@@ -108,6 +108,73 @@ impl ExtCommunityValue {
             value: self.val,
         })
     }
+
+    /// True iff this entry is the EVPN Multicast Flags Extended
+    /// Community (RFC 9251 §6): EVPN high-type (0x06) + Multicast
+    /// Flags sub-type (0x09).
+    pub fn is_evpn_mcast_flags(&self) -> bool {
+        self.high_type == ExtCommunityType::Evpn as u8 && self.low_type == EVPN_MCAST_FLAGS_SUB_TYPE
+    }
+
+    /// Decode the EVPN Multicast Flags EC (RFC 9251 §6). Returns the
+    /// IGMP / MLD proxy-support bits. Per §6 an EC with **both** bits
+    /// clear is malformed and MUST be ignored by the receiver, so this
+    /// returns `None` in that case (and for any non-matching EC).
+    pub fn as_evpn_mcast_flags(&self) -> Option<EvpnMcastFlags> {
+        if !self.is_evpn_mcast_flags() {
+            return None;
+        }
+        let flags = u16::from_be_bytes([self.val[0], self.val[1]]);
+        let mcast = EvpnMcastFlags {
+            igmp_proxy: flags & EvpnMcastFlags::IGMP_PROXY != 0,
+            mld_proxy: flags & EvpnMcastFlags::MLD_PROXY != 0,
+        };
+        if !mcast.igmp_proxy && !mcast.mld_proxy {
+            return None;
+        }
+        Some(mcast)
+    }
+}
+
+/// EVPN Multicast Flags Extended Community sub-type (RFC 9251 §6),
+/// carried under the EVPN high-type (0x06).
+const EVPN_MCAST_FLAGS_SUB_TYPE: u8 = 0x09;
+
+/// Decoded EVPN Multicast Flags Extended Community (RFC 9251 §6). A
+/// PE attaches this to its Inclusive Multicast (Type-3) route to
+/// advertise IGMP / MLD proxy capability. The 2-octet Flags field
+/// carries the two capability bits; the remaining 4 octets are
+/// reserved (zero).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct EvpnMcastFlags {
+    pub igmp_proxy: bool,
+    pub mld_proxy: bool,
+}
+
+impl EvpnMcastFlags {
+    /// Bit 15 of the Flags field (RFC 9251 §6): IGMP Proxy Support.
+    const IGMP_PROXY: u16 = 0x0001;
+    /// Bit 14 of the Flags field: MLD Proxy Support.
+    const MLD_PROXY: u16 = 0x0002;
+}
+
+impl From<EvpnMcastFlags> for ExtCommunityValue {
+    fn from(m: EvpnMcastFlags) -> Self {
+        let mut flags: u16 = 0;
+        if m.igmp_proxy {
+            flags |= EvpnMcastFlags::IGMP_PROXY;
+        }
+        if m.mld_proxy {
+            flags |= EvpnMcastFlags::MLD_PROXY;
+        }
+        let mut val = [0u8; 6];
+        val[0..2].copy_from_slice(&flags.to_be_bytes());
+        ExtCommunityValue {
+            high_type: ExtCommunityType::Evpn as u8,
+            low_type: EVPN_MCAST_FLAGS_SUB_TYPE,
+            val,
+        }
+    }
 }
 
 /// Decoded MUP Extended Community (RFC 9833 §5). The `value` field
@@ -209,6 +276,19 @@ impl fmt::Display for ExtCommunityValue {
                     ExtCommunitySubType::display(self.low_type)
                 )
             }
+        } else if self.is_evpn_mcast_flags() {
+            // EVPN Multicast Flags EC (RFC 9251 §6). Render the raw
+            // capability bits as `mcast-flags:` plus `I` (IGMP) / `M`
+            // (MLD); a both-clear value renders as a bare `mcast-flags:`.
+            let flags = u16::from_be_bytes([self.val[0], self.val[1]]);
+            let mut s = String::new();
+            if flags & EvpnMcastFlags::IGMP_PROXY != 0 {
+                s.push('I');
+            }
+            if flags & EvpnMcastFlags::MLD_PROXY != 0 {
+                s.push('M');
+            }
+            write!(f, "mcast-flags:{s}")
         } else {
             let ip = Ipv4Addr::new(self.val[0], self.val[1], self.val[2], self.val[3]);
             let val = u16::from_be_bytes([self.val[4], self.val[5]]);
@@ -397,6 +477,90 @@ mod tests {
     fn color_renders_in_display() {
         let c = ExtCommunityValue::from_color(0b01, 4242);
         assert_eq!(c.to_string(), "color:1:4242");
+    }
+
+    #[test]
+    fn evpn_mcast_flags_wire_layout() {
+        // Both IGMP + MLD proxy: high 0x06, sub 0x09, Flags=0x0003,
+        // reserved 4 octets zero.
+        let ec: ExtCommunityValue = EvpnMcastFlags {
+            igmp_proxy: true,
+            mld_proxy: true,
+        }
+        .into();
+        assert_eq!(ec.high_type, 0x06);
+        assert_eq!(ec.low_type, 0x09);
+        assert_eq!(ec.val, [0x00, 0x03, 0, 0, 0, 0]);
+        let mut buf = BytesMut::new();
+        ec.encode(&mut buf);
+        assert_eq!(&buf[..], &[0x06, 0x09, 0x00, 0x03, 0, 0, 0, 0]);
+    }
+
+    #[test]
+    fn evpn_mcast_flags_igmp_only_round_trips() {
+        let ec: ExtCommunityValue = EvpnMcastFlags {
+            igmp_proxy: true,
+            mld_proxy: false,
+        }
+        .into();
+        assert_eq!(ec.val[0..2], [0x00, 0x01], "Flags bit 15 (IGMP) set only");
+        assert!(ec.is_evpn_mcast_flags());
+        let decoded = ec.as_evpn_mcast_flags().expect("decode");
+        assert!(decoded.igmp_proxy);
+        assert!(!decoded.mld_proxy);
+    }
+
+    #[test]
+    fn evpn_mcast_flags_both_zero_is_ignored() {
+        // RFC 9251 §6: an EVPN Multicast Flags EC with both bits clear
+        // is malformed; `as_evpn_mcast_flags` returns None so callers
+        // ignore it (but `is_` still recognises the type for Display).
+        let ec = ExtCommunityValue {
+            high_type: 0x06,
+            low_type: 0x09,
+            val: [0; 6],
+        };
+        assert!(ec.is_evpn_mcast_flags());
+        assert!(ec.as_evpn_mcast_flags().is_none());
+        assert_eq!(ec.to_string(), "mcast-flags:");
+    }
+
+    #[test]
+    fn evpn_mcast_flags_renders_in_display() {
+        let both: ExtCommunityValue = EvpnMcastFlags {
+            igmp_proxy: true,
+            mld_proxy: true,
+        }
+        .into();
+        assert_eq!(both.to_string(), "mcast-flags:IM");
+        let mld: ExtCommunityValue = EvpnMcastFlags {
+            igmp_proxy: false,
+            mld_proxy: true,
+        }
+        .into();
+        assert_eq!(mld.to_string(), "mcast-flags:M");
+    }
+
+    #[test]
+    fn evpn_mcast_flags_false_for_rt() {
+        let rt: ExtCommunity = ExtCommunity::from_str("rt:100:200").unwrap();
+        let rt = rt.0.first().unwrap();
+        assert!(!rt.is_evpn_mcast_flags());
+        assert!(rt.as_evpn_mcast_flags().is_none());
+    }
+
+    #[test]
+    fn evpn_mcast_flags_round_trips_through_parse() {
+        let original: ExtCommunityValue = EvpnMcastFlags {
+            igmp_proxy: true,
+            mld_proxy: true,
+        }
+        .into();
+        let mut buf = BytesMut::new();
+        original.encode(&mut buf);
+        let (_, parsed) = ExtCommunityValue::parse_be(&buf).expect("parse 8-octet EC");
+        assert_eq!(parsed, original);
+        assert_eq!(parsed.as_evpn_mcast_flags(), original.as_evpn_mcast_flags());
     }
 
     #[test]

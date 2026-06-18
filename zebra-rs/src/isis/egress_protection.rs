@@ -145,9 +145,13 @@ fn config_egress_protect_dataplane(isis: &mut Isis, mut args: Args, op: ConfigOp
     Some(())
 }
 
-/// Re-originate both levels. `process_lsp_originate` filters by
-/// `has_level` for single-level instances, so sending both is safe.
+/// Reconcile the End.M dataplane install with the new config, then
+/// re-originate both levels so the advertisement matches. Both are gated
+/// identically (`update_mirror_sids` / `lsp::mirror_sid_subs`).
+/// `process_lsp_originate` filters by `has_level` for single-level
+/// instances, so sending both is safe.
 fn reoriginate(isis: &mut Isis) {
+    isis.update_mirror_sids();
     let _ = isis.tx.send(Message::LspOriginate(Level::L1, None));
     let _ = isis.tx.send(Message::LspOriginate(Level::L2, None));
 }

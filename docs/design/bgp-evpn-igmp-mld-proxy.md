@@ -28,8 +28,8 @@ before citing.
 | ----- | --------------------------------------- | -------- |
 | 0     | Design doc (this file)                  | **done** |
 | 1     | Codec — Type 6 SMET NLRI                | **done** |
-| 2     | Multicast Flags Extended Community      | planned  |
-| 3     | IMET (Type 3) capability signaling      | planned  |
+| 2     | Multicast Flags Extended Community      | **done** |
+| 3     | IMET (Type 3) capability signaling      | **done** |
 | 4     | SMET origination from kernel MDB snoop  | planned  |
 | 5     | SMET reception → selective dataplane    | planned  |
 | 6     | Show + BDD + docs                       | planned  |
@@ -207,22 +207,37 @@ RIB key, and `BgpRib` does not yet carry them, so a *re-advertised*
 parsed, stored in the Loc-RIB, and renderable; no SMET origination or
 dataplane action happens yet.
 
-### Phase 2 — Multicast Flags Extended Community
+### Phase 2 — Multicast Flags Extended Community — **done**
 `crates/bgp-packet/src/attrs/ext_com_type.rs`, `ext_com.rs`
-- Add `ExtCommunityType::Evpn = 0x06` and sub-type `0x09`.
-- `EvpnMcastFlags { igmp_proxy: bool, mld_proxy: bool }` ↔
-  `ExtCommunityValue` (2-octet flags: bit15=IGMP, bit14=MLD; 4-octet
-  reserved). Parse / emit / `Display`; both-zero ⇒ ignore. Wire-layout
-  unit test.
+- Added `ExtCommunityType::Evpn = 0x06`; the Multicast Flags sub-type
+  is the module const `EVPN_MCAST_FLAGS_SUB_TYPE = 0x09`.
+- `EvpnMcastFlags { igmp_proxy, mld_proxy }` with `From<…> for
+  ExtCommunityValue` (2-octet flags: bit15=IGMP `0x0001`, bit14=MLD
+  `0x0002`; 4-octet reserved), `ExtCommunityValue::is_evpn_mcast_flags`
+  / `as_evpn_mcast_flags` (the latter returns `None` when both bits
+  clear, per §6 "ignore"), and a `Display` branch rendering
+  `mcast-flags:IM`. Both types re-exported via `pub use ext_com::*`.
+- 6 unit tests: wire layout, IGMP-only round-trip, both-zero ignored,
+  `Display`, not-matching-for-RT, emit→parse round-trip.
 
-### Phase 3 — IMET (Type 3) capability signaling
-`zebra-rs/src/bgp/route.rs` (`evpn_originate_imet` + IMET import),
-`zebra-rs/yang/zebra-bgp-evpn.yang`
-- Attach the Multicast Flags EC (IGMP+MLD = 1) to originated IMET, gated
-  on a config knob (new YANG leaf; default on when snooping is active).
-- Parse + store the EC on **received** IMET into a per-(RD/VTEP)
-  capability table — consumed by Phase 5 to pick selective-vs-flood per
-  egress PE.
+### Phase 3 — IMET (Type 3) capability signaling — **done**
+`zebra-rs/src/bgp/inst.rs`, `route.rs`, `config.rs`,
+`zebra-rs/yang/zebra-bgp-evpn.yang`, `config/manager.rs`
+- New config knob `router bgp afi-safi evpn igmp-mld-proxy <bool>`
+  (`zebra-bgp-evpn.yang` leaf → `Bgp::igmp_mld_proxy`,
+  `config_igmp_mld_proxy`). Toggling re-originates all IMET via
+  `reoriginate_all_imet`.
+- `evpn_originate_imet` attaches the Multicast Flags EC
+  (`EvpnMcastFlags { igmp_proxy: true, mld_proxy: true }`) to the IMET
+  route's extended communities when the knob is on.
+- YANG-load `*_is_settable` test for the new leaf.
+- **Consumer read folded into Phase 5:** the capability rides the IMET
+  path attr and is already in the Loc-RIB; Phase 5 reads it on demand
+  via the Phase-2 `ExtCommunityValue::as_evpn_mcast_flags` accessor when
+  deciding selective-vs-flood. A receiving PE already renders
+  `mcast-flags:IM` in `show bgp evpn` (Phase-2 `Display`), so the signal
+  is observable end-to-end today. Per-protocol (IGMP-only / MLD-only)
+  granularity is a follow-up.
 
 ### Phase 4 — SMET origination from kernel MDB snoop
 - **4a (fork `../netlink-packet-route`):** finish `br_mdb_entry` +
