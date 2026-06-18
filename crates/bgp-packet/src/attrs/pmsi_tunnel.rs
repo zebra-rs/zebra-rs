@@ -4,7 +4,7 @@ use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 use bytes::{BufMut, BytesMut};
 use nom::IResult;
 use nom::bytes::complete::take;
-use nom::number::complete::{be_u8, be_u24};
+use nom::number::complete::{be_u8, be_u24, be_u32};
 
 use crate::{AttrEmitter, AttrFlags, AttrType, ParseBe, u32_u24};
 
@@ -17,8 +17,12 @@ use crate::{AttrEmitter, AttrFlags, AttrType, ParseBe, u32_u24};
 ///   MPLS Label    (3 octets, low 24 bits — the VXLAN VNI for EVPN
 ///                  per RFC 8365 §5.1.3)
 ///   Tunnel Identifier — variable per Tunnel Type. For Ingress
-///                       Replication (type 6) it is the local PE's
-///                       IP address: 4 octets for IPv4, 16 for IPv6.
+///                       Replication (type 6) and Assisted Replication
+///                       (type 0x0A) it is the PE / replicator IP
+///                       address: 4 octets for IPv4, 16 for IPv6.
+///                       For SR-MPLS / SRv6 P2MP trees (types 0x0C /
+///                       0x0D, draft-ietf-bess-mvpn-evpn-sr-p2mp) it is
+///                       a 4-octet Tree-ID followed by the Root IP.
 ///                       Family is implicit from the slice length;
 ///                       the BGP attribute header carries the
 ///                       overall length.
@@ -32,8 +36,17 @@ use crate::{AttrEmitter, AttrFlags, AttrType, ParseBe, u32_u24};
 pub struct PmsiTunnel {
     pub flags: u8,
     pub tunnel_type: u8,
+    /// MPLS Label field (low 24 bits). Carries the VXLAN VNI for EVPN with
+    /// Ingress/Assisted Replication (RFC 8365 §5.1.3); zero for SR P2MP
+    /// unless the tunnel is shared (SR-MPLS upstream label) or SRv6
+    /// transposition is in use.
     pub vni: u32,
+    /// Tunnel endpoint IP. The originating PE (Ingress Replication), the
+    /// AR-IP (Assisted Replication), or the SR P2MP Policy Root (SR P2MP).
     pub endpoint: IpAddr,
+    /// SR P2MP Policy Tree-ID, present only for SR-MPLS / SRv6 P2MP tree
+    /// tunnel types; `None` for all other tunnel types.
+    pub tree_id: Option<u32>,
 }
 
 /// Assisted Replication Type (T) field of the PMSI Tunnel Attribute Flags,
@@ -200,6 +213,22 @@ impl PmsiTunnel {
             Self::TUNNEL_SR_MPLS_P2MP | Self::TUNNEL_SRV6_P2MP
         )
     }
+
+    /// Build an SR P2MP tree P-tunnel (RFC 9524 replication tree). `root` is
+    /// the SR P2MP Policy Root, `tree_id` the 32-bit policy identifier, and
+    /// `label` the MPLS Label field (0 unless the tunnel is shared or SRv6
+    /// transposition is used). `tunnel_type` must be one of
+    /// [`TUNNEL_SR_MPLS_P2MP`](Self::TUNNEL_SR_MPLS_P2MP) /
+    /// [`TUNNEL_SRV6_P2MP`](Self::TUNNEL_SRV6_P2MP).
+    pub fn sr_p2mp(tunnel_type: u8, label: u32, tree_id: u32, root: IpAddr) -> Self {
+        PmsiTunnel {
+            flags: 0,
+            tunnel_type,
+            vni: label,
+            endpoint: root,
+            tree_id: Some(tree_id),
+        }
+    }
 }
 
 impl ParseBe<PmsiTunnel> for PmsiTunnel {
@@ -207,6 +236,18 @@ impl ParseBe<PmsiTunnel> for PmsiTunnel {
         let (input, flags) = be_u8(input)?;
         let (input, tunnel_type) = be_u8(input)?;
         let (input, vni) = be_u24(input)?;
+        // SR P2MP trees prefix the Root IP with a 4-octet Tree-ID; every
+        // other tunnel type's identifier is the bare endpoint IP.
+        let is_sr_p2mp = matches!(
+            tunnel_type,
+            PmsiTunnel::TUNNEL_SR_MPLS_P2MP | PmsiTunnel::TUNNEL_SRV6_P2MP
+        );
+        let (input, tree_id) = if is_sr_p2mp {
+            let (input, tree_id) = be_u32(input)?;
+            (input, Some(tree_id))
+        } else {
+            (input, None)
+        };
         let endpoint = match input.len() {
             4 => {
                 let (_, bytes) = take(4usize)(input)?;
@@ -232,6 +273,7 @@ impl ParseBe<PmsiTunnel> for PmsiTunnel {
                 tunnel_type,
                 vni,
                 endpoint,
+                tree_id,
             },
         ))
     }
@@ -254,6 +296,10 @@ impl AttrEmitter for PmsiTunnel {
         buf.put_u8(self.flags);
         buf.put_u8(self.tunnel_type);
         buf.put(&u32_u24(self.vni)[..]);
+        // SR P2MP trees prefix the Root IP with the 4-octet Tree-ID.
+        if self.is_sr_p2mp() {
+            buf.put_u32(self.tree_id.unwrap_or(0));
+        }
         match self.endpoint {
             IpAddr::V4(v4) => buf.put(&v4.octets()[..]),
             IpAddr::V6(v6) => buf.put(&v6.octets()[..]),
@@ -267,7 +313,11 @@ impl fmt::Display for PmsiTunnel {
             f,
             "Flag: {}, Tunnel Type: {}, VNI: {}, Endpoint: {}",
             self.flags, self.tunnel_type, self.vni, self.endpoint,
-        )
+        )?;
+        if let Some(tree_id) = self.tree_id {
+            write!(f, ", Tree-ID: {tree_id}")?;
+        }
+        Ok(())
     }
 }
 
@@ -288,6 +338,7 @@ mod pmsi_tunnel_tests {
             tunnel_type,
             vni: 100,
             endpoint: IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1)),
+            tree_id: None,
         }
     }
 
@@ -373,6 +424,49 @@ mod pmsi_tunnel_tests {
         // Ingress and Assisted Replication are not SR P2MP trees.
         assert!(!ir(0, PmsiTunnel::TUNNEL_INGRESS_REPLICATION).is_sr_p2mp());
         assert!(!ir(0, PmsiTunnel::TUNNEL_ASSISTED_REPLICATION).is_sr_p2mp());
+    }
+
+    /// An SR-MPLS P2MP tunnel (IPv4 Root) round-trips byte-for-byte: the
+    /// Tunnel Identifier is Tree-ID(4) followed by the Root IP, per
+    /// draft-ietf-bess-mvpn-evpn-sr-p2mp.
+    #[test]
+    fn sr_mpls_p2mp_emit_parse_roundtrip_v4() {
+        let root = IpAddr::V4(Ipv4Addr::new(192, 0, 2, 7));
+        let original = PmsiTunnel::sr_p2mp(PmsiTunnel::TUNNEL_SR_MPLS_P2MP, 0, 0xDEAD_BEEF, root);
+
+        let mut buf = BytesMut::new();
+        original.emit(&mut buf);
+        // flags(1) + type(1) + label(3) + tree-id(4) + IPv4 root(4).
+        assert_eq!(buf.len(), 13);
+        assert_eq!(buf[1], PmsiTunnel::TUNNEL_SR_MPLS_P2MP);
+        assert_eq!(&buf[5..9], &0xDEAD_BEEFu32.to_be_bytes(), "Tree-ID");
+        assert_eq!(&buf[9..13], &[192, 0, 2, 7], "Root");
+
+        let (_, parsed) = PmsiTunnel::parse_be(&buf).expect("parse our own bytes");
+        assert_eq!(parsed, original);
+        assert_eq!(parsed.tree_id, Some(0xDEAD_BEEF));
+        assert_eq!(parsed.endpoint, root);
+        assert!(parsed.is_sr_p2mp());
+    }
+
+    /// An SRv6 P2MP tunnel (IPv6 Root) round-trips, with the family inferred
+    /// from the identifier length.
+    #[test]
+    fn srv6_p2mp_emit_parse_roundtrip_v6() {
+        let root: IpAddr = "2001:db8::abcd".parse().unwrap();
+        let original = PmsiTunnel::sr_p2mp(PmsiTunnel::TUNNEL_SRV6_P2MP, 0, 42, root);
+
+        let mut buf = BytesMut::new();
+        original.emit(&mut buf);
+        // flags(1) + type(1) + label(3) + tree-id(4) + IPv6 root(16).
+        assert_eq!(buf.len(), 25);
+        assert_eq!(buf[1], PmsiTunnel::TUNNEL_SRV6_P2MP);
+
+        let (_, parsed) = PmsiTunnel::parse_be(&buf).expect("parse our own bytes");
+        assert_eq!(parsed, original);
+        assert_eq!(parsed.tree_id, Some(42));
+        assert_eq!(parsed.endpoint, root);
+        assert!(parsed.is_sr_p2mp());
     }
 
     /// A Replicator-AR tunnel with a BM prune flag survives an emit → parse
