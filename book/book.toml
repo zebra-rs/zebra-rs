@@ -3,3 +3,6 @@ title = "zebra-rs"
 authors = ["Kunihiro Ishiguro"]
 language = "en"
 src = "src"
+[output.html.fold]
+enable = true
+level = 0 
