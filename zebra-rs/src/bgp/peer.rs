@@ -836,12 +836,25 @@ pub struct Peer {
     /// (the writer holds a clone).
     pub egress_depth: Arc<AtomicUsize>,
     pub opt: ParseOption,
-    pub policy_list: InOuts<PolicyListValue>,
-    pub prefix_set: InOuts<PrefixSetValue>,
-    /// Cached owned snapshot of the *outbound* policy (Output direction of
-    /// `prefix_set` / `policy_list`), rebuilt by `rebuild_out_policy` only
-    /// when that policy resolves (`process_policy_msg`). `sync_ctx` clones
-    /// the `Arc` into every `SyncCtx`, so the per-route egress evaluation
+    /// Per-AFI/SAFI inbound/outbound route-policy + prefix-set, bound via
+    /// `neighbor X afi-safi <name> {policy,prefix-set} {in,out} <ref>`.
+    /// An explicit entry for a family (name set) wins for that family;
+    /// otherwise the family falls back to [`policy_list_legacy`] /
+    /// [`prefix_set_legacy`]. Read through [`Peer::policy_list_at`] /
+    /// [`Peer::prefix_set_at`], never indexed directly, so the fallback
+    /// stays consistent across every apply site.
+    pub policy_list: BTreeMap<AfiSafi, InOuts<PolicyListValue>>,
+    pub prefix_set: BTreeMap<AfiSafi, InOuts<PrefixSetValue>>,
+    /// Peer-wide fallback policy / prefix-set. Fed by the legacy
+    /// top-level `neighbor X policy {in,out}` (kept for backward
+    /// compatibility) and by `neighbor-group` inheritance, and used by
+    /// any family without its own per-AFI binding.
+    pub policy_list_legacy: InOuts<PolicyListValue>,
+    pub prefix_set_legacy: InOuts<PrefixSetValue>,
+    /// Cached owned snapshot of the effective IPv4-unicast *outbound*
+    /// policy, rebuilt by `rebuild_out_policy` only when that policy
+    /// resolves (`process_policy_msg`). `sync_ctx` clones the `Arc` into
+    /// every (v4-unicast) `SyncCtx`, so the per-route egress evaluation
     /// (and later a shard worker) reads the policy without a deep clone.
     pub out_policy: Arc<super::policy::OutPolicy>,
     pub rtcv4: BTreeSet<ExtCommunityValue>,
@@ -996,8 +1009,10 @@ impl Peer {
             pet: None,
             egress_depth: Arc::new(AtomicUsize::new(0)),
             opt: ParseOption::default(),
-            policy_list: InOuts::<PolicyListValue>::default(),
-            prefix_set: InOuts::<PrefixSetValue>::default(),
+            policy_list: BTreeMap::new(),
+            prefix_set: BTreeMap::new(),
+            policy_list_legacy: InOuts::<PolicyListValue>::default(),
+            prefix_set_legacy: InOuts::<PrefixSetValue>::default(),
             out_policy: Arc::new(super::policy::OutPolicy::default()),
             rtcv4: BTreeSet::default(),
             rtcv6: BTreeSet::default(),
@@ -1211,10 +1226,64 @@ impl Peer {
     /// clones stays current; the deep clone of the route-map / prefix-list
     /// happens here — once per resolve, never per advertised route.
     pub fn rebuild_out_policy(&mut self) {
+        // The cached snapshot drives only the IPv4-unicast egress (the
+        // `SyncCtx` family); other families read the peer directly.
+        let v4u = AfiSafi::new(Afi::Ip, Safi::Unicast);
         self.out_policy = Arc::new(super::policy::OutPolicy {
-            prefix_set: self.prefix_set.get(&super::policy::InOut::Output).clone(),
-            policy_list: self.policy_list.get(&super::policy::InOut::Output).clone(),
+            prefix_set: self
+                .prefix_set_at(v4u, super::policy::InOut::Output)
+                .clone(),
+            policy_list: self
+                .policy_list_at(v4u, super::policy::InOut::Output)
+                .clone(),
         });
+    }
+
+    /// The effective inbound/outbound prefix-set for `afi_safi`: the
+    /// family's explicit per-AFI binding if it names one, else the
+    /// peer-wide [`prefix_set_legacy`] fallback (top-level / inherited).
+    pub fn prefix_set_at(
+        &self,
+        afi_safi: AfiSafi,
+        dir: super::policy::InOut,
+    ) -> &super::policy::PrefixSetValue {
+        match self.prefix_set.get(&afi_safi).map(|io| io.get(&dir)) {
+            Some(v) if v.name.is_some() => v,
+            _ => self.prefix_set_legacy.get(&dir),
+        }
+    }
+
+    /// The effective inbound/outbound policy-list for `afi_safi`. Same
+    /// per-AFI-wins-else-legacy rule as [`prefix_set_at`].
+    pub fn policy_list_at(
+        &self,
+        afi_safi: AfiSafi,
+        dir: super::policy::InOut,
+    ) -> &super::policy::PolicyListValue {
+        match self.policy_list.get(&afi_safi).map(|io| io.get(&dir)) {
+            Some(v) if v.name.is_some() => v,
+            _ => self.policy_list_legacy.get(&dir),
+        }
+    }
+
+    /// Mutable per-AFI prefix-set slot, creating the family entry on
+    /// demand. Used by the config + resolve paths to bind a name and to
+    /// fill the resolved object.
+    pub fn prefix_set_slot(
+        &mut self,
+        afi_safi: AfiSafi,
+        dir: super::policy::InOut,
+    ) -> &mut super::policy::PrefixSetValue {
+        self.prefix_set.entry(afi_safi).or_default().get_mut(&dir)
+    }
+
+    /// Mutable per-AFI policy-list slot (see [`prefix_set_slot`]).
+    pub fn policy_list_slot(
+        &mut self,
+        afi_safi: AfiSafi,
+        dir: super::policy::InOut,
+    ) -> &mut super::policy::PolicyListValue {
+        self.policy_list.entry(afi_safi).or_default().get_mut(&dir)
     }
 
     /// Snapshot this peer's IPv4-unicast egress context (A2). `router_id`

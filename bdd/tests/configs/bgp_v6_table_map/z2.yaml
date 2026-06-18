@@ -17,11 +17,11 @@ policy:
   - number: 10
     action: deny
     match:
-      prefix: DENY6
+      prefix-set: DENY6
   - number: 20
     action: permit
     match:
-      prefix: MED6
+      prefix-set: MED6
     set:
       med:
         set: 50

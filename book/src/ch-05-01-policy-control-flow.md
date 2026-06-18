@@ -40,7 +40,7 @@ policy ACCEPT-CUSTOMER-A {
     entry 10 {
         action permit;
         match {
-            prefix CUSTOMER-A;
+            prefix-set CUSTOMER-A;
         }
         set {
             local-preference {
@@ -66,7 +66,7 @@ policy LAYERED {
     entry 10 {
         action next;
         match {
-            prefix CUSTOMER-A;
+            prefix-set CUSTOMER-A;
         }
         set {
             community {
@@ -106,7 +106,7 @@ policy BLOCK-MARTIANS {
     entry 10 {
         action deny;
         match {
-            prefix MARTIANS;
+            prefix-set MARTIANS;
         }
     }
     entry 20 {
@@ -129,7 +129,7 @@ policy ENDS-ON-NEXT {
     entry 10 {
         action next;
         match {
-            prefix CUSTOMER-A;
+            prefix-set CUSTOMER-A;
         }
         set {
             community {
@@ -151,7 +151,7 @@ policy CORRECT {
     entry 10 {
         action next;
         match {
-            prefix CUSTOMER-A;
+            prefix-set CUSTOMER-A;
         }
         set {
             community {
@@ -179,7 +179,7 @@ policy DEFAULT-PERMIT {
     entry 10 {
         action permit;
         match {
-            prefix CUSTOMER-A;
+            prefix-set CUSTOMER-A;
         }
         set {
             local-preference {
@@ -190,7 +190,7 @@ policy DEFAULT-PERMIT {
     entry 20 {
         action deny;
         match {
-            prefix MARTIANS;
+            prefix-set MARTIANS;
         }
     }
     entry 99 {
@@ -210,13 +210,13 @@ policy ORDER-DEMO {
     entry 10 {
         action deny;
         match {
-            prefix BLOCKLIST;
+            prefix-set BLOCKLIST;
         }
     }
     entry 20 {
         action permit;
         match {
-            prefix VIPS;
+            prefix-set VIPS;
         }
         set {
             local-preference {

@@ -3606,9 +3606,13 @@ impl Bgp {
         let Some(peer) = self.peers.get_by_idx(ident) else {
             return;
         };
+        // The shard only policy-filters IPv4 unicast ingress
+        // (`compute_policy`), so it carries that family's effective
+        // inbound policy (per-AFI binding, else the legacy fallback).
+        let v4u = bgp_packet::AfiSafi::new(bgp_packet::Afi::Ip, bgp_packet::Safi::Unicast);
         let snap = std::sync::Arc::new(super::shard::InPolicy {
-            prefix_set: peer.prefix_set.input.clone(),
-            policy_list: peer.policy_list.input.clone(),
+            prefix_set: peer.prefix_set_at(v4u, InOut::Input).clone(),
+            policy_list: peer.policy_list_at(v4u, InOut::Input).clone(),
         });
         if let Some(pool) = self.shards.as_ref() {
             pool.broadcast(|| super::shard::ShardMsg::PolicyReplace {
@@ -3634,7 +3638,10 @@ impl Bgp {
                 policy_type,
                 prefix_set,
             } => {
-                let Some(peer) = self.peers.get_mut_by_idx(ident) else {
+                // The low bits of `ident` carry the family (or the
+                // legacy peer-wide slot); the high bits the peer index.
+                let (peer_idx, afi_opt) = super::config::peer_policy_ident_decode(ident);
+                let Some(peer) = self.peers.get_mut_by_idx(peer_idx) else {
                     return;
                 };
                 let direction = match policy_type {
@@ -3642,7 +3649,10 @@ impl Bgp {
                     policy::PolicyType::PrefixSetOut => InOut::Output,
                     _ => return,
                 };
-                let config = peer.prefix_set.get_mut(&direction);
+                let config = match afi_opt {
+                    Some(afi) => peer.prefix_set_slot(afi, direction),
+                    None => peer.prefix_set_legacy.get_mut(&direction),
+                };
                 config.prefix_set = prefix_set;
                 // Keep the cached outbound-policy snapshot (carried by
                 // every `SyncCtx`) current before the soft-out re-advertise
@@ -3657,10 +3667,10 @@ impl Bgp {
                         // before replaying Adj-RIB-In, so the replay
                         // re-evaluates against it (single-relay FIFO keeps
                         // PolicyReplace ahead of the replayed routes).
-                        self.shard_replace_in_policy(ident);
-                        super::peer::apply_soft_in_peer(self, ident);
+                        self.shard_replace_in_policy(peer_idx);
+                        super::peer::apply_soft_in_peer(self, peer_idx);
                     }
-                    InOut::Output => super::peer::apply_soft_out_peer(self, ident),
+                    InOut::Output => super::peer::apply_soft_out_peer(self, peer_idx),
                 }
             }
             policy::PolicyRx::PolicyList {
@@ -3690,7 +3700,8 @@ impl Bgp {
                     self.table_map_resync(afi_safi);
                     return;
                 }
-                let Some(peer) = self.peers.get_mut_by_idx(ident) else {
+                let (peer_idx, afi_opt) = super::config::peer_policy_ident_decode(ident);
+                let Some(peer) = self.peers.get_mut_by_idx(peer_idx) else {
                     return;
                 };
                 let direction = match policy_type {
@@ -3698,7 +3709,10 @@ impl Bgp {
                     policy::PolicyType::PolicyListOut => InOut::Output,
                     _ => return,
                 };
-                let config = peer.policy_list.get_mut(&direction);
+                let config = match afi_opt {
+                    Some(afi) => peer.policy_list_slot(afi, direction),
+                    None => peer.policy_list_legacy.get_mut(&direction),
+                };
                 config.policy_list = policy_list;
                 // Keep the cached outbound-policy snapshot current before
                 // the soft-out re-advertise reads it (see the prefix-set
@@ -3713,10 +3727,10 @@ impl Bgp {
                         // before replaying Adj-RIB-In, so the replay
                         // re-evaluates against it (single-relay FIFO keeps
                         // PolicyReplace ahead of the replayed routes).
-                        self.shard_replace_in_policy(ident);
-                        super::peer::apply_soft_in_peer(self, ident);
+                        self.shard_replace_in_policy(peer_idx);
+                        super::peer::apply_soft_in_peer(self, peer_idx);
                     }
-                    InOut::Output => super::peer::apply_soft_out_peer(self, ident),
+                    InOut::Output => super::peer::apply_soft_out_peer(self, peer_idx),
                 }
             }
             policy::PolicyRx::KeyChain {

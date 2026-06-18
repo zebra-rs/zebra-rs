@@ -7,7 +7,7 @@ clause must succeed for the entry to fire. An empty `match` block
 
 This chapter covers all match clauses grouped by shape:
 
-1. **Set references** — `prefix`, `community`, `ext-community`,
+1. **Set references** — `prefix-set`, `community`, `ext-community`,
    `large-community`, `as-path` — name a separately-defined set.
 2. **Direct address** — `next-hop` — exact equality against the
    route's NEXT_HOP attribute.
@@ -18,7 +18,7 @@ This chapter covers all match clauses grouped by shape:
 
 ## Set references
 
-### `match prefix`
+### `match prefix-set`
 
 References a `prefix-set`. The route's prefix is checked against
 each entry of the set; if any matches (with optional `le` / `ge`
@@ -39,7 +39,7 @@ policy IN-CUSTOMER {
     entry 10 {
         action permit;
         match {
-            prefix CUSTOMER-NETS;
+            prefix-set CUSTOMER-NETS;
         }
     }
 }
@@ -164,7 +164,7 @@ matching `650030` or `650031`.
 Takes an IPv4 *or* IPv6 address — not a prefix-set name — and
 compares it for **exact equality** against the route's BGP
 NEXT_HOP attribute. To match a *range* of addresses, use a
-prefix-set with `match prefix` against the route prefix, or
+prefix-set with `match prefix-set` against the route prefix, or
 write multiple entries.
 
 ```console
@@ -343,7 +343,7 @@ policy STRICT {
     entry 10 {
         action permit;
         match {
-            prefix CUSTOMER-NETS;
+            prefix-set CUSTOMER-NETS;
             as-path FROM-65003;
             med {
                 le 100;

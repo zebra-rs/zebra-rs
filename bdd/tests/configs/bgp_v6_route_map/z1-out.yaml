@@ -14,7 +14,7 @@ policy:
   - number: 10
     action: deny
     match:
-      prefix: OUT-DENY6
+      prefix-set: OUT-DENY6
   - number: 20
     action: permit
 router:

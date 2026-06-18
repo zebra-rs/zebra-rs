@@ -54,11 +54,11 @@ policy:
   - number: 10
     action: deny
     match:
-      prefix: DENY
+      prefix-set: DENY
   - number: 20
     action: permit
     match:
-      prefix: MED
+      prefix-set: MED
     set:
       med:
         set: 50
@@ -118,7 +118,7 @@ policy:
   - number: 10
     action: deny
     match:
-      prefix: DENY6
+      prefix-set: DENY6
   - number: 20
     action: permit
 router:

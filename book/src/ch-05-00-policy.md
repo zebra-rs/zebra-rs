@@ -22,7 +22,7 @@ Most policy clauses reference a *set* — a separately-named
 collection of values. The defined set types are:
 
 - `prefix-set` — IP prefixes, optionally with `le`/`ge` length
-  bounds. Used by `match prefix`.
+  bounds. Used by `match prefix-set`.
 - `community-set` — standard or extended community values, with
   optional regex. Used by `match community`.
 - `ext-community-set` — extended communities only (`rt:`/`soo:`),
@@ -52,7 +52,7 @@ policy IN-CUSTOMER-A {
     entry 10 {
         action permit;
         match {
-            prefix CUSTOMER-A;
+            prefix-set CUSTOMER-A;
         }
         set {
             local-preference {
