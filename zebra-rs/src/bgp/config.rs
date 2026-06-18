@@ -1480,7 +1480,8 @@ fn reoriginate_all_imet(bgp: &mut Bgp) {
 }
 
 /// `router bgp afi-safi evpn assisted-replication role {none|replicator|leaf}`
-/// (RFC 9574). Stored on `Bgp` and consumed by `evpn_originate_imet`.
+/// (RFC 9574). Stored on `LocalRib.evpn_flood`; drives both IMET origination
+/// (`evpn_originate_imet`) and the BUM flood-list reconcile.
 fn config_assisted_replication_role(bgp: &mut Bgp, mut args: Args, op: ConfigOp) -> Option<()> {
     let afi_safi: AfiSafi = args.afi_safi()?;
     if afi_safi.afi != Afi::L2vpn || afi_safi.safi != Safi::Evpn {
@@ -1495,11 +1496,12 @@ fn config_assisted_replication_role(bgp: &mut Bgp, mut args: Args, op: ConfigOp)
     } else {
         AssistedReplicationRole::None
     };
-    if bgp.assisted_replication_role == role {
+    if bgp.local_rib.evpn_flood.role == role {
         return Some(());
     }
-    bgp.assisted_replication_role = role;
+    bgp.local_rib.evpn_flood.role = role;
     reoriginate_all_imet(bgp);
+    bgp.evpn_reconcile_all_flood();
     Some(())
 }
 
@@ -1515,10 +1517,10 @@ fn config_assisted_replication_ip(bgp: &mut Bgp, mut args: Args, op: ConfigOp) -
     } else {
         None
     };
-    if bgp.assisted_replication_ip == ip {
+    if bgp.local_rib.evpn_flood.ar_ip == ip {
         return Some(());
     }
-    bgp.assisted_replication_ip = ip;
+    bgp.local_rib.evpn_flood.ar_ip = ip;
     reoriginate_all_imet(bgp);
     Some(())
 }
