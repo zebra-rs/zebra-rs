@@ -131,7 +131,7 @@ every member; a statement on the neighbor itself wins.
 
 ## Verification
 
-`show ip bgp neighbors` reports the active setting for the session:
+`show bgp neighbors` reports the active setting for the session:
 
 ```
   Allowas-in: 3 occurrence(s)
@@ -147,7 +147,7 @@ Then confirm the previously-rejected prefix is now installed. `z3` should
 hold `10.0.0.1/32` with an AS_PATH of `65002 65001`:
 
 ```
-show ip bgp 10.0.0.1/32
+show bgp 10.0.0.1/32
 ```
 
 ## Troubleshooting

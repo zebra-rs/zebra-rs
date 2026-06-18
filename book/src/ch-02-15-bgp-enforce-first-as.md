@@ -96,7 +96,7 @@ every member; a statement on the neighbor itself wins.
 
 ## Verification
 
-`show ip bgp neighbor <addr>` reports whether the knob is active:
+`show bgp neighbors <addr>` reports whether the knob is active:
 
 ```
   Enforce-first-AS enabled (drop inbound updates not starting with peer AS)
@@ -106,7 +106,7 @@ After enabling it (and bouncing the session), a route that fails the
 check simply will not appear in the table:
 
 ```
-show ip bgp 10.0.0.1/32
+show bgp 10.0.0.1/32
 ```
 
 ## Relationship to allowas-in and as-override

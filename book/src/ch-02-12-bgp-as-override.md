@@ -102,7 +102,7 @@ every member; a statement on the neighbor itself wins.
 
 ## Verification
 
-`show ip bgp neighbor <addr>` reports whether the knob is active:
+`show bgp neighbors <addr>` reports whether the knob is active:
 
 ```
   AS-Override enabled (outbound AS_PATH replacement)
@@ -113,7 +113,7 @@ should now hold `10.0.0.1/32` with an AS_PATH of `65002 65002` rather
 than the rejected `65002 65001`:
 
 ```
-show ip bgp 10.0.0.1/32
+show bgp 10.0.0.1/32
 ```
 
 ### Interaction with update-groups

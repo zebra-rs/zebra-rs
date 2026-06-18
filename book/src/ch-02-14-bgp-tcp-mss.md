@@ -68,7 +68,7 @@ your peer's `tcp-mss` shrinks the segments you send to it.
 
 ## Configured vs. synced
 
-`show ip bgp neighbor <addr>` reports two numbers:
+`show bgp neighbors <addr>` reports two numbers:
 
 ```
   Configured tcp-mss is 500, synced tcp-mss is 488
@@ -101,7 +101,7 @@ the clamp is already in place when the connection forms.
 After the session establishes, confirm the negotiated value:
 
 ```
-> show ip bgp neighbor 192.168.0.2
+> show bgp neighbors 192.168.0.2
 BGP neighbor is 192.168.0.2, remote AS 65002, local AS 65001, external link
   ...
   Configured tcp-mss is 500, synced tcp-mss is 488

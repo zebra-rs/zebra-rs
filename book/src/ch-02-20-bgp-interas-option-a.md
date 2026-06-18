@@ -153,10 +153,10 @@ IP inside the VRF. A packet from `ce1` to a host in `ce2`'s subnet:
 ## Verification
 
 The inter-AS PE-CE session is a VRF session, shown under
-`show ip bgp vrf vrf-cust summary`:
+`show bgp vrf vrf-cust summary`:
 
 ```
-asbr1$ show ip bgp vrf vrf-cust summary
+asbr1$ show bgp vrf vrf-cust summary
 Neighbor    V    AS  MsgRcvd MsgSent ... State/PfxRcd
 172.16.0.2  4 65001        3       3 ... Established 1
 ```
