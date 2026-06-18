@@ -86,6 +86,18 @@ impl PmsiTunnel {
     /// Tunnel Identifier / next hop is the replicator's AR-IP.
     pub const TUNNEL_ASSISTED_REPLICATION: u8 = 0x0A;
 
+    /// SR-MPLS P2MP Tree tunnel type (0x0C, IANA PMSI Tunnel Types /
+    /// draft-ietf-bess-mvpn-evpn-sr-p2mp). Used to bind EVPN BUM delivery to
+    /// an SR-MPLS P2MP / RFC 9524 replication tree. The Tunnel Identifier
+    /// carries the tree's <Root, Tree-ID>; decoding it (the identifier is not
+    /// a bare PE address) is a follow-up.
+    pub const TUNNEL_SR_MPLS_P2MP: u8 = 0x0C;
+
+    /// SRv6 P2MP Tree tunnel type (0x0D, same registry / draft). Binds EVPN
+    /// BUM delivery to an SRv6 P2MP / RFC 9524 replication tree; the Tunnel
+    /// Identifier carries the replication SID. Decoding is a follow-up.
+    pub const TUNNEL_SRV6_P2MP: u8 = 0x0D;
+
     // PMSI Tunnel Attribute Flags bit layout, redefined for EVPN by
     // RFC 9574 §4 Figure 3. Bits are numbered with bit 0 = most significant
     // (leftmost), per the IANA PMSI Tunnel Attribute Flags registry:
@@ -178,6 +190,15 @@ impl PmsiTunnel {
     /// True when this is an Assisted Replication tunnel (type 0x0A, RFC 9574).
     pub fn is_assisted_replication(&self) -> bool {
         self.tunnel_type == Self::TUNNEL_ASSISTED_REPLICATION
+    }
+
+    /// True for an SR P2MP tree P-tunnel — either SR-MPLS (0x0C) or SRv6
+    /// (0x0D) — i.e. an RFC 9524 replication tree bound to EVPN BUM.
+    pub fn is_sr_p2mp(&self) -> bool {
+        matches!(
+            self.tunnel_type,
+            Self::TUNNEL_SR_MPLS_P2MP | Self::TUNNEL_SRV6_P2MP
+        )
     }
 }
 
@@ -339,6 +360,19 @@ mod pmsi_tunnel_tests {
         assert!(!ir(0, PmsiTunnel::TUNNEL_INGRESS_REPLICATION).is_assisted_replication());
         assert!(ir(0, PmsiTunnel::TUNNEL_ASSISTED_REPLICATION).is_assisted_replication());
         assert!(!ir(0, PmsiTunnel::TUNNEL_ASSISTED_REPLICATION).is_ingress_replication());
+    }
+
+    /// SR P2MP tree codepoints (RFC 9524 replication trees) and their
+    /// predicate. The integer values are the IANA-assigned wire contract.
+    #[test]
+    fn sr_p2mp_tunnel_types() {
+        assert_eq!(PmsiTunnel::TUNNEL_SR_MPLS_P2MP, 0x0C);
+        assert_eq!(PmsiTunnel::TUNNEL_SRV6_P2MP, 0x0D);
+        assert!(ir(0, PmsiTunnel::TUNNEL_SR_MPLS_P2MP).is_sr_p2mp());
+        assert!(ir(0, PmsiTunnel::TUNNEL_SRV6_P2MP).is_sr_p2mp());
+        // Ingress and Assisted Replication are not SR P2MP trees.
+        assert!(!ir(0, PmsiTunnel::TUNNEL_INGRESS_REPLICATION).is_sr_p2mp());
+        assert!(!ir(0, PmsiTunnel::TUNNEL_ASSISTED_REPLICATION).is_sr_p2mp());
     }
 
     /// A Replicator-AR tunnel with a BM prune flag survives an emit → parse
