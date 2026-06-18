@@ -78,6 +78,18 @@ module zebra-bgp-evpn {
          Equivalent to FRR's `advertise-all-vni` under
          `address-family l2vpn evpn`.";
     }
+    leaf igmp-mld-proxy {
+      type boolean;
+      default false;
+      description
+        "When true, advertise IGMP/MLD proxy capability (RFC 9251 §6)
+         by attaching the Multicast Flags Extended Community (both the
+         IGMP and MLD proxy bits) to every locally originated Type-3
+         (Inclusive Multicast) route. This tells remote PEs they may
+         send selective multicast (Type-6 SMET) toward this PE instead
+         of flooding BUM for snooped groups. Per-protocol granularity
+         (IGMP-only / MLD-only) is a follow-up.";
+    }
     container assisted-replication {
       description
         "RFC 9574 Optimized Ingress Replication (Assisted Replication)

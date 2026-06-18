@@ -11802,10 +11802,20 @@ impl Bgp {
             orig: vtep_local,
         };
         let mut attr = BgpAttr::new();
-        attr.ecom = Some(ExtCommunity::from([
-            evpn_route_target(self.asn, vni),
-            evpn_encap_vxlan(),
-        ]));
+        let mut ecom = ExtCommunity::from([evpn_route_target(self.asn, vni), evpn_encap_vxlan()]);
+        // RFC 9251 §6: advertise IGMP/MLD proxy capability on the IMET
+        // route via the Multicast Flags EC, so peers know they may send
+        // selective (SMET) multicast toward this PE instead of flooding.
+        if self.igmp_mld_proxy {
+            ecom.0.insert(
+                EvpnMcastFlags {
+                    igmp_proxy: true,
+                    mld_proxy: true,
+                }
+                .into(),
+            );
+        }
+        attr.ecom = Some(ecom);
         // RFC 9574: the PMSI Tunnel attribute and next hop depend on the
         // local Assisted Replication role. RNVE keeps the plain Ingress
         // Replication encoding (tunnel type 6); a Replicator emits a

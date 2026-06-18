@@ -557,6 +557,13 @@ pub struct Bgp {
     /// The Rib::neighbors -> EvpnPrefix::MacIp pipeline that reads
     /// this lands separately.
     pub advertise_all_vni: bool,
+    /// When true, attach the EVPN Multicast Flags Extended Community
+    /// (RFC 9251 §6, IGMP + MLD proxy capability) to every locally
+    /// originated Type-3 (IMET) route. Signals to peers that this PE
+    /// performs IGMP/MLD proxying, so they may send selective (SMET)
+    /// multicast toward it. Drives `evpn_originate_imet`; toggling it
+    /// re-originates all IMET routes via `reoriginate_all_imet`.
+    pub igmp_mld_proxy: bool,
     /// Local bridge FDB shadow keyed by `(vni, mac)`. Populated from
     /// every `RibRx::FdbAdd`, removed on `RibRx::FdbDel`. We need
     /// durable state (not just one-shot event handling) because the
@@ -974,6 +981,7 @@ impl Bgp {
             router_id_config: None,
             rib_router_id: None,
             advertise_all_vni: false,
+            igmp_mld_proxy: false,
             local_fdb: BTreeMap::new(),
             local_vxlans: BTreeMap::new(),
             hostname: None,
