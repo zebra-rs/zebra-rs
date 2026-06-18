@@ -11932,6 +11932,7 @@ fn imet_pmsi_tunnel(
                 tunnel_type: PmsiTunnel::TUNNEL_ASSISTED_REPLICATION,
                 vni,
                 endpoint: ar,
+                tree_id: None,
             }
             .with_ar_type(AssistedReplicationType::Replicator),
             ar,
@@ -11942,6 +11943,7 @@ fn imet_pmsi_tunnel(
                 tunnel_type: PmsiTunnel::TUNNEL_INGRESS_REPLICATION,
                 vni,
                 endpoint: vtep_local,
+                tree_id: None,
             }
             .with_ar_type(AssistedReplicationType::Leaf),
             vtep_local,
@@ -11952,6 +11954,7 @@ fn imet_pmsi_tunnel(
                 tunnel_type: PmsiTunnel::TUNNEL_INGRESS_REPLICATION,
                 vni,
                 endpoint: vtep_local,
+                tree_id: None,
             },
             vtep_local,
         ),
