@@ -158,11 +158,23 @@ impl Ospf<Ospfv3> {
             ("/segment-routing/srv6/locator", config_ospfv3_srv6_locator),
             ("/fast-reroute/ti-lfa", config_ospfv3_ti_lfa),
             (
-                "/fast-reroute/ti-lfa/compute-mode",
-                config_ospfv3_ti_lfa_compute_mode,
+                "/fast-reroute/ti-lfa/compute-mode/serial",
+                config_ospfv3_ti_lfa_compute_mode_serial,
             ),
             (
-                "/fast-reroute/ti-lfa/compute-shards",
+                "/fast-reroute/ti-lfa/compute-mode/conservative",
+                config_ospfv3_ti_lfa_compute_mode_conservative,
+            ),
+            (
+                "/fast-reroute/ti-lfa/compute-mode/aggressive",
+                config_ospfv3_ti_lfa_compute_mode_aggressive,
+            ),
+            (
+                "/fast-reroute/ti-lfa/compute-mode/sharding",
+                config_ospfv3_ti_lfa_compute_mode_sharding,
+            ),
+            (
+                "/fast-reroute/ti-lfa/compute-mode/sharding/shards",
                 config_ospfv3_ti_lfa_compute_shards,
             ),
             (
@@ -194,32 +206,114 @@ fn config_ospfv3_ti_lfa(ospf: &mut Ospf<Ospfv3>, _args: Args, op: ConfigOp) -> O
     Some(())
 }
 
-/// `/router/ospfv3/fast-reroute/ti-lfa/compute-mode` — v3 sibling of
-/// the v2 callback. Results are identical across modes; the SPF
-/// re-run makes the change observable in the telemetry.
-fn config_ospfv3_ti_lfa_compute_mode(
-    ospf: &mut Ospf<Ospfv3>,
-    mut args: Args,
-    op: ConfigOp,
-) -> Option<()> {
-    let prev = ospf.ti_lfa_compute_mode;
-    ospf.ti_lfa_compute_mode = if op.is_set() {
-        args.string()?.parse().ok()?
-    } else {
-        crate::spf::TilfaComputeModeConfig::default()
-    };
-    if ospf.ti_lfa_compute_mode == prev {
-        return Some(());
+/// Re-run SPF on every area iff the *effective* v3 TI-LFA scheduling
+/// mode (mode + shard count) changed from `prev`. v3 sibling of the v2
+/// `ospf_ti_lfa_recompute_if_changed`.
+fn ospfv3_ti_lfa_recompute_if_changed(ospf: &mut Ospf<Ospfv3>, prev: crate::spf::TilfaComputeMode) {
+    if ospf
+        .ti_lfa_compute_mode
+        .with_shards(ospf.ti_lfa_compute_shards)
+        == prev
+    {
+        return;
     }
     let area_ids: Vec<std::net::Ipv4Addr> = ospf.areas.iter().map(|(id, _)| *id).collect();
     for id in area_ids {
         let _ = ospf.tx.send(Message::SpfCalc(id));
     }
+}
+
+/// Set the payload-free v3 `compute-mode` selector and re-run SPF on an
+/// effective-mode change. Shared by the per-case callbacks below.
+fn apply_ospfv3_ti_lfa_compute_mode(
+    ospf: &mut Ospf<Ospfv3>,
+    mode: crate::spf::TilfaComputeModeConfig,
+) {
+    let prev = ospf
+        .ti_lfa_compute_mode
+        .with_shards(ospf.ti_lfa_compute_shards);
+    ospf.ti_lfa_compute_mode = mode;
+    ospfv3_ti_lfa_recompute_if_changed(ospf, prev);
+}
+
+/// Body shared by the v3 `serial` / `conservative` / `aggressive`
+/// `compute-mode` cases. Setting selects `mode`; deleting reverts to
+/// the default mode only when *this* case is the active one (the
+/// candidate store does not auto-clear sibling choice cases, so a stale
+/// delete of an inactive case is a no-op).
+fn config_ospfv3_ti_lfa_compute_mode_case(
+    ospf: &mut Ospf<Ospfv3>,
+    op: ConfigOp,
+    mode: crate::spf::TilfaComputeModeConfig,
+) -> Option<()> {
+    if op.is_set() {
+        apply_ospfv3_ti_lfa_compute_mode(ospf, mode);
+    } else if ospf.ti_lfa_compute_mode == mode {
+        apply_ospfv3_ti_lfa_compute_mode(ospf, crate::spf::TilfaComputeModeConfig::default());
+    }
     Some(())
 }
 
-/// `/router/ospfv3/fast-reroute/ti-lfa/compute-shards` — v3 sibling of
-/// the v2 callback. Consulted only in sharding mode.
+/// `/router/ospfv3/fast-reroute/ti-lfa/compute-mode/serial`.
+fn config_ospfv3_ti_lfa_compute_mode_serial(
+    ospf: &mut Ospf<Ospfv3>,
+    _args: Args,
+    op: ConfigOp,
+) -> Option<()> {
+    config_ospfv3_ti_lfa_compute_mode_case(ospf, op, crate::spf::TilfaComputeModeConfig::Serial)
+}
+
+/// `/router/ospfv3/fast-reroute/ti-lfa/compute-mode/conservative`.
+fn config_ospfv3_ti_lfa_compute_mode_conservative(
+    ospf: &mut Ospf<Ospfv3>,
+    _args: Args,
+    op: ConfigOp,
+) -> Option<()> {
+    config_ospfv3_ti_lfa_compute_mode_case(
+        ospf,
+        op,
+        crate::spf::TilfaComputeModeConfig::Conservative,
+    )
+}
+
+/// `/router/ospfv3/fast-reroute/ti-lfa/compute-mode/aggressive`.
+fn config_ospfv3_ti_lfa_compute_mode_aggressive(
+    ospf: &mut Ospf<Ospfv3>,
+    _args: Args,
+    op: ConfigOp,
+) -> Option<()> {
+    config_ospfv3_ti_lfa_compute_mode_case(ospf, op, crate::spf::TilfaComputeModeConfig::Aggressive)
+}
+
+/// `/router/ospfv3/fast-reroute/ti-lfa/compute-mode/sharding` — the
+/// presence container for the sharding case. Bare `sharding` selects
+/// the mode with the default shard count; the `shards` child overrides
+/// it. Deleting the container drops the whole sharding subtree, so
+/// reset the count here too and revert the mode when sharding is the
+/// active case.
+fn config_ospfv3_ti_lfa_compute_mode_sharding(
+    ospf: &mut Ospf<Ospfv3>,
+    _args: Args,
+    op: ConfigOp,
+) -> Option<()> {
+    if op.is_set() {
+        apply_ospfv3_ti_lfa_compute_mode(ospf, crate::spf::TilfaComputeModeConfig::Sharding);
+    } else {
+        let prev = ospf
+            .ti_lfa_compute_mode
+            .with_shards(ospf.ti_lfa_compute_shards);
+        // Matches the YANG `default 8` on the `shards` leaf.
+        ospf.ti_lfa_compute_shards = 8;
+        if ospf.ti_lfa_compute_mode == crate::spf::TilfaComputeModeConfig::Sharding {
+            ospf.ti_lfa_compute_mode = crate::spf::TilfaComputeModeConfig::default();
+        }
+        ospfv3_ti_lfa_recompute_if_changed(ospf, prev);
+    }
+    Some(())
+}
+
+/// `/router/ospfv3/fast-reroute/ti-lfa/compute-mode/sharding/shards` —
+/// v3 sibling of the v2 callback. Consulted only in sharding mode.
 fn config_ospfv3_ti_lfa_compute_shards(
     ospf: &mut Ospf<Ospfv3>,
     mut args: Args,
@@ -229,17 +323,7 @@ fn config_ospfv3_ti_lfa_compute_shards(
         .ti_lfa_compute_mode
         .with_shards(ospf.ti_lfa_compute_shards);
     ospf.ti_lfa_compute_shards = if op.is_set() { args.u16()? } else { 8 };
-    if ospf
-        .ti_lfa_compute_mode
-        .with_shards(ospf.ti_lfa_compute_shards)
-        == prev
-    {
-        return Some(());
-    }
-    let area_ids: Vec<std::net::Ipv4Addr> = ospf.areas.iter().map(|(id, _)| *id).collect();
-    for id in area_ids {
-        let _ = ospf.tx.send(Message::SpfCalc(id));
-    }
+    ospfv3_ti_lfa_recompute_if_changed(ospf, prev);
     Some(())
 }
 

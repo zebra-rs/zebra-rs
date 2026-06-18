@@ -162,8 +162,9 @@ Feature: OSPFv2 TI-LFA fast-reroute over SR-MPLS
 
   Scenario: TI-LFA compute-mode sharding bounds parallelism and still protects
     Given the test topology exists
-    When I apply command "set router ospf fast-reroute ti-lfa compute-shards 2" in namespace "s"
-    And I apply command "set router ospf fast-reroute ti-lfa compute-mode sharding" in namespace "s"
+    # The shard count now nests under the `sharding` mode: one command
+    # selects sharding and bounds parallelism to 2 shards.
+    When I apply command "set router ospf fast-reroute ti-lfa compute-mode sharding shards 2" in namespace "s"
     And I wait 5 seconds
     Then show command "show ospf ti-lfa" in namespace "s" should contain "Node-SID"
     And show command "show ospf" in namespace "s" should contain "mode=sharding(2)"
@@ -175,10 +176,10 @@ Feature: OSPFv2 TI-LFA fast-reroute over SR-MPLS
     When I make namespace "s" interface "s-n1" up
     And I wait 30 seconds
     Then ping from "s" to "10.0.0.8" should succeed
-    # Runtime leaf deletes (value-carrying) reset the scheduler to the
-    # stock serial mode for the remaining scenarios.
+    # Deleting the `sharding` presence container resets the scheduler to
+    # the stock serial mode (mode → serial, shards → 8) for the
+    # remaining scenarios.
     When I apply command "delete router ospf fast-reroute ti-lfa compute-mode sharding" in namespace "s"
-    And I apply command "delete router ospf fast-reroute ti-lfa compute-shards 2" in namespace "s"
     And I wait 5 seconds
     Then show command "show ospf" in namespace "s" should contain "mode=serial"
 

@@ -850,30 +850,51 @@ module config {
             // dataplane.
             presence "Enable Topology-Independent LFA (TI-LFA)";
 
-            leaf compute-mode {
+            container compute-mode {
               ext:help "How the TI-LFA computation is scheduled";
               // Execution scheduling for the per-destination TI-LFA
               // computation; same modes and semantics as
               // `router isis fast-reroute ti-lfa compute-mode` (see
               // docs/design/isis-tilfa-parallel-spf.md, §13 for the
-              // OSPF specifics).
-              type enumeration {
-                enum serial;
-                enum conservative;
-                enum aggressive;
-                enum sharding;
+              // OSPF specifics). One keyword per mode under a `choice`;
+              // the shard count nests under `sharding`. The default
+              // mode (serial) is applied by the Rust handler.
+              choice mode {
+                case serial {
+                  leaf serial {
+                    ext:help "Run on the SPF worker thread";
+                    type empty;
+                  }
+                }
+                case conservative {
+                  leaf conservative {
+                    ext:help "Fan out one task per destination";
+                    type empty;
+                  }
+                }
+                case aggressive {
+                  leaf aggressive {
+                    ext:help "Also share the PC-path SPF per protected node";
+                    type empty;
+                  }
+                }
+                case sharding {
+                  container sharding {
+                    ext:help "Aggressive work split into parallel shards";
+                    presence "Shard the aggressive computation (default 8 shards)";
+                    // Hard upper bound on TI-LFA parallelism, consulted
+                    // only in this mode. Bare `sharding` uses 8
+                    // (applied by the handler).
+                    leaf shards {
+                      ext:help "Max parallel TI-LFA shards";
+                      type uint16 {
+                        range "1..256";
+                      }
+                      default "8";
+                    }
+                  }
+                }
               }
-              default "serial";
-            }
-
-            leaf compute-shards {
-              ext:help "Max parallel TI-LFA shards (sharding mode)";
-              // Hard upper bound on TI-LFA parallelism, consulted
-              // only when `compute-mode sharding` is set.
-              type uint16 {
-                range "1..256";
-              }
-              default "8";
             }
           }
           container backup-as-primary {
@@ -1296,27 +1317,49 @@ module config {
             // RFC 9490). Post-convergence repair over the v3 LSDB.
             presence "Enable Topology-Independent LFA (TI-LFA)";
 
-            leaf compute-mode {
+            container compute-mode {
               ext:help "How the TI-LFA computation is scheduled";
               // Same modes and semantics as `router ospf
-              // fast-reroute ti-lfa compute-mode`.
-              type enumeration {
-                enum serial;
-                enum conservative;
-                enum aggressive;
-                enum sharding;
+              // fast-reroute ti-lfa compute-mode`. One keyword per
+              // mode under a `choice`; the shard count nests under
+              // `sharding`. The default mode (serial) is applied by
+              // the Rust handler.
+              choice mode {
+                case serial {
+                  leaf serial {
+                    ext:help "Run on the SPF worker thread";
+                    type empty;
+                  }
+                }
+                case conservative {
+                  leaf conservative {
+                    ext:help "Fan out one task per destination";
+                    type empty;
+                  }
+                }
+                case aggressive {
+                  leaf aggressive {
+                    ext:help "Also share the PC-path SPF per protected node";
+                    type empty;
+                  }
+                }
+                case sharding {
+                  container sharding {
+                    ext:help "Aggressive work split into parallel shards";
+                    presence "Shard the aggressive computation (default 8 shards)";
+                    // Hard upper bound on TI-LFA parallelism, consulted
+                    // only in this mode. Bare `sharding` uses 8
+                    // (applied by the handler).
+                    leaf shards {
+                      ext:help "Max parallel TI-LFA shards";
+                      type uint16 {
+                        range "1..256";
+                      }
+                      default "8";
+                    }
+                  }
+                }
               }
-              default "serial";
-            }
-
-            leaf compute-shards {
-              ext:help "Max parallel TI-LFA shards (sharding mode)";
-              // Hard upper bound on TI-LFA parallelism, consulted
-              // only when `compute-mode sharding` is set.
-              type uint16 {
-                range "1..256";
-              }
-              default "8";
             }
           }
           container backup-as-primary {
@@ -1614,36 +1657,64 @@ module config {
             // enabled for the repair to install in the dataplane.
             presence "Enable Topology-Independent LFA (TI-LFA)";
 
-            leaf compute-mode {
+            container compute-mode {
               ext:help "How the TI-LFA computation is scheduled";
               // Execution scheduling for the per-destination TI-LFA
               // computation (design: docs/design/isis-tilfa-parallel-
-              // spf.md). Results are identical across modes — only
-              // CPU usage and wall-clock differ. `serial` runs on the
-              // SPF worker thread; `conservative` fans out one task
-              // per destination; `aggressive` additionally shares the
+              // spf.md). Results are identical across modes — only CPU
+              // usage and wall-clock differ. `serial` runs on the SPF
+              // worker thread; `conservative` fans out one task per
+              // destination; `aggressive` additionally shares the
               // PC-path SPF across destinations behind the same
               // protected node; `sharding` is the aggressive work
-              // split into at most `compute-shards` parallel shards.
-              type enumeration {
-                enum serial;
-                enum conservative;
-                enum aggressive;
-                enum sharding;
+              // split into at most `shards` parallel shards.
+              //
+              // Modelled as a `choice` of one keyword per mode (the
+              // shard count nests under `sharding`, the only mode it
+              // applies to). The cases are mutually exclusive. The
+              // default mode (serial) is applied by the Rust handler —
+              // a choice/case carries no YANG default, and switching
+              // cases does not auto-clear the previous case node from
+              // the candidate store (same cosmetic as
+              // `allowas-in {count|origin}`).
+              choice mode {
+                case serial {
+                  leaf serial {
+                    ext:help "Run on the SPF worker thread";
+                    type empty;
+                  }
+                }
+                case conservative {
+                  leaf conservative {
+                    ext:help "Fan out one task per destination";
+                    type empty;
+                  }
+                }
+                case aggressive {
+                  leaf aggressive {
+                    ext:help "Also share the PC-path SPF per protected node";
+                    type empty;
+                  }
+                }
+                case sharding {
+                  container sharding {
+                    ext:help "Aggressive work split into parallel shards";
+                    presence "Shard the aggressive computation (default 8 shards)";
+                    // Hard upper bound on TI-LFA parallelism — lets an
+                    // operator reserve cores for other daemons on a
+                    // shared box. Bare `sharding` uses 8 (applied by
+                    // the handler; libyang does not carry the leaf
+                    // `default` into the entry tree).
+                    leaf shards {
+                      ext:help "Max parallel TI-LFA shards";
+                      type uint16 {
+                        range "1..256";
+                      }
+                      default "8";
+                    }
+                  }
+                }
               }
-              default "serial";
-            }
-
-            leaf compute-shards {
-              ext:help "Max parallel TI-LFA shards (sharding mode)";
-              // Hard upper bound on TI-LFA parallelism, consulted
-              // only when `compute-mode sharding` is set. Lets an
-              // operator reserve cores for other daemons on a shared
-              // box.
-              type uint16 {
-                range "1..256";
-              }
-              default "8";
             }
           }
           container backup-as-primary {
