@@ -628,6 +628,10 @@ impl fmt::Display for MpUnreachAttr {
                         EvpnRoute::Prefix(v) => {
                             writeln!(f, " [{}]{}", v.rd, v.prefix)?;
                         }
+                        EvpnRoute::Smet(v) => {
+                            let src = v.src.map_or_else(|| "*".to_string(), |s| s.to_string());
+                            writeln!(f, " [{}] SMET ({},{})", v.rd, src, v.grp)?;
+                        }
                     }
                 }
                 Ok(())

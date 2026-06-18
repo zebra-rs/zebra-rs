@@ -3174,6 +3174,10 @@ module config {
                   description
                     "Prefix (Type-5) route";
                 }
+                enum smet {
+                  description
+                    "Selective Multicast Ethernet Tag (Type-6) route";
+                }
               }
               description
                 "Match EVPN route type.";

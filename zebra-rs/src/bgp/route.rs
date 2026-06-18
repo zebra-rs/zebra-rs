@@ -3968,6 +3968,24 @@ pub fn route_update_evpn(
                 label: rib.label.as_ref().map(|l| l.label).unwrap_or(0),
             })
         }
+        EvpnPrefix::Smet {
+            eth_tag,
+            src,
+            grp,
+            orig,
+        } => EvpnRoute::Smet(EvpnSmet {
+            id,
+            rd: *rd,
+            ether_tag: *eth_tag,
+            src: *src,
+            grp: *grp,
+            orig: *orig,
+            // TODO(phase4): SMET Flags (IGMP/MLD version + IE mode) are
+            // not part of the RIB key; carry them on `BgpRib` so a
+            // reflected SMET preserves them. Until then a re-advertised
+            // SMET emits flags = 0.
+            flags: 0,
+        }),
     };
 
     let mut attrs = (*rib.attr).clone();
@@ -4113,6 +4131,22 @@ fn evpn_route_from_prefix(rd: &RouteDistinguisher, prefix: &EvpnPrefix, id: u32)
                 label: 0,
             })
         }
+        EvpnPrefix::Smet {
+            eth_tag,
+            src,
+            grp,
+            orig,
+        } => EvpnRoute::Smet(EvpnSmet {
+            id,
+            rd: *rd,
+            ether_tag: *eth_tag,
+            src: *src,
+            grp: *grp,
+            orig: *orig,
+            // Withdraw is matched on the NLRI key (flags are not part of
+            // it), so flags = 0 here is correct. See TODO(phase4).
+            flags: 0,
+        }),
     }
 }
 
@@ -5530,6 +5564,7 @@ fn evpn_route_type_of(route: &EvpnRoute) -> crate::policy::EvpnRouteType {
         EvpnRoute::Mac(_) => EvpnRouteType::MacIp,
         EvpnRoute::Multicast(_) => EvpnRouteType::Multicast,
         EvpnRoute::Prefix(_) => EvpnRouteType::Prefix,
+        EvpnRoute::Smet(_) => EvpnRouteType::Smet,
     }
 }
 
@@ -5546,6 +5581,9 @@ fn evpn_vni_of(route: &EvpnRoute, attr: &BgpAttr) -> Option<u32> {
         // Type-5 (IP Prefix) is an L3VPN-style route: forwarding rides
         // the per-route MPLS label / SRv6 SID, not a bridge VNI. No VNI.
         EvpnRoute::Prefix(_) => None,
+        // Type-6 (SMET) carries the EVI Route Target like Type-3; the
+        // VNI comes from the RT extended community (RFC 8365 §5.1.2.4).
+        EvpnRoute::Smet(_) => extract_vni_from_attr(attr),
     }
 }
 
@@ -5683,6 +5721,12 @@ fn route_evpn_export_selected(
                     }
                 }
             }
+            EvpnPrefix::Smet { .. } => {
+                // TODO(phase5): withdraw the selective kernel MDB entry
+                // (`bridge mdb del grp G dst <originator-VTEP>`). The
+                // selective-forwarding dataplane is not wired yet, so a
+                // received SMET withdraw is a no-op beyond Loc-RIB removal.
+            }
         }
         return;
     }
@@ -5762,6 +5806,13 @@ fn route_evpn_export_selected(
                 }
             }
         }
+        EvpnPrefix::Smet { .. } => {
+            // TODO(phase5): install the selective kernel MDB entry
+            // (`bridge mdb add grp G [src S] dst <originator-VTEP>`) so
+            // the ingress PE replicates (x,G) only toward PEs that asked.
+            // The received SMET is already in the Loc-RIB and `show bgp
+            // evpn`; the selective-forwarding dataplane lands in Phase 5.
+        }
     }
 }
 
@@ -5788,6 +5839,7 @@ pub fn route_evpn_update(
         EvpnRoute::Mac(m) => m.id,
         EvpnRoute::Multicast(m) => m.id,
         EvpnRoute::Prefix(p) => p.id,
+        EvpnRoute::Smet(s) => s.id,
     };
 
     // Loop detection mirrors route_ipv4_update — drop the route silently
@@ -5901,6 +5953,7 @@ pub fn route_evpn_withdraw(ident: usize, route: &EvpnRoute, bgp: &mut BgpTop, pe
         EvpnRoute::Mac(m) => m.id,
         EvpnRoute::Multicast(m) => m.id,
         EvpnRoute::Prefix(p) => p.id,
+        EvpnRoute::Smet(s) => s.id,
     };
 
     {
@@ -7865,6 +7918,23 @@ fn build_evpn_route(
                 label: rib.label.as_ref().map(|l| l.label).unwrap_or(0),
             }))
         }
+        EvpnPrefix::Smet {
+            eth_tag,
+            src,
+            grp,
+            orig,
+        } => Some(EvpnRoute::Smet(EvpnSmet {
+            id: rib.remote_id,
+            rd: *rd,
+            ether_tag: *eth_tag,
+            src: *src,
+            grp: *grp,
+            orig: *orig,
+            // TODO(phase4): carry SMET flags on `BgpRib` (see the
+            // advertise path). Peer-down withdraw is key-matched, so
+            // flags = 0 is correct here.
+            flags: 0,
+        })),
     }
 }
 
