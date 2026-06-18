@@ -109,11 +109,30 @@ End.X rather than reusing algo-0:
   base (algo-0) locator (the shared function source); without one, repair
   adj segments fall back to nothing (node-segment repairs only).
 
-Remaining deferred follow-ups: SRv6 L3VPN colour steering (prepend the
-End SID before the End.DT4/DT6 service SID); and a TI-LFA BDD (the PR-6
-`isis_flex_srv6` topology has no intra-algo redundancy to exercise a
-repair). The PR-6 BDD feature was authored but not executed here (needs
-root/netns; CI runs the bdd suite).
+**SRv6 service-route colour steering (prepend): implemented** (branch
+`isis-flexalgo-srv6-vpn-steer`, build/fmt/clippy/non-bdd tests green) —
+the "prepend" counterpart of PR 7's plain-unicast "replace":
+
+- `steer_srv6_vpn` / `steer_srv6_vpn_inner` (`bgp/route.rs`) prepend the
+  egress PE's algo-N End SID before an existing End.DT4/DT6 service SID
+  (`segs = [algoN-End-SID, service-SID]`). The service SID is itself
+  under the PE's locator, so LPM-ing it against the colour shadow yields
+  the PE's algo-N End SID — no separate next-hop lookup. Called in
+  `fib_install_v4` / `fib_install_v6` for routes carrying a service SID
+  (mutually exclusive with the plain-path block, which only fires when
+  `segs` is empty). 3 unit tests.
+- **Effective now** for global SRv6-IPv6-unicast service routes
+  (RFC 9252), which install on the main task where the colour shadow is
+  in scope. **No-op for per-VRF VPNv4/VPNv6-over-SRv6 routes**: those
+  install in per-VRF tasks that don't hold the (dynamic) colour shadow.
+
+Remaining deferred follow-ups: **per-VRF VPN colour steering** — needs a
+live global→VRF sync of `flex_algo_srv6_routes` (+ `color_policy`) to
+each VRF task (a new `BgpVrfMsg` broadcast on every IS-IS SPF + per-VRF
+storage + use in the per-VRF `fib_install`); and a **TI-LFA BDD** (the
+PR-6 `isis_flex_srv6` topology has no intra-algo redundancy to exercise
+a repair). The PR-6 BDD feature was authored but not executed here
+(needs root/netns; CI runs the bdd suite).
 
 ## Decisions (locked 2026-06-16)
 
