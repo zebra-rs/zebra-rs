@@ -33,6 +33,8 @@ impl Isis {
             .set(show_isis_fast_reroute_summary)
             .path("/show/isis/fast-reroute/prefix/detail")
             .set(show_isis_fast_reroute_prefix_detail)
+            .path("/show/isis/egress-protection")
+            .set(show_isis_egress_protection)
             .path("/show/isis/interface")
             .set(link::show)
             .path("/show/isis/interface/detail")
@@ -85,6 +87,59 @@ fn show_isis(
     _json: bool,
 ) -> std::result::Result<String, std::fmt::Error> {
     Ok(String::from("show isis"))
+}
+
+/// `show isis egress-protection` — the configured Mirror SID
+/// egress-protection entries (draft-ietf-rtgwg-srv6-egress-protection)
+/// and, per entry, whether it is currently advertised in the self-LSP.
+/// An entry is advertised when it is on the SRv6 dataplane, has an
+/// explicit Mirror SID, and that SID falls inside this node's own SRv6
+/// locator — exactly the condition `lsp::mirror_sid_subs` emits on.
+fn show_isis_egress_protection(
+    isis: &Isis,
+    _args: Args,
+    _json: bool,
+) -> std::result::Result<String, std::fmt::Error> {
+    use super::egress_protection::MirrorDataplane;
+
+    let entries = &isis.config.egress_protections;
+    if entries.is_empty() {
+        return Ok(String::from("No egress-protection entries configured\n"));
+    }
+
+    let local = isis.sr_locator.as_ref().and_then(|l| l.prefix);
+    let mut buf = String::new();
+    writeln!(
+        buf,
+        "{:<22} {:<24} {:<5} {:<10} Advertised",
+        "Protected-Locator", "Mirror-SID", "DP", "Via-VRF"
+    )?;
+    for e in entries.values() {
+        let dp = match e.dataplane {
+            MirrorDataplane::Srv6 => "srv6",
+            MirrorDataplane::Mpls => "mpls",
+        };
+        let sid = e
+            .mirror_sid
+            .map(|s| s.to_string())
+            .unwrap_or_else(|| "(auto)".to_string());
+        let vrf = e.via_vrf.as_deref().unwrap_or("-");
+        let advertised = e.dataplane == MirrorDataplane::Srv6
+            && e.mirror_sid
+                .zip(local)
+                .map(|(s, p)| p.contains(&s))
+                .unwrap_or(false);
+        writeln!(
+            buf,
+            "{:<22} {:<24} {:<5} {:<10} {}",
+            e.protected_locator.to_string(),
+            sid,
+            dp,
+            vrf,
+            if advertised { "yes" } else { "no" },
+        )?;
+    }
+    Ok(buf)
 }
 
 fn show_isis_summary(

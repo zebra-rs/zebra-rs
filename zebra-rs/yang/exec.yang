@@ -585,6 +585,10 @@ module exec {
           }
         }
       }
+      leaf egress-protection {
+        ext:help "Mirror SID egress-protection entries (SRv6/SR-MPLS)";
+        type empty;
+      }
       container interface {
         ext:help "IS-IS interface";
         presence "IS-IS interface";
