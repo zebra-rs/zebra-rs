@@ -141,3 +141,48 @@ before any code.**
   the host tool).
 - **`bridge vni add` netlink** — confirm the exact message
   (`RTM_NEWTUNNEL` + `VXLAN_VNIFILTER_*`) the fork must emit.
+
+## Decision & validation findings (2026-06-19)
+
+**Model: Option A (adopt `external vnifilter` wholesale) — confirmed.**
+
+Bench validation in a throwaway netns on this host (kernel 6.8) settled
+the open questions, with one tooling blocker:
+
+- **VXLAN creation: no fork change needed.** The fork's `InfoVxlan`
+  already exposes `CollectMetadata(bool)` (external) and
+  `Vnifilter(bool)`. `ip link add … type vxlan external vnifilter`
+  + `bridge vni add vni N dev <vtep>` succeed.
+- **Type-2 / Type-3 on the model: validated.** On an `external
+  vnifilter` VXLAN, `bridge fdb add <mac> dev <vtep> src_vni N dst
+  <VTEP>` works for both a unicast MAC (Type-2) and the all-zero
+  `00:00:00:00:00:00` BUM row (Type-3). So both shipped paths port to
+  the VNI-aware model via `src_vni`-keyed FDB — the regression risk is
+  real but the mechanism is sound.
+- **Fork prerequisite confirmed: `bridge vni add` is `RTM_NEWTUNNEL`,
+  which the fork/rtnetlink does NOT expose.** Adding the VNI-filter
+  netlink (message type + `VXLAN_VNIFILTER_ENTRY_*` attrs) to the
+  `seg6` fork is **P1's first task**.
+- **BLOCKER on the core deliverable's validation.** The VXLAN MDB with
+  `dst` (the whole point) cannot be exercised with this host's tooling:
+  `iproute2` is pinned at **6.1.0** (its `bridge mdb` predates
+  `dst`/`src_vni`/VXLAN-MDB; `apt` candidate is also 6.1.0) and
+  `pyroute2` is not installed. zebra-rs *emitting* it via netlink is
+  unaffected, but we cannot independently *drive or observe* a
+  reference entry to confirm the wire format or the forwarding result.
+  Before P4 lands we need one of: (a) a newer `bridge`/`iproute2` built
+  on the test box, (b) a daemon-side `show evpn mdb` that reads back the
+  install via `RTM_GETMDB` (needs the fork's `mdb/entry.rs` to also
+  decode `MDBE_ATTR_DST`/`SRC_VNI`), or (c) interop against a second
+  stack. **This is the gating item for validatable P4 work.**
+
+### Revised first steps
+
+1. **Fork P1a** — `RTM_NEWTUNNEL` / VNI-filter add+del in the `seg6`
+   fork (+ `MDBE_ATTR_DST`/`SRC_VNI` decode in `mdb/entry.rs` so the
+   daemon can read its own VXLAN MDB back for tests).
+2. **zebra P1b** — `vxlan_add` creates `external vnifilter`; drive the
+   VNI filter per learned VNI; keep Type-2/3 green (likely requires
+   landing the Type-2/3 `src_vni` FDB rework in the same PR, since the
+   plain-model FDB stops working under `external`).
+3. P2–P4 as before; P4 gated on the validation tooling above.
