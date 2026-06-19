@@ -1,0 +1,25 @@
+# z2 — EVPN IGMP/MLD proxy (RFC 9251). A locally-snooped (*,G) join
+# (injected via `bridge mdb add` in the feature) makes z2 originate a
+# Type-6 SMET route for VNI 10.
+vxlan:
+- name: vxlan10
+  vni: 10
+  local-address: 192.168.0.2
+router:
+  bgp:
+    global:
+      as: 65001
+      router-id: 192.168.0.2
+    afi-safi:
+    - name: evpn
+      advertise-all-vni: true
+      igmp-mld-proxy: true
+    neighbor:
+    - remote-address: 192.168.0.1
+      enabled: true
+      remote-as: 65001
+      afi-safi:
+      - name: ipv4
+        enabled: true
+      - name: evpn
+        enabled: true
