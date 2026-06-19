@@ -199,7 +199,7 @@ The honest posture, therefore:
         │   ingress/egress PE  : originate/import IMET as today                  │
         │   RBR/ASBR (Phase 3+): re-originate w/ next-hop + PTA rewrite,         │
         │                        Per-Region I-PMSI aggregation, Leaf A-D auto-RT │
-        │ show bgp l2vpn evpn route-type {per-region-imet|s-pmsi|leaf}           │
+        │ show bgp evpn route-type {…|per-region-imet|s-pmsi|leaf}  (Phase 2 ✓)  │
         └──────────────────────────────────────────────────────────────────────┘
                                    │ selected routes (Phase 6, kernel-limited)
                                    ▼
@@ -260,11 +260,22 @@ codec — and any RIB/Adj-RIB/show/origination wiring.
 
 ## 7. Control-plane design (later phases)
 
-- **Phase 2 — RIB + Adj-RIB + show.** The new `EvpnPrefix` variants flow
-  through the existing exact-match `LocalRibEvpnTable` and the NLRI-agnostic
-  best-path comparator with minimal new logic; add `show bgp l2vpn evpn
-  route-type {per-region-imet|s-pmsi|leaf}` (mind the show-grammar-sweep-bdd
-  gotcha — grep old spellings, fix feature files + parse() tests together).
+- **Phase 2 — RIB + Adj-RIB + show. DONE.** The receive-side drop guard in
+  `route_evpn_update` was removed, so types 9/10/11 now flow through the same
+  generic Adj-RIB-In → Loc-RIB → best-path → reflect path as the other EVPN
+  types (the `LocalRibEvpnTable` / `AdjRibEvpnTable` are fully generic over
+  `EvpnPrefix` — no per-variant RIB code). They carry no VXLAN dataplane
+  action (`route_evpn_export_selected` no-ops). They render in `show bgp evpn`
+  via `EvpnPrefix::Display`, and a new **`show bgp evpn route-type
+  {macip|multicast|prefix|smet|per-region-imet|s-pmsi|leaf}`** filter was
+  added (`/show/bgp/evpn/route-type` → `show_bgp_evpn`, keyword → route-type
+  number via `evpn_route_type_filter`). Pinned by a `config/parse.rs`
+  path/args test (the show-grammar gotcha) + a filter-vs-`route_type()`
+  cross-check unit test. Command is `show bgp evpn route-type …` (not `l2vpn
+  evpn`), matching the existing `show bgp evpn` grammar. **Note:** YANG `enum`
+  bodies can't carry `ext:help` in this parser — keep enums bare (the
+  `yang_load_tests` guard catches it; cargo/clippy don't). End-to-end
+  receive→show with real routes is BDD-covered in Phase 3 (needs origination).
 - **Phase 3 — inter-region (RBR, RFC 9572 §6) — first real milestone.**
   Region = BGP peer-group (§6.1). Config marks a peer-group's Region ID and
   flags it as a segmentation boundary. RBR re-advertises I/S-PMSI A-D
@@ -303,7 +314,8 @@ on push, not targeted filters).
 
 - **PR1 — Phase 0+1: PTA hardening + Type 9/10/11 codec + unit tests.**
   No behavior change; decode/encode + round-trip tests only. *(this PR)*
-- **PR2 — Phase 2: RIB/Adj-RIB plumbing + `show` + parse() show tests.**
+- **PR2 — Phase 2: RIB/Adj-RIB plumbing + `show` + parse() show tests. DONE.**
+  Removed the receive drop guard; added `show bgp evpn route-type <kw>` filter.
 - **PR3 — Phase 3: inter-region RBR re-origination** (Region ID / Multicast
   Flags / DF Election ECs land here) + Leaf A-D + BDD over a netns RR/region
   topology (ending in `Scenario: Teardown topology`).
