@@ -90,6 +90,16 @@ module zebra-bgp-evpn {
          of flooding BUM for snooped groups. Per-protocol granularity
          (IGMP-only / MLD-only) is a follow-up.";
     }
+    leaf segmentation {
+      type boolean;
+      default false;
+      description
+        "When true, advertise BUM tunnel-segmentation support (RFC 9572
+         Section 8) by setting bit 8 of the Multicast Flags Extended
+         Community on every locally originated Type-3 (Inclusive Multicast)
+         route. Tells peers and Regional Border Routers that this PE
+         supports the RFC 9572 segmentation procedures.";
+    }
     leaf bum-tunnel-type {
       type enumeration {
         enum ingress-replication {

@@ -582,6 +582,13 @@ pub struct Bgp {
     /// multicast toward it. Drives `evpn_originate_imet`; toggling it
     /// re-originates all IMET routes via `reoriginate_all_imet`.
     pub igmp_mld_proxy: bool,
+    /// RFC 9572 §8: advertise BUM tunnel **segmentation** support by setting
+    /// bit 8 of the Multicast Flags Extended Community on every originated
+    /// Type-3 (IMET) route. Signals to peers / Regional Border Routers that
+    /// this PE supports the RFC 9572 segmentation procedures. Drives
+    /// `evpn_originate_imet`; toggling it re-originates all IMET routes via
+    /// `reoriginate_all_imet`.
+    pub segmentation: bool,
     /// Local bridge FDB shadow keyed by `(vni, mac)`. Populated from
     /// every `RibRx::FdbAdd`, removed on `RibRx::FdbDel`. We need
     /// durable state (not just one-shot event handling) because the
@@ -1006,6 +1013,7 @@ impl Bgp {
             rib_router_id: None,
             advertise_all_vni: false,
             igmp_mld_proxy: false,
+            segmentation: false,
             local_fdb: BTreeMap::new(),
             local_vxlans: BTreeMap::new(),
             local_smet: BTreeMap::new(),

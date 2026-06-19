@@ -12064,14 +12064,16 @@ impl Bgp {
         };
         let mut attr = BgpAttr::new();
         let mut ecom = ExtCommunity::from([evpn_route_target(self.asn, vni), evpn_encap_vxlan()]);
-        // RFC 9251 §6: advertise IGMP/MLD proxy capability on the IMET
-        // route via the Multicast Flags EC, so peers know they may send
-        // selective (SMET) multicast toward this PE instead of flooding.
-        if self.igmp_mld_proxy {
+        // RFC 9251 §6 / RFC 9572 §8: advertise IGMP/MLD proxy capability
+        // and/or BUM tunnel-segmentation support on the IMET route via the
+        // Multicast Flags EC, so peers and Regional Border Routers learn
+        // this PE's capabilities.
+        if self.igmp_mld_proxy || self.segmentation {
             ecom.0.insert(
                 EvpnMcastFlags {
-                    igmp_proxy: true,
-                    mld_proxy: true,
+                    igmp_proxy: self.igmp_mld_proxy,
+                    mld_proxy: self.igmp_mld_proxy,
+                    segmentation_support: self.segmentation,
                 }
                 .into(),
             );

@@ -3176,6 +3176,10 @@ fn format_evpn_ecom_value(v: &ExtCommunityValue) -> String {
             let tunnel_type = u16::from_be_bytes([v.val[4], v.val[5]]);
             format!("ET:{tunnel_type}")
         }
+        // EVPN Multicast Flags EC — RFC 9251 §6 / RFC 9572 §8 (IGMP/MLD
+        // proxy + segmentation-support bits). Reuse the codec's Display,
+        // which renders `mcast-flags:` + I / M / S.
+        (0x06, 0x09) => v.to_string(),
         _ => format!(
             "0x{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}",
             v.high_type, v.low_type, v.val[0], v.val[1], v.val[2], v.val[3], v.val[4], v.val[5]
@@ -5055,5 +5059,34 @@ mod evpn_route_type_filter_tests {
             evpn_route_type_filter("leaf".into()),
             Some(t11.route_type())
         );
+    }
+}
+
+#[cfg(test)]
+mod evpn_ecom_render_tests {
+    use super::format_evpn_ecom_value;
+    use bgp_packet::EvpnMcastFlags;
+
+    /// The EVPN Multicast Flags EC (high 0x06, sub 0x09) renders via the
+    /// codec's Display rather than the raw-hex fallback, so the IGMP/MLD/seg
+    /// bits are legible in `show bgp evpn` — including the RFC 9572 §8
+    /// segmentation-support bit (`S`).
+    #[test]
+    fn mcast_flags_ec_renders_segmentation() {
+        let seg = EvpnMcastFlags {
+            igmp_proxy: false,
+            mld_proxy: false,
+            segmentation_support: true,
+        }
+        .into();
+        assert_eq!(format_evpn_ecom_value(&seg), "mcast-flags:S");
+
+        let combo = EvpnMcastFlags {
+            igmp_proxy: true,
+            mld_proxy: true,
+            segmentation_support: true,
+        }
+        .into();
+        assert_eq!(format_evpn_ecom_value(&combo), "mcast-flags:IMS");
     }
 }
