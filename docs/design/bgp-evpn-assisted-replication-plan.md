@@ -29,7 +29,7 @@ Branch `bgp-evpn-bum`. **Phase 0 (codec) landed on the branch**; Phases 1–3
 | 1a — role + origination | YANG `assisted-replication` role/AR-IP config; role-aware Type-3 IMET origination (Replicator-AR tunnel `0x0A` / AR-LEAF-flagged Regular-IR); pin tests | ✅ merged #1483 |
 | 1b — reception + flood model | per-VNI `EvpnFloodState` on `LocalRib`; classify received IMET (Regular-IR vs Replicator-AR); AR-LEAF flood-list collapse to a single `{AR-IP}` with full-IR fallback | ✅ on branch |
 | 2 — Pruned-Flood-Lists | YANG `pruned-flood-list` (BM/U) → set flags in our IMET; honor a received whole-VTEP prune (BM **and** U) by dropping the remote from the flood list; BDD prune scenario | ✅ on branch |
-| 3 — selective AR | Replicator `L=1`; AR-LEAF Leaf A-D (Type-1) origination with `AR-IP:0` RT; per-replicator leaf-set | ⬜ planned |
+| 3 — selective AR | Replicator `L=1` (config `selective`); AR-LEAF originates a Leaf A-D (Type-11, RFC 9572) keyed on the Replicator-AR route, scoped by an `<replicator-NH>:0` IPv4-address-specific RT; replicator imports the leaf set; BDD asserts the `[11]:` route on the replicator | ✅ on branch |
 | 4 — AR-REPLICATOR dataplane | decap-on-AR-IP → re-flood to other VTEPs with split-horizon | ⛔ deferred (needs eBPF/XDP or VPP — see feasibility) |
 
 ### Where the pieces live
@@ -241,7 +241,7 @@ Closest end-to-end template: the **EVPN Type-3/IMET** path itself (originate
 | 1a | YANG `assisted-replication` role/AR-IP; role-aware Type-3 IMET origination (Replicator-AR `0x0A` / AR-LEAF-flagged Regular-IR) | ✅ merged #1483 |
 | 1b | `EvpnFloodState` per-VNI flood model on `LocalRib`; classify received IMET; AR-LEAF flood-list → single `{AR-IP}`, full-IR fallback (U-flood off) | ✅ on branch |
 | 2 | Pruned-Flood-Lists: `pruned-flood-list` config → BM/U flags in our IMET; honor a received whole-VTEP prune (BM **and** U) by dropping the remote; partial (BM-only/U-only) not honored (one kernel flood list/VNI) | ✅ on branch |
-| 3 | Selective AR (control plane): Leaf A-D (Type-1) origination + `AR-IP:0` IP-specific RT; replicator `L=1`; per-replicator leaf-set | ⬜ planned |
+| 3 | Selective AR (control plane): `selective` config → `L=1`; route-triggered Leaf A-D (Type-11) origination from the AR-LEAF + `<NH>:0` IPv4-address-specific RT; replicator imports the leaf set (reuses the RFC 9251 Leaf A-D codec) | ✅ on branch |
 | 4 | **AR-REPLICATOR forwarding dataplane** (eBPF/XDP or VPP) | ⛔ deferred — out of stock-kernel scope |
 
 Phases 0–3 deliver a standards-compliant, interoperable AR/P-FL **control
@@ -266,6 +266,9 @@ kernel state:
 - **Phase 2 P-FL** — z3 also requests whole-VTEP prune (`pruned-flood-list`
   BM + U); **z1**'s FDB drops z3 (`not contain 192.168.0.3`) while keeping z2,
   proving a received whole-VTEP prune is honored.
+- **Phase 3 selective AR** — z1 is a `selective` replicator (L flag); z2
+  (leaf) originates a Leaf A-D (Type-11) that z1 imports, asserted as a
+  `[11]:[rt3/19B]:[192.168.0.2]` route in z1's `show bgp evpn`.
 
 This verifies the whole 1a→1b chain end-to-end: z1 originates Replicator-AR
 (AR-IP in the PMSI tunnel endpoint), z2 classifies it and collapses its flood
@@ -278,10 +281,18 @@ not faked. Run: `cd bdd && cargo test --test cucumber -- --concurrency=1 --tags
 
 ## Leftover / deferred
 
+- **Selective AR joins *all* replicators, not one chosen.** The AR-LEAF
+  originates a Leaf A-D toward every selective replicator it sees, where
+  RFC 9574 has it join a single chosen replicator's set. Harmless with no
+  replicator dataplane (Phase 4); chosen-replicator selection + a
+  config-change reconcile (the origination is route-triggered today, so a
+  role/`selective` flip after routes arrive isn't retro-applied) are
+  follow-ups.
 - **Replicator-AR BGP next-hop = AR-IP (RFC 9574 §4).** Found via the
-  `@bgp_evpn_ar` BDD: the EVPN advertise path overrides the route's BGP
-  next-hop to the local VTEP, so a Replicator-AR route carries next-hop =
-  VTEP, not the AR-IP. zebra-rs is self-consistent (it reads the AR-IP from
+  `@bgp_evpn_ar` BDD (confirmed again in Phase 3: the leaf builds the
+  `<NH>:0` selective RT from the *received* next-hop, which is the VTEP):
+  the EVPN advertise path overrides the route's BGP next-hop to the local
+  VTEP, so a Replicator-AR route carries next-hop = VTEP, not the AR-IP. zebra-rs is self-consistent (it reads the AR-IP from
   the PMSI tunnel endpoint, which *is* set correctly), so the flood collapse
   works — but for strict interop with implementations that read the AR-IP
   from the BGP next-hop, the next-hop should be the AR-IP. Fix is in the EVPN

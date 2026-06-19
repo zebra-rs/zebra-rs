@@ -83,6 +83,14 @@ Feature: BGP EVPN Assisted Replication (RFC 9574) control plane
     Then bridge fdb "vxlan10" in namespace "z1" should eventually contain "192.168.0.2"
     And bridge fdb "vxlan10" in namespace "z1" should not contain "192.168.0.3"
 
+  Scenario: Selective AR — the AR-LEAF originates a Leaf A-D toward the replicator
+    Given the test topology exists
+    # z1 is a selective replicator (L flag set); z2 (leaf) responds with a
+    # Leaf A-D (EVPN Route Type 11) keyed on z1's Replicator-AR route, which
+    # z1 imports — observable as a [11]: route originated by z2.
+    Then show command "show bgp evpn" in namespace "z1" should eventually contain "[11]:"
+    And show command "show bgp evpn" in namespace "z1" should eventually contain "[11]:[rt3/19B]:[192.168.0.2]"
+
   Scenario: Teardown topology
     Given the test topology exists
     When I stop zebra-rs in namespace "z1"
