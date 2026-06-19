@@ -3456,6 +3456,11 @@ impl Bgp {
             "/router/bgp/neighbor-group/route-reflector/client",
             super::neighbor_group::config_neighbor_group_route_reflector_client,
         );
+        // RFC 9572 §6.1: mark a neighbor-group as a segmentation region.
+        self.callback_add(
+            "/router/bgp/neighbor-group/region-id",
+            super::neighbor_group::config_neighbor_group_region_id,
+        );
         self.callback_add(
             "/router/bgp/neighbor-group/update-source",
             super::neighbor_group::config_neighbor_group_update_source,

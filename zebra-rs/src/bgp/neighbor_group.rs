@@ -74,6 +74,13 @@ pub struct InheritableKnobs {
     pub remove_private_as: Option<RemovePrivateAs>,
     pub enforce_first_as: Option<bool>,
     pub route_reflector_client: Option<bool>,
+    /// RFC 9572 §6.1 region identifier — the 8-octet, EC-formatted Region ID
+    /// (`region_id_from_asn`). A peer-group carrying this *is* a region; a
+    /// Regional Border Router uses it to aggregate the region's IMET into a
+    /// Per-Region I-PMSI (Type-9) route and to suppress per-PE IMET across
+    /// the boundary. Read at route-processing time via `resolve_knob`, not
+    /// applied to per-peer session state.
+    pub region_id: Option<[u8; 8]>,
 }
 
 /// One group `afi-safi <family>` entry: the mandatory `enabled`
@@ -652,6 +659,26 @@ pub fn config_neighbor_group_route_reflector_client(
     Some(())
 }
 
+/// `set router bgp neighbor-group <name> region-id <asn>` (RFC 9572 §6.1).
+///
+/// Marks the group as a *region*: stores the 8-octet, EC-formatted Region ID
+/// (Source-AS form via [`bgp_packet::region_id_from_asn`]) so a Regional
+/// Border Router can aggregate the region's IMET into a Per-Region I-PMSI
+/// (Type-9) route and suppress per-PE IMET across the boundary. The value is
+/// read at advertise/receive time via [`resolve_knob`]; there is no session
+/// bounce and no per-peer apply (region membership is not a session
+/// parameter).
+pub fn config_neighbor_group_region_id(bgp: &mut Bgp, mut args: Args, op: ConfigOp) -> Option<()> {
+    let name = args.string()?;
+    let value = match op {
+        ConfigOp::Set => Some(bgp_packet::region_id_from_asn(args.u32()? as u16)),
+        ConfigOp::Delete => None,
+        _ => return Some(()),
+    };
+    bgp.neighbor_groups.entry(name).or_default().knobs.region_id = value;
+    Some(())
+}
+
 /// `set router bgp neighbor-group <name> update-source <addr>`.
 ///
 /// Like the per-neighbor knob: no bounce (the source is read at dial
@@ -963,6 +990,7 @@ pub(super) fn apply_inherited(
         remove_private_as: resolve_knob(groups, &peer.config, |k| k.remove_private_as),
         enforce_first_as: resolve_knob(groups, &peer.config, |k| k.enforce_first_as),
         route_reflector_client: resolve_knob(groups, &peer.config, |k| k.route_reflector_client),
+        region_id: resolve_knob(groups, &peer.config, |k| k.region_id),
     };
     // Destructure so an unapplied field is a compile error, not a
     // silently-ignored knob. Fields whose apply lands in a follow-up
@@ -987,7 +1015,14 @@ pub(super) fn apply_inherited(
         remove_private_as,
         enforce_first_as,
         route_reflector_client,
+        region_id,
     } = resolved;
+
+    // `region_id` (RFC 9572 §6.1) is not a session parameter — no FSM
+    // bounce — but the EVPN receive / advertise paths can't reach
+    // `neighbor_groups` to resolve it, so cache the resolved value on the
+    // peer. Read by cross-region IMET suppression and Type-9 re-origination.
+    peer.region_id = region_id;
 
     let mut outcome = InheritOutcome::default();
     let mut bounce = false;

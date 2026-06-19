@@ -163,6 +163,51 @@ pub struct EvpnPerRegionImet {
     pub region_id: [u8; 8],
 }
 
+/// Encode a region identifier as the 8-octet, EC-formatted Region ID carried
+/// in the Per-Region I-PMSI A-D (Type-9) NLRI (RFC 9572 §6.2). The two-octet
+/// AS form is a Transitive Two-Octet AS-specific EC of sub-type 0x09 (Source
+/// AS): `[0x00, 0x09, AS(2 big-endian), 0, 0, 0, 0]`. All RBRs for the same
+/// region MUST use the same Region ID.
+pub fn region_id_from_asn(asn: u16) -> [u8; 8] {
+    let mut id = [0u8; 8];
+    id[0] = 0x00; // Transitive Two-Octet AS-specific Extended Community.
+    id[1] = 0x09; // Sub-type 0x09 — Source AS.
+    id[2..4].copy_from_slice(&asn.to_be_bytes());
+    id
+}
+
+/// Encode a region identifier from an area ID (RFC 9572 §6.2): a Transitive
+/// IPv4-Address-specific EC with the Global Administrator set to the area ID
+/// and the Local Administrator set to 0 — `[0x01, 0x09, area(4), 0, 0]`.
+pub fn region_id_from_area(area: Ipv4Addr) -> [u8; 8] {
+    let mut id = [0u8; 8];
+    id[0] = 0x01; // Transitive IPv4-Address-specific Extended Community.
+    id[1] = 0x09; // Sub-type (any permitted; mirror the Source-AS sub-type).
+    id[2..6].copy_from_slice(&area.octets());
+    id
+}
+
+/// Render an 8-octet EC-formatted Region ID (RFC 9572 §6.2) as a short human
+/// string: `AS:<n>` for the Source-AS form, `area:<a.b.c.d>` for the
+/// IPv4-address form, else a colon-separated hex dump.
+pub fn region_id_display(id: &[u8; 8]) -> String {
+    match (id[0], id[1]) {
+        (0x00, 0x09) => {
+            let asn = u16::from_be_bytes([id[2], id[3]]);
+            format!("AS:{asn}")
+        }
+        (0x01, _) => {
+            let area = Ipv4Addr::new(id[2], id[3], id[4], id[5]);
+            format!("area:{area}")
+        }
+        _ => id
+            .iter()
+            .map(|b| format!("{b:02x}"))
+            .collect::<Vec<_>>()
+            .join(":"),
+    }
+}
+
 /// Route Type 10 — S-PMSI A-D Route (RFC 9572 §3.2).
 ///
 /// Wire layout: RD(8) EthTag(4) SrcLen(1) Src(0/4/16) GrpLen(1) Grp(0/4/16)
@@ -405,14 +450,10 @@ impl fmt::Display for EvpnPrefix {
                 )
             }
             EvpnPrefix::PerRegionImet { eth_tag, region_id } => {
-                write!(f, "[9]:[{eth_tag}]:[")?;
-                for (i, b) in region_id.iter().enumerate() {
-                    if i > 0 {
-                        write!(f, ":")?;
-                    }
-                    write!(f, "{b:02x}")?;
-                }
-                write!(f, "]")
+                // Render the Region ID via its EC-encoding (`AS:<n>` /
+                // `area:<ip>`), falling back to a hex dump for unrecognised
+                // encodings (RFC 9572 §6.2).
+                write!(f, "[9]:[{eth_tag}]:[{}]", region_id_display(region_id))
             }
             EvpnPrefix::SPmsi {
                 eth_tag,
@@ -1064,6 +1105,23 @@ mod evpn_prefix_tests {
             orig: IpAddr::V4(Ipv4Addr::new(10, 0, 0, 5)),
         };
         assert_eq!(t10w.to_string(), "[10]:[0]:[*]:[239.1.1.1]:[10.0.0.5]");
+    }
+
+    #[test]
+    fn region_id_encodings() {
+        // Source-AS form (RFC 9572 §6.2): [0x00, 0x09, AS(2), 0,0,0,0].
+        assert_eq!(
+            region_id_from_asn(65001),
+            [0x00, 0x09, 0xfd, 0xe9, 0, 0, 0, 0]
+        );
+        assert_eq!(region_id_display(&region_id_from_asn(65001)), "AS:65001");
+        // IPv4-address (area) form: [0x01, sub, area(4), 0, 0].
+        let a = region_id_from_area(Ipv4Addr::new(0, 0, 0, 1));
+        assert_eq!(a[0], 0x01);
+        assert_eq!(&a[2..6], &[0, 0, 0, 1]);
+        assert_eq!(region_id_display(&a), "area:0.0.0.1");
+        // Unknown encoding falls back to a hex dump.
+        assert_eq!(region_id_display(&[0xaa; 8]), "aa:aa:aa:aa:aa:aa:aa:aa");
     }
 }
 

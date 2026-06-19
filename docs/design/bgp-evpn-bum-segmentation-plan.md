@@ -290,13 +290,23 @@ codec — and any RIB/Adj-RIB/show/origination wiring.
     matching how the twin `igmp-mld-proxy` feature shipped (no dedicated
     BDD). DF-Election EC is **§5.3.1 inter-AS only → Phase 4**, not needed
     here.
-  - **3b — RBR re-origination (the meat).** Region = BGP peer-group (§6.1);
-    config marks a peer-group's Region ID + segmentation boundary. Add the
-    Region-ID EC (Two-Octet-AS sub-type `0x09` Source-AS, Global-Admin = AS,
-    §6.2). RBR re-advertises I/S-PMSI A-D changing the BGP next hop to self
-    and rewriting the PTA for the local segment (§6.3, next-hop-based, no
-    S-NH-EC); aggregates in-region IMET into one Type-9 (§6.2). **First
-    end-to-end BDD lands here** (2-region topology). next.
+  - **3b — RBR re-origination (the meat). DONE.** Region = BGP neighbor-group
+    (§6.1): `region-id <asn>` on a neighbor-group, resolved onto the peer
+    (`Peer.region_id`) by `apply_inherited` and stashed on the received row
+    (`BgpRib.ingress_region`). The §6.2 Region ID is the 8-octet Source-AS
+    EC encoding (`region_id_from_asn`, shown as `AS:<n>`). When an in-region
+    per-PE IMET arrives, the RBR re-originates one aggregate Type-9 per
+    `(region, eth-tag)` (`evpn_reoriginate_per_region`) as an `Originated`
+    row — so the advertise gate stamps next-hop-self (§6.3, next-hop-based,
+    no S-NH-EC) — reusing the IMET's RT/encap and rewriting the PTA to an
+    IR tunnel rooted at the RBR. The advertise gate adds two §6 suppressions:
+    a region's Type-9 is never sent back into that region, and per-PE IMET
+    is held at the boundary (ingress region ≠ egress region; non-region
+    peers unaffected). 2-region BDD (`@bgp_evpn_segmentation`) + unit tests
+    (encoding, `region-id`-settable). **Deferred follow-ups:** Type-9
+    *withdrawal* when the last in-region IMET leaves; re-originating only on
+    a changed aggregate (today every in-region IMET re-fires, idempotent);
+    RR-based suppression BDD; S-PMSI (Type-10) aggregation.
   - **3c — Leaf A-D.** On L=1 the downstream auto-derives the IP-based RT and
     originates Type-11, which the upstream consumes to build the leaf set.
 - **Phase 4 — inter-AS (ASBR, RFC 9572 §5) + legacy coexistence.** ASBR
@@ -332,9 +342,14 @@ on push, not targeted filters).
   No behavior change; decode/encode + round-trip tests only. *(this PR)*
 - **PR2 — Phase 2: RIB/Adj-RIB plumbing + `show` + parse() show tests. DONE.**
   Removed the receive drop guard; added `show bgp evpn route-type <kw>` filter.
-- **PR3 — Phase 3: inter-region RBR re-origination** (Region ID / Multicast
-  Flags / DF Election ECs land here) + Leaf A-D + BDD over a netns RR/region
-  topology (ending in `Scenario: Teardown topology`).
+- **PR3a — Phase 3a: segmentation-support signaling. DONE** (#1507).
+- **PR3b — Phase 3b: inter-region RBR re-origination. DONE (this PR).**
+  neighbor-group `region-id`, `Peer.region_id` / `BgpRib.ingress_region`,
+  cross-region IMET suppression, Type-9 aggregation/re-origination with
+  next-hop-self, `AS:<n>` region rendering, `@bgp_evpn_segmentation` BDD,
+  and the EVPN-segmentation book chapter.
+- **PR3c — Phase 3c: Leaf A-D** (L flag → auto-RT → Type-11). Plus the 3b
+  follow-ups (Type-9 withdrawal, change-gated re-origination, S-PMSI).
 - **PR4 — Phase 4: inter-AS ASBR segmentation + legacy coexistence + BDD.**
 - **PR5 (optional) — Phase 5: S-PMSI selective multicast + BDD.**
 - **PR6 (later, re-confirm direction) — Phase 6: VXLAN-IR aggregation

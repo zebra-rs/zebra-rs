@@ -1161,6 +1161,11 @@ pub struct BgpRib {
     /// route key, so it rides here on the path; the advertise/rebuild
     /// helpers re-emit it. `0` for every non-SMET row.
     pub smet_flags: u8,
+    /// RFC 9572 §6.1 region of the peer this route was received from
+    /// (the resolved `Peer.region_id`), stamped at receive. The EVPN
+    /// advertise gate uses it to suppress per-PE IMET (Type-3) across region
+    /// boundaries. `None` for originated/local rows and non-region peers.
+    pub ingress_region: Option<[u8; 8]>,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -1258,6 +1263,7 @@ impl BgpRib {
             esi: None,
             vrf_transit_only: false,
             smet_flags: 0,
+            ingress_region: None,
         }
     }
 
@@ -4166,6 +4172,30 @@ pub fn route_update_evpn(
         return None;
     }
 
+    // RFC 9572 §6 tunnel-segmentation gates:
+    // (a) Per-Region I-PMSI (Type-9): never advertise a region's aggregate
+    //     route back into that same region — the peers there already hold the
+    //     per-PE IMET it represents. The Region ID is in the NLRI itself.
+    // (b) Per-PE IMET (Type-3): a Regional Border Router does NOT propagate a
+    //     per-PE inclusive-multicast route across a region boundary; the
+    //     aggregated Type-9 carries the region instead. Suppress only when
+    //     both the route's ingress region and the egress peer's region are
+    //     set and differ (non-region peers are unaffected — backward
+    //     compatible with non-segmented EVPN).
+    match prefix {
+        EvpnPrefix::PerRegionImet { region_id, .. } if peer.region_id == Some(*region_id) => {
+            return None;
+        }
+        EvpnPrefix::InclusiveMulticast { .. } => {
+            if let (Some(ingress), Some(egress)) = (rib.ingress_region, peer.region_id)
+                && ingress != egress
+            {
+                return None;
+            }
+        }
+        _ => {}
+    }
+
     let id = if add_path { rib.local_id } else { 0 };
 
     let route = match prefix {
@@ -6156,6 +6186,64 @@ fn route_evpn_export_selected(
 /// and RD-bound. The EVPN nexthop is recoverable from `peer.address` for
 /// display purposes; threading it through `BgpRib` is a follow-up tied to
 /// the show command.
+/// RFC 9572 §6.2: (re-)originate the Per-Region I-PMSI (Type-9) route that
+/// aggregates `region`'s inclusive BUM tunnel toward the other regions. An
+/// RBR calls this from the IMET receive path when an in-region per-PE IMET
+/// arrives. The Type-9 is an `Originated` row, so the advertise gate stamps
+/// next-hop-self (the RBR's address toward each egress region) and keeps it
+/// out of `region`'s own peers (RFC 9572 §6 gate). The route key is
+/// `(eth-tag, region)`, so every in-region IMET collapses to one Type-9 —
+/// the aggregation — and re-originating is idempotent.
+///
+/// The RBR has no local ASN in this context, so the region's Route Target /
+/// encapsulation ECs are reused verbatim from the received IMET's attribute
+/// (that RT is what egress PEs import); §6.3's PTA rewrite roots the Ingress
+/// Replication tunnel at this RBR's address.
+fn evpn_reoriginate_per_region(
+    bgp: &mut BgpTop,
+    peers: &mut PeerMap,
+    region_id: [u8; 8],
+    vni: u32,
+    src_attr: &BgpAttr,
+) {
+    if bgp.router_id.is_unspecified() {
+        return;
+    }
+    let Some(rd) = rd_from_router_id_vni(*bgp.router_id, vni) else {
+        return;
+    };
+    let prefix = EvpnPrefix::PerRegionImet {
+        eth_tag: 0,
+        region_id,
+    };
+    let mut attr = BgpAttr::new();
+    attr.ecom = src_attr.ecom.clone();
+    attr.pmsi_tunnel = Some(PmsiTunnel {
+        flags: 0,
+        tunnel_type: PmsiTunnel::TUNNEL_INGRESS_REPLICATION,
+        vni,
+        endpoint: IpAddr::V4(*bgp.router_id),
+        tree_id: None,
+    });
+    attr.nexthop = Some(BgpNexthop::Evpn(IpAddr::V4(*bgp.router_id)));
+
+    let rib = BgpRib::new(
+        ORIGINATED_PEER,
+        Ipv4Addr::UNSPECIFIED,
+        BgpRibType::Originated,
+        0,
+        32768,
+        &attr,
+        None,
+        None,
+        false,
+    );
+    let (_replaced, selected, _next_id) = bgp.local_rib.update_evpn(rd, prefix.clone(), rib);
+    if !selected.is_empty() {
+        route_advertise_evpn_to_peers(rd, prefix, &selected, bgp, peers);
+    }
+}
+
 pub fn route_evpn_update(
     ident: usize,
     route: &EvpnRoute,
@@ -6229,6 +6317,11 @@ pub fn route_evpn_update(
         stale,
     );
 
+    // RFC 9572 §6.1: stamp the ingress peer's segmentation region so the
+    // advertise gate can suppress per-PE IMET (Type-3) across region
+    // boundaries (`None` when the sending peer is not in a region).
+    rib.ingress_region = peers.get_by_idx(ident).and_then(|p| p.region_id);
+
     // Extract ESI from EVPN Type 2 route for multi-homing support.
     if let EvpnRoute::Mac(m) = route {
         rib.esi = Some(m.esi);
@@ -6281,6 +6374,18 @@ pub fn route_evpn_update(
     route_evpn_export_selected(&rd, &prefix, &selected, None, bgp);
     if !selected.is_empty() {
         route_advertise_evpn_to_peers(rd, prefix, &selected, bgp, peers);
+    }
+
+    // RFC 9572 §6.2: when an in-region per-PE IMET (Type-3) arrives, a
+    // Regional Border Router (re-)originates the region's aggregate
+    // Per-Region I-PMSI (Type-9) toward the other regions. Gated on the
+    // ingress peer carrying a region-id; a no-op on a plain (non-segmented)
+    // EVPN speaker.
+    if let EvpnRoute::Multicast(_) = route
+        && let Some(region_id) = peers.get_by_idx(ident).and_then(|p| p.region_id)
+        && let Some(vni) = extract_vni_from_attr(attr)
+    {
+        evpn_reoriginate_per_region(bgp, peers, region_id, vni, attr);
     }
 }
 

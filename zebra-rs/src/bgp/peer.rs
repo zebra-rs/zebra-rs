@@ -779,6 +779,12 @@ pub struct Peer {
     /// only by [`Peer::connected_check_ok`].
     pub shared_network: bool,
     pub peer_type: PeerType,
+    /// RFC 9572 §6.1 region identifier, resolved from this peer's
+    /// neighbor-group (`region-id`) by `apply_inherited`. `Some` marks the
+    /// peer as belonging to a segmentation region; the EVPN receive /
+    /// advertise paths use it for cross-region IMET suppression and Type-9
+    /// Per-Region I-PMSI re-origination. `None` = not a region peer.
+    pub region_id: Option<[u8; 8]>,
     pub state: State,
     pub task: PeerTask,
     pub timer: PeerTimer,
@@ -982,6 +988,7 @@ impl Peer {
             // interface-address events (see `shared_network`).
             shared_network: true,
             peer_type: PeerType::IBGP,
+            region_id: None,
             state: State::Idle,
             task: PeerTask::default(),
             timer: PeerTimer::default(),
