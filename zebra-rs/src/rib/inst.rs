@@ -662,6 +662,11 @@ pub struct Rib {
     /// `crate::rib::route::RECOVERY_*` if an external actor keeps
     /// fighting us.
     pub addr_recovery: BTreeMap<(u32, IpNet), AddrRecoveryState>,
+
+    /// Supervisor for the EVPN SR P2MP replication dataplane (RFC 9524).
+    /// Driven by `Message::ReplSegAdd` / `ReplSegDel`; spawns/feeds the
+    /// `tc-evpn-replicate` offload child.
+    pub evpn_repl: super::evpn_replicate::ReplicationHelper,
 }
 
 /// Name of the dummy interface that hosts End-style seg6local routes
@@ -742,6 +747,7 @@ impl Rib {
             rib_sync_interval: DEFAULT_RIB_SYNC_INTERVAL_SEC,
             sr0_owned: false,
             addr_recovery: BTreeMap::new(),
+            evpn_repl: super::evpn_replicate::ReplicationHelper::new(),
         };
         rib.show_build();
         Ok(rib)
@@ -2242,17 +2248,20 @@ impl Rib {
                 srv6,
                 leaves,
             } => {
-                // The SR replication dataplane (eBPF TC/clsact, offload crate
-                // `tc-evpn-replicate`) is wired in a follow-up; record the
-                // intent for now so the control plane is observable end to end.
+                // Hand the replication segment to the SR P2MP dataplane
+                // supervisor (the `tc-evpn-replicate` offload child). With no
+                // offload interface configured this is a logged no-op — the
+                // control plane still signals, nothing forwards.
                 tracing::info!(
-                    "EVPN ReplSeg add: VNI {vni} tree {tree_id} root {root} {} -> {} leaf PE(s): {leaves:?} (SR dataplane pending)",
+                    "EVPN ReplSeg add: VNI {vni} tree {tree_id} root {root} {} -> {} leaf PE(s)",
                     if srv6 { "SRv6" } else { "SR-MPLS" },
                     leaves.len()
                 );
+                self.evpn_repl.add(vni, tree_id, root, srv6, &leaves);
             }
             Message::ReplSegDel { vni } => {
-                tracing::info!("EVPN ReplSeg del: VNI {vni} (SR dataplane pending)");
+                tracing::info!("EVPN ReplSeg del: VNI {vni}");
+                self.evpn_repl.del(vni);
             }
             Message::RedistAdd {
                 proto,
