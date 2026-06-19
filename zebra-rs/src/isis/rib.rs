@@ -15,9 +15,9 @@ use crate::rib::inst::{IlmEntry, IlmType};
 use crate::rib::link_ext::LinkFlagsExt;
 use crate::rib::{self, Nexthop, NexthopMulti, NexthopUni, RibSubType, RibType};
 use crate::spf;
-// EncapType is only used by the IPv6 backup test fixture below;
-// production code paths route through `tilfa::build_repair_path_srv6`.
-#[cfg(test)]
+// EncapType: TI-LFA repairs route through `tilfa::build_repair_path_srv6`,
+// but the Mirror SID egress-protection backup builds an H.Encaps repair
+// here directly (`inject_mirror_sid_backups`).
 use isis_packet::srv6::EncapType;
 
 use super::config::MtId;
@@ -1381,6 +1381,64 @@ pub(super) fn compute_spf(input: SpfInput) -> SpfOutput {
 /// the ILM table, diff against the previous cycle, and publish to
 /// the RIB subsystem. Must run on the main task — every helper
 /// called from here borrows `IsisTop` and emits on `top.rib_client`.
+/// Longest-prefix-match `mirror_sid` in the v6 RIB to find the route to
+/// the *protector's* locator, returning its first primary nexthop
+/// (address + egress ifindex) — the H.Encaps next-hop the PLR uses to
+/// reach the protector. `None` when the protector isn't reachable (no
+/// covering route) or that route has no nexthop.
+fn nexthop_toward_protector(
+    rib_v6: &PrefixMap<Ipv6Net, SpfRoute<V6>>,
+    mirror_sid: Ipv6Addr,
+) -> Option<(Ipv6Addr, u32)> {
+    let host = Ipv6Net::new(mirror_sid, 128).ok()?;
+    let (_, route) = rib_v6.get_lpm(&host)?;
+    let (addr, nhop) = route.nhops.iter().next()?;
+    Some((*addr, nhop.ifindex))
+}
+
+/// Attach a Mirror SID egress-protection backup to every route whose
+/// destination is a protected egress locator that a peer advertised a
+/// Mirror SID for. The backup H.Encaps the packet to the protector's
+/// Mirror SID (End.M), so a BFD-driven `protect_switch` on the failed
+/// egress adjacency reroutes the traffic to the protector. Skips a route
+/// nexthop that already carries a TI-LFA backup (transit protection wins)
+/// and a protector that isn't reachable from here.
+fn inject_mirror_sid_backups(
+    top: &IsisTop,
+    level: Level,
+    rib_v6: &mut PrefixMap<Ipv6Net, SpfRoute<V6>>,
+) {
+    let received = super::egress_protection::collect_received_mirror_sids(top.lsdb.get(&level));
+    apply_mirror_sid_backups(rib_v6, &received);
+}
+
+/// Pure core of [`inject_mirror_sid_backups`] (the LSDB scan factored
+/// out so this is testable without an `IsisTop`).
+fn apply_mirror_sid_backups(
+    rib_v6: &mut PrefixMap<Ipv6Net, SpfRoute<V6>>,
+    received: &[super::egress_protection::ReceivedMirrorSid],
+) {
+    for entry in received {
+        let Some((addr, ifindex)) = nexthop_toward_protector(rib_v6, entry.mirror_sid) else {
+            continue;
+        };
+        let Some(route) = rib_v6.get_mut(&entry.protected_locator) else {
+            continue;
+        };
+        let backup = RepairPathSrv6 {
+            ifindex,
+            addr,
+            segs: vec![entry.mirror_sid],
+            encap: EncapType::HEncap,
+        };
+        for nhop in route.nhops.values_mut() {
+            if nhop.backup.is_none() {
+                nhop.backup = Some(backup.clone());
+            }
+        }
+    }
+}
+
 pub(super) fn apply_spf_result(top: &mut IsisTop, output: SpfOutput) {
     let SpfOutput {
         level,
@@ -1425,7 +1483,7 @@ pub(super) fn apply_spf_result(top: &mut IsisTop, output: SpfOutput) {
     );
 
     // IPv6 RIB — either MT 2 (when enabled) or the legacy single-topology path.
-    let rib_v6 = match mt2 {
+    let mut rib_v6 = match mt2 {
         Some(Mt2Output {
             source: Some(mt2_src),
             spf: Some(mt2_spf),
@@ -1463,6 +1521,13 @@ pub(super) fn apply_spf_result(top: &mut IsisTop, output: SpfOutput) {
             )
         }
     };
+
+    // Mirror SID egress protection (draft-ietf-rtgwg-srv6-egress-
+    // protection): for any route to a protected egress locator that a
+    // peer advertised a Mirror SID for, install an H.Encaps-to-the-
+    // Mirror-SID backup so a BFD-driven `protect_switch` reroutes to the
+    // protector when the protected egress fails.
+    inject_mirror_sid_backups(top, level, &mut rib_v6);
 
     // Per-algorithm RIB build (RFC 9350). For every algo:
     //   1. Walk the per-algo SPF result against `peer_algo_sid` to
@@ -2604,6 +2669,71 @@ mod tests {
         assert_eq!(b.segs, vec![end_sid, endx_sid]);
         assert_eq!(b.encap_type, Some(EncapType::HInsert));
         assert!(b.mpls.is_empty());
+    }
+
+    #[test]
+    fn apply_mirror_sid_backups_hencaps_to_protector() {
+        use crate::isis::egress_protection::ReceivedMirrorSid;
+        use isis_packet::IsisSysId;
+
+        fn v6route(nh_addr: Ipv6Addr, ifindex: u32) -> SpfRoute<V6> {
+            let mut nhops = BTreeMap::new();
+            nhops.insert(
+                nh_addr,
+                SpfNexthop::<V6> {
+                    ifindex,
+                    adjacency: true,
+                    sys_id: None,
+                    backup: None,
+                },
+            );
+            SpfRoute::<V6> {
+                metric: 10,
+                nhops,
+                sid: None,
+                prefix_sid: None,
+                no_php: false,
+                dest_vertex: None,
+                backup_as_primary: false,
+            }
+        }
+
+        let protected: Ipv6Net = "2001:db8:a3:1::/64".parse().unwrap();
+        let protector_loc: Ipv6Net = "2001:db8:a4:1::/64".parse().unwrap();
+        let mirror_sid: Ipv6Addr = "2001:db8:a4:1::3".parse().unwrap();
+        let toward_pea: Ipv6Addr = "fe80::3".parse().unwrap();
+        let toward_peb: Ipv6Addr = "fe80::4".parse().unwrap();
+
+        let mut rib: PrefixMap<Ipv6Net, SpfRoute<V6>> = PrefixMap::new();
+        rib.insert(protected, v6route(toward_pea, 3));
+        rib.insert(protector_loc, v6route(toward_peb, 4));
+
+        let received = vec![ReceivedMirrorSid {
+            protector: IsisSysId {
+                id: [0, 0, 0, 0, 0, 4],
+            },
+            mirror_sid,
+            protected_locator: protected,
+        }];
+        apply_mirror_sid_backups(&mut rib, &received);
+
+        // The protected egress's route gains an H.Encaps-to-Mirror-SID
+        // backup whose first hop points toward the protector (PEB).
+        let b = rib.get(&protected).unwrap().nhops[&toward_pea]
+            .backup
+            .clone()
+            .unwrap();
+        assert_eq!(b.segs, vec![mirror_sid]);
+        assert_eq!(b.encap, EncapType::HEncap);
+        assert_eq!(b.addr, toward_peb);
+        assert_eq!(b.ifindex, 4);
+
+        // The protector's own locator route stays unprotected.
+        assert!(
+            rib.get(&protector_loc).unwrap().nhops[&toward_peb]
+                .backup
+                .is_none()
+        );
     }
 
     #[test]
