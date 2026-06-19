@@ -340,6 +340,12 @@ Phase 6's BDD** (byte layout is unit-tested here).
 
 ## Deferred (not built — recorded so a contributor can pick it up)
 
+> The deferred items are written up with code anchors and an approach
+> for each in **`bgp-evpn-igmp-mld-proxy-followups.md`** (per-VTEP `dst`
+> via vnifilter VXLAN MDB; link-local-group filtering; SMET-flags
+> fidelity; the MF-EC capability gate; per-VLAN VID; Type 7/8). The
+> headline below stays here for quick reference.
+
 **Type 7 / 8 (Multicast Join / Leave Synch).** All-active multihoming
 only. Prerequisites absent today:
 - Ethernet-Segment support: Type 1 (Ethernet A-D) + Type 4 (Ethernet
