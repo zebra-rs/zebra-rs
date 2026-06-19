@@ -16,8 +16,8 @@ router:
       afi-safi:
       - name: ipv4
         enabled: true
-      policy:
-        out: pass-all
+        policy:
+          out: pass-all
       enabled: true
       remote-as: 65002
     afi-safi:

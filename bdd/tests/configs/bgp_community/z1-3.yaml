@@ -29,8 +29,8 @@ router:
       afi-safi:
       - name: ipv4
         enabled: true
-      policy:
-        out: set-no-export
+        policy:
+          out: set-no-export
       enabled: true
       remote-as: 65002
     afi-safi:

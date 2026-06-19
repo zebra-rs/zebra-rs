@@ -29,8 +29,8 @@ router:
       afi-safi:
       - name: ipv4
         enabled: true
-      policy:
-        in: IN-POL
+        policy:
+          in: IN-POL
       soft-reconfiguration:
         inbound: true
       enabled: true

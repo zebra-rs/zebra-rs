@@ -2128,26 +2128,27 @@ mod yang_load_tests {
             .expect("configure module present");
         let entry = to_entry(&yang, module);
 
-        // Settable: per-AFI policy + prefix-set, the kept legacy
-        // peer-wide policy, and `match prefix-set`.
+        // Settable: per-AFI policy + prefix-set (the only per-neighbor
+        // route-policy / prefix-set location) and `match prefix-set`.
         for cmd in [
             "set router bgp neighbor 10.0.0.2 afi-safi ipv4 policy in IN",
             "set router bgp neighbor 10.0.0.2 afi-safi ipv4 policy out OUT",
             "set router bgp neighbor 10.0.0.2 afi-safi ipv4 prefix-set in PIN",
             "set router bgp neighbor 10.0.0.2 afi-safi evpn policy out EOUT",
             "set router bgp neighbor 10.0.0.2 afi-safi label-v4 prefix-set out POUT",
-            "set router bgp neighbor 10.0.0.2 policy in LEGACY-IN",
-            "set router bgp neighbor 10.0.0.2 policy out LEGACY-OUT",
             "set policy P entry 10 match prefix-set PS",
         ] {
             let (code, _comps, _state) = parse(cmd, entry.clone(), None, State::new());
             assert_eq!(code, ExecCode::Success, "`{cmd}` must be a settable path");
         }
 
-        // No longer settable: the removed peer-wide `prefix-set` node.
-        // (The neighbor still has `prefix-limit`, so `prefix-set` is not
-        // an abbreviation of any surviving node and must fail outright.)
+        // No longer settable: the retired peer-wide `policy` / `prefix-set`
+        // nodes. (The neighbor has no surviving `policy*` / `prefix-set*`
+        // child for these to abbreviate, so they must fail outright; the
+        // per-family bindings under `afi-safi` are the replacement.)
         for cmd in [
+            "set router bgp neighbor 10.0.0.2 policy in LEGACY-IN",
+            "set router bgp neighbor 10.0.0.2 policy out LEGACY-OUT",
             "set router bgp neighbor 10.0.0.2 prefix-set in PIN",
             "set router bgp neighbor 10.0.0.2 prefix-set out POUT",
         ] {

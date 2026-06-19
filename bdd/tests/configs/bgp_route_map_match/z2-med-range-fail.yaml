@@ -16,7 +16,7 @@ router:
       afi-safi:
       - name: ipv4
         enabled: true
-      policy:
-        in: IN-MED
+        policy:
+          in: IN-MED
       enabled: true
       remote-as: 65001

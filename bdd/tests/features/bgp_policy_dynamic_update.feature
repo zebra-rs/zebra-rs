@@ -6,7 +6,7 @@ Feature: BGP reacts to live prefix-set / policy edits without session reset
   or policy-list is edited, so that operational changes propagate
   immediately without me having to clear the BGP session.
 
-  The exercise: z2 attaches `apply-policy in HOGE`, where policy HOGE
+  The exercise: z2 attaches `afi-safi ipv4 policy in HOGE`, where policy HOGE
   matches `prefix-set HOGE`. Because the prefix-set is referenced
   *indirectly* via the policy's match clause, the harness must follow
   the cascade prefix-set HOGE -> policy HOGE -> peer's Adj-RIB-In

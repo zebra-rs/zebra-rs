@@ -31,8 +31,8 @@ router:
         enabled: true
       - name: ipv6
         enabled: true
-      policy:
-        out: OUT6
+        policy:
+          out: OUT6
     afi-safi:
     - name: ipv6
       network:

@@ -1,16 +1,13 @@
-# Per-AFI ipv4 inbound policy that permits everything, layered on top of
-# the peer-wide DENY-ALL inherited from the neighbor-group. The per-AFI
-# binding wins for ipv4 (Peer::policy_list_at priority), so the routes the
-# peer-wide policy denied are accepted again.
+# Peer-wide inbound policy that denies everything, inherited from a
+# neighbor-group. The per-neighbor peer-wide `policy {in,out}` CLI was
+# retired; a neighbor-group is now the only way to bind a peer-wide
+# route-policy, which applies to every family that has no per-AFI
+# override of its own (Peer::policy_list_at fallback).
 policy:
 - name: DENY-ALL
   entry:
   - number: 10
     action: deny
-- name: PERMIT-ALL
-  entry:
-  - number: 10
-    action: permit
 router:
   bgp:
     global:
@@ -25,8 +22,6 @@ router:
       afi-safi:
       - name: ipv4
         enabled: true
-        policy:
-          in: PERMIT-ALL
       soft-reconfiguration:
         inbound: true
       neighbor-group: PEER-WIDE

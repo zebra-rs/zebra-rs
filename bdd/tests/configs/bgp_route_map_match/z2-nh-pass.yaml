@@ -15,7 +15,7 @@ router:
       afi-safi:
       - name: ipv4
         enabled: true
-      policy:
-        in: IN-NEXTHOP
+        policy:
+          in: IN-NEXTHOP
       enabled: true
       remote-as: 65001

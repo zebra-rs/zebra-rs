@@ -35,7 +35,7 @@ Feature: BGP well-known community handling (no-export, no-advertise)
   - z1-4.yaml: A advertises 1.1.1.1/32 with community "no-advertise".
   - z1-5.yaml: A advertises 1.1.1.1/32 through a permit-all policy
     (config apply is additive, so reverting means OVERWRITING the
-    neighbor's `policy out` leaf with a community-free policy — the
+    neighbor's `afi-safi ipv4 policy out` leaf with a community-free policy — the
     no-community z1-2.yaml cannot remove an already-set leaf).
   - z2-1.yaml: B — eBGP to A, iBGP to C, eBGP to D.
   - z3-1.yaml: C — iBGP to B only.
