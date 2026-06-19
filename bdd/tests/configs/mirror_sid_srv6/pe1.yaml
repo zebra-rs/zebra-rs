@@ -1,0 +1,32 @@
+# pe1 — the ingress, upstream of the PLR. IS-IS L2, SRv6 locator LOC1.
+# Present so the protected path (pe1 -> p1 -> pea) is a realistic chain;
+# the control + install assertions live on p1 (PLR) and peb (protector).
+interface:
+- if-name: lo
+  ipv6:
+    address: 2001:db8::1/128
+- if-name: pe1-p1
+  ipv6:
+    address: 2001:db8:0:12::1/64
+segment-routing:
+  locator:
+  - name: LOC1
+    prefix: fcbb:bbbb:1::/48
+    behavior: usid
+router:
+  isis:
+    net: 49.0000.0000.0000.0001.00
+    hostname: pe1
+    is-type: level-2-only
+    segment-routing:
+      srv6:
+        locator: LOC1
+    interface:
+    - if-name: lo
+      ipv6:
+        enable: true
+    - if-name: pe1-p1
+      network-type: point-to-point
+      metric: 1
+      ipv6:
+        enable: true

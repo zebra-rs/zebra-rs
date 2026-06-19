@@ -961,9 +961,16 @@ impl Rib {
     /// actual outgoing interface and never hit this path.
     pub fn resolve_sid_ifindex(&self, behavior: SidBehavior) -> Option<u32> {
         match behavior {
-            SidBehavior::End | SidBehavior::UN | SidBehavior::EndDT4 | SidBehavior::EndDT6 => {
-                self.resolve_sr0_ifindex()
-            }
+            // These bind their seg6local action to the sr0 dummy, not the
+            // loopback: the kernel silently STRIPS a seg6local encap whose
+            // oif is `lo` (verified on 6.8 — `End.DT6 dev lo` installs as a
+            // plain route), so a decap localsid must ride on a real device.
+            // End.M reuses the End.DT6 kernel action, so it joins this group.
+            SidBehavior::End
+            | SidBehavior::UN
+            | SidBehavior::EndDT4
+            | SidBehavior::EndDT6
+            | SidBehavior::EndM => self.resolve_sr0_ifindex(),
             _ => self.resolve_lo_ifindex(),
         }
     }

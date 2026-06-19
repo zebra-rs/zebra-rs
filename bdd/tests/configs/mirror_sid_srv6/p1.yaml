@@ -1,0 +1,52 @@
+# p1 — the Point of Local Repair (PLR), neighbour of pea. IS-IS L2,
+# SRv6 locator LOC2. Receives peb's Mirror SID advertisement and, for
+# its route to pea's locator (fcbb:bbbb:3::/48), installs an
+# H.Encaps-to-the-Mirror-SID backup toward peb. fast-reroute ti-lfa is
+# on so the protect/backup install path is active.
+interface:
+- if-name: lo
+  ipv6:
+    address: 2001:db8::2/128
+- if-name: p1-pe1
+  ipv6:
+    address: 2001:db8:0:12::2/64
+- if-name: p1-pea
+  ipv6:
+    address: 2001:db8:0:23::2/64
+- if-name: p1-peb
+  ipv6:
+    address: 2001:db8:0:24::2/64
+segment-routing:
+  locator:
+  - name: LOC2
+    prefix: fcbb:bbbb:2::/48
+    behavior: usid
+router:
+  isis:
+    net: 49.0000.0000.0000.0002.00
+    hostname: p1
+    is-type: level-2-only
+    segment-routing:
+      srv6:
+        locator: LOC2
+    fast-reroute:
+      ti-lfa: {}
+    interface:
+    - if-name: lo
+      ipv6:
+        enable: true
+    - if-name: p1-pe1
+      network-type: point-to-point
+      metric: 1
+      ipv6:
+        enable: true
+    - if-name: p1-pea
+      network-type: point-to-point
+      metric: 1
+      ipv6:
+        enable: true
+    - if-name: p1-peb
+      network-type: point-to-point
+      metric: 1
+      ipv6:
+        enable: true
