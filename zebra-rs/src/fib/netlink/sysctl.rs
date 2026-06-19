@@ -2,6 +2,17 @@ use sysctl::Sysctl;
 
 const CTLNAMES: &[(&str, &str)] = &[
     ("net.ipv4.ip_forward", "1"),
+    // Loosen IPv4 reverse-path filtering. An SRv6 L3VPN egress (End.DT46)
+    // decapsulates an inner IPv4 packet and re-injects it on the SR dummy
+    // (`sr0`), whose interface is asymmetric to the packet source's return
+    // path (a separate H.Encap route) — strict RPF (the common distro
+    // default of `1`) would silently drop it, so VPNv4-over-SRv6 forwarding
+    // would black-hole while VPNv6 (no RPF) worked. A router forwards
+    // asymmetric traffic by design, so disable it globally (matches FRR's
+    // SRv6 guidance). `all` is the max with the per-interface value, so it
+    // must be `0` for any interface to be loose.
+    ("net.ipv4.conf.all.rp_filter", "0"),
+    ("net.ipv4.conf.default.rp_filter", "0"),
     ("net.ipv6.conf.all.forwarding", "1"),
     ("net.ipv6.conf.all.seg6_enabled", "1"),
     ("net.ipv6.conf.default.seg6_enabled", "1"),

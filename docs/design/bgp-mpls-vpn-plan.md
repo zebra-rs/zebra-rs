@@ -221,9 +221,17 @@ Land in any order; none block each other.
   edit (e.g. `set router bgp vrf X neighbor 10.0.0.1 enabled
   false`) shouldn't require a respawn; future work routes the
   per-peer callbacks straight to `BgpVrf::cm`.
-- **v6 import/export symmetry.** `BgpVrfMsg::ImportV6` and
-  `BgpGlobalMsg::Export` IPv6 variants are placeholders. The
-  shape mirrors v4; just hasn't been wired.
+- **v6 import/export symmetry.** ~~`BgpVrfMsg::ImportV6` and
+  `BgpGlobalMsg::Export` IPv6 variants are placeholders.~~ DONE —
+  VPNv6 import/export is fully wired (v6 leak series). Last v4/v6
+  asymmetry closed 2026-06-20: the export-RT re-tag that closes the
+  "route originated before its `VrfRouteTargets` lands → advertised
+  with no RT → unimportable" race existed only for v4
+  (`retag_vrf_exports_v4`); added `retag_vrf_exports_v6` +
+  `export_v6_changed` tracking. This was THE cause of intermittently
+  black-holed VPNv6-over-SRv6 forwarding — see
+  `isis-mirror-sid-egress-protection-plan.md` §8 (Phase 7b
+  foundation) for the full 4-bug forwarding writeup.
 - **ND / BFD per-VRF.** The per-VRF `BgpVrf` carries an empty
   `InterfaceAddrs` because BGP unnumbered (interface-neighbor)
   and BFD client hand-off live on the global `Bgp`. Per-VRF

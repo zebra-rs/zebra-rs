@@ -5111,6 +5111,23 @@ pub fn route_ipv6_update(
     peers: &mut PeerMap,
     stale: bool,
 ) {
+    // VPNv6 carries its next-hop in the MP_REACH `nexthop` param, not the
+    // legacy NEXT_HOP attribute, so `attr.nexthop` arrives `None`. Fold it
+    // in here (mirroring the v6-unicast dispatch which stamps
+    // `BgpNexthop::Ipv6`) so NHT tracking, best-path and show all read the
+    // PE locator next-hop. Without this stamp, `bgp_nexthop_ip` returns
+    // `None`, the next-hop is never tracked, the SRv6 L3VPN transport never
+    // resolves, and the imported route installs no H.Encap FIB entry.
+    let stamped_attr;
+    let attr = if let Some(VpnNexthop::V6(v6nh)) = &nexthop {
+        let mut a = attr.clone();
+        a.nexthop = Some(BgpNexthop::Vpnv6(v6nh.clone()));
+        stamped_attr = a;
+        &stamped_attr
+    } else {
+        attr
+    };
+
     let (peer_ident, peer_router_id, typ) = {
         let peer = peers.get_mut_by_idx(ident).expect("peer must exist");
 
