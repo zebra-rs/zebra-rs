@@ -2704,6 +2704,80 @@ impl Bgp {
         }
     }
 
+    /// VPNv6 counterpart of [`Self::retag_vrf_exports_v4`]. Closes the same
+    /// export-RT race for the v6 address family: a per-VRF route can be
+    /// originated into `v6vpn` before this VRF's `VrfRouteTargets` lands,
+    /// leaving the row with no export RT — so a remote PE receives it with
+    /// no extended-community and `import_targets_v6` finds no target,
+    /// silently dropping it (the VPNv4 side had this fix; v6 did not, so
+    /// VPNv6-over-SRv6 imports were intermittently lost). Re-tag + re-
+    /// advertise this VRF's originated v6 rows with the current export RTs.
+    fn retag_vrf_exports_v6(&mut self, vrf: &str) {
+        let Some(rd) = self.vrfs.get(vrf).and_then(|c| c.rd) else {
+            return;
+        };
+        let export_rts = self
+            .rib_known_vrfs
+            .get(vrf)
+            .map(|k| k.export_rts_v6.clone())
+            .unwrap_or_default();
+        let rows: Vec<(ipnet::Ipv6Net, super::route::BgpRib)> = self
+            .shard
+            .v6vpn
+            .get(&rd)
+            .map(|t| {
+                t.0.iter()
+                    .filter_map(|(p, ribs)| {
+                        ribs.iter()
+                            .find(|r| r.ident == super::route::ORIGINATED_PEER)
+                            .map(|r| (p, r.clone()))
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+        for (prefix, mut rib) in rows {
+            let mut attr = (*rib.attr).clone();
+            // Strip existing Route-Target ecoms (RFC 4360 sub-type 0x02)
+            // so a genuine RT change replaces; the race case has none.
+            if let Some(ref mut ecom) = attr.ecom {
+                ecom.0.retain(|v| v.low_type != 0x02);
+                if ecom.0.is_empty() {
+                    attr.ecom = None;
+                }
+            }
+            let tagged = tag_attr_with_export_rts(attr, &export_rts);
+            rib.attr = self.shard.intern(tagged);
+            let (_, selected, _) = self.shard.update_v6vpn(rd, prefix, rib);
+            let mut top = super::peer::BgpTop {
+                router_id: &self.router_id,
+                srv6_ipv6_export: self.srv6_ipv6_export.as_ref(),
+                local_rib: &mut self.local_rib,
+                shard: &mut self.shard,
+                tx: &self.tx,
+                rib_client: &self.ctx.rib,
+                attr_store: &mut self.attr_store,
+                update_groups: &mut self.update_groups,
+                interface_addrs: &self.interface_addrs,
+                color_policy: Some(&self.color_policy),
+                flex_algo_routes: Some(&self.flex_algo_routes),
+                flex_algo_srv6_routes: Some(&self.flex_algo_srv6_routes),
+                vrf_export: None,
+                vrf_import: None,
+                nexthop_cache: None,
+                vrf_transport_v4: None,
+                vrf_transport_v6: None,
+                central_label_alloc: None,
+            };
+            super::route::route_advertise_to_peers_vpnv6(
+                rd,
+                prefix,
+                &selected,
+                &mut top,
+                &mut self.peers,
+            );
+        }
+    }
+
     /// Push the current colour-steering snapshot (Color→Flex-Algo
     /// bindings + the per-algo SRv6 End-SID shadow) to every per-VRF
     /// task, so a per-VRF SRv6 L3VPN route whose Color binds to a
@@ -2887,18 +2961,23 @@ impl Bgp {
                     .unwrap_or(false);
                 let entry = self.rib_known_vrfs.entry(name.clone()).or_default();
                 let export_v4_changed = entry.export_rts_v4 != ipv4_export_rts;
+                let export_v6_changed = entry.export_rts_v6 != ipv6_export_rts;
                 entry.import_rts_v4 = ipv4_import_rts;
                 entry.export_rts_v4 = ipv4_export_rts;
                 entry.import_rts_v6 = ipv6_import_rts;
                 entry.export_rts_v6 = ipv6_export_rts;
                 entry.inter_as_hybrid = hybrid;
                 // Close the export / RT-learning race: a per-VRF route can
-                // be exported into `v4vpn` before this RT policy lands (the
-                // export reads `rib_known_vrfs` at emit time), leaving the
-                // row with no export RT — unimportable by the remote PE.
-                // Re-tag + re-advertise the VRF's originated rows now.
+                // be exported into `v4vpn`/`v6vpn` before this RT policy
+                // lands (the export reads `rib_known_vrfs` at emit time),
+                // leaving the row with no export RT — unimportable by the
+                // remote PE. Re-tag + re-advertise the VRF's originated rows
+                // now, per address family.
                 if export_v4_changed {
                     self.retag_vrf_exports_v4(&name);
+                }
+                if export_v6_changed {
+                    self.retag_vrf_exports_v6(&name);
                 }
             }
             // Redistribute deliveries from RIB — initial walk

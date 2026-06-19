@@ -80,3 +80,5 @@ pub use addr_gen_mode::*;
 
 pub mod segment_routing;
 pub use segment_routing::*;
+
+pub mod evpn_replicate;

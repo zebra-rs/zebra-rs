@@ -185,6 +185,18 @@ module zebra-bgp-evpn {
            destination by AR-LEAF nodes. Required when `role` is
            `replicator`; ignored otherwise.";
       }
+      leaf selective {
+        type boolean;
+        default false;
+        description
+          "Selective Assisted Replication (RFC 9574). When true on an
+           AR-REPLICATOR, its Replicator-AR route carries the L (Leaf
+           Information Required) flag, soliciting Leaf A-D routes (EVPN
+           Route Type 11) so the replicator learns exactly which AR-LEAFs
+           to replicate to. An AR-LEAF originates a Leaf A-D toward each
+           selective replicator it sees. Non-selective (the default)
+           replicates to every node in the broadcast domain.";
+      }
     }
   }
 

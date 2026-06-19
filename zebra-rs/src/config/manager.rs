@@ -2288,6 +2288,7 @@ mod yang_load_tests {
             "set router bgp afi-safi evpn assisted-replication role replicator",
             "set router bgp afi-safi evpn assisted-replication role leaf",
             "set router bgp afi-safi evpn assisted-replication replicator-ip 10.0.0.254",
+            "set router bgp afi-safi evpn assisted-replication selective true",
         ] {
             let (code, _comps, _state) = parse(path, entry.clone(), None, State::new());
             assert_eq!(code, ExecCode::Success, "`{path}` must be a settable path");

@@ -17,20 +17,24 @@ flood-list netlink path in `zebra-rs/src/fib/netlink/handle.rs`
 (`mdb_add`/`mdb_del`), `rib::Message::MdbAdd/MdbDel`, or
 `zebra-rs/yang/zebra-bgp-evpn.yang`.
 
-## Status (updated 2026-06-20)
+## Status (updated 2026-06-18)
 
-Branch `bgp-evpn-bum`. **Phase 0 (codec) landed on the branch**; Phases 1–3
-(control plane + the kernel-supported dataplane subset) are planned; Phase 4
-(AR-REPLICATOR forwarding) is an explicit out-of-stock-kernel deferral.
+Branch `bgp-evpn-bum`. **The RFC 9574 control plane (Phases 0–3) is complete
+and merged**, together with the kernel-supported dataplane subset (RNVE,
+AR-LEAF flood-collapse, whole-VTEP P-FL prune). Phase 4 (AR-REPLICATOR
+*forwarding*) is an explicit out-of-stock-kernel deferral — its design lives
+in [`bgp-evpn-ar-replicator-dataplane-plan.md`](bgp-evpn-ar-replicator-dataplane-plan.md).
+A consolidated recap of what was built is in **Implementation summary** below.
 
-| Slice            | What landed / planned                                                                                  | Status |
+| Slice            | What landed                                                                                            | Status |
 | ---------------- | ----------------------------------------------------------------------------------------------------- | ------ |
 | 0 — PMSI codec   | tunnel type `0x0A`, `AssistedReplicationType` (T), BM/U/L flag accessors on `PmsiTunnel`, 7 pin tests  | ✅ merged #1476 |
 | 1a — role + origination | YANG `assisted-replication` role/AR-IP config; role-aware Type-3 IMET origination (Replicator-AR tunnel `0x0A` / AR-LEAF-flagged Regular-IR); pin tests | ✅ merged #1483 |
-| 1b — reception + flood model | per-VNI `EvpnFloodState` on `LocalRib`; classify received IMET (Regular-IR vs Replicator-AR); AR-LEAF flood-list collapse to a single `{AR-IP}` with full-IR fallback | ✅ on branch |
-| 2 — Pruned-Flood-Lists | YANG `pruned-flood-list` (BM/U) → set flags in our IMET; honor a received whole-VTEP prune (BM **and** U) by dropping the remote from the flood list; BDD prune scenario | ✅ on branch |
-| 3 — selective AR | Replicator `L=1`; AR-LEAF Leaf A-D (Type-1) origination with `AR-IP:0` RT; per-replicator leaf-set | ⬜ planned |
-| 4 — AR-REPLICATOR dataplane | decap-on-AR-IP → re-flood to other VTEPs with split-horizon | ⛔ deferred (needs eBPF/XDP or VPP — see feasibility) |
+| 1b — reception + flood model | per-VNI `EvpnFloodState` on `LocalRib`; classify received IMET (Regular-IR vs Replicator-AR); AR-LEAF flood-list collapse to a single `{AR-IP}` with full-IR fallback | ✅ merged #1488 |
+| BDD              | first VXLAN-dataplane BDD (`@bgp_evpn_ar`) — RNVE/AR-LEAF/replicator FDB assertions + `bridge fdb` step | ✅ merged #1496 |
+| 2 — Pruned-Flood-Lists | YANG `pruned-flood-list` (BM/U) → set flags in our IMET; honor a received whole-VTEP prune (BM **and** U) by dropping the remote from the flood list; BDD prune scenario | ✅ merged #1504 |
+| 3 — selective AR | Replicator `L=1` (config `selective`); AR-LEAF originates a Leaf A-D (Type-11, RFC 9572) keyed on the Replicator-AR route, scoped by an `<replicator-NH>:0` IPv4-address-specific RT; replicator imports the leaf set; BDD asserts the `[11]:` route; book chapter | ✅ merged #1512 |
+| 4 — AR-REPLICATOR dataplane | decap-on-AR-IP → re-flood to other VTEPs with split-horizon | ⛔ deferred — eBPF/XDP or VPP ([dedicated plan](bgp-evpn-ar-replicator-dataplane-plan.md)) |
 
 ### Where the pieces live
 
@@ -58,6 +62,76 @@ Branch `bgp-evpn-bum`. **Phase 0 (codec) landed on the branch**; Phases 1–3
   `local_vxlans: BTreeMap<u32, IpAddr>` / `local_fdb` (~`:544–562`).
 - **Config / YANG:** `zebra-rs/yang/zebra-bgp-evpn.yang` (`advertise-all-vni`
   at ~`:62–75`).
+
+## Implementation summary (as merged, Phases 0–3)
+
+What the merged control plane does, end to end.
+
+### Config surface (`zebra-bgp-evpn.yang`, global `router bgp afi-safi evpn`)
+
+```
+advertise-all-vni true
+assisted-replication { role none|replicator|leaf; replicator-ip <AR-IP>; selective <bool> }
+pruned-flood-list   { broadcast-multicast <bool>; unknown-unicast <bool> }
+bum-tunnel-type     ingress-replication|sr-mpls-p2mp|srv6-p2mp   # (SR P2MP from the RFC 9251/9524 series)
+```
+
+Each leaf has a `config_*` handler in `bgp/config.rs` that writes to
+`LocalRib.evpn_flood` and re-originates the per-VNI IMET (`reoriginate_all_imet`);
+a role change additionally reconciles the flood lists (`evpn_reconcile_all_flood`).
+
+### Runtime data model — `EvpnFloodState` on `LocalRib` (`bgp/route.rs`)
+
+Lives on `LocalRib` (not `Bgp`) so both the config callbacks (`&mut Bgp`) and
+the receive path (`BgpTop`, 38 build sites) reach it — the same pattern as
+`sr_policy_local` / `table_map`.
+
+- **Local config:** `role`, `ar_ip`, `selective`, `prune_bm`, `prune_unknown`,
+  `bum_tunnel`.
+- **Per-VNI (`VniFlood`):** `remotes: BTreeMap<orig, RemoteImet { ar_ip, prune }>`
+  (Regular-IR vs Replicator-AR, plus the whole-VTEP prune bit) ·
+  `sr_remotes: BTreeMap<orig, tree_id>` (SR P2MP roots, kept out of the flood
+  set) · `installed: BTreeSet<IpAddr>` (the zero-MAC FDB targets currently
+  programmed, for delta computation).
+
+### Origination — `evpn_originate_imet` (per local VXLAN VNI)
+
+`imet_pmsi_tunnel(bum, role, ar_ip, vtep, vni)` builds the PMSI: Replicator →
+tunnel `0x0A`, T=REPLICATOR, next-hop/endpoint = AR-IP; Leaf → Regular-IR
+flagged T=LEAF; None → legacy IR. The caller then stamps the P-FL **BM/U**
+flags (`set_prune_bm`/`set_prune_unknown`) and, for a selective Replicator,
+the **L** flag (`set_leaf_info_required`).
+
+### Reception — two hooks on the received-route path
+
+1. **Flood reconcile** — `route_evpn_export_selected` (Type-3 arm) classifies
+   the remote (`is_assisted_replication()` → AR-IP from the PMSI endpoint;
+   `prune_bm() && prune_unknown()` → whole-VTEP prune), updates `RemoteImet`,
+   and calls `EvpnFloodState::reconcile(vni)`. `desired(vni)` is the heart:
+   SR-P2MP mode → empty; AR-LEAF → the single lowest replicator AR-IP (full-IR
+   fallback); RNVE/Replicator → every remote IR-IP; pruned remotes excluded.
+   The delta vs `installed` emits `rib::Message::MdbAdd/MdbDel`.
+2. **Selective AR** — `evpn_selective_ar_on_receive` (called from
+   `route_evpn_update`/`route_evpn_withdraw`): when an AR-LEAF sees a
+   Replicator-AR with L=1, it originates a Leaf A-D (Type-11) via
+   `evpn_originate_leaf_ad` — `route_key` = the Replicator-AR NLRI
+   (`evpn_leaf_ad_route_key`), RT = `<replicator-NH>:0`
+   (`evpn_ipv4_route_target`, type 0x01).
+
+### Dataplane (Linux VXLAN kernel FDB)
+
+`MdbAdd/MdbDel { vni, group, .. }` → `fib/netlink/handle.rs::mdb_add/mdb_del`
+→ `bridge fdb {add,del} 00:00:00:00:00:00 dev <vxlan> dst <group> self`. The
+`group` is the flood target: a remote IR-IP (RNVE), or the chosen AR-IP
+(AR-LEAF). Whole-VTEP prune = the remote is simply omitted from `desired`.
+
+### Verified by
+
+Codec/flag/route-key unit tests in `pmsi_tunnel.rs` and `route.rs`
+(`evpn_flood_tests`, `evpn_imet_ar_tests`, `evpn_selective_ar_tests`),
+`yang_load` path tests, and the `@bgp_evpn_ar` BDD (7 scenarios: IMET
+exchange, AR-LEAF flood-collapse, RNVE full-IR, whole-VTEP prune, selective
+Leaf A-D). CI excludes BDD, so it is verified locally.
 
 ## Can the Linux kernel do it? — feasibility (the crux)
 
@@ -239,17 +313,17 @@ Closest end-to-end template: the **EVPN Type-3/IMET** path itself (originate
 | ----- | ----- | ------ |
 | 0 | Codec: PMSI tunnel 0x0A + `AssistedReplicationType` (T) + BM/U/L accessors + pin tests | ✅ merged #1476 |
 | 1a | YANG `assisted-replication` role/AR-IP; role-aware Type-3 IMET origination (Replicator-AR `0x0A` / AR-LEAF-flagged Regular-IR) | ✅ merged #1483 |
-| 1b | `EvpnFloodState` per-VNI flood model on `LocalRib`; classify received IMET; AR-LEAF flood-list → single `{AR-IP}`, full-IR fallback (U-flood off) | ✅ on branch |
-| 2 | Pruned-Flood-Lists: `pruned-flood-list` config → BM/U flags in our IMET; honor a received whole-VTEP prune (BM **and** U) by dropping the remote; partial (BM-only/U-only) not honored (one kernel flood list/VNI) | ✅ on branch |
-| 3 | Selective AR (control plane): Leaf A-D (Type-1) origination + `AR-IP:0` IP-specific RT; replicator `L=1`; per-replicator leaf-set | ⬜ planned |
-| 4 | **AR-REPLICATOR forwarding dataplane** (eBPF/XDP or VPP) | ⛔ deferred — out of stock-kernel scope |
+| 1b | `EvpnFloodState` per-VNI flood model on `LocalRib`; classify received IMET; AR-LEAF flood-list → single `{AR-IP}`, full-IR fallback (U-flood off) | ✅ merged #1488 |
+| 2 | Pruned-Flood-Lists: `pruned-flood-list` config → BM/U flags in our IMET; honor a received whole-VTEP prune (BM **and** U) by dropping the remote; partial (BM-only/U-only) not honored (one kernel flood list/VNI) | ✅ merged #1504 |
+| 3 | Selective AR (control plane): `selective` config → `L=1`; route-triggered Leaf A-D (Type-11) origination from the AR-LEAF + `<NH>:0` IPv4-address-specific RT; replicator imports the leaf set (reuses the RFC 9251 Leaf A-D codec) | ✅ merged #1512 |
+| 4 | **AR-REPLICATOR forwarding dataplane** (eBPF/XDP or VPP) — [dedicated plan](bgp-evpn-ar-replicator-dataplane-plan.md) | ⛔ deferred — out of stock-kernel scope |
 
 Phases 0–3 deliver a standards-compliant, interoperable AR/P-FL **control
 plane** plus the genuinely-useful Linux dataplane subset (RNVE, AR-LEAF,
 whole-VTEP prune), mirroring how the v6 BGP stack and the Flowspec series
 shipped control-plane-first. Phase 4 carries the dataplane risk.
 
-### BDD (`@bgp_evpn_ar`) — ✅ on branch
+### BDD (`@bgp_evpn_ar`) — ✅ merged (#1496, + prune #1504, + selective #1512)
 
 The repo's first VXLAN-dataplane BDD. Three iBGP (AS 65001) EVPN nodes on a
 shared bridge, each with a config-driven local VXLAN (VNI 10) so every node
@@ -266,6 +340,9 @@ kernel state:
 - **Phase 2 P-FL** — z3 also requests whole-VTEP prune (`pruned-flood-list`
   BM + U); **z1**'s FDB drops z3 (`not contain 192.168.0.3`) while keeping z2,
   proving a received whole-VTEP prune is honored.
+- **Phase 3 selective AR** — z1 is a `selective` replicator (L flag); z2
+  (leaf) originates a Leaf A-D (Type-11) that z1 imports, asserted as a
+  `[11]:[rt3/19B]:[192.168.0.2]` route in z1's `show bgp evpn`.
 
 This verifies the whole 1a→1b chain end-to-end: z1 originates Replicator-AR
 (AR-IP in the PMSI tunnel endpoint), z2 classifies it and collapses its flood
@@ -278,10 +355,18 @@ not faked. Run: `cd bdd && cargo test --test cucumber -- --concurrency=1 --tags
 
 ## Leftover / deferred
 
+- **Selective AR joins *all* replicators, not one chosen.** The AR-LEAF
+  originates a Leaf A-D toward every selective replicator it sees, where
+  RFC 9574 has it join a single chosen replicator's set. Harmless with no
+  replicator dataplane (Phase 4); chosen-replicator selection + a
+  config-change reconcile (the origination is route-triggered today, so a
+  role/`selective` flip after routes arrive isn't retro-applied) are
+  follow-ups.
 - **Replicator-AR BGP next-hop = AR-IP (RFC 9574 §4).** Found via the
-  `@bgp_evpn_ar` BDD: the EVPN advertise path overrides the route's BGP
-  next-hop to the local VTEP, so a Replicator-AR route carries next-hop =
-  VTEP, not the AR-IP. zebra-rs is self-consistent (it reads the AR-IP from
+  `@bgp_evpn_ar` BDD (confirmed again in Phase 3: the leaf builds the
+  `<NH>:0` selective RT from the *received* next-hop, which is the VTEP):
+  the EVPN advertise path overrides the route's BGP next-hop to the local
+  VTEP, so a Replicator-AR route carries next-hop = VTEP, not the AR-IP. zebra-rs is self-consistent (it reads the AR-IP from
   the PMSI tunnel endpoint, which *is* set correctly), so the flood collapse
   works — but for strict interop with implementations that read the AR-IP
   from the BGP next-hop, the next-hop should be the AR-IP. Fix is in the EVPN
@@ -291,10 +376,14 @@ not faked. Run: `cd bdd && cargo test --test cucumber -- --concurrency=1 --tags
   evpn` prints prefix + next-hop + ext-comms but not the PMSI tunnel
   type/flags, so the AR role isn't observable via `show` (only via the FDB).
   Adding a PMSI line would make AR role / tunnel-type 0x0A operator-visible.
-- **Phase 4 — AR-REPLICATOR forwarding.** The decap-on-AR-IP → re-flood
-  datapath with source-VTEP split-horizon and (optional) source-IP
+- **Phase 4 — AR-REPLICATOR forwarding (deferred).** The decap-on-AR-IP →
+  re-flood datapath with source-VTEP split-horizon and (optional) source-IP
   preservation. Needs eBPF/XDP/tc clone+redirect+header-rewrite or a VPP
-  southbound; not expressible on the stock kernel VXLAN/bridge datapath.
+  southbound; not expressible on the stock kernel VXLAN/bridge datapath. The
+  control plane already produces the per-VNI replication table this needs —
+  full design (kernel blockers, eBPF vs VPP options, FIB interface, phasing,
+  verification) in
+  [`bgp-evpn-ar-replicator-dataplane-plan.md`](bgp-evpn-ar-replicator-dataplane-plan.md).
 - **Per-category (BM-only / U-only) P-FL pruning.** Kernel has one flood
   list per VNI; per-remote per-category pruning needs the Phase 4 dataplane.
 - **AR-LEAF with unknown-unicast flooding *enabled*.** The RFC's separate

@@ -290,6 +290,23 @@ pub enum Message {
         source: Option<IpAddr>,
         dst: IpAddr,
     },
+    /// Install an RFC 9524 SR P2MP replication segment for a VNI's BUM
+    /// delivery (EVPN, draft-ietf-bess-mvpn-evpn-sr-p2mp). `root` is the tree
+    /// Root (local VTEP), `leaves` the egress PEs to replicate to, `srv6`
+    /// selects SRv6 (vs SR-MPLS) encapsulation. Consumed by the SR
+    /// replication dataplane (eBPF TC/clsact, offload crate
+    /// `tc-evpn-replicate`); a stub today.
+    ReplSegAdd {
+        vni: u32,
+        tree_id: u32,
+        root: IpAddr,
+        srv6: bool,
+        leaves: Vec<IpAddr>,
+    },
+    /// Withdraw the SR P2MP replication segment for a VNI.
+    ReplSegDel {
+        vni: u32,
+    },
     Shutdown {
         tx: oneshot::Sender<()>,
     },
@@ -645,6 +662,11 @@ pub struct Rib {
     /// `crate::rib::route::RECOVERY_*` if an external actor keeps
     /// fighting us.
     pub addr_recovery: BTreeMap<(u32, IpNet), AddrRecoveryState>,
+
+    /// Supervisor for the EVPN SR P2MP replication dataplane (RFC 9524).
+    /// Driven by `Message::ReplSegAdd` / `ReplSegDel`; spawns/feeds the
+    /// `tc-evpn-replicate` offload child.
+    pub evpn_repl: super::evpn_replicate::ReplicationHelper,
 }
 
 /// Name of the dummy interface that hosts End-style seg6local routes
@@ -725,6 +747,7 @@ impl Rib {
             rib_sync_interval: DEFAULT_RIB_SYNC_INTERVAL_SEC,
             sr0_owned: false,
             addr_recovery: BTreeMap::new(),
+            evpn_repl: super::evpn_replicate::ReplicationHelper::new(),
         };
         rib.show_build();
         Ok(rib)
@@ -982,11 +1005,14 @@ impl Rib {
             // loopback: the kernel silently STRIPS a seg6local encap whose
             // oif is `lo` (verified on 6.8 — `End.DT6 dev lo` installs as a
             // plain route), so a decap localsid must ride on a real device.
-            // End.M reuses the End.DT6 kernel action, so it joins this group.
+            // End.M reuses the End.DT6 kernel action; End.DT46 is the
+            // dual-family decap BGP L3VPN-over-SRv6 programs per VRF — both
+            // join this group or their decap silently vanishes.
             SidBehavior::End
             | SidBehavior::UN
             | SidBehavior::EndDT4
             | SidBehavior::EndDT6
+            | SidBehavior::EndDT46
             | SidBehavior::EndM => self.resolve_sr0_ifindex(),
             _ => self.resolve_lo_ifindex(),
         }
@@ -2214,6 +2240,28 @@ impl Rib {
                 dst,
             } => {
                 self.smet_install(vni, group, source, dst, false).await;
+            }
+            Message::ReplSegAdd {
+                vni,
+                tree_id,
+                root,
+                srv6,
+                leaves,
+            } => {
+                // Hand the replication segment to the SR P2MP dataplane
+                // supervisor (the `tc-evpn-replicate` offload child). With no
+                // offload interface configured this is a logged no-op — the
+                // control plane still signals, nothing forwards.
+                tracing::info!(
+                    "EVPN ReplSeg add: VNI {vni} tree {tree_id} root {root} {} -> {} leaf PE(s)",
+                    if srv6 { "SRv6" } else { "SR-MPLS" },
+                    leaves.len()
+                );
+                self.evpn_repl.add(vni, tree_id, root, srv6, &leaves);
+            }
+            Message::ReplSegDel { vni } => {
+                tracing::info!("EVPN ReplSeg del: VNI {vni}");
+                self.evpn_repl.del(vni);
             }
             Message::RedistAdd {
                 proto,

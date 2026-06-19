@@ -1935,6 +1935,12 @@ pub struct EvpnFloodState {
     /// unknown-unicast (`prune_unknown`) flood lists.
     pub prune_bm: bool,
     pub prune_unknown: bool,
+    /// RFC 9574 selective Assisted Replication (`... assisted-replication
+    /// selective`). When set on an AR-REPLICATOR, its Replicator-AR IMET
+    /// carries the L (Leaf Information Required) flag, soliciting Leaf A-D
+    /// routes; an AR-LEAF then originates a Leaf A-D toward each selective
+    /// replicator it sees.
+    pub selective: bool,
     /// Per-VNI flood model.
     vnis: BTreeMap<u32, VniFlood>,
 }
@@ -1973,6 +1979,33 @@ struct VniFlood {
     /// Flood targets (zero-MAC FDB `dst`s) currently programmed in the
     /// kernel, so `reconcile` can compute the MdbAdd/MdbDel delta.
     installed: BTreeSet<IpAddr>,
+    /// Local VTEP for this VNI — the SR P2MP tree Root — recorded when we
+    /// originate the Type-3 IMET. `Some` only for locally-originated VNIs.
+    /// The replication-segment producer needs it because `reconcile` is
+    /// reached from contexts (`BgpTop`) without `Bgp::local_vxlans`.
+    root: Option<IpAddr>,
+    /// Leaf set of the SR P2MP replication segment currently programmed to
+    /// the dataplane (the last `ReplSegAdd`), so `reconcile` emits only the
+    /// delta (and a `ReplSegDel` when it empties).
+    repl_installed: BTreeSet<IpAddr>,
+}
+
+/// What `reconcile` should do for a VNI's SR P2MP replication segment, decided
+/// purely from [`EvpnFloodState`] so it can be unit-tested without a RIB
+/// client.
+#[derive(Debug, PartialEq, Eq)]
+enum ReplAction {
+    /// No change since the last `ReplSegAdd`/`Del`.
+    None,
+    /// (Re)install the segment: local node is the `root`, replicate to
+    /// `leaves`. `srv6` selects SRv6 (vs SR-MPLS) encapsulation.
+    Add {
+        root: IpAddr,
+        srv6: bool,
+        leaves: BTreeSet<IpAddr>,
+    },
+    /// Withdraw the segment (left SR P2MP mode, lost the root, or no leaves).
+    Del,
 }
 
 impl EvpnFloodState {
@@ -2033,6 +2066,53 @@ impl EvpnFloodState {
                     .collect()
             })
             .unwrap_or_default()
+    }
+
+    /// Record the local VTEP for `vni` (the SR P2MP tree Root), learned when
+    /// we originate the Type-3 IMET. Needed by [`replication_action`] because
+    /// `reconcile` runs in contexts without `Bgp::local_vxlans`.
+    ///
+    /// [`replication_action`]: Self::replication_action
+    pub fn set_local_root(&mut self, vni: u32, root: IpAddr) {
+        self.vnis.entry(vni).or_default().root = Some(root);
+    }
+
+    /// Forget the local VTEP for `vni` (we stopped originating its IMET).
+    pub fn clear_local_root(&mut self, vni: u32) {
+        if let Some(v) = self.vnis.get_mut(&vni) {
+            v.root = None;
+        }
+    }
+
+    /// Decide the SR P2MP replication-segment action for `vni` against the
+    /// last-programmed leaf set, without sending anything. We program a
+    /// segment only when this node is configured for SR P2MP BUM *and* knows
+    /// its own root (it originates the VNI); the leaves are every remote PE in
+    /// the BUM domain ([`replication_leaves`](Self::replication_leaves)).
+    fn replication_action(&self, vni: u32) -> ReplAction {
+        let is_sr = matches!(
+            self.bum_tunnel,
+            EvpnBumTunnel::SrMplsP2mp | EvpnBumTunnel::SrV6P2mp
+        );
+        let Some(v) = self.vnis.get(&vni) else {
+            return ReplAction::None;
+        };
+        let want: BTreeSet<IpAddr> = if is_sr && v.root.is_some() {
+            self.replication_leaves(vni)
+        } else {
+            BTreeSet::new()
+        };
+        if want == v.repl_installed {
+            ReplAction::None
+        } else if want.is_empty() {
+            ReplAction::Del
+        } else {
+            ReplAction::Add {
+                root: v.root.expect("root is Some when want is non-empty"),
+                srv6: matches!(self.bum_tunnel, EvpnBumTunnel::SrV6P2mp),
+                leaves: want,
+            }
+        }
     }
 
     /// VNIs that currently have flood state (so a role/AR-IP change can
@@ -2099,20 +2179,10 @@ impl EvpnFloodState {
                 sr_trees.len()
             );
         }
-        // Local SR P2MP mode: BUM rides the replication tree (programmed by
-        // the SR dataplane, a later slice), so `desired` is empty above and
-        // the delta below withdraws any VXLAN IR entries left from a prior
-        // mode. Surface the computed leaf set the SR dataplane will serve.
-        if matches!(
-            self.bum_tunnel,
-            EvpnBumTunnel::SrMplsP2mp | EvpnBumTunnel::SrV6P2mp
-        ) {
-            let leaves = self.replication_leaves(vni);
-            tracing::debug!(
-                "EVPN VNI {vni}: SR P2MP local mode, replication tree to {} leaf PE(s): {leaves:?} (SR dataplane pending)",
-                leaves.len()
-            );
-        }
+        // Local SR P2MP mode: BUM rides the replication tree, programmed via a
+        // `ReplSeg` to the SR dataplane (`desired` is empty above, so the delta
+        // below withdraws any VXLAN IR entries left from a prior mode).
+        let repl_action = self.replication_action(vni);
         let entry = self.vnis.entry(vni).or_default();
         for &group in desired.difference(&entry.installed) {
             let _ = rib.send(rib::Message::MdbAdd {
@@ -2132,6 +2202,23 @@ impl EvpnFloodState {
             });
         }
         entry.installed = desired;
+        match repl_action {
+            ReplAction::None => {}
+            ReplAction::Add { root, srv6, leaves } => {
+                let _ = rib.send(rib::Message::ReplSegAdd {
+                    vni,
+                    tree_id: vni,
+                    root,
+                    srv6,
+                    leaves: leaves.iter().copied().collect(),
+                });
+                self.vnis.entry(vni).or_default().repl_installed = leaves;
+            }
+            ReplAction::Del => {
+                let _ = rib.send(rib::Message::ReplSegDel { vni });
+                self.vnis.entry(vni).or_default().repl_installed.clear();
+            }
+        }
     }
 }
 
@@ -5169,6 +5256,23 @@ pub fn route_ipv6_update(
     peers: &mut PeerMap,
     stale: bool,
 ) {
+    // VPNv6 carries its next-hop in the MP_REACH `nexthop` param, not the
+    // legacy NEXT_HOP attribute, so `attr.nexthop` arrives `None`. Fold it
+    // in here (mirroring the v6-unicast dispatch which stamps
+    // `BgpNexthop::Ipv6`) so NHT tracking, best-path and show all read the
+    // PE locator next-hop. Without this stamp, `bgp_nexthop_ip` returns
+    // `None`, the next-hop is never tracked, the SRv6 L3VPN transport never
+    // resolves, and the imported route installs no H.Encap FIB entry.
+    let stamped_attr;
+    let attr = if let Some(VpnNexthop::V6(v6nh)) = &nexthop {
+        let mut a = attr.clone();
+        a.nexthop = Some(BgpNexthop::Vpnv6(v6nh.clone()));
+        stamped_attr = a;
+        &stamped_attr
+    } else {
+        attr
+    };
+
     let (peer_ident, peer_router_id, typ) = {
         let peer = peers.get_mut_by_idx(ident).expect("peer must exist");
 
@@ -6387,6 +6491,10 @@ pub fn route_evpn_update(
     {
         evpn_reoriginate_per_region(bgp, peers, region_id, vni, attr);
     }
+
+    // RFC 9574 selective AR: an AR-LEAF responds to a selective Replicator-AR
+    // route (L flag set) by originating a Leaf A-D toward it.
+    evpn_selective_ar_on_receive(route, attr, bgp, peers);
 }
 
 /// Withdraw one EVPN route advertised in an MP_UNREACH_NLRI from Adj-RIB-In
@@ -6418,6 +6526,16 @@ pub fn route_evpn_withdraw(ident: usize, route: &EvpnRoute, bgp: &mut BgpTop, pe
     let selected = bgp.local_rib.select_best_path_evpn(&rd, &prefix);
 
     route_evpn_export_selected(&rd, &prefix, &selected, removed.first(), bgp);
+
+    // RFC 9574 selective AR: a withdrawn Replicator-AR route pulls the Leaf
+    // A-D we may have originated toward it (no-op if we originated none).
+    if bgp.local_rib.evpn_flood.role == AssistedReplicationRole::Leaf
+        && let EvpnRoute::Multicast(m) = route
+    {
+        let route_key = evpn_leaf_ad_route_key(m);
+        let originator = IpAddr::V4(*bgp.router_id);
+        evpn_withdraw_leaf_ad(route_key, originator, bgp, peers);
+    }
 }
 
 /// Store one received Flow Specification NLRI in the peer's Adj-RIB-In.
@@ -12163,6 +12281,10 @@ impl Bgp {
             );
             return;
         };
+        // Record our VTEP as this VNI's SR P2MP tree Root, so the
+        // replication-segment producer in `reconcile` can emit a ReplSeg
+        // without `local_vxlans` (unreachable from the BgpTop import path).
+        self.local_rib.evpn_flood.set_local_root(vni, vtep_local);
         let prefix = EvpnPrefix::InclusiveMulticast {
             eth_tag: 0,
             orig: vtep_local,
@@ -12194,11 +12316,17 @@ impl Bgp {
         let ar_ip = self.local_rib.evpn_flood.ar_ip;
         let prune_bm = self.local_rib.evpn_flood.prune_bm;
         let prune_unknown = self.local_rib.evpn_flood.prune_unknown;
+        let selective = self.local_rib.evpn_flood.selective;
         let (mut pmsi, nexthop) = imet_pmsi_tunnel(bum, role, ar_ip, vtep_local, vni);
         // RFC 9574 Pruned-Flood-List: advertise our prune preferences so
         // remote PEs can drop us from the BM / unknown-unicast flood lists.
         pmsi.set_prune_bm(prune_bm);
         pmsi.set_prune_unknown(prune_unknown);
+        // RFC 9574 selective AR: a selective AR-REPLICATOR sets the L flag in
+        // its Replicator-AR route to solicit Leaf A-D routes from the leaves.
+        if role == AssistedReplicationRole::Replicator && selective {
+            pmsi.set_leaf_info_required(true);
+        }
         attr.pmsi_tunnel = Some(pmsi);
         attr.nexthop = Some(BgpNexthop::Evpn(nexthop));
 
@@ -12260,6 +12388,9 @@ impl Bgp {
         let _ = self.local_rib.remove_evpn(rd, &prefix, 0, ORIGINATED_PEER);
         let _ = self.local_rib.select_best_path_evpn(&rd, &prefix);
         route_withdraw_evpn_to_peers(rd, prefix, &mut self.peers);
+        // We no longer originate this VNI — drop its SR P2MP tree Root so a
+        // subsequent reconcile withdraws any replication segment.
+        self.local_rib.evpn_flood.clear_local_root(vni);
     }
 
     /// Originate a Type-6 SMET route for a locally-snooped `(*,G)` /
@@ -12280,6 +12411,13 @@ impl Bgp {
             return;
         }
         if self.router_id.is_unspecified() {
+            return;
+        }
+        // The snooping bridge also registers link-local / well-known
+        // control multicast (e.g. IPv6 solicited-node ff02::1:ffxx:xxxx,
+        // IPv4 224.0.0.0/24). Those are not host group memberships and
+        // must not be proxied across the EVPN — skip them.
+        if !smet_advertisable_group(group) {
             return;
         }
         let Some(rd) = rd_from_router_id_vni(self.router_id, vni) else {
@@ -12352,6 +12490,11 @@ impl Bgp {
         group: IpAddr,
         source: Option<IpAddr>,
     ) {
+        // Symmetric with origination: we never advertised a SMET for a
+        // link-local / control group, so don't emit a spurious withdraw.
+        if !smet_advertisable_group(group) {
+            return;
+        }
         let Some(rd) = rd_from_router_id_vni(self.router_id, vni) else {
             return;
         };
@@ -12384,11 +12527,6 @@ impl Bgp {
 /// origination to avoid advertise loops.
 const NTF_EXT_LEARNED: u8 = 0x10;
 
-/// Build a Type-1 RD (4-byte IPv4 + 2-byte assigned number) from
-/// the local router-id and VNI per RFC 8365 §5.1.2. Returns None
-/// when the VNI exceeds 16 bits — Type-1 only has 2 bytes for the
-/// assigned-number field; supporting VNIs above 65535 needs the
-/// Type-0 (ASN) format and is a follow-up.
 /// Derive the RFC 9251 §9.1 SMET Flags octet from the group family and
 /// source presence. IPv4 advertises IGMPv3 (v3 bit), IPv6 advertises
 /// MLDv2 (v2 bit; MLD has no v3); a `(*,G)` join sets exclude (IE)
@@ -12406,6 +12544,31 @@ fn smet_flags(group: IpAddr, source: Option<IpAddr>) -> u8 {
     version | mode
 }
 
+/// Whether a multicast group may be advertised as an EVPN Type-6 SMET
+/// route. The kernel snooping bridge also registers link-local /
+/// well-known control multicast — IPv4 `224.0.0.0/24` (local network
+/// control block) and IPv6 interface-/link-local scopes — which is not
+/// host group membership and must not be proxied across the EVPN.
+fn smet_advertisable_group(group: IpAddr) -> bool {
+    match group {
+        IpAddr::V4(v4) => {
+            let o = v4.octets();
+            // 224.0.0.0/24 — routing protocols, ND-equivalents, etc.
+            !(o[0] == 224 && o[1] == 0 && o[2] == 0)
+        }
+        IpAddr::V6(v6) => {
+            // IPv6 multicast scope = low nibble of the 2nd octet; drop
+            // reserved (0), interface-local (1), and link-local (2).
+            (v6.octets()[1] & 0x0f) > 2
+        }
+    }
+}
+
+/// Build a Type-1 RD (4-byte IPv4 + 2-byte assigned number) from
+/// the local router-id and VNI per RFC 8365 §5.1.2. Returns None
+/// when the VNI exceeds 16 bits — Type-1 only has 2 bytes for the
+/// assigned-number field; supporting VNIs above 65535 needs the
+/// Type-0 (ASN) format and is a follow-up.
 fn rd_from_router_id_vni(router_id: Ipv4Addr, vni: u32) -> Option<RouteDistinguisher> {
     let vni_short: u16 = vni.try_into().ok()?;
     let mut rd = RouteDistinguisher::new(RouteDistinguisherType::IP);
@@ -12504,6 +12667,148 @@ fn imet_pmsi_tunnel(
 /// four (24-bit VNI naturally encoded big-endian into the low 3 of
 /// 4 bytes; 32-bit values would clobber the high byte but VNIs are
 /// 24-bit per RFC 7348).
+/// Build an IPv4-address-specific Route Target extended community (type 0x01
+/// / sub 0x02, RFC 4360): `<IPv4>:<local-admin>`. RFC 9574 selective AR
+/// scopes a Leaf A-D route to one AR-REPLICATOR with `<replicator-NH>:0`.
+fn evpn_ipv4_route_target(addr: Ipv4Addr, local_admin: u16) -> ExtCommunityValue {
+    let mut rt = ExtCommunityValue {
+        high_type: 0x01,
+        low_type: 0x02,
+        val: [0; 6],
+    };
+    rt.val[0..4].copy_from_slice(&addr.octets());
+    rt.val[4..6].copy_from_slice(&local_admin.to_be_bytes());
+    rt
+}
+
+/// The Leaf A-D `route_key` (RFC 9572 §3.3) for a Replicator-AR Type-3 IMET:
+/// its Route Type Specific NLRI (route-type + length + body), Add-Path id
+/// stripped, so leaf and replicator agree on the key.
+fn evpn_leaf_ad_route_key(m: &EvpnMulticast) -> Vec<u8> {
+    let mut buf = BytesMut::new();
+    EvpnRoute::Multicast(EvpnMulticast { id: 0, ..m.clone() }).nlri_emit(&mut buf);
+    buf.to_vec()
+}
+
+/// RFC 9574 selective AR: originate (or refresh) a Leaf A-D route (EVPN Route
+/// Type 11) toward a selective AR-REPLICATOR. `route_key` is the
+/// Replicator-AR route's NLRI; `replicator_nh` its next hop (→ the `<NH>:0`
+/// IP-specific RT scoping the route to that replicator); `originator` is our
+/// (AR-LEAF) VTEP IP; `vni` the BUM domain.
+fn evpn_originate_leaf_ad(
+    route_key: Vec<u8>,
+    originator: IpAddr,
+    replicator_nh: Ipv4Addr,
+    vni: u32,
+    bgp: &mut BgpTop,
+    peers: &mut PeerMap,
+) {
+    let route = EvpnRoute::LeafAd(EvpnLeafAd {
+        id: 0,
+        route_key,
+        originator,
+    });
+    let (rd, prefix) = EvpnPrefix::from_route(&route);
+
+    let mut attr = BgpAttr::new();
+    attr.ecom = Some(ExtCommunity::from([
+        evpn_ipv4_route_target(replicator_nh, 0),
+        evpn_encap_vxlan(),
+    ]));
+    attr.pmsi_tunnel = Some(
+        PmsiTunnel {
+            flags: 0,
+            tunnel_type: PmsiTunnel::TUNNEL_ASSISTED_REPLICATION,
+            vni,
+            endpoint: originator,
+            tree_id: None,
+        }
+        .with_ar_type(AssistedReplicationType::Leaf),
+    );
+    attr.nexthop = Some(BgpNexthop::Evpn(originator));
+
+    let rib = BgpRib::new(
+        ORIGINATED_PEER,
+        Ipv4Addr::UNSPECIFIED,
+        BgpRibType::Originated,
+        0,
+        32768,
+        &attr,
+        None,
+        None,
+        false,
+    );
+    let (_replaced, selected, _next_id) = bgp.local_rib.update_evpn(rd, prefix.clone(), rib);
+    if !selected.is_empty() {
+        route_advertise_evpn_to_peers(rd, prefix, &selected, bgp, peers);
+    }
+}
+
+/// Withdraw the Leaf A-D route we originated toward the replicator identified
+/// by `route_key` (its Replicator-AR route was withdrawn). No-op if we never
+/// originated one.
+fn evpn_withdraw_leaf_ad(
+    route_key: Vec<u8>,
+    originator: IpAddr,
+    bgp: &mut BgpTop,
+    peers: &mut PeerMap,
+) {
+    let route = EvpnRoute::LeafAd(EvpnLeafAd {
+        id: 0,
+        route_key,
+        originator,
+    });
+    let (rd, prefix) = EvpnPrefix::from_route(&route);
+    let removed = bgp.local_rib.remove_evpn(rd, &prefix, 0, ORIGINATED_PEER);
+    if removed.is_empty() {
+        return;
+    }
+    let _ = bgp.local_rib.select_best_path_evpn(&rd, &prefix);
+    route_withdraw_evpn_to_peers(rd, prefix, peers);
+}
+
+/// RFC 9574 selective AR receive hook (per received EVPN route). An AR-LEAF
+/// originates a Leaf A-D toward every selective AR-REPLICATOR it sees (a
+/// Replicator-AR route carrying the L flag).
+///
+/// Note: RFC 9574 has the leaf join a *single* chosen replicator's set; we
+/// currently join every selective replicator. Harmless with no replicator
+/// dataplane (Phase 4); chosen-replicator selection is a follow-up.
+fn evpn_selective_ar_on_receive(
+    route: &EvpnRoute,
+    attr: &BgpAttr,
+    bgp: &mut BgpTop,
+    peers: &mut PeerMap,
+) {
+    if bgp.local_rib.evpn_flood.role != AssistedReplicationRole::Leaf {
+        return;
+    }
+    let EvpnRoute::Multicast(m) = route else {
+        return;
+    };
+    let Some(pmsi) = attr.pmsi_tunnel.as_ref() else {
+        return;
+    };
+    if !(pmsi.is_assisted_replication()
+        && pmsi.ar_type() == AssistedReplicationType::Replicator
+        && pmsi.leaf_info_required())
+    {
+        return;
+    }
+    // The IP-specific RT scopes the Leaf A-D to this replicator's next hop;
+    // IPv4 only (VXLAN VTEPs are IPv4 here).
+    let nh = match attr.nexthop.as_ref() {
+        Some(BgpNexthop::Evpn(IpAddr::V4(nh))) => *nh,
+        _ => return,
+    };
+    let Some(vni) = extract_vni_from_attr(attr) else {
+        return;
+    };
+    let originator = IpAddr::V4(*bgp.router_id);
+    let route_key = evpn_leaf_ad_route_key(m);
+    evpn_originate_leaf_ad(route_key, originator, nh, vni, bgp, peers);
+}
+
 fn evpn_route_target(asn: u32, vni: u32) -> ExtCommunityValue {
     let mut rt = ExtCommunityValue {
         high_type: 0x00,
@@ -12671,6 +12976,66 @@ mod evpn_flood_tests {
         assert_eq!(f.desired(100), BTreeSet::from([ip("10.0.0.1")]));
     }
 
+    /// In SR P2MP mode with a known local root, the replication action adds a
+    /// segment rooted here to every remote PE (IR + SR), tagged SRv6/SR-MPLS.
+    #[test]
+    fn replication_action_adds_segment_in_sr_mode() {
+        let mut f = EvpnFloodState {
+            bum_tunnel: EvpnBumTunnel::SrV6P2mp,
+            ..Default::default()
+        };
+        f.set_local_root(100, ip("10.0.0.9"));
+        f.update_remote(100, ip("10.0.0.3"), None, false);
+        f.update_sr_remote(100, ip("10.0.0.2"), 100);
+        assert_eq!(
+            f.replication_action(100),
+            ReplAction::Add {
+                root: ip("10.0.0.9"),
+                srv6: true,
+                leaves: BTreeSet::from([ip("10.0.0.2"), ip("10.0.0.3")]),
+            }
+        );
+    }
+
+    /// No segment without a local root (we aren't the tree root), nor in
+    /// Ingress Replication mode.
+    #[test]
+    fn replication_action_none_without_root_or_in_ir_mode() {
+        // SR mode but no local root → None.
+        let mut f = EvpnFloodState {
+            bum_tunnel: EvpnBumTunnel::SrMplsP2mp,
+            ..Default::default()
+        };
+        f.update_sr_remote(100, ip("10.0.0.2"), 100);
+        assert_eq!(f.replication_action(100), ReplAction::None);
+        // IR mode with a root → None.
+        let mut g = EvpnFloodState::default();
+        g.set_local_root(100, ip("10.0.0.9"));
+        g.update_remote(100, ip("10.0.0.3"), None, false);
+        assert_eq!(g.replication_action(100), ReplAction::None);
+    }
+
+    /// Delta: once the current leaf set is installed it reports None; leaving
+    /// SR P2MP mode reports Del (withdraw the segment).
+    #[test]
+    fn replication_action_delta_and_withdraw() {
+        let mut f = EvpnFloodState {
+            bum_tunnel: EvpnBumTunnel::SrMplsP2mp,
+            ..Default::default()
+        };
+        f.set_local_root(100, ip("10.0.0.9"));
+        f.update_sr_remote(100, ip("10.0.0.2"), 100);
+        let ReplAction::Add { leaves, .. } = f.replication_action(100) else {
+            panic!("expected Add");
+        };
+        // Simulate reconcile recording what it sent.
+        f.vnis.get_mut(&100).unwrap().repl_installed = leaves;
+        assert_eq!(f.replication_action(100), ReplAction::None);
+        // Switch to Ingress Replication → withdraw the segment.
+        f.bum_tunnel = EvpnBumTunnel::IngressReplication;
+        assert_eq!(f.replication_action(100), ReplAction::Del);
+    }
+
     /// A remote that flips tunnel type moves between the two maps rather
     /// than lingering in both; a withdraw clears whichever map it was in.
     #[test]
@@ -12738,6 +13103,50 @@ mod evpn_flood_tests {
             imet_whole_vtep_prune(Some(&pmsi(true, true))),
             "BM and U → whole-VTEP prune"
         );
+    }
+}
+
+#[cfg(test)]
+mod evpn_selective_ar_tests {
+    use super::*;
+
+    /// IPv4-address-specific RT wire format: type 0x01 / sub 0x02, value =
+    /// 4-octet IPv4 + 2-octet local-administrator.
+    #[test]
+    fn ipv4_route_target_wire_format() {
+        let rt = evpn_ipv4_route_target(Ipv4Addr::new(192, 0, 2, 1), 0);
+        assert_eq!(rt.high_type, 0x01, "IPv4-address-specific");
+        assert_eq!(rt.low_type, 0x02, "Route Target");
+        assert_eq!(rt.val, [192, 0, 2, 1, 0, 0]);
+
+        let rt = evpn_ipv4_route_target(Ipv4Addr::new(10, 0, 0, 254), 7);
+        assert_eq!(rt.val, [10, 0, 0, 254, 0, 7]);
+    }
+
+    /// The Leaf A-D route_key is the Replicator-AR's Type-3 NLRI with the
+    /// Add-Path id stripped, so it parses back as a Type-3 IMET with id 0.
+    #[test]
+    fn leaf_ad_route_key_is_replicator_ar_nlri() {
+        let m = EvpnMulticast {
+            id: 5, // Add-Path id must NOT leak into the route_key
+            rd: RouteDistinguisher::default(),
+            ether_tag: 0,
+            addr: IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1)),
+        };
+        let key = evpn_leaf_ad_route_key(&m);
+        assert_eq!(
+            key[0], 3,
+            "route_key starts with the Type-3 route-type byte"
+        );
+        let (_, parsed) =
+            EvpnRoute::parse_nlri(&key, false).expect("route_key parses as a Type-3 NLRI");
+        match parsed {
+            EvpnRoute::Multicast(p) => {
+                assert_eq!(p.id, 0, "Add-Path id stripped");
+                assert_eq!(p.addr, m.addr);
+            }
+            other => panic!("expected Multicast, got {other:?}"),
+        }
     }
 }
 
@@ -14135,6 +14544,23 @@ mod tests {
         AsPathPrependConfig, CommunityMatcher, CommunitySet, NumericSet, PolicyList, PrefixSet,
         SetCommunityConfig, SetCommunityMode, SetNextHop,
     };
+
+    #[test]
+    fn smet_advertisable_group_filters_link_local() {
+        let adv = |s: &str| super::smet_advertisable_group(IpAddr::from_str(s).unwrap());
+        // Advertisable host groups (ASM / SSM / site-local / global v6).
+        assert!(adv("239.1.1.1"));
+        assert!(adv("232.1.1.1"));
+        assert!(adv("ff05::1:3"));
+        assert!(adv("ff0e::1234"));
+        // Filtered: IPv4 224.0.0.0/24 control block + IPv6 interface-
+        // and link-local scopes (incl. solicited-node).
+        assert!(!adv("224.0.0.1"));
+        assert!(!adv("224.0.0.251"));
+        assert!(!adv("ff02::1"));
+        assert!(!adv("ff02::1:ff00:1"));
+        assert!(!adv("ff01::1"));
+    }
 
     #[test]
     fn flowspec_locrib_select_then_remove() {

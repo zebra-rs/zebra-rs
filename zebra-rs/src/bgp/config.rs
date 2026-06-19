@@ -1579,6 +1579,27 @@ fn config_assisted_replication_ip(bgp: &mut Bgp, mut args: Args, op: ConfigOp) -
     Some(())
 }
 
+/// `router bgp afi-safi evpn assisted-replication selective <bool>` (RFC
+/// 9574). Toggles the L flag in our Replicator-AR route (selective mode);
+/// re-originates the IMET so the flag change reaches peers.
+fn config_assisted_replication_selective(
+    bgp: &mut Bgp,
+    mut args: Args,
+    op: ConfigOp,
+) -> Option<()> {
+    let afi_safi: AfiSafi = args.afi_safi()?;
+    if afi_safi.afi != Afi::L2vpn || afi_safi.safi != Safi::Evpn {
+        return None;
+    }
+    let on = if op.is_set() { args.boolean()? } else { false };
+    if bgp.local_rib.evpn_flood.selective == on {
+        return Some(());
+    }
+    bgp.local_rib.evpn_flood.selective = on;
+    reoriginate_all_imet(bgp);
+    Some(())
+}
+
 /// `router bgp afi-safi evpn pruned-flood-list broadcast-multicast <bool>`
 /// (RFC 9574). Sets the BM flag in this node's own Type-3 IMET to ask peers
 /// to prune it from the broadcast/multicast flood list.
@@ -1635,6 +1656,11 @@ fn config_evpn_bum_tunnel_type(bgp: &mut Bgp, mut args: Args, op: ConfigOp) -> O
     }
     bgp.local_rib.evpn_flood.bum_tunnel = bum;
     reoriginate_all_imet(bgp);
+    // The flood model is mode-dependent: SR P2MP suppresses the VXLAN
+    // head-end FDB and programs a replication segment instead, so a mode
+    // change must reconcile every VNI's dataplane (withdraw stale VXLAN IR
+    // entries / emit or withdraw the ReplSeg).
+    bgp.evpn_reconcile_all_flood();
     Some(())
 }
 
@@ -3779,6 +3805,10 @@ impl Bgp {
         self.callback_add(
             "/router/bgp/afi-safi/assisted-replication/replicator-ip",
             config_assisted_replication_ip,
+        );
+        self.callback_add(
+            "/router/bgp/afi-safi/assisted-replication/selective",
+            config_assisted_replication_selective,
         );
         // EVPN Pruned-Flood-List (RFC 9574), under `router bgp afi-safi evpn
         // pruned-flood-list`. Augmented in by zebra-bgp-evpn.yang.

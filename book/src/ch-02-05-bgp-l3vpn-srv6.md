@@ -61,6 +61,9 @@ router bgp {
     afi-safi ipv4 {
       network 192.168.5.0/24;
     }
+    afi-safi ipv6 {
+      network 2001:db8:5::/64;
+    }
   }
 }
 
@@ -71,8 +74,21 @@ vrf vrf1 {
       export 65000:1;
     }
   }
+  ipv6 {
+    route-target {
+      import 65000:1;
+      export 65000:1;
+    }
+  }
 }
 ```
+
+A VRF can carry **both families at once**: the single per-VRF End.DT46
+SID terminates VPNv4 and VPNv6 alike, so a dual-stack VRF advertises its
+v4 prefixes into VPNv4 and its v6 prefixes into VPNv6 over the *same*
+service SID and the *same* `seg6local End.DT46` decap. Enable whichever
+`afi-safi` (and matching session `afi-safi vpnv4` / `vpnv6`) the site
+needs; the SRv6 forwarding token is shared.
 
 | Config | Meaning |
 |---|---|

@@ -15,6 +15,7 @@ router:
       assisted-replication:
         role: replicator
         replicator-ip: 192.168.0.101
+        selective: true
     neighbor:
     - remote-address: 192.168.0.2
       enabled: true

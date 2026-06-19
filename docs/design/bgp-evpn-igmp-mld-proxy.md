@@ -17,23 +17,44 @@ the `rib::Message::Mdb*` / `fib/netlink/handle.rs` MDB code, or
 
 Branch: `bgp-evpn-igmp-mld-proxy` (already created).
 
-## Status (updated 2026-06-20)
+## Status (updated 2026-06-20) — COMPLETE
 
-**Phase 0 (this design doc) complete. No code landed yet.** The plan below
-is the agreed slice. Numbers (PR counts, byte offsets, line numbers) are
-estimates to guide the work, not commitments — verify against the tree
-before citing.
+**All six phases are merged to `main` and validated live** (the
+`@bgp_evpn_smet` BDD passes 5/5 against real kernel namespaces). Type-6
+SMET works end to end for single-homed PEs: a kernel-bridge IGMP/MLD
+snoop drives SMET origination, a received SMET imports into the Loc-RIB
+and programs the kernel bridge MDB, and the Multicast Flags EC signals
+proxy capability on the Type-3 IMET. Type 7/8 (multihoming synch) and
+true per-VTEP `dst` selectivity are deferred (see **Deferred**).
 
-| Phase | Slice                                   | State    |
-| ----- | --------------------------------------- | -------- |
-| 0     | Design doc (this file)                  | **done** |
-| 1     | Codec — Type 6 SMET NLRI                | **done** |
-| 2     | Multicast Flags Extended Community      | **done** |
-| 3     | IMET (Type 3) capability signaling      | **done** |
-| 4     | SMET origination from kernel MDB snoop  | **done** |
-| 5     | SMET reception → selective dataplane    | **done** |
-| 6     | Show + BDD + docs                       | planned  |
-| —     | Type 7/8 multihoming synch              | deferred |
+| Phase | Slice                                   | State    | PR    |
+| ----- | --------------------------------------- | -------- | ----- |
+| 0     | Design doc (this file)                  | **done** | #1477 |
+| 1     | Codec — Type 6 SMET NLRI                | **done** | #1486 |
+| 2     | Multicast Flags Extended Community      | **done** | #1489 |
+| 3     | IMET (Type 3) capability signaling      | **done** | #1493 |
+| 4     | SMET origination from kernel MDB snoop  | **done** | #1502 |
+| 5     | SMET reception → selective dataplane    | **done** | #1506 |
+| 6     | Show + BDD + docs                       | **done** | #1510 |
+| —     | Type 7/8 multihoming synch              | deferred | —     |
+
+(Phase 4 also pushed `netlink-packet-route` `seg6` commit `d912564`, which
+adds the MDB-entry decode; tracked via the `branch = "seg6"` dependency.)
+
+### One-paragraph recap
+
+Wire types live in `crates/bgp-packet`: `EvpnSmet` / `EvpnRoute::Smet` /
+`EvpnPrefix::Smet` (`nlri_evpn.rs`) and `EvpnMcastFlags` (`ext_com.rs`,
+type 0x06 / sub 0x09). The data path is fib → rib → bgp: kernel
+`RTM_NEWMDB` (joined group `RTNLGRP_MDB`, plus an `RTM_GETMDB` startup
+dump) → `FibMessage::NewMdb` → rib maps bridge→VNI (`mdb_vni_vtep`) →
+`RibRx::SnoopJoin` → `bgp::route::evpn_originate_smet` (RD `router-id:VNI`,
+RT `AS:VNI`, next hop = local VTEP, Flags via `smet_flags()`). On receive,
+`route_evpn_export_selected` → `rib::Message::SmetInstall` →
+`fib::mdb_install` (an `MDBA_SET_ENTRY`; NESTED `MDBE_ATTR_SOURCE` for
+`(S,G)`). The `igmp-mld-proxy` knob (`zebra-bgp-evpn.yang`) gates
+origination and the IMET capability EC. User docs:
+`book/src/ch-02-32-bgp-evpn-igmp-mld-proxy.md`.
 
 ## Locked decisions (2026-06-20, with Kunihiro)
 
@@ -271,13 +292,16 @@ group-mode (follow-up). No selective dataplane yet (Phase 5).
 
 ### Phase 5 — SMET reception → selective dataplane — **done**
 - **5a (fib `handle.rs`):** `mdb_install(bridge, port, vid, group, source,
-  dst, add)` emits `RTM_{NEW,DEL}MDB` with the `MDBA_SET_ENTRY`
-  (`br_mdb_entry`) + `MDBA_SET_ENTRY_ATTRS` (`MDBE_ATTR_SOURCE` +
-  `MDBE_ATTR_DST`) layout, via the fork's `MdbMessage` +
-  `MdbAttribute::Other` (no fork change needed). Byte-layout unit tests
-  (`br_mdb_entry_v4_layout`, `…_v6_proto`, `mdb_nla_bytes_*`). Needed the
-  one-line `netlink-packet-utils = "0.5.2"` dep (unifies with the fork's)
-  to name `DefaultNla`.
+  dst, add)` emits `RTM_{NEW,DEL}MDB` via the fork's `MdbMessage` +
+  `MdbAttribute::Other` (no fork change needed). A `(*,G)` entry is the
+  bare `MDBA_SET_ENTRY` (`br_mdb_entry`); an `(S,G)` entry adds a
+  **NESTED** (`NLA_F_NESTED`) `MDBA_SET_ENTRY_ATTRS` holding
+  `MDBE_ATTR_SOURCE`. Byte-layout unit tests. Needed the one-line
+  `netlink-packet-utils = "0.5.2"` dep (unifies with the fork's) to name
+  `DefaultNla`. **`MDBE_ATTR_DST` is deliberately NOT encoded** — the
+  kernel rejects it on a plain VXLAN (EINVAL) and `iproute2` drops it
+  too; per-VTEP `dst` selectivity needs a `vnifilter` VXLAN MDB
+  (follow-up, found via the Phase-6 BDD).
 - **5b (rib):** `rib::Message::SmetInstall/SmetRemove`; `smet_install`
   resolves the VNI to its local `(bridge, vxlan-port)` via
   `vni_to_bridge_vxlan` and calls `mdb_install` (vid 0; per-VLAN is a
@@ -295,17 +319,32 @@ Multicast Flags EC gate (skip sending selective toward non-proxy PEs) is
 therefore an optimization, deferred. **Live forwarding is validated in
 Phase 6's BDD** (byte layout is unit-tested here).
 
-### Phase 6 — Show + BDD + docs
-- `show bgp evpn` rendering for Type-6 (src/grp/orig/flags); extend
-  `format_evpn_ecom_value` for the Multicast Flags EC. New `exec.yang`
-  show spelling(s) as needed (sweep bdd/ for any moved spellings).
-- BDD `@bgp_evpn_smet`: two namespaces, VXLAN + bridge with
-  `mcast_snooping`, inject a join, assert SMET advertised/received via
-  `show` and assert the kernel MDB `dst` on the remote; a leave withdraws
-  it. **Teardown scenario** stopping zebra-rs in each namespace, deleting
-  each namespace, asserting `the test environment should be clean`.
+### Phase 6 — Show + BDD + docs — **done**
+- `show bgp evpn` renders Type-6 via the Phase-1 `EvpnPrefix` `Display`
+  (`[6]:[EthTag]:[SrcLen]:[Src]:[GrpLen]:[Grp]:[OrigLen]:[Orig]`); the
+  `smet` route-type filter + type-6 legend were already present.
+  `format_evpn_ecom_value` now renders the Multicast Flags EC as `MF:IM`.
+- BDD `@bgp_evpn_smet` (`bdd/tests/features/bgp_evpn_smet.feature` +
+  `configs/bgp_evpn_smet/z{1,2}-1.yaml`): two iBGP EVPN nodes, each with
+  a `mcast_snooping` bridge + enslaved VXLAN; a `bridge mdb add` on z2
+  drives SMET origination; asserts z1 shows the SMET + `RT:65001:10`,
+  z1's kernel bridge MDB gains the group, and a leave withdraws both.
+  Plus a new `I execute "<cmd>" in namespace` step (raw `ip`/`bridge`,
+  vs the vtyctl-only `I run`) and `bridge mdb … contain` steps. Teardown
+  scenario asserts a clean environment. **Ran live (sudo netns): 5/5
+  scenarios pass.**
+- The BDD found and fixed a real Phase-5 dataplane bug: the original
+  `mdb_install` sent `MDBE_ATTR_DST`, which the kernel rejected with
+  EINVAL — corrected to the `MDBA_SET_ENTRY`-only / NESTED-source form
+  above.
 
 ## Deferred (not built — recorded so a contributor can pick it up)
+
+> The deferred items are written up with code anchors and an approach
+> for each in **`bgp-evpn-igmp-mld-proxy-followups.md`** (per-VTEP `dst`
+> via vnifilter VXLAN MDB; link-local-group filtering; SMET-flags
+> fidelity; the MF-EC capability gate; per-VLAN VID; Type 7/8). The
+> headline below stays here for quick reference.
 
 **Type 7 / 8 (Multicast Join / Leave Synch).** All-active multihoming
 only. Prerequisites absent today:
