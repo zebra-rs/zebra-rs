@@ -260,7 +260,7 @@ end-state.
   behaviour change; validated by the full N>1 shard BDD matrix (88
   scenarios). The DumpV4 path (①–④) is now live.
 - **⑤ received-routes Adj-RIB-In gather. ✅ DONE (2026-06-16), scoped.**
-  `show bgp neighbors <peer> received-routes` read main's `bgp.shard.adj_in`
+  `show bgp neighbor <peer> received-routes` read main's `bgp.shard.adj_in`
   (empty at N>1 — the mirror replicates the Loc-RIB, not adj_in). Added
   `ShardMsg::DumpAdjInV4 { ident, reply }` (oneshot): `process_show_msg`
   scatters it to every shard, awaits the N replies, merges the disjoint

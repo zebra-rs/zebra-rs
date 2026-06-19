@@ -96,7 +96,7 @@ every member; a statement on the neighbor itself wins.
 
 ## Verification
 
-`show bgp neighbors <addr>` reports whether the knob is active:
+`show bgp neighbor <addr>` reports whether the knob is active:
 
 ```
   Enforce-first-AS enabled (drop inbound updates not starting with peer AS)

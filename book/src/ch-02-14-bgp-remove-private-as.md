@@ -143,7 +143,7 @@ every member; a statement on the neighbor itself wins.
 
 ## Verification
 
-`show bgp neighbors <addr>` reports the configured form:
+`show bgp neighbor <addr>` reports the configured form:
 
 ```
   Private AS removal: remove-private-AS (outbound)

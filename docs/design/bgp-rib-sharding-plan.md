@@ -477,9 +477,9 @@ The per-peer **show** reads at N>1 also landed, each intercepted in
 scatter-gathered from the off-main owner over oneshots — the sync render
 would read the empty main-side copy and print empty/0:
 
-- **`show bgp neighbors <peer> received-routes`** — Adj-RIB-In lives in the
+- **`show bgp neighbor <peer> received-routes`** — Adj-RIB-In lives in the
   pool shards at N>1; gathered via `ShardMsg::DumpAdjInV4` (A2 ⑤).
-- **`show bgp neighbors <peer> advertised-routes`** — Adj-RIB-Out lives in
+- **`show bgp neighbor <peer> advertised-routes`** — Adj-RIB-Out lives in
   the PET / group task at gate-on; requested via `request_adj_out`.
 - **`show bgp [ipv4] summary`** PfxRcd / PfxSnt — PfxRcd from the shards,
   PfxSnt from the PET or group task; **count-only** messages

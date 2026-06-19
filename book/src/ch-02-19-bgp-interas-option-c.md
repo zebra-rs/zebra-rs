@@ -248,7 +248,7 @@ $ show bgp labeled-unicast
 The `label-v4` capability is negotiated on each BGP-LU session:
 
 ```
-$ show bgp neighbors 172.16.0.2
+$ show bgp neighbor 172.16.0.2
   ...
     IPv4 Labeled Unicast: advertised and received
 ```
@@ -262,7 +262,7 @@ $ show bgp vpnv4
 Route Distinguisher: 65001:1
  *>  10.2.0.0/30        2.2.2.1   ...   # rt:65000:100
 
-$ show bgp neighbors 2.2.2.1
+$ show bgp neighbor 2.2.2.1
   BGP state = Established
 ```
 

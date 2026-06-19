@@ -39,7 +39,7 @@ count — so a v6-heavy or VPN-heavy deployment sees little benefit today.
 
 Forwarding correctness is unaffected at any shard count: sharding changes
 *where* the work runs, not *what* gets advertised or installed. `show bgp
-ipv4`, session-up sync, and `show bgp neighbors <peer> received-routes` all
+ipv4`, session-up sync, and `show bgp neighbor <peer> received-routes` all
 read the same routes whether you run 1 shard or 16.
 
 A note on core budget: the worker shards and the outbound-policy worker pool

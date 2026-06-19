@@ -63,7 +63,7 @@ Feature: BGP as-override rewrites the peer AS on egress so a shared-AS neighbor 
     And I wait 30 seconds for BGP to operate
     Then BGP session in "z3" to "192.168.1.2" should be "Established"
     And BGP route in "z3" has "10.0.0.1/32"
-    And show command "show bgp neighbors" in namespace "z2" should contain "AS-Override"
+    And show command "show bgp neighbor" in namespace "z2" should contain "AS-Override"
 
   # Pure P2P topology (no bridge): deleting each namespace destroys the veth
   # pair ends it holds, so only the daemons and namespaces need teardown.

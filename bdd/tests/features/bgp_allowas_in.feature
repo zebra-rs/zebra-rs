@@ -61,7 +61,7 @@ Feature: BGP allowas-in relaxes the inbound AS_PATH loop check
     And I wait 30 seconds for BGP to operate
     Then BGP session in "z3" to "192.168.1.2" should be "Established"
     And BGP route in "z3" has "10.0.0.1/32"
-    And show command "show bgp neighbors" in namespace "z3" should contain "Allowas-in: 3 occurrence(s)"
+    And show command "show bgp neighbor" in namespace "z3" should contain "Allowas-in: 3 occurrence(s)"
 
   Scenario: allowas-in origin mode accepts the route and shows in neighbor output
     Given the test topology exists
@@ -70,7 +70,7 @@ Feature: BGP allowas-in relaxes the inbound AS_PATH loop check
     And I wait 30 seconds for BGP to operate
     Then BGP session in "z3" to "192.168.1.2" should be "Established"
     And BGP route in "z3" has "10.0.0.1/32"
-    And show command "show bgp neighbors" in namespace "z3" should contain "Allowas-in: origin"
+    And show command "show bgp neighbor" in namespace "z3" should contain "Allowas-in: origin"
 
   # Pure P2P topology (no bridge): deleting each namespace destroys the veth
   # pair ends it holds, so only the daemons and namespaces need teardown.

@@ -4,7 +4,7 @@ Feature: show ipv6 nd exposes ND counters, neighbors, and BGP discovery state
   As a network operator running BGP unnumbered over IPv6 link-locals
   I want `show ipv6 nd` to report per-interface RA scheduler state,
   sent/received ND packet counters, and the per-source neighbor table,
-  and `show bgp neighbors` to report when the interface peer's
+  and `show bgp neighbor` to report when the interface peer's
   link-local was discovered via ND — so the RA exchange that underpins
   peer discovery is observable instead of a black box.
 
@@ -65,8 +65,8 @@ Feature: show ipv6 nd exposes ND counters, neighbors, and BGP discovery state
 
   Scenario: BGP neighbor detail reports the ND discovery
     Given the test topology exists
-    Then show command "show bgp neighbors i1" in namespace "z1" should contain "Interface peer: link-local learned via IPv6 ND router advertisement"
-    And show command "show bgp neighbors i1" in namespace "z1" should contain "Discovered "
+    Then show command "show bgp neighbor i1" in namespace "z1" should contain "Interface peer: link-local learned via IPv6 ND router advertisement"
+    And show command "show bgp neighbor i1" in namespace "z1" should contain "Discovered "
 
   Scenario: Teardown topology
     Given the test topology exists

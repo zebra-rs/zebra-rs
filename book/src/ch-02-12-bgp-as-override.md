@@ -102,7 +102,7 @@ every member; a statement on the neighbor itself wins.
 
 ## Verification
 
-`show bgp neighbors <addr>` reports whether the knob is active:
+`show bgp neighbor <addr>` reports whether the knob is active:
 
 ```
   AS-Override enabled (outbound AS_PATH replacement)

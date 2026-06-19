@@ -852,7 +852,7 @@ async fn verify_bgp_session(
     expected_state: String,
 ) {
     let scoped = world.ns(&namespace);
-    let cmd = format!("show bgp neighbors {}", neighbor);
+    let cmd = format!("show bgp neighbor {}", neighbor);
     let binding = ["show", "-j", &cmd];
     let output = netns::exec_in_netns(&scoped, "vtyctl", &binding)
         .await
@@ -886,7 +886,7 @@ async fn verify_bgp_session_not(
     unexpected_state: String,
 ) {
     let scoped = world.ns(&namespace);
-    let cmd = format!("show bgp neighbors {}", neighbor);
+    let cmd = format!("show bgp neighbor {}", neighbor);
     let binding = ["show", "-j", &cmd];
     let output = netns::exec_in_netns(&scoped, "vtyctl", &binding)
         .await
@@ -910,7 +910,7 @@ async fn verify_bgp_session_not(
     );
 }
 
-/// Poll `show bgp neighbors <addr>` (JSON) until the addressed peer's
+/// Poll `show bgp neighbor <addr>` (JSON) until the addressed peer's
 /// `state` matches `expected` (`want_match = true`) or stops matching it
 /// (`want_match = false`). Returns `(satisfied, last_output)`.
 ///
@@ -927,7 +927,7 @@ async fn poll_bgp_session_state(
     want_match: bool,
 ) -> (bool, String) {
     const ATTEMPTS: u32 = 30;
-    let cmd = format!("show bgp neighbors {}", neighbor);
+    let cmd = format!("show bgp neighbor {}", neighbor);
     let mut last = String::new();
     for i in 0..ATTEMPTS {
         last = netns::exec_in_netns(scoped, "vtyctl", &["show", "-j", &cmd])
@@ -991,7 +991,7 @@ async fn verify_bgp_session_eventually_not(
     );
 }
 
-/// Poll `show bgp neighbors` (all peers, JSON) until some peer's
+/// Poll `show bgp neighbor` (all peers, JSON) until some peer's
 /// `state` matches `expected` (`want_match = true`) or no peer matches
 /// it (`want_match = false`). Returns `(satisfied, last_output)`.
 ///
@@ -1010,7 +1010,7 @@ async fn poll_unnumbered_session_state(
     const ATTEMPTS: u32 = 60;
     let mut last = String::new();
     for i in 0..ATTEMPTS {
-        last = netns::exec_in_netns(scoped, "vtyctl", &["show", "-j", "show bgp neighbors"])
+        last = netns::exec_in_netns(scoped, "vtyctl", &["show", "-j", "show bgp neighbor"])
             .await
             .expect("Failed to get BGP neighbors");
         let matched = serde_json::from_str::<Value>(&last)

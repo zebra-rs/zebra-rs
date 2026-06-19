@@ -41,7 +41,7 @@ Feature: BGP unnumbered neighbor visible in summaries before any session
     Then show command "show bgp summary" in namespace "z1" should contain "i1 "
     And show command "show bgp summary" in namespace "z1" should contain "Idle"
     And show command "show bgp ipv4 summary" in namespace "z1" should contain "i1 "
-    And show command "show bgp neighbors i1" in namespace "z1" should contain "BGP neighbor on i1:"
+    And show command "show bgp neighbor i1" in namespace "z1" should contain "BGP neighbor on i1:"
 
   Scenario: Teardown topology
     Given the test topology exists

@@ -131,7 +131,7 @@ every member; a statement on the neighbor itself wins.
 
 ## Verification
 
-`show bgp neighbors` reports the active setting for the session:
+`show bgp neighbor` reports the active setting for the session:
 
 ```
   Allowas-in: 3 occurrence(s)

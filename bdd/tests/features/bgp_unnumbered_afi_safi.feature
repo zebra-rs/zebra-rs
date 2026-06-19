@@ -62,8 +62,8 @@ Feature: BGP neighbor-group afi-safi inheritance on an IPv6 unnumbered iBGP sess
     Then BGP session in namespace "z1" should eventually be "Established"
     And BGP session in namespace "z2" should eventually be "Established"
     And I wait 5 seconds
-    And show command "show bgp neighbors i1" in namespace "z1" should contain "IPv4 Unicast: advertised and received"
-    And show command "show bgp neighbors i1" in namespace "z1" should contain "IPv6 Unicast: advertised and received"
+    And show command "show bgp neighbor i1" in namespace "z1" should contain "IPv4 Unicast: advertised and received"
+    And show command "show bgp neighbor i1" in namespace "z1" should contain "IPv6 Unicast: advertised and received"
     And show command "show bgp neighbor-group dynamic" in namespace "z1" should contain "ipv4 enabled, ipv6 enabled"
     And BGP route in "z2" has "10.0.1.1/32"
     And BGP route in "z1" has "10.0.1.2/32"
@@ -85,9 +85,9 @@ Feature: BGP neighbor-group afi-safi inheritance on an IPv6 unnumbered iBGP sess
     And I wait 3 seconds
     # Positive assert first so the not-contains below cannot pass
     # vacuously on an empty/garbled show output.
-    And show command "show bgp neighbors i1" in namespace "z1" should contain "IPv6 Unicast: advertised and received"
-    And show command "show bgp neighbors i1" in namespace "z1" should not contain "IPv4 Unicast:"
-    And show command "show bgp neighbors i1" in namespace "z2" should not contain "IPv4 Unicast:"
+    And show command "show bgp neighbor i1" in namespace "z1" should contain "IPv6 Unicast: advertised and received"
+    And show command "show bgp neighbor i1" in namespace "z1" should not contain "IPv4 Unicast:"
+    And show command "show bgp neighbor i1" in namespace "z2" should not contain "IPv4 Unicast:"
     And show command "show bgp neighbor-group dynamic" in namespace "z1" should contain "ipv4 disabled, ipv6 enabled"
     # IPv4 routes from the old session were cleaned on the bounce and
     # must not re-sync on the IPv6-only session; IPv6 routes must.

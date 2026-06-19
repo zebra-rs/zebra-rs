@@ -56,8 +56,8 @@ Feature: BGP per-AFI neighbor policy under afi-safi (with legacy fallback)
     And I wait 5 seconds for BGP to operate
     Then BGP route in "z2" has "10.0.0.1/32"
     And BGP route in "z2" has "10.0.0.2/32"
-    And show command "show bgp neighbors 192.168.0.1" in namespace "z2" should contain "ipv4: policy in PERMIT-ALL"
-    And show command "show bgp neighbors 192.168.0.1" in namespace "z2" should contain "(peer-wide): policy in DENY-ALL"
+    And show command "show bgp neighbor 192.168.0.1" in namespace "z2" should contain "ipv4: policy in PERMIT-ALL"
+    And show command "show bgp neighbor 192.168.0.1" in namespace "z2" should contain "(peer-wide): policy in DENY-ALL"
 
   Scenario: Teardown topology
     Given the test topology exists

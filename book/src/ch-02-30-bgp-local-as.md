@@ -150,11 +150,11 @@ The fastest check is the peer's view. On an FRR neighbor configured
 with `remote-as 64999`:
 
 ```
-show bgp neighbors 192.168.1.3   # remote AS shows 64999, session Established
+show bgp neighbor 192.168.1.3   # remote AS shows 64999, session Established
 show bgp 10.0.0.0/24         # AS_PATH begins 64999 …
 ```
 
-On the local router, `show bgp neighbors <addr>` reports the
+On the local router, `show bgp neighbor <addr>` reports the
 substitute AS for the session, and `show bgp <prefix>` on a route
 learned from the neighbor shows whether the ingress prepend is active
 (`64999` leading the path, unless `no-prepend true`).
