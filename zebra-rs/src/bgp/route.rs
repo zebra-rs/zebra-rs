@@ -1923,8 +1923,28 @@ pub struct EvpnFloodState {
     /// (`... evpn bum-tunnel-type`). Default Ingress Replication; the SR
     /// P2MP modes advertise an RFC 9524 replication tree rooted here.
     pub bum_tunnel: EvpnBumTunnel,
+    /// RFC 9574 Pruned-Flood-List request flags set in this node's *own*
+    /// Type-3 IMET (`... evpn pruned-flood-list`): ask remote PEs to prune
+    /// this node from the broadcast/multicast (`prune_bm`) and/or
+    /// unknown-unicast (`prune_unknown`) flood lists.
+    pub prune_bm: bool,
+    pub prune_unknown: bool,
     /// Per-VNI flood model.
     vnis: BTreeMap<u32, VniFlood>,
+}
+
+/// One remote PE's Type-3 IMET state for a VNI.
+#[derive(Debug, Default)]
+struct RemoteImet {
+    /// The remote's AR-IP when it advertised a Replicator-AR route (PMSI
+    /// tunnel type 0x0A), else `None` for a Regular-IR route.
+    ar_ip: Option<IpAddr>,
+    /// RFC 9574 Pruned-Flood-List: the remote asked to be pruned from BOTH
+    /// the BM and the unknown-unicast flood lists, so we drop it from our
+    /// flood list entirely. A partial (BM-only / U-only) request is not
+    /// honored — the single kernel flood list per VNI can't express a
+    /// per-category prune — so such a remote stays in the flood list.
+    prune: bool,
 }
 
 /// Per-VNI flood state: which remotes advertised a Type-3 IMET, and what
@@ -1933,10 +1953,11 @@ pub struct EvpnFloodState {
 struct VniFlood {
     /// Remote PEs that advertised an Ingress/Assisted Replication Type-3
     /// IMET for this VNI, keyed by the NLRI Originating Router IP (the
-    /// remote's IR-IP). The value is the remote's AR-IP when it advertised
-    /// a Replicator-AR route (PMSI tunnel type 0x0A), else `None` for a
-    /// Regular-IR route. These are the VXLAN head-end flood candidates.
-    remotes: BTreeMap<IpAddr, Option<IpAddr>>,
+    /// remote's IR-IP). The value ([`RemoteImet`]) carries the remote's
+    /// AR-IP (when it advertised a Replicator-AR route, PMSI tunnel type
+    /// 0x0A) and its RFC 9574 prune request. These are the VXLAN head-end
+    /// flood candidates.
+    remotes: BTreeMap<IpAddr, RemoteImet>,
     /// Remote PEs that advertised an SR P2MP tree Type-3 IMET (PMSI tunnel
     /// type 0x0C/0x0D, RFC 9524), keyed by Originating Router IP (the tree
     /// Root), valued by the tree's Tree-ID. Recorded for the SR replication
@@ -1951,12 +1972,13 @@ struct VniFlood {
 impl EvpnFloodState {
     /// Record an Ingress/Assisted Replication remote's Type-3 IMET for
     /// `vni`. `ar_ip` is `Some` when the remote is an AR-REPLICATOR
-    /// (Replicator-AR route). Clears any stale SR P2MP record for the same
-    /// originator (a remote that flipped tunnel type).
-    pub fn update_remote(&mut self, vni: u32, orig: IpAddr, ar_ip: Option<IpAddr>) {
+    /// (Replicator-AR route); `prune` is true when it requested whole-VTEP
+    /// pruning (RFC 9574 BM and U both set). Clears any stale SR P2MP record
+    /// for the same originator (a remote that flipped tunnel type).
+    pub fn update_remote(&mut self, vni: u32, orig: IpAddr, ar_ip: Option<IpAddr>, prune: bool) {
         let v = self.vnis.entry(vni).or_default();
         v.sr_remotes.remove(&orig);
-        v.remotes.insert(orig, ar_ip);
+        v.remotes.insert(orig, RemoteImet { ar_ip, prune });
     }
 
     /// Record an SR P2MP tree remote's Type-3 IMET for `vni` (RFC 9524):
@@ -2038,12 +2060,18 @@ impl EvpnFloodState {
         let Some(v) = self.vnis.get(&vni) else {
             return BTreeSet::new();
         };
+        // RFC 9574 Pruned-Flood-List: drop any remote that asked to be pruned
+        // from both flood categories before computing flood targets.
+        let active: Vec<(&IpAddr, &RemoteImet)> =
+            v.remotes.iter().filter(|(_, r)| !r.prune).collect();
         match self.role {
-            AssistedReplicationRole::Leaf => match v.remotes.values().flatten().min().copied() {
-                Some(ar_ip) => BTreeSet::from([ar_ip]),
-                None => v.remotes.keys().copied().collect(),
-            },
-            _ => v.remotes.keys().copied().collect(),
+            AssistedReplicationRole::Leaf => {
+                match active.iter().filter_map(|(_, r)| r.ar_ip).min() {
+                    Some(ar_ip) => BTreeSet::from([ar_ip]),
+                    None => active.iter().map(|(orig, _)| **orig).collect(),
+                }
+            }
+            _ => active.iter().map(|(orig, _)| **orig).collect(),
         }
     }
 
@@ -6054,7 +6082,10 @@ fn route_evpn_export_selected(
                     let ar_ip = pmsi
                         .filter(|p| p.is_assisted_replication())
                         .map(|p| p.endpoint);
-                    bgp.local_rib.evpn_flood.update_remote(vni, *orig, ar_ip);
+                    let prune = imet_whole_vtep_prune(pmsi);
+                    bgp.local_rib
+                        .evpn_flood
+                        .update_remote(vni, *orig, ar_ip, prune);
                 }
                 bgp.local_rib.evpn_flood.reconcile(vni, bgp.rib_client);
             } else {
@@ -12037,7 +12068,13 @@ impl Bgp {
         let bum = self.local_rib.evpn_flood.bum_tunnel;
         let role = self.local_rib.evpn_flood.role;
         let ar_ip = self.local_rib.evpn_flood.ar_ip;
-        let (pmsi, nexthop) = imet_pmsi_tunnel(bum, role, ar_ip, vtep_local, vni);
+        let prune_bm = self.local_rib.evpn_flood.prune_bm;
+        let prune_unknown = self.local_rib.evpn_flood.prune_unknown;
+        let (mut pmsi, nexthop) = imet_pmsi_tunnel(bum, role, ar_ip, vtep_local, vni);
+        // RFC 9574 Pruned-Flood-List: advertise our prune preferences so
+        // remote PEs can drop us from the BM / unknown-unicast flood lists.
+        pmsi.set_prune_bm(prune_bm);
+        pmsi.set_prune_unknown(prune_unknown);
         attr.pmsi_tunnel = Some(pmsi);
         attr.nexthop = Some(BgpNexthop::Evpn(nexthop));
 
@@ -12268,6 +12305,17 @@ fn rd_from_router_id_vni(router_id: Ipv4Addr, vni: u32) -> Option<RouteDistingui
 /// When `bum` selects an SR P2MP tree (RFC 9524) the AR role is bypassed:
 /// the local node is the tree Root, the Tree-ID is derived from the VNI,
 /// and the tunnel endpoint / next hop is the local VTEP.
+/// RFC 9574 Pruned-Flood-List: decide whether a received Type-3 IMET prunes
+/// its originator from OUR flood list. We honor the request only when the
+/// remote asks to be pruned from BOTH the BM and the unknown-unicast lists —
+/// a single kernel flood list per VNI can't express a per-category
+/// (BM-only / U-only) prune, so a partial request is not honored and the
+/// remote stays in the flood list.
+fn imet_whole_vtep_prune(pmsi: Option<&PmsiTunnel>) -> bool {
+    pmsi.map(|p| p.prune_bm() && p.prune_unknown())
+        .unwrap_or(false)
+}
+
 fn imet_pmsi_tunnel(
     bum: EvpnBumTunnel,
     role: AssistedReplicationRole,
@@ -12369,14 +12417,28 @@ mod evpn_flood_tests {
         s.parse().unwrap()
     }
 
+    /// An Ingress Replication PMSI with the given BM / U prune flags set.
+    fn pmsi(bm: bool, unknown: bool) -> PmsiTunnel {
+        let mut p = PmsiTunnel {
+            flags: 0,
+            tunnel_type: PmsiTunnel::TUNNEL_INGRESS_REPLICATION,
+            vni: 10,
+            endpoint: ip("10.0.0.1"),
+            tree_id: None,
+        };
+        p.set_prune_bm(bm);
+        p.set_prune_unknown(unknown);
+        p
+    }
+
     /// RNVE floods to every remote PE's IR-IP (originating IP), ignoring any
     /// AR-IP a replicator advertised.
     #[test]
     fn rnve_floods_all_remote_ir_ips() {
         let mut f = EvpnFloodState::default();
-        f.update_remote(100, ip("10.0.0.1"), None);
-        f.update_remote(100, ip("10.0.0.2"), None);
-        f.update_remote(100, ip("10.0.0.3"), Some(ip("10.0.0.254")));
+        f.update_remote(100, ip("10.0.0.1"), None, false);
+        f.update_remote(100, ip("10.0.0.2"), None, false);
+        f.update_remote(100, ip("10.0.0.3"), Some(ip("10.0.0.254")), false);
         assert_eq!(
             f.desired(100),
             BTreeSet::from([ip("10.0.0.1"), ip("10.0.0.2"), ip("10.0.0.3")])
@@ -12391,9 +12453,9 @@ mod evpn_flood_tests {
             role: AssistedReplicationRole::Leaf,
             ..Default::default()
         };
-        f.update_remote(100, ip("10.0.0.1"), None); // another leaf
-        f.update_remote(100, ip("10.0.0.10"), Some(ip("10.0.0.254"))); // replicator A
-        f.update_remote(100, ip("10.0.0.20"), Some(ip("10.0.0.253"))); // replicator B
+        f.update_remote(100, ip("10.0.0.1"), None, false); // another leaf
+        f.update_remote(100, ip("10.0.0.10"), Some(ip("10.0.0.254")), false); // replicator A
+        f.update_remote(100, ip("10.0.0.20"), Some(ip("10.0.0.253")), false); // replicator B
         assert_eq!(f.desired(100), BTreeSet::from([ip("10.0.0.253")]));
     }
 
@@ -12405,8 +12467,8 @@ mod evpn_flood_tests {
             role: AssistedReplicationRole::Leaf,
             ..Default::default()
         };
-        f.update_remote(100, ip("10.0.0.1"), None);
-        f.update_remote(100, ip("10.0.0.2"), None);
+        f.update_remote(100, ip("10.0.0.1"), None, false);
+        f.update_remote(100, ip("10.0.0.2"), None, false);
         assert_eq!(
             f.desired(100),
             BTreeSet::from([ip("10.0.0.1"), ip("10.0.0.2")])
@@ -12421,8 +12483,8 @@ mod evpn_flood_tests {
             role: AssistedReplicationRole::Leaf,
             ..Default::default()
         };
-        f.update_remote(100, ip("10.0.0.1"), None);
-        f.update_remote(100, ip("10.0.0.10"), Some(ip("10.0.0.254")));
+        f.update_remote(100, ip("10.0.0.1"), None, false);
+        f.update_remote(100, ip("10.0.0.10"), Some(ip("10.0.0.254")), false);
         assert_eq!(f.desired(100), BTreeSet::from([ip("10.0.0.254")]));
         f.remove_remote(100, ip("10.0.0.10"));
         assert_eq!(f.desired(100), BTreeSet::from([ip("10.0.0.1")]));
@@ -12432,8 +12494,8 @@ mod evpn_flood_tests {
     #[test]
     fn flood_state_is_per_vni() {
         let mut f = EvpnFloodState::default();
-        f.update_remote(100, ip("10.0.0.1"), None);
-        f.update_remote(200, ip("10.0.0.2"), None);
+        f.update_remote(100, ip("10.0.0.1"), None, false);
+        f.update_remote(200, ip("10.0.0.2"), None, false);
         assert_eq!(f.desired(100), BTreeSet::from([ip("10.0.0.1")]));
         assert_eq!(f.desired(200), BTreeSet::from([ip("10.0.0.2")]));
         assert!(f.desired(300).is_empty());
@@ -12444,7 +12506,7 @@ mod evpn_flood_tests {
     #[test]
     fn sr_p2mp_remotes_recorded_and_excluded_from_flood() {
         let mut f = EvpnFloodState::default();
-        f.update_remote(100, ip("10.0.0.1"), None); // plain IR remote
+        f.update_remote(100, ip("10.0.0.1"), None, false); // plain IR remote
         f.update_sr_remote(100, ip("10.0.0.7"), 4242); // SR P2MP tree remote
         // Only the IR remote floods via VXLAN; the SR P2MP Root does not.
         assert_eq!(f.desired(100), BTreeSet::from([ip("10.0.0.1")]));
@@ -12459,7 +12521,7 @@ mod evpn_flood_tests {
             bum_tunnel: EvpnBumTunnel::SrMplsP2mp,
             ..Default::default()
         };
-        f.update_remote(100, ip("10.0.0.1"), None);
+        f.update_remote(100, ip("10.0.0.1"), None, false);
         f.update_sr_remote(100, ip("10.0.0.2"), 100);
         // No VXLAN head-end FDB targets in SR P2MP mode.
         assert!(f.desired(100).is_empty());
@@ -12475,7 +12537,7 @@ mod evpn_flood_tests {
     #[test]
     fn replication_leaves_unions_ir_and_sr_remotes() {
         let mut f = EvpnFloodState::default();
-        f.update_remote(100, ip("10.0.0.1"), None);
+        f.update_remote(100, ip("10.0.0.1"), None, false);
         f.update_sr_remote(100, ip("10.0.0.7"), 9);
         assert_eq!(
             f.replication_leaves(100),
@@ -12490,7 +12552,7 @@ mod evpn_flood_tests {
     #[test]
     fn remote_tunnel_type_flip_is_exclusive() {
         let mut f = EvpnFloodState::default();
-        f.update_remote(100, ip("10.0.0.5"), None);
+        f.update_remote(100, ip("10.0.0.5"), None, false);
         assert_eq!(f.desired(100), BTreeSet::from([ip("10.0.0.5")]));
         assert!(f.sr_p2mp_remotes(100).is_empty());
 
@@ -12500,7 +12562,7 @@ mod evpn_flood_tests {
         assert_eq!(f.sr_p2mp_remotes(100), vec![(ip("10.0.0.5"), 7)]);
 
         // Flip back SR P2MP -> IR.
-        f.update_remote(100, ip("10.0.0.5"), None);
+        f.update_remote(100, ip("10.0.0.5"), None, false);
         assert_eq!(f.desired(100), BTreeSet::from([ip("10.0.0.5")]));
         assert!(f.sr_p2mp_remotes(100).is_empty());
 
@@ -12509,6 +12571,49 @@ mod evpn_flood_tests {
         f.remove_remote(100, ip("10.0.0.5"));
         assert!(f.desired(100).is_empty());
         assert!(f.sr_p2mp_remotes(100).is_empty());
+    }
+
+    /// RFC 9574 P-FL: a remote requesting whole-VTEP prune is dropped from
+    /// an RNVE's flood list.
+    #[test]
+    fn pruned_remote_excluded_from_rnve_flood() {
+        let mut f = EvpnFloodState::default();
+        f.update_remote(100, ip("10.0.0.1"), None, false);
+        f.update_remote(100, ip("10.0.0.2"), None, true);
+        assert_eq!(f.desired(100), BTreeSet::from([ip("10.0.0.1")]));
+    }
+
+    /// A pruned remote is also dropped from an AR-LEAF's full-IR fallback.
+    #[test]
+    fn pruned_remote_excluded_from_leaf_fallback() {
+        let mut f = EvpnFloodState {
+            role: AssistedReplicationRole::Leaf,
+            ..Default::default()
+        };
+        f.update_remote(100, ip("10.0.0.1"), None, false);
+        f.update_remote(100, ip("10.0.0.2"), None, true);
+        assert_eq!(f.desired(100), BTreeSet::from([ip("10.0.0.1")]));
+    }
+
+    /// Whole-VTEP prune is honored only when BOTH BM and U are set — a
+    /// per-category (BM-only / U-only) request is not expressible with one
+    /// kernel flood list per VNI, so it is not honored.
+    #[test]
+    fn whole_vtep_prune_requires_both_flags() {
+        assert!(!imet_whole_vtep_prune(None));
+        assert!(!imet_whole_vtep_prune(Some(&pmsi(false, false))));
+        assert!(
+            !imet_whole_vtep_prune(Some(&pmsi(true, false))),
+            "BM-only is not honored"
+        );
+        assert!(
+            !imet_whole_vtep_prune(Some(&pmsi(false, true))),
+            "U-only is not honored"
+        );
+        assert!(
+            imet_whole_vtep_prune(Some(&pmsi(true, true))),
+            "BM and U → whole-VTEP prune"
+        );
     }
 }
 

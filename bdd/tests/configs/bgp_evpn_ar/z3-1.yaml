@@ -1,5 +1,7 @@
 # z3 — RNVE (regular NVE, no Assisted Replication). Does plain ingress
-# replication: floods to every remote PE's IR-IP, ignoring the AR-IP.
+# replication: floods to every remote PE's IR-IP, ignoring the AR-IP. Also
+# requests RFC 9574 whole-VTEP Pruned-Flood-List (BM + U), so peers drop z3
+# from their flood lists (z3 still floods outbound to z1/z2).
 vxlan:
 - name: vxlan10
   vni: 10
@@ -12,6 +14,9 @@ router:
     afi-safi:
     - name: evpn
       advertise-all-vni: true
+      pruned-flood-list:
+        broadcast-multicast: true
+        unknown-unicast: true
     neighbor:
     - remote-address: 192.168.0.1
       enabled: true
