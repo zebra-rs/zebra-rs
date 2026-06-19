@@ -2046,6 +2046,36 @@ mod yang_load_tests {
         );
     }
 
+    /// `vxlan <name> bridge <bridge>` enslaves a VXLAN device to a bridge,
+    /// reusing the same `bridge` leafref (to `/bridge/name`) as the
+    /// interface case. Pin that the `set` path parses so a future YANG
+    /// edit dropping/renaming the leaf is caught here rather than silently
+    /// turning the `/vxlan/bridge` dispatch into a no-op.
+    #[test]
+    fn vxlan_bridge_is_settable() {
+        use crate::config::ExecCode;
+        use crate::config::parse::{State, parse};
+        use libyang::to_entry;
+
+        let mut yang = YangStore::new();
+        yang.add_path(concat!(env!("CARGO_MANIFEST_DIR"), "/yang"));
+        yang.read_with_resolve("configure")
+            .expect("configure mode loads");
+        yang.identity_resolve();
+        let module = yang
+            .find_module("configure")
+            .expect("configure module present");
+        let entry = to_entry(&yang, module);
+
+        let (code, _comps, _state) =
+            parse("set vxlan vni550 bridge br0", entry, None, State::new());
+        assert_eq!(
+            code,
+            ExecCode::Success,
+            "`set vxlan vni550 bridge br0` must parse as a settable path",
+        );
+    }
+
     /// The per-neighbor `afi-safi ipv6 encapsulation-type` knob is a
     /// hand-added leaf on the vendored `ietf-bgp-neighbor` afi-safi list.
     /// `load_mode` proves the module loads but not that the concrete path

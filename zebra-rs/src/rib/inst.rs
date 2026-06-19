@@ -1803,6 +1803,13 @@ impl Rib {
                 self.fib_handle.vxlan_add(&vxlan).await;
             }
             Message::VxlanDel { name } => {
+                // Deleting the VXLAN device removes its kernel master
+                // implicitly. Drop any staged bridge-bind for it so a
+                // later same-named VXLAN isn't silently re-enslaved by a
+                // stale intent (belt-and-braces: a `delete vxlan X bridge
+                // BR` line, when present, already clears it via the
+                // `/vxlan/bridge` dispatch above).
+                self.pending_bridge_bind.remove(&name);
                 let vxlan = Vxlan {
                     name: name.clone(),
                     ..Default::default()
@@ -2572,7 +2579,7 @@ impl Rib {
                 //
             }
             ConfigOp::Set | ConfigOp::Delete => {
-                let (path, args) = path_from_command(&msg.paths);
+                let (path, mut args) = path_from_command(&msg.paths);
                 if path.as_str() == "/system/router-id" {
                     let _ = self.router_id_config_exec(args, msg.op);
                 } else if path.as_str().starts_with("/router/static/ipv4/route") {
@@ -2586,6 +2593,34 @@ impl Rib {
                     let _ = link_config_exec(self, path, args, msg.op).await;
                 } else if path.as_str().starts_with("/bridge") {
                     let _ = self.bridge_config.exec(path, args, msg.op);
+                } else if path.as_str() == "/vxlan/bridge" {
+                    // `set vxlan X bridge BR` enslaves the VXLAN device X
+                    // to bridge BR, reusing the SAME deferred bridge-bind
+                    // as `interface X bridge BR` (a VXLAN is an ordinary
+                    // kernel link in `self.links`, keyed by name). The
+                    // VXLAN-specific bridge-slave defaults are applied
+                    // automatically: `neigh_suppress on` + `learning off`
+                    // by `vxlan_bridge_port_defaults` (fired from
+                    // `link_add` when a VXLAN gains a master), and
+                    // addrgenmode none is the VXLAN creation default. We
+                    // intercept here rather than routing through the
+                    // VxlanBuilder so a bridge-only change doesn't re-emit
+                    // VxlanAdd (which would re-create the device). The
+                    // leaf still lands in the running-config tree like the
+                    // interface case. `delete … bridge BR` carries the
+                    // value, which we drain and treat as detach.
+                    if let Some(name) = args.string() {
+                        let bridge = if msg.op.is_set() {
+                            args.string()
+                        } else {
+                            let _ = args.string();
+                            None
+                        };
+                        let _ = self.tx.send(Message::LinkBridgeBind {
+                            ifname: name,
+                            bridge,
+                        });
+                    }
                 } else if path.as_str().starts_with("/vxlan") {
                     let _ = self.vxlan_config.exec(path, args, msg.op);
                 } else if path.as_str().starts_with("/vrf") {

@@ -324,6 +324,23 @@ module config {
           enum stable-secret;
         }
       }
+      leaf bridge {
+        ext:dynamic "rib:bridge";
+        type leafref {
+          path "/bridge/name";
+        }
+        description
+          "Enslave this VXLAN device to the named bridge master,
+           equivalent to `ip link set <name> master <bridge>`. Reuses
+           the same staged bridge-bind as `interface <name> bridge
+           <bridge>` (applied once both the VXLAN and the bridge exist,
+           so config order is free), and the VXLAN bridge-slave defaults
+           are applied automatically: addrgenmode none (the VXLAN
+           creation default) plus `neigh_suppress on` and `learning off`
+           on the bridge port (set by `vxlan_bridge_port_defaults` when
+           the VXLAN gains a master). Omitted means the VXLAN is not a
+           bridge port.";
+      }
     }
 
     container system {
