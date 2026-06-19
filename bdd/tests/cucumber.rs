@@ -1366,6 +1366,120 @@ async fn show_command_not_contains(
     );
 }
 
+/// Kernel-state sibling of `show_command_eventually_contains`: run an
+/// arbitrary command (argv split on whitespace) inside a namespace and
+/// poll until its stdout contains the needle, or fail after the budget.
+/// Unlike `show command …` (which targets the vtyctl show surface) this
+/// reaches the real `ip`/`bridge` tools — used to assert async netlink
+/// effects, e.g. a port being enslaved to a bridge (`ip -o link show
+/// <if>` gaining `master <bridge>`).
+#[then(expr = "command {string} in namespace {string} should eventually contain {string}")]
+async fn command_eventually_contains(
+    world: &mut World,
+    command: String,
+    namespace: String,
+    needle: String,
+) {
+    let scoped = world.ns(&namespace);
+    let parts: Vec<&str> = command.split_whitespace().collect();
+    let (cmd, args) = parts
+        .split_first()
+        .unwrap_or_else(|| panic!("empty command in 'command …' for {}", scoped));
+    const ATTEMPTS: u32 = 30;
+    let mut last_output = String::new();
+    for i in 0..ATTEMPTS {
+        last_output = netns::exec_in_netns(&scoped, cmd, args)
+            .await
+            .unwrap_or_else(|e| panic!("Failed to run '{}' in {}: {}", command, scoped, e));
+        if last_output.contains(&needle) {
+            println!(
+                "✓ '{}' in namespace {} contains '{}'",
+                command, scoped, needle
+            );
+            return;
+        }
+        if i + 1 < ATTEMPTS {
+            tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
+        }
+    }
+    panic!(
+        "'{}' in namespace {} did not contain '{}' after {} attempts\nlast output:\n{}",
+        command, scoped, needle, ATTEMPTS, last_output
+    );
+}
+
+/// Negative polling sibling: run the command and poll until its stdout no
+/// longer contains the needle (e.g. a port losing `master <bridge>` after
+/// the bridge is deleted and the kernel releases it).
+#[then(expr = "command {string} in namespace {string} should eventually not contain {string}")]
+async fn command_eventually_not_contains(
+    world: &mut World,
+    command: String,
+    namespace: String,
+    needle: String,
+) {
+    let scoped = world.ns(&namespace);
+    let parts: Vec<&str> = command.split_whitespace().collect();
+    let (cmd, args) = parts
+        .split_first()
+        .unwrap_or_else(|| panic!("empty command in 'command …' for {}", scoped));
+    const ATTEMPTS: u32 = 30;
+    let mut last_output = String::new();
+    for i in 0..ATTEMPTS {
+        last_output = netns::exec_in_netns(&scoped, cmd, args)
+            .await
+            .unwrap_or_else(|e| panic!("Failed to run '{}' in {}: {}", command, scoped, e));
+        if !last_output.contains(&needle) {
+            println!(
+                "✓ '{}' in namespace {} no longer contains '{}'",
+                command, scoped, needle
+            );
+            return;
+        }
+        if i + 1 < ATTEMPTS {
+            tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
+        }
+    }
+    panic!(
+        "'{}' in namespace {} still contained '{}' after {} attempts\nlast output:\n{}",
+        command, scoped, needle, ATTEMPTS, last_output
+    );
+}
+
+/// Immediate (non-polling) negative assertion: run the command once and
+/// require its stdout does NOT contain the needle. Pair with a preceding
+/// `I wait N seconds` to give any erroneous async effect time to manifest
+/// before asserting absence (e.g. a binding that must stay pending must
+/// NOT have enslaved the port).
+#[then(expr = "command {string} in namespace {string} should not contain {string}")]
+async fn command_not_contains(
+    world: &mut World,
+    command: String,
+    namespace: String,
+    needle: String,
+) {
+    let scoped = world.ns(&namespace);
+    let parts: Vec<&str> = command.split_whitespace().collect();
+    let (cmd, args) = parts
+        .split_first()
+        .unwrap_or_else(|| panic!("empty command in 'command …' for {}", scoped));
+    let output = netns::exec_in_netns(&scoped, cmd, args)
+        .await
+        .unwrap_or_else(|e| panic!("Failed to run '{}' in {}: {}", command, scoped, e));
+    assert!(
+        !output.contains(&needle),
+        "'{}' in namespace {} unexpectedly contained '{}'\nfull output:\n{}",
+        command,
+        scoped,
+        needle,
+        output,
+    );
+    println!(
+        "✓ '{}' in namespace {} does not contain '{}'",
+        command, scoped, needle
+    );
+}
+
 /// Assert the IS-IS LSDB at the given level (`L1` or `L2`) in a namespace
 /// holds at least one self-originated LSP. Reads
 /// `vtyctl show -j "show isis database"`, whose JSON is

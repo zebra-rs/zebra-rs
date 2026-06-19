@@ -2013,6 +2013,39 @@ mod yang_load_tests {
         );
     }
 
+    /// `interface <name> bridge <bridge>` enslaves the interface to a
+    /// bridge master device (equivalent to `ip link set <name> master
+    /// <bridge>`). The `bridge` leaf is a leafref to `/bridge/name`; pin
+    /// that the `set` path parses so a future YANG edit that drops or
+    /// renames the leaf is caught here rather than silently turning the
+    /// runtime handler into a no-op. (`delete` of a leaf is not a
+    /// `parse()`-settable path — like every other leaf, it flows through
+    /// a separate dispatch — so only the `set` form is pinned here.)
+    #[test]
+    fn interface_bridge_is_settable() {
+        use crate::config::ExecCode;
+        use crate::config::parse::{State, parse};
+        use libyang::to_entry;
+
+        let mut yang = YangStore::new();
+        yang.add_path(concat!(env!("CARGO_MANIFEST_DIR"), "/yang"));
+        yang.read_with_resolve("configure")
+            .expect("configure mode loads");
+        yang.identity_resolve();
+        let module = yang
+            .find_module("configure")
+            .expect("configure module present");
+        let entry = to_entry(&yang, module);
+
+        let (code, _comps, _state) =
+            parse("set interface eth0 bridge br0", entry, None, State::new());
+        assert_eq!(
+            code,
+            ExecCode::Success,
+            "`set interface eth0 bridge br0` must parse as a settable path",
+        );
+    }
+
     /// The per-neighbor `afi-safi ipv6 encapsulation-type` knob is a
     /// hand-added leaf on the vendored `ietf-bgp-neighbor` afi-safi list.
     /// `load_mode` proves the module loads but not that the concrete path

@@ -248,6 +248,17 @@ pub enum Message {
         ifname: String,
         vrf: Option<String>,
     },
+    /// Bind / unbind an interface to a bridge master device
+    /// (`ip link set <ifname> master <bridge>` / `... nomaster`).
+    /// `bridge == Some(name)` enslaves to that bridge; `None` detaches
+    /// (sets IFLA_MASTER = 0). Like `LinkVrfBind`, the handler tolerates
+    /// the interface or the bridge not yet existing in our tables and
+    /// stages the intent in `pending_bridge_bind`, firing it when the
+    /// missing kernel device appears via `link_add`.
+    LinkBridgeBind {
+        ifname: String,
+        bridge: Option<String>,
+    },
     MacAdd {
         vni: u32,
         mac: MacAddr,
@@ -557,6 +568,12 @@ pub struct Rib {
     /// when a missing interface or VRF master appears later, and clears
     /// the entry once the netlink call succeeds.
     pub pending_vrf_bind: BTreeMap<String, Option<String>>,
+    /// Operator intent for per-interface bridge binding, keyed by
+    /// ifname. `Some(bridge)` = enslave; `None` = detach. Mirrors
+    /// `pending_vrf_bind`: retried when either the interface or the
+    /// bridge master appears later, kept as durable desired-state across
+    /// link flaps, and cleared on detach.
+    pub pending_bridge_bind: BTreeMap<String, Option<String>>,
     /// Operator-configured interface MTU, keyed by ifname. This is the
     /// durable desired-state for `set interface <name> mtu <n>`: it is
     /// applied to the kernel when set, replayed when a matching link
@@ -707,6 +724,7 @@ impl Rib {
             vrf_tables: BTreeMap::new(),
             vrf_id_alloc: VrfIdAllocator::new(),
             pending_vrf_bind: BTreeMap::new(),
+            pending_bridge_bind: BTreeMap::new(),
             mtu_config: BTreeMap::new(),
             table: PrefixMap::new(),
             table_v6: PrefixMap::new(),
@@ -2013,6 +2031,91 @@ impl Rib {
                     vrf
                 );
             }
+            Message::LinkBridgeBind { ifname, bridge } => {
+                // Always record operator intent so a later kernel
+                // NewLink (the slave interface appears, or the bridge
+                // master is created) can fire the bind without the
+                // operator re-issuing the command.
+                if bridge.is_none() {
+                    self.pending_bridge_bind.remove(&ifname);
+                } else {
+                    self.pending_bridge_bind
+                        .insert(ifname.clone(), bridge.clone());
+                }
+
+                let (ifindex, current_master) = match self.links.values().find(|l| l.name == ifname)
+                {
+                    Some(link) => (link.index, link.master.unwrap_or(0)),
+                    None => {
+                        tracing::info!(
+                            "link_bridge_bind: interface {} not present yet — pending",
+                            ifname
+                        );
+                        return;
+                    }
+                };
+
+                // Resolve the bridge to its kernel ifindex. `master == 0`
+                // detaches (`ip link set ... nomaster`). Gate on TWO
+                // things, mirroring how the VRF bind resolves through
+                // `self.vrfs`:
+                //   1. config presence (`self.bridges`) — `BridgeDel`
+                //      removes the entry synchronously, BEFORE the netlink
+                //      delete that releases this port. The released port's
+                //      RTM_NEWLINK (master cleared) re-fires this bind via
+                //      `link_add`; gating here means it sees the bridge
+                //      already gone and stays pending, instead of racing a
+                //      `link_set_master` against the vanishing device —
+                //      which the kernel rejects with EINVAL. The `bridge`
+                //      leaf is a leafref to `/bridge/name`, so a bound
+                //      bridge is always a configured one.
+                //   2. kernel presence (`self.links`) for the ifindex — it
+                //      lands there once `BridgeAdd`'s netlink create echoes
+                //      back as RTM_NEWLINK.
+                let master_ifindex = match &bridge {
+                    Some(bridge) => {
+                        if !self.bridges.contains_key(bridge) {
+                            tracing::info!(
+                                "link_bridge_bind: bridge {} not configured — pending",
+                                bridge
+                            );
+                            return;
+                        }
+                        match self.links.values().find(|l| l.name == *bridge) {
+                            Some(l) => l.index,
+                            None => {
+                                tracing::info!(
+                                    "link_bridge_bind: bridge {} not present yet — pending",
+                                    bridge
+                                );
+                                return;
+                            }
+                        }
+                    }
+                    None => 0,
+                };
+
+                // Only touch the kernel when the master actually changes.
+                // `pending_bridge_bind` is durable desired-state, so
+                // `link_add` replays this on every RTM_NEWLINK for the
+                // interface; without this guard the enslave burst would
+                // re-issue redundant `link_set_master` calls (see the
+                // `LinkVrfBind` guard for the same rationale).
+                if current_master == master_ifindex {
+                    return;
+                }
+
+                self.fib_handle
+                    .link_set_master(ifindex, master_ifindex)
+                    .await;
+                tracing::info!(
+                    "link_bridge_bind: ifname={} ifindex={} master={} bridge={:?}",
+                    ifname,
+                    ifindex,
+                    master_ifindex,
+                    bridge
+                );
+            }
             Message::BlockAdd { name, config } => {
                 let block = config.to_block();
                 self.blocks.insert(name.clone(), block);
@@ -2511,6 +2614,7 @@ impl Rib {
                 // (`rib:<handler>`) as the first path segment.
                 let comps = match msg.paths.first().map(|p| p.name.as_str()) {
                     Some("vrf") => self.vrf_comps(),
+                    Some("bridge") => self.bridge_comps(),
                     _ => self.link_comps(),
                 };
                 msg.resp.unwrap().send(comps).unwrap();
