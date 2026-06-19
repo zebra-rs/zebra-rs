@@ -44,20 +44,18 @@ Approach when picked up:
   `dst` (the current `@bgp_evpn_smet` asserts the bridge-MDB group only,
   because the plain-VXLAN kernel drops the `dst`).
 
-## 2. Don't originate SMET for link-local / well-known groups
+## 2. Don't originate SMET for link-local / well-known groups — DONE (#1516)
 
-**Observed in the BDD run**: a snooping bridge auto-joins IPv6
-link-local solicited-node groups (`ff02::1:ffXX:XXXX`, `ff02::2`, …);
-those `RTM_NEWMDB` entries flowed all the way to `evpn_originate_smet`,
-so the speaker advertised SMET for link-local multicast. Functionally
-harmless in the test but wrong — RFC 9251 proxying targets host group
-membership, not link-local control multicast.
+**Was**: a snooping bridge auto-joins IPv6 link-local solicited-node
+groups (`ff02::1:ffXX:XXXX`, `ff02::2`, …); those `RTM_NEWMDB` entries
+flowed all the way to `evpn_originate_smet`, so the speaker advertised
+SMET for link-local control multicast.
 
-Fix: filter at origination (`evpn_originate_smet`, or earlier in
-`mdb_entries_from_msg` / the `SnoopJoin` handler) — skip IPv4
-`224.0.0.0/24` (local network control block) and IPv6 `ff02::/16`
-(link-local scope), and probably `ff0?::/…` reserved/well-known. Small,
-self-contained; worth doing before any production use.
+**Fixed** by `smet_advertisable_group()` (`bgp::route`): both
+`evpn_originate_smet` and `evpn_withdraw_smet` skip IPv4 `224.0.0.0/24`
+(local network control block) and IPv6 interface-/link-local scopes
+(scope nibble ≤ 2). Unit test + a non-vacuous `@bgp_evpn_smet` assert
+(`show bgp evpn` excludes `ff02` while the `239.1.1.1` SMET is present).
 
 ## 3. SMET Flags fidelity (from kernel MDB group-mode)
 
