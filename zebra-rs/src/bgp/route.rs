@@ -1982,6 +1982,25 @@ impl EvpnFloodState {
             .unwrap_or_default()
     }
 
+    /// The leaf PEs of this node's SR P2MP replication tree for `vni` (RFC
+    /// 9524): every remote PE in the VNI's BUM domain — the union of the
+    /// Ingress/Assisted Replication remotes and the SR P2MP tree remotes.
+    /// The SR dataplane (a later slice) delivers a copy to each. Only
+    /// meaningful when this node's `bum_tunnel` is an SR P2MP mode; with
+    /// IR/AR the VXLAN head-end FDB ([`desired`](Self::desired)) is used.
+    pub fn replication_leaves(&self, vni: u32) -> BTreeSet<IpAddr> {
+        self.vnis
+            .get(&vni)
+            .map(|v| {
+                v.remotes
+                    .keys()
+                    .chain(v.sr_remotes.keys())
+                    .copied()
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
     /// VNIs that currently have flood state (so a role/AR-IP change can
     /// reconcile every one of them).
     pub fn vnis(&self) -> Vec<u32> {
@@ -1998,7 +2017,18 @@ impl EvpnFloodState {
     /// - **RNVE / Replicator**: plain ingress replication to every remote
     ///   PE's IR-IP. (A stock-kernel Replicator can't re-flood, so for
     ///   traffic it *originates* it behaves like an RNVE.)
+    ///
+    /// In SR P2MP local mode the VXLAN head-end FDB is not used at all — BUM
+    /// rides the replication tree via the SR dataplane — so this returns
+    /// empty and `reconcile`'s delta withdraws any prior IR flood entries.
+    /// The tree's leaf set is [`replication_leaves`](Self::replication_leaves).
     fn desired(&self, vni: u32) -> BTreeSet<IpAddr> {
+        if matches!(
+            self.bum_tunnel,
+            EvpnBumTunnel::SrMplsP2mp | EvpnBumTunnel::SrV6P2mp
+        ) {
+            return BTreeSet::new();
+        }
         let Some(v) = self.vnis.get(&vni) else {
             return BTreeSet::new();
         };
@@ -2027,6 +2057,20 @@ impl EvpnFloodState {
             tracing::debug!(
                 "EVPN VNI {vni}: {} SR P2MP tree remote(s) recorded, excluded from VXLAN flood: {sr_trees:?}",
                 sr_trees.len()
+            );
+        }
+        // Local SR P2MP mode: BUM rides the replication tree (programmed by
+        // the SR dataplane, a later slice), so `desired` is empty above and
+        // the delta below withdraws any VXLAN IR entries left from a prior
+        // mode. Surface the computed leaf set the SR dataplane will serve.
+        if matches!(
+            self.bum_tunnel,
+            EvpnBumTunnel::SrMplsP2mp | EvpnBumTunnel::SrV6P2mp
+        ) {
+            let leaves = self.replication_leaves(vni);
+            tracing::debug!(
+                "EVPN VNI {vni}: SR P2MP local mode, replication tree to {} leaf PE(s): {leaves:?} (SR dataplane pending)",
+                leaves.len()
             );
         }
         let entry = self.vnis.entry(vni).or_default();
@@ -12285,6 +12329,40 @@ mod evpn_flood_tests {
         // Only the IR remote floods via VXLAN; the SR P2MP Root does not.
         assert_eq!(f.desired(100), BTreeSet::from([ip("10.0.0.1")]));
         assert_eq!(f.sr_p2mp_remotes(100), vec![(ip("10.0.0.7"), 4242)]);
+    }
+
+    /// In SR P2MP local mode the VXLAN head-end flood set is empty (BUM
+    /// rides the replication tree); the tree's leaf set is every remote PE.
+    #[test]
+    fn sr_p2mp_local_mode_suppresses_vxlan_flood() {
+        let mut f = EvpnFloodState {
+            bum_tunnel: EvpnBumTunnel::SrMplsP2mp,
+            ..Default::default()
+        };
+        f.update_remote(100, ip("10.0.0.1"), None);
+        f.update_sr_remote(100, ip("10.0.0.2"), 100);
+        // No VXLAN head-end FDB targets in SR P2MP mode.
+        assert!(f.desired(100).is_empty());
+        // Both remotes are leaves of our replication tree.
+        assert_eq!(
+            f.replication_leaves(100),
+            BTreeSet::from([ip("10.0.0.1"), ip("10.0.0.2")])
+        );
+    }
+
+    /// `replication_leaves` is the union of IR/AR and SR P2MP remotes,
+    /// independent of local mode; IR/AR `desired` is unaffected.
+    #[test]
+    fn replication_leaves_unions_ir_and_sr_remotes() {
+        let mut f = EvpnFloodState::default();
+        f.update_remote(100, ip("10.0.0.1"), None);
+        f.update_sr_remote(100, ip("10.0.0.7"), 9);
+        assert_eq!(
+            f.replication_leaves(100),
+            BTreeSet::from([ip("10.0.0.1"), ip("10.0.0.7")])
+        );
+        // Default (IR) mode still floods the IR remote via VXLAN.
+        assert_eq!(f.desired(100), BTreeSet::from([ip("10.0.0.1")]));
     }
 
     /// A remote that flips tunnel type moves between the two maps rather
