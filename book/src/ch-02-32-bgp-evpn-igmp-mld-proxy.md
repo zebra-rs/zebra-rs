@@ -5,9 +5,12 @@ which add *selective* multicast delivery to an EVPN. Without it, an
 ingress PE floods every BUM (broadcast / unknown-unicast / multicast)
 frame to **all** remote VTEPs over the Type-3 (Inclusive Multicast)
 tree. With it, a PE learns which groups its locally-attached hosts have
-joined (via the kernel bridge's IGMP/MLD snooping), advertises that
-interest in BGP, and ingress PEs replicate each `(*,G)` / `(S,G)` flow
-**only** to the PEs that asked.
+joined (via the kernel bridge's IGMP/MLD snooping) and advertises that
+interest in BGP (a **Type-6 SMET** route), so other PEs can constrain
+multicast to the groups that were actually asked for. The control plane
+(snoop → SMET → import → kernel bridge MDB) is implemented and
+validated; per-VTEP `dst` pruning of the overlay replication is a
+documented follow-up (see [Limitations](#limitations)).
 
 Three new EVPN route types and one extended community carry this:
 
