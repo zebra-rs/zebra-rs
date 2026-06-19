@@ -690,7 +690,37 @@ impl Rib {
             .map(|l| l.name.clone())
             .unwrap_or_default();
         if let Some(vrf) = self.pending_vrf_bind.get(&ifname).cloned() {
-            let _ = self.tx.send(Message::LinkVrfBind { ifname, vrf });
+            let _ = self.tx.send(Message::LinkVrfBind {
+                ifname: ifname.clone(),
+                vrf,
+            });
+        }
+
+        // Replay any pending bridge binding now that a link (re)appeared.
+        // Two cases, both keyed off the just-arrived link, cover either
+        // config/creation order:
+        //   1. this link is the *slave* that was waiting to be enslaved
+        //      (operator set `bridge` before the interface appeared, or
+        //      before its bridge existed).
+        //   2. this link is the *bridge master* one or more slaves were
+        //      waiting on (BridgeAdd's netlink create just echoed back).
+        if let Some(bridge) = self.pending_bridge_bind.get(&ifname).cloned() {
+            let _ = self.tx.send(Message::LinkBridgeBind {
+                ifname: ifname.clone(),
+                bridge,
+            });
+        }
+        let waiting: Vec<(String, Option<String>)> = self
+            .pending_bridge_bind
+            .iter()
+            .filter(|(_, b)| b.as_deref() == Some(ifname.as_str()))
+            .map(|(slave, b)| (slave.clone(), b.clone()))
+            .collect();
+        for (slave, bridge) in waiting {
+            let _ = self.tx.send(Message::LinkBridgeBind {
+                ifname: slave,
+                bridge,
+            });
         }
     }
 
@@ -729,6 +759,13 @@ impl Rib {
     /// of the VRFs currently applied (one per kernel master device).
     pub fn vrf_comps(&self) -> Vec<String> {
         self.vrfs.keys().cloned().collect()
+    }
+
+    /// Completion candidates for the `rib:bridge` dynamic key — the
+    /// names of the bridges currently configured (the eligible master
+    /// devices for `interface <name> master <bridge>`).
+    pub fn bridge_comps(&self) -> Vec<String> {
+        self.bridges.keys().cloned().collect()
     }
 
     /// Add an IPv4 or IPv6 address to an interface link.
@@ -1047,6 +1084,19 @@ pub async fn link_config_exec(
             None
         };
         let _ = rib.tx.send(Message::LinkVrfBind { ifname, vrf });
+    } else if path == "/interface/bridge" {
+        // `set interface X bridge BR`   → enslave X to bridge master BR.
+        // `delete interface X bridge [BR]` → detach X from its bridge.
+        // The optional name on delete is ignored: the intent is
+        // unambiguous and we tolerate either form (mirrors `vrf`).
+        let bridge = if op.is_set() {
+            Some(args.string().context("missing bridge name")?)
+        } else {
+            // Drain any trailing token so it isn't picked up later.
+            let _ = args.string();
+            None
+        };
+        let _ = rib.tx.send(Message::LinkBridgeBind { ifname, bridge });
     } else if path == "/interface/mtu" {
         // `set interface X mtu N`    → record desired MTU and apply it.
         // `delete interface X mtu`   → drop the desired MTU and restore

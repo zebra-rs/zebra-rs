@@ -2883,6 +2883,23 @@ module config {
            Omitted means the interface lives in the default routing
            instance.";
       }
+      leaf bridge {
+        // Same priority as `vrf` (and mutually exclusive with it in
+        // practice — an interface has a single kernel IFLA_MASTER):
+        // apply the enslave before any address.
+        ext:sort "11";
+        ext:dynamic "rib:bridge";
+        type leafref {
+          path "/bridge/name";
+        }
+        description
+          "Enslave this interface to the named bridge master device,
+           equivalent to `ip link set <if-name> master <bridge>`. The
+           bind is staged and applied once both the interface and the
+           bridge exist in the kernel, so config order is free (the
+           bridge may be created after this leaf is set). Omitted means
+           the interface is not a bridge port.";
+      }
       leaf mtu {
         ext:help "Maximum transmission unit in bytes";
         type uint32 {
