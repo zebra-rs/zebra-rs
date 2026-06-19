@@ -1541,6 +1541,96 @@ impl FibHandle {
         }
     }
 
+    /// Install a mirror-context route (draft-ietf-rtgwg-srv6-egress-
+    /// protection): in `context_table`, route the protected egress's
+    /// locator `prefix` to a `seg6local End.DT46 vrftable=<vrf_table>`.
+    /// End.M decapsulates the redirected packet and looks the inner
+    /// packet (the protected egress's service SID) up in `context_table`,
+    /// where this route re-instantiates that egress's End.DT46 behavior
+    /// into the protector's local CE-facing VRF. `ifindex` is the seg6
+    /// device (sr0 / lo) the kernel binds the action to.
+    pub async fn route_mirror_context_install(
+        &self,
+        prefix: &Ipv6Net,
+        context_table: u32,
+        vrf_table: u32,
+        ifindex: u32,
+    ) {
+        let mut msg = RouteMessage::default();
+        msg.header.address_family = AddressFamily::Inet6;
+        set_route_table(&mut msg, context_table);
+        msg.header.destination_prefix_length = prefix.prefix_len();
+        msg.header.protocol = RouteProtocol::Isis;
+        msg.header.scope = RouteScope::Universe;
+        msg.header.kind = RouteType::Unicast;
+        msg.attributes
+            .push(RouteAttribute::Destination(RouteAddress::Inet6(
+                prefix.addr(),
+            )));
+        if ifindex != 0 {
+            msg.attributes.push(RouteAttribute::Oif(ifindex));
+        }
+        let Some((encap, encap_type)) = super::srv6::build_seg6local_attrs(
+            crate::rib::SidBehavior::EndDT46,
+            None,
+            None,
+            vrf_table,
+            &[],
+        ) else {
+            return;
+        };
+        msg.attributes.push(encap);
+        msg.attributes.push(encap_type);
+
+        let mut req = NetlinkMessage::from(RouteNetlinkMessage::NewRoute(msg));
+        req.header.flags = NLM_F_REQUEST | NLM_F_ACK | NLM_F_CREATE | NLM_F_REPLACE;
+        let mut response = self.handle.clone().request(req).unwrap();
+        while let Some(m) = response.next().await {
+            if let NetlinkPayload::Error(e) = m.payload {
+                tracing::warn!(
+                    "NewRoute mirror-context install error: prefix={} context_table={} \
+                     vrf_table={} ifindex={} err={}",
+                    prefix,
+                    context_table,
+                    vrf_table,
+                    ifindex,
+                    e
+                );
+            }
+        }
+    }
+
+    /// Remove a previously-installed mirror-context route. The kernel
+    /// matches RTM_DELROUTE on (table, family, dst, prefixlen, kind), so
+    /// only the prefix and context table are needed.
+    pub async fn route_mirror_context_uninstall(&self, prefix: &Ipv6Net, context_table: u32) {
+        let mut msg = RouteMessage::default();
+        msg.header.address_family = AddressFamily::Inet6;
+        set_route_table(&mut msg, context_table);
+        msg.header.destination_prefix_length = prefix.prefix_len();
+        msg.header.protocol = RouteProtocol::Isis;
+        msg.header.scope = RouteScope::Universe;
+        msg.header.kind = RouteType::Unicast;
+        msg.attributes
+            .push(RouteAttribute::Destination(RouteAddress::Inet6(
+                prefix.addr(),
+            )));
+
+        let mut req = NetlinkMessage::from(RouteNetlinkMessage::DelRoute(msg));
+        req.header.flags = NLM_F_REQUEST | NLM_F_ACK;
+        let mut response = self.handle.clone().request(req).unwrap();
+        while let Some(m) = response.next().await {
+            if let NetlinkPayload::Error(e) = m.payload {
+                tracing::info!(
+                    "DelRoute mirror-context uninstall error: prefix={} context_table={} err={}",
+                    prefix,
+                    context_table,
+                    e
+                );
+            }
+        }
+    }
+
     pub async fn bridge_add(&self, bridge: &Bridge) {
         // First create the bridge interface. Bring it up at creation
         // (`ip link add ... up`) so the device is operational without a

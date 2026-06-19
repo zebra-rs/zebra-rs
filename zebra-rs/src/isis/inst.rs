@@ -369,6 +369,12 @@ pub struct Isis {
     /// changed underneath us).
     pub installed_mirror_sids: std::collections::BTreeSet<std::net::Ipv6Addr>,
 
+    /// Protected-locator prefixes for which a mirror-context route is
+    /// currently installed (the static `via-vrf` path). Tracked so
+    /// `update_mirror_context_routes` can withdraw the previous set before
+    /// re-adding the entries that still qualify.
+    pub installed_mirror_routes: std::collections::BTreeSet<ipnet::Ipv6Net>,
+
     /// ELIB function pool used for End.X (adjacency) SID allocation.
     /// Reset whenever the watched locator changes so stale function
     /// reservations don't leak across prefix swaps.
@@ -795,6 +801,7 @@ impl Isis {
                 sr_locator: None,
                 sr_end_sid: None,
                 installed_mirror_sids: std::collections::BTreeSet::new(),
+                installed_mirror_routes: std::collections::BTreeSet::new(),
                 elib: super::srv6::ElibPool::new(),
                 lsp_seq_wrap_wait: Levels::<BTreeMap<u8, Timer>>::default(),
                 lsp_placement_memory: Levels::<BTreeMap<TlvKey, u8>>::default(),
@@ -3031,6 +3038,7 @@ impl Isis {
                 self.sr_locator = None;
                 self.update_end_sid();
                 self.update_mirror_sids();
+                self.update_mirror_context_routes();
                 self.clear_all_endx_sids();
             }
             self.watched_locator = desired_base;
@@ -3216,6 +3224,39 @@ impl Isis {
         }
     }
 
+    /// Reconcile the static `via-vrf` mirror-context routes with the
+    /// current config and resolved locator. Gated identically to
+    /// [`Self::update_mirror_sids`] (so a route installs exactly when its
+    /// End.M decap is active) plus a configured `via-vrf`: install, in
+    /// `MIRROR_CONTEXT_TABLE`, the protected locator → the local VRF, so
+    /// the End.M decap resolves the protected egress's service SIDs into
+    /// the CE-facing VRF. The RIB resolves the VRF name to a kernel table
+    /// (skipping a not-yet-known VRF; the next reconcile re-sends it).
+    pub(crate) fn update_mirror_context_routes(&mut self) {
+        let context_table = Self::MIRROR_CONTEXT_TABLE;
+        for prefix in std::mem::take(&mut self.installed_mirror_routes) {
+            let _ = self.ctx.rib.send(rib::Message::MirrorRouteDel {
+                prefix,
+                context_table,
+            });
+        }
+        let Some(local) = self.sr_locator.as_ref().and_then(|l| l.prefix) else {
+            return;
+        };
+        let desired = super::egress_protection::desired_context_routes(
+            &self.config.egress_protections,
+            local,
+        );
+        for (prefix, vrf_name) in desired {
+            let _ = self.ctx.rib.send(rib::Message::MirrorRouteAdd {
+                prefix,
+                context_table,
+                vrf_name,
+            });
+            self.installed_mirror_routes.insert(prefix);
+        }
+    }
+
     /// Fold the staged `/srlg/group/*` cache into the
     /// applied snapshot at `ConfigOp::CommitEnd`. When the snapshot
     /// actually moved, re-originate both LSP levels so the new
@@ -3268,6 +3309,7 @@ impl Isis {
                     // The local locator just resolved, so any configured
                     // Mirror SID can now be range-checked and installed.
                     self.update_mirror_sids();
+                    self.update_mirror_context_routes();
                     touched = true;
                 }
                 let algos: Vec<u8> = self

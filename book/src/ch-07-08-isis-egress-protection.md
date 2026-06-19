@@ -138,15 +138,27 @@ mirror-context routing table:
 (`End.DT6` is the kernel action End.M reuses; the high table id is the
 shared mirror-context table.)
 
+When `via-vrf` is configured, the protector also populates the
+mirror-context table: the protected locator is routed to a second
+`seg6local End.DT46` that decapsulates into the named local VRF, so the
+End.M lookup of the protected egress's service SID resolves through to
+the CE:
+
+```text
+> ip -6 route show table 1291845632
+2001:db8:a3:1::/64  encap seg6local action End.DT46 vrftable <cust-table> dev sr0
+```
+
 ## Current status
 
 The configuration, the IS-IS **advertisement** of the Mirror SID (SRv6
 End.M sub-TLV with the Protected Locators sub-sub-TLV), the `show isis
-egress-protection` view, and the protector's **End.M localsid install**
-are implemented. Still landing in later stages: auto-allocation of the
-Mirror SID when `mirror-sid` is omitted, **populating the mirror-context
-table** with the protected egress's service forwarding (so the decap
-actually resolves), and the **PLR-side repair** that pushes the Mirror
-SID on egress failure. So today a configured entry is advertised and the
-decap path exists, but traffic is not yet redirected end-to-end; SR-MPLS
-(`dataplane mpls`) is also a later stage.
+egress-protection` view, the protector's **End.M localsid install**, and
+the **static `via-vrf` mirror-context population** are implemented. Still
+landing in later stages: auto-allocation of the Mirror SID when
+`mirror-sid` is omitted, learning the context population from **BGP
+L3VPN** (the alternative to static `via-vrf`), and the **PLR-side
+repair** that pushes the Mirror SID on egress failure. So today a
+configured entry is advertised and the full protector decap chain is in
+place, but traffic is only redirected once a PLR steers it (the next
+stage); SR-MPLS (`dataplane mpls`) is also a later stage.
