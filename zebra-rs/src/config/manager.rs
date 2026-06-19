@@ -2320,6 +2320,31 @@ mod yang_load_tests {
     }
 
     #[test]
+    fn bgp_evpn_segmentation_is_settable() {
+        use crate::config::ExecCode;
+        use crate::config::parse::{State, parse};
+        use libyang::to_entry;
+
+        let mut yang = YangStore::new();
+        yang.add_path(concat!(env!("CARGO_MANIFEST_DIR"), "/yang"));
+        yang.read_with_resolve("configure")
+            .expect("configure mode loads");
+        yang.identity_resolve();
+        let module = yang
+            .find_module("configure")
+            .expect("configure module present");
+        let entry = to_entry(&yang, module);
+
+        for path in [
+            "set router bgp afi-safi evpn segmentation true",
+            "set router bgp afi-safi evpn segmentation false",
+        ] {
+            let (code, _comps, _state) = parse(path, entry.clone(), None, State::new());
+            assert_eq!(code, ExecCode::Success, "`{path}` must be a settable path");
+        }
+    }
+
+    #[test]
     fn bgp_evpn_bum_tunnel_type_is_settable() {
         use crate::config::ExecCode;
         use crate::config::parse::{State, parse};

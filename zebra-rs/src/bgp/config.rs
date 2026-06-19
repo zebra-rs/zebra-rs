@@ -1483,6 +1483,25 @@ fn config_igmp_mld_proxy(bgp: &mut Bgp, mut args: Args, op: ConfigOp) -> Option<
     Some(())
 }
 
+/// `router bgp afi-safi evpn segmentation <bool>` (RFC 9572 §8). When
+/// enabled, the Multicast Flags Extended Community's segmentation-support
+/// bit (bit 8) is attached to every originated Type-3 IMET route, telling
+/// peers / Regional Border Routers that this PE supports BUM tunnel
+/// segmentation. Toggling re-originates all IMET so the bit is added/removed.
+fn config_segmentation(bgp: &mut Bgp, mut args: Args, op: ConfigOp) -> Option<()> {
+    let afi_safi: AfiSafi = args.afi_safi()?;
+    if afi_safi.afi != Afi::L2vpn || afi_safi.safi != Safi::Evpn {
+        return None;
+    }
+    let enabled = if op.is_set() { args.boolean()? } else { false };
+    if bgp.segmentation == enabled {
+        return Some(());
+    }
+    bgp.segmentation = enabled;
+    reoriginate_all_imet(bgp);
+    Some(())
+}
+
 /// Re-originate every per-VNI Type-3 IMET route so a changed Assisted
 /// Replication role / AR-IP is reflected in the PMSI Tunnel attribute and
 /// next hop. `evpn_originate_imet` replaces the existing Originated path
@@ -3690,6 +3709,11 @@ impl Bgp {
         // `router bgp afi-safi evpn igmp-mld-proxy`. When set, the
         // Multicast Flags EC rides the originated Type-3 IMET route.
         self.callback_add("/router/bgp/afi-safi/igmp-mld-proxy", config_igmp_mld_proxy);
+
+        // EVPN BUM tunnel-segmentation support (RFC 9572 §8) under
+        // `router bgp afi-safi evpn segmentation`. When set, the Multicast
+        // Flags EC's segmentation bit rides the originated Type-3 IMET route.
+        self.callback_add("/router/bgp/afi-safi/segmentation", config_segmentation);
 
         // EVPN Assisted Replication role + AR-IP (RFC 9574), under
         // `router bgp afi-safi evpn assisted-replication`. Augmented in by

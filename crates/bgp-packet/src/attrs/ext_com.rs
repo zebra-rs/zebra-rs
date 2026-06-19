@@ -128,8 +128,12 @@ impl ExtCommunityValue {
         let mcast = EvpnMcastFlags {
             igmp_proxy: flags & EvpnMcastFlags::IGMP_PROXY != 0,
             mld_proxy: flags & EvpnMcastFlags::MLD_PROXY != 0,
+            segmentation_support: flags & EvpnMcastFlags::SEGMENTATION_SUPPORT != 0,
         };
-        if !mcast.igmp_proxy && !mcast.mld_proxy {
+        // RFC 9251 §6: an EC with no capability bits set is malformed and
+        // MUST be ignored. With the RFC 9572 §8 segmentation bit added, that
+        // means all three known bits clear.
+        if !mcast.igmp_proxy && !mcast.mld_proxy && !mcast.segmentation_support {
             return None;
         }
         Some(mcast)
@@ -140,15 +144,17 @@ impl ExtCommunityValue {
 /// carried under the EVPN high-type (0x06).
 const EVPN_MCAST_FLAGS_SUB_TYPE: u8 = 0x09;
 
-/// Decoded EVPN Multicast Flags Extended Community (RFC 9251 §6). A
-/// PE attaches this to its Inclusive Multicast (Type-3) route to
-/// advertise IGMP / MLD proxy capability. The 2-octet Flags field
-/// carries the two capability bits; the remaining 4 octets are
-/// reserved (zero).
+/// Decoded EVPN Multicast Flags Extended Community (RFC 9251 §6, extended
+/// by RFC 9572 §8). A PE attaches this to its Inclusive Multicast (Type-3)
+/// route to advertise IGMP / MLD proxy capability and/or BUM tunnel
+/// **segmentation** support. The 2-octet Flags field carries the capability
+/// bits; the remaining 4 octets are reserved (zero).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct EvpnMcastFlags {
     pub igmp_proxy: bool,
     pub mld_proxy: bool,
+    /// Bit 8 (RFC 9572 §8): the PE supports BUM tunnel segmentation.
+    pub segmentation_support: bool,
 }
 
 impl EvpnMcastFlags {
@@ -156,6 +162,9 @@ impl EvpnMcastFlags {
     const IGMP_PROXY: u16 = 0x0001;
     /// Bit 14 of the Flags field: MLD Proxy Support.
     const MLD_PROXY: u16 = 0x0002;
+    /// Bit 8 of the Flags field (RFC 9572 §8): Segmentation Support. RFC
+    /// bit numbering is MSB-0 across the 16-bit field, so bit 8 = `1 << 7`.
+    const SEGMENTATION_SUPPORT: u16 = 0x0080;
 }
 
 impl From<EvpnMcastFlags> for ExtCommunityValue {
@@ -166,6 +175,9 @@ impl From<EvpnMcastFlags> for ExtCommunityValue {
         }
         if m.mld_proxy {
             flags |= EvpnMcastFlags::MLD_PROXY;
+        }
+        if m.segmentation_support {
+            flags |= EvpnMcastFlags::SEGMENTATION_SUPPORT;
         }
         let mut val = [0u8; 6];
         val[0..2].copy_from_slice(&flags.to_be_bytes());
@@ -277,9 +289,10 @@ impl fmt::Display for ExtCommunityValue {
                 )
             }
         } else if self.is_evpn_mcast_flags() {
-            // EVPN Multicast Flags EC (RFC 9251 §6). Render the raw
-            // capability bits as `mcast-flags:` plus `I` (IGMP) / `M`
-            // (MLD); a both-clear value renders as a bare `mcast-flags:`.
+            // EVPN Multicast Flags EC (RFC 9251 §6 / RFC 9572 §8). Render the
+            // raw capability bits as `mcast-flags:` plus `I` (IGMP) / `M`
+            // (MLD) / `S` (segmentation support); an all-clear value renders
+            // as a bare `mcast-flags:`.
             let flags = u16::from_be_bytes([self.val[0], self.val[1]]);
             let mut s = String::new();
             if flags & EvpnMcastFlags::IGMP_PROXY != 0 {
@@ -287,6 +300,9 @@ impl fmt::Display for ExtCommunityValue {
             }
             if flags & EvpnMcastFlags::MLD_PROXY != 0 {
                 s.push('M');
+            }
+            if flags & EvpnMcastFlags::SEGMENTATION_SUPPORT != 0 {
+                s.push('S');
             }
             write!(f, "mcast-flags:{s}")
         } else {
@@ -486,6 +502,7 @@ mod tests {
         let ec: ExtCommunityValue = EvpnMcastFlags {
             igmp_proxy: true,
             mld_proxy: true,
+            segmentation_support: false,
         }
         .into();
         assert_eq!(ec.high_type, 0x06);
@@ -501,6 +518,7 @@ mod tests {
         let ec: ExtCommunityValue = EvpnMcastFlags {
             igmp_proxy: true,
             mld_proxy: false,
+            segmentation_support: false,
         }
         .into();
         assert_eq!(ec.val[0..2], [0x00, 0x01], "Flags bit 15 (IGMP) set only");
@@ -530,12 +548,14 @@ mod tests {
         let both: ExtCommunityValue = EvpnMcastFlags {
             igmp_proxy: true,
             mld_proxy: true,
+            segmentation_support: false,
         }
         .into();
         assert_eq!(both.to_string(), "mcast-flags:IM");
         let mld: ExtCommunityValue = EvpnMcastFlags {
             igmp_proxy: false,
             mld_proxy: true,
+            segmentation_support: false,
         }
         .into();
         assert_eq!(mld.to_string(), "mcast-flags:M");
@@ -554,6 +574,7 @@ mod tests {
         let original: ExtCommunityValue = EvpnMcastFlags {
             igmp_proxy: true,
             mld_proxy: true,
+            segmentation_support: false,
         }
         .into();
         let mut buf = BytesMut::new();
@@ -561,6 +582,40 @@ mod tests {
         let (_, parsed) = ExtCommunityValue::parse_be(&buf).expect("parse 8-octet EC");
         assert_eq!(parsed, original);
         assert_eq!(parsed.as_evpn_mcast_flags(), original.as_evpn_mcast_flags());
+    }
+
+    #[test]
+    fn evpn_mcast_flags_segmentation_support() {
+        // RFC 9572 §8: segmentation support is bit 8 of the Flags field
+        // (0x0080). A segmentation-only EC must survive decode (it is not
+        // "all bits clear") and renders with `S`.
+        let ec: ExtCommunityValue = EvpnMcastFlags {
+            igmp_proxy: false,
+            mld_proxy: false,
+            segmentation_support: true,
+        }
+        .into();
+        assert_eq!(ec.val[0..2], [0x00, 0x80], "Flags bit 8 (segmentation)");
+        assert_eq!(ec.to_string(), "mcast-flags:S");
+        let decoded = ec
+            .as_evpn_mcast_flags()
+            .expect("segmentation-only EC is valid");
+        assert!(decoded.segmentation_support);
+        assert!(!decoded.igmp_proxy && !decoded.mld_proxy);
+
+        // Combined with IGMP: bit 15 (0x0001) + bit 8 (0x0080) = 0x0081.
+        let combo: ExtCommunityValue = EvpnMcastFlags {
+            igmp_proxy: true,
+            mld_proxy: false,
+            segmentation_support: true,
+        }
+        .into();
+        assert_eq!(combo.val[0..2], [0x00, 0x81]);
+        assert_eq!(combo.to_string(), "mcast-flags:IS");
+        let mut buf = BytesMut::new();
+        combo.encode(&mut buf);
+        let (_, parsed) = ExtCommunityValue::parse_be(&buf).expect("parse 8-octet EC");
+        assert_eq!(parsed.as_evpn_mcast_flags(), combo.as_evpn_mcast_flags());
     }
 
     #[test]

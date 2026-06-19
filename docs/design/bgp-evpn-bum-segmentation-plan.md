@@ -277,12 +277,28 @@ codec — and any RIB/Adj-RIB/show/origination wiring.
   `yang_load_tests` guard catches it; cargo/clippy don't). End-to-end
   receive→show with real routes is BDD-covered in Phase 3 (needs origination).
 - **Phase 3 — inter-region (RBR, RFC 9572 §6) — first real milestone.**
-  Region = BGP peer-group (§6.1). Config marks a peer-group's Region ID and
-  flags it as a segmentation boundary. RBR re-advertises I/S-PMSI A-D
-  changing the BGP next hop to self and rewriting the PTA for the local
-  segment (§6.3, next-hop-based, no S-NH-EC); aggregates in-region IMET into
-  one Type-9 (§6.2); on L=1 the downstream auto-derives the IP-based RT and
-  originates Type-11, which the upstream consumes to build the leaf set.
+  Sliced smallest-first:
+  - **3a — segmentation-support signaling. DONE.** Added Bit 8 (`0x0080`,
+    RFC bit numbering MSB-0 so `1<<7`) to the existing `EvpnMcastFlags` EC
+    (with the all-clear "ignore" guard generalized so a segmentation-only EC
+    survives), an instance `segmentation` knob mirroring `igmp_mld_proxy`
+    (`router bgp afi-safi evpn segmentation`), and set the bit on originated
+    IMET via the Multicast Flags EC. `show bgp evpn` renders it as
+    `mcast-flags:…S` (added a `(0x06,0x09)` arm to `format_evpn_ecom_value`
+    reusing the codec Display). Unit-tested (codec round-trip incl.
+    segmentation-only + combined; `segmentation`-settable; show render) —
+    matching how the twin `igmp-mld-proxy` feature shipped (no dedicated
+    BDD). DF-Election EC is **§5.3.1 inter-AS only → Phase 4**, not needed
+    here.
+  - **3b — RBR re-origination (the meat).** Region = BGP peer-group (§6.1);
+    config marks a peer-group's Region ID + segmentation boundary. Add the
+    Region-ID EC (Two-Octet-AS sub-type `0x09` Source-AS, Global-Admin = AS,
+    §6.2). RBR re-advertises I/S-PMSI A-D changing the BGP next hop to self
+    and rewriting the PTA for the local segment (§6.3, next-hop-based, no
+    S-NH-EC); aggregates in-region IMET into one Type-9 (§6.2). **First
+    end-to-end BDD lands here** (2-region topology). next.
+  - **3c — Leaf A-D.** On L=1 the downstream auto-derives the IP-based RT and
+    originates Type-11, which the upstream consumes to build the leaf set.
 - **Phase 4 — inter-AS (ASBR, RFC 9572 §5) + legacy coexistence.** ASBR
   becomes the root of the intra-AS segment; per-AS IMET stays AS-local,
   per-region I-PMSI crosses AS boundaries; DF Election EC (AC-DF cleared)
