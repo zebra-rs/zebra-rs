@@ -1053,6 +1053,13 @@ fn show_adj_rib_routes_evpn<D: RibDirection>(
     writeln!(buf, "EVPN type-3 prefix: [3]:[EthTag]:[IPlen]:[OrigIP]")?;
     writeln!(buf, "EVPN type-4 prefix: [4]:[ESI]:[IPlen]:[OrigIP]")?;
     writeln!(buf, "EVPN type-5 prefix: [5]:[EthTag]:[IPlen]:[IP]")?;
+    writeln!(
+        buf,
+        "EVPN type-6 prefix: [6]:[EthTag]:[SrcLen]:[Src]:[GrpLen]:[Grp]:[OrigLen]:[Orig]"
+    )?;
+    writeln!(buf, "EVPN type-9 prefix: [9]:[EthTag]:[RegionID]")?;
+    writeln!(buf, "EVPN type-10 prefix: [10]:[EthTag]:[Src]:[Grp]:[Orig]")?;
+    writeln!(buf, "EVPN type-11 prefix: [11]:[RouteKey]:[Orig]")?;
     writeln!(buf)?;
 
     writeln!(
@@ -3187,9 +3194,26 @@ fn show_evpn_ecom(attr: &BgpAttr) -> String {
         .join(" ")
 }
 
+/// Map a `show bgp evpn route-type <keyword>` filter keyword to its EVPN
+/// route-type number (the value `EvpnPrefix::route_type()` returns). An
+/// unrecognised token yields `None`, which the caller treats as "no filter".
+/// Keywords mirror the `route-type` enum in exec.yang.
+fn evpn_route_type_filter(token: String) -> Option<u8> {
+    match token.as_str() {
+        "macip" => Some(2),
+        "multicast" => Some(3),
+        "prefix" => Some(5),
+        "smet" => Some(6),
+        "per-region-imet" => Some(9),
+        "s-pmsi" => Some(10),
+        "leaf" => Some(11),
+        _ => None,
+    }
+}
+
 fn show_bgp_evpn(
     bgp: &Bgp,
-    _args: Args,
+    mut args: Args,
     json: bool,
 ) -> std::result::Result<String, std::fmt::Error> {
     if json {
@@ -3198,6 +3222,11 @@ fn show_bgp_evpn(
         // EVPN routes" without parsing errors.
         return Ok(String::from("[]"));
     }
+
+    // Optional `route-type <keyword>` filter. Plain `show bgp evpn` carries
+    // no argument (filter = None); `show bgp evpn route-type <kw>` passes the
+    // keyword through, which we map to a route-type number to filter on.
+    let filter = args.string().and_then(evpn_route_type_filter);
 
     let mut buf = String::new();
 
@@ -3213,6 +3242,13 @@ fn show_bgp_evpn(
     writeln!(buf, "EVPN type-3 prefix: [3]:[EthTag]:[IPlen]:[OrigIP]")?;
     writeln!(buf, "EVPN type-4 prefix: [4]:[ESI]:[IPlen]:[OrigIP]")?;
     writeln!(buf, "EVPN type-5 prefix: [5]:[EthTag]:[IPlen]:[IP]")?;
+    writeln!(
+        buf,
+        "EVPN type-6 prefix: [6]:[EthTag]:[SrcLen]:[Src]:[GrpLen]:[Grp]:[OrigLen]:[Orig]"
+    )?;
+    writeln!(buf, "EVPN type-9 prefix: [9]:[EthTag]:[RegionID]")?;
+    writeln!(buf, "EVPN type-10 prefix: [10]:[EthTag]:[Src]:[Grp]:[Orig]")?;
+    writeln!(buf, "EVPN type-11 prefix: [11]:[RouteKey]:[Orig]")?;
     writeln!(buf)?;
 
     // Column header.
@@ -3223,12 +3259,20 @@ fn show_bgp_evpn(
 
     // Walk per-RD EVPN Loc-RIB tables in BTree (sorted) order.
     for (rd, table) in bgp.local_rib.evpn.iter() {
-        if table.selected.is_empty() {
-            continue;
-        }
-        writeln!(buf, "Route Distinguisher: {}", rd)?;
+        // Print the RD header lazily so a route-type filter that excludes
+        // every prefix under this RD doesn't leave a dangling header.
+        let mut rd_header = false;
 
         for (prefix, rib) in table.selected.iter() {
+            if let Some(rt) = filter
+                && prefix.route_type() != rt
+            {
+                continue;
+            }
+            if !rd_header {
+                writeln!(buf, "Route Distinguisher: {}", rd)?;
+                rd_header = true;
+            }
             let valid = "*";
             let best = if rib.best_path { ">" } else { " " };
             // Line 1: status flags + prefix on its own line (the EVPN
@@ -4908,6 +4952,8 @@ impl Bgp {
             .set(show_bgp_vpnv6)
             .path("/show/bgp/evpn")
             .set(show_bgp_evpn)
+            .path("/show/bgp/evpn/route-type")
+            .set(show_bgp_evpn)
             .path("/show/bgp/summary")
             .set(show_bgp_summary::<Bgp>)
             .path("/show/bgp/evpn/summary")
@@ -4952,5 +4998,62 @@ mod nd_elapsed_tests {
     fn hours_minutes_seconds() {
         assert_eq!(format_nd_elapsed(3600), "1h0m0s");
         assert_eq!(format_nd_elapsed(3661), "1h1m1s");
+    }
+}
+
+#[cfg(test)]
+mod evpn_route_type_filter_tests {
+    use super::evpn_route_type_filter;
+
+    #[test]
+    fn known_keywords_map_to_route_type_numbers() {
+        assert_eq!(evpn_route_type_filter("macip".into()), Some(2));
+        assert_eq!(evpn_route_type_filter("multicast".into()), Some(3));
+        assert_eq!(evpn_route_type_filter("prefix".into()), Some(5));
+        assert_eq!(evpn_route_type_filter("smet".into()), Some(6));
+        assert_eq!(evpn_route_type_filter("per-region-imet".into()), Some(9));
+        assert_eq!(evpn_route_type_filter("s-pmsi".into()), Some(10));
+        assert_eq!(evpn_route_type_filter("leaf".into()), Some(11));
+    }
+
+    #[test]
+    fn unknown_keyword_is_no_filter() {
+        assert_eq!(evpn_route_type_filter("bogus".into()), None);
+        assert_eq!(evpn_route_type_filter(String::new()), None);
+    }
+
+    /// The filter numbers must agree with `EvpnPrefix::route_type()`, or a
+    /// `route-type <kw>` filter would silently match nothing. Cross-check the
+    /// RFC 9572 keywords against the actual key discriminators.
+    #[test]
+    fn keywords_match_evpnprefix_route_type_numbers() {
+        use bgp_packet::EvpnPrefix;
+        use std::net::{IpAddr, Ipv4Addr};
+        let t9 = EvpnPrefix::PerRegionImet {
+            eth_tag: 0,
+            region_id: [0; 8],
+        };
+        let t10 = EvpnPrefix::SPmsi {
+            eth_tag: 0,
+            src: None,
+            grp: None,
+            orig: IpAddr::V4(Ipv4Addr::UNSPECIFIED),
+        };
+        let t11 = EvpnPrefix::LeafAd {
+            route_key: vec![9, 20],
+            orig: IpAddr::V4(Ipv4Addr::UNSPECIFIED),
+        };
+        assert_eq!(
+            evpn_route_type_filter("per-region-imet".into()),
+            Some(t9.route_type())
+        );
+        assert_eq!(
+            evpn_route_type_filter("s-pmsi".into()),
+            Some(t10.route_type())
+        );
+        assert_eq!(
+            evpn_route_type_filter("leaf".into()),
+            Some(t11.route_type())
+        );
     }
 }

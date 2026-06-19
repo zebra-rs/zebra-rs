@@ -6017,18 +6017,11 @@ pub fn route_evpn_update(
     stale: bool,
 ) {
     let (rd, prefix) = EvpnPrefix::from_route(route);
-    if matches!(
-        route,
-        EvpnRoute::PerRegionImet(_) | EvpnRoute::SPmsi(_) | EvpnRoute::LeafAd(_)
-    ) {
-        // RFC 9572 EVPN route types 9/10/11 (Per-Region I-PMSI / S-PMSI /
-        // Leaf A-D) are decoded by the wire codec but not yet processed by
-        // the RIB / dataplane — that lands in a later control-plane phase.
-        // Accept and drop them here so the codec round-trips without changing
-        // RIB or forwarding behavior.
-        tracing::debug!("EVPN RFC 9572 route type received; codec-only, processing deferred");
-        return;
-    }
+    // RFC 9572 route types 9/10/11 (Per-Region I-PMSI / S-PMSI / Leaf A-D)
+    // flow through the same generic Adj-RIB-In → Loc-RIB → best-path →
+    // reflect path as the other EVPN types; they carry no VXLAN dataplane
+    // action (`route_evpn_export_selected` handles them as no-ops). Local
+    // origination / segmentation re-origination lands in a later phase.
     let id = match route {
         EvpnRoute::Mac(m) => m.id,
         EvpnRoute::Multicast(m) => m.id,

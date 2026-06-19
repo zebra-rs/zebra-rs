@@ -1109,6 +1109,21 @@ mod tests {
                 vec!["10.0.0.0/24"],
             ),
             ("show bgp evpn", "/show/bgp/evpn", vec![]),
+            (
+                "show bgp evpn route-type per-region-imet",
+                "/show/bgp/evpn/route-type",
+                vec!["per-region-imet"],
+            ),
+            (
+                "show bgp evpn route-type s-pmsi",
+                "/show/bgp/evpn/route-type",
+                vec!["s-pmsi"],
+            ),
+            (
+                "show bgp evpn route-type leaf",
+                "/show/bgp/evpn/route-type",
+                vec!["leaf"],
+            ),
         ];
 
         for &(cmd, want_path, ref want_args) in &cases {

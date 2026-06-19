@@ -341,6 +341,20 @@ module exec {
           ext:help "Summary of EVPN-enabled neighbors";
           type empty;
         }
+        leaf route-type {
+          ext:help "Filter the EVPN RIB by route type";
+          // macip=2, multicast=3, prefix=5 (RFC 7432/9136); smet=6
+          // (RFC 9251); per-region-imet=9, s-pmsi=10, leaf=11 (RFC 9572).
+          type enumeration {
+            enum macip;
+            enum multicast;
+            enum prefix;
+            enum smet;
+            enum per-region-imet;
+            enum s-pmsi;
+            enum leaf;
+          }
+        }
       }
       list update-group {
         ext:help "BGP update-groups (IOS-XR style)";
