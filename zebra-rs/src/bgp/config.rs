@@ -1635,6 +1635,11 @@ fn config_evpn_bum_tunnel_type(bgp: &mut Bgp, mut args: Args, op: ConfigOp) -> O
     }
     bgp.local_rib.evpn_flood.bum_tunnel = bum;
     reoriginate_all_imet(bgp);
+    // The flood model is mode-dependent: SR P2MP suppresses the VXLAN
+    // head-end FDB and programs a replication segment instead, so a mode
+    // change must reconcile every VNI's dataplane (withdraw stale VXLAN IR
+    // entries / emit or withdraw the ReplSeg).
+    bgp.evpn_reconcile_all_flood();
     Some(())
 }
 

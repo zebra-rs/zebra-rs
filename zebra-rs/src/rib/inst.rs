@@ -290,6 +290,23 @@ pub enum Message {
         source: Option<IpAddr>,
         dst: IpAddr,
     },
+    /// Install an RFC 9524 SR P2MP replication segment for a VNI's BUM
+    /// delivery (EVPN, draft-ietf-bess-mvpn-evpn-sr-p2mp). `root` is the tree
+    /// Root (local VTEP), `leaves` the egress PEs to replicate to, `srv6`
+    /// selects SRv6 (vs SR-MPLS) encapsulation. Consumed by the SR
+    /// replication dataplane (eBPF TC/clsact, offload crate
+    /// `tc-evpn-replicate`); a stub today.
+    ReplSegAdd {
+        vni: u32,
+        tree_id: u32,
+        root: IpAddr,
+        srv6: bool,
+        leaves: Vec<IpAddr>,
+    },
+    /// Withdraw the SR P2MP replication segment for a VNI.
+    ReplSegDel {
+        vni: u32,
+    },
     Shutdown {
         tx: oneshot::Sender<()>,
     },
@@ -2214,6 +2231,25 @@ impl Rib {
                 dst,
             } => {
                 self.smet_install(vni, group, source, dst, false).await;
+            }
+            Message::ReplSegAdd {
+                vni,
+                tree_id,
+                root,
+                srv6,
+                leaves,
+            } => {
+                // The SR replication dataplane (eBPF TC/clsact, offload crate
+                // `tc-evpn-replicate`) is wired in a follow-up; record the
+                // intent for now so the control plane is observable end to end.
+                tracing::info!(
+                    "EVPN ReplSeg add: VNI {vni} tree {tree_id} root {root} {} -> {} leaf PE(s): {leaves:?} (SR dataplane pending)",
+                    if srv6 { "SRv6" } else { "SR-MPLS" },
+                    leaves.len()
+                );
+            }
+            Message::ReplSegDel { vni } => {
+                tracing::info!("EVPN ReplSeg del: VNI {vni} (SR dataplane pending)");
             }
             Message::RedistAdd {
                 proto,
