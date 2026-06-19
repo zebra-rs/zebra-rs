@@ -1929,6 +1929,12 @@ pub struct EvpnFloodState {
     /// unknown-unicast (`prune_unknown`) flood lists.
     pub prune_bm: bool,
     pub prune_unknown: bool,
+    /// RFC 9574 selective Assisted Replication (`... assisted-replication
+    /// selective`). When set on an AR-REPLICATOR, its Replicator-AR IMET
+    /// carries the L (Leaf Information Required) flag, soliciting Leaf A-D
+    /// routes; an AR-LEAF then originates a Leaf A-D toward each selective
+    /// replicator it sees.
+    pub selective: bool,
     /// Per-VNI flood model.
     vnis: BTreeMap<u32, VniFlood>,
 }
@@ -6363,6 +6369,10 @@ pub fn route_evpn_update(
     if !selected.is_empty() {
         route_advertise_evpn_to_peers(rd, prefix, &selected, bgp, peers);
     }
+
+    // RFC 9574 selective AR: an AR-LEAF responds to a selective Replicator-AR
+    // route (L flag set) by originating a Leaf A-D toward it.
+    evpn_selective_ar_on_receive(route, attr, bgp, peers);
 }
 
 /// Withdraw one EVPN route advertised in an MP_UNREACH_NLRI from Adj-RIB-In
@@ -6394,6 +6404,16 @@ pub fn route_evpn_withdraw(ident: usize, route: &EvpnRoute, bgp: &mut BgpTop, pe
     let selected = bgp.local_rib.select_best_path_evpn(&rd, &prefix);
 
     route_evpn_export_selected(&rd, &prefix, &selected, removed.first(), bgp);
+
+    // RFC 9574 selective AR: a withdrawn Replicator-AR route pulls the Leaf
+    // A-D we may have originated toward it (no-op if we originated none).
+    if bgp.local_rib.evpn_flood.role == AssistedReplicationRole::Leaf
+        && let EvpnRoute::Multicast(m) = route
+    {
+        let route_key = evpn_leaf_ad_route_key(m);
+        let originator = IpAddr::V4(*bgp.router_id);
+        evpn_withdraw_leaf_ad(route_key, originator, bgp, peers);
+    }
 }
 
 /// Store one received Flow Specification NLRI in the peer's Adj-RIB-In.
@@ -12174,11 +12194,17 @@ impl Bgp {
         let ar_ip = self.local_rib.evpn_flood.ar_ip;
         let prune_bm = self.local_rib.evpn_flood.prune_bm;
         let prune_unknown = self.local_rib.evpn_flood.prune_unknown;
+        let selective = self.local_rib.evpn_flood.selective;
         let (mut pmsi, nexthop) = imet_pmsi_tunnel(bum, role, ar_ip, vtep_local, vni);
         // RFC 9574 Pruned-Flood-List: advertise our prune preferences so
         // remote PEs can drop us from the BM / unknown-unicast flood lists.
         pmsi.set_prune_bm(prune_bm);
         pmsi.set_prune_unknown(prune_unknown);
+        // RFC 9574 selective AR: a selective AR-REPLICATOR sets the L flag in
+        // its Replicator-AR route to solicit Leaf A-D routes from the leaves.
+        if role == AssistedReplicationRole::Replicator && selective {
+            pmsi.set_leaf_info_required(true);
+        }
         attr.pmsi_tunnel = Some(pmsi);
         attr.nexthop = Some(BgpNexthop::Evpn(nexthop));
 
@@ -12487,6 +12513,148 @@ fn imet_pmsi_tunnel(
 /// four (24-bit VNI naturally encoded big-endian into the low 3 of
 /// 4 bytes; 32-bit values would clobber the high byte but VNIs are
 /// 24-bit per RFC 7348).
+/// Build an IPv4-address-specific Route Target extended community (type 0x01
+/// / sub 0x02, RFC 4360): `<IPv4>:<local-admin>`. RFC 9574 selective AR
+/// scopes a Leaf A-D route to one AR-REPLICATOR with `<replicator-NH>:0`.
+fn evpn_ipv4_route_target(addr: Ipv4Addr, local_admin: u16) -> ExtCommunityValue {
+    let mut rt = ExtCommunityValue {
+        high_type: 0x01,
+        low_type: 0x02,
+        val: [0; 6],
+    };
+    rt.val[0..4].copy_from_slice(&addr.octets());
+    rt.val[4..6].copy_from_slice(&local_admin.to_be_bytes());
+    rt
+}
+
+/// The Leaf A-D `route_key` (RFC 9572 §3.3) for a Replicator-AR Type-3 IMET:
+/// its Route Type Specific NLRI (route-type + length + body), Add-Path id
+/// stripped, so leaf and replicator agree on the key.
+fn evpn_leaf_ad_route_key(m: &EvpnMulticast) -> Vec<u8> {
+    let mut buf = BytesMut::new();
+    EvpnRoute::Multicast(EvpnMulticast { id: 0, ..m.clone() }).nlri_emit(&mut buf);
+    buf.to_vec()
+}
+
+/// RFC 9574 selective AR: originate (or refresh) a Leaf A-D route (EVPN Route
+/// Type 11) toward a selective AR-REPLICATOR. `route_key` is the
+/// Replicator-AR route's NLRI; `replicator_nh` its next hop (→ the `<NH>:0`
+/// IP-specific RT scoping the route to that replicator); `originator` is our
+/// (AR-LEAF) VTEP IP; `vni` the BUM domain.
+fn evpn_originate_leaf_ad(
+    route_key: Vec<u8>,
+    originator: IpAddr,
+    replicator_nh: Ipv4Addr,
+    vni: u32,
+    bgp: &mut BgpTop,
+    peers: &mut PeerMap,
+) {
+    let route = EvpnRoute::LeafAd(EvpnLeafAd {
+        id: 0,
+        route_key,
+        originator,
+    });
+    let (rd, prefix) = EvpnPrefix::from_route(&route);
+
+    let mut attr = BgpAttr::new();
+    attr.ecom = Some(ExtCommunity::from([
+        evpn_ipv4_route_target(replicator_nh, 0),
+        evpn_encap_vxlan(),
+    ]));
+    attr.pmsi_tunnel = Some(
+        PmsiTunnel {
+            flags: 0,
+            tunnel_type: PmsiTunnel::TUNNEL_ASSISTED_REPLICATION,
+            vni,
+            endpoint: originator,
+            tree_id: None,
+        }
+        .with_ar_type(AssistedReplicationType::Leaf),
+    );
+    attr.nexthop = Some(BgpNexthop::Evpn(originator));
+
+    let rib = BgpRib::new(
+        ORIGINATED_PEER,
+        Ipv4Addr::UNSPECIFIED,
+        BgpRibType::Originated,
+        0,
+        32768,
+        &attr,
+        None,
+        None,
+        false,
+    );
+    let (_replaced, selected, _next_id) = bgp.local_rib.update_evpn(rd, prefix.clone(), rib);
+    if !selected.is_empty() {
+        route_advertise_evpn_to_peers(rd, prefix, &selected, bgp, peers);
+    }
+}
+
+/// Withdraw the Leaf A-D route we originated toward the replicator identified
+/// by `route_key` (its Replicator-AR route was withdrawn). No-op if we never
+/// originated one.
+fn evpn_withdraw_leaf_ad(
+    route_key: Vec<u8>,
+    originator: IpAddr,
+    bgp: &mut BgpTop,
+    peers: &mut PeerMap,
+) {
+    let route = EvpnRoute::LeafAd(EvpnLeafAd {
+        id: 0,
+        route_key,
+        originator,
+    });
+    let (rd, prefix) = EvpnPrefix::from_route(&route);
+    let removed = bgp.local_rib.remove_evpn(rd, &prefix, 0, ORIGINATED_PEER);
+    if removed.is_empty() {
+        return;
+    }
+    let _ = bgp.local_rib.select_best_path_evpn(&rd, &prefix);
+    route_withdraw_evpn_to_peers(rd, prefix, peers);
+}
+
+/// RFC 9574 selective AR receive hook (per received EVPN route). An AR-LEAF
+/// originates a Leaf A-D toward every selective AR-REPLICATOR it sees (a
+/// Replicator-AR route carrying the L flag).
+///
+/// Note: RFC 9574 has the leaf join a *single* chosen replicator's set; we
+/// currently join every selective replicator. Harmless with no replicator
+/// dataplane (Phase 4); chosen-replicator selection is a follow-up.
+fn evpn_selective_ar_on_receive(
+    route: &EvpnRoute,
+    attr: &BgpAttr,
+    bgp: &mut BgpTop,
+    peers: &mut PeerMap,
+) {
+    if bgp.local_rib.evpn_flood.role != AssistedReplicationRole::Leaf {
+        return;
+    }
+    let EvpnRoute::Multicast(m) = route else {
+        return;
+    };
+    let Some(pmsi) = attr.pmsi_tunnel.as_ref() else {
+        return;
+    };
+    if !(pmsi.is_assisted_replication()
+        && pmsi.ar_type() == AssistedReplicationType::Replicator
+        && pmsi.leaf_info_required())
+    {
+        return;
+    }
+    // The IP-specific RT scopes the Leaf A-D to this replicator's next hop;
+    // IPv4 only (VXLAN VTEPs are IPv4 here).
+    let nh = match attr.nexthop.as_ref() {
+        Some(BgpNexthop::Evpn(IpAddr::V4(nh))) => *nh,
+        _ => return,
+    };
+    let Some(vni) = extract_vni_from_attr(attr) else {
+        return;
+    };
+    let originator = IpAddr::V4(*bgp.router_id);
+    let route_key = evpn_leaf_ad_route_key(m);
+    evpn_originate_leaf_ad(route_key, originator, nh, vni, bgp, peers);
+}
+
 fn evpn_route_target(asn: u32, vni: u32) -> ExtCommunityValue {
     let mut rt = ExtCommunityValue {
         high_type: 0x00,
@@ -12781,6 +12949,50 @@ mod evpn_flood_tests {
             imet_whole_vtep_prune(Some(&pmsi(true, true))),
             "BM and U → whole-VTEP prune"
         );
+    }
+}
+
+#[cfg(test)]
+mod evpn_selective_ar_tests {
+    use super::*;
+
+    /// IPv4-address-specific RT wire format: type 0x01 / sub 0x02, value =
+    /// 4-octet IPv4 + 2-octet local-administrator.
+    #[test]
+    fn ipv4_route_target_wire_format() {
+        let rt = evpn_ipv4_route_target(Ipv4Addr::new(192, 0, 2, 1), 0);
+        assert_eq!(rt.high_type, 0x01, "IPv4-address-specific");
+        assert_eq!(rt.low_type, 0x02, "Route Target");
+        assert_eq!(rt.val, [192, 0, 2, 1, 0, 0]);
+
+        let rt = evpn_ipv4_route_target(Ipv4Addr::new(10, 0, 0, 254), 7);
+        assert_eq!(rt.val, [10, 0, 0, 254, 0, 7]);
+    }
+
+    /// The Leaf A-D route_key is the Replicator-AR's Type-3 NLRI with the
+    /// Add-Path id stripped, so it parses back as a Type-3 IMET with id 0.
+    #[test]
+    fn leaf_ad_route_key_is_replicator_ar_nlri() {
+        let m = EvpnMulticast {
+            id: 5, // Add-Path id must NOT leak into the route_key
+            rd: RouteDistinguisher::default(),
+            ether_tag: 0,
+            addr: IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1)),
+        };
+        let key = evpn_leaf_ad_route_key(&m);
+        assert_eq!(
+            key[0], 3,
+            "route_key starts with the Type-3 route-type byte"
+        );
+        let (_, parsed) =
+            EvpnRoute::parse_nlri(&key, false).expect("route_key parses as a Type-3 NLRI");
+        match parsed {
+            EvpnRoute::Multicast(p) => {
+                assert_eq!(p.id, 0, "Add-Path id stripped");
+                assert_eq!(p.addr, m.addr);
+            }
+            other => panic!("expected Multicast, got {other:?}"),
+        }
     }
 }
 
