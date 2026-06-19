@@ -15,6 +15,10 @@ the group is delivered out the VXLAN and head-end-replicated to every
 remote VTEP on the Type-3 zero-MAC FDB list. True
 `(x,G)`-to-only-the-asking-VTEP delivery needs the kernel **VXLAN MDB**.
 
+> Scoped in its own design doc: **`bgp-evpn-smet-pervtep-dst-plan.md`**
+> (the `external vnifilter` VXLAN model, the wholesale-vs-per-VNI
+> decision, phasing, and the iproute2-6.1.0 / kernel-6.8 tooling note).
+
 Why deferred: it is not a localized SMET change. The kernel rejects
 `MDBE_ATTR_DST` on a plain VXLAN with `EINVAL` (verified; `iproute2`
 drops it too — see the `mdb_install` comment). The per-VTEP form needs a
