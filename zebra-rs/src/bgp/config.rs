@@ -16,7 +16,7 @@ use super::auth::AoConfig;
 use super::peer::{AfiSafiEncapType, BgpTop};
 use super::route_clean;
 use super::{
-    AssistedReplicationRole, BGP_PORT, Bgp,
+    AssistedReplicationRole, BGP_PORT, Bgp, EvpnBumTunnel,
     inst::Callback,
     peer::{
         ALLOWAS_IN_DEFAULT_COUNT, AllowAsIn, LocalAs, PasswordEncoding, Peer, PeerType,
@@ -1540,6 +1540,32 @@ fn config_assisted_replication_ip(bgp: &mut Bgp, mut args: Args, op: ConfigOp) -
         return Some(());
     }
     bgp.local_rib.evpn_flood.ar_ip = ip;
+    reoriginate_all_imet(bgp);
+    Some(())
+}
+
+/// `router bgp afi-safi evpn bum-tunnel-type <ingress-replication|
+/// sr-mpls-p2mp|srv6-p2mp>` — the inclusive BUM P-tunnel advertised in the
+/// Type-3 IMET PMSI. The SR P2MP modes bind BUM delivery to an RFC 9524
+/// replication tree (draft-ietf-bess-mvpn-evpn-sr-p2mp).
+fn config_evpn_bum_tunnel_type(bgp: &mut Bgp, mut args: Args, op: ConfigOp) -> Option<()> {
+    let afi_safi: AfiSafi = args.afi_safi()?;
+    if afi_safi.afi != Afi::L2vpn || afi_safi.safi != Safi::Evpn {
+        return None;
+    }
+    let bum = if op.is_set() {
+        match args.string()?.as_str() {
+            "sr-mpls-p2mp" => EvpnBumTunnel::SrMplsP2mp,
+            "srv6-p2mp" => EvpnBumTunnel::SrV6P2mp,
+            _ => EvpnBumTunnel::IngressReplication,
+        }
+    } else {
+        EvpnBumTunnel::IngressReplication
+    };
+    if bgp.local_rib.evpn_flood.bum_tunnel == bum {
+        return Some(());
+    }
+    bgp.local_rib.evpn_flood.bum_tunnel = bum;
     reoriginate_all_imet(bgp);
     Some(())
 }
@@ -3675,6 +3701,13 @@ impl Bgp {
         self.callback_add(
             "/router/bgp/afi-safi/assisted-replication/replicator-ip",
             config_assisted_replication_ip,
+        );
+        // EVPN inclusive BUM P-tunnel selection (RFC 9524 SR P2MP trees vs.
+        // ingress replication), under `router bgp afi-safi evpn
+        // bum-tunnel-type`. Augmented in by zebra-bgp-evpn.yang.
+        self.callback_add(
+            "/router/bgp/afi-safi/bum-tunnel-type",
+            config_evpn_bum_tunnel_type,
         );
 
         // Per-AFI redistribution (zebra-bgp-redistribute.yang).

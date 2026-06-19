@@ -1,0 +1,33 @@
+# z2 — AR-LEAF (RFC 9574). Tags its Regular-IR Type-3 IMET as AR-LEAF and
+# collapses its BUM flood list to the AR-REPLICATOR's AR-IP (192.168.0.101).
+vxlan:
+- name: vxlan10
+  vni: 10
+  local-address: 192.168.0.2
+router:
+  bgp:
+    global:
+      as: 65001
+      router-id: 192.168.0.2
+    afi-safi:
+    - name: evpn
+      advertise-all-vni: true
+      assisted-replication:
+        role: leaf
+    neighbor:
+    - remote-address: 192.168.0.1
+      enabled: true
+      remote-as: 65001
+      afi-safi:
+      - name: ipv4
+        enabled: true
+      - name: evpn
+        enabled: true
+    - remote-address: 192.168.0.3
+      enabled: true
+      remote-as: 65001
+      afi-safi:
+      - name: ipv4
+        enabled: true
+      - name: evpn
+        enabled: true

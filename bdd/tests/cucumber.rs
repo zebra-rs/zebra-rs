@@ -2155,6 +2155,68 @@ async fn kernel_route_eventually_contains(
     );
 }
 
+/// Poll `bridge fdb show dev <dev>` inside a namespace until it contains
+/// `needle`. Used to observe the EVPN BUM flood list: the daemon programs
+/// zero-MAC (`00:00:00:00:00:00`) FDB rows on the VXLAN device, one `dst`
+/// per flood target. An AR-LEAF (RFC 9574) collapses these to a single
+/// AR-IP `dst`; an RNVE keeps one per remote VTEP.
+#[then(expr = "bridge fdb {string} in namespace {string} should eventually contain {string}")]
+async fn bridge_fdb_eventually_contains(
+    world: &mut World,
+    dev: String,
+    namespace: String,
+    needle: String,
+) {
+    let scoped = world.ns(&namespace);
+    const ATTEMPTS: u32 = 30;
+    let mut last_output = String::new();
+    for i in 0..ATTEMPTS {
+        last_output = netns::exec_in_netns(&scoped, "bridge", &["fdb", "show", "dev", &dev])
+            .await
+            .expect("Failed to run bridge fdb show");
+        if last_output.contains(&needle) {
+            println!(
+                "✓ bridge fdb {} in namespace {} contains '{}'",
+                dev, scoped, needle
+            );
+            return;
+        }
+        if i + 1 < ATTEMPTS {
+            tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
+        }
+    }
+    panic!(
+        "bridge fdb {} in namespace {} did not contain '{}' after {} attempts\nlast `bridge fdb show dev {}` output:\n{}",
+        dev, scoped, needle, ATTEMPTS, dev, last_output
+    );
+}
+
+/// Assert `bridge fdb show dev <dev>` does NOT contain `needle`. A
+/// point-in-time check — order it AFTER a positive
+/// `should eventually contain` on the same device so the flood list has
+/// converged and the assertion isn't vacuously true on an empty table.
+#[then(expr = "bridge fdb {string} in namespace {string} should not contain {string}")]
+async fn bridge_fdb_not_contains(
+    world: &mut World,
+    dev: String,
+    namespace: String,
+    needle: String,
+) {
+    let scoped = world.ns(&namespace);
+    let output = netns::exec_in_netns(&scoped, "bridge", &["fdb", "show", "dev", &dev])
+        .await
+        .expect("Failed to run bridge fdb show");
+    assert!(
+        !output.contains(&needle),
+        "bridge fdb {} in namespace {} unexpectedly contained '{}'\n`bridge fdb show dev {}` output:\n{}",
+        dev,
+        scoped,
+        needle,
+        dev,
+        output
+    );
+}
+
 /// Poll the namespace's daemon log (`logs/<scoped>.log`, where
 /// `start_zebra_rs` pointed --log-file) for a substring. This is how a
 /// scenario asserts on internal events that leave no stable external

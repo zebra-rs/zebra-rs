@@ -527,6 +527,24 @@ pub enum AssistedReplicationRole {
     Leaf,
 }
 
+/// Inclusive BUM P-tunnel mode advertised in the Type-3 IMET PMSI Tunnel
+/// attribute, configured under `router bgp afi-safi evpn bum-tunnel-type`.
+/// Ingress Replication (optionally optimized by Assisted Replication via
+/// [`AssistedReplicationRole`]) is the default; the SR P2MP modes bind BUM
+/// delivery to an RFC 9524 replication tree
+/// (draft-ietf-bess-mvpn-evpn-sr-p2mp), with the local node as the tree Root.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum EvpnBumTunnel {
+    /// Ingress Replication (PMSI tunnel type 0x06, or Assisted Replication
+    /// 0x0A per the AR role). The default.
+    #[default]
+    IngressReplication,
+    /// SR-MPLS P2MP tree (PMSI tunnel type 0x0C).
+    SrMplsP2mp,
+    /// SRv6 P2MP tree (PMSI tunnel type 0x0D).
+    SrV6P2mp,
+}
+
 pub struct Bgp {
     pub asn: u32,
     /// Effective BGP Identifier — what OPENs, EVPN RDs and the show

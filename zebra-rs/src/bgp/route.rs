@@ -19,7 +19,7 @@ use super::peer_map::PeerMap;
 use super::shard::msg::{ShardUpdateV4, ShardUpdateV6};
 use super::shard::{ShardMsg, ShardOut};
 use super::timer::{start_adv_timer_vpnv4, start_adv_timer_vpnv6};
-use super::{AssistedReplicationRole, Bgp, InOut, Message};
+use super::{AssistedReplicationRole, Bgp, EvpnBumTunnel, InOut, Message};
 
 pub const ORIGINATED_PEER: usize = usize::MAX;
 
@@ -1913,6 +1913,10 @@ pub struct EvpnFloodState {
     /// Local AR-IP (`... assisted-replication replicator-ip`), advertised in
     /// the Replicator-AR route's next hop when `role` is `Replicator`.
     pub ar_ip: Option<IpAddr>,
+    /// Inclusive BUM P-tunnel advertised in the Type-3 IMET PMSI
+    /// (`... evpn bum-tunnel-type`). Default Ingress Replication; the SR
+    /// P2MP modes advertise an RFC 9524 replication tree rooted here.
+    pub bum_tunnel: EvpnBumTunnel,
     /// Per-VNI flood model.
     vnis: BTreeMap<u32, VniFlood>,
 }
@@ -1921,32 +1925,61 @@ pub struct EvpnFloodState {
 /// flood targets we have programmed for them.
 #[derive(Debug, Default)]
 struct VniFlood {
-    /// Remote PEs that advertised a Type-3 IMET for this VNI, keyed by the
-    /// NLRI Originating Router IP (the remote's IR-IP). The value is the
-    /// remote's AR-IP when it advertised a Replicator-AR route (PMSI tunnel
-    /// type 0x0A), else `None` for a Regular-IR route.
+    /// Remote PEs that advertised an Ingress/Assisted Replication Type-3
+    /// IMET for this VNI, keyed by the NLRI Originating Router IP (the
+    /// remote's IR-IP). The value is the remote's AR-IP when it advertised
+    /// a Replicator-AR route (PMSI tunnel type 0x0A), else `None` for a
+    /// Regular-IR route. These are the VXLAN head-end flood candidates.
     remotes: BTreeMap<IpAddr, Option<IpAddr>>,
+    /// Remote PEs that advertised an SR P2MP tree Type-3 IMET (PMSI tunnel
+    /// type 0x0C/0x0D, RFC 9524), keyed by Originating Router IP (the tree
+    /// Root), valued by the tree's Tree-ID. Recorded for the SR replication
+    /// dataplane; deliberately kept *out* of `remotes` so they never get a
+    /// VXLAN head-end FDB entry. Mutually exclusive with `remotes` per key.
+    sr_remotes: BTreeMap<IpAddr, u32>,
     /// Flood targets (zero-MAC FDB `dst`s) currently programmed in the
     /// kernel, so `reconcile` can compute the MdbAdd/MdbDel delta.
     installed: BTreeSet<IpAddr>,
 }
 
 impl EvpnFloodState {
-    /// Record a remote's Type-3 IMET for `vni`. `ar_ip` is `Some` when the
-    /// remote is an AR-REPLICATOR (Replicator-AR route).
+    /// Record an Ingress/Assisted Replication remote's Type-3 IMET for
+    /// `vni`. `ar_ip` is `Some` when the remote is an AR-REPLICATOR
+    /// (Replicator-AR route). Clears any stale SR P2MP record for the same
+    /// originator (a remote that flipped tunnel type).
     pub fn update_remote(&mut self, vni: u32, orig: IpAddr, ar_ip: Option<IpAddr>) {
-        self.vnis
-            .entry(vni)
-            .or_default()
-            .remotes
-            .insert(orig, ar_ip);
+        let v = self.vnis.entry(vni).or_default();
+        v.sr_remotes.remove(&orig);
+        v.remotes.insert(orig, ar_ip);
     }
 
-    /// Forget a remote's Type-3 IMET for `vni` (it was withdrawn).
+    /// Record an SR P2MP tree remote's Type-3 IMET for `vni` (RFC 9524):
+    /// `orig` is the tree Root, `tree_id` its Tree-ID. Clears any stale
+    /// Ingress/Assisted Replication record for the same originator.
+    pub fn update_sr_remote(&mut self, vni: u32, orig: IpAddr, tree_id: u32) {
+        let v = self.vnis.entry(vni).or_default();
+        v.remotes.remove(&orig);
+        v.sr_remotes.insert(orig, tree_id);
+    }
+
+    /// Forget a remote's Type-3 IMET for `vni` (it was withdrawn). The
+    /// originator may have been either tunnel kind, so clear both maps.
     pub fn remove_remote(&mut self, vni: u32, orig: IpAddr) {
         if let Some(v) = self.vnis.get_mut(&vni) {
             v.remotes.remove(&orig);
+            v.sr_remotes.remove(&orig);
         }
+    }
+
+    /// The SR P2MP replication trees `(Root, Tree-ID)` remote PEs advertised
+    /// for `vni` (RFC 9524). Recorded on import for the SR replication
+    /// dataplane (a later slice); these remotes are excluded from the VXLAN
+    /// head-end flood set built by [`desired`](Self::desired).
+    pub fn sr_p2mp_remotes(&self, vni: u32) -> Vec<(IpAddr, u32)> {
+        self.vnis
+            .get(&vni)
+            .map(|v| v.sr_remotes.iter().map(|(orig, t)| (*orig, *t)).collect())
+            .unwrap_or_default()
     }
 
     /// VNIs that currently have flood state (so a role/AR-IP change can
@@ -1985,6 +2018,17 @@ impl EvpnFloodState {
     /// [`desired`]: Self::desired
     pub fn reconcile(&mut self, vni: u32, rib: &crate::rib::client::RibClient) {
         let desired = self.desired(vni);
+        // SR P2MP remotes (RFC 9524) are delivered over their replication
+        // tree by the SR dataplane (a later slice), not the VXLAN head-end
+        // FDB — so they are intentionally absent from `desired`. Surface
+        // them here so a missing VXLAN flood entry reads as "by design".
+        let sr_trees = self.sr_p2mp_remotes(vni);
+        if !sr_trees.is_empty() {
+            tracing::debug!(
+                "EVPN VNI {vni}: {} SR P2MP tree remote(s) recorded, excluded from VXLAN flood: {sr_trees:?}",
+                sr_trees.len()
+            );
+        }
         let entry = self.vnis.entry(vni).or_default();
         for &group in desired.difference(&entry.installed) {
             let _ = rib.send(rib::Message::MdbAdd {
@@ -5948,13 +5992,20 @@ fn route_evpn_export_selected(
             // type 0x0A carries the AR-IP) and reconcile the role-aware flood
             // list, rather than blindly flooding toward the originating IP.
             if let Some(vni) = extract_vni_from_attr(&best.attr) {
-                let ar_ip = best
-                    .attr
-                    .pmsi_tunnel
-                    .as_ref()
-                    .filter(|p| p.is_assisted_replication())
-                    .map(|p| p.endpoint);
-                bgp.local_rib.evpn_flood.update_remote(vni, *orig, ar_ip);
+                let pmsi = best.attr.pmsi_tunnel.as_ref();
+                if let Some(p) = pmsi.filter(|p| p.is_sr_p2mp()) {
+                    // SR P2MP tree (RFC 9574 -> RFC 9524): record the
+                    // remote's (Root, Tree-ID); BUM to it rides the
+                    // replication tree, not a VXLAN head-end FDB entry.
+                    bgp.local_rib
+                        .evpn_flood
+                        .update_sr_remote(vni, *orig, p.tree_id.unwrap_or(0));
+                } else {
+                    let ar_ip = pmsi
+                        .filter(|p| p.is_assisted_replication())
+                        .map(|p| p.endpoint);
+                    bgp.local_rib.evpn_flood.update_remote(vni, *orig, ar_ip);
+                }
                 bgp.local_rib.evpn_flood.reconcile(vni, bgp.rib_client);
             } else {
                 eprintln!(
@@ -11933,9 +11984,10 @@ impl Bgp {
         // Replication encoding (tunnel type 6); a Replicator emits a
         // Replicator-AR route (tunnel type 0x0A, next hop = AR-IP); a Leaf
         // tags its Regular-IR route as AR-LEAF.
+        let bum = self.local_rib.evpn_flood.bum_tunnel;
         let role = self.local_rib.evpn_flood.role;
         let ar_ip = self.local_rib.evpn_flood.ar_ip;
-        let (pmsi, nexthop) = imet_pmsi_tunnel(role, ar_ip, vtep_local, vni);
+        let (pmsi, nexthop) = imet_pmsi_tunnel(bum, role, ar_ip, vtep_local, vni);
         attr.pmsi_tunnel = Some(pmsi);
         attr.nexthop = Some(BgpNexthop::Evpn(nexthop));
 
@@ -12041,12 +12093,31 @@ fn rd_from_router_id_vni(router_id: Ipv4Addr, vni: u32) -> Option<RouteDistingui
 ///   next hop = local VTEP (IR-IP).
 /// - **None**, or Replicator without an AR-IP: plain Ingress Replication
 ///   (tunnel type 6, T = RNVE) — byte-for-byte the pre-RFC-9574 encoding.
+///
+/// When `bum` selects an SR P2MP tree (RFC 9524) the AR role is bypassed:
+/// the local node is the tree Root, the Tree-ID is derived from the VNI,
+/// and the tunnel endpoint / next hop is the local VTEP.
 fn imet_pmsi_tunnel(
+    bum: EvpnBumTunnel,
     role: AssistedReplicationRole,
     ar_ip: Option<IpAddr>,
     vtep_local: IpAddr,
     vni: u32,
 ) -> (PmsiTunnel, IpAddr) {
+    // SR P2MP replication trees ignore the AR role. The MPLS Label field
+    // stays 0 (shared-tunnel upstream label / SRv6 transposition is a
+    // follow-up); the Root is the local VTEP and the Tree-ID is the VNI.
+    let sr_tunnel_type = match bum {
+        EvpnBumTunnel::SrMplsP2mp => Some(PmsiTunnel::TUNNEL_SR_MPLS_P2MP),
+        EvpnBumTunnel::SrV6P2mp => Some(PmsiTunnel::TUNNEL_SRV6_P2MP),
+        EvpnBumTunnel::IngressReplication => None,
+    };
+    if let Some(tunnel_type) = sr_tunnel_type {
+        return (
+            PmsiTunnel::sr_p2mp(tunnel_type, 0, vni, vtep_local),
+            vtep_local,
+        );
+    }
     match (role, ar_ip) {
         (AssistedReplicationRole::Replicator, Some(ar)) => (
             PmsiTunnel {
@@ -12196,6 +12267,44 @@ mod evpn_flood_tests {
         assert_eq!(f.desired(200), BTreeSet::from([ip("10.0.0.2")]));
         assert!(f.desired(300).is_empty());
     }
+
+    /// SR P2MP remotes are recorded with their Tree-ID and kept out of the
+    /// VXLAN head-end flood set (their BUM rides the replication tree).
+    #[test]
+    fn sr_p2mp_remotes_recorded_and_excluded_from_flood() {
+        let mut f = EvpnFloodState::default();
+        f.update_remote(100, ip("10.0.0.1"), None); // plain IR remote
+        f.update_sr_remote(100, ip("10.0.0.7"), 4242); // SR P2MP tree remote
+        // Only the IR remote floods via VXLAN; the SR P2MP Root does not.
+        assert_eq!(f.desired(100), BTreeSet::from([ip("10.0.0.1")]));
+        assert_eq!(f.sr_p2mp_remotes(100), vec![(ip("10.0.0.7"), 4242)]);
+    }
+
+    /// A remote that flips tunnel type moves between the two maps rather
+    /// than lingering in both; a withdraw clears whichever map it was in.
+    #[test]
+    fn remote_tunnel_type_flip_is_exclusive() {
+        let mut f = EvpnFloodState::default();
+        f.update_remote(100, ip("10.0.0.5"), None);
+        assert_eq!(f.desired(100), BTreeSet::from([ip("10.0.0.5")]));
+        assert!(f.sr_p2mp_remotes(100).is_empty());
+
+        // Flip IR -> SR P2MP: leaves the flood set, enters the SR record.
+        f.update_sr_remote(100, ip("10.0.0.5"), 7);
+        assert!(f.desired(100).is_empty());
+        assert_eq!(f.sr_p2mp_remotes(100), vec![(ip("10.0.0.5"), 7)]);
+
+        // Flip back SR P2MP -> IR.
+        f.update_remote(100, ip("10.0.0.5"), None);
+        assert_eq!(f.desired(100), BTreeSet::from([ip("10.0.0.5")]));
+        assert!(f.sr_p2mp_remotes(100).is_empty());
+
+        // Withdraw clears it entirely.
+        f.update_sr_remote(100, ip("10.0.0.5"), 9);
+        f.remove_remote(100, ip("10.0.0.5"));
+        assert!(f.desired(100).is_empty());
+        assert!(f.sr_p2mp_remotes(100).is_empty());
+    }
 }
 
 #[cfg(test)]
@@ -12214,8 +12323,13 @@ mod evpn_imet_ar_tests {
     /// next hop = the local VTEP, regardless of any stray AR-IP.
     #[test]
     fn rnve_is_plain_ingress_replication() {
-        let (pmsi, nh) =
-            imet_pmsi_tunnel(AssistedReplicationRole::None, Some(ar_ip()), ir_ip(), 100);
+        let (pmsi, nh) = imet_pmsi_tunnel(
+            EvpnBumTunnel::IngressReplication,
+            AssistedReplicationRole::None,
+            Some(ar_ip()),
+            ir_ip(),
+            100,
+        );
         assert_eq!(pmsi.tunnel_type, PmsiTunnel::TUNNEL_INGRESS_REPLICATION);
         assert_eq!(pmsi.ar_type(), AssistedReplicationType::Rnve);
         assert_eq!(pmsi.flags, 0, "byte-for-byte the legacy encoding");
@@ -12228,6 +12342,7 @@ mod evpn_imet_ar_tests {
     #[test]
     fn replicator_emits_replicator_ar_route() {
         let (pmsi, nh) = imet_pmsi_tunnel(
+            EvpnBumTunnel::IngressReplication,
             AssistedReplicationRole::Replicator,
             Some(ar_ip()),
             ir_ip(),
@@ -12243,7 +12358,13 @@ mod evpn_imet_ar_tests {
     /// 6 with the next hop = local VTEP (IR-IP).
     #[test]
     fn leaf_flags_regular_ir_as_ar_leaf() {
-        let (pmsi, nh) = imet_pmsi_tunnel(AssistedReplicationRole::Leaf, None, ir_ip(), 100);
+        let (pmsi, nh) = imet_pmsi_tunnel(
+            EvpnBumTunnel::IngressReplication,
+            AssistedReplicationRole::Leaf,
+            None,
+            ir_ip(),
+            100,
+        );
         assert_eq!(pmsi.tunnel_type, PmsiTunnel::TUNNEL_INGRESS_REPLICATION);
         assert_eq!(pmsi.ar_type(), AssistedReplicationType::Leaf);
         assert_eq!(pmsi.endpoint, ir_ip());
@@ -12255,9 +12376,50 @@ mod evpn_imet_ar_tests {
     /// usable tunnel destination.
     #[test]
     fn replicator_without_ar_ip_falls_back_to_ir() {
-        let (pmsi, nh) = imet_pmsi_tunnel(AssistedReplicationRole::Replicator, None, ir_ip(), 100);
+        let (pmsi, nh) = imet_pmsi_tunnel(
+            EvpnBumTunnel::IngressReplication,
+            AssistedReplicationRole::Replicator,
+            None,
+            ir_ip(),
+            100,
+        );
         assert_eq!(pmsi.tunnel_type, PmsiTunnel::TUNNEL_INGRESS_REPLICATION);
         assert_eq!(pmsi.ar_type(), AssistedReplicationType::Rnve);
+        assert_eq!(nh, ir_ip());
+    }
+
+    /// SR-MPLS P2MP mode → an SR P2MP tree IMET (RFC 9524): tunnel type
+    /// 0x0C, Root and next hop = the local VTEP, Tree-ID derived from the
+    /// VNI. The AR role is bypassed.
+    #[test]
+    fn sr_mpls_p2mp_origination() {
+        let (pmsi, nh) = imet_pmsi_tunnel(
+            EvpnBumTunnel::SrMplsP2mp,
+            AssistedReplicationRole::Replicator,
+            Some(ar_ip()),
+            ir_ip(),
+            100,
+        );
+        assert_eq!(pmsi.tunnel_type, PmsiTunnel::TUNNEL_SR_MPLS_P2MP);
+        assert!(pmsi.is_sr_p2mp());
+        assert_eq!(pmsi.tree_id, Some(100), "Tree-ID derived from VNI");
+        assert_eq!(pmsi.endpoint, ir_ip(), "Root = local VTEP");
+        assert_eq!(nh, ir_ip(), "next hop = local VTEP, not the AR-IP");
+    }
+
+    /// SRv6 P2MP mode → tunnel type 0x0D, otherwise as SR-MPLS.
+    #[test]
+    fn srv6_p2mp_origination() {
+        let (pmsi, nh) = imet_pmsi_tunnel(
+            EvpnBumTunnel::SrV6P2mp,
+            AssistedReplicationRole::None,
+            None,
+            ir_ip(),
+            4242,
+        );
+        assert_eq!(pmsi.tunnel_type, PmsiTunnel::TUNNEL_SRV6_P2MP);
+        assert_eq!(pmsi.tree_id, Some(4242));
+        assert_eq!(pmsi.endpoint, ir_ip());
         assert_eq!(nh, ir_ip());
     }
 }
