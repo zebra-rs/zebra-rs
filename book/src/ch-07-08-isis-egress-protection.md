@@ -109,12 +109,24 @@ inside this node's own SRv6 locator:
 
 ```text
 > show isis egress-protection
+Local egress-protection:
 Protected-Locator      Mirror-SID               DP    Via-VRF    Advertised
 2001:db8:a3:1::/64     2001:db8:a4:1::3         srv6  cust       yes
 ```
 
-When advertised, the Mirror SID rides in the SRv6 Locator TLV of this
-node's LSP, alongside the node's own End SID, and is visible in the
+The same command on any node also lists the Mirror SIDs it has **received**
+from peers — the PLR's view — so an upstream router can confirm it has
+learned the protector's offer before relying on it:
+
+```text
+> show isis egress-protection
+Received Mirror SIDs:
+Protector          Mirror-SID               Protected-Locator
+0000.0000.0004     2001:db8:a4:1::3         2001:db8:a3:1::/64
+```
+
+When advertised, the Mirror SID rides in the SRv6 Locator TLV of the
+protector's LSP, alongside its own End SID, and is visible in the
 database on the protector and on every peer:
 
 ```text
@@ -153,12 +165,13 @@ the CE:
 
 The configuration, the IS-IS **advertisement** of the Mirror SID (SRv6
 End.M sub-TLV with the Protected Locators sub-sub-TLV), the `show isis
-egress-protection` view, the protector's **End.M localsid install**, and
-the **static `via-vrf` mirror-context population** are implemented. Still
-landing in later stages: auto-allocation of the Mirror SID when
-`mirror-sid` is omitted, learning the context population from **BGP
-L3VPN** (the alternative to static `via-vrf`), and the **PLR-side
-repair** that pushes the Mirror SID on egress failure. So today a
-configured entry is advertised and the full protector decap chain is in
-place, but traffic is only redirected once a PLR steers it (the next
-stage); SR-MPLS (`dataplane mpls`) is also a later stage.
+egress-protection` view (local **and received**), the protector's **End.M
+localsid install**, and the **static `via-vrf` mirror-context population**
+are implemented. Still landing in later stages: auto-allocation of the
+Mirror SID when `mirror-sid` is omitted, learning the context population
+from **BGP L3VPN** (the alternative to static `via-vrf`), and the
+**PLR-side repair** that pushes the Mirror SID on egress failure. So today
+a configured entry is advertised, every node can see what it has received,
+and the full protector decap chain is in place — but traffic is only
+redirected once the PLR repair lands (the next stage); SR-MPLS
+(`dataplane mpls`) is also a later stage.
