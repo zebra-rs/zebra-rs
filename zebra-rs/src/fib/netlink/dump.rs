@@ -1,13 +1,17 @@
 use std::net::{Ipv4Addr, Ipv6Addr};
 
 use anyhow::Result;
-use futures::stream::TryStreamExt;
-use netlink_packet_route::AddressFamily;
+use futures::stream::{StreamExt, TryStreamExt};
+use netlink_packet_core::{NLM_F_DUMP, NLM_F_REQUEST, NetlinkPayload};
+use netlink_packet_route::mdb::{MdbHeader, MdbMessage};
+use netlink_packet_route::{AddressFamily, RouteNetlinkMessage};
 use rtnetlink::{IpVersion, RouteMessageBuilder};
 
 use crate::{fib::FibMessage, rib::Rib};
 
-use super::{addr_from_msg, link_from_msg, neighbor_from_msg, route_from_msg};
+use super::{
+    addr_from_msg, link_from_msg, mdb_entries_from_msg, neighbor_from_msg, route_from_msg,
+};
 
 pub async fn fib_dump(rib: &mut Rib) -> Result<()> {
     link_dump(rib, rib.fib_handle.handle.clone()).await?;
@@ -21,7 +25,43 @@ pub async fn fib_dump(rib: &mut Rib) -> Result<()> {
     neighbor_dump(rib, rib.fib_handle.handle.clone(), AddressFamily::Inet).await?;
     neighbor_dump(rib, rib.fib_handle.handle.clone(), AddressFamily::Inet6).await?;
     neighbor_dump(rib, rib.fib_handle.handle.clone(), AddressFamily::Bridge).await?;
+    // Bridge multicast database (IGMP/MLD snooping) — existing
+    // memberships at startup. Best-effort: hosts without a snooping
+    // bridge simply return nothing (or an error we log and ignore).
+    mdb_dump(rib, rib.fib_handle.handle.clone()).await;
     Ok(())
+}
+
+/// Dump the kernel bridge MDB (`RTM_GETMDB`) so EVPN learns memberships
+/// that existed before start-up. rtnetlink has no MDB helper, so issue
+/// the dump request by hand and feed each `RTM_NEWMDB` reply through the
+/// same converter the live notification path uses.
+async fn mdb_dump(rib: &mut Rib, mut handle: rtnetlink::Handle) {
+    let mdb = MdbMessage {
+        header: MdbHeader {
+            family: AddressFamily::Bridge,
+            index: 0,
+        },
+        ..Default::default()
+    };
+    let mut req = netlink_packet_core::NetlinkMessage::from(RouteNetlinkMessage::GetMdb(mdb));
+    req.header.flags = NLM_F_REQUEST | NLM_F_DUMP;
+    req.finalize();
+
+    let mut resp = match handle.request(req) {
+        Ok(resp) => resp,
+        Err(e) => {
+            tracing::warn!("fib: RTM_GETMDB dump request failed ({e}); skipping MDB dump");
+            return;
+        }
+    };
+    while let Some(msg) = resp.next().await {
+        if let NetlinkPayload::InnerMessage(RouteNetlinkMessage::NewMdb(m)) = msg.payload {
+            for entry in mdb_entries_from_msg(&m) {
+                rib.process_fib_msg(FibMessage::NewMdb(entry)).await;
+            }
+        }
+    }
 }
 
 async fn link_dump(rib: &mut Rib, handle: rtnetlink::Handle) -> Result<()> {

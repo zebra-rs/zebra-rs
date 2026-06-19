@@ -1479,7 +1479,23 @@ fn config_igmp_mld_proxy(bgp: &mut Bgp, mut args: Args, op: ConfigOp) -> Option<
         return Some(());
     }
     bgp.igmp_mld_proxy = enabled;
+    // Re-originate IMET (the Multicast Flags EC rides it), then replay
+    // the snooped-membership cache across the gate transition: on
+    // enable, originate a SMET per cached (*,G)/(S,G); on disable,
+    // withdraw them all.
     reoriginate_all_imet(bgp);
+    let memberships: Vec<(u32, IpAddr, Option<IpAddr>, IpAddr)> = bgp
+        .local_smet
+        .iter()
+        .map(|((vni, group, source), vtep)| (*vni, *group, *source, *vtep))
+        .collect();
+    for (vni, group, source, vtep_local) in memberships {
+        if enabled {
+            bgp.evpn_originate_smet(vni, vtep_local, group, source);
+        } else {
+            bgp.evpn_withdraw_smet(vni, vtep_local, group, source);
+        }
+    }
     Some(())
 }
 

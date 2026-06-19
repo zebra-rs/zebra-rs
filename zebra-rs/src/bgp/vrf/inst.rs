@@ -614,6 +614,7 @@ impl BgpVrf {
             stale: false,
             esi: None,
             vrf_transit_only: false,
+            smet_flags: 0,
         };
 
         let (_, selected, _gen) = self.shard.update(None, prefix, rib);
@@ -836,6 +837,7 @@ impl BgpVrf {
             stale: false,
             esi: None,
             vrf_transit_only: false,
+            smet_flags: 0,
         };
 
         let (_, selected, _gen) = self.shard.update_v6(prefix, rib);
@@ -1089,6 +1091,7 @@ impl BgpVrf {
             stale: false,
             esi: None,
             vrf_transit_only: false,
+            smet_flags: 0,
         }
     }
 

@@ -136,4 +136,21 @@ pub enum FibMessage {
     DelNexthop(u32),
     NewNeighbor(FibNeighbor),
     DelNeighbor(FibNeighbor),
+    /// Bridge multicast database entry from kernel IGMP/MLD snooping
+    /// (`RTM_NEWMDB`). Drives EVPN SMET (Type-6) origination.
+    NewMdb(FibMdbEntry),
+    /// Inverse of `NewMdb` (`RTM_DELMDB`).
+    DelMdb(FibMdbEntry),
+}
+
+/// One kernel bridge MDB entry, reduced to the fields EVPN cares about.
+/// `group`/`source` are IP (L2 MAC groups are filtered out upstream);
+/// `bridge_ifindex` is the bridge the group was learned on (mapped to a
+/// VNI by the RIB).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FibMdbEntry {
+    pub bridge_ifindex: u32,
+    pub vid: u16,
+    pub group: IpAddr,
+    pub source: Option<IpAddr>,
 }
