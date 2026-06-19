@@ -26,7 +26,8 @@ Feature: BGP EVPN Assisted Replication (RFC 9574) control plane
   Roles (router bgp afi-safi evpn assisted-replication):
   - z1: role replicator, replicator-ip 192.168.0.101 (the AR-IP)
   - z2: role leaf
-  - z3: role none (default RNVE)
+  - z3: role none (default RNVE); also requests whole-VTEP P-FL pruning
+    (pruned-flood-list broadcast-multicast + unknown-unicast)
 
   The flood list is observed via the kernel VXLAN FDB: the daemon programs
   zero-MAC (00:00:00:00:00:00) rows, one `dst` per flood target. There is
@@ -69,10 +70,18 @@ Feature: BGP EVPN Assisted Replication (RFC 9574) control plane
 
   Scenario: RNVE floods to every remote VTEP (plain ingress replication)
     Given the test topology exists
-    # z3 (RNVE) floods to z1's and z2's IR-IPs, ignoring the AR-IP.
+    # z3 (RNVE) floods to z1's and z2's IR-IPs, ignoring the AR-IP. z3's own
+    # Pruned-Flood-List request is outbound-independent — it still floods.
     Then bridge fdb "vxlan10" in namespace "z3" should eventually contain "192.168.0.2"
     And bridge fdb "vxlan10" in namespace "z3" should eventually contain "192.168.0.1"
     And bridge fdb "vxlan10" in namespace "z3" should not contain "192.168.0.101"
+
+  Scenario: A whole-VTEP Pruned-Flood-List request drops the node from peers' flood lists
+    Given the test topology exists
+    # z3 set both prune flags (BM + U), so z1 — which floods to every remote
+    # IR-IP — drops z3 while keeping z2. (Inbound prune; z3 still floods out.)
+    Then bridge fdb "vxlan10" in namespace "z1" should eventually contain "192.168.0.2"
+    And bridge fdb "vxlan10" in namespace "z1" should not contain "192.168.0.3"
 
   Scenario: Teardown topology
     Given the test topology exists

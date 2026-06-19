@@ -116,6 +116,29 @@ module zebra-bgp-evpn {
          advertise a Tree-ID + Root identifier with the local node as the
          tree Root; they bypass Assisted Replication.";
     }
+    container pruned-flood-list {
+      description
+        "RFC 9574 Pruned-Flood-List: request that remote PEs prune this
+         node from the named BUM flood categories by setting the matching
+         flag in this node's Type-3 IMET PMSI Tunnel attribute. Honoring a
+         received request is whole-VTEP only on a Linux VXLAN dataplane
+         (one flood list per VNI), so a remote is dropped from the flood
+         list only when it prunes BOTH categories.";
+      leaf broadcast-multicast {
+        type boolean;
+        default false;
+        description
+          "Ask peers to prune this node from the broadcast/multicast flood
+           list (RFC 9574 BM flag).";
+      }
+      leaf unknown-unicast {
+        type boolean;
+        default false;
+        description
+          "Ask peers to prune this node from the unknown-unicast flood
+           list (RFC 9574 U flag).";
+      }
+    }
     container assisted-replication {
       description
         "RFC 9574 Optimized Ingress Replication (Assisted Replication)
