@@ -2594,21 +2594,31 @@ impl FibHandle {
         use netlink_packet_utils::nla::DefaultNla;
 
         let entry = br_mdb_entry_bytes(port_ifindex, vid, group);
-        let mut nested = Vec::new();
+        // MDBA_SET_ENTRY is the bare br_mdb_entry (this is all iproute2
+        // sends for a (*,G) entry). An (S,G) entry adds a NESTED
+        // MDBA_SET_ENTRY_ATTRS holding MDBE_ATTR_SOURCE. The per-VTEP
+        // `dst` is deliberately NOT encoded: the kernel rejects
+        // MDBE_ATTR_DST on a plain (non-vnifilter) VXLAN with EINVAL, and
+        // iproute2 silently drops it too. True per-VTEP selectivity needs
+        // a vnifilter VXLAN MDB — a documented follow-up.
+        let mut attributes = vec![MdbAttribute::Other(DefaultNla::new(
+            MDBA_SET_ENTRY,
+            entry.to_vec(),
+        ))];
         if let Some(src) = source {
-            nested.extend_from_slice(&mdb_nla_bytes(MDBE_ATTR_SOURCE, &ip_octets(src)));
+            let nested = mdb_nla_bytes(MDBE_ATTR_SOURCE, &ip_octets(src));
+            attributes.push(MdbAttribute::Other(DefaultNla::new(
+                MDBA_SET_ENTRY_ATTRS | NLA_F_NESTED,
+                nested,
+            )));
         }
-        nested.extend_from_slice(&mdb_nla_bytes(MDBE_ATTR_DST, &ip_octets(dst)));
 
         let msg = MdbMessage {
             header: MdbHeader {
                 family: AddressFamily::Bridge,
                 index: bridge_ifindex,
             },
-            attributes: vec![
-                MdbAttribute::Other(DefaultNla::new(MDBA_SET_ENTRY, entry.to_vec())),
-                MdbAttribute::Other(DefaultNla::new(MDBA_SET_ENTRY_ATTRS, nested)),
-            ],
+            attributes,
         };
 
         let req = if add {
@@ -3192,7 +3202,9 @@ fn process_msg(msg: NetlinkMessage<RouteNetlinkMessage>, tx: UnboundedSender<Fib
 const MDBA_SET_ENTRY: u16 = 1;
 const MDBA_SET_ENTRY_ATTRS: u16 = 2;
 const MDBE_ATTR_SOURCE: u16 = 1;
-const MDBE_ATTR_DST: u16 = 5;
+/// `NLA_F_NESTED` (linux/netlink.h) — the kernel expects it on the
+/// `MDBA_SET_ENTRY_ATTRS` container (matches what iproute2 sets).
+const NLA_F_NESTED: u16 = 0x8000;
 const MDB_PERMANENT: u8 = 1;
 const ETH_P_IP_BE: u16 = 0x0800;
 const ETH_P_IPV6_BE: u16 = 0x86dd;
@@ -3320,7 +3332,7 @@ mod tests {
         assert_eq!(&n[2..4], &MDBE_ATTR_SOURCE.to_ne_bytes(), "nla kind");
         assert_eq!(&n[4..8], &[192, 0, 2, 1], "value");
         // IPv6 value: 4 + 16 = 20, aligned.
-        assert_eq!(mdb_nla_bytes(MDBE_ATTR_DST, &[0u8; 16]).len(), 20);
+        assert_eq!(mdb_nla_bytes(MDBE_ATTR_SOURCE, &[0u8; 16]).len(), 20);
     }
 
     #[test]

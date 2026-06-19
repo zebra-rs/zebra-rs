@@ -37,6 +37,7 @@
   - [L3VPN and Per-VRF Labels](ch-02-04-bgp-l3vpn.md)
   - [L3VPN over an SRv6 Underlay](ch-02-05-bgp-l3vpn-srv6.md)
   - [EVPN Type-5 (IP Prefix Routes)](ch-02-06-bgp-evpn-type5.md)
+  - [EVPN IGMP/MLD Proxy (Selective Multicast)](ch-02-32-bgp-evpn-igmp-mld-proxy.md)
   - [Route Target Constraint (RTC)](ch-02-07-bgp-rtc.md)
   - [Inter-AS L3VPN](ch-02-18-bgp-interas.md)
     - [Option A (back-to-back VRFs)](ch-02-20-bgp-interas-option-a.md)

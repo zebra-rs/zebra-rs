@@ -789,6 +789,24 @@ async fn run_exec_command(world: &mut World, command: String, namespace: String)
     println!("✓ Ran '{}' in namespace {}", command, scoped);
 }
 
+/// Run an arbitrary shell command (split on whitespace into argv) inside
+/// a namespace via `sudo ip netns exec`. Unlike `I run …` (which targets
+/// the vtyctl `clear` surface), this reaches the real `ip`/`bridge`
+/// tools — used to build the EVPN snooping bridge and inject IGMP/MLD
+/// membership for the SMET tests.
+#[when(expr = "I execute {string} in namespace {string}")]
+async fn execute_command(world: &mut World, command: String, namespace: String) {
+    let scoped = world.ns(&namespace);
+    let parts: Vec<&str> = command.split_whitespace().collect();
+    let (cmd, args) = parts
+        .split_first()
+        .unwrap_or_else(|| panic!("empty command in 'I execute' for {}", scoped));
+    netns::exec_in_netns(&scoped, cmd, args)
+        .await
+        .unwrap_or_else(|e| panic!("Failed to execute '{}' in {}: {}", command, scoped, e));
+    println!("✓ Executed '{}' in namespace {}", command, scoped);
+}
+
 #[when(expr = "I delete namespace {string}")]
 async fn delete_namespace(world: &mut World, namespace: String) {
     let scoped = world.ns(&namespace);
@@ -2209,6 +2227,67 @@ async fn bridge_fdb_not_contains(
     assert!(
         !output.contains(&needle),
         "bridge fdb {} in namespace {} unexpectedly contained '{}'\n`bridge fdb show dev {}` output:\n{}",
+        dev,
+        scoped,
+        needle,
+        dev,
+        output
+    );
+}
+
+/// Poll `bridge mdb show dev <dev>` inside a namespace until it contains
+/// `needle`. Used to observe EVPN selective multicast (RFC 9251 SMET):
+/// a received Type-6 SMET installs a kernel bridge MDB entry whose `dst`
+/// is the originator's VTEP, so the snooping bridge delivers that group
+/// selectively. `dev` is the bridge.
+#[then(expr = "bridge mdb {string} in namespace {string} should eventually contain {string}")]
+async fn bridge_mdb_eventually_contains(
+    world: &mut World,
+    dev: String,
+    namespace: String,
+    needle: String,
+) {
+    let scoped = world.ns(&namespace);
+    const ATTEMPTS: u32 = 30;
+    let mut last_output = String::new();
+    for i in 0..ATTEMPTS {
+        last_output = netns::exec_in_netns(&scoped, "bridge", &["mdb", "show", "dev", &dev])
+            .await
+            .expect("Failed to run bridge mdb show");
+        if last_output.contains(&needle) {
+            println!(
+                "✓ bridge mdb {} in namespace {} contains '{}'",
+                dev, scoped, needle
+            );
+            return;
+        }
+        if i + 1 < ATTEMPTS {
+            tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
+        }
+    }
+    panic!(
+        "bridge mdb {} in namespace {} did not contain '{}' after {} attempts\nlast `bridge mdb show dev {}` output:\n{}",
+        dev, scoped, needle, ATTEMPTS, dev, last_output
+    );
+}
+
+/// Assert `bridge mdb show dev <dev>` does NOT contain `needle`. A
+/// point-in-time check — order it AFTER a positive
+/// `should eventually contain` so the MDB has converged.
+#[then(expr = "bridge mdb {string} in namespace {string} should not contain {string}")]
+async fn bridge_mdb_not_contains(
+    world: &mut World,
+    dev: String,
+    namespace: String,
+    needle: String,
+) {
+    let scoped = world.ns(&namespace);
+    let output = netns::exec_in_netns(&scoped, "bridge", &["mdb", "show", "dev", &dev])
+        .await
+        .expect("Failed to run bridge mdb show");
+    assert!(
+        !output.contains(&needle),
+        "bridge mdb {} in namespace {} unexpectedly contained '{}'\n`bridge mdb show dev {}` output:\n{}",
         dev,
         scoped,
         needle,

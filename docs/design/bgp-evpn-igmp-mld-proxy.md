@@ -32,7 +32,7 @@ before citing.
 | 3     | IMET (Type 3) capability signaling      | **done** |
 | 4     | SMET origination from kernel MDB snoop  | **done** |
 | 5     | SMET reception → selective dataplane    | **done** |
-| 6     | Show + BDD + docs                       | planned  |
+| 6     | Show + BDD + docs                       | **done** |
 | —     | Type 7/8 multihoming synch              | deferred |
 
 ## Locked decisions (2026-06-20, with Kunihiro)
@@ -271,13 +271,16 @@ group-mode (follow-up). No selective dataplane yet (Phase 5).
 
 ### Phase 5 — SMET reception → selective dataplane — **done**
 - **5a (fib `handle.rs`):** `mdb_install(bridge, port, vid, group, source,
-  dst, add)` emits `RTM_{NEW,DEL}MDB` with the `MDBA_SET_ENTRY`
-  (`br_mdb_entry`) + `MDBA_SET_ENTRY_ATTRS` (`MDBE_ATTR_SOURCE` +
-  `MDBE_ATTR_DST`) layout, via the fork's `MdbMessage` +
-  `MdbAttribute::Other` (no fork change needed). Byte-layout unit tests
-  (`br_mdb_entry_v4_layout`, `…_v6_proto`, `mdb_nla_bytes_*`). Needed the
-  one-line `netlink-packet-utils = "0.5.2"` dep (unifies with the fork's)
-  to name `DefaultNla`.
+  dst, add)` emits `RTM_{NEW,DEL}MDB` via the fork's `MdbMessage` +
+  `MdbAttribute::Other` (no fork change needed). A `(*,G)` entry is the
+  bare `MDBA_SET_ENTRY` (`br_mdb_entry`); an `(S,G)` entry adds a
+  **NESTED** (`NLA_F_NESTED`) `MDBA_SET_ENTRY_ATTRS` holding
+  `MDBE_ATTR_SOURCE`. Byte-layout unit tests. Needed the one-line
+  `netlink-packet-utils = "0.5.2"` dep (unifies with the fork's) to name
+  `DefaultNla`. **`MDBE_ATTR_DST` is deliberately NOT encoded** — the
+  kernel rejects it on a plain VXLAN (EINVAL) and `iproute2` drops it
+  too; per-VTEP `dst` selectivity needs a `vnifilter` VXLAN MDB
+  (follow-up, found via the Phase-6 BDD).
 - **5b (rib):** `rib::Message::SmetInstall/SmetRemove`; `smet_install`
   resolves the VNI to its local `(bridge, vxlan-port)` via
   `vni_to_bridge_vxlan` and calls `mdb_install` (vid 0; per-VLAN is a
@@ -295,15 +298,24 @@ Multicast Flags EC gate (skip sending selective toward non-proxy PEs) is
 therefore an optimization, deferred. **Live forwarding is validated in
 Phase 6's BDD** (byte layout is unit-tested here).
 
-### Phase 6 — Show + BDD + docs
-- `show bgp evpn` rendering for Type-6 (src/grp/orig/flags); extend
-  `format_evpn_ecom_value` for the Multicast Flags EC. New `exec.yang`
-  show spelling(s) as needed (sweep bdd/ for any moved spellings).
-- BDD `@bgp_evpn_smet`: two namespaces, VXLAN + bridge with
-  `mcast_snooping`, inject a join, assert SMET advertised/received via
-  `show` and assert the kernel MDB `dst` on the remote; a leave withdraws
-  it. **Teardown scenario** stopping zebra-rs in each namespace, deleting
-  each namespace, asserting `the test environment should be clean`.
+### Phase 6 — Show + BDD + docs — **done**
+- `show bgp evpn` renders Type-6 via the Phase-1 `EvpnPrefix` `Display`
+  (`[6]:[EthTag]:[SrcLen]:[Src]:[GrpLen]:[Grp]:[OrigLen]:[Orig]`); the
+  `smet` route-type filter + type-6 legend were already present.
+  `format_evpn_ecom_value` now renders the Multicast Flags EC as `MF:IM`.
+- BDD `@bgp_evpn_smet` (`bdd/tests/features/bgp_evpn_smet.feature` +
+  `configs/bgp_evpn_smet/z{1,2}-1.yaml`): two iBGP EVPN nodes, each with
+  a `mcast_snooping` bridge + enslaved VXLAN; a `bridge mdb add` on z2
+  drives SMET origination; asserts z1 shows the SMET + `RT:65001:10`,
+  z1's kernel bridge MDB gains the group, and a leave withdraws both.
+  Plus a new `I execute "<cmd>" in namespace` step (raw `ip`/`bridge`,
+  vs the vtyctl-only `I run`) and `bridge mdb … contain` steps. Teardown
+  scenario asserts a clean environment. **Ran live (sudo netns): 5/5
+  scenarios pass.**
+- The BDD found and fixed a real Phase-5 dataplane bug: the original
+  `mdb_install` sent `MDBE_ATTR_DST`, which the kernel rejected with
+  EINVAL — corrected to the `MDBA_SET_ENTRY`-only / NESTED-source form
+  above.
 
 ## Deferred (not built — recorded so a contributor can pick it up)
 
