@@ -58,6 +58,10 @@ Feature: BGP EVPN IGMP/MLD Proxy — Selective Multicast (RFC 9251)
     When I execute "bridge mdb add dev br10 port host0 grp 239.1.1.1 permanent" in namespace "z2"
     Then show command "show bgp evpn" in namespace "z1" should eventually contain "[6]:[0]:[0]:[*]:[32]:[239.1.1.1]:[32]:[192.168.0.2]"
     And show command "show bgp evpn" in namespace "z1" should eventually contain "RT:65001:10"
+    # The snooping bridge also auto-joins IPv6 link-local control groups
+    # (ff02::…); those must NOT be proxied as SMET. Ordered after the
+    # positive assert above so z1 already has EVPN routes (non-vacuous).
+    And show command "show bgp evpn" in namespace "z1" should not contain "ff02"
 
   Scenario: z1 programs the received SMET into its kernel bridge MDB
     Given the test topology exists

@@ -12308,6 +12308,13 @@ impl Bgp {
         if self.router_id.is_unspecified() {
             return;
         }
+        // The snooping bridge also registers link-local / well-known
+        // control multicast (e.g. IPv6 solicited-node ff02::1:ffxx:xxxx,
+        // IPv4 224.0.0.0/24). Those are not host group memberships and
+        // must not be proxied across the EVPN — skip them.
+        if !smet_advertisable_group(group) {
+            return;
+        }
         let Some(rd) = rd_from_router_id_vni(self.router_id, vni) else {
             return;
         };
@@ -12378,6 +12385,11 @@ impl Bgp {
         group: IpAddr,
         source: Option<IpAddr>,
     ) {
+        // Symmetric with origination: we never advertised a SMET for a
+        // link-local / control group, so don't emit a spurious withdraw.
+        if !smet_advertisable_group(group) {
+            return;
+        }
         let Some(rd) = rd_from_router_id_vni(self.router_id, vni) else {
             return;
         };
@@ -12410,11 +12422,6 @@ impl Bgp {
 /// origination to avoid advertise loops.
 const NTF_EXT_LEARNED: u8 = 0x10;
 
-/// Build a Type-1 RD (4-byte IPv4 + 2-byte assigned number) from
-/// the local router-id and VNI per RFC 8365 §5.1.2. Returns None
-/// when the VNI exceeds 16 bits — Type-1 only has 2 bytes for the
-/// assigned-number field; supporting VNIs above 65535 needs the
-/// Type-0 (ASN) format and is a follow-up.
 /// Derive the RFC 9251 §9.1 SMET Flags octet from the group family and
 /// source presence. IPv4 advertises IGMPv3 (v3 bit), IPv6 advertises
 /// MLDv2 (v2 bit; MLD has no v3); a `(*,G)` join sets exclude (IE)
@@ -12432,6 +12439,31 @@ fn smet_flags(group: IpAddr, source: Option<IpAddr>) -> u8 {
     version | mode
 }
 
+/// Whether a multicast group may be advertised as an EVPN Type-6 SMET
+/// route. The kernel snooping bridge also registers link-local /
+/// well-known control multicast — IPv4 `224.0.0.0/24` (local network
+/// control block) and IPv6 interface-/link-local scopes — which is not
+/// host group membership and must not be proxied across the EVPN.
+fn smet_advertisable_group(group: IpAddr) -> bool {
+    match group {
+        IpAddr::V4(v4) => {
+            let o = v4.octets();
+            // 224.0.0.0/24 — routing protocols, ND-equivalents, etc.
+            !(o[0] == 224 && o[1] == 0 && o[2] == 0)
+        }
+        IpAddr::V6(v6) => {
+            // IPv6 multicast scope = low nibble of the 2nd octet; drop
+            // reserved (0), interface-local (1), and link-local (2).
+            (v6.octets()[1] & 0x0f) > 2
+        }
+    }
+}
+
+/// Build a Type-1 RD (4-byte IPv4 + 2-byte assigned number) from
+/// the local router-id and VNI per RFC 8365 §5.1.2. Returns None
+/// when the VNI exceeds 16 bits — Type-1 only has 2 bytes for the
+/// assigned-number field; supporting VNIs above 65535 needs the
+/// Type-0 (ASN) format and is a follow-up.
 fn rd_from_router_id_vni(router_id: Ipv4Addr, vni: u32) -> Option<RouteDistinguisher> {
     let vni_short: u16 = vni.try_into().ok()?;
     let mut rd = RouteDistinguisher::new(RouteDistinguisherType::IP);
@@ -14407,6 +14439,23 @@ mod tests {
         AsPathPrependConfig, CommunityMatcher, CommunitySet, NumericSet, PolicyList, PrefixSet,
         SetCommunityConfig, SetCommunityMode, SetNextHop,
     };
+
+    #[test]
+    fn smet_advertisable_group_filters_link_local() {
+        let adv = |s: &str| super::smet_advertisable_group(IpAddr::from_str(s).unwrap());
+        // Advertisable host groups (ASM / SSM / site-local / global v6).
+        assert!(adv("239.1.1.1"));
+        assert!(adv("232.1.1.1"));
+        assert!(adv("ff05::1:3"));
+        assert!(adv("ff0e::1234"));
+        // Filtered: IPv4 224.0.0.0/24 control block + IPv6 interface-
+        // and link-local scopes (incl. solicited-node).
+        assert!(!adv("224.0.0.1"));
+        assert!(!adv("224.0.0.251"));
+        assert!(!adv("ff02::1"));
+        assert!(!adv("ff02::1:ff00:1"));
+        assert!(!adv("ff01::1"));
+    }
 
     #[test]
     fn flowspec_locrib_select_then_remove() {
