@@ -2,8 +2,9 @@
 
 zebra-rs forwards EVPN **BUM** traffic (Broadcast, Unknown-unicast,
 Multicast) over VXLAN using **ingress replication** (RFC 7432 / RFC 8365),
-and optimizes it with **Assisted Replication** and **Pruned-Flood-Lists**
-from RFC 9574 ("Optimized Ingress Replication Solution for EVPN").
+optimizes it with **Assisted Replication** and **Pruned-Flood-Lists** from
+RFC 9574 ("Optimized Ingress Replication Solution for EVPN"), and can bind
+it to a **Segment Routing P2MP replication tree** (RFC 9524) instead.
 
 Where [Type-5](ch-02-06-bgp-evpn-type5.md) is the L3 service, this chapter
 covers the L2 broadcast domain: how a VNI's flood list is built from
@@ -102,6 +103,35 @@ set router bgp afi-safi evpn assisted-replication selective true
 The replicator then learns its AR-LEAF set from the imported Leaf A-D
 routes (visible as `[11]:` routes in `show bgp evpn`).
 
+## SR P2MP replication trees (RFC 9524)
+
+Assisted Replication keeps BUM on the VXLAN ingress-replication dataplane.
+An alternative is to carry BUM over a **Segment Routing point-to-multipoint
+replication tree** (RFC 9524), bound to the broadcast domain per
+`draft-ietf-bess-mvpn-evpn-sr-p2mp`. Each PE that sources BUM is the
+**Root** of its own tree to the other PEs (the **leaves**); intermediate
+*bud* nodes replicate further down, so no single node fans out to the whole
+fabric and transit nodes hold no per-flow state.
+
+```
+set router bgp afi-safi evpn bum-tunnel-type sr-mpls-p2mp   # or srv6-p2mp
+```
+
+The selected tunnel is advertised in the Type-3 IMET PMSI Tunnel attribute
+as type `0x0C` (SR-MPLS) or `0x0D` (SRv6); the tunnel identifier is the
+tree's **Tree-ID** (derived from the VNI) plus the **Root** IP (the local
+VTEP). On import a PE records each remote tree it is a leaf of; on
+origination it computes its own tree's leaf set (every PE in the broadcast
+domain). These modes bypass the AR role and are **not** programmed into the
+VXLAN flood list — BUM rides the tree, not a zero-MAC FDB row.
+
+The stock kernel cannot forward an SR replication tree (next section), so
+SR P2MP is programmed through a dedicated **eBPF TC/clsact** dataplane
+(`offload/tc-evpn-replicate`). The BGP **control plane is complete**
+(signalling, import, and the replication-segment computation); the eBPF
+forwarder is under construction — selecting an SR P2MP mode today signals
+the tree and suppresses the VXLAN flood, but does not yet forward BUM.
+
 ## What the Linux kernel can and cannot do
 
 Assisted Replication targets the VXLAN ingress-replication dataplane, where
@@ -116,10 +146,11 @@ as follows:
 | **Whole-VTEP P-FL prune** | ✅ | Just omit the remote's FDB row. |
 | **Per-category P-FL prune** | ⛔ | One flood list per VNI can't keep a remote for broadcast but drop it for unknown-unicast. |
 | **AR-REPLICATOR forwarding** | ⛔ | The kernel never re-floods a decapsulated BUM frame back out to other VTEPs, can't branch on the AR-IP vs IR-IP outer destination, and can't rewrite the per-copy source IP — so it cannot act as a replicator. Needs eBPF/XDP or VPP. |
+| **SR P2MP tree forwarding** (RFC 9524) | ⛔ | No `End.Replicate` (SRv6), MPLS P2MP, or `End.DT2M` (L2 leaf flood) in the stock kernel — needs the eBPF TC/clsact dataplane (`offload/tc-evpn-replicate`) or VPP. |
 
 zebra-rs therefore implements the full RFC 9574 **control plane** (role
 signalling, P-FL, selective Leaf A-D) and the kernel-supported dataplane
 subset (**RNVE**, **AR-LEAF**, whole-VTEP prune). Acting as the
-**AR-REPLICATOR** forwarder is out of stock-kernel scope and is deferred to
-a programmable dataplane (eBPF/XDP or VPP) — the control plane is the
-producer that drives it.
+**AR-REPLICATOR** forwarder — and SR P2MP tree forwarding — are out of
+stock-kernel scope and are deferred to a programmable dataplane (eBPF/XDP
+or VPP); the control plane is the producer that drives it.
