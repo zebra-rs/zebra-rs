@@ -31,7 +31,7 @@ before citing.
 | 2     | Multicast Flags Extended Community      | **done** |
 | 3     | IMET (Type 3) capability signaling      | **done** |
 | 4     | SMET origination from kernel MDB snoop  | **done** |
-| 5     | SMET reception → selective dataplane    | planned  |
+| 5     | SMET reception → selective dataplane    | **done** |
 | 6     | Show + BDD + docs                       | planned  |
 | —     | Type 7/8 multihoming synch              | deferred |
 
@@ -269,15 +269,31 @@ overload; the rename is cosmetic and can come with Phase 5. SMET flags
 are a per-family approximation, not derived from the kernel MDB
 group-mode (follow-up). No selective dataplane yet (Phase 5).
 
-### Phase 5 — SMET reception → selective dataplane
-- **5a (fib):** real `bridge mdb add/del dev <vxlan> grp G [src S]
-  dst <remote-VTEP> permanent` via `RTM_NEWMDB/DELMDB` *send* (proper
-  `br_mdb_entry` + MDBE attrs) — distinct from the zero-MAC FDB flood row.
-- **5b (bgp):** on a best-path Type-6 whose EVI RT matches a local VNI,
-  install selective MDB toward the originator's VTEP; withdraw removes it.
-  Reconcile with the Type-3 flood list: replicate `(x,G)` selectively only
-  to VTEPs that advertised **both** the Multicast Flags EC **and** a
-  matching SMET; others still flood (RFC 9251 IR filtering).
+### Phase 5 — SMET reception → selective dataplane — **done**
+- **5a (fib `handle.rs`):** `mdb_install(bridge, port, vid, group, source,
+  dst, add)` emits `RTM_{NEW,DEL}MDB` with the `MDBA_SET_ENTRY`
+  (`br_mdb_entry`) + `MDBA_SET_ENTRY_ATTRS` (`MDBE_ATTR_SOURCE` +
+  `MDBE_ATTR_DST`) layout, via the fork's `MdbMessage` +
+  `MdbAttribute::Other` (no fork change needed). Byte-layout unit tests
+  (`br_mdb_entry_v4_layout`, `…_v6_proto`, `mdb_nla_bytes_*`). Needed the
+  one-line `netlink-packet-utils = "0.5.2"` dep (unifies with the fork's)
+  to name `DefaultNla`.
+- **5b (rib):** `rib::Message::SmetInstall/SmetRemove`; `smet_install`
+  resolves the VNI to its local `(bridge, vxlan-port)` via
+  `vni_to_bridge_vxlan` and calls `mdb_install` (vid 0; per-VLAN is a
+  follow-up).
+- **5c (bgp `route_evpn_export_selected`):** the Smet arms now send
+  `SmetInstall` (best-path, non-Originated, dst = SMET `orig`) /
+  `SmetRemove` (withdraw), VNI from the EVI RT.
+
+**No explicit flood reconciliation needed:** a snooping bridge forwards
+*registered* groups (those with an MDB entry) only to the MDB dsts and
+floods only *unregistered* groups over the Type-3 zero-MAC FDB list — so
+installing received SMET as MDB entries yields selective delivery, and a
+non-proxy PE (which never sends SMET) keeps getting the flood. The
+Multicast Flags EC gate (skip sending selective toward non-proxy PEs) is
+therefore an optimization, deferred. **Live forwarding is validated in
+Phase 6's BDD** (byte layout is unit-tested here).
 
 ### Phase 6 — Show + BDD + docs
 - `show bgp evpn` rendering for Type-6 (src/grp/orig/flags); extend

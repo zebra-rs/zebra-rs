@@ -6014,11 +6014,18 @@ fn route_evpn_export_selected(
                     }
                 }
             }
-            EvpnPrefix::Smet { .. } => {
-                // TODO(phase5): withdraw the selective kernel MDB entry
-                // (`bridge mdb del grp G dst <originator-VTEP>`). The
-                // selective-forwarding dataplane is not wired yet, so a
-                // received SMET withdraw is a no-op beyond Loc-RIB removal.
+            EvpnPrefix::Smet { src, grp, orig, .. } => {
+                // Remove the selective kernel MDB entry toward the
+                // originator's VTEP (the SMET `orig`). VNI comes from the
+                // withdrawn path's EVI RT.
+                if let Some(vni) = extract_vni_from_attr(&wd.attr) {
+                    let _ = bgp.rib_client.send(rib::Message::SmetRemove {
+                        vni,
+                        group: *grp,
+                        source: *src,
+                        dst: *orig,
+                    });
+                }
             }
             // RFC 9572 A-D routes have no VXLAN dataplane action — withdraw
             // is a control-plane no-op.
@@ -6115,12 +6122,22 @@ fn route_evpn_export_selected(
                 }
             }
         }
-        EvpnPrefix::Smet { .. } => {
-            // TODO(phase5): install the selective kernel MDB entry
-            // (`bridge mdb add grp G [src S] dst <originator-VTEP>`) so
-            // the ingress PE replicates (x,G) only toward PEs that asked.
-            // The received SMET is already in the Loc-RIB and `show bgp
-            // evpn`; the selective-forwarding dataplane lands in Phase 5.
+        EvpnPrefix::Smet { src, grp, orig, .. } => {
+            // Install a selective kernel MDB entry toward the originator's
+            // VTEP (the SMET `orig`) so this PE delivers (x,G) only to the
+            // asking PE — the snooping bridge forwards the registered
+            // group selectively instead of flooding. Skip our own
+            // originated SMET; VNI comes from the EVI RT.
+            if best.typ != BgpRibType::Originated
+                && let Some(vni) = extract_vni_from_attr(&best.attr)
+            {
+                let _ = bgp.rib_client.send(rib::Message::SmetInstall {
+                    vni,
+                    group: *grp,
+                    source: *src,
+                    dst: *orig,
+                });
+            }
         }
         // RFC 9572 Per-Region I-PMSI / S-PMSI / Leaf A-D have no VXLAN
         // dataplane action in the current codec-only phase — install is a
