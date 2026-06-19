@@ -999,11 +999,14 @@ impl Rib {
             // loopback: the kernel silently STRIPS a seg6local encap whose
             // oif is `lo` (verified on 6.8 — `End.DT6 dev lo` installs as a
             // plain route), so a decap localsid must ride on a real device.
-            // End.M reuses the End.DT6 kernel action, so it joins this group.
+            // End.M reuses the End.DT6 kernel action; End.DT46 is the
+            // dual-family decap BGP L3VPN-over-SRv6 programs per VRF — both
+            // join this group or their decap silently vanishes.
             SidBehavior::End
             | SidBehavior::UN
             | SidBehavior::EndDT4
             | SidBehavior::EndDT6
+            | SidBehavior::EndDT46
             | SidBehavior::EndM => self.resolve_sr0_ifindex(),
             _ => self.resolve_lo_ifindex(),
         }

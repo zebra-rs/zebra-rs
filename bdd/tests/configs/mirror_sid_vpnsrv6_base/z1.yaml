@@ -1,0 +1,85 @@
+# z1 — foundation test for VRF L3VPN over SRv6 (End.DT46), dual-stack.
+# IS-IS L2 SRv6 underlay, iBGP VPNv4+VPNv6 to z2 over loopbacks, VRF
+# vrf-cust holding the ce1 CE link. Its v4 and v6 prefixes are originated
+# into VPNv4 / VPNv6 carrying the per-VRF End.DT46 service SID from LOC1
+# (End.DT46 is dual-family, so one SID serves both AFIs).
+vrf:
+- name: vrf-cust
+  ipv4:
+    route-target:
+      import:
+      - 65001:100
+      export:
+      - 65001:100
+  ipv6:
+    route-target:
+      import:
+      - 65001:100
+      export:
+      - 65001:100
+interface:
+- if-name: lo
+  ipv6:
+    address: 2001:db8::1/128
+- if-name: z1-z2
+  ipv6:
+    address: 2001:db8:0:12::1/64
+- if-name: ce1
+  vrf: vrf-cust
+  ipv4:
+    address: 10.1.1.1/24
+  ipv6:
+    address: 2001:db8:a::1/64
+segment-routing:
+  locator:
+  - name: LOC1
+    prefix: fcbb:bbbb:1::/48
+    behavior: usid
+router:
+  isis:
+    net: 49.0000.0000.0000.0001.00
+    hostname: z1
+    is-type: level-2-only
+    segment-routing:
+      srv6:
+        locator: LOC1
+    interface:
+    - if-name: lo
+      ipv6:
+        enable: true
+    - if-name: z1-z2
+      network-type: point-to-point
+      metric: 1
+      ipv6:
+        enable: true
+  bgp:
+    global:
+      as: 65001
+      router-id: 10.0.0.1
+    timer:
+      adv-interval:
+        ibgp: 1
+    segment-routing:
+      srv6:
+        locator: LOC1
+    neighbor:
+    - remote-address: 2001:db8::2
+      remote-as: 65001
+      update-source: 2001:db8::1
+      enabled: true
+      afi-safi:
+      - name: vpnv4
+        enabled: true
+      - name: vpnv6
+        enabled: true
+    vrf:
+    - name: vrf-cust
+      rd: 65001:100
+      encapsulation: srv6
+      afi-safi:
+        ipv4:
+          network:
+          - prefix: 10.1.1.0/24
+        ipv6:
+          network:
+          - prefix: 2001:db8:a::/64
