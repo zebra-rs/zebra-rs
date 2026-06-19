@@ -18,6 +18,7 @@ interface enp0s6 {
 | `/interface/<name>/if-name` | `string` | List key — the kernel interface name. |
 | `/interface/<name>/mtu` | `uint32` (68..65535) | Maximum transmission unit in bytes. See below. |
 | `/interface/<name>/vrf` | leafref `/vrf/name` | Enslave the interface to a VRF master device. |
+| `/interface/<name>/bridge` | leafref `/bridge/name` | Enslave the interface to a bridge master device. See below. |
 | `/interface/<name>/ipv4/address` | `inet:ipv4-prefix` | IPv4 address (with prefix length). |
 | `/interface/<name>/ipv6/address` | `inet:ipv6-prefix` | IPv6 address (with prefix length). |
 
@@ -25,6 +26,40 @@ The list entry itself is not a separate "create interface" operation —
 it just attaches configuration to a kernel device that already exists
 (or appears later). zebra-rs does not create physical or virtual links
 from this block.
+
+## Bridge and VRF enslavement
+
+The `bridge` and `vrf` leaves enslave the interface to a master device —
+the equivalent of `ip link set <name> master <master>`:
+
+```
+interface enp0s6 {
+  bridge br0;     # make enp0s6 a port of the Linux bridge br0
+}
+interface enp0s7 {
+  vrf CUST-A;     # move enp0s7 into the VRF CUST-A
+}
+```
+
+Both write the kernel `IFLA_MASTER`, so they are mutually exclusive — an
+interface has exactly one master. `bridge` is a leafref to
+`/bridge/name` and `vrf` a leafref to `/vrf/name`; the referenced device
+is the one zebra-rs creates from its own
+[`bridge`](ch-00-05-bridge-configuration.md) / `vrf` block.
+
+The bind is **staged**, the same way the configured MTU is: it is held
+as durable desired-state and applied once *both* the interface and the
+master device exist in the kernel, so the order of configuration and
+device creation is irrelevant. If the bridge is configured after the
+interface, the enslavement fires when the bridge appears; if the bridge
+is later deleted, the kernel releases the port and zebra-rs re-applies
+the bind automatically when the bridge is re-created.
+
+Remove the binding with the master name as the argument:
+
+```
+no interface enp0s6 bridge br0
+```
 
 ## MTU
 
@@ -126,7 +161,8 @@ they are sourced from one RIB-driven update, not independent reads.
 | `interface <n> mtu <v>` | `mtu <v>` (interface) / `ip link set <n> mtu <v>` |
 | `no interface <n> mtu` | restore original — no direct FRR equivalent (FRR leaves the last value) |
 | `interface <n> ipv4 address <p>` | `ip address <p>` (interface) |
-| `interface <n> vrf <name>` | `ip link set <n> master <name>` |
+| `interface <n> vrf <name>` | `ip link set <n> master <name>` (VRF master) |
+| `interface <n> bridge <name>` | `ip link set <n> master <name>` (bridge master) |
 
 Note the delete semantics differ: zebra-rs restores the
 originally-observed MTU, whereas iproute2/FRR simply leave whatever was

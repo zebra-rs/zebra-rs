@@ -59,6 +59,33 @@ ip link set br550 addrgenmode none
 ip link set br550 up
 ```
 
+## Enslaving ports to the bridge
+
+Ports are enslaved from *their own* config block — not the bridge's —
+each with a `bridge` leafref to `/bridge/name` (the equivalent of
+`ip link set <port> master <bridge>`):
+
+```
+interface enp0s6 {
+  bridge br550;        # a local access port
+}
+vxlan vni550 {
+  vni 550;
+  bridge br550;        # the EVPN VXLAN tunnel
+}
+```
+
+The bind is staged the same way for both: it is applied once the port
+*and* the bridge exist in the kernel, so the bridge may be configured
+before or after its members, and a deleted-and-recreated bridge
+re-acquires them automatically. Enslaving a VXLAN additionally triggers
+the EVPN bridge-slave defaults (`neigh_suppress on`, `learning off`) on
+the port.
+
+See [Interface Configuration](ch-00-03-interface-configuration.md#bridge-and-vrf-enslavement)
+and [VXLAN Configuration](ch-00-04-vxlan-configuration.md#when-the-device-joins-a-bridge)
+for the full details.
+
 ## Deleting the configuration
 
 Removing the list entry deletes the kernel device (`RTM_DELLINK`, the
@@ -75,4 +102,6 @@ no bridge br550
 | `bridge <n>` | `ip link add <n> type bridge` |
 | `bridge <n> address-gen-mode <m>` | `ip link set <n> addrgenmode <m>` |
 | *(automatic)* device up | `ip link set <n> up` |
+| `interface <p> bridge <n>` | `ip link set <p> master <n>` (enslave a port) |
+| `vxlan <p> bridge <n>` | `ip link set <p> master <n>` (enslave a VXLAN) |
 | `no bridge <n>` | `ip link del <n>` |
