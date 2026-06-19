@@ -82,6 +82,9 @@ rtnetlink = { git = "https://github.com/zebra-rs/rtnetlink", rev = "2d7b1830e9bd
 netlink-sys = "0.8"
 netlink-packet-route = { git = "https://github.com/zebra-rs/netlink-packet-route", branch = "seg6" }
 netlink-packet-core = "0.7"
+# Matches the version netlink-packet-route (seg6) pins, so DefaultNla
+# unifies — used to emit kernel bridge MDB SET entries (EVPN SMET).
+netlink-packet-utils = "0.5.2"
 futures = "0.3"
 scan_fmt = "0.2"
 procfs = "0.18"

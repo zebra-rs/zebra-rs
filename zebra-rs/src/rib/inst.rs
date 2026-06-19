@@ -273,6 +273,23 @@ pub enum Message {
         source: Option<IpAddr>,
         ifindex: u32,
     },
+    /// Install (`SmetInstall`) or remove (`SmetRemove`) a selective EVPN
+    /// multicast forwarding entry from a received Type-6 SMET route:
+    /// deliver `(source, group)` in `vni` toward the remote VTEP `dst`
+    /// (the SMET originator). The RIB resolves `vni` to its local
+    /// `(bridge, vxlan-port)` and programs the kernel bridge MDB.
+    SmetInstall {
+        vni: u32,
+        group: IpAddr,
+        source: Option<IpAddr>,
+        dst: IpAddr,
+    },
+    SmetRemove {
+        vni: u32,
+        group: IpAddr,
+        source: Option<IpAddr>,
+        dst: IpAddr,
+    },
     Shutdown {
         tx: oneshot::Sender<()>,
     },
@@ -2182,6 +2199,22 @@ impl Rib {
             } => {
                 self.mdb_del(vni, group, source, ifindex).await;
             }
+            Message::SmetInstall {
+                vni,
+                group,
+                source,
+                dst,
+            } => {
+                self.smet_install(vni, group, source, dst, true).await;
+            }
+            Message::SmetRemove {
+                vni,
+                group,
+                source,
+                dst,
+            } => {
+                self.smet_install(vni, group, source, dst, false).await;
+            }
             Message::RedistAdd {
                 proto,
                 afi,
@@ -2504,6 +2537,40 @@ impl Rib {
     async fn mdb_del(&mut self, vni: u32, group: IpAddr, source: Option<IpAddr>, ifindex: u32) {
         self.vtep_table.remove(&(vni, group));
         self.fib_handle.mdb_del(vni, group, source, ifindex).await;
+    }
+
+    /// Resolve a VNI to its local `(bridge ifindex, VXLAN-port ifindex)`
+    /// — the VXLAN link carrying `vni` is the bridge port, and its
+    /// `master` is the bridge. `None` when the VNI has no local VXLAN
+    /// enslaved to a bridge.
+    fn vni_to_bridge_vxlan(&self, vni: u32) -> Option<(u32, u32)> {
+        self.links.iter().find_map(|(ifindex, link)| {
+            if link.vni == Some(vni) {
+                link.master.map(|bridge| (bridge, *ifindex))
+            } else {
+                None
+            }
+        })
+    }
+
+    /// Program (or remove) a selective EVPN multicast forwarding entry
+    /// in the kernel bridge MDB from a received Type-6 SMET route.
+    /// vid 0 (non-VLAN-aware bridge) for now — per-VLAN mapping is a
+    /// follow-up. No-op when the VNI has no local VXLAN bridge.
+    async fn smet_install(
+        &self,
+        vni: u32,
+        group: IpAddr,
+        source: Option<IpAddr>,
+        dst: IpAddr,
+        add: bool,
+    ) {
+        let Some((bridge_ifindex, vxlan_ifindex)) = self.vni_to_bridge_vxlan(vni) else {
+            return;
+        };
+        self.fib_handle
+            .mdb_install(bridge_ifindex, vxlan_ifindex, 0, group, source, dst, add)
+            .await;
     }
 
     pub async fn event_loop(&mut self) {

@@ -2569,6 +2569,86 @@ impl FibHandle {
         }
     }
 
+    /// Install (`add`) or remove (`!add`) a selective EVPN multicast
+    /// forwarding entry in the kernel bridge MDB: forward `group`
+    /// (optionally `source`-filtered) out the VXLAN `port_ifindex`
+    /// toward the remote VTEP `dst`. Built from a received Type-6 SMET
+    /// route — the kernel snooping bridge then delivers that registered
+    /// group selectively to `dst` instead of flooding (RFC 9251).
+    /// `bridge_ifindex` is the bridge (`dev`); `port_ifindex` its VXLAN
+    /// slave (`port`). Emits `RTM_{NEW,DEL}MDB` with the
+    /// `MDBA_SET_ENTRY` / `MDBA_SET_ENTRY_ATTRS` layout
+    /// (linux/if_bridge.h).
+    pub async fn mdb_install(
+        &self,
+        bridge_ifindex: u32,
+        port_ifindex: u32,
+        vid: u16,
+        group: IpAddr,
+        source: Option<IpAddr>,
+        dst: IpAddr,
+        add: bool,
+    ) {
+        use netlink_packet_route::RouteNetlinkMessage;
+        use netlink_packet_route::mdb::{MdbAttribute, MdbHeader, MdbMessage};
+        use netlink_packet_utils::nla::DefaultNla;
+
+        let entry = br_mdb_entry_bytes(port_ifindex, vid, group);
+        let mut nested = Vec::new();
+        if let Some(src) = source {
+            nested.extend_from_slice(&mdb_nla_bytes(MDBE_ATTR_SOURCE, &ip_octets(src)));
+        }
+        nested.extend_from_slice(&mdb_nla_bytes(MDBE_ATTR_DST, &ip_octets(dst)));
+
+        let msg = MdbMessage {
+            header: MdbHeader {
+                family: AddressFamily::Bridge,
+                index: bridge_ifindex,
+            },
+            attributes: vec![
+                MdbAttribute::Other(DefaultNla::new(MDBA_SET_ENTRY, entry.to_vec())),
+                MdbAttribute::Other(DefaultNla::new(MDBA_SET_ENTRY_ATTRS, nested)),
+            ],
+        };
+
+        let req = if add {
+            let mut r = NetlinkMessage::from(RouteNetlinkMessage::NewMdb(msg));
+            r.header.flags = NLM_F_REQUEST | NLM_F_ACK | NLM_F_CREATE | NLM_F_REPLACE;
+            r
+        } else {
+            let mut r = NetlinkMessage::from(RouteNetlinkMessage::DelMdb(msg));
+            r.header.flags = NLM_F_REQUEST | NLM_F_ACK;
+            r
+        };
+
+        if fib_l2_mdb() {
+            tracing::info!(
+                "mdb_install(add={}): br {} port {} grp {} src {:?} dst {}",
+                add,
+                bridge_ifindex,
+                port_ifindex,
+                group,
+                source,
+                dst
+            );
+        }
+
+        let mut response = self.handle.clone().request(req).unwrap();
+        while let Some(rsp) = response.next().await {
+            if let NetlinkPayload::Error(e) = rsp.payload
+                && e.code.is_some()
+            {
+                tracing::info!(
+                    "mdb_install: netlink error grp {} dst {} (add={}): {}",
+                    group,
+                    dst,
+                    add,
+                    e
+                );
+            }
+        }
+    }
+
     /// Delete EVPN MAC entry from bridge FDB
     pub async fn mac_del(&self, vni: u32, mac: &MacAddr) {
         // Mirror `mac_add` — skip when no local VXLAN registered for
@@ -3106,6 +3186,59 @@ fn process_msg(msg: NetlinkMessage<RouteNetlinkMessage>, tx: UnboundedSender<Fib
 /// statically-added L2 MAC groups carry no IGMP/MLD membership and are
 /// skipped. The bridge ifindex (`header.index`) is mapped to a VNI by
 /// the RIB.
+// MDB SET request attribute kinds (linux/if_bridge.h). The top-level
+// container is MDBA_SET_ENTRY (the br_mdb_entry struct) + the nested
+// MDBA_SET_ENTRY_ATTRS holding per-entry MDBE_ATTR_* attributes.
+const MDBA_SET_ENTRY: u16 = 1;
+const MDBA_SET_ENTRY_ATTRS: u16 = 2;
+const MDBE_ATTR_SOURCE: u16 = 1;
+const MDBE_ATTR_DST: u16 = 5;
+const MDB_PERMANENT: u8 = 1;
+const ETH_P_IP_BE: u16 = 0x0800;
+const ETH_P_IPV6_BE: u16 = 0x86dd;
+
+/// Build a `struct br_mdb_entry` (28 octets) for an MDB SET request.
+/// Integer fields (`ifindex`, `vid`) are host byte order; the address
+/// union and `proto` are network byte order.
+fn br_mdb_entry_bytes(port_ifindex: u32, vid: u16, group: IpAddr) -> [u8; 28] {
+    let mut b = [0u8; 28];
+    b[0..4].copy_from_slice(&port_ifindex.to_ne_bytes());
+    b[4] = MDB_PERMANENT;
+    b[6..8].copy_from_slice(&vid.to_ne_bytes());
+    match group {
+        IpAddr::V4(g) => {
+            b[8..12].copy_from_slice(&g.octets());
+            b[24..26].copy_from_slice(&ETH_P_IP_BE.to_be_bytes());
+        }
+        IpAddr::V6(g) => {
+            b[8..24].copy_from_slice(&g.octets());
+            b[24..26].copy_from_slice(&ETH_P_IPV6_BE.to_be_bytes());
+        }
+    }
+    b
+}
+
+/// Encode one netlink attribute (host-endian header) with 4-byte tail
+/// padding: `[len u16][kind u16][value][pad]`.
+fn mdb_nla_bytes(kind: u16, value: &[u8]) -> Vec<u8> {
+    let len = 4 + value.len();
+    let mut out = Vec::with_capacity((len + 3) & !3);
+    out.extend_from_slice(&(len as u16).to_ne_bytes());
+    out.extend_from_slice(&kind.to_ne_bytes());
+    out.extend_from_slice(value);
+    while out.len() % 4 != 0 {
+        out.push(0);
+    }
+    out
+}
+
+fn ip_octets(ip: IpAddr) -> Vec<u8> {
+    match ip {
+        IpAddr::V4(v) => v.octets().to_vec(),
+        IpAddr::V6(v) => v.octets().to_vec(),
+    }
+}
+
 pub(crate) fn mdb_entries_from_msg(
     msg: &netlink_packet_route::mdb::MdbMessage,
 ) -> Vec<FibMdbEntry> {
@@ -3154,6 +3287,40 @@ mod tests {
             "RTM_NEWNEXTHOP decode regressed: {:?}",
             parsed.err()
         );
+    }
+
+    #[test]
+    fn br_mdb_entry_v4_layout() {
+        use std::net::Ipv4Addr;
+        let b = br_mdb_entry_bytes(7, 0, IpAddr::V4(Ipv4Addr::new(239, 1, 1, 1)));
+        assert_eq!(b.len(), 28);
+        assert_eq!(&b[0..4], &7u32.to_ne_bytes(), "port ifindex (host order)");
+        assert_eq!(b[4], 1, "MDB_PERMANENT");
+        assert_eq!(&b[6..8], &0u16.to_ne_bytes(), "vid");
+        assert_eq!(&b[8..12], &[239, 1, 1, 1], "group v4");
+        assert_eq!(&b[24..26], &[0x08, 0x00], "proto ETH_P_IP (big-endian)");
+    }
+
+    #[test]
+    fn br_mdb_entry_v6_proto() {
+        use std::net::Ipv6Addr;
+        let g: Ipv6Addr = "ff05::1:3".parse().unwrap();
+        let b = br_mdb_entry_bytes(3, 10, IpAddr::V6(g));
+        assert_eq!(&b[6..8], &10u16.to_ne_bytes(), "vid 10");
+        assert_eq!(&b[8..24], &g.octets(), "group v6");
+        assert_eq!(&b[24..26], &[0x86, 0xdd], "proto ETH_P_IPV6");
+    }
+
+    #[test]
+    fn mdb_nla_bytes_header_and_pad() {
+        // IPv4 value: [len=8][kind][4 bytes] — already 4-aligned.
+        let n = mdb_nla_bytes(MDBE_ATTR_SOURCE, &[192, 0, 2, 1]);
+        assert_eq!(n.len(), 8);
+        assert_eq!(&n[0..2], &8u16.to_ne_bytes(), "nla len");
+        assert_eq!(&n[2..4], &MDBE_ATTR_SOURCE.to_ne_bytes(), "nla kind");
+        assert_eq!(&n[4..8], &[192, 0, 2, 1], "value");
+        // IPv6 value: 4 + 16 = 20, aligned.
+        assert_eq!(mdb_nla_bytes(MDBE_ATTR_DST, &[0u8; 16]).len(), 20);
     }
 
     #[test]
