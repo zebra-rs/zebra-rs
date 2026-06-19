@@ -163,15 +163,17 @@ the CE:
 
 ## Current status
 
-The configuration, the IS-IS **advertisement** of the Mirror SID (SRv6
-End.M sub-TLV with the Protected Locators sub-sub-TLV), the `show isis
+The end-to-end SRv6 path is now in place: the Mirror SID **advertisement**
+(End.M sub-TLV + Protected Locators sub-sub-TLV), the `show isis
 egress-protection` view (local **and received**), the protector's **End.M
-localsid install**, and the **static `via-vrf` mirror-context population**
-are implemented. Still landing in later stages: auto-allocation of the
-Mirror SID when `mirror-sid` is omitted, learning the context population
-from **BGP L3VPN** (the alternative to static `via-vrf`), and the
-**PLR-side repair** that pushes the Mirror SID on egress failure. So today
-a configured entry is advertised, every node can see what it has received,
-and the full protector decap chain is in place — but traffic is only
-redirected once the PLR repair lands (the next stage); SR-MPLS
-(`dataplane mpls`) is also a later stage.
+localsid install**, the **static `via-vrf` mirror-context population**, and
+the **PLR repair** — for any route to a protected egress locator, the PLR
+installs an H.Encaps-to-the-Mirror-SID backup that a BFD-driven failover
+switches to when the protected egress fails. Still landing in later stages:
+auto-allocation of the Mirror SID when `mirror-sid` is omitted, learning
+the context population from **BGP L3VPN** (the alternative to static
+`via-vrf`), PE–CE link protection (the egress as its own PLR), and a
+TI-LFA-style repair list to the protector (today the repair is a single
+`[Mirror SID]` segment, assuming the protector is reachable on a path that
+avoids the failed egress). SR-MPLS (`dataplane mpls`) is also a later
+stage.
