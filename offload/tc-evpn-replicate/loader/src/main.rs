@@ -10,7 +10,8 @@
 use anyhow::Context as _;
 use aya::programs::{SchedClassifier, TcAttachType, tc};
 use clap::Parser;
-use log::{debug, info};
+use log::{debug, info, warn};
+use tokio::io::AsyncBufReadExt as _;
 use tokio::signal;
 
 #[derive(Debug, Parser)]
@@ -65,8 +66,60 @@ async fn main() -> anyhow::Result<()> {
     program.load()?;
     program.attach(&iface, attach)?;
 
-    info!("tc_evpn_replicate attached to {iface} ({direction}); waiting for Ctrl-C");
-    signal::ctrl_c().await?;
+    info!("tc_evpn_replicate attached to {iface} ({direction}); reading commands on stdin");
+
+    // Replication segments are fed by the zebra-rs supervisor over a stdin
+    // line protocol (one command per line):
+    //   repl-add <vni> <tree-id> <srv6:0|1> <root-ip> <leaf-ip>...
+    //   repl-del <vni>
+    // Today each command is parsed and logged; populating the BPF replication
+    // map and the End.Replicate / End.DT2M forwarding are follow-up slices.
+    let mut lines = tokio::io::BufReader::new(tokio::io::stdin()).lines();
+    loop {
+        tokio::select! {
+            line = lines.next_line() => match line {
+                Ok(Some(l)) => handle_command(&l),
+                // EOF (supervisor closed our stdin) or read error: exit so the
+                // TC program detaches cleanly.
+                _ => break,
+            },
+            _ = signal::ctrl_c() => break,
+        }
+    }
     info!("Exiting");
     Ok(())
+}
+
+/// Handle one control line from the supervisor. Unknown / malformed lines are
+/// warned and ignored so a protocol mismatch never kills the dataplane.
+fn handle_command(line: &str) {
+    let line = line.trim();
+    if line.is_empty() {
+        return;
+    }
+    let mut it = line.split_whitespace();
+    match it.next() {
+        Some("repl-add") => {
+            let vni = it.next();
+            let tree_id = it.next();
+            let srv6 = it.next();
+            let root = it.next();
+            let leaves: Vec<&str> = it.collect();
+            match (vni, tree_id, srv6, root) {
+                (Some(vni), Some(tree_id), Some(srv6), Some(root)) if !leaves.is_empty() => {
+                    info!(
+                        "repl-add vni={vni} tree={tree_id} srv6={srv6} root={root} \
+                         leaves={leaves:?} (BPF map population pending)"
+                    );
+                }
+                _ => warn!("malformed repl-add: {line:?}"),
+            }
+        }
+        Some("repl-del") => match it.next() {
+            Some(vni) => info!("repl-del vni={vni}"),
+            None => warn!("malformed repl-del: {line:?}"),
+        },
+        Some(other) => warn!("unknown command: {other:?}"),
+        None => {}
+    }
 }
