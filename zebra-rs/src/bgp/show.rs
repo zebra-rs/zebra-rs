@@ -2190,7 +2190,8 @@ impl PolicyBindingView {
 }
 
 /// Collect a neighbor's per-AFI bindings (sorted by family) followed by
-/// the peer-wide legacy fallback, dropping rows that name nothing.
+/// the peer-wide fallback (now populated only by neighbor-group
+/// inheritance), dropping rows that name nothing.
 fn collect_policy_bindings(peer: &Peer) -> Vec<PolicyBindingView> {
     use super::policy::InOut;
     let mut families: std::collections::BTreeSet<AfiSafi> = std::collections::BTreeSet::new();
@@ -3960,9 +3961,9 @@ Neighbor        V         AS   MsgRcvd   MsgSent   TblVer  InQ OutQ  Up/Down Sta
     }
 
     /// `show bgp neighbor` lists per-AFI policy/prefix-set bindings and
-    /// the legacy peer-wide fallback, family-scoped rows first.
+    /// the peer-wide fallback (group-inherited), family-scoped rows first.
     #[test]
-    fn policy_block_lists_per_afi_and_legacy() {
+    fn policy_block_lists_per_afi_and_peer_wide() {
         let mut out = String::new();
         let mut n = minimal_neighbor(None);
         n.policy_bindings = vec![

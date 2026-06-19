@@ -8,26 +8,26 @@ router:
       afi-safi:
       - name: ipv4
         enabled: true
+        policy:
+          out: out-shared
       enabled: true
       remote-as: 65002
-      policy:
-        out: out-shared
     - remote-address: 192.168.0.3
       afi-safi:
       - name: ipv4
         enabled: true
+        policy:
+          out: out-shared
       enabled: true
       remote-as: 65003
-      policy:
-        out: out-shared
     - remote-address: 192.168.0.4
       afi-safi:
       - name: ipv4
         enabled: true
+        policy:
+          out: out-different
       enabled: true
       remote-as: 65004
-      policy:
-        out: out-different
 policy:
 - name: out-shared
   entry:
