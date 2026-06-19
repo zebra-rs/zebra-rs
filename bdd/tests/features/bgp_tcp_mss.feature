@@ -49,10 +49,10 @@ Feature: BGP TCP MSS (neighbor tcp-mss)
     And BGP session in "z2" to "192.168.0.1" should be "Established"
     # show bgp neighbor reports both the configured tcp-mss and the MSS
     # the kernel actually negotiated on the live socket.
-    And show command "show bgp neighbors 192.168.0.2" in namespace "z1" should contain "Configured tcp-mss is 500"
-    And show command "show bgp neighbors 192.168.0.2" in namespace "z1" should contain "synced tcp-mss is 488"
-    And show command "show bgp neighbors 192.168.0.1" in namespace "z2" should contain "Configured tcp-mss is 500"
-    And show command "show bgp neighbors 192.168.0.1" in namespace "z2" should contain "synced tcp-mss is 488"
+    And show command "show bgp neighbor 192.168.0.2" in namespace "z1" should contain "Configured tcp-mss is 500"
+    And show command "show bgp neighbor 192.168.0.2" in namespace "z1" should contain "synced tcp-mss is 488"
+    And show command "show bgp neighbor 192.168.0.1" in namespace "z2" should contain "Configured tcp-mss is 500"
+    And show command "show bgp neighbor 192.168.0.1" in namespace "z2" should contain "synced tcp-mss is 488"
 
   Scenario: Teardown topology
     Given the test topology exists

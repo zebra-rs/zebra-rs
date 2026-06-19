@@ -18,7 +18,7 @@ What exists today (branch `nd-show-commands`, 2026-06-10):
 | Learned neighbors | not stored; `NdEvent::NeighborDiscovered` is fire-and-forget to BGP | `nd/engine.rs:122-137` |
 | Show infrastructure | none (no ShowChannel, no `show nd` grammar, `show_proto` falls back to `"rib"`) | `config/manager.rs:1112` |
 | BGP interface peer | stores `ifname`, learned link-local in `address`, `scope_id` | `bgp/interface_neighbor.rs:88` (`materialize_peer`) |
-| `show bgp neighbors` for interface peers | prints `BGP neighbor on <ifname>: <link-local>` only — nothing about ND | `bgp/show.rs:2036-2041` |
+| `show bgp neighbor` for interface peers | prints `BGP neighbor on <ifname>: <link-local>` only — nothing about ND | `bgp/show.rs:2036-2041` |
 
 Key physical constraints that shape the design:
 
@@ -226,7 +226,7 @@ pub nd_event_count: u64,
 Set/updated in `materialize_peer()` (`bgp/interface_neighbor.rs:88`) for
 both the create and the refresh path.
 
-`bgp/show.rs` — for interface-keyed peers, `show bgp neighbors` (and the
+`bgp/show.rs` — for interface-keyed peers, `show bgp neighbor` (and the
 single-neighbor form) gains a block right under the identity line, text
 and JSON:
 
@@ -250,7 +250,7 @@ existing tag — verify with a grep before naming; `@nd_show` proposed):
 * Assert `show ipv6 nd interface <if>` contains the peer's link-local
   and a non-zero received-RA count (allow the documented up-to-16 s
   initial-RA delay before asserting).
-* Assert `show bgp neighbors` contains the `Discovered ... ago` line.
+* Assert `show bgp neighbor` contains the `Discovered ... ago` line.
 * End with the mandatory `Scenario: Teardown topology`.
 
 Known step traps (from prior sessions): the `show command "<cmd>"` step
@@ -274,7 +274,7 @@ Each PR: `cargo fmt`, workspace-wide clippy, full test suite before push.
    ShowChannel on `Nd`, `nd/show.rs` text+JSON renderers, `dev_snmp6`
    reader, parse() grammar tests. (medium)
 4. **PR 4 — BGP neighbor ND block.** `Peer` discovery-tracking fields,
-   `materialize_peer` updates, `show bgp neighbors` text+JSON rendering
+   `materialize_peer` updates, `show bgp neighbor` text+JSON rendering
    for interface peers. (small)
 5. **PR 5 — BDD.** `@nd_show` feature as in §2.5, with teardown. (small)
 

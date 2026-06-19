@@ -195,7 +195,7 @@ module configure {
       //
       // Modeled as a presence list so the node is a valid terminal
       // on its own (-> reset all) yet still accepts a positional key
-      // (-> reset one), the same shape as `show bgp ipv4 neighbors
+      // (-> reset one), the same shape as `show bgp neighbor
       // [<addr>]`. No `all` keyword is needed (unlike
       // zebra-bgp-clear.yang) because the bare presence already
       // carries the "every neighbor" meaning.

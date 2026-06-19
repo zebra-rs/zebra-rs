@@ -65,7 +65,7 @@ Feature: BGP neighbor ip-transparent (peer as an address the host does not own)
     And BGP session in "z1" to "10.255.0.99" should be "Established"
     And BGP route in "z1" has "10.2.2.2/32"
     And BGP route in "z2" has "10.1.1.1/32"
-    And show command "show bgp neighbors" in namespace "z2" should contain "IP transparent enabled"
+    And show command "show bgp neighbor" in namespace "z2" should contain "IP transparent enabled"
 
   Scenario: Teardown topology
     Given the test topology exists

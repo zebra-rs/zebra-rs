@@ -45,7 +45,7 @@ Feature: BGP IPv6 unnumbered neighbor discovered via Router Advertisements
   Note: the interface-keyed peer's remote address is a kernel-assigned
   link-local that the scenario can't name, so the session is asserted
   with the address-agnostic "BGP session in namespace … should
-  eventually be …" step (it reads `show bgp neighbors`, which lists
+  eventually be …" step (it reads `show bgp neighbor`, which lists
   interface-keyed peers), and the FIB assertion pins the substring
   `via inet6 fe80::` rather than a full next-hop.
 
@@ -93,12 +93,12 @@ Feature: BGP IPv6 unnumbered neighbor discovered via Router Advertisements
     Given the test topology exists
     # The summary identifies an interface-keyed peer by its interface
     # name (the trailing space pins the fixed-width Neighbor column),
-    # and `show bgp neighbors <ifname>` resolves the peer the
+    # and `show bgp neighbor <ifname>` resolves the peer the
     # dynamic completion offers, rendering the FRR-style
     # `BGP neighbor on <ifname>: <link-local>` identity.
     Then show command "show bgp summary" in namespace "z1" should contain "i1 "
     And show command "show bgp ipv4 summary" in namespace "z1" should contain "i1 "
-    And show command "show bgp neighbors i1" in namespace "z1" should contain "BGP neighbor on i1: fe80::"
+    And show command "show bgp neighbor i1" in namespace "z1" should contain "BGP neighbor on i1: fe80::"
 
   Scenario: Removing the interface-neighbor tears the session down
     Given the test topology exists

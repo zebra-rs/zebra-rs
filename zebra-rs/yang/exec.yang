@@ -242,7 +242,7 @@ module exec {
         ext:help "Summary of BGP neighbor status per AFI/SAFI";
         type empty;
       }
-      list neighbors {
+      list neighbor {
         ext:help "BGP neighbor information";
         ext:presence "BGP all neighbor information";
         key name;
@@ -254,7 +254,7 @@ module exec {
           // their only typeable identity. The string arm is
           // pattern-less on purpose: a bare string word-matches one
           // token (a pattern would full-match the remaining LINE and
-          // break `neighbors i1 advertised-routes`). Address inputs
+          // break `neighbor i1 advertised-routes`). Address inputs
           // tie the string arm (both Partial), which is safe: the
           // parser folds a union's arms into a single match
           // candidate, and the consumed token is the same either
@@ -421,7 +421,7 @@ module exec {
           ext:help "Summary of this VRF's BGP neighbor status";
           type empty;
         }
-        leaf neighbors {
+        leaf neighbor {
           ext:help "Detailed information on this VRF's BGP neighbors";
           type empty;
         }

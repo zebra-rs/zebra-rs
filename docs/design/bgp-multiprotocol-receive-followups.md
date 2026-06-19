@@ -52,7 +52,7 @@ been re-confirmed against the reporter's topology — do that first.
 
 ## Small / one-PR each
 
-### `show bgp neighbors <X> advertised-routes` for IPv6 unicast
+### `show bgp neighbor <X> advertised-routes` for IPv6 unicast
 `route_sync_ipv6` intentionally skips Adj-RIB-Out: `AdjRib<Out>` has
 no `add_v6` (only `AdjRib<In>` does), and the event-driven
 `route_advertise_to_peers_v6` skips it too. Consequence: v6-unicast

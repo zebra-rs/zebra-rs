@@ -84,11 +84,11 @@ everything, exactly as it would be without RTC.
 
 ## Verification
 
-`show bgp neighbors <addr> rtcv4` prints the route-target constraint
+`show bgp neighbor <addr> rtcv4` prints the route-target constraint
 sets received from a neighbor, split by family:
 
 ```
-$ show bgp neighbors 10.0.0.1 rtcv4
+$ show bgp neighbor 10.0.0.1 rtcv4
 IPv4 Route Target Constraints for 10.0.0.1
  65000:1
  65000:2

@@ -103,7 +103,7 @@ Semantics worth knowing:
 
 ## Verification
 
-`show bgp neighbors <addr>` reports the active policy:
+`show bgp neighbor <addr>` reports the active policy:
 
 ```
   IP transparent enabled (session may use a non-local update-source address)

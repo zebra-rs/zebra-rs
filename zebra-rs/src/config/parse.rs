@@ -1178,8 +1178,8 @@ mod tests {
             "show ip bgp vpnv4",
             "show ip bgp vpnv4 route 10.0.0.1",
             "show ip bgp evpn",
-            "show ip bgp neighbors 10.0.0.1",
-            "show ip bgp neighbors 10.0.0.1 advertised-routes vpnv4",
+            "show ip bgp neighbor 10.0.0.1",
+            "show ip bgp neighbor 10.0.0.1 advertised-routes vpnv4",
             "show ip bgp labeled-unicast",
             "show ip bgp flowspec",
             "show ip bgp flowspec ipv6",
@@ -1188,15 +1188,15 @@ mod tests {
             "show ip bgp link-state",
             "show ip bgp route 10.0.0.1",
             "show ip bgp vrf",
-            "show ip bgp vrf blue neighbors",
+            "show ip bgp vrf blue neighbor",
             "show ip bgp neighbor-group g1",
         ] {
             let (code, _comps, _state) = parse(cmd, entry.clone(), None, State::new());
             assert_ne!(code, ExecCode::Success, "`{cmd}` must not be a command");
         }
         for cmd in [
-            "show bgp neighbors 10.0.0.1 advertised-routes vpnv4",
-            "show bgp neighbors 10.0.0.1 received-routes evpn",
+            "show bgp neighbor 10.0.0.1 advertised-routes vpnv4",
+            "show bgp neighbor 10.0.0.1 received-routes evpn",
             "show bgp labeled-unicast",
             "show bgp flowspec",
             "show bgp flowspec ipv6",
@@ -1204,7 +1204,7 @@ mod tests {
             "show bgp sr-policy ipv6",
             "show bgp attributes",
             "show bgp link-state",
-            "show bgp vrf blue neighbors",
+            "show bgp vrf blue neighbor",
             "show bgp neighbor-group g1",
         ] {
             let (code, _comps, _state) = parse(cmd, entry.clone(), None, State::new());
@@ -1212,7 +1212,7 @@ mod tests {
         }
     }
 
-    /// `show bgp neighbors <X>` accepts an `interface-neighbor` name
+    /// `show bgp neighbor <X>` accepts an `interface-neighbor` name
     /// — IPv6 unnumbered peers are keyed by interface, and the
     /// `bgp:neighbor` dynamic completion offers those names, so the
     /// execute path (which never sees dynamic candidates) must parse
@@ -1230,21 +1230,21 @@ mod tests {
         let cases: Vec<(&str, &str, Vec<&str>)> = vec![
             // The bare (all-peers) form rides on the list's
             // `ext:presence`; the BDD session-state steps poll it.
-            ("show bgp neighbors", "/show/bgp/neighbors", vec![]),
-            ("show bgp neighbors i1", "/show/bgp/neighbors", vec!["i1"]),
+            ("show bgp neighbor", "/show/bgp/neighbor", vec![]),
+            ("show bgp neighbor i1", "/show/bgp/neighbor", vec!["i1"]),
             (
-                "show bgp neighbors i1 advertised-routes",
-                "/show/bgp/neighbors/advertised-routes",
+                "show bgp neighbor i1 advertised-routes",
+                "/show/bgp/neighbor/advertised-routes",
                 vec!["i1"],
             ),
             (
-                "show bgp neighbors 10.0.0.1",
-                "/show/bgp/neighbors",
+                "show bgp neighbor 10.0.0.1",
+                "/show/bgp/neighbor",
                 vec!["10.0.0.1"],
             ),
             (
-                "show bgp neighbors 2001:db8::1",
-                "/show/bgp/neighbors",
+                "show bgp neighbor 2001:db8::1",
+                "/show/bgp/neighbor",
                 vec!["2001:db8::1"],
             ),
             // The v6-unicast Adj-RIB views: an `ipv6` leaf under each of
@@ -1252,18 +1252,18 @@ mod tests {
             // neighbor key keeps the peer (a v6 address or interface name)
             // as the only arg; `ipv6` is a child path element, not an arg.
             (
-                "show bgp neighbors 2001:db8::1 advertised-routes ipv6",
-                "/show/bgp/neighbors/advertised-routes/ipv6",
+                "show bgp neighbor 2001:db8::1 advertised-routes ipv6",
+                "/show/bgp/neighbor/advertised-routes/ipv6",
                 vec!["2001:db8::1"],
             ),
             (
-                "show bgp neighbors 2001:db8::1 received-routes ipv6",
-                "/show/bgp/neighbors/received-routes/ipv6",
+                "show bgp neighbor 2001:db8::1 received-routes ipv6",
+                "/show/bgp/neighbor/received-routes/ipv6",
                 vec!["2001:db8::1"],
             ),
             (
-                "show bgp neighbors i1 received-routes ipv6",
-                "/show/bgp/neighbors/received-routes/ipv6",
+                "show bgp neighbor i1 received-routes ipv6",
+                "/show/bgp/neighbor/received-routes/ipv6",
                 vec!["i1"],
             ),
         ];

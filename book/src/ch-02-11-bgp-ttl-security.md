@@ -159,7 +159,7 @@ for the next unrelated flap.
 
 ### Verification
 
-`show bgp neighbors <addr>` reports the active policy:
+`show bgp neighbor <addr>` reports the active policy:
 
 ```
   TTL security (GTSM) enabled, minimum received TTL 255
