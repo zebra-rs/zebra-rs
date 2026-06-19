@@ -14,9 +14,11 @@ use std::net::Ipv6Addr;
 use std::str::FromStr;
 
 use ipnet::Ipv6Net;
+use isis_packet::{IsisMirrorSub2Tlv, IsisSysId, IsisTlv, prefix};
 
 use crate::config::{Args, ConfigOp};
 
+use super::lsdb::Lsdb;
 use super::{Isis, Level, Message};
 
 /// Which dataplane a Mirror SID egress-protection entry protects.
@@ -105,6 +107,61 @@ pub(crate) fn desired_context_routes(
         })
         .filter_map(|e| e.via_vrf.clone().map(|vrf| (e.protected_locator, vrf)))
         .collect()
+}
+
+// ── PLR-side reception (Phase 6a) ─────────────────────────────────────
+
+/// A Mirror SID advertisement received from a peer — the PLR's view of
+/// the network. The `protector` node advertises `mirror_sid` (End.M)
+/// backing the egress whose locator is `protected_locator`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ReceivedMirrorSid {
+    pub protector: IsisSysId,
+    pub mirror_sid: Ipv6Addr,
+    pub protected_locator: Ipv6Net,
+}
+
+/// Extract the SRv6 Mirror SID advertisements carried in one node's LSP
+/// TLVs: every Mirror SID sub-TLV inside an SRv6 Locator TLV, paired
+/// with each of its Protected Locators sub-sub-TLVs.
+fn mirror_sids_from_tlvs(protector: IsisSysId, tlvs: &[IsisTlv]) -> Vec<ReceivedMirrorSid> {
+    let mut out = Vec::new();
+    for tlv in tlvs {
+        let IsisTlv::Srv6(srv6) = tlv else {
+            continue;
+        };
+        for locator in &srv6.locators {
+            for sub in &locator.subs {
+                let prefix::IsisSubTlv::Srv6MirrorSid(m) = sub else {
+                    continue;
+                };
+                for sub2 in &m.sub2s {
+                    let IsisMirrorSub2Tlv::ProtectedLocators(pl) = sub2 else {
+                        continue;
+                    };
+                    out.push(ReceivedMirrorSid {
+                        protector,
+                        mirror_sid: m.sid,
+                        protected_locator: pl.locator,
+                    });
+                }
+            }
+        }
+    }
+    out
+}
+
+/// Scan a level's LSDB for received SRv6 Mirror SID advertisements.
+/// Pseudonode LSPs never carry them and are skipped.
+pub fn collect_received_mirror_sids(lsdb: &Lsdb) -> Vec<ReceivedMirrorSid> {
+    let mut out = Vec::new();
+    for (id, lsa) in lsdb.iter() {
+        if id.is_pseudo() {
+            continue;
+        }
+        out.extend(mirror_sids_from_tlvs(id.sys_id(), &lsa.lsp.tlvs));
+    }
+    out
 }
 
 // ── YANG callback wiring ──────────────────────────────────────────────
@@ -281,6 +338,48 @@ mod tests {
             routes,
             vec![(net("2001:db8:a3:1::/64"), "cust".to_string())],
             "only the fully-eligible entry yields a context route"
+        );
+    }
+
+    #[test]
+    fn mirror_sids_from_tlvs_extracts_protector_and_protected_locator() {
+        use isis_packet::{
+            Algo, Behavior, IsisSub2ProtectedLocators, IsisSubSrv6MirrorSid, IsisTlvSrv6,
+            Srv6Locator,
+        };
+
+        let protector = IsisSysId {
+            id: [0, 0, 0, 0, 0, 4],
+        };
+        let mirror = IsisSubSrv6MirrorSid {
+            flags: 0,
+            behavior: Behavior::EndM,
+            sid: "2001:db8:a4:1::3".parse().unwrap(),
+            sub2s: vec![IsisMirrorSub2Tlv::ProtectedLocators(
+                IsisSub2ProtectedLocators {
+                    locator: "2001:db8:a3:1::/64".parse().unwrap(),
+                },
+            )],
+        };
+        let tlvs = vec![IsisTlv::Srv6(IsisTlvSrv6 {
+            flags: 0u16.into(),
+            locators: vec![Srv6Locator {
+                metric: 0,
+                flags: 0,
+                algo: Algo::Spf,
+                locator: "2001:db8:a4:1::/64".parse().unwrap(),
+                subs: vec![prefix::IsisSubTlv::Srv6MirrorSid(mirror)],
+            }],
+        })];
+
+        let got = mirror_sids_from_tlvs(protector, &tlvs);
+        assert_eq!(
+            got,
+            vec![ReceivedMirrorSid {
+                protector,
+                mirror_sid: "2001:db8:a4:1::3".parse().unwrap(),
+                protected_locator: "2001:db8:a3:1::/64".parse().unwrap(),
+            }]
         );
     }
 }

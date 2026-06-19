@@ -100,44 +100,77 @@ fn show_isis_egress_protection(
     _args: Args,
     _json: bool,
 ) -> std::result::Result<String, std::fmt::Error> {
-    use super::egress_protection::MirrorDataplane;
+    use super::egress_protection::{MirrorDataplane, collect_received_mirror_sids};
 
     let entries = &isis.config.egress_protections;
-    if entries.is_empty() {
-        return Ok(String::from("No egress-protection entries configured\n"));
-    }
-
     let local = isis.sr_locator.as_ref().and_then(|l| l.prefix);
     let mut buf = String::new();
-    writeln!(
-        buf,
-        "{:<22} {:<24} {:<5} {:<10} Advertised",
-        "Protected-Locator", "Mirror-SID", "DP", "Via-VRF"
-    )?;
-    for e in entries.values() {
-        let dp = match e.dataplane {
-            MirrorDataplane::Srv6 => "srv6",
-            MirrorDataplane::Mpls => "mpls",
-        };
-        let sid = e
-            .mirror_sid
-            .map(|s| s.to_string())
-            .unwrap_or_else(|| "(auto)".to_string());
-        let vrf = e.via_vrf.as_deref().unwrap_or("-");
-        let advertised = e.dataplane == MirrorDataplane::Srv6
-            && e.mirror_sid
-                .zip(local)
-                .map(|(s, p)| p.contains(&s))
-                .unwrap_or(false);
+
+    // Local (configured) entries this node protects, and whether each is
+    // currently advertised.
+    if !entries.is_empty() {
+        writeln!(buf, "Local egress-protection:")?;
         writeln!(
             buf,
-            "{:<22} {:<24} {:<5} {:<10} {}",
-            e.protected_locator.to_string(),
-            sid,
-            dp,
-            vrf,
-            if advertised { "yes" } else { "no" },
+            "{:<22} {:<24} {:<5} {:<10} Advertised",
+            "Protected-Locator", "Mirror-SID", "DP", "Via-VRF"
         )?;
+        for e in entries.values() {
+            let dp = match e.dataplane {
+                MirrorDataplane::Srv6 => "srv6",
+                MirrorDataplane::Mpls => "mpls",
+            };
+            let sid = e
+                .mirror_sid
+                .map(|s| s.to_string())
+                .unwrap_or_else(|| "(auto)".to_string());
+            let vrf = e.via_vrf.as_deref().unwrap_or("-");
+            let advertised = e.dataplane == MirrorDataplane::Srv6
+                && e.mirror_sid
+                    .zip(local)
+                    .map(|(s, p)| p.contains(&s))
+                    .unwrap_or(false);
+            writeln!(
+                buf,
+                "{:<22} {:<24} {:<5} {:<10} {}",
+                e.protected_locator.to_string(),
+                sid,
+                dp,
+                vrf,
+                if advertised { "yes" } else { "no" },
+            )?;
+        }
+    }
+
+    // Mirror SID advertisements received from peers (the PLR's view),
+    // scanned from both levels' LSDBs.
+    let mut received = collect_received_mirror_sids(&isis.lsdb.l1);
+    received.extend(collect_received_mirror_sids(&isis.lsdb.l2));
+    if !received.is_empty() {
+        if !entries.is_empty() {
+            writeln!(buf)?;
+        }
+        writeln!(buf, "Received Mirror SIDs:")?;
+        writeln!(
+            buf,
+            "{:<18} {:<24} Protected-Locator",
+            "Protector", "Mirror-SID"
+        )?;
+        for r in &received {
+            writeln!(
+                buf,
+                "{:<18} {:<24} {}",
+                r.protector.to_string(),
+                r.mirror_sid.to_string(),
+                r.protected_locator,
+            )?;
+        }
+    }
+
+    if buf.is_empty() {
+        return Ok(String::from(
+            "No egress-protection entries configured or received\n",
+        ));
     }
     Ok(buf)
 }
