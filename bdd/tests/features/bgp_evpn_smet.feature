@@ -78,6 +78,14 @@ Feature: BGP EVPN IGMP/MLD Proxy — Selective Multicast (RFC 9251)
     Then show command "show bgp evpn" in namespace "z1" should eventually not contain "[6]:[0]:[0]:[*]:[32]:[239.1.1.1]"
     And bridge mdb "br10" in namespace "z1" should not contain "239.1.1.1"
 
+  Scenario: An (S,G) join originates a source-specific SMET with the right source
+    Given the test topology exists
+    # Source-specific (IGMPv3) membership. Validates the kernel MDB
+    # EATTR_SOURCE decode — z1 must see the source 192.0.2.9 in the SMET
+    # key, not a (*,G) wildcard.
+    When I execute "bridge mdb add dev br10 port host0 src 192.0.2.9 grp 232.1.1.1 permanent" in namespace "z2"
+    Then show command "show bgp evpn" in namespace "z1" should eventually contain "[6]:[0]:[32]:[192.0.2.9]:[32]:[232.1.1.1]:[32]:[192.168.0.2]"
+
   Scenario: Teardown topology
     Given the test topology exists
     When I stop zebra-rs in namespace "z1"
