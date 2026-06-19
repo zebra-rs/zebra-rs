@@ -632,6 +632,15 @@ impl fmt::Display for MpUnreachAttr {
                             let src = v.src.map_or_else(|| "*".to_string(), |s| s.to_string());
                             writeln!(f, " [{}] SMET ({},{})", v.rd, src, v.grp)?;
                         }
+                        EvpnRoute::PerRegionImet(v) => {
+                            writeln!(f, " [{}] per-region-imet:{}", v.rd, v.ether_tag)?;
+                        }
+                        EvpnRoute::SPmsi(v) => {
+                            writeln!(f, " [{}] s-pmsi:{}", v.rd, v.originator)?;
+                        }
+                        EvpnRoute::LeafAd(v) => {
+                            writeln!(f, " leaf-ad:{}", v.originator)?;
+                        }
                     }
                 }
                 Ok(())

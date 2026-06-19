@@ -19,6 +19,9 @@ pub enum EvpnRouteType {
     EthernetSr,    // 4
     IpPrefix,      // 5
     SmetRoute,     // 6 — Selective Multicast Ethernet Tag (RFC 9251)
+    PerRegionImet, // 9  — Per-Region I-PMSI A-D (RFC 9572 §3.1)
+    SPmsiAd,       // 10 — S-PMSI A-D (RFC 9572 §3.2)
+    LeafAd,        // 11 — Leaf A-D (RFC 9572 §3.3)
     Unknown(u8),
 }
 
@@ -32,6 +35,9 @@ impl From<EvpnRouteType> for u8 {
             EthernetSr => 4,
             IpPrefix => 5,
             SmetRoute => 6,
+            PerRegionImet => 9,
+            SPmsiAd => 10,
+            LeafAd => 11,
             Unknown(val) => val,
         }
     }
@@ -47,6 +53,9 @@ impl From<u8> for EvpnRouteType {
             4 => EthernetSr,
             5 => IpPrefix,
             6 => SmetRoute,
+            9 => PerRegionImet,
+            10 => SPmsiAd,
+            11 => LeafAd,
             _ => Unknown(val),
         }
     }
@@ -65,6 +74,9 @@ pub enum EvpnRoute {
     Multicast(EvpnMulticast),
     Prefix(EvpnIpPrefix),
     Smet(EvpnSmet),
+    PerRegionImet(EvpnPerRegionImet),
+    SPmsi(EvpnSPmsi),
+    LeafAd(EvpnLeafAd),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -135,6 +147,55 @@ pub struct EvpnSmet {
     pub flags: u8,
 }
 
+/// Route Type 9 — Per-Region I-PMSI A-D Route (RFC 9572 §3.1).
+///
+/// Wire layout (fixed, 20 octets): RD(8) EthTag(4) RegionID(8). The Region
+/// ID is an 8-octet value encoded the same way an Extended Community is, and
+/// is carried inside the NLRI itself (not as a separate attribute). A
+/// segmentation point (RBR/ASBR) originates this to aggregate the inclusive
+/// BUM tunnel of all PEs in its region into a single route across the region
+/// boundary.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct EvpnPerRegionImet {
+    pub id: u32,
+    pub rd: RouteDistinguisher,
+    pub ether_tag: u32,
+    pub region_id: [u8; 8],
+}
+
+/// Route Type 10 — S-PMSI A-D Route (RFC 9572 §3.2).
+///
+/// Wire layout: RD(8) EthTag(4) SrcLen(1) Src(0/4/16) GrpLen(1) Grp(0/4/16)
+/// OrigLen(1) Orig(4/16). The Source/Group/Originator length octets are in
+/// BITS (0 = wildcard `*`, 32 = IPv4, 128 = IPv6), matching RFC 6514/7117
+/// and the SMET parser. Unlike SMET (Type 6), both `src` and `grp` may be the
+/// wildcard `*` (a (\*,\*) S-PMSI A-D), so both are `Option`.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct EvpnSPmsi {
+    pub id: u32,
+    pub rd: RouteDistinguisher,
+    pub ether_tag: u32,
+    pub src: Option<IpAddr>,
+    pub grp: Option<IpAddr>,
+    pub originator: IpAddr,
+}
+
+/// Route Type 11 — Leaf A-D Route (RFC 9572 §3.3).
+///
+/// Wire layout: RouteKey(variable) OrigLen(1) Orig(4/16). The Route Key is
+/// the full NLRI of the triggering route (a Type-9, Type-10, or IMET Type-3
+/// NLRI, *including* its route-type and length octets), stored opaque here.
+/// It is self-delimiting on the wire — `route-type(1) length(1)
+/// body(length)` — which is how the codec finds where the Route Key ends and
+/// the Originator's Addr Length begins. The Leaf A-D NLRI carries no RD of
+/// its own; the RD it is filed under is the one embedded in the Route Key.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct EvpnLeafAd {
+    pub id: u32,
+    pub route_key: Vec<u8>,
+    pub originator: IpAddr,
+}
+
 impl Evpn {
     pub fn rd(&self) -> &RouteDistinguisher {
         &self.rd
@@ -183,6 +244,20 @@ pub enum EvpnPrefix {
         grp: IpAddr,
         orig: IpAddr,
     },
+    /// Route Type 9 — Per-Region I-PMSI A-D Route (RFC 9572 §3.1).
+    PerRegionImet { eth_tag: u32, region_id: [u8; 8] },
+    /// Route Type 10 — S-PMSI A-D Route (RFC 9572 §3.2). `src`/`grp` are
+    /// `None` for the wildcard `*`.
+    SPmsi {
+        eth_tag: u32,
+        src: Option<IpAddr>,
+        grp: Option<IpAddr>,
+        orig: IpAddr,
+    },
+    /// Route Type 11 — Leaf A-D Route (RFC 9572 §3.3). The Route Key is the
+    /// opaque embedded NLRI of the triggering route. Declared last so the
+    /// derived `Ord` keeps Type 2 → 3 → 5 → 6 → 9 → 10 → 11 ordering.
+    LeafAd { route_key: Vec<u8>, orig: IpAddr },
 }
 
 impl EvpnPrefix {
@@ -193,6 +268,9 @@ impl EvpnPrefix {
             EvpnPrefix::InclusiveMulticast { .. } => 3,
             EvpnPrefix::IpPrefix { .. } => 5,
             EvpnPrefix::Smet { .. } => 6,
+            EvpnPrefix::PerRegionImet { .. } => 9,
+            EvpnPrefix::SPmsi { .. } => 10,
+            EvpnPrefix::LeafAd { .. } => 11,
         }
     }
 
@@ -234,6 +312,41 @@ impl EvpnPrefix {
                     orig: s.orig,
                 },
             ),
+            EvpnRoute::PerRegionImet(r) => (
+                r.rd,
+                EvpnPrefix::PerRegionImet {
+                    eth_tag: r.ether_tag,
+                    region_id: r.region_id,
+                },
+            ),
+            EvpnRoute::SPmsi(r) => (
+                r.rd,
+                EvpnPrefix::SPmsi {
+                    eth_tag: r.ether_tag,
+                    src: r.src,
+                    grp: r.grp,
+                    orig: r.originator,
+                },
+            ),
+            EvpnRoute::LeafAd(r) => {
+                // A Leaf A-D NLRI carries no RD of its own. File it under the
+                // RD embedded in its Route Key (the triggering route's NLRI:
+                // route-type(1) length(1) RD(8) …). Best-effort: fall back to
+                // a zeroed RD if the key is too short / malformed.
+                let rd = r
+                    .route_key
+                    .get(2..)
+                    .and_then(|s| RouteDistinguisher::parse_be(s).ok())
+                    .map(|(_, rd)| rd)
+                    .unwrap_or_default();
+                (
+                    rd,
+                    EvpnPrefix::LeafAd {
+                        route_key: r.route_key.clone(),
+                        orig: r.originator,
+                    },
+                )
+            }
         }
     }
 }
@@ -290,6 +403,32 @@ impl fmt::Display for EvpnPrefix {
                     ip_bits(grp),
                     ip_bits(orig)
                 )
+            }
+            EvpnPrefix::PerRegionImet { eth_tag, region_id } => {
+                write!(f, "[9]:[{eth_tag}]:[")?;
+                for (i, b) in region_id.iter().enumerate() {
+                    if i > 0 {
+                        write!(f, ":")?;
+                    }
+                    write!(f, "{b:02x}")?;
+                }
+                write!(f, "]")
+            }
+            EvpnPrefix::SPmsi {
+                eth_tag,
+                src,
+                grp,
+                orig,
+            } => {
+                let s = src.map_or_else(|| "*".to_string(), |a| a.to_string());
+                let g = grp.map_or_else(|| "*".to_string(), |a| a.to_string());
+                write!(f, "[10]:[{eth_tag}]:[{s}]:[{g}]:[{orig}]")
+            }
+            EvpnPrefix::LeafAd { route_key, orig } => {
+                // The Route Key is the opaque embedded NLRI; surface its
+                // route-type and byte length rather than its raw bytes.
+                let rt = route_key.first().copied().unwrap_or(0);
+                write!(f, "[11]:[rt{rt}/{}B]:[{orig}]", route_key.len())
             }
         }
     }
@@ -444,6 +583,68 @@ impl ParseNlri<EvpnRoute> for EvpnRoute {
                     flags,
                 };
                 Ok((input, EvpnRoute::Smet(evpn)))
+            }
+            PerRegionImet => {
+                // RFC 9572 §3.1: RD(8) EthTag(4) RegionID(8).
+                let (input, rd) = RouteDistinguisher::parse_be(input)?;
+                let (input, ether_tag) = be_u32(input)?;
+                let (input, region_raw) = take(8usize).parse(input)?;
+                let mut region_id = [0u8; 8];
+                region_id.copy_from_slice(region_raw);
+                Ok((
+                    input,
+                    EvpnRoute::PerRegionImet(EvpnPerRegionImet {
+                        id,
+                        rd,
+                        ether_tag,
+                        region_id,
+                    }),
+                ))
+            }
+            SPmsiAd => {
+                // RFC 9572 §3.2: RD(8) EthTag(4) SrcLen(1) Src GrpLen(1) Grp
+                // OrigLen(1) Orig. Lengths in bits (0 = wildcard `*`).
+                let (input, rd) = RouteDistinguisher::parse_be(input)?;
+                let (input, ether_tag) = be_u32(input)?;
+                let (input, src) = parse_len_prefixed_ip(input)?;
+                let (input, grp) = parse_len_prefixed_ip(input)?;
+                let (input, orig) = parse_len_prefixed_ip(input)?;
+                let originator =
+                    orig.ok_or_else(|| nom::Err::Error(make_error(input, ErrorKind::LengthValue)))?;
+                Ok((
+                    input,
+                    EvpnRoute::SPmsi(EvpnSPmsi {
+                        id,
+                        rd,
+                        ether_tag,
+                        src,
+                        grp,
+                        originator,
+                    }),
+                ))
+            }
+            LeafAd => {
+                // RFC 9572 §3.3: RouteKey(var) OrigLen(1) Orig. The Route Key
+                // is the self-delimiting embedded NLRI — route-type(1)
+                // length(1) body(length) — so peek the embedded length to
+                // size it, then the originator follows.
+                if input.len() < 2 {
+                    return Err(nom::Err::Error(make_error(input, ErrorKind::LengthValue)));
+                }
+                let key_len = 2 + input[1] as usize;
+                let (input, key_raw) = take(key_len).parse(input)?;
+                let route_key = key_raw.to_vec();
+                let (input, orig) = parse_len_prefixed_ip(input)?;
+                let originator =
+                    orig.ok_or_else(|| nom::Err::Error(make_error(input, ErrorKind::LengthValue)))?;
+                Ok((
+                    input,
+                    EvpnRoute::LeafAd(EvpnLeafAd {
+                        id,
+                        route_key,
+                        originator,
+                    }),
+                ))
             }
             _ => Err(nom::Err::Error(make_error(input, ErrorKind::NoneOf))),
         }
@@ -614,6 +815,55 @@ impl EvpnRoute {
                 buf.put_u8(payload.len() as u8);
                 buf.put(&payload[..]);
             }
+            EvpnRoute::PerRegionImet(r) => {
+                if r.id != 0 {
+                    buf.put_u32(r.id);
+                }
+                let mut payload = BytesMut::new();
+                // RD (8 octets).
+                payload.put_u16(r.rd.typ as u16);
+                payload.put(&r.rd.val[..]);
+                // Ethernet Tag (4 octets).
+                payload.put_u32(r.ether_tag);
+                // Region ID (8 octets, EC-encoded). RFC 9572 §3.1.
+                payload.put(&r.region_id[..]);
+                buf.put_u8(9); // Route Type 9 — Per-Region I-PMSI A-D.
+                buf.put_u8(payload.len() as u8);
+                buf.put(&payload[..]);
+            }
+            EvpnRoute::SPmsi(r) => {
+                if r.id != 0 {
+                    buf.put_u32(r.id);
+                }
+                let mut payload = BytesMut::new();
+                // RD (8 octets).
+                payload.put_u16(r.rd.typ as u16);
+                payload.put(&r.rd.val[..]);
+                // Ethernet Tag (4 octets).
+                payload.put_u32(r.ether_tag);
+                // Source / Group / Originator, each <len-in-bits><addr>.
+                // RFC 9572 §3.2.
+                emit_len_prefixed_ip(&mut payload, r.src);
+                emit_len_prefixed_ip(&mut payload, r.grp);
+                emit_len_prefixed_ip(&mut payload, Some(r.originator));
+                buf.put_u8(10); // Route Type 10 — S-PMSI A-D.
+                buf.put_u8(payload.len() as u8);
+                buf.put(&payload[..]);
+            }
+            EvpnRoute::LeafAd(r) => {
+                if r.id != 0 {
+                    buf.put_u32(r.id);
+                }
+                let mut payload = BytesMut::new();
+                // Route Key — the opaque embedded NLRI, verbatim. RFC 9572
+                // §3.3.
+                payload.put(&r.route_key[..]);
+                // Originator's Addr (<len-in-bits><addr>).
+                emit_len_prefixed_ip(&mut payload, Some(r.originator));
+                buf.put_u8(11); // Route Type 11 — Leaf A-D.
+                buf.put_u8(payload.len() as u8);
+                buf.put(&payload[..]);
+            }
         }
     }
 }
@@ -756,6 +1006,64 @@ mod evpn_prefix_tests {
         assert_eq!(s.route_type(), 6);
         // Variant order keeps Type 5 < Type 6.
         assert!(p < s);
+    }
+
+    #[test]
+    fn route_type_numbers_segmentation() {
+        let t9 = EvpnPrefix::PerRegionImet {
+            eth_tag: 0,
+            region_id: [0; 8],
+        };
+        let t10 = EvpnPrefix::SPmsi {
+            eth_tag: 0,
+            src: None,
+            grp: None,
+            orig: IpAddr::V4(Ipv4Addr::UNSPECIFIED),
+        };
+        let t11 = EvpnPrefix::LeafAd {
+            route_key: vec![9, 20],
+            orig: IpAddr::V4(Ipv4Addr::UNSPECIFIED),
+        };
+        assert_eq!(t9.route_type(), 9);
+        assert_eq!(t10.route_type(), 10);
+        assert_eq!(t11.route_type(), 11);
+        // Variant order preserves Type 6 < 9 < 10 < 11.
+        let t6 = EvpnPrefix::Smet {
+            eth_tag: 0,
+            src: None,
+            grp: IpAddr::V4(Ipv4Addr::UNSPECIFIED),
+            orig: IpAddr::V4(Ipv4Addr::UNSPECIFIED),
+        };
+        assert!(t6 < t9);
+        assert!(t9 < t10);
+        assert!(t10 < t11);
+    }
+
+    #[test]
+    fn display_segmentation_types() {
+        let t9 = EvpnPrefix::PerRegionImet {
+            eth_tag: 0,
+            region_id: [0, 0, 0, 0, 0, 0, 0, 9],
+        };
+        assert_eq!(t9.to_string(), "[9]:[0]:[00:00:00:00:00:00:00:09]");
+        let t10 = EvpnPrefix::SPmsi {
+            eth_tag: 0,
+            src: Some(IpAddr::V4(Ipv4Addr::new(10, 1, 1, 1))),
+            grp: Some(IpAddr::V4(Ipv4Addr::new(239, 1, 1, 1))),
+            orig: IpAddr::V4(Ipv4Addr::new(10, 0, 0, 5)),
+        };
+        assert_eq!(
+            t10.to_string(),
+            "[10]:[0]:[10.1.1.1]:[239.1.1.1]:[10.0.0.5]"
+        );
+        // Wildcard source renders as `*`.
+        let t10w = EvpnPrefix::SPmsi {
+            eth_tag: 0,
+            src: None,
+            grp: Some(IpAddr::V4(Ipv4Addr::new(239, 1, 1, 1))),
+            orig: IpAddr::V4(Ipv4Addr::new(10, 0, 0, 5)),
+        };
+        assert_eq!(t10w.to_string(), "[10]:[0]:[*]:[239.1.1.1]:[10.0.0.5]");
     }
 }
 
@@ -1132,5 +1440,147 @@ mod evpn_emit_tests {
         EvpnRoute::Prefix(p).nlri_emit(&mut buf);
         assert_eq!(&buf[0..4], &[0, 0, 0, 9], "path id 9 prepended");
         assert_eq!(buf[4], 5, "route type follows id");
+    }
+
+    /// Type-9 Per-Region I-PMSI (RFC 9572 §3.1): route-type byte (9),
+    /// length (20), then 8 (RD) + 4 (eth-tag) + 8 (region) = 20.
+    #[test]
+    fn per_region_imet_nlri_emit() {
+        let r = EvpnPerRegionImet {
+            id: 0,
+            rd: rd_type1_ip(Ipv4Addr::new(192, 0, 2, 1), 100),
+            ether_tag: 0,
+            region_id: [0, 0, 0, 0, 0, 0, 0, 9],
+        };
+        let mut buf = BytesMut::new();
+        EvpnRoute::PerRegionImet(r).nlri_emit(&mut buf);
+        assert_eq!(buf[0], 9, "route type 9");
+        assert_eq!(buf[1], 20, "length");
+        assert_eq!(&buf[2..4], &[0x00, 0x01], "RD type 1");
+        assert_eq!(&buf[4..10], &[192, 0, 2, 1, 0x00, 0x64], "RD");
+        assert_eq!(&buf[10..14], &[0, 0, 0, 0], "eth-tag 0");
+        assert_eq!(&buf[14..22], &[0, 0, 0, 0, 0, 0, 0, 9], "region id");
+        assert_eq!(buf.len(), 22, "1 (type) + 1 (len) + 20");
+    }
+
+    #[test]
+    fn per_region_imet_emit_then_parse_roundtrip() {
+        let original = EvpnPerRegionImet {
+            id: 0,
+            rd: rd_type1_ip(Ipv4Addr::new(10, 0, 0, 1), 50),
+            ether_tag: 7,
+            region_id: [0xab; 8],
+        };
+        let mut buf = BytesMut::new();
+        EvpnRoute::PerRegionImet(original.clone()).nlri_emit(&mut buf);
+        let (_, parsed) = EvpnRoute::parse_nlri(&buf, false).expect("parse what we emit");
+        match parsed {
+            EvpnRoute::PerRegionImet(p) => {
+                assert_eq!(p.rd, original.rd);
+                assert_eq!(p.ether_tag, original.ether_tag);
+                assert_eq!(p.region_id, original.region_id);
+            }
+            _ => panic!("expected PerRegionImet variant"),
+        }
+    }
+
+    /// Type-10 S-PMSI with explicit (S,G), all IPv4 (RFC 9572 §3.2):
+    /// 8 (RD) + 4 (tag) + 1+4 (src) + 1+4 (grp) + 1+4 (orig) = 27.
+    #[test]
+    fn s_pmsi_nlri_emit_sg_v4() {
+        let r = EvpnSPmsi {
+            id: 0,
+            rd: rd_type1_ip(Ipv4Addr::new(192, 0, 2, 1), 100),
+            ether_tag: 0,
+            src: Some(IpAddr::V4(Ipv4Addr::new(10, 1, 1, 1))),
+            grp: Some(IpAddr::V4(Ipv4Addr::new(239, 1, 1, 1))),
+            originator: IpAddr::V4(Ipv4Addr::new(10, 0, 0, 5)),
+        };
+        let mut buf = BytesMut::new();
+        EvpnRoute::SPmsi(r).nlri_emit(&mut buf);
+        assert_eq!(buf[0], 10, "route type 10");
+        assert_eq!(buf[1], 27, "length");
+        assert_eq!(buf[14], 32, "src length in bits");
+        assert_eq!(&buf[15..19], &[10, 1, 1, 1], "src");
+        assert_eq!(buf[19], 32, "grp length in bits");
+        assert_eq!(&buf[20..24], &[239, 1, 1, 1], "grp");
+        assert_eq!(buf[24], 32, "orig length in bits");
+        assert_eq!(&buf[25..29], &[10, 0, 0, 5], "orig");
+        assert_eq!(buf.len(), 29, "1 (type) + 1 (len) + 27");
+    }
+
+    /// Wildcard (\*,\*) S-PMSI with an IPv6 originator: src/grp lengths are 0
+    /// (no address bytes follow), so `src`/`grp` parse back as `None`.
+    #[test]
+    fn s_pmsi_emit_then_parse_roundtrip_wildcard_v6_orig() {
+        let original = EvpnSPmsi {
+            id: 0,
+            rd: rd_type1_ip(Ipv4Addr::new(10, 0, 0, 1), 50),
+            ether_tag: 0,
+            src: None,
+            grp: None,
+            originator: IpAddr::V6("2001:db8::5".parse().unwrap()),
+        };
+        let mut buf = BytesMut::new();
+        EvpnRoute::SPmsi(original.clone()).nlri_emit(&mut buf);
+        let (_, parsed) = EvpnRoute::parse_nlri(&buf, false).expect("parse what we emit");
+        match parsed {
+            EvpnRoute::SPmsi(p) => {
+                assert_eq!(p.src, None);
+                assert_eq!(p.grp, None);
+                assert_eq!(p.originator, original.originator);
+                assert_eq!(p.rd, original.rd);
+            }
+            _ => panic!("expected SPmsi variant"),
+        }
+    }
+
+    /// Type-11 Leaf A-D (RFC 9572 §3.3): the Route Key is the triggering
+    /// route's full NLRI, preserved verbatim. Round-trip a Leaf A-D whose
+    /// Route Key is itself a Type-9 NLRI (exercises the self-delimiting
+    /// embedded-NLRI split between Route Key and Originator).
+    #[test]
+    fn leaf_ad_emit_then_parse_roundtrip_over_per_region_key() {
+        let key_route = EvpnPerRegionImet {
+            id: 0,
+            rd: rd_type1_ip(Ipv4Addr::new(192, 0, 2, 1), 100),
+            ether_tag: 0,
+            region_id: [0, 0, 0, 0, 0, 0, 0, 9],
+        };
+        let mut key_buf = BytesMut::new();
+        EvpnRoute::PerRegionImet(key_route).nlri_emit(&mut key_buf);
+        let route_key = key_buf.to_vec();
+
+        let original = EvpnLeafAd {
+            id: 0,
+            route_key: route_key.clone(),
+            originator: IpAddr::V4(Ipv4Addr::new(10, 0, 0, 9)),
+        };
+        let mut buf = BytesMut::new();
+        EvpnRoute::LeafAd(original.clone()).nlri_emit(&mut buf);
+        assert_eq!(buf[0], 11, "route type 11");
+        let (_, parsed) = EvpnRoute::parse_nlri(&buf, false).expect("parse what we emit");
+        match parsed {
+            EvpnRoute::LeafAd(p) => {
+                assert_eq!(p.route_key, route_key, "route key preserved verbatim");
+                assert_eq!(p.originator, original.originator);
+            }
+            _ => panic!("expected LeafAd variant"),
+        }
+    }
+
+    /// Add-Path prefixes the 4-byte path id for the new types too.
+    #[test]
+    fn per_region_imet_nlri_emit_addpath() {
+        let r = EvpnPerRegionImet {
+            id: 11,
+            rd: rd_type1_ip(Ipv4Addr::new(10, 0, 0, 1), 50),
+            ether_tag: 0,
+            region_id: [0; 8],
+        };
+        let mut buf = BytesMut::new();
+        EvpnRoute::PerRegionImet(r).nlri_emit(&mut buf);
+        assert_eq!(&buf[0..4], &[0, 0, 0, 11], "path id prepended");
+        assert_eq!(buf[4], 9, "route type follows id");
     }
 }

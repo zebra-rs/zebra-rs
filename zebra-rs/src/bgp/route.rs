@@ -4083,6 +4083,32 @@ pub fn route_update_evpn(
                 label: rib.label.as_ref().map(|l| l.label).unwrap_or(0),
             })
         }
+        EvpnPrefix::PerRegionImet { eth_tag, region_id } => {
+            EvpnRoute::PerRegionImet(EvpnPerRegionImet {
+                id,
+                rd: *rd,
+                ether_tag: *eth_tag,
+                region_id: *region_id,
+            })
+        }
+        EvpnPrefix::SPmsi {
+            eth_tag,
+            src,
+            grp,
+            orig,
+        } => EvpnRoute::SPmsi(EvpnSPmsi {
+            id,
+            rd: *rd,
+            ether_tag: *eth_tag,
+            src: *src,
+            grp: *grp,
+            originator: *orig,
+        }),
+        EvpnPrefix::LeafAd { route_key, orig } => EvpnRoute::LeafAd(EvpnLeafAd {
+            id,
+            route_key: route_key.clone(),
+            originator: *orig,
+        }),
         EvpnPrefix::Smet {
             eth_tag,
             src,
@@ -4246,6 +4272,32 @@ fn evpn_route_from_prefix(rd: &RouteDistinguisher, prefix: &EvpnPrefix, id: u32)
                 label: 0,
             })
         }
+        EvpnPrefix::PerRegionImet { eth_tag, region_id } => {
+            EvpnRoute::PerRegionImet(EvpnPerRegionImet {
+                id,
+                rd: *rd,
+                ether_tag: *eth_tag,
+                region_id: *region_id,
+            })
+        }
+        EvpnPrefix::SPmsi {
+            eth_tag,
+            src,
+            grp,
+            orig,
+        } => EvpnRoute::SPmsi(EvpnSPmsi {
+            id,
+            rd: *rd,
+            ether_tag: *eth_tag,
+            src: *src,
+            grp: *grp,
+            originator: *orig,
+        }),
+        EvpnPrefix::LeafAd { route_key, orig } => EvpnRoute::LeafAd(EvpnLeafAd {
+            id,
+            route_key: route_key.clone(),
+            originator: *orig,
+        }),
         EvpnPrefix::Smet {
             eth_tag,
             src,
@@ -5680,6 +5732,12 @@ fn evpn_route_type_of(route: &EvpnRoute) -> crate::policy::EvpnRouteType {
         EvpnRoute::Multicast(_) => EvpnRouteType::Multicast,
         EvpnRoute::Prefix(_) => EvpnRouteType::Prefix,
         EvpnRoute::Smet(_) => EvpnRouteType::Smet,
+        // RFC 9572 Per-Region I-PMSI / S-PMSI / Leaf A-D are BUM tunnel A-D
+        // routes; the closest existing policy discriminator is Multicast.
+        // (They are dropped before policy in the current codec-only phase.)
+        EvpnRoute::PerRegionImet(_) | EvpnRoute::SPmsi(_) | EvpnRoute::LeafAd(_) => {
+            EvpnRouteType::Multicast
+        }
     }
 }
 
@@ -5699,6 +5757,9 @@ fn evpn_vni_of(route: &EvpnRoute, attr: &BgpAttr) -> Option<u32> {
         // Type-6 (SMET) carries the EVI Route Target like Type-3; the
         // VNI comes from the RT extended community (RFC 8365 §5.1.2.4).
         EvpnRoute::Smet(_) => extract_vni_from_attr(attr),
+        // RFC 9572 A-D routes carry no bridge VNI in the NLRI (any VNI rides
+        // the PMSI Tunnel attribute, consumed in a later phase).
+        EvpnRoute::PerRegionImet(_) | EvpnRoute::SPmsi(_) | EvpnRoute::LeafAd(_) => None,
     }
 }
 
@@ -5837,6 +5898,11 @@ fn route_evpn_export_selected(
                 // selective-forwarding dataplane is not wired yet, so a
                 // received SMET withdraw is a no-op beyond Loc-RIB removal.
             }
+            // RFC 9572 A-D routes have no VXLAN dataplane action — withdraw
+            // is a control-plane no-op.
+            EvpnPrefix::PerRegionImet { .. }
+            | EvpnPrefix::SPmsi { .. }
+            | EvpnPrefix::LeafAd { .. } => {}
         }
         return;
     }
@@ -5924,6 +5990,11 @@ fn route_evpn_export_selected(
             // The received SMET is already in the Loc-RIB and `show bgp
             // evpn`; the selective-forwarding dataplane lands in Phase 5.
         }
+        // RFC 9572 Per-Region I-PMSI / S-PMSI / Leaf A-D have no VXLAN
+        // dataplane action in the current codec-only phase — install is a
+        // control-plane no-op.
+        EvpnPrefix::PerRegionImet { .. } | EvpnPrefix::SPmsi { .. } | EvpnPrefix::LeafAd { .. } => {
+        }
     }
 }
 
@@ -5946,11 +6017,26 @@ pub fn route_evpn_update(
     stale: bool,
 ) {
     let (rd, prefix) = EvpnPrefix::from_route(route);
+    if matches!(
+        route,
+        EvpnRoute::PerRegionImet(_) | EvpnRoute::SPmsi(_) | EvpnRoute::LeafAd(_)
+    ) {
+        // RFC 9572 EVPN route types 9/10/11 (Per-Region I-PMSI / S-PMSI /
+        // Leaf A-D) are decoded by the wire codec but not yet processed by
+        // the RIB / dataplane — that lands in a later control-plane phase.
+        // Accept and drop them here so the codec round-trips without changing
+        // RIB or forwarding behavior.
+        tracing::debug!("EVPN RFC 9572 route type received; codec-only, processing deferred");
+        return;
+    }
     let id = match route {
         EvpnRoute::Mac(m) => m.id,
         EvpnRoute::Multicast(m) => m.id,
         EvpnRoute::Prefix(p) => p.id,
         EvpnRoute::Smet(s) => s.id,
+        EvpnRoute::PerRegionImet(r) => r.id,
+        EvpnRoute::SPmsi(r) => r.id,
+        EvpnRoute::LeafAd(r) => r.id,
     };
 
     // Loop detection mirrors route_ipv4_update — drop the route silently
@@ -6065,6 +6151,9 @@ pub fn route_evpn_withdraw(ident: usize, route: &EvpnRoute, bgp: &mut BgpTop, pe
         EvpnRoute::Multicast(m) => m.id,
         EvpnRoute::Prefix(p) => p.id,
         EvpnRoute::Smet(s) => s.id,
+        EvpnRoute::PerRegionImet(r) => r.id,
+        EvpnRoute::SPmsi(r) => r.id,
+        EvpnRoute::LeafAd(r) => r.id,
     };
 
     {
@@ -8045,6 +8134,36 @@ fn build_evpn_route(
             // advertise path). Peer-down withdraw is key-matched, so
             // flags = 0 is correct here.
             flags: 0,
+        })),
+        // RFC 9572 A-D routes are not stored in the Loc-RIB in the current
+        // codec-only phase (dropped at receive), so this is unreachable in
+        // practice; reconstruct faithfully from the key for forward
+        // compatibility with the later control-plane phase.
+        EvpnPrefix::PerRegionImet { eth_tag, region_id } => {
+            Some(EvpnRoute::PerRegionImet(EvpnPerRegionImet {
+                id: rib.remote_id,
+                rd: *rd,
+                ether_tag: *eth_tag,
+                region_id: *region_id,
+            }))
+        }
+        EvpnPrefix::SPmsi {
+            eth_tag,
+            src,
+            grp,
+            orig,
+        } => Some(EvpnRoute::SPmsi(EvpnSPmsi {
+            id: rib.remote_id,
+            rd: *rd,
+            ether_tag: *eth_tag,
+            src: *src,
+            grp: *grp,
+            originator: *orig,
+        })),
+        EvpnPrefix::LeafAd { route_key, orig } => Some(EvpnRoute::LeafAd(EvpnLeafAd {
+            id: rib.remote_id,
+            route_key: route_key.clone(),
+            originator: *orig,
         })),
     }
 }

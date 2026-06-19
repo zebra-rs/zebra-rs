@@ -671,6 +671,19 @@ impl fmt::Display for MpReachAttr {
                             let src = v.src.map_or_else(|| "*".to_string(), |s| s.to_string());
                             writeln!(f, " [{}] SMET ({},{}) orig:{}", v.rd, src, v.grp, v.orig)?;
                         }
+                        EvpnRoute::PerRegionImet(v) => {
+                            writeln!(f, " [{}] per-region-imet tag:{}", v.rd, v.ether_tag)?;
+                        }
+                        EvpnRoute::SPmsi(v) => {
+                            writeln!(
+                                f,
+                                " [{}] s-pmsi tag:{} orig:{}",
+                                v.rd, v.ether_tag, v.originator
+                            )?;
+                        }
+                        EvpnRoute::LeafAd(v) => {
+                            writeln!(f, " leaf-ad orig:{}", v.originator)?;
+                        }
                     }
                 }
             }
