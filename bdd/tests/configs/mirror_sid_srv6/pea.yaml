@@ -1,0 +1,40 @@
+# pea — the primary (protected) egress. IS-IS L2, SRv6 locator LOC3
+# (fcbb:bbbb:3::/48). peb advertises a Mirror SID protecting this
+# locator; p1 installs the backup toward peb for routes to it.
+interface:
+- if-name: lo
+  ipv6:
+    address: 2001:db8::3/128
+- if-name: pea-p1
+  ipv6:
+    address: 2001:db8:0:23::3/64
+- if-name: pea-peb
+  ipv6:
+    address: 2001:db8:0:34::3/64
+segment-routing:
+  locator:
+  - name: LOC3
+    prefix: fcbb:bbbb:3::/48
+    behavior: usid
+router:
+  isis:
+    net: 49.0000.0000.0000.0003.00
+    hostname: pea
+    is-type: level-2-only
+    segment-routing:
+      srv6:
+        locator: LOC3
+    interface:
+    - if-name: lo
+      ipv6:
+        enable: true
+    - if-name: pea-p1
+      network-type: point-to-point
+      metric: 1
+      ipv6:
+        enable: true
+    - if-name: pea-peb
+      network-type: point-to-point
+      metric: 1
+      ipv6:
+        enable: true

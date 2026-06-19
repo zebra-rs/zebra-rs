@@ -1479,7 +1479,23 @@ fn config_igmp_mld_proxy(bgp: &mut Bgp, mut args: Args, op: ConfigOp) -> Option<
         return Some(());
     }
     bgp.igmp_mld_proxy = enabled;
+    // Re-originate IMET (the Multicast Flags EC rides it), then replay
+    // the snooped-membership cache across the gate transition: on
+    // enable, originate a SMET per cached (*,G)/(S,G); on disable,
+    // withdraw them all.
     reoriginate_all_imet(bgp);
+    let memberships: Vec<(u32, IpAddr, Option<IpAddr>, IpAddr)> = bgp
+        .local_smet
+        .iter()
+        .map(|((vni, group, source), vtep)| (*vni, *group, *source, *vtep))
+        .collect();
+    for (vni, group, source, vtep_local) in memberships {
+        if enabled {
+            bgp.evpn_originate_smet(vni, vtep_local, group, source);
+        } else {
+            bgp.evpn_withdraw_smet(vni, vtep_local, group, source);
+        }
+    }
     Some(())
 }
 
@@ -1559,6 +1575,39 @@ fn config_assisted_replication_ip(bgp: &mut Bgp, mut args: Args, op: ConfigOp) -
         return Some(());
     }
     bgp.local_rib.evpn_flood.ar_ip = ip;
+    reoriginate_all_imet(bgp);
+    Some(())
+}
+
+/// `router bgp afi-safi evpn pruned-flood-list broadcast-multicast <bool>`
+/// (RFC 9574). Sets the BM flag in this node's own Type-3 IMET to ask peers
+/// to prune it from the broadcast/multicast flood list.
+fn config_pruned_flood_bm(bgp: &mut Bgp, mut args: Args, op: ConfigOp) -> Option<()> {
+    let afi_safi: AfiSafi = args.afi_safi()?;
+    if afi_safi.afi != Afi::L2vpn || afi_safi.safi != Safi::Evpn {
+        return None;
+    }
+    let on = if op.is_set() { args.boolean()? } else { false };
+    if bgp.local_rib.evpn_flood.prune_bm == on {
+        return Some(());
+    }
+    bgp.local_rib.evpn_flood.prune_bm = on;
+    reoriginate_all_imet(bgp);
+    Some(())
+}
+
+/// `router bgp afi-safi evpn pruned-flood-list unknown-unicast <bool>`
+/// (RFC 9574). Sets the U flag in this node's own Type-3 IMET.
+fn config_pruned_flood_unknown(bgp: &mut Bgp, mut args: Args, op: ConfigOp) -> Option<()> {
+    let afi_safi: AfiSafi = args.afi_safi()?;
+    if afi_safi.afi != Afi::L2vpn || afi_safi.safi != Safi::Evpn {
+        return None;
+    }
+    let on = if op.is_set() { args.boolean()? } else { false };
+    if bgp.local_rib.evpn_flood.prune_unknown == on {
+        return Some(());
+    }
+    bgp.local_rib.evpn_flood.prune_unknown = on;
     reoriginate_all_imet(bgp);
     Some(())
 }
@@ -3725,6 +3774,16 @@ impl Bgp {
         self.callback_add(
             "/router/bgp/afi-safi/assisted-replication/replicator-ip",
             config_assisted_replication_ip,
+        );
+        // EVPN Pruned-Flood-List (RFC 9574), under `router bgp afi-safi evpn
+        // pruned-flood-list`. Augmented in by zebra-bgp-evpn.yang.
+        self.callback_add(
+            "/router/bgp/afi-safi/pruned-flood-list/broadcast-multicast",
+            config_pruned_flood_bm,
+        );
+        self.callback_add(
+            "/router/bgp/afi-safi/pruned-flood-list/unknown-unicast",
+            config_pruned_flood_unknown,
         );
         // EVPN inclusive BUM P-tunnel selection (RFC 9524 SR P2MP trees vs.
         // ingress replication), under `router bgp afi-safi evpn

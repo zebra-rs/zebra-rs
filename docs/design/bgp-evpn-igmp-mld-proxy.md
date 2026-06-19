@@ -30,7 +30,7 @@ before citing.
 | 1     | Codec — Type 6 SMET NLRI                | **done** |
 | 2     | Multicast Flags Extended Community      | **done** |
 | 3     | IMET (Type 3) capability signaling      | **done** |
-| 4     | SMET origination from kernel MDB snoop  | planned  |
+| 4     | SMET origination from kernel MDB snoop  | **done** |
 | 5     | SMET reception → selective dataplane    | planned  |
 | 6     | Show + BDD + docs                       | planned  |
 | —     | Type 7/8 multihoming synch              | deferred |
@@ -239,22 +239,35 @@ dataplane action happens yet.
   is observable end-to-end today. Per-protocol (IGMP-only / MLD-only)
   granularity is a follow-up.
 
-### Phase 4 — SMET origination from kernel MDB snoop
-- **4a (fork `../netlink-packet-route`):** finish `br_mdb_entry` +
-  `MDBA_MDB_ENTRY_INFO` + `MDBE_ATTR_SOURCE/GROUP` decode (currently raw
-  bytes); commit to `seg6`, **push**, bump the Cargo git rev (CI builds
-  from the pinned rev).
-- **4b (fib `handle.rs`):** startup `RTM_GETMDB` dump + subscribe to the
-  MDB rtnl multicast group; parse `NewMdb/DelMdb` (the `:2930` TODO). Map
-  (bridge, VID→VNI, grp, src) → a **new** `rib::Message::SnoopJoin /
-  SnoopLeave`. Rename the existing Type-3 `MdbAdd`/`mdb_add` (e.g.
-  `BumReplicationAdd`) to remove the overload.
-- **4c (bgp `route.rs`):** membership events → `evpn_originate_smet` /
-  `evpn_withdraw_smet`. RD auto-derived `router-id:VNI` (like macip/imet),
-  RT = EVI RT `AS:VNI`, nexthop = local VTEP, flags from the snooped
-  IGMP/MLD version + IE mode. Cache for replay on capability/gate
-  transitions. Triggers per RFC 9251 §6 (first `(*,G)`; IGMPv3 `(S,G)`;
-  version upgrade ⇒ re-advertise, not withdraw).
+### Phase 4 — SMET origination from kernel MDB snoop — **done**
+- **4a (fork `netlink-packet-route` `seg6`):** `src/mdb/entry.rs` decodes
+  the nested `MDBA_MDB → MDBA_MDB_ENTRY → MDBA_MDB_ENTRY_INFO →
+  br_mdb_entry + MDBA_MDB_EATTR_SOURCE` tree into typed
+  `MdbEntry { port_ifindex, state, flags, vid, group, source }` (+
+  `MdbGroup`, `parse_mdb_entries`, `MdbMessage::entries()`). Pushed to
+  `seg6` (commit `d912564`); Cargo.lock bumped to it.
+- **4b (fib):** join `RTNLGRP_MDB` (group 26); `process_msg` handles
+  `NewMdb/DelMdb` → `mdb_entries_from_msg` (IP groups only) →
+  `FibMessage::NewMdb/DelMdb { bridge_ifindex, vid, group, source }`;
+  `mdb_dump` issues an `RTM_GETMDB` dump at startup via
+  `Handle::request`. RIB `process_fib_msg` maps `bridge_ifindex →
+  (VNI, local VTEP)` (`mdb_vni_vtep` over `vni_for_bridge` +
+  `vxlan_local_for_bridge`) → `RibRx::SnoopJoin/SnoopLeave`.
+- **4c (bgp):** `process_rib_msg` caches membership in `local_smet` and
+  calls `evpn_originate_smet` / `evpn_withdraw_smet` (`route.rs`): RD
+  auto-derived `router-id:VNI`, RT = EVI RT `AS:VNI`, next hop = local
+  VTEP, no PMSI, Flags via `smet_flags()` (IPv4→IGMPv3, IPv6→MLDv2; IE =
+  exclude for `(*,G)`, include for `(S,G)`). The Flags octet now rides on
+  `BgpRib::smet_flags` (resolves the Phase-1 TODO), so reflected SMET
+  preserves it. Gated on the `igmp-mld-proxy` knob; `config_igmp_mld_proxy`
+  replays `local_smet` across the gate transition.
+
+**Notes / deferred:** the existing Type-3 `MdbAdd`/`mdb_add` (zero-MAC FDB
+flood list) was left as-is rather than renamed — the new SMET path uses
+distinct `SnoopJoin/SnoopLeave` messages, so there's no functional
+overload; the rename is cosmetic and can come with Phase 5. SMET flags
+are a per-family approximation, not derived from the kernel MDB
+group-mode (follow-up). No selective dataplane yet (Phase 5).
 
 ### Phase 5 — SMET reception → selective dataplane
 - **5a (fib):** real `bridge mdb add/del dev <vxlan> grp G [src S]

@@ -1,0 +1,50 @@
+# peb — the protector. IS-IS L2, SRv6 locator LOC4. Advertises a Mirror
+# SID (End.M) protecting pea's locator (fcbb:bbbb:3::/48) so a PLR can
+# redirect traffic past a failed pea. The Mirror SID lies inside peb's
+# own locator. No via-vrf here: this topology validates the control +
+# install path (advertisement, reception, End.M localsid, PLR backup);
+# the mirror-context route and live traffic need a VRF/VPN service.
+interface:
+- if-name: lo
+  ipv6:
+    address: 2001:db8::4/128
+- if-name: peb-p1
+  ipv6:
+    address: 2001:db8:0:24::4/64
+- if-name: peb-pea
+  ipv6:
+    address: 2001:db8:0:34::4/64
+segment-routing:
+  locator:
+  - name: LOC4
+    prefix: fcbb:bbbb:4::/48
+    behavior: usid
+router:
+  isis:
+    net: 49.0000.0000.0000.0004.00
+    hostname: peb
+    is-type: level-2-only
+    segment-routing:
+      srv6:
+        locator: LOC4
+    egress-protection:
+      protect:
+      - protected-locator: fcbb:bbbb:3::/48
+        # Quoted: a bare-"::"-terminated IPv6 scalar trips the YAML
+        # scanner (reads the trailing ":" as a mapping indicator).
+        mirror-sid: "fcbb:bbbb:4:1::"
+        dataplane: srv6
+    interface:
+    - if-name: lo
+      ipv6:
+        enable: true
+    - if-name: peb-p1
+      network-type: point-to-point
+      metric: 1
+      ipv6:
+        enable: true
+    - if-name: peb-pea
+      network-type: point-to-point
+      metric: 1
+      ipv6:
+        enable: true

@@ -135,6 +135,23 @@ pub enum RibRx {
     VxlanDel {
         vni: u32,
     },
+    /// Local IGMP/MLD membership snooped by the kernel bridge
+    /// (`RTM_NEWMDB`), resolved to its VNI. The EVPN advertise path
+    /// consumes this to originate a Type-6 SMET route. `source` is
+    /// `None` for a `(*,G)` join, `Some` for `(S,G)`.
+    SnoopJoin {
+        vni: u32,
+        vtep_local: IpAddr,
+        group: IpAddr,
+        source: Option<IpAddr>,
+    },
+    /// Inverse of `SnoopJoin` — emitted on `RTM_DELMDB`.
+    SnoopLeave {
+        vni: u32,
+        vtep_local: IpAddr,
+        group: IpAddr,
+        source: Option<IpAddr>,
+    },
     /// A Linux VRF master device the operator has committed. Emitted
     /// when [`crate::rib::inst::Message::VrfAdd`] has allocated a
     /// `table_id` and the netlink-side `ip link add` succeeded; also
@@ -386,6 +403,44 @@ impl Rib {
     pub fn api_vxlan_add(&self, vni: u32, vtep_local: IpAddr) {
         for (_, sub) in self.client_registry.iter() {
             let _ = sub.rib_rx_tx.send(RibRx::VxlanAdd { vni, vtep_local });
+        }
+    }
+
+    /// Announce / withdraw a snooped IGMP/MLD membership to EVPN
+    /// subscribers (BGP), resolved to its VNI + local VTEP. Like
+    /// FDB/VXLAN events, broadcast to every subscriber (single BGP
+    /// instance consumes the full view).
+    pub fn api_snoop_join(
+        &self,
+        vni: u32,
+        vtep_local: IpAddr,
+        group: IpAddr,
+        source: Option<IpAddr>,
+    ) {
+        for (_, sub) in self.client_registry.iter() {
+            let _ = sub.rib_rx_tx.send(RibRx::SnoopJoin {
+                vni,
+                vtep_local,
+                group,
+                source,
+            });
+        }
+    }
+
+    pub fn api_snoop_leave(
+        &self,
+        vni: u32,
+        vtep_local: IpAddr,
+        group: IpAddr,
+        source: Option<IpAddr>,
+    ) {
+        for (_, sub) in self.client_registry.iter() {
+            let _ = sub.rib_rx_tx.send(RibRx::SnoopLeave {
+                vni,
+                vtep_local,
+                group,
+                source,
+            });
         }
     }
 

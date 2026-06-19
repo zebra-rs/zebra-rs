@@ -33,7 +33,7 @@ use rtnetlink::{
 use tokio::sync::mpsc::UnboundedSender;
 
 use crate::fib::sysctl::sysctl_enable;
-use crate::fib::{FibAddr, FibLink, FibMessage, FibNeighbor, FibRoute};
+use crate::fib::{FibAddr, FibLink, FibMdbEntry, FibMessage, FibNeighbor, FibRoute};
 use crate::rib::entry::RibEntry;
 use crate::rib::inst::{IlmEntry, IlmType};
 use crate::rib::tracing::{fib_l2_fdb, fib_l2_mdb, fib_l2_vxlan, fib_nexthop, fib_route, fib_srv6};
@@ -172,6 +172,12 @@ fn protect_primary_nexthop(pro: &crate::rib::nexthop::NexthopProtect) -> Nexthop
 /// (`RTNLGRP_NEXTHOP`, linux/rtnetlink.h). Numbered past the legacy
 /// `RTMGRP_*` bind mask, so it's joined via `add_membership`.
 const RTNLGRP_NEXTHOP: u32 = 32;
+
+/// `RTNLGRP_MDB` (linux/rtnetlink.h) — bridge multicast database
+/// notifications (`RTM_{NEW,DEL}MDB`) from IGMP/MLD snooping. Past the
+/// legacy `RTMGRP_*` bind mask, so joined via `add_membership`. Drives
+/// EVPN SMET (RFC 9251) origination.
+const RTNLGRP_MDB: u32 = 26;
 
 /// Mask the lower (128 - prefix_len) bits of an IPv6 address. The
 /// kernel ignores bits past the prefix length on install, but masking
@@ -372,6 +378,20 @@ impl FibHandle {
             Err(e) => tracing::warn!(
                 "fib: could not join RTNLGRP_NEXTHOP ({e}); nexthop reconciliation disabled"
             ),
+        }
+
+        // Bridge MDB group — kernel IGMP/MLD snooping notifications that
+        // drive EVPN SMET origination. Non-fatal on join error (the host
+        // may not have a snooping bridge).
+        match connection
+            .socket_mut()
+            .socket_mut()
+            .add_membership(RTNLGRP_MDB)
+        {
+            Ok(()) => tracing::debug!("fib: joined RTNLGRP_MDB for EVPN IGMP/MLD snooping"),
+            Err(e) => {
+                tracing::warn!("fib: could not join RTNLGRP_MDB ({e}); EVPN SMET snooping disabled")
+            }
         }
 
         tokio::spawn(connection);
@@ -3066,16 +3086,47 @@ fn process_msg(msg: NetlinkMessage<RouteNetlinkMessage>, tx: UnboundedSender<Fib
                 let neighbor = neighbor_from_msg(msg);
                 let _ = tx.send(FibMessage::DelNeighbor(neighbor));
             }
-            // TODO: Add MDB message handling when netlink-packet-route supports it.
-            // RouteNetlinkMessage::NewMdb(_) => {
-            //     // Parse MDB message and send MdbAdd message
-            // }
-            // RouteNetlinkMessage::DelMdb(_) => {
-            //     // Parse MDB message and send MdbDel message
-            // }
+            RouteNetlinkMessage::NewMdb(msg) => {
+                for entry in mdb_entries_from_msg(&msg) {
+                    let _ = tx.send(FibMessage::NewMdb(entry));
+                }
+            }
+            RouteNetlinkMessage::DelMdb(msg) => {
+                for entry in mdb_entries_from_msg(&msg) {
+                    let _ = tx.send(FibMessage::DelMdb(entry));
+                }
+            }
             _ => {}
         }
     }
+}
+
+/// Convert a kernel `RTM_{NEW,DEL}MDB` message into per-group
+/// [`FibMdbEntry`] events. Only IP multicast groups are surfaced —
+/// statically-added L2 MAC groups carry no IGMP/MLD membership and are
+/// skipped. The bridge ifindex (`header.index`) is mapped to a VNI by
+/// the RIB.
+pub(crate) fn mdb_entries_from_msg(
+    msg: &netlink_packet_route::mdb::MdbMessage,
+) -> Vec<FibMdbEntry> {
+    use netlink_packet_route::mdb::MdbGroup;
+    let bridge_ifindex = msg.header.index;
+    msg.entries()
+        .into_iter()
+        .filter_map(|e| {
+            let group = match e.group {
+                MdbGroup::V4(g) => IpAddr::V4(g),
+                MdbGroup::V6(g) => IpAddr::V6(g),
+                MdbGroup::Mac(_) => return None,
+            };
+            Some(FibMdbEntry {
+                bridge_ifindex,
+                vid: e.vid,
+                group,
+                source: e.source,
+            })
+        })
+        .collect()
 }
 
 #[cfg(test)]
