@@ -602,6 +602,12 @@ pub struct Bgp {
     /// — and replays on `advertise_all_vni` / `router_id` transitions
     /// just like `local_fdb`.
     pub local_vxlans: BTreeMap<u32, std::net::IpAddr>,
+    /// Local snooped IGMP/MLD membership shadow, keyed by
+    /// `(vni, group, source)` → local VTEP IP. Populated from
+    /// `RibRx::SnoopJoin`, removed on `RibRx::SnoopLeave`. Drives
+    /// Type-6 (SMET) origination and replays on `igmp_mld_proxy`
+    /// transitions, mirroring `local_vxlans`/`local_fdb`.
+    pub local_smet: BTreeMap<(u32, std::net::IpAddr, Option<std::net::IpAddr>), std::net::IpAddr>,
     /// Configured hostname for the local BGP speaker. Advertised in
     /// the FQDN capability (capability code 73). When None, falls back
     /// to the OS hostname; if that also fails, no FQDN capability is
@@ -1002,6 +1008,7 @@ impl Bgp {
             igmp_mld_proxy: false,
             local_fdb: BTreeMap::new(),
             local_vxlans: BTreeMap::new(),
+            local_smet: BTreeMap::new(),
             hostname: None,
             no_fib_install: false,
             peers: PeerMap::new(),
@@ -2778,6 +2785,26 @@ impl Bgp {
                     self.evpn_withdraw_imet(vni, vtep_local);
                 }
             }
+            RibRx::SnoopJoin {
+                vni,
+                vtep_local,
+                group,
+                source,
+            } => {
+                // Cache durably so we can replay on `igmp_mld_proxy`
+                // false→true transitions — see `local_smet` doc.
+                self.local_smet.insert((vni, group, source), vtep_local);
+                self.evpn_originate_smet(vni, vtep_local, group, source);
+            }
+            RibRx::SnoopLeave {
+                vni,
+                vtep_local,
+                group,
+                source,
+            } => {
+                self.local_smet.remove(&(vni, group, source));
+                self.evpn_withdraw_smet(vni, vtep_local, group, source);
+            }
             RibRx::VrfAdd {
                 name,
                 table_id,
@@ -4194,6 +4221,7 @@ impl Bgp {
                     stale: false,
                     esi: None,
                     vrf_transit_only: false,
+                    smet_flags: 0,
                 };
 
                 let (_, selected, _gen) = self.shard.update(Some(rd), prefix, rib);
@@ -4475,6 +4503,7 @@ impl Bgp {
                     stale: false,
                     esi: None,
                     vrf_transit_only: false,
+                    smet_flags: 0,
                 };
 
                 let (_, selected, _gen) = self.shard.update_v6vpn(rd, prefix, rib);

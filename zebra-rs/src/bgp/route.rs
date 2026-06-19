@@ -1156,6 +1156,11 @@ pub struct BgpRib {
     /// (`route_ipv4_update` / `route_ipv6_update`); `route_update_ipv4` /
     /// `…ipv6` suppress the advertise. Default `false` (ordinary route).
     pub vrf_transit_only: bool,
+    /// EVPN Type-6 SMET Flags octet (IGMP/MLD version + include/exclude
+    /// mode, RFC 9251 §9.1). The Flags field is NOT part of the SMET
+    /// route key, so it rides here on the path; the advertise/rebuild
+    /// helpers re-emit it. `0` for every non-SMET row.
+    pub smet_flags: u8,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -1252,6 +1257,7 @@ impl BgpRib {
             stale,
             esi: None,
             vrf_transit_only: false,
+            smet_flags: 0,
         }
     }
 
@@ -4165,11 +4171,11 @@ pub fn route_update_evpn(
             src: *src,
             grp: *grp,
             orig: *orig,
-            // TODO(phase4): SMET Flags (IGMP/MLD version + IE mode) are
-            // not part of the RIB key; carry them on `BgpRib` so a
-            // reflected SMET preserves them. Until then a re-advertised
-            // SMET emits flags = 0.
-            flags: 0,
+            // SMET Flags are not part of the RIB key; they ride on the
+            // path (`BgpRib::smet_flags`), set at origination and
+            // preserved here so a re-advertised / reflected SMET keeps
+            // its IGMP/MLD version + IE mode.
+            flags: rib.smet_flags,
         }),
     };
 
@@ -8174,10 +8180,10 @@ fn build_evpn_route(
             src: *src,
             grp: *grp,
             orig: *orig,
-            // TODO(phase4): carry SMET flags on `BgpRib` (see the
-            // advertise path). Peer-down withdraw is key-matched, so
-            // flags = 0 is correct here.
-            flags: 0,
+            // Flags ride on the path; preserve them from the stored row
+            // (a peer-down withdraw is key-matched, but keeping the real
+            // flags is harmless and consistent with the advertise path).
+            flags: rib.smet_flags,
         })),
         // RFC 9572 A-D routes are not stored in the Loc-RIB in the current
         // codec-only phase (dropped at receive), so this is unreachable in
@@ -12051,6 +12057,110 @@ impl Bgp {
         route_withdraw_evpn_to_peers(rd, prefix, &mut self.peers);
     }
 
+    /// Originate a Type-6 SMET route for a locally-snooped `(*,G)` /
+    /// `(S,G)` membership (RFC 9251 §9.1). Mirrors `evpn_originate_imet`.
+    /// Gated on `igmp_mld_proxy` — the proxy feature must be enabled.
+    /// RD is auto-derived `<router-id>:<VNI>`, the RT is the EVI RT
+    /// `<AS>:<VNI>` (so receivers map it back to the VNI), next hop is
+    /// the local VTEP, and the Flags octet carries the IGMP/MLD version
+    /// + include/exclude mode. No PMSI attribute (RFC 9251 §6).
+    pub fn evpn_originate_smet(
+        &mut self,
+        vni: u32,
+        vtep_local: IpAddr,
+        group: IpAddr,
+        source: Option<IpAddr>,
+    ) {
+        if !self.igmp_mld_proxy {
+            return;
+        }
+        if self.router_id.is_unspecified() {
+            return;
+        }
+        let Some(rd) = rd_from_router_id_vni(self.router_id, vni) else {
+            return;
+        };
+        let prefix = EvpnPrefix::Smet {
+            eth_tag: 0,
+            src: source,
+            grp: group,
+            orig: vtep_local,
+        };
+        let mut attr = BgpAttr::new();
+        attr.ecom = Some(ExtCommunity::from([
+            evpn_route_target(self.asn, vni),
+            evpn_encap_vxlan(),
+        ]));
+        attr.nexthop = Some(BgpNexthop::Evpn(vtep_local));
+
+        let mut rib = BgpRib::new(
+            ORIGINATED_PEER,
+            Ipv4Addr::UNSPECIFIED,
+            BgpRibType::Originated,
+            0,
+            32768,
+            &attr,
+            None,
+            None,
+            false,
+        );
+        // The Flags octet is not part of the route key — carry it on the
+        // path so the advertise side re-emits it.
+        rib.smet_flags = smet_flags(group, source);
+        let (_replaced, selected, next_id) =
+            self.local_rib.update_evpn(rd, prefix.clone(), rib.clone());
+        rib.local_id = next_id;
+
+        let mut bgp_ref = BgpTop {
+            router_id: &self.router_id,
+            srv6_ipv6_export: self.srv6_ipv6_export.as_ref(),
+            local_rib: &mut self.local_rib,
+            shard: &mut self.shard,
+            tx: &self.tx,
+            rib_client: &self.ctx.rib,
+            attr_store: &mut self.attr_store,
+            update_groups: &mut self.update_groups,
+            interface_addrs: &self.interface_addrs,
+            vrf_export: None,
+            color_policy: Some(&self.color_policy),
+            flex_algo_routes: Some(&self.flex_algo_routes),
+            flex_algo_srv6_routes: Some(&self.flex_algo_srv6_routes),
+            vrf_import: None,
+            nexthop_cache: None,
+            vrf_transport_v4: None,
+            vrf_transport_v6: None,
+            central_label_alloc: None,
+        };
+
+        if !selected.is_empty() {
+            route_advertise_evpn_to_peers(rd, prefix, &selected, &mut bgp_ref, &mut self.peers);
+        }
+    }
+
+    /// Inverse of `evpn_originate_smet`. Not gated on `igmp_mld_proxy`
+    /// so a membership leave (or the proxy being turned off) always
+    /// clears the originated route.
+    pub fn evpn_withdraw_smet(
+        &mut self,
+        vni: u32,
+        vtep_local: IpAddr,
+        group: IpAddr,
+        source: Option<IpAddr>,
+    ) {
+        let Some(rd) = rd_from_router_id_vni(self.router_id, vni) else {
+            return;
+        };
+        let prefix = EvpnPrefix::Smet {
+            eth_tag: 0,
+            src: source,
+            grp: group,
+            orig: vtep_local,
+        };
+        let _ = self.local_rib.remove_evpn(rd, &prefix, 0, ORIGINATED_PEER);
+        let _ = self.local_rib.select_best_path_evpn(&rd, &prefix);
+        route_withdraw_evpn_to_peers(rd, prefix, &mut self.peers);
+    }
+
     /// Reconcile the BUM flood list of every VNI against the current
     /// Assisted Replication role/AR-IP. Called from the config callbacks
     /// when `role` or `replicator-ip` changes — e.g. switching to AR-LEAF
@@ -12074,6 +12184,23 @@ const NTF_EXT_LEARNED: u8 = 0x10;
 /// when the VNI exceeds 16 bits — Type-1 only has 2 bytes for the
 /// assigned-number field; supporting VNIs above 65535 needs the
 /// Type-0 (ASN) format and is a follow-up.
+/// Derive the RFC 9251 §9.1 SMET Flags octet from the group family and
+/// source presence. IPv4 advertises IGMPv3 (v3 bit), IPv6 advertises
+/// MLDv2 (v2 bit; MLD has no v3); a `(*,G)` join sets exclude (IE)
+/// mode, an `(S,G)` join include mode. Precise per-host version/mode
+/// derivation from the kernel MDB group-mode is a follow-up.
+fn smet_flags(group: IpAddr, source: Option<IpAddr>) -> u8 {
+    const V2: u8 = 0x02;
+    const V3: u8 = 0x04;
+    const IE_EXCLUDE: u8 = 0x08;
+    let version = match group {
+        IpAddr::V4(_) => V3,
+        IpAddr::V6(_) => V2,
+    };
+    let mode = if source.is_some() { 0 } else { IE_EXCLUDE };
+    version | mode
+}
+
 fn rd_from_router_id_vni(router_id: Ipv4Addr, vni: u32) -> Option<RouteDistinguisher> {
     let vni_short: u16 = vni.try_into().ok()?;
     let mut rd = RouteDistinguisher::new(RouteDistinguisherType::IP);

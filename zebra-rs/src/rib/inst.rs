@@ -2351,7 +2351,28 @@ impl Rib {
                     self.api_fdb_del(&entry);
                 }
             }
+            FibMessage::NewMdb(entry) => {
+                if let Some((vni, vtep_local)) = self.mdb_vni_vtep(entry.bridge_ifindex) {
+                    self.api_snoop_join(vni, vtep_local, entry.group, entry.source);
+                }
+            }
+            FibMessage::DelMdb(entry) => {
+                if let Some((vni, vtep_local)) = self.mdb_vni_vtep(entry.bridge_ifindex) {
+                    self.api_snoop_leave(vni, vtep_local, entry.group, entry.source);
+                }
+            }
         }
+    }
+
+    /// Resolve a snooped MDB entry's bridge ifindex to `(VNI, local
+    /// VTEP IP)` via the bridge's VXLAN slave. `None` when the bridge
+    /// has no VXLAN slave with a VNI + local address (e.g. a plain L2
+    /// bridge not participating in EVPN) — such memberships are not
+    /// advertised.
+    fn mdb_vni_vtep(&self, bridge_ifindex: u32) -> Option<(u32, IpAddr)> {
+        let vni = self.vni_for_bridge(bridge_ifindex)?;
+        let vtep_local = self.vxlan_local_for_bridge(bridge_ifindex)?;
+        Some((vni, vtep_local))
     }
 
     async fn process_cm_msg(&mut self, msg: ConfigRequest) {
