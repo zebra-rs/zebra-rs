@@ -1,0 +1,31 @@
+# z3 — RNVE (regular NVE, no Assisted Replication). Does plain ingress
+# replication: floods to every remote PE's IR-IP, ignoring the AR-IP.
+vxlan:
+- name: vxlan10
+  vni: 10
+  local-address: 192.168.0.3
+router:
+  bgp:
+    global:
+      as: 65001
+      router-id: 192.168.0.3
+    afi-safi:
+    - name: evpn
+      advertise-all-vni: true
+    neighbor:
+    - remote-address: 192.168.0.1
+      enabled: true
+      remote-as: 65001
+      afi-safi:
+      - name: ipv4
+        enabled: true
+      - name: evpn
+        enabled: true
+    - remote-address: 192.168.0.2
+      enabled: true
+      remote-as: 65001
+      afi-safi:
+      - name: ipv4
+        enabled: true
+      - name: evpn
+        enabled: true

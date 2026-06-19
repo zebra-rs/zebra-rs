@@ -249,17 +249,45 @@ plane** plus the genuinely-useful Linux dataplane subset (RNVE, AR-LEAF,
 whole-VTEP prune), mirroring how the v6 BGP stack and the Flowspec series
 shipped control-plane-first. Phase 4 carries the dataplane risk.
 
-### BDD
+### BDD (`@bgp_evpn_ar`) — ✅ on branch
 
-A feature (3 namespaces: leaf / replicator-signaler / RNVE) asserting: IMET
-PMSI tunnel-type + T/BM/U flags via `show`; an AR-LEAF programs a single
-zero-MAC FDB toward the AR-IP; a whole-VTEP prune removes an FDB entry. Ends
-with an explicit `Scenario: Teardown topology` (stop zebra-rs per namespace,
-delete namespaces, assert the test environment is clean). The AR-REPLICATOR
-*forwarding* path cannot be BDD-tested on a stock kernel — noted, not faked.
+The repo's first VXLAN-dataplane BDD. Three iBGP (AS 65001) EVPN nodes on a
+shared bridge, each with a config-driven local VXLAN (VNI 10) so every node
+originates a Type-3 IMET: **z1** = AR-REPLICATOR (`replicator-ip
+192.168.0.101`), **z2** = AR-LEAF, **z3** = RNVE. Asserts, against the real
+kernel state:
+
+- **Control plane** — `show bgp evpn` on z2/z3 shows all three Type-3 IMET
+  routes (auto-RT `65001:10`), confirming the mesh imports each node's IMET.
+- **1b flood collapse** — `bridge fdb show dev vxlan10` on **z2** contains a
+  single zero-MAC `dst 192.168.0.101` (the AR-IP) and **not** z3's VTEP,
+  proving the AR-LEAF collapse; on **z3** it contains both remote IR-IPs
+  (`.1`, `.2`) and **not** the AR-IP, proving RNVE full ingress replication.
+
+This verifies the whole 1a→1b chain end-to-end: z1 originates Replicator-AR
+(AR-IP in the PMSI tunnel endpoint), z2 classifies it and collapses its flood
+list. A new `bridge fdb {dev} in namespace {ns} should [eventually] contain /
+not contain {needle}` step was added (mirrors `kernel route …`). Ends with an
+explicit `Scenario: Teardown topology` (asserts the environment is clean). The
+AR-REPLICATOR *forwarding* path can't be BDD-tested on a stock kernel — noted,
+not faked. Run: `cd bdd && cargo test --test cucumber -- --concurrency=1 --tags
+"@bgp_evpn_ar"` (needs `make install` first).
 
 ## Leftover / deferred
 
+- **Replicator-AR BGP next-hop = AR-IP (RFC 9574 §4).** Found via the
+  `@bgp_evpn_ar` BDD: the EVPN advertise path overrides the route's BGP
+  next-hop to the local VTEP, so a Replicator-AR route carries next-hop =
+  VTEP, not the AR-IP. zebra-rs is self-consistent (it reads the AR-IP from
+  the PMSI tunnel endpoint, which *is* set correctly), so the flood collapse
+  works — but for strict interop with implementations that read the AR-IP
+  from the BGP next-hop, the next-hop should be the AR-IP. Fix is in the EVPN
+  next-hop emit (next-hop-self override); deferred to keep that change
+  focused.
+- **Render the PMSI tunnel attribute in `show bgp evpn`.** Today `show bgp
+  evpn` prints prefix + next-hop + ext-comms but not the PMSI tunnel
+  type/flags, so the AR role isn't observable via `show` (only via the FDB).
+  Adding a PMSI line would make AR role / tunnel-type 0x0A operator-visible.
 - **Phase 4 — AR-REPLICATOR forwarding.** The decap-on-AR-IP → re-flood
   datapath with source-VTEP split-horizon and (optional) source-IP
   preservation. Needs eBPF/XDP/tc clone+redirect+header-rewrite or a VPP
