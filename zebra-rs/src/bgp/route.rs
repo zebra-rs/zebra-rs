@@ -19,7 +19,7 @@ use super::peer_map::PeerMap;
 use super::shard::msg::{ShardUpdateV4, ShardUpdateV6};
 use super::shard::{ShardMsg, ShardOut};
 use super::timer::{start_adv_timer_vpnv4, start_adv_timer_vpnv6};
-use super::{AssistedReplicationRole, Bgp, InOut, Message};
+use super::{AssistedReplicationRole, Bgp, EvpnBumTunnel, InOut, Message};
 
 pub const ORIGINATED_PEER: usize = usize::MAX;
 
@@ -1913,6 +1913,10 @@ pub struct EvpnFloodState {
     /// Local AR-IP (`... assisted-replication replicator-ip`), advertised in
     /// the Replicator-AR route's next hop when `role` is `Replicator`.
     pub ar_ip: Option<IpAddr>,
+    /// Inclusive BUM P-tunnel advertised in the Type-3 IMET PMSI
+    /// (`... evpn bum-tunnel-type`). Default Ingress Replication; the SR
+    /// P2MP modes advertise an RFC 9524 replication tree rooted here.
+    pub bum_tunnel: EvpnBumTunnel,
     /// Per-VNI flood model.
     vnis: BTreeMap<u32, VniFlood>,
 }
@@ -11940,9 +11944,10 @@ impl Bgp {
         // Replication encoding (tunnel type 6); a Replicator emits a
         // Replicator-AR route (tunnel type 0x0A, next hop = AR-IP); a Leaf
         // tags its Regular-IR route as AR-LEAF.
+        let bum = self.local_rib.evpn_flood.bum_tunnel;
         let role = self.local_rib.evpn_flood.role;
         let ar_ip = self.local_rib.evpn_flood.ar_ip;
-        let (pmsi, nexthop) = imet_pmsi_tunnel(role, ar_ip, vtep_local, vni);
+        let (pmsi, nexthop) = imet_pmsi_tunnel(bum, role, ar_ip, vtep_local, vni);
         attr.pmsi_tunnel = Some(pmsi);
         attr.nexthop = Some(BgpNexthop::Evpn(nexthop));
 
@@ -12048,12 +12053,31 @@ fn rd_from_router_id_vni(router_id: Ipv4Addr, vni: u32) -> Option<RouteDistingui
 ///   next hop = local VTEP (IR-IP).
 /// - **None**, or Replicator without an AR-IP: plain Ingress Replication
 ///   (tunnel type 6, T = RNVE) — byte-for-byte the pre-RFC-9574 encoding.
+///
+/// When `bum` selects an SR P2MP tree (RFC 9524) the AR role is bypassed:
+/// the local node is the tree Root, the Tree-ID is derived from the VNI,
+/// and the tunnel endpoint / next hop is the local VTEP.
 fn imet_pmsi_tunnel(
+    bum: EvpnBumTunnel,
     role: AssistedReplicationRole,
     ar_ip: Option<IpAddr>,
     vtep_local: IpAddr,
     vni: u32,
 ) -> (PmsiTunnel, IpAddr) {
+    // SR P2MP replication trees ignore the AR role. The MPLS Label field
+    // stays 0 (shared-tunnel upstream label / SRv6 transposition is a
+    // follow-up); the Root is the local VTEP and the Tree-ID is the VNI.
+    let sr_tunnel_type = match bum {
+        EvpnBumTunnel::SrMplsP2mp => Some(PmsiTunnel::TUNNEL_SR_MPLS_P2MP),
+        EvpnBumTunnel::SrV6P2mp => Some(PmsiTunnel::TUNNEL_SRV6_P2MP),
+        EvpnBumTunnel::IngressReplication => None,
+    };
+    if let Some(tunnel_type) = sr_tunnel_type {
+        return (
+            PmsiTunnel::sr_p2mp(tunnel_type, 0, vni, vtep_local),
+            vtep_local,
+        );
+    }
     match (role, ar_ip) {
         (AssistedReplicationRole::Replicator, Some(ar)) => (
             PmsiTunnel {
@@ -12221,8 +12245,13 @@ mod evpn_imet_ar_tests {
     /// next hop = the local VTEP, regardless of any stray AR-IP.
     #[test]
     fn rnve_is_plain_ingress_replication() {
-        let (pmsi, nh) =
-            imet_pmsi_tunnel(AssistedReplicationRole::None, Some(ar_ip()), ir_ip(), 100);
+        let (pmsi, nh) = imet_pmsi_tunnel(
+            EvpnBumTunnel::IngressReplication,
+            AssistedReplicationRole::None,
+            Some(ar_ip()),
+            ir_ip(),
+            100,
+        );
         assert_eq!(pmsi.tunnel_type, PmsiTunnel::TUNNEL_INGRESS_REPLICATION);
         assert_eq!(pmsi.ar_type(), AssistedReplicationType::Rnve);
         assert_eq!(pmsi.flags, 0, "byte-for-byte the legacy encoding");
@@ -12235,6 +12264,7 @@ mod evpn_imet_ar_tests {
     #[test]
     fn replicator_emits_replicator_ar_route() {
         let (pmsi, nh) = imet_pmsi_tunnel(
+            EvpnBumTunnel::IngressReplication,
             AssistedReplicationRole::Replicator,
             Some(ar_ip()),
             ir_ip(),
@@ -12250,7 +12280,13 @@ mod evpn_imet_ar_tests {
     /// 6 with the next hop = local VTEP (IR-IP).
     #[test]
     fn leaf_flags_regular_ir_as_ar_leaf() {
-        let (pmsi, nh) = imet_pmsi_tunnel(AssistedReplicationRole::Leaf, None, ir_ip(), 100);
+        let (pmsi, nh) = imet_pmsi_tunnel(
+            EvpnBumTunnel::IngressReplication,
+            AssistedReplicationRole::Leaf,
+            None,
+            ir_ip(),
+            100,
+        );
         assert_eq!(pmsi.tunnel_type, PmsiTunnel::TUNNEL_INGRESS_REPLICATION);
         assert_eq!(pmsi.ar_type(), AssistedReplicationType::Leaf);
         assert_eq!(pmsi.endpoint, ir_ip());
@@ -12262,9 +12298,50 @@ mod evpn_imet_ar_tests {
     /// usable tunnel destination.
     #[test]
     fn replicator_without_ar_ip_falls_back_to_ir() {
-        let (pmsi, nh) = imet_pmsi_tunnel(AssistedReplicationRole::Replicator, None, ir_ip(), 100);
+        let (pmsi, nh) = imet_pmsi_tunnel(
+            EvpnBumTunnel::IngressReplication,
+            AssistedReplicationRole::Replicator,
+            None,
+            ir_ip(),
+            100,
+        );
         assert_eq!(pmsi.tunnel_type, PmsiTunnel::TUNNEL_INGRESS_REPLICATION);
         assert_eq!(pmsi.ar_type(), AssistedReplicationType::Rnve);
+        assert_eq!(nh, ir_ip());
+    }
+
+    /// SR-MPLS P2MP mode → an SR P2MP tree IMET (RFC 9524): tunnel type
+    /// 0x0C, Root and next hop = the local VTEP, Tree-ID derived from the
+    /// VNI. The AR role is bypassed.
+    #[test]
+    fn sr_mpls_p2mp_origination() {
+        let (pmsi, nh) = imet_pmsi_tunnel(
+            EvpnBumTunnel::SrMplsP2mp,
+            AssistedReplicationRole::Replicator,
+            Some(ar_ip()),
+            ir_ip(),
+            100,
+        );
+        assert_eq!(pmsi.tunnel_type, PmsiTunnel::TUNNEL_SR_MPLS_P2MP);
+        assert!(pmsi.is_sr_p2mp());
+        assert_eq!(pmsi.tree_id, Some(100), "Tree-ID derived from VNI");
+        assert_eq!(pmsi.endpoint, ir_ip(), "Root = local VTEP");
+        assert_eq!(nh, ir_ip(), "next hop = local VTEP, not the AR-IP");
+    }
+
+    /// SRv6 P2MP mode → tunnel type 0x0D, otherwise as SR-MPLS.
+    #[test]
+    fn srv6_p2mp_origination() {
+        let (pmsi, nh) = imet_pmsi_tunnel(
+            EvpnBumTunnel::SrV6P2mp,
+            AssistedReplicationRole::None,
+            None,
+            ir_ip(),
+            4242,
+        );
+        assert_eq!(pmsi.tunnel_type, PmsiTunnel::TUNNEL_SRV6_P2MP);
+        assert_eq!(pmsi.tree_id, Some(4242));
+        assert_eq!(pmsi.endpoint, ir_ip());
         assert_eq!(nh, ir_ip());
     }
 }
