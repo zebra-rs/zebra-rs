@@ -116,6 +116,17 @@ module zebra-bgp-neighbor-group {
            group. A `remote-as` set on the neighbor itself wins.";
       }
 
+      leaf region-id {
+        ext:help "RFC 9572 segmentation region identifier";
+        type uint16;
+        description
+          "Mark this neighbor-group as an RFC 9572 region (Section 6.1).
+           The value is a two-octet AS number used as the Source-AS-encoded
+           Region ID carried in Per-Region I-PMSI (Type-9) routes that a
+           Regional Border Router aggregates from, and re-originates into,
+           this region. Absent means the group is not a region boundary.";
+      }
+
       /* Per-neighbor knobs inheritable through the group. The same
        * explicit-wins rule applies to each: a statement on the
        * neighbor itself outranks the group's; absence of both means

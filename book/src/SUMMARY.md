@@ -39,6 +39,7 @@
   - [EVPN Type-5 (IP Prefix Routes)](ch-02-06-bgp-evpn-type5.md)
   - [EVPN IGMP/MLD Proxy (Selective Multicast)](ch-02-32-bgp-evpn-igmp-mld-proxy.md)
   - [EVPN BUM & Assisted Replication](ch-02-33-bgp-evpn-assisted-replication.md)
+  - [EVPN BUM Tunnel Segmentation (RFC 9572)](ch-02-34-bgp-evpn-segmentation.md)
   - [Route Target Constraint (RTC)](ch-02-07-bgp-rtc.md)
   - [Inter-AS L3VPN](ch-02-18-bgp-interas.md)
     - [Option A (back-to-back VRFs)](ch-02-20-bgp-interas-option-a.md)

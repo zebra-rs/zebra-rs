@@ -4309,6 +4309,7 @@ impl Bgp {
                     esi: None,
                     vrf_transit_only: false,
                     smet_flags: 0,
+                    ingress_region: None,
                 };
 
                 let (_, selected, _gen) = self.shard.update(Some(rd), prefix, rib);
@@ -4591,6 +4592,7 @@ impl Bgp {
                     esi: None,
                     vrf_transit_only: false,
                     smet_flags: 0,
+                    ingress_region: None,
                 };
 
                 let (_, selected, _gen) = self.shard.update_v6vpn(rd, prefix, rib);
