@@ -1925,32 +1925,61 @@ pub struct EvpnFloodState {
 /// flood targets we have programmed for them.
 #[derive(Debug, Default)]
 struct VniFlood {
-    /// Remote PEs that advertised a Type-3 IMET for this VNI, keyed by the
-    /// NLRI Originating Router IP (the remote's IR-IP). The value is the
-    /// remote's AR-IP when it advertised a Replicator-AR route (PMSI tunnel
-    /// type 0x0A), else `None` for a Regular-IR route.
+    /// Remote PEs that advertised an Ingress/Assisted Replication Type-3
+    /// IMET for this VNI, keyed by the NLRI Originating Router IP (the
+    /// remote's IR-IP). The value is the remote's AR-IP when it advertised
+    /// a Replicator-AR route (PMSI tunnel type 0x0A), else `None` for a
+    /// Regular-IR route. These are the VXLAN head-end flood candidates.
     remotes: BTreeMap<IpAddr, Option<IpAddr>>,
+    /// Remote PEs that advertised an SR P2MP tree Type-3 IMET (PMSI tunnel
+    /// type 0x0C/0x0D, RFC 9524), keyed by Originating Router IP (the tree
+    /// Root), valued by the tree's Tree-ID. Recorded for the SR replication
+    /// dataplane; deliberately kept *out* of `remotes` so they never get a
+    /// VXLAN head-end FDB entry. Mutually exclusive with `remotes` per key.
+    sr_remotes: BTreeMap<IpAddr, u32>,
     /// Flood targets (zero-MAC FDB `dst`s) currently programmed in the
     /// kernel, so `reconcile` can compute the MdbAdd/MdbDel delta.
     installed: BTreeSet<IpAddr>,
 }
 
 impl EvpnFloodState {
-    /// Record a remote's Type-3 IMET for `vni`. `ar_ip` is `Some` when the
-    /// remote is an AR-REPLICATOR (Replicator-AR route).
+    /// Record an Ingress/Assisted Replication remote's Type-3 IMET for
+    /// `vni`. `ar_ip` is `Some` when the remote is an AR-REPLICATOR
+    /// (Replicator-AR route). Clears any stale SR P2MP record for the same
+    /// originator (a remote that flipped tunnel type).
     pub fn update_remote(&mut self, vni: u32, orig: IpAddr, ar_ip: Option<IpAddr>) {
-        self.vnis
-            .entry(vni)
-            .or_default()
-            .remotes
-            .insert(orig, ar_ip);
+        let v = self.vnis.entry(vni).or_default();
+        v.sr_remotes.remove(&orig);
+        v.remotes.insert(orig, ar_ip);
     }
 
-    /// Forget a remote's Type-3 IMET for `vni` (it was withdrawn).
+    /// Record an SR P2MP tree remote's Type-3 IMET for `vni` (RFC 9524):
+    /// `orig` is the tree Root, `tree_id` its Tree-ID. Clears any stale
+    /// Ingress/Assisted Replication record for the same originator.
+    pub fn update_sr_remote(&mut self, vni: u32, orig: IpAddr, tree_id: u32) {
+        let v = self.vnis.entry(vni).or_default();
+        v.remotes.remove(&orig);
+        v.sr_remotes.insert(orig, tree_id);
+    }
+
+    /// Forget a remote's Type-3 IMET for `vni` (it was withdrawn). The
+    /// originator may have been either tunnel kind, so clear both maps.
     pub fn remove_remote(&mut self, vni: u32, orig: IpAddr) {
         if let Some(v) = self.vnis.get_mut(&vni) {
             v.remotes.remove(&orig);
+            v.sr_remotes.remove(&orig);
         }
+    }
+
+    /// The SR P2MP replication trees `(Root, Tree-ID)` remote PEs advertised
+    /// for `vni` (RFC 9524). Recorded on import for the SR replication
+    /// dataplane (a later slice); these remotes are excluded from the VXLAN
+    /// head-end flood set built by [`desired`](Self::desired).
+    pub fn sr_p2mp_remotes(&self, vni: u32) -> Vec<(IpAddr, u32)> {
+        self.vnis
+            .get(&vni)
+            .map(|v| v.sr_remotes.iter().map(|(orig, t)| (*orig, *t)).collect())
+            .unwrap_or_default()
     }
 
     /// VNIs that currently have flood state (so a role/AR-IP change can
@@ -1989,6 +2018,17 @@ impl EvpnFloodState {
     /// [`desired`]: Self::desired
     pub fn reconcile(&mut self, vni: u32, rib: &crate::rib::client::RibClient) {
         let desired = self.desired(vni);
+        // SR P2MP remotes (RFC 9524) are delivered over their replication
+        // tree by the SR dataplane (a later slice), not the VXLAN head-end
+        // FDB — so they are intentionally absent from `desired`. Surface
+        // them here so a missing VXLAN flood entry reads as "by design".
+        let sr_trees = self.sr_p2mp_remotes(vni);
+        if !sr_trees.is_empty() {
+            tracing::debug!(
+                "EVPN VNI {vni}: {} SR P2MP tree remote(s) recorded, excluded from VXLAN flood: {sr_trees:?}",
+                sr_trees.len()
+            );
+        }
         let entry = self.vnis.entry(vni).or_default();
         for &group in desired.difference(&entry.installed) {
             let _ = rib.send(rib::Message::MdbAdd {
@@ -5952,13 +5992,20 @@ fn route_evpn_export_selected(
             // type 0x0A carries the AR-IP) and reconcile the role-aware flood
             // list, rather than blindly flooding toward the originating IP.
             if let Some(vni) = extract_vni_from_attr(&best.attr) {
-                let ar_ip = best
-                    .attr
-                    .pmsi_tunnel
-                    .as_ref()
-                    .filter(|p| p.is_assisted_replication())
-                    .map(|p| p.endpoint);
-                bgp.local_rib.evpn_flood.update_remote(vni, *orig, ar_ip);
+                let pmsi = best.attr.pmsi_tunnel.as_ref();
+                if let Some(p) = pmsi.filter(|p| p.is_sr_p2mp()) {
+                    // SR P2MP tree (RFC 9574 -> RFC 9524): record the
+                    // remote's (Root, Tree-ID); BUM to it rides the
+                    // replication tree, not a VXLAN head-end FDB entry.
+                    bgp.local_rib
+                        .evpn_flood
+                        .update_sr_remote(vni, *orig, p.tree_id.unwrap_or(0));
+                } else {
+                    let ar_ip = pmsi
+                        .filter(|p| p.is_assisted_replication())
+                        .map(|p| p.endpoint);
+                    bgp.local_rib.evpn_flood.update_remote(vni, *orig, ar_ip);
+                }
                 bgp.local_rib.evpn_flood.reconcile(vni, bgp.rib_client);
             } else {
                 eprintln!(
@@ -12226,6 +12273,44 @@ mod evpn_flood_tests {
         assert_eq!(f.desired(100), BTreeSet::from([ip("10.0.0.1")]));
         assert_eq!(f.desired(200), BTreeSet::from([ip("10.0.0.2")]));
         assert!(f.desired(300).is_empty());
+    }
+
+    /// SR P2MP remotes are recorded with their Tree-ID and kept out of the
+    /// VXLAN head-end flood set (their BUM rides the replication tree).
+    #[test]
+    fn sr_p2mp_remotes_recorded_and_excluded_from_flood() {
+        let mut f = EvpnFloodState::default();
+        f.update_remote(100, ip("10.0.0.1"), None); // plain IR remote
+        f.update_sr_remote(100, ip("10.0.0.7"), 4242); // SR P2MP tree remote
+        // Only the IR remote floods via VXLAN; the SR P2MP Root does not.
+        assert_eq!(f.desired(100), BTreeSet::from([ip("10.0.0.1")]));
+        assert_eq!(f.sr_p2mp_remotes(100), vec![(ip("10.0.0.7"), 4242)]);
+    }
+
+    /// A remote that flips tunnel type moves between the two maps rather
+    /// than lingering in both; a withdraw clears whichever map it was in.
+    #[test]
+    fn remote_tunnel_type_flip_is_exclusive() {
+        let mut f = EvpnFloodState::default();
+        f.update_remote(100, ip("10.0.0.5"), None);
+        assert_eq!(f.desired(100), BTreeSet::from([ip("10.0.0.5")]));
+        assert!(f.sr_p2mp_remotes(100).is_empty());
+
+        // Flip IR -> SR P2MP: leaves the flood set, enters the SR record.
+        f.update_sr_remote(100, ip("10.0.0.5"), 7);
+        assert!(f.desired(100).is_empty());
+        assert_eq!(f.sr_p2mp_remotes(100), vec![(ip("10.0.0.5"), 7)]);
+
+        // Flip back SR P2MP -> IR.
+        f.update_remote(100, ip("10.0.0.5"), None);
+        assert_eq!(f.desired(100), BTreeSet::from([ip("10.0.0.5")]));
+        assert!(f.sr_p2mp_remotes(100).is_empty());
+
+        // Withdraw clears it entirely.
+        f.update_sr_remote(100, ip("10.0.0.5"), 9);
+        f.remove_remote(100, ip("10.0.0.5"));
+        assert!(f.desired(100).is_empty());
+        assert!(f.sr_p2mp_remotes(100).is_empty());
     }
 }
 
