@@ -665,14 +665,9 @@ module ietf-bgp {
                  graceful restart with the peer";
           }
         }
-        container prefix-set {
-          leaf in {
-            type string;
-          }
-          leaf out {
-            type string;
-          }
-        }
+        // The per-neighbor `prefix-set {in,out}` moved under
+        // `afi-safi <name> prefix-set {in,out}` (per-family). No
+        // backward-compatibility alias is kept (unlike `policy`).
 
         container prefix-limit {
           description

@@ -1950,13 +1950,14 @@ impl LocalRib {
 // RIB update from peer.
 pub fn route_apply_policy_in(
     peer: &Peer,
+    afi_safi: AfiSafi,
     nlri: &Ipv4Nlri,
     bgp_attr: BgpAttr,
     weight: u32,
 ) -> Option<PolicyDecision> {
     apply_policy_in_pure(
-        peer.prefix_set.get(&InOut::Input),
-        peer.policy_list.get(&InOut::Input),
+        peer.prefix_set_at(afi_safi, InOut::Input),
+        peer.policy_list_at(afi_safi, InOut::Input),
         peer.router_id,
         nlri,
         bgp_attr,
@@ -2033,7 +2034,8 @@ pub fn route_apply_policy_in_evpn(
     bgp_attr: BgpAttr,
     weight: u32,
 ) -> Option<PolicyDecision> {
-    let config = peer.policy_list.get(&InOut::Input);
+    let evpn = AfiSafi::new(Afi::L2vpn, Safi::Evpn);
+    let config = peer.policy_list_at(evpn, InOut::Input);
     if config.name.is_some() {
         let Some(policy_list) = &config.policy_list else {
             return None;
@@ -2057,7 +2059,8 @@ pub fn route_apply_policy_out_evpn(
     bgp_attr: BgpAttr,
     weight: u32,
 ) -> Option<PolicyDecision> {
-    let config = peer.policy_list.get(&InOut::Output);
+    let evpn = AfiSafi::new(Afi::L2vpn, Safi::Evpn);
+    let config = peer.policy_list_at(evpn, InOut::Output);
     if config.name.is_some() {
         let Some(policy_list) = &config.policy_list else {
             return None;
@@ -2095,13 +2098,14 @@ pub fn route_apply_policy_out(
 /// silently ignored.
 pub fn route_apply_policy_in_v6(
     peer: &Peer,
+    afi_safi: AfiSafi,
     nlri: &Ipv6Nlri,
     bgp_attr: BgpAttr,
     weight: u32,
 ) -> Option<PolicyDecision> {
     apply_policy_net(
-        peer.prefix_set.get(&InOut::Input),
-        peer.policy_list.get(&InOut::Input),
+        peer.prefix_set_at(afi_safi, InOut::Input),
+        peer.policy_list_at(afi_safi, InOut::Input),
         peer.router_id,
         IpNet::V6(nlri.prefix),
         bgp_attr,
@@ -2113,13 +2117,14 @@ pub fn route_apply_policy_in_v6(
 /// projection of [`apply_policy_net`].
 pub fn route_apply_policy_out_v6(
     peer: &Peer,
+    afi_safi: AfiSafi,
     nlri: &Ipv6Nlri,
     bgp_attr: BgpAttr,
     weight: u32,
 ) -> Option<PolicyDecision> {
     apply_policy_net(
-        peer.prefix_set.get(&InOut::Output),
-        peer.policy_list.get(&InOut::Output),
+        peer.prefix_set_at(afi_safi, InOut::Output),
+        peer.policy_list_at(afi_safi, InOut::Output),
         peer.router_id,
         IpNet::V6(nlri.prefix),
         bgp_attr,
@@ -2263,7 +2268,13 @@ pub fn route_ipv4_update(
     let stale = stale || attr_has_llgr_stale(attr);
     let decision = {
         let peer = peers.get_mut_by_idx(ident).expect("peer must exist");
-        route_apply_policy_in(peer, nlri, attr.clone(), 0)
+        route_apply_policy_in(
+            peer,
+            AfiSafi::new(Afi::Ip, Safi::Unicast),
+            nlri,
+            attr.clone(),
+            0,
+        )
     };
     let jobs = route_ipv4_update_decided(
         peer_ident,
@@ -2449,8 +2460,9 @@ fn any_established_out_policy_v4(peers: &PeerMap) -> bool {
         .into_iter()
         .filter_map(|id| peers.get_by_idx(id))
         .any(|p| {
-            p.policy_list.get(&InOut::Output).name.is_some()
-                || p.prefix_set.get(&InOut::Output).name.is_some()
+            let v4u = AfiSafi::new(Afi::Ip, Safi::Unicast);
+            p.policy_list_at(v4u, InOut::Output).name.is_some()
+                || p.prefix_set_at(v4u, InOut::Output).name.is_some()
         })
 }
 
@@ -3579,7 +3591,13 @@ fn compute_advertise_outcome_v6(
     add_path: bool,
 ) -> AdvertiseOutcome<Ipv6Nlri> {
     if let Some((nlri, attr)) = route_update_ipv6(peer, prefix, best, bgp, add_path) {
-        if let Some(decision) = route_apply_policy_out_v6(peer, &nlri, attr, best.weight) {
+        if let Some(decision) = route_apply_policy_out_v6(
+            peer,
+            AfiSafi::new(Afi::Ip6, Safi::Unicast),
+            &nlri,
+            attr,
+            best.weight,
+        ) {
             AdvertiseOutcome::Advertise(nlri, decision.attr)
         } else {
             AdvertiseOutcome::Withdraw
@@ -4539,7 +4557,13 @@ fn route_soft_in_peer_table(
             let pre_weight = stored.weight;
             let post_attr_opt = {
                 let peer = peers.get_mut_by_idx(peer_idx).expect("peer exists");
-                route_apply_policy_in(peer, &nlri, pre_attr, pre_weight)
+                route_apply_policy_in(
+                    peer,
+                    AfiSafi::new(Afi::Ip, Safi::Unicast),
+                    &nlri,
+                    pre_attr,
+                    pre_weight,
+                )
             };
 
             match post_attr_opt {
@@ -4781,7 +4805,13 @@ pub fn route_ipv6_update(
     // inbound policy.)
     let decision = {
         let peer = peers.get_by_idx(ident).expect("peer must exist");
-        route_apply_policy_in_v6(peer, nlri, attr.clone(), 0)
+        route_apply_policy_in_v6(
+            peer,
+            AfiSafi::new(Afi::Ip6, Safi::Unicast),
+            nlri,
+            attr.clone(),
+            0,
+        )
     };
 
     let dep = match rd {
@@ -5073,7 +5103,13 @@ pub fn route_labelv4_update(
     // unicast ingest — LU previously applied no per-neighbor policy.
     let decision = {
         let peer = peers.get_by_idx(ident).expect("peer must exist");
-        route_apply_policy_in(peer, &lu.nlri, attr.clone(), 0)
+        route_apply_policy_in(
+            peer,
+            AfiSafi::new(Afi::Ip, Safi::MplsLabel),
+            &lu.nlri,
+            attr.clone(),
+            0,
+        )
     };
 
     // Adj-RIB-In keeps the pre-policy attribute (soft-reconfig replay).
@@ -5191,7 +5227,13 @@ pub fn route_labelv6_update(
     // `route_labelv4_update`). `None` drops the route.
     let decision = {
         let peer = peers.get_by_idx(ident).expect("peer must exist");
-        route_apply_policy_in_v6(peer, &lu.nlri, attr.clone(), 0)
+        route_apply_policy_in_v6(
+            peer,
+            AfiSafi::new(Afi::Ip6, Safi::MplsLabel),
+            &lu.nlri,
+            attr.clone(),
+            0,
+        )
     };
 
     // Adj-RIB-In keeps the pre-policy attribute (soft-reconfig replay).
@@ -8743,7 +8785,13 @@ impl LabeledAfi for LabeledV6 {
         attr: BgpAttr,
         weight: u32,
     ) -> Option<PolicyDecision> {
-        route_apply_policy_out_v6(peer, nlri, attr, weight)
+        route_apply_policy_out_v6(
+            peer,
+            AfiSafi::new(Afi::Ip6, Safi::MplsLabel),
+            nlri,
+            attr,
+            weight,
+        )
     }
     fn reach(nhop: IpAddr, label: Label, nlri: Ipv6Nlri) -> MpReachAttr {
         MpReachAttr::Labelv6 {
@@ -9817,7 +9865,13 @@ pub fn route_sync_ipv6(peer: &mut Peer, bgp: &mut BgpTop) {
         // event-driven advertise does, mirroring the v4 sync path —
         // otherwise an out-policy-denied prefix leaks on the initial
         // sync and is only suppressed on a later update.
-        let Some(decision) = route_apply_policy_out_v6(peer, &nlri, attr, rib.weight) else {
+        let Some(decision) = route_apply_policy_out_v6(
+            peer,
+            AfiSafi::new(Afi::Ip6, Safi::Unicast),
+            &nlri,
+            attr,
+            rib.weight,
+        ) else {
             continue;
         };
         rib.attr = bgp.attr_store.intern(decision.attr);
@@ -9949,7 +10003,13 @@ pub fn route_sync_vpnv6(peer: &mut Peer, bgp: &mut BgpTop) {
             let Some((nlri, attr)) = route_update_ipv6(peer, &prefix, &rib, bgp, add_path) else {
                 continue;
             };
-            let Some(decision) = route_apply_policy_out_v6(peer, &nlri, attr, rib.weight) else {
+            let Some(decision) = route_apply_policy_out_v6(
+                peer,
+                AfiSafi::new(Afi::Ip6, Safi::MplsVpn),
+                &nlri,
+                attr,
+                rib.weight,
+            ) else {
                 continue;
             };
             let attr = decision.attr;
@@ -10238,7 +10298,13 @@ pub fn route_sync_labelv6(peer: &mut Peer, bgp: &mut BgpTop) {
             continue;
         };
         // Outbound policy on the establish-time dump (see route_sync_labelv4).
-        let Some(decision) = route_apply_policy_out_v6(peer, &nlri, attr, best.weight) else {
+        let Some(decision) = route_apply_policy_out_v6(
+            peer,
+            AfiSafi::new(Afi::Ip6, Safi::MplsLabel),
+            &nlri,
+            attr,
+            best.weight,
+        ) else {
             continue;
         };
         let mut update = UpdatePacket::with_max_packet_size(peer.max_packet_size());

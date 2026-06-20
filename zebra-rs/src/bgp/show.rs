@@ -2148,6 +2148,75 @@ struct Neighbor<'a> {
     /// the same cases as `nd_discovered_secs_ago`.
     #[serde(skip_serializing_if = "Option::is_none")]
     nd_refreshed_secs_ago: Option<u64>,
+
+    /// Configured route-policy / prefix-set bindings: one entry per
+    /// address family that names something, plus a `(peer-wide)` entry
+    /// for the legacy top-level `policy` / inherited fallback. Empty
+    /// when nothing is bound.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    policy_bindings: Vec<PolicyBindingView>,
+}
+
+/// One row of a neighbor's configured policy/prefix-set, scoped either
+/// to an address family (`ipv4`, `evpn`, …) or to the `(peer-wide)`
+/// legacy fallback. Only the bound directions are `Some`.
+#[derive(Debug, Serialize)]
+struct PolicyBindingView {
+    scope: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    policy_in: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    policy_out: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    prefix_set_in: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    prefix_set_out: Option<String>,
+}
+
+impl PolicyBindingView {
+    fn is_empty(&self) -> bool {
+        self.policy_in.is_none()
+            && self.policy_out.is_none()
+            && self.prefix_set_in.is_none()
+            && self.prefix_set_out.is_none()
+    }
+}
+
+/// Collect a neighbor's per-AFI bindings (sorted by family) followed by
+/// the peer-wide legacy fallback, dropping rows that name nothing.
+fn collect_policy_bindings(peer: &Peer) -> Vec<PolicyBindingView> {
+    use super::policy::InOut;
+    let mut families: std::collections::BTreeSet<AfiSafi> = std::collections::BTreeSet::new();
+    families.extend(peer.policy_list.keys().copied());
+    families.extend(peer.prefix_set.keys().copied());
+
+    let mut out: Vec<PolicyBindingView> = Vec::new();
+    for af in families {
+        let pl = peer.policy_list.get(&af);
+        let ps = peer.prefix_set.get(&af);
+        let row = PolicyBindingView {
+            scope: afi_safi_config_name(&af).to_string(),
+            policy_in: pl.and_then(|io| io.get(&InOut::Input).name.clone()),
+            policy_out: pl.and_then(|io| io.get(&InOut::Output).name.clone()),
+            prefix_set_in: ps.and_then(|io| io.get(&InOut::Input).name.clone()),
+            prefix_set_out: ps.and_then(|io| io.get(&InOut::Output).name.clone()),
+        };
+        if !row.is_empty() {
+            out.push(row);
+        }
+    }
+
+    let legacy = PolicyBindingView {
+        scope: "(peer-wide)".to_string(),
+        policy_in: peer.policy_list_legacy.get(&InOut::Input).name.clone(),
+        policy_out: peer.policy_list_legacy.get(&InOut::Output).name.clone(),
+        prefix_set_in: peer.prefix_set_legacy.get(&InOut::Input).name.clone(),
+        prefix_set_out: peer.prefix_set_legacy.get(&InOut::Output).name.clone(),
+    };
+    if !legacy.is_empty() {
+        out.push(legacy);
+    }
+    out
 }
 
 const ONE_DAY_SECOND: u64 = 60 * 60 * 24;
@@ -2328,6 +2397,7 @@ fn fetch(peer: &Peer) -> Neighbor<'_> {
         nd_discovered_secs_ago,
         nd_refresh_count,
         nd_refreshed_secs_ago,
+        policy_bindings: collect_policy_bindings(peer),
     };
 
     // Timers.
@@ -2591,6 +2661,29 @@ fn render(out: &mut String, neighbor: &Neighbor) -> std::fmt::Result {
             ""
         };
         writeln!(out, "  Neighbor-group: {group}{suffix}")?;
+    }
+
+    // Configured route-policy / prefix-set, per address family, with the
+    // legacy peer-wide fallback last. A family-scoped binding takes
+    // priority over `(peer-wide)` for routes of that family.
+    if !neighbor.policy_bindings.is_empty() {
+        writeln!(out, "  Policy:")?;
+        for b in &neighbor.policy_bindings {
+            let mut parts: Vec<String> = Vec::new();
+            if let Some(ref n) = b.policy_in {
+                parts.push(format!("policy in {n}"));
+            }
+            if let Some(ref n) = b.policy_out {
+                parts.push(format!("policy out {n}"));
+            }
+            if let Some(ref n) = b.prefix_set_in {
+                parts.push(format!("prefix-set in {n}"));
+            }
+            if let Some(ref n) = b.prefix_set_out {
+                parts.push(format!("prefix-set out {n}"));
+            }
+            writeln!(out, "    {}: {}", b.scope, parts.join(", "))?;
+        }
     }
 
     writeln!(out)?;
@@ -3818,6 +3911,40 @@ Neighbor        V         AS   MsgRcvd   MsgSent   TblVer  InQ OutQ  Up/Down Sta
         );
     }
 
+    /// `show bgp neighbor` lists per-AFI policy/prefix-set bindings and
+    /// the legacy peer-wide fallback, family-scoped rows first.
+    #[test]
+    fn policy_block_lists_per_afi_and_legacy() {
+        let mut out = String::new();
+        let mut n = minimal_neighbor(None);
+        n.policy_bindings = vec![
+            PolicyBindingView {
+                scope: "ipv4".to_string(),
+                policy_in: Some("IN4".to_string()),
+                policy_out: None,
+                prefix_set_in: Some("PFX4".to_string()),
+                prefix_set_out: None,
+            },
+            PolicyBindingView {
+                scope: "(peer-wide)".to_string(),
+                policy_in: Some("LEGACY".to_string()),
+                policy_out: None,
+                prefix_set_in: None,
+                prefix_set_out: None,
+            },
+        ];
+        render(&mut out, &n).unwrap();
+        assert!(out.contains("  Policy:"), "missing Policy header:\n{out}");
+        assert!(
+            out.contains("    ipv4: policy in IN4, prefix-set in PFX4"),
+            "missing per-AFI row:\n{out}"
+        );
+        assert!(
+            out.contains("    (peer-wide): policy in LEGACY"),
+            "missing legacy row:\n{out}"
+        );
+    }
+
     /// JSON output for an interface-keyed peer carries the three ND
     /// fields; an address-keyed peer must not carry them.
     #[test]
@@ -3897,6 +4024,7 @@ Neighbor        V         AS   MsgRcvd   MsgSent   TblVer  InQ OutQ  Up/Down Sta
             nd_discovered_secs_ago: None,
             nd_refresh_count: None,
             nd_refreshed_secs_ago: None,
+            policy_bindings: Vec::new(),
         }
     }
 }

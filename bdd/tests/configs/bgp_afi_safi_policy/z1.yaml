@@ -1,28 +1,18 @@
-prefix-set:
-- name: out-test
-  prefixes:
-  - prefix: 10.0.0.1/32
-policy:
-- name: out-test
-  entry:
-  - number: 10
-    action: permit
-    match:
-      prefix-set: out-test
 router:
   bgp:
     global:
       as: 65001
       router-id: 192.168.0.1
+    timer:
+      adv-interval:
+        ebgp: 1
     neighbor:
     - remote-address: 192.168.0.2
       afi-safi:
       - name: ipv4
         enabled: true
-      policy:
-        out: out-test
       enabled: true
-      remote-as: 65001
+      remote-as: 65002
     afi-safi:
     - name: ipv4
       network:

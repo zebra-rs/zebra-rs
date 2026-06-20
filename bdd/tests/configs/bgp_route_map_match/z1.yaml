@@ -9,7 +9,7 @@ policy:
   - number: 10
     action: permit
     match:
-      prefix: ALL-V4
+      prefix-set: ALL-V4
     set:
       med:
         set: 100

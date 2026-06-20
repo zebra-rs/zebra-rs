@@ -12,7 +12,7 @@ policy:
   - number: 10
     action: permit
     match:
-      prefix: adv-1111
+      prefix-set: adv-1111
     set:
       community:
         name: comm-no-advertise

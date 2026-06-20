@@ -1,0 +1,24 @@
+# Legacy peer-wide (top-level) inbound policy that denies everything.
+# Kept for backward compatibility (Task B); applies to every family that
+# has no per-AFI override of its own.
+policy:
+- name: DENY-ALL
+  entry:
+  - number: 10
+    action: deny
+router:
+  bgp:
+    global:
+      as: 65002
+      router-id: 192.168.0.2
+    neighbor:
+    - remote-address: 192.168.0.1
+      afi-safi:
+      - name: ipv4
+        enabled: true
+      soft-reconfiguration:
+        inbound: true
+      policy:
+        in: DENY-ALL
+      enabled: true
+      remote-as: 65001

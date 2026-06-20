@@ -17,11 +17,11 @@ policy:
   - number: 10
     action: deny
     match:
-      prefix: IN-DENY6
+      prefix-set: IN-DENY6
   - number: 20
     action: permit
     match:
-      prefix: IN-MED6
+      prefix-set: IN-MED6
     set:
       med:
         set: 50
@@ -41,8 +41,8 @@ router:
         enabled: true
       - name: ipv6
         enabled: true
-      policy:
-        in: IN6
+        policy:
+          in: IN6
     afi-safi:
     - name: ipv6
       redistribute:

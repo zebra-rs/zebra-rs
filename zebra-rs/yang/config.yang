@@ -2834,7 +2834,7 @@ module config {
         }
         container "match" {
           ext:sort "7";
-          leaf "prefix" {
+          leaf "prefix-set" {
             type string;
             description
               "Reference to a `prefix-set` by name.";

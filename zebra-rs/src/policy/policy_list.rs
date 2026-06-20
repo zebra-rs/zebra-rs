@@ -455,7 +455,7 @@ impl ConfigBuilder {
                 list.entry.remove(&seq).context(ARG_ERR)?;
                 Ok(())
             })
-            .path("/entry/match/prefix")
+            .path("/entry/match/prefix-set")
             .set(|policy, cache, name, seq, args| {
                 let list = cache_get(policy, cache, &name).context(ARG_ERR)?;
                 let entry = list.entry(seq);

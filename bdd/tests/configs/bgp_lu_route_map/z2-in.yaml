@@ -12,7 +12,7 @@ policy:
   - number: 10
     action: deny
     match:
-      prefix: IN-DENY-LU
+      prefix-set: IN-DENY-LU
   - number: 20
     action: permit
 router:
@@ -27,5 +27,5 @@ router:
       afi-safi:
       - name: label-v4
         enabled: true
-      policy:
-        in: IN-LU
+        policy:
+          in: IN-LU

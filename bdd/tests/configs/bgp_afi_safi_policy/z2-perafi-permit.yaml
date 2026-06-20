@@ -1,0 +1,31 @@
+# Per-AFI ipv4 inbound policy that permits everything, layered on top of
+# the still-present legacy DENY-ALL. The per-AFI binding wins for ipv4
+# (Task B/C priority), so the routes the legacy policy denied are
+# accepted again.
+policy:
+- name: DENY-ALL
+  entry:
+  - number: 10
+    action: deny
+- name: PERMIT-ALL
+  entry:
+  - number: 10
+    action: permit
+router:
+  bgp:
+    global:
+      as: 65002
+      router-id: 192.168.0.2
+    neighbor:
+    - remote-address: 192.168.0.1
+      afi-safi:
+      - name: ipv4
+        enabled: true
+        policy:
+          in: PERMIT-ALL
+      soft-reconfiguration:
+        inbound: true
+      policy:
+        in: DENY-ALL
+      enabled: true
+      remote-as: 65001

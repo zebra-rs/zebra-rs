@@ -12,11 +12,11 @@ policy:
   - number: 10
     action: deny
     match:
-      prefix: DENY
+      prefix-set: DENY
   - number: 20
     action: permit
     match:
-      prefix: MED
+      prefix-set: MED
     set:
       med:
         set: 50
