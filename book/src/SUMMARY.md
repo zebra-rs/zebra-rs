@@ -55,6 +55,7 @@
   - [LSP MTU and Fragmentation](ch-07-05-isis-lsp-mtu.md)
   - [Route Redistribution](ch-07-06-isis-redistribution.md)
   - [Passive Interfaces](ch-07-07-isis-passive.md)
+  - [Egress Protection (Mirror SID)](ch-07-08-isis-egress-protection.md)
 - [OSPFv2](ch-08-00-ospf.md)
   - [Configuration](ch-08-01-ospf-configuration.md)
   - [BFD](ch-08-02-ospf-bfd.md)
