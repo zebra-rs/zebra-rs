@@ -1,0 +1,189 @@
+name: Build .deb (reusable)
+
+# Reusable build of all six .deb variants (jammy/noble/resolute x amd64/arm64).
+# Called by nightly.yaml (nightly: true) and release.yaml (nightly: false).
+# Each matrix leg uploads an artifact named `deb-<dist>-<arch>`.
+
+on:
+  workflow_call:
+    inputs:
+      nightly:
+        description: "Stamp a ~nightlyYYYYMMDD version so apt upgrade advances daily"
+        type: boolean
+        default: false
+
+jobs:
+  # =====================================================================
+  # Native runners: Ubuntu 22.04 and 24.04
+  # =====================================================================
+  build-native:
+    name: Build ${{ matrix.dist }}-${{ matrix.arch }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { dist: jammy, arch: amd64, runner: ubuntu-22.04 }
+          - { dist: jammy, arch: arm64, runner: ubuntu-22.04-arm }
+          - { dist: noble, arch: amd64, runner: ubuntu-24.04 }
+          - { dist: noble, arch: arm64, runner: ubuntu-24.04-arm }
+
+    runs-on: ${{ matrix.runner }}
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Rust
+        uses: actions-rust-lang/setup-rust-toolchain@v1
+        with:
+          cache-key: ${{ matrix.dist }}
+
+      # `make -C packaging` builds the XDP BFD Echo helper (offload/xdp-bfd-echo) for
+      # bpfel-unknown-none: needs nightly + rust-src and bpf-linker (links LLVM).
+      # Versions match the validated combo bpf-linker 0.10.3 / LLVM 18.1.
+      - name: Install XDP/eBPF toolchain
+        run: |
+          rustup toolchain install nightly --component rust-src
+          wget -qO /tmp/llvm.sh https://apt.llvm.org/llvm.sh
+          chmod +x /tmp/llvm.sh
+          sudo /tmp/llvm.sh 18
+          echo "/usr/lib/llvm-18/bin" >> "$GITHUB_PATH"
+          export PATH="/usr/lib/llvm-18/bin:$PATH"
+          cargo install bpf-linker --version 0.10.3 --locked
+
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update -y
+          sudo apt-get install -y protobuf-compiler libnanomsg-dev bison xxd libpam0g-dev
+
+      - name: Install nfpm
+        run: |
+          echo 'deb [trusted=yes] https://repo.goreleaser.com/apt/ /' | \
+            sudo tee /etc/apt/sources.list.d/goreleaser.list
+          sudo apt-get update
+          sudo apt-get install -y nfpm
+
+      - name: Build vty
+        run: make -C vty
+
+      # Nightly packages need a monotonically increasing, pre-release-sorting
+      # version or `apt upgrade` never advances. 26.6.2~nightlyYYYYMMDD sorts
+      # BELOW a future stable 26.6.2 (Debian '~'); version_schema:none keeps the
+      # '~' verbatim (nfpm's default semver schema would reject/mangle it).
+      # Skipped for stable releases, which use the clean version from the file.
+      - name: Stamp nightly package version
+        if: ${{ inputs.nightly }}
+        run: |
+          STAMP="$(cat version)~nightly$(date -u +%Y%m%d)"
+          sed -i -E "s|^version:.*|version: \"$STAMP\"\nversion_schema: none|" \
+            packaging/nfpm-amd64.yaml packaging/nfpm-arm64.yaml
+          echo "Nightly package version: $STAMP"
+
+      - name: Build .deb
+        run: make -C packaging ${{ matrix.arch }}
+
+      - name: Rename .deb with dist suffix
+        run: |
+          cd packaging
+          for f in *.deb; do
+            # zebra-rs_0.5.0_arm64.deb -> zebra-rs_0.5.0-noble_arm64.deb
+            new=$(echo "$f" | sed -E "s/_([^_]+)_([^_]+)\.deb$/_\1-${{ matrix.dist }}_\2.deb/")
+            mv "$f" "$new"
+          done
+          ls -la *.deb
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: deb-${{ matrix.dist }}-${{ matrix.arch }}
+          path: ./packaging/*.deb
+
+  # =====================================================================
+  # Container-based: Ubuntu 26.04 (until native runners are available)
+  # https://github.com/actions/runner-images/issues/13964
+  # =====================================================================
+  build-container:
+    name: Build resolute-${{ matrix.arch }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { arch: amd64, runner: ubuntu-24.04 }
+          - { arch: arm64, runner: ubuntu-24.04-arm }
+
+    runs-on: ${{ matrix.runner }}
+    container:
+      image: ubuntu:26.04
+
+    steps:
+      - name: Install container base tools
+        run: |
+          apt-get update
+          apt-get install -y curl git ca-certificates sudo build-essential pkg-config xxd
+
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Rust
+        uses: actions-rust-lang/setup-rust-toolchain@v1
+
+      # The helper (offload/xdp-bfd-echo) needs nightly + rust-src and bpf-linker (LLVM 18,
+      # matching the validated bpf-linker 0.10.3). Root container, so no sudo.
+      # llvm.sh runs `lsb_release`/`gpg`/`add-apt-repository` and needs wget; the
+      # base tools install none of them — without lsb-release the script aborts at
+      # `DISTRO=$(lsb_release -is)` (exit 127) under its `set -euxo pipefail`.
+      # apt.llvm.org has a resolute (26.04) repo dir but no llvm-toolchain-resolute-18
+      # suite yet, so auto-detection would 404. Pin the codename to noble (24.04)
+      # with `-n noble`; its clang-18/lld-18 install and run fine on resolute.
+      # Revisit (drop `-n noble`) once apt.llvm.org publishes LLVM 18 for resolute.
+      - name: Install XDP/eBPF toolchain
+        run: |
+          apt-get install -y wget lsb-release gnupg software-properties-common
+          rustup toolchain install nightly --component rust-src
+          wget -qO /tmp/llvm.sh https://apt.llvm.org/llvm.sh
+          chmod +x /tmp/llvm.sh
+          /tmp/llvm.sh 18 -n noble
+          echo "/usr/lib/llvm-18/bin" >> "$GITHUB_PATH"
+          export PATH="/usr/lib/llvm-18/bin:$PATH"
+          cargo install bpf-linker --version 0.10.3 --locked
+
+      - name: Install build dependencies
+        run: |
+          apt-get update -y
+          apt-get install -y protobuf-compiler libnanomsg-dev bison xxd libpam0g-dev
+
+      - name: Install nfpm
+        run: |
+          echo 'deb [trusted=yes] https://repo.goreleaser.com/apt/ /' \
+            > /etc/apt/sources.list.d/goreleaser.list
+          apt-get update
+          apt-get install -y nfpm
+
+      - name: Build vty
+        run: make -C vty
+
+      - name: Stamp nightly package version
+        if: ${{ inputs.nightly }}
+        run: |
+          STAMP="$(cat version)~nightly$(date -u +%Y%m%d)"
+          sed -i -E "s|^version:.*|version: \"$STAMP\"\nversion_schema: none|" \
+            packaging/nfpm-amd64.yaml packaging/nfpm-arm64.yaml
+          echo "Nightly package version: $STAMP"
+
+      - name: Build .deb
+        run: make -C packaging ${{ matrix.arch }}
+
+      - name: Rename .deb with dist suffix
+        run: |
+          cd packaging
+          for f in *.deb; do
+            new=$(echo "$f" | sed -E "s/_([^_]+)_([^_]+)\.deb$/_\1-resolute_\2.deb/")
+            mv "$f" "$new"
+          done
+          ls -la *.deb
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: deb-resolute-${{ matrix.arch }}
+          path: ./packaging/*.deb

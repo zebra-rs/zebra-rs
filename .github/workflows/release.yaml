@@ -1,32 +1,52 @@
-name: Nightly Build
+name: Stable Release
+
+# Push a tag `v<X.Y.Z>` matching the `version` file to build all six .debs and
+# publish them: a `v<X.Y.Z>` GitHub release for direct download, plus the
+# per-codename `apt-<codename>` flat APT repositories (when APT_PUBLISH_ENABLED).
+#
+# Release flow:
+#   1. Bump the `version` file, then `packaging/version-update.sh`
+#   2. Commit, then `git tag "v$(cat version)" && git push origin "v$(cat version)"`
 
 on:
-  schedule:
-    - cron: '0 18 * * *'    # 03:00 JST (UTC 18:00)
+  push:
+    tags:
+      - 'v*'
   workflow_dispatch:
 
 permissions:
-  contents: write           # Required to push the nightly tag and release
+  contents: write
 
 jobs:
+  check:
+    name: Verify tag matches version file
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Tag vs version file
+        run: |
+          tag="${GITHUB_REF_NAME#v}"
+          ver="$(cat version)"
+          echo "ref=$GITHUB_REF_NAME  tag=$tag  version-file=$ver"
+          if [ "$tag" != "$ver" ]; then
+            echo "::error::Release ref '$GITHUB_REF_NAME' must be tag 'v$ver' (the version file). Bump the version file first, then tag."
+            exit 1
+          fi
+
   build:
+    needs: check
     uses: ./.github/workflows/build-debs.yaml
     with:
-      nightly: true
+      nightly: false
 
   # =====================================================================
-  # Single 'nightly' release: all six .debs for direct download
+  # GitHub release v<X.Y.Z>: all six .debs for direct download
   # =====================================================================
   release:
-    name: Publish Nightly Release
+    name: Publish Stable Release
     needs: build
     runs-on: ubuntu-latest
     steps:
-      - name: Checkout code
-        uses: actions/checkout@v4
-        with:
-          fetch-depth: 0    # Needed to move tags
-
       - name: Download all build artifacts
         uses: actions/download-artifact@v4
         with:
@@ -37,21 +57,13 @@ jobs:
       - name: List collected .deb files
         run: ls -la artifacts/
 
-      - name: Force-move nightly tag to current commit
-        run: |
-          git config user.name  "github-actions[bot]"
-          git config user.email "github-actions[bot]@users.noreply.github.com"
-          git tag -f nightly
-          git push -f origin nightly
-
       - name: Publish to GitHub Releases
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: nightly
-          name: "Nightly Build"
-          prerelease: true
+          tag_name: ${{ github.ref_name }}
+          name: ${{ github.ref_name }}
           body: |
-            Nightly build from commit ${{ github.sha }}
+            zebra-rs ${{ github.ref_name }}
 
             ## Downloads
 
@@ -63,18 +75,18 @@ jobs:
             | 24.04 (noble)      | `*-noble_amd64.deb`      | `*-noble_arm64.deb`      |
             | 26.04 (resolute)   | `*-resolute_amd64.deb`   | `*-resolute_arm64.deb`   |
 
-            Or install via apt (nightly channel): https://zebra.rs/apt/
+            Or install via apt: https://zebra.rs/apt/
           files: artifacts/*.deb
 
   # =====================================================================
-  # Per-codename nightly-<codename> flat APT repositories (nightly channel)
+  # Per-codename apt-<codename> flat APT repositories (stable channel)
   # =====================================================================
   publish-apt:
-    name: Publish nightly APT repo
+    name: Publish stable APT repo
     needs: build
     if: ${{ vars.APT_PUBLISH_ENABLED == 'true' }}
     uses: ./.github/workflows/publish-apt.yaml
     with:
-      channel: nightly
-      prerelease: true
+      channel: apt
+      prerelease: false
     secrets: inherit
