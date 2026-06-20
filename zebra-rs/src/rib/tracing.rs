@@ -57,6 +57,7 @@ struct State {
     fib_neighbor: AtomicBool,
     fib_interface: AtomicBool,
     fib_interface_detail: AtomicBool,
+    fib_link: AtomicBool,
     fib_vrf: AtomicBool,
     fib_srv6: AtomicBool,
     fib_srv6_detail: AtomicBool,
@@ -93,6 +94,7 @@ impl State {
             fib_neighbor: AtomicBool::new(false),
             fib_interface: AtomicBool::new(false),
             fib_interface_detail: AtomicBool::new(false),
+            fib_link: AtomicBool::new(false),
             fib_vrf: AtomicBool::new(false),
             fib_srv6: AtomicBool::new(false),
             fib_srv6_detail: AtomicBool::new(false),
@@ -145,6 +147,7 @@ impl State {
             "/fib/neighbor" => self.fib_neighbor.store(set, Relaxed),
             "/fib/interface" => toggle(&self.fib_interface, &self.fib_interface_detail, op),
             "/fib/interface/detail" => detail(&self.fib_interface, &self.fib_interface_detail, op),
+            "/fib/link" => self.fib_link.store(set, Relaxed),
             "/fib/vrf" => self.fib_vrf.store(set, Relaxed),
             "/fib/srv6" => toggle(&self.fib_srv6, &self.fib_srv6_detail, op),
             "/fib/srv6/detail" => detail(&self.fib_srv6, &self.fib_srv6_detail, op),
@@ -228,6 +231,9 @@ pub fn fib_nexthop() -> bool {
 pub fn fib_srv6() -> bool {
     STATE.on(&STATE.fib_srv6)
 }
+pub fn fib_link() -> bool {
+    STATE.on(&STATE.fib_link)
+}
 pub fn fib_l2_vxlan() -> bool {
     STATE.on(&STATE.fib_l2_vxlan)
 }
@@ -274,12 +280,22 @@ mod tests {
     }
 
     #[test]
+    fn fib_link_toggle_set_delete() {
+        let s = State::new();
+        s.apply("/fib/link", &mut args(&[]), ConfigOp::Set);
+        assert!(s.on(&s.fib_link));
+        s.apply("/fib/link", &mut args(&[]), ConfigOp::Delete);
+        assert!(!s.on(&s.fib_link));
+    }
+
+    #[test]
     fn all_master_switch_lights_every_category() {
         let s = State::new();
         s.apply("/all", &mut args(&[]), ConfigOp::Set);
         assert!(s.on(&s.rib_route));
         assert!(s.on(&s.fib_l2_fdb));
         assert!(s.on(&s.fib_srv6));
+        assert!(s.on(&s.fib_link));
         // `all` is summary-level only — never implies detail.
         assert!(!s.fib_route_detail.load(Relaxed));
         s.apply("/all", &mut args(&[]), ConfigOp::Delete);

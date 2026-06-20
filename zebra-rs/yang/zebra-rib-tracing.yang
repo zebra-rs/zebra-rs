@@ -47,8 +47,9 @@ module zebra-rib-tracing {
          into the kernel over netlink (routes, nexthop groups, the
          raw southbound messages in either direction, the MPLS LFIB,
          the ARP / ND neighbor table, interface / address programming,
-         VRF devices, SRv6 `seg6local` SIDs, and L2 / EVPN objects
-         (bridge, VXLAN, FDB, MDB)).
+         link master-binding (bridge enslavement), VRF devices, SRv6
+         `seg6local` SIDs, and L2 / EVPN objects (bridge, VXLAN, FDB,
+         MDB)).
 
      The category set was derived by cataloguing every existing
      `tracing::` site in `src/rib` and `src/fib` and giving each a
@@ -86,6 +87,14 @@ module zebra-rib-tracing {
      presence (rather than a `true` value) matches the IS-IS / OSPF /
      BGP `tracing` blocks: the config callbacks key off set vs delete
      and never read a value, so `type empty` is the honest type.";
+
+  revision 2026-06-19 {
+    description
+      "Add the `fib link` category — gates the link master-binding
+       traces (bridge enslavement / `link_set_master` and the
+       deferred-bind bookkeeping) that previously logged
+       unconditionally.";
+  }
 
   revision 2026-06-05 {
     description
@@ -227,8 +236,9 @@ module zebra-rib-tracing {
           "Dataplane categories: what is programmed into the kernel
            over netlink — routes, nexthop groups, the raw southbound
            messages, the MPLS LFIB, the ARP / ND table, interface /
-           address programming, VRF devices, SRv6 `seg6local` SIDs,
-           and L2 / EVPN objects (bridge, VXLAN, FDB, MDB).";
+           address programming, link master-binding (bridge
+           enslavement), VRF devices, SRv6 `seg6local` SIDs, and L2 /
+           EVPN objects (bridge, VXLAN, FDB, MDB).";
 
         container route {
           ext:help "Trace route programming to the kernel";
@@ -295,6 +305,15 @@ module zebra-rib-tracing {
              kernel: link admin up, MTU set, dummy-device create /
              delete, and address add / delete over netlink.";
           uses rib-tracing-detail-option;
+        }
+        leaf link {
+          ext:help "Trace link enslavement / master binding to the kernel";
+          type empty;
+          description
+            "Log link master-binding programming: enslaving an interface
+             to a bridge master over netlink (`link_set_master`), plus the
+             deferred-bind bookkeeping that holds the bind pending until
+             both the slave interface and the bridge device appear.";
         }
         leaf vrf {
           ext:help "Trace VRF device programming to the kernel";
