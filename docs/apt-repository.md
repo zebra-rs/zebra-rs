@@ -98,16 +98,18 @@ signed flat repo. Test from a clean Ubuntu box using the nightly instructions at
 | nightly | `nightly-<codename>` | `26.6.2~nightlyYYYYMMDD` *(see note)*  | nightly cron / dispatch            |
 | stable  | `apt-<codename>`     | `26.6.2`                              | a stable-release workflow *(not yet added)* |
 
-> **Nightly upgradability:** the package's control version is currently a static
-> `26.6.2`, so `apt upgrade` would never see a new nightly. Before
-> `make -C packaging`, stamp a monotonic, pre-release-sorting version, e.g.:
+> **Nightly upgradability (wired up):** each build job stamps a monotonic,
+> pre-release-sorting version `26.6.2~nightlyYYYYMMDD` into the nfpm config before
+> packaging, with `version_schema: none` so the Debian `~` survives verbatim
+> (nfpm's default `semver` schema would mangle it). The `~` sorts *below* a future
+> stable `26.6.2`, and the date makes each night an upgrade over the last.
 >
-> ```bash
-> sed -i "s/^version: .*/version: \"$(cat version)~nightly$(date -u +%Y%m%d)\"/" \
->   packaging/nfpm-amd64.yaml packaging/nfpm-arm64.yaml
-> ```
->
-> The leading `~` sorts *below* a future stable `26.6.2`, so stable always wins.
+> One subtlety the `publish-apt` job handles: GitHub rewrites release-asset names,
+> replacing any char outside `[A-Za-z0-9._-]` with `.` — so a `~` in the filename
+> would survive in the `Filename:` index but become `.` on the uploaded asset, and
+> apt would 404. The job normalizes filenames to that safe set before scanning, so
+> asset name == index == on-disk. The `~` stays only where it matters: the package
+> version inside each `.deb`.
 
 To add the **stable** channel: factor the build matrix into a `workflow_call`
 reusable workflow, add `release.yaml` triggered on a `v*` tag (clean version),

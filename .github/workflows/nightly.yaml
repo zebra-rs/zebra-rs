@@ -64,6 +64,17 @@ jobs:
       - name: Build vty
         run: make -C vty
 
+      # Nightly packages need a monotonically increasing, pre-release-sorting
+      # version or `apt upgrade` never advances. 26.6.2~nightlyYYYYMMDD sorts
+      # BELOW a future stable 26.6.2 (Debian '~'); version_schema:none keeps the
+      # '~' verbatim (nfpm's default semver schema would reject/mangle it).
+      - name: Stamp nightly package version
+        run: |
+          STAMP="$(cat version)~nightly$(date -u +%Y%m%d)"
+          sed -i -E "s|^version:.*|version: \"$STAMP\"\nversion_schema: none|" \
+            packaging/nfpm-amd64.yaml packaging/nfpm-arm64.yaml
+          echo "Nightly package version: $STAMP"
+
       - name: Build .deb
         run: make -C packaging ${{ matrix.arch }}
 
@@ -146,6 +157,17 @@ jobs:
 
       - name: Build vty
         run: make -C vty
+
+      # Nightly packages need a monotonically increasing, pre-release-sorting
+      # version or `apt upgrade` never advances. 26.6.2~nightlyYYYYMMDD sorts
+      # BELOW a future stable 26.6.2 (Debian '~'); version_schema:none keeps the
+      # '~' verbatim (nfpm's default semver schema would reject/mangle it).
+      - name: Stamp nightly package version
+        run: |
+          STAMP="$(cat version)~nightly$(date -u +%Y%m%d)"
+          sed -i -E "s|^version:.*|version: \"$STAMP\"\nversion_schema: none|" \
+            packaging/nfpm-amd64.yaml packaging/nfpm-arm64.yaml
+          echo "Nightly package version: $STAMP"
 
       - name: Build .deb
         run: make -C packaging ${{ matrix.arch }}
@@ -276,6 +298,15 @@ jobs:
           TAG="${CHANNEL}-${{ matrix.codename }}"
           echo "tag=$TAG" >> "$GITHUB_OUTPUT"
           mkdir repo && cp incoming/*.deb repo/ && cd repo
+          # GitHub rewrites release-asset names, replacing chars outside
+          # [A-Za-z0-9._-] with '.'. Pre-normalize on-disk names to that set so the
+          # uploaded asset matches the `Filename:` in Packages -- otherwise the
+          # nightly '~' becomes '.' only on upload and apt 404s. The version string
+          # inside each .deb (which keeps '~' for correct sorting) is untouched.
+          for f in *.deb; do
+            n=$(printf '%s' "$f" | sed -E 's/[^A-Za-z0-9._-]/./g')
+            [ "$f" = "$n" ] || mv -- "$f" "$n"
+          done
           # Flat repo: one Packages index lists every arch; apt filters by Architecture.
           dpkg-scanpackages --multiversion . > Packages
           gzip -9 -k -f Packages
