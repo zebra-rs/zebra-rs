@@ -1454,10 +1454,11 @@ mod yang_load_tests {
     }
 
     /// TI-LFA parallel-computation knobs: `fast-reroute ti-lfa
-    /// compute-mode <serial|conservative|aggressive|sharding>` plus
-    /// `compute-shards <1..256>`. Pinned because vtyctl apply is
-    /// garbage-tolerant — an unwired grammar silently no-ops instead
-    /// of erroring.
+    /// compute-mode <serial|conservative|aggressive|sharding>`. IS-IS,
+    /// OSPFv2 and OSPFv3 all nest the shard count as `compute-mode
+    /// sharding shards <1..256>`. Pinned because vtyctl apply is
+    /// garbage-tolerant — an unwired grammar silently no-ops instead of
+    /// erroring.
     #[test]
     fn isis_tilfa_compute_grammar() {
         use crate::config::ExecCode;
@@ -1474,37 +1475,46 @@ mod yang_load_tests {
             .expect("configure module present");
         let entry = to_entry(&yang, module);
 
-        for cmd in [
-            "set router isis fast-reroute ti-lfa compute-mode serial",
-            "set router isis fast-reroute ti-lfa compute-mode conservative",
-            "set router isis fast-reroute ti-lfa compute-mode aggressive",
-            "set router isis fast-reroute ti-lfa compute-mode sharding",
-            "set router isis fast-reroute ti-lfa compute-shards 4",
-            "set router ospf fast-reroute ti-lfa compute-mode aggressive",
-            "set router ospf fast-reroute ti-lfa compute-shards 4",
-            "set router ospfv3 fast-reroute ti-lfa compute-mode sharding",
-            "set router ospfv3 fast-reroute ti-lfa compute-shards 2",
-        ] {
-            let (code, _comps, _state) = parse(cmd, entry.clone(), None, State::new());
-            assert_eq!(
+        // IS-IS, OSPFv2 and OSPFv3 all nest the shard count under the
+        // `sharding` mode: the bare presence form and the explicit
+        // count must both settle for each protocol.
+        for proto in ["isis", "ospf", "ospfv3"] {
+            for tail in [
+                "compute-mode serial",
+                "compute-mode conservative",
+                "compute-mode aggressive",
+                "compute-mode sharding",
+                "compute-mode sharding shards 4",
+            ] {
+                let cmd = format!("set router {proto} fast-reroute ti-lfa {tail}");
+                let (code, _comps, _state) = parse(&cmd, entry.clone(), None, State::new());
+                assert_eq!(
+                    code,
+                    ExecCode::Success,
+                    "should parse as a settable path: {cmd}"
+                );
+            }
+
+            // An unknown mode keyword must not resolve to a settable path.
+            let cmd = format!("set router {proto} fast-reroute ti-lfa compute-mode turbo");
+            let (code, _comps, _state) = parse(&cmd, entry.clone(), None, State::new());
+            assert_ne!(
                 code,
                 ExecCode::Success,
-                "should parse as a settable path: {cmd}"
+                "`compute-mode turbo` must not parse"
+            );
+
+            // The flat `compute-shards` leaf moved under `sharding`; the
+            // old spelling must no longer resolve (vtyctl apply is
+            // garbage-tolerant, so an unwired path silently no-ops).
+            let cmd = format!("set router {proto} fast-reroute ti-lfa compute-shards 4");
+            let (code, _comps, _state) = parse(&cmd, entry.clone(), None, State::new());
+            assert_ne!(
+                code,
+                ExecCode::Success,
+                "flat `{proto}` `compute-shards` must not parse after the move"
             );
         }
-
-        // An unknown mode keyword must not resolve to a settable path.
-        let (code, _comps, _state) = parse(
-            "set router isis fast-reroute ti-lfa compute-mode turbo",
-            entry.clone(),
-            None,
-            State::new(),
-        );
-        assert_ne!(
-            code,
-            ExecCode::Success,
-            "`compute-mode turbo` must not parse"
-        );
     }
 
     /// STAMP Phase 1 grammar: the `te-metric measurement` block on

@@ -1113,7 +1113,7 @@ pub(super) struct SpfInput {
     lsp_map: LspMap,
     ti_lfa_enabled: bool,
     /// How the TI-LFA computation is scheduled
-    /// (`fast-reroute ti-lfa compute-mode` / `compute-shards`),
+    /// (`fast-reroute ti-lfa compute-mode [sharding shards <N>]`),
     /// snapshotted from config at build time so a mid-run change
     /// cleanly applies to the next run.
     tilfa_mode: spf::TilfaComputeMode,

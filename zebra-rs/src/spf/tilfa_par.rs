@@ -30,8 +30,9 @@ use super::calc::{
 };
 
 /// How the per-destination TI-LFA computation is executed.
-/// Operator-facing via `fast-reroute ti-lfa compute-mode` (plus
-/// `compute-shards` for [`Self::Sharding`]).
+/// Operator-facing via `fast-reroute ti-lfa compute-mode` (plus the
+/// nested `compute-mode sharding shards <N>` count for
+/// [`Self::Sharding`]).
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
 pub enum TilfaComputeMode {
     /// Sequential loop on the SPF worker thread; rayon is never
@@ -64,11 +65,12 @@ impl std::fmt::Display for TilfaComputeMode {
     }
 }
 
-/// YANG mirror of the `fast-reroute/ti-lfa/compute-mode` leaf
-/// (payload-free — the sharding count lives in the sibling
-/// `compute-shards` leaf; [`Self::with_shards`] joins them into the
-/// scheduler-facing [`TilfaComputeMode`]). Shared by the IS-IS and
-/// OSPF config layers, which carry the same two leaves.
+/// YANG mirror of the `fast-reroute/ti-lfa/compute-mode` selector
+/// (payload-free — the sharding count lives in the nested
+/// `compute-mode/sharding/shards` leaf; [`Self::with_shards`] joins
+/// them into the scheduler-facing [`TilfaComputeMode`]). Shared by the
+/// IS-IS and OSPF config layers, which carry the same `compute-mode`
+/// choice.
 #[derive(
     Debug, Default, Clone, Copy, PartialEq, Eq, strum_macros::EnumString, strum_macros::Display,
 )]

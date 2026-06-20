@@ -117,15 +117,16 @@ pub struct Ospf<V: OspfVersion = Ospfv2> {
     /// primary. A protection-testing knob; no effect when
     /// `ti_lfa_enabled` is off (there is no repair to promote).
     pub fast_reroute_backup_as_primary: bool,
-    /// `/router/ospf/fast-reroute/ti-lfa/compute-mode` — how the
-    /// per-destination TI-LFA computation is scheduled (serial
-    /// default; conservative/aggressive/sharding fan out on the rayon
-    /// pool). Joined with `ti_lfa_compute_shards` at SPF-input build
-    /// time. Results are identical across modes.
+    /// `/router/ospf{,v3}/fast-reroute/ti-lfa/compute-mode` — how the
+    /// per-destination TI-LFA computation is scheduled (serial default;
+    /// conservative/aggressive/sharding fan out on the rayon pool),
+    /// selected by one keyword per mode under the `mode` choice. Joined
+    /// with `ti_lfa_compute_shards` at SPF-input build time. Results are
+    /// identical across modes.
     pub ti_lfa_compute_mode: spf::TilfaComputeModeConfig,
-    /// `/router/ospf/fast-reroute/ti-lfa/compute-shards` — hard upper
-    /// bound on TI-LFA parallelism, consulted only in sharding mode.
-    /// Default 8, matching the YANG default.
+    /// `/router/ospf{,v3}/fast-reroute/ti-lfa/compute-mode/sharding/shards`
+    /// — hard upper bound on TI-LFA parallelism, consulted only in
+    /// sharding mode. Default 8, matching the YANG default.
     pub ti_lfa_compute_shards: u16,
     /// TI-LFA compute telemetry for the most recent SPF run, stamped
     /// by `apply_spf_result` like `spf_duration` (last-area-wins).
@@ -1182,7 +1183,7 @@ impl Ospf<Ospfv2> {
             graph: None,
             ti_lfa_enabled: false,
             ti_lfa_compute_mode: spf::TilfaComputeModeConfig::default(),
-            // Matches the YANG `default 8` on compute-shards.
+            // Matches the YANG `default 8` on the sharding `shards` leaf.
             ti_lfa_compute_shards: 8,
             tilfa_stats: None,
             fast_reroute_backup_as_primary: false,
@@ -5232,7 +5233,7 @@ impl Ospf<Ospfv3> {
             graph: None,
             ti_lfa_enabled: false,
             ti_lfa_compute_mode: spf::TilfaComputeModeConfig::default(),
-            // Matches the YANG `default 8` on compute-shards.
+            // Matches the YANG `default 8` on the sharding `shards` leaf.
             ti_lfa_compute_shards: 8,
             tilfa_stats: None,
             fast_reroute_backup_as_primary: false,
@@ -11781,9 +11782,9 @@ struct SpfInput {
     /// `/router/ospf/fast-reroute/ti-lfa` snapshot. Gates the
     /// graph-only TI-LFA repair computation on the worker.
     ti_lfa_enabled: bool,
-    /// TI-LFA compute scheduling (`compute-mode` + `compute-shards`
-    /// joined), snapshotted from config at build time so a mid-run
-    /// change cleanly applies to the next run.
+    /// TI-LFA compute scheduling (`compute-mode` + the nested sharding
+    /// `shards` count joined), snapshotted from config at build time so
+    /// a mid-run change cleanly applies to the next run.
     tilfa_mode: spf::TilfaComputeMode,
     /// One per configured Flex-Algorithm: its FAD-filtered graph and
     /// source vertex (None if the algo's graph had no source).
