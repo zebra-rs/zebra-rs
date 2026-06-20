@@ -2054,10 +2054,12 @@ impl Rib {
                 {
                     Some(link) => (link.index, link.master.unwrap_or(0)),
                     None => {
-                        tracing::info!(
-                            "link_bridge_bind: interface {} not present yet — pending",
-                            ifname
-                        );
+                        if crate::rib::tracing::fib_link() {
+                            tracing::info!(
+                                "link_bridge_bind: interface {} not present yet — pending",
+                                ifname
+                            );
+                        }
                         return;
                     }
                 };
@@ -2082,19 +2084,23 @@ impl Rib {
                 let master_ifindex = match &bridge {
                     Some(bridge) => {
                         if !self.bridges.contains_key(bridge) {
-                            tracing::info!(
-                                "link_bridge_bind: bridge {} not configured — pending",
-                                bridge
-                            );
+                            if crate::rib::tracing::fib_link() {
+                                tracing::info!(
+                                    "link_bridge_bind: bridge {} not configured — pending",
+                                    bridge
+                                );
+                            }
                             return;
                         }
                         match self.links.values().find(|l| l.name == *bridge) {
                             Some(l) => l.index,
                             None => {
-                                tracing::info!(
-                                    "link_bridge_bind: bridge {} not present yet — pending",
-                                    bridge
-                                );
+                                if crate::rib::tracing::fib_link() {
+                                    tracing::info!(
+                                        "link_bridge_bind: bridge {} not present yet — pending",
+                                        bridge
+                                    );
+                                }
                                 return;
                             }
                         }
@@ -2115,13 +2121,15 @@ impl Rib {
                 self.fib_handle
                     .link_set_master(ifindex, master_ifindex)
                     .await;
-                tracing::info!(
-                    "link_bridge_bind: ifname={} ifindex={} master={} bridge={:?}",
-                    ifname,
-                    ifindex,
-                    master_ifindex,
-                    bridge
-                );
+                if crate::rib::tracing::fib_link() {
+                    tracing::info!(
+                        "link_bridge_bind: ifname={} ifindex={} master={} bridge={:?}",
+                        ifname,
+                        ifindex,
+                        master_ifindex,
+                        bridge
+                    );
+                }
             }
             Message::BlockAdd { name, config } => {
                 let block = config.to_block();
