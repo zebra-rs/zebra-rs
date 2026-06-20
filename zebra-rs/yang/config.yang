@@ -1657,6 +1657,58 @@ module config {
           }
         }
 
+        container egress-protection {
+          ext:help "Mirror SID egress node/link protection (SRv6/SR-MPLS)";
+          // draft-ietf-rtgwg-srv6-egress-protection / RFC 8679. This
+          // node (the protector, PEB) advertises a Mirror SID (End.M
+          // for SRv6) plus the protected egress's locator(s) so a PLR
+          // can redirect traffic past a failed egress PE or PE-CE link
+          // — the gap TI-LFA cannot cover. Each `protect` entry
+          // declares one egress this node backs up. Phase 2 scope:
+          // config + state only; nothing is advertised or installed
+          // until later phases.
+          list protect {
+            ext:help "Protect one egress node, keyed by its SRv6 locator";
+            key "protected-locator";
+            leaf protected-locator {
+              type inet:ipv6-prefix;
+              description
+                "SRv6 locator of the protected egress PE (PEA), e.g.
+                 2001:db8:a3:1::/64. Emitted in the Protected Locators
+                 sub-sub-TLV of the advertised Mirror SID sub-TLV and
+                 used by the PLR to match traffic destined to PEA.";
+            }
+            leaf mirror-sid {
+              type inet:ipv6-address;
+              description
+                "Mirror SID (End.M) to advertise for the protected
+                 egress. Must lie within this node's own SRv6 locator.
+                 When omitted, a SID is auto-allocated from the local
+                 locator at origination time.";
+            }
+            leaf via-vrf {
+              type string;
+              description
+                "Name of the local VRF whose forwarding reaches the
+                 dual-homed CE. The mirror-context FIB resolves the
+                 protected egress's service SIDs in this VRF (static
+                 path; the BGP-learned path lands in a later phase).";
+            }
+            leaf dataplane {
+              type enumeration {
+                enum srv6;
+                enum mpls;
+              }
+              default "srv6";
+              description
+                "Dataplane this entry protects. srv6 advertises the
+                 End.M Mirror SID sub-TLV in the SRv6 Locator TLV; mpls
+                 advertises the SID/Label Binding TLV (149) M-flag
+                 (SR-MPLS, wired in a later phase).";
+            }
+          }
+        }
+
         container graceful-restart {
           ext:help "Graceful restart helper / restarter (RFC 5306)";
           // RFC 5306 helper and restarter configuration. Defaults

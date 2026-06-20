@@ -413,6 +413,7 @@ impl Isis {
 
         super::flex_algo::callback_register(self);
         super::affinity_map::callback_register(self);
+        super::egress_protection::callback_register(self);
     }
 }
 
@@ -521,6 +522,14 @@ pub struct IsisConfig {
     /// only when `compute-mode sharding` is set. Default 8, matching
     /// the YANG default.
     pub ti_lfa_compute_shards: u16,
+
+    /// Mirror SID egress node/link protection entries, from the YANG
+    /// list at /router/isis/egress-protection/protect[protected-locator].
+    /// Each entry names a protected egress (PEA) this node backs up
+    /// (draft-ietf-rtgwg-srv6-egress-protection). Config + state only
+    /// in this phase; origination / dataplane / PLR repair consume it
+    /// later. See [`super::egress_protection`].
+    pub egress_protections: super::egress_protection::MirrorProtectMap,
 
     /// Instance-level BFD defaults (`router isis { bfd {} }`), inherited by
     /// every interface and overridden per interface (see
@@ -769,6 +778,7 @@ impl Default for IsisConfig {
             ti_lfa_compute_mode: Default::default(),
             // Matches the YANG `default 8` on compute-shards.
             ti_lfa_compute_shards: 8,
+            egress_protections: Default::default(),
             mt_enabled: Default::default(),
             mt_topologies: Default::default(),
             networks_v4: Default::default(),

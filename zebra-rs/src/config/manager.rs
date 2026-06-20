@@ -1378,6 +1378,42 @@ mod yang_load_tests {
         }
     }
 
+    /// Mirror SID egress-protection config paths
+    /// (`draft-ietf-rtgwg-srv6-egress-protection`, config.yang). vtyctl
+    /// apply is garbage-tolerant, so an unwired list / key / leaf would
+    /// silently no-op at apply time — pin each settable path so the
+    /// `egress-protection/protect` list (ipv6-prefix key, the mirror-sid
+    /// / via-vrf / dataplane leaves and the srv6|mpls enum) stays valid.
+    #[test]
+    fn isis_egress_protection_paths_parse() {
+        use crate::config::ExecCode;
+        use crate::config::parse::{State, parse};
+        use libyang::to_entry;
+
+        let mut yang = YangStore::new();
+        yang.add_path(concat!(env!("CARGO_MANIFEST_DIR"), "/yang"));
+        yang.read_with_resolve("configure")
+            .unwrap_or_else(|e| panic!("configure failed to load: {e:#}"));
+        yang.identity_resolve();
+        let module = yang.find_module("configure").unwrap();
+        let entry = to_entry(&yang, module);
+
+        for cmd in [
+            "set router isis egress-protection protect 2001:db8:a3:1::/64",
+            "set router isis egress-protection protect 2001:db8:a3:1::/64 mirror-sid 2001:db8:a4:1::3",
+            "set router isis egress-protection protect 2001:db8:a3:1::/64 via-vrf cust",
+            "set router isis egress-protection protect 2001:db8:a3:1::/64 dataplane srv6",
+            "set router isis egress-protection protect 2001:db8:a3:1::/64 dataplane mpls",
+        ] {
+            let (code, _comps, _state) = parse(cmd, entry.clone(), None, State::new());
+            assert_eq!(
+                code,
+                ExecCode::Success,
+                "should parse as a settable path: {cmd}"
+            );
+        }
+    }
+
     /// C.4 `router bgp shards <1-64>` — the shipping form of the
     /// `ZEBRA_BGP_SHARDS` env var (`zebra-bgp-sharding.yang`). Pinned
     /// because vtyctl apply is garbage-tolerant — an unwired grammar

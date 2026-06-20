@@ -61,6 +61,8 @@ pub mod affinity_map;
 
 pub mod flex_algo;
 
+pub mod egress_protection;
+
 pub mod auth;
 
 pub mod checkpoint;
