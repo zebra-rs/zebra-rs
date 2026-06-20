@@ -69,7 +69,8 @@ pub fn init_peer_task(config: Option<bool>) -> bool {
     if on {
         tracing::info!("BGP per-peer egress task: enabled (from {source})");
     } else {
-        tracing::info!("BGP per-peer egress task: disabled (from {source})");
+        // Disable default logging.
+        // tracing::info!("BGP per-peer egress task: disabled (from {source})");
     }
     on
 }
