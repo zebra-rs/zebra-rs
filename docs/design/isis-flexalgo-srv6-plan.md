@@ -149,10 +149,23 @@ across a convergence burst would cut redundant full-snapshot clones
 (VRFs are few and churn is transient, so it's a perf nicety not a
 correctness issue).
 
-Remaining deferred: a **TI-LFA BDD** (the PR-6 `isis_flex_srv6` topology
-has no intra-algo redundancy to exercise a repair). The PR-6 BDD feature
-was authored but not executed here (needs root/netns; CI runs the bdd
-suite).
+**TI-LFA BDD: authored** (`@flexalgo_tilfa_srv6`) — clones the proven
+8-node `tilfa_srv6` topology + metrics (so the repair is guaranteed to
+exist) and adds a per-algo locator + `flex-algo 128` (`dataplane srv6` +
+per-algo `ti-lfa`, no affinity constraints → algo-128 topology == algo-0)
+to each node. Pure-IGP; 5 scenarios assert per-algo SID + algo-128
+locator reachability, algo-0 FRR survival on `s-n1` down, and — under
+`backup-as-primary` — the promoted per-algo SRv6 repair on d's algo-128
+locator kernel route (`mode inline` / `proto isis` / `dev s-n2` /
+`segs 2 [`). All 8 configs YAML-validated. Like every BDD here it runs
+under the CI-excluded bdd suite (root/netns) and was *not* executed in
+the authoring sandbox — a real run may need assertion tuning.
+
+The SRv6 Flex-Algo plan is now complete end-to-end: IGP reachability
+(#1461), colour steering — global unicast (#1462), service-route (#1471),
+per-VRF VPN (#1472) — per-algo TI-LFA (#1469), per-algo End.X (#1470),
+and this BDD. Remaining nicety: coalescing the per-VRF colour-shadow
+broadcast across a convergence burst.
 
 ## Decisions (locked 2026-06-16)
 

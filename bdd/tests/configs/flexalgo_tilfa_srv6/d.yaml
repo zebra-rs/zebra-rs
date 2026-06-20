@@ -1,0 +1,54 @@
+# d — TI-LFA destination. Mirror of s: IS-IS L2 + LOC8 (+ algo-128
+# locator LOC8_A128). Pure-IGP variant (no BGP/LAN).
+interface:
+- if-name: lo
+  ipv6:
+    address: 2001:db8::8/128
+- if-name: d-n1
+  ipv6:
+    address: 2001:db8:0:10::2/64
+- if-name: d-r3
+  ipv6:
+    address: 2001:db8:0:11::2/64
+segment-routing:
+  locator:
+  - name: LOC8
+    prefix: fcbb:bbbb:8::/48
+    behavior: usid
+  - name: LOC8_A128
+    prefix: fcbb:bbbb:18::/48
+    behavior: usid
+router:
+  isis:
+    net: 49.0000.0000.0000.0008.00
+    hostname: d
+    is-type: level-2-only
+    segment-routing:
+      srv6:
+        locator: LOC8
+        flex-algo-locator:
+        - algo: 128
+          locator: LOC8_A128
+    fast-reroute:
+      ti-lfa: {}
+    flex-algo:
+    - algo: 128
+      advertise-definition: true
+      dataplane:
+        srv6: true
+      fast-reroute:
+        ti-lfa: {}
+    interface:
+    - if-name: lo
+      ipv6:
+        enable: true
+    - if-name: d-n1
+      network-type: point-to-point
+      metric: 1
+      ipv6:
+        enable: true
+    - if-name: d-r3
+      network-type: point-to-point
+      metric: 1
+      ipv6:
+        enable: true

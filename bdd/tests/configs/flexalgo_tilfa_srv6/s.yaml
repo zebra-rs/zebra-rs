@@ -1,0 +1,67 @@
+# s — TI-LFA source. Flex-Algo sibling of configs/tilfa_srv6/s.yaml:
+# the SAME proven 8-node topology + metrics, plus a Flex-Algorithm 128
+# that participates over every link (no affinity constraints, so algo
+# 128's topology == algo 0's) with its own per-algo SRv6 locator and
+# per-algo TI-LFA. The algo-128 repair therefore mirrors the algo-0 one.
+# Pure-IGP variant (no BGP/LAN): the test exercises the per-algo SRv6
+# TI-LFA repair on the per-algo locator routes, not service traffic.
+interface:
+- if-name: lo
+  ipv6:
+    address: 2001:db8::1/128
+- if-name: s-n1
+  ipv6:
+    address: 2001:db8:0:1::1/64
+- if-name: s-n2
+  ipv6:
+    address: 2001:db8:0:2::1/64
+- if-name: s-n3
+  ipv6:
+    address: 2001:db8:0:3::1/64
+segment-routing:
+  locator:
+  - name: LOC1
+    prefix: fcbb:bbbb:1::/48
+    behavior: usid
+  - name: LOC1_A128
+    prefix: fcbb:bbbb:11::/48
+    behavior: usid
+router:
+  isis:
+    net: 49.0000.0000.0000.0001.00
+    hostname: s
+    is-type: level-2-only
+    segment-routing:
+      srv6:
+        locator: LOC1
+        flex-algo-locator:
+        - algo: 128
+          locator: LOC1_A128
+    fast-reroute:
+      ti-lfa: {}
+    flex-algo:
+    - algo: 128
+      advertise-definition: true
+      dataplane:
+        srv6: true
+      fast-reroute:
+        ti-lfa: {}
+    interface:
+    - if-name: lo
+      ipv6:
+        enable: true
+    - if-name: s-n1
+      network-type: point-to-point
+      metric: 1
+      ipv6:
+        enable: true
+    - if-name: s-n2
+      network-type: point-to-point
+      metric: 1
+      ipv6:
+        enable: true
+    - if-name: s-n3
+      network-type: point-to-point
+      metric: 1000
+      ipv6:
+        enable: true
