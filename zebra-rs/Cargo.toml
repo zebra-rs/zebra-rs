@@ -22,7 +22,8 @@ tokio-stream.workspace = true
 tonic.workspace = true
 tonic-prost.workspace = true
 console-subscriber = "0.5"
-libyang = { git = "https://github.com/zebra-rs/libyang", rev = "103b60c2d560a91d37fa26502eb3d495db1cdb99" }
+libyang = "1"
+#libyang = { git = "https://github.com/zebra-rs/libyang", rev = "103b60c2d560a91d37fa26502eb3d495db1cdb99" }
 #libyang = { path = "../../libyang" }
 regex = "1.10"
 similar = "3"
