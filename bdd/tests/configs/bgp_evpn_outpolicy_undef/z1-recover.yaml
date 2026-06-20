@@ -1,0 +1,44 @@
+# The neighbor stays bound to NOPE, but NOPE is now defined as a
+# permit-all policy. Defining a previously-undefined referenced policy
+# must replay through the watch and re-advertise the EVPN Type-5 route to
+# z2 — again without a session reset.
+policy:
+- name: PERMIT-ALL
+  entry:
+  - number: 10
+    action: permit
+- name: NOPE
+  entry:
+  - number: 10
+    action: permit
+vrf:
+- name: vrf-blue
+  ipv4:
+    route-target:
+      import:
+      - 65001:100
+      export:
+      - 65001:100
+router:
+  bgp:
+    global:
+      as: 65001
+      router-id: 192.168.0.1
+    neighbor:
+    - remote-address: 192.168.0.2
+      afi-safi:
+      - name: evpn
+        enabled: true
+        policy:
+          out: NOPE
+      enabled: true
+      remote-as: 65001
+    vrf:
+    - name: vrf-blue
+      rd: 65001:100
+      evpn:
+        advertise-ipv4: true
+      afi-safi:
+        ipv4:
+          network:
+          - prefix: 10.1.0.0/24
