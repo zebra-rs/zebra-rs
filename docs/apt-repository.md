@@ -3,9 +3,11 @@
 How users `apt install zebra-rs` on Ubuntu. Two pieces:
 
 - **Binaries + signed metadata** live as assets on per-codename GitHub Releases
-  in *this* repo (`zebra-rs/zebra-rs`), built by `build-debs.yaml` and published
-  by `publish-apt.yaml` (both reusable `workflow_call` workflows), driven by
-  `nightly.yaml` and `release.yaml`.
+  in the **`zebra-rs/zebra-rs.github.io`** repo (deliberately *not* the main repo,
+  so `zebra-rs/zebra-rs`'s `/releases` page shows only `v*` + `nightly`). They are
+  built by `build-debs.yaml` and published by `publish-apt.yaml` (reusable
+  `workflow_call` workflows in `zebra-rs/zebra-rs`), driven by `nightly.yaml` and
+  `release.yaml`. Cross-repo publishing uses the `APT_REPO_TOKEN` PAT (Step 2).
 - **The public signing key + a landing page** live in the separate Pages repo
   `zebra-rs/zebra-rs.github.io`, served on the custom domain **`https://zebra.rs/`**:
 
@@ -85,6 +87,8 @@ Settings → Secrets and variables → Actions:
 - **Secrets** tab:
   - `APT_GPG_PRIVATE_KEY` = contents of `/tmp/apt-private.b64` (then delete the file)
   - `APT_GPG_PASSPHRASE` = the passphrase from the keyspec
+  - `APT_REPO_TOKEN` = a fine-grained PAT with **Contents: read & write** scoped to
+    `zebra-rs/zebra-rs.github.io` (the repo where apt releases are published)
 - **Variables** tab:
   - `APT_PUBLISH_ENABLED` = `true`   ← the on-switch; set this *last*
 

@@ -32,10 +32,12 @@ jobs:
       matrix:
         codename: [jammy, noble, resolute]
     env:
-      GH_TOKEN: ${{ github.token }}
-      # This job has no checkout (it works from downloaded artifacts), so gh can't
-      # infer the repo from a git remote. Tell it explicitly.
-      GH_REPO: ${{ github.repository }}
+      # The apt repo is published to a SEPARATE repo so the main repo's /releases
+      # page stays clean (only v* and nightly). That needs a PAT with contents:write
+      # on the target repo -- the default GITHUB_TOKEN can't reach across repos.
+      # GH_REPO also tells gh which repo to act on (this job has no checkout).
+      GH_TOKEN: ${{ secrets.APT_REPO_TOKEN }}
+      GH_REPO: zebra-rs/zebra-rs.github.io
     steps:
       - name: Install apt tooling
         run: sudo apt-get update && sudo apt-get install -y dpkg-dev apt-utils gnupg
