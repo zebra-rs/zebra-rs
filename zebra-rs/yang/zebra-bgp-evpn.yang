@@ -16,6 +16,10 @@ module zebra-bgp-evpn {
     prefix configure;
   }
 
+  import ietf-inet-types {
+    prefix inet;
+  }
+
   organization
     "zebra-rs";
 
@@ -52,7 +56,8 @@ module zebra-bgp-evpn {
 
   reference
     "RFC 7432: BGP MPLS-Based Ethernet VPN
-     RFC 8365: Network Virtualization Overlay Solution Using EVPN";
+     RFC 8365: Network Virtualization Overlay Solution Using EVPN
+     RFC 9574: Optimized Ingress Replication Solution for EVPN";
 
   grouping bgp-afi-safi-evpn-extension {
     description
@@ -72,6 +77,43 @@ module zebra-bgp-evpn {
 
          Equivalent to FRR's `advertise-all-vni` under
          `address-family l2vpn evpn`.";
+    }
+    container assisted-replication {
+      description
+        "RFC 9574 Optimized Ingress Replication (Assisted Replication)
+         role for the local speaker. Applies to every VNI advertised
+         under `advertise-all-vni`.";
+      leaf role {
+        type enumeration {
+          enum none {
+            description
+              "Regular NVE — plain ingress replication (the default).";
+          }
+          enum replicator {
+            description
+              "AR-REPLICATOR — advertise a Replicator-AR Type-3 route
+               (PMSI tunnel type 0x0A) whose next hop is `replicator-ip`,
+               so AR-LEAF nodes offload BUM replication here.";
+          }
+          enum leaf {
+            description
+              "AR-LEAF — tag the Regular-IR Type-3 route as AR-LEAF and
+               offload BUM replication to an AR-REPLICATOR.";
+          }
+        }
+        default none;
+        description
+          "Assisted Replication role advertised in the Type-3 IMET PMSI
+           Tunnel attribute (RFC 9574 §4, the T field).";
+      }
+      leaf replicator-ip {
+        type inet:ip-address;
+        description
+          "The AR-IP — a distinct routable local address advertised in
+           the Replicator-AR route's next hop and used as the BUM tunnel
+           destination by AR-LEAF nodes. Required when `role` is
+           `replicator`; ignored otherwise.";
+      }
     }
   }
 

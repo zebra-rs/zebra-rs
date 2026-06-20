@@ -25,8 +25,9 @@ Branch `bgp-evpn-bum`. **Phase 0 (codec) landed on the branch**; Phases 1–3
 
 | Slice            | What landed / planned                                                                                  | Status |
 | ---------------- | ----------------------------------------------------------------------------------------------------- | ------ |
-| 0 — PMSI codec   | tunnel type `0x0A`, `AssistedReplicationType` (T), BM/U/L flag accessors on `PmsiTunnel`, 7 pin tests  | ✅ on branch |
-| 1 — role + non-selective AR | YANG `assisted-replication` role config; Replicator-AR / Regular-IR IMET origination + reception; AR-LEAF flood-list collapse to `{AR-IP}` | ⬜ planned |
+| 0 — PMSI codec   | tunnel type `0x0A`, `AssistedReplicationType` (T), BM/U/L flag accessors on `PmsiTunnel`, 7 pin tests  | ✅ merged #1476 |
+| 1a — role + origination | YANG `assisted-replication` role/AR-IP config; role-aware Type-3 IMET origination (Replicator-AR tunnel `0x0A` / AR-LEAF-flagged Regular-IR); pin tests | ✅ on branch |
+| 1b — reception + flood model | parse received role/AR-IP; per-VNI role-aware flood model; AR-LEAF flood-list collapse to `{AR-IP}` | ⬜ planned |
 | 2 — Pruned-Flood-Lists | originate BM/U prune flags; honor received prune at whole-VTEP flood-list membership | ⬜ planned |
 | 3 — selective AR | Replicator `L=1`; AR-LEAF Leaf A-D (Type-1) origination with `AR-IP:0` RT; per-replicator leaf-set | ⬜ planned |
 | 4 — AR-REPLICATOR dataplane | decap-on-AR-IP → re-flood to other VTEPs with split-horizon | ⛔ deferred (needs eBPF/XDP or VPP — see feasibility) |
@@ -236,8 +237,9 @@ Closest end-to-end template: the **EVPN Type-3/IMET** path itself (originate
 
 | Phase | Scope | Status |
 | ----- | ----- | ------ |
-| 0 | Codec: PMSI tunnel 0x0A + `AssistedReplicationType` (T) + BM/U/L accessors + pin tests | ✅ on branch |
-| 1 | YANG `assisted-replication` role; Replicator-AR / Regular-IR IMET originate + receive; per-VNI role-aware flood model; AR-LEAF flood-list → `{AR-IP}` (U-flood off) | ⬜ planned |
+| 0 | Codec: PMSI tunnel 0x0A + `AssistedReplicationType` (T) + BM/U/L accessors + pin tests | ✅ merged #1476 |
+| 1a | YANG `assisted-replication` role/AR-IP; role-aware Type-3 IMET origination (Replicator-AR `0x0A` / AR-LEAF-flagged Regular-IR) | ✅ on branch |
+| 1b | Parse received role/AR-IP; per-VNI role-aware flood model; AR-LEAF flood-list → `{AR-IP}` (U-flood off) | ⬜ planned |
 | 2 | Pruned-Flood-Lists: originate BM/U flags; honor received prune at whole-VTEP membership | ⬜ planned |
 | 3 | Selective AR (control plane): Leaf A-D (Type-1) origination + `AR-IP:0` IP-specific RT; replicator `L=1`; per-replicator leaf-set | ⬜ planned |
 | 4 | **AR-REPLICATOR forwarding dataplane** (eBPF/XDP or VPP) | ⛔ deferred — out of stock-kernel scope |

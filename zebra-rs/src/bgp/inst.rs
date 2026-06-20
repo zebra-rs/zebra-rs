@@ -510,6 +510,23 @@ impl DumpBarrierV4 {
     }
 }
 
+/// RFC 9574 Optimized Ingress Replication role for the local speaker,
+/// configured under `router bgp afi-safi evpn assisted-replication`.
+/// Distinct from the on-wire [`bgp_packet::AssistedReplicationType`] the
+/// codec uses: this is the operator-facing config knob and has no
+/// `Reserved` value.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum AssistedReplicationRole {
+    /// Regular NVE — plain ingress replication (RFC 7432). The default.
+    #[default]
+    None,
+    /// AR-REPLICATOR — advertise a Replicator-AR IMET (tunnel type 0x0A,
+    /// next hop = the configured AR-IP).
+    Replicator,
+    /// AR-LEAF — advertise a Regular-IR IMET flagged as AR-LEAF.
+    Leaf,
+}
+
 pub struct Bgp {
     pub asn: u32,
     /// Effective BGP Identifier — what OPENs, EVPN RDs and the show
@@ -560,6 +577,16 @@ pub struct Bgp {
     /// — and replays on `advertise_all_vni` / `router_id` transitions
     /// just like `local_fdb`.
     pub local_vxlans: BTreeMap<u32, std::net::IpAddr>,
+    /// RFC 9574 Assisted Replication role for the local speaker
+    /// (`router bgp afi-safi evpn assisted-replication role`). Drives the
+    /// Type-3 IMET PMSI Tunnel encoding in `evpn_originate_imet`.
+    pub assisted_replication_role: AssistedReplicationRole,
+    /// The AR-IP advertised in the Replicator-AR route's next hop when
+    /// `assisted_replication_role` is `Replicator` (`... assisted-replication
+    /// replicator-ip`). A distinct routable IP that AR-LEAF nodes send BUM
+    /// to; required for the Replicator role, otherwise IMET origination
+    /// falls back to plain ingress replication.
+    pub assisted_replication_ip: Option<std::net::IpAddr>,
     /// Configured hostname for the local BGP speaker. Advertised in
     /// the FQDN capability (capability code 73). When None, falls back
     /// to the OS hostname; if that also fails, no FQDN capability is
@@ -959,6 +986,8 @@ impl Bgp {
             advertise_all_vni: false,
             local_fdb: BTreeMap::new(),
             local_vxlans: BTreeMap::new(),
+            assisted_replication_role: AssistedReplicationRole::None,
+            assisted_replication_ip: None,
             hostname: None,
             no_fib_install: false,
             peers: PeerMap::new(),

@@ -1,5 +1,5 @@
 pub mod inst;
-pub use inst::{Bgp, Message};
+pub use inst::{AssistedReplicationRole, Bgp, Message};
 
 pub mod constant;
 pub use constant::*;

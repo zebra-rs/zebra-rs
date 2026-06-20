@@ -19,7 +19,7 @@ use super::peer_map::PeerMap;
 use super::shard::msg::{ShardUpdateV4, ShardUpdateV6};
 use super::shard::{ShardMsg, ShardOut};
 use super::timer::{start_adv_timer_vpnv4, start_adv_timer_vpnv6};
-use super::{Bgp, InOut, Message};
+use super::{AssistedReplicationRole, Bgp, InOut, Message};
 
 pub const ORIGINATED_PEER: usize = usize::MAX;
 
@@ -11559,15 +11559,19 @@ impl Bgp {
             evpn_route_target(self.asn, vni),
             evpn_encap_vxlan(),
         ]));
-        attr.pmsi_tunnel = Some(PmsiTunnel {
-            // Flags = 0 (no leaf info required, per RFC 6514 §5).
-            flags: 0,
-            // Tunnel Type 6 = Ingress Replication.
-            tunnel_type: 6,
+        // RFC 9574: the PMSI Tunnel attribute and next hop depend on the
+        // local Assisted Replication role. RNVE keeps the plain Ingress
+        // Replication encoding (tunnel type 6); a Replicator emits a
+        // Replicator-AR route (tunnel type 0x0A, next hop = AR-IP); a Leaf
+        // tags its Regular-IR route as AR-LEAF.
+        let (pmsi, nexthop) = imet_pmsi_tunnel(
+            self.assisted_replication_role,
+            self.assisted_replication_ip,
+            vtep_local,
             vni,
-            endpoint: vtep_local,
-        });
-        attr.nexthop = Some(BgpNexthop::Evpn(vtep_local));
+        );
+        attr.pmsi_tunnel = Some(pmsi);
+        attr.nexthop = Some(BgpNexthop::Evpn(nexthop));
 
         let mut rib = BgpRib::new(
             ORIGINATED_PEER,
@@ -11649,6 +11653,56 @@ fn rd_from_router_id_vni(router_id: Ipv4Addr, vni: u32) -> Option<RouteDistingui
     Some(rd)
 }
 
+/// RFC 9574 role-aware PMSI Tunnel attribute + BGP next hop for a Type-3
+/// IMET origination. Returns the `(PmsiTunnel, next-hop)` pair the
+/// configured Assisted Replication role dictates:
+///
+/// - **Replicator** (with an AR-IP configured): the Replicator-AR route —
+///   tunnel type `0x0A`, T = AR-REPLICATOR, next hop and tunnel endpoint =
+///   the AR-IP, so AR-LEAF nodes send BUM there.
+/// - **Leaf**: the Regular-IR route flagged T = AR-LEAF — tunnel type 6,
+///   next hop = local VTEP (IR-IP).
+/// - **None**, or Replicator without an AR-IP: plain Ingress Replication
+///   (tunnel type 6, T = RNVE) — byte-for-byte the pre-RFC-9574 encoding.
+fn imet_pmsi_tunnel(
+    role: AssistedReplicationRole,
+    ar_ip: Option<IpAddr>,
+    vtep_local: IpAddr,
+    vni: u32,
+) -> (PmsiTunnel, IpAddr) {
+    match (role, ar_ip) {
+        (AssistedReplicationRole::Replicator, Some(ar)) => (
+            PmsiTunnel {
+                flags: 0,
+                tunnel_type: PmsiTunnel::TUNNEL_ASSISTED_REPLICATION,
+                vni,
+                endpoint: ar,
+            }
+            .with_ar_type(AssistedReplicationType::Replicator),
+            ar,
+        ),
+        (AssistedReplicationRole::Leaf, _) => (
+            PmsiTunnel {
+                flags: 0,
+                tunnel_type: PmsiTunnel::TUNNEL_INGRESS_REPLICATION,
+                vni,
+                endpoint: vtep_local,
+            }
+            .with_ar_type(AssistedReplicationType::Leaf),
+            vtep_local,
+        ),
+        _ => (
+            PmsiTunnel {
+                flags: 0,
+                tunnel_type: PmsiTunnel::TUNNEL_INGRESS_REPLICATION,
+                vni,
+                endpoint: vtep_local,
+            },
+            vtep_local,
+        ),
+    }
+}
+
 /// Build the auto-derived Route Target extended community for an EVPN
 /// route per RFC 8365 §5.1.2.4: type 0x00 / sub 0x02 (Two-Octet AS
 /// Specific Route Target) carrying `<local-AS>:<VNI>`. The 2-byte
@@ -11683,6 +11737,70 @@ fn evpn_encap_vxlan() -> ExtCommunityValue {
     // Encapsulation type 8 = VXLAN, occupies the trailing 2 octets.
     encap.val[5] = 8;
     encap
+}
+
+#[cfg(test)]
+mod evpn_imet_ar_tests {
+    use super::*;
+
+    fn ir_ip() -> IpAddr {
+        IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1))
+    }
+    fn ar_ip() -> IpAddr {
+        IpAddr::V4(Ipv4Addr::new(10, 0, 0, 254))
+    }
+
+    /// RNVE (default role) must produce byte-for-byte the pre-RFC-9574
+    /// Ingress Replication encoding: tunnel type 6, flags 0, endpoint and
+    /// next hop = the local VTEP, regardless of any stray AR-IP.
+    #[test]
+    fn rnve_is_plain_ingress_replication() {
+        let (pmsi, nh) =
+            imet_pmsi_tunnel(AssistedReplicationRole::None, Some(ar_ip()), ir_ip(), 100);
+        assert_eq!(pmsi.tunnel_type, PmsiTunnel::TUNNEL_INGRESS_REPLICATION);
+        assert_eq!(pmsi.ar_type(), AssistedReplicationType::Rnve);
+        assert_eq!(pmsi.flags, 0, "byte-for-byte the legacy encoding");
+        assert_eq!(pmsi.endpoint, ir_ip());
+        assert_eq!(nh, ir_ip());
+    }
+
+    /// Replicator role → Replicator-AR route: tunnel type 0x0A,
+    /// T = AR-REPLICATOR, tunnel endpoint and next hop = the AR-IP.
+    #[test]
+    fn replicator_emits_replicator_ar_route() {
+        let (pmsi, nh) = imet_pmsi_tunnel(
+            AssistedReplicationRole::Replicator,
+            Some(ar_ip()),
+            ir_ip(),
+            100,
+        );
+        assert_eq!(pmsi.tunnel_type, PmsiTunnel::TUNNEL_ASSISTED_REPLICATION);
+        assert_eq!(pmsi.ar_type(), AssistedReplicationType::Replicator);
+        assert_eq!(pmsi.endpoint, ar_ip(), "tunnel endpoint = AR-IP");
+        assert_eq!(nh, ar_ip(), "next hop = AR-IP");
+    }
+
+    /// Leaf role → Regular-IR route flagged T = AR-LEAF, still tunnel type
+    /// 6 with the next hop = local VTEP (IR-IP).
+    #[test]
+    fn leaf_flags_regular_ir_as_ar_leaf() {
+        let (pmsi, nh) = imet_pmsi_tunnel(AssistedReplicationRole::Leaf, None, ir_ip(), 100);
+        assert_eq!(pmsi.tunnel_type, PmsiTunnel::TUNNEL_INGRESS_REPLICATION);
+        assert_eq!(pmsi.ar_type(), AssistedReplicationType::Leaf);
+        assert_eq!(pmsi.endpoint, ir_ip());
+        assert_eq!(nh, ir_ip());
+    }
+
+    /// A Replicator misconfigured without an AR-IP degrades safely to plain
+    /// Ingress Replication rather than advertising an AR route with no
+    /// usable tunnel destination.
+    #[test]
+    fn replicator_without_ar_ip_falls_back_to_ir() {
+        let (pmsi, nh) = imet_pmsi_tunnel(AssistedReplicationRole::Replicator, None, ir_ip(), 100);
+        assert_eq!(pmsi.tunnel_type, PmsiTunnel::TUNNEL_INGRESS_REPLICATION);
+        assert_eq!(pmsi.ar_type(), AssistedReplicationType::Rnve);
+        assert_eq!(nh, ir_ip());
+    }
 }
 
 #[cfg(test)]
