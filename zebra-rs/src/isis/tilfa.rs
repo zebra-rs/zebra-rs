@@ -124,20 +124,20 @@ pub(super) fn build_repair_path_mpls(
 pub(super) fn build_repair_path_srv6(
     top: &IsisTop,
     level: Level,
+    algo: Option<u8>,
     rp: &spf::RepairPath,
 ) -> Option<RepairPathSrv6> {
     let lsp_map = top.lsp_map.get(&level);
     let mut parts: Vec<RepairSeg> = Vec::with_capacity(rp.segs.len());
     for (idx, seg) in rp.segs.iter().enumerate() {
         let resolved = match seg {
-            spf::SrSegment::NodeSid(v) => lsp_map
-                .resolve(*v)
-                .and_then(|sys_id| top.srv6_end_map.get(&level).get(sys_id).cloned())
-                .map(|info| RepairSeg {
+            spf::SrSegment::NodeSid(v) => {
+                node_sid_info(top, level, *v, algo).map(|info| RepairSeg {
                     sid: info.sid,
                     landing: *v,
                     csid: csid_bits_end(&info),
-                }),
+                })
+            }
             spf::SrSegment::AdjSid(from, to, via) => {
                 srv6_endx_sid_for_link(top, level, *from, *to, *via).map(|endx| RepairSeg {
                     sid: endx.sid,
@@ -186,6 +186,35 @@ pub(super) fn build_repair_path_srv6(
         segs,
         encap: EncapType::HInsert,
     })
+}
+
+/// Resolve `vertex`'s SRv6 node (End) SID for `algo`: the base
+/// (algo-0) End SID from `srv6_end_map` when `algo` is `None`, or the
+/// per-Flex-Algorithm End SID from `peer_algo_srv6` when `Some(n)`.
+///
+/// Per-algo node segments are what keep a Flex-Algo TI-LFA repair list
+/// inside the algo-N topology: each node-SID hop routes to that node's
+/// algo-N locator (installed by the per-algo IPv6 RIB build), so the
+/// repair traffic follows the algo-N constrained paths rather than the
+/// unconstrained algo-0 ones. Adjacency (End.X) segments stay algo-0:
+/// they are the final single-hop into the repair link, processed at the
+/// node the prior algo-N node-SID already delivered the packet to.
+fn node_sid_info(
+    top: &IsisTop,
+    level: Level,
+    vertex: usize,
+    algo: Option<u8>,
+) -> Option<super::srv6::Srv6EndSidInfo> {
+    let sys_id = top.lsp_map.get(&level).resolve(vertex)?;
+    match algo {
+        None => top.srv6_end_map.get(&level).get(sys_id).cloned(),
+        Some(n) => top
+            .peer_algo_srv6
+            .get(&level)
+            .get(sys_id)
+            .and_then(|m| m.get(&n))
+            .map(|loc| loc.end.clone()),
+    }
 }
 
 /// SRv6 End.X SID as advertised in an IS-reach sub-TLV: the SID plus

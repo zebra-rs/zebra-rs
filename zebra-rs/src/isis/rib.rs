@@ -257,7 +257,8 @@ impl IsisRibFamily for V6 {
         level: Level,
         repair: &spf::RepairPath,
     ) -> Option<RepairPathSrv6> {
-        build_repair_path_srv6(top, level, repair)
+        // Algo-0 (legacy) repair: node segments resolve to base End SIDs.
+        build_repair_path_srv6(top, level, None, repair)
     }
 
     fn trunc_prefix(p: Ipv6Net) -> Ipv6Net {
@@ -1129,6 +1130,10 @@ struct FlexAlgoInput {
     algo: u8,
     graph: spf::Graph,
     source: Option<usize>,
+    /// Run per-algo TI-LFA in this algo's constrained graph. Set only
+    /// for SRv6-dataplane algos with the per-algo `fast-reroute ti-lfa`
+    /// toggle — Flex-Algo TI-LFA is an SRv6 feature here.
+    ti_lfa: bool,
 }
 
 /// Result of a single IS-IS SPF run, ready to be applied back to
@@ -1167,6 +1172,11 @@ struct FlexAlgoOutput {
     graph: spf::Graph,
     source: Option<usize>,
     spf: Option<BTreeMap<usize, spf::Path>>,
+    /// Per-algo TI-LFA repair paths keyed by destination vertex (empty
+    /// when this algo's `ti_lfa` was false). Consumed by the per-algo
+    /// IPv6 (SRv6) RIB build to stamp backups; resolved to algo-N End
+    /// SIDs so the repair stays in the algo-N topology.
+    tilfa: BTreeMap<usize, Vec<spf::RepairPath>>,
 }
 
 /// Build the SPF graphs for `level` and snapshot the data the worker
@@ -1233,6 +1243,11 @@ pub(super) fn build_spf_input(top: &mut IsisTop, level: Level) -> Option<SpfInpu
             algo: *algo,
             graph: algo_graph,
             source: algo_source,
+            // Per-algo TI-LFA is an SRv6 feature here: compute it only
+            // for SRv6-dataplane algos whose per-algo `fast-reroute
+            // ti-lfa` toggle is set, so we don't pay the cost for algos
+            // whose repair we'd never install.
+            ti_lfa: entry.ti_lfa && entry.dataplane_srv6 == Some(true),
         });
     }
 
@@ -1313,8 +1328,11 @@ pub(super) fn compute_spf(input: SpfInput) -> SpfOutput {
         Mt2Output { source, spf, tilfa }
     });
 
-    // Per-algo SPF. No TI-LFA for Flex-Algo (the FAD topology may
-    // not admit the algo-0 repair anyway — deferred).
+    // Per-algo SPF + (SRv6) TI-LFA. The repair is computed in this
+    // algo's *constrained* graph so it never leaves the algo-N
+    // topology. Per-algo TI-LFA stats are intentionally not merged into
+    // `tilfa_stats` (which `show isis spf` reports) so the legacy + MT2
+    // figures stay comparable across releases.
     let flex_algos = flex_algos
         .into_iter()
         .map(
@@ -1322,13 +1340,21 @@ pub(super) fn compute_spf(input: SpfInput) -> SpfOutput {
                  algo,
                  graph,
                  source,
+                 ti_lfa,
              }| {
                 let spf = source.map(|src| spf::spf(&graph, src, &spf::SpfOpt::full_path()));
+                let tilfa = match (ti_lfa, source, spf.as_ref()) {
+                    (true, Some(src), Some(spf_res)) => {
+                        tilfa_repair_path(&graph, &lsp_map, src, spf_res, tilfa_mode).0
+                    }
+                    _ => BTreeMap::new(),
+                };
                 FlexAlgoOutput {
                     algo,
                     graph,
                     source,
                     spf,
+                    tilfa,
                 }
             },
         )
@@ -1459,6 +1485,7 @@ pub(super) fn apply_spf_result(top: &mut IsisTop, output: SpfOutput) {
         graph: algo_graph,
         source: algo_source,
         spf: algo_spf,
+        tilfa: algo_tilfa,
     } in flex_algos
     {
         // Per-algo dataplane participation (RFC 9350 §6). Build the
@@ -1500,7 +1527,7 @@ pub(super) fn apply_spf_result(top: &mut IsisTop, output: SpfOutput) {
                 if !export.is_empty() {
                     new_flex_algo_srv6_export.insert(algo, export);
                 }
-                build_rib6_from_flex_algo(top, level, algo, src, spf_res)
+                build_rib6_from_flex_algo(top, level, algo, src, spf_res, &algo_tilfa)
             }
             _ => PrefixMap::<Ipv6Net, SpfRoute<V6>>::new(),
         };
@@ -1582,8 +1609,12 @@ pub(super) fn apply_spf_result(top: &mut IsisTop, output: SpfOutput) {
 /// algo N" is plain longest-prefix IPv6 to its locator over the algo-N
 /// constrained topology. This routes each participating origin's
 /// per-algo locator prefix (`peer_algo_srv6[origin][algo]`) with the
-/// algo-N SPF nexthop(s) — no SID push for transit, no TI-LFA backup
-/// (per-algo fast-reroute over SRv6 is deferred).
+/// algo-N SPF nexthop(s) — no SID push for transit.
+///
+/// When `tilfa` is non-empty (the algo's per-algo `fast-reroute ti-lfa`
+/// toggle was set), each single-nexthop locator route also gets a TI-LFA
+/// backup computed in the algo-N constrained graph and resolved to
+/// algo-N node End SIDs (so the repair stays in the algo-N topology).
 ///
 /// Nodes that did not advertise a per-algo locator are skipped: they do
 /// not participate in algo-N SRv6 forwarding. The algo-0 IPv6 RIB still
@@ -1594,6 +1625,7 @@ fn build_rib6_from_flex_algo(
     algo: u8,
     source: usize,
     spf_result: &BTreeMap<usize, spf::Path>,
+    tilfa: &BTreeMap<usize, Vec<spf::RepairPath>>,
 ) -> PrefixMap<Ipv6Net, SpfRoute<V6>> {
     let mut rib = PrefixMap::<Ipv6Net, SpfRoute<V6>>::new();
 
@@ -1657,7 +1689,7 @@ fn build_rib6_from_flex_algo(
             continue;
         }
 
-        let route = SpfRoute::<V6> {
+        let mut route = SpfRoute::<V6> {
             metric: nhops.cost,
             nhops: spf_nhops,
             sid: None,
@@ -1666,6 +1698,23 @@ fn build_rib6_from_flex_algo(
             dest_vertex: Some(*node),
             backup_as_primary: top.config.fast_reroute_backup_as_primary,
         };
+
+        // Per-algo TI-LFA backup. Single-nexthop only (an ECMP route is
+        // already self-protecting), mirroring `build_rib_from_spf`. Node
+        // segments resolve to algo-N End SIDs so the repair stays in the
+        // algo-N topology; adjacency segments reuse the algo-0 End.X
+        // (the final single hop into the repair link). A repair whose
+        // segments can't all resolve (e.g. the origin hasn't advertised
+        // an algo-N End SID for a node hop) is dropped rather than
+        // installed partial.
+        if route.nhops.len() == 1
+            && let Some(repair) = tilfa.get(node).and_then(|paths| paths.first())
+            && let Some(backup) = build_repair_path_srv6(top, level, Some(algo), repair)
+            && let Some(nhop) = route.nhops.values_mut().next()
+        {
+            nhop.backup = Some(backup);
+        }
+
         rib.insert(locator.trunc(), route);
     }
 
