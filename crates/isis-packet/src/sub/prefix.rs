@@ -13,7 +13,10 @@ use serde::{Deserialize, Serialize};
 use crate::util::{ParseBe, TlvEmitter, emit_sub_tlvs};
 use crate::{IsisTlv, IsisTlvType, SidLabelValue, many0_complete};
 
-use super::{Behavior, IsisCodeLen, IsisPrefixCode, IsisSrv6SidSub2Code, IsisSubTlvUnknown};
+use super::{
+    Behavior, IsisCodeLen, IsisPrefixCode, IsisSrv6MirrorSub2Code, IsisSrv6SidSub2Code,
+    IsisSubTlvUnknown,
+};
 
 #[derive(Debug, NomBE, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "kebab-case")]
@@ -23,6 +26,8 @@ pub enum IsisSubTlv {
     PrefixSid(IsisSubPrefixSid),
     #[nom(Selector = "IsisPrefixCode::Srv6EndSid")]
     Srv6EndSid(IsisSubSrv6EndSid),
+    #[nom(Selector = "IsisPrefixCode::Srv6MirrorSid")]
+    Srv6MirrorSid(IsisSubSrv6MirrorSid),
     #[nom(Selector = "IsisPrefixCode::Ipv4SourceRouterId")]
     Ipv4SourceRouterId(IsisSubIpv4SourceRouterId),
     #[nom(Selector = "IsisPrefixCode::Ipv6SourceRouterId")]
@@ -128,6 +133,144 @@ impl TlvEmitter for IsisSubSrv6EndSid {
     }
 }
 
+/// draft-ietf-rtgwg-srv6-egress-protection — SRv6 Mirror SID sub-TLV
+/// (type 8 inside the SRv6 Locator TLV). Wire layout mirrors the SRv6
+/// End SID sub-TLV (RFC 9352 §7.2): Flags(1) + SRv6 Endpoint
+/// Behavior(2, = End.M / 74) + SID(16) + sub-sub-TLV-length(1) +
+/// sub-sub-TLVs. The draft requires exactly one Protected Locators
+/// sub-sub-TLV identifying the protected egress locator(s).
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct IsisSubSrv6MirrorSid {
+    pub flags: u8,
+    pub behavior: Behavior,
+    pub sid: Ipv6Addr,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub sub2s: Vec<IsisMirrorSub2Tlv>,
+}
+
+impl ParseBe<IsisSubSrv6MirrorSid> for IsisSubSrv6MirrorSid {
+    fn parse_be(input: &[u8]) -> IResult<&[u8], Self> {
+        let (input, flags) = be_u8(input)?;
+        let (input, behavior) = be_u16(input)?;
+        let (input, sid) = Ipv6Addr::parse_be(input)?;
+        let (input, sub2_len) = be_u8(input)?;
+        let mut sub = Self {
+            flags,
+            behavior: behavior.into(),
+            sid,
+            sub2s: vec![],
+        };
+        if sub2_len == 0 {
+            return Ok((input, sub));
+        }
+        let (input, sub2_data) = safe_split_at(input, sub2_len as usize)?;
+        let (_, sub2s) = many0_complete(IsisMirrorSub2Tlv::parse_subs).parse(sub2_data)?;
+        sub.sub2s = sub2s;
+        Ok((input, sub))
+    }
+}
+
+impl TlvEmitter for IsisSubSrv6MirrorSid {
+    fn typ(&self) -> u8 {
+        IsisPrefixCode::Srv6MirrorSid.into()
+    }
+
+    fn len(&self) -> u8 {
+        // Flags(1)+Behavior(2)+Sid(16)+Sub2Len(1)+Sub2
+        let len: u8 = self.sub2s.iter().map(|sub| sub.len() + 2).sum();
+        1 + 2 + 16 + 1 + len
+    }
+
+    fn emit(&self, buf: &mut BytesMut) {
+        buf.put_u8(self.flags);
+        buf.put_u16(self.behavior.into());
+        buf.put(&self.sid.octets()[..]);
+        emit_sub_tlvs(buf, |buf| {
+            for sub2 in &self.sub2s {
+                sub2.emit(buf);
+            }
+        });
+    }
+}
+
+/// Protected Locators sub-sub-TLV (type 1) carried inside the SRv6
+/// Mirror SID sub-TLV. Encodes one protected egress locator as a
+/// Locator-Size (number of significant bits, 1..=128) followed by the
+/// ceil(bits/8) most-significant locator octets.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct IsisSub2ProtectedLocators {
+    pub locator: Ipv6Net,
+}
+
+impl ParseBe<IsisSub2ProtectedLocators> for IsisSub2ProtectedLocators {
+    fn parse_be(input: &[u8]) -> IResult<&[u8], Self> {
+        let (input, locator_size) = be_u8(input)?;
+        let (input, locator) = ptakev6(input, locator_size)?;
+        Ok((input, Self { locator }))
+    }
+}
+
+impl TlvEmitter for IsisSub2ProtectedLocators {
+    fn typ(&self) -> u8 {
+        IsisSrv6MirrorSub2Code::ProtectedLocators.into()
+    }
+
+    fn len(&self) -> u8 {
+        1 + psize(self.locator.prefix_len()) as u8
+    }
+
+    fn emit(&self, buf: &mut BytesMut) {
+        buf.put_u8(self.locator.prefix_len());
+        let plen = psize(self.locator.prefix_len());
+        if plen != 0 {
+            buf.put(&self.locator.addr().octets()[..plen]);
+        }
+    }
+}
+
+#[derive(Debug, NomBE, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "kebab-case")]
+#[nom(Selector = "IsisSrv6MirrorSub2Code")]
+pub enum IsisMirrorSub2Tlv {
+    #[nom(Selector = "IsisSrv6MirrorSub2Code::ProtectedLocators")]
+    ProtectedLocators(IsisSub2ProtectedLocators),
+    #[nom(Selector = "_")]
+    Unknown(IsisSubTlvUnknown),
+}
+
+impl IsisMirrorSub2Tlv {
+    pub fn parse_subs(input: &[u8]) -> IResult<&[u8], Self> {
+        let (input, cl) = IsisCodeLen::parse_be(input)?;
+        let (input, sub) = safe_split_at(input, cl.len as usize)?;
+        let (_, mut val) = Self::parse_be(sub, cl.code.into())?;
+        if let IsisMirrorSub2Tlv::Unknown(ref mut v) = val {
+            v.code = cl.code;
+            v.len = cl.len;
+        }
+        Ok((input, val))
+    }
+
+    pub fn len(&self) -> u8 {
+        use IsisMirrorSub2Tlv::*;
+        match self {
+            ProtectedLocators(v) => v.len(),
+            Unknown(v) => v.len(),
+        }
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
+
+    pub fn emit(&self, buf: &mut BytesMut) {
+        use IsisMirrorSub2Tlv::*;
+        match self {
+            ProtectedLocators(v) => v.tlv_emit(buf),
+            Unknown(v) => v.tlv_emit(buf),
+        }
+    }
+}
+
 #[derive(Debug, NomBE, Clone, Serialize, Deserialize, PartialEq)]
 pub struct IsisSub2SidStructure {
     pub lb_len: u8,
@@ -213,6 +356,7 @@ impl IsisSubTlv {
         match self {
             PrefixSid(v) => v.len(),
             Srv6EndSid(v) => v.len(),
+            Srv6MirrorSid(v) => v.len(),
             Ipv4SourceRouterId(v) => v.len(),
             Ipv6SourceRouterId(v) => v.len(),
             Unknown(v) => v.len,
@@ -228,6 +372,7 @@ impl IsisSubTlv {
         match self {
             PrefixSid(v) => v.tlv_emit(buf),
             Srv6EndSid(v) => v.tlv_emit(buf),
+            Srv6MirrorSid(v) => v.tlv_emit(buf),
             Ipv4SourceRouterId(v) => v.tlv_emit(buf),
             Ipv6SourceRouterId(v) => v.tlv_emit(buf),
             Unknown(v) => v.tlv_emit(buf),
