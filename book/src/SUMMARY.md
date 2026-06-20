@@ -5,6 +5,7 @@
 - [Router ID Selection](ch-00-02-router-id.md)
 - [Interface Configuration](ch-00-03-interface-configuration.md)
 - [VXLAN Configuration](ch-00-04-vxlan-configuration.md)
+- [Bridge Configuration](ch-00-05-bridge-configuration.md)
 
 ## Static Route
 

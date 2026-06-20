@@ -1541,8 +1541,12 @@ impl FibHandle {
     }
 
     pub async fn bridge_add(&self, bridge: &Bridge) {
-        // First create the bridge interface
+        // First create the bridge interface. Bring it up at creation
+        // (`ip link add ... up`) so the device is operational without a
+        // separate operator step.
         let mut msg = LinkMessage::default();
+        msg.header.flags = LinkFlags::Up;
+        msg.header.change_mask = LinkFlags::Up;
 
         let name = LinkAttribute::IfName(bridge.name.clone());
         msg.attributes.push(name);
@@ -1564,11 +1568,12 @@ impl FibHandle {
             }
         }
 
-        // If we have addr_gen_mode, set it as a second operation
-        if let Some(addr_gen_mode) = &bridge.addr_gen_mode {
-            self.bridge_set_addr_gen_mode(&bridge.name, addr_gen_mode)
-                .await;
-        }
+        // Set the IPv6 address generation mode as a second operation.
+        // Defaults to `none` (no kernel-generated link-local on the
+        // bridge) when the operator hasn't configured one.
+        let addr_gen_mode = bridge.addr_gen_mode.clone().unwrap_or(AddrGenMode::None);
+        self.bridge_set_addr_gen_mode(&bridge.name, &addr_gen_mode)
+            .await;
     }
 
     pub async fn bridge_set_addr_gen_mode(&self, name: &str, addr_gen_mode: &AddrGenMode) {

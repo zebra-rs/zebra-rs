@@ -8,7 +8,8 @@ equivalent of `ip link add <name> type vxlan ...`) and tears it down
 when the entry is removed.
 
 A VXLAN device is the data-plane endpoint (VTEP) for an EVPN overlay:
-once it is enslaved to a Linux bridge it carries the L2 service, and the
+once it is enslaved to a Linux [bridge](ch-00-05-bridge-configuration.md)
+it carries the L2 service, and the
 control plane (BGP [EVPN Type-5](ch-02-06-bgp-evpn-type5.md) and the L2
 Type-2 / Type-3 routes) populates the forwarding database. Because the
 overlay relies on a BGP control plane rather than data-plane
