@@ -2902,6 +2902,8 @@ impl Isis {
             rib_client: &self.ctx.rib,
             sr_locator: &self.sr_locator,
             watched_locator: &self.watched_locator,
+            sr_flex_algo_locators: &self.sr_flex_algo_locators,
+            watched_flex_algo_locators: &self.watched_flex_algo_locators,
             elib: &mut self.elib,
             key_chains: &self.key_chains,
         })
