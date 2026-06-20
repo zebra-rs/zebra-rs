@@ -223,3 +223,85 @@ jobs:
             sudo apt install ./<filename>.deb
             ```
           files: artifacts/*.deb
+
+  # =====================================================================
+  # Publish a signed flat APT repository, one per Ubuntu codename, as the
+  # asset set of a dedicated `nightly-<codename>` release. Users then add a
+  # one-line apt source and `apt install zebra-rs` / `apt upgrade`.
+  #
+  # Dormant until activated. To turn it on:
+  #   1. Generate the archive signing key (see docs/README.md, "Step 1").
+  #   2. Set secrets   APT_GPG_PRIVATE_KEY (base64 of the armored private key)
+  #                    APT_GPG_PASSPHRASE
+  #   3. Set variable  APT_PUBLISH_ENABLED = true
+  # Until APT_PUBLISH_ENABLED is "true" this job is skipped (kept green), so
+  # nightly runs don't fail before the key exists.
+  # =====================================================================
+  publish-apt:
+    name: Publish APT repo (${{ matrix.codename }})
+    if: ${{ vars.APT_PUBLISH_ENABLED == 'true' }}
+    needs: [build-native, build-container]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    strategy:
+      fail-fast: false
+      matrix:
+        codename: [jammy, noble, resolute]
+    env:
+      CHANNEL: nightly            # tag prefix -> nightly-<codename> (use "apt" for stable)
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - name: Install apt tooling
+        run: sudo apt-get update && sudo apt-get install -y dpkg-dev apt-utils gnupg
+
+      - name: Download this codename's freshly built .debs
+        uses: actions/download-artifact@v4
+        with:
+          path: incoming
+          pattern: deb-${{ matrix.codename }}-*
+          merge-multiple: true
+
+      - name: Import signing key
+        run: echo "$APT_GPG_PRIVATE_KEY" | base64 -d | gpg --batch --import
+        env:
+          APT_GPG_PRIVATE_KEY: ${{ secrets.APT_GPG_PRIVATE_KEY }}
+
+      - name: Build + sign flat repository
+        id: repo
+        env:
+          APT_GPG_PASSPHRASE: ${{ secrets.APT_GPG_PASSPHRASE }}
+        run: |
+          set -euo pipefail
+          TAG="${CHANNEL}-${{ matrix.codename }}"
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+          mkdir repo && cp incoming/*.deb repo/ && cd repo
+          # Flat repo: one Packages index lists every arch; apt filters by Architecture.
+          dpkg-scanpackages --multiversion . > Packages
+          gzip -9 -k -f Packages
+          # Generate Release AFTER the indices (so it checksums Packages/Packages.gz),
+          # then sign it -> InRelease (inline) + Release.gpg (detached).
+          apt-ftparchive \
+            -o APT::FTPArchive::Release::Origin=zebra-rs \
+            -o APT::FTPArchive::Release::Label=zebra-rs \
+            -o APT::FTPArchive::Release::Suite=${{ matrix.codename }} \
+            -o APT::FTPArchive::Release::Codename=${{ matrix.codename }} \
+            -o APT::FTPArchive::Release::Architectures="amd64 arm64" \
+            -o APT::FTPArchive::Release::Components=main \
+            release . > Release
+          GPG=(gpg --batch --yes --pinentry-mode loopback --passphrase "$APT_GPG_PASSPHRASE")
+          "${GPG[@]}" -abs -o Release.gpg Release
+          "${GPG[@]}" --clearsign -o InRelease Release
+
+      - name: Ensure the channel release exists
+        run: |
+          gh release view "${{ steps.repo.outputs.tag }}" >/dev/null 2>&1 || \
+          gh release create "${{ steps.repo.outputs.tag }}" --prerelease \
+            --title "APT repo — ${{ matrix.codename }} (${CHANNEL})" \
+            --notes "Flat APT repository for Ubuntu ${{ matrix.codename }}. Infrastructure release — do not delete."
+
+      - name: Upload .debs + signed metadata (clobber in place)
+        run: |
+          cd repo
+          gh release upload "${{ steps.repo.outputs.tag }}" \
+            Packages Packages.gz Release Release.gpg InRelease *.deb --clobber
