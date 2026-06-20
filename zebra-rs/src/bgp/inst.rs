@@ -429,7 +429,8 @@ pub fn init_shard_count(config_shards: Option<usize>) -> usize {
     if n > 1 {
         tracing::info!("BGP RIB sharding: {n} shards (from {source})");
     } else {
-        tracing::info!("BGP RIB sharding: 1 shard, synchronous (from {source})");
+        // Disable default logging.
+        // tracing::info!("BGP RIB sharding: 1 shard, synchronous (from {source})");
     }
     n
 }
