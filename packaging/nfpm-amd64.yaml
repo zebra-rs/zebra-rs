@@ -21,7 +21,7 @@ description: |
   zebra-rs is reincarnation of GNU zebra in Rust.
 homepage: "https://zebra.dev"
 license: "MIT"
-changelog: "changelog.yaml"
+changelog: "../CHANGELOG.yaml"
 contents:
   - src: ../target/release/zebra-rs
     dst: /usr/bin/zebra-rs
