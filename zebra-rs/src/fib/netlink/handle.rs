@@ -506,13 +506,15 @@ impl FibHandle {
                     continue;
                 }
                 ok = false;
-                tracing::info!(
-                    "NewRoute error: {prefix} {e} table={table_id} rtype={:?} metric={} use_nhid={} nh={}",
-                    entry.rtype,
-                    entry.metric,
-                    self.use_nhid,
-                    fmt_nexthop_for_trace(nexthop),
-                );
+                if fib_route() {
+                    tracing::info!(
+                        "NewRoute error: {prefix} {e} table={table_id} rtype={:?} metric={} use_nhid={} nh={}",
+                        entry.rtype,
+                        entry.metric,
+                        self.use_nhid,
+                        fmt_nexthop_for_trace(nexthop),
+                    );
+                }
             }
         }
         ok
@@ -653,7 +655,9 @@ impl FibHandle {
 
         let mut response = self.handle.clone().request(req).unwrap();
         while let Some(msg) = response.next().await {
-            if let NetlinkPayload::Error(e) = msg.payload {
+            if let NetlinkPayload::Error(e) = msg.payload
+                && fib_route()
+            {
                 tracing::info!(
                     "DelRoute error: {prefix} {e} table={table_id} rtype={:?} metric={} use_nhid={} nh={}",
                     entry.rtype,
@@ -903,11 +907,13 @@ impl FibHandle {
                     continue;
                 }
                 ok = false;
-                tracing::info!(
-                    "NewRoute IPv6 error: {prefix} {e} use_nhid={} nh={}",
-                    self.use_nhid,
-                    fmt_nexthop_for_trace(nexthop),
-                );
+                if fib_route() {
+                    tracing::info!(
+                        "NewRoute IPv6 error: {prefix} {e} use_nhid={} nh={}",
+                        self.use_nhid,
+                        fmt_nexthop_for_trace(nexthop),
+                    );
+                }
             }
         }
         ok
@@ -1316,10 +1322,12 @@ impl FibHandle {
         while let Some(msg) = response.next().await {
             match msg.payload {
                 NetlinkPayload::Error(e) => {
-                    tracing::info!(
-                        "NewNexthop error: {e} gid: {gid} refcnt: {refcnt} {}",
-                        group_summary,
-                    );
+                    if fib_nexthop() {
+                        tracing::info!(
+                            "NewNexthop error: {e} gid: {gid} refcnt: {refcnt} {}",
+                            group_summary,
+                        );
+                    }
                 }
                 // Non-error payloads here are mostly the RTNLGRP_NEXTHOP
                 // multicast echoes the kernel delivers on the shared
@@ -1373,7 +1381,9 @@ impl FibHandle {
 
         let mut response = self.handle.clone().request(req).unwrap();
         while let Some(msg) = response.next().await {
-            if let NetlinkPayload::Error(e) = msg.payload {
+            if let NetlinkPayload::Error(e) = msg.payload
+                && fib_nexthop()
+            {
                 tracing::info!(
                     "DelNexthop error: {e} gid: {gid} refcnt: {refcnt} nhop: {nexthop:?}",
                     gid = nexthop.gid(),
