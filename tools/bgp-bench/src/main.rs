@@ -54,6 +54,24 @@ enum Cmd {
     Run(RunArgs),
 }
 
+/// Outbound policy attached to each receiver, to exercise the egress
+/// out-policy build — the per-peer work the peer-task vs update-group
+/// comparison turns on (the design memo puts it at ~75% of egress CPU).
+#[derive(Clone, Copy, PartialEq, Eq, clap::ValueEnum)]
+enum OutPolicy {
+    /// No out-policy; egress is a trivial copy of the Loc-RIB attr.
+    None,
+    /// One shared policy on every receiver → all receivers fall in ONE
+    /// update-group. Coalescing-favorable (the route-reflector case):
+    /// peer-task OFF builds+encodes once and replicates; ON re-does it
+    /// per peer.
+    Shared,
+    /// A distinct policy per receiver → one update-group EACH. Diversity-
+    /// favorable: neither model can coalesce, so the per-peer parallel
+    /// build (peer-task ON) is free to win on many cores.
+    Distinct,
+}
+
 #[derive(Args)]
 struct EmitArgs {
     /// Daemon's AS number.
@@ -81,7 +99,17 @@ struct EmitArgs {
     /// plane. Enable for a with-FIB run under root.
     #[arg(long)]
     fib_install: bool,
+    /// Outbound policy applied to every receiver (set MED + AS-path-
+    /// prepend, permit-all). `shared` puts all receivers in one update-
+    /// group (coalescing case); `distinct` gives each its own (diversity
+    /// case). `none` is a trivial-egress baseline.
+    #[arg(long, value_enum, default_value = "none")]
+    out_policy: OutPolicy,
 }
+
+/// eBGP AS prepended by the bench out-policy (distinct mode offsets per
+/// receiver). Kept clear of the sender/receiver AS ranges.
+const PREPEND_AS_BASE: u32 = 64600;
 
 #[derive(Args)]
 struct RunArgs {
@@ -147,20 +175,77 @@ fn emit_config(args: &EmitArgs) -> Result<()> {
     if !args.fib_install {
         out.push_str("router bgp global no-fib-install true;\n");
     }
-    let mut neighbor = |addr: Ipv4Addr, asn: u32| {
-        out.push_str(&format!(
-            "router bgp neighbor {addr} remote-as {asn};\n\
-             router bgp neighbor {addr} afi-safi ipv4 enabled true;\n",
-        ));
-    };
-    for i in 0..args.senders {
-        neighbor(sender_addr(i), SENDER_AS_BASE + i as u32);
+
+    // Out-policy definitions (before the neighbors that reference them).
+    match args.out_policy {
+        OutPolicy::None => {}
+        OutPolicy::Shared => push_policy(&mut out, "bench-out", 100, PREPEND_AS_BASE, 2),
+        OutPolicy::Distinct => {
+            for j in 0..args.receivers {
+                push_policy(
+                    &mut out,
+                    &format!("bench-out-{j}"),
+                    100 + j as u32,
+                    PREPEND_AS_BASE + j as u32,
+                    2,
+                );
+            }
+        }
     }
+
+    // Senders inject only; no out-policy on them (they drain-and-discard).
+    for i in 0..args.senders {
+        push_neighbor(&mut out, sender_addr(i), SENDER_AS_BASE + i as u32, None);
+    }
+    // Receivers are the fan-out set we "reflect to" and measure; the
+    // out-policy lives here so its build cost is on the measured path.
     for j in 0..args.receivers {
-        neighbor(receiver_addr(j), RECEIVER_AS_BASE + j as u32);
+        let policy = match args.out_policy {
+            OutPolicy::None => None,
+            OutPolicy::Shared => Some("bench-out".to_string()),
+            OutPolicy::Distinct => Some(format!("bench-out-{j}")),
+        };
+        push_neighbor(
+            &mut out,
+            receiver_addr(j),
+            RECEIVER_AS_BASE + j as u32,
+            policy.as_deref(),
+        );
     }
     print!("{out}");
     Ok(())
+}
+
+/// Emit one neighbor: remote-as, ipv4-unicast enabled, and `passive-mode`.
+/// Passive is essential at scale — without it the daemon *also* dials each
+/// neighbor's address on port 179, and that outbound attempt collides with
+/// the bench's inbound session (BGP §6.8 collision resolution), resetting
+/// sessions once more than a handful of receivers are configured. Passive =
+/// the daemon only accepts; the bench is always the dialer.
+fn push_neighbor(out: &mut String, addr: Ipv4Addr, asn: u32, out_policy: Option<&str>) {
+    out.push_str(&format!(
+        "router bgp neighbor {addr} remote-as {asn};\n\
+         router bgp neighbor {addr} afi-safi ipv4 enabled true;\n\
+         router bgp neighbor {addr} transport passive-mode true;\n",
+    ));
+    if let Some(name) = out_policy {
+        out.push_str(&format!("router bgp neighbor {addr} policy out {name};\n"));
+    }
+}
+
+/// Emit a permit-all out-policy that sets MED and prepends `prepend_as`
+/// `repeat` times. The prepend forces an AS_PATH rebuild per prefix per
+/// advertisement, so the out-policy application is real work on the egress
+/// path — exactly the per-peer cost the peer-task vs update-group benchmark
+/// is comparing. A single permit entry with no match clause passes every
+/// prefix (verified: a deny-all twin zeroes the receiver's routes).
+fn push_policy(out: &mut String, name: &str, med: u32, prepend_as: u32, repeat: u8) {
+    out.push_str(&format!(
+        "policy {name} entry 10 action permit;\n\
+         policy {name} entry 10 set med set {med};\n\
+         policy {name} entry 10 set as-path-prepend asn {prepend_as};\n\
+         policy {name} entry 10 set as-path-prepend repeat {repeat};\n",
+    ));
 }
 
 fn assert_addr_capacity(senders: u8, receivers: u8) -> Result<()> {
