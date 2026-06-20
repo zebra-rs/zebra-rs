@@ -1375,6 +1375,8 @@ impl Bgp {
         );
         self.register_vrf_show(name, &new_handle);
         self.vrf_registry.insert(name.to_string(), new_handle);
+        // Re-seed the respawned VRF with the colour-steering snapshot.
+        self.broadcast_colour_steering();
         bgp_srv6_trace!(self.tracing, vrf = %name, "bgp: reconciled SRv6 service SID for VRF");
     }
 
@@ -1964,6 +1966,10 @@ impl Bgp {
             self.register_vrf_show(&name, &handle);
             self.vrf_registry.insert(name, handle);
         }
+        // Seed every (including newly-spawned) VRF with the current
+        // colour-steering snapshot so SRv6 L3VPN routes steer from the
+        // first install, not only after the next shadow change.
+        self.broadcast_colour_steering();
     }
 
     /// Called when `RibRx::VrfAdd` for `name` arrives. If a
@@ -2640,6 +2646,33 @@ impl Bgp {
         }
     }
 
+    /// Push the current colour-steering snapshot (Color→Flex-Algo
+    /// bindings + the per-algo SRv6 End-SID shadow) to every per-VRF
+    /// task, so a per-VRF SRv6 L3VPN route whose Color binds to a
+    /// Flex-Algo gets the algo-N End SID prepended at FIB install. The
+    /// per-VRF tasks leak their `RibRx` half, so the shadow can't reach
+    /// them by subscription — the global task mirrors it via
+    /// `BgpVrfMsg::ColourSteering` instead.
+    ///
+    /// Called on shadow change (each IS-IS SPF that moves a per-algo
+    /// End SID), colour-policy commit, and VRF spawn. No-op when no VRF
+    /// is spawned. Sent per-change today; coalescing across a
+    /// convergence burst is a follow-up (VRFs are few and shadow churn
+    /// is transient).
+    pub fn broadcast_colour_steering(&self) {
+        if self.vrf_registry.is_empty() {
+            return;
+        }
+        for handle in self.vrf_registry.values() {
+            let _ = handle
+                .inbox
+                .send(super::vrf::msg::BgpVrfMsg::ColourSteering {
+                    color_policy: self.color_policy.clone(),
+                    srv6_shadow: self.flex_algo_srv6_routes.clone(),
+                });
+        }
+    }
+
     pub fn process_rib_msg(&mut self, msg: RibRx) {
         // println!("RIB Message {:?}", msg);
         match msg {
@@ -2833,9 +2866,13 @@ impl Bgp {
             RibRx::FlexAlgoSrv6RouteAdd { route } => {
                 self.flex_algo_srv6_routes
                     .insert(route.algo, route.prefix, route.end_sid);
+                // Mirror the updated shadow to per-VRF tasks for L3VPN
+                // colour steering.
+                self.broadcast_colour_steering();
             }
             RibRx::FlexAlgoSrv6RouteDel { algo, prefix } => {
                 self.flex_algo_srv6_routes.remove(algo, prefix);
+                self.broadcast_colour_steering();
             }
             RibRx::NexthopUpdate { nh, resolution } => {
                 self.nht_handle_update(nh, &resolution);

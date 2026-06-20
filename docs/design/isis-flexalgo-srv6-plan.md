@@ -126,13 +126,33 @@ the "prepend" counterpart of PR 7's plain-unicast "replace":
   in scope. **No-op for per-VRF VPNv4/VPNv6-over-SRv6 routes**: those
   install in per-VRF tasks that don't hold the (dynamic) colour shadow.
 
-Remaining deferred follow-ups: **per-VRF VPN colour steering** — needs a
-live global→VRF sync of `flex_algo_srv6_routes` (+ `color_policy`) to
-each VRF task (a new `BgpVrfMsg` broadcast on every IS-IS SPF + per-VRF
-storage + use in the per-VRF `fib_install`); and a **TI-LFA BDD** (the
-PR-6 `isis_flex_srv6` topology has no intra-algo redundancy to exercise
-a repair). The PR-6 BDD feature was authored but not executed here
-(needs root/netns; CI runs the bdd suite).
+**Per-VRF VPN colour steering: implemented** (branch
+`isis-flexalgo-srv6-vrf-steer`, build/fmt/clippy/non-bdd tests green) —
+the global→VRF colour-shadow sync that unlocks steering for imported
+SRv6 L3VPN routes:
+
+- VRF tasks leak their `RibRx` half, so the shadow can't reach them by
+  subscription; the global `Bgp` instead mirrors it via a new
+  `BgpVrfMsg::ColourSteering { color_policy, srv6_shadow }`.
+- `Bgp::broadcast_colour_steering` pushes the combined snapshot to every
+  `vrf_registry` entry on: a `flex_algo_srv6_routes` change (the `RibRx`
+  handler, i.e. each IS-IS SPF that moves a per-algo End SID), `CommitEnd`
+  (covers colour-policy edits *and* VRF spawn, via `apply_vrf_commit_diff`),
+  and SRv6 VRF respawn. No-op when no VRF is spawned.
+- The `Vrf` stores `color_policy` + `flex_algo_srv6_routes` (updated on
+  the new message) and its `BgpTop` sites pass `Some(&self.…)`, so the
+  `steer_srv6_vpn` already called in the per-VRF `fib_install` resolves
+  and prepends the algo-N End SID for VPNv4/VPNv6-over-SRv6 imports.
+
+Coalescing follow-up: the shadow is broadcast per-change today; batching
+across a convergence burst would cut redundant full-snapshot clones
+(VRFs are few and churn is transient, so it's a perf nicety not a
+correctness issue).
+
+Remaining deferred: a **TI-LFA BDD** (the PR-6 `isis_flex_srv6` topology
+has no intra-algo redundancy to exercise a repair). The PR-6 BDD feature
+was authored but not executed here (needs root/netns; CI runs the bdd
+suite).
 
 ## Decisions (locked 2026-06-16)
 

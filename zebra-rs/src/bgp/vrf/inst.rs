@@ -121,6 +121,14 @@ pub struct BgpVrf {
         std::collections::BTreeMap<ipnet::Ipv4Net, Vec<crate::rib::nht::ResolvedNexthop>>,
     pub transport_v6:
         std::collections::BTreeMap<ipnet::Ipv6Net, Vec<crate::rib::nht::ResolvedNexthop>>,
+    /// Colour-steering state mirrored from the global task via
+    /// `BgpVrfMsg::ColourSteering`: the Color→Flex-Algo bindings and the
+    /// per-algo SRv6 End-SID shadow. Read by `fib_install_v4`/`v6` (via
+    /// `BgpTop`) so an imported SRv6 L3VPN route whose Color binds to a
+    /// Flex-Algo gets the algo-N End SID prepended before its service
+    /// SID. Empty until the first snapshot arrives.
+    pub color_policy: super::super::color_policy::ColorPolicy,
+    pub flex_algo_srv6_routes: super::super::color_policy::FlexAlgoSrv6Shadow,
 }
 
 /// Sender side of the per-VRF inbound channel — handed back to
@@ -376,6 +384,8 @@ impl BgpVrf {
             interface_addrs: InterfaceAddrs::new(),
             transport_v4: std::collections::BTreeMap::new(),
             transport_v6: std::collections::BTreeMap::new(),
+            color_policy: Default::default(),
+            flex_algo_srv6_routes: Default::default(),
         };
         (vrf, inbox_tx)
     }
@@ -459,9 +469,9 @@ impl BgpVrf {
                     vrf_export: Some(&exporter),
                     // Color → Flex-Algo binding is a default-VRF
                     // concept today; per-VRF support is a follow-up.
-                    color_policy: None,
+                    color_policy: Some(&self.color_policy),
                     flex_algo_routes: None,
-                    flex_algo_srv6_routes: None,
+                    flex_algo_srv6_routes: Some(&self.flex_algo_srv6_routes),
                     // Per-VRF tasks never receive VPNv4 NLRI directly,
                     // so no import dispatcher to thread through.
                     vrf_import: None,
@@ -632,9 +642,9 @@ impl BgpVrf {
             // No re-export of imported routes: a VPNv4-from-RD
             // re-emitted as a VPNv4-with-same-RD would loop.
             vrf_export: None,
-            color_policy: None,
+            color_policy: Some(&self.color_policy),
             flex_algo_routes: None,
-            flex_algo_srv6_routes: None,
+            flex_algo_srv6_routes: Some(&self.flex_algo_srv6_routes),
             vrf_import: None,
             nexthop_cache: None,
             vrf_transport_v4: Some(&self.transport_v4),
@@ -719,9 +729,9 @@ impl BgpVrf {
             update_groups: &mut self.update_groups,
             interface_addrs: &self.interface_addrs,
             vrf_export: None,
-            color_policy: None,
+            color_policy: Some(&self.color_policy),
             flex_algo_routes: None,
-            flex_algo_srv6_routes: None,
+            flex_algo_srv6_routes: Some(&self.flex_algo_srv6_routes),
             vrf_import: None,
             nexthop_cache: None,
             vrf_transport_v4: Some(&self.transport_v4),
@@ -849,9 +859,9 @@ impl BgpVrf {
             update_groups: &mut self.update_groups,
             interface_addrs: &self.interface_addrs,
             vrf_export: None,
-            color_policy: None,
+            color_policy: Some(&self.color_policy),
             flex_algo_routes: None,
-            flex_algo_srv6_routes: None,
+            flex_algo_srv6_routes: Some(&self.flex_algo_srv6_routes),
             vrf_import: None,
             nexthop_cache: None,
             vrf_transport_v4: Some(&self.transport_v4),
@@ -920,9 +930,9 @@ impl BgpVrf {
             update_groups: &mut self.update_groups,
             interface_addrs: &self.interface_addrs,
             vrf_export: None,
-            color_policy: None,
+            color_policy: Some(&self.color_policy),
             flex_algo_routes: None,
-            flex_algo_srv6_routes: None,
+            flex_algo_srv6_routes: Some(&self.flex_algo_srv6_routes),
             vrf_import: None,
             nexthop_cache: None,
             vrf_transport_v4: Some(&self.transport_v4),
@@ -1086,6 +1096,18 @@ impl BgpVrf {
     /// `Shutdown`.
     fn process_global_msg(&mut self, msg: BgpVrfMsg) {
         match msg {
+            BgpVrfMsg::ColourSteering {
+                color_policy,
+                srv6_shadow,
+            } => {
+                // Mirror the global colour-steering state so this VRF's
+                // FIB install can steer imported SRv6 L3VPN routes. No
+                // re-install of existing routes here — the next best-path
+                // / NHT churn re-runs `fib_install`; steady-state VPN
+                // routes refresh on the SPF that changed the shadow.
+                self.color_policy = color_policy;
+                self.flex_algo_srv6_routes = srv6_shadow;
+            }
             BgpVrfMsg::Accept(stream, sockaddr) => {
                 // Passive accept for the per-VRF PE-CE session. The global
                 // accept dispatcher routed this inbound connection here by

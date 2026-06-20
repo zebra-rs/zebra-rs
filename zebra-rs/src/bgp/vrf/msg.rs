@@ -100,6 +100,17 @@ pub enum BgpVrfMsg {
     /// IPv6 counterpart of [`Self::WithdrawNetwork`].
     WithdrawNetworkV6 { prefix: Ipv6Net },
 
+    /// Snapshot of the global colour-steering state (Color→Flex-Algo
+    /// bindings + the per-algo SRv6 End-SID shadow) so the per-VRF FIB
+    /// install can steer imported SRv6 L3VPN routes into a Flex-Algo.
+    /// The shadow is rebuilt on every IS-IS SPF; the global task
+    /// re-sends this on change (and once at VRF spawn). Both travel by
+    /// value so the VRF task owns its copy without locking the global.
+    ColourSteering {
+        color_policy: crate::bgp::color_policy::ColorPolicy,
+        srv6_shadow: crate::bgp::color_policy::FlexAlgoSrv6Shadow,
+    },
+
     /// Tear the VRF task down cleanly. The event loop exits on the
     /// next select iteration after receiving this. Used by
     /// `despawn_bgp_vrf` and during daemon shutdown.
