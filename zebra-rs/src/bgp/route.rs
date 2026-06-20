@@ -579,6 +579,15 @@ pub(super) fn fib_install_v4(bgp: &super::peer::BgpTop, prefix: Ipv4Net, selecte
                     uni.encap_type = Some(isis_packet::srv6::EncapType::HEncap);
                 }
             }
+            // SRv6 service-route steering: prepend the algo-N End SID
+            // before an existing End.DT4 service SID. Mutually exclusive
+            // with the plain-path block above (that fires only when
+            // `segs` is empty, i.e. no service SID).
+            if let Some(best) = best
+                && best.attr.srv6_l3_sid().is_some()
+            {
+                steer_srv6_vpn(bgp, &best.attr, &mut rib_entry);
+            }
             let _ = bgp.rib_client.send(rib::Message::Ipv4Add {
                 prefix,
                 rib: rib_entry,
@@ -738,6 +747,17 @@ pub(super) fn fib_install_v6(bgp: &super::peer::BgpTop, prefix: Ipv6Net, selecte
             {
                 uni.segs = vec![sid];
                 uni.encap_type = Some(isis_packet::srv6::EncapType::HEncap);
+            }
+            // SRv6 service-route steering: prepend the algo-N End SID
+            // before an existing End.DT6 service SID. Effective today for
+            // global SRv6-IPv6-unicast service routes (the colour shadow
+            // is in scope on the main task); a no-op for per-VRF VPN
+            // routes until the shadow is synced to VRF tasks. Mutually
+            // exclusive with the plain-path block above.
+            if let Some(best) = best
+                && best.attr.srv6_l3_sid().is_some()
+            {
+                steer_srv6_vpn(bgp, &best.attr, &mut rib_entry);
             }
             let _ = bgp.rib_client.send(rib::Message::Ipv6Add {
                 prefix,
@@ -1017,6 +1037,53 @@ fn resolve_flex_algo_srv6_inner(
         }
     }
     None
+}
+
+/// SRv6 service-route colour steering: prepend the egress PE's algo-N
+/// End SID before the existing End.DT4/DT6 service SID on each nexthop,
+/// so matched traffic rides the algo-N constrained path to the PE before
+/// the service decap (`segs = [algoN-End-SID, service-SID]`). The
+/// "prepend" counterpart of the plain-unicast "replace" steering in
+/// `fib_install_v4` / `fib_install_v6`.
+///
+/// The service SID (the existing first segment) is itself under the
+/// egress PE's locator, so LPM-ing it against the colour shadow yields
+/// that PE's algo-N End SID — no separate next-hop lookup needed. A
+/// no-op when the route carries no Color binding or the shadow has no
+/// covering route. In per-VRF install contexts `bgp.flex_algo_srv6_routes`
+/// is `None` (the shadow isn't synced to VRF tasks yet), so per-VRF VPN
+/// routes are left unsteered until that follow-up lands.
+fn steer_srv6_vpn(bgp: &super::peer::BgpTop, attr: &BgpAttr, entry: &mut rib::entry::RibEntry) {
+    let (Some(color_policy), Some(shadow)) = (bgp.color_policy, bgp.flex_algo_srv6_routes) else {
+        return;
+    };
+    steer_srv6_vpn_inner(color_policy, shadow, attr, entry);
+}
+
+/// Pure-function inner for `steer_srv6_vpn` — testable without a full
+/// `BgpTop`. Prepends the resolved algo-N End SID before the service SID
+/// on every nexthop that carries one.
+fn steer_srv6_vpn_inner(
+    color_policy: &super::color_policy::ColorPolicy,
+    shadow: &super::color_policy::FlexAlgoSrv6Shadow,
+    attr: &BgpAttr,
+    entry: &mut rib::entry::RibEntry,
+) {
+    let prepend = |uni: &mut rib::NexthopUni| {
+        let Some(service_sid) = uni.segs.first().copied() else {
+            return;
+        };
+        if let Some(end_sid) =
+            resolve_flex_algo_srv6_inner(color_policy, shadow, attr, IpAddr::V6(service_sid))
+        {
+            uni.segs.insert(0, end_sid);
+        }
+    };
+    match &mut entry.nexthop {
+        rib::Nexthop::Uni(uni) => prepend(uni),
+        rib::Nexthop::Multi(multi) => multi.nexthops.iter_mut().for_each(prepend),
+        _ => {}
+    }
 }
 
 /// VPN next-hop carried on a `BgpRib` for routes living in the
@@ -12573,6 +12640,68 @@ mod color_aware_nht_tests {
             )
             .is_none()
         );
+    }
+
+    // ---- SRv6 L3VPN / service-route steering (steer_srv6_vpn_inner) --
+
+    fn srv6_service_entry(service_sid: Ipv6Addr) -> crate::rib::entry::RibEntry {
+        let mut entry = crate::rib::entry::RibEntry::new(crate::rib::RibType::Bgp);
+        let mut uni =
+            crate::rib::NexthopUni::new(IpAddr::V6("fe80::1".parse().unwrap()), 0, Vec::new());
+        uni.segs = vec![service_sid];
+        entry.nexthop = crate::rib::Nexthop::Uni(uni);
+        entry
+    }
+
+    fn entry_segs(entry: &crate::rib::entry::RibEntry) -> Vec<Ipv6Addr> {
+        match &entry.nexthop {
+            crate::rib::Nexthop::Uni(uni) => uni.segs.clone(),
+            _ => panic!("expected Uni nexthop"),
+        }
+    }
+
+    #[test]
+    fn srv6_vpn_prepends_end_sid_before_service_sid() {
+        let mut cp = ColorPolicy::new();
+        cp.bindings.insert(100, 128);
+        // The service SID lives under the egress PE's base locator, so
+        // LPM-ing it against the shadow yields the PE's algo-128 End SID.
+        let end_sid: Ipv6Addr = "2001:db8:b128::".parse().unwrap();
+        let service_sid: Ipv6Addr = "2001:db8:b000:42::1".parse().unwrap();
+        let mut shadow = FlexAlgoSrv6Shadow::default();
+        shadow.insert(128, "2001:db8:b000::/48".parse().unwrap(), end_sid);
+        let attr = attr_with_colors(&[100]);
+
+        let mut entry = srv6_service_entry(service_sid);
+        super::steer_srv6_vpn_inner(&cp, &shadow, &attr, &mut entry);
+        assert_eq!(entry_segs(&entry), vec![end_sid, service_sid]);
+    }
+
+    #[test]
+    fn srv6_vpn_no_color_leaves_service_sid() {
+        let cp = ColorPolicy::new();
+        let shadow = FlexAlgoSrv6Shadow::default();
+        let attr = BgpAttr::default();
+        let service_sid: Ipv6Addr = "2001:db8:b000:42::1".parse().unwrap();
+
+        let mut entry = srv6_service_entry(service_sid);
+        super::steer_srv6_vpn_inner(&cp, &shadow, &attr, &mut entry);
+        assert_eq!(entry_segs(&entry), vec![service_sid]);
+    }
+
+    #[test]
+    fn srv6_vpn_unresolved_shadow_leaves_service_sid() {
+        // Colour bound but the shadow has no covering route for the
+        // service SID (e.g. per-VRF install — shadow not synced).
+        let mut cp = ColorPolicy::new();
+        cp.bindings.insert(100, 128);
+        let shadow = FlexAlgoSrv6Shadow::default();
+        let attr = attr_with_colors(&[100]);
+        let service_sid: Ipv6Addr = "2001:db8:b000:42::1".parse().unwrap();
+
+        let mut entry = srv6_service_entry(service_sid);
+        super::steer_srv6_vpn_inner(&cp, &shadow, &attr, &mut entry);
+        assert_eq!(entry_segs(&entry), vec![service_sid]);
     }
 }
 
