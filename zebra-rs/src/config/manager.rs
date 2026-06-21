@@ -251,14 +251,25 @@ pub struct ConfigManager {
 impl ConfigManager {
     pub fn new(
         yang_path: String,
+        config_file: Option<String>,
         rib_tx: UnboundedSender<crate::rib::Message>,
         rib_inbound_tx: UnboundedSender<crate::rib::client::RibInbound>,
         policy_tx: UnboundedSender<crate::policy::Message>,
         yang_service_accounts: std::sync::Arc<std::sync::RwLock<std::collections::HashSet<u32>>>,
     ) -> anyhow::Result<Self> {
-        let mut config_path = PathBuf::from(yang_path.clone());
-        config_path.pop();
-        config_path.push("zebra-rs.conf");
+        // `--config-file FILENAME` overrides the load/save target; with no
+        // override fall back to `zebra-rs.conf` next to the YANG tree. The
+        // explicit file may be in any format `load_config` understands
+        // (CLI brace, JSON, YAML, set/delete) — see `config_to_commands`.
+        let config_path = match config_file {
+            Some(path) => PathBuf::from(path),
+            None => {
+                let mut p = PathBuf::from(yang_path.clone());
+                p.pop();
+                p.push("zebra-rs.conf");
+                p
+            }
+        };
 
         let (tx, rx) = mpsc::channel(255);
         let mut cm = Self {
@@ -689,13 +700,78 @@ impl ConfigManager {
         Ok(to_entry(yang, module))
     }
 
+    /// Sniff the format of a raw config document and convert it into a
+    /// flat list of `set`/`delete` command strings. Shared by the
+    /// startup/`load` path ([`Self::load_config`]) and the
+    /// `vtyctl apply` (`Message::Deploy`) path so a config — whether on
+    /// disk or streamed in — may be CLI brace, JSON, YAML, or
+    /// `set`/`delete` form.
+    ///
+    /// On success returns the detected format plus the commands. A
+    /// document key that doesn't exist in the schema used to be dropped
+    /// silently, applying a PARTIAL config with a clean "applied" reply
+    /// (e.g. a misspelled policy match leaf that left the policy
+    /// permit-all). Reject the document instead, returning the offending
+    /// keys as `Err`, so the operator sees exactly which keys the schema
+    /// refused.
+    fn config_to_commands(&self, config: &str) -> Result<(ConfigFormat, Vec<String>), Vec<String>> {
+        let mode = self.modes.get("configure").unwrap();
+        let mut entry: Option<Rc<Entry>> = None;
+        for e in mode.entry.dir.borrow().iter() {
+            if e.name == "set" {
+                entry = Some(e.clone());
+            }
+        }
+        let entry = entry.unwrap();
+
+        let format_type = config_format_type(config);
+        let (cmds, doc_errors) = match format_type {
+            ConfigFormat::Cli => (load_config_file(config.to_string()), Vec::new()),
+            ConfigFormat::Json => json_read(entry, config),
+            ConfigFormat::Yaml => {
+                let json = yaml_parse(config);
+                json_read(entry, json.as_str())
+            }
+            ConfigFormat::SetDelete => (
+                config
+                    .lines()
+                    .filter(|l| !l.trim().is_empty())
+                    .map(str::to_string)
+                    .collect(),
+                Vec::new(),
+            ),
+        };
+        if !doc_errors.is_empty() {
+            return Err(doc_errors);
+        }
+        Ok((format_type, cmds))
+    }
+
     pub fn load_config(&self) {
-        let output = std::fs::read_to_string(&self.config_path);
-        if let Ok(output) = output {
-            let cmds = load_config_file(output);
-            if let Some(mode) = self.modes.get("configure") {
-                for cmd in cmds.iter() {
-                    let _ = self.execute(mode, cmd);
+        if let Ok(output) = std::fs::read_to_string(&self.config_path) {
+            // An empty (or comment/whitespace-only) config file carries no
+            // commands. Skip the format parsers entirely: the YAML default
+            // would otherwise `yaml_parse("")` → `null` → a bogus bare
+            // `set` line. (Done here, not in `config_to_commands`, so the
+            // `vtyctl apply` path keeps its existing empty-document
+            // behavior — an empty apply must not clear+commit the running
+            // config.)
+            if !output.trim().is_empty() {
+                match self.config_to_commands(&output) {
+                    Ok((_format, cmds)) => {
+                        if let Some(mode) = self.modes.get("configure") {
+                            for cmd in cmds.iter() {
+                                let _ = self.execute(mode, cmd);
+                            }
+                        }
+                    }
+                    Err(doc_errors) => {
+                        tracing::error!(
+                            "config file {}: rejected by schema: {}",
+                            self.config_path.display(),
+                            doc_errors.join("; ")
+                        );
+                    }
                 }
             }
         }
@@ -851,46 +927,19 @@ impl ConfigManager {
             }
             Message::Deploy(req) => {
                 let mode = self.modes.get("configure").unwrap();
-                let mut entry: Option<Rc<Entry>> = None;
-                for e in mode.entry.dir.borrow().iter() {
-                    if e.name == "set" {
-                        entry = Some(e.clone());
-                    }
-                }
-                let entry = entry.unwrap();
 
-                let format_type = config_format_type(&req.config);
-                let (cmds, doc_errors) = match format_type {
-                    ConfigFormat::Cli => (load_config_file(req.config.clone()), Vec::new()),
-                    ConfigFormat::Json => json_read(entry, req.config.as_str()),
-                    ConfigFormat::Yaml => {
-                        let config = yaml_parse(req.config.as_str());
-                        json_read(entry, config.as_str())
+                let (format_type, cmds) = match self.config_to_commands(&req.config) {
+                    Ok(parsed) => parsed,
+                    Err(doc_errors) => {
+                        let resp = DeployResponse {
+                            apply_code: ApplyCode::ParseError,
+                            exec_code: ExecCode::Nomatch,
+                            cmd: doc_errors.join("; "),
+                        };
+                        let _ = req.resp.send(resp);
+                        return;
                     }
-                    ConfigFormat::SetDelete => (
-                        req.config
-                            .lines()
-                            .filter(|l| !l.trim().is_empty())
-                            .map(str::to_string)
-                            .collect(),
-                        Vec::new(),
-                    ),
                 };
-                // A document key that doesn't exist in the schema used
-                // to be dropped silently, applying a PARTIAL config
-                // with a clean "applied" reply (e.g. a misspelled
-                // policy match leaf that left the policy permit-all).
-                // Reject the document instead so the operator sees
-                // exactly which keys the schema refused.
-                if !doc_errors.is_empty() {
-                    let resp = DeployResponse {
-                        apply_code: ApplyCode::ParseError,
-                        exec_code: ExecCode::Nomatch,
-                        cmd: doc_errors.join("; "),
-                    };
-                    let _ = req.resp.send(resp);
-                    return;
-                }
 
                 if format_type != ConfigFormat::SetDelete {
                     self.store.candidate_clear();
