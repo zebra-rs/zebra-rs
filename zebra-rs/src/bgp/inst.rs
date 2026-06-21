@@ -2958,6 +2958,9 @@ impl Bgp {
                 // false→true transitions — see `local_smet` doc.
                 self.local_smet.insert((vni, group, source), vtep_local);
                 self.evpn_originate_smet(vni, vtep_local, group, source);
+                // RFC 9572 §3.2: with segmentation, also advertise a selective
+                // S-PMSI tunnel (Type-10) for the flow (no-op unless enabled).
+                self.evpn_originate_spmsi(vni, vtep_local, group, source);
             }
             RibRx::SnoopLeave {
                 vni,
@@ -2967,6 +2970,7 @@ impl Bgp {
             } => {
                 self.local_smet.remove(&(vni, group, source));
                 self.evpn_withdraw_smet(vni, vtep_local, group, source);
+                self.evpn_withdraw_spmsi(vni, vtep_local, group, source);
             }
             RibRx::VrfAdd {
                 name,

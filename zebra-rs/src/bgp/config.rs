@@ -1467,8 +1467,12 @@ fn config_igmp_mld_proxy(bgp: &mut Bgp, mut args: Args, op: ConfigOp) -> Option<
     for (vni, group, source, vtep_local) in memberships {
         if enabled {
             bgp.evpn_originate_smet(vni, vtep_local, group, source);
+            // A selective S-PMSI rides the same snoop membership when
+            // segmentation is on (the originate is a no-op otherwise).
+            bgp.evpn_originate_spmsi(vni, vtep_local, group, source);
         } else {
             bgp.evpn_withdraw_smet(vni, vtep_local, group, source);
+            bgp.evpn_withdraw_spmsi(vni, vtep_local, group, source);
         }
     }
     Some(())
@@ -1490,6 +1494,20 @@ fn config_segmentation(bgp: &mut Bgp, mut args: Args, op: ConfigOp) -> Option<()
     }
     bgp.segmentation = enabled;
     reoriginate_all_imet(bgp);
+    // Replay snooped memberships so existing flows gain/lose their selective
+    // S-PMSI (Type-10) tunnel on the segmentation toggle.
+    let memberships: Vec<(u32, IpAddr, Option<IpAddr>, IpAddr)> = bgp
+        .local_smet
+        .iter()
+        .map(|((vni, group, source), vtep)| (*vni, *group, *source, *vtep))
+        .collect();
+    for (vni, group, source, vtep_local) in memberships {
+        if enabled {
+            bgp.evpn_originate_spmsi(vni, vtep_local, group, source);
+        } else {
+            bgp.evpn_withdraw_spmsi(vni, vtep_local, group, source);
+        }
+    }
     Some(())
 }
 

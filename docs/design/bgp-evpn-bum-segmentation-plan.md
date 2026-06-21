@@ -370,8 +370,20 @@ codec — and any RIB/Adj-RIB/show/origination wiring.
     elected, legacy PE flagged. **Deferred:** the elected DF gates nothing until
     the Phase-6 replication dataplane; conditional EC-attach (only when legacy
     present); HRW DF Alg.
-- **Phase 5 (optional) — S-PMSI selective multicast (Type 10 + Leaf A-D)**
-  end to end; ties to SMET (Type 6) if/when that lands.
+- **Phase 5 — S-PMSI selective multicast (Type 10 + Leaf A-D). DONE.**
+  Origination + RBR re-origination, end to end. `evpn_originate_spmsi`
+  (mirrors `evpn_originate_smet` but adds a PMSI Tunnel attr — the selective
+  provider tunnel for the snooped `(S,G)` — rooted at the local VTEP; gated on
+  `segmentation`, called alongside SMET from the `SnoopJoin` path + the
+  proxy/segmentation toggle replays). `evpn_reoriginate_spmsi` re-roots an
+  in-region S-PMSI at the RBR (Originator + next-hop-self, L-flag PTA, the
+  selective analog of `evpn_reoriginate_per_region`); triggered from the
+  Type-10 receive path, skipping our own Originator. Leaf A-D for S-PMSI was
+  already generalized in 3c. Live BDD `@bgp_evpn_spmsi` (source PE → RBR →
+  region B, 5/5); SMET BDD still green. **Deferred:** the RBR doesn't withdraw
+  its re-originated S-PMSI when the source withdraws, and doesn't hold the
+  per-PE S-PMSI at the boundary (both mirror the deferred Type-9 follow-ups);
+  S-PMSI-specific DF election.
 
 ## 8. YANG / config (later phases)
 
