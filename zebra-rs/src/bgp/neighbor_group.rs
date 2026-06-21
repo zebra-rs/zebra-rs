@@ -16,9 +16,11 @@
 //!   (the FSM must renegotiate with the new ASN) — see
 //!   [`config_neighbor_group_remote_as`].
 //! - `afi-safi` changes recompute the peers' effective MP set
-//!   ([`effective_mp`]) without touching the FSM: like the per-neighbor
-//!   `afi-safi <name> enabled` knob, the new set is advertised when
-//!   capabilities are next negotiated (`clear bgp …`).
+//!   ([`effective_mp`]) and bounce any Established member — an AFI/SAFI is
+//!   a Multiprotocol capability fixed at OPEN time, so the FSM must
+//!   renegotiate (the same `Event::Stop` `clear bgp … hard` uses). Like
+//!   the per-neighbor `afi-safi <name> enabled` knob; a member still
+//!   coming up carries the change in its first OPEN.
 //!
 //! Naming-wise this sits alongside the existing
 //! `peer-groups/peer-group` schema, not on top of it: a peer can
@@ -931,9 +933,18 @@ pub fn recompute_peer_mp(groups: &BTreeMap<String, NeighborGroup>, config: &mut 
 /// lookup misses and members fall back to default + explicit).
 fn sweep_group_afi_safi(bgp: &mut Bgp, name: &str) {
     sweep_members(bgp, name, |groups, peer| {
+        // An AFI/SAFI is a Multiprotocol capability fixed at OPEN time, so a
+        // change to a member's effective family set only takes effect on a
+        // session that renegotiates. Bounce an Established member whose set
+        // actually changed (mirrors the per-peer `config_afi_safi`); a member
+        // still coming up carries the new family in its first OPEN, and an
+        // unchanged set never bounces.
+        let before: std::collections::BTreeSet<AfiSafi> =
+            peer.config.mp.0.keys().copied().collect();
         recompute_peer_mp(groups, &mut peer.config);
         recompute_peer_nhs(groups, peer);
-        false
+        let after: std::collections::BTreeSet<AfiSafi> = peer.config.mp.0.keys().copied().collect();
+        before != after && matches!(peer.state, State::Established)
     });
 }
 
