@@ -3736,6 +3736,18 @@ impl Bgp {
             "/router/bgp/vrf/evpn/advertise-ipv6",
             super::vrf_config::config_vrf_evpn_advertise_ipv6,
         );
+        self.callback_add(
+            "/router/bgp/vrf/mobile-uplane/route-target/export",
+            super::vrf_config::config_vrf_mup_rt_export,
+        );
+        self.callback_add(
+            "/router/bgp/vrf/mobile-uplane/srv6-mobile/decapsulation/network-instance/exact",
+            super::vrf_config::config_vrf_mup_srv6_decap,
+        );
+        self.callback_add(
+            "/router/bgp/vrf/mobile-uplane/srv6-mobile/encapsulation/network-instance/exact",
+            super::vrf_config::config_vrf_mup_srv6_encap,
+        );
 
         // `set router bgp interface-neighbor <name> [...]`.
         self.callback_add(

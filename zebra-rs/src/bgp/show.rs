@@ -3402,9 +3402,11 @@ fn mup_prefix_display(prefix: &MupPrefix) -> String {
     }
 }
 
-/// `show bgp mobile-uplane` — the MUP (SAFI 85, RFC 9833) Loc-RIB. Phase 2
-/// renders the route table only; the `MUP controller:` block (zenoh +
-/// VRFs + sessions) lands with the controller phase.
+/// `show bgp mobile-uplane` — the MUP (SAFI 85, RFC 9833) view: the
+/// config-driven `MUP VRFs:` block (per-VRF `mobile-uplane` services)
+/// followed by the Loc-RIB route table. The full `MUP controller:`
+/// wrapper (zenoh source + ingested sessions) lands with the controller
+/// phase.
 fn show_bgp_mup(
     bgp: &Bgp,
     _args: Args,
@@ -3413,7 +3415,12 @@ fn show_bgp_mup(
     if json {
         return Ok(String::from("[]"));
     }
-    render_mup_table(&bgp.local_rib.mup)
+    let mut out = render_mup_vrfs(&bgp.vrfs)?;
+    if !out.is_empty() {
+        out.push('\n');
+    }
+    out.push_str(&render_mup_table(&bgp.local_rib.mup)?);
+    Ok(out)
 }
 
 /// Render the MUP Loc-RIB table body. Split out from `show_bgp_mup` so it
@@ -3442,6 +3449,50 @@ fn render_mup_table(
         }
     }
 
+    Ok(buf)
+}
+
+/// Render the configured per-VRF MUP services (the `mobile-uplane`
+/// blocks) as the `MUP VRFs:` section of `show bgp mobile-uplane`.
+/// Config-driven only; returns an empty string when no VRF carries a
+/// `mobile-uplane` config. The full `MUP controller:` wrapper lands with
+/// the controller phase.
+fn render_mup_vrfs(
+    vrfs: &std::collections::BTreeMap<String, super::vrf_config::BgpVrfConfig>,
+) -> std::result::Result<String, std::fmt::Error> {
+    use super::vrf_config::MupSrv6Direction;
+    let mut buf = String::new();
+    let mut any = false;
+    for (name, cfg) in vrfs {
+        let mup = &cfg.mobile_uplane;
+        if mup.srv6_mobile.is_none() && mup.route_target_export.is_empty() {
+            continue;
+        }
+        if !any {
+            writeln!(buf, "MUP VRFs:")?;
+            any = true;
+        }
+        let rd = cfg
+            .rd
+            .as_ref()
+            .map(|r| r.to_string())
+            .unwrap_or_else(|| "-".into());
+        let rts = mup.route_target_export.len();
+        match &mup.srv6_mobile {
+            Some(sm) => {
+                let (dir, st) = match sm.direction {
+                    MupSrv6Direction::Decapsulation => ("decap", "ST2"),
+                    MupSrv6Direction::Encapsulation => ("encap", "ST1"),
+                };
+                let ni = sm.network_instance.as_deref().unwrap_or("-");
+                writeln!(
+                    buf,
+                    "  {name}: rd={rd} {dir}/{st} ni={ni} route-targets={rts}"
+                )?;
+            }
+            None => writeln!(buf, "  {name}: rd={rd} route-targets={rts}")?,
+        }
+    }
     Ok(buf)
 }
 
@@ -4362,6 +4413,52 @@ mod detail_tests {
             None,
             false,
         )
+    }
+
+    #[test]
+    fn render_mup_vrfs_lists_configured_services() {
+        use super::super::vrf_config::{
+            BgpVrfConfig, BgpVrfMobileUplane, MupSrv6Direction, MupSrv6Mobile,
+        };
+        use std::collections::{BTreeMap, BTreeSet};
+        let n3 = BgpVrfConfig {
+            rd: Some("65000:1".parse().unwrap()),
+            mobile_uplane: BgpVrfMobileUplane {
+                route_target_export: ["65000:100".parse().unwrap()]
+                    .into_iter()
+                    .collect::<BTreeSet<_>>(),
+                srv6_mobile: Some(MupSrv6Mobile {
+                    direction: MupSrv6Direction::Decapsulation,
+                    network_instance: Some("core-ni".to_string()),
+                }),
+            },
+            ..Default::default()
+        };
+        let n6 = BgpVrfConfig {
+            rd: Some("65000:2".parse().unwrap()),
+            mobile_uplane: BgpVrfMobileUplane {
+                route_target_export: ["65000:200".parse().unwrap()]
+                    .into_iter()
+                    .collect::<BTreeSet<_>>(),
+                srv6_mobile: Some(MupSrv6Mobile {
+                    direction: MupSrv6Direction::Encapsulation,
+                    network_instance: Some("access-ni".to_string()),
+                }),
+            },
+            ..Default::default()
+        };
+        let mut vrfs: BTreeMap<String, BgpVrfConfig> = BTreeMap::new();
+        vrfs.insert("N3".to_string(), n3);
+        vrfs.insert("N6".to_string(), n6);
+
+        let out = render_mup_vrfs(&vrfs).unwrap();
+        assert!(out.contains("MUP VRFs:"));
+        assert!(out.contains("N3: rd=65000:1 decap/ST2 ni=core-ni route-targets=1"));
+        assert!(out.contains("N6: rd=65000:2 encap/ST1 ni=access-ni route-targets=1"));
+
+        // No mobile-uplane config anywhere → empty section.
+        let empty: BTreeMap<String, BgpVrfConfig> = BTreeMap::new();
+        assert!(render_mup_vrfs(&empty).unwrap().is_empty());
     }
 
     /// End-to-end render of the MUP Loc-RIB table: exercises
