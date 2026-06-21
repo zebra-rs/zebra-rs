@@ -3181,6 +3181,9 @@ fn format_evpn_ecom_value(v: &ExtCommunityValue) -> String {
         // proxy + segmentation-support bits). Reuse the codec's Display,
         // which renders `mcast-flags:` + I / M / S.
         (0x06, 0x09) => v.to_string(),
+        // DF Election EC — RFC 8584 §2.2 (RFC 9572 §5.3.1 inter-AS DF
+        // election). Reuse the codec's Display: `df-election:alg<N>[+ac-df]`.
+        (0x06, 0x06) => v.to_string(),
         _ => format!(
             "0x{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}",
             v.high_type, v.low_type, v.val[0], v.val[1], v.val[2], v.val[3], v.val[4], v.val[5]
@@ -3306,6 +3309,19 @@ fn show_bgp_evpn(
             let ecom = show_evpn_ecom(&rib.attr);
             if !ecom.is_empty() {
                 writeln!(buf, "                    {}", ecom)?;
+            }
+
+            // Line 4 (Type-9 only): RFC 9572 §5.3.1 inter-AS DF election among
+            // the ASBRs advertising this region's Per-Region I-PMSI.
+            if let EvpnPrefix::PerRegionImet { eth_tag, region_id } = prefix
+                && let Some(df) = super::route::evpn_df_election_show(
+                    &bgp.local_rib,
+                    *region_id,
+                    *eth_tag,
+                    &rib.attr,
+                )
+            {
+                writeln!(buf, "                    {}", df)?;
             }
         }
     }

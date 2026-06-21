@@ -351,10 +351,25 @@ codec — and any RIB/Adj-RIB/show/origination wiring.
     live in namespaces (5/5 scenarios). **Deferred:** transit re-root of a
     *received* Type-9 (re-rooting the PMSI endpoint at each ASBR for 3+ AS
     chains) — only matters with the replication dataplane (Phase 6).
-  - **4c — DF election among ASBRs + legacy coexistence.** Attach the DF
-    Election EC with AC-DF cleared to the re-advertised Type-9 so exactly one
-    ASBR forwards into a downstream AS with legacy PEs; gate legacy behavior on
-    the Multicast-Flags segmentation bit. End-to-end BDD.
+  - **4c — DF election among ASBRs + legacy coexistence. DONE.** Full
+    control-plane DF election (decision with Kunihiro). `evpn_reoriginate_per_region`
+    attaches a DF Election EC (`DfElectionEc`, RFC 8584) with **AC-DF cleared**
+    to the re-originated Type-9. `evpn_df_election` implements the RFC 7432 §8.5
+    modulus (Default) algorithm: the candidate ASBRs (every node advertising the
+    region's Type-9, gathered across RDs by `evpn_per_region_asbrs` — each ASBR
+    re-originates under its own RD) are ordered by address and DF =
+    ordinal `eth_tag mod N`; for the I-PMSI (eth-tag 0) that is the lowest
+    address. `show bgp evpn` renders the elected DF + candidate list per region
+    (`evpn_df_election_show`) and the DF Election EC (`df-election:alg0`).
+    Legacy-PE detection: the IMET receive path records each remote's
+    Multicast-Flags segmentation bit (`RemoteImet.segmentation_capable`), and
+    `EvpnFloodState::has_legacy_remote(vni)` surfaces a `(legacy PEs present)`
+    note in the per-region show — an ASBR flags a non-segmentation PE in its
+    region. Validated by a new 4-namespace BDD (`@bgp_evpn_df_election`: PE +
+    two ASBRs .0.2/.0.4 + downstream AS) run live (5/5): EC present, DF=.0.2
+    elected, legacy PE flagged. **Deferred:** the elected DF gates nothing until
+    the Phase-6 replication dataplane; conditional EC-attach (only when legacy
+    present); HRW DF Alg.
 - **Phase 5 (optional) — S-PMSI selective multicast (Type 10 + Leaf A-D)**
   end to end; ties to SMET (Type 6) if/when that lands.
 
@@ -399,11 +414,17 @@ on push, not targeted filters).
 - **PR4a — Phase 4a: DF Election EC codec (RFC 8584). DONE (this PR).**
   `DfElectionEc` in `ext_com.rs` + AC-DF accessors + Display + round-trip
   tests. No behavior change.
-- **PR4b — Phase 4b: inter-AS ASBR re-origination. DONE (this PR).** Reuse
+- **PR4b — Phase 4b: inter-AS ASBR re-origination. DONE.** Reuse
   `region-id` on eBGP groups ("region = AS"); the 3b/3c machinery already
   re-originates the per-AS Type-9 across eBGP with next-hop-self + AS_PATH and
   holds per-AS IMET AS-local. No production code change; new 2-AS
   `@bgp_evpn_interas_segmentation` BDD (run live, 5/5).
+- **PR4c — Phase 4c: inter-AS DF election + legacy coexistence. DONE (this
+  PR).** DF Election EC (AC-DF cleared) on the re-originated Type-9; modulus DF
+  election over the region's ASBRs (`evpn_df_election` / `evpn_per_region_asbrs`)
+  with elected-DF + candidate show; legacy-PE detection via the Multicast-Flags
+  segmentation bit (`RemoteImet.segmentation_capable` / `has_legacy_remote`).
+  4-namespace `@bgp_evpn_df_election` BDD (run live, 5/5). Completes Phase 4.
 - **PR4c — Phase 4c: DF election among ASBRs (AC-DF cleared) + legacy
   coexistence gating + BDD.**
 - **PR5 (optional) — Phase 5: S-PMSI selective multicast + BDD.**

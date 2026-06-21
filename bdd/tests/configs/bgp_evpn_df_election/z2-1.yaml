@@ -1,0 +1,34 @@
+# z2 — ASBR #1 (AS 65001, router-id .0.2, the lower of the two ASBRs so it is
+# the elected DF). region-a (region-id 65001) is the iBGP session to the local
+# region (z1); region-b (region-id 65002) is the eBGP session to AS 65002 (z3).
+# It re-originates region A's per-PE IMET as a Per-Region I-PMSI (Type-9) toward
+# z3, attaching a DF Election EC (AC-DF cleared).
+router:
+  bgp:
+    global:
+      as: 65001
+      router-id: 192.168.0.2
+    neighbor-group:
+    - name: region-a
+      remote-as: 65001
+      region-id: 65001
+    - name: region-b
+      remote-as: 65002
+      region-id: 65002
+    neighbor:
+    - remote-address: 192.168.0.1
+      enabled: true
+      neighbor-group: region-a
+      afi-safi:
+      - name: ipv4
+        enabled: true
+      - name: evpn
+        enabled: true
+    - remote-address: 192.168.0.3
+      enabled: true
+      neighbor-group: region-b
+      afi-safi:
+      - name: ipv4
+        enabled: true
+      - name: evpn
+        enabled: true
