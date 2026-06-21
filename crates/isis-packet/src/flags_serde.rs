@@ -24,7 +24,7 @@ use crate::parser::IsisLspTypes;
 use crate::sub::cap::{RouterCapFlags, SegmentRoutingCapFlags, Srv6Flags};
 use crate::sub::neigh::AdjSidFlags;
 use crate::sub::prefix::{
-    Ipv4ControlInfo, Ipv6ControlInfo, MultiTopologyId, PrefixSidFlags, Srv6TlvFlags,
+    BindingFlags, Ipv4ControlInfo, Ipv6ControlInfo, MultiTopologyId, PrefixSidFlags, Srv6TlvFlags,
 };
 
 /// Generate field-decoded `Serialize` + `Deserialize` for a
@@ -83,6 +83,14 @@ bitfield_serde!(Ipv4ControlInfo {
 });
 
 bitfield_serde!(MultiTopologyId { id: u16 } reserved { resvd: u8 });
+
+bitfield_serde!(BindingFlags {
+    a_flag: bool,
+    d_flag: bool,
+    s_flag: bool,
+    m_flag: bool,
+    f_flag: bool,
+} reserved { resvd: u8 });
 
 bitfield_serde!(Ipv6ControlInfo {
     sub_tlv: bool,

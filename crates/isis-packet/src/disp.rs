@@ -193,6 +193,7 @@ impl Display for IsisTlv {
             Ipv4IfAddr(v) => write!(f, "{}", v),
             TeRouterId(v) => write!(f, "{}", v),
             ExtIpReach(v) => write!(f, "{}", v),
+            SidLabelBinding(v) => write!(f, "{}", v),
             Hostname(v) => write!(f, "{}", v),
             Srlg(v) => write!(f, "{:?}", v),
             Ipv6Srlg(v) => write!(f, "{:?}", v),

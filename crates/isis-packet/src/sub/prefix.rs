@@ -775,6 +775,207 @@ impl IsisTlvIpv6ReachEntry {
     }
 }
 
+/// SID/Label Binding TLV (type 149) flags — RFC 8667 §2.4. Wire order
+/// is MSB-first (F at bit 7); the `bitfield` macro lays fields LSB-first,
+/// so the *last*-declared field lands at the MSB. The **M-flag (Mirror
+/// Context)** is what egress protection's SR-MPLS path (RFC 8679 context
+/// label) keys on: M-set means the binding advertises a *context label*
+/// (in a SID/Label sub-TLV) for the prefix's mirroring context rather
+/// than a normal Prefix-SID mapping.
+#[bitfield(u8, debug = true)]
+#[derive(PartialEq)]
+pub struct BindingFlags {
+    #[bits(3)]
+    pub resvd: u8,
+    /// A-flag — Attached.
+    pub a_flag: bool,
+    /// D-flag — leaked Down from L2 to L1.
+    pub d_flag: bool,
+    /// S-flag — leak into another level.
+    pub s_flag: bool,
+    /// M-flag — Mirror Context (RFC 8679 egress protection).
+    pub m_flag: bool,
+    /// F-flag — Address Family of the prefix: 0 = IPv4, 1 = IPv6.
+    pub f_flag: bool,
+}
+
+impl ParseBe<BindingFlags> for BindingFlags {
+    fn parse_be(input: &[u8]) -> IResult<&[u8], Self> {
+        let (input, flags) = be_u8(input)?;
+        Ok((input, flags.into()))
+    }
+}
+
+/// FEC prefix carried by the Binding TLV; family is selected by the
+/// TLV's F-flag (kept here as a typed enum so consumers don't re-derive
+/// it).
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub enum BindingPrefix {
+    V4(Ipv4Net),
+    V6(Ipv6Net),
+}
+
+impl BindingPrefix {
+    fn prefix_len(&self) -> u8 {
+        match self {
+            BindingPrefix::V4(p) => p.prefix_len(),
+            BindingPrefix::V6(p) => p.prefix_len(),
+        }
+    }
+
+    fn emit(&self, buf: &mut BytesMut) {
+        let plen = psize(self.prefix_len());
+        buf.put_u8(self.prefix_len());
+        match self {
+            BindingPrefix::V4(p) => buf.put(&p.addr().octets()[..plen]),
+            BindingPrefix::V6(p) => buf.put(&p.addr().octets()[..plen]),
+        }
+    }
+}
+
+/// One sub-TLV of a Binding TLV. The codec is permissive: it understands
+/// the SID/Label sub-TLV (type 1, RFC 8667 §2.3 — the context label for a
+/// Mirror Context binding) and round-trips everything else as raw bytes.
+/// Validation (M-set ⇒ exactly one SID/Label sub-TLV, no Prefix-SID) lives
+/// in the IS-IS layer, not here.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub enum IsisBindingSubTlv {
+    /// SID/Label sub-TLV (type 1) — a 20-bit label (len 3) or 32-bit
+    /// index (len 4).
+    SidLabel(SidLabelValue),
+    Unknown {
+        typ: u8,
+        value: Vec<u8>,
+    },
+}
+
+impl IsisBindingSubTlv {
+    fn parse_be(input: &[u8]) -> IResult<&[u8], Self> {
+        let (input, typ) = be_u8(input)?;
+        let (input, len) = be_u8(input)?;
+        let (input, value) = safe_split_at(input, len as usize)?;
+        match typ {
+            1 => {
+                let (_, sid) = SidLabelValue::parse_be(value)?;
+                Ok((input, Self::SidLabel(sid)))
+            }
+            other => Ok((
+                input,
+                Self::Unknown {
+                    typ: other,
+                    value: value.to_vec(),
+                },
+            )),
+        }
+    }
+
+    /// Value length (excludes the 2-byte type+length header).
+    fn value_len(&self) -> u8 {
+        match self {
+            Self::SidLabel(sid) => sid.len(),
+            Self::Unknown { value, .. } => value.len() as u8,
+        }
+    }
+
+    fn emit(&self, buf: &mut BytesMut) {
+        match self {
+            Self::SidLabel(sid) => {
+                buf.put_u8(1);
+                buf.put_u8(sid.len());
+                sid.emit(buf);
+            }
+            Self::Unknown { typ, value } => {
+                buf.put_u8(*typ);
+                buf.put_u8(value.len() as u8);
+                buf.put(&value[..]);
+            }
+        }
+    }
+}
+
+/// SID/Label Binding TLV (type 149) — RFC 8667 §2.4. Advertises a
+/// mapping from a FEC prefix (range of prefixes) to a SID/Label, plus
+/// sub-TLVs. With the **M-flag** set it is a Mirror Context binding
+/// (RFC 8679): the SID/Label sub-TLV carries the context label a PLR
+/// pushes to steer protected traffic to the protector. The codec is
+/// permissive — the M-set ⇒ SID/Label-present / Prefix-SID-absent
+/// invariant is enforced at origination in the IS-IS layer.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct IsisTlvSidLabelBinding {
+    pub flags: BindingFlags,
+    pub weight: u8,
+    pub range: u16,
+    pub prefix: BindingPrefix,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub subs: Vec<IsisBindingSubTlv>,
+}
+
+impl ParseBe<IsisTlvSidLabelBinding> for IsisTlvSidLabelBinding {
+    fn parse_be(input: &[u8]) -> IResult<&[u8], Self> {
+        let (input, flags) = BindingFlags::parse_be(input)?;
+        let (input, weight) = be_u8(input)?;
+        let (input, range) = be_u16(input)?;
+        let (input, prefixlen) = be_u8(input)?;
+        let (input, prefix) = if flags.f_flag() {
+            let (input, p) = ptakev6(input, prefixlen)?;
+            (input, BindingPrefix::V6(p))
+        } else {
+            let (input, p) = ptake(input, prefixlen)?;
+            (input, BindingPrefix::V4(p))
+        };
+        // The remainder of the TLV value is sub-TLVs (no separate
+        // sub-TLV-length field — the TLV length bounds them).
+        let (input, subs) = many0_complete(IsisBindingSubTlv::parse_be).parse(input)?;
+        Ok((
+            input,
+            Self {
+                flags,
+                weight,
+                range,
+                prefix,
+                subs,
+            },
+        ))
+    }
+}
+
+impl TlvEmitter for IsisTlvSidLabelBinding {
+    fn typ(&self) -> u8 {
+        IsisTlvType::SidLabelBinding.into()
+    }
+
+    fn len(&self) -> u8 {
+        // Flags(1)+Weight(1)+Range(2)+PrefixLen(1)+Prefix+Sub-TLVs.
+        let prefix = psize(self.prefix.prefix_len()) as u8;
+        let subs: u8 = self
+            .subs
+            .iter()
+            .map(|sub| sub.value_len() + 2)
+            .fold(0u8, u8::saturating_add);
+        1u8.saturating_add(1)
+            .saturating_add(2)
+            .saturating_add(1)
+            .saturating_add(prefix)
+            .saturating_add(subs)
+    }
+
+    fn emit(&self, buf: &mut BytesMut) {
+        buf.put_u8(self.flags.into());
+        buf.put_u8(self.weight);
+        buf.put_u16(self.range);
+        self.prefix.emit(buf);
+        for sub in &self.subs {
+            sub.emit(buf);
+        }
+    }
+}
+
+impl From<IsisTlvSidLabelBinding> for IsisTlv {
+    fn from(tlv: IsisTlvSidLabelBinding) -> Self {
+        IsisTlv::SidLabelBinding(tlv)
+    }
+}
+
 pub fn psize(plen: u8) -> usize {
     // From Rust 1.73 we can use .dev_ceil()
     // ((plen + 7) / 8) as usize

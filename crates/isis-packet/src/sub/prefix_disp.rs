@@ -6,10 +6,39 @@ use super::prefix::{
     IsisSubTlv, PrefixSidFlags,
 };
 use super::{
-    IsisSubPrefixSid, IsisTlvExtIpReach, IsisTlvExtIpReachEntry, IsisTlvIpv6Reach,
-    IsisTlvIpv6ReachEntry, IsisTlvMtIpReach, IsisTlvMtIpv6Reach, IsisTlvMultiTopology,
-    MultiTopologyId,
+    BindingPrefix, IsisBindingSubTlv, IsisSubPrefixSid, IsisTlvExtIpReach, IsisTlvExtIpReachEntry,
+    IsisTlvIpv6Reach, IsisTlvIpv6ReachEntry, IsisTlvMtIpReach, IsisTlvMtIpv6Reach,
+    IsisTlvMultiTopology, IsisTlvSidLabelBinding, MultiTopologyId,
 };
+
+impl Display for BindingPrefix {
+    fn fmt(&self, f: &mut Formatter<'_>) -> Result {
+        match self {
+            BindingPrefix::V4(p) => write!(f, "{}", p),
+            BindingPrefix::V6(p) => write!(f, "{}", p),
+        }
+    }
+}
+
+impl Display for IsisTlvSidLabelBinding {
+    fn fmt(&self, f: &mut Formatter<'_>) -> Result {
+        write!(f, "  SID/Label Binding")?;
+        if self.flags.m_flag() {
+            write!(f, " (Mirror Context)")?;
+        }
+        write!(f, ": {}", self.prefix)?;
+        if self.range > 1 {
+            write!(f, " range {}", self.range)?;
+        }
+        for sub in &self.subs {
+            match sub {
+                IsisBindingSubTlv::SidLabel(sid) => write!(f, " label/index {}", sid.value())?,
+                IsisBindingSubTlv::Unknown { typ, .. } => write!(f, " sub-tlv {}", typ)?,
+            }
+        }
+        Ok(())
+    }
+}
 
 impl Display for IsisTlvExtIpReach {
     fn fmt(&self, f: &mut Formatter<'_>) -> Result {
