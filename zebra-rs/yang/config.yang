@@ -1759,12 +1759,16 @@ module config {
             ext:help "Protect one egress node, keyed by its SRv6 locator";
             key "protected-locator";
             leaf protected-locator {
-              type inet:ipv6-prefix;
+              type inet:ip-prefix;
               description
-                "SRv6 locator of the protected egress PE (PEA), e.g.
-                 2001:db8:a3:1::/64. Emitted in the Protected Locators
-                 sub-sub-TLV of the advertised Mirror SID sub-TLV and
-                 used by the PLR to match traffic destined to PEA.";
+                "Prefix identifying the protected egress PE (PEA). For
+                 SRv6 it is PEA's SRv6 locator (IPv6), e.g.
+                 2001:db8:a3:1::/64, emitted in the Protected Locators
+                 sub-sub-TLV of the Mirror SID sub-TLV. For SR-MPLS it is
+                 PEA's IGP loopback (IPv4 in the current SR-MPLS dataplane,
+                 which has no IPv6 prefix-SID), e.g. 1.1.1.3/32, emitted as
+                 the FEC of the SID/Label Binding TLV (149). The PLR /
+                 protected egress matches it to identify PEA.";
             }
             leaf mirror-sid {
               type inet:ipv6-address;

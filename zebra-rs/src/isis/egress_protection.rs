@@ -13,7 +13,7 @@ use std::collections::BTreeMap;
 use std::net::Ipv6Addr;
 use std::str::FromStr;
 
-use ipnet::Ipv6Net;
+use ipnet::{IpNet, Ipv6Net};
 use isis_packet::{IsisMirrorSub2Tlv, IsisSysId, IsisTlv, prefix};
 
 use crate::config::{Args, ConfigOp};
@@ -53,8 +53,10 @@ impl FromStr for MirrorDataplane {
 /// `protected_locator`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MirrorProtect {
-    /// SRv6 locator of the protected egress PE (PEA). The map key.
-    pub protected_locator: Ipv6Net,
+    /// Prefix identifying the protected egress PE (PEA) — the map key.
+    /// SRv6: PEA's SRv6 locator (IPv6). SR-MPLS: PEA's IGP loopback
+    /// (IPv4, since the SR-MPLS dataplane has no IPv6 prefix-SID).
+    pub protected_locator: IpNet,
     /// Mirror SID (End.M) to advertise. `None` ⇒ auto-allocate from
     /// the local SRv6 locator at origination time (Phase 3).
     pub mirror_sid: Option<Ipv6Addr>,
@@ -66,7 +68,7 @@ pub struct MirrorProtect {
 }
 
 impl MirrorProtect {
-    pub fn new(protected_locator: Ipv6Net) -> Self {
+    pub fn new(protected_locator: IpNet) -> Self {
         Self {
             protected_locator,
             mirror_sid: None,
@@ -78,12 +80,12 @@ impl MirrorProtect {
 
 /// Map of configured egress-protection entries, keyed by protected
 /// locator. Lives on `IsisConfig`.
-pub type MirrorProtectMap = BTreeMap<Ipv6Net, MirrorProtect>;
+pub type MirrorProtectMap = BTreeMap<IpNet, MirrorProtect>;
 
 // ── Pure state operations (testable without an `Isis` instance) ───────
 
 /// Get the entry for `key`, creating an empty one if absent.
-fn ensure(map: &mut MirrorProtectMap, key: Ipv6Net) -> &mut MirrorProtect {
+fn ensure(map: &mut MirrorProtectMap, key: IpNet) -> &mut MirrorProtect {
     map.entry(key).or_insert_with(|| MirrorProtect::new(key))
 }
 
@@ -105,7 +107,11 @@ pub(crate) fn desired_context_routes(
                 .map(|s| local_prefix.contains(&s))
                 .unwrap_or(false)
         })
-        .filter_map(|e| e.via_vrf.clone().map(|vrf| (e.protected_locator, vrf)))
+        // SRv6 entries always key on an IPv6 locator.
+        .filter_map(|e| match (e.protected_locator, e.via_vrf.clone()) {
+            (IpNet::V6(loc), Some(vrf)) => Some((loc, vrf)),
+            _ => None,
+        })
         .collect()
 }
 
@@ -117,7 +123,7 @@ pub(crate) fn desired_context_routes(
 /// the label is allocated (SR-MPLS up) or the VRF appears (`VrfAdd`).
 pub(crate) fn desired_context_labels(
     entries: &MirrorProtectMap,
-    labels: &BTreeMap<Ipv6Net, u32>,
+    labels: &BTreeMap<IpNet, u32>,
     known_vrfs: &BTreeMap<String, (u32, u32)>,
 ) -> Vec<(u32, u32, u32)> {
     entries
@@ -196,12 +202,13 @@ pub fn collect_received_mirror_sids(lsdb: &Lsdb) -> Vec<ReceivedMirrorSid> {
 pub struct ReceivedMplsBinding {
     pub protector: IsisSysId,
     pub context_label: u32,
-    pub protected_fec: Ipv6Net,
+    pub protected_fec: IpNet,
 }
 
 /// Extract the SR-MPLS Mirror Context bindings carried in one node's LSP
-/// TLVs: every SID/Label Binding TLV (149) with the M-flag set and an
-/// IPv6 FEC (F-flag), paired with the label from its SID/Label sub-TLV.
+/// TLVs: every SID/Label Binding TLV (149) with the M-flag set, paired
+/// with the label from its SID/Label sub-TLV. The FEC is IPv4 (the
+/// SR-MPLS transport) or IPv6.
 fn mpls_bindings_from_tlvs(protector: IsisSysId, tlvs: &[IsisTlv]) -> Vec<ReceivedMplsBinding> {
     use isis_packet::{BindingPrefix, IsisBindingSubTlv, SidLabelValue};
     let mut out = Vec::new();
@@ -212,8 +219,9 @@ fn mpls_bindings_from_tlvs(protector: IsisSysId, tlvs: &[IsisTlv]) -> Vec<Receiv
         if !binding.flags.m_flag() {
             continue;
         }
-        let BindingPrefix::V6(protected_fec) = binding.prefix else {
-            continue;
+        let protected_fec = match binding.prefix {
+            BindingPrefix::V4(p) => IpNet::V4(p),
+            BindingPrefix::V6(p) => IpNet::V6(p),
         };
         for sub in &binding.subs {
             if let IsisBindingSubTlv::SidLabel(SidLabelValue::Label(label)) = sub {
@@ -252,7 +260,7 @@ pub fn collect_received_mpls_bindings(lsdb: &Lsdb) -> Vec<ReceivedMplsBinding> {
 /// `/router/isis/egress-protection/protect` — list-entry lifecycle.
 /// Creates the entry on set, removes it on delete.
 fn config_egress_protect(isis: &mut Isis, mut args: Args, op: ConfigOp) -> Option<()> {
-    let key = args.v6net()?;
+    let key = args.ipnet()?;
     if op.is_set() {
         ensure(&mut isis.config.egress_protections, key);
     } else {
@@ -264,7 +272,7 @@ fn config_egress_protect(isis: &mut Isis, mut args: Args, op: ConfigOp) -> Optio
 
 /// `/router/isis/egress-protection/protect/mirror-sid`.
 fn config_egress_protect_mirror_sid(isis: &mut Isis, mut args: Args, op: ConfigOp) -> Option<()> {
-    let key = args.v6net()?;
+    let key = args.ipnet()?;
     if op.is_set() {
         let sid = args.v6addr()?;
         ensure(&mut isis.config.egress_protections, key).mirror_sid = Some(sid);
@@ -277,7 +285,7 @@ fn config_egress_protect_mirror_sid(isis: &mut Isis, mut args: Args, op: ConfigO
 
 /// `/router/isis/egress-protection/protect/via-vrf`.
 fn config_egress_protect_via_vrf(isis: &mut Isis, mut args: Args, op: ConfigOp) -> Option<()> {
-    let key = args.v6net()?;
+    let key = args.ipnet()?;
     if op.is_set() {
         let vrf = args.string()?;
         ensure(&mut isis.config.egress_protections, key).via_vrf = Some(vrf);
@@ -290,7 +298,7 @@ fn config_egress_protect_via_vrf(isis: &mut Isis, mut args: Args, op: ConfigOp) 
 
 /// `/router/isis/egress-protection/protect/dataplane`.
 fn config_egress_protect_dataplane(isis: &mut Isis, mut args: Args, op: ConfigOp) -> Option<()> {
-    let key = args.v6net()?;
+    let key = args.ipnet()?;
     let dataplane = if op.is_set() {
         args.string()?.parse().ok()?
     } else {
@@ -338,7 +346,11 @@ pub fn callback_register(isis: &mut Isis) {
 mod tests {
     use super::*;
 
-    fn net(s: &str) -> Ipv6Net {
+    fn net(s: &str) -> IpNet {
+        s.parse().unwrap()
+    }
+
+    fn v6(s: &str) -> Ipv6Net {
         s.parse().unwrap()
     }
 
@@ -392,7 +404,7 @@ mod tests {
 
     #[test]
     fn desired_context_routes_requires_in_locator_sid_and_via_vrf() {
-        let local = net("2001:db8:a4:1::/64");
+        let local = v6("2001:db8:a4:1::/64");
         let mut map = MirrorProtectMap::new();
 
         // Fully eligible: SRv6, in-locator Mirror SID, via-vrf set.
@@ -415,7 +427,7 @@ mod tests {
         let routes = desired_context_routes(&map, local);
         assert_eq!(
             routes,
-            vec![(net("2001:db8:a3:1::/64"), "cust".to_string())],
+            vec![(v6("2001:db8:a3:1::/64"), "cust".to_string())],
             "only the fully-eligible entry yields a context route"
         );
     }
