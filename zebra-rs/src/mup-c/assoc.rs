@@ -35,4 +35,15 @@ impl AssocTable {
     pub fn remove(&mut self, peer: &SocketAddr) -> Option<MupAssocInfo> {
         self.peers.remove(peer)
     }
+
+    /// Whether `peer` has an established association — the precondition
+    /// for accepting its session messages (3GPP TS 29.244 §6.2.6.2).
+    pub fn contains(&self, peer: &SocketAddr) -> bool {
+        self.peers.contains_key(peer)
+    }
+
+    /// Number of associations held (used to bound state).
+    pub fn count(&self) -> usize {
+        self.peers.len()
+    }
 }

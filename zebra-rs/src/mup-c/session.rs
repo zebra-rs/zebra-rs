@@ -67,6 +67,12 @@ impl SessionTable {
         self.sessions.remove(&seid)
     }
 
+    /// Number of sessions held (used to bound state — see the
+    /// per-listener cap in [`super::pfcp`]).
+    pub fn count(&self) -> usize {
+        self.sessions.len()
+    }
+
     /// Drop every session owned by `peer` (PFCP association release).
     /// Returns the removed SEIDs so the caller can emit withdrawals.
     pub fn remove_peer(&mut self, peer: SocketAddr) -> Vec<u64> {

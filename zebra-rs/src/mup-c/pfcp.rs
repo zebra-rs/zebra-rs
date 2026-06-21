@@ -15,6 +15,7 @@ use tokio::net::UdpSocket;
 use tokio::sync::mpsc::UnboundedSender;
 
 use rs_pfcp::ie::IeType;
+use rs_pfcp::ie::cause::CauseValue;
 use rs_pfcp::ie::create_pdr::CreatePdr;
 use rs_pfcp::ie::node_id::NodeId;
 use rs_pfcp::message::association_release_response::AssociationReleaseResponseBuilder;
@@ -24,6 +25,7 @@ use rs_pfcp::message::session_deletion_response::SessionDeletionResponseBuilder;
 use rs_pfcp::message::session_establishment_response::SessionEstablishmentResponseBuilder;
 use rs_pfcp::message::session_modification_response::SessionModificationResponseBuilder;
 use rs_pfcp::message::{self, Message as PfcpMessage, MsgType};
+use rs_pfcp::types::SequenceNumber;
 
 use crate::context::Task;
 
@@ -34,6 +36,14 @@ use super::session::MupSession;
 /// Outcome of handling one PFCP request: an optional reply to send back
 /// to the peer, plus the events to report to BGP.
 type Handled = (Option<Vec<u8>>, Vec<MupCEvent>);
+
+/// Upper bound on concurrent PFCP associations. The controller faces an
+/// external SMF/CP, so the association and session tables are bounded to
+/// keep a misbehaving or hostile peer from exhausting memory. Idle/dead
+/// association eviction (driven by Heartbeat liveness) is a follow-up.
+const MAX_ASSOCS: usize = 256;
+/// Upper bound on concurrently learned sessions across all peers.
+const MAX_SESSIONS: usize = 1 << 20;
 
 impl MupC {
     /// (Re)bind the PFCP listener to the configured address/port and
@@ -112,9 +122,9 @@ impl MupC {
                     self.handle_session_establishment(msg.as_ref(), src)
                 }
                 MsgType::SessionModificationRequest => {
-                    self.handle_session_modification(msg.as_ref())
+                    self.handle_session_modification(msg.as_ref(), src)
                 }
-                MsgType::SessionDeletionRequest => self.handle_session_deletion(msg.as_ref()),
+                MsgType::SessionDeletionRequest => self.handle_session_deletion(msg.as_ref(), src),
                 other => {
                     tracing::debug!("mup-c: unhandled PFCP {other:?} from {src}");
                     (None, Vec::new())
@@ -139,6 +149,17 @@ impl MupC {
     }
 
     fn handle_association_setup(&mut self, msg: &dyn PfcpMessage, src: SocketAddr) -> Handled {
+        // Bound the association table against a flood of distinct peers.
+        // A re-setup from an already-known peer is always allowed.
+        if !self.assoc.contains(&src) && self.assoc.count() >= MAX_ASSOCS {
+            tracing::warn!("mup-c: association table full ({MAX_ASSOCS}); rejecting {src}");
+            let resp = AssociationSetupResponseBuilder::new(msg.sequence())
+                .cause(CauseValue::NoResourcesAvailable)
+                .node_id(self.local_ip())
+                .recovery_time_stamp(std::time::SystemTime::now())
+                .build();
+            return (Some(resp.marshal()), Vec::new());
+        }
         let node_id = msg
             .ies(IeType::NodeId)
             .next()
@@ -180,6 +201,23 @@ impl MupC {
 
     fn handle_session_establishment(&mut self, msg: &dyn PfcpMessage, src: SocketAddr) -> Handled {
         let seq = msg.sequence();
+
+        // A session is only valid inside an established association
+        // (3GPP TS 29.244 §6.2.6.2).
+        if !self.assoc.contains(&src) {
+            return (
+                self.reject_session_establishment(seq, CauseValue::NoEstablishedPfcpAssociation),
+                Vec::new(),
+            );
+        }
+        // Bound the session table against a hostile / runaway peer.
+        if self.sessions.count() >= MAX_SESSIONS {
+            tracing::warn!("mup-c: session table full ({MAX_SESSIONS}); rejecting from {src}");
+            return (
+                self.reject_session_establishment(seq, CauseValue::NoResourcesAvailable),
+                Vec::new(),
+            );
+        }
 
         // Walk the Create PDRs for the access-side F-TEID, UE IP and NI.
         let mut ue_ipv4 = None;
@@ -246,9 +284,40 @@ impl MupC {
         (reply, vec![MupCEvent::SessionUp(session)])
     }
 
-    fn handle_session_modification(&mut self, msg: &dyn PfcpMessage) -> Handled {
+    /// Build a rejected Session Establishment Response carrying `cause`
+    /// (SEID 0 — no session was created). An F-SEID is set even on
+    /// rejection because the codec requires it; its value is irrelevant
+    /// when the cause is not "accepted".
+    fn reject_session_establishment(
+        &self,
+        seq: SequenceNumber,
+        cause: CauseValue,
+    ) -> Option<Vec<u8>> {
+        let local_ip = self.local_ip();
+        match SessionEstablishmentResponseBuilder::new(0u64, seq, cause)
+            .node_id(local_ip)
+            .fseid(0u64, local_ip)
+            .build()
+        {
+            Ok(resp) => Some(resp.marshal()),
+            Err(e) => {
+                tracing::warn!("mup-c: build rejected SessionEstablishmentResponse failed: {e}");
+                None
+            }
+        }
+    }
+
+    fn handle_session_modification(&mut self, msg: &dyn PfcpMessage, src: SocketAddr) -> Handled {
         let seq = msg.sequence();
         let seid = msg.seid().map(|s| s.value()).unwrap_or(0);
+        // Only the peer that owns the session may modify it; a mismatch
+        // (or unknown SEID) is rejected without touching state.
+        if self.sessions.get(seid).map(|s| s.peer) != Some(src) {
+            let resp = SessionModificationResponseBuilder::new(seid, seq)
+                .cause(CauseValue::SessionContextNotFound)
+                .build();
+            return (Some(resp.marshal()), Vec::new());
+        }
         // PR-A re-reports the existing session unchanged (field-level
         // re-extraction from Update/Create PDRs is a follow-up).
         let events = match self.sessions.get(seid).cloned() {
@@ -261,9 +330,16 @@ impl MupC {
         (Some(resp.marshal()), events)
     }
 
-    fn handle_session_deletion(&mut self, msg: &dyn PfcpMessage) -> Handled {
+    fn handle_session_deletion(&mut self, msg: &dyn PfcpMessage, src: SocketAddr) -> Handled {
         let seq = msg.sequence();
         let seid = msg.seid().map(|s| s.value()).unwrap_or(0);
+        // Only the peer that owns the session may delete it.
+        if self.sessions.get(seid).map(|s| s.peer) != Some(src) {
+            let resp = SessionDeletionResponseBuilder::new(seid, seq)
+                .cause(CauseValue::SessionContextNotFound)
+                .build();
+            return (Some(resp.marshal()), Vec::new());
+        }
         let removed = self.sessions.remove(seid).is_some();
         let resp = SessionDeletionResponseBuilder::new(seid, seq)
             .cause_accepted()
@@ -348,6 +424,18 @@ mod tests {
         "10.0.0.2:8805".parse().unwrap()
     }
 
+    /// Establish the association that `peer()` must hold before the
+    /// controller will accept its session messages.
+    fn associate(mupc: &mut MupC) {
+        let asr = AssociationSetupRequestBuilder::new(1u32)
+            .node_id(Ipv4Addr::new(10, 0, 0, 2))
+            .recovery_time_stamp(std::time::SystemTime::now())
+            .build()
+            .marshal();
+        let msg = message::parse(&asr).unwrap();
+        let _ = mupc.handle_association_setup(msg.as_ref(), peer());
+    }
+
     /// A Session Establishment Request whose uplink/access PDR carries an
     /// F-TEID (teid + GTP endpoint), a UE IPv4 address and a Network
     /// Instance — the three things the controller extracts.
@@ -386,6 +474,7 @@ mod tests {
     #[test]
     fn session_establishment_extracts_and_acks() {
         let (mut mupc, _bgp_rx) = MupC::new_for_test(MupCConfig::default());
+        associate(&mut mupc);
         let bytes = establishment_bytes();
         let msg = message::parse(&bytes).unwrap();
         let (reply, events) = mupc.handle_session_establishment(msg.as_ref(), peer());
@@ -412,6 +501,7 @@ mod tests {
     #[test]
     fn session_deletion_removes_session() {
         let (mut mupc, _bgp_rx) = MupC::new_for_test(MupCConfig::default());
+        associate(&mut mupc);
         let est = message::parse(&establishment_bytes()).unwrap();
         let (_, events) = mupc.handle_session_establishment(est.as_ref(), peer());
         let MupCEvent::SessionUp(session) = &events[0] else {
@@ -423,7 +513,7 @@ mod tests {
             .build()
             .marshal();
         let msg = message::parse(&del).unwrap();
-        let (reply, events) = mupc.handle_session_deletion(msg.as_ref());
+        let (reply, events) = mupc.handle_session_deletion(msg.as_ref(), peer());
 
         assert!(mupc.sessions.get(seid).is_none());
         assert!(
@@ -432,6 +522,49 @@ mod tests {
         );
         let resp = message::parse(&reply.unwrap()).unwrap();
         assert_eq!(resp.msg_type(), MsgType::SessionDeletionResponse);
+    }
+
+    #[test]
+    fn session_without_association_is_rejected() {
+        let (mut mupc, _bgp_rx) = MupC::new_for_test(MupCConfig::default());
+        // No association established for peer().
+        let msg = message::parse(&establishment_bytes()).unwrap();
+        let (reply, events) = mupc.handle_session_establishment(msg.as_ref(), peer());
+
+        assert!(
+            events.is_empty(),
+            "no session learned without an association"
+        );
+        assert!(mupc.sessions.get(1).is_none(), "no session inserted");
+        let resp = message::parse(&reply.unwrap()).unwrap();
+        assert_eq!(resp.msg_type(), MsgType::SessionEstablishmentResponse);
+    }
+
+    #[test]
+    fn foreign_peer_cannot_delete_session() {
+        let (mut mupc, _bgp_rx) = MupC::new_for_test(MupCConfig::default());
+        associate(&mut mupc);
+        let est = message::parse(&establishment_bytes()).unwrap();
+        let (_, events) = mupc.handle_session_establishment(est.as_ref(), peer());
+        let MupCEvent::SessionUp(session) = &events[0] else {
+            panic!("expected SessionUp");
+        };
+        let seid = session.seid;
+
+        // A different peer tries to delete the session by SEID.
+        let other: SocketAddr = "10.9.9.9:8805".parse().unwrap();
+        let del = SessionDeletionRequestBuilder::new(seid, 9u32)
+            .build()
+            .marshal();
+        let msg = message::parse(&del).unwrap();
+        let (reply, events) = mupc.handle_session_deletion(msg.as_ref(), other);
+
+        assert!(events.is_empty(), "foreign delete emits no event");
+        assert!(
+            mupc.sessions.get(seid).is_some(),
+            "session survives a foreign delete"
+        );
+        let _ = reply.expect("a (rejected) response is still sent");
     }
 
     #[test]
