@@ -1,0 +1,102 @@
+# pe1 — the ingress PE and the PLR for Mirror SID egress NODE protection
+# of a real BGP L3VPN service. IS-IS L2 SRv6 (locator LOC1), iBGP VPNv6 to
+# pea and peb. pea is a stub egress reached only over pe1-pea (fast hellos
+# so its node loss is seen in ~3 s); peb is reached directly over the
+# pe1-peb bypass so it stays reachable when pea's node dies.
+#
+# pe1 learns ce2's prefix from pea with pea's End.DT46 SID. NHT tracks that
+# SID (not pea's loopback), so the route follows pea's *locator*. When
+# pea's node fails: (1) `pic-retention` on the pea session keeps the VPN
+# route stale instead of withdrawing it, and (2) IS-IS Mirror SID node-
+# protection stale-route retention keeps pea's locator alive as a seg6
+# H.Encaps to peb's Mirror SID. NHT then resolves pea's SID *through* that
+# retained locator, accumulating the Mirror SID, so pe1 double-encaps
+# [Mirror SID, pea-SID] to peb — peb's End.M re-resolves pea's SID in its
+# mirror context and delivers to the dual-homed ce2. The L3VPN ping
+# survives pea's node death end to end.
+vrf:
+- name: vrf-cust
+  ipv6:
+    route-target:
+      import:
+      - 65001:100
+      export:
+      - 65001:100
+interface:
+- if-name: lo
+  ipv6:
+    address: 2001:db8::1/128
+- if-name: pe1-pea
+  ipv6:
+    address: 2001:db8:0:13::1/64
+- if-name: pe1-peb
+  ipv6:
+    address: 2001:db8:0:14::1/64
+- if-name: ce1
+  vrf: vrf-cust
+  ipv6:
+    address: 2001:db8:c1::1/64
+segment-routing:
+  locator:
+  - name: LOC1
+    prefix: fcbb:bbbb:1::/48
+    behavior: usid
+router:
+  isis:
+    net: 49.0000.0000.0000.0001.00
+    hostname: pe1
+    is-type: level-2-only
+    segment-routing:
+      srv6:
+        locator: LOC1
+    interface:
+    - if-name: lo
+      ipv6:
+        enable: true
+    - if-name: pe1-pea
+      network-type: point-to-point
+      metric: 1
+      hello:
+        interval: 1
+        multiplier: 3
+      ipv6:
+        enable: true
+    - if-name: pe1-peb
+      network-type: point-to-point
+      metric: 1
+      ipv6:
+        enable: true
+  bgp:
+    global:
+      as: 65001
+      router-id: 10.0.0.1
+    timer:
+      adv-interval:
+        ibgp: 1
+    segment-routing:
+      srv6:
+        locator: LOC1
+    neighbor:
+    - remote-address: 2001:db8::3
+      remote-as: 65001
+      update-source: 2001:db8::1
+      enabled: true
+      pic-retention: {}
+      afi-safi:
+      - name: vpnv6
+        enabled: true
+    - remote-address: 2001:db8::4
+      remote-as: 65001
+      update-source: 2001:db8::1
+      enabled: true
+      afi-safi:
+      - name: vpnv6
+        enabled: true
+    vrf:
+    - name: vrf-cust
+      rd: 65001:1
+      encapsulation: srv6
+      afi-safi:
+        ipv6:
+          network:
+          - prefix: 2001:db8:c1::/64

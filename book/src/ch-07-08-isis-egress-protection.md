@@ -31,7 +31,7 @@ flooded per-service in the IGP.
 
 | Model | PLR | Failure it covers | Status |
 |---|---|---|---|
-| **Node protection** | an upstream node | PEA's **node** fails (router down) | SRv6: the PLR repair plus stale-route retention keep the protected locator pointed at the protector across reconvergence (a service ping additionally needs ingress BGP-PIC) |
+| **Node protection** | an upstream node | PEA's **node** fails (router down) | SRv6: implemented and validated end-to-end — the PLR repair plus stale-route retention keep the protected locator pointed at the protector across reconvergence, and ingress BGP-PIC (`pic-retention`) keeps the L3VPN service forwarding so a real ping survives |
 | **Link protection** | **PEA itself** | PEA's **PE–CE link** fails (PEA stays up) | implemented and validated end-to-end |
 
 zebra-rs implements **egress link protection** as the validated path. PEA
@@ -384,6 +384,20 @@ and validated on real-namespace BDD topologies.
   PEA's node fails and its locator route is withdrawn, so the failover
   survives SPF reconvergence (not just the sub-second BFD window),
   optionally bounded by the `hold-down` timer.
+- **Ingress BGP-PIC** (`neighbor X pic-retention`) closes the loop for an
+  end-to-end *service* failover on node loss. Normally the ingress
+  withdraws PEA's L3VPN routes the moment its BGP session drops; with
+  `pic-retention` it keeps them stale and **NHT-gated** instead. NHT tracks
+  each SRv6 L3VPN route's **End.DT46 service SID** (not PEA's loopback), so
+  the route follows the *locator's* reachability — which the
+  node-protection retention above keeps alive. The ingress H.Encaps to
+  PEA's SID as usual; the kernel re-routes that packet by the retained
+  locator route, which H.Encaps a second segment to the protector's Mirror
+  SID. The protector's End.M re-resolves the inner SID in its mirror
+  context and delivers to the dual-homed CE, so a real L3VPN ping survives
+  PEA's node death (validated end-to-end by `@mirror_sid_node_vpn`). Opt-in
+  and default-off; the route is withdrawn when NHT finally reports the
+  next hop unreachable or a safety hold-down elapses.
 - **SR-MPLS** — the SID/Label Binding TLV (149, M-flag) **advertisement**
   with a context label from the SRLB, **reception** into the
   `show isis egress-protection` view, the protector's **context-label
@@ -391,9 +405,7 @@ and validated on real-namespace BDD topologies.
   (PEA swaps its own VPN-label ILM to push the context label toward the
   protector, latched on link state).
 
-Still landing in later stages: ingress **BGP-PIC** for an end-to-end
-*service* failover on node loss (the retention keeps the locator route,
-but the ingress must also keep forwarding to it); **SR-MPLS node
+Still landing in later stages: **SR-MPLS node
 protection**
 (blocked on stock Linux — no per-context label table; needs eBPF/VPP);
 learning the context population from **BGP L3VPN** instead of static

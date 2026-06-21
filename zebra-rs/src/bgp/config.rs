@@ -602,6 +602,15 @@ fn config_soft_reconfig_in(bgp: &mut Bgp, mut args: Args, op: ConfigOp) -> Optio
     Some(())
 }
 
+/// `/router/bgp/neighbor/<addr>/pic-retention` — presence container, so
+/// presence means "on". Opt-in NHT-gated route retention on session-down.
+fn config_pic_retention(bgp: &mut Bgp, mut args: Args, op: ConfigOp) -> Option<()> {
+    let addr = args.addr()?;
+    let peer = bgp.peers.get_mut(&addr)?;
+    peer.config.pic_retention = op.is_set();
+    Some(())
+}
+
 /// `set router bgp neighbor X flowspec validation true|false` — per
 /// RFC 9117, toggle whether flow specs received from this neighbor are
 /// validated against the unicast RIB before re-advertising. Defaults to
@@ -3927,6 +3936,7 @@ impl Bgp {
         // left-most AS_PATH segment begins with the neighbor's own AS
         // (eBGP only).
         self.callback_peer("/enforce-first-as", config_enforce_first_as);
+        self.callback_peer("/pic-retention", config_pic_retention);
 
         // Per-neighbor local-as (zebra-bgp-local-as.yang): a
         // single-entry list keyed by the substitute AS number, with

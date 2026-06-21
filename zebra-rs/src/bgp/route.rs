@@ -423,9 +423,16 @@ fn build_srv6_vpn_fib_entry(
         return None;
     }
     let mk_uni = |egress: &rib::nht::ResolvedNexthop| {
-        // `via egress.addr dev egress.ifindex encap seg6 segs [sid]`:
-        // the on-link underlay next-hop carries the packet, the seg6
-        // encap sets the outer IPv6 DA + SRH to the SID.
+        // `via egress.addr dev egress.ifindex encap seg6 segs [sid]`: the
+        // on-link underlay next-hop carries the packet, the seg6 encap sets
+        // the outer IPv6 DA + SRH to the service SID. A single segment with
+        // segleft=0 — when the SID resolves through a Mirror SID egress-
+        // protection redirect (the retained locator route), the kernel re-
+        // routes the encapped packet by its new DA and that route H.Encaps
+        // a *second* single-segment header toward the protector's Mirror
+        // SID, exactly like the egress-link redirect. Stacking both SIDs in
+        // one SRH would leave segleft=1 at the protector, where End.DT6
+        // expects segleft=0.
         let mut uni = rib::NexthopUni::new(egress.addr, 0, Vec::new());
         uni.segs = vec![sid];
         uni.encap_type = Some(isis_packet::srv6::EncapType::HEncap);
@@ -1423,7 +1430,7 @@ impl<P: Prefix + Copy> LocalRibTable<P> {
         };
         let mut changed = false;
         for c in cands.iter_mut() {
-            if super::nht::bgp_nexthop_ip(&c.attr) == Some(nh) && c.nexthop_reachable != reachable {
+            if super::nht::nht_target(&c.attr) == Some(nh) && c.nexthop_reachable != reachable {
                 c.nexthop_reachable = reachable;
                 changed = true;
             }
@@ -2635,7 +2642,7 @@ fn nht_track_received(bgp: &mut BgpTop, rib: &mut BgpRib, dep: super::nht::NhtDe
     let Some(cache) = bgp.nexthop_cache.as_deref_mut() else {
         return;
     };
-    let Some(nh) = super::nht::bgp_nexthop_ip(&rib.attr) else {
+    let Some(nh) = super::nht::nht_target(&rib.attr) else {
         return;
     };
     let (needs_register, reachable) = cache.track(nh, dep);
@@ -2659,7 +2666,7 @@ fn nht_track_received_attr(bgp: &mut BgpTop, attr: &BgpAttr, dep: super::nht::Nh
     let Some(cache) = bgp.nexthop_cache.as_deref_mut() else {
         return true;
     };
-    let Some(nh) = super::nht::bgp_nexthop_ip(attr) else {
+    let Some(nh) = super::nht::nht_target(attr) else {
         return true;
     };
     let (needs_register, reachable) = cache.track(nh, dep);
@@ -2698,7 +2705,7 @@ fn nht_untrack_withdrawn(
         if r.enhe_egress.is_some() {
             continue;
         }
-        let Some(nh) = super::nht::bgp_nexthop_ip(&r.attr) else {
+        let Some(nh) = super::nht::nht_target(&r.attr) else {
             continue;
         };
         if survivor_nhs.contains(&nh) || !seen.insert(nh) {
@@ -2731,7 +2738,7 @@ fn vpn_import_transport<'a>(
     let label = winner.label.map(|l| l.label).unwrap_or(0);
     let transport = match (
         bgp.nexthop_cache.as_deref(),
-        super::nht::bgp_nexthop_ip(&winner.attr),
+        super::nht::nht_target(&winner.attr),
     ) {
         (Some(cache), Some(nh)) => cache.transport_for(nh),
         _ => &[][..],
@@ -8121,6 +8128,13 @@ pub fn route_from_peer(
     }
 }
 
+/// BGP-PIC route-retention safety hold-down (seconds). With
+/// `neighbor X pic-retention`, a session-down keeps the peer's VPN routes
+/// stale and NHT-gated; NHT-unreachable is the primary withdrawal trigger,
+/// so this only caps how long a next hop that never goes unreachable can
+/// pin a stale route.
+const PIC_RETENTION_HOLDDOWN: u32 = 600;
+
 pub fn route_clean(
     peer_id: usize,
     bgp: &mut BgpTop,
@@ -8193,19 +8207,32 @@ pub fn route_clean(
 
     // IPv4 VPN.
     let afi_safi = AfiSafi::new(Afi::Ip, Safi::MplsVpn);
-    if let Some(_) = peer.cap_send.llgr.get(&afi_safi)
-        && let Some(llgr) = peer.cap_recv.llgr.get(&afi_safi)
-    {
+    // Retain on session-down for LLGR-negotiated or BGP-PIC-retention
+    // neighbors (see the VPNv6 block below for the rationale).
+    let llgr_active =
+        peer.cap_send.llgr.contains_key(&afi_safi) && peer.cap_recv.llgr.contains_key(&afi_safi);
+    if llgr_active || peer.config.pic_retention {
+        let stale_secs = if llgr_active {
+            peer.cap_recv
+                .llgr
+                .get(&afi_safi)
+                .map(|l| l.stale_time())
+                .unwrap_or(PIC_RETENTION_HOLDDOWN)
+        } else {
+            PIC_RETENTION_HOLDDOWN
+        };
         // Start stale timer.
-        peer.timer.stale_timer.insert(
-            afi_safi,
-            start_stale_timer(peer, afi_safi, llgr.stale_time()),
-        );
+        peer.timer
+            .stale_timer
+            .insert(afi_safi, start_stale_timer(peer, afi_safi, stale_secs));
 
         // RFC 9494 §4.2: routes the peer marked NO_LLGR "MUST NOT be
         // retained" by the long-lived procedures — remove and withdraw
         // them per normal RFC 4271 operation; only the rest go stale.
-        let no_llgr: Vec<Vpnv4Nlri> = {
+        // LLGR-specific.
+        let no_llgr: Vec<Vpnv4Nlri> = if !llgr_active {
+            Vec::new()
+        } else {
             let mut out = Vec::new();
             for (rd, table) in bgp.shard.adj_in_mut(peer_id).v4vpn.iter_mut() {
                 for (prefix, ribs) in table.0.iter_mut() {
@@ -8252,18 +8279,21 @@ pub fn route_clean(
                     for (_prefix, ribs) in table.0.iter_mut() {
                         for rib in ribs.iter_mut() {
                             rib.stale = true;
-                            let mut new_attr = (*rib.attr).clone();
-                            match &mut new_attr.com {
-                                Some(com) => {
-                                    com.insert(CommunityValue::LLGR_STALE.value());
+                            // LLGR_STALE community is LLGR-only (see VPNv6).
+                            if llgr_active {
+                                let mut new_attr = (*rib.attr).clone();
+                                match &mut new_attr.com {
+                                    Some(com) => {
+                                        com.insert(CommunityValue::LLGR_STALE.value());
+                                    }
+                                    None => {
+                                        let mut com = Community::new();
+                                        com.insert(CommunityValue::LLGR_STALE.value());
+                                        new_attr.com = Some(com);
+                                    }
                                 }
-                                None => {
-                                    let mut com = Community::new();
-                                    com.insert(CommunityValue::LLGR_STALE.value());
-                                    new_attr.com = Some(com);
-                                }
+                                rib.attr = attr_store.intern(new_attr);
                             }
-                            rib.attr = attr_store.intern(new_attr);
                         }
                     }
                 }
@@ -8358,17 +8388,32 @@ pub fn route_clean(
     // withdraw everything. Was missing entirely alongside the v6
     // unicast block.
     let afi_safi = AfiSafi::new(Afi::Ip6, Safi::MplsVpn);
-    if peer.cap_send.llgr.contains_key(&afi_safi)
-        && let Some(llgr) = peer.cap_recv.llgr.get(&afi_safi)
-    {
-        peer.timer.stale_timer.insert(
-            afi_safi,
-            start_stale_timer(peer, afi_safi, llgr.stale_time()),
-        );
+    // Retain (mark stale, keep in Loc-RIB) on session-down when either
+    // LLGR is negotiated (RFC 9494) or this neighbor has BGP-PIC retention
+    // configured. PIC-retention has no LLGR capability, so it carries no
+    // NO_LLGR/`LLGR_STALE` semantics and relies on the NHT gate
+    // (`nexthop_reachable`) to withdraw once the next hop goes away.
+    let llgr_active =
+        peer.cap_send.llgr.contains_key(&afi_safi) && peer.cap_recv.llgr.contains_key(&afi_safi);
+    if llgr_active || peer.config.pic_retention {
+        let stale_secs = if llgr_active {
+            peer.cap_recv
+                .llgr
+                .get(&afi_safi)
+                .map(|l| l.stale_time())
+                .unwrap_or(PIC_RETENTION_HOLDDOWN)
+        } else {
+            PIC_RETENTION_HOLDDOWN
+        };
+        peer.timer
+            .stale_timer
+            .insert(afi_safi, start_stale_timer(peer, afi_safi, stale_secs));
 
         // RFC 9494 §4.2: NO_LLGR routes are not retained — remove and
-        // withdraw them; only the rest go stale.
-        let no_llgr: Vec<Vpnv6Nlri> = {
+        // withdraw them; only the rest go stale. LLGR-specific.
+        let no_llgr: Vec<Vpnv6Nlri> = if !llgr_active {
+            Vec::new()
+        } else {
             let mut out = Vec::new();
             for (rd, table) in bgp.shard.adj_in_mut(peer_id).v6vpn.iter_mut() {
                 for (prefix, ribs) in table.0.iter_mut() {
@@ -8405,18 +8450,23 @@ pub fn route_clean(
                     for (_prefix, ribs) in table.0.iter_mut() {
                         for rib in ribs.iter_mut() {
                             rib.stale = true;
-                            let mut new_attr = (*rib.attr).clone();
-                            match &mut new_attr.com {
-                                Some(com) => {
-                                    com.insert(CommunityValue::LLGR_STALE.value());
+                            // The LLGR_STALE community is an LLGR re-advertise
+                            // concept; PIC-retention keeps the route stale
+                            // locally without tagging it.
+                            if llgr_active {
+                                let mut new_attr = (*rib.attr).clone();
+                                match &mut new_attr.com {
+                                    Some(com) => {
+                                        com.insert(CommunityValue::LLGR_STALE.value());
+                                    }
+                                    None => {
+                                        let mut com = Community::new();
+                                        com.insert(CommunityValue::LLGR_STALE.value());
+                                        new_attr.com = Some(com);
+                                    }
                                 }
-                                None => {
-                                    let mut com = Community::new();
-                                    com.insert(CommunityValue::LLGR_STALE.value());
-                                    new_attr.com = Some(com);
-                                }
+                                rib.attr = attr_store.intern(new_attr);
                             }
-                            rib.attr = attr_store.intern(new_attr);
                         }
                     }
                 }

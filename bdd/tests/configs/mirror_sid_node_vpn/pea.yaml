@@ -1,0 +1,87 @@
+# pea — the protected egress, a STUB hanging off pe1 only (no pea-peb
+# link), reached over pe1-pea with fast hellos so pe1 detects pea's node
+# loss in ~3 s and removes it from SPF. IS-IS L2 SRv6 (locator LOC3,
+# fcbb:bbbb:3::/48). VRF vrf-cust holds the ce2 CE link; pea reaches ce2's
+# loopback via a static route inside the VRF and originates it into VPNv6
+# with its per-VRF End.DT46 service SID, so pe1 H.Encaps ce2-bound traffic
+# toward pea's locator. When this daemon is stopped (node failure), pe1's
+# pic-retention + Mirror SID node-protection retention keep delivering to
+# ce2 via peb.
+vrf:
+- name: vrf-cust
+  ipv6:
+    route-target:
+      import:
+      - 65001:100
+      export:
+      - 65001:100
+interface:
+- if-name: lo
+  ipv6:
+    address: 2001:db8::3/128
+- if-name: pea-pe1
+  ipv6:
+    address: 2001:db8:0:13::3/64
+- if-name: pea-ce2
+  vrf: vrf-cust
+  ipv6:
+    address: 2001:db8:ac::1/64
+segment-routing:
+  locator:
+  - name: LOC3
+    prefix: fcbb:bbbb:3::/48
+    behavior: usid
+router:
+  static:
+    vrf:
+    - name: vrf-cust
+      ipv6:
+        route:
+        - prefix: 2001:db8:c2::1/128
+          nexthop:
+          - address: 2001:db8:ac::2
+  isis:
+    net: 49.0000.0000.0000.0003.00
+    hostname: pea
+    is-type: level-2-only
+    segment-routing:
+      srv6:
+        locator: LOC3
+    interface:
+    - if-name: lo
+      ipv6:
+        enable: true
+    - if-name: pea-pe1
+      network-type: point-to-point
+      metric: 1
+      hello:
+        interval: 1
+        multiplier: 3
+      ipv6:
+        enable: true
+  bgp:
+    global:
+      as: 65001
+      router-id: 10.0.0.3
+    timer:
+      adv-interval:
+        ibgp: 1
+    segment-routing:
+      srv6:
+        locator: LOC3
+    neighbor:
+    - remote-address: 2001:db8::1
+      remote-as: 65001
+      update-source: 2001:db8::3
+      enabled: true
+      afi-safi:
+      - name: vpnv6
+        enabled: true
+    vrf:
+    - name: vrf-cust
+      rd: 65001:3
+      encapsulation: srv6
+      afi-safi:
+        ipv6:
+          network:
+          - prefix: 2001:db8:c2::1/128

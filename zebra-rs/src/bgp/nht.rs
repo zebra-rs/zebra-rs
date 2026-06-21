@@ -174,6 +174,22 @@ pub fn bgp_nexthop_ip(attr: &BgpAttr) -> Option<IpAddr> {
     }
 }
 
+/// The address a route's reachability and transport should track. For an
+/// SRv6 L3VPN route this is the **End.DT46 service SID** (resolved via its
+/// locator), not the egress PE's next-hop loopback: the SID is the actual
+/// forwarding dependency, so the route follows the locator's reachability
+/// — including a Mirror SID egress-protection redirect, and surviving a
+/// node failure that withdraws the loopback but whose locator the PLR
+/// retains. Everything else (SR-MPLS VPN, plain unicast) keeps tracking
+/// the BGP next-hop. All of a route's NHT sites — register, transport
+/// lookup, re-eval, untrack — must agree, so they all call this.
+pub fn nht_target(attr: &BgpAttr) -> Option<IpAddr> {
+    if let Some((sid, _behavior)) = attr.srv6_l3_sid() {
+        return Some(IpAddr::V6(sid));
+    }
+    bgp_nexthop_ip(attr)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
