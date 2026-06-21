@@ -450,12 +450,21 @@ on push, not targeted filters).
     live (4/4); 6.1 BDD still green. Topology note: gateway↔gateway iBGP is
     required (so they see each other's *originated* Type-9s); iBGP split-horizon
     keeps per-PE IMET from leaking between them.
-  - **PR6.3 — offload signaling + eBPF replication:** extend `tc-evpn-replicate`
-    loader line protocol + a new BPF map + a supervisor (mirror
-    `rib/evpn_replicate.rs`); implement the clone + re-encap in the skeleton
-    (currently `TC_ACT_PIPE` passthrough) with split-horizon + DF gate, and a
-    forwarding BDD. NOTE: the offload is excluded from CI (nightly +
-    bpf-linker); validate live.
+  - **PR6.3 — ride the SR-P2MP replication tree (`srv6-p2mp`).** Direction
+    confirmed with Kunihiro (the SR-P2MP replication owner): reuse the merged
+    `tc-evpn-replicate` SRv6 datapath rather than a separate VXLAN-IR eBPF.
+    - **Root `H.Encaps` eBPF — DONE on main (Kunihiro's DP4, `15f91a73`).** The
+      `tc_evpn_encap` clsact-egress classifier wraps a bare BUM frame and fans
+      it out per leaf. (I built a parallel `H.Encaps` slice; it collided with
+      this merged work and was dropped — his is canonical.)
+    - **PR-B — CP producer. DONE (this PR).** A segmentation gateway emits a
+      `ReplSeg` rooted at itself toward its DF-owned cross-region VTEPs:
+      `evpn_gateway_tree_set` (called before `reconcile`) computes the leaf set
+      (`owned_region_vteps` over `evpn_gateway_owned_regions`) and stashes it
+      via `set_gateway_tree`; `replication_action` builds the gateway tree (no
+      local VXLAN root needed). zebra-rs-only, unit-tested; reuses DP4 + DP3b/c.
+    - **PR-C — forwarding BDD** end-to-end over the SRv6 tree (offload excluded
+      from CI → validate live).
   - MPLS-P2MP / BIER segmentation stays out of scope (no kernel/eBPF-feasible
     path) → VPP/ASIC backend.
 
