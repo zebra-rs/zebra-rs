@@ -452,6 +452,18 @@ pub fn link_addr_del(link: &mut Link, addr: LinkAddr) -> Option<()> {
 
 impl Rib {
     pub async fn link_add(&mut self, fib_link: FibLink) {
+        // `external vnifilter` VXLAN devices (the EVPN model) carry no
+        // fixed kernel VNI — `IFLA_VXLAN_ID` is 0. Source the real VNI
+        // from our own config (keyed by device name) so the VNI→ifindex
+        // map, EVPN VTEP discovery and `vni_for_bridge` all observe the
+        // true L2VPN VNI instead of 0.
+        let mut fib_link = fib_link;
+        if fib_link.vni == Some(0)
+            && let Some(cfg_vni) = self.vxlan.get(&fib_link.name).and_then(|v| v.vni)
+        {
+            fib_link.vni = Some(cfg_vni);
+        }
+
         if rib_interface() {
             tracing::info!(
                 "link_add: ifindex {} name {} vni {:?} master {:?}",
@@ -740,9 +752,17 @@ impl Rib {
     }
 
     pub fn link_delete(&mut self, oslink: FibLink) {
-        // Unregister via the kernel-derived VNI on the netlink
-        // message (mirrors the registration trigger in `link_add`).
-        if let Some(vni) = oslink.vni {
+        // Unregister via the VNI we resolved when the link was added
+        // (config-sourced for `external vnifilter` devices, whose kernel
+        // `IFLA_VXLAN_ID` is 0). Fall back to the netlink value for a
+        // plain fixed-`id` VXLAN.
+        let del_vni = self
+            .links
+            .get(&oslink.index)
+            .and_then(|l| l.vni)
+            .filter(|v| *v != 0)
+            .or(oslink.vni);
+        if let Some(vni) = del_vni {
             self.fib_handle.unregister_vxlan_ifindex(vni);
             self.api_vxlan_del(vni);
         }

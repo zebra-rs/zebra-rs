@@ -1817,9 +1817,13 @@ impl FibHandle {
         let kind = InfoKind::Vxlan;
         let link_kind = LinkInfo::Kind(kind);
 
-        // VNI encode.
-        let vni = InfoVxlan::Id(vni);
-        let mut vxlan_info = vec![vni];
+        // EVPN VXLAN device model: `external vnifilter`. The device
+        // carries no fixed VNI (`IFLA_VXLAN_ID` = 0); each VNI it serves
+        // is registered separately with `bridge vni add` and stamped on
+        // every FDB/MDB entry as `src_vni`. This VNI-aware model is what
+        // unlocks the kernel VXLAN MDB (per-VTEP `dst` for RFC 9251
+        // SMET) — a plain fixed-`id` device cannot carry an MDB `dst`.
+        let mut vxlan_info = vec![InfoVxlan::CollectMetadata(true), InfoVxlan::Vnifilter(true)];
 
         // Destination port. Defaults to the IANA-assigned VXLAN port
         // (4789) when the operator hasn't configured one — Linux would
@@ -1855,6 +1859,13 @@ impl FibHandle {
                 tracing::info!("NewLink vxlan error: {e}");
                 return;
             }
+        }
+
+        // Register the VNI on the vnifilter device so the kernel accepts
+        // and encapsulates traffic for it (`bridge vni add vni N dev X`).
+        // The device must exist first, so resolve its ifindex now.
+        if let Some(ifindex) = self.link_index_by_name(&vxlan.name).await {
+            self.vni_filter_add(ifindex, vni).await;
         }
 
         // Set the IPv6 address generation mode as a second operation.
@@ -1939,6 +1950,36 @@ impl FibHandle {
         while let Some(msg) = response.next().await {
             if let NetlinkPayload::Error(e) = msg.payload {
                 tracing::info!("DelLink error: {}", e);
+            }
+        }
+    }
+
+    /// Register a VNI on a `vnifilter` VXLAN device — the netlink
+    /// equivalent of `bridge vni add vni <vni> dev <ifindex>`. Required
+    /// before an `external vnifilter` device will accept or originate
+    /// traffic for that VNI (and before VXLAN-MDB / FDB entries can bind
+    /// to it via `src_vni`). Emits `RTM_NEWTUNNEL` carrying one
+    /// `VXLAN_VNIFILTER_ENTRY`. (Removal rides on device deletion, which
+    /// the kernel cascades, so there is no explicit del counterpart.)
+    pub async fn vni_filter_add(&self, ifindex: u32, vni: u32) {
+        use netlink_packet_route::RouteNetlinkMessage;
+        use netlink_packet_route::tunnel::TunnelMessage;
+
+        let msg = TunnelMessage::vni(ifindex, vni);
+        let mut req = NetlinkMessage::from(RouteNetlinkMessage::NewTunnel(msg));
+        req.header.flags = NLM_F_REQUEST | NLM_F_ACK | NLM_F_CREATE;
+
+        let mut response = self.handle.clone().request(req).unwrap();
+        while let Some(rsp) = response.next().await {
+            if let NetlinkPayload::Error(e) = rsp.payload
+                && e.code.is_some()
+            {
+                tracing::info!(
+                    "vni_filter_add: netlink error vni {} ifindex {}: {}",
+                    vni,
+                    ifindex,
+                    e
+                );
             }
         }
     }
@@ -2835,16 +2876,18 @@ impl FibHandle {
         const NTF_EXT_LEARNED: u8 = 0x10;
         const NUD_PERMANENT: u16 = 0x80;
 
-        // Zero-MAC entry on the VXLAN device. Note we pass `vni: None`
-        // — for ingress-replication entries the kernel uses the
-        // VXLAN device's own VNI (set at link creation), and adding
-        // NDA_VNI/NDA_SRC_VNI here is incorrect.
+        // Zero-MAC entry on the VXLAN device. Under the `external
+        // vnifilter` model the device has no fixed VNI, so the BUM
+        // ingress-replication row must carry `src_vni` (NDA_SRC_VNI) to
+        // bind it to this VNI; NDA_VNI sets the VNI used when
+        // encapsulating the replicated BUM traffic to `group` (the
+        // remote VTEP).
         self.fdb_neigh_send(
             vxlan_ifindex,
             &MacAddr::from([0u8; 6]),
             NTF_SELF | NTF_EXT_LEARNED,
             NUD_PERMANENT,
-            None,
+            Some(vni),
             Some(group),
             FdbOp::Append,
             "mdb_add(zero-mac)",
@@ -2882,7 +2925,7 @@ impl FibHandle {
             &MacAddr::from([0u8; 6]),
             NTF_SELF,
             0,
-            None,
+            Some(vni),
             Some(group),
             FdbOp::Delete,
             "mdb_del(zero-mac)",
