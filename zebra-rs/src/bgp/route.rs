@@ -1994,6 +1994,13 @@ struct VniFlood {
     /// dataplane; deliberately kept *out* of `remotes` so they never get a
     /// VXLAN head-end FDB entry. Mutually exclusive with `remotes` per key.
     sr_remotes: BTreeMap<IpAddr, u32>,
+    /// The `End.DT2M` SID a remote SR P2MP PE advertised for this VNI (RFC
+    /// 9252 SRv6 L2 Service TLV on its Type-3 IMET), keyed by Originating
+    /// Router IP. This is the SID the dataplane sets as the outer DA when it
+    /// replicates a BUM copy toward that leaf. Absent when the remote
+    /// advertised no SID (e.g. its locator hadn't resolved); the producer
+    /// then falls back to the remote's VTEP address.
+    sr_remote_sids: BTreeMap<IpAddr, std::net::Ipv6Addr>,
     /// Flood targets (zero-MAC FDB `dst`s) currently programmed in the
     /// kernel, so `reconcile` can compute the MdbAdd/MdbDel delta.
     installed: BTreeSet<IpAddr>,
@@ -2043,6 +2050,7 @@ impl EvpnFloodState {
     ) {
         let v = self.vnis.entry(vni).or_default();
         v.sr_remotes.remove(&orig);
+        v.sr_remote_sids.remove(&orig);
         v.remotes.insert(
             orig,
             RemoteImet {
@@ -2108,12 +2116,34 @@ impl EvpnFloodState {
         v.sr_remotes.insert(orig, tree_id);
     }
 
+    /// Record (or clear) the `End.DT2M` SID a remote SR P2MP PE advertised for
+    /// `vni` on its Type-3 IMET (RFC 9252 SRv6 L2 Service TLV). `sid` is `None`
+    /// when the route carried no L2 Service SID, which also evicts any stale
+    /// SID for that originator.
+    pub fn update_sr_remote_sid(
+        &mut self,
+        vni: u32,
+        orig: IpAddr,
+        sid: Option<std::net::Ipv6Addr>,
+    ) {
+        let v = self.vnis.entry(vni).or_default();
+        match sid {
+            Some(sid) => {
+                v.sr_remote_sids.insert(orig, sid);
+            }
+            None => {
+                v.sr_remote_sids.remove(&orig);
+            }
+        }
+    }
+
     /// Forget a remote's Type-3 IMET for `vni` (it was withdrawn). The
     /// originator may have been either tunnel kind, so clear both maps.
     pub fn remove_remote(&mut self, vni: u32, orig: IpAddr) {
         if let Some(v) = self.vnis.get_mut(&vni) {
             v.remotes.remove(&orig);
             v.sr_remotes.remove(&orig);
+            v.sr_remote_sids.remove(&orig);
         }
     }
 
@@ -6362,6 +6392,18 @@ fn route_evpn_export_selected(
                     bgp.local_rib
                         .evpn_flood
                         .update_sr_remote(vni, *orig, p.tree_id.unwrap_or(0));
+                    // RFC 9252: if the remote advertised an End.DT2M SID (SRv6
+                    // L2 Service TLV), record it — that's the outer DA the SR
+                    // dataplane replicates toward this leaf. A non-DT2M L2 SID
+                    // (or none) clears any stale entry.
+                    let dt2m = best
+                        .attr
+                        .srv6_l2_sid()
+                        .filter(|(_, behavior)| *behavior == bgp_packet::SRV6_BEHAVIOR_END_DT2M)
+                        .map(|(sid, _)| sid);
+                    bgp.local_rib
+                        .evpn_flood
+                        .update_sr_remote_sid(vni, *orig, dt2m);
                 } else {
                     let ar_ip = pmsi
                         .filter(|p| p.is_assisted_replication())
@@ -13363,6 +13405,40 @@ mod evpn_flood_tests {
             None,
         ); // replicator B
         assert_eq!(f.desired(100), BTreeSet::from([ip("10.0.0.253")]));
+    }
+
+    /// A remote SR P2MP PE's End.DT2M SID is recorded per (VNI, originator),
+    /// cleared when it re-advertises SID-less, when it flips to IR, and when
+    /// it's withdrawn.
+    #[test]
+    fn sr_remote_dt2m_sid_recorded_and_cleared() {
+        let sid: std::net::Ipv6Addr = "2001:db8:1:2::".parse().unwrap();
+        let leaf = ip("10.0.0.7");
+        let read = |f: &EvpnFloodState| {
+            f.vnis
+                .get(&100)
+                .and_then(|v| v.sr_remote_sids.get(&leaf).copied())
+        };
+
+        let mut f = EvpnFloodState::default();
+        f.update_sr_remote(100, leaf, 4242);
+        f.update_sr_remote_sid(100, leaf, Some(sid));
+        assert_eq!(read(&f), Some(sid));
+
+        // Re-advertised SID-less (e.g. remote locator unresolved): evicted.
+        f.update_sr_remote_sid(100, leaf, None);
+        assert_eq!(read(&f), None);
+
+        // Flip to Ingress Replication clears any SR SID.
+        f.update_sr_remote_sid(100, leaf, Some(sid));
+        f.update_remote(100, leaf, None, false, false, None);
+        assert_eq!(read(&f), None);
+
+        // Withdrawal clears it too.
+        f.update_sr_remote(100, leaf, 4242);
+        f.update_sr_remote_sid(100, leaf, Some(sid));
+        f.remove_remote(100, leaf);
+        assert_eq!(read(&f), None);
     }
 
     /// AR-LEAF with no replicator available falls back to full ingress
