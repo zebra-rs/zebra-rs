@@ -1,0 +1,81 @@
+# pe1 — the ingress PE. IS-IS L2 SRv6 (locator LOC1), iBGP VPNv6 to pea
+# and peb over loopbacks, VRF vrf-cust holding the ce1 CE link. It
+# originates ce1's prefix into VPNv6 and learns ce2's prefix from pea
+# (primary egress). pe1 connects only to pea in the core; it reaches peb
+# via pea (which stays up — this is egress *link* protection, not node
+# protection), so pe1 always H.Encaps toward pea's End.DT46 service SID.
+# The redirect to peb's Mirror SID happens at pea, not here.
+vrf:
+- name: vrf-cust
+  ipv6:
+    route-target:
+      import:
+      - 65001:100
+      export:
+      - 65001:100
+interface:
+- if-name: lo
+  ipv6:
+    address: 2001:db8::1/128
+- if-name: pe1-pea
+  ipv6:
+    address: 2001:db8:0:13::1/64
+- if-name: ce1
+  vrf: vrf-cust
+  ipv6:
+    address: 2001:db8:c1::1/64
+segment-routing:
+  locator:
+  - name: LOC1
+    prefix: fcbb:bbbb:1::/48
+    behavior: usid
+router:
+  isis:
+    net: 49.0000.0000.0000.0001.00
+    hostname: pe1
+    is-type: level-2-only
+    segment-routing:
+      srv6:
+        locator: LOC1
+    interface:
+    - if-name: lo
+      ipv6:
+        enable: true
+    - if-name: pe1-pea
+      network-type: point-to-point
+      metric: 1
+      ipv6:
+        enable: true
+  bgp:
+    global:
+      as: 65001
+      router-id: 10.0.0.1
+    timer:
+      adv-interval:
+        ibgp: 1
+    segment-routing:
+      srv6:
+        locator: LOC1
+    neighbor:
+    - remote-address: 2001:db8::3
+      remote-as: 65001
+      update-source: 2001:db8::1
+      enabled: true
+      afi-safi:
+      - name: vpnv6
+        enabled: true
+    - remote-address: 2001:db8::4
+      remote-as: 65001
+      update-source: 2001:db8::1
+      enabled: true
+      afi-safi:
+      - name: vpnv6
+        enabled: true
+    vrf:
+    - name: vrf-cust
+      rd: 65001:1
+      encapsulation: srv6
+      afi-safi:
+        ipv6:
+          network:
+          - prefix: 2001:db8:c1::/64
