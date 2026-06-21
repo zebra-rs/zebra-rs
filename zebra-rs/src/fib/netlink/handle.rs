@@ -2716,36 +2716,74 @@ impl FibHandle {
         group: IpAddr,
         source: Option<IpAddr>,
         dst: IpAddr,
+        vni: u32,
         add: bool,
     ) {
-        use netlink_packet_route::RouteNetlinkMessage;
-        use netlink_packet_route::mdb::{MdbAttribute, MdbHeader, MdbMessage};
+        use netlink_packet_route::mdb::MdbAttribute;
         use netlink_packet_utils::nla::DefaultNla;
 
+        // (1) Bridge MDB — register the group on the bridge toward the
+        // VXLAN port (`dev = bridge`, `port = vxlan`) so the snooping
+        // bridge forwards it into the overlay. (*,G) is the bare
+        // br_mdb_entry; (S,G) nests MDBE_ATTR_SOURCE. No `dst` here — the
+        // bridge MDB rejects MDBE_ATTR_DST; per-VTEP selectivity is the
+        // VXLAN MDB below.
         let entry = br_mdb_entry_bytes(port_ifindex, vid, group);
-        // MDBA_SET_ENTRY is the bare br_mdb_entry (this is all iproute2
-        // sends for a (*,G) entry). An (S,G) entry adds a NESTED
-        // MDBA_SET_ENTRY_ATTRS holding MDBE_ATTR_SOURCE. The per-VTEP
-        // `dst` is deliberately NOT encoded: the kernel rejects
-        // MDBE_ATTR_DST on a plain (non-vnifilter) VXLAN with EINVAL, and
-        // iproute2 silently drops it too. True per-VTEP selectivity needs
-        // a vnifilter VXLAN MDB — a documented follow-up.
-        let mut attributes = vec![MdbAttribute::Other(DefaultNla::new(
+        let mut bridge_attrs = vec![MdbAttribute::Other(DefaultNla::new(
             MDBA_SET_ENTRY,
             entry.to_vec(),
         ))];
         if let Some(src) = source {
-            let nested = mdb_nla_bytes(MDBE_ATTR_SOURCE, &ip_octets(src));
-            attributes.push(MdbAttribute::Other(DefaultNla::new(
+            bridge_attrs.push(MdbAttribute::Other(DefaultNla::new(
                 MDBA_SET_ENTRY_ATTRS | NLA_F_NESTED,
-                nested,
+                mdb_nla_bytes(MDBE_ATTR_SOURCE, &ip_octets(src)),
             )));
         }
+        self.mdb_send(bridge_ifindex, bridge_attrs, group, dst, add, "bridge")
+            .await;
+
+        // (2) VXLAN MDB — per-VTEP overlay selectivity (`dev = port =
+        // vxlan`). The nested MDBA_SET_ENTRY_ATTRS carries MDBE_ATTR_DST
+        // (the remote VTEP the SMET came from) + MDBE_ATTR_SRC_VNI, plus
+        // MDBE_ATTR_SOURCE for (S,G). The kernel then replicates the
+        // group only to `dst` instead of BUM-flooding to every VTEP
+        // (RFC 9251). Requires an `external vnifilter` VXLAN device (P1b).
+        let mut nested = Vec::new();
+        if let Some(src) = source {
+            nested.extend_from_slice(&mdb_nla_bytes(MDBE_ATTR_SOURCE, &ip_octets(src)));
+        }
+        nested.extend_from_slice(&mdb_nla_bytes(MDBE_ATTR_DST, &ip_octets(dst)));
+        nested.extend_from_slice(&mdb_nla_bytes(MDBE_ATTR_SRC_VNI, &vni.to_ne_bytes()));
+        let vxlan_attrs = vec![
+            MdbAttribute::Other(DefaultNla::new(
+                MDBA_SET_ENTRY,
+                br_mdb_entry_bytes(port_ifindex, vid, group).to_vec(),
+            )),
+            MdbAttribute::Other(DefaultNla::new(MDBA_SET_ENTRY_ATTRS | NLA_F_NESTED, nested)),
+        ];
+        self.mdb_send(port_ifindex, vxlan_attrs, group, dst, add, "vxlan")
+            .await;
+    }
+
+    /// Send one `RTM_{NEW,DEL}MDB` for `dev_ifindex` with the supplied
+    /// `MDBA_SET_ENTRY` (+ optional nested `MDBA_SET_ENTRY_ATTRS`).
+    /// Shared by the bridge-MDB and VXLAN-MDB installs in `mdb_install`.
+    async fn mdb_send(
+        &self,
+        dev_ifindex: u32,
+        attributes: Vec<netlink_packet_route::mdb::MdbAttribute>,
+        group: IpAddr,
+        dst: IpAddr,
+        add: bool,
+        kind: &str,
+    ) {
+        use netlink_packet_route::RouteNetlinkMessage;
+        use netlink_packet_route::mdb::{MdbHeader, MdbMessage};
 
         let msg = MdbMessage {
             header: MdbHeader {
                 family: AddressFamily::Bridge,
-                index: bridge_ifindex,
+                index: dev_ifindex,
             },
             attributes,
         };
@@ -2762,12 +2800,11 @@ impl FibHandle {
 
         if fib_l2_mdb() {
             tracing::info!(
-                "mdb_install(add={}): br {} port {} grp {} src {:?} dst {}",
+                "mdb_install[{}](add={}): dev {} grp {} dst {}",
+                kind,
                 add,
-                bridge_ifindex,
-                port_ifindex,
+                dev_ifindex,
                 group,
-                source,
                 dst
             );
         }
@@ -2778,7 +2815,8 @@ impl FibHandle {
                 && e.code.is_some()
             {
                 tracing::info!(
-                    "mdb_install: netlink error grp {} dst {} (add={}): {}",
+                    "mdb_install[{}]: netlink error grp {} dst {} (add={}): {}",
+                    kind,
                     group,
                     dst,
                     add,
@@ -3333,6 +3371,11 @@ fn process_msg(msg: NetlinkMessage<RouteNetlinkMessage>, tx: UnboundedSender<Fib
 const MDBA_SET_ENTRY: u16 = 1;
 const MDBA_SET_ENTRY_ATTRS: u16 = 2;
 const MDBE_ATTR_SOURCE: u16 = 1;
+/// VXLAN-MDB per-entry attributes (linux/if_bridge.h): the remote VTEP
+/// (`MDBE_ATTR_DST`) and the source VNI (`MDBE_ATTR_SRC_VNI`). Only
+/// accepted on a VNI-aware `external vnifilter` VXLAN device.
+const MDBE_ATTR_DST: u16 = 5;
+const MDBE_ATTR_SRC_VNI: u16 = 9;
 /// `NLA_F_NESTED` (linux/netlink.h) — the kernel expects it on the
 /// `MDBA_SET_ENTRY_ATTRS` container (matches what iproute2 sets).
 const NLA_F_NESTED: u16 = 0x8000;

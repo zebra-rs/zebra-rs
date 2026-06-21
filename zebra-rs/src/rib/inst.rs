@@ -3256,7 +3256,16 @@ impl Rib {
             return;
         };
         self.fib_handle
-            .mdb_install(bridge_ifindex, vxlan_ifindex, 0, group, source, dst, add)
+            .mdb_install(
+                bridge_ifindex,
+                vxlan_ifindex,
+                0,
+                group,
+                source,
+                dst,
+                vni,
+                add,
+            )
             .await;
     }
 
