@@ -1670,6 +1670,12 @@ impl Isis {
         self.rib_known_vrfs
             .insert(name.clone(), (table_id, ifindex));
         self.vrf_spawn_if_ready(&name);
+        // A mirror-context route whose `via-vrf` is this VRF was dropped
+        // by the RIB if the VRF's kernel table wasn't registered yet
+        // (config apply races the netlink VRF creation). Now that the
+        // table exists, re-run the reconcile so the protected locator's
+        // End.DT46-into-VRF route installs. Idempotent (del-then-add).
+        self.update_mirror_context_routes();
     }
 
     /// Kernel VRF master removed. Despawn the child but KEEP its config

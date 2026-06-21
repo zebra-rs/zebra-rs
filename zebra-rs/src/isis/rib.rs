@@ -1439,6 +1439,26 @@ fn apply_mirror_sid_backups(
     }
 }
 
+/// Recompute and push the node's Mirror SID egress-protection
+/// registrations to the RIB: every received `(protected_locator,
+/// mirror_sid)` from both levels. The RIB filters to the locators that
+/// cover one of *its own* End.DT46 service SIDs, so sending the full set
+/// untouched is correct — a transit node that holds no service SID inside
+/// any advertised locator redirects nothing. Idempotent reset.
+fn register_egress_protections(top: &IsisTop) {
+    let mut set: std::collections::BTreeMap<Ipv6Net, std::net::Ipv6Addr> =
+        std::collections::BTreeMap::new();
+    for level in [Level::L1, Level::L2] {
+        for e in super::egress_protection::collect_received_mirror_sids(top.lsdb.get(&level)) {
+            set.insert(e.protected_locator, e.mirror_sid);
+        }
+    }
+    let protections: Vec<(Ipv6Net, std::net::Ipv6Addr)> = set.into_iter().collect();
+    let _ = top
+        .rib_client
+        .send(crate::rib::Message::EgressProtectSet { protections });
+}
+
 pub(super) fn apply_spf_result(top: &mut IsisTop, output: SpfOutput) {
     let SpfOutput {
         level,
@@ -1528,6 +1548,13 @@ pub(super) fn apply_spf_result(top: &mut IsisTop, output: SpfOutput) {
     // Mirror-SID backup so a BFD-driven `protect_switch` reroutes to the
     // protector when the protected egress fails.
     inject_mirror_sid_backups(top, level, &mut rib_v6);
+
+    // Egress *link* protection (same draft): push every received
+    // `(protected_locator, mirror_sid)` to the RIB. The RIB redirects a
+    // *local* End.DT46 service SID inside a protected locator to the
+    // Mirror SID when its PE-CE link goes down (the protected egress acts
+    // as its own PLR). Recomputed per-SPF so it tracks LSDB changes.
+    register_egress_protections(top);
 
     // Per-algorithm RIB build (RFC 9350). For every algo:
     //   1. Walk the per-algo SPF result against `peer_algo_sid` to

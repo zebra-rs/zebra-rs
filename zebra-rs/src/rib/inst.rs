@@ -228,6 +228,18 @@ pub enum Message {
         prefix: ipnet::Ipv6Net,
         context_table: u32,
     },
+    /// Reset the local node's Mirror SID egress-protection registrations:
+    /// every `(protected_locator, mirror_sid)` a peer advertised. IS-IS
+    /// recomputes the full set on each SPF and sends it here. The RIB
+    /// matches a protected locator against its *own* End.DT46 service SIDs
+    /// — so a SID inside a protected locator is redirected (via
+    /// `End.B6.Encaps` to the Mirror SID) when its CE-facing VRF can no
+    /// longer deliver (PE-CE link down), and restored when it recovers.
+    /// This is egress *link* protection: the protected egress (PEA) acts
+    /// as its own PLR.
+    EgressProtectSet {
+        protections: Vec<(ipnet::Ipv6Net, std::net::Ipv6Addr)>,
+    },
     VxlanAdd {
         name: String,
         config: VxlanConfig,
@@ -659,6 +671,18 @@ pub struct Rib {
     /// inserts collide naturally on duplicate allocations; the show
     /// callback iterates this in address order.
     pub sids: BTreeMap<std::net::Ipv6Addr, Sid>,
+    /// Mirror SID egress-protection registrations from IS-IS: every
+    /// `protected_locator -> mirror_sid` a peer advertised (see
+    /// [`Message::EgressProtectSet`]). A local End.DT46 service SID whose
+    /// address falls inside one of these locators is redirected to the
+    /// Mirror SID (via `End.B6.Encaps`) while its CE-facing VRF can't
+    /// deliver.
+    pub egress_protect: BTreeMap<ipnet::Ipv6Net, std::net::Ipv6Addr>,
+    /// Local SID addresses currently installed in their redirect
+    /// (`End.B6.Encaps -> mirror_sid`) form rather than the normal
+    /// End.DT46 decap. Tracks the live FIB form so a reconcile only
+    /// emits a netlink change on an actual transition.
+    pub redirected_sids: BTreeSet<std::net::Ipv6Addr>,
     /// SR-update return channels keyed by protocol name. One sender per
     /// protocol; established once via Message::SrSubscribe.
     pub sr_clients: BTreeMap<String, UnboundedSender<RibSrRx>>,
@@ -785,6 +809,8 @@ impl Rib {
             },
             locators: BTreeMap::new(),
             sids: BTreeMap::new(),
+            egress_protect: BTreeMap::new(),
+            redirected_sids: BTreeSet::new(),
             sr_clients: BTreeMap::new(),
             block_watch: BTreeMap::new(),
             locator_watch: BTreeMap::new(),
@@ -1182,7 +1208,11 @@ impl Rib {
         // are /128).
         self.sid_rib_insert(&sid);
 
+        let addr = sid.addr;
         self.sids.insert(sid.addr, sid);
+        // A protected End.DT46 SID installed while its PE-CE link is
+        // already down must go straight to its redirect form.
+        self.apply_egress_redirect(addr).await;
     }
 
     /// Insert a `RibEntry` for this SID into `self.table_v6`. Replaces
@@ -1269,6 +1299,156 @@ impl Rib {
         self.fib_handle
             .route_mirror_context_install(&prefix, context_table, vrf_table, ifindex)
             .await;
+    }
+
+    /// True when the VRF behind `table_id` still has an operationally-up,
+    /// addressed, non-loopback member link — i.e. it can still reach its
+    /// CE. `table_id == 0` (the main table, not a VRF SID) always
+    /// delivers. Gates Mirror SID egress link protection: when the PE-CE
+    /// link goes down the VRF can no longer deliver, so the protected
+    /// End.DT46 service SID is redirected to the protector's Mirror SID.
+    fn vrf_can_deliver(&self, table_id: u32) -> bool {
+        if table_id == 0 {
+            return true;
+        }
+        self.links.values().any(|link| {
+            self.ifindex_vrf_id(link.index) == table_id
+                && !link.is_loopback()
+                && link.is_up()
+                && (!link.addr4.is_empty() || !link.addr6.is_empty())
+        })
+    }
+
+    /// The Mirror SID a local End.DT46 service SID is protected by: the
+    /// first registered protected-locator that covers the SID's address.
+    /// `None` when the SID isn't covered by any registration. The match
+    /// against the node's *own* SID address is why IS-IS can send every
+    /// received Mirror SID untouched — only a locator that actually covers
+    /// a local service SID redirects anything.
+    fn protecting_mirror_sid(&self, sid: &Sid) -> Option<std::net::Ipv6Addr> {
+        if sid.behavior != SidBehavior::EndDT46 {
+            return None;
+        }
+        self.egress_protect
+            .iter()
+            .find(|(loc, _)| loc.contains(&sid.addr))
+            .map(|(_, m)| *m)
+    }
+
+    /// Resolve the underlay nexthop (link-local + ifindex) toward an SRv6
+    /// destination — the protector's Mirror SID — by longest-prefix match
+    /// in the main IPv6 table (the IS-IS route to the protector's
+    /// locator). Returns the `via`/`dev` the redirect's seg6 H.Encaps
+    /// route needs. `None` if the protector isn't reachable.
+    fn resolve_underlay_nexthop_v6(&self, dest: std::net::Ipv6Addr) -> Option<(Ipv6Addr, u32)> {
+        let host = Ipv6Net::new(dest, 128).ok()?;
+        let (_, entries) = self.table_v6.get_lpm(&host)?;
+        for entry in entries.iter() {
+            let unis: &[NexthopUni] = match &entry.nexthop {
+                Nexthop::Uni(uni) => std::slice::from_ref(uni),
+                Nexthop::Multi(multi) => &multi.nexthops,
+                _ => continue,
+            };
+            for uni in unis {
+                if let (IpAddr::V6(a), Some(ifindex)) = (uni.addr, uni.ifindex()) {
+                    return Some((a, ifindex));
+                }
+            }
+        }
+        None
+    }
+
+    /// Reconcile one local SID's installed FIB form against the egress-
+    /// protection decision, with a **link-state latch**:
+    ///
+    /// - Enter the redirect form (`End.B6.Encaps -> mirror_sid`) when the
+    ///   SID is protected *and* its CE-facing VRF can't deliver (PE-CE link
+    ///   down).
+    /// - Leave it (restore the normal End.DT46 decap) **only** when the VRF
+    ///   can deliver again — never just because the protection registration
+    ///   vanished. The registration is recomputed from a live LSDB scan on
+    ///   every SPF and can transiently read empty (e.g. during the SPF the
+    ///   PE-CE link-down itself triggers); dropping an active redirect on
+    ///   that transient would black-hole the very traffic it protects. A
+    ///   fast-reroute redirect must hold until the data-plane condition
+    ///   that caused it clears.
+    ///
+    /// A single `route_sid_install` (NLM_F_REPLACE) swaps the /128 in
+    /// place; `redirected_sids` tracks the live form so the FIB is only
+    /// touched on an actual transition.
+    pub async fn apply_egress_redirect(&mut self, addr: std::net::Ipv6Addr) {
+        let Some(sid) = self.sids.get(&addr).cloned() else {
+            return;
+        };
+        if sid.behavior != SidBehavior::EndDT46 {
+            return;
+        }
+        let is_redirected = self.redirected_sids.contains(&addr);
+        let can_deliver = self.vrf_can_deliver(sid.table_id);
+        if is_redirected {
+            // Latched: hold the redirect until the PE-CE link recovers.
+            if can_deliver {
+                self.fib_handle
+                    .route_sid_install(&sid, 0, sid.ifindex)
+                    .await;
+                self.redirected_sids.remove(&addr);
+                tracing::info!(
+                    "[egress-protect] restore {} -> End.DT46 (VRF table {} delivers again)",
+                    addr,
+                    sid.table_id
+                );
+            }
+        } else if !can_deliver {
+            // Enter redirect: the VRF can't deliver and a peer protects us.
+            // Re-encapsulate (seg6 H.Encaps, route-level — not a seg6local
+            // endpoint action, since the inbound SRH is already exhausted)
+            // toward the protector's Mirror SID via the underlay nexthop.
+            let Some(mirror_sid) = self.protecting_mirror_sid(&sid) else {
+                return;
+            };
+            let Some((nh6, ifindex)) = self.resolve_underlay_nexthop_v6(mirror_sid) else {
+                tracing::warn!(
+                    "[egress-protect] {} protected by {} but protector unreachable — not redirecting",
+                    addr,
+                    mirror_sid
+                );
+                return;
+            };
+            self.fib_handle
+                .route_sid_redirect_install(&sid.prefix(), mirror_sid, nh6, ifindex)
+                .await;
+            self.redirected_sids.insert(addr);
+            tracing::info!(
+                "[egress-protect] redirect {} -> seg6 H.Encaps [{}] via {} dev {} (VRF table {} can't deliver)",
+                addr,
+                mirror_sid,
+                nh6,
+                ifindex,
+                sid.table_id
+            );
+        }
+    }
+
+    /// Re-evaluate every local End.DT46 SID inside a protected locator (or
+    /// currently redirected). Called when IS-IS resets the egress-
+    /// protection registrations and on PE-CE link up/down.
+    pub async fn reconcile_egress_redirects(&mut self) {
+        if self.egress_protect.is_empty() && self.redirected_sids.is_empty() {
+            return;
+        }
+        let addrs: Vec<std::net::Ipv6Addr> = self
+            .sids
+            .values()
+            .filter(|s| s.behavior == SidBehavior::EndDT46)
+            .filter(|s| {
+                self.redirected_sids.contains(&s.addr)
+                    || self.egress_protect.keys().any(|loc| loc.contains(&s.addr))
+            })
+            .map(|s| s.addr)
+            .collect();
+        for addr in addrs {
+            self.apply_egress_redirect(addr).await;
+        }
     }
 
     /// Register a subscriber. `proto_id` is allocated by
@@ -2337,6 +2517,21 @@ impl Rib {
                 self.fib_handle
                     .route_mirror_context_uninstall(&prefix, context_table)
                     .await;
+            }
+            Message::EgressProtectSet { protections } => {
+                // Sticky: only a non-empty scan updates the registration.
+                // IS-IS recomputes this from a live LSDB scan on every SPF,
+                // and that scan can momentarily read empty during a local
+                // link event (the SPF runs against a transiently-partial
+                // LSDB). Dropping the last-known protector on that transient
+                // would disarm egress protection right when a PE-CE link is
+                // failing. Keeping it is PIC-like and benign — redirecting
+                // to a since-withdrawn Mirror SID merely drops, no worse
+                // than decapping into a VRF that can't deliver anyway.
+                if !protections.is_empty() {
+                    self.egress_protect = protections.into_iter().collect();
+                }
+                self.reconcile_egress_redirects().await;
             }
             Message::Shutdown { tx } => {
                 self.nmap.shutdown(&self.fib_handle).await;
