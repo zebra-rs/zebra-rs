@@ -1,0 +1,52 @@
+# z2 — the peer SRv6 EVPN PE (root + leaf) for VNI 10. Mirror of z1: locator
+# LOC2 (fcbb:bbbb:2::/48), a static route to z1's locator, and the same
+# srv6-p2mp + sr-p2mp-dataplane offload config. z1 sources BUM; z2 is the leaf
+# that receives the replicated copy and floods it into br10.
+interface:
+- if-name: lo
+  ipv6:
+    address: 2001:db8::2/128
+- if-name: z2z1
+  ipv6:
+    address: 2001:db8:12::2/64
+segment-routing:
+  locator:
+  - name: LOC2
+    prefix: fcbb:bbbb:2::/48
+    behavior: usid
+vxlan:
+- name: vxlan10
+  vni: 10
+  local-address: 2001:db8::2
+router:
+  bgp:
+    global:
+      as: 65001
+      router-id: 192.168.0.2
+    segment-routing:
+      srv6:
+        locator: LOC2
+    afi-safi:
+    - name: evpn
+      advertise-all-vni: true
+      bum-tunnel-type: srv6-p2mp
+      sr-p2mp-dataplane:
+        overlay-interface: oport2
+        underlay-interface: z2z1
+        bridge-interface: iport2
+        next-hop-mac: "02:00:00:00:12:01"
+    neighbor:
+    - remote-address: 2001:db8:12::1
+      enabled: true
+      remote-as: 65001
+      afi-safi:
+      - name: ipv6
+        enabled: true
+      - name: evpn
+        enabled: true
+  static:
+    ipv6:
+      route:
+      - prefix: fcbb:bbbb:1::/48
+        nexthop:
+        - address: 2001:db8:12::1

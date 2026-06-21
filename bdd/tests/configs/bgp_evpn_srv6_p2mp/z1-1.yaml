@@ -1,0 +1,54 @@
+# z1 — an SRv6 EVPN PE (root + leaf) for VNI 10 over an SR P2MP (RFC 9524)
+# BUM-replication tree. Locator LOC1 (fcbb:bbbb:1::/48) carves its End.DT2M
+# SID; a static route reaches z2's locator (no IGP in this 2-node test).
+# bum-tunnel-type srv6-p2mp + sr-p2mp-dataplane drive the tc-evpn-replicate
+# offload: the encap child wraps bare BUM out z1z2; the leaf child decaps a
+# replicated copy addressed to z1's End.DT2M SID into br10.
+interface:
+- if-name: lo
+  ipv6:
+    address: 2001:db8::1/128
+- if-name: z1z2
+  ipv6:
+    address: 2001:db8:12::1/64
+segment-routing:
+  locator:
+  - name: LOC1
+    prefix: fcbb:bbbb:1::/48
+    behavior: usid
+vxlan:
+- name: vxlan10
+  vni: 10
+  local-address: 2001:db8::1
+router:
+  bgp:
+    global:
+      as: 65001
+      router-id: 192.168.0.1
+    segment-routing:
+      srv6:
+        locator: LOC1
+    afi-safi:
+    - name: evpn
+      advertise-all-vni: true
+      bum-tunnel-type: srv6-p2mp
+      sr-p2mp-dataplane:
+        overlay-interface: oport1
+        underlay-interface: z1z2
+        bridge-interface: iport1
+        next-hop-mac: "02:00:00:00:12:02"
+    neighbor:
+    - remote-address: 2001:db8:12::2
+      enabled: true
+      remote-as: 65001
+      afi-safi:
+      - name: ipv6
+        enabled: true
+      - name: evpn
+        enabled: true
+  static:
+    ipv6:
+      route:
+      - prefix: fcbb:bbbb:2::/48
+        nexthop:
+        - address: 2001:db8:12::2
