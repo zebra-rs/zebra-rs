@@ -2250,13 +2250,27 @@ impl EvpnFloodState {
         // local-VXLAN SR PE roots it at its own VTEP toward every PE in the BUM
         // domain (RFC 9524). The gateway leaf set takes precedence — a node with
         // both is acting as the region's re-originator.
-        let (want, root): (BTreeSet<IpAddr>, Option<IpAddr>) = if is_sr && !v.gw_leaves.is_empty() {
-            (v.gw_leaves.clone(), v.gw_root)
-        } else if is_sr && v.root.is_some() {
-            (self.replication_leaves(vni), v.root)
-        } else {
-            (BTreeSet::new(), None)
-        };
+        let (vtep_leaves, root): (BTreeSet<IpAddr>, Option<IpAddr>) =
+            if is_sr && !v.gw_leaves.is_empty() {
+                (v.gw_leaves.clone(), v.gw_root)
+            } else if is_sr && v.root.is_some() {
+                (self.replication_leaves(vni), v.root)
+            } else {
+                (BTreeSet::new(), None)
+            };
+        // Resolve each leaf VTEP to the End.DT2M SID it advertised (RFC 9252
+        // SRv6 L2 Service TLV) — that's the outer DA the dataplane replicates
+        // toward. Fall back to the VTEP address when the leaf signalled no SID
+        // (e.g. its locator hadn't resolved, or an SR-MPLS tree).
+        let want: BTreeSet<IpAddr> = vtep_leaves
+            .into_iter()
+            .map(|leaf| {
+                v.sr_remote_sids
+                    .get(&leaf)
+                    .map(|sid| IpAddr::V6(*sid))
+                    .unwrap_or(leaf)
+            })
+            .collect();
         if want == v.repl_installed {
             ReplAction::None
         } else if want.is_empty() {
@@ -13799,6 +13813,34 @@ mod evpn_flood_tests {
                 root: ip("10.0.0.9"),
                 srv6: true,
                 leaves: BTreeSet::from([ip("10.0.0.2"), ip("10.0.0.3")]),
+            }
+        );
+    }
+
+    /// A leaf that advertised an End.DT2M SID is replicated toward that SID;
+    /// a leaf with no advertised SID falls back to its VTEP address.
+    #[test]
+    fn replication_action_resolves_leaf_dt2m_sids() {
+        let mut f = EvpnFloodState {
+            bum_tunnel: EvpnBumTunnel::SrV6P2mp,
+            ..Default::default()
+        };
+        f.set_local_root(100, ip("10.0.0.9"));
+        // Leaf .2 advertised an End.DT2M SID; leaf .3 did not.
+        f.update_sr_remote(100, ip("10.0.0.2"), 100);
+        f.update_sr_remote_sid(
+            100,
+            ip("10.0.0.2"),
+            Some("2001:db8:2::100".parse().unwrap()),
+        );
+        f.update_sr_remote(100, ip("10.0.0.3"), 100);
+        assert_eq!(
+            f.replication_action(100),
+            ReplAction::Add {
+                root: ip("10.0.0.9"),
+                srv6: true,
+                // .2 → its SID, .3 → VTEP fallback.
+                leaves: BTreeSet::from([ip("2001:db8:2::100"), ip("10.0.0.3")]),
             }
         );
     }
