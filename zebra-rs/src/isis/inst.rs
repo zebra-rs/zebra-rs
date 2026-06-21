@@ -375,6 +375,15 @@ pub struct Isis {
     /// re-adding the entries that still qualify.
     pub installed_mirror_routes: std::collections::BTreeSet<ipnet::Ipv6Net>,
 
+    /// SR-MPLS Mirror Context labels currently allocated for egress
+    /// protection, keyed by protected-locator. Each `dataplane: mpls`
+    /// entry gets one **context label** (RFC 8679), allocated from the
+    /// SRLB `local_pool` and advertised in a SID/Label Binding TLV (149)
+    /// with the M-flag. Held so the label is stable across LSP
+    /// regenerations and released back to the pool when the entry is
+    /// removed.
+    pub mirror_labels: std::collections::BTreeMap<ipnet::Ipv6Net, u32>,
+
     /// ELIB function pool used for End.X (adjacency) SID allocation.
     /// Reset whenever the watched locator changes so stale function
     /// reservations don't leak across prefix swaps.
@@ -683,6 +692,10 @@ pub struct IsisTop<'a> {
     /// config row.
     pub redist_v4: &'a BTreeMap<(crate::rib::RibType, Ipv4Net), crate::rib::RouteEntryV4>,
     pub redist_v6: &'a BTreeMap<(crate::rib::RibType, Ipv6Net), crate::rib::RouteEntryV6>,
+    /// SR-MPLS Mirror Context labels per protected-locator (see
+    /// `Isis::mirror_labels`); read by `lsp_generate` to emit the
+    /// SID/Label Binding TLV (149) for `dataplane: mpls` entries.
+    pub mirror_labels: &'a BTreeMap<Ipv6Net, u32>,
 }
 
 impl Isis {
@@ -802,6 +815,7 @@ impl Isis {
                 sr_end_sid: None,
                 installed_mirror_sids: std::collections::BTreeSet::new(),
                 installed_mirror_routes: std::collections::BTreeSet::new(),
+                mirror_labels: std::collections::BTreeMap::new(),
                 elib: super::srv6::ElibPool::new(),
                 lsp_seq_wrap_wait: Levels::<BTreeMap<u8, Timer>>::default(),
                 lsp_placement_memory: Levels::<BTreeMap<TlvKey, u8>>::default(),
@@ -2889,6 +2903,7 @@ impl Isis {
             lsp_placement_memory: &mut self.lsp_placement_memory,
             redist_v4: &self.redist_v4,
             redist_v6: &self.redist_v6,
+            mirror_labels: &self.mirror_labels,
         }
     }
 
@@ -3045,6 +3060,7 @@ impl Isis {
                 self.update_end_sid();
                 self.update_mirror_sids();
                 self.update_mirror_context_routes();
+                self.update_mirror_labels();
                 self.clear_all_endx_sids();
             }
             self.watched_locator = desired_base;
@@ -3263,6 +3279,55 @@ impl Isis {
         }
     }
 
+    /// Reconcile the SR-MPLS Mirror Context labels against the config.
+    /// Each `dataplane: mpls` egress-protection entry gets one **context
+    /// label** (RFC 8679), allocated from the SRLB `local_pool` and held
+    /// stable in `mirror_labels` so the advertised label doesn't churn
+    /// across LSP regenerations. Entries removed from the config release
+    /// their label back to the pool. A label can only be allocated once
+    /// SR-MPLS is enabled (the SRLB pool exists); a not-yet-allocatable
+    /// entry is retried on the next reconcile (e.g. when the SRLB lands).
+    ///
+    /// Note: this reuses the SRLB local pool rather than a separate
+    /// context-label band — it is the node's local-SID block, the natural
+    /// home for a local binding label, and the ILM install (a later
+    /// phase) distinguishes context labels by their entry type.
+    pub(crate) fn update_mirror_labels(&mut self) {
+        use super::egress_protection::MirrorDataplane;
+        let desired: std::collections::BTreeSet<ipnet::Ipv6Net> = self
+            .config
+            .egress_protections
+            .values()
+            .filter(|e| e.dataplane == MirrorDataplane::Mpls)
+            .map(|e| e.protected_locator)
+            .collect();
+        // Release labels for entries no longer desired.
+        let stale: Vec<ipnet::Ipv6Net> = self
+            .mirror_labels
+            .keys()
+            .filter(|k| !desired.contains(*k))
+            .copied()
+            .collect();
+        for key in stale {
+            if let Some(label) = self.mirror_labels.remove(&key)
+                && let Some(pool) = self.local_pool.as_mut()
+            {
+                pool.release(label as usize);
+            }
+        }
+        // Allocate for newly-desired entries (keeps existing allocations).
+        for key in desired {
+            if self.mirror_labels.contains_key(&key) {
+                continue;
+            }
+            if let Some(pool) = self.local_pool.as_mut()
+                && let Some(label) = pool.allocate()
+            {
+                self.mirror_labels.insert(key, label as u32);
+            }
+        }
+    }
+
     /// Fold the staged `/srlg/group/*` cache into the
     /// applied snapshot at `ConfigOp::CommitEnd`. When the snapshot
     /// actually moved, re-originate both LSP levels so the new
@@ -3295,6 +3360,11 @@ impl Isis {
                 // unlock pool creation (first-time arrival) or drop it
                 // (block went away on the RIB side).
                 self.reconcile_local_pool();
+                // The SRLB pool just (dis)appeared — (de)allocate Mirror
+                // Context labels and re-flood so the Binding TLVs match.
+                self.update_mirror_labels();
+                let _ = self.tx.send(Message::LspOriginate(Level::L1, None));
+                let _ = self.tx.send(Message::LspOriginate(Level::L2, None));
             }
             RibSrRx::Locator { name, locator } => {
                 // A single locator name may back the base (algo-0)
@@ -3316,6 +3386,7 @@ impl Isis {
                     // Mirror SID can now be range-checked and installed.
                     self.update_mirror_sids();
                     self.update_mirror_context_routes();
+                    self.update_mirror_labels();
                     touched = true;
                 }
                 let algos: Vec<u8> = self
