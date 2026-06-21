@@ -364,6 +364,17 @@ pub enum Message {
     ReplSegDel {
         vni: u32,
     },
+    /// Topology for the SR P2MP BUM-replication dataplane, from BGP's
+    /// `sr-p2mp-dataplane` config: the overlay bridge port the root encap
+    /// attaches to, the SR underlay NIC, the bridge port a leaf floods into,
+    /// and the outer next-hop MAC. Stored by the replication supervisor and
+    /// used when it (re)spawns the eBPF children. Any field may be `None`.
+    ReplDataplaneCfg {
+        overlay: Option<String>,
+        underlay: Option<String>,
+        bridge: Option<String>,
+        next_hop_mac: Option<String>,
+    },
     Shutdown {
         tx: oneshot::Sender<()>,
     },
@@ -2863,6 +2874,15 @@ impl Rib {
             Message::ReplSegDel { vni } => {
                 tracing::info!("EVPN ReplSeg del: VNI {vni}");
                 self.evpn_repl.del(vni);
+            }
+            Message::ReplDataplaneCfg {
+                overlay,
+                underlay,
+                bridge,
+                next_hop_mac,
+            } => {
+                self.evpn_repl
+                    .set_topology(overlay, underlay, bridge, next_hop_mac);
             }
             Message::RedistAdd {
                 proto,

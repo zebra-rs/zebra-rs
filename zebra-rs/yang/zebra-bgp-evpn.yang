@@ -198,6 +198,38 @@ module zebra-bgp-evpn {
            replicates to every node in the broadcast domain.";
       }
     }
+    container sr-p2mp-dataplane {
+      description
+        "Interfaces + next hop the SRv6 P2MP (RFC 9524) BUM-replication eBPF
+         dataplane (offload/tc-evpn-replicate) attaches to. Consulted only
+         when bum-tunnel-type is srv6-p2mp; with the offload absent the
+         control plane still signals and nothing forwards.";
+      leaf overlay-interface {
+        type string;
+        description
+          "Bridge port the root H.Encaps classifier attaches to (egress):
+           a bare BUM frame egressing it is encapsulated + fanned out per
+           leaf End.DT2M SID.";
+      }
+      leaf underlay-interface {
+        type string;
+        description
+          "SR underlay NIC: replicated copies leave here, and the leaf
+           End.DT2M decap classifier attaches to its ingress.";
+      }
+      leaf bridge-interface {
+        type string;
+        description
+          "Bridge port a leaf floods decapped BUM frames into for native
+           delivery to the local attachment circuits.";
+      }
+      leaf next-hop-mac {
+        type string;
+        description
+          "Outer Ethernet next-hop MAC (aa:bb:cc:dd:ee:ff) the encapsulated
+           copies are sent to on the underlay.";
+      }
+    }
   }
 
   /* =========================================================
