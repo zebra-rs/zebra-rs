@@ -46,6 +46,33 @@ const IFACE_ENV: &str = "ZEBRA_TC_EVPN_REPLICATE_IFACE";
 /// role programs its SID but the datapath passes such frames to the stack.
 const BRIDGE_ENV: &str = "ZEBRA_TC_EVPN_REPLICATE_BRIDGE";
 
+/// Interfaces + next hop the SR P2MP BUM-replication eBPF children attach to,
+/// from BGP's `sr-p2mp-dataplane` config (`rib::Message::ReplDataplaneCfg`).
+/// Consumed when the children are (re)spawned.
+#[derive(Debug, Clone, Default)]
+pub struct DataplaneTopology {
+    /// Overlay bridge port the root `H.Encaps` classifier attaches to (egress).
+    pub overlay: Option<String>,
+    /// SR underlay NIC: replicated copies leave here; the leaf `End.DT2M`
+    /// decap classifier attaches to its ingress.
+    pub underlay: Option<String>,
+    /// Bridge port a leaf floods decapped BUM frames into.
+    pub bridge: Option<String>,
+    /// Outer Ethernet next-hop MAC for the encapsulated copies.
+    pub next_hop_mac: Option<String>,
+}
+
+impl DataplaneTopology {
+    /// True when every interface + next hop the eBPF children need is set, so
+    /// the supervisor can spawn the full send+receive dataplane.
+    pub fn is_complete(&self) -> bool {
+        self.overlay.is_some()
+            && self.underlay.is_some()
+            && self.bridge.is_some()
+            && self.next_hop_mac.is_some()
+    }
+}
+
 /// Supervises the single `tc-evpn-replicate` child that forwards EVPN BUM over
 /// SR P2MP replication trees. Lifecycle is reference-counted by the set of
 /// VNIs that currently have a replication segment.
@@ -68,6 +95,10 @@ pub struct ReplicationHelper {
     iface: Option<String>,
     /// Bridge port a leaf floods decapped frames into ($ZEBRA_..._BRIDGE).
     bridge: Option<String>,
+    /// Dataplane topology from BGP `sr-p2mp-dataplane` config. Consumed when
+    /// the eBPF children are (re)spawned (a follow-up); stored here so the
+    /// supervisor has it before the first replication segment arrives.
+    topology: DataplaneTopology,
 }
 
 impl Default for ReplicationHelper {
@@ -87,7 +118,31 @@ impl ReplicationHelper {
             bin: resolve_bin(),
             iface: std::env::var(IFACE_ENV).ok().filter(|s| !s.is_empty()),
             bridge: std::env::var(BRIDGE_ENV).ok().filter(|s| !s.is_empty()),
+            topology: DataplaneTopology::default(),
         }
+    }
+
+    /// Update the SR P2MP dataplane topology from BGP `sr-p2mp-dataplane`
+    /// config. Stored for use when the eBPF children are (re)spawned; logged so
+    /// operators can see what the dataplane will attach to.
+    pub fn set_topology(
+        &mut self,
+        overlay: Option<String>,
+        underlay: Option<String>,
+        bridge: Option<String>,
+        next_hop_mac: Option<String>,
+    ) {
+        self.topology = DataplaneTopology {
+            overlay,
+            underlay,
+            bridge,
+            next_hop_mac,
+        };
+        tracing::info!(
+            "evpn replication: dataplane topology updated: {:?} (complete={})",
+            self.topology,
+            self.topology.is_complete()
+        );
     }
 
     /// Install or refresh the SR P2MP replication segment for `vni`, spawning
