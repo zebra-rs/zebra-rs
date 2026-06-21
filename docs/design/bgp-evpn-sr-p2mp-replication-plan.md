@@ -98,9 +98,11 @@ SR P2MP policy at the Root.
 ## Phasing & status (updated 2026-06-18)
 
 Branch `bgp-evpn-tunnel-replication`. The **control plane is complete and
-merged**, and the SRv6 **`End.Replicate`** datapath (clone + per-branch outer-DA
-rewrite) is **implemented and lab-validated**. The remaining gap is the leaf
-`End.DT2M` decap (strip outer IPv6+SRH, redirect inner to the bridge).
+merged**, and **both** SRv6 datapath halves are **implemented and lab-validated**:
+`End.Replicate` (clone + per-branch outer-DA rewrite) at the root/bud, and the
+leaf `End.DT2M` (decap the outer encap, flood the inner frame into the bridge).
+The remaining gaps are the root H.Encaps-from-bare-frame path and SRH-present
+(non-reduced) decap.
 
 | Slice | What landed / planned | Status |
 | --- | --- | --- |
@@ -113,8 +115,8 @@ rewrite) is **implemented and lab-validated**. The remaining gap is the leaf
 | DP1 — ReplSeg handoff | `Message::ReplSegAdd/ReplSegDel` + producer (`set_local_root`/`replication_action`) + FIB stub consumer; mode-change reconcile | ✅ merged #1508 |
 | DP2 — supervisor | spawn/refcount the `tc-evpn-replicate` loader child (pattern: `bfd/reflector.rs`), feed it over stdin line-IPC from the `ReplSeg` consumer | ✅ merged #1518 |
 | DP3a — BPF map + loader | `REPL_SEG` map + loader `repl-add`/`repl-del` population (clone+rewrite logic still a no-op) | ✅ merged #1520 |
-| DP3b — `End.Replicate` | clsact-ingress clone loop: match outer DA against `REPL_LOCAL_SID`, decrement Hop Limit (guard ≤1), `clone_redirect` one copy per leaf with outer DA rewritten, drop original. Lab-validated (`scripts/veth-replicate-test.sh`) | ✅ this slice |
-| DP3c — leaf `End.DT2M` | match the local `End.DT2M` SID → strip outer IPv6+SRH, redirect inner frame to the bridge master for native BUM flooding | ⬜ planned |
+| DP3b — `End.Replicate` | clsact-ingress clone loop: match outer DA against `REPL_LOCAL_SID`, decrement Hop Limit (guard ≤1), `clone_redirect` one copy per leaf with outer DA rewritten, drop original. Lab-validated (`scripts/veth-replicate-test.sh`) | ✅ merged #1563 |
+| DP3c — leaf `End.DT2M` | match the local `End.DT2M` SID (`DT2M_SID` map) → slide the inner frame to the front (`adjust_room` can't strip a full L3), `change_tail`-trim, `bpf_redirect` into a bridge port's ingress → native flood. Lab-validated (`scripts/veth-dt2m-test.sh`) | ✅ this slice |
 
 ## Where the pieces live
 
@@ -140,31 +142,45 @@ rewrite) is **implemented and lab-validated**. The remaining gap is the leaf
 ## eBPF dataplane design (DP2/DP3)
 
 - New `offload/tc-evpn-replicate/` crate mirrors `offload/xdp-bfd-echo/` but a
-  TC/clsact `#[classifier]`. Roles, all clsact-attached: **root/bud** (ingress)
-  match the Replication-SID → clone + per-branch outer-DA rewrite
-  (`End.Replicate`, **implemented**); **leaf** (ingress) match the `End.DT2M`
-  SID → strip outer IPv6+SRH, redirect inner frame to the bridge master for
-  native BUM flooding (DP3c). A root that must `H.Encaps` a bare BUM frame
-  (rather than re-replicate an already-encapsulated one) is a later refinement.
+  TC/clsact `#[classifier]`. One ingress classifier serves both roles, keyed by
+  which map the outer IPv6 DA hits: **root/bud** match the Replication-SID →
+  clone + per-branch outer-DA rewrite (`End.Replicate`); **leaf** match the
+  `End.DT2M` SID → decap + bridge flood. A root that must `H.Encaps` a bare BUM
+  frame (rather than re-replicate an already-encapsulated one) is a later
+  refinement.
 - **Maps** (loader-filled): `REPL_SEG` (per-VNI segment: tree-id, leaf SIDs);
-  `REPL_LOCAL_SID` (local replication SID → VNI, so the datapath demuxes an
-  inbound packet to its segment by outer IPv6 DA — derived here from each
-  segment's root SID); `CONFIG[0]` (egress ifindex the copies leave on,
-  `--redirect-iface`). Fed from `ReplSeg` over a stdin line protocol; a
+  `REPL_LOCAL_SID` (local replication SID → VNI, demuxes a packet to its segment
+  by outer IPv6 DA — derived here from each segment's root SID); `DT2M_SID`
+  (local `End.DT2M` SID → VNI, leaf role); `CONFIG[0]` (clone egress ifindex,
+  `--redirect-iface`), `CONFIG[1]` (bridge port the leaf floods into,
+  `--bridge-iface`). Fed from `ReplSeg`/`leaf-add` over a stdin line protocol; a
   supervisor spawns/refcounts the loader per ifindex.
 - **`End.Replicate` datapath:** on an inbound IPv6 frame whose outer DA hits
   `REPL_LOCAL_SID`, decrement the outer Hop Limit (drop if ≤1), then for each
   leaf rewrite the outer DA and `clone_redirect` a copy out `CONFIG[0]`; drop
-  the original (`TC_ACT_SHOT`). Writes use `bpf_skb_store_bytes`/`load_bytes`
-  (not raw `data` pointers), so nothing is held across the `clone_redirect`s
-  that invalidate packet pointers. No outer checksum fix-up is needed (IPv6 has
-  no header checksum; the outer DA is not in any inner L4 pseudo-header).
-  Validated end-to-end on a veth pair by `scripts/veth-replicate-test.sh` (one
-  frame to a replication SID → a copy at each leaf SID).
-- **Caveats:** `bpf_clone_redirect` is TC-only; the leaf decap (DP3c) and any
-  SRH segment-list rewrite are still to come; `H.Encaps.Red` MTU (eBPF can't
-  fragment → jumbo/large underlay); veth needs the clsact path (no native XDP);
-  aya is pulled from git unpinned.
+  the original (`TC_ACT_SHOT`). No outer checksum fix-up (IPv6 has no header
+  checksum; the outer DA is not in any inner L4 pseudo-header). Validated by
+  `scripts/veth-replicate-test.sh`.
+- **Leaf `End.DT2M` datapath:** on an inbound IPv6 frame whose outer DA hits
+  `DT2M_SID` (reduced encap, Next Header = Ethernet/143), slide the inner
+  Ethernet frame to the front of the skb and `bpf_skb_change_tail`-trim the tail,
+  then `bpf_redirect(BPF_F_INGRESS)` into a bridge **port** so the bridge floods
+  to the other ports. `bpf_skb_adjust_room` can't do this (it preserves the L3
+  header and refuses to shrink past it — confirmed: a small MAC-mode shrink
+  succeeds but a full-header shrink returns `-ENOTSUPP`); the slide+trim is the
+  head-removal workaround. Redirecting to the bridge *master* would only send
+  the frame up the host stack, so a dedicated bridge port is the inject point.
+  Validated by `scripts/veth-dt2m-test.sh`.
+- Both use `bpf_skb_store_bytes`/`load_bytes` (`TcContext::store`/`load`), never
+  a raw `data` pointer, so nothing is held across the `clone_redirect` /
+  `change_tail` calls that invalidate packet pointers.
+- **Caveats:** `bpf_clone_redirect`/`bpf_redirect` are TC-only; the root
+  H.Encaps-from-bare-frame path and SRH-present (non-reduced) decap + any SRH
+  segment-list rewrite are still to come; `change_tail`'s minimum length is the
+  stale transport offset, so a sub-`DT2M_STRIP`-byte (runt) inner frame can't be
+  trimmed and is dropped — real ≥60-byte Ethernet frames trim fine; veth needs
+  GRO off (a GRO'd skb presents as GSO and blocks shrink helpers); aya is pulled
+  from git unpinned.
 
 ## Gotchas / build notes
 
@@ -182,5 +198,10 @@ rewrite) is **implemented and lab-validated**. The remaining gap is the leaf
   SRv6 Function transposition) — label field left 0.
 - Controller-instantiated replication SIDs (PCEP / BGP SR-P2MP policy) — only
   the locally-computed degenerate tree is built.
-- Multi-tier (bud-node) replication forwarding depends on the eBPF dataplane
-  (DP3); the signaling/state model already supports it.
+- Multi-tier (bud-node) replication forwarding: the `End.Replicate` datapath
+  already clones + rewrites per branch, so a bud is forwarding-capable; the
+  remaining piece is the control plane computing a multi-tier tree (only the
+  degenerate root→leaves tree is built today).
+- Root `H.Encaps`-from-bare-frame (encapsulate a BUM frame arriving bare from
+  the local bridge, vs. re-replicating an already-encapsulated one) and
+  SRH-present (non-reduced) `End.DT2M` decap + SRH segment-list rewrite.
