@@ -1962,6 +1962,12 @@ struct RemoteImet {
     /// it is a *legacy* (non-segmentation) PE, which an ASBR must account for
     /// in the §5.3.1 DF election when bordering a downstream AS.
     segmentation_capable: bool,
+    /// RFC 9572 §6.1: the segmentation region the remote VTEP belongs to (the
+    /// ingress peer's `region-id`), or `None` for a non-segmented neighbor. A
+    /// segmentation gateway uses this to partition its flood set by region and
+    /// re-flood BUM across the boundary with split-horizon (never back into the
+    /// ingress region). See [`EvpnFloodState::gateway_replicate`].
+    region: Option<[u8; 8]>,
 }
 
 /// Per-VNI flood state: which remotes advertised a Type-3 IMET, and what
@@ -2026,6 +2032,7 @@ impl EvpnFloodState {
         ar_ip: Option<IpAddr>,
         prune: bool,
         segmentation_capable: bool,
+        region: Option<[u8; 8]>,
     ) {
         let v = self.vnis.entry(vni).or_default();
         v.sr_remotes.remove(&orig);
@@ -2035,8 +2042,30 @@ impl EvpnFloodState {
                 ar_ip,
                 prune,
                 segmentation_capable,
+                region,
             },
         );
+    }
+
+    /// RFC 9572 §6: a segmentation gateway re-floods a BUM frame that ingressed
+    /// from `ingress_region` to every remote VTEP in `vni`'s flood set that is
+    /// in a *different* region — split-horizon: a copy is never sent back into
+    /// the region it came from. Remotes with no region (`None`) are plain
+    /// (non-segmented) neighbours and are always included. Returns the set of
+    /// re-flood target VTEPs (empty for an unknown VNI).
+    ///
+    /// This is the per-boundary replication primitive the (eBPF) gateway
+    /// dataplane consumes; the caller gates it on being the elected DF
+    /// (`evpn_df_election`) so only one gateway forwards across the boundary.
+    pub fn gateway_replicate(&self, vni: u32, ingress_region: [u8; 8]) -> BTreeSet<IpAddr> {
+        let Some(v) = self.vnis.get(&vni) else {
+            return BTreeSet::new();
+        };
+        v.remotes
+            .iter()
+            .filter(|(_, r)| r.region != Some(ingress_region))
+            .map(|(orig, _)| *orig)
+            .collect()
     }
 
     /// RFC 9572 §5.3.1: does any remote PE in `vni`'s flood set lack
@@ -6318,9 +6347,18 @@ fn route_evpn_export_selected(
                         .map(|p| p.endpoint);
                     let prune = imet_whole_vtep_prune(pmsi);
                     let seg_capable = attr_segmentation_support(&best.attr);
-                    bgp.local_rib
-                        .evpn_flood
-                        .update_remote(vni, *orig, ar_ip, prune, seg_capable);
+                    // RFC 9572 §6.1: the remote VTEP's region (the ingress
+                    // peer's region-id, stamped on the path) lets a gateway
+                    // partition its flood set for cross-boundary re-flooding.
+                    let region = best.ingress_region;
+                    bgp.local_rib.evpn_flood.update_remote(
+                        vni,
+                        *orig,
+                        ar_ip,
+                        prune,
+                        seg_capable,
+                        region,
+                    );
                 }
                 bgp.local_rib.evpn_flood.reconcile(vni, bgp.rib_client);
             } else {
@@ -6448,14 +6486,16 @@ fn evpn_per_region_asbrs(local_rib: &LocalRib, region_id: [u8; 8]) -> Vec<Ipv4Ad
 /// Render the RFC 9572 §5.3.1 inter-AS DF-election summary for one region's
 /// Per-Region I-PMSI (Type-9), as appended by `show bgp evpn`: the candidate
 /// ASBRs (those advertising the region's Type-9), the elected Designated
-/// Forwarder (modulus DF Alg), and — from the route's VNI — whether any
-/// downstream legacy (non-segmentation) PE is present. `None` when there are no
-/// candidates (nothing to elect).
+/// Forwarder (modulus DF Alg) and whether `router_id` (this node) is it,
+/// whether a legacy PE is present, and — when this node is a gateway with
+/// remote VTEPs outside the region — the split-horizon gateway re-flood set for
+/// BUM ingressing from this region. `None` when there are no candidates.
 pub(super) fn evpn_df_election_show(
     local_rib: &LocalRib,
     region_id: [u8; 8],
     eth_tag: u32,
     attr: &BgpAttr,
+    router_id: Ipv4Addr,
 ) -> Option<String> {
     let mut asbrs = evpn_per_region_asbrs(local_rib, region_id);
     let df = evpn_df_election(&asbrs, eth_tag)?;
@@ -6466,13 +6506,30 @@ pub(super) fn evpn_df_election_show(
         .map(|a| a.to_string())
         .collect::<Vec<_>>()
         .join(" ");
-    let legacy = extract_vni_from_attr(attr)
-        .map(|vni| local_rib.evpn_flood.has_legacy_remote(vni))
-        .unwrap_or(false);
-    let legacy_note = if legacy { " (legacy PEs present)" } else { "" };
-    Some(format!(
-        "DF-election (modulus): DF={df} [candidates: {cands}]{legacy_note}"
-    ))
+    // RFC 9572 §5.3.1: only the elected DF forwards BUM across the boundary.
+    let role = if df == router_id {
+        " (this node is DF, forwards)"
+    } else {
+        " (standby)"
+    };
+    let mut out = format!("DF-election (modulus): DF={df} [candidates: {cands}]{role}");
+    if let Some(vni) = extract_vni_from_attr(attr) {
+        if local_rib.evpn_flood.has_legacy_remote(vni) {
+            out.push_str(" (legacy PEs present)");
+        }
+        // The split-horizon re-flood set for BUM that ingressed from this
+        // region: every remote VTEP in the VNI that is in another region.
+        let reflood = local_rib.evpn_flood.gateway_replicate(vni, region_id);
+        if !reflood.is_empty() {
+            let targets = reflood
+                .iter()
+                .map(|a| a.to_string())
+                .collect::<Vec<_>>()
+                .join(" ");
+            out.push_str(&format!("; gateway re-flood [{targets}]"));
+        }
+    }
+    Some(out)
 }
 
 fn evpn_reoriginate_per_region(
@@ -13167,9 +13224,16 @@ mod evpn_flood_tests {
     #[test]
     fn rnve_floods_all_remote_ir_ips() {
         let mut f = EvpnFloodState::default();
-        f.update_remote(100, ip("10.0.0.1"), None, false, false);
-        f.update_remote(100, ip("10.0.0.2"), None, false, false);
-        f.update_remote(100, ip("10.0.0.3"), Some(ip("10.0.0.254")), false, false);
+        f.update_remote(100, ip("10.0.0.1"), None, false, false, None);
+        f.update_remote(100, ip("10.0.0.2"), None, false, false, None);
+        f.update_remote(
+            100,
+            ip("10.0.0.3"),
+            Some(ip("10.0.0.254")),
+            false,
+            false,
+            None,
+        );
         assert_eq!(
             f.desired(100),
             BTreeSet::from([ip("10.0.0.1"), ip("10.0.0.2"), ip("10.0.0.3")])
@@ -13184,9 +13248,23 @@ mod evpn_flood_tests {
             role: AssistedReplicationRole::Leaf,
             ..Default::default()
         };
-        f.update_remote(100, ip("10.0.0.1"), None, false, false); // another leaf
-        f.update_remote(100, ip("10.0.0.10"), Some(ip("10.0.0.254")), false, false); // replicator A
-        f.update_remote(100, ip("10.0.0.20"), Some(ip("10.0.0.253")), false, false); // replicator B
+        f.update_remote(100, ip("10.0.0.1"), None, false, false, None); // another leaf
+        f.update_remote(
+            100,
+            ip("10.0.0.10"),
+            Some(ip("10.0.0.254")),
+            false,
+            false,
+            None,
+        ); // replicator A
+        f.update_remote(
+            100,
+            ip("10.0.0.20"),
+            Some(ip("10.0.0.253")),
+            false,
+            false,
+            None,
+        ); // replicator B
         assert_eq!(f.desired(100), BTreeSet::from([ip("10.0.0.253")]));
     }
 
@@ -13198,8 +13276,8 @@ mod evpn_flood_tests {
             role: AssistedReplicationRole::Leaf,
             ..Default::default()
         };
-        f.update_remote(100, ip("10.0.0.1"), None, false, false);
-        f.update_remote(100, ip("10.0.0.2"), None, false, false);
+        f.update_remote(100, ip("10.0.0.1"), None, false, false, None);
+        f.update_remote(100, ip("10.0.0.2"), None, false, false, None);
         assert_eq!(
             f.desired(100),
             BTreeSet::from([ip("10.0.0.1"), ip("10.0.0.2")])
@@ -13214,8 +13292,15 @@ mod evpn_flood_tests {
             role: AssistedReplicationRole::Leaf,
             ..Default::default()
         };
-        f.update_remote(100, ip("10.0.0.1"), None, false, false);
-        f.update_remote(100, ip("10.0.0.10"), Some(ip("10.0.0.254")), false, false);
+        f.update_remote(100, ip("10.0.0.1"), None, false, false, None);
+        f.update_remote(
+            100,
+            ip("10.0.0.10"),
+            Some(ip("10.0.0.254")),
+            false,
+            false,
+            None,
+        );
         assert_eq!(f.desired(100), BTreeSet::from([ip("10.0.0.254")]));
         f.remove_remote(100, ip("10.0.0.10"));
         assert_eq!(f.desired(100), BTreeSet::from([ip("10.0.0.1")]));
@@ -13225,8 +13310,8 @@ mod evpn_flood_tests {
     #[test]
     fn flood_state_is_per_vni() {
         let mut f = EvpnFloodState::default();
-        f.update_remote(100, ip("10.0.0.1"), None, false, false);
-        f.update_remote(200, ip("10.0.0.2"), None, false, false);
+        f.update_remote(100, ip("10.0.0.1"), None, false, false, None);
+        f.update_remote(200, ip("10.0.0.2"), None, false, false, None);
         assert_eq!(f.desired(100), BTreeSet::from([ip("10.0.0.1")]));
         assert_eq!(f.desired(200), BTreeSet::from([ip("10.0.0.2")]));
         assert!(f.desired(300).is_empty());
@@ -13237,7 +13322,7 @@ mod evpn_flood_tests {
     #[test]
     fn sr_p2mp_remotes_recorded_and_excluded_from_flood() {
         let mut f = EvpnFloodState::default();
-        f.update_remote(100, ip("10.0.0.1"), None, false, false); // plain IR remote
+        f.update_remote(100, ip("10.0.0.1"), None, false, false, None); // plain IR remote
         f.update_sr_remote(100, ip("10.0.0.7"), 4242); // SR P2MP tree remote
         // Only the IR remote floods via VXLAN; the SR P2MP Root does not.
         assert_eq!(f.desired(100), BTreeSet::from([ip("10.0.0.1")]));
@@ -13252,7 +13337,7 @@ mod evpn_flood_tests {
             bum_tunnel: EvpnBumTunnel::SrMplsP2mp,
             ..Default::default()
         };
-        f.update_remote(100, ip("10.0.0.1"), None, false, false);
+        f.update_remote(100, ip("10.0.0.1"), None, false, false, None);
         f.update_sr_remote(100, ip("10.0.0.2"), 100);
         // No VXLAN head-end FDB targets in SR P2MP mode.
         assert!(f.desired(100).is_empty());
@@ -13268,7 +13353,7 @@ mod evpn_flood_tests {
     #[test]
     fn replication_leaves_unions_ir_and_sr_remotes() {
         let mut f = EvpnFloodState::default();
-        f.update_remote(100, ip("10.0.0.1"), None, false, false);
+        f.update_remote(100, ip("10.0.0.1"), None, false, false, None);
         f.update_sr_remote(100, ip("10.0.0.7"), 9);
         assert_eq!(
             f.replication_leaves(100),
@@ -13287,7 +13372,7 @@ mod evpn_flood_tests {
             ..Default::default()
         };
         f.set_local_root(100, ip("10.0.0.9"));
-        f.update_remote(100, ip("10.0.0.3"), None, false, false);
+        f.update_remote(100, ip("10.0.0.3"), None, false, false, None);
         f.update_sr_remote(100, ip("10.0.0.2"), 100);
         assert_eq!(
             f.replication_action(100),
@@ -13313,7 +13398,7 @@ mod evpn_flood_tests {
         // IR mode with a root → None.
         let mut g = EvpnFloodState::default();
         g.set_local_root(100, ip("10.0.0.9"));
-        g.update_remote(100, ip("10.0.0.3"), None, false, false);
+        g.update_remote(100, ip("10.0.0.3"), None, false, false, None);
         assert_eq!(g.replication_action(100), ReplAction::None);
     }
 
@@ -13343,7 +13428,7 @@ mod evpn_flood_tests {
     #[test]
     fn remote_tunnel_type_flip_is_exclusive() {
         let mut f = EvpnFloodState::default();
-        f.update_remote(100, ip("10.0.0.5"), None, false, false);
+        f.update_remote(100, ip("10.0.0.5"), None, false, false, None);
         assert_eq!(f.desired(100), BTreeSet::from([ip("10.0.0.5")]));
         assert!(f.sr_p2mp_remotes(100).is_empty());
 
@@ -13353,7 +13438,7 @@ mod evpn_flood_tests {
         assert_eq!(f.sr_p2mp_remotes(100), vec![(ip("10.0.0.5"), 7)]);
 
         // Flip back SR P2MP -> IR.
-        f.update_remote(100, ip("10.0.0.5"), None, false, false);
+        f.update_remote(100, ip("10.0.0.5"), None, false, false, None);
         assert_eq!(f.desired(100), BTreeSet::from([ip("10.0.0.5")]));
         assert!(f.sr_p2mp_remotes(100).is_empty());
 
@@ -13369,8 +13454,8 @@ mod evpn_flood_tests {
     #[test]
     fn pruned_remote_excluded_from_rnve_flood() {
         let mut f = EvpnFloodState::default();
-        f.update_remote(100, ip("10.0.0.1"), None, false, false);
-        f.update_remote(100, ip("10.0.0.2"), None, true, false);
+        f.update_remote(100, ip("10.0.0.1"), None, false, false, None);
+        f.update_remote(100, ip("10.0.0.2"), None, true, false, None);
         assert_eq!(f.desired(100), BTreeSet::from([ip("10.0.0.1")]));
     }
 
@@ -13381,8 +13466,8 @@ mod evpn_flood_tests {
             role: AssistedReplicationRole::Leaf,
             ..Default::default()
         };
-        f.update_remote(100, ip("10.0.0.1"), None, false, false);
-        f.update_remote(100, ip("10.0.0.2"), None, true, false);
+        f.update_remote(100, ip("10.0.0.1"), None, false, false, None);
+        f.update_remote(100, ip("10.0.0.2"), None, true, false, None);
         assert_eq!(f.desired(100), BTreeSet::from([ip("10.0.0.1")]));
     }
 
@@ -13453,14 +13538,57 @@ mod evpn_flood_tests {
     fn has_legacy_remote_tracks_segmentation_capability() {
         let mut f = EvpnFloodState::default();
         // Two segmentation-capable remotes on VNI 100 → no legacy.
-        f.update_remote(100, ip("10.0.0.1"), None, false, true);
-        f.update_remote(100, ip("10.0.0.2"), None, false, true);
+        f.update_remote(100, ip("10.0.0.1"), None, false, true, None);
+        f.update_remote(100, ip("10.0.0.2"), None, false, true, None);
         assert!(!f.has_legacy_remote(100));
         // A legacy (non-segmentation) remote joins VNI 100 → legacy present.
-        f.update_remote(100, ip("10.0.0.3"), None, false, false);
+        f.update_remote(100, ip("10.0.0.3"), None, false, false, None);
         assert!(f.has_legacy_remote(100));
         // VNI 200 is unaffected (and unknown VNIs report no legacy).
         assert!(!f.has_legacy_remote(200));
+    }
+
+    const REGION_A: [u8; 8] = [0x00, 0x09, 0xfd, 0xe9, 0, 0, 0, 0]; // AS 65001
+    const REGION_B: [u8; 8] = [0x00, 0x09, 0xfd, 0xea, 0, 0, 0, 0]; // AS 65002
+
+    /// A gateway re-floods BUM from region A only to VTEPs outside region A
+    /// (split-horizon): region-B VTEPs get a copy, region-A VTEPs do not.
+    #[test]
+    fn gateway_replicate_is_split_horizon() {
+        let mut f = EvpnFloodState::default();
+        f.update_remote(10, ip("192.168.0.1"), None, false, true, Some(REGION_A));
+        f.update_remote(10, ip("192.168.0.5"), None, false, true, Some(REGION_A));
+        f.update_remote(10, ip("192.168.0.3"), None, false, true, Some(REGION_B));
+        // BUM ingressing from region A re-floods to region B only.
+        assert_eq!(
+            f.gateway_replicate(10, REGION_A),
+            BTreeSet::from([ip("192.168.0.3")])
+        );
+        // BUM ingressing from region B re-floods to both region-A VTEPs.
+        assert_eq!(
+            f.gateway_replicate(10, REGION_B),
+            BTreeSet::from([ip("192.168.0.1"), ip("192.168.0.5")])
+        );
+    }
+
+    /// Plain (non-segmented, region `None`) remotes are always a re-flood
+    /// target regardless of the ingress region.
+    #[test]
+    fn gateway_replicate_includes_regionless_remotes() {
+        let mut f = EvpnFloodState::default();
+        f.update_remote(10, ip("192.168.0.1"), None, false, true, Some(REGION_A));
+        f.update_remote(10, ip("192.168.0.9"), None, false, false, None);
+        assert_eq!(
+            f.gateway_replicate(10, REGION_A),
+            BTreeSet::from([ip("192.168.0.9")])
+        );
+    }
+
+    /// An unknown VNI re-floods nowhere.
+    #[test]
+    fn gateway_replicate_unknown_vni_is_empty() {
+        let f = EvpnFloodState::default();
+        assert!(f.gateway_replicate(999, REGION_A).is_empty());
     }
 }
 

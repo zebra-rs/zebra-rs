@@ -3319,6 +3319,7 @@ fn show_bgp_evpn(
                     *region_id,
                     *eth_tag,
                     &rib.attr,
+                    bgp.router_id,
                 )
             {
                 writeln!(buf, "                    {}", df)?;
