@@ -1,0 +1,45 @@
+# z2 — gateway #1 (AS 65001, router-id .0.2, the lower of the two, so the
+# elected DF). It borders region A (region-id 65001, iBGP to z1) and region B
+# (region-id 65002, eBGP to z3), and peers iBGP with the other gateway z4
+# (no region-id) so the two exchange their originated Per-Region I-PMSI
+# (Type-9) routes and run the §5.3.1 DF election. As DF it owns delivery into
+# both regions and re-floods BUM across the boundary.
+router:
+  bgp:
+    global:
+      as: 65001
+      router-id: 192.168.0.2
+    neighbor-group:
+    - name: region-a
+      remote-as: 65001
+      region-id: 65001
+    - name: region-b
+      remote-as: 65002
+      region-id: 65002
+    neighbor:
+    - remote-address: 192.168.0.1
+      enabled: true
+      neighbor-group: region-a
+      afi-safi:
+      - name: ipv4
+        enabled: true
+      - name: evpn
+        enabled: true
+    - remote-address: 192.168.0.3
+      enabled: true
+      neighbor-group: region-b
+      afi-safi:
+      - name: ipv4
+        enabled: true
+      - name: evpn
+        enabled: true
+    # Gateway-to-gateway iBGP (no region-id) — exchanges the Type-9 routes the
+    # DF election runs over.
+    - remote-address: 192.168.0.4
+      enabled: true
+      remote-as: 65001
+      afi-safi:
+      - name: ipv4
+        enabled: true
+      - name: evpn
+        enabled: true
