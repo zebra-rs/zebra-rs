@@ -17,8 +17,11 @@ curl -fsSL https://zebra.rs/install.sh | bash
 The script downloads the latest package from the
 [GitHub releases](https://github.com/zebra-rs/zebra-rs/releases) and installs
 it with `apt`, so it pulls in the runtime dependencies automatically. It needs
-`sudo` for the install step and supports Ubuntu 22.04/24.04/26.04 on x86_64 and
-ARM64. Piping a remote script into `bash` runs it with your privileges — read
+`sudo` for the install step. Prebuilt `.deb` packages are currently provided
+only for Ubuntu 22.04 (jammy), 24.04 (noble), and 26.04 (resolute) on x86_64
+and ARM64 — other distributions or releases are not packaged yet and should
+build from source (below). Piping a remote script into `bash` runs it with your
+privileges — read
 it first at <https://zebra.rs/install.sh> if you'd rather review before
 running.
 
