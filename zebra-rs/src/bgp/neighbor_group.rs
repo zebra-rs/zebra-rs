@@ -221,14 +221,19 @@ pub fn config_neighbor_group_afi_safi_enabled(
     match op {
         ConfigOp::Set => {
             let enabled = args.boolean()?;
-            group.afi_safi.entry(family).or_default().enabled = enabled;
+            // `mobile-uplane` toggles both MUP families at once (RFC 9833).
+            for fam in mp_family_expand(family) {
+                group.afi_safi.entry(fam).or_default().enabled = enabled;
+            }
         }
         ConfigOp::Delete => {
             // `enabled` is the entry's mandatory core: dropping it
             // drops the family opinion. A surviving `next-hop-self`
             // opinion would be unreachable config (the schema requires
             // `enabled` on the entry), so remove the whole entry.
-            group.afi_safi.remove(&family);
+            for fam in mp_family_expand(family) {
+                group.afi_safi.remove(&fam);
+            }
         }
         _ => return Some(()),
     }
@@ -855,6 +860,23 @@ pub(super) fn sweep_members(
     }
 }
 
+/// MUP (RFC 9833) is exposed through a single `mobile-uplane` config
+/// name that enables *both* the IPv4 (AFI 1) and IPv6 (AFI 2) MUP
+/// families at once. Every other family is one config name → one
+/// `(AFI, SAFI)`. Expand a parsed family into the concrete set of
+/// `(AFI, SAFI)` tuples it toggles, so the `enabled` handlers, the MP
+/// capability set, and the resolver all see ordinary per-family entries.
+pub fn mp_family_expand(key: AfiSafi) -> Vec<AfiSafi> {
+    if key.safi == Safi::Mup {
+        vec![
+            AfiSafi::new(Afi::Ip, Safi::Mup),
+            AfiSafi::new(Afi::Ip6, Safi::Mup),
+        ]
+    } else {
+        vec![key]
+    }
+}
+
 /// Compute a peer's effective MP (multiprotocol) family set from the
 /// three layers, lowest precedence first:
 ///
@@ -1383,6 +1405,21 @@ mod tests {
         // Peer was never inherited and never got an explicit asn —
         // Delete on the group is a no-op from the sweep's perspective.
         assert_eq!(sweep_action(0, false, false, None), SweepAction::Ignore);
+    }
+
+    #[test]
+    fn mp_family_expand_fans_out_mup_to_both_afis() {
+        // `mobile-uplane` enables both IPv4-MUP and IPv6-MUP (RFC 9833).
+        assert_eq!(
+            mp_family_expand(AfiSafi::new(Afi::Ip, Safi::Mup)),
+            vec![
+                AfiSafi::new(Afi::Ip, Safi::Mup),
+                AfiSafi::new(Afi::Ip6, Safi::Mup),
+            ]
+        );
+        // Every other family passes through unchanged.
+        let v4 = AfiSafi::new(Afi::Ip, Safi::Unicast);
+        assert_eq!(mp_family_expand(v4), vec![v4]);
     }
 
     // [`effective_mp`] precedence matrix: built-in default (IPv4

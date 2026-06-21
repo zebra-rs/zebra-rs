@@ -105,6 +105,8 @@ fn afi_safi_summary_label(afi: Afi, safi: Safi) -> &'static str {
         (Afi::Ip6, Safi::MplsLabel) => "IPv6 Labeled Unicast",
         (Afi::Ip6, Safi::MplsVpn) => "VPNv6 Unicast",
         (Afi::L2vpn, Safi::Evpn) => "L2VPN EVPN",
+        (Afi::Ip, Safi::Mup) => "IPv4 MUP",
+        (Afi::Ip6, Safi::Mup) => "IPv6 MUP",
         (Afi::Ip, Safi::Flowspec) => "IPv4 Flowspec",
         (Afi::Ip6, Safi::Flowspec) => "IPv6 Flowspec",
         (Afi::LinkState, Safi::LinkState) => "Link-State",
@@ -2749,6 +2751,18 @@ fn render(out: &mut String, neighbor: &Neighbor) -> std::fmt::Result {
         {
             writeln!(out, "    L2VPN EVPN: {}", cap.desc())?;
         }
+        let afi = CapMultiProtocol::new(&Afi::Ip, &Safi::Mup);
+        if let Some(cap) = neighbor.cap_map.entries.get(&afi)
+            && (cap.send || cap.recv)
+        {
+            writeln!(out, "    IPv4 MUP: {}", cap.desc())?;
+        }
+        let afi = CapMultiProtocol::new(&Afi::Ip6, &Safi::Mup);
+        if let Some(cap) = neighbor.cap_map.entries.get(&afi)
+            && (cap.send || cap.recv)
+        {
+            writeln!(out, "    IPv6 MUP: {}", cap.desc())?;
+        }
         let afi = CapMultiProtocol::new(&Afi::Ip, &Safi::Rtc);
         if let Some(cap) = neighbor.cap_map.entries.get(&afi)
             && (cap.send || cap.recv)
@@ -3324,6 +3338,107 @@ fn show_bgp_evpn(
             {
                 writeln!(buf, "                    {}", df)?;
             }
+        }
+    }
+
+    Ok(buf)
+}
+
+/// Decode a MUP path's extended communities for display: two-octet AS
+/// Route Targets render as `RT:<asn>:<u32>`; the MUP Extended Community
+/// (RFC 9833 §5, type 0x0c) and anything else fall through to a raw
+/// 8-octet hex dump (e.g. `0x0c0000010000003d`).
+fn format_mup_ecom_value(v: &ExtCommunityValue) -> String {
+    match (v.high_type, v.low_type) {
+        (0x00, 0x02) => {
+            let asn = u16::from_be_bytes([v.val[0], v.val[1]]);
+            let val = u32::from_be_bytes([v.val[2], v.val[3], v.val[4], v.val[5]]);
+            format!("RT:{asn}:{val}")
+        }
+        _ => format!(
+            "0x{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}",
+            v.high_type, v.low_type, v.val[0], v.val[1], v.val[2], v.val[3], v.val[4], v.val[5]
+        ),
+    }
+}
+
+fn show_mup_ecom(attr: &BgpAttr) -> String {
+    let Some(ecom) = &attr.ecom else {
+        return String::new();
+    };
+    ecom.0
+        .iter()
+        .map(format_mup_ecom_value)
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+/// Render a `MupPrefix` as the bracketed `[TYPE][rd][fields]` form used by
+/// `show bgp mobile-uplane`, following the MUP NLRI layout (RFC 9833).
+fn mup_prefix_display(prefix: &MupPrefix) -> String {
+    match prefix {
+        MupPrefix::Dsd { rd, address } => format!("[DSD][{rd}][{address}]"),
+        MupPrefix::Isd { rd, prefix } => format!("[ISD][{rd}][{prefix}]"),
+        MupPrefix::T1st {
+            rd,
+            prefix,
+            teid,
+            qfi,
+            endpoint,
+            source,
+        } => match source {
+            Some(src) => {
+                format!("[ST1][{rd}][ue={prefix}][teid={teid}][qfi={qfi}][ep={endpoint}:src={src}]")
+            }
+            None => format!("[ST1][{rd}][ue={prefix}][teid={teid}][qfi={qfi}][ep={endpoint}]"),
+        },
+        MupPrefix::T2st {
+            rd,
+            endpoint,
+            endpoint_len: _,
+            teid,
+        } => format!("[ST2][{rd}][ep={endpoint}][teid={teid}]"),
+        MupPrefix::Unknown { route_type, .. } => format!("[UNKNOWN type {route_type}]"),
+    }
+}
+
+/// `show bgp mobile-uplane` — the MUP (SAFI 85, RFC 9833) Loc-RIB. Phase 2
+/// renders the route table only; the `MUP controller:` block (zenoh +
+/// VRFs + sessions) lands with the controller phase.
+fn show_bgp_mup(
+    bgp: &Bgp,
+    _args: Args,
+    json: bool,
+) -> std::result::Result<String, std::fmt::Error> {
+    if json {
+        return Ok(String::from("[]"));
+    }
+    render_mup_table(&bgp.local_rib.mup)
+}
+
+/// Render the MUP Loc-RIB table body. Split out from `show_bgp_mup` so it
+/// can be unit-tested against a hand-built table without standing up a
+/// full `Bgp`.
+fn render_mup_table(
+    table: &super::route::LocalRibMupTable,
+) -> std::result::Result<String, std::fmt::Error> {
+    let mut buf = String::new();
+    writeln!(
+        buf,
+        "   Network (MUP NLRI)                                   Next Hop"
+    )?;
+
+    // The flat table iterates in `MupPrefix` Ord order: DSD, ISD, ST1, ST2.
+    for (prefix, rib) in table.selected.iter() {
+        let best = if rib.best_path { ">" } else { " " };
+        writeln!(buf, " *{best} {}", mup_prefix_display(prefix))?;
+
+        let nexthop = show_nexthop(&rib.attr);
+        writeln!(buf, "       next-hop {nexthop}  weight {}", rib.weight)?;
+
+        let ecom = show_mup_ecom(&rib.attr);
+        if !ecom.is_empty() {
+            writeln!(buf, "       {ecom}")?;
         }
     }
 
@@ -4216,6 +4331,139 @@ mod detail_tests {
             "Remote SID missing:\n{out}"
         );
     }
+
+    // --- MUP (SAFI 85) show rendering ------------------------------------
+
+    fn ecv(high: u8, low: u8, val: [u8; 6]) -> ExtCommunityValue {
+        ExtCommunityValue {
+            high_type: high,
+            low_type: low,
+            val,
+        }
+    }
+
+    fn mup_rib(nexthop: std::net::IpAddr, weight: u32, ecoms: &[ExtCommunityValue]) -> BgpRib {
+        let mut attr = BgpAttr::new();
+        attr.nexthop = Some(match nexthop {
+            std::net::IpAddr::V4(a) => BgpNexthop::Ipv4(a),
+            std::net::IpAddr::V6(a) => BgpNexthop::Ipv6(a),
+        });
+        if !ecoms.is_empty() {
+            attr.ecom = Some(ExtCommunity(ecoms.iter().cloned().collect()));
+        }
+        BgpRib::new(
+            0,
+            Ipv4Addr::new(10, 0, 0, 1),
+            BgpRibType::IBGP,
+            0,
+            weight,
+            &attr,
+            None,
+            None,
+            false,
+        )
+    }
+
+    /// End-to-end render of the MUP Loc-RIB table: exercises
+    /// `LocalRibMupTable::update`/best-path and the `show bgp mobile-uplane`
+    /// route-table body against the documented mockup shape.
+    #[test]
+    fn render_mup_table_matches_mockup_shape() {
+        use std::net::IpAddr;
+        let mut table = super::super::route::LocalRibMupTable::default();
+        let nh6: IpAddr = "fc00::30".parse().unwrap();
+        let nh4: IpAddr = "10.10.10.1".parse().unwrap();
+        let rt_2_3 = ecv(0x00, 0x02, [0x00, 0x02, 0x00, 0x00, 0x00, 0x03]);
+        let rt_9_9 = ecv(0x00, 0x02, [0x00, 0x09, 0x00, 0x00, 0x00, 0x09]);
+        let mup_ec = ecv(0x0c, 0x00, [0x00, 0x01, 0x00, 0x00, 0x00, 0x3d]);
+
+        let _ = table.update(
+            MupPrefix::from_route(&MupRoute::Isd {
+                id: 0,
+                arch: MupArchitectureType::Gpp5g,
+                rd: "1.1.1.30:50002".parse().unwrap(),
+                prefix: "20.0.3.0/24".parse().unwrap(),
+            }),
+            mup_rib(nh6, 0, &[rt_2_3]),
+        );
+        let _ = table.update(
+            MupPrefix::from_route(&MupRoute::Dsd {
+                id: 0,
+                arch: MupArchitectureType::Gpp5g,
+                rd: "1.1.1.30:50005".parse().unwrap(),
+                address: "1.1.1.99".parse().unwrap(),
+            }),
+            mup_rib(nh6, 0, &[mup_ec]),
+        );
+        let _ = table.update(
+            MupPrefix::from_route(&MupRoute::T1st {
+                id: 0,
+                arch: MupArchitectureType::Gpp5g,
+                rd: "65000:2".parse().unwrap(),
+                prefix: "2001:db8:cafe::5/128".parse().unwrap(),
+                teid: 601,
+                qfi: 9,
+                endpoint: "20.0.3.99".parse().unwrap(),
+                source: Some("20.0.1.1".parse().unwrap()),
+            }),
+            mup_rib(nh6, 32768, &[rt_9_9]),
+        );
+        let _ = table.update(
+            MupPrefix::from_route(&MupRoute::T2st {
+                id: 0,
+                arch: MupArchitectureType::Gpp5g,
+                rd: "65000:1".parse().unwrap(),
+                endpoint: "20.0.1.1".parse().unwrap(),
+                endpoint_len: 64,
+                teid: 600,
+            }),
+            mup_rib(nh4, 32768, &[]),
+        );
+
+        let out = render_mup_table(&table).unwrap();
+
+        // Grouped DSD -> ISD -> ST1 -> ST2 by MupPrefix Ord.
+        let dsd = out.find("[DSD]").expect("DSD line");
+        let isd = out.find("[ISD]").expect("ISD line");
+        let st1 = out.find("[ST1]").expect("ST1 line");
+        let st2 = out.find("[ST2]").expect("ST2 line");
+        assert!(
+            dsd < isd && isd < st1 && st1 < st2,
+            "route-type ordering:\n{out}"
+        );
+
+        assert!(out.contains("[ISD][1.1.1.30:50002][20.0.3.0/24]"), "{out}");
+        assert!(out.contains("[DSD][1.1.1.30:50005][1.1.1.99]"), "{out}");
+        assert!(
+            out.contains(
+                "[ST1][65000:2][ue=2001:db8:cafe::5/128][teid=601][qfi=9][ep=20.0.3.99:src=20.0.1.1]"
+            ),
+            "{out}"
+        );
+        assert!(
+            out.contains("[ST2][65000:1][ep=20.0.1.1][teid=600]"),
+            "{out}"
+        );
+
+        // Next-hop, weight, route-target and MUP ext-comm hex.
+        assert!(out.contains("next-hop fc00::30  weight 0"), "{out}");
+        assert!(out.contains("next-hop 10.10.10.1  weight 32768"), "{out}");
+        assert!(out.contains("RT:2:3"), "{out}");
+        assert!(out.contains("RT:9:9"), "{out}");
+        assert!(out.contains("0x0c0000010000003d"), "{out}");
+    }
+
+    #[test]
+    fn format_mup_ecom_value_rt_and_raw() {
+        assert_eq!(
+            format_mup_ecom_value(&ecv(0x00, 0x02, [0x00, 0x09, 0x00, 0x00, 0x00, 0x09])),
+            "RT:9:9"
+        );
+        assert_eq!(
+            format_mup_ecom_value(&ecv(0x0c, 0x00, [0x00, 0x01, 0x00, 0x00, 0x00, 0x3d])),
+            "0x0c0000010000003d"
+        );
+    }
 }
 
 fn show_evpn_vni_all(
@@ -4976,6 +5224,8 @@ impl Bgp {
             .set(show_bgp_evpn)
             .path("/show/bgp/evpn/route-type")
             .set(show_bgp_evpn)
+            .path("/show/bgp/mobile-uplane")
+            .set(show_bgp_mup)
             .path("/show/bgp/summary")
             .set(show_bgp_summary::<Bgp>)
             .path("/show/bgp/evpn/summary")

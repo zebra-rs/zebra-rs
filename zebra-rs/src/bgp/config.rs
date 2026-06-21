@@ -1337,11 +1337,17 @@ fn config_afi_safi(bgp: &mut Bgp, mut args: Args, op: ConfigOp) -> Option<()> {
     // set through the default < group < explicit precedence. A Delete
     // simply forgets the statement: IPv4 unicast falls back to the
     // built-in default (or the group's opinion), other families to
-    // off (or the group's opinion).
+    // off (or the group's opinion). The `mobile-uplane` name expands to
+    // both the IPv4 and IPv6 MUP families (RFC 9833).
     if op.is_set() {
-        peer.config.mp_explicit.insert(key, enabled?);
+        let enabled = enabled?;
+        for fam in super::neighbor_group::mp_family_expand(key) {
+            peer.config.mp_explicit.insert(fam, enabled);
+        }
     } else {
-        peer.config.mp_explicit.remove(&key);
+        for fam in super::neighbor_group::mp_family_expand(key) {
+            peer.config.mp_explicit.remove(&fam);
+        }
     }
     super::neighbor_group::recompute_peer_mp(&bgp.neighbor_groups, &mut peer.config);
 

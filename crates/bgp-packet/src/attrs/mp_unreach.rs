@@ -757,11 +757,13 @@ mod tests {
         v
     }
 
-    /// Minimal T2ST body (AFI-agnostic at endpoint_len=0):
-    /// 8 RD + 1 ep_len=0 + 0 endpoint bytes.
+    /// Minimal T2ST body for the IPv4 outer AFI (its only caller): RD(8),
+    /// ep_len=32, endpoint(4) (no TEID bits). The endpoint length covers
+    /// the full-width address per RFC 9833 §3.2.2.
     fn min_t2st_body() -> Vec<u8> {
         let mut v = vec![0u8; 8];
-        v.push(0);
+        v.push(32); // endpoint_len = IPv4 address width
+        v.extend_from_slice(&[0; 4]); // endpoint
         v
     }
 
@@ -848,6 +850,7 @@ mod tests {
                 teid: 7,
                 qfi: 4,
                 endpoint: "2001:db8::5".parse().unwrap(),
+                source: None,
             },
         ];
         let mut buf = BytesMut::new();
