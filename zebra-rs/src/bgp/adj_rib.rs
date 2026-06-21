@@ -312,6 +312,8 @@ pub struct AdjRib<D: RibDirection> {
     pub v6vpn: BTreeMap<RouteDistinguisher, AdjRibTable<D, Ipv6Net>>,
     // EVPN, per Route Distinguisher
     pub evpn: BTreeMap<RouteDistinguisher, AdjRibEvpnTable<D>>,
+    // MUP (SAFI 85), flat by MupPrefix
+    pub mup: AdjRibMupTable<D>,
     // IPv4 Flow Specification (AFI 1, SAFI 133)
     pub flowspec_v4: AdjRibFlowspecTable<D>,
     // IPv6 Flow Specification (AFI 2, SAFI 133)
@@ -330,6 +332,7 @@ impl<D: RibDirection> AdjRib<D> {
             v4vpn: BTreeMap::new(),
             v6vpn: BTreeMap::new(),
             evpn: BTreeMap::new(),
+            mup: AdjRibMupTable::new(),
             flowspec_v4: AdjRibFlowspecTable::new(),
             flowspec_v6: AdjRibFlowspecTable::new(),
             bgp_ls: AdjRibBgpLsTable::new(),
@@ -587,6 +590,8 @@ impl AdjRib<Out> {
             (Afi::Ip, Safi::MplsVpn) => self.v4vpn.values().map(|table| table.0.len()).sum(),
             (Afi::Ip6, Safi::MplsVpn) => self.v6vpn.values().map(|table| table.0.len()).sum(),
             (Afi::L2vpn, Safi::Evpn) => self.evpn.values().map(|table| table.0.len()).sum(),
+            // Flat MUP table; counted under IPv4-MUP to avoid double-count.
+            (Afi::Ip, Safi::Mup) => self.mup.0.len(),
             (Afi::Ip, Safi::Flowspec) => self.flowspec_v4.0.len(),
             (Afi::Ip6, Safi::Flowspec) => self.flowspec_v6.0.len(),
             (Afi::LinkState, Safi::LinkState) => self.bgp_ls.0.len(),
@@ -618,6 +623,14 @@ impl AdjRib<Out> {
         id: u32,
     ) -> Option<BgpRib> {
         self.evpn.entry(rd).or_default().remove(prefix, id)
+    }
+
+    pub fn add_mup(&mut self, prefix: MupPrefix, route: BgpRib) -> Option<BgpRib> {
+        self.mup.add(prefix, route)
+    }
+
+    pub fn remove_mup(&mut self, prefix: &MupPrefix, id: u32) -> Option<BgpRib> {
+        self.mup.remove(prefix, id)
     }
 
     pub fn add_flowspec(&mut self, afi: Afi, nlri: FlowspecNlri, route: BgpRib) -> Option<BgpRib> {

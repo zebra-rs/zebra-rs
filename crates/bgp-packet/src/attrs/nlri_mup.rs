@@ -729,6 +729,79 @@ impl MupPrefix {
             },
         }
     }
+
+    /// Outer AFI implied by the route's address family. RFC 9833 §3 ties
+    /// every address a MUP route carries to the MP_REACH AFI, so the
+    /// prefix / address / endpoint family is authoritative. `Unknown`
+    /// has no decoded address, so it defaults to IPv4.
+    pub fn afi(&self) -> Afi {
+        let v6 = match self {
+            MupPrefix::Isd { prefix, .. } | MupPrefix::T1st { prefix, .. } => {
+                matches!(prefix, IpNet::V6(_))
+            }
+            MupPrefix::Dsd { address, .. } => address.is_ipv6(),
+            MupPrefix::T2st { endpoint, .. } => endpoint.is_ipv6(),
+            MupPrefix::Unknown { .. } => false,
+        };
+        if v6 { Afi::Ip6 } else { Afi::Ip }
+    }
+
+    /// Reconstruct a wire `MupRoute` from the key for re-advertisement.
+    /// The full-NLRI key carries every field, so the only synthesized
+    /// values are the 3GPP-5G architecture type and a zero add-path id.
+    pub fn to_route(&self) -> MupRoute {
+        let arch = MupArchitectureType::Gpp5g;
+        match self {
+            MupPrefix::Isd { rd, prefix } => MupRoute::Isd {
+                id: 0,
+                arch,
+                rd: *rd,
+                prefix: *prefix,
+            },
+            MupPrefix::Dsd { rd, address } => MupRoute::Dsd {
+                id: 0,
+                arch,
+                rd: *rd,
+                address: *address,
+            },
+            MupPrefix::T1st {
+                rd,
+                prefix,
+                teid,
+                qfi,
+                endpoint,
+                source,
+            } => MupRoute::T1st {
+                id: 0,
+                arch,
+                rd: *rd,
+                prefix: *prefix,
+                teid: *teid,
+                qfi: *qfi,
+                endpoint: *endpoint,
+                source: *source,
+            },
+            MupPrefix::T2st {
+                rd,
+                endpoint,
+                endpoint_len,
+                teid,
+            } => MupRoute::T2st {
+                id: 0,
+                arch,
+                rd: *rd,
+                endpoint: *endpoint,
+                endpoint_len: *endpoint_len,
+                teid: *teid,
+            },
+            MupPrefix::Unknown { route_type, body } => MupRoute::Unknown {
+                id: 0,
+                arch,
+                route_type: *route_type,
+                body: body.clone(),
+            },
+        }
+    }
 }
 
 #[cfg(test)]
@@ -1352,6 +1425,51 @@ mod tests {
             prefix: "10.0.0.0/24".parse().unwrap(),
         };
         assert_eq!(MupPrefix::from_route(&a), MupPrefix::from_route(&b));
+    }
+
+    #[test]
+    fn mup_prefix_afi_and_to_route_round_trip() {
+        // afi() reflects the route-key address family; to_route() inverts
+        // from_route for the full-NLRI key (arch=Gpp5g, id=0).
+        let cases = [
+            MupRoute::Isd {
+                id: 7,
+                arch: MupArchitectureType::Gpp5g,
+                rd: sample_rd(),
+                prefix: "10.0.3.0/24".parse().unwrap(),
+            },
+            MupRoute::Dsd {
+                id: 7,
+                arch: MupArchitectureType::Gpp5g,
+                rd: sample_rd(),
+                address: "1.1.1.99".parse().unwrap(),
+            },
+            MupRoute::T1st {
+                id: 7,
+                arch: MupArchitectureType::Gpp5g,
+                rd: sample_rd(),
+                prefix: "2001:db8:cafe::5/128".parse().unwrap(),
+                teid: 601,
+                qfi: 9,
+                endpoint: "2001:db8::99".parse().unwrap(),
+                source: Some("2001:db8::1".parse().unwrap()),
+            },
+            MupRoute::T2st {
+                id: 7,
+                arch: MupArchitectureType::Gpp5g,
+                rd: sample_rd(),
+                endpoint: "20.0.1.1".parse().unwrap(),
+                endpoint_len: 64,
+                teid: 600,
+            },
+        ];
+        let expect_afi = [Afi::Ip, Afi::Ip, Afi::Ip6, Afi::Ip];
+        for (route, afi) in cases.iter().zip(expect_afi) {
+            let prefix = MupPrefix::from_route(route);
+            assert_eq!(prefix.afi(), afi);
+            // to_route() round-trips back to the same key.
+            assert_eq!(MupPrefix::from_route(&prefix.to_route()), prefix);
+        }
     }
 
     #[test]
