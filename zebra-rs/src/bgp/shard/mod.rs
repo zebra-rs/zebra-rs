@@ -386,7 +386,7 @@ impl BgpShard {
         cands
             .into_iter()
             .flatten()
-            .filter_map(|r| super::nht::bgp_nexthop_ip(&r.attr))
+            .filter_map(|r| super::nht::nht_target(&r.attr))
             .collect()
     }
 
@@ -403,7 +403,7 @@ impl BgpShard {
         cands
             .into_iter()
             .flatten()
-            .filter_map(|r| super::nht::bgp_nexthop_ip(&r.attr))
+            .filter_map(|r| super::nht::nht_target(&r.attr))
             .collect()
     }
 
@@ -414,7 +414,7 @@ impl BgpShard {
         self.v4lu
             .candidates(prefix)
             .iter()
-            .filter_map(|r| super::nht::bgp_nexthop_ip(&r.attr))
+            .filter_map(|r| super::nht::nht_target(&r.attr))
             .collect()
     }
 
@@ -422,7 +422,7 @@ impl BgpShard {
         self.v6lu
             .candidates(prefix)
             .iter()
-            .filter_map(|r| super::nht::bgp_nexthop_ip(&r.attr))
+            .filter_map(|r| super::nht::nht_target(&r.attr))
             .collect()
     }
 }

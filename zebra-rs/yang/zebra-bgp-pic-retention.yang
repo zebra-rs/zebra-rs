@@ -1,0 +1,97 @@
+module zebra-bgp-pic-retention {
+  yang-version "1";
+
+  namespace "urn:ietf:params:xml:ns:yang:zebra-bgp-pic-retention";
+  prefix "zbpic";
+
+  import ietf-bgp {
+    prefix bgp;
+  }
+
+  import config {
+    prefix config;
+  }
+
+  import configure {
+    prefix configure;
+  }
+
+  import extension {
+    prefix ext;
+  }
+
+  organization
+    "zebra-rs";
+
+  contact
+    "https://github.com/zebra-rs";
+
+  description
+    "Per-neighbor BGP-PIC (Prefix-Independent Convergence) next-hop-gated
+     route retention.
+
+     Normally a BGP session going down withdraws every route learned from
+     that peer immediately. With `pic-retention` enabled, the peer's VPN
+     routes are instead marked stale and KEPT in the Loc-RIB/FIB for as
+     long as their next hop stays reachable (tracked by NHT); they are
+     withdrawn only when the next hop finally becomes unreachable (or a
+     safety hold-down elapses).
+
+     This is what lets IS-IS Mirror SID egress *node* protection deliver
+     service traffic end to end: when the protected egress (PEA) node
+     fails, the ingress would otherwise drop the L3VPN route as soon as the
+     BGP session resets. With `pic-retention` the ingress keeps forwarding
+     toward PEA's service SID, whose next hop (PEA's locator) is held alive
+     by the PLR's IGP stale-route retention and redirected to the
+     protector's Mirror SID — so the L3VPN ping survives PEA's node death
+     until the IGP retention itself expires (which makes the next hop
+     unreachable and withdraws the stale route).
+
+       router bgp {
+         neighbor 2001:db8::3 {
+           remote-as 65001;
+           pic-retention;          // keep PEA's VPN routes while reachable
+         }
+       }
+
+     Opt-in: with the knob absent, session-down withdraws routes as usual.
+     Enable it only on sessions toward an egress protected by Mirror SID
+     egress protection.";
+
+  revision 2026-06-21 {
+    description "Initial revision.";
+    reference
+      "BGP PIC core (draft-ietf-rtgwg-bgp-pic); RFC 9494 LLGR stale model.";
+  }
+
+  grouping bgp-neighbor-pic-retention-extension {
+    description
+      "Per-neighbor NHT-gated route retention presence container.";
+
+    container pic-retention {
+      ext:help "Keep this peer's VPN routes on session-down while their next hop stays reachable";
+      presence "Enable NHT-gated route retention for this neighbor";
+      description
+        "When present, a session-down marks this peer's VPN routes stale
+         and retains them while NHT reports their next hop reachable,
+         instead of withdrawing immediately. Withdrawn on NHT-unreachable
+         or the safety hold-down.";
+    }
+  }
+
+  augment "/configure:set/config:router"
+        + "/bgp:bgp/bgp:neighbor" {
+    description
+      "Attach pic-retention to BGP neighbors in the candidate-set
+       subtree.";
+    uses bgp-neighbor-pic-retention-extension;
+  }
+
+  augment "/configure:delete/config:router"
+        + "/bgp:bgp/bgp:neighbor" {
+    description
+      "Same attachment for the delete subtree so
+       `delete router bgp neighbor X pic-retention` is path-valid.";
+    uses bgp-neighbor-pic-retention-extension;
+  }
+}

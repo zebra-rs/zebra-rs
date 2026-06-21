@@ -1,0 +1,89 @@
+# peb — the protector, reached directly from pe1 over the peb-pe1 bypass
+# (so it stays reachable when pea's node dies). IS-IS L2 SRv6 (locator
+# LOC4, fcbb:bbbb:4::/48). It advertises a Mirror SID (End.M,
+# fcbb:bbbb:4:1::) protecting pea's locator fcbb:bbbb:3::/48 with via-vrf
+# vrf-cust, so the mirror-context table re-instantiates pea's End.DT46
+# into vrf-cust. ce2 is dual-homed here; peb reaches ce2's loopback via a
+# static route inside vrf-cust, which delivers the redirected traffic.
+# peb is a pure protector — it does NOT originate ce2 into BGP (pea is the
+# sole advertiser). peb peers VPNv6 with pe1 to import ce1 so the
+# post-failover return path ce2 -> peb -> pe1 resolves.
+vrf:
+- name: vrf-cust
+  ipv6:
+    route-target:
+      import:
+      - 65001:100
+      export:
+      - 65001:100
+interface:
+- if-name: lo
+  ipv6:
+    address: 2001:db8::4/128
+- if-name: peb-pe1
+  ipv6:
+    address: 2001:db8:0:14::4/64
+- if-name: peb-ce2
+  vrf: vrf-cust
+  ipv6:
+    address: 2001:db8:bc::1/64
+segment-routing:
+  locator:
+  - name: LOC4
+    prefix: fcbb:bbbb:4::/48
+    behavior: usid
+router:
+  static:
+    vrf:
+    - name: vrf-cust
+      ipv6:
+        route:
+        - prefix: 2001:db8:c2::1/128
+          nexthop:
+          - address: 2001:db8:bc::2
+  isis:
+    net: 49.0000.0000.0000.0004.00
+    hostname: peb
+    is-type: level-2-only
+    segment-routing:
+      srv6:
+        locator: LOC4
+    egress-protection:
+      protect:
+      - protected-locator: fcbb:bbbb:3::/48
+        # Quoted: a bare-"::"-terminated IPv6 scalar trips the YAML
+        # scanner (reads the trailing ":" as a mapping indicator).
+        mirror-sid: "fcbb:bbbb:4:1::"
+        via-vrf: vrf-cust
+        dataplane: srv6
+    interface:
+    - if-name: lo
+      ipv6:
+        enable: true
+    - if-name: peb-pe1
+      network-type: point-to-point
+      metric: 1
+      ipv6:
+        enable: true
+  bgp:
+    global:
+      as: 65001
+      router-id: 10.0.0.4
+    timer:
+      adv-interval:
+        ibgp: 1
+    segment-routing:
+      srv6:
+        locator: LOC4
+    neighbor:
+    - remote-address: 2001:db8::1
+      remote-as: 65001
+      update-source: 2001:db8::4
+      enabled: true
+      afi-safi:
+      - name: vpnv6
+        enabled: true
+    vrf:
+    - name: vrf-cust
+      rd: 65001:4
+      encapsulation: srv6

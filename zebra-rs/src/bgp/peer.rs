@@ -476,6 +476,13 @@ pub struct PeerConfig {
     // bounce when the peer doesn't support RFC 2918, at the cost of
     // keeping received UPDATEs in memory.
     pub soft_reconfig_in: bool,
+    /// BGP-PIC next-hop-gated route retention (`neighbor X pic-retention`).
+    /// When `true`, a session-down marks this peer's VPN routes stale and
+    /// keeps them while their next hop stays NHT-reachable, instead of
+    /// withdrawing immediately. Used by IS-IS Mirror SID egress *node*
+    /// protection so the ingress keeps forwarding toward the failed
+    /// egress's SID (held alive + redirected by the PLR's IGP retention).
+    pub pic_retention: bool,
     /// Per-neighbor BGP Flow Specification validation toggle (RFC 9117).
     /// `true` (default) validates received flow specs against the
     /// unicast RIB before re-advertising them; `false` accepts every
@@ -541,6 +548,7 @@ impl Default for PeerConfig {
             addpath: AfiSafis::new(),
             route_refresh: Default::default(),
             soft_reconfig_in: Default::default(),
+            pic_retention: false,
             flowspec_validation: true,
             timer: Default::default(),
             sub: Default::default(),

@@ -103,6 +103,9 @@ module config {
   import zebra-bgp-enforce-first-as {
     prefix zbef;
   }
+  import zebra-bgp-pic-retention {
+    prefix zbpic;
+  }
 
   import zebra-bgp-local-as {
     prefix zbla;
