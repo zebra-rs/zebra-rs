@@ -542,6 +542,41 @@ fn mirror_sid_subs(
     subs
 }
 
+/// Build the SR-MPLS Mirror Context Binding TLVs (149) for this node's
+/// `dataplane: mpls` egress-protection entries. One TLV per entry whose
+/// context label is allocated (`mirror_labels`), with the M-flag set
+/// (Mirror Context, RFC 8679), the protected egress's loopback as the
+/// IPv6 FEC, and the context label in a SID/Label sub-TLV. Entries
+/// without an allocated label (SR-MPLS not yet up) are skipped — they
+/// re-emit once `update_mirror_labels` allocates from the SRLB.
+fn mirror_binding_tlvs(
+    entries: &super::egress_protection::MirrorProtectMap,
+    labels: &std::collections::BTreeMap<Ipv6Net, u32>,
+) -> Vec<IsisTlv> {
+    use super::egress_protection::MirrorDataplane;
+    use isis_packet::{
+        BindingFlags, BindingPrefix, IsisBindingSubTlv, IsisTlvSidLabelBinding, SidLabelValue,
+    };
+    let mut tlvs = Vec::new();
+    for entry in entries.values() {
+        if entry.dataplane != MirrorDataplane::Mpls {
+            continue;
+        }
+        let Some(&label) = labels.get(&entry.protected_locator) else {
+            continue;
+        };
+        tlvs.push(IsisTlv::SidLabelBinding(IsisTlvSidLabelBinding {
+            // M = Mirror Context, F = IPv6 FEC (the protected loopback).
+            flags: BindingFlags::new().with_m_flag(true).with_f_flag(true),
+            weight: 0,
+            range: 1,
+            prefix: BindingPrefix::V6(entry.protected_locator),
+            subs: vec![IsisBindingSubTlv::SidLabel(SidLabelValue::Label(label))],
+        }));
+    }
+    tlvs
+}
+
 /// Per-Flexible-Algorithm SRv6 End.X (adjacency) sub-TLVs for one
 /// neighbor (RFC 9352 §8, Algorithm = N). One per entry in
 /// `nbr.algo_endx_sids` whose per-algo locator is still resolved; the
@@ -918,6 +953,14 @@ pub fn lsp_generate(top: &mut IsisTop, level: Level, seq_floor: Option<u32>) -> 
             locators: srv6_locators,
         }));
     }
+
+    // SR-MPLS Mirror Context bindings (RFC 8667 §2.4 + RFC 8679): one
+    // SID/Label Binding TLV (149) with the M-flag per `dataplane: mpls`
+    // egress-protection entry whose context label is allocated.
+    distributable.extend(mirror_binding_tlvs(
+        &top.config.egress_protections,
+        top.mirror_labels,
+    ));
 
     // Multi-Topology TLV (229) — RFC 5120 §7.1. Lists the MT IDs
     // this router participates in. Receivers use it to decide which
@@ -1876,6 +1919,49 @@ mod tests {
             panic!("expected ProtectedLocators sub-sub-TLV");
         };
         assert_eq!(pl.locator, "2001:db8:a3:1::/64".parse::<Ipv6Net>().unwrap());
+    }
+
+    #[test]
+    fn mirror_binding_tlvs_emits_only_mpls_with_label() {
+        use crate::isis::egress_protection::{MirrorDataplane, MirrorProtect, MirrorProtectMap};
+        use isis_packet::{BindingPrefix, IsisBindingSubTlv, SidLabelValue};
+
+        let mut map = MirrorProtectMap::new();
+
+        // MPLS entry with an allocated context label → emitted.
+        let mut mpls = MirrorProtect::new("2001:db8::3/128".parse().unwrap());
+        mpls.dataplane = MirrorDataplane::Mpls;
+        map.insert(mpls.protected_locator, mpls);
+
+        // MPLS entry without an allocated label (SR-MPLS not up) → skipped.
+        let mut mpls_no_label = MirrorProtect::new("2001:db8::4/128".parse().unwrap());
+        mpls_no_label.dataplane = MirrorDataplane::Mpls;
+        map.insert(mpls_no_label.protected_locator, mpls_no_label);
+
+        // SRv6 entry → skipped (Binding TLV emit is MPLS-only).
+        let mut srv6 = MirrorProtect::new("2001:db8:a3:1::/64".parse().unwrap());
+        srv6.mirror_sid = Some("2001:db8:a4:1::3".parse().unwrap());
+        map.insert(srv6.protected_locator, srv6);
+
+        let mut labels = std::collections::BTreeMap::new();
+        labels.insert("2001:db8::3/128".parse::<Ipv6Net>().unwrap(), 16001u32);
+
+        let tlvs = mirror_binding_tlvs(&map, &labels);
+        assert_eq!(tlvs.len(), 1, "only the MPLS entry with a label emits");
+
+        let IsisTlv::SidLabelBinding(b) = &tlvs[0] else {
+            panic!("expected SidLabelBinding, got {:?}", tlvs[0]);
+        };
+        assert!(b.flags.m_flag(), "Mirror Context M-flag set");
+        assert!(b.flags.f_flag(), "IPv6 FEC F-flag set");
+        assert_eq!(
+            b.prefix,
+            BindingPrefix::V6("2001:db8::3/128".parse().unwrap())
+        );
+        assert!(matches!(
+            b.subs[0],
+            IsisBindingSubTlv::SidLabel(SidLabelValue::Label(16001))
+        ));
     }
 
     #[test]

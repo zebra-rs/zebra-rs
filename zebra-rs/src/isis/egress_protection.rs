@@ -164,6 +164,60 @@ pub fn collect_received_mirror_sids(lsdb: &Lsdb) -> Vec<ReceivedMirrorSid> {
     out
 }
 
+/// An SR-MPLS Mirror Context binding received from a peer — the PLR's
+/// view. The `protector` advertises `context_label` (RFC 8679) for the
+/// mirroring context whose FEC is the protected egress's `protected_fec`
+/// (its IGP loopback). The PLR pushes `context_label` to steer traffic to
+/// the protector on egress failure.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ReceivedMplsBinding {
+    pub protector: IsisSysId,
+    pub context_label: u32,
+    pub protected_fec: Ipv6Net,
+}
+
+/// Extract the SR-MPLS Mirror Context bindings carried in one node's LSP
+/// TLVs: every SID/Label Binding TLV (149) with the M-flag set and an
+/// IPv6 FEC (F-flag), paired with the label from its SID/Label sub-TLV.
+fn mpls_bindings_from_tlvs(protector: IsisSysId, tlvs: &[IsisTlv]) -> Vec<ReceivedMplsBinding> {
+    use isis_packet::{BindingPrefix, IsisBindingSubTlv, SidLabelValue};
+    let mut out = Vec::new();
+    for tlv in tlvs {
+        let IsisTlv::SidLabelBinding(binding) = tlv else {
+            continue;
+        };
+        if !binding.flags.m_flag() {
+            continue;
+        }
+        let BindingPrefix::V6(protected_fec) = binding.prefix else {
+            continue;
+        };
+        for sub in &binding.subs {
+            if let IsisBindingSubTlv::SidLabel(SidLabelValue::Label(label)) = sub {
+                out.push(ReceivedMplsBinding {
+                    protector,
+                    context_label: *label,
+                    protected_fec,
+                });
+            }
+        }
+    }
+    out
+}
+
+/// Scan a level's LSDB for received SR-MPLS Mirror Context bindings.
+/// Pseudonode LSPs never carry them and are skipped.
+pub fn collect_received_mpls_bindings(lsdb: &Lsdb) -> Vec<ReceivedMplsBinding> {
+    let mut out = Vec::new();
+    for (id, lsa) in lsdb.iter() {
+        if id.is_pseudo() {
+            continue;
+        }
+        out.extend(mpls_bindings_from_tlvs(id.sys_id(), &lsa.lsp.tlvs));
+    }
+    out
+}
+
 // ── YANG callback wiring ──────────────────────────────────────────────
 //
 // Each shim parses the list key (`protected-locator`) and, for leaf
@@ -232,6 +286,7 @@ fn config_egress_protect_dataplane(isis: &mut Isis, mut args: Args, op: ConfigOp
 fn reoriginate(isis: &mut Isis) {
     isis.update_mirror_sids();
     isis.update_mirror_context_routes();
+    isis.update_mirror_labels();
     let _ = isis.tx.send(Message::LspOriginate(Level::L1, None));
     let _ = isis.tx.send(Message::LspOriginate(Level::L2, None));
 }
@@ -379,6 +434,43 @@ mod tests {
                 protector,
                 mirror_sid: "2001:db8:a4:1::3".parse().unwrap(),
                 protected_locator: "2001:db8:a3:1::/64".parse().unwrap(),
+            }]
+        );
+    }
+
+    #[test]
+    fn mpls_bindings_from_tlvs_extracts_label_and_fec() {
+        use isis_packet::{
+            BindingFlags, BindingPrefix, IsisBindingSubTlv, IsisTlvSidLabelBinding, SidLabelValue,
+        };
+
+        let protector = IsisSysId {
+            id: [0, 0, 0, 0, 0, 4],
+        };
+        // Mirror Context binding (M-flag) → extracted.
+        let binding = IsisTlv::SidLabelBinding(IsisTlvSidLabelBinding {
+            flags: BindingFlags::new().with_m_flag(true).with_f_flag(true),
+            weight: 0,
+            range: 1,
+            prefix: BindingPrefix::V6("2001:db8::3/128".parse().unwrap()),
+            subs: vec![IsisBindingSubTlv::SidLabel(SidLabelValue::Label(16003))],
+        });
+        // A plain (non-Mirror) Binding TLV without the M-flag → ignored.
+        let mapping = IsisTlv::SidLabelBinding(IsisTlvSidLabelBinding {
+            flags: BindingFlags::new().with_f_flag(true),
+            weight: 0,
+            range: 1,
+            prefix: BindingPrefix::V6("2001:db8::5/128".parse().unwrap()),
+            subs: vec![IsisBindingSubTlv::SidLabel(SidLabelValue::Label(99))],
+        });
+
+        let got = mpls_bindings_from_tlvs(protector, &[binding, mapping]);
+        assert_eq!(
+            got,
+            vec![ReceivedMplsBinding {
+                protector,
+                context_label: 16003,
+                protected_fec: "2001:db8::3/128".parse().unwrap(),
             }]
         );
     }
