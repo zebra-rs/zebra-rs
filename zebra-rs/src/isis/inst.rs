@@ -384,6 +384,13 @@ pub struct Isis {
     /// removed.
     pub mirror_labels: std::collections::BTreeMap<ipnet::Ipv6Net, u32>,
 
+    /// Context labels for which a Mirror Context ILM decap is currently
+    /// installed in the kernel LFIB (the `via-vrf` MPLS path). Tracked so
+    /// `update_mirror_context_labels` can withdraw the previous set before
+    /// re-adding the entries that still qualify — the MPLS analog of
+    /// `installed_mirror_routes`.
+    pub installed_mirror_ilm: std::collections::BTreeSet<u32>,
+
     /// ELIB function pool used for End.X (adjacency) SID allocation.
     /// Reset whenever the watched locator changes so stale function
     /// reservations don't leak across prefix swaps.
@@ -816,6 +823,7 @@ impl Isis {
                 installed_mirror_sids: std::collections::BTreeSet::new(),
                 installed_mirror_routes: std::collections::BTreeSet::new(),
                 mirror_labels: std::collections::BTreeMap::new(),
+                installed_mirror_ilm: std::collections::BTreeSet::new(),
                 elib: super::srv6::ElibPool::new(),
                 lsp_seq_wrap_wait: Levels::<BTreeMap<u8, Timer>>::default(),
                 lsp_placement_memory: Levels::<BTreeMap<TlvKey, u8>>::default(),
@@ -1690,6 +1698,9 @@ impl Isis {
         // table exists, re-run the reconcile so the protected locator's
         // End.DT46-into-VRF route installs. Idempotent (del-then-add).
         self.update_mirror_context_routes();
+        // Same race for the SR-MPLS Mirror Context ILM: it needs the VRF's
+        // `(table_id, vrf_ifindex)` to install, now available.
+        self.update_mirror_context_labels();
     }
 
     /// Kernel VRF master removed. Despawn the child but KEEP its config
@@ -3061,6 +3072,7 @@ impl Isis {
                 self.update_mirror_sids();
                 self.update_mirror_context_routes();
                 self.update_mirror_labels();
+                self.update_mirror_context_labels();
                 self.clear_all_endx_sids();
             }
             self.watched_locator = desired_base;
@@ -3328,6 +3340,49 @@ impl Isis {
         }
     }
 
+    /// Install the SR-MPLS Mirror Context ILM decap for this node's
+    /// `dataplane: mpls` egress-protection entries: at each allocated
+    /// context label, an `IlmType::ContextLabel` LFIB entry that pops the
+    /// label and routes the inner packet into the configured `via-vrf`
+    /// (RFC 8679). So when a failed egress's PLR redirects traffic to this
+    /// protector with the context label on top, it decaps into the
+    /// dual-homed VRF. Resolves `via-vrf` -> `(table_id, vrf_ifindex)` from
+    /// `rib_known_vrfs` (populated by `VrfAdd`); an entry whose VRF isn't
+    /// known yet is skipped and retried (the `VrfAdd` reconcile re-runs
+    /// this). Del-then-add against `installed_mirror_ilm`.
+    pub(crate) fn update_mirror_context_labels(&mut self) {
+        // Withdraw the previous set. The netlink delete keys off the label
+        // + owner, so a minimal entry suffices.
+        for label in std::mem::take(&mut self.installed_mirror_ilm) {
+            let ilm = rib::inst::IlmEntry {
+                ilm_type: rib::inst::IlmType::ContextLabel {
+                    table_id: 0,
+                    vrf_ifindex: 0,
+                },
+                nexthop: rib::Nexthop::default(),
+                ..rib::inst::IlmEntry::new(rib::RibType::Isis)
+            };
+            let _ = self.ctx.rib.send(rib::Message::IlmDel { label, ilm });
+        }
+        let desired = super::egress_protection::desired_context_labels(
+            &self.config.egress_protections,
+            &self.mirror_labels,
+            &self.rib_known_vrfs,
+        );
+        for (label, table_id, vrf_ifindex) in desired {
+            let ilm = rib::inst::IlmEntry {
+                ilm_type: rib::inst::IlmType::ContextLabel {
+                    table_id,
+                    vrf_ifindex,
+                },
+                nexthop: rib::Nexthop::default(),
+                ..rib::inst::IlmEntry::new(rib::RibType::Isis)
+            };
+            let _ = self.ctx.rib.send(rib::Message::IlmAdd { label, ilm });
+            self.installed_mirror_ilm.insert(label);
+        }
+    }
+
     /// Fold the staged `/srlg/group/*` cache into the
     /// applied snapshot at `ConfigOp::CommitEnd`. When the snapshot
     /// actually moved, re-originate both LSP levels so the new
@@ -3363,6 +3418,7 @@ impl Isis {
                 // The SRLB pool just (dis)appeared — (de)allocate Mirror
                 // Context labels and re-flood so the Binding TLVs match.
                 self.update_mirror_labels();
+                self.update_mirror_context_labels();
                 let _ = self.tx.send(Message::LspOriginate(Level::L1, None));
                 let _ = self.tx.send(Message::LspOriginate(Level::L2, None));
             }
@@ -3387,6 +3443,7 @@ impl Isis {
                     self.update_mirror_sids();
                     self.update_mirror_context_routes();
                     self.update_mirror_labels();
+                    self.update_mirror_context_labels();
                     touched = true;
                 }
                 let algos: Vec<u8> = self
