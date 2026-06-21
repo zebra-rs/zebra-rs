@@ -1,0 +1,38 @@
+# z2 — the AS 65001 ASBR / segmentation gateway (RFC 9572 Section 5). It
+# borders two ASes, each modelled as a neighbor-group carrying a region-id
+# equal to that AS:
+#   region-a (region-id 65001) is the iBGP session to the local AS 65001 (z1),
+#   region-b (region-id 65002) is the eBGP session to AS 65002 (z3).
+# z2 has no local VXLAN: it aggregates AS 65001's per-PE IMET into a single
+# Per-Region I-PMSI (Type-9) re-originated across the AS boundary toward AS
+# 65002 with next-hop-self (and an AS_PATH of [65001]), and does not propagate
+# the per-AS per-PE IMET across the boundary.
+router:
+  bgp:
+    global:
+      as: 65001
+      router-id: 192.168.0.2
+    neighbor-group:
+    - name: region-a
+      remote-as: 65001
+      region-id: 65001
+    - name: region-b
+      remote-as: 65002
+      region-id: 65002
+    neighbor:
+    - remote-address: 192.168.0.1
+      enabled: true
+      neighbor-group: region-a
+      afi-safi:
+      - name: ipv4
+        enabled: true
+      - name: evpn
+        enabled: true
+    - remote-address: 192.168.0.3
+      enabled: true
+      neighbor-group: region-b
+      afi-safi:
+      - name: ipv4
+        enabled: true
+      - name: evpn
+        enabled: true
