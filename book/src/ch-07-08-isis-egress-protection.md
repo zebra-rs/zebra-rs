@@ -22,17 +22,51 @@ The customer edge (CE) is typically **dual-homed** to PEA and PEB. On
 egress failure the PLR redirects traffic to PEB, which processes the
 inner packet *as if it were PEA* — for SRv6 this is the **End.M**
 behavior (decapsulate, then look the inner packet up in the
-mirror-context FIB). The protected egress's service SIDs are learned at
-PEB out of band (BGP L3VPN or local configuration), not flooded
-per-service in the IGP.
+mirror-context FIB); for SR-MPLS it is a single **context-label** pop
+into PEB's VRF (RFC 8679). The protected egress's service SIDs/labels are
+learned at PEB out of band (BGP L3VPN or local configuration), not
+flooded per-service in the IGP.
+
+### Two protection models
+
+| Model | PLR | Failure it covers | Status |
+|---|---|---|---|
+| **Node protection** | an upstream node | PEA's **node** fails (router down) | partial — repair list assumes the protector is reachable on a PEA-avoiding path |
+| **Link protection** | **PEA itself** | PEA's **PE–CE link** fails (PEA stays up) | implemented and validated end-to-end |
+
+zebra-rs implements **egress link protection** as the validated path. PEA
+stays fully up (IGP and BGP intact, still advertising the CE prefix), so
+the ingress keeps forwarding to PEA; when PEA's PE–CE link fails, **PEA
+acts as its own PLR** and redirects its own service traffic to PEB, which
+delivers it over its own link to the dual-homed CE. This sidesteps the
+harder node-protection pop (Linux has no per-context label table) while
+covering the common dual-homing failure.
+
+Both dataplanes are implemented:
+
+| Dataplane | Mirror advertisement | What PEB installs |
+|---|---|---|
+| **SRv6** (`dataplane srv6`, default) | End.M Mirror SID sub-TLV inside the SRv6 Locator TLV (`draft-ietf-rtgwg-srv6-egress-protection`) | a `seg6local End.DT46` mirror-context decap |
+| **SR-MPLS** (`dataplane mpls`) | SID/Label Binding TLV (149) with the **M-flag**, carrying a context label (RFC 8667 §2.4 + RFC 8679) | a context-label ILM (pop + decap into the VRF) |
+
+> **SR-MPLS uses an IPv4 FEC.** IS-IS in zebra-rs has no IPv6 prefix-SID
+> yet (it is deferred until SRv6-over-IS-IS lands), so the SR-MPLS
+> transport — and therefore the protected egress's identity — is an
+> **IPv4 loopback**. For `dataplane mpls`, the `protected-locator` is
+> PEA's IPv4 IGP loopback (e.g. `1.1.1.3/32`); for `dataplane srv6` it is
+> PEA's IPv6 SRv6 locator.
 
 `egress-protection` is configured on the **protector (PEB)**: each
 `protect` entry names one egress this node backs up.
 
 ## Configuration
 
-A `protect` entry is keyed by the **SRv6 locator of the protected
-egress** and lives under `router isis`:
+`egress-protection` lives under `router isis` on the protector (PEB).
+Each `protect` entry is keyed by the **prefix that identifies the
+protected egress** — its SRv6 locator (SRv6) or its IPv4 loopback
+(SR-MPLS).
+
+### SRv6 (`dataplane srv6`)
 
 ```text
 router isis {
@@ -65,42 +99,118 @@ router:
         dataplane: srv6
 ```
 
+### SR-MPLS (`dataplane mpls`)
+
+The protected egress is identified by its **IPv4 loopback**, and the
+context label is auto-allocated from the SRLB — there is **no
+`mirror-sid`** for SR-MPLS:
+
+```text
+router isis {
+  net 49.0000.0000.0000.0004.00;        // this node = PE4 (the protector, PEB)
+  segment-routing mpls;
+  te-router-id 1.1.1.4;                  // PEB's loopback (the transport identity)
+  egress-protection {
+    protect 1.1.1.3/32 {                  // back up PEA, whose IGP loopback is 1.1.1.3
+      via-vrf cust;
+      dataplane mpls;
+    }
+  }
+}
+```
+
+```yaml
+router:
+  isis:
+    segment-routing: mpls
+    te-router-id: 1.1.1.4
+    egress-protection:
+      protect:
+      - protected-locator: 1.1.1.3/32
+        via-vrf: cust
+        dataplane: mpls
+```
+
+For SR-MPLS, the protected egress (PEA) also needs nothing extra beyond a
+normal SR-MPLS L3VPN setup: it carries the CE prefix in BGP L3VPN with a
+per-VRF VPN label over the IS-IS Prefix-SID transport, and PEA learns the
+protector's context binding from the IGP. On a PE–CE link failure PEA
+rewrites its own VPN-label ILM to push the context label toward PEB — no
+PEA-side egress-protection configuration is required.
+
 ### The leaves
 
-- **`protected-locator`** (key, `ipv6-prefix`) — the SRv6 locator of the
-  protected egress PE. This is what gets advertised in the Protected
-  Locators sub-sub-TLV of the Mirror SID advertisement and what the PLR
-  matches traffic against. One `protect` entry protects one locator;
-  configure several entries to protect several egresses.
+- **`protected-locator`** (key, `ip-prefix`) — the prefix identifying the
+  protected egress PE. For `dataplane srv6` it is PEA's **IPv6 SRv6
+  locator** (advertised in the Protected Locators sub-sub-TLV of the
+  Mirror SID); for `dataplane mpls` it is PEA's **IPv4 IGP loopback**
+  (the FEC of the SID/Label Binding TLV). It is what the PLR / the
+  protected egress matches traffic against. One `protect` entry protects
+  one prefix; configure several entries to protect several egresses.
 
-- **`mirror-sid`** (`ipv6-address`, optional) — the Mirror SID (End.M)
-  this node advertises on behalf of the protected egress. It **must lie
-  within this node's own SRv6 `locator`**, because the protector owns and
-  instantiates it. When omitted, a SID is auto-allocated from the local
-  locator.
+- **`mirror-sid`** (`ipv6-address`, optional, **SRv6 only**) — the Mirror
+  SID (End.M) this node advertises on behalf of the protected egress. It
+  **must lie within this node's own SRv6 `locator`**, because the
+  protector owns and instantiates it. When omitted, a SID is
+  auto-allocated from the local locator. Ignored for `dataplane mpls`,
+  where the context label is auto-allocated from the SRLB.
 
 - **`via-vrf`** (`string`, optional) — the name of the local VRF whose
-  forwarding reaches the dual-homed CE. The mirror-context FIB resolves
-  the protected egress's service SIDs in this VRF. This is the
-  configuration-driven way to populate the context; learning the service
-  behavior from BGP L3VPN is the alternative (and is added later).
+  forwarding reaches the dual-homed CE. The mirror-context FIB (SRv6) or
+  the context-label decap (SR-MPLS) routes the inner packet into this
+  VRF. This is the configuration-driven way to populate the context;
+  learning the service behavior from BGP L3VPN is the alternative.
 
 - **`dataplane`** (`srv6` | `mpls`, default `srv6`) — which dataplane the
-  Mirror SID protects. `srv6` advertises the End.M Mirror SID sub-TLV
+  Mirror context protects. `srv6` advertises the End.M Mirror SID sub-TLV
   inside the SRv6 Locator TLV; `mpls` advertises the SID/Label Binding
-  TLV (RFC 8667) with the Mirror (M) flag set. SRv6 is the primary
-  target; SR-MPLS is wired in a later stage.
+  TLV (149) with the Mirror (M) flag set, carrying a context label. Both
+  are implemented for egress link protection.
 
-## Scope and guidance
+## Configuration guidelines
 
 Mirror SID egress protection is, by the IETF draft's own guidance,
 intended for **structured dual-homing and modest service counts within a
 single IS-IS level/area**. Prefer a single protector (PEB) per protected
 egress (PEA). It is *not* meant for large VPN cardinality or arbitrary
 multi-homing — the IGP only ever carries the locator-level
-`<PEB, PEA, Mirror SID>` binding, never per-service state.
+`<PEB, PEA, Mirror SID/context label>` binding, never per-service state.
+
+To stand up egress link protection, set up the two PEs and the CE so the
+following hold:
+
+1. **Dual-home the CE to both PEs in the same VRF.** PEA and PEB each have
+   a PE–CE link in the protected VRF and each can reach the CE prefix
+   inside it (a connected route, or `router static vrf` — see
+   [Static Routes](ch-01-00-what-is-static-route.md)). PEB's link is the
+   delivery path after failover.
+
+2. **Let PEA be the sole BGP advertiser of the CE prefix.** PEA originates
+   the CE prefix into BGP L3VPN with its per-VRF VPN label; PEB is a
+   *pure protector* and does **not** originate it. Because PEA stays up on
+   a PE–CE link failure, the ingress keeps its single route via PEA — PEA
+   then redirects. (PEB still imports the *other* side's routes so the
+   return path resolves.)
+
+3. **Match the dataplane to the transport.** Use `dataplane srv6` with an
+   SRv6 locator key when the L3VPN rides SRv6, and `dataplane mpls` with
+   PEA's IPv4 loopback key when it rides SR-MPLS (IS-IS Prefix-SID
+   transport + per-VRF MPLS VPN labels). The `protected-locator` family
+   must match: IPv6 for SRv6, IPv4 for SR-MPLS.
+
+4. **Set `via-vrf` to the protected VRF on PEB.** This is what lets the
+   Mirror context / context label decapsulate into the VRF that reaches
+   the CE. Without it the binding is held but the decap is not installed
+   (it installs automatically once the VRF appears, so ordering is safe).
+
+5. **Configure `egress-protection` only on PEB.** PEA needs *no*
+   egress-protection stanza — it learns the protector's offer from the
+   IGP and redirects its own forwarding. One `protect` entry per protected
+   egress.
 
 ## Verification
+
+### SRv6
 
 `show isis egress-protection` lists the configured entries and, per
 entry, whether it is currently advertised. An entry is advertised when it
@@ -161,19 +271,99 @@ the CE:
 2001:db8:a3:1::/64  encap seg6local action End.DT46 vrftable <cust-table> dev sr0
 ```
 
+### SR-MPLS
+
+`show isis egress-protection` shows the same view for `dataplane mpls`,
+with the auto-allocated **context label** in the SID/Context column:
+
+```text
+> show isis egress-protection
+Local egress-protection:
+Protected-Locator      SID/Context              DP    Via-VRF    Advertised
+1.1.1.3/32             label 15000              mpls  vrf-cust   yes
+
+Received Mirror Context labels:
+Protector          Context-Label  Protected-FEC
+0000.0000.0004     15000          1.1.1.3/32
+```
+
+The binding rides in the protector's LSP as a SID/Label Binding TLV with
+the Mirror (M) flag, visible on every peer:
+
+```text
+> show isis database detail
+...
+  SID/Label Binding (Mirror Context): 1.1.1.3/32 label/index 15000
+```
+
+The protector installs the context label as a pop-and-decap ILM — it pops
+the label and routes the inner packet into `via-vrf` (the same netlink
+form as a BGP MPLS-VPN label, rendered `Mirror Ctx`):
+
+```text
+> show mpls ilm                                    # on the protector (PEB)
+   P Dist Local  Outgoing    Prefix             Outgoing     Next Hop
+          Label  Label       or ID              Interface
+*> i 115  15000  Pop         Mirror Ctx (tbl 1) vrf-cust
+```
+
+On the protected egress (PEA) the per-VRF VPN label decaps normally into
+the VRF (`VPN Decap`):
+
+```text
+> show mpls ilm                                    # on PEA
+*> b 20   16     Pop         VPN Decap (tbl 1)  vrf-cust
+```
+
+When PEA's PE–CE link fails, PEA rewrites this label's **kernel** route
+into a swap that pushes the context label toward the protector. Like the
+SRv6 redirect, this is a FIB-level override: `show isis egress-protection`
+and `show mpls ilm` keep reporting the canonical `VPN Decap` form, while
+the kernel LFIB reflects the live redirect — inspect it directly:
+
+```text
+> ip -f mpls route                                 # on PEA, PE–CE link UP
+16 dev vrf-cust proto bgp                              # pop + decap into the VRF
+
+> ip -f mpls route                                 # on PEA, PE–CE link DOWN (redirected)
+16 as to 15000 via inet 10.0.34.2 dev pea-peb proto isis   # swap 16 -> 15000 toward PEB
+```
+
+(The transport label to the protector is omitted here because PEB is a
+directly-adjacent next hop under PHP; a non-adjacent protector would show
+`16 as to <transport>/15000 …`.)
+
+The redirect is **latched**: PEA restores the `VPN Decap` form only when
+the VRF can deliver locally again (the link recovers). End to end, a
+ping across the L3VPN keeps flowing through the failover and the
+recovery, just over a different egress.
+
 ## Current status
 
-The end-to-end SRv6 path is now in place: the Mirror SID **advertisement**
-(End.M sub-TLV + Protected Locators sub-sub-TLV), the `show isis
-egress-protection` view (local **and received**), the protector's **End.M
-localsid install**, the **static `via-vrf` mirror-context population**, and
-the **PLR repair** — for any route to a protected egress locator, the PLR
-installs an H.Encaps-to-the-Mirror-SID backup that a BFD-driven failover
-switches to when the protected egress fails. Still landing in later stages:
-auto-allocation of the Mirror SID when `mirror-sid` is omitted, learning
-the context population from **BGP L3VPN** (the alternative to static
-`via-vrf`), PE–CE link protection (the egress as its own PLR), and a
-TI-LFA-style repair list to the protector (today the repair is a single
-`[Mirror SID]` segment, assuming the protector is reachable on a path that
-avoids the failed egress). SR-MPLS (`dataplane mpls`) is also a later
-stage.
+**Egress link protection is implemented end-to-end on both dataplanes**
+and validated on real-namespace BDD topologies.
+
+- **SRv6** — Mirror SID **advertisement** (End.M sub-TLV + Protected
+  Locators sub-sub-TLV), the `show isis egress-protection` view (local
+  **and received**), the protector's **End.M localsid install**, the
+  **static `via-vrf` mirror-context population**, the **PLR repair**
+  (an H.Encaps-to-the-Mirror-SID backup with BFD-driven failover), and
+  the **egress-as-its-own-PLR link redirect** (PEA redirects its own
+  service SID to the protector on PE–CE link down, restored on recovery).
+- **SR-MPLS** — the SID/Label Binding TLV (149, M-flag) **advertisement**
+  with a context label from the SRLB, **reception** into the
+  `show isis egress-protection` view, the protector's **context-label
+  ILM** (pop + decap into `via-vrf`), and the **egress link redirect**
+  (PEA swaps its own VPN-label ILM to push the context label toward the
+  protector, latched on link state).
+
+Still landing in later stages: **node protection** stale-route retention
+(PEA's node failing rather than just its link), learning the context
+population from **BGP L3VPN** instead of static `via-vrf`, auto-allocation
+of the SRv6 Mirror SID when `mirror-sid` is omitted, a TI-LFA-style repair
+list to the protector (today the SRv6 repair is a single `[Mirror SID]`
+segment, assuming the protector is reachable on a path that avoids the
+failed egress), and surfacing the live redirected form in `show` output
+(today the kernel LFIB reflects the redirect while `show` keeps the
+canonical form). SR-MPLS rides an **IPv4** transport because IS-IS has no
+IPv6 prefix-SID yet (deferred until SRv6-over-IS-IS).
