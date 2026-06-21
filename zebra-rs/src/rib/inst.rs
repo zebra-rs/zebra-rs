@@ -364,6 +364,18 @@ pub enum Message {
     ReplSegDel {
         vni: u32,
     },
+    /// Program this node's local `End.DT2M` SID for a VNI into the
+    /// `tc-evpn-replicate` leaf datapath, so a replicated copy addressed to it
+    /// is decapsulated and flooded into the bridge. Driven by the SR P2MP leaf
+    /// role (the SID this PE advertises in its Type-3 IMET's SRv6 L2 Prefix-SID).
+    ReplLeafAdd {
+        vni: u32,
+        sid: Ipv6Addr,
+    },
+    /// Withdraw this node's `End.DT2M` leaf SID for a VNI.
+    ReplLeafDel {
+        vni: u32,
+    },
     Shutdown {
         tx: oneshot::Sender<()>,
     },
@@ -2863,6 +2875,14 @@ impl Rib {
             Message::ReplSegDel { vni } => {
                 tracing::info!("EVPN ReplSeg del: VNI {vni}");
                 self.evpn_repl.del(vni);
+            }
+            Message::ReplLeafAdd { vni, sid } => {
+                tracing::info!("EVPN ReplLeaf add: VNI {vni} End.DT2M SID {sid}");
+                self.evpn_repl.leaf_add(vni, sid);
+            }
+            Message::ReplLeafDel { vni } => {
+                tracing::info!("EVPN ReplLeaf del: VNI {vni}");
+                self.evpn_repl.leaf_del(vni);
             }
             Message::RedistAdd {
                 proto,

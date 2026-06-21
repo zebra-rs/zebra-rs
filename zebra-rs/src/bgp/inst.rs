@@ -1283,6 +1283,12 @@ impl Bgp {
         match crate::isis::srv6::function_addr(prefix, function) {
             Some(addr) => {
                 self.evpn_dt2m_sids.insert(vni, (addr, function));
+                // Program the local End.DT2M leaf datapath: a replicated copy
+                // addressed to this SID is decapsulated + bridge-flooded.
+                let _ = self
+                    .ctx
+                    .rib
+                    .send(crate::rib::Message::ReplLeafAdd { vni, sid: addr });
                 Some(addr)
             }
             None => {
@@ -1297,6 +1303,7 @@ impl Bgp {
     pub(super) fn free_vni_dt2m_sid(&mut self, vni: u32) {
         if let Some((_addr, function)) = self.evpn_dt2m_sids.remove(&vni) {
             self.srv6_sid_pool.release(function);
+            let _ = self.ctx.rib.send(crate::rib::Message::ReplLeafDel { vni });
         }
     }
 

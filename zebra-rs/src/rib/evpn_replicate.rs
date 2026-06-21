@@ -8,22 +8,26 @@
 //! process — this module is its supervisor, mirroring the BFD echo reflector
 //! (`bfd::reflector::EchoReflectors`).
 //!
-//! A single child carries every VNI's replication map; it is spawned on the
-//! first replication segment and SIGTERM'd (clean TC detach) when the last is
-//! withdrawn. Segments are pushed over a stdin line protocol:
+//! A single clsact-ingress child carries every VNI's maps; it is spawned on the
+//! first replication segment OR leaf SID and SIGTERM'd (clean TC detach) when
+//! both are withdrawn. State is pushed over a stdin line protocol:
 //!
 //! ```text
-//!   repl-add <vni> <tree-id> <srv6:0|1> <root-ip> <leaf-ip>...
+//!   repl-add <vni> <tree-id> <srv6:0|1> <root-ip> <leaf-ip>...   # root/bud
 //!   repl-del <vni>
+//!   leaf-add <vni> <dt2m-sid>                                    # End.DT2M leaf
+//!   leaf-del <vni>
 //! ```
 //!
-//! The underlay interface the replicator attaches to comes from
+//! The underlay interface the classifier attaches to comes from
 //! `$ZEBRA_TC_EVPN_REPLICATE_IFACE`; with it unset the dataplane is disabled
 //! (the control plane still signals, nothing forwards) — honest on a host
-//! without the offload installed.
+//! without the offload installed. A leaf also needs the bridge port it floods
+//! decapped frames into, from `$ZEBRA_TC_EVPN_REPLICATE_BRIDGE`. The egress
+//! root `H.Encaps` role is a separate `--encap` child (a follow-up).
 
 use std::collections::BTreeSet;
-use std::net::IpAddr;
+use std::net::{IpAddr, Ipv6Addr};
 use std::path::PathBuf;
 use std::process::Stdio;
 
@@ -38,14 +42,19 @@ use crate::context::Task;
 const BIN_ENV: &str = "ZEBRA_TC_EVPN_REPLICATE_BIN";
 /// Underlay interface the TC replicator attaches to. Unset ⇒ dataplane off.
 const IFACE_ENV: &str = "ZEBRA_TC_EVPN_REPLICATE_IFACE";
+/// Bridge port a leaf floods decapped `End.DT2M` frames into. Unset ⇒ the leaf
+/// role programs its SID but the datapath passes such frames to the stack.
+const BRIDGE_ENV: &str = "ZEBRA_TC_EVPN_REPLICATE_BRIDGE";
 
 /// Supervises the single `tc-evpn-replicate` child that forwards EVPN BUM over
 /// SR P2MP replication trees. Lifecycle is reference-counted by the set of
 /// VNIs that currently have a replication segment.
 pub struct ReplicationHelper {
-    /// VNIs with an active replication segment — spawn on the first, stop on
-    /// the last.
+    /// VNIs with an active replication segment (`repl-add`) — root/bud role.
     vnis: BTreeSet<u32>,
+    /// VNIs with a local `End.DT2M` leaf SID (`leaf-add`) — leaf role. Tracked
+    /// separately from `vnis` so the child lives while EITHER role is active.
+    leaf_vnis: BTreeSet<u32>,
     /// The child process, if it spawned. `None` when the dataplane is disabled
     /// (no interface) or the spawn failed.
     child: Option<Child>,
@@ -57,6 +66,8 @@ pub struct ReplicationHelper {
     /// Underlay interface to attach to; `None` ($ZEBRA_..._IFACE unset)
     /// disables the dataplane.
     iface: Option<String>,
+    /// Bridge port a leaf floods decapped frames into ($ZEBRA_..._BRIDGE).
+    bridge: Option<String>,
 }
 
 impl Default for ReplicationHelper {
@@ -69,11 +80,13 @@ impl ReplicationHelper {
     pub fn new() -> Self {
         Self {
             vnis: BTreeSet::new(),
+            leaf_vnis: BTreeSet::new(),
             child: None,
             cmd_tx: None,
             _io: None,
             bin: resolve_bin(),
             iface: std::env::var(IFACE_ENV).ok().filter(|s| !s.is_empty()),
+            bridge: std::env::var(BRIDGE_ENV).ok().filter(|s| !s.is_empty()),
         }
     }
 
@@ -90,14 +103,37 @@ impl ReplicationHelper {
         self.send(line);
     }
 
-    /// Withdraw the replication segment for `vni`, stopping the child when the
-    /// last segment is gone.
+    /// Withdraw the replication segment for `vni`, stopping the child when no
+    /// role (segment or leaf) needs it any more.
     pub fn del(&mut self, vni: u32) {
         if !self.vnis.remove(&vni) {
             return;
         }
         self.send(format!("repl-del {vni}"));
-        if self.vnis.is_empty() {
+        self.stop_if_idle();
+    }
+
+    /// Program this node's local `End.DT2M` leaf SID for `vni`, so a replicated
+    /// copy addressed to it is decapsulated and flooded into the bridge.
+    pub fn leaf_add(&mut self, vni: u32, sid: Ipv6Addr) {
+        self.ensure_child();
+        self.leaf_vnis.insert(vni);
+        self.send(format!("leaf-add {vni} {sid}"));
+    }
+
+    /// Withdraw this node's `End.DT2M` leaf SID for `vni`.
+    pub fn leaf_del(&mut self, vni: u32) {
+        if !self.leaf_vnis.remove(&vni) {
+            return;
+        }
+        self.send(format!("leaf-del {vni}"));
+        self.stop_if_idle();
+    }
+
+    /// Stop the child once neither role (replication segment nor leaf SID) is
+    /// active, so the loader detaches its TC program cleanly.
+    fn stop_if_idle(&mut self) {
+        if self.vnis.is_empty() && self.leaf_vnis.is_empty() {
             self.stop();
         }
     }
@@ -116,17 +152,20 @@ impl ReplicationHelper {
             tracing::debug!("evpn replication: {IFACE_ENV} unset; SR P2MP dataplane disabled");
             return;
         };
-        // The replicator encaps + clones at egress (the root); ingress
-        // bud/leaf attach is a follow-up once those roles are wired.
-        match Command::new(&self.bin)
-            .arg("--iface")
+        // `tc_evpn_replicate` is the clsact-*ingress* classifier: it demuxes the
+        // inbound outer DA to End.Replicate (root/bud) or End.DT2M (leaf) by the
+        // REPL_LOCAL_SID / DT2M_SID maps. A leaf also needs the bridge port it
+        // floods decapped frames into (`--bridge-iface`). The egress H.Encaps
+        // role is a separate `--encap` child (PR-C2).
+        let mut cmd = Command::new(&self.bin);
+        cmd.arg("--iface")
             .arg(&iface)
             .arg("--direction")
-            .arg("egress")
-            .stdin(Stdio::piped())
-            .kill_on_drop(true)
-            .spawn()
-        {
+            .arg("ingress");
+        if let Some(bridge) = &self.bridge {
+            cmd.arg("--bridge-iface").arg(bridge);
+        }
+        match cmd.stdin(Stdio::piped()).kill_on_drop(true).spawn() {
             Ok(mut child) => {
                 tracing::info!(
                     "evpn replication: spawned {} on {iface}",
@@ -217,6 +256,29 @@ mod tests {
         assert_eq!(h.vnis, BTreeSet::from([20]));
         h.del(20);
         assert!(h.vnis.is_empty());
+    }
+
+    #[test]
+    fn leaf_add_del_tracks_independently_of_segments() {
+        let mut h = ReplicationHelper::new();
+        h.iface = None; // never spawn a child
+        // A leaf SID and a replication segment for the same/another VNI are
+        // tracked separately; the child lives while EITHER role is active.
+        h.add(10, 10, ip("10.0.0.1"), true, &[ip("10.0.0.2")]);
+        h.leaf_add(10, "2001:db8::1".parse().unwrap());
+        h.leaf_add(20, "2001:db8::2".parse().unwrap());
+        assert_eq!(h.vnis, BTreeSet::from([10]));
+        assert_eq!(h.leaf_vnis, BTreeSet::from([10, 20]));
+
+        // Dropping the segment leaves the leaf role; both must empty to idle.
+        h.del(10);
+        assert!(h.vnis.is_empty());
+        assert_eq!(h.leaf_vnis, BTreeSet::from([10, 20]));
+        h.leaf_del(10);
+        h.leaf_del(99); // unknown: no-op
+        assert_eq!(h.leaf_vnis, BTreeSet::from([20]));
+        h.leaf_del(20);
+        assert!(h.leaf_vnis.is_empty());
     }
 
     #[test]
