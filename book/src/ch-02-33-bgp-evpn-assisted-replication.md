@@ -127,23 +127,29 @@ VXLAN flood list — BUM rides the tree, not a zero-MAC FDB row.
 
 The stock kernel cannot forward an SR replication tree (next section), so
 SR P2MP is programmed through a dedicated **eBPF TC/clsact** dataplane
-(`offload/tc-evpn-replicate`). The BGP **control plane is complete**
-(signalling, import, and the replication-segment computation), and the **whole
-SRv6 datapath is implemented and lab-validated** on veth topologies:
+(`offload/tc-evpn-replicate`), driven end-to-end by the BGP control plane.
 
-- **`End.Replicate`** (root/bud): a clsact-ingress classifier clones each BUM
-  frame once per leaf, rewriting the outer IPv6 destination to that leaf's SID —
-  the per-copy header rewrite the kernel cannot do natively;
-- **`End.DT2M`** (leaf): the classifier strips the outer encapsulation off a
-  frame addressed to its local `End.DT2M` SID and redirects the inner Ethernet
-  frame into a bridge port, so the bridge floods it to the local attachment
-  circuits — the L2 flood the kernel has no SID behavior for;
-- **root `H.Encaps`** (ingress PE): a clsact-egress classifier on the overlay
-  port wraps a *bare* BUM frame in the SRv6 encapsulation (outer IPv6, src = the
-  root SID) and fans it out, one copy per leaf — the header push + per-copy
-  rewrite for an L2 payload that the kernel cannot express.
+Each PE allocates a per-VNI **`End.DT2M` SID** from its SRv6 Locator and
+advertises it on the Type-3 IMET in an SRv6 L2 Service TLV (RFC 9252) alongside
+the SR P2MP PMSI (Root = VTEP, Tree-ID = VNI); remote PEs learn it. With the
+`sr-p2mp-dataplane` topology configured (overlay port, underlay NIC, leaf
+bridge, next-hop MAC), the replication supervisor spawns and feeds two
+`tc-evpn-replicate` children — each role is the per-copy header rewrite the
+kernel has no SID behavior for, lab-validated on veth topologies:
 
-The remaining gap is SRH-present (non-reduced) encapsulation.
+- **`End.Replicate`** (root/bud, ingress): clone each BUM frame once per leaf,
+  rewriting the outer IPv6 destination to that leaf's `End.DT2M` SID;
+- **`End.DT2M`** (leaf, ingress): strip the outer encapsulation off a frame
+  addressed to the local `End.DT2M` SID and redirect the inner Ethernet frame
+  into a bridge port for native flooding to the local attachment circuits;
+- **root `H.Encaps`** (ingress PE, egress on the overlay port): wrap a *bare*
+  BUM frame in the SRv6 encapsulation (outer IPv6, src = root SID) and fan it
+  out, one copy per leaf SID.
+
+A daemon-driven two-PE BDD (`bgp_evpn_srv6_p2mp.feature`) exercises the
+control→supervisor→loader handoff (SID exchange, replication segment, child
+spawn). Remaining gaps: SRH-present (non-reduced) encapsulation, and an
+SR-MPLS P2MP forwarder (the eBPF dataplane is SRv6-only).
 
 ## What the Linux kernel can and cannot do
 

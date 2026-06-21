@@ -97,12 +97,23 @@ SR P2MP policy at the Root.
 
 ## Phasing & status (updated 2026-06-18)
 
-Branch `bgp-evpn-tunnel-replication`. The **control plane is complete and
-merged**, and the **whole SRv6 datapath is implemented and lab-validated**:
-`End.Replicate` (clone + per-branch outer-DA rewrite) at the root/bud, the leaf
-`End.DT2M` (decap the outer encap, flood the inner frame into the bridge), and
-the root `H.Encaps` (wrap a bare BUM frame + fan out per leaf). The only
-remaining gap is SRH-present (non-reduced) encap/decap.
+Branch `bgp-evpn-tunnel-replication`. **Feature complete and merged.** The
+control plane signals + learns per-PE `End.DT2M` SIDs (RFC 9252 SRv6 L2 Service
+TLV on the Type-3 IMET), the producer fans the replication segment out to those
+SIDs, the `sr-p2mp-dataplane` topology is YANG-configurable, and the supervisor
+spawns + feeds the two `tc-evpn-replicate` eBPF children. The SRv6 datapath is
+lab-validated: `End.Replicate` (clone + per-branch outer-DA rewrite) at the
+root/bud, leaf `End.DT2M` (decap + bridge flood), and root `H.Encaps` (wrap a
+bare BUM frame + fan out per leaf). A daemon-driven two-PE BDD
+(`bgp_evpn_srv6_p2mp.feature`) exercises the control→supervisor→loader handoff
+end to end. Remaining gaps (deferred): SRH-present (non-reduced) encap/decap +
+segment-list rewrite, full netns packet-capture across all three datapaths in
+the BDD, an SR-MPLS P2MP forwarder, and multi-tier (bud) tree computation.
+
+Note: the control→dataplane integration converged with a parallel effort (the
+"seg 6.3 PR-Cx" decomposition) — the leaf wiring + the daemon-driven BDD/docs
+landed there (#1575, #1577); the SID signalling, producer, YANG config, and the
+encap-child reconciliation landed here (#1570–#1576).
 
 | Slice | What landed / planned | Status |
 | --- | --- | --- |
@@ -117,7 +128,15 @@ remaining gap is SRH-present (non-reduced) encap/decap.
 | DP3a — BPF map + loader | `REPL_SEG` map + loader `repl-add`/`repl-del` population (clone+rewrite logic still a no-op) | ✅ merged #1520 |
 | DP3b — `End.Replicate` | clsact-ingress clone loop: match outer DA against `REPL_LOCAL_SID`, decrement Hop Limit (guard ≤1), `clone_redirect` one copy per leaf with outer DA rewritten, drop original. Lab-validated (`scripts/veth-replicate-test.sh`) | ✅ merged #1563 |
 | DP3c — leaf `End.DT2M` | match the local `End.DT2M` SID (`DT2M_SID` map) → slide the inner frame to the front (`adjust_room` can't strip a full L3), `change_tail`-trim, `bpf_redirect` into a bridge port's ingress → native flood. Lab-validated (`scripts/veth-dt2m-test.sh`) | ✅ merged #1567 |
-| DP4 — root `H.Encaps` | `tc_evpn_encap` (clsact egress on the overlay port): grow + slide a bare BUM frame to open headroom, write the outer link Ethernet + IPv6 (NH=Ethernet, src=root SID, from `ENCAP_CFG`), `clone_redirect` one copy per leaf out the underlay. Lab-validated (`scripts/veth-encap-test.sh`) | ✅ this slice |
+| DP4 — root `H.Encaps` | `tc_evpn_encap` (clsact egress on the overlay port): grow + slide a bare BUM frame to open headroom, write the outer link Ethernet + IPv6 (NH=Ethernet, src=root SID, from `ENCAP_CFG`), `clone_redirect` one copy per leaf out the underlay. Lab-validated (`scripts/veth-encap-test.sh`) | ✅ merged #1568 |
+| CP→DP 1 — `End.DT2M` codec | `SRV6_BEHAVIOR_END_DT2M` (0x0016) + `BgpAttr::srv6_l2_sid()` accessor (SRv6 L2 Service TLV, sub-TLV type 6) | ✅ merged #1570 |
+| CP→DP 2 — advertise local SID | per-VNI `End.DT2M` SID from the SRv6 Locator (`evpn_dt2m_sids`) attached to the Type-3 IMET as an SRv6 L2 Service Prefix-SID, gated on `SrV6P2mp` | ✅ merged #1570 |
+| CP→DP 3 — import remote SID | extract `srv6_l2_sid()` on Type-3 import → `VniFlood.sr_remote_sids` (leaf VTEP → its `End.DT2M` SID) | ✅ merged #1571 |
+| CP→DP 4 — fan out to SIDs | `replication_action` resolves each leaf VTEP → its advertised `End.DT2M` SID (fallback VTEP); the segment's `leaves` carry SIDs | ✅ merged #1573 |
+| CP→DP 5 — YANG topology | `router bgp afi-safi evpn sr-p2mp-dataplane {overlay,underlay,bridge,next-hop-mac}` → `rib::Message::ReplDataplaneCfg` → `ReplicationHelper::set_topology` | ✅ merged #1574 |
+| CP→DP 6a — leaf wiring | `ReplLeafAdd`/`ReplLeafDel` from `alloc/free_vni_dt2m_sid`; ingress child `leaf-add`/`leaf-del` + `--bridge-iface` (parallel effort) | ✅ merged #1575 |
+| CP→DP 6b — encap child + config unify | `ReplChild` two-child supervisor: add the encap child (`--encap` on the overlay, `encap-cfg` + `repl-add`); topology-first config (env fallback) | ✅ merged #1576 |
+| CP→DP 7 — daemon-driven BDD + docs | `bgp_evpn_srv6_p2mp.feature`: two SRv6 PEs exchange `End.DT2M` SIDs over the IMET, daemon spawns + feeds the children (parallel effort) | ✅ merged #1577 |
 
 ## Where the pieces live
 
