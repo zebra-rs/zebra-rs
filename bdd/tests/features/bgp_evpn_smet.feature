@@ -63,20 +63,26 @@ Feature: BGP EVPN IGMP/MLD Proxy — Selective Multicast (RFC 9251)
     # positive assert above so z1 already has EVPN routes (non-vacuous).
     And show command "show bgp evpn" in namespace "z1" should not contain "ff02"
 
-  Scenario: z1 programs the received SMET into its kernel bridge MDB
+  Scenario: z1 programs the received SMET into its kernel MDB (per-VTEP dst)
     Given the test topology exists
-    # The received SMET drives `bridge mdb add dev br10 port vxlan10
-    # grp 239.1.1.1` on z1. z1 has no local member, so the group can only
-    # appear in its MDB via the SMET install. (Per-VTEP `dst` selectivity
-    # needs a vnifilter VXLAN MDB — see the design doc; a plain VXLAN
-    # registers the group on the port but the kernel drops the `dst`.)
+    # The received SMET drives two installs on z1: the bridge MDB
+    # (`dev br10 port vxlan10 grp 239.1.1.1`, local membership so the
+    # bridge forwards the group into the overlay) and the VXLAN MDB on the
+    # `external vnifilter` device (`dev vxlan10 grp 239.1.1.1 src_vni 10
+    # dst 192.168.0.2`), which delivers the group selectively to z2's VTEP
+    # instead of BUM-flooding every peer (RFC 9251). z1 has no local
+    # member, so the group can only appear via the SMET install.
     Then bridge mdb "br10" in namespace "z1" should eventually contain "239.1.1.1"
+    And bridge mdb "vxlan10" in namespace "z1" should eventually contain "239.1.1.1"
+    # The per-VTEP `dst` — the whole point: G is targeted at z2 (192.168.0.2).
+    And bridge mdb "vxlan10" in namespace "z1" should eventually contain "192.168.0.2"
 
   Scenario: A leave withdraws the SMET and removes the MDB entry on z1
     Given the test topology exists
     When I execute "bridge mdb del dev br10 port host0 grp 239.1.1.1 permanent" in namespace "z2"
     Then show command "show bgp evpn" in namespace "z1" should eventually not contain "[6]:[0]:[0]:[*]:[32]:[239.1.1.1]"
     And bridge mdb "br10" in namespace "z1" should not contain "239.1.1.1"
+    And bridge mdb "vxlan10" in namespace "z1" should not contain "239.1.1.1"
 
   Scenario: An (S,G) join originates a source-specific SMET with the right source
     Given the test topology exists
@@ -85,6 +91,10 @@ Feature: BGP EVPN IGMP/MLD Proxy — Selective Multicast (RFC 9251)
     # key, not a (*,G) wildcard.
     When I execute "bridge mdb add dev br10 port host0 src 192.0.2.9 grp 232.1.1.1 permanent" in namespace "z2"
     Then show command "show bgp evpn" in namespace "z1" should eventually contain "[6]:[0]:[32]:[192.0.2.9]:[32]:[232.1.1.1]:[32]:[192.168.0.2]"
+    # (S,G) per-VTEP VXLAN MDB on z1: the source-specific entry carries
+    # the group and z2's dst (the source rides in the MDB SET nest).
+    And bridge mdb "vxlan10" in namespace "z1" should eventually contain "232.1.1.1"
+    And bridge mdb "vxlan10" in namespace "z1" should eventually contain "192.168.0.2"
 
   Scenario: Teardown topology
     Given the test topology exists

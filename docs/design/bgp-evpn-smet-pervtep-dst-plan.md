@@ -186,3 +186,39 @@ the open questions, with one tooling blocker:
    landing the Type-2/3 `src_vni` FDB rework in the same PR, since the
    plain-model FDB stops working under `external`).
 3. P2–P4 as before; P4 gated on the validation tooling above.
+
+## Status — IMPLEMENTED & BDD-validated (2026-06-21)
+
+The series shipped. The "validation tooling" blocker above is **resolved**:
+the test host was upgraded to **iproute2 7.0.0 / kernel 6.8**, whose
+`bridge mdb show dev <vxlan>` renders the VXLAN MDB `dst`/`src_vni`, so P4
+is directly observable in BDD (no daemon-side readback needed after all).
+
+- **P1a (fork)** — `netlink-packet-route` seg6 `b03a738`: `tunnel::TunnelMessage`
+  (`RTM_NEWTUNNEL` = `bridge vni add`, `VXLAN_VNIFILTER_ENTRY`), plus the
+  earlier `d2c1d85` MDB `dst`/`src_vni` readback decode.
+- **P1b (model switch)** — PR #1549: `vxlan_add` → `external vnifilter`
+  (`CollectMetadata`+`Vnifilter`, no fixed `id`); `bridge vni add` per VNI via
+  `vni_filter_add`; Type-3 BUM `mdb_add`/`del` carry `src_vni`; `link.rs`
+  sources the L2VPN VNI from config when the kernel reports `id 0`. Type-2
+  needed no change (self FDB already had `src_vni`).
+- **P4 (per-VTEP dst)** — PR #1550 (stacked on #1549): `mdb_install` keeps the
+  bridge MDB (local membership → overlay) AND adds a VXLAN MDB on `dev=vxlan`
+  with nested `MDBE_ATTR_DST` (originator VTEP) + `MDBE_ATTR_SRC_VNI`
+  (+ `MDBE_ATTR_SOURCE` for (S,G)), via a shared `mdb_send`. Replicates the
+  group only to the asking VTEP instead of BUM-flooding.
+
+**Design choice vs the sketch:** the original sketch said "retarget
+`mdb_install` to `dev = vxlan`" (replace the bridge MDB). The implementation
+keeps **both** installs — the bridge MDB registers the VXLAN port so the
+snooping bridge forwards the group into the overlay, while the VXLAN MDB
+selects the destination VTEP. This mirrors FRR and avoids dropping local
+bridge→overlay forwarding.
+
+Validation (kernel 6.8 / iproute2 7.0.0): `@bgp_evpn_smet` extended to assert
+`bridge mdb "vxlan10" … contains <dst VTEP>` for (*,G) and (S,G) + withdrawal;
+green alongside `@vxlan_bridge` and `@bgp_evpn_ar`. `cargo fmt` +
+`clippy --workspace --all-targets -- -D warnings` clean.
+
+Deferred (unchanged): SMET-flags fidelity from kernel group-mode, MF-EC
+capability gate, per-VLAN VID mapping, Type 7/8 multihoming synch.
