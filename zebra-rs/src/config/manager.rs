@@ -1347,12 +1347,68 @@ pub fn config_format_type(config_str: &str) -> ConfigFormat {
         .unwrap_or("");
     if first_line.starts_with('{') {
         ConfigFormat::Json
-    } else if first_line.ends_with('{') {
+    } else if first_line.ends_with('{') || first_line.ends_with(';') {
+        // CLI brace format. A block opens with `… {`, but a top-level
+        // leaf or a bare keyed list entry is a `;`-terminated statement
+        // with no block — e.g. a config that starts with `vrf N3;`. Both
+        // are CLI; only `{` was matched before, so such a config fell
+        // through to the YAML default and was silently dropped. YAML and
+        // `set`/`delete` lines never end with `;`, so this is unambiguous.
         ConfigFormat::Cli
     } else if first_line.starts_with("set ") || first_line.starts_with("delete ") {
         ConfigFormat::SetDelete
     } else {
         ConfigFormat::Yaml
+    }
+}
+
+#[cfg(test)]
+mod config_format_tests {
+    use super::*;
+
+    #[test]
+    fn cli_brace_block() {
+        assert_eq!(
+            config_format_type("system {\n  hostname r1;\n}\n"),
+            ConfigFormat::Cli
+        );
+    }
+
+    /// Regression: a CLI config that opens with a `;`-terminated leaf or a
+    /// bare keyed list entry (no block) — e.g. `vrf N3;` — used to be
+    /// sniffed as YAML and silently dropped at load.
+    #[test]
+    fn cli_leading_semicolon_statement() {
+        assert_eq!(config_format_type("vrf N3;\nvrf N6;\n"), ConfigFormat::Cli);
+        assert_eq!(config_format_type("hostname r1;\n"), ConfigFormat::Cli);
+        // Leading blank lines / comments are skipped before sniffing.
+        assert_eq!(
+            config_format_type("\n# a comment\nvrf N3;\n"),
+            ConfigFormat::Cli
+        );
+    }
+
+    #[test]
+    fn json_object() {
+        assert_eq!(
+            config_format_type("{\n  \"system\": {}\n}"),
+            ConfigFormat::Json
+        );
+    }
+
+    #[test]
+    fn set_delete_lines() {
+        assert_eq!(config_format_type("set vrf N3\n"), ConfigFormat::SetDelete);
+        assert_eq!(
+            config_format_type("delete vrf N3\n"),
+            ConfigFormat::SetDelete
+        );
+    }
+
+    #[test]
+    fn yaml_mapping() {
+        assert_eq!(config_format_type("vrf:\n- name: N3\n"), ConfigFormat::Yaml);
+        assert_eq!(config_format_type("router:\n  bgp:\n"), ConfigFormat::Yaml);
     }
 }
 
