@@ -1,0 +1,23 @@
+# z1 — a PE in region A (AS 65001) with a local VXLAN (VNI 10), so it
+# originates a Type-3 IMET (a region-A VTEP). iBGP to the gateway z2.
+vxlan:
+- name: vxlan10
+  vni: 10
+  local-address: 192.168.0.1
+router:
+  bgp:
+    global:
+      as: 65001
+      router-id: 192.168.0.1
+    afi-safi:
+    - name: evpn
+      advertise-all-vni: true
+    neighbor:
+    - remote-address: 192.168.0.2
+      enabled: true
+      remote-as: 65001
+      afi-safi:
+      - name: ipv4
+        enabled: true
+      - name: evpn
+        enabled: true

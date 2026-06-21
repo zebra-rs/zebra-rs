@@ -425,11 +425,27 @@ on push, not targeted filters).
   with elected-DF + candidate show; legacy-PE detection via the Multicast-Flags
   segmentation bit (`RemoteImet.segmentation_capable` / `has_legacy_remote`).
   4-namespace `@bgp_evpn_df_election` BDD (run live, 5/5). Completes Phase 4.
-- **PR4c — Phase 4c: DF election among ASBRs (AC-DF cleared) + legacy
-  coexistence gating + BDD.**
 - **PR5 (optional) — Phase 5: S-PMSI selective multicast + BDD.**
-- **PR6 (later, re-confirm direction) — Phase 6: VXLAN-IR aggregation
-  dataplane only;** MPLS-P2MP / BIER / clean-DF gateway → VPP/eBPF backend.
+- **Phase 6 — eBPF gateway dataplane (direction confirmed: multi-gateway
+  correct, extend `tc-evpn-replicate`).** Sliced:
+  - **PR6.1 — control-plane gateway re-flood primitive. DONE (this PR).** Tag
+    each remote VTEP with its region (`RemoteImet.region`, from the path's
+    `ingress_region`); `EvpnFloodState::gateway_replicate(vni, ingress_region)`
+    returns the split-horizon re-flood set (every remote VTEP in another
+    region — never back into the ingress region; region-less remotes always
+    included). `show bgp evpn` renders the per-region re-flood set + the DF
+    forward/standby role (`evpn_df_election_show`). Unit tests + 3-namespace
+    `@bgp_evpn_gateway_reflood` BDD (region-A PE + gateway + region-B PE, both
+    VNI 10), run live (5/5). No dataplane forwarding yet.
+  - **PR6.2 — offload signaling:** extend the `tc-evpn-replicate` loader line
+    protocol + a new BPF map + a supervisor (mirror `rib/evpn_replicate.rs`)
+    to carry the DF-gated per-region stitch.
+  - **PR6.3 — eBPF replication:** implement the clone + re-encap in the
+    `tc-evpn-replicate` skeleton (currently `TC_ACT_PIPE` passthrough), with
+    split-horizon + DF gate, and a forwarding BDD. NOTE: the offload is
+    excluded from CI (nightly + bpf-linker); validate live.
+  - MPLS-P2MP / BIER segmentation stays out of scope (no kernel/eBPF-feasible
+    path) → VPP/ASIC backend.
 
 ## 11. Validation strategy
 
