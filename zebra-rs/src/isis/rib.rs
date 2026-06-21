@@ -1666,6 +1666,16 @@ fn register_egress_protections(top: &mut IsisTop) {
         }
     }
 
+    // Degenerate-LSDB guard: a link event can momentarily collapse the
+    // SPF's LSDB view to just the local node. With no neighbors there are
+    // no Mirror SID advertisements to read, so the scan reads empty — but
+    // that is a convergence transient, not a withdrawal. Skip the update
+    // so the last-known registration survives (the genuine-withdrawal
+    // logic below only ever runs against a healthy multi-node LSDB, which
+    // is the only state in which a protector can be "present but silent").
+    if live_nodes.len() <= 1 {
+        return;
+    }
     let authoritative =
         authoritative_protections(current, top.egress_protect_registered, &live_nodes);
     *top.egress_protect_registered = authoritative.clone();
