@@ -92,6 +92,21 @@ impl Args {
         arg_parse_type!(self, Ipv6Net);
     }
 
+    /// Parse an `inet:ip-prefix` (IPv4 or IPv6) into an `IpNet`. Tries
+    /// IPv4 first, then IPv6 — mirroring [`Self::addr`].
+    pub fn ipnet(&mut self) -> Option<ipnet::IpNet> {
+        let item = self.0.front()?;
+        if let Ok(net) = item.parse::<Ipv4Net>() {
+            self.0.pop_front();
+            return Some(ipnet::IpNet::V4(net));
+        }
+        if let Ok(net) = item.parse::<Ipv6Net>() {
+            self.0.pop_front();
+            return Some(ipnet::IpNet::V6(net));
+        }
+        None
+    }
+
     pub fn addr(&mut self) -> Option<IpAddr> {
         let item = self.0.front()?;
         if let Ok(addr) = item.parse::<Ipv4Addr>() {

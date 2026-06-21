@@ -98,7 +98,7 @@ pub struct CollisionConn {
     pub role: Role,
     /// Endpoint addresses of this collision conn, written into
     /// `peer.param` if it wins §6.8 resolution and is promoted —
-    /// `show bgp neighbors`' Local/Foreign host lines must
+    /// `show bgp neighbor`' Local/Foreign host lines must
     /// describe the surviving connection, not the primary it
     /// replaced.
     pub local_addr: Option<SocketAddr>,
@@ -649,7 +649,7 @@ pub struct PeerParam {
     /// refreshed if a §6.8 collision conn is promoted). For a dialed
     /// session the port is the neighbor's configured `port` (default
     /// 179); for an accepted one it is the peer's ephemeral source
-    /// port. Rendered as `Foreign host/port` by `show bgp neighbors`,
+    /// port. Rendered as `Foreign host/port` by `show bgp neighbor`,
     /// mirroring FRR's `su_remote`.
     pub remote_addr: Option<SocketAddr>,
 }
@@ -3445,7 +3445,7 @@ mod fsm_idle_hold_tests {
     }
 
     /// The eBGP connected-check holdoff parks in Active with the
-    /// connect-retry backstop armed (and `show bgp neighbors`
+    /// connect-retry backstop armed (and `show bgp neighbor`
     /// reports "Next connect retry timer fires in N seconds").
     #[tokio::test]
     async fn connected_check_holdoff_parks_active_with_connect_retry() {

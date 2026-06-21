@@ -37,10 +37,10 @@ router:
       afi-safi:
       - name: ipv4
         enabled: true
+        policy:
+          out: PREPEND-FOREIGN
       enabled: true
       remote-as: 65002
-      policy:
-        out: PREPEND-FOREIGN
     afi-safi:
     - name: ipv4
       network:

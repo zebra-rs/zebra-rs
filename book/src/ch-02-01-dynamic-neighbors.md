@@ -84,8 +84,8 @@ group (and its `remote-as`) lands.
 ## Verification
 
 A spoke that has connected shows up like any other peer —
-`show bgp summary`, `show bgp neighbors` — identified by its source
-address, and `show bgp neighbors <addr>` reports the binding:
+`show bgp summary`, `show bgp neighbor` — identified by its source
+address, and `show bgp neighbor <addr>` reports the binding:
 
 ```
   Neighbor-group: SPOKES (remote-as inherited)

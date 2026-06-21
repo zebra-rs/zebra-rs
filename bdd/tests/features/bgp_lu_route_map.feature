@@ -2,8 +2,9 @@
 @bgp_lu_route_map
 Feature: BGP per-peer route-map for IPv4 labeled-unicast (inbound + outbound)
   As a network operator
-  I want `neighbor policy in/out <policy>` to filter IPv4 labeled-unicast
-  (SAFI 4) routes per neighbor, the same per-peer route-map the IPv4
+  I want `neighbor X afi-safi label-v4 policy in/out <policy>` to filter
+  IPv4 labeled-unicast (SAFI 4) routes per neighbor, the same per-peer
+  per-family route-map the IPv4
   unicast path already has. Before this, the labeled-unicast ingest and
   advertise applied no per-neighbor policy, so BGP-LU route-maps were
   silently ignored.

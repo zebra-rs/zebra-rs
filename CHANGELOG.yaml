@@ -1,0 +1,138 @@
+# CHANGELOG.yaml – the single source of truth for the project changelog.
+# nfpm (packaging/nfpm-*.yaml) reads this file to build the Debian changelog.
+# Keep newest entry first.
+# All timestamps must be in full ISO-8601 format.
+# Fields "distribution" and "urgency" are optional per-entry; if you omit
+# them, the defaults from .chglog.yml (or chglog config) are used.
+
+- semver: 26.6.2
+  date: 2026-06-19T18:00:00+09:00
+  distribution: unstable
+  urgency: medium
+  packager: Kunihiro Ishiguro <kunihiro@zebra.rs>
+  changes:
+    - note: |
+        ### BGP EVPN
+        * IGMP/MLD Proxy (RFC 9251): Type-6 SMET routes, selective kernel MDB
+          programming, link-local / (S,G) filtering, per-VTEP destinations
+        * BUM tunnel segmentation (RFC 9572): Type 9/10/11 routes, PMSI codec,
+          segmentation bit, Regional Border Router re-origination
+        * Assisted Replication (RFC 9574): PMSI tunnel codec
+        * EVPN add-path support and capability-teardown fixes
+
+    - note: |
+        ### BGP RIB sharding and egress pipeline
+        * Lock-free sharded Loc-RIB: per-shard attribute store, adj-in, RIB,
+          and label block; peer-membership index; shard-count YANG knob
+        * Egress group-task / worker-pool model for update generation
+        * Show-read and origination fixes at N>1 shards
+
+    - note: |
+        ### BGP (other)
+        * Add-path for IPv4/IPv6 unicast, labeled-unicast, VPNv6, EVPN
+        * local-as support; table-map extended to IPv6; ip-transparent
+        * TCP-AO key rotation/reset; MD5 password reset on running sessions
+        * Policy: undefined policy name now denies all; per-AFI policy migration
+        * Show-command cleanups and additional tracing knobs
+
+    - note: |
+        ### IS-IS
+        * TI-LFA SRv6 with classic SID; compute-mode sharding and parallel SPF
+        * Flex-Algo SRv6: per-algo locator routing, End.X, VPN/VRF steering
+        * Mirror-SID egress protection (codec to dataplane, with PLR repair)
+
+    - note: |
+        ### OSPF / OSPFv3
+        * TI-LFA compute-modes for OSPFv2 and OSPFv3 (IS-IS-compatible)
+        * Dynamic adjacency-SID, address dedup, OSPFv3 LSDB / E-LSA detail show
+        * Show grammar: `show ip ospf` -> `show ospf`,
+          `show ipv6 ospf` -> `show ospfv3`
+
+    - note: |
+        ### Fast reroute / BFD / STAMP
+        * Nexthop-protect with kernel failover, switchover, ECMP evict,
+          IS-IS/OSPF hooks (dataplane side of TI-LFA)
+        * BFD Echo runtime updates; detect-offload for IS-IS and BGP;
+          XDP/eBPF expiration offload
+        * STAMP (RFC 8762): Phase 1 plus IPv6, SO_TIMESTAMPING, TX errqueue
+
+    - note: |
+        ### Infrastructure
+        * YANG presence-container / implicit-null sweep; clear-neighbor grammar
+        * IPv6 ND flow observation and show commands
+        * VXLAN/bridge default handling, interface master
+        * FIB tracing (link/route); router-id architecture; docs/mdBook updates
+
+- semver: 26.6.1
+  date: 2026-05-31T18:00:00+09:00
+  distribution: unstable
+  urgency: medium
+  packager: Kunihiro Ishiguro <kunihiro@zebra.rs>
+  changes:
+    - note: |
+        ### BGP L3VPN / SRv6
+        * MPLS L3VPN: per-VRF VPNv4 and VPNv6, label allocator, ILM decap,
+          import/export hooks, per-VRF network statements, `show ip bgp vrf`
+        * L3VPN over SRv6 (RFC 9252): per-VRF End.DT46 SID from a Locator,
+          SRv6 L3 Service TLV codec
+        * Route Target Constraint (RFC 4684) for VPNv4 and VPNv6
+        * Next-Hop Tracking: recursive nexthop resolution, register-then-gate
+
+    - note: |
+        ### BGP address families and features
+        * BGP Link-State (RFC 9552): IS-IS LSDB producer, NLRI + attributes,
+          Loc-RIB and show
+        * FlowSpec (RFC 8955/8956): NLRI codec, validation, advertise, Loc-RIB
+        * EVPN Type-5 IP-Prefix routes (RFC 9136) over MPLS and SRv6
+        * Labeled Unicast (SAFI 4)
+        * Extended Next Hop Encoding (RFC 5549): IPv4-over-IPv6 forwarding for
+          unnumbered peers, dual-nexthop, FIB install
+        * Color-aware policy: route-map match color, color-aware NHT
+        * afi-safi migration to zebra-owned YANG
+
+    - note: |
+        ### OSPFv2 / OSPFv3
+        * OSPFv3 (IPv6) implementation: adjacency FSM, LSDB, flooding, SPF,
+          RIB, NSSA, multi-area / inter-area, E-LSA and show commands
+        * OSPF Flex-Algo for v2 and v3 (SPF, RIB, ILM)
+        * OSPF Segment Routing (SR-MPLS) and TI-LFA
+        * Graceful Restart, authentication, and NSSA across v2/v3
+        * Multi-area ABR: per-area Router-LSA, Type-3 origination
+
+    - note: |
+        ### IS-IS
+        * Graceful Restart (RFC 5306): helper and restarter
+        * Authentication: cleartext, MD5, and RFC 5310 SHA across IIH/SNP/LSP
+        * TI-LFA and SPF offload (parallel Dijkstra on spawn_blocking)
+        * LSP fragmentation; Flex-Algo; SRLG and TE extensions
+          (RFC 8570 / RFC 7794); RFC 6232 Purge Originator Identification
+
+    - note: |
+        ### BFD / OAM / infrastructure
+        * BFD Echo function and BFD/S-BFD/STAMP XDP/eBPF offload
+        * TWAMP Light (RFC 9503) foundations
+        * Cross-protocol keychain / key-management (BGP, OSPF, IS-IS)
+        * IPv6 ND router advertisements with conditional spawn
+        * MPLS ILM FIB monitor and nexthop self-heal
+        * RIB/FIB improvements and per-protocol VRF support
+        * vty CLI enhancements
+
+- semver: 26.5.1
+  date: 2026-05-21T18:00:00+09:00
+  distribution: unstable
+  urgency: medium
+  packager: Kunihiro Ishiguro <kunihiro@zebra.rs>
+  changes:
+    - note: |
+        ### Added
+        * OSPFv3 packet codec: header, Hello, DBDesc, LSR, LSUpdate, LSAck,
+          and Router/Network/Inter-Area/AS-External/Link/Intra-Area-Prefix LSAs
+        * OSPFv3 socket primitives and IPv6 pseudo-header checksum
+        * BGP per-VRF MPLS/VPN: label allocator, ILM decap, import/export hooks,
+          per-VRF network statements, `show ip bgp vrf`
+        * BGP color-aware policy (route-map match color, NHT consumer)
+
+    - note: |
+        ### Changed
+        * OSPF parameterised over `OspfVersion` trait (Ospfv2 / Ospfv3 markers)
+        * OSPF CLI aligned with IS-IS style

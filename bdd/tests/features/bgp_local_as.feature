@@ -57,7 +57,7 @@ Feature: BGP local-as presents a substitute AS to one neighbor (AS migration)
     # AS. One occurrence is within the loop-check budget — the route
     # must be accepted.
     And BGP route in "z1" has "10.0.0.2/32" with "as_path" value "64999 65001"
-    And show command "show bgp neighbors" in namespace "z1" should contain "Local AS substitution: local-as 64999"
+    And show command "show bgp neighbor" in namespace "z1" should contain "Local AS substitution: local-as 64999"
 
   Scenario: replace-as hides the real AS on egress
     Given the test topology exists
@@ -101,7 +101,7 @@ Feature: BGP local-as presents a substitute AS to one neighbor (AS migration)
     # normal real-AS prepend on egress, no ingress prepend.
     And BGP route in "z2" has "10.0.0.1/32" with "as_path" value "65100"
     And BGP route in "z1" has "10.0.0.2/32" with "as_path" value "65001"
-    And show command "show bgp neighbors" in namespace "z1" should contain "dual-as fallback active"
+    And show command "show bgp neighbor" in namespace "z1" should contain "dual-as fallback active"
 
   # Pure P2P topology (no bridge): deleting each namespace destroys the
   # veth pair ends it holds, so only the daemons and namespaces need

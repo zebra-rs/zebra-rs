@@ -23,8 +23,8 @@ router:
       afi-safi:
       - name: ipv4
         enabled: true
-      policy:
-        out: SET-MED-100
+        policy:
+          out: SET-MED-100
       enabled: true
       remote-as: 65002
     afi-safi:

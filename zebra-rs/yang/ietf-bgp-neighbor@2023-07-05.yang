@@ -243,9 +243,10 @@ submodule ietf-bgp-neighbor {
         ext:help "Per-family route-policy references";
         description
           "Per-direction route-policy references applied to routes of
-           THIS address family. Takes priority over the legacy
-           peer-wide `neighbor X policy {in,out}`; when a family has no
-           per-family binding it falls back to that peer-wide policy.";
+           THIS address family. This is the only per-neighbor
+           route-policy binding; when a family has no per-family binding
+           it falls back to a route-policy inherited from a
+           neighbor-group (if any).";
         leaf in {
           type string;
         }

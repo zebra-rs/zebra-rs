@@ -100,36 +100,48 @@ fn show_isis_egress_protection(
     _args: Args,
     _json: bool,
 ) -> std::result::Result<String, std::fmt::Error> {
-    use super::egress_protection::{MirrorDataplane, collect_received_mirror_sids};
+    use super::egress_protection::{
+        MirrorDataplane, collect_received_mirror_sids, collect_received_mpls_bindings,
+    };
 
     let entries = &isis.config.egress_protections;
     let local = isis.sr_locator.as_ref().and_then(|l| l.prefix);
     let mut buf = String::new();
 
     // Local (configured) entries this node protects, and whether each is
-    // currently advertised.
+    // currently advertised. The SID/Context column shows the SRv6 Mirror
+    // SID or, for MPLS, the allocated context label.
     if !entries.is_empty() {
         writeln!(buf, "Local egress-protection:")?;
         writeln!(
             buf,
             "{:<22} {:<24} {:<5} {:<10} Advertised",
-            "Protected-Locator", "Mirror-SID", "DP", "Via-VRF"
+            "Protected-Locator", "SID/Context", "DP", "Via-VRF"
         )?;
         for e in entries.values() {
             let dp = match e.dataplane {
                 MirrorDataplane::Srv6 => "srv6",
                 MirrorDataplane::Mpls => "mpls",
             };
-            let sid = e
-                .mirror_sid
-                .map(|s| s.to_string())
-                .unwrap_or_else(|| "(auto)".to_string());
+            let (sid, advertised) = match e.dataplane {
+                MirrorDataplane::Srv6 => {
+                    let sid = e
+                        .mirror_sid
+                        .map(|s| s.to_string())
+                        .unwrap_or_else(|| "(auto)".to_string());
+                    let advertised = e
+                        .mirror_sid
+                        .zip(local)
+                        .map(|(s, p)| p.contains(&s))
+                        .unwrap_or(false);
+                    (sid, advertised)
+                }
+                MirrorDataplane::Mpls => match isis.mirror_labels.get(&e.protected_locator) {
+                    Some(label) => (format!("label {label}"), true),
+                    None => ("(pending)".to_string(), false),
+                },
+            };
             let vrf = e.via_vrf.as_deref().unwrap_or("-");
-            let advertised = e.dataplane == MirrorDataplane::Srv6
-                && e.mirror_sid
-                    .zip(local)
-                    .map(|(s, p)| p.contains(&s))
-                    .unwrap_or(false);
             writeln!(
                 buf,
                 "{:<22} {:<24} {:<5} {:<10} {}",
@@ -163,6 +175,30 @@ fn show_isis_egress_protection(
                 r.protector.to_string(),
                 r.mirror_sid.to_string(),
                 r.protected_locator,
+            )?;
+        }
+    }
+
+    // SR-MPLS Mirror Context bindings received from peers (the PLR's view).
+    let mut bindings = collect_received_mpls_bindings(&isis.lsdb.l1);
+    bindings.extend(collect_received_mpls_bindings(&isis.lsdb.l2));
+    if !bindings.is_empty() {
+        if !buf.is_empty() {
+            writeln!(buf)?;
+        }
+        writeln!(buf, "Received Mirror Context labels:")?;
+        writeln!(
+            buf,
+            "{:<18} {:<14} Protected-FEC",
+            "Protector", "Context-Label"
+        )?;
+        for b in &bindings {
+            writeln!(
+                buf,
+                "{:<18} {:<14} {}",
+                b.protector.to_string(),
+                b.context_label,
+                b.protected_fec,
             )?;
         }
     }

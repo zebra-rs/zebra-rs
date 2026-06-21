@@ -27,8 +27,8 @@ router:
       afi-safi:
       - name: label-v4
         enabled: true
-      policy:
-        out: OUT-LU
+        policy:
+          out: OUT-LU
     afi-safi:
     - name: label-v4
       network:

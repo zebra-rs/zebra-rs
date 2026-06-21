@@ -1,7 +1,7 @@
 # Per-AFI ipv4 inbound policy that permits everything, layered on top of
-# the still-present legacy DENY-ALL. The per-AFI binding wins for ipv4
-# (Task B/C priority), so the routes the legacy policy denied are
-# accepted again.
+# the peer-wide DENY-ALL inherited from the neighbor-group. The per-AFI
+# binding wins for ipv4 (Peer::policy_list_at priority), so the routes the
+# peer-wide policy denied are accepted again.
 policy:
 - name: DENY-ALL
   entry:
@@ -16,6 +16,10 @@ router:
     global:
       as: 65002
       router-id: 192.168.0.2
+    neighbor-group:
+    - name: PEER-WIDE
+      policy:
+        in: DENY-ALL
     neighbor:
     - remote-address: 192.168.0.1
       afi-safi:
@@ -25,7 +29,6 @@ router:
           in: PERMIT-ALL
       soft-reconfiguration:
         inbound: true
-      policy:
-        in: DENY-ALL
+      neighbor-group: PEER-WIDE
       enabled: true
       remote-as: 65001

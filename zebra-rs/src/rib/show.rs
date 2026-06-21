@@ -1458,13 +1458,49 @@ pub fn ilm_show(rib: &Rib, _args: Args, json: bool) -> String {
                             write_ilm_entry(&mut buf, rib, *label, ilm, uni);
                         }
                     }
-                    _ => {}
+                    // Pop-and-decap entries (BGP VPN label, Mirror Context
+                    // label) carry no forwarding nexthop — render from the
+                    // ilm_type alone.
+                    _ => write_ilm_decap_entry(&mut buf, rib, *label, ilm),
                 }
             }
         }
 
         buf
     }
+}
+
+/// Render a pop-and-decap ILM entry — `DecapVrf` (BGP/MPLS-VPN) or
+/// `ContextLabel` (Mirror Context) — which has no forwarding nexthop,
+/// just a VRF the popped packet is routed into. Other no-nexthop types
+/// are skipped.
+fn write_ilm_decap_entry(buf: &mut String, rib: &Rib, label: u32, ilm: &super::inst::IlmEntry) {
+    let (prefix_or_id, vrf_ifindex) = match &ilm.ilm_type {
+        super::inst::IlmType::DecapVrf {
+            table_id,
+            vrf_ifindex,
+        } => (format!("VPN Decap (tbl {:<3})", table_id), *vrf_ifindex),
+        super::inst::IlmType::ContextLabel {
+            table_id,
+            vrf_ifindex,
+        } => (format!("Mirror Ctx (tbl {:<3})", table_id), *vrf_ifindex),
+        _ => return,
+    };
+    let marker = if ilm.selected { "*>" } else { "" };
+    let interface = rib.link_name(vrf_ifindex);
+    // No forwarding next-hop column — the popped packet is routed in the VRF.
+    writeln!(
+        buf,
+        "{:<2} {} {:<4} {:<6} {:<11} {:<18} {}",
+        marker,
+        ilm.rtype.abbrev(),
+        ilm.distance,
+        label,
+        "Pop",
+        prefix_or_id,
+        interface,
+    )
+    .unwrap();
 }
 
 // Helper function to format an ILM entry
@@ -1499,6 +1535,10 @@ fn write_ilm_entry(
             table_id,
             vrf_ifindex: _,
         } => format!("VPN Decap (tbl {:<3})", table_id),
+        super::inst::IlmType::ContextLabel {
+            table_id,
+            vrf_ifindex: _,
+        } => format!("Mirror Ctx (tbl {:<3})", table_id),
         super::inst::IlmType::Swap => "LU Swap".to_string(),
         super::inst::IlmType::None => {
             // Try to find a matching route for this nexthop
@@ -1554,6 +1594,10 @@ fn ilm_to_json(
             table_id,
             vrf_ifindex: _,
         } => format!("VPN Decap (tbl {})", table_id),
+        super::inst::IlmType::ContextLabel {
+            table_id,
+            vrf_ifindex: _,
+        } => format!("Mirror Ctx (tbl {})", table_id),
         super::inst::IlmType::Swap => "LU Swap".to_string(),
         super::inst::IlmType::None => {
             if let Some((prefix, _)) = find_route_for_nexthop(rib, uni) {

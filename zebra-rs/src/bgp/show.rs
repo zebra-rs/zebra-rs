@@ -75,7 +75,7 @@ pub async fn process_vrf_show(vrf: &BgpVrf, msg: DisplayRequest) {
     let (path, args) = path_from_command(&msg.paths);
     let out = match path.as_str() {
         "/show/bgp/summary" => show_bgp_summary(vrf, args, msg.json),
-        "/show/bgp/neighbors" => show_bgp_neighbor(vrf, args, msg.json),
+        "/show/bgp/neighbor" => show_bgp_neighbor(vrf, args, msg.json),
         // `show bgp vrf <name> [ipv4|ipv6] [<addr>|<prefix> [longer-prefix]]`
         // — the manager strips the `vrf <name>` selector, so a per-VRF
         // task sees the same `/show/bgp/…` paths as the default VRF and
@@ -1772,7 +1772,7 @@ fn show_bgp_received(
     show_adj_rib_routes(table, bgp.router_id, json)
 }
 
-/// `show bgp neighbors <X> advertised-routes ipv6` — the v6-unicast twin
+/// `show bgp neighbor <X> advertised-routes ipv6` — the v6-unicast twin
 /// of [`show_bgp_advertised`]. The IPv6 Adj-RIB-Out always lives on the
 /// peer (`adj_out.v6`); unlike the v4 path, v6 egress is never moved to
 /// the per-peer egress task (PET is v4-only), so this reads the peer copy
@@ -1795,7 +1795,7 @@ fn show_bgp_advertised_ipv6(
     show_adj_rib_routes(&peer.adj_out.v6.0, bgp.router_id, json)
 }
 
-/// `show bgp neighbors <X> received-routes ipv6` — the v6-unicast twin of
+/// `show bgp neighbor <X> received-routes ipv6` — the v6-unicast twin of
 /// [`show_bgp_received`]. The IPv6 Adj-RIB-In lives in main's `bgp.shard`
 /// (`route_ipv6_update` runs on `bgp.shard`, not the pool), so it is read
 /// directly with no scatter-gather — the v4 N>1 pool path has no v6 twin.
@@ -2190,7 +2190,8 @@ impl PolicyBindingView {
 }
 
 /// Collect a neighbor's per-AFI bindings (sorted by family) followed by
-/// the peer-wide legacy fallback, dropping rows that name nothing.
+/// the peer-wide fallback (now populated only by neighbor-group
+/// inheritance), dropping rows that name nothing.
 fn collect_policy_bindings(peer: &Peer) -> Vec<PolicyBindingView> {
     use super::policy::InOut;
     let mut families: std::collections::BTreeSet<AfiSafi> = std::collections::BTreeSet::new();
@@ -2429,7 +2430,7 @@ fn fetch(peer: &Peer) -> Neighbor<'_> {
 
 /// Format a number of seconds as `NhNmNs` (or just `Ns` / `NmNs`
 /// depending on magnitude).  Used for the ND discovery / refresh
-/// elapsed-time lines in `show bgp neighbors`.
+/// elapsed-time lines in `show bgp neighbor`.
 ///
 /// Examples:
 /// * 27 → `"27s"`
@@ -3873,7 +3874,7 @@ Neighbor        V         AS   MsgRcvd   MsgSent   TblVer  InQ OutQ  Up/Down Sta
         assert!(addr.get("interface").is_none());
     }
 
-    /// `show bgp neighbors <name>` resolves an `interface-neighbor`
+    /// `show bgp neighbor <name>` resolves an `interface-neighbor`
     /// name (the completion offers them) and renders the FRR-style
     /// `BGP neighbor on <ifname>: <link-local>` identity; address
     /// lookups and the no-match error keep their existing forms.
@@ -3960,9 +3961,9 @@ Neighbor        V         AS   MsgRcvd   MsgSent   TblVer  InQ OutQ  Up/Down Sta
     }
 
     /// `show bgp neighbor` lists per-AFI policy/prefix-set bindings and
-    /// the legacy peer-wide fallback, family-scoped rows first.
+    /// the peer-wide fallback (group-inherited), family-scoped rows first.
     #[test]
-    fn policy_block_lists_per_afi_and_legacy() {
+    fn policy_block_lists_per_afi_and_peer_wide() {
         let mut out = String::new();
         let mut n = minimal_neighbor(None);
         n.policy_bindings = vec![
@@ -4902,25 +4903,25 @@ impl Bgp {
         self.show_cb = Builder::<ShowCallback>::default()
             .path("/show/bgp/labeled-unicast")
             .set(show_bgp_labeled)
-            .path("/show/bgp/neighbors")
+            .path("/show/bgp/neighbor")
             .set(show_bgp_neighbor::<Bgp>)
-            .path("/show/bgp/neighbors/advertised-routes")
+            .path("/show/bgp/neighbor/advertised-routes")
             .set(show_bgp_advertised)
-            .path("/show/bgp/neighbors/advertised-routes/ipv6")
+            .path("/show/bgp/neighbor/advertised-routes/ipv6")
             .set(show_bgp_advertised_ipv6)
-            .path("/show/bgp/neighbors/advertised-routes/vpnv4")
+            .path("/show/bgp/neighbor/advertised-routes/vpnv4")
             .set(show_bgp_advertised_vpnv4)
-            .path("/show/bgp/neighbors/advertised-routes/evpn")
+            .path("/show/bgp/neighbor/advertised-routes/evpn")
             .set(show_bgp_advertised_evpn)
-            .path("/show/bgp/neighbors/received-routes")
+            .path("/show/bgp/neighbor/received-routes")
             .set(show_bgp_received)
-            .path("/show/bgp/neighbors/received-routes/ipv6")
+            .path("/show/bgp/neighbor/received-routes/ipv6")
             .set(show_bgp_received_ipv6)
-            .path("/show/bgp/neighbors/received-routes/vpnv4")
+            .path("/show/bgp/neighbor/received-routes/vpnv4")
             .set(show_bgp_received_vpnv4)
-            .path("/show/bgp/neighbors/received-routes/evpn")
+            .path("/show/bgp/neighbor/received-routes/evpn")
             .set(show_bgp_received_evpn)
-            .path("/show/bgp/neighbors/rtcv4")
+            .path("/show/bgp/neighbor/rtcv4")
             .set(show_bgp_rtcv4)
             .path("/show/bgp/flowspec")
             .set(show_bgp_flowspec_v4)
@@ -4966,7 +4967,7 @@ impl Bgp {
             .set(show_bgp_vrf)
             .path("/show/bgp/vrf/summary")
             .set(show_bgp_vrf_not_running)
-            .path("/show/bgp/vrf/neighbors")
+            .path("/show/bgp/vrf/neighbor")
             .set(show_bgp_vrf_not_running)
             .path("/show/bgp/vrf/ipv4")
             .set(show_bgp_vrf_not_running)

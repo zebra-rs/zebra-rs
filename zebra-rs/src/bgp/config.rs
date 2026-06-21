@@ -405,14 +405,15 @@ fn policy_attach_msgs(
     }
 }
 
-/// Bind a resolved policy / prefix-set name to one direction slot on
-/// the peer and (un)register it with the policy actor. The actor's
-/// `PolicyRx` reply resolves the name into the actual object and
-/// soft-replays the direction — the same asynchronous ritual the
-/// per-neighbor callbacks use. Diff-gated inside
+/// Bind a resolved policy / prefix-set name to one direction of the
+/// peer-wide fallback slot and (un)register it with the policy actor.
+/// The actor's `PolicyRx` reply resolves the name into the actual
+/// object and soft-replays the direction. Diff-gated inside
 /// [`policy_attach_msgs`] (prior == new sends nothing), so group
-/// sweeps may call this freely. Shared by the per-neighbor callbacks
-/// and the neighbor-group sweep.
+/// sweeps may call this freely. The peer-wide `neighbor X policy
+/// {in,out}` CLI was retired, so the only caller is now the
+/// neighbor-group inheritance sweep ([`super::neighbor_group::apply_inherited`]);
+/// per-family bindings go through [`apply_peer_afi_policy_ref`].
 pub(super) fn apply_peer_policy_ref(
     policy_tx: &tokio::sync::mpsc::UnboundedSender<policy::Message>,
     peer: &mut Peer,
@@ -473,48 +474,13 @@ pub(super) fn apply_peer_afi_policy_ref(
     policy_attach_msgs(policy_tx, ident, policy_type, prior, want);
 }
 
-fn config_policy_in(bgp: &mut Bgp, mut args: Args, op: ConfigOp) -> Option<()> {
-    let addr = args.addr()?;
-    let new_name = if op.is_set() {
-        Some(args.string()?)
-    } else {
-        None
-    };
-    let peer = bgp.peers.get_mut(&addr)?;
-    peer.config.knobs_explicit.policy_in = new_name;
-    let want = super::neighbor_group::resolve_knob(&bgp.neighbor_groups, &peer.config, |k| {
-        k.policy_in.clone()
-    });
-    apply_peer_policy_ref(&bgp.policy_tx, peer, policy::PolicyType::PolicyListIn, want);
-    Some(())
-}
-
-fn config_policy_out(bgp: &mut Bgp, mut args: Args, op: ConfigOp) -> Option<()> {
-    let addr = args.addr()?;
-    let new_name = if op.is_set() {
-        Some(args.string()?)
-    } else {
-        None
-    };
-    let peer = bgp.peers.get_mut(&addr)?;
-    peer.config.knobs_explicit.policy_out = new_name;
-    let want = super::neighbor_group::resolve_knob(&bgp.neighbor_groups, &peer.config, |k| {
-        k.policy_out.clone()
-    });
-    apply_peer_policy_ref(
-        &bgp.policy_tx,
-        peer,
-        policy::PolicyType::PolicyListOut,
-        want,
-    );
-    Some(())
-}
-
 /// `neighbor X afi-safi <name> policy {in,out} <ref>` — the per-family
-/// route-policy binding. Wins over the legacy top-level `policy {in,out}`
-/// for routes of this family ([`Peer::policy_list_at`]). No neighbor-group
-/// inheritance layer (the group has no per-AFI policy knob), so the
-/// explicit name is bound directly.
+/// route-policy binding, and the only per-neighbor route-policy binding
+/// (the peer-wide `neighbor X policy {in,out}` was retired). For a family
+/// with no per-AFI binding, [`Peer::policy_list_at`] falls back to the
+/// peer-wide slot, which only a neighbor-group can populate. No per-AFI
+/// neighbor-group inheritance layer (the group's policy is peer-wide), so
+/// the explicit name is bound directly.
 fn config_afi_safi_policy_in(bgp: &mut Bgp, mut args: Args, op: ConfigOp) -> Option<()> {
     let addr = args.addr()?;
     let afi_safi: AfiSafi = args.afi_safi()?;
@@ -3909,13 +3875,11 @@ impl Bgp {
         // rewrite at BGP-to-RIB install time.
         self.callback_add("/router/bgp/afi-safi/table-map", config_table_map);
 
-        // Applying policy.
-        // Legacy peer-wide policy (kept for backward compatibility): a
-        // per-family `afi-safi <name> policy …` binding overrides it.
-        self.callback_peer("/policy/in", config_policy_in);
-        self.callback_peer("/policy/out", config_policy_out);
-        // Per-AFI policy / prefix-set (the canonical location). The old
-        // top-level `prefix-set` node was removed; only these remain.
+        // Applying policy. Per-AFI policy / prefix-set is the only
+        // per-neighbor binding location; the peer-wide `neighbor X
+        // policy {in,out}` and `prefix-set {in,out}` nodes were retired.
+        // A neighbor-group can still inherit a peer-wide route-policy /
+        // prefix-set into the per-family fallback slots.
         self.callback_peer("/afi-safi/policy/in", config_afi_safi_policy_in);
         self.callback_peer("/afi-safi/policy/out", config_afi_safi_policy_out);
         self.callback_peer("/afi-safi/prefix-set/in", config_afi_safi_prefix_in);
@@ -6565,10 +6529,11 @@ mod neighbor_group_wiring_tests {
         );
     }
 
-    /// Group policy/prefix-set references bind to the member's
-    /// direction slots with explicit-wins semantics.
+    /// Group policy/prefix-set references bind to the member's peer-wide
+    /// fallback slots. With the per-neighbor `policy {in,out}` CLI retired,
+    /// a neighbor-group is the only producer of those slots.
     #[tokio::test]
-    async fn group_policy_refs_bind_with_explicit_priority() {
+    async fn group_policy_refs_bind_to_peer_wide_slots() {
         use super::super::neighbor_group::{
             config_neighbor_group_policy_out, config_neighbor_group_prefix_set_in,
         };
@@ -6580,8 +6545,8 @@ mod neighbor_group_wiring_tests {
         config_peer(&mut bgp, arg_words(&["10.0.0.1"]), ConfigOp::Set).unwrap();
         config_peer_neighbor_group(&mut bgp, arg_words(&["10.0.0.1", "G"]), ConfigOp::Set).unwrap();
 
-        // The group/top-level (legacy) bindings land in the peer-wide
-        // fallback slots, not the per-AFI map.
+        // The group bindings land in the peer-wide fallback slots, not the
+        // per-AFI map.
         let pol_out = |bgp: &Bgp| {
             bgp.peers
                 .get(&peer_addr())
@@ -6608,18 +6573,6 @@ mod neighbor_group_wiring_tests {
         assert_eq!(pol_out(&bgp).as_deref(), Some("EGRESS"));
         assert_eq!(pfx_in(&bgp).as_deref(), Some("INGRESS"));
 
-        // Explicit per-neighbor name outranks the group's.
-        config_policy_out(&mut bgp, arg_words(&["10.0.0.1", "MINE"]), ConfigOp::Set).unwrap();
-        assert_eq!(pol_out(&bgp).as_deref(), Some("MINE"), "explicit wins");
-
-        // Removing the explicit statement falls back to the group's.
-        config_policy_out(&mut bgp, arg_words(&["10.0.0.1", "MINE"]), ConfigOp::Delete).unwrap();
-        assert_eq!(
-            pol_out(&bgp).as_deref(),
-            Some("EGRESS"),
-            "fallback to group reference",
-        );
-
         // Dropping the group reference unbinds.
         config_neighbor_group_policy_out(&mut bgp, arg_words(&["G", "EGRESS"]), ConfigOp::Delete)
             .unwrap();
@@ -6627,16 +6580,21 @@ mod neighbor_group_wiring_tests {
     }
 
     /// A per-AFI `afi-safi <name> policy/prefix-set` binding wins for its
-    /// own family; other families fall back to the legacy peer-wide
-    /// `policy {in,out}` (Task B/C priority). Deleting the per-AFI binding
-    /// restores the fallback.
+    /// own family; other families fall back to the peer-wide route-policy
+    /// inherited from a neighbor-group (now the only producer of the
+    /// peer-wide slot — the per-neighbor `policy {in,out}` CLI was
+    /// retired). Deleting the per-AFI binding restores the fallback.
     #[tokio::test]
-    async fn afi_safi_policy_overrides_legacy_per_family() {
+    async fn afi_safi_policy_overrides_inherited_peer_wide_per_family() {
+        use super::super::neighbor_group::config_neighbor_group_policy_in;
         use crate::bgp::InOut;
         use bgp_packet::{Afi, AfiSafi, Safi};
 
         let mut bgp = fresh_bgp();
         config_peer(&mut bgp, arg_words(&["10.0.0.1"]), ConfigOp::Set).unwrap();
+        config_neighbor_group_remote_as(&mut bgp, arg_words(&["G", "65000"]), ConfigOp::Set)
+            .unwrap();
+        config_peer_neighbor_group(&mut bgp, arg_words(&["10.0.0.1", "G"]), ConfigOp::Set).unwrap();
 
         let v4 = AfiSafi::new(Afi::Ip, Safi::Unicast);
         let evpn = AfiSafi::new(Afi::L2vpn, Safi::Evpn);
@@ -6657,14 +6615,15 @@ mod neighbor_group_wiring_tests {
                 .clone()
         };
 
-        // Legacy top-level policy (kept for backward compatibility)
-        // applies to every family as the fallback.
-        config_policy_in(&mut bgp, arg_words(&["10.0.0.1", "LEGACY"]), ConfigOp::Set).unwrap();
+        // The peer-wide fallback, inherited from the neighbor-group,
+        // applies to every family with no per-AFI override.
+        config_neighbor_group_policy_in(&mut bgp, arg_words(&["G", "LEGACY"]), ConfigOp::Set)
+            .unwrap();
         assert_eq!(pol_in(&bgp, v4).as_deref(), Some("LEGACY"));
         assert_eq!(pol_in(&bgp, evpn).as_deref(), Some("LEGACY"));
 
-        // A per-AFI ipv4 binding overrides the legacy one — but only for
-        // ipv4; evpn still sees the legacy fallback.
+        // A per-AFI ipv4 binding overrides the fallback — but only for
+        // ipv4; evpn still sees the inherited fallback.
         super::config_afi_safi_policy_in(
             &mut bgp,
             arg_words(&["10.0.0.1", "ipv4", "PERAFI"]),
@@ -6675,11 +6634,11 @@ mod neighbor_group_wiring_tests {
         assert_eq!(
             pol_in(&bgp, evpn).as_deref(),
             Some("LEGACY"),
-            "other family keeps the legacy fallback",
+            "other family keeps the inherited fallback",
         );
 
-        // prefix-set has no legacy peer-wide slot (Task C removed it), so
-        // it is per-AFI only.
+        // prefix-set has no per-neighbor CLI and the group sets none, so
+        // it is per-AFI only here.
         super::config_afi_safi_prefix_in(
             &mut bgp,
             arg_words(&["10.0.0.1", "ipv4", "PFX4"]),
@@ -6689,7 +6648,7 @@ mod neighbor_group_wiring_tests {
         assert_eq!(pfx_in(&bgp, v4).as_deref(), Some("PFX4"));
         assert_eq!(pfx_in(&bgp, evpn), None, "no prefix-set fallback");
 
-        // Deleting the per-AFI policy restores the legacy fallback for ipv4.
+        // Deleting the per-AFI policy restores the inherited fallback for ipv4.
         super::config_afi_safi_policy_in(
             &mut bgp,
             arg_words(&["10.0.0.1", "ipv4"]),
@@ -6699,7 +6658,7 @@ mod neighbor_group_wiring_tests {
         assert_eq!(
             pol_in(&bgp, v4).as_deref(),
             Some("LEGACY"),
-            "per-AFI delete falls back to legacy",
+            "per-AFI delete falls back to the inherited peer-wide policy",
         );
     }
 }

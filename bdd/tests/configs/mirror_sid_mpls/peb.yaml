@@ -1,0 +1,86 @@
+# peb — the protector. IS-IS L2 SR-MPLS (loopback 1.1.1.4/32, Prefix-SID
+# index 4 -> label 16004), iBGP VPNv4 to pe1 and pea. It advertises a
+# Mirror Context binding (SID/Label Binding TLV 149 with the M-flag) for
+# pea's loopback 1.1.1.3/32, with via-vrf vrf-cust, and installs a
+# context-label ILM that pops the context label and decaps into vrf-cust
+# (RFC 8679). ce2 is dual-homed here too; peb reaches ce2's loopback via a
+# static route inside vrf-cust, which is how the context-label decap
+# delivers redirected traffic. peb does NOT originate ce2 into BGP — it is
+# a pure protector; pea is the sole BGP advertiser of ce2, and since pea
+# stays up this is egress *link* protection. peb imports ce1 (from pe1) so
+# the post-failover return path ce2 -> peb -> pe1 resolves.
+vrf:
+- name: vrf-cust
+  ipv4:
+    route-target:
+      import:
+      - 65000:100
+      export:
+      - 65000:100
+interface:
+- if-name: lo
+  ipv4:
+    address: 1.1.1.4/32
+- if-name: peb-pea
+  ipv4:
+    address: 10.0.34.2/30
+- if-name: peb-ce2
+  vrf: vrf-cust
+  ipv4:
+    address: 10.3.3.1/30
+router:
+  static:
+    vrf:
+    - name: vrf-cust
+      ipv4:
+        route:
+        - prefix: 10.20.20.20/32
+          nexthop:
+          - address: 10.3.3.2
+  isis:
+    net: 49.0000.0000.0000.0004.00
+    hostname: peb
+    is-type: level-2-only
+    segment-routing: mpls
+    te-router-id: 1.1.1.4
+    egress-protection:
+      protect:
+      - protected-locator: 1.1.1.3/32
+        via-vrf: vrf-cust
+        dataplane: mpls
+    interface:
+    - if-name: lo
+      ipv4:
+        enable: true
+        prefix-sid:
+          index: 4
+    - if-name: peb-pea
+      network-type: point-to-point
+      metric: 10
+      ipv4:
+        enable: true
+  bgp:
+    global:
+      as: 65000
+      router-id: 1.1.1.4
+    timer:
+      adv-interval:
+        ibgp: 1
+    neighbor:
+    - remote-address: 1.1.1.1
+      remote-as: 65000
+      update-source: 1.1.1.4
+      enabled: true
+      afi-safi:
+      - name: vpnv4
+        enabled: true
+    - remote-address: 1.1.1.3
+      remote-as: 65000
+      update-source: 1.1.1.4
+      enabled: true
+      afi-safi:
+      - name: vpnv4
+        enabled: true
+    vrf:
+    - name: vrf-cust
+      rd: 65000:4

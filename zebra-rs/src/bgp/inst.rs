@@ -429,7 +429,8 @@ pub fn init_shard_count(config_shards: Option<usize>) -> usize {
     if n > 1 {
         tracing::info!("BGP RIB sharding: {n} shards (from {source})");
     } else {
-        tracing::info!("BGP RIB sharding: 1 shard, synchronous (from {source})");
+        // Disable default logging.
+        // tracing::info!("BGP RIB sharding: 1 shard, synchronous (from {source})");
     }
     n
 }
@@ -2151,7 +2152,7 @@ impl Bgp {
         // A2 ⑤: at N>1 a peer's v4-unicast Adj-RIB-In lives in the pool
         // shards, not main's Loc-RIB mirror — gather it for received-routes
         // (the sync render callback would read the empty main-side copy).
-        if self.shards.is_some() && path == "/show/bgp/neighbors/received-routes" {
+        if self.shards.is_some() && path == "/show/bgp/neighbor/received-routes" {
             let output = self.show_received_v4_gathered(&mut args, msg.json).await;
             let _ = msg.resp.send(output).await;
             return;
@@ -2159,7 +2160,7 @@ impl Bgp {
         // Group-task: at gate-on a peer's v4 Adj-RIB-Out lives in its update
         // group's egress task — request it for advertised-routes.
         if super::group_egress::egress_group_task_enabled()
-            && path == "/show/bgp/neighbors/advertised-routes"
+            && path == "/show/bgp/neighbor/advertised-routes"
         {
             let output = self
                 .show_advertised_v4_from_group(&mut args, msg.json)
@@ -2170,7 +2171,7 @@ impl Bgp {
         // A2 ⑥: at gate-on a peer's v4 Adj-RIB-Out lives in its PET, not on
         // the peer — request it from the PET for advertised-routes.
         if super::peer_egress::peer_egress_task_enabled()
-            && path == "/show/bgp/neighbors/advertised-routes"
+            && path == "/show/bgp/neighbor/advertised-routes"
         {
             let output = self.show_advertised_v4_from_pet(&mut args, msg.json).await;
             let _ = msg.resp.send(output).await;

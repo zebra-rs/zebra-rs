@@ -6,7 +6,7 @@ use super::{
     Block, BlockBuilder, BlockConfig, BridgeBuilder, BridgeConfig, DEFAULT_BLOCK_NAME, GroupTrait,
     Link, Locator, LocatorBuilder, LocatorConfig, MacAddr, MplsConfig, Nexthop, NexthopMap,
     NexthopUni, RibSrRx, RibType, Sid, SidBehavior, StaticConfig, V4, V6, Vrf, VrfBuilder,
-    VrfIdAllocator, VrfRibTables, Vxlan, VxlanBuilder, VxlanConfig,
+    VrfIdAllocator, VrfRibTables, VrfStaticConfig, Vxlan, VxlanBuilder, VxlanConfig,
 };
 
 use crate::config::{Args, path_from_command};
@@ -48,6 +48,30 @@ pub enum Message {
         rib: RibEntry,
     },
     Ipv6Del {
+        prefix: Ipv6Net,
+        rib: RibEntry,
+    },
+    /// Static-route install/withdraw into a named VRF's table. The VRF
+    /// name (not the kernel `table_id`) is carried so the message
+    /// survives a VRF whose table isn't up yet — `process_msg` resolves
+    /// it via `self.vrfs`, and the `VrfAdd` reconcile re-emits it.
+    Ipv4AddVrf {
+        vrf: String,
+        prefix: Ipv4Net,
+        rib: RibEntry,
+    },
+    Ipv4DelVrf {
+        vrf: String,
+        prefix: Ipv4Net,
+        rib: RibEntry,
+    },
+    Ipv6AddVrf {
+        vrf: String,
+        prefix: Ipv6Net,
+        rib: RibEntry,
+    },
+    Ipv6DelVrf {
+        vrf: String,
         prefix: Ipv6Net,
         rib: RibEntry,
     },
@@ -204,6 +228,28 @@ pub enum Message {
         prefix: ipnet::Ipv6Net,
         context_table: u32,
     },
+    /// Reset the local node's Mirror SID egress-protection registrations:
+    /// every `(protected_locator, mirror_sid)` a peer advertised. IS-IS
+    /// recomputes the full set on each SPF and sends it here. The RIB
+    /// matches a protected locator against its *own* End.DT46 service SIDs
+    /// — so a SID inside a protected locator is redirected (via
+    /// `End.B6.Encaps` to the Mirror SID) when its CE-facing VRF can no
+    /// longer deliver (PE-CE link down), and restored when it recovers.
+    /// This is egress *link* protection: the protected egress (PEA) acts
+    /// as its own PLR.
+    EgressProtectSet {
+        protections: Vec<(ipnet::Ipv6Net, std::net::Ipv6Addr)>,
+    },
+    /// SR-MPLS Mirror Context egress link protection: the local node is
+    /// protected — each `(context_label, protector_loopback)` says that on
+    /// a PE-CE link failure its per-VRF VPN-label ILM should be swapped to
+    /// push `context_label` toward `protector_loopback` (resolved to the
+    /// transport LSP by the RIB). IS-IS recomputes the full set on each
+    /// SPF. The RIB overrides the BGP-owned `DecapVrf` ILM for the failed
+    /// VRF and restores it on recovery.
+    EgressMplsProtectSet {
+        protections: Vec<(u32, std::net::Ipv4Addr)>,
+    },
     VxlanAdd {
         name: String,
         config: VxlanConfig,
@@ -247,6 +293,17 @@ pub enum Message {
     LinkVrfBind {
         ifname: String,
         vrf: Option<String>,
+    },
+    /// Bind / unbind an interface to a bridge master device
+    /// (`ip link set <ifname> master <bridge>` / `... nomaster`).
+    /// `bridge == Some(name)` enslaves to that bridge; `None` detaches
+    /// (sets IFLA_MASTER = 0). Like `LinkVrfBind`, the handler tolerates
+    /// the interface or the bridge not yet existing in our tables and
+    /// stages the intent in `pending_bridge_bind`, firing it when the
+    /// missing kernel device appears via `link_add`.
+    LinkBridgeBind {
+        ifname: String,
+        bridge: Option<String>,
     },
     MacAdd {
         vni: u32,
@@ -389,7 +446,11 @@ impl Message {
     pub fn is_fib_install(&self) -> bool {
         matches!(
             self,
-            Message::Ipv4Add { .. } | Message::Ipv6Add { .. } | Message::IlmAdd { .. }
+            Message::Ipv4Add { .. }
+                | Message::Ipv6Add { .. }
+                | Message::Ipv4AddVrf { .. }
+                | Message::Ipv6AddVrf { .. }
+                | Message::IlmAdd { .. }
         )
     }
 }
@@ -409,6 +470,22 @@ pub enum IlmType {
     /// keys off the Oif, not the table id), but the show path
     /// renders it for operators.
     DecapVrf {
+        table_id: u32,
+        vrf_ifindex: u32,
+    },
+    /// IS-IS SR-MPLS Mirror Context label (RFC 8679 egress protection):
+    /// the protector (PEB) pops the context label a failed egress's PLR
+    /// pushed and delivers the inner packet into the dual-homed VRF.
+    /// Netlink-identical to [`IlmType::DecapVrf`] (pop + `Oif(vrf_ifindex)`
+    /// so the inner packet lands in `vrf_tables[table_id]`) — a distinct
+    /// variant only so show output and ILM selection can tell a context
+    /// label from a BGP VPN label. The egress-link-protection model (the
+    /// protected egress redirects and strips its own VPN label, like the
+    /// SRv6 End.B6.Encaps path) means the protector only ever pops this
+    /// one label; the two-label node-protection variant (a context label
+    /// over the egress's VPN label) needs the Linux global-ILM
+    /// approximation and is deferred.
+    ContextLabel {
         table_id: u32,
         vrf_ifindex: u32,
     },
@@ -557,6 +634,12 @@ pub struct Rib {
     /// when a missing interface or VRF master appears later, and clears
     /// the entry once the netlink call succeeds.
     pub pending_vrf_bind: BTreeMap<String, Option<String>>,
+    /// Operator intent for per-interface bridge binding, keyed by
+    /// ifname. `Some(bridge)` = enslave; `None` = detach. Mirrors
+    /// `pending_vrf_bind`: retried when either the interface or the
+    /// bridge master appears later, kept as durable desired-state across
+    /// link flaps, and cleared on detach.
+    pub pending_bridge_bind: BTreeMap<String, Option<String>>,
     /// Operator-configured interface MTU, keyed by ifname. This is the
     /// durable desired-state for `set interface <name> mtu <n>`: it is
     /// applied to the kernel when set, replayed when a matching link
@@ -596,6 +679,8 @@ pub struct Rib {
     pub rx: UnboundedReceiver<Message>,
     pub static_v4: StaticConfig<V4>,
     pub static_v6: StaticConfig<V6>,
+    pub static_vrf_v4: VrfStaticConfig<V4>,
+    pub static_vrf_v6: VrfStaticConfig<V6>,
     pub mpls_config: MplsConfig,
     pub link_config: LinkConfig,
     pub bridge_config: BridgeBuilder,
@@ -612,6 +697,29 @@ pub struct Rib {
     /// inserts collide naturally on duplicate allocations; the show
     /// callback iterates this in address order.
     pub sids: BTreeMap<std::net::Ipv6Addr, Sid>,
+    /// Mirror SID egress-protection registrations from IS-IS: every
+    /// `protected_locator -> mirror_sid` a peer advertised (see
+    /// [`Message::EgressProtectSet`]). A local End.DT46 service SID whose
+    /// address falls inside one of these locators is redirected to the
+    /// Mirror SID (via `End.B6.Encaps`) while its CE-facing VRF can't
+    /// deliver.
+    pub egress_protect: BTreeMap<ipnet::Ipv6Net, std::net::Ipv6Addr>,
+    /// Local SID addresses currently installed in their redirect
+    /// (`End.B6.Encaps -> mirror_sid`) form rather than the normal
+    /// End.DT46 decap. Tracks the live FIB form so a reconcile only
+    /// emits a netlink change on an actual transition.
+    pub redirected_sids: BTreeSet<std::net::Ipv6Addr>,
+    /// SR-MPLS Mirror Context egress link protection registrations from
+    /// IS-IS (see [`Message::EgressMplsProtectSet`]): each
+    /// `(context_label, protector_loopback)` the local node is protected
+    /// by. On a PE-CE link failure the protected VRF's BGP `DecapVrf`
+    /// VPN-label ILM is overridden to a swap pushing the context label
+    /// toward the protector.
+    pub egress_mpls_protect: Vec<(u32, std::net::Ipv4Addr)>,
+    /// VPN labels whose `DecapVrf` ILM is currently overridden with a
+    /// Mirror Context redirect swap. Maps the label to the original
+    /// `DecapVrf` IlmEntry so the decap can be restored on link recovery.
+    pub redirected_vpn_labels: BTreeMap<u32, IlmEntry>,
     /// SR-update return channels keyed by protocol name. One sender per
     /// protocol; established once via Message::SrSubscribe.
     pub sr_clients: BTreeMap<String, UnboundedSender<RibSrRx>>,
@@ -707,6 +815,7 @@ impl Rib {
             vrf_tables: BTreeMap::new(),
             vrf_id_alloc: VrfIdAllocator::new(),
             pending_vrf_bind: BTreeMap::new(),
+            pending_bridge_bind: BTreeMap::new(),
             mtu_config: BTreeMap::new(),
             table: PrefixMap::new(),
             table_v6: PrefixMap::new(),
@@ -719,6 +828,8 @@ impl Rib {
             rx,
             static_v4: StaticConfig::<V4>::new(),
             static_v6: StaticConfig::<V6>::new(),
+            static_vrf_v4: VrfStaticConfig::<V4>::new(),
+            static_vrf_v6: VrfStaticConfig::<V6>::new(),
             mpls_config: MplsConfig::new(),
             link_config: LinkConfig::new(),
             bridge_config: BridgeBuilder::new(),
@@ -735,6 +846,10 @@ impl Rib {
             },
             locators: BTreeMap::new(),
             sids: BTreeMap::new(),
+            egress_protect: BTreeMap::new(),
+            redirected_sids: BTreeSet::new(),
+            egress_mpls_protect: Vec::new(),
+            redirected_vpn_labels: BTreeMap::new(),
             sr_clients: BTreeMap::new(),
             block_watch: BTreeMap::new(),
             locator_watch: BTreeMap::new(),
@@ -1132,7 +1247,11 @@ impl Rib {
         // are /128).
         self.sid_rib_insert(&sid);
 
+        let addr = sid.addr;
         self.sids.insert(sid.addr, sid);
+        // A protected End.DT46 SID installed while its PE-CE link is
+        // already down must go straight to its redirect form.
+        self.apply_egress_redirect(addr).await;
     }
 
     /// Insert a `RibEntry` for this SID into `self.table_v6`. Replaces
@@ -1219,6 +1338,285 @@ impl Rib {
         self.fib_handle
             .route_mirror_context_install(&prefix, context_table, vrf_table, ifindex)
             .await;
+    }
+
+    /// True when the VRF behind `table_id` still has an operationally-up,
+    /// addressed, non-loopback member link — i.e. it can still reach its
+    /// CE. `table_id == 0` (the main table, not a VRF SID) always
+    /// delivers. Gates Mirror SID egress link protection: when the PE-CE
+    /// link goes down the VRF can no longer deliver, so the protected
+    /// End.DT46 service SID is redirected to the protector's Mirror SID.
+    fn vrf_can_deliver(&self, table_id: u32) -> bool {
+        if table_id == 0 {
+            return true;
+        }
+        self.links.values().any(|link| {
+            self.ifindex_vrf_id(link.index) == table_id
+                && !link.is_loopback()
+                && link.is_up()
+                && (!link.addr4.is_empty() || !link.addr6.is_empty())
+        })
+    }
+
+    /// The Mirror SID a local End.DT46 service SID is protected by: the
+    /// first registered protected-locator that covers the SID's address.
+    /// `None` when the SID isn't covered by any registration. The match
+    /// against the node's *own* SID address is why IS-IS can send every
+    /// received Mirror SID untouched — only a locator that actually covers
+    /// a local service SID redirects anything.
+    fn protecting_mirror_sid(&self, sid: &Sid) -> Option<std::net::Ipv6Addr> {
+        if sid.behavior != SidBehavior::EndDT46 {
+            return None;
+        }
+        self.egress_protect
+            .iter()
+            .find(|(loc, _)| loc.contains(&sid.addr))
+            .map(|(_, m)| *m)
+    }
+
+    /// Resolve the underlay nexthop (link-local + ifindex) toward an SRv6
+    /// destination — the protector's Mirror SID — by longest-prefix match
+    /// in the main IPv6 table (the IS-IS route to the protector's
+    /// locator). Returns the `via`/`dev` the redirect's seg6 H.Encaps
+    /// route needs. `None` if the protector isn't reachable.
+    fn resolve_underlay_nexthop_v6(&self, dest: std::net::Ipv6Addr) -> Option<(Ipv6Addr, u32)> {
+        let host = Ipv6Net::new(dest, 128).ok()?;
+        let (_, entries) = self.table_v6.get_lpm(&host)?;
+        for entry in entries.iter() {
+            let unis: &[NexthopUni] = match &entry.nexthop {
+                Nexthop::Uni(uni) => std::slice::from_ref(uni),
+                Nexthop::Multi(multi) => &multi.nexthops,
+                _ => continue,
+            };
+            for uni in unis {
+                if let (IpAddr::V6(a), Some(ifindex)) = (uni.addr, uni.ifindex()) {
+                    return Some((a, ifindex));
+                }
+            }
+        }
+        None
+    }
+
+    /// Reconcile one local SID's installed FIB form against the egress-
+    /// protection decision, with a **link-state latch**:
+    ///
+    /// - Enter the redirect form (`End.B6.Encaps -> mirror_sid`) when the
+    ///   SID is protected *and* its CE-facing VRF can't deliver (PE-CE link
+    ///   down).
+    /// - Leave it (restore the normal End.DT46 decap) **only** when the VRF
+    ///   can deliver again — never just because the protection registration
+    ///   vanished. The registration is recomputed from a live LSDB scan on
+    ///   every SPF and can transiently read empty (e.g. during the SPF the
+    ///   PE-CE link-down itself triggers); dropping an active redirect on
+    ///   that transient would black-hole the very traffic it protects. A
+    ///   fast-reroute redirect must hold until the data-plane condition
+    ///   that caused it clears.
+    ///
+    /// A single `route_sid_install` (NLM_F_REPLACE) swaps the /128 in
+    /// place; `redirected_sids` tracks the live form so the FIB is only
+    /// touched on an actual transition.
+    pub async fn apply_egress_redirect(&mut self, addr: std::net::Ipv6Addr) {
+        let Some(sid) = self.sids.get(&addr).cloned() else {
+            return;
+        };
+        if sid.behavior != SidBehavior::EndDT46 {
+            return;
+        }
+        let is_redirected = self.redirected_sids.contains(&addr);
+        let can_deliver = self.vrf_can_deliver(sid.table_id);
+        if is_redirected {
+            // Latched: hold the redirect until the PE-CE link recovers.
+            if can_deliver {
+                self.fib_handle
+                    .route_sid_install(&sid, 0, sid.ifindex)
+                    .await;
+                self.redirected_sids.remove(&addr);
+                tracing::info!(
+                    "[egress-protect] restore {} -> End.DT46 (VRF table {} delivers again)",
+                    addr,
+                    sid.table_id
+                );
+            }
+        } else if !can_deliver {
+            // Enter redirect: the VRF can't deliver and a peer protects us.
+            // Re-encapsulate (seg6 H.Encaps, route-level — not a seg6local
+            // endpoint action, since the inbound SRH is already exhausted)
+            // toward the protector's Mirror SID via the underlay nexthop.
+            let Some(mirror_sid) = self.protecting_mirror_sid(&sid) else {
+                return;
+            };
+            let Some((nh6, ifindex)) = self.resolve_underlay_nexthop_v6(mirror_sid) else {
+                tracing::warn!(
+                    "[egress-protect] {} protected by {} but protector unreachable — not redirecting",
+                    addr,
+                    mirror_sid
+                );
+                return;
+            };
+            self.fib_handle
+                .route_sid_redirect_install(&sid.prefix(), mirror_sid, nh6, ifindex)
+                .await;
+            self.redirected_sids.insert(addr);
+            tracing::info!(
+                "[egress-protect] redirect {} -> seg6 H.Encaps [{}] via {} dev {} (VRF table {} can't deliver)",
+                addr,
+                mirror_sid,
+                nh6,
+                ifindex,
+                sid.table_id
+            );
+        }
+    }
+
+    /// Re-evaluate every local End.DT46 SID inside a protected locator (or
+    /// currently redirected). Called when IS-IS resets the egress-
+    /// protection registrations and on PE-CE link up/down.
+    pub async fn reconcile_egress_redirects(&mut self) {
+        if self.egress_protect.is_empty() && self.redirected_sids.is_empty() {
+            return;
+        }
+        let addrs: Vec<std::net::Ipv6Addr> = self
+            .sids
+            .values()
+            .filter(|s| s.behavior == SidBehavior::EndDT46)
+            .filter(|s| {
+                self.redirected_sids.contains(&s.addr)
+                    || self.egress_protect.keys().any(|loc| loc.contains(&s.addr))
+            })
+            .map(|s| s.addr)
+            .collect();
+        for addr in addrs {
+            self.apply_egress_redirect(addr).await;
+        }
+    }
+
+    // ── SR-MPLS Mirror Context egress redirect ────────────────────────
+
+    /// Resolve the SR-MPLS transport to `protector_loopback`: the outgoing
+    /// label stack (the prefix-SID transport label — empty under PHP for a
+    /// directly-adjacent protector) plus the underlay nexthop + ifindex,
+    /// by longest-prefix match in the main IPv4 table.
+    fn resolve_protector_transport_v4(
+        &self,
+        protector_loopback: Ipv4Addr,
+    ) -> Option<(Vec<u32>, Ipv4Addr, u32)> {
+        let host = Ipv4Net::new(protector_loopback, 32).ok()?;
+        let (_, entries) = self.table.get_lpm(&host)?;
+        for entry in entries.iter() {
+            let unis: &[NexthopUni] = match &entry.nexthop {
+                Nexthop::Uni(uni) => std::slice::from_ref(uni),
+                Nexthop::Multi(multi) => &multi.nexthops,
+                _ => continue,
+            };
+            for uni in unis {
+                if let (IpAddr::V4(a), Some(ifindex)) = (uni.addr, uni.ifindex()) {
+                    return Some((uni.mpls_label.clone(), a, ifindex));
+                }
+            }
+        }
+        None
+    }
+
+    /// Re-evaluate every BGP VPN-label `DecapVrf` ILM for the Mirror
+    /// Context redirect. Called when IS-IS resets the registration and on
+    /// PE-CE link up/down.
+    pub async fn reconcile_egress_mpls_redirects(&mut self) {
+        if self.egress_mpls_protect.is_empty() && self.redirected_vpn_labels.is_empty() {
+            return;
+        }
+        // Snapshot the (label, table_id) of every VPN decap ILM.
+        let targets: Vec<(u32, u32)> = self
+            .ilm
+            .iter()
+            .filter_map(|(&label, entries)| {
+                entries.iter().find_map(|e| match e.ilm_type {
+                    IlmType::DecapVrf { table_id, .. } => Some((label, table_id)),
+                    _ => None,
+                })
+            })
+            .chain(
+                // Already-redirected labels may have lost their candidate;
+                // keep them so a restore can run.
+                self.redirected_vpn_labels.keys().map(|&l| (l, 0)),
+            )
+            .collect();
+        for (label, table_id) in targets {
+            self.apply_egress_mpls_redirect(label, table_id).await;
+        }
+    }
+
+    /// Reconcile one VPN-label ILM with the redirect decision, **latched**
+    /// on link state (like the SRv6 path): override the BGP `DecapVrf` to a
+    /// swap pushing `[transport…, context_label]` toward the protector when
+    /// the VRF can't deliver, and restore the decap only when it can again.
+    async fn apply_egress_mpls_redirect(&mut self, label: u32, table_id: u32) {
+        let is_redirected = self.redirected_vpn_labels.contains_key(&label);
+        // Resolve the live DecapVrf entry (the restore target) + its VRF.
+        let decap = self.ilm.get(&label).and_then(|es| {
+            es.iter()
+                .find(|e| matches!(e.ilm_type, IlmType::DecapVrf { .. }))
+                .cloned()
+        });
+        let vrf_table = match (&decap, is_redirected) {
+            (Some(e), _) => match e.ilm_type {
+                IlmType::DecapVrf { table_id, .. } => table_id,
+                _ => table_id,
+            },
+            (None, true) => table_id, // restore-only; table_id from caller is 0/unused
+            (None, false) => return,
+        };
+        let can_deliver = self.vrf_can_deliver(vrf_table);
+        if is_redirected {
+            if can_deliver && let Some(orig) = self.redirected_vpn_labels.remove(&label) {
+                // Restore the BGP VPN decap, replacing the IS-IS swap
+                // (the kernel holds one route per label).
+                self.fib_handle.ilm_replace(label, &orig).await;
+                tracing::info!(
+                    "[egress-protect-mpls] restore VPN label {} -> DecapVrf (VRF table {} delivers)",
+                    label,
+                    vrf_table
+                );
+            }
+        } else if !can_deliver {
+            let Some(orig) = decap else { return };
+            // Pick a protection (single-protector dual-homing).
+            let Some(&(context_label, protector_lo)) = self.egress_mpls_protect.first() else {
+                return;
+            };
+            let Some((mut stack, nexthop, ifindex)) =
+                self.resolve_protector_transport_v4(protector_lo)
+            else {
+                tracing::warn!(
+                    "[egress-protect-mpls] protector {} unreachable — not redirecting VPN label {}",
+                    protector_lo,
+                    label
+                );
+                return;
+            };
+            stack.push(context_label);
+            let swap = IlmEntry {
+                ilm_type: IlmType::Swap,
+                nexthop: Nexthop::Uni(NexthopUni {
+                    addr: IpAddr::V4(nexthop),
+                    ifindex_origin: Some(ifindex),
+                    mpls_label: stack.clone(),
+                    valid: true,
+                    ..Default::default()
+                }),
+                ..IlmEntry::new(RibType::Isis)
+            };
+            // Replace the BGP DecapVrf route at this label with the swap.
+            self.fib_handle.ilm_replace(label, &swap).await;
+            self.redirected_vpn_labels.insert(label, orig);
+            tracing::info!(
+                "[egress-protect-mpls] redirect VPN label {} -> swap {:?} via {} dev {} (VRF table {} can't deliver)",
+                label,
+                stack,
+                nexthop,
+                ifindex,
+                vrf_table
+            );
+        }
     }
 
     /// Register a subscriber. `proto_id` is allocated by
@@ -1646,6 +2044,48 @@ impl Rib {
         table_id
     }
 
+    /// Pre-resolve a VRF-static route's gateway that sits directly on a
+    /// VRF interface by stamping its egress `ifindex_origin`. The kernel
+    /// flushes (and silently re-adds) an interface's addresses when it is
+    /// enslaved to a VRF, which races our connected-route shadow out of
+    /// the per-VRF table — so a table-walk resolution of an on-link
+    /// gateway intermittently fails. `ifindex_origin` makes the resolver
+    /// skip the table walk (`GroupUni::resolve_v6`) and install the route
+    /// on-link, exactly as the kernel resolves it. Only stamps a Uni/Multi
+    /// gateway the source didn't already pin to an interface.
+    fn stamp_vrf_onlink(&self, entry: &mut RibEntry, table_id: u32) {
+        let onlink_ifindex = |nh: IpAddr| -> Option<u32> {
+            self.links.values().find_map(|link| {
+                if self.ifindex_vrf_id(link.index) != table_id {
+                    return None;
+                }
+                let hit = match nh {
+                    IpAddr::V4(a) => link
+                        .addr4
+                        .iter()
+                        .any(|x| matches!(x.addr, IpNet::V4(net) if net.contains(&a))),
+                    IpAddr::V6(a) => link
+                        .addr6
+                        .iter()
+                        .any(|x| matches!(x.addr, IpNet::V6(net) if net.contains(&a))),
+                };
+                hit.then_some(link.index)
+            })
+        };
+        let stamp = |uni: &mut NexthopUni| {
+            if uni.ifindex_origin.is_none()
+                && let Some(ifindex) = onlink_ifindex(uni.addr)
+            {
+                uni.ifindex_origin = Some(ifindex);
+            }
+        };
+        match &mut entry.nexthop {
+            Nexthop::Uni(uni) => stamp(uni),
+            Nexthop::Multi(multi) => multi.nexthops.iter_mut().for_each(stamp),
+            _ => {}
+        }
+    }
+
     async fn process_msg(&mut self, msg: Message, table_id: u32) {
         match msg {
             Message::Ipv4Add { prefix, rib } => {
@@ -1681,6 +2121,42 @@ impl Rib {
                     self.ipv6_route_del(&prefix, rib, table_id).await;
                     self.nht_recompute_and_notify();
                 } else {
+                    self.ipv6_route_del_vrf(table_id, &prefix, rib).await;
+                }
+            }
+            // Static-route install/withdraw into a named VRF's table.
+            // Resolve the VRF name → kernel `table_id`; a VRF that isn't
+            // up yet drops the install (re-emitted by the `VrfAdd`
+            // reconcile once its table exists).
+            Message::Ipv4AddVrf {
+                vrf,
+                prefix,
+                mut rib,
+            } => match self.vrfs.get(&vrf).map(|v| v.table_id) {
+                Some(table_id) => {
+                    self.stamp_vrf_onlink(&mut rib, table_id);
+                    self.ipv4_route_add_vrf(table_id, &prefix, rib).await
+                }
+                None => tracing::debug!(%vrf, %prefix, "static vrf route: vrf table not up yet"),
+            },
+            Message::Ipv4DelVrf { vrf, prefix, rib } => {
+                if let Some(table_id) = self.vrfs.get(&vrf).map(|v| v.table_id) {
+                    self.ipv4_route_del_vrf(table_id, &prefix, rib).await;
+                }
+            }
+            Message::Ipv6AddVrf {
+                vrf,
+                prefix,
+                mut rib,
+            } => match self.vrfs.get(&vrf).map(|v| v.table_id) {
+                Some(table_id) => {
+                    self.stamp_vrf_onlink(&mut rib, table_id);
+                    self.ipv6_route_add_vrf(table_id, &prefix, rib).await
+                }
+                None => tracing::debug!(%vrf, %prefix, "static vrf route: vrf table not up yet"),
+            },
+            Message::Ipv6DelVrf { vrf, prefix, rib } => {
+                if let Some(table_id) = self.vrfs.get(&vrf).map(|v| v.table_id) {
                     self.ipv6_route_del_vrf(table_id, &prefix, rib).await;
                 }
             }
@@ -1785,6 +2261,13 @@ impl Rib {
                 self.fib_handle.vxlan_add(&vxlan).await;
             }
             Message::VxlanDel { name } => {
+                // Deleting the VXLAN device removes its kernel master
+                // implicitly. Drop any staged bridge-bind for it so a
+                // later same-named VXLAN isn't silently re-enslaved by a
+                // stale intent (belt-and-braces: a `delete vxlan X bridge
+                // BR` line, when present, already clears it via the
+                // `/vxlan/bridge` dispatch above).
+                self.pending_bridge_bind.remove(&name);
                 let vxlan = Vxlan {
                     name: name.clone(),
                     ..Default::default()
@@ -1861,6 +2344,11 @@ impl Rib {
                 // per-`ProtoId` dispatcher writes routes here when a
                 // VRF-attached protocol installs.
                 self.vrf_tables.insert(table_id, VrfRibTables::new());
+                // Re-emit any static routes configured for this VRF now
+                // that its kernel table exists — the initial commit's
+                // install was dropped if it raced ahead of the VRF.
+                self.static_vrf_v4.reinstall(&name, &self.tx);
+                self.static_vrf_v6.reinstall(&name, &self.tx);
                 tracing::info!(
                     "vrf_add: {} table_id={} ifindex={}",
                     name,
@@ -2013,6 +2501,99 @@ impl Rib {
                     vrf
                 );
             }
+            Message::LinkBridgeBind { ifname, bridge } => {
+                // Always record operator intent so a later kernel
+                // NewLink (the slave interface appears, or the bridge
+                // master is created) can fire the bind without the
+                // operator re-issuing the command.
+                if bridge.is_none() {
+                    self.pending_bridge_bind.remove(&ifname);
+                } else {
+                    self.pending_bridge_bind
+                        .insert(ifname.clone(), bridge.clone());
+                }
+
+                let (ifindex, current_master) = match self.links.values().find(|l| l.name == ifname)
+                {
+                    Some(link) => (link.index, link.master.unwrap_or(0)),
+                    None => {
+                        if crate::rib::tracing::fib_link() {
+                            tracing::info!(
+                                "link_bridge_bind: interface {} not present yet — pending",
+                                ifname
+                            );
+                        }
+                        return;
+                    }
+                };
+
+                // Resolve the bridge to its kernel ifindex. `master == 0`
+                // detaches (`ip link set ... nomaster`). Gate on TWO
+                // things, mirroring how the VRF bind resolves through
+                // `self.vrfs`:
+                //   1. config presence (`self.bridges`) — `BridgeDel`
+                //      removes the entry synchronously, BEFORE the netlink
+                //      delete that releases this port. The released port's
+                //      RTM_NEWLINK (master cleared) re-fires this bind via
+                //      `link_add`; gating here means it sees the bridge
+                //      already gone and stays pending, instead of racing a
+                //      `link_set_master` against the vanishing device —
+                //      which the kernel rejects with EINVAL. The `bridge`
+                //      leaf is a leafref to `/bridge/name`, so a bound
+                //      bridge is always a configured one.
+                //   2. kernel presence (`self.links`) for the ifindex — it
+                //      lands there once `BridgeAdd`'s netlink create echoes
+                //      back as RTM_NEWLINK.
+                let master_ifindex = match &bridge {
+                    Some(bridge) => {
+                        if !self.bridges.contains_key(bridge) {
+                            if crate::rib::tracing::fib_link() {
+                                tracing::info!(
+                                    "link_bridge_bind: bridge {} not configured — pending",
+                                    bridge
+                                );
+                            }
+                            return;
+                        }
+                        match self.links.values().find(|l| l.name == *bridge) {
+                            Some(l) => l.index,
+                            None => {
+                                if crate::rib::tracing::fib_link() {
+                                    tracing::info!(
+                                        "link_bridge_bind: bridge {} not present yet — pending",
+                                        bridge
+                                    );
+                                }
+                                return;
+                            }
+                        }
+                    }
+                    None => 0,
+                };
+
+                // Only touch the kernel when the master actually changes.
+                // `pending_bridge_bind` is durable desired-state, so
+                // `link_add` replays this on every RTM_NEWLINK for the
+                // interface; without this guard the enslave burst would
+                // re-issue redundant `link_set_master` calls (see the
+                // `LinkVrfBind` guard for the same rationale).
+                if current_master == master_ifindex {
+                    return;
+                }
+
+                self.fib_handle
+                    .link_set_master(ifindex, master_ifindex)
+                    .await;
+                if crate::rib::tracing::fib_link() {
+                    tracing::info!(
+                        "link_bridge_bind: ifname={} ifindex={} master={} bridge={:?}",
+                        ifname,
+                        ifindex,
+                        master_ifindex,
+                        bridge
+                    );
+                }
+            }
             Message::BlockAdd { name, config } => {
                 let block = config.to_block();
                 self.blocks.insert(name.clone(), block);
@@ -2104,6 +2685,23 @@ impl Rib {
                 self.fib_handle
                     .route_mirror_context_uninstall(&prefix, context_table)
                     .await;
+            }
+            Message::EgressProtectSet { protections } => {
+                // Authoritative replace. The PIC-sticky / withdrawal logic
+                // now lives in IS-IS `register_egress_protections`, which
+                // has the LSDB to tell a genuine withdrawal (protector
+                // present, no longer advertising) from a convergence
+                // transient (protector's LSP absent — carried forward).
+                self.egress_protect = protections.into_iter().collect();
+                self.reconcile_egress_redirects().await;
+            }
+            Message::EgressMplsProtectSet { protections } => {
+                // Sticky, like EgressProtectSet: a transiently-empty SPF
+                // LSDB scan must not disarm protection mid-failure.
+                if !protections.is_empty() {
+                    self.egress_mpls_protect = protections;
+                }
+                self.reconcile_egress_mpls_redirects().await;
             }
             Message::Shutdown { tx } => {
                 self.nmap.shutdown(&self.fib_handle).await;
@@ -2469,9 +3067,13 @@ impl Rib {
                 //
             }
             ConfigOp::Set | ConfigOp::Delete => {
-                let (path, args) = path_from_command(&msg.paths);
+                let (path, mut args) = path_from_command(&msg.paths);
                 if path.as_str() == "/system/router-id" {
                     let _ = self.router_id_config_exec(args, msg.op);
+                } else if path.as_str().starts_with("/router/static/vrf/ipv4/route") {
+                    let _ = self.static_vrf_v4.exec(path, args, msg.op);
+                } else if path.as_str().starts_with("/router/static/vrf/ipv6/route") {
+                    let _ = self.static_vrf_v6.exec(path, args, msg.op);
                 } else if path.as_str().starts_with("/router/static/ipv4/route") {
                     let _ = self.static_v4.exec(path, args, msg.op);
                 } else if path.as_str().starts_with("/router/static/ipv6/route") {
@@ -2483,6 +3085,34 @@ impl Rib {
                     let _ = link_config_exec(self, path, args, msg.op).await;
                 } else if path.as_str().starts_with("/bridge") {
                     let _ = self.bridge_config.exec(path, args, msg.op);
+                } else if path.as_str() == "/vxlan/bridge" {
+                    // `set vxlan X bridge BR` enslaves the VXLAN device X
+                    // to bridge BR, reusing the SAME deferred bridge-bind
+                    // as `interface X bridge BR` (a VXLAN is an ordinary
+                    // kernel link in `self.links`, keyed by name). The
+                    // VXLAN-specific bridge-slave defaults are applied
+                    // automatically: `neigh_suppress on` + `learning off`
+                    // by `vxlan_bridge_port_defaults` (fired from
+                    // `link_add` when a VXLAN gains a master), and
+                    // addrgenmode none is the VXLAN creation default. We
+                    // intercept here rather than routing through the
+                    // VxlanBuilder so a bridge-only change doesn't re-emit
+                    // VxlanAdd (which would re-create the device). The
+                    // leaf still lands in the running-config tree like the
+                    // interface case. `delete … bridge BR` carries the
+                    // value, which we drain and treat as detach.
+                    if let Some(name) = args.string() {
+                        let bridge = if msg.op.is_set() {
+                            args.string()
+                        } else {
+                            let _ = args.string();
+                            None
+                        };
+                        let _ = self.tx.send(Message::LinkBridgeBind {
+                            ifname: name,
+                            bridge,
+                        });
+                    }
                 } else if path.as_str().starts_with("/vxlan") {
                     let _ = self.vxlan_config.exec(path, args, msg.op);
                 } else if path.as_str().starts_with("/vrf") {
@@ -2502,6 +3132,8 @@ impl Rib {
                 self.link_config.commit(self.tx.clone());
                 self.static_v4.commit(self.tx.clone());
                 self.static_v6.commit(self.tx.clone());
+                self.static_vrf_v4.commit(&self.tx);
+                self.static_vrf_v6.commit(&self.tx);
                 self.mpls_config.commit(self.tx.clone());
                 self.block_config.commit(self.tx.clone());
                 self.locator_config.commit(self.tx.clone());
@@ -2511,6 +3143,7 @@ impl Rib {
                 // (`rib:<handler>`) as the first path segment.
                 let comps = match msg.paths.first().map(|p| p.name.as_str()) {
                     Some("vrf") => self.vrf_comps(),
+                    Some("bridge") => self.bridge_comps(),
                     _ => self.link_comps(),
                 };
                 msg.resp.unwrap().send(comps).unwrap();
@@ -2617,7 +3250,16 @@ impl Rib {
             return;
         };
         self.fib_handle
-            .mdb_install(bridge_ifindex, vxlan_ifindex, 0, group, source, dst, add)
+            .mdb_install(
+                bridge_ifindex,
+                vxlan_ifindex,
+                0,
+                group,
+                source,
+                dst,
+                vni,
+                add,
+            )
             .await;
     }
 

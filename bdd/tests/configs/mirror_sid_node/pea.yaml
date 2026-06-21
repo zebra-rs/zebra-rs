@@ -1,0 +1,41 @@
+# pea — the protected egress, a stub off pe1. IS-IS L2 SRv6 (locator
+# LOC3, fcbb:bbbb:3::/48). It neighbours only pe1 (fast hellos so its
+# loss is detected in ~3 s) and reaches the dual-homed CE ce2 over
+# pea-ce2. pea advertises its locator into IS-IS; pe1 routes to it and
+# carries peb's Mirror SID as the egress-protection backup. Stopping
+# pea's daemon is the node failure that triggers stale-route retention on
+# pe1. (No BGP/VRF service is configured: this feature validates that the
+# locator route itself survives the node failure — the seg6 H.Encaps
+# forwarding it points at is exercised by @mirror_sid_egress_link.)
+interface:
+- if-name: lo
+  ipv6:
+    address: 2001:db8::3/128
+- if-name: pea-pe1
+  ipv6:
+    address: 2001:db8:0:13::3/64
+segment-routing:
+  locator:
+  - name: LOC3
+    prefix: fcbb:bbbb:3::/48
+    behavior: usid
+router:
+  isis:
+    net: 49.0000.0000.0000.0003.00
+    hostname: pea
+    is-type: level-2-only
+    segment-routing:
+      srv6:
+        locator: LOC3
+    interface:
+    - if-name: lo
+      ipv6:
+        enable: true
+    - if-name: pea-pe1
+      network-type: point-to-point
+      metric: 1
+      hello:
+        interval: 1
+        multiplier: 3
+      ipv6:
+        enable: true

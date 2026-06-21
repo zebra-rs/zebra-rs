@@ -1090,6 +1090,11 @@ fn apply_routing_updates(
     if top.config.distribute.rib {
         let diff = spf::table_diff(top.rib_v6.get(&level).iter(), rib_v6.iter());
         diff_apply::<V6>(top.rib_client, &diff, level);
+        // Mirror SID node protection: pre-install a high-distance seg6
+        // H.Encaps floating backup to the Mirror SID for each protected
+        // locator, so best-path promotes it when the failed egress's
+        // native route is withdrawn — surviving SPF reconvergence.
+        reconcile_retained_locators(top, level, &rib_v6);
     }
     *top.rib_v6.get_mut(&level) = rib_v6;
 }
@@ -1439,6 +1444,304 @@ fn apply_mirror_sid_backups(
     }
 }
 
+/// Above IS-IS (115) so the native locator route wins while the egress is
+/// up; the retained backup is promoted by best-path only once it is gone.
+const RETAIN_DISTANCE: u8 = 250;
+
+/// Per-locator node-protection retention state (see
+/// [`reconcile_retained_locators`]).
+pub struct RetainEntry {
+    /// Whether the seg6 backup is currently in the FIB. Cleared once the
+    /// hold-down withdraws it; re-set when the egress returns.
+    pub installed: bool,
+    /// Armed hold-down timer — `Some` while the egress is down and the
+    /// hold-down is counting; dropped (cancelled) on recovery. `None` when
+    /// the egress is up, the hold-down is disabled, or it already expired.
+    pub holddown: Option<crate::context::Timer>,
+}
+
+/// Install the seg6 H.Encaps retained backup for `loc` toward the Mirror
+/// SID. A distinct `RibType` (Static, not Isis) is required so it coexists
+/// with the native locator route under the RIB's per-rtype replacement
+/// (same-rtype would orphan one in the kernel); the high distance keeps it
+/// unselected until the native route is withdrawn.
+fn install_retain_backup(
+    rib_client: &crate::rib::client::RibClient,
+    loc: Ipv6Net,
+    mirror_sid: Ipv6Addr,
+    addr: Ipv6Addr,
+    ifindex: u32,
+) {
+    let mut nhop = rib::NexthopUni::new(IpAddr::V6(addr), 0, vec![]);
+    nhop.ifindex_origin = (ifindex != 0).then_some(ifindex);
+    nhop.segs = vec![mirror_sid];
+    nhop.encap_type = Some(EncapType::HEncap);
+    nhop.valid = true;
+    let mut entry = rib::entry::RibEntry::new(RibType::Static);
+    entry.distance = RETAIN_DISTANCE;
+    entry.nexthop = rib::Nexthop::Uni(nhop);
+    let _ = rib_client.send(crate::rib::Message::Ipv6Add {
+        prefix: loc,
+        rib: entry,
+    });
+}
+
+fn withdraw_retain_backup(rib_client: &crate::rib::client::RibClient, loc: Ipv6Net) {
+    let entry = rib::entry::RibEntry::new(RibType::Static);
+    let _ = rib_client.send(crate::rib::Message::Ipv6Del {
+        prefix: loc,
+        rib: entry,
+    });
+}
+
+/// Arm a one-shot hold-down timer that fires `EgressRetentionExpire` for
+/// `loc` after `secs`. Held in `RetainEntry::holddown`; dropping it cancels.
+fn arm_holddown_timer(
+    tx: &super::inst::MsgSender,
+    level: Level,
+    loc: Ipv6Net,
+    secs: u64,
+) -> crate::context::Timer {
+    let tx = tx.clone();
+    crate::context::Timer::once(secs, move || {
+        let tx = tx.clone();
+        async move {
+            let _ = tx.send(super::Message::EgressRetentionExpire {
+                level,
+                locator: loc,
+            });
+        }
+    })
+}
+
+/// Mirror SID node-protection stale-route retention. The `inject_mirror_
+/// sid_backups` repair above protects a route to a protected egress
+/// locator *while that route still exists* — but once the protected
+/// egress's node fails and its LSP ages out, the locator drops out of the
+/// SPF result and the diff withdraws it, taking the repair with it.
+///
+/// This pre-installs a **floating backup**: for every protected locator
+/// whose protector is reachable, a seg6 H.Encaps route to the Mirror SID
+/// at a high administrative distance (250). The native locator route
+/// (distance 115) wins while the egress is up, so the backup sits in the
+/// RIB unselected; when the egress's node fails and the native route is
+/// withdrawn, best-path promotes the backup — carrying locator-bound
+/// traffic to the protector (PEB's End.M) and surviving SPF
+/// reconvergence — and demotes it when the egress returns.
+///
+/// **Hold-down** (`egress-protection hold-down`): when configured non-zero,
+/// the backup forwards only for that many seconds after the egress fails,
+/// then `EgressRetentionExpire` withdraws it so a genuinely-decommissioned
+/// egress is not masked toward the protector forever. The backup is
+/// re-installed if the egress later returns. Hold-down `0`/unset keeps the
+/// historical float-forever behavior.
+///
+/// Reconciled every SPF against `top.retained_locators`.
+fn reconcile_retained_locators(
+    top: &mut IsisTop,
+    level: Level,
+    rib_v6: &PrefixMap<Ipv6Net, SpfRoute<V6>>,
+) {
+    // Our own SRv6 locator — never back ourselves up (we *are* the egress
+    // for it; a remote protector's offer for our own locator is not ours
+    // to retain). `Ipv6Net` is `Copy`, so this releases the `top` borrow.
+    let my_locator: Option<Ipv6Net> = top.sr_locator.as_ref().and_then(|l| l.prefix);
+    let hold_secs = top.config.egress_protection_holddown.unwrap_or(0) as u64;
+
+    // Desired backups: protected locators whose protector is reachable.
+    // locator -> (mirror_sid, nexthop addr, ifindex).
+    let mut desired: BTreeMap<Ipv6Net, (Ipv6Addr, Ipv6Addr, u32)> = BTreeMap::new();
+    for entry in super::egress_protection::collect_received_mirror_sids(top.lsdb.get(&level)) {
+        if my_locator.is_some_and(|my| my.contains(&entry.protected_locator)) {
+            continue; // our own locator.
+        }
+        let Some((addr, ifindex)) = nexthop_toward_protector(rib_v6, entry.mirror_sid) else {
+            continue; // protector unreachable — can't back it up.
+        };
+        desired.insert(entry.protected_locator, (entry.mirror_sid, addr, ifindex));
+    }
+
+    // `&RibClient` and the message sender are `Copy`/clonable out, so the
+    // `retained` mutable borrow below does not conflict with using them.
+    let rib_client = top.rib_client;
+    let tx = top.tx.clone();
+    let retained = top.retained_locators.get_mut(&level);
+
+    // Withdraw backups no longer desired (protector gone / unprotected).
+    let stale: Vec<Ipv6Net> = retained
+        .keys()
+        .filter(|k| !desired.contains_key(k))
+        .copied()
+        .collect();
+    for loc in stale {
+        if let Some(e) = retained.remove(&loc)
+            && e.installed
+        {
+            withdraw_retain_backup(rib_client, loc);
+        }
+    }
+
+    // Drive each desired backup's state machine off the egress's presence
+    // in the SPF result and the hold-down.
+    for (loc, (mirror_sid, addr, ifindex)) in desired {
+        let egress_up = rib_v6.get(&loc).is_some();
+        match retained.get_mut(&loc) {
+            None => {
+                install_retain_backup(rib_client, loc, mirror_sid, addr, ifindex);
+                // First-seen while already down arms the hold-down at once.
+                let holddown = (!egress_up && hold_secs > 0)
+                    .then(|| arm_holddown_timer(&tx, level, loc, hold_secs));
+                retained.insert(
+                    loc,
+                    RetainEntry {
+                        installed: true,
+                        holddown,
+                    },
+                );
+            }
+            Some(e) => {
+                if egress_up {
+                    // Up (or recovered): cancel any hold-down; re-install if
+                    // a prior hold-down had withdrawn it.
+                    e.holddown = None;
+                    if !e.installed {
+                        install_retain_backup(rib_client, loc, mirror_sid, addr, ifindex);
+                        e.installed = true;
+                    }
+                } else if e.installed && e.holddown.is_none() && hold_secs > 0 {
+                    // Egress just went down and the backup is live: start
+                    // the hold-down. (Already-armed / expired / hold-down-
+                    // disabled entries are left as-is.)
+                    e.holddown = Some(arm_holddown_timer(&tx, level, loc, hold_secs));
+                }
+            }
+        }
+    }
+}
+
+/// Handle a fired node-protection hold-down (`EgressRetentionExpire`): if
+/// the egress is still down and the backup is still armed, withdraw it so
+/// the failed egress is no longer masked toward the protector. A recovered
+/// egress (the reconcile already cancelled the timer) is a no-op.
+pub(super) fn egress_retention_expire(top: &mut IsisTop, level: Level, locator: Ipv6Net) {
+    let egress_up = top.rib_v6.get(&level).get(&locator).is_some();
+    let rib_client = top.rib_client;
+    if let Some(e) = top.retained_locators.get_mut(&level).get_mut(&locator) {
+        if e.installed && e.holddown.is_some() && !egress_up {
+            withdraw_retain_backup(rib_client, locator);
+            e.installed = false;
+            tracing::info!(
+                "[egress-protect] hold-down expired for {} ({}) — withdrew retained Mirror SID backup",
+                locator,
+                level
+            );
+        }
+        e.holddown = None;
+    }
+}
+
+/// Recompute and push the node's Mirror SID egress-protection
+/// registrations to the RIB: every received `(protected_locator,
+/// mirror_sid)` from both levels. The RIB filters to the locators that
+/// cover one of *its own* End.DT46 service SIDs, so sending the full set
+/// untouched is correct — a transit node that holds no service SID inside
+/// any advertised locator redirects nothing. Idempotent reset.
+fn register_egress_protections(top: &mut IsisTop) {
+    use std::collections::{BTreeMap, BTreeSet};
+    // Current LSDB scan: every advertised `(protected_locator ->
+    // (mirror_sid, protector))`, plus the set of nodes whose LSPs are
+    // present (so we can tell a withdrawn protector apart from an absent
+    // one).
+    let mut current: BTreeMap<Ipv6Net, (std::net::Ipv6Addr, IsisSysId)> = BTreeMap::new();
+    let mut live_nodes: BTreeSet<IsisSysId> = BTreeSet::new();
+    for level in [Level::L1, Level::L2] {
+        let lsdb = top.lsdb.get(&level);
+        for (id, _) in lsdb.iter() {
+            if !id.is_pseudo() {
+                live_nodes.insert(id.sys_id());
+            }
+        }
+        for e in super::egress_protection::collect_received_mirror_sids(lsdb) {
+            current.insert(e.protected_locator, (e.mirror_sid, e.protector));
+        }
+    }
+
+    let authoritative =
+        authoritative_protections(current, top.egress_protect_registered, &live_nodes);
+    *top.egress_protect_registered = authoritative.clone();
+
+    let protections: Vec<(Ipv6Net, std::net::Ipv6Addr)> = authoritative
+        .into_iter()
+        .map(|(l, (s, _))| (l, s))
+        .collect();
+    let _ = top
+        .rib_client
+        .send(crate::rib::Message::EgressProtectSet { protections });
+}
+
+/// Proper withdrawal vs. PIC-sticky, factored out for testing. Start from
+/// what is advertised now (`current`), then carry forward a
+/// previously-registered protection (`prior`) ONLY when its protector's
+/// LSP is *absent* from `live_nodes` (a convergence transient — the SPF
+/// can momentarily read a partial LSDB, and disarming protection right as
+/// a link fails is exactly wrong). A protector whose LSP is present but no
+/// longer carries the Mirror SID has genuinely withdrawn it, so it is
+/// dropped.
+fn authoritative_protections(
+    current: std::collections::BTreeMap<Ipv6Net, (Ipv6Addr, IsisSysId)>,
+    prior: &std::collections::BTreeMap<Ipv6Net, (Ipv6Addr, IsisSysId)>,
+    live_nodes: &std::collections::BTreeSet<IsisSysId>,
+) -> std::collections::BTreeMap<Ipv6Net, (Ipv6Addr, IsisSysId)> {
+    let mut authoritative = current;
+    for (loc, (sid, protector)) in prior.iter() {
+        if !authoritative.contains_key(loc) && !live_nodes.contains(protector) {
+            authoritative.insert(*loc, (*sid, *protector));
+        }
+    }
+    authoritative
+}
+
+/// SR-MPLS counterpart of [`register_egress_protections`]: tell the RIB
+/// which context label to redirect *this* node's VPN traffic to if its
+/// PE-CE link fails. We are protected when a received Mirror Context
+/// binding's FEC covers our own loopback (`te-router-id`); the protector
+/// (carried only as a sys-id) is resolved to its loopback via its
+/// TE Router-ID so the RIB can build the transport LSP. The RIB does the
+/// VPN-label-ILM override on link state. Idempotent reset.
+fn register_mpls_protections(top: &IsisTop) {
+    use std::net::{IpAddr, Ipv4Addr};
+    let Some(my_loopback) = top.config.te_router_id else {
+        let _ = top
+            .rib_client
+            .send(crate::rib::Message::EgressMplsProtectSet {
+                protections: Vec::new(),
+            });
+        return;
+    };
+    let my_sys_id = top.config.net.sys_id();
+    // context_label -> protector loopback.
+    let mut set: std::collections::BTreeMap<u32, Ipv4Addr> = std::collections::BTreeMap::new();
+    for level in [Level::L1, Level::L2] {
+        let lsdb = top.lsdb.get(&level);
+        for b in super::egress_protection::collect_received_mpls_bindings(lsdb) {
+            // Protected when the binding's FEC covers our own loopback,
+            // and the binding came from someone else.
+            if b.protector == my_sys_id || !b.protected_fec.contains(&IpAddr::V4(my_loopback)) {
+                continue;
+            }
+            if let Some(protector_lo) =
+                super::egress_protection::node_te_router_id(lsdb, b.protector)
+            {
+                set.insert(b.context_label, protector_lo);
+            }
+        }
+    }
+    let protections: Vec<(u32, Ipv4Addr)> = set.into_iter().collect();
+    let _ = top
+        .rib_client
+        .send(crate::rib::Message::EgressMplsProtectSet { protections });
+}
+
 pub(super) fn apply_spf_result(top: &mut IsisTop, output: SpfOutput) {
     let SpfOutput {
         level,
@@ -1528,6 +1831,14 @@ pub(super) fn apply_spf_result(top: &mut IsisTop, output: SpfOutput) {
     // Mirror-SID backup so a BFD-driven `protect_switch` reroutes to the
     // protector when the protected egress fails.
     inject_mirror_sid_backups(top, level, &mut rib_v6);
+
+    // Egress *link* protection (same draft): push every received
+    // `(protected_locator, mirror_sid)` to the RIB. The RIB redirects a
+    // *local* End.DT46 service SID inside a protected locator to the
+    // Mirror SID when its PE-CE link goes down (the protected egress acts
+    // as its own PLR). Recomputed per-SPF so it tracks LSDB changes.
+    register_egress_protections(top);
+    register_mpls_protections(top);
 
     // Per-algorithm RIB build (RFC 9350). For every algo:
     //   1. Walk the per-algo SPF result against `peer_algo_sid` to
@@ -2112,6 +2423,47 @@ pub fn mpls_route(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn authoritative_protections_withdraws_only_when_protector_present() {
+        use std::collections::{BTreeMap, BTreeSet};
+        let loc = |s: &str| s.parse::<Ipv6Net>().unwrap();
+        let sid = |s: &str| s.parse::<Ipv6Addr>().unwrap();
+        let peb = IsisSysId {
+            id: [0, 0, 0, 0, 0, 4],
+        };
+        let pec = IsisSysId {
+            id: [0, 0, 0, 0, 0, 5],
+        };
+
+        let l_keep = loc("2001:db8:a::/48"); // still advertised
+        let l_withdrawn_live = loc("2001:db8:b::/48"); // protector live, stopped advertising
+        let l_withdrawn_absent = loc("2001:db8:c::/48"); // protector LSP absent (transient)
+
+        let prior: BTreeMap<Ipv6Net, (Ipv6Addr, IsisSysId)> = [
+            (l_keep, (sid("2001:db8:4::1"), peb)),
+            (l_withdrawn_live, (sid("2001:db8:4::2"), peb)),
+            (l_withdrawn_absent, (sid("2001:db8:4::3"), pec)),
+        ]
+        .into_iter()
+        .collect();
+
+        // Only `l_keep` is still advertised; peb's LSP is present, pec's is not.
+        let current: BTreeMap<Ipv6Net, (Ipv6Addr, IsisSysId)> =
+            [(l_keep, (sid("2001:db8:4::1"), peb))]
+                .into_iter()
+                .collect();
+        let live_nodes: BTreeSet<IsisSysId> = [peb].into_iter().collect();
+
+        let out = authoritative_protections(current, &prior, &live_nodes);
+
+        // Still advertised → kept.
+        assert!(out.contains_key(&l_keep));
+        // Protector live but no longer advertising → genuine withdrawal, dropped.
+        assert!(!out.contains_key(&l_withdrawn_live));
+        // Protector's LSP absent → convergence transient, kept (PIC-like).
+        assert!(out.contains_key(&l_withdrawn_absent));
+    }
 
     #[test]
     fn resolve_self_sid_index_and_label() {

@@ -43,6 +43,7 @@ set vxlan vni550 dest-port 4789
 | `/vxlan/<name>/local-address` | `inet:ipv4-address` \| `inet:ipv6-address` | no | Source VTEP address → `IFLA_VXLAN_LOCAL` / `IFLA_VXLAN_LOCAL6`. |
 | `/vxlan/<name>/dest-port` | `uint16` | no | UDP destination port → `IFLA_VXLAN_PORT`. Defaults to `4789`. |
 | `/vxlan/<name>/address-gen-mode` | `enum {none, eui64, random, stable-secret}` | no | IPv6 link-local address generation mode. Defaults to `none`. |
+| `/vxlan/<name>/bridge` | leafref `/bridge/name` | no | Enslave the VXLAN to a bridge master → `IFLA_MASTER`. Triggers the bridge-slave defaults below. |
 
 ## Defaults applied automatically
 
@@ -58,6 +59,7 @@ These are part of the `RTM_NEWLINK` that creates the device:
 | Default | Netlink | `ip link` equivalent | Why |
 |---|---|---|---|
 | **MAC learning off** (`nolearning`) | `IFLA_VXLAN_LEARNING = 0` | `... type vxlan ... nolearning` | The BGP control plane owns the FDB; kernel flood-and-learn must be off so it does not fight the control plane. |
+| **VNI-aware device** (`external vnifilter`) | `IFLA_VXLAN_COLLECT_METADATA = 1` + `IFLA_VXLAN_VNIFILTER = 1`; each VNI via `RTM_NEWTUNNEL` | `... type vxlan external vnifilter` then `bridge vni add vni <id> dev <dev>` | The device carries no fixed VNI (`id 0`); configured VNIs are registered explicitly and stamped on every FDB/MDB entry as `src_vni`. This VNI-aware model is what enables per-VTEP EVPN multicast — the kernel VXLAN MDB `dst` (see [IGMP/MLD Proxy](ch-02-32-bgp-evpn-igmp-mld-proxy.md)). |
 | **`dest-port 4789`** | `IFLA_VXLAN_PORT = 4789` | `... type vxlan ... dstport 4789` | The IANA-assigned VXLAN port, used when `dest-port` is unset — Linux would otherwise fall back to the legacy 8472. An explicit value always wins. |
 | **Brought up** | `IFF_UP` set on create | `ip link add ... up` | The device is operational immediately, without a separate `ip link set <dev> up`. |
 | **`address-gen-mode none`** | `IFLA_INET6_ADDR_GEN_MODE = 1` | `ip link set <dev> addrgenmode none` | Suppresses the kernel's automatic link-local on the VTEP. Applied as a follow-up `RTM_NEWLINK` after creation. |
@@ -70,11 +72,29 @@ These are part of the `RTM_NEWLINK` that creates the device:
 ### When the device joins a bridge
 
 A VXLAN device only carries an L2 service once it is enslaved to a Linux
-bridge. zebra-rs does **not** assign the bridge master itself — that is
-done externally (`ip link set vni550 master <bridge>`, or by your
-bridge-management tooling) and zebra-rs **observes** it over netlink.
-The moment it sees a VXLAN device gain a bridge master, it applies the
-bridge-slave defaults to the port:
+bridge. Enslave it with the `bridge` leaf — the equivalent of
+`ip link set vni550 master <bridge>`:
+
+```
+vxlan vni550 {
+  vni 550;
+  local-address 10.0.0.1;
+  bridge br550;
+}
+```
+
+`bridge` is a leafref to `/bridge/name`, and the bind is **staged** — it
+is applied once both the VXLAN and the bridge exist in the kernel, so
+the order of configuration is irrelevant. This is the same deferred
+mechanism as [`interface <name>
+bridge`](ch-00-03-interface-configuration.md#bridge-and-vrf-enslavement),
+which the VXLAN binding reuses directly. zebra-rs also still
+**observes** enslavement performed externally
+(`ip link set vni550 master <bridge>`), so either path works.
+
+The moment a VXLAN device gains a bridge master — by config or by an
+external action — zebra-rs applies the bridge-slave defaults to the
+port:
 
 | Default | Netlink | `ip link` equivalent | Why |
 |---|---|---|---|
@@ -88,11 +108,11 @@ nothing else is affected.)
 ## The full sequence
 
 Taken together, configuring a VXLAN in zebra-rs and enslaving it to a
-bridge reproduces the canonical EVPN-VXLAN bring-up. The four manual
-commands
+bridge reproduces the canonical EVPN-VXLAN bring-up. The manual commands
 
 ```
-ip link add vni550 type vxlan local 10.0.0.1 dstport 4789 id 550 nolearning
+ip link add vni550 type vxlan local 10.0.0.1 dstport 4789 external vnifilter nolearning
+bridge vni add vni 550 dev vni550
 ip link set vni550 master br550 addrgenmode none
 ip link set vni550 type bridge_slave neigh_suppress on learning off
 ip link set vni550 up
@@ -100,16 +120,26 @@ ip link set vni550 up
 
 map onto zebra-rs as:
 
-* `set vxlan vni550 vni 550 / local-address 10.0.0.1 / dest-port 4789`
-  — the device, with `nolearning`, `addrgenmode none`, and `up` applied
-  automatically (the first command plus the `addrgenmode`/`up` parts).
-* `ip link set vni550 master br550` — **still external**; zebra-rs
-  observes it.
-* on observing that master, zebra-rs applies `neigh_suppress on` and
+```
+set bridge br550
+set vxlan vni550 vni 550
+set vxlan vni550 local-address 10.0.0.1
+set vxlan vni550 dest-port 4789
+set vxlan vni550 bridge br550
+```
+
+* the `vxlan` leaves create the device as an `external vnifilter` VXLAN
+  with `nolearning`, register the configured VNI (`bridge vni add`), and
+  apply `addrgenmode none` and `up` automatically (the first two commands
+  plus the `addrgenmode`/`up` parts);
+* `set vxlan vni550 bridge br550` enslaves it — the equivalent of
+  `ip link set vni550 master br550` (the second command);
+* on gaining that master, zebra-rs applies `neigh_suppress on` and
   `learning off` automatically (the third command).
 
-So the operator supplies the VNI / VTEP / port and the bridge
-enslavement; zebra-rs fills in every EVPN-correct default.
+So the operator supplies the VNI / VTEP / port and names the bridge;
+zebra-rs creates the devices, performs the enslavement, and fills in
+every EVPN-correct default.
 
 ## Deleting the configuration
 
@@ -133,13 +163,13 @@ box. An explicit `dest-port` always takes precedence.
 
 | zebra-rs | iproute2 |
 |---|---|
-| `vxlan <n> vni <id>` | `ip link add <n> type vxlan id <id>` |
+| `vxlan <n> vni <id>` | `ip link add <n> type vxlan external vnifilter` + `bridge vni add vni <id> dev <n>` |
 | `vxlan <n> local-address <ip>` | `... type vxlan local <ip>` |
 | `vxlan <n> dest-port <p>` | `... type vxlan dstport <p>` |
 | `vxlan <n> address-gen-mode <m>` | `ip link set <n> addrgenmode <m>` |
+| `vxlan <n> bridge <name>` | `ip link set <n> master <name>` |
 | *(automatic)* `nolearning` | `... type vxlan ... nolearning` |
 | *(automatic)* device up | `ip link set <n> up` |
 | *(automatic on bridge-join)* `neigh_suppress on` | `ip link set <n> type bridge_slave neigh_suppress on` |
 | *(automatic on bridge-join)* `learning off` | `ip link set <n> type bridge_slave learning off` |
 | `no vxlan <n>` | `ip link del <n>` |
-| *(external)* bridge enslavement | `ip link set <n> master <bridge>` |

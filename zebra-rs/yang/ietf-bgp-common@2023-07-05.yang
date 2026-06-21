@@ -414,7 +414,9 @@ submodule ietf-bgp-common {
     uses structure-neighbor-group-as-path-options;
     uses structure-add-paths;
     uses bgp-neighbor-use-multiple-paths;
-    uses rt-pol:apply-policy-group;
+    // The peer-wide `neighbor X policy {in,out}` (rt-pol:apply-policy-group)
+    // was retired; per-family route-policy now lives under
+    // `neighbor X afi-safi <name> policy {in,out}` (ietf-bgp-neighbor).
   }
 
   grouping neighbor-group-transport-config {

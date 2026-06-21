@@ -5,7 +5,7 @@
 As a network operator running BGP unnumbered over IPv6 link-locals
 I want `show ipv6 nd` to report per-interface RA scheduler state,
 sent/received ND packet counters, and the per-source neighbor table,
-and `show bgp neighbors` to report when the interface peer's
+and `show bgp neighbor` to report when the interface peer's
 link-local was discovered via ND — so the RA exchange that underpins
 peer discovery is observable instead of a black box.
 This exercises the ND show pipeline end-to-end: the engine's counters

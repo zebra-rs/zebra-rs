@@ -59,7 +59,7 @@ Feature: BGP enforce-first-as drops inbound updates whose AS_PATH does not start
     And I wait 30 seconds for BGP to operate
     Then BGP session in "z2" to "192.168.0.1" should be "Established"
     And BGP route in "z2" does not have "10.0.0.1/32"
-    And show command "show bgp neighbors" in namespace "z2" should contain "Enforce-first-AS"
+    And show command "show bgp neighbor" in namespace "z2" should contain "Enforce-first-AS"
 
   # Pure P2P topology (no bridge): deleting each namespace destroys the veth
   # pair ends it holds, so only the daemons and namespaces need teardown.

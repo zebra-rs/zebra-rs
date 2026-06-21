@@ -852,7 +852,7 @@ async fn verify_bgp_session(
     expected_state: String,
 ) {
     let scoped = world.ns(&namespace);
-    let cmd = format!("show bgp neighbors {}", neighbor);
+    let cmd = format!("show bgp neighbor {}", neighbor);
     let binding = ["show", "-j", &cmd];
     let output = netns::exec_in_netns(&scoped, "vtyctl", &binding)
         .await
@@ -886,7 +886,7 @@ async fn verify_bgp_session_not(
     unexpected_state: String,
 ) {
     let scoped = world.ns(&namespace);
-    let cmd = format!("show bgp neighbors {}", neighbor);
+    let cmd = format!("show bgp neighbor {}", neighbor);
     let binding = ["show", "-j", &cmd];
     let output = netns::exec_in_netns(&scoped, "vtyctl", &binding)
         .await
@@ -910,7 +910,7 @@ async fn verify_bgp_session_not(
     );
 }
 
-/// Poll `show bgp neighbors <addr>` (JSON) until the addressed peer's
+/// Poll `show bgp neighbor <addr>` (JSON) until the addressed peer's
 /// `state` matches `expected` (`want_match = true`) or stops matching it
 /// (`want_match = false`). Returns `(satisfied, last_output)`.
 ///
@@ -927,7 +927,7 @@ async fn poll_bgp_session_state(
     want_match: bool,
 ) -> (bool, String) {
     const ATTEMPTS: u32 = 30;
-    let cmd = format!("show bgp neighbors {}", neighbor);
+    let cmd = format!("show bgp neighbor {}", neighbor);
     let mut last = String::new();
     for i in 0..ATTEMPTS {
         last = netns::exec_in_netns(scoped, "vtyctl", &["show", "-j", &cmd])
@@ -991,7 +991,7 @@ async fn verify_bgp_session_eventually_not(
     );
 }
 
-/// Poll `show bgp neighbors` (all peers, JSON) until some peer's
+/// Poll `show bgp neighbor` (all peers, JSON) until some peer's
 /// `state` matches `expected` (`want_match = true`) or no peer matches
 /// it (`want_match = false`). Returns `(satisfied, last_output)`.
 ///
@@ -1010,7 +1010,7 @@ async fn poll_unnumbered_session_state(
     const ATTEMPTS: u32 = 60;
     let mut last = String::new();
     for i in 0..ATTEMPTS {
-        last = netns::exec_in_netns(scoped, "vtyctl", &["show", "-j", "show bgp neighbors"])
+        last = netns::exec_in_netns(scoped, "vtyctl", &["show", "-j", "show bgp neighbor"])
             .await
             .expect("Failed to get BGP neighbors");
         let matched = serde_json::from_str::<Value>(&last)
@@ -1363,6 +1363,120 @@ async fn show_command_not_contains(
     println!(
         "✓ show '{}' in namespace {} does not contain '{}'",
         show_cmd, scoped, needle
+    );
+}
+
+/// Kernel-state sibling of `show_command_eventually_contains`: run an
+/// arbitrary command (argv split on whitespace) inside a namespace and
+/// poll until its stdout contains the needle, or fail after the budget.
+/// Unlike `show command …` (which targets the vtyctl show surface) this
+/// reaches the real `ip`/`bridge` tools — used to assert async netlink
+/// effects, e.g. a port being enslaved to a bridge (`ip -o link show
+/// <if>` gaining `master <bridge>`).
+#[then(expr = "command {string} in namespace {string} should eventually contain {string}")]
+async fn command_eventually_contains(
+    world: &mut World,
+    command: String,
+    namespace: String,
+    needle: String,
+) {
+    let scoped = world.ns(&namespace);
+    let parts: Vec<&str> = command.split_whitespace().collect();
+    let (cmd, args) = parts
+        .split_first()
+        .unwrap_or_else(|| panic!("empty command in 'command …' for {}", scoped));
+    const ATTEMPTS: u32 = 30;
+    let mut last_output = String::new();
+    for i in 0..ATTEMPTS {
+        last_output = netns::exec_in_netns(&scoped, cmd, args)
+            .await
+            .unwrap_or_else(|e| panic!("Failed to run '{}' in {}: {}", command, scoped, e));
+        if last_output.contains(&needle) {
+            println!(
+                "✓ '{}' in namespace {} contains '{}'",
+                command, scoped, needle
+            );
+            return;
+        }
+        if i + 1 < ATTEMPTS {
+            tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
+        }
+    }
+    panic!(
+        "'{}' in namespace {} did not contain '{}' after {} attempts\nlast output:\n{}",
+        command, scoped, needle, ATTEMPTS, last_output
+    );
+}
+
+/// Negative polling sibling: run the command and poll until its stdout no
+/// longer contains the needle (e.g. a port losing `master <bridge>` after
+/// the bridge is deleted and the kernel releases it).
+#[then(expr = "command {string} in namespace {string} should eventually not contain {string}")]
+async fn command_eventually_not_contains(
+    world: &mut World,
+    command: String,
+    namespace: String,
+    needle: String,
+) {
+    let scoped = world.ns(&namespace);
+    let parts: Vec<&str> = command.split_whitespace().collect();
+    let (cmd, args) = parts
+        .split_first()
+        .unwrap_or_else(|| panic!("empty command in 'command …' for {}", scoped));
+    const ATTEMPTS: u32 = 30;
+    let mut last_output = String::new();
+    for i in 0..ATTEMPTS {
+        last_output = netns::exec_in_netns(&scoped, cmd, args)
+            .await
+            .unwrap_or_else(|e| panic!("Failed to run '{}' in {}: {}", command, scoped, e));
+        if !last_output.contains(&needle) {
+            println!(
+                "✓ '{}' in namespace {} no longer contains '{}'",
+                command, scoped, needle
+            );
+            return;
+        }
+        if i + 1 < ATTEMPTS {
+            tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
+        }
+    }
+    panic!(
+        "'{}' in namespace {} still contained '{}' after {} attempts\nlast output:\n{}",
+        command, scoped, needle, ATTEMPTS, last_output
+    );
+}
+
+/// Immediate (non-polling) negative assertion: run the command once and
+/// require its stdout does NOT contain the needle. Pair with a preceding
+/// `I wait N seconds` to give any erroneous async effect time to manifest
+/// before asserting absence (e.g. a binding that must stay pending must
+/// NOT have enslaved the port).
+#[then(expr = "command {string} in namespace {string} should not contain {string}")]
+async fn command_not_contains(
+    world: &mut World,
+    command: String,
+    namespace: String,
+    needle: String,
+) {
+    let scoped = world.ns(&namespace);
+    let parts: Vec<&str> = command.split_whitespace().collect();
+    let (cmd, args) = parts
+        .split_first()
+        .unwrap_or_else(|| panic!("empty command in 'command …' for {}", scoped));
+    let output = netns::exec_in_netns(&scoped, cmd, args)
+        .await
+        .unwrap_or_else(|e| panic!("Failed to run '{}' in {}: {}", command, scoped, e));
+    assert!(
+        !output.contains(&needle),
+        "'{}' in namespace {} unexpectedly contained '{}'\nfull output:\n{}",
+        command,
+        scoped,
+        needle,
+        output,
+    );
+    println!(
+        "✓ '{}' in namespace {} does not contain '{}'",
+        command, scoped, needle
     );
 }
 

@@ -37,7 +37,7 @@ How a session comes up:
 
 The discovered link-local is not something an operator can type, so
 the interface name is the peer's CLI identity throughout:
-`show bgp neighbors i1`, `clear bgp ipv4 neighbor i1`, and the
+`show bgp neighbor i1`, `clear bgp ipv4 neighbor i1`, and the
 `Neighbor` column of `show bgp summary` all use it.
 
 ## remote-as forms
@@ -119,7 +119,7 @@ their own schedule, so allow up to ~16 seconds for first discovery.
 Once both ends have applied the configuration:
 
 ```
-show bgp neighbors i1
+show bgp neighbor i1
 BGP neighbor on i1: fe80::8080:9fff:fef9:3fa, remote AS 65001, local AS 65001, internal link
   Local host: fe80::c49d:fbff:fe08:b421, Local port: 35086
   Foreign host: fe80::8080:9fff:fef9:3fa, Foreign port: 179
@@ -161,7 +161,7 @@ clear bgp ipv4 neighbor i1
 
 The re-established session advertises only IPv6 unicast — the
 `IPv4 Unicast:` capability line is gone from
-`show bgp neighbors i1`, the IPv4 routes learned from the peer were
+`show bgp neighbor i1`, the IPv4 routes learned from the peer were
 withdrawn with the old session and do not return, and the IPv6 routes
 re-sync immediately:
 

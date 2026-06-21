@@ -1,0 +1,112 @@
+name: Publish APT repo (reusable)
+
+# Reusable: build a signed flat APT repository per Ubuntu codename from the
+# `deb-<codename>-*` artifacts produced by build-debs.yaml, and upload it --
+# debs plus signed Packages/Release/InRelease -- as the asset set of a
+# `<channel>-<codename>` release (e.g. apt-jammy, nightly-noble).
+#
+# Callers pass `secrets: inherit` and gate the call on
+# `vars.APT_PUBLISH_ENABLED == 'true'`. Needs secrets APT_GPG_PRIVATE_KEY
+# (base64 of the armored private key) and APT_GPG_PASSPHRASE.
+
+on:
+  workflow_call:
+    inputs:
+      channel:
+        description: "Release-tag prefix: 'apt' (stable) or 'nightly'"
+        type: string
+        required: true
+      prerelease:
+        description: "Mark the per-codename releases as prereleases"
+        type: boolean
+        default: false
+
+jobs:
+  publish:
+    name: Publish ${{ inputs.channel }} repo (${{ matrix.codename }})
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    strategy:
+      fail-fast: false
+      matrix:
+        codename: [jammy, noble, resolute]
+    env:
+      # The apt repo is published to a SEPARATE repo so the main repo's /releases
+      # page stays clean (only v* and nightly). That needs a PAT with contents:write
+      # on the target repo -- the default GITHUB_TOKEN can't reach across repos.
+      # GH_REPO also tells gh which repo to act on (this job has no checkout).
+      GH_TOKEN: ${{ secrets.APT_REPO_TOKEN }}
+      GH_REPO: zebra-rs/zebra-rs.github.io
+    steps:
+      - name: Install apt tooling
+        run: sudo apt-get update && sudo apt-get install -y dpkg-dev apt-utils gnupg
+
+      - name: Download this codename's freshly built .debs
+        uses: actions/download-artifact@v8
+        with:
+          path: incoming
+          pattern: deb-${{ matrix.codename }}-*
+          merge-multiple: true
+
+      - name: Import signing key
+        run: echo "$APT_GPG_PRIVATE_KEY" | base64 -d | gpg --batch --import
+        env:
+          APT_GPG_PRIVATE_KEY: ${{ secrets.APT_GPG_PRIVATE_KEY }}
+
+      - name: Build + sign flat repository
+        id: repo
+        env:
+          APT_GPG_PASSPHRASE: ${{ secrets.APT_GPG_PASSPHRASE }}
+          CHANNEL: ${{ inputs.channel }}
+          CODENAME: ${{ matrix.codename }}
+        run: |
+          set -euo pipefail
+          TAG="${CHANNEL}-${CODENAME}"
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+          mkdir repo && cp incoming/*.deb repo/ && cd repo
+          # GitHub rewrites release-asset names, replacing chars outside
+          # [A-Za-z0-9._-] with '.'. Pre-normalize on-disk names to that set so the
+          # uploaded asset matches the `Filename:` in Packages -- otherwise the
+          # nightly '~' becomes '.' only on upload and apt 404s. The version string
+          # inside each .deb (which keeps '~' for correct sorting) is untouched.
+          for f in *.deb; do
+            n=$(printf '%s' "$f" | sed -E 's/[^A-Za-z0-9._-]/./g')
+            [ "$f" = "$n" ] || mv -- "$f" "$n"
+          done
+          # Flat repo: one Packages index lists every arch; apt filters by Architecture.
+          dpkg-scanpackages --multiversion . > Packages
+          gzip -9 -k -f Packages
+          # Generate Release AFTER the indices (so it checksums Packages/Packages.gz),
+          # then sign it -> InRelease (inline) + Release.gpg (detached).
+          apt-ftparchive \
+            -o APT::FTPArchive::Release::Origin=zebra-rs \
+            -o APT::FTPArchive::Release::Label=zebra-rs \
+            -o APT::FTPArchive::Release::Suite="$CODENAME" \
+            -o APT::FTPArchive::Release::Codename="$CODENAME" \
+            -o APT::FTPArchive::Release::Architectures="amd64 arm64" \
+            -o APT::FTPArchive::Release::Components=main \
+            release . > Release
+          GPG=(gpg --batch --yes --pinentry-mode loopback --passphrase "$APT_GPG_PASSPHRASE")
+          "${GPG[@]}" -abs -o Release.gpg Release
+          "${GPG[@]}" --clearsign -o InRelease Release
+
+      - name: Ensure the channel release exists
+        env:
+          TAG: ${{ steps.repo.outputs.tag }}
+          CHANNEL: ${{ inputs.channel }}
+          CODENAME: ${{ matrix.codename }}
+          PRERELEASE_FLAG: ${{ inputs.prerelease && '--prerelease' || '' }}
+        run: |
+          gh release view "$TAG" >/dev/null 2>&1 || \
+          gh release create "$TAG" $PRERELEASE_FLAG \
+            --title "APT repo — $CODENAME ($CHANNEL)" \
+            --notes "Flat APT repository for Ubuntu $CODENAME. Infrastructure release — do not delete."
+
+      - name: Upload .debs + signed metadata (clobber in place)
+        env:
+          TAG: ${{ steps.repo.outputs.tag }}
+        run: |
+          cd repo
+          gh release upload "$TAG" \
+            Packages Packages.gz Release Release.gpg InRelease *.deb --clobber

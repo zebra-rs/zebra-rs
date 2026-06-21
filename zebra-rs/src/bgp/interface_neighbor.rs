@@ -99,7 +99,7 @@ pub fn materialize_peer(
 /// any RA has surfaced the remote link-local. The address stays
 /// unspecified and the FSM is left alone (`peer.start()` gates on a
 /// dialable address), so the peer is operator-visible state only:
-/// `show bgp summary` / `show bgp neighbors` list the configured
+/// `show bgp summary` / `show bgp neighbor` list the configured
 /// neighbor as Idle even when the remote node has never been up,
 /// matching FRR. The RA path ([`materialize_peer`]) upgrades it in
 /// place. `None` when the interface is unknown to RIB yet or the
@@ -161,7 +161,7 @@ fn materialize(
     };
     peer.origin = PeerOrigin::Interface { ifindex };
     // The operator-facing identity for show/clear output and lookups
-    // (`show bgp summary`, `show bgp neighbors i1`, …) — the
+    // (`show bgp summary`, `show bgp neighbor i1`, …) — the
     // link-local in `address` is not something the operator can name.
     peer.ifname = Some(name.to_string());
     // Required for the kernel connect(2) to a fe80:: target —

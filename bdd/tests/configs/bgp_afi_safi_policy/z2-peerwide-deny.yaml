@@ -1,0 +1,29 @@
+# Peer-wide inbound policy that denies everything, inherited from a
+# neighbor-group. The per-neighbor peer-wide `policy {in,out}` CLI was
+# retired; a neighbor-group is now the only way to bind a peer-wide
+# route-policy, which applies to every family that has no per-AFI
+# override of its own (Peer::policy_list_at fallback).
+policy:
+- name: DENY-ALL
+  entry:
+  - number: 10
+    action: deny
+router:
+  bgp:
+    global:
+      as: 65002
+      router-id: 192.168.0.2
+    neighbor-group:
+    - name: PEER-WIDE
+      policy:
+        in: DENY-ALL
+    neighbor:
+    - remote-address: 192.168.0.1
+      afi-safi:
+      - name: ipv4
+        enabled: true
+      soft-reconfiguration:
+        inbound: true
+      neighbor-group: PEER-WIDE
+      enabled: true
+      remote-as: 65001

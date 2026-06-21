@@ -2489,6 +2489,30 @@ pub fn route_apply_policy_out(
     )
 }
 
+/// Per-AFI v4-family outbound policy: the v4 twin of
+/// [`route_apply_policy_out_v6`]. Reads the peer's own
+/// `policy_list_at(afi_safi, Output)` / `prefix_set_at(afi_safi, Output)`
+/// binding directly rather than the cached v4-unicast
+/// [`SyncCtx::out_policy`] snapshot, so VPNv4 / labeled-v4 advertisements
+/// get THEIR family's per-neighbor policy. (The v4-unicast egress keeps
+/// using the snapshot — it can run in a shard worker that has no `&Peer`.)
+pub fn route_apply_policy_out_at(
+    peer: &Peer,
+    afi_safi: AfiSafi,
+    nlri: &Ipv4Nlri,
+    bgp_attr: BgpAttr,
+    weight: u32,
+) -> Option<PolicyDecision> {
+    apply_policy_net(
+        peer.prefix_set_at(afi_safi, InOut::Output),
+        peer.policy_list_at(afi_safi, InOut::Output),
+        peer.router_id,
+        IpNet::V4(nlri.prefix),
+        bgp_attr,
+        weight,
+    )
+}
+
 /// Inbound-policy evaluation for an IPv6 NLRI: the v6 / Input projection
 /// of [`apply_policy_net`]. Before this, the v6 ingest applied no
 /// per-neighbor inbound policy — v6 route-maps / prefix-lists were
@@ -2663,15 +2687,18 @@ pub fn route_ipv4_update(
         return;
     };
     let stale = stale || attr_has_llgr_stale(attr);
+    // Per-AFI inbound policy: a route carrying an RD is VPNv4, otherwise
+    // it is IPv4 unicast (the RFC 8950 IPv4-over-IPv6 path also lands
+    // here with no RD). Each family reads its own
+    // `policy_list_at(afi_safi, Input)` binding.
+    let afi_safi = if rd.is_some() {
+        AfiSafi::new(Afi::Ip, Safi::MplsVpn)
+    } else {
+        AfiSafi::new(Afi::Ip, Safi::Unicast)
+    };
     let decision = {
         let peer = peers.get_mut_by_idx(ident).expect("peer must exist");
-        route_apply_policy_in(
-            peer,
-            AfiSafi::new(Afi::Ip, Safi::Unicast),
-            nlri,
-            attr.clone(),
-            0,
-        )
+        route_apply_policy_in(peer, afi_safi, nlri, attr.clone(), 0)
     };
     let jobs = route_ipv4_update_decided(
         peer_ident,
@@ -2951,8 +2978,14 @@ fn precompute_ipv4_advertise_outcomes(
                     });
                     if let Some(idx) = canonical {
                         let peer = peers.get_by_idx(idx).expect("peer exists");
-                        let outcome =
-                            compute_advertise_outcome(peer, &job.prefix, best, bgp, *add_path);
+                        let outcome = compute_advertise_outcome(
+                            peer,
+                            afi_safi,
+                            &job.prefix,
+                            best,
+                            bgp,
+                            *add_path,
+                        );
                         memo.insert(gid.clone(), outcome);
                     }
                 }
@@ -3455,6 +3488,7 @@ enum AdvertiseOutcome<N> {
 /// non-source member of the same update-group.
 fn compute_advertise_outcome(
     peer: &Peer,
+    afi_safi: AfiSafi,
     prefix: &Ipv4Net,
     best: &BgpRib,
     bgp: &BgpTop,
@@ -3462,7 +3496,15 @@ fn compute_advertise_outcome(
 ) -> AdvertiseOutcome<Ipv4Nlri> {
     let ctx = peer.sync_ctx(*bgp.router_id);
     if let Some((nlri, attr)) = route_update_ipv4(&ctx, prefix, best, add_path) {
-        if let Some(decision) = route_apply_policy_out(&ctx, &nlri, attr, best.weight) {
+        // v4-unicast reads the cached `SyncCtx` snapshot (the egress can run
+        // off-main in a shard worker); VPNv4 reads its own per-AFI Output
+        // policy from the peer.
+        let decision = if afi_safi == AfiSafi::new(Afi::Ip, Safi::Unicast) {
+            route_apply_policy_out(&ctx, &nlri, attr, best.weight)
+        } else {
+            route_apply_policy_out_at(peer, afi_safi, &nlri, attr, best.weight)
+        };
+        if let Some(decision) = decision {
             bgp_adj_out_trace!(peer, prefix = %prefix, "advertise");
             AdvertiseOutcome::Advertise(nlri, decision.attr)
         } else {
@@ -3791,6 +3833,7 @@ trait BatchAfi {
     fn afi_safi(rd: Option<RouteDistinguisher>) -> (Afi, Safi);
     fn compute_outcome(
         peer: &mut Peer,
+        afi_safi: AfiSafi,
         prefix: &Self::Prefix,
         best: &BgpRib,
         bgp: &mut BgpTop,
@@ -3840,12 +3883,13 @@ impl BatchAfi for V4Batch {
     }
     fn compute_outcome(
         peer: &mut Peer,
+        afi_safi: AfiSafi,
         prefix: &Ipv4Net,
         best: &BgpRib,
         bgp: &mut BgpTop,
         add_path: bool,
     ) -> AdvertiseOutcome<Ipv4Nlri> {
-        compute_advertise_outcome(peer, prefix, best, bgp, add_path)
+        compute_advertise_outcome(peer, afi_safi, prefix, best, bgp, add_path)
     }
     fn advertise(
         peer: &mut Peer,
@@ -3938,7 +3982,16 @@ impl BatchAfi for V4Batch {
         let Some((nlri, attr)) = route_update_ipv4(&ctx, &prefix, rib, true) else {
             return;
         };
-        let Some(decision) = route_apply_policy_out(&ctx, &nlri, attr, rib.weight) else {
+        // v4-unicast reads the cached snapshot; VPNv4 reads its own per-AFI
+        // Output policy from the peer.
+        let (afi, safi) = Self::afi_safi(rd);
+        let afi_safi = AfiSafi::new(afi, safi);
+        let decision = if afi_safi == AfiSafi::new(Afi::Ip, Safi::Unicast) {
+            route_apply_policy_out(&ctx, &nlri, attr, rib.weight)
+        } else {
+            route_apply_policy_out_at(peer, afi_safi, &nlri, attr, rib.weight)
+        };
+        let Some(decision) = decision else {
             return;
         };
         let attr = decision.attr;
@@ -3957,8 +4010,6 @@ impl BatchAfi for V4Batch {
             };
             peer.send_vpnv4(vpnv4_nlri, attr, true);
         } else {
-            let (afi, safi) = Self::afi_safi(rd);
-            let afi_safi = AfiSafi::new(afi, safi);
             let group_id = peer.update_group_id.get(&afi_safi).cloned();
             if let Some(gid) = group_id
                 && let Some(af) = bgp.update_groups.get_mut(&afi_safi)
@@ -3982,19 +4033,16 @@ impl BatchAfi for V4Batch {
 /// ever runs inline on the advertise loop.
 fn compute_advertise_outcome_v6(
     peer: &mut Peer,
+    afi_safi: AfiSafi,
     prefix: &Ipv6Net,
     best: &BgpRib,
     bgp: &mut BgpTop,
     add_path: bool,
 ) -> AdvertiseOutcome<Ipv6Nlri> {
     if let Some((nlri, attr)) = route_update_ipv6(peer, prefix, best, bgp, add_path) {
-        if let Some(decision) = route_apply_policy_out_v6(
-            peer,
-            AfiSafi::new(Afi::Ip6, Safi::Unicast),
-            &nlri,
-            attr,
-            best.weight,
-        ) {
+        // Per-AFI Output policy: v6-unicast or VPNv6, picked by the caller.
+        if let Some(decision) = route_apply_policy_out_v6(peer, afi_safi, &nlri, attr, best.weight)
+        {
             AdvertiseOutcome::Advertise(nlri, decision.attr)
         } else {
             AdvertiseOutcome::Withdraw
@@ -4018,12 +4066,13 @@ impl BatchAfi for V6Batch {
     }
     fn compute_outcome(
         peer: &mut Peer,
+        afi_safi: AfiSafi,
         prefix: &Ipv6Net,
         best: &BgpRib,
         bgp: &mut BgpTop,
         add_path: bool,
     ) -> AdvertiseOutcome<Ipv6Nlri> {
-        compute_advertise_outcome_v6(peer, prefix, best, bgp, add_path)
+        compute_advertise_outcome_v6(peer, afi_safi, prefix, best, bgp, add_path)
     }
     fn advertise(
         peer: &mut Peer,
@@ -4129,9 +4178,18 @@ impl BatchAfi for V6Batch {
         let Some((nlri, attr)) = route_update_ipv6(peer, &prefix, rib, bgp, true) else {
             return;
         };
-        let attr = bgp.attr_store.intern(attr);
+        // Per-AFI Output policy (v6-unicast or VPNv6), mirroring the
+        // non-AddPath path so an AddPath candidate is filtered/rewritten
+        // the same way.
+        let (afi, safi) = Self::afi_safi(rd);
+        let afi_safi = AfiSafi::new(afi, safi);
+        let Some(decision) = route_apply_policy_out_v6(peer, afi_safi, &nlri, attr, rib.weight)
+        else {
+            return;
+        };
+        let attr = bgp.attr_store.intern(decision.attr);
         if let Some(rd) = rd {
-            // VPNv6 AddPath (current behavior: RTC only, no out-policy/adj_out).
+            // VPNv6 AddPath: RTC then per-AFI out-policy (above).
             if !peer.rtcv6.is_empty() && !rtc_match(&peer.rtcv6, &attr.ecom) {
                 return;
             }
@@ -4142,9 +4200,7 @@ impl BatchAfi for V6Batch {
             };
             peer.send_vpnv6(vpnv6_nlri, attr, true);
         } else {
-            // v6-unicast AddPath (current behavior: no out-policy).
-            let (afi, safi) = Self::afi_safi(rd);
-            let afi_safi = AfiSafi::new(afi, safi);
+            // v6-unicast AddPath.
             let group_id = peer.update_group_id.get(&afi_safi).cloned();
             if let Some(gid) = group_id
                 && let Some(af) = bgp.update_groups.get_mut(&afi_safi)
@@ -4199,7 +4255,8 @@ fn route_advertise_batch<A: BatchAfi>(
                     let outcome = match memo.get(gid) {
                         Some(cached) => cached.clone(),
                         None => {
-                            let outcome = A::compute_outcome(peer, &prefix, best, bgp, add_path);
+                            let outcome =
+                                A::compute_outcome(peer, afi_safi, &prefix, best, bgp, add_path);
                             memo.insert(gid.clone(), outcome.clone());
                             outcome
                         }
@@ -4210,7 +4267,7 @@ fn route_advertise_batch<A: BatchAfi>(
                     }
                     outcome
                 }
-                None => A::compute_outcome(peer, &prefix, best, bgp, add_path),
+                None => A::compute_outcome(peer, afi_safi, &prefix, best, bgp, add_path),
             },
         };
 
@@ -4800,7 +4857,14 @@ fn route_soft_out_peer_table(
         let Some((nlri, attr)) = route_update_ipv4(&ctx, prefix, rib, add_path) else {
             continue;
         };
-        let Some(decision) = route_apply_policy_out(&ctx, &nlri, attr, rib.weight) else {
+        // v4-unicast reads the cached snapshot; VPNv4 reads its own per-AFI
+        // Output policy from the peer.
+        let decision = if rd.is_some() {
+            route_apply_policy_out_at(peer, AfiSafi::new(afi, safi), &nlri, attr, rib.weight)
+        } else {
+            route_apply_policy_out(&ctx, &nlri, attr, rib.weight)
+        };
+        let Some(decision) = decision else {
             continue;
         };
         let attr = decision.attr;
@@ -5326,16 +5390,16 @@ pub fn route_ipv6_update(
     // carries the post-policy attribute; `None` means the route was
     // denied, so the shard withdraws any prior Loc-RIB row. (Reaches
     // parity with the v4 ingest — v6 previously applied no per-neighbor
-    // inbound policy.)
+    // inbound policy.) A route carrying an RD is VPNv6, otherwise IPv6
+    // unicast; each family reads its own `policy_list_at(afi_safi, Input)`.
+    let afi_safi = if rd.is_some() {
+        AfiSafi::new(Afi::Ip6, Safi::MplsVpn)
+    } else {
+        AfiSafi::new(Afi::Ip6, Safi::Unicast)
+    };
     let decision = {
         let peer = peers.get_by_idx(ident).expect("peer must exist");
-        route_apply_policy_in_v6(
-            peer,
-            AfiSafi::new(Afi::Ip6, Safi::Unicast),
-            nlri,
-            attr.clone(),
-            0,
-        )
+        route_apply_policy_in_v6(peer, afi_safi, nlri, attr.clone(), 0)
     };
 
     let dep = match rd {
@@ -9482,7 +9546,13 @@ impl LabeledAfi for LabeledV4 {
         attr: BgpAttr,
         weight: u32,
     ) -> Option<PolicyDecision> {
-        route_apply_policy_out(&peer.sync_ctx(peer.router_id), nlri, attr, weight)
+        route_apply_policy_out_at(
+            peer,
+            AfiSafi::new(Afi::Ip, Safi::MplsLabel),
+            nlri,
+            attr,
+            weight,
+        )
     }
     fn reach(nhop: IpAddr, label: Label, nlri: Ipv4Nlri) -> MpReachAttr {
         MpReachAttr::Labelv4 {
@@ -9649,8 +9719,14 @@ fn route_advertise_labeled<A: LabeledAfi>(
             let Some((nlri, attr, nhop, label)) = A::update(peer, &prefix, cand, bgp, true) else {
                 continue;
             };
+            // Per-AFI Output policy, mirroring the best-path branch so an
+            // AddPath candidate is filtered/rewritten the same way (this was
+            // previously skipped on the labeled AddPath path).
+            let Some(decision) = A::apply_policy_out(peer, &nlri, attr, cand.weight) else {
+                continue;
+            };
             let mut update = UpdatePacket::with_max_packet_size(peer.max_packet_size());
-            update.bgp_attr = Some(attr);
+            update.bgp_attr = Some(decision.attr);
             update.mp_update = Some(A::reach(nhop, label, nlri));
             peer.send_packet(update.into());
             A::adj_out_add(peer, prefix, cand.clone());
@@ -10684,7 +10760,15 @@ pub fn route_sync_vpnv4(peer: &mut Peer, bgp: &mut BgpTop) {
                 continue;
             };
 
-            let Some(decision) = route_apply_policy_out(&ctx, &nlri, attr, rib.weight) else {
+            // VPNv4 reads its own per-AFI Output policy from the peer (not the
+            // v4-unicast `SyncCtx` snapshot).
+            let Some(decision) = route_apply_policy_out_at(
+                peer,
+                AfiSafi::new(Afi::Ip, Safi::MplsVpn),
+                &nlri,
+                attr,
+                rib.weight,
+            ) else {
                 continue;
             };
             let attr = decision.attr;
@@ -11009,9 +11093,15 @@ pub fn route_sync_labelv4(peer: &mut Peer, bgp: &mut BgpTop) {
             continue;
         };
         // Outbound policy on the establish-time dump (parity with the
-        // event-driven advertise and the unicast sync paths).
-        let ctx = peer.sync_ctx(*bgp.router_id);
-        let Some(decision) = route_apply_policy_out(&ctx, &nlri, attr, best.weight) else {
+        // event-driven advertise and the unicast sync paths). Labeled-v4
+        // reads its own per-AFI Output policy from the peer.
+        let Some(decision) = route_apply_policy_out_at(
+            peer,
+            AfiSafi::new(Afi::Ip, Safi::MplsLabel),
+            &nlri,
+            attr,
+            best.weight,
+        ) else {
             continue;
         };
         let mut update = UpdatePacket::with_max_packet_size(peer.max_packet_size());
@@ -15849,6 +15939,48 @@ mod local_as_tests {
         }));
         peer.local_as_dual_fallback = true;
         assert_eq!(egress(&peer, "65010"), "65100 65010");
+    }
+
+    /// `route_apply_policy_out_at` reads the Output policy of the family it
+    /// is handed: a VPNv4 deny binding filters VPNv4 advertisements, while
+    /// v4-unicast (no binding here) still permits. Guards the per-AFI
+    /// egress wiring — families must not share one policy (the bug this
+    /// fixes was VPNv4 / labeled-v4 reusing the v4-unicast snapshot).
+    #[test]
+    fn apply_policy_out_at_is_per_family() {
+        use crate::bgp::InOut;
+        use crate::policy::{PolicyAction, PolicyList};
+        use bgp_packet::{Afi, AfiSafi, Ipv4Nlri, Safi};
+
+        let mut peer = test_peer(None);
+        let vpnv4 = AfiSafi::new(Afi::Ip, Safi::MplsVpn);
+        let v4u = AfiSafi::new(Afi::Ip, Safi::Unicast);
+
+        // Bind a deny-all Output policy to VPNv4 only.
+        let mut deny = PolicyList::default();
+        deny.entry(10).action = PolicyAction::Deny;
+        {
+            let slot = peer.policy_list_slot(vpnv4, InOut::Output);
+            slot.name = Some("DENY".to_string());
+            slot.policy_list = Some(deny);
+        }
+
+        let nlri = Ipv4Nlri {
+            id: 0,
+            prefix: "10.0.0.0/24".parse().unwrap(),
+        };
+
+        // VPNv4: the bound deny policy filters the route out.
+        assert!(
+            super::route_apply_policy_out_at(&peer, vpnv4, &nlri, BgpAttr::default(), 0).is_none(),
+            "VPNv4 Output policy (deny) must filter the route",
+        );
+        // v4-unicast: no binding for this family → default permit; the
+        // VPNv4 deny must not leak across families.
+        assert!(
+            super::route_apply_policy_out_at(&peer, v4u, &nlri, BgpAttr::default(), 0).is_some(),
+            "v4-unicast has no Output policy → permit (no cross-family leak)",
+        );
     }
 
     fn loops(peer: &Peer, path: &str) -> bool {

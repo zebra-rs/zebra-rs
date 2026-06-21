@@ -7,10 +7,11 @@ frame to **all** remote VTEPs over the Type-3 (Inclusive Multicast)
 tree. With it, a PE learns which groups its locally-attached hosts have
 joined (via the kernel bridge's IGMP/MLD snooping) and advertises that
 interest in BGP (a **Type-6 SMET** route), so other PEs can constrain
-multicast to the groups that were actually asked for. The control plane
-(snoop → SMET → import → kernel bridge MDB) is implemented and
-validated; per-VTEP `dst` pruning of the overlay replication is a
-documented follow-up (see [Limitations](#limitations)).
+multicast to the groups that were actually asked for. Both the control
+plane (snoop → SMET → import) and the per-VTEP data plane — a kernel
+**VXLAN MDB** entry that replicates the group only to the VTEP that
+asked for it, instead of head-end-replicating to every PE — are
+implemented and validated.
 
 Three new EVPN route types and one extended community carry this:
 
@@ -39,13 +40,25 @@ withdraws it. Existing memberships at start-up are picked up by an
 `RTM_GETMDB` dump.
 
 **Reception (ingress / source PE).** A received SMET whose RT matches a
-local VNI registers the group in the kernel bridge MDB —
-`bridge mdb add dev <bridge> port <vxlan> grp G [src S]`. With snooping
-on, the bridge forwards that **registered** group only to ports that
-asked for it, while still flooding *unregistered* groups over the
-Type-3 zero-MAC FDB list. No explicit flood-vs-selective reconciliation
-is needed — the kernel does it, and a non-proxy PE (which never sends
-SMET) simply keeps receiving the flood.
+local VNI is programmed as **two** kernel MDB entries:
+
+* a **bridge MDB** entry — `bridge mdb add dev <bridge> port <vxlan>
+  grp G [src S]` — that registers the group on the VXLAN bridge port so
+  the snooping bridge forwards it *into* the overlay rather than dropping
+  it; and
+* a **VXLAN MDB** entry on the VXLAN device itself — `bridge mdb add dev
+  <vxlan> grp G [src S] src_vni <VNI> dst <VTEP>` — carrying the
+  originating PE as `dst`, so the kernel replicates the group **only** to
+  the VTEP that asked for it instead of head-end-replicating it to every
+  VTEP on the Type-3 BUM tree.
+
+The per-VTEP `dst` requires a VNI-aware VXLAN, so zebra-rs creates its
+EVPN VXLAN devices in the kernel's **`external vnifilter`** model
+(equivalent to `ip link add … type vxlan external vnifilter`, with each
+VNI registered via `bridge vni add`); FDB and MDB entries are keyed by
+`src_vni`. Unregistered groups still flood over the Type-3 tree, so a
+non-proxy PE (which never sends SMET) keeps receiving them — no explicit
+flood-vs-selective reconciliation is needed.
 
 **Capability signalling.** A proxy-capable PE attaches the **Multicast
 Flags Extended Community** to its Type-3 IMET route so peers know it
@@ -104,13 +117,17 @@ Route Distinguisher: 192.168.0.2:10
 
 Filter by route type with `show bgp evpn route-type smet`.
 
-The registered group is visible in the kernel bridge MDB on the ingress
-PE (it has no local member, so the entry can only come from the received
-SMET):
+The registered group is visible in both MDBs on the ingress PE (it has
+no local member, so the entries can only come from the received SMET).
+The bridge MDB registers the VXLAN port; the VXLAN MDB carries the
+per-VTEP `dst`:
 
 ```
 bridge mdb show dev br10
 dev br10 port vxlan10 grp 239.1.1.1 permanent
+
+bridge mdb show dev vxlan10
+dev vxlan10 port vxlan10 grp 239.1.1.1 permanent dst 192.168.0.2 src_vni 10
 ```
 
 ## Limitations
@@ -122,14 +139,6 @@ dev br10 port vxlan10 grp 239.1.1.1 permanent
   rather than from the kernel MDB group-mode.
 * Selective entries are programmed with bridge **VLAN 0** (non
   VLAN-aware bridge); per-VLAN mapping is a follow-up.
-* **Per-VTEP `dst` selectivity is not yet programmed.** A received SMET
-  registers the group on the VXLAN bridge port (`bridge mdb add … grp G`)
-  but does *not* encode a per-entry `dst` — the kernel rejects
-  `MDBE_ATTR_DST` on a plain VXLAN (and `iproute2` drops it too). True
-  per-`(x,G)`-to-specific-VTEP delivery requires a **`vnifilter` VXLAN
-  MDB** (`bridge mdb add dev <vxlan> … src_vni N dst <VTEP>`), a separate
-  follow-up. Today the registered group is delivered out the VXLAN and
-  head-end-replicated per the Type-3 FDB list.
 * The Multicast Flags EC capability gate (skip selective replication
   toward non-proxy PEs) is an optimization that is not yet applied —
   correctness still holds because the kernel floods unregistered groups.

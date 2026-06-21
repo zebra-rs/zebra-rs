@@ -1,8 +1,6 @@
 name: Nightly Build
 
 on:
-  # push:
-  #  branches: [main]
   schedule:
     - cron: '0 18 * * *'    # 03:00 JST (UTC 18:00)
   workflow_dispatch:
@@ -11,176 +9,26 @@ permissions:
   contents: write           # Required to push the nightly tag and release
 
 jobs:
-  # =====================================================================
-  # Native runners: Ubuntu 22.04 and 24.04
-  # =====================================================================
-  build-native:
-    name: Build ${{ matrix.dist }}-${{ matrix.arch }}
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - { dist: jammy, arch: amd64, runner: ubuntu-22.04 }
-          - { dist: jammy, arch: arm64, runner: ubuntu-22.04-arm }
-          - { dist: noble, arch: amd64, runner: ubuntu-24.04 }
-          - { dist: noble, arch: arm64, runner: ubuntu-24.04-arm }
-
-    runs-on: ${{ matrix.runner }}
-
-    steps:
-      - name: Checkout code
-        uses: actions/checkout@v4
-
-      - name: Setup Rust
-        uses: actions-rust-lang/setup-rust-toolchain@v1
-        with:
-          cache-key: ${{ matrix.dist }}
-
-      # `make -C packaging` builds the XDP BFD Echo helper (offload/xdp-bfd-echo) for
-      # bpfel-unknown-none: needs nightly + rust-src and bpf-linker (links LLVM).
-      # Versions match the validated combo bpf-linker 0.10.3 / LLVM 18.1.
-      - name: Install XDP/eBPF toolchain
-        run: |
-          rustup toolchain install nightly --component rust-src
-          wget -qO /tmp/llvm.sh https://apt.llvm.org/llvm.sh
-          chmod +x /tmp/llvm.sh
-          sudo /tmp/llvm.sh 18
-          echo "/usr/lib/llvm-18/bin" >> "$GITHUB_PATH"
-          export PATH="/usr/lib/llvm-18/bin:$PATH"
-          cargo install bpf-linker --version 0.10.3 --locked
-
-      - name: Install build dependencies
-        run: |
-          sudo apt-get update -y
-          sudo apt-get install -y protobuf-compiler libnanomsg-dev bison xxd libpam0g-dev
-
-      - name: Install nfpm
-        run: |
-          echo 'deb [trusted=yes] https://repo.goreleaser.com/apt/ /' | \
-            sudo tee /etc/apt/sources.list.d/goreleaser.list
-          sudo apt-get update
-          sudo apt-get install -y nfpm
-
-      - name: Build vty
-        run: make -C vty
-
-      - name: Build .deb
-        run: make -C packaging ${{ matrix.arch }}
-
-      - name: Rename .deb with dist suffix
-        run: |
-          cd packaging
-          for f in *.deb; do
-            # zebra-rs_0.5.0_arm64.deb -> zebra-rs_0.5.0-noble_arm64.deb
-            new=$(echo "$f" | sed -E "s/_([^_]+)_([^_]+)\.deb$/_\1-${{ matrix.dist }}_\2.deb/")
-            mv "$f" "$new"
-          done
-          ls -la *.deb
-
-      - name: Upload artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: deb-${{ matrix.dist }}-${{ matrix.arch }}
-          path: ./packaging/*.deb
+  build:
+    uses: ./.github/workflows/build-debs.yaml
+    with:
+      nightly: true
 
   # =====================================================================
-  # Container-based: Ubuntu 26.04 (until native runners are available)
-  # https://github.com/actions/runner-images/issues/13964
-  # =====================================================================
-  build-container:
-    name: Build resolute-${{ matrix.arch }}
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - { arch: amd64, runner: ubuntu-24.04 }
-          - { arch: arm64, runner: ubuntu-24.04-arm }
-
-    runs-on: ${{ matrix.runner }}
-    container:
-      image: ubuntu:26.04
-
-    steps:
-      - name: Install container base tools
-        run: |
-          apt-get update
-          apt-get install -y curl git ca-certificates sudo build-essential pkg-config xxd
-
-      - name: Checkout code
-        uses: actions/checkout@v4
-
-      - name: Setup Rust
-        uses: actions-rust-lang/setup-rust-toolchain@v1
-
-      # The helper (offload/xdp-bfd-echo) needs nightly + rust-src and bpf-linker (LLVM 18,
-      # matching the validated bpf-linker 0.10.3). Root container, so no sudo.
-      # llvm.sh runs `lsb_release`/`gpg`/`add-apt-repository` and needs wget; the
-      # base tools install none of them — without lsb-release the script aborts at
-      # `DISTRO=$(lsb_release -is)` (exit 127) under its `set -euxo pipefail`.
-      # apt.llvm.org has a resolute (26.04) repo dir but no llvm-toolchain-resolute-18
-      # suite yet, so auto-detection would 404. Pin the codename to noble (24.04)
-      # with `-n noble`; its clang-18/lld-18 install and run fine on resolute.
-      # Revisit (drop `-n noble`) once apt.llvm.org publishes LLVM 18 for resolute.
-      - name: Install XDP/eBPF toolchain
-        run: |
-          apt-get install -y wget lsb-release gnupg software-properties-common
-          rustup toolchain install nightly --component rust-src
-          wget -qO /tmp/llvm.sh https://apt.llvm.org/llvm.sh
-          chmod +x /tmp/llvm.sh
-          /tmp/llvm.sh 18 -n noble
-          echo "/usr/lib/llvm-18/bin" >> "$GITHUB_PATH"
-          export PATH="/usr/lib/llvm-18/bin:$PATH"
-          cargo install bpf-linker --version 0.10.3 --locked
-
-      - name: Install build dependencies
-        run: |
-          apt-get update -y
-          apt-get install -y protobuf-compiler libnanomsg-dev bison xxd libpam0g-dev
-
-      - name: Install nfpm
-        run: |
-          echo 'deb [trusted=yes] https://repo.goreleaser.com/apt/ /' \
-            > /etc/apt/sources.list.d/goreleaser.list
-          apt-get update
-          apt-get install -y nfpm
-
-      - name: Build vty
-        run: make -C vty
-
-      - name: Build .deb
-        run: make -C packaging ${{ matrix.arch }}
-
-      - name: Rename .deb with dist suffix
-        run: |
-          cd packaging
-          for f in *.deb; do
-            new=$(echo "$f" | sed -E "s/_([^_]+)_([^_]+)\.deb$/_\1-resolute_\2.deb/")
-            mv "$f" "$new"
-          done
-          ls -la *.deb
-
-      - name: Upload artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: deb-resolute-${{ matrix.arch }}
-          path: ./packaging/*.deb
-
-  # =====================================================================
-  # Publish all six .deb files as a "nightly" Release
+  # Single 'nightly' release: all six .debs for direct download
   # =====================================================================
   release:
     name: Publish Nightly Release
-    needs: [build-native, build-container]
+    needs: build
     runs-on: ubuntu-latest
-
     steps:
       - name: Checkout code
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
         with:
           fetch-depth: 0    # Needed to move tags
 
       - name: Download all build artifacts
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
           path: artifacts
           pattern: deb-*
@@ -205,8 +53,6 @@ jobs:
           body: |
             Nightly build from commit ${{ github.sha }}
 
-            Built at: ${{ github.event.repository.updated_at }}
-
             ## Downloads
 
             Choose the file matching your Ubuntu version and architecture:
@@ -217,9 +63,18 @@ jobs:
             | 24.04 (noble)      | `*-noble_amd64.deb`      | `*-noble_arm64.deb`      |
             | 26.04 (resolute)   | `*-resolute_amd64.deb`   | `*-resolute_arm64.deb`   |
 
-            Install:
-            ```
-            curl -LO https://github.com/${{ github.repository }}/releases/download/nightly/<filename>.deb
-            sudo apt install ./<filename>.deb
-            ```
+            Or install via apt (nightly channel): https://zebra.rs/apt/
           files: artifacts/*.deb
+
+  # =====================================================================
+  # Per-codename nightly-<codename> flat APT repositories (nightly channel)
+  # =====================================================================
+  publish-apt:
+    name: Publish nightly APT repo
+    needs: build
+    if: ${{ vars.APT_PUBLISH_ENABLED == 'true' }}
+    uses: ./.github/workflows/publish-apt.yaml
+    with:
+      channel: nightly
+      prerelease: true
+    secrets: inherit

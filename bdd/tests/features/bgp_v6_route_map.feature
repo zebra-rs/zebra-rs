@@ -2,8 +2,9 @@
 @bgp_v6_route_map
 Feature: BGP per-peer route-map for IPv6 unicast (inbound + outbound)
   As a network operator
-  I want `neighbor policy in/out <policy>` to filter and rewrite IPv6
-  unicast routes per neighbor — the same per-peer route-map semantics
+  I want `neighbor X afi-safi ipv6 policy in/out <policy>` to filter and
+  rewrite IPv6 unicast routes per neighbor — the same per-peer per-family
+  route-map semantics
   the IPv4 unicast path already has. Before this, the v6 ingest and the
   v6 advertise applied no per-neighbor policy, so v6 route-maps were
   silently ignored (the global `table-map` was the only v6 policy hook).

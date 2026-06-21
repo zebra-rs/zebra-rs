@@ -324,6 +324,23 @@ module config {
           enum stable-secret;
         }
       }
+      leaf bridge {
+        ext:dynamic "rib:bridge";
+        type leafref {
+          path "/bridge/name";
+        }
+        description
+          "Enslave this VXLAN device to the named bridge master,
+           equivalent to `ip link set <name> master <bridge>`. Reuses
+           the same staged bridge-bind as `interface <name> bridge
+           <bridge>` (applied once both the VXLAN and the bridge exist,
+           so config order is free), and the VXLAN bridge-slave defaults
+           are applied automatically: addrgenmode none (the VXLAN
+           creation default) plus `neigh_suppress on` and `learning off`
+           on the bridge port (set by `vxlan_bridge_port_defaults` when
+           the VXLAN gains a master). Omitted means the VXLAN is not a
+           bridge port.";
+      }
     }
 
     container system {
@@ -1730,6 +1747,18 @@ module config {
 
         container egress-protection {
           ext:help "Mirror SID egress node/link protection (SRv6/SR-MPLS)";
+          leaf hold-down {
+            type uint32;
+            units seconds;
+            description
+              "Node-protection stale-route retention hold-down. After a
+               protected egress's node fails, its locator is kept alive as
+               a seg6 H.Encaps backup to the protector's Mirror SID; this
+               bounds how long that backup forwards before it is withdrawn
+               (so a genuinely-decommissioned egress is not masked toward
+               the protector forever). 0 or unset = no hold-down: the
+               backup floats for as long as the protector advertises.";
+          }
           // draft-ietf-rtgwg-srv6-egress-protection / RFC 8679. This
           // node (the protector, PEB) advertises a Mirror SID (End.M
           // for SRv6) plus the protected egress's locator(s) so a PLR
@@ -1742,12 +1771,16 @@ module config {
             ext:help "Protect one egress node, keyed by its SRv6 locator";
             key "protected-locator";
             leaf protected-locator {
-              type inet:ipv6-prefix;
+              type inet:ip-prefix;
               description
-                "SRv6 locator of the protected egress PE (PEA), e.g.
-                 2001:db8:a3:1::/64. Emitted in the Protected Locators
-                 sub-sub-TLV of the advertised Mirror SID sub-TLV and
-                 used by the PLR to match traffic destined to PEA.";
+                "Prefix identifying the protected egress PE (PEA). For
+                 SRv6 it is PEA's SRv6 locator (IPv6), e.g.
+                 2001:db8:a3:1::/64, emitted in the Protected Locators
+                 sub-sub-TLV of the Mirror SID sub-TLV. For SR-MPLS it is
+                 PEA's IGP loopback (IPv4 in the current SR-MPLS dataplane,
+                 which has no IPv6 prefix-SID), e.g. 1.1.1.3/32, emitted as
+                 the FEC of the SID/Label Binding TLV (149). The PLR /
+                 protected egress matches it to identify PEA.";
             }
             leaf mirror-sid {
               type inet:ipv6-address;
@@ -2882,6 +2915,23 @@ module config {
           "Enslave this interface to the named VRF master device.
            Omitted means the interface lives in the default routing
            instance.";
+      }
+      leaf bridge {
+        // Same priority as `vrf` (and mutually exclusive with it in
+        // practice — an interface has a single kernel IFLA_MASTER):
+        // apply the enslave before any address.
+        ext:sort "11";
+        ext:dynamic "rib:bridge";
+        type leafref {
+          path "/bridge/name";
+        }
+        description
+          "Enslave this interface to the named bridge master device,
+           equivalent to `ip link set <if-name> master <bridge>`. The
+           bind is staged and applied once both the interface and the
+           bridge exist in the kernel, so config order is free (the
+           bridge may be created after this leaf is set). Omitted means
+           the interface is not a bridge port.";
       }
       leaf mtu {
         ext:help "Maximum transmission unit in bytes";

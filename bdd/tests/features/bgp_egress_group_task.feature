@@ -64,9 +64,9 @@ Feature: BGP per-update-group egress task (migration Phases 0-3)
     # not on the peer. `show ... advertised-routes` must request it from the
     # group task: z3 was advertised .10/.11, and — split-horizon — z1 (the
     # source) was advertised neither.
-    Then show command "show bgp neighbors 10.0.0.3 advertised-routes" in namespace "z2" should contain "10.10.10.0/24"
-    And show command "show bgp neighbors 10.0.0.3 advertised-routes" in namespace "z2" should contain "10.10.11.0/24"
-    And show command "show bgp neighbors 10.0.0.1 advertised-routes" in namespace "z2" should not contain "10.10.10.0/24"
+    Then show command "show bgp neighbor 10.0.0.3 advertised-routes" in namespace "z2" should contain "10.10.10.0/24"
+    And show command "show bgp neighbor 10.0.0.3 advertised-routes" in namespace "z2" should contain "10.10.11.0/24"
+    And show command "show bgp neighbor 10.0.0.1 advertised-routes" in namespace "z2" should not contain "10.10.10.0/24"
 
   Scenario: a late peer z4 gets the routes on session-up sync (Phase 3)
     Given the test topology exists

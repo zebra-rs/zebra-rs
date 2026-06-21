@@ -358,6 +358,10 @@ impl Rib {
         )
         .await;
         self.ipv6_default_sync().await;
+        // A PE-CE link going down may leave a protected egress VRF unable
+        // to deliver — redirect its End.DT46 service SID to the Mirror SID.
+        self.reconcile_egress_redirects().await;
+        self.reconcile_egress_mpls_redirects().await;
         self.schedule_rib_sync();
     }
 
@@ -506,6 +510,10 @@ impl Rib {
         )
         .await;
         self.ipv6_default_sync().await;
+        // A recovered PE-CE link can deliver again — restore any protected
+        // End.DT46 service SID from its Mirror SID redirect form.
+        self.reconcile_egress_redirects().await;
+        self.reconcile_egress_mpls_redirects().await;
         // Mirror link_down: schedule a deferred Resolve so recursive
         // groups (e.g. a static whose first segment was unreachable
         // while the link was down) re-evaluate now that the IS-IS
