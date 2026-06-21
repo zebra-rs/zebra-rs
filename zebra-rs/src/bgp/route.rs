@@ -12710,6 +12710,13 @@ impl Bgp {
         }
         attr.pmsi_tunnel = Some(pmsi);
         attr.nexthop = Some(BgpNexthop::Evpn(nexthop));
+        // RFC 9252 §6.4: in SRv6 P2MP mode, advertise this PE's End.DT2M SID
+        // for the VNI on the IMET route (SRv6 L2 Service TLV in the Prefix-SID
+        // attribute) so remote roots fan replicated BUM to it. SID-less when no
+        // locator has resolved yet (reconciled on the next locator update).
+        if matches!(bum, EvpnBumTunnel::SrV6P2mp) {
+            attr.prefix_sid = self.vni_dt2m_prefix_sid(vni);
+        }
 
         let mut rib = BgpRib::new(
             ORIGINATED_PEER,
@@ -12770,8 +12777,10 @@ impl Bgp {
         let _ = self.local_rib.select_best_path_evpn(&rd, &prefix);
         route_withdraw_evpn_to_peers(rd, prefix, &mut self.peers);
         // We no longer originate this VNI — drop its SR P2MP tree Root so a
-        // subsequent reconcile withdraws any replication segment.
+        // subsequent reconcile withdraws any replication segment, and release
+        // its End.DT2M SID back to the pool.
         self.local_rib.evpn_flood.clear_local_root(vni);
+        self.free_vni_dt2m_sid(vni);
     }
 
     /// Originate a Type-6 SMET route for a locally-snooped `(*,G)` /
