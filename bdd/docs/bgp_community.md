@@ -43,10 +43,9 @@ route from A exercises both re-advertisement edges:
 - z2-1.yaml: B — eBGP to A, iBGP to C, eBGP to D.
 - z3-1.yaml: C — iBGP to B only.
 - z4-1.yaml: D — eBGP to B only.
-- eBGP MinRouteAdvertisementInterval = 30 s
-- iBGP MinRouteAdvertisementInterval =  5 s
-- End-to-end A → B → C propagation: up to 30 + 5 = 35 s.
-- End-to-end A → B → D propagation: up to 30 + 30 = 60 s.
+- Every router sets `timer adv-interval ebgp: 3`, overriding the
+- End-to-end A → B → C propagation: up to 3 + 5 =  8 s.
+- End-to-end A → B → D propagation: up to 3 + 3 =  6 s.
 - Each scenario that triggers a fresh advertisement on A waits
 
 Convergence wait-time rationale:
