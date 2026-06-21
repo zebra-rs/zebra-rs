@@ -6,6 +6,16 @@ zebra-rs is a BGP, OSPF, and IS‑IS routing stack with SRv6, SR-MPLS, L3VPN, an
 
 ### Quick Install
 
+Prebuilt `.deb` packages are currently provided only for the following Ubuntu
+releases. Other distributions or releases are not packaged yet and should
+[build from source](#build-and-install-from-source).
+
+| Ubuntu release | Code name | Architectures |
+|---|---|---|
+| 22.04 | jammy | x86_64, ARM64 |
+| 24.04 | noble | x86_64, ARM64 |
+| 26.04 | resolute | x86_64, ARM64 |
+
 The fastest way to get zebra-rs is the install script, which detects your
 distribution and CPU architecture, fetches the matching prebuilt `.deb`
 package, and installs it:
@@ -17,13 +27,9 @@ curl -fsSL https://zebra.rs/install.sh | bash
 The script downloads the latest package from the
 [GitHub releases](https://github.com/zebra-rs/zebra-rs/releases) and installs
 it with `apt`, so it pulls in the runtime dependencies automatically. It needs
-`sudo` for the install step. Prebuilt `.deb` packages are currently provided
-only for Ubuntu 22.04 (jammy), 24.04 (noble), and 26.04 (resolute) on x86_64
-and ARM64 — other distributions or releases are not packaged yet and should
-build from source (below). Piping a remote script into `bash` runs it with your
-privileges — read
-it first at <https://zebra.rs/install.sh> if you'd rather review before
-running.
+`sudo` for the install step. Piping a remote script into `bash` runs it with
+your privileges — read it first at <https://zebra.rs/install.sh> if you'd rather
+review before running.
 
 ### Nightly Packages
 
