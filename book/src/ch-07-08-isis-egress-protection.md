@@ -283,6 +283,23 @@ the CE:
 2001:db8:a3:1::/64  encap seg6local action End.DT46 vrftable <cust-table> dev sr0
 ```
 
+While a redirect is **active** (the protected egress's PE–CE link is down
+and it has steered its own service SID to the protector), the SID is
+surfaced in `show segment-routing srv6 sid` — its canonical behavior plus
+the live H.Encaps redirect target — so you don't have to read the kernel
+LFIB to see the failover:
+
+```text
+> show segment-routing srv6 sid
+ SID               Behavior   Context  Protocol  Locator  AllocationType
+ ----------------------------  -------  --------  -------  --------------
+ fcbb:bbbb:3:40::  End.DT46   -        bgp       LOC3     dynamic
+    -> egress-protection redirect: H.Encaps to fcbb:bbbb:4:1::
+```
+
+The annotation clears when the link recovers and the SID returns to its
+canonical End.DT46 decap.
+
 ### SR-MPLS
 
 `show isis egress-protection` shows the same view for `dataplane mpls`,
@@ -381,10 +398,8 @@ protection**
 (blocked on stock Linux — no per-context label table; needs eBPF/VPP);
 learning the context population from **BGP L3VPN** instead of static
 `via-vrf`; auto-allocation
-of the SRv6 Mirror SID when `mirror-sid` is omitted, a TI-LFA-style repair
-list to the protector (today the SRv6 repair is a single `[Mirror SID]`
-segment, assuming the protector is reachable on a path that avoids the
-failed egress), and surfacing the live redirected form in `show` output
-(today the kernel LFIB reflects the redirect while `show` keeps the
-canonical form). SR-MPLS rides an **IPv4** transport because IS-IS has no
-IPv6 prefix-SID yet (deferred until SRv6-over-IS-IS).
+of the SRv6 Mirror SID when `mirror-sid` is omitted, and a TI-LFA-style
+repair list to the protector (today the SRv6 repair is a single
+`[Mirror SID]` segment, assuming the protector is reachable on a path that
+avoids the failed egress). SR-MPLS rides an **IPv4** transport because
+IS-IS has no IPv6 prefix-SID yet (deferred until SRv6-over-IS-IS).

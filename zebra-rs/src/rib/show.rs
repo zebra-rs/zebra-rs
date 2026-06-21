@@ -1930,15 +1930,32 @@ pub fn l2_neighbor_show(rib: &Rib, _args: Args, _json: bool) -> String {
 /// operator the command is wired and they're just not allocating any
 /// SIDs yet).
 pub fn sid_show(rib: &Rib, _args: Args, json: bool) -> String {
+    // `redirected_sids` maps each SID currently in its egress-protection
+    // redirect form to the protector's Mirror SID it H.Encaps to — a live,
+    // latched state that `show segment-routing srv6 sid` surfaces (the
+    // canonical behavior column otherwise hides it; only the kernel route
+    // reflects the redirect).
+    let redirects = &rib.redirected_sids;
     if json {
-        let entries: Vec<SidJson> = rib.sids.values().map(SidJson::from).collect();
+        let entries: Vec<SidJson> = rib
+            .sids
+            .values()
+            .map(|s| {
+                let mut j = SidJson::from(s);
+                j.redirected_to = redirects.get(&s.addr).map(|m| m.to_string());
+                j
+            })
+            .collect();
         return serde_json::to_string_pretty(&SidTable { entries })
             .unwrap_or_else(|e| format!("{{\"error\": \"Failed to serialize SIDs: {}\"}}", e));
     }
-    sid_show_text(&rib.sids)
+    sid_show_text(&rib.sids, redirects)
 }
 
-fn sid_show_text(sids: &std::collections::BTreeMap<std::net::Ipv6Addr, super::Sid>) -> String {
+fn sid_show_text(
+    sids: &std::collections::BTreeMap<std::net::Ipv6Addr, super::Sid>,
+    redirects: &std::collections::BTreeMap<std::net::Ipv6Addr, std::net::Ipv6Addr>,
+) -> String {
     let mut buf = String::new();
     writeln!(
         buf,
@@ -1993,6 +2010,19 @@ fn sid_show_text(sids: &std::collections::BTreeMap<std::net::Ipv6Addr, super::Si
             alloc_w = ALLOC_COL,
         )
         .unwrap();
+        // Mirror SID egress-protection: while the protected link is down,
+        // this SID forwards as seg6 H.Encaps to the protector's Mirror SID
+        // instead of its canonical behavior. Surface the live redirect that
+        // the kernel route reflects.
+        if let Some(mirror) = redirects.get(&sid.addr) {
+            writeln!(
+                buf,
+                " {:<sid_w$}  -> egress-protection redirect: H.Encaps to {mirror}",
+                "",
+                sid_w = SID_COL,
+            )
+            .unwrap();
+        }
     }
     buf
 }
@@ -2010,6 +2040,10 @@ struct SidJson {
     owner: String,
     locator: String,
     allocation_type: String,
+    /// Present only while this SID is in its egress-protection redirect
+    /// form: the protector's Mirror SID it currently H.Encaps to.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    redirected_to: Option<String>,
 }
 
 impl From<&super::Sid> for SidJson {
@@ -2021,6 +2055,7 @@ impl From<&super::Sid> for SidJson {
             owner: s.owner.to_string(),
             locator: s.locator.clone(),
             allocation_type: s.allocation_type.to_string(),
+            redirected_to: None,
         }
     }
 }
@@ -2140,7 +2175,7 @@ mod tests {
         // An empty registry must still produce a header so operators
         // can tell the command is wired and they just aren't allocating
         // anything yet — silence would look like a broken handler.
-        let out = sid_show_text(&BTreeMap::new());
+        let out = sid_show_text(&BTreeMap::new(), &BTreeMap::new());
         let lines: Vec<&str> = out.lines().collect();
         assert_eq!(lines.len(), 2);
         assert!(lines[0].contains("SID"));
@@ -2161,7 +2196,7 @@ mod tests {
         sids.insert(end.addr, end);
         sids.insert(endx.addr, endx);
 
-        let out = sid_show_text(&sids);
+        let out = sid_show_text(&sids, &BTreeMap::new());
         // BTreeMap iterates by key — End sorts before End.X, matching
         // the design-doc example ordering.
         let body: Vec<&str> = out.lines().skip(2).collect();
@@ -2185,6 +2220,32 @@ mod tests {
             assert!(line.contains("LOC_N1"));
             assert!(line.contains("dynamic"));
         }
+    }
+
+    #[test]
+    fn sid_show_surfaces_egress_protection_redirect() {
+        let mut sids: BTreeMap<Ipv6Addr, Sid> = BTreeMap::new();
+        let dt = sid(
+            "2001:db8:a:2:fe00::",
+            SidBehavior::EndDT46,
+            SidContext::None,
+        );
+        sids.insert(dt.addr, dt);
+
+        // No redirect → just the canonical row.
+        let plain = sid_show_text(&sids, &BTreeMap::new());
+        assert!(!plain.contains("redirect"), "plain: {plain}");
+
+        // Redirected → an extra annotation line names the Mirror SID.
+        let mut redirects: BTreeMap<Ipv6Addr, Ipv6Addr> = BTreeMap::new();
+        let mirror: Ipv6Addr = "2001:db8:b:1::".parse().unwrap();
+        redirects.insert("2001:db8:a:2:fe00::".parse().unwrap(), mirror);
+        let out = sid_show_text(&sids, &redirects);
+        assert!(out.contains("2001:db8:a:2:fe00::"), "SID row: {out}");
+        assert!(
+            out.contains("egress-protection redirect") && out.contains("2001:db8:b:1::"),
+            "redirect annotation: {out}"
+        );
     }
 
     #[test]

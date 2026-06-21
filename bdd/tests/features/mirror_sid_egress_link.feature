@@ -91,11 +91,18 @@ Feature: IS-IS SRv6 Mirror SID egress link protection — steady-state baseline
     When I make namespace "pea" interface "pea-ce2" down
     And I wait 8 seconds
     Then ping from "ce1" to "2001:db8:c2::1" should eventually succeed
+    # The live redirect is now surfaced in show output (not just the kernel
+    # route): pea's End.DT46 SID reports its H.Encaps redirect to peb's
+    # Mirror SID.
+    And show command "show segment-routing srv6 sid" in namespace "pea" should contain "egress-protection redirect"
+    And show command "show segment-routing srv6 sid" in namespace "pea" should contain "fcbb:bbbb:4:1::"
     # Recover the link: pea restores the normal End.DT46 decap and the
     # service forwards locally again.
     When I make namespace "pea" interface "pea-ce2" up
     And I wait 8 seconds
     Then ping from "ce1" to "2001:db8:c2::1" should eventually succeed
+    # ...and the redirect annotation clears.
+    And show command "show segment-routing srv6 sid" in namespace "pea" should not contain "egress-protection redirect"
 
   Scenario: Teardown topology
     Given the test topology exists

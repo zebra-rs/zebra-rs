@@ -704,11 +704,14 @@ pub struct Rib {
     /// Mirror SID (via `End.B6.Encaps`) while its CE-facing VRF can't
     /// deliver.
     pub egress_protect: BTreeMap<ipnet::Ipv6Net, std::net::Ipv6Addr>,
-    /// Local SID addresses currently installed in their redirect
-    /// (`End.B6.Encaps -> mirror_sid`) form rather than the normal
-    /// End.DT46 decap. Tracks the live FIB form so a reconcile only
-    /// emits a netlink change on an actual transition.
-    pub redirected_sids: BTreeSet<std::net::Ipv6Addr>,
+    /// Local SIDs currently installed in their redirect (`seg6 H.Encaps ->
+    /// mirror_sid`) form rather than the normal End.DT46 decap, mapped to
+    /// the protector's Mirror SID they redirect to. Tracks the live FIB
+    /// form so a reconcile only emits a netlink change on an actual
+    /// transition, and lets `show segment-routing srv6 sid` surface the
+    /// redirect target independently of the (volatile) `egress_protect`
+    /// registration.
+    pub redirected_sids: BTreeMap<std::net::Ipv6Addr, std::net::Ipv6Addr>,
     /// SR-MPLS Mirror Context egress link protection registrations from
     /// IS-IS (see [`Message::EgressMplsProtectSet`]): each
     /// `(context_label, protector_loopback)` the local node is protected
@@ -847,7 +850,7 @@ impl Rib {
             locators: BTreeMap::new(),
             sids: BTreeMap::new(),
             egress_protect: BTreeMap::new(),
-            redirected_sids: BTreeSet::new(),
+            redirected_sids: BTreeMap::new(),
             egress_mpls_protect: Vec::new(),
             redirected_vpn_labels: BTreeMap::new(),
             sr_clients: BTreeMap::new(),
@@ -1422,7 +1425,7 @@ impl Rib {
         if sid.behavior != SidBehavior::EndDT46 {
             return;
         }
-        let is_redirected = self.redirected_sids.contains(&addr);
+        let is_redirected = self.redirected_sids.contains_key(&addr);
         let can_deliver = self.vrf_can_deliver(sid.table_id);
         if is_redirected {
             // Latched: hold the redirect until the PE-CE link recovers.
@@ -1456,7 +1459,7 @@ impl Rib {
             self.fib_handle
                 .route_sid_redirect_install(&sid.prefix(), mirror_sid, nh6, ifindex)
                 .await;
-            self.redirected_sids.insert(addr);
+            self.redirected_sids.insert(addr, mirror_sid);
             tracing::info!(
                 "[egress-protect] redirect {} -> seg6 H.Encaps [{}] via {} dev {} (VRF table {} can't deliver)",
                 addr,
@@ -1480,7 +1483,7 @@ impl Rib {
             .values()
             .filter(|s| s.behavior == SidBehavior::EndDT46)
             .filter(|s| {
-                self.redirected_sids.contains(&s.addr)
+                self.redirected_sids.contains_key(&s.addr)
                     || self.egress_protect.keys().any(|loc| loc.contains(&s.addr))
             })
             .map(|s| s.addr)
