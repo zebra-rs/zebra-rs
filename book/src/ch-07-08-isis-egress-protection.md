@@ -167,6 +167,18 @@ PEA-side egress-protection configuration is required.
   TLV (149) with the Mirror (M) flag set, carrying a context label. Both
   are implemented for egress link protection.
 
+One leaf sits beside `protect` (not inside it), governing node protection:
+
+- **`hold-down`** (`uint32` seconds, under `egress-protection`) — bounds
+  node-protection stale-route retention. After a protected egress's *node*
+  fails, the PLR keeps its locator alive as a seg6 H.Encaps backup to the
+  protector's Mirror SID (so the failover survives reconvergence); this
+  caps how long that backup forwards before it is withdrawn, so a
+  genuinely-decommissioned egress is not redirected to the protector
+  forever. `0`/unset = no hold-down (the backup floats for as long as the
+  protector advertises). Configured on the PLR, e.g. `router isis
+  egress-protection hold-down 120`.
+
 ## Configuration guidelines
 
 Mirror SID egress protection is, by the IETF draft's own guidance,
@@ -353,7 +365,8 @@ and validated on real-namespace BDD topologies.
   and **node-protection stale-route retention** — a high-distance seg6
   H.Encaps floating backup to the Mirror SID that best-path promotes when
   PEA's node fails and its locator route is withdrawn, so the failover
-  survives SPF reconvergence (not just the sub-second BFD window).
+  survives SPF reconvergence (not just the sub-second BFD window),
+  optionally bounded by the `hold-down` timer.
 - **SR-MPLS** — the SID/Label Binding TLV (149, M-flag) **advertisement**
   with a context label from the SRLB, **reception** into the
   `show isis egress-protection` view, the protector's **context-label
@@ -361,11 +374,10 @@ and validated on real-namespace BDD topologies.
   (PEA swaps its own VPN-label ILM to push the context label toward the
   protector, latched on link state).
 
-Still landing in later stages: a **time-bounded hold-down** on the
-node-protection retained backup (today it floats for as long as the
-protector advertises) and ingress **BGP-PIC** for an end-to-end *service*
-failover on node loss (the retention keeps the locator route, but the
-ingress must also keep forwarding to it); **SR-MPLS node protection**
+Still landing in later stages: ingress **BGP-PIC** for an end-to-end
+*service* failover on node loss (the retention keeps the locator route,
+but the ingress must also keep forwarding to it); **SR-MPLS node
+protection**
 (blocked on stock Linux — no per-context label table; needs eBPF/VPP);
 learning the context population from **BGP L3VPN** instead of static
 `via-vrf`; auto-allocation

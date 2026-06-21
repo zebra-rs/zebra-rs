@@ -542,6 +542,12 @@ pub struct IsisConfig {
     /// in this phase; origination / dataplane / PLR repair consume it
     /// later. See [`super::egress_protection`].
     pub egress_protections: super::egress_protection::MirrorProtectMap,
+    /// Node-protection stale-route retention hold-down, in seconds
+    /// (`router isis egress-protection hold-down`). `None`/`0` ⇒ the
+    /// retained backup floats indefinitely; otherwise it is withdrawn this
+    /// long after the protected egress's node fails. See
+    /// [`super::egress_protection`].
+    pub egress_protection_holddown: Option<u32>,
 
     /// Instance-level BFD defaults (`router isis { bfd {} }`), inherited by
     /// every interface and overridden per interface (see
@@ -791,6 +797,7 @@ impl Default for IsisConfig {
             // Matches the YANG `default 8` on the sharding `shards` leaf.
             ti_lfa_compute_shards: 8,
             egress_protections: Default::default(),
+            egress_protection_holddown: None,
             mt_enabled: Default::default(),
             mt_topologies: Default::default(),
             networks_v4: Default::default(),

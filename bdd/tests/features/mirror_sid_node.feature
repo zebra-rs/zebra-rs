@@ -76,6 +76,27 @@ Feature: IS-IS SRv6 Mirror SID egress NODE protection — stale-route retention
     # seg6 Mirror SID backup is demoted out of the FIB.
     Then kernel route "fcbb:bbbb:3::/48" in namespace "pe1" should eventually contain "dev pe1-pea"
 
+  Scenario: Hold-down bounds the retention and withdraws the backup
+    Given the test topology exists
+    # Arm a short node-protection hold-down on the PLR. With pea up the
+    # backup floats unselected, so this just sets the timer value.
+    When I apply command "set router isis egress-protection hold-down 10" in namespace "pe1"
+    And I wait 3 seconds
+    # Fail pea's node again. The backup is promoted (seg6 to peb's Mirror
+    # SID) while the hold-down counts...
+    When I stop zebra-rs in namespace "pea"
+    Then kernel route "fcbb:bbbb:3::/48" in namespace "pe1" should eventually contain "seg6"
+    # ...then the hold-down fires and withdraws it, so the locator becomes
+    # unreachable rather than masked toward the protector forever.
+    Then kernel route "fcbb:bbbb:3::/48" in namespace "pe1" should eventually be gone
+
+  Scenario: After the hold-down, a returning egress re-installs the backup
+    Given the test topology exists
+    When I start zebra-rs in namespace "pea"
+    And I apply config "pea.yaml" to namespace "pea"
+    # pea's native locator route is back and best-path again.
+    Then kernel route "fcbb:bbbb:3::/48" in namespace "pe1" should eventually contain "dev pe1-pea"
+
   Scenario: Teardown topology
     Given the test topology exists
     When I stop zebra-rs in namespace "pe1"
