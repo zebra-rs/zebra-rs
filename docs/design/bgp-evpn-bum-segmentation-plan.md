@@ -475,8 +475,24 @@ on push, not targeted filters).
       (`owned_region_vteps` over `evpn_gateway_owned_regions`) and stashes it
       via `set_gateway_tree`; `replication_action` builds the gateway tree (no
       local VXLAN root needed). zebra-rs-only, unit-tested; reuses DP4 + DP3b/c.
-    - **PR-C — forwarding BDD** end-to-end over the SRv6 tree (offload excluded
-      from CI → validate live).
+    - **PR-C1 — leaf-add supervisor wiring. DONE (#1575).** Drive the leaf
+      `End.DT2M` role from the daemon: `ReplicationHelper::leaf_add`/`leaf_del`
+      (separate `leaf_vnis` set), spawn fix to `--direction ingress` +
+      `--bridge-iface`, `rib::Message::ReplLeafAdd/Del`, driver from
+      `alloc_vni_dt2m_sid` / `free_vni_dt2m_sid`.
+    - **PR-C2 — encap child + unified dataplane config. DONE on main
+      (Kunihiro's #1576).** Two-child supervisor (ingress + `--encap` egress),
+      `encap-cfg` driven off the `sr-p2mp-dataplane` YANG topology
+      (`overlay`/`underlay`/`bridge`/`next-hop-mac`); my env vars kept as
+      fallbacks, my leaf-add absorbed. (My parallel encap-spawn slice was not
+      built — coordinated; his is canonical.)
+    - **PR-C3 — daemon-driven offload integration BDD. DONE (this PR).**
+      2-node SRv6 EVPN (`@bgp_evpn_srv6_p2mp`, static-route underlay, no IGP):
+      session + `End.DT2M` SID exchange over the SR P2MP IMET, ReplSeg formed,
+      and the daemon spawns + feeds the ingress + encap children (verified live,
+      offload binary at `/usr/sbin/tc-evpn-replicate`). Proves control-plane ->
+      supervisor -> loader end to end. Actual netns packet capture through all
+      three datapaths (each veth-validated standalone) is the remaining layer.
   - MPLS-P2MP / BIER segmentation stays out of scope (no kernel/eBPF-feasible
     path) → VPP/ASIC backend.
 
