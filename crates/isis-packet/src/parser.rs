@@ -16,7 +16,7 @@ use super::util::{ParseBe, TlvEmitter, u32_u8_3};
 use super::{
     IsisTlvExtIpReach, IsisTlvExtIsReach, IsisTlvIpv6Reach, IsisTlvIpv6Srlg, IsisTlvMtIpReach,
     IsisTlvMtIpv6Reach, IsisTlvMtIsReach, IsisTlvMultiTopology, IsisTlvRestart, IsisTlvRouterCap,
-    IsisTlvSrlg, IsisTlvSrv6, IsisTlvType, IsisType, many0_complete,
+    IsisTlvSidLabelBinding, IsisTlvSrlg, IsisTlvSrv6, IsisTlvType, IsisType, many0_complete,
 };
 
 // IS-IS discriminator.
@@ -538,6 +538,8 @@ pub enum IsisTlv {
     TeRouterId(IsisTlvTeRouterId),
     #[nom(Selector = "IsisTlvType::ExtIpReach")]
     ExtIpReach(IsisTlvExtIpReach),
+    #[nom(Selector = "IsisTlvType::SidLabelBinding")]
+    SidLabelBinding(IsisTlvSidLabelBinding),
     #[nom(Selector = "IsisTlvType::DynamicHostname")]
     Hostname(IsisTlvHostname),
     #[nom(Selector = "IsisTlvType::Srlg")]
@@ -603,6 +605,7 @@ impl IsisTlv {
             Ipv4IfAddr(v) => v.tlv_emit(buf),
             TeRouterId(v) => v.tlv_emit(buf),
             ExtIpReach(v) => v.tlv_emit(buf),
+            SidLabelBinding(v) => v.tlv_emit(buf),
             Hostname(v) => v.tlv_emit(buf),
             Srlg(v) => v.tlv_emit(buf),
             Ipv6Srlg(v) => v.tlv_emit(buf),

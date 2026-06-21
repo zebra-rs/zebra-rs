@@ -394,6 +394,79 @@ fn srv6_mirror_sid_round_trips_through_isis_tlv() {
 }
 
 #[test]
+fn sid_label_binding_mirror_context_round_trips() {
+    use ipnet::Ipv4Net;
+
+    // SID/Label Binding TLV (149) with the M-flag set: a Mirror Context
+    // binding (RFC 8679 egress protection) for the protected egress's
+    // loopback 10.0.0.3/32, carrying the context label 16003 in a
+    // SID/Label sub-TLV (type 1).
+    let original = IsisTlv::SidLabelBinding(IsisTlvSidLabelBinding {
+        flags: BindingFlags::new().with_m_flag(true),
+        weight: 0,
+        range: 1,
+        prefix: BindingPrefix::V4("10.0.0.3/32".parse::<Ipv4Net>().unwrap()),
+        subs: vec![IsisBindingSubTlv::SidLabel(SidLabelValue::Label(16003))],
+    });
+
+    let mut buf = BytesMut::new();
+    original.emit(&mut buf);
+
+    let (rest, tlvs) = IsisTlv::parse_tlvs(&buf).expect("parse must succeed");
+    assert!(rest.is_empty());
+    assert_eq!(tlvs.len(), 1);
+    assert_eq!(tlvs[0], original, "round-trip must preserve the TLV");
+
+    let IsisTlv::SidLabelBinding(b) = &tlvs[0] else {
+        panic!("expected SidLabelBinding TLV, got {:?}", tlvs[0]);
+    };
+    assert!(b.flags.m_flag(), "M-flag must survive the round-trip");
+    assert!(!b.flags.f_flag(), "IPv4 binding ⇒ F-flag clear");
+    assert_eq!(b.prefix, BindingPrefix::V4("10.0.0.3/32".parse().unwrap()));
+    assert_eq!(b.subs.len(), 1);
+    let IsisBindingSubTlv::SidLabel(SidLabelValue::Label(label)) = &b.subs[0] else {
+        panic!(
+            "expected SID/Label sub-TLV with a label, got {:?}",
+            b.subs[0]
+        );
+    };
+    assert_eq!(*label, 16003);
+}
+
+#[test]
+fn sid_label_binding_ipv6_index_round_trips() {
+    use ipnet::Ipv6Net;
+
+    // IPv6 prefix (F-flag set) + a 32-bit SID index sub-TLV (len 4).
+    let original = IsisTlv::SidLabelBinding(IsisTlvSidLabelBinding {
+        flags: BindingFlags::new().with_f_flag(true),
+        weight: 5,
+        range: 4,
+        prefix: BindingPrefix::V6("2001:db8::3/128".parse::<Ipv6Net>().unwrap()),
+        subs: vec![IsisBindingSubTlv::SidLabel(SidLabelValue::Index(42))],
+    });
+
+    let mut buf = BytesMut::new();
+    original.emit(&mut buf);
+
+    let (rest, tlvs) = IsisTlv::parse_tlvs(&buf).expect("parse must succeed");
+    assert!(rest.is_empty());
+    assert_eq!(tlvs[0], original, "round-trip must preserve the TLV");
+
+    let IsisTlv::SidLabelBinding(b) = &tlvs[0] else {
+        panic!("expected SidLabelBinding TLV");
+    };
+    assert!(b.flags.f_flag());
+    assert!(!b.flags.m_flag());
+    assert_eq!(b.weight, 5);
+    assert_eq!(b.range, 4);
+    assert!(matches!(
+        b.subs[0],
+        IsisBindingSubTlv::SidLabel(SidLabelValue::Index(42))
+    ));
+}
+
+#[test]
 pub fn parse_p2p_hello() {
     const PACKET: &[u8] = &hex!(
         "

@@ -33,11 +33,12 @@ pub mod neigh_disp;
 
 pub mod prefix;
 pub use prefix::{
-    IsisMirrorSub2Tlv, IsisSub2ProtectedLocators, IsisSub2SidStructure, IsisSub2Tlv,
-    IsisSubIpv4SourceRouterId, IsisSubIpv6SourceRouterId, IsisSubPrefixSid, IsisSubSrv6EndSid,
-    IsisSubSrv6MirrorSid, IsisTlvExtIpReach, IsisTlvExtIpReachEntry, IsisTlvIpv6Reach,
-    IsisTlvIpv6ReachEntry, IsisTlvMtIpReach, IsisTlvMtIpv6Reach, IsisTlvMultiTopology, IsisTlvSrv6,
-    MultiTopologyId, PrefixSidFlags, Srv6Locator,
+    BindingFlags, BindingPrefix, IsisBindingSubTlv, IsisMirrorSub2Tlv, IsisSub2ProtectedLocators,
+    IsisSub2SidStructure, IsisSub2Tlv, IsisSubIpv4SourceRouterId, IsisSubIpv6SourceRouterId,
+    IsisSubPrefixSid, IsisSubSrv6EndSid, IsisSubSrv6MirrorSid, IsisTlvExtIpReach,
+    IsisTlvExtIpReachEntry, IsisTlvIpv6Reach, IsisTlvIpv6ReachEntry, IsisTlvMtIpReach,
+    IsisTlvMtIpv6Reach, IsisTlvMultiTopology, IsisTlvSidLabelBinding, IsisTlvSrv6, MultiTopologyId,
+    PrefixSidFlags, Srv6Locator,
 };
 pub mod prefix_code;
 pub use prefix_code::{IsisPrefixCode, IsisSrv6MirrorSub2Code, IsisSrv6SidSub2Code};

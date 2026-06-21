@@ -38,6 +38,10 @@ pub enum IsisTlvType {
     /// IPv6 Shared Risk Link Group (RFC 6119).
     Ipv6Srlg = 139,
     Ipv6TeRouterId = 140,
+    /// SID/Label Binding TLV (RFC 8667 §2.4). Carries SR mapping-server
+    /// bindings and, with the M-flag, RFC 8679 Mirror Context (egress
+    /// protection) context-label bindings.
+    SidLabelBinding = 149,
     Ipv6IfAddr = 232,
     Ipv6GlobalIfAddr = 233,
     MultiTopology = 229,
@@ -84,6 +88,7 @@ impl IsisTlvType {
                 | Srlg
                 | Ipv6Srlg
                 | Ipv6TeRouterId
+                | SidLabelBinding
                 | Ipv6IfAddr
                 | Ipv6GlobalIfAddr
                 | MultiTopology
@@ -119,6 +124,7 @@ impl From<IsisTlvType> for u8 {
             Srlg => 138,
             Ipv6Srlg => 139,
             Ipv6TeRouterId => 140,
+            SidLabelBinding => 149,
             Ipv6IfAddr => 232,
             Ipv6GlobalIfAddr => 233,
             MultiTopology => 229,
@@ -155,6 +161,7 @@ impl From<u8> for IsisTlvType {
             138 => Srlg,
             139 => Ipv6Srlg,
             140 => Ipv6TeRouterId,
+            149 => SidLabelBinding,
             232 => Ipv6IfAddr,
             233 => Ipv6GlobalIfAddr,
             229 => MultiTopology,
