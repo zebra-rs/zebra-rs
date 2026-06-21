@@ -328,7 +328,22 @@ codec — and any RIB/Adj-RIB/show/origination wiring.
   becomes the root of the intra-AS segment; per-AS IMET stays AS-local,
   per-region I-PMSI crosses AS boundaries; DF Election EC (AC-DF cleared)
   picks one forwarding ASBR; the Multicast-Flags segmentation bit gates
-  legacy-PE behavior.
+  legacy-PE behavior. Sliced like Phase 3:
+  - **4a — DF Election EC codec. DONE.** `DfElectionEc { df_alg, bitmap }` in
+    `ext_com.rs` (RFC 8584 §2.2): EVPN high-type 0x06 / sub-type 0x06; `val[0]`
+    low 5 bits = DF Alg (`ALG_DEFAULT`/`ALG_HRW`), high 3 = RSV; `val[1..3]` =
+    16-bit Bitmap with AC-DF = Bit 1 (MSB-0) = `CAP_AC_DF` (0x4000); `val[3..6]`
+    reserved. `is_evpn_df_election`/`as_df_election`, `From<DfElectionEc>`,
+    `ac_df()`/`with_ac_df()`, `df-election:alg<N>[+ac-df]` Display, round-trip
+    unit tests. No behavior change.
+  - **4b — inter-AS ASBR re-origination.** ASBR re-originates the per-region
+    I-PMSI across the AS boundary (eBGP) with next-hop-self; per-AS IMET held
+    AS-local. Extends `evpn_reoriginate_per_region`; needs an AS-boundary
+    config model decision (reuse `region-id` neighbor-group vs a new toggle).
+  - **4c — DF election among ASBRs + legacy coexistence.** Attach the DF
+    Election EC with AC-DF cleared to the re-advertised Type-9 so exactly one
+    ASBR forwards into a downstream AS with legacy PEs; gate legacy behavior on
+    the Multicast-Flags segmentation bit. End-to-end BDD.
 - **Phase 5 (optional) — S-PMSI selective multicast (Type 10 + Leaf A-D)**
   end to end; ties to SMET (Type 6) if/when that lands.
 
@@ -370,7 +385,13 @@ on push, not targeted filters).
   `@bgp_evpn_segmentation` leaf scenarios. Remaining 3b follow-ups
   (change-gated re-origination, S-PMSI aggregation) and leaf-set dataplane
   stay deferred.
-- **PR4 — Phase 4: inter-AS ASBR segmentation + legacy coexistence + BDD.**
+- **PR4a — Phase 4a: DF Election EC codec (RFC 8584). DONE (this PR).**
+  `DfElectionEc` in `ext_com.rs` + AC-DF accessors + Display + round-trip
+  tests. No behavior change.
+- **PR4b — Phase 4b: inter-AS ASBR re-origination** (per-region I-PMSI across
+  the AS boundary, next-hop-self; per-AS IMET AS-local).
+- **PR4c — Phase 4c: DF election among ASBRs (AC-DF cleared) + legacy
+  coexistence gating + BDD.**
 - **PR5 (optional) — Phase 5: S-PMSI selective multicast + BDD.**
 - **PR6 (later, re-confirm direction) — Phase 6: VXLAN-IR aggregation
   dataplane only;** MPLS-P2MP / BIER / clean-DF gateway → VPP/eBPF backend.
