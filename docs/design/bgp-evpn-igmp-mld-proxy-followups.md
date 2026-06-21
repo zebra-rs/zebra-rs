@@ -6,47 +6,41 @@ Snapshot as of `main` ≈ commit `4da2868a` (2026-06-20). The Type-6
 memo records what was deliberately left out, why, and how a future
 session would pick each up — roughly highest-value first.
 
-## 1. Per-VTEP `dst` selectivity (vnifilter VXLAN MDB)
+## 1. Per-VTEP `dst` selectivity (vnifilter VXLAN MDB) — DONE (#1549, #1550)
 
-**The biggest gap.** Today a received SMET *registers* the group in the
-**bridge** MDB (`bridge mdb add dev <bridge> port <vxlan> grp G`), which
-is selective among local bridge ports but **not** across the overlay:
-the group is delivered out the VXLAN and head-end-replicated to every
-remote VTEP on the Type-3 zero-MAC FDB list. True
-`(x,G)`-to-only-the-asking-VTEP delivery needs the kernel **VXLAN MDB**.
+**Was the biggest gap.** A received SMET registered the group only in
+the **bridge** MDB (`bridge mdb add dev <bridge> port <vxlan> grp G`) —
+selective among local bridge ports but **not** across the overlay, so
+the group was head-end-replicated to every remote VTEP on the Type-3
+BUM list.
 
-> Scoped in its own design doc: **`bgp-evpn-smet-pervtep-dst-plan.md`**
-> (the `external vnifilter` VXLAN model, the wholesale-vs-per-VNI
-> decision, phasing, and the iproute2-6.1.0 / kernel-6.8 tooling note).
+**Done.** zebra-rs now adopts the **`external vnifilter`** VXLAN model
+wholesale (Option A from the plan) and programs a received SMET as
+**two** MDB entries: the bridge MDB (registers the VXLAN port so the
+snooping bridge forwards the group into the overlay) plus a **VXLAN
+MDB** on the VXLAN device itself carrying `MDBE_ATTR_DST` (the
+originating VTEP) + `MDBE_ATTR_SRC_VNI` — so the kernel replicates the
+group only to the PE that asked for it. Shipped across:
 
-Why deferred: it is not a localized SMET change. The kernel rejects
-`MDBE_ATTR_DST` on a plain VXLAN with `EINVAL` (verified; `iproute2`
-drops it too — see the `mdb_install` comment). The per-VTEP form needs a
-**VNI-aware VXLAN**:
+- **P1a** — seg6 fork `netlink-packet-route@b03a738`:
+  `tunnel::TunnelMessage` (`RTM_NEWTUNNEL` = `bridge vni add`,
+  `VXLAN_VNIFILTER_ENTRY`) + the MDB `dst`/`src_vni` readback decode.
+- **P1b (#1549)** — `vxlan_add` → `external vnifilter` (`CollectMetadata`
+  + `Vnifilter`, no fixed id); `bridge vni add` per VNI via
+  `vni_filter_add`; Type-3 BUM `mdb_add`/`del` carry `src_vni`; `link.rs`
+  sources the L2VPN VNI from config when the kernel reports id 0. Type-2
+  needed no change (self FDB already had `src_vni`).
+- **P4 (#1550)** — `mdb_install` adds the VXLAN MDB entry
+  (`dev = vxlan`, `MDBE_ATTR_DST`/`SRC_VNI`, via a shared `mdb_send`);
+  `dst`/`vni` were already plumbed through `SmetInstall`. `@bgp_evpn_smet`
+  now asserts `bridge mdb show dev vxlan10` carries the `dst` for (*,G)
+  and (S,G), plus withdrawal.
 
-```
-ip link add vxlan10 type vxlan external vnifilter local <ip> dstport 4789
-bridge vni add vni 10 dev vxlan10
-bridge mdb add dev vxlan10 grp G [src S] src_vni 10 permanent dst <VTEP>
-```
-
-`external vnifilter` is a different VXLAN model from the plain
-fixed-VNI + `local` device zebra-rs creates today (`vxlan_add` in
-`zebra-rs/src/fib/netlink/handle.rs`), and it interacts with the
-already-merged **Type-2 MAC FDB** and **Type-3 BUM flood** paths (which
-assume the plain model). So this is its own design + phased series, not
-a patch.
-
-Approach when picked up:
-- Decide whether zebra-rs adopts `external vnifilter` VXLANs wholesale
-  (affects Type-2/3) or only for VNIs with proxy enabled.
-- Retarget `mdb_install` to `dev = vxlan` with `MDBE_ATTR_SRC_VNI` +
-  `MDBE_ATTR_DST` (+ `MDBE_ATTR_DST_PORT`); `dst` is already plumbed
-  through `rib::Message::SmetInstall { … dst }` → `smet_install` →
-  `mdb_install` (currently only logged).
-- Add a BDD that asserts `bridge mdb show dev vxlan10` carries the
-  `dst` (the current `@bgp_evpn_smet` asserts the bridge-MDB group only,
-  because the plain-VXLAN kernel drops the `dst`).
+Validated on kernel 6.8 / iproute2 **7.0.0** (the plan doc's assumed
+6.1.0 tooling blocker was moot — the host had been upgraded, so the
+VXLAN MDB `dst` is directly BDD-observable). Full EVPN BDD suite
+(7 features / 33 scenarios) green on the integrated state. Design doc:
+`bgp-evpn-smet-pervtep-dst-plan.md`; book: `ch-02-32` / `ch-00-04`.
 
 ## 2. Don't originate SMET for link-local / well-known groups — DONE (#1516)
 
