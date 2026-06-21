@@ -10,10 +10,12 @@ use crate::{AttrType, ParseBe};
 use super::{AttrEmitter, AttrFlags};
 
 /// SRv6 Endpoint Behavior codepoints (IANA "SRv6 Endpoint Behaviors",
-/// RFC 8986). Only the L3VPN-relevant decap behaviors are named here.
+/// RFC 8986). The L3VPN decap behaviors plus the L2 multicast/BUM decap
+/// (`End.DT2M`) used by EVPN-over-SRv6 (RFC 9252 §6.4).
 pub const SRV6_BEHAVIOR_END_DT6: u16 = 0x0012;
 pub const SRV6_BEHAVIOR_END_DT4: u16 = 0x0013;
 pub const SRV6_BEHAVIOR_END_DT46: u16 = 0x0014;
+pub const SRV6_BEHAVIOR_END_DT2M: u16 = 0x0016;
 
 /// BGP Prefix-SID TLV Types (IANA "BGP Prefix-SID TLV Types", RFC 8669 /
 /// RFC 9252 §8.1).
@@ -637,6 +639,42 @@ mod tests {
                 );
             }
             _ => panic!("expected SRv6 L3 Service TLV"),
+        }
+    }
+
+    #[test]
+    fn srv6_l2_service_end_dt2m_round_trips() {
+        // One End.DT2M SID in an SRv6 L2 Service TLV (sub-TLV type 6) — the
+        // EVPN-over-SRv6 BUM-replication advertise shape on a Type-3 IMET.
+        let sid = PrefixSid {
+            tlvs: vec![PrefixSidTlv::Srv6L2Service(Srv6ServiceTlv {
+                sids: vec![Srv6SidInfo::new(
+                    "2001:db8:1:2::".parse().unwrap(),
+                    0,
+                    SRV6_BEHAVIOR_END_DT2M,
+                    Some(Srv6SidStructure {
+                        locator_block_len: 32,
+                        locator_node_len: 16,
+                        function_len: 16,
+                        argument_len: 0,
+                        transposition_len: 0,
+                        transposition_offset: 0,
+                    }),
+                )],
+                ..Default::default()
+            })],
+        };
+        let rt = round_trip(sid.clone());
+        assert_eq!(rt, sid);
+        match &rt.tlvs[0] {
+            PrefixSidTlv::Srv6L2Service(svc) => {
+                assert_eq!(svc.sids[0].behavior, SRV6_BEHAVIOR_END_DT2M);
+                assert_eq!(
+                    svc.sids[0].sid,
+                    "2001:db8:1:2::".parse::<Ipv6Addr>().unwrap()
+                );
+            }
+            _ => panic!("expected SRv6 L2 Service TLV"),
         }
     }
 

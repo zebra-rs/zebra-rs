@@ -226,6 +226,32 @@ fn srv6_l3_service_prefix_sid(
     }
 }
 
+/// Build an SRv6 **L2** Service Prefix-SID (RFC 9252 §6) carrying a single
+/// service SID — used for the EVPN `End.DT2M` SID on a Type-3 IMET route.
+/// Mirrors [`srv6_l3_service_prefix_sid`] but emits the L2 Service TLV.
+pub(super) fn srv6_l2_service_prefix_sid(
+    sid: std::net::Ipv6Addr,
+    structure: Option<crate::rib::SidStructure>,
+    behavior: u16,
+) -> bgp_packet::PrefixSid {
+    let structure = structure.map(|s| bgp_packet::Srv6SidStructure {
+        locator_block_len: s.lb_bits,
+        locator_node_len: s.ln_bits,
+        function_len: s.fun_bits,
+        argument_len: s.arg_bits,
+        transposition_len: 0,
+        transposition_offset: 0,
+    });
+    bgp_packet::PrefixSid {
+        tlvs: vec![bgp_packet::PrefixSidTlv::Srv6L2Service(
+            bgp_packet::Srv6ServiceTlv {
+                sids: vec![bgp_packet::Srv6SidInfo::new(sid, 0, behavior, structure)],
+                ..Default::default()
+            },
+        )],
+    }
+}
+
 /// Walk `vrf_index` and return every VRF name whose
 /// `import_rts_v4` intersects the route's Route-Target extended
 /// communities in `ecom`. RTs on the wire are distinguished from
@@ -841,6 +867,13 @@ pub struct Bgp {
     /// `None` otherwise. The `function` is borrowed from
     /// [`Self::srv6_sid_pool`], same as a per-VRF SID.
     pub srv6_ipv6_sid: Option<(std::net::Ipv6Addr, u16)>,
+    /// Per-VNI `End.DT2M` service SID `(addr, function)` for EVPN BUM
+    /// replication over SRv6 (RFC 9252 §6.4), carved from
+    /// [`Self::srv6_locator`] and advertised on the VNI's Type-3 IMET when
+    /// the BUM tunnel mode is SRv6 P2MP. The `function` is borrowed from
+    /// [`Self::srv6_sid_pool`] (same band as a per-VRF SID) and freed when
+    /// the VNI stops originating.
+    pub evpn_dt2m_sids: BTreeMap<u32, (std::net::Ipv6Addr, u16)>,
     /// Precomputed advertise-time data derived from
     /// [`Self::srv6_ipv6_sid`] and the locator, borrowed into
     /// [`super::peer::BgpTop`] so the egress path stamps
@@ -1066,6 +1099,7 @@ impl Bgp {
             srv6_sid_pool: super::vrf::BgpSidPool::new(),
             srv6_ipv6_unicast: false,
             srv6_ipv6_sid: None,
+            evpn_dt2m_sids: BTreeMap::new(),
             srv6_ipv6_export: None,
             networks_v6: std::collections::BTreeSet::new(),
             peer_index: BTreeMap::new(),
@@ -1237,6 +1271,49 @@ impl Bgp {
         }
     }
 
+    /// Allocate (or return the existing) `End.DT2M` SID for `vni`, carved from
+    /// the resolved locator. Stable per VNI for as long as it originates;
+    /// `None` when no locator has resolved or the function band is exhausted.
+    fn alloc_vni_dt2m_sid(&mut self, vni: u32) -> Option<std::net::Ipv6Addr> {
+        if let Some((addr, _function)) = self.evpn_dt2m_sids.get(&vni) {
+            return Some(*addr);
+        }
+        let prefix = self.srv6_locator.as_ref().and_then(|l| l.prefix)?;
+        let function = self.srv6_sid_pool.allocate()?;
+        match crate::isis::srv6::function_addr(prefix, function) {
+            Some(addr) => {
+                self.evpn_dt2m_sids.insert(vni, (addr, function));
+                Some(addr)
+            }
+            None => {
+                self.srv6_sid_pool.release(function);
+                None
+            }
+        }
+    }
+
+    /// Release `vni`'s `End.DT2M` SID back to the pool (it stopped
+    /// originating). No-op if it had none (e.g. no locator was resolved).
+    pub(super) fn free_vni_dt2m_sid(&mut self, vni: u32) {
+        if let Some((_addr, function)) = self.evpn_dt2m_sids.remove(&vni) {
+            self.srv6_sid_pool.release(function);
+        }
+    }
+
+    /// Build the SRv6 L2 Service Prefix-SID attribute advertised on `vni`'s
+    /// Type-3 IMET — this PE's `End.DT2M` SID for the VNI. `None` when no
+    /// locator has resolved (the IMET is advertised SID-less and reconciled
+    /// on the next locator update).
+    pub(super) fn vni_dt2m_prefix_sid(&mut self, vni: u32) -> Option<bgp_packet::PrefixSid> {
+        let sid = self.alloc_vni_dt2m_sid(vni)?;
+        let structure = self.srv6_locator.as_ref().and_then(|l| l.sid_structure());
+        Some(srv6_l2_service_prefix_sid(
+            sid,
+            structure,
+            bgp_packet::SRV6_BEHAVIOR_END_DT2M,
+        ))
+    }
+
     /// Rebuild a [`super::vrf::Srv6VrfSid`] from a handle's preserved
     /// `(addr, function)` so a relabel / kernel-ctx respawn re-installs
     /// the *same* SID rather than churning the address.
@@ -1260,6 +1337,9 @@ impl Bgp {
         // maps to a now-invalid address. Throw the pool away and
         // re-allocate from the base under the new prefix.
         self.srv6_sid_pool.reset();
+        // Per-VNI End.DT2M SIDs were carved from the same pool; drop them so
+        // the next Type-3 (re)origination re-allocates under the new prefix.
+        self.evpn_dt2m_sids.clear();
         let srv6_vrfs: Vec<String> = self
             .vrf_registry
             .keys()
@@ -4862,6 +4942,21 @@ mod tests {
 
     fn addr(s: &str) -> IpAddr {
         s.parse().unwrap()
+    }
+
+    #[test]
+    fn srv6_l2_service_prefix_sid_emits_end_dt2m() {
+        // The EVPN End.DT2M producer must emit an SRv6 *L2* Service TLV (not
+        // the L3VPN one) carrying the End.DT2M behavior + the SID value.
+        let sid: std::net::Ipv6Addr = "2001:db8:1:2::".parse().unwrap();
+        let ps = super::srv6_l2_service_prefix_sid(sid, None, bgp_packet::SRV6_BEHAVIOR_END_DT2M);
+        match &ps.tlvs[0] {
+            bgp_packet::PrefixSidTlv::Srv6L2Service(svc) => {
+                assert_eq!(svc.sids[0].sid, sid);
+                assert_eq!(svc.sids[0].behavior, bgp_packet::SRV6_BEHAVIOR_END_DT2M);
+            }
+            other => panic!("expected SRv6 L2 Service TLV, got {other:?}"),
+        }
     }
 
     #[test]

@@ -148,6 +148,17 @@ impl BgpAttr {
         })
     }
 
+    /// The first SRv6 L2 Service SID (value + endpoint behavior) carried
+    /// in the Prefix-SID attribute — RFC 9252 EVPN-over-SRv6 (e.g. an
+    /// `End.DT2M` SID on a Type-3 IMET route). `None` when the attribute
+    /// is absent or carries no SRv6 L2 Service TLV.
+    pub fn srv6_l2_sid(&self) -> Option<(std::net::Ipv6Addr, u16)> {
+        self.prefix_sid.as_ref()?.tlvs.iter().find_map(|t| match t {
+            PrefixSidTlv::Srv6L2Service(svc) => svc.sids.first().map(|s| (s.sid, s.behavior)),
+            _ => None,
+        })
+    }
+
     /// Iterate every Color extended community (RFC 9012 §4.3, type
     /// 0x03 0x0b) attached to the route. Returns an empty iterator
     /// when the route has no EXT_COMMUNITIES or the attribute carries
