@@ -1,0 +1,33 @@
+# z4 — ASBR #2 (AS 65001, router-id .0.4, the higher of the two ASBRs). Same
+# role as z2: region-a (region-id 65001) iBGP to z1, region-b (region-id 65002)
+# eBGP to z3. It also re-originates region A's Type-9 toward z3, so z3 sees two
+# candidate ASBRs and runs the RFC 9572 Section 5.3.1 DF election.
+router:
+  bgp:
+    global:
+      as: 65001
+      router-id: 192.168.0.4
+    neighbor-group:
+    - name: region-a
+      remote-as: 65001
+      region-id: 65001
+    - name: region-b
+      remote-as: 65002
+      region-id: 65002
+    neighbor:
+    - remote-address: 192.168.0.1
+      enabled: true
+      neighbor-group: region-a
+      afi-safi:
+      - name: ipv4
+        enabled: true
+      - name: evpn
+        enabled: true
+    - remote-address: 192.168.0.3
+      enabled: true
+      neighbor-group: region-b
+      afi-safi:
+      - name: ipv4
+        enabled: true
+      - name: evpn
+        enabled: true
