@@ -138,11 +138,35 @@ impl ExtCommunityValue {
         }
         Some(mcast)
     }
+
+    /// True iff this entry is the DF Election Extended Community
+    /// (RFC 8584 §2.2): EVPN high-type (0x06) + DF Election sub-type (0x06).
+    pub fn is_evpn_df_election(&self) -> bool {
+        self.high_type == ExtCommunityType::Evpn as u8 && self.low_type == EVPN_DF_ELECTION_SUB_TYPE
+    }
+
+    /// Decode the DF Election Extended Community (RFC 8584 §2.2). Returns the
+    /// DF election algorithm and the capability bitmap (carrying the AC-DF
+    /// bit, used by RFC 9572 §5.3.1 inter-AS segmentation). `None` for any
+    /// non-matching EC.
+    pub fn as_df_election(&self) -> Option<DfElectionEc> {
+        if !self.is_evpn_df_election() {
+            return None;
+        }
+        Some(DfElectionEc {
+            df_alg: self.val[0] & DfElectionEc::DF_ALG_MASK,
+            bitmap: u16::from_be_bytes([self.val[1], self.val[2]]),
+        })
+    }
 }
 
 /// EVPN Multicast Flags Extended Community sub-type (RFC 9251 §6),
 /// carried under the EVPN high-type (0x06).
 const EVPN_MCAST_FLAGS_SUB_TYPE: u8 = 0x09;
+
+/// DF Election Extended Community sub-type (RFC 8584 §2.2), carried under
+/// the EVPN high-type (0x06).
+const EVPN_DF_ELECTION_SUB_TYPE: u8 = 0x06;
 
 /// Decoded EVPN Multicast Flags Extended Community (RFC 9251 §6, extended
 /// by RFC 9572 §8). A PE attaches this to its Inclusive Multicast (Type-3)
@@ -184,6 +208,72 @@ impl From<EvpnMcastFlags> for ExtCommunityValue {
         ExtCommunityValue {
             high_type: ExtCommunityType::Evpn as u8,
             low_type: EVPN_MCAST_FLAGS_SUB_TYPE,
+            val,
+        }
+    }
+}
+
+/// Decoded DF Election Extended Community (RFC 8584 §2.2). Carried on EVPN
+/// Ethernet Segment (Type-4) routes to negotiate the Designated Forwarder
+/// election algorithm and capabilities; RFC 9572 §5.3.1 reuses it on a
+/// re-advertised Per-Region I-PMSI (Type-9), with AC-DF cleared, to pick a
+/// single forwarding ASBR into a downstream AS that contains legacy PEs.
+///
+/// Wire layout of the 6-octet value (after the 0x06/0x06 type bytes):
+/// `val[0]` = RSV (high 3 bits) + DF Alg (low 5 bits); `val[1..3]` = the
+/// 16-bit capability Bitmap; `val[3..6]` = reserved (zero).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct DfElectionEc {
+    /// DF election algorithm (5-bit field, values 0–31).
+    pub df_alg: u8,
+    /// Capability Bitmap (16 bits, RFC MSB-0 numbering: Bit 0 = `0x8000`).
+    pub bitmap: u16,
+}
+
+impl DfElectionEc {
+    /// Mask of the 5-bit DF Alg field within `val[0]`.
+    pub const DF_ALG_MASK: u8 = 0x1F;
+
+    /// DF Alg 0 — Default DF Election (service-carving / modulus, RFC 7432).
+    pub const ALG_DEFAULT: u8 = 0;
+    /// DF Alg 1 — Highest Random Weight (HRW, RFC 8584 §3).
+    pub const ALG_HRW: u8 = 1;
+
+    /// Bitmap Bit 1 (RFC 8584 §2.2): AC-DF Capability (AC-Influenced DF
+    /// election). MSB-0 within the 16-bit Bitmap → `0x4000`.
+    pub const CAP_AC_DF: u16 = 0x4000;
+
+    /// True when the AC-DF (AC-Influenced DF election) capability bit is set.
+    pub fn ac_df(&self) -> bool {
+        self.bitmap & Self::CAP_AC_DF != 0
+    }
+
+    /// Set or clear the AC-DF capability bit. RFC 9572 §5.3.1 clears it on the
+    /// re-advertised Per-Region I-PMSI so exactly one ASBR forwards downstream.
+    pub fn set_ac_df(&mut self, on: bool) {
+        if on {
+            self.bitmap |= Self::CAP_AC_DF;
+        } else {
+            self.bitmap &= !Self::CAP_AC_DF;
+        }
+    }
+
+    /// Builder form of [`set_ac_df`](Self::set_ac_df).
+    pub fn with_ac_df(mut self, on: bool) -> Self {
+        self.set_ac_df(on);
+        self
+    }
+}
+
+impl From<DfElectionEc> for ExtCommunityValue {
+    fn from(df: DfElectionEc) -> Self {
+        let mut val = [0u8; 6];
+        // RSV (high 3 bits of val[0]) stays 0; only the low 5 bits carry DF Alg.
+        val[0] = df.df_alg & DfElectionEc::DF_ALG_MASK;
+        val[1..3].copy_from_slice(&df.bitmap.to_be_bytes());
+        ExtCommunityValue {
+            high_type: ExtCommunityType::Evpn as u8,
+            low_type: EVPN_DF_ELECTION_SUB_TYPE,
             val,
         }
     }
@@ -305,6 +395,14 @@ impl fmt::Display for ExtCommunityValue {
                 s.push('S');
             }
             write!(f, "mcast-flags:{s}")
+        } else if let Some(df) = self.as_df_election() {
+            // DF Election EC (RFC 8584 §2.2): render the algorithm and append
+            // `+ac-df` when the AC-Influenced DF election bit is set.
+            write!(f, "df-election:alg{}", df.df_alg)?;
+            if df.ac_df() {
+                write!(f, "+ac-df")?;
+            }
+            Ok(())
         } else {
             let ip = Ipv4Addr::new(self.val[0], self.val[1], self.val[2], self.val[3]);
             let val = u16::from_be_bytes([self.val[4], self.val[5]]);
@@ -616,6 +714,114 @@ mod tests {
         combo.encode(&mut buf);
         let (_, parsed) = ExtCommunityValue::parse_be(&buf).expect("parse 8-octet EC");
         assert_eq!(parsed.as_evpn_mcast_flags(), combo.as_evpn_mcast_flags());
+    }
+
+    #[test]
+    fn df_election_wire_layout() {
+        // RFC 8584 §2.2: high 0x06, sub 0x06; val[0] low-5-bits = DF Alg
+        // (HRW = 1); Bitmap (val[1..3]) with AC-DF = Bit 1 = 0x4000; the
+        // RSV bits and trailing 3 reserved octets are zero.
+        let ec: ExtCommunityValue = DfElectionEc {
+            df_alg: DfElectionEc::ALG_HRW,
+            bitmap: DfElectionEc::CAP_AC_DF,
+        }
+        .into();
+        assert_eq!(ec.high_type, 0x06);
+        assert_eq!(ec.low_type, 0x06);
+        assert_eq!(ec.val, [0x01, 0x40, 0x00, 0, 0, 0]);
+        let mut buf = BytesMut::new();
+        ec.encode(&mut buf);
+        assert_eq!(&buf[..], &[0x06, 0x06, 0x01, 0x40, 0x00, 0, 0, 0]);
+    }
+
+    #[test]
+    fn df_election_df_alg_is_low_five_bits() {
+        // Only the low 5 bits of val[0] carry DF Alg; the high 3 (RSV) stay 0.
+        // A 5-bit value of 31 (max) must round-trip without bleeding into RSV.
+        let ec: ExtCommunityValue = DfElectionEc {
+            df_alg: 31,
+            bitmap: 0,
+        }
+        .into();
+        assert_eq!(ec.val[0], 0x1F, "DF Alg in low 5 bits, RSV clear");
+        let decoded = ec.as_df_election().expect("decode");
+        assert_eq!(decoded.df_alg, 31);
+        assert!(!decoded.ac_df());
+
+        // A caller passing a too-wide value is masked to 5 bits on emit.
+        let wide: ExtCommunityValue = DfElectionEc {
+            df_alg: 0xFF,
+            bitmap: 0,
+        }
+        .into();
+        assert_eq!(wide.val[0], 0x1F);
+    }
+
+    #[test]
+    fn df_election_ac_df_bit_toggles() {
+        let mut df = DfElectionEc {
+            df_alg: DfElectionEc::ALG_DEFAULT,
+            bitmap: 0,
+        };
+        assert!(!df.ac_df());
+        df.set_ac_df(true);
+        assert_eq!(df.bitmap, 0x4000, "AC-DF is Bitmap Bit 1 (MSB-0)");
+        assert!(df.ac_df());
+        // RFC 9572 §5.3.1: clearing AC-DF leaves other capability bits intact.
+        df.bitmap |= 0x8000; // Bit 0 (unassigned) — stand-in for "other bits".
+        df.set_ac_df(false);
+        assert!(!df.ac_df());
+        assert_eq!(df.bitmap, 0x8000, "only AC-DF cleared");
+    }
+
+    #[test]
+    fn df_election_round_trips_through_parse() {
+        let original: ExtCommunityValue = DfElectionEc {
+            df_alg: DfElectionEc::ALG_HRW,
+            bitmap: DfElectionEc::CAP_AC_DF,
+        }
+        .into();
+        let mut buf = BytesMut::new();
+        original.encode(&mut buf);
+        let (_, parsed) = ExtCommunityValue::parse_be(&buf).expect("parse 8-octet EC");
+        assert_eq!(parsed, original);
+        assert_eq!(parsed.as_df_election(), original.as_df_election());
+        let decoded = parsed.as_df_election().expect("decode");
+        assert_eq!(decoded.df_alg, DfElectionEc::ALG_HRW);
+        assert!(decoded.ac_df());
+    }
+
+    #[test]
+    fn df_election_renders_in_display() {
+        let hrw_ac: ExtCommunityValue = DfElectionEc {
+            df_alg: DfElectionEc::ALG_HRW,
+            bitmap: DfElectionEc::CAP_AC_DF,
+        }
+        .into();
+        assert_eq!(hrw_ac.to_string(), "df-election:alg1+ac-df");
+        let default_only: ExtCommunityValue = DfElectionEc {
+            df_alg: DfElectionEc::ALG_DEFAULT,
+            bitmap: 0,
+        }
+        .into();
+        assert_eq!(default_only.to_string(), "df-election:alg0");
+    }
+
+    #[test]
+    fn df_election_false_for_rt_and_mcast_flags() {
+        let rt: ExtCommunity = ExtCommunity::from_str("rt:100:200").unwrap();
+        assert!(!rt.0.first().unwrap().is_evpn_df_election());
+        assert!(rt.0.first().unwrap().as_df_election().is_none());
+        // Same EVPN high-type but the Multicast Flags sub-type (0x09) must
+        // not be mistaken for DF Election (0x06).
+        let mcast: ExtCommunityValue = EvpnMcastFlags {
+            igmp_proxy: true,
+            mld_proxy: false,
+            segmentation_support: false,
+        }
+        .into();
+        assert!(!mcast.is_evpn_df_election());
+        assert!(mcast.as_df_election().is_none());
     }
 
     #[test]
