@@ -336,10 +336,21 @@ codec — and any RIB/Adj-RIB/show/origination wiring.
     reserved. `is_evpn_df_election`/`as_df_election`, `From<DfElectionEc>`,
     `ac_df()`/`with_ac_df()`, `df-election:alg<N>[+ac-df]` Display, round-trip
     unit tests. No behavior change.
-  - **4b — inter-AS ASBR re-origination.** ASBR re-originates the per-region
-    I-PMSI across the AS boundary (eBGP) with next-hop-self; per-AS IMET held
-    AS-local. Extends `evpn_reoriginate_per_region`; needs an AS-boundary
-    config model decision (reuse `region-id` neighbor-group vs a new toggle).
+  - **4b — inter-AS ASBR re-origination. DONE.** Config-model decision (with
+    Kunihiro): **reuse `region-id` on eBGP neighbor-groups** ("region = AS"),
+    no new config surface. The 3b/3c re-origination trigger
+    (`evpn_reoriginate_per_region`, fired from the Type-3 receive path) is
+    **not** iBGP-gated, and the cross-region advertise gates + eBGP egress
+    (`ebgp_egress_aspath` prepends the local AS — `BgpAttr::new()` seeds an
+    empty `As4Path` and an ORIGIN, so the originated Type-9 is well-formed —
+    plus next-hop-self for `is_ebgp() || is_originated()`) are all AS-agnostic.
+    So an ASBR already re-originates the per-AS Type-9 across an eBGP boundary
+    with next-hop-self + AS_PATH `[local-as]`, and holds the per-AS per-PE IMET
+    AS-local. No production code change; validated by a new 2-AS BDD
+    (`@bgp_evpn_interas_segmentation`, AS 65001 iBGP→ASBR eBGP→AS 65002) run
+    live in namespaces (5/5 scenarios). **Deferred:** transit re-root of a
+    *received* Type-9 (re-rooting the PMSI endpoint at each ASBR for 3+ AS
+    chains) — only matters with the replication dataplane (Phase 6).
   - **4c — DF election among ASBRs + legacy coexistence.** Attach the DF
     Election EC with AC-DF cleared to the re-advertised Type-9 so exactly one
     ASBR forwards into a downstream AS with legacy PEs; gate legacy behavior on
@@ -388,8 +399,11 @@ on push, not targeted filters).
 - **PR4a — Phase 4a: DF Election EC codec (RFC 8584). DONE (this PR).**
   `DfElectionEc` in `ext_com.rs` + AC-DF accessors + Display + round-trip
   tests. No behavior change.
-- **PR4b — Phase 4b: inter-AS ASBR re-origination** (per-region I-PMSI across
-  the AS boundary, next-hop-self; per-AS IMET AS-local).
+- **PR4b — Phase 4b: inter-AS ASBR re-origination. DONE (this PR).** Reuse
+  `region-id` on eBGP groups ("region = AS"); the 3b/3c machinery already
+  re-originates the per-AS Type-9 across eBGP with next-hop-self + AS_PATH and
+  holds per-AS IMET AS-local. No production code change; new 2-AS
+  `@bgp_evpn_interas_segmentation` BDD (run live, 5/5).
 - **PR4c — Phase 4c: DF election among ASBRs (AC-DF cleared) + legacy
   coexistence gating + BDD.**
 - **PR5 (optional) — Phase 5: S-PMSI selective multicast + BDD.**
