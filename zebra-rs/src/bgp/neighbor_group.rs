@@ -675,7 +675,17 @@ pub fn config_neighbor_group_region_id(bgp: &mut Bgp, mut args: Args, op: Config
         ConfigOp::Delete => None,
         _ => return Some(()),
     };
-    bgp.neighbor_groups.entry(name).or_default().knobs.region_id = value;
+    bgp.neighbor_groups
+        .entry(name.clone())
+        .or_default()
+        .knobs
+        .region_id = value;
+    // Re-resolve members already bound to this group so the region-id
+    // (RFC 9572 §6.1 RBR gate) reaches an existing neighbor regardless of
+    // config order. Without this, a neighbor bound before the region-id
+    // leaf is applied keeps `region_id = None` and never re-originates the
+    // Type-9 Per-Region I-PMSI — every other neighbor-group knob sweeps.
+    sweep_members_inherit(bgp, &name);
     Some(())
 }
 
