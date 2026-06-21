@@ -307,8 +307,23 @@ codec — and any RIB/Adj-RIB/show/origination wiring.
     *withdrawal* when the last in-region IMET leaves; re-originating only on
     a changed aggregate (today every in-region IMET re-fires, idempotent);
     RR-based suppression BDD; S-PMSI (Type-10) aggregation.
-  - **3c — Leaf A-D.** On L=1 the downstream auto-derives the IP-based RT and
-    originates Type-11, which the upstream consumes to build the leaf set.
+  - **3c — Leaf A-D. DONE.** The RBR's re-originated Type-9 now carries the L
+    (Leaf Information Required) flag, and its PMSI Tunnel attribute is built
+    from the configured `bum-tunnel-type` (`imet_pmsi_tunnel`) — plain IR or an
+    SR P2MP tree rooted at the RBR. A downstream node that receives a Type-9
+    (or Type-10) with L=1 auto-derives the IP-address-format RT
+    `<originator-next-hop>:0` and originates a Type-11 Leaf A-D
+    (`evpn_segmentation_leaf_ad_on_receive`) keyed by the triggering NLRI
+    (`evpn_leaf_ad_route_key`, generalized from the RFC 9574 AR path to any
+    EVPN route type), reporting its own VTEP; the upstream consumes it to build
+    the region's leaf set. The shared origination helper
+    (`evpn_originate_leaf_ad`) is parameterized `ar_leaf: bool` — AR-typed Leaf
+    PMSI for RFC 9574, plain IR PMSI for RFC 9572 segmentation. Withdrawal of
+    the Type-9/10 pulls the Leaf A-D. `@bgp_evpn_segmentation` BDD extended
+    with the region-B leaf answering and the RBR collecting the Leaf A-D; unit
+    test pins the Type-9 route_key. **Deferred:** the upstream does not yet act
+    on the collected leaf set (no replication-list dataplane — Phase 6); a node
+    joins every soliciting upstream rather than a single chosen one.
 - **Phase 4 — inter-AS (ASBR, RFC 9572 §5) + legacy coexistence.** ASBR
   becomes the root of the intra-AS segment; per-AS IMET stays AS-local,
   per-region I-PMSI crosses AS boundaries; DF Election EC (AC-DF cleared)
@@ -348,8 +363,13 @@ on push, not targeted filters).
   cross-region IMET suppression, Type-9 aggregation/re-origination with
   next-hop-self, `AS:<n>` region rendering, `@bgp_evpn_segmentation` BDD,
   and the EVPN-segmentation book chapter.
-- **PR3c — Phase 3c: Leaf A-D** (L flag → auto-RT → Type-11). Plus the 3b
-  follow-ups (Type-9 withdrawal, change-gated re-origination, S-PMSI).
+- **PR3c — Phase 3c: Leaf A-D. DONE (this PR).** L flag on the re-originated
+  Type-9, BUM-tunnel-typed PTA, `evpn_segmentation_leaf_ad_on_receive` →
+  Type-11 with auto-RT `<nh>:0`, generalized `evpn_leaf_ad_route_key` /
+  `evpn_originate_leaf_ad(ar_leaf)`, Type-9/10 withdrawal pulls the Leaf A-D,
+  `@bgp_evpn_segmentation` leaf scenarios. Remaining 3b follow-ups
+  (change-gated re-origination, S-PMSI aggregation) and leaf-set dataplane
+  stay deferred.
 - **PR4 — Phase 4: inter-AS ASBR segmentation + legacy coexistence + BDD.**
 - **PR5 (optional) — Phase 5: S-PMSI selective multicast + BDD.**
 - **PR6 (later, re-confirm direction) — Phase 6: VXLAN-IR aggregation

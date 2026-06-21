@@ -62,6 +62,21 @@ Feature: BGP EVPN BUM tunnel segmentation — inter-region RBR (RFC 9572 Section
     # aggregated Type-9 instead, never z1's individual Type-3.
     Then show command "show bgp evpn" in namespace "z3" should not contain "[3]:[0]:[32]:[192.168.0.1]"
 
+  Scenario: Region B leaf answers the Per-Region I-PMSI with a Leaf A-D
+    Given the test topology exists
+    # The RBR's Type-9 carries the L (Leaf Information Required) flag (RFC 9572
+    # Section 6.3), so z3 originates a Leaf A-D (Type-11) keyed by that Type-9
+    # NLRI (route-type 9) and reporting its own VTEP (192.168.0.3).
+    Then show command "show bgp evpn route-type leaf" in namespace "z3" should eventually contain "[11]:[rt9"
+    And show command "show bgp evpn route-type leaf" in namespace "z3" should eventually contain "192.168.0.3"
+
+  Scenario: The RBR collects the region's Leaf A-D route
+    Given the test topology exists
+    # z3's Leaf A-D is scoped to the RBR (IP-specific RT 192.168.0.2:0) and
+    # carried back to z2, letting the RBR learn region B's tunnel leaf set.
+    Then show command "show bgp evpn route-type leaf" in namespace "z2" should eventually contain "[11]:[rt9"
+    And show command "show bgp evpn route-type leaf" in namespace "z2" should eventually contain "192.168.0.3"
+
   Scenario: Teardown topology
     Given the test topology exists
     When I stop zebra-rs in namespace "z1"
