@@ -1,0 +1,39 @@
+## tests/configs/vrf_phantom_instance/z1.yaml
+# A single router with a top-level VRF `cust` (which makes the RIB create
+# the kernel VRF master device, firing VrfAdd) plus IS-IS and OSPFv2
+# configured ONLY in the default VRF — there is deliberately NO
+# `router isis vrf cust` / `router ospf vrf cust` block.
+#
+# The config manager broadcasts every committed line to every protocol
+# task, so a too-greedy `vrf <name>` match used to make IS-IS/OSPF treat
+# the top-level `vrf cust` line as their own per-VRF intent and spawn a
+# phantom per-VRF instance. With the proto-anchored `vrf_config_split`
+# they must not: `show task` should list each protocol only under the
+# `default` VRF, never under `cust`.
+vrf:
+- name: cust
+interface:
+- if-name: lo
+  ipv4:
+    address: 10.0.0.1/32
+  ipv6:
+    address: 2001:db8::1/128
+router:
+  isis:
+    net: 49.0000.0000.0000.0001.00
+    is-type: level-2-only
+    hostname: z1
+    interface:
+    - if-name: lo
+      circuit-type: level-2-only
+      ipv4:
+        enable: true
+      ipv6:
+        enable: true
+  ospf:
+    router-id: 10.0.0.1
+    area:
+    - area-id: 0.0.0.0
+      interface:
+      - if-name: lo
+        enable: true
