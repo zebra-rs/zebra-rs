@@ -31,7 +31,7 @@ flooded per-service in the IGP.
 
 | Model | PLR | Failure it covers | Status |
 |---|---|---|---|
-| **Node protection** | an upstream node | PEA's **node** fails (router down) | partial — repair list assumes the protector is reachable on a PEA-avoiding path |
+| **Node protection** | an upstream node | PEA's **node** fails (router down) | SRv6: the PLR repair plus stale-route retention keep the protected locator pointed at the protector across reconvergence (a service ping additionally needs ingress BGP-PIC) |
 | **Link protection** | **PEA itself** | PEA's **PE–CE link** fails (PEA stays up) | implemented and validated end-to-end |
 
 zebra-rs implements **egress link protection** as the validated path. PEA
@@ -349,7 +349,11 @@ and validated on real-namespace BDD topologies.
   **static `via-vrf` mirror-context population**, the **PLR repair**
   (an H.Encaps-to-the-Mirror-SID backup with BFD-driven failover), and
   the **egress-as-its-own-PLR link redirect** (PEA redirects its own
-  service SID to the protector on PE–CE link down, restored on recovery).
+  service SID to the protector on PE–CE link down, restored on recovery),
+  and **node-protection stale-route retention** — a high-distance seg6
+  H.Encaps floating backup to the Mirror SID that best-path promotes when
+  PEA's node fails and its locator route is withdrawn, so the failover
+  survives SPF reconvergence (not just the sub-second BFD window).
 - **SR-MPLS** — the SID/Label Binding TLV (149, M-flag) **advertisement**
   with a context label from the SRLB, **reception** into the
   `show isis egress-protection` view, the protector's **context-label
@@ -357,9 +361,14 @@ and validated on real-namespace BDD topologies.
   (PEA swaps its own VPN-label ILM to push the context label toward the
   protector, latched on link state).
 
-Still landing in later stages: **node protection** stale-route retention
-(PEA's node failing rather than just its link), learning the context
-population from **BGP L3VPN** instead of static `via-vrf`, auto-allocation
+Still landing in later stages: a **time-bounded hold-down** on the
+node-protection retained backup (today it floats for as long as the
+protector advertises) and ingress **BGP-PIC** for an end-to-end *service*
+failover on node loss (the retention keeps the locator route, but the
+ingress must also keep forwarding to it); **SR-MPLS node protection**
+(blocked on stock Linux — no per-context label table; needs eBPF/VPP);
+learning the context population from **BGP L3VPN** instead of static
+`via-vrf`; auto-allocation
 of the SRv6 Mirror SID when `mirror-sid` is omitted, a TI-LFA-style repair
 list to the protector (today the SRv6 repair is a single `[Mirror SID]`
 segment, assuming the protector is reachable on a path that avoids the

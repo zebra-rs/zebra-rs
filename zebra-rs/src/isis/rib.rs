@@ -1090,6 +1090,11 @@ fn apply_routing_updates(
     if top.config.distribute.rib {
         let diff = spf::table_diff(top.rib_v6.get(&level).iter(), rib_v6.iter());
         diff_apply::<V6>(top.rib_client, &diff, level);
+        // Mirror SID node protection: pre-install a high-distance seg6
+        // H.Encaps floating backup to the Mirror SID for each protected
+        // locator, so best-path promotes it when the failed egress's
+        // native route is withdrawn — surviving SPF reconvergence.
+        reconcile_retained_locators(top, level, &rib_v6);
     }
     *top.rib_v6.get_mut(&level) = rib_v6;
 }
@@ -1436,6 +1441,94 @@ fn apply_mirror_sid_backups(
                 nhop.backup = Some(backup.clone());
             }
         }
+    }
+}
+
+/// Mirror SID node-protection stale-route retention. The `inject_mirror_
+/// sid_backups` repair above protects a route to a protected egress
+/// locator *while that route still exists* — but once the protected
+/// egress's node fails and its LSP ages out, the locator drops out of the
+/// SPF result and the diff withdraws it, taking the repair with it.
+///
+/// This pre-installs a **floating backup**: for every protected locator
+/// whose protector is reachable, a seg6 H.Encaps route to the Mirror SID
+/// at a high administrative distance (250). The protected egress's own
+/// native IS-IS locator route (distance 115) wins while the egress is up,
+/// so the backup sits in the RIB unselected. When the egress's node fails
+/// and the native route is withdrawn, the RIB's best-path selection
+/// promotes this backup — carrying traffic addressed into the failed
+/// egress's locator to the protector (PEB's End.M decap into the mirror
+/// context), surviving SPF reconvergence rather than only the sub-second
+/// BFD `protect_switch` window — and demotes it again when the egress
+/// returns. A distinct `RibType` (Static, not Isis) is required so the
+/// backup coexists with the native route rather than colliding under the
+/// RIB's per-rtype replacement, which would orphan one in the kernel.
+///
+/// Reconciled every SPF against `top.retained_locators`: installed when a
+/// protector becomes reachable, withdrawn when the protection or the
+/// protector goes away.
+fn reconcile_retained_locators(
+    top: &mut IsisTop,
+    level: Level,
+    rib_v6: &PrefixMap<Ipv6Net, SpfRoute<V6>>,
+) {
+    // Above IS-IS (115) so the native locator route wins while the egress
+    // is up; the backup is promoted by best-path only once it is gone.
+    const RETAIN_DISTANCE: u8 = 250;
+
+    // Our own SRv6 locator — never back ourselves up (we *are* the egress
+    // for it; a remote protector's offer for our own locator is not ours
+    // to retain). `Ipv6Net` is `Copy`, so this releases the `top` borrow.
+    let my_locator: Option<Ipv6Net> = top.sr_locator.as_ref().and_then(|l| l.prefix);
+
+    // Desired backups: protected locators whose protector is reachable.
+    // locator -> (mirror_sid, nexthop addr, ifindex).
+    let mut desired: BTreeMap<Ipv6Net, (Ipv6Addr, Ipv6Addr, u32)> = BTreeMap::new();
+    for entry in super::egress_protection::collect_received_mirror_sids(top.lsdb.get(&level)) {
+        if my_locator.is_some_and(|my| my.contains(&entry.protected_locator)) {
+            continue; // our own locator.
+        }
+        let Some((addr, ifindex)) = nexthop_toward_protector(rib_v6, entry.mirror_sid) else {
+            continue; // protector unreachable — can't back it up.
+        };
+        desired.insert(entry.protected_locator, (entry.mirror_sid, addr, ifindex));
+    }
+
+    let retained = top.retained_locators.get_mut(&level);
+
+    // Withdraw backups no longer desired.
+    let stale: Vec<Ipv6Net> = retained
+        .keys()
+        .filter(|k| !desired.contains_key(k))
+        .copied()
+        .collect();
+    for loc in stale {
+        retained.remove(&loc);
+        let entry = rib::entry::RibEntry::new(RibType::Static);
+        let _ = top.rib_client.send(crate::rib::Message::Ipv6Del {
+            prefix: loc,
+            rib: entry,
+        });
+    }
+
+    // Install newly-desired backups (idempotent: skip already-installed).
+    for (loc, (mirror_sid, addr, ifindex)) in desired {
+        if retained.contains_key(&loc) {
+            continue;
+        }
+        let mut nhop = rib::NexthopUni::new(IpAddr::V6(addr), 0, vec![]);
+        nhop.ifindex_origin = (ifindex != 0).then_some(ifindex);
+        nhop.segs = vec![mirror_sid];
+        nhop.encap_type = Some(EncapType::HEncap);
+        nhop.valid = true;
+        let mut entry = rib::entry::RibEntry::new(RibType::Static);
+        entry.distance = RETAIN_DISTANCE;
+        entry.nexthop = rib::Nexthop::Uni(nhop);
+        let _ = top.rib_client.send(crate::rib::Message::Ipv6Add {
+            prefix: loc,
+            rib: entry,
+        });
+        retained.insert(loc, mirror_sid);
     }
 }
 
