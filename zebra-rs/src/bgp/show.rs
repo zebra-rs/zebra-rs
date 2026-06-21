@@ -141,9 +141,35 @@ fn rib_entries_count<V: BgpShowView>(bgp: &V, afi_safi: &AfiSafi) -> usize {
         (Afi::Ip6, Safi::MplsLabel) => bgp.shard().v6lu.0.len(),
         (Afi::Ip, Safi::MplsVpn) => bgp.shard().v4vpn.values().map(|t| t.0.len()).sum(),
         (Afi::L2vpn, Safi::Evpn) => bgp.local_rib().evpn.values().map(|t| t.cands.len()).sum(),
+        (Afi::Ip, Safi::Mup) => mup_rib_count(&bgp.local_rib().mup, Afi::Ip),
+        (Afi::Ip6, Safi::Mup) => mup_rib_count(&bgp.local_rib().mup, Afi::Ip6),
         (Afi::LinkState, Safi::LinkState) => bgp.local_rib().bgp_ls.selected.len(),
         _ => 0,
     }
+}
+
+/// Address family a MUP Loc-RIB entry belongs to. The MUP table is a
+/// single flat map (RFC 9833 routes for both AFIs share it), so attribute
+/// each route to v4/v6 by the family of its principal address — the DSD
+/// address, the ISD / ST1 session prefix, or the ST2 endpoint. `Unknown`
+/// routes carry no decoded address and belong to neither family.
+fn mup_prefix_afi(prefix: &MupPrefix) -> Option<Afi> {
+    let addr = match prefix {
+        MupPrefix::Dsd { address, .. } => *address,
+        MupPrefix::Isd { prefix, .. } | MupPrefix::T1st { prefix, .. } => prefix.addr(),
+        MupPrefix::T2st { endpoint, .. } => *endpoint,
+        MupPrefix::Unknown { .. } => return None,
+    };
+    Some(if addr.is_ipv4() { Afi::Ip } else { Afi::Ip6 })
+}
+
+/// Count selected MUP Loc-RIB entries for one address family.
+fn mup_rib_count(table: &super::route::LocalRibMupTable, afi: Afi) -> usize {
+    table
+        .selected
+        .keys()
+        .filter(|p| mup_prefix_afi(p) == Some(afi))
+        .count()
 }
 
 /// Has this peer negotiated a given AFI/SAFI? True iff we advertised the
@@ -2023,6 +2049,41 @@ fn show_bgp_evpn_summary(
     json: bool,
 ) -> std::result::Result<String, std::fmt::Error> {
     show_bgp_summary_one(bgp, AfiSafi::new(Afi::L2vpn, Safi::Evpn), json)
+}
+
+/// `show bgp mobile-uplane summary` — the MUP (SAFI 85, RFC 9833)
+/// neighbor summary. `mobile-uplane` enables both IPv4-MUP and IPv6-MUP
+/// at once (RFC 9833), so this renders both sections — the MUP slice of
+/// `show bgp summary` — listing the neighbors that have each MUP family
+/// enabled and whether they negotiated the capability.
+fn show_bgp_mup_summary(
+    bgp: &Bgp,
+    _args: Args,
+    json: bool,
+) -> std::result::Result<String, std::fmt::Error> {
+    let families = [
+        AfiSafi::new(Afi::Ip, Safi::Mup),
+        AfiSafi::new(Afi::Ip6, Safi::Mup),
+    ];
+    if json {
+        let summary = BgpSummaryJson {
+            router_id: summary_router_id(bgp),
+            local_as: bgp.asn(),
+            afi_safis: families
+                .iter()
+                .map(|af| summary_section_json(bgp, *af, None))
+                .collect(),
+        };
+        return Ok(summary_json_render(&summary));
+    }
+    let mut buf = String::new();
+    for (i, af) in families.iter().enumerate() {
+        if i > 0 {
+            writeln!(buf)?;
+        }
+        write_summary_section(&mut buf, bgp, *af, None)?;
+    }
+    Ok(buf)
 }
 
 #[derive(Serialize, Debug)]
@@ -5323,6 +5384,8 @@ impl Bgp {
             .set(show_bgp_evpn)
             .path("/show/bgp/mobile-uplane")
             .set(show_bgp_mup)
+            .path("/show/bgp/mobile-uplane/summary")
+            .set(show_bgp_mup_summary)
             .path("/show/bgp/summary")
             .set(show_bgp_summary::<Bgp>)
             .path("/show/bgp/evpn/summary")

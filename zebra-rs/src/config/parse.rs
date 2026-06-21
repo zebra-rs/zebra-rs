@@ -1298,6 +1298,16 @@ mod tests {
             ("show bgp vpnv4 summary", "/show/bgp/vpnv4", vec!["summary"]),
             ("show bgp evpn summary", "/show/bgp/evpn/summary", vec![]),
             (
+                "show bgp mobile-uplane summary",
+                "/show/bgp/mobile-uplane/summary",
+                vec![],
+            ),
+            (
+                "show bgp mobile-uplane summ",
+                "/show/bgp/mobile-uplane/summary",
+                vec![],
+            ),
+            (
                 "show bgp vrf blue summary",
                 "/show/bgp/vrf/summary",
                 vec!["blue"],
