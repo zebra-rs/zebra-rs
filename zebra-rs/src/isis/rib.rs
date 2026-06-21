@@ -1459,6 +1459,47 @@ fn register_egress_protections(top: &IsisTop) {
         .send(crate::rib::Message::EgressProtectSet { protections });
 }
 
+/// SR-MPLS counterpart of [`register_egress_protections`]: tell the RIB
+/// which context label to redirect *this* node's VPN traffic to if its
+/// PE-CE link fails. We are protected when a received Mirror Context
+/// binding's FEC covers our own loopback (`te-router-id`); the protector
+/// (carried only as a sys-id) is resolved to its loopback via its
+/// TE Router-ID so the RIB can build the transport LSP. The RIB does the
+/// VPN-label-ILM override on link state. Idempotent reset.
+fn register_mpls_protections(top: &IsisTop) {
+    use std::net::{IpAddr, Ipv4Addr};
+    let Some(my_loopback) = top.config.te_router_id else {
+        let _ = top
+            .rib_client
+            .send(crate::rib::Message::EgressMplsProtectSet {
+                protections: Vec::new(),
+            });
+        return;
+    };
+    let my_sys_id = top.config.net.sys_id();
+    // context_label -> protector loopback.
+    let mut set: std::collections::BTreeMap<u32, Ipv4Addr> = std::collections::BTreeMap::new();
+    for level in [Level::L1, Level::L2] {
+        let lsdb = top.lsdb.get(&level);
+        for b in super::egress_protection::collect_received_mpls_bindings(lsdb) {
+            // Protected when the binding's FEC covers our own loopback,
+            // and the binding came from someone else.
+            if b.protector == my_sys_id || !b.protected_fec.contains(&IpAddr::V4(my_loopback)) {
+                continue;
+            }
+            if let Some(protector_lo) =
+                super::egress_protection::node_te_router_id(lsdb, b.protector)
+            {
+                set.insert(b.context_label, protector_lo);
+            }
+        }
+    }
+    let protections: Vec<(u32, Ipv4Addr)> = set.into_iter().collect();
+    let _ = top
+        .rib_client
+        .send(crate::rib::Message::EgressMplsProtectSet { protections });
+}
+
 pub(super) fn apply_spf_result(top: &mut IsisTop, output: SpfOutput) {
     let SpfOutput {
         level,
@@ -1555,6 +1596,7 @@ pub(super) fn apply_spf_result(top: &mut IsisTop, output: SpfOutput) {
     // Mirror SID when its PE-CE link goes down (the protected egress acts
     // as its own PLR). Recomputed per-SPF so it tracks LSDB changes.
     register_egress_protections(top);
+    register_mpls_protections(top);
 
     // Per-algorithm RIB build (RFC 9350). For every algo:
     //   1. Walk the per-algo SPF result against `peer_algo_sid` to

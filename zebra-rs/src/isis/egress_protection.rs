@@ -249,6 +249,25 @@ pub fn collect_received_mpls_bindings(lsdb: &Lsdb) -> Vec<ReceivedMplsBinding> {
     out
 }
 
+/// The TE Router-ID (IPv4 loopback, TLV 134) a node advertises in its
+/// LSP. Used to resolve a Mirror Context binding's protector — carried
+/// only as a sys-id — to the loopback the SR-MPLS transport LSP reaches
+/// it at, so the protected egress can build the redirect's transport
+/// label stack.
+pub fn node_te_router_id(lsdb: &Lsdb, sys_id: IsisSysId) -> Option<std::net::Ipv4Addr> {
+    for (id, lsa) in lsdb.iter() {
+        if id.is_pseudo() || id.sys_id() != sys_id {
+            continue;
+        }
+        for tlv in &lsa.lsp.tlvs {
+            if let IsisTlv::TeRouterId(te) = tlv {
+                return Some(te.router_id);
+            }
+        }
+    }
+    None
+}
+
 // ── YANG callback wiring ──────────────────────────────────────────────
 //
 // Each shim parses the list key (`protected-locator`) and, for leaf

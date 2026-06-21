@@ -73,6 +73,25 @@ Feature: IS-IS SR-MPLS Mirror SID egress link protection — steady-state baseli
     Given the test topology exists
     Then show command "show mpls ilm" in namespace "pea" should contain "VPN Decap"
 
+  Scenario: PE-CE link failure redirects via the Mirror Context label
+    Given the test topology exists
+    # Baseline: ce1 -> ce2 flows via pea (the primary egress).
+    Then ping from "ce1" to "10.20.20.20" should eventually succeed
+    # Fail pea's PE-CE link. pea stays up (IS-IS/BGP intact, still
+    # advertising ce2), so pe1 keeps forwarding with pea's VPN label under
+    # the SR transport — but pea can no longer deliver locally. As its own
+    # PLR pea swaps its VPN-label ILM to push peb's context label toward
+    # peb; peb pops the context label and decaps into vrf-cust, delivering
+    # over peb-ce2. A successful ping proves the redirect carries live
+    # traffic.
+    When I make namespace "pea" interface "pea-ce2" down
+    And I wait 8 seconds
+    Then ping from "ce1" to "10.20.20.20" should eventually succeed
+    # Recover the link: pea restores the normal VPN decap.
+    When I make namespace "pea" interface "pea-ce2" up
+    And I wait 8 seconds
+    Then ping from "ce1" to "10.20.20.20" should eventually succeed
+
   Scenario: Teardown topology
     Given the test topology exists
     When I stop zebra-rs in namespace "pe1"

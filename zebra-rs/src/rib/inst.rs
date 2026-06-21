@@ -240,6 +240,16 @@ pub enum Message {
     EgressProtectSet {
         protections: Vec<(ipnet::Ipv6Net, std::net::Ipv6Addr)>,
     },
+    /// SR-MPLS Mirror Context egress link protection: the local node is
+    /// protected — each `(context_label, protector_loopback)` says that on
+    /// a PE-CE link failure its per-VRF VPN-label ILM should be swapped to
+    /// push `context_label` toward `protector_loopback` (resolved to the
+    /// transport LSP by the RIB). IS-IS recomputes the full set on each
+    /// SPF. The RIB overrides the BGP-owned `DecapVrf` ILM for the failed
+    /// VRF and restores it on recovery.
+    EgressMplsProtectSet {
+        protections: Vec<(u32, std::net::Ipv4Addr)>,
+    },
     VxlanAdd {
         name: String,
         config: VxlanConfig,
@@ -699,6 +709,17 @@ pub struct Rib {
     /// End.DT46 decap. Tracks the live FIB form so a reconcile only
     /// emits a netlink change on an actual transition.
     pub redirected_sids: BTreeSet<std::net::Ipv6Addr>,
+    /// SR-MPLS Mirror Context egress link protection registrations from
+    /// IS-IS (see [`Message::EgressMplsProtectSet`]): each
+    /// `(context_label, protector_loopback)` the local node is protected
+    /// by. On a PE-CE link failure the protected VRF's BGP `DecapVrf`
+    /// VPN-label ILM is overridden to a swap pushing the context label
+    /// toward the protector.
+    pub egress_mpls_protect: Vec<(u32, std::net::Ipv4Addr)>,
+    /// VPN labels whose `DecapVrf` ILM is currently overridden with a
+    /// Mirror Context redirect swap. Maps the label to the original
+    /// `DecapVrf` IlmEntry so the decap can be restored on link recovery.
+    pub redirected_vpn_labels: BTreeMap<u32, IlmEntry>,
     /// SR-update return channels keyed by protocol name. One sender per
     /// protocol; established once via Message::SrSubscribe.
     pub sr_clients: BTreeMap<String, UnboundedSender<RibSrRx>>,
@@ -827,6 +848,8 @@ impl Rib {
             sids: BTreeMap::new(),
             egress_protect: BTreeMap::new(),
             redirected_sids: BTreeSet::new(),
+            egress_mpls_protect: Vec::new(),
+            redirected_vpn_labels: BTreeMap::new(),
             sr_clients: BTreeMap::new(),
             block_watch: BTreeMap::new(),
             locator_watch: BTreeMap::new(),
@@ -1464,6 +1487,135 @@ impl Rib {
             .collect();
         for addr in addrs {
             self.apply_egress_redirect(addr).await;
+        }
+    }
+
+    // ── SR-MPLS Mirror Context egress redirect ────────────────────────
+
+    /// Resolve the SR-MPLS transport to `protector_loopback`: the outgoing
+    /// label stack (the prefix-SID transport label — empty under PHP for a
+    /// directly-adjacent protector) plus the underlay nexthop + ifindex,
+    /// by longest-prefix match in the main IPv4 table.
+    fn resolve_protector_transport_v4(
+        &self,
+        protector_loopback: Ipv4Addr,
+    ) -> Option<(Vec<u32>, Ipv4Addr, u32)> {
+        let host = Ipv4Net::new(protector_loopback, 32).ok()?;
+        let (_, entries) = self.table.get_lpm(&host)?;
+        for entry in entries.iter() {
+            let unis: &[NexthopUni] = match &entry.nexthop {
+                Nexthop::Uni(uni) => std::slice::from_ref(uni),
+                Nexthop::Multi(multi) => &multi.nexthops,
+                _ => continue,
+            };
+            for uni in unis {
+                if let (IpAddr::V4(a), Some(ifindex)) = (uni.addr, uni.ifindex()) {
+                    return Some((uni.mpls_label.clone(), a, ifindex));
+                }
+            }
+        }
+        None
+    }
+
+    /// Re-evaluate every BGP VPN-label `DecapVrf` ILM for the Mirror
+    /// Context redirect. Called when IS-IS resets the registration and on
+    /// PE-CE link up/down.
+    pub async fn reconcile_egress_mpls_redirects(&mut self) {
+        if self.egress_mpls_protect.is_empty() && self.redirected_vpn_labels.is_empty() {
+            return;
+        }
+        // Snapshot the (label, table_id) of every VPN decap ILM.
+        let targets: Vec<(u32, u32)> = self
+            .ilm
+            .iter()
+            .filter_map(|(&label, entries)| {
+                entries.iter().find_map(|e| match e.ilm_type {
+                    IlmType::DecapVrf { table_id, .. } => Some((label, table_id)),
+                    _ => None,
+                })
+            })
+            .chain(
+                // Already-redirected labels may have lost their candidate;
+                // keep them so a restore can run.
+                self.redirected_vpn_labels.keys().map(|&l| (l, 0)),
+            )
+            .collect();
+        for (label, table_id) in targets {
+            self.apply_egress_mpls_redirect(label, table_id).await;
+        }
+    }
+
+    /// Reconcile one VPN-label ILM with the redirect decision, **latched**
+    /// on link state (like the SRv6 path): override the BGP `DecapVrf` to a
+    /// swap pushing `[transport…, context_label]` toward the protector when
+    /// the VRF can't deliver, and restore the decap only when it can again.
+    async fn apply_egress_mpls_redirect(&mut self, label: u32, table_id: u32) {
+        let is_redirected = self.redirected_vpn_labels.contains_key(&label);
+        // Resolve the live DecapVrf entry (the restore target) + its VRF.
+        let decap = self.ilm.get(&label).and_then(|es| {
+            es.iter()
+                .find(|e| matches!(e.ilm_type, IlmType::DecapVrf { .. }))
+                .cloned()
+        });
+        let vrf_table = match (&decap, is_redirected) {
+            (Some(e), _) => match e.ilm_type {
+                IlmType::DecapVrf { table_id, .. } => table_id,
+                _ => table_id,
+            },
+            (None, true) => table_id, // restore-only; table_id from caller is 0/unused
+            (None, false) => return,
+        };
+        let can_deliver = self.vrf_can_deliver(vrf_table);
+        if is_redirected {
+            if can_deliver && let Some(orig) = self.redirected_vpn_labels.remove(&label) {
+                // Restore the BGP VPN decap, replacing the IS-IS swap
+                // (the kernel holds one route per label).
+                self.fib_handle.ilm_replace(label, &orig).await;
+                tracing::info!(
+                    "[egress-protect-mpls] restore VPN label {} -> DecapVrf (VRF table {} delivers)",
+                    label,
+                    vrf_table
+                );
+            }
+        } else if !can_deliver {
+            let Some(orig) = decap else { return };
+            // Pick a protection (single-protector dual-homing).
+            let Some(&(context_label, protector_lo)) = self.egress_mpls_protect.first() else {
+                return;
+            };
+            let Some((mut stack, nexthop, ifindex)) =
+                self.resolve_protector_transport_v4(protector_lo)
+            else {
+                tracing::warn!(
+                    "[egress-protect-mpls] protector {} unreachable — not redirecting VPN label {}",
+                    protector_lo,
+                    label
+                );
+                return;
+            };
+            stack.push(context_label);
+            let swap = IlmEntry {
+                ilm_type: IlmType::Swap,
+                nexthop: Nexthop::Uni(NexthopUni {
+                    addr: IpAddr::V4(nexthop),
+                    ifindex_origin: Some(ifindex),
+                    mpls_label: stack.clone(),
+                    valid: true,
+                    ..Default::default()
+                }),
+                ..IlmEntry::new(RibType::Isis)
+            };
+            // Replace the BGP DecapVrf route at this label with the swap.
+            self.fib_handle.ilm_replace(label, &swap).await;
+            self.redirected_vpn_labels.insert(label, orig);
+            tracing::info!(
+                "[egress-protect-mpls] redirect VPN label {} -> swap {:?} via {} dev {} (VRF table {} can't deliver)",
+                label,
+                stack,
+                nexthop,
+                ifindex,
+                vrf_table
+            );
         }
     }
 
@@ -2548,6 +2700,14 @@ impl Rib {
                     self.egress_protect = protections.into_iter().collect();
                 }
                 self.reconcile_egress_redirects().await;
+            }
+            Message::EgressMplsProtectSet { protections } => {
+                // Sticky, like EgressProtectSet: a transiently-empty SPF
+                // LSDB scan must not disarm protection mid-failure.
+                if !protections.is_empty() {
+                    self.egress_mpls_protect = protections;
+                }
+                self.reconcile_egress_mpls_redirects().await;
             }
             Message::Shutdown { tx } => {
                 self.nmap.shutdown(&self.fib_handle).await;

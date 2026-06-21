@@ -2242,6 +2242,24 @@ impl FibHandle {
     }
 
     pub async fn ilm_add(&self, label: u32, ilm: &IlmEntry) {
+        self.ilm_install(label, ilm, false).await;
+    }
+
+    /// Install an ILM **replacing** any existing route at `label`
+    /// (`NLM_F_REPLACE`) instead of failing on collision. Used by the
+    /// Mirror Context egress redirect to swap a BGP `DecapVrf` VPN-label
+    /// route for a redirect swap (and to restore it), since the kernel
+    /// holds one route per label and a plain add is `CREATE | EXCL`.
+    pub async fn ilm_replace(&self, label: u32, ilm: &IlmEntry) {
+        self.ilm_install(label, ilm, true).await;
+    }
+
+    async fn ilm_install(&self, label: u32, ilm: &IlmEntry, replace: bool) {
+        let create_flags = if replace {
+            NLM_F_REPLACE | NLM_F_CREATE
+        } else {
+            NLM_F_EXCL | NLM_F_CREATE
+        };
         let mut msg = RouteMessage::default();
         msg.header.address_family = AddressFamily::Mpls;
         msg.header.destination_prefix_length = 20;
@@ -2285,7 +2303,7 @@ impl FibHandle {
             }));
             msg.attributes.push(attr);
             let mut req = NetlinkMessage::from(RouteNetlinkMessage::NewRoute(msg));
-            req.header.flags = NLM_F_REQUEST | NLM_F_ACK | NLM_F_EXCL | NLM_F_CREATE;
+            req.header.flags = NLM_F_REQUEST | NLM_F_ACK | create_flags;
             let mut response = self.handle.clone().request(req).unwrap();
             while let Some(msg) = response.next().await {
                 if let NetlinkPayload::Error(e) = msg.payload {
@@ -2384,7 +2402,7 @@ impl FibHandle {
         msg.attributes.push(attr);
 
         let mut req = NetlinkMessage::from(RouteNetlinkMessage::NewRoute(msg));
-        req.header.flags = NLM_F_REQUEST | NLM_F_ACK | NLM_F_EXCL | NLM_F_CREATE;
+        req.header.flags = NLM_F_REQUEST | NLM_F_ACK | create_flags;
 
         let mut response = self.handle.clone().request(req).unwrap();
         while let Some(msg) = response.next().await {
