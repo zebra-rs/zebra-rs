@@ -2,7 +2,7 @@
 #![no_main]
 
 //! EVPN BUM replication dataplane (RFC 9524 SR replication segment) — eBPF
-//! TC/clsact `End.Replicate`.
+//! TC/clsact `End.Replicate` + leaf `End.DT2M`.
 //!
 //! This is the SR P2MP / RFC 9524 replication forwarder the stock Linux kernel
 //! cannot do natively: there is no `End.Replicate` seg6local action, no MPLS
@@ -12,30 +12,42 @@
 //! between clones). XDP has no per-copy clone, so this is a `#[classifier]`
 //! (clsact) program, unlike the sibling `xdp-bfd-echo` offload.
 //!
-//! ## `End.Replicate` (this slice — root/bud, clsact ingress)
+//! One clsact-ingress classifier serves both replication roles, keyed by which
+//! map the inbound packet's outer IPv6 Destination Address hits:
 //!
-//! A BUM packet arrives already SRv6-encapsulated, its outer IPv6 Destination
-//! Address equal to the local replication SID for the tree (the loader indexes
-//! that SID -> VNI in [`REPL_LOCAL_SID`]). For each downstream leaf the program:
-//!   1. rewrites the outer IPv6 DA to the leaf's SID (no checksum fix-up — IPv6
-//!      has no header checksum and the *outer* DA is not in any inner L4
-//!      pseudo-header), and
-//!   2. `bpf_clone_redirect`s the copy out the egress ifindex in [`CONFIG`].
-//! The outer Hop Limit is decremented once up front (a replication node is a
-//! forwarding hop); a packet that arrives with Hop Limit <= 1 is dropped rather
+//! ## `End.Replicate` (root/bud) — DA in [`REPL_LOCAL_SID`]
+//!
+//! A BUM packet arrives already SRv6-encapsulated, its outer IPv6 DA equal to
+//! the local replication SID for the tree. For each downstream leaf the program
+//! rewrites the outer DA to the leaf's SID (no checksum fix-up — IPv6 has no
+//! header checksum and the *outer* DA is not in any inner L4 pseudo-header) and
+//! `bpf_clone_redirect`s the copy out the egress ifindex in [`CONFIG`]`[0]`. The
+//! outer Hop Limit is decremented once up front (a replication node is a
+//! forwarding hop); a packet arriving with Hop Limit <= 1 is dropped rather
 //! than replicated, so a misrouted copy can't storm. The original (which still
-//! carries the replication SID, not a deliverable destination) is dropped with
-//! `TC_ACT_SHOT` after the fan-out.
+//! carries the replication SID) is dropped with `TC_ACT_SHOT` after fan-out.
 //!
-//! Writes go through `bpf_skb_store_bytes` / `bpf_skb_load_bytes`
+//! ## Leaf `End.DT2M` — DA in [`DT2M_SID`]
+//!
+//! A replicated copy arrives at a leaf PE addressed to its local `End.DT2M`
+//! SID: outer IPv6 (reduced SRv6 encap, Next Header = Ethernet/143) wrapping the
+//! inner Ethernet BUM frame. The program removes the outer encap (link Ethernet
+//! + outer IPv6) by sliding the inner frame to the front and trimming the tail
+//! (`bpf_skb_adjust_room` can't strip a full outer L3 — it preserves the
+//! network header), then `bpf_redirect`s the inner frame to a bridge port's
+//! ingress (`CONFIG[1]`) so the bridge floods it natively to the local
+//! attachment circuits — the L2 flood the kernel has no SID behavior for. (Only
+//! the reduced encap, no SRH, is handled here; the SRH-present form is a
+//! follow-up.)
+//!
+//! Packet access goes through `bpf_skb_store_bytes` / `bpf_skb_load_bytes`
 //! (`TcContext::store` / `::load`), never a raw `data` pointer, so nothing is
-//! held across the `clone_redirect` calls that invalidate packet pointers.
-//!
-//! The leaf side — match the local `End.DT2M` SID, strip the outer IPv6+SRH and
-//! redirect the inner frame to the bridge master — is the next slice (DP3c).
+//! held across the `clone_redirect` / `change_tail` calls that invalidate
+//! packet pointers.
 
 use aya_ebpf::{
     bindings::{TC_ACT_PIPE, TC_ACT_SHOT},
+    helpers::{bpf_redirect, bpf_skb_change_tail},
     macros::{classifier, map},
     maps::{Array, HashMap},
     programs::TcContext,
@@ -54,16 +66,37 @@ pub const REPL_FLAG_ROOT_V4: u32 = 1 << 1; // `root` is an IPv4 address (first 4
 const ACT_PIPE: i32 = TC_ACT_PIPE as i32;
 const ACT_SHOT: i32 = TC_ACT_SHOT as i32;
 
-/// Ethernet II + IPv6 fixed-header offsets (from the start of the frame). Only
-/// a base IPv6 header is parsed; the replication match is purely on the outer
-/// Destination Address, so extension headers between it and any inner payload
-/// are irrelevant here.
+/// `CONFIG` slots (egress devices the loader resolves once at attach).
+const CFG_REPLICATE_IFINDEX: u32 = 0; // `End.Replicate` clone egress
+const CFG_BRIDGE_IFINDEX: u32 = 1; // leaf `End.DT2M` flood target
+
+/// `bpf_redirect` flag: deliver to the target's ingress (kernel
+/// `BPF_F_INGRESS`). Redirecting a decapped frame to a bridge *port's* ingress
+/// makes the bridge flood it to the other ports.
+const BPF_F_INGRESS: u64 = 1;
+
+/// Ethernet II + IPv6 fixed-header offsets (from the start of the frame).
 const ETH_HLEN: usize = 14;
 const ETH_TYPE_OFF: usize = 12; // u16 (big-endian) EtherType
 const ETHERTYPE_IPV6: u16 = 0x86DD;
 const IP6_OFF: usize = ETH_HLEN;
+const IP6_HLEN: usize = 40;
+const IP6_NEXTHDR_OFF: usize = IP6_OFF + 6; // u8 Next Header
 const IP6_HOPLIMIT_OFF: usize = IP6_OFF + 7; // u8 Hop Limit
 const IP6_DST_OFF: usize = IP6_OFF + 24; // [u8; 16] destination address
+
+/// IANA protocol number for "Ethernet" (RFC 8986 §6.6) — the outer IPv6 Next
+/// Header of a reduced SRv6 L2 (`End.DT2M`) encapsulation, indicating the
+/// payload is an Ethernet frame.
+const NH_ETHERNET: u8 = 143;
+/// Bytes of outer encap to remove for a reduced `End.DT2M` frame: the link
+/// Ethernet header + the outer IPv6 header. What follows is the inner Ethernet
+/// BUM frame, which becomes the new link frame.
+const DT2M_STRIP: usize = ETH_HLEN + IP6_HLEN; // 54
+/// Upper bound on the inner frame length copied to the front during decap (a
+/// jumbo-free Ethernet payload fits well under this). The verifier needs a
+/// constant loop bound; a frame longer than this is left for the stack.
+const MAX_INNER: usize = 2048;
 
 /// One VNI's SR P2MP replication segment (RFC 9524), keyed by VNI in
 /// [`REPL_SEG`]. Addresses are stored as 16 bytes — IPv6 verbatim, or IPv4 in
@@ -92,15 +125,20 @@ static REPL_SEG: HashMap<u32, ReplSeg> = HashMap::with_max_entries(256, 0);
 #[map]
 static REPL_LOCAL_SID: HashMap<[u8; 16], u32> = HashMap::with_max_entries(256, 0);
 
-/// Single-entry config: index 0 holds the egress ifindex the replicated copies
-/// are `bpf_clone_redirect`ed out of (the SR underlay-facing NIC). The loader
-/// sets it from `--redirect-iface`.
+/// Local `End.DT2M` SID -> VNI index for the leaf role: a packet whose outer DA
+/// matches is decapsulated and the inner Ethernet frame flooded into the
+/// bridge. The loader fills this on `leaf-add`.
 #[map]
-static CONFIG: Array<u32> = Array::with_max_entries(1, 0);
+static DT2M_SID: HashMap<[u8; 16], u32> = HashMap::with_max_entries(256, 0);
+
+/// Egress devices, by `CFG_*` index: `[0]` = `End.Replicate` clone egress,
+/// `[1]` = leaf `End.DT2M` bridge-flood target. 0 = unset (role disabled).
+#[map]
+static CONFIG: Array<u32> = Array::with_max_entries(2, 0);
 
 #[classifier]
 pub fn tc_evpn_replicate(ctx: TcContext) -> i32 {
-    match try_replicate(&ctx) {
+    match try_forward(&ctx) {
         Ok(action) => action,
         // A truncated/short frame or a transient map/helper failure: hand the
         // packet back to the stack untouched rather than dropping it.
@@ -108,18 +146,33 @@ pub fn tc_evpn_replicate(ctx: TcContext) -> i32 {
     }
 }
 
-fn try_replicate(ctx: &TcContext) -> Result<i32, ()> {
-    // Only IPv6-framed packets carry an SRv6 replication SID. Anything else is
-    // not ours; pass it on.
+fn try_forward(ctx: &TcContext) -> Result<i32, ()> {
+    // Only IPv6-framed packets carry an SRv6 replication / End.DT2M SID.
     let ethertype = u16::from_be(ctx.load::<u16>(ETH_TYPE_OFF).map_err(|_| ())?);
     if ethertype != ETHERTYPE_IPV6 {
         return Ok(ACT_PIPE);
     }
 
-    // Demux by the outer Destination Address: is it one of our local
-    // replication SIDs? If not, leave the frame for the stack.
+    // Demux by the outer Destination Address.
     let da: [u8; 16] = ctx.load(IP6_DST_OFF).map_err(|_| ())?;
-    let Some(vni) = (unsafe { REPL_LOCAL_SID.get(&da) }) else {
+    if unsafe { REPL_LOCAL_SID.get(&da) }.is_some() {
+        // Root/bud: a replication SID -> clone + per-branch DA rewrite.
+        return end_replicate(ctx, &da);
+    }
+    if unsafe { DT2M_SID.get(&da) }.is_some() {
+        // Leaf: our End.DT2M SID -> decap + flood into the bridge.
+        return end_dt2m(ctx);
+    }
+    // Not one of our SIDs; leave it for the stack.
+    Ok(ACT_PIPE)
+}
+
+/// `End.Replicate` (root/bud): fan the packet out, one clone per leaf, each with
+/// the outer IPv6 DA rewritten to that leaf's SID.
+fn end_replicate(ctx: &TcContext, da: &[u8; 16]) -> Result<i32, ()> {
+    // `da` already matched REPL_LOCAL_SID in the caller; re-fetch the VNI +
+    // segment here so the borrows are local to this branch.
+    let Some(vni) = (unsafe { REPL_LOCAL_SID.get(da) }) else {
         return Ok(ACT_PIPE);
     };
     let Some(seg) = (unsafe { REPL_SEG.get(vni) }) else {
@@ -130,7 +183,7 @@ fn try_replicate(ctx: &TcContext) -> Result<i32, ()> {
 
     // Egress device for the replicated copies. Unset (0) means the loader hasn't
     // configured one yet — don't replicate into the void; pass the frame on.
-    let ifindex = match CONFIG.get(0) {
+    let ifindex = match CONFIG.get(CFG_REPLICATE_IFINDEX) {
         Some(&v) if v != 0 => v,
         _ => return Ok(ACT_PIPE),
     };
@@ -174,14 +227,69 @@ fn try_replicate(ctx: &TcContext) -> Result<i32, ()> {
     Ok(ACT_SHOT)
 }
 
+/// Leaf `End.DT2M`: strip the reduced SRv6 encap and flood the inner Ethernet
+/// frame into the bridge so the kernel replicates it to the local ACs.
+fn end_dt2m(ctx: &TcContext) -> Result<i32, ()> {
+    // Only the reduced encap (single SID in the DA, no SRH) is handled here:
+    // the outer IPv6 Next Header is Ethernet(143) and the inner Ethernet frame
+    // follows the fixed header directly. An SRH-present frame (Next Header 43)
+    // is left for a follow-up; pass it on.
+    if ctx.load::<u8>(IP6_NEXTHDR_OFF).map_err(|_| ())? != NH_ETHERNET {
+        return Ok(ACT_PIPE);
+    }
+
+    // Bridge port to flood into. Unset (0) means the leaf role isn't configured.
+    let bridge = match CONFIG.get(CFG_BRIDGE_IFINDEX) {
+        Some(&v) if v != 0 => v,
+        _ => return Ok(ACT_PIPE),
+    };
+
+    // Decap = remove the outer encap (link Ethernet + outer IPv6) from the front
+    // of the frame, leaving the inner Ethernet BUM frame. `bpf_skb_adjust_room`
+    // can't do this — it preserves the L3 header and refuses to shrink past it —
+    // so shift the inner frame to the front and trim the tail. (`adjust_room`
+    // also has no "remove the L2 header" mode.)
+    let total = ctx.len() as usize;
+    if total <= DT2M_STRIP {
+        return Ok(ACT_PIPE); // no inner frame
+    }
+    let inner_len = total - DT2M_STRIP;
+
+    // Slide the inner frame left by DT2M_STRIP bytes, ascending so the (lower)
+    // destination never clobbers a not-yet-read (higher) source byte. The
+    // constant `MAX_INNER` bound keeps the loop bounded for the verifier; a
+    // frame longer than that is left for the stack.
+    let mut i = 0usize;
+    while i < inner_len && i < MAX_INNER {
+        let b: u8 = ctx.load(DT2M_STRIP + i).map_err(|_| ())?;
+        ctx.store(i, &b, 0).map_err(|_| ())?;
+        i += 1;
+    }
+    if i < inner_len {
+        return Ok(ACT_PIPE); // frame larger than MAX_INNER — don't truncate it
+    }
+
+    // Trim the now-duplicated trailing DT2M_STRIP bytes: the skb becomes exactly
+    // the inner Ethernet frame. A real BUM frame is a full (>=60-byte) Ethernet
+    // frame, so `inner_len` clears the kernel's change_tail minimum; if a runt
+    // frame can't be trimmed, drop it rather than flood stale tail bytes.
+    if unsafe { bpf_skb_change_tail(ctx.skb.skb, inner_len as u32, 0) } != 0 {
+        return Ok(ACT_SHOT);
+    }
+
+    // Flood into the bridge (ingress on a bridge port): the bridge replicates
+    // the inner BUM frame to the other local attachment circuits.
+    Ok(unsafe { bpf_redirect(bridge, BPF_F_INGRESS) } as i32)
+}
+
 #[cfg(not(test))]
 #[panic_handler]
 fn panic(_info: &core::panic::PanicInfo) -> ! {
     loop {}
 }
 
-// `bpf_clone_redirect` is a GPL-only helper, so declare a GPL-compatible
-// license.
+// `bpf_clone_redirect` / `bpf_redirect` are GPL-only helpers, so declare a
+// GPL-compatible license.
 #[unsafe(link_section = "license")]
 #[unsafe(no_mangle)]
 static LICENSE: [u8; 13] = *b"Dual MIT/GPL\0";
