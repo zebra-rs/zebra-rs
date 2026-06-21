@@ -30,6 +30,6 @@ redirect into the spawned per-VRF task.
 |----------|--------|
 | Setup topology | |
 | Configure vrf-blue and observe via show | |
-| Inspect vrf-blue via the `show bgp vrf` tree | |
+| Inspect vrf-blue via the `show bgp vrf` AFI forms | |
 | Remove the BGP VRF block and observe the RD clear | |
 | Teardown topology | |
