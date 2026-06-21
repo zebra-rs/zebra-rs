@@ -1,0 +1,51 @@
+# pe1 — the ingress PE and the PLR. IS-IS L2 SRv6 (locator LOC1). pea is
+# a stub egress reachable ONLY via pe1 (no pea-peb link), and peb (the
+# protector) is reached directly over pe1-peb. So pe1 holds the route to
+# pea's locator fcbb:bbbb:3::/48 via its pe1-pea adjacency, with peb's
+# Mirror SID as the egress-protection backup. When pea's node fails, that
+# adjacency drops, pea's locator leaves the SPF, and — because peb still
+# advertises a Mirror SID for it and peb is reachable over pe1-peb —
+# Mirror SID *node-protection stale-route retention* keeps the locator
+# alive as a seg6 H.Encaps route to peb's Mirror SID, surviving SPF
+# reconvergence. The pe1-pea adjacency uses fast hellos (hold 3 s) so the
+# node-down failover is quick.
+interface:
+- if-name: lo
+  ipv6:
+    address: 2001:db8::1/128
+- if-name: pe1-pea
+  ipv6:
+    address: 2001:db8:0:13::1/64
+- if-name: pe1-peb
+  ipv6:
+    address: 2001:db8:0:14::1/64
+segment-routing:
+  locator:
+  - name: LOC1
+    prefix: fcbb:bbbb:1::/48
+    behavior: usid
+router:
+  isis:
+    net: 49.0000.0000.0000.0001.00
+    hostname: pe1
+    is-type: level-2-only
+    segment-routing:
+      srv6:
+        locator: LOC1
+    interface:
+    - if-name: lo
+      ipv6:
+        enable: true
+    - if-name: pe1-pea
+      network-type: point-to-point
+      metric: 1
+      hello:
+        interval: 1
+        multiplier: 3
+      ipv6:
+        enable: true
+    - if-name: pe1-peb
+      network-type: point-to-point
+      metric: 1
+      ipv6:
+        enable: true

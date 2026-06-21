@@ -249,6 +249,12 @@ pub struct Isis {
     pub peer_algo_srv6: Levels<BTreeMap<IsisSysId, BTreeMap<u8, super::srv6::Srv6AlgoLoc>>>,
     pub rib: Levels<PrefixMap<Ipv4Net, SpfRoute<V4>>>,
     pub rib_v6: Levels<PrefixMap<Ipv6Net, SpfRoute<V6>>>,
+    /// Mirror SID node-protection stale-route retention: protected egress
+    /// locators currently kept alive in the FIB (mapped to the Mirror SID
+    /// they redirect to) after the protected egress's LSP aged out, so a
+    /// node-down failover survives SPF reconvergence. Keyed per level;
+    /// reconciled each SPF and withdrawn when the egress returns.
+    pub retained_locators: Levels<BTreeMap<Ipv6Net, std::net::Ipv6Addr>>,
     pub ilm: Levels<BTreeMap<u32, SpfIlm>>,
     /// Currently-installed local (self-originated) Prefix-SID ILM
     /// entries, keyed by MPLS label. Level-independent (the label is
@@ -605,6 +611,7 @@ pub struct IsisTop<'a> {
     pub peer_algo_srv6: &'a mut Levels<BTreeMap<IsisSysId, BTreeMap<u8, super::srv6::Srv6AlgoLoc>>>,
     pub rib: &'a mut Levels<PrefixMap<Ipv4Net, SpfRoute<V4>>>,
     pub rib_v6: &'a mut Levels<PrefixMap<Ipv6Net, SpfRoute<V6>>>,
+    pub retained_locators: &'a mut Levels<BTreeMap<Ipv6Net, std::net::Ipv6Addr>>,
     pub ilm: &'a mut Levels<BTreeMap<u32, SpfIlm>>,
     pub rib_client: &'a crate::rib::client::RibClient,
     pub hostname: &'a mut Levels<Hostname>,
@@ -779,6 +786,7 @@ impl Isis {
                     Levels::<BTreeMap<IsisSysId, BTreeMap<u8, super::srv6::Srv6AlgoLoc>>>::default(),
                 rib: Levels::<PrefixMap<Ipv4Net, SpfRoute<V4>>>::default(),
                 rib_v6: Levels::<PrefixMap<Ipv6Net, SpfRoute<V6>>>::default(),
+                retained_locators: Levels::<BTreeMap<Ipv6Net, std::net::Ipv6Addr>>::default(),
                 ilm: Levels::<BTreeMap<u32, SpfIlm>>::default(),
                 self_sid_ilm: BTreeMap::new(),
                 hostname: Levels::<Hostname>::default(),
@@ -2881,6 +2889,7 @@ impl Isis {
             peer_algo_srv6: &mut self.peer_algo_srv6,
             rib: &mut self.rib,
             rib_v6: &mut self.rib_v6,
+            retained_locators: &mut self.retained_locators,
             ilm: &mut self.ilm,
             rib_client: &self.ctx.rib,
             hostname: &mut self.hostname,
