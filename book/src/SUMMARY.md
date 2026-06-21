@@ -6,6 +6,7 @@
 - [Interface Configuration](ch-00-03-interface-configuration.md)
 - [VXLAN Configuration](ch-00-04-vxlan-configuration.md)
 - [Bridge Configuration](ch-00-05-bridge-configuration.md)
+- [Command Line Options](ch-00-06-command-line-options.md)
 
 ## Static Route
 

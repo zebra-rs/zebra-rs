@@ -41,6 +41,14 @@ struct Arg {
     #[arg(short, long, help = "YANG load path", default_value = "")]
     yang_path: String,
 
+    #[arg(
+        short = 'c',
+        long = "config-file",
+        value_name = "FILENAME",
+        help = "Configuration file to load at startup (CLI, JSON, YAML, or set/delete format); overrides the default zebra-rs.conf"
+    )]
+    config_file: Option<String>,
+
     #[arg(short, long, help = "Run as daemon in background")]
     daemon: bool,
 
@@ -184,6 +192,7 @@ async fn run(arg: Arg) -> anyhow::Result<()> {
 
     let config = ConfigManager::new(
         yang_path,
+        arg.config_file.clone(),
         rib.tx.clone(),
         rib.inbound_tx.clone(),
         policy.tx.clone(),
