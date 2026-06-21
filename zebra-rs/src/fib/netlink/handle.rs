@@ -1,5 +1,5 @@
 use std::collections::BTreeMap;
-use std::net::{IpAddr, Ipv4Addr};
+use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 
 use futures::stream::StreamExt;
 use ipnet::{IpNet, Ipv4Net, Ipv6Net};
@@ -1520,6 +1520,70 @@ impl FibHandle {
                     sid.nh6,
                     gid,
                     self.use_nhid,
+                    e
+                );
+            }
+        }
+    }
+
+    /// Replace a local End.DT46 service SID's `/128` with a Mirror SID
+    /// redirect: `ip -6 route replace <sid>/128 encap seg6 mode encap
+    /// segs [<mirror_sid>] via <nh6> dev <ifindex>`. Used by egress link
+    /// protection — when the protected egress's PE-CE link fails it
+    /// re-encapsulates traffic for its own service SID toward the
+    /// protector's Mirror SID (End.M) instead of decapping locally.
+    ///
+    /// This is a *route-level* seg6 H.Encaps (not a seg6local endpoint
+    /// action): the incoming packet arrives with an already-exhausted SRH
+    /// (`segleft=0`), which `End.B6.Encaps` rejects, and the SID address
+    /// is no longer a local seg6local binding, so the kernel forwards +
+    /// encapsulates it. `NLM_F_REPLACE` swaps the seg6local decap in place;
+    /// `route_sid_install` with the original SID restores it.
+    pub async fn route_sid_redirect_install(
+        &self,
+        sid_prefix: &Ipv6Net,
+        mirror_sid: Ipv6Addr,
+        nh6: Ipv6Addr,
+        ifindex: u32,
+    ) {
+        let mut msg = RouteMessage::default();
+        msg.header.address_family = AddressFamily::Inet6;
+        msg.header.table = RouteHeader::RT_TABLE_MAIN;
+        msg.header.destination_prefix_length = 128;
+        msg.header.protocol = RouteProtocol::Isis;
+        msg.header.scope = RouteScope::Universe;
+        msg.header.kind = RouteType::Unicast;
+
+        msg.attributes
+            .push(RouteAttribute::Destination(RouteAddress::Inet6(
+                sid_prefix.addr(),
+            )));
+        msg.attributes.push(RouteAttribute::Oif(ifindex));
+        msg.attributes
+            .push(RouteAttribute::Gateway(RouteAddress::Inet6(nh6)));
+
+        match super::srv6::build_seg6_attrs(&[mirror_sid], isis_packet::srv6::EncapType::HEncap) {
+            Ok((encap, encap_type)) => {
+                msg.attributes.push(encap);
+                msg.attributes.push(encap_type);
+            }
+            Err(e) => {
+                tracing::warn!("mirror redirect encap build failed for {sid_prefix}: {e}");
+                return;
+            }
+        }
+
+        let mut req = NetlinkMessage::from(RouteNetlinkMessage::NewRoute(msg));
+        req.header.flags = NLM_F_REQUEST | NLM_F_ACK | NLM_F_CREATE | NLM_F_REPLACE;
+        let mut response = self.handle.clone().request(req).unwrap();
+        while let Some(m) = response.next().await {
+            if let NetlinkPayload::Error(e) = m.payload {
+                tracing::warn!(
+                    "mirror redirect install error: sid={} mirror_sid={} nh6={} ifindex={} err={}",
+                    sid_prefix.addr(),
+                    mirror_sid,
+                    nh6,
+                    ifindex,
                     e
                 );
             }

@@ -77,6 +77,26 @@ Feature: IS-IS SRv6 Mirror SID egress link protection — steady-state baseline
     Given the test topology exists
     Then show command "show segment-routing srv6 sid" in namespace "pea" should contain "End.DT46"
 
+  Scenario: PE-CE link failure redirects via the Mirror SID
+    Given the test topology exists
+    # Baseline: ce1 -> ce2 flows via pea (the primary egress).
+    Then ping from "ce1" to "2001:db8:c2::1" should eventually succeed
+    # Fail pea's PE-CE link. pea stays up (IS-IS/BGP intact, still
+    # advertising ce2), so pe1 keeps H.Encaps-ing toward pea's End.DT46
+    # service SID — but pea can no longer deliver locally. As its own PLR
+    # pea redirects that SID to peb's Mirror SID (End.B6.Encaps); peb's
+    # End.M re-resolves the inner SID in the mirror-context table into
+    # vrf-cust and delivers over peb-ce2. A successful ping therefore
+    # proves the two-level End.M -> End.DT46 decap carries live traffic.
+    When I make namespace "pea" interface "pea-ce2" down
+    And I wait 8 seconds
+    Then ping from "ce1" to "2001:db8:c2::1" should eventually succeed
+    # Recover the link: pea restores the normal End.DT46 decap and the
+    # service forwards locally again.
+    When I make namespace "pea" interface "pea-ce2" up
+    And I wait 8 seconds
+    Then ping from "ce1" to "2001:db8:c2::1" should eventually succeed
+
   Scenario: Teardown topology
     Given the test topology exists
     When I stop zebra-rs in namespace "pe1"
