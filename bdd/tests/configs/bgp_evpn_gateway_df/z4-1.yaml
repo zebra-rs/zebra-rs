@@ -1,0 +1,42 @@
+# z4 — gateway #2 (AS 65001, router-id .0.4, the higher of the two, so the
+# standby — NOT the DF). Same wiring as z2: region A (iBGP to z1), region B
+# (eBGP to z3), gateway-to-gateway iBGP with z2. Since z2 wins the modulus DF
+# election for both regions, z4 owns no region and re-floods nothing (no
+# duplicate BUM).
+router:
+  bgp:
+    global:
+      as: 65001
+      router-id: 192.168.0.4
+    neighbor-group:
+    - name: region-a
+      remote-as: 65001
+      region-id: 65001
+    - name: region-b
+      remote-as: 65002
+      region-id: 65002
+    neighbor:
+    - remote-address: 192.168.0.1
+      enabled: true
+      neighbor-group: region-a
+      afi-safi:
+      - name: ipv4
+        enabled: true
+      - name: evpn
+        enabled: true
+    - remote-address: 192.168.0.3
+      enabled: true
+      neighbor-group: region-b
+      afi-safi:
+      - name: ipv4
+        enabled: true
+      - name: evpn
+        enabled: true
+    - remote-address: 192.168.0.2
+      enabled: true
+      remote-as: 65001
+      afi-safi:
+      - name: ipv4
+        enabled: true
+      - name: evpn
+        enabled: true

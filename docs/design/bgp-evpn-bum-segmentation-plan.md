@@ -437,13 +437,25 @@ on push, not targeted filters).
     forward/standby role (`evpn_df_election_show`). Unit tests + 3-namespace
     `@bgp_evpn_gateway_reflood` BDD (region-A PE + gateway + region-B PE, both
     VNI 10), run live (5/5). No dataplane forwarding yet.
-  - **PR6.2 — offload signaling:** extend the `tc-evpn-replicate` loader line
-    protocol + a new BPF map + a supervisor (mirror `rib/evpn_replicate.rs`)
-    to carry the DF-gated per-region stitch.
-  - **PR6.3 — eBPF replication:** implement the clone + re-encap in the
-    `tc-evpn-replicate` skeleton (currently `TC_ACT_PIPE` passthrough), with
-    split-horizon + DF gate, and a forwarding BDD. NOTE: the offload is
-    excluded from CI (nightly + bpf-linker); validate live.
+  - **PR6.2 — DF-gated re-flood. DONE (this PR).** Refine the re-flood to the
+    DF gate (RFC 9572 §5.3.1): `gateway_replicate_gated(vni, ingress_region,
+    owned)` restricts the split-horizon set to remote VTEPs whose destination
+    region this gateway *owns* (is the elected DF for); `evpn_gateway_owned_regions`
+    computes the owned set (win the modulus DF election among the region's
+    ASBRs). With redundant gateways, only the DF delivers into a region → no
+    duplicate BUM; the standby drops every region it doesn't own. `show bgp
+    evpn` uses the gated set. Unit tests (incl. drops-unowned-region) + a
+    4-namespace `@bgp_evpn_gateway_df` BDD (two gateways peering iBGP so they
+    exchange Type-9s and DF-elect; DF z2 re-floods, standby z4 prunes), run
+    live (4/4); 6.1 BDD still green. Topology note: gateway↔gateway iBGP is
+    required (so they see each other's *originated* Type-9s); iBGP split-horizon
+    keeps per-PE IMET from leaking between them.
+  - **PR6.3 — offload signaling + eBPF replication:** extend `tc-evpn-replicate`
+    loader line protocol + a new BPF map + a supervisor (mirror
+    `rib/evpn_replicate.rs`); implement the clone + re-encap in the skeleton
+    (currently `TC_ACT_PIPE` passthrough) with split-horizon + DF gate, and a
+    forwarding BDD. NOTE: the offload is excluded from CI (nightly +
+    bpf-linker); validate live.
   - MPLS-P2MP / BIER segmentation stays out of scope (no kernel/eBPF-feasible
     path) → VPP/ASIC backend.
 

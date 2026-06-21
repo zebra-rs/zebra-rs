@@ -1966,7 +1966,7 @@ struct RemoteImet {
     /// ingress peer's `region-id`), or `None` for a non-segmented neighbor. A
     /// segmentation gateway uses this to partition its flood set by region and
     /// re-flood BUM across the boundary with split-horizon (never back into the
-    /// ingress region). See [`EvpnFloodState::gateway_replicate`].
+    /// ingress region). See [`EvpnFloodState::gateway_replicate_gated`].
     region: Option<[u8; 8]>,
 }
 
@@ -2047,23 +2047,37 @@ impl EvpnFloodState {
         );
     }
 
-    /// RFC 9572 §6: a segmentation gateway re-floods a BUM frame that ingressed
-    /// from `ingress_region` to every remote VTEP in `vni`'s flood set that is
-    /// in a *different* region — split-horizon: a copy is never sent back into
-    /// the region it came from. Remotes with no region (`None`) are plain
-    /// (non-segmented) neighbours and are always included. Returns the set of
-    /// re-flood target VTEPs (empty for an unknown VNI).
-    ///
-    /// This is the per-boundary replication primitive the (eBPF) gateway
-    /// dataplane consumes; the caller gates it on being the elected DF
-    /// (`evpn_df_election`) so only one gateway forwards across the boundary.
-    pub fn gateway_replicate(&self, vni: u32, ingress_region: [u8; 8]) -> BTreeSet<IpAddr> {
+    /// The segmentation regions present in `vni`'s flood set (the regions a
+    /// gateway bridges). Region-less (non-segmented) remotes are ignored.
+    pub fn gateway_regions(&self, vni: u32) -> BTreeSet<[u8; 8]> {
+        self.vnis
+            .get(&vni)
+            .map(|v| v.remotes.values().filter_map(|r| r.region).collect())
+            .unwrap_or_default()
+    }
+
+    /// DF-gated split-horizon gateway re-flood set
+    /// (RFC 9572 §5.3.1): restricted to remote
+    /// VTEPs whose destination region this gateway *owns* — i.e. is the elected
+    /// DF for (`owned`). With multiple gateways bordering a region, only its DF
+    /// delivers BUM into it, so the others drop that region from their re-flood
+    /// and no duplicate is produced. Region-less remotes are always delivered.
+    pub fn gateway_replicate_gated(
+        &self,
+        vni: u32,
+        ingress_region: [u8; 8],
+        owned: &BTreeSet<[u8; 8]>,
+    ) -> BTreeSet<IpAddr> {
         let Some(v) = self.vnis.get(&vni) else {
             return BTreeSet::new();
         };
         v.remotes
             .iter()
-            .filter(|(_, r)| r.region != Some(ingress_region))
+            .filter(|(_, r)| r.region != Some(ingress_region)) // split-horizon
+            .filter(|(_, r)| match r.region {
+                Some(region) => owned.contains(&region), // DF owns this region
+                None => true,                            // non-segmented PE
+            })
             .map(|(orig, _)| *orig)
             .collect()
     }
@@ -6483,6 +6497,26 @@ fn evpn_per_region_asbrs(local_rib: &LocalRib, region_id: [u8; 8]) -> Vec<Ipv4Ad
     asbrs
 }
 
+/// The set of segmentation regions in `vni`'s flood set that `router_id` (this
+/// node) is the elected Designated Forwarder for — the destination regions a
+/// gateway owns delivery into (RFC 9572 §5.3.1). A region is owned when this
+/// node wins the modulus DF election among the ASBRs advertising that region's
+/// Per-Region I-PMSI (Type-9).
+fn evpn_gateway_owned_regions(
+    local_rib: &LocalRib,
+    router_id: Ipv4Addr,
+    vni: u32,
+) -> BTreeSet<[u8; 8]> {
+    local_rib
+        .evpn_flood
+        .gateway_regions(vni)
+        .into_iter()
+        .filter(|&region| {
+            evpn_df_election(&evpn_per_region_asbrs(local_rib, region), 0) == Some(router_id)
+        })
+        .collect()
+}
+
 /// Render the RFC 9572 §5.3.1 inter-AS DF-election summary for one region's
 /// Per-Region I-PMSI (Type-9), as appended by `show bgp evpn`: the candidate
 /// ASBRs (those advertising the region's Type-9), the elected Designated
@@ -6517,9 +6551,13 @@ pub(super) fn evpn_df_election_show(
         if local_rib.evpn_flood.has_legacy_remote(vni) {
             out.push_str(" (legacy PEs present)");
         }
-        // The split-horizon re-flood set for BUM that ingressed from this
-        // region: every remote VTEP in the VNI that is in another region.
-        let reflood = local_rib.evpn_flood.gateway_replicate(vni, region_id);
+        // The DF-gated split-horizon re-flood set for BUM that ingressed from
+        // this region: every remote VTEP in another region this gateway owns
+        // (is the DF for), so multiple gateways don't duplicate BUM.
+        let owned = evpn_gateway_owned_regions(local_rib, router_id, vni);
+        let reflood = local_rib
+            .evpn_flood
+            .gateway_replicate_gated(vni, region_id, &owned);
         if !reflood.is_empty() {
             let targets = reflood
                 .iter()
@@ -13551,35 +13589,58 @@ mod evpn_flood_tests {
     const REGION_A: [u8; 8] = [0x00, 0x09, 0xfd, 0xe9, 0, 0, 0, 0]; // AS 65001
     const REGION_B: [u8; 8] = [0x00, 0x09, 0xfd, 0xea, 0, 0, 0, 0]; // AS 65002
 
-    /// A gateway re-floods BUM from region A only to VTEPs outside region A
-    /// (split-horizon): region-B VTEPs get a copy, region-A VTEPs do not.
+    /// A gateway that owns both regions re-floods BUM from region A only to
+    /// VTEPs outside region A (split-horizon): region-B VTEPs get a copy,
+    /// region-A VTEPs do not.
     #[test]
     fn gateway_replicate_is_split_horizon() {
         let mut f = EvpnFloodState::default();
         f.update_remote(10, ip("192.168.0.1"), None, false, true, Some(REGION_A));
         f.update_remote(10, ip("192.168.0.5"), None, false, true, Some(REGION_A));
         f.update_remote(10, ip("192.168.0.3"), None, false, true, Some(REGION_B));
+        let both = BTreeSet::from([REGION_A, REGION_B]);
         // BUM ingressing from region A re-floods to region B only.
         assert_eq!(
-            f.gateway_replicate(10, REGION_A),
+            f.gateway_replicate_gated(10, REGION_A, &both),
             BTreeSet::from([ip("192.168.0.3")])
         );
         // BUM ingressing from region B re-floods to both region-A VTEPs.
         assert_eq!(
-            f.gateway_replicate(10, REGION_B),
+            f.gateway_replicate_gated(10, REGION_B, &both),
             BTreeSet::from([ip("192.168.0.1"), ip("192.168.0.5")])
         );
     }
 
+    /// The DF gate (RFC 9572 §5.3.1): a gateway that does NOT own region B
+    /// drops region-B VTEPs from its re-flood, so the region-B DF is the only
+    /// one that delivers there (no duplicate BUM).
+    #[test]
+    fn gateway_replicate_gated_drops_unowned_region() {
+        let mut f = EvpnFloodState::default();
+        f.update_remote(10, ip("192.168.0.1"), None, false, true, Some(REGION_A));
+        f.update_remote(10, ip("192.168.0.3"), None, false, true, Some(REGION_B));
+        // This gateway owns only region A → BUM from region A re-floods nowhere
+        // (the region-B VTEP belongs to region B's DF, not this node).
+        let owns_a = BTreeSet::from([REGION_A]);
+        assert!(f.gateway_replicate_gated(10, REGION_A, &owns_a).is_empty());
+        // Owning region B, BUM from region A reaches the region-B VTEP.
+        let owns_b = BTreeSet::from([REGION_B]);
+        assert_eq!(
+            f.gateway_replicate_gated(10, REGION_A, &owns_b),
+            BTreeSet::from([ip("192.168.0.3")])
+        );
+    }
+
     /// Plain (non-segmented, region `None`) remotes are always a re-flood
-    /// target regardless of the ingress region.
+    /// target regardless of ownership or ingress region.
     #[test]
     fn gateway_replicate_includes_regionless_remotes() {
         let mut f = EvpnFloodState::default();
         f.update_remote(10, ip("192.168.0.1"), None, false, true, Some(REGION_A));
         f.update_remote(10, ip("192.168.0.9"), None, false, false, None);
+        // Owns no segmentation region, yet the region-less PE still gets BUM.
         assert_eq!(
-            f.gateway_replicate(10, REGION_A),
+            f.gateway_replicate_gated(10, REGION_A, &BTreeSet::new()),
             BTreeSet::from([ip("192.168.0.9")])
         );
     }
@@ -13588,7 +13649,10 @@ mod evpn_flood_tests {
     #[test]
     fn gateway_replicate_unknown_vni_is_empty() {
         let f = EvpnFloodState::default();
-        assert!(f.gateway_replicate(999, REGION_A).is_empty());
+        assert!(
+            f.gateway_replicate_gated(999, REGION_A, &BTreeSet::from([REGION_A]))
+                .is_empty()
+        );
     }
 }
 
