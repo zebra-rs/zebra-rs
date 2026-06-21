@@ -40,7 +40,8 @@ use super::lsp::{
 };
 use super::nfsm::nbr_hold_timer_expire;
 use super::rib::{
-    SpfIlm, SpfRoute, V4, V6, apply_spf_result, build_spf_input, compute_spf, update_self_sid_ilm,
+    RetainEntry, SpfIlm, SpfRoute, V4, V6, apply_spf_result, build_spf_input, compute_spf,
+    egress_retention_expire, update_self_sid_ilm,
 };
 use super::srlg::{SrlgGroup, SrlgGroupBuilder};
 use super::srmpls::IsisLabelMap;
@@ -254,7 +255,7 @@ pub struct Isis {
     /// they redirect to) after the protected egress's LSP aged out, so a
     /// node-down failover survives SPF reconvergence. Keyed per level;
     /// reconciled each SPF and withdrawn when the egress returns.
-    pub retained_locators: Levels<BTreeMap<Ipv6Net, std::net::Ipv6Addr>>,
+    pub retained_locators: Levels<BTreeMap<Ipv6Net, RetainEntry>>,
     pub ilm: Levels<BTreeMap<u32, SpfIlm>>,
     /// Currently-installed local (self-originated) Prefix-SID ILM
     /// entries, keyed by MPLS label. Level-independent (the label is
@@ -611,7 +612,7 @@ pub struct IsisTop<'a> {
     pub peer_algo_srv6: &'a mut Levels<BTreeMap<IsisSysId, BTreeMap<u8, super::srv6::Srv6AlgoLoc>>>,
     pub rib: &'a mut Levels<PrefixMap<Ipv4Net, SpfRoute<V4>>>,
     pub rib_v6: &'a mut Levels<PrefixMap<Ipv6Net, SpfRoute<V6>>>,
-    pub retained_locators: &'a mut Levels<BTreeMap<Ipv6Net, std::net::Ipv6Addr>>,
+    pub retained_locators: &'a mut Levels<BTreeMap<Ipv6Net, RetainEntry>>,
     pub ilm: &'a mut Levels<BTreeMap<u32, SpfIlm>>,
     pub rib_client: &'a crate::rib::client::RibClient,
     pub hostname: &'a mut Levels<Hostname>,
@@ -786,7 +787,7 @@ impl Isis {
                     Levels::<BTreeMap<IsisSysId, BTreeMap<u8, super::srv6::Srv6AlgoLoc>>>::default(),
                 rib: Levels::<PrefixMap<Ipv4Net, SpfRoute<V4>>>::default(),
                 rib_v6: Levels::<PrefixMap<Ipv6Net, SpfRoute<V6>>>::default(),
-                retained_locators: Levels::<BTreeMap<Ipv6Net, std::net::Ipv6Addr>>::default(),
+                retained_locators: Levels::<BTreeMap<Ipv6Net, RetainEntry>>::default(),
                 ilm: Levels::<BTreeMap<u32, SpfIlm>>::default(),
                 self_sid_ilm: BTreeMap::new(),
                 hostname: Levels::<Hostname>::default(),
@@ -2022,6 +2023,10 @@ impl Isis {
                 if self.restarting.is_some() {
                     self.kick_hello_all_links();
                 }
+            }
+            Message::EgressRetentionExpire { level, locator } => {
+                let mut top = self.top();
+                egress_retention_expire(&mut top, level, locator);
             }
         }
     }
@@ -3553,6 +3558,13 @@ pub enum Message {
     /// `HelloOriginate` on every link. Auto-cancelled when
     /// `restarting` drops (the Timer is parked inside it).
     GrT1Tick,
+    /// A node-protection retention hold-down fired for `locator` at
+    /// `level`: if the protected egress is still down, withdraw its
+    /// retained Mirror SID backup (`rib::egress_retention_expire`).
+    EgressRetentionExpire {
+        level: Level,
+        locator: Ipv6Net,
+    },
     /// Re-originate the self LSP at `level`. The optional seq-number
     /// floor carries §7.3.16.4 semantics: when a peer floods our own
     /// LSP back at us with a seq higher than what we hold, we must
@@ -3660,6 +3672,9 @@ impl Display for Message {
             Message::GrNeighborUp(sys_id) => write!(f, "[Message::GrNeighborUp({})]", sys_id),
             Message::ClearOverload => write!(f, "[Message::ClearOverload]"),
             Message::GrT1Tick => write!(f, "[Message::GrT1Tick]"),
+            Message::EgressRetentionExpire { level, locator } => {
+                write!(f, "[Message::EgressRetentionExpire {locator} {level}]")
+            }
         }
     }
 }

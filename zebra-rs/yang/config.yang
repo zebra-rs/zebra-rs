@@ -1747,6 +1747,18 @@ module config {
 
         container egress-protection {
           ext:help "Mirror SID egress node/link protection (SRv6/SR-MPLS)";
+          leaf hold-down {
+            type uint32;
+            units seconds;
+            description
+              "Node-protection stale-route retention hold-down. After a
+               protected egress's node fails, its locator is kept alive as
+               a seg6 H.Encaps backup to the protector's Mirror SID; this
+               bounds how long that backup forwards before it is withdrawn
+               (so a genuinely-decommissioned egress is not masked toward
+               the protector forever). 0 or unset = no hold-down: the
+               backup floats for as long as the protector advertises.";
+          }
           // draft-ietf-rtgwg-srv6-egress-protection / RFC 8679. This
           // node (the protector, PEB) advertises a Mirror SID (End.M
           // for SRv6) plus the protected egress's locator(s) so a PLR

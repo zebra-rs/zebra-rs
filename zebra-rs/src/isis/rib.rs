@@ -1444,6 +1444,76 @@ fn apply_mirror_sid_backups(
     }
 }
 
+/// Above IS-IS (115) so the native locator route wins while the egress is
+/// up; the retained backup is promoted by best-path only once it is gone.
+const RETAIN_DISTANCE: u8 = 250;
+
+/// Per-locator node-protection retention state (see
+/// [`reconcile_retained_locators`]).
+pub struct RetainEntry {
+    /// Whether the seg6 backup is currently in the FIB. Cleared once the
+    /// hold-down withdraws it; re-set when the egress returns.
+    pub installed: bool,
+    /// Armed hold-down timer — `Some` while the egress is down and the
+    /// hold-down is counting; dropped (cancelled) on recovery. `None` when
+    /// the egress is up, the hold-down is disabled, or it already expired.
+    pub holddown: Option<crate::context::Timer>,
+}
+
+/// Install the seg6 H.Encaps retained backup for `loc` toward the Mirror
+/// SID. A distinct `RibType` (Static, not Isis) is required so it coexists
+/// with the native locator route under the RIB's per-rtype replacement
+/// (same-rtype would orphan one in the kernel); the high distance keeps it
+/// unselected until the native route is withdrawn.
+fn install_retain_backup(
+    rib_client: &crate::rib::client::RibClient,
+    loc: Ipv6Net,
+    mirror_sid: Ipv6Addr,
+    addr: Ipv6Addr,
+    ifindex: u32,
+) {
+    let mut nhop = rib::NexthopUni::new(IpAddr::V6(addr), 0, vec![]);
+    nhop.ifindex_origin = (ifindex != 0).then_some(ifindex);
+    nhop.segs = vec![mirror_sid];
+    nhop.encap_type = Some(EncapType::HEncap);
+    nhop.valid = true;
+    let mut entry = rib::entry::RibEntry::new(RibType::Static);
+    entry.distance = RETAIN_DISTANCE;
+    entry.nexthop = rib::Nexthop::Uni(nhop);
+    let _ = rib_client.send(crate::rib::Message::Ipv6Add {
+        prefix: loc,
+        rib: entry,
+    });
+}
+
+fn withdraw_retain_backup(rib_client: &crate::rib::client::RibClient, loc: Ipv6Net) {
+    let entry = rib::entry::RibEntry::new(RibType::Static);
+    let _ = rib_client.send(crate::rib::Message::Ipv6Del {
+        prefix: loc,
+        rib: entry,
+    });
+}
+
+/// Arm a one-shot hold-down timer that fires `EgressRetentionExpire` for
+/// `loc` after `secs`. Held in `RetainEntry::holddown`; dropping it cancels.
+fn arm_holddown_timer(
+    tx: &super::inst::MsgSender,
+    level: Level,
+    loc: Ipv6Net,
+    secs: u64,
+) -> crate::context::Timer {
+    let tx = tx.clone();
+    crate::context::Timer::once(secs, move || {
+        let tx = tx.clone();
+        async move {
+            let _ = tx.send(super::Message::EgressRetentionExpire {
+                level,
+                locator: loc,
+            });
+        }
+    })
+}
+
 /// Mirror SID node-protection stale-route retention. The `inject_mirror_
 /// sid_backups` repair above protects a route to a protected egress
 /// locator *while that route still exists* — but once the protected
@@ -1452,34 +1522,31 @@ fn apply_mirror_sid_backups(
 ///
 /// This pre-installs a **floating backup**: for every protected locator
 /// whose protector is reachable, a seg6 H.Encaps route to the Mirror SID
-/// at a high administrative distance (250). The protected egress's own
-/// native IS-IS locator route (distance 115) wins while the egress is up,
-/// so the backup sits in the RIB unselected. When the egress's node fails
-/// and the native route is withdrawn, the RIB's best-path selection
-/// promotes this backup — carrying traffic addressed into the failed
-/// egress's locator to the protector (PEB's End.M decap into the mirror
-/// context), surviving SPF reconvergence rather than only the sub-second
-/// BFD `protect_switch` window — and demotes it again when the egress
-/// returns. A distinct `RibType` (Static, not Isis) is required so the
-/// backup coexists with the native route rather than colliding under the
-/// RIB's per-rtype replacement, which would orphan one in the kernel.
+/// at a high administrative distance (250). The native locator route
+/// (distance 115) wins while the egress is up, so the backup sits in the
+/// RIB unselected; when the egress's node fails and the native route is
+/// withdrawn, best-path promotes the backup — carrying locator-bound
+/// traffic to the protector (PEB's End.M) and surviving SPF
+/// reconvergence — and demotes it when the egress returns.
 ///
-/// Reconciled every SPF against `top.retained_locators`: installed when a
-/// protector becomes reachable, withdrawn when the protection or the
-/// protector goes away.
+/// **Hold-down** (`egress-protection hold-down`): when configured non-zero,
+/// the backup forwards only for that many seconds after the egress fails,
+/// then `EgressRetentionExpire` withdraws it so a genuinely-decommissioned
+/// egress is not masked toward the protector forever. The backup is
+/// re-installed if the egress later returns. Hold-down `0`/unset keeps the
+/// historical float-forever behavior.
+///
+/// Reconciled every SPF against `top.retained_locators`.
 fn reconcile_retained_locators(
     top: &mut IsisTop,
     level: Level,
     rib_v6: &PrefixMap<Ipv6Net, SpfRoute<V6>>,
 ) {
-    // Above IS-IS (115) so the native locator route wins while the egress
-    // is up; the backup is promoted by best-path only once it is gone.
-    const RETAIN_DISTANCE: u8 = 250;
-
     // Our own SRv6 locator — never back ourselves up (we *are* the egress
     // for it; a remote protector's offer for our own locator is not ours
     // to retain). `Ipv6Net` is `Copy`, so this releases the `top` borrow.
     let my_locator: Option<Ipv6Net> = top.sr_locator.as_ref().and_then(|l| l.prefix);
+    let hold_secs = top.config.egress_protection_holddown.unwrap_or(0) as u64;
 
     // Desired backups: protected locators whose protector is reachable.
     // locator -> (mirror_sid, nexthop addr, ifindex).
@@ -1494,41 +1561,82 @@ fn reconcile_retained_locators(
         desired.insert(entry.protected_locator, (entry.mirror_sid, addr, ifindex));
     }
 
+    // `&RibClient` and the message sender are `Copy`/clonable out, so the
+    // `retained` mutable borrow below does not conflict with using them.
+    let rib_client = top.rib_client;
+    let tx = top.tx.clone();
     let retained = top.retained_locators.get_mut(&level);
 
-    // Withdraw backups no longer desired.
+    // Withdraw backups no longer desired (protector gone / unprotected).
     let stale: Vec<Ipv6Net> = retained
         .keys()
         .filter(|k| !desired.contains_key(k))
         .copied()
         .collect();
     for loc in stale {
-        retained.remove(&loc);
-        let entry = rib::entry::RibEntry::new(RibType::Static);
-        let _ = top.rib_client.send(crate::rib::Message::Ipv6Del {
-            prefix: loc,
-            rib: entry,
-        });
+        if let Some(e) = retained.remove(&loc)
+            && e.installed
+        {
+            withdraw_retain_backup(rib_client, loc);
+        }
     }
 
-    // Install newly-desired backups (idempotent: skip already-installed).
+    // Drive each desired backup's state machine off the egress's presence
+    // in the SPF result and the hold-down.
     for (loc, (mirror_sid, addr, ifindex)) in desired {
-        if retained.contains_key(&loc) {
-            continue;
+        let egress_up = rib_v6.get(&loc).is_some();
+        match retained.get_mut(&loc) {
+            None => {
+                install_retain_backup(rib_client, loc, mirror_sid, addr, ifindex);
+                // First-seen while already down arms the hold-down at once.
+                let holddown = (!egress_up && hold_secs > 0)
+                    .then(|| arm_holddown_timer(&tx, level, loc, hold_secs));
+                retained.insert(
+                    loc,
+                    RetainEntry {
+                        installed: true,
+                        holddown,
+                    },
+                );
+            }
+            Some(e) => {
+                if egress_up {
+                    // Up (or recovered): cancel any hold-down; re-install if
+                    // a prior hold-down had withdrawn it.
+                    e.holddown = None;
+                    if !e.installed {
+                        install_retain_backup(rib_client, loc, mirror_sid, addr, ifindex);
+                        e.installed = true;
+                    }
+                } else if e.installed && e.holddown.is_none() && hold_secs > 0 {
+                    // Egress just went down and the backup is live: start
+                    // the hold-down. (Already-armed / expired / hold-down-
+                    // disabled entries are left as-is.)
+                    e.holddown = Some(arm_holddown_timer(&tx, level, loc, hold_secs));
+                }
+            }
         }
-        let mut nhop = rib::NexthopUni::new(IpAddr::V6(addr), 0, vec![]);
-        nhop.ifindex_origin = (ifindex != 0).then_some(ifindex);
-        nhop.segs = vec![mirror_sid];
-        nhop.encap_type = Some(EncapType::HEncap);
-        nhop.valid = true;
-        let mut entry = rib::entry::RibEntry::new(RibType::Static);
-        entry.distance = RETAIN_DISTANCE;
-        entry.nexthop = rib::Nexthop::Uni(nhop);
-        let _ = top.rib_client.send(crate::rib::Message::Ipv6Add {
-            prefix: loc,
-            rib: entry,
-        });
-        retained.insert(loc, mirror_sid);
+    }
+}
+
+/// Handle a fired node-protection hold-down (`EgressRetentionExpire`): if
+/// the egress is still down and the backup is still armed, withdraw it so
+/// the failed egress is no longer masked toward the protector. A recovered
+/// egress (the reconcile already cancelled the timer) is a no-op.
+pub(super) fn egress_retention_expire(top: &mut IsisTop, level: Level, locator: Ipv6Net) {
+    let egress_up = top.rib_v6.get(&level).get(&locator).is_some();
+    let rib_client = top.rib_client;
+    if let Some(e) = top.retained_locators.get_mut(&level).get_mut(&locator) {
+        if e.installed && e.holddown.is_some() && !egress_up {
+            withdraw_retain_backup(rib_client, locator);
+            e.installed = false;
+            tracing::info!(
+                "[egress-protect] hold-down expired for {} ({}) — withdrew retained Mirror SID backup",
+                locator,
+                level
+            );
+        }
+        e.holddown = None;
     }
 }
 

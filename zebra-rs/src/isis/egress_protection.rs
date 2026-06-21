@@ -359,6 +359,21 @@ pub fn callback_register(isis: &mut Isis) {
         "/router/isis/egress-protection/protect/dataplane",
         config_egress_protect_dataplane,
     );
+    isis.callback_add(
+        "/router/isis/egress-protection/hold-down",
+        config_egress_protect_holddown,
+    );
+}
+
+/// `/router/isis/egress-protection/hold-down` — node-protection
+/// stale-route retention hold-down (seconds). 0/unset floats forever.
+fn config_egress_protect_holddown(isis: &mut Isis, mut args: Args, op: ConfigOp) -> Option<()> {
+    if op.is_set() {
+        isis.config.egress_protection_holddown = Some(args.u32()?);
+    } else {
+        isis.config.egress_protection_holddown = None;
+    }
+    Some(())
 }
 
 #[cfg(test)]
