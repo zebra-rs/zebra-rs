@@ -538,6 +538,11 @@ impl BgpVrf {
                 // BGP-LS (RFC 9552) is produced and stored only by the
                 // global BGP instance — per-VRF tasks never see it.
             }
+            Message::MupC(_) => {
+                // The MUP controller reports only to the global BGP
+                // instance (it is handed the global `tx`); per-VRF tasks
+                // never see `MupC`.
+            }
             Message::Relisten => {
                 // `router bgp port` is a global-instance knob; only the
                 // global event loop queues (and handles) Relisten.

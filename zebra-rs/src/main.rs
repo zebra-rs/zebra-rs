@@ -24,6 +24,10 @@ mod fib;
 mod flex_algo;
 mod fmt;
 mod isis;
+// The MUP controller lives in `src/mup-c/` (hyphenated dir, per the
+// feature's home); `#[path]` maps it to the `mup_c` module name.
+#[path = "mup-c/mod.rs"]
+mod mup_c;
 mod nd;
 mod policy;
 use policy::Policy;
