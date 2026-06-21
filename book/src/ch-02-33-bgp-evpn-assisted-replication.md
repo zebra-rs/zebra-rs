@@ -128,9 +128,13 @@ VXLAN flood list — BUM rides the tree, not a zero-MAC FDB row.
 The stock kernel cannot forward an SR replication tree (next section), so
 SR P2MP is programmed through a dedicated **eBPF TC/clsact** dataplane
 (`offload/tc-evpn-replicate`). The BGP **control plane is complete**
-(signalling, import, and the replication-segment computation); the eBPF
-forwarder is under construction — selecting an SR P2MP mode today signals
-the tree and suppresses the VXLAN flood, but does not yet forward BUM.
+(signalling, import, and the replication-segment computation), and the SRv6
+**`End.Replicate`** datapath is **implemented** — a clsact-ingress classifier
+clones each BUM frame once per leaf, rewriting the outer IPv6 destination to
+that leaf's SID (the per-copy header rewrite the kernel cannot do natively),
+validated end-to-end on a veth pair. The remaining gap is the leaf-side
+`End.DT2M` decap (strip the outer IPv6+SRH and hand the inner frame to the
+bridge for native flooding).
 
 ## What the Linux kernel can and cannot do
 

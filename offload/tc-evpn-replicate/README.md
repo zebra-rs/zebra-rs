@@ -14,20 +14,40 @@ a different rewritten header*. The TC layer can express that with
 clone per-copy. So this is a `#[classifier]` program on `clsact`, unlike the
 sibling [`xdp-bfd-echo`](../xdp-bfd-echo) offload.
 
-Planned roles (all clsact-attached):
-- **root** (egress): `H.Encaps` each copy toward a downstream SID / leaf;
-- **bud** (ingress): match the local Replication-SID, clone+rewrite per branch
-  (`End.Replicate`);
-- **leaf** (ingress): match the local `End.DT2M` SID, strip the outer IPv6+SRH,
-  redirect the inner frame to the bridge for native BUM flooding.
+Roles (all clsact-attached):
+- **root / bud** (ingress) — **implemented**: match the local Replication-SID
+  (the outer IPv6 DA), then for each downstream leaf clone the packet and
+  rewrite the outer DA to that leaf's SID (`End.Replicate`);
+- **leaf** (ingress) — *follow-up (DP3c)*: match the local `End.DT2M` SID, strip
+  the outer IPv6+SRH, redirect the inner frame to the bridge for native BUM
+  flooding.
 
 The branch/leaf table is a BPF map the loader fills from the BGP control plane
 (`ReplSeg`, fed by `EvpnFloodState::replication_leaves`).
 
 ## Status
 
-**Skeleton only.** The classifier loads and attaches but passes every frame
-through (`TC_ACT_PIPE`); the replication logic and maps are follow-up slices.
+**`End.Replicate` works.** The classifier reads three maps the loader fills:
+
+- `REPL_SEG` — per-VNI replication segment (tree + leaf SIDs);
+- `REPL_LOCAL_SID` — local replication SID → VNI, for demuxing an inbound packet
+  to its segment by outer IPv6 DA (derived from each segment's root SID);
+- `CONFIG` — index 0 = egress ifindex the copies are `clone_redirect`'d out of.
+
+On an inbound IPv6 frame whose DA is a known replication SID it decrements the
+outer Hop Limit (dropping anything that arrives with Hop Limit ≤ 1) and emits
+one clone per leaf with the outer DA rewritten, then drops the original.
+
+Validated end-to-end on a veth pair —
+[`scripts/veth-replicate-test.sh`](scripts/veth-replicate-test.sh) sends one
+frame to a replication SID and asserts a copy arrives at *each* leaf SID:
+
+```sh
+sudo bash offload/tc-evpn-replicate/scripts/veth-replicate-test.sh
+```
+
+The **leaf `End.DT2M` decap** (strip outer IPv6+SRH, redirect inner to the
+bridge) and the **root H.Encaps-from-bare-frame** path are follow-up slices.
 
 ## Build / run
 
