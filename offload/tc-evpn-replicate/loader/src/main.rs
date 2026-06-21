@@ -14,7 +14,9 @@
 //!   * `DT2M_SID`       — local `End.DT2M` SID -> VNI for the leaf role;
 //!   * `CONFIG`         — index 0 = egress ifindex the replicated copies leave
 //!     on (`--redirect-iface`); index 1 = bridge ifindex a leaf floods decapped
-//!     frames into (`--bridge-iface`).
+//!     frames into (`--bridge-iface`);
+//!   * `ENCAP_CFG`      — root `H.Encaps` config (`--encap` mode): VNI, underlay
+//!     ifindex, root SID, outer MAC header.
 //! Runs until Ctrl-C / SIGTERM.
 
 use std::collections::HashMap as StdHashMap;
@@ -31,6 +33,7 @@ use tokio::signal;
 
 /// Must match `tc-evpn-replicate-ebpf`'s `MAX_LEAVES`.
 const MAX_LEAVES: usize = 32;
+const ETH_HLEN: usize = 14;
 const REPL_FLAG_SRV6: u32 = 1 << 0;
 const REPL_FLAG_ROOT_V4: u32 = 1 << 1;
 
@@ -53,8 +56,25 @@ struct ReplSeg {
 // 1-aligned arrays totalling a multiple of 4), so every byte is initialized.
 unsafe impl aya::Pod for ReplSeg {}
 
+/// Userspace mirror of the eBPF `EncapCfg` map value (root `H.Encaps` role).
+/// Same padding-free `#[repr(C)]` layout (`u32`s first, then byte arrays).
+#[repr(C)]
+#[derive(Clone, Copy)]
+struct EncapCfg {
+    vni: u32,
+    underlay_ifindex: u32,
+    root_sid: [u8; 16],
+    link_eth: [u8; ETH_HLEN],
+    _pad: [u8; 2],
+}
+
+// SAFETY: `#[repr(C)]`, integer/byte-array fields only, no padding (two `u32`s
+// then 1-aligned arrays totalling a multiple of 4) — every byte is initialized.
+unsafe impl aya::Pod for EncapCfg {}
+
 type ReplMap = AyaHashMap<MapData, u32, ReplSeg>;
 type SidIndex = AyaHashMap<MapData, [u8; 16], u32>;
+type EncapMap = AyaArray<MapData, EncapCfg>;
 
 /// The maps the stdin line protocol programs, threaded together so a `repl-add`
 /// keeps the per-VNI segment ([`ReplMap`]) and the SID demux index
@@ -67,6 +87,8 @@ struct Maps {
     /// VNI -> its `End.DT2M` SID, so `leaf-del <vni>` can evict the SID-keyed
     /// `dt2m` map (which has no VNI to look the key up by).
     leaf_sids: StdHashMap<u32, [u8; 16]>,
+    /// Single-entry root `H.Encaps` config (`encap-cfg`).
+    encap: EncapMap,
 }
 
 #[derive(Debug, Parser)]
@@ -87,6 +109,11 @@ struct Opt {
     /// disables the leaf role (the datapath passes such frames to the stack).
     #[clap(short, long)]
     bridge_iface: Option<String>,
+    /// Root `H.Encaps` mode: attach the `tc_evpn_encap` classifier at `--iface`
+    /// *egress* (the overlay bridge port) instead of the ingress replicator, so
+    /// every bare BUM frame is encapsulated + fanned out per `encap-cfg`.
+    #[clap(short, long)]
+    encap: bool,
 }
 
 #[tokio::main]
@@ -96,6 +123,7 @@ async fn main() -> anyhow::Result<()> {
         direction,
         redirect_iface,
         bridge_iface,
+        encap,
     } = Opt::parse();
     env_logger::init();
 
@@ -138,14 +166,21 @@ async fn main() -> anyhow::Result<()> {
         debug!("qdisc_add_clsact({iface}): {e} (already present?)");
     }
 
-    let attach = match direction.as_str() {
-        "egress" => TcAttachType::Egress,
-        _ => TcAttachType::Ingress,
+    // Encap mode attaches the root H.Encaps classifier at egress; otherwise the
+    // ingress replicate/decap classifier at the requested direction.
+    let (prog_name, attach) = if encap {
+        ("tc_evpn_encap", TcAttachType::Egress)
+    } else {
+        let dir = match direction.as_str() {
+            "egress" => TcAttachType::Egress,
+            _ => TcAttachType::Ingress,
+        };
+        ("tc_evpn_replicate", dir)
     };
 
     let program: &mut SchedClassifier = ebpf
-        .program_mut("tc_evpn_replicate")
-        .context("classifier 'tc_evpn_replicate' not found in object")?
+        .program_mut(prog_name)
+        .with_context(|| format!("classifier {prog_name:?} not found in object"))?
         .try_into()?;
     program.load()?;
     program.attach(&iface, attach)?;
@@ -177,23 +212,32 @@ async fn main() -> anyhow::Result<()> {
                 .context("map 'DT2M_SID' not found in object")?,
         )?,
         leaf_sids: StdHashMap::new(),
+        encap: AyaArray::try_from(
+            ebpf.take_map("ENCAP_CFG")
+                .context("map 'ENCAP_CFG' not found in object")?,
+        )?,
     };
 
-    let bridge_desc = match bridge_iface.as_deref() {
-        Some(name) => format!("{name} (ifindex {bridge_ifindex})"),
-        None => "disabled".to_string(),
-    };
-    info!(
-        "tc_evpn_replicate attached to {iface} ({direction}); copies -> {redirect} \
-         (ifindex {redirect_ifindex}); leaf flood -> {bridge_desc}; reading commands on stdin"
-    );
+    if encap {
+        info!("{prog_name} attached to {iface} (egress); awaiting encap-cfg + repl-add on stdin");
+    } else {
+        let bridge_desc = match bridge_iface.as_deref() {
+            Some(name) => format!("{name} (ifindex {bridge_ifindex})"),
+            None => "disabled".to_string(),
+        };
+        info!(
+            "{prog_name} attached to {iface} ({direction}); copies -> {redirect} \
+             (ifindex {redirect_ifindex}); leaf flood -> {bridge_desc}; reading commands on stdin"
+        );
+    }
 
-    // Replication segments are fed by the zebra-rs supervisor over a stdin
-    // line protocol (one command per line):
+    // The control plane feeds map updates over a stdin line protocol (one
+    // command per line):
     //   repl-add <vni> <tree-id> <srv6:0|1> <root-ip> <leaf-ip>...
     //   repl-del <vni>
     //   leaf-add <vni> <dt2m-sid>        (this node's End.DT2M SID for the VNI)
     //   leaf-del <vni>
+    //   encap-cfg <vni> <underlay-ifname> <root-sid> <eth-dst-mac> <eth-src-mac>
     let mut lines = tokio::io::BufReader::new(tokio::io::stdin()).lines();
     loop {
         tokio::select! {
@@ -296,9 +340,62 @@ fn handle_command(line: &str, maps: &mut Maps) {
             }
             None => warn!("malformed leaf-del: {line:?}"),
         },
+        Some("encap-cfg") => match parse_encap(&mut it) {
+            Some(cfg) => {
+                if let Err(e) = maps.encap.set(0, cfg, 0) {
+                    warn!("ENCAP_CFG set failed: {e}");
+                } else {
+                    info!(
+                        "encap-cfg vni={} underlay-ifindex={}",
+                        cfg.vni, cfg.underlay_ifindex
+                    );
+                }
+            }
+            None => warn!("malformed encap-cfg: {line:?}"),
+        },
         Some(other) => warn!("unknown command: {other:?}"),
         None => {}
     }
+}
+
+/// Parse a MAC address `aa:bb:cc:dd:ee:ff` into 6 bytes.
+fn parse_mac(s: &str) -> Option<[u8; 6]> {
+    let mut out = [0u8; 6];
+    let mut n = 0usize;
+    for part in s.split(':') {
+        if n >= 6 {
+            return None;
+        }
+        out[n] = u8::from_str_radix(part, 16).ok()?;
+        n += 1;
+    }
+    (n == 6).then_some(out)
+}
+
+/// Parse an `encap-cfg <vni> <underlay-ifname> <root-sid> <eth-dst> <eth-src>`
+/// body (the verb already consumed) into the root `H.Encaps` config: the root
+/// SID must be IPv6; the underlay must resolve to an ifindex.
+fn parse_encap<'a>(it: &mut impl Iterator<Item = &'a str>) -> Option<EncapCfg> {
+    let vni: u32 = it.next()?.parse().ok()?;
+    let underlay_ifindex = if_nametoindex(it.next()?).ok()?;
+    let root_sid = match it.next()?.parse::<IpAddr>().ok()? {
+        IpAddr::V6(a) => a.octets(),
+        IpAddr::V4(_) => return None,
+    };
+    let dst = parse_mac(it.next()?)?;
+    let src = parse_mac(it.next()?)?;
+    let mut link_eth = [0u8; ETH_HLEN];
+    link_eth[..6].copy_from_slice(&dst);
+    link_eth[6..12].copy_from_slice(&src);
+    link_eth[12] = 0x86; // EtherType IPv6 (0x86DD)
+    link_eth[13] = 0xdd;
+    Some(EncapCfg {
+        vni,
+        underlay_ifindex,
+        root_sid,
+        link_eth,
+        _pad: [0; 2],
+    })
 }
 
 /// Parse a `leaf-add <vni> <dt2m-sid>` body (the verb already consumed) into the

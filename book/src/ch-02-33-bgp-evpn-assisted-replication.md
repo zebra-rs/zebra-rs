@@ -128,8 +128,8 @@ VXLAN flood list — BUM rides the tree, not a zero-MAC FDB row.
 The stock kernel cannot forward an SR replication tree (next section), so
 SR P2MP is programmed through a dedicated **eBPF TC/clsact** dataplane
 (`offload/tc-evpn-replicate`). The BGP **control plane is complete**
-(signalling, import, and the replication-segment computation), and **both**
-SRv6 datapath halves are **implemented and lab-validated** on veth topologies:
+(signalling, import, and the replication-segment computation), and the **whole
+SRv6 datapath is implemented and lab-validated** on veth topologies:
 
 - **`End.Replicate`** (root/bud): a clsact-ingress classifier clones each BUM
   frame once per leaf, rewriting the outer IPv6 destination to that leaf's SID —
@@ -137,10 +137,13 @@ SRv6 datapath halves are **implemented and lab-validated** on veth topologies:
 - **`End.DT2M`** (leaf): the classifier strips the outer encapsulation off a
   frame addressed to its local `End.DT2M` SID and redirects the inner Ethernet
   frame into a bridge port, so the bridge floods it to the local attachment
-  circuits — the L2 flood the kernel has no SID behavior for.
+  circuits — the L2 flood the kernel has no SID behavior for;
+- **root `H.Encaps`** (ingress PE): a clsact-egress classifier on the overlay
+  port wraps a *bare* BUM frame in the SRv6 encapsulation (outer IPv6, src = the
+  root SID) and fans it out, one copy per leaf — the header push + per-copy
+  rewrite for an L2 payload that the kernel cannot express.
 
-The remaining gaps are the root `H.Encaps`-from-bare-frame path and the
-SRH-present (non-reduced) encapsulation.
+The remaining gap is SRH-present (non-reduced) encapsulation.
 
 ## What the Linux kernel can and cannot do
 

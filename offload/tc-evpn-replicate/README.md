@@ -14,28 +14,36 @@ a different rewritten header*. The TC layer can express that with
 clone per-copy. So this is a `#[classifier]` program on `clsact`, unlike the
 sibling [`xdp-bfd-echo`](../xdp-bfd-echo) offload.
 
-Roles (all clsact-ingress, dispatched by which map the outer IPv6 DA hits):
-- **root / bud** — **implemented**: match the local Replication-SID, then for
-  each downstream leaf clone the packet and rewrite the outer DA to that leaf's
-  SID (`End.Replicate`);
-- **leaf** — **implemented**: match the local `End.DT2M` SID, strip the outer
-  encap (link Ethernet + outer IPv6), and redirect the inner frame to a bridge
-  port for native BUM flooding.
+Roles:
+- **root / bud** (clsact ingress) — **implemented**: match the local
+  Replication-SID, then for each downstream leaf clone the packet and rewrite
+  the outer DA to that leaf's SID (`End.Replicate`);
+- **leaf** (clsact ingress) — **implemented**: match the local `End.DT2M` SID,
+  strip the outer encap (link Ethernet + outer IPv6), and redirect the inner
+  frame to a bridge port for native BUM flooding;
+- **root ingress** (clsact egress on the overlay port) — **implemented**: wrap a
+  *bare* BUM frame in a reduced SRv6 encap (root `H.Encaps`) and fan it out, one
+  copy per leaf.
 
-The branch/leaf table is a BPF map the loader fills from the BGP control plane
-(`ReplSeg`, fed by `EvpnFloodState::replication_leaves`).
+The ingress classifier (`tc_evpn_replicate`) dispatches `End.Replicate` vs
+`End.DT2M` by which map the inbound outer IPv6 DA hits; the egress classifier
+(`tc_evpn_encap`) handles the bare-frame `H.Encaps`. The leaf set is a BPF map
+the loader fills from the BGP control plane (`ReplSeg`, fed by
+`EvpnFloodState::replication_leaves`).
 
 ## Status
 
-**`End.Replicate` + leaf `End.DT2M` both work.** The classifier reads four maps
-the loader fills:
+**`End.Replicate`, leaf `End.DT2M`, and root `H.Encaps` all work.** The loader
+fills these maps:
 
 - `REPL_SEG` — per-VNI replication segment (tree + leaf SIDs);
 - `REPL_LOCAL_SID` — local replication SID → VNI, for demuxing an inbound packet
   to its segment by outer IPv6 DA (derived from each segment's root SID);
 - `DT2M_SID` — local `End.DT2M` SID → VNI for the leaf role;
 - `CONFIG` — index 0 = `End.Replicate` clone egress ifindex; index 1 = the
-  bridge port a leaf floods decapped frames into.
+  bridge port a leaf floods decapped frames into;
+- `ENCAP_CFG` — root `H.Encaps` config: VNI, underlay ifindex, root SID, outer
+  MAC header (`--encap` mode).
 
 `End.Replicate`: on an inbound IPv6 frame whose DA is a known replication SID,
 decrement the outer Hop Limit (drop anything ≤ 1) and emit one clone per leaf
@@ -47,15 +55,20 @@ the skb (`bpf_skb_adjust_room` can't strip a full outer L3), trim the tail with
 `bpf_skb_change_tail`, and `bpf_redirect` it into a bridge port's ingress so the
 bridge floods it to the local ACs.
 
-Both validated end-to-end on veth pairs:
+`H.Encaps`: on a bare BUM frame egressing the overlay port, grow the buffer
+(`bpf_skb_change_tail`) and slide the frame right to open headroom, write the
+outer link Ethernet + IPv6 (Next Header = Ethernet, src = root SID), then
+`clone_redirect` one copy per leaf with the outer DA set, out the underlay.
+
+All three validated end-to-end on veth topologies:
 
 ```sh
 sudo bash offload/tc-evpn-replicate/scripts/veth-replicate-test.sh   # End.Replicate
 sudo bash offload/tc-evpn-replicate/scripts/veth-dt2m-test.sh        # leaf End.DT2M
+sudo bash offload/tc-evpn-replicate/scripts/veth-encap-test.sh       # root H.Encaps
 ```
 
-The **root H.Encaps-from-bare-frame** path and **SRH-present** decap (non-reduced
-encap) are follow-up slices.
+**SRH-present** (non-reduced) encap/decap is the remaining follow-up.
 
 ## Build / run
 
