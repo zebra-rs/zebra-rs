@@ -42,6 +42,8 @@ impl CapAfiMap {
         let mp4srp = CapMultiProtocol::new(&Afi::Ip, &Safi::SrTePolicy);
         let mp6srp = CapMultiProtocol::new(&Afi::Ip6, &Safi::SrTePolicy);
         let mp_ls = CapMultiProtocol::new(&Afi::LinkState, &Safi::LinkState);
+        let mp4mup = CapMultiProtocol::new(&Afi::Ip, &Safi::Mup);
+        let mp6mup = CapMultiProtocol::new(&Afi::Ip6, &Safi::Mup);
 
         let mut cmap = Self::default();
         cmap.entries.insert(mp4uni, SendRecv::default());
@@ -58,6 +60,8 @@ impl CapAfiMap {
         cmap.entries.insert(mp4srp, SendRecv::default());
         cmap.entries.insert(mp6srp, SendRecv::default());
         cmap.entries.insert(mp_ls, SendRecv::default());
+        cmap.entries.insert(mp4mup, SendRecv::default());
+        cmap.entries.insert(mp6mup, SendRecv::default());
         cmap
     }
 

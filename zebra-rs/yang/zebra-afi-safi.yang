@@ -88,6 +88,12 @@ module zebra-afi-safi {
         enum link-state {
           description "BGP Link-State (AFI 16388, SAFI 71, RFC 9552).";
         }
+        enum mobile-uplane {
+          description
+            "BGP Mobile User Plane (MUP), SAFI 85, RFC 9833. A single
+             config name that negotiates BOTH IPv4-MUP (AFI 1) and
+             IPv6-MUP (AFI 2).";
+        }
       }
       description
         "Address family / sub-address family this list entry configures.

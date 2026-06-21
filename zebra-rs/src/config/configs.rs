@@ -154,6 +154,11 @@ impl Args {
             "sr-policy-v4" => Some(AfiSafi::new(Afi::Ip, Safi::SrTePolicy)),
             "sr-policy-v6" => Some(AfiSafi::new(Afi::Ip6, Safi::SrTePolicy)),
             "link-state" => Some(AfiSafi::new(Afi::LinkState, Safi::LinkState)),
+            // MUP (RFC 9833) is one config name that enables both the
+            // IPv4 and IPv6 MUP families; (Ip, Mup) is the canonical
+            // tuple returned here and `mp_family_expand` fans it out to
+            // both AFIs at the `enabled` handlers.
+            "mobile-uplane" => Some(AfiSafi::new(Afi::Ip, Safi::Mup)),
             _ => None,
         }
     }
@@ -775,6 +780,14 @@ mod tests {
             args.afi_safi(),
             Some(AfiSafi::new(Afi::Ip6, Safi::Flowspec))
         );
+    }
+
+    #[test]
+    fn afi_safi_parses_mobile_uplane_as_v4_mup() {
+        // The single `mobile-uplane` name canonicalizes to (Ip, Mup);
+        // the enabled handlers fan it out to both MUP AFIs (RFC 9833).
+        let mut args = Args(["mobile-uplane".to_string()].into_iter().collect());
+        assert_eq!(args.afi_safi(), Some(AfiSafi::new(Afi::Ip, Safi::Mup)));
     }
 
     #[test]

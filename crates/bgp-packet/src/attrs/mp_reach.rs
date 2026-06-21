@@ -1251,14 +1251,18 @@ mod tests {
         vec![0u8; 8 + 4]
     }
 
-    /// Minimal T1ST body (AFI-agnostic at plen=0 and ep_len=0):
-    /// 8 RD + 1 plen=0 + 0 prefix + 4 TEID + 1 QFI + 1 ep_len=0 + 0 endpoint.
+    /// Minimal T1ST body for the IPv6 outer AFI (its only caller): RD(8),
+    /// plen=0 (no prefix), TEID(4), QFI(1), ep_len=128, endpoint(16),
+    /// src_len=0. The endpoint length must equal the AFI host width and
+    /// the source-address-length octet is mandatory (RFC 9833 §3.2.1).
     fn min_t1st_body() -> Vec<u8> {
         let mut v = vec![0u8; 8]; // RD
         v.push(0); // plen
         v.extend_from_slice(&[0; 4]); // TEID
         v.push(0); // QFI
-        v.push(0); // ep_len
+        v.push(128); // ep_len (IPv6 host width)
+        v.extend_from_slice(&[0; 16]); // endpoint
+        v.push(0); // src_len = 0 (no source)
         v
     }
 
@@ -1354,7 +1358,9 @@ mod tests {
                 id: 0,
                 arch: crate::MupArchitectureType::Gpp5g,
                 rd: crate::RouteDistinguisher::from_str("65000:2").unwrap(),
-                endpoint: "192.0.2.50/32".parse().unwrap(),
+                endpoint: "192.0.2.50".parse().unwrap(),
+                endpoint_len: 64,
+                teid: 50,
             },
         ];
         let mut buf = BytesMut::new();

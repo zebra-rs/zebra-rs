@@ -1685,6 +1685,111 @@ impl LocalRibEvpnTable {
     }
 }
 
+/// Flat Loc-RIB table for MUP (SAFI 85) routes — exact-match keyed by
+/// `MupPrefix`. The RD is part of the key, so one flat map holds every RD
+/// and `show bgp mobile-uplane` walks it grouped by route type. Mirrors
+/// `LocalRibEvpnTable`; best-path reuses the NLRI-agnostic `BgpRib`
+/// comparator.
+#[derive(Debug, Default)]
+pub struct LocalRibMupTable {
+    /// Candidate paths per prefix.
+    pub cands: BTreeMap<MupPrefix, Vec<BgpRib>>,
+    /// Selected best path per prefix.
+    pub selected: BTreeMap<MupPrefix, BgpRib>,
+}
+
+impl LocalRibMupTable {
+    pub fn update(&mut self, prefix: MupPrefix, rib: BgpRib) -> (Vec<BgpRib>, Vec<BgpRib>, u32) {
+        let cands = self.cands.entry(prefix.clone()).or_default();
+
+        let existing_local_id = cands
+            .iter()
+            .find(|r| r.ident == rib.ident && r.remote_id == rib.remote_id)
+            .map(|r| r.local_id);
+
+        let replaced: Vec<BgpRib> = cands
+            .extract_if(.., |r| r.ident == rib.ident && r.remote_id == rib.remote_id)
+            .collect();
+
+        let mut next_id = 1u32;
+        let mut new_rib = rib.clone();
+        if let Some(local_id) = existing_local_id {
+            new_rib.local_id = local_id;
+        } else {
+            let used_ids: std::collections::HashSet<u32> =
+                cands.iter().map(|r| r.local_id).collect();
+            while used_ids.contains(&next_id) {
+                next_id += 1;
+            }
+            new_rib.local_id = next_id;
+        }
+
+        next_id = new_rib.local_id;
+
+        cands.push(new_rib);
+
+        let selected = self.select_best_path(&prefix);
+
+        (replaced, selected, next_id)
+    }
+
+    pub fn remove(&mut self, prefix: &MupPrefix, id: u32, ident: usize) -> Vec<BgpRib> {
+        let cands = self.cands.entry(prefix.clone()).or_default();
+        cands
+            .extract_if(.., |r| r.ident == ident && r.remote_id == id)
+            .collect()
+    }
+
+    pub fn select_best_path(&mut self, prefix: &MupPrefix) -> Vec<BgpRib> {
+        let mut selected = Vec::new();
+
+        if !self.cands.contains_key(prefix) {
+            self.selected.remove(prefix);
+            return selected;
+        }
+
+        let is_empty = self
+            .cands
+            .get(prefix)
+            .map(|cands| cands.is_empty())
+            .unwrap_or(true);
+
+        if is_empty {
+            self.cands.remove(prefix);
+            self.selected.remove(prefix);
+            return selected;
+        }
+
+        let best = {
+            let cands = self.cands.get_mut(prefix).expect("prefix checked above");
+
+            let mut best_index = 0usize;
+            let mut best_reason = Reason::Default;
+            for index in 1..cands.len() {
+                let (better, reason) =
+                    LocalRibTable::<Ipv4Net>::is_better(&cands[index], &cands[best_index]);
+                if better {
+                    best_index = index;
+                }
+                best_reason = reason;
+            }
+
+            for rib in cands.iter_mut() {
+                rib.best_path = false;
+                rib.best_reason = Reason::NotSelected;
+            }
+            cands[best_index].best_path = true;
+            cands[best_index].best_reason = best_reason;
+            cands[best_index].clone()
+        };
+
+        self.selected.insert(prefix.clone(), best.clone());
+        selected.push(best);
+
+        selected
+    }
+}
+
 /// Loc-RIB table for Flow Specification routes — candidate paths and the
 /// selected best path per `FlowspecNlri`, exact-match (overlapping flow
 /// specs coexist, so no prefix trie). Mirrors `LocalRibEvpnTable`;
@@ -2399,6 +2504,9 @@ pub struct LocalRib {
     /// Per-RD EVPN Loc-RIB tables.
     pub evpn: BTreeMap<RouteDistinguisher, LocalRibEvpnTable>,
 
+    /// Flat MUP (SAFI 85, RFC 9833) Loc-RIB table.
+    pub mup: LocalRibMupTable,
+
     /// IPv4 / IPv6 Flow Specification Loc-RIB (SAFI 133).
     pub flowspec_v4: LocalRibFlowspecTable,
     pub flowspec_v6: LocalRibFlowspecTable,
@@ -2460,6 +2568,24 @@ impl LocalRib {
         prefix: &EvpnPrefix,
     ) -> Vec<BgpRib> {
         self.evpn.entry(*rd).or_default().select_best_path(prefix)
+    }
+
+    // MUP dispatch -----------------------------------------------------------
+
+    pub fn update_mup(
+        &mut self,
+        prefix: MupPrefix,
+        rib: BgpRib,
+    ) -> (Vec<BgpRib>, Vec<BgpRib>, u32) {
+        self.mup.update(prefix, rib)
+    }
+
+    pub fn remove_mup(&mut self, prefix: &MupPrefix, id: u32, ident: usize) -> Vec<BgpRib> {
+        self.mup.remove(prefix, id, ident)
+    }
+
+    pub fn select_best_path_mup(&mut self, prefix: &MupPrefix) -> Vec<BgpRib> {
+        self.mup.select_best_path(prefix)
     }
 
     // Flow Specification dispatch --------------------------------------------
@@ -7039,6 +7165,289 @@ pub fn route_evpn_withdraw(ident: usize, route: &EvpnRoute, bgp: &mut BgpTop, pe
     }
 }
 
+/// Store one received MUP NLRI (RFC 9833, SAFI 85) in the peer's
+/// Adj-RIB-In and the MUP Loc-RIB, then re-run best-path.
+///
+/// Phase 2 is receive + show only: there is no inbound route-policy, no
+/// VRF import, no re-advertise, and no FIB install yet (those land in
+/// P3/P4/P6). The caller stamps the MP_REACH next-hop into `attr` so
+/// `show bgp mobile-uplane` can render it. Loop detection mirrors
+/// `route_evpn_update` — a route carrying our own AS / ORIGINATOR_ID /
+/// CLUSTER_LIST is dropped silently.
+pub fn route_mup_update(
+    ident: usize,
+    route: &MupRoute,
+    attr: &BgpAttr,
+    bgp: &mut BgpTop,
+    peers: &mut PeerMap,
+    stale: bool,
+) {
+    let prefix = MupPrefix::from_route(route);
+    let id = route.add_path_id();
+
+    let (peer_ident, peer_router_id, typ) = {
+        let peer = peers.get_mut_by_idx(ident).expect("peer must exist");
+
+        if let Some(ref aspath) = attr.aspath
+            && aspath_own_as_loop(peer, aspath)
+        {
+            return;
+        }
+        if aspath_enforce_first_as_violation(peer, attr.aspath.as_ref()) {
+            return;
+        }
+        if let Some(ref originator_id) = attr.originator_id
+            && originator_id.id == *bgp.router_id
+        {
+            return;
+        }
+        if let Some(ref cluster_list) = attr.cluster_list
+            && cluster_list.list.contains(bgp.router_id)
+        {
+            return;
+        }
+
+        let typ = if peer.is_ibgp() {
+            BgpRibType::IBGP
+        } else {
+            BgpRibType::EBGP
+        };
+        (peer.ident, peer.remote_id, typ)
+    };
+
+    let stale = stale || attr_has_llgr_stale(attr);
+    let mut rib = BgpRib::new(
+        peer_ident,
+        peer_router_id,
+        typ,
+        id,
+        0,    // weight
+        attr, // next-hop is carried inside attr for show
+        None, // label
+        None, // nexthop (VpnNexthop) — not used by MUP at this layer
+        stale,
+    );
+
+    {
+        let peer = peers.get_mut_by_idx(ident).expect("peer must exist");
+        peer.adj_in.add_mup(prefix.clone(), rib.clone());
+    }
+
+    rib.attr = bgp.attr_store.intern(attr.clone());
+    let _ = bgp.local_rib.update_mup(prefix.clone(), rib);
+    let selected = bgp.local_rib.select_best_path_mup(&prefix);
+    if !selected.is_empty() {
+        route_advertise_mup_to_peers(prefix, &selected, bgp, peers);
+    }
+}
+
+/// Withdraw one MUP route advertised in an MP_UNREACH_NLRI from
+/// Adj-RIB-In and the Loc-RIB, then re-run best-path.
+pub fn route_mup_withdraw(ident: usize, route: &MupRoute, bgp: &mut BgpTop, peers: &mut PeerMap) {
+    let prefix = MupPrefix::from_route(route);
+    let id = route.add_path_id();
+    {
+        let peer = peers.get_mut_by_idx(ident).expect("peer must exist");
+        peer.adj_in.remove_mup(&prefix, id);
+    }
+    let _ = bgp.local_rib.remove_mup(&prefix, id, ident);
+    let selected = bgp.local_rib.select_best_path_mup(&prefix);
+    if selected.is_empty() {
+        route_withdraw_mup_to_peers(prefix, peers);
+    } else {
+        // Another path remains best for this key — re-advertise it.
+        route_advertise_mup_to_peers(prefix, &selected, bgp, peers);
+    }
+}
+
+/// Extract the forwarding `IpAddr` from a stored BGP next-hop. MUP
+/// next-hops are stamped as `Ipv4`/`Ipv6` (the MP_REACH address);
+/// `Evpn` is accepted defensively, the VPN forms never occur here.
+fn bgp_nexthop_ip(nh: &BgpNexthop) -> Option<IpAddr> {
+    match nh {
+        BgpNexthop::Ipv4(a) => Some(IpAddr::V4(*a)),
+        BgpNexthop::Ipv6(a) => Some(IpAddr::V6(*a)),
+        BgpNexthop::Evpn(a) => Some(*a),
+        _ => None,
+    }
+}
+
+/// Build the (route, egress attrs, MP_REACH next-hop) to advertise one
+/// selected MUP path to `peer`, or `None` to suppress it. Mirrors
+/// `route_update_evpn`: split-horizon (never back to the source peer),
+/// iBGP-to-iBGP suppression unless the peer is a route-reflector client,
+/// RFC 1997 NO_ADVERTISE/NO_EXPORT, eBGP AS_PATH prepend + next-hop-self,
+/// iBGP default LOCAL_PREF, and stripping iBGP-only attrs on eBGP. The
+/// next-hop rides in MP_REACH (RFC 9833), so the path-attr NEXT_HOP is
+/// cleared.
+fn route_update_mup(
+    peer: &mut Peer,
+    prefix: &MupPrefix,
+    rib: &BgpRib,
+    bgp: &BgpTop,
+) -> Option<(MupRoute, BgpAttr, IpAddr)> {
+    if rib.ident == peer.ident {
+        return None;
+    }
+    if peer.peer_type == PeerType::IBGP
+        && rib.typ == BgpRibType::IBGP
+        && !peer.is_reflector_client()
+    {
+        return None;
+    }
+    if community_suppresses_advertisement(&rib.attr, peer.peer_type) {
+        return None;
+    }
+
+    let route = prefix.to_route();
+    let mut attrs = (*rib.attr).clone();
+    ebgp_egress_aspath(&peer.egress_as(), &mut attrs);
+
+    // MP_REACH next-hop: next-hop-self toward eBGP and for our own
+    // originations; otherwise preserve the received next-hop (RFC 9833 —
+    // the PE/controller address the ingress PE resolves).
+    let nhop: IpAddr = if peer.is_ebgp() || rib.is_originated() {
+        if let Some(ref local_addr) = peer.param.local_addr {
+            local_addr.ip()
+        } else {
+            IpAddr::V4(*bgp.router_id)
+        }
+    } else {
+        bgp_nexthop_ip(attrs.nexthop.as_ref()?)?
+    };
+
+    if peer.is_ibgp() && attrs.local_pref.is_none() {
+        attrs.local_pref = Some(LocalPref::default());
+    }
+    if peer.is_ebgp() {
+        strip_ibgp_only_attrs(&mut attrs);
+    }
+    // The next-hop rides in MP_REACH, not the legacy NEXT_HOP path attr.
+    attrs.nexthop = None;
+
+    Some((route, attrs, nhop))
+}
+
+/// Emit one MUP route to a peer as a single-NLRI MP_REACH UPDATE.
+fn mup_send_one(peer: &mut Peer, afi: Afi, route: MupRoute, attr: &Arc<BgpAttr>, nhop: IpAddr) {
+    let mut update = UpdatePacket::with_max_packet_size(peer.max_packet_size());
+    update.mp_update = Some(MpReachAttr::Mup {
+        afi,
+        snpa: 0,
+        nhop,
+        updates: vec![route],
+    });
+    update.bgp_attr = Some(attr.as_ref().clone());
+    peer.send_packet(update.into());
+}
+
+/// Advertise one selected MUP path to a single peer: apply egress
+/// transforms, record the Adj-RIB-Out entry, and emit the UPDATE.
+fn mup_advertise_one(peer: &mut Peer, prefix: &MupPrefix, rib: &BgpRib, bgp: &mut BgpTop) -> bool {
+    // RFC 9494 §4.3: stale routes only go to LLGR peers.
+    if llgr_blocks_advertisement(rib.stale, &peer.cap_recv, prefix.afi(), Safi::Mup) {
+        return false;
+    }
+    let Some((route, attrs, nhop)) = route_update_mup(peer, prefix, rib, bgp) else {
+        return false;
+    };
+    // No per-AFI MUP outbound route-policy binding exists yet, so the
+    // egress passes through unfiltered (parity with EVPN when no Output
+    // policy is configured).
+    let attr = bgp.attr_store.intern(attrs);
+    let mut adj = rib.clone();
+    adj.attr = attr.clone();
+    peer.adj_out.add_mup(prefix.clone(), adj);
+    mup_send_one(peer, prefix.afi(), route, &attr, nhop);
+    true
+}
+
+/// Fan out a MUP selection to every Established peer that negotiated the
+/// route's `(afi, Mup)` family. MUP AddPath TX is not implemented, so
+/// only the best path is sent (plain members). Pairs with
+/// [`route_withdraw_mup_to_peers`].
+pub fn route_advertise_mup_to_peers(
+    prefix: MupPrefix,
+    selected: &[BgpRib],
+    bgp: &mut BgpTop,
+    peers: &mut PeerMap,
+) {
+    let Some(new_best) = selected.last() else {
+        return;
+    };
+    let afi = prefix.afi();
+    for ident in peers.established_plain_idents(afi, Safi::Mup) {
+        let peer = peers.get_mut_by_idx(ident).expect("peer exists");
+        mup_advertise_one(peer, &prefix, new_best, bgp);
+    }
+}
+
+/// Send one id-less MUP MP_UNREACH to a peer and drop the Adj-RIB-Out
+/// entry so a later policy diff doesn't re-withdraw it.
+fn mup_withdraw_one(peer: &mut Peer, prefix: &MupPrefix) {
+    peer.adj_out.remove_mup(prefix, 0);
+    let mut update = UpdatePacket::with_max_packet_size(peer.max_packet_size());
+    update.mp_withdraw = Some(MpUnreachAttr::Mup {
+        afi: prefix.afi(),
+        withdraws: vec![prefix.to_route()],
+    });
+    peer.send_packet(update.into());
+}
+
+/// Withdraw a MUP prefix from every Established `(afi, Mup)` peer. The
+/// id-less MP_UNREACH clears the whole prefix; a peer that never held it
+/// ignores the withdraw.
+pub fn route_withdraw_mup_to_peers(prefix: MupPrefix, peers: &mut PeerMap) {
+    let afi = prefix.afi();
+    for ident in peers.established_plain_idents(afi, Safi::Mup) {
+        let peer = peers.get_mut_by_idx(ident).expect("peer exists");
+        mup_withdraw_one(peer, &prefix);
+    }
+}
+
+/// Replay every selected MUP route from the Loc-RIB to a peer that just
+/// reached Established, for whichever MUP AFI(s) it negotiated, then send
+/// the MUP End-of-RIB per negotiated AFI. Without this a route learned
+/// before the peer came up would never be sent. Called from `route_sync`
+/// only when the peer negotiated `(Ip, Mup)` or `(Ip6, Mup)`.
+pub fn route_sync_mup(peer: &mut Peer, bgp: &mut BgpTop) {
+    let snapshot: Vec<(MupPrefix, BgpRib)> = bgp
+        .local_rib
+        .mup
+        .selected
+        .iter()
+        .map(|(prefix, rib)| (prefix.clone(), rib.clone()))
+        .collect();
+    for (prefix, rib) in snapshot {
+        let afi = prefix.afi();
+        if !peer.is_afi_safi(afi, Safi::Mup) {
+            continue;
+        }
+        if llgr_blocks_advertisement(rib.stale, &peer.cap_recv, afi, Safi::Mup) {
+            continue;
+        }
+        let Some((route, attrs, nhop)) = route_update_mup(peer, &prefix, &rib, bgp) else {
+            continue;
+        };
+        let attr = bgp.attr_store.intern(attrs);
+        let mut adj = rib.clone();
+        adj.attr = attr.clone();
+        peer.adj_out.add_mup(prefix.clone(), adj);
+        mup_send_one(peer, afi, route, &attr, nhop);
+    }
+    // RFC 4724 / RFC 7606 §3 EoR: empty MP_UNREACH per negotiated MUP AFI.
+    for afi in [Afi::Ip, Afi::Ip6] {
+        if peer.is_afi_safi(afi, Safi::Mup) {
+            let mut update = UpdatePacket::with_max_packet_size(peer.max_packet_size());
+            update.mp_withdraw = Some(MpUnreachAttr::Mup {
+                afi,
+                withdraws: vec![],
+            });
+            peer.send_packet(update.into());
+        }
+    }
+}
+
 /// Store one received Flow Specification NLRI in the peer's Adj-RIB-In.
 ///
 /// Phase 1 (receive/reflect) is control-plane only: the flow spec is
@@ -8064,6 +8473,24 @@ pub fn route_from_peer(
                         route_evpn_update(peer_id, route, nhop, bgp_attr, bgp, peers, false);
                     }
                 }
+                MpReachAttr::Mup {
+                    afi: _,
+                    snpa: _,
+                    nhop,
+                    updates,
+                } => {
+                    // MUP carries its next-hop in MP_REACH (no usable
+                    // NEXT_HOP attr). Stamp it into the path attr so the
+                    // Loc-RIB and `show bgp mobile-uplane` render it.
+                    let mut attr_mup = bgp_attr.clone();
+                    attr_mup.nexthop = Some(match nhop {
+                        IpAddr::V4(a) => BgpNexthop::Ipv4(a),
+                        IpAddr::V6(a) => BgpNexthop::Ipv6(a),
+                    });
+                    for route in updates.iter() {
+                        route_mup_update(peer_id, route, &attr_mup, bgp, peers, false);
+                    }
+                }
                 MpReachAttr::Ipv4 {
                     snpa: _,
                     nhop,
@@ -8189,9 +8616,6 @@ pub fn route_from_peer(
                         route_labelv6_update(peer_id, update, nhop, bgp_attr, bgp, peers, false);
                     }
                 }
-                _ => {
-                    //
-                }
             }
         }
     }
@@ -8238,6 +8662,13 @@ pub fn route_from_peer(
                 let _ = bgp
                     .tx
                     .send(Message::Event(peer_id, Event::StaleTimerExipires(afi_safi)));
+            }
+            MpUnreachAttr::Mup { afi: _, withdraws } => {
+                // An empty `withdraws` list is the MUP End-of-RIB marker
+                // (no separate Eor variant); the loop is then a no-op.
+                for route in withdraws.iter() {
+                    route_mup_withdraw(peer_id, route, bgp, peers);
+                }
             }
             MpUnreachAttr::Ipv6Nlri(withdrawals) => {
                 for withdraw in withdrawals.iter() {
@@ -8842,6 +9273,27 @@ pub fn route_clean(
         let peer = peers.get_mut_by_idx(peer_id).expect("peer must exist");
         peer.adj_in.evpn.clear();
     }
+
+    // MUP (RFC 9833). Phase 2 is receive-only with no LLGR retention, so
+    // peer-down simply drops every MUP route the peer gave us from the
+    // Loc-RIB and clears its Adj-RIB-In. (LLGR stale retention for MUP is
+    // a later phase, mirroring the EVPN/VPN two-branch logic above.)
+    let mup_keys: Vec<(MupPrefix, u32)> = {
+        let peer = peers.get_mut_by_idx(peer_id).expect("peer must exist");
+        let mut out = Vec::new();
+        for (prefix, ribs) in peer.adj_in.mup.0.iter() {
+            for rib in ribs.iter() {
+                out.push((prefix.clone(), rib.remote_id));
+            }
+        }
+        out
+    };
+    for (prefix, id) in mup_keys.iter() {
+        let _ = bgp.local_rib.remove_mup(prefix, *id, peer_id);
+        let _ = bgp.local_rib.select_best_path_mup(prefix);
+    }
+    let peer = peers.get_mut_by_idx(peer_id).expect("peer must exist");
+    peer.adj_in.mup.0.clear();
 
     let peer = peers.get_mut_by_idx(peer_id).expect("peer must exist");
     peer.adj_out.evpn.clear();
@@ -11682,6 +12134,12 @@ pub fn route_sync(peer: &mut Peer, bgp: &mut BgpTop, v4_via_pool: bool) {
     }
     if peer.is_afi_safi(Afi::L2vpn, Safi::Evpn) {
         route_sync_evpn(peer, bgp);
+    }
+    // SAFI 85 (RFC 9833): dump the MUP Loc-RIB. Like EVPN/label, MUP is
+    // advertised event-driven, so a route learned before this peer came
+    // up would otherwise never be sent.
+    if peer.is_afi_safi(Afi::Ip, Safi::Mup) || peer.is_afi_safi(Afi::Ip6, Safi::Mup) {
+        route_sync_mup(peer, bgp);
     }
     // SAFI 4 (RFC 3107 / 8277): dump the Labeled-Unicast Loc-RIBs. Needed
     // because label-v4/v6 are advertised event-driven only — a route that

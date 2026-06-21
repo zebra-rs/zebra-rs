@@ -136,6 +136,57 @@ impl<D: RibDirection> Default for AdjRibEvpnTable<D> {
     }
 }
 
+/// Flat Adj-RIB table for MUP (SAFI 85) routes, keyed on `MupPrefix`
+/// (exact match; the RD is part of the key). Mirrors `AdjRibEvpnTable<D>`;
+/// the `D` marker selects the path-id field for AddPath disambiguation.
+#[derive(Debug)]
+pub struct AdjRibMupTable<D: RibDirection>(pub BTreeMap<MupPrefix, Vec<BgpRib>>, PhantomData<D>);
+
+impl<D: RibDirection> AdjRibMupTable<D> {
+    pub fn new() -> Self {
+        Self(BTreeMap::new(), PhantomData)
+    }
+
+    pub fn add(&mut self, prefix: MupPrefix, route: BgpRib) -> Option<BgpRib> {
+        let candidates = self.0.entry(prefix).or_default();
+
+        let route_id = D::get_id(&route);
+        if let Some(pos) = candidates.iter().position(|r| D::get_id(r) == route_id) {
+            let old_route = candidates[pos].clone();
+            candidates[pos] = route;
+            Some(old_route)
+        } else {
+            candidates.push(route);
+            None
+        }
+    }
+
+    pub fn remove(&mut self, prefix: &MupPrefix, id: u32) -> Option<BgpRib> {
+        let candidates = self.0.get_mut(prefix)?;
+
+        if let Some(pos) = candidates.iter().position(|r| D::get_id(r) == id) {
+            let removed_route = candidates.remove(pos);
+
+            if candidates.is_empty() {
+                self.0.remove(prefix);
+            }
+
+            Some(removed_route)
+        } else if id == 0 {
+            self.0.remove(prefix);
+            None
+        } else {
+            None
+        }
+    }
+}
+
+impl<D: RibDirection> Default for AdjRibMupTable<D> {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 /// Adj-RIB-In/Out table for Flow Specification routes, keyed on
 /// `FlowspecNlri` (exact match — overlapping flow specs coexist, so no
 /// prefix trie). Mirrors `AdjRibEvpnTable<D>`; the `D` marker selects
@@ -261,6 +312,8 @@ pub struct AdjRib<D: RibDirection> {
     pub v6vpn: BTreeMap<RouteDistinguisher, AdjRibTable<D, Ipv6Net>>,
     // EVPN, per Route Distinguisher
     pub evpn: BTreeMap<RouteDistinguisher, AdjRibEvpnTable<D>>,
+    // MUP (SAFI 85), flat by MupPrefix
+    pub mup: AdjRibMupTable<D>,
     // IPv4 Flow Specification (AFI 1, SAFI 133)
     pub flowspec_v4: AdjRibFlowspecTable<D>,
     // IPv6 Flow Specification (AFI 2, SAFI 133)
@@ -279,6 +332,7 @@ impl<D: RibDirection> AdjRib<D> {
             v4vpn: BTreeMap::new(),
             v6vpn: BTreeMap::new(),
             evpn: BTreeMap::new(),
+            mup: AdjRibMupTable::new(),
             flowspec_v4: AdjRibFlowspecTable::new(),
             flowspec_v6: AdjRibFlowspecTable::new(),
             bgp_ls: AdjRibBgpLsTable::new(),
@@ -413,6 +467,8 @@ impl ShardAdjIn {
 pub struct MainAdjIn {
     // EVPN, per Route Distinguisher
     pub evpn: BTreeMap<RouteDistinguisher, AdjRibEvpnTable<In>>,
+    // MUP (SAFI 85), flat by MupPrefix
+    pub mup: AdjRibMupTable<In>,
     // IPv4 Flow Specification (AFI 1, SAFI 133)
     pub flowspec_v4: AdjRibFlowspecTable<In>,
     // IPv6 Flow Specification (AFI 2, SAFI 133)
@@ -446,6 +502,16 @@ impl MainAdjIn {
         self.evpn.entry(rd).or_default().remove(prefix, id)
     }
 
+    // MUP add/remove ---------------------------------------------------------
+
+    pub fn add_mup(&mut self, prefix: MupPrefix, route: BgpRib) -> Option<BgpRib> {
+        self.mup.add(prefix, route)
+    }
+
+    pub fn remove_mup(&mut self, prefix: &MupPrefix, id: u32) -> Option<BgpRib> {
+        self.mup.remove(prefix, id)
+    }
+
     // Flow Specification add/remove ------------------------------------------
 
     pub fn add_flowspec(&mut self, afi: Afi, nlri: FlowspecNlri, route: BgpRib) -> Option<BgpRib> {
@@ -477,6 +543,9 @@ impl MainAdjIn {
     pub fn count(&self, afi: Afi, safi: Safi) -> usize {
         match (afi, safi) {
             (Afi::L2vpn, Safi::Evpn) => self.evpn.values().map(|table| table.0.len()).sum(),
+            // Flat MUP table; counted under IPv4-MUP to avoid double-count
+            // in a combined v4+v6 summary.
+            (Afi::Ip, Safi::Mup) => self.mup.0.len(),
             (Afi::Ip, Safi::Flowspec) => self.flowspec_v4.0.len(),
             (Afi::Ip6, Safi::Flowspec) => self.flowspec_v6.0.len(),
             (Afi::LinkState, Safi::LinkState) => self.bgp_ls.0.len(),
@@ -521,6 +590,8 @@ impl AdjRib<Out> {
             (Afi::Ip, Safi::MplsVpn) => self.v4vpn.values().map(|table| table.0.len()).sum(),
             (Afi::Ip6, Safi::MplsVpn) => self.v6vpn.values().map(|table| table.0.len()).sum(),
             (Afi::L2vpn, Safi::Evpn) => self.evpn.values().map(|table| table.0.len()).sum(),
+            // Flat MUP table; counted under IPv4-MUP to avoid double-count.
+            (Afi::Ip, Safi::Mup) => self.mup.0.len(),
             (Afi::Ip, Safi::Flowspec) => self.flowspec_v4.0.len(),
             (Afi::Ip6, Safi::Flowspec) => self.flowspec_v6.0.len(),
             (Afi::LinkState, Safi::LinkState) => self.bgp_ls.0.len(),
@@ -552,6 +623,14 @@ impl AdjRib<Out> {
         id: u32,
     ) -> Option<BgpRib> {
         self.evpn.entry(rd).or_default().remove(prefix, id)
+    }
+
+    pub fn add_mup(&mut self, prefix: MupPrefix, route: BgpRib) -> Option<BgpRib> {
+        self.mup.add(prefix, route)
+    }
+
+    pub fn remove_mup(&mut self, prefix: &MupPrefix, id: u32) -> Option<BgpRib> {
+        self.mup.remove(prefix, id)
     }
 
     pub fn add_flowspec(&mut self, afi: Afi, nlri: FlowspecNlri, route: BgpRib) -> Option<BgpRib> {

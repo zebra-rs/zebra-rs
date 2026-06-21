@@ -122,6 +122,38 @@ impl<N: Ord> Default for BgpVrfAfConfig<N> {
     }
 }
 
+/// SRv6 mobile user-plane direction for a per-VRF MUP service
+/// (zebra-bgp-vrf.yang `mobile-uplane srv6-mobile`). `Decapsulation`
+/// is the egress/uplink (Type-2 ST, the N3 VRF); `Encapsulation` is
+/// the ingress/downlink (Type-1 ST, the N6 VRF).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MupSrv6Direction {
+    Decapsulation,
+    Encapsulation,
+}
+
+/// `mobile-uplane srv6-mobile {decapsulation|encapsulation}
+/// network-instance exact <ni>` for one VRF: the direction plus the
+/// session network-instance matched exactly. Surfaced in
+/// `show bgp mobile-uplane` (the `MUP VRFs:` block) and consumed by the
+/// P5 MUP controller when it originates ST routes (decapsulation →
+/// Type-2 ST, the N3 VRF; encapsulation → Type-1 ST, the N6 VRF).
+#[derive(Debug, Clone)]
+pub struct MupSrv6Mobile {
+    pub direction: MupSrv6Direction,
+    pub network_instance: Option<String>,
+}
+
+/// Per-VRF BGP MUP (RFC 9833) service config — the `mobile-uplane`
+/// container in zebra-bgp-vrf.yang. The route-targets tag the ST
+/// routes the controller originates from this VRF (RT shares the RD
+/// wire format, so it is stored as a `RouteDistinguisher`).
+#[derive(Default, Debug, Clone)]
+pub struct BgpVrfMobileUplane {
+    pub route_target_export: BTreeSet<RouteDistinguisher>,
+    pub srv6_mobile: Option<MupSrv6Mobile>,
+}
+
 /// Staged candidate configuration for one VRF entry. Mirrors the
 /// `list vrf` body in zebra-bgp-vrf.yang.
 #[derive(Default, Debug, Clone)]
@@ -145,6 +177,9 @@ pub struct BgpVrfConfig {
     /// its own PEs over a single MP-eBGP VPNv4 session while still
     /// forwarding per-VRF. Default `false` (ordinary L3VPN VRF).
     pub inter_as_hybrid: bool,
+    /// Per-VRF BGP MUP (RFC 9833) service config. Mirrors the
+    /// `mobile-uplane` container in zebra-bgp-vrf.yang.
+    pub mobile_uplane: BgpVrfMobileUplane,
 }
 
 /// Borrow-or-create the per-VRF entry on `Bgp::vrfs`. Used by every
@@ -235,6 +270,80 @@ pub fn config_vrf_inter_as_hybrid(bgp: &mut Bgp, mut args: Args, op: ConfigOp) -
     match op {
         ConfigOp::Set => cfg.inter_as_hybrid = args.boolean()?,
         ConfigOp::Delete => cfg.inter_as_hybrid = false,
+        _ => {}
+    }
+    Some(())
+}
+
+/// `set router bgp vrf <NAME> mobile-uplane route-target export <RT>...`
+/// — the route-targets attached to MUP ST routes originated from this
+/// VRF. A leaf-list arrives as one callback call with every value in
+/// the args deque, so the handler loops (project convention).
+pub fn config_vrf_mup_rt_export(bgp: &mut Bgp, mut args: Args, op: ConfigOp) -> Option<()> {
+    let name = args.string()?;
+    let cfg = vrf_entry(bgp, name);
+    match op {
+        ConfigOp::Set => {
+            while let Some(s) = args.string() {
+                if let Ok(rt) = RouteDistinguisher::from_str(&s) {
+                    cfg.mobile_uplane.route_target_export.insert(rt);
+                }
+            }
+        }
+        ConfigOp::Delete => {
+            let mut removed_any = false;
+            while let Some(s) = args.string() {
+                if let Ok(rt) = RouteDistinguisher::from_str(&s) {
+                    cfg.mobile_uplane.route_target_export.remove(&rt);
+                    removed_any = true;
+                }
+            }
+            // A bare `delete ... route-target export` with no value
+            // clears the whole leaf-list.
+            if !removed_any {
+                cfg.mobile_uplane.route_target_export.clear();
+            }
+        }
+        _ => {}
+    }
+    Some(())
+}
+
+/// `set router bgp vrf <NAME> mobile-uplane srv6-mobile decapsulation
+/// network-instance exact <NI>` — egress GTP decapsulation for the
+/// uplink Type-2 ST service (the N3 VRF).
+pub fn config_vrf_mup_srv6_decap(bgp: &mut Bgp, mut args: Args, op: ConfigOp) -> Option<()> {
+    let name = args.string()?;
+    let cfg = vrf_entry(bgp, name);
+    match op {
+        ConfigOp::Set => {
+            let ni = args.string()?;
+            cfg.mobile_uplane.srv6_mobile = Some(MupSrv6Mobile {
+                direction: MupSrv6Direction::Decapsulation,
+                network_instance: Some(ni),
+            });
+        }
+        ConfigOp::Delete => cfg.mobile_uplane.srv6_mobile = None,
+        _ => {}
+    }
+    Some(())
+}
+
+/// `set router bgp vrf <NAME> mobile-uplane srv6-mobile encapsulation
+/// network-instance exact <NI>` — ingress GTP encapsulation for the
+/// downlink Type-1 ST service (the N6 VRF).
+pub fn config_vrf_mup_srv6_encap(bgp: &mut Bgp, mut args: Args, op: ConfigOp) -> Option<()> {
+    let name = args.string()?;
+    let cfg = vrf_entry(bgp, name);
+    match op {
+        ConfigOp::Set => {
+            let ni = args.string()?;
+            cfg.mobile_uplane.srv6_mobile = Some(MupSrv6Mobile {
+                direction: MupSrv6Direction::Encapsulation,
+                network_instance: Some(ni),
+            });
+        }
+        ConfigOp::Delete => cfg.mobile_uplane.srv6_mobile = None,
         _ => {}
     }
     Some(())
@@ -551,6 +660,50 @@ mod tests {
             BgpVrfConfig::default().encapsulation,
             BgpVrfEncapsulation::Mpls
         );
+    }
+
+    #[test]
+    fn mobile_uplane_default_is_empty() {
+        let mup = BgpVrfConfig::default().mobile_uplane;
+        assert!(mup.route_target_export.is_empty());
+        assert!(mup.srv6_mobile.is_none());
+    }
+
+    #[test]
+    fn mobile_uplane_rt_export_insert_and_clear() {
+        let mut cfg = BgpVrfConfig::default();
+        let rt1 = RouteDistinguisher::from_str("65000:100").unwrap();
+        let rt2 = RouteDistinguisher::from_str("65000:200").unwrap();
+        cfg.mobile_uplane.route_target_export.insert(rt1);
+        cfg.mobile_uplane.route_target_export.insert(rt2);
+        assert_eq!(cfg.mobile_uplane.route_target_export.len(), 2);
+        assert!(cfg.mobile_uplane.route_target_export.contains(&rt1));
+        cfg.mobile_uplane.route_target_export.clear();
+        assert!(cfg.mobile_uplane.route_target_export.is_empty());
+    }
+
+    #[test]
+    fn mobile_uplane_srv6_decap_and_encap() {
+        let mut cfg = BgpVrfConfig::default();
+        cfg.mobile_uplane.srv6_mobile = Some(MupSrv6Mobile {
+            direction: MupSrv6Direction::Decapsulation,
+            network_instance: Some("core-ni".to_string()),
+        });
+        let sm = cfg.mobile_uplane.srv6_mobile.as_ref().unwrap();
+        assert_eq!(sm.direction, MupSrv6Direction::Decapsulation);
+        assert_eq!(sm.network_instance.as_deref(), Some("core-ni"));
+
+        cfg.mobile_uplane.srv6_mobile = Some(MupSrv6Mobile {
+            direction: MupSrv6Direction::Encapsulation,
+            network_instance: Some("access-ni".to_string()),
+        });
+        assert_eq!(
+            cfg.mobile_uplane.srv6_mobile.as_ref().unwrap().direction,
+            MupSrv6Direction::Encapsulation
+        );
+
+        cfg.mobile_uplane.srv6_mobile = None;
+        assert!(cfg.mobile_uplane.srv6_mobile.is_none());
     }
 
     #[test]

@@ -140,11 +140,12 @@ pub enum MupRoute {
     ///
     /// Wire body: 8-octet RD + 1-octet prefix length (bits) + prefix
     /// bytes + 4-octet TEID + 1-octet QFI + 1-octet endpoint address
-    /// length (bits) + endpoint address bytes. Both prefix and
-    /// endpoint follow the outer AFI's address family. The optional
-    /// Source Address suffix from earlier draft revisions is not
-    /// emitted here; trailing bytes inside the NLRI length window
-    /// would surface as a parse failure.
+    /// length (bits, 32 or 128) + endpoint address bytes + 1-octet
+    /// source address length (bits, 0/32/128) + optional source
+    /// address bytes. The source-address-length octet is always
+    /// present on the wire (zero when no source is carried), matching
+    /// GoBGP and RFC 9833 §3.2.1. Prefix, endpoint, and source all
+    /// follow the outer AFI's address family.
     T1st {
         id: u32,
         arch: MupArchitectureType,
@@ -153,20 +154,27 @@ pub enum MupRoute {
         teid: u32,
         qfi: u8,
         endpoint: IpAddr,
+        /// Optional GTP source address (§3.2.1). `None` encodes a
+        /// source-address-length of 0 on the wire.
+        source: Option<IpAddr>,
     },
     /// Type 2 Session Transformed Route (RFC 9833 §3.2.2).
     ///
-    /// Wire body: 8-octet RD + 1-octet endpoint address length in
-    /// bits + endpoint address bytes (ceil(len/8) octets). The TEID
-    /// is encoded in the lower bits of the endpoint address per
-    /// §3.2.2; this layer surfaces the address + bit-length pair as
-    /// an `IpNet`, leaving any TEID-bits extraction to upper layers.
-    /// The outer AFI selects the address family.
+    /// Wire body: 8-octet RD + 1-octet endpoint address length (bits,
+    /// up to 64 for IPv4 / 160 for IPv6) + full-width endpoint address
+    /// (4 or 16 octets, selected by the outer AFI) + TEID bytes. The
+    /// endpoint-address-length covers both the address and the trailing
+    /// TEID bits, so the TEID occupies ceil((len - addr_bits)/8) octets
+    /// stored high-aligned in a 32-bit value (GoBGP-compatible).
     T2st {
         id: u32,
         arch: MupArchitectureType,
         rd: RouteDistinguisher,
-        endpoint: IpNet,
+        endpoint: IpAddr,
+        /// Endpoint Address Length in bits (address bits + TEID bits).
+        endpoint_len: u8,
+        /// GTP TEID, high-aligned into 32 bits per §3.2.2.
+        teid: u32,
     },
     Unknown {
         id: u32,
@@ -219,15 +227,40 @@ impl MupRoute {
                 }
             }
             MupRoute::T1st {
-                prefix, endpoint, ..
+                prefix,
+                endpoint,
+                source,
+                ..
             } => {
                 let ep_bits = match endpoint {
                     IpAddr::V4(_) => 32u8,
                     IpAddr::V6(_) => 128u8,
                 };
-                8 + 1 + nlri_psize(prefix.prefix_len()) + 4 + 1 + 1 + nlri_psize(ep_bits)
+                // RD(8) + plen(1) + prefix + TEID(4) + QFI(1)
+                // + ep_len(1) + endpoint + src_len(1) + optional source.
+                let mut len =
+                    8 + 1 + nlri_psize(prefix.prefix_len()) + 4 + 1 + 1 + nlri_psize(ep_bits) + 1;
+                if let Some(src) = source {
+                    let src_bits = match src {
+                        IpAddr::V4(_) => 32u8,
+                        IpAddr::V6(_) => 128u8,
+                    };
+                    len += nlri_psize(src_bits);
+                }
+                len
             }
-            MupRoute::T2st { endpoint, .. } => 8 + 1 + nlri_psize(endpoint.prefix_len()),
+            MupRoute::T2st {
+                endpoint,
+                endpoint_len,
+                ..
+            } => {
+                let (addr_bytes, addr_bits) = match endpoint {
+                    IpAddr::V4(_) => (4usize, 32u8),
+                    IpAddr::V6(_) => (16usize, 128u8),
+                };
+                let teid_bits = endpoint_len.saturating_sub(addr_bits);
+                8 + 1 + addr_bytes + nlri_psize(teid_bits)
+            }
             MupRoute::Unknown { body, .. } => body.len(),
         }
     }
@@ -347,8 +380,10 @@ impl MupRoute {
                 let rest = &rest[psize..];
                 let (rest, teid) = be_u32(rest)?;
                 let (rest, qfi) = be_u8(rest)?;
+                // Endpoint address length must be exactly the AFI's host
+                // width (32 or 128) per RFC 9833 §3.2.1.
                 let (rest, ep_len) = be_u8(rest)?;
-                if ep_len > max_addr_bits {
+                if ep_len != max_addr_bits {
                     return Err(nom::Err::Error(make_error(input, ErrorKind::Verify)));
                 }
                 let ep_size = nlri_psize(ep_len);
@@ -368,6 +403,33 @@ impl MupRoute {
                     }
                     _ => unreachable!(),
                 };
+                let rest = &rest[ep_size..];
+                // Mandatory source-address-length octet; 0 means no
+                // source, otherwise it must match the AFI host width.
+                let (rest, src_len) = be_u8(rest)?;
+                let source = if src_len == 0 {
+                    None
+                } else if src_len == max_addr_bits {
+                    let src_size = nlri_psize(src_len);
+                    if rest.len() < src_size {
+                        return Err(nom::Err::Error(make_error(input, ErrorKind::Eof)));
+                    }
+                    match afi {
+                        Afi::Ip => {
+                            let mut octets = [0u8; 4];
+                            octets[..src_size].copy_from_slice(&rest[..src_size]);
+                            Some(IpAddr::V4(Ipv4Addr::from(octets)))
+                        }
+                        Afi::Ip6 => {
+                            let mut octets = [0u8; 16];
+                            octets[..src_size].copy_from_slice(&rest[..src_size]);
+                            Some(IpAddr::V6(Ipv6Addr::from(octets)))
+                        }
+                        _ => unreachable!(),
+                    }
+                } else {
+                    return Err(nom::Err::Error(make_error(input, ErrorKind::Verify)));
+                };
                 MupRoute::T1st {
                     id,
                     arch,
@@ -376,41 +438,59 @@ impl MupRoute {
                     teid,
                     qfi,
                     endpoint,
+                    source,
                 }
             }
             MupRouteType::T2st => {
                 let (rest, rd) = RouteDistinguisher::parse_be(body_slice)?;
-                let (rest, ep_len) = be_u8(rest)?;
-                let max_addr_bits = match afi {
-                    Afi::Ip => 32u8,
-                    Afi::Ip6 => 128u8,
+                let (rest, endpoint_len) = be_u8(rest)?;
+                let (max_ep_len, addr_size, addr_bits) = match afi {
+                    Afi::Ip => (64u8, 4usize, 32u8),
+                    Afi::Ip6 => (160u8, 16usize, 128u8),
                     _ => return Err(nom::Err::Error(make_error(input, ErrorKind::Verify))),
                 };
-                if ep_len > max_addr_bits {
+                if endpoint_len > max_ep_len {
                     return Err(nom::Err::Error(make_error(input, ErrorKind::Verify)));
                 }
-                let ep_size = nlri_psize(ep_len);
-                if rest.len() < ep_size {
+                if rest.len() < addr_size {
                     return Err(nom::Err::Error(make_error(input, ErrorKind::Eof)));
                 }
                 let endpoint = match afi {
                     Afi::Ip => {
                         let mut octets = [0u8; 4];
-                        octets[..ep_size].copy_from_slice(&rest[..ep_size]);
-                        IpNet::V4(Ipv4Net::new(Ipv4Addr::from(octets), ep_len).unwrap())
+                        octets.copy_from_slice(&rest[..4]);
+                        IpAddr::V4(Ipv4Addr::from(octets))
                     }
                     Afi::Ip6 => {
                         let mut octets = [0u8; 16];
-                        octets[..ep_size].copy_from_slice(&rest[..ep_size]);
-                        IpNet::V6(Ipv6Net::new(Ipv6Addr::from(octets), ep_len).unwrap())
+                        octets.copy_from_slice(&rest[..16]);
+                        IpAddr::V6(Ipv6Addr::from(octets))
                     }
                     _ => unreachable!(),
+                };
+                let rest = &rest[addr_size..];
+                // The endpoint-address-length covers the address plus the
+                // trailing TEID bits; the TEID is high-aligned in 32 bits
+                // (GoBGP-compatible).
+                let teid_bits = endpoint_len.saturating_sub(addr_bits);
+                let teid = if teid_bits > 0 {
+                    let tsize = nlri_psize(teid_bits);
+                    if rest.len() < tsize {
+                        return Err(nom::Err::Error(make_error(input, ErrorKind::Eof)));
+                    }
+                    let mut octets = [0u8; 4];
+                    octets[..tsize].copy_from_slice(&rest[..tsize]);
+                    u32::from_be_bytes(octets)
+                } else {
+                    0
                 };
                 MupRoute::T2st {
                     id,
                     arch,
                     rd,
                     endpoint,
+                    endpoint_len,
+                    teid,
                 }
             }
             MupRouteType::Unknown(rt) => MupRoute::Unknown {
@@ -463,6 +543,7 @@ impl MupRoute {
                 teid,
                 qfi,
                 endpoint,
+                source,
                 ..
             } => {
                 payload.put_u16(rd.typ as u16);
@@ -485,16 +566,43 @@ impl MupRoute {
                     IpAddr::V4(v4) => payload.put(&v4.octets()[..]),
                     IpAddr::V6(v6) => payload.put(&v6.octets()[..]),
                 }
+                // Source-address-length octet is mandatory (0 = absent).
+                match source {
+                    Some(IpAddr::V4(v4)) => {
+                        payload.put_u8(32);
+                        payload.put(&v4.octets()[..]);
+                    }
+                    Some(IpAddr::V6(v6)) => {
+                        payload.put_u8(128);
+                        payload.put(&v6.octets()[..]);
+                    }
+                    None => payload.put_u8(0),
+                }
             }
-            MupRoute::T2st { rd, endpoint, .. } => {
+            MupRoute::T2st {
+                rd,
+                endpoint,
+                endpoint_len,
+                teid,
+                ..
+            } => {
                 payload.put_u16(rd.typ as u16);
                 payload.put(&rd.val[..]);
-                let plen = endpoint.prefix_len();
-                payload.put_u8(plen);
-                let psize = nlri_psize(plen);
+                payload.put_u8(*endpoint_len);
+                let addr_bits = match endpoint {
+                    IpAddr::V4(_) => 32u8,
+                    IpAddr::V6(_) => 128u8,
+                };
                 match endpoint {
-                    IpNet::V4(p) => payload.put(&p.addr().octets()[..psize]),
-                    IpNet::V6(p) => payload.put(&p.addr().octets()[..psize]),
+                    IpAddr::V4(v4) => payload.put(&v4.octets()[..]),
+                    IpAddr::V6(v6) => payload.put(&v6.octets()[..]),
+                }
+                // TEID occupies the bits beyond the address, high-aligned.
+                let teid_bits = endpoint_len.saturating_sub(addr_bits);
+                if teid_bits > 0 {
+                    let tsize = nlri_psize(teid_bits);
+                    let tb = teid.to_be_bytes();
+                    payload.put(&tb[..tsize]);
                 }
             }
             MupRoute::Unknown { body, .. } => {
@@ -503,6 +611,196 @@ impl MupRoute {
         }
         buf.put_u8(payload.len() as u8);
         buf.put(&payload[..]);
+    }
+}
+
+/// MUP NLRI key with the add-path Path Identifier (and the constant
+/// architecture type) stripped off, used to index the MUP RIB tables.
+///
+/// This is a *full-NLRI* key: every wire field except the add-path `id`
+/// (which lives on `BgpRib.remote_id`) is part of the key, so two routes
+/// that differ only in TEID/QFI/endpoint/source coexist, and replacement
+/// is by explicit withdraw. Variant declaration order (`Dsd, Isd, T1st,
+/// T2st`) drives the derived `Ord`, so a RIB walk lists routes grouped by
+/// type (DSD then ISD then ST1 then ST2).
+#[derive(Debug, Clone, Eq, PartialEq, Ord, PartialOrd, Hash)]
+pub enum MupPrefix {
+    /// Direct Segment Discovery Route key (RFC 9833 §3.1.2).
+    Dsd {
+        rd: RouteDistinguisher,
+        address: IpAddr,
+    },
+    /// Interwork Segment Discovery Route key (§3.1.1).
+    Isd {
+        rd: RouteDistinguisher,
+        prefix: IpNet,
+    },
+    /// Type 1 Session Transformed Route (ST1) key (§3.2.1).
+    T1st {
+        rd: RouteDistinguisher,
+        prefix: IpNet,
+        teid: u32,
+        qfi: u8,
+        endpoint: IpAddr,
+        source: Option<IpAddr>,
+    },
+    /// Type 2 Session Transformed Route (ST2) key (§3.2.2).
+    T2st {
+        rd: RouteDistinguisher,
+        endpoint: IpAddr,
+        endpoint_len: u8,
+        teid: u32,
+    },
+    /// Unrecognized route type — keyed by its raw type and opaque body so
+    /// the RIB never coalesces distinct unknown routes.
+    Unknown { route_type: u16, body: Vec<u8> },
+}
+
+impl MupPrefix {
+    /// MUP route type number (1=ISD, 2=DSD, 3=T1ST, 4=T2ST).
+    pub fn route_type(&self) -> u16 {
+        match self {
+            MupPrefix::Isd { .. } => 1,
+            MupPrefix::Dsd { .. } => 2,
+            MupPrefix::T1st { .. } => 3,
+            MupPrefix::T2st { .. } => 4,
+            MupPrefix::Unknown { route_type, .. } => *route_type,
+        }
+    }
+
+    /// The Route Distinguisher carried by every defined MUP route type
+    /// (`None` only for the opaque `Unknown` variant).
+    pub fn rd(&self) -> Option<RouteDistinguisher> {
+        match self {
+            MupPrefix::Dsd { rd, .. }
+            | MupPrefix::Isd { rd, .. }
+            | MupPrefix::T1st { rd, .. }
+            | MupPrefix::T2st { rd, .. } => Some(*rd),
+            MupPrefix::Unknown { .. } => None,
+        }
+    }
+
+    /// Split a parsed `MupRoute` into the RD-and-id-stripped key used to
+    /// index the MUP RIB. The add-path `id` and the (constant) arch type
+    /// are dropped; the `id` lives on `BgpRib.remote_id`.
+    pub fn from_route(route: &MupRoute) -> MupPrefix {
+        match route {
+            MupRoute::Isd { rd, prefix, .. } => MupPrefix::Isd {
+                rd: *rd,
+                prefix: *prefix,
+            },
+            MupRoute::Dsd { rd, address, .. } => MupPrefix::Dsd {
+                rd: *rd,
+                address: *address,
+            },
+            MupRoute::T1st {
+                rd,
+                prefix,
+                teid,
+                qfi,
+                endpoint,
+                source,
+                ..
+            } => MupPrefix::T1st {
+                rd: *rd,
+                prefix: *prefix,
+                teid: *teid,
+                qfi: *qfi,
+                endpoint: *endpoint,
+                source: *source,
+            },
+            MupRoute::T2st {
+                rd,
+                endpoint,
+                endpoint_len,
+                teid,
+                ..
+            } => MupPrefix::T2st {
+                rd: *rd,
+                endpoint: *endpoint,
+                endpoint_len: *endpoint_len,
+                teid: *teid,
+            },
+            MupRoute::Unknown {
+                route_type, body, ..
+            } => MupPrefix::Unknown {
+                route_type: *route_type,
+                body: body.clone(),
+            },
+        }
+    }
+
+    /// Outer AFI implied by the route's address family. RFC 9833 §3 ties
+    /// every address a MUP route carries to the MP_REACH AFI, so the
+    /// prefix / address / endpoint family is authoritative. `Unknown`
+    /// has no decoded address, so it defaults to IPv4.
+    pub fn afi(&self) -> Afi {
+        let v6 = match self {
+            MupPrefix::Isd { prefix, .. } | MupPrefix::T1st { prefix, .. } => {
+                matches!(prefix, IpNet::V6(_))
+            }
+            MupPrefix::Dsd { address, .. } => address.is_ipv6(),
+            MupPrefix::T2st { endpoint, .. } => endpoint.is_ipv6(),
+            MupPrefix::Unknown { .. } => false,
+        };
+        if v6 { Afi::Ip6 } else { Afi::Ip }
+    }
+
+    /// Reconstruct a wire `MupRoute` from the key for re-advertisement.
+    /// The full-NLRI key carries every field, so the only synthesized
+    /// values are the 3GPP-5G architecture type and a zero add-path id.
+    pub fn to_route(&self) -> MupRoute {
+        let arch = MupArchitectureType::Gpp5g;
+        match self {
+            MupPrefix::Isd { rd, prefix } => MupRoute::Isd {
+                id: 0,
+                arch,
+                rd: *rd,
+                prefix: *prefix,
+            },
+            MupPrefix::Dsd { rd, address } => MupRoute::Dsd {
+                id: 0,
+                arch,
+                rd: *rd,
+                address: *address,
+            },
+            MupPrefix::T1st {
+                rd,
+                prefix,
+                teid,
+                qfi,
+                endpoint,
+                source,
+            } => MupRoute::T1st {
+                id: 0,
+                arch,
+                rd: *rd,
+                prefix: *prefix,
+                teid: *teid,
+                qfi: *qfi,
+                endpoint: *endpoint,
+                source: *source,
+            },
+            MupPrefix::T2st {
+                rd,
+                endpoint,
+                endpoint_len,
+                teid,
+            } => MupRoute::T2st {
+                id: 0,
+                arch,
+                rd: *rd,
+                endpoint: *endpoint,
+                endpoint_len: *endpoint_len,
+                teid: *teid,
+            },
+            MupPrefix::Unknown { route_type, body } => MupRoute::Unknown {
+                id: 0,
+                arch,
+                route_type: *route_type,
+                body: body.clone(),
+            },
+        }
     }
 }
 
@@ -753,6 +1051,7 @@ mod tests {
                 teid: 0x1234_5678,
                 qfi: 9,
                 endpoint: "192.0.2.1".parse().unwrap(),
+                source: Some("198.51.100.7".parse().unwrap()),
             },
             false,
             Afi::Ip,
@@ -770,6 +1069,7 @@ mod tests {
                 teid: 0xAAAA_BBBB,
                 qfi: 5,
                 endpoint: "2001:db8::1".parse().unwrap(),
+                source: Some("2001:db8::abcd".parse().unwrap()),
             },
             false,
             Afi::Ip6,
@@ -787,6 +1087,7 @@ mod tests {
                 teid: 0,
                 qfi: 0,
                 endpoint: "203.0.113.99".parse().unwrap(),
+                source: None,
             },
             true,
             Afi::Ip,
@@ -804,6 +1105,7 @@ mod tests {
                 teid: 42,
                 qfi: 1,
                 endpoint: "192.0.2.250".parse().unwrap(),
+                source: None,
             },
             false,
             Afi::Ip,
@@ -844,6 +1146,7 @@ mod tests {
             teid: 1,
             qfi: 2,
             endpoint: "192.0.2.1".parse().unwrap(),
+            source: Some("203.0.113.1".parse().unwrap()),
         };
         let mut buf = BytesMut::new();
         route.nlri_emit(&mut buf);
@@ -857,7 +1160,9 @@ mod tests {
                 id: 0,
                 arch: MupArchitectureType::Gpp5g,
                 rd: sample_rd(),
-                endpoint: "10.0.0.1/32".parse().unwrap(),
+                endpoint: "10.0.0.1".parse().unwrap(),
+                endpoint_len: 64,
+                teid: 600,
             },
             false,
             Afi::Ip,
@@ -871,7 +1176,9 @@ mod tests {
                 id: 0,
                 arch: MupArchitectureType::Gpp5g,
                 rd: sample_rd(),
-                endpoint: "2001:db8::1/128".parse().unwrap(),
+                endpoint: "2001:db8::1".parse().unwrap(),
+                endpoint_len: 160,
+                teid: 0xAABB_CCDD,
             },
             false,
             Afi::Ip6,
@@ -879,19 +1186,21 @@ mod tests {
     }
 
     #[test]
-    fn t2st_v6_partial_bit_length_round_trip() {
-        // TEID-encoded endpoint where only the upper 80 bits are
-        // semantically meaningful. The encoding stores ceil(80/8)=10
-        // octets and reconstructs them on parse.
+    fn t2st_v4_partial_teid_round_trip() {
+        // endpoint_len = 48 → 32 address bits + 16 TEID bits. The TEID is
+        // stored high-aligned, so only its upper 16 bits survive the
+        // 2-octet on-wire field.
         round_trip(
             MupRoute::T2st {
                 id: 0,
                 arch: MupArchitectureType::Gpp5g,
                 rd: sample_rd(),
-                endpoint: "2001:db8:1:2:3::/80".parse().unwrap(),
+                endpoint: "10.0.0.1".parse().unwrap(),
+                endpoint_len: 48,
+                teid: 0x0258_0000,
             },
             false,
-            Afi::Ip6,
+            Afi::Ip,
         );
     }
 
@@ -902,7 +1211,9 @@ mod tests {
                 id: 0xC0FFEE00,
                 arch: MupArchitectureType::Gpp5g,
                 rd: sample_rd(),
-                endpoint: "192.0.2.99/32".parse().unwrap(),
+                endpoint: "192.0.2.99".parse().unwrap(),
+                endpoint_len: 64,
+                teid: 0x0000_3039,
             },
             true,
             Afi::Ip,
@@ -911,11 +1222,10 @@ mod tests {
 
     #[test]
     fn t2st_rejects_endpoint_len_over_afi_max() {
-        // arch=1, route_type=4, length=14, RD(8) + ep_len=33 (> 32 for v4) + filler
-        let mut v = vec![0x01, 0x00, 0x04, 14];
+        // arch=1, route_type=4, length=9: RD(8) + ep_len=65 (> 64 for v4).
+        let mut v = vec![0x01, 0x00, 0x04, 9];
         v.extend_from_slice(&[0; 8]);
-        v.push(33);
-        v.extend_from_slice(&[0; 5]);
+        v.push(65);
         assert!(MupRoute::parse(&v, false, Afi::Ip).is_err());
     }
 
@@ -925,11 +1235,129 @@ mod tests {
             id: 0,
             arch: MupArchitectureType::Gpp5g,
             rd: sample_rd(),
-            endpoint: "2001:db8::1/128".parse().unwrap(),
+            endpoint: "2001:db8::1".parse().unwrap(),
+            endpoint_len: 160,
+            teid: 42,
         };
         let mut buf = BytesMut::new();
         route.nlri_emit(&mut buf);
         assert_eq!(buf.len(), 4 + route.body_len());
+    }
+
+    // --- GoBGP byte-exact interop vectors ---------------------------------
+    // These pin the on-wire layout against GoBGP's mup.go encoders. A
+    // zero Route Distinguisher (8 zero octets) keeps the vectors free of
+    // any dependence on RD string parsing.
+
+    #[test]
+    fn t1st_parses_gobgp_v4_bytes_with_source() {
+        // RD(8) + plen=24 + prefix(3) + TEID(4)=601 + QFI=9
+        // + ep_len=32 + endpoint(4) + src_len=32 + source(4).
+        let mut body = vec![0u8; 8];
+        body.push(24);
+        body.extend_from_slice(&[10, 0, 3]); // 10.0.3.0/24
+        body.extend_from_slice(&[0x00, 0x00, 0x02, 0x59]); // TEID 601
+        body.push(9); // QFI
+        body.push(32); // endpoint address length
+        body.extend_from_slice(&[20, 0, 3, 99]); // 20.0.3.99
+        body.push(32); // source address length
+        body.extend_from_slice(&[20, 0, 1, 1]); // 20.0.1.1
+        let mut v = vec![0x01, 0x00, 0x03, body.len() as u8];
+        v.extend_from_slice(&body);
+
+        let (rest, route) = MupRoute::parse(&v, false, Afi::Ip).unwrap();
+        assert!(rest.is_empty());
+        match route {
+            MupRoute::T1st {
+                prefix,
+                teid,
+                qfi,
+                endpoint,
+                source,
+                ..
+            } => {
+                assert_eq!(prefix.to_string(), "10.0.3.0/24");
+                assert_eq!(teid, 601);
+                assert_eq!(qfi, 9);
+                assert_eq!(endpoint, "20.0.3.99".parse::<IpAddr>().unwrap());
+                assert_eq!(source, Some("20.0.1.1".parse::<IpAddr>().unwrap()));
+            }
+            other => panic!("expected T1st, got {other:?}"),
+        }
+
+        // Re-emit must reproduce the exact same wire bytes.
+        let mut buf = BytesMut::new();
+        route.nlri_emit(&mut buf);
+        assert_eq!(&buf[..], &v[..]);
+    }
+
+    #[test]
+    fn t1st_parses_gobgp_v4_bytes_without_source() {
+        // Same as above but the mandatory source-address-length octet is
+        // zero and no source bytes follow.
+        let mut body = vec![0u8; 8];
+        body.push(24);
+        body.extend_from_slice(&[10, 0, 3]);
+        body.extend_from_slice(&[0x00, 0x00, 0x02, 0x59]);
+        body.push(9);
+        body.push(32);
+        body.extend_from_slice(&[20, 0, 3, 99]);
+        body.push(0); // source address length = 0
+        let mut v = vec![0x01, 0x00, 0x03, body.len() as u8];
+        v.extend_from_slice(&body);
+
+        let (rest, route) = MupRoute::parse(&v, false, Afi::Ip).unwrap();
+        assert!(rest.is_empty());
+        assert!(matches!(route, MupRoute::T1st { source: None, .. }));
+        let mut buf = BytesMut::new();
+        route.nlri_emit(&mut buf);
+        assert_eq!(&buf[..], &v[..]);
+    }
+
+    #[test]
+    fn t1st_rejects_non_host_endpoint_len() {
+        // ep_len = 24 is neither 32 nor 128 → malformed (RFC 9833 §3.2.1).
+        let mut body = vec![0u8; 8];
+        body.push(0); // plen=0
+        body.extend_from_slice(&[0; 4]); // TEID
+        body.push(0); // QFI
+        body.push(24); // ep_len not a host width
+        body.extend_from_slice(&[0; 3]);
+        let mut v = vec![0x01, 0x00, 0x03, body.len() as u8];
+        v.extend_from_slice(&body);
+        assert!(MupRoute::parse(&v, false, Afi::Ip).is_err());
+    }
+
+    #[test]
+    fn t2st_parses_gobgp_v4_bytes_with_teid() {
+        // RD(8) + ep_len=64 + endpoint(4) + TEID(4)=600. The endpoint
+        // address length covers the 32 address bits plus 32 TEID bits.
+        let mut body = vec![0u8; 8];
+        body.push(64);
+        body.extend_from_slice(&[20, 0, 1, 1]); // 20.0.1.1
+        body.extend_from_slice(&[0x00, 0x00, 0x02, 0x58]); // TEID 600
+        let mut v = vec![0x01, 0x00, 0x04, body.len() as u8];
+        v.extend_from_slice(&body);
+
+        let (rest, route) = MupRoute::parse(&v, false, Afi::Ip).unwrap();
+        assert!(rest.is_empty());
+        match route {
+            MupRoute::T2st {
+                endpoint,
+                endpoint_len,
+                teid,
+                ..
+            } => {
+                assert_eq!(endpoint, "20.0.1.1".parse::<IpAddr>().unwrap());
+                assert_eq!(endpoint_len, 64);
+                assert_eq!(teid, 600);
+            }
+            other => panic!("expected T2st, got {other:?}"),
+        }
+
+        let mut buf = BytesMut::new();
+        route.nlri_emit(&mut buf);
+        assert_eq!(&buf[..], &v[..]);
     }
 
     #[test]
@@ -979,5 +1407,98 @@ mod tests {
         route.nlri_emit(&mut buf);
         // 1 arch + 2 rt + 1 len + body
         assert_eq!(buf.len(), 4 + route.body_len());
+    }
+
+    #[test]
+    fn mup_prefix_strips_add_path_id() {
+        // Two routes identical but for the add-path id map to one key.
+        let a = MupRoute::Isd {
+            id: 1,
+            arch: MupArchitectureType::Gpp5g,
+            rd: sample_rd(),
+            prefix: "10.0.0.0/24".parse().unwrap(),
+        };
+        let b = MupRoute::Isd {
+            id: 999,
+            arch: MupArchitectureType::Gpp5g,
+            rd: sample_rd(),
+            prefix: "10.0.0.0/24".parse().unwrap(),
+        };
+        assert_eq!(MupPrefix::from_route(&a), MupPrefix::from_route(&b));
+    }
+
+    #[test]
+    fn mup_prefix_afi_and_to_route_round_trip() {
+        // afi() reflects the route-key address family; to_route() inverts
+        // from_route for the full-NLRI key (arch=Gpp5g, id=0).
+        let cases = [
+            MupRoute::Isd {
+                id: 7,
+                arch: MupArchitectureType::Gpp5g,
+                rd: sample_rd(),
+                prefix: "10.0.3.0/24".parse().unwrap(),
+            },
+            MupRoute::Dsd {
+                id: 7,
+                arch: MupArchitectureType::Gpp5g,
+                rd: sample_rd(),
+                address: "1.1.1.99".parse().unwrap(),
+            },
+            MupRoute::T1st {
+                id: 7,
+                arch: MupArchitectureType::Gpp5g,
+                rd: sample_rd(),
+                prefix: "2001:db8:cafe::5/128".parse().unwrap(),
+                teid: 601,
+                qfi: 9,
+                endpoint: "2001:db8::99".parse().unwrap(),
+                source: Some("2001:db8::1".parse().unwrap()),
+            },
+            MupRoute::T2st {
+                id: 7,
+                arch: MupArchitectureType::Gpp5g,
+                rd: sample_rd(),
+                endpoint: "20.0.1.1".parse().unwrap(),
+                endpoint_len: 64,
+                teid: 600,
+            },
+        ];
+        let expect_afi = [Afi::Ip, Afi::Ip, Afi::Ip6, Afi::Ip];
+        for (route, afi) in cases.iter().zip(expect_afi) {
+            let prefix = MupPrefix::from_route(route);
+            assert_eq!(prefix.afi(), afi);
+            // to_route() round-trips back to the same key.
+            assert_eq!(MupPrefix::from_route(&prefix.to_route()), prefix);
+        }
+    }
+
+    #[test]
+    fn mup_prefix_orders_dsd_before_isd_before_st() {
+        let dsd = MupPrefix::from_route(&MupRoute::Dsd {
+            id: 0,
+            arch: MupArchitectureType::Gpp5g,
+            rd: sample_rd(),
+            address: "1.1.1.1".parse().unwrap(),
+        });
+        let isd = MupPrefix::from_route(&MupRoute::Isd {
+            id: 0,
+            arch: MupArchitectureType::Gpp5g,
+            rd: sample_rd(),
+            prefix: "10.0.0.0/24".parse().unwrap(),
+        });
+        let st2 = MupPrefix::from_route(&MupRoute::T2st {
+            id: 0,
+            arch: MupArchitectureType::Gpp5g,
+            rd: sample_rd(),
+            endpoint: "20.0.1.1".parse().unwrap(),
+            endpoint_len: 64,
+            teid: 600,
+        });
+        assert!(dsd < isd, "Dsd sorts before Isd");
+        assert!(isd < st2, "Isd sorts before T2st");
+        assert_eq!(dsd.route_type(), 2);
+        assert_eq!(isd.route_type(), 1);
+        assert_eq!(st2.route_type(), 4);
+        assert_eq!(isd.rd(), Some(sample_rd()));
     }
 }

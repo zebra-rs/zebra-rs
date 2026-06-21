@@ -1331,20 +1331,50 @@ fn config_afi_safi(bgp: &mut Bgp, mut args: Args, op: ConfigOp) -> Option<()> {
         && op.is_set()
         && enabled.unwrap_or(false);
 
-    let peer = bgp.peers.get_mut(&addr)?;
+    let (ident, bounce) = {
+        let peer = bgp.peers.get_mut(&addr)?;
 
-    // Record the verbatim statement, then re-resolve the effective MP
-    // set through the default < group < explicit precedence. A Delete
-    // simply forgets the statement: IPv4 unicast falls back to the
-    // built-in default (or the group's opinion), other families to
-    // off (or the group's opinion).
-    if op.is_set() {
-        peer.config.mp_explicit.insert(key, enabled?);
-    } else {
-        peer.config.mp_explicit.remove(&key);
+        // Snapshot the effective MP family set so we can tell whether this
+        // statement actually changes it (a redundant set must not bounce).
+        let before: std::collections::BTreeSet<AfiSafi> =
+            peer.config.mp.0.keys().copied().collect();
+
+        // Record the verbatim statement, then re-resolve the effective MP
+        // set through the default < group < explicit precedence. A Delete
+        // simply forgets the statement: IPv4 unicast falls back to the
+        // built-in default (or the group's opinion), other families to
+        // off (or the group's opinion). The `mobile-uplane` name expands to
+        // both the IPv4 and IPv6 MUP families (RFC 9833).
+        if op.is_set() {
+            let enabled = enabled?;
+            for fam in super::neighbor_group::mp_family_expand(key) {
+                peer.config.mp_explicit.insert(fam, enabled);
+            }
+        } else {
+            for fam in super::neighbor_group::mp_family_expand(key) {
+                peer.config.mp_explicit.remove(&fam);
+            }
+        }
+        super::neighbor_group::recompute_peer_mp(&bgp.neighbor_groups, &mut peer.config);
+
+        // An AFI/SAFI is a Multiprotocol *capability*, advertised once in
+        // the OPEN — the negotiated set is fixed for the life of the
+        // session. So changing the family set on an already-Established
+        // peer has no effect until the session renegotiates: bounce it with
+        // `Event::Stop` (the `clear bgp ... hard` teardown) to force a
+        // reconnect that carries the new capability set. A peer still coming
+        // up includes the new family in its first OPEN, so startup config —
+        // applied before the session establishes — never bounces.
+        let after: std::collections::BTreeSet<AfiSafi> = peer.config.mp.0.keys().copied().collect();
+        let bounce = before != after && matches!(peer.state, super::peer::State::Established);
+        (peer.ident, bounce)
+    };
+
+    if bounce {
+        let _ = bgp
+            .tx
+            .try_send(super::inst::Message::Event(ident, super::peer::Event::Stop));
     }
-    super::neighbor_group::recompute_peer_mp(&bgp.neighbor_groups, &mut peer.config);
-
     if label_block_needed {
         bgp.request_label_block();
     }
@@ -3730,6 +3760,18 @@ impl Bgp {
             "/router/bgp/vrf/evpn/advertise-ipv6",
             super::vrf_config::config_vrf_evpn_advertise_ipv6,
         );
+        self.callback_add(
+            "/router/bgp/vrf/mobile-uplane/route-target/export",
+            super::vrf_config::config_vrf_mup_rt_export,
+        );
+        self.callback_add(
+            "/router/bgp/vrf/mobile-uplane/srv6-mobile/decapsulation/network-instance/exact",
+            super::vrf_config::config_vrf_mup_srv6_decap,
+        );
+        self.callback_add(
+            "/router/bgp/vrf/mobile-uplane/srv6-mobile/encapsulation/network-instance/exact",
+            super::vrf_config::config_vrf_mup_srv6_encap,
+        );
 
         // `set router bgp interface-neighbor <name> [...]`.
         self.callback_add(
@@ -5676,9 +5718,10 @@ mod neighbor_group_wiring_tests {
     }
 
     /// Group `afi-safi ipv6 enabled true` flows to a member peer's
-    /// effective MP set reactively (no session bounce — the change is
-    /// advertised at the next capability negotiation), and `enabled
-    /// false` on ipv4 overrides the built-in default.
+    /// effective MP set, and `enabled false` on ipv4 overrides the built-in
+    /// default. The member here is not Established, so it does not bounce —
+    /// its first OPEN carries the change (the Established case bounces; see
+    /// `group_afi_safi_change_bounces_established_member`).
     #[tokio::test]
     async fn group_afi_safi_propagates_to_member() {
         let mut bgp = fresh_bgp();
@@ -5705,7 +5748,61 @@ mod neighbor_group_wiring_tests {
         assert_eq!(peer_mp_families(&bgp), vec![v6()]);
         assert!(
             drain_stop_events(&mut bgp).is_empty(),
-            "afi-safi changes must not bounce the session",
+            "a not-yet-Established member must not bounce",
+        );
+    }
+
+    /// Changing a group's afi-safi opinion is a capability change, so an
+    /// Established member renegotiates: its MP set changes and it is sent
+    /// `Event::Stop` (the `clear bgp ... hard` teardown). Mirrors the
+    /// per-peer `config_afi_safi` bounce, on the group path.
+    #[tokio::test]
+    async fn group_afi_safi_change_bounces_established_member() {
+        let mut bgp = fresh_bgp();
+        config_neighbor_group_remote_as(&mut bgp, arg_words(&["G", "65000"]), ConfigOp::Set)
+            .unwrap();
+        config_peer(&mut bgp, arg_words(&["10.0.0.1"]), ConfigOp::Set).unwrap();
+        config_peer_neighbor_group(&mut bgp, arg_words(&["10.0.0.1", "G"]), ConfigOp::Set).unwrap();
+        let peer_ident = bgp.peers.get(&peer_addr()).unwrap().ident;
+        // Bring the member up, then drain the setup events.
+        bgp.peers.get_mut(&peer_addr()).unwrap().state = crate::bgp::peer::State::Established;
+        let _ = drain_stop_events(&mut bgp);
+
+        // Enabling a new family on the group bounces the Established member.
+        config_neighbor_group_afi_safi_enabled(
+            &mut bgp,
+            arg_words(&["G", "mobile-uplane", "true"]),
+            ConfigOp::Set,
+        )
+        .unwrap();
+        assert_eq!(peer_mp_families(&bgp).len(), 3, "v4 + IPv4/IPv6 MUP");
+        assert!(
+            drain_stop_events(&mut bgp).contains(&peer_ident),
+            "enabling a group afi-safi must bounce an Established member",
+        );
+
+        // A redundant set (no family-set change) must not bounce.
+        config_neighbor_group_afi_safi_enabled(
+            &mut bgp,
+            arg_words(&["G", "mobile-uplane", "true"]),
+            ConfigOp::Set,
+        )
+        .unwrap();
+        assert!(
+            drain_stop_events(&mut bgp).is_empty(),
+            "a redundant group afi-safi set must not bounce",
+        );
+
+        // Disabling the family again also bounces (capability withdrawn).
+        config_neighbor_group_afi_safi_enabled(
+            &mut bgp,
+            arg_words(&["G", "mobile-uplane", "true"]),
+            ConfigOp::Delete,
+        )
+        .unwrap();
+        assert!(
+            drain_stop_events(&mut bgp).contains(&peer_ident),
+            "disabling a group afi-safi must bounce an Established member",
         );
     }
 
@@ -5744,6 +5841,75 @@ mod neighbor_group_wiring_tests {
         )
         .unwrap();
         assert_eq!(peer_mp_families(&bgp), Vec::<AfiSafi>::new());
+    }
+
+    /// An AFI/SAFI is a Multiprotocol *capability*: enabling or disabling
+    /// one on an Established neighbor changes the negotiated set, which is
+    /// fixed at OPEN time, so the session must bounce (`Event::Stop`, the
+    /// `clear bgp ... hard` teardown) to renegotiate. This is NOT
+    /// MUP-specific — pinned across IPv6 unicast, EVPN, VPNv4 and
+    /// mobile-uplane. A peer that has not Established yet carries the change
+    /// in its first OPEN (no bounce); a redundant set leaves the family set
+    /// unchanged (no bounce).
+    #[tokio::test]
+    async fn afi_safi_change_bounces_established_peer() {
+        for fam in ["ipv6", "evpn", "vpnv4", "mobile-uplane"] {
+            let mut bgp = fresh_bgp();
+            config_peer(&mut bgp, arg_words(&["10.0.0.1"]), ConfigOp::Set).unwrap();
+            let peer_ident = bgp.peers.get(&peer_addr()).unwrap().ident;
+
+            // Not Established yet → the upcoming OPEN carries it → no bounce.
+            config_afi_safi(
+                &mut bgp,
+                arg_words(&["10.0.0.1", fam, "true"]),
+                ConfigOp::Set,
+            )
+            .unwrap();
+            assert!(
+                drain_stop_events(&mut bgp).is_empty(),
+                "{fam}: a not-yet-Established peer must not bounce",
+            );
+
+            // Bring the session up.
+            bgp.peers.get_mut(&peer_addr()).unwrap().state = crate::bgp::peer::State::Established;
+            let _ = drain_stop_events(&mut bgp);
+
+            // Redundant set (already enabled) → family set unchanged → no bounce.
+            config_afi_safi(
+                &mut bgp,
+                arg_words(&["10.0.0.1", fam, "true"]),
+                ConfigOp::Set,
+            )
+            .unwrap();
+            assert!(
+                drain_stop_events(&mut bgp).is_empty(),
+                "{fam}: a redundant set must not bounce",
+            );
+
+            // Disabling on the live session withdraws the capability → bounce.
+            config_afi_safi(
+                &mut bgp,
+                arg_words(&["10.0.0.1", fam, "true"]),
+                ConfigOp::Delete,
+            )
+            .unwrap();
+            assert!(
+                drain_stop_events(&mut bgp).contains(&peer_ident),
+                "{fam}: disabling on an Established peer must bounce",
+            );
+
+            // Re-enabling changes the set back → bounce again.
+            config_afi_safi(
+                &mut bgp,
+                arg_words(&["10.0.0.1", fam, "true"]),
+                ConfigOp::Set,
+            )
+            .unwrap();
+            assert!(
+                drain_stop_events(&mut bgp).contains(&peer_ident),
+                "{fam}: re-enabling on an Established peer must bounce",
+            );
+        }
     }
 
     /// Deleting one group afi-safi entry (or the whole group) drops

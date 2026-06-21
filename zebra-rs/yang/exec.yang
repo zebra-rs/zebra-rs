@@ -356,6 +356,14 @@ module exec {
           }
         }
       }
+      container mobile-uplane {
+        ext:help "BGP Mobile User Plane (MUP) RIB";
+        presence "BGP Mobile User Plane (MUP) RIB";
+        leaf summary {
+          ext:help "Summary of MUP-enabled neighbors";
+          type empty;
+        }
+      }
       list update-group {
         ext:help "BGP update-groups (IOS-XR style)";
         ext:presence "BGP update-group summary";
