@@ -6,7 +6,7 @@ use super::{
     Block, BlockBuilder, BlockConfig, BridgeBuilder, BridgeConfig, DEFAULT_BLOCK_NAME, GroupTrait,
     Link, Locator, LocatorBuilder, LocatorConfig, MacAddr, MplsConfig, Nexthop, NexthopMap,
     NexthopUni, RibSrRx, RibType, Sid, SidBehavior, StaticConfig, V4, V6, Vrf, VrfBuilder,
-    VrfIdAllocator, VrfRibTables, Vxlan, VxlanBuilder, VxlanConfig,
+    VrfIdAllocator, VrfRibTables, VrfStaticConfig, Vxlan, VxlanBuilder, VxlanConfig,
 };
 
 use crate::config::{Args, path_from_command};
@@ -48,6 +48,30 @@ pub enum Message {
         rib: RibEntry,
     },
     Ipv6Del {
+        prefix: Ipv6Net,
+        rib: RibEntry,
+    },
+    /// Static-route install/withdraw into a named VRF's table. The VRF
+    /// name (not the kernel `table_id`) is carried so the message
+    /// survives a VRF whose table isn't up yet — `process_msg` resolves
+    /// it via `self.vrfs`, and the `VrfAdd` reconcile re-emits it.
+    Ipv4AddVrf {
+        vrf: String,
+        prefix: Ipv4Net,
+        rib: RibEntry,
+    },
+    Ipv4DelVrf {
+        vrf: String,
+        prefix: Ipv4Net,
+        rib: RibEntry,
+    },
+    Ipv6AddVrf {
+        vrf: String,
+        prefix: Ipv6Net,
+        rib: RibEntry,
+    },
+    Ipv6DelVrf {
+        vrf: String,
         prefix: Ipv6Net,
         rib: RibEntry,
     },
@@ -389,7 +413,11 @@ impl Message {
     pub fn is_fib_install(&self) -> bool {
         matches!(
             self,
-            Message::Ipv4Add { .. } | Message::Ipv6Add { .. } | Message::IlmAdd { .. }
+            Message::Ipv4Add { .. }
+                | Message::Ipv6Add { .. }
+                | Message::Ipv4AddVrf { .. }
+                | Message::Ipv6AddVrf { .. }
+                | Message::IlmAdd { .. }
         )
     }
 }
@@ -596,6 +624,8 @@ pub struct Rib {
     pub rx: UnboundedReceiver<Message>,
     pub static_v4: StaticConfig<V4>,
     pub static_v6: StaticConfig<V6>,
+    pub static_vrf_v4: VrfStaticConfig<V4>,
+    pub static_vrf_v6: VrfStaticConfig<V6>,
     pub mpls_config: MplsConfig,
     pub link_config: LinkConfig,
     pub bridge_config: BridgeBuilder,
@@ -714,6 +744,8 @@ impl Rib {
             rx,
             static_v4: StaticConfig::<V4>::new(),
             static_v6: StaticConfig::<V6>::new(),
+            static_vrf_v4: VrfStaticConfig::<V4>::new(),
+            static_vrf_v6: VrfStaticConfig::<V6>::new(),
             mpls_config: MplsConfig::new(),
             link_config: LinkConfig::new(),
             bridge_config: BridgeBuilder::new(),
@@ -1640,6 +1672,48 @@ impl Rib {
         table_id
     }
 
+    /// Pre-resolve a VRF-static route's gateway that sits directly on a
+    /// VRF interface by stamping its egress `ifindex_origin`. The kernel
+    /// flushes (and silently re-adds) an interface's addresses when it is
+    /// enslaved to a VRF, which races our connected-route shadow out of
+    /// the per-VRF table — so a table-walk resolution of an on-link
+    /// gateway intermittently fails. `ifindex_origin` makes the resolver
+    /// skip the table walk (`GroupUni::resolve_v6`) and install the route
+    /// on-link, exactly as the kernel resolves it. Only stamps a Uni/Multi
+    /// gateway the source didn't already pin to an interface.
+    fn stamp_vrf_onlink(&self, entry: &mut RibEntry, table_id: u32) {
+        let onlink_ifindex = |nh: IpAddr| -> Option<u32> {
+            self.links.values().find_map(|link| {
+                if self.ifindex_vrf_id(link.index) != table_id {
+                    return None;
+                }
+                let hit = match nh {
+                    IpAddr::V4(a) => link
+                        .addr4
+                        .iter()
+                        .any(|x| matches!(x.addr, IpNet::V4(net) if net.contains(&a))),
+                    IpAddr::V6(a) => link
+                        .addr6
+                        .iter()
+                        .any(|x| matches!(x.addr, IpNet::V6(net) if net.contains(&a))),
+                };
+                hit.then_some(link.index)
+            })
+        };
+        let stamp = |uni: &mut NexthopUni| {
+            if uni.ifindex_origin.is_none()
+                && let Some(ifindex) = onlink_ifindex(uni.addr)
+            {
+                uni.ifindex_origin = Some(ifindex);
+            }
+        };
+        match &mut entry.nexthop {
+            Nexthop::Uni(uni) => stamp(uni),
+            Nexthop::Multi(multi) => multi.nexthops.iter_mut().for_each(stamp),
+            _ => {}
+        }
+    }
+
     async fn process_msg(&mut self, msg: Message, table_id: u32) {
         match msg {
             Message::Ipv4Add { prefix, rib } => {
@@ -1675,6 +1749,42 @@ impl Rib {
                     self.ipv6_route_del(&prefix, rib, table_id).await;
                     self.nht_recompute_and_notify();
                 } else {
+                    self.ipv6_route_del_vrf(table_id, &prefix, rib).await;
+                }
+            }
+            // Static-route install/withdraw into a named VRF's table.
+            // Resolve the VRF name → kernel `table_id`; a VRF that isn't
+            // up yet drops the install (re-emitted by the `VrfAdd`
+            // reconcile once its table exists).
+            Message::Ipv4AddVrf {
+                vrf,
+                prefix,
+                mut rib,
+            } => match self.vrfs.get(&vrf).map(|v| v.table_id) {
+                Some(table_id) => {
+                    self.stamp_vrf_onlink(&mut rib, table_id);
+                    self.ipv4_route_add_vrf(table_id, &prefix, rib).await
+                }
+                None => tracing::debug!(%vrf, %prefix, "static vrf route: vrf table not up yet"),
+            },
+            Message::Ipv4DelVrf { vrf, prefix, rib } => {
+                if let Some(table_id) = self.vrfs.get(&vrf).map(|v| v.table_id) {
+                    self.ipv4_route_del_vrf(table_id, &prefix, rib).await;
+                }
+            }
+            Message::Ipv6AddVrf {
+                vrf,
+                prefix,
+                mut rib,
+            } => match self.vrfs.get(&vrf).map(|v| v.table_id) {
+                Some(table_id) => {
+                    self.stamp_vrf_onlink(&mut rib, table_id);
+                    self.ipv6_route_add_vrf(table_id, &prefix, rib).await
+                }
+                None => tracing::debug!(%vrf, %prefix, "static vrf route: vrf table not up yet"),
+            },
+            Message::Ipv6DelVrf { vrf, prefix, rib } => {
+                if let Some(table_id) = self.vrfs.get(&vrf).map(|v| v.table_id) {
                     self.ipv6_route_del_vrf(table_id, &prefix, rib).await;
                 }
             }
@@ -1855,6 +1965,11 @@ impl Rib {
                 // per-`ProtoId` dispatcher writes routes here when a
                 // VRF-attached protocol installs.
                 self.vrf_tables.insert(table_id, VrfRibTables::new());
+                // Re-emit any static routes configured for this VRF now
+                // that its kernel table exists — the initial commit's
+                // install was dropped if it raced ahead of the VRF.
+                self.static_vrf_v4.reinstall(&name, &self.tx);
+                self.static_vrf_v6.reinstall(&name, &self.tx);
                 tracing::info!(
                     "vrf_add: {} table_id={} ifindex={}",
                     name,
@@ -2463,6 +2578,10 @@ impl Rib {
                 let (path, args) = path_from_command(&msg.paths);
                 if path.as_str() == "/system/router-id" {
                     let _ = self.router_id_config_exec(args, msg.op);
+                } else if path.as_str().starts_with("/router/static/vrf/ipv4/route") {
+                    let _ = self.static_vrf_v4.exec(path, args, msg.op);
+                } else if path.as_str().starts_with("/router/static/vrf/ipv6/route") {
+                    let _ = self.static_vrf_v6.exec(path, args, msg.op);
                 } else if path.as_str().starts_with("/router/static/ipv4/route") {
                     let _ = self.static_v4.exec(path, args, msg.op);
                 } else if path.as_str().starts_with("/router/static/ipv6/route") {
@@ -2493,6 +2612,8 @@ impl Rib {
                 self.link_config.commit(self.tx.clone());
                 self.static_v4.commit(self.tx.clone());
                 self.static_v6.commit(self.tx.clone());
+                self.static_vrf_v4.commit(&self.tx);
+                self.static_vrf_v6.commit(&self.tx);
                 self.mpls_config.commit(self.tx.clone());
                 self.block_config.commit(self.tx.clone());
                 self.locator_config.commit(self.tx.clone());
