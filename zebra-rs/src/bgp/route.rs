@@ -6386,14 +6386,24 @@ fn evpn_reoriginate_per_region(
     };
     let mut attr = BgpAttr::new();
     attr.ecom = src_attr.ecom.clone();
-    attr.pmsi_tunnel = Some(PmsiTunnel {
-        flags: 0,
-        tunnel_type: PmsiTunnel::TUNNEL_INGRESS_REPLICATION,
+    // Build the Per-Region I-PMSI's PMSI Tunnel attribute from this RBR's
+    // configured BUM tunnel type, rooted at the RBR (next-hop-self). For SR
+    // P2MP modes this advertises an RFC 9524 replication tree; otherwise plain
+    // Ingress Replication.
+    let bum = bgp.local_rib.evpn_flood.bum_tunnel;
+    let (mut pmsi, root) = imet_pmsi_tunnel(
+        bum,
+        AssistedReplicationRole::None,
+        None,
+        IpAddr::V4(*bgp.router_id),
         vni,
-        endpoint: IpAddr::V4(*bgp.router_id),
-        tree_id: None,
-    });
-    attr.nexthop = Some(BgpNexthop::Evpn(IpAddr::V4(*bgp.router_id)));
+    );
+    // RFC 9572 §6.3: set the L (Leaf Information Required) flag so in-region
+    // tunnel leaves answer with a Leaf A-D (Type-11), letting the RBR learn the
+    // region's leaf set. Required for P2MP trees; also drives IR leaf discovery.
+    pmsi.set_leaf_info_required(true);
+    attr.pmsi_tunnel = Some(pmsi);
+    attr.nexthop = Some(BgpNexthop::Evpn(root));
 
     let rib = BgpRib::new(
         ORIGINATED_PEER,
@@ -6559,6 +6569,11 @@ pub fn route_evpn_update(
     // RFC 9574 selective AR: an AR-LEAF responds to a selective Replicator-AR
     // route (L flag set) by originating a Leaf A-D toward it.
     evpn_selective_ar_on_receive(route, attr, bgp, peers);
+
+    // RFC 9572 §6.3 tunnel segmentation: a node responds to a Per-Region
+    // I-PMSI (Type-9) / S-PMSI (Type-10) A-D route that carries the L flag by
+    // originating a Leaf A-D (Type-11) back toward the route's originator.
+    evpn_segmentation_leaf_ad_on_receive(route, attr, bgp, peers);
 }
 
 /// Withdraw one EVPN route advertised in an MP_UNREACH_NLRI from Adj-RIB-In
@@ -6594,9 +6609,17 @@ pub fn route_evpn_withdraw(ident: usize, route: &EvpnRoute, bgp: &mut BgpTop, pe
     // RFC 9574 selective AR: a withdrawn Replicator-AR route pulls the Leaf
     // A-D we may have originated toward it (no-op if we originated none).
     if bgp.local_rib.evpn_flood.role == AssistedReplicationRole::Leaf
-        && let EvpnRoute::Multicast(m) = route
+        && let EvpnRoute::Multicast(_) = route
     {
-        let route_key = evpn_leaf_ad_route_key(m);
+        let route_key = evpn_leaf_ad_route_key(route);
+        let originator = IpAddr::V4(*bgp.router_id);
+        evpn_withdraw_leaf_ad(route_key, originator, bgp, peers);
+    }
+
+    // RFC 9572 §6.3: a withdrawn Per-Region I-PMSI / S-PMSI pulls the Leaf A-D
+    // we may have originated in response (no-op if we originated none).
+    if matches!(route, EvpnRoute::PerRegionImet(_) | EvpnRoute::SPmsi(_)) {
+        let route_key = evpn_leaf_ad_route_key(route);
         let originator = IpAddr::V4(*bgp.router_id);
         evpn_withdraw_leaf_ad(route_key, originator, bgp, peers);
     }
@@ -12771,25 +12794,43 @@ fn evpn_ipv4_route_target(addr: Ipv4Addr, local_admin: u16) -> ExtCommunityValue
     rt
 }
 
-/// The Leaf A-D `route_key` (RFC 9572 §3.3) for a Replicator-AR Type-3 IMET:
-/// its Route Type Specific NLRI (route-type + length + body), Add-Path id
-/// stripped, so leaf and replicator agree on the key.
-fn evpn_leaf_ad_route_key(m: &EvpnMulticast) -> Vec<u8> {
+/// The Leaf A-D `route_key` (RFC 9572 §3.3) for a triggering route: its Route
+/// Type Specific NLRI (route-type + length + body), Add-Path id stripped, so
+/// the leaf and the tunnel root agree on the key. Works for any route type
+/// that can carry the L flag — the Type-3 Replicator-AR IMET (RFC 9574) and
+/// the RFC 9572 Type-9 (Per-Region I-PMSI) / Type-10 (S-PMSI) segmentation
+/// routes.
+fn evpn_leaf_ad_route_key(route: &EvpnRoute) -> Vec<u8> {
+    let zeroed = match route.clone() {
+        EvpnRoute::Mac(m) => EvpnRoute::Mac(EvpnMac { id: 0, ..m }),
+        EvpnRoute::Multicast(m) => EvpnRoute::Multicast(EvpnMulticast { id: 0, ..m }),
+        EvpnRoute::Prefix(p) => EvpnRoute::Prefix(EvpnIpPrefix { id: 0, ..p }),
+        EvpnRoute::Smet(s) => EvpnRoute::Smet(EvpnSmet { id: 0, ..s }),
+        EvpnRoute::PerRegionImet(r) => EvpnRoute::PerRegionImet(EvpnPerRegionImet { id: 0, ..r }),
+        EvpnRoute::SPmsi(r) => EvpnRoute::SPmsi(EvpnSPmsi { id: 0, ..r }),
+        EvpnRoute::LeafAd(r) => EvpnRoute::LeafAd(EvpnLeafAd { id: 0, ..r }),
+    };
     let mut buf = BytesMut::new();
-    EvpnRoute::Multicast(EvpnMulticast { id: 0, ..m.clone() }).nlri_emit(&mut buf);
+    zeroed.nlri_emit(&mut buf);
     buf.to_vec()
 }
 
-/// RFC 9574 selective AR: originate (or refresh) a Leaf A-D route (EVPN Route
-/// Type 11) toward a selective AR-REPLICATOR. `route_key` is the
-/// Replicator-AR route's NLRI; `replicator_nh` its next hop (→ the `<NH>:0`
-/// IP-specific RT scoping the route to that replicator); `originator` is our
-/// (AR-LEAF) VTEP IP; `vni` the BUM domain.
+/// Originate (or refresh) a Leaf A-D route (EVPN Route Type 11) in response to
+/// a triggering route that carried the L flag. `route_key` is the triggering
+/// route's NLRI; `upstream_nh` its next hop (→ the `<NH>:0` IP-specific RT
+/// scoping the Leaf A-D back to that upstream); `originator` is our VTEP IP;
+/// `vni` the BUM domain.
+///
+/// `ar_leaf` selects the PMSI tunnel encoding: `true` for RFC 9574 selective
+/// Assisted Replication (AR-typed Leaf PMSI, toward an AR-REPLICATOR), `false`
+/// for RFC 9572 §6.3 tunnel segmentation (plain Ingress-Replication PMSI,
+/// toward a Type-9/10 originator). Both root the PMSI at our own VTEP.
 fn evpn_originate_leaf_ad(
     route_key: Vec<u8>,
     originator: IpAddr,
-    replicator_nh: Ipv4Addr,
+    upstream_nh: Ipv4Addr,
     vni: u32,
+    ar_leaf: bool,
     bgp: &mut BgpTop,
     peers: &mut PeerMap,
 ) {
@@ -12802,10 +12843,10 @@ fn evpn_originate_leaf_ad(
 
     let mut attr = BgpAttr::new();
     attr.ecom = Some(ExtCommunity::from([
-        evpn_ipv4_route_target(replicator_nh, 0),
+        evpn_ipv4_route_target(upstream_nh, 0),
         evpn_encap_vxlan(),
     ]));
-    attr.pmsi_tunnel = Some(
+    attr.pmsi_tunnel = Some(if ar_leaf {
         PmsiTunnel {
             flags: 0,
             tunnel_type: PmsiTunnel::TUNNEL_ASSISTED_REPLICATION,
@@ -12813,8 +12854,16 @@ fn evpn_originate_leaf_ad(
             endpoint: originator,
             tree_id: None,
         }
-        .with_ar_type(AssistedReplicationType::Leaf),
-    );
+        .with_ar_type(AssistedReplicationType::Leaf)
+    } else {
+        PmsiTunnel {
+            flags: 0,
+            tunnel_type: PmsiTunnel::TUNNEL_INGRESS_REPLICATION,
+            vni,
+            endpoint: originator,
+            tree_id: None,
+        }
+    });
     attr.nexthop = Some(BgpNexthop::Evpn(originator));
 
     let rib = BgpRib::new(
@@ -12873,7 +12922,7 @@ fn evpn_selective_ar_on_receive(
     if bgp.local_rib.evpn_flood.role != AssistedReplicationRole::Leaf {
         return;
     }
-    let EvpnRoute::Multicast(m) = route else {
+    let EvpnRoute::Multicast(_) = route else {
         return;
     };
     let Some(pmsi) = attr.pmsi_tunnel.as_ref() else {
@@ -12895,8 +12944,48 @@ fn evpn_selective_ar_on_receive(
         return;
     };
     let originator = IpAddr::V4(*bgp.router_id);
-    let route_key = evpn_leaf_ad_route_key(m);
-    evpn_originate_leaf_ad(route_key, originator, nh, vni, bgp, peers);
+    let route_key = evpn_leaf_ad_route_key(route);
+    evpn_originate_leaf_ad(route_key, originator, nh, vni, true, bgp, peers);
+}
+
+/// RFC 9572 §6.3 tunnel-segmentation receive hook. A segmentation node answers
+/// a Per-Region I-PMSI (Type-9) or S-PMSI (Type-10) A-D route that carries the
+/// L (Leaf Information Required) flag by originating a Leaf A-D (Type-11)
+/// toward the route's originator: keyed by the triggering NLRI and scoped to
+/// the originator's next hop with an IP-specific RT. Independent of the
+/// RFC 9574 AR role — a region/AS leaf reports itself regardless of AR.
+fn evpn_segmentation_leaf_ad_on_receive(
+    route: &EvpnRoute,
+    attr: &BgpAttr,
+    bgp: &mut BgpTop,
+    peers: &mut PeerMap,
+) {
+    if !matches!(route, EvpnRoute::PerRegionImet(_) | EvpnRoute::SPmsi(_)) {
+        return;
+    }
+    let Some(pmsi) = attr.pmsi_tunnel.as_ref() else {
+        return;
+    };
+    if !pmsi.leaf_info_required() {
+        return;
+    }
+    // The IP-specific RT scopes the Leaf A-D to the Type-9/10 originator's next
+    // hop; IPv4 only (VXLAN VTEPs are IPv4 here).
+    let upstream_nh = match attr.nexthop.as_ref() {
+        Some(BgpNexthop::Evpn(IpAddr::V4(nh))) => *nh,
+        _ => return,
+    };
+    // Never report ourselves to ourselves (e.g. a Type-9 we re-originated and
+    // received back before loop detection — defensive).
+    if upstream_nh == *bgp.router_id {
+        return;
+    }
+    let Some(vni) = extract_vni_from_attr(attr) else {
+        return;
+    };
+    let originator = IpAddr::V4(*bgp.router_id);
+    let route_key = evpn_leaf_ad_route_key(route);
+    evpn_originate_leaf_ad(route_key, originator, upstream_nh, vni, false, bgp, peers);
 }
 
 fn evpn_route_target(asn: u32, vni: u32) -> ExtCommunityValue {
@@ -13223,7 +13312,7 @@ mod evpn_selective_ar_tests {
             ether_tag: 0,
             addr: IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1)),
         };
-        let key = evpn_leaf_ad_route_key(&m);
+        let key = evpn_leaf_ad_route_key(&EvpnRoute::Multicast(m.clone()));
         assert_eq!(
             key[0], 3,
             "route_key starts with the Type-3 route-type byte"
@@ -13236,6 +13325,33 @@ mod evpn_selective_ar_tests {
                 assert_eq!(p.addr, m.addr);
             }
             other => panic!("expected Multicast, got {other:?}"),
+        }
+    }
+
+    /// RFC 9572 §6.3: the Leaf A-D route_key generalizes to a Per-Region
+    /// I-PMSI (Type-9) triggering route — it is that Type-9 NLRI (route-type
+    /// byte 9) with the Add-Path id stripped, parsing back as a Type-9.
+    #[test]
+    fn leaf_ad_route_key_is_per_region_imet_nlri() {
+        let r = EvpnPerRegionImet {
+            id: 7, // Add-Path id must NOT leak into the route_key
+            rd: RouteDistinguisher::default(),
+            ether_tag: 0,
+            region_id: bgp_packet::region_id_from_asn(65001),
+        };
+        let key = evpn_leaf_ad_route_key(&EvpnRoute::PerRegionImet(r.clone()));
+        assert_eq!(
+            key[0], 9,
+            "route_key starts with the Type-9 route-type byte"
+        );
+        let (_, parsed) =
+            EvpnRoute::parse_nlri(&key, false).expect("route_key parses as a Type-9 NLRI");
+        match parsed {
+            EvpnRoute::PerRegionImet(p) => {
+                assert_eq!(p.id, 0, "Add-Path id stripped");
+                assert_eq!(p.region_id, r.region_id);
+            }
+            other => panic!("expected PerRegionImet, got {other:?}"),
         }
     }
 }
