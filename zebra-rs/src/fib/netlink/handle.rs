@@ -2265,7 +2265,13 @@ impl FibHandle {
         // `vrf_tables[table_id]`. Skips the per-`Nexthop` branch
         // because `IlmEntry::nexthop` is `Nexthop::default()` for
         // this variant.
+        // The Mirror Context label (RFC 8679) decaps identically to a
+        // BGP VPN label: pop + route the inner packet through the VRF.
         if let IlmType::DecapVrf {
+            table_id: _,
+            vrf_ifindex,
+        }
+        | IlmType::ContextLabel {
             table_id: _,
             vrf_ifindex,
         } = ilm.ilm_type

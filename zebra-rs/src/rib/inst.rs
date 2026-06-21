@@ -463,6 +463,22 @@ pub enum IlmType {
         table_id: u32,
         vrf_ifindex: u32,
     },
+    /// IS-IS SR-MPLS Mirror Context label (RFC 8679 egress protection):
+    /// the protector (PEB) pops the context label a failed egress's PLR
+    /// pushed and delivers the inner packet into the dual-homed VRF.
+    /// Netlink-identical to [`IlmType::DecapVrf`] (pop + `Oif(vrf_ifindex)`
+    /// so the inner packet lands in `vrf_tables[table_id]`) — a distinct
+    /// variant only so show output and ILM selection can tell a context
+    /// label from a BGP VPN label. The egress-link-protection model (the
+    /// protected egress redirects and strips its own VPN label, like the
+    /// SRv6 End.B6.Encaps path) means the protector only ever pops this
+    /// one label; the two-label node-protection variant (a context label
+    /// over the egress's VPN label) needs the Linux global-ILM
+    /// approximation and is deferred.
+    ContextLabel {
+        table_id: u32,
+        vrf_ifindex: u32,
+    },
     /// BGP Labeled-Unicast transit swap (RFC 3107 / RFC 8277): the
     /// kernel swaps the incoming local label for the next-hop's outgoing
     /// label stack (`nexthop.mpls_label`) and forwards toward the

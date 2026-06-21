@@ -109,6 +109,29 @@ pub(crate) fn desired_context_routes(
         .collect()
 }
 
+/// The SR-MPLS Mirror Context ILM decaps to install, as
+/// `(context_label, table_id, vrf_ifindex)`. One per `dataplane: mpls`
+/// entry that has both an allocated context label (`labels`) and a
+/// `via-vrf` resolved to its kernel `(table_id, vrf_ifindex)` in
+/// `known_vrfs`. An entry missing either is skipped — it re-installs once
+/// the label is allocated (SR-MPLS up) or the VRF appears (`VrfAdd`).
+pub(crate) fn desired_context_labels(
+    entries: &MirrorProtectMap,
+    labels: &BTreeMap<Ipv6Net, u32>,
+    known_vrfs: &BTreeMap<String, (u32, u32)>,
+) -> Vec<(u32, u32, u32)> {
+    entries
+        .values()
+        .filter(|e| e.dataplane == MirrorDataplane::Mpls)
+        .filter_map(|e| {
+            let label = *labels.get(&e.protected_locator)?;
+            let vrf = e.via_vrf.as_deref()?;
+            let &(table_id, vrf_ifindex) = known_vrfs.get(vrf)?;
+            Some((label, table_id, vrf_ifindex))
+        })
+        .collect()
+}
+
 // ── PLR-side reception (Phase 6a) ─────────────────────────────────────
 
 /// A Mirror SID advertisement received from a peer — the PLR's view of
@@ -287,6 +310,7 @@ fn reoriginate(isis: &mut Isis) {
     isis.update_mirror_sids();
     isis.update_mirror_context_routes();
     isis.update_mirror_labels();
+    isis.update_mirror_context_labels();
     let _ = isis.tx.send(Message::LspOriginate(Level::L1, None));
     let _ = isis.tx.send(Message::LspOriginate(Level::L2, None));
 }
@@ -394,6 +418,46 @@ mod tests {
             vec![(net("2001:db8:a3:1::/64"), "cust".to_string())],
             "only the fully-eligible entry yields a context route"
         );
+    }
+
+    #[test]
+    fn desired_context_labels_requires_mpls_label_and_known_vrf() {
+        let mut map = MirrorProtectMap::new();
+
+        // MPLS entry with via-vrf, an allocated label, and a known VRF →
+        // yields one ILM decap.
+        let mut ok = MirrorProtect::new(net("2001:db8::3/128"));
+        ok.dataplane = MirrorDataplane::Mpls;
+        ok.via_vrf = Some("cust".to_string());
+        map.insert(ok.protected_locator, ok);
+
+        // MPLS entry without via-vrf → skipped.
+        let mut no_vrf = MirrorProtect::new(net("2001:db8::4/128"));
+        no_vrf.dataplane = MirrorDataplane::Mpls;
+        map.insert(no_vrf.protected_locator, no_vrf);
+
+        // SRv6 entry with via-vrf → skipped (MPLS ILM only).
+        let mut srv6 = MirrorProtect::new(net("2001:db8::5/128"));
+        srv6.via_vrf = Some("cust".to_string());
+        map.insert(srv6.protected_locator, srv6);
+
+        let mut labels = BTreeMap::new();
+        labels.insert(net("2001:db8::3/128"), 16001u32);
+        labels.insert(net("2001:db8::4/128"), 16002u32);
+        let mut vrfs: BTreeMap<String, (u32, u32)> = BTreeMap::new();
+        vrfs.insert("cust".to_string(), (10, 42));
+
+        assert_eq!(
+            desired_context_labels(&map, &labels, &vrfs),
+            vec![(16001, 10, 42)],
+            "only the MPLS entry with label + known via-vrf installs"
+        );
+
+        // VRF not yet known (VrfAdd will re-add) → nothing installs.
+        assert!(desired_context_labels(&map, &labels, &BTreeMap::new()).is_empty());
+
+        // No label allocated (SR-MPLS not up) → nothing installs.
+        assert!(desired_context_labels(&map, &BTreeMap::new(), &vrfs).is_empty());
     }
 
     #[test]
