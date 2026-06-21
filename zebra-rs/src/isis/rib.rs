@@ -1646,18 +1646,59 @@ pub(super) fn egress_retention_expire(top: &mut IsisTop, level: Level, locator: 
 /// cover one of *its own* End.DT46 service SIDs, so sending the full set
 /// untouched is correct — a transit node that holds no service SID inside
 /// any advertised locator redirects nothing. Idempotent reset.
-fn register_egress_protections(top: &IsisTop) {
-    let mut set: std::collections::BTreeMap<Ipv6Net, std::net::Ipv6Addr> =
-        std::collections::BTreeMap::new();
+fn register_egress_protections(top: &mut IsisTop) {
+    use std::collections::{BTreeMap, BTreeSet};
+    // Current LSDB scan: every advertised `(protected_locator ->
+    // (mirror_sid, protector))`, plus the set of nodes whose LSPs are
+    // present (so we can tell a withdrawn protector apart from an absent
+    // one).
+    let mut current: BTreeMap<Ipv6Net, (std::net::Ipv6Addr, IsisSysId)> = BTreeMap::new();
+    let mut live_nodes: BTreeSet<IsisSysId> = BTreeSet::new();
     for level in [Level::L1, Level::L2] {
-        for e in super::egress_protection::collect_received_mirror_sids(top.lsdb.get(&level)) {
-            set.insert(e.protected_locator, e.mirror_sid);
+        let lsdb = top.lsdb.get(&level);
+        for (id, _) in lsdb.iter() {
+            if !id.is_pseudo() {
+                live_nodes.insert(id.sys_id());
+            }
+        }
+        for e in super::egress_protection::collect_received_mirror_sids(lsdb) {
+            current.insert(e.protected_locator, (e.mirror_sid, e.protector));
         }
     }
-    let protections: Vec<(Ipv6Net, std::net::Ipv6Addr)> = set.into_iter().collect();
+
+    let authoritative =
+        authoritative_protections(current, top.egress_protect_registered, &live_nodes);
+    *top.egress_protect_registered = authoritative.clone();
+
+    let protections: Vec<(Ipv6Net, std::net::Ipv6Addr)> = authoritative
+        .into_iter()
+        .map(|(l, (s, _))| (l, s))
+        .collect();
     let _ = top
         .rib_client
         .send(crate::rib::Message::EgressProtectSet { protections });
+}
+
+/// Proper withdrawal vs. PIC-sticky, factored out for testing. Start from
+/// what is advertised now (`current`), then carry forward a
+/// previously-registered protection (`prior`) ONLY when its protector's
+/// LSP is *absent* from `live_nodes` (a convergence transient — the SPF
+/// can momentarily read a partial LSDB, and disarming protection right as
+/// a link fails is exactly wrong). A protector whose LSP is present but no
+/// longer carries the Mirror SID has genuinely withdrawn it, so it is
+/// dropped.
+fn authoritative_protections(
+    current: std::collections::BTreeMap<Ipv6Net, (Ipv6Addr, IsisSysId)>,
+    prior: &std::collections::BTreeMap<Ipv6Net, (Ipv6Addr, IsisSysId)>,
+    live_nodes: &std::collections::BTreeSet<IsisSysId>,
+) -> std::collections::BTreeMap<Ipv6Net, (Ipv6Addr, IsisSysId)> {
+    let mut authoritative = current;
+    for (loc, (sid, protector)) in prior.iter() {
+        if !authoritative.contains_key(loc) && !live_nodes.contains(protector) {
+            authoritative.insert(*loc, (*sid, *protector));
+        }
+    }
+    authoritative
 }
 
 /// SR-MPLS counterpart of [`register_egress_protections`]: tell the RIB
@@ -2382,6 +2423,47 @@ pub fn mpls_route(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn authoritative_protections_withdraws_only_when_protector_present() {
+        use std::collections::{BTreeMap, BTreeSet};
+        let loc = |s: &str| s.parse::<Ipv6Net>().unwrap();
+        let sid = |s: &str| s.parse::<Ipv6Addr>().unwrap();
+        let peb = IsisSysId {
+            id: [0, 0, 0, 0, 0, 4],
+        };
+        let pec = IsisSysId {
+            id: [0, 0, 0, 0, 0, 5],
+        };
+
+        let l_keep = loc("2001:db8:a::/48"); // still advertised
+        let l_withdrawn_live = loc("2001:db8:b::/48"); // protector live, stopped advertising
+        let l_withdrawn_absent = loc("2001:db8:c::/48"); // protector LSP absent (transient)
+
+        let prior: BTreeMap<Ipv6Net, (Ipv6Addr, IsisSysId)> = [
+            (l_keep, (sid("2001:db8:4::1"), peb)),
+            (l_withdrawn_live, (sid("2001:db8:4::2"), peb)),
+            (l_withdrawn_absent, (sid("2001:db8:4::3"), pec)),
+        ]
+        .into_iter()
+        .collect();
+
+        // Only `l_keep` is still advertised; peb's LSP is present, pec's is not.
+        let current: BTreeMap<Ipv6Net, (Ipv6Addr, IsisSysId)> =
+            [(l_keep, (sid("2001:db8:4::1"), peb))]
+                .into_iter()
+                .collect();
+        let live_nodes: BTreeSet<IsisSysId> = [peb].into_iter().collect();
+
+        let out = authoritative_protections(current, &prior, &live_nodes);
+
+        // Still advertised → kept.
+        assert!(out.contains_key(&l_keep));
+        // Protector live but no longer advertising → genuine withdrawal, dropped.
+        assert!(!out.contains_key(&l_withdrawn_live));
+        // Protector's LSP absent → convergence transient, kept (PIC-like).
+        assert!(out.contains_key(&l_withdrawn_absent));
+    }
 
     #[test]
     fn resolve_self_sid_index_and_label() {

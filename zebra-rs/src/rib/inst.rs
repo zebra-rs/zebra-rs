@@ -2687,18 +2687,12 @@ impl Rib {
                     .await;
             }
             Message::EgressProtectSet { protections } => {
-                // Sticky: only a non-empty scan updates the registration.
-                // IS-IS recomputes this from a live LSDB scan on every SPF,
-                // and that scan can momentarily read empty during a local
-                // link event (the SPF runs against a transiently-partial
-                // LSDB). Dropping the last-known protector on that transient
-                // would disarm egress protection right when a PE-CE link is
-                // failing. Keeping it is PIC-like and benign — redirecting
-                // to a since-withdrawn Mirror SID merely drops, no worse
-                // than decapping into a VRF that can't deliver anyway.
-                if !protections.is_empty() {
-                    self.egress_protect = protections.into_iter().collect();
-                }
+                // Authoritative replace. The PIC-sticky / withdrawal logic
+                // now lives in IS-IS `register_egress_protections`, which
+                // has the LSDB to tell a genuine withdrawal (protector
+                // present, no longer advertising) from a convergence
+                // transient (protector's LSP absent — carried forward).
+                self.egress_protect = protections.into_iter().collect();
                 self.reconcile_egress_redirects().await;
             }
             Message::EgressMplsProtectSet { protections } => {

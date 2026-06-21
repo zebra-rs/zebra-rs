@@ -77,6 +77,23 @@ Feature: IS-IS SRv6 Mirror SID egress protection — control plane + install
     Then show command "show isis route detail" in namespace "p1" should contain "fcbb:bbbb:3::/48"
     And show command "show isis route detail" in namespace "p1" should contain "fcbb:bbbb:4:1::"
 
+  Scenario: peb withdraws the Mirror SID and the PLR backup clears
+    Given the test topology exists
+    # Remove peb's Mirror SID. peb re-originates its LSP without it; because
+    # peb's LSP is still present, this is a genuine withdrawal (not a
+    # convergence-transient empty scan), so every receiver drops the
+    # protection rather than sticky-keeping it. (The withdrawal-vs-PIC
+    # distinction itself is unit-tested in `authoritative_protections`;
+    # here we confirm the live end-to-end propagation.)
+    When I apply command "delete router isis egress-protection protect fcbb:bbbb:3::/48 mirror-sid fcbb:bbbb:4:1::" in namespace "peb"
+    And I wait 5 seconds
+    # peb no longer advertises the Mirror SID...
+    Then show command "show isis egress-protection" in namespace "peb" should not contain "fcbb:bbbb:4:1::"
+    # ...so the PLR's route to the protected locator no longer carries the
+    # Mirror SID backup, nor does its received view.
+    And show command "show isis route detail" in namespace "p1" should not contain "fcbb:bbbb:4:1::"
+    And show command "show isis egress-protection" in namespace "p1" should not contain "fcbb:bbbb:4:1::"
+
   Scenario: Teardown topology
     Given the test topology exists
     When I stop zebra-rs in namespace "pe1"
