@@ -256,6 +256,13 @@ pub struct Isis {
     /// node-down failover survives SPF reconvergence. Keyed per level;
     /// reconciled each SPF and withdrawn when the egress returns.
     pub retained_locators: Levels<BTreeMap<Ipv6Net, RetainEntry>>,
+    /// Last set of received Mirror SID egress-protection registrations
+    /// pushed to the RIB, keyed by protected locator → `(mirror_sid,
+    /// protector)`. Carries the protector so `register_egress_protections`
+    /// can tell a genuine withdrawal (protector's LSP present but no longer
+    /// advertising) from a convergence-transient empty scan (protector's
+    /// LSP absent — keep, PIC-like).
+    pub egress_protect_registered: BTreeMap<Ipv6Net, (std::net::Ipv6Addr, IsisSysId)>,
     pub ilm: Levels<BTreeMap<u32, SpfIlm>>,
     /// Currently-installed local (self-originated) Prefix-SID ILM
     /// entries, keyed by MPLS label. Level-independent (the label is
@@ -613,6 +620,7 @@ pub struct IsisTop<'a> {
     pub rib: &'a mut Levels<PrefixMap<Ipv4Net, SpfRoute<V4>>>,
     pub rib_v6: &'a mut Levels<PrefixMap<Ipv6Net, SpfRoute<V6>>>,
     pub retained_locators: &'a mut Levels<BTreeMap<Ipv6Net, RetainEntry>>,
+    pub egress_protect_registered: &'a mut BTreeMap<Ipv6Net, (std::net::Ipv6Addr, IsisSysId)>,
     pub ilm: &'a mut Levels<BTreeMap<u32, SpfIlm>>,
     pub rib_client: &'a crate::rib::client::RibClient,
     pub hostname: &'a mut Levels<Hostname>,
@@ -788,6 +796,7 @@ impl Isis {
                 rib: Levels::<PrefixMap<Ipv4Net, SpfRoute<V4>>>::default(),
                 rib_v6: Levels::<PrefixMap<Ipv6Net, SpfRoute<V6>>>::default(),
                 retained_locators: Levels::<BTreeMap<Ipv6Net, RetainEntry>>::default(),
+                egress_protect_registered: BTreeMap::new(),
                 ilm: Levels::<BTreeMap<u32, SpfIlm>>::default(),
                 self_sid_ilm: BTreeMap::new(),
                 hostname: Levels::<Hostname>::default(),
@@ -2895,6 +2904,7 @@ impl Isis {
             rib: &mut self.rib,
             rib_v6: &mut self.rib_v6,
             retained_locators: &mut self.retained_locators,
+            egress_protect_registered: &mut self.egress_protect_registered,
             ilm: &mut self.ilm,
             rib_client: &self.ctx.rib,
             hostname: &mut self.hostname,
