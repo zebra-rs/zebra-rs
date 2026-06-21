@@ -27,6 +27,7 @@ pub use comps::Completion;
 
 mod paths;
 pub use paths::path_from_command;
+pub use paths::vrf_config_split;
 pub use paths::vrf_redirect_split;
 
 mod show_builder;

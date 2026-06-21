@@ -23,7 +23,7 @@ use crate::spf;
 use crate::{
     config::{
         Args, CommandPath, ConfigChannel, ConfigOp, ConfigRequest, RibSubscriber,
-        path_from_command, vrf_redirect_split,
+        path_from_command, vrf_config_split,
     },
     context::ProtoContext,
 };
@@ -936,8 +936,12 @@ impl Isis {
         // is already running. The default instance never runs these
         // through its own callback table. Only the default instance
         // owns children — a child's paths never carry a `vrf` segment,
-        // so this is a no-op there.
-        if let Some((name, rewritten)) = vrf_redirect_split(&msg.paths) {
+        // so this is a no-op there. Anchored to `router isis` (see
+        // `vrf_config_split`): the manager broadcasts every committed
+        // line to every protocol, so a generic match would otherwise
+        // spawn a phantom child for the top-level `/vrf/<name>` list or
+        // for another protocol's `router <other> vrf <name>` block.
+        if let Some((name, rewritten)) = vrf_config_split("isis", &msg.paths) {
             self.vrf_config_record(name, rewritten, msg.op);
             return;
         }

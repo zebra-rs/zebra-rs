@@ -92,6 +92,10 @@ isis_passive:
 	mkdir -p allure-results
 	cargo test --test cucumber -- --concurrency=1 --tags "@isis_passive"
 
+vrf_phantom_instance:
+	mkdir -p allure-results
+	cargo test --test cucumber -- --concurrency=1 --tags "@vrf_phantom_instance"
+
 isis_afi_enable:
 	mkdir -p allure-results
 	cargo test --test cucumber -- --concurrency=1 --tags "@isis_afi_enable"

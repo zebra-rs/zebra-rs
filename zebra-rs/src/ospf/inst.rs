@@ -27,7 +27,7 @@ use crate::spf::label_block::LabelConfig;
 use crate::{
     config::{
         Args, CommandPath, ConfigChannel, ConfigOp, ConfigRequest, RibSubscriber,
-        path_from_command, vrf_redirect_split,
+        path_from_command, vrf_config_split,
     },
     context::Task,
     ospf_event_trace, ospf_fsm_trace,
@@ -1296,8 +1296,12 @@ impl Ospf<Ospfv2> {
         // `/router/ospf/vrf/<name>/...` belongs to a per-VRF child, not
         // the default instance. Strip the `vrf <name>` selector and
         // buffer + forward the rewritten line; never dispatch it through
-        // the default instance's own callback table.
-        if let Some((name, rewritten)) = vrf_redirect_split(&msg.paths) {
+        // the default instance's own callback table. Anchored to `router
+        // ospf` (see `vrf_config_split`): the manager broadcasts every
+        // committed line to every protocol, so a generic match would
+        // otherwise spawn a phantom child for the top-level `/vrf/<name>`
+        // list or for another protocol's `router <other> vrf <name>`.
+        if let Some((name, rewritten)) = vrf_config_split("ospf", &msg.paths) {
             self.vrf_config_record(name, rewritten, msg.op);
             return;
         }
@@ -5331,8 +5335,12 @@ impl Ospf<Ospfv3> {
         // `/router/ospfv3/vrf/<name>/...` belongs to a per-VRF child.
         // Strip the `vrf <name>` selector and buffer + forward the
         // rewritten line; never dispatch it through the default
-        // instance's own callback table.
-        if let Some((name, rewritten)) = vrf_redirect_split(&msg.paths) {
+        // instance's own callback table. Anchored to `router ospfv3`
+        // (see `vrf_config_split`): the manager broadcasts every
+        // committed line to every protocol, so a generic match would
+        // otherwise spawn a phantom child for the top-level `/vrf/<name>`
+        // list or for another protocol's `router <other> vrf <name>`.
+        if let Some((name, rewritten)) = vrf_config_split("ospfv3", &msg.paths) {
             self.vrf_config_record(name, rewritten, msg.op);
             return;
         }
