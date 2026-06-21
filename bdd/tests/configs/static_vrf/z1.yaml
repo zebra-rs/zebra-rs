@@ -1,0 +1,33 @@
+# z1 — a single router with VRF cust holding two CE links. Two
+# static routes *inside the VRF* reach each host's loopback via its
+# CE link; forwarding between the hosts therefore rides entirely on
+# `router static vrf cust` routes installed into the VRF kernel table.
+vrf:
+- name: cust
+  ipv6:
+    route-target:
+      import:
+      - 65000:100
+      export:
+      - 65000:100
+interface:
+- if-name: ce1
+  vrf: cust
+  ipv6:
+    address: 2001:db8:a::1/64
+- if-name: ce2
+  vrf: cust
+  ipv6:
+    address: 2001:db8:b::1/64
+router:
+  static:
+    vrf:
+    - name: cust
+      ipv6:
+        route:
+        - prefix: 2001:db8:aa::1/128
+          nexthop:
+          - address: 2001:db8:a::2
+        - prefix: 2001:db8:bb::1/128
+          nexthop:
+          - address: 2001:db8:b::2

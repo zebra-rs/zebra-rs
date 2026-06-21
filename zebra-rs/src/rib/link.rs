@@ -631,6 +631,21 @@ impl Rib {
                 for addr in link.addr4.iter().chain(link.addr6.iter()) {
                     self.api_addr_add_vrf(addr, now_vrf_id);
                 }
+                // Replay this VRF's static routes now that the interface
+                // is enslaved: a route whose gateway sits on this link was
+                // unresolvable while the link was still in the default VRF,
+                // but the on-link stamp (`Rib::stamp_vrf_onlink`) can pin
+                // its egress now that `link.master` reflects the VRF.
+                if now_vrf_id != 0
+                    && let Some(name) = self
+                        .vrfs
+                        .values()
+                        .find(|v| v.table_id == now_vrf_id)
+                        .map(|v| v.name.clone())
+                {
+                    self.static_vrf_v4.reinstall(&name, &self.tx);
+                    self.static_vrf_v6.reinstall(&name, &self.tx);
+                }
                 // The interface's addresses changed scope: both the
                 // VRF it left and the one it joined (and the global
                 // pick, which excludes VRF members) may now derive a

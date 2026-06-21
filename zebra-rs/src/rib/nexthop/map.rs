@@ -94,6 +94,17 @@ impl NexthopMap {
             let entry = self.groups.get_mut(gid)?;
             if entry.is_none() {
                 *entry = Some(Group::from_nexthop_uni(uni, gid, table_id));
+            } else if let Some(Group::Uni(g)) = entry
+                && g.ifindex_origin.is_none()
+                && uni.ifindex_origin.is_some()
+            {
+                // A later install pinned an on-link egress the cached
+                // group was created without (the VRF-static on-link
+                // stamp — see `Rib::stamp_vrf_onlink`). Adopt it so the
+                // shared group resolves on-link instead of re-walking a
+                // table whose connected route the VRF enslave flushed.
+                g.ifindex_origin = uni.ifindex_origin;
+                g.set_valid(true);
             }
             return self.get_mut(gid);
         }
