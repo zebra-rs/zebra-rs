@@ -1,0 +1,17 @@
+# z3 — a PE in region B (AS 65002). It peers eBGP only with the RBR z2 and
+# receives region A's selective S-PMSI (Type-10) re-rooted at z2 (Originator =
+# 192.168.0.2), not z1's per-PE originator.
+router:
+  bgp:
+    global:
+      as: 65002
+      router-id: 192.168.0.3
+    neighbor:
+    - remote-address: 192.168.0.2
+      enabled: true
+      remote-as: 65001
+      afi-safi:
+      - name: ipv4
+        enabled: true
+      - name: evpn
+        enabled: true

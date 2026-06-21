@@ -1,0 +1,33 @@
+# z2 — the Regional Border Router (AS 65001). region-a (region-id 65001) is
+# the iBGP session to region A (z1); region-b (region-id 65002) is the eBGP
+# session to region B (z3). On receiving z1's in-region S-PMSI (Type-10) it
+# re-roots that selective (S,G) tunnel at itself toward region B. No local VXLAN.
+router:
+  bgp:
+    global:
+      as: 65001
+      router-id: 192.168.0.2
+    neighbor-group:
+    - name: region-a
+      remote-as: 65001
+      region-id: 65001
+    - name: region-b
+      remote-as: 65002
+      region-id: 65002
+    neighbor:
+    - remote-address: 192.168.0.1
+      enabled: true
+      neighbor-group: region-a
+      afi-safi:
+      - name: ipv4
+        enabled: true
+      - name: evpn
+        enabled: true
+    - remote-address: 192.168.0.3
+      enabled: true
+      neighbor-group: region-b
+      afi-safi:
+      - name: ipv4
+        enabled: true
+      - name: evpn
+        enabled: true

@@ -2250,13 +2250,27 @@ impl EvpnFloodState {
         // local-VXLAN SR PE roots it at its own VTEP toward every PE in the BUM
         // domain (RFC 9524). The gateway leaf set takes precedence — a node with
         // both is acting as the region's re-originator.
-        let (want, root): (BTreeSet<IpAddr>, Option<IpAddr>) = if is_sr && !v.gw_leaves.is_empty() {
-            (v.gw_leaves.clone(), v.gw_root)
-        } else if is_sr && v.root.is_some() {
-            (self.replication_leaves(vni), v.root)
-        } else {
-            (BTreeSet::new(), None)
-        };
+        let (vtep_leaves, root): (BTreeSet<IpAddr>, Option<IpAddr>) =
+            if is_sr && !v.gw_leaves.is_empty() {
+                (v.gw_leaves.clone(), v.gw_root)
+            } else if is_sr && v.root.is_some() {
+                (self.replication_leaves(vni), v.root)
+            } else {
+                (BTreeSet::new(), None)
+            };
+        // Resolve each leaf VTEP to the End.DT2M SID it advertised (RFC 9252
+        // SRv6 L2 Service TLV) — that's the outer DA the dataplane replicates
+        // toward. Fall back to the VTEP address when the leaf signalled no SID
+        // (e.g. its locator hadn't resolved, or an SR-MPLS tree).
+        let want: BTreeSet<IpAddr> = vtep_leaves
+            .into_iter()
+            .map(|leaf| {
+                v.sr_remote_sids
+                    .get(&leaf)
+                    .map(|sid| IpAddr::V6(*sid))
+                    .unwrap_or(leaf)
+            })
+            .collect();
         if want == v.repl_installed {
             ReplAction::None
         } else if want.is_empty() {
@@ -6752,6 +6766,64 @@ fn evpn_reoriginate_per_region(
     }
 }
 
+/// RFC 9572 §6: when an in-region S-PMSI (Type-10) arrives, a Regional Border
+/// Router re-roots that selective `(S,G)` tunnel at itself toward the other
+/// regions — the selective analog of `evpn_reoriginate_per_region`. The
+/// re-originated route keeps the `(src, grp)` but takes the RBR as Originator
+/// and next hop (next-hop-self), with a PMSI Tunnel rooted at the RBR carrying
+/// the Leaf-Information-Required flag (so in-region leaves answer with a Type-11
+/// Leaf A-D, reusing the generalized `evpn_segmentation_leaf_ad_on_receive`).
+fn evpn_reoriginate_spmsi(
+    bgp: &mut BgpTop,
+    peers: &mut PeerMap,
+    src: Option<IpAddr>,
+    grp: Option<IpAddr>,
+    vni: u32,
+    src_attr: &BgpAttr,
+) {
+    if bgp.router_id.is_unspecified() {
+        return;
+    }
+    let Some(rd) = rd_from_router_id_vni(*bgp.router_id, vni) else {
+        return;
+    };
+    let prefix = EvpnPrefix::SPmsi {
+        eth_tag: 0,
+        src,
+        grp,
+        orig: IpAddr::V4(*bgp.router_id),
+    };
+    let mut attr = BgpAttr::new();
+    attr.ecom = src_attr.ecom.clone();
+    let bum = bgp.local_rib.evpn_flood.bum_tunnel;
+    let (mut pmsi, root) = imet_pmsi_tunnel(
+        bum,
+        AssistedReplicationRole::None,
+        None,
+        IpAddr::V4(*bgp.router_id),
+        vni,
+    );
+    pmsi.set_leaf_info_required(true);
+    attr.pmsi_tunnel = Some(pmsi);
+    attr.nexthop = Some(BgpNexthop::Evpn(root));
+
+    let rib = BgpRib::new(
+        ORIGINATED_PEER,
+        Ipv4Addr::UNSPECIFIED,
+        BgpRibType::Originated,
+        0,
+        32768,
+        &attr,
+        None,
+        None,
+        false,
+    );
+    let (_replaced, selected, _next_id) = bgp.local_rib.update_evpn(rd, prefix.clone(), rib);
+    if !selected.is_empty() {
+        route_advertise_evpn_to_peers(rd, prefix, &selected, bgp, peers);
+    }
+}
+
 pub fn route_evpn_update(
     ident: usize,
     route: &EvpnRoute,
@@ -6894,6 +6966,18 @@ pub fn route_evpn_update(
         && let Some(vni) = extract_vni_from_attr(attr)
     {
         evpn_reoriginate_per_region(bgp, peers, region_id, vni, attr);
+    }
+
+    // RFC 9572 §6: an in-region S-PMSI (Type-10) is re-rooted per-region at the
+    // RBR — the selective counterpart of the Type-9 aggregation. Gated on the
+    // ingress peer carrying a region-id, and skips our own re-originated route
+    // (Originator == us) to avoid a re-origination loop.
+    if let EvpnRoute::SPmsi(s) = route
+        && peers.get_by_idx(ident).and_then(|p| p.region_id).is_some()
+        && s.originator != IpAddr::V4(*bgp.router_id)
+        && let Some(vni) = extract_vni_from_attr(attr)
+    {
+        evpn_reoriginate_spmsi(bgp, peers, s.src, s.grp, vni, attr);
     }
 
     // RFC 9574 selective AR: an AR-LEAF responds to a selective Replicator-AR
@@ -13004,6 +13088,119 @@ impl Bgp {
         route_withdraw_evpn_to_peers(rd, prefix, &mut self.peers);
     }
 
+    /// RFC 9572 §3.2: originate a Type-10 S-PMSI A-D route for a locally-snooped
+    /// `(S,G)` / `(*,G)`, declaring a *selective* provider tunnel for that flow
+    /// — the per-(S,G) analog of the inclusive Type-3 IMET. Unlike the Type-6
+    /// SMET (receiver interest, no tunnel — RFC 9251 §6), the S-PMSI carries a
+    /// PMSI Tunnel attribute rooting the selective tunnel at this node, so the
+    /// RBR can segment it per-region (`evpn_reoriginate_spmsi`). Gated on the
+    /// `segmentation` knob; called alongside `evpn_originate_smet`, so the
+    /// `igmp_mld_proxy` / advertisable-group gates already held at the caller.
+    pub fn evpn_originate_spmsi(
+        &mut self,
+        vni: u32,
+        vtep_local: IpAddr,
+        group: IpAddr,
+        source: Option<IpAddr>,
+    ) {
+        if !self.segmentation {
+            return;
+        }
+        if self.router_id.is_unspecified() || !smet_advertisable_group(group) {
+            return;
+        }
+        let Some(rd) = rd_from_router_id_vni(self.router_id, vni) else {
+            return;
+        };
+        let prefix = EvpnPrefix::SPmsi {
+            eth_tag: 0,
+            src: source,
+            grp: Some(group),
+            orig: vtep_local,
+        };
+        let mut attr = BgpAttr::new();
+        attr.ecom = Some(ExtCommunity::from([
+            evpn_route_target(self.asn, vni),
+            evpn_encap_vxlan(),
+        ]));
+        // The selective provider tunnel for this (S,G): an Ingress-Replication
+        // PMSI rooted at our VTEP (the key difference from a Type-6 SMET).
+        attr.pmsi_tunnel = Some(PmsiTunnel {
+            flags: 0,
+            tunnel_type: PmsiTunnel::TUNNEL_INGRESS_REPLICATION,
+            vni,
+            endpoint: vtep_local,
+            tree_id: None,
+        });
+        attr.nexthop = Some(BgpNexthop::Evpn(vtep_local));
+
+        let mut rib = BgpRib::new(
+            ORIGINATED_PEER,
+            Ipv4Addr::UNSPECIFIED,
+            BgpRibType::Originated,
+            0,
+            32768,
+            &attr,
+            None,
+            None,
+            false,
+        );
+        let (_replaced, selected, next_id) =
+            self.local_rib.update_evpn(rd, prefix.clone(), rib.clone());
+        rib.local_id = next_id;
+
+        let mut bgp_ref = BgpTop {
+            router_id: &self.router_id,
+            srv6_ipv6_export: self.srv6_ipv6_export.as_ref(),
+            local_rib: &mut self.local_rib,
+            shard: &mut self.shard,
+            tx: &self.tx,
+            rib_client: &self.ctx.rib,
+            attr_store: &mut self.attr_store,
+            update_groups: &mut self.update_groups,
+            interface_addrs: &self.interface_addrs,
+            vrf_export: None,
+            color_policy: Some(&self.color_policy),
+            flex_algo_routes: Some(&self.flex_algo_routes),
+            flex_algo_srv6_routes: Some(&self.flex_algo_srv6_routes),
+            vrf_import: None,
+            nexthop_cache: None,
+            vrf_transport_v4: None,
+            vrf_transport_v6: None,
+            central_label_alloc: None,
+        };
+        if !selected.is_empty() {
+            route_advertise_evpn_to_peers(rd, prefix, &selected, &mut bgp_ref, &mut self.peers);
+        }
+    }
+
+    /// Inverse of `evpn_originate_spmsi`. Not gated on `segmentation` so turning
+    /// the feature off (or a membership leave) always clears the originated
+    /// route.
+    pub fn evpn_withdraw_spmsi(
+        &mut self,
+        vni: u32,
+        vtep_local: IpAddr,
+        group: IpAddr,
+        source: Option<IpAddr>,
+    ) {
+        if !smet_advertisable_group(group) {
+            return;
+        }
+        let Some(rd) = rd_from_router_id_vni(self.router_id, vni) else {
+            return;
+        };
+        let prefix = EvpnPrefix::SPmsi {
+            eth_tag: 0,
+            src: source,
+            grp: Some(group),
+            orig: vtep_local,
+        };
+        let _ = self.local_rib.remove_evpn(rd, &prefix, 0, ORIGINATED_PEER);
+        let _ = self.local_rib.select_best_path_evpn(&rd, &prefix);
+        route_withdraw_evpn_to_peers(rd, prefix, &mut self.peers);
+    }
+
     /// Reconcile the BUM flood list of every VNI against the current
     /// Assisted Replication role/AR-IP. Called from the config callbacks
     /// when `role` or `replicator-ip` changes — e.g. switching to AR-LEAF
@@ -13616,6 +13813,34 @@ mod evpn_flood_tests {
                 root: ip("10.0.0.9"),
                 srv6: true,
                 leaves: BTreeSet::from([ip("10.0.0.2"), ip("10.0.0.3")]),
+            }
+        );
+    }
+
+    /// A leaf that advertised an End.DT2M SID is replicated toward that SID;
+    /// a leaf with no advertised SID falls back to its VTEP address.
+    #[test]
+    fn replication_action_resolves_leaf_dt2m_sids() {
+        let mut f = EvpnFloodState {
+            bum_tunnel: EvpnBumTunnel::SrV6P2mp,
+            ..Default::default()
+        };
+        f.set_local_root(100, ip("10.0.0.9"));
+        // Leaf .2 advertised an End.DT2M SID; leaf .3 did not.
+        f.update_sr_remote(100, ip("10.0.0.2"), 100);
+        f.update_sr_remote_sid(
+            100,
+            ip("10.0.0.2"),
+            Some("2001:db8:2::100".parse().unwrap()),
+        );
+        f.update_sr_remote(100, ip("10.0.0.3"), 100);
+        assert_eq!(
+            f.replication_action(100),
+            ReplAction::Add {
+                root: ip("10.0.0.9"),
+                srv6: true,
+                // .2 → its SID, .3 → VTEP fallback.
+                leaves: BTreeSet::from([ip("2001:db8:2::100"), ip("10.0.0.3")]),
             }
         );
     }
