@@ -572,6 +572,17 @@ pub enum EvpnBumTunnel {
     SrV6P2mp,
 }
 
+/// `router bgp afi-safi evpn sr-p2mp-dataplane` config: the interfaces +
+/// next hop the SRv6 P2MP BUM-replication eBPF dataplane attaches to. Pushed
+/// to the RIB replication supervisor via [`rib::Message::ReplDataplaneCfg`].
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct EvpnSrDataplaneCfg {
+    pub overlay_iface: Option<String>,
+    pub underlay_iface: Option<String>,
+    pub bridge_iface: Option<String>,
+    pub next_hop_mac: Option<String>,
+}
+
 pub struct Bgp {
     pub asn: u32,
     /// Effective BGP Identifier — what OPENs, EVPN RDs and the show
@@ -874,6 +885,9 @@ pub struct Bgp {
     /// [`Self::srv6_sid_pool`] (same band as a per-VRF SID) and freed when
     /// the VNI stops originating.
     pub evpn_dt2m_sids: BTreeMap<u32, (std::net::Ipv6Addr, u16)>,
+    /// `sr-p2mp-dataplane` config (interfaces + next hop for the SRv6 P2MP BUM
+    /// replication eBPF dataplane), pushed to the RIB supervisor on change.
+    pub evpn_sr_dataplane: EvpnSrDataplaneCfg,
     /// Precomputed advertise-time data derived from
     /// [`Self::srv6_ipv6_sid`] and the locator, borrowed into
     /// [`super::peer::BgpTop`] so the egress path stamps
@@ -1100,6 +1114,7 @@ impl Bgp {
             srv6_ipv6_unicast: false,
             srv6_ipv6_sid: None,
             evpn_dt2m_sids: BTreeMap::new(),
+            evpn_sr_dataplane: EvpnSrDataplaneCfg::default(),
             srv6_ipv6_export: None,
             networks_v6: std::collections::BTreeSet::new(),
             peer_index: BTreeMap::new(),
