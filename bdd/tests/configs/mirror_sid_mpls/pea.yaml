@@ -1,0 +1,92 @@
+# pea — the primary (protected) egress. IS-IS L2 SR-MPLS (loopback
+# 1.1.1.3/32, Prefix-SID index 3 -> label 16003), iBGP VPNv4 to pe1 and
+# peb. VRF vrf-cust holds the ce2 CE link (ce2 is dual-homed to pea and
+# peb). pea reaches ce2's loopback via a static route inside the VRF and
+# originates it into VPNv4 with its per-VRF MPLS label — so pe1 forwards
+# ce2-bound traffic with pea's VPN label under the SR transport. peb
+# advertises a Mirror Context binding (SID/Label Binding TLV 149, M-flag)
+# for pea's loopback; on PE-CE (pea-ce2) link failure pea redirects that
+# VPN traffic to peb's context label (egress link protection, wired in a
+# follow-up — this config is the steady-state baseline).
+vrf:
+- name: vrf-cust
+  ipv4:
+    route-target:
+      import:
+      - 65000:100
+      export:
+      - 65000:100
+interface:
+- if-name: lo
+  ipv4:
+    address: 1.1.1.3/32
+- if-name: pea-pe1
+  ipv4:
+    address: 10.0.13.2/30
+- if-name: pea-peb
+  ipv4:
+    address: 10.0.34.1/30
+- if-name: pea-ce2
+  vrf: vrf-cust
+  ipv4:
+    address: 10.2.2.1/30
+router:
+  static:
+    vrf:
+    - name: vrf-cust
+      ipv4:
+        route:
+        - prefix: 10.20.20.20/32
+          nexthop:
+          - address: 10.2.2.2
+  isis:
+    net: 49.0000.0000.0000.0003.00
+    hostname: pea
+    is-type: level-2-only
+    segment-routing: mpls
+    te-router-id: 1.1.1.3
+    interface:
+    - if-name: lo
+      ipv4:
+        enable: true
+        prefix-sid:
+          index: 3
+    - if-name: pea-pe1
+      network-type: point-to-point
+      metric: 10
+      ipv4:
+        enable: true
+    - if-name: pea-peb
+      network-type: point-to-point
+      metric: 10
+      ipv4:
+        enable: true
+  bgp:
+    global:
+      as: 65000
+      router-id: 1.1.1.3
+    timer:
+      adv-interval:
+        ibgp: 1
+    neighbor:
+    - remote-address: 1.1.1.1
+      remote-as: 65000
+      update-source: 1.1.1.3
+      enabled: true
+      afi-safi:
+      - name: vpnv4
+        enabled: true
+    - remote-address: 1.1.1.4
+      remote-as: 65000
+      update-source: 1.1.1.3
+      enabled: true
+      afi-safi:
+      - name: vpnv4
+        enabled: true
+    vrf:
+    - name: vrf-cust
+      rd: 65000:3
+      afi-safi:
+        ipv4:
+          network:
+          - prefix: 10.20.20.20/32

@@ -2,7 +2,7 @@ use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::fmt::Display;
 use std::net::Ipv4Addr;
 
-use ipnet::{Ipv4Net, Ipv6Net};
+use ipnet::{IpNet, Ipv4Net, Ipv6Net};
 use isis_packet::*;
 use prefix_trie::PrefixMap;
 use tokio::sync::mpsc::{self, UnboundedReceiver, UnboundedSender};
@@ -382,7 +382,7 @@ pub struct Isis {
     /// with the M-flag. Held so the label is stable across LSP
     /// regenerations and released back to the pool when the entry is
     /// removed.
-    pub mirror_labels: std::collections::BTreeMap<ipnet::Ipv6Net, u32>,
+    pub mirror_labels: std::collections::BTreeMap<ipnet::IpNet, u32>,
 
     /// Context labels for which a Mirror Context ILM decap is currently
     /// installed in the kernel LFIB (the `via-vrf` MPLS path). Tracked so
@@ -702,7 +702,7 @@ pub struct IsisTop<'a> {
     /// SR-MPLS Mirror Context labels per protected-locator (see
     /// `Isis::mirror_labels`); read by `lsp_generate` to emit the
     /// SID/Label Binding TLV (149) for `dataplane: mpls` entries.
-    pub mirror_labels: &'a BTreeMap<Ipv6Net, u32>,
+    pub mirror_labels: &'a BTreeMap<IpNet, u32>,
 }
 
 impl Isis {
@@ -3306,7 +3306,7 @@ impl Isis {
     /// phase) distinguishes context labels by their entry type.
     pub(crate) fn update_mirror_labels(&mut self) {
         use super::egress_protection::MirrorDataplane;
-        let desired: std::collections::BTreeSet<ipnet::Ipv6Net> = self
+        let desired: std::collections::BTreeSet<ipnet::IpNet> = self
             .config
             .egress_protections
             .values()
@@ -3314,7 +3314,7 @@ impl Isis {
             .map(|e| e.protected_locator)
             .collect();
         // Release labels for entries no longer desired.
-        let stale: Vec<ipnet::Ipv6Net> = self
+        let stale: Vec<ipnet::IpNet> = self
             .mirror_labels
             .keys()
             .filter(|k| !desired.contains(*k))
