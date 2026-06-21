@@ -40,6 +40,20 @@
 //! the reduced encap, no SRH, is handled here; the SRH-present form is a
 //! follow-up.)
 //!
+//! ## Root `H.Encaps` from a bare frame — `tc_evpn_encap` (clsact egress)
+//!
+//! At the ingress PE a BUM frame arrives *bare* (just `[inner Ethernet][...]`)
+//! from the local bridge — there is no outer SID to match on, so this is a
+//! separate classifier attached at the overlay bridge-port's **egress**. For
+//! every bare frame it prepends a reduced SRv6 encap (link Ethernet + outer
+//! IPv6, Next Header = Ethernet/143, src = the root SID), then fans out exactly
+//! like `End.Replicate`: one `clone_redirect` per leaf with the outer DA set to
+//! that leaf's SID, out the underlay. `bpf_skb_adjust_room` can't prepend a full
+//! outer L2+L3 in front of the frame, so — mirroring the leaf decap — the buffer
+//! is grown at the tail (`bpf_skb_change_tail`) and the bare frame slid right to
+//! open 54 bytes of headroom. Config (root SID, VNI, underlay ifindex, outer MAC
+//! header) comes from [`ENCAP_CFG`]; the leaf set is `REPL_SEG[vni]`.
+//!
 //! Packet access goes through `bpf_skb_store_bytes` / `bpf_skb_load_bytes`
 //! (`TcContext::store` / `::load`), never a raw `data` pointer, so nothing is
 //! held across the `clone_redirect` / `change_tail` calls that invalidate
@@ -93,9 +107,12 @@ const NH_ETHERNET: u8 = 143;
 /// Ethernet header + the outer IPv6 header. What follows is the inner Ethernet
 /// BUM frame, which becomes the new link frame.
 const DT2M_STRIP: usize = ETH_HLEN + IP6_HLEN; // 54
-/// Upper bound on the inner frame length copied to the front during decap (a
-/// jumbo-free Ethernet payload fits well under this). The verifier needs a
-/// constant loop bound; a frame longer than this is left for the stack.
+/// Bytes of reduced SRv6 encap the root prepends to a bare BUM frame: a new link
+/// Ethernet header + the outer IPv6 header (mirror of [`DT2M_STRIP`]).
+const ENCAP_OVERHEAD: usize = ETH_HLEN + IP6_HLEN; // 54
+/// Upper bound on the inner frame length copied during decap/encap (a jumbo-free
+/// Ethernet payload fits well under this). The verifier needs a constant loop
+/// bound; a frame longer than this is left for the stack.
 const MAX_INNER: usize = 2048;
 
 /// One VNI's SR P2MP replication segment (RFC 9524), keyed by VNI in
@@ -135,6 +152,28 @@ static DT2M_SID: HashMap<[u8; 16], u32> = HashMap::with_max_entries(256, 0);
 /// `[1]` = leaf `End.DT2M` bridge-flood target. 0 = unset (role disabled).
 #[map]
 static CONFIG: Array<u32> = Array::with_max_entries(2, 0);
+
+/// Root `H.Encaps` config (single entry), filled by the loader for the
+/// `tc_evpn_encap` role. `#[repr(C)]` with the `u32`s first so it is padding-free
+/// and matches the loader's `aya::Pod` mirror byte-for-byte.
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct EncapCfg {
+    /// VNI whose leaf set (`REPL_SEG[vni]`) the bare frame fans out to.
+    pub vni: u32,
+    /// Underlay ifindex the encapsulated copies are `clone_redirect`ed out of.
+    /// 0 = the encap role is not configured.
+    pub underlay_ifindex: u32,
+    /// Outer IPv6 source address (this PE's root SID).
+    pub root_sid: [u8; 16],
+    /// Prebuilt outer link Ethernet header (dst MAC | src MAC | 0x86DD).
+    pub link_eth: [u8; ETH_HLEN],
+    pub _pad: [u8; 2],
+}
+
+/// Single-entry root `H.Encaps` config the loader fills from `encap-cfg`.
+#[map]
+static ENCAP_CFG: Array<EncapCfg> = Array::with_max_entries(1, 0);
 
 #[classifier]
 pub fn tc_evpn_replicate(ctx: TcContext) -> i32 {
@@ -280,6 +319,87 @@ fn end_dt2m(ctx: &TcContext) -> Result<i32, ()> {
     // Flood into the bridge (ingress on a bridge port): the bridge replicates
     // the inner BUM frame to the other local attachment circuits.
     Ok(unsafe { bpf_redirect(bridge, BPF_F_INGRESS) } as i32)
+}
+
+#[classifier]
+pub fn tc_evpn_encap(ctx: TcContext) -> i32 {
+    match try_encap(&ctx) {
+        Ok(action) => action,
+        Err(()) => ACT_PIPE,
+    }
+}
+
+/// Root `H.Encaps`: wrap a bare BUM Ethernet frame in a reduced SRv6 encap and
+/// fan it out, one `clone_redirect` per leaf with the outer DA set to that
+/// leaf's SID.
+fn try_encap(ctx: &TcContext) -> Result<i32, ()> {
+    let Some(cfg) = ENCAP_CFG.get(0) else {
+        return Ok(ACT_PIPE);
+    };
+    if cfg.underlay_ifindex == 0 {
+        return Ok(ACT_PIPE); // encap role not configured
+    }
+    let Some(seg) = (unsafe { REPL_SEG.get(&cfg.vni) }) else {
+        return Ok(ACT_PIPE); // no leaf set yet
+    };
+    let n_leaves = seg.n_leaves;
+    if n_leaves == 0 {
+        return Ok(ACT_PIPE);
+    }
+
+    // The bare BUM frame currently being transmitted out the overlay port.
+    let inner_total = ctx.len() as usize;
+    if inner_total < ETH_HLEN || inner_total > MAX_INNER {
+        return Ok(ACT_PIPE);
+    }
+
+    // Open ENCAP_OVERHEAD bytes of headroom at the front: grow the buffer at the
+    // tail, then slide the bare frame right. (`bpf_skb_adjust_room` can't prepend
+    // a full outer L2+L3.) Descending copy so a not-yet-read lower byte is never
+    // clobbered by an earlier (higher) write.
+    let new_total = inner_total + ENCAP_OVERHEAD;
+    if unsafe { bpf_skb_change_tail(ctx.skb.skb, new_total as u32, 0) } != 0 {
+        return Ok(ACT_PIPE); // can't grow (MTU) — leave the frame for the stack
+    }
+    let mut k = 0usize;
+    while k < inner_total && k < MAX_INNER {
+        let src = inner_total - 1 - k;
+        let b: u8 = ctx.load(src).map_err(|_| ())?;
+        ctx.store(ENCAP_OVERHEAD + src, &b, 0).map_err(|_| ())?;
+        k += 1;
+    }
+    if k < inner_total {
+        return Ok(ACT_SHOT); // unreachable (inner_total <= MAX_INNER) — be safe
+    }
+
+    // Outer link Ethernet header (dst | src | 0x86DD), prebuilt by the loader.
+    ctx.store(0, &cfg.link_eth, 0).map_err(|_| ())?;
+
+    // Outer IPv6 header: version 6, payload length = the inner frame, Next Header
+    // = Ethernet(143), Hop Limit 64, src = root SID. The DA is set per leaf below.
+    let mut ip6 = [0u8; IP6_HLEN];
+    ip6[0] = 0x60;
+    ip6[4] = (inner_total >> 8) as u8;
+    ip6[5] = inner_total as u8;
+    ip6[6] = NH_ETHERNET;
+    ip6[7] = 64;
+    ip6[8..24].copy_from_slice(&cfg.root_sid);
+    ctx.store(IP6_OFF, &ip6, 0).map_err(|_| ())?;
+
+    // Fan out: per leaf, set the outer DA and clone a copy out the underlay.
+    for i in 0..MAX_LEAVES {
+        if i as u32 >= n_leaves {
+            break;
+        }
+        let leaf = seg.leaves[i];
+        if ctx.store(IP6_DST_OFF, &leaf, 0).is_err() {
+            break;
+        }
+        let _ = ctx.clone_redirect(cfg.underlay_ifindex, 0);
+    }
+
+    // Drop the bare original — the encapsulated copies carry it onward.
+    Ok(ACT_SHOT)
 }
 
 #[cfg(not(test))]
