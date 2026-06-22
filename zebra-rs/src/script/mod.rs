@@ -187,6 +187,37 @@ pub fn loc_rib_import_v4(_prefix: IpNet, _attr: &BgpAttr, _peer: &PeerView) -> I
     ImportOutcome::nomatch()
 }
 
+/// The script name bound to the IPv4-unicast Loc-RIB **withdraw** hook,
+/// or `None` when unbound.
+static WITHDRAW_BINDING_V4: OnceLock<RwLock<Option<String>>> = OnceLock::new();
+
+fn withdraw_binding_v4() -> &'static RwLock<Option<String>> {
+    WITHDRAW_BINDING_V4.get_or_init(|| RwLock::new(None))
+}
+
+/// Bind (or, with `None`, unbind) the IPv4-unicast withdraw hook.
+pub fn set_withdraw_binding_v4(name: Option<String>) {
+    *withdraw_binding_v4().write().unwrap() = name;
+}
+
+/// Run the IPv4-unicast withdraw hook against the currently-bound script.
+///
+/// Fires when a path leaves the Loc-RIB; `attr` is the **stored Loc-RIB
+/// attributes of the path being removed** (a wire withdraw carries only
+/// the NLRI), so a script can recover e.g. the GBP tag to tear down a
+/// side-effect. The hook is observe-only — its return value is ignored —
+/// and fail-safe. No-op when unbound or the feature is off.
+#[cfg(feature = "lua")]
+pub fn loc_rib_withdraw_v4(prefix: IpNet, attr: &BgpAttr, peer: &PeerView) {
+    if let Some(name) = withdraw_binding_v4().read().unwrap().clone() {
+        engine::loc_rib_withdraw(&name, prefix, attr, peer);
+    }
+}
+
+/// Feature-off no-op.
+#[cfg(not(feature = "lua"))]
+pub fn loc_rib_withdraw_v4(_prefix: IpNet, _attr: &BgpAttr, _peer: &PeerView) {}
+
 /// Run the bound script's
 /// `loc_rib_import(prefix, attributes, peer, RM_*)` and return its
 /// [`Action`].
