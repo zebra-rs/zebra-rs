@@ -77,6 +77,16 @@ sha1 = "0.11"
 sha2 = "0.11"
 hmac = "0.13"
 rs-pfcp = "0.3.1"
+# Embedded Lua scripting engine — optional, enabled by the `lua` feature.
+# `vendored` bundles the Lua 5.4 interpreter so the build stays hermetic
+# (no system liblua). Off by default, mirroring FRR's --enable-scripting.
+mlua = { version = "0.10", features = ["lua54", "vendored"], optional = true }
+
+[features]
+default = []
+# Compile the embedded Lua scripting engine (src/script). Off by default;
+# enable with `--features lua`.
+lua = ["dep:mlua"]
 
 [target.'cfg(target_os = "linux")'.dependencies]
 rtnetlink = { git = "https://github.com/zebra-rs/rtnetlink", rev = "2d7b1830e9bd9a049a757f0a79ccd16216450bf2" }

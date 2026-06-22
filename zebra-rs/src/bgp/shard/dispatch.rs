@@ -360,6 +360,40 @@ impl BgpShard {
             decision
         };
 
+        // Lua import hook (Adj-RIB-In → Loc-RIB), run on the shard worker
+        // thread (thread-local VM) right after native inbound policy.
+        // Plain IPv4-unicast only (`rd == None`); VPNv4 is skipped. The
+        // shard carries only router-id + IBGP/EBGP for the peer table —
+        // remote-as / addresses are enriched in a later PR. A `Failure`
+        // verdict denies the route (same drop path as a policy deny).
+        #[cfg(feature = "lua")]
+        let decision = decision.and_then(|mut d| {
+            if rd.is_some() {
+                return Some(d);
+            }
+            let peer = crate::script::PeerView {
+                remote_as: 0,
+                local_as: 0,
+                remote_id: peer_router_id,
+                local_id: std::net::Ipv4Addr::UNSPECIFIED,
+                remote_address: std::net::IpAddr::V4(std::net::Ipv4Addr::UNSPECIFIED),
+                state: String::new(),
+                is_ibgp: matches!(typ, super::super::route::BgpRibType::IBGP),
+            };
+            let outcome =
+                crate::script::loc_rib_import_v4(ipnet::IpNet::V4(nlri.prefix), &d.attr, &peer);
+            match outcome.action {
+                crate::script::Action::Failure => None,
+                crate::script::Action::MatchAndChange => {
+                    if let Some(attr) = outcome.attr {
+                        d.attr = attr;
+                    }
+                    Some(d)
+                }
+                _ => Some(d),
+            }
+        });
+
         let Some(decision) = decision else {
             // Inbound policy denied: drop any Loc-RIB row from this peer.
             let removed = self.remove(rd, nlri.prefix, nlri.id, ident);
