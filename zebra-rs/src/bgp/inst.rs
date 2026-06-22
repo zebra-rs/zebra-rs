@@ -649,6 +649,11 @@ pub struct Bgp {
     /// commit; consumed (and cleared) at `CommitEnd` to decide whether to
     /// reconfigure a running controller.
     pub mup_c_dirty: bool,
+    /// MUP routes the controller has originated, keyed by session SEID →
+    /// (originated NLRI, allocated SRv6 SID function). Tracked so a
+    /// Session Deletion / Modification withdraws the exact prior route and
+    /// returns its SID function to the pool.
+    pub mup_c_originated: BTreeMap<u64, (bgp_packet::MupPrefix, u16)>,
     /// Local bridge FDB shadow keyed by `(vni, mac)`. Populated from
     /// every `RibRx::FdbAdd`, removed on `RibRx::FdbDel`. We need
     /// durable state (not just one-shot event handling) because the
@@ -1088,6 +1093,7 @@ impl Bgp {
             mup_c: None,
             mup_c_view: crate::mup_c::inst::MupCView::default(),
             mup_c_dirty: false,
+            mup_c_originated: BTreeMap::new(),
             local_fdb: BTreeMap::new(),
             local_vxlans: BTreeMap::new(),
             local_smet: BTreeMap::new(),
@@ -1966,9 +1972,29 @@ impl Bgp {
             }
             Message::MupC(ev) => {
                 // A session/association change from the in-process MUP
-                // controller. Record it in the read-only view that
-                // `show bgp mobile-uplane mup-c` renders. MUP route
-                // origination from these events lands in a follow-up.
+                // controller. Drive MUP route origination, then record it
+                // in the read-only view `show bgp mobile-uplane mup-c`
+                // renders.
+                use crate::mup_c::inst::MupCEvent;
+                match &ev {
+                    MupCEvent::SessionUp(session) => self.originate_mup_route(session),
+                    MupCEvent::SessionDown { seid } => self.withdraw_mup_route(*seid),
+                    MupCEvent::AssocDown { peer } => {
+                        // The peer's sessions are about to drop from the
+                        // view; withdraw their routes first.
+                        let seids: Vec<u64> = self
+                            .mup_c_view
+                            .sessions
+                            .iter()
+                            .filter(|(_, s)| s.peer == *peer)
+                            .map(|(seid, _)| *seid)
+                            .collect();
+                        for seid in seids {
+                            self.withdraw_mup_route(seid);
+                        }
+                    }
+                    MupCEvent::Listener { .. } | MupCEvent::AssocUp { .. } => {}
+                }
                 self.mup_c_view.apply(ev);
             }
             Message::Relisten => {
