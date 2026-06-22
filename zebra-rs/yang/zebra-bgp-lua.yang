@@ -105,6 +105,10 @@ module zebra-bgp-lua {
           ext:help "Script run when an EVPN route is admitted into the Loc-RIB (sees prefix.evpn)";
           type string;
         }
+        leaf withdraw {
+          ext:help "Script run when an EVPN route is removed from the Loc-RIB (sees the stored attributes)";
+          type string;
+        }
       }
     }
   }

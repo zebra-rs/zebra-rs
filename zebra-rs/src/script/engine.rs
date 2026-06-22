@@ -191,15 +191,36 @@ impl Engine {
         })
     }
 
-    /// Run the script's `loc_rib_withdraw(prefix, attributes, peer, RM_*)`.
-    /// Observe-only: the return value is ignored (the route is already
-    /// gone), so there is no attribute write-back. A script that defines
-    /// no `loc_rib_withdraw` is a silent no-op (a script may bind only the
-    /// import hook).
     fn run_withdraw(
         &self,
         name: &str,
         prefix: IpNet,
+        attr: &BgpAttr,
+        peer: &PeerView,
+    ) -> mlua::Result<()> {
+        let prefix_t = marshal::prefix_table(&self.lua, prefix)?;
+        self.run_withdraw_prefix(name, prefix_t, attr, peer)
+    }
+
+    fn run_withdraw_evpn(
+        &self,
+        name: &str,
+        route: &EvpnRoute,
+        attr: &BgpAttr,
+        peer: &PeerView,
+    ) -> mlua::Result<()> {
+        let prefix_t = marshal::evpn_prefix_table(&self.lua, route)?;
+        self.run_withdraw_prefix(name, prefix_t, attr, peer)
+    }
+
+    /// Prefix-agnostic core of the withdraw hook. Observe-only: the return
+    /// value is ignored (the route is already gone), so there is no
+    /// attribute write-back. A script that defines no `loc_rib_withdraw`
+    /// is a silent no-op (a script may bind only the import hook).
+    fn run_withdraw_prefix(
+        &self,
+        name: &str,
+        prefix_t: Table,
         attr: &BgpAttr,
         peer: &PeerView,
     ) -> mlua::Result<()> {
@@ -210,9 +231,14 @@ impl Engine {
         let Some(func) = env.get::<Option<Function>>("loc_rib_withdraw")? else {
             return Ok(());
         };
-        let prefix_t = marshal::prefix_table(&self.lua, prefix)?;
         let attr_t = marshal::attr_table(&self.lua, attr)?;
         let peer_t = marshal::peer_table(&self.lua, peer)?;
+        // The withdraw hook is strictly observe-only: pass the tables
+        // deeply read-only so a script cannot even appear to mutate route
+        // state (the route is already gone — there is nothing to change).
+        let prefix_t = freeze(&self.lua, &prefix_t)?;
+        let attr_t = freeze(&self.lua, &attr_t)?;
+        let peer_t = freeze(&self.lua, &peer_t)?;
         let _: Value = func.call((
             prefix_t,
             attr_t,
@@ -224,6 +250,52 @@ impl Engine {
         ))?;
         Ok(())
     }
+}
+
+/// Recursively wrap `table` (and its nested table values) in a read-only
+/// proxy: an empty table whose metatable indexes the backing for reads and
+/// errors on every write. Existing keys are blocked too (the proxy is
+/// empty, so all access goes through `__index` / `__newindex`), and
+/// `__metatable = false` hides the metatable so a script can't unwrap it.
+/// `ipairs` and field reads work through `__index`; the withdraw hook uses
+/// this so it cannot mutate the route values it observes.
+fn freeze(lua: &Lua, table: &Table) -> mlua::Result<Table> {
+    // Freeze nested tables in the backing first (collect, then replace —
+    // no mutation during iteration).
+    let mut nested: Vec<(Value, Table)> = Vec::new();
+    table.for_each::<Value, Value>(|key, value| {
+        if let Value::Table(child) = value {
+            nested.push((key, child));
+        }
+        Ok(())
+    })?;
+    for (key, child) in nested {
+        let frozen = freeze(lua, &child)?;
+        table.raw_set(key, frozen)?;
+    }
+
+    let proxy = lua.create_table()?;
+    let meta = lua.create_table()?;
+    meta.set("__index", table.clone())?;
+    let backing = table.clone();
+    meta.set(
+        "__len",
+        lua.create_function(move |_, _: Table| Ok(backing.raw_len()))?,
+    )?;
+    meta.set(
+        "__newindex",
+        lua.create_function(
+            |_, (_t, _k, _v): (Table, Value, Value)| -> mlua::Result<()> {
+                Err(mlua::Error::RuntimeError(
+                    "read-only: the withdraw hook cannot modify route values".into(),
+                ))
+            },
+        )?,
+    )?;
+    // Hide the metatable so a script cannot reach `__newindex` to disable it.
+    meta.set("__metatable", false)?;
+    proxy.set_metatable(Some(meta));
+    Ok(proxy)
 }
 
 /// Load one script source into its own sandboxed environment table and
@@ -376,21 +448,34 @@ pub fn loc_rib_import_evpn(
     })
 }
 
-/// Thread-local entry point used by [`super::loc_rib_withdraw_v4`].
-/// Observe-only; fail-safe (errors are logged, nothing else happens).
-pub fn loc_rib_withdraw(name: &str, prefix: IpNet, attr: &BgpAttr, peer: &PeerView) {
+/// Sync the thread-local VM and run an observe-only `op` against it,
+/// logging (and otherwise swallowing) any error — the fail-safe used by
+/// both withdraw entry points.
+fn with_engine_unit(name: &str, op: impl FnOnce(&Engine) -> mlua::Result<()>) {
     let scripts = current();
     ENGINE.with(|cell| {
         let mut engine = cell.borrow_mut();
         engine.sync(&scripts);
-        if let Err(err) = engine.run_withdraw(name, prefix, attr, peer) {
+        if let Err(err) = op(&engine) {
             tracing::warn!("lua: withdraw hook '{name}' error: {err}");
         }
     });
 }
 
-/// Test-only: run the withdraw hook and surface the `Result` (the public
-/// entry swallows errors by design), so a test can assert the script ran
+/// Thread-local entry point used by [`super::loc_rib_withdraw_v4`].
+pub fn loc_rib_withdraw(name: &str, prefix: IpNet, attr: &BgpAttr, peer: &PeerView) {
+    with_engine_unit(name, |engine| engine.run_withdraw(name, prefix, attr, peer));
+}
+
+/// Thread-local entry point used by [`super::loc_rib_withdraw_evpn`].
+pub fn loc_rib_withdraw_evpn(name: &str, route: &EvpnRoute, attr: &BgpAttr, peer: &PeerView) {
+    with_engine_unit(name, |engine| {
+        engine.run_withdraw_evpn(name, route, attr, peer)
+    });
+}
+
+/// Test-only: run a withdraw hook and surface the `Result` (the public
+/// entries swallow errors by design), so a test can assert the script ran
 /// and saw the stored attributes.
 #[cfg(test)]
 fn run_withdraw_test(
@@ -404,6 +489,22 @@ fn run_withdraw_test(
         let mut engine = cell.borrow_mut();
         engine.sync(&scripts);
         engine.run_withdraw(name, prefix, attr, peer)
+    })
+}
+
+/// Test-only EVPN twin of [`run_withdraw_test`].
+#[cfg(test)]
+fn run_withdraw_evpn_test(
+    name: &str,
+    route: &EvpnRoute,
+    attr: &BgpAttr,
+    peer: &PeerView,
+) -> mlua::Result<()> {
+    let scripts = current();
+    ENGINE.with(|cell| {
+        let mut engine = cell.borrow_mut();
+        engine.sync(&scripts);
+        engine.run_withdraw_evpn(name, route, attr, peer)
     })
 }
 
@@ -735,6 +836,57 @@ mod tests {
     }
 
     #[test]
+    fn withdraw_tables_are_read_only() {
+        // The withdraw hook is observe-only: any write to prefix /
+        // attributes / peer (top-level or nested) must raise an error.
+        for body in [
+            "attributes.med = 5",                  // overwrite a scalar attribute
+            "attributes.foo = 1",                  // add a new key
+            "prefix.network = \"x\"",              // mutate prefix
+            "peer.remote_as = 0",                  // mutate peer
+            "attributes.ext_community[1] = \"x\"", // mutate a nested list
+        ] {
+            let src = format!(
+                "function loc_rib_withdraw(prefix, attributes, peer, F, N, M, C)\n{body}\nend"
+            );
+            let _g = install_one("ro", &src);
+            // A write attempt raises a Lua error, surfaced here as Err
+            // (the public entry would fail-safe and log it).
+            assert!(
+                run_withdraw_test("ro", net("10.0.0.0/24"), &BgpAttr::default(), &peer()).is_err(),
+                "write `{body}` should be rejected by the read-only table",
+            );
+        }
+    }
+
+    #[test]
+    fn withdraw_reads_still_work_under_freeze() {
+        // Freezing must not break reads: field access + ipairs over a
+        // nested list still work.
+        let _g = install_one(
+            "rd",
+            r#"
+            function loc_rib_withdraw(prefix, attributes, peer, F, N, M, C)
+                local _ = prefix.network
+                local n = 0
+                for _, ec in ipairs(attributes.ext_community) do n = n + 1 end
+                if peer.remote_as ~= 65001 or n ~= 1 then error("unexpected") end
+            end
+        "#,
+        );
+        let ecom = ExtCommunity::from([ExtCommunityValue {
+            high_type: 0x03,
+            low_type: 0x17,
+            val: [0x00, 0x00, 0x00, 0x00, 0x01, 0x2c],
+        }]);
+        let attr = BgpAttr {
+            ecom: Some(ecom),
+            ..Default::default()
+        };
+        assert!(run_withdraw_test("rd", net("10.0.0.0/24"), &attr, &peer()).is_ok());
+    }
+
+    #[test]
     fn withdraw_v4_binding_smoke() {
         // Exercise the public dispatch: unbound → no-op, bound → runs.
         let _g = install_one("wb", "function loc_rib_withdraw(p, a, pe, F, N, M, C) end");
@@ -848,5 +1000,48 @@ mod tests {
             loc_rib_import_evpn("evpn", &mac, &BgpAttr::default(), &peer()).action,
             Action::NoMatch
         );
+    }
+
+    #[test]
+    fn evpn_withdraw_sees_stored_attrs() {
+        // The GBP teardown move: on EVPN withdraw the script recovers the
+        // MAC (prefix.evpn.mac) and the GPI tag from the *stored* attrs of
+        // the path leaving the Loc-RIB. The script `error()`s on tag 300,
+        // which the test surfaces as Err.
+        use bgp_packet::{EvpnMac, EvpnRoute, RouteDistinguisher};
+        let _g = install_one(
+            "evpnw",
+            r#"
+            function loc_rib_withdraw(prefix, attributes, peer, FAIL, NOMATCH, MATCH, CHANGE)
+                if prefix.evpn.mac == "aa:bb:cc:dd:ee:01" then
+                    for _, ec in ipairs(attributes.ext_community) do
+                        if ecom.parse_gpi(ec) == 300 then
+                            error("teardown mac 300")
+                        end
+                    end
+                end
+            end
+        "#,
+        );
+        let mac = EvpnRoute::Mac(EvpnMac {
+            id: 0,
+            rd: "65000:1".parse::<RouteDistinguisher>().unwrap(),
+            esi: [0; 10],
+            ether_tag: 0,
+            mac: [0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0x01],
+            vni: 100,
+        });
+        let ecom = ExtCommunity::from([ExtCommunityValue {
+            high_type: 0x03,
+            low_type: 0x17,
+            val: [0x00, 0x00, 0x00, 0x00, 0x01, 0x2c],
+        }]);
+        let attr = BgpAttr {
+            ecom: Some(ecom),
+            ..Default::default()
+        };
+        assert!(run_withdraw_evpn_test("evpnw", &mac, &attr, &peer()).is_err());
+        // No GPI ext-community on the removed path → no-op.
+        assert!(run_withdraw_evpn_test("evpnw", &mac, &BgpAttr::default(), &peer()).is_ok());
     }
 }

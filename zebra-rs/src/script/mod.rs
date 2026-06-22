@@ -249,6 +249,32 @@ pub fn loc_rib_withdraw_v4(prefix: IpNet, attr: &BgpAttr, peer: &PeerView) {
 #[cfg(not(feature = "lua"))]
 pub fn loc_rib_withdraw_v4(_prefix: IpNet, _attr: &BgpAttr, _peer: &PeerView) {}
 
+/// The script name bound to the L2VPN-EVPN withdraw hook, or `None`.
+static WITHDRAW_BINDING_EVPN: OnceLock<RwLock<Option<String>>> = OnceLock::new();
+
+fn withdraw_binding_evpn() -> &'static RwLock<Option<String>> {
+    WITHDRAW_BINDING_EVPN.get_or_init(|| RwLock::new(None))
+}
+
+/// Bind (or, with `None`, unbind) the EVPN withdraw hook.
+pub fn set_withdraw_binding_evpn(name: Option<String>) {
+    *withdraw_binding_evpn().write().unwrap() = name;
+}
+
+/// Run the EVPN withdraw hook against the currently-bound script with the
+/// stored attributes of the EVPN path leaving the Loc-RIB (the teardown
+/// half of the GBP-over-EVPN demo). Observe-only; no-op when unbound/off.
+#[cfg(feature = "lua")]
+pub fn loc_rib_withdraw_evpn(route: &EvpnRoute, attr: &BgpAttr, peer: &PeerView) {
+    if let Some(name) = withdraw_binding_evpn().read().unwrap().clone() {
+        engine::loc_rib_withdraw_evpn(&name, route, attr, peer);
+    }
+}
+
+/// Feature-off no-op.
+#[cfg(not(feature = "lua"))]
+pub fn loc_rib_withdraw_evpn(_route: &EvpnRoute, _attr: &BgpAttr, _peer: &PeerView) {}
+
 /// Config-seeded lookup tables exposed to scripts as `map.get(ns, key)`.
 /// This is the non-blocking replacement for FRR's blocking HTTP GET: a
 /// background process can refresh a namespace out of band while the hook

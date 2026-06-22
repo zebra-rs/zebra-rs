@@ -7195,6 +7195,18 @@ pub fn route_evpn_withdraw(ident: usize, route: &EvpnRoute, bgp: &mut BgpTop, pe
     // and `.first()` is fine. If the prefix wasn't in the RIB the
     // vec is empty and the export becomes a no-op.
     let removed = bgp.local_rib.remove_evpn(rd, &prefix, id, ident);
+
+    // Lua EVPN withdraw hook (Loc-RIB → gone): hand the script the stored
+    // attributes of the EVPN path that just left the Loc-RIB (the GBP
+    // teardown move — recover the tag from `prefix.evpn` + the ext-comm).
+    #[cfg(feature = "lua")]
+    if let Some(gone) = removed.first()
+        && let Some(peer) = peers.get_by_idx(ident)
+    {
+        let view = lua_peer_view(peer);
+        crate::script::loc_rib_withdraw_evpn(route, &gone.attr, &view);
+    }
+
     let selected = bgp.local_rib.select_best_path_evpn(&rd, &prefix);
 
     route_evpn_export_selected(&rd, &prefix, &selected, removed.first(), bgp);
