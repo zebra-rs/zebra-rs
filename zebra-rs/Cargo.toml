@@ -77,15 +77,18 @@ sha1 = "0.11"
 sha2 = "0.11"
 hmac = "0.13"
 rs-pfcp = "0.3.1"
-# Embedded Lua scripting engine — optional, enabled by the `lua` feature.
-# `vendored` bundles the Lua 5.4 interpreter so the build stays hermetic
-# (no system liblua). Off by default, mirroring FRR's --enable-scripting.
+# Embedded Lua scripting engine, enabled by the `lua` feature (on by
+# default). `vendored` bundles the Lua 5.4 interpreter so the build stays
+# hermetic (no system liblua) — it does need a C compiler at build time.
 mlua = { version = "0.10", features = ["lua54", "vendored"], optional = true }
 
 [features]
-default = []
-# Compile the embedded Lua scripting engine (src/script). Off by default;
-# enable with `--features lua`.
+# `lua` is on by default so stock builds (and the BDD binary) ship the
+# embedded scripting engine. Build without it via
+# `--no-default-features` (the hooks compile to no-ops); that path is
+# guarded by the `no-lua` CI lane.
+default = ["lua"]
+# Compile the embedded Lua scripting engine (src/script).
 lua = ["dep:mlua"]
 
 [target.'cfg(target_os = "linux")'.dependencies]

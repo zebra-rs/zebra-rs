@@ -1165,4 +1165,55 @@ mod tests {
                 .any(|v| v.high_type == 0x03 && v.low_type == 0x17)
         );
     }
+
+    #[test]
+    fn shipped_gbp_example_loads_and_runs() {
+        // The example script packaged at /etc/zebra-rs/lua/gbp-example.lua
+        // must stay valid: `include_str!` pins the path at compile time,
+        // and exercising the egress path (map.get → ecom.gpi →
+        // MATCH_AND_CHANGE) proves it actually loaded and ran (a syntax
+        // error would fail-safe to a *loaded-script-missing* NoMatch, so
+        // we assert the positive transform).
+        use bgp_packet::{EvpnMac, EvpnRoute, RouteDistinguisher};
+        const EXAMPLE: &str = include_str!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../etc/zebra-rs/lua/gbp-example.lua"
+        ));
+        let _g = install_one("gbp_example", EXAMPLE);
+
+        let mac = EvpnRoute::Mac(EvpnMac {
+            id: 0,
+            rd: "65000:1".parse::<RouteDistinguisher>().unwrap(),
+            esi: [0; 10],
+            ether_tag: 0,
+            mac: [0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0x01],
+            vni: 100,
+        });
+        let mut sgt = std::collections::BTreeMap::new();
+        sgt.insert("aa:bb:cc:dd:ee:01".to_string(), "300".to_string());
+        crate::script::map_set_namespace("sgt", sgt);
+
+        // Egress: stamps the GPI ext-community looked up MAC → tag.
+        let out = adj_rib_out_evpn("gbp_example", &mac, &BgpAttr::default(), &peer());
+        assert_eq!(out.action, Action::MatchAndChange);
+        let ecom = out.attr.unwrap().ecom.unwrap();
+        assert!(
+            ecom.0
+                .iter()
+                .any(|v| v.high_type == 0x03 && v.low_type == 0x17)
+        );
+
+        // Import + withdraw run on the stamped route without error.
+        let stamped = BgpAttr {
+            ecom: Some(ecom),
+            ..Default::default()
+        };
+        assert_eq!(
+            loc_rib_import_evpn("gbp_example", &mac, &stamped, &peer()).action,
+            Action::NoMatch
+        );
+        assert!(run_withdraw_evpn_test("gbp_example", &mac, &stamped, &peer()).is_ok());
+
+        crate::script::map_clear_namespace("sgt");
+    }
 }

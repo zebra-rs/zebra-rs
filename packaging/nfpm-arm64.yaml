@@ -47,6 +47,11 @@ contents:
       mode: 0644
   - src: ../zebra-rs/yang
     dst: /etc/zebra-rs/yang
+  # Example Lua policy scripts for the embedded scripting engine (on by
+  # default). Operators drop their own scripts here and bind them from
+  # `router bgp { lua-script <name> { source-path ... } }`.
+  - src: ../etc/zebra-rs/lua
+    dst: /etc/zebra-rs/lua
   - src: ./modules-load.d/zebra-rs.conf
     dst: /etc/modules-load.d/zebra-rs.conf
   - src: ./patch/usr/lib/systemd/system/zebra-rs.service
