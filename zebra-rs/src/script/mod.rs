@@ -156,6 +156,13 @@ pub fn current() -> Arc<Scripts> {
     registry().read().unwrap().clone()
 }
 
+/// Current registry generation. Folded into `UpdateGroupSig` for the
+/// egress hook so a script hot-reload re-forms the update-groups and
+/// re-encodes (the canonical member must run the new transform).
+pub fn generation() -> u64 {
+    registry().read().unwrap().generation
+}
+
 /// The script name bound to the IPv4-unicast Adj-RIB-In → Loc-RIB import
 /// hook, or `None` when unbound. Kept separate from [`Scripts`] so
 /// changing the binding does not force every VM to recompile.
@@ -215,6 +222,81 @@ pub fn loc_rib_import_evpn(route: &EvpnRoute, attr: &BgpAttr, peer: &PeerView) -
 /// Feature-off no-op.
 #[cfg(not(feature = "lua"))]
 pub fn loc_rib_import_evpn(_route: &EvpnRoute, _attr: &BgpAttr, _peer: &PeerView) -> ImportOutcome {
+    ImportOutcome::nomatch()
+}
+
+// ---------------------------------------------------------------------------
+// Egress (Adj-RIB-Out) hook — the GBP advertise side. A bound egress script
+// is a black-box per-peer transform, so (per the egress design note, Model B)
+// `UpdateGroupSig` folds the script identity + the peer key in, making a
+// scripted peer its own singleton update-group — the transform then runs
+// per-peer with the full peer table. These bindings are read by
+// `signature_of` and (later) the advertise path; they are always compiled so
+// `signature_of` links regardless of the `lua` feature.
+// ---------------------------------------------------------------------------
+
+static EGRESS_BINDING_V4: OnceLock<RwLock<Option<String>>> = OnceLock::new();
+static EGRESS_BINDING_EVPN: OnceLock<RwLock<Option<String>>> = OnceLock::new();
+
+fn egress_slot_v4() -> &'static RwLock<Option<String>> {
+    EGRESS_BINDING_V4.get_or_init(|| RwLock::new(None))
+}
+
+fn egress_slot_evpn() -> &'static RwLock<Option<String>> {
+    EGRESS_BINDING_EVPN.get_or_init(|| RwLock::new(None))
+}
+
+/// Bind (or, with `None`, unbind) the IPv4-unicast egress hook.
+pub fn set_egress_binding_v4(name: Option<String>) {
+    *egress_slot_v4().write().unwrap() = name;
+}
+
+/// Bind (or, with `None`, unbind) the EVPN egress hook.
+pub fn set_egress_binding_evpn(name: Option<String>) {
+    *egress_slot_evpn().write().unwrap() = name;
+}
+
+/// The script bound to the IPv4-unicast egress hook, or `None`.
+pub fn egress_binding_v4() -> Option<String> {
+    egress_slot_v4().read().unwrap().clone()
+}
+
+/// The script bound to the EVPN egress hook, or `None`.
+pub fn egress_binding_evpn() -> Option<String> {
+    egress_slot_evpn().read().unwrap().clone()
+}
+
+/// Run the IPv4-unicast egress hook against the currently-bound script,
+/// transforming the advertised attributes (e.g. add a GPI ext-community).
+/// `Failure` means "do not advertise this route"; `MatchAndChange` carries
+/// the rewritten attributes. No-op when unbound / off.
+#[cfg(feature = "lua")]
+pub fn adj_rib_out_v4(prefix: IpNet, attr: &BgpAttr, peer: &PeerView) -> ImportOutcome {
+    match egress_binding_v4() {
+        Some(name) => engine::adj_rib_out(&name, prefix, attr, peer),
+        None => ImportOutcome::nomatch(),
+    }
+}
+
+/// Feature-off no-op.
+#[cfg(not(feature = "lua"))]
+pub fn adj_rib_out_v4(_prefix: IpNet, _attr: &BgpAttr, _peer: &PeerView) -> ImportOutcome {
+    ImportOutcome::nomatch()
+}
+
+/// Run the EVPN egress hook against the currently-bound script (sees
+/// `prefix.evpn`). Same contract as [`adj_rib_out_v4`].
+#[cfg(feature = "lua")]
+pub fn adj_rib_out_evpn(route: &EvpnRoute, attr: &BgpAttr, peer: &PeerView) -> ImportOutcome {
+    match egress_binding_evpn() {
+        Some(name) => engine::adj_rib_out_evpn(&name, route, attr, peer),
+        None => ImportOutcome::nomatch(),
+    }
+}
+
+/// Feature-off no-op.
+#[cfg(not(feature = "lua"))]
+pub fn adj_rib_out_evpn(_route: &EvpnRoute, _attr: &BgpAttr, _peer: &PeerView) -> ImportOutcome {
     ImportOutcome::nomatch()
 }
 

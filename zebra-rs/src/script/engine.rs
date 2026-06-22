@@ -139,13 +139,47 @@ impl Engine {
         self.run_import_prefix(name, prefix_t, attr, peer)
     }
 
-    /// Prefix-agnostic core of the import hook: given the already-built
-    /// `prefix` table (v4 or EVPN), build `attributes` / `peer`, call the
-    /// script's `loc_rib_import`, and fold a mutated `attributes` table
-    /// back on `MATCH_AND_CHANGE`.
     fn run_import_prefix(
         &self,
         name: &str,
+        prefix_t: Table,
+        attr: &BgpAttr,
+        peer: &PeerView,
+    ) -> mlua::Result<ImportOutcome> {
+        self.run_hook(name, "loc_rib_import", prefix_t, attr, peer)
+    }
+
+    fn run_adj_rib_out(
+        &self,
+        name: &str,
+        prefix: IpNet,
+        attr: &BgpAttr,
+        peer: &PeerView,
+    ) -> mlua::Result<ImportOutcome> {
+        let prefix_t = marshal::prefix_table(&self.lua, prefix)?;
+        self.run_hook(name, "adj_rib_out", prefix_t, attr, peer)
+    }
+
+    fn run_adj_rib_out_evpn(
+        &self,
+        name: &str,
+        route: &EvpnRoute,
+        attr: &BgpAttr,
+        peer: &PeerView,
+    ) -> mlua::Result<ImportOutcome> {
+        let prefix_t = marshal::evpn_prefix_table(&self.lua, route)?;
+        self.run_hook(name, "adj_rib_out", prefix_t, attr, peer)
+    }
+
+    /// Prefix- and direction-agnostic core of a transforming hook: given
+    /// the already-built `prefix` table (v4 or EVPN) and the script
+    /// function name (`loc_rib_import` or `adj_rib_out`), build
+    /// `attributes` / `peer`, call the function, and fold a mutated
+    /// `attributes` table back on `MATCH_AND_CHANGE`.
+    fn run_hook(
+        &self,
+        name: &str,
+        func_name: &str,
         prefix_t: Table,
         attr: &BgpAttr,
         peer: &PeerView,
@@ -154,7 +188,7 @@ impl Engine {
             .envs
             .get(name)
             .ok_or_else(|| mlua::Error::RuntimeError(format!("no loaded script '{name}'")))?;
-        let func: Function = env.get("loc_rib_import")?;
+        let func: Function = env.get(func_name)?;
         let attr_t = marshal::attr_table(&self.lua, attr)?;
         let peer_t = marshal::peer_table(&self.lua, peer)?;
         let ret: Value = func.call((
@@ -445,6 +479,25 @@ pub fn loc_rib_import_evpn(
 ) -> ImportOutcome {
     with_engine(name, |engine| {
         engine.run_import_evpn(name, route, attr, peer)
+    })
+}
+
+/// Thread-local entry point used by [`super::adj_rib_out_v4`].
+pub fn adj_rib_out(name: &str, prefix: IpNet, attr: &BgpAttr, peer: &PeerView) -> ImportOutcome {
+    with_engine(name, |engine| {
+        engine.run_adj_rib_out(name, prefix, attr, peer)
+    })
+}
+
+/// Thread-local entry point used by [`super::adj_rib_out_evpn`].
+pub fn adj_rib_out_evpn(
+    name: &str,
+    route: &EvpnRoute,
+    attr: &BgpAttr,
+    peer: &PeerView,
+) -> ImportOutcome {
+    with_engine(name, |engine| {
+        engine.run_adj_rib_out_evpn(name, route, attr, peer)
     })
 }
 
@@ -1043,5 +1096,73 @@ mod tests {
         assert!(run_withdraw_evpn_test("evpnw", &mac, &attr, &peer()).is_err());
         // No GPI ext-community on the removed path → no-op.
         assert!(run_withdraw_evpn_test("evpnw", &mac, &BgpAttr::default(), &peer()).is_ok());
+    }
+
+    #[test]
+    fn adj_rib_out_appends_gpi() {
+        // The GBP origination move (advertise side): the egress hook adds
+        // a GPI ext-community to the outbound attributes. Model B gives it
+        // the full `peer` table.
+        let _g = install_one(
+            "eg",
+            r#"
+            function adj_rib_out(prefix, attributes, peer, FAIL, NOMATCH, MATCH, CHANGE)
+                if peer.remote_as == 65001 then
+                    table.insert(attributes.ext_community, ecom.gpi(300))
+                    return { action = CHANGE, attributes = attributes }
+                end
+                return { action = NOMATCH }
+            end
+        "#,
+        );
+        let out = adj_rib_out("eg", net("10.0.0.0/24"), &BgpAttr::default(), &peer());
+        assert_eq!(out.action, Action::MatchAndChange);
+        let ecom = out
+            .attr
+            .expect("attributes present")
+            .ecom
+            .expect("ext-community installed");
+        let gpi = ecom
+            .0
+            .iter()
+            .find(|v| v.high_type == 0x03 && v.low_type == 0x17)
+            .expect("GPI ext-community present");
+        assert_eq!(u16::from_be_bytes([gpi.val[4], gpi.val[5]]), 300);
+    }
+
+    #[test]
+    fn adj_rib_out_evpn_appends_gpi() {
+        use bgp_packet::{EvpnMac, EvpnRoute, RouteDistinguisher};
+        let _g = install_one(
+            "ege",
+            r#"
+            function adj_rib_out(prefix, attributes, peer, FAIL, NOMATCH, MATCH, CHANGE)
+                if prefix.evpn and prefix.evpn.mac == "aa:bb:cc:dd:ee:01" then
+                    table.insert(attributes.ext_community, ecom.gpi(300))
+                    return { action = CHANGE, attributes = attributes }
+                end
+                return { action = NOMATCH }
+            end
+        "#,
+        );
+        let mac = EvpnRoute::Mac(EvpnMac {
+            id: 0,
+            rd: "65000:1".parse::<RouteDistinguisher>().unwrap(),
+            esi: [0; 10],
+            ether_tag: 0,
+            mac: [0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0x01],
+            vni: 100,
+        });
+        let out = adj_rib_out_evpn("ege", &mac, &BgpAttr::default(), &peer());
+        assert_eq!(out.action, Action::MatchAndChange);
+        assert!(
+            out.attr
+                .unwrap()
+                .ecom
+                .unwrap()
+                .0
+                .iter()
+                .any(|v| v.high_type == 0x03 && v.low_type == 0x17)
+        );
     }
 }
