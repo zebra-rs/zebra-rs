@@ -1216,4 +1216,83 @@ mod tests {
 
         crate::script::map_clear_namespace("sgt");
     }
+
+    #[test]
+    fn packaged_lua_scripts_load() {
+        // The other example scripts shipped to /etc/zebra-rs/lua must stay
+        // valid (they are packaged): `include_str!` pins each path at
+        // compile time, and the positive transforms below prove each one
+        // actually loaded and ran.
+        use bgp_packet::{EvpnMac, EvpnRoute, RouteDistinguisher};
+        const METRIC: &str = include_str!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../etc/zebra-rs/lua/metric.lua"
+        ));
+        const EXPORT: &str = include_str!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../etc/zebra-rs/lua/gbp-export.lua"
+        ));
+        const IMPORT: &str = include_str!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../etc/zebra-rs/lua/gbp-import.lua"
+        ));
+
+        // metric.lua — non-matching prefix bumps MED by 7 (proves it loaded).
+        {
+            let _g = install_one("metric_port", METRIC);
+            let out = loc_rib_import(
+                "metric_port",
+                net("10.0.0.0/24"),
+                &BgpAttr::default(),
+                &peer(),
+            );
+            assert_eq!(out.action, Action::MatchAndChange);
+            assert_eq!(out.attr.unwrap().med.map(|m| m.med), Some(7));
+            assert_eq!(
+                import("metric_port", "172.16.10.4/24", &BgpAttr::default()),
+                Action::NoMatch
+            );
+        }
+
+        let mac = EvpnRoute::Mac(EvpnMac {
+            id: 0,
+            rd: "65000:1".parse::<RouteDistinguisher>().unwrap(),
+            esi: [0; 10],
+            ether_tag: 0,
+            mac: [0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0x01],
+            vni: 100,
+        });
+
+        // gbp-export.lua — map.get → ecom.gpi → MATCH_AND_CHANGE (proves it loaded).
+        {
+            let _g = install_one("gbp_export", EXPORT);
+            let mut sgt = BTreeMap::new();
+            sgt.insert("aa:bb:cc:dd:ee:01".to_string(), "100".to_string());
+            crate::script::map_set_namespace("sgt", sgt);
+            let out = adj_rib_out_evpn("gbp_export", &mac, &BgpAttr::default(), &peer());
+            assert_eq!(out.action, Action::MatchAndChange);
+            assert!(
+                out.attr
+                    .unwrap()
+                    .ecom
+                    .unwrap()
+                    .0
+                    .iter()
+                    .any(|v| v.high_type == 0x03 && v.low_type == 0x17)
+            );
+            crate::script::map_clear_namespace("sgt");
+        }
+
+        // gbp-import.lua — loads + import/withdraw run without error.
+        {
+            let _g = install_one("gbp_import", IMPORT);
+            assert_eq!(
+                loc_rib_import_evpn("gbp_import", &mac, &BgpAttr::default(), &peer()).action,
+                Action::NoMatch
+            );
+            assert!(
+                run_withdraw_evpn_test("gbp_import", &mac, &BgpAttr::default(), &peer()).is_ok()
+            );
+        }
+    }
 }
