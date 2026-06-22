@@ -2823,17 +2823,52 @@ pub fn route_apply_policy_out_evpn(
     weight: u32,
 ) -> Option<PolicyDecision> {
     let evpn = AfiSafi::new(Afi::L2vpn, Safi::Evpn);
-    let config = peer.policy_list_at(evpn, InOut::Output);
-    if config.name.is_some() {
-        let Some(policy_list) = &config.policy_list else {
-            return None;
-        };
-        return policy_list_apply_evpn(policy_list, route, bgp_attr, weight, peer.router_id);
+    let decision = {
+        let config = peer.policy_list_at(evpn, InOut::Output);
+        if config.name.is_some() {
+            match &config.policy_list {
+                Some(policy_list) => {
+                    policy_list_apply_evpn(policy_list, route, bgp_attr, weight, peer.router_id)
+                }
+                None => None,
+            }
+        } else {
+            Some(PolicyDecision {
+                attr: bgp_attr,
+                weight,
+            })
+        }
+    };
+    // EVPN egress (Adj-RIB-Out) Lua hook after native out-policy. EVPN
+    // advertise has a full `&Peer`, so the hook runs with the complete
+    // peer table. Failure suppresses the advertisement; MatchAndChange
+    // folds the rewritten attributes in (e.g. add the GBP GPI ecom).
+    #[cfg(feature = "lua")]
+    let decision = apply_egress_evpn(route, decision, peer);
+    decision
+}
+
+/// Apply the bound EVPN egress (Adj-RIB-Out) Lua hook to a native
+/// out-policy decision. No-op when no egress script is bound.
+#[cfg(feature = "lua")]
+fn apply_egress_evpn(
+    route: &EvpnRoute,
+    decision: Option<PolicyDecision>,
+    peer: &Peer,
+) -> Option<PolicyDecision> {
+    let mut decision = decision?;
+    let view = lua_peer_view(peer);
+    let outcome = crate::script::adj_rib_out_evpn(route, &decision.attr, &view);
+    match outcome.action {
+        crate::script::Action::Failure => None,
+        crate::script::Action::MatchAndChange => {
+            if let Some(attr) = outcome.attr {
+                decision.attr = attr;
+            }
+            Some(decision)
+        }
+        _ => Some(decision),
     }
-    Some(PolicyDecision {
-        attr: bgp_attr,
-        weight,
-    })
 }
 
 /// Outbound-policy evaluation for an IPv4 NLRI: the v4 / Output
