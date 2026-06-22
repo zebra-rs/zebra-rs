@@ -1,0 +1,36 @@
+# z1 — VTEP-A (GBP originator). Learns a local MAC on a VXLAN/VNI-10
+# bridge, originates an EVPN Type-2 (MAC) route, and the egress Lua hook
+# stamps it with the Group-Policy-ID extended community (MAC -> tag via
+# the `sgt` map) on the way out to z2.
+vxlan:
+- name: vxlan10
+  vni: 10
+  local-address: 192.168.0.1
+router:
+  bgp:
+    global:
+      as: 65001
+      router-id: 192.168.0.1
+    lua-script:
+    # The shipped example script (validated by its own engine unit test).
+    # Paths resolve from the daemon's cwd, which is the BDD runner's dir.
+    - name: GBP
+      source-path: ../etc/zebra-rs/lua/gbp-example.lua
+    lua-map:
+    - name: sgt
+      source-path: tests/configs/bgp_lua_gbp/sgt.json
+    adj-rib-out-hook:
+      l2vpn-evpn:
+        export: GBP
+    afi-safi:
+    - name: evpn
+      advertise-all-vni: true
+    neighbor:
+    - remote-address: 192.168.0.2
+      enabled: true
+      remote-as: 65001
+      afi-safi:
+      - name: ipv4
+        enabled: true
+      - name: evpn
+        enabled: true
