@@ -20,7 +20,7 @@ pub fn tokenizer(input: String) -> Vec<Token> {
             ch if ch.is_whitespace() => {
                 continue;
             }
-            'a'..='z' | 'A'..='Z' | '0'..='9' | ':' => {
+            'a'..='z' | 'A'..='Z' | '0'..='9' | ':' | '/' => {
                 // ':' as a leader covers IPv6 prefixes that start with the
                 // double-colon shorthand: `::/0`, `::1/128`, etc. Without
                 // it the tokenizer dropped the leading `:` characters and
@@ -30,6 +30,13 @@ pub fn tokenizer(input: String) -> Vec<Token> {
                 // route silently disappeared. CLI input arrives already
                 // split by the shell, so the bug only surfaced on
                 // startup-config / saved-config loads.
+                //
+                // '/' as a leader covers absolute filesystem paths used as
+                // leaf values (e.g. `source-path /etc/zebra-rs/lua/sgt.json`
+                // for `lua-map` / `lua-script`). '/' was already a valid
+                // continuation char, so without it as a leader the loader
+                // dropped the leading slash and emitted a relative path,
+                // which then failed to open at the wrong cwd.
                 let s: String = iter::once(ch)
                     .chain(from_fn(|| {
                         chars.by_ref().next_if(|c| {
@@ -129,6 +136,33 @@ router {
             ("::1/128;", vec!["::1/128"]),
             ("::ffff:1.2.3.4/128;", vec!["::ffff:1.2.3.4/128"]),
             ("nexthop ::1;", vec!["nexthop", "::1"]),
+        ];
+        for (input, expected) in cases {
+            let strings: Vec<String> = tokenizer(input.to_string())
+                .into_iter()
+                .filter_map(|t| match t {
+                    Token::String(s) => Some(s),
+                    _ => None,
+                })
+                .collect();
+            assert_eq!(strings, expected, "input was {input:?}");
+        }
+    }
+
+    #[test]
+    fn test_tokenizer_absolute_path_leading_slash_kept_intact() {
+        // Regression: a leaf value that is an absolute filesystem path
+        // (e.g. `source-path /etc/zebra-rs/lua/sgt.json` for `lua-map` /
+        // `lua-script`). '/' was a valid continuation char but not a valid
+        // leader, so the tokenizer silently dropped the leading slash and
+        // emitted the relative `etc/zebra-rs/lua/sgt.json`, which failed to
+        // open. Pin a few shapes so the leader rule isn't tightened again.
+        let cases = [
+            (
+                "source-path /etc/zebra-rs/lua/sgt.json;",
+                vec!["source-path", "/etc/zebra-rs/lua/sgt.json"],
+            ),
+            ("/usr/bin/zebra-rs;", vec!["/usr/bin/zebra-rs"]),
         ];
         for (input, expected) in cases {
             let strings: Vec<String> = tokenizer(input.to_string())
