@@ -106,3 +106,65 @@ endpoint's group tag (looked up MAC → tag via `map.get`) as a GPI
 extended community; the `import` hook recovers the tag and programs an
 nftables set member; the `withdraw` hook removes it. The receive → enforce
 → teardown loop runs without any blocking I/O on the route path.
+
+## Porting an FRR script
+
+zebra-rs's hook model is modelled on FRR's `route-map match script`
+feature, so an existing FRR script ports almost line-for-line. FRR exposes
+a single `route_match(prefix, attributes, peer, RM_FAILURE, RM_NOMATCH,
+RM_MATCH, RM_MATCH_AND_CHANGE)` function bound via `match script <name>`;
+zebra-rs replaces that one entry point with the named hooks above and
+swaps FRR's blocking, unsandboxed primitives for non-blocking host
+helpers:
+
+| FRR | zebra-rs | Why |
+|-----|----------|-----|
+| one `route_match` | `loc_rib_import` / `adj_rib_out` / `loc_rib_withdraw` | named per hook point — including withdraw, which FRR has no equivalent for |
+| regex on `tostring(prefix.network)` | `prefix.evpn.mac` (structured) | the route key is already marshalled |
+| `attributes["metric"]` | `attributes.med` | field naming |
+| `http.request(...)` + `json.decode(...)` | `map.get(ns, key)` | non-blocking; FRR's HTTP GET blocks the route path |
+| `os.execute("nft …")` | `sideeffect.nft{…}` | non-blocking drainer; `os` is stripped by the sandbox |
+| `string.pack(">BBHHH", 0x03, 0x17, …)` | `ecom.gpi(tag)` | helper (the raw `string.pack` form still works) |
+| `ec:byte()` loop + `string.unpack` | `ecom.parse_gpi(ec)` | helper (the raw form still works) |
+| *(required patching FRR)* | built-in | reading/writing extended communities needs no source changes |
+
+For example, the GBP advertise step — FRR (left) vs zebra-rs (right):
+
+```lua
+-- FRR: match script, with a patched ext_community + blocking HTTP
+function route_match(prefix, attributes, peer, ...)
+  local _,_,_,mac = tostring(prefix.network):match("…:%[([0-9a-fA-F:]+)%]$")
+  local body = http.request("http://10.254.254.254:8080/sgt?mac=" .. mac)
+  local ecoms = {}
+  for _, ec in ipairs(attributes.ext_community) do table.insert(ecoms, ec) end
+  table.insert(ecoms, string.pack(">BBHHH", 0x03, 0x17, 0, 0,
+                                  tonumber(json.decode(body).sgt)))
+  attributes.ext_community = ecoms
+  return { action = RM_MATCH_AND_CHANGE, attributes = attributes }
+end
+```
+
+```lua
+-- zebra-rs: adj-rib-out-hook l2vpn-evpn export
+function adj_rib_out(prefix, attributes, peer, FAIL, NOMATCH, MATCH, CHANGE)
+  local mac = prefix.evpn and prefix.evpn.mac
+  if not mac then return { action = NOMATCH } end
+  local tag = map.get("sgt", mac)
+  if not tag then return { action = NOMATCH } end
+  table.insert(attributes.ext_community, ecom.gpi(tonumber(tag)))
+  return { action = CHANGE, attributes = attributes }
+end
+```
+
+The three scripts from the FRR-scripting talk are shipped as ports you can
+read and adapt:
+
+- `/etc/zebra-rs/lua/metric.lua` — the basic MED-rewrite example.
+- `/etc/zebra-rs/lua/gbp-export.lua` — the advertise side (above).
+- `/etc/zebra-rs/lua/gbp-import.lua` — the receive side, plus the withdraw
+  teardown FRR cannot express.
+
+Because zebra-rs is Lua 5.4, the raw FRR idioms (`string.pack`/`unpack` on
+the 8-byte `ext_community` entries, `ec:byte(1)`) still work unchanged —
+the `ecom.*` helpers are just the tidy spelling. Only `os`, `io`, and
+`http` are gone, by design.
