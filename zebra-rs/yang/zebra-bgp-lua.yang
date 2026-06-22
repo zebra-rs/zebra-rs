@@ -1,0 +1,104 @@
+module zebra-bgp-lua {
+  yang-version "1";
+
+  namespace "urn:ietf:params:xml:ns:yang:zebra-bgp-lua";
+  prefix "zbl";
+
+  import ietf-bgp {
+    prefix bgp;
+  }
+
+  import config {
+    prefix config;
+  }
+
+  import configure {
+    prefix configure;
+  }
+
+  import extension {
+    prefix ext;
+  }
+
+  organization
+    "zebra-rs";
+
+  contact
+    "https://github.com/zebra-rs";
+
+  description
+    "Embedded Lua scripting hooks on the BGP instance (gated behind the
+     `lua` build feature; the config tree is always present so a config
+     loads identically with or without the feature).
+
+     Two surfaces:
+
+       router bgp {
+         lua-script GBP {
+           source-path /etc/zebra-rs/lua/gbp.lua;
+         }
+         loc-rib-hook {
+           ipv4-unicast {
+             import GBP;
+           }
+         }
+       }
+
+     `lua-script` defines a named script from a file; `loc-rib-hook
+     ipv4-unicast import` binds a script to the Adj-RIB-In -> Loc-RIB
+     import hook, run after native inbound policy on every received
+     IPv4-unicast path. See docs/design/lua-scripting-policy.md.";
+
+  revision 2026-06-21 {
+    description
+      "Initial revision: `lua-script` defined-set (source-path) plus the
+       per-AFI Loc-RIB import hook binding for ipv4-unicast.";
+  }
+
+  grouping bgp-lua-extension {
+    description
+      "Lua script definitions and Loc-RIB hook bindings on the BGP
+       instance.";
+
+    list lua-script {
+      ext:help "Define a named Lua script";
+      key "name";
+      leaf name {
+        ext:help "Script name (referenced by loc-rib-hook bindings)";
+        type string;
+      }
+      leaf source-path {
+        ext:help "Filesystem path to the Lua script source loaded at config time";
+        type string;
+      }
+    }
+
+    container loc-rib-hook {
+      ext:help "Bind Lua scripts to Loc-RIB lifecycle hooks";
+      container ipv4-unicast {
+        ext:help "IPv4-unicast Loc-RIB hooks";
+        leaf import {
+          ext:help "Script run when a route is admitted from Adj-RIB-In into the Loc-RIB";
+          type string;
+        }
+      }
+    }
+  }
+
+  augment "/configure:set/config:router"
+        + "/bgp:bgp" {
+    description
+      "Attach the Lua scripting surface to the BGP instance in the
+       candidate-set subtree.";
+    uses bgp-lua-extension;
+  }
+
+  augment "/configure:delete/config:router"
+        + "/bgp:bgp" {
+    description
+      "Same attachment for the delete subtree so
+       `delete router bgp lua-script X` / `delete router bgp loc-rib-hook
+       ipv4-unicast import` are path-valid.";
+    uses bgp-lua-extension;
+  }
+}

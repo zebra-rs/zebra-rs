@@ -60,6 +60,10 @@ module config {
     prefix zbt;
   }
 
+  import zebra-bgp-lua {
+    prefix zbl;
+  }
+
   import zebra-bgp-password {
     prefix zbp;
   }

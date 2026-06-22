@@ -34,6 +34,11 @@ use policy::Policy;
 mod rib;
 use rib::{LogFormatType, LogOutputType, Rib, logging_config, tracing_set};
 mod ospf;
+// Embedded Lua scripting engine, behind the `lua` feature. PR1 is the
+// engine skeleton only; the route.rs Loc-RIB hooks that call it land in a
+// later PR, so nothing references it yet — drop the allow once wired.
+#[allow(dead_code)]
+mod script;
 mod spf;
 mod srv6;
 mod stamp;

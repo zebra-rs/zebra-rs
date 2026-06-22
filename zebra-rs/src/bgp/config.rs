@@ -76,6 +76,52 @@ fn config_global_no_fib_install(bgp: &mut Bgp, mut args: Args, op: ConfigOp) -> 
     Some(())
 }
 
+/// `set router bgp lua-script <name> source-path <path>` — load a named
+/// Lua script from a file into the global script registry. With the `lua`
+/// build feature off the registry is still populated (so a config
+/// round-trips) but never executed. A read error logs and clears that
+/// script rather than failing the commit.
+fn config_lua_script_source_path(_bgp: &mut Bgp, mut args: Args, op: ConfigOp) -> Option<()> {
+    let name = args.string()?;
+    if op.is_set() {
+        let path = args.string()?;
+        match std::fs::read_to_string(&path) {
+            Ok(src) => crate::script::set_source(&name, Some(src)),
+            Err(e) => {
+                tracing::warn!("lua: cannot read script '{name}' from '{path}': {e}");
+                crate::script::set_source(&name, None);
+            }
+        }
+    } else {
+        crate::script::set_source(&name, None);
+    }
+    Some(())
+}
+
+/// `delete router bgp lua-script <name>` — drop the named script. The
+/// `set` of the list node itself carries no data (the `source-path` leaf
+/// installs it), so only delete acts here.
+fn config_lua_script(_bgp: &mut Bgp, mut args: Args, op: ConfigOp) -> Option<()> {
+    if op == ConfigOp::Delete {
+        let name = args.string()?;
+        crate::script::set_source(&name, None);
+    }
+    Some(())
+}
+
+/// `set router bgp loc-rib-hook ipv4-unicast import <name>` — bind a
+/// script to the IPv4-unicast Adj-RIB-In → Loc-RIB import hook; delete
+/// unbinds.
+fn config_loc_rib_hook_import_v4(_bgp: &mut Bgp, mut args: Args, op: ConfigOp) -> Option<()> {
+    if op.is_set() {
+        let name = args.string()?;
+        crate::script::set_import_binding_v4(Some(name));
+    } else {
+        crate::script::set_import_binding_v4(None);
+    }
+    Some(())
+}
+
 /// `set router bgp segment-routing srv6 locator <name>` — names the
 /// SRv6 locator BGP carves per-VRF End.DT46 service SIDs from for
 /// L3VPN over SRv6 (RFC 9252). Mirrors `router isis / segment-routing
@@ -3612,6 +3658,17 @@ impl Bgp {
         self.callback_add(
             "/router/bgp/segment-routing/srv6/ipv6-unicast",
             config_srv6_ipv6_unicast,
+        );
+        // Embedded Lua scripting (zebra-bgp-lua.yang): define scripts and
+        // bind the IPv4-unicast Adj-RIB-In → Loc-RIB import hook.
+        self.callback_add("/router/bgp/lua-script", config_lua_script);
+        self.callback_add(
+            "/router/bgp/lua-script/source-path",
+            config_lua_script_source_path,
+        );
+        self.callback_add(
+            "/router/bgp/loc-rib-hook/ipv4-unicast/import",
+            config_loc_rib_hook_import_v4,
         );
         self.callback_peer("", config_peer);
         self.callback_peer("/remote-as", config_remote_as);

@@ -679,7 +679,10 @@ pub fn delete(paths: Vec<CommandPath>, mut config: Rc<Config>) {
                 }
             }
             YangMatch::LeafMatched => {
-                if config.value.borrow().as_ref() != path.name {
+                // `as_str()` (not `as_ref()`): the `lua` feature pulls in
+                // `bstr`, whose `PartialEq<String> for &BStr` makes a bare
+                // `as_ref()` here ambiguous. `as_str()` pins it to `&str`.
+                if config.value.borrow().as_str() != path.name {
                     break;
                 }
             }
