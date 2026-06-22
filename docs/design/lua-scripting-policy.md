@@ -479,7 +479,7 @@ side (Phase 5); there it becomes `map.get("sgt", mac)` with a background refresh
 | 5b | side-effect channel | `sideeffect.nft{op,table,set,elem}` host helper → unbounded channel → background drainer task running `nft` off the hot path; spawned at daemon start. | unit: hook enqueues an `NftOp`; `nft_args` argv shape. | **done** |
 | 5c | N>1 withdraw wiring | fire the withdraw hook on the sharded path too: the `WithdrawV4` handler removes the Loc-RIB row itself (reading `gone.attr`/`gone.router_id`/`gone.typ`) and hands it to `best_path_delta_v4` — covering N>1 (the default N=1 was PR5). | unit: `WithdrawV4` removes the row + reports it as `replaced`. | **done** |
 | 5d | `map.get` lookup | non-blocking `map.get(ns, key)` (config-seeded / background-refreshed table) — the non-blocking replacement for FRR's blocking HTTP GET on the origination side. | unit: seed + read. | |
-| 6 | GBP EVPN BDD | EVPN Type-2 marshalling (`prefix.evpn`); enrich the shard import peer table (remote-as/addresses); end-to-end `@bgp_lua_gbp` feature. Requires a **`--features lua` BDD binary** (see note). | BDD with explicit `Teardown topology`. | |
+| 6 | GBP EVPN BDD | EVPN Type-2 marshalling (`prefix.evpn`); end-to-end `@bgp_lua_gbp` feature: two VTEPs, z1 originates a Type-2 from a local FDB MAC, the egress hook stamps the GPI ecom (MAC→tag via `map.get`), z2's import hook programs an nftables `tag_100` set, the withdraw hook removes it. Live-validated (CI excludes bdd); self-contained via repo-relative `source-path` to the shipped `gbp-example.lua`. | BDD with explicit `Teardown topology`. | **done** |
 
 Each PR is independently revertible. **BDD note:** the BDD harness runs a
 manually-installed `/usr/bin/zebra-rs`; the `lua` feature is **now on by default**, so a
