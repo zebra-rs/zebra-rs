@@ -3463,6 +3463,102 @@ fn mup_prefix_display(prefix: &MupPrefix) -> String {
     }
 }
 
+/// `show bgp mobile-uplane mup-c` — MUP controller (MUP-C) status: admin
+/// state, the PFCP listener, and association / session counts. Rendered
+/// from the read-only [`crate::mup_c::inst::MupCView`] the controller
+/// feeds over `Message::MupC`.
+fn show_bgp_mup_c(
+    bgp: &Bgp,
+    _args: Args,
+    json: bool,
+) -> std::result::Result<String, std::fmt::Error> {
+    if json {
+        return Ok(String::from("{}"));
+    }
+    let view = &bgp.mup_c_view;
+    let mut buf = String::new();
+    writeln!(buf, "MUP controller (MUP-C)")?;
+    writeln!(
+        buf,
+        "  Admin state : {}",
+        if bgp.mup_c.is_some() {
+            "enabled"
+        } else {
+            "disabled"
+        }
+    )?;
+    match view.listen {
+        Some(addr) => writeln!(buf, "  PFCP listen : {addr}")?,
+        None => writeln!(buf, "  PFCP listen : down")?,
+    }
+    writeln!(buf, "  Associations: {}", view.associations.len())?;
+    writeln!(buf, "  Sessions    : {}", view.sessions.len())?;
+    Ok(buf)
+}
+
+/// `show bgp mobile-uplane mup-c session` — the PFCP sessions the
+/// controller has learned (one row each).
+fn show_bgp_mup_c_session(
+    bgp: &Bgp,
+    _args: Args,
+    json: bool,
+) -> std::result::Result<String, std::fmt::Error> {
+    if json {
+        return Ok(String::from("[]"));
+    }
+    let mut buf = String::new();
+    writeln!(
+        buf,
+        "{:<10} {:<40} {:<12} {:<40} {:<5} Network-Instance",
+        "SEID", "UE address", "TEID", "Endpoint", "QFI"
+    )?;
+    for s in bgp.mup_c_view.sessions.values() {
+        let ue = match (s.ue_ipv4, s.ue_ipv6) {
+            (Some(v4), _) => v4.to_string(),
+            (None, Some(v6)) => v6.to_string(),
+            (None, None) => "-".to_string(),
+        };
+        let teid = format!("0x{:08x}", s.teid);
+        let endpoint = s
+            .endpoint
+            .map(|e| e.to_string())
+            .unwrap_or_else(|| "-".to_string());
+        let qfi = s
+            .qfi
+            .map(|q| q.to_string())
+            .unwrap_or_else(|| "-".to_string());
+        writeln!(
+            buf,
+            "{:<10} {:<40} {:<12} {:<40} {:<5} {}",
+            s.seid,
+            ue,
+            teid,
+            endpoint,
+            qfi,
+            s.network_instance.as_deref().unwrap_or("-")
+        )?;
+    }
+    Ok(buf)
+}
+
+/// `show bgp mobile-uplane mup-c association` — the PFCP associations
+/// (control-plane peers) the controller currently holds.
+fn show_bgp_mup_c_association(
+    bgp: &Bgp,
+    _args: Args,
+    json: bool,
+) -> std::result::Result<String, std::fmt::Error> {
+    if json {
+        return Ok(String::from("[]"));
+    }
+    let mut buf = String::new();
+    writeln!(buf, "{:<36} Node-ID", "Peer")?;
+    for (peer, info) in bgp.mup_c_view.associations.iter() {
+        writeln!(buf, "{:<36} {}", peer.to_string(), info.node_id)?;
+    }
+    Ok(buf)
+}
+
 /// `show bgp mobile-uplane` — the MUP (SAFI 85, RFC 9833) view: the
 /// config-driven `MUP VRFs:` block (per-VRF `mobile-uplane` services)
 /// followed by the Loc-RIB route table. The full `MUP controller:`
@@ -5386,6 +5482,12 @@ impl Bgp {
             .set(show_bgp_mup)
             .path("/show/bgp/mobile-uplane/summary")
             .set(show_bgp_mup_summary)
+            .path("/show/bgp/mobile-uplane/mup-c")
+            .set(show_bgp_mup_c)
+            .path("/show/bgp/mobile-uplane/mup-c/session")
+            .set(show_bgp_mup_c_session)
+            .path("/show/bgp/mobile-uplane/mup-c/association")
+            .set(show_bgp_mup_c_association)
             .path("/show/bgp/summary")
             .set(show_bgp_summary::<Bgp>)
             .path("/show/bgp/evpn/summary")

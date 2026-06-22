@@ -117,6 +117,13 @@ pub enum Message {
         add: Vec<(bgp_packet::BgpLsNlri, bgp_packet::BgpLsAttr)>,
         withdraw: Vec<bgp_packet::BgpLsNlri>,
     },
+    /// A session/association change reported by the in-process MUP
+    /// controller (`src/mup-c/`), which the BGP task spawns when
+    /// `afi-safi mobile-uplane mup-c enable true` is committed and hands
+    /// `self.tx`. Recorded in [`Bgp::mup_c_view`] for `show bgp
+    /// mobile-uplane mup-c`; MUP route origination from these lands in a
+    /// follow-up. Mirrors the IS-IS `BgpLs` producer seam.
+    MupC(crate::mup_c::inst::MupCEvent),
     /// `router bgp port <0-65535>` changed: close the BGP listen
     /// sockets and reopen them on the (new) configured port — or leave
     /// them closed when the port is 0. Sent by the config callback
@@ -627,6 +634,26 @@ pub struct Bgp {
     /// `evpn_originate_imet`; toggling it re-originates all IMET routes via
     /// `reoriginate_all_imet`.
     pub segmentation: bool,
+    /// MUP controller (`afi-safi mobile-uplane mup-c`) config, staged by
+    /// the config callbacks and applied at `CommitEnd` by
+    /// [`Self::apply_mup_c_commit_diff`].
+    pub mup_c_config: crate::mup_c::inst::MupCConfig,
+    /// Running MUP controller handle, or `None` when disabled. Dropping it
+    /// aborts the controller task (the VRF-handle idiom).
+    pub mup_c: Option<crate::mup_c::inst::MupCHandle>,
+    /// Read-only snapshot of the controller's sessions / associations,
+    /// fed by `Message::MupC` and rendered by `show bgp mobile-uplane
+    /// mup-c`.
+    pub mup_c_view: crate::mup_c::inst::MupCView,
+    /// Set by the MUP-C config callbacks when a `mup-c` leaf changed this
+    /// commit; consumed (and cleared) at `CommitEnd` to decide whether to
+    /// reconfigure a running controller.
+    pub mup_c_dirty: bool,
+    /// MUP routes the controller has originated, keyed by session SEID →
+    /// (originated NLRI, allocated SRv6 SID function). Tracked so a
+    /// Session Deletion / Modification withdraws the exact prior route and
+    /// returns its SID function to the pool.
+    pub mup_c_originated: BTreeMap<u64, (bgp_packet::MupPrefix, u16)>,
     /// Local bridge FDB shadow keyed by `(vni, mac)`. Populated from
     /// every `RibRx::FdbAdd`, removed on `RibRx::FdbDel`. We need
     /// durable state (not just one-shot event handling) because the
@@ -1062,6 +1089,11 @@ impl Bgp {
             advertise_all_vni: false,
             igmp_mld_proxy: false,
             segmentation: false,
+            mup_c_config: crate::mup_c::inst::MupCConfig::default(),
+            mup_c: None,
+            mup_c_view: crate::mup_c::inst::MupCView::default(),
+            mup_c_dirty: false,
+            mup_c_originated: BTreeMap::new(),
             local_fdb: BTreeMap::new(),
             local_vxlans: BTreeMap::new(),
             local_smet: BTreeMap::new(),
@@ -1938,6 +1970,33 @@ impl Bgp {
                     );
                 }
             }
+            Message::MupC(ev) => {
+                // A session/association change from the in-process MUP
+                // controller. Drive MUP route origination, then record it
+                // in the read-only view `show bgp mobile-uplane mup-c`
+                // renders.
+                use crate::mup_c::inst::MupCEvent;
+                match &ev {
+                    MupCEvent::SessionUp(session) => self.originate_mup_route(session),
+                    MupCEvent::SessionDown { seid } => self.withdraw_mup_route(*seid),
+                    MupCEvent::AssocDown { peer } => {
+                        // The peer's sessions are about to drop from the
+                        // view; withdraw their routes first.
+                        let seids: Vec<u64> = self
+                            .mup_c_view
+                            .sessions
+                            .iter()
+                            .filter(|(_, s)| s.peer == *peer)
+                            .map(|(seid, _)| *seid)
+                            .collect();
+                        for seid in seids {
+                            self.withdraw_mup_route(seid);
+                        }
+                    }
+                    MupCEvent::Listener { .. } | MupCEvent::AssocUp { .. } => {}
+                }
+                self.mup_c_view.apply(ev);
+            }
             Message::Relisten => {
                 // Intercepted in `event_loop` before this dispatcher
                 // (the rebind is async, this method is not). Nothing to
@@ -2133,6 +2192,41 @@ impl Bgp {
         self.broadcast_colour_steering();
     }
 
+    /// Reconcile the MUP controller against `mup_c_config` at every
+    /// `CommitEnd`. Spawn on enable, tear down on disable (dropping the
+    /// handle aborts the task), and push a reconfigure when a `mup-c`
+    /// leaf changed while it stays enabled. The controller is handed
+    /// `self.tx` — the BGP Message channel — exactly the way a per-VRF
+    /// instance receives the global channel from `spawn_bgp_vrf`.
+    fn apply_mup_c_commit_diff(&mut self) {
+        let want = self.mup_c_config.enable;
+        let running = self.mup_c.is_some();
+        let dirty = std::mem::take(&mut self.mup_c_dirty);
+        match (want, running) {
+            (true, false) => {
+                let handle = crate::mup_c::inst::spawn(
+                    self.mup_c_config.clone(),
+                    self.tx.clone(),
+                    self.ctx.clone(),
+                );
+                self.mup_c = Some(handle);
+            }
+            (false, true) => {
+                // Drop the handle → abort the controller task. Reset the
+                // view so `show` reflects the teardown. (Route withdrawal
+                // for originated MUP routes lands with the route phase.)
+                self.mup_c = None;
+                self.mup_c_view = crate::mup_c::inst::MupCView::default();
+            }
+            (true, true) if dirty => {
+                if let Some(handle) = &self.mup_c {
+                    handle.reconfig(self.mup_c_config.clone());
+                }
+            }
+            _ => {}
+        }
+    }
+
     /// Called when `RibRx::VrfAdd` for `name` arrives. If a
     /// placeholder per-VRF task is already running for this name,
     /// tear it down and respawn it with the real
@@ -2224,6 +2318,7 @@ impl Bgp {
                 // cfg-hash comparison on top.
                 super::vrf_config::log_commit_diff(self);
                 self.apply_vrf_commit_diff();
+                self.apply_mup_c_commit_diff();
             }
             ConfigOp::Completion => {
                 // `comps_dynamic` carries the dynamic handler name

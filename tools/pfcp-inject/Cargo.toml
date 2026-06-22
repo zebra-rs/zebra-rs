@@ -1,0 +1,15 @@
+[package]
+name = "pfcp-inject"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+description = "Minimal PFCP/N4 SMF simulator for driving the zebra-rs MUP controller in tests"
+
+[dependencies]
+anyhow.workspace = true
+clap.workspace = true
+rs-pfcp = "0.3.1"
+
+[lints]
+workspace = true

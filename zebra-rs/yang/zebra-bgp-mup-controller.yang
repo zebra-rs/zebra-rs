@@ -1,0 +1,140 @@
+module zebra-bgp-mup-controller {
+  yang-version "1";
+
+  namespace "urn:ietf:params:xml:ns:yang:zebra-bgp-mup-controller";
+  prefix "zbmupc";
+
+  import ietf-bgp {
+    prefix bgp;
+  }
+
+  import config {
+    prefix config;
+  }
+
+  import configure {
+    prefix configure;
+  }
+
+  import ietf-inet-types {
+    prefix inet;
+  }
+
+  organization
+    "zebra-rs";
+
+  contact
+    "https://github.com/zebra-rs";
+
+  description
+    "BGP MUP Controller (MUP-C) extensions to the BGP candidate-config
+     tree. Adds a `mup-c` container under the BGP global AFI/SAFI list,
+     only meaningful when the entry's name is `mobile-uplane` (SAFI 85,
+     RFC 9833). When enabled, the BGP task spawns an in-process MUP
+     controller that terminates PFCP/N4 (3GPP TS 29.244) as a UP-node,
+     learns mobile sessions and (in a follow-up) originates Type-1 /
+     Type-2 Session-Transformed routes.
+
+     Resulting CLI / config shape:
+
+       router bgp {
+         afi-safi {
+           name mobile-uplane;
+           mup-c {
+             enable true;
+             controller-address 2001:db8::1;
+             pfcp {
+               node-id 10.0.0.1;
+               listen-address ::;
+               port 8805;
+             }
+             srv6 { locator LOC1; }
+           }
+         }
+       }";
+
+  reference
+    "RFC 9833: A YANG ... (BGP MUP, draft-mpmz-bess-mup-safi)
+     3GPP TS 29.244: Interface between the Control Plane and the User
+     Plane Nodes (PFCP)";
+
+  grouping bgp-afi-safi-mup-c-extension {
+    description
+      "MUP controller config on the global afi-safi list. Only
+       meaningful when the list entry's name is `mobile-uplane` —
+       harmless and ignored on other AFI/SAFIs.";
+
+    container mup-c {
+      description
+        "BGP MUP Controller (MUP-C). Terminates PFCP/N4 as a UP-node and
+         originates MUP Session-Transformed routes from learned sessions.";
+
+      leaf enable {
+        type boolean;
+        default false;
+        description
+          "Master switch. When true, the BGP task spawns the in-process
+           MUP controller (PFCP listener); when false it is torn down.";
+      }
+
+      leaf controller-address {
+        type inet:ipv6-address;
+        description
+          "Controller IPv6 address advertised as the next hop on
+           originated Type-1 / Type-2 Session-Transformed routes.";
+      }
+
+      container pfcp {
+        description
+          "PFCP / N4 listener parameters (3GPP TS 29.244).";
+
+        leaf node-id {
+          type inet:ip-address;
+          description
+            "Our PFCP Node ID, returned in responses. Falls back to the
+             bind address / controller-address when unset.";
+        }
+        leaf listen-address {
+          type inet:ip-address;
+          description
+            "PFCP listen address. Defaults to `::` (all addresses) when
+             unset.";
+        }
+        leaf port {
+          type inet:port-number;
+          description
+            "PFCP listen port. Defaults to 8805 when unset.";
+        }
+      }
+
+      container srv6 {
+        description
+          "SRv6 parameters for originated routes (route phase).";
+        leaf locator {
+          type string;
+          description
+            "Name of the SRv6 locator per-session SIDs are drawn from.";
+        }
+      }
+
+      leaf architecture {
+        type enumeration {
+          enum "3gpp-5g";
+        }
+        default "3gpp-5g";
+        description
+          "Mobile architecture the controller serves. Informational.";
+      }
+    }
+  }
+
+  augment "/configure:set/config:router/bgp:bgp/bgp:afi-safi" {
+    description "MUP controller config under the global afi-safi list (set).";
+    uses bgp-afi-safi-mup-c-extension;
+  }
+
+  augment "/configure:delete/config:router/bgp:bgp/bgp:afi-safi" {
+    description "MUP controller config under the global afi-safi list (delete).";
+    uses bgp-afi-safi-mup-c-extension;
+  }
+}

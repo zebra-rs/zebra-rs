@@ -44,6 +44,10 @@ module config {
     prefix zbe;
   }
 
+  import zebra-bgp-mup-controller {
+    prefix zbmupc;
+  }
+
   import zebra-bgp-redistribute {
     prefix zbr;
   }

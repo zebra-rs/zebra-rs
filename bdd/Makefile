@@ -20,6 +20,13 @@ bgp_srv6_redistribute:
 	mkdir -p allure-results
 	cargo test --test cucumber -- --concurrency=1 --tags "@bgp_srv6_redistribute"
 
+# MUP controller end-to-end: PFCP session -> ST route origination ->
+# peer receive. Needs the `pfcp-inject` binary on the host PATH
+# (cargo build --release -p pfcp-inject; copy to /usr/bin).
+bgp_mup_e2e:
+	mkdir -p allure-results
+	cargo test --test cucumber -- --concurrency=1 --tags "@bgp_mup_e2e"
+
 rib_static_ipv6:
 	mkdir -p allure-results
 	cargo test --test cucumber -- --concurrency=1 --tags "@rib_static_ipv6"

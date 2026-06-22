@@ -18,6 +18,7 @@ members = [
   "crates/fixedbuf",
   "bdd",
   "tools/bgp-bench",
+  "tools/pfcp-inject",
 ]
 # The offload/ tree holds XDP/eBPF PoCs built with aya. It is intentionally NOT
 # a member of this workspace: building it needs a nightly `bpfel` toolchain +
