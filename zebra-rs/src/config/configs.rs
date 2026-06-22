@@ -737,7 +737,23 @@ pub fn delete(paths: Vec<CommandPath>, mut config: Rc<Config>) {
         config_delete(parent.clone(), &config.name);
         config = parent.clone();
         if config.has_dir() || config.has_prefix() || config.presence {
-            break;
+            // Exception: an empty entry of an `ext:non-empty` list is dead
+            // config — a bare `... <key>` (e.g. `router isis afi-safi ipv4`)
+            // that the same `ext:non-empty` rule rejects at commit. So when
+            // deleting its last child empties a list-key entry, keep
+            // cascading to prune the entry (and the list node, if it too
+            // becomes empty) instead of leaving the bare key behind. Gated on
+            // the parent list carrying the marker, so ordinary key entries
+            // still stop the cascade as before.
+            let prunable_empty_entry = !config.has_dir()
+                && config.list.borrow().is_empty()
+                && config
+                    .parent
+                    .as_ref()
+                    .is_some_and(|p| !p.non_empty.is_empty());
+            if !prunable_empty_entry {
+                break;
+            }
         }
     }
 }
@@ -869,6 +885,82 @@ mod tests {
             errors.is_empty(),
             "entry carrying a child must validate clean, got: {:?}",
             errors
+        );
+    }
+
+    // Deleting the last child of an `ext:non-empty` list entry must prune
+    // the now-empty entry rather than leave a bare `... <key>` behind (which
+    // would then fail commit validation). A sibling entry that still has a
+    // child is left untouched.
+    #[test]
+    fn delete_last_child_prunes_non_empty_list_entry() {
+        let dir = |name: &str| CommandPath {
+            name: name.to_string(),
+            ymatch: YangMatch::Dir as i32,
+            ..Default::default()
+        };
+        let list = |name: &str| CommandPath {
+            name: name.to_string(),
+            ymatch: YangMatch::Key as i32,
+            non_empty: "network or redistribute".to_string(),
+            ..Default::default()
+        };
+        let plain = |name: &str| CommandPath {
+            name: name.to_string(),
+            ymatch: YangMatch::Key as i32,
+            ..Default::default()
+        };
+        let key = |name: &str| CommandPath {
+            name: name.to_string(),
+            ymatch: YangMatch::KeyMatched as i32,
+            ..Default::default()
+        };
+        let net = |afi: &str, prefix: &str| {
+            vec![
+                dir("router"),
+                dir("isis"),
+                list("afi-safi"),
+                key(afi),
+                plain("network"),
+                key(prefix),
+            ]
+        };
+
+        let root = Rc::new(Config::new("".to_string(), None));
+        set(net("ipv4", "10.0.0.0/24"), root.clone());
+        set(net("ipv6", "2001:db8::/64"), root.clone());
+
+        // Drop ipv4's only network. ipv4 becomes empty and must be pruned;
+        // ipv6 (still carrying a network) and the afi-safi node survive.
+        delete(net("ipv4", "10.0.0.0/24"), root.clone());
+
+        let afi_safi = root
+            .lookup(&"router".to_string())
+            .and_then(|r| r.lookup(&"isis".to_string()))
+            .and_then(|i| i.lookup(&"afi-safi".to_string()))
+            .expect("afi-safi node should survive (ipv6 still present)");
+        assert!(
+            afi_safi.lookup_key(&"ipv4".to_string()).is_none(),
+            "empty ipv4 entry must be pruned"
+        );
+        assert!(
+            afi_safi.lookup_key(&"ipv6".to_string()).is_some(),
+            "ipv6 entry with a child must be untouched"
+        );
+
+        // Dropping ipv6's network too empties the whole afi-safi subtree,
+        // which cascades away (no bare entry, no empty afi-safi node left).
+        delete(net("ipv6", "2001:db8::/64"), root.clone());
+        let afi_safi_gone = match root
+            .lookup(&"router".to_string())
+            .and_then(|r| r.lookup(&"isis".to_string()))
+        {
+            None => true,
+            Some(isis) => isis.lookup(&"afi-safi".to_string()).is_none(),
+        };
+        assert!(
+            afi_safi_gone,
+            "afi-safi node must be gone once its last entry is pruned"
         );
     }
 

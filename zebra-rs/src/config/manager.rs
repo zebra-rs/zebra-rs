@@ -1574,6 +1574,65 @@ mod yang_load_tests {
         }
     }
 
+    /// Companion to `isis_afi_safi_bare_entry_is_rejected`: deleting the
+    /// last child of an afi-safi entry must prune the now-empty entry, so
+    /// the bare `afi-safi <name>` doesn't linger and trip `ext:non-empty`
+    /// at the next commit. Drives the real schema (set then delete) and
+    /// checks the tree is clean and the node is gone.
+    #[test]
+    fn isis_afi_safi_delete_last_child_prunes_entry() {
+        use crate::config::ExecCode;
+        use crate::config::configs::{delete, set};
+        use crate::config::parse::{State, parse};
+        use crate::config::{Config, paths::path_try_trim};
+        use libyang::to_entry;
+        use std::rc::Rc;
+
+        let mut yang = YangStore::new();
+        yang.add_path(concat!(env!("CARGO_MANIFEST_DIR"), "/yang"));
+        yang.read_with_resolve("configure")
+            .unwrap_or_else(|e| panic!("configure failed to load: {e:#}"));
+        yang.identity_resolve();
+        let module = yang.find_module("configure").unwrap();
+        let entry = to_entry(&yang, module);
+        let set_entry = entry
+            .dir
+            .borrow()
+            .iter()
+            .find(|e| e.name == "set")
+            .cloned()
+            .expect("configure mode has a `set` entry");
+
+        let paths = |cmd: &str| {
+            let (code, _comps, state) = parse(cmd, set_entry.clone(), None, State::new());
+            assert_eq!(code, ExecCode::Success, "should parse: {cmd}");
+            path_try_trim("set", state.paths)
+        };
+
+        let root = Rc::new(Config::new("".to_string(), None));
+        let line = "router isis afi-safi ipv4 network 10.0.0.1/32";
+        set(paths(line), root.clone());
+        delete(paths(line), root.clone());
+
+        // No bare afi-safi entry left → validates clean.
+        let mut errors = Vec::new();
+        root.validate(&mut errors);
+        assert!(
+            errors.is_empty(),
+            "tree must validate clean after set+delete, got: {errors:?}"
+        );
+
+        // And the afi-safi node itself is gone (not a key-only leftover).
+        let leftover = root
+            .lookup(&"router".to_string())
+            .and_then(|r| r.lookup(&"isis".to_string()))
+            .and_then(|i| i.lookup(&"afi-safi".to_string()));
+        assert!(
+            leftover.is_none(),
+            "afi-safi node must be pruned after its last child is deleted"
+        );
+    }
+
     /// Mirror SID egress-protection config paths
     /// (`draft-ietf-rtgwg-srv6-egress-protection`, config.yang). vtyctl
     /// apply is garbage-tolerant, so an unwired list / key / leaf would
