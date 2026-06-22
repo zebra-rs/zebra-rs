@@ -1,6 +1,5 @@
-all: run
-
-run:
+all:
+	rm -rf allure-results
 	mkdir -p allure-results
 	cargo test --test cucumber -- --concurrency=1
 
