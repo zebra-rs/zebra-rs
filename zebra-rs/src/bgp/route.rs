@@ -7088,6 +7088,26 @@ pub fn route_evpn_update(
         peer.adj_in.add_evpn(rd, prefix.clone(), rib.clone());
         route_apply_policy_in_evpn(peer, route, attr.clone(), rib.weight)
     };
+    // Lua EVPN import hook (Adj-RIB-In → Loc-RIB), after native policy.
+    // Unlike v4 (sharded), EVPN ingest is synchronous in main, so the
+    // hook runs here with the full peer; the script sees `prefix.evpn`.
+    // Failure → deny (implicit withdraw); MatchAndChange folds the
+    // mutated attrs back onto the route.
+    #[cfg(feature = "lua")]
+    let decision = decision.and_then(|mut d| {
+        let view = lua_peer_view(peers.get_by_idx(ident)?);
+        let outcome = crate::script::loc_rib_import_evpn(route, &d.attr, &view);
+        match outcome.action {
+            crate::script::Action::Failure => None,
+            crate::script::Action::MatchAndChange => {
+                if let Some(attr) = outcome.attr {
+                    d.attr = attr;
+                }
+                Some(d)
+            }
+            _ => Some(d),
+        }
+    });
     let Some(decision) = decision else {
         route_evpn_withdraw(ident, route, bgp, peers);
         return;

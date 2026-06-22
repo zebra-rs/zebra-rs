@@ -14,7 +14,7 @@ use std::collections::BTreeMap;
 use std::net::{IpAddr, Ipv4Addr};
 use std::sync::{Arc, OnceLock, RwLock};
 
-use bgp_packet::BgpAttr;
+use bgp_packet::{BgpAttr, EvpnRoute};
 use ipnet::IpNet;
 
 #[cfg(feature = "lua")]
@@ -186,6 +186,35 @@ pub fn loc_rib_import_v4(prefix: IpNet, attr: &BgpAttr, peer: &PeerView) -> Impo
 /// Feature-off no-op.
 #[cfg(not(feature = "lua"))]
 pub fn loc_rib_import_v4(_prefix: IpNet, _attr: &BgpAttr, _peer: &PeerView) -> ImportOutcome {
+    ImportOutcome::nomatch()
+}
+
+/// The script name bound to the L2VPN-EVPN import hook, or `None`.
+static BINDING_EVPN: OnceLock<RwLock<Option<String>>> = OnceLock::new();
+
+fn binding_evpn() -> &'static RwLock<Option<String>> {
+    BINDING_EVPN.get_or_init(|| RwLock::new(None))
+}
+
+/// Bind (or, with `None`, unbind) the EVPN import hook.
+pub fn set_import_binding_evpn(name: Option<String>) {
+    *binding_evpn().write().unwrap() = name;
+}
+
+/// Run the EVPN import hook against the currently-bound script. The script
+/// sees the route as `prefix.evpn` (route_type / mac / vni / rd / …). Same
+/// `ImportOutcome` contract as the v4 hook; no-op when unbound / off.
+#[cfg(feature = "lua")]
+pub fn loc_rib_import_evpn(route: &EvpnRoute, attr: &BgpAttr, peer: &PeerView) -> ImportOutcome {
+    match binding_evpn().read().unwrap().clone() {
+        Some(name) => engine::loc_rib_import_evpn(&name, route, attr, peer),
+        None => ImportOutcome::nomatch(),
+    }
+}
+
+/// Feature-off no-op.
+#[cfg(not(feature = "lua"))]
+pub fn loc_rib_import_evpn(_route: &EvpnRoute, _attr: &BgpAttr, _peer: &PeerView) -> ImportOutcome {
     ImportOutcome::nomatch()
 }
 

@@ -11,7 +11,7 @@
 use std::cell::RefCell;
 use std::collections::BTreeMap;
 
-use bgp_packet::BgpAttr;
+use bgp_packet::{BgpAttr, EvpnRoute};
 use ipnet::IpNet;
 use mlua::{Function, Lua, Table, Value};
 
@@ -124,12 +124,37 @@ impl Engine {
         attr: &BgpAttr,
         peer: &PeerView,
     ) -> mlua::Result<ImportOutcome> {
+        let prefix_t = marshal::prefix_table(&self.lua, prefix)?;
+        self.run_import_prefix(name, prefix_t, attr, peer)
+    }
+
+    fn run_import_evpn(
+        &self,
+        name: &str,
+        route: &EvpnRoute,
+        attr: &BgpAttr,
+        peer: &PeerView,
+    ) -> mlua::Result<ImportOutcome> {
+        let prefix_t = marshal::evpn_prefix_table(&self.lua, route)?;
+        self.run_import_prefix(name, prefix_t, attr, peer)
+    }
+
+    /// Prefix-agnostic core of the import hook: given the already-built
+    /// `prefix` table (v4 or EVPN), build `attributes` / `peer`, call the
+    /// script's `loc_rib_import`, and fold a mutated `attributes` table
+    /// back on `MATCH_AND_CHANGE`.
+    fn run_import_prefix(
+        &self,
+        name: &str,
+        prefix_t: Table,
+        attr: &BgpAttr,
+        peer: &PeerView,
+    ) -> mlua::Result<ImportOutcome> {
         let env = self
             .envs
             .get(name)
             .ok_or_else(|| mlua::Error::RuntimeError(format!("no loaded script '{name}'")))?;
         let func: Function = env.get("loc_rib_import")?;
-        let prefix_t = marshal::prefix_table(&self.lua, prefix)?;
         let attr_t = marshal::attr_table(&self.lua, attr)?;
         let peer_t = marshal::peer_table(&self.lua, peer)?;
         let ret: Value = func.call((
@@ -314,20 +339,40 @@ fn install_host_helpers(lua: &Lua, env: &Table) -> mlua::Result<()> {
     Ok(())
 }
 
-/// Thread-local entry point used by [`super::loc_rib_import`]. Fail-safe:
-/// sync/run errors are logged and mapped to [`ImportOutcome::nomatch`].
-pub fn loc_rib_import(name: &str, prefix: IpNet, attr: &BgpAttr, peer: &PeerView) -> ImportOutcome {
+/// Sync the thread-local VM and run `op` against it, mapping any error to
+/// the fail-safe [`ImportOutcome::nomatch`] (errors logged).
+fn with_engine(
+    name: &str,
+    op: impl FnOnce(&Engine) -> mlua::Result<ImportOutcome>,
+) -> ImportOutcome {
     let scripts = current();
     ENGINE.with(|cell| {
         let mut engine = cell.borrow_mut();
         engine.sync(&scripts);
-        match engine.run_import(name, prefix, attr, peer) {
+        match op(&engine) {
             Ok(outcome) => outcome,
             Err(err) => {
                 tracing::warn!("lua: import hook '{name}' error: {err}");
                 ImportOutcome::nomatch()
             }
         }
+    })
+}
+
+/// Thread-local entry point used by [`super::loc_rib_import_v4`].
+pub fn loc_rib_import(name: &str, prefix: IpNet, attr: &BgpAttr, peer: &PeerView) -> ImportOutcome {
+    with_engine(name, |engine| engine.run_import(name, prefix, attr, peer))
+}
+
+/// Thread-local entry point used by [`super::loc_rib_import_evpn`].
+pub fn loc_rib_import_evpn(
+    name: &str,
+    route: &EvpnRoute,
+    attr: &BgpAttr,
+    peer: &PeerView,
+) -> ImportOutcome {
+    with_engine(name, |engine| {
+        engine.run_import_evpn(name, route, attr, peer)
     })
 }
 
@@ -749,6 +794,58 @@ mod tests {
         crate::script::map_clear_namespace("sgt");
         assert_eq!(
             import("m", "10.0.0.0/24", &BgpAttr::default()),
+            Action::NoMatch
+        );
+    }
+
+    #[test]
+    fn evpn_import_reads_mac_and_gpi() {
+        // The GBP demo target: an EVPN Type-2 (MAC) route. The script
+        // reads the structured `prefix.evpn.mac` (no regex) and the GPI
+        // ext-community, exactly the talk's receive path.
+        use bgp_packet::{EvpnMac, EvpnRoute, RouteDistinguisher};
+        let _g = install_one(
+            "evpn",
+            r#"
+            function loc_rib_import(prefix, attributes, peer, FAIL, NOMATCH, MATCH, CHANGE)
+                if prefix.afi == "evpn"
+                   and prefix.evpn.route_type == 2
+                   and prefix.evpn.mac == "aa:bb:cc:dd:ee:01"
+                   and prefix.evpn.vni == 100 then
+                    for _, ec in ipairs(attributes.ext_community) do
+                        if ecom.parse_gpi(ec) == 300 then
+                            return { action = FAIL }
+                        end
+                    end
+                end
+                return { action = NOMATCH }
+            end
+        "#,
+        );
+        let mac = EvpnRoute::Mac(EvpnMac {
+            id: 0,
+            rd: "65000:1".parse::<RouteDistinguisher>().unwrap(),
+            esi: [0; 10],
+            ether_tag: 0,
+            mac: [0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0x01],
+            vni: 100,
+        });
+        let ecom = ExtCommunity::from([ExtCommunityValue {
+            high_type: 0x03,
+            low_type: 0x17,
+            val: [0x00, 0x00, 0x00, 0x00, 0x01, 0x2c],
+        }]);
+        let attr = BgpAttr {
+            ecom: Some(ecom),
+            ..Default::default()
+        };
+        assert_eq!(
+            loc_rib_import_evpn("evpn", &mac, &attr, &peer()).action,
+            Action::Failure
+        );
+        // Same MAC but no GPI ext-community → no match.
+        assert_eq!(
+            loc_rib_import_evpn("evpn", &mac, &BgpAttr::default(), &peer()).action,
             Action::NoMatch
         );
     }
