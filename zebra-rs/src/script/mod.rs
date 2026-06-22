@@ -21,6 +21,8 @@ use ipnet::IpNet;
 mod engine;
 #[cfg(feature = "lua")]
 mod marshal;
+#[cfg(feature = "lua")]
+pub mod sideeffect;
 
 /// Outcome of a script hook, mirroring FRR's route-map result constants.
 ///
