@@ -1316,6 +1316,8 @@ impl Peer {
                 _ => None,
             }),
             router_id,
+            remote_id: self.remote_id,
+            remote_address: self.address,
             vpnv4_next_hop_self: self.next_hop_self(Afi::Ip, Safi::MplsVpn),
             egress_as: self.egress_as(),
             out_policy: self.out_policy.clone(),

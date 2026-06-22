@@ -86,6 +86,17 @@ module zebra-bgp-lua {
       }
     }
 
+    container adj-rib-out-hook {
+      ext:help "Bind Lua scripts to Adj-RIB-Out (advertise) hooks";
+      container ipv4-unicast {
+        ext:help "IPv4-unicast egress hooks";
+        leaf export {
+          ext:help "Script run as a route is advertised; may rewrite attributes, or deny to suppress";
+          type string;
+        }
+      }
+    }
+
     container loc-rib-hook {
       ext:help "Bind Lua scripts to Loc-RIB lifecycle hooks";
       container ipv4-unicast {
