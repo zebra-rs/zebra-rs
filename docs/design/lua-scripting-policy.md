@@ -58,8 +58,9 @@ first-class, in-process operation.
 ## 2. Scope
 
 **In scope (Phase 1–4):**
-- An embedded Lua 5.4 runtime, gated behind a Cargo feature `lua` (mirrors FRR's
-  `--enable-scripting` — off in default builds).
+- An embedded Lua 5.4 runtime behind a Cargo feature `lua`. (Originally off by
+  default — mirroring FRR's `--enable-scripting` — but now **on by default**; build
+  without it via `--no-default-features`, where the hooks compile to no-ops.)
 - Import hook on `route_ipv4_update` (and the v4 batch/shard reduce paths).
 - Withdraw hook on `route_ipv4_withdraw` (and the shard `WithdrawV4` reduce).
 - A read/write marshalling layer for `prefix`, `attributes` (incl. `ext_community`),
@@ -477,10 +478,11 @@ side (Phase 5); there it becomes `map.get("sgt", mac)` with a background refresh
 | 5d | `map.get` lookup | non-blocking `map.get(ns, key)` (config-seeded / background-refreshed table) — the non-blocking replacement for FRR's blocking HTTP GET on the origination side. | unit: seed + read. | |
 | 6 | GBP EVPN BDD | EVPN Type-2 marshalling (`prefix.evpn`); enrich the shard import peer table (remote-as/addresses); end-to-end `@bgp_lua_gbp` feature. Requires a **`--features lua` BDD binary** (see note). | BDD with explicit `Teardown topology`. | |
 
-Each PR is independently revertible; the feature flag keeps `main` builds untouched
-until the engine is proven. **BDD note:** the BDD harness runs a manually-installed
-`/usr/bin/zebra-rs`; the `lua` feature is off by default, so a Lua BDD needs that
-binary built with `--features lua` (a dedicated build/CI lane). Until that lane
+Each PR is independently revertible. **BDD note:** the BDD harness runs a
+manually-installed `/usr/bin/zebra-rs`; the `lua` feature is **now on by default**, so a
+stock release binary already includes the engine and the `@bgp_lua_gbp` BDD no longer
+needs a special `--features lua` build. (Historically the lane needed that build.) Until
+that lane
 exists, Lua behaviour is covered by the `#[cfg(feature = "lua")]` unit tests.
 Later: egress/origination hook (Phase 5b — *adds* the GPI ecom on advertise;
 **must join `UpdateGroupSig`**, see §10), route-map `match script` clause (FRR
