@@ -292,7 +292,7 @@ module config {
     }
 
     list bridge {
-      ext:sort "10";
+      ext:sort "100";
       key "name";
       leaf name {
         type string;
@@ -308,7 +308,7 @@ module config {
     }
 
     list vxlan {
-      ext:sort "15";
+      ext:sort "90";
       key "name";
       leaf name {
         type string;
