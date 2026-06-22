@@ -30,12 +30,15 @@ phases, committed and pushed (rebased onto `origin/main`):
 Tests on the rebased base: 342 `bgp-packet` + 1378 `zebra-rs`, fmt +
 workspace clippy clean.
 
+**P5 (the MUP Controller) is now built** over PR-A/B/C using a **PFCP/N4**
+northbound (not zenoh) — see the P5 section below. **P6 (the
+SRv6-mobile dataplane) remains the one large deferred phase.**
+
 The items below were consciously left out so each phase could ship as a
 small PR. None block the control-plane path for the common case
-(receive / store / show / re-advertise MUP routes between speakers).
-Each entry: **what / why deferred / where / suggested PR size**. The
-two large remaining phases (P5 controller, P6 dataplane) are at the end
-with their open design questions.
+(receive / store / show / re-advertise MUP routes between speakers, and
+controller origination). Each entry: **what / why deferred / where /
+suggested PR size**; several are now marked **DONE** by P5.
 
 Standing guidance still applies: smallest meaningful slice first, let
 the user redirect, one branch / one PR at a time.
@@ -121,19 +124,18 @@ mirror the EVPN LLGR two-branch.
 
 ## Show
 
-### 6. Full `MUP controller:` show block
+### 6. Full `MUP controller:` show block — **DONE (P5)**
 
-**What:** `show bgp mobile-uplane` renders the config-driven `MUP VRFs:`
-block (P3) + the route table (P2). The mockup's full wrapper — header
-`MUP controller: enabled`, the `zenoh source:` line, `ingested sessions`
-count, and the `vpnv6 ue-routes:` list — needs P5 controller state.
+`show bgp mobile-uplane mup-c [session|association]` now renders the
+controller runtime (admin state, PFCP listen address, association /
+session counts, and the per-session table) from the BGP-held
+`mup_c_view` the controller feeds over `Message::MupC`. The
+`zenoh source:` line is moot (the northbound is PFCP, not zenoh); the
+`vpnv6 ue-routes:` list was dropped (the ST routes carry the SRv6
+service directly). `show bgp mobile-uplane` still renders the `MUP VRFs:`
+block (P3) + the route table (P2), now populated by originated ST routes.
 
-**Why deferred:** Those lines describe controller runtime that doesn't
-exist until P5.
-
-**Where:** `show_bgp_mup` / `render_mup_vrfs` in `zebra-rs/src/bgp/show.rs`.
-
-**Size:** small once P5 state exists (~150 lines).
+**Where:** `show_bgp_mup_c*` / `render_mup_vrfs` in `zebra-rs/src/bgp/show.rs`.
 
 ### 7. `show bgp mobile-uplane` JSON output
 
@@ -237,22 +239,20 @@ implicit-replace semantics are required.
 
 ## Testing
 
-### 14. End-to-end receive-from-peer / RR BDD
+### 14. End-to-end originate → receive BDD — **DONE (P5/PR-C)**
 
-**What:** A multi-node BDD (originate on one speaker, receive +
-re-advertise + show on another) that exercises the full control plane on
-the wire.
+`bdd/tests/features/bgp_mup_e2e.feature` (`@bgp_mup_e2e`): the controller
+node (z1) is driven by `tools/pfcp-inject` (a PFCP SMF simulator that
+supplies the originator the harness otherwise lacks), originates the ST1
+route, and the peer (z2) receives it. The earlier
+`bgp_mup_capability.feature` covers session-up + capability negotiation.
+Both need root netns and are excluded from CI gates per
+[`zebra-rs-ci-and-merge-rules`](../../zebra-rs-ci-and-merge-rules.md) —
+run live (`make -C bdd bgp_mup_e2e`, with `pfcp-inject` staged on PATH).
+Remaining: a receive-from-peer / RR variant (a third node reflecting the
+ST route) is still worth adding.
 
-**Why deferred:** The BDD harness is zebra-rs↔zebra-rs (no GoBGP/ExaBGP
-injector), so an *originator* is required — and MUP origination is P5.
-`bdd/tests/features/bgp_mup_capability.feature` (session-up + capability
-negotiation) is authored but **not run** (needs root netns; BDD is
-excluded from CI gates per
-[`zebra-rs-ci-and-merge-rules`](../../zebra-rs-ci-and-merge-rules.md)).
-
-**Where:** `bdd/tests/`.
-
-**Size:** medium (lands with P5).
+**Where:** `bdd/tests/features/bgp_mup_e2e.feature`, `tools/pfcp-inject/`.
 
 ### 15. zebra-rs-level advertise integration test
 
@@ -270,35 +270,42 @@ Coverage today is compile + clippy-wiring + the `bgp-packet`
 
 ## The two remaining phases
 
-### P5 — MUP Controller (zenoh / PFCP)
+### P5 — MUP Controller (PFCP) — **BUILT**
 
-**What:** Subscribe to PFCP sessions over zenoh and originate, per
-session: an ST1 route (the `encapsulation` / N6 VRF), an ST2 route (the
-`decapsulation` / N3 VRF), and a VPNv6 UE route — each tagged with the
-VRF's `route-target export` and an SRv6 SID — plus the full
-`MUP controller:` show block (zenoh source, ingested-session count,
-originated-route count, `vpnv6 ue-routes`).
+Built over PR-A/B/C. The northbound is **PFCP / N4** (3GPP TS 29.244, via
+the `rs-pfcp` crate), not zenoh — the controller terminates N4 as a
+UP-node, so an external SMF programs it exactly as it would a UPF. The
+session schema question is therefore answered by PFCP itself (no custom
+zenoh encoding to design).
 
-**Open design questions (need operator input before building):**
-1. **Session schema** on the zenoh `pfcp/**` keys — encoding (JSON /
-   protobuf / custom) and fields (UE prefix, TEID, QFI, gNodeB endpoint,
-   source, network-instance, …). This is the blocker for the
-   session→route mapping.
-2. **`zenoh` crate** dependency + the `zenoh source tcp/<addr>:<port>` /
-   `prefix pfcp/**` config knobs (and a pinned version).
-3. **SID source** — where ST / VPNv6 SIDs come from (the mockup shows
-   `sid=fcbb:bb00:30:19::`, i.e. carved from a global `srv6 locator`
-   like the L3VPN End.DT46 path).
+* **Config home:** under the BGP instance at `router bgp afi-safi
+  mobile-uplane mup-c { enable; controller-address; pfcp {…}; srv6 {…} }`
+  — so the controller is spawned by the BGP task and handed its `Message`
+  channel, the way a per-VRF BGP instance is. Module: `zebra-rs/src/mup-c/`
+  (`inst` task, `pfcp` socket/handlers, `session`/`assoc` tables); spawn /
+  reconfigure / teardown in `Bgp::apply_mup_c_commit_diff`.
+* **PR-A (ingest):** PFCP listener (own tokio UDP socket); Association
+  Setup/Release, Heartbeat, Session Establishment/Modification/Deletion;
+  per-session table; `show bgp mobile-uplane mup-c [session|association]`.
+  Hardened (commit security review): session-ownership check on
+  Modify/Delete, association precondition on Establish, bounded tables.
+* **PR-B (origination):** `Bgp::originate_mup_route` correlates the
+  session's Network Instance → a per-VRF `mobile-uplane` config (RD /
+  route-targets / direction), allocates an SRv6 SID (`alloc_mup_sid`,
+  same pool as the L3VPN End.DT46 path), builds the ST NLRI
+  (`encapsulation`→T1ST UE prefix; `decapsulation`→T2ST endpoint+TEID)
+  and attributes (controller-address next hop, RT exports, SRv6 L3
+  Service Prefix-SID End.DT4/DT6), and originates via the P4 advertise
+  path. Tracked per session SEID for stable withdraw.
+* **PR-C (e2e):** `tools/pfcp-inject` (PFCP SMF simulator) + the
+  `@bgp_mup_e2e` BDD feature (#14). Live-validated end-to-end.
 
-**Recommended seam:** a `SessionSource` trait (zenoh is one impl) so the
-session→ST origination logic is unit-testable without standing up a
-zenoh bus. This also unblocks the end-to-end BDD (#14) using a synthetic
-source.
-
-**Where:** new module under `zebra-rs/src/bgp/`; origination reuses the
-P4 advertise path + the VPNv6 origination path.
-
-**Size:** large (multi-PR).
+**Deferred from P5:** the VPNv6 UE host route originally listed here was
+dropped — the ST routes carry the per-session SRv6 service directly.
+Heartbeat-driven eviction of idle PFCP associations and per-source rate
+limiting are follow-ups (the tables are bounded by hard caps today). The
+controller draws SIDs from the **global** resolved locator; honouring a
+distinct `mup-c srv6 locator` override is a small follow-up.
 
 ### P6 — SRv6-mobile dataplane
 
@@ -327,9 +334,10 @@ By value-per-line, if picking one up independently of P5/P6:
    first thing a real deployment with filtering will need.
 
 Larger items (#3 VRF import, #8 update-groups, #10 AddPath TX, #13
-strict route-key) should each gate on a concrete consumer — most of them
-naturally sequence after **P5**, which is the next real milestone (and
-needs the operator design input above before it can start).
+strict route-key) should each gate on a concrete consumer. With **P5
+built**, the next real milestone is **P6 (the SRv6-mobile dataplane)**;
+most of the larger items above now have a concrete consumer in the
+controller and can be picked up as deployments demand them.
 
 ## Cross-references
 
