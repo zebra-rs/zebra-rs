@@ -134,6 +134,53 @@ fn config_loc_rib_hook_withdraw_v4(_bgp: &mut Bgp, mut args: Args, op: ConfigOp)
     Some(())
 }
 
+/// Parse a flat JSON object (`{"key": "value", ...}`) into a string→string
+/// map for `map.get`. Non-string JSON values (numbers, bools) are taken as
+/// their JSON text (so `{"aa:..": 100}` yields `"100"`); a parse failure
+/// yields an empty map.
+fn parse_lua_map(content: &str) -> std::collections::BTreeMap<String, String> {
+    let mut out = std::collections::BTreeMap::new();
+    if let Ok(obj) = serde_json::from_str::<serde_json::Map<String, serde_json::Value>>(content) {
+        for (key, value) in obj {
+            let value = match value {
+                serde_json::Value::String(s) => s,
+                other => other.to_string(),
+            };
+            out.insert(key, value);
+        }
+    }
+    out
+}
+
+/// `set router bgp lua-map <ns> source-path <path>` — load a JSON lookup
+/// table into the `map.get` namespace `<ns>`. A read error logs and clears
+/// the namespace rather than failing the commit.
+fn config_lua_map_source_path(_bgp: &mut Bgp, mut args: Args, op: ConfigOp) -> Option<()> {
+    let namespace = args.string()?;
+    if op.is_set() {
+        let path = args.string()?;
+        match std::fs::read_to_string(&path) {
+            Ok(content) => crate::script::map_set_namespace(&namespace, parse_lua_map(&content)),
+            Err(e) => {
+                tracing::warn!("lua: cannot read map '{namespace}' from '{path}': {e}");
+                crate::script::map_clear_namespace(&namespace);
+            }
+        }
+    } else {
+        crate::script::map_clear_namespace(&namespace);
+    }
+    Some(())
+}
+
+/// `delete router bgp lua-map <ns>` — drop the namespace.
+fn config_lua_map(_bgp: &mut Bgp, mut args: Args, op: ConfigOp) -> Option<()> {
+    if op == ConfigOp::Delete {
+        let namespace = args.string()?;
+        crate::script::map_clear_namespace(&namespace);
+    }
+    Some(())
+}
+
 /// `set router bgp segment-routing srv6 locator <name>` — names the
 /// SRv6 locator BGP carves per-VRF End.DT46 service SIDs from for
 /// L3VPN over SRv6 (RFC 9252). Mirrors `router isis / segment-routing
@@ -3685,6 +3732,11 @@ impl Bgp {
         self.callback_add(
             "/router/bgp/loc-rib-hook/ipv4-unicast/withdraw",
             config_loc_rib_hook_withdraw_v4,
+        );
+        self.callback_add("/router/bgp/lua-map", config_lua_map);
+        self.callback_add(
+            "/router/bgp/lua-map/source-path",
+            config_lua_map_source_path,
         );
         self.callback_peer("", config_peer);
         self.callback_peer("/remote-as", config_remote_as);

@@ -220,6 +220,39 @@ pub fn loc_rib_withdraw_v4(prefix: IpNet, attr: &BgpAttr, peer: &PeerView) {
 #[cfg(not(feature = "lua"))]
 pub fn loc_rib_withdraw_v4(_prefix: IpNet, _attr: &BgpAttr, _peer: &PeerView) {}
 
+/// Config-seeded lookup tables exposed to scripts as `map.get(ns, key)`.
+/// This is the non-blocking replacement for FRR's blocking HTTP GET: a
+/// background process can refresh a namespace out of band while the hook
+/// does a synchronous in-memory read on the hot path. Each namespace is a
+/// flat key→value string table (e.g. `"sgt"` → MAC → tag).
+static MAP: OnceLock<RwLock<BTreeMap<String, BTreeMap<String, String>>>> = OnceLock::new();
+
+fn map() -> &'static RwLock<BTreeMap<String, BTreeMap<String, String>>> {
+    MAP.get_or_init(|| RwLock::new(BTreeMap::new()))
+}
+
+/// Replace a whole namespace's entries (config load).
+pub fn map_set_namespace(namespace: &str, entries: BTreeMap<String, String>) {
+    map()
+        .write()
+        .unwrap()
+        .insert(namespace.to_string(), entries);
+}
+
+/// Drop a namespace (config delete / load error).
+pub fn map_clear_namespace(namespace: &str) {
+    map().write().unwrap().remove(namespace);
+}
+
+/// Look up `key` in `namespace`; `None` if either is absent.
+pub fn map_get(namespace: &str, key: &str) -> Option<String> {
+    map()
+        .read()
+        .unwrap()
+        .get(namespace)
+        .and_then(|entries| entries.get(key).cloned())
+}
+
 /// Run the bound script's
 /// `loc_rib_import(prefix, attributes, peer, RM_*)` and return its
 /// [`Action`].

@@ -34,8 +34,8 @@ struct Engine {
 /// Safe standard-library symbols copied into each script's environment.
 /// Everything else — `os`, `io`, `package`, `require`, `load*`,
 /// `dofile`, `debug`, `print` — is intentionally absent (sandbox). The
-/// non-blocking host helpers (`zlog`, `ecom`, `sideeffect`) are added by
-/// [`install_host_helpers`]; `map` (the lookup table) arrives later.
+/// non-blocking host helpers (`zlog`, `ecom`, `sideeffect`, `map`) are
+/// added by [`install_host_helpers`].
 const SAFE_GLOBALS: &[&str] = &[
     "string",
     "table",
@@ -299,6 +299,18 @@ fn install_host_helpers(lua: &Lua, env: &Table) -> mlua::Result<()> {
         })?,
     )?;
     env.set("sideeffect", sideeffect)?;
+
+    // map.get(namespace, key) → value string, or nil. A synchronous,
+    // non-blocking read of a config-seeded lookup table (the non-blocking
+    // replacement for FRR's blocking HTTP GET).
+    let map = lua.create_table()?;
+    map.set(
+        "get",
+        lua.create_function(|_, (namespace, key): (String, String)| {
+            Ok(super::map_get(&namespace, &key))
+        })?,
+    )?;
+    env.set("map", map)?;
     Ok(())
 }
 
@@ -709,5 +721,35 @@ mod tests {
         assert_eq!(op.table, "bridge gbp_filter");
         assert_eq!(op.set, "tag_100");
         assert_eq!(op.elem, "aa:bb:cc:dd:ee:01");
+    }
+
+    #[test]
+    fn map_get_lookup() {
+        // The GBP origination move: a script resolves a MAC → tag from a
+        // config-seeded table via `map.get` (no blocking HTTP).
+        let _g = install_one(
+            "m",
+            r#"
+            function loc_rib_import(prefix, attributes, peer, FAIL, NOMATCH, MATCH, CHANGE)
+                if map.get("sgt", "aa:bb:cc:dd:ee:01") == "100" then
+                    return { action = FAIL }
+                end
+                return { action = NOMATCH }
+            end
+        "#,
+        );
+        let mut entries = std::collections::BTreeMap::new();
+        entries.insert("aa:bb:cc:dd:ee:01".to_string(), "100".to_string());
+        crate::script::map_set_namespace("sgt", entries);
+        assert_eq!(
+            import("m", "10.0.0.0/24", &BgpAttr::default()),
+            Action::Failure
+        );
+        // Cleared namespace → nil → no match (and cleans up the global).
+        crate::script::map_clear_namespace("sgt");
+        assert_eq!(
+            import("m", "10.0.0.0/24", &BgpAttr::default()),
+            Action::NoMatch
+        );
     }
 }

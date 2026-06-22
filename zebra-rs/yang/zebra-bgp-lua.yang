@@ -73,6 +73,19 @@ module zebra-bgp-lua {
       }
     }
 
+    list lua-map {
+      ext:help "Define a named lookup table for scripts (map.get)";
+      key "name";
+      leaf name {
+        ext:help "Namespace, the first argument to map.get(ns, key)";
+        type string;
+      }
+      leaf source-path {
+        ext:help "JSON file (flat object key->value) loaded into the namespace at config time";
+        type string;
+      }
+    }
+
     container loc-rib-hook {
       ext:help "Bind Lua scripts to Loc-RIB lifecycle hooks";
       container ipv4-unicast {
