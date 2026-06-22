@@ -58,3 +58,28 @@ jobs:
         # namespaces and are not runnable in the GitHub Actions sandbox;
         # exclude them here. They are intended to be run locally.
         run: cargo test --workspace --exclude bdd
+
+  lua:
+    name: cargo test (lua)
+    runs-on: ubuntu-22.04
+    # The `lua` feature is off by default, so the default clippy / test
+    # jobs never compile the embedded scripting engine (src/script's
+    # `#[cfg(feature = "lua")]` code) nor run its unit tests. This lane
+    # closes that gap: it clippy-checks and tests zebra-rs with the
+    # feature on. `mlua`'s vendored Lua 5.4 builds from C source, so the
+    # runner's preinstalled cc is enough (no extra apt deps).
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v5
+      - name: Install build deps
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y protobuf-compiler libpam0g-dev
+      - name: Rust
+        uses: actions-rust-lang/setup-rust-toolchain@v1
+        with:
+          components: clippy
+      - name: Clippy (lua)
+        run: cargo clippy -p zebra-rs --features lua --all-targets -- -D warnings
+      - name: Test (lua)
+        run: cargo test -p zebra-rs --features lua
