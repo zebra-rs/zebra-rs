@@ -40,7 +40,7 @@ use crate::context::Timer;
 
 /// Bumped whenever a new field is added to `UpdateGroupSig`. Surfaced
 /// in `show bgp update-group` so a stale view is detectable.
-pub const SIGNATURE_VERSION: u32 = 3;
+pub const SIGNATURE_VERSION: u32 = 4;
 
 /// Address families the grouping logic considers — every family whose
 /// advertise pipeline consults `peer.update_group_id`. IPv6 unicast
@@ -154,7 +154,29 @@ pub struct UpdateGroupSig {
     pub addpath_send: bool,
     pub extended_next_hop: bool,
     pub multiple_labels: bool,
+    /// Bound egress (Adj-RIB-Out) Lua script identity for this family, or
+    /// `None`. A bound egress script is an arbitrary black-box attribute
+    /// transform, so it cannot ride the canonical-member "encode once,
+    /// replicate" path safely. [`EgressScriptKey`] includes a peer-unique
+    /// key, so a scripted peer lands in its OWN singleton update-group and
+    /// the transform runs per-peer with full peer context (the egress
+    /// design note's Model B). The `generation` makes a script hot-reload
+    /// bump the signature → regroup + re-encode.
+    pub egress_script: Option<EgressScriptKey>,
     pub signature_version: u32,
+}
+
+/// Identity of a per-peer egress Lua script in [`UpdateGroupSig`].
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct EgressScriptKey {
+    /// Bound script name.
+    pub name: String,
+    /// Script-registry generation (a hot-reload bumps it).
+    pub generation: u64,
+    /// Peer address — makes the signature unique per peer (singleton
+    /// group), so the black-box transform never replicates one peer's
+    /// bytes to another.
+    pub peer: IpAddr,
 }
 
 #[derive(Debug, Default, Clone)]
@@ -373,7 +395,26 @@ pub fn signature_of(peer: &Peer, afi: Afi, safi: Safi) -> Option<UpdateGroupSig>
         // RFC 8277 multiple-labels is still not negotiated by zebra-rs;
         // the field is forward-compatible for the day it lands.
         multiple_labels: false,
+        egress_script: egress_script_key(peer, afi, safi),
         signature_version: SIGNATURE_VERSION,
+    })
+}
+
+/// The bound egress Lua script for `(afi, safi)`, keyed per peer so a
+/// scripted peer becomes its own singleton update-group (Model B). `None`
+/// when no egress script is bound for the family (the common case — no
+/// effect on grouping). Always compiled; the bindings are empty without
+/// the `lua` feature.
+fn egress_script_key(peer: &Peer, afi: Afi, safi: Safi) -> Option<EgressScriptKey> {
+    let name = match (afi, safi) {
+        (Afi::Ip, Safi::Unicast) => crate::script::egress_binding_v4(),
+        (Afi::L2vpn, Safi::Evpn) => crate::script::egress_binding_evpn(),
+        _ => None,
+    }?;
+    Some(EgressScriptKey {
+        name,
+        generation: crate::script::generation(),
+        peer: peer.address,
     })
 }
 
@@ -1326,8 +1367,44 @@ mod tests {
             addpath_send: false,
             extended_next_hop: false,
             multiple_labels: false,
+            egress_script: None,
             signature_version: SIGNATURE_VERSION,
         }
+    }
+
+    /// A bound egress Lua script must shard the update-group per peer
+    /// (Model B): two peers under the same script land in DIFFERENT groups
+    /// (distinct signatures), so the black-box transform never replicates
+    /// one peer's bytes to another. A reload (generation bump) also
+    /// re-shards. Without an egress script, grouping is unchanged.
+    #[test]
+    fn egress_script_shards_group_per_peer() {
+        use std::net::{IpAddr, Ipv4Addr};
+
+        let a = base_sig();
+        let b = base_sig();
+        assert_eq!(a, b, "no egress script ⇒ identical sigs share a group");
+
+        let key = |peer: [u8; 4], generation: u64| EgressScriptKey {
+            name: "gbp".into(),
+            generation,
+            peer: IpAddr::V4(Ipv4Addr::from(peer)),
+        };
+
+        // Same script + generation, different peers ⇒ singleton groups.
+        let mut p1 = base_sig();
+        p1.egress_script = Some(key([10, 0, 0, 1], 1));
+        let mut p2 = base_sig();
+        p2.egress_script = Some(key([10, 0, 0, 2], 1));
+        assert_ne!(p1, p2, "scripted peers get their own groups");
+
+        // Same peer, a reload (generation bump) ⇒ new sig (regroup).
+        let mut p1_reloaded = base_sig();
+        p1_reloaded.egress_script = Some(key([10, 0, 0, 1], 2));
+        assert_ne!(p1, p1_reloaded, "a script reload re-forms the group");
+
+        // Binding vs unbound also differ.
+        assert_ne!(a, p1, "binding an egress script changes the sig");
     }
 
     /// Two structurally identical signatures must hash and compare equal.
