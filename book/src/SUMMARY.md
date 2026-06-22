@@ -90,6 +90,7 @@
   - [Control Flow](ch-05-01-policy-control-flow.md)
   - [Match](ch-05-02-policy-match.md)
   - [Set](ch-05-03-policy-set.md)
+  - [Lua Scripting](ch-05-04-lua-scripting.md)
 
 ## Management Interface
 

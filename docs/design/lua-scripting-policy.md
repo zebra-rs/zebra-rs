@@ -1,6 +1,9 @@
 # Lua Scripting Integration for zebra-rs — Loc-RIB Policy Hooks
 
-Status: **design / proposal** (branch `lua`)
+Status: **shipped** — the engine plus the import / withdraw / egress hooks (IPv4-unicast
+and L2VPN-EVPN) are on `main`; the `lua` feature is **on by default**. User docs:
+`book/src/ch-05-04-lua-scripting.md`; egress-specific design: `lua-egress-hook.md`. This
+file is the original design + the per-PR plan (§9) that drove the work.
 Prior art: FRR Scripting (合田和也, ENOG90 2026-06-19 — "FRR Scripting は何ができるのか").
 
 This document designs an embedded-Lua scripting facility for zebra-rs, modelled
