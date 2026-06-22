@@ -1878,6 +1878,12 @@ module config {
           // every self-originated LSP as an IP-reach TLV (135 / 236 /
           // 237 depending on MT). Prefix family must match the
           // afi-safi name; the callback rejects mismatches.
+          //
+          // A bare `afi-safi <ipv4|ipv6>` carries no state — IS-IS does
+          // per-AFI enable per-interface, and this list exists only to
+          // hold `network` + `redistribute`. Reject the empty entry so a
+          // meaningless line can't be committed.
+          ext:non-empty "network or redistribute";
           key "name";
           uses zas:afi-safi-unicast;
           list network {
@@ -2593,6 +2599,7 @@ module config {
             // (mirrors the default instance, reusing the same
             // groupings). Forwarded `/router/isis/afi-safi/...` paths
             // match the existing v2 callbacks.
+            ext:non-empty "network or redistribute";
             key "name";
             uses zas:afi-safi-unicast;
             list network {

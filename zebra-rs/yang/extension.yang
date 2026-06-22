@@ -41,4 +41,15 @@ module extension {
        `show bgp ipv4 A.B.C.D`). The argument is the child node name.";
     argument "default-child";
   }
+
+  extension non-empty {
+    description
+      "Forbids key-only entries on this `list`: every entry must carry at
+       least one child node, so a bare `... <key>` is rejected at commit.
+       (YANG has no clean `must`-style 'at least one child' constraint and
+       this config tree does not evaluate `must`.) The argument is the
+       human-readable requirement echoed in the error, e.g.
+       'network or redistribute'.";
+    argument "non-empty";
+  }
 }

@@ -45,6 +45,7 @@ impl ZebraClient {
                 ymatch: ymatch.into(),
                 mandatory: vec![],
                 sort_priority: 0,
+                non_empty: String::new(),
             };
             paths.push(path);
         }

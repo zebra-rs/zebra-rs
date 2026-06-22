@@ -776,7 +776,18 @@ impl ConfigManager {
                 }
             }
         }
-        let _ = self.commit_config();
+        // A schema-validation failure (mandatory / `ext:non-empty`) rejects
+        // the whole startup commit — nothing is dispatched. Log it loudly so
+        // a config file the operator hand-edited into an invalid state (e.g.
+        // a bare `router isis afi-safi ipv4`) is diagnosable, rather than the
+        // daemon silently coming up with no config.
+        if let Err(e) = self.commit_config() {
+            tracing::error!(
+                "startup config {} rejected by schema validation: {}",
+                self.config_path.display(),
+                e
+            );
+        }
     }
 
     pub fn save_config(&self) {
@@ -959,7 +970,21 @@ impl ConfigManager {
                         return;
                     }
                 }
-                let _ = self.commit_config();
+                // Schema validation (mandatory / `ext:non-empty`) runs
+                // inside `commit_config` and returns Err *before* any
+                // dispatch. Surface it instead of swallowing it, and revert
+                // the candidate so the rejected lines don't linger into the
+                // next apply.
+                if let Err(e) = self.commit_config() {
+                    self.store.discard();
+                    let resp = DeployResponse {
+                        apply_code: ApplyCode::MissingMandatory,
+                        exec_code: ExecCode::Success,
+                        cmd: e.to_string(),
+                    };
+                    let _ = req.resp.send(resp);
+                    return;
+                }
 
                 let resp = DeployResponse {
                     apply_code: ApplyCode::Applied,
@@ -1480,6 +1505,71 @@ mod yang_load_tests {
                 code,
                 ExecCode::Success,
                 "should parse as a settable path: {cmd}"
+            );
+        }
+    }
+
+    /// `router isis afi-safi <ipv4|ipv6>` is dead config unless it carries
+    /// a `network` or `redistribute` child — IS-IS does per-AFI enable
+    /// per-interface, the list only holds those. The list is tagged
+    /// `ext:non-empty` so a key-only entry is rejected at commit. This
+    /// drives the real schema end to end (proving the extension flows
+    /// YANG -> Entry -> CommandPath -> Config) and checks that a bare entry
+    /// fails `validate` while a child-bearing entry passes.
+    #[test]
+    fn isis_afi_safi_bare_entry_is_rejected() {
+        use crate::config::ExecCode;
+        use crate::config::configs::set;
+        use crate::config::parse::{State, parse};
+        use crate::config::{Config, paths::path_try_trim};
+        use libyang::to_entry;
+        use std::rc::Rc;
+
+        let mut yang = YangStore::new();
+        yang.add_path(concat!(env!("CARGO_MANIFEST_DIR"), "/yang"));
+        yang.read_with_resolve("configure")
+            .unwrap_or_else(|e| panic!("configure failed to load: {e:#}"));
+        yang.identity_resolve();
+        let module = yang.find_module("configure").unwrap();
+        let entry = to_entry(&yang, module);
+        // The diff/apply layer parses config lines against the `set`
+        // subtree (no leading `set` keyword), so do the same here.
+        let set_entry = entry
+            .dir
+            .borrow()
+            .iter()
+            .find(|e| e.name == "set")
+            .cloned()
+            .expect("configure mode has a `set` entry");
+
+        let validate_errors = |cmd: &str| -> Vec<String> {
+            let (code, _comps, state) = parse(cmd, set_entry.clone(), None, State::new());
+            assert_eq!(code, ExecCode::Success, "should parse: {cmd}");
+            let root = Rc::new(Config::new("".to_string(), None));
+            set(path_try_trim("set", state.paths), root.clone());
+            let mut errors = Vec::new();
+            root.validate(&mut errors);
+            errors
+        };
+
+        // Bare entry → rejected.
+        let errors = validate_errors("router isis afi-safi ipv4");
+        assert!(
+            errors
+                .iter()
+                .any(|e| e.contains("afi-safi ipv4") && e.contains("network or redistribute")),
+            "bare `afi-safi ipv4` must be rejected, got: {errors:?}"
+        );
+
+        // network / redistribute children → validate clean.
+        for cmd in [
+            "router isis afi-safi ipv4 network 10.0.0.0/24",
+            "router isis afi-safi ipv6 redistribute connected",
+        ] {
+            let errors = validate_errors(cmd);
+            assert!(
+                errors.is_empty(),
+                "should validate clean: {cmd}, got: {errors:?}"
             );
         }
     }
