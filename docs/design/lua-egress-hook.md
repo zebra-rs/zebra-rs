@@ -1,6 +1,6 @@
 # Lua Egress (Adj-RIB-Out) Hook — design note
 
-Status: **in progress** — E1+E2 landed; E3 (wiring) next.
+Status: **in progress** — E1+E2+E3 (v4 wired) landed; E4 (EVPN advertise) next.
 Builds on the merged Lua scripting series (engine, import/withdraw hooks, marshalling,
 host helpers) — see `docs/design/lua-scripting-policy.md`.
 
@@ -17,8 +17,13 @@ host helpers) — see `docs/design/lua-scripting-policy.md`.
 - **Status:** E1 (engine `adj_rib_out` / `adj_rib_out_evpn` entries + egress bindings +
   `generation()`) and E2 (`UpdateGroupSig.egress_script` = [`EgressScriptKey`] {name,
   generation, peer} + `SIGNATURE_VERSION = 4` + `signature_of`) are implemented and
-  unit-tested. E3 (wire into `route_apply_policy_out` + `adj-rib-out-hook` config/YANG +
-  regroup-on-bind) and E4 (EVPN advertise) are next. Under Model B the egress hook **does**
+  unit-tested. **E3 is done**: the v4 egress hook is wired into
+  `route_apply_policy_out` (via `SyncCtx::apply_egress_v4`, with `remote_id`/
+  `remote_address` added to `SyncCtx` so the egress `peer` table is complete), bound by
+  `adj-rib-out-hook ipv4-unicast export`, and a binding change reassigns every
+  established peer's update-group (`reassign_all_update_groups`) so the singletons form
+  before the transform runs. E4 (EVPN advertise via `route_apply_policy_out_evpn`) is
+  next. Under Model B the egress hook **does**
   receive the full `peer` table (it runs per-peer), unlike the no-peer-table design A
   sketched in §3.
 

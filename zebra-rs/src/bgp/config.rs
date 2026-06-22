@@ -158,6 +158,40 @@ fn config_loc_rib_hook_withdraw_evpn(_bgp: &mut Bgp, mut args: Args, op: ConfigO
     Some(())
 }
 
+/// Re-evaluate every established peer's update-group membership
+/// (detach + attach, which recompute `signature_of`). Needed after an
+/// egress-script binding change: a bound egress script must move each
+/// scripted peer into its own singleton group (Model B) *before* the
+/// transform runs, or the canonical-member encode would replicate one
+/// peer's rewritten bytes to another.
+fn reassign_all_update_groups(bgp: &mut Bgp) {
+    let router_id = bgp.router_id;
+    let idents: Vec<usize> = bgp
+        .peers
+        .iter_all()
+        .filter(|(_, peer)| peer.state.is_established())
+        .map(|(_, peer)| peer.ident)
+        .collect();
+    for ident in idents {
+        super::update_group::detach(&mut bgp.update_groups, &mut bgp.peers, ident);
+        super::update_group::attach(&mut bgp.update_groups, &mut bgp.peers, ident, router_id);
+    }
+}
+
+/// `set router bgp adj-rib-out-hook ipv4-unicast export <name>` — bind a
+/// script to the IPv4-unicast egress (Adj-RIB-Out) hook; delete unbinds.
+/// A change re-forms the update-groups (see [`reassign_all_update_groups`]).
+fn config_adj_rib_out_hook_export_v4(bgp: &mut Bgp, mut args: Args, op: ConfigOp) -> Option<()> {
+    if op.is_set() {
+        let name = args.string()?;
+        crate::script::set_egress_binding_v4(Some(name));
+    } else {
+        crate::script::set_egress_binding_v4(None);
+    }
+    reassign_all_update_groups(bgp);
+    Some(())
+}
+
 /// Parse a flat JSON object (`{"key": "value", ...}`) into a string→string
 /// map for `map.get`. Non-string JSON values (numbers, bools) are taken as
 /// their JSON text (so `{"aa:..": 100}` yields `"100"`); a parse failure
@@ -3764,6 +3798,10 @@ impl Bgp {
         self.callback_add(
             "/router/bgp/loc-rib-hook/l2vpn-evpn/withdraw",
             config_loc_rib_hook_withdraw_evpn,
+        );
+        self.callback_add(
+            "/router/bgp/adj-rib-out-hook/ipv4-unicast/export",
+            config_adj_rib_out_hook_export_v4,
         );
         self.callback_add("/router/bgp/lua-map", config_lua_map);
         self.callback_add(

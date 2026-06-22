@@ -175,6 +175,14 @@ pub struct SyncCtx {
     pub reflector_client: bool,
     pub local_addr_v4: Option<Ipv4Addr>,
     pub router_id: Ipv4Addr,
+    /// The peer's BGP Identifier and address — carried so the egress Lua
+    /// hook (which runs without a `&Peer`) can present a full `peer` table.
+    /// Under Model B a scripted peer is its own singleton group, so these
+    /// are that one peer's values. Read only by the `lua` egress hook.
+    #[cfg_attr(not(feature = "lua"), allow(dead_code))]
+    pub remote_id: Ipv4Addr,
+    #[cfg_attr(not(feature = "lua"), allow(dead_code))]
+    pub remote_address: IpAddr,
     pub vpnv4_next_hop_self: bool,
     pub egress_as: EgressAs,
     pub out_policy: Arc<super::policy::OutPolicy>,
@@ -205,6 +213,48 @@ impl SyncCtx {
     }
 }
 
+#[cfg(feature = "lua")]
+impl SyncCtx {
+    /// Build the `peer` table for the egress hook. Under Model B the
+    /// canonical member of a scripted peer's singleton group *is* that
+    /// peer, so these snapshot fields are its values.
+    fn lua_peer_view(&self) -> crate::script::PeerView {
+        crate::script::PeerView {
+            remote_as: self.egress_as.remote_as,
+            local_as: self.egress_as.local_as,
+            remote_id: self.remote_id,
+            local_id: self.router_id,
+            remote_address: self.remote_address,
+            state: "Established".to_string(),
+            is_ibgp: matches!(self.peer_type, PeerType::IBGP),
+        }
+    }
+
+    /// Apply the bound IPv4-unicast egress (Adj-RIB-Out) Lua hook to a
+    /// native out-policy decision: `Failure` drops the advertisement,
+    /// `MatchAndChange` folds the script's rewritten attributes in, else
+    /// pass through. No-op when no egress script is bound.
+    fn apply_egress_v4(
+        &self,
+        prefix: IpNet,
+        decision: Option<PolicyDecision>,
+    ) -> Option<PolicyDecision> {
+        let mut decision = decision?;
+        let peer = self.lua_peer_view();
+        let outcome = crate::script::adj_rib_out_v4(prefix, &decision.attr, &peer);
+        match outcome.action {
+            crate::script::Action::Failure => None,
+            crate::script::Action::MatchAndChange => {
+                if let Some(attr) = outcome.attr {
+                    decision.attr = attr;
+                }
+                Some(decision)
+            }
+            _ => Some(decision),
+        }
+    }
+}
+
 #[cfg(test)]
 impl SyncCtx {
     /// Minimal `SyncCtx` for shard-dispatch tests — no peer, no writer
@@ -217,6 +267,8 @@ impl SyncCtx {
             reflector_client: false,
             local_addr_v4: None,
             router_id: Ipv4Addr::UNSPECIFIED,
+            remote_id: Ipv4Addr::UNSPECIFIED,
+            remote_address: IpAddr::V4(Ipv4Addr::UNSPECIFIED),
             vpnv4_next_hop_self: false,
             egress_as: EgressAs {
                 is_ebgp: true,
@@ -2793,14 +2845,20 @@ pub fn route_apply_policy_out(
     bgp_attr: BgpAttr,
     weight: u32,
 ) -> Option<PolicyDecision> {
-    apply_policy_net(
+    let decision = apply_policy_net(
         &ctx.out_policy.prefix_set,
         &ctx.out_policy.policy_list,
         ctx.router_id,
         IpNet::V4(nlri.prefix),
         bgp_attr,
         weight,
-    )
+    );
+    // Egress (Adj-RIB-Out) Lua hook after native out-policy. Runs on the
+    // canonical member's encode; under Model B a scripted peer is a
+    // singleton group, so it runs per-peer.
+    #[cfg(feature = "lua")]
+    let decision = ctx.apply_egress_v4(IpNet::V4(nlri.prefix), decision);
+    decision
 }
 
 /// Per-AFI v4-family outbound policy: the v4 twin of
