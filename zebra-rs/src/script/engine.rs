@@ -165,6 +165,40 @@ impl Engine {
             attr: new_attr,
         })
     }
+
+    /// Run the script's `loc_rib_withdraw(prefix, attributes, peer, RM_*)`.
+    /// Observe-only: the return value is ignored (the route is already
+    /// gone), so there is no attribute write-back. A script that defines
+    /// no `loc_rib_withdraw` is a silent no-op (a script may bind only the
+    /// import hook).
+    fn run_withdraw(
+        &self,
+        name: &str,
+        prefix: IpNet,
+        attr: &BgpAttr,
+        peer: &PeerView,
+    ) -> mlua::Result<()> {
+        let env = self
+            .envs
+            .get(name)
+            .ok_or_else(|| mlua::Error::RuntimeError(format!("no loaded script '{name}'")))?;
+        let Some(func) = env.get::<Option<Function>>("loc_rib_withdraw")? else {
+            return Ok(());
+        };
+        let prefix_t = marshal::prefix_table(&self.lua, prefix)?;
+        let attr_t = marshal::attr_table(&self.lua, attr)?;
+        let peer_t = marshal::peer_table(&self.lua, peer)?;
+        let _: Value = func.call((
+            prefix_t,
+            attr_t,
+            peer_t,
+            Action::Failure as i64,
+            Action::NoMatch as i64,
+            Action::Match as i64,
+            Action::MatchAndChange as i64,
+        ))?;
+        Ok(())
+    }
 }
 
 /// Load one script source into its own sandboxed environment table and
@@ -189,10 +223,35 @@ fn load_script(lua: &Lua, name: &str, src: &str) -> mlua::Result<Table> {
     Ok(env)
 }
 
-/// Register the non-blocking host helpers exposed to scripts. PR4 adds the
-/// `ecom` typed Group-Policy-ID helpers (draft-wlin-bess, type 0x03,
-/// sub-type 0x17); `zlog` / `map` / `sideeffect` follow in a later PR.
+/// Register the non-blocking host helpers exposed to scripts: `zlog`
+/// (logging) and the `ecom` typed Group-Policy-ID helpers
+/// (draft-wlin-bess, type 0x03, sub-type 0x17). `map` / `sideeffect`
+/// (the non-blocking side-effect channel) follow in a later PR.
 fn install_host_helpers(lua: &Lua, env: &Table) -> mlua::Result<()> {
+    let zlog = lua.create_table()?;
+    zlog.set(
+        "info",
+        lua.create_function(|_, msg: String| {
+            tracing::info!("lua: {msg}");
+            Ok(())
+        })?,
+    )?;
+    zlog.set(
+        "warn",
+        lua.create_function(|_, msg: String| {
+            tracing::warn!("lua: {msg}");
+            Ok(())
+        })?,
+    )?;
+    zlog.set(
+        "error",
+        lua.create_function(|_, msg: String| {
+            tracing::error!("lua: {msg}");
+            Ok(())
+        })?,
+    )?;
+    env.set("zlog", zlog)?;
+
     let ecom = lua.create_table()?;
     // ecom.gpi(tag) -> 8-octet GPI extended-community value.
     ecom.set(
@@ -238,6 +297,37 @@ pub fn loc_rib_import(name: &str, prefix: IpNet, attr: &BgpAttr, peer: &PeerView
                 ImportOutcome::nomatch()
             }
         }
+    })
+}
+
+/// Thread-local entry point used by [`super::loc_rib_withdraw_v4`].
+/// Observe-only; fail-safe (errors are logged, nothing else happens).
+pub fn loc_rib_withdraw(name: &str, prefix: IpNet, attr: &BgpAttr, peer: &PeerView) {
+    let scripts = current();
+    ENGINE.with(|cell| {
+        let mut engine = cell.borrow_mut();
+        engine.sync(&scripts);
+        if let Err(err) = engine.run_withdraw(name, prefix, attr, peer) {
+            tracing::warn!("lua: withdraw hook '{name}' error: {err}");
+        }
+    });
+}
+
+/// Test-only: run the withdraw hook and surface the `Result` (the public
+/// entry swallows errors by design), so a test can assert the script ran
+/// and saw the stored attributes.
+#[cfg(test)]
+fn run_withdraw_test(
+    name: &str,
+    prefix: IpNet,
+    attr: &BgpAttr,
+    peer: &PeerView,
+) -> mlua::Result<()> {
+    let scripts = current();
+    ENGINE.with(|cell| {
+        let mut engine = cell.borrow_mut();
+        engine.sync(&scripts);
+        engine.run_withdraw(name, prefix, attr, peer)
     })
 }
 
@@ -526,5 +616,55 @@ mod tests {
         let out = loc_rib_import("nm", net("10.0.0.0/24"), &BgpAttr::default(), &peer());
         assert_eq!(out.action, Action::NoMatch);
         assert!(out.attr.is_none());
+    }
+
+    #[test]
+    fn withdraw_sees_stored_attrs() {
+        // The headline capability FRR lacks: on withdraw the script gets
+        // the *stored* attributes of the removed path, so it can recover
+        // the GBP tag. The script `error()`s when it sees tag 300, which
+        // the test surfaces as Err.
+        let _g = install_one(
+            "wd",
+            r#"
+            function loc_rib_withdraw(prefix, attributes, peer, FAIL, NOMATCH, MATCH, CHANGE)
+                for _, ec in ipairs(attributes.ext_community) do
+                    if ecom.parse_gpi(ec) == 300 then
+                        error("saw gpi 300")
+                    end
+                end
+            end
+        "#,
+        );
+        let ecom = ExtCommunity::from([ExtCommunityValue {
+            high_type: 0x03,
+            low_type: 0x17,
+            val: [0x00, 0x00, 0x00, 0x00, 0x01, 0x2c],
+        }]);
+        let attr = BgpAttr {
+            ecom: Some(ecom),
+            ..Default::default()
+        };
+        assert!(run_withdraw_test("wd", net("10.0.0.0/24"), &attr, &peer()).is_err());
+        // No ext-community on the removed path → loop empty → Ok.
+        assert!(run_withdraw_test("wd", net("10.0.0.0/24"), &BgpAttr::default(), &peer()).is_ok());
+    }
+
+    #[test]
+    fn withdraw_missing_function_is_noop() {
+        // A script that binds only the import hook is a silent no-op for
+        // withdraw (not a logged error every time).
+        let _g = install_one("wd2", "function loc_rib_import() return { action = 1 } end");
+        assert!(run_withdraw_test("wd2", net("10.0.0.0/24"), &BgpAttr::default(), &peer()).is_ok());
+    }
+
+    #[test]
+    fn withdraw_v4_binding_smoke() {
+        // Exercise the public dispatch: unbound → no-op, bound → runs.
+        let _g = install_one("wb", "function loc_rib_withdraw(p, a, pe, F, N, M, C) end");
+        crate::script::loc_rib_withdraw_v4(net("10.0.0.0/24"), &BgpAttr::default(), &peer());
+        crate::script::set_withdraw_binding_v4(Some("wb".to_string()));
+        crate::script::loc_rib_withdraw_v4(net("10.0.0.0/24"), &BgpAttr::default(), &peer());
+        crate::script::set_withdraw_binding_v4(None);
     }
 }

@@ -81,6 +81,10 @@ module zebra-bgp-lua {
           ext:help "Script run when a route is admitted from Adj-RIB-In into the Loc-RIB";
           type string;
         }
+        leaf withdraw {
+          ext:help "Script run when a route is removed from the Loc-RIB (sees the stored attributes)";
+          type string;
+        }
       }
     }
   }

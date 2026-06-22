@@ -2640,6 +2640,25 @@ impl LocalRib {
 }
 
 // RIB update from peer.
+/// Build a `script::PeerView` (the flattened peer table marshalled into
+/// the Lua hooks) from a full `Peer`. Used by the call sites that have a
+/// `&Peer` in hand (e.g. the withdraw hook); the shard import path builds
+/// a partial view from the router-id it carries.
+#[cfg(feature = "lua")]
+fn lua_peer_view(peer: &Peer) -> crate::script::PeerView {
+    crate::script::PeerView {
+        remote_as: peer.remote_as,
+        local_as: peer.local_as,
+        remote_id: peer.remote_id,
+        local_id: peer
+            .local_identifier
+            .unwrap_or(std::net::Ipv4Addr::UNSPECIFIED),
+        remote_address: peer.address,
+        state: peer.state.to_str().to_string(),
+        is_ibgp: peer.is_ibgp(),
+    }
+}
+
 pub fn route_apply_policy_in(
     peer: &Peer,
     afi_safi: AfiSafi,
@@ -5506,6 +5525,20 @@ pub fn route_ipv4_withdraw(
 
     // BGP Path selection - this may select a new best path
     let mut removed = bgp.shard.remove(rd, nlri.prefix, nlri.id, ident);
+
+    // Lua withdraw hook (Loc-RIB → gone): a wire withdraw carries only the
+    // NLRI, so hand the script the *stored* attributes of the path that
+    // just left the Loc-RIB (e.g. to recover a GBP tag and tear down a
+    // side-effect). Plain IPv4-unicast only; this is the N=1 / VPNv4
+    // synchronous path (the N>1 pool reduce is a follow-up).
+    #[cfg(feature = "lua")]
+    if rd.is_none()
+        && let Some(gone) = removed.first()
+        && let Some(peer) = peers.get_by_idx(ident)
+    {
+        let view = lua_peer_view(peer);
+        crate::script::loc_rib_withdraw_v4(IpNet::V4(nlri.prefix), &gone.attr, &view);
+    }
 
     // NHT untrack: release the withdrawn path's next-hop(s) unless a
     // surviving candidate still uses them.

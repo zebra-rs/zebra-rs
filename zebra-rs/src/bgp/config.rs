@@ -122,6 +122,18 @@ fn config_loc_rib_hook_import_v4(_bgp: &mut Bgp, mut args: Args, op: ConfigOp) -
     Some(())
 }
 
+/// `set router bgp loc-rib-hook ipv4-unicast withdraw <name>` — bind a
+/// script to the IPv4-unicast Loc-RIB withdraw hook; delete unbinds.
+fn config_loc_rib_hook_withdraw_v4(_bgp: &mut Bgp, mut args: Args, op: ConfigOp) -> Option<()> {
+    if op.is_set() {
+        let name = args.string()?;
+        crate::script::set_withdraw_binding_v4(Some(name));
+    } else {
+        crate::script::set_withdraw_binding_v4(None);
+    }
+    Some(())
+}
+
 /// `set router bgp segment-routing srv6 locator <name>` — names the
 /// SRv6 locator BGP carves per-VRF End.DT46 service SIDs from for
 /// L3VPN over SRv6 (RFC 9252). Mirrors `router isis / segment-routing
@@ -3669,6 +3681,10 @@ impl Bgp {
         self.callback_add(
             "/router/bgp/loc-rib-hook/ipv4-unicast/import",
             config_loc_rib_hook_import_v4,
+        );
+        self.callback_add(
+            "/router/bgp/loc-rib-hook/ipv4-unicast/withdraw",
+            config_loc_rib_hook_withdraw_v4,
         );
         self.callback_peer("", config_peer);
         self.callback_peer("/remote-as", config_remote_as);
