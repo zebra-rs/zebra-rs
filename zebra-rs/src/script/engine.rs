@@ -34,8 +34,8 @@ struct Engine {
 /// Safe standard-library symbols copied into each script's environment.
 /// Everything else — `os`, `io`, `package`, `require`, `load*`,
 /// `dofile`, `debug`, `print` — is intentionally absent (sandbox). The
-/// non-blocking host helpers (`zlog`, `map`, `sideeffect`) arrive in a
-/// later PR.
+/// non-blocking host helpers (`zlog`, `ecom`, `sideeffect`) are added by
+/// [`install_host_helpers`]; `map` (the lookup table) arrives later.
 const SAFE_GLOBALS: &[&str] = &[
     "string",
     "table",
@@ -280,6 +280,25 @@ fn install_host_helpers(lua: &Lua, env: &Table) -> mlua::Result<()> {
         })?,
     )?;
     env.set("ecom", ecom)?;
+
+    // sideeffect.nft{op=, table=, set=, elem=} enqueues a non-blocking
+    // nftables mutation onto the background drainer (the route path never
+    // runs `nft` inline).
+    let sideeffect = lua.create_table()?;
+    sideeffect.set(
+        "nft",
+        lua.create_function(|_, opts: Table| {
+            let op: String = opts.get("op")?;
+            super::sideeffect::enqueue(super::sideeffect::NftOp {
+                add: op == "add",
+                table: opts.get("table")?,
+                set: opts.get("set")?,
+                elem: opts.get("elem")?,
+            });
+            Ok(())
+        })?,
+    )?;
+    env.set("sideeffect", sideeffect)?;
     Ok(())
 }
 
@@ -666,5 +685,29 @@ mod tests {
         crate::script::set_withdraw_binding_v4(Some("wb".to_string()));
         crate::script::loc_rib_withdraw_v4(net("10.0.0.0/24"), &BgpAttr::default(), &peer());
         crate::script::set_withdraw_binding_v4(None);
+    }
+
+    #[test]
+    fn sideeffect_nft_enqueues() {
+        // A hook calling sideeffect.nft{...} enqueues an NftOp for the
+        // background drainer (the GBP teardown move) without blocking.
+        let _g = install_one(
+            "se",
+            r#"
+            function loc_rib_import(prefix, attributes, peer, FAIL, NOMATCH, MATCH, CHANGE)
+                sideeffect.nft{ op = "add", table = "bridge gbp_filter",
+                                set = "tag_100", elem = "aa:bb:cc:dd:ee:01" }
+                return { action = NOMATCH }
+            end
+        "#,
+        );
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        crate::script::sideeffect::set_sender(tx);
+        let _ = loc_rib_import("se", net("10.0.0.0/24"), &BgpAttr::default(), &peer());
+        let op = rx.try_recv().expect("nft op enqueued");
+        assert!(op.add);
+        assert_eq!(op.table, "bridge gbp_filter");
+        assert_eq!(op.set, "tag_100");
+        assert_eq!(op.elem, "aa:bb:cc:dd:ee:01");
     }
 }

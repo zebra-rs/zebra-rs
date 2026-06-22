@@ -225,6 +225,11 @@ async fn run(arg: Arg) -> anyhow::Result<()> {
 
     // rib::nanomsg::serve();
 
+    // Background drainer for Lua scripts' non-blocking side-effects
+    // (sideeffect.nft → nftables). Must run inside the tokio runtime.
+    #[cfg(feature = "lua")]
+    script::sideeffect::spawn_drainer();
+
     tracing::info!("zebra-rs started");
 
     config::event_loop(config).await;
