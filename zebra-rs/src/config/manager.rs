@@ -1633,6 +1633,87 @@ mod yang_load_tests {
         );
     }
 
+    /// `router static ipv4 route <prefix>` carries no forwarding info on its
+    /// own, so the route list is tagged `ext:non-empty "nexthop"`: a bare
+    /// entry is rejected at commit, and deleting its last child prunes it.
+    /// Same generic machinery as the IS-IS afi-safi case — this pins the
+    /// `config-static.yang` tags through the real schema.
+    #[test]
+    fn static_route_bare_entry_rejected_and_pruned() {
+        use crate::config::ExecCode;
+        use crate::config::configs::{delete, set};
+        use crate::config::parse::{State, parse};
+        use crate::config::{Config, paths::path_try_trim};
+        use libyang::to_entry;
+        use std::rc::Rc;
+
+        let mut yang = YangStore::new();
+        yang.add_path(concat!(env!("CARGO_MANIFEST_DIR"), "/yang"));
+        yang.read_with_resolve("configure")
+            .unwrap_or_else(|e| panic!("configure failed to load: {e:#}"));
+        yang.identity_resolve();
+        let module = yang.find_module("configure").unwrap();
+        let entry = to_entry(&yang, module);
+        let set_entry = entry
+            .dir
+            .borrow()
+            .iter()
+            .find(|e| e.name == "set")
+            .cloned()
+            .expect("configure mode has a `set` entry");
+        let paths = |cmd: &str| {
+            let (code, _comps, state) = parse(cmd, set_entry.clone(), None, State::new());
+            assert_eq!(code, ExecCode::Success, "should parse: {cmd}");
+            path_try_trim("set", state.paths)
+        };
+        let validate_errors = |line: &[crate::config::CommandPath]| -> Vec<String> {
+            let root = Rc::new(Config::new("".to_string(), None));
+            set(line.to_vec(), root.clone());
+            let mut errors = Vec::new();
+            root.validate(&mut errors);
+            errors
+        };
+
+        // Bare `route 10.0.0.1/32` → rejected.
+        let errors = validate_errors(&paths("router static ipv4 route 10.0.0.1/32"));
+        assert!(
+            errors
+                .iter()
+                .any(|e| e.contains("route 10.0.0.1/32") && e.contains("nexthop")),
+            "bare static route must be rejected, got: {errors:?}"
+        );
+
+        // With a nexthop child → validates clean.
+        let errors = validate_errors(&paths(
+            "router static ipv4 route 10.0.0.1/32 nexthop 10.0.0.254",
+        ));
+        assert!(
+            errors.is_empty(),
+            "route with a nexthop must validate clean, got: {errors:?}"
+        );
+
+        // set route+nexthop, then delete the nexthop → bare route is pruned.
+        let root = Rc::new(Config::new("".to_string(), None));
+        let line = paths("router static ipv4 route 10.0.0.1/32 nexthop 10.0.0.254");
+        set(line.clone(), root.clone());
+        delete(line, root.clone());
+        let mut errors = Vec::new();
+        root.validate(&mut errors);
+        assert!(
+            errors.is_empty(),
+            "tree must validate clean after set+delete, got: {errors:?}"
+        );
+        let leftover = root
+            .lookup(&"router".to_string())
+            .and_then(|r| r.lookup(&"static".to_string()))
+            .and_then(|s| s.lookup(&"ipv4".to_string()))
+            .and_then(|v4| v4.lookup(&"route".to_string()));
+        assert!(
+            leftover.is_none(),
+            "static route node must be pruned after its last child is deleted"
+        );
+    }
+
     /// Mirror SID egress-protection config paths
     /// (`draft-ietf-rtgwg-srv6-egress-protection`, config.yang). vtyctl
     /// apply is garbage-tolerant, so an unwired list / key / leaf would

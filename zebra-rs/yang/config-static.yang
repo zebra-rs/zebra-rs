@@ -52,6 +52,11 @@ module config-static {
     container ipv4 {
       ext:help "IPv4 configuration";
       list route {
+        // A bare `route <prefix>` carries no forwarding information — it
+        // needs at least a nexthop (or SRv6 / distance / metric child).
+        // Reject the key-only entry at commit, and prune it when its last
+        // child is deleted, so a meaningless route can't linger.
+        ext:non-empty "nexthop";
         key "prefix";
         leaf prefix {
           type inet:ipv4-prefix;
@@ -172,6 +177,10 @@ module config-static {
       }
 
       list route {
+        // Sibling of the IPv4 route list: a bare `route <prefix>` is dead
+        // config (no nexthop / SRv6 / metric), so reject the key-only entry
+        // at commit and prune it on last-child delete.
+        ext:non-empty "nexthop";
         key "prefix";
         leaf prefix {
           type inet:ipv6-prefix;
