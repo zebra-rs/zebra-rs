@@ -161,6 +161,14 @@ pub struct MupC {
     pub(super) recv_task: Option<Task<()>>,
     /// Last successfully bound local address.
     pub(super) listen_addr: Option<SocketAddr>,
+    /// PFCP Recovery Time Stamp — the instant this controller started.
+    /// **Fixed for the controller's lifetime**: per 3GPP TS 29.244 §19.5
+    /// the recovery timestamp signals when the node last (re)started, so a
+    /// CP peer treats *any* change as a UP restart and tears down every
+    /// session (PFCP restoration). Set once here and echoed in every
+    /// Heartbeat / Association Setup response; it survives listener
+    /// rebinds (a reconfig is not a restart).
+    pub(super) recovery_ts: std::time::SystemTime,
 }
 
 /// Spawn the controller. Mirrors `spawn_bgp_vrf`: takes the global BGP
@@ -200,6 +208,7 @@ impl MupC {
             sock: None,
             recv_task: None,
             listen_addr: None,
+            recovery_ts: std::time::SystemTime::now(),
         }
     }
 
@@ -231,13 +240,19 @@ impl MupC {
         }
     }
 
-    /// Our local address, used for the F-SEID / Node ID in responses:
-    /// configured `node-id`, else `controller-address`, else the bound
-    /// (non-unspecified) listen IP, else loopback.
+    /// Our local address for the PFCP **Node ID / F-SEID** node address in
+    /// responses: configured `node-id`, else the bound (non-unspecified)
+    /// listen IP, else loopback.
+    ///
+    /// This is the N4 identity — the address the CP dialed and keys its
+    /// session context by — so it must be the listen address, **never**
+    /// the SRv6/BGP `controller-address` next-hop (a different plane). A CP
+    /// that can't correlate the response Node ID to the UPF it knows fails
+    /// the session: free5GC dereferences a nil PFCP context and crashes
+    /// (`datapath.go` `PFCPContext[NodeIDtoIP]` with no existence check).
     pub(super) fn local_ip(&self) -> IpAddr {
         self.config
             .node_id
-            .or(self.config.controller_address.map(IpAddr::V6))
             .or_else(|| {
                 self.listen_addr
                     .map(|a| a.ip())

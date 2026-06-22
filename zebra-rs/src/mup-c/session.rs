@@ -16,6 +16,13 @@ pub struct MupSession {
     /// our F-SEID; the CP then addresses Session Modification / Deletion
     /// with this value as the message SEID, so it is the table key.
     pub seid: u64,
+    /// The CP's (SMF's) F-SEID, learned from the Session Establishment
+    /// Request's F-SEID IE. Per 3GPP TS 29.244 the SEID in a PFCP message
+    /// header is the *receiver's* F-SEID, so every response we send about
+    /// this session (Establishment / Modification / Deletion) must carry
+    /// this value as the header SEID — not our own [`seid`](Self::seid),
+    /// which only goes in the response's F-SEID IE.
+    pub cp_seid: u64,
     /// The PFCP peer (SMF) transport address that owns this session.
     pub peer: SocketAddr,
     /// UE IPv4 address/prefix, if assigned.

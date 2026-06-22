@@ -16788,6 +16788,7 @@ mod tests {
         ) -> crate::mup_c::session::MupSession {
             crate::mup_c::session::MupSession {
                 seid: 1,
+                cp_seid: 0x1111,
                 peer: "10.0.0.2:8805".parse().unwrap(),
                 ue_ipv4: v4,
                 ue_ipv6: v6,

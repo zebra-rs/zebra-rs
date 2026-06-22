@@ -17,6 +17,7 @@ use tokio::sync::mpsc::UnboundedSender;
 use rs_pfcp::ie::IeType;
 use rs_pfcp::ie::cause::CauseValue;
 use rs_pfcp::ie::create_pdr::CreatePdr;
+use rs_pfcp::ie::fseid::Fseid;
 use rs_pfcp::ie::node_id::NodeId;
 use rs_pfcp::message::association_release_response::AssociationReleaseResponseBuilder;
 use rs_pfcp::message::association_setup_response::AssociationSetupResponseBuilder;
@@ -142,8 +143,11 @@ impl MupC {
     }
 
     fn handle_heartbeat(&mut self, msg: &dyn PfcpMessage) -> Handled {
+        // Echo our fixed start-time recovery stamp, never `now()`: a
+        // changing value makes the CP (free5GC) treat us as restarted and
+        // release every session (TS 29.244 §19.5).
         let resp = HeartbeatResponseBuilder::new(msg.sequence())
-            .recovery_time_stamp(std::time::SystemTime::now())
+            .recovery_time_stamp(self.recovery_ts)
             .build();
         (Some(resp.marshal()), Vec::new())
     }
@@ -151,12 +155,13 @@ impl MupC {
     fn handle_association_setup(&mut self, msg: &dyn PfcpMessage, src: SocketAddr) -> Handled {
         // Bound the association table against a flood of distinct peers.
         // A re-setup from an already-known peer is always allowed.
-        if !self.assoc.contains(&src) && self.assoc.count() >= MAX_ASSOCS {
+        let reassoc = self.assoc.contains(&src);
+        if !reassoc && self.assoc.count() >= MAX_ASSOCS {
             tracing::warn!("mup-c: association table full ({MAX_ASSOCS}); rejecting {src}");
             let resp = AssociationSetupResponseBuilder::new(msg.sequence())
                 .cause(CauseValue::NoResourcesAvailable)
                 .node_id(self.local_ip())
-                .recovery_time_stamp(std::time::SystemTime::now())
+                .recovery_time_stamp(self.recovery_ts)
                 .build();
             return (Some(resp.marshal()), Vec::new());
         }
@@ -166,6 +171,16 @@ impl MupC {
             .and_then(|ie| NodeId::unmarshal(&ie.payload).ok())
             .map(|n| node_id_string(&n))
             .unwrap_or_else(|| src.ip().to_string());
+
+        // A re-setup from a peer that already has an association replaces
+        // it (TS 29.244 §6.2.6.2): drop its existing sessions so they
+        // don't leak, and tell BGP to withdraw their routes via AssocDown
+        // before the fresh AssocUp re-originates them.
+        let mut events = Vec::new();
+        if reassoc {
+            let _ = self.sessions.remove_peer(src);
+            events.push(MupCEvent::AssocDown { peer: src });
+        }
         self.assoc.upsert(
             src,
             MupAssocInfo {
@@ -175,12 +190,10 @@ impl MupC {
         let resp = AssociationSetupResponseBuilder::new(msg.sequence())
             .cause_accepted()
             .node_id(self.local_ip())
-            .recovery_time_stamp(std::time::SystemTime::now())
+            .recovery_time_stamp(self.recovery_ts)
             .build();
-        (
-            Some(resp.marshal()),
-            vec![MupCEvent::AssocUp { peer: src, node_id }],
-        )
+        events.push(MupCEvent::AssocUp { peer: src, node_id });
+        (Some(resp.marshal()), events)
     }
 
     fn handle_association_release(&mut self, msg: &dyn PfcpMessage, src: SocketAddr) -> Handled {
@@ -202,11 +215,20 @@ impl MupC {
     fn handle_session_establishment(&mut self, msg: &dyn PfcpMessage, src: SocketAddr) -> Handled {
         let seq = msg.sequence();
 
+        // The CP's F-SEID, which the response header must echo (TS 29.244
+        // §7.2.2.4.2: the message SEID is the *receiver's* F-SEID). Read
+        // it up front so even a rejection can be correlated by the CP.
+        let cp_seid = cp_fseid(msg);
+
         // A session is only valid inside an established association
         // (3GPP TS 29.244 §6.2.6.2).
         if !self.assoc.contains(&src) {
             return (
-                self.reject_session_establishment(seq, CauseValue::NoEstablishedPfcpAssociation),
+                self.reject_session_establishment(
+                    cp_seid,
+                    seq,
+                    CauseValue::NoEstablishedPfcpAssociation,
+                ),
                 Vec::new(),
             );
         }
@@ -214,7 +236,7 @@ impl MupC {
         if self.sessions.count() >= MAX_SESSIONS {
             tracing::warn!("mup-c: session table full ({MAX_SESSIONS}); rejecting from {src}");
             return (
-                self.reject_session_establishment(seq, CauseValue::NoResourcesAvailable),
+                self.reject_session_establishment(cp_seid, seq, CauseValue::NoResourcesAvailable),
                 Vec::new(),
             );
         }
@@ -259,6 +281,7 @@ impl MupC {
         let seid = self.sessions.alloc_seid();
         let session = MupSession {
             seid,
+            cp_seid,
             peer: src,
             ue_ipv4,
             ue_ipv6,
@@ -270,7 +293,9 @@ impl MupC {
         self.sessions.insert(session.clone());
 
         let local_ip = self.local_ip();
-        let reply = match SessionEstablishmentResponseBuilder::accepted(seid, seq)
+        // Response header SEID = the CP's F-SEID (so the SMF correlates the
+        // response); our own SEID goes only in the F-SEID IE.
+        let reply = match SessionEstablishmentResponseBuilder::accepted(cp_seid, seq)
             .node_id(local_ip)
             .fseid(seid, local_ip)
             .build()
@@ -284,17 +309,20 @@ impl MupC {
         (reply, vec![MupCEvent::SessionUp(session)])
     }
 
-    /// Build a rejected Session Establishment Response carrying `cause`
-    /// (SEID 0 — no session was created). An F-SEID is set even on
-    /// rejection because the codec requires it; its value is irrelevant
-    /// when the cause is not "accepted".
+    /// Build a rejected Session Establishment Response carrying `cause`.
+    /// The header SEID echoes the CP's F-SEID so the SMF can correlate the
+    /// rejection (no session was created, so our own SEID is meaningless
+    /// here). An F-SEID IE is set even on rejection because the codec
+    /// requires it; its value is irrelevant when the cause is not
+    /// "accepted".
     fn reject_session_establishment(
         &self,
+        cp_seid: u64,
         seq: SequenceNumber,
         cause: CauseValue,
     ) -> Option<Vec<u8>> {
         let local_ip = self.local_ip();
-        match SessionEstablishmentResponseBuilder::new(0u64, seq, cause)
+        match SessionEstablishmentResponseBuilder::new(cp_seid, seq, cause)
             .node_id(local_ip)
             .fseid(0u64, local_ip)
             .build()
@@ -309,48 +337,61 @@ impl MupC {
 
     fn handle_session_modification(&mut self, msg: &dyn PfcpMessage, src: SocketAddr) -> Handled {
         let seq = msg.sequence();
+        // The CP addresses Modification by our F-SEID (the message SEID),
+        // so it keys the table directly.
         let seid = msg.seid().map(|s| s.value()).unwrap_or(0);
         // Only the peer that owns the session may modify it; a mismatch
-        // (or unknown SEID) is rejected without touching state.
-        if self.sessions.get(seid).map(|s| s.peer) != Some(src) {
+        // (or unknown SEID) is rejected without touching state. We have no
+        // session to echo a CP F-SEID from, so the error response carries
+        // the request's SEID.
+        let Some(session) = self.sessions.get(seid).filter(|s| s.peer == src).cloned() else {
             let resp = SessionModificationResponseBuilder::new(seid, seq)
                 .cause(CauseValue::SessionContextNotFound)
                 .build();
             return (Some(resp.marshal()), Vec::new());
-        }
-        // PR-A re-reports the existing session unchanged (field-level
-        // re-extraction from Update/Create PDRs is a follow-up).
-        let events = match self.sessions.get(seid).cloned() {
-            Some(session) => vec![MupCEvent::SessionUp(session)],
-            None => Vec::new(),
         };
-        let resp = SessionModificationResponseBuilder::new(seid, seq)
+        // PR-A re-reports the existing session unchanged (field-level
+        // re-extraction from Update/Create PDRs is a follow-up). The
+        // response header SEID echoes the CP's F-SEID, not our own.
+        let resp = SessionModificationResponseBuilder::new(session.cp_seid, seq)
             .cause_accepted()
             .build();
-        (Some(resp.marshal()), events)
+        (Some(resp.marshal()), vec![MupCEvent::SessionUp(session)])
     }
 
     fn handle_session_deletion(&mut self, msg: &dyn PfcpMessage, src: SocketAddr) -> Handled {
         let seq = msg.sequence();
         let seid = msg.seid().map(|s| s.value()).unwrap_or(0);
         // Only the peer that owns the session may delete it.
-        if self.sessions.get(seid).map(|s| s.peer) != Some(src) {
+        let Some(cp_seid) = self
+            .sessions
+            .get(seid)
+            .filter(|s| s.peer == src)
+            .map(|s| s.cp_seid)
+        else {
             let resp = SessionDeletionResponseBuilder::new(seid, seq)
                 .cause(CauseValue::SessionContextNotFound)
                 .build();
             return (Some(resp.marshal()), Vec::new());
-        }
-        let removed = self.sessions.remove(seid).is_some();
-        let resp = SessionDeletionResponseBuilder::new(seid, seq)
+        };
+        self.sessions.remove(seid);
+        // Header SEID echoes the CP's F-SEID so the SMF correlates it.
+        let resp = SessionDeletionResponseBuilder::new(cp_seid, seq)
             .cause_accepted()
             .build();
-        let events = if removed {
-            vec![MupCEvent::SessionDown { seid }]
-        } else {
-            Vec::new()
-        };
-        (Some(resp.marshal()), events)
+        (Some(resp.marshal()), vec![MupCEvent::SessionDown { seid }])
     }
+}
+
+/// Extract the CP's F-SEID from a Session Establishment Request's F-SEID
+/// IE (`0` if absent — a malformed request, but the codec still needs a
+/// value for the response header).
+fn cp_fseid(msg: &dyn PfcpMessage) -> u64 {
+    msg.ies(IeType::Fseid)
+        .next()
+        .and_then(|ie| Fseid::unmarshal(&ie.payload).ok())
+        .map(|f| f.seid.value())
+        .unwrap_or(0)
 }
 
 /// Receive datagrams forever, forwarding each to the controller event
@@ -400,6 +441,7 @@ fn node_id_string(node_id: &NodeId) -> String {
 mod tests {
     use std::net::Ipv4Addr;
 
+    use rs_pfcp::ie::IeType;
     use rs_pfcp::ie::create_far::CreateFar;
     use rs_pfcp::ie::create_pdr::CreatePdrBuilder;
     use rs_pfcp::ie::destination_interface::Interface;
@@ -493,9 +535,27 @@ mod tests {
         assert_eq!(session.peer, peer());
         assert!(mupc.sessions.get(session.seid).is_some());
 
+        // We learned the CP's F-SEID (0x1111, from the request's F-SEID
+        // IE) so later Modification/Deletion responses can echo it.
+        assert_eq!(session.cp_seid, 0x1111);
+
         let reply = reply.expect("a Session Establishment Response");
         let resp = message::parse(&reply).unwrap();
         assert_eq!(resp.msg_type(), MsgType::SessionEstablishmentResponse);
+        // Regression (free5GC interop): the response header SEID must echo
+        // the CP's F-SEID (0x1111), NOT our own allocated SEID. A strict
+        // SMF rejects the establishment otherwise ("received unexpected
+        // SEID response message").
+        assert_eq!(
+            resp.seid().map(|s| s.value()),
+            Some(0x1111),
+            "establishment response must echo the CP F-SEID in the header"
+        );
+        assert_ne!(
+            resp.seid().map(|s| s.value()),
+            Some(session.seid),
+            "header SEID must not be our own allocated SEID"
+        );
     }
 
     #[test]
@@ -580,6 +640,113 @@ mod tests {
         assert!(events.is_empty());
         let resp = message::parse(&reply.unwrap()).unwrap();
         assert_eq!(resp.msg_type(), MsgType::HeartbeatResponse);
+    }
+
+    /// Pull the Recovery Time Stamp IE payload out of a marshalled
+    /// response (the 4-byte NTP-era seconds the CP compares).
+    fn recovery_ts_bytes(bytes: &[u8]) -> Vec<u8> {
+        let msg = message::parse(bytes).unwrap();
+        msg.ies(IeType::RecoveryTimeStamp)
+            .next()
+            .expect("a Recovery Time Stamp IE")
+            .payload
+            .clone()
+    }
+
+    #[test]
+    fn node_id_is_listen_address_not_controller_address() {
+        // Regression (free5GC interop): the PFCP Node ID must be our N4
+        // listen address (what the CP dialed and keys its context by), not
+        // the SRv6 `controller-address`. Conflating them makes free5GC
+        // look up an unknown PFCPContext key and crash on a nil deref.
+        let config = MupCConfig {
+            controller_address: Some("fcbb:bbbb:2::1".parse().unwrap()),
+            ..MupCConfig::default()
+        };
+        let (mut mupc, _bgp_rx) = MupC::new_for_test(config);
+        mupc.listen_addr = Some("127.0.0.8:8805".parse().unwrap());
+
+        assert_eq!(
+            mupc.local_ip(),
+            "127.0.0.8".parse::<IpAddr>().unwrap(),
+            "Node ID must be the listen address, not the controller-address"
+        );
+    }
+
+    #[test]
+    fn recovery_timestamp_is_stable_across_responses() {
+        // Regression (free5GC interop): the Recovery Time Stamp must not
+        // change between responses, or the CP treats us as restarted and
+        // releases every session ("RecoveryTimeStamp has been updated"),
+        // re-establishing them forever.
+        let (mut mupc, _bgp_rx) = MupC::new_for_test(MupCConfig::default());
+
+        let hb = HeartbeatRequestBuilder::new(1u32)
+            .recovery_time_stamp(std::time::SystemTime::now())
+            .build()
+            .marshal();
+        let msg = message::parse(&hb).unwrap();
+        let (r1, _) = mupc.handle_heartbeat(msg.as_ref());
+        let (r2, _) = mupc.handle_heartbeat(msg.as_ref());
+
+        let asr = AssociationSetupRequestBuilder::new(2u32)
+            .node_id(Ipv4Addr::new(10, 0, 0, 2))
+            .recovery_time_stamp(std::time::SystemTime::now())
+            .build()
+            .marshal();
+        let msg = message::parse(&asr).unwrap();
+        let (r3, _) = mupc.handle_association_setup(msg.as_ref(), peer());
+
+        let t1 = recovery_ts_bytes(&r1.unwrap());
+        assert_eq!(
+            t1,
+            recovery_ts_bytes(&r2.unwrap()),
+            "heartbeat stamp drifts"
+        );
+        assert_eq!(
+            t1,
+            recovery_ts_bytes(&r3.unwrap()),
+            "association stamp differs from heartbeat stamp"
+        );
+    }
+
+    #[test]
+    fn reassociation_clears_prior_sessions() {
+        // A second Association Setup from the same peer replaces the
+        // association (TS 29.244 §6.2.6.2): its sessions must be dropped
+        // (with an AssocDown so BGP withdraws their routes) so they don't
+        // accumulate across CP-driven re-associations.
+        let (mut mupc, _bgp_rx) = MupC::new_for_test(MupCConfig::default());
+        associate(&mut mupc);
+        let est = message::parse(&establishment_bytes()).unwrap();
+        let (_, events) = mupc.handle_session_establishment(est.as_ref(), peer());
+        let MupCEvent::SessionUp(session) = &events[0] else {
+            panic!("expected SessionUp");
+        };
+        let seid = session.seid;
+        assert!(mupc.sessions.get(seid).is_some());
+
+        // Re-setup from the same peer.
+        let asr = AssociationSetupRequestBuilder::new(9u32)
+            .node_id(Ipv4Addr::new(10, 0, 0, 2))
+            .recovery_time_stamp(std::time::SystemTime::now())
+            .build()
+            .marshal();
+        let msg = message::parse(&asr).unwrap();
+        let (_, events) = mupc.handle_association_setup(msg.as_ref(), peer());
+
+        assert!(
+            mupc.sessions.get(seid).is_none(),
+            "re-association must drop the peer's prior sessions"
+        );
+        assert!(
+            matches!(
+                events.as_slice(),
+                [MupCEvent::AssocDown { peer: d }, MupCEvent::AssocUp { peer: u, .. }]
+                    if *d == peer() && *u == peer()
+            ),
+            "re-association must emit AssocDown then AssocUp, got {events:?}"
+        );
     }
 
     #[test]
