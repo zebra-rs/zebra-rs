@@ -1,6 +1,7 @@
 # Lua Egress (Adj-RIB-Out) Hook — design note
 
-Status: **in progress** — E1+E2+E3 (v4 wired) landed; E4 (EVPN advertise) next.
+Status: **E1–E4 complete** — egress hook wired and config-bindable for IPv4-unicast and
+L2VPN-EVPN. (E5, the Model-B opt-in / restricted-identity table, remains deferred.)
 Builds on the merged Lua scripting series (engine, import/withdraw hooks, marshalling,
 host helpers) — see `docs/design/lua-scripting-policy.md`.
 

@@ -95,6 +95,13 @@ module zebra-bgp-lua {
           type string;
         }
       }
+      container l2vpn-evpn {
+        ext:help "L2VPN-EVPN egress hooks";
+        leaf export {
+          ext:help "Script run as an EVPN route is advertised (sees prefix.evpn); may rewrite attributes, or deny to suppress";
+          type string;
+        }
+      }
     }
 
     container loc-rib-hook {

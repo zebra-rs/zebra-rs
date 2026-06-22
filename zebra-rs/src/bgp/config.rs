@@ -192,6 +192,20 @@ fn config_adj_rib_out_hook_export_v4(bgp: &mut Bgp, mut args: Args, op: ConfigOp
     Some(())
 }
 
+/// `set router bgp adj-rib-out-hook l2vpn-evpn export <name>` — bind a
+/// script to the EVPN egress hook; delete unbinds. Re-forms the
+/// update-groups (the EVPN sig branch already keys on the egress script).
+fn config_adj_rib_out_hook_export_evpn(bgp: &mut Bgp, mut args: Args, op: ConfigOp) -> Option<()> {
+    if op.is_set() {
+        let name = args.string()?;
+        crate::script::set_egress_binding_evpn(Some(name));
+    } else {
+        crate::script::set_egress_binding_evpn(None);
+    }
+    reassign_all_update_groups(bgp);
+    Some(())
+}
+
 /// Parse a flat JSON object (`{"key": "value", ...}`) into a string→string
 /// map for `map.get`. Non-string JSON values (numbers, bools) are taken as
 /// their JSON text (so `{"aa:..": 100}` yields `"100"`); a parse failure
@@ -3802,6 +3816,10 @@ impl Bgp {
         self.callback_add(
             "/router/bgp/adj-rib-out-hook/ipv4-unicast/export",
             config_adj_rib_out_hook_export_v4,
+        );
+        self.callback_add(
+            "/router/bgp/adj-rib-out-hook/l2vpn-evpn/export",
+            config_adj_rib_out_hook_export_evpn,
         );
         self.callback_add("/router/bgp/lua-map", config_lua_map);
         self.callback_add(
