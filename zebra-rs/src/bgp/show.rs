@@ -1122,10 +1122,7 @@ fn show_adj_rib_routes_evpn<D: RibDirection>(
                     nexthop, med, local_pref, weight, aspath, origin
                 )?;
 
-                let ecom = show_evpn_ecom(&rib.attr);
-                if !ecom.is_empty() {
-                    writeln!(buf, "                    {}", ecom)?;
-                }
+                write_evpn_path_attrs(&mut buf, &rib.attr)?;
             }
         }
     }
@@ -3277,6 +3274,77 @@ fn show_evpn_ecom(attr: &BgpAttr) -> String {
         .join(" ")
 }
 
+/// Append the per-route attribute lines shared by the EVPN table renderers
+/// (`show_bgp_evpn` and `show_adj_rib_routes_evpn`). Each attribute prints on
+/// its own 20-space-indented line (aligned under the "Next Hop" column),
+/// labelled and emitted only when carried and non-empty — a route with none
+/// of these attributes adds no extra lines.
+///
+/// - Extended communities (RFC 4360 / EVPN ECs) decode via the EVPN-aware
+///   `show_evpn_ecom` (RT, ET, mcast-flags, df-election).
+/// - Standard communities (RFC 1997) and large communities (RFC 8092) reuse
+///   the codec `Display`, matching the unicast detail view at
+///   `write_bgp_entry_detail`.
+/// - Route-reflection attributes (RFC 4456): Originator-ID and Cluster-List,
+///   rendered together on one line as in the unicast detail view.
+/// - Aggregation (RFC 4271): Atomic-Aggregate flag and Aggregator AS/IP.
+/// - Accumulated IGP metric (RFC 7311).
+fn write_evpn_path_attrs(buf: &mut String, attr: &BgpAttr) -> std::fmt::Result {
+    const PAD: &str = "                    ";
+
+    let ecom = show_evpn_ecom(attr);
+    if !ecom.is_empty() {
+        writeln!(buf, "{PAD}Extended community: {ecom}")?;
+    }
+    if let Some(com) = &attr.com {
+        let s = com.to_string();
+        if !s.is_empty() {
+            writeln!(buf, "{PAD}Community: {s}")?;
+        }
+    }
+    if let Some(lcom) = &attr.lcom {
+        let s = lcom.to_string();
+        if !s.is_empty() {
+            writeln!(buf, "{PAD}Large community: {s}")?;
+        }
+    }
+
+    // Route reflection (RFC 4456): Originator-ID and Cluster-List. When both
+    // are present they share one line (Originator first, then the cluster
+    // path); a Cluster-List without an Originator still prints on its own.
+    let cluster = attr.cluster_list.as_ref().map(|cl| {
+        cl.list
+            .iter()
+            .map(|id| id.to_string())
+            .collect::<Vec<_>>()
+            .join(" ")
+    });
+    if let Some(originator_id) = &attr.originator_id {
+        write!(buf, "{PAD}Originator: {}", originator_id.id)?;
+        if let Some(cluster) = &cluster {
+            write!(buf, ", Cluster list: {cluster}")?;
+        }
+        writeln!(buf)?;
+    } else if let Some(cluster) = &cluster {
+        writeln!(buf, "{PAD}Cluster list: {cluster}")?;
+    }
+
+    // Aggregation (RFC 4271 §5.1.6/§5.1.7).
+    if attr.atomic_aggregate.is_some() {
+        writeln!(buf, "{PAD}Atomic aggregate")?;
+    }
+    if let Some(agg) = &attr.aggregator {
+        writeln!(buf, "{PAD}Aggregator: AS {} {}", agg.asn, agg.ip)?;
+    }
+
+    // Accumulated IGP metric (RFC 7311).
+    if let Some(aigp) = &attr.aigp {
+        writeln!(buf, "{PAD}AIGP metric: {}", aigp.aigp)?;
+    }
+
+    Ok(())
+}
+
 /// Map a `show bgp evpn route-type <keyword>` filter keyword to its EVPN
 /// route-type number (the value `EvpnPrefix::route_type()` returns). An
 /// unrecognised token yields `None`, which the caller treats as "no filter".
@@ -3380,11 +3448,13 @@ fn show_bgp_evpn(
                 nexthop, med, local_pref, weight, aspath, origin
             )?;
 
-            // Line 3: extended communities (ET, RT, ...) only if present.
-            let ecom = show_evpn_ecom(&rib.attr);
-            if !ecom.is_empty() {
-                writeln!(buf, "                    {}", ecom)?;
-            }
+            // Line 3+: every carried path attribute, one labelled line each —
+            // extended communities (ET, RT, mcast-flags, df-election),
+            // standard communities (RFC 1997), large communities (RFC 8092),
+            // route-reflection attrs (RFC 4456: Originator / Cluster list),
+            // aggregation (RFC 4271), and AIGP (RFC 7311). Lines are emitted
+            // only when the attribute is present.
+            write_evpn_path_attrs(&mut buf, &rib.attr)?;
 
             // Line 4 (Type-9 only): RFC 9572 §5.3.1 inter-AS DF election among
             // the ASBRs advertising this region's Per-Region I-PMSI.
@@ -4023,6 +4093,118 @@ mod evpn_show_tests {
             val: [0xde, 0xad, 0xbe, 0xef, 0x00, 0x01],
         };
         assert_eq!(format_evpn_ecom_value(&v), "0x4002deadbeef0001");
+    }
+
+    /// A path carrying all three community flavours must emit one labelled,
+    /// 20-space-indented line each (extended, standard RFC 1997, large
+    /// RFC 8092) in that order — the EVPN table renderers used to drop the
+    /// standard and large communities entirely.
+    #[test]
+    fn write_communities_renders_all_three_labelled() {
+        let mut lcom = LargeCommunity::new();
+        lcom.insert(LargeCommunityValue {
+            global: 65001,
+            local1: 100,
+            local2: 200,
+        });
+        let attr = BgpAttr {
+            ecom: Some(ExtCommunity::from([ExtCommunityValue {
+                high_type: 0x00,
+                low_type: 0x02,
+                val: [0xfd, 0xe9, 0x00, 0x00, 0x00, 0x0a], // RT:65001:10
+            }])),
+            com: Some("65001:100 no-export".parse().unwrap()),
+            lcom: Some(lcom),
+            ..Default::default()
+        };
+
+        let mut buf = String::new();
+        write_evpn_path_attrs(&mut buf, &attr).unwrap();
+
+        let pad = " ".repeat(20);
+        let expected = format!(
+            "{pad}Extended community: RT:65001:10\n\
+             {pad}Community: 65001:100 no-export\n\
+             {pad}Large community: 65001:100:200\n"
+        );
+        assert_eq!(buf, expected);
+    }
+
+    /// Route-reflection attributes (RFC 4456): with both present, Originator
+    /// and Cluster-List share one 20-space-indented line, Originator first.
+    #[test]
+    fn write_path_attrs_renders_originator_and_cluster_list() {
+        use std::net::Ipv4Addr;
+        let attr = BgpAttr {
+            originator_id: Some(OriginatorId::new(Ipv4Addr::new(10, 0, 0, 1))),
+            cluster_list: Some(ClusterList {
+                list: vec![Ipv4Addr::new(10, 0, 0, 2), Ipv4Addr::new(10, 0, 0, 3)],
+            }),
+            ..Default::default()
+        };
+
+        let mut buf = String::new();
+        write_evpn_path_attrs(&mut buf, &attr).unwrap();
+
+        let pad = " ".repeat(20);
+        assert_eq!(
+            buf,
+            format!("{pad}Originator: 10.0.0.1, Cluster list: 10.0.0.2 10.0.0.3\n")
+        );
+    }
+
+    /// A Cluster-List carried without an Originator-ID still prints on its
+    /// own line (mirrors the unicast detail view's fallback branch).
+    #[test]
+    fn write_path_attrs_cluster_list_without_originator() {
+        use std::net::Ipv4Addr;
+        let attr = BgpAttr {
+            cluster_list: Some(ClusterList {
+                list: vec![Ipv4Addr::new(10, 0, 0, 2)],
+            }),
+            ..Default::default()
+        };
+
+        let mut buf = String::new();
+        write_evpn_path_attrs(&mut buf, &attr).unwrap();
+
+        let pad = " ".repeat(20);
+        assert_eq!(buf, format!("{pad}Cluster list: 10.0.0.2\n"));
+    }
+
+    /// Aggregation (RFC 4271) and AIGP (RFC 7311): Atomic-Aggregate flag,
+    /// Aggregator AS/IP, and the accumulated IGP metric each on their own
+    /// 20-space-indented line, in that order.
+    #[test]
+    fn write_path_attrs_renders_aggregation_and_aigp() {
+        use std::net::Ipv4Addr;
+        let attr = BgpAttr {
+            atomic_aggregate: Some(AtomicAggregate::new()),
+            aggregator: Some(Aggregator::new(65001, Ipv4Addr::new(10, 0, 0, 1))),
+            aigp: Some(Aigp { aigp: 42 }),
+            ..Default::default()
+        };
+
+        let mut buf = String::new();
+        write_evpn_path_attrs(&mut buf, &attr).unwrap();
+
+        let pad = " ".repeat(20);
+        let expected = format!(
+            "{pad}Atomic aggregate\n\
+             {pad}Aggregator: AS 65001 10.0.0.1\n\
+             {pad}AIGP metric: 42\n"
+        );
+        assert_eq!(buf, expected);
+    }
+
+    /// A path with none of the surfaced attributes adds no lines — callers
+    /// print the route's status/prefix line regardless, keeping the table
+    /// tight.
+    #[test]
+    fn write_path_attrs_empty_attr_writes_nothing() {
+        let mut buf = String::new();
+        write_evpn_path_attrs(&mut buf, &BgpAttr::default()).unwrap();
+        assert!(buf.is_empty());
     }
 }
 
