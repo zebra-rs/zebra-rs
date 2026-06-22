@@ -99,6 +99,13 @@ module zebra-bgp-lua {
           type string;
         }
       }
+      container l2vpn-evpn {
+        ext:help "L2VPN-EVPN Loc-RIB hooks";
+        leaf import {
+          ext:help "Script run when an EVPN route is admitted into the Loc-RIB (sees prefix.evpn)";
+          type string;
+        }
+      }
     }
   }
 

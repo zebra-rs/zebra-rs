@@ -134,6 +134,18 @@ fn config_loc_rib_hook_withdraw_v4(_bgp: &mut Bgp, mut args: Args, op: ConfigOp)
     Some(())
 }
 
+/// `set router bgp loc-rib-hook l2vpn-evpn import <name>` — bind a script
+/// to the EVPN Adj-RIB-In → Loc-RIB import hook; delete unbinds.
+fn config_loc_rib_hook_import_evpn(_bgp: &mut Bgp, mut args: Args, op: ConfigOp) -> Option<()> {
+    if op.is_set() {
+        let name = args.string()?;
+        crate::script::set_import_binding_evpn(Some(name));
+    } else {
+        crate::script::set_import_binding_evpn(None);
+    }
+    Some(())
+}
+
 /// Parse a flat JSON object (`{"key": "value", ...}`) into a string→string
 /// map for `map.get`. Non-string JSON values (numbers, bools) are taken as
 /// their JSON text (so `{"aa:..": 100}` yields `"100"`); a parse failure
@@ -3732,6 +3744,10 @@ impl Bgp {
         self.callback_add(
             "/router/bgp/loc-rib-hook/ipv4-unicast/withdraw",
             config_loc_rib_hook_withdraw_v4,
+        );
+        self.callback_add(
+            "/router/bgp/loc-rib-hook/l2vpn-evpn/import",
+            config_loc_rib_hook_import_evpn,
         );
         self.callback_add("/router/bgp/lua-map", config_lua_map);
         self.callback_add(

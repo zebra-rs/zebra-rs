@@ -10,12 +10,79 @@
 use std::collections::BTreeSet;
 
 use bgp_packet::{
-    BgpAttr, BgpNexthop, Community, ExtCommunity, ExtCommunityValue, LocalPref, Med, Origin,
+    BgpAttr, BgpNexthop, Community, EvpnRoute, ExtCommunity, ExtCommunityValue, LocalPref, Med,
+    Origin,
 };
 use ipnet::IpNet;
 use mlua::{Lua, Table};
 
 use super::PeerView;
+
+/// Format a 6-octet MAC as `aa:bb:cc:dd:ee:ff`.
+fn mac_str(mac: &[u8; 6]) -> String {
+    mac.iter()
+        .map(|b| format!("{b:02x}"))
+        .collect::<Vec<_>>()
+        .join(":")
+}
+
+/// Build the `prefix` table for an EVPN route: `afi = "evpn"`, a
+/// human-readable `network`, and a structured `evpn` sub-table. For a
+/// Type-2 (MAC) route the script gets `prefix.evpn.mac` / `.vni` directly
+/// (no brittle `tostring(network):match(...)` regex, unlike FRR).
+pub fn evpn_prefix_table(lua: &Lua, route: &EvpnRoute) -> mlua::Result<Table> {
+    let table = lua.create_table()?;
+    table.set("afi", "evpn")?;
+    let evpn = lua.create_table()?;
+    let network = match route {
+        EvpnRoute::Mac(m) => {
+            evpn.set("route_type", 2)?;
+            evpn.set("rd", m.rd.to_string())?;
+            evpn.set("ether_tag", m.ether_tag)?;
+            evpn.set("mac", mac_str(&m.mac))?;
+            evpn.set("vni", m.vni)?;
+            format!("[2]:[{}]:[{}]", m.ether_tag, mac_str(&m.mac))
+        }
+        EvpnRoute::Multicast(m) => {
+            evpn.set("route_type", 3)?;
+            evpn.set("rd", m.rd.to_string())?;
+            evpn.set("ether_tag", m.ether_tag)?;
+            evpn.set("ip", m.addr.to_string())?;
+            format!("[3]:[{}]:[{}]", m.ether_tag, m.addr)
+        }
+        EvpnRoute::Prefix(p) => {
+            evpn.set("route_type", 5)?;
+            evpn.set("rd", p.rd.to_string())?;
+            evpn.set("ether_tag", p.ether_tag)?;
+            evpn.set("network", p.prefix.to_string())?;
+            evpn.set("gw", p.gw.to_string())?;
+            evpn.set("label", p.label)?;
+            format!("[5]:[{}]", p.prefix)
+        }
+        EvpnRoute::Smet(s) => {
+            evpn.set("route_type", 6)?;
+            evpn.set("rd", s.rd.to_string())?;
+            "[6]".to_string()
+        }
+        EvpnRoute::PerRegionImet(r) => {
+            evpn.set("route_type", 9)?;
+            evpn.set("rd", r.rd.to_string())?;
+            "[9]".to_string()
+        }
+        EvpnRoute::SPmsi(r) => {
+            evpn.set("route_type", 10)?;
+            evpn.set("rd", r.rd.to_string())?;
+            "[10]".to_string()
+        }
+        EvpnRoute::LeafAd(_) => {
+            evpn.set("route_type", 11)?;
+            "[11]".to_string()
+        }
+    };
+    table.set("network", network)?;
+    table.set("evpn", evpn)?;
+    Ok(table)
+}
 
 /// Build the `prefix` table: `network` (FRR-compatible "addr/len"
 /// string) plus structured `afi` / `addr` / `len`.
