@@ -210,6 +210,11 @@ message CommandPath {
   YangMatch ymatch = 3;
   repeated string mandatory = 4;
   int32 sort_priority = 5;
+  // When non-empty, this list node forbids key-only entries: every list
+  // entry must carry at least one child node. The string is the human-
+  // readable requirement (e.g. "network or redistribute") surfaced in the
+  // commit-time error. Driven by the `ext:non-empty` YANG extension.
+  string non_empty = 6;
 }
 
 // Show service.

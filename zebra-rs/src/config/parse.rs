@@ -713,6 +713,15 @@ pub fn parse(
         .extension
         .get("ext:sort")
         .map_or_else(|| 0, |v| v.parse::<i32>().unwrap_or(0));
+    // `ext:non-empty` on a list node: forbids key-only entries. Carried
+    // on every CommandPath for the list so `config_set_dir` can stamp it
+    // onto the list's Config node, where `validate` enforces it.
+    let non_empty = mx
+        .matched_entry
+        .extension
+        .get("ext:non-empty")
+        .cloned()
+        .unwrap_or_default();
 
     let path = if ymatch_complete(s.ymatch, mx.matched_entry.presence, s.delete) {
         // KeyMatched / LeafMatched / LeafListMatched carry the user-
@@ -734,6 +743,7 @@ pub fn parse(
             key: mx.matched_entry.name.to_owned(),
             mandatory,
             sort_priority,
+            non_empty,
         }
     } else {
         CommandPath {
@@ -742,6 +752,7 @@ pub fn parse(
             key: "".to_string(),
             mandatory,
             sort_priority,
+            non_empty,
         }
     };
 

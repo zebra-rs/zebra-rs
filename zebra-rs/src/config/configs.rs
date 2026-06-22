@@ -176,6 +176,10 @@ pub struct Config {
     pub parent: Option<Rc<Config>>,
     pub mandatory: Vec<String>,
     pub sort_priority: RefCell<i32>,
+    /// `ext:non-empty` requirement text (empty = unset). When set on a
+    /// list node, every key entry must carry at least one child; a bare
+    /// `... <key>` fails `validate` with this string as the hint.
+    pub non_empty: String,
 }
 
 impl Config {
@@ -519,6 +523,22 @@ impl Config {
                 errors.push(format!("'{}' missing mandatory node '{}'", parents, m));
             }
         }
+        // `ext:non-empty`: a list node that forbids key-only entries. Each
+        // entry must carry at least one child (`configs`/`keys`) or a
+        // leaf-list value (`list`); a bare `... <key>` is rejected.
+        if !self.non_empty.is_empty() {
+            for key in self.keys.borrow().iter() {
+                if !key.has_dir() && key.list.borrow().is_empty() {
+                    let mut parents = VecDeque::<String>::new();
+                    self.parents(&mut parents);
+                    parents.push_back(self.name.clone());
+                    parents.push_back(key.name.clone());
+                    let parents = Vec::from(parents);
+                    let parents = parents.join(" ");
+                    errors.push(format!("'{}' requires {}", parents, self.non_empty));
+                }
+            }
+        }
         for key in self.keys.borrow().iter() {
             key.validate(errors);
         }
@@ -537,6 +557,7 @@ pub fn carbon_copy(conf: &Rc<Config>, parent: Option<Rc<Config>>) -> Rc<Config> 
         presence: conf.presence,
         mandatory: conf.mandatory.clone(),
         sort_priority: conf.sort_priority.clone(),
+        non_empty: conf.non_empty.clone(),
         parent,
         ..Default::default()
     });
@@ -569,6 +590,7 @@ fn config_set_dir(config: &Rc<Config>, cpath: &CommandPath) -> Rc<Config> {
                 presence: (ymatch_enum(cpath.ymatch) == YangMatch::DirMatched),
                 mandatory: cpath.mandatory.clone(),
                 sort_priority: cpath.sort_priority.into(),
+                non_empty: cpath.non_empty.clone(),
                 ..Default::default()
             });
             config.configs.borrow_mut().push(n.clone());
@@ -782,6 +804,71 @@ mod tests {
         assert_eq!(
             args.afi_safi(),
             Some(AfiSafi::new(Afi::Ip6, Safi::Flowspec))
+        );
+    }
+
+    // `ext:non-empty` on a list node (carried as `CommandPath.non_empty`)
+    // must reject a key-only entry at validate time, mirroring the IS-IS
+    // `router isis afi-safi <ipv4|ipv6>` case where a bare entry is dead
+    // config. An entry that gains a child validates clean.
+    #[test]
+    fn non_empty_rejects_bare_list_entry() {
+        let dir = |name: &str| CommandPath {
+            name: name.to_string(),
+            ymatch: YangMatch::Dir as i32,
+            ..Default::default()
+        };
+        let list = |name: &str| CommandPath {
+            name: name.to_string(),
+            ymatch: YangMatch::Key as i32,
+            non_empty: "network or redistribute".to_string(),
+            ..Default::default()
+        };
+        let key = |name: &str| CommandPath {
+            name: name.to_string(),
+            ymatch: YangMatch::KeyMatched as i32,
+            ..Default::default()
+        };
+
+        let root = Rc::new(Config::new("".to_string(), None));
+
+        // `set router isis afi-safi ipv4` — bare entry.
+        set(
+            vec![dir("router"), dir("isis"), list("afi-safi"), key("ipv4")],
+            root.clone(),
+        );
+        let mut errors = Vec::new();
+        root.validate(&mut errors);
+        assert!(
+            errors
+                .iter()
+                .any(|e| e.contains("afi-safi ipv4") && e.contains("network or redistribute")),
+            "bare list entry should be rejected, got: {:?}",
+            errors
+        );
+
+        // `... afi-safi ipv4 network 10.0.0.0/24` — entry now has a child.
+        set(
+            vec![
+                dir("router"),
+                dir("isis"),
+                list("afi-safi"),
+                key("ipv4"),
+                CommandPath {
+                    name: "network".to_string(),
+                    ymatch: YangMatch::Key as i32,
+                    ..Default::default()
+                },
+                key("10.0.0.0/24"),
+            ],
+            root.clone(),
+        );
+        let mut errors = Vec::new();
+        root.validate(&mut errors);
+        assert!(
+            errors.is_empty(),
+            "entry carrying a child must validate clean, got: {:?}",
+            errors
         );
     }
 
