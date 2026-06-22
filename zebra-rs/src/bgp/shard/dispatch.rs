@@ -54,11 +54,36 @@ impl BgpShard {
             } => {
                 // Drop the Adj-RIB-In row first, exactly as the
                 // synchronous `route_ipv4_withdraw` does on `bgp.shard`,
-                // then re-run best-path off the Loc-RIB removal.
+                // then re-run best-path off the Loc-RIB removal. Remove the
+                // Loc-RIB row here (rather than letting `best_path_delta_v4`
+                // do it) so the Lua withdraw hook can read the removed
+                // row's stored attrs — the N>1 counterpart of the
+                // synchronous path's hook; the rows are then handed to
+                // `best_path_delta_v4` as the already-removed set.
                 if rib_in {
                     self.adj_in_mut(ident).remove(rd, nlri.prefix, nlri.id);
                 }
-                vec![self.best_path_delta_v4(ident, rd, nlri, Vec::new())]
+                let removed = self.remove(rd, nlri.prefix, nlri.id, ident);
+                #[cfg(feature = "lua")]
+                if rd.is_none()
+                    && let Some(gone) = removed.first()
+                {
+                    let peer = crate::script::PeerView {
+                        remote_as: 0,
+                        local_as: 0,
+                        remote_id: gone.router_id,
+                        local_id: std::net::Ipv4Addr::UNSPECIFIED,
+                        remote_address: std::net::IpAddr::V4(std::net::Ipv4Addr::UNSPECIFIED),
+                        state: String::new(),
+                        is_ibgp: matches!(gone.typ, super::super::route::BgpRibType::IBGP),
+                    };
+                    crate::script::loc_rib_withdraw_v4(
+                        ipnet::IpNet::V4(nlri.prefix),
+                        &gone.attr,
+                        &peer,
+                    );
+                }
+                vec![self.best_path_delta_v4(ident, rd, nlri, removed)]
             }
             ShardMsg::OriginateV4 { prefix, withdraw } => {
                 self.handle_originate_v4(prefix, withdraw)
@@ -1127,6 +1152,47 @@ mod tests {
                 assert!(selected.is_empty(), "no winner ⇒ main withdraws");
             }
             _ => panic!("expected BestPathV4 withdraw, got {out:?}"),
+        }
+    }
+
+    #[test]
+    fn withdraw_v4_removes_loc_rib_and_reports_replaced() {
+        // The N>1 withdraw path: the `WithdrawV4` handler now removes the
+        // Loc-RIB row itself (so the Lua hook can read its attrs) and
+        // hands it to `best_path_delta_v4` as the already-removed set. The
+        // delta must still report the row as `replaced` and empty the
+        // Loc-RIB — identical to the pre-restructure behaviour.
+        let mut shard = BgpShard::default();
+        shard.handle(update_v4(1, "10.0.0.0/24", "192.0.2.1", true), None);
+        assert_eq!(shard.v4.0.len(), 1);
+        let out = shard.handle(
+            ShardMsg::WithdrawV4 {
+                ident: 1,
+                rd: None,
+                nlri: v4("10.0.0.0/24"),
+                rib_in: true,
+            },
+            None,
+        );
+        assert!(shard.v4.0.is_empty(), "withdraw cleared the Loc-RIB");
+        assert!(
+            shard.adj_in(1).is_none_or(|a| a.v4.0.is_empty()),
+            "Adj-RIB-In row dropped too (rib_in)"
+        );
+        match &out[..] {
+            [
+                ShardOut::BestPathV4 {
+                    selected, replaced, ..
+                },
+            ] => {
+                assert!(selected.is_empty(), "no survivor ⇒ main withdraws");
+                assert_eq!(
+                    replaced.len(),
+                    1,
+                    "the withdrawn row is reported as replaced"
+                );
+            }
+            _ => panic!("expected one BestPathV4, got {out:?}"),
         }
     }
 
