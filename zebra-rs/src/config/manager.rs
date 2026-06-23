@@ -1714,6 +1714,86 @@ mod yang_load_tests {
         );
     }
 
+    /// `router bgp neighbor <addr>` is dead config on its own — without a
+    /// `remote-as` (or a `peer-group` that supplies one) it can never form a
+    /// session. The address-keyed neighbor list is tagged
+    /// `ext:non-empty "remote-as or peer-group"`: a bare entry is rejected at
+    /// commit, and deleting its last child prunes it. Same generic machinery
+    /// as the IS-IS afi-safi / static-route cases — this pins the
+    /// `ietf-bgp` neighbor tag through the real schema.
+    #[test]
+    fn bgp_neighbor_bare_entry_rejected_and_pruned() {
+        use crate::config::ExecCode;
+        use crate::config::configs::{delete, set};
+        use crate::config::parse::{State, parse};
+        use crate::config::{Config, paths::path_try_trim};
+        use libyang::to_entry;
+        use std::rc::Rc;
+
+        let mut yang = YangStore::new();
+        yang.add_path(concat!(env!("CARGO_MANIFEST_DIR"), "/yang"));
+        yang.read_with_resolve("configure")
+            .unwrap_or_else(|e| panic!("configure failed to load: {e:#}"));
+        yang.identity_resolve();
+        let module = yang.find_module("configure").unwrap();
+        let entry = to_entry(&yang, module);
+        let set_entry = entry
+            .dir
+            .borrow()
+            .iter()
+            .find(|e| e.name == "set")
+            .cloned()
+            .expect("configure mode has a `set` entry");
+        let paths = |cmd: &str| {
+            let (code, _comps, state) = parse(cmd, set_entry.clone(), None, State::new());
+            assert_eq!(code, ExecCode::Success, "should parse: {cmd}");
+            path_try_trim("set", state.paths)
+        };
+        let validate_errors = |line: &[crate::config::CommandPath]| -> Vec<String> {
+            let root = Rc::new(Config::new("".to_string(), None));
+            set(line.to_vec(), root.clone());
+            let mut errors = Vec::new();
+            root.validate(&mut errors);
+            errors
+        };
+
+        // Bare `neighbor 192.168.1.3` → rejected.
+        let errors = validate_errors(&paths("router bgp neighbor 192.168.1.3"));
+        assert!(
+            errors.iter().any(
+                |e| e.contains("neighbor 192.168.1.3") && e.contains("remote-as or peer-group")
+            ),
+            "bare bgp neighbor must be rejected, got: {errors:?}"
+        );
+
+        // With a remote-as child → validates clean.
+        let errors = validate_errors(&paths("router bgp neighbor 192.168.1.3 remote-as 65000"));
+        assert!(
+            errors.is_empty(),
+            "neighbor with a remote-as must validate clean, got: {errors:?}"
+        );
+
+        // set neighbor+remote-as, then delete remote-as → bare neighbor is pruned.
+        let root = Rc::new(Config::new("".to_string(), None));
+        let line = paths("router bgp neighbor 192.168.1.3 remote-as 65000");
+        set(line.clone(), root.clone());
+        delete(line, root.clone());
+        let mut errors = Vec::new();
+        root.validate(&mut errors);
+        assert!(
+            errors.is_empty(),
+            "tree must validate clean after set+delete, got: {errors:?}"
+        );
+        let leftover = root
+            .lookup(&"router".to_string())
+            .and_then(|r| r.lookup(&"bgp".to_string()))
+            .and_then(|b| b.lookup(&"neighbor".to_string()));
+        assert!(
+            leftover.is_none(),
+            "bgp neighbor node must be pruned after its last child is deleted"
+        );
+    }
+
     /// Mirror SID egress-protection config paths
     /// (`draft-ietf-rtgwg-srv6-egress-protection`, config.yang). vtyctl
     /// apply is garbage-tolerant, so an unwired list / key / leaf would

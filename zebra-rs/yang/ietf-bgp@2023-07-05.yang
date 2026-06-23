@@ -470,6 +470,13 @@ module ietf-bgp {
       }
 
       list neighbor {
+        // A bare `neighbor <addr>` carries no session intent — without a
+        // `remote-as` (or a `peer-group` that supplies one) it can never
+        // form a session, so it's dead config. Reject the key-only entry at
+        // commit, and prune it when its last child is deleted, so a
+        // meaningless neighbor can't linger. Interface-based (unnumbered)
+        // and dynamic listen-range peers are separate lists and unaffected.
+        ext:non-empty "remote-as or peer-group";
         key "remote-address";
         description
           "List of BGP neighbors configured on the local system,
