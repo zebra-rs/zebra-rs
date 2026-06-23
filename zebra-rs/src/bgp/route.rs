@@ -3755,7 +3755,7 @@ fn reduce_bestpath_v4_nht_fib(
 ) -> Option<(usize, Ipv4AdvertiseJob)> {
     let ShardOut::BestPathV4 {
         ident,
-        rd: _,
+        rd,
         prefix,
         selected,
         replaced,
@@ -3774,6 +3774,22 @@ fn reduce_bestpath_v4_nht_fib(
         );
     }
     fib_install_v4(bgp, prefix.prefix, &selected);
+    // Per-VRF VPNv4 export (rd == None, inside a VRF task) — mirror the
+    // same hook in `route_ipv4_update_decided`. This batch reduce is the
+    // ONLY path for received v4-unicast NLRI, so without firing the export
+    // here a route a VRF learns from a peer (e.g. an Inter-AS Option A
+    // PE-CE eBGP session) never crosses into VPNv4 — only spawn-time
+    // `network`-originated prefixes did, which is why the remote-AS
+    // customer prefix never reached the far PE.
+    if rd.is_none()
+        && let Some(exporter) = bgp.vrf_export
+    {
+        if let Some(winner) = selected.first() {
+            super::vrf::vrf_emit_export(exporter, prefix.prefix, &winner.attr);
+        } else {
+            super::vrf::vrf_emit_withdraw(exporter, prefix.prefix);
+        }
+    }
     Some((
         ident,
         Ipv4AdvertiseJob {

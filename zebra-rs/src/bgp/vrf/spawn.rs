@@ -284,7 +284,7 @@ pub fn spawn_bgp_vrf(
 /// idle-hold timer; once it fires the FSM event lands on
 /// `vrf.tx`.
 fn materialize_peers(vrf: &mut BgpVrf, cfg: &BgpVrfConfig) -> usize {
-    use super::super::peer::Peer;
+    use super::super::peer::{Peer, PeerType};
     use super::super::peer_key::PeerKey;
 
     let mut count = 0usize;
@@ -315,6 +315,19 @@ fn materialize_peers(vrf: &mut BgpVrf, cfg: &BgpVrfConfig) -> usize {
             vrf.tx.clone(),
             vrf.ctx.clone(),
         );
+        // `Peer::new` defaults `peer_type` to IBGP and, unlike the global
+        // `config_remote_as` path, nothing else recomputes it for a VRF
+        // peer — so derive it here from the AS comparison. Without this a
+        // per-VRF PE-CE *eBGP* session (remote-as != the VRF's AS) is
+        // treated as iBGP: its routes are marked internal, carry no
+        // AS-path prepend, and (the symptom) are never re-advertised to
+        // the iBGP VPNv4 core, so an Inter-AS Option A remote-AS customer
+        // prefix never reaches the far PE.
+        peer.peer_type = if remote_as == vrf.asn {
+            PeerType::IBGP
+        } else {
+            PeerType::EBGP
+        };
         peer.start();
         vrf.peers.insert_with_key(PeerKey::Addr(*addr), peer);
         count += 1;
@@ -477,9 +490,18 @@ mod tests {
         // a dormant entry would clutter `show bgp vrf v1 summary`
         // output until the operator filled the leaf in.
         assert_eq!(count, 1);
-        assert!(
-            vrf.peers.get(&with_as).is_some(),
-            "peer with remote-as inserted"
+        let peer = vrf
+            .peers
+            .get(&with_as)
+            .expect("peer with remote-as inserted");
+        // remote-as 65001 != the VRF's AS 65000 → eBGP. `Peer::new`
+        // defaults to IBGP, so `materialize_peers` must derive this — else
+        // a per-VRF PE-CE eBGP session is treated as iBGP and its routes
+        // never re-advertise into the VPNv4 core (Inter-AS Option A).
+        assert_eq!(
+            peer.peer_type,
+            crate::bgp::peer::PeerType::EBGP,
+            "remote-as != VRF AS must be classified eBGP"
         );
         assert!(
             vrf.peers.get(&no_as).is_none(),

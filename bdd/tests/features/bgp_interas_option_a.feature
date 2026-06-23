@@ -61,7 +61,11 @@ Feature: Inter-AS MPLS/VPN Option A over SR-MPLS (RFC 4364 §10a)
     And I apply config "p2.yaml" to namespace "p2"
     And I apply config "pe2.yaml" to namespace "pe2"
     And I apply config "ce2.yaml" to namespace "ce2"
-    And I wait 35 seconds for BGP to operate
+    # 75s, not the 35s the sibling option features use: the customer
+    # prefix crosses the longest chain here — CE2 → PE2 (VPNv4) → ASBR2
+    # → (PE-CE eBGP) → ASBR1 → re-export to VPNv4 → PE1 → import — so end-
+    # to-end convergence (measured ~55-60s) needs the extra headroom.
+    And I wait 75 seconds for BGP to operate
     # IS-IS SR adjacencies form the intra-AS transport.
     Then isis neighbor in namespace "pe1" at level 2 on interface "p1" should be up
     And isis neighbor in namespace "asbr1" at level 2 on interface "p1" should be up
