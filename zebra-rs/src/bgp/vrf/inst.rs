@@ -346,6 +346,52 @@ pub fn dispatch_withdraw_import_v6(
     }
 }
 
+/// Mirror a peer-learned MUP (SAFI 85) best-path — or its withdrawal —
+/// to every VRF whose `mup_import_rts` intersects the route's RT
+/// extcomms, so `show bgp vrf <name> mup` reflects routes received from
+/// peers (not just locally-originated Session-Transformed routes). This
+/// is **display only**: the global `Bgp` Loc-RIB stays the authoritative
+/// MUP RIB and advertiser. It mirrors the originate-side
+/// [`super::super::route::Bgp::forward_mup_to_vrf`], which keys on `rd`
+/// because it already knows the originating VRF; the receive path has no
+/// such context, so it keys on the route's RTs like the VPNv4/v6 import
+/// fan-out.
+///
+/// On withdrawal (`best` is `None`) the route's RTs are no longer
+/// available, so `BgpVrfMsg::MupWithdraw` is flooded to every VRF — the
+/// per-VRF `selected.remove` is idempotent, so a VRF that never held the
+/// prefix simply ignores it.
+pub fn dispatch_mup(
+    dispatcher: &VrfImportDispatcher<'_>,
+    prefix: &bgp_packet::MupPrefix,
+    best: Option<&super::super::route::BgpRib>,
+) {
+    match best {
+        Some(rib) => {
+            let matches = super::super::inst::matching_import_vrfs_mup(
+                dispatcher.rib_known_vrfs,
+                &rib.attr.ecom,
+            );
+            for vrf_name in matches {
+                let Some(handle) = dispatcher.vrf_registry.get(&vrf_name) else {
+                    continue;
+                };
+                let _ = handle.inbox.send(BgpVrfMsg::MupUpdate {
+                    prefix: prefix.clone(),
+                    rib: rib.clone(),
+                });
+            }
+        }
+        None => {
+            for handle in dispatcher.vrf_registry.values() {
+                let _ = handle.inbox.send(BgpVrfMsg::MupWithdraw {
+                    prefix: prefix.clone(),
+                });
+            }
+        }
+    }
+}
+
 impl BgpVrf {
     /// Build a `BgpVrf` and the matching inbound sender. The
     /// caller (`spawn_bgp_vrf`) keeps the `BgpVrfInbox`, hands the

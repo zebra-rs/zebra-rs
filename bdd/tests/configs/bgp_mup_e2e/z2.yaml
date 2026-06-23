@@ -2,6 +2,19 @@
 # mup afi-safi negotiated. Plain BGP speaker: it has no
 # controller and originates nothing, but receives the Type-1 ST route the
 # controller (z1) originates and shows it under `show bgp mup`.
+#
+# `vrf mobile-up` imports the route's MUP route-target (65000:200, z1's
+# `mobile-up` export). The global MUP Loc-RIB stays authoritative; the
+# receive path mirrors the best-path into the per-VRF task (display only)
+# so `show bgp vrf mobile-up mup` reflects the peer-learned route. The
+# `router bgp vrf` block spawns that per-VRF task and routes the
+# `show bgp vrf <name> mup` redirect to it.
+vrf:
+- name: mobile-up
+  mup:
+    route-target:
+      import:
+      - "65000:200"
 router:
   bgp:
     global:
@@ -16,3 +29,6 @@ router:
         enabled: true
       - name: mup
         enabled: true
+    vrf:
+    - name: mobile-up
+      rd: "65000:100"

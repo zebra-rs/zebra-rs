@@ -59,6 +59,9 @@ Feature: BGP MUP Controller originates Session-Transformed routes from PFCP
     Then show command "show bgp mup mup-c session" in namespace "z1" should eventually contain "192.0.2.5"
     And show command "show bgp mup" in namespace "z1" should contain "ue=192.0.2.5/32"
     And show command "show bgp mup" in namespace "z2" should eventually contain "ue=192.0.2.5/32"
+    # The peer-learned route is mirrored into z2's `mobile-up` VRF (it
+    # imports the route's RT 65000:200), so the per-VRF view reflects it.
+    And show command "show bgp vrf mobile-up mup" in namespace "z2" should eventually contain "ue=192.0.2.5/32"
 
   # Session deletion / route withdrawal is covered by the `pfcp.rs`
   # `session_deletion_removes_session` unit test and manual validation; a
