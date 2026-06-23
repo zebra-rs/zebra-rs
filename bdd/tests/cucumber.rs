@@ -116,6 +116,15 @@ async fn clean_test_environment(world: &mut World) {
         }
     }
 
+    // 5. Sweep stray global-scope addresses off the HOST loopback. Unlike
+    // the per-feature resources above this is host-global, but it is only
+    // ever leaked test addresses (a router `interface lo` /32 whose daemon
+    // ran in the host namespace) — never anything a live feature needs —
+    // so an unconditional sweep is safe and self-healing. A leaked address
+    // here makes the host answer ARP for a bridge subnet and black-holes
+    // loopback-peered sessions (see `sweep_host_loopback_addrs`).
+    let _ = netns::sweep_host_loopback_addrs().await;
+
     println!(
         "✓ Test environment cleaned for feature {}",
         world.feature_tag
