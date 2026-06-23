@@ -144,8 +144,10 @@ pub enum MupRoute {
     /// source address length (bits, 0/32/128) + optional source
     /// address bytes. The source-address-length octet is always
     /// present on the wire (zero when no source is carried), matching
-    /// GoBGP and RFC 9833 §3.2.1. Prefix, endpoint, and source all
-    /// follow the outer AFI's address family.
+    /// GoBGP and RFC 9833 §3.2.1. Only the UE `prefix` follows the outer
+    /// AFI; the `endpoint` (gNB) and `source` (UPF) families are decided
+    /// by their own length octets (32 = IPv4, 128 = IPv6), so an IPv6 UE
+    /// route may carry an IPv4 endpoint/source (the mixed-AFI 5G case).
     T1st {
         id: u32,
         arch: MupArchitectureType,
@@ -380,55 +382,57 @@ impl MupRoute {
                 let rest = &rest[psize..];
                 let (rest, teid) = be_u32(rest)?;
                 let (rest, qfi) = be_u8(rest)?;
-                // Endpoint address length must be exactly the AFI's host
-                // width (32 or 128) per RFC 9833 §3.2.1.
+                // The endpoint-address-length octet selects the endpoint's
+                // address family on its own (32 = IPv4 gNB, 128 = IPv6
+                // gNB), independent of the outer AFI: draft-ietf-bess-mup-
+                // safi / RFC 9833 §3.2.1 deliberately permits an IPv6 UE
+                // prefix to carry an IPv4 endpoint/source — the real 5G
+                // case where the N3 transport is IPv4. (GoBGP infers the
+                // family from this octet the same way; only the UE prefix
+                // is tied to the outer AFI.)
                 let (rest, ep_len) = be_u8(rest)?;
-                if ep_len != max_addr_bits {
-                    return Err(nom::Err::Error(make_error(input, ErrorKind::Verify)));
-                }
-                let ep_size = nlri_psize(ep_len);
-                if rest.len() < ep_size {
-                    return Err(nom::Err::Error(make_error(input, ErrorKind::Eof)));
-                }
-                let endpoint = match afi {
-                    Afi::Ip => {
+                let (endpoint, rest) = match ep_len {
+                    32 => {
+                        if rest.len() < 4 {
+                            return Err(nom::Err::Error(make_error(input, ErrorKind::Eof)));
+                        }
                         let mut octets = [0u8; 4];
-                        octets[..ep_size].copy_from_slice(&rest[..ep_size]);
-                        IpAddr::V4(Ipv4Addr::from(octets))
+                        octets.copy_from_slice(&rest[..4]);
+                        (IpAddr::V4(Ipv4Addr::from(octets)), &rest[4..])
                     }
-                    Afi::Ip6 => {
+                    128 => {
+                        if rest.len() < 16 {
+                            return Err(nom::Err::Error(make_error(input, ErrorKind::Eof)));
+                        }
                         let mut octets = [0u8; 16];
-                        octets[..ep_size].copy_from_slice(&rest[..ep_size]);
-                        IpAddr::V6(Ipv6Addr::from(octets))
+                        octets.copy_from_slice(&rest[..16]);
+                        (IpAddr::V6(Ipv6Addr::from(octets)), &rest[16..])
                     }
-                    _ => unreachable!(),
+                    _ => return Err(nom::Err::Error(make_error(input, ErrorKind::Verify))),
                 };
-                let rest = &rest[ep_size..];
-                // Mandatory source-address-length octet; 0 means no
-                // source, otherwise it must match the AFI host width.
+                // Mandatory source-address-length octet: 0 = no source,
+                // else 32 (IPv4) or 128 (IPv6) — also family-by-length,
+                // independent of the outer AFI.
                 let (rest, src_len) = be_u8(rest)?;
-                let source = if src_len == 0 {
-                    None
-                } else if src_len == max_addr_bits {
-                    let src_size = nlri_psize(src_len);
-                    if rest.len() < src_size {
-                        return Err(nom::Err::Error(make_error(input, ErrorKind::Eof)));
-                    }
-                    match afi {
-                        Afi::Ip => {
-                            let mut octets = [0u8; 4];
-                            octets[..src_size].copy_from_slice(&rest[..src_size]);
-                            Some(IpAddr::V4(Ipv4Addr::from(octets)))
+                let source = match src_len {
+                    0 => None,
+                    32 => {
+                        if rest.len() < 4 {
+                            return Err(nom::Err::Error(make_error(input, ErrorKind::Eof)));
                         }
-                        Afi::Ip6 => {
-                            let mut octets = [0u8; 16];
-                            octets[..src_size].copy_from_slice(&rest[..src_size]);
-                            Some(IpAddr::V6(Ipv6Addr::from(octets)))
-                        }
-                        _ => unreachable!(),
+                        let mut octets = [0u8; 4];
+                        octets.copy_from_slice(&rest[..4]);
+                        Some(IpAddr::V4(Ipv4Addr::from(octets)))
                     }
-                } else {
-                    return Err(nom::Err::Error(make_error(input, ErrorKind::Verify)));
+                    128 => {
+                        if rest.len() < 16 {
+                            return Err(nom::Err::Error(make_error(input, ErrorKind::Eof)));
+                        }
+                        let mut octets = [0u8; 16];
+                        octets.copy_from_slice(&rest[..16]);
+                        Some(IpAddr::V6(Ipv6Addr::from(octets)))
+                    }
+                    _ => return Err(nom::Err::Error(make_error(input, ErrorKind::Verify))),
                 };
                 MupRoute::T1st {
                     id,
@@ -730,10 +734,12 @@ impl MupPrefix {
         }
     }
 
-    /// Outer AFI implied by the route's address family. RFC 9833 §3 ties
-    /// every address a MUP route carries to the MP_REACH AFI, so the
-    /// prefix / address / endpoint family is authoritative. `Unknown`
-    /// has no decoded address, so it defaults to IPv4.
+    /// Outer AFI implied by the route's keyed address. The MP_REACH AFI
+    /// tracks the prefix/address that names the route — the UE prefix for
+    /// ISD/T1ST, the segment address for DSD, the endpoint for T2ST — so
+    /// that field is authoritative. (A T1ST endpoint/source may be a
+    /// different family; see `MupRoute::T1st`.) `Unknown` has no decoded
+    /// address, so it defaults to IPv4.
     pub fn afi(&self) -> Afi {
         let v6 = match self {
             MupPrefix::Isd { prefix, .. } | MupPrefix::T1st { prefix, .. } => {
@@ -1123,17 +1129,94 @@ mod tests {
     }
 
     #[test]
-    fn t1st_rejects_endpoint_len_over_afi_max() {
+    fn t1st_rejects_invalid_endpoint_len() {
         // arch=1, route_type=3, length=20, RD(8) + plen=0 + TEID(4) + QFI(1)
-        // + ep_len=33 (> 32 for v4) + filler
+        // + ep_len=33 (not 32 or 128 → invalid host width) + filler.
         let mut v = vec![0x01, 0x00, 0x03, 20];
         v.extend_from_slice(&[0; 8]); // RD
         v.push(0); // plen=0 → no prefix bytes
         v.extend_from_slice(&[0; 4]); // TEID
         v.push(0); // QFI
-        v.push(33); // ep_len > 32
+        v.push(33); // ep_len neither 32 nor 128
         v.extend_from_slice(&[0; 6]); // pad to length=20
         assert!(MupRoute::parse(&v, false, Afi::Ip).is_err());
+    }
+
+    #[test]
+    fn t1st_mixed_afi_v6_ue_v4_endpoint_round_trip() {
+        // The real 5G case: an IPv6 UE prefix (outer AFI = IPv6) carrying
+        // an IPv4 gNB endpoint and IPv4 UPF source (IPv4 N3 transport).
+        // The endpoint/source families come from their own length octets,
+        // so this must round-trip under the IPv6 outer AFI.
+        round_trip(
+            MupRoute::T1st {
+                id: 0,
+                arch: MupArchitectureType::Gpp5g,
+                rd: sample_rd(),
+                prefix: "2001:db8::5/128".parse().unwrap(),
+                teid: 0x1234_5678,
+                qfi: 9,
+                endpoint: "10.0.0.1".parse().unwrap(),
+                source: Some("198.51.100.7".parse().unwrap()),
+            },
+            false,
+            Afi::Ip6,
+        );
+    }
+
+    #[test]
+    fn t1st_mixed_afi_v4_ue_v6_endpoint_round_trip() {
+        // The mirror case: an IPv4 UE prefix (outer AFI = IPv4) carrying an
+        // IPv6 endpoint/source (IPv6 N3 transport).
+        round_trip(
+            MupRoute::T1st {
+                id: 0,
+                arch: MupArchitectureType::Gpp5g,
+                rd: sample_rd(),
+                prefix: "192.0.2.5/32".parse().unwrap(),
+                teid: 7,
+                qfi: 1,
+                endpoint: "2001:db8::1".parse().unwrap(),
+                source: Some("2001:db8::abcd".parse().unwrap()),
+            },
+            false,
+            Afi::Ip,
+        );
+    }
+
+    #[test]
+    fn t1st_parses_v6_ue_with_v4_endpoint_bytes() {
+        // Hand-rolled wire bytes: outer AFI = IPv6, UE prefix /128, then a
+        // 32-bit endpoint and a 32-bit source. A parser that forced the
+        // endpoint/source to match the outer AFI (128) would reject this.
+        // arch=1, route_type=3 (T1ST).
+        // body = RD(8) + plen(1)=128 + ue(16) + TEID(4) + QFI(1)
+        //        + ep_len(1)=32 + ep(4) + src_len(1)=32 + src(4) = 40
+        let ue = std::net::Ipv6Addr::new(0x2001, 0xdb8, 0, 0, 0, 0, 0, 5);
+        let mut v = vec![0x01, 0x00, 0x03, 40];
+        v.extend_from_slice(&[0; 8]); // RD = 0:0
+        v.push(128); // prefix length
+        v.extend_from_slice(&ue.octets()); // UE prefix (16)
+        v.extend_from_slice(&0x1234_5678u32.to_be_bytes()); // TEID
+        v.push(9); // QFI
+        v.push(32); // endpoint length → IPv4
+        v.extend_from_slice(&[10, 0, 0, 1]); // endpoint
+        v.push(32); // source length → IPv4
+        v.extend_from_slice(&[198, 51, 100, 7]); // source
+        let (_, route) = MupRoute::parse(&v, false, Afi::Ip6).expect("mixed-AFI T1ST parses");
+        match route {
+            MupRoute::T1st {
+                prefix,
+                endpoint,
+                source,
+                ..
+            } => {
+                assert_eq!(prefix, "2001:db8::5/128".parse::<IpNet>().unwrap());
+                assert_eq!(endpoint, "10.0.0.1".parse::<IpAddr>().unwrap());
+                assert_eq!(source, Some("198.51.100.7".parse::<IpAddr>().unwrap()));
+            }
+            other => panic!("expected T1st, got {other:?}"),
+        }
     }
 
     #[test]

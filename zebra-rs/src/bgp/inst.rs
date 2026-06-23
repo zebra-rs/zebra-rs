@@ -650,10 +650,11 @@ pub struct Bgp {
     /// reconfigure a running controller.
     pub mup_c_dirty: bool,
     /// MUP routes the controller has originated, keyed by session SEID →
-    /// (originated NLRI, allocated SRv6 SID function). Tracked so a
-    /// Session Deletion / Modification withdraws the exact prior route and
-    /// returns its SID function to the pool.
-    pub mup_c_originated: BTreeMap<u64, (bgp_packet::MupPrefix, u16)>,
+    /// the originated NLRI. Tracked so a Session Deletion / Modification
+    /// withdraws the exact prior route. No SRv6 SID is allocated for these
+    /// (the PE derives forwarding from its ISD/DSD routes), so only the
+    /// prefix is retained.
+    pub mup_c_originated: BTreeMap<u64, bgp_packet::MupPrefix>,
     /// Local bridge FDB shadow keyed by `(vni, mac)`. Populated from
     /// every `RibRx::FdbAdd`, removed on `RibRx::FdbDel`. We need
     /// durable state (not just one-shot event handling) because the

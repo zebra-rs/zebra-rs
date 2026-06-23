@@ -4086,12 +4086,12 @@ impl Bgp {
             super::vrf_config::config_vrf_mup_rt_export,
         );
         self.callback_add(
-            "/router/bgp/vrf/mobile-uplane/srv6-mobile/decapsulation/network-instance/exact",
-            super::vrf_config::config_vrf_mup_srv6_decap,
+            "/router/bgp/vrf/mobile-uplane/route/st2/dest-network-instance/core/exact",
+            super::vrf_config::config_vrf_mup_route_st2,
         );
         self.callback_add(
-            "/router/bgp/vrf/mobile-uplane/srv6-mobile/encapsulation/network-instance/exact",
-            super::vrf_config::config_vrf_mup_srv6_encap,
+            "/router/bgp/vrf/mobile-uplane/route/st1/dest-network-instance/access/exact",
+            super::vrf_config::config_vrf_mup_route_st1,
         );
 
         // `set router bgp interface-neighbor <name> [...]`.

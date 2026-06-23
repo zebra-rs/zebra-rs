@@ -1,0 +1,20 @@
+# z2 — MUP route receiver. AS 65001, iBGP to z1 (192.168.0.1) with the
+# mobile-uplane afi-safi negotiated (both IPv4-MUP and IPv6-MUP). Plain BGP
+# speaker: no controller, originates nothing. It receives the Type-1 ST
+# route z1 originates — an IPv6 UE route carrying an IPv4 endpoint — and
+# must parse and show it. A receiver that forced the endpoint family to
+# match the outer (IPv6) AFI would reject the UPDATE and never show it.
+router:
+  bgp:
+    global:
+      as: 65001
+      router-id: 192.168.0.2
+    neighbor:
+    - remote-address: 192.168.0.1
+      remote-as: 65001
+      enabled: true
+      afi-safi:
+      - name: ipv4
+        enabled: true
+      - name: mobile-uplane
+        enabled: true

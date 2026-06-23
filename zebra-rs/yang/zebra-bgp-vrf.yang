@@ -343,10 +343,10 @@ module zebra-bgp-vrf {
       container mobile-uplane {
         description
           "BGP MUP (RFC 9833) per-VRF service. route-target/export tags
-           the ST routes the controller originates from this VRF;
-           srv6-mobile selects the direction (decapsulation = Type-2 ST
-           / uplink = N3, encapsulation = Type-1 ST / downlink = N6) and
-           the session network-instance matched exactly.";
+           the ST routes the controller originates from this VRF; route
+           selects the Session-Transformed route type (st1 = Type-1 ST
+           / downlink = N6, st2 = Type-2 ST / uplink = N3) and the
+           destination session network-instance matched exactly.";
         container route-target {
           leaf-list export {
             type route-distinguisher;
@@ -355,25 +355,34 @@ module zebra-bgp-vrf {
                this VRF (RT shares the RD wire format).";
           }
         }
-        container srv6-mobile {
-          description "SRv6 mobile user-plane behaviour for this VRF.";
-          container decapsulation {
+        container route {
+          description
+            "Session-Transformed route origination for this VRF, keyed by
+             ST route type. Each route type binds the destination
+             network-instance whose PFCP sessions it originates from.";
+          container st1 {
             description
-              "Egress GTP decapsulation (Type-2 ST / uplink); the N3 VRF.";
-            container network-instance {
-              leaf exact {
-                type string;
-                description "Session core network-instance matched exactly.";
+              "Type-1 ST (downlink); ingress GTP encapsulation, the N6 VRF.";
+            container dest-network-instance {
+              container access {
+                leaf exact {
+                  type string;
+                  description
+                    "Session access network-instance matched exactly.";
+                }
               }
             }
           }
-          container encapsulation {
+          container st2 {
             description
-              "Ingress GTP encapsulation (Type-1 ST / downlink); the N6 VRF.";
-            container network-instance {
-              leaf exact {
-                type string;
-                description "Session access network-instance matched exactly.";
+              "Type-2 ST (uplink); egress GTP decapsulation, the N3 VRF.";
+            container dest-network-instance {
+              container core {
+                leaf exact {
+                  type string;
+                  description
+                    "Session core network-instance matched exactly.";
+                }
               }
             }
           }
