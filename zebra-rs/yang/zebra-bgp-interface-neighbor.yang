@@ -92,6 +92,12 @@ module zebra-bgp-interface-neighbor {
     description
       "Container hung off `router bgp`.";
     list interface-neighbor {
+      // A bare `interface-neighbor <ifname>` can never materialize a peer —
+      // without a `remote-as` (or a `neighbor-group` that supplies one) the
+      // ND-triggered materialization silently no-ops, so it's dead config.
+      // Reject the key-only entry at commit, and prune it when its last
+      // child is deleted, so a meaningless entry can't linger.
+      ext:non-empty "remote-as or neighbor-group";
       key "interface";
       ext:help "BGP interface-keyed neighbor (IPv6 unnumbered)";
       description

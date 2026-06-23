@@ -77,6 +77,14 @@ module zebra-bgp-dynamic-neighbors {
            list.";
       }
       list listen-range {
+        // A bare `listen-range <prefix>` synthesizes no peer attributes
+        // without a `neighbor-group`, so it's dead config. `neighbor-group`
+        // is this list's only child, so `ext:non-empty` is equivalent to the
+        // `mandatory true` it replaces — but it additionally prunes the entry
+        // when that last child is deleted (which `mandatory` alone leaves
+        // behind as a bare entry that then fails the next commit). Unifies on
+        // the same key-only-entry rejection used elsewhere in this tree.
+        ext:non-empty "neighbor-group";
         key "prefix";
         description
           "Per-prefix authorization to accept dynamic peers. Multiple
@@ -89,7 +97,6 @@ module zebra-bgp-dynamic-neighbors {
         }
         leaf neighbor-group {
           type string;
-          mandatory true;
           description
             "Name of the `neighbor-group` whose attributes the newly
              materialized peer inherits. Held as a plain string (not
