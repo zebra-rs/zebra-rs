@@ -1794,6 +1794,120 @@ mod yang_load_tests {
         );
     }
 
+    /// The two other BGP peer lists are dead config when bare, same as the
+    /// address-keyed `neighbor`: `interface-neighbor <ifname>` (IPv6
+    /// unnumbered) can't materialize a peer without a `remote-as` /
+    /// `neighbor-group`, and `dynamic-neighbors listen-range <prefix>`
+    /// synthesizes nothing without a `neighbor-group`. Both are tagged
+    /// `ext:non-empty`, so a bare entry is rejected at commit and pruned when
+    /// its last child is deleted. For `listen-range` this `ext:non-empty`
+    /// replaces the old `mandatory true` on `neighbor-group` (its only child),
+    /// unifying on one mechanism and adding the prune. Drives the real schema.
+    #[test]
+    fn bgp_unnumbered_and_dynamic_bare_entries_rejected_and_pruned() {
+        use crate::config::ExecCode;
+        use crate::config::configs::{delete, set};
+        use crate::config::parse::{State, parse};
+        use crate::config::{Config, paths::path_try_trim};
+        use libyang::to_entry;
+        use std::rc::Rc;
+
+        let mut yang = YangStore::new();
+        yang.add_path(concat!(env!("CARGO_MANIFEST_DIR"), "/yang"));
+        yang.read_with_resolve("configure")
+            .unwrap_or_else(|e| panic!("configure failed to load: {e:#}"));
+        yang.identity_resolve();
+        let module = yang.find_module("configure").unwrap();
+        let entry = to_entry(&yang, module);
+        let set_entry = entry
+            .dir
+            .borrow()
+            .iter()
+            .find(|e| e.name == "set")
+            .cloned()
+            .expect("configure mode has a `set` entry");
+        let paths = |cmd: &str| {
+            let (code, _comps, state) = parse(cmd, set_entry.clone(), None, State::new());
+            assert_eq!(code, ExecCode::Success, "should parse: {cmd}");
+            path_try_trim("set", state.paths)
+        };
+        let validate_errors = |line: &[crate::config::CommandPath]| -> Vec<String> {
+            let root = Rc::new(Config::new("".to_string(), None));
+            set(line.to_vec(), root.clone());
+            let mut errors = Vec::new();
+            root.validate(&mut errors);
+            errors
+        };
+        // (bare cmd + reject-hint, child-bearing cmd, lookup path to the list)
+        let cases = [
+            (
+                "router bgp interface-neighbor eth0",
+                "remote-as or neighbor-group",
+                "router bgp interface-neighbor eth0 remote-as 65000",
+                ["bgp", "interface-neighbor"],
+            ),
+            (
+                "router bgp dynamic-neighbors listen-range 10.1.0.0/24",
+                "neighbor-group",
+                "router bgp dynamic-neighbors listen-range 10.1.0.0/24 neighbor-group LEAF",
+                ["bgp", "dynamic-neighbors"],
+            ),
+        ];
+        for (bare, hint, with_child, _) in &cases {
+            // Bare entry → rejected with exactly one error (no double-report).
+            let errors = validate_errors(&paths(bare));
+            assert_eq!(
+                errors.len(),
+                1,
+                "bare `{bare}` → one error, got: {errors:?}"
+            );
+            assert!(
+                errors[0].contains(hint),
+                "bare `{bare}` must be rejected with `{hint}`, got: {errors:?}"
+            );
+            // With a child → validates clean.
+            let errors = validate_errors(&paths(with_child));
+            assert!(
+                errors.is_empty(),
+                "`{with_child}` must validate clean, got: {errors:?}"
+            );
+        }
+
+        // set entry+child, then delete the child → the bare entry is pruned
+        // (so the next commit doesn't re-reject it).
+        for (_, _, with_child, lookup) in &cases {
+            let root = Rc::new(Config::new("".to_string(), None));
+            let line = paths(with_child);
+            set(line.clone(), root.clone());
+            delete(line, root.clone());
+            let mut errors = Vec::new();
+            root.validate(&mut errors);
+            assert!(
+                errors.is_empty(),
+                "tree must validate clean after set+delete of `{with_child}`, got: {errors:?}"
+            );
+            let leftover = root
+                .lookup(&"router".to_string())
+                .and_then(|r| r.lookup(&lookup[0].to_string()))
+                .and_then(|b| b.lookup(&lookup[1].to_string()));
+            // dynamic-neighbors is a plain container (always present once
+            // touched); interface-neighbor is a list that must be gone.
+            if lookup[1] == "interface-neighbor" {
+                assert!(
+                    leftover.is_none(),
+                    "interface-neighbor node must be pruned after its last child is deleted"
+                );
+            } else {
+                // The listen-range entry under the container must be gone.
+                let range = leftover.and_then(|d| d.lookup(&"listen-range".to_string()));
+                assert!(
+                    range.is_none(),
+                    "listen-range entry must be pruned after its last child is deleted"
+                );
+            }
+        }
+    }
+
     /// Mirror SID egress-protection config paths
     /// (`draft-ietf-rtgwg-srv6-egress-protection`, config.yang). vtyctl
     /// apply is garbage-tolerant, so an unwired list / key / leaf would
