@@ -1,4 +1,4 @@
-# Link Delay Measurement (TWAMP Light / STAMP)
+# STAMP
 
 Modern traffic engineering increasingly steers on *latency* rather than
 hop count or static cost. zebra-rs treats per-link delay, jitter, and

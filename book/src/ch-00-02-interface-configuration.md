@@ -45,7 +45,7 @@ Both write the kernel `IFLA_MASTER`, so they are mutually exclusive — an
 interface has exactly one master. `bridge` is a leafref to
 `/bridge/name` and `vrf` a leafref to `/vrf/name`; the referenced device
 is the one zebra-rs creates from its own
-[`bridge`](ch-00-05-bridge-configuration.md) / `vrf` block.
+[`bridge`](ch-00-04-bridge-configuration.md) / `vrf` block.
 
 The bind is **staged**, the same way the configured MTU is: it is held
 as durable desired-state and applied once *both* the interface and the

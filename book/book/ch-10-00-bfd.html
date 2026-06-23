@@ -1,0 +1,561 @@
+<!DOCTYPE HTML>
+<html lang="en" class="light sidebar-visible" dir="ltr">
+    <head>
+        <!-- Book generated using mdBook -->
+        <meta charset="UTF-8">
+        <title>BFD - zebra-rs</title>
+
+
+        <!-- Custom HTML head -->
+
+        <meta name="description" content="">
+        <meta name="viewport" content="width=device-width, initial-scale=1">
+        <meta name="theme-color" content="#ffffff">
+
+        <link rel="icon" href="favicon-de23e50b.svg">
+        <link rel="shortcut icon" href="favicon-8114d1fc.png">
+        <link rel="stylesheet" href="css/variables-8adf115d.css">
+        <link rel="stylesheet" href="css/general-0392ca55.css">
+        <link rel="stylesheet" href="css/chrome-fc474251.css">
+        <link rel="stylesheet" href="css/print-9e4910d8.css" media="print">
+
+        <!-- Fonts -->
+        <link rel="stylesheet" href="fonts/fonts-9644e21d.css">
+
+        <!-- Highlight.js Stylesheets -->
+        <link rel="stylesheet" id="mdbook-highlight-css" href="highlight-493f70e1.css">
+        <link rel="stylesheet" id="mdbook-tomorrow-night-css" href="tomorrow-night-4c0ae647.css">
+        <link rel="stylesheet" id="mdbook-ayu-highlight-css" href="ayu-highlight-3fdfc3ac.css">
+
+        <!-- Custom theme stylesheets -->
+
+
+        <!-- Provide site root and default themes to javascript -->
+        <script>
+            const path_to_root = "";
+            const default_light_theme = "light";
+            const default_dark_theme = "navy";
+            window.path_to_searchindex_js = "searchindex-e8920642.js";
+        </script>
+        <!-- Start loading toc.js asap -->
+        <script src="toc-d6f7580c.js"></script>
+    </head>
+    <body>
+    <div id="mdbook-help-container">
+        <div id="mdbook-help-popup">
+            <h2 class="mdbook-help-title">Keyboard shortcuts</h2>
+            <div>
+                <p>Press <kbd>←</kbd> or <kbd>→</kbd> to navigate between chapters</p>
+                <p>Press <kbd>S</kbd> or <kbd>/</kbd> to search in the book</p>
+                <p>Press <kbd>?</kbd> to show this help</p>
+                <p>Press <kbd>Esc</kbd> to hide this help</p>
+            </div>
+        </div>
+    </div>
+    <div id="mdbook-body-container">
+        <!-- Work around some values being stored in localStorage wrapped in quotes -->
+        <script>
+            try {
+                let theme = localStorage.getItem('mdbook-theme');
+                let sidebar = localStorage.getItem('mdbook-sidebar');
+
+                if (theme.startsWith('"') && theme.endsWith('"')) {
+                    localStorage.setItem('mdbook-theme', theme.slice(1, theme.length - 1));
+                }
+
+                if (sidebar.startsWith('"') && sidebar.endsWith('"')) {
+                    localStorage.setItem('mdbook-sidebar', sidebar.slice(1, sidebar.length - 1));
+                }
+            } catch (e) { }
+        </script>
+
+        <!-- Set the theme before any content is loaded, prevents flash -->
+        <script>
+            const default_theme = window.matchMedia("(prefers-color-scheme: dark)").matches ? default_dark_theme : default_light_theme;
+            let theme;
+            try { theme = localStorage.getItem('mdbook-theme'); } catch(e) { }
+            if (theme === null || theme === undefined) { theme = default_theme; }
+            const html = document.documentElement;
+            html.classList.remove('light')
+            html.classList.add(theme);
+            html.classList.add("js");
+        </script>
+
+        <input type="checkbox" id="mdbook-sidebar-toggle-anchor" class="hidden">
+
+        <!-- Hide / unhide sidebar before it is displayed -->
+        <script>
+            let sidebar = null;
+            const sidebar_toggle = document.getElementById("mdbook-sidebar-toggle-anchor");
+            if (document.body.clientWidth >= 1080) {
+                try { sidebar = localStorage.getItem('mdbook-sidebar'); } catch(e) { }
+                sidebar = sidebar || 'visible';
+            } else {
+                sidebar = 'hidden';
+                sidebar_toggle.checked = false;
+            }
+            if (sidebar === 'visible') {
+                sidebar_toggle.checked = true;
+            } else {
+                html.classList.remove('sidebar-visible');
+            }
+        </script>
+
+        <nav id="mdbook-sidebar" class="sidebar" aria-label="Table of contents">
+            <!-- populated by js -->
+            <mdbook-sidebar-scrollbox class="sidebar-scrollbox"></mdbook-sidebar-scrollbox>
+            <noscript>
+                <iframe class="sidebar-iframe-outer" src="toc.html"></iframe>
+            </noscript>
+            <div id="mdbook-sidebar-resize-handle" class="sidebar-resize-handle">
+                <div class="sidebar-resize-indicator"></div>
+            </div>
+        </nav>
+
+        <div id="mdbook-page-wrapper" class="page-wrapper">
+
+            <div class="page">
+                <div id="mdbook-menu-bar-hover-placeholder"></div>
+                <div id="mdbook-menu-bar" class="menu-bar sticky">
+                    <div class="left-buttons">
+                        <label id="mdbook-sidebar-toggle" class="icon-button" for="mdbook-sidebar-toggle-anchor" title="Toggle Table of Contents" aria-label="Toggle Table of Contents" aria-controls="mdbook-sidebar">
+                            <span class=fa-svg><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 448 512"><!--! Font Awesome Free 6.2.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2022 Fonticons, Inc. --><path d="M0 96C0 78.3 14.3 64 32 64H416c17.7 0 32 14.3 32 32s-14.3 32-32 32H32C14.3 128 0 113.7 0 96zM0 256c0-17.7 14.3-32 32-32H416c17.7 0 32 14.3 32 32s-14.3 32-32 32H32c-17.7 0-32-14.3-32-32zM448 416c0 17.7-14.3 32-32 32H32c-17.7 0-32-14.3-32-32s14.3-32 32-32H416c17.7 0 32 14.3 32 32z"/></svg></span>
+                        </label>
+                        <button id="mdbook-theme-toggle" class="icon-button" type="button" title="Change theme" aria-label="Change theme" aria-haspopup="true" aria-expanded="false" aria-controls="mdbook-theme-list">
+                            <span class=fa-svg><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 576 512"><!--! Font Awesome Free 6.2.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2022 Fonticons, Inc. --><path d="M371.3 367.1c27.3-3.9 51.9-19.4 67.2-42.9L600.2 74.1c12.6-19.5 9.4-45.3-7.6-61.2S549.7-4.4 531.1 9.6L294.4 187.2c-24 18-38.2 46.1-38.4 76.1L371.3 367.1zm-19.6 25.4l-116-104.4C175.9 290.3 128 339.6 128 400c0 3.9 .2 7.8 .6 11.6c1.8 17.5-10.2 36.4-27.8 36.4H96c-17.7 0-32 14.3-32 32s14.3 32 32 32H240c61.9 0 112-50.1 112-112c0-2.5-.1-5-.2-7.5z"/></svg></span>
+                        </button>
+                        <ul id="mdbook-theme-list" class="theme-popup" aria-label="Themes" role="menu">
+                            <li role="none"><button role="menuitem" class="theme" id="mdbook-theme-default_theme">Auto</button></li>
+                            <li role="none"><button role="menuitem" class="theme" id="mdbook-theme-light">Light</button></li>
+                            <li role="none"><button role="menuitem" class="theme" id="mdbook-theme-rust">Rust</button></li>
+                            <li role="none"><button role="menuitem" class="theme" id="mdbook-theme-coal">Coal</button></li>
+                            <li role="none"><button role="menuitem" class="theme" id="mdbook-theme-navy">Navy</button></li>
+                            <li role="none"><button role="menuitem" class="theme" id="mdbook-theme-ayu">Ayu</button></li>
+                        </ul>
+                        <button id="mdbook-search-toggle" class="icon-button" type="button" title="Search (`/`)" aria-label="Toggle Searchbar" aria-expanded="false" aria-keyshortcuts="/ s" aria-controls="mdbook-searchbar">
+                            <span class=fa-svg><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512"><!--! Font Awesome Free 6.2.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2022 Fonticons, Inc. --><path d="M416 208c0 45.9-14.9 88.3-40 122.7L502.6 457.4c12.5 12.5 12.5 32.8 0 45.3s-32.8 12.5-45.3 0L330.7 376c-34.4 25.2-76.8 40-122.7 40C93.1 416 0 322.9 0 208S93.1 0 208 0S416 93.1 416 208zM208 352c79.5 0 144-64.5 144-144s-64.5-144-144-144S64 128.5 64 208s64.5 144 144 144z"/></svg></span>
+                        </button>
+                    </div>
+
+                    <h1 class="menu-title">zebra-rs</h1>
+
+                    <div class="right-buttons">
+                        <a href="print.html" title="Print this book" aria-label="Print this book">
+                            <span class=fa-svg id="print-button"><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512"><!--! Font Awesome Free 6.2.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2022 Fonticons, Inc. --><path d="M128 0C92.7 0 64 28.7 64 64v96h64V64H354.7L384 93.3V160h64V93.3c0-17-6.7-33.3-18.7-45.3L400 18.7C388 6.7 371.7 0 354.7 0H128zM384 352v32 64H128V384 368 352H384zm64 32h32c17.7 0 32-14.3 32-32V256c0-35.3-28.7-64-64-64H64c-35.3 0-64 28.7-64 64v96c0 17.7 14.3 32 32 32H64v64c0 35.3 28.7 64 64 64H384c35.3 0 64-28.7 64-64V384zm-16-88c-13.3 0-24-10.7-24-24s10.7-24 24-24s24 10.7 24 24s-10.7 24-24 24z"/></svg></span>
+                        </a>
+
+                    </div>
+                </div>
+
+                <div id="mdbook-search-wrapper" class="hidden">
+                    <form id="mdbook-searchbar-outer" class="searchbar-outer">
+                        <div class="search-wrapper">
+                            <input type="search" id="mdbook-searchbar" name="searchbar" placeholder="Search this book ..." aria-controls="mdbook-searchresults-outer" aria-describedby="searchresults-header">
+                            <div class="spinner-wrapper">
+                                <span class=fa-svg id="fa-spin"><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512"><!--! Font Awesome Free 6.2.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2022 Fonticons, Inc. --><path d="M304 48c0-26.5-21.5-48-48-48s-48 21.5-48 48s21.5 48 48 48s48-21.5 48-48zm0 416c0-26.5-21.5-48-48-48s-48 21.5-48 48s21.5 48 48 48s48-21.5 48-48zM48 304c26.5 0 48-21.5 48-48s-21.5-48-48-48s-48 21.5-48 48s21.5 48 48 48zm464-48c0-26.5-21.5-48-48-48s-48 21.5-48 48s21.5 48 48 48s48-21.5 48-48zM142.9 437c18.7-18.7 18.7-49.1 0-67.9s-49.1-18.7-67.9 0s-18.7 49.1 0 67.9s49.1 18.7 67.9 0zm0-294.2c18.7-18.7 18.7-49.1 0-67.9S93.7 56.2 75 75s-18.7 49.1 0 67.9s49.1 18.7 67.9 0zM369.1 437c18.7 18.7 49.1 18.7 67.9 0s18.7-49.1 0-67.9s-49.1-18.7-67.9 0s-18.7 49.1 0 67.9z"/></svg></span>
+                            </div>
+                        </div>
+                    </form>
+                    <div id="mdbook-searchresults-outer" class="searchresults-outer hidden">
+                        <div id="mdbook-searchresults-header" class="searchresults-header"></div>
+                        <ul id="mdbook-searchresults">
+                        </ul>
+                    </div>
+                </div>
+
+                <!-- Apply ARIA attributes after the sidebar and the sidebar toggle button are added to the DOM -->
+                <script>
+                    document.getElementById('mdbook-sidebar-toggle').setAttribute('aria-expanded', sidebar === 'visible');
+                    document.getElementById('mdbook-sidebar').setAttribute('aria-hidden', sidebar !== 'visible');
+                    Array.from(document.querySelectorAll('#mdbook-sidebar a')).forEach(function(link) {
+                        link.setAttribute('tabIndex', sidebar === 'visible' ? 0 : -1);
+                    });
+                </script>
+
+                <div id="mdbook-content" class="content">
+                    <main>
+                        <h1 id="bfd"><a class="header" href="#bfd">BFD</a></h1>
+<p>Bidirectional Forwarding Detection (BFD, RFC 5880) is a lightweight
+hello protocol that detects a forwarding-path failure to an adjacent
+system in <strong>sub-second</strong> time — far faster than the multi-second
+hold/dead timers of the routing protocols themselves. zebra-rs runs a
+single BFD subsystem that the routing protocols attach to: when a BFD
+session drops, the subsystem notifies every protocol watching that
+neighbour, and each one tears its adjacency or peering down
+immediately (RFC 5882 §5) instead of waiting for its own timer.</p>
+<p>This chapter covers the BFD subsystem as a whole — how it starts, the
+session model, the transport, and the operational <code>show</code> commands. How
+each protocol attaches BFD to a neighbour is documented in that
+protocol’s own BFD section:</p>
+<ul>
+<li><a href="ch-02-08-bgp-bfd.html">BGP</a> — per-neighbor, single- or multi-hop</li>
+<li><a href="ch-07-03-isis-bfd.html">IS-IS</a> — per-interface, single-hop</li>
+<li><a href="ch-08-02-ospf-bfd.html">OSPFv2 / OSPFv3</a> — per-interface, single-hop</li>
+</ul>
+<p>The implementation follows the FRR command surface and semantics where
+they align, so configurations written against FRR carry across with
+little surprise; differences from FRR and Cisco IOS-XR are called out
+where they matter.</p>
+<h2 id="you-do-not-enable-bfd-globally"><a class="header" href="#you-do-not-enable-bfd-globally">You do not enable BFD globally</a></h2>
+<p>There is <strong>no global “turn BFD on” switch</strong>, and there are <strong>no BFD
+configuration leaves of its own</strong>. The BFD subsystem is spawned
+automatically the moment any consumer is configured — a <code>router bgp</code>,
+<code>router isis</code>, <code>router ospf</code>, or <code>router ospfv3</code> block — and it is
+always brought up <em>before</em> the protocol that uses it, so the order in
+which you type the configuration never matters. Attaching BFD to a
+neighbour is then a single per-neighbour / per-interface flag:</p>
+<pre><code>router ospf {
+  area 0 {
+    interface eth0 {
+      bfd { enable true; }
+    }
+  }
+}
+</code></pre>
+<p>That is the whole story. All BFD is configured <em>per protocol</em>; there is
+no standalone <code>bfd { peer … }</code> or <code>bfd { profile … }</code> block — earlier
+revisions had both, but they were inert (parsed but never wired to a
+live session) and have been removed. The top-level <code>bfd</code> keyword exists
+only as the FRR-style enable anchor and takes no sub-configuration.</p>
+<blockquote>
+<p>This matches FRR, where <code>neighbor X bfd</code> / <code>ip ospf bfd</code> “just work”
+without a separate global daemon switch. Earlier revisions of
+zebra-rs required a top-level <code>bfd { }</code> block to exist first; that
+requirement has been removed.</p>
+</blockquote>
+<h2 id="session-model"><a class="header" href="#session-model">Session model</a></h2>
+<p>A BFD session is keyed by the tuple <strong>(local address, remote address,
+ifindex, hop-mode)</strong>. Two systems each pick a random, non-zero local
+<em>discriminator</em>; once packets are flowing each end echoes the other’s
+discriminator and the session is demultiplexed by discriminator on the
+fast path. The session runs a small state machine — <code>Down → Init → Up</code>
+— and reports each transition back to the attached protocols.</p>
+<p>Multiple protocols can attach to the <strong>same</strong> neighbour: they share one
+underlying session, and all of them are notified when it changes state.
+The session is torn down only when the last consumer detaches.</p>
+<p>Timers are negotiated from each side’s <em>desired transmit</em> and <em>required
+receive</em> intervals; the detection time is <code>received-tx-interval × detect-multiplier</code>. The shipped defaults are aligned with FRR:</p>
+<div class="table-wrapper">
+<table>
+<thead>
+<tr><th>Parameter</th><th>Default</th></tr>
+</thead>
+<tbody>
+<tr><td>Transmit interval</td><td>300 ms</td></tr>
+<tr><td>Receive interval</td><td>300 ms</td></tr>
+<tr><td>Detect multiplier</td><td>3</td></tr>
+</tbody>
+</table>
+</div>
+<p>giving a <strong>~900 ms</strong> detection time out of the box. These intervals are
+not currently tunable (the configuration leaves that would set them
+were removed — see <a href="#tuning-intervals">Tuning</a>); every session runs
+with the defaults above.</p>
+<h3 id="slow-transmit-while-not-up"><a class="header" href="#slow-transmit-while-not-up">Slow transmit while not Up</a></h3>
+<p>Per RFC 5880 §6.8.3, while a session is <strong>not</strong> <code>Up</code> the transmit
+interval is clamped to <strong>at least one second</strong>, regardless of the
+configured rate. This keeps a session that is still coming up — or that
+is probing a dead neighbour — from sending at the full sub-second rate.
+The configured (fast) rate is restored the moment the session reaches
+<code>Up</code>. Because this changes the advertised interval, zebra-rs announces
+the change with a <strong>Poll Sequence</strong> (§6.8.7): the <code>Poll</code> bit is set on
+outgoing packets across the up/down boundary until the peer answers with
+a <code>Final</code>. zebra-rs both initiates Poll Sequences and answers a peer’s
+Poll with a Final.</p>
+<h3 id="local-source-address"><a class="header" href="#local-source-address">Local source address</a></h3>
+<p>A session’s local address — the source address on the control packets it
+sends — is taken from the consumer. For BGP this is the neighbour’s
+<code>update-source</code>; for OSPF / IS-IS it is the interface address the
+protocol already uses. When no source is configured the address is left
+unspecified and the kernel selects one per the route. The chosen source
+is what <code>show bfd peers</code> reports as <code>Local address</code>.</p>
+<h2 id="single-hop-vs-multi-hop"><a class="header" href="#single-hop-vs-multi-hop">Single-hop vs multi-hop</a></h2>
+<div class="table-wrapper">
+<table>
+<thead>
+<tr><th></th><th>Single-hop (RFC 5881)</th><th>Multi-hop (RFC 5883)</th></tr>
+</thead>
+<tbody>
+<tr><td>UDP port</td><td>3784</td><td>4784</td></tr>
+<tr><td>TTL / Hop Limit on egress</td><td>255</td><td>255</td></tr>
+<tr><td>Accepted received TTL</td><td><strong>exactly 255</strong> (GTSM)</td><td><strong>≥ <code>minimum-ttl</code></strong> (default 254)</td></tr>
+<tr><td>Use</td><td>directly-connected neighbour</td><td>neighbour reached over ≥ 1 router</td></tr>
+</tbody>
+</table>
+</div>
+<p>Single-hop sessions enforce the <strong>GTSM</strong> check (RFC 5082): a control
+packet that did not arrive with TTL/Hop-Limit 255 has crossed a router
+and is dropped. Multi-hop sessions relax this to a configurable floor
+so a packet that legitimately crossed a few hops is still accepted but
+a spoofed far-away packet is not.</p>
+<p>The two transports are kept strictly separate: a packet that arrives on
+the single-hop port (3784) is never allowed to drive a multi-hop session
+and vice-versa, even when the same neighbour has both.</p>
+<p>OSPF and IS-IS sessions are <strong>always single-hop</strong> (their neighbours are,
+by definition, on a shared link). BGP chooses per neighbour: directly
+connected eBGP is single-hop, while iBGP and eBGP-over-loopback are
+multi-hop — see the <a href="ch-02-08-bgp-bfd.html">BGP BFD</a> section.</p>
+<h2 id="ipv4-and-ipv6"><a class="header" href="#ipv4-and-ipv6">IPv4 and IPv6</a></h2>
+<p>Both address families are supported. The subsystem listens on the v4
+and v6 transports independently (on both 3784 and 4784); IPv6
+link-local sessions — used by OSPFv3 and by IPv6 IS-IS / BGP — are
+demultiplexed per <strong>ifindex</strong>, since the same <code>fe80::</code> address can
+appear on several interfaces. The egress interface is pinned for
+link-local destinations so packets leave the right link.</p>
+<h2 id="tuning-intervals"><a class="header" href="#tuning-intervals">Tuning intervals</a></h2>
+<p>There is currently <strong>no way to tune the BFD timers</strong> — every session
+runs with the FRR-aligned defaults (300 ms / ×3 ⇒ ~900 ms detection).</p>
+<p>Earlier revisions accepted a top-level <code>bfd { profile … }</code> block plus a
+per-neighbour / per-interface <code>profile &lt;name&gt;</code> reference, but the
+profile parameters were never resolved into the live session, so they
+had no effect on timers. Both the top-level block and the per-protocol
+<code>profile</code> leaf have been removed. Configurable timers (per-protocol or
+via a reinstated profile mechanism) are a possible future addition.</p>
+<h2 id="verifying-sessions"><a class="header" href="#verifying-sessions">Verifying sessions</a></h2>
+<p>Three <code>show</code> commands surface BFD state:</p>
+<pre><code>show bfd                   # one-line-per-session summary table
+show bfd peers             # FRR-style detail block for every session
+show bfd peers 10.0.0.2    # detail for a single peer
+show bfd counters          # per-session control-packet counters
+</code></pre>
+<p><code>show bfd</code> gives a quick health table:</p>
+<pre><code>Peer             State    Local/Remote Disc      Uptime     Iface
+10.0.0.2         Up       0xd6b24a5/0x3f0a112    00:14:22   single-hop
+</code></pre>
+<p><code>show bfd peers [&lt;addr&gt;]</code> prints the FRR-style indented detail block —
+discriminators, status and up/down time, diagnostics, the negotiated
+local and remote timers, and (for multi-hop) the minimum TTL. A fresh
+session that has not yet heard from the peer shows <code>State Down</code> with a
+remote discriminator of <code>0x0</code>; that means the local side is
+transmitting but nothing is coming back — check that the peer also has
+BFD configured toward this router and that UDP 3784/4784 is not
+filtered on the path.</p>
+<p><code>show bfd counters</code> shows received / transmitted control-packet counts
+per session (the RX counter is the reliable one for confirming the
+receive path is alive).</p>
+<p>Each command also accepts a trailing <code>json</code> for machine-readable output.</p>
+<h2 id="tracing"><a class="header" href="#tracing">Tracing</a></h2>
+<p>The BFD task is quiet by default. A single runtime flag turns on its
+diagnostic traces — session FSM transitions, control-packet handling, and
+the <code>xdp-bfd-echo</code> helper lifecycle (Echo and the in-kernel expiration
+watchdog it hosts):</p>
+<pre><code>set bfd tracing true     # enable
+set bfd tracing false    # disable (or: delete bfd tracing)
+</code></pre>
+<p>It is a runtime toggle — no restart, and no rebuild — backed by a single
+global flag, so it also covers the parts of BFD that run outside the main
+task (the socket read/write tasks and the per-interface Echo reflector
+IPC). It is not per-session or per-interface; it is on or off for the
+whole BFD task.</p>
+<p>The info- and warn-level traces appear at the <strong>default</strong> log level once
+the flag is on, so <code>set bfd tracing true</code> is usually enough. The more
+verbose per-packet, debug-level traces additionally need the log level
+raised (e.g. <code>RUST_LOG=debug</code>), matching their original verbosity. With
+the flag off, every BFD trace is suppressed regardless of <code>RUST_LOG</code>.</p>
+<p>This is distinct from the per-protocol BFD tracing under
+<code>router bgp tracing { bfd }</code>, <code>router isis tracing { bfd }</code>, etc., which
+trace how <em>that protocol</em> reacts to BFD events; <code>set bfd tracing</code> traces
+the BFD task itself.</p>
+<h2 id="echo-function"><a class="header" href="#echo-function">Echo function</a></h2>
+<p>The BFD <strong>Echo function</strong> (RFC 5880 §6.4 / RFC 5881 §6) is a forwarding-plane
+liveness test: a node sends a UDP/3785 packet crafted so the peer loops it
+straight back without its BFD software ever processing it, and times the round
+trip. Because the loop never enters the peer’s BFD control software, it
+detects a forwarding fault even while control packets still flow — and it lets
+a node slow its control-packet rate while keeping fast detection. Echo is
+<strong>single-hop only</strong> (RFC 5883 multi-hop has no Echo); <strong>both IPv4 and IPv6</strong>
+are supported.</p>
+<p>The two halves are independent and zebra-rs implements both, offloaded to a
+per-interface XDP/eBPF helper, <strong><code>xdp-bfd-echo</code></strong>:</p>
+<ul>
+<li><strong>Responder</strong> — when we advertise a non-zero <code>Required Min Echo RX Interval</code>,
+the helper’s XDP program loops a peer’s Echo back in the data plane, so the
+<em>peer</em> gets fast detection. We only advertise non-zero once the helper is
+confirmed running, so the promise to loop is honest. The loop differs per
+family to match what real peers send: IPv4 Echo is <em>self-addressed</em> and
+looped as a forwarding hop (TTL decremented to 254), while IPv6 Echo (as FRR
+sends it) is <em>peer-addressed</em>, so the reflector also swaps the IPv6
+source/destination and decrements the Hop Limit — both interop-validated
+against FRR <code>echo-mode</code>.</li>
+<li><strong>Originator</strong> — the helper sends our Echo from a raw <code>AF_PACKET</code> socket and
+the XDP program arms a per-session in-kernel <code>bpf_timer</code> on each return; if
+returns stop for <code>interval × detect-mult</code>, the session goes <code>Down</code> with
+diagnostic <code>Echo Function Failed</code> (RFC 5880 §6.8.5). We only originate while
+the session is <code>Up</code> and the peer advertised a non-zero echo-rx (§6.8.9).</li>
+</ul>
+<p>The helper is reference-counted <strong>per interface</strong>: one <code>xdp-bfd-echo</code> process is
+spawned for each interface that has at least one Echo-enabled (or
+<a href="#offloading-expiration-detection-detect-offload"><code>detect-offload</code></a>-enabled)
+session, shared by all sessions on that link, and stopped when the last one
+goes away. It needs
+<code>cap_net_admin,cap_bpf</code> (load/attach XDP) and <code>cap_net_raw</code> (the originator’s
+raw socket); the packaged install grants these. A node with no Echo configured
+runs no helper and advertises <code>Required Min Echo RX Interval = 0</code>. Deployment,
+attach modes, and troubleshooting are covered in
+<a href="ch-10-01-bfd-xdp-helper.html">The XDP/eBPF Data-Plane Helper</a>.</p>
+<p>Echo is enabled per attachment — on OSPFv2/v3 and IS-IS interfaces, and on
+single-hop eBGP neighbours, where <code>echo-mode</code> selects the role
+(<code>transmit</code> / <code>receive</code> / <code>both</code>) and <code>echo-transmit-interval</code> /
+<code>echo-receive-interval</code> set the rates; see
+<a href="ch-08-02-ospf-bfd.html#echo">OSPF BFD</a>, <a href="ch-07-03-isis-bfd.html#echo">IS-IS BFD</a>,
+and <a href="ch-02-08-bgp-bfd.html#echo">BGP BFD</a>. An IPv6-only session (an OSPFv3 or
+IS-IS adjacency over link-locals, a v6 eBGP neighbour) runs IPv6 Echo the same
+way. Echo configuration changes apply to <strong>live</strong> sessions on commit — no
+session bounce. <code>show bfd peers</code> reports the negotiated
+<code>Echo receive interval</code> / <code>Echo transmission interval</code>.</p>
+<h2 id="offloading-expiration-detection-detect-offload"><a class="header" href="#offloading-expiration-detection-detect-offload">Offloading expiration detection (<code>detect-offload</code>)</a></h2>
+<p>Detection of a <em>silent</em> failure — the peer’s control packets simply stop
+arriving — normally rides on a userspace timer (RFC 5880 §6.8.4): every
+valid packet resets it, and its expiry drives the session <code>Down</code> with
+<code>Control Detection Time Expired</code>. That timer races the daemon’s event
+loop, which has two failure modes under load:</p>
+<ul>
+<li><strong>false Down</strong> — packets are <em>arriving</em> but sit unprocessed in the
+socket queue while the daemon is busy (a BGP churn, a large SPF, a
+config commit), so the timer fires anyway;</li>
+<li><strong>late Down</strong> — the peer really is gone, but the expiry event waits
+behind the same backlog.</li>
+</ul>
+<p><code>detect-offload</code> moves that timing into the kernel, using the same
+per-interface <code>xdp-bfd-echo</code> helper as the <a href="#echo-function">Echo
+function</a>. Once the session is <code>Up</code>, the helper’s XDP
+program <em>observes</em> every BFD control packet (UDP 3784 at TTL 255) on the
+interface: it matches the packet’s <code>Your Discriminator</code> against the
+session, re-arms a per-session in-kernel <code>bpf_timer</code>, and <strong>passes the
+packet up unchanged</strong> — the daemon still runs the full state machine,
+Poll/Final handling, and timer negotiation on every packet; only the
+liveness clock lives in the kernel. If control packets stop for the
+negotiated detection time, the timer fires in softirq and the session
+goes <code>Down</code> exactly as a userspace expiry would.</p>
+<p>Because the re-arm happens at packet <em>arrival</em> (before any socket
+queueing) and the expiry fires in softirq (no event-loop latency),
+detection neither false-fires nor waits on a busy daemon — which is
+what makes aggressive detection times honest.</p>
+<p>Notes and guard-rails:</p>
+<ul>
+<li><strong>Up sessions only.</strong> Before the session is established the peer may
+send <code>Your Discriminator = 0</code>, which cannot be matched in the kernel;
+zebra-rs arms the watchdog on the <code>Up</code> transition and disarms it when
+the session leaves <code>Up</code>. Renegotiated timers retune the armed value
+automatically.</li>
+<li><strong>Single-hop only.</strong> The helper attaches per interface; multi-hop
+ingress is not bound to one (and its TTL floor is below the GTSM 255
+the observer requires). IPv4 and IPv6 are both supported.</li>
+<li><strong>The userspace timer stays as a backstop.</strong> While the watchdog is
+armed, the normal detection timer keeps running, stretched to 4× the
+detection time; if the helper process ever dies, zebra-rs reverts the
+session to ordinary userspace detection immediately.</li>
+<li><strong>Honesty gate.</strong> The watchdog is only armed once the helper is
+confirmed running — if it cannot start (missing binary, capabilities,
+kernel without XDP/<code>bpf_timer</code>), detection simply stays in userspace.
+A watchdog-only helper needs <code>cap_net_admin,cap_bpf</code> (no <code>cap_net_raw</code>
+— there is no transmit half; the daemon keeps sending its own control
+packets). See
+<a href="ch-10-01-bfd-xdp-helper.html">The XDP/eBPF Data-Plane Helper</a> for
+requirements and troubleshooting.</li>
+</ul>
+<p>It is enabled per attachment, with the same per-interface /
+per-neighbour + instance-level inheritance as <code>echo-mode</code> — see
+<a href="ch-08-02-ospf-bfd.html#offloading-expiration-detection">OSPF BFD</a>,
+<a href="ch-07-03-isis-bfd.html#offloading-expiration-detection">IS-IS BFD</a>, and
+<a href="ch-02-08-bgp-bfd.html#offloading-expiration-detection">BGP BFD</a>
+(single-hop neighbours; BGP sessions are keyed by the connected
+interface so the helper knows where to attach). <code>show bfd peers</code>
+reports where detection currently runs:</p>
+<pre><code>    Detection timeout: 900ms
+    Detection runs in: kernel/XDP (900ms)
+</code></pre>
+<p>(<code>userspace</code> when the watchdog is not armed.)</p>
+<h2 id="what-happens-on-failure"><a class="header" href="#what-happens-on-failure">What happens on failure</a></h2>
+<p>When a session transitions to <code>Down</code>, every attached protocol is
+notified and reacts as if its own liveness timer had expired
+(RFC 5882 §5): BGP sends the peer FSM a <code>Stop</code>, and OSPF / IS-IS tear
+the adjacency down via the same path as a dead-timer / hold-timer
+expiry, which re-runs SPF. Because BFD detects the failure in
+well under a second, convergence starts far sooner than the protocol’s
+native timers would allow.</p>
+<h2 id="status-and-roadmap"><a class="header" href="#status-and-roadmap">Status and roadmap</a></h2>
+<ul>
+<li><strong>Done:</strong> single- and multi-hop, IPv4 and IPv6; BGP, IS-IS, OSPFv2
+and OSPFv3 attachment; the three <code>show</code> commands; FRR-aligned 300 ms
+defaults; RFC 5880 §6.8.3 slow-transmit-while-not-Up with §6.8.7 Poll
+Sequences (both initiating and answering); BGP <code>update-source</code>
+inherited as the session’s local address; the <strong>Echo function</strong>
+(RFC 5880 §6.4, single-hop, IPv4 <strong>and</strong> IPv6) — both reflecting a
+peer’s Echo and originating our own, offloaded to the <code>xdp-bfd-echo</code>
+XDP/eBPF helper (see <a href="#echo-function">Echo function</a> below), with
+per-role (<code>transmit</code> / <code>receive</code> / <code>both</code>) config applied live on
+commit and an instance-level <code>router &lt;proto&gt; { bfd {} }</code> default
+inherited and overridden per interface / neighbour. Echo is
+configurable on OSPFv2/v3, IS-IS, and single-hop eBGP (BGP echo is
+inert on multihop sessions — RFC 5883 has no Echo); the IS-IS
+attachment additionally pins a BFD-Down neighbour below <code>Up</code>
+(RFC 5882 §3.2 hold-down — see
+<a href="ch-07-03-isis-bfd.html#hold-down-while-bfd-is-down">IS-IS BFD</a>).
+<strong>In-kernel expiration detection</strong> (<code>detect-offload</code>,
+RFC 5880 §6.8.4 evaluated in an XDP <code>bpf_timer</code> — see
+<a href="#offloading-expiration-detection-detect-offload">Offloading expiration detection</a>),
+configurable on OSPFv2/v3 and IS-IS interfaces and on single-hop BGP
+neighbours.</li>
+<li><strong>Not yet:</strong> configurable control-packet timers (the intervals are
+fixed at the defaults); BFD for <strong>static routes</strong>; per-VRF OSPF BFD;
+a BFD <code>profile</code> mechanism.</li>
+</ul>
+
+                    </main>
+
+                    <nav class="nav-wrapper" aria-label="Page navigation">
+                        <!-- Mobile navigation buttons -->
+                            <a rel="prev" href="ch-08-03-ospf-clear.html" class="mobile-nav-chapters previous" title="Previous chapter" aria-label="Previous chapter" aria-keyshortcuts="Left">
+                                <span class=fa-svg><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 320 512"><!--! Font Awesome Free 6.2.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2022 Fonticons, Inc. --><path d="M41.4 233.4c-12.5 12.5-12.5 32.8 0 45.3l160 160c12.5 12.5 32.8 12.5 45.3 0s12.5-32.8 0-45.3L109.3 256 246.6 118.6c12.5-12.5 12.5-32.8 0-45.3s-32.8-12.5-45.3 0l-160 160z"/></svg></span>
+                            </a>
+
+                            <a rel="next prefetch" href="ch-10-01-bfd-xdp-helper.html" class="mobile-nav-chapters next" title="Next chapter" aria-label="Next chapter" aria-keyshortcuts="Right">
+                                <span class=fa-svg><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 320 512"><!--! Font Awesome Free 6.2.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2022 Fonticons, Inc. --><path d="M278.6 233.4c12.5 12.5 12.5 32.8 0 45.3l-160 160c-12.5 12.5-32.8 12.5-45.3 0s-12.5-32.8 0-45.3L210.7 256 73.4 118.6c-12.5-12.5-12.5-32.8 0-45.3s32.8-12.5 45.3 0l160 160z"/></svg></span>
+                            </a>
+
+                        <div style="clear: both"></div>
+                    </nav>
+                </div>
+            </div>
+
+            <nav class="nav-wide-wrapper" aria-label="Page navigation">
+                    <a rel="prev" href="ch-08-03-ospf-clear.html" class="nav-chapters previous" title="Previous chapter" aria-label="Previous chapter" aria-keyshortcuts="Left">
+                        <span class=fa-svg><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 320 512"><!--! Font Awesome Free 6.2.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2022 Fonticons, Inc. --><path d="M41.4 233.4c-12.5 12.5-12.5 32.8 0 45.3l160 160c12.5 12.5 32.8 12.5 45.3 0s12.5-32.8 0-45.3L109.3 256 246.6 118.6c12.5-12.5 12.5-32.8 0-45.3s-32.8-12.5-45.3 0l-160 160z"/></svg></span>
+                    </a>
+
+                    <a rel="next prefetch" href="ch-10-01-bfd-xdp-helper.html" class="nav-chapters next" title="Next chapter" aria-label="Next chapter" aria-keyshortcuts="Right">
+                        <span class=fa-svg><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 320 512"><!--! Font Awesome Free 6.2.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2022 Fonticons, Inc. --><path d="M278.6 233.4c12.5 12.5 12.5 32.8 0 45.3l-160 160c-12.5 12.5-32.8 12.5-45.3 0s-12.5-32.8 0-45.3L210.7 256 73.4 118.6c-12.5-12.5-12.5-32.8 0-45.3s32.8-12.5 45.3 0l160 160z"/></svg></span>
+                    </a>
+            </nav>
+
+        </div>
+
+        <template id=fa-eye><span class=fa-svg><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 576 512"><!--! Font Awesome Free 6.2.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2022 Fonticons, Inc. --><path d="M288 32c-80.8 0-145.5 36.8-192.6 80.6C48.6 156 17.3 208 2.5 243.7c-3.3 7.9-3.3 16.7 0 24.6C17.3 304 48.6 356 95.4 399.4C142.5 443.2 207.2 480 288 480s145.5-36.8 192.6-80.6c46.8-43.5 78.1-95.4 93-131.1c3.3-7.9 3.3-16.7 0-24.6c-14.9-35.7-46.2-87.7-93-131.1C433.5 68.8 368.8 32 288 32zM432 256c0 79.5-64.5 144-144 144s-144-64.5-144-144s64.5-144 144-144s144 64.5 144 144zM288 192c0 35.3-28.7 64-64 64c-11.5 0-22.3-3-31.6-8.4c-.2 2.8-.4 5.5-.4 8.4c0 53 43 96 96 96s96-43 96-96s-43-96-96-96c-2.8 0-5.6 .1-8.4 .4c5.3 9.3 8.4 20.1 8.4 31.6z"/></svg></span></template>
+        <template id=fa-eye-slash><span class=fa-svg><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 640 512"><!--! Font Awesome Free 6.2.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2022 Fonticons, Inc. --><path d="M38.8 5.1C28.4-3.1 13.3-1.2 5.1 9.2S-1.2 34.7 9.2 42.9l592 464c10.4 8.2 25.5 6.3 33.7-4.1s6.3-25.5-4.1-33.7L525.6 386.7c39.6-40.6 66.4-86.1 79.9-118.4c3.3-7.9 3.3-16.7 0-24.6c-14.9-35.7-46.2-87.7-93-131.1C465.5 68.8 400.8 32 320 32c-68.2 0-125 26.3-169.3 60.8L38.8 5.1zM223.1 149.5C248.6 126.2 282.7 112 320 112c79.5 0 144 64.5 144 144c0 24.9-6.3 48.3-17.4 68.7L408 294.5c5.2-11.8 8-24.8 8-38.5c0-53-43-96-96-96c-2.8 0-5.6 .1-8.4 .4c5.3 9.3 8.4 20.1 8.4 31.6c0 10.2-2.4 19.8-6.6 28.3l-90.3-70.8zm223.1 298L373 389.9c-16.4 6.5-34.3 10.1-53 10.1c-79.5 0-144-64.5-144-144c0-6.9 .5-13.6 1.4-20.2L83.1 161.5C60.3 191.2 44 220.8 34.5 243.7c-3.3 7.9-3.3 16.7 0 24.6c14.9 35.7 46.2 87.7 93 131.1C174.5 443.2 239.2 480 320 480c47.8 0 89.9-12.9 126.2-32.5z"/></svg></span></template>
+        <template id=fa-copy><span class=fa-svg><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512"><!--! Font Awesome Free 6.2.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2022 Fonticons, Inc. --><path d="M502.6 70.63l-61.25-61.25C435.4 3.371 427.2 0 418.7 0H255.1c-35.35 0-64 28.66-64 64l.0195 256C192 355.4 220.7 384 256 384h192c35.2 0 64-28.8 64-64V93.25C512 84.77 508.6 76.63 502.6 70.63zM464 320c0 8.836-7.164 16-16 16H255.1c-8.838 0-16-7.164-16-16L239.1 64.13c0-8.836 7.164-16 16-16h128L384 96c0 17.67 14.33 32 32 32h47.1V320zM272 448c0 8.836-7.164 16-16 16H63.1c-8.838 0-16-7.164-16-16L47.98 192.1c0-8.836 7.164-16 16-16H160V128H63.99c-35.35 0-64 28.65-64 64l.0098 256C.002 483.3 28.66 512 64 512h192c35.2 0 64-28.8 64-64v-32h-47.1L272 448z"/></svg></span></template>
+        <template id=fa-play><span class=fa-svg><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 384 512"><!--! Font Awesome Free 6.2.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2022 Fonticons, Inc. --><path d="M73 39c-14.8-9.1-33.4-9.4-48.5-.9S0 62.6 0 80V432c0 17.4 9.4 33.4 24.5 41.9s33.7 8.1 48.5-.9L361 297c14.3-8.7 23-24.2 23-41s-8.7-32.2-23-41L73 39z"/></svg></span></template>
+        <template id=fa-clock-rotate-left><span class=fa-svg><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512"><!--! Font Awesome Free 6.2.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2022 Fonticons, Inc. --><path d="M75 75L41 41C25.9 25.9 0 36.6 0 57.9V168c0 13.3 10.7 24 24 24H134.1c21.4 0 32.1-25.9 17-41l-30.8-30.8C155 85.5 203 64 256 64c106 0 192 86 192 192s-86 192-192 192c-40.8 0-78.6-12.7-109.7-34.4c-14.5-10.1-34.4-6.6-44.6 7.9s-6.6 34.4 7.9 44.6C151.2 495 201.7 512 256 512c141.4 0 256-114.6 256-256S397.4 0 256 0C185.3 0 121.3 28.7 75 75zm181 53c-13.3 0-24 10.7-24 24V256c0 6.4 2.5 12.5 7 17l72 72c9.4 9.4 24.6 9.4 33.9 0s9.4-24.6 0-33.9l-65-65V152c0-13.3-10.7-24-24-24z"/></svg></span></template>
+
+
+
+        <script>
+            window.playground_copyable = true;
+        </script>
+
+
+        <script src="elasticlunr-ef4e11c1.min.js"></script>
+        <script src="mark-09e88c2c.min.js"></script>
+        <script src="searcher-09f2665d.js"></script>
+
+        <script src="clipboard-1626706a.min.js"></script>
+        <script src="highlight-abc7f01d.js"></script>
+        <script src="book-c22b7243.js"></script>
+
+        <!-- Custom JS scripts -->
+
+
+
+    </div>
+    </body>
+</html>

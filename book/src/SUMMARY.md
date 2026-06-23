@@ -1,12 +1,11 @@
 # zebra-rs Routing Software
 
 [zebra-rs Routing Software](ch-00-00-introduction.md)
-- [Separation of Reachability Information and Forwarding Decision](ch-00-01-reachability-information.md)
-- [Router ID Selection](ch-00-02-router-id.md)
-- [Interface Configuration](ch-00-03-interface-configuration.md)
-- [VXLAN Configuration](ch-00-04-vxlan-configuration.md)
-- [Bridge Configuration](ch-00-05-bridge-configuration.md)
-- [Command Line Options](ch-00-06-command-line-options.md)
+- [Router ID Selection](ch-00-01-router-id.md)
+- [Interface Configuration](ch-00-02-interface-configuration.md)
+- [VXLAN Configuration](ch-00-03-vxlan-configuration.md)
+- [Bridge Configuration](ch-00-04-bridge-configuration.md)
+- [Command Line Options](ch-00-05-command-line-options.md)
 
 ## Static Route
 
@@ -62,14 +61,14 @@
   - [Route Redistribution](ch-07-06-isis-redistribution.md)
   - [Passive Interfaces](ch-07-07-isis-passive.md)
   - [Egress Protection (Mirror SID)](ch-07-08-isis-egress-protection.md)
-- [OSPFv2](ch-08-00-ospf.md)
+- [OSPF](ch-08-00-ospf.md)
   - [Configuration](ch-08-01-ospf-configuration.md)
   - [BFD](ch-08-02-ospf-bfd.md)
   - [Clearing OSPF State](ch-08-03-ospf-clear.md)
 
 ## Failure Detection
 
-- [Bidirectional Forwarding Detection (BFD)](ch-10-00-bfd.md)
+- [BFD](ch-10-00-bfd.md)
   - [The XDP/eBPF Data-Plane Helper](ch-10-01-bfd-xdp-helper.md)
 
 ## Fast Reroute
@@ -78,7 +77,7 @@
 
 ## Performance Measurement
 
-- [Link Delay Measurement (TWAMP Light / STAMP)](ch-09-00-twamp-stamp.md)
+- [STAMP](ch-09-00-twamp-stamp.md)
 
 ## SRv6
 
@@ -97,6 +96,10 @@
 - [VTY Access and Authentication](ch-06-00-vty-access.md)
   - [Session Management Design](ch-06-01-session-design.md)
   - [Show Config Commands](ch-06-02-show-config-commands.md)
+
+## AI Native
+
+- [Native MCP Server](ch-13-00-mcp-server.md)
 
 ## Logging and Monitoring
 

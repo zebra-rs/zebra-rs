@@ -1,0 +1,638 @@
+<!DOCTYPE HTML>
+<html lang="en" class="light sidebar-visible" dir="ltr">
+    <head>
+        <!-- Book generated using mdBook -->
+        <meta charset="UTF-8">
+        <title>Timer Configuration - zebra-rs</title>
+
+
+        <!-- Custom HTML head -->
+
+        <meta name="description" content="">
+        <meta name="viewport" content="width=device-width, initial-scale=1">
+        <meta name="theme-color" content="#ffffff">
+
+        <link rel="icon" href="favicon-de23e50b.svg">
+        <link rel="shortcut icon" href="favicon-8114d1fc.png">
+        <link rel="stylesheet" href="css/variables-8adf115d.css">
+        <link rel="stylesheet" href="css/general-0392ca55.css">
+        <link rel="stylesheet" href="css/chrome-fc474251.css">
+        <link rel="stylesheet" href="css/print-9e4910d8.css" media="print">
+
+        <!-- Fonts -->
+        <link rel="stylesheet" href="fonts/fonts-9644e21d.css">
+
+        <!-- Highlight.js Stylesheets -->
+        <link rel="stylesheet" id="mdbook-highlight-css" href="highlight-493f70e1.css">
+        <link rel="stylesheet" id="mdbook-tomorrow-night-css" href="tomorrow-night-4c0ae647.css">
+        <link rel="stylesheet" id="mdbook-ayu-highlight-css" href="ayu-highlight-3fdfc3ac.css">
+
+        <!-- Custom theme stylesheets -->
+
+
+        <!-- Provide site root and default themes to javascript -->
+        <script>
+            const path_to_root = "";
+            const default_light_theme = "light";
+            const default_dark_theme = "navy";
+            window.path_to_searchindex_js = "searchindex-e8920642.js";
+        </script>
+        <!-- Start loading toc.js asap -->
+        <script src="toc-d6f7580c.js"></script>
+    </head>
+    <body>
+    <div id="mdbook-help-container">
+        <div id="mdbook-help-popup">
+            <h2 class="mdbook-help-title">Keyboard shortcuts</h2>
+            <div>
+                <p>Press <kbd>←</kbd> or <kbd>→</kbd> to navigate between chapters</p>
+                <p>Press <kbd>S</kbd> or <kbd>/</kbd> to search in the book</p>
+                <p>Press <kbd>?</kbd> to show this help</p>
+                <p>Press <kbd>Esc</kbd> to hide this help</p>
+            </div>
+        </div>
+    </div>
+    <div id="mdbook-body-container">
+        <!-- Work around some values being stored in localStorage wrapped in quotes -->
+        <script>
+            try {
+                let theme = localStorage.getItem('mdbook-theme');
+                let sidebar = localStorage.getItem('mdbook-sidebar');
+
+                if (theme.startsWith('"') && theme.endsWith('"')) {
+                    localStorage.setItem('mdbook-theme', theme.slice(1, theme.length - 1));
+                }
+
+                if (sidebar.startsWith('"') && sidebar.endsWith('"')) {
+                    localStorage.setItem('mdbook-sidebar', sidebar.slice(1, sidebar.length - 1));
+                }
+            } catch (e) { }
+        </script>
+
+        <!-- Set the theme before any content is loaded, prevents flash -->
+        <script>
+            const default_theme = window.matchMedia("(prefers-color-scheme: dark)").matches ? default_dark_theme : default_light_theme;
+            let theme;
+            try { theme = localStorage.getItem('mdbook-theme'); } catch(e) { }
+            if (theme === null || theme === undefined) { theme = default_theme; }
+            const html = document.documentElement;
+            html.classList.remove('light')
+            html.classList.add(theme);
+            html.classList.add("js");
+        </script>
+
+        <input type="checkbox" id="mdbook-sidebar-toggle-anchor" class="hidden">
+
+        <!-- Hide / unhide sidebar before it is displayed -->
+        <script>
+            let sidebar = null;
+            const sidebar_toggle = document.getElementById("mdbook-sidebar-toggle-anchor");
+            if (document.body.clientWidth >= 1080) {
+                try { sidebar = localStorage.getItem('mdbook-sidebar'); } catch(e) { }
+                sidebar = sidebar || 'visible';
+            } else {
+                sidebar = 'hidden';
+                sidebar_toggle.checked = false;
+            }
+            if (sidebar === 'visible') {
+                sidebar_toggle.checked = true;
+            } else {
+                html.classList.remove('sidebar-visible');
+            }
+        </script>
+
+        <nav id="mdbook-sidebar" class="sidebar" aria-label="Table of contents">
+            <!-- populated by js -->
+            <mdbook-sidebar-scrollbox class="sidebar-scrollbox"></mdbook-sidebar-scrollbox>
+            <noscript>
+                <iframe class="sidebar-iframe-outer" src="toc.html"></iframe>
+            </noscript>
+            <div id="mdbook-sidebar-resize-handle" class="sidebar-resize-handle">
+                <div class="sidebar-resize-indicator"></div>
+            </div>
+        </nav>
+
+        <div id="mdbook-page-wrapper" class="page-wrapper">
+
+            <div class="page">
+                <div id="mdbook-menu-bar-hover-placeholder"></div>
+                <div id="mdbook-menu-bar" class="menu-bar sticky">
+                    <div class="left-buttons">
+                        <label id="mdbook-sidebar-toggle" class="icon-button" for="mdbook-sidebar-toggle-anchor" title="Toggle Table of Contents" aria-label="Toggle Table of Contents" aria-controls="mdbook-sidebar">
+                            <span class=fa-svg><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 448 512"><!--! Font Awesome Free 6.2.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2022 Fonticons, Inc. --><path d="M0 96C0 78.3 14.3 64 32 64H416c17.7 0 32 14.3 32 32s-14.3 32-32 32H32C14.3 128 0 113.7 0 96zM0 256c0-17.7 14.3-32 32-32H416c17.7 0 32 14.3 32 32s-14.3 32-32 32H32c-17.7 0-32-14.3-32-32zM448 416c0 17.7-14.3 32-32 32H32c-17.7 0-32-14.3-32-32s14.3-32 32-32H416c17.7 0 32 14.3 32 32z"/></svg></span>
+                        </label>
+                        <button id="mdbook-theme-toggle" class="icon-button" type="button" title="Change theme" aria-label="Change theme" aria-haspopup="true" aria-expanded="false" aria-controls="mdbook-theme-list">
+                            <span class=fa-svg><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 576 512"><!--! Font Awesome Free 6.2.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2022 Fonticons, Inc. --><path d="M371.3 367.1c27.3-3.9 51.9-19.4 67.2-42.9L600.2 74.1c12.6-19.5 9.4-45.3-7.6-61.2S549.7-4.4 531.1 9.6L294.4 187.2c-24 18-38.2 46.1-38.4 76.1L371.3 367.1zm-19.6 25.4l-116-104.4C175.9 290.3 128 339.6 128 400c0 3.9 .2 7.8 .6 11.6c1.8 17.5-10.2 36.4-27.8 36.4H96c-17.7 0-32 14.3-32 32s14.3 32 32 32H240c61.9 0 112-50.1 112-112c0-2.5-.1-5-.2-7.5z"/></svg></span>
+                        </button>
+                        <ul id="mdbook-theme-list" class="theme-popup" aria-label="Themes" role="menu">
+                            <li role="none"><button role="menuitem" class="theme" id="mdbook-theme-default_theme">Auto</button></li>
+                            <li role="none"><button role="menuitem" class="theme" id="mdbook-theme-light">Light</button></li>
+                            <li role="none"><button role="menuitem" class="theme" id="mdbook-theme-rust">Rust</button></li>
+                            <li role="none"><button role="menuitem" class="theme" id="mdbook-theme-coal">Coal</button></li>
+                            <li role="none"><button role="menuitem" class="theme" id="mdbook-theme-navy">Navy</button></li>
+                            <li role="none"><button role="menuitem" class="theme" id="mdbook-theme-ayu">Ayu</button></li>
+                        </ul>
+                        <button id="mdbook-search-toggle" class="icon-button" type="button" title="Search (`/`)" aria-label="Toggle Searchbar" aria-expanded="false" aria-keyshortcuts="/ s" aria-controls="mdbook-searchbar">
+                            <span class=fa-svg><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512"><!--! Font Awesome Free 6.2.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2022 Fonticons, Inc. --><path d="M416 208c0 45.9-14.9 88.3-40 122.7L502.6 457.4c12.5 12.5 12.5 32.8 0 45.3s-32.8 12.5-45.3 0L330.7 376c-34.4 25.2-76.8 40-122.7 40C93.1 416 0 322.9 0 208S93.1 0 208 0S416 93.1 416 208zM208 352c79.5 0 144-64.5 144-144s-64.5-144-144-144S64 128.5 64 208s64.5 144 144 144z"/></svg></span>
+                        </button>
+                    </div>
+
+                    <h1 class="menu-title">zebra-rs</h1>
+
+                    <div class="right-buttons">
+                        <a href="print.html" title="Print this book" aria-label="Print this book">
+                            <span class=fa-svg id="print-button"><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512"><!--! Font Awesome Free 6.2.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2022 Fonticons, Inc. --><path d="M128 0C92.7 0 64 28.7 64 64v96h64V64H354.7L384 93.3V160h64V93.3c0-17-6.7-33.3-18.7-45.3L400 18.7C388 6.7 371.7 0 354.7 0H128zM384 352v32 64H128V384 368 352H384zm64 32h32c17.7 0 32-14.3 32-32V256c0-35.3-28.7-64-64-64H64c-35.3 0-64 28.7-64 64v96c0 17.7 14.3 32 32 32H64v64c0 35.3 28.7 64 64 64H384c35.3 0 64-28.7 64-64V384zm-16-88c-13.3 0-24-10.7-24-24s10.7-24 24-24s24 10.7 24 24s-10.7 24-24 24z"/></svg></span>
+                        </a>
+
+                    </div>
+                </div>
+
+                <div id="mdbook-search-wrapper" class="hidden">
+                    <form id="mdbook-searchbar-outer" class="searchbar-outer">
+                        <div class="search-wrapper">
+                            <input type="search" id="mdbook-searchbar" name="searchbar" placeholder="Search this book ..." aria-controls="mdbook-searchresults-outer" aria-describedby="searchresults-header">
+                            <div class="spinner-wrapper">
+                                <span class=fa-svg id="fa-spin"><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512"><!--! Font Awesome Free 6.2.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2022 Fonticons, Inc. --><path d="M304 48c0-26.5-21.5-48-48-48s-48 21.5-48 48s21.5 48 48 48s48-21.5 48-48zm0 416c0-26.5-21.5-48-48-48s-48 21.5-48 48s21.5 48 48 48s48-21.5 48-48zM48 304c26.5 0 48-21.5 48-48s-21.5-48-48-48s-48 21.5-48 48s21.5 48 48 48zm464-48c0-26.5-21.5-48-48-48s-48 21.5-48 48s21.5 48 48 48s48-21.5 48-48zM142.9 437c18.7-18.7 18.7-49.1 0-67.9s-49.1-18.7-67.9 0s-18.7 49.1 0 67.9s49.1 18.7 67.9 0zm0-294.2c18.7-18.7 18.7-49.1 0-67.9S93.7 56.2 75 75s-18.7 49.1 0 67.9s49.1 18.7 67.9 0zM369.1 437c18.7 18.7 49.1 18.7 67.9 0s18.7-49.1 0-67.9s-49.1-18.7-67.9 0s-18.7 49.1 0 67.9z"/></svg></span>
+                            </div>
+                        </div>
+                    </form>
+                    <div id="mdbook-searchresults-outer" class="searchresults-outer hidden">
+                        <div id="mdbook-searchresults-header" class="searchresults-header"></div>
+                        <ul id="mdbook-searchresults">
+                        </ul>
+                    </div>
+                </div>
+
+                <!-- Apply ARIA attributes after the sidebar and the sidebar toggle button are added to the DOM -->
+                <script>
+                    document.getElementById('mdbook-sidebar-toggle').setAttribute('aria-expanded', sidebar === 'visible');
+                    document.getElementById('mdbook-sidebar').setAttribute('aria-hidden', sidebar !== 'visible');
+                    Array.from(document.querySelectorAll('#mdbook-sidebar a')).forEach(function(link) {
+                        link.setAttribute('tabIndex', sidebar === 'visible' ? 0 : -1);
+                    });
+                </script>
+
+                <div id="mdbook-content" class="content">
+                    <main>
+                        <h1 id="is-is-timer-configuration"><a class="header" href="#is-is-timer-configuration">IS-IS Timer Configuration</a></h1>
+<p>IS-IS behaviour is governed by a set of timers that control adjacency
+liveness, database synchronization, self-LSP origination rhythm, and
+convergence speed. This chapter documents each timer zebra-rs exposes,
+its default, the semantics it carries on the wire or inside the local
+state machine, and the operational considerations behind tuning it.</p>
+<p>All timer configuration lives under the IS-IS instance:</p>
+<pre><code>router isis
+  timers
+    ...
+  spf-interval
+    ...
+  interface &lt;name&gt;
+    hello
+      ...
+    csnp-interval ...
+    psnp-interval ...
+</code></pre>
+<p>Defaults are chosen to match Cisco IOS-XR where the semantics align,
+so configurations written against IOS-XR’s <code>router isis</code> model carry
+across without surprise.</p>
+<h2 id="adjacency-timers--hello-interval-and-hello-multiplier"><a class="header" href="#adjacency-timers--hello-interval-and-hello-multiplier">Adjacency timers — hello-interval and hello-multiplier</a></h2>
+<p>Every active IS-IS interface periodically emits Intermediate-System
+Hello (IIH) PDUs to discover and maintain neighbours. Each hello
+carries a <code>holdingTime</code> field telling the receiver how long to keep
+the adjacency alive if no further hello is heard.</p>
+<p>zebra-rs follows the IOS-XR / RFC model: the operator sets the <strong>hello
+interval</strong> (how often we send) and the <strong>hello multiplier</strong> (how many
+intervals worth of silence before the receiver declares us dead).
+The hold time advertised on the wire is the product:</p>
+<pre><code>hold_time = hello_interval × hello_multiplier
+</code></pre>
+<div class="table-wrapper">
+<table>
+<thead>
+<tr><th>YANG leaf</th><th>Default</th><th>Range</th><th>Units</th></tr>
+</thead>
+<tbody>
+<tr><td><code>/router/isis/interface/&lt;n&gt;/hello/interval</code></td><td>3</td><td>1..65535</td><td>seconds</td></tr>
+<tr><td><code>/router/isis/interface/&lt;n&gt;/hello/multiplier</code></td><td>10</td><td>2..1000</td><td>(count)</td></tr>
+</tbody>
+</table>
+</div>
+<p>With the defaults, a router emits a hello every 3 seconds and
+advertises a 30-second hold time. The multiplier default of 10 (rather
+than IOS-XR’s 3) compensates for the shorter default hello interval
+(3 s versus IOS-XR’s 10 s) — the resulting 30-second hold matches
+the conservative end of common deployments.</p>
+<p><strong>Live application.</strong> When either value changes via configuration,
+zebra-rs sends <code>HelloOriginate</code> for each active level on the
+interface. This re-emits a fresh hello PDU (so the new <code>holdingTime</code>
+hits the wire immediately) and re-arms the periodic timer (so the
+new interval takes effect without an adjacency reset).</p>
+<p><strong>Tuning trade-offs.</strong></p>
+<ul>
+<li>Lowering the interval shortens failure-detection time at the cost
+of more hello traffic and CPU.</li>
+<li>Raising the multiplier without changing the interval makes the
+hello protocol more tolerant of single-packet loss on lossy links
+without changing how often hellos are sent.</li>
+<li>The product (hold time) is what the wire sees; a peer with a
+10-second hello and multiplier 3 expects a 30-second hold from us
+regardless of how we got there.</li>
+<li>Sub-second adjacency detection is typically delegated to BFD rather
+than aggressive hello tuning.</li>
+</ul>
+<p>The hold-time multiplication saturates at <code>u16::MAX</code> (the on-wire
+field’s range). Extreme values (e.g. interval 65535 × multiplier 1000)
+clamp rather than overflow.</p>
+<h2 id="hello-padding"><a class="header" href="#hello-padding">Hello padding</a></h2>
+<p>Hello PDUs are normally padded to the interface MTU so adjacency
+formation can detect MTU mismatches early (a too-large hello won’t
+fit through a smaller-MTU peer and the adjacency never comes up,
+which is the desired behaviour — silent black-holing of larger
+packets later is far worse).</p>
+<div class="table-wrapper">
+<table>
+<thead>
+<tr><th>YANG leaf</th><th>Default</th><th>Values</th></tr>
+</thead>
+<tbody>
+<tr><td><code>/router/isis/interface/&lt;n&gt;/hello/padding</code></td><td><code>always</code></td><td><code>always</code>, <code>disable</code></td></tr>
+</tbody>
+</table>
+</div>
+<p><code>disable</code> skips padding entirely. Operationally useful only when
+intentionally hiding an MTU mismatch (very rare) or to save a small
+amount of bandwidth on extremely high-fanout broadcast LANs.</p>
+<h2 id="database-synchronization--csnp-and-psnp-intervals"><a class="header" href="#database-synchronization--csnp-and-psnp-intervals">Database synchronization — CSNP and PSNP intervals</a></h2>
+<p>On broadcast LANs the Designated Intermediate System (DIS) periodically
+emits a Complete Sequence Number PDU (CSNP) summarising every LSP it
+holds. Receivers compare the summary against their own LSDB and use
+Partial Sequence Number PDUs (PSNPs) either to acknowledge already-held
+LSPs or to request missing ones. On point-to-point links PSNPs serve
+as the explicit per-LSP acknowledgement.</p>
+<div class="table-wrapper">
+<table>
+<thead>
+<tr><th>YANG leaf</th><th>Default</th><th>Range</th><th>Units</th><th>Scope</th></tr>
+</thead>
+<tbody>
+<tr><td><code>/router/isis/interface/&lt;n&gt;/csnp-interval</code></td><td>10</td><td>1..65535</td><td>seconds</td><td>broadcast DIS only</td></tr>
+<tr><td><code>/router/isis/interface/&lt;n&gt;/psnp-interval</code></td><td>2</td><td>1..65535</td><td>seconds</td><td>per-interface</td></tr>
+</tbody>
+</table>
+</div>
+<p>These are best left at default. Stretching <code>csnp-interval</code> reduces
+periodic LAN overhead but slows recovery of lost LSPs on the segment;
+shortening it does the opposite.</p>
+<p><strong>Live application.</strong> Changes apply on the next timer cycle — CSNP
+runs only on the DIS and PSNP only while there are pending
+acknowledgements, so recreating timers on the fly would mean
+cancelling whatever is currently armed for little benefit over
+waiting one cycle.</p>
+<h2 id="lsp-refresh-interval-and-maximum-lsp-lifetime"><a class="header" href="#lsp-refresh-interval-and-maximum-lsp-lifetime">LSP refresh interval and maximum LSP lifetime</a></h2>
+<p>Each self-originated LSP carries a <code>RemainingLifetime</code> field counting
+down from the maximum lifetime. Routers refresh their own LSPs (bump
+the sequence number, reset the lifetime, re-flood) on a periodic
+timer that fires before the lifetime would expire on receivers’
+LSDBs.</p>
+<div class="table-wrapper">
+<table>
+<thead>
+<tr><th>YANG leaf</th><th>Default</th><th>Range</th><th>Units</th></tr>
+</thead>
+<tbody>
+<tr><td><code>/router/isis/timers/lsp-refresh-interval</code></td><td>900</td><td>1..65535</td><td>seconds</td></tr>
+<tr><td><code>/router/isis/timers/hold-time</code> (max LSP lifetime)</td><td>1200</td><td>—</td><td>seconds</td></tr>
+</tbody>
+</table>
+</div>
+<p>The naming carries some history. zebra-rs calls the <strong>maximum LSP
+lifetime</strong> <code>hold-time</code> for the instance-level YANG leaf; IOS-XR’s
+equivalent command is <code>max-lsp-lifetime</code>. Both control the same
+value: the <code>RemainingLifetime</code> we put on the wire when we originate
+or refresh a self-LSP, which receivers count down toward zero.</p>
+<p><strong>Invariant.</strong> The refresh interval must be strictly less than the
+maximum lifetime, with enough margin for one refresh round-trip plus
+the LSP-zero-age window (60 s) — otherwise our own LSP can age out
+on a peer before our refresh reaches them. zebra-rs enforces this in
+<code>insert_self_originate</code>: the actual scheduled refresh is</p>
+<pre><code>min(config.refresh_time, lsp.hold_time − 65 s)
+</code></pre>
+<p>where the 65-second safety margin combines the ISO 10589 zero-age
+lifetime (60 s) and the minimum LSP transmission interval (5 s). If
+you shorten <code>hold-time</code> aggressively without lowering
+<code>lsp-refresh-interval</code>, this clamp keeps the refresh timer from
+running too late.</p>
+<p><strong>Tuning trade-offs.</strong></p>
+<ul>
+<li>Raising both <code>lsp-refresh-interval</code> and <code>hold-time</code> (e.g. 65000 s
+each) reduces background LSP flooding and CPU on very stable
+networks; the trade-off is that stuck routers take longer to age
+out of the database after an ungraceful exit.</li>
+<li>Lowering refresh / lifetime accelerates LSDB cleanup at the cost
+of more flooding traffic.</li>
+</ul>
+<h2 id="min-lsp-arrival-time--storm-protection-on-the-receive-side"><a class="header" href="#min-lsp-arrival-time--storm-protection-on-the-receive-side">min-lsp-arrival-time — storm protection on the receive side</a></h2>
+<p>When a peer’s LSP arrives with a higher sequence number than the
+copy in our LSDB, we install the new version and re-flood. Without
+a rate limit a misbehaving neighbour (or a flapping path) can drive
+arbitrarily fast LSDB churn and SPF reschedules.</p>
+<p><code>min-lsp-arrival-time</code> is a per-LSP receive-side floor: if a new
+version of an LSP we already have arrives within the configured
+window after the last accepted version of <em>the same LSP ID</em>, we
+drop the new copy.</p>
+<div class="table-wrapper">
+<table>
+<thead>
+<tr><th>YANG leaf</th><th>Default</th><th>Range</th><th>Units</th></tr>
+</thead>
+<tbody>
+<tr><td><code>/router/isis/timers/min-lsp-arrival-time</code></td><td>100</td><td>1..600000</td><td>milliseconds</td></tr>
+</tbody>
+</table>
+</div>
+<p>Drop matrix:</p>
+<div class="table-wrapper">
+<table>
+<thead>
+<tr><th>Incoming LSP situation</th><th>Action</th></tr>
+</thead>
+<tbody>
+<tr><td>First time we see this LSP ID</td><td>Accept</td></tr>
+<tr><td>Higher seq number, outside window</td><td>Accept, refresh per-LSP timestamp</td></tr>
+<tr><td>Higher seq number, inside window</td><td><strong>Drop</strong> (storm protection)</td></tr>
+<tr><td>Same or smaller seq number</td><td>Drop (RFC 1195 standard rule)</td></tr>
+<tr><td>Self-originated LSP (insert path)</td><td>Window not consulted</td></tr>
+</tbody>
+</table>
+</div>
+<p>The window is checked per-LSP-ID, not per-sender, so it does not
+penalise legitimately fast updates to <em>different</em> LSPs during the
+same burst. Default matches IOS-XR; values much below 50 ms defeat
+the purpose, values above a few hundred milliseconds risk masking
+genuinely fast topology changes.</p>
+<h2 id="lsp-generation-throttle--lsp-gen-interval"><a class="header" href="#lsp-generation-throttle--lsp-gen-interval">LSP generation throttle — lsp-gen-interval</a></h2>
+<p>Many control-plane events ask us to re-originate our own LSP: a
+neighbour adjacency comes up, a per-link metric changes, a prefix
+gets added to the redistribution set, a peer floods our own LSP back
+at us with a higher sequence number. Without throttling, every
+event would trigger an immediate <code>lsp_generate</code> → <code>lsp_emit</code> →
+flood cycle, plus a peer-side SPF reschedule for every reflood.</p>
+<p><code>lsp-gen-interval</code> applies the same exponential-backoff algorithm
+as <code>spf-interval</code> to LSP origination: events that arrive within the
+window are coalesced into a single regeneration. The seq-number
+floor across coalesced events is folded as <code>max(existing, new)</code>, so
+the resulting LSP bumps past the highest sequence any peer demanded
+during the burst.</p>
+<div class="table-wrapper">
+<table>
+<thead>
+<tr><th>YANG leaf</th><th>Default</th><th>Range</th><th>Units</th></tr>
+</thead>
+<tbody>
+<tr><td><code>/router/isis/lsp-gen-interval/initial-wait</code></td><td>50</td><td>1..120000</td><td>milliseconds</td></tr>
+<tr><td><code>/router/isis/lsp-gen-interval/secondary-wait</code></td><td>5000</td><td>1..120000</td><td>milliseconds</td></tr>
+<tr><td><code>/router/isis/lsp-gen-interval/maximum-wait</code></td><td>5000</td><td>1..120000</td><td>milliseconds</td></tr>
+</tbody>
+</table>
+</div>
+<p>The IOS-XR-matching default (50 / 5000 / 5000) collapses the
+geometric ramp — secondary and maximum are equal, so after the
+initial 50 ms response the throttle jumps straight to 5 s spacing
+and stays there for the duration of the burst. This reflects the
+operational reality that self-LSP origination is expensive (every
+regen causes a network-wide reflood and peer-side SPF) and operators
+generally prefer conservative spacing once a burst is in progress.</p>
+<p>The internal machinery follows the same shape as the SPF throttle:
+<code>Isis::lsp_gen_timer: Levels&lt;Option&lt;Timer&gt;&gt;</code>,
+<code>Isis::lsp_gen_throttle: Levels&lt;Throttle&gt;</code>, and
+<code>Isis::lsp_gen_pending_floor: Levels&lt;Option&lt;u32&gt;&gt;</code> for the
+accumulated floor. <code>LspOriginate</code> is the front-door message;
+<code>LspGenFire</code> is the internal “throttle fired, run the work” event.
+Both share the generic <code>Throttle</code> type defined in
+<code>isis/throttle.rs</code> (also used by SPF).</p>
+<h2 id="spf-throttle--spf-interval"><a class="header" href="#spf-throttle--spf-interval">SPF throttle — spf-interval</a></h2>
+<p>zebra-rs schedules SPF after any LSDB change that could affect the
+shortest-path tree, but coalesces multiple changes that arrive in
+quick succession so a single SPF run absorbs a whole topology event.
+The coalescing window is governed by the IOS-XR-style exponential
+backoff algorithm.</p>
+<div class="table-wrapper">
+<table>
+<thead>
+<tr><th>YANG leaf</th><th>Default</th><th>Range</th><th>Units</th></tr>
+</thead>
+<tbody>
+<tr><td><code>/router/isis/spf-interval/initial-wait</code></td><td>50</td><td>1..120000</td><td>milliseconds</td></tr>
+<tr><td><code>/router/isis/spf-interval/secondary-wait</code></td><td>200</td><td>1..120000</td><td>milliseconds</td></tr>
+<tr><td><code>/router/isis/spf-interval/maximum-wait</code></td><td>5000</td><td>1..120000</td><td>milliseconds</td></tr>
+</tbody>
+</table>
+</div>
+<h3 id="algorithm"><a class="header" href="#algorithm">Algorithm</a></h3>
+<p>The algorithm is best understood as a state machine carrying two
+per-level variables: <code>current_wait_ms</code> (the wait planned for the
+next scheduling event during this burst) and <code>last_run_at</code> (the
+timestamp of the last SPF completion).</p>
+<p>On every <code>spf_schedule()</code> event:</p>
+<ol>
+<li>If a timer is already armed, return — the in-flight SPF will
+absorb this event.</li>
+<li>Otherwise, decide the wait:
+<ul>
+<li>If <code>last_run_at</code> is <code>None</code> (first SPF ever), or
+<code>now − last_run_at &gt; 2 × maximum-wait</code> (quiescent period
+elapsed) — reset and use <code>initial-wait</code>.</li>
+<li>Otherwise — use <code>current_wait_ms</code> (carried forward from the
+prior event during the same burst).</li>
+</ul>
+</li>
+<li>Plan the next wait for any subsequent event during this burst:
+<ul>
+<li>If we just used <code>initial-wait</code>, plan <code>min(secondary-wait, maximum-wait)</code> next.</li>
+<li>Otherwise, plan <code>min(current × 2, maximum-wait)</code> next
+(saturating multiply).</li>
+</ul>
+</li>
+<li>Arm a one-shot timer with the chosen wait. When it fires, SPF
+runs; on completion the SPF handler stamps <code>last_run_at = now</code>
+and clears the timer slot.</li>
+</ol>
+<h3 id="worked-example-with-defaults-50--200--5000"><a class="header" href="#worked-example-with-defaults-50--200--5000">Worked example with defaults (50 / 200 / 5000)</a></h3>
+<pre><code>t=0       topology change → wait 50 ms (initial)
+t=50      SPF runs, last_run_at=50, next planned=200
+t=70      another change → wait 200 ms (still in burst)
+t=270     SPF runs, last_run_at=270, next planned=400
+t=300     another change → wait 400 ms
+t=700     SPF runs, last_run_at=700, next planned=800
+...
+                          ... doubles until 5000 cap ...
+t+10s     no events for 10 s ( &gt; 2 × 5000 = 10000 ms threshold )
+t+10s+1   topology change → wait 50 ms (quiet, reset)
+</code></pre>
+<h3 id="tuning-trade-offs"><a class="header" href="#tuning-trade-offs">Tuning trade-offs</a></h3>
+<ul>
+<li><strong>Lowering <code>initial-wait</code></strong> makes isolated changes converge faster
+but increases the chance of running SPF twice for what could have
+been one coalesced run.</li>
+<li><strong>Raising <code>maximum-wait</code></strong> strengthens storm dampening but extends
+the worst-case time-to-converge during sustained churn. Default
+5 s is the IOS-XR baseline; very stable networks can raise it to
+10 s or more for better CPU economy.</li>
+<li><strong>Raising <code>secondary-wait</code> close to <code>maximum-wait</code></strong> (e.g. setting
+both to 5000 ms) effectively disables the geometric ramp and
+jumps straight from <code>initial</code> to <code>maximum</code> after the first burst
+event — useful when SPF is genuinely expensive and the operator
+prefers conservative spacing throughout the burst.</li>
+</ul>
+<h3 id="per-level-state"><a class="header" href="#per-level-state">Per-level state</a></h3>
+<p>The throttle is independent per level: an event on L1 doesn’t
+influence L2’s wait time and vice versa. The configuration leaves
+are currently global (apply to both levels); per-level YANG
+qualifiers can be added later if a deployment needs them.</p>
+<h2 id="summary--default-value-reference"><a class="header" href="#summary--default-value-reference">Summary — default-value reference</a></h2>
+<div class="table-wrapper">
+<table>
+<thead>
+<tr><th>Knob</th><th>Default</th><th>Scope</th></tr>
+</thead>
+<tbody>
+<tr><td>hello interval</td><td>3 s</td><td>per-interface</td></tr>
+<tr><td>hello multiplier</td><td>10</td><td>per-interface</td></tr>
+<tr><td>hello padding</td><td>always</td><td>per-interface</td></tr>
+<tr><td>csnp-interval</td><td>10 s</td><td>per-interface</td></tr>
+<tr><td>psnp-interval</td><td>2 s</td><td>per-interface</td></tr>
+<tr><td>lsp-refresh-interval</td><td>900 s</td><td>instance</td></tr>
+<tr><td>hold-time (max LSP lifetime)</td><td>1200 s</td><td>instance</td></tr>
+<tr><td>min-lsp-arrival-time</td><td>100 ms</td><td>instance</td></tr>
+<tr><td>spf-interval initial-wait</td><td>50 ms</td><td>instance</td></tr>
+<tr><td>spf-interval secondary-wait</td><td>200 ms</td><td>instance</td></tr>
+<tr><td>spf-interval maximum-wait</td><td>5000 ms</td><td>instance</td></tr>
+<tr><td>lsp-gen-interval initial-wait</td><td>50 ms</td><td>instance</td></tr>
+<tr><td>lsp-gen-interval secondary-wait</td><td>5000 ms</td><td>instance</td></tr>
+<tr><td>lsp-gen-interval maximum-wait</td><td>5000 ms</td><td>instance</td></tr>
+</tbody>
+</table>
+</div>
+<h2 id="example-configurations"><a class="header" href="#example-configurations">Example configurations</a></h2>
+<h3 id="conservative-low-churn-deployment"><a class="header" href="#conservative-low-churn-deployment">Conservative, low-churn deployment</a></h3>
+<pre><code>router isis
+  timers
+    lsp-refresh-interval 1800
+    hold-time 7200
+    min-lsp-arrival-time 200
+  spf-interval
+    initial-wait 200
+    secondary-wait 1000
+    maximum-wait 10000
+  interface eth0
+    hello
+      interval 10
+      multiplier 3
+    csnp-interval 30
+</code></pre>
+<p>Wider hello intervals and longer hold time reduce control-plane
+chatter on a network that rarely changes; SPF backs off more
+aggressively under any disturbance.</p>
+<h3 id="aggressive-fast-convergence-deployment"><a class="header" href="#aggressive-fast-convergence-deployment">Aggressive, fast-convergence deployment</a></h3>
+<pre><code>router isis
+  timers
+    min-lsp-arrival-time 50
+  spf-interval
+    initial-wait 20
+    secondary-wait 100
+    maximum-wait 1000
+  interface eth0
+    hello
+      interval 1
+      multiplier 3
+</code></pre>
+<p>Sub-second hello / 3-second hold and a 20 ms initial SPF wait
+prioritise convergence at the cost of additional control-plane
+traffic and CPU. For sub-second adjacency detection in production,
+prefer BFD over aggressive hellos.</p>
+<h2 id="cross-reference--ios-xr-command-mapping"><a class="header" href="#cross-reference--ios-xr-command-mapping">Cross-reference — IOS-XR command mapping</a></h2>
+<div class="table-wrapper">
+<table>
+<thead>
+<tr><th>zebra-rs YANG</th><th>IOS-XR command</th></tr>
+</thead>
+<tbody>
+<tr><td><code>timers/lsp-refresh-interval</code></td><td><code>lsp-refresh-interval</code></td></tr>
+<tr><td><code>timers/hold-time</code></td><td><code>max-lsp-lifetime</code></td></tr>
+<tr><td><code>timers/min-lsp-arrival-time</code></td><td><code>min-lsp-arrival-time</code></td></tr>
+<tr><td><code>spf-interval/{initial,secondary,maximum}-wait</code></td><td><code>spf-interval initial-wait … secondary-wait … maximum-wait …</code></td></tr>
+<tr><td><code>lsp-gen-interval/{initial,secondary,maximum}-wait</code></td><td><code>lsp-gen-interval initial-wait … secondary-wait … maximum-wait …</code></td></tr>
+<tr><td><code>interface/&lt;n&gt;/hello/interval</code></td><td><code>isis hello-interval</code> (interface)</td></tr>
+<tr><td><code>interface/&lt;n&gt;/hello/multiplier</code></td><td><code>isis hello-multiplier</code> (interface)</td></tr>
+<tr><td><code>interface/&lt;n&gt;/hello/padding</code></td><td><code>isis hello-padding</code> (interface)</td></tr>
+<tr><td><code>interface/&lt;n&gt;/csnp-interval</code></td><td><code>isis csnp-interval</code> (interface)</td></tr>
+<tr><td><code>interface/&lt;n&gt;/psnp-interval</code></td><td><code>isis retransmit-interval</code>-adjacent (no exact IOS-XR equivalent — PSNP ack pacing)</td></tr>
+</tbody>
+</table>
+</div>
+<p>Gaps relative to IOS-XR that zebra-rs does not yet implement:
+<code>prc-interval</code> (no partial route calculation distinct from full
+SPF), <code>lsp-interval</code> (LSP send pacing), <code>retransmit-interval</code> /
+<code>retransmit-throttle-interval</code> (no periodic LSP retransmit-until-ack
+on point-to-point), and <code>adjacency-stagger</code>. LSP sizing and
+fragmentation (IOS-XR’s <code>lsp-mtu</code>) <em>are</em> implemented — see
+<a href="ch-07-05-isis-lsp-mtu.html">LSP MTU and Fragmentation</a> — as is BFD
+client integration for IS-IS adjacencies (see <a href="ch-07-03-isis-bfd.html">BFD</a>).</p>
+
+                    </main>
+
+                    <nav class="nav-wrapper" aria-label="Page navigation">
+                        <!-- Mobile navigation buttons -->
+                            <a rel="prev" href="ch-07-00-isis.html" class="mobile-nav-chapters previous" title="Previous chapter" aria-label="Previous chapter" aria-keyshortcuts="Left">
+                                <span class=fa-svg><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 320 512"><!--! Font Awesome Free 6.2.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2022 Fonticons, Inc. --><path d="M41.4 233.4c-12.5 12.5-12.5 32.8 0 45.3l160 160c12.5 12.5 32.8 12.5 45.3 0s12.5-32.8 0-45.3L109.3 256 246.6 118.6c12.5-12.5 12.5-32.8 0-45.3s-32.8-12.5-45.3 0l-160 160z"/></svg></span>
+                            </a>
+
+                            <a rel="next prefetch" href="ch-07-02-isis-srlg.html" class="mobile-nav-chapters next" title="Next chapter" aria-label="Next chapter" aria-keyshortcuts="Right">
+                                <span class=fa-svg><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 320 512"><!--! Font Awesome Free 6.2.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2022 Fonticons, Inc. --><path d="M278.6 233.4c12.5 12.5 12.5 32.8 0 45.3l-160 160c-12.5 12.5-32.8 12.5-45.3 0s-12.5-32.8 0-45.3L210.7 256 73.4 118.6c-12.5-12.5-12.5-32.8 0-45.3s32.8-12.5 45.3 0l160 160z"/></svg></span>
+                            </a>
+
+                        <div style="clear: both"></div>
+                    </nav>
+                </div>
+            </div>
+
+            <nav class="nav-wide-wrapper" aria-label="Page navigation">
+                    <a rel="prev" href="ch-07-00-isis.html" class="nav-chapters previous" title="Previous chapter" aria-label="Previous chapter" aria-keyshortcuts="Left">
+                        <span class=fa-svg><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 320 512"><!--! Font Awesome Free 6.2.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2022 Fonticons, Inc. --><path d="M41.4 233.4c-12.5 12.5-12.5 32.8 0 45.3l160 160c12.5 12.5 32.8 12.5 45.3 0s12.5-32.8 0-45.3L109.3 256 246.6 118.6c12.5-12.5 12.5-32.8 0-45.3s-32.8-12.5-45.3 0l-160 160z"/></svg></span>
+                    </a>
+
+                    <a rel="next prefetch" href="ch-07-02-isis-srlg.html" class="nav-chapters next" title="Next chapter" aria-label="Next chapter" aria-keyshortcuts="Right">
+                        <span class=fa-svg><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 320 512"><!--! Font Awesome Free 6.2.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2022 Fonticons, Inc. --><path d="M278.6 233.4c12.5 12.5 12.5 32.8 0 45.3l-160 160c-12.5 12.5-32.8 12.5-45.3 0s-12.5-32.8 0-45.3L210.7 256 73.4 118.6c-12.5-12.5-12.5-32.8 0-45.3s32.8-12.5 45.3 0l160 160z"/></svg></span>
+                    </a>
+            </nav>
+
+        </div>
+
+        <template id=fa-eye><span class=fa-svg><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 576 512"><!--! Font Awesome Free 6.2.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2022 Fonticons, Inc. --><path d="M288 32c-80.8 0-145.5 36.8-192.6 80.6C48.6 156 17.3 208 2.5 243.7c-3.3 7.9-3.3 16.7 0 24.6C17.3 304 48.6 356 95.4 399.4C142.5 443.2 207.2 480 288 480s145.5-36.8 192.6-80.6c46.8-43.5 78.1-95.4 93-131.1c3.3-7.9 3.3-16.7 0-24.6c-14.9-35.7-46.2-87.7-93-131.1C433.5 68.8 368.8 32 288 32zM432 256c0 79.5-64.5 144-144 144s-144-64.5-144-144s64.5-144 144-144s144 64.5 144 144zM288 192c0 35.3-28.7 64-64 64c-11.5 0-22.3-3-31.6-8.4c-.2 2.8-.4 5.5-.4 8.4c0 53 43 96 96 96s96-43 96-96s-43-96-96-96c-2.8 0-5.6 .1-8.4 .4c5.3 9.3 8.4 20.1 8.4 31.6z"/></svg></span></template>
+        <template id=fa-eye-slash><span class=fa-svg><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 640 512"><!--! Font Awesome Free 6.2.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2022 Fonticons, Inc. --><path d="M38.8 5.1C28.4-3.1 13.3-1.2 5.1 9.2S-1.2 34.7 9.2 42.9l592 464c10.4 8.2 25.5 6.3 33.7-4.1s6.3-25.5-4.1-33.7L525.6 386.7c39.6-40.6 66.4-86.1 79.9-118.4c3.3-7.9 3.3-16.7 0-24.6c-14.9-35.7-46.2-87.7-93-131.1C465.5 68.8 400.8 32 320 32c-68.2 0-125 26.3-169.3 60.8L38.8 5.1zM223.1 149.5C248.6 126.2 282.7 112 320 112c79.5 0 144 64.5 144 144c0 24.9-6.3 48.3-17.4 68.7L408 294.5c5.2-11.8 8-24.8 8-38.5c0-53-43-96-96-96c-2.8 0-5.6 .1-8.4 .4c5.3 9.3 8.4 20.1 8.4 31.6c0 10.2-2.4 19.8-6.6 28.3l-90.3-70.8zm223.1 298L373 389.9c-16.4 6.5-34.3 10.1-53 10.1c-79.5 0-144-64.5-144-144c0-6.9 .5-13.6 1.4-20.2L83.1 161.5C60.3 191.2 44 220.8 34.5 243.7c-3.3 7.9-3.3 16.7 0 24.6c14.9 35.7 46.2 87.7 93 131.1C174.5 443.2 239.2 480 320 480c47.8 0 89.9-12.9 126.2-32.5z"/></svg></span></template>
+        <template id=fa-copy><span class=fa-svg><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512"><!--! Font Awesome Free 6.2.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2022 Fonticons, Inc. --><path d="M502.6 70.63l-61.25-61.25C435.4 3.371 427.2 0 418.7 0H255.1c-35.35 0-64 28.66-64 64l.0195 256C192 355.4 220.7 384 256 384h192c35.2 0 64-28.8 64-64V93.25C512 84.77 508.6 76.63 502.6 70.63zM464 320c0 8.836-7.164 16-16 16H255.1c-8.838 0-16-7.164-16-16L239.1 64.13c0-8.836 7.164-16 16-16h128L384 96c0 17.67 14.33 32 32 32h47.1V320zM272 448c0 8.836-7.164 16-16 16H63.1c-8.838 0-16-7.164-16-16L47.98 192.1c0-8.836 7.164-16 16-16H160V128H63.99c-35.35 0-64 28.65-64 64l.0098 256C.002 483.3 28.66 512 64 512h192c35.2 0 64-28.8 64-64v-32h-47.1L272 448z"/></svg></span></template>
+        <template id=fa-play><span class=fa-svg><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 384 512"><!--! Font Awesome Free 6.2.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2022 Fonticons, Inc. --><path d="M73 39c-14.8-9.1-33.4-9.4-48.5-.9S0 62.6 0 80V432c0 17.4 9.4 33.4 24.5 41.9s33.7 8.1 48.5-.9L361 297c14.3-8.7 23-24.2 23-41s-8.7-32.2-23-41L73 39z"/></svg></span></template>
+        <template id=fa-clock-rotate-left><span class=fa-svg><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512"><!--! Font Awesome Free 6.2.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2022 Fonticons, Inc. --><path d="M75 75L41 41C25.9 25.9 0 36.6 0 57.9V168c0 13.3 10.7 24 24 24H134.1c21.4 0 32.1-25.9 17-41l-30.8-30.8C155 85.5 203 64 256 64c106 0 192 86 192 192s-86 192-192 192c-40.8 0-78.6-12.7-109.7-34.4c-14.5-10.1-34.4-6.6-44.6 7.9s-6.6 34.4 7.9 44.6C151.2 495 201.7 512 256 512c141.4 0 256-114.6 256-256S397.4 0 256 0C185.3 0 121.3 28.7 75 75zm181 53c-13.3 0-24 10.7-24 24V256c0 6.4 2.5 12.5 7 17l72 72c9.4 9.4 24.6 9.4 33.9 0s9.4-24.6 0-33.9l-65-65V152c0-13.3-10.7-24-24-24z"/></svg></span></template>
+
+
+
+        <script>
+            window.playground_copyable = true;
+        </script>
+
+
+        <script src="elasticlunr-ef4e11c1.min.js"></script>
+        <script src="mark-09e88c2c.min.js"></script>
+        <script src="searcher-09f2665d.js"></script>
+
+        <script src="clipboard-1626706a.min.js"></script>
+        <script src="highlight-abc7f01d.js"></script>
+        <script src="book-c22b7243.js"></script>
+
+        <!-- Custom JS scripts -->
+
+
+
+    </div>
+    </body>
+</html>

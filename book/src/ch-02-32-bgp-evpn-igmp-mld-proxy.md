@@ -67,7 +67,7 @@ performs proxying.
 ## Configuration
 
 The feature is opt-in per speaker under the `evpn` address family, and
-builds on [`advertise-all-vni`](ch-00-04-vxlan-configuration.md) (which
+builds on [`advertise-all-vni`](ch-00-03-vxlan-configuration.md) (which
 makes local VXLAN VNIs participate in EVPN):
 
 ```

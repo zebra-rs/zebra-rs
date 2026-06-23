@@ -42,5 +42,5 @@ re-originates the self LSP immediately, so the change propagates
 without waiting for the refresh timer. A per-VRF instance accepts
 `set router isis vrf <name> te-router-id`, which is stored and goes
 on the wire once per-VRF segment routing is available. See
-[Selection of the Router-ID](ch-00-02-router-id.md) for the
+[Selection of the Router-ID](ch-00-01-router-id.md) for the
 system-wide selection and precedence model.

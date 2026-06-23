@@ -21,7 +21,7 @@ peers receive are completely untouched — `show bgp` still shows the
 route as best, and downstream neighbors still learn it. This is the
 same separation of reachability information from forwarding decision
 described in
-[the introduction](ch-00-01-reachability-information.md), exposed as
+[the introduction](ch-00-00-introduction.md), exposed as
 an operator knob. The command mirrors FRR's / IOS's `table-map`.
 
 Typical uses:
