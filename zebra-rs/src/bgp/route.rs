@@ -5326,10 +5326,27 @@ fn route_soft_out_peer_table(
         let peer = peers.get_mut_by_idx(peer_idx).expect("peer exists");
         if let Some(rd) = rd {
             peer.cache_remove_vpnv4(rd, prefix, 0);
+        } else {
+            // Drop any not-yet-flushed pending advert of this prefix
+            // from the shared update-group cache. The re-advert above
+            // goes out per-peer via `send_ipv4_direct`, but a PRIOR
+            // group-based advertise (`send_ipv4`, e.g. the origination
+            // that ran before this peer's out-policy resolved) may have
+            // parked the prefix in `cache_ipv4` behind the MRAI debounce
+            // timer (30s for eBGP). That entry outlives this soft-out:
+            // when the timer later fires, `build_flush_job_ipv4` rebuilds
+            // from the stale cache and re-sends the prefix this soft-out
+            // just withdrew — resurrecting a route the peer's `adj_out`
+            // no longer tracks, so nothing ever withdraws it again.
+            // Mirrors the group-cache cleanup in `V4Batch::withdraw`.
+            let afi_safi = AfiSafi::new(Afi::Ip, Safi::Unicast);
+            if let Some(gid) = peer.update_group_id.get(&afi_safi).cloned()
+                && let Some(af) = bgp.update_groups.get_mut(&afi_safi)
+                && let Some(group) = af.group_by_id_mut(&gid)
+            {
+                super::update_group::cache_remove_ipv4(group, prefix, 0);
+            }
         }
-        // No IPv4 cache to remove from — direct-encode means there
-        // was never a pending bucket to drop. adj_out + the on-wire
-        // withdraw still happen.
         peer.adj_out.remove(rd, prefix, 0);
         withdraw_ipv4_deferrable(bgp.update_groups, peer, rd, prefix, 0);
     }
