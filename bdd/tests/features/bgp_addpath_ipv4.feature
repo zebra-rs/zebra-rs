@@ -57,8 +57,11 @@ Feature: BGP AddPath Send for IPv4 unicast (RFC 7911)
     # advertises BOTH — so z4's table shows the prefix twice, once per
     # originating AS. Without AddPath Send z4 would hold exactly the
     # single best path (one AS_PATH only).
+    # Both checks poll: z3 advertises the two AddPaths asynchronously, so
+    # the second AS_PATH can land a beat after the first — a single-shot
+    # check on it races that arrival under full-suite load.
     Then show command "show bgp 10.10.10.0/24" in namespace "z4" should eventually contain "65003 65001"
-    And show command "show bgp 10.10.10.0/24" in namespace "z4" should contain "65003 65002"
+    And show command "show bgp 10.10.10.0/24" in namespace "z4" should eventually contain "65003 65002"
 
   Scenario: Teardown topology
     Given the test topology exists
