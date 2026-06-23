@@ -52,9 +52,12 @@ Feature: BGP EVPN BUM segmentation — DF-gated gateway re-flood (RFC 9572 §5.3
   Scenario: The standby gateway re-floods nothing (no duplicate BUM)
     Given the test topology exists
     # z4 (.0.4) loses the DF election for both regions, so it owns neither and
-    # drops every region from its re-flood set.
+    # drops every region from its re-flood set. Poll the negative check: until
+    # z4 has learned z2 as a candidate for *every* region it can transiently
+    # see itself as the lone (hence DF) gateway for a not-yet-converged region
+    # and re-flood it, dropping that only once z2's per-region IMET arrives.
     Then show command "show bgp evpn route-type per-region-imet" in namespace "z4" should eventually contain "(standby)"
-    And show command "show bgp evpn route-type per-region-imet" in namespace "z4" should not contain "gateway re-flood"
+    And show command "show bgp evpn route-type per-region-imet" in namespace "z4" should eventually not contain "gateway re-flood"
 
   Scenario: Teardown topology
     Given the test topology exists
