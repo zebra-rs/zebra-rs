@@ -26,6 +26,13 @@ bgp_mup_e2e:
 	mkdir -p allure-results
 	cargo test --test cucumber -- --concurrency=1 --tags "@bgp_mup_e2e"
 
+# MUP mixed-AFI: IPv6 UE with an IPv4 GTP endpoint, originated by the MUP-C
+# with no SRv6 locator and parsed by the peer. Needs `pfcp-inject` on the
+# host PATH (cargo build --release -p pfcp-inject; copy to /usr/bin).
+bgp_mup_mixed_afi:
+	mkdir -p allure-results
+	cargo test --test cucumber -- --concurrency=1 --tags "@bgp_mup_mixed_afi"
+
 rib_static_ipv6:
 	mkdir -p allure-results
 	cargo test --test cucumber -- --concurrency=1 --tags "@rib_static_ipv6"

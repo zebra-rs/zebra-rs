@@ -7605,24 +7605,15 @@ fn mup_ue_prefix(session: &crate::mup_c::session::MupSession) -> Option<IpNet> {
     }
 }
 
-/// End.DT4 / End.DT6 / End.DT46 SRv6 behaviour for a session's UE address
-/// family.
-fn mup_sid_behavior(session: &crate::mup_c::session::MupSession) -> u16 {
-    match (session.ue_ipv4.is_some(), session.ue_ipv6.is_some()) {
-        (true, false) => bgp_packet::SRV6_BEHAVIOR_END_DT4,
-        (false, true) => bgp_packet::SRV6_BEHAVIOR_END_DT6,
-        _ => bgp_packet::SRV6_BEHAVIOR_END_DT46,
-    }
-}
-
 /// Build the attributes for a controller-originated MUP ST route: the
-/// controller next-hop (carried in MP_REACH), the VRF's route-target
-/// exports, and the SRv6 L3 Service SID (RFC 9252 Prefix-SID).
+/// controller next-hop (carried in MP_REACH) and the VRF's route-target
+/// exports. No SID is attached — per draft-ietf-bess-mup-safi the default
+/// is for the receiving PE to derive the forwarding SID from its own
+/// ISD/DSD routes (matched by endpoint/prefix) and program the FIB itself,
+/// so the MUP-C neither allocates nor advertises one.
 fn build_mup_attr(
     controller: Option<std::net::Ipv6Addr>,
     rts: &std::collections::BTreeSet<RouteDistinguisher>,
-    sid: std::net::Ipv6Addr,
-    behavior: u16,
 ) -> BgpAttr {
     let mut attr = BgpAttr::new();
     if let Some(addr) = controller {
@@ -7635,14 +7626,6 @@ fn build_mup_attr(
         }
         attr.ecom = Some(ecom);
     }
-    attr.prefix_sid = Some(bgp_packet::PrefixSid {
-        tlvs: vec![bgp_packet::PrefixSidTlv::Srv6L3Service(
-            bgp_packet::Srv6ServiceTlv {
-                sids: vec![bgp_packet::Srv6SidInfo::new(sid, 0, behavior, None)],
-                ..Default::default()
-            },
-        )],
-    });
     attr
 }
 
@@ -12401,17 +12384,18 @@ pub fn route_sync(peer: &mut Peer, bgp: &mut BgpTop, v4_via_pool: bool) {
 impl Bgp {
     /// Originate (or re-originate) a MUP Session-Transformed route for one
     /// controller-learned session. Correlates the session's Network
-    /// Instance to a `router bgp vrf <name> mobile-uplane` config,
-    /// allocates an SRv6 service SID from the locator, builds the ST route
-    /// with its attributes, installs into the MUP Loc-RIB as `Originated`,
-    /// and advertises. A prior route for the same session is withdrawn
-    /// first, so a Session Modification cleanly replaces it. No-op when no
-    /// VRF matches the NI, the VRF has no RD, or no SRv6 SID is available.
+    /// Instance to a `router bgp vrf <name> mobile-uplane` config, builds
+    /// the ST route with its attributes, installs into the MUP Loc-RIB as
+    /// `Originated`, and advertises. A prior route for the same session is
+    /// withdrawn first, so a Session Modification cleanly replaces it.
+    /// No-op when no VRF matches the NI or the VRF has no RD. No SRv6 SID
+    /// is allocated — the receiving PE derives forwarding from its own
+    /// ISD/DSD routes (draft-ietf-bess-mup-safi default).
     pub fn originate_mup_route(&mut self, session: &crate::mup_c::session::MupSession) {
         // Replace any prior route for this session (Modification path).
         self.withdraw_mup_route(session.seid);
 
-        let Some((prefix, function, attr)) = self.build_mup_origination(session) else {
+        let Some((prefix, attr)) = self.build_mup_origination(session) else {
             return;
         };
         let mut rib = BgpRib::new(
@@ -12428,35 +12412,32 @@ impl Bgp {
         rib.attr = self.attr_store.intern(attr);
         let _ = self.local_rib.update_mup(prefix.clone(), rib);
         let selected = self.local_rib.select_best_path_mup(&prefix);
-        self.mup_c_originated
-            .insert(session.seid, (prefix.clone(), function));
+        self.mup_c_originated.insert(session.seid, prefix.clone());
         self.mup_apply_selected(prefix, selected);
     }
 
     /// Withdraw the MUP route originated for `seid` (Session Deletion or
-    /// the replace step of a Modification), returning its SRv6 SID
-    /// function to the pool. No-op when nothing was originated.
+    /// the replace step of a Modification). No-op when nothing was
+    /// originated.
     pub fn withdraw_mup_route(&mut self, seid: u64) {
-        let Some((prefix, function)) = self.mup_c_originated.remove(&seid) else {
+        let Some(prefix) = self.mup_c_originated.remove(&seid) else {
             return;
         };
-        self.srv6_sid_pool.release(function);
         self.local_rib.remove_mup(&prefix, 0, ORIGINATED_PEER);
         let selected = self.local_rib.select_best_path_mup(&prefix);
         self.mup_apply_selected(prefix, selected);
     }
 
     /// Correlate a session to a VRF `mobile-uplane` config and build the
-    /// ST prefix + attributes + allocated SID function. Returns `None`
-    /// (releasing any SID it took) when the session can't be originated.
+    /// ST prefix + attributes. Returns `None` when no VRF matches the
+    /// session's Network Instance, the VRF has no RD, or the session lacks
+    /// the addresses the chosen ST route type needs.
     fn build_mup_origination(
         &mut self,
         session: &crate::mup_c::session::MupSession,
-    ) -> Option<(bgp_packet::MupPrefix, u16, BgpAttr)> {
+    ) -> Option<(bgp_packet::MupPrefix, BgpAttr)> {
         use super::vrf_config::MupSrv6Direction;
         let ni = session.network_instance.as_deref()?;
-        // Owned copies so the immutable `vrfs` borrow ends before the
-        // mutable SID allocation below.
         let (rd, rts, direction) = self.vrfs.values().find_map(|cfg| {
             let sm = cfg.mobile_uplane.srv6_mobile.as_ref()?;
             (sm.network_instance.as_deref() == Some(ni)).then(|| {
@@ -12468,10 +12449,10 @@ impl Bgp {
             })
         })?;
         let rd = rd?;
-        let (sid, function) = self.alloc_mup_sid()?;
         let prefix = match direction {
             // Encapsulation (N6 / downlink): Type-1 ST carries the UE
-            // prefix + access tunnel.
+            // prefix + access tunnel. The endpoint (gNB) family may differ
+            // from the UE prefix family (mixed-AFI 5G).
             MupSrv6Direction::Encapsulation => match (mup_ue_prefix(session), session.endpoint) {
                 (Some(prefix), Some(endpoint)) => bgp_packet::MupPrefix::T1st {
                     rd,
@@ -12481,10 +12462,7 @@ impl Bgp {
                     endpoint,
                     source: None,
                 },
-                _ => {
-                    self.srv6_sid_pool.release(function);
-                    return None;
-                }
+                _ => return None,
             },
             // Decapsulation (N3 / uplink): Type-2 ST carries the core
             // endpoint + TEID.
@@ -12495,35 +12473,11 @@ impl Bgp {
                     endpoint_len: if endpoint.is_ipv4() { 32 } else { 128 },
                     teid: session.teid,
                 },
-                None => {
-                    self.srv6_sid_pool.release(function);
-                    return None;
-                }
+                None => return None,
             },
         };
-        let attr = build_mup_attr(
-            self.mup_c_config.controller_address,
-            &rts,
-            sid,
-            mup_sid_behavior(session),
-        );
-        Some((prefix, function, attr))
-    }
-
-    /// Allocate an SRv6 service SID from the resolved BGP locator (the
-    /// same source `encapsulation srv6` VRFs draw End.DT46 from). Returns
-    /// the full SID address and its function, or `None` when no locator
-    /// has resolved or the function band is exhausted.
-    fn alloc_mup_sid(&mut self) -> Option<(std::net::Ipv6Addr, u16)> {
-        let prefix = self.srv6_locator.as_ref().and_then(|l| l.prefix)?;
-        let function = self.srv6_sid_pool.allocate()?;
-        match crate::isis::srv6::function_addr(prefix, function) {
-            Some(addr) => Some((addr, function)),
-            None => {
-                self.srv6_sid_pool.release(function);
-                None
-            }
-        }
+        let attr = build_mup_attr(self.mup_c_config.controller_address, &rts);
+        Some((prefix, attr))
     }
 
     /// Apply the post-update best path of one MUP prefix to peers:
@@ -16988,20 +16942,6 @@ mod tests {
         );
         assert_eq!(super::mup_ue_prefix(&session(None, None)), None);
 
-        // End.DT4 / DT6 / DT46 by UE family.
-        assert_eq!(
-            super::mup_sid_behavior(&session(Some(v4), None)),
-            bgp_packet::SRV6_BEHAVIOR_END_DT4
-        );
-        assert_eq!(
-            super::mup_sid_behavior(&session(None, Some(v6))),
-            bgp_packet::SRV6_BEHAVIOR_END_DT6
-        );
-        assert_eq!(
-            super::mup_sid_behavior(&session(Some(v4), Some(v6))),
-            bgp_packet::SRV6_BEHAVIOR_END_DT46
-        );
-
         // RT shares the RD wire format (low type 0x02, value preserved).
         let rd = RouteDistinguisher::from_str("65000:100").unwrap();
         let rt = super::rd_route_target(&rd);
@@ -17009,18 +16949,14 @@ mod tests {
         assert_eq!(rt.high_type, rd.typ as u8);
         assert_eq!(rt.val, rd.val);
 
-        // The built attr carries the controller next-hop, the RT export
-        // and the SRv6 L3 Service SID.
+        // The built attr carries the controller next-hop and the RT export
+        // — and NO Prefix-SID: per draft-ietf-bess-mup-safi the receiving
+        // PE derives the forwarding SID from its own ISD/DSD routes, so the
+        // MUP-C neither allocates nor advertises one.
         let controller: Ipv6Addr = "2001:db8::1".parse().unwrap();
-        let sid: Ipv6Addr = "2001:db8:1:40::".parse().unwrap();
         let mut rts = BTreeSet::new();
         rts.insert(rd);
-        let attr = super::build_mup_attr(
-            Some(controller),
-            &rts,
-            sid,
-            bgp_packet::SRV6_BEHAVIOR_END_DT4,
-        );
+        let attr = super::build_mup_attr(Some(controller), &rts);
         assert!(
             matches!(attr.nexthop, Some(BgpNexthop::Ipv6(a)) if a == controller),
             "controller next-hop in MP_REACH"
@@ -17034,13 +16970,10 @@ mod tests {
                 .any(|v| v.low_type == 0x02),
             "RT export present"
         );
-        match &attr.prefix_sid.as_ref().unwrap().tlvs[0] {
-            bgp_packet::PrefixSidTlv::Srv6L3Service(tlv) => {
-                assert_eq!(tlv.sids[0].sid, sid);
-                assert_eq!(tlv.sids[0].behavior, bgp_packet::SRV6_BEHAVIOR_END_DT4);
-            }
-            other => panic!("expected Srv6L3Service, got {other:?}"),
-        }
+        assert!(
+            attr.prefix_sid.is_none(),
+            "MUP-C must not attach a Prefix-SID; the PE derives the SID from ISD/DSD"
+        );
     }
 
     fn bgp_rib_with_nexthop(nh: Option<BgpNexthop>, typ: super::BgpRibType) -> super::BgpRib {
