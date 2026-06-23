@@ -18,3 +18,9 @@ router:
         enabled: true
       enabled: true
       remote-as: 65002
+      # Short connect-retry so a synchronized startup dial that
+      # collides (both eBGP ends dial at once) recovers in seconds
+      # instead of parking on the 120s default — keeps the fixed
+      # setup waits reliable under full-suite load.
+      timers:
+        connect-retry-time: 3
