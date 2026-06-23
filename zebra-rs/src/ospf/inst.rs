@@ -10262,47 +10262,58 @@ fn add_as_external_routes(
         }
 
         let asbr_id = lsa.data.h.adv_router;
-        let Some(asbr_vertex) = top.lsp_map.lookup(asbr_id) else {
-            continue;
-        };
+        // The ASBR may not appear in THIS area's lsp_map / SPF at all when
+        // it lives in another area (its Router-LSA is area-scoped) — that
+        // is exactly the inter-area case the Type-4 fallback below handles,
+        // so keep `asbr_vertex` optional rather than bailing here.
+        let asbr_vertex = top.lsp_map.lookup(asbr_id);
 
         // Try the local (intra-area) SPF result first. If the ASBR is
         // in another area, fall back to a Type-4 Summary-ASBR LSA
         // advertised by an ABR that is reachable from this area
         // (RFC 2328 §16.4 step 5).
-        let (asbr_cost, nexthop_vertex, nexthop_path) =
-            if let Some(path) = spf_result.get(&asbr_vertex) {
-                (path.cost, asbr_vertex, path.clone())
-            } else {
-                // Look for a Type-4 in this area whose ls_id == asbr_id.
-                let type4 = top.areas.get(area_id).and_then(|area| {
-                    area.lsdb
-                        .iter_by_type(OspfLsType::SummaryAsbr)
-                        .filter(|((ls_id_t4, _), lsa_t4)| {
-                            *ls_id_t4 == asbr_id
-                                && lsa_t4.data.h.ls_age < OSPF_MAX_AGE
-                                && lsa_t4.data.h.adv_router != top.router_id
-                        })
-                        .filter_map(|((_, _), lsa_t4)| {
-                            let OspfLsp::Summary(ref s) = lsa_t4.data.lsp else {
-                                return None;
-                            };
-                            let abr_id = lsa_t4.data.h.adv_router;
-                            let abr_vertex = top.lsp_map.lookup(abr_id)?;
-                            let abr_path = spf_result.get(&abr_vertex)?;
-                            Some((
-                                abr_path.cost.saturating_add(s.metric),
-                                abr_vertex,
-                                abr_path.clone(),
-                            ))
-                        })
-                        .min_by_key(|(cost, _, _)| *cost)
-                });
-                match type4 {
-                    Some(t) => t,
-                    None => continue,
-                }
-            };
+        let (asbr_cost, nexthop_vertex, nexthop_path) = if let Some((vertex, path)) =
+            asbr_vertex.and_then(|v| spf_result.get(&v).map(|p| (v, p)))
+        {
+            (path.cost, vertex, path.clone())
+        } else {
+            // Look for a Type-4 in this area whose ls_id == asbr_id.
+            let type4 = top.areas.get(area_id).and_then(|area| {
+                area.lsdb
+                    .iter_by_type(OspfLsType::SummaryAsbr)
+                    .filter(|((ls_id_t4, _), lsa_t4)| {
+                        *ls_id_t4 == asbr_id
+                            && lsa_t4.data.h.ls_age < OSPF_MAX_AGE
+                            && lsa_t4.data.h.adv_router != top.router_id
+                    })
+                    .filter_map(|((_, _), lsa_t4)| {
+                        // A self-originated Type-4 carries an
+                        // `OspfLsp::Summary` body, but one received off
+                        // the wire is parsed into the distinct
+                        // `OspfLsp::SummaryAsbr` variant — accept both,
+                        // else a remote ABR's Type-4 (the only kind a
+                        // non-backbone router ever sees) never resolves.
+                        let (OspfLsp::Summary(ref s) | OspfLsp::SummaryAsbr(ref s)) =
+                            lsa_t4.data.lsp
+                        else {
+                            return None;
+                        };
+                        let abr_id = lsa_t4.data.h.adv_router;
+                        let abr_vertex = top.lsp_map.lookup(abr_id)?;
+                        let abr_path = spf_result.get(&abr_vertex)?;
+                        Some((
+                            abr_path.cost.saturating_add(s.metric),
+                            abr_vertex,
+                            abr_path.clone(),
+                        ))
+                    })
+                    .min_by_key(|(cost, _, _)| *cost)
+            });
+            match type4 {
+                Some(t) => t,
+                None => continue,
+            }
+        };
 
         let is_type2 = (ext.ext_and_resvd & E_FLAG) != 0;
         let metric = if is_type2 {
