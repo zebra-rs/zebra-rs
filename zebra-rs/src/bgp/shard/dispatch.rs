@@ -44,7 +44,7 @@ impl BgpShard {
         central: Option<&mut VrfLabelAllocator>,
     ) -> Vec<ShardOut> {
         match msg {
-            ShardMsg::UpdateV4(u) => self.handle_update_v4(u),
+            ShardMsg::UpdateV4(u) => self.handle_update_v4(u, central),
             ShardMsg::RouteBatchV4(b) => self.handle_route_batch_v4(b),
             ShardMsg::WithdrawV4 {
                 ident,
@@ -295,22 +295,27 @@ impl BgpShard {
     fn handle_route_batch_v4(&mut self, b: ShardRouteBatchV4) -> Vec<ShardOut> {
         let mut outs = Vec::with_capacity(b.nlris.len());
         for nlri in b.nlris {
-            outs.extend(self.handle_update_v4(ShardUpdateV4 {
-                ident: b.ident,
-                rd: None,
-                nlri,
-                peer_router_id: b.peer_router_id,
-                typ: b.typ,
-                attr: b.attr.clone(),
-                label: None,
-                nexthop: None,
-                enhe_egress: b.enhe_egress,
-                stale: b.stale,
-                nexthop_reachable: b.nexthop_reachable,
-                vrf_transit_only: false,
-                decision: None,
-                compute_policy: b.compute_policy,
-            }));
+            outs.extend(self.handle_update_v4(
+                ShardUpdateV4 {
+                    ident: b.ident,
+                    rd: None,
+                    nlri,
+                    peer_router_id: b.peer_router_id,
+                    typ: b.typ,
+                    attr: b.attr.clone(),
+                    label: None,
+                    nexthop: None,
+                    enhe_egress: b.enhe_egress,
+                    stale: b.stale,
+                    nexthop_reachable: b.nexthop_reachable,
+                    vrf_transit_only: false,
+                    decision: None,
+                    compute_policy: b.compute_policy,
+                    // The batch path is v4-unicast only (`rd: None`), so it
+                    // never mints a VPNv4 transit label — no central needed.
+                },
+                None,
+            ));
         }
         outs
     }
@@ -321,7 +326,11 @@ impl BgpShard {
     /// VPNv4 transit label, update the Loc-RIB, and report the
     /// best-path delta. A denied route (`decision == None`) keeps its
     /// Adj-RIB-In entry but withdraws any prior Loc-RIB row.
-    fn handle_update_v4(&mut self, u: ShardUpdateV4) -> Vec<ShardOut> {
+    fn handle_update_v4(
+        &mut self,
+        u: ShardUpdateV4,
+        central: Option<&mut VrfLabelAllocator>,
+    ) -> Vec<ShardOut> {
         let ShardUpdateV4 {
             ident,
             rd,
@@ -432,10 +441,14 @@ impl BgpShard {
         rib.nexthop_reachable = nexthop_reachable;
         rib.vrf_transit_only = vrf_transit_only;
         if let Some(rd) = rd {
-            // VPNv4 transit local label (Inter-AS Option B). Drawn from
-            // the shard's own sub-block; `None` central refill until
-            // LabelBlockLow lands (B.3 follow-up).
-            rib.local_label = self.labels.label_vpn_v4(None, rd, nlri.prefix);
+            // VPNv4 transit local label (Inter-AS Option B): re-advertising
+            // with next-hop-self forwards via a swap ILM keyed on this
+            // label (`reconcile_swap_ilm`), so without it the ASBR sends a
+            // pass-through label it holds no ILM for and the data plane
+            // black-holes. Drawn from the shard's own sub-block, refilled
+            // from `central` (the same allocator the BGP-LU path uses) —
+            // passing `None` here was the bug that left `local_label` unset.
+            rib.local_label = self.labels.label_vpn_v4(central, rd, nlri.prefix);
         }
         // Snapshot the row (for AddPath advertise) and stamp the
         // `local_id` the update assigns to it.
@@ -1099,6 +1112,49 @@ mod tests {
             matches!(&down[..], [ShardOut::BestPathLu { selected, .. }] if selected.is_empty())
         );
         assert!(shard.v4lu.0.is_empty());
+    }
+
+    #[test]
+    fn update_v4_vpn_mints_transit_local_label() {
+        // Inter-AS Option B: a received VPNv4 transit route must mint its
+        // own local label (carved from `central`) so the ASBR can program
+        // a swap ILM keyed on it. The bug was `handle` passing `None`
+        // central to `handle_update_v4`, leaving `local_label` unset and
+        // the data plane black-holing. Regression guard.
+        let mut shard = BgpShard::default();
+        let mut central = VrfLabelAllocator::bounded(1000, 5000);
+        let rd = RouteDistinguisher::default();
+        let out = shard.handle(
+            ShardMsg::UpdateV4(ShardUpdateV4 {
+                ident: 2,
+                rd: Some(rd),
+                nlri: v4("10.2.0.0/30"),
+                peer_router_id: std::net::Ipv4Addr::new(10, 0, 0, 1),
+                typ: BgpRibType::EBGP,
+                attr: attr_with_nh("172.16.0.2"),
+                label: Some(bgp_packet::Label::new(16, 0, true)),
+                nexthop: None,
+                enhe_egress: None,
+                stale: false,
+                nexthop_reachable: true,
+                vrf_transit_only: false,
+                decision: None,
+                compute_policy: true,
+            }),
+            Some(&mut central),
+        );
+        let row = shard
+            .v4vpn
+            .get(&rd)
+            .and_then(|t| t.0.values().next())
+            .and_then(|c| c.first())
+            .expect("vpnv4 transit row stored");
+        assert_eq!(
+            row.local_label,
+            Some(1000),
+            "transit label minted from the central pool"
+        );
+        assert!(matches!(&out[..], [ShardOut::BestPathV4 { .. }]));
     }
 
     #[test]
