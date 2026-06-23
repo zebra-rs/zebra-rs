@@ -4,7 +4,7 @@ Feature: BGP Mobile User Plane (MUP) capability negotiation
   As a network operator
   I want two zebra-rs instances to negotiate the BGP MUP multiprotocol
   capability (SAFI 85, RFC 9833) for BOTH IPv4-MUP (AFI 1) and IPv6-MUP
-  (AFI 2) from a single `afi-safi mobile-uplane enabled true` knob, and
+  (AFI 2) from a single `afi-safi mup enabled true` knob, and
   bring an iBGP session to Established, so the foundation for MUP route
   exchange (ISD / DSD / ST1 / ST2) is validated before origination is
   implemented.
@@ -31,12 +31,12 @@ Feature: BGP Mobile User Plane (MUP) capability negotiation
   Both peers enable two AFI/SAFIs:
     - ipv4 (so the session has a fallback AF and matches the
       established BDD pattern)
-    - mobile-uplane (the single knob this scenario validates; it
+    - mup (the single knob this scenario validates; it
       negotiates IPv4-MUP and IPv6-MUP)
 
   Config files:
-  - z1-1.yaml: AS 65001, peer to 192.168.0.2, mobile-uplane enabled
-  - z2-1.yaml: AS 65001, peer to 192.168.0.1, mobile-uplane enabled
+  - z1-1.yaml: AS 65001, peer to 192.168.0.2, mup enabled
+  - z2-1.yaml: AS 65001, peer to 192.168.0.1, mup enabled
 
   Scenario: Setup topology and establish iBGP session with MUP capability
     Given a clean test environment
@@ -58,9 +58,9 @@ Feature: BGP Mobile User Plane (MUP) capability negotiation
     And show command "show bgp neighbor 192.168.0.1" in namespace "z2" should contain "IPv4 MUP: advertised and received"
     And show command "show bgp neighbor 192.168.0.1" in namespace "z2" should contain "IPv6 MUP: advertised and received"
 
-  Scenario: show bgp mobile-uplane renders the (empty) MUP RIB header
+  Scenario: show bgp mup renders the (empty) MUP RIB header
     Given the test topology exists
-    Then show command "show bgp mobile-uplane" in namespace "z1" should contain "Network (MUP NLRI)"
+    Then show command "show bgp mup" in namespace "z1" should contain "Network (MUP NLRI)"
 
   Scenario: Teardown topology
     Given the test topology exists

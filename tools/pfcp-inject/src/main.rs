@@ -1,7 +1,7 @@
 //! `pfcp-inject` — a minimal PFCP/N4 SMF simulator.
 //!
 //! Drives the zebra-rs BGP MUP controller (`router bgp afi-safi
-//! mobile-uplane mup-c`) in tests: it sends a PFCP Association Setup
+//! mup mup-c`) in tests: it sends a PFCP Association Setup
 //! Request followed by a Session Establishment Request describing one
 //! mobile session (UE IP, access-side F-TEID, Network Instance), so the
 //! controller learns the session and originates a MUP Session-Transformed
@@ -72,7 +72,7 @@ struct Args {
     #[arg(long, default_value = "10.0.0.1")]
     endpoint: IpAddr,
 
-    /// Network Instance (APN/DNN) — matched against a VRF `mobile-uplane`
+    /// Network Instance (APN/DNN) — matched against a VRF `mup`
     /// config on the controller.
     #[arg(long, default_value = "access")]
     network_instance: String,

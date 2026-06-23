@@ -1739,7 +1739,7 @@ impl LocalRibEvpnTable {
 
 /// Flat Loc-RIB table for MUP (SAFI 85) routes — exact-match keyed by
 /// `MupPrefix`. The RD is part of the key, so one flat map holds every RD
-/// and `show bgp mobile-uplane` walks it grouped by route type. Mirrors
+/// and `show bgp mup` walks it grouped by route type. Mirrors
 /// `LocalRibEvpnTable`; best-path reuses the NLRI-agnostic `BgpRib`
 /// comparator.
 #[derive(Debug, Default)]
@@ -7346,7 +7346,7 @@ pub fn route_evpn_withdraw(ident: usize, route: &EvpnRoute, bgp: &mut BgpTop, pe
 /// Phase 2 is receive + show only: there is no inbound route-policy, no
 /// VRF import, no re-advertise, and no FIB install yet (those land in
 /// P3/P4/P6). The caller stamps the MP_REACH next-hop into `attr` so
-/// `show bgp mobile-uplane` can render it. Loop detection mirrors
+/// `show bgp mup` can render it. Loop detection mirrors
 /// `route_evpn_update` — a route carrying our own AS / ORIGINATOR_ID /
 /// CLUSTER_LIST is dropped silently.
 pub fn route_mup_update(
@@ -7583,7 +7583,7 @@ pub fn route_withdraw_mup_to_peers(prefix: MupPrefix, peers: &mut PeerMap) {
 /// Build a Route-Target extended community from a stored Route
 /// Distinguisher. An RT shares the RD's 8-octet wire format — the RD
 /// type becomes the EC high-order type and the low-order type is `0x02`
-/// (Route Target) — so the per-VRF `mobile-uplane route-target export`
+/// (Route Target) — so the per-VRF `mup route-target export`
 /// set (stored as `RouteDistinguisher`s) maps straight through.
 fn rd_route_target(rd: &RouteDistinguisher) -> ExtCommunityValue {
     ExtCommunityValue {
@@ -8705,7 +8705,7 @@ pub fn route_from_peer(
                 } => {
                     // MUP carries its next-hop in MP_REACH (no usable
                     // NEXT_HOP attr). Stamp it into the path attr so the
-                    // Loc-RIB and `show bgp mobile-uplane` render it.
+                    // Loc-RIB and `show bgp mup` render it.
                     let mut attr_mup = bgp_attr.clone();
                     attr_mup.nexthop = Some(match nhop {
                         IpAddr::V4(a) => BgpNexthop::Ipv4(a),
@@ -12384,7 +12384,7 @@ pub fn route_sync(peer: &mut Peer, bgp: &mut BgpTop, v4_via_pool: bool) {
 impl Bgp {
     /// Originate (or re-originate) a MUP Session-Transformed route for one
     /// controller-learned session. Correlates the session's Network
-    /// Instance to a `router bgp vrf <name> mobile-uplane` config, builds
+    /// Instance to a `router bgp vrf <name> mup` config, builds
     /// the ST route with its attributes, installs into the MUP Loc-RIB as
     /// `Originated`, and advertises. A prior route for the same session is
     /// withdrawn first, so a Session Modification cleanly replaces it.
@@ -12428,7 +12428,7 @@ impl Bgp {
         self.mup_apply_selected(prefix, selected);
     }
 
-    /// Correlate a session to a VRF `mobile-uplane` config and build the
+    /// Correlate a session to a VRF `mup` config and build the
     /// ST prefix + attributes. Returns `None` when no VRF matches the
     /// session's Network Instance, the VRF has no RD, or the session lacks
     /// the addresses the chosen ST route type needs.
@@ -12438,17 +12438,23 @@ impl Bgp {
     ) -> Option<(bgp_packet::MupPrefix, BgpAttr)> {
         use super::vrf_config::MupSrv6Direction;
         let ni = session.network_instance.as_deref()?;
-        let (rd, rts, direction) = self.vrfs.values().find_map(|cfg| {
+        // Correlate the session NI to a `router bgp vrf <name> mup
+        // route {st1|st2}` config for the RD + direction.
+        let (name, rd, direction) = self.vrfs.iter().find_map(|(name, cfg)| {
             let sm = cfg.mobile_uplane.srv6_mobile.as_ref()?;
-            (sm.network_instance.as_deref() == Some(ni)).then(|| {
-                (
-                    cfg.rd,
-                    cfg.mobile_uplane.route_target_export.clone(),
-                    sm.direction,
-                )
-            })
+            (sm.network_instance.as_deref() == Some(ni))
+                .then(|| (name.clone(), cfg.rd, sm.direction))
         })?;
         let rd = rd?;
+        // The export route-targets now live on the top-level
+        // `vrf <name> mup route-target export` (RIB-owned,
+        // pushed to `rib_known_vrfs` via `VrfRouteTargets`), the same
+        // framework as ipv4 / ipv6.
+        let rts = self
+            .rib_known_vrfs
+            .get(&name)
+            .map(|k| k.mup_export_rts.clone())
+            .unwrap_or_default();
         let prefix = match direction {
             // Encapsulation (N6 / downlink): Type-1 ST carries the UE
             // prefix + access tunnel. The endpoint (gNB) family may differ
@@ -12483,6 +12489,9 @@ impl Bgp {
     /// Apply the post-update best path of one MUP prefix to peers:
     /// advertise the new best, or withdraw when no path remains.
     fn mup_apply_selected(&mut self, prefix: bgp_packet::MupPrefix, selected: Vec<BgpRib>) {
+        // Mirror the best-path to the per-VRF task whose `rd` matches this
+        // route's RD (display-only, for `show bgp vrf <name> mup`).
+        self.forward_mup_to_vrf(&prefix, selected.first());
         if selected.is_empty() {
             route_withdraw_mup_to_peers(prefix, &mut self.peers);
             return;
@@ -12508,6 +12517,37 @@ impl Bgp {
             central_label_alloc: None,
         };
         route_advertise_mup_to_peers(prefix, &selected, &mut bgp_ref, &mut self.peers);
+    }
+
+    /// Forward a MUP best-path (or its withdrawal) to the per-VRF task
+    /// whose configured `rd` matches the route's RD, for display under
+    /// `show bgp vrf <name> mup`. No-op when no VRF owns the RD or that
+    /// VRF has no running per-VRF task. Display-only: the global instance
+    /// stays the authoritative MUP RIB and advertiser.
+    fn forward_mup_to_vrf(&self, prefix: &bgp_packet::MupPrefix, best: Option<&BgpRib>) {
+        let Some(rd) = prefix.rd() else {
+            return;
+        };
+        let Some(name) = self
+            .vrfs
+            .iter()
+            .find_map(|(n, c)| (c.rd == Some(rd)).then_some(n))
+        else {
+            return;
+        };
+        let Some(handle) = self.vrf_registry.get(name) else {
+            return;
+        };
+        let msg = match best {
+            Some(rib) => super::vrf::msg::BgpVrfMsg::MupUpdate {
+                prefix: prefix.clone(),
+                rib: rib.clone(),
+            },
+            None => super::vrf::msg::BgpVrfMsg::MupWithdraw {
+                prefix: prefix.clone(),
+            },
+        };
+        let _ = handle.inbox.send(msg);
     }
 
     pub fn route_add(&mut self, prefix: Ipv4Net) {

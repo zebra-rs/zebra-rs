@@ -10,17 +10,19 @@ phases, committed and pushed (rebased onto `origin/main`):
   (length up to 64/160, high-aligned TEID). GoBGP byte-exact interop
   vectors added. The MUP Extended Community (`0x0c`) and SAFI 85 were
   already present.
-- **P1 negotiation** — `mobile-uplane` afi-safi knob that expands to
+- **P1 negotiation** — `mup` afi-safi knob that expands to
   *both* `(Ip, Mup)` and `(Ip6, Mup)` capabilities (`mp_family_expand`),
   per-neighbor and per-group.
 - **P2 Loc-RIB + receive + show** — full-NLRI `MupPrefix` key + flat
   `LocalRibMupTable`; `route_mup_update`/`route_mup_withdraw` wired into
   the `MpReachAttr::Mup` / `MpUnreachAttr::Mup` receive arms; `adj_in.mup`;
-  `route_clean` peer-down; `show bgp mobile-uplane` route table.
-- **P3 per-VRF config** — `router bgp vrf <name> mobile-uplane`:
-  `route-target export` + `route {st1|st2} dest-network-instance
-  {access|core} exact <ni>`; the config-driven `MUP VRFs:` block in
-  `show bgp mobile-uplane`.
+  `route_clean` peer-down; `show bgp mup` route table.
+- **P3 per-VRF config** — `router bgp vrf <name> mup route {st1|st2}
+  dest-network-instance {access|core} exact <ni>` (the ST origination
+  binding), plus the export/import route-targets on the top-level
+  `vrf <name> mup route-target {export|import}` (RIB-owned, the same
+  framework as ipv4 / ipv6, surfaced to BGP via `rib_known_vrfs`); the
+  config-driven `MUP VRFs:` block in `show bgp mup`.
 - **P4 advertise / re-originate** — `MupPrefix::afi()`/`to_route()`,
   `adj_out.mup`, AFI-aware `route_advertise_mup_to_peers` /
   `route_withdraw_mup_to_peers` (EVPN suppression + eBGP-next-hop-self /
@@ -43,6 +45,71 @@ suggested PR size**; several are now marked **DONE** by P5.
 Standing guidance still applies: smallest meaningful slice first, let
 the user redirect, one branch / one PR at a time.
 
+## Draft-default forwarding & mixed-AFI (2026-06-23)
+
+Two post-P5 corrections aligned the controller and codec with
+draft-ietf-bess-mup-safi (merged as PR #1614):
+
+**No SID allocation by the controller — draft-default forwarding.** The
+MUP-C no longer allocates or advertises an SRv6 service SID on the ST
+routes it originates. Per the draft the **default** is that the receiving
+PE derives the forwarding SID from its *own* ISD / DSD routes: it matches
+an ST route against the segment a co-located ISD (GTP4.E / GTP6.E) or DSD
+(End.DT4/6) route advertises and programs the FIB itself. So an
+originated ST route now carries only the controller-address next hop and
+the VRF's route-target exports — `alloc_mup_sid` / `mup_sid_behavior` and
+the per-session SID-function bookkeeping were removed, and
+`build_mup_attr` no longer attaches the SRv6 L3 Service Prefix-SID.
+Carrying an *explicit* SID (via Prefix-SID or the `0x0c` MUP Direct-SID
+extended community) is the **non-default, controller-pushed** mode; it
+can be reintroduced behind a knob if a deployment needs it, and the
+now-unused `mup-c srv6 locator` config is retained as the natural home
+for that mode.
+
+**Mixed-AFI T1ST endpoint/source.** A Type-1 ST route's endpoint (gNB)
+and source (UPF) address family is now decided by its own length octet
+(32 = IPv4, 128 = IPv6), **independent of the outer AFI**; only the UE
+prefix follows the outer AFI. This lets an IPv6 UE route carry an IPv4
+gNB/UPF — the real 5G case where the N3 transport is IPv4 — matching
+GoBGP. (T2ST keeps its single endpoint AFI-tied; it has no second address
+that could differ.) Covered end-to-end by the `@bgp_mup_mixed_afi` BDD
+feature (#14): an IPv6 UE + IPv4 endpoint session, with no SRv6 locator
+configured anywhere, originated by z1 and received/parsed by z2.
+
+## CLI rename, RT framework, per-VRF show (2026-06-23)
+
+Three follow-on changes (post-PR #1614, not yet merged):
+
+**`mobile-uplane` → `mup` rename.** The CLI / YANG keyword is now `mup`
+everywhere: the afi-safi enum (`neighbor X afi-safi mup`,
+`router bgp afi-safi mup mup-c`), `show bgp mup`, `router bgp vrf <name>
+mup`, and every matching callback-path string + YANG node name (renamed
+in lockstep). Internal Rust identifiers (`mobile_uplane`,
+`BgpVrfMobileUplane`, `MupSrv6*`) are unchanged — not user-facing.
+
+**Export RT moved to the top-level VRF framework.** The MUP export (and
+import) route-targets now live on `vrf <name> mup route-target
+{export|import}` — the same `vrf-route-target-policy` grouping as
+`ipv4` / `ipv6`, owned by the RIB. They flow RIB → BGP via
+`Message::VrfRouteTargets` / `RibRx::VrfRouteTargets`
+(`mup_{import,export}_rts`) into `RibKnownVrf`, and `build_mup_origination`
+reads the export set from `rib_known_vrfs`. **Consequence:** the MUP RT
+now requires the VRF's kernel device to exist (it rides the RIB `Vrf`
+row), exactly like the ipv4/ipv6 RT — the old `router bgp vrf <name> mup
+route-target export` is gone. The import set is parsed and carried but
+not yet consumed (reserved for the MUP import dispatch, §3 below).
+
+**`show bgp vrf <name> mup`.** The MUP Loc-RIB is global, but the
+command renders per-VRF: the global `mup_apply_selected` mirrors each
+best-path to the per-VRF `BgpVrf` task whose `rd` matches the route's RD
+(`BgpVrfMsg::Mup{Update,Withdraw}`, display-only — it touches just
+`local_rib.mup.selected`). The manager's existing `vrf_redirect_split`
+routes `show bgp vrf <name> mup` into that task, which renders it via the
+new `/show/bgp/mup` arm in `process_vrf_show` (`show_bgp_vrf_mup`). The
+per-VRF task spawns from `router bgp vrf <name>` config (placeholder
+context when the kernel VRF isn't up yet), so the redirect target exists.
+A `/show/bgp/vrf/mup` global handler is the not-running fallback.
+
 ## Receive / Loc-RIB
 
 ### 1. Inbound route-policy for MUP
@@ -52,7 +119,7 @@ the user redirect, one branch / one PR at a time.
 
 **Why deferred:** No per-AFI MUP policy binding exists (the `afi-safi
 <name> policy {in,out}` / `prefix-set` knobs don't yet accept
-`mobile-uplane`). Parity with EVPN, which also applies no inbound policy.
+`mup`). Parity with EVPN, which also applies no inbound policy.
 
 **Where:** `route_mup_update` in `zebra-rs/src/bgp/route.rs`; the per-AFI
 policy plumbing in `zebra-rs/src/bgp/config.rs` (`config_afi_safi_policy_*`)
@@ -76,7 +143,7 @@ MUP routes drive forwarding (P6) or feed the controller's resolution.
 
 ### 3. VRF import (route-target → VRF) for received MUP routes
 
-**What:** The per-VRF `mobile-uplane route-target export` set (P3) is
+**What:** The per-VRF `mup route-target export` set (P3) is
 stored but there is no import dispatch that pulls received MUP routes
 into a VRF by RT (unlike VPNv4/EVPN's `VrfImportDispatcher`).
 
@@ -126,18 +193,18 @@ mirror the EVPN LLGR two-branch.
 
 ### 6. Full `MUP controller:` show block — **DONE (P5)**
 
-`show bgp mobile-uplane mup-c [session|association]` now renders the
+`show bgp mup mup-c [session|association]` now renders the
 controller runtime (admin state, PFCP listen address, association /
 session counts, and the per-session table) from the BGP-held
 `mup_c_view` the controller feeds over `Message::MupC`. The
 `zenoh source:` line is moot (the northbound is PFCP, not zenoh); the
 `vpnv6 ue-routes:` list was dropped (the ST routes carry the SRv6
-service directly). `show bgp mobile-uplane` still renders the `MUP VRFs:`
+service directly). `show bgp mup` still renders the `MUP VRFs:`
 block (P3) + the route table (P2), now populated by originated ST routes.
 
 **Where:** `show_bgp_mup_c*` / `render_mup_vrfs` in `zebra-rs/src/bgp/show.rs`.
 
-### 7. `show bgp mobile-uplane` JSON output
+### 7. `show bgp mup` JSON output
 
 **What:** The JSON branch returns the `"[]"` placeholder; only text is
 implemented.
@@ -246,11 +313,15 @@ node (z1) is driven by `tools/pfcp-inject` (a PFCP SMF simulator that
 supplies the originator the harness otherwise lacks), originates the ST1
 route, and the peer (z2) receives it. The earlier
 `bgp_mup_capability.feature` covers session-up + capability negotiation.
-Both need root netns and are excluded from CI gates per
+`bgp_mup_mixed_afi.feature` (`@bgp_mup_mixed_afi`) is a variant covering
+the *Draft-default forwarding & mixed-AFI* corrections above — an IPv6 UE
+with an IPv4 endpoint, originated with no SRv6 locator configured, and
+parsed by the peer under the IPv6-MUP AFI. All need root netns and are
+excluded from CI gates per
 [`zebra-rs-ci-and-merge-rules`](../../zebra-rs-ci-and-merge-rules.md) —
-run live (`make -C bdd bgp_mup_e2e`, with `pfcp-inject` staged on PATH).
-Remaining: a receive-from-peer / RR variant (a third node reflecting the
-ST route) is still worth adding.
+run live (`make -C bdd bgp_mup_e2e` / `make -C bdd bgp_mup_mixed_afi`,
+with `pfcp-inject` staged on PATH). Remaining: a receive-from-peer / RR
+variant (a third node reflecting the ST route) is still worth adding.
 
 **Where:** `bdd/tests/features/bgp_mup_e2e.feature`, `tools/pfcp-inject/`.
 
@@ -279,42 +350,47 @@ session schema question is therefore answered by PFCP itself (no custom
 zenoh encoding to design).
 
 * **Config home:** under the BGP instance at `router bgp afi-safi
-  mobile-uplane mup-c { enable; controller-address; pfcp {…}; srv6 {…} }`
+  mup mup-c { enable; controller-address; pfcp {…}; srv6 {…} }`
   — so the controller is spawned by the BGP task and handed its `Message`
   channel, the way a per-VRF BGP instance is. Module: `zebra-rs/src/mup-c/`
   (`inst` task, `pfcp` socket/handlers, `session`/`assoc` tables); spawn /
   reconfigure / teardown in `Bgp::apply_mup_c_commit_diff`.
 * **PR-A (ingest):** PFCP listener (own tokio UDP socket); Association
   Setup/Release, Heartbeat, Session Establishment/Modification/Deletion;
-  per-session table; `show bgp mobile-uplane mup-c [session|association]`.
+  per-session table; `show bgp mup mup-c [session|association]`.
   Hardened (commit security review): session-ownership check on
   Modify/Delete, association precondition on Establish, bounded tables.
 * **PR-B (origination):** `Bgp::originate_mup_route` correlates the
-  session's Network Instance → a per-VRF `mobile-uplane` config (RD /
-  route-targets / direction), allocates an SRv6 SID (`alloc_mup_sid`,
-  same pool as the L3VPN End.DT46 path), builds the ST NLRI
-  (`encapsulation`→T1ST UE prefix; `decapsulation`→T2ST endpoint+TEID)
-  and attributes (controller-address next hop, RT exports, SRv6 L3
-  Service Prefix-SID End.DT4/DT6), and originates via the P4 advertise
-  path. Tracked per session SEID for stable withdraw.
+  session's Network Instance → a per-VRF `mup` config (RD /
+  route-targets / `route {st1|st2}` direction), builds the ST NLRI
+  (`st1`→T1ST UE prefix; `st2`→T2ST endpoint+TEID) and attributes
+  (controller-address next hop, RT exports), and originates via the P4
+  advertise path. Tracked per session SEID for stable withdraw. As of
+  2026-06-23 it allocates **no** SRv6 SID — see *Draft-default
+  forwarding* above. (PR-B as originally landed did allocate an
+  End.DT4/6 Prefix-SID; that was removed to match the draft default.)
 * **PR-C (e2e):** `tools/pfcp-inject` (PFCP SMF simulator) + the
   `@bgp_mup_e2e` BDD feature (#14). Live-validated end-to-end.
 
 **Deferred from P5:** the VPNv6 UE host route originally listed here was
-dropped — the ST routes carry the per-session SRv6 service directly.
-Heartbeat-driven eviction of idle PFCP associations and per-source rate
-limiting are follow-ups (the tables are bounded by hard caps today). The
-controller draws SIDs from the **global** resolved locator; honouring a
-distinct `mup-c srv6 locator` override is a small follow-up.
+dropped. Heartbeat-driven eviction of idle PFCP associations and
+per-source rate limiting are follow-ups (the tables are bounded by hard
+caps today). The controller-pushed *explicit*-SID origination mode (and
+its `mup-c srv6 locator` source) is a follow-up — the default is now
+PE-derived forwarding, see *Draft-default forwarding* above.
 
 ### P6 — SRv6-mobile dataplane
 
-**What:** Install the FIB state for MUP-derived routes. Per the chosen
-"install what the kernel supports" scope: program `End.DT4/6` + the
-route-level SIDs we already do for L3VPN/SRv6, and flag the GTP
-behaviours (`End.M.GTP4.E` / `End.M.GTP6.E` / `GTP4.E` / `GTP6.E`) as
-needing VPP or eBPF — mainline Linux `seg6local` has no `End.M.GTP*`
-actions. See the kernel-support note in
+**What:** Install the FIB state that actually forwards MUP traffic. With
+the draft-default model (see *Draft-default forwarding* above), the PE
+receiving an ST route resolves its forwarding SID from the matching
+ISD / DSD route rather than from a SID carried on the ST route — so P6
+gains an *ISD/DSD-route → segment-SID resolution* step ahead of the FIB
+write. Per the chosen "install what the kernel supports" scope: program
+`End.DT4/6` + the route-level SIDs we already do for L3VPN/SRv6, and flag
+the GTP behaviours (`End.M.GTP4.E` / `End.M.GTP6.E` / `GTP4.E` /
+`GTP6.E`) as needing VPP or eBPF — mainline Linux `seg6local` has no
+`End.M.GTP*` actions. See the kernel-support note in
 [`bgp-prefix-sid-rfc9252.md`](bgp-prefix-sid-rfc9252.md) and
 [`srv6-l3vpn` forwarding notes](../../zebra-rs-srv6-l3vpn-forwarding-bugs.md).
 
@@ -326,7 +402,7 @@ actions. See the kernel-support note in
 
 By value-per-line, if picking one up independently of P5/P6:
 
-1. **#7 (`show bgp mobile-uplane` JSON)** — cheap, mechanical, zero risk.
+1. **#7 (`show bgp mup` JSON)** — cheap, mechanical, zero risk.
 2. **#11 (eBGP v6 next-hop-self)** — small RFC-correctness fix.
 3. **#4 (RFC 7606 attr-level treat-as-withdraw for MUP)** — closes a
    small correctness/robustness gap on malformed UPDATEs.

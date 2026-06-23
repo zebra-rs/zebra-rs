@@ -123,7 +123,7 @@ impl<N: Ord> Default for BgpVrfAfConfig<N> {
 }
 
 /// SRv6 mobile user-plane direction for a per-VRF MUP service
-/// (zebra-bgp-vrf.yang `mobile-uplane route {st1|st2}`). `Decapsulation`
+/// (zebra-bgp-vrf.yang `mup route {st1|st2}`). `Decapsulation`
 /// is the `st2` egress/uplink (Type-2 ST, the N3 VRF); `Encapsulation`
 /// is the `st1` ingress/downlink (Type-1 ST, the N6 VRF).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -132,10 +132,10 @@ pub enum MupSrv6Direction {
     Encapsulation,
 }
 
-/// `mobile-uplane route {st1|st2} dest-network-instance {access|core}
+/// `mup route {st1|st2} dest-network-instance {access|core}
 /// exact <ni>` for one VRF: the ST route type (as a direction) plus the
 /// session network-instance matched exactly. Surfaced in
-/// `show bgp mobile-uplane` (the `MUP VRFs:` block) and consumed by the
+/// `show bgp mup` (the `MUP VRFs:` block) and consumed by the
 /// P5 MUP controller when it originates ST routes (st2/Decapsulation →
 /// Type-2 ST, the N3 VRF; st1/Encapsulation → Type-1 ST, the N6 VRF).
 #[derive(Debug, Clone)]
@@ -144,13 +144,14 @@ pub struct MupSrv6Mobile {
     pub network_instance: Option<String>,
 }
 
-/// Per-VRF BGP MUP (RFC 9833) service config — the `mobile-uplane`
-/// container in zebra-bgp-vrf.yang. The route-targets tag the ST
-/// routes the controller originates from this VRF (RT shares the RD
-/// wire format, so it is stored as a `RouteDistinguisher`).
+/// Per-VRF BGP MUP (RFC 9833) service config — the `mup`
+/// container under `router bgp vrf <name>` in zebra-bgp-vrf.yang. Holds
+/// only the `route {st1|st2}` origination binding; the export/import
+/// route-targets live on the top-level `vrf <name> mup
+/// route-target {export|import}` (RIB-owned, surfaced to BGP via
+/// `rib_known_vrfs`), the same framework as ipv4 / ipv6.
 #[derive(Default, Debug, Clone)]
 pub struct BgpVrfMobileUplane {
-    pub route_target_export: BTreeSet<RouteDistinguisher>,
     pub srv6_mobile: Option<MupSrv6Mobile>,
 }
 
@@ -178,7 +179,7 @@ pub struct BgpVrfConfig {
     /// forwarding per-VRF. Default `false` (ordinary L3VPN VRF).
     pub inter_as_hybrid: bool,
     /// Per-VRF BGP MUP (RFC 9833) service config. Mirrors the
-    /// `mobile-uplane` container in zebra-bgp-vrf.yang.
+    /// `mup` container in zebra-bgp-vrf.yang.
     pub mobile_uplane: BgpVrfMobileUplane,
 }
 
@@ -275,41 +276,7 @@ pub fn config_vrf_inter_as_hybrid(bgp: &mut Bgp, mut args: Args, op: ConfigOp) -
     Some(())
 }
 
-/// `set router bgp vrf <NAME> mobile-uplane route-target export <RT>...`
-/// — the route-targets attached to MUP ST routes originated from this
-/// VRF. A leaf-list arrives as one callback call with every value in
-/// the args deque, so the handler loops (project convention).
-pub fn config_vrf_mup_rt_export(bgp: &mut Bgp, mut args: Args, op: ConfigOp) -> Option<()> {
-    let name = args.string()?;
-    let cfg = vrf_entry(bgp, name);
-    match op {
-        ConfigOp::Set => {
-            while let Some(s) = args.string() {
-                if let Ok(rt) = RouteDistinguisher::from_str(&s) {
-                    cfg.mobile_uplane.route_target_export.insert(rt);
-                }
-            }
-        }
-        ConfigOp::Delete => {
-            let mut removed_any = false;
-            while let Some(s) = args.string() {
-                if let Ok(rt) = RouteDistinguisher::from_str(&s) {
-                    cfg.mobile_uplane.route_target_export.remove(&rt);
-                    removed_any = true;
-                }
-            }
-            // A bare `delete ... route-target export` with no value
-            // clears the whole leaf-list.
-            if !removed_any {
-                cfg.mobile_uplane.route_target_export.clear();
-            }
-        }
-        _ => {}
-    }
-    Some(())
-}
-
-/// `set router bgp vrf <NAME> mobile-uplane route st2 dest-network-instance
+/// `set router bgp vrf <NAME> mup route st2 dest-network-instance
 /// core exact <NI>` — Type-2 ST (uplink) origination: egress GTP
 /// decapsulation for the N3 VRF, matched against the session's core
 /// network-instance.
@@ -330,7 +297,7 @@ pub fn config_vrf_mup_route_st2(bgp: &mut Bgp, mut args: Args, op: ConfigOp) -> 
     Some(())
 }
 
-/// `set router bgp vrf <NAME> mobile-uplane route st1 dest-network-instance
+/// `set router bgp vrf <NAME> mup route st1 dest-network-instance
 /// access exact <NI>` — Type-1 ST (downlink) origination: ingress GTP
 /// encapsulation for the N6 VRF, matched against the session's access
 /// network-instance.
@@ -667,21 +634,7 @@ mod tests {
     #[test]
     fn mobile_uplane_default_is_empty() {
         let mup = BgpVrfConfig::default().mobile_uplane;
-        assert!(mup.route_target_export.is_empty());
         assert!(mup.srv6_mobile.is_none());
-    }
-
-    #[test]
-    fn mobile_uplane_rt_export_insert_and_clear() {
-        let mut cfg = BgpVrfConfig::default();
-        let rt1 = RouteDistinguisher::from_str("65000:100").unwrap();
-        let rt2 = RouteDistinguisher::from_str("65000:200").unwrap();
-        cfg.mobile_uplane.route_target_export.insert(rt1);
-        cfg.mobile_uplane.route_target_export.insert(rt2);
-        assert_eq!(cfg.mobile_uplane.route_target_export.len(), 2);
-        assert!(cfg.mobile_uplane.route_target_export.contains(&rt1));
-        cfg.mobile_uplane.route_target_export.clear();
-        assert!(cfg.mobile_uplane.route_target_export.is_empty());
     }
 
     #[test]

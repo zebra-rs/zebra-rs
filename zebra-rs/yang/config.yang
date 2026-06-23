@@ -3010,6 +3010,16 @@ module config {
           "IPv6 unicast (VPNv6 / RFC 4659) route policy for this VRF.";
         uses vrf-route-target-policy;
       }
+      container mup {
+        description
+          "BGP MUP (RFC 9833 / draft-ietf-bess-mup-safi) route policy for
+           this VRF. The export RTs tag the Session-Transformed routes the
+           MUP controller originates from this VRF; the import RTs select
+           which received ST routes belong to it (the import side is
+           reserved for the MUP import dispatch follow-up). Same
+           `route-target {import|export}` shape as ipv4 / ipv6.";
+        uses vrf-route-target-policy;
+      }
     }
     list policy {
       ext:sort "4";

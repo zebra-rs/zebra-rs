@@ -51,16 +51,23 @@ Feature: BGP MUP mixed-AFI Session-Transformed route (IPv6 UE, IPv4 endpoint)
     Then BGP session in "z1" to "192.168.0.2" should be "Established"
     And BGP session in "z2" to "192.168.0.1" should be "Established"
     And show command "show bgp neighbor 192.168.0.2" in namespace "z1" should contain "IPv6 MUP: advertised and received"
-    And show command "show bgp mobile-uplane mup-c" in namespace "z1" should contain "PFCP listen : 192.168.0.1:8805"
+    And show command "show bgp mup mup-c" in namespace "z1" should contain "PFCP listen : 192.168.0.1:8805"
 
   Scenario: IPv6 UE with IPv4 endpoint originates an ST1 route the peer parses
     Given the test topology exists
     When I execute "pfcp-inject --target 192.168.0.1 --port 8805 --ue-ipv6 2001:db8::5 --teid 0x12345678 --endpoint 10.0.0.1 --network-instance access" in namespace "z1"
-    Then show command "show bgp mobile-uplane mup-c session" in namespace "z1" should eventually contain "2001:db8::5"
-    And show command "show bgp mobile-uplane" in namespace "z1" should contain "ue=2001:db8::5/128"
-    And show command "show bgp mobile-uplane" in namespace "z1" should contain "ep=10.0.0.1"
-    And show command "show bgp mobile-uplane" in namespace "z2" should eventually contain "ue=2001:db8::5/128"
-    And show command "show bgp mobile-uplane" in namespace "z2" should contain "ep=10.0.0.1"
+    Then show command "show bgp mup mup-c session" in namespace "z1" should eventually contain "2001:db8::5"
+    And show command "show bgp mup" in namespace "z1" should contain "ue=2001:db8::5/128"
+    And show command "show bgp mup" in namespace "z1" should contain "ep=10.0.0.1"
+    # The export route-target comes from the top-level `vrf mobile-up mup
+    # route-target export` (the ipv4/ipv6 framework), proving it reaches
+    # origination via the RIB -> rib_known_vrfs path.
+    And show command "show bgp mup" in namespace "z1" should contain "RT:65000:200"
+    # Per-VRF MUP view: the global best-path is mirrored into the
+    # mobile-up per-VRF task, so `show bgp vrf mobile-up mup` renders it.
+    And show command "show bgp vrf mobile-up mup" in namespace "z1" should contain "ue=2001:db8::5/128"
+    And show command "show bgp mup" in namespace "z2" should eventually contain "ue=2001:db8::5/128"
+    And show command "show bgp mup" in namespace "z2" should contain "ep=10.0.0.1"
 
   Scenario: Teardown topology
     Given the test topology exists

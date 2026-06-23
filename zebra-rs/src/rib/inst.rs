@@ -276,6 +276,8 @@ pub enum Message {
         ipv4_export_rts: std::collections::BTreeSet<bgp_packet::RouteDistinguisher>,
         ipv6_import_rts: std::collections::BTreeSet<bgp_packet::RouteDistinguisher>,
         ipv6_export_rts: std::collections::BTreeSet<bgp_packet::RouteDistinguisher>,
+        mup_import_rts: std::collections::BTreeSet<bgp_packet::RouteDistinguisher>,
+        mup_export_rts: std::collections::BTreeSet<bgp_packet::RouteDistinguisher>,
     },
     /// Configured `vrf <name> router-id` snapshot from the VRF config
     /// builder, sent on commit after `VrfAdd` (same ordering contract
@@ -1763,6 +1765,8 @@ impl Rib {
                     ipv4_export_rts: vrf.ipv4_export_rts.clone(),
                     ipv6_import_rts: vrf.ipv6_import_rts.clone(),
                     ipv6_export_rts: vrf.ipv6_export_rts.clone(),
+                    mup_import_rts: vrf.mup_import_rts.clone(),
+                    mup_export_rts: vrf.mup_export_rts.clone(),
                 };
                 if tx.send(rt_msg).is_err() {
                     return;
@@ -2358,11 +2362,13 @@ impl Rib {
                         // RT sets arrive separately via
                         // `Message::VrfRouteTargets` once the VRF
                         // config builder has finished parsing
-                        // /vrf/<name>/{ipv4,ipv6}/route-target.
+                        // /vrf/<name>/{ipv4,ipv6,mup}/route-target.
                         ipv4_import_rts: std::collections::BTreeSet::new(),
                         ipv4_export_rts: std::collections::BTreeSet::new(),
                         ipv6_import_rts: std::collections::BTreeSet::new(),
                         ipv6_export_rts: std::collections::BTreeSet::new(),
+                        mup_import_rts: std::collections::BTreeSet::new(),
+                        mup_export_rts: std::collections::BTreeSet::new(),
                     },
                 );
                 // Park an empty per-VRF routing table set keyed by
@@ -2431,6 +2437,8 @@ impl Rib {
                 ipv4_export_rts,
                 ipv6_import_rts,
                 ipv6_export_rts,
+                mup_import_rts,
+                mup_export_rts,
             } => {
                 // Idempotent — the message carries a full snapshot
                 // of the staged RT sets, replacing whatever was on
@@ -2444,6 +2452,8 @@ impl Rib {
                     vrf.ipv4_export_rts = ipv4_export_rts;
                     vrf.ipv6_import_rts = ipv6_import_rts;
                     vrf.ipv6_export_rts = ipv6_export_rts;
+                    vrf.mup_import_rts = mup_import_rts;
+                    vrf.mup_export_rts = mup_export_rts;
                     let vrf_snapshot = vrf.clone();
                     self.api_vrf_route_targets(&vrf_snapshot);
                 } else {

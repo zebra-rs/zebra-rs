@@ -119,9 +119,9 @@ pub enum Message {
     },
     /// A session/association change reported by the in-process MUP
     /// controller (`src/mup-c/`), which the BGP task spawns when
-    /// `afi-safi mobile-uplane mup-c enable true` is committed and hands
+    /// `afi-safi mup mup-c enable true` is committed and hands
     /// `self.tx`. Recorded in [`Bgp::mup_c_view`] for `show bgp
-    /// mobile-uplane mup-c`; MUP route origination from these lands in a
+    /// mup mup-c`; MUP route origination from these lands in a
     /// follow-up. Mirrors the IS-IS `BgpLs` producer seam.
     MupC(crate::mup_c::inst::MupCEvent),
     /// `router bgp port <0-65535>` changed: close the BGP listen
@@ -407,6 +407,12 @@ pub struct RibKnownVrf {
     pub export_rts_v4: std::collections::BTreeSet<bgp_packet::RouteDistinguisher>,
     pub import_rts_v6: std::collections::BTreeSet<bgp_packet::RouteDistinguisher>,
     pub export_rts_v6: std::collections::BTreeSet<bgp_packet::RouteDistinguisher>,
+    /// MUP (mup / SAFI 85) RT sets from the top-level
+    /// `vrf <name> mup route-target {import,export}`. The
+    /// export set tags the controller-originated ST routes; the import
+    /// set is reserved for the MUP import dispatch follow-up.
+    pub mup_import_rts: std::collections::BTreeSet<bgp_packet::RouteDistinguisher>,
+    pub mup_export_rts: std::collections::BTreeSet<bgp_packet::RouteDistinguisher>,
     /// Inter-AS Option AB: copied from the VRF's BGP config
     /// (`inter_as_hybrid`). Lets the shared VPNv4/VPNv6 receive path
     /// (which only borrows `rib_known_vrfs`, not the config map) tell
@@ -634,7 +640,7 @@ pub struct Bgp {
     /// `evpn_originate_imet`; toggling it re-originates all IMET routes via
     /// `reoriginate_all_imet`.
     pub segmentation: bool,
-    /// MUP controller (`afi-safi mobile-uplane mup-c`) config, staged by
+    /// MUP controller (`afi-safi mup mup-c`) config, staged by
     /// the config callbacks and applied at `CommitEnd` by
     /// [`Self::apply_mup_c_commit_diff`].
     pub mup_c_config: crate::mup_c::inst::MupCConfig,
@@ -642,7 +648,7 @@ pub struct Bgp {
     /// aborts the controller task (the VRF-handle idiom).
     pub mup_c: Option<crate::mup_c::inst::MupCHandle>,
     /// Read-only snapshot of the controller's sessions / associations,
-    /// fed by `Message::MupC` and rendered by `show bgp mobile-uplane
+    /// fed by `Message::MupC` and rendered by `show bgp mup
     /// mup-c`.
     pub mup_c_view: crate::mup_c::inst::MupCView,
     /// Set by the MUP-C config callbacks when a `mup-c` leaf changed this
@@ -1974,7 +1980,7 @@ impl Bgp {
             Message::MupC(ev) => {
                 // A session/association change from the in-process MUP
                 // controller. Drive MUP route origination, then record it
-                // in the read-only view `show bgp mobile-uplane mup-c`
+                // in the read-only view `show bgp mup mup-c`
                 // renders.
                 use crate::mup_c::inst::MupCEvent;
                 match &ev {
@@ -3119,6 +3125,14 @@ impl Bgp {
                         .as_ref()
                         .map(|p| p.export_rts_v6.clone())
                         .unwrap_or_default(),
+                    mup_import_rts: prev_rts
+                        .as_ref()
+                        .map(|p| p.mup_import_rts.clone())
+                        .unwrap_or_default(),
+                    mup_export_rts: prev_rts
+                        .as_ref()
+                        .map(|p| p.mup_export_rts.clone())
+                        .unwrap_or_default(),
                     inter_as_hybrid: self
                         .vrfs
                         .get(&name)
@@ -3148,6 +3162,8 @@ impl Bgp {
                 ipv4_export_rts,
                 ipv6_import_rts,
                 ipv6_export_rts,
+                mup_import_rts,
+                mup_export_rts,
             } => {
                 // Mutate-in-place if a `VrfAdd` already populated
                 // the row; otherwise stage the RT cache so a later
@@ -3169,6 +3185,8 @@ impl Bgp {
                 entry.export_rts_v4 = ipv4_export_rts;
                 entry.import_rts_v6 = ipv6_import_rts;
                 entry.export_rts_v6 = ipv6_export_rts;
+                entry.mup_import_rts = mup_import_rts;
+                entry.mup_export_rts = mup_export_rts;
                 entry.inter_as_hybrid = hybrid;
                 // Close the export / RT-learning race: a per-VRF route can
                 // be exported into `v4vpn`/`v6vpn` before this RT policy
@@ -5403,6 +5421,8 @@ mod tests {
                 export_rts_v4: BTreeSet::new(),
                 import_rts_v6: BTreeSet::new(),
                 export_rts_v6: BTreeSet::new(),
+                mup_import_rts: BTreeSet::new(),
+                mup_export_rts: BTreeSet::new(),
                 inter_as_hybrid: false,
             }
         }
@@ -5419,6 +5439,8 @@ mod tests {
                 export_rts_v4: BTreeSet::new(),
                 import_rts_v6,
                 export_rts_v6: BTreeSet::new(),
+                mup_import_rts: BTreeSet::new(),
+                mup_export_rts: BTreeSet::new(),
                 inter_as_hybrid: false,
             }
         }

@@ -31,6 +31,15 @@ pub struct VrfConfig {
     /// IPv6-unicast RT export set —
     /// `set vrf X ipv6 route-target export …`.
     pub ipv6_export_rts: std::collections::BTreeSet<bgp_packet::RouteDistinguisher>,
+    /// MUP (mup / SAFI 85) RT import set —
+    /// `set vrf X mup route-target import …`. Reserved for the
+    /// MUP import dispatch follow-up; carried for framework parity.
+    pub mup_import_rts: std::collections::BTreeSet<bgp_packet::RouteDistinguisher>,
+    /// MUP (mup / SAFI 85) RT export set —
+    /// `set vrf X mup route-target export …`. Tags the
+    /// Session-Transformed routes the MUP controller originates from this
+    /// VRF.
+    pub mup_export_rts: std::collections::BTreeSet<bgp_packet::RouteDistinguisher>,
 }
 
 #[cfg(test)]

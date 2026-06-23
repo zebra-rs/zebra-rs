@@ -1,7 +1,7 @@
 # z2 — MUP route receiver. AS 65001, iBGP to z1 (192.168.0.1) with the
-# mobile-uplane afi-safi negotiated. Plain BGP speaker: it has no
+# mup afi-safi negotiated. Plain BGP speaker: it has no
 # controller and originates nothing, but receives the Type-1 ST route the
-# controller (z1) originates and shows it under `show bgp mobile-uplane`.
+# controller (z1) originates and shows it under `show bgp mup`.
 router:
   bgp:
     global:
@@ -14,5 +14,5 @@ router:
       afi-safi:
       - name: ipv4
         enabled: true
-      - name: mobile-uplane
+      - name: mup
         enabled: true

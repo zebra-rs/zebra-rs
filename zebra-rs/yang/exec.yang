@@ -356,7 +356,7 @@ module exec {
           }
         }
       }
-      container mobile-uplane {
+      container mup {
         ext:help "BGP Mobile User Plane (MUP) RIB";
         presence "BGP Mobile User Plane (MUP) RIB";
         leaf summary {
@@ -443,6 +443,10 @@ module exec {
         }
         leaf neighbor {
           ext:help "Detailed information on this VRF's BGP neighbors";
+          type empty;
+        }
+        leaf mup {
+          ext:help "This VRF's BGP Mobile User Plane (MUP) RIB";
           type empty;
         }
         uses bgp-show-afi-rib;

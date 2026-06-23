@@ -86,6 +86,10 @@ pub async fn process_vrf_show(vrf: &BgpVrf, msg: DisplayRequest) {
         "/show/bgp/ipv4/longer-prefix" => show_bgp_ipv4_longer(vrf, args, msg.json),
         "/show/bgp/ipv6" => show_bgp_ipv6(vrf, args, msg.json),
         "/show/bgp/ipv6/longer-prefix" => show_bgp_ipv6_longer(vrf, args, msg.json),
+        // `show bgp vrf <name> mup` — the manager strips `vrf <name>`, so
+        // the per-VRF task sees `/show/bgp/mup` and renders the MUP routes
+        // the global instance mirrored to it (by matching RD).
+        "/show/bgp/mup" => show_bgp_vrf_mup(vrf, args, msg.json),
         other => Ok(format!("% Unsupported per-VRF show command: {other}\n")),
     };
     let out = out.unwrap_or_else(|e| format!("Error formatting output: {e}"));
@@ -2048,8 +2052,8 @@ fn show_bgp_evpn_summary(
     show_bgp_summary_one(bgp, AfiSafi::new(Afi::L2vpn, Safi::Evpn), json)
 }
 
-/// `show bgp mobile-uplane summary` — the MUP (SAFI 85, RFC 9833)
-/// neighbor summary. `mobile-uplane` enables both IPv4-MUP and IPv6-MUP
+/// `show bgp mup summary` — the MUP (SAFI 85, RFC 9833)
+/// neighbor summary. `mup` enables both IPv4-MUP and IPv6-MUP
 /// at once (RFC 9833), so this renders both sections — the MUP slice of
 /// `show bgp summary` — listing the neighbors that have each MUP family
 /// enabled and whether they negotiated the capability.
@@ -3505,7 +3509,7 @@ fn show_mup_ecom(attr: &BgpAttr) -> String {
 }
 
 /// Render a `MupPrefix` as the bracketed `[TYPE][rd][fields]` form used by
-/// `show bgp mobile-uplane`, following the MUP NLRI layout (RFC 9833).
+/// `show bgp mup`, following the MUP NLRI layout (RFC 9833).
 fn mup_prefix_display(prefix: &MupPrefix) -> String {
     match prefix {
         MupPrefix::Dsd { rd, address } => format!("[DSD][{rd}][{address}]"),
@@ -3533,7 +3537,7 @@ fn mup_prefix_display(prefix: &MupPrefix) -> String {
     }
 }
 
-/// `show bgp mobile-uplane mup-c` — MUP controller (MUP-C) status: admin
+/// `show bgp mup mup-c` — MUP controller (MUP-C) status: admin
 /// state, the PFCP listener, and association / session counts. Rendered
 /// from the read-only [`crate::mup_c::inst::MupCView`] the controller
 /// feeds over `Message::MupC`.
@@ -3566,7 +3570,7 @@ fn show_bgp_mup_c(
     Ok(buf)
 }
 
-/// `show bgp mobile-uplane mup-c session` — the PFCP sessions the
+/// `show bgp mup mup-c session` — the PFCP sessions the
 /// controller has learned (one row each).
 fn show_bgp_mup_c_session(
     bgp: &Bgp,
@@ -3611,7 +3615,7 @@ fn show_bgp_mup_c_session(
     Ok(buf)
 }
 
-/// `show bgp mobile-uplane mup-c association` — the PFCP associations
+/// `show bgp mup mup-c association` — the PFCP associations
 /// (control-plane peers) the controller currently holds.
 fn show_bgp_mup_c_association(
     bgp: &Bgp,
@@ -3629,8 +3633,8 @@ fn show_bgp_mup_c_association(
     Ok(buf)
 }
 
-/// `show bgp mobile-uplane` — the MUP (SAFI 85, RFC 9833) view: the
-/// config-driven `MUP VRFs:` block (per-VRF `mobile-uplane` services)
+/// `show bgp mup` — the MUP (SAFI 85, RFC 9833) view: the
+/// config-driven `MUP VRFs:` block (per-VRF `mup` services)
 /// followed by the Loc-RIB route table. The full `MUP controller:`
 /// wrapper (zenoh source + ingested sessions) lands with the controller
 /// phase.
@@ -3642,12 +3646,28 @@ fn show_bgp_mup(
     if json {
         return Ok(String::from("[]"));
     }
-    let mut out = render_mup_vrfs(&bgp.vrfs)?;
+    let mut out = render_mup_vrfs(&bgp.vrfs, &bgp.rib_known_vrfs)?;
     if !out.is_empty() {
         out.push('\n');
     }
     out.push_str(&render_mup_table(&bgp.local_rib.mup)?);
     Ok(out)
+}
+
+/// `show bgp vrf <name> mup` — the per-VRF MUP view. The manager
+/// redirects this into the VRF's task, which holds the MUP best-paths the
+/// global instance mirrored to it (those whose RD matches this VRF's
+/// `rd`); renders just the route table. Generic over [`BgpShowView`] so it
+/// runs against either the per-VRF task or (in tests) any view.
+fn show_bgp_vrf_mup<V: BgpShowView>(
+    bgp: &V,
+    _args: Args,
+    json: bool,
+) -> std::result::Result<String, std::fmt::Error> {
+    if json {
+        return Ok(String::from("[]"));
+    }
+    render_mup_table(&bgp.local_rib().mup)
 }
 
 /// Render the MUP Loc-RIB table body. Split out from `show_bgp_mup` so it
@@ -3679,20 +3699,27 @@ fn render_mup_table(
     Ok(buf)
 }
 
-/// Render the configured per-VRF MUP services (the `mobile-uplane`
-/// blocks) as the `MUP VRFs:` section of `show bgp mobile-uplane`.
+/// Render the configured per-VRF MUP services (the `mup`
+/// blocks) as the `MUP VRFs:` section of `show bgp mup`.
 /// Config-driven only; returns an empty string when no VRF carries a
-/// `mobile-uplane` config. The full `MUP controller:` wrapper lands with
+/// `mup` config. The full `MUP controller:` wrapper lands with
 /// the controller phase.
 fn render_mup_vrfs(
     vrfs: &std::collections::BTreeMap<String, super::vrf_config::BgpVrfConfig>,
+    rib_known_vrfs: &std::collections::BTreeMap<String, super::inst::RibKnownVrf>,
 ) -> std::result::Result<String, std::fmt::Error> {
     use super::vrf_config::MupSrv6Direction;
     let mut buf = String::new();
     let mut any = false;
     for (name, cfg) in vrfs {
         let mup = &cfg.mobile_uplane;
-        if mup.srv6_mobile.is_none() && mup.route_target_export.is_empty() {
+        // The export RTs live on the top-level `vrf <name> mup
+        // route-target export`, surfaced to BGP via `rib_known_vrfs`.
+        let rts = rib_known_vrfs
+            .get(name)
+            .map(|k| k.mup_export_rts.len())
+            .unwrap_or(0);
+        if mup.srv6_mobile.is_none() && rts == 0 {
             continue;
         }
         if !any {
@@ -3704,7 +3731,6 @@ fn render_mup_vrfs(
             .as_ref()
             .map(|r| r.to_string())
             .unwrap_or_else(|| "-".into());
-        let rts = mup.route_target_export.len();
         match &mup.srv6_mobile {
             Some(sm) => {
                 let (dir, st) = match sm.direction {
@@ -4756,16 +4782,14 @@ mod detail_tests {
 
     #[test]
     fn render_mup_vrfs_lists_configured_services() {
+        use super::super::inst::RibKnownVrf;
         use super::super::vrf_config::{
             BgpVrfConfig, BgpVrfMobileUplane, MupSrv6Direction, MupSrv6Mobile,
         };
-        use std::collections::{BTreeMap, BTreeSet};
+        use std::collections::BTreeMap;
         let n3 = BgpVrfConfig {
             rd: Some("65000:1".parse().unwrap()),
             mobile_uplane: BgpVrfMobileUplane {
-                route_target_export: ["65000:100".parse().unwrap()]
-                    .into_iter()
-                    .collect::<BTreeSet<_>>(),
                 srv6_mobile: Some(MupSrv6Mobile {
                     direction: MupSrv6Direction::Decapsulation,
                     network_instance: Some("core-ni".to_string()),
@@ -4776,9 +4800,6 @@ mod detail_tests {
         let n6 = BgpVrfConfig {
             rd: Some("65000:2".parse().unwrap()),
             mobile_uplane: BgpVrfMobileUplane {
-                route_target_export: ["65000:200".parse().unwrap()]
-                    .into_iter()
-                    .collect::<BTreeSet<_>>(),
                 srv6_mobile: Some(MupSrv6Mobile {
                     direction: MupSrv6Direction::Encapsulation,
                     network_instance: Some("access-ni".to_string()),
@@ -4790,18 +4811,37 @@ mod detail_tests {
         vrfs.insert("N3".to_string(), n3);
         vrfs.insert("N6".to_string(), n6);
 
-        let out = render_mup_vrfs(&vrfs).unwrap();
+        // The export RTs now come from `rib_known_vrfs` (the top-level
+        // `vrf <name> mup route-target export`).
+        let mut rib_known_vrfs: BTreeMap<String, RibKnownVrf> = BTreeMap::new();
+        rib_known_vrfs.insert(
+            "N3".to_string(),
+            RibKnownVrf {
+                mup_export_rts: ["65000:100".parse().unwrap()].into_iter().collect(),
+                ..Default::default()
+            },
+        );
+        rib_known_vrfs.insert(
+            "N6".to_string(),
+            RibKnownVrf {
+                mup_export_rts: ["65000:200".parse().unwrap()].into_iter().collect(),
+                ..Default::default()
+            },
+        );
+
+        let out = render_mup_vrfs(&vrfs, &rib_known_vrfs).unwrap();
         assert!(out.contains("MUP VRFs:"));
         assert!(out.contains("N3: rd=65000:1 decap/ST2 ni=core-ni route-targets=1"));
         assert!(out.contains("N6: rd=65000:2 encap/ST1 ni=access-ni route-targets=1"));
 
-        // No mobile-uplane config anywhere → empty section.
+        // No mup config anywhere → empty section.
         let empty: BTreeMap<String, BgpVrfConfig> = BTreeMap::new();
-        assert!(render_mup_vrfs(&empty).unwrap().is_empty());
+        let empty_rib: BTreeMap<String, RibKnownVrf> = BTreeMap::new();
+        assert!(render_mup_vrfs(&empty, &empty_rib).unwrap().is_empty());
     }
 
     /// End-to-end render of the MUP Loc-RIB table: exercises
-    /// `LocalRibMupTable::update`/best-path and the `show bgp mobile-uplane`
+    /// `LocalRibMupTable::update`/best-path and the `show bgp mup`
     /// route-table body against the documented mockup shape.
     #[test]
     fn render_mup_table_matches_mockup_shape() {
@@ -5660,15 +5700,15 @@ impl Bgp {
             .set(show_bgp_evpn)
             .path("/show/bgp/evpn/route-type")
             .set(show_bgp_evpn)
-            .path("/show/bgp/mobile-uplane")
+            .path("/show/bgp/mup")
             .set(show_bgp_mup)
-            .path("/show/bgp/mobile-uplane/summary")
+            .path("/show/bgp/mup/summary")
             .set(show_bgp_mup_summary)
-            .path("/show/bgp/mobile-uplane/mup-c")
+            .path("/show/bgp/mup/mup-c")
             .set(show_bgp_mup_c)
-            .path("/show/bgp/mobile-uplane/mup-c/session")
+            .path("/show/bgp/mup/mup-c/session")
             .set(show_bgp_mup_c_session)
-            .path("/show/bgp/mobile-uplane/mup-c/association")
+            .path("/show/bgp/mup/mup-c/association")
             .set(show_bgp_mup_c_association)
             .path("/show/bgp/summary")
             .set(show_bgp_summary::<Bgp>)
@@ -5687,6 +5727,8 @@ impl Bgp {
             .path("/show/bgp/vrf/ipv6")
             .set(show_bgp_vrf_not_running)
             .path("/show/bgp/vrf/ipv6/longer-prefix")
+            .set(show_bgp_vrf_not_running)
+            .path("/show/bgp/vrf/mup")
             .set(show_bgp_vrf_not_running)
             .map();
     }

@@ -1520,7 +1520,7 @@ fn config_afi_safi(bgp: &mut Bgp, mut args: Args, op: ConfigOp) -> Option<()> {
         // set through the default < group < explicit precedence. A Delete
         // simply forgets the statement: IPv4 unicast falls back to the
         // built-in default (or the group's opinion), other families to
-        // off (or the group's opinion). The `mobile-uplane` name expands to
+        // off (or the group's opinion). The `mup` name expands to
         // both the IPv4 and IPv6 MUP families (RFC 9833).
         if op.is_set() {
             let enabled = enabled?;
@@ -1718,12 +1718,12 @@ fn config_segmentation(bgp: &mut Bgp, mut args: Args, op: ConfigOp) -> Option<()
     Some(())
 }
 
-// --- MUP controller config (afi-safi mobile-uplane mup-c) -------------
+// --- MUP controller config (afi-safi mup mup-c) -------------
 //
-// `router bgp afi-safi mobile-uplane mup-c { enable; controller-address;
+// `router bgp afi-safi mup mup-c { enable; controller-address;
 // pfcp { node-id; listen-address; port }; srv6 { locator }; architecture }`
 // (augmented in by zebra-bgp-mup-controller.yang). Every callback gates on
-// the list entry's afi-safi being `mobile-uplane` (Safi::Mup) and mutates
+// the list entry's afi-safi being `mup` (Safi::Mup) and mutates
 // the staged `mup_c_config`, marking it dirty. The spawn / teardown /
 // reconfigure of the controller task happens at CommitEnd in
 // `Bgp::apply_mup_c_commit_diff` — these only stage config.
@@ -4082,15 +4082,11 @@ impl Bgp {
             super::vrf_config::config_vrf_evpn_advertise_ipv6,
         );
         self.callback_add(
-            "/router/bgp/vrf/mobile-uplane/route-target/export",
-            super::vrf_config::config_vrf_mup_rt_export,
-        );
-        self.callback_add(
-            "/router/bgp/vrf/mobile-uplane/route/st2/dest-network-instance/core/exact",
+            "/router/bgp/vrf/mup/route/st2/dest-network-instance/core/exact",
             super::vrf_config::config_vrf_mup_route_st2,
         );
         self.callback_add(
-            "/router/bgp/vrf/mobile-uplane/route/st1/dest-network-instance/access/exact",
+            "/router/bgp/vrf/mup/route/st1/dest-network-instance/access/exact",
             super::vrf_config::config_vrf_mup_route_st1,
         );
 
@@ -4238,7 +4234,7 @@ impl Bgp {
         // Flags EC's segmentation bit rides the originated Type-3 IMET route.
         self.callback_add("/router/bgp/afi-safi/segmentation", config_segmentation);
 
-        // MUP controller (`afi-safi mobile-uplane mup-c …`, RFC 9833).
+        // MUP controller (`afi-safi mup mup-c …`, RFC 9833).
         // Augmented in by zebra-bgp-mup-controller.yang; the controller
         // task is spawned/torn down at CommitEnd by `apply_mup_c_commit_diff`.
         self.callback_add("/router/bgp/afi-safi/mup-c/enable", config_mup_c_enable);
@@ -6121,7 +6117,7 @@ mod neighbor_group_wiring_tests {
         // Enabling a new family on the group bounces the Established member.
         config_neighbor_group_afi_safi_enabled(
             &mut bgp,
-            arg_words(&["G", "mobile-uplane", "true"]),
+            arg_words(&["G", "mup", "true"]),
             ConfigOp::Set,
         )
         .unwrap();
@@ -6134,7 +6130,7 @@ mod neighbor_group_wiring_tests {
         // A redundant set (no family-set change) must not bounce.
         config_neighbor_group_afi_safi_enabled(
             &mut bgp,
-            arg_words(&["G", "mobile-uplane", "true"]),
+            arg_words(&["G", "mup", "true"]),
             ConfigOp::Set,
         )
         .unwrap();
@@ -6146,7 +6142,7 @@ mod neighbor_group_wiring_tests {
         // Disabling the family again also bounces (capability withdrawn).
         config_neighbor_group_afi_safi_enabled(
             &mut bgp,
-            arg_words(&["G", "mobile-uplane", "true"]),
+            arg_words(&["G", "mup", "true"]),
             ConfigOp::Delete,
         )
         .unwrap();
@@ -6198,12 +6194,12 @@ mod neighbor_group_wiring_tests {
     /// fixed at OPEN time, so the session must bounce (`Event::Stop`, the
     /// `clear bgp ... hard` teardown) to renegotiate. This is NOT
     /// MUP-specific — pinned across IPv6 unicast, EVPN, VPNv4 and
-    /// mobile-uplane. A peer that has not Established yet carries the change
+    /// mup. A peer that has not Established yet carries the change
     /// in its first OPEN (no bounce); a redundant set leaves the family set
     /// unchanged (no bounce).
     #[tokio::test]
     async fn afi_safi_change_bounces_established_peer() {
-        for fam in ["ipv6", "evpn", "vpnv4", "mobile-uplane"] {
+        for fam in ["ipv6", "evpn", "vpnv4", "mup"] {
             let mut bgp = fresh_bgp();
             config_peer(&mut bgp, arg_words(&["10.0.0.1"]), ConfigOp::Set).unwrap();
             let peer_ident = bgp.peers.get(&peer_addr()).unwrap().ident;
