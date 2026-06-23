@@ -25,7 +25,7 @@ pub use sid::{BgpSidPool, Srv6VrfSid};
 // `msg::BgpVrfMsg` stay internal — they're constructed / consumed
 // inside `vrf::spawn` only.
 pub use inst::{
-    VrfExporter, VrfImportDispatcher, dispatch_import_v4, dispatch_import_v6,
+    VrfExporter, VrfImportDispatcher, dispatch_import_v4, dispatch_import_v6, dispatch_mup,
     dispatch_withdraw_import_v4, dispatch_withdraw_import_v6, vrf_emit_export, vrf_emit_export_v6,
     vrf_emit_withdraw, vrf_emit_withdraw_v6,
 };

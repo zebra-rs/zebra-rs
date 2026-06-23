@@ -7427,6 +7427,12 @@ pub fn route_mup_update(
     rib.attr = bgp.attr_store.intern(attr.clone());
     let _ = bgp.local_rib.update_mup(prefix.clone(), rib);
     let selected = bgp.local_rib.select_best_path_mup(&prefix);
+    // Mirror the new best-path to every VRF whose `mup import` RT set
+    // matches, so `show bgp vrf <name> mup` reflects peer-learned routes
+    // (display only; the global Loc-RIB stays authoritative).
+    if let Some(dispatcher) = bgp.vrf_import {
+        super::vrf::dispatch_mup(dispatcher, &prefix, selected.first());
+    }
     if !selected.is_empty() {
         route_advertise_mup_to_peers(prefix, &selected, bgp, peers);
     }
@@ -7443,6 +7449,12 @@ pub fn route_mup_withdraw(ident: usize, route: &MupRoute, bgp: &mut BgpTop, peer
     }
     let _ = bgp.local_rib.remove_mup(&prefix, id, ident);
     let selected = bgp.local_rib.select_best_path_mup(&prefix);
+    // Mirror the post-withdraw state to per-VRF tasks: a remaining best
+    // path is re-forwarded (matched by RT), otherwise the prefix is
+    // withdrawn from every VRF's display copy.
+    if let Some(dispatcher) = bgp.vrf_import {
+        super::vrf::dispatch_mup(dispatcher, &prefix, selected.first());
+    }
     if selected.is_empty() {
         route_withdraw_mup_to_peers(prefix, peers);
     } else {

@@ -299,6 +299,26 @@ pub(crate) fn matching_import_vrfs_v6(
         .collect()
 }
 
+/// MUP (SAFI 85) counterpart of [`matching_import_vrfs`] — intersects
+/// against each VRF's `mup_import_rts` (the top-level `vrf <name> mup
+/// route-target import` set). Drives the display-only mirror of
+/// peer-learned MUP best-paths into per-VRF tasks for
+/// `show bgp vrf <name> mup`.
+pub(crate) fn matching_import_vrfs_mup(
+    vrf_index: &BTreeMap<String, RibKnownVrf>,
+    ecom: &Option<bgp_packet::ExtCommunity>,
+) -> Vec<String> {
+    let route_rts = route_rts_from_ecom(ecom);
+    if route_rts.is_empty() {
+        return Vec::new();
+    }
+    vrf_index
+        .iter()
+        .filter(|(_, info)| !info.mup_import_rts.is_disjoint(&route_rts))
+        .map(|(name, _)| name.clone())
+        .collect()
+}
+
 /// Extract the route-target set a route carries: every extended
 /// community with RT sub-type (`low_type == 0x02`), reinterpreted as a
 /// `RouteDistinguisher` (RT and RD share the on-wire 6-octet shape).
@@ -5396,7 +5416,7 @@ mod tests {
 
         use super::super::{
             RibKnownVrf, import_targets, import_targets_v6, matching_import_vrfs,
-            matching_import_vrfs_v6,
+            matching_import_vrfs_mup, matching_import_vrfs_v6,
         };
 
         fn rt(s: &str) -> RouteDistinguisher {
@@ -5518,6 +5538,56 @@ mod tests {
             let mut got = import_targets(&index, &ecom, None);
             got.sort();
             assert_eq!(got, vec!["v1".to_string(), "v2".to_string()]);
+        }
+
+        fn vrf_with_mup_imports(rts: &[&str]) -> RibKnownVrf {
+            let mut mup_import_rts = BTreeSet::new();
+            for s in rts {
+                mup_import_rts.insert(rt(s));
+            }
+            RibKnownVrf {
+                table_id: 100,
+                ifindex: 1,
+                import_rts_v4: BTreeSet::new(),
+                export_rts_v4: BTreeSet::new(),
+                import_rts_v6: BTreeSet::new(),
+                export_rts_v6: BTreeSet::new(),
+                mup_import_rts,
+                mup_export_rts: BTreeSet::new(),
+                inter_as_hybrid: false,
+            }
+        }
+
+        #[test]
+        fn mup_rt_matches_mup_importing_vrf() {
+            // A peer-learned MUP route carrying RT 65501:10 is mirrored
+            // into the VRF whose `mup import` set contains it.
+            let mut index = BTreeMap::new();
+            index.insert("N3".to_string(), vrf_with_mup_imports(&["65501:10"]));
+            index.insert("N4".to_string(), vrf_with_mup_imports(&["65501:20"]));
+            let ecom = Some(ExtCommunity::from([rt_extcom("65501:10")]));
+            assert_eq!(
+                matching_import_vrfs_mup(&index, &ecom),
+                vec!["N3".to_string()]
+            );
+        }
+
+        #[test]
+        fn mup_ignores_v4_import_rts() {
+            // The MUP fan-out keys on `mup_import_rts` only: a VRF that
+            // imports the same RT for VPNv4 unicast (but not MUP) must
+            // not receive the MUP route.
+            let mut index = BTreeMap::new();
+            index.insert("v1".to_string(), vrf_with_imports(&["65501:10"]));
+            let ecom = Some(ExtCommunity::from([rt_extcom("65501:10")]));
+            assert!(matching_import_vrfs_mup(&index, &ecom).is_empty());
+        }
+
+        #[test]
+        fn mup_no_ecom_matches_no_vrf() {
+            let mut index = BTreeMap::new();
+            index.insert("N3".to_string(), vrf_with_mup_imports(&["65501:10"]));
+            assert!(matching_import_vrfs_mup(&index, &None).is_empty());
         }
 
         #[test]
