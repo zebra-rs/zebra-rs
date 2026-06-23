@@ -125,6 +125,55 @@ pub async fn delete_bridge(bridge_name: &str) -> Result<()> {
     .await
 }
 
+/// Remove stray global-scope addresses left on the HOST loopback.
+///
+/// A router config that puts a `/32` on `interface lo` adds it to the
+/// loopback of whatever namespace the daemon runs in. When such a daemon
+/// leaks into — or is run by hand in — the host namespace, its loopback
+/// address persists on the host `lo` after teardown (deleting a netns
+/// can't reclaim an address that was added to the host's own `lo`). That
+/// stray address then poisons every later feature that peers over
+/// loopbacks across a bridge: the bridge lives in the host namespace, so
+/// when a namespace ARPs for its bridge-subnet next-hop the host answers
+/// for the leaked address with the bridge's MAC and silently black-holes
+/// one direction of the session — the peer wedges in Connect until the
+/// ~120s ConnectRetryTimer, far past any scenario wait. (Diagnosed on
+/// `@bgp_disable_connected_check`, whose z2→z1 loopback path died exactly
+/// this way against a stale `10.0.0.1/32` on the host `lo`.)
+///
+/// `scope global` excludes real loopback (127.0.0.0/8 and ::1 are scope
+/// host), so this only ever deletes leaked test addresses — there is no
+/// legitimate global address on a BDD host's `lo`.
+pub async fn sweep_host_loopback_addrs() -> Result<()> {
+    let output = Command::new("ip")
+        .args(["-o", "addr", "show", "dev", "lo", "scope", "global"])
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .output()
+        .await
+        .context("Failed to list host loopback addresses")?;
+
+    let text = String::from_utf8_lossy(&output.stdout);
+    for line in text.lines() {
+        // `N: lo    inet 10.0.0.1/32 scope global lo \ ...` — pull the
+        // CIDR token right after `inet` / `inet6`.
+        let mut tokens = line.split_whitespace();
+        while let Some(tok) = tokens.next() {
+            if tok == "inet" || tok == "inet6" {
+                if let Some(addr) = tokens.next() {
+                    let _ = run_cmd(
+                        &["ip", "addr", "del", addr, "dev", "lo"],
+                        &format!("Failed to delete stray host lo address {}", addr),
+                    )
+                    .await;
+                }
+                break;
+            }
+        }
+    }
+    Ok(())
+}
+
 /// Create a veth pair and connect a namespace to a bridge.
 ///
 /// `veth_host` must be unique in the host's default namespace.
