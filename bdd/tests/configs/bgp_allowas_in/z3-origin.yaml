@@ -18,6 +18,12 @@ router:
         enabled: true
       enabled: true
       remote-as: 65002
+      # Short connect-retry so a hard-clear reconnect that collides
+      # (both sides land in Active) re-dials in seconds instead of
+      # parking on the 120s default — keeps the fixed 30s settle waits
+      # in this feature reliable under full-suite load.
+      timers:
+        connect-retry-time: 3
       # origin mode → accept only when our AS is the route's origin.
       # (`origin:` is a `type empty` leaf → `set ... allowas-in origin`.)
       allowas-in:
