@@ -94,8 +94,10 @@ router bgp {
       route-target {
         export 65000:200;
       }
-      srv6-mobile encapsulation {
-        network-instance exact access;
+      route st1 {
+        dest-network-instance access {
+          exact access;
+        }
       }
     }
   }
@@ -130,12 +132,11 @@ router bgp {
   (the same pool an `encapsulation srv6` VRF draws its End.DT46 SID
   from).
 
-The **`srv6-mobile`** direction in the VRF selects the route type:
-`encapsulation` (the N6 / downlink VRF) originates a **Type-1 ST** route
-carrying the UE prefix; `decapsulation` (the N3 / uplink VRF) originates
-a **Type-2 ST** route carrying the core endpoint and TEID. The
-`network-instance exact` value is matched against the PFCP session's
-Network Instance.
+The **`route`** type in the VRF selects what is originated: `st1` (the
+N6 / downlink VRF) originates a **Type-1 ST** route carrying the UE
+prefix; `st2` (the N3 / uplink VRF) originates a **Type-2 ST** route
+carrying the core endpoint and TEID. The `dest-network-instance ... exact`
+value is matched against the PFCP session's Network Instance.
 
 ## From PFCP session to ST route
 

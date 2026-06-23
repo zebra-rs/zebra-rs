@@ -35,10 +35,11 @@ router:
         route-target:
           export:
           - "65000:200"
-        srv6-mobile:
-          encapsulation:
-            network-instance:
-              exact: access
+        route:
+          st1:
+            dest-network-instance:
+              access:
+                exact: access
     afi-safi:
     - name: mobile-uplane
       mup-c:

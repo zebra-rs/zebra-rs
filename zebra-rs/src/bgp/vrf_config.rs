@@ -123,21 +123,21 @@ impl<N: Ord> Default for BgpVrfAfConfig<N> {
 }
 
 /// SRv6 mobile user-plane direction for a per-VRF MUP service
-/// (zebra-bgp-vrf.yang `mobile-uplane srv6-mobile`). `Decapsulation`
-/// is the egress/uplink (Type-2 ST, the N3 VRF); `Encapsulation` is
-/// the ingress/downlink (Type-1 ST, the N6 VRF).
+/// (zebra-bgp-vrf.yang `mobile-uplane route {st1|st2}`). `Decapsulation`
+/// is the `st2` egress/uplink (Type-2 ST, the N3 VRF); `Encapsulation`
+/// is the `st1` ingress/downlink (Type-1 ST, the N6 VRF).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum MupSrv6Direction {
     Decapsulation,
     Encapsulation,
 }
 
-/// `mobile-uplane srv6-mobile {decapsulation|encapsulation}
-/// network-instance exact <ni>` for one VRF: the direction plus the
+/// `mobile-uplane route {st1|st2} dest-network-instance {access|core}
+/// exact <ni>` for one VRF: the ST route type (as a direction) plus the
 /// session network-instance matched exactly. Surfaced in
 /// `show bgp mobile-uplane` (the `MUP VRFs:` block) and consumed by the
-/// P5 MUP controller when it originates ST routes (decapsulation →
-/// Type-2 ST, the N3 VRF; encapsulation → Type-1 ST, the N6 VRF).
+/// P5 MUP controller when it originates ST routes (st2/Decapsulation →
+/// Type-2 ST, the N3 VRF; st1/Encapsulation → Type-1 ST, the N6 VRF).
 #[derive(Debug, Clone)]
 pub struct MupSrv6Mobile {
     pub direction: MupSrv6Direction,
@@ -309,10 +309,11 @@ pub fn config_vrf_mup_rt_export(bgp: &mut Bgp, mut args: Args, op: ConfigOp) -> 
     Some(())
 }
 
-/// `set router bgp vrf <NAME> mobile-uplane srv6-mobile decapsulation
-/// network-instance exact <NI>` — egress GTP decapsulation for the
-/// uplink Type-2 ST service (the N3 VRF).
-pub fn config_vrf_mup_srv6_decap(bgp: &mut Bgp, mut args: Args, op: ConfigOp) -> Option<()> {
+/// `set router bgp vrf <NAME> mobile-uplane route st2 dest-network-instance
+/// core exact <NI>` — Type-2 ST (uplink) origination: egress GTP
+/// decapsulation for the N3 VRF, matched against the session's core
+/// network-instance.
+pub fn config_vrf_mup_route_st2(bgp: &mut Bgp, mut args: Args, op: ConfigOp) -> Option<()> {
     let name = args.string()?;
     let cfg = vrf_entry(bgp, name);
     match op {
@@ -329,10 +330,11 @@ pub fn config_vrf_mup_srv6_decap(bgp: &mut Bgp, mut args: Args, op: ConfigOp) ->
     Some(())
 }
 
-/// `set router bgp vrf <NAME> mobile-uplane srv6-mobile encapsulation
-/// network-instance exact <NI>` — ingress GTP encapsulation for the
-/// downlink Type-1 ST service (the N6 VRF).
-pub fn config_vrf_mup_srv6_encap(bgp: &mut Bgp, mut args: Args, op: ConfigOp) -> Option<()> {
+/// `set router bgp vrf <NAME> mobile-uplane route st1 dest-network-instance
+/// access exact <NI>` — Type-1 ST (downlink) origination: ingress GTP
+/// encapsulation for the N6 VRF, matched against the session's access
+/// network-instance.
+pub fn config_vrf_mup_route_st1(bgp: &mut Bgp, mut args: Args, op: ConfigOp) -> Option<()> {
     let name = args.string()?;
     let cfg = vrf_entry(bgp, name);
     match op {

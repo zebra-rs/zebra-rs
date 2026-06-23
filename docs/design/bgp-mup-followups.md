@@ -18,8 +18,8 @@ phases, committed and pushed (rebased onto `origin/main`):
   the `MpReachAttr::Mup` / `MpUnreachAttr::Mup` receive arms; `adj_in.mup`;
   `route_clean` peer-down; `show bgp mobile-uplane` route table.
 - **P3 per-VRF config** — `router bgp vrf <name> mobile-uplane`:
-  `route-target export` + `srv6-mobile {decapsulation|encapsulation}
-  network-instance exact <ni>`; the config-driven `MUP VRFs:` block in
+  `route-target export` + `route {st1|st2} dest-network-instance
+  {access|core} exact <ni>`; the config-driven `MUP VRFs:` block in
   `show bgp mobile-uplane`.
 - **P4 advertise / re-originate** — `MupPrefix::afi()`/`to_route()`,
   `adj_out.mup`, AFI-aware `route_advertise_mup_to_peers` /
