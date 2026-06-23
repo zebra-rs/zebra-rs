@@ -1,0 +1,610 @@
+<!DOCTYPE HTML>
+<html lang="en" class="light sidebar-visible" dir="ltr">
+    <head>
+        <!-- Book generated using mdBook -->
+        <meta charset="UTF-8">
+        <title>Session Management Design - zebra-rs</title>
+
+
+        <!-- Custom HTML head -->
+
+        <meta name="description" content="">
+        <meta name="viewport" content="width=device-width, initial-scale=1">
+        <meta name="theme-color" content="#ffffff">
+
+        <link rel="icon" href="favicon-de23e50b.svg">
+        <link rel="shortcut icon" href="favicon-8114d1fc.png">
+        <link rel="stylesheet" href="css/variables-8adf115d.css">
+        <link rel="stylesheet" href="css/general-0392ca55.css">
+        <link rel="stylesheet" href="css/chrome-fc474251.css">
+        <link rel="stylesheet" href="css/print-9e4910d8.css" media="print">
+
+        <!-- Fonts -->
+        <link rel="stylesheet" href="fonts/fonts-9644e21d.css">
+
+        <!-- Highlight.js Stylesheets -->
+        <link rel="stylesheet" id="mdbook-highlight-css" href="highlight-493f70e1.css">
+        <link rel="stylesheet" id="mdbook-tomorrow-night-css" href="tomorrow-night-4c0ae647.css">
+        <link rel="stylesheet" id="mdbook-ayu-highlight-css" href="ayu-highlight-3fdfc3ac.css">
+
+        <!-- Custom theme stylesheets -->
+
+
+        <!-- Provide site root and default themes to javascript -->
+        <script>
+            const path_to_root = "";
+            const default_light_theme = "light";
+            const default_dark_theme = "navy";
+            window.path_to_searchindex_js = "searchindex-e8920642.js";
+        </script>
+        <!-- Start loading toc.js asap -->
+        <script src="toc-d6f7580c.js"></script>
+    </head>
+    <body>
+    <div id="mdbook-help-container">
+        <div id="mdbook-help-popup">
+            <h2 class="mdbook-help-title">Keyboard shortcuts</h2>
+            <div>
+                <p>Press <kbd>←</kbd> or <kbd>→</kbd> to navigate between chapters</p>
+                <p>Press <kbd>S</kbd> or <kbd>/</kbd> to search in the book</p>
+                <p>Press <kbd>?</kbd> to show this help</p>
+                <p>Press <kbd>Esc</kbd> to hide this help</p>
+            </div>
+        </div>
+    </div>
+    <div id="mdbook-body-container">
+        <!-- Work around some values being stored in localStorage wrapped in quotes -->
+        <script>
+            try {
+                let theme = localStorage.getItem('mdbook-theme');
+                let sidebar = localStorage.getItem('mdbook-sidebar');
+
+                if (theme.startsWith('"') && theme.endsWith('"')) {
+                    localStorage.setItem('mdbook-theme', theme.slice(1, theme.length - 1));
+                }
+
+                if (sidebar.startsWith('"') && sidebar.endsWith('"')) {
+                    localStorage.setItem('mdbook-sidebar', sidebar.slice(1, sidebar.length - 1));
+                }
+            } catch (e) { }
+        </script>
+
+        <!-- Set the theme before any content is loaded, prevents flash -->
+        <script>
+            const default_theme = window.matchMedia("(prefers-color-scheme: dark)").matches ? default_dark_theme : default_light_theme;
+            let theme;
+            try { theme = localStorage.getItem('mdbook-theme'); } catch(e) { }
+            if (theme === null || theme === undefined) { theme = default_theme; }
+            const html = document.documentElement;
+            html.classList.remove('light')
+            html.classList.add(theme);
+            html.classList.add("js");
+        </script>
+
+        <input type="checkbox" id="mdbook-sidebar-toggle-anchor" class="hidden">
+
+        <!-- Hide / unhide sidebar before it is displayed -->
+        <script>
+            let sidebar = null;
+            const sidebar_toggle = document.getElementById("mdbook-sidebar-toggle-anchor");
+            if (document.body.clientWidth >= 1080) {
+                try { sidebar = localStorage.getItem('mdbook-sidebar'); } catch(e) { }
+                sidebar = sidebar || 'visible';
+            } else {
+                sidebar = 'hidden';
+                sidebar_toggle.checked = false;
+            }
+            if (sidebar === 'visible') {
+                sidebar_toggle.checked = true;
+            } else {
+                html.classList.remove('sidebar-visible');
+            }
+        </script>
+
+        <nav id="mdbook-sidebar" class="sidebar" aria-label="Table of contents">
+            <!-- populated by js -->
+            <mdbook-sidebar-scrollbox class="sidebar-scrollbox"></mdbook-sidebar-scrollbox>
+            <noscript>
+                <iframe class="sidebar-iframe-outer" src="toc.html"></iframe>
+            </noscript>
+            <div id="mdbook-sidebar-resize-handle" class="sidebar-resize-handle">
+                <div class="sidebar-resize-indicator"></div>
+            </div>
+        </nav>
+
+        <div id="mdbook-page-wrapper" class="page-wrapper">
+
+            <div class="page">
+                <div id="mdbook-menu-bar-hover-placeholder"></div>
+                <div id="mdbook-menu-bar" class="menu-bar sticky">
+                    <div class="left-buttons">
+                        <label id="mdbook-sidebar-toggle" class="icon-button" for="mdbook-sidebar-toggle-anchor" title="Toggle Table of Contents" aria-label="Toggle Table of Contents" aria-controls="mdbook-sidebar">
+                            <span class=fa-svg><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 448 512"><!--! Font Awesome Free 6.2.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2022 Fonticons, Inc. --><path d="M0 96C0 78.3 14.3 64 32 64H416c17.7 0 32 14.3 32 32s-14.3 32-32 32H32C14.3 128 0 113.7 0 96zM0 256c0-17.7 14.3-32 32-32H416c17.7 0 32 14.3 32 32s-14.3 32-32 32H32c-17.7 0-32-14.3-32-32zM448 416c0 17.7-14.3 32-32 32H32c-17.7 0-32-14.3-32-32s14.3-32 32-32H416c17.7 0 32 14.3 32 32z"/></svg></span>
+                        </label>
+                        <button id="mdbook-theme-toggle" class="icon-button" type="button" title="Change theme" aria-label="Change theme" aria-haspopup="true" aria-expanded="false" aria-controls="mdbook-theme-list">
+                            <span class=fa-svg><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 576 512"><!--! Font Awesome Free 6.2.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2022 Fonticons, Inc. --><path d="M371.3 367.1c27.3-3.9 51.9-19.4 67.2-42.9L600.2 74.1c12.6-19.5 9.4-45.3-7.6-61.2S549.7-4.4 531.1 9.6L294.4 187.2c-24 18-38.2 46.1-38.4 76.1L371.3 367.1zm-19.6 25.4l-116-104.4C175.9 290.3 128 339.6 128 400c0 3.9 .2 7.8 .6 11.6c1.8 17.5-10.2 36.4-27.8 36.4H96c-17.7 0-32 14.3-32 32s14.3 32 32 32H240c61.9 0 112-50.1 112-112c0-2.5-.1-5-.2-7.5z"/></svg></span>
+                        </button>
+                        <ul id="mdbook-theme-list" class="theme-popup" aria-label="Themes" role="menu">
+                            <li role="none"><button role="menuitem" class="theme" id="mdbook-theme-default_theme">Auto</button></li>
+                            <li role="none"><button role="menuitem" class="theme" id="mdbook-theme-light">Light</button></li>
+                            <li role="none"><button role="menuitem" class="theme" id="mdbook-theme-rust">Rust</button></li>
+                            <li role="none"><button role="menuitem" class="theme" id="mdbook-theme-coal">Coal</button></li>
+                            <li role="none"><button role="menuitem" class="theme" id="mdbook-theme-navy">Navy</button></li>
+                            <li role="none"><button role="menuitem" class="theme" id="mdbook-theme-ayu">Ayu</button></li>
+                        </ul>
+                        <button id="mdbook-search-toggle" class="icon-button" type="button" title="Search (`/`)" aria-label="Toggle Searchbar" aria-expanded="false" aria-keyshortcuts="/ s" aria-controls="mdbook-searchbar">
+                            <span class=fa-svg><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512"><!--! Font Awesome Free 6.2.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2022 Fonticons, Inc. --><path d="M416 208c0 45.9-14.9 88.3-40 122.7L502.6 457.4c12.5 12.5 12.5 32.8 0 45.3s-32.8 12.5-45.3 0L330.7 376c-34.4 25.2-76.8 40-122.7 40C93.1 416 0 322.9 0 208S93.1 0 208 0S416 93.1 416 208zM208 352c79.5 0 144-64.5 144-144s-64.5-144-144-144S64 128.5 64 208s64.5 144 144 144z"/></svg></span>
+                        </button>
+                    </div>
+
+                    <h1 class="menu-title">zebra-rs</h1>
+
+                    <div class="right-buttons">
+                        <a href="print.html" title="Print this book" aria-label="Print this book">
+                            <span class=fa-svg id="print-button"><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512"><!--! Font Awesome Free 6.2.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2022 Fonticons, Inc. --><path d="M128 0C92.7 0 64 28.7 64 64v96h64V64H354.7L384 93.3V160h64V93.3c0-17-6.7-33.3-18.7-45.3L400 18.7C388 6.7 371.7 0 354.7 0H128zM384 352v32 64H128V384 368 352H384zm64 32h32c17.7 0 32-14.3 32-32V256c0-35.3-28.7-64-64-64H64c-35.3 0-64 28.7-64 64v96c0 17.7 14.3 32 32 32H64v64c0 35.3 28.7 64 64 64H384c35.3 0 64-28.7 64-64V384zm-16-88c-13.3 0-24-10.7-24-24s10.7-24 24-24s24 10.7 24 24s-10.7 24-24 24z"/></svg></span>
+                        </a>
+
+                    </div>
+                </div>
+
+                <div id="mdbook-search-wrapper" class="hidden">
+                    <form id="mdbook-searchbar-outer" class="searchbar-outer">
+                        <div class="search-wrapper">
+                            <input type="search" id="mdbook-searchbar" name="searchbar" placeholder="Search this book ..." aria-controls="mdbook-searchresults-outer" aria-describedby="searchresults-header">
+                            <div class="spinner-wrapper">
+                                <span class=fa-svg id="fa-spin"><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512"><!--! Font Awesome Free 6.2.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2022 Fonticons, Inc. --><path d="M304 48c0-26.5-21.5-48-48-48s-48 21.5-48 48s21.5 48 48 48s48-21.5 48-48zm0 416c0-26.5-21.5-48-48-48s-48 21.5-48 48s21.5 48 48 48s48-21.5 48-48zM48 304c26.5 0 48-21.5 48-48s-21.5-48-48-48s-48 21.5-48 48s21.5 48 48 48zm464-48c0-26.5-21.5-48-48-48s-48 21.5-48 48s21.5 48 48 48s48-21.5 48-48zM142.9 437c18.7-18.7 18.7-49.1 0-67.9s-49.1-18.7-67.9 0s-18.7 49.1 0 67.9s49.1 18.7 67.9 0zm0-294.2c18.7-18.7 18.7-49.1 0-67.9S93.7 56.2 75 75s-18.7 49.1 0 67.9s49.1 18.7 67.9 0zM369.1 437c18.7 18.7 49.1 18.7 67.9 0s18.7-49.1 0-67.9s-49.1-18.7-67.9 0s-18.7 49.1 0 67.9z"/></svg></span>
+                            </div>
+                        </div>
+                    </form>
+                    <div id="mdbook-searchresults-outer" class="searchresults-outer hidden">
+                        <div id="mdbook-searchresults-header" class="searchresults-header"></div>
+                        <ul id="mdbook-searchresults">
+                        </ul>
+                    </div>
+                </div>
+
+                <!-- Apply ARIA attributes after the sidebar and the sidebar toggle button are added to the DOM -->
+                <script>
+                    document.getElementById('mdbook-sidebar-toggle').setAttribute('aria-expanded', sidebar === 'visible');
+                    document.getElementById('mdbook-sidebar').setAttribute('aria-hidden', sidebar !== 'visible');
+                    Array.from(document.querySelectorAll('#mdbook-sidebar a')).forEach(function(link) {
+                        link.setAttribute('tabIndex', sidebar === 'visible' ? 0 : -1);
+                    });
+                </script>
+
+                <div id="mdbook-content" class="content">
+                    <main>
+                        <h1 id="vty-session-management-design"><a class="header" href="#vty-session-management-design">VTY Session Management Design</a></h1>
+<p>This chapter documents the design of session management for the VTY
+gRPC channel between zebra-rs and its clients (<code>vty</code>, <code>vtyhelper</code>,
+<code>vtyctl</code>). It captures the rationale behind the architecture so that
+future implementation work and reviewers have the full context.</p>
+<p>User-facing configuration is documented in
+<a href="ch-06-00-vty-access.html">VTY Access and Authentication</a>. This chapter
+is concerned with the implementation beneath those interfaces.</p>
+<h2 id="goals"><a class="header" href="#goals">Goals</a></h2>
+<ul>
+<li>Allow operators to type <code>enable</code> once per VTY shell and have the
+privilege persist across subsequent commands in the same shell.</li>
+<li>Derive peer identity from kernel-guaranteed sources only — never
+trust client-supplied session tokens.</li>
+<li>Compose with PAM for authentication (TACACS+ via <code>pam_tacplus</code>,
+local accounts via <code>pam_unix</code>).</li>
+<li>Detect parent-shell death (including <code>kill -9</code>) and clean up
+promptly.</li>
+<li>Support per-network-namespace deployments transparently.</li>
+</ul>
+<h2 id="non-goals"><a class="header" href="#non-goals">Non-goals</a></h2>
+<ul>
+<li>True OS-level uid=0 escalation. <code>enable</code> is an <strong>application-level</strong>
+role transition; the daemon already holds the network capabilities
+it needs.</li>
+<li>Cross-tab session sharing. Each interactive shell is its own
+session, mirroring the behavior of Cisco IOS vty lines.</li>
+<li>Persistence of <code>enable</code> state across daemon restart. Re-authentication
+is required after restart.</li>
+<li>Configure-mode locking. Deferred (see <a href="#deferred-work">Deferred Work</a>).</li>
+</ul>
+<h2 id="background-how-vty-invokes-vtyhelper"><a class="header" href="#background-how-vty-invokes-vtyhelper">Background: How vty invokes vtyhelper</a></h2>
+<p>The <code>vty</code> shell is a patched GNU bash 5.2. Its <code>vty.sh</code> startup
+script invokes <code>vtyhelper</code> via shell command substitution
+(<code>$(vtyhelper ...)</code>) on four events:</p>
+<div class="table-wrapper">
+<table>
+<thead>
+<tr><th>Event</th><th>Command</th><th>Purpose</th></tr>
+</thead>
+<tbody>
+<tr><td>Tab</td><td><code>vtyhelper -t -m MODE WORDS...</code></td><td>Token completion</td></tr>
+<tr><td><code>?</code></td><td><code>vtyhelper -t -m MODE WORDS...</code></td><td>Help with descriptions</td></tr>
+<tr><td>Enter</td><td><code>vtyhelper [-j] -m MODE LINE</code></td><td>Execute command</td></tr>
+<tr><td>Startup / mode change</td><td><code>vtyhelper -f -m MODE</code></td><td>List first-level commands</td></tr>
+</tbody>
+</table>
+</div>
+<p>Each invocation is a fresh fork+exec — <code>vtyhelper</code> runs to
+completion, writes to stdout, and exits. A single user keystroke
+sequence may trigger 5-10 invocations.</p>
+<p>Critically, <code>$(...)</code> does <strong>not</strong> alter the parent-process chain:
+bash forks once, the child execs <code>vtyhelper</code> in place, and
+<code>vtyhelper</code>’s <code>PPid</code> is the original vty bash. This invariant is the
+foundation of the session-key design below.</p>
+<h2 id="architecture"><a class="header" href="#architecture">Architecture</a></h2>
+<pre><code>+-----------------+           +--------------------+
+|  vty (bash)     |           |  zebra-rs (daemon) |
+|  pid = 1000     |   gRPC    |                    |
+|                 |  abstract |  +--------------+  |
+|  +-----------+  | UDS @vty  |  | SessionTable |  |
+|  | vtyhelper |--+----------&gt;|  |              |  |
+|  | pid=1234  |  |           |  | key:(uid,    |  |
+|  | ppid=1000 |  |           |  |   bash_pid)  |  |
+|  +-----------+  |           |  |              |  |
+|                 |           |  +--------------+  |
+|  (one per key   |           |                    |
+|   event, short  |           |  reads /proc to    |
+|   lived)        |           |  derive bash_pid   |
++-----------------+           +--------------------+
+</code></pre>
+<p>The daemon owns a <code>SessionTable</code> keyed by <code>(peer_uid, parent_pid)</code>.
+Both components are derived from the kernel (<code>SO_PEERCRED</code> plus
+<code>/proc/{peer_pid}/status</code>), never from client-supplied data.</p>
+<h2 id="session-key-derivation"><a class="header" href="#session-key-derivation">Session key derivation</a></h2>
+<p>For every incoming gRPC request the daemon resolves a session key:</p>
+<pre class="playground"><code class="language-rust"><span class="boring">#![allow(unused)]
+</span><span class="boring">fn main() {
+</span>fn resolve_session_key(peer_uid: u32, peer_pid: u32)
+    -&gt; Result&lt;(u32, u32), Status&gt;
+{
+    // Guard 0: PID-namespace mismatch (D12).
+    // SO_PEERCRED returns 0 when the peer is not visible in the
+    // daemon's PID namespace.
+    if peer_pid == 0 {
+        return Err(Status::failed_precondition(
+            "client not visible in daemon's PID namespace"
+        ));
+    }
+
+    let stat = procfs::process::Process::new(peer_pid as i32)
+        .and_then(|p| p.status())
+        .map_err(|_| Status::internal("cannot read /proc"))?;
+    let ppid = stat.ppid as u32;
+
+    // Guard 1: orphan client (parent died, reparented to init).
+    if ppid &lt;= 1 {
+        return Err(Status::unauthenticated(
+            "orphan client (no parent shell)"
+        ));
+    }
+
+    // Guard 2: parent uid must match peer uid (PID-reuse race), except
+    // for root peers — D26 short-circuits the match so that `sudo &lt;cmd&gt;`
+    // (whose outer process retains the invoking user's ruid) works.
+    let parent = procfs::process::Process::new(ppid as i32)
+        .map_err(|_| Status::unauthenticated("parent shell vanished"))?;
+    let parent_ruid = parent.status().map(|s| s.ruid).unwrap_or(u32::MAX);
+    if peer_uid != 0 &amp;&amp; parent_ruid != peer_uid {
+        return Err(Status::unauthenticated("parent uid mismatch"));
+    }
+
+    Ok((peer_uid, ppid))
+}
+<span class="boring">}</span></code></pre>
+<p>Why this design:</p>
+<ul>
+<li><strong><code>SO_PEERCRED</code> cannot be forged</strong> by the client. Kernel guarantees
+the uid/pid reflect the peer as it appeared at <code>connect(2)</code>.</li>
+<li><strong><code>/proc/{pid}/status</code> <code>PPid</code></strong> is likewise kernel-backed.</li>
+<li><strong>The client never supplies a session id</strong>, so there is no token to
+leak, no env var to manage, no replay risk.</li>
+<li>The same key <code>(uid, bash_pid)</code> is derived for every <code>vtyhelper</code>
+invocation spawned from the same vty bash, automatically grouping
+all RPCs from one shell into one session.</li>
+</ul>
+<p>Performance: completion events fire frequently, so the resolver
+short-circuits to a single <code>/proc/{pid}/status</code> read for known
+sessions and only walks the parent chain on first-seen keys.</p>
+<h2 id="lifecycle"><a class="header" href="#lifecycle">Lifecycle</a></h2>
+<pre><code>[create]  Lazy on first RPC; no explicit OpenSession call.
+[active]  Each RPC updates Session.last_active.
+[end]     Triggered by any of:
+            - Parent bash death (pidfd, immediate)
+            - Idle TTL expiry (~10 min, periodic sweep)
+            - Explicit Logout RPC (bash EXIT trap)
+            - Daemon shutdown
+</code></pre>
+<p>Bash-death detection uses a three-tier strategy:</p>
+<ol>
+<li><strong><code>pidfd_open(bash_pid)</code></strong> wrapped in <code>tokio::io::unix::AsyncFd</code>.
+Fires immediately when the bash process exits, including via
+<code>kill -9</code>. (Linux 5.3+.)</li>
+<li><strong><code>Logout</code> RPC</strong> sent from the bash EXIT trap. Covers normal
+<code>exit</code> cleanly even if pidfd notification is briefly delayed.</li>
+<li><strong>Periodic <code>/proc/{bash_pid}</code> sweep</strong> every 60s. Backstop for
+any case the above miss.</li>
+</ol>
+<p>On session termination, the daemon aborts any streaming RPCs bound
+to the session (see <a href="#streaming-rpcs-phase-7">Streaming RPCs</a>) and
+releases per-session resources.</p>
+<h2 id="authentication"><a class="header" href="#authentication">Authentication</a></h2>
+<h3 id="enable-command-flow"><a class="header" href="#enable-command-flow">enable command flow</a></h3>
+<pre><code>vty bash         vtyhelper            daemon                vtypam
+  |                  |                  |                     |
+  |--enable--------&gt;-|                  |                     |
+  |  (read passwd    |--Enable RPC----&gt;|                     |
+  |   with echo off) |  {password}     |--spawn pipe--------&gt;|
+  |                  |                  |  username via argv  |
+  |                  |                  |  password via stdin |
+  |                  |                  |&lt;--exit code---------|
+  |                  |                  |  0=ok 1=auth_fail   |
+  |                  |&lt;--EnableReply--- |  2=acct_invalid     |
+  |&lt;--prompt change--|  {ok, ttl_secs} |  3=sys_error        |
+  |                  |                  |                     |
+  |                  |                  | session.enabled=true|
+  |                  |                  | session.expires=... |
+</code></pre>
+<h3 id="vtypam-helper"><a class="header" href="#vtypam-helper">vtypam helper</a></h3>
+<p><code>vtypam</code> is a small, dedicated PAM helper binary:</p>
+<ul>
+<li>Installed at <code>/usr/sbin/vtypam</code> in distribution packages, or
+<code>${HOME}/.zebra/bin/vtypam</code> in development builds.</li>
+<li>Setuid root (or with <code>cap_dac_read_search,cap_audit_write=ep</code> to
+avoid the full setuid surface, depending on packaging).</li>
+<li>Reads username from <code>argv[1]</code>, password from stdin (never argv,
+to keep it out of <code>/proc/*/cmdline</code>).</li>
+<li>Calls <code>pam_start("zebra-rs", ...)</code> → <code>pam_authenticate</code> →
+<code>pam_acct_mgmt</code> → <code>pam_end</code> and exits with a numeric code.</li>
+<li>Does not communicate priv-lvl or AV-pairs back to the daemon
+(D14).</li>
+</ul>
+<p>Isolating PAM in a separate process keeps the daemon free of
+shadow-read privileges and confines libpam (a C library invoking
+arbitrary modules) inside a minimal helper.</p>
+<h3 id="pam-service-file"><a class="header" href="#pam-service-file">PAM service file</a></h3>
+<pre><code># /etc/pam.d/zebra-rs
+auth     required pam_unix.so
+account  required pam_unix.so
+</code></pre>
+<p>Or, for TACACS+ deployments:</p>
+<pre><code># /etc/pam.d/zebra-rs
+auth     [success=done default=ignore] \
+         pam_tacplus.so server=10.0.0.1 secret=KEY encrypt
+auth     required  pam_unix.so   # local fallback
+account  required  pam_unix.so
+</code></pre>
+<p>TACACS+ integration is <strong>authentication-only</strong> (D13). zebra-rs does
+not consume priv-lvl from TACACS+ responses, does not send TACACS+
+accounting, and does not perform per-command authorization. The
+role decision lives entirely in the daemon (see <a href="#rbac">RBAC</a>).</p>
+<h3 id="enable-ttl"><a class="header" href="#enable-ttl">enable TTL</a></h3>
+<p>Successful <code>enable</code> sets two timestamps on the session:</p>
+<ul>
+<li><code>enable_expires</code>: sliding idle TTL (15 min). Each authorized RPC
+pushes it forward by 15 min.</li>
+<li><code>enable_hard_deadline</code>: absolute deadline (4 h from the original
+<code>enable</code>). Not extended by activity.</li>
+</ul>
+<p>The session drops back to unprivileged when either deadline is
+reached, or on explicit <code>disable</code>. There is no persistence across
+daemon restart.</p>
+<h2 id="rbac"><a class="header" href="#rbac">RBAC</a></h2>
+<p>The Session struct carries a <code>role</code> field (<code>View</code>, <code>Operator</code>,
+<code>Admin</code>). Three ways to acquire <code>Admin</code>:</p>
+<ul>
+<li>
+<p><strong>Root (uid=0)</strong>: implicit Admin from session creation, no enable
+required (D20). The <code>enable</code> RPC short-circuits to success
+without invoking PAM.</p>
+</li>
+<li>
+<p><strong>Interactive</strong>: type <code>enable</code>, authenticate via PAM, hold Admin
+for the TTL.</p>
+</li>
+<li>
+<p><strong>Service account</strong> (for automation): a uid listed in the env
+var <code>ZEBRA_VTY_SERVICE_ACCOUNTS</code> (CSV of decimal uids) is
+permanently Admin without enable. Typically set in the
+daemon’s systemd unit:</p>
+<pre><code class="language-ini"># /etc/systemd/system/zebra-rs.service.d/service-accounts.conf
+[Service]
+Environment=ZEBRA_VTY_SERVICE_ACCOUNTS=999,1001
+</code></pre>
+<p>Service accounts bypass PAM (no password to ship in scripts) and
+are identified by uid alone via SO_PEERCRED. The env var is read
+once at daemon startup (D21); changes require restart. Future
+YANG-driven runtime mutability is the deferred Phase 4-d-ii.</p>
+</li>
+</ul>
+<p><code>vtyctl</code> invocations are short-lived; their sessions exist for one
+or two RPCs and then idle out. Because session state is per-bash_pid
+and <code>vtyctl</code> rarely has a long-lived parent shell, <strong>interactive
+<code>enable</code> is effectively a <code>vty</code> shell-only feature</strong>. Automated
+admin work uses service accounts.</p>
+<h2 id="pipeline--parent-process-conventions"><a class="header" href="#pipeline--parent-process-conventions">Pipeline / parent-process conventions</a></h2>
+<p>vty’s <code>vty.sh</code> invokes <code>vtyhelper</code> via <code>$(vtyhelper ...)</code> so the
+parent process is always the vty bash directly. The shell never
+runs <code>vtyhelper</code> inside explicit subshells <code>( ... )</code> or command
+substitutions other than top-level assignment. This invariant is
+not enforced by code; it is a convention of the patched bash.</p>
+<p>If a user invokes <code>vtyhelper</code> manually from a normal shell, its
+parent becomes that shell and the session becomes scoped to that
+shell’s pid. This is intentional and supported (for debugging), but
+the resulting “session” lasts only as long as that shell.</p>
+<h2 id="pid-namespace-assumption"><a class="header" href="#pid-namespace-assumption">PID-namespace assumption</a></h2>
+<p>The daemon and all clients must run in the <strong>same PID namespace</strong>.
+<code>ip netns exec</code> does not change PID namespace by default, so typical
+per-VRF deployments work without configuration.</p>
+<p>Container deployments require either:</p>
+<ul>
+<li>daemon and client in the same container, or</li>
+<li><code>--pid host</code> to share the host’s PID namespace.</li>
+</ul>
+<p>A daemon in container A cannot serve a client in container B: the
+abstract Unix socket is also netns-scoped, so the connection cannot
+even be established.</p>
+<p>When <code>SO_PEERCRED</code> returns <code>peer_pid == 0</code>, the peer is not visible
+in the daemon’s PID namespace; the connection is rejected with
+<code>FailedPrecondition</code>.</p>
+<h2 id="streaming-rpcs-phase-7"><a class="header" href="#streaming-rpcs-phase-7">Streaming RPCs (Phase 7)</a></h2>
+<p>Some commands need server-streaming RPCs rather than unary calls:</p>
+<ul>
+<li><code>ping count N</code> — one reply per ICMP echo.</li>
+<li><code>traceroute</code> — one reply per hop.</li>
+<li><code>monitor terminal</code> — live log tail, filtered by severity/protocol.</li>
+<li><code>commit confirmed</code> — countdown / confirmation events.</li>
+</ul>
+<p>Streams are bound to a session via <code>Session.active_streams: Vec&lt;AbortHandle&gt;</code>. When the session ends (pidfd, GC, Logout), every
+attached stream is aborted, ensuring the daemon never leaks
+subscribers when bash dies.</p>
+<p><code>vtyhelper</code> for streaming commands stays alive for the duration of
+the stream and forwards SIGINT (Ctrl-C from vty bash) to cancel the
+stream cleanly. Whether a command is streaming is declared by the
+daemon in the first-level command listing (<code>-f</code>) so <code>vty.sh</code> can
+dispatch with or without <code>$(...)</code> capture.</p>
+<h2 id="implementation-phases"><a class="header" href="#implementation-phases">Implementation phases</a></h2>
+<div class="table-wrapper">
+<table>
+<thead>
+<tr><th>Phase</th><th>Scope</th></tr>
+</thead>
+<tbody>
+<tr><td>1</td><td>SessionTable, <code>(uid, ppid)</code> resolver, peer-validation guards. No proto changes.</td></tr>
+<tr><td>2</td><td>Idle TTL + periodic procfs sweep.</td></tr>
+<tr><td>3</td><td>pidfd-based immediate parent-death detection.</td></tr>
+<tr><td>4</td><td>RBAC, enable RPC, vtypam helper, PAM service file, service-accounts in YANG.</td></tr>
+<tr><td>5</td><td><em>(deferred)</em> configure-mode lock.</td></tr>
+<tr><td>6</td><td>Logout RPC + bash EXIT trap integration.</td></tr>
+<tr><td>7</td><td>Streaming RPCs (ping, traceroute, monitor terminal, commit confirmed).</td></tr>
+</tbody>
+</table>
+</div>
+<p>Each phase is intended to ship as an independent PR.</p>
+<h2 id="decisions"><a class="header" href="#decisions">Decisions</a></h2>
+<div class="table-wrapper">
+<table>
+<thead>
+<tr><th>#</th><th>Decision</th></tr>
+</thead>
+<tbody>
+<tr><td>D1</td><td>Default <code>enable</code> backing store is PAM; YANG-local-hash mode is a future option.</td></tr>
+<tr><td>D2</td><td>enable TTL is sliding 15 min with a 4 h hard cap.</td></tr>
+<tr><td>D3</td><td>enable state is not persisted across daemon restart.</td></tr>
+<tr><td>D4</td><td>enable does not propagate to other shell tabs. Each bash is its own session.</td></tr>
+<tr><td>D5</td><td>The Phase 1 Session struct is minimal; enable-related fields are added in Phase 4.</td></tr>
+<tr><td>D6</td><td>PAM is invoked via a separate setuid (or capability-restricted) helper named <code>vtypam</code>, installed at <code>/usr/sbin/vtypam</code> for distribution.</td></tr>
+<tr><td>D7</td><td>The initial Enable RPC uses a single password field. Bidirectional PAM conversation (for OTP, password change) is deferred.</td></tr>
+<tr><td>D8</td><td>Session key derivation assumes the direct vty-bash-to-vtyhelper parent relationship; the daemon verifies via <code>/proc</code> (orphan check + parent uid match) but does not inspect the parent’s command name.</td></tr>
+<tr><td>D9</td><td>vtyctl receives no special-casing. Stateful RPCs (configure, enable, monitor) naturally fail across vtyctl invocations because the session is not continuous.</td></tr>
+<tr><td>D10</td><td>Script-driven admin operations use YANG <code>service-accounts</code> (permanent admin by uid), not interactive enable.</td></tr>
+<tr><td>D11</td><td>Configure-mode locking is not part of the initial implementation. Concurrent edits are tolerated; conflict-resolution policy is left to commit semantics.</td></tr>
+<tr><td>D12</td><td>The daemon and its clients must share a PID namespace. <code>peer_pid == 0</code> from SO_PEERCRED is rejected as cross-PID-ns access.</td></tr>
+<tr><td>D13</td><td>TACACS+ integration is authentication-only via <code>pam_tacplus</code>. No login/command accounting, no per-command authorization.</td></tr>
+<tr><td>D14</td><td>vtypam communicates result via exit code only. priv-lvl and TACACS+ AV-pairs are not propagated to the daemon.</td></tr>
+<tr><td>D15</td><td>vtypam is installed with file capabilities <code>cap_dac_read_search,cap_audit_write=ep</code>, not setuid root. setuid root is documented as a fallback for environments where file caps are stripped by packaging.</td></tr>
+<tr><td>D16</td><td>The daemon does <strong>not</strong> install <code>/etc/pam.d/zebra-rs</code>. A <code>zebra-rs.example</code> sample (minimal <code>pam_unix</code> stack) is shipped and the admin copies it into place, optionally rewriting it as <code>@include common-auth</code> on Debian/Ubuntu.</td></tr>
+<tr><td>D17</td><td>enable failure rate-limit lives in the daemon (per-uid counter, 5 failures within 30 s triggers a 30 s lockout, in-memory only). <code>pam_faillock</code> is documented as an optional stronger layer that admins can stack in the PAM service file.</td></tr>
+<tr><td>D18</td><td>RBAC is 3-tier: <code>View</code>, <code>Operator</code>, <code>Admin</code>. Maps cleanly onto Cisco priv-lvl ranges 0-1 / 2-14 / 15. YANG-configurable roles are explicitly out of scope.</td></tr>
+<tr><td>D19</td><td>Default idle session TTL is <strong>600 s</strong> with a 60 s sweep interval (Cisco IOS <code>exec-timeout 10 0</code> convention). Configurable later if a deployment needs it.</td></tr>
+<tr><td>D20</td><td><strong>Root (uid=0) is implicitly Admin.</strong> New sessions for uid=0 are created with <code>role=Admin</code> / <code>enabled=true</code> / no deadlines; the <code>enable</code> RPC short-circuits to success without spawning vtypam. Service-account configuration (Phase 4-d) does not need to list uid 0. Reason: root already owns the host and <code>pam_unix</code> against the daemon’s own owning account is awkward UX.</td></tr>
+<tr><td>D21</td><td><strong>Service-accounts via env var</strong> for Phase 4-d initial implementation. <code>ZEBRA_VTY_SERVICE_ACCOUNTS=999,1001,...</code> (CSV of decimal uids) names uids that are permanent Admin from session creation, with the same shape as root (no deadlines, enable short-circuits to success). State is fixed at daemon startup; runtime changes require a restart. Full YANG integration is deferred to a follow-up (Phase 4-d-ii) if a deployment demands runtime mutability.</td></tr>
+<tr><td>D22</td><td><strong>Initial admin gates: Apply and Clear RPCs.</strong> <code>SessionTable::require_admin</code> checks <code>enabled</code>, enforces sliding TTL + hard cap (with auto-downgrade on expiry), and slides the idle deadline on each authorized call.</td></tr>
+<tr><td>D23</td><td><strong>Configure-mode admin gate</strong> on <code>DoExec</code>. For <code>ExecType::Exec</code> only (completion paths remain free): admin is required when <code>mode != "exec"</code> (catches a client that sets <code>mode=configure</code> directly) and when <code>mode == "exec" &amp;&amp; first_word == "configure"</code> (UX courtesy — block at entry so the prompt doesn’t flip uselessly). Configure-mode mutex/lock is deliberately NOT included; multiple admins can enter configure simultaneously (D11 still deferred).</td></tr>
+<tr><td>D24</td><td><strong>Auto-elevate on <code>configure</code></strong>. When a non-admin user types <code>configure</code>, the vty bash shell function optimistically tries first (admins succeed silently). On <code>PermissionDenied</code> it prompts for <code>Password:</code> (echo off) and sends an <code>Enable</code> RPC against the caller’s own account (sudo-style) — so the same password that works for <code>enable</code> works here. On success it retries <code>configure</code> and flips <code>CLI_PRIVILEGE</code>. <code>EnableRequest</code> carries an optional <code>auth_user</code> field that the daemon honors when non-empty (kept for future su-style flows); the configure auto-elevate path leaves it empty.</td></tr>
+<tr><td>D25</td><td><strong>YANG-driven service-accounts</strong> (Phase 4-d-ii). New <code>vty.yang</code> module with <code>list service-account { key uid; leaf description; }</code> under <code>container vty</code> in the global <code>grouping config</code>. <code>ConfigManager</code> maintains an <code>Arc&lt;RwLock&lt;HashSet&lt;u32&gt;&gt;&gt;</code> updated by <code>commit_config</code> on <code>vty service-account uid N</code> Set/Delete diffs; <code>SessionTable</code> reads the union of this set and the env-var set in <code>is_service_account</code>. The env var (D21) remains as a startup-only seed for environments where YANG config is unavailable; YANG is the runtime-mutable path.</td></tr>
+<tr><td>D26</td><td><strong>Root peers bypass the parent-uid check.</strong> <code>resolve_session_key</code> skips Guard 2 when <code>peer_uid == 0</code>. Rationale: the strict match rejected the common <code>sudo &lt;cmd&gt;</code> pattern, where the outer <code>sudo</code> process retains the invoking user’s ruid while the client itself runs as uid 0. Risk surface: any uid-0 connector is trusted regardless of ancestry, but <code>SO_PEERCRED</code>’s effective-uid attestation already implies that — a process running as root can already do anything on the host. The remaining guards (D12 cross-PID-namespace, OrphanClient, ParentVanished) still fire for root peers. Non-root peers are unaffected — the parent-uid match is still enforced, so a setuid escalation to a non-zero uid is still refused.</td></tr>
+</tbody>
+</table>
+</div>
+<h2 id="deferred-work"><a class="header" href="#deferred-work">Deferred work</a></h2>
+<p>Items intentionally left out of the initial roadmap:</p>
+<ul>
+<li><strong>Configure-mode lock</strong> (Phase 5). Add if multi-operator
+contention becomes a real problem.</li>
+<li><strong>TACACS+ per-command authorization and accounting</strong>. Requires
+a TACACS+ client in the daemon (Rust <code>tacacs-plus</code> crate or
+in-house). Add when an operator deployment demands it.</li>
+<li><strong>priv-lvl-based role mapping</strong>. Tied to the TACACS+ expansion
+above. Requires expanding vtypam’s output format to JSON.</li>
+<li><strong>PAM session API (<code>pam_open_session</code>/<code>pam_close_session</code>)</strong> for
+login accounting. Requires the daemon to hold a long-lived
+<code>pam_handle_t</code>, which is feasible but adds libpam linkage to
+the daemon process.</li>
+<li><strong>YANG-local-hash enable mode</strong> as an alternative to PAM. Useful
+for appliances with no system user accounts.</li>
+<li><strong>Bidirectional PAM conversation</strong> for multi-step authentication
+(OTP, forced password change). Requires a streaming Enable RPC.</li>
+</ul>
+<h2 id="open-questions"><a class="header" href="#open-questions">Open questions</a></h2>
+<p>These were identified during design and require decisions before
+the relevant phase begins:</p>
+<div class="table-wrapper">
+<table>
+<thead>
+<tr><th>#</th><th>Question</th><th>Phase</th></tr>
+</thead>
+<tbody>
+<tr><td>Q12a</td><td>vtyhelper streaming model: per-command subcommands vs unified streaming dispatch</td><td>7</td></tr>
+<tr><td>Q12b</td><td><code>monitor terminal</code> output format: human-readable, JSON, or both</td><td>7</td></tr>
+<tr><td>Q12c</td><td><code>monitor terminal</code> max concurrent subscribers</td><td>7</td></tr>
+<tr><td>Q12d</td><td><code>monitor terminal</code> drop policy under backpressure</td><td>7</td></tr>
+<tr><td>Q12e</td><td>ping/traceroute implementation: in-daemon raw sockets vs spawning system binaries</td><td>7</td></tr>
+</tbody>
+</table>
+</div>
+
+                    </main>
+
+                    <nav class="nav-wrapper" aria-label="Page navigation">
+                        <!-- Mobile navigation buttons -->
+                            <a rel="prev" href="ch-06-00-vty-access.html" class="mobile-nav-chapters previous" title="Previous chapter" aria-label="Previous chapter" aria-keyshortcuts="Left">
+                                <span class=fa-svg><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 320 512"><!--! Font Awesome Free 6.2.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2022 Fonticons, Inc. --><path d="M41.4 233.4c-12.5 12.5-12.5 32.8 0 45.3l160 160c12.5 12.5 32.8 12.5 45.3 0s12.5-32.8 0-45.3L109.3 256 246.6 118.6c12.5-12.5 12.5-32.8 0-45.3s-32.8-12.5-45.3 0l-160 160z"/></svg></span>
+                            </a>
+
+                            <a rel="next prefetch" href="ch-06-02-show-config-commands.html" class="mobile-nav-chapters next" title="Next chapter" aria-label="Next chapter" aria-keyshortcuts="Right">
+                                <span class=fa-svg><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 320 512"><!--! Font Awesome Free 6.2.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2022 Fonticons, Inc. --><path d="M278.6 233.4c12.5 12.5 12.5 32.8 0 45.3l-160 160c-12.5 12.5-32.8 12.5-45.3 0s-12.5-32.8 0-45.3L210.7 256 73.4 118.6c-12.5-12.5-12.5-32.8 0-45.3s32.8-12.5 45.3 0l160 160z"/></svg></span>
+                            </a>
+
+                        <div style="clear: both"></div>
+                    </nav>
+                </div>
+            </div>
+
+            <nav class="nav-wide-wrapper" aria-label="Page navigation">
+                    <a rel="prev" href="ch-06-00-vty-access.html" class="nav-chapters previous" title="Previous chapter" aria-label="Previous chapter" aria-keyshortcuts="Left">
+                        <span class=fa-svg><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 320 512"><!--! Font Awesome Free 6.2.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2022 Fonticons, Inc. --><path d="M41.4 233.4c-12.5 12.5-12.5 32.8 0 45.3l160 160c12.5 12.5 32.8 12.5 45.3 0s12.5-32.8 0-45.3L109.3 256 246.6 118.6c12.5-12.5 12.5-32.8 0-45.3s-32.8-12.5-45.3 0l-160 160z"/></svg></span>
+                    </a>
+
+                    <a rel="next prefetch" href="ch-06-02-show-config-commands.html" class="nav-chapters next" title="Next chapter" aria-label="Next chapter" aria-keyshortcuts="Right">
+                        <span class=fa-svg><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 320 512"><!--! Font Awesome Free 6.2.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2022 Fonticons, Inc. --><path d="M278.6 233.4c12.5 12.5 12.5 32.8 0 45.3l-160 160c-12.5 12.5-32.8 12.5-45.3 0s-12.5-32.8 0-45.3L210.7 256 73.4 118.6c-12.5-12.5-12.5-32.8 0-45.3s32.8-12.5 45.3 0l160 160z"/></svg></span>
+                    </a>
+            </nav>
+
+        </div>
+
+        <template id=fa-eye><span class=fa-svg><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 576 512"><!--! Font Awesome Free 6.2.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2022 Fonticons, Inc. --><path d="M288 32c-80.8 0-145.5 36.8-192.6 80.6C48.6 156 17.3 208 2.5 243.7c-3.3 7.9-3.3 16.7 0 24.6C17.3 304 48.6 356 95.4 399.4C142.5 443.2 207.2 480 288 480s145.5-36.8 192.6-80.6c46.8-43.5 78.1-95.4 93-131.1c3.3-7.9 3.3-16.7 0-24.6c-14.9-35.7-46.2-87.7-93-131.1C433.5 68.8 368.8 32 288 32zM432 256c0 79.5-64.5 144-144 144s-144-64.5-144-144s64.5-144 144-144s144 64.5 144 144zM288 192c0 35.3-28.7 64-64 64c-11.5 0-22.3-3-31.6-8.4c-.2 2.8-.4 5.5-.4 8.4c0 53 43 96 96 96s96-43 96-96s-43-96-96-96c-2.8 0-5.6 .1-8.4 .4c5.3 9.3 8.4 20.1 8.4 31.6z"/></svg></span></template>
+        <template id=fa-eye-slash><span class=fa-svg><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 640 512"><!--! Font Awesome Free 6.2.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2022 Fonticons, Inc. --><path d="M38.8 5.1C28.4-3.1 13.3-1.2 5.1 9.2S-1.2 34.7 9.2 42.9l592 464c10.4 8.2 25.5 6.3 33.7-4.1s6.3-25.5-4.1-33.7L525.6 386.7c39.6-40.6 66.4-86.1 79.9-118.4c3.3-7.9 3.3-16.7 0-24.6c-14.9-35.7-46.2-87.7-93-131.1C465.5 68.8 400.8 32 320 32c-68.2 0-125 26.3-169.3 60.8L38.8 5.1zM223.1 149.5C248.6 126.2 282.7 112 320 112c79.5 0 144 64.5 144 144c0 24.9-6.3 48.3-17.4 68.7L408 294.5c5.2-11.8 8-24.8 8-38.5c0-53-43-96-96-96c-2.8 0-5.6 .1-8.4 .4c5.3 9.3 8.4 20.1 8.4 31.6c0 10.2-2.4 19.8-6.6 28.3l-90.3-70.8zm223.1 298L373 389.9c-16.4 6.5-34.3 10.1-53 10.1c-79.5 0-144-64.5-144-144c0-6.9 .5-13.6 1.4-20.2L83.1 161.5C60.3 191.2 44 220.8 34.5 243.7c-3.3 7.9-3.3 16.7 0 24.6c14.9 35.7 46.2 87.7 93 131.1C174.5 443.2 239.2 480 320 480c47.8 0 89.9-12.9 126.2-32.5z"/></svg></span></template>
+        <template id=fa-copy><span class=fa-svg><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512"><!--! Font Awesome Free 6.2.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2022 Fonticons, Inc. --><path d="M502.6 70.63l-61.25-61.25C435.4 3.371 427.2 0 418.7 0H255.1c-35.35 0-64 28.66-64 64l.0195 256C192 355.4 220.7 384 256 384h192c35.2 0 64-28.8 64-64V93.25C512 84.77 508.6 76.63 502.6 70.63zM464 320c0 8.836-7.164 16-16 16H255.1c-8.838 0-16-7.164-16-16L239.1 64.13c0-8.836 7.164-16 16-16h128L384 96c0 17.67 14.33 32 32 32h47.1V320zM272 448c0 8.836-7.164 16-16 16H63.1c-8.838 0-16-7.164-16-16L47.98 192.1c0-8.836 7.164-16 16-16H160V128H63.99c-35.35 0-64 28.65-64 64l.0098 256C.002 483.3 28.66 512 64 512h192c35.2 0 64-28.8 64-64v-32h-47.1L272 448z"/></svg></span></template>
+        <template id=fa-play><span class=fa-svg><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 384 512"><!--! Font Awesome Free 6.2.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2022 Fonticons, Inc. --><path d="M73 39c-14.8-9.1-33.4-9.4-48.5-.9S0 62.6 0 80V432c0 17.4 9.4 33.4 24.5 41.9s33.7 8.1 48.5-.9L361 297c14.3-8.7 23-24.2 23-41s-8.7-32.2-23-41L73 39z"/></svg></span></template>
+        <template id=fa-clock-rotate-left><span class=fa-svg><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512"><!--! Font Awesome Free 6.2.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2022 Fonticons, Inc. --><path d="M75 75L41 41C25.9 25.9 0 36.6 0 57.9V168c0 13.3 10.7 24 24 24H134.1c21.4 0 32.1-25.9 17-41l-30.8-30.8C155 85.5 203 64 256 64c106 0 192 86 192 192s-86 192-192 192c-40.8 0-78.6-12.7-109.7-34.4c-14.5-10.1-34.4-6.6-44.6 7.9s-6.6 34.4 7.9 44.6C151.2 495 201.7 512 256 512c141.4 0 256-114.6 256-256S397.4 0 256 0C185.3 0 121.3 28.7 75 75zm181 53c-13.3 0-24 10.7-24 24V256c0 6.4 2.5 12.5 7 17l72 72c9.4 9.4 24.6 9.4 33.9 0s9.4-24.6 0-33.9l-65-65V152c0-13.3-10.7-24-24-24z"/></svg></span></template>
+
+
+
+        <script>
+            window.playground_copyable = true;
+        </script>
+
+
+        <script src="elasticlunr-ef4e11c1.min.js"></script>
+        <script src="mark-09e88c2c.min.js"></script>
+        <script src="searcher-09f2665d.js"></script>
+
+        <script src="clipboard-1626706a.min.js"></script>
+        <script src="highlight-abc7f01d.js"></script>
+        <script src="book-c22b7243.js"></script>
+
+        <!-- Custom JS scripts -->
+
+
+
+    </div>
+    </body>
+</html>

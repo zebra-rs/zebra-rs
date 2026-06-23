@@ -57,7 +57,7 @@ either configure it explicitly per router (recommended) or ensure each
 router derives a unique value (e.g. a unique loopback address). The
 same `router-id` leaf exists on `router ospfv3` (and its `vrf` list)
 with identical semantics. See
-[Selection of the Router-ID](ch-00-02-router-id.md) for the full
+[Selection of the Router-ID](ch-00-01-router-id.md) for the full
 selection and precedence model.
 
 ## Per-interface knobs

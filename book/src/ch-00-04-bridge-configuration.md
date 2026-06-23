@@ -1,14 +1,14 @@
 # Bridge Configuration
 
 zebra-rs can create a **Linux bridge device** from configuration. Like
-the [`vxlan`](ch-00-04-vxlan-configuration.md) block — and unlike
-[`interface`](ch-00-03-interface-configuration.md), which only attaches
+the [`vxlan`](ch-00-03-vxlan-configuration.md) block — and unlike
+[`interface`](ch-00-02-interface-configuration.md), which only attaches
 attributes to an existing device — the top-level `bridge` list
 **creates** the kernel bridge netdevice (`ip link add <name> type
 bridge`) and tears it down when the entry is removed.
 
 A bridge is the L2 forwarding domain an EVPN deployment binds a
-[VXLAN](ch-00-04-vxlan-configuration.md) device into: the VXLAN tunnel
+[VXLAN](ch-00-03-vxlan-configuration.md) device into: the VXLAN tunnel
 and the local access ports are enslaved to the same bridge, and the
 control plane drives the forwarding database.
 
@@ -82,8 +82,8 @@ re-acquires them automatically. Enslaving a VXLAN additionally triggers
 the EVPN bridge-slave defaults (`neigh_suppress on`, `learning off`) on
 the port.
 
-See [Interface Configuration](ch-00-03-interface-configuration.md#bridge-and-vrf-enslavement)
-and [VXLAN Configuration](ch-00-04-vxlan-configuration.md#when-the-device-joins-a-bridge)
+See [Interface Configuration](ch-00-02-interface-configuration.md#bridge-and-vrf-enslavement)
+and [VXLAN Configuration](ch-00-03-vxlan-configuration.md#when-the-device-joins-a-bridge)
 for the full details.
 
 ## Deleting the configuration

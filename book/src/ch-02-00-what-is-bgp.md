@@ -23,7 +23,7 @@ commit
 It is optional: when not configured, the RIB-distributed router-id
 (the system-wide selection, or the configured `system router-id`)
 is used, and deleting the BGP-local value falls back to it. See
-[Selection of the Router-ID](ch-00-02-router-id.md) for the full
+[Selection of the Router-ID](ch-00-01-router-id.md) for the full
 selection and precedence model. Earlier releases named this leaf
 `identifier`, following the IETF BGP YANG model; it was renamed for
 consistency with the rest of the configuration tree.

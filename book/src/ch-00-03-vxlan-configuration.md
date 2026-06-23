@@ -1,14 +1,14 @@
 # VXLAN Configuration
 
 zebra-rs can create a **VXLAN tunnel device** from configuration. Unlike
-the [`interface`](ch-00-03-interface-configuration.md) block — which
+the [`interface`](ch-00-02-interface-configuration.md) block — which
 only attaches attributes to a device that already exists — the
 top-level `vxlan` list **creates** the kernel VXLAN netdevice (the
 equivalent of `ip link add <name> type vxlan ...`) and tears it down
 when the entry is removed.
 
 A VXLAN device is the data-plane endpoint (VTEP) for an EVPN overlay:
-once it is enslaved to a Linux [bridge](ch-00-05-bridge-configuration.md)
+once it is enslaved to a Linux [bridge](ch-00-04-bridge-configuration.md)
 it carries the L2 service, and the
 control plane (BGP [EVPN Type-5](ch-02-06-bgp-evpn-type5.md) and the L2
 Type-2 / Type-3 routes) populates the forwarding database. Because the
@@ -87,7 +87,7 @@ vxlan vni550 {
 is applied once both the VXLAN and the bridge exist in the kernel, so
 the order of configuration is irrelevant. This is the same deferred
 mechanism as [`interface <name>
-bridge`](ch-00-03-interface-configuration.md#bridge-and-vrf-enslavement),
+bridge`](ch-00-02-interface-configuration.md#bridge-and-vrf-enslavement),
 which the VXLAN binding reuses directly. zebra-rs also still
 **observes** enslavement performed externally
 (`ip link set vni550 master <bridge>`), so either path works.

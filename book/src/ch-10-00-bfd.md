@@ -1,4 +1,4 @@
-# Bidirectional Forwarding Detection (BFD)
+# BFD
 
 Bidirectional Forwarding Detection (BFD, RFC 5880) is a lightweight
 hello protocol that detects a forwarding-path failure to an adjacent

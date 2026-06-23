@@ -119,7 +119,7 @@ router:
 
 A per-VRF neighbor needs no `afi-safi` block — it defaults to IPv4
 unicast, which is what a PE-CE session carries. The per-VRF BGP router-id
-defaults to the global `router-id` (see [Router ID](ch-00-02-router-id.md)).
+defaults to the global `router-id` (see [Router ID](ch-00-01-router-id.md)).
 
 ## What makes the per-VRF session work
 

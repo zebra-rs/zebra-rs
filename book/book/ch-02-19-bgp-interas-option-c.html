@@ -1,0 +1,470 @@
+<!DOCTYPE HTML>
+<html lang="en" class="light sidebar-visible" dir="ltr">
+    <head>
+        <!-- Book generated using mdBook -->
+        <meta charset="UTF-8">
+        <title>Option C over SR-MPLS - zebra-rs</title>
+
+
+        <!-- Custom HTML head -->
+
+        <meta name="description" content="">
+        <meta name="viewport" content="width=device-width, initial-scale=1">
+        <meta name="theme-color" content="#ffffff">
+
+        <link rel="icon" href="favicon-de23e50b.svg">
+        <link rel="shortcut icon" href="favicon-8114d1fc.png">
+        <link rel="stylesheet" href="css/variables-8adf115d.css">
+        <link rel="stylesheet" href="css/general-0392ca55.css">
+        <link rel="stylesheet" href="css/chrome-fc474251.css">
+        <link rel="stylesheet" href="css/print-9e4910d8.css" media="print">
+
+        <!-- Fonts -->
+        <link rel="stylesheet" href="fonts/fonts-9644e21d.css">
+
+        <!-- Highlight.js Stylesheets -->
+        <link rel="stylesheet" id="mdbook-highlight-css" href="highlight-493f70e1.css">
+        <link rel="stylesheet" id="mdbook-tomorrow-night-css" href="tomorrow-night-4c0ae647.css">
+        <link rel="stylesheet" id="mdbook-ayu-highlight-css" href="ayu-highlight-3fdfc3ac.css">
+
+        <!-- Custom theme stylesheets -->
+
+
+        <!-- Provide site root and default themes to javascript -->
+        <script>
+            const path_to_root = "";
+            const default_light_theme = "light";
+            const default_dark_theme = "navy";
+            window.path_to_searchindex_js = "searchindex-e8920642.js";
+        </script>
+        <!-- Start loading toc.js asap -->
+        <script src="toc-d6f7580c.js"></script>
+    </head>
+    <body>
+    <div id="mdbook-help-container">
+        <div id="mdbook-help-popup">
+            <h2 class="mdbook-help-title">Keyboard shortcuts</h2>
+            <div>
+                <p>Press <kbd>←</kbd> or <kbd>→</kbd> to navigate between chapters</p>
+                <p>Press <kbd>S</kbd> or <kbd>/</kbd> to search in the book</p>
+                <p>Press <kbd>?</kbd> to show this help</p>
+                <p>Press <kbd>Esc</kbd> to hide this help</p>
+            </div>
+        </div>
+    </div>
+    <div id="mdbook-body-container">
+        <!-- Work around some values being stored in localStorage wrapped in quotes -->
+        <script>
+            try {
+                let theme = localStorage.getItem('mdbook-theme');
+                let sidebar = localStorage.getItem('mdbook-sidebar');
+
+                if (theme.startsWith('"') && theme.endsWith('"')) {
+                    localStorage.setItem('mdbook-theme', theme.slice(1, theme.length - 1));
+                }
+
+                if (sidebar.startsWith('"') && sidebar.endsWith('"')) {
+                    localStorage.setItem('mdbook-sidebar', sidebar.slice(1, sidebar.length - 1));
+                }
+            } catch (e) { }
+        </script>
+
+        <!-- Set the theme before any content is loaded, prevents flash -->
+        <script>
+            const default_theme = window.matchMedia("(prefers-color-scheme: dark)").matches ? default_dark_theme : default_light_theme;
+            let theme;
+            try { theme = localStorage.getItem('mdbook-theme'); } catch(e) { }
+            if (theme === null || theme === undefined) { theme = default_theme; }
+            const html = document.documentElement;
+            html.classList.remove('light')
+            html.classList.add(theme);
+            html.classList.add("js");
+        </script>
+
+        <input type="checkbox" id="mdbook-sidebar-toggle-anchor" class="hidden">
+
+        <!-- Hide / unhide sidebar before it is displayed -->
+        <script>
+            let sidebar = null;
+            const sidebar_toggle = document.getElementById("mdbook-sidebar-toggle-anchor");
+            if (document.body.clientWidth >= 1080) {
+                try { sidebar = localStorage.getItem('mdbook-sidebar'); } catch(e) { }
+                sidebar = sidebar || 'visible';
+            } else {
+                sidebar = 'hidden';
+                sidebar_toggle.checked = false;
+            }
+            if (sidebar === 'visible') {
+                sidebar_toggle.checked = true;
+            } else {
+                html.classList.remove('sidebar-visible');
+            }
+        </script>
+
+        <nav id="mdbook-sidebar" class="sidebar" aria-label="Table of contents">
+            <!-- populated by js -->
+            <mdbook-sidebar-scrollbox class="sidebar-scrollbox"></mdbook-sidebar-scrollbox>
+            <noscript>
+                <iframe class="sidebar-iframe-outer" src="toc.html"></iframe>
+            </noscript>
+            <div id="mdbook-sidebar-resize-handle" class="sidebar-resize-handle">
+                <div class="sidebar-resize-indicator"></div>
+            </div>
+        </nav>
+
+        <div id="mdbook-page-wrapper" class="page-wrapper">
+
+            <div class="page">
+                <div id="mdbook-menu-bar-hover-placeholder"></div>
+                <div id="mdbook-menu-bar" class="menu-bar sticky">
+                    <div class="left-buttons">
+                        <label id="mdbook-sidebar-toggle" class="icon-button" for="mdbook-sidebar-toggle-anchor" title="Toggle Table of Contents" aria-label="Toggle Table of Contents" aria-controls="mdbook-sidebar">
+                            <span class=fa-svg><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 448 512"><!--! Font Awesome Free 6.2.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2022 Fonticons, Inc. --><path d="M0 96C0 78.3 14.3 64 32 64H416c17.7 0 32 14.3 32 32s-14.3 32-32 32H32C14.3 128 0 113.7 0 96zM0 256c0-17.7 14.3-32 32-32H416c17.7 0 32 14.3 32 32s-14.3 32-32 32H32c-17.7 0-32-14.3-32-32zM448 416c0 17.7-14.3 32-32 32H32c-17.7 0-32-14.3-32-32s14.3-32 32-32H416c17.7 0 32 14.3 32 32z"/></svg></span>
+                        </label>
+                        <button id="mdbook-theme-toggle" class="icon-button" type="button" title="Change theme" aria-label="Change theme" aria-haspopup="true" aria-expanded="false" aria-controls="mdbook-theme-list">
+                            <span class=fa-svg><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 576 512"><!--! Font Awesome Free 6.2.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2022 Fonticons, Inc. --><path d="M371.3 367.1c27.3-3.9 51.9-19.4 67.2-42.9L600.2 74.1c12.6-19.5 9.4-45.3-7.6-61.2S549.7-4.4 531.1 9.6L294.4 187.2c-24 18-38.2 46.1-38.4 76.1L371.3 367.1zm-19.6 25.4l-116-104.4C175.9 290.3 128 339.6 128 400c0 3.9 .2 7.8 .6 11.6c1.8 17.5-10.2 36.4-27.8 36.4H96c-17.7 0-32 14.3-32 32s14.3 32 32 32H240c61.9 0 112-50.1 112-112c0-2.5-.1-5-.2-7.5z"/></svg></span>
+                        </button>
+                        <ul id="mdbook-theme-list" class="theme-popup" aria-label="Themes" role="menu">
+                            <li role="none"><button role="menuitem" class="theme" id="mdbook-theme-default_theme">Auto</button></li>
+                            <li role="none"><button role="menuitem" class="theme" id="mdbook-theme-light">Light</button></li>
+                            <li role="none"><button role="menuitem" class="theme" id="mdbook-theme-rust">Rust</button></li>
+                            <li role="none"><button role="menuitem" class="theme" id="mdbook-theme-coal">Coal</button></li>
+                            <li role="none"><button role="menuitem" class="theme" id="mdbook-theme-navy">Navy</button></li>
+                            <li role="none"><button role="menuitem" class="theme" id="mdbook-theme-ayu">Ayu</button></li>
+                        </ul>
+                        <button id="mdbook-search-toggle" class="icon-button" type="button" title="Search (`/`)" aria-label="Toggle Searchbar" aria-expanded="false" aria-keyshortcuts="/ s" aria-controls="mdbook-searchbar">
+                            <span class=fa-svg><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512"><!--! Font Awesome Free 6.2.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2022 Fonticons, Inc. --><path d="M416 208c0 45.9-14.9 88.3-40 122.7L502.6 457.4c12.5 12.5 12.5 32.8 0 45.3s-32.8 12.5-45.3 0L330.7 376c-34.4 25.2-76.8 40-122.7 40C93.1 416 0 322.9 0 208S93.1 0 208 0S416 93.1 416 208zM208 352c79.5 0 144-64.5 144-144s-64.5-144-144-144S64 128.5 64 208s64.5 144 144 144z"/></svg></span>
+                        </button>
+                    </div>
+
+                    <h1 class="menu-title">zebra-rs</h1>
+
+                    <div class="right-buttons">
+                        <a href="print.html" title="Print this book" aria-label="Print this book">
+                            <span class=fa-svg id="print-button"><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512"><!--! Font Awesome Free 6.2.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2022 Fonticons, Inc. --><path d="M128 0C92.7 0 64 28.7 64 64v96h64V64H354.7L384 93.3V160h64V93.3c0-17-6.7-33.3-18.7-45.3L400 18.7C388 6.7 371.7 0 354.7 0H128zM384 352v32 64H128V384 368 352H384zm64 32h32c17.7 0 32-14.3 32-32V256c0-35.3-28.7-64-64-64H64c-35.3 0-64 28.7-64 64v96c0 17.7 14.3 32 32 32H64v64c0 35.3 28.7 64 64 64H384c35.3 0 64-28.7 64-64V384zm-16-88c-13.3 0-24-10.7-24-24s10.7-24 24-24s24 10.7 24 24s-10.7 24-24 24z"/></svg></span>
+                        </a>
+
+                    </div>
+                </div>
+
+                <div id="mdbook-search-wrapper" class="hidden">
+                    <form id="mdbook-searchbar-outer" class="searchbar-outer">
+                        <div class="search-wrapper">
+                            <input type="search" id="mdbook-searchbar" name="searchbar" placeholder="Search this book ..." aria-controls="mdbook-searchresults-outer" aria-describedby="searchresults-header">
+                            <div class="spinner-wrapper">
+                                <span class=fa-svg id="fa-spin"><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512"><!--! Font Awesome Free 6.2.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2022 Fonticons, Inc. --><path d="M304 48c0-26.5-21.5-48-48-48s-48 21.5-48 48s21.5 48 48 48s48-21.5 48-48zm0 416c0-26.5-21.5-48-48-48s-48 21.5-48 48s21.5 48 48 48s48-21.5 48-48zM48 304c26.5 0 48-21.5 48-48s-21.5-48-48-48s-48 21.5-48 48s21.5 48 48 48zm464-48c0-26.5-21.5-48-48-48s-48 21.5-48 48s21.5 48 48 48s48-21.5 48-48zM142.9 437c18.7-18.7 18.7-49.1 0-67.9s-49.1-18.7-67.9 0s-18.7 49.1 0 67.9s49.1 18.7 67.9 0zm0-294.2c18.7-18.7 18.7-49.1 0-67.9S93.7 56.2 75 75s-18.7 49.1 0 67.9s49.1 18.7 67.9 0zM369.1 437c18.7 18.7 49.1 18.7 67.9 0s18.7-49.1 0-67.9s-49.1-18.7-67.9 0s-18.7 49.1 0 67.9z"/></svg></span>
+                            </div>
+                        </div>
+                    </form>
+                    <div id="mdbook-searchresults-outer" class="searchresults-outer hidden">
+                        <div id="mdbook-searchresults-header" class="searchresults-header"></div>
+                        <ul id="mdbook-searchresults">
+                        </ul>
+                    </div>
+                </div>
+
+                <!-- Apply ARIA attributes after the sidebar and the sidebar toggle button are added to the DOM -->
+                <script>
+                    document.getElementById('mdbook-sidebar-toggle').setAttribute('aria-expanded', sidebar === 'visible');
+                    document.getElementById('mdbook-sidebar').setAttribute('aria-hidden', sidebar !== 'visible');
+                    Array.from(document.querySelectorAll('#mdbook-sidebar a')).forEach(function(link) {
+                        link.setAttribute('tabIndex', sidebar === 'visible' ? 0 : -1);
+                    });
+                </script>
+
+                <div id="mdbook-content" class="content">
+                    <main>
+                        <h1 id="inter-as-option-c-over-sr-mpls"><a class="header" href="#inter-as-option-c-over-sr-mpls">Inter-AS Option C over SR-MPLS</a></h1>
+<p>Option C (RFC 4364 §10c) keeps the ASBRs out of the VPN entirely. Three
+control planes cooperate so that a single MPLS LSP runs from the ingress
+PE to the egress PE, with the VPN routes carried directly between the
+PEs over the top:</p>
+<ol>
+<li><strong>Inside each AS</strong> — an IGP with SR-MPLS (IS-IS here) makes the local
+PE and ASBR loopbacks reachable and gives them prefix-SID labels, so
+any two routers in the AS have a transport LSP between them.</li>
+<li><strong>Across the AS boundary</strong> — the ASBRs run <strong>eBGP labeled-unicast</strong>
+(BGP-LU, SAFI 4) and exchange each other’s PE loopback <code>/32</code>s <em>with a
+label</em>. No IGP and no VPN routes cross the link; the ASBRs hold no VPN
+state.</li>
+<li><strong>Between the PEs</strong> — a <strong>multihop MP-eBGP VPNv4/VPNv6</strong> session
+(loopback to loopback) carries the VPN routes. Its next-hop is the
+remote PE loopback, which the local PE reaches over the stitched
+BGP-LU LSP from step 2.</li>
+</ol>
+<p>The result is an end-to-end label stack — SR transport (outer), BGP-LU
+(AS crossing), VPN service label (inner) — that the ingress PE pushes in
+one go.</p>
+<h2 id="reference-topology"><a class="header" href="#reference-topology">Reference topology</a></h2>
+<p>This is the topology exercised by the <code>@bgp_interas_option_c</code> BDD
+feature (<code>bdd/tests/features/bgp_interas_option_c.feature</code>):</p>
+<pre><code>          AS 65000                                  AS 65001
+ ce1 ── pe1 ──── p1 ──── asbr1 ═══════════ asbr2 ──── p2 ──── pe2 ── ce2
+        lo        lo       lo    172.16.0.0/30  lo      lo      lo
+     1.1.1.1   1.1.1.2  1.1.1.3              2.2.2.3 2.2.2.2 2.2.2.1
+     (sid 1)   (sid 2)  (sid 3)              (sid 6) (sid 5) (sid 4)
+  └ vrf-cust ┘                                            └ vrf-cust ┘
+   10.1.0.0/30                                             10.2.0.0/30
+</code></pre>
+<p>With the default SRGB base of <code>16000</code>, prefix-SID index <code>N</code> becomes
+label <code>16000+N</code>, so <code>pe2</code>’s loopback <code>2.2.2.1</code> is SR label <code>16004</code>,
+<code>asbr1</code>’s <code>1.1.1.3</code> is <code>16003</code>, and so on. <code>p1</code> and <code>p2</code> are pure SR
+transit LSRs (IS-IS only); the ASBRs hold no VPN routes; the customer
+prefixes live in <code>vrf-cust</code> on each PE.</p>
+<h2 id="sr-mpls-transport-inside-each-as"><a class="header" href="#sr-mpls-transport-inside-each-as">SR-MPLS transport inside each AS</a></h2>
+<p>Each PE, P, and ASBR runs IS-IS Level-2 with <code>segment-routing mpls</code> and
+a prefix-SID on its loopback. The inter-AS link is deliberately <strong>not</strong>
+in the IGP — it is the BGP-LU link. A PE config’s IS-IS block:</p>
+<pre><code class="language-yaml">router:
+  isis:
+    net: 49.0000.0000.0000.0001.00
+    is-type: level-2-only
+    segment-routing: mpls
+    interface:
+    - if-name: lo
+      ipv4: { enable: true, prefix-sid: { index: 1 } }
+    - if-name: p1
+      network-type: point-to-point
+      metric: 10
+      ipv4: { enable: true }
+</code></pre>
+<p>This gives <code>pe1</code> a transport LSP to <code>asbr1</code> (its BGP-LU peer’s
+loopback), traversing <code>p1</code> with a real SR swap / penultimate-hop pop.
+See the <a href="ch-04-00-srv6.html">SRv6</a> and IS-IS chapters for the segment
+routing details.</p>
+<h2 id="ebgp-labeled-unicast-between-the-asbrs"><a class="header" href="#ebgp-labeled-unicast-between-the-asbrs">eBGP labeled-unicast between the ASBRs</a></h2>
+<p>The ASBRs peer over the inter-AS link with the IPv4 Labeled-Unicast
+family (<code>label-v4</code>) and <strong>originate their own AS’s PE loopbacks</strong> into
+it. Because the loopback is reached over the IGP, the ASBR allocates a
+<em>local</em> label for it and installs a swap entry (BGP-LU label → SR
+transport toward the PE); the remote ASBR learns the <code>/32</code> with that
+label.</p>
+<pre><code class="language-yaml">router:
+  bgp:
+    global:
+      as: 65000
+      router-id: 1.1.1.3
+    neighbor:
+    - remote-address: 172.16.0.2   # ASBR2, over the inter-AS link
+      remote-as: 65001
+      enabled: true
+      afi-safi:
+      - name: label-v4
+        enabled: true
+    afi-safi:
+    - name: label-v4
+      network:
+      - prefix: 1.1.1.1/32         # advertise PE1's loopback to AS 65001
+</code></pre>
+<blockquote>
+<p>Each PE typically originates its own loopback (implicit-null, since it
+is the egress), and the ASBR re-originates it across the boundary. The
+BDD has the PEs originate their loopbacks via <code>network</code> under the
+global <code>label-v4</code> family; the ASBRs simply relay.</p>
+</blockquote>
+<h2 id="ibgp-labeled-unicast-asbr--pe-with-next-hop-self"><a class="header" href="#ibgp-labeled-unicast-asbr--pe-with-next-hop-self">iBGP labeled-unicast ASBR → PE, with <code>next-hop-self</code></a></h2>
+<p>The ASBR re-advertises the routes it learned across the boundary to its
+own PEs over an iBGP-LU session. This leg needs <strong><code>next-hop-self</code></strong>: by
+default a route learned from one peer keeps its received next-hop, which
+here is the <em>foreign-AS</em> next-hop the PE cannot resolve. With
+<code>next-hop-self</code>, the ASBR advertises its own loopback as the next-hop
+and a fresh swap label, so the PE resolves the ASBR over the IGP and
+pushes the ASBR’s label.</p>
+<pre><code class="language-yaml">    neighbor:
+    - remote-address: 1.1.1.1       # PE1, iBGP over loopbacks
+      remote-as: 65000
+      update-source: 1.1.1.3
+      enabled: true
+      afi-safi:
+      - name: label-v4
+        enabled: true
+        next-hop-self: true
+</code></pre>
+<p>The CLI equivalent is:</p>
+<pre><code>set router bgp neighbor 1.1.1.1 afi-safi label-v4 next-hop-self true
+</code></pre>
+<p><code>next-hop-self</code> is a per-neighbor, per-AFI/SAFI knob honored on the
+Labeled-Unicast advertise path. Without it, the PE would see the remote
+ASBR (a different AS) as the next-hop and the route would be unusable.</p>
+<h2 id="multihop-ebgp-vpnv4-between-the-pes"><a class="header" href="#multihop-ebgp-vpnv4-between-the-pes">Multihop eBGP VPNv4 between the PEs</a></h2>
+<p>The PEs run a direct MP-eBGP session between their loopbacks, carrying
+only the <code>vpnv4</code> family. It is multihop (<code>ebgp-multihop</code>) and sourced
+from the loopback (<code>update-source</code>); a short <code>connect-retry-time</code> lets
+it come up promptly once the BGP-LU LSP to the remote loopback exists.</p>
+<pre><code class="language-yaml">    neighbor:
+    - remote-address: 2.2.2.1       # PE2's loopback, several hops away
+      remote-as: 65001
+      ebgp-multihop: 10
+      update-source: 1.1.1.1
+      timers: { connect-retry-time: 3 }
+      enabled: true
+      afi-safi:
+      - name: vpnv4
+        enabled: true
+    vrf:
+    - name: vrf-cust
+      rd: 65000:1
+      afi-safi:
+        ipv4:
+          network:
+          - prefix: 10.1.0.0/30     # the customer prefix
+</code></pre>
+<p>The VPN route-targets live on the top-level <code>vrf</code> block, exactly as for
+intra-AS <a href="ch-02-04-bgp-l3vpn.html">L3VPN</a>:</p>
+<pre><code class="language-yaml">vrf:
+- name: vrf-cust
+  ipv4:
+    route-target:
+      import: [65000:100]
+      export: [65000:100]
+</code></pre>
+<p>Because the PE <em>originates</em> its VPN route, it sets next-hop-self
+(its own loopback) — which is the correct egress — so no
+<code>next-hop-unchanged</code> is needed even though the session is eBGP. (A
+route-reflector-based Option C, where an out-of-path RR reflects VPNv4
+with <code>next-hop-unchanged</code>, is a separate design.)</p>
+<h2 id="the-crux-resolving-the-vpn-next-hop-over-the-bgp-lu-lsp"><a class="header" href="#the-crux-resolving-the-vpn-next-hop-over-the-bgp-lu-lsp">The crux: resolving the VPN next-hop over the BGP-LU LSP</a></h2>
+<p>When <code>pe1</code> receives <code>10.2.0.0/30</code> with next-hop <code>2.2.2.1</code>, that next-hop
+is <strong>not</strong> in any IGP — it is only reachable over the BGP-LU LSP. The
+recursive next-hop resolver therefore has to resolve a VPN next-hop
+<strong>through a labeled BGP route</strong>, stacking that route’s label(s) under
+the VPN service label.</p>
+<p>This is the one place inter-AS forwarding differs from the intra-AS
+case. Ordinarily a BGP next-hop must resolve over the underlay (IGP /
+connected) and resolving over another BGP route is refused — it would
+risk loops. The exception is a <strong>labeled</strong> BGP-LU route: it <em>is</em> the
+transport, so the resolver accepts it (bounded by the recursion depth
+cap). The VPN next-hop then resolves to:</p>
+<pre><code>2.2.2.1  →  BGP-LU route (push the ASBR's swap label)
+         →  IGP/SR route to the ASBR (push the SR prefix-SID)
+         →  on-link next-hop toward P1
+</code></pre>
+<p>and the PE programs the VPN prefix with all three labels.</p>
+<h2 id="end-to-end-label-stack"><a class="header" href="#end-to-end-label-stack">End-to-end label stack</a></h2>
+<p>A packet from <code>ce1</code> to a host in <code>ce2</code>’s subnet, traced by the labels on
+the wire (AS 65000 → AS 65001):</p>
+<div class="table-wrapper">
+<table>
+<thead>
+<tr><th>Hop</th><th>Action</th><th>Stack leaving the hop</th></tr>
+</thead>
+<tbody>
+<tr><td><code>pe1</code></td><td>VRF lookup → push <code>[SR→asbr1, BGP-LU, VPN]</code></td><td><code>16003 · L_lu · L_vpn</code></td></tr>
+<tr><td><code>p1</code></td><td>SR penultimate-hop pop of <code>16003</code></td><td><code>L_lu · L_vpn</code></td></tr>
+<tr><td><code>asbr1</code></td><td>swap BGP-LU label toward <code>asbr2</code></td><td><code>L_lu' · L_vpn</code></td></tr>
+<tr><td><code>asbr2</code></td><td>swap → push SR transport toward <code>pe2</code></td><td><code>16004 · L_vpn</code></td></tr>
+<tr><td><code>p2</code></td><td>SR penultimate-hop pop of <code>16004</code></td><td><code>L_vpn</code></td></tr>
+<tr><td><code>pe2</code></td><td>pop VPN label → VRF lookup → to <code>ce2</code></td><td><em>(IP)</em></td></tr>
+</tbody>
+</table>
+</div>
+<p>The transport label (SR) gets the packet to the next ASBR; the BGP-LU
+label carries it across the AS boundary to the right egress PE; the VPN
+label selects the customer VRF on that PE.</p>
+<h2 id="verification"><a class="header" href="#verification">Verification</a></h2>
+<p><strong>The PEs learn each other’s loopback as a labeled route.</strong> On <code>pe1</code>,
+<code>2.2.2.1/32</code> arrives over BGP-LU and installs with the stacked transport</p>
+<ul>
+<li>BGP-LU label:</li>
+</ul>
+<pre><code>$ show ip route 2.2.2.1
+B  *&gt; 2.2.2.1/32 [200/0] via 10.0.0.2, p1, label 16003 16
+
+$ ip route show 2.2.2.1
+2.2.2.1 nhid 3  encap mpls  16003/16 via 10.0.0.2 dev p1 proto bgp onlink
+</code></pre>
+<p>Here <code>16003</code> is the SR prefix-SID toward <code>asbr1</code> and <code>16</code> is <code>asbr1</code>’s
+BGP-LU swap label for <code>2.2.2.1</code>.</p>
+<p><strong>The ASBRs carry only labeled IPv4 — no VPN.</strong> On <code>asbr1</code>:</p>
+<pre><code>$ show bgp labeled-unicast
+    Network            Next Hop            ...  Path
+ *&gt;i 1.1.1.1/32         1.1.1.1             ...  i        # local PE, from PE1
+ *&gt;  2.2.2.1/32         172.16.0.2          ...  65001 i  # remote PE, from ASBR2
+</code></pre>
+<p>The <code>label-v4</code> capability is negotiated on each BGP-LU session:</p>
+<pre><code>$ show bgp neighbor 172.16.0.2
+  ...
+    IPv4 Labeled Unicast: advertised and received
+</code></pre>
+<p><strong>The VPN routes pass directly between the PEs.</strong> On <code>pe1</code>, the remote
+customer prefix appears under the remote PE’s RD, tagged with the shared
+route-target, and the multihop session is up:</p>
+<pre><code>$ show bgp vpnv4
+Route Distinguisher: 65001:1
+ *&gt;  10.2.0.0/30        2.2.2.1   ...   # rt:65000:100
+
+$ show bgp neighbor 2.2.2.1
+  BGP state = Established
+</code></pre>
+<p>That the multihop VPNv4 session reaches <code>Established</code> at all already
+proves the BGP-LU LSP forwards — its TCP rides that LSP.</p>
+<p><strong>End to end.</strong> With the customer prefix imported into <code>vrf-cust</code> on
+each PE, traffic forwards across the boundary:</p>
+<pre><code>ce1$ ping &lt;host in ce2's subnet&gt;   # succeeds
+</code></pre>
+<h2 id="bdd-coverage"><a class="header" href="#bdd-coverage">BDD coverage</a></h2>
+<p><code>bdd/tests/features/bgp_interas_option_c.feature</code> builds the full
+eight-namespace topology above and asserts, in order: the IS-IS SR
+adjacencies, the SR-MPLS ILM entries on the P routers, the eBGP-LU and
+iBGP-LU sessions, the BGP-LU loopback exchange across the ASBRs, the
+multihop VPNv4 session, the VPNv4 route exchange under each RD, and
+finally an end-to-end CE-to-CE ping that exercises the SR + BGP-LU + VPN
+label stack in the Linux MPLS data plane.</p>
+
+                    </main>
+
+                    <nav class="nav-wrapper" aria-label="Page navigation">
+                        <!-- Mobile navigation buttons -->
+                            <a rel="prev" href="ch-02-21-bgp-interas-option-b.html" class="mobile-nav-chapters previous" title="Previous chapter" aria-label="Previous chapter" aria-keyshortcuts="Left">
+                                <span class=fa-svg><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 320 512"><!--! Font Awesome Free 6.2.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2022 Fonticons, Inc. --><path d="M41.4 233.4c-12.5 12.5-12.5 32.8 0 45.3l160 160c12.5 12.5 32.8 12.5 45.3 0s12.5-32.8 0-45.3L109.3 256 246.6 118.6c12.5-12.5 12.5-32.8 0-45.3s-32.8-12.5-45.3 0l-160 160z"/></svg></span>
+                            </a>
+
+                            <a rel="next prefetch" href="ch-02-22-bgp-interas-option-ab.html" class="mobile-nav-chapters next" title="Next chapter" aria-label="Next chapter" aria-keyshortcuts="Right">
+                                <span class=fa-svg><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 320 512"><!--! Font Awesome Free 6.2.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2022 Fonticons, Inc. --><path d="M278.6 233.4c12.5 12.5 12.5 32.8 0 45.3l-160 160c-12.5 12.5-32.8 12.5-45.3 0s-12.5-32.8 0-45.3L210.7 256 73.4 118.6c-12.5-12.5-12.5-32.8 0-45.3s32.8-12.5 45.3 0l160 160z"/></svg></span>
+                            </a>
+
+                        <div style="clear: both"></div>
+                    </nav>
+                </div>
+            </div>
+
+            <nav class="nav-wide-wrapper" aria-label="Page navigation">
+                    <a rel="prev" href="ch-02-21-bgp-interas-option-b.html" class="nav-chapters previous" title="Previous chapter" aria-label="Previous chapter" aria-keyshortcuts="Left">
+                        <span class=fa-svg><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 320 512"><!--! Font Awesome Free 6.2.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2022 Fonticons, Inc. --><path d="M41.4 233.4c-12.5 12.5-12.5 32.8 0 45.3l160 160c12.5 12.5 32.8 12.5 45.3 0s12.5-32.8 0-45.3L109.3 256 246.6 118.6c12.5-12.5 12.5-32.8 0-45.3s-32.8-12.5-45.3 0l-160 160z"/></svg></span>
+                    </a>
+
+                    <a rel="next prefetch" href="ch-02-22-bgp-interas-option-ab.html" class="nav-chapters next" title="Next chapter" aria-label="Next chapter" aria-keyshortcuts="Right">
+                        <span class=fa-svg><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 320 512"><!--! Font Awesome Free 6.2.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2022 Fonticons, Inc. --><path d="M278.6 233.4c12.5 12.5 12.5 32.8 0 45.3l-160 160c-12.5 12.5-32.8 12.5-45.3 0s-12.5-32.8 0-45.3L210.7 256 73.4 118.6c-12.5-12.5-12.5-32.8 0-45.3s32.8-12.5 45.3 0l160 160z"/></svg></span>
+                    </a>
+            </nav>
+
+        </div>
+
+        <template id=fa-eye><span class=fa-svg><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 576 512"><!--! Font Awesome Free 6.2.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2022 Fonticons, Inc. --><path d="M288 32c-80.8 0-145.5 36.8-192.6 80.6C48.6 156 17.3 208 2.5 243.7c-3.3 7.9-3.3 16.7 0 24.6C17.3 304 48.6 356 95.4 399.4C142.5 443.2 207.2 480 288 480s145.5-36.8 192.6-80.6c46.8-43.5 78.1-95.4 93-131.1c3.3-7.9 3.3-16.7 0-24.6c-14.9-35.7-46.2-87.7-93-131.1C433.5 68.8 368.8 32 288 32zM432 256c0 79.5-64.5 144-144 144s-144-64.5-144-144s64.5-144 144-144s144 64.5 144 144zM288 192c0 35.3-28.7 64-64 64c-11.5 0-22.3-3-31.6-8.4c-.2 2.8-.4 5.5-.4 8.4c0 53 43 96 96 96s96-43 96-96s-43-96-96-96c-2.8 0-5.6 .1-8.4 .4c5.3 9.3 8.4 20.1 8.4 31.6z"/></svg></span></template>
+        <template id=fa-eye-slash><span class=fa-svg><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 640 512"><!--! Font Awesome Free 6.2.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2022 Fonticons, Inc. --><path d="M38.8 5.1C28.4-3.1 13.3-1.2 5.1 9.2S-1.2 34.7 9.2 42.9l592 464c10.4 8.2 25.5 6.3 33.7-4.1s6.3-25.5-4.1-33.7L525.6 386.7c39.6-40.6 66.4-86.1 79.9-118.4c3.3-7.9 3.3-16.7 0-24.6c-14.9-35.7-46.2-87.7-93-131.1C465.5 68.8 400.8 32 320 32c-68.2 0-125 26.3-169.3 60.8L38.8 5.1zM223.1 149.5C248.6 126.2 282.7 112 320 112c79.5 0 144 64.5 144 144c0 24.9-6.3 48.3-17.4 68.7L408 294.5c5.2-11.8 8-24.8 8-38.5c0-53-43-96-96-96c-2.8 0-5.6 .1-8.4 .4c5.3 9.3 8.4 20.1 8.4 31.6c0 10.2-2.4 19.8-6.6 28.3l-90.3-70.8zm223.1 298L373 389.9c-16.4 6.5-34.3 10.1-53 10.1c-79.5 0-144-64.5-144-144c0-6.9 .5-13.6 1.4-20.2L83.1 161.5C60.3 191.2 44 220.8 34.5 243.7c-3.3 7.9-3.3 16.7 0 24.6c14.9 35.7 46.2 87.7 93 131.1C174.5 443.2 239.2 480 320 480c47.8 0 89.9-12.9 126.2-32.5z"/></svg></span></template>
+        <template id=fa-copy><span class=fa-svg><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512"><!--! Font Awesome Free 6.2.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2022 Fonticons, Inc. --><path d="M502.6 70.63l-61.25-61.25C435.4 3.371 427.2 0 418.7 0H255.1c-35.35 0-64 28.66-64 64l.0195 256C192 355.4 220.7 384 256 384h192c35.2 0 64-28.8 64-64V93.25C512 84.77 508.6 76.63 502.6 70.63zM464 320c0 8.836-7.164 16-16 16H255.1c-8.838 0-16-7.164-16-16L239.1 64.13c0-8.836 7.164-16 16-16h128L384 96c0 17.67 14.33 32 32 32h47.1V320zM272 448c0 8.836-7.164 16-16 16H63.1c-8.838 0-16-7.164-16-16L47.98 192.1c0-8.836 7.164-16 16-16H160V128H63.99c-35.35 0-64 28.65-64 64l.0098 256C.002 483.3 28.66 512 64 512h192c35.2 0 64-28.8 64-64v-32h-47.1L272 448z"/></svg></span></template>
+        <template id=fa-play><span class=fa-svg><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 384 512"><!--! Font Awesome Free 6.2.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2022 Fonticons, Inc. --><path d="M73 39c-14.8-9.1-33.4-9.4-48.5-.9S0 62.6 0 80V432c0 17.4 9.4 33.4 24.5 41.9s33.7 8.1 48.5-.9L361 297c14.3-8.7 23-24.2 23-41s-8.7-32.2-23-41L73 39z"/></svg></span></template>
+        <template id=fa-clock-rotate-left><span class=fa-svg><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512"><!--! Font Awesome Free 6.2.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2022 Fonticons, Inc. --><path d="M75 75L41 41C25.9 25.9 0 36.6 0 57.9V168c0 13.3 10.7 24 24 24H134.1c21.4 0 32.1-25.9 17-41l-30.8-30.8C155 85.5 203 64 256 64c106 0 192 86 192 192s-86 192-192 192c-40.8 0-78.6-12.7-109.7-34.4c-14.5-10.1-34.4-6.6-44.6 7.9s-6.6 34.4 7.9 44.6C151.2 495 201.7 512 256 512c141.4 0 256-114.6 256-256S397.4 0 256 0C185.3 0 121.3 28.7 75 75zm181 53c-13.3 0-24 10.7-24 24V256c0 6.4 2.5 12.5 7 17l72 72c9.4 9.4 24.6 9.4 33.9 0s9.4-24.6 0-33.9l-65-65V152c0-13.3-10.7-24-24-24z"/></svg></span></template>
+
+
+
+        <script>
+            window.playground_copyable = true;
+        </script>
+
+
+        <script src="elasticlunr-ef4e11c1.min.js"></script>
+        <script src="mark-09e88c2c.min.js"></script>
+        <script src="searcher-09f2665d.js"></script>
+
+        <script src="clipboard-1626706a.min.js"></script>
+        <script src="highlight-abc7f01d.js"></script>
+        <script src="book-c22b7243.js"></script>
+
+        <!-- Custom JS scripts -->
+
+
+
+    </div>
+    </body>
+</html>
