@@ -59,6 +59,8 @@ impl VrfBuilder {
                 let ipv4_export_rts = config.ipv4_export_rts.clone();
                 let ipv6_import_rts = config.ipv6_import_rts.clone();
                 let ipv6_export_rts = config.ipv6_export_rts.clone();
+                let mup_import_rts = config.mup_import_rts.clone();
+                let mup_export_rts = config.mup_export_rts.clone();
                 let router_id = config.router_id;
                 self.config.insert(name.clone(), config);
                 let _ = tx.send(Message::VrfAdd { name: name.clone() });
@@ -68,6 +70,8 @@ impl VrfBuilder {
                     ipv4_export_rts,
                     ipv6_import_rts,
                     ipv6_export_rts,
+                    mup_import_rts,
+                    mup_export_rts,
                 });
                 // Router-id snapshot follows the same VrfAdd-first
                 // ordering contract as the RT message; `None` (leaf
@@ -253,6 +257,50 @@ impl ConfigBuilder {
                     .remove(&rt);
                 Ok(())
             })
+            // /vrf/<name>/mup/route-target/{import,export} —
+            // BGP MUP (SAFI 85) RT policy, same shape as ipv4 / ipv6.
+            .path("/mup/route-target/import")
+            .set(|config, cache, name, args| {
+                let raw = args.string().context(RT_ERR)?;
+                let rt = bgp_packet::RouteDistinguisher::from_str(&raw)
+                    .map_err(|_| anyhow::anyhow!(RT_PARSE_ERR))?;
+                cache_get(config, cache, name)
+                    .context(CONFIG_ERR)?
+                    .mup_import_rts
+                    .insert(rt);
+                Ok(())
+            })
+            .del(|config, cache, name, args| {
+                let raw = args.string().context(RT_ERR)?;
+                let rt = bgp_packet::RouteDistinguisher::from_str(&raw)
+                    .map_err(|_| anyhow::anyhow!(RT_PARSE_ERR))?;
+                cache_get(config, cache, name)
+                    .context(CONFIG_ERR)?
+                    .mup_import_rts
+                    .remove(&rt);
+                Ok(())
+            })
+            .path("/mup/route-target/export")
+            .set(|config, cache, name, args| {
+                let raw = args.string().context(RT_ERR)?;
+                let rt = bgp_packet::RouteDistinguisher::from_str(&raw)
+                    .map_err(|_| anyhow::anyhow!(RT_PARSE_ERR))?;
+                cache_get(config, cache, name)
+                    .context(CONFIG_ERR)?
+                    .mup_export_rts
+                    .insert(rt);
+                Ok(())
+            })
+            .del(|config, cache, name, args| {
+                let raw = args.string().context(RT_ERR)?;
+                let rt = bgp_packet::RouteDistinguisher::from_str(&raw)
+                    .map_err(|_| anyhow::anyhow!(RT_PARSE_ERR))?;
+                cache_get(config, cache, name)
+                    .context(CONFIG_ERR)?
+                    .mup_export_rts
+                    .remove(&rt);
+                Ok(())
+            })
     }
 
     pub fn path(mut self, path: &str) -> Self {
@@ -329,6 +377,8 @@ mod tests {
             ipv4_export_rts,
             ipv6_import_rts,
             ipv6_export_rts,
+            mup_import_rts,
+            mup_export_rts,
         } = second
         else {
             panic!("second message is not VrfRouteTargets");
@@ -340,6 +390,8 @@ mod tests {
         assert!(ipv4_export_rts.contains(&exp));
         assert!(ipv6_import_rts.is_empty());
         assert!(ipv6_export_rts.is_empty());
+        assert!(mup_import_rts.is_empty());
+        assert!(mup_export_rts.is_empty());
 
         // The router-id snapshot always trails the RT message — `None`
         // here because the operator never set `vrf v1 router-id`.

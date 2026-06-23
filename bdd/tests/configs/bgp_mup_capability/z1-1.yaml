@@ -10,5 +10,5 @@ router:
       afi-safi:
       - name: ipv4
         enabled: true
-      - name: mobile-uplane
+      - name: mup
         enabled: true

@@ -41,6 +41,10 @@ pub struct Vrf {
     pub ipv4_export_rts: std::collections::BTreeSet<bgp_packet::RouteDistinguisher>,
     pub ipv6_import_rts: std::collections::BTreeSet<bgp_packet::RouteDistinguisher>,
     pub ipv6_export_rts: std::collections::BTreeSet<bgp_packet::RouteDistinguisher>,
+    /// MUP (mup / SAFI 85) RT sets —
+    /// `set vrf X mup route-target {import,export} …`.
+    pub mup_import_rts: std::collections::BTreeSet<bgp_packet::RouteDistinguisher>,
+    pub mup_export_rts: std::collections::BTreeSet<bgp_packet::RouteDistinguisher>,
 }
 
 /// Per-VRF routing-table set. Mirrors the `table` / `table_v6` /

@@ -1,6 +1,6 @@
 ## tests/configs/bgp_mup_runtime_enable/z2-1.yaml
-# Mirror of z1-1.yaml: iBGP, IPv4 unicast only, no mobile-uplane at
-# startup. mobile-uplane is enabled at runtime by the scenario.
+# Mirror of z1-1.yaml: iBGP, IPv4 unicast only, no mup at
+# startup. mup is enabled at runtime by the scenario.
 router:
   bgp:
     global:

@@ -1,10 +1,10 @@
 # z1 — MUP Controller (MUP-C). AS 65001, iBGP to z2 (192.168.0.2) with the
-# mobile-uplane afi-safi negotiated. Runs the PFCP/N4 listener on
+# mup afi-safi negotiated. Runs the PFCP/N4 listener on
 # 192.168.0.1:8805 and, when pfcp-inject programs a session whose Network
 # Instance is `access`, originates a Type-1 Session-Transformed route into
 # the `mobile-up` VRF (rd 65000:100, RT export 65000:200) with an End.DT4
 # SID carved from locator LOC1 and the controller-address as next hop. The
-# route is advertised to z2 over the mobile-uplane session.
+# route is advertised to z2 over the mup session.
 segment-routing:
   locator:
   - name: LOC1
@@ -26,22 +26,19 @@ router:
       afi-safi:
       - name: ipv4
         enabled: true
-      - name: mobile-uplane
+      - name: mup
         enabled: true
     vrf:
     - name: mobile-up
       rd: "65000:100"
-      mobile-uplane:
-        route-target:
-          export:
-          - "65000:200"
+      mup:
         route:
           st1:
             dest-network-instance:
               access:
                 exact: access
     afi-safi:
-    - name: mobile-uplane
+    - name: mup
       mup-c:
         enable: true
         controller-address: fcbb:bb01::1
@@ -50,3 +47,12 @@ router:
           port: 8805
         srv6:
           locator: LOC1
+# Top-level VRF: the MUP export route-targets live here now (same
+# `route-target {import|export}` framework as ipv4 / ipv6), not under
+# `router bgp vrf`.
+vrf:
+- name: mobile-up
+  mup:
+    route-target:
+      export:
+      - "65000:200"

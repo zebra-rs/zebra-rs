@@ -29,7 +29,7 @@ module zebra-bgp-mup-controller {
   description
     "BGP MUP Controller (MUP-C) extensions to the BGP candidate-config
      tree. Adds a `mup-c` container under the BGP global AFI/SAFI list,
-     only meaningful when the entry's name is `mobile-uplane` (SAFI 85,
+     only meaningful when the entry's name is `mup` (SAFI 85,
      RFC 9833). When enabled, the BGP task spawns an in-process MUP
      controller that terminates PFCP/N4 (3GPP TS 29.244) as a UP-node,
      learns mobile sessions and (in a follow-up) originates Type-1 /
@@ -39,7 +39,7 @@ module zebra-bgp-mup-controller {
 
        router bgp {
          afi-safi {
-           name mobile-uplane;
+           name mup;
            mup-c {
              enable true;
              controller-address 2001:db8::1;
@@ -61,7 +61,7 @@ module zebra-bgp-mup-controller {
   grouping bgp-afi-safi-mup-c-extension {
     description
       "MUP controller config on the global afi-safi list. Only
-       meaningful when the list entry's name is `mobile-uplane` —
+       meaningful when the list entry's name is `mup` —
        harmless and ignored on other AFI/SAFIs.";
 
     container mup-c {

@@ -59,6 +59,20 @@ pub enum BgpVrfMsg {
         prefix: ipnet::Ipv4Net,
     },
 
+    /// A MUP (SAFI 85) best-path the global Loc-RIB selected whose RD
+    /// matches this VRF's `rd`. Forwarded for **display only**: the
+    /// per-VRF task mirrors it into `local_rib.mup.selected` so a
+    /// `show bgp vrf <name> mup` (which the manager redirects into this
+    /// task) renders the VRF's Session-Transformed routes. The global
+    /// `Bgp` instance remains the authoritative MUP RIB / advertiser.
+    MupUpdate {
+        prefix: bgp_packet::MupPrefix,
+        rib: crate::bgp::route::BgpRib,
+    },
+    /// Withdraw a previously-forwarded MUP best-path (the global RIB no
+    /// longer has a selected path for it).
+    MupWithdraw { prefix: bgp_packet::MupPrefix },
+
     /// VPNv6 counterpart of [`Self::ImportV4`] — a VPNv6 route whose
     /// RT list intersects this VRF's `import_rts_v6`; inserted into
     /// the VRF's IPv6 unicast Loc-RIB and advertised to CE peers.

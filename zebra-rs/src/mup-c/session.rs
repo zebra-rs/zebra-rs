@@ -33,7 +33,7 @@ pub struct MupSession {
     pub teid: u32,
     /// Access-side GTP-U endpoint (the F-TEID address).
     pub endpoint: Option<IpAddr>,
-    /// Network Instance (APN/DNN). Correlated to a BGP VRF `mobile-uplane`
+    /// Network Instance (APN/DNN). Correlated to a BGP VRF `mup`
     /// config when routes are originated.
     pub network_instance: Option<String>,
     /// QoS Flow Identifier, if present.

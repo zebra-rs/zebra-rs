@@ -21,7 +21,7 @@ use super::session::{MupSession, SessionTable};
 /// PFCP default port (3GPP TS 29.244 §4.2.2).
 pub const PFCP_PORT: u16 = 8805;
 
-/// Controller config, staged from `router bgp afi-safi mobile-uplane
+/// Controller config, staged from `router bgp afi-safi mup
 /// mup-c { … }` by the BGP config callbacks and applied at `CommitEnd`.
 #[derive(Debug, Clone, Default)]
 pub struct MupCConfig {
@@ -70,7 +70,7 @@ pub enum MupCEvent {
 }
 
 /// Read-only controller snapshot held by the BGP task, fed by
-/// [`MupCEvent`]. Renders `show bgp mobile-uplane mup-c [session |
+/// [`MupCEvent`]. Renders `show bgp mup mup-c [session |
 /// association]`.
 #[derive(Debug, Default)]
 pub struct MupCView {

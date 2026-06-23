@@ -1186,6 +1186,17 @@ impl BgpVrf {
             BgpVrfMsg::WithdrawNetworkV6 { prefix } => {
                 self.withdraw_self_network_v6(prefix);
             }
+            // Display-only mirror of the global MUP best-path for this
+            // VRF's RD, so `show bgp vrf <name> mup` (redirected here)
+            // renders the VRF's ST routes. We touch only `selected`
+            // (what `render_mup_table` reads); the per-VRF task never
+            // re-advertises or best-paths MUP.
+            BgpVrfMsg::MupUpdate { prefix, rib } => {
+                self.local_rib.mup.selected.insert(prefix, rib);
+            }
+            BgpVrfMsg::MupWithdraw { prefix } => {
+                self.local_rib.mup.selected.remove(&prefix);
+            }
             BgpVrfMsg::Shutdown => unreachable!("handled in event_loop"),
         }
     }

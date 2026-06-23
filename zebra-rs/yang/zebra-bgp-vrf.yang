@@ -340,21 +340,15 @@ module zebra-bgp-vrf {
              (IP Prefix) routes. Requires `rd` to be set.";
         }
       }
-      container mobile-uplane {
+      container mup {
         description
-          "BGP MUP (RFC 9833) per-VRF service. route-target/export tags
-           the ST routes the controller originates from this VRF; route
-           selects the Session-Transformed route type (st1 = Type-1 ST
-           / downlink = N6, st2 = Type-2 ST / uplink = N3) and the
-           destination session network-instance matched exactly.";
-        container route-target {
-          leaf-list export {
-            type route-distinguisher;
-            description
-              "Route-targets attached to MUP ST routes originated from
-               this VRF (RT shares the RD wire format).";
-          }
-        }
+          "BGP MUP (RFC 9833) per-VRF service. `route` selects the
+           Session-Transformed route type (st1 = Type-1 ST / downlink =
+           N6, st2 = Type-2 ST / uplink = N3) and the destination session
+           network-instance matched exactly. The export/import route-
+           targets live on the top-level `vrf <name> mup
+           route-target {export|import}` (config.yang), the same place as
+           the ipv4 / ipv6 RT policy.";
         container route {
           description
             "Session-Transformed route origination for this VRF, keyed by

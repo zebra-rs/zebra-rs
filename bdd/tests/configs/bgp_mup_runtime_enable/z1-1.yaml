@@ -1,6 +1,6 @@
 ## tests/configs/bgp_mup_runtime_enable/z1-1.yaml
-# iBGP, IPv4 unicast only — NO mobile-uplane at startup. The scenario
-# enables `afi-safi mobile-uplane` on the LIVE session at runtime; because
+# iBGP, IPv4 unicast only — NO mup at startup. The scenario
+# enables `afi-safi mup` on the LIVE session at runtime; because
 # an AFI/SAFI is a Multiprotocol capability fixed at OPEN time, that change
 # bounces the session (like `clear bgp ... hard`) so the MUP capability is
 # renegotiated and shows up in `show bgp neighbor`.

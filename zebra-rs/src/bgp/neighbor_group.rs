@@ -223,7 +223,7 @@ pub fn config_neighbor_group_afi_safi_enabled(
     match op {
         ConfigOp::Set => {
             let enabled = args.boolean()?;
-            // `mobile-uplane` toggles both MUP families at once (RFC 9833).
+            // `mup` toggles both MUP families at once (RFC 9833).
             for fam in mp_family_expand(family) {
                 group.afi_safi.entry(fam).or_default().enabled = enabled;
             }
@@ -862,7 +862,7 @@ pub(super) fn sweep_members(
     }
 }
 
-/// MUP (RFC 9833) is exposed through a single `mobile-uplane` config
+/// MUP (RFC 9833) is exposed through a single `mup` config
 /// name that enables *both* the IPv4 (AFI 1) and IPv6 (AFI 2) MUP
 /// families at once. Every other family is one config name → one
 /// `(AFI, SAFI)`. Expand a parsed family into the concrete set of
@@ -1420,7 +1420,7 @@ mod tests {
 
     #[test]
     fn mp_family_expand_fans_out_mup_to_both_afis() {
-        // `mobile-uplane` enables both IPv4-MUP and IPv6-MUP (RFC 9833).
+        // `mup` enables both IPv4-MUP and IPv6-MUP (RFC 9833).
         assert_eq!(
             mp_family_expand(AfiSafi::new(Afi::Ip, Safi::Mup)),
             vec![

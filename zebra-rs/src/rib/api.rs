@@ -184,6 +184,8 @@ pub enum RibRx {
         ipv4_export_rts: std::collections::BTreeSet<bgp_packet::RouteDistinguisher>,
         ipv6_import_rts: std::collections::BTreeSet<bgp_packet::RouteDistinguisher>,
         ipv6_export_rts: std::collections::BTreeSet<bgp_packet::RouteDistinguisher>,
+        mup_import_rts: std::collections::BTreeSet<bgp_packet::RouteDistinguisher>,
+        mup_export_rts: std::collections::BTreeSet<bgp_packet::RouteDistinguisher>,
     },
     EoR,
 
@@ -479,6 +481,8 @@ impl Rib {
                 ipv4_export_rts: vrf.ipv4_export_rts.clone(),
                 ipv6_import_rts: vrf.ipv6_import_rts.clone(),
                 ipv6_export_rts: vrf.ipv6_export_rts.clone(),
+                mup_import_rts: vrf.mup_import_rts.clone(),
+                mup_export_rts: vrf.mup_export_rts.clone(),
             });
         }
     }

@@ -1,5 +1,5 @@
 # z2 — MUP route receiver. AS 65001, iBGP to z1 (192.168.0.1) with the
-# mobile-uplane afi-safi negotiated (both IPv4-MUP and IPv6-MUP). Plain BGP
+# mup afi-safi negotiated (both IPv4-MUP and IPv6-MUP). Plain BGP
 # speaker: no controller, originates nothing. It receives the Type-1 ST
 # route z1 originates — an IPv6 UE route carrying an IPv4 endpoint — and
 # must parse and show it. A receiver that forced the endpoint family to
@@ -16,5 +16,5 @@ router:
       afi-safi:
       - name: ipv4
         enabled: true
-      - name: mobile-uplane
+      - name: mup
         enabled: true
