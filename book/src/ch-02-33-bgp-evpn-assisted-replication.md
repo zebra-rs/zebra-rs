@@ -69,6 +69,23 @@ On the **receive** side the daemon classifies each remote's Type-3 route
 The collapse is observable in the kernel FDB — an AR-LEAF shows one `dst`
 (the AR-IP); an RNVE shows one per remote VTEP.
 
+The AR role is also visible in the control plane: `show bgp evpn` prints a
+**`PMSI:`** line per Type-3 route decoding the PMSI Tunnel attribute — the
+tunnel type, the AR role carried in the `T` field, the RFC 9574 BM/U/L flags,
+and the endpoint + VNI:
+
+```
+ *>  [3]:[0]:[32]:[10.0.0.1]
+                    10.0.0.1                   0         32768 i
+                    Extended community: RT:65501:550 ET:8
+                    PMSI: assisted-replication(replicator) endpoint:10.0.0.254 vni:550
+```
+
+A Regular-IR route renders `PMSI: ingress-replication endpoint:<VTEP> vni:<n>`;
+an SR P2MP tree renders `PMSI: srv6-p2mp root:<VTEP> tree-id:<n>`. (The
+**AR-IP** appears on the PMSI `endpoint:` field, not the route's next hop —
+the EVPN advertise path emits next-hop = VTEP.)
+
 ## Pruned-Flood-Lists
 
 A node that does not want to receive a flood category can ask peers to

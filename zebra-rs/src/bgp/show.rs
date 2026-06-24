@@ -3278,6 +3278,60 @@ fn show_evpn_ecom(attr: &BgpAttr) -> String {
         .join(" ")
 }
 
+/// Render the PMSI Tunnel attribute for the EVPN detail view (RFC 6514,
+/// EVPN-extended by RFC 9574). The tunnel type names the BUM delivery
+/// method; Assisted Replication additionally shows the AR role carried in
+/// the T field, and the RFC 9574 Pruned-Flood-List (BM/U) and Leaf
+/// Information Required (L) flags are appended when set. SR P2MP trees per
+/// RFC 9524 carry a Root and Tree-ID instead of a plain endpoint and VNI.
+fn format_pmsi_tunnel(p: &PmsiTunnel) -> String {
+    let mut s = String::new();
+    let type_name = match p.tunnel_type {
+        PmsiTunnel::TUNNEL_INGRESS_REPLICATION => "ingress-replication".to_string(),
+        PmsiTunnel::TUNNEL_ASSISTED_REPLICATION => "assisted-replication".to_string(),
+        PmsiTunnel::TUNNEL_SR_MPLS_P2MP => "sr-mpls-p2mp".to_string(),
+        PmsiTunnel::TUNNEL_SRV6_P2MP => "srv6-p2mp".to_string(),
+        other => format!("type-0x{other:02x}"),
+    };
+    let _ = write!(s, "{type_name}");
+    // Assisted Replication: name the role carried in the T field.
+    if p.is_assisted_replication() {
+        let role = match p.ar_type() {
+            AssistedReplicationType::Rnve => "rnve",
+            AssistedReplicationType::Replicator => "replicator",
+            AssistedReplicationType::Leaf => "leaf",
+            AssistedReplicationType::Reserved => "reserved",
+        };
+        let _ = write!(s, "({role})");
+    }
+    // SR P2MP trees identify a <Root, Tree-ID>; every other tunnel type a
+    // plain endpoint IP (the PE / replicator) plus the VNI.
+    if p.is_sr_p2mp() {
+        let _ = write!(s, " root:{}", p.endpoint);
+        if let Some(tree_id) = p.tree_id {
+            let _ = write!(s, " tree-id:{tree_id}");
+        }
+    } else {
+        let _ = write!(s, " endpoint:{} vni:{}", p.endpoint, p.vni);
+    }
+    // RFC 9574 flags: BM/U prune requests and the L (Leaf Information
+    // Required) selective-AR solicitation.
+    let mut flags = Vec::new();
+    if p.prune_bm() {
+        flags.push("prune-bm");
+    }
+    if p.prune_unknown() {
+        flags.push("prune-u");
+    }
+    if p.leaf_info_required() {
+        flags.push("leaf-info-required");
+    }
+    if !flags.is_empty() {
+        let _ = write!(s, " flags:{}", flags.join(","));
+    }
+    s
+}
+
 /// Append the per-route attribute lines shared by the EVPN table renderers
 /// (`show_bgp_evpn` and `show_adj_rib_routes_evpn`). Each attribute prints on
 /// its own 20-space-indented line (aligned under the "Next Hop" column),
@@ -3286,6 +3340,8 @@ fn show_evpn_ecom(attr: &BgpAttr) -> String {
 ///
 /// - Extended communities (RFC 4360 / EVPN ECs) decode via the EVPN-aware
 ///   `show_evpn_ecom` (RT, ET, mcast-flags, df-election).
+/// - PMSI Tunnel (RFC 6514 / RFC 9574): BUM delivery method, AR role, prune
+///   flags, or SR P2MP tree binding, via `format_pmsi_tunnel`.
 /// - Standard communities (RFC 1997) and large communities (RFC 8092) reuse
 ///   the codec `Display`, matching the unicast detail view at
 ///   `write_bgp_entry_detail`.
@@ -3299,6 +3355,12 @@ fn write_evpn_path_attrs(buf: &mut String, attr: &BgpAttr) -> std::fmt::Result {
     let ecom = show_evpn_ecom(attr);
     if !ecom.is_empty() {
         writeln!(buf, "{PAD}Extended community: {ecom}")?;
+    }
+    // PMSI Tunnel (RFC 6514 / RFC 9574): the BUM delivery method for a Type-3
+    // IMET route — ingress vs assisted replication, the AR role, prune flags,
+    // or an SR P2MP tree binding.
+    if let Some(pmsi) = &attr.pmsi_tunnel {
+        writeln!(buf, "{PAD}PMSI: {}", format_pmsi_tunnel(pmsi))?;
     }
     if let Some(com) = &attr.com {
         let s = com.to_string();
@@ -6022,5 +6084,98 @@ mod evpn_ecom_render_tests {
         }
         .into();
         assert_eq!(format_evpn_ecom_value(&combo), "mcast-flags:IMS");
+    }
+}
+
+#[cfg(test)]
+mod pmsi_render_tests {
+    use super::format_pmsi_tunnel;
+    use bgp_packet::{AssistedReplicationType, PmsiTunnel};
+    use std::net::{IpAddr, Ipv4Addr};
+
+    fn ip(a: u8, b: u8, c: u8, d: u8) -> IpAddr {
+        IpAddr::V4(Ipv4Addr::new(a, b, c, d))
+    }
+
+    /// A plain Ingress Replication tunnel renders its endpoint (the
+    /// originating PE) and VNI, with no role or flags.
+    #[test]
+    fn ingress_replication() {
+        let p = PmsiTunnel {
+            flags: 0,
+            tunnel_type: PmsiTunnel::TUNNEL_INGRESS_REPLICATION,
+            vni: 550,
+            endpoint: ip(10, 0, 0, 1),
+            tree_id: None,
+        };
+        assert_eq!(
+            format_pmsi_tunnel(&p),
+            "ingress-replication endpoint:10.0.0.1 vni:550"
+        );
+    }
+
+    /// A Replicator-AR tunnel names the `replicator` role (the T field) and
+    /// shows the AR-IP as the endpoint.
+    #[test]
+    fn assisted_replication_replicator() {
+        let p = PmsiTunnel {
+            flags: 0,
+            tunnel_type: PmsiTunnel::TUNNEL_ASSISTED_REPLICATION,
+            vni: 550,
+            endpoint: ip(10, 0, 0, 254),
+            tree_id: None,
+        }
+        .with_ar_type(AssistedReplicationType::Replicator);
+        assert_eq!(
+            format_pmsi_tunnel(&p),
+            "assisted-replication(replicator) endpoint:10.0.0.254 vni:550"
+        );
+    }
+
+    /// A selective Replicator-AR carrying the L flag appends
+    /// `flags:leaf-info-required`.
+    #[test]
+    fn assisted_replication_selective_leaf_info() {
+        let mut p = PmsiTunnel {
+            flags: 0,
+            tunnel_type: PmsiTunnel::TUNNEL_ASSISTED_REPLICATION,
+            vni: 10,
+            endpoint: ip(10, 0, 0, 254),
+            tree_id: None,
+        }
+        .with_ar_type(AssistedReplicationType::Replicator);
+        p.set_leaf_info_required(true);
+        assert_eq!(
+            format_pmsi_tunnel(&p),
+            "assisted-replication(replicator) endpoint:10.0.0.254 vni:10 flags:leaf-info-required"
+        );
+    }
+
+    /// An AR-LEAF that requests pruning from both flood categories renders
+    /// both prune flags in wire order (BM before U).
+    #[test]
+    fn leaf_with_prune_flags() {
+        let mut p = PmsiTunnel {
+            flags: 0,
+            tunnel_type: PmsiTunnel::TUNNEL_INGRESS_REPLICATION,
+            vni: 10,
+            endpoint: ip(10, 0, 0, 2),
+            tree_id: None,
+        }
+        .with_ar_type(AssistedReplicationType::Leaf);
+        p.set_prune_bm(true);
+        p.set_prune_unknown(true);
+        assert_eq!(
+            format_pmsi_tunnel(&p),
+            "ingress-replication endpoint:10.0.0.2 vni:10 flags:prune-bm,prune-u"
+        );
+    }
+
+    /// An SR P2MP tree (RFC 9524) renders its Root + Tree-ID, not an
+    /// endpoint/VNI pair.
+    #[test]
+    fn sr_p2mp_tree() {
+        let p = PmsiTunnel::sr_p2mp(PmsiTunnel::TUNNEL_SRV6_P2MP, 0, 10, ip(10, 0, 0, 1));
+        assert_eq!(format_pmsi_tunnel(&p), "srv6-p2mp root:10.0.0.1 tree-id:10");
     }
 }
