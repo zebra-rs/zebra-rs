@@ -1509,6 +1509,51 @@ mod yang_load_tests {
         }
     }
 
+    /// The RFC 9251 Type-7/8 debug-origination surface
+    /// (`clear bgp debug igmp-{join,leave}-sync-{originate,withdraw} <spec>`,
+    /// zebra-bgp-clear.yang) must parse as a complete exec path against the
+    /// configure tree — the `clear` augment lives there. Guards the
+    /// hand-written grammar (the `debug` container + the single comma-spec
+    /// list key) so a regression is caught in the unit suite, not only the
+    /// `@bgp_evpn_igmp_sync` BDD.
+    #[test]
+    fn bgp_clear_debug_igmp_sync_paths_parse() {
+        use crate::config::ExecCode;
+        use crate::config::parse::{State, parse};
+        use libyang::to_entry;
+
+        let mut yang = YangStore::new();
+        yang.add_path(concat!(env!("CARGO_MANIFEST_DIR"), "/yang"));
+        yang.read_with_resolve("configure")
+            .unwrap_or_else(|e| panic!("configure failed to load: {e:#}"));
+        yang.identity_resolve();
+        let module = yang.find_module("configure").unwrap();
+        let entry = to_entry(&yang, module);
+
+        for (cmd, want_path, want_arg0) in [
+            (
+                "clear bgp debug igmp-join-sync-originate 10,00:01:02:03:04:05:06:07:08:09,239.1.1.1",
+                "/clear/bgp/debug/igmp-join-sync-originate",
+                "10,00:01:02:03:04:05:06:07:08:09,239.1.1.1",
+            ),
+            (
+                "clear bgp debug igmp-leave-sync-originate 10,00:01:02:03:04:05:06:07:08:09,232.1.1.1,192.0.2.9",
+                "/clear/bgp/debug/igmp-leave-sync-originate",
+                "10,00:01:02:03:04:05:06:07:08:09,232.1.1.1,192.0.2.9",
+            ),
+        ] {
+            let (code, _comps, state) = parse(cmd, entry.clone(), None, State::new());
+            assert_eq!(code, ExecCode::Success, "should parse: {cmd}");
+            let (path, mut args) = crate::config::path_from_command(&state.paths);
+            assert_eq!(path, want_path, "path for: {cmd}");
+            assert_eq!(
+                args.string().as_deref(),
+                Some(want_arg0),
+                "spec arg for: {cmd}"
+            );
+        }
+    }
+
     /// `router isis afi-safi <ipv4|ipv6>` is dead config unless it carries
     /// a `network` or `redistribute` child — IS-IS does per-AFI enable
     /// per-interface, the list only holds those. The list is tagged

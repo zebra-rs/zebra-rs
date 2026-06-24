@@ -14312,11 +14312,10 @@ impl Bgp {
     /// ESI. The Flags octet rides on the path (`BgpRib::smet_flags`).
     ///
     /// Control-plane stub: this builds and advertises the route with the
-    /// mandated RTs attached so a route reflector relays it; DF election and
-    /// the kernel-MDB synch state machine are follow-ups, so nothing calls
-    /// this from an ES-snoop trigger yet — hence `allow(dead_code)` on the
-    /// Type-7/8 origination API below.
-    #[allow(dead_code)]
+    /// mandated RTs attached so a route reflector relays it. DF election and
+    /// the kernel-MDB synch state machine are follow-ups, so the only caller
+    /// today is the `clear bgp debug igmp-join-sync-*` test command
+    /// (`debug_igmp_sync_action`), not an organic ES-snoop trigger.
     pub fn evpn_originate_igmp_join_sync(
         &mut self,
         vni: u32,
@@ -14350,7 +14349,6 @@ impl Bgp {
     /// Inverse of `evpn_originate_igmp_join_sync`. Not gated on
     /// `igmp_mld_proxy` so a leave (or the feature being disabled) always
     /// clears the originated route.
-    #[allow(dead_code)]
     pub fn evpn_withdraw_igmp_join_sync(
         &mut self,
         vni: u32,
@@ -14380,7 +14378,6 @@ impl Bgp {
     /// Originate a Type-8 IGMP/MLD Leave Synch route (RFC 9251 §9.3). As the
     /// Join Synch route, plus the per-path Maximum Response Time used to drive
     /// the last-member-query synchronisation on the peer PE(s).
-    #[allow(dead_code)]
     pub fn evpn_originate_igmp_leave_sync(
         &mut self,
         vni: u32,
@@ -14414,7 +14411,6 @@ impl Bgp {
     }
 
     /// Inverse of `evpn_originate_igmp_leave_sync`.
-    #[allow(dead_code)]
     pub fn evpn_withdraw_igmp_leave_sync(
         &mut self,
         vni: u32,
@@ -14445,7 +14441,6 @@ impl Bgp {
     /// next hop = local VTEP, extended communities = the ES-Import RT (derived
     /// from `esi`, scopes distribution to the ES) plus the EVI-RT EC (carries
     /// the EVI's RT). Caller stamps `smet_flags` / `igmp_max_resp_time`.
-    #[allow(dead_code)]
     fn igmp_sync_rib(&self, vni: u32, esi: [u8; 10], vtep_local: IpAddr) -> BgpRib {
         let mut attr = BgpAttr::new();
         // RFC 9251 §9.5: the EVI-RT EC carries the EVI's Route Target. A
@@ -14475,7 +14470,6 @@ impl Bgp {
     /// Shared tail of the Type-7/8 Synch originators: insert into the Loc-RIB,
     /// run best-path, and fan the selected route out to peers (route reflection
     /// included). Mirrors the advertise tail of `evpn_originate_smet`.
-    #[allow(dead_code)]
     fn evpn_originate_synch(
         &mut self,
         rd: RouteDistinguisher,
@@ -14509,6 +14503,44 @@ impl Bgp {
 
         if !selected.is_empty() {
             route_advertise_evpn_to_peers(rd, prefix, &selected, &mut bgp_ref, &mut self.peers);
+        }
+    }
+
+    /// Debug / test-injection entry point for the EVPN Type-7/8 Synch routes
+    /// (`clear bgp debug igmp-{join,leave}-sync-{originate,withdraw} <spec>`,
+    /// zebra-bgp-clear.yang). `action` is the path tail after
+    /// `/clear/bgp/debug/`; `spec` is `vni,esi,group[,source]`. The VTEP is
+    /// this node's router-id, the Flags are derived from the group family
+    /// (IGMPv3 / MLDv2 + IE), and the Type-8 Maximum Response Time uses a
+    /// fixed debug default. This exists so a route reflector can be exercised
+    /// end-to-end without the deferred ES/DF dataplane.
+    pub fn debug_igmp_sync_action(&mut self, action: &str, spec: &str) {
+        let Some((vni, esi, group, source)) = parse_igmp_sync_spec(spec) else {
+            eprintln!("[debug] igmp-sync: bad spec '{spec}' — want vni,esi,group[,source]");
+            return;
+        };
+        let vtep = IpAddr::V4(self.router_id);
+        let flags = smet_flags(group, source);
+        match action {
+            "igmp-join-sync-originate" => {
+                self.evpn_originate_igmp_join_sync(vni, esi, vtep, group, source, flags)
+            }
+            "igmp-join-sync-withdraw" => {
+                self.evpn_withdraw_igmp_join_sync(vni, esi, vtep, group, source)
+            }
+            "igmp-leave-sync-originate" => self.evpn_originate_igmp_leave_sync(
+                vni,
+                esi,
+                vtep,
+                group,
+                source,
+                IGMP_DEBUG_MAX_RESP_TIME,
+                flags,
+            ),
+            "igmp-leave-sync-withdraw" => {
+                self.evpn_withdraw_igmp_leave_sync(vni, esi, vtep, group, source)
+            }
+            other => eprintln!("[debug] igmp-sync: unknown action '{other}'"),
         }
     }
 
@@ -14642,6 +14674,85 @@ impl Bgp {
 /// speaker that installed via netlink). Must be filtered out of
 /// origination to avoid advertise loops.
 const NTF_EXT_LEARNED: u8 = 0x10;
+
+/// Fixed Maximum Response Time stamped on a Type-8 Leave Synch route
+/// originated by the `clear bgp debug igmp-leave-sync-*` test command
+/// (RFC 9251 §9.3; IGMP units, ~10s). The real value would come from the
+/// last-member-query timer, which is part of the deferred synch machinery.
+const IGMP_DEBUG_MAX_RESP_TIME: u8 = 100;
+
+/// Parse the `vni,esi,group[,source]` spec of the `clear bgp debug
+/// igmp-*-sync-*` test commands into the origination-helper arguments.
+/// `esi` is colon-hex (`00:01:…:09`) or 20 plain hex digits; an empty or
+/// absent `source` field yields the `(*,G)` wildcard. Returns `None` on any
+/// malformed field (the caller logs and ignores).
+fn parse_igmp_sync_spec(spec: &str) -> Option<(u32, [u8; 10], IpAddr, Option<IpAddr>)> {
+    let mut parts = spec.split(',');
+    let vni: u32 = parts.next()?.trim().parse().ok()?;
+    let esi = parse_esi(parts.next()?.trim())?;
+    let group: IpAddr = parts.next()?.trim().parse().ok()?;
+    let source = match parts.next().map(str::trim) {
+        Some(s) if !s.is_empty() => Some(s.parse().ok()?),
+        _ => None,
+    };
+    Some((vni, esi, group, source))
+}
+
+/// Decode a 10-octet ESI from colon-hex (`00:01:…:09`) or 20 bare hex
+/// digits. Colons are stripped; any other length or non-hex digit fails.
+fn parse_esi(s: &str) -> Option<[u8; 10]> {
+    let hex: String = s.chars().filter(|c| *c != ':').collect();
+    if hex.len() != 20 {
+        return None;
+    }
+    let mut esi = [0u8; 10];
+    for (i, byte) in esi.iter_mut().enumerate() {
+        *byte = u8::from_str_radix(&hex[i * 2..i * 2 + 2], 16).ok()?;
+    }
+    Some(esi)
+}
+
+#[cfg(test)]
+mod igmp_sync_spec_tests {
+    use super::{parse_esi, parse_igmp_sync_spec};
+    use std::net::{IpAddr, Ipv4Addr};
+
+    #[test]
+    fn esi_colon_hex_and_plain() {
+        let want = [0x00, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x09];
+        assert_eq!(parse_esi("00:01:02:03:04:05:06:07:08:09"), Some(want));
+        assert_eq!(parse_esi("00010203040506070809"), Some(want));
+        // Wrong length / non-hex are rejected.
+        assert_eq!(parse_esi("00:01:02"), None);
+        assert_eq!(parse_esi("zz010203040506070809"), None);
+    }
+
+    #[test]
+    fn spec_star_g_and_s_g() {
+        // (*,G): no source field.
+        let (vni, esi, grp, src) =
+            parse_igmp_sync_spec("10,00:01:02:03:04:05:06:07:08:09,239.1.1.1").unwrap();
+        assert_eq!(vni, 10);
+        assert_eq!(esi[1], 0x01);
+        assert_eq!(grp, IpAddr::V4(Ipv4Addr::new(239, 1, 1, 1)));
+        assert_eq!(src, None);
+        // (S,G): trailing source.
+        let (_, _, _, src) =
+            parse_igmp_sync_spec("10,00010203040506070809,232.1.1.1,192.0.2.9").unwrap();
+        assert_eq!(src, Some(IpAddr::V4(Ipv4Addr::new(192, 0, 2, 9))));
+        // Empty trailing source field is the (*,G) wildcard.
+        let (_, _, _, src) = parse_igmp_sync_spec("10,00010203040506070809,239.1.1.1,").unwrap();
+        assert_eq!(src, None);
+    }
+
+    #[test]
+    fn spec_rejects_malformed() {
+        assert!(parse_igmp_sync_spec("notanum,00010203040506070809,239.1.1.1").is_none());
+        assert!(parse_igmp_sync_spec("10,00010203040506070809,notanip").is_none());
+        assert!(parse_igmp_sync_spec("10,badesi,239.1.1.1").is_none());
+        assert!(parse_igmp_sync_spec("10").is_none());
+    }
+}
 
 /// Derive the RFC 9251 §9.1 SMET Flags octet from the group family and
 /// source presence. IPv4 advertises IGMPv3 (v3 bit), IPv6 advertises
