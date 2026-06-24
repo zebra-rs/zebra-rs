@@ -3658,7 +3658,14 @@ fn show_bgp_mup(
     if !out.is_empty() {
         out.push('\n');
     }
-    out.push_str(&render_mup_table(&bgp.local_rib.mup)?);
+    // An interwork (SRGW) node — any VRF with `afi-safi mup segment
+    // interwork` — resolves received ST2 routes against received DSD
+    // (Direct segment) routes by their MUP Extended Community.
+    let is_interwork = bgp
+        .vrfs
+        .values()
+        .any(|c| c.mobile_uplane.segment == Some(super::vrf_config::MupSegmentMode::Interwork));
+    out.push_str(&render_mup_table(&bgp.local_rib.mup, is_interwork)?);
     Ok(out)
 }
 
@@ -3675,15 +3682,62 @@ fn show_bgp_vrf_mup<V: BgpShowView>(
     if json {
         return Ok(String::from("[]"));
     }
-    render_mup_table(&bgp.local_rib().mup)
+    // The per-VRF task holds only the best-paths mirrored to it (by RD) and
+    // none of the config, so ST2 -> Direct-segment resolution (which spans
+    // the whole MUP Loc-RIB on an interwork node) is rendered only by the
+    // global `show bgp mup`.
+    render_mup_table(&bgp.local_rib().mup, false)
 }
 
 /// Render the MUP Loc-RIB table body. Split out from `show_bgp_mup` so it
 /// can be unit-tested against a hand-built table without standing up a
 /// full `Bgp`.
+/// The 6-octet Direct-segment id carried by a MUP Extended Community
+/// (transitive type 0x0c, sub-type 0x00 = Direct-Type Segment Identifier),
+/// if the attributes carry one.
+fn mup_direct_segment_id(attr: &BgpAttr) -> Option<[u8; 6]> {
+    attr.ecom
+        .as_ref()?
+        .0
+        .iter()
+        .find(|v| v.high_type == 0x0c && v.low_type == 0x00)
+        .map(|v| v.val)
+}
+
+/// Render a 6-octet Direct-segment id in the RD/RT 2:4 form.
+fn fmt_direct_segment_id(val: &[u8; 6]) -> String {
+    let asn = u16::from_be_bytes([val[0], val[1]]);
+    let v = u32::from_be_bytes([val[2], val[3], val[4], val[5]]);
+    format!("{asn}:{v}")
+}
+
 fn render_mup_table(
     table: &super::route::LocalRibMupTable,
+    resolve_segments: bool,
 ) -> std::result::Result<String, std::fmt::Error> {
+    // On an interwork (SRGW) node, index the selected DSD routes by their
+    // Direct-segment id (the MUP Extended Community) so each received ST2
+    // can be resolved to the End.DT46 Direct segment its uplink GTP tunnel
+    // forwards into (draft-mpmz-bess-mup-safi §3.3.12). The forwarding FIB
+    // (H.M.GTP4.D GTP decap) is VPP/eBPF — this is the control-plane bind.
+    let dsd_index: std::collections::BTreeMap<[u8; 6], (MupPrefix, std::net::Ipv6Addr, u16)> =
+        if resolve_segments {
+            table
+                .selected
+                .iter()
+                .filter_map(|(prefix, rib)| {
+                    if !matches!(prefix, MupPrefix::Dsd { .. }) {
+                        return None;
+                    }
+                    let seg = mup_direct_segment_id(&rib.attr)?;
+                    let (sid, behavior) = rib.attr.srv6_l3_sid()?;
+                    Some((seg, (prefix.clone(), sid, behavior)))
+                })
+                .collect()
+        } else {
+            std::collections::BTreeMap::new()
+        };
+
     let mut buf = String::new();
     writeln!(
         buf,
@@ -3716,6 +3770,25 @@ fn render_mup_table(
         let ecom = show_mup_ecom(&rib.attr);
         if !ecom.is_empty() {
             writeln!(buf, "       {ecom}")?;
+        }
+
+        // ST2 -> Direct-segment resolution on an interwork (SRGW) node:
+        // the received ST2's Direct-segment id (MUP Extended Community) is
+        // matched against a received DSD to find the End.DT46 segment the
+        // uplink (endpoint, TEID) tunnel forwards into.
+        if resolve_segments
+            && matches!(prefix, MupPrefix::T2st { .. })
+            && let Some(seg) = mup_direct_segment_id(&rib.attr)
+            && let Some((dsd, sid, behavior)) = dsd_index.get(&seg)
+        {
+            writeln!(
+                buf,
+                "       resolved {} -> {} {} (via {})",
+                fmt_direct_segment_id(&seg),
+                srv6_behavior_name(*behavior),
+                sid,
+                mup_prefix_display(dsd)
+            )?;
         }
     }
 
@@ -4923,7 +4996,7 @@ mod detail_tests {
             mup_rib(nh4, 32768, &[]),
         );
 
-        let out = render_mup_table(&table).unwrap();
+        let out = render_mup_table(&table, false).unwrap();
 
         // Grouped DSD -> ISD -> ST1 -> ST2 by MupPrefix Ord.
         let dsd = out.find("[DSD]").expect("DSD line");
@@ -4956,6 +5029,76 @@ mod detail_tests {
         // MUP Extended Community sub-type 0x00 (Direct segment ID) renders
         // bare in the RD/RT 2:4 form: 0x0001:0x0000003d = 1:61.
         assert!(out.contains("1:61"), "{out}");
+    }
+
+    /// On an interwork (SRGW) node, a received ST2 resolves to a received
+    /// DSD (Direct segment) sharing the same MUP Extended Community
+    /// (Direct-segment id), and `show bgp mup` prints the End.DT46 segment
+    /// the uplink tunnel forwards into. Without the interwork gate, no
+    /// resolution line is shown.
+    #[test]
+    fn render_mup_table_resolves_st2_to_direct_segment() {
+        use std::net::{IpAddr, Ipv4Addr};
+        let mut table = super::super::route::LocalRibMupTable::default();
+        // Direct-segment id 1:2 (MUP Ext-Comm 0x0c/0x00), shared DSD<->ST2.
+        let seg = ecv(0x0c, 0x00, [0x00, 0x01, 0x00, 0x00, 0x00, 0x02]);
+
+        // A received DSD carrying segment id 1:2 + an End.DT46 SID.
+        let mut dsd_attr = BgpAttr::new();
+        dsd_attr.nexthop = Some(BgpNexthop::Ipv6("fc00::1".parse().unwrap()));
+        dsd_attr.ecom = Some(ExtCommunity([seg.clone()].into_iter().collect()));
+        dsd_attr.prefix_sid = Some(super::super::inst::srv6_l3_service_prefix_sid(
+            "fcbb:bbbb:1:40::".parse().unwrap(),
+            None,
+            bgp_packet::SRV6_BEHAVIOR_END_DT46,
+        ));
+        let dsd_rib = BgpRib::new(
+            0,
+            Ipv4Addr::new(10, 0, 0, 1),
+            BgpRibType::IBGP,
+            0,
+            0,
+            &dsd_attr,
+            None,
+            None,
+            false,
+        );
+        let _ = table.update(
+            MupPrefix::from_route(&MupRoute::Dsd {
+                id: 0,
+                arch: MupArchitectureType::Gpp5g,
+                rd: "65001:1".parse().unwrap(),
+                address: "10.0.0.1".parse().unwrap(),
+            }),
+            dsd_rib,
+        );
+
+        // A received ST2 carrying the same segment id 1:2 (no SID of its own).
+        let st2_rib = mup_rib("fc00::2".parse::<IpAddr>().unwrap(), 0, &[seg]);
+        let _ = table.update(
+            MupPrefix::from_route(&MupRoute::T2st {
+                id: 0,
+                arch: MupArchitectureType::Gpp5g,
+                rd: "65001:2".parse().unwrap(),
+                endpoint: "127.0.0.8".parse().unwrap(),
+                endpoint_len: 64,
+                teid: 2,
+            }),
+            st2_rib,
+        );
+
+        // Not an interwork node: no resolution shown.
+        let plain = render_mup_table(&table, false).unwrap();
+        assert!(!plain.contains("resolved"), "{plain}");
+
+        // Interwork node: the ST2 resolves to the DSD's End.DT46 segment.
+        let out = render_mup_table(&table, true).unwrap();
+        assert!(
+            out.contains(
+                "resolved 1:2 -> End.DT46 fcbb:bbbb:1:40:: (via [DSD][65001:1][10.0.0.1])"
+            ),
+            "{out}"
+        );
     }
 
     #[test]

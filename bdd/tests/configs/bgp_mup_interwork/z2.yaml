@@ -1,0 +1,60 @@
+# z2 — MUP interwork node (SRGW). IS-IS L2 SRv6 underlay + iBGP (mup
+# afi-safi) to z1 over loopbacks. VRF N6 is `afi-safi mup segment
+# interwork`, which marks this node as an interwork (SRGW) node: it
+# receives z1's DSD (Direct segment, End.DT46 + id `1:2`) and the ST2
+# (id `1:2`) into its global MUP Loc-RIB and resolves each received ST2 to
+# the matching Direct segment by that id — `show bgp mup` prints the
+# End.DT46 segment the uplink tunnel forwards into. (The GTP-decap FIB
+# itself, H.M.GTP4.D, is VPP/eBPF and out of scope here.)
+interface:
+- if-name: lo
+  ipv6:
+    address: 2001:db8::2/128
+- if-name: z2-z1
+  ipv6:
+    address: 2001:db8:0:12::2/64
+segment-routing:
+  locator:
+  - name: LOC2
+    prefix: fcbb:bbbb:2::/48
+    behavior: usid
+router:
+  isis:
+    net: 49.0000.0000.0000.0002.00
+    hostname: z2
+    is-type: level-2-only
+    segment-routing:
+      srv6:
+        locator: LOC2
+    interface:
+    - if-name: lo
+      ipv6:
+        enable: true
+    - if-name: z2-z1
+      network-type: point-to-point
+      metric: 1
+      ipv6:
+        enable: true
+  bgp:
+    global:
+      as: 65501
+      router-id: 10.0.0.2
+    timer:
+      adv-interval:
+        ibgp: 1
+    segment-routing:
+      srv6:
+        locator: LOC2
+    neighbor:
+    - remote-address: 2001:db8::1
+      remote-as: 65501
+      update-source: 2001:db8::2
+      enabled: true
+      afi-safi:
+      - name: mup
+        enabled: true
+    vrf:
+    - name: N6
+      afi-safi:
+        mup:
+          segment: interwork
