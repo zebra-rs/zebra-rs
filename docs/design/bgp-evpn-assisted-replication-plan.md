@@ -372,10 +372,14 @@ not faked. Run: `cd bdd && cargo test --test cucumber -- --concurrency=1 --tags
   from the BGP next-hop, the next-hop should be the AR-IP. Fix is in the EVPN
   next-hop emit (next-hop-self override); deferred to keep that change
   focused.
-- **Render the PMSI tunnel attribute in `show bgp evpn`.** Today `show bgp
-  evpn` prints prefix + next-hop + ext-comms but not the PMSI tunnel
-  type/flags, so the AR role isn't observable via `show` (only via the FDB).
-  Adding a PMSI line would make AR role / tunnel-type 0x0A operator-visible.
+- **Render the PMSI tunnel attribute in `show bgp evpn` — done.** A `PMSI:`
+  line in `write_evpn_path_attrs` (`bgp/show.rs`, `format_pmsi_tunnel`) now
+  prints the tunnel type, the Assisted Replication role (the T field), the
+  RFC 9574 BM/U/L flags, and the endpoint+VNI (or SR P2MP Root+Tree-ID), so
+  the AR role / tunnel-type 0x0A is observable in `show bgp evpn` (and
+  `show bgp evpn` adj-rib views), not only via the kernel FDB. Note: the
+  rendered next-hop is still the VTEP (see the next-hop leftover above); the
+  AR-IP shows on the PMSI `endpoint:` field.
 - **Phase 4 — AR-REPLICATOR forwarding (deferred).** The decap-on-AR-IP →
   re-flood datapath with source-VTEP split-horizon and (optional) source-IP
   preservation. Needs eBPF/XDP/tc clone+redirect+header-rewrite or a VPP
