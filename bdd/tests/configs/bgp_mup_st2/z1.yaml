@@ -37,16 +37,11 @@ router:
     vrf:
     - name: mobile-up
       rd: "65000:100"
-      mup:
-        route:
-          st2:
-            dest-network-instance:
-              core:
-                exact: core
       afi-safi:
         mup:
           segment: direct
           mup-ext-comm: "1:2"
+          network-instance: core
     afi-safi:
     - name: mup
       mup-c:
