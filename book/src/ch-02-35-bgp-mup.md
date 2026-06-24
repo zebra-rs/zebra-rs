@@ -100,17 +100,16 @@ router bgp {
   }
 
   # Turn on the controller: the PFCP/N4 listener + route origination.
-  afi-safi mup {
-    mup-c {
-      enable true;
-      controller-address fcbb:bb01::1;
-      pfcp {
-        listen-address 192.168.0.1;
-        port 8805;
-      }
-      srv6 {
-        locator LOC1;
-      }
+  # The `mup-c` block sits directly under the BGP instance.
+  mup-c {
+    enable true;
+    controller-address fcbb:bb01::1;
+    pfcp {
+      listen-address 192.168.0.1;
+      port 8805;
+    }
+    srv6 {
+      locator LOC1;
     }
   }
 }

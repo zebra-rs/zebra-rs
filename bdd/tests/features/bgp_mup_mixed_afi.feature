@@ -62,7 +62,7 @@ Feature: BGP MUP mixed-AFI Session-Transformed route (IPv6 UE, IPv4 endpoint)
     # The export route-target comes from the top-level `vrf mobile-up mup
     # route-target export` (the ipv4/ipv6 framework), proving it reaches
     # origination via the RIB -> rib_known_vrfs path.
-    And show command "show bgp mup" in namespace "z1" should contain "RT:65000:200"
+    And show command "show bgp mup" in namespace "z1" should contain "rt:65000:200"
     # Per-VRF MUP view: the global best-path is mirrored into the
     # mobile-up per-VRF task, so `show bgp vrf mobile-up mup` renders it.
     And show command "show bgp vrf mobile-up mup" in namespace "z1" should contain "ue=2001:db8::5/128"

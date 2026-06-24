@@ -1718,22 +1718,18 @@ fn config_segmentation(bgp: &mut Bgp, mut args: Args, op: ConfigOp) -> Option<()
     Some(())
 }
 
-// --- MUP controller config (afi-safi mup mup-c) -------------
+// --- MUP controller config (router bgp mup-c) ---------------
 //
-// `router bgp afi-safi mup mup-c { enable; controller-address;
+// `router bgp mup-c { enable; controller-address;
 // pfcp { node-id; listen-address; port }; srv6 { locator }; architecture }`
-// (augmented in by zebra-bgp-mup-controller.yang). Every callback gates on
-// the list entry's afi-safi being `mup` (Safi::Mup) and mutates
-// the staged `mup_c_config`, marking it dirty. The spawn / teardown /
-// reconfigure of the controller task happens at CommitEnd in
+// (augmented in by zebra-bgp-mup-controller.yang, directly under the BGP
+// instance — no `afi-safi` wrapper). Every callback mutates the staged
+// `mup_c_config`, marking it dirty. The spawn / teardown / reconfigure of
+// the controller task happens at CommitEnd in
 // `Bgp::apply_mup_c_commit_diff` — these only stage config.
 
 /// `… mup-c enable <bool>` — the controller master switch.
 fn config_mup_c_enable(bgp: &mut Bgp, mut args: Args, op: ConfigOp) -> Option<()> {
-    let afi_safi: AfiSafi = args.afi_safi()?;
-    if afi_safi.safi != Safi::Mup {
-        return None;
-    }
     let enabled = if op.is_set() { args.boolean()? } else { false };
     bgp.mup_c_config.enable = enabled;
     bgp.mup_c_dirty = true;
@@ -1742,10 +1738,6 @@ fn config_mup_c_enable(bgp: &mut Bgp, mut args: Args, op: ConfigOp) -> Option<()
 
 /// `… mup-c controller-address <ipv6>` — next-hop on originated ST routes.
 fn config_mup_c_controller_address(bgp: &mut Bgp, mut args: Args, op: ConfigOp) -> Option<()> {
-    let afi_safi: AfiSafi = args.afi_safi()?;
-    if afi_safi.safi != Safi::Mup {
-        return None;
-    }
     bgp.mup_c_config.controller_address = if op.is_set() {
         Some(args.v6addr()?)
     } else {
@@ -1757,10 +1749,6 @@ fn config_mup_c_controller_address(bgp: &mut Bgp, mut args: Args, op: ConfigOp) 
 
 /// `… mup-c pfcp node-id <ip>` — our PFCP Node ID for responses.
 fn config_mup_c_pfcp_node_id(bgp: &mut Bgp, mut args: Args, op: ConfigOp) -> Option<()> {
-    let afi_safi: AfiSafi = args.afi_safi()?;
-    if afi_safi.safi != Safi::Mup {
-        return None;
-    }
     bgp.mup_c_config.node_id = if op.is_set() {
         Some(args.addr()?)
     } else {
@@ -1772,10 +1760,6 @@ fn config_mup_c_pfcp_node_id(bgp: &mut Bgp, mut args: Args, op: ConfigOp) -> Opt
 
 /// `… mup-c pfcp listen-address <ip>` — PFCP bind address (default `::`).
 fn config_mup_c_pfcp_listen_address(bgp: &mut Bgp, mut args: Args, op: ConfigOp) -> Option<()> {
-    let afi_safi: AfiSafi = args.afi_safi()?;
-    if afi_safi.safi != Safi::Mup {
-        return None;
-    }
     bgp.mup_c_config.listen_address = if op.is_set() {
         Some(args.addr()?)
     } else {
@@ -1787,10 +1771,6 @@ fn config_mup_c_pfcp_listen_address(bgp: &mut Bgp, mut args: Args, op: ConfigOp)
 
 /// `… mup-c pfcp port <0-65535>` — PFCP bind port (default 8805).
 fn config_mup_c_pfcp_port(bgp: &mut Bgp, mut args: Args, op: ConfigOp) -> Option<()> {
-    let afi_safi: AfiSafi = args.afi_safi()?;
-    if afi_safi.safi != Safi::Mup {
-        return None;
-    }
     bgp.mup_c_config.port = if op.is_set() { Some(args.u16()?) } else { None };
     bgp.mup_c_dirty = true;
     Some(())
@@ -1798,10 +1778,6 @@ fn config_mup_c_pfcp_port(bgp: &mut Bgp, mut args: Args, op: ConfigOp) -> Option
 
 /// `… mup-c srv6 locator <name>` — locator SIDs are drawn from (route phase).
 fn config_mup_c_srv6_locator(bgp: &mut Bgp, mut args: Args, op: ConfigOp) -> Option<()> {
-    let afi_safi: AfiSafi = args.afi_safi()?;
-    if afi_safi.safi != Safi::Mup {
-        return None;
-    }
     bgp.mup_c_config.locator = if op.is_set() {
         Some(args.string()?)
     } else {
@@ -1813,10 +1789,6 @@ fn config_mup_c_srv6_locator(bgp: &mut Bgp, mut args: Args, op: ConfigOp) -> Opt
 
 /// `… mup-c architecture <enum>` — mobile architecture (informational).
 fn config_mup_c_architecture(bgp: &mut Bgp, mut args: Args, op: ConfigOp) -> Option<()> {
-    let afi_safi: AfiSafi = args.afi_safi()?;
-    if afi_safi.safi != Safi::Mup {
-        return None;
-    }
     bgp.mup_c_config.architecture = if op.is_set() {
         Some(args.string()?)
     } else {
@@ -4242,34 +4214,22 @@ impl Bgp {
         // Flags EC's segmentation bit rides the originated Type-3 IMET route.
         self.callback_add("/router/bgp/afi-safi/segmentation", config_segmentation);
 
-        // MUP controller (`afi-safi mup mup-c …`, RFC 9833).
+        // MUP controller (`router bgp mup-c …`, RFC 9833).
         // Augmented in by zebra-bgp-mup-controller.yang; the controller
         // task is spawned/torn down at CommitEnd by `apply_mup_c_commit_diff`.
-        self.callback_add("/router/bgp/afi-safi/mup-c/enable", config_mup_c_enable);
+        self.callback_add("/router/bgp/mup-c/enable", config_mup_c_enable);
         self.callback_add(
-            "/router/bgp/afi-safi/mup-c/controller-address",
+            "/router/bgp/mup-c/controller-address",
             config_mup_c_controller_address,
         );
+        self.callback_add("/router/bgp/mup-c/pfcp/node-id", config_mup_c_pfcp_node_id);
         self.callback_add(
-            "/router/bgp/afi-safi/mup-c/pfcp/node-id",
-            config_mup_c_pfcp_node_id,
-        );
-        self.callback_add(
-            "/router/bgp/afi-safi/mup-c/pfcp/listen-address",
+            "/router/bgp/mup-c/pfcp/listen-address",
             config_mup_c_pfcp_listen_address,
         );
-        self.callback_add(
-            "/router/bgp/afi-safi/mup-c/pfcp/port",
-            config_mup_c_pfcp_port,
-        );
-        self.callback_add(
-            "/router/bgp/afi-safi/mup-c/srv6/locator",
-            config_mup_c_srv6_locator,
-        );
-        self.callback_add(
-            "/router/bgp/afi-safi/mup-c/architecture",
-            config_mup_c_architecture,
-        );
+        self.callback_add("/router/bgp/mup-c/pfcp/port", config_mup_c_pfcp_port);
+        self.callback_add("/router/bgp/mup-c/srv6/locator", config_mup_c_srv6_locator);
+        self.callback_add("/router/bgp/mup-c/architecture", config_mup_c_architecture);
 
         // EVPN Assisted Replication role + AR-IP (RFC 9574), under
         // `router bgp afi-safi evpn assisted-replication`. Augmented in by

@@ -349,10 +349,11 @@ UP-node, so an external SMF programs it exactly as it would a UPF. The
 session schema question is therefore answered by PFCP itself (no custom
 zenoh encoding to design).
 
-* **Config home:** under the BGP instance at `router bgp afi-safi
-  mup mup-c { enable; controller-address; pfcp {…}; srv6 {…} }`
-  — so the controller is spawned by the BGP task and handed its `Message`
-  channel, the way a per-VRF BGP instance is. Module: `zebra-rs/src/mup-c/`
+* **Config home:** directly under the BGP instance at `router bgp mup-c {
+  enable; controller-address; pfcp {…}; srv6 {…} }` (lifted out of the
+  former `afi-safi mup` wrapper) — so the controller is spawned by the BGP
+  task and handed its `Message` channel, the way a per-VRF BGP instance is.
+  Module: `zebra-rs/src/mup-c/`
   (`inst` task, `pfcp` socket/handlers, `session`/`assoc` tables); spawn /
   reconfigure / teardown in `Bgp::apply_mup_c_commit_diff`.
 * **PR-A (ingest):** PFCP listener (own tokio UDP socket); Association

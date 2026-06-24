@@ -11,7 +11,7 @@
 //! Heartbeat.
 //!
 //! The controller is **configured under the BGP instance** at
-//! `router bgp ... afi-safi mup mup-c { enable; pfcp … }` and is
+//! `router bgp mup-c { enable; pfcp … }` and is
 //! spawned by the BGP task, which hands it the BGP instance's own
 //! `mpsc::Sender<crate::bgp::inst::Message>` — exactly the way a BGP VRF
 //! instance receives the global BGP channel. The controller reports

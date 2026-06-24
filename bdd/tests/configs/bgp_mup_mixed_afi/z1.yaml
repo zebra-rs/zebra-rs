@@ -36,14 +36,12 @@ router:
             dest-network-instance:
               access:
                 exact: access
-    afi-safi:
-    - name: mup
-      mup-c:
-        enable: true
-        controller-address: fcbb:bb01::1
-        pfcp:
-          listen-address: 192.168.0.1
-          port: 8805
+    mup-c:
+      enable: true
+      controller-address: fcbb:bb01::1
+      pfcp:
+        listen-address: 192.168.0.1
+        port: 8805
 # Top-level VRF: MUP export route-targets (same `route-target` framework
 # as ipv4 / ipv6). Note there is still NO SRv6 locator anywhere.
 vrf:

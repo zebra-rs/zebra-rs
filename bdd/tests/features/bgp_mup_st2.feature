@@ -66,10 +66,10 @@ Feature: BGP MUP Controller originates a Type-2 ST route from a PFCP session
     And show command "show bgp mup" in namespace "z1" should contain "[ST2][65000:100][ep=10.0.0.1][teid=305419896]"
     # The ST2 carries the export route-target and the Direct segment id
     # (MUP Extended Community 1:2), both rendered in the RD/RT 2:4 form.
-    And show command "show bgp mup" in namespace "z1" should contain "RT:65000:200 1:2"
+    And show command "show bgp mup" in namespace "z1" should contain "rt:65000:200 mup:1:2"
     # The peer receives the ST2 with the TEID and the Direct segment id.
     And show command "show bgp mup" in namespace "z2" should eventually contain "[ST2][65000:100][ep=10.0.0.1][teid=305419896]"
-    And show command "show bgp mup" in namespace "z2" should contain "RT:65000:200 1:2"
+    And show command "show bgp mup" in namespace "z2" should contain "rt:65000:200 mup:1:2"
 
   Scenario: Teardown topology
     Given the test topology exists

@@ -119,7 +119,7 @@ pub enum Message {
     },
     /// A session/association change reported by the in-process MUP
     /// controller (`src/mup-c/`), which the BGP task spawns when
-    /// `afi-safi mup mup-c enable true` is committed and hands
+    /// `router bgp mup-c enable true` is committed and hands
     /// `self.tx`. Recorded in [`Bgp::mup_c_view`] for `show bgp
     /// mup mup-c`; MUP route origination from these lands in a
     /// follow-up. Mirrors the IS-IS `BgpLs` producer seam.
@@ -660,7 +660,7 @@ pub struct Bgp {
     /// `evpn_originate_imet`; toggling it re-originates all IMET routes via
     /// `reoriginate_all_imet`.
     pub segmentation: bool,
-    /// MUP controller (`afi-safi mup mup-c`) config, staged by
+    /// MUP controller (`router bgp mup-c`) config, staged by
     /// the config callbacks and applied at `CommitEnd` by
     /// [`Self::apply_mup_c_commit_diff`].
     pub mup_c_config: crate::mup_c::inst::MupCConfig,
