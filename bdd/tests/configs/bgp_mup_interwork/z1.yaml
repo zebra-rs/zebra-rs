@@ -69,12 +69,10 @@ router:
           segment: direct
           mup-ext-comm: "1:2"
           network-instance: core
-    afi-safi:
-    - name: mup
-      mup-c:
-        enable: true
-        controller-address: 2001:db8::1
-        pfcp:
-          listen-address: 127.0.0.1
-        srv6:
-          locator: S
+    mup-c:
+      enable: true
+      controller-address: 2001:db8::1
+      pfcp:
+        listen-address: 127.0.0.1
+      srv6:
+        locator: S

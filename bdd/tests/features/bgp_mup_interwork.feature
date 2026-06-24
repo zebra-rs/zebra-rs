@@ -50,14 +50,14 @@ Feature: BGP MUP interwork node resolves ST2 to the Direct segment
     Then show command "show bgp mup" in namespace "z1" should eventually contain "[DSD][65501:10][10.0.0.1]"
     And show command "show bgp mup" in namespace "z1" should eventually contain "[ST2][65501:10][ep=10.0.0.1][teid=305419896]"
     # z1 is a `segment direct` node, not interwork, so it shows no resolution.
-    And show command "show bgp mup" in namespace "z1" should not contain "resolved 1:2"
+    And show command "show bgp mup" in namespace "z1" should not contain "resolved mup:1:2"
 
   Scenario: z2 (interwork) resolves the ST2 to z1's End.DT46 Direct segment
     Given the test topology exists
     Then show command "show bgp mup" in namespace "z2" should eventually contain "[ST2][65501:10][ep=10.0.0.1][teid=305419896]"
     And show command "show bgp mup" in namespace "z2" should contain "[DSD][65501:10][10.0.0.1]"
     # The ST2's Direct-segment id (1:2) resolves to the DSD's End.DT46 SID.
-    And show command "show bgp mup" in namespace "z2" should eventually contain "resolved 1:2 -> End.DT46"
+    And show command "show bgp mup" in namespace "z2" should eventually contain "resolved mup:1:2 -> End.DT46"
     And show command "show bgp mup" in namespace "z2" should contain "(via [DSD][65501:10][10.0.0.1])"
 
   Scenario: Teardown topology

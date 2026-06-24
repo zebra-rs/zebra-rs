@@ -37,16 +37,14 @@ router:
             dest-network-instance:
               access:
                 exact: access
-    afi-safi:
-    - name: mup
-      mup-c:
-        enable: true
-        controller-address: fcbb:bb01::1
-        pfcp:
-          listen-address: 192.168.0.1
-          port: 8805
-        srv6:
-          locator: LOC1
+    mup-c:
+      enable: true
+      controller-address: fcbb:bb01::1
+      pfcp:
+        listen-address: 192.168.0.1
+        port: 8805
+      srv6:
+        locator: LOC1
 # Top-level VRF: the MUP export route-targets live here now (same
 # `route-target {import|export}` framework as ipv4 / ipv6), not under
 # `router bgp vrf`.
