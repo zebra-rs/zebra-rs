@@ -197,6 +197,45 @@ impl ExtCommunityValue {
         }
     }
 
+    /// Build an ESI Label Extended Community (RFC 7432 §7.5): EVPN high-type
+    /// (0x06) + ESI Label sub-type (0x01). Carried on the **per-ES** Ethernet
+    /// A-D (Type-1) route. The Flags octet's low bit is the redundancy mode
+    /// (`single_active`); the 3-octet `label` (low 20 bits) is the MPLS ESI
+    /// label for split-horizon (unused/0 for VXLAN, where local-bias does the
+    /// filtering — RFC 8365 §8.3.1 — but the mode flag still matters).
+    pub fn esi_label(single_active: bool, label: u32) -> Self {
+        let mut val = [0u8; 6];
+        if single_active {
+            val[0] = EsiLabelEc::SINGLE_ACTIVE;
+        }
+        // val[1..3] reserved (zero). Label in the low 20 bits of val[3..6].
+        let lbl = label.to_be_bytes();
+        val[3..6].copy_from_slice(&lbl[1..4]);
+        ExtCommunityValue {
+            high_type: ExtCommunityType::Evpn as u8,
+            low_type: EVPN_ESI_LABEL_SUB_TYPE,
+            val,
+        }
+    }
+
+    /// True iff this entry is an EVPN ESI Label EC (RFC 7432 §7.5):
+    /// EVPN high-type (0x06) + ESI Label sub-type (0x01).
+    pub fn is_esi_label(&self) -> bool {
+        self.high_type == ExtCommunityType::Evpn as u8 && self.low_type == EVPN_ESI_LABEL_SUB_TYPE
+    }
+
+    /// Decode the ESI Label EC (RFC 7432 §7.5): the redundancy-mode flag and
+    /// the 3-octet ESI label. `None` for any non-matching EC.
+    pub fn as_esi_label(&self) -> Option<EsiLabelEc> {
+        if !self.is_esi_label() {
+            return None;
+        }
+        Some(EsiLabelEc {
+            single_active: self.val[0] & EsiLabelEc::SINGLE_ACTIVE != 0,
+            label: u32::from_be_bytes([0, self.val[3], self.val[4], self.val[5]]),
+        })
+    }
+
     /// Build an EVI-RT Extended Community (RFC 9251 §9.5) from the EVI's
     /// (BD's) Route Target. The EVI-RT carries the same 6-octet RT value
     /// under the EVPN high-type (0x06), with the sub-type selecting the RT
@@ -270,6 +309,33 @@ const EVPN_DF_ELECTION_SUB_TYPE: u8 = 0x06;
 /// high-type (0x06). Shares the Route Target sub-type value (0x02) but is
 /// disambiguated by the EVPN high-type.
 const EVPN_ES_IMPORT_RT_SUB_TYPE: u8 = 0x02;
+
+/// ESI Label Extended Community sub-type (RFC 7432 §7.5), carried under the
+/// EVPN high-type (0x06).
+const EVPN_ESI_LABEL_SUB_TYPE: u8 = 0x01;
+
+/// Decoded EVPN ESI Label Extended Community (RFC 7432 §7.5). Carried on the
+/// per-ES Ethernet A-D (Type-1) route to signal the redundancy mode and the
+/// split-horizon ESI label.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct EsiLabelEc {
+    /// Redundancy mode: `true` = Single-Active, `false` = All-Active
+    /// (Flags octet low bit).
+    pub single_active: bool,
+    /// 3-octet ESI label (low 20 bits). 0 / unused for VXLAN (local-bias).
+    pub label: u32,
+}
+
+impl EsiLabelEc {
+    /// Flags octet bit 0 (LSB): set = Single-Active redundancy mode.
+    const SINGLE_ACTIVE: u8 = 0x01;
+}
+
+impl From<EsiLabelEc> for ExtCommunityValue {
+    fn from(e: EsiLabelEc) -> Self {
+        ExtCommunityValue::esi_label(e.single_active, e.label)
+    }
+}
 
 /// EVI-RT Extended Community sub-types (RFC 9251 §9.5), carried under the
 /// EVPN high-type (0x06). The sub-type selects which Route Target format the
@@ -522,6 +588,14 @@ impl fmt::Display for ExtCommunityValue {
                 "es-import:{:02x}:{:02x}:{:02x}:{:02x}:{:02x}:{:02x}",
                 es[0], es[1], es[2], es[3], es[4], es[5]
             )
+        } else if let Some(es) = self.as_esi_label() {
+            // ESI Label EC (RFC 7432 §7.5): redundancy mode + ESI label.
+            let mode = if es.single_active {
+                "single-active"
+            } else {
+                "all-active"
+            };
+            write!(f, "esi-label:{mode}:{}", es.label)
         } else if self.is_evi_rt() {
             // EVI-RT EC (RFC 9251 §9.5): render `evi-rt:` then the underlying
             // Route Target. The IPv6 form (0x0D) has no 8-octet RT, so fall
@@ -1140,5 +1214,40 @@ mod tests {
             val: [0; 6],
         };
         assert!(ExtCommunityValue::evi_rt_from_rt(&soo).is_none());
+    }
+
+    #[test]
+    fn esi_label_ec_round_trips() {
+        // All-active, label 100.
+        let ec = ExtCommunityValue::esi_label(false, 100);
+        assert_eq!(ec.high_type, ExtCommunityType::Evpn as u8);
+        assert_eq!(ec.low_type, 0x01);
+        assert_eq!(ec.val, [0x00, 0, 0, 0, 0, 100], "flags 0, label in low 24");
+        assert!(ec.is_esi_label());
+        let dec = ec.as_esi_label().expect("decode");
+        assert!(!dec.single_active);
+        assert_eq!(dec.label, 100);
+        assert_eq!(ec.to_string(), "esi-label:all-active:100");
+        // Single-active, label 0x12345 (20 bits).
+        let sa = ExtCommunityValue::esi_label(true, 0x12345);
+        assert_eq!(sa.val, [0x01, 0, 0, 0x01, 0x23, 0x45]);
+        let dec = sa.as_esi_label().expect("decode");
+        assert!(dec.single_active);
+        assert_eq!(dec.label, 0x12345);
+        assert_eq!(sa.to_string(), "esi-label:single-active:74565");
+        // From-impl mirrors the constructor.
+        let from: ExtCommunityValue = EsiLabelEc {
+            single_active: true,
+            label: 7,
+        }
+        .into();
+        assert_eq!(from, ExtCommunityValue::esi_label(true, 7));
+        // A standard RT is not an ESI Label EC.
+        let rt = ExtCommunityValue {
+            high_type: 0x00,
+            low_type: 0x02,
+            val: [0; 6],
+        };
+        assert!(!rt.is_esi_label());
     }
 }

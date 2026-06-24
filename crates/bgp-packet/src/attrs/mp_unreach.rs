@@ -608,6 +608,12 @@ impl fmt::Display for MpUnreachAttr {
             Evpn(evpn_routes) => {
                 for evpn in evpn_routes.iter() {
                     match evpn {
+                        EvpnRoute::EthernetAd(v) => {
+                            writeln!(f, " [{}] ethernet-ad tag:{}", v.rd, v.ether_tag)?;
+                        }
+                        EvpnRoute::EthernetSeg(v) => {
+                            writeln!(f, " [{}] ethernet-segment orig:{}", v.rd, v.orig)?;
+                        }
                         EvpnRoute::Mac(v) => {
                             writeln!(
                                 f,

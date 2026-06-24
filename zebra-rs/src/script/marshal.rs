@@ -11,7 +11,7 @@ use std::collections::BTreeSet;
 
 use bgp_packet::{
     BgpAttr, BgpNexthop, Community, EvpnRoute, ExtCommunity, ExtCommunityValue, LocalPref, Med,
-    Origin,
+    Origin, esi_display,
 };
 use ipnet::IpNet;
 use mlua::{Lua, Table};
@@ -35,6 +35,20 @@ pub fn evpn_prefix_table(lua: &Lua, route: &EvpnRoute) -> mlua::Result<Table> {
     table.set("afi", "evpn")?;
     let evpn = lua.create_table()?;
     let network = match route {
+        EvpnRoute::EthernetAd(e) => {
+            evpn.set("route_type", 1)?;
+            evpn.set("rd", e.rd.to_string())?;
+            evpn.set("esi", esi_display(&e.esi))?;
+            evpn.set("ether_tag", e.ether_tag)?;
+            format!("[1]:[{}]:[{}]", esi_display(&e.esi), e.ether_tag)
+        }
+        EvpnRoute::EthernetSeg(e) => {
+            evpn.set("route_type", 4)?;
+            evpn.set("rd", e.rd.to_string())?;
+            evpn.set("esi", esi_display(&e.esi))?;
+            evpn.set("orig", e.orig.to_string())?;
+            format!("[4]:[{}]:[{}]", esi_display(&e.esi), e.orig)
+        }
         EvpnRoute::Mac(m) => {
             evpn.set("route_type", 2)?;
             evpn.set("rd", m.rd.to_string())?;

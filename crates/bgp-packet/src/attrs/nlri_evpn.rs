@@ -76,8 +76,10 @@ pub struct Evpn {
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum EvpnRoute {
+    EthernetAd(EvpnEthernetAd),
     Mac(EvpnMac),
     Multicast(EvpnMulticast),
+    EthernetSeg(EvpnEthernetSeg),
     Prefix(EvpnIpPrefix),
     Smet(EvpnSmet),
     IgmpJoinSync(EvpnIgmpJoinSync),
@@ -85,6 +87,44 @@ pub enum EvpnRoute {
     PerRegionImet(EvpnPerRegionImet),
     SPmsi(EvpnSPmsi),
     LeafAd(EvpnLeafAd),
+}
+
+/// Route Type 1 — Ethernet Auto-Discovery (A-D) Route (RFC 7432 §7.1). A PE
+/// advertises one per multihomed Ethernet Segment for fast convergence and
+/// split-horizon (the **per-ES** A-D, Ethernet Tag = `MAX-ET`
+/// 0xFFFFFFFF, carrying the ESI Label EC), and one per EVI for aliasing /
+/// backup-path load-balancing (the **per-EVI** A-D, Ethernet Tag = the
+/// EVI's tag).
+///
+/// Wire layout (RFC 7432 §7.1, fixed 25 octets): RD(8) ESI(10) EthTag(4)
+/// MPLSLabel(3). The route key is **ESI + Ethernet Tag**; the RD and Label
+/// are per-path properties (the Label is the VXLAN VNI or MPLS label, 0 for
+/// a per-ES A-D whose label rides the ESI Label EC instead).
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct EvpnEthernetAd {
+    pub id: u32,
+    pub rd: RouteDistinguisher,
+    pub esi: [u8; 10],
+    pub ether_tag: u32,
+    /// MPLS label / VXLAN VNI (low 24 bits). Per-path, not in the key.
+    pub label: u32,
+}
+
+/// Route Type 4 — Ethernet Segment Route (RFC 7432 §7.4). A PE advertises
+/// one per locally-attached Ethernet Segment so the PEs on the same ES
+/// discover one another (matched by the auto-derived **ES-Import RT**) and
+/// run **Designated Forwarder** election (RFC 7432 §8.5 / RFC 8584). It
+/// carries the ES-Import RT and the DF Election EC.
+///
+/// Wire layout (RFC 7432 §7.4): RD(8) ESI(10) IPAddrLen(1) OrigRouterIP(4|16).
+/// The route key is **ESI + Originating Router's IP**; the RD is per-path.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct EvpnEthernetSeg {
+    pub id: u32,
+    pub rd: RouteDistinguisher,
+    pub esi: [u8; 10],
+    /// Originating router's IP address (the PE's VTEP / loopback).
+    pub orig: IpAddr,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -323,6 +363,13 @@ impl Evpn {
 /// `show bgp evpn` output).
 #[derive(Debug, Clone, Eq, PartialEq, Ord, PartialOrd, Hash)]
 pub enum EvpnPrefix {
+    /// Route Type 1 — Ethernet Auto-Discovery (A-D) Route (RFC 7432 §7.1).
+    ///
+    /// Wire format: `[1]:[ESI]:[EthTag]`. The route key is the ESI plus the
+    /// Ethernet Tag; the MPLS label / VNI rides on the `EvpnEthernetAd`
+    /// path, not the key. Declared first so the derived `Ord` keeps numeric
+    /// route-type ordering (Type 1 < 2).
+    EthernetAd { esi: [u8; 10], eth_tag: u32 },
     /// Route Type 2 — MAC/IP Advertisement Route.
     ///
     /// Wire format: `[2]:[EthTag]:[MAClen]:[MAC]:[IPlen]:[IP]`. The IP
@@ -337,6 +384,12 @@ pub enum EvpnPrefix {
     ///
     /// Wire format: `[3]:[EthTag]:[IPlen]:[OrigIP]`.
     InclusiveMulticast { eth_tag: u32, orig: IpAddr },
+    /// Route Type 4 — Ethernet Segment Route (RFC 7432 §7.4).
+    ///
+    /// Wire format: `[4]:[ESI]:[IPlen]:[OrigIP]`. The route key is the ESI
+    /// plus the Originating Router's IP; the RD is per-path. Declared
+    /// between Type 3 and Type 5 so the derived `Ord` stays numeric.
+    EthernetSeg { esi: [u8; 10], orig: IpAddr },
     /// Route Type 5 — IP Prefix Route (RFC 9136).
     ///
     /// Wire format: `[5]:[EthTag]:[IPlen]:[IP]`. The gateway IP and label
@@ -406,8 +459,10 @@ impl EvpnPrefix {
     /// EVPN route type number (2, 3, 5, or 6).
     pub fn route_type(&self) -> u8 {
         match self {
+            EvpnPrefix::EthernetAd { .. } => 1,
             EvpnPrefix::MacIp { .. } => 2,
             EvpnPrefix::InclusiveMulticast { .. } => 3,
+            EvpnPrefix::EthernetSeg { .. } => 4,
             EvpnPrefix::IpPrefix { .. } => 5,
             EvpnPrefix::Smet { .. } => 6,
             EvpnPrefix::IgmpJoinSync { .. } => 7,
@@ -422,6 +477,20 @@ impl EvpnPrefix {
     /// RD-stripped key suitable for indexing the EVPN RIB.
     pub fn from_route(route: &EvpnRoute) -> (RouteDistinguisher, EvpnPrefix) {
         match route {
+            EvpnRoute::EthernetAd(e) => (
+                e.rd,
+                EvpnPrefix::EthernetAd {
+                    esi: e.esi,
+                    eth_tag: e.ether_tag,
+                },
+            ),
+            EvpnRoute::EthernetSeg(e) => (
+                e.rd,
+                EvpnPrefix::EthernetSeg {
+                    esi: e.esi,
+                    orig: e.orig,
+                },
+            ),
             EvpnRoute::Mac(m) => (
                 m.rd,
                 EvpnPrefix::MacIp {
@@ -518,6 +587,14 @@ impl EvpnPrefix {
 impl fmt::Display for EvpnPrefix {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
+            EvpnPrefix::EthernetAd { esi, eth_tag } => {
+                // `[1]:[ESI]:[EthTag]` — the per-ES/per-EVI A-D route key.
+                write!(f, "[1]:[{}]:[{eth_tag}]", esi_display(esi))
+            }
+            EvpnPrefix::EthernetSeg { esi, orig } => {
+                // `[4]:[ESI]:[IPlen]:[OrigIP]` — the Ethernet Segment route key.
+                write!(f, "[4]:[{}]:[{}]:[{orig}]", esi_display(esi), ip_bits(orig))
+            }
             EvpnPrefix::MacIp { eth_tag, mac, ip } => {
                 write!(
                     f,
@@ -661,6 +738,39 @@ impl ParseNlri<EvpnRoute> for EvpnRoute {
 
         use EvpnRouteType::*;
         match route_type {
+            EthernetAd => {
+                // RFC 7432 §7.1: RD(8) ESI(10) EthTag(4) MPLSLabel(3).
+                let (input, rd) = RouteDistinguisher::parse_be(input)?;
+                let (input, esi_raw) = take(10usize).parse(input)?;
+                let mut esi = [0u8; 10];
+                esi.copy_from_slice(esi_raw);
+                let (input, ether_tag) = be_u32(input)?;
+                let (input, label) = be_u24(input)?;
+                Ok((
+                    input,
+                    EvpnRoute::EthernetAd(EvpnEthernetAd {
+                        id,
+                        rd,
+                        esi,
+                        ether_tag,
+                        label,
+                    }),
+                ))
+            }
+            EthernetSr => {
+                // RFC 7432 §7.4: RD(8) ESI(10) IPAddrLen(1) OrigRouterIP(4|16).
+                let (input, rd) = RouteDistinguisher::parse_be(input)?;
+                let (input, esi_raw) = take(10usize).parse(input)?;
+                let mut esi = [0u8; 10];
+                esi.copy_from_slice(esi_raw);
+                let (input, orig) = parse_len_prefixed_ip(input)?;
+                let orig =
+                    orig.ok_or_else(|| nom::Err::Error(make_error(input, ErrorKind::LengthValue)))?;
+                Ok((
+                    input,
+                    EvpnRoute::EthernetSeg(EvpnEthernetSeg { id, rd, esi, orig }),
+                ))
+            }
             MacIpAdvRoute => {
                 let (input, rd) = RouteDistinguisher::parse_be(input)?;
 
@@ -957,6 +1067,41 @@ impl EvpnRoute {
     /// (e.g. Type-2 IP component going from absent → IPv4 → IPv6).
     pub fn nlri_emit(&self, buf: &mut BytesMut) {
         match self {
+            EvpnRoute::EthernetAd(e) => {
+                if e.id != 0 {
+                    buf.put_u32(e.id);
+                }
+                let mut payload = BytesMut::new();
+                // RD (8 octets).
+                payload.put_u16(e.rd.typ as u16);
+                payload.put(&e.rd.val[..]);
+                // ESI (10 octets) — RFC 7432 §7.1.
+                payload.put(&e.esi[..]);
+                // Ethernet Tag (4 octets).
+                payload.put_u32(e.ether_tag);
+                // MPLS Label / VNI (3 octets, low 24 bits).
+                let label_bytes = e.label.to_be_bytes();
+                payload.put(&label_bytes[1..4]);
+                buf.put_u8(1); // Route Type 1 — Ethernet Auto-Discovery.
+                buf.put_u8(payload.len() as u8);
+                buf.put(&payload[..]);
+            }
+            EvpnRoute::EthernetSeg(e) => {
+                if e.id != 0 {
+                    buf.put_u32(e.id);
+                }
+                let mut payload = BytesMut::new();
+                // RD (8 octets).
+                payload.put_u16(e.rd.typ as u16);
+                payload.put(&e.rd.val[..]);
+                // ESI (10 octets) — RFC 7432 §7.4.
+                payload.put(&e.esi[..]);
+                // Originating Router's IP (<len-in-bits><addr>).
+                emit_len_prefixed_ip(&mut payload, Some(e.orig));
+                buf.put_u8(4); // Route Type 4 — Ethernet Segment.
+                buf.put_u8(payload.len() as u8);
+                buf.put(&payload[..]);
+            }
             EvpnRoute::Mac(m) => {
                 if m.id != 0 {
                     buf.put_u32(m.id);
@@ -1213,6 +1358,56 @@ mod evpn_prefix_tests {
             ip: None,
         };
         assert_eq!(p.to_string(), "[2]:[0]:[48]:[fe:b2:14:6c:11:6c]");
+    }
+
+    #[test]
+    fn display_ethernet_ad_and_segment() {
+        let esi = [0x00, 0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77, 0x88, 0x99];
+        let ad = EvpnPrefix::EthernetAd {
+            esi,
+            eth_tag: 0xffffffff,
+        };
+        assert_eq!(
+            ad.to_string(),
+            "[1]:[00:11:22:33:44:55:66:77:88:99]:[4294967295]"
+        );
+        assert_eq!(ad.route_type(), 1);
+        let es = EvpnPrefix::EthernetSeg {
+            esi,
+            orig: IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1)),
+        };
+        assert_eq!(
+            es.to_string(),
+            "[4]:[00:11:22:33:44:55:66:77:88:99]:[32]:[10.0.0.1]"
+        );
+        assert_eq!(es.route_type(), 4);
+    }
+
+    #[test]
+    fn es_route_type_ordering() {
+        // Derived `Ord` must keep numeric route-type order: 1 < 2 < 3 < 4 < 5.
+        let t1 = EvpnPrefix::EthernetAd {
+            esi: [0; 10],
+            eth_tag: 0,
+        };
+        let t2 = EvpnPrefix::MacIp {
+            eth_tag: 0,
+            mac: [0; 6],
+            ip: None,
+        };
+        let t3 = EvpnPrefix::InclusiveMulticast {
+            eth_tag: 0,
+            orig: IpAddr::V4(Ipv4Addr::UNSPECIFIED),
+        };
+        let t4 = EvpnPrefix::EthernetSeg {
+            esi: [0; 10],
+            orig: IpAddr::V4(Ipv4Addr::UNSPECIFIED),
+        };
+        let t5 = EvpnPrefix::IpPrefix {
+            eth_tag: 0,
+            prefix: "10.0.0.0/8".parse().unwrap(),
+        };
+        assert!(t1 < t2 && t2 < t3 && t3 < t4 && t4 < t5);
     }
 
     #[test]
@@ -2104,5 +2299,87 @@ mod evpn_emit_tests {
         let (_, parsed) =
             EvpnRoute::parse_nlri(&buf, false).expect("parse_nlri must accept what we emit");
         assert_eq!(parsed, EvpnRoute::IgmpLeaveSync(original));
+    }
+
+    fn es_esi() -> [u8; 10] {
+        [0x00, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x09]
+    }
+
+    /// Type-1 per-ES A-D: payload = 8 (RD) + 10 (ESI) + 4 (tag) + 3
+    /// (label) = 25. Per-ES form uses MAX-ET and label 0 (the real label
+    /// rides the ESI Label EC).
+    #[test]
+    fn ethernet_ad_nlri_emit_per_es() {
+        let e = EvpnEthernetAd {
+            id: 0,
+            rd: rd_type1_ip(Ipv4Addr::new(10, 0, 0, 1), 100),
+            esi: es_esi(),
+            ether_tag: 0xffffffff,
+            label: 0,
+        };
+        let mut buf = BytesMut::new();
+        EvpnRoute::EthernetAd(e.clone()).nlri_emit(&mut buf);
+        assert_eq!(buf[0], 1, "route type 1");
+        assert_eq!(buf[1], 25, "length");
+        assert_eq!(&buf[10..20], &es_esi(), "ESI after RD");
+        assert_eq!(&buf[20..24], &[0xff, 0xff, 0xff, 0xff], "MAX-ET");
+        assert_eq!(&buf[24..27], &[0, 0, 0], "label 0");
+        let (_, parsed) = EvpnRoute::parse_nlri(&buf, false).expect("round-trip");
+        assert_eq!(parsed, EvpnRoute::EthernetAd(e));
+    }
+
+    /// Type-1 per-EVI A-D round-trip with a real VNI label and Add-Path id.
+    #[test]
+    fn ethernet_ad_roundtrip_per_evi_addpath() {
+        let original = EvpnEthernetAd {
+            id: 7,
+            rd: rd_type1_ip(Ipv4Addr::new(192, 168, 0, 1), 200),
+            esi: es_esi(),
+            ether_tag: 0,
+            label: 10,
+        };
+        let mut buf = BytesMut::new();
+        EvpnRoute::EthernetAd(original.clone()).nlri_emit(&mut buf);
+        assert_eq!(&buf[0..4], &[0, 0, 0, 7], "path id prepended");
+        assert_eq!(buf[4], 1, "route type follows id");
+        let (_, parsed) = EvpnRoute::parse_nlri(&buf, true).expect("round-trip");
+        assert_eq!(parsed, EvpnRoute::EthernetAd(original));
+    }
+
+    /// Type-4 Ethernet Segment: payload = 8 (RD) + 10 (ESI) + 1 (IP-len) +
+    /// 4 (orig) = 23 for IPv4.
+    #[test]
+    fn ethernet_seg_nlri_emit_v4() {
+        let e = EvpnEthernetSeg {
+            id: 0,
+            rd: rd_type1_ip(Ipv4Addr::new(10, 0, 0, 1), 0),
+            esi: es_esi(),
+            orig: IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1)),
+        };
+        let mut buf = BytesMut::new();
+        EvpnRoute::EthernetSeg(e.clone()).nlri_emit(&mut buf);
+        assert_eq!(buf[0], 4, "route type 4");
+        assert_eq!(buf[1], 23, "length");
+        assert_eq!(&buf[10..20], &es_esi(), "ESI after RD");
+        assert_eq!(buf[20], 32, "IP len = 32");
+        assert_eq!(&buf[21..25], &[10, 0, 0, 1], "orig router IP");
+        let (_, parsed) = EvpnRoute::parse_nlri(&buf, false).expect("round-trip");
+        assert_eq!(parsed, EvpnRoute::EthernetSeg(e));
+    }
+
+    /// Type-4 Ethernet Segment round-trip with an IPv6 originating router.
+    #[test]
+    fn ethernet_seg_roundtrip_v6() {
+        let original = EvpnEthernetSeg {
+            id: 0,
+            rd: rd_type1_ip(Ipv4Addr::new(192, 168, 0, 1), 0),
+            esi: es_esi(),
+            orig: "2001:db8::2".parse::<IpAddr>().unwrap(),
+        };
+        let mut buf = BytesMut::new();
+        EvpnRoute::EthernetSeg(original.clone()).nlri_emit(&mut buf);
+        assert_eq!(buf[1], 35, "IPv6 payload length");
+        let (_, parsed) = EvpnRoute::parse_nlri(&buf, false).expect("round-trip");
+        assert_eq!(parsed, EvpnRoute::EthernetSeg(original));
     }
 }

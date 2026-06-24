@@ -4771,6 +4771,21 @@ pub fn route_update_evpn(
     let id = if add_path { rib.local_id } else { 0 };
 
     let route = match prefix {
+        // Type-1/4: ESI is in the key; the per-path label (Type-1) rides the
+        // BgpRib so a reflected route stays faithful.
+        EvpnPrefix::EthernetAd { esi, eth_tag } => EvpnRoute::EthernetAd(EvpnEthernetAd {
+            id,
+            rd: *rd,
+            esi: *esi,
+            ether_tag: *eth_tag,
+            label: rib.label.as_ref().map(|l| l.label).unwrap_or(0),
+        }),
+        EvpnPrefix::EthernetSeg { esi, orig } => EvpnRoute::EthernetSeg(EvpnEthernetSeg {
+            id,
+            rd: *rd,
+            esi: *esi,
+            orig: *orig,
+        }),
         EvpnPrefix::MacIp { eth_tag, mac, .. } => {
             let vni = extract_vni_from_attr(&rib.attr).unwrap_or(0);
             EvpnRoute::Mac(EvpnMac {
@@ -4993,6 +5008,21 @@ pub fn route_withdraw_evpn_to_peers(
 /// passes through.
 fn evpn_route_from_prefix(rd: &RouteDistinguisher, prefix: &EvpnPrefix, id: u32) -> EvpnRoute {
     match prefix {
+        // Type-1/4: reconstructed from the key for a withdraw (label/RD are
+        // not part of the key, so 0/empty is correct for a key-matched pull).
+        EvpnPrefix::EthernetAd { esi, eth_tag } => EvpnRoute::EthernetAd(EvpnEthernetAd {
+            id,
+            rd: *rd,
+            esi: *esi,
+            ether_tag: *eth_tag,
+            label: 0,
+        }),
+        EvpnPrefix::EthernetSeg { esi, orig } => EvpnRoute::EthernetSeg(EvpnEthernetSeg {
+            id,
+            rd: *rd,
+            esi: *esi,
+            orig: *orig,
+        }),
         EvpnPrefix::MacIp { eth_tag, mac, .. } => {
             // RD type 1 (IPv4 + 2-byte assigned-number) is the form
             // we emit at origination — the assigned-number bytes
@@ -6573,12 +6603,14 @@ fn extract_vni_from_attr(attr: &BgpAttr) -> Option<u32> {
 }
 
 /// Map a parsed `EvpnRoute` to the policy-side `EvpnRouteType`
-/// discriminator. Type-2 (MAC-IP), Type-3 (Inclusive Multicast) and
-/// Type-5 (IP Prefix) parse into `EvpnRoute`; Type-1/4 NLRIs are
-/// dropped at parse, so they are not represented here.
+/// discriminator. The policy enum predates Type-1/4/7-11; routes without a
+/// dedicated discriminator map to the closest existing one.
 fn evpn_route_type_of(route: &EvpnRoute) -> crate::policy::EvpnRouteType {
     use crate::policy::EvpnRouteType;
     match route {
+        // RFC 7432 Type-1 (Ethernet A-D) and Type-4 (Ethernet Segment) are
+        // MAC-segment / multihoming routes; the closest discriminator is MacIp.
+        EvpnRoute::EthernetAd(_) | EvpnRoute::EthernetSeg(_) => EvpnRouteType::MacIp,
         EvpnRoute::Mac(_) => EvpnRouteType::MacIp,
         EvpnRoute::Multicast(_) => EvpnRouteType::Multicast,
         EvpnRoute::Prefix(_) => EvpnRouteType::Prefix,
@@ -6603,6 +6635,9 @@ fn evpn_route_type_of(route: &EvpnRoute) -> crate::policy::EvpnRouteType {
 /// Returns `None` when neither source yields a non-zero VNI.
 fn evpn_vni_of(route: &EvpnRoute, attr: &BgpAttr) -> Option<u32> {
     match route {
+        // Type-1 A-D carries the VNI in its label field; Type-4 ES carries none.
+        EvpnRoute::EthernetAd(e) => (e.label != 0).then_some(e.label),
+        EvpnRoute::EthernetSeg(_) => None,
         EvpnRoute::Mac(m) => (m.vni != 0).then_some(m.vni),
         EvpnRoute::Multicast(_) => extract_vni_from_attr(attr),
         // Type-5 (IP Prefix) is an L3VPN-style route: forwarding rides
@@ -6763,9 +6798,12 @@ fn route_evpn_export_selected(
                     });
                 }
             }
-            // RFC 9251 Type-7/8 Synch and RFC 9572 A-D routes have no VXLAN
-            // dataplane action here — withdraw is a control-plane no-op.
-            EvpnPrefix::IgmpJoinSync { .. }
+            // RFC 7432 Type-1/4 ES routes, RFC 9251 Type-7/8 Synch, and RFC
+            // 9572 A-D routes have no VXLAN dataplane action here — withdraw
+            // is a control-plane no-op.
+            EvpnPrefix::EthernetAd { .. }
+            | EvpnPrefix::EthernetSeg { .. }
+            | EvpnPrefix::IgmpJoinSync { .. }
             | EvpnPrefix::IgmpLeaveSync { .. }
             | EvpnPrefix::PerRegionImet { .. }
             | EvpnPrefix::SPmsi { .. }
@@ -6900,11 +6938,14 @@ fn route_evpn_export_selected(
                 });
             }
         }
-        // RFC 9251 Type-7/8 Synch and RFC 9572 Per-Region I-PMSI / S-PMSI /
-        // Leaf A-D have no VXLAN dataplane action in the current control-plane
-        // phase — install is a no-op (the routes are still stored and
-        // re-advertised; only kernel programming is skipped).
-        EvpnPrefix::IgmpJoinSync { .. }
+        // RFC 7432 Type-1/4 ES routes, RFC 9251 Type-7/8 Synch, and RFC 9572
+        // Per-Region I-PMSI / S-PMSI / Leaf A-D have no VXLAN dataplane action
+        // in the current control-plane phase — install is a no-op (the routes
+        // are still stored and re-advertised; only kernel programming is
+        // skipped).
+        EvpnPrefix::EthernetAd { .. }
+        | EvpnPrefix::EthernetSeg { .. }
+        | EvpnPrefix::IgmpJoinSync { .. }
         | EvpnPrefix::IgmpLeaveSync { .. }
         | EvpnPrefix::PerRegionImet { .. }
         | EvpnPrefix::SPmsi { .. }
@@ -7214,6 +7255,8 @@ pub fn route_evpn_update(
     // action (`route_evpn_export_selected` handles them as no-ops). Local
     // origination / segmentation re-origination lands in a later phase.
     let id = match route {
+        EvpnRoute::EthernetAd(e) => e.id,
+        EvpnRoute::EthernetSeg(e) => e.id,
         EvpnRoute::Mac(m) => m.id,
         EvpnRoute::Multicast(m) => m.id,
         EvpnRoute::Prefix(p) => p.id,
@@ -7291,6 +7334,17 @@ pub fn route_evpn_update(
     {
         rib.label = Some(bgp_packet::Label {
             label: p.label,
+            exp: 0,
+            bos: true,
+        });
+    }
+    // Type-1 Ethernet A-D: the MPLS label / VNI is per-path (not in the key);
+    // capture it so a reflected A-D re-emits it faithfully.
+    if let EvpnRoute::EthernetAd(e) = route
+        && e.label != 0
+    {
+        rib.label = Some(bgp_packet::Label {
+            label: e.label,
             exp: 0,
             bos: true,
         });
@@ -7403,6 +7457,8 @@ pub fn route_evpn_update(
 pub fn route_evpn_withdraw(ident: usize, route: &EvpnRoute, bgp: &mut BgpTop, peers: &mut PeerMap) {
     let (rd, prefix) = EvpnPrefix::from_route(route);
     let id = match route {
+        EvpnRoute::EthernetAd(e) => e.id,
+        EvpnRoute::EthernetSeg(e) => e.id,
         EvpnRoute::Mac(m) => m.id,
         EvpnRoute::Multicast(m) => m.id,
         EvpnRoute::Prefix(p) => p.id,
@@ -9824,6 +9880,20 @@ fn build_evpn_route(
     rib: &BgpRib,
 ) -> Option<EvpnRoute> {
     match prefix {
+        // Type-1/4: ESI is in the key; label (Type-1) preserved from the path.
+        EvpnPrefix::EthernetAd { esi, eth_tag } => Some(EvpnRoute::EthernetAd(EvpnEthernetAd {
+            id: rib.remote_id,
+            rd: *rd,
+            esi: *esi,
+            ether_tag: *eth_tag,
+            label: rib.label.as_ref().map(|l| l.label).unwrap_or(0),
+        })),
+        EvpnPrefix::EthernetSeg { esi, orig } => Some(EvpnRoute::EthernetSeg(EvpnEthernetSeg {
+            id: rib.remote_id,
+            rd: *rd,
+            esi: *esi,
+            orig: *orig,
+        })),
         EvpnPrefix::MacIp { eth_tag, mac, .. } => {
             let vni = extract_vni_from_attr(&rib.attr).unwrap_or(0);
             Some(EvpnRoute::Mac(EvpnMac {
@@ -14916,6 +14986,8 @@ fn evpn_ipv4_route_target(addr: Ipv4Addr, local_admin: u16) -> ExtCommunityValue
 /// routes.
 fn evpn_leaf_ad_route_key(route: &EvpnRoute) -> Vec<u8> {
     let zeroed = match route.clone() {
+        EvpnRoute::EthernetAd(e) => EvpnRoute::EthernetAd(EvpnEthernetAd { id: 0, ..e }),
+        EvpnRoute::EthernetSeg(e) => EvpnRoute::EthernetSeg(EvpnEthernetSeg { id: 0, ..e }),
         EvpnRoute::Mac(m) => EvpnRoute::Mac(EvpnMac { id: 0, ..m }),
         EvpnRoute::Multicast(m) => EvpnRoute::Multicast(EvpnMulticast { id: 0, ..m }),
         EvpnRoute::Prefix(p) => EvpnRoute::Prefix(EvpnIpPrefix { id: 0, ..p }),
