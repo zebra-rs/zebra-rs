@@ -158,6 +158,104 @@ impl ExtCommunityValue {
             bitmap: u16::from_be_bytes([self.val[1], self.val[2]]),
         })
     }
+
+    /// Build an ES-Import Route Target (RFC 7432 §7.6): EVPN high-type
+    /// (0x06) + Route Target sub-type (0x02), value auto-derived from the
+    /// **high-order 6 octets of the ESI value** (ESI octets 1..7 — the
+    /// 1-octet ESI Type is skipped). Carried on EVPN Ethernet Segment
+    /// (Type-4) and IGMP/MLD Synch (Type-7/8, RFC 9251) routes to scope
+    /// their distribution to the PEs attached to that Ethernet Segment.
+    pub fn es_import_rt(esi: &[u8; 10]) -> Self {
+        let mut es_import = [0u8; 6];
+        es_import.copy_from_slice(&esi[1..7]);
+        Self::es_import_rt_raw(es_import)
+    }
+
+    /// Build an ES-Import Route Target from an already-derived 6-octet
+    /// ES-Import value.
+    pub fn es_import_rt_raw(es_import: [u8; 6]) -> Self {
+        ExtCommunityValue {
+            high_type: ExtCommunityType::Evpn as u8,
+            low_type: EVPN_ES_IMPORT_RT_SUB_TYPE,
+            val: es_import,
+        }
+    }
+
+    /// True iff this entry is an EVPN ES-Import Route Target (RFC 7432
+    /// §7.6): EVPN high-type (0x06) + Route Target sub-type (0x02).
+    pub fn is_es_import_rt(&self) -> bool {
+        self.high_type == ExtCommunityType::Evpn as u8
+            && self.low_type == EVPN_ES_IMPORT_RT_SUB_TYPE
+    }
+
+    /// Decode the 6-octet ES-Import value if this entry is an ES-Import RT.
+    pub fn as_es_import_rt(&self) -> Option<[u8; 6]> {
+        if self.is_es_import_rt() {
+            Some(self.val)
+        } else {
+            None
+        }
+    }
+
+    /// Build an EVI-RT Extended Community (RFC 9251 §9.5) from the EVI's
+    /// (BD's) Route Target. The EVI-RT carries the same 6-octet RT value
+    /// under the EVPN high-type (0x06), with the sub-type selecting the RT
+    /// format: 2-octet-AS RT (`0x00/0x02`) → Type 0 (`0x0A`), IPv4-address
+    /// RT (`0x01/0x02`) → Type 1 (`0x0B`), 4-octet-AS RT (`0x02/0x02`) →
+    /// Type 2 (`0x0C`). Returns `None` for a non-RT EC or an
+    /// IPv6-address-specific RT (EVI-RT Type 3 / `0x0D` needs a 20-octet
+    /// IPv6 EC that `ExtCommunityValue` cannot hold). Each Type-7/8 route
+    /// carries exactly one EVI-RT EC matching its BD's RT.
+    pub fn evi_rt_from_rt(rt: &ExtCommunityValue) -> Option<Self> {
+        if rt.low_type != ExtCommunitySubType::RouteTarget as u8 {
+            return None;
+        }
+        let sub_type = match rt.high_type {
+            0x00 => EVI_RT_TYPE0_SUB_TYPE,
+            0x01 => EVI_RT_TYPE1_SUB_TYPE,
+            0x02 => EVI_RT_TYPE2_SUB_TYPE,
+            _ => return None,
+        };
+        Some(ExtCommunityValue {
+            high_type: ExtCommunityType::Evpn as u8,
+            low_type: sub_type,
+            val: rt.val,
+        })
+    }
+
+    /// True iff this entry is an EVI-RT Extended Community (RFC 9251 §9.5):
+    /// EVPN high-type (0x06) + a Type-0..3 EVI-RT sub-type (0x0A–0x0D).
+    pub fn is_evi_rt(&self) -> bool {
+        self.high_type == ExtCommunityType::Evpn as u8
+            && matches!(
+                self.low_type,
+                EVI_RT_TYPE0_SUB_TYPE
+                    | EVI_RT_TYPE1_SUB_TYPE
+                    | EVI_RT_TYPE2_SUB_TYPE
+                    | EVI_RT_TYPE3_SUB_TYPE
+            )
+    }
+
+    /// Reconstruct the underlying Route Target EC carried by an EVI-RT EC
+    /// (RFC 9251 §9.5), the inverse of [`evi_rt_from_rt`](Self::evi_rt_from_rt).
+    /// Returns `None` for a non-EVI-RT EC or the IPv6 form (`0x0D`), which
+    /// has no 8-octet RT representation.
+    pub fn as_evi_rt(&self) -> Option<ExtCommunityValue> {
+        if self.high_type != ExtCommunityType::Evpn as u8 {
+            return None;
+        }
+        let high_type = match self.low_type {
+            EVI_RT_TYPE0_SUB_TYPE => 0x00,
+            EVI_RT_TYPE1_SUB_TYPE => 0x01,
+            EVI_RT_TYPE2_SUB_TYPE => 0x02,
+            _ => return None,
+        };
+        Some(ExtCommunityValue {
+            high_type,
+            low_type: ExtCommunitySubType::RouteTarget as u8,
+            val: self.val,
+        })
+    }
 }
 
 /// EVPN Multicast Flags Extended Community sub-type (RFC 9251 §6),
@@ -167,6 +265,19 @@ const EVPN_MCAST_FLAGS_SUB_TYPE: u8 = 0x09;
 /// DF Election Extended Community sub-type (RFC 8584 §2.2), carried under
 /// the EVPN high-type (0x06).
 const EVPN_DF_ELECTION_SUB_TYPE: u8 = 0x06;
+
+/// ES-Import Route Target sub-type (RFC 7432 §7.6), carried under the EVPN
+/// high-type (0x06). Shares the Route Target sub-type value (0x02) but is
+/// disambiguated by the EVPN high-type.
+const EVPN_ES_IMPORT_RT_SUB_TYPE: u8 = 0x02;
+
+/// EVI-RT Extended Community sub-types (RFC 9251 §9.5), carried under the
+/// EVPN high-type (0x06). The sub-type selects which Route Target format the
+/// 6-octet value encodes.
+const EVI_RT_TYPE0_SUB_TYPE: u8 = 0x0A; // 2-octet-AS RT
+const EVI_RT_TYPE1_SUB_TYPE: u8 = 0x0B; // IPv4-address RT
+const EVI_RT_TYPE2_SUB_TYPE: u8 = 0x0C; // 4-octet-AS RT
+const EVI_RT_TYPE3_SUB_TYPE: u8 = 0x0D; // IPv6-address RT (decode-only marker)
 
 /// Decoded EVPN Multicast Flags Extended Community (RFC 9251 §6, extended
 /// by RFC 9572 §8). A PE attaches this to its Inclusive Multicast (Type-3)
@@ -403,6 +514,26 @@ impl fmt::Display for ExtCommunityValue {
                 write!(f, "+ac-df")?;
             }
             Ok(())
+        } else if let Some(es) = self.as_es_import_rt() {
+            // ES-Import RT (RFC 7432 §7.6): render the 6-octet ES-Import as
+            // a colon-joined hex string, MAC-like.
+            write!(
+                f,
+                "es-import:{:02x}:{:02x}:{:02x}:{:02x}:{:02x}:{:02x}",
+                es[0], es[1], es[2], es[3], es[4], es[5]
+            )
+        } else if self.is_evi_rt() {
+            // EVI-RT EC (RFC 9251 §9.5): render `evi-rt:` then the underlying
+            // Route Target. The IPv6 form (0x0D) has no 8-octet RT, so fall
+            // back to a hex dump of the value.
+            match self.as_evi_rt() {
+                Some(rt) => write!(f, "evi-rt:{rt}"),
+                None => write!(
+                    f,
+                    "evi-rt:{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}",
+                    self.val[0], self.val[1], self.val[2], self.val[3], self.val[4], self.val[5]
+                ),
+            }
         } else {
             let ip = Ipv4Addr::new(self.val[0], self.val[1], self.val[2], self.val[3]);
             let val = u16::from_be_bytes([self.val[4], self.val[5]]);
@@ -935,5 +1066,79 @@ mod tests {
         assert_eq!(parsed, original);
         let m = parsed.as_mup().unwrap();
         assert_eq!(m.sub_type, MupExtComSubType::Sub03);
+    }
+
+    #[test]
+    fn es_import_rt_derives_from_esi() {
+        // ESI: Type byte (0x00) then the 9-octet value; the ES-Import RT is
+        // the high-order 6 octets of that value (ESI octets 1..7).
+        let esi = [0x00, 0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0xff, 0x01, 0x02, 0x03];
+        let ec = ExtCommunityValue::es_import_rt(&esi);
+        assert_eq!(ec.high_type, ExtCommunityType::Evpn as u8);
+        assert_eq!(ec.low_type, 0x02);
+        assert_eq!(ec.val, [0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0xff]);
+        assert!(ec.is_es_import_rt());
+        assert_eq!(
+            ec.as_es_import_rt(),
+            Some([0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0xff])
+        );
+        assert_eq!(ec.to_string(), "es-import:aa:bb:cc:dd:ee:ff");
+        // A standard 2-octet-AS RT is not an ES-Import RT despite sharing
+        // the 0x02 sub-type — the high-type differs.
+        let rt = ExtCommunityValue {
+            high_type: 0x00,
+            low_type: 0x02,
+            val: [0xfd, 0xe9, 0, 0, 0, 100],
+        };
+        assert!(!rt.is_es_import_rt());
+    }
+
+    #[test]
+    fn evi_rt_round_trips_two_octet_as_rt() {
+        // EVI RT value for AS 65001, VNI 100 (Local Admin) — the same 6-octet
+        // value evpn_route_target builds.
+        let rt = ExtCommunityValue {
+            high_type: 0x00, // Two-Octet AS-specific
+            low_type: 0x02,  // Route Target
+            val: [0xfd, 0xe9, 0, 0, 0, 100],
+        };
+        let evi = ExtCommunityValue::evi_rt_from_rt(&rt).expect("2-octet-AS RT → EVI-RT Type 0");
+        assert_eq!(evi.high_type, ExtCommunityType::Evpn as u8);
+        assert_eq!(evi.low_type, 0x0A);
+        assert_eq!(evi.val, rt.val);
+        assert!(evi.is_evi_rt());
+        // Reconstructing the RT yields the original.
+        assert_eq!(evi.as_evi_rt(), Some(rt));
+        assert_eq!(evi.to_string(), "evi-rt:rt:65001:100");
+    }
+
+    #[test]
+    fn evi_rt_sub_type_per_rt_format() {
+        // IPv4-address RT → Type 1 (0x0B); 4-octet-AS RT → Type 2 (0x0C).
+        let v4 = ExtCommunityValue {
+            high_type: 0x01,
+            low_type: 0x02,
+            val: [192, 0, 2, 1, 0, 7],
+        };
+        assert_eq!(
+            ExtCommunityValue::evi_rt_from_rt(&v4).unwrap().low_type,
+            0x0B
+        );
+        let as4 = ExtCommunityValue {
+            high_type: 0x02,
+            low_type: 0x02,
+            val: [0, 1, 0, 0, 0, 9],
+        };
+        assert_eq!(
+            ExtCommunityValue::evi_rt_from_rt(&as4).unwrap().low_type,
+            0x0C
+        );
+        // A non-RT EC (Route Origin sub-type 0x03) yields no EVI-RT.
+        let soo = ExtCommunityValue {
+            high_type: 0x00,
+            low_type: 0x03,
+            val: [0; 6],
+        };
+        assert!(ExtCommunityValue::evi_rt_from_rt(&soo).is_none());
     }
 }

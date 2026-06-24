@@ -632,6 +632,14 @@ impl fmt::Display for MpUnreachAttr {
                             let src = v.src.map_or_else(|| "*".to_string(), |s| s.to_string());
                             writeln!(f, " [{}] SMET ({},{})", v.rd, src, v.grp)?;
                         }
+                        EvpnRoute::IgmpJoinSync(v) => {
+                            let src = v.src.map_or_else(|| "*".to_string(), |s| s.to_string());
+                            writeln!(f, " [{}] igmp-join-sync ({},{})", v.rd, src, v.grp)?;
+                        }
+                        EvpnRoute::IgmpLeaveSync(v) => {
+                            let src = v.src.map_or_else(|| "*".to_string(), |s| s.to_string());
+                            writeln!(f, " [{}] igmp-leave-sync ({},{})", v.rd, src, v.grp)?;
+                        }
                         EvpnRoute::PerRegionImet(v) => {
                             writeln!(f, " [{}] per-region-imet:{}", v.rd, v.ether_tag)?;
                         }
