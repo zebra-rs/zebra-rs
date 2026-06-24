@@ -3690,6 +3690,21 @@ fn render_mup_table(
         let nexthop = show_nexthop(&rib.attr);
         writeln!(buf, "       next-hop {nexthop}  weight {}", rib.weight)?;
 
+        // SRv6 L3 Service SID (the segment a DSD/ISD route advertises, or
+        // an explicitly-pushed ST-route SID). "Local" when we originated it.
+        if let Some((sid, behavior)) = rib.attr.srv6_l3_sid() {
+            let kind = if rib.is_originated() {
+                "Local SID"
+            } else {
+                "Remote SID"
+            };
+            writeln!(
+                buf,
+                "       {kind} {sid} ({})",
+                srv6_behavior_name(behavior)
+            )?;
+        }
+
         let ecom = show_mup_ecom(&rib.attr);
         if !ecom.is_empty() {
             writeln!(buf, "       {ecom}")?;
@@ -4794,6 +4809,7 @@ mod detail_tests {
                     direction: MupSrv6Direction::Decapsulation,
                     network_instance: Some("core-ni".to_string()),
                 }),
+                segment: None,
             },
             ..Default::default()
         };
@@ -4804,6 +4820,7 @@ mod detail_tests {
                     direction: MupSrv6Direction::Encapsulation,
                     network_instance: Some("access-ni".to_string()),
                 }),
+                segment: None,
             },
             ..Default::default()
         };

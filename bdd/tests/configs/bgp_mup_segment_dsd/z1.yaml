@@ -1,0 +1,67 @@
+# z1 — MUP PE originating a Direct Segment Discovery (DSD, type 2) route
+# for VRF N6 (`afi-safi mup segment direct`). IS-IS L2 SRv6 underlay +
+# iBGP (mup afi-safi) to z2 over loopbacks. VRF N6 is `encapsulation
+# srv6`, so it carves a per-VRF End.DT46 service SID from locator S and
+# installs the seg6local decap into the VRF table; `segment direct`
+# advertises that segment as a DSD route (NLRI = rd + router-id) carrying
+# the End.DT46 SID as the SRv6 L3 Service, received by z2.
+vrf:
+- name: N6
+  mup:
+    route-target:
+      export:
+      - "65501:10"
+interface:
+- if-name: lo
+  ipv6:
+    address: 2001:db8::1/128
+- if-name: z1-z2
+  ipv6:
+    address: 2001:db8:0:12::1/64
+segment-routing:
+  locator:
+  - name: S
+    prefix: fcbb:bbbb:1::/48
+    behavior: usid
+router:
+  isis:
+    net: 49.0000.0000.0000.0001.00
+    hostname: z1
+    is-type: level-2-only
+    segment-routing:
+      srv6:
+        locator: S
+    interface:
+    - if-name: lo
+      ipv6:
+        enable: true
+    - if-name: z1-z2
+      network-type: point-to-point
+      metric: 1
+      ipv6:
+        enable: true
+  bgp:
+    global:
+      as: 65501
+      router-id: 10.0.0.1
+    timer:
+      adv-interval:
+        ibgp: 1
+    segment-routing:
+      srv6:
+        locator: S
+    neighbor:
+    - remote-address: 2001:db8::2
+      remote-as: 65501
+      update-source: 2001:db8::1
+      enabled: true
+      afi-safi:
+      - name: mup
+        enabled: true
+    vrf:
+    - name: N6
+      rd: "65501:10"
+      encapsulation: srv6
+      afi-safi:
+        mup:
+          segment: direct

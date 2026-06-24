@@ -4089,6 +4089,10 @@ impl Bgp {
             "/router/bgp/vrf/mup/route/st1/dest-network-instance/access/exact",
             super::vrf_config::config_vrf_mup_route_st1,
         );
+        self.callback_add(
+            "/router/bgp/vrf/afi-safi/mup/segment",
+            super::vrf_config::config_vrf_mup_segment,
+        );
 
         // `set router bgp interface-neighbor <name> [...]`.
         self.callback_add(

@@ -132,6 +132,28 @@ pub enum MupSrv6Direction {
     Encapsulation,
 }
 
+/// MUP Segment Discovery route type for a per-VRF service — the PE side
+/// (zebra-bgp-vrf.yang `afi-safi mup segment {direct|interwork}`).
+/// `Direct` originates a Direct Segment Discovery (DSD, type 2) route
+/// carrying the VRF's End.DT46 SID; `Interwork` an Interwork Segment
+/// Discovery (ISD, type 1) route. Independent of [`MupSrv6Mobile`], which
+/// is the controller-side Session-Transformed origination binding.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MupSegmentMode {
+    Direct,
+    Interwork,
+}
+
+impl MupSegmentMode {
+    fn parse(s: &str) -> Option<Self> {
+        match s {
+            "direct" => Some(Self::Direct),
+            "interwork" => Some(Self::Interwork),
+            _ => None,
+        }
+    }
+}
+
 /// `mup route {st1|st2} dest-network-instance {access|core}
 /// exact <ni>` for one VRF: the ST route type (as a direction) plus the
 /// session network-instance matched exactly. Surfaced in
@@ -153,6 +175,11 @@ pub struct MupSrv6Mobile {
 #[derive(Default, Debug, Clone)]
 pub struct BgpVrfMobileUplane {
     pub srv6_mobile: Option<MupSrv6Mobile>,
+    /// `afi-safi mup segment {direct|interwork}` — PE-side Segment
+    /// Discovery origination for this VRF. `Direct` → DSD (type 2,
+    /// carrying the VRF's End.DT46 SID); `Interwork` → ISD (type 1,
+    /// origination deferred). Independent of `srv6_mobile`.
+    pub segment: Option<MupSegmentMode>,
 }
 
 /// Staged candidate configuration for one VRF entry. Mirrors the
@@ -313,6 +340,24 @@ pub fn config_vrf_mup_route_st1(bgp: &mut Bgp, mut args: Args, op: ConfigOp) -> 
             });
         }
         ConfigOp::Delete => cfg.mobile_uplane.srv6_mobile = None,
+        _ => {}
+    }
+    Some(())
+}
+
+/// `set router bgp vrf <NAME> afi-safi mup segment {direct|interwork}` —
+/// PE-side Segment Discovery origination. `direct` originates a Direct
+/// Segment Discovery (DSD, type 2) route carrying the VRF's End.DT46 SID;
+/// `interwork` an Interwork Segment Discovery (ISD, type 1) route.
+pub fn config_vrf_mup_segment(bgp: &mut Bgp, mut args: Args, op: ConfigOp) -> Option<()> {
+    let name = args.string()?;
+    let cfg = vrf_entry(bgp, name);
+    match op {
+        ConfigOp::Set => {
+            let raw = args.string()?;
+            cfg.mobile_uplane.segment = Some(MupSegmentMode::parse(&raw)?);
+        }
+        ConfigOp::Delete => cfg.mobile_uplane.segment = None,
         _ => {}
     }
     Some(())

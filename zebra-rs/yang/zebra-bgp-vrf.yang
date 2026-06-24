@@ -213,6 +213,35 @@ module zebra-bgp-vrf {
           }
         }
       }
+      container mup {
+        description
+          "Per-VRF MUP (RFC 9833) Segment Discovery origination — the PE
+           side. `segment direct` originates a Direct Segment Discovery
+           (DSD, type 2) route for this VRF carrying the VRF's End.DT46
+           SID (carved from `encapsulation srv6`); `interwork` originates
+           an Interwork Segment Discovery (ISD, type 1) route. A receiving
+           PE derives forwarding for matching Session-Transformed routes
+           from these segment routes (draft-ietf-bess-mup-safi default).
+           Distinct from the controller-side `mup route {st1|st2}` block.";
+        leaf segment {
+          type enumeration {
+            enum direct {
+              description
+                "Originate a Direct Segment Discovery (DSD, type 2)
+                 route: the NLRI is the VRF RD + router-id and the SRv6
+                 L3 Service carries the per-VRF End.DT46 SID.";
+            }
+            enum interwork {
+              description
+                "Originate an Interwork Segment Discovery (ISD, type 1)
+                 route. (Origination deferred — parsed but not yet acted
+                 on.)";
+            }
+          }
+          description
+            "MUP Segment Discovery route type originated for this VRF.";
+        }
+      }
     }
   }
 

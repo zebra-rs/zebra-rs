@@ -210,7 +210,7 @@ pub struct Srv6Ipv6Export {
     pub nexthop: std::net::Ipv6Addr,
 }
 
-fn srv6_l3_service_prefix_sid(
+pub(super) fn srv6_l3_service_prefix_sid(
     sid: std::net::Ipv6Addr,
     structure: Option<crate::rib::SidStructure>,
     behavior: u16,
@@ -681,6 +681,13 @@ pub struct Bgp {
     /// (the PE derives forwarding from its ISD/DSD routes), so only the
     /// prefix is retained.
     pub mup_c_originated: BTreeMap<u64, bgp_packet::MupPrefix>,
+    /// Config-driven MUP DSD (Direct Segment Discovery, type 2) routes
+    /// originated per VRF (`afi-safi mup segment direct`), keyed by VRF
+    /// name → `(originated NLRI, End.DT46 SID)`. The SID is tracked
+    /// alongside the prefix so a locator-driven SID change re-advertises
+    /// even though the RD+router-id NLRI key is stable. See
+    /// [`Bgp::reconcile_mup_dsd`].
+    pub mup_dsd_originated: BTreeMap<String, (bgp_packet::MupPrefix, std::net::Ipv6Addr)>,
     /// Local bridge FDB shadow keyed by `(vni, mac)`. Populated from
     /// every `RibRx::FdbAdd`, removed on `RibRx::FdbDel`. We need
     /// durable state (not just one-shot event handling) because the
@@ -1121,6 +1128,7 @@ impl Bgp {
             mup_c_view: crate::mup_c::inst::MupCView::default(),
             mup_c_dirty: false,
             mup_c_originated: BTreeMap::new(),
+            mup_dsd_originated: BTreeMap::new(),
             local_fdb: BTreeMap::new(),
             local_vxlans: BTreeMap::new(),
             local_smet: BTreeMap::new(),
@@ -1430,6 +1438,9 @@ impl Bgp {
         for name in srv6_vrfs {
             self.resid_vrf(&name);
         }
+        // The SIDs just changed under stable RD+router-id keys — re-advertise
+        // any `segment direct` DSD route with the new End.DT46 SID.
+        self.reconcile_mup_dsd();
     }
 
     /// `segment-routing srv6 ipv6-unicast` toggle. Enables or disables
@@ -1677,6 +1688,11 @@ impl Bgp {
                 }
             }
         }
+
+        // MUP DSD NLRIs embed the router-id (RD + router-id); a router-id
+        // change rebinds the key, so withdraw the old-keyed DSD and
+        // re-originate under the new — `reconcile_mup_dsd` does both.
+        self.reconcile_mup_dsd();
     }
 
     /// Recompute the effective BGP Identifier from its two sources —
@@ -2217,6 +2233,9 @@ impl Bgp {
         // colour-steering snapshot so SRv6 L3VPN routes steer from the
         // first install, not only after the next shadow change.
         self.broadcast_colour_steering();
+        // Originate / withdraw config-driven MUP DSD segment routes now the
+        // VRF set (and its SIDs / kernel context) may have changed.
+        self.reconcile_mup_dsd();
     }
 
     /// Reconcile the MUP controller against `mup_c_config` at every
@@ -2316,6 +2335,9 @@ impl Bgp {
             table_id,
             "bgp: respawned per-VRF task with real ProtoContext::for_vrf",
         );
+        // The respawn with real kernel context is what actually installs the
+        // End.DT46 decap; a `segment direct` VRF can now originate its DSD.
+        self.reconcile_mup_dsd();
     }
 
     pub fn process_cm_msg(&mut self, msg: ConfigRequest) {
@@ -3175,6 +3197,9 @@ impl Bgp {
                 // per-VRF task carries the YANG intent. If the
                 // operator subsequently deletes the BGP VRF block,
                 // `apply_vrf_commit_diff` handles teardown.
+                // The kernel VRF (and its End.DT46 decap) is gone, so
+                // withdraw any DSD segment route that depended on it.
+                self.reconcile_mup_dsd();
             }
             RibRx::VrfRouteTargets {
                 name,
@@ -3201,6 +3226,7 @@ impl Bgp {
                 let entry = self.rib_known_vrfs.entry(name.clone()).or_default();
                 let export_v4_changed = entry.export_rts_v4 != ipv4_export_rts;
                 let export_v6_changed = entry.export_rts_v6 != ipv6_export_rts;
+                let export_mup_changed = entry.mup_export_rts != mup_export_rts;
                 entry.import_rts_v4 = ipv4_import_rts;
                 entry.export_rts_v4 = ipv4_export_rts;
                 entry.import_rts_v6 = ipv6_import_rts;
@@ -3219,6 +3245,11 @@ impl Bgp {
                 }
                 if export_v6_changed {
                     self.retag_vrf_exports_v6(&name);
+                }
+                // Re-stamp the VRF's DSD segment route with the new MUP
+                // export RTs (same race the v4/v6 retag above closes).
+                if export_mup_changed {
+                    self.reconcile_mup_dsd();
                 }
             }
             // Redistribute deliveries from RIB — initial walk

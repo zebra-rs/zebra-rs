@@ -381,6 +381,52 @@ PE-derived forwarding, see *Draft-default forwarding* above.
 
 ### P6 — SRv6-mobile dataplane
 
+#### P6 slice 1 — DSD origination + End.DT46 (2026-06-23) — **DONE**
+
+The first P6 slice landed the **PE-side Direct Segment Discovery (DSD,
+type 2) origination** that the draft-default ST routes resolve against:
+
+- **`afi-safi mup segment {direct|interwork}`** on a per-VRF BGP block
+  (zebra-bgp-vrf.yang, under the per-VRF `afi-safi` container — distinct
+  from the controller-side `mup route {st1|st2}`). `MupSegmentMode` on
+  `BgpVrfMobileUplane`; callback `/router/bgp/vrf/afi-safi/mup/segment`.
+  `interwork` (ISD, type 1) is parsed but origination is deferred.
+- **`segment direct` originates a DSD** route for the VRF: NLRI is the
+  VRF **RD + router-id** (so it rides the IPv4-MUP AFI); the attributes
+  carry the PE locator node as the **IPv6 next-hop** and the per-VRF
+  **End.DT46 SID** as the SRv6 L3 Service (`srv6_l3_service_prefix_sid`,
+  `SRV6_BEHAVIOR_END_DT46`). `build_mup_dsd_origination` /
+  `originate_mup_dsd` / `withdraw_mup_dsd` mirror the controller ST path;
+  `reconcile_mup_dsd` is the idempotent driver.
+- **SID + FIB install are pure reuse** of L3VPN-over-SRv6: a VRF with
+  `encapsulation srv6` already carves an End.DT46 SID (`alloc_vrf_sid`)
+  and installs the `seg6local End.DT46 SEG6_LOCAL_VRFTABLE(table_id)`
+  decap at spawn. The DSD path only *reads* `vrf_registry[name].srv6_sid`
+  and advertises it — no new alloc / FIB code.
+- **Gating + reconcile triggers:** the DSD originates only once the VRF
+  has `segment direct` + `encapsulation srv6` + an RD + a resolved SID +
+  a **known kernel VRF** (proxy for "End.DT46 is installed") + a non-zero
+  router-id. `reconcile_mup_dsd` runs from `apply_vrf_commit_diff`,
+  `maybe_respawn_vrf_with_kernel_ctx` (kernel-ctx / FIB install),
+  `reconcile_srv6_vrfs` (locator-driven SID change under a stable key),
+  the `VrfDel` and MUP-RT (`VrfRouteTargets`) handlers, and `set_router_id`
+  (the router-id is in the NLRI key). `route_update_mup` advertises the
+  attr IPv6 next-hop for originated routes carrying a Prefix-SID (DSD);
+  ST routes (no Prefix-SID) are unaffected.
+- **Show:** `show bgp mup` / `show bgp vrf <name> mup` now print the SRv6
+  L3 SID line (`Local/Remote SID <sid> (End.DT46)`).
+- **Test:** `@bgp_mup_segment_dsd` BDD (root) — z1 originates the DSD,
+  installs the `seg6local End.DT46` (asserted via `ip -6 route show table
+  all`), and z2 receives it with the SID. Excluded from CI; run live via
+  `make -C bdd bgp_mup_segment_dsd`.
+
+**Still open in P6:** the *receive* side — a PE consuming a peer's DSD/ISD
+route to drive forwarding (the *ISD/DSD-route → segment-SID resolution*
+step below), ISD (`segment interwork`) origination, and the GTP
+behaviours.
+
+#### Remaining
+
 **What:** Install the FIB state that actually forwards MUP traffic. With
 the draft-default model (see *Draft-default forwarding* above), the PE
 receiving an ST route resolves its forwarding SID from the matching
