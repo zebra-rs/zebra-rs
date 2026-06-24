@@ -457,11 +457,21 @@ MUP Extended Community:
   `VrfRouteTargets`) never carried the RT — and would likewise miss a
   later `mup-ext-comm`. The skip now also compares the ext-community set,
   so an RT / segment-id change re-advertises under the stable key.
-- **Tests.** `@bgp_mup_st2` BDD (controller drives `pfcp-inject` with a
-  `core` Network Instance → ST2 with endpoint + TEID + Direct segment id,
-  received by the peer); `@bgp_mup_segment_dsd` extended to assert the
-  DSD carries `RT:65501:10 1:2`. Run live via `make -C bdd bgp_mup_st2`
-  / `bgp_mup_segment_dsd`.
+- **Grammar simplification.** The ST2 (uplink) Network-Instance binding
+  moved off the nested `router bgp vrf <name> mup route st2
+  dest-network-instance core exact <ni>` onto a single
+  `router bgp vrf <name> afi-safi mup network-instance <ni>` leaf, next to
+  `segment direct` (the Direct segment the ST2 resolves to). It still maps
+  to the Decapsulation direction on `srv6_mobile`, so `build_mup_origination`
+  / `render_mup_vrfs` are unchanged. The downlink `mup route st1
+  dest-network-instance access exact <ni>` is unchanged; the `route st2`
+  sub-container was removed.
+- **Tests.** `@bgp_mup_st2` BDD (controller, `afi-safi mup segment direct
+  network-instance core`, drives `pfcp-inject` with a `core` Network
+  Instance → ST2 with endpoint + TEID + Direct segment id, received by the
+  peer); `@bgp_mup_segment_dsd` extended to assert the DSD carries
+  `RT:65501:10 1:2`. Run live via `make -C bdd bgp_mup_st2` /
+  `bgp_mup_segment_dsd`.
 
 **Still open in P6 (unchanged):** the *receive* side (ST2 → Direct-segment
 resolution → FIB), ISD (`segment interwork`) origination, and the GTP

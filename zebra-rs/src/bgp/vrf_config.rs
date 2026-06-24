@@ -311,11 +311,13 @@ pub fn config_vrf_inter_as_hybrid(bgp: &mut Bgp, mut args: Args, op: ConfigOp) -
     Some(())
 }
 
-/// `set router bgp vrf <NAME> mup route st2 dest-network-instance
-/// core exact <NI>` — Type-2 ST (uplink) origination: egress GTP
-/// decapsulation for the N3 VRF, matched against the session's core
-/// network-instance.
-pub fn config_vrf_mup_route_st2(bgp: &mut Bgp, mut args: Args, op: ConfigOp) -> Option<()> {
+/// `set router bgp vrf <NAME> afi-safi mup network-instance <NI>` — the
+/// Type-2 ST (uplink) NI binding, alongside `segment direct` (the Direct
+/// segment the ST2 resolves to). When the MUP controller learns a session
+/// whose Network Instance matches `<NI>`, it originates an ST2 (endpoint +
+/// GTP TEID, egress GTP decapsulation into this VRF's End.DT46 Direct
+/// segment). Stored as the Decapsulation direction on `srv6_mobile`.
+pub fn config_vrf_mup_network_instance(bgp: &mut Bgp, mut args: Args, op: ConfigOp) -> Option<()> {
     let name = args.string()?;
     let cfg = vrf_entry(bgp, name);
     match op {

@@ -141,14 +141,37 @@ vrf mobile-up {
   **without** a service SID — the receiving PE derives forwarding from
   its own ISD/DSD routes — so no per-session SID is allocated.
 
-The **`route`** type in the VRF selects what is originated: `st1` (the
-N6 / downlink VRF) originates a **Type-1 ST** route carrying the UE
-prefix; `st2` (the N3 / uplink VRF) originates a **Type-2 ST** route
-carrying the core endpoint and TEID. The `dest-network-instance ... exact`
-value is matched against the PFCP session's Network Instance. The export
-route-targets the ST route carries come from the top-level
-`vrf <name> mup route-target export` — the same `route-target` framework
-as `ipv4` / `ipv6`.
+The VRF binds each direction to a PFCP Network Instance:
+
+* **Downlink (Type-1 ST).** `mup route st1 dest-network-instance access
+  exact <ni>` — the N6 VRF originates a **Type-1 ST** route carrying the
+  UE prefix (ingress GTP encapsulation).
+* **Uplink (Type-2 ST).** `afi-safi mup segment direct network-instance
+  <ni>` — the N3 VRF originates a **Type-2 ST** route carrying the core
+  endpoint and the GTP TEID (egress GTP decapsulation into the VRF's
+  End.DT46 Direct segment). The ST2 NI binding lives next to `segment
+  direct` because the ST2 resolves to that Direct segment; the route also
+  carries the segment's BGP MUP Extended Community (`mup-ext-comm`, a
+  Direct-segment id in RD/RT 2:4 form, e.g. `1:2`).
+
+In both cases the configured network-instance is matched exactly against
+the PFCP session's Network Instance. The export route-targets the ST route
+carries come from the top-level `vrf <name> mup route-target export` — the
+same `route-target` framework as `ipv4` / `ipv6`.
+
+For example, an uplink VRF:
+
+```
+vrf N3 {
+  rd 65000:100;
+  encapsulation srv6;
+  afi-safi mup {
+    segment direct;          # originate the End.DT46 Direct Segment Discovery route
+    mup-ext-comm 1:2;        # the Direct segment id (BGP MUP Ext-Comm 0x0c/0x00)
+    network-instance core;   # originate an ST2 for PFCP sessions on NI "core"
+  }
+}
+```
 
 ## From PFCP session to ST route
 

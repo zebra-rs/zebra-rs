@@ -4082,10 +4082,6 @@ impl Bgp {
             super::vrf_config::config_vrf_evpn_advertise_ipv6,
         );
         self.callback_add(
-            "/router/bgp/vrf/mup/route/st2/dest-network-instance/core/exact",
-            super::vrf_config::config_vrf_mup_route_st2,
-        );
-        self.callback_add(
             "/router/bgp/vrf/mup/route/st1/dest-network-instance/access/exact",
             super::vrf_config::config_vrf_mup_route_st1,
         );
@@ -4096,6 +4092,10 @@ impl Bgp {
         self.callback_add(
             "/router/bgp/vrf/afi-safi/mup/mup-ext-comm",
             super::vrf_config::config_vrf_mup_ext_comm,
+        );
+        self.callback_add(
+            "/router/bgp/vrf/afi-safi/mup/network-instance",
+            super::vrf_config::config_vrf_mup_network_instance,
         );
 
         // `set router bgp interface-neighbor <name> [...]`.
