@@ -171,7 +171,15 @@ _cli_set_completions ()
     else
       IFS=$'\t' col=(${line})
       completions=(${completions[@]} ${col[0]})
-      if [[ ${col[0]}  =~ ^[a-zEH0-9/] ]];then
+      # Everything except a type-hint placeholder is a literal,
+      # TAB-completable word. Placeholders (`<name:string>`,
+      # `<A.B.C.D>`, `<cr>`, ...) all start with '<' and must be kept
+      # out of the compgen word list. A previous initial-character
+      # whitelist (`[a-zEH0-9/]`) wrongly dropped any candidate whose
+      # first character was an uppercase letter other than E/H, so a
+      # VRF/interface/neighbour name like `N6` showed under `?` but
+      # never expanded on TAB.
+      if [[ ${col[0]} != "<"* ]];then
         completions2=(${completions2[@]} ${col[0]})
         _cli_array_completions=(${_cli_array_completions[@]} ${col[0]})
       fi
