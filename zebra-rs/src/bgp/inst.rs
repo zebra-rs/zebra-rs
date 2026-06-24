@@ -2397,6 +2397,11 @@ impl Bgp {
                 let (path, mut args) = path_from_command(&msg.paths);
                 if let Some((afi_safi, op)) = parse_clear_bgp_path(&path) {
                     let _ = peer::clear_bgp_action(self, &mut args, afi_safi, op);
+                } else if let Some(action) = path.strip_prefix("/clear/bgp/debug/")
+                    && let Some(spec) = args.string()
+                {
+                    // RFC 9251 Type-7/8 debug origination (zebra-bgp-clear.yang).
+                    self.debug_igmp_sync_action(action, &spec);
                 }
             }
         }

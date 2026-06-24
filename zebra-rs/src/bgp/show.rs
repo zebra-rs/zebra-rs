@@ -3268,6 +3268,14 @@ fn format_evpn_ecom_value(v: &ExtCommunityValue) -> String {
         // DF Election EC — RFC 8584 §2.2 (RFC 9572 §5.3.1 inter-AS DF
         // election). Reuse the codec's Display: `df-election:alg<N>[+ac-df]`.
         (0x06, 0x06) => v.to_string(),
+        // EVPN ES-Import RT — RFC 7432 §7.6, carried on Type-7/8 IGMP/MLD
+        // Synch routes (RFC 9251). Reuse the codec's Display:
+        // `es-import:<6-octet colon-hex>`.
+        (0x06, 0x02) => v.to_string(),
+        // EVPN EVI-RT EC — RFC 9251 §9.5 (Type 0..3 sub-types 0x0a-0x0d),
+        // carried on the Type-7/8 Synch routes. Reuse the codec's Display:
+        // `evi-rt:<route-target>`.
+        (0x06, 0x0a) | (0x06, 0x0b) | (0x06, 0x0c) | (0x06, 0x0d) => v.to_string(),
         _ => format!(
             "0x{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}",
             v.high_type, v.low_type, v.val[0], v.val[1], v.val[2], v.val[3], v.val[4], v.val[5]

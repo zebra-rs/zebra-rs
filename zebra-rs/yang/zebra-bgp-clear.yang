@@ -157,6 +157,56 @@ module zebra-bgp-clear {
         ext:default-child "neighbor";
         uses bgp-clear-neighbor-actions;
       }
+      // Debug / test-injection surface for the RFC 9251 EVPN Type-7
+      // (IGMP/MLD Join Synch) and Type-8 (Leave Synch) routes. Each action
+      // takes one comma-separated spec token `vni,esi,group[,source]`:
+      //   - vni    L2VPN VNI (selects RD <router-id>:VNI and the EVI RT)
+      //   - esi    10-octet ESI, colon-hex (00:01:..:09) or 20 hex digits
+      //   - group  multicast group address
+      //   - source multicast source for (S,G); omit for (*,G)
+      // It drives `evpn_originate_igmp_*_sync` directly so a route reflector
+      // can be exercised end-to-end (BDD) without the ES/DF dataplane, which
+      // is still deferred. Flags are derived from the group family
+      // (IGMPv3 / MLDv2) and the Type-8 Maximum Response Time defaults.
+      container debug {
+        ext:help "BGP debug / test-injection actions";
+        list igmp-join-sync-originate {
+          ext:presence "Originate an EVPN Type-7 IGMP/MLD Join Synch route";
+          ext:help "Originate a Type-7 Join Synch route (RFC 9251, debug)";
+          key spec;
+          leaf spec {
+            ext:help "vni,esi,group[,source]";
+            type string;
+          }
+        }
+        list igmp-join-sync-withdraw {
+          ext:presence "Withdraw an EVPN Type-7 IGMP/MLD Join Synch route";
+          ext:help "Withdraw a Type-7 Join Synch route (RFC 9251, debug)";
+          key spec;
+          leaf spec {
+            ext:help "vni,esi,group[,source]";
+            type string;
+          }
+        }
+        list igmp-leave-sync-originate {
+          ext:presence "Originate an EVPN Type-8 IGMP/MLD Leave Synch route";
+          ext:help "Originate a Type-8 Leave Synch route (RFC 9251, debug)";
+          key spec;
+          leaf spec {
+            ext:help "vni,esi,group[,source]";
+            type string;
+          }
+        }
+        list igmp-leave-sync-withdraw {
+          ext:presence "Withdraw an EVPN Type-8 IGMP/MLD Leave Synch route";
+          ext:help "Withdraw a Type-8 Leave Synch route (RFC 9251, debug)";
+          key spec;
+          leaf spec {
+            ext:help "vni,esi,group[,source]";
+            type string;
+          }
+        }
+      }
     }
   }
 }
