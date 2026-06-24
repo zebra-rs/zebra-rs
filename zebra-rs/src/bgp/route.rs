@@ -14769,17 +14769,9 @@ fn parse_igmp_sync_spec(spec: &str) -> Option<(u32, [u8; 10], IpAddr, Option<IpA
 }
 
 /// Decode a 10-octet ESI from colon-hex (`00:01:…:09`) or 20 bare hex
-/// digits. Colons are stripped; any other length or non-hex digit fails.
+/// digits — delegates to the shared `bgp_packet::esi_from_str`.
 fn parse_esi(s: &str) -> Option<[u8; 10]> {
-    let hex: String = s.chars().filter(|c| *c != ':').collect();
-    if hex.len() != 20 {
-        return None;
-    }
-    let mut esi = [0u8; 10];
-    for (i, byte) in esi.iter_mut().enumerate() {
-        *byte = u8::from_str_radix(&hex[i * 2..i * 2 + 2], 16).ok()?;
-    }
-    Some(esi)
+    bgp_packet::esi_from_str(s)
 }
 
 #[cfg(test)]

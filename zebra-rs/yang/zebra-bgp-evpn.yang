@@ -100,6 +100,44 @@ module zebra-bgp-evpn {
          route. Tells peers and Regional Border Routers that this PE
          supports the RFC 9572 segmentation procedures.";
     }
+    list ethernet-segment {
+      key "name";
+      description
+        "EVPN Ethernet Segment (RFC 7432) — a CE multihomed to two or more
+         PEs. Identified to the overlay by a 10-octet ESI; the PEs on the
+         same ES discover one another (Type-4 route + ES-Import RT) and run
+         Designated-Forwarder election. Config + state only in this phase;
+         Type-1/4 origination and DF election are later phases.";
+      leaf name {
+        type string;
+        description "Operator-chosen Ethernet Segment name (the list key).";
+      }
+      leaf esi {
+        type string;
+        description
+          "10-octet Ethernet Segment Identifier, colon-hex (00:11:..:99) or
+           20 bare hex digits. Manual Type-0 ESI in this phase.";
+      }
+      leaf redundancy-mode {
+        type enumeration {
+          enum all-active {
+            description
+              "All PEs on the ES forward to/from the CE (load-balanced).";
+          }
+          enum single-active {
+            description
+              "Only the Designated Forwarder forwards per service; the rest
+               are backup.";
+          }
+        }
+        default all-active;
+        description "All-active (default) or single-active multihoming.";
+      }
+      leaf interface {
+        type string;
+        description "Access interface (CE-facing port) bound to this ES.";
+      }
+    }
     leaf bum-tunnel-type {
       type enumeration {
         enum ingress-replication {

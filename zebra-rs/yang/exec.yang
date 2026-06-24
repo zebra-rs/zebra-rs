@@ -341,6 +341,10 @@ module exec {
           ext:help "Summary of EVPN-enabled neighbors";
           type empty;
         }
+        leaf ethernet-segment {
+          ext:help "Locally-configured EVPN Ethernet Segments (RFC 7432)";
+          type empty;
+        }
         leaf route-type {
           ext:help "Filter the EVPN RIB by route type";
           // ethernet-ad=1, macip=2, multicast=3, ethernet-segment=4,

@@ -2984,6 +2984,41 @@ mod yang_load_tests {
         }
     }
 
+    /// The RFC 7432 Ethernet Segment config surface
+    /// (`router bgp afi-safi evpn ethernet-segment <name> …`,
+    /// zebra-bgp-evpn.yang). Guards the hand-written list-under-afi-safi
+    /// grammar so a regression is caught in the unit suite.
+    #[test]
+    fn bgp_evpn_ethernet_segment_is_settable() {
+        use crate::config::ExecCode;
+        use crate::config::parse::{State, parse};
+        use libyang::to_entry;
+
+        let mut yang = YangStore::new();
+        yang.add_path(concat!(env!("CARGO_MANIFEST_DIR"), "/yang"));
+        yang.read_with_resolve("configure")
+            .expect("configure mode loads");
+        yang.identity_resolve();
+        let module = yang
+            .find_module("configure")
+            .expect("configure module present");
+        let entry = to_entry(&yang, module);
+
+        // Only `set` paths are schema-validated here: delete-mode parsing
+        // matches against the live config (empty in this test), so deleting a
+        // non-existent entry is correctly Nomatch.
+        for path in [
+            "set router bgp afi-safi evpn ethernet-segment es1",
+            "set router bgp afi-safi evpn ethernet-segment es1 esi 00:11:22:33:44:55:66:77:88:99",
+            "set router bgp afi-safi evpn ethernet-segment es1 redundancy-mode all-active",
+            "set router bgp afi-safi evpn ethernet-segment es1 redundancy-mode single-active",
+            "set router bgp afi-safi evpn ethernet-segment es1 interface eth0",
+        ] {
+            let (code, _comps, _state) = parse(path, entry.clone(), None, State::new());
+            assert_eq!(code, ExecCode::Success, "`{path}` must be a settable path");
+        }
+    }
+
     #[test]
     fn bgp_evpn_segmentation_is_settable() {
         use crate::config::ExecCode;

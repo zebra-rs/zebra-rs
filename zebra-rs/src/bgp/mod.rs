@@ -8,6 +8,7 @@ pub mod auth;
 pub mod config;
 pub mod connected;
 pub mod dynamic_neighbors;
+pub mod ethernet_segment;
 pub mod group_egress;
 pub mod interface_addrs;
 pub mod interface_neighbor;

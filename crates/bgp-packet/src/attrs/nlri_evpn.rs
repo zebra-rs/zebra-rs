@@ -703,6 +703,21 @@ pub fn esi_display(esi: &[u8; 10]) -> String {
         .join(":")
 }
 
+/// Parse a 10-octet Ethernet Segment Identifier from colon-hex
+/// (`00:11:…:99`) or 20 bare hex digits. Returns `None` on any other length
+/// or a non-hex digit. The inverse of [`esi_display`].
+pub fn esi_from_str(s: &str) -> Option<[u8; 10]> {
+    let hex: String = s.chars().filter(|c| *c != ':').collect();
+    if hex.len() != 20 {
+        return None;
+    }
+    let mut esi = [0u8; 10];
+    for (i, byte) in esi.iter_mut().enumerate() {
+        *byte = u8::from_str_radix(&hex[i * 2..i * 2 + 2], 16).ok()?;
+    }
+    Some(esi)
+}
+
 /// Shared `Display` body for the IGMP/MLD Join (Type 7) and Leave (Type 8)
 /// Synch route keys, which differ only in the leading route-type number:
 /// `[<rt>]:[<ESI>]:[EthTag]:[SrcLen]:[Src]:[GrpLen]:[Grp]:[OrigLen]:[Orig]`.
@@ -1381,6 +1396,18 @@ mod evpn_prefix_tests {
             "[4]:[00:11:22:33:44:55:66:77:88:99]:[32]:[10.0.0.1]"
         );
         assert_eq!(es.route_type(), 4);
+    }
+
+    #[test]
+    fn esi_from_str_parses_and_round_trips() {
+        let want = [0x00, 0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77, 0x88, 0x99];
+        assert_eq!(esi_from_str("00:11:22:33:44:55:66:77:88:99"), Some(want));
+        assert_eq!(esi_from_str("00112233445566778899"), Some(want));
+        // Round-trips with esi_display.
+        assert_eq!(esi_from_str(&esi_display(&want)), Some(want));
+        // Wrong length / non-hex rejected.
+        assert_eq!(esi_from_str("00:11:22"), None);
+        assert_eq!(esi_from_str("zz112233445566778899"), None);
     }
 
     #[test]
