@@ -647,6 +647,25 @@ impl fmt::Display for MpReachAttr {
             } => {
                 for update in updates.iter() {
                     match update {
+                        EvpnRoute::EthernetAd(v) => {
+                            writeln!(
+                                f,
+                                " [{}] ethernet-ad esi:{} tag:{} label:{}",
+                                v.rd,
+                                esi_display(&v.esi),
+                                v.ether_tag,
+                                v.label
+                            )?;
+                        }
+                        EvpnRoute::EthernetSeg(v) => {
+                            writeln!(
+                                f,
+                                " [{}] ethernet-segment esi:{} orig:{}",
+                                v.rd,
+                                esi_display(&v.esi),
+                                v.orig
+                            )?;
+                        }
                         EvpnRoute::Mac(v) => {
                             writeln!(
                                 f,

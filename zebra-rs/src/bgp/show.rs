@@ -1074,10 +1074,7 @@ fn show_adj_rib_routes_evpn<D: RibDirection>(
 
     let mut buf = String::new();
 
-    writeln!(
-        buf,
-        "EVPN type-1 prefix: [1]:[EthTag]:[ESI]:[IPlen]:[VTEP-IP]:[Frag-id]"
-    )?;
+    writeln!(buf, "EVPN type-1 prefix: [1]:[ESI]:[EthTag]")?;
     writeln!(
         buf,
         "EVPN type-2 prefix: [2]:[EthTag]:[MAClen]:[MAC]:[IPlen]:[IP]"
@@ -3268,10 +3265,13 @@ fn format_evpn_ecom_value(v: &ExtCommunityValue) -> String {
         // DF Election EC — RFC 8584 §2.2 (RFC 9572 §5.3.1 inter-AS DF
         // election). Reuse the codec's Display: `df-election:alg<N>[+ac-df]`.
         (0x06, 0x06) => v.to_string(),
-        // EVPN ES-Import RT — RFC 7432 §7.6, carried on Type-7/8 IGMP/MLD
-        // Synch routes (RFC 9251). Reuse the codec's Display:
-        // `es-import:<6-octet colon-hex>`.
+        // EVPN ES-Import RT — RFC 7432 §7.6, carried on Type-4 ES routes and
+        // Type-7/8 IGMP/MLD Synch routes (RFC 9251). Reuse the codec's
+        // Display: `es-import:<6-octet colon-hex>`.
         (0x06, 0x02) => v.to_string(),
+        // EVPN ESI Label EC — RFC 7432 §7.5, carried on the per-ES Type-1
+        // A-D route. Reuse the codec's Display: `esi-label:<mode>:<label>`.
+        (0x06, 0x01) => v.to_string(),
         // EVPN EVI-RT EC — RFC 9251 §9.5 (Type 0..3 sub-types 0x0a-0x0d),
         // carried on the Type-7/8 Synch routes. Reuse the codec's Display:
         // `evi-rt:<route-target>`.
@@ -3433,8 +3433,10 @@ fn write_evpn_path_attrs(buf: &mut String, attr: &BgpAttr) -> std::fmt::Result {
 /// Keywords mirror the `route-type` enum in exec.yang.
 fn evpn_route_type_filter(token: String) -> Option<u8> {
     match token.as_str() {
+        "ethernet-ad" => Some(1),
         "macip" => Some(2),
         "multicast" => Some(3),
+        "ethernet-segment" => Some(4),
         "prefix" => Some(5),
         "smet" => Some(6),
         "igmp-join-sync" => Some(7),
@@ -3466,10 +3468,7 @@ fn show_bgp_evpn(
     let mut buf = String::new();
 
     // Legend — describes the wire-format layout of each EVPN route type.
-    writeln!(
-        buf,
-        "EVPN type-1 prefix: [1]:[EthTag]:[ESI]:[IPlen]:[VTEP-IP]:[Frag-id]"
-    )?;
+    writeln!(buf, "EVPN type-1 prefix: [1]:[ESI]:[EthTag]")?;
     writeln!(
         buf,
         "EVPN type-2 prefix: [2]:[EthTag]:[MAClen]:[MAC]:[IPlen]:[IP]"
