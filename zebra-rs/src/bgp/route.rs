@@ -7506,10 +7506,14 @@ fn route_update_mup(
     let mut attrs = (*rib.attr).clone();
     ebgp_egress_aspath(&peer.egress_as(), &mut attrs);
 
-    // MP_REACH next-hop: next-hop-self toward eBGP and for our own
-    // originations; otherwise preserve the received next-hop (RFC 9833 —
-    // the PE/controller address the ingress PE resolves).
-    let nhop: IpAddr = if peer.is_ebgp() || rib.is_originated() {
+    // MP_REACH next-hop: an SRv6 segment route we originate (a DSD carrying
+    // an End.DT46 Prefix-SID) advertises the PE locator node carried in the
+    // attr, so a receiving PE H.Encaps to it; next-hop-self toward eBGP and
+    // for our other originations; otherwise preserve the received next-hop
+    // (RFC 9833 — the PE/controller address the ingress PE resolves).
+    let nhop: IpAddr = if rib.is_originated() && attrs.prefix_sid.is_some() {
+        bgp_nexthop_ip(attrs.nexthop.as_ref()?)?
+    } else if peer.is_ebgp() || rib.is_originated() {
         if let Some(ref local_addr) = peer.param.local_addr {
             local_addr.ip()
         } else {
@@ -12576,6 +12580,154 @@ impl Bgp {
             },
         };
         let _ = handle.inbox.send(msg);
+    }
+
+    /// Reconcile config-driven MUP DSD (Direct Segment Discovery, type 2)
+    /// origination across every VRF. Idempotent — safe to call after VRF
+    /// spawn / kernel-ctx respawn, locator (SID) change, and MUP RT update.
+    /// Originates a DSD for each VRF that now qualifies (see
+    /// [`Self::build_mup_dsd_origination`]), withdraws those that no longer
+    /// do, and re-advertises when the SID changed under a stable NLRI key.
+    pub(super) fn reconcile_mup_dsd(&mut self) {
+        let names: Vec<String> = self.vrfs.keys().cloned().collect();
+        let mut desired: std::collections::BTreeMap<
+            String,
+            (bgp_packet::MupPrefix, std::net::Ipv6Addr, BgpAttr),
+        > = std::collections::BTreeMap::new();
+        for name in &names {
+            if let Some(d) = self.build_mup_dsd_origination(name) {
+                desired.insert(name.clone(), d);
+            }
+        }
+        // Withdraw DSDs no longer desired, or whose NLRI key changed (a
+        // changed RD/router-id needs an explicit withdraw of the OLD prefix
+        // before the new one is originated under a different key).
+        let prev: Vec<(String, bgp_packet::MupPrefix)> = self
+            .mup_dsd_originated
+            .iter()
+            .map(|(n, (p, _))| (n.clone(), p.clone()))
+            .collect();
+        for (name, prev_prefix) in prev {
+            let keep = desired
+                .get(&name)
+                .map(|(p, _, _)| *p == prev_prefix)
+                .unwrap_or(false);
+            if !keep {
+                self.withdraw_mup_dsd(&name);
+            }
+        }
+        // Originate or refresh. Skip when both the NLRI key and the SID are
+        // unchanged so an unrelated commit doesn't re-advertise.
+        for (name, (prefix, sid, attr)) in desired {
+            let unchanged = self
+                .mup_dsd_originated
+                .get(&name)
+                .map(|(p, s)| *p == prefix && *s == sid)
+                .unwrap_or(false);
+            if unchanged {
+                continue;
+            }
+            self.originate_mup_dsd(name, prefix, sid, attr);
+        }
+    }
+
+    /// Build a VRF's DSD origination, or `None` when it shouldn't originate
+    /// one right now. Gates: `afi-safi mup segment direct`, `encapsulation
+    /// srv6`, a configured RD, a resolved per-VRF End.DT46 SID, a resolved
+    /// locator, and a known kernel VRF — the last so the local End.DT46
+    /// decap is already installed before the segment is advertised (the SID
+    /// install rides the same `VrfAdd`/spawn path).
+    ///
+    /// The NLRI is the VRF RD + router-id (so the route rides the IPv4-MUP
+    /// AFI); the attributes carry the PE locator node as the IPv6 next-hop
+    /// and the End.DT46 SID as the SRv6 L3 Service — the segment a receiving
+    /// PE resolves for matching Session-Transformed routes. Returns
+    /// `(prefix, sid_addr, attr)`.
+    fn build_mup_dsd_origination(
+        &self,
+        name: &str,
+    ) -> Option<(bgp_packet::MupPrefix, std::net::Ipv6Addr, BgpAttr)> {
+        use super::vrf_config::{BgpVrfEncapsulation, MupSegmentMode};
+        let cfg = self.vrfs.get(name)?;
+        if cfg.mobile_uplane.segment != Some(MupSegmentMode::Direct) {
+            return None;
+        }
+        if cfg.encapsulation != BgpVrfEncapsulation::Srv6 {
+            return None;
+        }
+        let rd = cfg.rd?;
+        // The End.DT46 decap must already be installed in the kernel before
+        // we advertise the segment — a known kernel VRF (the SID install
+        // path) is the proxy for "installed".
+        if !self.rib_known_vrfs.contains_key(name) {
+            return None;
+        }
+        let (sid, _function) = self.vrf_registry.get(name)?.srv6_sid?;
+        let locator = self.srv6_locator.as_ref()?;
+        let node = locator.node_sid_addr()?;
+        let router_id = cfg.router_id.unwrap_or(self.router_id);
+        // The DSD NLRI embeds the router-id; never originate one under the
+        // all-zero identity (cold start before the router-id resolves —
+        // `reconcile_mup_dsd` re-runs from `set_router_id`).
+        if router_id.is_unspecified() {
+            return None;
+        }
+        let prefix = bgp_packet::MupPrefix::Dsd {
+            rd,
+            address: IpAddr::V4(router_id),
+        };
+        let rts = self
+            .rib_known_vrfs
+            .get(name)
+            .map(|k| k.mup_export_rts.clone())
+            .unwrap_or_default();
+        let mut attr = build_mup_attr(Some(node), &rts);
+        attr.prefix_sid = Some(super::inst::srv6_l3_service_prefix_sid(
+            sid,
+            locator.sid_structure(),
+            bgp_packet::SRV6_BEHAVIOR_END_DT46,
+        ));
+        Some((prefix, sid, attr))
+    }
+
+    /// Install one VRF's DSD route into the MUP Loc-RIB as `Originated` and
+    /// advertise it (mirrors [`Self::originate_mup_route`]). Tracks
+    /// `(prefix, sid)` so [`Self::reconcile_mup_dsd`] can detect a SID
+    /// change under a stable RD+router-id key.
+    fn originate_mup_dsd(
+        &mut self,
+        name: String,
+        prefix: bgp_packet::MupPrefix,
+        sid: std::net::Ipv6Addr,
+        attr: BgpAttr,
+    ) {
+        let mut rib = BgpRib::new(
+            ORIGINATED_PEER,
+            Ipv4Addr::UNSPECIFIED,
+            BgpRibType::Originated,
+            0,
+            32768,
+            &attr,
+            None,
+            None,
+            false,
+        );
+        rib.attr = self.attr_store.intern(attr);
+        let _ = self.local_rib.update_mup(prefix.clone(), rib);
+        let selected = self.local_rib.select_best_path_mup(&prefix);
+        self.mup_dsd_originated.insert(name, (prefix.clone(), sid));
+        self.mup_apply_selected(prefix, selected);
+    }
+
+    /// Withdraw the DSD route originated for `name` (a config / SID /
+    /// kernel-VRF precondition dropped). No-op when nothing was originated.
+    fn withdraw_mup_dsd(&mut self, name: &str) {
+        let Some((prefix, _sid)) = self.mup_dsd_originated.remove(name) else {
+            return;
+        };
+        self.local_rib.remove_mup(&prefix, 0, ORIGINATED_PEER);
+        let selected = self.local_rib.select_best_path_mup(&prefix);
+        self.mup_apply_selected(prefix, selected);
     }
 
     pub fn route_add(&mut self, prefix: Ipv4Net) {

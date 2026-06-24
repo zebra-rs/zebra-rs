@@ -33,6 +33,14 @@ bgp_mup_mixed_afi:
 	mkdir -p allure-results
 	cargo test --test cucumber -- --concurrency=1 --tags "@bgp_mup_mixed_afi"
 
+# MUP segment DSD: a PE with `encapsulation srv6` VRF + `afi-safi mup
+# segment direct` carves a per-VRF End.DT46 SID, installs the seg6local
+# decap, and originates a Direct Segment Discovery (DSD) route the peer
+# receives. Needs root netns (kernel VRF + seg6local).
+bgp_mup_segment_dsd:
+	mkdir -p allure-results
+	cargo test --test cucumber -- --concurrency=1 --tags "@bgp_mup_segment_dsd"
+
 rib_static_ipv6:
 	mkdir -p allure-results
 	cargo test --test cucumber -- --concurrency=1 --tags "@rib_static_ipv6"
