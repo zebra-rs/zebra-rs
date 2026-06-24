@@ -241,6 +241,17 @@ module zebra-bgp-vrf {
           description
             "MUP Segment Discovery route type originated for this VRF.";
         }
+        leaf mup-ext-comm {
+          type route-distinguisher;
+          description
+            "BGP MUP Extended Community (transitive type 0x0c, sub-type
+             0x00 = Direct-Type Segment Identifier,
+             draft-mpmz-bess-mup-safi §3.2) identifying this VRF's Direct
+             segment. Attached to the VRF's Direct Segment Discovery (DSD)
+             route and to the controller's Type-2 Session-Transformed
+             (ST2) routes that resolve to this Direct segment (§3.3.10 /
+             §3.3.12). The 6-octet value reuses the RD/RT 2:4 wire format.";
+        }
       }
     }
   }

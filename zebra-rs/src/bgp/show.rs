@@ -3490,6 +3490,14 @@ fn format_mup_ecom_value(v: &ExtCommunityValue) -> String {
             let val = u32::from_be_bytes([v.val[2], v.val[3], v.val[4], v.val[5]]);
             format!("RT:{asn}:{val}")
         }
+        // BGP MUP Extended Community, sub-type 0x00 = Direct-Type Segment
+        // Identifier (draft-mpmz-bess-mup-safi §3.2). The 6-octet value
+        // reuses the RD/RT 2:4 layout, shown bare as `<asn>:<val>`.
+        (0x0c, 0x00) => {
+            let asn = u16::from_be_bytes([v.val[0], v.val[1]]);
+            let val = u32::from_be_bytes([v.val[2], v.val[3], v.val[4], v.val[5]]);
+            format!("{asn}:{val}")
+        }
         _ => format!(
             "0x{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}",
             v.high_type, v.low_type, v.val[0], v.val[1], v.val[2], v.val[3], v.val[4], v.val[5]
@@ -4810,6 +4818,7 @@ mod detail_tests {
                     network_instance: Some("core-ni".to_string()),
                 }),
                 segment: None,
+                mup_ext_comm: None,
             },
             ..Default::default()
         };
@@ -4821,6 +4830,7 @@ mod detail_tests {
                     network_instance: Some("access-ni".to_string()),
                 }),
                 segment: None,
+                mup_ext_comm: None,
             },
             ..Default::default()
         };
@@ -4943,18 +4953,27 @@ mod detail_tests {
         assert!(out.contains("next-hop 10.10.10.1  weight 32768"), "{out}");
         assert!(out.contains("RT:2:3"), "{out}");
         assert!(out.contains("RT:9:9"), "{out}");
-        assert!(out.contains("0x0c0000010000003d"), "{out}");
+        // MUP Extended Community sub-type 0x00 (Direct segment ID) renders
+        // bare in the RD/RT 2:4 form: 0x0001:0x0000003d = 1:61.
+        assert!(out.contains("1:61"), "{out}");
     }
 
     #[test]
-    fn format_mup_ecom_value_rt_and_raw() {
+    fn format_mup_ecom_value_rt_and_direct_segment() {
         assert_eq!(
             format_mup_ecom_value(&ecv(0x00, 0x02, [0x00, 0x09, 0x00, 0x00, 0x00, 0x09])),
             "RT:9:9"
         );
+        // MUP Extended Community sub-type 0x00 = Direct segment ID, shown
+        // bare in the RD/RT 2:4 form (0x0001:0x0000003d = 1:61).
         assert_eq!(
             format_mup_ecom_value(&ecv(0x0c, 0x00, [0x00, 0x01, 0x00, 0x00, 0x00, 0x3d])),
-            "0x0c0000010000003d"
+            "1:61"
+        );
+        // An unrecognized MUP sub-type still falls back to raw hex.
+        assert_eq!(
+            format_mup_ecom_value(&ecv(0x0c, 0x01, [0x00, 0x01, 0x00, 0x00, 0x00, 0x3d])),
+            "0x0c0100010000003d"
         );
     }
 }

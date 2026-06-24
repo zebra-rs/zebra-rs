@@ -46,6 +46,10 @@ Feature: BGP MUP PE originates a Direct Segment Discovery (DSD) route over SRv6
     # The route carries the per-VRF End.DT46 SID as a local SRv6 L3 Service.
     And show command "show bgp mup" in namespace "z1" should contain "Local SID"
     And show command "show bgp mup" in namespace "z1" should contain "End.DT46"
+    # The DSD advertises its BGP MUP Extended Community (Direct segment ID,
+    # `mup-ext-comm 1:2`), rendered bare in the RD/RT 2:4 form alongside the
+    # export route-target.
+    And show command "show bgp mup" in namespace "z1" should contain "RT:65501:10 1:2"
     # The per-VRF view mirrors the originated DSD (its RD matches N6's rd).
     And show command "show bgp vrf N6 mup" in namespace "z1" should eventually contain "[DSD][65501:10][10.0.0.1]"
     # Step 4: the End.DT46 decap is installed into the kernel FIB.
@@ -56,6 +60,8 @@ Feature: BGP MUP PE originates a Direct Segment Discovery (DSD) route over SRv6
     Then show command "show bgp mup" in namespace "z2" should eventually contain "[DSD][65501:10][10.0.0.1]"
     And show command "show bgp mup" in namespace "z2" should contain "Remote SID"
     And show command "show bgp mup" in namespace "z2" should contain "End.DT46"
+    # The Direct segment ID (MUP Extended Community) rides through to the peer.
+    And show command "show bgp mup" in namespace "z2" should contain "RT:65501:10 1:2"
 
   Scenario: Teardown topology
     Given the test topology exists

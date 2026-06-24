@@ -41,6 +41,15 @@ bgp_mup_segment_dsd:
 	mkdir -p allure-results
 	cargo test --test cucumber -- --concurrency=1 --tags "@bgp_mup_segment_dsd"
 
+# MUP ST2: the MUP-C learns a PFCP decapsulation session (Network Instance
+# `core`) and originates a Type-2 Session-Transformed route carrying the
+# core endpoint + GTP TEID and the Direct segment id (MUP Extended
+# Community), received by the peer. Needs `pfcp-inject` on the host PATH
+# (cargo build --release -p pfcp-inject; copy to /usr/bin).
+bgp_mup_st2:
+	mkdir -p allure-results
+	cargo test --test cucumber -- --concurrency=1 --tags "@bgp_mup_st2"
+
 rib_static_ipv6:
 	mkdir -p allure-results
 	cargo test --test cucumber -- --concurrency=1 --tags "@rib_static_ipv6"

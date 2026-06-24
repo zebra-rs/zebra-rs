@@ -65,3 +65,4 @@ router:
       afi-safi:
         mup:
           segment: direct
+          mup-ext-comm: "1:2"

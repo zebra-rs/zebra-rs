@@ -7625,6 +7625,24 @@ fn rd_route_target(rd: &RouteDistinguisher) -> ExtCommunityValue {
     }
 }
 
+/// Build the BGP MUP Extended Community (transitive type 0x0c, sub-type
+/// 0x00 = Direct-Type Segment Identifier, draft-mpmz-bess-mup-safi §3.2)
+/// from a configured 2:4 segment identifier. The 6-octet value reuses the
+/// RD/RT wire layout, so the `RouteDistinguisher`'s `val` maps straight
+/// through. Attached to DSD routes and to the ST2 routes that resolve to
+/// the Direct segment (§3.3.10 / §3.3.12).
+fn mup_direct_segment_ecom(seg: &RouteDistinguisher) -> ExtCommunityValue {
+    MupExtCom::new(MupExtComSubType::Sub00, seg.val).into()
+}
+
+/// Insert one extended community into `attr`, creating the set if absent.
+fn attr_add_ecom(attr: &mut BgpAttr, ecv: ExtCommunityValue) {
+    attr.ecom
+        .get_or_insert_with(ExtCommunity::default)
+        .0
+        .insert(ecv);
+}
+
 /// UE host prefix (/32 or /128) for a session, preferring IPv4 — the
 /// prefix carried in a Type-1 Session-Transformed route.
 fn mup_ue_prefix(session: &crate::mup_c::session::MupSession) -> Option<IpNet> {
@@ -12472,10 +12490,16 @@ impl Bgp {
         let ni = session.network_instance.as_deref()?;
         // Correlate the session NI to a `router bgp vrf <name> mup
         // route {st1|st2}` config for the RD + direction.
-        let (name, rd, direction) = self.vrfs.iter().find_map(|(name, cfg)| {
+        let (name, rd, direction, seg_ec) = self.vrfs.iter().find_map(|(name, cfg)| {
             let sm = cfg.mobile_uplane.srv6_mobile.as_ref()?;
-            (sm.network_instance.as_deref() == Some(ni))
-                .then(|| (name.clone(), cfg.rd, sm.direction))
+            (sm.network_instance.as_deref() == Some(ni)).then(|| {
+                (
+                    name.clone(),
+                    cfg.rd,
+                    sm.direction,
+                    cfg.mobile_uplane.mup_ext_comm,
+                )
+            })
         })?;
         let rd = rd?;
         // The export route-targets now live on the top-level
@@ -12503,18 +12527,30 @@ impl Bgp {
                 _ => return None,
             },
             // Decapsulation (N3 / uplink): Type-2 ST carries the core
-            // endpoint + TEID.
+            // endpoint + TEID. The Endpoint Length (draft §3.1.4.1) spans
+            // the address *and* the trailing 32-bit GTP TEID, so it is
+            // 64 (IPv4) / 160 (IPv6) — using the bare address width (32 /
+            // 128) would drop the TEID from the wire (a TEID of 0 is a
+            // malformed NLRI per the draft).
             MupSrv6Direction::Decapsulation => match session.endpoint {
                 Some(endpoint) => bgp_packet::MupPrefix::T2st {
                     rd,
                     endpoint,
-                    endpoint_len: if endpoint.is_ipv4() { 32 } else { 128 },
+                    endpoint_len: if endpoint.is_ipv4() { 64 } else { 160 },
                     teid: session.teid,
                 },
                 None => return None,
             },
         };
-        let attr = build_mup_attr(self.mup_c_config.controller_address, &rts);
+        let mut attr = build_mup_attr(self.mup_c_config.controller_address, &rts);
+        // §3.3.10: a Type-2 ST route SHOULD carry the BGP MUP Extended
+        // Community of the Direct segment it resolves to, so a receiving PE
+        // maps the (endpoint, TEID) tunnel onto the End.DT46 segment.
+        if matches!(direction, MupSrv6Direction::Decapsulation)
+            && let Some(seg) = seg_ec
+        {
+            attr_add_ecom(&mut attr, mup_direct_segment_ecom(&seg));
+        }
         Some((prefix, attr))
     }
 
@@ -12605,7 +12641,7 @@ impl Bgp {
         let prev: Vec<(String, bgp_packet::MupPrefix)> = self
             .mup_dsd_originated
             .iter()
-            .map(|(n, (p, _))| (n.clone(), p.clone()))
+            .map(|(n, (p, _, _))| (n.clone(), p.clone()))
             .collect();
         for (name, prev_prefix) in prev {
             let keep = desired
@@ -12616,13 +12652,15 @@ impl Bgp {
                 self.withdraw_mup_dsd(&name);
             }
         }
-        // Originate or refresh. Skip when both the NLRI key and the SID are
-        // unchanged so an unrelated commit doesn't re-advertise.
+        // Originate or refresh. Skip only when the NLRI key, the SID *and*
+        // the ext-communities (export RTs + the Direct-segment MUP
+        // ext-comm) are all unchanged, so an unrelated commit doesn't
+        // re-advertise but a later RT / `mup-ext-comm` arrival does.
         for (name, (prefix, sid, attr)) in desired {
             let unchanged = self
                 .mup_dsd_originated
                 .get(&name)
-                .map(|(p, s)| *p == prefix && *s == sid)
+                .map(|(p, s, e)| *p == prefix && *s == sid && *e == attr.ecom)
                 .unwrap_or(false);
             if unchanged {
                 continue;
@@ -12687,6 +12725,12 @@ impl Bgp {
             locator.sid_structure(),
             bgp_packet::SRV6_BEHAVIOR_END_DT46,
         ));
+        // The DSD route *is* the Direct segment, so it advertises its own
+        // MUP Extended Community identifier (draft §3.2 / §3.3.4); the
+        // controller's ST2 routes carry the same value to resolve here.
+        if let Some(seg) = cfg.mobile_uplane.mup_ext_comm {
+            attr_add_ecom(&mut attr, mup_direct_segment_ecom(&seg));
+        }
         Some((prefix, sid, attr))
     }
 
@@ -12712,17 +12756,19 @@ impl Bgp {
             None,
             false,
         );
+        let ecom = attr.ecom.clone();
         rib.attr = self.attr_store.intern(attr);
         let _ = self.local_rib.update_mup(prefix.clone(), rib);
         let selected = self.local_rib.select_best_path_mup(&prefix);
-        self.mup_dsd_originated.insert(name, (prefix.clone(), sid));
+        self.mup_dsd_originated
+            .insert(name, (prefix.clone(), sid, ecom));
         self.mup_apply_selected(prefix, selected);
     }
 
     /// Withdraw the DSD route originated for `name` (a config / SID /
     /// kernel-VRF precondition dropped). No-op when nothing was originated.
     fn withdraw_mup_dsd(&mut self, name: &str) {
-        let Some((prefix, _sid)) = self.mup_dsd_originated.remove(name) else {
+        let Some((prefix, _sid, _ecom)) = self.mup_dsd_originated.remove(name) else {
             return;
         };
         self.local_rib.remove_mup(&prefix, 0, ORIGINATED_PEER);

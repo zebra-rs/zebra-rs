@@ -683,11 +683,20 @@ pub struct Bgp {
     pub mup_c_originated: BTreeMap<u64, bgp_packet::MupPrefix>,
     /// Config-driven MUP DSD (Direct Segment Discovery, type 2) routes
     /// originated per VRF (`afi-safi mup segment direct`), keyed by VRF
-    /// name → `(originated NLRI, End.DT46 SID)`. The SID is tracked
-    /// alongside the prefix so a locator-driven SID change re-advertises
-    /// even though the RD+router-id NLRI key is stable. See
+    /// name → `(originated NLRI, End.DT46 SID, ext-communities)`. The SID
+    /// and the ext-community set (export RTs + the Direct-segment MUP
+    /// ext-comm) are tracked alongside the prefix so a locator-driven SID
+    /// change *or* a later RT / `mup-ext-comm` change re-advertises even
+    /// though the RD+router-id NLRI key is stable. See
     /// [`Bgp::reconcile_mup_dsd`].
-    pub mup_dsd_originated: BTreeMap<String, (bgp_packet::MupPrefix, std::net::Ipv6Addr)>,
+    pub mup_dsd_originated: BTreeMap<
+        String,
+        (
+            bgp_packet::MupPrefix,
+            std::net::Ipv6Addr,
+            Option<bgp_packet::ExtCommunity>,
+        ),
+    >,
     /// Local bridge FDB shadow keyed by `(vni, mac)`. Populated from
     /// every `RibRx::FdbAdd`, removed on `RibRx::FdbDel`. We need
     /// durable state (not just one-shot event handling) because the

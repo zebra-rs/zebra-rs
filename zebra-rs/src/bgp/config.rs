@@ -4093,6 +4093,10 @@ impl Bgp {
             "/router/bgp/vrf/afi-safi/mup/segment",
             super::vrf_config::config_vrf_mup_segment,
         );
+        self.callback_add(
+            "/router/bgp/vrf/afi-safi/mup/mup-ext-comm",
+            super::vrf_config::config_vrf_mup_ext_comm,
+        );
 
         // `set router bgp interface-neighbor <name> [...]`.
         self.callback_add(
