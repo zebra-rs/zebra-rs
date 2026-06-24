@@ -119,9 +119,11 @@ codec and the EVPN RIB:
 - **CLI**: `show bgp evpn igmp-join-sync` / `igmp-leave-sync` filters +
   legends + `exec.yang` enums.
 
-**Still deferred (the actual multihoming data plane):**
+**Still deferred (the actual multihoming data plane).** The
+Ethernet-Segment foundation these all sit on now has its own design +
+phasing plan: `bgp-evpn-ethernet-segment.md`. The remaining gaps:
 - **Ethernet-Segment** support: Type 1 (Ethernet A-D) + Type 4
-  (Ethernet Segment) routes, **DF election**.
+  (Ethernet Segment) routes, **DF election** — see the ES design doc.
 - Synch state machine + timers (last-member-query, Maximum Response
   Time); the DF advertises/withdraws the SMET from the combined
   `(x,G)` state across the ES.
@@ -133,9 +135,11 @@ codec and the EVPN RIB:
   carried but not yet consulted on import). Note `route_rts_from_ecom`
   filters `low_type == 0x02` regardless of high-type and is VPNv4/v6
   only, so the ES-Import RT (`0x06/0x02`) causes no collision today.
-- **Live validation** (BDD): needs an injection path (a debug exec
-  command driving the origination helpers, or real ES multihoming) to
-  observe reflection end-to-end.
+- **Live validation** (BDD): **DONE** for reflection — the
+  `clear bgp debug igmp-{join,leave}-sync-{originate,withdraw} <spec>`
+  test command drives the origination helpers and `@bgp_evpn_igmp_sync`
+  asserts z1 imports/renders the routes (prefix + ES-Import RT + EVI-RT).
+  Real ES-multihoming validation still waits on the ES foundation.
 
 ## 7. Minor / cosmetic
 
