@@ -1,0 +1,33 @@
+# z2 — MUP ST2 route receiver. AS 65001, iBGP to z1 (192.168.0.1) with the
+# mup afi-safi negotiated. Plain BGP speaker: no controller, originates
+# nothing, but receives the Type-2 Session-Transformed (ST2) route z1
+# originates and shows it under `show bgp mup` — including the GTP TEID and
+# the Direct segment id (MUP Extended Community `1:2`).
+#
+# `vrf mobile-up` imports the route's MUP route-target (65000:200, z1's
+# `mobile-up` export); the global MUP Loc-RIB stays authoritative and the
+# best-path is mirrored into the per-VRF task for `show bgp vrf mobile-up
+# mup` (display only). The `router bgp vrf` block spawns that per-VRF task.
+vrf:
+- name: mobile-up
+  mup:
+    route-target:
+      import:
+      - "65000:200"
+router:
+  bgp:
+    global:
+      as: 65001
+      router-id: 192.168.0.2
+    neighbor:
+    - remote-address: 192.168.0.1
+      remote-as: 65001
+      enabled: true
+      afi-safi:
+      - name: ipv4
+        enabled: true
+      - name: mup
+        enabled: true
+    vrf:
+    - name: mobile-up
+      rd: "65000:100"

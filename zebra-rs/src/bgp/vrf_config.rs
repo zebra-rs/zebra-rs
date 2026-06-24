@@ -180,6 +180,14 @@ pub struct BgpVrfMobileUplane {
     /// carrying the VRF's End.DT46 SID); `Interwork` → ISD (type 1,
     /// origination deferred). Independent of `srv6_mobile`.
     pub segment: Option<MupSegmentMode>,
+    /// `afi-safi mup segment direct mup-ext-comm <2:4>` — the BGP MUP
+    /// Extended Community (transitive type 0x0c, sub-type 0x00 =
+    /// Direct-Type Segment Identifier, draft-mpmz-bess-mup-safi §3.2)
+    /// identifying this VRF's Direct segment. Attached to the VRF's DSD
+    /// route and to the controller's Type-2 ST routes that resolve to
+    /// this Direct segment (§3.3.10 / §3.3.12). The 6-octet value reuses
+    /// the RD/RT 2:4 wire layout, so it is stored as a `RouteDistinguisher`.
+    pub mup_ext_comm: Option<RouteDistinguisher>,
 }
 
 /// Staged candidate configuration for one VRF entry. Mirrors the
@@ -358,6 +366,25 @@ pub fn config_vrf_mup_segment(bgp: &mut Bgp, mut args: Args, op: ConfigOp) -> Op
             cfg.mobile_uplane.segment = Some(MupSegmentMode::parse(&raw)?);
         }
         ConfigOp::Delete => cfg.mobile_uplane.segment = None,
+        _ => {}
+    }
+    Some(())
+}
+
+/// `set router bgp vrf <NAME> afi-safi mup segment direct mup-ext-comm
+/// <2:4>` — the BGP MUP Extended Community (Direct-Type Segment
+/// Identifier) for this VRF's Direct segment. The value is the RD/RT 2:4
+/// notation, stored as a `RouteDistinguisher` whose 6-octet `val` maps
+/// straight onto the extended-community value.
+pub fn config_vrf_mup_ext_comm(bgp: &mut Bgp, mut args: Args, op: ConfigOp) -> Option<()> {
+    let name = args.string()?;
+    let cfg = vrf_entry(bgp, name);
+    match op {
+        ConfigOp::Set => {
+            let raw = args.string()?;
+            cfg.mobile_uplane.mup_ext_comm = Some(RouteDistinguisher::from_str(&raw).ok()?);
+        }
+        ConfigOp::Delete => cfg.mobile_uplane.mup_ext_comm = None,
         _ => {}
     }
     Some(())

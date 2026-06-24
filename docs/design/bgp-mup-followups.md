@@ -425,6 +425,48 @@ route to drive forwarding (the *ISD/DSD-route → segment-SID resolution*
 step below), ISD (`segment interwork`) origination, and the GTP
 behaviours.
 
+#### P6 slice 2 — ST2 origination (TEID) + MUP Extended Community — **DONE**
+
+Corrected and completed the controller-side **Type-2 Session-Transformed
+(ST2)** origination from a PFCP decapsulation session, and added the BGP
+MUP Extended Community:
+
+- **TEID encoding fix.** The MUP-C was setting the T2ST *Endpoint Length*
+  to the bare address width (32 / 128), which made the codec emit **zero
+  TEID octets** — a malformed NLRI per draft-mpmz-bess-mup-safi §3.1.4.1
+  ("a TEID value of 0 is considered invalid"). It is now `64` (IPv4) /
+  `160` (IPv6) = the address bits plus the full 32-bit GTP TEID, matching
+  the GoBGP byte-exact vectors. `build_mup_origination`
+  (`zebra-rs/src/bgp/route.rs`).
+- **BGP MUP Extended Community** (transitive type `0x0c`, sub-type `0x00`
+  = Direct-Type Segment Identifier, §3.2). New per-VRF knob `router bgp
+  vrf <name> afi-safi mup segment direct mup-ext-comm <2:4>` (YANG leaf
+  `mup-ext-comm`, type `route-distinguisher`; `BgpVrfMobileUplane
+  .mup_ext_comm`). The 6-octet value reuses the RD/RT 2:4 wire layout. It
+  is attached to the **ST2** route the controller originates (§3.3.10 —
+  the Direct segment a receiving PE resolves against, §3.3.12) and to the
+  VRF's **DSD** route (it *is* that Direct segment). End.DT46 is the
+  forwarding behaviour both directions (RFC 9433), so no SID is carried —
+  the ext-comm is the correlation handle.
+- **Show.** `show bgp mup` / `show bgp vrf <name> mup` render the Direct
+  segment id bare in the RD/RT 2:4 form on the ext-community line (e.g.
+  `RT:65000:200 1:2`).
+- **DSD re-origination fix.** `reconcile_mup_dsd` skipped re-origination
+  whenever the NLRI key + SID were unchanged, so a DSD that originated
+  before its export route-target arrived (asynchronously, via
+  `VrfRouteTargets`) never carried the RT — and would likewise miss a
+  later `mup-ext-comm`. The skip now also compares the ext-community set,
+  so an RT / segment-id change re-advertises under the stable key.
+- **Tests.** `@bgp_mup_st2` BDD (controller drives `pfcp-inject` with a
+  `core` Network Instance → ST2 with endpoint + TEID + Direct segment id,
+  received by the peer); `@bgp_mup_segment_dsd` extended to assert the
+  DSD carries `RT:65501:10 1:2`. Run live via `make -C bdd bgp_mup_st2`
+  / `bgp_mup_segment_dsd`.
+
+**Still open in P6 (unchanged):** the *receive* side (ST2 → Direct-segment
+resolution → FIB), ISD (`segment interwork`) origination, and the GTP
+behaviours.
+
 #### Remaining
 
 **What:** Install the FIB state that actually forwards MUP traffic. With

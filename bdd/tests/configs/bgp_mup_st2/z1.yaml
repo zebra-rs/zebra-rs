@@ -1,0 +1,67 @@
+# z1 — MUP Controller (MUP-C) originating a Type-2 Session-Transformed
+# (ST2, RFC 9833 / draft-mpmz-bess-mup-safi §3.1.4) route from a PFCP
+# decapsulation session. AS 65001, iBGP to z2 (192.168.0.2) with the mup
+# afi-safi negotiated; PFCP/N4 listener on 192.168.0.1:8805. When
+# pfcp-inject programs a session whose Network Instance is `core`, the VRF
+# `mobile-up` binds it to a Type-2 ST route (`mup route st2
+# dest-network-instance core`), so z1 originates the ST2 carrying the core
+# endpoint + GTP TEID, the controller-address next hop, the export
+# route-target (65000:200) and the BGP MUP Extended Community (Direct
+# segment id `1:2`, type 0x0c / sub-type 0x00). The route is advertised to
+# z2 over the mup session. End.DT46 is the forwarding behaviour both
+# directions, so the controller attaches no SID — the receiving PE resolves
+# the Direct segment from the MUP Extended Community.
+segment-routing:
+  locator:
+  - name: LOC1
+    prefix: fcbb:bb01::/48
+    behavior: usid
+router:
+  bgp:
+    global:
+      as: 65001
+      router-id: 192.168.0.1
+    segment-routing:
+      srv6:
+        locator: LOC1
+        ipv6-unicast: {}
+    neighbor:
+    - remote-address: 192.168.0.2
+      remote-as: 65001
+      enabled: true
+      afi-safi:
+      - name: ipv4
+        enabled: true
+      - name: mup
+        enabled: true
+    vrf:
+    - name: mobile-up
+      rd: "65000:100"
+      mup:
+        route:
+          st2:
+            dest-network-instance:
+              core:
+                exact: core
+      afi-safi:
+        mup:
+          segment: direct
+          mup-ext-comm: "1:2"
+    afi-safi:
+    - name: mup
+      mup-c:
+        enable: true
+        controller-address: fcbb:bb01::1
+        pfcp:
+          listen-address: 192.168.0.1
+          port: 8805
+        srv6:
+          locator: LOC1
+# Top-level VRF: the MUP export route-targets live here (same
+# `route-target {import|export}` framework as ipv4 / ipv6).
+vrf:
+- name: mobile-up
+  mup:
+    route-target:
+      export:
+      - "65000:200"
