@@ -4590,6 +4590,7 @@ impl Bgp {
                     esi: None,
                     vrf_transit_only: false,
                     smet_flags: 0,
+                    igmp_max_resp_time: 0,
                     ingress_region: None,
                 };
 
@@ -4873,6 +4874,7 @@ impl Bgp {
                     esi: None,
                     vrf_transit_only: false,
                     smet_flags: 0,
+                    igmp_max_resp_time: 0,
                     ingress_region: None,
                 };
 

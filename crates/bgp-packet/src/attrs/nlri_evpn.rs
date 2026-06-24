@@ -19,6 +19,8 @@ pub enum EvpnRouteType {
     EthernetSr,    // 4
     IpPrefix,      // 5
     SmetRoute,     // 6 — Selective Multicast Ethernet Tag (RFC 9251)
+    IgmpJoinSync,  // 7 — IGMP/MLD Join Synch (RFC 9251 §9.2)
+    IgmpLeaveSync, // 8 — IGMP/MLD Leave Synch (RFC 9251 §9.3)
     PerRegionImet, // 9  — Per-Region I-PMSI A-D (RFC 9572 §3.1)
     SPmsiAd,       // 10 — S-PMSI A-D (RFC 9572 §3.2)
     LeafAd,        // 11 — Leaf A-D (RFC 9572 §3.3)
@@ -35,6 +37,8 @@ impl From<EvpnRouteType> for u8 {
             EthernetSr => 4,
             IpPrefix => 5,
             SmetRoute => 6,
+            IgmpJoinSync => 7,
+            IgmpLeaveSync => 8,
             PerRegionImet => 9,
             SPmsiAd => 10,
             LeafAd => 11,
@@ -53,6 +57,8 @@ impl From<u8> for EvpnRouteType {
             4 => EthernetSr,
             5 => IpPrefix,
             6 => SmetRoute,
+            7 => IgmpJoinSync,
+            8 => IgmpLeaveSync,
             9 => PerRegionImet,
             10 => SPmsiAd,
             11 => LeafAd,
@@ -74,6 +80,8 @@ pub enum EvpnRoute {
     Multicast(EvpnMulticast),
     Prefix(EvpnIpPrefix),
     Smet(EvpnSmet),
+    IgmpJoinSync(EvpnIgmpJoinSync),
+    IgmpLeaveSync(EvpnIgmpLeaveSync),
     PerRegionImet(EvpnPerRegionImet),
     SPmsi(EvpnSPmsi),
     LeafAd(EvpnLeafAd),
@@ -142,6 +150,66 @@ pub struct EvpnSmet {
     pub grp: IpAddr,
     /// Originating router's IP address.
     pub orig: IpAddr,
+    /// IGMP/MLD version + include/exclude flags (RFC 9251 §9.1).
+    /// Not part of the route key.
+    pub flags: u8,
+}
+
+/// Route Type 7 — IGMP/MLD Join Synch Route (RFC 9251 §9.2). On an
+/// all-active Ethernet Segment, a PE that receives an IGMP/MLD membership
+/// report originates this so the other PE(s) on the same ES synchronise the
+/// `(*,G)` / `(S,G)` Join state (the DF then advertises the combined SMET).
+///
+/// Wire layout (RFC 9251 §9.2): RD(8) ESI(10) EthTag(4) McastSrcLen(1)
+/// McastSrc(0|4|16) McastGrpLen(1) McastGrp(4|16) OrigLen(1) Orig(4|16)
+/// Flags(1). It is Type-6 SMET with a 10-octet ESI inserted after the RD.
+/// Source length 0 means `(*,G)`. The 1-octet Flags field (IGMP/MLD version
+/// and include/exclude mode) rides on the path, so — like SMET — it is
+/// **not** part of the BGP route key (`EvpnPrefix::IgmpJoinSync`).
+/// Distribution is scoped by an ES-Import RT; the route also carries one
+/// EVI-RT EC.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct EvpnIgmpJoinSync {
+    pub id: u32,
+    pub rd: RouteDistinguisher,
+    /// Ethernet Segment Identifier (10 octets) of the multihomed ES.
+    pub esi: [u8; 10],
+    pub ether_tag: u32,
+    /// Multicast source. `None` is the `(*,G)` wildcard (source length 0
+    /// on the wire); `Some` is a specific `(S,G)` source.
+    pub src: Option<IpAddr>,
+    /// Multicast group address (always present).
+    pub grp: IpAddr,
+    /// Originating router's IP address.
+    pub orig: IpAddr,
+    /// IGMP/MLD version + include/exclude flags (RFC 9251 §9.1).
+    /// Not part of the route key.
+    pub flags: u8,
+}
+
+/// Route Type 8 — IGMP/MLD Leave Synch Route (RFC 9251 §9.3). The companion
+/// to Type 7: a PE on an all-active ES originates this on a membership Leave
+/// so the peer PE(s) run the last-member-query synchronisation.
+///
+/// Wire layout (RFC 9251 §9.3): identical to the Join Synch route up to the
+/// Originator, then `Reserved(4)` + `MaximumResponseTime(1)` + `Flags(1)`:
+/// RD(8) ESI(10) EthTag(4) McastSrcLen(1) McastSrc(0|4|16) McastGrpLen(1)
+/// McastGrp(4|16) OrigLen(1) Orig(4|16) Reserved(4) MaxRespTime(1) Flags(1).
+/// The Reserved field is sent as zero. The Reserved, MaximumResponseTime and
+/// Flags fields all ride on the path and are **not** part of the BGP route
+/// key (`EvpnPrefix::IgmpLeaveSync`).
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct EvpnIgmpLeaveSync {
+    pub id: u32,
+    pub rd: RouteDistinguisher,
+    pub esi: [u8; 10],
+    pub ether_tag: u32,
+    pub src: Option<IpAddr>,
+    pub grp: IpAddr,
+    pub orig: IpAddr,
+    /// Maximum Response Time (RFC 2236) for the last-member query, in the
+    /// same units IGMP uses. Not part of the route key.
+    pub max_resp_time: u8,
     /// IGMP/MLD version + include/exclude flags (RFC 9251 §9.1).
     /// Not part of the route key.
     pub flags: u8,
@@ -289,6 +357,35 @@ pub enum EvpnPrefix {
         grp: IpAddr,
         orig: IpAddr,
     },
+    /// Route Type 7 — IGMP/MLD Join Synch Route (RFC 9251 §9.2).
+    ///
+    /// Wire format:
+    /// `[7]:[ESI]:[EthTag]:[SrcLen]:[Src]:[GrpLen]:[Grp]:[OrigLen]:[Orig]`.
+    /// `src = None` is the `(*,G)` wildcard. The ESI is part of the route
+    /// key (it scopes the route to the Ethernet Segment); the 1-octet Flags
+    /// field is a per-path property and is omitted here. Declared after
+    /// `Smet` (6) and before `PerRegionImet` (9) so the derived `Ord` keeps
+    /// numeric route-type ordering.
+    IgmpJoinSync {
+        esi: [u8; 10],
+        eth_tag: u32,
+        src: Option<IpAddr>,
+        grp: IpAddr,
+        orig: IpAddr,
+    },
+    /// Route Type 8 — IGMP/MLD Leave Synch Route (RFC 9251 §9.3).
+    ///
+    /// Wire format:
+    /// `[8]:[ESI]:[EthTag]:[SrcLen]:[Src]:[GrpLen]:[Grp]:[OrigLen]:[Orig]`.
+    /// Same key shape as the Join Synch route; the Reserved, Maximum
+    /// Response Time and Flags octets are per-path properties, omitted here.
+    IgmpLeaveSync {
+        esi: [u8; 10],
+        eth_tag: u32,
+        src: Option<IpAddr>,
+        grp: IpAddr,
+        orig: IpAddr,
+    },
     /// Route Type 9 — Per-Region I-PMSI A-D Route (RFC 9572 §3.1).
     PerRegionImet { eth_tag: u32, region_id: [u8; 8] },
     /// Route Type 10 — S-PMSI A-D Route (RFC 9572 §3.2). `src`/`grp` are
@@ -313,6 +410,8 @@ impl EvpnPrefix {
             EvpnPrefix::InclusiveMulticast { .. } => 3,
             EvpnPrefix::IpPrefix { .. } => 5,
             EvpnPrefix::Smet { .. } => 6,
+            EvpnPrefix::IgmpJoinSync { .. } => 7,
+            EvpnPrefix::IgmpLeaveSync { .. } => 8,
             EvpnPrefix::PerRegionImet { .. } => 9,
             EvpnPrefix::SPmsi { .. } => 10,
             EvpnPrefix::LeafAd { .. } => 11,
@@ -355,6 +454,26 @@ impl EvpnPrefix {
                     src: s.src,
                     grp: s.grp,
                     orig: s.orig,
+                },
+            ),
+            EvpnRoute::IgmpJoinSync(j) => (
+                j.rd,
+                EvpnPrefix::IgmpJoinSync {
+                    esi: j.esi,
+                    eth_tag: j.ether_tag,
+                    src: j.src,
+                    grp: j.grp,
+                    orig: j.orig,
+                },
+            ),
+            EvpnRoute::IgmpLeaveSync(l) => (
+                l.rd,
+                EvpnPrefix::IgmpLeaveSync {
+                    esi: l.esi,
+                    eth_tag: l.ether_tag,
+                    src: l.src,
+                    grp: l.grp,
+                    orig: l.orig,
                 },
             ),
             EvpnRoute::PerRegionImet(r) => (
@@ -449,6 +568,20 @@ impl fmt::Display for EvpnPrefix {
                     ip_bits(orig)
                 )
             }
+            EvpnPrefix::IgmpJoinSync {
+                esi,
+                eth_tag,
+                src,
+                grp,
+                orig,
+            } => fmt_sync_prefix(f, 7, esi, *eth_tag, src, grp, orig),
+            EvpnPrefix::IgmpLeaveSync {
+                esi,
+                eth_tag,
+                src,
+                grp,
+                orig,
+            } => fmt_sync_prefix(f, 8, esi, *eth_tag, src, grp, orig),
             EvpnPrefix::PerRegionImet { eth_tag, region_id } => {
                 // Render the Region ID via its EC-encoding (`AS:<n>` /
                 // `area:<ip>`), falling back to a hex dump for unrecognised
@@ -482,6 +615,41 @@ fn ip_bits(ip: &IpAddr) -> u8 {
         IpAddr::V4(_) => 32,
         IpAddr::V6(_) => 128,
     }
+}
+
+/// Render a 10-octet Ethernet Segment Identifier as a colon-separated hex
+/// string (`00:11:22:…`), the canonical EVPN ESI notation.
+pub fn esi_display(esi: &[u8; 10]) -> String {
+    esi.iter()
+        .map(|b| format!("{b:02x}"))
+        .collect::<Vec<_>>()
+        .join(":")
+}
+
+/// Shared `Display` body for the IGMP/MLD Join (Type 7) and Leave (Type 8)
+/// Synch route keys, which differ only in the leading route-type number:
+/// `[<rt>]:[<ESI>]:[EthTag]:[SrcLen]:[Src]:[GrpLen]:[Grp]:[OrigLen]:[Orig]`.
+/// A `(*,G)` route renders the source as `[0]:[*]`.
+fn fmt_sync_prefix(
+    f: &mut fmt::Formatter<'_>,
+    rt: u8,
+    esi: &[u8; 10],
+    eth_tag: u32,
+    src: &Option<IpAddr>,
+    grp: &IpAddr,
+    orig: &IpAddr,
+) -> fmt::Result {
+    write!(f, "[{rt}]:[{}]:[{eth_tag}]", esi_display(esi))?;
+    match src {
+        Some(s) => write!(f, ":[{}]:[{s}]", ip_bits(s))?,
+        None => write!(f, ":[0]:[*]")?,
+    }
+    write!(
+        f,
+        ":[{}]:[{grp}]:[{}]:[{orig}]",
+        ip_bits(grp),
+        ip_bits(orig)
+    )
 }
 
 impl ParseNlri<EvpnRoute> for EvpnRoute {
@@ -624,6 +792,66 @@ impl ParseNlri<EvpnRoute> for EvpnRoute {
                     flags,
                 };
                 Ok((input, EvpnRoute::Smet(evpn)))
+            }
+            IgmpJoinSync => {
+                // RFC 9251 §9.2: RD(8) ESI(10) EthTag(4) SrcLen(1) Src(0|4|16)
+                // GrpLen(1) Grp(4|16) OrigLen(1) Orig(4|16) Flags(1).
+                let (input, rd) = RouteDistinguisher::parse_be(input)?;
+                let (input, esi_raw) = take(10usize).parse(input)?;
+                let mut esi = [0u8; 10];
+                esi.copy_from_slice(esi_raw);
+                let (input, ether_tag) = be_u32(input)?;
+                let (input, src) = parse_len_prefixed_ip(input)?;
+                let (input, grp) = parse_len_prefixed_ip(input)?;
+                let grp =
+                    grp.ok_or_else(|| nom::Err::Error(make_error(input, ErrorKind::LengthValue)))?;
+                let (input, orig) = parse_len_prefixed_ip(input)?;
+                let orig =
+                    orig.ok_or_else(|| nom::Err::Error(make_error(input, ErrorKind::LengthValue)))?;
+                let (input, flags) = be_u8(input)?;
+                let evpn = EvpnIgmpJoinSync {
+                    id,
+                    rd,
+                    esi,
+                    ether_tag,
+                    src,
+                    grp,
+                    orig,
+                    flags,
+                };
+                Ok((input, EvpnRoute::IgmpJoinSync(evpn)))
+            }
+            IgmpLeaveSync => {
+                // RFC 9251 §9.3: like the Join Synch route, then Reserved(4)
+                // MaxRespTime(1) Flags(1) in place of the lone Flags octet.
+                let (input, rd) = RouteDistinguisher::parse_be(input)?;
+                let (input, esi_raw) = take(10usize).parse(input)?;
+                let mut esi = [0u8; 10];
+                esi.copy_from_slice(esi_raw);
+                let (input, ether_tag) = be_u32(input)?;
+                let (input, src) = parse_len_prefixed_ip(input)?;
+                let (input, grp) = parse_len_prefixed_ip(input)?;
+                let grp =
+                    grp.ok_or_else(|| nom::Err::Error(make_error(input, ErrorKind::LengthValue)))?;
+                let (input, orig) = parse_len_prefixed_ip(input)?;
+                let orig =
+                    orig.ok_or_else(|| nom::Err::Error(make_error(input, ErrorKind::LengthValue)))?;
+                // Reserved (4 octets, sent as zero) — read and discard.
+                let (input, _reserved) = take(4usize).parse(input)?;
+                let (input, max_resp_time) = be_u8(input)?;
+                let (input, flags) = be_u8(input)?;
+                let evpn = EvpnIgmpLeaveSync {
+                    id,
+                    rd,
+                    esi,
+                    ether_tag,
+                    src,
+                    grp,
+                    orig,
+                    max_resp_time,
+                    flags,
+                };
+                Ok((input, EvpnRoute::IgmpLeaveSync(evpn)))
             }
             PerRegionImet => {
                 // RFC 9572 §3.1: RD(8) EthTag(4) RegionID(8).
@@ -856,6 +1084,52 @@ impl EvpnRoute {
                 buf.put_u8(payload.len() as u8);
                 buf.put(&payload[..]);
             }
+            EvpnRoute::IgmpJoinSync(j) => {
+                if j.id != 0 {
+                    buf.put_u32(j.id);
+                }
+                let mut payload = BytesMut::new();
+                // RD (8 octets).
+                payload.put_u16(j.rd.typ as u16);
+                payload.put(&j.rd.val[..]);
+                // ESI (10 octets) — RFC 9251 §9.2.
+                payload.put(&j.esi[..]);
+                // Ethernet Tag (4 octets).
+                payload.put_u32(j.ether_tag);
+                // Multicast Source / Group / Originator, each <len><addr>.
+                emit_len_prefixed_ip(&mut payload, j.src);
+                emit_len_prefixed_ip(&mut payload, Some(j.grp));
+                emit_len_prefixed_ip(&mut payload, Some(j.orig));
+                // Flags (1 octet).
+                payload.put_u8(j.flags);
+                buf.put_u8(7); // Route Type 7 — IGMP/MLD Join Synch.
+                buf.put_u8(payload.len() as u8);
+                buf.put(&payload[..]);
+            }
+            EvpnRoute::IgmpLeaveSync(l) => {
+                if l.id != 0 {
+                    buf.put_u32(l.id);
+                }
+                let mut payload = BytesMut::new();
+                // RD (8 octets).
+                payload.put_u16(l.rd.typ as u16);
+                payload.put(&l.rd.val[..]);
+                // ESI (10 octets) — RFC 9251 §9.3.
+                payload.put(&l.esi[..]);
+                // Ethernet Tag (4 octets).
+                payload.put_u32(l.ether_tag);
+                // Multicast Source / Group / Originator, each <len><addr>.
+                emit_len_prefixed_ip(&mut payload, l.src);
+                emit_len_prefixed_ip(&mut payload, Some(l.grp));
+                emit_len_prefixed_ip(&mut payload, Some(l.orig));
+                // Reserved (4 octets, zero), Maximum Response Time (1), Flags (1).
+                payload.put_u32(0);
+                payload.put_u8(l.max_resp_time);
+                payload.put_u8(l.flags);
+                buf.put_u8(8); // Route Type 8 — IGMP/MLD Leave Synch.
+                buf.put_u8(payload.len() as u8);
+                buf.put(&payload[..]);
+            }
             EvpnRoute::PerRegionImet(r) => {
                 if r.id != 0 {
                     buf.put_u32(r.id);
@@ -1047,6 +1321,71 @@ mod evpn_prefix_tests {
         assert_eq!(s.route_type(), 6);
         // Variant order keeps Type 5 < Type 6.
         assert!(p < s);
+    }
+
+    #[test]
+    fn display_igmp_join_sync_star_g_v4() {
+        let p = EvpnPrefix::IgmpJoinSync {
+            esi: [0x00, 0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77, 0x88, 0x99],
+            eth_tag: 0,
+            src: None,
+            grp: IpAddr::V4(Ipv4Addr::new(239, 1, 1, 1)),
+            orig: IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1)),
+        };
+        assert_eq!(
+            p.to_string(),
+            "[7]:[00:11:22:33:44:55:66:77:88:99]:[0]:[0]:[*]:[32]:[239.1.1.1]:[32]:[10.0.0.1]"
+        );
+        assert_eq!(p.route_type(), 7);
+    }
+
+    #[test]
+    fn display_igmp_leave_sync_s_g_v4() {
+        let p = EvpnPrefix::IgmpLeaveSync {
+            esi: [0; 10],
+            eth_tag: 20,
+            src: Some(IpAddr::V4(Ipv4Addr::new(192, 0, 2, 9))),
+            grp: IpAddr::V4(Ipv4Addr::new(232, 1, 1, 1)),
+            orig: IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2)),
+        };
+        assert_eq!(
+            p.to_string(),
+            "[8]:[00:00:00:00:00:00:00:00:00:00]:[20]:[32]:[192.0.2.9]:[32]:[232.1.1.1]:[32]:[10.0.0.2]"
+        );
+        assert_eq!(p.route_type(), 8);
+    }
+
+    #[test]
+    fn sync_route_type_ordering() {
+        // The derived `Ord` must keep Type 6 < 7 < 8 < 9 so `show bgp evpn`
+        // lists the route types numerically.
+        let t6 = EvpnPrefix::Smet {
+            eth_tag: 0,
+            src: None,
+            grp: IpAddr::V4(Ipv4Addr::UNSPECIFIED),
+            orig: IpAddr::V4(Ipv4Addr::UNSPECIFIED),
+        };
+        let t7 = EvpnPrefix::IgmpJoinSync {
+            esi: [0; 10],
+            eth_tag: 0,
+            src: None,
+            grp: IpAddr::V4(Ipv4Addr::UNSPECIFIED),
+            orig: IpAddr::V4(Ipv4Addr::UNSPECIFIED),
+        };
+        let t8 = EvpnPrefix::IgmpLeaveSync {
+            esi: [0; 10],
+            eth_tag: 0,
+            src: None,
+            grp: IpAddr::V4(Ipv4Addr::UNSPECIFIED),
+            orig: IpAddr::V4(Ipv4Addr::UNSPECIFIED),
+        };
+        let t9 = EvpnPrefix::PerRegionImet {
+            eth_tag: 0,
+            region_id: [0; 8],
+        };
+        assert!(t6 < t7);
+        assert!(t7 < t8);
+        assert!(t8 < t9);
     }
 
     #[test]
@@ -1640,5 +1979,130 @@ mod evpn_emit_tests {
         EvpnRoute::PerRegionImet(r).nlri_emit(&mut buf);
         assert_eq!(&buf[0..4], &[0, 0, 0, 11], "path id prepended");
         assert_eq!(buf[4], 9, "route type follows id");
+    }
+
+    fn esi_sample() -> [u8; 10] {
+        [0x00, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x09]
+    }
+
+    /// Type-7 Join Synch `(*,G)` IPv4. Payload = 8 (RD) + 10 (ESI) + 4
+    /// (eth-tag) + 1 (src-len=0) + 1 (grp-len=32) + 4 (grp) + 1
+    /// (orig-len=32) + 4 (orig) + 1 (flags) = 34.
+    #[test]
+    fn igmp_join_sync_nlri_emit_star_g_v4() {
+        let j = EvpnIgmpJoinSync {
+            id: 0,
+            rd: rd_type1_ip(Ipv4Addr::new(10, 0, 0, 1), 100),
+            esi: esi_sample(),
+            ether_tag: 0,
+            src: None,
+            grp: IpAddr::V4(Ipv4Addr::new(239, 1, 1, 1)),
+            orig: IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1)),
+            flags: 0x04, // IGMPv3 include
+        };
+        let mut buf = BytesMut::new();
+        EvpnRoute::IgmpJoinSync(j).nlri_emit(&mut buf);
+        assert_eq!(buf[0], 7, "route type 7");
+        assert_eq!(buf[1], 34, "length");
+        assert_eq!(&buf[2..4], &[0x00, 0x01], "RD type 1");
+        assert_eq!(&buf[10..20], &esi_sample(), "ESI after RD");
+        assert_eq!(&buf[20..24], &[0, 0, 0, 0], "eth-tag = 0");
+        assert_eq!(buf[24], 0, "src len 0 — (*,G)");
+        assert_eq!(buf[25], 32, "grp len = 32");
+        assert_eq!(&buf[26..30], &[239, 1, 1, 1], "group");
+        assert_eq!(buf[30], 32, "orig len = 32");
+        assert_eq!(&buf[31..35], &[10, 0, 0, 1], "originator");
+        assert_eq!(buf[35], 0x04, "flags");
+        assert_eq!(buf.len(), 36, "1 + 1 + 34");
+    }
+
+    /// Round-trip an `(S,G)` IPv4 Join Synch route.
+    #[test]
+    fn igmp_join_sync_roundtrip_s_g_v4() {
+        let original = EvpnIgmpJoinSync {
+            id: 0,
+            rd: rd_type1_ip(Ipv4Addr::new(192, 168, 0, 1), 200),
+            esi: esi_sample(),
+            ether_tag: 5,
+            src: Some(IpAddr::V4(Ipv4Addr::new(192, 0, 2, 9))),
+            grp: IpAddr::V4(Ipv4Addr::new(232, 1, 1, 1)),
+            orig: IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2)),
+            flags: 0x0c, // v3 + exclude (IE)
+        };
+        let mut buf = BytesMut::new();
+        EvpnRoute::IgmpJoinSync(original.clone()).nlri_emit(&mut buf);
+        let (_, parsed) =
+            EvpnRoute::parse_nlri(&buf, false).expect("parse_nlri must accept what we emit");
+        assert_eq!(parsed, EvpnRoute::IgmpJoinSync(original));
+    }
+
+    /// Add-Path: a non-zero `id` prepends the 4-byte path identifier.
+    #[test]
+    fn igmp_join_sync_nlri_emit_addpath() {
+        let j = EvpnIgmpJoinSync {
+            id: 13,
+            rd: rd_type1_ip(Ipv4Addr::new(10, 0, 0, 1), 100),
+            esi: esi_sample(),
+            ether_tag: 0,
+            src: None,
+            grp: IpAddr::V4(Ipv4Addr::new(239, 1, 1, 1)),
+            orig: IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1)),
+            flags: 0,
+        };
+        let mut buf = BytesMut::new();
+        EvpnRoute::IgmpJoinSync(j).nlri_emit(&mut buf);
+        assert_eq!(&buf[0..4], &[0, 0, 0, 13], "path id prepended");
+        assert_eq!(buf[4], 7, "route type follows id");
+    }
+
+    /// Type-8 Leave Synch `(*,G)` IPv4. Payload = Join Synch (34) without
+    /// the trailing flags, then Reserved(4) + MaxRespTime(1) + Flags(1)
+    /// = 33 + 4 + 1 + 1 = 39.
+    #[test]
+    fn igmp_leave_sync_nlri_emit_star_g_v4() {
+        let l = EvpnIgmpLeaveSync {
+            id: 0,
+            rd: rd_type1_ip(Ipv4Addr::new(10, 0, 0, 1), 100),
+            esi: esi_sample(),
+            ether_tag: 0,
+            src: None,
+            grp: IpAddr::V4(Ipv4Addr::new(239, 1, 1, 1)),
+            orig: IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1)),
+            max_resp_time: 100,
+            flags: 0x04,
+        };
+        let mut buf = BytesMut::new();
+        EvpnRoute::IgmpLeaveSync(l).nlri_emit(&mut buf);
+        assert_eq!(buf[0], 8, "route type 8");
+        assert_eq!(buf[1], 39, "length");
+        assert_eq!(&buf[10..20], &esi_sample(), "ESI after RD");
+        assert_eq!(buf[30], 32, "orig len = 32");
+        assert_eq!(&buf[31..35], &[10, 0, 0, 1], "originator");
+        assert_eq!(&buf[35..39], &[0, 0, 0, 0], "Reserved = 0");
+        assert_eq!(buf[39], 100, "Maximum Response Time");
+        assert_eq!(buf[40], 0x04, "flags");
+        assert_eq!(buf.len(), 41, "1 + 1 + 39");
+    }
+
+    /// Round-trip a `(*,G)` IPv6/MLD Leave Synch route (source absent,
+    /// 16-octet group + originator).
+    #[test]
+    fn igmp_leave_sync_roundtrip_star_g_v6() {
+        let original = EvpnIgmpLeaveSync {
+            id: 0,
+            rd: rd_type1_ip(Ipv4Addr::new(192, 168, 0, 1), 300),
+            esi: esi_sample(),
+            ether_tag: 0,
+            src: None,
+            grp: "ff05::1:3".parse::<IpAddr>().unwrap(),
+            orig: "2001:db8::2".parse::<IpAddr>().unwrap(),
+            max_resp_time: 50,
+            flags: 0x02, // MLDv2
+        };
+        let mut buf = BytesMut::new();
+        EvpnRoute::IgmpLeaveSync(original.clone()).nlri_emit(&mut buf);
+        let (_, parsed) =
+            EvpnRoute::parse_nlri(&buf, false).expect("parse_nlri must accept what we emit");
+        assert_eq!(parsed, EvpnRoute::IgmpLeaveSync(original));
     }
 }

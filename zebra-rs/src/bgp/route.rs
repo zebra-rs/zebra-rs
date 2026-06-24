@@ -1215,11 +1215,15 @@ pub struct BgpRib {
     /// (`route_ipv4_update` / `route_ipv6_update`); `route_update_ipv4` /
     /// `…ipv6` suppress the advertise. Default `false` (ordinary route).
     pub vrf_transit_only: bool,
-    /// EVPN Type-6 SMET Flags octet (IGMP/MLD version + include/exclude
-    /// mode, RFC 9251 §9.1). The Flags field is NOT part of the SMET
-    /// route key, so it rides here on the path; the advertise/rebuild
-    /// helpers re-emit it. `0` for every non-SMET row.
+    /// EVPN RFC 9251 §9.1 Flags octet (IGMP/MLD version + include/exclude
+    /// mode). The Flags field is NOT part of the SMET (Type-6) or Join/Leave
+    /// Synch (Type-7/8) route key, so it rides here on the path; the
+    /// advertise/rebuild helpers re-emit it. `0` for every non-RFC-9251 row.
     pub smet_flags: u8,
+    /// EVPN Type-8 Leave Synch Maximum Response Time (RFC 9251 §9.3), a
+    /// per-path field carried off the route key like `smet_flags`. `0` for
+    /// every non-Leave-Synch row.
+    pub igmp_max_resp_time: u8,
     /// RFC 9572 §6.1 region of the peer this route was received from
     /// (the resolved `Peer.region_id`), stamped at receive. The EVPN
     /// advertise gate uses it to suppress per-PE IMET (Type-3) across region
@@ -1322,6 +1326,7 @@ impl BgpRib {
             esi: None,
             vrf_transit_only: false,
             smet_flags: 0,
+            igmp_max_resp_time: 0,
             ingress_region: None,
         }
     }
@@ -4846,6 +4851,42 @@ pub fn route_update_evpn(
             // its IGMP/MLD version + IE mode.
             flags: rib.smet_flags,
         }),
+        // Type-7/8 Synch routes (RFC 9251): the ESI/src/grp/orig come from
+        // the RIB key; the per-path Flags (and Type-8 Maximum Response Time)
+        // ride on the `BgpRib`, preserved so a reflected route stays faithful.
+        EvpnPrefix::IgmpJoinSync {
+            esi,
+            eth_tag,
+            src,
+            grp,
+            orig,
+        } => EvpnRoute::IgmpJoinSync(EvpnIgmpJoinSync {
+            id,
+            rd: *rd,
+            esi: *esi,
+            ether_tag: *eth_tag,
+            src: *src,
+            grp: *grp,
+            orig: *orig,
+            flags: rib.smet_flags,
+        }),
+        EvpnPrefix::IgmpLeaveSync {
+            esi,
+            eth_tag,
+            src,
+            grp,
+            orig,
+        } => EvpnRoute::IgmpLeaveSync(EvpnIgmpLeaveSync {
+            id,
+            rd: *rd,
+            esi: *esi,
+            ether_tag: *eth_tag,
+            src: *src,
+            grp: *grp,
+            orig: *orig,
+            max_resp_time: rib.igmp_max_resp_time,
+            flags: rib.smet_flags,
+        }),
     };
 
     let mut attrs = (*rib.attr).clone();
@@ -5031,6 +5072,42 @@ fn evpn_route_from_prefix(rd: &RouteDistinguisher, prefix: &EvpnPrefix, id: u32)
             orig: *orig,
             // Withdraw is matched on the NLRI key (flags are not part of
             // it), so flags = 0 here is correct. See TODO(phase4).
+            flags: 0,
+        }),
+        // Type-7/8 Synch routes: ESI comes from the key; the per-path Flags
+        // and Maximum Response Time are not part of the key, so 0 is correct
+        // for a withdraw matched on the NLRI key.
+        EvpnPrefix::IgmpJoinSync {
+            esi,
+            eth_tag,
+            src,
+            grp,
+            orig,
+        } => EvpnRoute::IgmpJoinSync(EvpnIgmpJoinSync {
+            id,
+            rd: *rd,
+            esi: *esi,
+            ether_tag: *eth_tag,
+            src: *src,
+            grp: *grp,
+            orig: *orig,
+            flags: 0,
+        }),
+        EvpnPrefix::IgmpLeaveSync {
+            esi,
+            eth_tag,
+            src,
+            grp,
+            orig,
+        } => EvpnRoute::IgmpLeaveSync(EvpnIgmpLeaveSync {
+            id,
+            rd: *rd,
+            esi: *esi,
+            ether_tag: *eth_tag,
+            src: *src,
+            grp: *grp,
+            orig: *orig,
+            max_resp_time: 0,
             flags: 0,
         }),
     }
@@ -6506,6 +6583,9 @@ fn evpn_route_type_of(route: &EvpnRoute) -> crate::policy::EvpnRouteType {
         EvpnRoute::Multicast(_) => EvpnRouteType::Multicast,
         EvpnRoute::Prefix(_) => EvpnRouteType::Prefix,
         EvpnRoute::Smet(_) => EvpnRouteType::Smet,
+        // RFC 9251 Type-7/8 Join/Leave Synch are multicast membership routes;
+        // the closest existing policy discriminator is Multicast.
+        EvpnRoute::IgmpJoinSync(_) | EvpnRoute::IgmpLeaveSync(_) => EvpnRouteType::Multicast,
         // RFC 9572 Per-Region I-PMSI / S-PMSI / Leaf A-D are BUM tunnel A-D
         // routes; the closest existing policy discriminator is Multicast.
         // (They are dropped before policy in the current codec-only phase.)
@@ -6531,6 +6611,9 @@ fn evpn_vni_of(route: &EvpnRoute, attr: &BgpAttr) -> Option<u32> {
         // Type-6 (SMET) carries the EVI Route Target like Type-3; the
         // VNI comes from the RT extended community (RFC 8365 §5.1.2.4).
         EvpnRoute::Smet(_) => extract_vni_from_attr(attr),
+        // RFC 9251 Type-7/8 Synch routes are control-plane only here (no
+        // kernel MDB action); they carry no bridge VNI we act on.
+        EvpnRoute::IgmpJoinSync(_) | EvpnRoute::IgmpLeaveSync(_) => None,
         // RFC 9572 A-D routes carry no bridge VNI in the NLRI (any VNI rides
         // the PMSI Tunnel attribute, consumed in a later phase).
         EvpnRoute::PerRegionImet(_) | EvpnRoute::SPmsi(_) | EvpnRoute::LeafAd(_) => None,
@@ -6680,9 +6763,11 @@ fn route_evpn_export_selected(
                     });
                 }
             }
-            // RFC 9572 A-D routes have no VXLAN dataplane action — withdraw
-            // is a control-plane no-op.
-            EvpnPrefix::PerRegionImet { .. }
+            // RFC 9251 Type-7/8 Synch and RFC 9572 A-D routes have no VXLAN
+            // dataplane action here — withdraw is a control-plane no-op.
+            EvpnPrefix::IgmpJoinSync { .. }
+            | EvpnPrefix::IgmpLeaveSync { .. }
+            | EvpnPrefix::PerRegionImet { .. }
             | EvpnPrefix::SPmsi { .. }
             | EvpnPrefix::LeafAd { .. } => {}
         }
@@ -6815,11 +6900,15 @@ fn route_evpn_export_selected(
                 });
             }
         }
-        // RFC 9572 Per-Region I-PMSI / S-PMSI / Leaf A-D have no VXLAN
-        // dataplane action in the current codec-only phase — install is a
-        // control-plane no-op.
-        EvpnPrefix::PerRegionImet { .. } | EvpnPrefix::SPmsi { .. } | EvpnPrefix::LeafAd { .. } => {
-        }
+        // RFC 9251 Type-7/8 Synch and RFC 9572 Per-Region I-PMSI / S-PMSI /
+        // Leaf A-D have no VXLAN dataplane action in the current control-plane
+        // phase — install is a no-op (the routes are still stored and
+        // re-advertised; only kernel programming is skipped).
+        EvpnPrefix::IgmpJoinSync { .. }
+        | EvpnPrefix::IgmpLeaveSync { .. }
+        | EvpnPrefix::PerRegionImet { .. }
+        | EvpnPrefix::SPmsi { .. }
+        | EvpnPrefix::LeafAd { .. } => {}
     }
 }
 
@@ -7129,6 +7218,8 @@ pub fn route_evpn_update(
         EvpnRoute::Multicast(m) => m.id,
         EvpnRoute::Prefix(p) => p.id,
         EvpnRoute::Smet(s) => s.id,
+        EvpnRoute::IgmpJoinSync(j) => j.id,
+        EvpnRoute::IgmpLeaveSync(l) => l.id,
         EvpnRoute::PerRegionImet(r) => r.id,
         EvpnRoute::SPmsi(r) => r.id,
         EvpnRoute::LeafAd(r) => r.id,
@@ -7203,6 +7294,18 @@ pub fn route_evpn_update(
             exp: 0,
             bos: true,
         });
+    }
+    // RFC 9251 Type-7/8 Synch: the Flags (and the Type-8 Maximum Response
+    // Time) ride off the route key, so capture them onto the BgpRib path so a
+    // reflected route re-emits them faithfully. The ESI is part of the key,
+    // so it travels in the `EvpnPrefix` rather than here.
+    match route {
+        EvpnRoute::IgmpJoinSync(j) => rib.smet_flags = j.flags,
+        EvpnRoute::IgmpLeaveSync(l) => {
+            rib.smet_flags = l.flags;
+            rib.igmp_max_resp_time = l.max_resp_time;
+        }
+        _ => {}
     }
 
     // Apply input policy *after* the route is registered in
@@ -7304,6 +7407,8 @@ pub fn route_evpn_withdraw(ident: usize, route: &EvpnRoute, bgp: &mut BgpTop, pe
         EvpnRoute::Multicast(m) => m.id,
         EvpnRoute::Prefix(p) => p.id,
         EvpnRoute::Smet(s) => s.id,
+        EvpnRoute::IgmpJoinSync(j) => j.id,
+        EvpnRoute::IgmpLeaveSync(l) => l.id,
         EvpnRoute::PerRegionImet(r) => r.id,
         EvpnRoute::SPmsi(r) => r.id,
         EvpnRoute::LeafAd(r) => r.id,
@@ -9768,6 +9873,41 @@ fn build_evpn_route(
             // Flags ride on the path; preserve them from the stored row
             // (a peer-down withdraw is key-matched, but keeping the real
             // flags is harmless and consistent with the advertise path).
+            flags: rib.smet_flags,
+        })),
+        // RFC 9251 Type-7/8 Synch: ESI is in the key; flags / Max Response
+        // Time ride on the stored path, preserved for a faithful withdraw.
+        EvpnPrefix::IgmpJoinSync {
+            esi,
+            eth_tag,
+            src,
+            grp,
+            orig,
+        } => Some(EvpnRoute::IgmpJoinSync(EvpnIgmpJoinSync {
+            id: rib.remote_id,
+            rd: *rd,
+            esi: *esi,
+            ether_tag: *eth_tag,
+            src: *src,
+            grp: *grp,
+            orig: *orig,
+            flags: rib.smet_flags,
+        })),
+        EvpnPrefix::IgmpLeaveSync {
+            esi,
+            eth_tag,
+            src,
+            grp,
+            orig,
+        } => Some(EvpnRoute::IgmpLeaveSync(EvpnIgmpLeaveSync {
+            id: rib.remote_id,
+            rd: *rd,
+            esi: *esi,
+            ether_tag: *eth_tag,
+            src: *src,
+            grp: *grp,
+            orig: *orig,
+            max_resp_time: rib.igmp_max_resp_time,
             flags: rib.smet_flags,
         })),
         // RFC 9572 A-D routes are not stored in the Loc-RIB in the current
@@ -14164,6 +14304,214 @@ impl Bgp {
         route_withdraw_evpn_to_peers(rd, prefix, &mut self.peers);
     }
 
+    /// Originate a Type-7 IGMP/MLD Join Synch route (RFC 9251 §9.2) for a
+    /// membership snooped on the multihomed Ethernet Segment `esi`. Mirrors
+    /// `evpn_originate_smet`, but the route is scoped to the ES: it carries an
+    /// **ES-Import RT** (controls distribution to the PEs on that ES) plus a
+    /// single **EVI-RT EC** (identifies the EVI), and the NLRI key embeds the
+    /// ESI. The Flags octet rides on the path (`BgpRib::smet_flags`).
+    ///
+    /// Control-plane stub: this builds and advertises the route with the
+    /// mandated RTs attached so a route reflector relays it; DF election and
+    /// the kernel-MDB synch state machine are follow-ups, so nothing calls
+    /// this from an ES-snoop trigger yet — hence `allow(dead_code)` on the
+    /// Type-7/8 origination API below.
+    #[allow(dead_code)]
+    pub fn evpn_originate_igmp_join_sync(
+        &mut self,
+        vni: u32,
+        esi: [u8; 10],
+        vtep_local: IpAddr,
+        group: IpAddr,
+        source: Option<IpAddr>,
+        flags: u8,
+    ) {
+        if !self.igmp_mld_proxy || self.router_id.is_unspecified() {
+            return;
+        }
+        if !smet_advertisable_group(group) {
+            return;
+        }
+        let Some(rd) = rd_from_router_id_vni(self.router_id, vni) else {
+            return;
+        };
+        let prefix = EvpnPrefix::IgmpJoinSync {
+            esi,
+            eth_tag: 0,
+            src: source,
+            grp: group,
+            orig: vtep_local,
+        };
+        let mut rib = self.igmp_sync_rib(vni, esi, vtep_local);
+        rib.smet_flags = flags;
+        self.evpn_originate_synch(rd, prefix, rib);
+    }
+
+    /// Inverse of `evpn_originate_igmp_join_sync`. Not gated on
+    /// `igmp_mld_proxy` so a leave (or the feature being disabled) always
+    /// clears the originated route.
+    #[allow(dead_code)]
+    pub fn evpn_withdraw_igmp_join_sync(
+        &mut self,
+        vni: u32,
+        esi: [u8; 10],
+        vtep_local: IpAddr,
+        group: IpAddr,
+        source: Option<IpAddr>,
+    ) {
+        if !smet_advertisable_group(group) {
+            return;
+        }
+        let Some(rd) = rd_from_router_id_vni(self.router_id, vni) else {
+            return;
+        };
+        let prefix = EvpnPrefix::IgmpJoinSync {
+            esi,
+            eth_tag: 0,
+            src: source,
+            grp: group,
+            orig: vtep_local,
+        };
+        let _ = self.local_rib.remove_evpn(rd, &prefix, 0, ORIGINATED_PEER);
+        let _ = self.local_rib.select_best_path_evpn(&rd, &prefix);
+        route_withdraw_evpn_to_peers(rd, prefix, &mut self.peers);
+    }
+
+    /// Originate a Type-8 IGMP/MLD Leave Synch route (RFC 9251 §9.3). As the
+    /// Join Synch route, plus the per-path Maximum Response Time used to drive
+    /// the last-member-query synchronisation on the peer PE(s).
+    #[allow(dead_code)]
+    pub fn evpn_originate_igmp_leave_sync(
+        &mut self,
+        vni: u32,
+        esi: [u8; 10],
+        vtep_local: IpAddr,
+        group: IpAddr,
+        source: Option<IpAddr>,
+        max_resp_time: u8,
+        flags: u8,
+    ) {
+        if !self.igmp_mld_proxy || self.router_id.is_unspecified() {
+            return;
+        }
+        if !smet_advertisable_group(group) {
+            return;
+        }
+        let Some(rd) = rd_from_router_id_vni(self.router_id, vni) else {
+            return;
+        };
+        let prefix = EvpnPrefix::IgmpLeaveSync {
+            esi,
+            eth_tag: 0,
+            src: source,
+            grp: group,
+            orig: vtep_local,
+        };
+        let mut rib = self.igmp_sync_rib(vni, esi, vtep_local);
+        rib.smet_flags = flags;
+        rib.igmp_max_resp_time = max_resp_time;
+        self.evpn_originate_synch(rd, prefix, rib);
+    }
+
+    /// Inverse of `evpn_originate_igmp_leave_sync`.
+    #[allow(dead_code)]
+    pub fn evpn_withdraw_igmp_leave_sync(
+        &mut self,
+        vni: u32,
+        esi: [u8; 10],
+        vtep_local: IpAddr,
+        group: IpAddr,
+        source: Option<IpAddr>,
+    ) {
+        if !smet_advertisable_group(group) {
+            return;
+        }
+        let Some(rd) = rd_from_router_id_vni(self.router_id, vni) else {
+            return;
+        };
+        let prefix = EvpnPrefix::IgmpLeaveSync {
+            esi,
+            eth_tag: 0,
+            src: source,
+            grp: group,
+            orig: vtep_local,
+        };
+        let _ = self.local_rib.remove_evpn(rd, &prefix, 0, ORIGINATED_PEER);
+        let _ = self.local_rib.select_best_path_evpn(&rd, &prefix);
+        route_withdraw_evpn_to_peers(rd, prefix, &mut self.peers);
+    }
+
+    /// Build the originated `BgpRib` shared by the Type-7/8 Synch helpers:
+    /// next hop = local VTEP, extended communities = the ES-Import RT (derived
+    /// from `esi`, scopes distribution to the ES) plus the EVI-RT EC (carries
+    /// the EVI's RT). Caller stamps `smet_flags` / `igmp_max_resp_time`.
+    #[allow(dead_code)]
+    fn igmp_sync_rib(&self, vni: u32, esi: [u8; 10], vtep_local: IpAddr) -> BgpRib {
+        let mut attr = BgpAttr::new();
+        // RFC 9251 §9.5: the EVI-RT EC carries the EVI's Route Target. A
+        // 2-octet-AS RT always converts; the fallback keeps a usable RT.
+        let evi_rt = evpn_route_target(self.asn, vni);
+        let evi_rt_ec = ExtCommunityValue::evi_rt_from_rt(&evi_rt).unwrap_or(evi_rt);
+        attr.ecom = Some(ExtCommunity::from([
+            ExtCommunityValue::es_import_rt(&esi),
+            evi_rt_ec,
+        ]));
+        attr.nexthop = Some(BgpNexthop::Evpn(vtep_local));
+        let mut rib = BgpRib::new(
+            ORIGINATED_PEER,
+            Ipv4Addr::UNSPECIFIED,
+            BgpRibType::Originated,
+            0,
+            32768,
+            &attr,
+            None,
+            None,
+            false,
+        );
+        rib.esi = Some(esi);
+        rib
+    }
+
+    /// Shared tail of the Type-7/8 Synch originators: insert into the Loc-RIB,
+    /// run best-path, and fan the selected route out to peers (route reflection
+    /// included). Mirrors the advertise tail of `evpn_originate_smet`.
+    #[allow(dead_code)]
+    fn evpn_originate_synch(
+        &mut self,
+        rd: RouteDistinguisher,
+        prefix: EvpnPrefix,
+        mut rib: BgpRib,
+    ) {
+        let (_replaced, selected, next_id) =
+            self.local_rib.update_evpn(rd, prefix.clone(), rib.clone());
+        rib.local_id = next_id;
+
+        let mut bgp_ref = BgpTop {
+            router_id: &self.router_id,
+            srv6_ipv6_export: self.srv6_ipv6_export.as_ref(),
+            local_rib: &mut self.local_rib,
+            shard: &mut self.shard,
+            tx: &self.tx,
+            rib_client: &self.ctx.rib,
+            attr_store: &mut self.attr_store,
+            update_groups: &mut self.update_groups,
+            interface_addrs: &self.interface_addrs,
+            vrf_export: None,
+            color_policy: Some(&self.color_policy),
+            flex_algo_routes: Some(&self.flex_algo_routes),
+            flex_algo_srv6_routes: Some(&self.flex_algo_srv6_routes),
+            vrf_import: None,
+            nexthop_cache: None,
+            vrf_transport_v4: None,
+            vrf_transport_v6: None,
+            central_label_alloc: None,
+        };
+
+        if !selected.is_empty() {
+            route_advertise_evpn_to_peers(rd, prefix, &selected, &mut bgp_ref, &mut self.peers);
+        }
+    }
+
     /// RFC 9572 §3.2: originate a Type-10 S-PMSI A-D route for a locally-snooped
     /// `(S,G)` / `(*,G)`, declaring a *selective* provider tunnel for that flow
     /// — the per-(S,G) analog of the inclusive Type-3 IMET. Unlike the Type-6
@@ -14461,6 +14809,8 @@ fn evpn_leaf_ad_route_key(route: &EvpnRoute) -> Vec<u8> {
         EvpnRoute::Multicast(m) => EvpnRoute::Multicast(EvpnMulticast { id: 0, ..m }),
         EvpnRoute::Prefix(p) => EvpnRoute::Prefix(EvpnIpPrefix { id: 0, ..p }),
         EvpnRoute::Smet(s) => EvpnRoute::Smet(EvpnSmet { id: 0, ..s }),
+        EvpnRoute::IgmpJoinSync(j) => EvpnRoute::IgmpJoinSync(EvpnIgmpJoinSync { id: 0, ..j }),
+        EvpnRoute::IgmpLeaveSync(l) => EvpnRoute::IgmpLeaveSync(EvpnIgmpLeaveSync { id: 0, ..l }),
         EvpnRoute::PerRegionImet(r) => EvpnRoute::PerRegionImet(EvpnPerRegionImet { id: 0, ..r }),
         EvpnRoute::SPmsi(r) => EvpnRoute::SPmsi(EvpnSPmsi { id: 0, ..r }),
         EvpnRoute::LeafAd(r) => EvpnRoute::LeafAd(EvpnLeafAd { id: 0, ..r }),

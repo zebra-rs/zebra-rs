@@ -1089,6 +1089,14 @@ fn show_adj_rib_routes_evpn<D: RibDirection>(
         buf,
         "EVPN type-6 prefix: [6]:[EthTag]:[SrcLen]:[Src]:[GrpLen]:[Grp]:[OrigLen]:[Orig]"
     )?;
+    writeln!(
+        buf,
+        "EVPN type-7 prefix: [7]:[ESI]:[EthTag]:[SrcLen]:[Src]:[GrpLen]:[Grp]:[OrigLen]:[Orig]"
+    )?;
+    writeln!(
+        buf,
+        "EVPN type-8 prefix: [8]:[ESI]:[EthTag]:[SrcLen]:[Src]:[GrpLen]:[Grp]:[OrigLen]:[Orig]"
+    )?;
     writeln!(buf, "EVPN type-9 prefix: [9]:[EthTag]:[RegionID]")?;
     writeln!(buf, "EVPN type-10 prefix: [10]:[EthTag]:[Src]:[Grp]:[Orig]")?;
     writeln!(buf, "EVPN type-11 prefix: [11]:[RouteKey]:[Orig]")?;
@@ -3421,6 +3429,8 @@ fn evpn_route_type_filter(token: String) -> Option<u8> {
         "multicast" => Some(3),
         "prefix" => Some(5),
         "smet" => Some(6),
+        "igmp-join-sync" => Some(7),
+        "igmp-leave-sync" => Some(8),
         "per-region-imet" => Some(9),
         "s-pmsi" => Some(10),
         "leaf" => Some(11),
@@ -3462,6 +3472,14 @@ fn show_bgp_evpn(
     writeln!(
         buf,
         "EVPN type-6 prefix: [6]:[EthTag]:[SrcLen]:[Src]:[GrpLen]:[Grp]:[OrigLen]:[Orig]"
+    )?;
+    writeln!(
+        buf,
+        "EVPN type-7 prefix: [7]:[ESI]:[EthTag]:[SrcLen]:[Src]:[GrpLen]:[Grp]:[OrigLen]:[Orig]"
+    )?;
+    writeln!(
+        buf,
+        "EVPN type-8 prefix: [8]:[ESI]:[EthTag]:[SrcLen]:[Src]:[GrpLen]:[Grp]:[OrigLen]:[Orig]"
     )?;
     writeln!(buf, "EVPN type-9 prefix: [9]:[EthTag]:[RegionID]")?;
     writeln!(buf, "EVPN type-10 prefix: [10]:[EthTag]:[Src]:[Grp]:[Orig]")?;

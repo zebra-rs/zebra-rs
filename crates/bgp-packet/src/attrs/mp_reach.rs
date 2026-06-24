@@ -12,7 +12,7 @@ use bytes::BufMut;
 use crate::{
     Afi, AttrFlags, AttrType, BgpLsNlri, EvpnRoute, FlowspecNlri, Ipv4Nlri, Ipv6Nlri, Labelv4Nlri,
     Labelv6Nlri, MupRoute, ParseBe, ParseNlri, ParseOption, Rtcv4, Rtcv6, Safi, SrPolicyNlri,
-    Vpnv4Nexthop, Vpnv4Nlri, Vpnv6Nexthop, Vpnv6Nlri, many0_complete,
+    Vpnv4Nexthop, Vpnv4Nlri, Vpnv6Nexthop, Vpnv6Nlri, esi_display, many0_complete,
 };
 
 use super::{AttrEmitter, RouteDistinguisher, Rtcv4Reach, Rtcv6Reach, Vpnv4Reach, Vpnv6Reach};
@@ -670,6 +670,30 @@ impl fmt::Display for MpReachAttr {
                         EvpnRoute::Smet(v) => {
                             let src = v.src.map_or_else(|| "*".to_string(), |s| s.to_string());
                             writeln!(f, " [{}] SMET ({},{}) orig:{}", v.rd, src, v.grp, v.orig)?;
+                        }
+                        EvpnRoute::IgmpJoinSync(v) => {
+                            let src = v.src.map_or_else(|| "*".to_string(), |s| s.to_string());
+                            writeln!(
+                                f,
+                                " [{}] igmp-join-sync ({},{}) esi:{} orig:{}",
+                                v.rd,
+                                src,
+                                v.grp,
+                                esi_display(&v.esi),
+                                v.orig
+                            )?;
+                        }
+                        EvpnRoute::IgmpLeaveSync(v) => {
+                            let src = v.src.map_or_else(|| "*".to_string(), |s| s.to_string());
+                            writeln!(
+                                f,
+                                " [{}] igmp-leave-sync ({},{}) esi:{} orig:{}",
+                                v.rd,
+                                src,
+                                v.grp,
+                                esi_display(&v.esi),
+                                v.orig
+                            )?;
                         }
                         EvpnRoute::PerRegionImet(v) => {
                             writeln!(f, " [{}] per-region-imet tag:{}", v.rd, v.ether_tag)?;

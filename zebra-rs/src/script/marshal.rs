@@ -64,6 +64,24 @@ pub fn evpn_prefix_table(lua: &Lua, route: &EvpnRoute) -> mlua::Result<Table> {
             evpn.set("rd", s.rd.to_string())?;
             "[6]".to_string()
         }
+        EvpnRoute::IgmpJoinSync(j) => {
+            evpn.set("route_type", 7)?;
+            evpn.set("rd", j.rd.to_string())?;
+            evpn.set("group", j.grp.to_string())?;
+            if let Some(src) = j.src {
+                evpn.set("source", src.to_string())?;
+            }
+            "[7]".to_string()
+        }
+        EvpnRoute::IgmpLeaveSync(l) => {
+            evpn.set("route_type", 8)?;
+            evpn.set("rd", l.rd.to_string())?;
+            evpn.set("group", l.grp.to_string())?;
+            if let Some(src) = l.src {
+                evpn.set("source", src.to_string())?;
+            }
+            "[8]".to_string()
+        }
         EvpnRoute::PerRegionImet(r) => {
             evpn.set("route_type", 9)?;
             evpn.set("rd", r.rd.to_string())?;

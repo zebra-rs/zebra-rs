@@ -36,7 +36,8 @@ true per-VTEP `dst` selectivity are deferred (see **Deferred**).
 | 4     | SMET origination from kernel MDB snoop  | **done** | #1502 |
 | 5     | SMET reception → selective dataplane    | **done** | #1506 |
 | 6     | Show + BDD + docs                       | **done** | #1510 |
-| —     | Type 7/8 multihoming synch              | deferred | —     |
+| —     | Type 7/8 codec + control-plane stub     | **done** | —     |
+| —     | Type 7/8 multihoming data plane (DF/ES) | deferred | —     |
 
 (Phase 4 also pushed `netlink-packet-route` `seg6` commit `d912564`, which
 adds the MDB-entry decode; tracked via the `branch = "seg6"` dependency.)
@@ -112,7 +113,7 @@ Flags (2 octets): **bit 15 = IGMP Proxy Support**, **bit 14 = MLD Proxy
 Support**, bits 0-13 reserved. Both-zero ⇒ malformed, ignore the EC.
 Rides on the Type-3 IMET route to advertise proxy capability.
 
-### Route Types 7 / 8 (deferred — recorded for completeness)
+### Route Types 7 / 8 (codec + control-plane stub implemented)
 
 Type 7 (Join Synch) = SMET fields **plus a 10-octet ESI** (after RD,
 before Ethernet Tag). Type 8 (Leave Synch) = Type 7 fields **plus**
@@ -121,6 +122,14 @@ Reserved(4) + Maximum Response Time(1) before Flags. Both MUST carry an
 `0x0A`–`0x0D` for the 2-octet-AS / IPv4 / 4-octet-AS / IPv6 RT shapes).
 Distribution is scoped by the ES-Import RT only; the EVI-RT EC carries the
 EVI's RT value but does not control propagation.
+
+The NLRI codec, the ES-Import RT / EVI-RT extended communities, the EVPN
+RIB store + reflect path, the `show bgp evpn igmp-join-sync` /
+`igmp-leave-sync` filters, and the origination helpers are now in tree;
+the multihoming data plane (DF election, Ethernet-Segment Type 1/4, the
+synch state machine, and the ES-snoop origination trigger) remains
+deferred. See `bgp-evpn-igmp-mld-proxy-followups.md` §6 for the full
+breakdown.
 
 ## Operational model (how SMET fits with Type 3)
 

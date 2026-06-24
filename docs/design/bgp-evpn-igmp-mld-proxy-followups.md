@@ -92,15 +92,50 @@ vlan-tunnel config and pass it to `mdb_install`.
 
 ## 6. Type 7 / Type 8 multihoming synch routes
 
-All-active multihoming only; large. Prerequisites absent today:
+**Codec + control-plane stub: DONE.** Type 7 (IGMP/MLD Join Synch) and
+Type 8 (IGMP/MLD Leave Synch) are now first-class in the BGP-packet
+codec and the EVPN RIB:
+
+- **NLRI codec** (`crates/bgp-packet/src/attrs/nlri_evpn.rs`):
+  `EvpnIgmpJoinSync` / `EvpnIgmpLeaveSync` structs, `EvpnRoute` +
+  `EvpnPrefix` variants (route types 7/8, ESI in the key), parse/emit,
+  `Display` (with an `esi_display` helper), round-trip unit tests. The
+  Type-8 `Reserved(4)` + `MaximumResponseTime(1)` + `Flags(1)` tail is
+  handled; the Flags / Max-Response-Time ride off the route key.
+- **Ext-comms** (`ext_com.rs`): **ES-Import RT** (`0x06`/`0x02`,
+  auto-derived from the ESI) and **EVI-RT EC** (`0x06`/`0x0A`–`0x0C`,
+  via `evi_rt_from_rt`), with predicates, accessors, `Display`, tests.
+  EVI-RT Type 3 (IPv6, `0x0D`, 20-octet EC) is still out — the
+  `ExtCommunityValue` is fixed 8-octet and zebra RTs are 2-octet-AS.
+- **RIB stub** (`bgp/route.rs`): received Type-7/8 routes are stored,
+  best-path-selected, and **re-advertised / route-reflected** through
+  the generic EVPN path; the per-path Flags / Max-Response-Time are
+  stamped on the `BgpRib` (`smet_flags` / `igmp_max_resp_time`) so a
+  reflected route stays faithful. `route_evpn_export_selected` treats
+  them as **kernel no-ops**. Origination helpers
+  `evpn_originate_igmp_join_sync` / `…_leave_sync` (+ withdraws) attach
+  the ES-Import RT + EVI-RT EC; they are `#[allow(dead_code)]` until an
+  ES-snoop trigger calls them (see below).
+- **CLI**: `show bgp evpn igmp-join-sync` / `igmp-leave-sync` filters +
+  legends + `exec.yang` enums.
+
+**Still deferred (the actual multihoming data plane):**
 - **Ethernet-Segment** support: Type 1 (Ethernet A-D) + Type 4
   (Ethernet Segment) routes, **DF election**.
-- New ext-comms: **EVI-RT EC** (`0x06` / sub-types `0x0A`–`0x0D`) and
-  **ES-Import RT**.
 - Synch state machine + timers (last-member-query, Maximum Response
   Time); the DF advertises/withdraws the SMET from the combined
   `(x,G)` state across the ES.
-The Type 7/8 NLRI wire layouts are recorded in the main design doc.
+- The **organic origination trigger**: a snoop on a multihomed ES that
+  calls the `evpn_originate_igmp_*_sync` helpers (today nothing does).
+- **Kernel MDB synch** between the PEs on the ES.
+- EVPN **import-RT filtering** so the ES-Import RT actually scopes
+  distribution (today Type-7/8 reflect to all EVPN peers; the RTs are
+  carried but not yet consulted on import). Note `route_rts_from_ecom`
+  filters `low_type == 0x02` regardless of high-type and is VPNv4/v6
+  only, so the ES-Import RT (`0x06/0x02`) causes no collision today.
+- **Live validation** (BDD): needs an injection path (a debug exec
+  command driving the origination helpers, or real ES multihoming) to
+  observe reflection end-to-end.
 
 ## 7. Minor / cosmetic
 

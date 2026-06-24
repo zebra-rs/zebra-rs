@@ -343,13 +343,16 @@ module exec {
         }
         leaf route-type {
           ext:help "Filter the EVPN RIB by route type";
-          // macip=2, multicast=3, prefix=5 (RFC 7432/9136); smet=6
-          // (RFC 9251); per-region-imet=9, s-pmsi=10, leaf=11 (RFC 9572).
+          // macip=2, multicast=3, prefix=5 (RFC 7432/9136); smet=6,
+          // igmp-join-sync=7, igmp-leave-sync=8 (RFC 9251);
+          // per-region-imet=9, s-pmsi=10, leaf=11 (RFC 9572).
           type enumeration {
             enum macip;
             enum multicast;
             enum prefix;
             enum smet;
+            enum igmp-join-sync;
+            enum igmp-leave-sync;
             enum per-region-imet;
             enum s-pmsi;
             enum leaf;
