@@ -136,8 +136,10 @@ Feature: OSPFv3 TI-LFA fast-reroute over SR-MPLS
     # route to s flips from the expensive r3 path to the n1 path only
     # once every E-LSA has flooded and n1's ILM for s's node-SID
     # (16100, kept end-to-end by the v3 NP flag) settles — observed
-    # ~40s after config, right at this scenario's runtime. Poll
-    # instead of single-shot.
+    # ~40s after config, and slower still under full-suite CPU load.
+    # Give it explicit settle time, then poll (60-attempt budget) rather
+    # than single-shot.
+    And I wait 20 seconds
     And ping from "d" to "2001:db8::1" should eventually succeed
 
   Scenario: Fast-reroute survives the primary link failure (s-n1)
