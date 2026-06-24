@@ -477,6 +477,36 @@ MUP Extended Community:
 resolution → FIB), ISD (`segment interwork`) origination, and the GTP
 behaviours.
 
+#### P6 slice 3 — receive-side ST2 → Direct-segment resolution — **DONE**
+
+The interwork (SRGW) node — any VRF with `afi-safi mup segment
+interwork` — now resolves each received Type-2 ST route to the Direct
+segment it forwards into, the control-plane half of
+draft-mpmz-bess-mup-safi §3.3.12:
+
+- **Resolution.** `show bgp mup` indexes the selected DSD routes by their
+  BGP MUP Extended Community (Direct-segment id, type 0x0c / sub-type
+  0x00) and, for each received ST2 carrying the same id, prints the
+  End.DT46 segment and the DSD it resolves to:
+  `resolved 1:2 -> End.DT46 <sid> (via [DSD][rd][addr])`. Gated on the
+  node being an interwork node (a `segment interwork` VRF) — a
+  `segment direct` PE or a controller shows nothing. Pure control plane,
+  computed over the global MUP Loc-RIB (`render_mup_table` in
+  `zebra-rs/src/bgp/show.rs`); no new RIB state.
+- **FIB still deferred.** Actually forwarding the uplink — GTP-U decap
+  (`H.M.GTP4.D`) then SRv6 H.Encaps toward the resolved End.DT46 SID —
+  needs VPP / eBPF (mainline Linux `seg6local` has no `End.M.GTP*` /
+  `H.M.GTP4.D`), so this slice binds the segment but does not install the
+  decap.
+- **Test.** `@bgp_mup_interwork` BDD: z1 (combined UPF + controller)
+  originates a DSD (End.DT46 + id 1:2) and an ST2 (id 1:2) from a PFCP
+  session; z2 (`segment interwork`) resolves the ST2 to z1's End.DT46
+  Direct segment. Plus a `render_mup_table` unit test. Run live via
+  `make -C bdd bgp_mup_interwork`.
+
+**Still open in P6 (unchanged):** the receive-side *FIB* write (above),
+ISD (`segment interwork`) route origination, and the GTP behaviours.
+
 #### Remaining
 
 **What:** Install the FIB state that actually forwards MUP traffic. With

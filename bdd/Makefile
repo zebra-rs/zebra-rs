@@ -50,6 +50,15 @@ bgp_mup_st2:
 	mkdir -p allure-results
 	cargo test --test cucumber -- --concurrency=1 --tags "@bgp_mup_st2"
 
+# MUP interwork: a combined UPF+controller (z1) originates a DSD (End.DT46
+# + Direct-segment id) and an ST2 (same id) from a PFCP session; the
+# interwork node (z2, `afi-safi mup segment interwork`) resolves the ST2 to
+# z1's End.DT46 Direct segment by the MUP Extended Community. Needs
+# `pfcp-inject` on the host PATH and root netns (kernel VRF + seg6local).
+bgp_mup_interwork:
+	mkdir -p allure-results
+	cargo test --test cucumber -- --concurrency=1 --tags "@bgp_mup_interwork"
+
 rib_static_ipv6:
 	mkdir -p allure-results
 	cargo test --test cucumber -- --concurrency=1 --tags "@rib_static_ipv6"

@@ -1,0 +1,80 @@
+# z1 — combined MUP UPF + Controller. It originates BOTH:
+#   * a Direct Segment Discovery (DSD) route for VRF N6 (`afi-safi mup
+#     segment direct`, `encapsulation srv6`) carrying the per-VRF End.DT46
+#     SID and the Direct-segment id (MUP Ext-Comm `1:2`), and
+#   * a Type-2 Session-Transformed (ST2) route from a PFCP session whose
+#     Network Instance is `core` (`afi-safi mup network-instance core`),
+#     carrying the same Direct-segment id `1:2`.
+# IS-IS L2 SRv6 underlay + iBGP (mup afi-safi) to z2 (the interwork SRGW)
+# over loopbacks. z2 resolves the ST2 to this End.DT46 Direct segment.
+vrf:
+- name: N6
+  mup:
+    route-target:
+      export:
+      - "65501:10"
+interface:
+- if-name: lo
+  ipv6:
+    address: 2001:db8::1/128
+- if-name: z1-z2
+  ipv6:
+    address: 2001:db8:0:12::1/64
+segment-routing:
+  locator:
+  - name: S
+    prefix: fcbb:bbbb:1::/48
+    behavior: usid
+router:
+  isis:
+    net: 49.0000.0000.0000.0001.00
+    hostname: z1
+    is-type: level-2-only
+    segment-routing:
+      srv6:
+        locator: S
+    interface:
+    - if-name: lo
+      ipv6:
+        enable: true
+    - if-name: z1-z2
+      network-type: point-to-point
+      metric: 1
+      ipv6:
+        enable: true
+  bgp:
+    global:
+      as: 65501
+      router-id: 10.0.0.1
+    timer:
+      adv-interval:
+        ibgp: 1
+    segment-routing:
+      srv6:
+        locator: S
+    neighbor:
+    - remote-address: 2001:db8::2
+      remote-as: 65501
+      update-source: 2001:db8::1
+      enabled: true
+      afi-safi:
+      - name: mup
+        enabled: true
+    vrf:
+    - name: N6
+      rd: "65501:10"
+      encapsulation: srv6
+      afi-safi:
+        mup:
+          segment: direct
+          mup-ext-comm: "1:2"
+          network-instance: core
+    afi-safi:
+    - name: mup
+      mup-c:
+        enable: true
+        controller-address: 2001:db8::1
+        pfcp:
+          listen-address: 127.0.0.1
+        srv6:
+          locator: S
