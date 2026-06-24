@@ -307,7 +307,12 @@ async fn ping_should_succeed(world: &mut World, namespace: String, target: Strin
 #[then(expr = "ping from {string} to {string} should eventually succeed")]
 async fn ping_eventually_succeeds(world: &mut World, namespace: String, target: String) {
     let scoped = world.ns(&namespace);
-    const ATTEMPTS: u32 = 30;
+    // 60 ≈ the `show … should eventually` budget. The shorter 30s here let a
+    // load-sensitive convergence flake through (`@ospfv3_tilfa`: d's route to
+    // the source loopback /128 lands just past 30s under full-suite CPU load —
+    // it polls to success in isolation). A longer budget only delays the
+    // failure of a genuinely-broken path; it never turns a fail into a pass.
+    const ATTEMPTS: u32 = 60;
     for i in 0..ATTEMPTS {
         let ok = if target.contains(':') {
             netns::ping6(&scoped, &target, 1, 1).await
