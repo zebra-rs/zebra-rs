@@ -411,6 +411,25 @@ pub fn ospf_hello_recv(
         )
     });
 
+    // RFC 2328 §10.5 ("Receiving Hello Packets"): a Hello from a known
+    // source address but carrying a *different* Router-ID means the
+    // neighbour restarted under a new identity — typically an operator
+    // changed its `router-id`. OSPFv2 keys neighbours by source address
+    // (unlike v3, which keys by Router-ID), so without this the stale
+    // entry would keep the OLD Router-ID forever: our Router-LSA would
+    // point at a node that no longer originates one, the peer's new
+    // identity would never enter SPF, and `show ospf neighbor` would
+    // report a Router-ID that no longer exists. Tear the stale neighbour
+    // down through the same path as the dead-timer / `clear ospf
+    // neighbor`; the next Hello re-learns it cleanly under the new
+    // Router-ID.
+    if !init && nbr.ident.router_id != packet.router_id {
+        let _ = oi
+            .tx
+            .send(Message::Nfsm(oi.index, *src, NfsmEvent::InactivityTimer));
+        return;
+    }
+
     oi.tx
         .send(Message::Nfsm(oi.index, *src, NfsmEvent::HelloReceived))
         .unwrap();
