@@ -27,11 +27,16 @@ controller exactly as it would a UPF.
 
 ```
    SMF ──PFCP/N4──▶ zebra-rs MUP-C ──BGP MUP (SAFI 85)──▶ SRv6 PEs
- (sessions)          │ learns UE/TEID/NI                 (install
-                     │ originates T1ST/T2ST               forwarding)
-                     ▼
-             SRv6 End.DT4/DT6 SID  (from a locator)
+ (sessions)            learns UE/TEID/NI,                (resolve the
+                       originates T1ST/T2ST               segment, install
+                       (no SID — see below)               End.DT46 forwarding)
 ```
+
+The PEs originate the **segment** routes — DSD (`segment direct`) and ISD
+(`segment interwork`) — that advertise their per-VRF **End.DT46** SID; the
+controller's ST routes carry no SID and a receiving PE derives forwarding by
+resolving each ST route against the matching segment (the
+draft-ietf-bess-mup-safi default).
 
 The MUP control plane (capability negotiation, Loc-RIB, receive, and
 re-advertisement) is always present once the `mup` AFI/SAFI is
@@ -64,10 +69,11 @@ router bgp {
 
 ## Configuring the controller
 
-The controller lives under the **global** `mup` AFI/SAFI. It
-needs three things: an SRv6 locator to carve per-session SIDs from, a
-per-VRF `mup` service that maps a PFCP Network Instance to a
-Route Distinguisher / route-targets, and the `mup-c` block itself.
+The controller's `mup-c` block sits **directly under the BGP instance**
+(`router bgp { mup-c { … } }`). It needs three things: a per-VRF `mup`
+service that maps a PFCP Network Instance to a Route Distinguisher /
+route-targets, the `mup-c` block itself, and — only for the non-default
+explicit-SID mode — an SRv6 locator.
 
 ```
 segment-routing {
@@ -90,11 +96,9 @@ router bgp {
   # stamped on the ST route and the ST route type it originates.
   vrf mobile-up {
     rd 65000:100;
-    mup {
+    afi-safi mup {
       route st1 {
-        dest-network-instance access {
-          exact access;
-        }
+        network-instance access;
       }
     }
   }
@@ -140,37 +144,80 @@ vrf mobile-up {
   **without** a service SID — the receiving PE derives forwarding from
   its own ISD/DSD routes — so no per-session SID is allocated.
 
-The VRF binds each direction to a PFCP Network Instance:
+A VRF binds one ST direction to a PFCP Network Instance under `afi-safi
+mup route {st1|st2}`; the two read identically:
 
-* **Downlink (Type-1 ST).** `mup route st1 dest-network-instance access
-  exact <ni>` — the N6 VRF originates a **Type-1 ST** route carrying the
-  UE prefix (ingress GTP encapsulation).
-* **Uplink (Type-2 ST).** `afi-safi mup segment direct network-instance
-  <ni>` — the N3 VRF originates a **Type-2 ST** route carrying the core
-  endpoint and the GTP TEID (egress GTP decapsulation into the VRF's
-  End.DT46 Direct segment). The ST2 NI binding lives next to `segment
-  direct` because the ST2 resolves to that Direct segment; the route also
-  carries the segment's BGP MUP Extended Community (`mup-ext-comm`, a
-  Direct-segment id in RD/RT 2:4 form, e.g. `1:2`).
+* **Downlink (Type-1 ST).** `afi-safi mup route st1 { network-instance
+  <ni>; }` — the N6 VRF originates a **Type-1 ST** route carrying the UE
+  prefix (ingress GTP encapsulation).
+* **Uplink (Type-2 ST).** `afi-safi mup route st2 { network-instance <ni>;
+  mup-ext-comm <2:4>; }` — the N3 VRF originates a **Type-2 ST** route
+  carrying the core endpoint and the GTP TEID (egress GTP decapsulation).
+  The optional `mup-ext-comm` is the BGP MUP Extended Community
+  (Direct-segment id in RD/RT 2:4 form, e.g. `1:2`) the ST2 resolves to.
 
-In both cases the configured network-instance is matched exactly against
-the PFCP session's Network Instance. The export route-targets the ST route
-carries come from the top-level `vrf <name> mup route-target export` — the
-same `route-target` framework as `ipv4` / `ipv6`.
+The configured network-instance is matched exactly against the PFCP
+session's Network Instance. The export route-targets the ST route carries
+come from the top-level `vrf <name> mup route-target export` — the same
+`route-target` framework as `ipv4` / `ipv6`.
 
-For example, an uplink VRF:
+A single PFCP session originates **every** matching ST route: if both an
+st1 VRF and an st2 VRF bind the same Network Instance, one session
+originates both the Type-1 and the Type-2 ST.
+
+For example, an uplink VRF that also originates the Direct segment it
+resolves to:
 
 ```
 vrf N3 {
   rd 65000:100;
   encapsulation srv6;
   afi-safi mup {
-    segment direct;          # originate the End.DT46 Direct Segment Discovery route
-    mup-ext-comm 1:2;        # the Direct segment id (BGP MUP Ext-Comm 0x0c/0x00)
-    network-instance core;   # originate an ST2 for PFCP sessions on NI "core"
+    route st2 {
+      network-instance core;   # originate an ST2 for PFCP sessions on NI "core"
+      mup-ext-comm 1:2;        # the Direct segment id it resolves to
+    }
+    segment direct {
+      mup-ext-comm 1:2;        # originate the End.DT46 DSD with the same id
+    }
   }
 }
 ```
+
+### Segment Discovery routes (`segment direct` / `segment interwork`)
+
+A PE VRF with `encapsulation srv6` carves a per-VRF **End.DT46** SID from
+the locator and installs the `seg6local` decap. `afi-safi mup segment`
+advertises that segment so a receiving PE can resolve matching ST routes to
+it:
+
+* **`segment direct { mup-ext-comm <2:4>; }`** originates a **Direct
+  Segment Discovery (DSD, type 2)** route — NLRI = RD + router-id — carrying
+  the End.DT46 SID and the Direct-segment id (`mup-ext-comm`). A receiving
+  *interwork* node (`segment interwork`) matches each received ST2 to the
+  DSD by this id and `show bgp mup` prints the resolution.
+* **`segment interwork { prefix <p>; }`** originates an **Interwork Segment
+  Discovery (ISD, type 1)** route — NLRI = RD + the configured `prefix`
+  (typically the locally connected gNodeB N3 prefix; its family selects the
+  AFI) — carrying the End.DT46 SID. The ISD does not originate until the
+  prefix is set, and carries no `mup-ext-comm` (an ISD is resolved by
+  endpoint-address lookup).
+
+```
+vrf N6 {
+  rd 65501:10;
+  encapsulation srv6;
+  afi-safi mup {
+    segment interwork {
+      prefix 10.60.0.0/16;     # originate the End.DT46 ISD under this prefix
+    }
+  }
+}
+```
+
+zebra-rs uses **End.DT46** for both Direct and Interwork segments; the
+draft's GTP-interwork behaviours (GTP4.E / GTP6.E / H.M.GTP4.D) are
+VPP/eBPF and not yet implemented.
 
 ## From PFCP session to ST route
 
@@ -205,7 +252,7 @@ MUP VRFs:
    Network (MUP NLRI)                                   Next Hop
  *> [ST1][65000:100][ue=192.0.2.5/32][teid=305419896][qfi=0][ep=10.0.0.1]
        next-hop fcbb:bb01::1  weight 32768
-       RT:65000:200
+       rt:65000:200
 ```
 
 `show bgp vrf <name> mup` renders just the ST routes belonging to one
@@ -218,7 +265,7 @@ mirrored into the per-VRF task so the per-VRF view renders them:
    Network (MUP NLRI)                                   Next Hop
  *> [ST1][65000:100][ue=192.0.2.5/32][teid=305419896][qfi=0][ep=10.0.0.1]
        next-hop fcbb:bb01::1  weight 32768
-       RT:65000:200
+       rt:65000:200
 ```
 
 `show bgp mup mup-c` shows the controller status, and the
@@ -263,11 +310,17 @@ mup` on both the controller and its peers.
 
 ## Scope and limitations
 
-The control plane — capability negotiation, ISD/DSD/T1ST/T2ST codec,
-Loc-RIB receive/store/show, and controller origination + advertisement —
-is complete. The forwarding plane (programming GTP4.E / GTP6.E
-behaviours into the kernel) is **not** implemented: stock Linux has no
-GTP-U SRv6 endpoint behaviour, so the data plane is left to a
-VPP/eBPF-based forwarder. The controller's PFCP northbound currently
-handles Association and Session lifecycle messages; heartbeat-driven
-eviction of idle associations is a follow-up.
+The control plane is complete: capability negotiation, ISD/DSD/T1ST/T2ST
+codec, Loc-RIB receive/store/show, controller ST origination, PE-side
+Segment Discovery origination (DSD and ISD, each with the per-VRF End.DT46
+SID + `seg6local` decap installed into the kernel FIB), and the interwork
+node's control-plane resolution of received ST2 routes to the matching
+Direct segment.
+
+The **GTP-interwork forwarding plane** is **not** implemented: the
+End.DT46 decap that the segment routes advertise is installed, but the
+GTP-U SRv6 endpoint behaviours themselves (GTP4.E / GTP6.E / H.M.GTP4.D)
+have no stock-Linux `seg6local` action, so the actual GTP encap/decap is
+left to a VPP/eBPF-based forwarder. The controller's PFCP northbound
+currently handles Association and Session lifecycle messages;
+heartbeat-driven eviction of idle associations is a follow-up.
