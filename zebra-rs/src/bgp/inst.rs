@@ -1678,6 +1678,21 @@ impl Bgp {
             }
         }
 
+        // RFC 7432 Type-4 ES routes are keyed by the <router-id>:0 RD and the
+        // router-id Originator; a router-id change rebinds both. Withdraw the
+        // old-keyed Type-4 for every configured ES — independent of
+        // advertise-all-vni (ES origination gates only on the router-id).
+        if !old_router_id.is_unspecified() {
+            let esis: Vec<[u8; 10]> = self
+                .ethernet_segments
+                .values()
+                .filter_map(|es| es.esi)
+                .collect();
+            for esi in esis {
+                self.evpn_withdraw_ethernet_seg(esi, std::net::IpAddr::V4(old_router_id));
+            }
+        }
+
         self.router_id = router_id;
         for (_, peer) in self.peers.iter_mut_all() {
             peer.router_id = router_id;
@@ -1701,6 +1716,19 @@ impl Bgp {
                 for (vni, vtep_local) in vxlans {
                     self.evpn_originate_imet(vni, vtep_local);
                 }
+            }
+        }
+
+        // Re-originate the Type-4 ES routes under the new router-id (the
+        // inverse of the withdraw above; gated only on a valid router-id).
+        if !router_id.is_unspecified() {
+            let esis: Vec<[u8; 10]> = self
+                .ethernet_segments
+                .values()
+                .filter_map(|es| es.esi)
+                .collect();
+            for esi in esis {
+                self.evpn_originate_ethernet_seg(esi, std::net::IpAddr::V4(router_id));
             }
         }
 

@@ -14374,6 +14374,82 @@ impl Bgp {
         route_withdraw_evpn_to_peers(rd, prefix, &mut self.peers);
     }
 
+    /// Originate a Type-4 Ethernet Segment route (RFC 7432 §7.4) for a
+    /// locally-configured ES, so the PEs on the same segment discover one
+    /// another. Carries the auto-derived **ES-Import RT** (scopes distribution
+    /// to that ES) and a default-algorithm **DF Election EC** (RFC 8584).
+    /// Gated on a set router-id (the originating VTEP); RD is `<router-id>:0`,
+    /// the Originator is `vtep_local`. DF election itself is a later phase.
+    pub fn evpn_originate_ethernet_seg(&mut self, esi: [u8; 10], vtep_local: IpAddr) {
+        if self.router_id.is_unspecified() {
+            return;
+        }
+        let Some(rd) = rd_from_router_id_vni(self.router_id, 0) else {
+            return;
+        };
+        let prefix = EvpnPrefix::EthernetSeg {
+            esi,
+            orig: vtep_local,
+        };
+        let mut attr = BgpAttr::new();
+        let df = bgp_packet::DfElectionEc {
+            df_alg: bgp_packet::DfElectionEc::ALG_DEFAULT,
+            bitmap: 0,
+        };
+        attr.ecom = Some(ExtCommunity::from([
+            ExtCommunityValue::es_import_rt(&esi),
+            df.into(),
+        ]));
+        attr.nexthop = Some(BgpNexthop::Evpn(vtep_local));
+        let mut rib = BgpRib::new(
+            ORIGINATED_PEER,
+            Ipv4Addr::UNSPECIFIED,
+            BgpRibType::Originated,
+            0,
+            32768,
+            &attr,
+            None,
+            None,
+            false,
+        );
+        rib.esi = Some(esi);
+        self.evpn_originate_synch(rd, prefix, rib);
+    }
+
+    /// Inverse of `evpn_originate_ethernet_seg`. Not gated on the router-id so
+    /// a teardown always clears the route.
+    pub fn evpn_withdraw_ethernet_seg(&mut self, esi: [u8; 10], vtep_local: IpAddr) {
+        let Some(rd) = rd_from_router_id_vni(self.router_id, 0) else {
+            return;
+        };
+        let prefix = EvpnPrefix::EthernetSeg {
+            esi,
+            orig: vtep_local,
+        };
+        let _ = self.local_rib.remove_evpn(rd, &prefix, 0, ORIGINATED_PEER);
+        let _ = self.local_rib.select_best_path_evpn(&rd, &prefix);
+        route_withdraw_evpn_to_peers(rd, prefix, &mut self.peers);
+    }
+
+    /// The set of Originating Router IPs (VTEPs) that have advertised a Type-4
+    /// Ethernet Segment route for `esi` — the PE membership of the segment,
+    /// computed from the EVPN Loc-RIB (includes our own originated Type-4).
+    /// The ESI is in the Type-4 NLRI key, so membership matches on it directly
+    /// rather than on the ES-Import RT.
+    pub fn es_member_vteps(&self, esi: &[u8; 10]) -> std::collections::BTreeSet<IpAddr> {
+        let mut members = std::collections::BTreeSet::new();
+        for table in self.local_rib.evpn.values() {
+            for prefix in table.selected.keys() {
+                if let EvpnPrefix::EthernetSeg { esi: e, orig } = prefix
+                    && e == esi
+                {
+                    members.insert(*orig);
+                }
+            }
+        }
+        members
+    }
+
     /// Originate a Type-7 IGMP/MLD Join Synch route (RFC 9251 §9.2) for a
     /// membership snooped on the multihomed Ethernet Segment `esi`. Mirrors
     /// `evpn_originate_smet`, but the route is scoped to the ES: it carries an
