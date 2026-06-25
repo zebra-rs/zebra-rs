@@ -676,11 +676,13 @@ pub struct Bgp {
     /// reconfigure a running controller.
     pub mup_c_dirty: bool,
     /// MUP routes the controller has originated, keyed by session SEID →
-    /// the originated NLRI. Tracked so a Session Deletion / Modification
-    /// withdraws the exact prior route. No SRv6 SID is allocated for these
-    /// (the PE derives forwarding from its ISD/DSD routes), so only the
-    /// prefix is retained.
-    pub mup_c_originated: BTreeMap<u64, bgp_packet::MupPrefix>,
+    /// the originated NLRIs. One session can map to several ST routes (an
+    /// st1 and an st2 VRF binding the same Network Instance), so a Vec of
+    /// prefixes is retained — a Session Deletion / Modification withdraws
+    /// the exact prior routes. No SRv6 SID is allocated for these (the PE
+    /// derives forwarding from its ISD/DSD routes), so only the prefixes
+    /// are retained.
+    pub mup_c_originated: BTreeMap<u64, Vec<bgp_packet::MupPrefix>>,
     /// Config-driven MUP DSD (Direct Segment Discovery, type 2) routes
     /// originated per VRF (`afi-safi mup segment direct`), keyed by VRF
     /// name → `(originated NLRI, End.DT46 SID, ext-communities)`. The SID

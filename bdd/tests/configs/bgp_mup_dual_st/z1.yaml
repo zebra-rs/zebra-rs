@@ -1,0 +1,74 @@
+# z1 — MUP Controller (MUP-C) originating BOTH Session-Transformed routes
+# from a SINGLE PFCP session. AS 65001, iBGP to z2 (192.168.0.2) with the
+# mup afi-safi negotiated; PFCP/N4 listener on 192.168.0.1:8805.
+#
+# Two VRFs bind the *same* Network Instance `internet`:
+#   * `mobile-dl` (rd 65000:101) — `afi-safi mup route st1` (downlink / N6),
+#     so a session originates a Type-1 ST (UE prefix + access tunnel).
+#   * `mobile-ul` (rd 65000:100) — `afi-safi mup route st2` (uplink / N3)
+#     with the Direct segment id `1:2`, so the same session also originates
+#     a Type-2 ST (core endpoint + GTP TEID).
+#
+# When pfcp-inject programs one session whose Network Instance is
+# `internet`, z1 originates BOTH the ST1 and the ST2 (previously only the
+# first matching VRF fired) and advertises them to z2.
+segment-routing:
+  locator:
+  - name: LOC1
+    prefix: fcbb:bb01::/48
+    behavior: usid
+router:
+  bgp:
+    global:
+      as: 65001
+      router-id: 192.168.0.1
+    segment-routing:
+      srv6:
+        locator: LOC1
+        ipv6-unicast: {}
+    neighbor:
+    - remote-address: 192.168.0.2
+      remote-as: 65001
+      enabled: true
+      afi-safi:
+      - name: ipv4
+        enabled: true
+      - name: mup
+        enabled: true
+    vrf:
+    - name: mobile-dl
+      rd: "65000:101"
+      afi-safi:
+        mup:
+          route:
+          - type: st1
+            network-instance: internet
+    - name: mobile-ul
+      rd: "65000:100"
+      afi-safi:
+        mup:
+          route:
+          - type: st2
+            network-instance: internet
+            mup-ext-comm: "1:2"
+    mup-c:
+      enable: true
+      controller-address: fcbb:bb01::1
+      pfcp:
+        listen-address: 192.168.0.1
+        port: 8805
+      srv6:
+        locator: LOC1
+# Top-level VRFs: the MUP export route-targets live here (same
+# `route-target {import|export}` framework as ipv4 / ipv6).
+vrf:
+- name: mobile-dl
+  mup:
+    route-target:
+      export:
+      - "65000:201"
+- name: mobile-ul
+  mup:
+    route-target:
+      export:
+      - "65000:200"
