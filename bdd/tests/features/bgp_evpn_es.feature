@@ -53,6 +53,17 @@ Feature: BGP EVPN Ethernet Segment discovery (RFC 7432 Type-4)
     And show command "show bgp evpn ethernet-segment" in namespace "z1" should contain "192.168.0.1 (local)"
     And show command "show bgp evpn ethernet-segment" in namespace "z1" should contain "192.168.0.2"
 
+  Scenario: DF election carves the segment (default service-carving)
+    Given the test topology exists
+    # Both PEs advertise Alg 0, so the negotiated algorithm is the default.
+    Then show command "show bgp evpn ethernet-segment" in namespace "z1" should eventually contain "DF algorithm: service-carving (default)"
+    # 2 PEs sorted by IP: ordinal 0 = z1 (192.168.0.1) is DF for tag 0; both
+    # PEs agree on the same elected DF.
+    And show command "show bgp evpn ethernet-segment" in namespace "z1" should contain "Designated Forwarder (tag 0): 192.168.0.1 (this node)"
+    And show command "show bgp evpn ethernet-segment" in namespace "z2" should eventually contain "Designated Forwarder (tag 0): 192.168.0.1"
+    # z2 (ordinal 1) is NOT the DF for tag 0.
+    And show command "show bgp evpn ethernet-segment" in namespace "z2" should not contain "Designated Forwarder (tag 0): 192.168.0.2"
+
   Scenario: Removing the ES on z2 withdraws its Type-4 from z1
     Given the test topology exists
     When I apply config "z2-noes.yaml" to namespace "z2"

@@ -2078,13 +2078,29 @@ fn show_bgp_evpn_ethernet_segment(
         if let Some(rt) = es.es_import_rt() {
             writeln!(buf, "  ES-Import RT: {}", format_evpn_ecom_value(&rt))?;
         }
-        // PE membership discovered from received (and our own) Type-4 routes.
+        // PE membership + DF election, from the received (and our own) Type-4
+        // routes. Candidates are sorted by VTEP — the index is the RFC 7432
+        // §8.5 service-carving ordinal.
         if let Some(esi) = es.esi {
-            let members = bgp.es_member_vteps(&esi);
-            writeln!(buf, "  Member VTEPs ({}):", members.len())?;
-            for vtep in &members {
+            let cands = bgp.es_df_candidates(&esi);
+            let vteps: Vec<std::net::IpAddr> = cands.iter().map(|(ip, _)| *ip).collect();
+            writeln!(buf, "  Member VTEPs ({}):", vteps.len())?;
+            for (ordinal, (vtep, _)) in cands.iter().enumerate() {
                 let tag = if *vtep == local { " (local)" } else { "" };
-                writeln!(buf, "    {vtep}{tag}")?;
+                writeln!(buf, "    [{ordinal}] {vtep}{tag}")?;
+            }
+            // RFC 8584 algorithm negotiation, then RFC 7432 §8.5 carving.
+            let algs: Vec<u8> = cands.iter().map(|(_, a)| *a).collect();
+            let alg = super::ethernet_segment::negotiate_df_alg(&algs);
+            let alg_name = if alg == bgp_packet::DfElectionEc::ALG_DEFAULT {
+                "service-carving (default)"
+            } else {
+                "negotiated (non-default; carving fallback)"
+            };
+            writeln!(buf, "  DF algorithm: {alg_name}")?;
+            if let Some(df) = super::ethernet_segment::designated_forwarder(&vteps, 0) {
+                let tag = if df == local { " (this node)" } else { "" };
+                writeln!(buf, "  Designated Forwarder (tag 0): {df}{tag}")?;
             }
         }
     }

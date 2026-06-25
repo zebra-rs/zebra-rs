@@ -14425,23 +14425,33 @@ impl Bgp {
         route_withdraw_evpn_to_peers(rd, prefix, &mut self.peers);
     }
 
-    /// The set of Originating Router IPs (VTEPs) that have advertised a Type-4
-    /// Ethernet Segment route for `esi` — the PE membership of the segment,
-    /// computed from the EVPN Loc-RIB (includes our own originated Type-4).
-    /// The ESI is in the Type-4 NLRI key, so membership matches on it directly
-    /// rather than on the ES-Import RT.
-    pub fn es_member_vteps(&self, esi: &[u8; 10]) -> std::collections::BTreeSet<IpAddr> {
-        let mut members = std::collections::BTreeSet::new();
+    /// The DF-election candidates for an ES, computed from the EVPN Loc-RIB:
+    /// the `(VTEP, advertised DF algorithm)` of every Type-4 route with this
+    /// ESI (our own originated one included), **sorted by ascending VTEP** so
+    /// the index is the RFC 7432 §8.5 service-carving ordinal. The algorithm
+    /// is read from each Type-4's DF Election EC (RFC 8584), defaulting to
+    /// service-carving (Alg 0) when absent. The ESI is in the Type-4 NLRI key,
+    /// so candidates match on it directly rather than on the ES-Import RT.
+    pub fn es_df_candidates(&self, esi: &[u8; 10]) -> Vec<(IpAddr, u8)> {
+        let mut cands: Vec<(IpAddr, u8)> = Vec::new();
         for table in self.local_rib.evpn.values() {
-            for prefix in table.selected.keys() {
+            for (prefix, rib) in table.selected.iter() {
                 if let EvpnPrefix::EthernetSeg { esi: e, orig } = prefix
                     && e == esi
                 {
-                    members.insert(*orig);
+                    let alg = rib
+                        .attr
+                        .ecom
+                        .as_ref()
+                        .and_then(|ec| ec.0.iter().find_map(|v| v.as_df_election()))
+                        .map(|df| df.df_alg)
+                        .unwrap_or(bgp_packet::DfElectionEc::ALG_DEFAULT);
+                    cands.push((*orig, alg));
                 }
             }
         }
-        members
+        cands.sort_by_key(|(ip, _)| *ip);
+        cands
     }
 
     /// Originate a Type-7 IGMP/MLD Join Synch route (RFC 9251 §9.2) for a
