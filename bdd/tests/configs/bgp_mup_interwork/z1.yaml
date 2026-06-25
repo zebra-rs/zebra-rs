@@ -3,8 +3,8 @@
 #     segment direct`, `encapsulation srv6`) carrying the per-VRF End.DT46
 #     SID and the Direct-segment id (MUP Ext-Comm `1:2`), and
 #   * a Type-2 Session-Transformed (ST2) route from a PFCP session whose
-#     Network Instance is `core` (`afi-safi mup network-instance core`),
-#     carrying the same Direct-segment id `1:2`.
+#     Network Instance is `core` (`afi-safi mup route st2 network-instance
+#     core mup-ext-comm 1:2`), carrying the same Direct-segment id `1:2`.
 # IS-IS L2 SRv6 underlay + iBGP (mup afi-safi) to z2 (the interwork SRGW)
 # over loopbacks. z2 resolves the ST2 to this End.DT46 Direct segment.
 vrf:
@@ -66,9 +66,13 @@ router:
       encapsulation: srv6
       afi-safi:
         mup:
-          segment: direct
-          mup-ext-comm: "1:2"
-          network-instance: core
+          segment:
+          - type: direct
+            mup-ext-comm: "1:2"
+          route:
+          - type: st2
+            network-instance: core
+            mup-ext-comm: "1:2"
     mup-c:
       enable: true
       controller-address: 2001:db8::1

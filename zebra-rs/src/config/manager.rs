@@ -1509,6 +1509,77 @@ mod yang_load_tests {
         }
     }
 
+    /// Regression guard for the per-VRF MUP `segment` list
+    /// (zebra-bgp-vrf.yang). `mup-ext-comm` moved from a sibling leaf of
+    /// `segment` to a child leaf of the `segment direct` list entry, so the
+    /// key-only `segment direct` / `segment interwork` entries and the
+    /// nested `mup-ext-comm` leaf must each parse as settable paths. Pins
+    /// the new shape (`segment <type> { mup-ext-comm <2:4>; }`) so a broken
+    /// list key or a stale callback path is caught in the unit suite, not
+    /// only in the `@bgp_mup_segment_dsd` / `@bgp_mup_st2` BDDs.
+    #[test]
+    fn bgp_vrf_mup_segment_paths_parse() {
+        use crate::config::ExecCode;
+        use crate::config::parse::{State, parse};
+        use libyang::to_entry;
+
+        let mut yang = YangStore::new();
+        yang.add_path(concat!(env!("CARGO_MANIFEST_DIR"), "/yang"));
+        yang.read_with_resolve("configure")
+            .unwrap_or_else(|e| panic!("configure failed to load: {e:#}"));
+        yang.identity_resolve();
+        let module = yang.find_module("configure").unwrap();
+        let entry = to_entry(&yang, module);
+
+        for cmd in [
+            "set router bgp vrf N3 afi-safi mup segment direct",
+            "set router bgp vrf N3 afi-safi mup segment interwork",
+            "set router bgp vrf N3 afi-safi mup segment direct mup-ext-comm 1:20",
+        ] {
+            let (code, _comps, _state) = parse(cmd, entry.clone(), None, State::new());
+            assert_eq!(
+                code,
+                ExecCode::Success,
+                "should parse as a settable path: {cmd}"
+            );
+        }
+    }
+
+    /// Regression guard for the per-VRF MUP `route` list (zebra-bgp-vrf.yang).
+    /// Both ST bindings now live under `afi-safi mup route {st1|st2}`
+    /// (collapsed enum-keyed list): st1 (downlink / N6) and st2 (uplink /
+    /// N3), each with a `network-instance`, and st2 additionally with a
+    /// `mup-ext-comm`. Pins the new shape so a broken list key or a stale
+    /// callback path is caught in the unit suite, not only in the
+    /// `@bgp_mup_st2` / `@bgp_mup_e2e` BDDs.
+    #[test]
+    fn bgp_vrf_mup_route_paths_parse() {
+        use crate::config::ExecCode;
+        use crate::config::parse::{State, parse};
+        use libyang::to_entry;
+
+        let mut yang = YangStore::new();
+        yang.add_path(concat!(env!("CARGO_MANIFEST_DIR"), "/yang"));
+        yang.read_with_resolve("configure")
+            .unwrap_or_else(|e| panic!("configure failed to load: {e:#}"));
+        yang.identity_resolve();
+        let module = yang.find_module("configure").unwrap();
+        let entry = to_entry(&yang, module);
+
+        for cmd in [
+            "set router bgp vrf N6 afi-safi mup route st1 network-instance access",
+            "set router bgp vrf N3 afi-safi mup route st2 network-instance core",
+            "set router bgp vrf N3 afi-safi mup route st2 mup-ext-comm 1:30",
+        ] {
+            let (code, _comps, _state) = parse(cmd, entry.clone(), None, State::new());
+            assert_eq!(
+                code,
+                ExecCode::Success,
+                "should parse as a settable path: {cmd}"
+            );
+        }
+    }
+
     /// The RFC 9251 Type-7/8 debug-origination surface
     /// (`clear bgp debug igmp-{join,leave}-sync-{originate,withdraw} <spec>`,
     /// zebra-bgp-clear.yang) must parse as a complete exec path against the

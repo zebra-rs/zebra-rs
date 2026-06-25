@@ -31,12 +31,11 @@ router:
     vrf:
     - name: mobile-up
       rd: "65000:100"
-      mup:
-        route:
-          st1:
-            dest-network-instance:
-              access:
-                exact: access
+      afi-safi:
+        mup:
+          route:
+          - type: st1
+            network-instance: access
     mup-c:
       enable: true
       controller-address: fcbb:bb01::1

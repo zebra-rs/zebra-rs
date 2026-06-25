@@ -3,8 +3,8 @@
 # decapsulation session. AS 65001, iBGP to z2 (192.168.0.2) with the mup
 # afi-safi negotiated; PFCP/N4 listener on 192.168.0.1:8805. When
 # pfcp-inject programs a session whose Network Instance is `core`, the VRF
-# `mobile-up` binds it to a Type-2 ST route (`mup route st2
-# dest-network-instance core`), so z1 originates the ST2 carrying the core
+# `mobile-up` binds it to a Type-2 ST route (`afi-safi mup route st2
+# network-instance core`), so z1 originates the ST2 carrying the core
 # endpoint + GTP TEID, the controller-address next hop, the export
 # route-target (65000:200) and the BGP MUP Extended Community (Direct
 # segment id `1:2`, type 0x0c / sub-type 0x00). The route is advertised to
@@ -39,9 +39,13 @@ router:
       rd: "65000:100"
       afi-safi:
         mup:
-          segment: direct
-          mup-ext-comm: "1:2"
-          network-instance: core
+          segment:
+          - type: direct
+            mup-ext-comm: "1:2"
+          route:
+          - type: st2
+            network-instance: core
+            mup-ext-comm: "1:2"
     mup-c:
       enable: true
       controller-address: fcbb:bb01::1

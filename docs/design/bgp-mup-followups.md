@@ -440,15 +440,23 @@ MUP Extended Community:
   the GoBGP byte-exact vectors. `build_mup_origination`
   (`zebra-rs/src/bgp/route.rs`).
 - **BGP MUP Extended Community** (transitive type `0x0c`, sub-type `0x00`
-  = Direct-Type Segment Identifier, §3.2). New per-VRF knob `router bgp
-  vrf <name> afi-safi mup segment direct mup-ext-comm <2:4>` (YANG leaf
-  `mup-ext-comm`, type `route-distinguisher`; `BgpVrfMobileUplane
-  .mup_ext_comm`). The 6-octet value reuses the RD/RT 2:4 wire layout. It
-  is attached to the **ST2** route the controller originates (§3.3.10 —
-  the Direct segment a receiving PE resolves against, §3.3.12) and to the
-  VRF's **DSD** route (it *is* that Direct segment). End.DT46 is the
-  forwarding behaviour both directions (RFC 9433), so no SID is carried —
-  the ext-comm is the correlation handle.
+  = Direct-Type Segment Identifier, §3.2). The 6-octet value reuses the
+  RD/RT 2:4 wire layout. It is declared independently on each side of the
+  service, so a split controller/PE can point an ST2 at a remote PE's
+  segment:
+  - **DSD side** — `router bgp vrf <name> afi-safi mup segment direct
+    mup-ext-comm <2:4>` (YANG leaf `mup-ext-comm` on the `segment` list
+    entry; `BgpVrfMobileUplane.mup_ext_comm`). The DSD route *is* that
+    Direct segment, so it advertises this as its own identifier.
+  - **ST2 side** — `router bgp vrf <name> afi-safi mup route st2
+    mup-ext-comm <2:4>` (YANG leaf `mup-ext-comm` on the `route` list
+    entry; `MupSrv6Mobile.mup_ext_comm`). Attached to the ST2 route the
+    controller originates (§3.3.10 — the Direct segment a receiving PE
+    resolves against, §3.3.12). In a collocated UPF+controller both carry
+    the same value.
+
+  End.DT46 is the forwarding behaviour both directions (RFC 9433), so no
+  SID is carried — the ext-comm is the correlation handle.
 - **Show.** `show bgp mup` / `show bgp vrf <name> mup` render the Direct
   segment id bare in the RD/RT 2:4 form on the ext-community line (e.g.
   `RT:65000:200 1:2`).
@@ -458,17 +466,20 @@ MUP Extended Community:
   `VrfRouteTargets`) never carried the RT — and would likewise miss a
   later `mup-ext-comm`. The skip now also compares the ext-community set,
   so an RT / segment-id change re-advertises under the stable key.
-- **Grammar simplification.** The ST2 (uplink) Network-Instance binding
-  moved off the nested `router bgp vrf <name> mup route st2
-  dest-network-instance core exact <ni>` onto a single
-  `router bgp vrf <name> afi-safi mup network-instance <ni>` leaf, next to
-  `segment direct` (the Direct segment the ST2 resolves to). It still maps
-  to the Decapsulation direction on `srv6_mobile`, so `build_mup_origination`
-  / `render_mup_vrfs` are unchanged. The downlink `mup route st1
-  dest-network-instance access exact <ni>` is unchanged; the `route st2`
-  sub-container was removed.
-- **Tests.** `@bgp_mup_st2` BDD (controller, `afi-safi mup segment direct
-  network-instance core`, drives `pfcp-inject` with a `core` Network
+- **Grammar — explicit symmetric ST routes.** Both Session-Transformed
+  bindings live under one collapsed enum-keyed list `router bgp vrf <name>
+  afi-safi mup route {st1|st2}` (YANG `list route { key type; }`), each
+  with a flat `network-instance <ni>` leaf, and `route st2` additionally a
+  `mup-ext-comm <2:4>`. st1 → Encapsulation (downlink / N6), st2 →
+  Decapsulation (uplink / N3); the list key maps to the direction on
+  `srv6_mobile`. This replaced both the bare `afi-safi mup
+  network-instance` leaf (the old st2 binding) and the nested vrf-level
+  `mup route st1 dest-network-instance access exact <ni>` container, so
+  st1 and st2 now read identically. `build_mup_origination` /
+  `render_mup_vrfs` consume the same `srv6_mobile` binding.
+- **Tests.** `@bgp_mup_st2` BDD (controller, `afi-safi mup segment direct`
+  + `route st2 network-instance core mup-ext-comm 1:2`, drives
+  `pfcp-inject` with a `core` Network
   Instance → ST2 with endpoint + TEID + Direct segment id, received by the
   peer); `@bgp_mup_segment_dsd` extended to assert the DSD carries
   `RT:65501:10 1:2`. Run live via `make -C bdd bgp_mup_st2` /

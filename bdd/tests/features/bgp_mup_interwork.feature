@@ -21,10 +21,11 @@ Feature: BGP MUP interwork node resolves ST2 to the Direct segment
   ```
 
   z1 is a combined UPF + controller: VRF N6 (`encapsulation srv6`, rd
-  65501:10) with `afi-safi mup segment direct mup-ext-comm 1:2
-  network-instance core` originates a DSD (End.DT46 SID + Direct-segment id
-  1:2) and — when `pfcp-inject` programs a session on Network Instance
-  `core` — an ST2 (same id 1:2). z2 has `afi-safi mup segment interwork`,
+  65501:10) with `afi-safi mup segment direct mup-ext-comm 1:2` plus
+  `route st2 network-instance core mup-ext-comm 1:2` originates a DSD
+  (End.DT46 SID + Direct-segment id 1:2) and — when `pfcp-inject` programs
+  a session on Network Instance `core` — an ST2 (same id 1:2). z2 has
+  `afi-safi mup segment interwork`,
   receives both, and resolves the ST2 to z1's End.DT46 Direct segment.
 
   NOTE: needs `pfcp-inject` on the BDD host PATH (cargo build --release -p
