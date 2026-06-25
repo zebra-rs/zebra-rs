@@ -41,6 +41,15 @@ bgp_mup_segment_dsd:
 	mkdir -p allure-results
 	cargo test --test cucumber -- --concurrency=1 --tags "@bgp_mup_segment_dsd"
 
+# MUP segment ISD: a PE with `encapsulation srv6` VRF + `afi-safi mup
+# segment interwork prefix <p>` carves a per-VRF End.DT46 SID, installs the
+# seg6local decap, and originates an Interwork Segment Discovery (ISD) route
+# under the configured prefix, received by the peer. Needs root netns
+# (kernel VRF + seg6local).
+bgp_mup_isd:
+	mkdir -p allure-results
+	cargo test --test cucumber -- --concurrency=1 --tags "@bgp_mup_isd"
+
 # MUP ST2: the MUP-C learns a PFCP decapsulation session (Network Instance
 # `core`) and originates a Type-2 Session-Transformed route carrying the
 # core endpoint + GTP TEID and the Direct segment id (MUP Extended

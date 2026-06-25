@@ -683,15 +683,16 @@ pub struct Bgp {
     /// derives forwarding from its ISD/DSD routes), so only the prefixes
     /// are retained.
     pub mup_c_originated: BTreeMap<u64, Vec<bgp_packet::MupPrefix>>,
-    /// Config-driven MUP DSD (Direct Segment Discovery, type 2) routes
-    /// originated per VRF (`afi-safi mup segment direct`), keyed by VRF
-    /// name → `(originated NLRI, End.DT46 SID, ext-communities)`. The SID
-    /// and the ext-community set (export RTs + the Direct-segment MUP
-    /// ext-comm) are tracked alongside the prefix so a locator-driven SID
-    /// change *or* a later RT / `mup-ext-comm` change re-advertises even
-    /// though the RD+router-id NLRI key is stable. See
-    /// [`Bgp::reconcile_mup_dsd`].
-    pub mup_dsd_originated: BTreeMap<
+    /// Config-driven MUP Segment Discovery routes originated per VRF — a DSD
+    /// (Direct, type 2, `afi-safi mup segment direct`) or an ISD (Interwork,
+    /// type 1, `afi-safi mup segment interwork prefix <p>`); a VRF has at
+    /// most one. Keyed by VRF name → `(originated NLRI, End.DT46 SID,
+    /// ext-communities)`. The SID and the ext-community set (export RTs + the
+    /// Direct-segment MUP ext-comm, DSD only) are tracked alongside the
+    /// prefix so a locator-driven SID change *or* a later RT / `mup-ext-comm`
+    /// change re-advertises even though the NLRI key is stable. See
+    /// [`Bgp::reconcile_mup_segment`].
+    pub mup_segment_originated: BTreeMap<
         String,
         (
             bgp_packet::MupPrefix,
@@ -1144,7 +1145,7 @@ impl Bgp {
             mup_c_view: crate::mup_c::inst::MupCView::default(),
             mup_c_dirty: false,
             mup_c_originated: BTreeMap::new(),
-            mup_dsd_originated: BTreeMap::new(),
+            mup_segment_originated: BTreeMap::new(),
             local_fdb: BTreeMap::new(),
             local_vxlans: BTreeMap::new(),
             local_smet: BTreeMap::new(),
@@ -1457,7 +1458,7 @@ impl Bgp {
         }
         // The SIDs just changed under stable RD+router-id keys — re-advertise
         // any `segment direct` DSD route with the new End.DT46 SID.
-        self.reconcile_mup_dsd();
+        self.reconcile_mup_segment();
     }
 
     /// `segment-routing srv6 ipv6-unicast` toggle. Enables or disables
@@ -1736,8 +1737,8 @@ impl Bgp {
 
         // MUP DSD NLRIs embed the router-id (RD + router-id); a router-id
         // change rebinds the key, so withdraw the old-keyed DSD and
-        // re-originate under the new — `reconcile_mup_dsd` does both.
-        self.reconcile_mup_dsd();
+        // re-originate under the new — `reconcile_mup_segment` does both.
+        self.reconcile_mup_segment();
     }
 
     /// Recompute the effective BGP Identifier from its two sources —
@@ -2280,7 +2281,7 @@ impl Bgp {
         self.broadcast_colour_steering();
         // Originate / withdraw config-driven MUP DSD segment routes now the
         // VRF set (and its SIDs / kernel context) may have changed.
-        self.reconcile_mup_dsd();
+        self.reconcile_mup_segment();
     }
 
     /// Reconcile the MUP controller against `mup_c_config` at every
@@ -2382,7 +2383,7 @@ impl Bgp {
         );
         // The respawn with real kernel context is what actually installs the
         // End.DT46 decap; a `segment direct` VRF can now originate its DSD.
-        self.reconcile_mup_dsd();
+        self.reconcile_mup_segment();
     }
 
     pub fn process_cm_msg(&mut self, msg: ConfigRequest) {
@@ -3249,7 +3250,7 @@ impl Bgp {
                 // `apply_vrf_commit_diff` handles teardown.
                 // The kernel VRF (and its End.DT46 decap) is gone, so
                 // withdraw any DSD segment route that depended on it.
-                self.reconcile_mup_dsd();
+                self.reconcile_mup_segment();
             }
             RibRx::VrfRouteTargets {
                 name,
@@ -3299,7 +3300,7 @@ impl Bgp {
                 // Re-stamp the VRF's DSD segment route with the new MUP
                 // export RTs (same race the v4/v6 retag above closes).
                 if export_mup_changed {
-                    self.reconcile_mup_dsd();
+                    self.reconcile_mup_segment();
                 }
             }
             // Redistribute deliveries from RIB — initial walk

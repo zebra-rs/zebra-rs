@@ -391,7 +391,7 @@ type 2) origination** that the draft-default ST routes resolve against:
   (zebra-bgp-vrf.yang, under the per-VRF `afi-safi` container — distinct
   from the controller-side `mup route {st1|st2}`). `MupSegmentMode` on
   `BgpVrfMobileUplane`; callback `/router/bgp/vrf/afi-safi/mup/segment`.
-  `interwork` (ISD, type 1) is parsed but origination is deferred.
+  (`interwork` (ISD, type 1) origination landed later — see P6 slice 4.)
 - **`segment direct` originates a DSD** route for the VRF: NLRI is the
   VRF **RD + router-id** (so it rides the IPv4-MUP AFI); the attributes
   carry the PE locator node as the **IPv6 next-hop** and the per-VRF
@@ -421,10 +421,10 @@ type 2) origination** that the draft-default ST routes resolve against:
   all`), and z2 receives it with the SID. Excluded from CI; run live via
   `make -C bdd bgp_mup_segment_dsd`.
 
-**Still open in P6:** the *receive* side — a PE consuming a peer's DSD/ISD
-route to drive forwarding (the *ISD/DSD-route → segment-SID resolution*
-step below), ISD (`segment interwork`) origination, and the GTP
-behaviours.
+**Still open in P6 (at the time of slice 1):** the *receive* side — a PE
+consuming a peer's DSD/ISD route to drive forwarding (the *ISD/DSD-route →
+segment-SID resolution* step below), ISD (`segment interwork`) origination
+(landed in slice 4), and the GTP behaviours.
 
 #### P6 slice 2 — ST2 origination (TEID) + MUP Extended Community — **DONE**
 
@@ -486,8 +486,8 @@ MUP Extended Community:
   `bgp_mup_segment_dsd`.
 
 **Still open in P6 (unchanged):** the *receive* side (ST2 → Direct-segment
-resolution → FIB), ISD (`segment interwork`) origination, and the GTP
-behaviours.
+resolution → FIB) and the GTP behaviours. (ISD (`segment interwork`)
+origination landed in slice 4.)
 
 #### P6 slice 3 — receive-side ST2 → Direct-segment resolution — **DONE**
 
@@ -516,8 +516,38 @@ draft-mpmz-bess-mup-safi §3.3.12:
   Direct segment. Plus a `render_mup_table` unit test. Run live via
   `make -C bdd bgp_mup_interwork`.
 
-**Still open in P6 (unchanged):** the receive-side *FIB* write (above),
-ISD (`segment interwork`) route origination, and the GTP behaviours.
+**Still open in P6 (unchanged):** the receive-side *FIB* write (above) and
+the GTP behaviours.
+
+#### P6 slice 4 — ISD origination — **DONE**
+
+The PE-side **Interwork Segment Discovery (ISD, type 1) origination**, the
+sibling of the slice-1 DSD:
+
+- **`afi-safi mup segment interwork prefix <p>`** — a new `prefix` leaf on
+  the `segment` list (zebra-bgp-vrf.yang; `BgpVrfMobileUplane.interwork_prefix`,
+  handler `config_vrf_mup_segment_prefix`, callback
+  `/router/bgp/vrf/afi-safi/mup/segment/prefix`). The CLI is
+  `router bgp vrf <name> afi-safi mup segment interwork prefix 10.60.0.0/16`
+  — typically the locally connected gNodeB N3 prefix (draft §3.1.1).
+- **`segment interwork` originates an ISD** route: NLRI = the VRF **RD + the
+  configured prefix** (its family selects the AFI), the attributes carry the
+  PE locator node as the IPv6 next-hop and the per-VRF **End.DT46** SID as
+  the SRv6 L3 Service. zebra-rs uses End.DT46 for the interwork segment too
+  (the draft's GTP4.E/GTP6.E behaviours are VPP/eBPF, deferred); no MUP
+  Extended Community (an ISD is resolved by endpoint-address lookup, §3.1.1).
+- **Shared machinery with DSD.** The DSD reconcile/originate/withdraw were
+  generalized to *segment* origination (`build_mup_segment_origination`,
+  `reconcile_mup_segment`, `mup_segment_originated`) — a VRF has at most one
+  segment route (its `segment` is direct *or* interwork), so the existing
+  per-VRF-name tracking covers both, and a direct↔interwork switch naturally
+  withdraws the old NLRI and originates the new. The SID carve + seg6local
+  decap + gating (encap srv6, RD, kernel VRF, locator) are unchanged.
+- **Test.** `@bgp_mup_isd` BDD (root): z1 originates
+  `[ISD][65501:10][10.60.0.0/16]` with a local End.DT46 SID + installs the
+  decap; z2 receives it. Plus a `mup_segment_nlri` unit test (DSD vs ISD NLRI
+  selection + the empty-prefix / zero-router-id gates). Run live via
+  `make -C bdd bgp_mup_isd`.
 
 #### Remaining
 
