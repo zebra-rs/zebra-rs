@@ -4148,20 +4148,24 @@ impl Bgp {
             super::vrf_config::config_vrf_evpn_advertise_ipv6,
         );
         self.callback_add(
-            "/router/bgp/vrf/mup/route/st1/dest-network-instance/access/exact",
-            super::vrf_config::config_vrf_mup_route_st1,
-        );
-        self.callback_add(
             "/router/bgp/vrf/afi-safi/mup/segment",
             super::vrf_config::config_vrf_mup_segment,
         );
         self.callback_add(
-            "/router/bgp/vrf/afi-safi/mup/mup-ext-comm",
+            "/router/bgp/vrf/afi-safi/mup/segment/mup-ext-comm",
             super::vrf_config::config_vrf_mup_ext_comm,
         );
         self.callback_add(
-            "/router/bgp/vrf/afi-safi/mup/network-instance",
-            super::vrf_config::config_vrf_mup_network_instance,
+            "/router/bgp/vrf/afi-safi/mup/route",
+            super::vrf_config::config_vrf_mup_route,
+        );
+        self.callback_add(
+            "/router/bgp/vrf/afi-safi/mup/route/network-instance",
+            super::vrf_config::config_vrf_mup_route_network_instance,
+        );
+        self.callback_add(
+            "/router/bgp/vrf/afi-safi/mup/route/mup-ext-comm",
+            super::vrf_config::config_vrf_mup_route_mup_ext_comm,
         );
 
         // `set router bgp interface-neighbor <name> [...]`.

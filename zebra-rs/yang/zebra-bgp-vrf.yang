@@ -215,54 +215,104 @@ module zebra-bgp-vrf {
       }
       container mup {
         description
-          "Per-VRF MUP (RFC 9833) Segment Discovery origination — the PE
-           side. `segment direct` originates a Direct Segment Discovery
+          "Per-VRF MUP (RFC 9833) service. The `segment` list is the PE
+           side: `segment direct` originates a Direct Segment Discovery
            (DSD, type 2) route for this VRF carrying the VRF's End.DT46
-           SID (carved from `encapsulation srv6`); `interwork` originates
-           an Interwork Segment Discovery (ISD, type 1) route. A receiving
-           PE derives forwarding for matching Session-Transformed routes
-           from these segment routes (draft-ietf-bess-mup-safi default).
-           Distinct from the controller-side `mup route {st1|st2}` block.";
-        leaf segment {
-          type enumeration {
-            enum direct {
-              description
-                "Originate a Direct Segment Discovery (DSD, type 2)
-                 route: the NLRI is the VRF RD + router-id and the SRv6
-                 L3 Service carries the per-VRF End.DT46 SID.";
+           SID (carved from `encapsulation srv6`); `segment interwork` an
+           Interwork Segment Discovery (ISD, type 1) route. The `route`
+           list is the controller side: `route {st1|st2}` binds a PFCP
+           session Network Instance to Session-Transformed (ST) route
+           origination. A receiving PE derives forwarding for matching ST
+           routes from the segment routes (draft-ietf-bess-mup-safi
+           default).";
+        list segment {
+          key "type";
+          description
+            "MUP Segment Discovery route type originated for this VRF.
+             `segment direct` originates a Direct Segment Discovery (DSD,
+             type 2) route carrying the VRF's End.DT46 SID; `segment
+             interwork` an Interwork Segment Discovery (ISD, type 1)
+             route. The `direct` entry additionally carries the
+             `mup-ext-comm` identifying this VRF's Direct segment.";
+          leaf type {
+            type enumeration {
+              enum direct {
+                description
+                  "Originate a Direct Segment Discovery (DSD, type 2)
+                   route: the NLRI is the VRF RD + router-id and the SRv6
+                   L3 Service carries the per-VRF End.DT46 SID.";
+              }
+              enum interwork {
+                description
+                  "Originate an Interwork Segment Discovery (ISD, type 1)
+                   route. (Origination deferred — parsed but not yet acted
+                   on.)";
+              }
             }
-            enum interwork {
-              description
-                "Originate an Interwork Segment Discovery (ISD, type 1)
-                 route. (Origination deferred — parsed but not yet acted
-                 on.)";
-            }
+            description
+              "MUP Segment Discovery route type originated for this VRF.";
           }
-          description
-            "MUP Segment Discovery route type originated for this VRF.";
+          leaf mup-ext-comm {
+            type route-distinguisher;
+            description
+              "BGP MUP Extended Community (transitive type 0x0c, sub-type
+               0x00 = Direct-Type Segment Identifier,
+               draft-mpmz-bess-mup-safi §3.2) identifying this VRF's Direct
+               segment. Attached to the VRF's Direct Segment Discovery (DSD)
+               route and to the controller's Type-2 Session-Transformed
+               (ST2) routes that resolve to this Direct segment (§3.3.10 /
+               §3.3.12). The 6-octet value reuses the RD/RT 2:4 wire format.
+               Meaningful only under the `direct` segment.";
+          }
         }
-        leaf mup-ext-comm {
-          type route-distinguisher;
+        list route {
+          key "type";
           description
-            "BGP MUP Extended Community (transitive type 0x0c, sub-type
-             0x00 = Direct-Type Segment Identifier,
-             draft-mpmz-bess-mup-safi §3.2) identifying this VRF's Direct
-             segment. Attached to the VRF's Direct Segment Discovery (DSD)
-             route and to the controller's Type-2 Session-Transformed
-             (ST2) routes that resolve to this Direct segment (§3.3.10 /
-             §3.3.12). The 6-octet value reuses the RD/RT 2:4 wire format.";
-        }
-        leaf network-instance {
-          type string;
-          description
-            "PFCP session Network Instance whose uplink sessions this
-             Direct segment originates Type-2 Session-Transformed (ST2)
-             routes for. When the MUP controller learns a session whose
-             Network Instance matches this value, it originates an ST2
-             (endpoint + GTP TEID) for this VRF — egress GTP decapsulation
-             into the VRF's End.DT46 Direct segment. This is the ST2 NI
-             binding; the downlink (ST1) binding stays on
-             `mup route st1 dest-network-instance access exact`.";
+            "Session-Transformed route origination for this VRF, keyed by
+             ST route type. `route st1` is the downlink (Type-1 ST / N6;
+             ingress GTP encapsulation); `route st2` the uplink (Type-2 ST
+             / N3; egress GTP decapsulation). Each binds the PFCP session
+             Network Instance whose sessions the MUP controller originates
+             ST routes for; `route st2` additionally carries its own
+             `mup-ext-comm` of the Direct segment those ST2 routes resolve
+             to.";
+          leaf type {
+            type enumeration {
+              enum st1 {
+                description
+                  "Type-1 ST (downlink); ingress GTP encapsulation, the
+                   N6 VRF.";
+              }
+              enum st2 {
+                description
+                  "Type-2 ST (uplink); egress GTP decapsulation, the
+                   N3 VRF.";
+              }
+            }
+            description
+              "ST route type this entry originates (st1 = downlink / N6,
+               st2 = uplink / N3).";
+          }
+          leaf network-instance {
+            type string;
+            description
+              "PFCP session Network Instance whose sessions this VRF
+               originates ST routes for. When the MUP controller learns a
+               session whose Network Instance matches this value, it
+               originates the ST route (st1 → Type-1 / ingress encap;
+               st2 → Type-2 / egress decap into the VRF's End.DT46 Direct
+               segment).";
+          }
+          leaf mup-ext-comm {
+            type route-distinguisher;
+            description
+              "BGP MUP Extended Community (Direct-Type Segment Identifier,
+               draft-mpmz-bess-mup-safi §3.2 / §3.3.10) of the Direct
+               segment the originated ST2 routes resolve to, so a receiving
+               PE maps the (endpoint, TEID) tunnel onto the matching
+               End.DT46 segment. Meaningful only under `route st2`. The
+               6-octet value reuses the RD/RT 2:4 wire format.";
+          }
         }
       }
     }
@@ -390,36 +440,6 @@ module zebra-bgp-vrf {
           description
             "Advertise this VRF's IPv6 unicast routes as EVPN Type-5
              (IP Prefix) routes. Requires `rd` to be set.";
-        }
-      }
-      container mup {
-        description
-          "BGP MUP (RFC 9833) per-VRF service. `route st1` binds the
-           Type-1 ST (downlink / N6) destination session network-instance
-           matched exactly. The uplink Type-2 ST (N3) binding lives on the
-           `afi-safi mup network-instance` leaf, alongside `segment direct`
-           (the Direct segment the ST2 resolves to). The export/import
-           route-targets live on the top-level `vrf <name> mup
-           route-target {export|import}` (config.yang), the same place as
-           the ipv4 / ipv6 RT policy.";
-        container route {
-          description
-            "Session-Transformed route origination for this VRF. Only the
-             downlink (st1) binding lives here; the uplink (st2) binding
-             moved to `afi-safi mup network-instance`.";
-          container st1 {
-            description
-              "Type-1 ST (downlink); ingress GTP encapsulation, the N6 VRF.";
-            container dest-network-instance {
-              container access {
-                leaf exact {
-                  type string;
-                  description
-                    "Session access network-instance matched exactly.";
-                }
-              }
-            }
-          }
         }
       }
       uses bgp-vrf-neighbor;

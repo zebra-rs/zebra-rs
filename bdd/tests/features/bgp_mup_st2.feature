@@ -28,9 +28,10 @@ Feature: BGP MUP Controller originates a Type-2 ST route from a PFCP session
   ```
 
   z1 runs the controller (PFCP listener on 192.168.0.1:8805, locator LOC1,
-  VRF `mobile-up` with `afi-safi mup segment direct network-instance core`
-  binding Network Instance `core` to its Type-2 ST / Direct segment, and
-  carrying the Direct segment id `1:2`). `pfcp-inject` plays the SMF: it
+  VRF `mobile-up` with `afi-safi mup segment direct` plus `route st2
+  network-instance core` binding Network Instance `core` to its Type-2 ST /
+  Direct segment, and carrying the Direct segment id `1:2` on both the
+  segment and the st2 route). `pfcp-inject` plays the SMF: it
   sends an Association Setup + Session Establishment for endpoint 10.0.0.1 /
   TEID 0x12345678 (Network Instance `core`), so z1 originates the ST2 route
   and advertises it to z2.

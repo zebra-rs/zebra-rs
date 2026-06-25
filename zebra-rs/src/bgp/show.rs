@@ -5019,6 +5019,7 @@ mod detail_tests {
                 srv6_mobile: Some(MupSrv6Mobile {
                     direction: MupSrv6Direction::Decapsulation,
                     network_instance: Some("core-ni".to_string()),
+                    mup_ext_comm: None,
                 }),
                 segment: None,
                 mup_ext_comm: None,
@@ -5031,6 +5032,7 @@ mod detail_tests {
                 srv6_mobile: Some(MupSrv6Mobile {
                     direction: MupSrv6Direction::Encapsulation,
                     network_instance: Some("access-ni".to_string()),
+                    mup_ext_comm: None,
                 }),
                 segment: None,
                 mup_ext_comm: None,

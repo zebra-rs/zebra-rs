@@ -12698,18 +12698,12 @@ impl Bgp {
     ) -> Option<(bgp_packet::MupPrefix, BgpAttr)> {
         use super::vrf_config::MupSrv6Direction;
         let ni = session.network_instance.as_deref()?;
-        // Correlate the session NI to a `router bgp vrf <name> mup
-        // route {st1|st2}` config for the RD + direction.
+        // Correlate the session NI to a `router bgp vrf <name> afi-safi mup
+        // route {st1|st2}` config for the RD + direction + (st2) ext-comm.
         let (name, rd, direction, seg_ec) = self.vrfs.iter().find_map(|(name, cfg)| {
             let sm = cfg.mobile_uplane.srv6_mobile.as_ref()?;
-            (sm.network_instance.as_deref() == Some(ni)).then(|| {
-                (
-                    name.clone(),
-                    cfg.rd,
-                    sm.direction,
-                    cfg.mobile_uplane.mup_ext_comm,
-                )
-            })
+            (sm.network_instance.as_deref() == Some(ni))
+                .then(|| (name.clone(), cfg.rd, sm.direction, sm.mup_ext_comm))
         })?;
         let rd = rd?;
         // The export route-targets now live on the top-level
