@@ -6,7 +6,9 @@
 //! those are later phases. The config handlers live in `config.rs` alongside
 //! the other EVPN afi-safi knobs; this module owns the state types.
 
-use bgp_packet::ExtCommunityValue;
+use std::net::IpAddr;
+
+use bgp_packet::{DfElectionEc, ExtCommunityValue};
 
 /// All-active vs single-active multihoming redundancy mode (RFC 7432 §14.1).
 /// Carried in the ESI Label EC's flag on the per-ES A-D route.
@@ -62,6 +64,32 @@ impl EthernetSegment {
     }
 }
 
+/// RFC 8584 DF Election algorithm negotiation across the PEs on an Ethernet
+/// Segment: if every PE advertised the same algorithm (in its Type-4 DF
+/// Election EC), that algorithm is used; otherwise the Default algorithm
+/// (Alg 0, service-carving / modulus) is used as the fallback. An empty set
+/// yields the default.
+pub fn negotiate_df_alg(algs: &[u8]) -> u8 {
+    match algs.split_first() {
+        Some((first, rest)) if rest.iter().all(|a| a == first) => *first,
+        _ => DfElectionEc::ALG_DEFAULT,
+    }
+}
+
+/// Designated-Forwarder election via service carving (RFC 7432 §8.5 /
+/// RFC 8584 Alg 0): the candidate VTEPs are ordered by ascending IP, given
+/// ordinals 0..N, and the DF for a given Ethernet Tag / VLAN `tag` is the
+/// candidate at ordinal `tag mod N`. `candidates` MUST already be sorted
+/// ascending. `None` for an empty candidate set. (HRW, Alg 1, is a follow-up;
+/// callers fall back to this carving for any non-zero negotiated algorithm.)
+pub fn designated_forwarder(candidates: &[IpAddr], tag: u32) -> Option<IpAddr> {
+    if candidates.is_empty() {
+        return None;
+    }
+    let idx = (tag as usize) % candidates.len();
+    Some(candidates[idx])
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -102,5 +130,36 @@ mod tests {
             rt.as_es_import_rt(),
             Some([0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0xff])
         );
+    }
+
+    #[test]
+    fn df_alg_negotiation() {
+        // All agree → that algorithm.
+        assert_eq!(negotiate_df_alg(&[0, 0, 0]), 0);
+        assert_eq!(negotiate_df_alg(&[1, 1]), 1);
+        // Disagreement → Default (0).
+        assert_eq!(negotiate_df_alg(&[0, 1]), 0);
+        assert_eq!(negotiate_df_alg(&[1, 1, 0]), 0);
+        // Empty → Default.
+        assert_eq!(negotiate_df_alg(&[]), 0);
+        // Single PE → its own algorithm.
+        assert_eq!(negotiate_df_alg(&[1]), 1);
+    }
+
+    #[test]
+    fn service_carving_df() {
+        use std::net::Ipv4Addr;
+        let a = IpAddr::V4(Ipv4Addr::new(192, 168, 0, 1));
+        let b = IpAddr::V4(Ipv4Addr::new(192, 168, 0, 2));
+        let cands = [a, b]; // sorted ascending
+        // tag 0 -> ordinal 0 (a); tag 1 -> ordinal 1 (b); tag 2 -> 0 (a).
+        assert_eq!(designated_forwarder(&cands, 0), Some(a));
+        assert_eq!(designated_forwarder(&cands, 1), Some(b));
+        assert_eq!(designated_forwarder(&cands, 2), Some(a));
+        assert_eq!(designated_forwarder(&cands, 3), Some(b));
+        // Single candidate is DF for every tag.
+        assert_eq!(designated_forwarder(&[a], 7), Some(a));
+        // Empty → none.
+        assert_eq!(designated_forwarder(&[], 0), None);
     }
 }
