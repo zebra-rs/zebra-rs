@@ -1,0 +1,41 @@
+# z2 — MUP dual-ST route receiver. AS 65001, iBGP to z1 (192.168.0.1) with
+# the mup afi-safi negotiated. Plain BGP speaker: no controller, originates
+# nothing, but receives BOTH the Type-1 (ST1) and Type-2 (ST2)
+# Session-Transformed routes z1 originates from one PFCP session and shows
+# them under `show bgp mup`.
+#
+# Two `vrf` blocks import the routes' MUP route-targets (65000:201 for the
+# downlink/ST1, 65000:200 for the uplink/ST2 — z1's `mobile-dl` /
+# `mobile-ul` exports); the global MUP Loc-RIB stays authoritative and each
+# best-path is mirrored into its per-VRF task for `show bgp vrf <name> mup`
+# (display only). The `router bgp vrf` blocks spawn those per-VRF tasks.
+vrf:
+- name: mobile-dl
+  mup:
+    route-target:
+      import:
+      - "65000:201"
+- name: mobile-ul
+  mup:
+    route-target:
+      import:
+      - "65000:200"
+router:
+  bgp:
+    global:
+      as: 65001
+      router-id: 192.168.0.2
+    neighbor:
+    - remote-address: 192.168.0.1
+      remote-as: 65001
+      enabled: true
+      afi-safi:
+      - name: ipv4
+        enabled: true
+      - name: mup
+        enabled: true
+    vrf:
+    - name: mobile-dl
+      rd: "65000:101"
+    - name: mobile-ul
+      rd: "65000:100"

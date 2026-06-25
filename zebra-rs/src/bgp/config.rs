@@ -7503,3 +7503,130 @@ mod afi_safi_next_hop_self_tests {
         );
     }
 }
+
+#[cfg(test)]
+mod mup_dual_origination_tests {
+    //! `build_mup_origination` fans one PFCP session out to *every* VRF
+    //! whose `afi-safi mup route {st1|st2}` binding matches the session's
+    //! Network Instance — so a single session under `internet` originates
+    //! both the downlink (st1 / Type-1 ST, the N6 VRF) and the uplink
+    //! (st2 / Type-2 ST, the N3 VRF) routes. The earlier `find_map`
+    //! returned only the first match. Independent test module with its own
+    //! mock channels, mirroring `afi_safi_next_hop_self_tests`.
+
+    use std::str::FromStr;
+
+    use bgp_packet::{MupPrefix, RouteDistinguisher};
+    use tokio::sync::mpsc;
+
+    use super::super::vrf_config::{BgpVrfConfig, MupSrv6Direction, MupSrv6Mobile};
+    use super::*;
+
+    fn fresh_bgp() -> Bgp {
+        let (inbound_tx, _inbound_rx) = mpsc::unbounded_channel();
+        let (_rib_rx_tx, rib_rx) = mpsc::unbounded_channel();
+        let client = crate::rib::client::RibClient::new(
+            inbound_tx,
+            crate::rib::client::ProtoId::from_raw(0),
+        );
+        Box::leak(Box::new(_inbound_rx));
+        let ctx = crate::context::ProtoContext::default_table(client);
+
+        let (rib_tx, _rib_rx) = mpsc::unbounded_channel();
+        let (rib_inbound_tx, _sub_inbound_rx) = mpsc::unbounded_channel();
+        Box::leak(Box::new(_rib_rx));
+        Box::leak(Box::new(_sub_inbound_rx));
+        let next_proto_id = std::sync::Arc::new(std::sync::atomic::AtomicU32::new(1));
+        let subscriber =
+            crate::config::RibSubscriber::for_test(rib_tx, rib_inbound_tx, next_proto_id);
+
+        let (policy_tx, _policy_rx) = mpsc::unbounded_channel();
+        Box::leak(Box::new(_policy_rx));
+        Bgp::new(
+            ctx,
+            rib_rx,
+            subscriber,
+            policy_tx,
+            None,
+            None,
+            tokio::sync::mpsc::channel(1).0,
+        )
+    }
+
+    fn mup_vrf(rd: &str, direction: MupSrv6Direction, ni: &str, ext: Option<&str>) -> BgpVrfConfig {
+        let mut cfg = BgpVrfConfig {
+            rd: Some(RouteDistinguisher::from_str(rd).unwrap()),
+            ..BgpVrfConfig::default()
+        };
+        cfg.mobile_uplane.srv6_mobile = Some(MupSrv6Mobile {
+            direction,
+            network_instance: Some(ni.to_string()),
+            mup_ext_comm: ext.map(|e| RouteDistinguisher::from_str(e).unwrap()),
+        });
+        cfg
+    }
+
+    fn session(ni: &str) -> crate::mup_c::session::MupSession {
+        crate::mup_c::session::MupSession {
+            seid: 1,
+            cp_seid: 0x1111,
+            peer: "10.0.0.2:8805".parse().unwrap(),
+            ue_ipv4: Some("192.0.2.5".parse().unwrap()),
+            ue_ipv6: None,
+            teid: 0x1234,
+            endpoint: Some("10.0.0.1".parse().unwrap()),
+            network_instance: Some(ni.to_string()),
+            qfi: Some(9),
+        }
+    }
+
+    /// One NI bound by both an st1 (N6 / downlink) VRF and an st2 (N3 /
+    /// uplink) VRF originates BOTH Session-Transformed routes from a single
+    /// session.
+    #[test]
+    fn one_session_originates_both_st1_and_st2() {
+        let mut bgp = fresh_bgp();
+        bgp.vrfs.insert(
+            "N6".to_string(),
+            mup_vrf("65501:1", MupSrv6Direction::Encapsulation, "internet", None),
+        );
+        bgp.vrfs.insert(
+            "N3".to_string(),
+            mup_vrf(
+                "65501:2",
+                MupSrv6Direction::Decapsulation,
+                "internet",
+                Some("100:1"),
+            ),
+        );
+
+        let routes = bgp.build_mup_origination(&session("internet"));
+        assert_eq!(routes.len(), 2, "one session → both st1 and st2 routes");
+        assert!(
+            routes
+                .iter()
+                .any(|(p, _)| matches!(p, MupPrefix::T1st { .. })),
+            "downlink Type-1 ST originated from the st1 VRF",
+        );
+        assert!(
+            routes
+                .iter()
+                .any(|(p, _)| matches!(p, MupPrefix::T2st { .. })),
+            "uplink Type-2 ST originated from the st2 VRF",
+        );
+    }
+
+    /// A session whose NI matches no VRF binding originates nothing.
+    #[test]
+    fn unmatched_ni_originates_nothing() {
+        let mut bgp = fresh_bgp();
+        bgp.vrfs.insert(
+            "N3".to_string(),
+            mup_vrf("65501:2", MupSrv6Direction::Decapsulation, "internet", None),
+        );
+        assert!(
+            bgp.build_mup_origination(&session("ims")).is_empty(),
+            "no VRF binds NI `ims`",
+        );
+    }
+}

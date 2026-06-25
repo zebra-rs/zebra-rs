@@ -59,6 +59,14 @@ bgp_mup_interwork:
 	mkdir -p allure-results
 	cargo test --test cucumber -- --concurrency=1 --tags "@bgp_mup_interwork"
 
+# MUP dual-ST: two VRFs (st1 downlink + st2 uplink) bind the same Network
+# Instance, so one PFCP session originates BOTH Session-Transformed routes
+# (Type-1 + Type-2), received by the peer. Needs `pfcp-inject` on the host
+# PATH (cargo build --release -p pfcp-inject; copy to /usr/bin).
+bgp_mup_dual_st:
+	mkdir -p allure-results
+	cargo test --test cucumber -- --concurrency=1 --tags "@bgp_mup_dual_st"
+
 rib_static_ipv6:
 	mkdir -p allure-results
 	cargo test --test cucumber -- --concurrency=1 --tags "@rib_static_ipv6"

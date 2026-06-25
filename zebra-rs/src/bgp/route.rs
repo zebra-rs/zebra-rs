@@ -12652,110 +12652,134 @@ impl Bgp {
     /// is allocated — the receiving PE derives forwarding from its own
     /// ISD/DSD routes (draft-ietf-bess-mup-safi default).
     pub fn originate_mup_route(&mut self, session: &crate::mup_c::session::MupSession) {
-        // Replace any prior route for this session (Modification path).
+        // Replace any prior routes for this session (Modification path).
         self.withdraw_mup_route(session.seid);
 
-        let Some((prefix, attr)) = self.build_mup_origination(session) else {
+        let originations = self.build_mup_origination(session);
+        if originations.is_empty() {
             return;
-        };
-        let mut rib = BgpRib::new(
-            ORIGINATED_PEER,
-            Ipv4Addr::UNSPECIFIED,
-            BgpRibType::Originated,
-            0,
-            32768,
-            &attr,
-            None,
-            None,
-            false,
-        );
-        rib.attr = self.attr_store.intern(attr);
-        let _ = self.local_rib.update_mup(prefix.clone(), rib);
-        let selected = self.local_rib.select_best_path_mup(&prefix);
-        self.mup_c_originated.insert(session.seid, prefix.clone());
-        self.mup_apply_selected(prefix, selected);
+        }
+        // One session can map to several ST routes (an st1 and an st2 VRF
+        // sharing the NI). Install + advertise each, recording every prefix
+        // so the deletion / next modification withdraws all of them.
+        let mut prefixes = Vec::with_capacity(originations.len());
+        for (prefix, attr) in originations {
+            let mut rib = BgpRib::new(
+                ORIGINATED_PEER,
+                Ipv4Addr::UNSPECIFIED,
+                BgpRibType::Originated,
+                0,
+                32768,
+                &attr,
+                None,
+                None,
+                false,
+            );
+            rib.attr = self.attr_store.intern(attr);
+            let _ = self.local_rib.update_mup(prefix.clone(), rib);
+            let selected = self.local_rib.select_best_path_mup(&prefix);
+            self.mup_apply_selected(prefix.clone(), selected);
+            prefixes.push(prefix);
+        }
+        self.mup_c_originated.insert(session.seid, prefixes);
     }
 
-    /// Withdraw the MUP route originated for `seid` (Session Deletion or
+    /// Withdraw the MUP route(s) originated for `seid` (Session Deletion or
     /// the replace step of a Modification). No-op when nothing was
     /// originated.
     pub fn withdraw_mup_route(&mut self, seid: u64) {
-        let Some(prefix) = self.mup_c_originated.remove(&seid) else {
+        let Some(prefixes) = self.mup_c_originated.remove(&seid) else {
             return;
         };
-        self.local_rib.remove_mup(&prefix, 0, ORIGINATED_PEER);
-        let selected = self.local_rib.select_best_path_mup(&prefix);
-        self.mup_apply_selected(prefix, selected);
+        for prefix in prefixes {
+            self.local_rib.remove_mup(&prefix, 0, ORIGINATED_PEER);
+            let selected = self.local_rib.select_best_path_mup(&prefix);
+            self.mup_apply_selected(prefix, selected);
+        }
     }
 
-    /// Correlate a session to a VRF `mup` config and build the
-    /// ST prefix + attributes. Returns `None` when no VRF matches the
-    /// session's Network Instance, the VRF has no RD, or the session lacks
-    /// the addresses the chosen ST route type needs.
-    fn build_mup_origination(
-        &mut self,
+    /// Correlate a session to the VRF `mup` configs and build one ST prefix +
+    /// attributes per matching VRF. A single Network Instance can be bound by
+    /// more than one VRF — e.g. an N3 VRF binds `route st1` and an N6 VRF
+    /// binds `route st2` to the same `internet` NI — so one PFCP session
+    /// originates *both* Session-Transformed routes, one per matching VRF.
+    /// Returns an empty Vec when no VRF matches the session's Network
+    /// Instance. A matching VRF is skipped (no entry) when it has no RD or
+    /// the session lacks the addresses that ST route type needs.
+    pub(super) fn build_mup_origination(
+        &self,
         session: &crate::mup_c::session::MupSession,
-    ) -> Option<(bgp_packet::MupPrefix, BgpAttr)> {
+    ) -> Vec<(bgp_packet::MupPrefix, BgpAttr)> {
         use super::vrf_config::MupSrv6Direction;
-        let ni = session.network_instance.as_deref()?;
-        // Correlate the session NI to a `router bgp vrf <name> afi-safi mup
-        // route {st1|st2}` config for the RD + direction + (st2) ext-comm.
-        let (name, rd, direction, seg_ec) = self.vrfs.iter().find_map(|(name, cfg)| {
-            let sm = cfg.mobile_uplane.srv6_mobile.as_ref()?;
-            (sm.network_instance.as_deref() == Some(ni))
-                .then(|| (name.clone(), cfg.rd, sm.direction, sm.mup_ext_comm))
-        })?;
-        let rd = rd?;
-        // The export route-targets now live on the top-level
-        // `vrf <name> mup route-target export` (RIB-owned,
-        // pushed to `rib_known_vrfs` via `VrfRouteTargets`), the same
-        // framework as ipv4 / ipv6.
-        let rts = self
-            .rib_known_vrfs
-            .get(&name)
-            .map(|k| k.mup_export_rts.clone())
-            .unwrap_or_default();
-        let prefix = match direction {
-            // Encapsulation (N6 / downlink): Type-1 ST carries the UE
-            // prefix + access tunnel. The endpoint (gNB) family may differ
-            // from the UE prefix family (mixed-AFI 5G).
-            MupSrv6Direction::Encapsulation => match (mup_ue_prefix(session), session.endpoint) {
-                (Some(prefix), Some(endpoint)) => bgp_packet::MupPrefix::T1st {
-                    rd,
-                    prefix,
-                    teid: session.teid,
-                    qfi: session.qfi.unwrap_or(0),
-                    endpoint,
-                    source: None,
-                },
-                _ => return None,
-            },
-            // Decapsulation (N3 / uplink): Type-2 ST carries the core
-            // endpoint + TEID. The Endpoint Length (draft §3.1.4.1) spans
-            // the address *and* the trailing 32-bit GTP TEID, so it is
-            // 64 (IPv4) / 160 (IPv6) — using the bare address width (32 /
-            // 128) would drop the TEID from the wire (a TEID of 0 is a
-            // malformed NLRI per the draft).
-            MupSrv6Direction::Decapsulation => match session.endpoint {
-                Some(endpoint) => bgp_packet::MupPrefix::T2st {
-                    rd,
-                    endpoint,
-                    endpoint_len: if endpoint.is_ipv4() { 64 } else { 160 },
-                    teid: session.teid,
-                },
-                None => return None,
-            },
+        let Some(ni) = session.network_instance.as_deref() else {
+            return Vec::new();
         };
-        let mut attr = build_mup_attr(self.mup_c_config.controller_address, &rts);
-        // §3.3.10: a Type-2 ST route SHOULD carry the BGP MUP Extended
-        // Community of the Direct segment it resolves to, so a receiving PE
-        // maps the (endpoint, TEID) tunnel onto the End.DT46 segment.
-        if matches!(direction, MupSrv6Direction::Decapsulation)
-            && let Some(seg) = seg_ec
-        {
-            attr_add_ecom(&mut attr, mup_direct_segment_ecom(&seg));
-        }
-        Some((prefix, attr))
+        // Correlate the session NI to *every* `router bgp vrf <name> afi-safi
+        // mup route {st1|st2}` binding that matches it, building one ST route
+        // per match (RD + direction + the st2 ext-comm come from each VRF).
+        self.vrfs
+            .iter()
+            .filter_map(|(name, cfg)| {
+                let sm = cfg.mobile_uplane.srv6_mobile.as_ref()?;
+                if sm.network_instance.as_deref() != Some(ni) {
+                    return None;
+                }
+                let rd = cfg.rd?;
+                // The export route-targets now live on the top-level
+                // `vrf <name> mup route-target export` (RIB-owned, pushed to
+                // `rib_known_vrfs` via `VrfRouteTargets`), the same framework
+                // as ipv4 / ipv6.
+                let rts = self
+                    .rib_known_vrfs
+                    .get(name)
+                    .map(|k| k.mup_export_rts.clone())
+                    .unwrap_or_default();
+                let prefix = match sm.direction {
+                    // Encapsulation (N6 / downlink): Type-1 ST carries the UE
+                    // prefix + access tunnel. The endpoint (gNB) family may
+                    // differ from the UE prefix family (mixed-AFI 5G).
+                    MupSrv6Direction::Encapsulation => {
+                        match (mup_ue_prefix(session), session.endpoint) {
+                            (Some(prefix), Some(endpoint)) => bgp_packet::MupPrefix::T1st {
+                                rd,
+                                prefix,
+                                teid: session.teid,
+                                qfi: session.qfi.unwrap_or(0),
+                                endpoint,
+                                source: None,
+                            },
+                            _ => return None,
+                        }
+                    }
+                    // Decapsulation (N3 / uplink): Type-2 ST carries the core
+                    // endpoint + TEID. The Endpoint Length (draft §3.1.4.1)
+                    // spans the address *and* the trailing 32-bit GTP TEID, so
+                    // it is 64 (IPv4) / 160 (IPv6) — using the bare address
+                    // width (32 / 128) would drop the TEID from the wire (a
+                    // TEID of 0 is a malformed NLRI per the draft).
+                    MupSrv6Direction::Decapsulation => match session.endpoint {
+                        Some(endpoint) => bgp_packet::MupPrefix::T2st {
+                            rd,
+                            endpoint,
+                            endpoint_len: if endpoint.is_ipv4() { 64 } else { 160 },
+                            teid: session.teid,
+                        },
+                        None => return None,
+                    },
+                };
+                let mut attr = build_mup_attr(self.mup_c_config.controller_address, &rts);
+                // §3.3.10: a Type-2 ST route SHOULD carry the BGP MUP Extended
+                // Community of the Direct segment it resolves to, so a
+                // receiving PE maps the (endpoint, TEID) tunnel onto the
+                // End.DT46 segment.
+                if matches!(sm.direction, MupSrv6Direction::Decapsulation)
+                    && let Some(seg) = sm.mup_ext_comm
+                {
+                    attr_add_ecom(&mut attr, mup_direct_segment_ecom(&seg));
+                }
+                Some((prefix, attr))
+            })
+            .collect()
     }
 
     /// Apply the post-update best path of one MUP prefix to peers:
