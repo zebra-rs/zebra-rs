@@ -489,6 +489,32 @@ MUP Extended Community:
 resolution → FIB) and the GTP behaviours. (ISD (`segment interwork`)
 origination landed in slice 4.)
 
+#### P6 slice 2b — dual ST origination (one session → ST1 + ST2) — **DONE**
+
+A single PFCP session whose Network Instance is bound by more than one VRF
+must originate **every** matching Session-Transformed route, not just the
+first. `build_mup_origination` used `find_map` over the VRFs, so when an
+st1 (downlink) VRF and an st2 (uplink) VRF both bound the same Network
+Instance (e.g. both `internet`), only the first match originated.
+
+- **Fan-out.** `build_mup_origination` now `filter_map`s over *all* VRFs
+  whose `srv6_mobile.network_instance` matches the session NI and returns
+  `Vec<(MupPrefix, BgpAttr)>` — one ST route per match. So one session
+  under `internet` originates both the Type-1 ST (from the st1 VRF) and the
+  Type-2 ST (from the st2 VRF). Each match still skips when it has no RD or
+  lacks the addresses its route type needs.
+- **Multi-prefix tracking.** `mup_c_originated` becomes
+  `BTreeMap<u64, Vec<MupPrefix>>` so a Session Deletion / Modification
+  withdraws all of a session's routes.
+- **Grammar unchanged** — the symmetric `route st1{} / route st2{}` shape
+  already expressed this (two VRFs, distinct directions, same NI); only the
+  origination behaviour changed.
+- **Test.** Unit module `mup_dual_origination_tests` (one session → both a
+  T1st and a T2st; unmatched NI → nothing). New `@bgp_mup_dual_st` BDD: two
+  VRFs bind NI `internet`, one `pfcp-inject` session, both ST1 and ST2
+  originated on z1 and received by z2. Run live via
+  `make -C bdd bgp_mup_dual_st`.
+
 #### P6 slice 3 — receive-side ST2 → Direct-segment resolution — **DONE**
 
 The interwork (SRGW) node — any VRF with `afi-safi mup segment
