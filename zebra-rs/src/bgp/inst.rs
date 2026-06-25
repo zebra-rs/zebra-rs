@@ -723,6 +723,11 @@ pub struct Bgp {
     /// Type-6 (SMET) origination and replays on `igmp_mld_proxy`
     /// transitions, mirroring `local_vxlans`/`local_fdb`.
     pub local_smet: BTreeMap<(u32, std::net::IpAddr, Option<std::net::IpAddr>), std::net::IpAddr>,
+    /// Locally-configured EVPN Ethernet Segments (RFC 7432) keyed by the
+    /// operator-chosen name, from `router bgp afi-safi evpn ethernet-segment`.
+    /// Config + state only in this phase — Type-4 discovery and DF election
+    /// are later phases.
+    pub ethernet_segments: BTreeMap<String, super::ethernet_segment::EthernetSegment>,
     /// Configured hostname for the local BGP speaker. Advertised in
     /// the FQDN capability (capability code 73). When None, falls back
     /// to the OS hostname; if that also fails, no FQDN capability is
@@ -1141,6 +1146,7 @@ impl Bgp {
             local_fdb: BTreeMap::new(),
             local_vxlans: BTreeMap::new(),
             local_smet: BTreeMap::new(),
+            ethernet_segments: BTreeMap::new(),
             hostname: None,
             no_fib_install: false,
             peers: PeerMap::new(),

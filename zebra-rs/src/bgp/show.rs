@@ -2049,6 +2049,38 @@ pub(super) fn render_summary_with_counts<V: BgpShowView>(
 }
 
 /// `show bgp evpn summary` — the L2VPN/EVPN section only.
+/// `show bgp evpn ethernet-segment` — the locally-configured EVPN Ethernet
+/// Segments (RFC 7432): name, ESI, redundancy mode, access interface, and the
+/// auto-derived ES-Import RT. Config + state only in this phase (DF state and
+/// the per-ES PE membership set arrive with Type-4 discovery / DF election).
+fn show_bgp_evpn_ethernet_segment(
+    bgp: &Bgp,
+    _args: Args,
+    _json: bool,
+) -> std::result::Result<String, std::fmt::Error> {
+    use std::fmt::Write;
+    let mut buf = String::new();
+    if bgp.ethernet_segments.is_empty() {
+        writeln!(buf, "No EVPN Ethernet Segments configured")?;
+        return Ok(buf);
+    }
+    for (name, es) in bgp.ethernet_segments.iter() {
+        writeln!(buf, "Ethernet Segment: {name}")?;
+        match es.esi {
+            Some(esi) => writeln!(buf, "  ESI: {}", bgp_packet::esi_display(&esi))?,
+            None => writeln!(buf, "  ESI: (unset)")?,
+        }
+        writeln!(buf, "  Redundancy mode: {}", es.redundancy_mode.as_str())?;
+        if let Some(ifname) = &es.interface {
+            writeln!(buf, "  Interface: {ifname}")?;
+        }
+        if let Some(rt) = es.es_import_rt() {
+            writeln!(buf, "  ES-Import RT: {}", format_evpn_ecom_value(&rt))?;
+        }
+    }
+    Ok(buf)
+}
+
 fn show_bgp_evpn_summary(
     bgp: &Bgp,
     _args: Args,
@@ -5967,6 +5999,8 @@ impl Bgp {
             .set(show_bgp_evpn)
             .path("/show/bgp/evpn/route-type")
             .set(show_bgp_evpn)
+            .path("/show/bgp/evpn/ethernet-segment")
+            .set(show_bgp_evpn_ethernet_segment)
             .path("/show/bgp/mup")
             .set(show_bgp_mup)
             .path("/show/bgp/mup/summary")

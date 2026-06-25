@@ -1685,6 +1685,85 @@ fn config_igmp_mld_proxy(bgp: &mut Bgp, mut args: Args, op: ConfigOp) -> Option<
     Some(())
 }
 
+/// `router bgp afi-safi evpn ethernet-segment <name>` (RFC 7432) — create or
+/// delete a locally-configured Ethernet Segment. Config + state only in this
+/// phase; Type-4 discovery and DF election land later.
+fn config_ethernet_segment(bgp: &mut Bgp, mut args: Args, op: ConfigOp) -> Option<()> {
+    let afi_safi: AfiSafi = args.afi_safi()?;
+    if afi_safi.afi != Afi::L2vpn || afi_safi.safi != Safi::Evpn {
+        return None;
+    }
+    let name = args.string()?;
+    match op {
+        ConfigOp::Set => {
+            bgp.ethernet_segments.entry(name).or_default();
+        }
+        ConfigOp::Delete => {
+            bgp.ethernet_segments.remove(&name);
+        }
+        _ => {}
+    }
+    Some(())
+}
+
+/// `router bgp afi-safi evpn ethernet-segment <name> esi <value>` — the
+/// 10-octet ESI (colon-hex or 20 hex digits). A malformed value is rejected.
+fn config_ethernet_segment_esi(bgp: &mut Bgp, mut args: Args, op: ConfigOp) -> Option<()> {
+    let afi_safi: AfiSafi = args.afi_safi()?;
+    if afi_safi.afi != Afi::L2vpn || afi_safi.safi != Safi::Evpn {
+        return None;
+    }
+    let name = args.string()?;
+    let esi = if op.is_set() {
+        Some(bgp_packet::esi_from_str(&args.string()?)?)
+    } else {
+        None
+    };
+    bgp.ethernet_segments.entry(name).or_default().esi = esi;
+    Some(())
+}
+
+/// `router bgp afi-safi evpn ethernet-segment <name> redundancy-mode
+/// <all-active|single-active>` (default all-active).
+fn config_ethernet_segment_redundancy_mode(
+    bgp: &mut Bgp,
+    mut args: Args,
+    op: ConfigOp,
+) -> Option<()> {
+    let afi_safi: AfiSafi = args.afi_safi()?;
+    if afi_safi.afi != Afi::L2vpn || afi_safi.safi != Safi::Evpn {
+        return None;
+    }
+    let name = args.string()?;
+    let mode = if op.is_set() {
+        super::ethernet_segment::EsRedundancyMode::from_keyword(&args.string()?)
+    } else {
+        super::ethernet_segment::EsRedundancyMode::default()
+    };
+    bgp.ethernet_segments
+        .entry(name)
+        .or_default()
+        .redundancy_mode = mode;
+    Some(())
+}
+
+/// `router bgp afi-safi evpn ethernet-segment <name> interface <name>` — the
+/// CE-facing access port bound to this ES.
+fn config_ethernet_segment_interface(bgp: &mut Bgp, mut args: Args, op: ConfigOp) -> Option<()> {
+    let afi_safi: AfiSafi = args.afi_safi()?;
+    if afi_safi.afi != Afi::L2vpn || afi_safi.safi != Safi::Evpn {
+        return None;
+    }
+    let name = args.string()?;
+    let interface = if op.is_set() {
+        Some(args.string()?)
+    } else {
+        None
+    };
+    bgp.ethernet_segments.entry(name).or_default().interface = interface;
+    Some(())
+}
+
 /// `router bgp afi-safi evpn segmentation <bool>` (RFC 9572 §8). When
 /// enabled, the Multicast Flags Extended Community's segmentation-support
 /// bit (bit 8) is attached to every originated Type-3 IMET route, telling
@@ -4213,6 +4292,26 @@ impl Bgp {
         // `router bgp afi-safi evpn segmentation`. When set, the Multicast
         // Flags EC's segmentation bit rides the originated Type-3 IMET route.
         self.callback_add("/router/bgp/afi-safi/segmentation", config_segmentation);
+
+        // EVPN Ethernet Segment (RFC 7432), under
+        // `router bgp afi-safi evpn ethernet-segment <name> …`. Augmented in
+        // by zebra-bgp-evpn.yang. Config + state only in this phase.
+        self.callback_add(
+            "/router/bgp/afi-safi/ethernet-segment",
+            config_ethernet_segment,
+        );
+        self.callback_add(
+            "/router/bgp/afi-safi/ethernet-segment/esi",
+            config_ethernet_segment_esi,
+        );
+        self.callback_add(
+            "/router/bgp/afi-safi/ethernet-segment/redundancy-mode",
+            config_ethernet_segment_redundancy_mode,
+        );
+        self.callback_add(
+            "/router/bgp/afi-safi/ethernet-segment/interface",
+            config_ethernet_segment_interface,
+        );
 
         // MUP controller (`router bgp mup-c …`, RFC 9833).
         // Augmented in by zebra-bgp-mup-controller.yang; the controller
