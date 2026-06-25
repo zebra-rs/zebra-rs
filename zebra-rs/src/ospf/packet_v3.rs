@@ -397,6 +397,31 @@ pub fn ospfv3_hello_recv(
 
     let nbr_router_id = packet.router_id;
 
+    // RFC 5340 §10 keys neighbours by Router-ID, but a single physical
+    // neighbour is identified on the wire by its link-local source
+    // address. A Hello arriving from a source we already track under a
+    // *different* Router-ID means that neighbour restarted under a new
+    // identity (typically an operator changed its `router-id`). The old
+    // entry would otherwise linger as a phantom Full adjacency — our
+    // Router-LSA would advertise a link to a Router-ID that no longer
+    // originates an LSA, and we would retransmit to it indefinitely
+    // (its dead timer does not reap it while the underlying link stays
+    // up). Tear the stale entry down at once via the same path as the
+    // dead timer / `clear ospfv3 neighbor`; the fresh Router-ID is
+    // (re-)learned just below.
+    let stale: Vec<std::net::Ipv4Addr> = oi
+        .nbrs
+        .iter()
+        .filter_map(|(rid, nbr)| {
+            (*rid != nbr_router_id && nbr.ident.prefix.addr() == *src).then_some(*rid)
+        })
+        .collect();
+    for rid in stale {
+        let _ = oi
+            .tx
+            .send(Message::Nfsm(oi.index, rid, NfsmEvent::InactivityTimer));
+    }
+
     // Neighbor key in `oi.nbrs` is Ipv4Addr in both versions; v3
     // stores the router-id (RFC 5340 §10), which matches what
     // `V::nbr_addr` returns for v3.

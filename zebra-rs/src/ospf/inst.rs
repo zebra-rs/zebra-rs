@@ -4544,11 +4544,100 @@ impl Ospf<Ospfv2> {
     }
 
     pub(super) fn router_id_update(&mut self, router_id: Ipv4Addr) {
+        // Flush everything we originated under the PREVIOUS Router-ID
+        // before adopting the new one. Self-originated LSAs are keyed by
+        // advertising router, so once our Router-ID changes the old
+        // instances are no longer "self" — nothing refreshes them and
+        // they would linger as phantom nodes in every router's LSDB
+        // until they age out at MaxAge (~1 h). Pre-aging + re-flooding
+        // them now withdraws the stale identity immediately.
+        let old_router_id = self.router_id;
+        if old_router_id != router_id {
+            self.flush_self_originated_under(old_router_id);
+        }
+
         self.router_id = router_id;
         for (_, link) in self.links.iter_mut() {
             link.ident.router_id = router_id;
         }
         self.router_lsa_originate();
+    }
+
+    /// Flush (pre-age to MaxAge + re-flood) every LSA we originated
+    /// under `old_router_id` — the per-area Router/Network/Summary/
+    /// Opaque LSAs plus AS-External LSAs. Called from
+    /// [`Self::router_id_update`] when the effective Router-ID moves so
+    /// the database advertised under our former identity is withdrawn
+    /// instead of lingering until MaxAge.
+    fn flush_self_originated_under(&mut self, old_router_id: Ipv4Addr) {
+        if self.in_restart() {
+            return;
+        }
+        // Per-area LSDBs.
+        let area_ids: Vec<Ipv4Addr> = self.areas.iter().map(|(id, _)| *id).collect();
+        for area_id in area_ids {
+            let keys: Vec<OspfLsaKey> = match self.areas.get(area_id) {
+                Some(area) => area
+                    .lsdb
+                    .tables
+                    .keys()
+                    .filter(|(_, _, adv)| *adv == old_router_id)
+                    .copied()
+                    .collect(),
+                None => continue,
+            };
+            for key in keys {
+                let flushed = if let Some(area) = self.areas.get_mut(area_id) {
+                    area.lsdb.flush_lsa_by_raw_key(key, &self.tx, Some(area_id))
+                } else {
+                    None
+                };
+                if let Some(lsa) = flushed {
+                    self.flood_self_originated_lsa(area_id, &lsa);
+                }
+            }
+        }
+        // AS-External LSDB (Type-5), flooded AS-wide.
+        let as_keys: Vec<OspfLsaKey> = self
+            .lsdb_as
+            .tables
+            .keys()
+            .filter(|(_, _, adv)| *adv == old_router_id)
+            .copied()
+            .collect();
+        for key in as_keys {
+            if let Some(lsa) = self.lsdb_as.flush_lsa_by_raw_key(key, &self.tx, None) {
+                self.flood_lsa_through_as(&lsa, None);
+            }
+        }
+
+        // Per-link LSDBs: link-scope Opaque LSAs (e.g. the Extended-Link
+        // LSA that carries an Adj-SID) live in `link.lsdb`, not the area
+        // LSDB. Flush + re-flood them on their link so a peer's
+        // link-scope database doesn't keep the old identity around.
+        let ifindices: Vec<u32> = self.links.keys().copied().collect();
+        for ifindex in ifindices {
+            let keys: Vec<OspfLsaKey> = match self.links.get(&ifindex) {
+                Some(link) => link
+                    .lsdb
+                    .tables
+                    .keys()
+                    .filter(|(_, _, adv)| *adv == old_router_id)
+                    .copied()
+                    .collect(),
+                None => continue,
+            };
+            for key in keys {
+                let flushed = if let Some(link) = self.links.get_mut(&ifindex) {
+                    link.lsdb.flush_lsa_by_raw_key(key, &self.tx, None)
+                } else {
+                    None
+                };
+                if let Some(lsa) = flushed {
+                    self.flood_link_scope_lsa_v2(ifindex, &lsa);
+                }
+            }
+        }
     }
 
     /// Recompute the effective Router ID from its sources —
@@ -5516,11 +5605,92 @@ impl Ospf<Ospfv3> {
     /// at all and every instance kept the constructor default
     /// 10.0.0.1).
     pub(super) fn router_id_update(&mut self, router_id: Ipv4Addr) {
+        // See the v2 sibling: withdraw everything originated under the
+        // previous Router-ID so it does not linger as a phantom node in
+        // peers' LSDBs until MaxAge.
+        let old_router_id = self.router_id;
+        if old_router_id != router_id {
+            self.flush_self_originated_under(old_router_id);
+        }
+
         self.router_id = router_id;
         for (_, link) in self.links.iter_mut() {
             link.ident.router_id = router_id;
         }
         self.router_lsa_originate();
+    }
+
+    /// v3 sibling of the v2 `flush_self_originated_under`: pre-age to
+    /// MaxAge + re-flood every LSA we originated under `old_router_id`
+    /// (per-area LSAs plus AS-External LSAs) when the effective
+    /// Router-ID moves.
+    fn flush_self_originated_under(&mut self, old_router_id: Ipv4Addr) {
+        let area_ids: Vec<Ipv4Addr> = self.areas.iter().map(|(id, _)| *id).collect();
+        for area_id in area_ids {
+            let keys: Vec<OspfLsaKey> = match self.areas.get(area_id) {
+                Some(area) => area
+                    .lsdb
+                    .tables
+                    .keys()
+                    .filter(|(_, _, adv)| *adv == old_router_id)
+                    .copied()
+                    .collect(),
+                None => continue,
+            };
+            for key in keys {
+                let flushed = if let Some(area) = self.areas.get_mut(area_id) {
+                    area.lsdb.flush_lsa_by_raw_key(key, &self.tx, Some(area_id))
+                } else {
+                    None
+                };
+                if let Some(lsa) = flushed {
+                    self.flood_self_originated_lsa(area_id, &lsa);
+                }
+            }
+        }
+        let as_keys: Vec<OspfLsaKey> = self
+            .lsdb_as
+            .tables
+            .keys()
+            .filter(|(_, _, adv)| *adv == old_router_id)
+            .copied()
+            .collect();
+        for key in as_keys {
+            if let Some(lsa) = self.lsdb_as.flush_lsa_by_raw_key(key, &self.tx, None) {
+                self.flood_lsa_through_as_v3(&lsa, None);
+            }
+        }
+
+        // Per-link LSDBs: v3 Link-LSAs (RFC 5340 §A.4.9) are
+        // link-local scope and live in `link.lsdb`, not the area
+        // LSDB, so the loop above misses them. A peer keeps the
+        // Link-LSA we originated under the old Router-ID (it shows up
+        // in its `show ospfv3 database`) until it MaxAges on its own;
+        // flush + re-flood it on the link so it goes away with the
+        // rest of the old identity.
+        let ifindices: Vec<u32> = self.links.keys().copied().collect();
+        for ifindex in ifindices {
+            let keys: Vec<OspfLsaKey> = match self.links.get(&ifindex) {
+                Some(link) => link
+                    .lsdb
+                    .tables
+                    .keys()
+                    .filter(|(_, _, adv)| *adv == old_router_id)
+                    .copied()
+                    .collect(),
+                None => continue,
+            };
+            for key in keys {
+                let flushed = if let Some(link) = self.links.get_mut(&ifindex) {
+                    link.lsdb.flush_lsa_by_raw_key(key, &self.tx, None)
+                } else {
+                    None
+                };
+                if let Some(lsa) = flushed {
+                    self.flood_link_scope_lsa(ifindex, &lsa);
+                }
+            }
+        }
     }
 
     /// v3 sibling of the v2 `refresh_router_id`: configured value

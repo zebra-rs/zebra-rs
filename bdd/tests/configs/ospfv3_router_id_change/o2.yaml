@@ -1,0 +1,18 @@
+interface:
+- if-name: lo
+  ipv6:
+    address: 2001:db8::2/128
+- if-name: eth2
+  ipv6:
+    address: 2001:db8:12::2/64
+router:
+  ospfv3:
+    router-id: 2.2.2.2
+    area:
+    - area-id: 0.0.0.0
+      interface:
+      - if-name: lo
+        enable: true
+      - if-name: eth2
+        enable: true
+        network-type: point-to-point
