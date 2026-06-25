@@ -1,0 +1,24 @@
+# z1 — EVPN multihoming (RFC 7432). Configures Ethernet Segment es1 with a
+# shared ESI; originates a Type-4 ES route and discovers z2 (the other PE on
+# the same ES) from z2's Type-4. Control-plane only — no VXLAN dataplane is
+# needed for ES discovery.
+router:
+  bgp:
+    global:
+      as: 65001
+      router-id: 192.168.0.1
+    afi-safi:
+    - name: evpn
+      ethernet-segment:
+      - name: es1
+        esi: "00:11:22:33:44:55:66:77:88:99"
+        redundancy-mode: all-active
+    neighbor:
+    - remote-address: 192.168.0.2
+      enabled: true
+      remote-as: 65001
+      afi-safi:
+      - name: ipv4
+        enabled: true
+      - name: evpn
+        enabled: true

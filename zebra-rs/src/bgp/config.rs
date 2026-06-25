@@ -1686,8 +1686,8 @@ fn config_igmp_mld_proxy(bgp: &mut Bgp, mut args: Args, op: ConfigOp) -> Option<
 }
 
 /// `router bgp afi-safi evpn ethernet-segment <name>` (RFC 7432) — create or
-/// delete a locally-configured Ethernet Segment. Config + state only in this
-/// phase; Type-4 discovery and DF election land later.
+/// delete a locally-configured Ethernet Segment. Deleting an ES that had an
+/// ESI withdraws its Type-4 route.
 fn config_ethernet_segment(bgp: &mut Bgp, mut args: Args, op: ConfigOp) -> Option<()> {
     let afi_safi: AfiSafi = args.afi_safi()?;
     if afi_safi.afi != Afi::L2vpn || afi_safi.safi != Safi::Evpn {
@@ -1699,6 +1699,10 @@ fn config_ethernet_segment(bgp: &mut Bgp, mut args: Args, op: ConfigOp) -> Optio
             bgp.ethernet_segments.entry(name).or_default();
         }
         ConfigOp::Delete => {
+            let vtep = IpAddr::V4(bgp.router_id);
+            if let Some(esi) = bgp.ethernet_segments.get(&name).and_then(|es| es.esi) {
+                bgp.evpn_withdraw_ethernet_seg(esi, vtep);
+            }
             bgp.ethernet_segments.remove(&name);
         }
         _ => {}
@@ -1708,18 +1712,29 @@ fn config_ethernet_segment(bgp: &mut Bgp, mut args: Args, op: ConfigOp) -> Optio
 
 /// `router bgp afi-safi evpn ethernet-segment <name> esi <value>` — the
 /// 10-octet ESI (colon-hex or 20 hex digits). A malformed value is rejected.
+/// Setting the ESI originates the Type-4 ES route (RFC 7432 §7.4); changing or
+/// clearing it withdraws the previous one first.
 fn config_ethernet_segment_esi(bgp: &mut Bgp, mut args: Args, op: ConfigOp) -> Option<()> {
     let afi_safi: AfiSafi = args.afi_safi()?;
     if afi_safi.afi != Afi::L2vpn || afi_safi.safi != Safi::Evpn {
         return None;
     }
     let name = args.string()?;
-    let esi = if op.is_set() {
+    let new_esi = if op.is_set() {
         Some(bgp_packet::esi_from_str(&args.string()?)?)
     } else {
         None
     };
-    bgp.ethernet_segments.entry(name).or_default().esi = esi;
+    let vtep = IpAddr::V4(bgp.router_id);
+    // Withdraw the Type-4 for the previously-configured ESI (if any), then set
+    // the new one and originate.
+    if let Some(old) = bgp.ethernet_segments.get(&name).and_then(|es| es.esi) {
+        bgp.evpn_withdraw_ethernet_seg(old, vtep);
+    }
+    bgp.ethernet_segments.entry(name).or_default().esi = new_esi;
+    if let Some(esi) = new_esi {
+        bgp.evpn_originate_ethernet_seg(esi, vtep);
+    }
     Some(())
 }
 

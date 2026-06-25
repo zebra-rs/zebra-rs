@@ -2064,6 +2064,7 @@ fn show_bgp_evpn_ethernet_segment(
         writeln!(buf, "No EVPN Ethernet Segments configured")?;
         return Ok(buf);
     }
+    let local = std::net::IpAddr::V4(bgp.router_id);
     for (name, es) in bgp.ethernet_segments.iter() {
         writeln!(buf, "Ethernet Segment: {name}")?;
         match es.esi {
@@ -2076,6 +2077,15 @@ fn show_bgp_evpn_ethernet_segment(
         }
         if let Some(rt) = es.es_import_rt() {
             writeln!(buf, "  ES-Import RT: {}", format_evpn_ecom_value(&rt))?;
+        }
+        // PE membership discovered from received (and our own) Type-4 routes.
+        if let Some(esi) = es.esi {
+            let members = bgp.es_member_vteps(&esi);
+            writeln!(buf, "  Member VTEPs ({}):", members.len())?;
+            for vtep in &members {
+                let tag = if *vtep == local { " (local)" } else { "" };
+                writeln!(buf, "    {vtep}{tag}")?;
+            }
         }
     }
     Ok(buf)
