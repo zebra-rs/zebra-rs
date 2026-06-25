@@ -27,7 +27,7 @@ use std::net::{IpAddr, Ipv4Addr};
 use std::str::FromStr;
 
 use bgp_packet::RouteDistinguisher;
-use ipnet::{Ipv4Net, Ipv6Net};
+use ipnet::{IpNet, Ipv4Net, Ipv6Net};
 
 use crate::bgp_vrf_trace;
 use crate::config::{Args, ConfigOp};
@@ -184,9 +184,10 @@ pub struct MupSrv6Mobile {
 pub struct BgpVrfMobileUplane {
     pub srv6_mobile: Option<MupSrv6Mobile>,
     /// `afi-safi mup segment {direct|interwork}` — PE-side Segment
-    /// Discovery origination for this VRF. `Direct` → DSD (type 2,
-    /// carrying the VRF's End.DT46 SID); `Interwork` → ISD (type 1,
-    /// origination deferred). Independent of `srv6_mobile`.
+    /// Discovery origination for this VRF. `Direct` → DSD (type 2, NLRI =
+    /// RD + router-id); `Interwork` → ISD (type 1, NLRI = RD +
+    /// [`Self::interwork_prefix`]). Both carry the VRF's End.DT46 SID.
+    /// Independent of `srv6_mobile`.
     pub segment: Option<MupSegmentMode>,
     /// `afi-safi mup segment direct mup-ext-comm <2:4>` — the BGP MUP
     /// Extended Community (transitive type 0x0c, sub-type 0x00 =
@@ -196,6 +197,13 @@ pub struct BgpVrfMobileUplane {
     /// this Direct segment (§3.3.10 / §3.3.12). The 6-octet value reuses
     /// the RD/RT 2:4 wire layout, so it is stored as a `RouteDistinguisher`.
     pub mup_ext_comm: Option<RouteDistinguisher>,
+    /// `afi-safi mup segment interwork prefix <p>` — the interwork segment
+    /// prefix advertised in this VRF's Interwork Segment Discovery (ISD,
+    /// type 1) route NLRI (draft-mpmz-bess-mup-safi §3.1.1), typically the
+    /// locally connected gNodeB N3 prefix. Meaningful only under the
+    /// `interwork` segment; the ISD does not originate until it is set, and
+    /// its AFI follows this prefix's family.
+    pub interwork_prefix: Option<IpNet>,
 }
 
 /// Staged candidate configuration for one VRF entry. Mirrors the
@@ -471,6 +479,28 @@ pub fn config_vrf_mup_ext_comm(bgp: &mut Bgp, mut args: Args, op: ConfigOp) -> O
             cfg.mobile_uplane.mup_ext_comm = Some(RouteDistinguisher::from_str(&raw).ok()?);
         }
         ConfigOp::Delete => cfg.mobile_uplane.mup_ext_comm = None,
+        _ => {}
+    }
+    Some(())
+}
+
+/// `set router bgp vrf <NAME> afi-safi mup segment interwork prefix <p>` —
+/// the interwork segment prefix carried in this VRF's Interwork Segment
+/// Discovery (ISD, type 1) route NLRI (draft §3.1.1). Like `mup-ext-comm`,
+/// this leaf hangs off the `segment` list, so the segment list key
+/// (`direct`/`interwork`) sits between the VRF name and the value and is
+/// skipped here. The value is an IPv4 or IPv6 prefix; the ISD's AFI follows
+/// its family.
+pub fn config_vrf_mup_segment_prefix(bgp: &mut Bgp, mut args: Args, op: ConfigOp) -> Option<()> {
+    let name = args.string()?;
+    let _segment = args.string()?; // segment list key (direct|interwork)
+    let cfg = vrf_entry(bgp, name);
+    match op {
+        ConfigOp::Set => {
+            let raw = args.string()?;
+            cfg.mobile_uplane.interwork_prefix = Some(IpNet::from_str(&raw).ok()?);
+        }
+        ConfigOp::Delete => cfg.mobile_uplane.interwork_prefix = None,
         _ => {}
     }
     Some(())

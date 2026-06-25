@@ -245,8 +245,9 @@ module zebra-bgp-vrf {
               enum interwork {
                 description
                   "Originate an Interwork Segment Discovery (ISD, type 1)
-                   route. (Origination deferred — parsed but not yet acted
-                   on.)";
+                   route: the NLRI is the VRF RD + the configured `prefix`
+                   and the SRv6 L3 Service carries the per-VRF End.DT46 SID.
+                   Requires `prefix` to be set.";
               }
             }
             description
@@ -263,6 +264,18 @@ module zebra-bgp-vrf {
                (ST2) routes that resolve to this Direct segment (§3.3.10 /
                §3.3.12). The 6-octet value reuses the RD/RT 2:4 wire format.
                Meaningful only under the `direct` segment.";
+          }
+          leaf prefix {
+            type inet:ip-prefix;
+            description
+              "Interwork segment prefix advertised in the Interwork Segment
+               Discovery (ISD, type 1) route's NLRI
+               (draft-mpmz-bess-mup-safi §3.1.1) — typically the locally
+               connected gNodeB N3 interface prefix. The route's AFI follows
+               this prefix's family (IPv4 / IPv6) and the SRv6 L3 Service
+               carries the VRF's End.DT46 SID. Meaningful only under the
+               `interwork` segment; the ISD does not originate until it is
+               set.";
           }
         }
         list route {

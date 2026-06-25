@@ -4156,6 +4156,10 @@ impl Bgp {
             super::vrf_config::config_vrf_mup_ext_comm,
         );
         self.callback_add(
+            "/router/bgp/vrf/afi-safi/mup/segment/prefix",
+            super::vrf_config::config_vrf_mup_segment_prefix,
+        );
+        self.callback_add(
             "/router/bgp/vrf/afi-safi/mup/route",
             super::vrf_config::config_vrf_mup_route,
         );

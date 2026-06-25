@@ -7636,6 +7636,35 @@ fn bgp_nexthop_ip(nh: &BgpNexthop) -> Option<IpAddr> {
     }
 }
 
+/// Select the Segment Discovery NLRI for a VRF's `segment` mode: a DSD
+/// (RD + router-id) for `Direct`, or an ISD (RD + the configured interwork
+/// prefix) for `Interwork`. Returns `None` when the route's NLRI key is not
+/// available yet — an all-zero router-id for Direct (cold start before the
+/// router-id resolves) or an unset `segment interwork prefix` for Interwork.
+fn mup_segment_nlri(
+    mode: super::vrf_config::MupSegmentMode,
+    rd: RouteDistinguisher,
+    router_id: Ipv4Addr,
+    interwork_prefix: Option<ipnet::IpNet>,
+) -> Option<MupPrefix> {
+    use super::vrf_config::MupSegmentMode;
+    match mode {
+        MupSegmentMode::Direct => {
+            if router_id.is_unspecified() {
+                return None;
+            }
+            Some(MupPrefix::Dsd {
+                rd,
+                address: IpAddr::V4(router_id),
+            })
+        }
+        MupSegmentMode::Interwork => Some(MupPrefix::Isd {
+            rd,
+            prefix: interwork_prefix?,
+        }),
+    }
+}
+
 /// Build the (route, egress attrs, MP_REACH next-hop) to advertise one
 /// selected MUP path to `peer`, or `None` to suppress it. Mirrors
 /// `route_update_evpn`: split-horizon (never back to the source peer),
@@ -7667,11 +7696,11 @@ fn route_update_mup(
     let mut attrs = (*rib.attr).clone();
     ebgp_egress_aspath(&peer.egress_as(), &mut attrs);
 
-    // MP_REACH next-hop: an SRv6 segment route we originate (a DSD carrying
-    // an End.DT46 Prefix-SID) advertises the PE locator node carried in the
-    // attr, so a receiving PE H.Encaps to it; next-hop-self toward eBGP and
-    // for our other originations; otherwise preserve the received next-hop
-    // (RFC 9833 — the PE/controller address the ingress PE resolves).
+    // MP_REACH next-hop: an SRv6 segment route we originate (a DSD or ISD
+    // carrying an End.DT46 Prefix-SID) advertises the PE locator node carried
+    // in the attr, so a receiving PE H.Encaps to it; next-hop-self toward
+    // eBGP and for our other originations; otherwise preserve the received
+    // next-hop (RFC 9833 — the PE/controller address the ingress PE resolves).
     let nhop: IpAddr = if rib.is_originated() && attrs.prefix_sid.is_some() {
         bgp_nexthop_ip(attrs.nexthop.as_ref()?)?
     } else if peer.is_ebgp() || rib.is_originated() {
@@ -12846,28 +12875,32 @@ impl Bgp {
         let _ = handle.inbox.send(msg);
     }
 
-    /// Reconcile config-driven MUP DSD (Direct Segment Discovery, type 2)
-    /// origination across every VRF. Idempotent — safe to call after VRF
-    /// spawn / kernel-ctx respawn, locator (SID) change, and MUP RT update.
-    /// Originates a DSD for each VRF that now qualifies (see
-    /// [`Self::build_mup_dsd_origination`]), withdraws those that no longer
-    /// do, and re-advertises when the SID changed under a stable NLRI key.
-    pub(super) fn reconcile_mup_dsd(&mut self) {
+    /// Reconcile config-driven MUP Segment Discovery origination — DSD
+    /// (Direct, type 2) and ISD (Interwork, type 1) — across every VRF.
+    /// Idempotent — safe to call after VRF spawn / kernel-ctx respawn,
+    /// locator (SID) change, and MUP RT update. Originates a segment route
+    /// for each VRF that now qualifies (see
+    /// [`Self::build_mup_segment_origination`]), withdraws those that no
+    /// longer do, and re-advertises when the SID changed under a stable
+    /// NLRI key. A VRF has at most one segment route (its `segment` is one
+    /// of direct/interwork), so the per-VRF-name tracking holds for both.
+    pub(super) fn reconcile_mup_segment(&mut self) {
         let names: Vec<String> = self.vrfs.keys().cloned().collect();
         let mut desired: std::collections::BTreeMap<
             String,
             (bgp_packet::MupPrefix, std::net::Ipv6Addr, BgpAttr),
         > = std::collections::BTreeMap::new();
         for name in &names {
-            if let Some(d) = self.build_mup_dsd_origination(name) {
+            if let Some(d) = self.build_mup_segment_origination(name) {
                 desired.insert(name.clone(), d);
             }
         }
-        // Withdraw DSDs no longer desired, or whose NLRI key changed (a
-        // changed RD/router-id needs an explicit withdraw of the OLD prefix
-        // before the new one is originated under a different key).
+        // Withdraw segment routes no longer desired, or whose NLRI key
+        // changed (a changed RD/router-id/prefix, or a direct↔interwork
+        // switch, needs an explicit withdraw of the OLD prefix before the new
+        // one is originated under a different key).
         let prev: Vec<(String, bgp_packet::MupPrefix)> = self
-            .mup_dsd_originated
+            .mup_segment_originated
             .iter()
             .map(|(n, (p, _, _))| (n.clone(), p.clone()))
             .collect();
@@ -12877,7 +12910,7 @@ impl Bgp {
                 .map(|(p, _, _)| *p == prev_prefix)
                 .unwrap_or(false);
             if !keep {
-                self.withdraw_mup_dsd(&name);
+                self.withdraw_mup_segment(&name);
             }
         }
         // Originate or refresh. Skip only when the NLRI key, the SID *and*
@@ -12886,38 +12919,47 @@ impl Bgp {
         // re-advertise but a later RT / `mup-ext-comm` arrival does.
         for (name, (prefix, sid, attr)) in desired {
             let unchanged = self
-                .mup_dsd_originated
+                .mup_segment_originated
                 .get(&name)
                 .map(|(p, s, e)| *p == prefix && *s == sid && *e == attr.ecom)
                 .unwrap_or(false);
             if unchanged {
                 continue;
             }
-            self.originate_mup_dsd(name, prefix, sid, attr);
+            self.originate_mup_segment(name, prefix, sid, attr);
         }
     }
 
-    /// Build a VRF's DSD origination, or `None` when it shouldn't originate
-    /// one right now. Gates: `afi-safi mup segment direct`, `encapsulation
-    /// srv6`, a configured RD, a resolved per-VRF End.DT46 SID, a resolved
-    /// locator, and a known kernel VRF — the last so the local End.DT46
-    /// decap is already installed before the segment is advertised (the SID
-    /// install rides the same `VrfAdd`/spawn path).
+    /// Build a VRF's Segment Discovery origination — a DSD (type 2) for
+    /// `segment direct` or an ISD (type 1) for `segment interwork` — or
+    /// `None` when it shouldn't originate one right now. Shared gates:
+    /// `encapsulation srv6`, a configured RD, a resolved per-VRF End.DT46
+    /// SID, a resolved locator, and a known kernel VRF — the last so the
+    /// local End.DT46 decap is already installed before the segment is
+    /// advertised (the SID install rides the same `VrfAdd`/spawn path).
+    /// Both carry the PE locator node as the IPv6 next-hop and the per-VRF
+    /// **End.DT46** SID as the SRv6 L3 Service — the segment a receiving PE
+    /// resolves for matching Session-Transformed routes. (zebra-rs uses
+    /// End.DT46 for both Direct and Interwork; the draft's GTP4.E/GTP6.E
+    /// interwork behaviours are VPP/eBPF and deferred.)
     ///
-    /// The NLRI is the VRF RD + router-id (so the route rides the IPv4-MUP
-    /// AFI); the attributes carry the PE locator node as the IPv6 next-hop
-    /// and the End.DT46 SID as the SRv6 L3 Service — the segment a receiving
-    /// PE resolves for matching Session-Transformed routes. Returns
-    /// `(prefix, sid_addr, attr)`.
-    fn build_mup_dsd_origination(
+    /// - **Direct (DSD):** NLRI = RD + router-id (rides the IPv4-MUP AFI);
+    ///   additionally carries the VRF's MUP Extended Community
+    ///   (Direct-segment id) so ST2 routes resolve to it. Needs a non-zero
+    ///   router-id (it is in the NLRI key).
+    /// - **Interwork (ISD):** NLRI = RD + the configured interwork `prefix`
+    ///   (`afi-safi mup segment interwork prefix <p>`; its family selects
+    ///   the AFI). Needs the prefix to be set; no MUP Extended Community (a
+    ///   receiving PE resolves it by endpoint-address lookup, §3.1.1).
+    ///
+    /// Returns `(prefix, sid_addr, attr)`.
+    fn build_mup_segment_origination(
         &self,
         name: &str,
     ) -> Option<(bgp_packet::MupPrefix, std::net::Ipv6Addr, BgpAttr)> {
         use super::vrf_config::{BgpVrfEncapsulation, MupSegmentMode};
         let cfg = self.vrfs.get(name)?;
-        if cfg.mobile_uplane.segment != Some(MupSegmentMode::Direct) {
-            return None;
-        }
+        let mode = cfg.mobile_uplane.segment?;
         if cfg.encapsulation != BgpVrfEncapsulation::Srv6 {
             return None;
         }
@@ -12931,17 +12973,10 @@ impl Bgp {
         let (sid, _function) = self.vrf_registry.get(name)?.srv6_sid?;
         let locator = self.srv6_locator.as_ref()?;
         let node = locator.node_sid_addr()?;
+        // The NLRI differs by segment type (DSD = RD + router-id, ISD = RD +
+        // interwork prefix); both ride the same End.DT46 SID.
         let router_id = cfg.router_id.unwrap_or(self.router_id);
-        // The DSD NLRI embeds the router-id; never originate one under the
-        // all-zero identity (cold start before the router-id resolves —
-        // `reconcile_mup_dsd` re-runs from `set_router_id`).
-        if router_id.is_unspecified() {
-            return None;
-        }
-        let prefix = bgp_packet::MupPrefix::Dsd {
-            rd,
-            address: IpAddr::V4(router_id),
-        };
+        let prefix = mup_segment_nlri(mode, rd, router_id, cfg.mobile_uplane.interwork_prefix)?;
         let rts = self
             .rib_known_vrfs
             .get(name)
@@ -12953,20 +12988,25 @@ impl Bgp {
             locator.sid_structure(),
             bgp_packet::SRV6_BEHAVIOR_END_DT46,
         ));
-        // The DSD route *is* the Direct segment, so it advertises its own
-        // MUP Extended Community identifier (draft §3.2 / §3.3.4); the
-        // controller's ST2 routes carry the same value to resolve here.
-        if let Some(seg) = cfg.mobile_uplane.mup_ext_comm {
+        // A Direct (DSD) route *is* the Direct segment, so it advertises its
+        // own MUP Extended Community identifier (draft §3.2 / §3.3.4); the
+        // controller's ST2 routes carry the same value to resolve here. The
+        // Interwork (ISD) route is resolved by endpoint-address lookup
+        // (§3.1.1), not by this ext-comm.
+        if matches!(mode, MupSegmentMode::Direct)
+            && let Some(seg) = cfg.mobile_uplane.mup_ext_comm
+        {
             attr_add_ecom(&mut attr, mup_direct_segment_ecom(&seg));
         }
         Some((prefix, sid, attr))
     }
 
-    /// Install one VRF's DSD route into the MUP Loc-RIB as `Originated` and
-    /// advertise it (mirrors [`Self::originate_mup_route`]). Tracks
-    /// `(prefix, sid)` so [`Self::reconcile_mup_dsd`] can detect a SID
-    /// change under a stable RD+router-id key.
-    fn originate_mup_dsd(
+    /// Install one VRF's Segment Discovery route (DSD or ISD) into the MUP
+    /// Loc-RIB as `Originated` and advertise it (mirrors
+    /// [`Self::originate_mup_route`]). Tracks `(prefix, sid, ecom)` so
+    /// [`Self::reconcile_mup_segment`] can detect a SID / ext-comm change
+    /// under a stable NLRI key.
+    fn originate_mup_segment(
         &mut self,
         name: String,
         prefix: bgp_packet::MupPrefix,
@@ -12988,15 +13028,16 @@ impl Bgp {
         rib.attr = self.attr_store.intern(attr);
         let _ = self.local_rib.update_mup(prefix.clone(), rib);
         let selected = self.local_rib.select_best_path_mup(&prefix);
-        self.mup_dsd_originated
+        self.mup_segment_originated
             .insert(name, (prefix.clone(), sid, ecom));
         self.mup_apply_selected(prefix, selected);
     }
 
-    /// Withdraw the DSD route originated for `name` (a config / SID /
-    /// kernel-VRF precondition dropped). No-op when nothing was originated.
-    fn withdraw_mup_dsd(&mut self, name: &str) {
-        let Some((prefix, _sid, _ecom)) = self.mup_dsd_originated.remove(name) else {
+    /// Withdraw the Segment Discovery route (DSD or ISD) originated for
+    /// `name` (a config / SID / kernel-VRF precondition dropped, or the
+    /// `segment` type changed). No-op when nothing was originated.
+    fn withdraw_mup_segment(&mut self, name: &str) {
+        let Some((prefix, _sid, _ecom)) = self.mup_segment_originated.remove(name) else {
             return;
         };
         self.local_rib.remove_mup(&prefix, 0, ORIGINATED_PEER);
@@ -17869,6 +17910,51 @@ mod tests {
             attr.prefix_sid.is_none(),
             "MUP-C must not attach a Prefix-SID; the PE derives the SID from ISD/DSD"
         );
+    }
+
+    // The Segment Discovery NLRI selector: `segment direct` keys a DSD off
+    // RD + router-id; `segment interwork` keys an ISD off RD + the configured
+    // interwork prefix. Each mode returns `None` until its NLRI key exists.
+    #[test]
+    fn mup_segment_nlri_selects_dsd_or_isd() {
+        use std::net::{IpAddr, Ipv4Addr};
+        use std::str::FromStr;
+
+        use bgp_packet::{MupPrefix, RouteDistinguisher};
+
+        use super::super::vrf_config::MupSegmentMode;
+
+        let rd = RouteDistinguisher::from_str("65501:10").unwrap();
+        let router_id: Ipv4Addr = "192.168.0.1".parse().unwrap();
+        let isd_prefix: ipnet::IpNet = "10.60.0.0/16".parse().unwrap();
+
+        // Direct -> DSD keyed by RD + router-id (the interwork prefix is
+        // irrelevant for Direct and is ignored).
+        match super::mup_segment_nlri(MupSegmentMode::Direct, rd, router_id, Some(isd_prefix)) {
+            Some(MupPrefix::Dsd { rd: r, address }) => {
+                assert_eq!(r, rd);
+                assert_eq!(address, IpAddr::V4(router_id));
+            }
+            other => panic!("expected Dsd, got {other:?}"),
+        }
+        // Direct with an all-zero router-id -> nothing (cold start before the
+        // router-id resolves).
+        assert!(
+            super::mup_segment_nlri(MupSegmentMode::Direct, rd, Ipv4Addr::UNSPECIFIED, None)
+                .is_none()
+        );
+
+        // Interwork -> ISD keyed by RD + the configured prefix.
+        match super::mup_segment_nlri(MupSegmentMode::Interwork, rd, router_id, Some(isd_prefix)) {
+            Some(MupPrefix::Isd { rd: r, prefix }) => {
+                assert_eq!(r, rd);
+                assert_eq!(prefix, isd_prefix);
+            }
+            other => panic!("expected Isd, got {other:?}"),
+        }
+        // Interwork without a configured prefix -> nothing (the ISD does not
+        // originate until `segment interwork prefix <p>` is set).
+        assert!(super::mup_segment_nlri(MupSegmentMode::Interwork, rd, router_id, None).is_none());
     }
 
     fn bgp_rib_with_nexthop(nh: Option<BgpNexthop>, typ: super::BgpRibType) -> super::BgpRib {

@@ -5039,6 +5039,7 @@ mod detail_tests {
                 }),
                 segment: None,
                 mup_ext_comm: None,
+                interwork_prefix: None,
             },
             ..Default::default()
         };
@@ -5052,6 +5053,7 @@ mod detail_tests {
                 }),
                 segment: None,
                 mup_ext_comm: None,
+                interwork_prefix: None,
             },
             ..Default::default()
         };
