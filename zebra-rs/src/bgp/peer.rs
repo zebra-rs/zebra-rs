@@ -2294,7 +2294,7 @@ pub async fn peer_read(
                 }
 
                 while let Some(length) = peek_bgp_length(&buf) {
-                    if length < BGP_HEADER_LEN as usize || length > opt.max_message_len() {
+                    if length < BGP_HEADER_LEN.into() || length > opt.max_message_len() {
                         event_conn_fail(ident, conn).await;
                         return;
                     }
@@ -2317,6 +2317,7 @@ pub async fn peer_read(
             }
             Err(_err) => {
                 event_conn_fail(ident, conn).await;
+                return;
             }
         }
     }
