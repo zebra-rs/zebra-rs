@@ -7,7 +7,7 @@ use nom::error::{ErrorKind, make_error};
 use nom::number::complete::{be_u8, be_u32};
 use nom_derive::*;
 
-use crate::{ParseNlri, many0_complete, nlri_psize};
+use crate::{ParseNlri, nlri_psize};
 
 #[derive(Debug, Clone, Hash, Eq, PartialEq)]
 pub struct Ipv4Nlri {
@@ -41,19 +41,46 @@ pub fn parse_bgp_nlri_ipv4(
     add_path: bool,
 ) -> IResult<&[u8], Vec<Ipv4Nlri>> {
     let len = length as usize;
-    let (input, nlri) = packet_utils::safe_split_at(input, len)?;
-    let (_, nlris) = many0_complete(|i| Ipv4Nlri::parse_nlri(i, add_path)).parse(nlri)?;
+    let (input, mut nlri) = packet_utils::safe_split_at(input, len)?;
+    // Drain the whole bounded slice: every byte must belong to a complete
+    // NLRI. A leftover (malformed/truncated trailing entry) surfaces the
+    // real parse error instead of being silently discarded.
+    let mut nlris = Vec::new();
+    while !nlri.is_empty() {
+        let (rest, entry) = Ipv4Nlri::parse_nlri(nlri, add_path)?;
+        nlris.push(entry);
+        nlri = rest;
+    }
     Ok((input, nlris))
 }
 
 #[cfg(test)]
 mod tests {
-    use super::Ipv4Nlri;
+    use super::{Ipv4Nlri, parse_bgp_nlri_ipv4};
     use crate::ParseNlri;
 
     #[test]
     fn parse_nlri_rejects_prefixlen_over_32() {
         let input = [33, 192, 0, 2, 1, 0];
         assert!(Ipv4Nlri::parse_nlri(&input, false).is_err());
+    }
+
+    #[test]
+    fn parse_bgp_nlri_ipv4_consumes_whole_block() {
+        // Two NLRIs: 192.0.2.0/24 (4 bytes) then the default route /0 (1 byte).
+        let input = [24, 192, 0, 2, 0];
+        let (rest, nlris) = parse_bgp_nlri_ipv4(&input, 5, false).unwrap();
+        assert!(rest.is_empty());
+        assert_eq!(nlris.len(), 2);
+        assert_eq!(nlris[0].prefix, "192.0.2.0/24".parse().unwrap());
+        assert_eq!(nlris[1].prefix, "0.0.0.0/0".parse().unwrap());
+    }
+
+    #[test]
+    fn parse_bgp_nlri_ipv4_rejects_trailing_garbage() {
+        // One /24 NLRI (4 bytes) plus a stray length octet that cannot form a
+        // complete NLRI; previously many0_complete dropped it silently.
+        let input = [24, 192, 0, 2, 8];
+        assert!(parse_bgp_nlri_ipv4(&input, 5, false).is_err());
     }
 }
