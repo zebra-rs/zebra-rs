@@ -1,205 +1,160 @@
 # bgp-packet Security Audit
 
-**Audit date:** 2026-04-09  
-**Crate version:** 0.9.0  
-**nom version:** 8.0.0  
+**Original audit date:** 2026-04-09
+**Re-verified:** 2026-06-26 against the current workspace tree
+**Crate version:** 26.6.2 (workspace versioning)
+**nom version:** 7.1.3
 **Scope:** current workspace tree under `crates/bgp-packet/`
 
 ## Summary
 
-This revision supersedes the earlier audit document in this crate.
+This revision re-verifies the four findings from the previous audit against the
+current source. Two of them — both the High-severity panic paths — are now
+fully fixed and covered by regression tests. The two Medium-severity findings
+are partly addressed: the MP_REACH `nhop_len` case is fixed, but the
+trailing-garbage class and the EVPN substructure-length cases remain open. The
+residual encoder-side `u8` truncation issues are unchanged.
 
-Several previously reported problems are fixed in the current tree:
+Status of the four previously reported issues:
 
-- the old unchecked `split_at()` calls in OPEN optional-parameter parsing,
-  capability parsing, and IPv4 NLRI block parsing have been replaced with
-  `packet_utils::safe_split_at()`.
-- the UPDATE and NOTIFICATION length-underflow paths now use
-  `saturating_sub()`.
-- attribute flags now use `AttributeFlags::from_bits_truncate()`.
-- the 2-octet aggregator conversion now correctly clamps at `u16::MAX`.
-- VPNv4 NLRI now validates `plen >= 88` before parsing the label and route
-  distinguisher.
-- `peek_bgp_length()` no longer uses `unwrap()`.
+1. **High — FIXED:** UPDATE attribute-block parsing now bounds the slice with
+   `packet_utils::safe_split_at()` instead of a raw `split_at()`.
+2. **High — FIXED:** IPv4 and IPv6 NLRI parsers now reject overlong prefix
+   lengths before computing the prefix byte size.
+3. **Medium — OPEN:** several length-bounded BGP subparsers still ignore inner
+   remainders and silently discard trailing garbage.
+4. **Medium — PARTIALLY FIXED:** MP_REACH now validates `nhop_len`; EVPN
+   per-route `length` and multicast `addr_len` are still not enforced.
 
-I still found four current security-relevant issues:
-
-1. **High:** UPDATE attribute-block parsing still contains a reachable raw
-   `split_at()` panic.
-2. **High:** IPv4 and IPv6 NLRI parsers still panic on overlong prefix lengths.
-3. **Medium:** several length-bounded BGP subparsers ignore inner remainders
-   and silently discard trailing garbage.
-4. **Medium:** some protocol length fields are parsed but not enforced,
-   especially in MP_REACH and EVPN NLRI substructures.
-
-There are also residual encoder-side `u8` truncation issues for oversized
-capabilities, but those are local packet-construction problems rather than
+The residual encoder-side `u8` truncation issues for oversized capabilities are
+unchanged. They are local packet-construction problems rather than
 network-triggered parser bugs.
 
-## Current Findings
+Earlier hardening that remains in place (carried over from the prior revision):
+the OPEN optional-parameter, capability, and IPv4 NLRI block parsers use
+`packet_utils::safe_split_at()`; UPDATE/NOTIFICATION length-underflow paths use
+`saturating_sub()`; attribute flags use `AttributeFlags::from_bits_truncate()`;
+the 2-octet aggregator conversion clamps at `u16::MAX`; VPNv4 NLRI validates
+`plen >= 88`; and `peek_bgp_length()` no longer uses `unwrap()`.
 
-### 1. UPDATE attribute-block parsing still panics on oversized `attr_len`
+## Findings
+
+### 1. UPDATE attribute-block parsing — FIXED
 
 - **Severity:** High
 - **Files:**
   - `src/attrs/attr.rs`
   - `src/update.rs`
 
-Relevant code:
+`parse_bgp_update_attribute()` (`src/attrs/attr.rs:345`) now bounds the
+attribute block with `packet_utils::safe_split_at()` before iterating:
 
 ```rust
-pub fn parse_bgp_update_attribute(
-    input: &[u8],
-    length: u16,
-    as4: bool,
-    opt: Option<ParseOption>,
-) -> ParsedAttributes<'_> {
-    let (attr, input) = input.split_at(length as usize);
-    // ...
-}
+let length = length as usize;
+let (input, attr) = packet_utils::safe_split_at(input, length).map_err(BgpParseError::from)?;
 ```
 
-- **Problem:** `length` comes directly from the untrusted UPDATE `attr_len`
-  field. Unlike the earlier fixed call sites, this path still uses raw
-  `split_at()` without checking that `input.len() >= length as usize`.
-- **Trigger:** A malformed UPDATE message with an attribute length larger than
-  the remaining bytes after the withdrawn-routes field.
-- **Impact:** Immediate panic and daemon crash from crafted wire input.
-- **Recommendation:** Replace this with `packet_utils::safe_split_at()` or an
-  explicit length check that returns a parse error instead of panicking.
+An oversized `attr_len` returns a parse error instead of panicking. A regression
+test, `parse_bgp_update_attribute_rejects_oversized_length` (`attr.rs:517`),
+pins this behavior. The sibling call site at `attr.rs:263` also uses
+`safe_split_at()`.
 
-### 2. IPv4 and IPv6 NLRI parsers still panic on overlong prefix lengths
+### 2. IPv4 and IPv6 NLRI overlong prefix lengths — FIXED
 
 - **Severity:** High
 - **Files:**
   - `src/attrs/nlri_ipv4.rs`
   - `src/attrs/nlri_ipv6.rs`
 
-Representative snippets:
+Both parsers now validate the address-family prefix bound before computing
+`nlri_psize()`, and additionally check that the buffer holds `psize` bytes:
 
 ```rust
 let (input, plen) = be_u8(input)?;
+if plen > 32 {                       // 128 for IPv6
+    return Err(nom::Err::Error(make_error(input, ErrorKind::Verify)));
+}
 let psize = nlri_psize(plen);
-let mut paddr = [0u8; 4];
-paddr[..psize].copy_from_slice(&input[..psize]);
-```
-
-```rust
-let (input, plen) = be_u8(input)?;
-let psize = nlri_psize(plen);
-let mut paddr = [0u8; 16];
-paddr[..psize].copy_from_slice(&input[..psize]);
-```
-
-- **Problem:** `nlri_psize()` is computed before validating the address-family
-  prefix bound. For IPv4, `plen = 33` produces `psize = 5`; for IPv6,
-  `plen = 129` produces `psize = 17`. Both then index beyond the fixed address
-  buffer.
-- **Reachability:** This affects multiple paths:
-  - classic IPv4 UPDATE NLRI
-  - classic IPv4 withdrawn routes
-  - MP_REACH IPv6 unicast NLRI
-  - MP_UNREACH IPv6 unicast NLRI
-  - any caller using the `ParseBe<Ipv6Net>` helper
-- **Impact:** Immediate panic and daemon crash from malformed BGP input.
-- **Recommendation:** Reject `plen > 32` for IPv4 and `plen > 128` for IPv6
-  before computing `psize` or slicing the fixed buffer.
-
-### 3. Length-bounded attribute, capability, and NLRI payloads accept trailing garbage
-
-- **Severity:** Medium
-- **Files:**
-  - `src/attrs/attr.rs`
-  - `src/open.rs`
-  - `src/caps/packet.rs`
-  - `src/attrs/nlri_ipv4.rs`
-  - `src/attrs/cluster_list.rs`
-
-Representative patterns:
-
-```rust
-let (_, attr) = Attr::parse_be(attr_payload, AttrSelector(attr_type, as4_opt))?;
-```
-
-```rust
-let (_, caps) = many0_complete(CapabilityPacket::parse_cap).parse(opts)?;
-```
-
-```rust
-let (_, nlris) = many0_complete(|i| Ipv4Nlri::parse_nlri(i, add_path)).parse(nlri)?;
-```
-
-- **Problem:** The outer parser correctly bounds a slice using a wire-format
-  length field, but then ignores the inner parser's remainder. If the inner
-  parser consumes only a prefix of that bounded slice, the trailing bytes are
-  silently discarded.
-- **Concrete examples:**
-  - `ClusterList::parse_be()` uses `many0_complete(be_u32)`, so a 5-byte
-    payload is accepted as one cluster ID plus one discarded byte.
-  - `CapabilityPacket::parse_cap()` ignores any bytes left over after a
-    capability-specific parser such as FQDN parsing.
-  - `parse_bgp_nlri_ipv4()` can accept an NLRI block containing one valid NLRI
-    followed by trailing junk.
-- **Impact:** Malformed wire data is normalized into a different in-memory
-  object and the dropped bytes vanish on re-emit. That creates parser
-  differential and canonicalization problems.
-- **Recommendation:** Require full consumption of every bounded slice. After
-  parsing, reject any non-empty remainder instead of discarding it.
-
-### 4. Some BGP substructure length fields are read but not enforced
-
-- **Severity:** Medium
-- **Files:**
-  - `src/attrs/mp_reach.rs`
-  - `src/attrs/nlri_evpn.rs`
-
-Representative examples:
-
-```rust
-if header.afi == Afi::Ip && header.safi == Safi::MplsVpn {
-    let (input, rd) = RouteDistinguisher::parse_be(input)?;
-    let (input, nhop) = be_u32(input)?;
-    // header.nhop_len is never checked here
+if input.len() < psize {
+    return Err(nom::Err::Error(make_error(input, ErrorKind::Eof)));
 }
 ```
 
-```rust
-let (input, _length) = be_u8(input)?;
-// route-specific parsing ignores the declared EVPN route length
-```
+This covers all reachable paths the prior audit listed, including the
+`ParseBe<Ipv6Net>` helper (`nlri_ipv6.rs:61`), which carries the same guard.
+Regression tests: `parse_nlri_rejects_prefixlen_over_32` (IPv4),
+`parse_nlri_rejects_prefixlen_over_128` and
+`parse_ipv6net_rejects_prefixlen_over_128` (IPv6).
 
-- **Problem:** Certain protocol length fields are parsed but not actually used
-  to bound the following substructure.
-- **Concrete cases:**
-  - VPNv4 MP_REACH ignores `nhop_len` and always parses a fixed 12-byte nexthop
-    (RD + IPv4 address).
-  - EVPN route parsing reads the per-route `length` octet but does not split
-    the route payload to that length before decoding route-specific fields.
-  - EVPN multicast treats any `addr_len` other than `32` as a 16-byte IPv6
-    address instead of validating the value.
-- **Impact:** A malformed substructure can consume bytes outside its declared
-  boundary and shift the parse of subsequent data. This is not a direct panic
-  path in the current tree, but it is a correctness and interoperability risk.
-- **Recommendation:** Use each declared substructure length to create a bounded
-  slice, parse within that slice, and reject non-empty remainders.
+### 3. Length-bounded payloads still accept trailing garbage — OPEN
 
-## Residual Hardening Issues
+- **Severity:** Medium
+- **Files:**
+  - `src/attrs/cluster_list.rs`
+  - `src/caps/packet.rs`
+  - `src/attrs/nlri_ipv4.rs`
 
-These are lower severity because they affect local packet construction rather
-than parsing untrusted network data:
+The outer parsers now bound their slice with `safe_split_at()`, but they still
+ignore the inner parser's remainder rather than rejecting a non-empty one:
 
-- multiple capability encoders still compute wire lengths with unchecked `u8`
-  casts, including:
-  - `CapAddPath::len()`
-  - `CapRestart::len()`
-  - `CapLlgr::len()`
-  - `CapPathLimit::len()`
-  - `CapFqdn::len()`
-  - `CapVersion::len()`
-  - `CapUnknown::len()`
-- `CapFqdn::emit_value()` also casts `hostname.len()` and `domain.len()` to
-  `u8` independently, so oversized values can produce internally inconsistent
-  encodings.
+- `ClusterList::parse_be()` (`cluster_list.rs:24`) uses
+  `many0_complete(be_u32)`, so a 5-byte payload is accepted as one cluster ID
+  plus one discarded byte.
+- `CapabilityPacket::parse_cap()` (`caps/packet.rs:66`) discards the inner
+  remainder: `let (_, cap) = CapabilityPacket::parse_be(cap, …)?;`.
+- `parse_bgp_nlri_ipv4()` (`nlri_ipv4.rs:45`) uses `many0_complete(...)` and
+  drops any trailing bytes after the last valid NLRI.
+
+- **Impact:** Malformed wire data is normalized into a different in-memory
+  object and the dropped bytes vanish on re-emit, creating parser-differential
+  and canonicalization problems.
+- **Recommendation:** After parsing each bounded slice, reject any non-empty
+  remainder instead of discarding it.
+
+### 4. Substructure length fields not enforced — PARTIALLY FIXED
+
+- **Severity:** Medium
+- **Files:**
+  - `src/attrs/mp_reach.rs` (fixed)
+  - `src/attrs/nlri_evpn.rs` (open)
+
+**Fixed — MP_REACH `nhop_len`.** `parse_nlri_opt()` now matches on
+`header.nhop_len` for every AFI/SAFI and rejects unexpected lengths instead of
+assuming a fixed nexthop width. VPNv4 accepts only 12/24/48 (`mp_reach.rs:200`),
+VPNv6 only 24/48 (`mp_reach.rs:254`), and any other value returns
+`Err(ErrorKind::LengthValue)`.
+
+**Open — EVPN per-route `length`.** `EvpnRoute::parse_nlri()`
+(`nlri_evpn.rs:752`) reads the per-route `length` octet but only uses it for the
+`IpPrefix` family-width selection (`nlri_evpn.rs:853`). The other route types
+(EthernetAd, EthernetSr, MacIpAdvRoute, IncMulticast) decode their fields
+without splitting the payload to `length` first. There is no
+`safe_split_at()`/`split_at()` anywhere in the file.
+
+**Open — EVPN multicast `addr_len`.** `nlri_evpn.rs:828` treats any `addr_len`
+other than `32` as a 16-byte IPv6 address (`else { take(16) }`) without
+validating that the value is `128`.
+
+- **Recommendation:** Bound each EVPN route body to its declared `length`,
+  parse within that slice, reject a non-empty remainder, and validate
+  `addr_len` against the expected `32`/`128` before decoding.
+
+## Residual Hardening Issues — unchanged
+
+These remain lower severity because they affect local packet construction
+rather than parsing untrusted network data. All still present:
+
+- capability encoders compute wire lengths with unchecked `as u8` casts:
+  - `CapAddPath::len()` (`caps/addpath.rs:101`)
+  - `CapRestart::len()` (`caps/graceful.rs:59`)
+  - `CapLlgr::len()` (`caps/llgr.rs:68`)
+  - `CapPathLimit::len()` (`caps/path_limit.rs:39`)
+  - `CapFqdn::len()` (`caps/fqdn.rs:48`)
+  - `CapVersion::len()` (`caps/version.rs:35`)
+  - `CapUnknown::len()` (`caps/unknown.rs:29`)
+- `CapFqdn::emit_value()` (`caps/fqdn.rs:52,54`) casts `hostname.len()` and
+  `domain.len()` to `u8` independently, so oversized values can produce
+  internally inconsistent encodings.
 
 Recommended follow-up:
 
@@ -211,27 +166,27 @@ Recommended follow-up:
 
 ## Recommended Priority
 
-### Priority 1
+### Priority 1 — DONE
 
-1. Replace the raw `split_at()` in `parse_bgp_update_attribute()`.
-2. Add explicit IPv4/IPv6 prefix-length validation before `nlri_psize()`.
+1. ~~Replace the raw `split_at()` in `parse_bgp_update_attribute()`.~~ Fixed.
+2. ~~Add explicit IPv4/IPv6 prefix-length validation before `nlri_psize()`.~~
+   Fixed.
 
-### Priority 2
+### Priority 2 — partially open
 
 3. Enforce full consumption for all length-bounded attribute, capability, and
-   NLRI slices.
-4. Enforce `nhop_len`, EVPN route length, and other parsed substructure length
-   fields.
+   NLRI slices (Finding 3).
+4. Enforce the EVPN per-route `length` and multicast `addr_len` (the remaining
+   half of Finding 4). MP_REACH `nhop_len` is done.
 
-### Priority 3
+### Priority 3 — open
 
 5. Convert remaining encoder-side `u8` length arithmetic to checked arithmetic.
-6. Add malformed-length regression tests for:
-   - oversized UPDATE `attr_len`
-   - IPv4 `plen > 32`
-   - IPv6 `plen > 128`
-   - attribute/capability payloads with valid prefixes plus trailing garbage
-   - MP_REACH / EVPN substructures with inconsistent embedded lengths
+6. Add malformed-length regression tests for the still-open cases:
+   - attribute/capability/NLRI payloads with valid prefixes plus trailing
+     garbage
+   - EVPN substructures with inconsistent embedded lengths and non-`32`/`128`
+     `addr_len`
 
 ## Verification
 
@@ -240,5 +195,3 @@ The current tree was validated with:
 ```sh
 cargo test -p bgp-packet
 ```
-
-All tests passed at the time of this revision.
