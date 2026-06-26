@@ -4,8 +4,8 @@ use nom::combinator::peek;
 use nom_derive::*;
 
 use crate::{
-    Afi, AfiSafi, BGP_EXTENDED_PACKET_LEN, BGP_PACKET_LEN, BgpHeader, BgpPacket, BgpParseError,
-    BgpType, NotificationPacket, OpenPacket, RouteRefreshPacket, Safi, UpdatePacket,
+    Afi, AfiSafi, BGP_EXTENDED_PACKET_LEN, BGP_HEADER_LEN, BGP_PACKET_LEN, BgpHeader, BgpPacket,
+    BgpParseError, BgpType, NotificationPacket, OpenPacket, RouteRefreshPacket, Safi, UpdatePacket,
 };
 
 #[derive(Default, Debug, Clone)]
@@ -58,12 +58,12 @@ pub fn nlri_psize(plen: u8) -> usize {
     plen.div_ceil(8).into()
 }
 
-pub fn peek_bgp_length(input: &[u8]) -> usize {
-    if let Some(len) = input.get(16..18) {
-        u16::from_be_bytes([len[0], len[1]]) as usize
-    } else {
-        0
+pub fn peek_bgp_length(input: &[u8]) -> Option<usize> {
+    if input.len() < BGP_HEADER_LEN.into() {
+        return None;
     }
+    let length = u16::from_be_bytes([input[16], input[17]]) as usize;
+    (input.len() >= length).then_some(length)
 }
 
 impl BgpPacket {
