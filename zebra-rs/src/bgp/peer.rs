@@ -2280,33 +2280,27 @@ pub async fn peer_read(
     mut config: PeerConfig,
     mut opt: ParseOption,
 ) {
-    let mut buf = BytesMut::with_capacity(BGP_EXTENDED_PACKET_LEN);
+    let event_conn_fail = async |ident, conn| {
+        let _ = tx.send(Message::Event(ident, Event::ConnFail(conn))).await;
+    };
+
+    let mut buf = BytesMut::with_capacity(BGP_EXTENDED_PACKET_LEN * 3);
     loop {
         match read_half.read_buf(&mut buf).await {
             Ok(read_len) => {
                 if read_len == 0 {
-                    // EOF: the peer closed the connection (graceful close,
-                    // or its process died). Deliver ConnFail with an
-                    // awaiting send rather than `try_send` — a momentarily
-                    // full message channel must not drop the one event that
-                    // drives peer-down detection, or detection falls back
-                    // to the ~90s hold timer. Mirrors the read-error arm
-                    // below; a dying connection has nothing left to read,
-                    // so parking this task on backpressure is harmless.
-                    let _ = tx.send(Message::Event(ident, Event::ConnFail(conn))).await;
+                    event_conn_fail(ident, conn).await;
                     return;
                 }
-                while buf.len() >= BGP_HEADER_LEN as usize && buf.len() >= peek_bgp_length(&buf) {
-                    let length = peek_bgp_length(&buf);
 
-                    // Validate message length (RFC 8654).
+                while let Some(length) = peek_bgp_length(&buf) {
                     if length < BGP_HEADER_LEN as usize || length > opt.max_message_len() {
-                        let _ = tx.try_send(Message::Event(ident, Event::ConnFail(conn)));
+                        event_conn_fail(ident, conn).await;
                         return;
                     }
 
                     let mut remain = buf.split_off(length);
-                    remain.reserve(BGP_EXTENDED_PACKET_LEN);
+                    remain.reserve(BGP_EXTENDED_PACKET_LEN * 3);
 
                     match peer_packet_parse(&buf, ident, conn, tx.clone(), &mut config, &mut opt)
                         .await
@@ -2315,14 +2309,14 @@ pub async fn peer_read(
                             buf = remain;
                         }
                         Err(_err) => {
-                            let _ = tx.try_send(Message::Event(ident, Event::ConnFail(conn)));
+                            event_conn_fail(ident, conn).await;
                             return;
                         }
                     }
                 }
             }
             Err(_err) => {
-                let _ = tx.send(Message::Event(ident, Event::ConnFail(conn))).await;
+                event_conn_fail(ident, conn).await;
             }
         }
     }
