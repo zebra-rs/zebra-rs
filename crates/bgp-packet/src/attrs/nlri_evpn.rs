@@ -751,8 +751,14 @@ impl ParseNlri<EvpnRoute> for EvpnRoute {
         let route_type: EvpnRouteType = typ.into();
         let (input, length) = be_u8(input)?;
 
+        // Bound the route body to its declared length (the EVPN NLRI length
+        // octet, RFC 7432 §5). No field may read past this NLRI into the next
+        // one, and any octet left unparsed inside the body fails the parse
+        // (RFC 7606 treat-as-withdraw at the caller).
+        let (rest, input) = packet_utils::safe_split_at(input, length as usize)?;
+
         use EvpnRouteType::*;
-        match route_type {
+        let result: IResult<&[u8], EvpnRoute> = match route_type {
             EthernetAd => {
                 // RFC 7432 §7.1: RD(8) ESI(10) EthTag(4) MPLSLabel(3).
                 let (input, rd) = RouteDistinguisher::parse_be(input)?;
@@ -825,17 +831,22 @@ impl ParseNlri<EvpnRoute> for EvpnRoute {
                 let (input, rd) = RouteDistinguisher::parse_be(input)?;
                 let (input, ether_tag) = be_u32(input)?;
                 let (input, addr_len) = be_u8(input)?;
-                let (input, addr) = if addr_len == 32 {
-                    let (input, val) = be_u32(input)?;
-                    let nhop = IpAddr::V4(Ipv4Addr::from(val));
-                    (input, nhop)
-                } else {
-                    let (input, val) = take(16usize).parse(input)?;
-                    let mut octets = [0u8; 16];
-                    octets.copy_from_slice(val);
-                    let addr = Ipv6Addr::from(octets);
-                    let nhop = IpAddr::V6(addr);
-                    (input, nhop)
+                // RFC 7432 §7.3: the Originating Router's IP Address length is
+                // 32 (IPv4) or 128 (IPv6). Reject any other value instead of
+                // treating it as a 16-octet IPv6 read (RFC 7606
+                // treat-as-withdraw at the caller).
+                let (input, addr) = match addr_len {
+                    32 => {
+                        let (input, val) = be_u32(input)?;
+                        (input, IpAddr::V4(Ipv4Addr::from(val)))
+                    }
+                    128 => {
+                        let (input, val) = take(16usize).parse(input)?;
+                        let mut octets = [0u8; 16];
+                        octets.copy_from_slice(val);
+                        (input, IpAddr::V6(Ipv6Addr::from(octets)))
+                    }
+                    _ => return Err(nom::Err::Error(make_error(input, ErrorKind::LengthValue))),
                 };
                 let evpn = EvpnMulticast {
                     id,
@@ -1041,7 +1052,18 @@ impl ParseNlri<EvpnRoute> for EvpnRoute {
                 ))
             }
             _ => Err(nom::Err::Error(make_error(input, ErrorKind::NoneOf))),
+        };
+
+        let (remainder, route) = result?;
+        if !remainder.is_empty() {
+            // A field was shorter than the declared length, or the length was
+            // padded — reject rather than silently dropping the extra octets.
+            return Err(nom::Err::Error(make_error(
+                remainder,
+                ErrorKind::LengthValue,
+            )));
         }
+        Ok((rest, route))
     }
 }
 
@@ -2408,5 +2430,46 @@ mod evpn_emit_tests {
         assert_eq!(buf[1], 35, "IPv6 payload length");
         let (_, parsed) = EvpnRoute::parse_nlri(&buf, false).expect("round-trip");
         assert_eq!(parsed, EvpnRoute::EthernetSeg(original));
+    }
+
+    /// RFC 7432 §7.3: an Inclusive Multicast (Type-3) Originating Router IP
+    /// length other than 32/128 must be rejected, not read as 16 IPv6 octets.
+    #[test]
+    fn inclusive_multicast_rejects_bad_addr_len() {
+        let mut body = BytesMut::new();
+        body.put_u16(0x0001); // RD type 1 ...
+        body.put_slice(&[10, 0, 0, 1, 0x00, 0x64]); // ... value (RD = 8 octets)
+        body.put_u32(0); // Ethernet Tag
+        body.put_u8(64); // IP address length — illegal (not 32/128)
+        body.put_slice(&[0u8; 16]);
+        let mut nlri = BytesMut::new();
+        nlri.put_u8(3); // Route Type 3 — Inclusive Multicast
+        nlri.put_u8(body.len() as u8);
+        nlri.put_slice(&body);
+        assert!(EvpnRoute::parse_nlri(&nlri, false).is_err());
+    }
+
+    /// The declared NLRI length bounds the route body: a length octet that
+    /// claims one extra byte the route does not use must be rejected, not
+    /// parsed with the stray octet silently dropped.
+    #[test]
+    fn parse_nlri_rejects_trailing_body_bytes() {
+        let original = EvpnEthernetAd {
+            id: 0,
+            rd: rd_type1_ip(Ipv4Addr::new(192, 0, 2, 1), 100),
+            esi: [0; 10],
+            ether_tag: 7,
+            label: 42,
+        };
+        let mut buf = BytesMut::new();
+        EvpnRoute::EthernetAd(original).nlri_emit(&mut buf);
+        // buf = [type=1, len=25, <25 body octets>]. Bump the declared length
+        // and append a stray octet inside the now-26-octet body.
+        let mut nlri = BytesMut::new();
+        nlri.put_u8(buf[0]); // Route Type 1
+        nlri.put_u8(buf[1] + 1); // declared length + 1
+        nlri.put_slice(&buf[2..]); // 25 real body octets
+        nlri.put_u8(0xff); // stray trailing octet
+        assert!(EvpnRoute::parse_nlri(&nlri, false).is_err());
     }
 }
