@@ -499,11 +499,67 @@ fn show_ospf_interface(
     Ok(buf)
 }
 
-fn show_ospf(
-    ospf: &Ospf,
-    _args: Args,
-    _json: bool,
-) -> std::result::Result<String, std::fmt::Error> {
+#[derive(Serialize)]
+struct OspfAreaGateJson {
+    area_id: String,
+    spf_inflight: bool,
+    spf_pending: bool,
+}
+
+#[derive(Serialize)]
+struct OspfSummaryJson {
+    router_id: String,
+    area_count: usize,
+    link_count: usize,
+    spf_last_ms_ago: Option<u128>,
+    spf_duration_us: Option<u128>,
+    /// TI-LFA compute telemetry for the most-recent run, preformatted.
+    /// `None` until TI-LFA runs (and cleared when it is disabled). Same
+    /// shape as the OSPFv3 summary's `tilfa_compute`.
+    tilfa_compute: Option<String>,
+    /// Per-area SPF-offload gates. The instance-level `spf_*` fields
+    /// reflect the most-recent area's run; these tell automation which
+    /// area's worker is still in `spawn_blocking` and which has a
+    /// coalesced follow-up.
+    spf_offload_gates: Vec<OspfAreaGateJson>,
+}
+
+fn show_ospf(ospf: &Ospf, _args: Args, json: bool) -> std::result::Result<String, std::fmt::Error> {
+    if json {
+        let spf_offload_gates: Vec<_> = ospf
+            .areas
+            .iter()
+            .map(|(area_id, area)| OspfAreaGateJson {
+                area_id: area_id.to_string(),
+                spf_inflight: area.spf_inflight,
+                spf_pending: area.spf_pending,
+            })
+            .collect();
+        let summary = OspfSummaryJson {
+            router_id: ospf.router_id.to_string(),
+            area_count: ospf.areas.iter().count(),
+            link_count: ospf.links.len(),
+            spf_last_ms_ago: ospf
+                .spf_last
+                .map(|t| Instant::now().duration_since(t).as_millis()),
+            spf_duration_us: ospf.spf_duration.map(|d| d.as_micros()),
+            tilfa_compute: ospf.tilfa_stats.as_ref().map(|s| {
+                format!(
+                    "targets={} mode={} workers={} spf{{q={} pc={} dedup-saved={}}} took {} us",
+                    s.targets,
+                    s.mode,
+                    s.width,
+                    s.q_spf,
+                    s.pc_spf,
+                    s.pc_deduped,
+                    s.duration.as_micros(),
+                )
+            }),
+            spf_offload_gates,
+        };
+        return Ok(serde_json::to_string_pretty(&summary)
+            .unwrap_or_else(|e| format!("{{\"error\": \"{}\"}}", e)));
+    }
     let mut buf = String::new();
     writeln!(buf, " OSPF Routing Process, Router ID: {}", ospf.router_id)?;
     if let Some(spf_last) = ospf.spf_last {
@@ -1647,11 +1703,55 @@ fn show_ext_link_detail(
     Ok(())
 }
 
+#[derive(Serialize)]
+struct OspfRouteNexthopJson {
+    /// Nexthop address, or `null` for a directly-attached prefix
+    /// (the self-attached marker stamped by `attached_nhops`).
+    via: Option<String>,
+    directly_attached: bool,
+    interface: String,
+    ifindex: u32,
+}
+
+#[derive(Serialize)]
+struct OspfRouteJson {
+    prefix: String,
+    metric: u32,
+    path_type: String,
+    nexthops: Vec<OspfRouteNexthopJson>,
+}
+
 fn show_ospf_route(
     ospf: &Ospf,
     _args: Args,
-    _json: bool,
+    json: bool,
 ) -> std::result::Result<String, std::fmt::Error> {
+    if json {
+        let entries: Vec<OspfRouteJson> = ospf
+            .rib
+            .iter()
+            .map(|(prefix, route)| OspfRouteJson {
+                prefix: prefix.to_string(),
+                metric: route.metric,
+                path_type: format!("{:?}", route.path_type),
+                nexthops: route
+                    .nhops
+                    .iter()
+                    .map(|(addr, nhop)| {
+                        let attached = addr.is_unspecified();
+                        OspfRouteNexthopJson {
+                            via: (!attached).then(|| addr.to_string()),
+                            directly_attached: attached,
+                            interface: ospf.ifname(nhop.ifindex),
+                            ifindex: nhop.ifindex,
+                        }
+                    })
+                    .collect(),
+            })
+            .collect();
+        return Ok(serde_json::to_string_pretty(&entries)
+            .unwrap_or_else(|e| format!("{{\"error\": \"{}\"}}", e)));
+    }
     let mut buf = String::new();
 
     for (prefix, route) in ospf.rib.iter() {
@@ -1698,11 +1798,52 @@ fn show_ospf_route(
     Ok(buf)
 }
 
+#[derive(Serialize)]
+struct SpfFirstHopJson {
+    vertex_id: usize,
+    link_id: u32,
+}
+
+#[derive(Serialize)]
+struct SpfPathJson {
+    vertex_id: usize,
+    cost: u32,
+    /// Equal-cost nexthop vertex-id chains to this destination (mirrors
+    /// `disp_out`'s non-full view, which lists `path.nexthops`).
+    nexthops: Vec<Vec<usize>>,
+    first_hop_links: Vec<SpfFirstHopJson>,
+}
+
 fn show_ospf_spf(
     ospf: &Ospf,
     _args: Args,
-    _json: bool,
+    json: bool,
 ) -> std::result::Result<String, std::fmt::Error> {
+    if json {
+        let entries: Vec<SpfPathJson> = ospf
+            .spf_result
+            .as_ref()
+            .map(|spf| {
+                spf.iter()
+                    .map(|(vertex, path)| SpfPathJson {
+                        vertex_id: *vertex,
+                        cost: path.cost,
+                        nexthops: path.nexthops.iter().cloned().collect(),
+                        first_hop_links: path
+                            .first_hop_links
+                            .iter()
+                            .map(|(vid, link_id)| SpfFirstHopJson {
+                                vertex_id: *vid,
+                                link_id: *link_id,
+                            })
+                            .collect(),
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+        return Ok(serde_json::to_string_pretty(&entries)
+            .unwrap_or_else(|e| format!("{{\"error\": \"{}\"}}", e)));
+    }
     let mut buf = String::new();
     if let Some(spf) = &ospf.spf_result {
         spf::disp_out(&mut buf, spf, false);
@@ -1713,13 +1854,88 @@ fn show_ospf_spf(
 /// `show ospf flex-algo` — for each configured Flexible Algorithm
 /// (RFC 9350): its local definition plus the FAD-filtered per-algo SPF
 /// tree (the routers reachable under that algorithm's constraints).
+#[derive(Serialize)]
+struct FlexAlgoRouteJson {
+    prefix: String,
+    metric: u32,
+    label: Option<u32>,
+    nexthops: Vec<String>,
+}
+
+#[derive(Serialize)]
+struct FlexAlgoJson {
+    algorithm: u8,
+    metric_type: String,
+    priority: u8,
+    advertise_definition: bool,
+    include_any: Vec<String>,
+    include_all: Vec<String>,
+    exclude_any: Vec<String>,
+    srlg_exclude: Vec<String>,
+    /// Reachable-node count when the per-algo SPF has a result; `None`
+    /// when there is no source vertex or it has not run yet (see
+    /// `spf_status`).
+    spf_reachable_nodes: Option<usize>,
+    spf_status: String,
+    routes: Vec<FlexAlgoRouteJson>,
+}
+
 fn show_ospf_flex_algo(
     ospf: &Ospf,
     _args: Args,
-    _json: bool,
+    json: bool,
 ) -> std::result::Result<String, std::fmt::Error> {
     use crate::flex_algo::FadMetricType;
     use std::fmt::Write;
+
+    let metric_name = |m: FadMetricType| match m {
+        FadMetricType::Igp => "igp",
+        FadMetricType::MinUnidirLinkDelay => "min-unidir-link-delay",
+        FadMetricType::TeDefault => "te-default",
+    };
+
+    if json {
+        let mut algos = Vec::new();
+        for (algo, entry) in &ospf.flex_algo.config {
+            let set_vec =
+                |s: &std::collections::BTreeSet<String>| s.iter().cloned().collect::<Vec<_>>();
+            let (spf_reachable_nodes, spf_status) = match ospf.spf_flex_algo.get(algo) {
+                Some(Some(spf_res)) => (Some(spf_res.len()), "computed"),
+                Some(None) => (None, "no-source-vertex"),
+                None => (None, "not-computed"),
+            };
+            let routes = ospf
+                .rib_flex_algo
+                .get(algo)
+                .map(|rib| {
+                    rib.iter()
+                        .map(|(prefix, route)| FlexAlgoRouteJson {
+                            prefix: prefix.to_string(),
+                            metric: route.metric,
+                            label: route.sid,
+                            nexthops: route.nhops.keys().map(|a| a.to_string()).collect(),
+                        })
+                        .collect()
+                })
+                .unwrap_or_default();
+            algos.push(FlexAlgoJson {
+                algorithm: *algo,
+                metric_type: metric_name(entry.metric_type.unwrap_or(FadMetricType::Igp))
+                    .to_string(),
+                priority: entry.priority.unwrap_or(128),
+                advertise_definition: entry.advertise_definition.unwrap_or(false),
+                include_any: set_vec(&entry.include_any),
+                include_all: set_vec(&entry.include_all),
+                exclude_any: set_vec(&entry.exclude_any),
+                srlg_exclude: set_vec(&entry.srlg_exclude),
+                spf_reachable_nodes,
+                spf_status: spf_status.to_string(),
+                routes,
+            });
+        }
+        return Ok(serde_json::to_string_pretty(&algos)
+            .unwrap_or_else(|e| format!("{{\"error\": \"{}\"}}", e)));
+    }
 
     let mut buf = String::new();
     if ospf.flex_algo.config.is_empty() {
@@ -1732,11 +1948,7 @@ fn show_ospf_flex_algo(
 
     for (algo, entry) in &ospf.flex_algo.config {
         writeln!(buf, "Flex-Algorithm {algo}")?;
-        let metric = match entry.metric_type.unwrap_or(FadMetricType::Igp) {
-            FadMetricType::Igp => "igp",
-            FadMetricType::MinUnidirLinkDelay => "min-unidir-link-delay",
-            FadMetricType::TeDefault => "te-default",
-        };
+        let metric = metric_name(entry.metric_type.unwrap_or(FadMetricType::Igp));
         writeln!(buf, "  Metric-Type: {metric}")?;
         writeln!(buf, "  Priority: {}", entry.priority.unwrap_or(128))?;
         writeln!(
@@ -1868,11 +2080,117 @@ fn format_algo_list(ri: &RouterInfoLsa) -> String {
     String::new()
 }
 
+#[derive(Serialize)]
+struct SrPrefixSidJson {
+    prefix: String,
+    /// `index` (SRGB-relative) or `label` (absolute).
+    sid_type: String,
+    sid_value: u32,
+    /// Resolved MPLS label pushed for this prefix, when derivable.
+    label_operation: Option<u32>,
+    interface: String,
+    nexthop: Option<String>,
+}
+
+#[derive(Serialize)]
+struct SrNodeJson {
+    router_id: String,
+    srgb_start: u32,
+    srgb_end: u32,
+    srlb_start: Option<u32>,
+    srlb_end: Option<u32>,
+    algorithms: String,
+    prefix_sids: Vec<SrPrefixSidJson>,
+}
+
+#[derive(Serialize)]
+struct SegmentRoutingJson {
+    router_id: String,
+    nodes: Vec<SrNodeJson>,
+}
+
 fn show_ospf_segment_routing(
     ospf: &Ospf,
     _args: Args,
-    _json: bool,
+    json: bool,
 ) -> std::result::Result<String, std::fmt::Error> {
+    if json {
+        let mut nodes = Vec::new();
+        for (_, area) in ospf.areas.iter() {
+            let lsdb = &area.lsdb;
+            for (router_id, label_config) in lsdb.label_map.iter() {
+                let algorithms = lsdb
+                    .values_by_type(OspfLsType::OpaqueAreaLocal)
+                    .find_map(|lsa| {
+                        if lsa.adv_router() == *router_id
+                            && let OspfLsp::OpaqueAreaRouterInfo(ref ri) = lsa.data.lsp
+                        {
+                            return Some(format_algo_list(ri));
+                        }
+                        None
+                    })
+                    .unwrap_or_default();
+                let srgb = &label_config.global;
+                let (srlb_start, srlb_end) = match &label_config.local {
+                    Some(lb) => (Some(lb.start), Some(lb.end)),
+                    None => (None, None),
+                };
+                let mut prefix_sids = Vec::new();
+                for (_, lsa) in lsdb.iter_by_type(OspfLsType::OpaqueAreaLocal) {
+                    if lsa.adv_router() != *router_id {
+                        continue;
+                    }
+                    if let OspfLsp::OpaqueAreaExtPrefix(ref ep) = lsa.data.lsp {
+                        for tlv in &ep.tlvs {
+                            for sub in &tlv.subs {
+                                if let ExtPrefixSubTlv::PrefixSid(sid) = sub {
+                                    let (sid_type, sid_value, label_operation) = match sid.sid {
+                                        SidLabelTlv::Index(idx) => {
+                                            ("index", idx, srgb.start.checked_add(idx))
+                                        }
+                                        SidLabelTlv::Label(label) => ("label", label, Some(label)),
+                                    };
+                                    let (interface, nexthop) = ospf
+                                        .rib
+                                        .get(&tlv.prefix)
+                                        .and_then(|r| r.nhops.iter().next())
+                                        .map(|(addr, nh)| {
+                                            let nexthop =
+                                                (!addr.is_unspecified()).then(|| addr.to_string());
+                                            (ospf.ifname(nh.ifindex), nexthop)
+                                        })
+                                        .unwrap_or_default();
+                                    prefix_sids.push(SrPrefixSidJson {
+                                        prefix: tlv.prefix.to_string(),
+                                        sid_type: sid_type.to_string(),
+                                        sid_value,
+                                        label_operation,
+                                        interface,
+                                        nexthop,
+                                    });
+                                }
+                            }
+                        }
+                    }
+                }
+                nodes.push(SrNodeJson {
+                    router_id: router_id.to_string(),
+                    srgb_start: srgb.start,
+                    srgb_end: srgb.end,
+                    srlb_start,
+                    srlb_end,
+                    algorithms,
+                    prefix_sids,
+                });
+            }
+        }
+        let out = SegmentRoutingJson {
+            router_id: ospf.router_id.to_string(),
+            nodes,
+        };
+        return Ok(serde_json::to_string_pretty(&out)
+            .unwrap_or_else(|e| format!("{{\"error\": \"{}\"}}", e)));
+    }
     let mut buf = String::new();
     writeln!(buf)?;
     writeln!(
@@ -2312,13 +2630,71 @@ fn show_ospf_tilfa(
 /// table of currently-active helper sessions. Plain-text only
 /// for now — the JSON shape can land in 2c-iii alongside
 /// helper-history.
+#[derive(Serialize)]
+struct GrHelperJson {
+    neighbor_id: String,
+    ifindex: u32,
+    restart_reason: String,
+    grace_period_secs: u32,
+    remaining_secs: u32,
+}
+
+#[derive(Serialize)]
+struct GrRestartingJson {
+    grace_period_secs: u32,
+    reason: String,
+    age_secs: u64,
+}
+
+#[derive(Serialize)]
+struct GracefulRestartJson {
+    helper_enabled: bool,
+    max_grace_period_secs: u32,
+    strict_lsa_checking: bool,
+    drain_time_ms: u32,
+    restarting: Option<GrRestartingJson>,
+    helpers: Vec<GrHelperJson>,
+}
+
 fn show_ospf_graceful_restart(
     ospf: &Ospf,
     _args: Args,
-    _json: bool,
+    json: bool,
 ) -> std::result::Result<String, std::fmt::Error> {
-    let mut buf = String::new();
     let cfg = &ospf.gr_config;
+    if json {
+        let mut helpers = Vec::new();
+        for (ifindex, link) in ospf.links.iter() {
+            for nbr in link.nbrs.values() {
+                let Some(helper) = nbr.gr_helper.as_ref() else {
+                    continue;
+                };
+                let elapsed = helper.entered_at.elapsed().as_secs() as u32;
+                helpers.push(GrHelperJson {
+                    neighbor_id: nbr.ident.router_id.to_string(),
+                    ifindex: *ifindex,
+                    restart_reason: format!("{:?}", helper.reason),
+                    grace_period_secs: helper.grace_period,
+                    remaining_secs: helper.grace_period.saturating_sub(elapsed),
+                });
+            }
+        }
+        let out = GracefulRestartJson {
+            helper_enabled: cfg.helper_enabled,
+            max_grace_period_secs: cfg.max_grace_period,
+            strict_lsa_checking: cfg.helper_strict_lsa_checking,
+            drain_time_ms: cfg.drain_time_ms,
+            restarting: ospf.restarting.as_ref().map(|state| GrRestartingJson {
+                grace_period_secs: state.grace_period,
+                reason: format!("{:?}", state.reason),
+                age_secs: state.entered_at.elapsed().as_secs(),
+            }),
+            helpers,
+        };
+        return Ok(serde_json::to_string_pretty(&out)
+            .unwrap_or_else(|e| format!("{{\"error\": \"{}\"}}", e)));
+    }
+    let mut buf = String::new();
 
     writeln!(buf, "Graceful-restart configuration:")?;
     writeln!(buf, "  Helper enabled: {}", cfg.helper_enabled)?;
@@ -2376,14 +2752,126 @@ fn show_ospf_graceful_restart(
 /// at the default path and pretty-prints a summary so operators
 /// / tests can verify the write side without unpacking CBOR
 /// manually.
+#[derive(Serialize)]
+struct CheckpointNeighborJson {
+    router_id: String,
+    interface_addr: String,
+    was_full: bool,
+}
+
+#[derive(Serialize)]
+struct CheckpointLinkJson {
+    ifindex: u32,
+    ifname: String,
+    area_id: String,
+    neighbors: Vec<CheckpointNeighborJson>,
+}
+
+#[derive(Serialize)]
+struct CheckpointAreaJson {
+    area_id: String,
+    area_type: String,
+    lsa_count: usize,
+}
+
+#[derive(Serialize)]
+struct CheckpointAdjSidJson {
+    ifindex: u32,
+    address: String,
+    label: u32,
+}
+
+#[derive(Serialize)]
+struct CheckpointJson {
+    path: String,
+    present: bool,
+    /// Set only when a read error other than not-found occurred.
+    error: Option<String>,
+    format_version: Option<u32>,
+    written_at: Option<String>,
+    grace_period_secs: Option<u32>,
+    restart_reason: Option<String>,
+    router_id: Option<String>,
+    areas: Vec<CheckpointAreaJson>,
+    links: Vec<CheckpointLinkJson>,
+    adj_sid_labels: Vec<CheckpointAdjSidJson>,
+}
+
 fn show_ospf_checkpoint(
     _ospf: &Ospf,
     _args: Args,
-    _json: bool,
+    json: bool,
 ) -> std::result::Result<String, std::fmt::Error> {
     use super::checkpoint::{OspfCheckpoint, default_path};
 
     let path = default_path("ospf");
+
+    if json {
+        let mut out = CheckpointJson {
+            path: path.display().to_string(),
+            present: false,
+            error: None,
+            format_version: None,
+            written_at: None,
+            grace_period_secs: None,
+            restart_reason: None,
+            router_id: None,
+            areas: Vec::new(),
+            links: Vec::new(),
+            adj_sid_labels: Vec::new(),
+        };
+        match OspfCheckpoint::read_from_path(&path) {
+            Ok(cp) => {
+                out.present = true;
+                out.format_version = Some(cp.format_version);
+                out.written_at = Some(format!("{:?}", cp.written_at));
+                out.grace_period_secs = Some(cp.grace_period_secs);
+                out.restart_reason = Some(cp.restart_reason.to_string());
+                out.router_id = Some(cp.router_id.to_string());
+                out.areas = cp
+                    .areas
+                    .iter()
+                    .map(|area| CheckpointAreaJson {
+                        area_id: area.area_id.to_string(),
+                        area_type: format!("{:?}", area.area_type_kind),
+                        lsa_count: area.lsas.len(),
+                    })
+                    .collect();
+                out.links = cp
+                    .links
+                    .iter()
+                    .map(|link| CheckpointLinkJson {
+                        ifindex: link.ifindex,
+                        ifname: link.ifname.clone(),
+                        area_id: link.area_id.to_string(),
+                        neighbors: link
+                            .neighbors
+                            .iter()
+                            .map(|nbr| CheckpointNeighborJson {
+                                router_id: nbr.router_id.to_string(),
+                                interface_addr: nbr.interface_addr.to_string(),
+                                was_full: nbr.was_full,
+                            })
+                            .collect(),
+                    })
+                    .collect();
+                out.adj_sid_labels = cp
+                    .lan_adj_sids
+                    .iter()
+                    .map(|((ifindex, addr), label)| CheckpointAdjSidJson {
+                        ifindex: *ifindex,
+                        address: addr.to_string(),
+                        label: *label,
+                    })
+                    .collect();
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+            Err(e) => out.error = Some(e.to_string()),
+        }
+        return Ok(serde_json::to_string_pretty(&out)
+            .unwrap_or_else(|e| format!("{{\"error\": \"{}\"}}", e)));
+    }
+
     let mut buf = String::new();
     writeln!(buf, "Checkpoint path: {}", path.display())?;
     let cp = match OspfCheckpoint::read_from_path(&path) {

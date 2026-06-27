@@ -126,19 +126,19 @@ pending a finalized JSON schema.
 
 | Command | Description | JSON |
 |---|---|---|
-| `show ospf` | Instance summary | text only |
+| `show ospf` | Instance summary | ✅ |
 | `show ospf interface` | Interface status | ✅ |
 | `show ospf neighbor [detail]` | Neighbors | ✅ |
 | `show ospf database [detail]` | LSDB | ✅ |
-| `show ospf route` | OSPF routing table | text only |
-| `show ospf spf` | SPF tree | text only |
+| `show ospf route` | OSPF routing table | ✅ |
+| `show ospf spf` | SPF tree | ✅ |
 | `show ospf graph` | Topology graph | ✅ |
 | `show ospf ti-lfa` | TI-LFA per-destination repair paths | ✅ |
 | `show ospf repair-list [detail]` | TI-LFA repair-list | ✅ |
-| `show ospf flex-algo` | Flexible Algorithm (RFC 9350) state | text only |
-| `show ospf segment-routing` | SR database | text only |
-| `show ospf graceful-restart` | GR helper status | text only |
-| `show ospf checkpoint` | GR on-disk checkpoint | text only |
+| `show ospf flex-algo` | Flexible Algorithm (RFC 9350) state | ✅ |
+| `show ospf segment-routing` | SR database | ✅ |
+| `show ospf graceful-restart` | GR helper status | ✅ |
+| `show ospf checkpoint` | GR on-disk checkpoint | ✅ |
 | `show ospf vrf <name> …` | Per-VRF (redirected; mirrors above) | per sibling |
 
 ## OSPFv3 (`zebra-rs/src/ospf/show_v3.rs`)
@@ -229,7 +229,7 @@ pending a finalized JSON schema.
 |---|---:|---:|---:|
 | RIB / forwarding / config | 22 | 19 | 3 |
 | BGP | 25 | 20 | 5 |
-| OSPFv2 | 13 | 6 | 7 |
+| OSPFv2 | 13 | 13 | 0 |
 | OSPFv3 | 12 | 11 | 1 |
 | IS-IS | 21 | 14 | 7 |
 | IPv6 ND | 2 | 2 | 0 |
@@ -252,8 +252,6 @@ JSON":
 - **BGP:** `show bgp <afi> <prefix> longer-prefix`,
   `show bgp evpn ethernet-segment`, `show bgp attributes`,
   `show bgp neighbor <addr> rtcv4`
-- **OSPFv2:** `show ospf` (summary), `route`, `spf`, `flex-algo`,
-  `segment-routing`, `graceful-restart`, `checkpoint`
 - **OSPFv3:** `show ospfv3 flex-algo`
 - **IS-IS:** `show isis` (root), `summary`, `egress-protection`,
   `fast-reroute …`, `flex-algo [route …]`
