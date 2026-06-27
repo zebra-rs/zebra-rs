@@ -15,6 +15,9 @@ machinery in `crates/bgp-packet/src/attrs/attr.rs`, the
 Related: [`bgp-mpls-vpn-plan.md`](bgp-mpls-vpn-plan.md) (the MPLS L3VPN
 path this mirrors), and the project memory note `zebra-rs-bgp-srv6-l3vpn`
 (the 5-phase L3VPN-over-SRv6 plan).
+[`bgp-unknown-attribute-handling.md`](bgp-unknown-attribute-handling.md)
+covers the general RFC 4271 §9 unrecognized-attribute path that shares
+this same `parse_bgp_update_attribute` loop and treat-as-withdraw hook.
 
 ## Status (2026-06-08)
 
