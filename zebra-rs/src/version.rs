@@ -2,7 +2,10 @@
 /// Version information module containing package and git details
 use std::fmt;
 
+use serde::Serialize;
+
 /// Build-time version information
+#[derive(Serialize)]
 pub struct VersionInfo {
     pub package_version: &'static str,
     pub package_name: &'static str,
@@ -36,6 +39,12 @@ impl VersionInfo {
             "{} version {} ({})\nBuild Date: {}",
             self.package_name, self.package_version, self.git_hash, self.build_date
         )
+    }
+
+    /// Pretty-printed JSON rendering of the full version record —
+    /// every build-time field, for `show version -j`.
+    pub fn format_json(&self) -> String {
+        serde_json::to_string_pretty(self).unwrap_or_else(|e| format!("{{\"error\": \"{e}\"}}"))
     }
 
     /// Get a short version string

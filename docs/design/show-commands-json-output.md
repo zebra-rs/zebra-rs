@@ -66,11 +66,11 @@ its non-VRF sibling** in the tables below.
 
 | Command | Description | JSON |
 |---|---|---|
-| `show version` | Daemon version (config-tree handler) | text only |
+| `show version` | Daemon version (manager-answered global) | ✅ |
 | `show router-id` | Effective global router ID | ✅ |
 | `show hostname` | System hostname | ✅ |
 | `show vrf` | VRF table | ✅ |
-| `show task` | Spawned protocol tasks and their VRF (manager handler) | text only |
+| `show task` | Spawned protocol tasks and their VRF (manager handler) | ✅ |
 | `show interface [<name>] [detail]` | Interface state | ✅ |
 | `show ip route` | IPv4 routing table | ✅ |
 | `show ip route detail` | IPv4 RIB, IOS-XR detail blocks | ✅ |
@@ -85,7 +85,7 @@ its non-VRF sibling** in the tables below.
 | `show l2 mac table` | Bridge MAC table | ✅ |
 | `show l2 neighbor` | Bridge FDB entries | ✅ |
 | `show segment-routing srv6 sid` | Allocated SRv6 SIDs | ✅ |
-| `show evpn vni all` | EVPN VNI information | text only |
+| `show evpn vni all` | EVPN VNI information (stub; `-j` → `[]`) | ✅ |
 | `show running-config [formal\|json\|yaml]` | Committed config | ✅ (sub-keyword) |
 | `show candidate-config [formal\|json\|yaml]` | Uncommitted config | ✅ (sub-keyword) |
 
@@ -236,7 +236,7 @@ pending a finalized JSON schema.
 
 | Module | Commands | JSON (incl. ◐ placeholder) | Text only |
 |---|---:|---:|---:|
-| RIB / forwarding / config | 22 | 19 | 3 |
+| RIB / forwarding / config | 22 | 22 | 0 |
 | BGP | 25 | 25 | 0 |
 | OSPFv2 | 13 | 13 | 0 |
 | OSPFv3 | 12 | 12 | 0 |
@@ -252,17 +252,22 @@ the flag but still emit an empty array/object.)
 
 ### Remaining gaps (still text only)
 
-These are the commands to convert to reach "all `show` commands support
-JSON":
+None. Every concrete `show` command now honors `-j`:
 
-- **RIB:** `show task`, `show version` (both use the config-tree /
-  manager dispatch that does not carry the `-j` flag — needs plumbing),
-  and `show evpn vni all` (lives in the BGP/EVPN module)
+- Every per-protocol `ShowCallback` (RIB, BGP, all IGPs, BFD, STAMP, ND,
+  policy) branches on the flag.
+- `show version` and `show task` — owned by no protocol daemon — are
+  answered by the manager's `DisplayTx` interceptor, which now picks
+  text vs. JSON from the second-phase `DisplayRequest.json`
+  (`reply_static_show`). `show version` previously returned **nothing**
+  over the Show RPC (it was only wired to the interactive exec path);
+  it now works in both renderings.
+- `show evpn vni all` is still a content stub, but honors `-j` (`[]`)
+  rather than emitting the text placeholder.
 
-Every per-protocol `ShowCallback` (RIB, BGP, all IGPs, BFD, STAMP, ND,
-policy) now honors `-j`. What's left is the handful of commands routed
-through a different dispatch path (above) plus the BGP `◐` placeholders
-below.
+The only entries left short of a full document are the BGP `◐`
+placeholders below — they already accept `-j` but emit an empty
+array/object pending dedicated per-AFI route schemas.
 
 ### Placeholder JSON (BGP ◐ — honors `-j`, emits empty array/object)
 
