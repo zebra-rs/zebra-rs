@@ -1,0 +1,98 @@
+module zebra-bgp-unknown-attr {
+  yang-version "1";
+
+  namespace "urn:ietf:params:xml:ns:yang:zebra-bgp-unknown-attr";
+  prefix "zbua";
+
+  import ietf-bgp {
+    prefix bgp;
+  }
+
+  import config {
+    prefix config;
+  }
+
+  import configure {
+    prefix configure;
+  }
+
+  import extension {
+    prefix ext;
+  }
+
+  organization
+    "zebra-rs";
+
+  contact
+    "https://github.com/zebra-rs";
+
+  description
+    "Debug/test per-neighbor knob: attach a synthetic *unrecognized* path
+     attribute to every IPv4-unicast route advertised to this neighbor.
+
+     This exists to drive the receiver-side RFC 4271 §9 handling of
+     unrecognized path attributes from configuration, without having to
+     hand-craft BGP packets:
+
+       * an Optional Transitive unknown attribute must be accepted, have
+         its Partial bit set, and be re-advertised;
+       * an Optional non-Transitive unknown attribute must be silently
+         dropped and never propagated;
+       * an unrecognized well-known attribute (Optional bit clear) must
+         reset the session with a NOTIFICATION (subcode 2).
+
+     The value is a compact `<type>:<flags>:<value-hex>` spec:
+
+       router bgp {
+         neighbor 10.0.0.2 {
+           remote-as 65002;
+           // type 250, flags 0xC0 (Optional|Transitive), value DE AD BE EF
+           attach-unknown-attribute 250:192:deadbeef;
+         }
+       }
+
+     `<type>` and `<flags>` are decimal 0-255; `<value-hex>` is an
+     even-length hex string (possibly empty). The Extended-Length flag bit
+     is ignored and re-derived from the value length on emit.";
+
+  revision 2026-06-27 {
+    description "Initial revision.";
+    reference "RFC 4271 §5, §9 unrecognized path attribute handling.";
+  }
+
+  grouping bgp-neighbor-attach-unknown-attr-extension {
+    description
+      "Per-neighbor `attach-unknown-attribute` leaf.";
+
+    leaf attach-unknown-attribute {
+      type string;
+      ext:help "Attach a synthetic unrecognized attribute: <type>:<flags>:<value-hex>";
+      description
+        "When set, stamp a synthetic unrecognized path attribute onto
+         every IPv4-unicast route advertised to this neighbor. Format is
+         `<type>:<flags>:<value-hex>` (decimal type/flags, even-length hex
+         value). Debug/test use only.";
+    }
+  }
+
+  /* =========================================================
+   * Augments into the zebra-rs configure tree
+   * ========================================================= */
+
+  augment "/configure:set/config:router"
+        + "/bgp:bgp/bgp:neighbor" {
+    description
+      "Attach the debug knob to BGP neighbors in the candidate-set
+       subtree.";
+    uses bgp-neighbor-attach-unknown-attr-extension;
+  }
+
+  augment "/configure:delete/config:router"
+        + "/bgp:bgp/bgp:neighbor" {
+    description
+      "Same attachment for the delete subtree so
+       `delete router bgp neighbor X attach-unknown-attribute` is
+       path-valid.";
+    uses bgp-neighbor-attach-unknown-attr-extension;
+  }
+}

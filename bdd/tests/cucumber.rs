@@ -1196,6 +1196,129 @@ async fn verify_bgp_route_field(
     );
 }
 
+/// Fetch the `unknown_attributes` JSON array for a prefix from
+/// `show bgp -j`, panicking if the route itself is missing. Returns an
+/// empty Vec when the route has no unrecognized attributes (the field is
+/// `skip_serializing_if = "Vec::is_empty"`, so it is simply absent).
+async fn route_unknown_attrs(world: &World, namespace: &str, prefix: &str) -> Vec<Value> {
+    let scoped = world.ns(namespace);
+    let output = netns::exec_in_netns(&scoped, "vtyctl", &["show", "-j", "show bgp"])
+        .await
+        .expect("Failed to get BGP routes");
+    let routes: Value = serde_json::from_str(&output).expect("Failed to parse JSON output");
+    let route = routes
+        .as_array()
+        .and_then(|arr| {
+            arr.iter()
+                .find(|r| r.get("prefix").and_then(|p| p.as_str()) == Some(prefix))
+        })
+        .unwrap_or_else(|| {
+            panic!(
+                "BGP route {} not found in namespace {}, got: {}",
+                prefix, scoped, output
+            )
+        });
+    route
+        .get("unknown_attributes")
+        .and_then(|v| v.as_array())
+        .cloned()
+        .unwrap_or_default()
+}
+
+/// Assert the route carries an unrecognized attribute of the given Type
+/// Code (RFC 4271 §9 — an optional transitive unknown attribute that was
+/// accepted and retained).
+#[then(expr = "BGP route in {string} has {string} with unknown attribute type {int}")]
+async fn verify_unknown_attr_present(
+    world: &mut World,
+    namespace: String,
+    prefix: String,
+    type_code: u8,
+) {
+    let attrs = route_unknown_attrs(world, &namespace, &prefix).await;
+    let found = attrs
+        .iter()
+        .any(|a| a.get("type_code").and_then(|t| t.as_u64()) == Some(type_code as u64));
+    assert!(
+        found,
+        "route {} in {} should carry unknown attribute type {}, got: {:?}",
+        prefix,
+        world.ns(&namespace),
+        type_code,
+        attrs
+    );
+    println!(
+        "✓ route {} in {} carries unknown attribute type {}",
+        prefix,
+        world.ns(&namespace),
+        type_code
+    );
+}
+
+/// Assert the route carries an unrecognized attribute of the given Type
+/// Code AND that its Partial bit is set — proving a downstream speaker
+/// set Partial on receipt of an unrecognized transitive attribute
+/// (RFC 4271 §9).
+#[then(expr = "BGP route in {string} has {string} with partial unknown attribute type {int}")]
+async fn verify_unknown_attr_partial(
+    world: &mut World,
+    namespace: String,
+    prefix: String,
+    type_code: u8,
+) {
+    let attrs = route_unknown_attrs(world, &namespace, &prefix).await;
+    let entry = attrs
+        .iter()
+        .find(|a| a.get("type_code").and_then(|t| t.as_u64()) == Some(type_code as u64))
+        .unwrap_or_else(|| {
+            panic!(
+                "route {} in {} missing unknown attribute type {}, got: {:?}",
+                prefix,
+                world.ns(&namespace),
+                type_code,
+                attrs
+            )
+        });
+    let partial = entry
+        .get("partial")
+        .and_then(|p| p.as_bool())
+        .unwrap_or(false);
+    assert!(
+        partial,
+        "unknown attribute type {} on {} in {} must have Partial set, got: {}",
+        type_code,
+        prefix,
+        world.ns(&namespace),
+        entry
+    );
+    println!(
+        "✓ route {} in {} carries unknown attribute type {} with Partial set",
+        prefix,
+        world.ns(&namespace),
+        type_code
+    );
+}
+
+/// Assert the route carries NO unrecognized attributes — proving an
+/// optional non-transitive unknown attribute was dropped and not
+/// propagated (RFC 4271 §9).
+#[then(expr = "BGP route in {string} has {string} without unknown attributes")]
+async fn verify_no_unknown_attr(world: &mut World, namespace: String, prefix: String) {
+    let attrs = route_unknown_attrs(world, &namespace, &prefix).await;
+    assert!(
+        attrs.is_empty(),
+        "route {} in {} must carry no unknown attributes, got: {:?}",
+        prefix,
+        world.ns(&namespace),
+        attrs
+    );
+    println!(
+        "✓ route {} in {} carries no unknown attributes",
+        prefix,
+        world.ns(&namespace)
+    );
+}
+
 #[given("the test topology exists")]
 async fn test_topology_exists(world: &mut World) {
     let z1 = world.ns("z1");

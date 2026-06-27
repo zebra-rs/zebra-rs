@@ -1,0 +1,29 @@
+interface:
+- if-name: i1
+  ipv4:
+    address: 192.168.0.1/24
+router:
+  bgp:
+    global:
+      as: 65001
+      router-id: 192.168.0.1
+    timer:
+      adv-interval:
+        ibgp: 1
+        ebgp: 1
+    neighbor:
+    - remote-address: 192.168.0.2
+      afi-safi:
+      - name: ipv4
+        enabled: true
+      enabled: true
+      remote-as: 65002
+      # Debug knob: attach an Optional, non-Transitive (flags 0x80 = 128)
+      # unknown attribute, Type Code 251, value 0x1234.
+      attach-unknown-attribute: "251:128:1234"
+      timers:
+        connect-retry-time: 3
+    afi-safi:
+    - name: ipv4
+      network:
+      - prefix: 10.0.0.1/32

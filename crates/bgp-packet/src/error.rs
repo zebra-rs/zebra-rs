@@ -27,6 +27,15 @@ pub enum BgpParseError {
     #[error("Unknown attribute type: {attr_type}")]
     UnknownAttributeType { attr_type: u8 },
 
+    /// RFC 4271 §6.3: an attribute whose Type Code is unrecognized AND
+    /// whose Optional bit is clear (i.e. an unrecognized *well-known*
+    /// attribute) is an error. The session must be reset with a
+    /// NOTIFICATION (Update Message Error, subcode 2). `attr` carries the
+    /// full offending attribute TLV (flags, type, length, value) for the
+    /// NOTIFICATION Data field.
+    #[error("Unrecognized well-known attribute: type {type_code}")]
+    UnrecognizedWellknownAttribute { type_code: u8, attr: Vec<u8> },
+
     #[error("Header length is smaller than expected: got {actual}, expected {expected}")]
     InvalidHeaderLength { expected: usize, actual: usize },
 }

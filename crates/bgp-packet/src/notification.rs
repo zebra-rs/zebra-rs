@@ -247,6 +247,25 @@ impl From<u8> for UpdateError {
     }
 }
 
+impl From<UpdateError> for u8 {
+    fn from(sub_code: UpdateError) -> Self {
+        use UpdateError::*;
+        match sub_code {
+            MalformedAttributeList => 1,
+            UnrecognizedWellknownAttribute => 2,
+            MissingWellknownAttribute => 3,
+            AttributeFlagsError => 4,
+            AttributeLengthError => 5,
+            InvalidOriginAttribute => 6,
+            InvalidNexthopAttribute => 8,
+            OptionalAttributeError => 9,
+            InvalidNetworkField => 10,
+            MalformedAspath => 11,
+            Unknown(v) => v,
+        }
+    }
+}
+
 fn sub_update_error_str(sub_code: UpdateError) -> String {
     use UpdateError::*;
     match sub_code {

@@ -1037,6 +1037,52 @@ pub(super) fn apply_enforce_first_as(peer: &mut Peer, want: bool) -> bool {
     false
 }
 
+/// Parse the compact `attach-unknown-attribute` spec
+/// `<type>:<flags>:<value-hex>` into a [`UnknownAttr`].
+///
+/// * `<type>`  — Attribute Type Code, decimal 0–255.
+/// * `<flags>` — Attribute Flags octet, decimal 0–255 (e.g. 192 =
+///   Optional|Transitive, 128 = Optional only). The Extended-Length bit
+///   is ignored here and re-derived from the value length at emit time.
+/// * `<value-hex>` — attribute Value as an even-length hex string; may be
+///   empty for a zero-length attribute (`250:192:`).
+///
+/// Returns `None` on any malformed field so the config callback rejects
+/// the statement rather than attaching a half-built attribute.
+fn parse_attach_unknown_attr(spec: &str) -> Option<UnknownAttr> {
+    let mut parts = spec.splitn(3, ':');
+    let type_code: u8 = parts.next()?.trim().parse().ok()?;
+    let flags: u8 = parts.next()?.trim().parse().ok()?;
+    let value_hex = parts.next()?.trim();
+    if value_hex.len() % 2 != 0 {
+        return None;
+    }
+    let mut value = Vec::with_capacity(value_hex.len() / 2);
+    for i in (0..value_hex.len()).step_by(2) {
+        value.push(u8::from_str_radix(&value_hex[i..i + 2], 16).ok()?);
+    }
+    Some(UnknownAttr::new(flags, type_code, value))
+}
+
+/// `set router bgp neighbor X attach-unknown-attribute "<type>:<flags>:<hex>"`
+/// (zebra-bgp-unknown-attr.yang). Debug/test knob: stamp a synthetic
+/// unrecognized path attribute onto every IPv4-unicast route advertised
+/// to this neighbor so a downstream speaker's RFC 4271 §9 handling can be
+/// driven from config. `delete` clears it.
+fn config_attach_unknown_attribute(bgp: &mut Bgp, mut args: Args, op: ConfigOp) -> Option<()> {
+    let addr = args.addr()?;
+    if op.is_set() {
+        let spec = args.string()?;
+        let attr = parse_attach_unknown_attr(&spec)?;
+        let peer = bgp.peers.get_mut(&addr)?;
+        peer.config.attach_unknown_attr = Some(attr);
+    } else {
+        let peer = bgp.peers.get_mut(&addr)?;
+        peer.config.attach_unknown_attr = None;
+    }
+    Some(())
+}
+
 /// Resolve the `local-as` entry the callbacks below may write to,
 /// enforcing the two commit-time rules from zebra-bgp-local-as.yang:
 /// the substitute must differ from the router's global AS (FRR's
@@ -4540,6 +4586,11 @@ impl Bgp {
         self.callback_peer("/enforce-first-as", config_enforce_first_as);
         self.callback_peer("/pic-retention", config_pic_retention);
 
+        // Debug/test knob (zebra-bgp-unknown-attr.yang): attach a synthetic
+        // unrecognized path attribute to routes advertised to this
+        // neighbor — exercises RFC 4271 §9 receiver handling end to end.
+        self.callback_peer("/attach-unknown-attribute", config_attach_unknown_attribute);
+
         // Per-neighbor local-as (zebra-bgp-local-as.yang): a
         // single-entry list keyed by the substitute AS number, with
         // three independent boolean modifier leaves.
@@ -5248,6 +5299,67 @@ mod bfd_wiring_tests {
         config_enforce_first_as(&mut bgp, arg_words(&["10.0.0.2"]), ConfigOp::Set).unwrap();
         config_enforce_first_as(&mut bgp, arg_words(&["10.0.0.2"]), ConfigOp::Delete).unwrap();
         assert!(!peer_enforce_first_as(&bgp, "10.0.0.2"));
+    }
+
+    fn peer_attach_unknown(bgp: &Bgp, addr: &str) -> Option<UnknownAttr> {
+        bgp.peers
+            .get(&addr.parse().unwrap())
+            .unwrap()
+            .config
+            .attach_unknown_attr
+            .clone()
+    }
+
+    /// The `attach-unknown-attribute` debug knob parses the compact
+    /// `<type>:<flags>:<value-hex>` spec onto the peer; delete clears it.
+    #[tokio::test]
+    async fn attach_unknown_attr_set_and_delete() {
+        let (mut bgp, _rx) = fresh_bgp_with_bfd();
+        config_peer(&mut bgp, arg_words(&["10.0.0.2"]), ConfigOp::Set).unwrap();
+        assert!(peer_attach_unknown(&bgp, "10.0.0.2").is_none());
+
+        config_attach_unknown_attribute(
+            &mut bgp,
+            arg_words(&["10.0.0.2", "250:192:deadbeef"]),
+            ConfigOp::Set,
+        )
+        .unwrap();
+        let u = peer_attach_unknown(&bgp, "10.0.0.2").expect("attr set");
+        assert_eq!(u.type_code, 250);
+        assert_eq!(u.flags, 192);
+        assert!(u.is_optional() && u.is_transitive());
+        assert_eq!(u.value, vec![0xde, 0xad, 0xbe, 0xef]);
+
+        config_attach_unknown_attribute(&mut bgp, arg_words(&["10.0.0.2"]), ConfigOp::Delete)
+            .unwrap();
+        assert!(peer_attach_unknown(&bgp, "10.0.0.2").is_none());
+    }
+
+    /// Spec parsing: empty value is a zero-length attribute; odd-length
+    /// hex and non-numeric fields are rejected.
+    #[test]
+    fn attach_unknown_attr_spec_parsing() {
+        let z = parse_attach_unknown_attr("251:128:").expect("empty value ok");
+        assert_eq!(z.type_code, 251);
+        assert_eq!(z.flags, 128);
+        assert!(z.value.is_empty());
+
+        assert!(
+            parse_attach_unknown_attr("250:192:dea").is_none(),
+            "odd hex"
+        );
+        assert!(
+            parse_attach_unknown_attr("999:0:00").is_none(),
+            "type > 255"
+        );
+        assert!(
+            parse_attach_unknown_attr("250:xx:00").is_none(),
+            "bad flags"
+        );
+        assert!(
+            parse_attach_unknown_attr("250:192").is_none(),
+            "missing value"
+        );
     }
 }
 

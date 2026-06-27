@@ -5,7 +5,7 @@ use bytes::BytesMut;
 use crate::{
     Aggregator, Aigp, As4Path, AtomicAggregate, AttrEmitter, BgpLsAttr, BgpNexthop, ClusterList,
     Color, Community, ExtCommunity, LargeCommunity, LocalPref, Med, NexthopAttr, Origin,
-    OriginatorId, PmsiTunnel, PrefixSid, PrefixSidTlv, TunnelEncap,
+    OriginatorId, PmsiTunnel, PrefixSid, PrefixSidTlv, TunnelEncap, UnknownAttr,
 };
 
 // BGP Attribute for quick access to each attribute. This would be used for
@@ -52,7 +52,11 @@ pub struct BgpAttr {
     pub tunnel_encap: Option<TunnelEncap>,
     /// BGP-LS Attribute (path attribute type 29, RFC 9552).
     pub bgp_ls: Option<BgpLsAttr>,
-    // TODO: Unknown Attributes.
+    /// Unrecognized **optional transitive** path attributes (RFC 4271
+    /// §9). Retained verbatim so they can be re-advertised to other peers
+    /// with the Partial bit set. Unrecognized optional non-transitive
+    /// attributes are dropped at parse time and never land here.
+    pub unknown: Vec<UnknownAttr>,
 }
 
 impl BgpAttr {
@@ -115,6 +119,11 @@ impl BgpAttr {
             v.attr_emit(buf);
         }
         if let Some(v) = &self.tunnel_encap {
+            v.attr_emit(buf);
+        }
+        // Unrecognized optional transitive attributes (RFC 4271 §9):
+        // re-advertised verbatim with the Partial bit (set when stored).
+        for v in &self.unknown {
             v.attr_emit(buf);
         }
     }
@@ -221,6 +230,9 @@ impl fmt::Display for BgpAttr {
         }
         if let Some(v) = &self.tunnel_encap {
             writeln!(f, " TunnelEncap: {}", v)?;
+        }
+        for v in &self.unknown {
+            writeln!(f, " Unknown: {}", v)?;
         }
         // Nexthop
         if let Some(v) = &self.nexthop {

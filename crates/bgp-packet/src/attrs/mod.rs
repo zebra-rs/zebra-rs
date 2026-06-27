@@ -4,6 +4,12 @@ pub use attr::*;
 pub mod flags;
 pub use flags::*;
 
+// Non-`pub` module: the crate root globs `attrs::*`, and a `pub mod
+// unknown` here would collide with the existing `caps::unknown` module
+// name. Re-export the contents (UnknownAttr) without the module name.
+mod unknown;
+pub use unknown::*;
+
 pub mod origin;
 pub use origin::*;
 

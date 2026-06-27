@@ -194,6 +194,11 @@ pub struct SyncCtx {
     pub packet_tx: Option<tokio::sync::mpsc::UnboundedSender<BytesMut>>,
     pub egress_depth: Arc<std::sync::atomic::AtomicUsize>,
     pub extended_message: bool,
+    /// Debug/test knob: a synthetic unrecognized path attribute to attach
+    /// to every IPv4-unicast route advertised on this session (RFC 4271
+    /// §9 origination test). `None` = off. See
+    /// [`super::peer::PeerConfig::attach_unknown_attr`].
+    pub attach_unknown_attr: Option<bgp_packet::UnknownAttr>,
 }
 
 impl SyncCtx {
@@ -283,6 +288,7 @@ impl SyncCtx {
             packet_tx: None,
             egress_depth: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
             extended_message: false,
+            attach_unknown_attr: None,
         }
     }
 }
@@ -10331,6 +10337,19 @@ pub fn route_update_ipv4(
     // the iBGP stamping/local-pref-default above; see `strip_ibgp_only_attrs`.
     if ctx.peer_type.is_ebgp() {
         strip_ibgp_only_attrs(&mut attrs);
+    }
+
+    // Debug/test knob: attach a synthetic unrecognized path attribute on
+    // egress (RFC 4271 §9 origination test). Done last so the configured
+    // Type Code / Flags reach the wire verbatim — the originator decides
+    // the Partial bit, downstream speakers that don't recognize it set
+    // Partial themselves on receive. Skip if the route already carries an
+    // unknown attribute of the same Type Code (a received one being
+    // re-advertised) so we never emit a duplicate.
+    if let Some(extra) = &ctx.attach_unknown_attr
+        && !attrs.unknown.iter().any(|u| u.type_code == extra.type_code)
+    {
+        attrs.unknown.push(extra.clone());
     }
 
     Some((nlri, attrs))
