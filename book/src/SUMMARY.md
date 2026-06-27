@@ -97,6 +97,16 @@
   - [Session Management Design](ch-06-01-session-design.md)
   - [Show Config Commands](ch-06-02-show-config-commands.md)
 
+## Operational Show Commands
+
+- [Overview](ch-14-00-show-overview.md)
+  - [System, RIB and Forwarding](ch-14-01-show-system-rib.md)
+  - [BGP](ch-14-02-show-bgp.md)
+  - [OSPFv2 and OSPFv3](ch-14-03-show-ospf.md)
+  - [IS-IS](ch-14-04-show-isis.md)
+  - [Neighbor Discovery, BFD and STAMP](ch-14-05-show-bfd-stamp-nd.md)
+  - [Policy Objects](ch-14-06-show-policy.md)
+
 ## AI Native
 
 - [Native MCP Server](ch-13-00-mcp-server.md)

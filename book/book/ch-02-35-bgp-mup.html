@@ -35,10 +35,10 @@
             const path_to_root = "";
             const default_light_theme = "light";
             const default_dark_theme = "navy";
-            window.path_to_searchindex_js = "searchindex-e8920642.js";
+            window.path_to_searchindex_js = "searchindex-c2dd9936.js";
         </script>
         <!-- Start loading toc.js asap -->
-        <script src="toc-d6f7580c.js"></script>
+        <script src="toc-ac7a9645.js"></script>
     </head>
     <body>
     <div id="mdbook-help-container">
@@ -204,17 +204,21 @@ draft leaves the controller’s session source as an out-of-scope
 northbound and terminates it as a UP-node — an external SMF programs the
 controller exactly as it would a UPF.</p>
 <pre><code>   SMF ──PFCP/N4──▶ zebra-rs MUP-C ──BGP MUP (SAFI 85)──▶ SRv6 PEs
- (sessions)          │ learns UE/TEID/NI                 (install
-                     │ originates T1ST/T2ST               forwarding)
-                     ▼
-             SRv6 End.DT4/DT6 SID  (from a locator)
+ (sessions)            learns UE/TEID/NI,                (resolve the
+                       originates T1ST/T2ST               segment, install
+                       (no SID — see below)               End.DT46 forwarding)
 </code></pre>
+<p>The PEs originate the <strong>segment</strong> routes — DSD (<code>segment direct</code>) and ISD
+(<code>segment interwork</code>) — that advertise their per-VRF <strong>End.DT46</strong> SID; the
+controller’s ST routes carry no SID and a receiving PE derives forwarding by
+resolving each ST route against the matching segment (the
+draft-ietf-bess-mup-safi default).</p>
 <p>The MUP control plane (capability negotiation, Loc-RIB, receive, and
-re-advertisement) is always present once the <code>mobile-uplane</code> AFI/SAFI is
+re-advertisement) is always present once the <code>mup</code> AFI/SAFI is
 negotiated. The <strong>controller</strong> — the PFCP listener and route origination
 — is what the <code>mup-c</code> block below turns on.</p>
 <h2 id="enabling-the-mup-capability"><a class="header" href="#enabling-the-mup-capability">Enabling the MUP capability</a></h2>
-<p><code>mobile-uplane</code> is a single AFI/SAFI knob that negotiates <strong>both</strong>
+<p><code>mup</code> is a single AFI/SAFI knob that negotiates <strong>both</strong>
 IPv4-MUP (AFI 1) and IPv6-MUP (AFI 2). Enable it per neighbor like any
 other family:</p>
 <pre><code>router bgp {
@@ -227,17 +231,18 @@ other family:</p>
     afi-safi ipv4 {
       enabled true;
     }
-    afi-safi mobile-uplane {
+    afi-safi mup {
       enabled true;
     }
   }
 }
 </code></pre>
 <h2 id="configuring-the-controller"><a class="header" href="#configuring-the-controller">Configuring the controller</a></h2>
-<p>The controller lives under the <strong>global</strong> <code>mobile-uplane</code> AFI/SAFI. It
-needs three things: an SRv6 locator to carve per-session SIDs from, a
-per-VRF <code>mobile-uplane</code> service that maps a PFCP Network Instance to a
-Route Distinguisher / route-targets, and the <code>mup-c</code> block itself.</p>
+<p>The controller’s <code>mup-c</code> block sits <strong>directly under the BGP instance</strong>
+(<code>router bgp { mup-c { … } }</code>). It needs three things: a per-VRF <code>mup</code>
+service that maps a PFCP Network Instance to a Route Distinguisher /
+route-targets, the <code>mup-c</code> block itself, and — only for the non-default
+explicit-SID mode — an SRv6 locator.</p>
 <pre><code>segment-routing {
   locator LOC1 {
     prefix fcbb:bb01::/48;
@@ -255,31 +260,37 @@ router bgp {
   }
 
   # Map the PFCP Network Instance "access" to a VPN service: the RD
-  # stamped on the ST route and the route-targets it carries.
+  # stamped on the ST route and the ST route type it originates.
   vrf mobile-up {
     rd 65000:100;
-    mobile-uplane {
-      route-target {
-        export 65000:200;
-      }
-      srv6-mobile encapsulation {
-        network-instance exact access;
+    afi-safi mup {
+      route st1 {
+        network-instance access;
       }
     }
   }
 
   # Turn on the controller: the PFCP/N4 listener + route origination.
-  afi-safi mobile-uplane {
-    mup-c {
-      enable true;
-      controller-address fcbb:bb01::1;
-      pfcp {
-        listen-address 192.168.0.1;
-        port 8805;
-      }
-      srv6 {
-        locator LOC1;
-      }
+  # The `mup-c` block sits directly under the BGP instance.
+  mup-c {
+    enable true;
+    controller-address fcbb:bb01::1;
+    pfcp {
+      listen-address 192.168.0.1;
+      port 8805;
+    }
+    srv6 {
+      locator LOC1;
+    }
+  }
+}
+
+# The export route-targets the ST routes carry live on the top-level VRF,
+# the same `route-target {import|export}` framework as ipv4 / ipv6.
+vrf mobile-up {
+  mup {
+    route-target {
+      export 65000:200;
     }
   }
 }
@@ -294,54 +305,125 @@ hop.</li>
 hop on every originated ST route.</li>
 <li><strong><code>pfcp</code></strong> sets the N4 listener bind address and port (default
 <code>[::]:8805</code>).</li>
-<li><strong><code>srv6 locator</code></strong> names the locator per-session SIDs are carved from
-(the same pool an <code>encapsulation srv6</code> VRF draws its End.DT46 SID
-from).</li>
+<li><strong><code>srv6 locator</code></strong> is <strong>reserved</strong> for the non-default mode where the
+controller pushes an explicit SID; in the default mode it is unused.
+Per draft-ietf-bess-mup-safi the controller originates ST routes
+<strong>without</strong> a service SID — the receiving PE derives forwarding from
+its own ISD/DSD routes — so no per-session SID is allocated.</li>
 </ul>
-<p>The <strong><code>srv6-mobile</code></strong> direction in the VRF selects the route type:
-<code>encapsulation</code> (the N6 / downlink VRF) originates a <strong>Type-1 ST</strong> route
-carrying the UE prefix; <code>decapsulation</code> (the N3 / uplink VRF) originates
-a <strong>Type-2 ST</strong> route carrying the core endpoint and TEID. The
-<code>network-instance exact</code> value is matched against the PFCP session’s
-Network Instance.</p>
+<p>A VRF binds one ST direction to a PFCP Network Instance under <code>afi-safi mup route {st1|st2}</code>; the two read identically:</p>
+<ul>
+<li><strong>Downlink (Type-1 ST).</strong> <code>afi-safi mup route st1 { network-instance &lt;ni&gt;; }</code> — the N6 VRF originates a <strong>Type-1 ST</strong> route carrying the UE
+prefix (ingress GTP encapsulation).</li>
+<li><strong>Uplink (Type-2 ST).</strong> <code>afi-safi mup route st2 { network-instance &lt;ni&gt;; mup-ext-comm &lt;2:4&gt;; }</code> — the N3 VRF originates a <strong>Type-2 ST</strong> route
+carrying the core endpoint and the GTP TEID (egress GTP decapsulation).
+The optional <code>mup-ext-comm</code> is the BGP MUP Extended Community
+(Direct-segment id in RD/RT 2:4 form, e.g. <code>1:2</code>) the ST2 resolves to.</li>
+</ul>
+<p>The configured network-instance is matched exactly against the PFCP
+session’s Network Instance. The export route-targets the ST route carries
+come from the top-level <code>vrf &lt;name&gt; mup route-target export</code> — the same
+<code>route-target</code> framework as <code>ipv4</code> / <code>ipv6</code>.</p>
+<p>A single PFCP session originates <strong>every</strong> matching ST route: if both an
+st1 VRF and an st2 VRF bind the same Network Instance, one session
+originates both the Type-1 and the Type-2 ST.</p>
+<p>For example, an uplink VRF that also originates the Direct segment it
+resolves to:</p>
+<pre><code>vrf N3 {
+  rd 65000:100;
+  encapsulation srv6;
+  afi-safi mup {
+    route st2 {
+      network-instance core;   # originate an ST2 for PFCP sessions on NI "core"
+      mup-ext-comm 1:2;        # the Direct segment id it resolves to
+    }
+    segment direct {
+      mup-ext-comm 1:2;        # originate the End.DT46 DSD with the same id
+    }
+  }
+}
+</code></pre>
+<h3 id="segment-discovery-routes-segment-direct--segment-interwork"><a class="header" href="#segment-discovery-routes-segment-direct--segment-interwork">Segment Discovery routes (<code>segment direct</code> / <code>segment interwork</code>)</a></h3>
+<p>A PE VRF with <code>encapsulation srv6</code> carves a per-VRF <strong>End.DT46</strong> SID from
+the locator and installs the <code>seg6local</code> decap. <code>afi-safi mup segment</code>
+advertises that segment so a receiving PE can resolve matching ST routes to
+it:</p>
+<ul>
+<li><strong><code>segment direct { mup-ext-comm &lt;2:4&gt;; }</code></strong> originates a <strong>Direct
+Segment Discovery (DSD, type 2)</strong> route — NLRI = RD + router-id — carrying
+the End.DT46 SID and the Direct-segment id (<code>mup-ext-comm</code>). A receiving
+<em>interwork</em> node (<code>segment interwork</code>) matches each received ST2 to the
+DSD by this id and <code>show bgp mup</code> prints the resolution.</li>
+<li><strong><code>segment interwork { prefix &lt;p&gt;; }</code></strong> originates an <strong>Interwork Segment
+Discovery (ISD, type 1)</strong> route — NLRI = RD + the configured <code>prefix</code>
+(typically the locally connected gNodeB N3 prefix; its family selects the
+AFI) — carrying the End.DT46 SID. The ISD does not originate until the
+prefix is set, and carries no <code>mup-ext-comm</code> (an ISD is resolved by
+endpoint-address lookup).</li>
+</ul>
+<pre><code>vrf N6 {
+  rd 65501:10;
+  encapsulation srv6;
+  afi-safi mup {
+    segment interwork {
+      prefix 10.60.0.0/16;     # originate the End.DT46 ISD under this prefix
+    }
+  }
+}
+</code></pre>
+<p>zebra-rs uses <strong>End.DT46</strong> for both Direct and Interwork segments; the
+draft’s GTP-interwork behaviours (GTP4.E / GTP6.E / H.M.GTP4.D) are
+VPP/eBPF and not yet implemented.</p>
 <h2 id="from-pfcp-session-to-st-route"><a class="header" href="#from-pfcp-session-to-st-route">From PFCP session to ST route</a></h2>
 <p>When an SMF establishes a session, the controller:</p>
 <ol>
 <li>extracts the UE IP address, the access-side F-TEID (TEID + GTP
 endpoint), and the Network Instance from the PFCP Session
 Establishment Request;</li>
-<li>correlates the Network Instance against the per-VRF <code>mobile-uplane</code>
-config to find the RD, the route-targets, and the direction;</li>
-<li>allocates an <strong>SRv6 service SID</strong> (End.DT4 for an IPv4 UE, End.DT6
-for IPv6) from the configured locator;</li>
+<li>correlates the Network Instance against the per-VRF <code>mup</code> config to
+find the RD and the ST route type (<code>st1</code> / <code>st2</code>), and the VRF’s
+export route-targets from the top-level VRF;</li>
 <li>originates the ST route into the MUP Loc-RIB with the
-controller-address as next hop, the VRF’s route-targets, and the SID
-carried in the SRv6 L3 Service Prefix-SID attribute;</li>
-<li>advertises it to every <code>mobile-uplane</code> peer.</li>
+controller-address as next hop and the VRF’s export route-targets —
+and <strong>no</strong> service SID (PE-derived forwarding, the draft default);</li>
+<li>advertises it to every <code>mup</code> peer.</li>
 </ol>
-<p>A Session Deletion withdraws the route and returns the SID to the pool.</p>
+<p>A Session Deletion withdraws the route. For an IPv6 UE whose GTP
+endpoint is IPv4 (IPv4 N3 transport), the endpoint/source address family
+is taken from its own length octet, so the route rides the IPv6-MUP AFI
+while carrying the IPv4 endpoint.</p>
 <h2 id="showing-mup-state"><a class="header" href="#showing-mup-state">Showing MUP state</a></h2>
-<p><code>show bgp mobile-uplane</code> renders the configured per-VRF services and the
+<p><code>show bgp mup</code> renders the configured per-VRF services and the
 MUP Loc-RIB:</p>
-<pre><code># show bgp mobile-uplane
+<pre><code># show bgp mup
 MUP VRFs:
   mobile-up: rd=65000:100 encap/ST1 ni=access route-targets=1
 
    Network (MUP NLRI)                                   Next Hop
  *&gt; [ST1][65000:100][ue=192.0.2.5/32][teid=305419896][qfi=0][ep=10.0.0.1]
        next-hop fcbb:bb01::1  weight 32768
-       RT:65000:200
+       rt:65000:200
 </code></pre>
-<p><code>show bgp mobile-uplane mup-c</code> shows the controller status, and the
+<p><code>show bgp vrf &lt;name&gt; mup</code> renders just the ST routes belonging to one
+VRF (those whose RD matches that VRF’s <code>rd</code>). The authoritative MUP
+Loc-RIB stays on the global instance; the matching best-paths are
+mirrored into the per-VRF task so the per-VRF view renders them:</p>
+<pre><code># show bgp vrf mobile-up mup
+   Network (MUP NLRI)                                   Next Hop
+ *&gt; [ST1][65000:100][ue=192.0.2.5/32][teid=305419896][qfi=0][ep=10.0.0.1]
+       next-hop fcbb:bb01::1  weight 32768
+       rt:65000:200
+</code></pre>
+<p><code>show bgp mup mup-c</code> shows the controller status, and the
 <code>session</code> / <code>association</code> sub-commands show the learned PFCP state:</p>
-<pre><code># show bgp mobile-uplane mup-c
+<pre><code># show bgp mup mup-c
 MUP controller (MUP-C)
   Admin state : enabled
   PFCP listen : 192.168.0.1:8805
   Associations: 1
   Sessions    : 1
 
-# show bgp mobile-uplane mup-c session
+# show bgp mup mup-c session
 SEID       UE address     TEID         Endpoint     QFI   Network-Instance
 1          192.0.2.5      0x12345678   10.0.0.1     -     access
 </code></pre>
@@ -358,16 +440,21 @@ Association Setup followed by a Session Establishment (and, with
             --ue-ipv4 192.0.2.5 --teid 0x12345678 \
             --endpoint 10.0.0.1 --network-instance access
 </code></pre>
-<p>After it runs, the session appears under <code>show bgp mobile-uplane mup-c session</code> and the controller’s ST route appears in <code>show bgp mobile-uplane</code> on both the controller and its peers.</p>
+<p>After it runs, the session appears under <code>show bgp mup mup-c session</code> and the controller’s ST route appears in <code>show bgp mup</code> on both the controller and its peers.</p>
 <h2 id="scope-and-limitations"><a class="header" href="#scope-and-limitations">Scope and limitations</a></h2>
-<p>The control plane — capability negotiation, ISD/DSD/T1ST/T2ST codec,
-Loc-RIB receive/store/show, and controller origination + advertisement —
-is complete. The forwarding plane (programming GTP4.E / GTP6.E
-behaviours into the kernel) is <strong>not</strong> implemented: stock Linux has no
-GTP-U SRv6 endpoint behaviour, so the data plane is left to a
-VPP/eBPF-based forwarder. The controller’s PFCP northbound currently
-handles Association and Session lifecycle messages; heartbeat-driven
-eviction of idle associations is a follow-up.</p>
+<p>The control plane is complete: capability negotiation, ISD/DSD/T1ST/T2ST
+codec, Loc-RIB receive/store/show, controller ST origination, PE-side
+Segment Discovery origination (DSD and ISD, each with the per-VRF End.DT46
+SID + <code>seg6local</code> decap installed into the kernel FIB), and the interwork
+node’s control-plane resolution of received ST2 routes to the matching
+Direct segment.</p>
+<p>The <strong>GTP-interwork forwarding plane</strong> is <strong>not</strong> implemented: the
+End.DT46 decap that the segment routes advertise is installed, but the
+GTP-U SRv6 endpoint behaviours themselves (GTP4.E / GTP6.E / H.M.GTP4.D)
+have no stock-Linux <code>seg6local</code> action, so the actual GTP encap/decap is
+left to a VPP/eBPF-based forwarder. The controller’s PFCP northbound
+currently handles Association and Session lifecycle messages;
+heartbeat-driven eviction of idle associations is a follow-up.</p>
 
                     </main>
 
