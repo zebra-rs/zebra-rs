@@ -1,4 +1,4 @@
-# vty: GNU bash 5.3 with vtysh integration patches.
+# vty: GNU bash 5.3 with vty integration patches.
 #
 # bash sources are fetched at build time and cached locally.
 # This directory contains only the deltas.

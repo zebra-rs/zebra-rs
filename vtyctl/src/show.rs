@@ -11,9 +11,9 @@ pub mod vty {
 
 pub async fn show(host: &str, command: &str, json: bool) -> Result<()> {
     if command.is_empty() {
-        eprintln!("zctl show: command argument is required");
-        eprintln!("Usage: zctl show <command>");
-        eprintln!("Example: zctl show 'show bgp vpnv4'");
+        eprintln!("vtyctl show: command argument is required");
+        eprintln!("Usage: vtyctl show <command>");
+        eprintln!("Example: vtyctl show 'show bgp vpnv4'");
         exit(1);
     }
 

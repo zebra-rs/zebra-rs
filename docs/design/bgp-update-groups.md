@@ -663,7 +663,7 @@ OpenConfig augment if we ever add one.
 - Three render functions: `render_summary_text`,
   `render_detail_text`, `render_json`. All read from the same view
   struct.
-- Wire into `proto/vtysh.proto` show grammar alongside existing `show
+- Wire into `proto/vty.proto` show grammar alongside existing `show
   bgp ...` entries.
 
 ### 5.7 Show capability per phase

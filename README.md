@@ -73,7 +73,7 @@ sudo apt install -y build-essential pkg-config curl \
 | `build-essential`, `pkg-config`, `curl` | C toolchain for the `vty` shell — GNU bash 5.3 is downloaded and compiled from source |
 | `protobuf-compiler` | `protoc`, which generates the gRPC/protobuf management API code |
 | `libpam0g-dev` | the `vtypam` PAM authentication helper |
-| `libnanomsg-dev` | the vtysh hooks built into the `vty` shell |
+| `libnanomsg-dev` | the vty hooks built into the `vty` shell |
 | `bison` | bash's grammar, regenerated during the `vty` build |
 | `xxd` | embeds `vty.sh` into the `vty` binary during the build |
 
