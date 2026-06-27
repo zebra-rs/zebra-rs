@@ -260,8 +260,7 @@ impl MupRoute {
                     IpAddr::V4(_) => (4usize, 32u8),
                     IpAddr::V6(_) => (16usize, 128u8),
                 };
-                let teid_bits = endpoint_len.saturating_sub(addr_bits);
-                8 + 1 + addr_bytes + nlri_psize(teid_bits)
+                8 + 1 + addr_bytes + t2st_teid_size(*endpoint_len, addr_bits)
             }
             MupRoute::Unknown { body, .. } => body.len(),
         }
@@ -508,6 +507,18 @@ impl MupRoute {
     }
 }
 
+/// Octet width of the high-aligned TEID carried by a Type-2 Session
+/// Transformed (ST2) MUP route. The TEID is a 32-bit value, so it never
+/// occupies more than 4 octets — clamp `nlri_psize(endpoint_len - addr_bits)`
+/// at 4 so the emitter cannot index past `teid.to_be_bytes()` when a
+/// locally-constructed route carries an out-of-range `endpoint_len` (the parser
+/// already bounds `endpoint_len` to `addr_bits + 32`). `len()` / `emit` /
+/// `body_len` all derive from this so the declared body length matches the
+/// bytes written.
+fn t2st_teid_size(endpoint_len: u8, addr_bits: u8) -> usize {
+    nlri_psize(endpoint_len.saturating_sub(addr_bits)).min(4)
+}
+
 impl MupRoute {
     /// Emit one MUP NLRI (optional Path Identifier + architecture +
     /// route type + length + body) onto `buf`. Mirror of `parse`.
@@ -601,10 +612,11 @@ impl MupRoute {
                     IpAddr::V4(v4) => payload.put(&v4.octets()[..]),
                     IpAddr::V6(v6) => payload.put(&v6.octets()[..]),
                 }
-                // TEID occupies the bits beyond the address, high-aligned.
-                let teid_bits = endpoint_len.saturating_sub(addr_bits);
-                if teid_bits > 0 {
-                    let tsize = nlri_psize(teid_bits);
+                // TEID occupies the bits beyond the address, high-aligned. It
+                // is a 32-bit value, so the width is capped at 4 octets even if
+                // `endpoint_len` claims more.
+                let tsize = t2st_teid_size(*endpoint_len, addr_bits);
+                if tsize > 0 {
                     let tb = teid.to_be_bytes();
                     payload.put(&tb[..tsize]);
                 }
@@ -1324,6 +1336,26 @@ mod tests {
         };
         let mut buf = BytesMut::new();
         route.nlri_emit(&mut buf);
+        assert_eq!(buf.len(), 4 + route.body_len());
+    }
+
+    #[test]
+    fn t2st_emit_clamps_oversized_endpoint_len() {
+        // A locally-constructed route with an out-of-range endpoint_len must
+        // not panic on emit: the TEID is a u32, so at most 4 octets are
+        // written, and body_len() agrees with the emitted size.
+        let route = MupRoute::T2st {
+            id: 0,
+            arch: MupArchitectureType::Gpp5g,
+            rd: sample_rd(),
+            endpoint: "10.0.0.1".parse().unwrap(),
+            endpoint_len: 255, // 255 - 32 = 223 bits -> 28 octets before clamp
+            teid: 0x1122_3344,
+        };
+        let mut buf = BytesMut::new();
+        route.nlri_emit(&mut buf); // must not panic
+        // TEID clamped to 4 octets: RD(8) + ep_len(1) + addr(4) + TEID(4) = 17.
+        assert_eq!(route.body_len(), 8 + 1 + 4 + 4);
         assert_eq!(buf.len(), 4 + route.body_len());
     }
 
