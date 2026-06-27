@@ -1,4 +1,4 @@
-# vty — GNU bash 5.3 with vtysh hooks
+# vty — GNU bash 5.3 with vty hooks
 
 This directory builds `vty`, a router-CLI shell derived from GNU
 bash 5.3 with patches that integrate it with the rest of
@@ -20,7 +20,7 @@ Override the cache location with `CACHE_DIR=/some/path`.
 
 ## Layout
 
-    additions/                  vtysh-specific source files (real source)
+    additions/                  vty-specific source files (real source)
     patches/0001-vty-hooks.patch  modifications to bash-5.3 sources
     Makefile                    build glue
 
