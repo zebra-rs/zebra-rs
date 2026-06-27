@@ -158,6 +158,13 @@ module exec {
         ext:help "Show bridge FDB entries";
         type empty;
       }
+      container mac {
+        ext:help "Show bridge MAC information";
+        leaf table {
+          ext:help "Show bridge MAC table (EVPN VNI-keyed)";
+          type empty;
+        }
+      }
     }
     container "community-set" {
       ext:help "Show community-set";

@@ -15,7 +15,7 @@ Source of truth: the `show` grammar in `zebra-rs/yang/exec.yang` and the
 
 There are two independent mechanisms:
 
-1. **The `-j` / `--json` flag (universal).** `zctl show -j '<command>'`
+1. **The `-j` / `--json` flag (universal).** `vtyctl show -j '<command>'`
    (or `--json`) sets `ShowRequest.json = true`. The flag is plumbed
    through `DisplayRequest` to **every** `ShowCallback`, whose signature
    is `fn(&Proto, Args, json: bool) -> String`. The flag is therefore
@@ -27,8 +27,8 @@ There are two independent mechanisms:
      render text (the flag is silently a no-op).
 
    ```
-   zctl show -j 'show ip route'        # JSON RIB
-   zctl show 'show ip route'           # text RIB
+   vtyctl show -j 'show ip route'      # JSON RIB
+   vtyctl show 'show ip route'         # text RIB
    ```
 
    Plumbing: `vtyctl/src/main.rs` (`-j`) → `vtyctl/src/show.rs`
@@ -82,7 +82,7 @@ its non-VRF sibling** in the tables below.
 | `show ipv6 route vrf [<name>] [detail]` | IPv6 RIB per VRF | ✅ |
 | `show nexthop` | Nexthop groups | ✅ |
 | `show mpls ilm` | MPLS incoming-label map | ✅ |
-| `show l2 mac table` | Bridge MAC table | ✅ |
+| `show l2 mac table` | Bridge MAC table (EVPN VNI-keyed) | ✅ |
 | `show l2 neighbor` | Bridge FDB entries | ✅ |
 | `show segment-routing srv6 sid` | Allocated SRv6 SIDs | ✅ |
 | `show evpn vni all` | EVPN VNI information (stub; `-j` → `[]`) | ✅ |

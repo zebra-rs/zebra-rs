@@ -36,10 +36,10 @@
             const path_to_root = "";
             const default_light_theme = "light";
             const default_dark_theme = "navy";
-            window.path_to_searchindex_js = "searchindex-e8920642.js";
+            window.path_to_searchindex_js = "searchindex-c2dd9936.js";
         </script>
         <!-- Start loading toc.js asap -->
-        <script src="toc-d6f7580c.js"></script>
+        <script src="toc-ac7a9645.js"></script>
     </head>
     <body>
     <div id="mdbook-help-container">
@@ -4122,6 +4122,19 @@ replication if no replicator is available);</li>
 </ul>
 <p>The collapse is observable in the kernel FDB — an AR-LEAF shows one <code>dst</code>
 (the AR-IP); an RNVE shows one per remote VTEP.</p>
+<p>The AR role is also visible in the control plane: <code>show bgp evpn</code> prints a
+<strong><code>PMSI:</code></strong> line per Type-3 route decoding the PMSI Tunnel attribute — the
+tunnel type, the AR role carried in the <code>T</code> field, the RFC 9574 BM/U/L flags,
+and the endpoint + VNI:</p>
+<pre><code> *&gt;  [3]:[0]:[32]:[10.0.0.1]
+                    10.0.0.1                   0         32768 i
+                    Extended community: RT:65501:550 ET:8
+                    PMSI: assisted-replication(replicator) endpoint:10.0.0.254 vni:550
+</code></pre>
+<p>A Regular-IR route renders <code>PMSI: ingress-replication endpoint:&lt;VTEP&gt; vni:&lt;n&gt;</code>;
+an SR P2MP tree renders <code>PMSI: srv6-p2mp root:&lt;VTEP&gt; tree-id:&lt;n&gt;</code>. (The
+<strong>AR-IP</strong> appears on the PMSI <code>endpoint:</code> field, not the route’s next hop —
+the EVPN advertise path emits next-hop = VTEP.)</p>
 <h2 id="pruned-flood-lists"><a class="header" href="#pruned-flood-lists">Pruned-Flood-Lists</a></h2>
 <p>A node that does not want to receive a flood category can ask peers to
 prune it, by setting the <strong>BM</strong> (Broadcast/Multicast) and/or <strong>U</strong>
@@ -4438,17 +4451,21 @@ draft leaves the controller’s session source as an out-of-scope
 northbound and terminates it as a UP-node — an external SMF programs the
 controller exactly as it would a UPF.</p>
 <pre><code>   SMF ──PFCP/N4──▶ zebra-rs MUP-C ──BGP MUP (SAFI 85)──▶ SRv6 PEs
- (sessions)          │ learns UE/TEID/NI                 (install
-                     │ originates T1ST/T2ST               forwarding)
-                     ▼
-             SRv6 End.DT4/DT6 SID  (from a locator)
+ (sessions)            learns UE/TEID/NI,                (resolve the
+                       originates T1ST/T2ST               segment, install
+                       (no SID — see below)               End.DT46 forwarding)
 </code></pre>
+<p>The PEs originate the <strong>segment</strong> routes — DSD (<code>segment direct</code>) and ISD
+(<code>segment interwork</code>) — that advertise their per-VRF <strong>End.DT46</strong> SID; the
+controller’s ST routes carry no SID and a receiving PE derives forwarding by
+resolving each ST route against the matching segment (the
+draft-ietf-bess-mup-safi default).</p>
 <p>The MUP control plane (capability negotiation, Loc-RIB, receive, and
-re-advertisement) is always present once the <code>mobile-uplane</code> AFI/SAFI is
+re-advertisement) is always present once the <code>mup</code> AFI/SAFI is
 negotiated. The <strong>controller</strong> — the PFCP listener and route origination
 — is what the <code>mup-c</code> block below turns on.</p>
 <h2 id="enabling-the-mup-capability"><a class="header" href="#enabling-the-mup-capability">Enabling the MUP capability</a></h2>
-<p><code>mobile-uplane</code> is a single AFI/SAFI knob that negotiates <strong>both</strong>
+<p><code>mup</code> is a single AFI/SAFI knob that negotiates <strong>both</strong>
 IPv4-MUP (AFI 1) and IPv6-MUP (AFI 2). Enable it per neighbor like any
 other family:</p>
 <pre><code>router bgp {
@@ -4461,17 +4478,18 @@ other family:</p>
     afi-safi ipv4 {
       enabled true;
     }
-    afi-safi mobile-uplane {
+    afi-safi mup {
       enabled true;
     }
   }
 }
 </code></pre>
 <h2 id="configuring-the-controller"><a class="header" href="#configuring-the-controller">Configuring the controller</a></h2>
-<p>The controller lives under the <strong>global</strong> <code>mobile-uplane</code> AFI/SAFI. It
-needs three things: an SRv6 locator to carve per-session SIDs from, a
-per-VRF <code>mobile-uplane</code> service that maps a PFCP Network Instance to a
-Route Distinguisher / route-targets, and the <code>mup-c</code> block itself.</p>
+<p>The controller’s <code>mup-c</code> block sits <strong>directly under the BGP instance</strong>
+(<code>router bgp { mup-c { … } }</code>). It needs three things: a per-VRF <code>mup</code>
+service that maps a PFCP Network Instance to a Route Distinguisher /
+route-targets, the <code>mup-c</code> block itself, and — only for the non-default
+explicit-SID mode — an SRv6 locator.</p>
 <pre><code>segment-routing {
   locator LOC1 {
     prefix fcbb:bb01::/48;
@@ -4489,31 +4507,37 @@ router bgp {
   }
 
   # Map the PFCP Network Instance "access" to a VPN service: the RD
-  # stamped on the ST route and the route-targets it carries.
+  # stamped on the ST route and the ST route type it originates.
   vrf mobile-up {
     rd 65000:100;
-    mobile-uplane {
-      route-target {
-        export 65000:200;
-      }
-      srv6-mobile encapsulation {
-        network-instance exact access;
+    afi-safi mup {
+      route st1 {
+        network-instance access;
       }
     }
   }
 
   # Turn on the controller: the PFCP/N4 listener + route origination.
-  afi-safi mobile-uplane {
-    mup-c {
-      enable true;
-      controller-address fcbb:bb01::1;
-      pfcp {
-        listen-address 192.168.0.1;
-        port 8805;
-      }
-      srv6 {
-        locator LOC1;
-      }
+  # The `mup-c` block sits directly under the BGP instance.
+  mup-c {
+    enable true;
+    controller-address fcbb:bb01::1;
+    pfcp {
+      listen-address 192.168.0.1;
+      port 8805;
+    }
+    srv6 {
+      locator LOC1;
+    }
+  }
+}
+
+# The export route-targets the ST routes carry live on the top-level VRF,
+# the same `route-target {import|export}` framework as ipv4 / ipv6.
+vrf mobile-up {
+  mup {
+    route-target {
+      export 65000:200;
     }
   }
 }
@@ -4528,54 +4552,125 @@ hop.</li>
 hop on every originated ST route.</li>
 <li><strong><code>pfcp</code></strong> sets the N4 listener bind address and port (default
 <code>[::]:8805</code>).</li>
-<li><strong><code>srv6 locator</code></strong> names the locator per-session SIDs are carved from
-(the same pool an <code>encapsulation srv6</code> VRF draws its End.DT46 SID
-from).</li>
+<li><strong><code>srv6 locator</code></strong> is <strong>reserved</strong> for the non-default mode where the
+controller pushes an explicit SID; in the default mode it is unused.
+Per draft-ietf-bess-mup-safi the controller originates ST routes
+<strong>without</strong> a service SID — the receiving PE derives forwarding from
+its own ISD/DSD routes — so no per-session SID is allocated.</li>
 </ul>
-<p>The <strong><code>srv6-mobile</code></strong> direction in the VRF selects the route type:
-<code>encapsulation</code> (the N6 / downlink VRF) originates a <strong>Type-1 ST</strong> route
-carrying the UE prefix; <code>decapsulation</code> (the N3 / uplink VRF) originates
-a <strong>Type-2 ST</strong> route carrying the core endpoint and TEID. The
-<code>network-instance exact</code> value is matched against the PFCP session’s
-Network Instance.</p>
+<p>A VRF binds one ST direction to a PFCP Network Instance under <code>afi-safi mup route {st1|st2}</code>; the two read identically:</p>
+<ul>
+<li><strong>Downlink (Type-1 ST).</strong> <code>afi-safi mup route st1 { network-instance &lt;ni&gt;; }</code> — the N6 VRF originates a <strong>Type-1 ST</strong> route carrying the UE
+prefix (ingress GTP encapsulation).</li>
+<li><strong>Uplink (Type-2 ST).</strong> <code>afi-safi mup route st2 { network-instance &lt;ni&gt;; mup-ext-comm &lt;2:4&gt;; }</code> — the N3 VRF originates a <strong>Type-2 ST</strong> route
+carrying the core endpoint and the GTP TEID (egress GTP decapsulation).
+The optional <code>mup-ext-comm</code> is the BGP MUP Extended Community
+(Direct-segment id in RD/RT 2:4 form, e.g. <code>1:2</code>) the ST2 resolves to.</li>
+</ul>
+<p>The configured network-instance is matched exactly against the PFCP
+session’s Network Instance. The export route-targets the ST route carries
+come from the top-level <code>vrf &lt;name&gt; mup route-target export</code> — the same
+<code>route-target</code> framework as <code>ipv4</code> / <code>ipv6</code>.</p>
+<p>A single PFCP session originates <strong>every</strong> matching ST route: if both an
+st1 VRF and an st2 VRF bind the same Network Instance, one session
+originates both the Type-1 and the Type-2 ST.</p>
+<p>For example, an uplink VRF that also originates the Direct segment it
+resolves to:</p>
+<pre><code>vrf N3 {
+  rd 65000:100;
+  encapsulation srv6;
+  afi-safi mup {
+    route st2 {
+      network-instance core;   # originate an ST2 for PFCP sessions on NI "core"
+      mup-ext-comm 1:2;        # the Direct segment id it resolves to
+    }
+    segment direct {
+      mup-ext-comm 1:2;        # originate the End.DT46 DSD with the same id
+    }
+  }
+}
+</code></pre>
+<h3 id="segment-discovery-routes-segment-direct--segment-interwork"><a class="header" href="#segment-discovery-routes-segment-direct--segment-interwork">Segment Discovery routes (<code>segment direct</code> / <code>segment interwork</code>)</a></h3>
+<p>A PE VRF with <code>encapsulation srv6</code> carves a per-VRF <strong>End.DT46</strong> SID from
+the locator and installs the <code>seg6local</code> decap. <code>afi-safi mup segment</code>
+advertises that segment so a receiving PE can resolve matching ST routes to
+it:</p>
+<ul>
+<li><strong><code>segment direct { mup-ext-comm &lt;2:4&gt;; }</code></strong> originates a <strong>Direct
+Segment Discovery (DSD, type 2)</strong> route — NLRI = RD + router-id — carrying
+the End.DT46 SID and the Direct-segment id (<code>mup-ext-comm</code>). A receiving
+<em>interwork</em> node (<code>segment interwork</code>) matches each received ST2 to the
+DSD by this id and <code>show bgp mup</code> prints the resolution.</li>
+<li><strong><code>segment interwork { prefix &lt;p&gt;; }</code></strong> originates an <strong>Interwork Segment
+Discovery (ISD, type 1)</strong> route — NLRI = RD + the configured <code>prefix</code>
+(typically the locally connected gNodeB N3 prefix; its family selects the
+AFI) — carrying the End.DT46 SID. The ISD does not originate until the
+prefix is set, and carries no <code>mup-ext-comm</code> (an ISD is resolved by
+endpoint-address lookup).</li>
+</ul>
+<pre><code>vrf N6 {
+  rd 65501:10;
+  encapsulation srv6;
+  afi-safi mup {
+    segment interwork {
+      prefix 10.60.0.0/16;     # originate the End.DT46 ISD under this prefix
+    }
+  }
+}
+</code></pre>
+<p>zebra-rs uses <strong>End.DT46</strong> for both Direct and Interwork segments; the
+draft’s GTP-interwork behaviours (GTP4.E / GTP6.E / H.M.GTP4.D) are
+VPP/eBPF and not yet implemented.</p>
 <h2 id="from-pfcp-session-to-st-route"><a class="header" href="#from-pfcp-session-to-st-route">From PFCP session to ST route</a></h2>
 <p>When an SMF establishes a session, the controller:</p>
 <ol>
 <li>extracts the UE IP address, the access-side F-TEID (TEID + GTP
 endpoint), and the Network Instance from the PFCP Session
 Establishment Request;</li>
-<li>correlates the Network Instance against the per-VRF <code>mobile-uplane</code>
-config to find the RD, the route-targets, and the direction;</li>
-<li>allocates an <strong>SRv6 service SID</strong> (End.DT4 for an IPv4 UE, End.DT6
-for IPv6) from the configured locator;</li>
+<li>correlates the Network Instance against the per-VRF <code>mup</code> config to
+find the RD and the ST route type (<code>st1</code> / <code>st2</code>), and the VRF’s
+export route-targets from the top-level VRF;</li>
 <li>originates the ST route into the MUP Loc-RIB with the
-controller-address as next hop, the VRF’s route-targets, and the SID
-carried in the SRv6 L3 Service Prefix-SID attribute;</li>
-<li>advertises it to every <code>mobile-uplane</code> peer.</li>
+controller-address as next hop and the VRF’s export route-targets —
+and <strong>no</strong> service SID (PE-derived forwarding, the draft default);</li>
+<li>advertises it to every <code>mup</code> peer.</li>
 </ol>
-<p>A Session Deletion withdraws the route and returns the SID to the pool.</p>
+<p>A Session Deletion withdraws the route. For an IPv6 UE whose GTP
+endpoint is IPv4 (IPv4 N3 transport), the endpoint/source address family
+is taken from its own length octet, so the route rides the IPv6-MUP AFI
+while carrying the IPv4 endpoint.</p>
 <h2 id="showing-mup-state"><a class="header" href="#showing-mup-state">Showing MUP state</a></h2>
-<p><code>show bgp mobile-uplane</code> renders the configured per-VRF services and the
+<p><code>show bgp mup</code> renders the configured per-VRF services and the
 MUP Loc-RIB:</p>
-<pre><code># show bgp mobile-uplane
+<pre><code># show bgp mup
 MUP VRFs:
   mobile-up: rd=65000:100 encap/ST1 ni=access route-targets=1
 
    Network (MUP NLRI)                                   Next Hop
  *&gt; [ST1][65000:100][ue=192.0.2.5/32][teid=305419896][qfi=0][ep=10.0.0.1]
        next-hop fcbb:bb01::1  weight 32768
-       RT:65000:200
+       rt:65000:200
 </code></pre>
-<p><code>show bgp mobile-uplane mup-c</code> shows the controller status, and the
+<p><code>show bgp vrf &lt;name&gt; mup</code> renders just the ST routes belonging to one
+VRF (those whose RD matches that VRF’s <code>rd</code>). The authoritative MUP
+Loc-RIB stays on the global instance; the matching best-paths are
+mirrored into the per-VRF task so the per-VRF view renders them:</p>
+<pre><code># show bgp vrf mobile-up mup
+   Network (MUP NLRI)                                   Next Hop
+ *&gt; [ST1][65000:100][ue=192.0.2.5/32][teid=305419896][qfi=0][ep=10.0.0.1]
+       next-hop fcbb:bb01::1  weight 32768
+       rt:65000:200
+</code></pre>
+<p><code>show bgp mup mup-c</code> shows the controller status, and the
 <code>session</code> / <code>association</code> sub-commands show the learned PFCP state:</p>
-<pre><code># show bgp mobile-uplane mup-c
+<pre><code># show bgp mup mup-c
 MUP controller (MUP-C)
   Admin state : enabled
   PFCP listen : 192.168.0.1:8805
   Associations: 1
   Sessions    : 1
 
-# show bgp mobile-uplane mup-c session
+# show bgp mup mup-c session
 SEID       UE address     TEID         Endpoint     QFI   Network-Instance
 1          192.0.2.5      0x12345678   10.0.0.1     -     access
 </code></pre>
@@ -4592,16 +4687,21 @@ Association Setup followed by a Session Establishment (and, with
             --ue-ipv4 192.0.2.5 --teid 0x12345678 \
             --endpoint 10.0.0.1 --network-instance access
 </code></pre>
-<p>After it runs, the session appears under <code>show bgp mobile-uplane mup-c session</code> and the controller’s ST route appears in <code>show bgp mobile-uplane</code> on both the controller and its peers.</p>
+<p>After it runs, the session appears under <code>show bgp mup mup-c session</code> and the controller’s ST route appears in <code>show bgp mup</code> on both the controller and its peers.</p>
 <h2 id="scope-and-limitations"><a class="header" href="#scope-and-limitations">Scope and limitations</a></h2>
-<p>The control plane — capability negotiation, ISD/DSD/T1ST/T2ST codec,
-Loc-RIB receive/store/show, and controller origination + advertisement —
-is complete. The forwarding plane (programming GTP4.E / GTP6.E
-behaviours into the kernel) is <strong>not</strong> implemented: stock Linux has no
-GTP-U SRv6 endpoint behaviour, so the data plane is left to a
-VPP/eBPF-based forwarder. The controller’s PFCP northbound currently
-handles Association and Session lifecycle messages; heartbeat-driven
-eviction of idle associations is a follow-up.</p>
+<p>The control plane is complete: capability negotiation, ISD/DSD/T1ST/T2ST
+codec, Loc-RIB receive/store/show, controller ST origination, PE-side
+Segment Discovery origination (DSD and ISD, each with the per-VRF End.DT46
+SID + <code>seg6local</code> decap installed into the kernel FIB), and the interwork
+node’s control-plane resolution of received ST2 routes to the matching
+Direct segment.</p>
+<p>The <strong>GTP-interwork forwarding plane</strong> is <strong>not</strong> implemented: the
+End.DT46 decap that the segment routes advertise is installed, but the
+GTP-U SRv6 endpoint behaviours themselves (GTP4.E / GTP6.E / H.M.GTP4.D)
+have no stock-Linux <code>seg6local</code> action, so the actual GTP encap/decap is
+left to a VPP/eBPF-based forwarder. The controller’s PFCP northbound
+currently handles Association and Session lifecycle messages;
+heartbeat-driven eviction of idle associations is a follow-up.</p>
 <div style="break-before: page; page-break-before: always;"></div>
 <h1 id="bgp-route-target-constraint-rtc"><a class="header" href="#bgp-route-target-constraint-rtc">BGP Route Target Constraint (RTC)</a></h1>
 <p>zebra-rs implements <strong>Route Target Constraint</strong> as specified in
@@ -11112,6 +11212,911 @@ configure-mode commands without the <code>show</code> prefix:</p>
 set of viewers (<code>show {candidate,running}-config { formal | json | yaml }</code>), so an operator can always say “show me the X view of the
 Y config” without remembering which forms exist for which view.</p>
 <div style="break-before: page; page-break-before: always;"></div>
+<h1 id="operational-show-commands"><a class="header" href="#operational-show-commands">Operational Show Commands</a></h1>
+<p>The <code>show</code> commands report the <em>live operational state</em> of the router —
+routes, neighbors, link-state databases, sessions, and the contents of
+every protocol’s tables. They are read-only: a <code>show</code> never changes
+configuration.</p>
+<p>This is distinct from the configuration viewers
+(<code>show running-config</code> / <code>show candidate-config</code>), which render the
+<em>configuration</em> tree and are covered in
+<a href="#show-config-commands">Show Config Commands</a>. Everything
+else under <code>show</code> is documented in this section:</p>
+<ul>
+<li><a href="#system-rib-and-forwarding">System, RIB and Forwarding</a> — version,
+interfaces, the IPv4/IPv6 routing tables, nexthops, MPLS, L2, VRFs,
+and SRv6 SIDs.</li>
+<li><a href="#bgp">BGP</a> — every address family’s Loc-RIB, neighbor
+state, Adj-RIB-In/Out, update-groups, and the MUP controller.</li>
+<li><a href="#ospfv2-and-ospfv3">OSPFv2 and OSPFv3</a> — instances, interfaces,
+neighbors, the LSDB, the SPF tree, and Segment Routing / TI-LFA state.</li>
+<li><a href="#is-is-1">IS-IS</a> — adjacencies, the LSDB, topology,
+routes, DIS election, and Fast ReRoute.</li>
+<li><a href="#neighbor-discovery-bfd-and-stamp">Neighbor Discovery, BFD and STAMP</a> —
+IPv6 ND, BFD sessions, and STAMP delay measurement.</li>
+<li><a href="#policy-objects">Policy Objects</a> — route policies,
+prefix-sets, community-sets, AS-path-sets, and key-chains.</li>
+</ul>
+<h2 id="how-to-run-a-show-command"><a class="header" href="#how-to-run-a-show-command">How to run a show command</a></h2>
+<p>A <code>show</code> command can be issued two ways:</p>
+<p><strong>From the interactive VTY shell</strong> (the <code>vty</code> binary), type the command
+directly. Tab completion and <code>?</code> help are driven by the same YANG
+grammar that validates the command:</p>
+<pre><code>r1&gt; show ip route
+r1&gt; show bgp summary
+r1&gt; show isis neighbor detail
+</code></pre>
+<p><strong>From the <code>vtyctl</code> client</strong>, pass the full command as one quoted
+argument to <code>vtyctl show</code>:</p>
+<pre><code>vtyctl show 'show ip route'
+vtyctl show 'show bgp summary'
+</code></pre>
+<p>Both paths reach the same per-protocol handler inside the daemon, so the
+output is identical.</p>
+<h2 id="json-output"><a class="header" href="#json-output">JSON output</a></h2>
+<blockquote>
+<p><strong>Goal:</strong> every <code>show</code> command supports JSON. The handler for each
+command branches on a <code>json</code> flag and emits a structured document, so
+any <code>show</code> can be machine-read without screen-scraping the text view.</p>
+</blockquote>
+<p>There are two independent ways to request JSON.</p>
+<h3 id="the--j----json-flag-universal"><a class="header" href="#the--j----json-flag-universal">The <code>-j</code> / <code>--json</code> flag (universal)</a></h3>
+<p><code>vtyctl show -j '&lt;command&gt;'</code> sets <code>ShowRequest.json = true</code>, which is
+plumbed through to every handler. The default (no flag) renders the
+human-readable text view:</p>
+<pre><code>vtyctl show -j 'show ip route'      # JSON RIB
+vtyctl show    'show ip route'      # text RIB
+</code></pre>
+<p>The flag is accepted on <em>any</em> <code>show</code> command. Each command’s page below
+notes the top-level shape of the JSON it returns.</p>
+<h3 id="cli-format-json-per-session-default"><a class="header" href="#cli-format-json-per-session-default"><code>cli format json</code> (per-session default)</a></h3>
+<p>Inside an interactive VTY session you can flip the default output format
+for the whole session instead of typing <code>-j</code> every time:</p>
+<pre><code>r1&gt; set cli format json
+</code></pre>
+<p><code>set cli format terminal</code> switches back to the human-readable view.</p>
+<h3 id="config-viewers-carry-their-own-keyword"><a class="header" href="#config-viewers-carry-their-own-keyword">Config viewers carry their own keyword</a></h3>
+<p><code>show running-config</code> and <code>show candidate-config</code> are dispatched by the
+configuration manager rather than a protocol handler, so they select
+their format with a trailing keyword (<code>formal</code> / <code>json</code> / <code>yaml</code>) rather
+than the <code>-j</code> flag. See
+<a href="#show-config-commands">Show Config Commands</a>.</p>
+<h2 id="per-vrf-forms"><a class="header" href="#per-vrf-forms">Per-VRF forms</a></h2>
+<p>For OSPFv2, OSPFv3, IS-IS and BGP, a <code>vrf &lt;name&gt;</code> selector can be
+inserted after the protocol keyword:</p>
+<pre><code>show ospf vrf blue neighbor
+show isis vrf red database
+show bgp vrf customer-a summary
+</code></pre>
+<p>These are <strong>not</strong> a separate set of handlers. The configuration manager
+strips the <code>vrf &lt;name&gt;</code> selector and replays the remaining command
+against the named VRF’s protocol task. Each per-VRF form therefore
+mirrors its non-VRF sibling exactly — same output, same JSON, same
+arguments. The <code>show ip route vrf</code> / <code>show ipv6 route vrf</code> RIB forms
+work the same way and are documented on the
+<a href="#system-rib-and-forwarding">System, RIB and Forwarding</a> page.</p>
+<div style="break-before: page; page-break-before: always;"></div>
+<h1 id="system-rib-and-forwarding"><a class="header" href="#system-rib-and-forwarding">System, RIB and Forwarding</a></h1>
+<p>These commands report the daemon’s identity, the contents of the
+Routing Information Base (RIB), and the forwarding constructs the RIB
+programs into the kernel — nexthop groups, MPLS labels, the L2 bridge
+table, and SRv6 SIDs.</p>
+<p>Every command honors the <code>-j</code> / <code>--json</code> flag described in the
+<a href="#operational-show-commands">overview</a>.</p>
+<h2 id="daemon-identity"><a class="header" href="#daemon-identity">Daemon identity</a></h2>
+<h3 id="show-version"><a class="header" href="#show-version"><code>show version</code></a></h3>
+<p>The package name and version, the git hash / branch / commit date the
+binary was built from, and the build date. Answered by the management
+task rather than a protocol daemon.</p>
+<pre><code>r1&gt; show version
+zebra-rs 0.1.0 (a3b4c5d / main, 2026-06-27)
+</code></pre>
+<p>JSON: an object with <code>package_name</code>, <code>package_version</code>, <code>git_hash</code>,
+<code>git_branch</code>, <code>git_date</code>, <code>git_message</code>, <code>git_dirty</code>, and <code>build_date</code>.</p>
+<h3 id="show-router-id"><a class="header" href="#show-router-id"><code>show router-id</code></a></h3>
+<p>The effective global Router ID and whether it was <code>configured</code>
+explicitly or selected <code>automatic</code>ally from a loopback/interface
+address. See <a href="#selection-of-the-router-id">Router ID Selection</a>.</p>
+<pre><code>r1&gt; show router-id
+Router ID: 10.0.0.1 (configured)
+</code></pre>
+<p>JSON: <code>{ "routerId": "10.0.0.1", "source": "configured" }</code>, or
+<code>{ "routerId": null }</code> when no Router ID has been selected yet.</p>
+<h3 id="show-hostname"><a class="header" href="#show-hostname"><code>show hostname</code></a></h3>
+<p>The system hostname.</p>
+<pre><code>r1&gt; show hostname
+r1
+</code></pre>
+<p>JSON: <code>{ "hostname": "r1" }</code> (or <code>null</code> if unresolvable).</p>
+<h3 id="show-task"><a class="header" href="#show-task"><code>show task</code></a></h3>
+<p>The protocol tasks the daemon has spawned and the VRF each runs in.
+Useful for confirming a per-VRF protocol instance actually started.</p>
+<pre><code>r1&gt; show task
+Protocol  VRF
+bgp       default
+ospf      default
+isis      blue
+</code></pre>
+<p>JSON: an array of <code>{ "protocol", "vrf" }</code> objects.</p>
+<h2 id="vrfs-and-interfaces"><a class="header" href="#vrfs-and-interfaces">VRFs and interfaces</a></h2>
+<h3 id="show-vrf"><a class="header" href="#show-vrf"><code>show vrf</code></a></h3>
+<p>Every VRF with its kernel table ID, per-VRF Router ID, and member
+interfaces.</p>
+<pre><code>r1&gt; show vrf
+Name   Table-ID  Router-ID  Members
+blue        100  10.1.1.1   eth1, eth2
+red         200  10.2.2.1   eth3
+</code></pre>
+<p>JSON: <code>{ "vrfs": [ { "name", "table_id", "router_id", "members" } ] }</code>,
+where <code>router_id</code> is <code>null</code> for a VRF with no Router ID yet.</p>
+<h3 id="show-interface-brief--name"><a class="header" href="#show-interface-brief--name"><code>show interface [brief | &lt;name&gt;]</code></a></h3>
+<p>Interface state: hardware address, ifindex, MTU, flags, VRF binding,
+MPLS switching state, and the IPv4/IPv6 addresses on the link.</p>
+<ul>
+<li><code>show interface</code> — every interface, in detail (the default view).</li>
+<li><code>show interface brief</code> — a one-line-per-interface summary table.</li>
+<li><code>show interface &lt;name&gt;</code> — one interface, in detail.</li>
+</ul>
+<pre><code>r1&gt; show interface brief
+Interface  Status  VRF      Addresses
+eth0       Up      default  10.0.0.1/24
+eth1       Down    blue     -
+
+r1&gt; show interface eth0
+Interface: eth0
+  Hardware is Ethernet 00:11:22:33:44:55
+  index 2 metric 1 mtu 1500
+  Link is Up &lt;UP,BROADCAST,RUNNING,MULTICAST&gt;
+  VRF Binding: Not bound
+  inet 10.0.0.1/24
+  inet6 2001:db8::1/64
+</code></pre>
+<p>JSON: an array of interface objects. The brief view carries <code>interface</code>,
+<code>status</code>, <code>vrf</code>, and <code>addresses</code>; the detailed view adds <code>hardware</code>,
+<code>index</code>, <code>metric</code>, <code>mtu</code>, <code>link_status</code>, <code>flags</code>, <code>vrf_binding</code>,
+<code>label_switching</code>, <code>inet_addresses</code>, and <code>inet6_addresses</code>.</p>
+<h2 id="ipv4--ipv6-routing-tables"><a class="header" href="#ipv4--ipv6-routing-tables">IPv4 / IPv6 routing tables</a></h2>
+<p>The RIB views share a layout and a set of status/protocol codes. The
+first column is the source protocol (<code>C</code> connected, <code>S</code> static,
+<code>O</code> OSPF, <code>B</code> BGP, <code>L1</code>/<code>L2</code> IS-IS, <code>K</code> kernel, …); <code>*</code> marks the
+FIB-installed route and <code>&gt;</code> the selected best path.</p>
+<h3 id="show-ip-route--show-ipv6-route"><a class="header" href="#show-ip-route--show-ipv6-route"><code>show ip route</code> / <code>show ipv6 route</code></a></h3>
+<p>The full IPv4 (resp. IPv6) routing table.</p>
+<ul>
+<li><code>… detail</code> — IOS-XR-style routing-descriptor blocks: distance, metric,
+age, and per-nexthop detail (labels, weight, protection).</li>
+<li><code>… prefix &lt;A.B.C.D/M&gt;</code> (<code>&lt;X::Y/M&gt;</code> for v6) <code>[detail]</code> — just the one
+prefix.</li>
+<li><code>… vrf [&lt;name&gt;] [detail]</code> — the table for one VRF, or every VRF when
+<code>&lt;name&gt;</code> is omitted.</li>
+</ul>
+<pre><code>r1&gt; show ip route
+Codes: K - kernel, C - connected, S - static, O - OSPF,
+       B - BGP, L1/L2 - IS-IS level-1/2,
+       &gt; - selected, * - FIB route
+
+O   *&gt; 10.0.0.0/24 [110/100] via 10.1.1.1, eth0, 00:12:34
+C   *&gt; 10.1.1.0/24 is directly connected, eth0, 00:05:43
+
+r1&gt; show ip route prefix 10.0.0.0/24 detail
+Routing entry for 10.0.0.0/24
+  Known via "ospf", distance 110, metric 100
+  Last update 00:12:34 ago
+  Routing Descriptor Blocks
+    10.1.1.1, via eth0
+      Route metric is 100, weight 0
+</code></pre>
+<p>JSON (all RIB forms): <code>{ "routes": [ … ] }</code>. Each route carries
+<code>prefix</code>, <code>protocol</code>, <code>subtype</code>, <code>selected</code>, <code>fib</code>, <code>valid</code>, <code>distance</code>,
+<code>metric</code>, <code>interface_name</code>, and a <code>nexthops</code> array whose entries hold
+<code>address</code>, <code>interface</code>, <code>weight</code>, <code>metric</code>, <code>mpls_labels</code>, and <code>backup</code>.</p>
+<blockquote>
+<p>The per-VRF RIB forms (<code>show ip route vrf …</code>) are answered by the RIB
+directly, unlike the protocol per-VRF forms, which are redirected to a
+per-VRF task (see the <a href="#operational-show-commands">overview</a>).</p>
+</blockquote>
+<h2 id="forwarding-constructs"><a class="header" href="#forwarding-constructs">Forwarding constructs</a></h2>
+<h3 id="show-nexthop"><a class="header" href="#show-nexthop"><code>show nexthop</code></a></h3>
+<p>The nexthop groups the RIB has built. Each group shows its ID, refcount,
+and <code>valid</code>/<code>installed</code> flags; single-path (<code>uni</code>), multipath (<code>multi</code>),
+and protected (<code>protect</code>) groups render their members, weights, SRv6
+segment lists, and MPLS label stacks.</p>
+<pre><code>r1&gt; show nexthop
+ID: 1 refcnt: 2 valid: true installed: true
+  via 10.1.1.1, eth0, label 17003
+ID: 2 refcnt: 1 valid: true installed: true
+  [1] via 10.1.1.2, eth1, weight 1
+  [3] via 10.1.1.3, eth2, weight 1
+</code></pre>
+<p>JSON: an array of group objects with <code>id</code>, <code>refcnt</code>, <code>valid</code>,
+<code>installed</code>, and <code>type</code> (<code>uni</code> / <code>multi</code> / <code>protect</code>), plus either
+inline <code>via</code>/<code>seg6</code>/<code>interface</code>/<code>labels</code> (uni) or a <code>members</code> array
+(multi / protect). See <a href="#fast-failover-ti-lfa--bfd-nexthopprotect">NexthopProtect</a>.</p>
+<h3 id="show-mpls-ilm"><a class="header" href="#show-mpls-ilm"><code>show mpls ilm</code></a></h3>
+<p>The MPLS Incoming-Label Map: for each local label, the forwarding
+action (<code>Pop</code>, <code>Swap &lt;out&gt;</code>, VPN decap), the prefix or SID it serves,
+and the outgoing interface / nexthop.</p>
+<pre><code>r1&gt; show mpls ilm
+ P Dist Local  Outgoing  Prefix/ID          Interface  Next Hop
+ * B  15   100  Pop       VPN Decap (tbl100) blue
+   O 10   200  Swap 300  10.0.0.0/24        eth0       10.1.1.1
+</code></pre>
+<p>JSON: <code>{ "entries": [ { "protocol", "distance", "selected", "local_label", "outgoing_label", "prefix_or_id", "outgoing_interface", "next_hop" } ] }</code>.</p>
+<h3 id="show-l2-mac-table"><a class="header" href="#show-l2-mac-table"><code>show l2 mac table</code></a></h3>
+<p>The EVPN MAC table — one entry per (VNI, MAC), with the remote VTEP
+(tunnel endpoint), the entry flags, its sequence number, and whether it
+is installed in the data plane. This is the control-plane view of the
+MACs EVPN has learned, keyed by VNI.</p>
+<pre><code>r1&gt; show l2 mac table
+VNI    MAC Address        Tunnel Endpoint  Flags  Seq  Installed
+5000   00:11:22:33:44:55  10.1.1.1         R      0    Yes
+5001   aa:bb:cc:dd:ee:ff  10.2.2.1         R      2    Yes
+</code></pre>
+<p>JSON: <code>{ "entries": [ { "vni", "mac", "tunnel_endpoint", "flags", "seq", "installed" } ] }</code>.</p>
+<h3 id="show-l2-neighbor"><a class="header" href="#show-l2-neighbor"><code>show l2 neighbor</code></a></h3>
+<p>Bridge forwarding-database (FDB) entries — MACs learned locally or via
+EVPN, with VLAN, VNI, remote VTEP, and state. Where
+<code>show l2 mac table</code> is the per-VNI control-plane view, this is the
+kernel-bridge FDB view.</p>
+<pre><code>r1&gt; show l2 neighbor
+ MAC                Interface  VLAN  VNI   Dst       State      Flags
+ 00:11:22:33:44:55  eth1       100   5000  10.1.1.1  Reachable  0x01
+ aa:bb:cc:dd:ee:ff  eth2       200   5001  10.2.2.1  Stale      0x02
+</code></pre>
+<p>JSON: <code>{ "entries": [ { "mac", "interface", "vlan", "vni", "dst", "state", "flags" } ] }</code>.</p>
+<h3 id="show-segment-routing-srv6-sid"><a class="header" href="#show-segment-routing-srv6-sid"><code>show segment-routing srv6 sid</code></a></h3>
+<p>The SRv6 SIDs the daemon has allocated, with behavior (<code>End</code>, <code>End.X</code>,
+<code>End.DT46</code>, …), context, owning protocol, locator, and allocation type.
+Egress-protection redirects are shown beneath the affected SID. See
+<a href="#srv6-1">SRv6</a>.</p>
+<pre><code>r1&gt; show segment-routing srv6 sid
+ SID              Behavior  Context             Protocol  Locator  AllocationType
+ fcbb:bbbb:1:1::  End       -                   isis      LOC_N1   Dynamic
+ fcbb:bbbb:1:2::  End.X     Interface 'enp0s7'  isis      LOC_N1   Dynamic
+</code></pre>
+<p>JSON: <code>{ "entries": [ { "sid", "behavior", "context", "owner", "locator", "allocation_type", "redirected_to" } ] }</code>.</p>
+<h3 id="show-evpn-vni-all"><a class="header" href="#show-evpn-vni-all"><code>show evpn vni all</code></a></h3>
+<p>A placeholder for EVPN VNI inventory. Per-VNI MAC state is surfaced by
+<code>show l2 mac table</code>; this command currently returns an empty result
+(text banner, or <code>[]</code> under <code>-j</code>) and is reserved for a future VNI
+summary.</p>
+<div style="break-before: page; page-break-before: always;"></div>
+<h1 id="bgp"><a class="header" href="#bgp">BGP</a></h1>
+<p>The <code>show bgp</code> family reports BGP’s Loc-RIB for every address family,
+neighbor state, the per-peer Adj-RIB-In/Out, update-group internals, and
+the MUP controller. Every command honors the <code>-j</code> / <code>--json</code> flag.</p>
+<p>A bare <code>show bgp</code> is shorthand for <code>show bgp ipv4</code> — the IPv4 unicast
+Loc-RIB. All the route-table views share one layout and status legend:</p>
+<pre><code>Status codes:  s suppressed, d damped, h history, * valid, &gt; best,
+               = multipath, i internal, S Stale, R Removed
+Origin codes:  i - IGP, e - EGP, ? - incomplete
+
+    Network        Next Hop   Metric LocPrf Weight Path
+ *&gt; 10.0.0.0/24    192.0.2.1                     0 65000 i
+</code></pre>
+<p><code>*&gt;</code> marks a valid best path; <code>i</code> in the leading code column marks an
+iBGP-learned route.</p>
+<h2 id="per-family-loc-rib"><a class="header" href="#per-family-loc-rib">Per-family Loc-RIB</a></h2>
+<h3 id="show-bgp-addrprefix-ipv4-unicast"><a class="header" href="#show-bgp-addrprefix-ipv4-unicast"><code>show bgp [&lt;addr&gt;|&lt;prefix&gt;]</code> (IPv4 unicast)</a></h3>
+<p>The IPv4 unicast table. Append a <code>&lt;prefix&gt;</code> for an exact match, or a
+bare <code>&lt;addr&gt;</code> for a longest-prefix-match lookup.</p>
+<h3 id="show-bgp-ipv4-addrprefixsummary"><a class="header" href="#show-bgp-ipv4-addrprefixsummary"><code>show bgp ipv4 [&lt;addr&gt;|&lt;prefix&gt;|summary]</code></a></h3>
+<p>The explicit IPv4 unicast form. <code>summary</code> renders only the IPv4-unicast
+neighbor section (see <a href="#show-bgp-summary"><code>show bgp summary</code></a>).</p>
+<h3 id="show-bgp-ipv4-prefix-longer-prefix"><a class="header" href="#show-bgp-ipv4-prefix-longer-prefix"><code>show bgp ipv4 &lt;prefix&gt; longer-prefix</code></a></h3>
+<p>Every route equal to or more specific than <code>&lt;prefix&gt;</code> (a CIDR-subtree
+match) — handy for auditing what a peer is advertising under an
+aggregate.</p>
+<h3 id="show-bgp-ipv6-"><a class="header" href="#show-bgp-ipv6-"><code>show bgp ipv6 …</code></a></h3>
+<p>The IPv6 unicast twins of all the IPv4 forms above: <code>show bgp ipv6</code>,
+<code>show bgp ipv6 &lt;addr&gt;|&lt;prefix&gt;|summary</code>, and <code>show bgp ipv6 &lt;prefix&gt; longer-prefix</code>.</p>
+<p>JSON (all unicast forms): an array of route objects with <code>prefix</code>,
+<code>valid</code>, <code>best</code>, <code>internal</code>, <code>route_type</code> (<code>iBGP</code>/<code>eBGP</code>), <code>next_hop</code>,
+<code>metric</code>, <code>local_pref</code>, <code>weight</code>, <code>as_path</code>, and <code>origin</code>. The <code>summary</code>
+forms instead return the summary object documented below.</p>
+<h3 id="show-bgp-vpnv4-addrprefixsummary--show-bgp-vpnv6-"><a class="header" href="#show-bgp-vpnv4-addrprefixsummary--show-bgp-vpnv6-"><code>show bgp vpnv4 [&lt;addr&gt;|&lt;prefix&gt;|summary]</code> / <code>show bgp vpnv6 …</code></a></h3>
+<p>The L3VPN Loc-RIB (SAFI 128), grouped by Route Distinguisher. Each entry
+shows its RD, the per-route extended communities (route-targets), and
+the VPN label. See <a href="#bgpmpls-l3vpn-and-per-vrf-labels">L3VPN and Per-VRF Labels</a>.</p>
+<pre><code>r1&gt; show bgp vpnv4
+Route Distinguisher: 65000:100
+ *&gt; 10.0.0.0/24   192.0.2.2                     0 65001 i
+      RT:65001:100 label=1001
+</code></pre>
+<p>JSON: an array of route objects that add <code>route_distinguisher</code>, <code>label</code>,
+<code>extended_community</code>, and <code>path_id</code> to the common attributes. (VPNv6
+reuses the same shape; <code>prefix</code> is a string and family-agnostic.)</p>
+<h3 id="show-bgp-labeled-unicast"><a class="header" href="#show-bgp-labeled-unicast"><code>show bgp labeled-unicast</code></a></h3>
+<p>The Labeled-Unicast Loc-RIB (SAFI 4), IPv4 and IPv6, with a per-prefix
+MPLS label column.</p>
+<p>JSON: an array with <code>family</code> (<code>ipv4</code>/<code>ipv6</code>), <code>prefix</code>, <code>label</code>, plus the
+common route attributes.</p>
+<h3 id="show-bgp-evpn-route-type-type"><a class="header" href="#show-bgp-evpn-route-type-type"><code>show bgp evpn [route-type &lt;type&gt;]</code></a></h3>
+<p>The EVPN Loc-RIB (L2VPN, SAFI 70), grouped by RD. <code>route-type</code> filters
+to one NLRI type: <code>ethernet-ad</code>, <code>macip</code>, <code>multicast</code>,
+<code>ethernet-segment</code>, <code>prefix</code>, <code>smet</code>, <code>igmp-join-sync</code>,
+<code>igmp-leave-sync</code>, <code>per-region-imet</code>, <code>s-pmsi</code>, or <code>leaf</code>. See the EVPN
+chapters starting at <a href="#bgp-evpn-type-5-ip-prefix-routes">EVPN Type-5</a>.</p>
+<ul>
+<li><code>show bgp evpn summary</code> — the EVPN neighbor section only.</li>
+<li><code>show bgp evpn ethernet-segment</code> — locally-configured Ethernet
+Segments (RFC 7432): ESI, redundancy mode, member VTEPs, DF algorithm,
+and the elected Designated Forwarder.</li>
+</ul>
+<p>JSON: an array of EVPN route objects (<code>route_distinguisher</code>,
+<code>route_type</code>, <code>prefix</code>, common attrs, <code>extended_communities</code>);
+<code>ethernet-segment</code> returns an array of segment objects.</p>
+<h3 id="show-bgp-flowspec-ipv6"><a class="header" href="#show-bgp-flowspec-ipv6"><code>show bgp flowspec [ipv6]</code></a></h3>
+<p>The Flow Specification Loc-RIB (RFC 8955, SAFI 133): match criteria,
+action, validation state, and the originating peer. Add <code>ipv6</code> for the
+IPv6 family.</p>
+<p>JSON: an array of <code>{ family, match, action, from, valid, validity }</code>.</p>
+<h3 id="show-bgp-sr-policy-ipv6"><a class="header" href="#show-bgp-sr-policy-ipv6"><code>show bgp sr-policy [ipv6]</code></a></h3>
+<p>The SR Policy Loc-RIB (SAFI 73): each policy’s color and endpoint, its
+candidate paths (origin, preference, binding-SID), and segment lists.
+Add <code>ipv6</code> for the IPv6 family.</p>
+<p>JSON: an array of policy objects with <code>color</code>, <code>endpoint</code>, and a
+<code>candidate_paths</code> array (<code>protocol_origin</code>, <code>preference</code>, <code>valid</code>,
+<code>active</code>, <code>binding_sid</code>, <code>segment_lists</code>).</p>
+<h3 id="show-bgp-link-state"><a class="header" href="#show-bgp-link-state"><code>show bgp link-state</code></a></h3>
+<p>The BGP Link-State Loc-RIB (RFC 9552, SAFI 71): one line per NLRI
+(node / link / prefix descriptor), the source peer, and a digest of the
+link-state TLVs.</p>
+<p>JSON: an array of <code>{ nlri_type, nlri, neighbor, best }</code>.</p>
+<h3 id="show-bgp-mup-summary"><a class="header" href="#show-bgp-mup-summary"><code>show bgp mup [summary]</code></a></h3>
+<p>The Mobile User Plane Loc-RIB (SAFI 85): Direct-Segment, ISD, and
+Type-1/Type-2 Session-Transformed routes. <code>summary</code> shows the
+IPv4-MUP / IPv6-MUP neighbor sections. See
+<a href="#bgp-mobile-user-plane-mup-and-the-mup-controller">Mobile User Plane (MUP)</a>.</p>
+<ul>
+<li><code>show bgp mup mup-c [session|association]</code> — the MUP Controller
+(MUP-C): admin state and PFCP listen address; <code>session</code> lists learned
+PFCP sessions (SEID, UE address, TEID, QFI); <code>association</code> lists PFCP
+CP/UP associations.</li>
+</ul>
+<p>JSON: an array of MUP route objects; <code>mup-c</code> returns a controller object
+or an array of session / association objects.</p>
+<h2 id="neighbor-state"><a class="header" href="#neighbor-state">Neighbor state</a></h2>
+<h3 id="show-bgp-summary"><a class="header" href="#show-bgp-summary"><code>show bgp summary</code></a></h3>
+<p>One section per AFI/SAFI configured on at least one neighbor, each
+listing peer version, AS, message counters, uptime, FSM state, and
+prefix counts received/sent.</p>
+<pre><code>r1&gt; show bgp summary
+IPv4 Unicast Summary:
+BGP router identifier 192.0.2.1, local AS 65000, VRF default
+Neighbor    V    AS  MsgRcvd MsgSent Up/Down     State    PfxRcd/Snt
+192.0.2.2   4 65001       42      40 00:05:00 Established       42/10
+</code></pre>
+<p>JSON: <code>{ router_id, local_as, afi_safis: [ { afi_safi, peers: [ … ] } ] }</code>.</p>
+<h3 id="show-bgp-neighbor-addrname"><a class="header" href="#show-bgp-neighbor-addrname"><code>show bgp neighbor [&lt;addr&gt;|&lt;name&gt;]</code></a></h3>
+<p>Full per-neighbor detail — FSM state, negotiated capabilities, timers,
+and message counters. With no argument it lists every neighbor,
+including interface-keyed IPv6 unnumbered peers (which are addressed by
+their interface <code>&lt;name&gt;</code>; see
+<a href="#ipv6-unnumbered-interface-neighbor">IPv6 Unnumbered</a>).</p>
+<p>JSON: a single neighbor object, or an array of them.</p>
+<h3 id="per-neighbor-adj-rib-views"><a class="header" href="#per-neighbor-adj-rib-views">Per-neighbor Adj-RIB views</a></h3>
+<ul>
+<li><code>show bgp neighbor &lt;addr&gt; advertised-routes [ipv6|vpnv4|evpn]</code> — the
+Adj-RIB-Out (what this peer is being sent, after outbound policy).</li>
+<li><code>show bgp neighbor &lt;addr&gt; received-routes [ipv6|vpnv4|evpn]</code> — the
+Adj-RIB-In (what this peer sent, before inbound policy).</li>
+<li><code>show bgp neighbor &lt;addr&gt; rtcv4</code> — the IPv4/IPv6 Route Target
+Constraints (RFC 4684) exchanged with the peer. See
+<a href="#bgp-route-target-constraint-rtc">Route Target Constraint</a>.</li>
+</ul>
+<p>The family keyword (default IPv4 unicast) selects which Adj-RIB table to
+render. JSON mirrors the corresponding Loc-RIB family shape
+(unicast / VPNv4 / EVPN); <code>rtcv4</code> returns
+<code>{ neighbor, ipv4: [...], ipv6: [...] }</code>.</p>
+<h2 id="configuration-and-internals"><a class="header" href="#configuration-and-internals">Configuration and internals</a></h2>
+<h3 id="show-bgp-neighbor-group-name"><a class="header" href="#show-bgp-neighbor-group-name"><code>show bgp neighbor-group [&lt;name&gt;]</code></a></h3>
+<p>Neighbor-group inheritance state — with no argument, a table of every
+group with its remote-AS and member count; with a <code>&lt;name&gt;</code>, the group’s
+members and inherited knobs. See
+<a href="#neighbor-groups">Neighbor Groups</a>.</p>
+<p>JSON: an array of group rows, or one group detail object.</p>
+<h3 id="show-bgp-update-group-id"><a class="header" href="#show-bgp-update-group-id"><code>show bgp update-group [&lt;id&gt;]</code></a></h3>
+<p>The IOS-XR-style update-groups: peers that share an identical outbound
+policy and capability signature are coalesced into one group so an
+update is formatted once and fanned out. With no argument, a summary
+table; with an <code>&lt;id&gt;</code>, the group’s signature, members, and counters.</p>
+<pre><code>r1&gt; show bgp update-group
+ID            Members Type  AS    Policy-out     Updates
+ipv4-unicast.0      3 ebgp  65001 customer-out   42 / 40
+
+1 group, 3 members.
+</code></pre>
+<p>JSON: <code>{ groups: [ … ] }</code>.</p>
+<h3 id="show-bgp-attributes"><a class="header" href="#show-bgp-attributes"><code>show bgp attributes</code></a></h3>
+<p>The shared path-attribute store: total / active entry counts (split
+across the main table and the sharded table), and each interned
+attribute set with its refcount. A diagnostic for memory and attribute
+sharing. See <a href="#bgp-rib-sharding">RIB Sharding</a>.</p>
+<p>JSON: <code>{ total_entries, active_entries, main_entries, shard_entries, attributes: [ { refcnt, store, attr } ] }</code>.</p>
+<h2 id="per-vrf-bgp"><a class="header" href="#per-vrf-bgp">Per-VRF BGP</a></h2>
+<h3 id="show-bgp-vrf-name-summaryneighboripv4ipv6mup"><a class="header" href="#show-bgp-vrf-name-summaryneighboripv4ipv6mup"><code>show bgp vrf [&lt;name&gt;] [summary|neighbor|ipv4|ipv6|mup]</code></a></h3>
+<p>With no name, a table of every BGP VRF — its RD, per-VRF label,
+table-id, peer count, and running state. With a <code>&lt;name&gt;</code> and a
+subcommand, the request is forwarded to that VRF’s BGP task and rendered
+by the matching handler above (so <code>show bgp vrf blue summary</code> mirrors
+<code>show bgp summary</code> for VRF <code>blue</code>).</p>
+<pre><code>r1&gt; show bgp vrf
+Name  RD          Label  Table-ID  Peers  State
+blue  65000:100   1001   256       2      running
+red   65000:200   1002   257       1      running
+</code></pre>
+<p>JSON (the no-name list): an array of
+<code>{ name, rd, label, table_id, peers, running }</code>. The per-VRF
+subcommands return their sibling’s JSON shape.</p>
+<div style="break-before: page; page-break-before: always;"></div>
+<h1 id="ospfv2-and-ospfv3"><a class="header" href="#ospfv2-and-ospfv3">OSPFv2 and OSPFv3</a></h1>
+<p>OSPFv2 (<code>show ospf …</code>) and OSPFv3 (<code>show ospfv3 …</code>) expose the same set
+of operational views: the instance summary, interfaces, neighbors, the
+link-state database, the routing table, the SPF tree, and the Segment
+Routing / TI-LFA state. The two command trees are near-identical; the
+differences are called out below. Every command honors <code>-j</code> / <code>--json</code>,
+and each accepts a <code>vrf &lt;name&gt;</code> selector that mirrors the non-VRF
+sibling (see the <a href="#operational-show-commands">overview</a>).</p>
+<p>See the protocol chapters for configuration:
+<a href="#ospf--open-shortest-path-first">OSPF</a>.</p>
+<h2 id="instance-and-adjacencies"><a class="header" href="#instance-and-adjacencies">Instance and adjacencies</a></h2>
+<h3 id="show-ospf--show-ospfv3"><a class="header" href="#show-ospf--show-ospfv3"><code>show ospf</code> / <code>show ospfv3</code></a></h3>
+<p>The instance summary: Router ID, area and interface counts, the time of
+and duration of the last SPF run, the TI-LFA compute statistics, and the
+per-area SPF-offload gate state.</p>
+<pre><code>r1&gt; show ospf
+ OSPF Routing Process, Router ID: 10.0.0.1
+ SPF algorithm last executed 5m12s ago, took 234 usecs
+ SPF offload gates:
+   area 0.0.0.0: inflight=false, pending=false
+</code></pre>
+<p>JSON: an object with <code>router_id</code>, <code>area_count</code>, <code>link_count</code>,
+<code>spf_last_ms_ago</code>, <code>spf_duration_us</code>, <code>tilfa_compute</code>, and
+<code>spf_offload_gates</code>.</p>
+<h3 id="show-ospf-interface--show-ospfv3-interface"><a class="header" href="#show-ospf-interface--show-ospfv3-interface"><code>show ospf interface</code> / <code>show ospfv3 interface</code></a></h3>
+<p>The OSPF-enabled interfaces: area, network type, cost, state (DR/BDR/…),
+priority, the elected DR/BDR, the hello/dead timers, and neighbor
+counts.</p>
+<p>JSON: an array of interface objects (<code>name</code>, <code>ifindex</code>, <code>area</code>, <code>state</code>,
+<code>cost</code>, <code>priority</code>, <code>dr_*</code>, <code>bdr_*</code>, <code>hello_interval</code>, <code>dead_interval</code>,
+<code>neighbor_count</code>, …).</p>
+<h3 id="show-ospf-neighbor-detail--show-ospfv3-neighbor-detail"><a class="header" href="#show-ospf-neighbor-detail--show-ospfv3-neighbor-detail"><code>show ospf neighbor [detail]</code> / <code>show ospfv3 neighbor [detail]</code></a></h3>
+<p>The neighbor table: Router ID, priority, FSM state (<code>Full/DR</code>, …),
+uptime, dead-time, address, and interface. <code>detail</code> adds per-neighbor
+state-change history, options, and the DB-summary / LS-request /
+retransmission list sizes.</p>
+<pre><code>r1&gt; show ospf neighbor
+Neighbor ID  Pri State         Up Time  Dead Time  Address      Interface
+10.0.0.2       1 Full/DR       10m02s   37.123s    192.168.1.2  eth0
+10.0.0.3       1 Full/DROther   8m45s   38.456s    192.168.1.3  eth0
+</code></pre>
+<p>JSON: an array of neighbor objects; <code>detail</code> returns the richer
+per-neighbor object.</p>
+<h2 id="link-state-database"><a class="header" href="#link-state-database">Link-state database</a></h2>
+<h3 id="show-ospf-database-detail--show-ospfv3-database-detail"><a class="header" href="#show-ospf-database-detail--show-ospfv3-database-detail"><code>show ospf database [detail]</code> / <code>show ospfv3 database [detail]</code></a></h3>
+<p>The LSDB. The summary view lists, per area/scope, each LSA’s
+Link-State ID, advertising router, age, sequence number, and checksum.
+<code>detail</code> expands every LSA body (links, metrics, prefixes, options).</p>
+<pre><code>r1&gt; show ospf database
+
+       OSPF Router with ID (10.0.0.1)
+
+Router Link States (Area 0.0.0.0)
+Link ID    ADV Router  Age  Seq#       CkSum   Link count
+10.0.0.1   10.0.0.1     42  0x80000001 0x1234           3
+10.0.0.2   10.0.0.2     45  0x80000001 0x5678           2
+</code></pre>
+<p>JSON: an object keyed by area/scope, each holding arrays of LSA-header
+objects (<code>link_id</code>, <code>adv_router</code>, <code>age</code>, <code>seq_number</code>, <code>checksum</code>, …).</p>
+<blockquote>
+<p>OSPFv3 organizes the LSDB by scope — Area, AS, and Link — to match the
+v3 LSA flooding scopes, where OSPFv2 organizes strictly by area.</p>
+</blockquote>
+<h2 id="routes-and-spf"><a class="header" href="#routes-and-spf">Routes and SPF</a></h2>
+<h3 id="show-ospf-route--show-ospfv3-route"><a class="header" href="#show-ospf-route--show-ospfv3-route"><code>show ospf route</code> / <code>show ospfv3 route</code></a></h3>
+<p>The OSPF-computed routes with metric, path type, and nexthops.</p>
+<pre><code>r1&gt; show ospf route
+192.168.1.0/24  [10] via 192.168.1.2, eth0
+10.0.0.0/24     [20] directly attached to eth1
+</code></pre>
+<p>JSON: an array of <code>{ prefix, metric, path_type, nexthops }</code>.</p>
+<h3 id="show-ospf-spf--show-ospfv3-spf"><a class="header" href="#show-ospf-spf--show-ospfv3-spf"><code>show ospf spf</code> / <code>show ospfv3 spf</code></a></h3>
+<p>The SPF tree: each vertex with its cost from the root and the nexthop
+chain used to reach it.</p>
+<p>JSON: an array of SPF-path objects (<code>vertex_id</code>, <code>cost</code>, <code>nexthops</code>).</p>
+<h3 id="show-ospf-graph--show-ospfv3-graph"><a class="header" href="#show-ospf-graph--show-ospfv3-graph"><code>show ospf graph</code> / <code>show ospfv3 graph</code></a></h3>
+<p>The topology graph the SPF runs over — nodes and their costed links.
+Useful for visualizing the area before SPF resolves nexthops.</p>
+<p>JSON: a graph object with <code>nodes</code>, each carrying its <code>links</code> (<code>to_id</code>,
+<code>cost</code>).</p>
+<h2 id="segment-routing-and-ti-lfa"><a class="header" href="#segment-routing-and-ti-lfa">Segment Routing and TI-LFA</a></h2>
+<h3 id="show-ospf-segment-routing--show-ospfv3-segment-routing"><a class="header" href="#show-ospf-segment-routing--show-ospfv3-segment-routing"><code>show ospf segment-routing</code> / <code>show ospfv3 segment-routing</code></a></h3>
+<p>The SR-MPLS database: per-router SRGB/SRLB, advertised algorithms, and
+Prefix-SID → label-operation mappings. The OSPFv3 form additionally
+lists local Adj-SIDs and the installed ILM. See
+<a href="#fast-failover-ti-lfa--bfd-nexthopprotect">Fast Failover: TI-LFA + BFD</a>.</p>
+<p>JSON: an SR-database object (<code>router_id</code>, <code>nodes</code>/<code>interfaces</code>,
+<code>prefix_sids</code>, and — v3 — <code>ilm</code>, <code>remote_routers</code>).</p>
+<h3 id="show-ospfv3-srv6"><a class="header" href="#show-ospfv3-srv6"><code>show ospfv3 srv6</code></a></h3>
+<p>OSPFv3 only: the SRv6 operational view — the configured/resolved
+locator, the node <code>End</code> SID, and the per-adjacency <code>End.X</code> SIDs with
+their nexthop and LIB twin. See <a href="#srv6-1">SRv6</a>.</p>
+<p>JSON: <code>{ locator, end_sid, end_x_sids: [ … ] }</code>.</p>
+<h3 id="show-ospf-ti-lfa--show-ospfv3-ti-lfa"><a class="header" href="#show-ospf-ti-lfa--show-ospfv3-ti-lfa"><code>show ospf ti-lfa</code> / <code>show ospfv3 ti-lfa</code></a></h3>
+<p>The graph-level TI-LFA repair paths from the last SPF — per destination,
+the repair first-hop and the segment list (Node-SID / Adj-SID, or SRv6
+segments for v3).</p>
+<h3 id="show-ospf-repair-list-detail--show-ospfv3-repair-list-detail"><a class="header" href="#show-ospf-repair-list-detail--show-ospfv3-repair-list-detail"><code>show ospf repair-list [detail]</code> / <code>show ospfv3 repair-list [detail]</code></a></h3>
+<p>The TI-LFA backups actually installed in the RIB: one row per protected
+prefix with its primary and repair nexthops and the segment stack.
+<code>detail</code> breaks out each segment with its ifindex and metric.</p>
+<pre><code>r1&gt; show ospf repair-list
+Prefix          Primary via   Repair via    Segments
+192.168.1.0/24  192.168.1.2   192.168.1.3   [16000, 16001]
+</code></pre>
+<p>JSON: <code>{ routes: [ { prefix, primary_nexthop, repair_nexthop, segments, … } ] }</code>.</p>
+<h3 id="show-ospf-flex-algo--show-ospfv3-flex-algo"><a class="header" href="#show-ospf-flex-algo--show-ospfv3-flex-algo"><code>show ospf flex-algo</code> / <code>show ospfv3 flex-algo</code></a></h3>
+<p>The Flexible Algorithm state (RFC 9350): each configured algorithm’s
+metric type, priority, affinity constraints, SPF reachability, and the
+per-algorithm routes. See the OSPF chapter for configuration.</p>
+<p>JSON: an array of flex-algo objects (<code>algorithm</code>, <code>metric_type</code>,
+<code>priority</code>, <code>include_any</code>/<code>exclude_any</code>/…, <code>spf_status</code>, <code>routes</code>).</p>
+<h2 id="graceful-restart-ospfv2"><a class="header" href="#graceful-restart-ospfv2">Graceful Restart (OSPFv2)</a></h2>
+<h3 id="show-ospf-graceful-restart"><a class="header" href="#show-ospf-graceful-restart"><code>show ospf graceful-restart</code></a></h3>
+<p>The GR helper configuration (helper enabled, max grace period, strict
+LSA checking) and any active helper sessions with their neighbor,
+restart reason, and remaining grace time.</p>
+<p>JSON: <code>{ helper_enabled, max_grace_period_secs, strict_lsa_checking, restarting, helpers: [ … ] }</code>.</p>
+<h3 id="show-ospf-checkpoint"><a class="header" href="#show-ospf-checkpoint"><code>show ospf checkpoint</code></a></h3>
+<p>A diagnostic dump of the on-disk graceful-restart checkpoint: format
+version, write time, the captured Router ID / areas / links / neighbors,
+and the saved Adj-SID labels. Used to inspect what a restart would
+replay.</p>
+<p>JSON: a checkpoint object (<code>path</code>, <code>present</code>, <code>format_version</code>,
+<code>router_id</code>, <code>areas</code>, <code>links</code>, <code>adj_sid_labels</code>, …).</p>
+<div style="break-before: page; page-break-before: always;"></div>
+<h1 id="is-is-1"><a class="header" href="#is-is-1">IS-IS</a></h1>
+<p>The <code>show isis</code> family reports adjacencies, the link-state database, the
+per-level SPF results and routing table, DIS election, and Fast ReRoute
+(TI-LFA) state. Every command honors <code>-j</code> / <code>--json</code>, and each accepts a
+<code>vrf &lt;name&gt;</code> selector that mirrors the non-VRF sibling (see the
+<a href="#operational-show-commands">overview</a>).</p>
+<p>Most views are organized per <strong>level</strong> (L1 / L2) and, where relevant,
+per address family (IPv4 / IPv6). See the protocol chapters for
+configuration: <a href="#is-is--intermediate-system-to-intermediate-system">IS-IS</a>.</p>
+<h2 id="overview"><a class="header" href="#overview">Overview</a></h2>
+<h3 id="show-isis"><a class="header" href="#show-isis"><code>show isis</code></a></h3>
+<p>Basic instance information (a banner today; JSON <code>{}</code>). Use
+<code>show isis summary</code> for the operational digest.</p>
+<h3 id="show-isis-summary"><a class="header" href="#show-isis-summary"><code>show isis summary</code></a></h3>
+<p>The area LSP-MTU, the L1 area-password / L2 domain-password
+authentication state, and the configured SRv6 locator’s status.</p>
+<pre><code>r1&gt; show isis summary
+LSP MTU: 1492 bytes
+Area-password (L1):   mode MD5, key-id 0
+Domain-password (L2): mode MD5, key-id 0
+
+SRv6 Locator:
+Name    Prefix             Behavior  Status
+LOC_N1  2001:db8:a:1::/64  Classic   Up
+</code></pre>
+<p>JSON: <code>{ lsp_mtu, area_password, domain_password, srv6_locator }</code>.</p>
+<h3 id="show-isis-hostname"><a class="header" href="#show-isis-hostname"><code>show isis hostname</code></a></h3>
+<p>The dynamic-hostname mappings (LSP TLV 137) — system-ID → hostname —
+learned across the domain, per level.</p>
+<p>JSON: a per-level mapping of system-ID to hostname.</p>
+<h2 id="adjacencies-and-interfaces"><a class="header" href="#adjacencies-and-interfaces">Adjacencies and interfaces</a></h2>
+<h3 id="show-isis-neighbor-detail"><a class="header" href="#show-isis-neighbor-detail"><code>show isis neighbor [detail]</code></a></h3>
+<p>The IS-IS adjacencies per interface and level: neighbor system-ID,
+state, and uptime. <code>detail</code> adds holdtime, the DIS/DR flag, circuit ID,
+and extended reachability.</p>
+<pre><code>r1&gt; show isis neighbor
+Interface  Level  Neighbor-ID     State  Uptime
+eth0       1      aaaa.bbbb.cccc  Up     5m23s
+eth0       2      aaaa.bbbb.cccd  Up     2h14m
+</code></pre>
+<p>JSON: an array of per-adjacency objects; <code>detail</code> returns the expanded
+form.</p>
+<h3 id="show-isis-interface-detail"><a class="header" href="#show-isis-interface-detail"><code>show isis interface [detail]</code></a></h3>
+<p>The IS-IS link configuration and state: circuit type, metric, hello
+timers, and network type. <code>detail</code> adds authentication state, the
+adjacency list, and PDU counters.</p>
+<p>JSON: an array of per-interface objects.</p>
+<h3 id="show-isis-dis-statistics--show-isis-dis-history"><a class="header" href="#show-isis-dis-statistics--show-isis-dis-history"><code>show isis dis statistics</code> / <code>show isis dis history</code></a></h3>
+<p>DIS (Designated IS) election diagnostics. <code>statistics</code> shows, per
+circuit and level, the current DIS and the number of elections;
+<code>history</code> is the timestamped log of past DIS transitions.</p>
+<p>JSON: per-interface/level election objects (<code>statistics</code>); a timestamped
+transition list (<code>history</code>).</p>
+<h2 id="database"><a class="header" href="#database">Database</a></h2>
+<h3 id="show-isis-database-detail"><a class="header" href="#show-isis-database-detail"><code>show isis database [detail]</code></a></h3>
+<p>The LSDB per level. The summary lists each LSP-ID with its PDU length,
+sequence number, checksum, remaining holdtime, and the ATT/P/OL bits
+(with a fragment summary for multi-fragment originators). <code>detail</code>
+expands each LSP’s full TLV content.</p>
+<pre><code>r1&gt; show isis database
+L1 Link State Database:
+LSP ID                PduLen  SeqNumber   Chksum  Holdtime  ATT/P/OL
+aaaa.bbbb.cccc.00-00 *  1200  0x00000001  0x9a5b      3600  0/0/0
+</code></pre>
+<p>JSON: an object with <code>level_1</code> / <code>level_2</code> arrays of LSP-summary objects
+(<code>lsp_id</code>, <code>seq_number</code>, <code>checksum</code>, <code>holdtime</code>, <code>att_bit</code>, <code>p_bit</code>,
+<code>ol_bit</code>, …); <code>detail</code> serializes the full LSP bodies.</p>
+<h2 id="routes-topology-and-spf"><a class="header" href="#routes-topology-and-spf">Routes, topology and SPF</a></h2>
+<h3 id="show-isis-route-detail"><a class="header" href="#show-isis-route-detail"><code>show isis route [detail]</code></a></h3>
+<p>The IS-IS routing table per level and family, with metric and nexthops.
+<code>detail</code> adds the Prefix-SID and any TI-LFA backup path (with the
+imposed label stack / SRv6 segments) per route.</p>
+<pre><code>r1&gt; show isis route
+L1 192.0.2.0/24 [metric 20]
+  via 192.0.2.1, eth0, Router2
+</code></pre>
+<p>JSON: <code>{ level_1: [ … ], level_2: [ … ] }</code>, each route with <code>prefix</code>,
+<code>metric</code>, and a <code>nexthops</code> array (<code>address</code>, <code>interface</code>, <code>label</code>,
+<code>implicit_null</code>).</p>
+<h3 id="show-isis-topology"><a class="header" href="#show-isis-topology"><code>show isis topology</code></a></h3>
+<p>The per-level, per-AFI SPF tree — vertices and reachable prefixes with
+their metric, nexthop, and parent — without the RIB tables that
+<code>show isis route</code> adds.</p>
+<p>JSON: <code>{ area, levels: [ { level, ipv4, ipv6 } ] }</code>.</p>
+<h3 id="show-isis-spf-detail"><a class="header" href="#show-isis-spf-detail"><code>show isis spf [detail]</code></a></h3>
+<p>The SPF computation results per topology: the TI-LFA enable state, the
+per-level SPF timing stats, and each destination’s cost, nexthops, and
+path vectors. <code>detail</code> adds the full per-destination path breakdown.</p>
+<p>JSON: <code>{ ti_lfa_enabled, sr_mpls_enabled, sr_srv6_enabled, topologies }</code>.</p>
+<h3 id="show-isis-graph"><a class="header" href="#show-isis-graph"><code>show isis graph</code></a></h3>
+<p>The SPF graph per level — nodes with their outgoing and incoming costed
+links.</p>
+<p>JSON: an array of <code>{ level, nodes: [ { id, name, sys_id, olinks, ilinks } ] }</code>.</p>
+<h2 id="fast-reroute-ti-lfa"><a class="header" href="#fast-reroute-ti-lfa">Fast ReRoute (TI-LFA)</a></h2>
+<h3 id="show-isis-fast-reroute-summary"><a class="header" href="#show-isis-fast-reroute-summary"><code>show isis fast-reroute summary</code></a></h3>
+<p>Per-level protection tallies for IPv4 and IPv6 separately: total
+prefixes, protected vs. unprotected, and the repair complexity breakdown
+(trivial / 1-segment / N-segment). See
+<a href="#fast-failover-ti-lfa--bfd-nexthopprotect">Fast Failover: TI-LFA + BFD</a>.</p>
+<pre><code>r1&gt; show isis fast-reroute summary
+Level-1 IPv4:
+  Total prefixes: 100
+  Protected:       80  (trivial 20, 1-seg 50, N-seg 10)
+  Unprotected:     20
+</code></pre>
+<p>JSON: <code>{ area, levels: [ { level, ipv4, ipv6 } ] }</code>.</p>
+<h3 id="show-isis-fast-reroute-prefix-abcdm-detail"><a class="header" href="#show-isis-fast-reroute-prefix-abcdm-detail"><code>show isis fast-reroute prefix &lt;A.B.C.D/M&gt; detail</code></a></h3>
+<p>The TI-LFA protection detail for one IPv4 prefix — per-nexthop backup
+path with its P/Q nodes and segment composition.</p>
+<p>JSON: <code>{ prefix, found, entries: [ { level, metric, protected, nexthops } ] }</code>.</p>
+<h3 id="show-isis-ti-lfa"><a class="header" href="#show-isis-ti-lfa"><code>show isis ti-lfa</code></a></h3>
+<p>The graph-level TI-LFA repair paths from the last SPF, per destination
+and level: the repair first-hop and the segment list (Node-SID /
+Adj-SID for SR-MPLS, End / End.X for SRv6).</p>
+<p>JSON: <code>{ levels: { L1: { destinations: [ … ] }, L2: { … } } }</code>.</p>
+<h3 id="show-isis-repair-list-detail"><a class="header" href="#show-isis-repair-list-detail"><code>show isis repair-list [detail]</code></a></h3>
+<p>The TI-LFA backups installed in the RIB: one row per protected route
+(level, family, prefix) with primary and repair nexthops and the segment
+list. <code>detail</code> breaks out each segment.</p>
+<p>JSON: <code>{ routes: [ { level, family, prefix, primary_nexthop, repair_nexthop, segments } ] }</code>.</p>
+<h3 id="show-isis-egress-protection"><a class="header" href="#show-isis-egress-protection"><code>show isis egress-protection</code></a></h3>
+<p>The Mirror-SID egress-protection state: locally-configured protected
+locators and their advertised status, plus the Mirror-SID /
+context-label advertisements received from protector peers. See
+<a href="#egress-protection-mirror-sid">Egress Protection (Mirror SID)</a>.</p>
+<p>JSON: <code>{ local, received_mirror_sids, received_context_labels }</code>.</p>
+<h2 id="segment-routing--flexible-algorithm"><a class="header" href="#segment-routing--flexible-algorithm">Segment Routing — Flexible Algorithm</a></h2>
+<h3 id="show-isis-flex-algo"><a class="header" href="#show-isis-flex-algo"><code>show isis flex-algo</code></a></h3>
+<p>The Flexible Algorithm state (RFC 9350): the locally-configured
+algorithms and their SRv6 locator bindings, plus the FADs, algorithms,
+and SRv6 locators received from peers, per level.</p>
+<p>JSON: <code>{ area, local_algorithms, local_srv6_locators, levels }</code>.</p>
+<h3 id="show-isis-flex-algo-route-algorithm-id"><a class="header" href="#show-isis-flex-algo-route-algorithm-id"><code>show isis flex-algo route [algorithm &lt;id&gt;]</code></a></h3>
+<p>The per-algorithm routing tables — IPv4 (SR-MPLS) and IPv6 (SRv6
+locator) — grouped by level and algorithm. Add <code>algorithm &lt;id&gt;</code> to
+filter to a single algorithm (0–255).</p>
+<pre><code>r1&gt; show isis flex-algo route algorithm 128
+Level-1 Algorithm 128:
+  Prefix        Metric  Interface  Nexthop    Label
+  192.0.2.0/24      10  eth0       192.0.2.1  16128
+</code></pre>
+<p>JSON: <code>{ area, groups: [ { level, algorithm, family, routes } ] }</code>.</p>
+<h2 id="graceful-restart"><a class="header" href="#graceful-restart">Graceful Restart</a></h2>
+<h3 id="show-isis-graceful-restart"><a class="header" href="#show-isis-graceful-restart"><code>show isis graceful-restart</code></a></h3>
+<p>The RFC 5306 Graceful Restart state per adjacency: helper/restarter
+config, and per-neighbor helper-active state, restart counters, the
+RR/RA/SA signaling bits, and remaining grace time.</p>
+<p>JSON: an array of per-adjacency objects (<code>level</code>, <code>system_id</code>,
+<code>interface</code>, <code>helper_active</code>, <code>rr</code>, <code>ra</code>, <code>sa</code>, <code>remaining_time</code>, …).</p>
+<h3 id="show-isis-checkpoint"><a class="header" href="#show-isis-checkpoint"><code>show isis checkpoint</code></a></h3>
+<p>A diagnostic dump of the on-disk graceful-restart checkpoint: format
+version, write time, system-ID, grace period, the self-originated LSPs,
+and the adjacency state captured at checkpoint time.</p>
+<p>JSON: a checkpoint object including the LSP bodies and adjacency records.</p>
+<div style="break-before: page; page-break-before: always;"></div>
+<h1 id="neighbor-discovery-bfd-and-stamp"><a class="header" href="#neighbor-discovery-bfd-and-stamp">Neighbor Discovery, BFD and STAMP</a></h1>
+<p>This page covers the operational views for IPv6 Neighbor Discovery, BFD
+liveness sessions, and STAMP delay measurement. Every command honors
+<code>-j</code> / <code>--json</code>.</p>
+<h2 id="ipv6-neighbor-discovery"><a class="header" href="#ipv6-neighbor-discovery">IPv6 Neighbor Discovery</a></h2>
+<p>These views report what the ND task has observed on each interface —
+the Router Advertisements it sends and the solicitations / neighbor
+messages it sees — so they double as a passive neighbor-cache and RA
+diagnostic.</p>
+<h3 id="show-ipv6-nd"><a class="header" href="#show-ipv6-nd"><code>show ipv6 nd</code></a></h3>
+<p>A one-line-per-interface summary of ND activity: whether the daemon is
+sending Router Advertisements, the learned-neighbor count, and total
+RX/TX packet counts.</p>
+<pre><code>r1&gt; show ipv6 nd
+Interface  RA   Neighbors  RX-total  TX-total  Ifindex
+eth0       on           5        42        12        2
+eth1       off          0         0         0        3
+</code></pre>
+<p>JSON: an array of <code>{ name, ifindex, ra_enabled, neighbor_count, rx_total, tx_total }</code>.</p>
+<h3 id="show-ipv6-nd-interface-ifname"><a class="header" href="#show-ipv6-nd-interface-ifname"><code>show ipv6 nd interface [&lt;ifname&gt;]</code></a></h3>
+<p>A detailed per-interface block: the RA scheduler state (intervals,
+lifetime, hop-limit, managed/other flags, next unsolicited RA), the
+daemon-observed and kernel counters, and per-neighbor statistics. Add an
+<code>&lt;ifname&gt;</code> to filter to one interface.</p>
+<pre><code>r1&gt; show ipv6 nd interface eth0
+Interface eth0 (ifindex 2)
+  Router advertisement: enabled
+    interval 200-600s, lifetime 1800s, hop-limit 64, managed=0 other=0
+  Counters (daemon-observed)   Sent  Received
+    Router advertisements        12         8
+    Router solicitations          -         5
+  Neighbors (1):
+    fe80::1   RA 1 RS 0 NS 1 NA 0   first 5m ago, last 2m ago
+</code></pre>
+<p>JSON: an array of interface objects with <code>ra_scheduler</code>, <code>counters</code>,
+<code>kernel_counters</code>, and a <code>neighbors</code> array.</p>
+<h2 id="bfd-1"><a class="header" href="#bfd-1">BFD</a></h2>
+<p>See <a href="#bfd">BFD</a> for configuration and the
+<a href="#the-xdpebpf-data-plane-helper-xdp-bfd-echo">XDP/eBPF data-plane helper</a>.</p>
+<h3 id="show-bfd"><a class="header" href="#show-bfd"><code>show bfd</code></a></h3>
+<p>A summary table of every BFD session: state, the local/remote
+discriminators, uptime, and interface.</p>
+<pre><code>r1&gt; show bfd
+Peer       State  Local/Remote Disc  Uptime    Iface
+10.0.0.2   Up     0xf001/0x2222      01:23:45  eth0
+10.0.0.3   Down   0x1234/0x0000      -         eth1
+</code></pre>
+<p>JSON: an array of <code>{ peer, local, interface, multihop, local_state, remote_state, local_discr, remote_discr, uptime_secs }</code>.</p>
+<h3 id="show-bfd-peers-addr"><a class="header" href="#show-bfd-peers-addr"><code>show bfd peers [&lt;addr&gt;]</code></a></h3>
+<p>FRR-style detailed blocks per session: the full timer negotiation
+(configured / negotiated / actual transmit and receive intervals,
+detection time), echo settings, diagnostics, the remote session
+parameters, and the control-packet counters. Add an <code>&lt;addr&gt;</code> to filter
+to one peer.</p>
+<pre><code>r1&gt; show bfd peers 10.0.0.2
+peer 10.0.0.2 (single-hop)
+    ID: 0xf001  Remote ID: 0x2222
+    Local address: 10.0.0.1  Interface: eth0
+    Status: up   Uptime: 123 second(s)
+    Local timers:
+        Detect-multiplier: 3
+        Receive interval: 1000ms  Transmit interval: 1000ms
+        Echo transmit interval: disabled
+</code></pre>
+<p>JSON: an array of detailed session objects (discriminators, states,
+diagnostics, the <code>*_interval_us</code> timers, echo fields, remote-state
+fields, and RX/TX counters).</p>
+<h3 id="show-bfd-counters"><a class="header" href="#show-bfd-counters"><code>show bfd counters</code></a></h3>
+<p>Per-session control-packet counters: received, received-invalid,
+transmitted, and transmit-failed.</p>
+<pre><code>r1&gt; show bfd counters
+Peer       RX  RX-Invalid  TX  TX-Failed
+10.0.0.2   42           0  40          0
+</code></pre>
+<p>JSON: an array of <code>{ peer, rx_count, rx_invalid_count, tx_count, tx_failed_count }</code>.</p>
+<h2 id="stamp-1"><a class="header" href="#stamp-1">STAMP</a></h2>
+<p>See <a href="#stamp">STAMP</a> for configuration.</p>
+<h3 id="show-stamp"><a class="header" href="#show-stamp"><code>show stamp</code></a></h3>
+<p>A one-line-per-session summary: the local/remote endpoints, session
+state, sent/received counts, loss percentage, and the last exported
+delay metric (min/avg/max).</p>
+<pre><code>r1&gt; show stamp
+Interface  Local      Remote     State   Sent  Recv  Loss%  Last (min/avg/max)
+eth0       10.0.0.1   10.0.0.2   Active    10     8    20%   42/43/45us (3us)
+eth1       10.0.1.1   10.0.1.2   Idle       0     0     -    -
+</code></pre>
+<p>JSON: an array of session objects (<code>interface</code>, <code>local</code>, <code>remote</code>,
+<code>state</code>, <code>ssid</code>, counters, <code>window_*</code>, and an optional <code>last_export</code>
+snapshot with <code>min</code>/<code>avg</code>/<code>max</code>/<code>variation</code>).</p>
+<h3 id="show-stamp-session"><a class="header" href="#show-stamp-session"><code>show stamp session</code></a></h3>
+<p>The same session data rendered as a detail block per session — SSID,
+probe interval, damping period, uptime, counters, the timestamp source
+(kernel vs. userspace), and the current measurement window.</p>
+<p>JSON: the same array of session objects as <code>show stamp</code>.</p>
+<h3 id="show-stamp-statistics"><a class="header" href="#show-stamp-statistics"><code>show stamp statistics</code></a></h3>
+<p>Aggregated sender and reflector packet counters across all sessions,
+including the kernel-vs-userspace timestamp split.</p>
+<pre><code>r1&gt; show stamp statistics
+Sender:    probes sent 50, replies received 48, invalid 1, failed 0
+           T4 kernel 48 (userspace fallback 0)
+Reflector: probes received 50, reflected 48, unauthorized 2
+           T2 kernel 48 (userspace fallback 0)
+</code></pre>
+<p>JSON: a single object with the <code>sender_*</code> and <code>reflector_*</code> counters.</p>
+<div style="break-before: page; page-break-before: always;"></div>
+<h1 id="policy-objects"><a class="header" href="#policy-objects">Policy Objects</a></h1>
+<p>These commands display the route-policy building blocks — the policies
+themselves and the named match-sets they reference (prefix-sets,
+community-sets, AS-path-sets, key-chains). They report <em>configuration</em>
+as the daemon has parsed it, which makes them the quickest way to
+confirm a set’s contents before referencing it from a policy. Every
+command honors <code>-j</code> / <code>--json</code>.</p>
+<p>See the <a href="#policy">Policy</a> chapters for how these objects are
+written and applied.</p>
+<h2 id="route-policies"><a class="header" href="#route-policies">Route policies</a></h2>
+<h3 id="show-policy"><a class="header" href="#show-policy"><code>show policy</code></a></h3>
+<p>The configured route policies (route-maps) — their ordered terms with
+the <code>match</code> conditions and <code>set</code> / control-flow actions of each.</p>
+<p>JSON: the policy set as a structured document.</p>
+<h2 id="match-sets"><a class="header" href="#match-sets">Match-sets</a></h2>
+<p>All of the set commands share one shape: with no argument they list
+every set of that kind; with <code>name &lt;name&gt;</code> they show just that one set
+(and report an error if the name is unknown).</p>
+<h3 id="show-prefix-set-name-name"><a class="header" href="#show-prefix-set-name-name"><code>show prefix-set [name &lt;name&gt;]</code></a></h3>
+<p>IP prefix-sets, each prefix with its optional length qualifier
+(<code>le</code> / <code>eq</code> / <code>ge</code>).</p>
+<pre><code>r1&gt; show prefix-set
+prefix-set: INTERNAL
+  192.0.2.0/24
+  198.51.100.0/24 le 25
+prefix-set: EXTERNAL
+  203.0.113.0/24 eq 24
+</code></pre>
+<p>JSON: an array of <code>{ name, prefixes: [ { prefix, le, eq, ge } ] }</code>
+(a single object when filtered by <code>name</code>).</p>
+<h3 id="show-community-set-name-name"><a class="header" href="#show-community-set-name-name"><code>show community-set [name &lt;name&gt;]</code></a></h3>
+<p>BGP standard community-sets — each member is an exact community value or
+a regular expression.</p>
+<pre><code>r1&gt; show community-set
+community-set: CUST_COMMS len: 3
+  65000:100
+  65000:200
+  ^65001:.*
+</code></pre>
+<p>JSON: an array of <code>{ name, members: [ … ] }</code>.</p>
+<h3 id="show-ext-community-set-name-name"><a class="header" href="#show-ext-community-set-name-name"><code>show ext-community-set [name &lt;name&gt;]</code></a></h3>
+<p>Extended-community sets — route-target / route-origin members, written
+<code>rt:…</code> / <code>soo:…</code>.</p>
+<pre><code>r1&gt; show ext-community-set
+ext-community-set: CUST_RT len: 2
+  rt:65000:100
+  rt:65001:.*
+</code></pre>
+<p>JSON: an array of <code>{ name, members: [ … ] }</code>.</p>
+<h3 id="show-large-community-set-name-name"><a class="header" href="#show-large-community-set-name-name"><code>show large-community-set [name &lt;name&gt;]</code></a></h3>
+<p>Large-community sets (RFC 8092) — members in <code>ASN:value:value</code> form.</p>
+<pre><code>r1&gt; show large-community-set
+large-community-set: LCOMM1 len: 2
+  65000:100:1
+  65001:.*:.*
+</code></pre>
+<p>JSON: an array of <code>{ name, members: [ … ] }</code>.</p>
+<h3 id="show-as-path-set-name-name"><a class="header" href="#show-as-path-set-name-name"><code>show as-path-set [name &lt;name&gt;]</code></a></h3>
+<p>AS-path-sets — each member is a regular expression matched against the
+BGP AS_PATH.</p>
+<pre><code>r1&gt; show as-path-set
+as-path-set: PATHS1 len: 2
+  ^65000.*
+  65001$
+</code></pre>
+<p>JSON: an array of <code>{ name, members: [ … ] }</code>.</p>
+<h3 id="show-key-chains-name-name"><a class="header" href="#show-key-chains-name-name"><code>show key-chains [name &lt;name&gt;]</code></a></h3>
+<p>Authentication key-chains and their keys — algorithm, key length,
+send/receive IDs, and the send/accept lifetime windows. Used by IS-IS
+and OSPF authentication. The key material itself is never printed.</p>
+<pre><code>r1&gt; show key-chains
+key-chain: PRIMARY
+  description: Production authentication
+  key 1:
+    algo: hmac-sha-256  key-bytes: 32
+    send-id: 1  recv-id: 1
+    send-lifetime:   2024-01-01T00:00:00 +86400s
+    accept-lifetime: 2024-01-01T00:00:00 +86400s
+</code></pre>
+<p>JSON: an array of <code>{ name, description, keys: [ { id, algo, key_bytes, send_id, recv_id, send_lifetime, accept_lifetime } ] }</code>.</p>
+<div style="break-before: page; page-break-before: always;"></div>
 <h1 id="native-mcp-server"><a class="header" href="#native-mcp-server">Native MCP Server</a></h1>
 <p>Model Context Protocol is built in. Ask Claude or any MCP-aware agent to inspect
 routes, diagnose adjacencies, or draft policy.</p>
@@ -11573,7 +12578,7 @@ the <code>router bgp tracing</code> config block — see
 <h2 id="ospf-logging"><a class="header" href="#ospf-logging">OSPF Logging</a></h2>
 <p>OSPF-related logs include protocol identification:</p>
 <p><strong>Common OSPF Log Messages:</strong></p>
-<h3 id="neighbor-state"><a class="header" href="#neighbor-state">Neighbor State</a></h3>
+<h3 id="neighbor-state-1"><a class="header" href="#neighbor-state-1">Neighbor State</a></h3>
 <pre><code class="language-json">{
   "message": "Neighbor 10.0.0.1 state change: Loading -&gt; Full",
   "proto": "ospf"

@@ -35,10 +35,10 @@
             const path_to_root = "";
             const default_light_theme = "light";
             const default_dark_theme = "navy";
-            window.path_to_searchindex_js = "searchindex-e8920642.js";
+            window.path_to_searchindex_js = "searchindex-c2dd9936.js";
         </script>
         <!-- Start loading toc.js asap -->
-        <script src="toc-d6f7580c.js"></script>
+        <script src="toc-ac7a9645.js"></script>
     </head>
     <body>
     <div id="mdbook-help-container">
@@ -235,6 +235,19 @@ replication if no replicator is available);</li>
 </ul>
 <p>The collapse is observable in the kernel FDB — an AR-LEAF shows one <code>dst</code>
 (the AR-IP); an RNVE shows one per remote VTEP.</p>
+<p>The AR role is also visible in the control plane: <code>show bgp evpn</code> prints a
+<strong><code>PMSI:</code></strong> line per Type-3 route decoding the PMSI Tunnel attribute — the
+tunnel type, the AR role carried in the <code>T</code> field, the RFC 9574 BM/U/L flags,
+and the endpoint + VNI:</p>
+<pre><code> *&gt;  [3]:[0]:[32]:[10.0.0.1]
+                    10.0.0.1                   0         32768 i
+                    Extended community: RT:65501:550 ET:8
+                    PMSI: assisted-replication(replicator) endpoint:10.0.0.254 vni:550
+</code></pre>
+<p>A Regular-IR route renders <code>PMSI: ingress-replication endpoint:&lt;VTEP&gt; vni:&lt;n&gt;</code>;
+an SR P2MP tree renders <code>PMSI: srv6-p2mp root:&lt;VTEP&gt; tree-id:&lt;n&gt;</code>. (The
+<strong>AR-IP</strong> appears on the PMSI <code>endpoint:</code> field, not the route’s next hop —
+the EVPN advertise path emits next-hop = VTEP.)</p>
 <h2 id="pruned-flood-lists"><a class="header" href="#pruned-flood-lists">Pruned-Flood-Lists</a></h2>
 <p>A node that does not want to receive a flood category can ask peers to
 prune it, by setting the <strong>BM</strong> (Broadcast/Multicast) and/or <strong>U</strong>

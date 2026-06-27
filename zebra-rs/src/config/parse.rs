@@ -1175,6 +1175,32 @@ mod tests {
         }
     }
 
+    /// Pin the `show l2` grammar: the bridge FDB (`neighbor`) and the
+    /// EVPN VNI-keyed MAC table (`mac table`) each parse to the path its
+    /// `ShowCallback` is registered under (`/show/l2/neighbor`,
+    /// `/show/l2/mac/table`). `mac table` was a registered handler with
+    /// no grammar node until the `mac` container was added — this guards
+    /// the wiring so it can't silently fall out again.
+    #[test]
+    fn show_l2_grammar() {
+        use crate::config::path_from_command;
+        let entry = exec_entry();
+
+        let cases: Vec<(&str, &str, Vec<&str>)> = vec![
+            ("show l2 neighbor", "/show/l2/neighbor", vec![]),
+            ("show l2 mac table", "/show/l2/mac/table", vec![]),
+        ];
+
+        for &(cmd, want_path, ref want_args) in &cases {
+            let (code, _comps, state) = parse(cmd, entry.clone(), None, State::new());
+            assert_eq!(code, ExecCode::Success, "parse `{cmd}`");
+            let (path, args) = path_from_command(&state.paths);
+            assert_eq!(path, want_path, "path for `{cmd}`");
+            let got: Vec<&str> = args.0.iter().map(|s| s.as_str()).collect();
+            assert_eq!(&got, want_args, "args for `{cmd}`");
+        }
+    }
+
     /// The BGP RIB views moved off the legacy `show ip bgp` tree onto
     /// `show bgp …`; the whole `show ip bgp` subtree is gone, so every
     /// old spelling must no longer parse and each `show bgp …` twin must.
