@@ -1,4 +1,4 @@
-use crate::config::api::{ClearTxResponse, DeployResponse, DisplayTxResponse};
+use crate::config::api::{ClearTxResponse, DeployResponse, DisplayTxRequest, DisplayTxResponse};
 
 use super::api::{CompletionResponse, ConfigOp, ExecuteResponse, Message};
 use super::bfd::{despawn_bfd, spawn_bfd};
@@ -998,18 +998,17 @@ impl ConfigManager {
                 // the task registries (`protocol_tasks` plus the per-VRF
                 // show channels), which no single daemon can see.
                 if req.paths.iter().any(|p| p.name == "task") {
-                    let output = self.show_task();
-                    let (task_tx, task_rx) = mpsc::unbounded_channel();
-                    let _ = req.resp.send(DisplayTxResponse {
-                        tx: task_tx,
-                        paths: None,
-                    });
-                    tokio::spawn(async move {
-                        let mut task_rx = task_rx;
-                        if let Some(display_req) = task_rx.recv().await {
-                            let _ = display_req.resp.send(output).await;
-                        }
-                    });
+                    reply_static_show(req, self.show_task(), self.show_task_json());
+                    return;
+                }
+                // `show version` is a build-time global owned by no
+                // protocol daemon; the per-proto `show_proto` routing would
+                // misfile it under `rib` (which has no handler), so the
+                // manager answers it directly — honoring `-j` via the
+                // second-phase `DisplayRequest.json`.
+                if req.paths.iter().any(|p| p.name == "version") {
+                    let v = crate::version::VersionInfo::current();
+                    reply_static_show(req, v.format_version(), v.format_json());
                     return;
                 }
                 // Generic per-VRF instance redirect: `show <proto> vrf
@@ -1105,7 +1104,10 @@ impl ConfigManager {
     /// Default-VRF tasks come from `protocol_tasks` (keyed by protocol);
     /// per-VRF tasks come from the `"<proto>:vrf:<name>"` keys that
     /// VRF-spawning daemons register via `SubscribeShowVrf`.
-    fn show_task(&self) -> String {
+    /// `(protocol, vrf)` rows for `show task`: one per spawned protocol
+    /// task plus one per registered `"<proto>:vrf:<name>"` show channel.
+    /// Shared by the text and JSON renderers.
+    fn task_rows(&self) -> Vec<(String, String)> {
         let mut rows: Vec<(String, String)> = self
             .protocol_tasks
             .borrow()
@@ -1119,11 +1121,24 @@ impl ConfigManager {
             }
         }
         rows.sort();
+        rows
+    }
+
+    fn show_task(&self) -> String {
         let mut buf = format!("{:<12}  {}\n", "Protocol", "VRF");
-        for (proto, vrf) in rows {
+        for (proto, vrf) in self.task_rows() {
             buf.push_str(&format!("{proto:<12}  {vrf}\n"));
         }
         buf
+    }
+
+    fn show_task_json(&self) -> String {
+        let tasks: Vec<_> = self
+            .task_rows()
+            .into_iter()
+            .map(|(protocol, vrf)| serde_json::json!({ "protocol": protocol, "vrf": vrf }))
+            .collect();
+        serde_json::to_string_pretty(&tasks).unwrap_or_else(|e| format!("{{\"error\": \"{e}\"}}"))
     }
 
     /// Apply a `vty service-account uid N` change to the in-memory
@@ -1182,6 +1197,23 @@ impl ConfigManager {
             );
         }
     }
+}
+
+/// Answer a manager-owned show command (`show task`, `show version`)
+/// with a static `(text, json)` pair, picking the rendering from the
+/// second-phase `DisplayRequest.json`. Mirrors the channel/spawn dance
+/// the `DisplayTx` handler uses for protocol daemons, but the payload is
+/// already computed so nothing is forwarded to a daemon.
+fn reply_static_show(req: DisplayTxRequest, text: String, json: String) {
+    let (tx, rx) = mpsc::unbounded_channel();
+    let _ = req.resp.send(DisplayTxResponse { tx, paths: None });
+    tokio::spawn(async move {
+        let mut rx = rx;
+        if let Some(display_req) = rx.recv().await {
+            let output = if display_req.json { json } else { text };
+            let _ = display_req.resp.send(output).await;
+        }
+    });
 }
 
 fn is_bgp(paths: &[CommandPath]) -> bool {

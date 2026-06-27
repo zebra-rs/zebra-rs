@@ -5396,10 +5396,15 @@ mod detail_tests {
 fn show_evpn_vni_all(
     _bgp: &Bgp,
     _args: Args,
-    _json: bool,
+    json: bool,
 ) -> std::result::Result<String, std::fmt::Error> {
-    let out = String::from("EVPN output here");
-    Ok(out)
+    // Placeholder: the EVPN VNI inventory isn't wired up here yet (the
+    // per-VNI MAC state lives in the RIB — see `show l2 mac table`).
+    // Honor `-j` with an empty array so the flag isn't a silent no-op.
+    if json {
+        return Ok("[]".to_string());
+    }
+    Ok(String::from("EVPN output here"))
 }
 
 fn show_bgp_rtcv4(
