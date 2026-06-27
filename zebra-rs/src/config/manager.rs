@@ -1217,9 +1217,23 @@ fn is_nd(paths: &[CommandPath]) -> bool {
 }
 
 fn is_policy(paths: &[CommandPath]) -> bool {
-    paths
-        .iter()
-        .any(|x| x.name == "prefix-set" || x.name == "community-set" || x.name == "policy")
+    // Every policy-object root the policy module registers a show
+    // handler for. Missing roots fall through to the `"rib"` fallback
+    // in `show_proto`, which has no handler for them — so the command
+    // silently returns empty (this dropped `as-path-set`, `key-chains`,
+    // and both extended/large community sets before being listed here).
+    paths.iter().any(|x| {
+        matches!(
+            x.name.as_str(),
+            "prefix-set"
+                | "community-set"
+                | "ext-community-set"
+                | "large-community-set"
+                | "as-path-set"
+                | "key-chains"
+                | "policy"
+        )
+    })
 }
 
 /// Map a show command to the protocol name used as its `show_clients`

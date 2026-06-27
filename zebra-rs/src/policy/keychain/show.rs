@@ -1,13 +1,63 @@
 use std::fmt::Write;
 
 use anyhow::{Context, Error};
+use serde::Serialize;
 
 use crate::config::Args;
 use crate::policy::Policy;
 
 use super::{CryptoAlgorithm, Lifetime, LifetimeEnd};
 
-pub fn key_chains(policy: &Policy, _args: Args, _json: bool) -> Result<String, Error> {
+#[derive(Serialize)]
+struct KeyJson {
+    id: u64,
+    algo: Option<String>,
+    /// Length of the raw key material in bytes (the secret itself is
+    /// never serialized).
+    key_bytes: usize,
+    send_id: Option<u8>,
+    recv_id: Option<u8>,
+    send_lifetime: String,
+    accept_lifetime: String,
+}
+
+#[derive(Serialize)]
+struct KeyChainJson {
+    name: String,
+    description: Option<String>,
+    keys: Vec<KeyJson>,
+}
+
+fn to_json(name: &str, kc: &super::KeyChain) -> KeyChainJson {
+    KeyChainJson {
+        name: name.to_string(),
+        description: kc.description.clone(),
+        keys: kc
+            .keys
+            .iter()
+            .map(|(id, key)| KeyJson {
+                id: *id,
+                algo: key.algo.map(|a| algo_name(a).to_string()),
+                key_bytes: key.key_material.len(),
+                send_id: key.send_id,
+                recv_id: key.recv_id,
+                send_lifetime: fmt_lifetime(&key.send_lifetime),
+                accept_lifetime: fmt_lifetime(&key.accept_lifetime),
+            })
+            .collect(),
+    }
+}
+
+pub fn key_chains(policy: &Policy, _args: Args, json: bool) -> Result<String, Error> {
+    if json {
+        let list: Vec<_> = policy
+            .key_chain_config
+            .config
+            .iter()
+            .map(|(name, kc)| to_json(name, kc))
+            .collect();
+        return Ok(serde_json::to_string_pretty(&list)?);
+    }
     let mut buf = String::new();
     for (name, kc) in policy.key_chain_config.config.iter() {
         write_chain(&mut buf, name, kc)?;
@@ -15,13 +65,16 @@ pub fn key_chains(policy: &Policy, _args: Args, _json: bool) -> Result<String, E
     Ok(buf)
 }
 
-pub fn key_chain_name(policy: &Policy, mut args: Args, _json: bool) -> Result<String, Error> {
+pub fn key_chain_name(policy: &Policy, mut args: Args, json: bool) -> Result<String, Error> {
     let name = args.string().context("missing key-chain name")?;
     let kc = policy
         .key_chain_config
         .config
         .get(&name)
         .context(format!("key-chain '{}' not found", name))?;
+    if json {
+        return Ok(serde_json::to_string_pretty(&to_json(&name, kc))?);
+    }
     let mut buf = String::new();
     write_chain(&mut buf, &name, kc)?;
     Ok(buf)

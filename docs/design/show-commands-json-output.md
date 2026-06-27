@@ -213,13 +213,22 @@ pending a finalized JSON schema.
 
 | Command | Description | JSON |
 |---|---|---|
-| `show policy` | Route policies | text only |
-| `show prefix-set [name <name>]` | Prefix sets | text only |
-| `show community-set [name <name>]` | Community sets | text only |
-| `show ext-community-set [name <name>]` | Extended-community sets | text only |
-| `show large-community-set [name <name>]` | Large-community sets | text only |
-| `show as-path-set [name <name>]` | AS-path sets | text only |
-| `show key-chains [name <name>]` | Key chains | text only |
+| `show policy` | Route policies | ✅ |
+| `show prefix-set [name <name>]` | Prefix sets | ✅ |
+| `show community-set [name <name>]` | Community sets | ✅ |
+| `show ext-community-set [name <name>]` | Extended-community sets | ✅ |
+| `show large-community-set [name <name>]` | Large-community sets | ✅ |
+| `show as-path-set [name <name>]` | AS-path sets | ✅ |
+| `show key-chains [name <name>]` | Key chains | ✅ |
+
+> Wiring fix shipped alongside the JSON: `show as-path-set`,
+> `show ext-community-set`, `show large-community-set`, and
+> `show key-chains` were unreachable before — `is_policy()` in the show
+> dispatcher didn't list them (so they fell through to the `rib`
+> channel), and the latter three plus `community-set name <name>` had no
+> grammar node in `exec.yang`. The dispatcher now recognizes every
+> policy-object root, and `exec.yang` defines all of them as containers
+> with a `name` selector.
 
 ---
 
@@ -235,7 +244,7 @@ pending a finalized JSON schema.
 | IPv6 ND | 2 | 2 | 0 |
 | BFD | 3 | 3 | 0 |
 | STAMP | 3 | 3 | 0 |
-| Policy objects | 7 | 0 | 7 |
+| Policy objects | 7 | 7 | 0 |
 
 (Counts exclude the `vrf <name>` redirect forms, which inherit their
 sibling's status. Some BGP "JSON" entries are ◐ placeholders that honor
@@ -254,8 +263,6 @@ JSON":
   `show bgp neighbor <addr> rtcv4`
 - **IS-IS:** `show isis` (root), `summary`, `egress-protection`,
   `fast-reroute …`, `flex-algo [route …]`
-- **Policy objects:** every `show … -set` / `show policy` /
-  `show key-chains` command
 
 ### Placeholder JSON (BGP ◐ — honors `-j`, emits empty array/object)
 
