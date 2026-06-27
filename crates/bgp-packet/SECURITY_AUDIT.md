@@ -9,11 +9,11 @@
 ## Summary
 
 This revision re-verifies the four findings from the previous audit against the
-current source. Two of them — both the High-severity panic paths — are now
-fully fixed and covered by regression tests. The two Medium-severity findings
-are partly addressed: the MP_REACH `nhop_len` case is fixed, but the
-trailing-garbage class and the EVPN substructure-length cases remain open. The
-residual encoder-side `u8` truncation issues are unchanged.
+current source. All four are now fully fixed and covered by regression tests:
+both High-severity panic paths, the Medium-severity trailing-garbage class, and
+the Medium-severity substructure-length cases (MP_REACH `nhop_len`, EVPN
+per-route `length`, and EVPN multicast `addr_len`). The only remaining items
+are the residual encoder-side `u8` truncation issues, which are unchanged.
 
 Status of the four previously reported issues:
 
@@ -21,10 +21,11 @@ Status of the four previously reported issues:
    `packet_utils::safe_split_at()` instead of a raw `split_at()`.
 2. **High — FIXED:** IPv4 and IPv6 NLRI parsers now reject overlong prefix
    lengths before computing the prefix byte size.
-3. **Medium — OPEN:** several length-bounded BGP subparsers still ignore inner
-   remainders and silently discard trailing garbage.
-4. **Medium — PARTIALLY FIXED:** MP_REACH now validates `nhop_len`; EVPN
-   per-route `length` and multicast `addr_len` are still not enforced.
+3. **Medium — FIXED:** the length-bounded BGP subparsers now enforce full
+   consumption of their bounded slice and reject trailing garbage.
+4. **Medium — FIXED:** MP_REACH validates `nhop_len`, and the EVPN parser now
+   bounds each route body to its declared `length` and validates the multicast
+   `addr_len`.
 
 The residual encoder-side `u8` truncation issues for oversized capabilities are
 unchanged. They are local packet-construction problems rather than
@@ -86,37 +87,47 @@ Regression tests: `parse_nlri_rejects_prefixlen_over_32` (IPv4),
 `parse_nlri_rejects_prefixlen_over_128` and
 `parse_ipv6net_rejects_prefixlen_over_128` (IPv6).
 
-### 3. Length-bounded payloads still accept trailing garbage — OPEN
+### 3. Length-bounded payloads accepted trailing garbage — FIXED
 
 - **Severity:** Medium
 - **Files:**
   - `src/attrs/cluster_list.rs`
-  - `src/caps/packet.rs`
   - `src/attrs/nlri_ipv4.rs`
+  - `src/caps/packet.rs`
+  - `src/open.rs`
 
-The outer parsers now bound their slice with `safe_split_at()`, but they still
-ignore the inner parser's remainder rather than rejecting a non-empty one:
+The outer parsers bounded their slice with `safe_split_at()` but then ignored
+the inner parser's remainder, so a non-empty leftover was silently discarded.
+Each bounded slice now enforces full consumption:
 
-- `ClusterList::parse_be()` (`cluster_list.rs:24`) uses
-  `many0_complete(be_u32)`, so a 5-byte payload is accepted as one cluster ID
-  plus one discarded byte.
-- `CapabilityPacket::parse_cap()` (`caps/packet.rs:66`) discards the inner
-  remainder: `let (_, cap) = CapabilityPacket::parse_be(cap, …)?;`.
-- `parse_bgp_nlri_ipv4()` (`nlri_ipv4.rs:45`) uses `many0_complete(...)` and
-  drops any trailing bytes after the last valid NLRI.
+- `ClusterList::parse_be()` (`cluster_list.rs:25`) rejects a payload whose
+  length is not a multiple of 4 up front
+  (`if !input.len().is_multiple_of(4)`), so a stray trailing octet can no longer
+  be swallowed by `many0_complete(be_u32)`.
+- `parse_bgp_nlri_ipv4()` (`nlri_ipv4.rs:38`) drains the bounded slice in an
+  explicit loop (`while !nlri.is_empty()`), so a malformed or truncated trailing
+  NLRI surfaces the real parse error from `Ipv4Nlri::parse_nlri()` instead of
+  being dropped by `many0_complete()`.
+- `CapabilityPacket::parse_cap()` (`caps/packet.rs:63`) now binds the inner
+  remainder and returns `Err(ErrorKind::LengthValue)` when it is non-empty,
+  rather than discarding it with `let (_, cap) = …`.
+- `OpenPacket::parse_packet()` and the `parse_caps()` helper (`open.rs:65,79`)
+  apply the same non-empty-remainder rejection to the OPEN optional-parameter
+  and capability-block slices.
 
-- **Impact:** Malformed wire data is normalized into a different in-memory
-  object and the dropped bytes vanish on re-emit, creating parser-differential
-  and canonicalization problems.
-- **Recommendation:** After parsing each bounded slice, reject any non-empty
-  remainder instead of discarding it.
+- **Impact (historical):** Malformed wire data was normalized into a different
+  in-memory object and the dropped bytes vanished on re-emit, creating
+  parser-differential and canonicalization problems.
+- **Regression tests:** `parse_cluster_list_rejects_non_multiple_of_four`
+  (`cluster_list.rs`), `parse_bgp_nlri_ipv4_rejects_trailing_garbage` and
+  `parse_bgp_nlri_ipv4_consumes_whole_block` (`nlri_ipv4.rs`).
 
-### 4. Substructure length fields not enforced — PARTIALLY FIXED
+### 4. Substructure length fields not enforced — FIXED
 
 - **Severity:** Medium
 - **Files:**
-  - `src/attrs/mp_reach.rs` (fixed)
-  - `src/attrs/nlri_evpn.rs` (open)
+  - `src/attrs/mp_reach.rs`
+  - `src/attrs/nlri_evpn.rs`
 
 **Fixed — MP_REACH `nhop_len`.** `parse_nlri_opt()` now matches on
 `header.nhop_len` for every AFI/SAFI and rejects unexpected lengths instead of
@@ -124,20 +135,22 @@ assuming a fixed nexthop width. VPNv4 accepts only 12/24/48 (`mp_reach.rs:200`),
 VPNv6 only 24/48 (`mp_reach.rs:254`), and any other value returns
 `Err(ErrorKind::LengthValue)`.
 
-**Open — EVPN per-route `length`.** `EvpnRoute::parse_nlri()`
-(`nlri_evpn.rs:752`) reads the per-route `length` octet but only uses it for the
-`IpPrefix` family-width selection (`nlri_evpn.rs:853`). The other route types
-(EthernetAd, EthernetSr, MacIpAdvRoute, IncMulticast) decode their fields
-without splitting the payload to `length` first. There is no
-`safe_split_at()`/`split_at()` anywhere in the file.
+**Fixed — EVPN per-route `length`.** `EvpnRoute::parse_nlri()`
+(`nlri_evpn.rs:748`) now bounds the route body to its declared `length` octet
+with `packet_utils::safe_split_at()` (`nlri_evpn.rs:758`) before dispatching on
+the route type, so no field can read past the NLRI into the next one. After the
+per-type parse it rejects any non-empty remainder inside the bounded body
+(`nlri_evpn.rs:1057`) with `Err(ErrorKind::LengthValue)`, so a field shorter
+than the declared length — or a padded length — fails the parse instead of
+silently dropping the extra octets.
 
-**Open — EVPN multicast `addr_len`.** `nlri_evpn.rs:828` treats any `addr_len`
-other than `32` as a 16-byte IPv6 address (`else { take(16) }`) without
-validating that the value is `128`.
+**Fixed — EVPN multicast `addr_len`.** The Inclusive Multicast (Type-3) arm
+now matches `addr_len` against `32` (IPv4) and `128` (IPv6) explicitly
+(`nlri_evpn.rs:834`); any other value returns `Err(ErrorKind::LengthValue)`
+rather than being read as a 16-octet IPv6 address.
 
-- **Recommendation:** Bound each EVPN route body to its declared `length`,
-  parse within that slice, reject a non-empty remainder, and validate
-  `addr_len` against the expected `32`/`128` before decoding.
+Regression tests: `inclusive_multicast_rejects_bad_addr_len` and
+`parse_nlri_rejects_trailing_body_bytes` (`nlri_evpn.rs`).
 
 ## Residual Hardening Issues — unchanged
 
@@ -172,21 +185,16 @@ Recommended follow-up:
 2. ~~Add explicit IPv4/IPv6 prefix-length validation before `nlri_psize()`.~~
    Fixed.
 
-### Priority 2 — partially open
+### Priority 2 — DONE
 
-3. Enforce full consumption for all length-bounded attribute, capability, and
-   NLRI slices (Finding 3).
-4. Enforce the EVPN per-route `length` and multicast `addr_len` (the remaining
-   half of Finding 4). MP_REACH `nhop_len` is done.
+3. ~~Enforce full consumption for all length-bounded attribute, capability, and
+   NLRI slices (Finding 3).~~ Fixed.
+4. ~~Enforce the EVPN per-route `length` and multicast `addr_len` (the remaining
+   half of Finding 4).~~ Fixed. MP_REACH `nhop_len` was already done.
 
 ### Priority 3 — open
 
 5. Convert remaining encoder-side `u8` length arithmetic to checked arithmetic.
-6. Add malformed-length regression tests for the still-open cases:
-   - attribute/capability/NLRI payloads with valid prefixes plus trailing
-     garbage
-   - EVPN substructures with inconsistent embedded lengths and non-`32`/`128`
-     `addr_len`
 
 ## Verification
 

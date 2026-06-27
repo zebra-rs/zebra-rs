@@ -62,7 +62,10 @@ impl OpenPacket {
             return Err(nom::Err::Error(make_error(input, ErrorKind::LengthValue)));
         }
         let (input, opts) = packet_utils::safe_split_at(input, len as usize)?;
-        let (_, caps) = many0_complete(parse_caps).parse(opts)?;
+        let (remaining, caps) = many0_complete(parse_caps).parse(opts)?;
+        if !remaining.is_empty() {
+            return Err(nom::Err::Error(make_error(input, ErrorKind::LengthValue)));
+        }
         let bgp_cap = BgpCap::from(caps);
         packet.bgp_cap = bgp_cap;
         Ok((input, packet))
@@ -73,7 +76,10 @@ fn parse_caps(input: &[u8]) -> IResult<&[u8], Vec<CapabilityPacket>> {
     let (input, header) = CapabilityHeader::parse_be(input)?;
     let len = header.length as usize;
     let (input, opts) = packet_utils::safe_split_at(input, len)?;
-    let (_, caps) = many0_complete(CapabilityPacket::parse_cap).parse(opts)?;
+    let (remaining, caps) = many0_complete(CapabilityPacket::parse_cap).parse(opts)?;
+    if !remaining.is_empty() {
+        return Err(nom::Err::Error(make_error(input, ErrorKind::LengthValue)));
+    }
     Ok((input, caps))
 }
 

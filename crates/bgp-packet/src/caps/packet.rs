@@ -2,6 +2,7 @@ use std::fmt;
 
 use bytes::BytesMut;
 use nom::IResult;
+use nom::error::{ErrorKind, make_error};
 use nom_derive::*;
 
 use super::*;
@@ -63,7 +64,10 @@ impl CapabilityPacket {
         let (input, cap_header) = CapabilityHeader::parse_be(input)?;
         let len = cap_header.length as usize;
         let (input, cap) = packet_utils::safe_split_at(input, len)?;
-        let (_, cap) = CapabilityPacket::parse_be(cap, cap_header.code.into())?;
+        let (remaining, cap) = CapabilityPacket::parse_be(cap, cap_header.code.into())?;
+        if !remaining.is_empty() {
+            return Err(nom::Err::Error(make_error(input, ErrorKind::LengthValue)));
+        }
         Ok((input, cap))
     }
 
