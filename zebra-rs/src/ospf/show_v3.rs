@@ -1599,29 +1599,67 @@ fn show_ospfv3_spf(top: &Ospf<Ospfv3>, _args: Args, json: bool) -> Result<String
 /// tree (the routers reachable under that algorithm's constraints).
 /// v3 sibling of v2's `show_ospf_flex_algo`. Per-algo v6 routes land
 /// with the v6 RIB slice.
+#[derive(Serialize)]
+struct Ospfv3FlexAlgoSpfNodeJson {
+    router_id: String,
+    cost: u32,
+    /// Resolved router-ids of the first-hop links to this node; empty
+    /// for the source vertex itself.
+    via: Vec<String>,
+}
+
+#[derive(Serialize)]
+struct Ospfv3FlexAlgoRouteJson {
+    prefix: String,
+    metric: u32,
+    /// Resolved absolute MPLS label for the per-algo Prefix-SID, when
+    /// derivable (mirror of v2's `FlexAlgoRouteJson::label`).
+    label: Option<u32>,
+    nexthops: Vec<String>,
+}
+
+#[derive(Serialize)]
+struct Ospfv3FlexAlgoJson {
+    algorithm: u8,
+    metric_type: String,
+    priority: u8,
+    advertise_definition: bool,
+    include_any: Vec<String>,
+    include_all: Vec<String>,
+    exclude_any: Vec<String>,
+    srlg_exclude: Vec<String>,
+    /// `computed` | `no-source-vertex` | `not-computed`.
+    spf_status: String,
+    spf_nodes: Vec<Ospfv3FlexAlgoSpfNodeJson>,
+    routes: Vec<Ospfv3FlexAlgoRouteJson>,
+}
+
 fn show_ospfv3_flex_algo(
     top: &Ospf<Ospfv3>,
     _args: Args,
-    _json: bool,
+    json: bool,
 ) -> Result<String, std::fmt::Error> {
     use crate::flex_algo::FadMetricType;
 
+    let metric_name = |m: FadMetricType| match m {
+        FadMetricType::Igp => "igp",
+        FadMetricType::MinUnidirLinkDelay => "min-unidir-link-delay",
+        FadMetricType::TeDefault => "te-default",
+    };
+    let names =
+        |s: &std::collections::BTreeSet<String>| s.iter().cloned().collect::<Vec<_>>().join(" ");
+    let set_vec = |s: &std::collections::BTreeSet<String>| s.iter().cloned().collect::<Vec<_>>();
+
+    let mut algos: Vec<Ospfv3FlexAlgoJson> = Vec::new();
     let mut buf = String::new();
     if top.flex_algo.config.is_empty() {
         writeln!(buf, "No Flexible Algorithms configured")?;
-        return Ok(buf);
+        return render_or(json, &algos, buf);
     }
-
-    let names =
-        |s: &std::collections::BTreeSet<String>| s.iter().cloned().collect::<Vec<_>>().join(" ");
 
     for (algo, entry) in &top.flex_algo.config {
         writeln!(buf, "Flex-Algorithm {algo}")?;
-        let metric = match entry.metric_type.unwrap_or(FadMetricType::Igp) {
-            FadMetricType::Igp => "igp",
-            FadMetricType::MinUnidirLinkDelay => "min-unidir-link-delay",
-            FadMetricType::TeDefault => "te-default",
-        };
+        let metric = metric_name(entry.metric_type.unwrap_or(FadMetricType::Igp));
         writeln!(buf, "  Metric-Type: {metric}")?;
         writeln!(buf, "  Priority: {}", entry.priority.unwrap_or(128))?;
         writeln!(
@@ -1642,34 +1680,48 @@ fn show_ospfv3_flex_algo(
             writeln!(buf, "  SRLG Exclude: {}", names(&entry.srlg_exclude))?;
         }
 
-        match top.spf_flex_algo.get(algo) {
+        let (spf_status, spf_nodes) = match top.spf_flex_algo.get(algo) {
             Some(Some(spf_res)) => {
                 writeln!(buf, "  SPF: {} reachable node(s)", spf_res.len())?;
+                let mut nodes = Vec::new();
                 for (id, path) in spf_res {
                     let router_id = top
                         .lsp_map
                         .resolve(*id)
                         .map_or_else(|| String::from("?"), |r| r.to_string());
-                    let vias: Vec<String> = path
+                    let via: Vec<String> = path
                         .first_hop_links
                         .iter()
                         .filter_map(|(vid, _)| top.lsp_map.resolve(*vid).map(|r| r.to_string()))
                         .collect();
-                    let via = if vias.is_empty() {
+                    let via_disp = if via.is_empty() {
                         "(self)".to_string()
                     } else {
-                        vias.join(", ")
+                        via.join(", ")
                     };
-                    writeln!(buf, "    {router_id} cost {} via {via}", path.cost)?;
+                    writeln!(buf, "    {router_id} cost {} via {via_disp}", path.cost)?;
+                    nodes.push(Ospfv3FlexAlgoSpfNodeJson {
+                        router_id,
+                        cost: path.cost,
+                        via,
+                    });
                 }
+                ("computed", nodes)
             }
-            Some(None) => writeln!(buf, "  SPF: no source vertex in per-algo topology")?,
-            None => writeln!(buf, "  SPF: not yet computed")?,
-        }
+            Some(None) => {
+                writeln!(buf, "  SPF: no source vertex in per-algo topology")?;
+                ("no-source-vertex", Vec::new())
+            }
+            None => {
+                writeln!(buf, "  SPF: not yet computed")?;
+                ("not-computed", Vec::new())
+            }
+        };
 
         // Per-algo v6 RIB: prefixes forwardable under this algo (those
         // carrying a per-algo Prefix-SID), with the resolved MPLS label
         // and the per-algo nexthops.
+        let mut routes = Vec::new();
         if let Some(rib) = top.rib6_flex_algo.get(algo) {
             if rib.iter().next().is_none() {
                 writeln!(buf, "  Routes: none (no per-algo Prefix-SIDs reachable)")?;
@@ -1691,12 +1743,32 @@ fn show_ospfv3_flex_algo(
                         "    {prefix}  metric {}  label {label}  via {nh}",
                         route.metric
                     )?;
+                    routes.push(Ospfv3FlexAlgoRouteJson {
+                        prefix: prefix.to_string(),
+                        metric: route.metric,
+                        label: route.sid,
+                        nexthops: route.nhops.keys().map(|a| a.to_string()).collect(),
+                    });
                 }
             }
         }
         writeln!(buf)?;
+
+        algos.push(Ospfv3FlexAlgoJson {
+            algorithm: *algo,
+            metric_type: metric_name(entry.metric_type.unwrap_or(FadMetricType::Igp)).to_string(),
+            priority: entry.priority.unwrap_or(128),
+            advertise_definition: entry.advertise_definition.unwrap_or(false),
+            include_any: set_vec(&entry.include_any),
+            include_all: set_vec(&entry.include_all),
+            exclude_any: set_vec(&entry.exclude_any),
+            srlg_exclude: set_vec(&entry.srlg_exclude),
+            spf_status: spf_status.to_string(),
+            spf_nodes,
+            routes,
+        });
     }
-    Ok(buf)
+    render_or(json, &algos, buf)
 }
 
 // ---- show ospfv3 graph ---------------------------------------

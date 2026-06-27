@@ -156,7 +156,7 @@ pending a finalized JSON schema.
 | `show ospfv3 repair-list [detail]` | TI-LFA repair-list | ✅ |
 | `show ospfv3 segment-routing` | SR state | ✅ |
 | `show ospfv3 srv6` | SRv6 state (locator, End/End.X SIDs) | ✅ |
-| `show ospfv3 flex-algo` | Flexible Algorithm (RFC 9350) state | text only |
+| `show ospfv3 flex-algo` | Flexible Algorithm (RFC 9350) state | ✅ |
 | `show ospfv3 vrf <name> …` | Per-VRF (redirected; mirrors above) | per sibling |
 
 ## IS-IS (`zebra-rs/src/isis/show.rs`)
@@ -230,7 +230,7 @@ pending a finalized JSON schema.
 | RIB / forwarding / config | 22 | 19 | 3 |
 | BGP | 25 | 20 | 5 |
 | OSPFv2 | 13 | 13 | 0 |
-| OSPFv3 | 12 | 11 | 1 |
+| OSPFv3 | 12 | 12 | 0 |
 | IS-IS | 21 | 14 | 7 |
 | IPv6 ND | 2 | 2 | 0 |
 | BFD | 3 | 3 | 0 |
@@ -252,7 +252,6 @@ JSON":
 - **BGP:** `show bgp <afi> <prefix> longer-prefix`,
   `show bgp evpn ethernet-segment`, `show bgp attributes`,
   `show bgp neighbor <addr> rtcv4`
-- **OSPFv3:** `show ospfv3 flex-algo`
 - **IS-IS:** `show isis` (root), `summary`, `egress-protection`,
   `fast-reroute …`, `flex-algo [route …]`
 - **Policy objects:** every `show … -set` / `show policy` /
