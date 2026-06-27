@@ -1555,6 +1555,37 @@ mod yang_load_tests {
         }
     }
 
+    /// Regression guard for the per-neighbor `attach-unknown-attribute`
+    /// debug knob (zebra-bgp-unknown-attr.yang). The string-valued leaf —
+    /// whose `<type>:<flags>:<value-hex>` value contains colons — must
+    /// parse as a settable path on the neighbor (the `set` subtree is what
+    /// `parse()` resolves here; the `delete` subtree, like every other
+    /// per-neighbor leaf, is exercised by the runtime diff engine, not by
+    /// this harness). Pins the augment + leaf so a broken schema is caught
+    /// in the unit suite, not only in the `@bgp_unknown_attr_transitive` BDD.
+    #[test]
+    fn bgp_neighbor_attach_unknown_attribute_paths_parse() {
+        use crate::config::ExecCode;
+        use crate::config::parse::{State, parse};
+        use libyang::to_entry;
+
+        let mut yang = YangStore::new();
+        yang.add_path(concat!(env!("CARGO_MANIFEST_DIR"), "/yang"));
+        yang.read_with_resolve("configure")
+            .unwrap_or_else(|e| panic!("configure failed to load: {e:#}"));
+        yang.identity_resolve();
+        let module = yang.find_module("configure").unwrap();
+        let entry = to_entry(&yang, module);
+
+        let cmd = "set router bgp neighbor 192.168.0.2 attach-unknown-attribute 250:192:deadbeef";
+        let (code, _comps, _state) = parse(cmd, entry.clone(), None, State::new());
+        assert_eq!(
+            code,
+            ExecCode::Success,
+            "should parse as a settable path: {cmd}"
+        );
+    }
+
     /// Regression guard for the per-VRF MUP `segment` list
     /// (zebra-bgp-vrf.yang). `mup-ext-comm` moved from a sibling leaf of
     /// `segment` to a child leaf of the `segment direct` list entry, so the

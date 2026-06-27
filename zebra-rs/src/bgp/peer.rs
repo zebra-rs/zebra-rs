@@ -141,6 +141,12 @@ pub enum Event {
     NotifMsg(ConnId, NotificationPacket), // 25
     KeepAliveMsg(ConnId),                 // 26
     UpdateMsg(UpdatePacket),              // 27
+    /// A received UPDATE failed validation with an error that RFC 4271
+    /// §6.3 maps to a NOTIFICATION + session reset (today: an
+    /// unrecognized well-known attribute). Carries the NOTIFICATION code,
+    /// subcode, and Data field. The reader emits it before the
+    /// connection drops; the FSM sends the NOTIFICATION and goes Idle.
+    UpdateError(NotifyCode, u8, Vec<u8>),
     // RFC 2918 Route Refresh receive. Carries the AFI/SAFI from the
     // wire (raw u16/u8) so unknown-AF refreshes still dispatch
     // through the FSM rather than tearing the session down.
@@ -531,6 +537,13 @@ pub struct PeerConfig {
     /// the session under the router's global AS; `Some` presents the
     /// substitute AS to this neighbor (see [`LocalAs`]).
     pub local_as: Option<LocalAs>,
+    /// Debug/test knob (zebra-bgp-unknown-attr.yang): attach a synthetic
+    /// unrecognized path attribute to every IPv4-unicast route advertised
+    /// to this neighbor. Lets a test originate an unknown attribute with a
+    /// chosen Type Code and Attribute Flags so the receiver's RFC 4271 §9
+    /// handling (transitive-retain + Partial / non-transitive-drop /
+    /// well-known NOTIFICATION) can be exercised end to end. `None` = off.
+    pub attach_unknown_attr: Option<UnknownAttr>,
 }
 
 impl Default for PeerConfig {
@@ -560,6 +573,7 @@ impl Default for PeerConfig {
             remove_private_as: None,
             enforce_first_as: false,
             local_as: None,
+            attach_unknown_attr: None,
         }
     }
 }
@@ -1324,6 +1338,7 @@ impl Peer {
             packet_tx: self.packet_tx.clone(),
             egress_depth: self.egress_depth.clone(),
             extended_message: self.opt.extended_message,
+            attach_unknown_attr: self.config.attach_unknown_attr.clone(),
         }
     }
 
@@ -1571,6 +1586,10 @@ pub fn fsm_next_state(peer: &mut Peer, event: Event) -> (State, FsmEffect) {
             timer::refresh_hold_timer(peer);
             (State::Established, FsmEffect::RouteUpdate(packet))
         }
+        Event::UpdateError(code, sub_code, data) => (
+            fsm_update_error(peer, code, sub_code, data),
+            FsmEffect::None,
+        ),
         Event::RouteRefreshMsg(afi, safi) => {
             peer.counter[BgpType::RouteRefresh as usize].rcvd += 1;
             timer::refresh_hold_timer(peer);
@@ -2129,6 +2148,16 @@ pub fn fsm_holdtimer_expires(peer: &mut Peer) -> State {
     State::Idle
 }
 
+/// RFC 4271 §6.3: a fatal UPDATE error (today, an unrecognized
+/// well-known attribute) resets the session with a NOTIFICATION. Mirrors
+/// [`fsm_holdtimer_expires`]: queue the NOTIFICATION on the writer, then
+/// go Idle so the Established→Idle teardown drains it onto the wire (the
+/// writer is detached, not aborted) and cleans the Adj-RIBs.
+pub fn fsm_update_error(peer: &mut Peer, code: NotifyCode, sub_code: u8, data: Vec<u8>) -> State {
+    peer_send_notification(peer, code, sub_code, data);
+    State::Idle
+}
+
 pub fn fsm_idle_hold_timer_expires(peer: &mut Peer) -> State {
     peer.timer.idle_hold_timer = None;
     peer.task.connect = Some(peer_start_connection(peer));
@@ -2268,7 +2297,26 @@ pub async fn peer_packet_parse(
             }
             Ok(())
         }
-        Err(e) => Err(e.to_string()),
+        Err(e) => {
+            // RFC 4271 §6.3: an unrecognized well-known attribute must be
+            // answered with a NOTIFICATION (Update Message Error, subcode
+            // 2) before the session drops. The reader has no `&mut Peer`,
+            // so hand the FSM the code/subcode/Data via an event; the
+            // subsequent ConnFail is a no-op once the FSM has gone Idle.
+            if let BgpParseError::UnrecognizedWellknownAttribute { attr, .. } = &e {
+                let _ = tx
+                    .send(Message::Event(
+                        ident,
+                        Event::UpdateError(
+                            NotifyCode::UpdateMsgError,
+                            UpdateError::UnrecognizedWellknownAttribute.into(),
+                            attr.clone(),
+                        ),
+                    ))
+                    .await;
+            }
+            Err(e.to_string())
+        }
     }
 }
 

@@ -27,7 +27,7 @@ use std::time::Instant;
 
 use bgp_packet::{
     Afi, AfiSafi, BgpAttr, BgpNexthop, CapExtendedNextHop, Ipv4MpReachNextHop, Ipv4Nlri, Ipv6Nlri,
-    MpReachAttr, Safi, UpdatePacket,
+    MpReachAttr, Safi, UnknownAttr, UpdatePacket,
 };
 use tokio::sync::mpsc;
 
@@ -40,7 +40,7 @@ use crate::context::Timer;
 
 /// Bumped whenever a new field is added to `UpdateGroupSig`. Surfaced
 /// in `show bgp update-group` so a stale view is detectable.
-pub const SIGNATURE_VERSION: u32 = 4;
+pub const SIGNATURE_VERSION: u32 = 5;
 
 /// Address families the grouping logic considers — every family whose
 /// advertise pipeline consults `peer.update_group_id`. IPv6 unicast
@@ -163,6 +163,12 @@ pub struct UpdateGroupSig {
     /// design note's Model B). The `generation` makes a script hot-reload
     /// bump the signature → regroup + re-encode.
     pub egress_script: Option<EgressScriptKey>,
+    /// Debug/test knob: a synthetic unrecognized attribute attached on
+    /// egress (zebra-bgp-unknown-attr.yang). It changes the encoded
+    /// UPDATE bytes for this peer, so two peers attaching different
+    /// attributes (or only one attaching) must not share canonical
+    /// bytes — fold it into the key. `None` when off (the common case).
+    pub attach_unknown_attr: Option<UnknownAttr>,
     pub signature_version: u32,
 }
 
@@ -396,6 +402,10 @@ pub fn signature_of(peer: &Peer, afi: Afi, safi: Safi) -> Option<UpdateGroupSig>
         // the field is forward-compatible for the day it lands.
         multiple_labels: false,
         egress_script: egress_script_key(peer, afi, safi),
+        // The egress attach knob (debug/test) stamps an extra attribute
+        // onto every advertised route, so peers with different attach
+        // specs encode different bytes and must shard the group.
+        attach_unknown_attr: peer.config.attach_unknown_attr.clone(),
         signature_version: SIGNATURE_VERSION,
     })
 }
@@ -1368,6 +1378,7 @@ mod tests {
             extended_next_hop: false,
             multiple_labels: false,
             egress_script: None,
+            attach_unknown_attr: None,
             signature_version: SIGNATURE_VERSION,
         }
     }
@@ -1505,6 +1516,16 @@ mod tests {
         let mut a = base.clone();
         a.multiple_labels = true;
         assert_ne!(base, a);
+
+        // The egress attach knob (debug/test) appends an attribute to the
+        // encoded UPDATE, so two peers attaching different attributes —
+        // or only one attaching — must shard the group.
+        let mut a = base.clone();
+        a.attach_unknown_attr = Some(UnknownAttr::new(0xC0, 250, vec![0xde, 0xad]));
+        assert_ne!(base, a);
+        let mut b = a.clone();
+        b.attach_unknown_attr = Some(UnknownAttr::new(0xC0, 251, vec![0xde, 0xad]));
+        assert_ne!(a, b);
     }
 
     #[test]

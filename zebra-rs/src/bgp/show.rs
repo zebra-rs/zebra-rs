@@ -501,6 +501,40 @@ struct BgpRouteJson {
     as_path: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     origin: Option<String>,
+    /// Unrecognized optional transitive path attributes (RFC 4271 §9)
+    /// carried verbatim on this route. Empty for routes without any.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    unknown_attributes: Vec<UnknownAttrJson>,
+}
+
+/// One unrecognized path attribute (RFC 4271 §9) as rendered for
+/// `show bgp -j`. The boolean flags decode the Attribute Flags octet so
+/// tests/operators can see the Optional / Transitive / Partial state
+/// directly; `value` is the attribute Value bytes in lowercase hex.
+#[derive(Serialize)]
+struct UnknownAttrJson {
+    type_code: u8,
+    flags: u8,
+    optional: bool,
+    transitive: bool,
+    partial: bool,
+    value: String,
+}
+
+/// Render the unrecognized optional transitive attributes retained on a
+/// route into their JSON rows.
+fn show_unknown_attrs(attr: &BgpAttr) -> Vec<UnknownAttrJson> {
+    attr.unknown
+        .iter()
+        .map(|u| UnknownAttrJson {
+            type_code: u.type_code,
+            flags: u.flags,
+            optional: u.is_optional(),
+            transitive: u.is_transitive(),
+            partial: u.is_partial(),
+            value: u.value.iter().map(|b| format!("{b:02x}")).collect(),
+        })
+        .collect()
 }
 
 /// Convert one Loc-RIB entry to its `BgpRouteJson` row. Shared by the
@@ -525,6 +559,7 @@ fn bgp_route_json(prefix: String, rib: &BgpRib) -> BgpRouteJson {
         weight: rib.weight,
         as_path: (!aspath_str.is_empty()).then_some(aspath_str),
         origin: (!origin_str.is_empty()).then_some(origin_str),
+        unknown_attributes: show_unknown_attrs(&rib.attr),
     }
 }
 
@@ -793,6 +828,7 @@ where
                     } else {
                         Some(origin_str)
                     },
+                    unknown_attributes: show_unknown_attrs(&rib.attr),
                 });
             }
         }
@@ -1949,6 +1985,7 @@ pub(super) fn show_adj_rib_routes<P: std::fmt::Display>(
                     } else {
                         Some(origin_str)
                     },
+                    unknown_attributes: show_unknown_attrs(&rib.attr),
                 });
             }
         }

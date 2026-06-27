@@ -359,7 +359,36 @@ pub fn parse_bgp_update_attribute(
     while !remaining.is_empty() {
         // Parse the framing first so a Value-parse error stays recoverable:
         // `new_remaining` already points at the next attribute.
-        let (new_remaining, attr_type, _flags, attr_payload) = Attr::parse_attr_header(remaining)?;
+        let (new_remaining, attr_type, flags, attr_payload) = Attr::parse_attr_header(remaining)?;
+
+        // Unrecognized attribute Type Code — classify by the Attribute
+        // Flags octet per RFC 4271 §6.3 / §9 (and RFC 7606):
+        //   * Optional bit clear  → unrecognized WELL-KNOWN attribute:
+        //     reset the session with a NOTIFICATION (subcode 2).
+        //   * Optional + Transitive → retain, set the Partial bit, and
+        //     re-advertise to other peers.
+        //   * Optional, non-Transitive → quietly ignore (not propagated).
+        if let AttrType::Unknown(type_code) = attr_type {
+            if !flags.contains(AttributeFlags::OPTIONAL) {
+                // Capture the full attribute TLV (flags..value) for the
+                // NOTIFICATION Data field; `new_remaining` is positioned
+                // just past this attribute.
+                let consumed = remaining.len() - new_remaining.len();
+                return Err(BgpParseError::UnrecognizedWellknownAttribute {
+                    type_code,
+                    attr: remaining[..consumed].to_vec(),
+                });
+            }
+            if flags.contains(AttributeFlags::TRANSITIVE) {
+                let mut unknown = UnknownAttr::new(flags.bits(), type_code, attr_payload.to_vec());
+                unknown.set_partial();
+                bgp_attr.unknown.push(unknown);
+            }
+            // Optional non-transitive: drop silently.
+            remaining = new_remaining;
+            continue;
+        }
+
         let attr = match Attr::parse_attr_value(attr_type, attr_payload, as4, &opt) {
             Ok(attr) => attr,
             Err(e) => {
@@ -598,5 +627,111 @@ mod tests {
             }
             other => panic!("Flowspec MP_REACH must surface as mp_update, got {other:?}"),
         }
+    }
+
+    // ---- RFC 4271 §9 unrecognized attribute handling -----------------
+
+    use crate::{AttributeFlags, UnknownAttr};
+    use bytes::BytesMut;
+
+    /// ORIGIN = IGP, used as a sentinel so we can prove the well-known
+    /// attributes survive whatever the unknown attribute does.
+    const ORIGIN_IGP: [u8; 4] = [0x40, 0x01, 0x01, 0x00];
+
+    /// Unrecognized OPTIONAL TRANSITIVE attribute → accepted, the Partial
+    /// bit is set, and it is retained for propagation (RFC 4271 §9). A
+    /// re-emit reproduces the attribute with Partial set.
+    #[test]
+    fn unknown_optional_transitive_is_retained_with_partial() {
+        let mut block = ORIGIN_IGP.to_vec();
+        // flags 0xC0 = OPTIONAL|TRANSITIVE, type 250, len 2, value DE AD
+        block.extend_from_slice(&[0xC0, 0xFA, 0x02, 0xDE, 0xAD]);
+        let len = block.len() as u16;
+
+        let (_, bgp_attr, _mp_u, _mp_w, taw) =
+            parse_bgp_update_attribute(&block, len, false, None).expect("must parse");
+        assert!(!taw, "unknown transitive must not treat-as-withdraw");
+        let bgp_attr = bgp_attr.expect("attrs parsed");
+        assert!(bgp_attr.origin.is_some(), "ORIGIN must survive");
+        assert_eq!(bgp_attr.unknown.len(), 1, "transitive unknown retained");
+
+        let u = &bgp_attr.unknown[0];
+        assert_eq!(u.type_code, 250);
+        assert_eq!(u.value, vec![0xDE, 0xAD]);
+        assert!(u.is_optional() && u.is_transitive());
+        assert!(u.is_partial(), "Partial bit must be set on receive (§9)");
+
+        // Re-emit just the unknown attribute and confirm the Partial bit
+        // is on the wire (0xE0 = OPTIONAL|TRANSITIVE|PARTIAL).
+        let mut buf = BytesMut::new();
+        u.attr_emit(&mut buf);
+        assert_eq!(&buf[..], &[0xE0, 0xFA, 0x02, 0xDE, 0xAD]);
+    }
+
+    /// Unrecognized OPTIONAL NON-TRANSITIVE attribute → quietly ignored,
+    /// never stored, never propagated (RFC 4271 §9).
+    #[test]
+    fn unknown_optional_nontransitive_is_dropped() {
+        let mut block = ORIGIN_IGP.to_vec();
+        // flags 0x80 = OPTIONAL only, type 251, len 1, value 07
+        block.extend_from_slice(&[0x80, 0xFB, 0x01, 0x07]);
+        let len = block.len() as u16;
+
+        let (_, bgp_attr, _mp_u, _mp_w, taw) =
+            parse_bgp_update_attribute(&block, len, false, None).expect("must parse");
+        assert!(!taw);
+        let bgp_attr = bgp_attr.expect("attrs parsed");
+        assert!(bgp_attr.origin.is_some(), "ORIGIN must survive");
+        assert!(
+            bgp_attr.unknown.is_empty(),
+            "non-transitive unknown must be dropped"
+        );
+    }
+
+    /// Unrecognized WELL-KNOWN attribute (Optional bit clear) → session
+    /// reset error carrying the offending attribute (RFC 4271 §6.3).
+    #[test]
+    fn unrecognized_wellknown_attribute_is_an_error() {
+        let mut block = ORIGIN_IGP.to_vec();
+        // flags 0x40 = TRANSITIVE, Optional CLEAR → well-known. type 252.
+        block.extend_from_slice(&[0x40, 0xFC, 0x01, 0x09]);
+        let len = block.len() as u16;
+
+        let err = parse_bgp_update_attribute(&block, len, false, None)
+            .expect_err("unrecognized well-known attribute must error");
+        match err {
+            BgpParseError::UnrecognizedWellknownAttribute { type_code, attr } => {
+                assert_eq!(type_code, 252);
+                // Full TLV: flags, type, length, value.
+                assert_eq!(attr, vec![0x40, 0xFC, 0x01, 0x09]);
+            }
+            other => panic!("expected UnrecognizedWellknownAttribute, got {other:?}"),
+        }
+    }
+
+    /// A whole-`BgpAttr` round-trip: an unknown transitive attribute set
+    /// on `BgpAttr` is emitted by `attr_emit` and parses back identically
+    /// (Partial already set), proving propagation is bit-faithful.
+    #[test]
+    fn bgp_attr_roundtrips_unknown_transitive() {
+        let mut attr = crate::BgpAttr::new();
+        let mut u = UnknownAttr::new(
+            (AttributeFlags::OPTIONAL | AttributeFlags::TRANSITIVE).bits(),
+            240,
+            vec![1, 2, 3, 4],
+        );
+        u.set_partial();
+        attr.unknown.push(u);
+
+        let mut buf = BytesMut::new();
+        attr.attr_emit(&mut buf);
+        let len = buf.len() as u16;
+        let (_, parsed, _, _, _) =
+            parse_bgp_update_attribute(&buf, len, true, None).expect("re-parse");
+        let parsed = parsed.unwrap();
+        assert_eq!(parsed.unknown.len(), 1);
+        assert_eq!(parsed.unknown[0].type_code, 240);
+        assert_eq!(parsed.unknown[0].value, vec![1, 2, 3, 4]);
+        assert!(parsed.unknown[0].is_partial());
     }
 }

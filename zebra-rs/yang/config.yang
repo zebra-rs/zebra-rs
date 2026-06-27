@@ -111,6 +111,9 @@ module config {
   import zebra-bgp-enforce-first-as {
     prefix zbef;
   }
+  import zebra-bgp-unknown-attr {
+    prefix zbua;
+  }
   import zebra-bgp-pic-retention {
     prefix zbpic;
   }
