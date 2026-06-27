@@ -1250,7 +1250,122 @@ impl ConfigBuilder {
     }
 }
 
-pub fn show(policy: &Policy, _args: Args, _json: bool) -> Result<String, Error> {
+/// Build the JSON object for one policy entry: `seq`, `action`, and the
+/// present-only `match` / `set` sub-objects. Mirrors the text renderer
+/// below field-for-field (plus `action`, which the text omits).
+fn entry_to_json(seq: u32, entry: &PolicyEntry) -> serde_json::Value {
+    use serde_json::{Map, Value, json};
+
+    let op_val = |op: &str, value: u32| json!({ "op": op, "value": value });
+
+    let mut m = Map::new();
+    if let Some(x) = &entry.prefix_set_name {
+        m.insert("prefix_set".into(), json!(x));
+    }
+    if let Some(x) = &entry.community_set_name {
+        m.insert("community_set".into(), json!(x));
+    }
+    if let Some(x) = &entry.ext_community_set_name {
+        m.insert("ext_community_set".into(), json!(x));
+    }
+    if let Some(x) = &entry.large_community_set_name {
+        m.insert("large_community_set".into(), json!(x));
+    }
+    if let Some(x) = &entry.as_path_set_name {
+        m.insert("as_path_set".into(), json!(x));
+    }
+    if let Some(x) = &entry.match_next_hop {
+        m.insert("next_hop".into(), json!(x.to_string()));
+    }
+    if let Some(x) = &entry.match_med {
+        m.insert("med".into(), op_val(x.op_str(), x.value()));
+    }
+    if let Some(x) = &entry.match_as_path_len {
+        m.insert("as_path_len".into(), op_val(x.op_str(), x.value()));
+    }
+    if let Some(x) = &entry.match_as_path_len_uniq {
+        m.insert("as_path_len_uniq".into(), op_val(x.op_str(), x.value()));
+    }
+    if let Some(x) = &entry.match_local_pref {
+        m.insert("local_preference".into(), op_val(x.op_str(), x.value()));
+    }
+    if let Some(x) = &entry.match_weight {
+        m.insert("weight".into(), op_val(x.op_str(), x.value()));
+    }
+    if let Some(x) = &entry.match_origin {
+        m.insert("origin".into(), json!(format!("{:?}", x)));
+    }
+    if let Some(x) = &entry.match_evpn_route_type {
+        m.insert("evpn_route_type".into(), json!(x.to_string()));
+    }
+    if let Some(x) = &entry.match_evpn_vni {
+        m.insert("evpn_vni".into(), json!(x));
+    }
+
+    let mut s = Map::new();
+    if let Some(x) = &entry.local_pref {
+        s.insert("local_preference".into(), op_val(x.op_str(), x.value()));
+    }
+    if let Some(x) = &entry.med {
+        s.insert("med".into(), op_val(x.op_str(), x.value()));
+    }
+    if let Some(x) = &entry.weight {
+        s.insert("weight".into(), json!(x));
+    }
+    if let Some(cfg) = &entry.set_community {
+        let mode = match cfg.mode {
+            SetCommunityMode::Replace => "replace",
+            SetCommunityMode::Additive => "additive",
+            SetCommunityMode::Delete => "delete",
+        };
+        s.insert(
+            "community".into(),
+            json!({ "name": cfg.name, "mode": mode }),
+        );
+    }
+    if let Some(p) = &entry.set_as_path_prepend {
+        s.insert(
+            "as_path_prepend".into(),
+            json!({ "asn": p.asn, "repeat": p.repeat }),
+        );
+    }
+    if let Some(nh) = &entry.set_next_hop {
+        let v = match nh {
+            SetNextHop::Address(a) => a.to_string(),
+            SetNextHop::SelfAddr => "self".to_string(),
+        };
+        s.insert("next_hop".into(), json!(v));
+    }
+    if let Some(o) = &entry.set_origin {
+        s.insert("origin".into(), json!(format!("{:?}", o)));
+    }
+
+    json!({
+        "seq": seq,
+        "action": entry.action.to_string(),
+        "match": Value::Object(m),
+        "set": Value::Object(s),
+    })
+}
+
+pub fn show(policy: &Policy, _args: Args, json: bool) -> Result<String, Error> {
+    if json {
+        let list: Vec<serde_json::Value> = policy
+            .policy_config
+            .config
+            .iter()
+            .map(|(name, plist)| {
+                let entries: Vec<serde_json::Value> = plist
+                    .entry
+                    .iter()
+                    .map(|(seq, entry)| entry_to_json(*seq, entry))
+                    .collect();
+                serde_json::json!({ "name": name, "entries": entries })
+            })
+            .collect();
+        return Ok(serde_json::to_string_pretty(&list)?);
+    }
+
     let mut buf = String::new();
     for (name, policy) in policy.policy_config.config.iter() {
         let _ = writeln!(buf, "policy-list: {}", name);

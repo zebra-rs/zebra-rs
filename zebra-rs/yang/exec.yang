@@ -159,13 +159,49 @@ module exec {
         type empty;
       }
     }
-    leaf community-set {
+    container "community-set" {
       ext:help "Show community-set";
-      type empty;
+      presence "Show community-set";
+      list name {
+        key name;
+        leaf name {
+          type string;
+        }
+      }
+    }
+    container "ext-community-set" {
+      ext:help "Show ext-community-set";
+      presence "Show ext-community-set";
+      list name {
+        key name;
+        leaf name {
+          type string;
+        }
+      }
+    }
+    container "large-community-set" {
+      ext:help "Show large-community-set";
+      presence "Show large-community-set";
+      list name {
+        key name;
+        leaf name {
+          type string;
+        }
+      }
     }
     container "as-path-set" {
       ext:help "Show as-path-set";
       presence "Show as-path-set";
+      list name {
+        key name;
+        leaf name {
+          type string;
+        }
+      }
+    }
+    container "key-chains" {
+      ext:help "Show key-chains";
+      presence "Show key-chains";
       list name {
         key name;
         leaf name {
