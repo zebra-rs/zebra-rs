@@ -1823,16 +1823,55 @@ pub fn router_id_show(rib: &Rib, _args: Args, json: bool) -> String {
     format!("Router ID: {} ({})\n", rib.router_id, source)
 }
 
-pub fn hostname_show(_rib: &Rib, _args: Args, _json: bool) -> String {
-    hostname::get()
+pub fn hostname_show(_rib: &Rib, _args: Args, json: bool) -> String {
+    let name = hostname::get()
         .ok()
         .and_then(|s| s.into_string().ok())
-        .filter(|s| !s.is_empty())
-        .map(|s| format!("{s}\n"))
+        .filter(|s| !s.is_empty());
+    if json {
+        // `name` is `Option<String>`: a resolved hostname or JSON `null`.
+        return serde_json::to_string_pretty(&serde_json::json!({ "hostname": name }))
+            .unwrap_or_else(|e| format!("{{\"error\": \"Failed to serialize hostname: {}\"}}", e));
+    }
+    name.map(|s| format!("{s}\n"))
         .unwrap_or_else(|| "unknown\n".to_string())
 }
 
-pub fn vrf_show(rib: &Rib, _args: Args, _json: bool) -> String {
+#[derive(Serialize)]
+pub struct VrfJson {
+    pub name: String,
+    pub table_id: u32,
+    /// `None` (JSON `null`) when this VRF has no Router ID selected yet.
+    pub router_id: Option<String>,
+    pub members: Vec<String>,
+}
+
+#[derive(Serialize)]
+pub struct VrfTable {
+    pub vrfs: Vec<VrfJson>,
+}
+
+pub fn vrf_show(rib: &Rib, _args: Args, json: bool) -> String {
+    if json {
+        let mut vrfs = Vec::new();
+        for vrf in rib.vrfs.values() {
+            let members: Vec<String> = rib
+                .links
+                .values()
+                .filter(|l| l.master == Some(vrf.ifindex))
+                .map(|l| l.name.clone())
+                .collect();
+            vrfs.push(VrfJson {
+                name: vrf.name.clone(),
+                table_id: vrf.table_id,
+                router_id: (!vrf.router_id.is_unspecified()).then(|| vrf.router_id.to_string()),
+                members,
+            });
+        }
+        let vrf_table = VrfTable { vrfs };
+        return serde_json::to_string_pretty(&vrf_table)
+            .unwrap_or_else(|e| format!("{{\"error\": \"Failed to serialize VRFs: {}\"}}", e));
+    }
     let mut buf = String::new();
     writeln!(
         buf,
@@ -1872,8 +1911,51 @@ pub fn vrf_show(rib: &Rib, _args: Args, _json: bool) -> String {
 /// attributes (VLAN, VNI, remote VTEP IP) the kernel supplied. ARP/NDP
 /// (AF_INET / AF_INET6) lives in the same map but isn't shown here —
 /// `show ip arp` / `show ipv6 neighbor` will surface those separately.
-pub fn l2_neighbor_show(rib: &Rib, _args: Args, _json: bool) -> String {
+#[derive(Serialize)]
+pub struct L2NeighborJson {
+    pub mac: String,
+    pub interface: String,
+    pub vlan: Option<u16>,
+    pub vni: Option<u32>,
+    pub dst: Option<String>,
+    pub state: String,
+    /// `NTF_*` flags as a raw bitmask (mirrors the `0x..` text column).
+    pub flags: u8,
+}
+
+#[derive(Serialize)]
+pub struct L2NeighborTable {
+    pub entries: Vec<L2NeighborJson>,
+}
+
+pub fn l2_neighbor_show(rib: &Rib, _args: Args, json: bool) -> String {
     use super::inst::NeighborKey;
+    if json {
+        let mut entries = Vec::new();
+        for (key, nbr) in rib.neighbors.iter() {
+            let NeighborKey::Bridge { ifindex, mac, vlan } = key else {
+                continue;
+            };
+            let interface = rib
+                .links
+                .get(ifindex)
+                .map(|l| l.name.clone())
+                .unwrap_or_else(|| format!("if#{ifindex}"));
+            entries.push(L2NeighborJson {
+                mac: mac.to_string(),
+                interface,
+                vlan: *vlan,
+                vni: nbr.vni,
+                dst: nbr.dst.map(|d| d.to_string()),
+                state: format!("{:?}", nbr.state),
+                flags: nbr.flags.bits(),
+            });
+        }
+        let table = L2NeighborTable { entries };
+        return serde_json::to_string_pretty(&table).unwrap_or_else(|e| {
+            format!("{{\"error\": \"Failed to serialize L2 neighbors: {}\"}}", e)
+        });
+    }
     let mut buf = String::new();
     writeln!(
         buf,
