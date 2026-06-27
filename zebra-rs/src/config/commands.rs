@@ -1,7 +1,6 @@
 use super::ExecCode;
 use super::manager::ConfigManager;
 use super::util::trim_first_line;
-use crate::version::VersionInfo;
 use libyang::Entry;
 use similar::TextDiff;
 use std::collections::HashMap;
@@ -31,7 +30,6 @@ impl Mode {
 pub fn exec_mode_create(entry: Rc<Entry>) -> Mode {
     let mut mode = Mode::new(entry);
     mode.install_func(String::from("/help"), help);
-    mode.install_func(String::from("/show/version"), show_version);
     install_show_config_handlers(&mut mode);
     mode.install_func(String::from("/configure"), configure);
     mode.install_func(String::from("/enable"), enable);
@@ -46,11 +44,6 @@ pub fn configure_mode_create(entry: Rc<Entry>) -> Mode {
     mode.install_func(String::from("/help"), help);
     mode.install_func(String::from("/exit"), exit);
     mode.install_func(String::from("/show"), show);
-    // Same operator command as exec mode. Without this, `show version`
-    // in configure mode falls through to the RedirectShow path, where
-    // no protocol-show handler claims it and the output is silently
-    // empty.
-    mode.install_func(String::from("/show/version"), show_version);
     install_show_config_handlers(&mut mode);
     mode.install_func(String::from("/commit"), commit);
     mode.install_func(String::from("/discard"), discard);
@@ -103,11 +96,6 @@ save output to files (e.g. `show running-config | grep bgp',
 `show version > /tmp/ver.txt').
 "#;
     (ExecCode::Show, output.to_string())
-}
-
-fn show_version(_config: &ConfigManager) -> (ExecCode, String) {
-    let version_info = VersionInfo::current();
-    (ExecCode::Show, version_info.format_version())
 }
 
 // const CLI_CONFIGURE_MODE_PROMPT: &str = "(config)";
