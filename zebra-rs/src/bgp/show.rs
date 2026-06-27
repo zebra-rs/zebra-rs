@@ -528,6 +528,175 @@ fn bgp_route_json(prefix: String, rib: &BgpRib) -> BgpRouteJson {
     }
 }
 
+/// BGP path attributes shared by every per-AFI route JSON row. Embedded
+/// via `#[serde(flatten)]` so each family struct adds only its
+/// NLRI-specific fields on top.
+#[derive(Serialize)]
+struct CommonRouteAttrs {
+    best: bool,
+    internal: bool,
+    next_hop: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    metric: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    local_pref: Option<u32>,
+    weight: u32,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    as_path: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    origin: Option<String>,
+}
+
+fn common_route_attrs(rib: &BgpRib) -> CommonRouteAttrs {
+    let aspath = show_aspath(&rib.attr);
+    let origin = show_origin(&rib.attr);
+    CommonRouteAttrs {
+        best: rib.best_path,
+        internal: rib.typ == BgpRibType::IBGP,
+        next_hop: show_nexthop(&rib.attr),
+        metric: show_med2(&rib.attr),
+        local_pref: show_local_pref2(&rib.attr),
+        weight: rib.weight,
+        as_path: (!aspath.is_empty()).then_some(aspath),
+        origin: (!origin.is_empty()).then_some(origin),
+    }
+}
+
+#[derive(Serialize)]
+struct EvpnRouteJson {
+    route_distinguisher: String,
+    route_type: u8,
+    prefix: String,
+    #[serde(flatten)]
+    attrs: CommonRouteAttrs,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    extended_communities: Option<String>,
+}
+
+fn evpn_route_json(rd: &RouteDistinguisher, prefix: &EvpnPrefix, rib: &BgpRib) -> EvpnRouteJson {
+    let ecom = show_evpn_ecom(&rib.attr);
+    EvpnRouteJson {
+        route_distinguisher: rd.to_string(),
+        route_type: prefix.route_type(),
+        prefix: prefix.to_string(),
+        attrs: common_route_attrs(rib),
+        extended_communities: (!ecom.is_empty()).then_some(ecom),
+    }
+}
+
+#[derive(Serialize)]
+struct LabeledRouteJson {
+    family: String,
+    prefix: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    label: Option<u32>,
+    #[serde(flatten)]
+    attrs: CommonRouteAttrs,
+}
+
+#[derive(Serialize)]
+struct MupRouteJson {
+    prefix: String,
+    #[serde(flatten)]
+    attrs: CommonRouteAttrs,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    extended_communities: Option<String>,
+}
+
+#[derive(Serialize)]
+struct FlowspecRouteJson {
+    family: String,
+    #[serde(rename = "match")]
+    match_: String,
+    action: String,
+    from: String,
+    valid: bool,
+    validity: String,
+}
+
+#[derive(Serialize)]
+struct SrPolicySegmentListJson {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    weight: Option<u32>,
+    segments: Vec<String>,
+}
+
+#[derive(Serialize)]
+struct SrPolicyCandidateJson {
+    protocol_origin: String,
+    discriminator: u32,
+    preference: u32,
+    priority: u8,
+    valid: bool,
+    active: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    name: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    binding_sid: Option<String>,
+    segment_lists: Vec<SrPolicySegmentListJson>,
+}
+
+#[derive(Serialize)]
+struct SrPolicyJson {
+    color: u32,
+    endpoint: String,
+    candidate_paths: Vec<SrPolicyCandidateJson>,
+}
+
+#[derive(Serialize)]
+struct BgpLsJson {
+    nlri_type: u16,
+    nlri: String,
+    neighbor: String,
+    best: bool,
+}
+
+#[derive(Serialize)]
+struct MupCControllerJson {
+    admin_state: String,
+    pfcp_listen: Option<String>,
+    associations: usize,
+    sessions: usize,
+}
+
+#[derive(Serialize)]
+struct MupCSessionJson {
+    seid: u64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    ue_address: Option<String>,
+    teid: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    endpoint: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    qfi: Option<u8>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    network_instance: Option<String>,
+}
+
+#[derive(Serialize)]
+struct MupCAssociationJson {
+    peer: String,
+    node_id: String,
+}
+
+/// JSON rendering of a MUP Loc-RIB table — shared by the global
+/// `show bgp mup` and the per-VRF `show bgp vrf <name> mup`.
+fn mup_routes_json(table: &super::route::LocalRibMupTable) -> String {
+    let routes: Vec<MupRouteJson> = table
+        .selected
+        .iter()
+        .map(|(prefix, rib)| {
+            let ecom = show_mup_ecom(&rib.attr);
+            MupRouteJson {
+                prefix: mup_prefix_display(prefix),
+                attrs: common_route_attrs(rib),
+                extended_communities: (!ecom.is_empty()).then_some(ecom),
+            }
+        })
+        .collect();
+    serde_json::to_string_pretty(&routes).unwrap_or_else(|e| format!("{{\"error\": \"{e}\"}}"))
+}
+
 #[derive(Serialize)]
 struct BgpVpnv4RouteJson {
     route_distinguisher: String,
@@ -652,7 +821,29 @@ fn show_bgp_labeled(
     json: bool,
 ) -> std::result::Result<String, std::fmt::Error> {
     if json {
-        return Ok("[]".to_string());
+        let mut routes: Vec<LabeledRouteJson> = Vec::new();
+        for (key, value) in bgp.shard.v4lu.0.iter() {
+            for rib in value.iter() {
+                routes.push(LabeledRouteJson {
+                    family: "ipv4".to_string(),
+                    prefix: key.to_string(),
+                    label: rib.label.as_ref().map(|l| l.label),
+                    attrs: common_route_attrs(rib),
+                });
+            }
+        }
+        for (key, value) in bgp.shard.v6lu.0.iter() {
+            for rib in value.iter() {
+                routes.push(LabeledRouteJson {
+                    family: "ipv6".to_string(),
+                    prefix: key.to_string(),
+                    label: rib.label.as_ref().map(|l| l.label),
+                    attrs: common_route_attrs(rib),
+                });
+            }
+        }
+        return Ok(serde_json::to_string_pretty(&routes)
+            .unwrap_or_else(|e| format!("{{\"error\": \"{e}\"}}")));
     }
 
     let mut buf = String::new();
@@ -1094,7 +1285,16 @@ fn show_adj_rib_routes_evpn<D: RibDirection>(
     json: bool,
 ) -> std::result::Result<String, std::fmt::Error> {
     if json {
-        return Ok(String::from("[]"));
+        let mut out: Vec<EvpnRouteJson> = Vec::new();
+        for (rd, table) in routes.iter() {
+            for (prefix, ribs) in table.0.iter() {
+                for rib in ribs.iter() {
+                    out.push(evpn_route_json(rd, prefix, rib));
+                }
+            }
+        }
+        return Ok(serde_json::to_string_pretty(&out)
+            .unwrap_or_else(|e| format!("{{\"error\": \"{e}\"}}")));
     }
 
     let mut buf = String::new();
@@ -3633,17 +3833,26 @@ fn show_bgp_evpn(
     mut args: Args,
     json: bool,
 ) -> std::result::Result<String, std::fmt::Error> {
-    if json {
-        // JSON rendering for EVPN is intentionally out of scope for the
-        // initial slice; return an empty array so callers can detect "no
-        // EVPN routes" without parsing errors.
-        return Ok(String::from("[]"));
-    }
-
     // Optional `route-type <keyword>` filter. Plain `show bgp evpn` carries
     // no argument (filter = None); `show bgp evpn route-type <kw>` passes the
     // keyword through, which we map to a route-type number to filter on.
     let filter = args.string().and_then(evpn_route_type_filter);
+
+    if json {
+        let mut routes: Vec<EvpnRouteJson> = Vec::new();
+        for (rd, table) in bgp.local_rib.evpn.iter() {
+            for (prefix, rib) in table.selected.iter() {
+                if let Some(rt) = filter
+                    && prefix.route_type() != rt
+                {
+                    continue;
+                }
+                routes.push(evpn_route_json(rd, prefix, rib));
+            }
+        }
+        return Ok(serde_json::to_string_pretty(&routes)
+            .unwrap_or_else(|e| format!("{{\"error\": \"{e}\"}}")));
+    }
 
     let mut buf = String::new();
 
@@ -3822,7 +4031,21 @@ fn show_bgp_mup_c(
     json: bool,
 ) -> std::result::Result<String, std::fmt::Error> {
     if json {
-        return Ok(String::from("{}"));
+        let view = &bgp.mup_c_view;
+        let v = MupCControllerJson {
+            admin_state: if bgp.mup_c.is_some() {
+                "enabled"
+            } else {
+                "disabled"
+            }
+            .to_string(),
+            pfcp_listen: view.listen.map(|a| a.to_string()),
+            associations: view.associations.len(),
+            sessions: view.sessions.len(),
+        };
+        return Ok(
+            serde_json::to_string_pretty(&v).unwrap_or_else(|e| format!("{{\"error\": \"{e}\"}}"))
+        );
     }
     let view = &bgp.mup_c_view;
     let mut buf = String::new();
@@ -3853,7 +4076,24 @@ fn show_bgp_mup_c_session(
     json: bool,
 ) -> std::result::Result<String, std::fmt::Error> {
     if json {
-        return Ok(String::from("[]"));
+        let out: Vec<MupCSessionJson> = bgp
+            .mup_c_view
+            .sessions
+            .values()
+            .map(|s| MupCSessionJson {
+                seid: s.seid,
+                ue_address: s
+                    .ue_ipv4
+                    .map(|v| v.to_string())
+                    .or_else(|| s.ue_ipv6.map(|v| v.to_string())),
+                teid: format!("0x{:08x}", s.teid),
+                endpoint: s.endpoint.map(|e| e.to_string()),
+                qfi: s.qfi,
+                network_instance: s.network_instance.clone(),
+            })
+            .collect();
+        return Ok(serde_json::to_string_pretty(&out)
+            .unwrap_or_else(|e| format!("{{\"error\": \"{e}\"}}")));
     }
     let mut buf = String::new();
     writeln!(
@@ -3898,7 +4138,17 @@ fn show_bgp_mup_c_association(
     json: bool,
 ) -> std::result::Result<String, std::fmt::Error> {
     if json {
-        return Ok(String::from("[]"));
+        let out: Vec<MupCAssociationJson> = bgp
+            .mup_c_view
+            .associations
+            .iter()
+            .map(|(peer, info)| MupCAssociationJson {
+                peer: peer.to_string(),
+                node_id: info.node_id.clone(),
+            })
+            .collect();
+        return Ok(serde_json::to_string_pretty(&out)
+            .unwrap_or_else(|e| format!("{{\"error\": \"{e}\"}}")));
     }
     let mut buf = String::new();
     writeln!(buf, "{:<36} Node-ID", "Peer")?;
@@ -3919,7 +4169,7 @@ fn show_bgp_mup(
     json: bool,
 ) -> std::result::Result<String, std::fmt::Error> {
     if json {
-        return Ok(String::from("[]"));
+        return Ok(mup_routes_json(&bgp.local_rib.mup));
     }
     let mut out = render_mup_vrfs(&bgp.vrfs, &bgp.rib_known_vrfs)?;
     if !out.is_empty() {
@@ -3947,7 +4197,7 @@ fn show_bgp_vrf_mup<V: BgpShowView>(
     json: bool,
 ) -> std::result::Result<String, std::fmt::Error> {
     if json {
-        return Ok(String::from("[]"));
+        return Ok(mup_routes_json(&bgp.local_rib().mup));
     }
     // The per-VRF task holds only the best-paths mirrored to it (by RD) and
     // none of the config, so ST2 -> Direct-segment resolution (which spans
@@ -4161,19 +4411,43 @@ fn show_bgp_flowspec(
     afi: Afi,
     json: bool,
 ) -> std::result::Result<String, std::fmt::Error> {
-    if json {
-        return Ok(String::from("[]"));
-    }
-
-    let family = if afi == Afi::Ip6 { "IPv6" } else { "IPv4" };
-    let mut buf = String::new();
-    writeln!(buf, "{family} Flow Specification (Loc-RIB):")?;
-
     let table = if afi == Afi::Ip6 {
         &bgp.local_rib.flowspec_v6
     } else {
         &bgp.local_rib.flowspec_v4
     };
+
+    if json {
+        let fam = if afi == Afi::Ip6 { "ipv6" } else { "ipv4" };
+        let mut rules: Vec<FlowspecRouteJson> = Vec::new();
+        for (nlri, rib) in table.selected.iter() {
+            let source = bgp.peers.get_by_idx(rib.ident);
+            let validation_enabled = source.map(|p| p.config.flowspec_validation).unwrap_or(true);
+            let validation = super::flowspec::flowspec_validate_with_mode(
+                &bgp.shard,
+                nlri,
+                rib,
+                validation_enabled,
+            );
+            let from = source
+                .map(|p| p.address.to_string())
+                .unwrap_or_else(|| rib.router_id.to_string());
+            rules.push(FlowspecRouteJson {
+                family: fam.to_string(),
+                match_: nlri.to_string(),
+                action: show_flowspec_actions(&rib.attr),
+                from,
+                valid: validation.is_valid(),
+                validity: validation.to_string(),
+            });
+        }
+        return Ok(serde_json::to_string_pretty(&rules)
+            .unwrap_or_else(|e| format!("{{\"error\": \"{e}\"}}")));
+    }
+
+    let family = if afi == Afi::Ip6 { "IPv6" } else { "IPv4" };
+    let mut buf = String::new();
+    writeln!(buf, "{family} Flow Specification (Loc-RIB):")?;
     if table.selected.is_empty() {
         writeln!(buf, "  (no flow specifications)")?;
         return Ok(buf);
@@ -4231,14 +4505,47 @@ fn show_bgp_sr_policy(
     afi: Afi,
     json: bool,
 ) -> std::result::Result<String, std::fmt::Error> {
+    let want_v6 = afi == Afi::Ip6;
+
     if json {
-        // Rich JSON is deferred (mirrors flowspec); the SR Policy types
-        // do not derive Serialize yet.
-        return Ok(String::from("[]"));
+        let mut out: Vec<SrPolicyJson> = Vec::new();
+        for (key, policy) in bgp.local_rib.sr_policy.policies.iter() {
+            if key.endpoint.is_ipv6() != want_v6 {
+                continue;
+            }
+            let candidate_paths = policy
+                .candidates
+                .iter()
+                .map(|(cpkey, cp)| SrPolicyCandidateJson {
+                    protocol_origin: show_sr_protocol_origin(cpkey.protocol_origin),
+                    discriminator: cpkey.discriminator,
+                    preference: cp.preference,
+                    priority: cp.priority,
+                    valid: cp.valid,
+                    active: policy.active.as_ref() == Some(cpkey),
+                    name: cp.cp_name.clone(),
+                    binding_sid: show_sr_binding_sid(cp),
+                    segment_lists: cp
+                        .segment_lists
+                        .iter()
+                        .map(|sl| SrPolicySegmentListJson {
+                            weight: sl.weight,
+                            segments: sl.segments.iter().map(show_sr_segment).collect(),
+                        })
+                        .collect(),
+                })
+                .collect();
+            out.push(SrPolicyJson {
+                color: key.color,
+                endpoint: key.endpoint.to_string(),
+                candidate_paths,
+            });
+        }
+        return Ok(serde_json::to_string_pretty(&out)
+            .unwrap_or_else(|e| format!("{{\"error\": \"{e}\"}}")));
     }
 
     let family = if afi == Afi::Ip6 { "IPv6" } else { "IPv4" };
-    let want_v6 = afi == Afi::Ip6;
     let mut buf = String::new();
     writeln!(buf, "{family} SR Policy (SAFI 73):")?;
 
@@ -4352,9 +4659,22 @@ fn show_bgp_link_state(
     json: bool,
 ) -> std::result::Result<String, std::fmt::Error> {
     if json {
-        // Rich JSON deferred (mirrors flowspec / sr-policy); rendered as the
-        // human view for now.
-        return Ok(String::from("[]"));
+        let mut out: Vec<BgpLsJson> = Vec::new();
+        for (nlri, rib) in bgp.local_rib.bgp_ls.selected.iter() {
+            let neighbor = bgp
+                .peers
+                .get_by_idx(rib.ident)
+                .map(|p| p.address.to_string())
+                .unwrap_or_else(|| rib.router_id.to_string());
+            out.push(BgpLsJson {
+                nlri_type: nlri.nlri_type(),
+                nlri: nlri.to_string(),
+                neighbor,
+                best: rib.best_path,
+            });
+        }
+        return Ok(serde_json::to_string_pretty(&out)
+            .unwrap_or_else(|e| format!("{{\"error\": \"{e}\"}}")));
     }
 
     let mut buf = String::new();

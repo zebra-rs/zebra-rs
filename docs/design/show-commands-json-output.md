@@ -101,26 +101,30 @@ its non-VRF sibling** in the tables below.
 | `show bgp ipv6 <prefix> longer-prefix` | IPv6 equal-or-more-specific | ✅ |
 | `show bgp vpnv4 [<addr>\|<prefix>\|summary]` | VPNv4 RIB (all RDs) | ✅ |
 | `show bgp vpnv6 [<addr>\|<prefix>\|summary]` | VPNv6 RIB (all RDs) | ✅ |
-| `show bgp evpn [route-type <type>]` | EVPN RIB | ✅ ◐ |
+| `show bgp evpn [route-type <type>]` | EVPN RIB | ✅ |
 | `show bgp evpn summary` | EVPN-enabled neighbors | ✅ |
 | `show bgp evpn ethernet-segment` | Local Ethernet Segments (RFC 7432) | ✅ |
-| `show bgp labeled-unicast` | Labeled-Unicast (SAFI 4) RIB | ✅ ◐ |
-| `show bgp flowspec [ipv6]` | Flowspec RIB (SAFI 133) | ✅ ◐ |
-| `show bgp sr-policy [ipv6]` | SR Policy RIB (SAFI 73) | ✅ ◐ |
-| `show bgp link-state` | Link-State RIB (SAFI 71) | ✅ ◐ |
+| `show bgp labeled-unicast` | Labeled-Unicast (SAFI 4) RIB | ✅ |
+| `show bgp flowspec [ipv6]` | Flowspec RIB (SAFI 133) | ✅ |
+| `show bgp sr-policy [ipv6]` | SR Policy RIB (SAFI 73) | ✅ |
+| `show bgp link-state` | Link-State RIB (SAFI 71) | ✅ |
 | `show bgp attributes` | Attribute-store statistics | ✅ |
 | `show bgp neighbor [<addr>\|<name>]` | Neighbor information | ✅ |
-| `show bgp neighbor <addr> advertised-routes [ipv6\|vpnv4\|evpn]` | Adj-RIB-Out | ✅ (evpn ◐) |
-| `show bgp neighbor <addr> received-routes [ipv6\|vpnv4\|evpn]` | Adj-RIB-In | ✅ (evpn ◐) |
+| `show bgp neighbor <addr> advertised-routes [ipv6\|vpnv4\|evpn]` | Adj-RIB-Out | ✅ |
+| `show bgp neighbor <addr> received-routes [ipv6\|vpnv4\|evpn]` | Adj-RIB-In | ✅ |
 | `show bgp neighbor <addr> rtcv4` | IPv4 Route Target Constraints | ✅ |
 | `show bgp neighbor-group [<name>]` | Neighbor-group inheritance state | ✅ |
 | `show bgp update-group [<id>]` | Update-groups (IOS-XR style) | ✅ |
-| `show bgp mup [summary]` | Mobile User Plane RIB (SAFI 85) | ✅ ◐ |
-| `show bgp mup mup-c [session\|association]` | MUP Controller status | ✅ ◐ |
+| `show bgp mup [summary]` | Mobile User Plane RIB (SAFI 85) | ✅ |
+| `show bgp mup mup-c [session\|association]` | MUP Controller status | ✅ |
 | `show bgp vrf [<name>] [summary\|neighbor\|ipv4\|ipv6\|mup]` | Per-VRF BGP (redirected) | ✅ |
 
-◐ = honors `-j` but currently emits an empty array/object placeholder
-pending a finalized JSON schema.
+Every per-AFI route dump (EVPN / labeled-unicast / flowspec / sr-policy /
+link-state / MUP) now renders a real JSON array — the NLRI as a string
+plus the common path attributes (`#[serde(flatten)]` of a shared
+`CommonRouteAttrs`), and family-specific fields (RD + route-type for
+EVPN, label for labeled-unicast, candidate-paths/segment-lists for
+sr-policy, etc.). MUP `mup-c` status renders a structured object.
 
 ## OSPFv2 (`zebra-rs/src/ospf/show.rs`)
 
@@ -234,7 +238,7 @@ pending a finalized JSON schema.
 
 ## Coverage summary
 
-| Module | Commands | JSON (incl. ◐ placeholder) | Text only |
+| Module | Commands | JSON | Text only |
 |---|---:|---:|---:|
 | RIB / forwarding / config | 22 | 22 | 0 |
 | BGP | 25 | 25 | 0 |
@@ -247,31 +251,28 @@ pending a finalized JSON schema.
 | Policy objects | 7 | 7 | 0 |
 
 (Counts exclude the `vrf <name>` redirect forms, which inherit their
-sibling's status. Some BGP "JSON" entries are ◐ placeholders that honor
-the flag but still emit an empty array/object.)
+sibling's status.)
 
-### Remaining gaps (still text only)
+### Status: complete
 
-None. Every concrete `show` command now honors `-j`:
+Every concrete `show` command now renders a real JSON document under
+`-j`:
 
 - Every per-protocol `ShowCallback` (RIB, BGP, all IGPs, BFD, STAMP, ND,
   policy) branches on the flag.
+- The BGP per-AFI route dumps (EVPN, labeled-unicast, flowspec v4/v6,
+  sr-policy v4/v6, link-state, MUP, MUP `mup-c`, and the neighbor
+  EVPN Adj-RIB views) emit structured arrays/objects — no more empty
+  placeholders.
 - `show version` and `show task` — owned by no protocol daemon — are
-  answered by the manager's `DisplayTx` interceptor, which now picks
-  text vs. JSON from the second-phase `DisplayRequest.json`
+  answered by the manager's `DisplayTx` interceptor, which picks text
+  vs. JSON from the second-phase `DisplayRequest.json`
   (`reply_static_show`). `show version` previously returned **nothing**
   over the Show RPC (it was only wired to the interactive exec path);
   it now works in both renderings.
-- `show evpn vni all` is still a content stub, but honors `-j` (`[]`)
-  rather than emitting the text placeholder.
+- `show evpn vni all` is a content stub (per-VNI MAC state lives in the
+  RIB — see `show l2 mac table`) but honors `-j` (`[]`).
 
-The only entries left short of a full document are the BGP `◐`
-placeholders below — they already accept `-j` but emit an empty
-array/object pending dedicated per-AFI route schemas.
-
-### Placeholder JSON (BGP ◐ — honors `-j`, emits empty array/object)
-
-`show bgp evpn`, `labeled-unicast`, `flowspec [ipv6]`,
-`sr-policy [ipv6]`, `link-state`, `mup [mup-c …]`, and the
-`advertised-routes evpn` / `received-routes evpn` neighbor views. The
-flag is wired but the per-AFI serialization schema is not yet filled in.
+Future schema refinements (e.g. expanding the EVPN row to break out
+PMSI / per-attribute fields, or embedding the full BGP-LS NLRI descriptor
+tree) can layer on top without changing the wire contract.
