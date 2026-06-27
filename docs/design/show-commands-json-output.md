@@ -96,23 +96,23 @@ its non-VRF sibling** in the tables below.
 | `show bgp [<addr>\|<prefix>]` | IPv4 unicast RIB (default family) | ✅ |
 | `show bgp summary` | Neighbor status per AFI/SAFI | ✅ |
 | `show bgp ipv4 [<addr>\|<prefix>\|summary]` | IPv4 unicast RIB | ✅ |
-| `show bgp ipv4 <prefix> longer-prefix` | IPv4 equal-or-more-specific | text only |
+| `show bgp ipv4 <prefix> longer-prefix` | IPv4 equal-or-more-specific | ✅ |
 | `show bgp ipv6 [<addr>\|<prefix>\|summary]` | IPv6 unicast RIB | ✅ |
-| `show bgp ipv6 <prefix> longer-prefix` | IPv6 equal-or-more-specific | text only |
+| `show bgp ipv6 <prefix> longer-prefix` | IPv6 equal-or-more-specific | ✅ |
 | `show bgp vpnv4 [<addr>\|<prefix>\|summary]` | VPNv4 RIB (all RDs) | ✅ |
 | `show bgp vpnv6 [<addr>\|<prefix>\|summary]` | VPNv6 RIB (all RDs) | ✅ |
 | `show bgp evpn [route-type <type>]` | EVPN RIB | ✅ ◐ |
 | `show bgp evpn summary` | EVPN-enabled neighbors | ✅ |
-| `show bgp evpn ethernet-segment` | Local Ethernet Segments (RFC 7432) | text only |
+| `show bgp evpn ethernet-segment` | Local Ethernet Segments (RFC 7432) | ✅ |
 | `show bgp labeled-unicast` | Labeled-Unicast (SAFI 4) RIB | ✅ ◐ |
 | `show bgp flowspec [ipv6]` | Flowspec RIB (SAFI 133) | ✅ ◐ |
 | `show bgp sr-policy [ipv6]` | SR Policy RIB (SAFI 73) | ✅ ◐ |
 | `show bgp link-state` | Link-State RIB (SAFI 71) | ✅ ◐ |
-| `show bgp attributes` | Attribute-store statistics | text only |
+| `show bgp attributes` | Attribute-store statistics | ✅ |
 | `show bgp neighbor [<addr>\|<name>]` | Neighbor information | ✅ |
 | `show bgp neighbor <addr> advertised-routes [ipv6\|vpnv4\|evpn]` | Adj-RIB-Out | ✅ (evpn ◐) |
 | `show bgp neighbor <addr> received-routes [ipv6\|vpnv4\|evpn]` | Adj-RIB-In | ✅ (evpn ◐) |
-| `show bgp neighbor <addr> rtcv4` | IPv4 Route Target Constraints | text only |
+| `show bgp neighbor <addr> rtcv4` | IPv4 Route Target Constraints | ✅ |
 | `show bgp neighbor-group [<name>]` | Neighbor-group inheritance state | ✅ |
 | `show bgp update-group [<id>]` | Update-groups (IOS-XR style) | ✅ |
 | `show bgp mup [summary]` | Mobile User Plane RIB (SAFI 85) | ✅ ◐ |
@@ -237,7 +237,7 @@ pending a finalized JSON schema.
 | Module | Commands | JSON (incl. ◐ placeholder) | Text only |
 |---|---:|---:|---:|
 | RIB / forwarding / config | 22 | 19 | 3 |
-| BGP | 25 | 20 | 5 |
+| BGP | 25 | 25 | 0 |
 | OSPFv2 | 13 | 13 | 0 |
 | OSPFv3 | 12 | 12 | 0 |
 | IS-IS | 21 | 21 | 0 |
@@ -258,9 +258,11 @@ JSON":
 - **RIB:** `show task`, `show version` (both use the config-tree /
   manager dispatch that does not carry the `-j` flag — needs plumbing),
   and `show evpn vni all` (lives in the BGP/EVPN module)
-- **BGP:** `show bgp <afi> <prefix> longer-prefix`,
-  `show bgp evpn ethernet-segment`, `show bgp attributes`,
-  `show bgp neighbor <addr> rtcv4`
+
+Every per-protocol `ShowCallback` (RIB, BGP, all IGPs, BFD, STAMP, ND,
+policy) now honors `-j`. What's left is the handful of commands routed
+through a different dispatch path (above) plus the BGP `◐` placeholders
+below.
 
 ### Placeholder JSON (BGP ◐ — honors `-j`, emits empty array/object)
 

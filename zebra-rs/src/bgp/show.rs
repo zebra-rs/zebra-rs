@@ -503,6 +503,31 @@ struct BgpRouteJson {
     origin: Option<String>,
 }
 
+/// Convert one Loc-RIB entry to its `BgpRouteJson` row. Shared by the
+/// `longer-prefix` filters; mirrors the inline construction in
+/// `render_unicast_table` but reports the entry's real `best_path`.
+fn bgp_route_json(prefix: String, rib: &BgpRib) -> BgpRouteJson {
+    let aspath_str = show_aspath(&rib.attr);
+    let origin_str = show_origin(&rib.attr);
+    BgpRouteJson {
+        prefix,
+        valid: true,
+        best: rib.best_path,
+        internal: rib.typ == BgpRibType::IBGP,
+        route_type: if rib.typ == BgpRibType::IBGP {
+            "iBGP".to_string()
+        } else {
+            "eBGP".to_string()
+        },
+        next_hop: show_nexthop(&rib.attr),
+        metric: show_med2(&rib.attr),
+        local_pref: show_local_pref2(&rib.attr),
+        weight: rib.weight,
+        as_path: (!aspath_str.is_empty()).then_some(aspath_str),
+        origin: (!origin_str.is_empty()).then_some(origin_str),
+    }
+}
+
 #[derive(Serialize)]
 struct BgpVpnv4RouteJson {
     route_distinguisher: String,
@@ -1565,10 +1590,13 @@ fn show_bgp_ipv4<V: BgpShowView>(
 fn show_bgp_ipv4_longer<V: BgpShowView>(
     bgp: &V,
     mut args: Args,
-    _json: bool,
+    json: bool,
 ) -> std::result::Result<String, std::fmt::Error> {
     let mut out = String::new();
     let Some(tok) = args.string() else {
+        if json {
+            return Ok("[]".to_string());
+        }
         return Ok(String::from("% Specify an IPv4 prefix\n"));
     };
     let net = if tok.contains('/') {
@@ -1577,9 +1605,22 @@ fn show_bgp_ipv4_longer<V: BgpShowView>(
         tok.parse::<Ipv4Addr>().ok().map(|a| a.to_host_prefix())
     };
     let Some(net) = net else {
+        if json {
+            return Ok("[]".to_string());
+        }
         writeln!(out, "% Malformed IPv4 prefix: {tok}")?;
         return Ok(out);
     };
+    if json {
+        let mut routes: Vec<BgpRouteJson> = Vec::new();
+        for (prefix, ribs) in bgp.shard().v4.0.children(&net) {
+            for rib in ribs.iter() {
+                routes.push(bgp_route_json(prefix.to_string(), rib));
+            }
+        }
+        return Ok(serde_json::to_string_pretty(&routes)
+            .unwrap_or_else(|e| format!("{{\"error\": \"Failed to serialize routes: {}\"}}", e)));
+    }
     out.push_str(SHOW_BGP_HEADER);
     for (prefix, ribs) in bgp.shard().v4.0.children(&net) {
         for rib in ribs.iter() {
@@ -1630,10 +1671,13 @@ fn show_bgp_ipv6<V: BgpShowView>(
 fn show_bgp_ipv6_longer<V: BgpShowView>(
     bgp: &V,
     mut args: Args,
-    _json: bool,
+    json: bool,
 ) -> std::result::Result<String, std::fmt::Error> {
     let mut out = String::new();
     let Some(tok) = args.string() else {
+        if json {
+            return Ok("[]".to_string());
+        }
         return Ok(String::from("% Specify an IPv6 prefix\n"));
     };
     let net = if tok.contains('/') {
@@ -1642,9 +1686,22 @@ fn show_bgp_ipv6_longer<V: BgpShowView>(
         tok.parse::<Ipv6Addr>().ok().map(|a| a.to_host_prefix())
     };
     let Some(net) = net else {
+        if json {
+            return Ok("[]".to_string());
+        }
         writeln!(out, "% Malformed IPv6 prefix: {tok}")?;
         return Ok(out);
     };
+    if json {
+        let mut routes: Vec<BgpRouteJson> = Vec::new();
+        for (prefix, ribs) in bgp.shard().v6.0.children(&net) {
+            for rib in ribs.iter() {
+                routes.push(bgp_route_json(prefix.to_string(), rib));
+            }
+        }
+        return Ok(serde_json::to_string_pretty(&routes)
+            .unwrap_or_else(|e| format!("{{\"error\": \"Failed to serialize routes: {}\"}}", e)));
+    }
     out.push_str(SHOW_BGP_HEADER);
     for (prefix, ribs) in bgp.shard().v6.0.children(&net) {
         for rib in ribs.iter() {
@@ -2053,12 +2110,77 @@ pub(super) fn render_summary_with_counts<V: BgpShowView>(
 /// Segments (RFC 7432): name, ESI, redundancy mode, access interface, and the
 /// auto-derived ES-Import RT. Config + state only in this phase (DF state and
 /// the per-ES PE membership set arrive with Type-4 discovery / DF election).
+#[derive(Serialize)]
+struct EsMemberVtepJson {
+    ordinal: usize,
+    vtep: String,
+    local: bool,
+}
+
+#[derive(Serialize)]
+struct EthernetSegmentJson {
+    name: String,
+    esi: Option<String>,
+    redundancy_mode: String,
+    interface: Option<String>,
+    es_import_rt: Option<String>,
+    member_vteps: Vec<EsMemberVtepJson>,
+    df_algorithm: Option<String>,
+    designated_forwarder: Option<String>,
+}
+
 fn show_bgp_evpn_ethernet_segment(
     bgp: &Bgp,
     _args: Args,
-    _json: bool,
+    json: bool,
 ) -> std::result::Result<String, std::fmt::Error> {
     use std::fmt::Write;
+
+    if json {
+        let local = std::net::IpAddr::V4(bgp.router_id);
+        let mut list = Vec::new();
+        for (name, es) in bgp.ethernet_segments.iter() {
+            let mut member_vteps = Vec::new();
+            let mut df_algorithm = None;
+            let mut designated_forwarder = None;
+            if let Some(esi) = es.esi {
+                let cands = bgp.es_df_candidates(&esi);
+                let vteps: Vec<std::net::IpAddr> = cands.iter().map(|(ip, _)| *ip).collect();
+                for (ordinal, (vtep, _)) in cands.iter().enumerate() {
+                    member_vteps.push(EsMemberVtepJson {
+                        ordinal,
+                        vtep: vtep.to_string(),
+                        local: *vtep == local,
+                    });
+                }
+                let algs: Vec<u8> = cands.iter().map(|(_, a)| *a).collect();
+                let alg = super::ethernet_segment::negotiate_df_alg(&algs);
+                df_algorithm = Some(
+                    if alg == bgp_packet::DfElectionEc::ALG_DEFAULT {
+                        "service-carving (default)"
+                    } else {
+                        "negotiated (non-default; carving fallback)"
+                    }
+                    .to_string(),
+                );
+                designated_forwarder = super::ethernet_segment::designated_forwarder(&vteps, 0)
+                    .map(|df| df.to_string());
+            }
+            list.push(EthernetSegmentJson {
+                name: name.clone(),
+                esi: es.esi.map(|esi| bgp_packet::esi_display(&esi)),
+                redundancy_mode: es.redundancy_mode.as_str().to_string(),
+                interface: es.interface.clone(),
+                es_import_rt: es.es_import_rt().map(|rt| format_evpn_ecom_value(&rt)),
+                member_vteps,
+                df_algorithm,
+                designated_forwarder,
+            });
+        }
+        return Ok(serde_json::to_string_pretty(&list)
+            .unwrap_or_else(|e| format!("{{\"error\": \"{e}\"}}")));
+    }
+
     let mut buf = String::new();
     if bgp.ethernet_segments.is_empty() {
         writeln!(buf, "No EVPN Ethernet Segments configured")?;
@@ -5283,19 +5405,39 @@ fn show_evpn_vni_all(
 fn show_bgp_rtcv4(
     bgp: &Bgp,
     mut args: Args,
-    _json: bool,
+    json: bool,
 ) -> std::result::Result<String, std::fmt::Error> {
     let mut buf = String::new();
 
     let addr = match args.addr() {
         Some(addr) => addr,
-        None => return Ok(String::from("% No neighbor address specified")),
+        None => {
+            if json {
+                return Ok("{\"error\": \"no neighbor address specified\"}".to_string());
+            }
+            return Ok(String::from("% No neighbor address specified"));
+        }
     };
 
     let peer = match bgp.peers.get(&addr) {
         Some(peer) => peer,
-        None => return Ok(format!("% No such neighbor: {}", addr)),
+        None => {
+            if json {
+                return Ok(format!("{{\"error\": \"no such neighbor: {}\"}}", addr));
+            }
+            return Ok(format!("% No such neighbor: {}", addr));
+        }
     };
+
+    if json {
+        let view = RtcJson {
+            neighbor: addr.to_string(),
+            ipv4: peer.rtcv4.iter().map(|rt| rt.to_string()).collect(),
+            ipv6: peer.rtcv6.iter().map(|rt| rt.to_string()).collect(),
+        };
+        return Ok(serde_json::to_string_pretty(&view)
+            .unwrap_or_else(|e| format!("{{\"error\": \"{e}\"}}")));
+    }
 
     if !peer.rtcv4.is_empty() {
         writeln!(buf, "IPv4 Route Target Constraints for {}", addr)?;
@@ -5313,11 +5455,60 @@ fn show_bgp_rtcv4(
     Ok(buf)
 }
 
+#[derive(Serialize)]
+struct RtcJson {
+    neighbor: String,
+    ipv4: Vec<String>,
+    ipv6: Vec<String>,
+}
+
+#[derive(Serialize)]
+struct BgpAttrEntryJson {
+    refcnt: usize,
+    store: String,
+    /// The attribute set's text rendering (multi-line `Display`).
+    attr: String,
+}
+
+#[derive(Serialize)]
+struct BgpAttributesJson {
+    total_entries: usize,
+    active_entries: usize,
+    main_entries: usize,
+    shard_entries: usize,
+    attributes: Vec<BgpAttrEntryJson>,
+}
+
 fn show_bgp_attributes(
     bgp: &Bgp,
     _args: Args,
-    _json: bool,
+    json: bool,
 ) -> std::result::Result<String, std::fmt::Error> {
+    if json {
+        let mut attributes = Vec::new();
+        for (label, store) in [("main", &bgp.attr_store), ("shard", &bgp.shard.attr_store)] {
+            for (attr, weak) in store.iter() {
+                let refcnt = weak.strong_count();
+                if refcnt > 0 {
+                    attributes.push(BgpAttrEntryJson {
+                        refcnt,
+                        store: label.to_string(),
+                        attr: format!("{}", attr),
+                    });
+                }
+            }
+        }
+        let view = BgpAttributesJson {
+            total_entries: bgp.attr_store.len() + bgp.shard.attr_store.len(),
+            active_entries: bgp.attr_store.refcnt_all() + bgp.shard.attr_store.refcnt_all(),
+            main_entries: bgp.attr_store.len(),
+            shard_entries: bgp.shard.attr_store.len(),
+            attributes,
+        };
+        return Ok(serde_json::to_string_pretty(&view)
+            .unwrap_or_else(|e| format!("{{\"error\": \"{e}\"}}")));
+    }
+
     let mut buf = String::new();
     // Two stores since RIB sharding B.1: the main store (egress
     // encode + EVPN/flowspec/BGP-LS/VRF re-tag) and the shard store
