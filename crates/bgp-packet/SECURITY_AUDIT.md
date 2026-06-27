@@ -13,9 +13,10 @@ current source. All four are now fully fixed and covered by regression tests:
 both High-severity panic paths, the Medium-severity trailing-garbage class, and
 the Medium-severity substructure-length cases (MP_REACH `nhop_len`, EVPN
 per-route `length`, and EVPN multicast `addr_len`). The only remaining items
-are the residual encoder-side `u8` truncation issues; `CapFqdn`, `CapVersion`,
-`CapUnknown`, `CapAddPath`, `CapRestart`, and `CapLlgr` are now fixed, leaving
-only `CapPathLimit` (and the shared `emit()` framing).
+were the residual encoder-side `u8` truncation issues; all seven capability
+encoders (`CapFqdn`, `CapVersion`, `CapUnknown`, `CapAddPath`, `CapRestart`,
+`CapLlgr`, `CapPathLimit`) now clamp to their wire budgets, leaving only the
+shared `CapEmit::emit()` `len() + 2` optional-parameter framing.
 
 Status of the four previously reported issues:
 
@@ -31,9 +32,10 @@ Status of the four previously reported issues:
 
 The residual encoder-side `u8` truncation issues for oversized capabilities are
 local packet-construction problems rather than network-triggered parser bugs.
-`CapFqdn`, `CapVersion`, `CapUnknown`, `CapAddPath`, `CapRestart`, and `CapLlgr`
-are now fixed (clamped wire lengths derived from a single helper each); only
-`CapPathLimit` remains.
+all seven capability encoders (`CapFqdn`, `CapVersion`, `CapUnknown`,
+`CapAddPath`, `CapRestart`, `CapLlgr`, `CapPathLimit`) are now fixed (clamped
+wire lengths derived from a single helper each); only the shared `emit()`
+`len() + 2` framing remains.
 
 Earlier hardening that remains in place (carried over from the prior revision):
 the OPEN optional-parameter, capability, and IPv4 NLRI block parsers use
@@ -156,7 +158,7 @@ rather than being read as a 16-octet IPv6 address.
 Regression tests: `inclusive_multicast_rejects_bad_addr_len` and
 `parse_nlri_rejects_trailing_body_bytes` (`nlri_evpn.rs`).
 
-## Residual Hardening Issues — only CapPathLimit + shared emit() framing open
+## Residual Hardening Issues — all capability encoder casts fixed; only the shared emit() framing remains
 
 These are lower severity because they affect local packet construction rather
 than parsing untrusted network data.
@@ -204,26 +206,26 @@ clamps the emitted entry count to 36 (252 octets). The `as u8` cast can no
 longer wrap. Regression tests cover the normal, empty, and too-many-entries
 cases.
 
-**Still present — one capability encoder** computes its wire length with an
-unchecked `as u8` cast:
+**Fixed — `CapPathLimit`.** Same shape: each Path-Limit entry is a fixed 5
+octets (AFI + SAFI + Path Limit u16), so `len()` (`values.len() * 5`) and
+`emit_value()` now derive from a `wire_count()` helper (`caps/path_limit.rs`)
+that clamps the emitted entry count to 50 (250 octets). The `as u8` cast can no
+longer wrap. Regression tests cover the normal, empty, and too-many-entries
+cases.
 
-- `CapPathLimit::len()` (`caps/path_limit.rs:39`)
-
-A related latent issue affects all capabilities: the shared `CapEmit::emit()`
+**Still present — the shared optional-parameter framing.** `CapEmit::emit()`
 (`caps/emit.rs:23`) writes the optional-parameter length as
 `put_u8(self.len() + 2)`, which overflows a `u8` if any capability's `len()`
-reaches 254–255. The `CapFqdn`, `CapVersion`, `CapUnknown`, `CapAddPath`,
-`CapRestart`, and `CapLlgr` fixes bound their values at 253/252 so they never
-trigger this; the remaining encoder should adopt the same bound (or `emit()`
-should saturate / reject).
+reaches 254–255. All seven per-capability encoders now bound their values at
+253/252 so they never trigger this in practice, but the shared `emit()` itself
+is still unguarded — it should clamp/saturate or `u8::try_from(...)` the
+`len() + 2` (or move to RFC 9072 extended optional parameters) so a future
+capability can't reintroduce the overflow.
 
 Recommended follow-up:
 
-1. clamp or `u8::try_from(...)` the remaining capability wire-length casts the
-   same way (compute aggregate lengths in `usize`, convert once at the wire
-   boundary), and bound or saturate the shared `emit()` optional-parameter
-   length.
-2. add regression tests for oversized local constructors.
+1. bound or saturate the shared `emit()` optional-parameter length (`len() + 2`)
+   so it cannot overflow regardless of a capability's `len()`.
 
 ## Recommended Priority
 
@@ -242,11 +244,11 @@ Recommended follow-up:
 
 ### Priority 3 — partially open
 
-5. Convert the remaining encoder-side `u8` length arithmetic to clamped/checked
-   arithmetic (`CapPathLimit`), and bound or saturate the shared
-   `CapEmit::emit()` optional-parameter length (`emit.rs:23`). `CapFqdn`,
-   `CapVersion`, `CapUnknown`, `CapAddPath`, `CapRestart`, and `CapLlgr` are
-   done.
+5. ~~Convert the encoder-side `u8` length arithmetic for each capability to
+   clamped/checked arithmetic.~~ Done — all seven (`CapFqdn`, `CapVersion`,
+   `CapUnknown`, `CapAddPath`, `CapRestart`, `CapLlgr`, `CapPathLimit`) now
+   clamp to their wire budgets. The only remaining item is to bound or saturate
+   the shared `CapEmit::emit()` optional-parameter length (`emit.rs:23`).
 
 ## Verification
 
