@@ -84,8 +84,13 @@ impl Isis {
 fn show_isis(
     _isis: &Isis,
     _args: Args,
-    _json: bool,
+    json: bool,
 ) -> std::result::Result<String, std::fmt::Error> {
+    if json {
+        // The bare `show isis` root is a placeholder banner; nothing
+        // structured to surface, so emit an empty object.
+        return Ok("{}".to_string());
+    }
     Ok(String::from("show isis"))
 }
 
@@ -95,10 +100,40 @@ fn show_isis(
 /// An entry is advertised when it is on the SRv6 dataplane, has an
 /// explicit Mirror SID, and that SID falls inside this node's own SRv6
 /// locator — exactly the condition `lsp::mirror_sid_subs` emits on.
+#[derive(Serialize)]
+struct EgressLocalJson {
+    protected_locator: String,
+    sid: String,
+    dataplane: String,
+    via_vrf: Option<String>,
+    advertised: bool,
+}
+
+#[derive(Serialize)]
+struct EgressReceivedSidJson {
+    protector: String,
+    mirror_sid: String,
+    protected_locator: String,
+}
+
+#[derive(Serialize)]
+struct EgressContextLabelJson {
+    protector: String,
+    context_label: u32,
+    protected_fec: String,
+}
+
+#[derive(Serialize)]
+struct EgressProtectionJson {
+    local: Vec<EgressLocalJson>,
+    received_mirror_sids: Vec<EgressReceivedSidJson>,
+    received_context_labels: Vec<EgressContextLabelJson>,
+}
+
 fn show_isis_egress_protection(
     isis: &Isis,
     _args: Args,
-    _json: bool,
+    json: bool,
 ) -> std::result::Result<String, std::fmt::Error> {
     use super::egress_protection::{
         MirrorDataplane, collect_received_mirror_sids, collect_received_mpls_bindings,
@@ -106,6 +141,73 @@ fn show_isis_egress_protection(
 
     let entries = &isis.config.egress_protections;
     let local = isis.sr_locator.as_ref().and_then(|l| l.prefix);
+
+    if json {
+        let local_entries: Vec<EgressLocalJson> = entries
+            .values()
+            .map(|e| {
+                let (sid, advertised) = match e.dataplane {
+                    MirrorDataplane::Srv6 => {
+                        let sid = e
+                            .mirror_sid
+                            .map(|s| s.to_string())
+                            .unwrap_or_else(|| "(auto)".to_string());
+                        let advertised = e
+                            .mirror_sid
+                            .zip(local)
+                            .map(|(s, p)| p.contains(&s))
+                            .unwrap_or(false);
+                        (sid, advertised)
+                    }
+                    MirrorDataplane::Mpls => match isis.mirror_labels.get(&e.protected_locator) {
+                        Some(label) => (format!("label {label}"), true),
+                        None => ("(pending)".to_string(), false),
+                    },
+                };
+                EgressLocalJson {
+                    protected_locator: e.protected_locator.to_string(),
+                    sid,
+                    dataplane: match e.dataplane {
+                        MirrorDataplane::Srv6 => "srv6".to_string(),
+                        MirrorDataplane::Mpls => "mpls".to_string(),
+                    },
+                    via_vrf: e.via_vrf.clone(),
+                    advertised,
+                }
+            })
+            .collect();
+
+        let mut received = collect_received_mirror_sids(&isis.lsdb.l1);
+        received.extend(collect_received_mirror_sids(&isis.lsdb.l2));
+        let received_mirror_sids: Vec<EgressReceivedSidJson> = received
+            .iter()
+            .map(|r| EgressReceivedSidJson {
+                protector: r.protector.to_string(),
+                mirror_sid: r.mirror_sid.to_string(),
+                protected_locator: r.protected_locator.to_string(),
+            })
+            .collect();
+
+        let mut bindings = collect_received_mpls_bindings(&isis.lsdb.l1);
+        bindings.extend(collect_received_mpls_bindings(&isis.lsdb.l2));
+        let received_context_labels: Vec<EgressContextLabelJson> = bindings
+            .iter()
+            .map(|b| EgressContextLabelJson {
+                protector: b.protector.to_string(),
+                context_label: b.context_label,
+                protected_fec: b.protected_fec.to_string(),
+            })
+            .collect();
+
+        let view = EgressProtectionJson {
+            local: local_entries,
+            received_mirror_sids,
+            received_context_labels,
+        };
+        return Ok(serde_json::to_string_pretty(&view)
+            .unwrap_or_else(|e| format!("{{\"error\": \"{e}\"}}")));
+    }
+
     let mut buf = String::new();
 
     // Local (configured) entries this node protects, and whether each is
@@ -211,11 +313,72 @@ fn show_isis_egress_protection(
     Ok(buf)
 }
 
+#[derive(Serialize)]
+struct IsisPasswordJson {
+    mode: String,
+    key_id: u16,
+    send_only: bool,
+}
+
+#[derive(Serialize)]
+struct IsisSrv6LocatorJson {
+    name: String,
+    prefix: Option<String>,
+    behavior: Option<String>,
+    status: String,
+}
+
+#[derive(Serialize)]
+struct IsisSummaryJson {
+    lsp_mtu: u16,
+    area_password: Option<IsisPasswordJson>,
+    domain_password: Option<IsisPasswordJson>,
+    srv6_locator: Option<IsisSrv6LocatorJson>,
+}
+
 fn show_isis_summary(
     isis: &Isis,
     _args: Args,
-    _json: bool,
+    json: bool,
 ) -> std::result::Result<String, std::fmt::Error> {
+    if json {
+        use crate::rib::LocatorBehavior;
+        let pw_json = |p: &super::config::IsisAuthConfig| {
+            p.password.as_deref().map(|_| IsisPasswordJson {
+                mode: p.auth_type.to_string(),
+                key_id: p.effective_key_id(),
+                send_only: p.send_only,
+            })
+        };
+        let srv6_locator = isis.watched_locator.as_ref().map(|name| {
+            let loc = isis.sr_locator.as_ref();
+            let (prefix, behavior, status) = match loc.and_then(|l| l.prefix) {
+                Some(p) => {
+                    let beh = match loc.and_then(|l| l.behavior.as_ref()) {
+                        Some(LocatorBehavior::Usid) => "uSID",
+                        None => "Classic",
+                    };
+                    (Some(p.to_string()), Some(beh.to_string()), "Up")
+                }
+                None => (None, None, "Down"),
+            };
+            IsisSrv6LocatorJson {
+                name: name.clone(),
+                prefix,
+                behavior,
+                status: status.to_string(),
+            }
+        });
+        let view = IsisSummaryJson {
+            lsp_mtu: isis.config.lsp_mtu_size(),
+            area_password: pw_json(&isis.config.area_password),
+            domain_password: pw_json(&isis.config.domain_password),
+            srv6_locator,
+        };
+        return Ok(serde_json::to_string_pretty(&view)
+            .unwrap_or_else(|e| format!("{{\"error\": \"{e}\"}}")));
+    }
+
     let mut buf = String::new();
 
     // LSP buffer size — the value we advertise in TLV 14 (RFC 1195)
@@ -728,7 +891,7 @@ fn show_isis_route_detail(
 /// backup's label-stack length (subsequent backups on the same
 /// route currently match by construction — tilfa_repair_path emits
 /// one repair per dest today).
-#[derive(Default, Debug, PartialEq, Eq)]
+#[derive(Default, Debug, PartialEq, Eq, Serialize)]
 struct FrrSummary {
     total: usize,
     protected: usize,
@@ -778,11 +941,49 @@ fn write_frr_summary_block(buf: &mut String, label: &str, s: &FrrSummary) -> std
 /// TI-LFA protection state. Reports IPv4 and IPv6 separately so the
 /// numbers stay legible when one AF has SR enabled and the other
 /// doesn't.
+#[derive(Serialize)]
+struct FrrLevelJson {
+    level: String,
+    ipv4: FrrSummary,
+    ipv6: FrrSummary,
+}
+
+#[derive(Serialize)]
+struct FrrSummaryViewJson {
+    area: String,
+    levels: Vec<FrrLevelJson>,
+}
+
 fn show_isis_fast_reroute_summary(
     isis: &Isis,
     _args: Args,
-    _json: bool,
+    json: bool,
 ) -> std::result::Result<String, std::fmt::Error> {
+    if json {
+        let mut levels = Vec::new();
+        for level in &[Level::L1, Level::L2] {
+            let v4 = summarize_frr::<V4>(isis.rib.get(level));
+            let v6 = summarize_frr::<V6>(isis.rib_v6.get(level));
+            if v4.total == 0 && v6.total == 0 {
+                continue;
+            }
+            levels.push(FrrLevelJson {
+                level: match level {
+                    Level::L1 => "Level-1".to_string(),
+                    Level::L2 => "Level-2".to_string(),
+                },
+                ipv4: v4,
+                ipv6: v6,
+            });
+        }
+        let view = FrrSummaryViewJson {
+            area: format_area_id(&isis.config.net),
+            levels,
+        };
+        return Ok(serde_json::to_string_pretty(&view)
+            .unwrap_or_else(|e| format!("{{\"error\": \"{e}\"}}")));
+    }
+
     let mut buf = String::new();
     writeln!(buf, "Area {}:", format_area_id(&isis.config.net))?;
     let mut wrote_any = false;
@@ -818,14 +1019,73 @@ fn show_isis_fast_reroute_summary(
 /// today (prefix arg is constrained to inet:ipv4-prefix in the
 /// grammar — IPv6 fast-reroute is reachable via `show isis route
 /// detail`).
+#[derive(Serialize)]
+struct FrrPrefixNexthopJson {
+    address: String,
+    interface: String,
+    has_backup: bool,
+}
+
+#[derive(Serialize)]
+struct FrrPrefixLevelJson {
+    level: String,
+    metric: u32,
+    protected: bool,
+    nexthops: Vec<FrrPrefixNexthopJson>,
+}
+
+#[derive(Serialize)]
+struct FrrPrefixDetailJson {
+    prefix: String,
+    found: bool,
+    entries: Vec<FrrPrefixLevelJson>,
+}
+
 fn show_isis_fast_reroute_prefix_detail(
     isis: &Isis,
     mut args: Args,
-    _json: bool,
+    json: bool,
 ) -> std::result::Result<String, std::fmt::Error> {
     let Some(prefix) = args.v4net() else {
+        if json {
+            return Ok("{\"error\": \"invalid IPv4 prefix\"}".to_string());
+        }
         return Ok("% Invalid IPv4 prefix\n".to_string());
     };
+
+    if json {
+        let mut entries = Vec::new();
+        for level in &[Level::L1, Level::L2] {
+            let Some(route) = isis.rib.get(level).get(&prefix) else {
+                continue;
+            };
+            let nexthops: Vec<FrrPrefixNexthopJson> = route
+                .nhops
+                .iter()
+                .map(|(addr, nhop)| FrrPrefixNexthopJson {
+                    address: addr.to_string(),
+                    interface: isis.ifname(nhop.ifindex),
+                    has_backup: nhop.backup.is_some(),
+                })
+                .collect();
+            entries.push(FrrPrefixLevelJson {
+                level: match level {
+                    Level::L1 => "L1".to_string(),
+                    Level::L2 => "L2".to_string(),
+                },
+                metric: route.metric,
+                protected: route.nhops.values().any(|n| n.backup.is_some()),
+                nexthops,
+            });
+        }
+        let view = FrrPrefixDetailJson {
+            prefix: prefix.to_string(),
+            found: !entries.is_empty(),
+            entries,
+        };
+        return Ok(serde_json::to_string_pretty(&view)
+            .unwrap_or_else(|e| format!("{{\"error\": \"{e}\"}}")));
+    }
 
     let mut buf = String::new();
     let mut found = false;
@@ -3045,11 +3305,174 @@ fn format_compute_duration(d: std::time::Duration) -> String {
 /// `show isis flex-algo` — summary of configured FADs, peer-
 /// advertised FADs, and per-peer SR-algorithm participation. The
 /// per-algo IPv4 RIB is reachable via `show isis flex-algo route`.
+#[derive(Serialize)]
+struct FlexAlgoLocalJson {
+    algorithm: u8,
+    metric_type: String,
+    priority: Option<u8>,
+    advertise_definition: bool,
+    include_any: Vec<String>,
+    include_all: Vec<String>,
+    exclude_any: Vec<String>,
+    srlg_exclude: Vec<String>,
+}
+
+#[derive(Serialize)]
+struct FlexAlgoSrv6LocatorJson {
+    algorithm: u8,
+    locator_name: String,
+    prefix: Option<String>,
+    end_sid: Option<String>,
+}
+
+#[derive(Serialize)]
+struct PeerFadJson {
+    system_id: String,
+    hostname: String,
+    algorithm: u8,
+    priority: u8,
+    metric_type: u8,
+    calc_type: u8,
+}
+
+#[derive(Serialize)]
+struct PeerAlgoJson {
+    system_id: String,
+    hostname: String,
+    algorithms: Vec<String>,
+}
+
+#[derive(Serialize)]
+struct PeerSrv6LocJson {
+    system_id: String,
+    hostname: String,
+    algorithm: u8,
+    locator: String,
+    end_sid: String,
+}
+
+#[derive(Serialize)]
+struct FlexAlgoLevelJson {
+    level: String,
+    peer_fads: Vec<PeerFadJson>,
+    peer_sr_algorithms: Vec<PeerAlgoJson>,
+    peer_srv6_locators: Vec<PeerSrv6LocJson>,
+}
+
+#[derive(Serialize)]
+struct FlexAlgoViewJson {
+    area: String,
+    local_algorithms: Vec<FlexAlgoLocalJson>,
+    local_srv6_locators: Vec<FlexAlgoSrv6LocatorJson>,
+    levels: Vec<FlexAlgoLevelJson>,
+}
+
 fn show_isis_flex_algo(
     isis: &Isis,
     _args: Args,
-    _json: bool,
+    json: bool,
 ) -> std::result::Result<String, std::fmt::Error> {
+    if json {
+        let set_vec = |s: &BTreeSet<String>| s.iter().cloned().collect::<Vec<_>>();
+        let local_algorithms: Vec<FlexAlgoLocalJson> = isis
+            .flex_algo
+            .config
+            .iter()
+            .map(|(algo, entry)| FlexAlgoLocalJson {
+                algorithm: *algo,
+                metric_type: match entry.metric_type {
+                    Some(t) => format!("{:?}", t).to_lowercase(),
+                    None => "igp".to_string(),
+                },
+                priority: entry.priority,
+                advertise_definition: entry.advertise_definition == Some(true),
+                include_any: set_vec(&entry.include_any),
+                include_all: set_vec(&entry.include_all),
+                exclude_any: set_vec(&entry.exclude_any),
+                srlg_exclude: set_vec(&entry.srlg_exclude),
+            })
+            .collect();
+
+        let local_srv6_locators: Vec<FlexAlgoSrv6LocatorJson> = isis
+            .config
+            .sr_srv6_flex_algo_locators
+            .iter()
+            .map(|(algo, name)| FlexAlgoSrv6LocatorJson {
+                algorithm: *algo,
+                locator_name: name.clone(),
+                prefix: isis
+                    .sr_flex_algo_locators
+                    .get(algo)
+                    .and_then(|l| l.prefix)
+                    .map(|p| p.to_string()),
+                end_sid: isis.sr_flex_algo_end_sid.get(algo).map(|s| s.to_string()),
+            })
+            .collect();
+
+        let mut levels = Vec::new();
+        for level in &[Level::L1, Level::L2] {
+            let peer_fad = isis.peer_fad.get(level);
+            let peer_algos = isis.peer_algos.get(level);
+            let peer_algo_srv6 = isis.peer_algo_srv6.get(level);
+            if peer_fad.is_empty() && peer_algos.is_empty() && peer_algo_srv6.is_empty() {
+                continue;
+            }
+            let mut peer_fads = Vec::new();
+            for (sys_id, fads) in peer_fad.iter() {
+                let hostname = hostname_for(isis, level, sys_id);
+                for (algo, fad) in fads {
+                    peer_fads.push(PeerFadJson {
+                        system_id: sys_id.to_string(),
+                        hostname: hostname.clone(),
+                        algorithm: *algo,
+                        priority: fad.priority,
+                        metric_type: fad.metric_type,
+                        calc_type: fad.calc_type,
+                    });
+                }
+            }
+            let peer_sr_algorithms: Vec<PeerAlgoJson> = peer_algos
+                .iter()
+                .map(|(sys_id, algos)| PeerAlgoJson {
+                    system_id: sys_id.to_string(),
+                    hostname: hostname_for(isis, level, sys_id),
+                    algorithms: algos.iter().map(|a| a.to_string()).collect(),
+                })
+                .collect();
+            let mut peer_srv6_locators = Vec::new();
+            for (sys_id, locs) in peer_algo_srv6.iter() {
+                let hostname = hostname_for(isis, level, sys_id);
+                for (algo, loc) in locs {
+                    peer_srv6_locators.push(PeerSrv6LocJson {
+                        system_id: sys_id.to_string(),
+                        hostname: hostname.clone(),
+                        algorithm: *algo,
+                        locator: loc.locator.to_string(),
+                        end_sid: loc.end.sid.to_string(),
+                    });
+                }
+            }
+            levels.push(FlexAlgoLevelJson {
+                level: match level {
+                    Level::L1 => "Level-1".to_string(),
+                    Level::L2 => "Level-2".to_string(),
+                },
+                peer_fads,
+                peer_sr_algorithms,
+                peer_srv6_locators,
+            });
+        }
+
+        let view = FlexAlgoViewJson {
+            area: format_area_id(&isis.config.net),
+            local_algorithms,
+            local_srv6_locators,
+            levels,
+        };
+        return Ok(serde_json::to_string_pretty(&view)
+            .unwrap_or_else(|e| format!("{{\"error\": \"{e}\"}}")));
+    }
+
     let mut buf = String::new();
     writeln!(buf, "Area {}:", format_area_id(&isis.config.net))?;
 
@@ -3234,11 +3657,136 @@ fn show_isis_flex_algo(
 /// `show isis flex-algo route` — every per-algo IPv4 route, grouped
 /// by level then algorithm. Renders nothing for algos that haven't
 /// produced any routes yet (cold start, no peer Prefix-SIDs).
+fn level_long(level: &Level) -> String {
+    match level {
+        Level::L1 => "Level-1".to_string(),
+        Level::L2 => "Level-2".to_string(),
+    }
+}
+
+#[derive(Serialize)]
+struct FlexRouteNexthopJson {
+    address: String,
+    interface: String,
+}
+
+#[derive(Serialize)]
+struct FlexRouteJson {
+    prefix: String,
+    metric: u32,
+    /// Resolved per-algo Prefix-SID label (SR-MPLS only; `null` on the
+    /// SRv6 dataplane, where transit is plain IPv6 to the locator).
+    label: Option<u32>,
+    nexthops: Vec<FlexRouteNexthopJson>,
+}
+
+#[derive(Serialize)]
+struct FlexAlgoRouteGroupJson {
+    level: String,
+    algorithm: u8,
+    /// `ipv4` (SR-MPLS) or `srv6` (per-algo locator routes).
+    family: String,
+    routes: Vec<FlexRouteJson>,
+}
+
+#[derive(Serialize)]
+struct FlexAlgoRoutesJson {
+    area: String,
+    groups: Vec<FlexAlgoRouteGroupJson>,
+}
+
+fn flex_algo_routes_json(isis: &Isis, filter: Option<u8>) -> String {
+    let mut groups = Vec::new();
+
+    // SR-MPLS (IPv4) per-algo routes.
+    for level in &[Level::L1, Level::L2] {
+        let per_algo = isis.rib_flex_algo.get(level);
+        for (algo, rib) in per_algo {
+            if let Some(f) = filter
+                && *algo != f
+            {
+                continue;
+            }
+            if rib.iter().next().is_none() {
+                continue;
+            }
+            let routes = rib
+                .iter()
+                .map(|(prefix, route)| FlexRouteJson {
+                    prefix: prefix.to_string(),
+                    metric: route.metric,
+                    label: route.sid,
+                    nexthops: route
+                        .nhops
+                        .iter()
+                        .map(|(addr, nhop)| FlexRouteNexthopJson {
+                            address: addr.to_string(),
+                            interface: isis.ifname(nhop.ifindex),
+                        })
+                        .collect(),
+                })
+                .collect();
+            groups.push(FlexAlgoRouteGroupJson {
+                level: level_long(level),
+                algorithm: *algo,
+                family: "ipv4".to_string(),
+                routes,
+            });
+        }
+    }
+
+    // SRv6 per-algo locator routes (IPv6).
+    for level in &[Level::L1, Level::L2] {
+        let per_algo = isis.rib6_flex_algo.get(level);
+        for (algo, rib) in per_algo {
+            if let Some(f) = filter
+                && *algo != f
+            {
+                continue;
+            }
+            if rib.iter().next().is_none() {
+                continue;
+            }
+            let routes = rib
+                .iter()
+                .map(|(prefix, route)| FlexRouteJson {
+                    prefix: prefix.to_string(),
+                    metric: route.metric,
+                    label: None,
+                    nexthops: route
+                        .nhops
+                        .iter()
+                        .map(|(addr, nhop)| FlexRouteNexthopJson {
+                            address: addr.to_string(),
+                            interface: isis.ifname(nhop.ifindex),
+                        })
+                        .collect(),
+                })
+                .collect();
+            groups.push(FlexAlgoRouteGroupJson {
+                level: level_long(level),
+                algorithm: *algo,
+                family: "srv6".to_string(),
+                routes,
+            });
+        }
+    }
+
+    let view = FlexAlgoRoutesJson {
+        area: format_area_id(&isis.config.net),
+        groups,
+    };
+    serde_json::to_string_pretty(&view).unwrap_or_else(|e| format!("{{\"error\": \"{e}\"}}"))
+}
+
 fn show_isis_flex_algo_route(
     isis: &Isis,
     _args: Args,
-    _json: bool,
+    json: bool,
 ) -> std::result::Result<String, std::fmt::Error> {
+    if json {
+        return Ok(flex_algo_routes_json(isis, None));
+    }
     write_flex_algo_routes(isis, None)
 }
 
@@ -3248,11 +3796,17 @@ fn show_isis_flex_algo_route(
 fn show_isis_flex_algo_route_algo(
     isis: &Isis,
     mut args: Args,
-    _json: bool,
+    json: bool,
 ) -> std::result::Result<String, std::fmt::Error> {
     let Some(algo) = args.u8() else {
+        if json {
+            return Ok("{\"error\": \"missing or invalid algorithm id\"}".to_string());
+        }
         return Ok("% Missing or invalid algorithm id\n".to_string());
     };
+    if json {
+        return Ok(flex_algo_routes_json(isis, Some(algo)));
+    }
     write_flex_algo_routes(isis, Some(algo))
 }
 

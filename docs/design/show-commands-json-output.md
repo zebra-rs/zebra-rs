@@ -163,8 +163,8 @@ pending a finalized JSON schema.
 
 | Command | Description | JSON |
 |---|---|---|
-| `show isis` | Basic IS-IS information | text only |
-| `show isis summary` | Summary | text only |
+| `show isis` | Basic IS-IS information | ✅ |
+| `show isis summary` | Summary | ✅ |
 | `show isis route [detail]` | Route table (TI-LFA/SR-MPLS/SRv6) | ✅ |
 | `show isis topology` | SPF tree (per-AFI) | ✅ |
 | `show isis database [detail]` | LSDB | ✅ |
@@ -179,11 +179,11 @@ pending a finalized JSON schema.
 | `show isis checkpoint` | GR on-disk checkpoint | ✅ |
 | `show isis ti-lfa` | TI-LFA repair paths (graph view) | ✅ |
 | `show isis repair-list [detail]` | TI-LFA repair-list | ✅ |
-| `show isis egress-protection` | Mirror SID egress-protection entries | text only |
-| `show isis fast-reroute summary` | Per-level TI-LFA counters | text only |
-| `show isis fast-reroute prefix <A.B.C.D/M> detail` | Per-prefix TI-LFA repair | text only |
-| `show isis flex-algo` | Flexible Algorithm (RFC 9350) state | text only |
-| `show isis flex-algo route [algorithm <id>]` | Per-algorithm IPv4 routes | text only |
+| `show isis egress-protection` | Mirror SID egress-protection entries | ✅ |
+| `show isis fast-reroute summary` | Per-level TI-LFA counters | ✅ |
+| `show isis fast-reroute prefix <A.B.C.D/M> detail` | Per-prefix TI-LFA repair | ✅ |
+| `show isis flex-algo` | Flexible Algorithm (RFC 9350) state | ✅ |
+| `show isis flex-algo route [algorithm <id>]` | Per-algorithm IPv4 routes | ✅ |
 | `show isis vrf <name> …` | Per-VRF (redirected; mirrors above) | per sibling |
 
 ## IPv6 ND (`zebra-rs/src/nd/show.rs`)
@@ -240,7 +240,7 @@ pending a finalized JSON schema.
 | BGP | 25 | 20 | 5 |
 | OSPFv2 | 13 | 13 | 0 |
 | OSPFv3 | 12 | 12 | 0 |
-| IS-IS | 21 | 14 | 7 |
+| IS-IS | 21 | 21 | 0 |
 | IPv6 ND | 2 | 2 | 0 |
 | BFD | 3 | 3 | 0 |
 | STAMP | 3 | 3 | 0 |
@@ -261,8 +261,6 @@ JSON":
 - **BGP:** `show bgp <afi> <prefix> longer-prefix`,
   `show bgp evpn ethernet-segment`, `show bgp attributes`,
   `show bgp neighbor <addr> rtcv4`
-- **IS-IS:** `show isis` (root), `summary`, `egress-protection`,
-  `fast-reroute …`, `flex-algo [route …]`
 
 ### Placeholder JSON (BGP ◐ — honors `-j`, emits empty array/object)
 
