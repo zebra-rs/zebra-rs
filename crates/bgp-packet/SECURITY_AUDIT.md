@@ -2,6 +2,7 @@
 
 **Original audit date:** 2026-04-09
 **Re-verified:** 2026-06-26 against the current workspace tree
+**Re-audited:** 2026-06-27 (full parse + emit sweep; see the re-audit section)
 **Crate version:** 26.6.2 (workspace versioning)
 **nom version:** 7.1.3
 **Scope:** current workspace tree under `crates/bgp-packet/`
@@ -250,6 +251,55 @@ With this, every residual encoder-side hardening item is resolved.
    `CapVersion`, `CapUnknown`, `CapAddPath`, `CapRestart`, `CapLlgr`,
    `CapPathLimit`) clamp to their wire budgets, and `CapEmit::emit()` now
    `saturating_add`s the `len() + 2` parameter length.
+
+## Encoder-side & parse-side re-audit (2026-06-27)
+
+A fresh sweep of the whole crate for panic-on-malformed-input and
+silent-truncation bugs, beyond the four findings above.
+
+**Parse side (untrusted input): clean.** Every NLRI and attribute parser that
+reads attacker-controlled bytes guards its slice accesses and prefix-length
+bounds before use — verified for ipv4/ipv6, vpnv4/vpnv6, labeled-unicast v4/v6,
+EVPN, MUP (all four route types), flowspec, SR-Policy, and BGP-LS, plus
+`prefix_sid` and `pmsi_tunnel`. All length subtractions are guarded
+(`plen -= 88` behind `plen >= 88`, `plen -= 24` behind `plen < 24`,
+`length - offset` behind `offset > length`); there is no raw `split_at()` on
+untrusted input (the lone use is `split_at_checked`); and `take_inner_tlv`'s
+`input[0]` is only reached inside `while !rest.is_empty()`. No new remote
+panic/DoS was found.
+
+**Encoder side — one panic fixed.** `nlri_mup.rs` T2ST emit wrote the
+high-aligned TEID as `teid.to_be_bytes()[..tsize]`, where `tsize` could exceed
+the 4-octet `u32` for an out-of-range `endpoint_len`, panicking on a
+locally-constructed route. Fixed by clamping the TEID width to 4 (`emit` and
+`body_len` share a `t2st_teid_size()` helper); the clamp is a no-op for every
+parsed route. (Not remotely reachable — the parser bounds `endpoint_len`.)
+
+**Encoder side — remaining `len() as u8` casts, reviewed and left as-is.** The
+NLRI/attribute emitters write a 1-octet length as `payload.len() as u8`
+(EVPN ×11, MUP body, `aspath` segment count, `tunnel_encap` / `srpolicy` TLV
+value). Unlike the capability values, these length octets precede a fixed or
+opaque **structure**, so the capability-style clamp does not apply: clamping the
+length would desync it from the body, and clamping the body would corrupt the
+route. Each was classified rather than mechanically changed:
+
+- *Fixed-size bodies* (EVPN EthernetAd / Mac / Multicast / EthernetSeg /
+  IpPrefix / Smet / IgmpJoin / IgmpLeave / PerRegionImet / SPmsi): the body is a
+  small fixed structure (≲ 60 octets), so `payload.len()` cannot reach 256. The
+  cast is unreachable.
+- *Variable opaque bodies* (EVPN LeafAd `route_key`, MUP `Unknown` body,
+  `tunnel_encap` / `srpolicy` TLV value): bounded ≤ 255 on the parse path by the
+  enclosing length octet, so a parsed-then-re-emitted object never truncates.
+  Only a locally-constructed object exceeding 255 octets would, and such an
+  object is simply unencodable in a 1-octet length field — there is no correct
+  clamp.
+- *AS_PATH segment count* (`aspath.rs`): a segment over 255 ASes must be split
+  into multiple segments (RFC 4271 §5.1.2). Unreachable in practice (no AS path
+  approaches 255 hops); left unchanged.
+
+These are local packet-construction concerns, not network-triggered bugs, and
+carry the same low severity as the (now-fixed) capability casts. They are
+documented here and intentionally left as-is.
 
 ## Verification
 
