@@ -178,6 +178,31 @@ module zebra-bgp-vrf {
     }
   }
 
+  grouping bgp-vrf-redistribute {
+    description
+      "Per-VRF, per-AFI redistribution of RIB routes into this VRF's
+       BGP table. A source's routes are taken from the VRF's own
+       routing table (`vrf_tables[table_id]`, never the default
+       table), originated into the per-VRF Loc-RIB, and exported to
+       the global VPNv4 / VPNv6 RIB with the VRF's RD and export
+       route-targets — the standard IOS-XR `router bgp … vrf …
+       address-family … redistribute …` model.
+
+       Bare presence containers (no per-source modifiers yet); the
+       redistributed route's MED follows the source RIB cost.
+       `connected` and `static` are wired today; IS-IS / OSPF land in
+       a follow-up.";
+    container redistribute {
+      presence "Enable route redistribution into this VRF's BGP table";
+      container connected {
+        presence "Redistribute this VRF's connected routes";
+      }
+      container static {
+        presence "Redistribute this VRF's static routes";
+      }
+    }
+  }
+
   grouping bgp-vrf-afi-safi {
     description
       "Per-VRF address-family configuration. Only the IPv4 and IPv6
@@ -203,6 +228,7 @@ module zebra-bgp-vrf {
             type inet:ipv4-prefix;
           }
         }
+        uses bgp-vrf-redistribute;
       }
       container ipv6 {
         presence "Enables the IPv6 unicast family for this VRF";
@@ -212,6 +238,7 @@ module zebra-bgp-vrf {
             type inet:ipv6-prefix;
           }
         }
+        uses bgp-vrf-redistribute;
       }
       container mup {
         description

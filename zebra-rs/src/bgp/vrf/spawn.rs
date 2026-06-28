@@ -128,25 +128,31 @@ pub fn spawn_bgp_vrf(
     // later.
     let kernel_table_id = kernel.as_ref().map(|k| k.table_id);
     let kernel_ifindex = kernel.as_ref().map(|k| k.ifindex);
-    let ctx = match kernel {
+    let (ctx, rib_rx) = match kernel {
         Some(k) => {
             // Mint a fresh `RibClient` for this VRF. The
-            // subscription's `vrf_id` tells RIB to route the
-            // task's route installs into `vrf_tables[table_id]`.
-            // The `RibRx` half is leaked — per-VRF subscribers
-            // don't yet consume RIB outbound notifications; that's
-            // a follow-up.
+            // subscription's `vrf_id` tells RIB to route the task's
+            // route installs into `vrf_tables[table_id]` and (now that
+            // the `RibRx` half is consumed) to stream this VRF's
+            // redistributed routes back for VPNv4/v6 origination.
             let proto = format!("bgp:vrf:{name}");
             let (rib_client, rib_rx) = rib_subscriber.subscribe_for_vrf(&proto, k.table_id);
-            Box::leak(Box::new(rib_rx));
-            ProtoContext::for_vrf(rib_client, k.table_id, name.clone())
+            (
+                ProtoContext::for_vrf(rib_client, k.table_id, name.clone()),
+                rib_rx,
+            )
         }
         None => {
             tracing::debug!(
                 vrf = %name,
                 "bgp: spawning per-VRF task with placeholder context (kernel VRF not yet known)",
             );
-            ProtoContext::default_table_no_rib()
+            // No subscription without a kernel table; hand the task a
+            // closed channel so its redistribute select arm stays inert
+            // until `maybe_respawn_vrf_with_kernel_ctx` re-spawns with a
+            // live subscription.
+            let (_closed_tx, rib_rx) = tokio::sync::mpsc::unbounded_channel();
+            (ProtoContext::default_table_no_rib(), rib_rx)
         }
     };
     // Per-VRF override on router-id wins over the global one. An
@@ -160,6 +166,7 @@ pub fn spawn_bgp_vrf(
         asn,
         label,
         global_tx,
+        rib_rx,
     );
     // Inter-AS Option AB: re-export imported VPNv4 routes (see the field
     // doc on `BgpVrf`). Carried from the staged VRF config.
@@ -191,6 +198,14 @@ pub fn spawn_bgp_vrf(
     // promotes them to VPNv4 advertisements toward PE peers.
     let network_count = materialize_self_originated_networks(&mut vrf, cfg)
         + materialize_self_originated_networks_v6(&mut vrf, cfg);
+
+    // Replay staged `afi-safi {ipv4,ipv6} redistribute {connected,
+    // static}` by (re)sending RedistAdd to the RIB. The walk's matching
+    // routes stream back on `rib_rx` for origination + VPNv4/v6 export
+    // once the event loop runs. A placeholder-ctx spawn has no live RIB
+    // client, so the sends are dropped harmlessly; the kernel-ctx
+    // respawn (which reads the same staged config) replays them.
+    let redist_count = materialize_vrf_redistribute(&vrf, cfg);
 
     // Install the AF_MPLS DecapVrf ILM at the allocated label so a
     // remote PE's VPNv4 packet with this label pops + lands in
@@ -267,6 +282,7 @@ pub fn spawn_bgp_vrf(
         srv6_sid = ?srv6_sid.map(|(addr, _)| addr),
         peers = peer_count,
         networks = network_count,
+        redistribute = redist_count,
         "bgp: spawned per-VRF task",
     );
     BgpVrfHandle {
@@ -384,13 +400,45 @@ fn materialize_self_originated_networks_v6(vrf: &mut BgpVrf, cfg: &BgpVrfConfig)
     af.networks.len()
 }
 
+/// Replay `afi-safi {ipv4,ipv6} redistribute {connected,static}` from
+/// the staged config by (re)sending RedistAdd to the RIB for each
+/// enabled source. Spawn-time twin of the dynamic
+/// [`BgpVrfMsg::RedistEnable`] path, so initial-config and post-spawn
+/// subscription stay identical. Returns the number of (afi, source)
+/// subscriptions replayed.
+fn materialize_vrf_redistribute(vrf: &BgpVrf, cfg: &BgpVrfConfig) -> usize {
+    let mut count = 0;
+    if let Some(af) = cfg.ipv4_unicast.as_ref() {
+        for source in &af.redistribute {
+            vrf.redist_subscribe(crate::rib::RedistAfi::Ipv4, *source);
+            count += 1;
+        }
+    }
+    if let Some(af) = cfg.ipv6_unicast.as_ref() {
+        for source in &af.redistribute {
+            vrf.redist_subscribe(crate::rib::RedistAfi::Ipv6, *source);
+            count += 1;
+        }
+    }
+    count
+}
+
 /// Send `Shutdown` to the per-VRF task. Caller drops the handle
 /// from `vrf_registry` *after* this returns; dropping the handle
 /// without sending `Shutdown` first would leak a final
 /// `BgpVrfMsg` send window — the FSM might miss state it needs to
 /// flush. The handle's `Task` aborts on drop regardless, so a
 /// failure path here doesn't strand the runtime.
-pub fn despawn_bgp_vrf(name: &str, handle: &BgpVrfHandle) {
+pub fn despawn_bgp_vrf(name: &str, handle: &BgpVrfHandle, rib_subscriber: &RibSubscriber) {
+    // Drop this VRF's RIB redistribute subscription (client-registry +
+    // redist-filter rows) so a respawn under the same `bgp:vrf:<name>`
+    // proto doesn't leave a stale subscriber shadowing the live one —
+    // `subscriber_for_proto` returns the first match by name. ProtoCleanup
+    // for a per-VRF proto only drops these rows (the VRF's routes live in
+    // `vrf_tables` and are reclaimed by `VrfDel`), so it's safe to call on
+    // both teardown and respawn. Sent before `Shutdown` so it's ordered
+    // ahead of any later re-subscribe by the respawn's `spawn_bgp_vrf`.
+    rib_subscriber.send_proto_cleanup(&format!("bgp:vrf:{name}"));
     if handle.inbox.send(BgpVrfMsg::Shutdown).is_err() {
         // Receiver already gone — the task exited on its own
         // (e.g. inbox-drop path). Nothing left to do.
@@ -462,6 +510,7 @@ mod tests {
         // the rx is dropped at end of scope.
         let (global_tx, _global_rx) = unbounded_channel::<BgpGlobalMsg>();
         let ctx = ProtoContext::default_table_no_rib();
+        let (_rib_tx, rib_rx) = unbounded_channel();
         let (mut vrf, _inbox) = BgpVrf::new(
             "v1".to_string(),
             ctx,
@@ -469,6 +518,7 @@ mod tests {
             65000,
             /* label */ 16,
             global_tx,
+            rib_rx,
         );
 
         let mut cfg = BgpVrfConfig::default();
@@ -517,6 +567,7 @@ mod tests {
 
         let (global_tx, _global_rx) = unbounded_channel::<BgpGlobalMsg>();
         let ctx = ProtoContext::default_table_no_rib();
+        let (_rib_tx, rib_rx) = unbounded_channel();
         let (mut vrf, _inbox) = BgpVrf::new(
             "v0".to_string(),
             ctx,
@@ -524,6 +575,7 @@ mod tests {
             65000,
             /* label */ 16,
             global_tx,
+            rib_rx,
         );
 
         let cfg = BgpVrfConfig::default();

@@ -1598,7 +1598,7 @@ impl Bgp {
             return;
         };
         let preserved_label = if let Some(handle) = self.vrf_registry.remove(name) {
-            super::vrf::despawn_bgp_vrf(name, &handle);
+            super::vrf::despawn_bgp_vrf(name, &handle, &self.rib_subscriber);
             self.unregister_vrf_show(name);
             self.peer_index.retain(|_, owner| owner != name);
             // Withdraw the stale SID by its (old-prefix) address.
@@ -2194,7 +2194,7 @@ impl Bgp {
 
         for name in to_despawn {
             if let Some(handle) = self.vrf_registry.remove(&name) {
-                super::vrf::despawn_bgp_vrf(&name, &handle);
+                super::vrf::despawn_bgp_vrf(&name, &handle, &self.rib_subscriber);
                 self.unregister_vrf_show(&name);
                 // Withdraw the AF_MPLS DecapVrf ILM ahead of
                 // returning the label. The netlink delete keys off
@@ -2348,7 +2348,7 @@ impl Bgp {
         // new handle.
         let (preserved_label, preserved_sid) = if let Some(handle) = self.vrf_registry.remove(name)
         {
-            super::vrf::despawn_bgp_vrf(name, &handle);
+            super::vrf::despawn_bgp_vrf(name, &handle, &self.rib_subscriber);
             self.unregister_vrf_show(name);
             // Clear stale `peer_index` entries — the spawned task
             // is about to push fresh RegisterPeer messages.
@@ -3442,7 +3442,7 @@ impl Bgp {
         };
         let kernel = self.rib_known_vrfs.get(name).cloned();
         let preserved_sid = if let Some(handle) = self.vrf_registry.remove(name) {
-            super::vrf::despawn_bgp_vrf(name, &handle);
+            super::vrf::despawn_bgp_vrf(name, &handle, &self.rib_subscriber);
             self.unregister_vrf_show(name);
             self.peer_index.retain(|_, owner| owner != name);
             handle.srv6_sid

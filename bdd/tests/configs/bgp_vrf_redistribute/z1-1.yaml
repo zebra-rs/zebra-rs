@@ -1,0 +1,47 @@
+# z1 — PE originating a VRF's connected + static routes as VPNv4 via
+# `redistribute`. vrf-blue (RD 65001:100, RT 65001:100 imp/exp) holds
+# interface vc1 (10.1.0.1/24 → connected 10.1.0.0/24 in the VRF table)
+# and a static route 10.2.0.0/24 via the on-link host 10.1.0.2. Both
+# are pulled into the per-VRF BGP table by `afi-safi ipv4 redistribute
+# {connected,static}` and exported to VPNv4 over the iBGP session to z2.
+vrf:
+- name: vrf-blue
+  ipv4:
+    route-target:
+      import:
+      - 65001:100
+      export:
+      - 65001:100
+interface:
+- if-name: vc1
+  vrf: vrf-blue
+  ipv4:
+    address: 10.1.0.1/24
+router:
+  bgp:
+    global:
+      as: 65001
+      router-id: 192.168.0.1
+    neighbor:
+    - remote-address: 192.168.0.2
+      afi-safi:
+      - name: vpnv4
+        enabled: true
+      enabled: true
+      remote-as: 65001
+    vrf:
+    - name: vrf-blue
+      rd: 65001:100
+      afi-safi:
+        ipv4:
+          redistribute:
+            connected: {}
+            static: {}
+  static:
+    vrf:
+    - name: vrf-blue
+      ipv4:
+        route:
+        - prefix: 10.2.0.0/24
+          nexthop:
+          - address: 10.1.0.2

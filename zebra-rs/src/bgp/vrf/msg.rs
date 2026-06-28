@@ -114,6 +114,24 @@ pub enum BgpVrfMsg {
     /// IPv6 counterpart of [`Self::WithdrawNetwork`].
     WithdrawNetworkV6 { prefix: Ipv6Net },
 
+    /// A `redistribute {connected,static}` source was enabled for this
+    /// VRF/AFI on a running task. The task sends `Message::RedistAdd`
+    /// to the RIB (proto `bgp:vrf:<name>`, vrf_id = this VRF's table
+    /// id), so the RIB walks `vrf_tables[table_id]` and streams the
+    /// matching routes back on `rib_rx` for origination + VPN export.
+    RedistEnable {
+        afi: crate::rib::RedistAfi,
+        source: crate::bgp::config::BgpRedistSource,
+    },
+
+    /// Inverse of [`Self::RedistEnable`]: a redistribute source was
+    /// removed. The task sends `Message::RedistDel`; the RIB replays
+    /// the matching prefixes as `RouteDel` so the task withdraws them.
+    RedistDisable {
+        afi: crate::rib::RedistAfi,
+        source: crate::bgp::config::BgpRedistSource,
+    },
+
     /// Snapshot of the global colour-steering state (Color→Flex-Algo
     /// bindings + the per-algo SRv6 End-SID shadow) so the per-VRF FIB
     /// install can steer imported SRv6 L3VPN routes into a Flex-Algo.
