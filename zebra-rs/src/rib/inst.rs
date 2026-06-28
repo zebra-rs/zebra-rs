@@ -2022,6 +2022,11 @@ impl Rib {
         }
     }
 
+    /// Walk the table the subscriber is bound to. A subscriber's
+    /// `vrf_id` (recorded at `Subscribe` time) selects the table:
+    /// `0` walks the default `self.table` / `self.table_v6`; any other
+    /// value is the kernel table id keying `vrf_tables`. A VRF whose
+    /// table has since been torn down walks nothing.
     fn redist_walk(
         &self,
         proto: &str,
@@ -2031,12 +2036,33 @@ impl Rib {
         op: super::redist::WalkOp,
         tx: &UnboundedSender<RibRx>,
     ) {
+        let vrf_id = self
+            .client_registry
+            .subscriber_for_proto(proto)
+            .map(|s| s.vrf_id)
+            .unwrap_or(0);
         match afi {
             super::RedistAfi::Ipv4 => {
-                super::redist::walk_v4(&self.table, proto, rtype, subtypes, op, tx);
+                let table = if vrf_id == 0 {
+                    &self.table
+                } else {
+                    match self.vrf_tables.get(&vrf_id) {
+                        Some(t) => &t.table,
+                        None => return,
+                    }
+                };
+                super::redist::walk_v4(table, proto, rtype, subtypes, op, tx);
             }
             super::RedistAfi::Ipv6 => {
-                super::redist::walk_v6(&self.table_v6, proto, rtype, subtypes, op, tx);
+                let table = if vrf_id == 0 {
+                    &self.table_v6
+                } else {
+                    match self.vrf_tables.get(&vrf_id) {
+                        Some(t) => &t.table_v6,
+                        None => return,
+                    }
+                };
+                super::redist::walk_v6(table, proto, rtype, subtypes, op, tx);
             }
         }
     }

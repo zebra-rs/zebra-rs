@@ -17,9 +17,13 @@
 //!     after its nexthop became (un)resolvable via the debounced
 //!     resolve / link up-down / address add-del paths.
 //!
-//! Still default-table only: `notify_v{4,6}_delta` delivers to
-//! `vrf_id == 0` subscribers, so VRF-table selection changes need a
-//! separate per-VRF hook (see `notify_v4_delta`).
+//! Both the default table and per-VRF tables feed the hook:
+//! `notify_v{4,6}_delta` takes a `target_vrf_id` and delivers only to
+//! subscribers bound to that VRF. The default-VRF route paths pass
+//! `0`; the per-VRF paths (`ipv{4,6}_route_{add,del}_vrf` /
+//! `ipv{4,6}_vrf_sync` on `vrf_tables[table_id]`) pass that table id.
+//! The initial walk-and-replay (`redist_walk`) likewise selects the
+//! subscriber's table from its recorded `vrf_id`.
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 
@@ -382,23 +386,27 @@ pub(super) fn selected_changed_v6(
     key(prefix, before) != key(prefix, after)
 }
 
-/// Notify every default-VRF subscriber whose filter matches the
-/// before/after transition of the selected entry at `prefix`. Single-
-/// entry batches, `bulk: More`. EoR is reserved for initial walk /
-/// `Redist{Add,Update,Del}` replays — steady-state never emits Eor.
+/// Notify every subscriber bound to `target_vrf_id` whose filter
+/// matches the before/after transition of the selected entry at
+/// `prefix`. Single-entry batches, `bulk: More`. EoR is reserved for
+/// initial walk / `Redist{Add,Update,Del}` replays — steady-state
+/// never emits Eor.
 ///
-/// VRF-attached subscribers (`vrf_id != 0`) are skipped here because
-/// `notify_v*_delta` is called from the default-VRF route paths
-/// (`Rib::ipv*_route_{add,del}` on `self.table` / `self.table_v6`).
-/// A per-VRF resolve + select pipeline can install a sibling hook
-/// that walks `vrf_tables[vrf_id]` and pushes to subscribers bound
-/// to that VRF.
+/// `target_vrf_id` scopes delivery to the table the transition came
+/// from: the default-VRF route paths (`Rib::ipv*_route_{add,del}` /
+/// `ipv*_default_sync` on `self.table` / `self.table_v6`) pass `0`,
+/// and the per-VRF paths (`ipv*_route_{add,del}_vrf` /
+/// `ipv*_vrf_sync` on `vrf_tables[table_id]`) pass that VRF's kernel
+/// table id. A subscriber whose `vrf_id` doesn't match is skipped so
+/// a default-table change never leaks to a VRF subscriber and vice
+/// versa.
 pub fn notify_v4_delta(
     filters: &HashMap<String, FilterMap>,
     registry: &ClientRegistry,
     prefix: &Ipv4Net,
     before: Option<&RibEntry>,
     after: Option<&RibEntry>,
+    target_vrf_id: u32,
 ) {
     if before.is_none() && after.is_none() {
         return;
@@ -407,7 +415,7 @@ pub fn notify_v4_delta(
         let Some(sub) = registry.subscriber_for_proto(proto) else {
             continue;
         };
-        if sub.vrf_id != 0 {
+        if sub.vrf_id != target_vrf_id {
             continue;
         }
         let tx = &sub.rib_rx_tx;
@@ -425,12 +433,15 @@ pub fn notify_v4_delta(
     }
 }
 
+/// IPv6 sibling of [`notify_v4_delta`]; see its docstring for the
+/// `target_vrf_id` scoping rules.
 pub fn notify_v6_delta(
     filters: &HashMap<String, FilterMap>,
     registry: &ClientRegistry,
     prefix: &Ipv6Net,
     before: Option<&RibEntry>,
     after: Option<&RibEntry>,
+    target_vrf_id: u32,
 ) {
     if before.is_none() && after.is_none() {
         return;
@@ -439,7 +450,7 @@ pub fn notify_v6_delta(
         let Some(sub) = registry.subscriber_for_proto(proto) else {
             continue;
         };
-        if sub.vrf_id != 0 {
+        if sub.vrf_id != target_vrf_id {
             continue;
         }
         let tx = &sub.rib_rx_tx;
@@ -570,8 +581,10 @@ fn send_v6_one(tx: &UnboundedSender<RibRx>, rtype: RibType, op: WalkOp, entry: R
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::rib::client::ProtoId;
     use crate::rib::nexthop::NexthopUni;
     use std::net::IpAddr;
+    use tokio::sync::mpsc::unbounded_channel;
 
     fn static_uni(addr: &str, metric: u32) -> RibEntry {
         let mut e = RibEntry::new(RibType::Static);
@@ -688,5 +701,86 @@ mod tests {
         assert!(!redistributable_v6(&"::1/128".parse().unwrap()));
         assert!(!redistributable_v6(&"fe80::/64".parse().unwrap()));
         assert!(redistributable_v6(&"2001:db8::/64".parse().unwrap()));
+    }
+
+    /// Build a `(filters, registry)` pair with one default-VRF
+    /// subscriber (`vrf_id 0`) and one VRF subscriber (`vrf_id 100`),
+    /// each carrying a wildcard Connected/IPv4 filter row, returning
+    /// their receivers so a test can assert who heard a delta.
+    fn two_subscribers() -> (
+        HashMap<String, FilterMap>,
+        ClientRegistry,
+        tokio::sync::mpsc::UnboundedReceiver<RibRx>,
+        tokio::sync::mpsc::UnboundedReceiver<RibRx>,
+    ) {
+        let mut reg = ClientRegistry::new();
+        let (tx_def, rx_def) = unbounded_channel();
+        let (tx_vrf, rx_vrf) = unbounded_channel();
+        reg.register_with_id(ProtoId::from_raw(0), "bgp", tx_def, 0);
+        reg.register_with_id(ProtoId::from_raw(1), "bgp:vrf:N3", tx_vrf, 100);
+
+        let mut filters: HashMap<String, FilterMap> = HashMap::new();
+        for proto in ["bgp", "bgp:vrf:N3"] {
+            let mut fm = FilterMap::new();
+            fm.insert((RedistAfi::Ipv4, RibType::Connected), BTreeSet::new());
+            filters.insert(proto.to_string(), fm);
+        }
+        (filters, reg, rx_def, rx_vrf)
+    }
+
+    fn connected_link(ifindex: u32) -> RibEntry {
+        let mut e = RibEntry::new(RibType::Connected);
+        e.nexthop = Nexthop::Link(ifindex);
+        e.ifindex = ifindex;
+        e
+    }
+
+    #[test]
+    fn notify_v4_delta_scopes_to_target_vrf() {
+        // The crux of per-VRF redistribution: a selection change in a
+        // VRF table must reach only the subscriber bound to that VRF,
+        // and a default-table change must reach only the default
+        // subscriber. Cross-delivery would advertise a VRF's CE prefix
+        // into the global table (and vice versa).
+        let (filters, reg, mut rx_def, mut rx_vrf) = two_subscribers();
+        let prefix: Ipv4Net = "203.0.113.0/24".parse().unwrap();
+        let conn = connected_link(7);
+
+        // Connected route appears in VRF 100 → only the VRF subscriber.
+        notify_v4_delta(&filters, &reg, &prefix, None, Some(&conn), 100);
+        assert!(
+            matches!(rx_vrf.try_recv(), Ok(RibRx::RouteAdd { .. })),
+            "VRF subscriber must hear the VRF-100 add"
+        );
+        assert!(
+            rx_def.try_recv().is_err(),
+            "default subscriber must not hear a VRF-100 change"
+        );
+
+        // Same prefix appears in the default table → only the default
+        // subscriber.
+        notify_v4_delta(&filters, &reg, &prefix, None, Some(&conn), 0);
+        assert!(
+            matches!(rx_def.try_recv(), Ok(RibRx::RouteAdd { .. })),
+            "default subscriber must hear the default-table add"
+        );
+        assert!(
+            rx_vrf.try_recv().is_err(),
+            "VRF subscriber must not hear a default-table change"
+        );
+    }
+
+    #[test]
+    fn notify_v4_delta_unknown_vrf_reaches_nobody() {
+        // A transition tagged with a table id no subscriber is bound to
+        // is silently dropped — no spurious delivery to the default or
+        // any other VRF.
+        let (filters, reg, mut rx_def, mut rx_vrf) = two_subscribers();
+        let prefix: Ipv4Net = "203.0.113.0/24".parse().unwrap();
+        let conn = connected_link(7);
+
+        notify_v4_delta(&filters, &reg, &prefix, None, Some(&conn), 777);
+        assert!(rx_def.try_recv().is_err());
+        assert!(rx_vrf.try_recv().is_err());
     }
 }
