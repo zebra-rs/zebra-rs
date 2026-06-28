@@ -558,6 +558,11 @@ impl Rib {
         prefix: &Ipv4Net,
         mut entry: RibEntry,
     ) {
+        let before = self
+            .vrf_tables
+            .get(&table_id)
+            .and_then(|t| selected_v4(&t.table, prefix))
+            .cloned();
         let replace = {
             let Some(t) = self.vrf_tables.get_mut(&table_id) else {
                 tracing::warn!(
@@ -578,9 +583,27 @@ impl Rib {
             }
         };
         self.vrf_rib_selection(table_id, prefix, replace).await;
+        let after = self
+            .vrf_tables
+            .get(&table_id)
+            .and_then(|t| selected_v4(&t.table, prefix))
+            .cloned();
+        super::redist::notify_v4_delta(
+            &self.redist_filters,
+            &self.client_registry,
+            prefix,
+            before.as_ref(),
+            after.as_ref(),
+            table_id,
+        );
     }
 
     pub async fn ipv4_route_del_vrf(&mut self, table_id: u32, prefix: &Ipv4Net, entry: RibEntry) {
+        let before = self
+            .vrf_tables
+            .get(&table_id)
+            .and_then(|t| selected_v4(&t.table, prefix))
+            .cloned();
         let replace = {
             let Some(t) = self.vrf_tables.get_mut(&table_id) else {
                 return;
@@ -592,6 +615,19 @@ impl Rib {
             }
         };
         self.vrf_rib_selection(table_id, prefix, replace).await;
+        let after = self
+            .vrf_tables
+            .get(&table_id)
+            .and_then(|t| selected_v4(&t.table, prefix))
+            .cloned();
+        super::redist::notify_v4_delta(
+            &self.redist_filters,
+            &self.client_registry,
+            prefix,
+            before.as_ref(),
+            after.as_ref(),
+            table_id,
+        );
     }
 
     pub async fn ipv6_route_add_vrf(
@@ -600,6 +636,11 @@ impl Rib {
         prefix: &Ipv6Net,
         mut entry: RibEntry,
     ) {
+        let before = self
+            .vrf_tables
+            .get(&table_id)
+            .and_then(|t| selected_v6(&t.table_v6, prefix))
+            .cloned();
         let replace = {
             let Some(t) = self.vrf_tables.get_mut(&table_id) else {
                 tracing::warn!(
@@ -620,9 +661,27 @@ impl Rib {
             }
         };
         self.vrf_rib_selection_v6(table_id, prefix, replace).await;
+        let after = self
+            .vrf_tables
+            .get(&table_id)
+            .and_then(|t| selected_v6(&t.table_v6, prefix))
+            .cloned();
+        super::redist::notify_v6_delta(
+            &self.redist_filters,
+            &self.client_registry,
+            prefix,
+            before.as_ref(),
+            after.as_ref(),
+            table_id,
+        );
     }
 
     pub async fn ipv6_route_del_vrf(&mut self, table_id: u32, prefix: &Ipv6Net, entry: RibEntry) {
+        let before = self
+            .vrf_tables
+            .get(&table_id)
+            .and_then(|t| selected_v6(&t.table_v6, prefix))
+            .cloned();
         let replace = {
             let Some(t) = self.vrf_tables.get_mut(&table_id) else {
                 return;
@@ -634,6 +693,19 @@ impl Rib {
             }
         };
         self.vrf_rib_selection_v6(table_id, prefix, replace).await;
+        let after = self
+            .vrf_tables
+            .get(&table_id)
+            .and_then(|t| selected_v6(&t.table_v6, prefix))
+            .cloned();
+        super::redist::notify_v6_delta(
+            &self.redist_filters,
+            &self.client_registry,
+            prefix,
+            before.as_ref(),
+            after.as_ref(),
+            table_id,
+        );
     }
 
     /// Best-path selection + FIB reconcile for one VRF prefix. Mirrors
@@ -717,6 +789,7 @@ impl Rib {
             prefix,
             before.as_ref(),
             after.as_ref(),
+            0,
         );
 
         // Any RIB add can shift the FIB — debounced resolve catches static /
@@ -742,6 +815,7 @@ impl Rib {
             prefix,
             before.as_ref(),
             after.as_ref(),
+            0,
         );
 
         self.schedule_rib_sync();
@@ -863,6 +937,7 @@ impl Rib {
             prefix,
             before.as_ref(),
             after.as_ref(),
+            0,
         );
 
         // Any RIB add can shift the FIB — debounced resolve catches static /
@@ -888,6 +963,7 @@ impl Rib {
             prefix,
             before.as_ref(),
             after.as_ref(),
+            0,
         );
 
         self.schedule_rib_sync();
@@ -926,6 +1002,7 @@ impl Rib {
                 &prefix,
                 before.as_ref(),
                 after.as_ref(),
+                0,
             );
         }
         retry
@@ -956,6 +1033,73 @@ impl Rib {
                 &prefix,
                 before.as_ref(),
                 after.as_ref(),
+                0,
+            );
+        }
+        retry
+    }
+
+    /// Per-VRF sibling of [`Self::ipv4_default_sync`]: re-resolve the
+    /// VRF table at `table_id` and, when redistribute subscribers are
+    /// registered, push the resulting selected-entry deltas to those
+    /// bound to this VRF (`target_vrf_id = table_id`). With no
+    /// subscribers it falls back to the plain sync with zero snapshot
+    /// overhead, matching the default path.
+    pub(super) async fn ipv4_vrf_sync(&mut self, table_id: u32, ifdown: bool) -> bool {
+        let Some(t) = self.vrf_tables.get_mut(&table_id) else {
+            return false;
+        };
+        if self.redist_filters.is_empty() {
+            return ipv4_route_sync(
+                &mut t.table,
+                &mut self.nmap,
+                &self.fib_handle,
+                table_id,
+                ifdown,
+            )
+            .await;
+        }
+        let (retry, deltas) = ipv4_route_sync_collect(
+            &mut t.table,
+            &mut self.nmap,
+            &self.fib_handle,
+            table_id,
+            ifdown,
+        )
+        .await;
+        for (prefix, before, after) in deltas {
+            super::redist::notify_v4_delta(
+                &self.redist_filters,
+                &self.client_registry,
+                &prefix,
+                before.as_ref(),
+                after.as_ref(),
+                table_id,
+            );
+        }
+        retry
+    }
+
+    /// IPv6 sibling of [`Self::ipv4_vrf_sync`].
+    pub(super) async fn ipv6_vrf_sync(&mut self, table_id: u32) -> bool {
+        let Some(t) = self.vrf_tables.get_mut(&table_id) else {
+            return false;
+        };
+        if self.redist_filters.is_empty() {
+            return ipv6_route_sync(&mut t.table_v6, &mut self.nmap, &self.fib_handle, table_id)
+                .await;
+        }
+        let (retry, deltas) =
+            ipv6_route_sync_collect(&mut t.table_v6, &mut self.nmap, &self.fib_handle, table_id)
+                .await;
+        for (prefix, before, after) in deltas {
+            super::redist::notify_v6_delta(
+                &self.redist_filters,
+                &self.client_registry,
+                &prefix,
+                before.as_ref(),
+                after.as_ref(),
+                table_id,
             );
         }
         retry
@@ -973,11 +1117,7 @@ impl Rib {
         let mut retry = self.ipv6_default_sync().await;
         let table_ids: Vec<u32> = self.vrf_tables.keys().copied().collect();
         for table_id in table_ids {
-            if let Some(t) = self.vrf_tables.get_mut(&table_id) {
-                retry |=
-                    ipv6_route_sync(&mut t.table_v6, &mut self.nmap, &self.fib_handle, table_id)
-                        .await;
-            }
+            retry |= self.ipv6_vrf_sync(table_id).await;
         }
         if retry {
             self.schedule_rib_sync();
@@ -1003,16 +1143,7 @@ impl Rib {
         // installed.
         let table_ids: Vec<u32> = self.vrf_tables.keys().copied().collect();
         for table_id in table_ids {
-            if let Some(t) = self.vrf_tables.get_mut(&table_id) {
-                retry |= ipv4_route_sync(
-                    &mut t.table,
-                    &mut self.nmap,
-                    &self.fib_handle,
-                    table_id,
-                    false,
-                )
-                .await;
-            }
+            retry |= self.ipv4_vrf_sync(table_id, false).await;
         }
         // A failed install forced a nexthop recreation; arm another
         // pass so the recreated nexthop and the pending route both land.
@@ -1249,9 +1380,11 @@ pub async fn ipv4_route_sync(
 
 /// Like `ipv4_route_sync` but also returns the per-prefix selected-entry
 /// transitions (so the caller can notify redistribute subscribers about
-/// resolution/topology-driven selection changes). Only the default
-/// table should collect: `notify_v4_delta` delivers to `vrf_id == 0`
-/// subscribers, so VRF-table deltas must not flow through it.
+/// resolution/topology-driven selection changes). The default table
+/// (`ipv4_default_sync`) and each VRF table (`ipv4_vrf_sync`) both
+/// collect; the caller scopes delivery by passing the matching
+/// `target_vrf_id` to `notify_v4_delta` (0 for the default table, the
+/// kernel table id for a VRF).
 pub async fn ipv4_route_sync_collect(
     table: &mut PrefixMap<Ipv4Net, RibEntries>,
     nmap: &mut NexthopMap,
