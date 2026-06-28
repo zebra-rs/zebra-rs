@@ -156,6 +156,10 @@ vrf_connected_route:
 	mkdir -p allure-results
 	cargo test --test cucumber -- --concurrency=1 --tags "@vrf_connected_route"
 
+bgp_vrf_redistribute:
+	mkdir -p allure-results
+	cargo test --test cucumber -- --concurrency=1 --tags "@bgp_vrf_redistribute"
+
 isis_afi_enable:
 	mkdir -p allure-results
 	cargo test --test cucumber -- --concurrency=1 --tags "@isis_afi_enable"

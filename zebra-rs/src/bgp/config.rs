@@ -4178,12 +4178,36 @@ impl Bgp {
             super::vrf_config::config_vrf_afi_ipv4_network,
         );
         self.callback_add(
+            "/router/bgp/vrf/afi-safi/ipv4/redistribute",
+            super::vrf_config::config_vrf_afi_ipv4_redistribute,
+        );
+        self.callback_add(
+            "/router/bgp/vrf/afi-safi/ipv4/redistribute/connected",
+            super::vrf_config::config_vrf_afi_ipv4_redistribute_connected,
+        );
+        self.callback_add(
+            "/router/bgp/vrf/afi-safi/ipv4/redistribute/static",
+            super::vrf_config::config_vrf_afi_ipv4_redistribute_static,
+        );
+        self.callback_add(
             "/router/bgp/vrf/afi-safi/ipv6",
             super::vrf_config::config_vrf_afi_ipv6,
         );
         self.callback_add(
             "/router/bgp/vrf/afi-safi/ipv6/network",
             super::vrf_config::config_vrf_afi_ipv6_network,
+        );
+        self.callback_add(
+            "/router/bgp/vrf/afi-safi/ipv6/redistribute",
+            super::vrf_config::config_vrf_afi_ipv6_redistribute,
+        );
+        self.callback_add(
+            "/router/bgp/vrf/afi-safi/ipv6/redistribute/connected",
+            super::vrf_config::config_vrf_afi_ipv6_redistribute_connected,
+        );
+        self.callback_add(
+            "/router/bgp/vrf/afi-safi/ipv6/redistribute/static",
+            super::vrf_config::config_vrf_afi_ipv6_redistribute_static,
         );
         self.callback_add(
             "/router/bgp/vrf/evpn/advertise-ipv4",

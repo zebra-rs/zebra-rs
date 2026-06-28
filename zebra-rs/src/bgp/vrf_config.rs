@@ -33,7 +33,9 @@ use crate::bgp_vrf_trace;
 use crate::config::{Args, ConfigOp};
 
 use super::Bgp;
+use super::config::BgpRedistSource;
 use super::vrf::msg::BgpVrfMsg;
+use crate::rib::RedistAfi;
 
 /// MPLS label allocation strategy for VPN routes originated from a
 /// VRF — mirrors `label-mode` in zebra-bgp-vrf.yang. Default is
@@ -112,12 +114,19 @@ impl Default for BgpVrfNeighborConfig {
 #[derive(Debug, Clone)]
 pub struct BgpVrfAfConfig<N: Ord> {
     pub networks: BTreeSet<N>,
+    /// Redistribution sources enabled for this VRF/AFI
+    /// (`afi-safi {ipv4,ipv6} redistribute {connected,static}`). Each
+    /// pulls the VRF table's routes of that protocol into the per-VRF
+    /// Loc-RIB for VPNv4/v6 export. Bare presence today (no per-source
+    /// modifiers).
+    pub redistribute: BTreeSet<BgpRedistSource>,
 }
 
 impl<N: Ord> Default for BgpVrfAfConfig<N> {
     fn default() -> Self {
         Self {
             networks: BTreeSet::new(),
+            redistribute: BTreeSet::new(),
         }
     }
 }
@@ -714,6 +723,145 @@ pub fn config_vrf_afi_ipv6_network(bgp: &mut Bgp, mut args: Args, op: ConfigOp) 
         let _ = handle.inbox.send(msg);
     }
     Some(())
+}
+
+/// Enable/disable one redistribute source for a VRF/AFI in the staged
+/// config, and drive the change onto the running VRF task. Shared by
+/// the four `redistribute {connected,static}` callbacks. Mirrors the
+/// `network` callbacks: `compute_vrf_diff` only re-spawns on the VRF
+/// *name* set, so a redistribute-only change reaches a live task through
+/// a [`BgpVrfMsg`]; an initial-config VRF picks it up at spawn-time
+/// materialization, which reads the same `redistribute` set.
+fn vrf_redist_set(
+    bgp: &mut Bgp,
+    name: String,
+    afi: RedistAfi,
+    source: BgpRedistSource,
+    op: ConfigOp,
+) -> Option<()> {
+    let set = match op {
+        ConfigOp::Set => true,
+        ConfigOp::Delete => false,
+        _ => return Some(()),
+    };
+    {
+        let cfg = vrf_entry(bgp, name.clone());
+        let redist = match afi {
+            RedistAfi::Ipv4 => {
+                &mut cfg
+                    .ipv4_unicast
+                    .get_or_insert_with(Default::default)
+                    .redistribute
+            }
+            RedistAfi::Ipv6 => {
+                &mut cfg
+                    .ipv6_unicast
+                    .get_or_insert_with(Default::default)
+                    .redistribute
+            }
+        };
+        if set {
+            redist.insert(source);
+        } else {
+            redist.remove(&source);
+        }
+    }
+    if let Some(handle) = bgp.vrf_registry.get(&name) {
+        let msg = if set {
+            BgpVrfMsg::RedistEnable { afi, source }
+        } else {
+            BgpVrfMsg::RedistDisable { afi, source }
+        };
+        let _ = handle.inbox.send(msg);
+    }
+    Some(())
+}
+
+/// Clear every redistribute source for a VRF/AFI and withdraw them
+/// from the running task. Driven by the `redistribute` container
+/// delete, whose child source-deletes the diff does not re-emit (same
+/// rationale as `config_vrf_afi_ipv4`'s network sweep).
+fn vrf_redist_clear(bgp: &mut Bgp, name: String, afi: RedistAfi) {
+    let sources: Vec<BgpRedistSource> = {
+        let cfg = vrf_entry(bgp, name.clone());
+        let redist = match afi {
+            RedistAfi::Ipv4 => cfg.ipv4_unicast.as_mut().map(|af| &mut af.redistribute),
+            RedistAfi::Ipv6 => cfg.ipv6_unicast.as_mut().map(|af| &mut af.redistribute),
+        };
+        match redist {
+            Some(set) => {
+                let drained: Vec<_> = set.iter().copied().collect();
+                set.clear();
+                drained
+            }
+            None => Vec::new(),
+        }
+    };
+    if let Some(handle) = bgp.vrf_registry.get(&name) {
+        for source in sources {
+            let _ = handle.inbox.send(BgpVrfMsg::RedistDisable { afi, source });
+        }
+    }
+}
+
+/// `delete router bgp vrf <NAME> afi-safi ipv4 redistribute` — clear
+/// all IPv4 redistribute sources. The set callback for the bare
+/// container is a no-op (sources are enabled by their own leaves).
+pub fn config_vrf_afi_ipv4_redistribute(bgp: &mut Bgp, mut args: Args, op: ConfigOp) -> Option<()> {
+    let name = args.string()?;
+    if matches!(op, ConfigOp::Delete) {
+        vrf_redist_clear(bgp, name, RedistAfi::Ipv4);
+    }
+    Some(())
+}
+
+/// `set router bgp vrf <NAME> afi-safi ipv4 redistribute connected`.
+pub fn config_vrf_afi_ipv4_redistribute_connected(
+    bgp: &mut Bgp,
+    mut args: Args,
+    op: ConfigOp,
+) -> Option<()> {
+    let name = args.string()?;
+    vrf_redist_set(bgp, name, RedistAfi::Ipv4, BgpRedistSource::Connected, op)
+}
+
+/// `set router bgp vrf <NAME> afi-safi ipv4 redistribute static`.
+pub fn config_vrf_afi_ipv4_redistribute_static(
+    bgp: &mut Bgp,
+    mut args: Args,
+    op: ConfigOp,
+) -> Option<()> {
+    let name = args.string()?;
+    vrf_redist_set(bgp, name, RedistAfi::Ipv4, BgpRedistSource::Static, op)
+}
+
+/// `delete router bgp vrf <NAME> afi-safi ipv6 redistribute`.
+pub fn config_vrf_afi_ipv6_redistribute(bgp: &mut Bgp, mut args: Args, op: ConfigOp) -> Option<()> {
+    let name = args.string()?;
+    if matches!(op, ConfigOp::Delete) {
+        vrf_redist_clear(bgp, name, RedistAfi::Ipv6);
+    }
+    Some(())
+}
+
+/// `set router bgp vrf <NAME> afi-safi ipv6 redistribute connected`.
+pub fn config_vrf_afi_ipv6_redistribute_connected(
+    bgp: &mut Bgp,
+    mut args: Args,
+    op: ConfigOp,
+) -> Option<()> {
+    let name = args.string()?;
+    vrf_redist_set(bgp, name, RedistAfi::Ipv6, BgpRedistSource::Connected, op)
+}
+
+/// `set router bgp vrf <NAME> afi-safi ipv6 redistribute static`.
+pub fn config_vrf_afi_ipv6_redistribute_static(
+    bgp: &mut Bgp,
+    mut args: Args,
+    op: ConfigOp,
+) -> Option<()> {
+    let name = args.string()?;
+    vrf_redist_set(bgp, name, RedistAfi::Ipv6, BgpRedistSource::Static, op)
 }
 
 /// `set router bgp vrf <NAME> evpn advertise-ipv4 <bool>`.

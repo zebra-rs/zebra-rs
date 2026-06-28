@@ -15,9 +15,10 @@ use crate::config::{ConfigChannel, ShowChannel};
 use crate::context::{ProtoContext, Task};
 
 use super::super::Message;
+use super::super::config::BgpRedistSource;
 use super::super::interface_addrs::InterfaceAddrs;
 use super::super::peer_map::PeerMap;
-use super::super::route::LocalRib;
+use super::super::route::{LocalRib, ORIGINATED_PEER};
 use super::super::shard::BgpShard;
 use super::super::store::BgpAttrStore;
 use super::super::update_group::UpdateGroupMap;
@@ -66,6 +67,16 @@ pub struct BgpVrf {
     /// dispatcher and the import pipeline push here. `Shutdown`
     /// from `despawn_bgp_vrf` also arrives on this channel.
     pub global_rx: UnboundedReceiver<BgpVrfMsg>,
+    /// RIB redistribute stream. The receive half of the per-VRF RIB
+    /// subscription (`subscribe_for_vrf("bgp:vrf:<name>", table_id)`):
+    /// after the task sends `Message::RedistAdd`, the RIB walks
+    /// `vrf_tables[table_id]` and streams the matching connected/static
+    /// routes here as `RibRx::RouteAdd`/`RouteDel`, which the event
+    /// loop turns into per-VRF Loc-RIB originations + VPNv4/v6 exports.
+    /// A placeholder-context spawn (kernel VRF not yet known) holds a
+    /// closed channel here, so the select arm stays inert until the
+    /// kernel-ctx respawn installs a live subscription.
+    pub rib_rx: UnboundedReceiver<super::super::super::rib::api::RibRx>,
     /// FSM event channel. Per-VRF peers send `Event(ident, ...)`
     /// here when their timers expire or their TCP state changes;
     /// the per-VRF event loop drives the FSM from these. Bounded
@@ -392,6 +403,32 @@ pub fn dispatch_mup(
     }
 }
 
+/// Per-rtype `remote_id` discriminator for redistribute-originated VRF
+/// rows (matches the global `Bgp::redist_remote_id`), so connected /
+/// static / IGP sources — and a `network` row at id 0 — coexist for
+/// one prefix in the per-VRF shard without overwriting one another.
+fn redist_remote_id(rtype: crate::rib::RibType) -> u32 {
+    match rtype {
+        crate::rib::RibType::Connected => 1,
+        crate::rib::RibType::Static => 2,
+        crate::rib::RibType::Ospf => 3,
+        crate::rib::RibType::Isis => 4,
+        crate::rib::RibType::Kernel => 5,
+        _ => 0,
+    }
+}
+
+/// Map a configured redistribute source to the RIB route type the
+/// subscription filters on.
+fn redist_source_rtype(source: BgpRedistSource) -> crate::rib::RibType {
+    match source {
+        BgpRedistSource::Connected => crate::rib::RibType::Connected,
+        BgpRedistSource::Static => crate::rib::RibType::Static,
+        BgpRedistSource::Isis => crate::rib::RibType::Isis,
+        BgpRedistSource::Ospf => crate::rib::RibType::Ospf,
+    }
+}
+
 impl BgpVrf {
     /// Build a `BgpVrf` and the matching inbound sender. The
     /// caller (`spawn_bgp_vrf`) keeps the `BgpVrfInbox`, hands the
@@ -405,6 +442,7 @@ impl BgpVrf {
         asn: u32,
         label: u32,
         global_tx: UnboundedSender<BgpGlobalMsg>,
+        rib_rx: UnboundedReceiver<super::super::super::rib::api::RibRx>,
     ) -> (Self, BgpVrfInbox) {
         let (inbox_tx, global_rx) = mpsc::unbounded_channel();
         let (tx, rx) = mpsc::channel(8192);
@@ -419,6 +457,7 @@ impl BgpVrf {
             show: ShowChannel::new(),
             global_tx,
             global_rx,
+            rib_rx,
             tx,
             rx,
             asn,
@@ -467,6 +506,15 @@ impl BgpVrf {
                     // path handler. Drained but ignored when no
                     // consumer is wired yet — keeps the select!
                     // arm from livelocking.
+                }
+                Some(msg) = self.rib_rx.recv() => {
+                    // Redistributed routes streamed back from the RIB
+                    // (RibRx::RouteAdd/RouteDel for the connected/static
+                    // sources this VRF subscribed to). A placeholder-ctx
+                    // spawn holds a closed channel here, so this arm is
+                    // inert until the kernel-ctx respawn provides a live
+                    // subscription.
+                    self.process_rib_msg(msg);
                 }
                 Some(msg) = self.show.rx.recv() => {
                     // `show bgp vrf <name> …` — the manager stripped the
@@ -1112,6 +1160,166 @@ impl BgpVrf {
         }
     }
 
+    /// Tell the RIB to start redistributing `source` for `afi` into
+    /// this VRF. The RIB resolves our subscriber by proto name
+    /// (`bgp:vrf:<name>`, registered at spawn) → its `vrf_id` (this
+    /// VRF's kernel table id) → walks `vrf_tables[table_id]` and
+    /// streams the matching routes back on `rib_rx`. Empty subtype set
+    /// = wildcard (every subtype under the rtype). `pub(super)` so
+    /// `spawn_bgp_vrf` can replay the staged config at spawn time.
+    pub(super) fn redist_subscribe(&self, afi: crate::rib::RedistAfi, source: BgpRedistSource) {
+        let _ = self.ctx.rib.send(crate::rib::Message::RedistAdd {
+            proto: format!("bgp:vrf:{}", self.name),
+            afi,
+            rtype: redist_source_rtype(source),
+            subtypes: std::collections::BTreeSet::new(),
+        });
+    }
+
+    /// Inverse of [`Self::redist_subscribe`]: drop the redistribute
+    /// subscription. The RIB replays the matched prefixes as
+    /// `RouteDel`, which `process_rib_msg` turns into withdraws — so no
+    /// local sweep is needed here.
+    fn redist_unsubscribe(&self, afi: crate::rib::RedistAfi, source: BgpRedistSource) {
+        let _ = self.ctx.rib.send(crate::rib::Message::RedistDel {
+            proto: format!("bgp:vrf:{}", self.name),
+            afi,
+            rtype: redist_source_rtype(source),
+        });
+    }
+
+    /// Consume one RIB redistribute notification. Only the route
+    /// add/del stream is relevant to a per-VRF redistribute subscriber;
+    /// link / addr / router-id / EoR markers are ignored.
+    fn process_rib_msg(&mut self, msg: crate::rib::api::RibRx) {
+        use crate::rib::RouteBatch;
+        use crate::rib::api::RibRx;
+        match msg {
+            RibRx::RouteAdd { rtype, routes, .. } => match routes {
+                RouteBatch::V4(entries) => {
+                    for e in entries {
+                        self.redist_inject_v4(rtype, e.prefix, e.metric);
+                    }
+                }
+                RouteBatch::V6(entries) => {
+                    for e in entries {
+                        self.redist_inject_v6(rtype, e.prefix, e.metric);
+                    }
+                }
+            },
+            RibRx::RouteDel { rtype, routes, .. } => match routes {
+                RouteBatch::V4(entries) => {
+                    for e in entries {
+                        self.redist_withdraw_v4(rtype, e.prefix);
+                    }
+                }
+                RouteBatch::V6(entries) => {
+                    for e in entries {
+                        self.redist_withdraw_v6(rtype, e.prefix);
+                    }
+                }
+            },
+            _ => {}
+        }
+    }
+
+    /// Originate one redistributed IPv4 route into this VRF's Loc-RIB
+    /// and export the winner to the global VPNv4 table. Mirrors
+    /// [`Self::originate_self_network_v4`] but keyed by a redistribute
+    /// identity (so it coexists with a `network` row for the same
+    /// prefix) and carries the source RIB cost as MED.
+    fn redist_inject_v4(
+        &mut self,
+        rtype: crate::rib::RibType,
+        prefix: ipnet::Ipv4Net,
+        metric: u32,
+    ) {
+        use bgp_packet::{BgpAttr, BgpNexthop, Med, Origin};
+
+        let mut attr = BgpAttr::new();
+        attr.origin = Some(Origin::Incomplete);
+        attr.nexthop = Some(BgpNexthop::Ipv4(self.router_id));
+        attr.med = Some(Med::new(metric));
+        let interned = self.shard.intern(attr);
+
+        let rib = self.redist_originated_rib(interned, rtype);
+        let (_, selected, _) = self.shard.update(None, prefix, rib);
+        if let Some(winner) = selected.first() {
+            let exporter = self.exporter();
+            vrf_emit_export(&exporter, prefix, &winner.attr);
+        }
+    }
+
+    /// Inverse of [`Self::redist_inject_v4`].
+    fn redist_withdraw_v4(&mut self, rtype: crate::rib::RibType, prefix: ipnet::Ipv4Net) {
+        let removed = self
+            .shard
+            .remove(None, prefix, redist_remote_id(rtype), ORIGINATED_PEER);
+        if removed.is_empty() {
+            return;
+        }
+        let exporter = self.exporter();
+        match self.shard.select_best_path(prefix).first() {
+            Some(winner) => vrf_emit_export(&exporter, prefix, &winner.attr),
+            None => vrf_emit_withdraw(&exporter, prefix),
+        }
+    }
+
+    /// IPv6 counterpart of [`Self::redist_inject_v4`]. The next-hop is a
+    /// placeholder — the global re-advertise rewrites it to
+    /// next-hop-self in `route_update_ipv6`.
+    fn redist_inject_v6(
+        &mut self,
+        rtype: crate::rib::RibType,
+        prefix: ipnet::Ipv6Net,
+        metric: u32,
+    ) {
+        use bgp_packet::{BgpAttr, BgpNexthop, Med, Origin};
+
+        let mut attr = BgpAttr::new();
+        attr.origin = Some(Origin::Incomplete);
+        attr.nexthop = Some(BgpNexthop::Ipv6(std::net::Ipv6Addr::UNSPECIFIED));
+        attr.med = Some(Med::new(metric));
+        let interned = self.shard.intern(attr);
+
+        let rib = self.redist_originated_rib(interned, rtype);
+        let (_, selected, _) = self.shard.update_v6(prefix, rib);
+        if let Some(winner) = selected.first() {
+            let exporter = self.exporter();
+            vrf_emit_export_v6(&exporter, prefix, &winner.attr);
+        }
+    }
+
+    /// IPv6 counterpart of [`Self::redist_withdraw_v4`].
+    fn redist_withdraw_v6(&mut self, rtype: crate::rib::RibType, prefix: ipnet::Ipv6Net) {
+        let removed = self
+            .shard
+            .remove_v6(prefix, redist_remote_id(rtype), ORIGINATED_PEER);
+        if removed.is_empty() {
+            return;
+        }
+        let exporter = self.exporter();
+        match self.shard.select_best_path_v6(prefix).first() {
+            Some(winner) => vrf_emit_export_v6(&exporter, prefix, &winner.attr),
+            None => vrf_emit_withdraw_v6(&exporter, prefix),
+        }
+    }
+
+    /// A redistribute-originated [`BgpRib`]: the self-originated shape
+    /// with a redistribute identity (ident `ORIGINATED_PEER`, per-rtype
+    /// `remote_id`) so distinct sources — and a `network` row at
+    /// id 0 — coexist for the same prefix without overwriting.
+    fn redist_originated_rib(
+        &self,
+        attr: std::sync::Arc<bgp_packet::BgpAttr>,
+        rtype: crate::rib::RibType,
+    ) -> super::super::route::BgpRib {
+        let mut rib = self.self_originated_rib(attr);
+        rib.ident = ORIGINATED_PEER;
+        rib.remote_id = redist_remote_id(rtype);
+        rib
+    }
+
     /// Build a fresh [`VrfExporter`] pointing at the global task.
     fn exporter(&self) -> VrfExporter {
         VrfExporter {
@@ -1235,6 +1443,12 @@ impl BgpVrf {
             BgpVrfMsg::WithdrawNetworkV6 { prefix } => {
                 self.withdraw_self_network_v6(prefix);
             }
+            BgpVrfMsg::RedistEnable { afi, source } => {
+                self.redist_subscribe(afi, source);
+            }
+            BgpVrfMsg::RedistDisable { afi, source } => {
+                self.redist_unsubscribe(afi, source);
+            }
             // Display-only mirror of the global MUP best-path for this
             // VRF's RD, so `show bgp vrf <name> mup` (redirected here)
             // renders the VRF's ST routes. We touch only `selected`
@@ -1285,6 +1499,7 @@ mod tests {
         // down cleanly.
         let (global_tx, _global_rx) = unbounded_channel::<BgpGlobalMsg>();
         let ctx = test_ctx_for_vrf(10, "vrf-test");
+        let (_rib_tx, rib_rx) = mpsc::unbounded_channel();
         let (mut vrf, inbox) = BgpVrf::new(
             "vrf-test".to_string(),
             ctx,
@@ -1292,6 +1507,7 @@ mod tests {
             65000,
             /* label */ 16,
             global_tx,
+            rib_rx,
         );
 
         inbox.send(BgpVrfMsg::Shutdown).expect("inbound rx alive");
@@ -1312,6 +1528,7 @@ mod tests {
         // leak the task.
         let (global_tx, _global_rx) = unbounded_channel::<BgpGlobalMsg>();
         let ctx = test_ctx_for_vrf(11, "vrf-test2");
+        let (_rib_tx, rib_rx) = mpsc::unbounded_channel();
         let (mut vrf, inbox) = BgpVrf::new(
             "vrf-test2".to_string(),
             ctx,
@@ -1319,6 +1536,7 @@ mod tests {
             65000,
             /* label */ 16,
             global_tx,
+            rib_rx,
         );
 
         drop(inbox);
