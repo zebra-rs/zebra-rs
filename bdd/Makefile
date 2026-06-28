@@ -152,6 +152,10 @@ vrf_phantom_instance:
 	mkdir -p allure-results
 	cargo test --test cucumber -- --concurrency=1 --tags "@vrf_phantom_instance"
 
+vrf_connected_route:
+	mkdir -p allure-results
+	cargo test --test cucumber -- --concurrency=1 --tags "@vrf_connected_route"
+
 isis_afi_enable:
 	mkdir -p allure-results
 	cargo test --test cucumber -- --concurrency=1 --tags "@isis_afi_enable"

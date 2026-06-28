@@ -13,8 +13,8 @@ use super::inst::{IlmEntry, RT_TABLE_MAIN, Rib};
 use super::nexthop::NexthopUni;
 use super::tracing::{rib_interface, rib_nexthop, rib_route};
 use super::{
-    Group, GroupTrait, Message, NexthopList, NexthopMap, NexthopMember, NexthopMulti,
-    NexthopProtect, ProtectActive, RibEntries, RibType,
+    Group, GroupTrait, NexthopList, NexthopMap, NexthopMember, NexthopMulti, NexthopProtect,
+    ProtectActive, RibEntries, RibType,
 };
 use std::net::IpAddr;
 
@@ -250,32 +250,21 @@ impl Rib {
     }
 
     pub async fn link_down(&mut self, ifindex: u32) {
-        let Some(link) = self.links.get(&ifindex) else {
+        // Own a snapshot — `connected_route_del` borrows `&mut self`.
+        let Some(link) = self.links.get(&ifindex).cloned() else {
             return;
         };
 
         // Notify protocol daemons.
         self.api_link_down(ifindex);
 
-        // Remove connected route.
-        for addr4 in link.addr4.iter() {
-            if let IpNet::V4(addr) = addr4.addr {
-                let prefix = addr.apply_mask();
-                let mut rib = RibEntry::new(RibType::Connected);
-                rib.ifindex = ifindex;
-                let _ = rib_replace_system(&mut self.table, &prefix, rib);
-            }
-        }
-        // Remove connected IPv6 route.
-        for addr6 in link.addr6.iter() {
-            if let IpNet::V6(addr) = addr6.addr {
-                let prefix = addr.apply_mask();
-                // println!("Connected IPv6: {:?} down - removing from RIB", prefix);
-                let mut rib = RibEntry::new(RibType::Connected);
-                rib.ifindex = ifindex;
-                let msg = Message::Ipv6Del { prefix, rib };
-                let _ = self.tx.send(msg);
-            }
+        // Remove the interface's connected routes from the table of the
+        // VRF it belongs to (default table when not enslaved). The route
+        // currently sits in the interface's *current* VRF, so derive the
+        // table id from `link.master` via `ifindex_vrf_id`.
+        let vrf_id = self.ifindex_vrf_id(ifindex);
+        for addr in link.addr4.iter().chain(link.addr6.iter()) {
+            self.connected_route_del(ifindex, addr.addr, vrf_id).await;
         }
         // Remove DHCP and Kernel routes.
         #[cfg(any())]
@@ -365,8 +354,84 @@ impl Rib {
         self.schedule_rib_sync();
     }
 
+    /// Install the connected route for an interface address into the
+    /// routing table of the VRF the interface currently belongs to —
+    /// the default table (`RT_TABLE_MAIN`) when it isn't enslaved.
+    ///
+    /// Every connected-route producer (link up, VRF re-home) funnels
+    /// through here so table placement honours VRF membership exactly
+    /// the way `route_table_for` does for the internal message path.
+    /// The VRF is derived from `link.master`, so callers must invoke
+    /// this only once that reflects the interface's *current* VRF.
+    /// Connected routes are non-protocol, so the FIB layer treats the
+    /// resulting add as a no-op (the kernel owns connected routes) —
+    /// this is pure RIB-table bookkeeping plus redistribution notify.
+    pub(crate) async fn connected_route_add(&mut self, ifindex: u32, addr: IpNet) {
+        let vrf_id = self.ifindex_vrf_id(ifindex);
+        match addr {
+            IpNet::V4(net) => {
+                let prefix = net.apply_mask();
+                let mut entry = RibEntry::new(RibType::Connected);
+                entry.ifindex = ifindex;
+                entry.set_valid(true);
+                if vrf_id == 0 {
+                    self.ipv4_route_add(&prefix, entry, RT_TABLE_MAIN).await;
+                } else {
+                    self.ipv4_route_add_vrf(vrf_id, &prefix, entry).await;
+                }
+            }
+            IpNet::V6(net) => {
+                let prefix = net.apply_mask();
+                let mut entry = RibEntry::new(RibType::Connected);
+                entry.ifindex = ifindex;
+                entry.set_valid(true);
+                if vrf_id == 0 {
+                    self.ipv6_route_add(&prefix, entry, RT_TABLE_MAIN).await;
+                } else {
+                    self.ipv6_route_add_vrf(vrf_id, &prefix, entry).await;
+                }
+            }
+        }
+    }
+
+    /// Withdraw the connected route for an interface address from the
+    /// table identified by `vrf_id` (0 == default / `RT_TABLE_MAIN`).
+    ///
+    /// `vrf_id` is passed explicitly rather than re-derived from
+    /// `link.master`: on a VRF boundary cross the route must be pulled
+    /// from the table it sat in *before* the master changed, which the
+    /// caller alone knows. As with the add side this is a no-op at the
+    /// FIB layer for connected (non-protocol) routes.
+    pub(crate) async fn connected_route_del(&mut self, ifindex: u32, addr: IpNet, vrf_id: u32) {
+        match addr {
+            IpNet::V4(net) => {
+                let prefix = net.apply_mask();
+                let mut entry = RibEntry::new(RibType::Connected);
+                entry.ifindex = ifindex;
+                if vrf_id == 0 {
+                    self.ipv4_route_del(&prefix, entry, RT_TABLE_MAIN).await;
+                } else {
+                    self.ipv4_route_del_vrf(vrf_id, &prefix, entry).await;
+                }
+            }
+            IpNet::V6(net) => {
+                let prefix = net.apply_mask();
+                let mut entry = RibEntry::new(RibType::Connected);
+                entry.ifindex = ifindex;
+                if vrf_id == 0 {
+                    self.ipv6_route_del(&prefix, entry, RT_TABLE_MAIN).await;
+                } else {
+                    self.ipv6_route_del_vrf(vrf_id, &prefix, entry).await;
+                }
+            }
+        }
+    }
+
     pub async fn link_up(&mut self, ifindex: u32) {
-        let Some(link) = self.links.get(&ifindex) else {
+        // Own a snapshot of the link: the connected-route recovery below
+        // calls `&mut self` helpers, so we can't keep an immutable borrow
+        // of `self.links` alive across them.
+        let Some(link) = self.links.get(&ifindex).cloned() else {
             if rib_interface() {
                 tracing::info!(
                     "link_up: ifindex {} not found in link table; skipping connected route recovery",
@@ -390,62 +455,20 @@ impl Rib {
         // Notify protocol daemons.
         self.api_link_up(ifindex);
 
-        // Add connected IPv4 routes when link comes up
-        for addr4 in link.addr4.iter() {
-            if let IpNet::V4(addr) = addr4.addr {
-                let prefix = addr.apply_mask();
-                let mut entry = RibEntry::new(RibType::Connected);
-                entry.ifindex = ifindex;
-                entry.set_valid(true);
-
-                if rib_interface() {
-                    tracing::info!(
-                        "link_up: {} re-adding IPv4 connected prefix {}",
-                        link_name,
-                        prefix
-                    );
-                }
-
-                rib_add_system(&mut self.table, &prefix, entry);
-                rib_selection_ipv4(
-                    &mut self.table,
-                    &prefix,
-                    None,
-                    &mut self.nmap,
-                    &self.fib_handle,
-                    RT_TABLE_MAIN,
-                )
-                .await;
+        // Re-add connected routes when the link comes up, into the
+        // table of the VRF the interface belongs to (default table when
+        // not enslaved) — `connected_route_add` derives that from
+        // `link.master`, so a VRF interface's connected prefix lands in
+        // its VRF table rather than polluting the default one.
+        for addr in link.addr4.iter().chain(link.addr6.iter()) {
+            if rib_interface() {
+                tracing::info!(
+                    "link_up: {} re-adding connected prefix {}",
+                    link_name,
+                    addr.addr
+                );
             }
-        }
-
-        // Add connected IPv6 routes when link comes up
-        for addr6 in link.addr6.iter() {
-            if let IpNet::V6(addr) = addr6.addr {
-                let prefix = addr.apply_mask();
-                let mut entry = RibEntry::new(RibType::Connected);
-                entry.ifindex = ifindex;
-                entry.set_valid(true);
-
-                if rib_interface() {
-                    tracing::info!(
-                        "link_up: {} re-adding IPv6 connected prefix {}",
-                        link_name,
-                        prefix
-                    );
-                }
-
-                rib_add_system_v6(&mut self.table_v6, &prefix, entry);
-                rib_selection_ipv6(
-                    &mut self.table_v6,
-                    &prefix,
-                    None,
-                    &mut self.nmap,
-                    &self.fib_handle,
-                    RT_TABLE_MAIN,
-                )
-                .await;
-            }
+            self.connected_route_add(ifindex, addr.addr).await;
         }
 
         // Re-install configured addresses that the kernel removed while the
@@ -1044,34 +1067,6 @@ impl Rib {
             self.schedule_rib_sync();
         }
     }
-}
-
-pub async fn rib_selection_ipv4(
-    table: &mut PrefixMap<Ipv4Net, RibEntries>,
-    prefix: &Ipv4Net,
-    replace: Option<RibEntry>,
-    nmap: &mut NexthopMap,
-    fib: &FibHandle,
-    table_id: u32,
-) -> bool {
-    let Some(entries) = table.get_mut(prefix) else {
-        return false;
-    };
-    ipv4_entry_selection(prefix, entries, replace, nmap, fib, table_id, true).await
-}
-
-pub async fn rib_selection_ipv6(
-    table: &mut PrefixMap<Ipv6Net, RibEntries>,
-    prefix: &Ipv6Net,
-    replace: Option<RibEntry>,
-    nmap: &mut NexthopMap,
-    fib: &FibHandle,
-    table_id: u32,
-) -> bool {
-    let Some(entries) = table.get_mut(prefix) else {
-        return false;
-    };
-    ipv6_entry_selection(prefix, entries, replace, nmap, fib, table_id).await
 }
 
 pub async fn ipv4_nexthop_sync(

@@ -1,0 +1,26 @@
+# z1 — one router with VRF N3. Interface vc1 is enslaved to N3 and
+# carries an IPv4 address; its connected route (172.16.10.0/24) must be
+# installed into the VRF table, not the default one. A static route
+# inside the VRF reaches 172.16.20.0/24 via an on-link gateway on vc1,
+# exercising the on-link resolution that depends on the connected route
+# sitting in the VRF table.
+vrf:
+- name: N3
+  ipv4:
+    route-target:
+      export:
+      - 10:20
+interface:
+- if-name: vc1
+  vrf: N3
+  ipv4:
+    address: 172.16.10.1/24
+router:
+  static:
+    vrf:
+    - name: N3
+      ipv4:
+        route:
+        - prefix: 172.16.20.0/24
+          nexthop:
+          - address: 172.16.10.2
