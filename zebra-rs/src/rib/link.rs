@@ -643,6 +643,28 @@ impl Rib {
                 for addr in link.addr4.iter().chain(link.addr6.iter()) {
                     self.api_addr_add_vrf(addr, now_vrf_id);
                 }
+                // Re-home this interface's own connected-route shadows
+                // between the two VRF tables. Each address's connected
+                // route was filed in the *old* table — `route_table_for`
+                // picked it from the master in effect when the address
+                // was learned, which (during a config-driven enslave)
+                // is the default table because the kernel's enslaving
+                // RTM_NEWLINK hadn't landed yet. Enslaving doesn't move
+                // those entries on its own, so without this the connected
+                // prefix is missing from `show ip route vrf <N>` and
+                // wrongly present in `show ip route`. Pull each one out of
+                // the old table (named by `prev_vrf_id`) and re-add it
+                // into the new one (derived from the now-updated
+                // `link.master`). Connected routes are non-protocol, so
+                // this never touches the kernel FIB. Only meaningful while
+                // the link is up — a down link has no connected shadow.
+                if link.is_up() {
+                    for addr in link.addr4.iter().chain(link.addr6.iter()) {
+                        self.connected_route_del(ifindex, addr.addr, prev_vrf_id)
+                            .await;
+                        self.connected_route_add(ifindex, addr.addr).await;
+                    }
+                }
                 // Replay this VRF's static routes now that the interface
                 // is enslaved: a route whose gateway sits on this link was
                 // unresolvable while the link was still in the default VRF,

@@ -2376,6 +2376,41 @@ impl Rib {
                 // per-`ProtoId` dispatcher writes routes here when a
                 // VRF-attached protocol installs.
                 self.vrf_tables.insert(table_id, VrfRibTables::new());
+                // Adopting a pre-existing kernel VRF can surface members
+                // that were already enslaved before we knew this VRF, so
+                // their connected routes were filed in the default table
+                // (`route_table_for` saw `master_vrf_id` == 0 because the
+                // VRF wasn't in `self.vrfs` yet). Now that the VRF and its
+                // table exist, re-home each member's connected routes out
+                // of the default table and into this one — mirroring the
+                // per-interface reconcile in `link_add`. The common
+                // fresh-create path has no members yet, so this is a
+                // no-op there.
+                let members: Vec<u32> = self
+                    .links
+                    .values()
+                    .filter(|l| l.master == Some(ifindex) && l.is_up())
+                    .map(|l| l.index)
+                    .collect();
+                for member in members {
+                    let addrs: Vec<IpNet> = self
+                        .links
+                        .get(&member)
+                        .map(|l| {
+                            l.addr4
+                                .iter()
+                                .chain(l.addr6.iter())
+                                .map(|a| a.addr)
+                                .collect()
+                        })
+                        .unwrap_or_default();
+                    for addr in addrs {
+                        // Old table is the default (0): the member was
+                        // enslaved in the kernel but this VRF was unknown.
+                        self.connected_route_del(member, addr, 0).await;
+                        self.connected_route_add(member, addr).await;
+                    }
+                }
                 // Re-emit any static routes configured for this VRF now
                 // that its kernel table exists — the initial commit's
                 // install was dropped if it raced ahead of the VRF.
