@@ -26,6 +26,9 @@ AGENTS.md
 perf.data
 perf.data.old
 
+# mdbook build output
+book/book/
+
 ref/
 
 # bdd
