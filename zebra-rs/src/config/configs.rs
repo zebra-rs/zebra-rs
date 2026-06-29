@@ -450,6 +450,13 @@ impl Config {
         }
     }
 
+    /// Command-path tokens up to and including this node's name and (leaf)
+    /// value — the prefix shared by every command line this node emits.
+    /// Leaf-list values are deliberately NOT appended here: each one forms
+    /// its own command line in [`Self::list`], because a leaf-list `set`
+    /// command takes a single value. Bundling them (`… import A B`) produces
+    /// a line that fails to re-parse, so the commit text-diff would skip it
+    /// and silently drop every value.
     pub fn list_command(&self) -> Vec<String> {
         let mut commands = Vec::new();
         if let Some(parent) = self.parent.as_ref() {
@@ -460,9 +467,6 @@ impl Config {
             if !self.value.borrow().is_empty() {
                 commands.push(self.value.borrow().clone());
             }
-            for list in self.list.borrow().iter() {
-                commands.push(list.clone());
-            }
         }
         commands
     }
@@ -471,8 +475,24 @@ impl Config {
         if !self.has_dir() || self.presence || !self.prefix.is_empty() {
             let commands = self.list_command();
             if !commands.is_empty() {
-                output.push_str(&commands.join(" "));
-                output.push('\n');
+                let base = commands.join(" ");
+                let list = self.list.borrow();
+                if list.is_empty() {
+                    output.push_str(&base);
+                    output.push('\n');
+                } else {
+                    // Leaf-list: one command line per value. A single joined
+                    // line (`… import A B`) does not re-parse as a leaf-list
+                    // command, so the commit text-diff would skip it and
+                    // silently drop every value (only single-value leaf-lists
+                    // round-tripped). See [`Self::list_command`].
+                    for value in list.iter() {
+                        output.push_str(&base);
+                        output.push(' ');
+                        output.push_str(value);
+                        output.push('\n');
+                    }
+                }
             }
         }
         for key in self.keys.borrow().iter() {
@@ -1026,6 +1046,57 @@ mod tests {
         assert!(output.contains("    10.0.0.1/32;"));
         assert!(output.contains("    10.0.0.2/32;"));
         assert!(output.contains("  }"));
+    }
+
+    /// Regression: `list()` (the flat "set command" form the commit
+    /// text-diff compares) must emit ONE line per leaf-list value. Bundling
+    /// every value onto one line (`… member A B`) produced a command that
+    /// failed to re-parse as a leaf-list set, so the commit text-diff skipped
+    /// it and silently dropped all values — only single-value leaf-lists
+    /// survived a commit. Hit `vrf … route-target import` across every AFI.
+    #[test]
+    fn test_leaf_list_list_emits_one_line_per_value() {
+        let root = Rc::new(Config::new("".to_string(), None));
+
+        for value in ["10.0.0.1/32", "10.0.0.2/32"] {
+            let paths = vec![
+                CommandPath {
+                    name: "prefix-test".to_string(),
+                    ymatch: YangMatch::Dir as i32,
+                    ..Default::default()
+                },
+                CommandPath {
+                    name: "member".to_string(),
+                    ymatch: YangMatch::LeafList as i32,
+                    ..Default::default()
+                },
+                CommandPath {
+                    name: value.to_string(),
+                    ymatch: YangMatch::LeafListMatched as i32,
+                    ..Default::default()
+                },
+            ];
+            set(paths, root.clone());
+        }
+
+        let mut output = String::new();
+        root.list(&mut output);
+
+        let lines: Vec<&str> = output.lines().collect();
+        assert!(
+            lines.contains(&"prefix-test member 10.0.0.1/32"),
+            "expected a per-value line for the first value; output:\n{output}"
+        );
+        assert!(
+            lines.contains(&"prefix-test member 10.0.0.2/32"),
+            "expected a per-value line for the second value; output:\n{output}"
+        );
+        // The bug rendered both values on one line, which fails to re-parse
+        // and is dropped by the commit diff.
+        assert!(
+            !output.contains("10.0.0.1/32 10.0.0.2/32"),
+            "leaf-list values must not be bundled onto one line; output:\n{output}"
+        );
     }
 
     #[test]
