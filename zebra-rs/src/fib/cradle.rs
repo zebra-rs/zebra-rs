@@ -1,10 +1,11 @@
 //! Optional tee of FIB route installs into the **cradle** eBPF data plane.
 //!
-//! Enabled by setting `CRADLE_GRPC=<host:port>`. When set, the protocol routes
-//! the RIB installs are also pushed to a running `cradle` via its gRPC control
-//! API, so zebra-rs-computed routes (static, BGP, OSPF, IS-IS, …) program the
-//! eBPF FIB in addition to the kernel. This is the zebra-rs side of the
-//! cradle-rs integration.
+//! Enabled by the `system cradle-grpc <endpoint>` config leaf (or the
+//! `CRADLE_GRPC` env var as a fallback). When set, the protocol routes the RIB
+//! installs are also pushed to a running `cradle` via its gRPC control API, so
+//! zebra-rs-computed routes (static, BGP, OSPF, IS-IS, …) program the eBPF FIB
+//! in addition to the kernel. This is the zebra-rs side of the cradle-rs
+//! integration.
 
 use std::collections::HashMap;
 use std::net::{Ipv4Addr, Ipv6Addr};
@@ -35,25 +36,28 @@ pub struct CradleFib {
 }
 
 impl CradleFib {
-    /// Construct from `CRADLE_GRPC` (e.g. `127.0.0.1:50151`). Returns `None`
-    /// when the variable is unset (tee disabled).
-    pub fn from_env() -> Option<Self> {
-        let ep = std::env::var("CRADLE_GRPC").ok()?;
-        // `unix:/path` (UDS) and `http://...` pass through; a bare host:port is
-        // treated as TCP.
+    /// Build a tee to the cradle gRPC endpoint `ep`. `unix:/path` (UDS) and
+    /// `http://...` pass through; a bare `host:port` is treated as TCP.
+    pub fn new(ep: &str) -> Self {
         let endpoint = if ep.starts_with("unix:") || ep.starts_with("http") {
-            ep
+            ep.to_string()
         } else {
             format!("http://{ep}")
         };
         tracing::info!("fib: cradle eBPF tee enabled -> {endpoint}");
-        Some(Self {
+        Self {
             endpoint,
             client: Arc::new(Mutex::new(None)),
             nh_ids: Arc::new(Mutex::new(HashMap::new())),
             nh_ids6: Arc::new(Mutex::new(HashMap::new())),
             next_id: Arc::new(AtomicU32::new(1)),
-        })
+        }
+    }
+
+    /// Construct from `CRADLE_GRPC` if set (env fallback; the primary control is
+    /// the `system cradle-grpc` config leaf). Returns `None` when unset.
+    pub fn from_env() -> Option<Self> {
+        std::env::var("CRADLE_GRPC").ok().map(|ep| Self::new(&ep))
     }
 
     /// Lazily connect (and cache) the gRPC client.

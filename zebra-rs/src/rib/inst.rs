@@ -3175,6 +3175,25 @@ impl Rib {
         Some((vni, vtep_local))
     }
 
+    /// `set system cradle-grpc <endpoint>` enables (or re-points) the cradle
+    /// eBPF data-plane tee; deleting it disables the tee. Mirrors
+    /// `router_id_config_exec`. The endpoint is `unix:/path`, `http://host:port`
+    /// or a bare `host:port` (treated as TCP).
+    #[cfg(target_os = "linux")]
+    pub(crate) fn cradle_grpc_config_exec(
+        &mut self,
+        mut args: crate::config::Args,
+        op: ConfigOp,
+    ) -> Option<()> {
+        if op.is_set() {
+            let endpoint = args.string()?;
+            self.fib_handle.set_cradle(Some(&endpoint));
+        } else {
+            self.fib_handle.set_cradle(None);
+        }
+        Some(())
+    }
+
     async fn process_cm_msg(&mut self, msg: ConfigRequest) {
         match msg.op {
             ConfigOp::CommitStart => {
@@ -3184,6 +3203,9 @@ impl Rib {
                 let (path, mut args) = path_from_command(&msg.paths);
                 if path.as_str() == "/system/router-id" {
                     let _ = self.router_id_config_exec(args, msg.op);
+                } else if path.as_str() == "/system/cradle-grpc" {
+                    #[cfg(target_os = "linux")]
+                    let _ = self.cradle_grpc_config_exec(args, msg.op);
                 } else if path.as_str().starts_with("/router/static/vrf/ipv4/route") {
                     let _ = self.static_vrf_v4.exec(path, args, msg.op);
                 } else if path.as_str().starts_with("/router/static/vrf/ipv6/route") {

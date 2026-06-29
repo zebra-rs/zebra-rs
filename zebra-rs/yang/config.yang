@@ -380,6 +380,16 @@ module config {
         ext:help "Global router identifier";
         type inet:ipv4-address;
       }
+      // gRPC endpoint of a cradle eBPF data plane to tee FIB route
+      // installs to (e.g. `unix:/run/cradle.sock` or `127.0.0.1:50151`).
+      // When set, every route zebra-rs installs is pushed to cradle in
+      // addition to the kernel (see `rib/inst.rs cradle_grpc_config_exec`);
+      // unset disables the tee. The zebra-rs side of the cradle-rs eBPF
+      // data-plane integration.
+      leaf cradle-grpc {
+        ext:help "cradle eBPF data-plane gRPC endpoint";
+        type string;
+      }
       container dhcp {
         uses "dhcp:dhcp";
       }
