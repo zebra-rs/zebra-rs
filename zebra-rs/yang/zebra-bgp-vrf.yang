@@ -12,6 +12,10 @@ module zebra-bgp-vrf {
     prefix bgp;
   }
 
+  import zebra-afi-safi {
+    prefix zas;
+  }
+
   import config {
     prefix config;
   }
@@ -166,14 +170,33 @@ module zebra-bgp-vrf {
           "Free-form description string echoed in `show bgp vrf X
            neighbors` output.";
       }
-      leaf enabled {
-        type boolean;
-        default "true";
+      list afi-safi {
+        key "name";
         description
-          "Whether the BGP peer is enabled. `false` keeps the
-           configured peer in the runtime state but holds the FSM
-           in `Idle` (the local system neither initiates connects
-           nor responds to inbound).";
+          "Per-address-family activation for this CE peer — the
+           equivalent of IOS-XR `address-family <af> ... neighbor X
+           activate`. An entry with `enabled true` adds the family to
+           the Multiprotocol capability set advertised in the OPEN;
+           `enabled false` removes it. Only the IPv4 and IPv6 unicast
+           families apply to a PE-CE session (VPNv4 / VPNv6 / EVPN stay
+           anchored on the top-level / global neighbor list).
+
+           When no entry is present the negotiated family is derived
+           from the peer's own address: an IPv6 CE peer exchanges IPv6
+           unicast, an IPv4 CE peer IPv4 unicast — so the common
+           single-family deployment needs no statement here. The
+           explicit knob is only required to override that, e.g. to
+           additionally carry IPv4 unicast over an IPv6 session. Unlike
+           the global neighbor, IPv4 unicast is NOT forced on for an
+           IPv6 peer. A change takes effect when the session next
+           renegotiates capabilities (`clear bgp`).";
+        uses zas:afi-safi-unicast;
+        leaf enabled {
+          type boolean;
+          mandatory true;
+          description
+            "Whether this AFI,SAFI is enabled for the CE peer.";
+        }
       }
     }
   }
