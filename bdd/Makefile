@@ -76,6 +76,14 @@ bgp_mup_dual_st:
 	mkdir -p allure-results
 	cargo test --test cucumber -- --concurrency=1 --tags "@bgp_mup_dual_st"
 
+# MUP cross-VRF import: a PE originates an ISD route in one VRF (rd 65501:20)
+# and imports it into a DIFFERENT VRF (rd 65501:10) purely by route-target,
+# proving per-VRF MUP import is RT-matched (like VPNv4/v6), not RD-matched.
+# Needs root netns (kernel VRF + seg6local for the End.DT46 install).
+bgp_mup_vrf_import:
+	mkdir -p allure-results
+	cargo test --test cucumber -- --concurrency=1 --tags "@bgp_mup_vrf_import"
+
 rib_static_ipv6:
 	mkdir -p allure-results
 	cargo test --test cucumber -- --concurrency=1 --tags "@rib_static_ipv6"

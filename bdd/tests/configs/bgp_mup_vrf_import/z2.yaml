@@ -1,0 +1,53 @@
+# z2 — MUP peer that receives z1's Interwork Segment Discovery (ISD) route.
+# IS-IS L2 SRv6 underlay + iBGP (mup afi-safi) to z1 over loopbacks. No
+# VRF / segment of its own — it just stores the ISD route (RD 65501:20 + z1's
+# interwork prefix 10.60.0.0/16) carrying z1's End.DT46 SID in its MUP
+# Loc-RIB, confirming the cross-VRF import on z1 does not disturb normal
+# peer advertisement.
+interface:
+- if-name: lo
+  ipv6:
+    address: 2001:db8::2/128
+- if-name: z2-z1
+  ipv6:
+    address: 2001:db8:0:12::2/64
+segment-routing:
+  locator:
+  - name: LOC2
+    prefix: fcbb:bbbb:2::/48
+    behavior: usid
+router:
+  isis:
+    net: 49.0000.0000.0000.0002.00
+    hostname: z2
+    is-type: level-2-only
+    segment-routing:
+      srv6:
+        locator: LOC2
+    interface:
+    - if-name: lo
+      ipv6:
+        enable: true
+    - if-name: z2-z1
+      network-type: point-to-point
+      metric: 1
+      ipv6:
+        enable: true
+  bgp:
+    global:
+      as: 65501
+      router-id: 10.0.0.2
+    timer:
+      adv-interval:
+        ibgp: 1
+    segment-routing:
+      srv6:
+        locator: LOC2
+    neighbor:
+    - remote-address: 2001:db8::1
+      remote-as: 65501
+      update-source: 2001:db8::2
+      enabled: true
+      afi-safi:
+      - name: mup
+        enabled: true
