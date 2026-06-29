@@ -1,0 +1,73 @@
+# PE2 — provider edge 2 (AS 65000). Mirror of PE1: SR-MPLS Prefix-SID
+# index 3, iBGP VPNv4 to PE1, per-VRF static route to C2's loopback via
+# CE2, redistributed into VPNv4 (RD 65000:2 / RT 65000:100).
+vrf:
+- name: vrf-cust
+  ipv4:
+    route-target:
+      import:
+      - 65000:100
+      export:
+      - 65000:100
+interface:
+- if-name: lo
+  ipv4:
+    address: 1.1.1.3/32
+- if-name: p
+  ipv4:
+    address: 10.250.0.6/30
+- if-name: ce2
+  vrf: vrf-cust
+  ipv4:
+    address: 10.2.0.6/30
+router:
+  static:
+    vrf:
+    - name: vrf-cust
+      ipv4:
+        route:
+        # Customer loopback + the C-CE link subnet (return path for a
+        # link-sourced customer ping).
+        - prefix: 10.0.2.1/32
+          nexthop:
+          - address: 10.2.0.5
+        - prefix: 10.2.0.0/30
+          nexthop:
+          - address: 10.2.0.5
+  isis:
+    net: 49.0000.0000.0000.0003.00
+    hostname: pe2
+    is-type: level-2-only
+    segment-routing: mpls
+    te-router-id: 1.1.1.3
+    interface:
+    - if-name: lo
+      ipv4:
+        enable: true
+        prefix-sid:
+          index: 3
+    - if-name: p
+      network-type: point-to-point
+      metric: 10
+      ipv4:
+        enable: true
+  bgp:
+    global:
+      as: 65000
+      router-id: 1.1.1.3
+    neighbor:
+    - remote-address: 1.1.1.1
+      remote-as: 65000
+      timers: {connect-retry-time: 3}
+      update-source: 1.1.1.3
+      enabled: true
+      afi-safi:
+      - name: vpnv4
+        enabled: true
+    vrf:
+    - name: vrf-cust
+      rd: 65000:2
+      afi-safi:
+        ipv4:
+          redistribute:
+            static: {}

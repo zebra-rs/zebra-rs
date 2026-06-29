@@ -1,0 +1,80 @@
+# PE1 — provider edge 1 (AS 65000). IS-IS L2 SRv6 underlay; iBGP VPNv6 to
+# PE2. Static PE-CE (encapsulation srv6): per-VRF static routes to C1's
+# loopback and the C-CE link via CE1, redistributed into VPNv6 carrying
+# the per-VRF End.DT46 SID (RD 65000:1 / RT 65000:100).
+vrf:
+- name: vrf-cust
+  ipv6:
+    route-target:
+      import:
+      - 65000:100
+      export:
+      - 65000:100
+interface:
+- if-name: lo
+  ipv6:
+    address: 2001:db8::1/128
+- if-name: p
+  ipv6:
+    address: 2001:db8:cafe:1::1/64
+- if-name: ce1
+  vrf: vrf-cust
+  ipv6:
+    address: 2001:db8:1e::2/64
+segment-routing:
+  locator:
+  - name: LOC1
+    prefix: fcbb:bbbb:1::/48
+    behavior: usid
+router:
+  static:
+    vrf:
+    - name: vrf-cust
+      ipv6:
+        route:
+        - prefix: 2001:db8:c1::1/128
+          nexthop:
+          - address: 2001:db8:1e::1
+        - prefix: 2001:db8:1c::/64
+          nexthop:
+          - address: 2001:db8:1e::1
+  isis:
+    net: 49.0000.0000.0000.0001.00
+    hostname: pe1
+    is-type: level-2-only
+    segment-routing:
+      srv6:
+        locator: LOC1
+    interface:
+    - if-name: lo
+      ipv6:
+        enable: true
+    - if-name: p
+      network-type: point-to-point
+      metric: 10
+      ipv6:
+        enable: true
+  bgp:
+    global:
+      as: 65000
+      router-id: 1.1.1.1
+    segment-routing:
+      srv6:
+        locator: LOC1
+    neighbor:
+    - remote-address: 2001:db8::3
+      remote-as: 65000
+      timers: {connect-retry-time: 3}
+      update-source: 2001:db8::1
+      enabled: true
+      afi-safi:
+      - name: vpnv6
+        enabled: true
+    vrf:
+    - name: vrf-cust
+      rd: 65000:1
+      encapsulation: srv6
+      afi-safi:
+        ipv6:
+          redistribute:
+            static: {}

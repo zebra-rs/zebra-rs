@@ -1,0 +1,17 @@
+# C1 — customer site 1. Loopback 10.0.1.1/32 + a static default toward
+# CE1. No routing protocol: the loopback is reached from the far side by
+# a static route on CE1, and C1 reaches everything via the default.
+interface:
+- if-name: lo
+  ipv4:
+    address: 10.0.1.1/32
+- if-name: ce1
+  ipv4:
+    address: 10.1.0.1/30
+router:
+  static:
+    ipv4:
+      route:
+      - prefix: 0.0.0.0/0
+        nexthop:
+        - address: 10.1.0.2

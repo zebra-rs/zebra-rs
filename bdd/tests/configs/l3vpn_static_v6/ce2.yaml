@@ -1,0 +1,19 @@
+# CE2 — customer edge 2. Mirror of CE1: IPv6 static route to C2's
+# loopback via C2, default toward PE2.
+interface:
+- if-name: c2
+  ipv6:
+    address: 2001:db8:2c::2/64
+- if-name: pe2
+  ipv6:
+    address: 2001:db8:2e::1/64
+router:
+  static:
+    ipv6:
+      route:
+      - prefix: 2001:db8:c2::1/128
+        nexthop:
+        - address: 2001:db8:2c::1
+      - prefix: ::/0
+        nexthop:
+        - address: 2001:db8:2e::2
