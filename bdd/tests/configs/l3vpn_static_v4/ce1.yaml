@@ -1,0 +1,20 @@
+# CE1 — customer edge 1. Static PE-CE: a static route to C1's loopback
+# via C1, and a default toward PE1 (so C2's loopback, learned by PE1 via
+# VPNv4, is reached through the PE). No routing protocol.
+interface:
+- if-name: c1
+  ipv4:
+    address: 10.1.0.2/30
+- if-name: pe1
+  ipv4:
+    address: 10.1.0.5/30
+router:
+  static:
+    ipv4:
+      route:
+      - prefix: 10.0.1.1/32
+        nexthop:
+        - address: 10.1.0.1
+      - prefix: 0.0.0.0/0
+        nexthop:
+        - address: 10.1.0.6

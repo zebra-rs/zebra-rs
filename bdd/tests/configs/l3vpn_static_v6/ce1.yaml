@@ -1,0 +1,19 @@
+# CE1 — customer edge 1. IPv6 static PE-CE: static route to C1's loopback
+# via C1, default toward PE1.
+interface:
+- if-name: c1
+  ipv6:
+    address: 2001:db8:1c::2/64
+- if-name: pe1
+  ipv6:
+    address: 2001:db8:1e::1/64
+router:
+  static:
+    ipv6:
+      route:
+      - prefix: 2001:db8:c1::1/128
+        nexthop:
+        - address: 2001:db8:1c::1
+      - prefix: ::/0
+        nexthop:
+        - address: 2001:db8:1e::2

@@ -1,0 +1,16 @@
+# C2 — customer site 2. Mirror of C1: loopback 10.0.2.1/32 + static
+# default toward CE2.
+interface:
+- if-name: lo
+  ipv4:
+    address: 10.0.2.1/32
+- if-name: ce2
+  ipv4:
+    address: 10.2.0.1/30
+router:
+  static:
+    ipv4:
+      route:
+      - prefix: 0.0.0.0/0
+        nexthop:
+        - address: 10.2.0.2

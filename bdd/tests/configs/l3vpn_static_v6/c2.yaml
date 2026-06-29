@@ -1,0 +1,16 @@
+# C2 — customer site 2. Mirror of C1: IPv6 loopback + static default
+# toward CE2.
+interface:
+- if-name: lo
+  ipv6:
+    address: 2001:db8:c2::1/128
+- if-name: ce2
+  ipv6:
+    address: 2001:db8:2c::1/64
+router:
+  static:
+    ipv6:
+      route:
+      - prefix: ::/0
+        nexthop:
+        - address: 2001:db8:2c::2
