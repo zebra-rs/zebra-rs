@@ -13,11 +13,9 @@
 //!   — the list-key handler typically arrives first, but staging
 //!   tolerates the leaf handler racing ahead.
 //! - The `peer-group` reference is a plain string (matching the
-//!   schema). Resolution against `neighbor-group <X>`
-//!   happens when the per-VRF runtime materializes peers.
-//! - `BgpVrfNeighborConfig::enabled` defaults to `true` so a freshly
-//!   added neighbor row matches the YANG default without the user
-//!   needing to `set ... enabled true` explicitly.
+//!   schema). Resolution against `neighbor-group <X>` (remote-as
+//!   fallback + afi-safi opinions) happens when the per-VRF runtime
+//!   materializes peers.
 //! - The label-mode value is parsed at the callback boundary into a
 //!   typed enum; bad input fails the callback and is rejected by the
 //!   config commit (same shape every other `enum`-typed leaf uses).
@@ -86,12 +84,11 @@ impl BgpVrfEncapsulation {
 /// Per-peer attribute set for a CE peer configured under
 /// `router bgp vrf X neighbor <addr>`. Mirrors `bgp-vrf-neighbor` in
 /// zebra-bgp-vrf.yang.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub struct BgpVrfNeighborConfig {
     pub remote_as: Option<u32>,
     pub peer_group: Option<String>,
     pub description: Option<String>,
-    pub enabled: bool,
     /// Verbatim per-family `afi-safi <name> enabled <bool>` statements
     /// for this CE peer — the per-VRF equivalent of
     /// [`super::peer::PeerConfig::mp_explicit`]. Only the IPv4 / IPv6
@@ -102,21 +99,6 @@ pub struct BgpVrfNeighborConfig {
     /// stored `peer_group` is not resolved at materialization), so this
     /// map is the only override layer.
     pub mp_explicit: BTreeMap<AfiSafi, bool>,
-}
-
-impl Default for BgpVrfNeighborConfig {
-    fn default() -> Self {
-        // `enabled: true` matches the YANG default — when the
-        // operator types `set ... neighbor X` without explicit
-        // `enabled`, the peer is live.
-        Self {
-            remote_as: None,
-            peer_group: None,
-            description: None,
-            enabled: true,
-            mp_explicit: BTreeMap::new(),
-        }
-    }
 }
 
 /// Per-AFI knobs under `router bgp vrf X afi-safi {ipv4,ipv6}-unicast`.
@@ -580,21 +562,6 @@ pub fn config_vrf_neighbor_description(bgp: &mut Bgp, mut args: Args, op: Config
     match op {
         ConfigOp::Set => nbr.description = Some(args.string()?),
         ConfigOp::Delete => nbr.description = None,
-        _ => {}
-    }
-    Some(())
-}
-
-/// `set router bgp vrf <NAME> neighbor <addr> enabled <BOOL>`.
-pub fn config_vrf_neighbor_enabled(bgp: &mut Bgp, mut args: Args, op: ConfigOp) -> Option<()> {
-    let name = args.string()?;
-    let addr = args.addr()?;
-    let cfg = vrf_entry(bgp, name);
-    let nbr = cfg.neighbors.entry(addr).or_default();
-    match op {
-        ConfigOp::Set => nbr.enabled = args.boolean()?,
-        // Reset to YANG default on delete.
-        ConfigOp::Delete => nbr.enabled = true,
         _ => {}
     }
     Some(())
@@ -1083,15 +1050,16 @@ mod tests {
     }
 
     #[test]
-    fn neighbor_default_is_enabled() {
-        // YANG default for `enabled` is true — every other leaf is
-        // None, so a `set ... neighbor X` without further leaves
-        // produces a live peer at materialization time.
+    fn neighbor_default_is_empty() {
+        // A `set ... neighbor X` with no further leaves stages an empty
+        // neighbor: no remote-as / peer-group / description and no
+        // explicit afi-safi activation. The peer only materializes once
+        // a remote-as (own or group-inherited) is known.
         let nbr = BgpVrfNeighborConfig::default();
-        assert!(nbr.enabled);
         assert!(nbr.remote_as.is_none());
         assert!(nbr.peer_group.is_none());
         assert!(nbr.description.is_none());
+        assert!(nbr.mp_explicit.is_empty());
     }
 
     #[test]

@@ -4166,10 +4166,6 @@ impl Bgp {
             super::vrf_config::config_vrf_neighbor_description,
         );
         self.callback_add(
-            "/router/bgp/vrf/neighbor/enabled",
-            super::vrf_config::config_vrf_neighbor_enabled,
-        );
-        self.callback_add(
             "/router/bgp/vrf/neighbor/afi-safi/enabled",
             super::vrf_config::config_vrf_neighbor_afi_safi_enabled,
         );

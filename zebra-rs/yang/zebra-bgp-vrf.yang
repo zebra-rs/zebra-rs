@@ -170,15 +170,6 @@ module zebra-bgp-vrf {
           "Free-form description string echoed in `show bgp vrf X
            neighbors` output.";
       }
-      leaf enabled {
-        type boolean;
-        default "true";
-        description
-          "Whether the BGP peer is enabled. `false` keeps the
-           configured peer in the runtime state but holds the FSM
-           in `Idle` (the local system neither initiates connects
-           nor responds to inbound).";
-      }
       list afi-safi {
         key "name";
         description
