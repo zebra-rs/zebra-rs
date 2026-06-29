@@ -1688,6 +1688,42 @@ mod yang_load_tests {
         }
     }
 
+    /// Regression guard for the per-VRF CE-neighbor `afi-safi <fam> enabled`
+    /// activation (zebra-bgp-vrf.yang `bgp-vrf-neighbor` grouping). The knob
+    /// is the per-VRF equivalent of the global neighbor's
+    /// `/router/bgp/neighbor/afi-safi/enabled`; only the unicast families
+    /// (`ipv4`, `ipv6`) are reachable. Pins the path so a broken `uses
+    /// zas:afi-safi-unicast` or a stale callback registration is caught in
+    /// the unit suite, not only the IPv6 PE-CE BDD.
+    #[test]
+    fn bgp_vrf_neighbor_afi_safi_enabled_paths_parse() {
+        use crate::config::ExecCode;
+        use crate::config::parse::{State, parse};
+        use libyang::to_entry;
+
+        let mut yang = YangStore::new();
+        yang.add_path(concat!(env!("CARGO_MANIFEST_DIR"), "/yang"));
+        yang.read_with_resolve("configure")
+            .unwrap_or_else(|e| panic!("configure failed to load: {e:#}"));
+        yang.identity_resolve();
+        let module = yang.find_module("configure").unwrap();
+        let entry = to_entry(&yang, module);
+
+        for cmd in [
+            "set router bgp vrf VRF1 neighbor 2001:db8::2 remote-as 65001",
+            "set router bgp vrf VRF1 neighbor 2001:db8::2 afi-safi ipv6 enabled true",
+            "set router bgp vrf VRF1 neighbor 2001:db8::2 afi-safi ipv4 enabled true",
+            "set router bgp vrf VRF1 neighbor 192.0.2.2 afi-safi ipv4 enabled false",
+        ] {
+            let (code, _comps, _state) = parse(cmd, entry.clone(), None, State::new());
+            assert_eq!(
+                code,
+                ExecCode::Success,
+                "should parse as a settable path: {cmd}"
+            );
+        }
+    }
+
     /// Regression guard for the per-VRF MUP `route` list (zebra-bgp-vrf.yang).
     /// Both ST bindings now live under `afi-safi mup route {st1|st2}`
     /// (collapsed enum-keyed list): st1 (downlink / N6) and st2 (uplink /

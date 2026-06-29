@@ -24,6 +24,7 @@ use tokio::sync::mpsc::UnboundedSender;
 use crate::context::{ProtoContext, Task};
 
 use super::super::inst::RibKnownVrf;
+use super::super::neighbor_group::NeighborGroup;
 use super::super::vrf_config::{BgpVrfConfig, BgpVrfEncapsulation};
 use super::inst::{BgpVrf, BgpVrfInbox, serve_vrf};
 use super::msg::{BgpGlobalMsg, BgpVrfMsg};
@@ -115,6 +116,7 @@ pub fn compute_vrf_diff(
 pub fn spawn_bgp_vrf(
     name: String,
     cfg: &BgpVrfConfig,
+    groups: &BTreeMap<String, NeighborGroup>,
     router_id: std::net::Ipv4Addr,
     asn: u32,
     label: u32,
@@ -178,7 +180,7 @@ pub fn spawn_bgp_vrf(
     // driver lands. Peers without a `remote_as` are skipped:
     // `Peer::start` gates on `remote_as != 0`, so inserting them
     // would only litter the map with permanently-Idle entries.
-    let peer_count = materialize_peers(&mut vrf, cfg);
+    let peer_count = materialize_peers(&mut vrf, cfg, groups);
 
     // Register each materialised peer with the global accept
     // dispatcher so an inbound `:179` from that IP lands on this
@@ -299,19 +301,41 @@ pub fn spawn_bgp_vrf(
 /// `vrf.peers`. Calls `peer.start()` on each — that arms the
 /// idle-hold timer; once it fires the FSM event lands on
 /// `vrf.tx`.
-fn materialize_peers(vrf: &mut BgpVrf, cfg: &BgpVrfConfig) -> usize {
+fn materialize_peers(
+    vrf: &mut BgpVrf,
+    cfg: &BgpVrfConfig,
+    groups: &BTreeMap<String, NeighborGroup>,
+) -> usize {
     use super::super::peer::{Peer, PeerType};
     use super::super::peer_key::PeerKey;
+    use bgp_packet::{Afi, AfiSafi, AfiSafis, Safi};
 
     let mut count = 0usize;
     for (addr, nbr_cfg) in &cfg.neighbors {
+        // Resolve the optionally-referenced neighbor-group once. Its
+        // attributes act as a fallback layer beneath the neighbor's own —
+        // the same precedence the global neighbor uses, except a CE peer's
+        // group is resolved here at materialization (and re-resolved on the
+        // next respawn) rather than swept live, because the group lives on
+        // the global `Bgp` and these peers run in a separate per-VRF task.
+        let group = nbr_cfg
+            .peer_group
+            .as_ref()
+            .and_then(|name| groups.get(name));
+
         // `Peer::start()` gates on `remote_as != 0` already, but
         // skipping the insert entirely keeps the per-VRF peer map
         // free of dormant rows the show path would have to render
         // as "remote-as: unset". When the operator later types
         // the missing leaf the follow-up commit re-runs
-        // `materialize_peers` and the peer arrives.
-        let Some(remote_as) = nbr_cfg.remote_as else {
+        // `materialize_peers` and the peer arrives. The neighbor's own
+        // `remote-as` wins; otherwise inherit the group's (so a peer-group
+        // that carries `remote-as` makes its members live without a
+        // per-neighbor leaf).
+        let Some(remote_as) = nbr_cfg
+            .remote_as
+            .or_else(|| group.and_then(|g| g.remote_as))
+        else {
             tracing::debug!(
                 vrf = %vrf.name,
                 peer = %addr,
@@ -344,6 +368,58 @@ fn materialize_peers(vrf: &mut BgpVrf, cfg: &BgpVrfConfig) -> usize {
         } else {
             PeerType::EBGP
         };
+        // Record the group binding so `show bgp vrf` reflects it. The
+        // inheritance below is resolved eagerly (the global group sweep
+        // doesn't reach per-VRF tasks); a later edit to the group's
+        // opinions takes effect when the VRF task next respawns or the
+        // session is cleared.
+        peer.config.neighbor_group = nbr_cfg.peer_group.clone();
+
+        // Derive the negotiated address-family set for this CE peer.
+        // `Peer::new` defaults to IPv4 unicast only, which is wrong for
+        // an IPv6 CE peer — so resolve the family set in three layers,
+        // lowest precedence first (mirroring `neighbor_group::effective_mp`
+        // for the global neighbor, but with an address-derived base):
+        //
+        //   1. base = the peer's own address family (an IPv6 peer →
+        //      IPv6 unicast, an IPv4 peer → IPv4 unicast). Unlike the
+        //      global neighbor we deliberately do NOT force IPv4 unicast
+        //      on for a v6 peer.
+        //   2. the referenced neighbor-group's `afi-safi` opinions
+        //      (`enabled true` adds a family, `false` removes it).
+        //   3. the per-neighbor explicit `afi-safi <fam> enabled`
+        //      statements — "any field set on the neighbor itself wins".
+        //
+        // The family set is a Multiprotocol capability fixed at OPEN
+        // time; peers are (re)materialized before the session
+        // establishes, so the resolved set rides the first OPEN with no
+        // bounce needed.
+        let base = if addr.is_ipv6() {
+            AfiSafi::new(Afi::Ip6, Safi::Unicast)
+        } else {
+            AfiSafi::new(Afi::Ip, Safi::Unicast)
+        };
+        let mut mp = AfiSafis::new();
+        mp.insert(base, true);
+        if let Some(g) = group {
+            for (fam, entry) in &g.afi_safi {
+                if entry.enabled {
+                    mp.insert(*fam, true);
+                } else {
+                    mp.remove(fam);
+                }
+            }
+        }
+        for (fam, enabled) in &nbr_cfg.mp_explicit {
+            if *enabled {
+                mp.insert(*fam, true);
+            } else {
+                mp.remove(fam);
+            }
+        }
+        peer.config.mp = mp;
+        peer.config.mp_explicit = nbr_cfg.mp_explicit.clone();
+
         peer.start();
         vrf.peers.insert_with_key(PeerKey::Addr(*addr), peer);
         count += 1;
@@ -493,9 +569,11 @@ mod tests {
         // need the per-VRF `SO_BINDTODEVICE` binding; the
         // placeholder context is enough for lifecycle testing.
         let subscriber = test_rib_subscriber();
+        let groups = BTreeMap::new();
         spawn_bgp_vrf(
             name.to_string(),
             &cfg,
+            &groups,
             Ipv4Addr::UNSPECIFIED,
             65000,
             /* label */ 16,
@@ -555,7 +633,7 @@ mod tests {
         );
         cfg.neighbors.insert(no_as, BgpVrfNeighborConfig::default());
 
-        let count = materialize_peers(&mut vrf, &cfg);
+        let count = materialize_peers(&mut vrf, &cfg, &BTreeMap::new());
 
         // Only the neighbor with `remote-as` set is materialised —
         // `Peer::start()` gates on `remote_as != 0`, and inserting
@@ -581,6 +659,174 @@ mod tests {
         );
     }
 
+    /// A CE peer's negotiated MP family set is derived from its own
+    /// address family (an IPv6 peer → IPv6 unicast, an IPv4 peer → IPv4
+    /// unicast) and then layered with explicit `afi-safi <fam> enabled`
+    /// overrides. Unlike the global neighbor, IPv4 unicast is NOT forced
+    /// on for a v6 peer — so a bare IPv6 CE peer negotiates IPv6 unicast
+    /// only (the bug this branch fixes: `Peer::new` defaults to IPv4
+    /// unicast, which left a v6 CE session with no usable family).
+    #[tokio::test]
+    async fn materialize_peers_derives_mp_from_address_and_explicit() {
+        use super::super::super::vrf_config::{BgpVrfConfig, BgpVrfNeighborConfig};
+        use super::super::inst::BgpVrf;
+        use crate::context::ProtoContext;
+        use bgp_packet::{Afi, AfiSafi, Safi};
+
+        let (global_tx, _global_rx) = unbounded_channel::<BgpGlobalMsg>();
+        let ctx = ProtoContext::default_table_no_rib();
+        let (_rib_tx, rib_rx) = unbounded_channel();
+        let (mut vrf, _inbox) = BgpVrf::new(
+            "v1".to_string(),
+            ctx,
+            Ipv4Addr::UNSPECIFIED,
+            65000,
+            /* label */ 16,
+            global_tx,
+            rib_rx,
+        );
+
+        let v4_only: std::net::IpAddr = "192.0.2.1".parse().unwrap();
+        let v6_only: std::net::IpAddr = "2001:db8::2".parse().unwrap();
+        let v6_dual: std::net::IpAddr = "2001:db8::3".parse().unwrap();
+
+        let ipv4u = AfiSafi::new(Afi::Ip, Safi::Unicast);
+        let ipv6u = AfiSafi::new(Afi::Ip6, Safi::Unicast);
+
+        let mut cfg = BgpVrfConfig::default();
+        // Bare IPv4 peer: IPv4 unicast only.
+        cfg.neighbors.insert(
+            v4_only,
+            BgpVrfNeighborConfig {
+                remote_as: Some(65001),
+                ..Default::default()
+            },
+        );
+        // Bare IPv6 peer: IPv6 unicast only (no implicit IPv4 unicast).
+        cfg.neighbors.insert(
+            v6_only,
+            BgpVrfNeighborConfig {
+                remote_as: Some(65001),
+                ..Default::default()
+            },
+        );
+        // IPv6 peer with an explicit `afi-safi ipv4 enabled true` override:
+        // negotiates both families (v4-over-v6).
+        let mut dual = BgpVrfNeighborConfig {
+            remote_as: Some(65001),
+            ..Default::default()
+        };
+        dual.mp_explicit.insert(ipv4u, true);
+        cfg.neighbors.insert(v6_dual, dual);
+
+        materialize_peers(&mut vrf, &cfg, &BTreeMap::new());
+
+        let p4 = vrf.peers.get(&v4_only).expect("v4 peer");
+        assert!(p4.config.mp.has(&ipv4u), "v4 peer negotiates IPv4 unicast");
+        assert!(
+            !p4.config.mp.has(&ipv6u),
+            "v4 peer must not negotiate IPv6 unicast"
+        );
+
+        let p6 = vrf.peers.get(&v6_only).expect("v6 peer");
+        assert!(p6.config.mp.has(&ipv6u), "v6 peer negotiates IPv6 unicast");
+        assert!(
+            !p6.config.mp.has(&ipv4u),
+            "bare v6 peer must NOT force IPv4 unicast on"
+        );
+
+        let pd = vrf.peers.get(&v6_dual).expect("dual peer");
+        assert!(
+            pd.config.mp.has(&ipv6u) && pd.config.mp.has(&ipv4u),
+            "explicit afi-safi ipv4 enabled adds v4 over a v6 session"
+        );
+    }
+
+    /// A CE neighbor that references a `neighbor-group` inherits the
+    /// group's `remote-as` (when its own is unset, so the peer is created
+    /// at all) and the group's `afi-safi` opinions (layered above the
+    /// address-derived base). A per-neighbor explicit `afi-safi <fam>
+    /// enabled` statement still wins over the group — the same precedence
+    /// the global neighbor uses.
+    #[tokio::test]
+    async fn materialize_peers_inherits_remote_as_and_afi_safi_from_group() {
+        use super::super::super::neighbor_group::{GroupAfiSafi, NeighborGroup};
+        use super::super::super::vrf_config::{BgpVrfConfig, BgpVrfNeighborConfig};
+        use super::super::inst::BgpVrf;
+        use crate::context::ProtoContext;
+        use bgp_packet::{Afi, AfiSafi, Safi};
+
+        let (global_tx, _global_rx) = unbounded_channel::<BgpGlobalMsg>();
+        let ctx = ProtoContext::default_table_no_rib();
+        let (_rib_tx, rib_rx) = unbounded_channel();
+        let (mut vrf, _inbox) = BgpVrf::new(
+            "v1".to_string(),
+            ctx,
+            Ipv4Addr::UNSPECIFIED,
+            65000,
+            /* label */ 16,
+            global_tx,
+            rib_rx,
+        );
+
+        let ipv4u = AfiSafi::new(Afi::Ip, Safi::Unicast);
+        let ipv6u = AfiSafi::new(Afi::Ip6, Safi::Unicast);
+
+        // Group "g1": carries remote-as and switches IPv6 unicast on.
+        let mut g1 = NeighborGroup {
+            remote_as: Some(65010),
+            ..Default::default()
+        };
+        g1.afi_safi.insert(
+            ipv6u,
+            GroupAfiSafi {
+                enabled: true,
+                next_hop_self: None,
+            },
+        );
+        let mut groups = BTreeMap::new();
+        groups.insert("g1".to_string(), g1);
+
+        // Inheriting peer: no own remote-as, no own afi-safi. v4 address.
+        let inherit: std::net::IpAddr = "192.0.2.5".parse().unwrap();
+        // Overriding peer: own remote-as wins; explicit `ipv6 enabled false`
+        // overrides the group's `ipv6 enabled true`.
+        let override_peer: std::net::IpAddr = "192.0.2.6".parse().unwrap();
+
+        let mut cfg = BgpVrfConfig::default();
+        cfg.neighbors.insert(
+            inherit,
+            BgpVrfNeighborConfig {
+                peer_group: Some("g1".to_string()),
+                ..Default::default()
+            },
+        );
+        let mut over = BgpVrfNeighborConfig {
+            remote_as: Some(65020),
+            peer_group: Some("g1".to_string()),
+            ..Default::default()
+        };
+        over.mp_explicit.insert(ipv6u, false);
+        cfg.neighbors.insert(override_peer, over);
+
+        let count = materialize_peers(&mut vrf, &cfg, &groups);
+        assert_eq!(count, 2, "both peers materialise (remote-as inherited)");
+
+        let p1 = vrf.peers.get(&inherit).expect("inheriting peer");
+        assert_eq!(p1.remote_as, 65010, "remote-as inherited from the group");
+        assert!(
+            p1.config.mp.has(&ipv4u) && p1.config.mp.has(&ipv6u),
+            "address base (v4) + group opinion (v6) both negotiated"
+        );
+
+        let p2 = vrf.peers.get(&override_peer).expect("overriding peer");
+        assert_eq!(p2.remote_as, 65020, "own remote-as wins over group");
+        assert!(
+            p2.config.mp.has(&ipv4u) && !p2.config.mp.has(&ipv6u),
+            "per-neighbor explicit `ipv6 enabled false` overrides the group"
+        );
+    }
+
     #[tokio::test]
     async fn materialize_peers_with_no_neighbors_returns_zero() {
         use super::super::super::vrf_config::BgpVrfConfig;
@@ -601,7 +847,7 @@ mod tests {
         );
 
         let cfg = BgpVrfConfig::default();
-        assert_eq!(materialize_peers(&mut vrf, &cfg), 0);
+        assert_eq!(materialize_peers(&mut vrf, &cfg, &BTreeMap::new()), 0);
     }
 
     #[tokio::test]

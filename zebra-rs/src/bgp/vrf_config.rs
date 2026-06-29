@@ -26,7 +26,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::net::{IpAddr, Ipv4Addr};
 use std::str::FromStr;
 
-use bgp_packet::RouteDistinguisher;
+use bgp_packet::{AfiSafi, RouteDistinguisher};
 use ipnet::{IpNet, Ipv4Net, Ipv6Net};
 
 use crate::bgp_vrf_trace;
@@ -92,6 +92,16 @@ pub struct BgpVrfNeighborConfig {
     pub peer_group: Option<String>,
     pub description: Option<String>,
     pub enabled: bool,
+    /// Verbatim per-family `afi-safi <name> enabled <bool>` statements
+    /// for this CE peer — the per-VRF equivalent of
+    /// [`super::peer::PeerConfig::mp_explicit`]. Only the IPv4 / IPv6
+    /// unicast families are reachable from the schema. Empty means "no
+    /// explicit override": the negotiated family is then derived from
+    /// the peer's own address family in `materialize_peers`. There is
+    /// no neighbor-group afi-safi inheritance for CE peers yet (the
+    /// stored `peer_group` is not resolved at materialization), so this
+    /// map is the only override layer.
+    pub mp_explicit: BTreeMap<AfiSafi, bool>,
 }
 
 impl Default for BgpVrfNeighborConfig {
@@ -104,6 +114,7 @@ impl Default for BgpVrfNeighborConfig {
             peer_group: None,
             description: None,
             enabled: true,
+            mp_explicit: BTreeMap::new(),
         }
     }
 }
@@ -584,6 +595,37 @@ pub fn config_vrf_neighbor_enabled(bgp: &mut Bgp, mut args: Args, op: ConfigOp) 
         ConfigOp::Set => nbr.enabled = args.boolean()?,
         // Reset to YANG default on delete.
         ConfigOp::Delete => nbr.enabled = true,
+        _ => {}
+    }
+    Some(())
+}
+
+/// `set router bgp vrf <NAME> neighbor <addr> afi-safi {ipv4|ipv6} enabled
+/// <BOOL>` — per-family activation for a CE peer, mirroring the global
+/// neighbor's `config_afi_safi`. Records the verbatim statement into the
+/// staged [`BgpVrfNeighborConfig::mp_explicit`]; `materialize_peers`
+/// resolves the effective family set (address-derived default layered
+/// with these overrides) when it builds the peer. The capability set is
+/// fixed at OPEN time, so a change only takes effect when the CE session
+/// next renegotiates (`clear bgp`).
+pub fn config_vrf_neighbor_afi_safi_enabled(
+    bgp: &mut Bgp,
+    mut args: Args,
+    op: ConfigOp,
+) -> Option<()> {
+    let name = args.string()?;
+    let addr = args.addr()?;
+    let afi_safi: AfiSafi = args.afi_safi()?;
+    let cfg = vrf_entry(bgp, name);
+    let nbr = cfg.neighbors.entry(addr).or_default();
+    match op {
+        ConfigOp::Set => {
+            let enabled = args.boolean()?;
+            nbr.mp_explicit.insert(afi_safi, enabled);
+        }
+        ConfigOp::Delete => {
+            nbr.mp_explicit.remove(&afi_safi);
+        }
         _ => {}
     }
     Some(())

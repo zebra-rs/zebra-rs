@@ -5884,10 +5884,13 @@ pub fn route_ipv4_withdraw(
 /// site), drives the FIB install, and the route lands in
 /// `shard.v6`.
 ///
-/// Scope (layer 2b-i): receive → Adj-RIB-In → Loc-RIB → FIB. Inbound
-/// policy is **not** applied yet (the policy engine is IPv4-typed),
-/// peer re-advertisement is layer 2b-ii, and the per-VRF export/import
-/// hooks are layer 3. None of those are wired here.
+/// Full receive path: Adj-RIB-In → inbound v6 policy
+/// ([`route_apply_policy_in_v6`]) → Loc-RIB → FIB → peer
+/// re-advertisement ([`route_advertise_to_peers_v6`]) → per-VRF
+/// export/import hooks (`vrf_emit_export_v6` when this `BgpTop` carries a
+/// `vrf_export`, so a CE-learned v6-unicast route is promoted to the
+/// global VPNv6 RIB). All of those are wired below; the `rd == None` arm
+/// is the unicast (CE / global) case, `rd == Some` the VPNv6 import case.
 pub fn route_ipv6_update(
     ident: usize,
     nlri: &Ipv6Nlri,

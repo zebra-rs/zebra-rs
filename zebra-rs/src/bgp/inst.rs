@@ -1616,6 +1616,7 @@ impl Bgp {
         let new_handle = super::vrf::spawn_bgp_vrf(
             name.to_string(),
             &cfg,
+            &self.neighbor_groups,
             self.router_id,
             self.asn,
             preserved_label,
@@ -2266,6 +2267,7 @@ impl Bgp {
             let handle = super::vrf::spawn_bgp_vrf(
                 name.clone(),
                 &cfg,
+                &self.neighbor_groups,
                 self.router_id,
                 self.asn,
                 label,
@@ -2367,6 +2369,7 @@ impl Bgp {
         let new_handle = super::vrf::spawn_bgp_vrf(
             name.to_string(),
             &cfg,
+            &self.neighbor_groups,
             self.router_id,
             self.asn,
             preserved_label,
@@ -3457,6 +3460,7 @@ impl Bgp {
         let new_handle = super::vrf::spawn_bgp_vrf(
             name.to_string(),
             &cfg,
+            &self.neighbor_groups,
             self.router_id,
             self.asn,
             label,
