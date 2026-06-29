@@ -1,0 +1,26 @@
+# C2 — customer site 2 (AS 65102). Mirror of C1: originates loopback
+# 10.0.2.1/32 into BGP via `redistribute connected` and eBGPs to CE2.
+interface:
+- if-name: lo
+  ipv4:
+    address: 10.0.2.1/32
+- if-name: ce2
+  ipv4:
+    address: 10.2.0.1/30
+router:
+  bgp:
+    global:
+      as: 65102
+      router-id: 10.0.2.1
+    neighbor:
+    - remote-address: 10.2.0.2
+      remote-as: 65002
+      timers: {connect-retry-time: 3}
+      enabled: true
+      afi-safi:
+      - name: ipv4
+        enabled: true
+    afi-safi:
+    - name: ipv4
+      redistribute:
+        connected: {}
