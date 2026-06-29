@@ -66,12 +66,16 @@ pub enum BgpVrfMsg {
     /// task) renders the VRF's Session-Transformed routes. The global
     /// `Bgp` instance remains the authoritative MUP RIB / advertiser.
     MupUpdate {
+        rd: RouteDistinguisher,
         prefix: bgp_packet::MupPrefix,
         rib: crate::bgp::route::BgpRib,
     },
     /// Withdraw a previously-forwarded MUP best-path (the global RIB no
     /// longer has a selected path for it).
-    MupWithdraw { prefix: bgp_packet::MupPrefix },
+    MupWithdraw {
+        rd: RouteDistinguisher,
+        prefix: bgp_packet::MupPrefix,
+    },
 
     /// VPNv6 counterpart of [`Self::ImportV4`] — a VPNv6 route whose
     /// RT list intersects this VRF's `import_rts_v6`; inserted into

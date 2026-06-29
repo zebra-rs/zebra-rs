@@ -1748,11 +1748,12 @@ impl LocalRibEvpnTable {
     }
 }
 
-/// Flat Loc-RIB table for MUP (SAFI 85) routes — exact-match keyed by
-/// `MupPrefix`. The RD is part of the key, so one flat map holds every RD
-/// and `show bgp mup` walks it grouped by route type. Mirrors
-/// `LocalRibEvpnTable`; best-path reuses the NLRI-agnostic `BgpRib`
-/// comparator.
+/// Per-RD Loc-RIB table for MUP (SAFI 85) routes — exact-match keyed by
+/// the RD-free `MupPrefix`. The RD is the outer
+/// `BTreeMap<RouteDistinguisher, LocalRibMupTable>` key (see `LocalRib.mup`),
+/// exactly as for `LocalRibEvpnTable`; `show bgp mup` walks the outer map
+/// then this table grouped by route type. Best-path reuses the
+/// NLRI-agnostic `BgpRib` comparator.
 #[derive(Debug, Default)]
 pub struct LocalRibMupTable {
     /// Candidate paths per prefix.
@@ -2567,8 +2568,8 @@ pub struct LocalRib {
     /// Per-RD EVPN Loc-RIB tables.
     pub evpn: BTreeMap<RouteDistinguisher, LocalRibEvpnTable>,
 
-    /// Flat MUP (SAFI 85, RFC 9833) Loc-RIB table.
-    pub mup: LocalRibMupTable,
+    /// Per-RD MUP (SAFI 85, RFC 9833) Loc-RIB tables, mirroring `evpn`.
+    pub mup: BTreeMap<RouteDistinguisher, LocalRibMupTable>,
 
     /// IPv4 / IPv6 Flow Specification Loc-RIB (SAFI 133).
     pub flowspec_v4: LocalRibFlowspecTable,
@@ -2637,18 +2638,29 @@ impl LocalRib {
 
     pub fn update_mup(
         &mut self,
+        rd: RouteDistinguisher,
         prefix: MupPrefix,
         rib: BgpRib,
     ) -> (Vec<BgpRib>, Vec<BgpRib>, u32) {
-        self.mup.update(prefix, rib)
+        self.mup.entry(rd).or_default().update(prefix, rib)
     }
 
-    pub fn remove_mup(&mut self, prefix: &MupPrefix, id: u32, ident: usize) -> Vec<BgpRib> {
-        self.mup.remove(prefix, id, ident)
+    pub fn remove_mup(
+        &mut self,
+        rd: RouteDistinguisher,
+        prefix: &MupPrefix,
+        id: u32,
+        ident: usize,
+    ) -> Vec<BgpRib> {
+        self.mup.entry(rd).or_default().remove(prefix, id, ident)
     }
 
-    pub fn select_best_path_mup(&mut self, prefix: &MupPrefix) -> Vec<BgpRib> {
-        self.mup.select_best_path(prefix)
+    pub fn select_best_path_mup(
+        &mut self,
+        rd: &RouteDistinguisher,
+        prefix: &MupPrefix,
+    ) -> Vec<BgpRib> {
+        self.mup.entry(*rd).or_default().select_best_path(prefix)
     }
 
     // Flow Specification dispatch --------------------------------------------
@@ -7540,7 +7552,7 @@ pub fn route_mup_update(
     peers: &mut PeerMap,
     stale: bool,
 ) {
-    let prefix = MupPrefix::from_route(route);
+    let (rd, prefix) = MupPrefix::from_route(route);
     let id = route.add_path_id();
 
     let (peer_ident, peer_router_id, typ) = {
@@ -7588,45 +7600,45 @@ pub fn route_mup_update(
 
     {
         let peer = peers.get_mut_by_idx(ident).expect("peer must exist");
-        peer.adj_in.add_mup(prefix.clone(), rib.clone());
+        peer.adj_in.add_mup(rd, prefix.clone(), rib.clone());
     }
 
     rib.attr = bgp.attr_store.intern(attr.clone());
-    let _ = bgp.local_rib.update_mup(prefix.clone(), rib);
-    let selected = bgp.local_rib.select_best_path_mup(&prefix);
+    let _ = bgp.local_rib.update_mup(rd, prefix.clone(), rib);
+    let selected = bgp.local_rib.select_best_path_mup(&rd, &prefix);
     // Mirror the new best-path to every VRF whose `mup import` RT set
     // matches, so `show bgp vrf <name> mup` reflects peer-learned routes
     // (display only; the global Loc-RIB stays authoritative).
     if let Some(dispatcher) = bgp.vrf_import {
-        super::vrf::dispatch_mup(dispatcher, &prefix, selected.first());
+        super::vrf::dispatch_mup(dispatcher, rd, &prefix, selected.first());
     }
     if !selected.is_empty() {
-        route_advertise_mup_to_peers(prefix, &selected, bgp, peers);
+        route_advertise_mup_to_peers(rd, prefix, &selected, bgp, peers);
     }
 }
 
 /// Withdraw one MUP route advertised in an MP_UNREACH_NLRI from
 /// Adj-RIB-In and the Loc-RIB, then re-run best-path.
 pub fn route_mup_withdraw(ident: usize, route: &MupRoute, bgp: &mut BgpTop, peers: &mut PeerMap) {
-    let prefix = MupPrefix::from_route(route);
+    let (rd, prefix) = MupPrefix::from_route(route);
     let id = route.add_path_id();
     {
         let peer = peers.get_mut_by_idx(ident).expect("peer must exist");
-        peer.adj_in.remove_mup(&prefix, id);
+        peer.adj_in.remove_mup(rd, &prefix, id);
     }
-    let _ = bgp.local_rib.remove_mup(&prefix, id, ident);
-    let selected = bgp.local_rib.select_best_path_mup(&prefix);
+    let _ = bgp.local_rib.remove_mup(rd, &prefix, id, ident);
+    let selected = bgp.local_rib.select_best_path_mup(&rd, &prefix);
     // Mirror the post-withdraw state to per-VRF tasks: a remaining best
     // path is re-forwarded (matched by RT), otherwise the prefix is
     // withdrawn from every VRF's display copy.
     if let Some(dispatcher) = bgp.vrf_import {
-        super::vrf::dispatch_mup(dispatcher, &prefix, selected.first());
+        super::vrf::dispatch_mup(dispatcher, rd, &prefix, selected.first());
     }
     if selected.is_empty() {
-        route_withdraw_mup_to_peers(prefix, peers);
+        route_withdraw_mup_to_peers(rd, prefix, peers);
     } else {
         // Another path remains best for this key — re-advertise it.
-        route_advertise_mup_to_peers(prefix, &selected, bgp, peers);
+        route_advertise_mup_to_peers(rd, prefix, &selected, bgp, peers);
     }
 }
 
@@ -7642,14 +7654,14 @@ fn bgp_nexthop_ip(nh: &BgpNexthop) -> Option<IpAddr> {
     }
 }
 
-/// Select the Segment Discovery NLRI for a VRF's `segment` mode: a DSD
-/// (RD + router-id) for `Direct`, or an ISD (RD + the configured interwork
-/// prefix) for `Interwork`. Returns `None` when the route's NLRI key is not
+/// Select the Segment Discovery NLRI (the RD-free MUP key) for a VRF's
+/// `segment` mode: a DSD (router-id) for `Direct`, or an ISD (the configured
+/// interwork prefix) for `Interwork`. The RD is the outer per-RD map key and
+/// is supplied separately by the caller. Returns `None` when the key is not
 /// available yet — an all-zero router-id for Direct (cold start before the
 /// router-id resolves) or an unset `segment interwork prefix` for Interwork.
 fn mup_segment_nlri(
     mode: super::vrf_config::MupSegmentMode,
-    rd: RouteDistinguisher,
     router_id: Ipv4Addr,
     interwork_prefix: Option<ipnet::IpNet>,
 ) -> Option<MupPrefix> {
@@ -7660,12 +7672,10 @@ fn mup_segment_nlri(
                 return None;
             }
             Some(MupPrefix::Dsd {
-                rd,
                 address: IpAddr::V4(router_id),
             })
         }
         MupSegmentMode::Interwork => Some(MupPrefix::Isd {
-            rd,
             prefix: interwork_prefix?,
         }),
     }
@@ -7681,6 +7691,7 @@ fn mup_segment_nlri(
 /// cleared.
 fn route_update_mup(
     peer: &mut Peer,
+    rd: RouteDistinguisher,
     prefix: &MupPrefix,
     rib: &BgpRib,
     bgp: &BgpTop,
@@ -7698,7 +7709,7 @@ fn route_update_mup(
         return None;
     }
 
-    let route = prefix.to_route();
+    let route = prefix.to_route(rd);
     let mut attrs = (*rib.attr).clone();
     ebgp_egress_aspath(&peer.egress_as(), &mut attrs);
 
@@ -7746,12 +7757,18 @@ fn mup_send_one(peer: &mut Peer, afi: Afi, route: MupRoute, attr: &Arc<BgpAttr>,
 
 /// Advertise one selected MUP path to a single peer: apply egress
 /// transforms, record the Adj-RIB-Out entry, and emit the UPDATE.
-fn mup_advertise_one(peer: &mut Peer, prefix: &MupPrefix, rib: &BgpRib, bgp: &mut BgpTop) -> bool {
+fn mup_advertise_one(
+    peer: &mut Peer,
+    rd: RouteDistinguisher,
+    prefix: &MupPrefix,
+    rib: &BgpRib,
+    bgp: &mut BgpTop,
+) -> bool {
     // RFC 9494 §4.3: stale routes only go to LLGR peers.
     if llgr_blocks_advertisement(rib.stale, &peer.cap_recv, prefix.afi(), Safi::Mup) {
         return false;
     }
-    let Some((route, attrs, nhop)) = route_update_mup(peer, prefix, rib, bgp) else {
+    let Some((route, attrs, nhop)) = route_update_mup(peer, rd, prefix, rib, bgp) else {
         return false;
     };
     // No per-AFI MUP outbound route-policy binding exists yet, so the
@@ -7760,7 +7777,7 @@ fn mup_advertise_one(peer: &mut Peer, prefix: &MupPrefix, rib: &BgpRib, bgp: &mu
     let attr = bgp.attr_store.intern(attrs);
     let mut adj = rib.clone();
     adj.attr = attr.clone();
-    peer.adj_out.add_mup(prefix.clone(), adj);
+    peer.adj_out.add_mup(rd, prefix.clone(), adj);
     mup_send_one(peer, prefix.afi(), route, &attr, nhop);
     true
 }
@@ -7770,6 +7787,7 @@ fn mup_advertise_one(peer: &mut Peer, prefix: &MupPrefix, rib: &BgpRib, bgp: &mu
 /// only the best path is sent (plain members). Pairs with
 /// [`route_withdraw_mup_to_peers`].
 pub fn route_advertise_mup_to_peers(
+    rd: RouteDistinguisher,
     prefix: MupPrefix,
     selected: &[BgpRib],
     bgp: &mut BgpTop,
@@ -7781,18 +7799,18 @@ pub fn route_advertise_mup_to_peers(
     let afi = prefix.afi();
     for ident in peers.established_plain_idents(afi, Safi::Mup) {
         let peer = peers.get_mut_by_idx(ident).expect("peer exists");
-        mup_advertise_one(peer, &prefix, new_best, bgp);
+        mup_advertise_one(peer, rd, &prefix, new_best, bgp);
     }
 }
 
 /// Send one id-less MUP MP_UNREACH to a peer and drop the Adj-RIB-Out
 /// entry so a later policy diff doesn't re-withdraw it.
-fn mup_withdraw_one(peer: &mut Peer, prefix: &MupPrefix) {
-    peer.adj_out.remove_mup(prefix, 0);
+fn mup_withdraw_one(peer: &mut Peer, rd: RouteDistinguisher, prefix: &MupPrefix) {
+    peer.adj_out.remove_mup(rd, prefix, 0);
     let mut update = UpdatePacket::with_max_packet_size(peer.max_packet_size());
     update.mp_withdraw = Some(MpUnreachAttr::Mup {
         afi: prefix.afi(),
-        withdraws: vec![prefix.to_route()],
+        withdraws: vec![prefix.to_route(rd)],
     });
     peer.send_packet(update.into());
 }
@@ -7800,11 +7818,11 @@ fn mup_withdraw_one(peer: &mut Peer, prefix: &MupPrefix) {
 /// Withdraw a MUP prefix from every Established `(afi, Mup)` peer. The
 /// id-less MP_UNREACH clears the whole prefix; a peer that never held it
 /// ignores the withdraw.
-pub fn route_withdraw_mup_to_peers(prefix: MupPrefix, peers: &mut PeerMap) {
+pub fn route_withdraw_mup_to_peers(rd: RouteDistinguisher, prefix: MupPrefix, peers: &mut PeerMap) {
     let afi = prefix.afi();
     for ident in peers.established_plain_idents(afi, Safi::Mup) {
         let peer = peers.get_mut_by_idx(ident).expect("peer exists");
-        mup_withdraw_one(peer, &prefix);
+        mup_withdraw_one(peer, rd, &prefix);
     }
 }
 
@@ -7881,14 +7899,19 @@ fn build_mup_attr(
 /// before the peer came up would never be sent. Called from `route_sync`
 /// only when the peer negotiated `(Ip, Mup)` or `(Ip6, Mup)`.
 pub fn route_sync_mup(peer: &mut Peer, bgp: &mut BgpTop) {
-    let snapshot: Vec<(MupPrefix, BgpRib)> = bgp
+    // Per-RD walk over `LocalRib::mup[rd].selected`, mirroring `route_sync_evpn`.
+    let snapshot: Vec<(RouteDistinguisher, MupPrefix, BgpRib)> = bgp
         .local_rib
         .mup
-        .selected
         .iter()
-        .map(|(prefix, rib)| (prefix.clone(), rib.clone()))
+        .flat_map(|(rd, table)| {
+            table
+                .selected
+                .iter()
+                .map(move |(prefix, rib)| (*rd, prefix.clone(), rib.clone()))
+        })
         .collect();
-    for (prefix, rib) in snapshot {
+    for (rd, prefix, rib) in snapshot {
         let afi = prefix.afi();
         if !peer.is_afi_safi(afi, Safi::Mup) {
             continue;
@@ -7896,13 +7919,13 @@ pub fn route_sync_mup(peer: &mut Peer, bgp: &mut BgpTop) {
         if llgr_blocks_advertisement(rib.stale, &peer.cap_recv, afi, Safi::Mup) {
             continue;
         }
-        let Some((route, attrs, nhop)) = route_update_mup(peer, &prefix, &rib, bgp) else {
+        let Some((route, attrs, nhop)) = route_update_mup(peer, rd, &prefix, &rib, bgp) else {
             continue;
         };
         let attr = bgp.attr_store.intern(attrs);
         let mut adj = rib.clone();
         adj.attr = attr.clone();
-        peer.adj_out.add_mup(prefix.clone(), adj);
+        peer.adj_out.add_mup(rd, prefix.clone(), adj);
         mup_send_one(peer, afi, route, &attr, nhop);
     }
     // RFC 4724 / RFC 7606 §3 EoR: empty MP_UNREACH per negotiated MUP AFI.
@@ -9748,22 +9771,24 @@ pub fn route_clean(
     // peer-down simply drops every MUP route the peer gave us from the
     // Loc-RIB and clears its Adj-RIB-In. (LLGR stale retention for MUP is
     // a later phase, mirroring the EVPN/VPN two-branch logic above.)
-    let mup_keys: Vec<(MupPrefix, u32)> = {
+    let mup_keys: Vec<(RouteDistinguisher, MupPrefix, u32)> = {
         let peer = peers.get_mut_by_idx(peer_id).expect("peer must exist");
         let mut out = Vec::new();
-        for (prefix, ribs) in peer.adj_in.mup.0.iter() {
-            for rib in ribs.iter() {
-                out.push((prefix.clone(), rib.remote_id));
+        for (rd, table) in peer.adj_in.mup.iter() {
+            for (prefix, ribs) in table.0.iter() {
+                for rib in ribs.iter() {
+                    out.push((*rd, prefix.clone(), rib.remote_id));
+                }
             }
         }
         out
     };
-    for (prefix, id) in mup_keys.iter() {
-        let _ = bgp.local_rib.remove_mup(prefix, *id, peer_id);
-        let _ = bgp.local_rib.select_best_path_mup(prefix);
+    for (rd, prefix, id) in mup_keys.iter() {
+        let _ = bgp.local_rib.remove_mup(*rd, prefix, *id, peer_id);
+        let _ = bgp.local_rib.select_best_path_mup(rd, prefix);
     }
     let peer = peers.get_mut_by_idx(peer_id).expect("peer must exist");
-    peer.adj_in.mup.0.clear();
+    peer.adj_in.mup.clear();
 
     let peer = peers.get_mut_by_idx(peer_id).expect("peer must exist");
     peer.adj_out.evpn.clear();
@@ -12711,7 +12736,7 @@ impl Bgp {
         // sharing the NI). Install + advertise each, recording every prefix
         // so the deletion / next modification withdraws all of them.
         let mut prefixes = Vec::with_capacity(originations.len());
-        for (prefix, attr) in originations {
+        for (rd, prefix, attr) in originations {
             let mut rib = BgpRib::new(
                 ORIGINATED_PEER,
                 Ipv4Addr::UNSPECIFIED,
@@ -12724,10 +12749,10 @@ impl Bgp {
                 false,
             );
             rib.attr = self.attr_store.intern(attr);
-            let _ = self.local_rib.update_mup(prefix.clone(), rib);
-            let selected = self.local_rib.select_best_path_mup(&prefix);
-            self.mup_apply_selected(prefix.clone(), selected);
-            prefixes.push(prefix);
+            let _ = self.local_rib.update_mup(rd, prefix.clone(), rib);
+            let selected = self.local_rib.select_best_path_mup(&rd, &prefix);
+            self.mup_apply_selected(rd, prefix.clone(), selected);
+            prefixes.push((rd, prefix));
         }
         self.mup_c_originated.insert(session.seid, prefixes);
     }
@@ -12739,10 +12764,10 @@ impl Bgp {
         let Some(prefixes) = self.mup_c_originated.remove(&seid) else {
             return;
         };
-        for prefix in prefixes {
-            self.local_rib.remove_mup(&prefix, 0, ORIGINATED_PEER);
-            let selected = self.local_rib.select_best_path_mup(&prefix);
-            self.mup_apply_selected(prefix, selected);
+        for (rd, prefix) in prefixes {
+            self.local_rib.remove_mup(rd, &prefix, 0, ORIGINATED_PEER);
+            let selected = self.local_rib.select_best_path_mup(&rd, &prefix);
+            self.mup_apply_selected(rd, prefix, selected);
         }
     }
 
@@ -12757,7 +12782,11 @@ impl Bgp {
     pub(super) fn build_mup_origination(
         &self,
         session: &crate::mup_c::session::MupSession,
-    ) -> Vec<(bgp_packet::MupPrefix, BgpAttr)> {
+    ) -> Vec<(
+        bgp_packet::RouteDistinguisher,
+        bgp_packet::MupPrefix,
+        BgpAttr,
+    )> {
         use super::vrf_config::MupSrv6Direction;
         let Some(ni) = session.network_instance.as_deref() else {
             return Vec::new();
@@ -12789,7 +12818,6 @@ impl Bgp {
                     MupSrv6Direction::Encapsulation => {
                         match (mup_ue_prefix(session), session.endpoint) {
                             (Some(prefix), Some(endpoint)) => bgp_packet::MupPrefix::T1st {
-                                rd,
                                 prefix,
                                 teid: session.teid,
                                 qfi: session.qfi.unwrap_or(0),
@@ -12807,7 +12835,6 @@ impl Bgp {
                     // TEID of 0 is a malformed NLRI per the draft).
                     MupSrv6Direction::Decapsulation => match session.endpoint {
                         Some(endpoint) => bgp_packet::MupPrefix::T2st {
-                            rd,
                             endpoint,
                             endpoint_len: if endpoint.is_ipv4() { 64 } else { 160 },
                             teid: session.teid,
@@ -12825,19 +12852,24 @@ impl Bgp {
                 {
                     attr_add_ecom(&mut attr, mup_direct_segment_ecom(&seg));
                 }
-                Some((prefix, attr))
+                Some((rd, prefix, attr))
             })
             .collect()
     }
 
     /// Apply the post-update best path of one MUP prefix to peers:
     /// advertise the new best, or withdraw when no path remains.
-    fn mup_apply_selected(&mut self, prefix: bgp_packet::MupPrefix, selected: Vec<BgpRib>) {
+    fn mup_apply_selected(
+        &mut self,
+        rd: RouteDistinguisher,
+        prefix: bgp_packet::MupPrefix,
+        selected: Vec<BgpRib>,
+    ) {
         // Mirror the best-path to the per-VRF task whose `rd` matches this
         // route's RD (display-only, for `show bgp vrf <name> mup`).
-        self.forward_mup_to_vrf(&prefix, selected.first());
+        self.forward_mup_to_vrf(rd, &prefix, selected.first());
         if selected.is_empty() {
-            route_withdraw_mup_to_peers(prefix, &mut self.peers);
+            route_withdraw_mup_to_peers(rd, prefix, &mut self.peers);
             return;
         }
         let mut bgp_ref = BgpTop {
@@ -12860,7 +12892,7 @@ impl Bgp {
             vrf_transport_v6: None,
             central_label_alloc: None,
         };
-        route_advertise_mup_to_peers(prefix, &selected, &mut bgp_ref, &mut self.peers);
+        route_advertise_mup_to_peers(rd, prefix, &selected, &mut bgp_ref, &mut self.peers);
     }
 
     /// Forward a MUP best-path (or its withdrawal) to the per-VRF task
@@ -12868,10 +12900,12 @@ impl Bgp {
     /// `show bgp vrf <name> mup`. No-op when no VRF owns the RD or that
     /// VRF has no running per-VRF task. Display-only: the global instance
     /// stays the authoritative MUP RIB and advertiser.
-    fn forward_mup_to_vrf(&self, prefix: &bgp_packet::MupPrefix, best: Option<&BgpRib>) {
-        let Some(rd) = prefix.rd() else {
-            return;
-        };
+    fn forward_mup_to_vrf(
+        &self,
+        rd: RouteDistinguisher,
+        prefix: &bgp_packet::MupPrefix,
+        best: Option<&BgpRib>,
+    ) {
         let Some(name) = self
             .vrfs
             .iter()
@@ -12884,10 +12918,12 @@ impl Bgp {
         };
         let msg = match best {
             Some(rib) => super::vrf::msg::BgpVrfMsg::MupUpdate {
+                rd,
                 prefix: prefix.clone(),
                 rib: rib.clone(),
             },
             None => super::vrf::msg::BgpVrfMsg::MupWithdraw {
+                rd,
                 prefix: prefix.clone(),
             },
         };
@@ -12907,7 +12943,12 @@ impl Bgp {
         let names: Vec<String> = self.vrfs.keys().cloned().collect();
         let mut desired: std::collections::BTreeMap<
             String,
-            (bgp_packet::MupPrefix, std::net::Ipv6Addr, BgpAttr),
+            (
+                RouteDistinguisher,
+                bgp_packet::MupPrefix,
+                std::net::Ipv6Addr,
+                BgpAttr,
+            ),
         > = std::collections::BTreeMap::new();
         for name in &names {
             if let Some(d) = self.build_mup_segment_origination(name) {
@@ -12918,34 +12959,34 @@ impl Bgp {
         // changed (a changed RD/router-id/prefix, or a direct↔interwork
         // switch, needs an explicit withdraw of the OLD prefix before the new
         // one is originated under a different key).
-        let prev: Vec<(String, bgp_packet::MupPrefix)> = self
+        let prev: Vec<(String, RouteDistinguisher, bgp_packet::MupPrefix)> = self
             .mup_segment_originated
             .iter()
-            .map(|(n, (p, _, _))| (n.clone(), p.clone()))
+            .map(|(n, (rd, p, _, _))| (n.clone(), *rd, p.clone()))
             .collect();
-        for (name, prev_prefix) in prev {
+        for (name, prev_rd, prev_prefix) in prev {
             let keep = desired
                 .get(&name)
-                .map(|(p, _, _)| *p == prev_prefix)
+                .map(|(rd, p, _, _)| *rd == prev_rd && *p == prev_prefix)
                 .unwrap_or(false);
             if !keep {
                 self.withdraw_mup_segment(&name);
             }
         }
-        // Originate or refresh. Skip only when the NLRI key, the SID *and*
-        // the ext-communities (export RTs + the Direct-segment MUP
+        // Originate or refresh. Skip only when the RD, the NLRI key, the SID
+        // *and* the ext-communities (export RTs + the Direct-segment MUP
         // ext-comm) are all unchanged, so an unrelated commit doesn't
         // re-advertise but a later RT / `mup-ext-comm` arrival does.
-        for (name, (prefix, sid, attr)) in desired {
+        for (name, (rd, prefix, sid, attr)) in desired {
             let unchanged = self
                 .mup_segment_originated
                 .get(&name)
-                .map(|(p, s, e)| *p == prefix && *s == sid && *e == attr.ecom)
+                .map(|(r, p, s, e)| *r == rd && *p == prefix && *s == sid && *e == attr.ecom)
                 .unwrap_or(false);
             if unchanged {
                 continue;
             }
-            self.originate_mup_segment(name, prefix, sid, attr);
+            self.originate_mup_segment(name, rd, prefix, sid, attr);
         }
     }
 
@@ -12971,11 +13012,16 @@ impl Bgp {
     ///   the AFI). Needs the prefix to be set; no MUP Extended Community (a
     ///   receiving PE resolves it by endpoint-address lookup, §3.1.1).
     ///
-    /// Returns `(prefix, sid_addr, attr)`.
+    /// Returns `(rd, prefix, sid_addr, attr)`.
     fn build_mup_segment_origination(
         &self,
         name: &str,
-    ) -> Option<(bgp_packet::MupPrefix, std::net::Ipv6Addr, BgpAttr)> {
+    ) -> Option<(
+        RouteDistinguisher,
+        bgp_packet::MupPrefix,
+        std::net::Ipv6Addr,
+        BgpAttr,
+    )> {
         use super::vrf_config::{BgpVrfEncapsulation, MupSegmentMode};
         let cfg = self.vrfs.get(name)?;
         let mode = cfg.mobile_uplane.segment?;
@@ -12995,7 +13041,7 @@ impl Bgp {
         // The NLRI differs by segment type (DSD = RD + router-id, ISD = RD +
         // interwork prefix); both ride the same End.DT46 SID.
         let router_id = cfg.router_id.unwrap_or(self.router_id);
-        let prefix = mup_segment_nlri(mode, rd, router_id, cfg.mobile_uplane.interwork_prefix)?;
+        let prefix = mup_segment_nlri(mode, router_id, cfg.mobile_uplane.interwork_prefix)?;
         let rts = self
             .rib_known_vrfs
             .get(name)
@@ -13017,7 +13063,7 @@ impl Bgp {
         {
             attr_add_ecom(&mut attr, mup_direct_segment_ecom(&seg));
         }
-        Some((prefix, sid, attr))
+        Some((rd, prefix, sid, attr))
     }
 
     /// Install one VRF's Segment Discovery route (DSD or ISD) into the MUP
@@ -13028,6 +13074,7 @@ impl Bgp {
     fn originate_mup_segment(
         &mut self,
         name: String,
+        rd: RouteDistinguisher,
         prefix: bgp_packet::MupPrefix,
         sid: std::net::Ipv6Addr,
         attr: BgpAttr,
@@ -13045,23 +13092,23 @@ impl Bgp {
         );
         let ecom = attr.ecom.clone();
         rib.attr = self.attr_store.intern(attr);
-        let _ = self.local_rib.update_mup(prefix.clone(), rib);
-        let selected = self.local_rib.select_best_path_mup(&prefix);
+        let _ = self.local_rib.update_mup(rd, prefix.clone(), rib);
+        let selected = self.local_rib.select_best_path_mup(&rd, &prefix);
         self.mup_segment_originated
-            .insert(name, (prefix.clone(), sid, ecom));
-        self.mup_apply_selected(prefix, selected);
+            .insert(name, (rd, prefix.clone(), sid, ecom));
+        self.mup_apply_selected(rd, prefix, selected);
     }
 
     /// Withdraw the Segment Discovery route (DSD or ISD) originated for
     /// `name` (a config / SID / kernel-VRF precondition dropped, or the
     /// `segment` type changed). No-op when nothing was originated.
     fn withdraw_mup_segment(&mut self, name: &str) {
-        let Some((prefix, _sid, _ecom)) = self.mup_segment_originated.remove(name) else {
+        let Some((rd, prefix, _sid, _ecom)) = self.mup_segment_originated.remove(name) else {
             return;
         };
-        self.local_rib.remove_mup(&prefix, 0, ORIGINATED_PEER);
-        let selected = self.local_rib.select_best_path_mup(&prefix);
-        self.mup_apply_selected(prefix, selected);
+        self.local_rib.remove_mup(rd, &prefix, 0, ORIGINATED_PEER);
+        let selected = self.local_rib.select_best_path_mup(&rd, &prefix);
+        self.mup_apply_selected(rd, prefix, selected);
     }
 
     pub fn route_add(&mut self, prefix: Ipv4Net) {
@@ -17937,21 +17984,18 @@ mod tests {
     #[test]
     fn mup_segment_nlri_selects_dsd_or_isd() {
         use std::net::{IpAddr, Ipv4Addr};
-        use std::str::FromStr;
 
-        use bgp_packet::{MupPrefix, RouteDistinguisher};
+        use bgp_packet::MupPrefix;
 
         use super::super::vrf_config::MupSegmentMode;
 
-        let rd = RouteDistinguisher::from_str("65501:10").unwrap();
         let router_id: Ipv4Addr = "192.168.0.1".parse().unwrap();
         let isd_prefix: ipnet::IpNet = "10.60.0.0/16".parse().unwrap();
 
-        // Direct -> DSD keyed by RD + router-id (the interwork prefix is
-        // irrelevant for Direct and is ignored).
-        match super::mup_segment_nlri(MupSegmentMode::Direct, rd, router_id, Some(isd_prefix)) {
-            Some(MupPrefix::Dsd { rd: r, address }) => {
-                assert_eq!(r, rd);
+        // Direct -> DSD keyed by router-id (the RD is the outer per-RD map
+        // key, supplied separately; the interwork prefix is ignored).
+        match super::mup_segment_nlri(MupSegmentMode::Direct, router_id, Some(isd_prefix)) {
+            Some(MupPrefix::Dsd { address }) => {
                 assert_eq!(address, IpAddr::V4(router_id));
             }
             other => panic!("expected Dsd, got {other:?}"),
@@ -17959,21 +18003,19 @@ mod tests {
         // Direct with an all-zero router-id -> nothing (cold start before the
         // router-id resolves).
         assert!(
-            super::mup_segment_nlri(MupSegmentMode::Direct, rd, Ipv4Addr::UNSPECIFIED, None)
-                .is_none()
+            super::mup_segment_nlri(MupSegmentMode::Direct, Ipv4Addr::UNSPECIFIED, None).is_none()
         );
 
-        // Interwork -> ISD keyed by RD + the configured prefix.
-        match super::mup_segment_nlri(MupSegmentMode::Interwork, rd, router_id, Some(isd_prefix)) {
-            Some(MupPrefix::Isd { rd: r, prefix }) => {
-                assert_eq!(r, rd);
+        // Interwork -> ISD keyed by the configured prefix.
+        match super::mup_segment_nlri(MupSegmentMode::Interwork, router_id, Some(isd_prefix)) {
+            Some(MupPrefix::Isd { prefix }) => {
                 assert_eq!(prefix, isd_prefix);
             }
             other => panic!("expected Isd, got {other:?}"),
         }
         // Interwork without a configured prefix -> nothing (the ISD does not
         // originate until `segment interwork prefix <p>` is set).
-        assert!(super::mup_segment_nlri(MupSegmentMode::Interwork, rd, router_id, None).is_none());
+        assert!(super::mup_segment_nlri(MupSegmentMode::Interwork, router_id, None).is_none());
     }
 
     fn bgp_rib_with_nexthop(nh: Option<BgpNexthop>, typ: super::BgpRibType) -> super::BgpRib {

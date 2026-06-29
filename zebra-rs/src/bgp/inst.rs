@@ -682,7 +682,8 @@ pub struct Bgp {
     /// the exact prior routes. No SRv6 SID is allocated for these (the PE
     /// derives forwarding from its ISD/DSD routes), so only the prefixes
     /// are retained.
-    pub mup_c_originated: BTreeMap<u64, Vec<bgp_packet::MupPrefix>>,
+    pub mup_c_originated:
+        BTreeMap<u64, Vec<(bgp_packet::RouteDistinguisher, bgp_packet::MupPrefix)>>,
     /// Config-driven MUP Segment Discovery routes originated per VRF — a DSD
     /// (Direct, type 2, `afi-safi mup segment direct`) or an ISD (Interwork,
     /// type 1, `afi-safi mup segment interwork prefix <p>`); a VRF has at
@@ -695,6 +696,7 @@ pub struct Bgp {
     pub mup_segment_originated: BTreeMap<
         String,
         (
+            bgp_packet::RouteDistinguisher,
             bgp_packet::MupPrefix,
             std::net::Ipv6Addr,
             Option<bgp_packet::ExtCommunity>,

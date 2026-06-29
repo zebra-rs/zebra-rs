@@ -167,11 +167,14 @@ fn mup_prefix_afi(prefix: &MupPrefix) -> Option<Afi> {
     Some(if addr.is_ipv4() { Afi::Ip } else { Afi::Ip6 })
 }
 
-/// Count selected MUP Loc-RIB entries for one address family.
-fn mup_rib_count(table: &super::route::LocalRibMupTable, afi: Afi) -> usize {
-    table
-        .selected
-        .keys()
+/// Count selected MUP Loc-RIB entries for one address family across every RD.
+fn mup_rib_count(
+    tables: &std::collections::BTreeMap<RouteDistinguisher, super::route::LocalRibMupTable>,
+    afi: Afi,
+) -> usize {
+    tables
+        .values()
+        .flat_map(|table| table.selected.keys())
         .filter(|p| mup_prefix_afi(p) == Some(afi))
         .count()
 }
@@ -716,17 +719,20 @@ struct MupCAssociationJson {
 
 /// JSON rendering of a MUP Loc-RIB table — shared by the global
 /// `show bgp mup` and the per-VRF `show bgp vrf <name> mup`.
-fn mup_routes_json(table: &super::route::LocalRibMupTable) -> String {
-    let routes: Vec<MupRouteJson> = table
-        .selected
+fn mup_routes_json(
+    tables: &std::collections::BTreeMap<RouteDistinguisher, super::route::LocalRibMupTable>,
+) -> String {
+    let routes: Vec<MupRouteJson> = tables
         .iter()
-        .map(|(prefix, rib)| {
-            let ecom = show_mup_ecom(&rib.attr);
-            MupRouteJson {
-                prefix: mup_prefix_display(prefix),
-                attrs: common_route_attrs(rib),
-                extended_communities: (!ecom.is_empty()).then_some(ecom),
-            }
+        .flat_map(|(rd, table)| {
+            table.selected.iter().map(move |(prefix, rib)| {
+                let ecom = show_mup_ecom(&rib.attr);
+                MupRouteJson {
+                    prefix: mup_prefix_display(rd, prefix),
+                    attrs: common_route_attrs(rib),
+                    extended_communities: (!ecom.is_empty()).then_some(ecom),
+                }
+            })
         })
         .collect();
     serde_json::to_string_pretty(&routes).unwrap_or_else(|e| format!("{{\"error\": \"{e}\"}}"))
@@ -4029,14 +4035,14 @@ fn show_mup_ecom(attr: &BgpAttr) -> String {
         .join(" ")
 }
 
-/// Render a `MupPrefix` as the bracketed `[TYPE][rd][fields]` form used by
-/// `show bgp mup`, following the MUP NLRI layout (RFC 9833).
-fn mup_prefix_display(prefix: &MupPrefix) -> String {
+/// Render a `MupPrefix` (plus its outer-map RD) as the bracketed
+/// `[TYPE][rd][fields]` form used by `show bgp mup`, following the MUP NLRI
+/// layout (RFC 9833).
+fn mup_prefix_display(rd: &RouteDistinguisher, prefix: &MupPrefix) -> String {
     match prefix {
-        MupPrefix::Dsd { rd, address } => format!("[DSD][{rd}][{address}]"),
-        MupPrefix::Isd { rd, prefix } => format!("[ISD][{rd}][{prefix}]"),
+        MupPrefix::Dsd { address } => format!("[DSD][{rd}][{address}]"),
+        MupPrefix::Isd { prefix } => format!("[ISD][{rd}][{prefix}]"),
         MupPrefix::T1st {
-            rd,
             prefix,
             teid,
             qfi,
@@ -4049,7 +4055,6 @@ fn mup_prefix_display(prefix: &MupPrefix) -> String {
             None => format!("[ST1][{rd}][ue={prefix}][teid={teid}][qfi={qfi}][ep={endpoint}]"),
         },
         MupPrefix::T2st {
-            rd,
             endpoint,
             endpoint_len: _,
             teid,
@@ -4267,7 +4272,7 @@ fn fmt_direct_segment_id(val: &[u8; 6]) -> String {
 }
 
 fn render_mup_table(
-    table: &super::route::LocalRibMupTable,
+    tables: &std::collections::BTreeMap<RouteDistinguisher, super::route::LocalRibMupTable>,
     resolve_segments: bool,
 ) -> std::result::Result<String, std::fmt::Error> {
     // On an interwork (SRGW) node, index the selected DSD routes by their
@@ -4275,23 +4280,30 @@ fn render_mup_table(
     // can be resolved to the End.DT46 Direct segment its uplink GTP tunnel
     // forwards into (draft-mpmz-bess-mup-safi §3.3.12). The forwarding FIB
     // (H.M.GTP4.D GTP decap) is VPP/eBPF — this is the control-plane bind.
-    let dsd_index: std::collections::BTreeMap<[u8; 6], (MupPrefix, std::net::Ipv6Addr, u16)> =
-        if resolve_segments {
-            table
-                .selected
-                .iter()
-                .filter_map(|(prefix, rib)| {
-                    if !matches!(prefix, MupPrefix::Dsd { .. }) {
-                        return None;
-                    }
-                    let seg = mup_direct_segment_id(&rib.attr)?;
-                    let (sid, behavior) = rib.attr.srv6_l3_sid()?;
-                    Some((seg, (prefix.clone(), sid, behavior)))
-                })
-                .collect()
-        } else {
-            std::collections::BTreeMap::new()
-        };
+    let dsd_index: std::collections::BTreeMap<
+        [u8; 6],
+        (RouteDistinguisher, MupPrefix, std::net::Ipv6Addr, u16),
+    > = if resolve_segments {
+        tables
+            .iter()
+            .flat_map(|(rd, table)| {
+                table
+                    .selected
+                    .iter()
+                    .map(move |(prefix, rib)| (rd, prefix, rib))
+            })
+            .filter_map(|(rd, prefix, rib)| {
+                if !matches!(prefix, MupPrefix::Dsd { .. }) {
+                    return None;
+                }
+                let seg = mup_direct_segment_id(&rib.attr)?;
+                let (sid, behavior) = rib.attr.srv6_l3_sid()?;
+                Some((seg, (*rd, prefix.clone(), sid, behavior)))
+            })
+            .collect()
+    } else {
+        std::collections::BTreeMap::new()
+    };
 
     let mut buf = String::new();
     writeln!(
@@ -4299,51 +4311,54 @@ fn render_mup_table(
         "   Network (MUP NLRI)                                   Next Hop"
     )?;
 
-    // The flat table iterates in `MupPrefix` Ord order: DSD, ISD, ST1, ST2.
-    for (prefix, rib) in table.selected.iter() {
-        let best = if rib.best_path { ">" } else { " " };
-        writeln!(buf, " *{best} {}", mup_prefix_display(prefix))?;
+    // Walk per-RD tables (BTree order), each in `MupPrefix` Ord order:
+    // DSD, ISD, ST1, ST2.
+    for (rd, table) in tables.iter() {
+        for (prefix, rib) in table.selected.iter() {
+            let best = if rib.best_path { ">" } else { " " };
+            writeln!(buf, " *{best} {}", mup_prefix_display(rd, prefix))?;
 
-        let nexthop = show_nexthop(&rib.attr);
-        writeln!(buf, "       next-hop {nexthop}  weight {}", rib.weight)?;
+            let nexthop = show_nexthop(&rib.attr);
+            writeln!(buf, "       next-hop {nexthop}  weight {}", rib.weight)?;
 
-        // SRv6 L3 Service SID (the segment a DSD/ISD route advertises, or
-        // an explicitly-pushed ST-route SID). "Local" when we originated it.
-        if let Some((sid, behavior)) = rib.attr.srv6_l3_sid() {
-            let kind = if rib.is_originated() {
-                "Local SID"
-            } else {
-                "Remote SID"
-            };
-            writeln!(
-                buf,
-                "       {kind} {sid} ({})",
-                srv6_behavior_name(behavior)
-            )?;
-        }
+            // SRv6 L3 Service SID (the segment a DSD/ISD route advertises, or
+            // an explicitly-pushed ST-route SID). "Local" when we originated it.
+            if let Some((sid, behavior)) = rib.attr.srv6_l3_sid() {
+                let kind = if rib.is_originated() {
+                    "Local SID"
+                } else {
+                    "Remote SID"
+                };
+                writeln!(
+                    buf,
+                    "       {kind} {sid} ({})",
+                    srv6_behavior_name(behavior)
+                )?;
+            }
 
-        let ecom = show_mup_ecom(&rib.attr);
-        if !ecom.is_empty() {
-            writeln!(buf, "       {ecom}")?;
-        }
+            let ecom = show_mup_ecom(&rib.attr);
+            if !ecom.is_empty() {
+                writeln!(buf, "       {ecom}")?;
+            }
 
-        // ST2 -> Direct-segment resolution on an interwork (SRGW) node:
-        // the received ST2's Direct-segment id (MUP Extended Community) is
-        // matched against a received DSD to find the End.DT46 segment the
-        // uplink (endpoint, TEID) tunnel forwards into.
-        if resolve_segments
-            && matches!(prefix, MupPrefix::T2st { .. })
-            && let Some(seg) = mup_direct_segment_id(&rib.attr)
-            && let Some((dsd, sid, behavior)) = dsd_index.get(&seg)
-        {
-            writeln!(
-                buf,
-                "       resolved {} -> {} {} (via {})",
-                fmt_direct_segment_id(&seg),
-                srv6_behavior_name(*behavior),
-                sid,
-                mup_prefix_display(dsd)
-            )?;
+            // ST2 -> Direct-segment resolution on an interwork (SRGW) node:
+            // the received ST2's Direct-segment id (MUP Extended Community) is
+            // matched against a received DSD to find the End.DT46 segment the
+            // uplink (endpoint, TEID) tunnel forwards into.
+            if resolve_segments
+                && matches!(prefix, MupPrefix::T2st { .. })
+                && let Some(seg) = mup_direct_segment_id(&rib.attr)
+                && let Some((dsd_rd, dsd, sid, behavior)) = dsd_index.get(&seg)
+            {
+                writeln!(
+                    buf,
+                    "       resolved {} -> {} {} (via {})",
+                    fmt_direct_segment_id(&seg),
+                    srv6_behavior_name(*behavior),
+                    sid,
+                    mup_prefix_display(dsd_rd, dsd)
+                )?;
+            }
         }
     }
 
@@ -5575,57 +5590,71 @@ mod detail_tests {
     #[test]
     fn render_mup_table_matches_mockup_shape() {
         use std::net::IpAddr;
-        let mut table = super::super::route::LocalRibMupTable::default();
+        let mut tables: std::collections::BTreeMap<
+            RouteDistinguisher,
+            super::super::route::LocalRibMupTable,
+        > = std::collections::BTreeMap::new();
         let nh6: IpAddr = "fc00::30".parse().unwrap();
         let nh4: IpAddr = "10.10.10.1".parse().unwrap();
         let rt_2_3 = ecv(0x00, 0x02, [0x00, 0x02, 0x00, 0x00, 0x00, 0x03]);
         let rt_9_9 = ecv(0x00, 0x02, [0x00, 0x09, 0x00, 0x00, 0x00, 0x09]);
         let mup_ec = ecv(0x0c, 0x00, [0x00, 0x01, 0x00, 0x00, 0x00, 0x3d]);
 
-        let _ = table.update(
-            MupPrefix::from_route(&MupRoute::Isd {
-                id: 0,
-                arch: MupArchitectureType::Gpp5g,
-                rd: "1.1.1.30:50002".parse().unwrap(),
-                prefix: "20.0.3.0/24".parse().unwrap(),
-            }),
-            mup_rib(nh6, 0, &[rt_2_3]),
-        );
-        let _ = table.update(
-            MupPrefix::from_route(&MupRoute::Dsd {
-                id: 0,
-                arch: MupArchitectureType::Gpp5g,
-                rd: "1.1.1.30:50005".parse().unwrap(),
-                address: "1.1.1.99".parse().unwrap(),
-            }),
-            mup_rib(nh6, 0, &[mup_ec]),
-        );
-        let _ = table.update(
-            MupPrefix::from_route(&MupRoute::T1st {
-                id: 0,
-                arch: MupArchitectureType::Gpp5g,
-                rd: "65000:2".parse().unwrap(),
-                prefix: "2001:db8:cafe::5/128".parse().unwrap(),
-                teid: 601,
-                qfi: 9,
-                endpoint: "20.0.3.99".parse().unwrap(),
-                source: Some("20.0.1.1".parse().unwrap()),
-            }),
-            mup_rib(nh6, 32768, &[rt_9_9]),
-        );
-        let _ = table.update(
-            MupPrefix::from_route(&MupRoute::T2st {
-                id: 0,
-                arch: MupArchitectureType::Gpp5g,
-                rd: "65000:1".parse().unwrap(),
-                endpoint: "20.0.1.1".parse().unwrap(),
-                endpoint_len: 64,
-                teid: 600,
-            }),
-            mup_rib(nh4, 32768, &[]),
-        );
+        // All four route types share one RD, so they land in a single per-RD
+        // inner table and the display order is driven purely by `MupPrefix`
+        // Ord (DSD -> ISD -> ST1 -> ST2). (Across *different* RDs the table is
+        // RD-major, like `show bgp evpn`; that is covered by the resolve test.)
+        let rd = "65000:1";
+        {
+            let mut insert = |route: &MupRoute, rib| {
+                let (rd, prefix) = MupPrefix::from_route(route);
+                let _ = tables.entry(rd).or_default().update(prefix, rib);
+            };
+            insert(
+                &MupRoute::Isd {
+                    id: 0,
+                    arch: MupArchitectureType::Gpp5g,
+                    rd: rd.parse().unwrap(),
+                    prefix: "20.0.3.0/24".parse().unwrap(),
+                },
+                mup_rib(nh6, 0, &[rt_2_3]),
+            );
+            insert(
+                &MupRoute::Dsd {
+                    id: 0,
+                    arch: MupArchitectureType::Gpp5g,
+                    rd: rd.parse().unwrap(),
+                    address: "1.1.1.99".parse().unwrap(),
+                },
+                mup_rib(nh6, 0, &[mup_ec]),
+            );
+            insert(
+                &MupRoute::T1st {
+                    id: 0,
+                    arch: MupArchitectureType::Gpp5g,
+                    rd: rd.parse().unwrap(),
+                    prefix: "2001:db8:cafe::5/128".parse().unwrap(),
+                    teid: 601,
+                    qfi: 9,
+                    endpoint: "20.0.3.99".parse().unwrap(),
+                    source: Some("20.0.1.1".parse().unwrap()),
+                },
+                mup_rib(nh6, 32768, &[rt_9_9]),
+            );
+            insert(
+                &MupRoute::T2st {
+                    id: 0,
+                    arch: MupArchitectureType::Gpp5g,
+                    rd: rd.parse().unwrap(),
+                    endpoint: "20.0.1.1".parse().unwrap(),
+                    endpoint_len: 64,
+                    teid: 600,
+                },
+                mup_rib(nh4, 32768, &[]),
+            );
+        }
 
-        let out = render_mup_table(&table, false).unwrap();
+        let out = render_mup_table(&tables, false).unwrap();
 
         // Grouped DSD -> ISD -> ST1 -> ST2 by MupPrefix Ord.
         let dsd = out.find("[DSD]").expect("DSD line");
@@ -5637,11 +5666,11 @@ mod detail_tests {
             "route-type ordering:\n{out}"
         );
 
-        assert!(out.contains("[ISD][1.1.1.30:50002][20.0.3.0/24]"), "{out}");
-        assert!(out.contains("[DSD][1.1.1.30:50005][1.1.1.99]"), "{out}");
+        assert!(out.contains("[ISD][65000:1][20.0.3.0/24]"), "{out}");
+        assert!(out.contains("[DSD][65000:1][1.1.1.99]"), "{out}");
         assert!(
             out.contains(
-                "[ST1][65000:2][ue=2001:db8:cafe::5/128][teid=601][qfi=9][ep=20.0.3.99:src=20.0.1.1]"
+                "[ST1][65000:1][ue=2001:db8:cafe::5/128][teid=601][qfi=9][ep=20.0.3.99:src=20.0.1.1]"
             ),
             "{out}"
         );
@@ -5668,7 +5697,10 @@ mod detail_tests {
     #[test]
     fn render_mup_table_resolves_st2_to_direct_segment() {
         use std::net::{IpAddr, Ipv4Addr};
-        let mut table = super::super::route::LocalRibMupTable::default();
+        let mut tables: std::collections::BTreeMap<
+            RouteDistinguisher,
+            super::super::route::LocalRibMupTable,
+        > = std::collections::BTreeMap::new();
         // Direct-segment id 1:2 (MUP Ext-Comm 0x0c/0x00), shared DSD<->ST2.
         let seg = ecv(0x0c, 0x00, [0x00, 0x01, 0x00, 0x00, 0x00, 0x02]);
 
@@ -5692,36 +5724,38 @@ mod detail_tests {
             None,
             false,
         );
-        let _ = table.update(
-            MupPrefix::from_route(&MupRoute::Dsd {
-                id: 0,
-                arch: MupArchitectureType::Gpp5g,
-                rd: "65001:1".parse().unwrap(),
-                address: "10.0.0.1".parse().unwrap(),
-            }),
-            dsd_rib,
-        );
+        let (dsd_rd, dsd_prefix) = MupPrefix::from_route(&MupRoute::Dsd {
+            id: 0,
+            arch: MupArchitectureType::Gpp5g,
+            rd: "65001:1".parse().unwrap(),
+            address: "10.0.0.1".parse().unwrap(),
+        });
+        let _ = tables
+            .entry(dsd_rd)
+            .or_default()
+            .update(dsd_prefix, dsd_rib);
 
         // A received ST2 carrying the same segment id 1:2 (no SID of its own).
         let st2_rib = mup_rib("fc00::2".parse::<IpAddr>().unwrap(), 0, &[seg]);
-        let _ = table.update(
-            MupPrefix::from_route(&MupRoute::T2st {
-                id: 0,
-                arch: MupArchitectureType::Gpp5g,
-                rd: "65001:2".parse().unwrap(),
-                endpoint: "127.0.0.8".parse().unwrap(),
-                endpoint_len: 64,
-                teid: 2,
-            }),
-            st2_rib,
-        );
+        let (st2_rd, st2_prefix) = MupPrefix::from_route(&MupRoute::T2st {
+            id: 0,
+            arch: MupArchitectureType::Gpp5g,
+            rd: "65001:2".parse().unwrap(),
+            endpoint: "127.0.0.8".parse().unwrap(),
+            endpoint_len: 64,
+            teid: 2,
+        });
+        let _ = tables
+            .entry(st2_rd)
+            .or_default()
+            .update(st2_prefix, st2_rib);
 
         // Not an interwork node: no resolution shown.
-        let plain = render_mup_table(&table, false).unwrap();
+        let plain = render_mup_table(&tables, false).unwrap();
         assert!(!plain.contains("resolved"), "{plain}");
 
         // Interwork node: the ST2 resolves to the DSD's End.DT46 segment.
-        let out = render_mup_table(&table, true).unwrap();
+        let out = render_mup_table(&tables, true).unwrap();
         assert!(
             out.contains(
                 "resolved mup:1:2 -> End.DT46 fcbb:bbbb:1:40:: (via [DSD][65001:1][10.0.0.1])"
