@@ -189,9 +189,12 @@ module zebra-bgp-vrf {
        address-family … redistribute …` model.
 
        Bare presence containers (no per-source modifiers yet); the
-       redistributed route's MED follows the source RIB cost.
-       `connected` and `static` are wired today; IS-IS / OSPF land in
-       a follow-up.";
+       redistributed route's MED follows the source RIB cost. The IGP
+       sources pull this VRF's OSPF / IS-IS routes — which a per-VRF
+       OSPF / IS-IS instance installs into `vrf_tables[table_id]` — so
+       a PE can advertise CE-learned IGP routes into the VPN without a
+       per-source level / match filter (deferred with the other
+       modifiers).";
     container redistribute {
       presence "Enable route redistribution into this VRF's BGP table";
       container connected {
@@ -199,6 +202,12 @@ module zebra-bgp-vrf {
       }
       container static {
         presence "Redistribute this VRF's static routes";
+      }
+      container ospf {
+        presence "Redistribute this VRF's OSPF routes";
+      }
+      container isis {
+        presence "Redistribute this VRF's IS-IS routes";
       }
     }
   }

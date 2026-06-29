@@ -1,0 +1,48 @@
+# z1 — PE running OSPF inside vrf-blue toward the CE and redistributing
+# the CE-learned OSPF route into VPNv4. Interface oc1 is enslaved to
+# vrf-blue; `router ospf vrf vrf-blue` forms an adjacency with the CE on
+# it and installs 10.9.9.9/32 into the VRF table as an OSPF route.
+# `afi-safi ipv4 redistribute ospf` pulls that (but NOT the connected
+# link 10.0.0.0/30) into the per-VRF BGP table for VPNv4 export to z2.
+vrf:
+- name: vrf-blue
+  ipv4:
+    route-target:
+      import:
+      - 65001:100
+      export:
+      - 65001:100
+interface:
+- if-name: oc1
+  vrf: vrf-blue
+  ipv4:
+    address: 10.0.0.1/30
+router:
+  ospf:
+    vrf:
+    - name: vrf-blue
+      router-id: 10.0.0.1
+      area:
+      - area-id: 0.0.0.0
+        interface:
+        - if-name: oc1
+          enable: true
+          network-type: point-to-point
+  bgp:
+    global:
+      as: 65001
+      router-id: 192.168.0.1
+    neighbor:
+    - remote-address: 192.168.0.2
+      afi-safi:
+      - name: vpnv4
+        enabled: true
+      enabled: true
+      remote-as: 65001
+    vrf:
+    - name: vrf-blue
+      rd: 65001:100
+      afi-safi:
+        ipv4:
+          redistribute:
+            ospf: {}

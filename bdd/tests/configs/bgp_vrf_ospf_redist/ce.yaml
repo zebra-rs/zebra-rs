@@ -1,0 +1,22 @@
+# ce — CE router speaking OSPF to z1 (in the default table; the PE side
+# runs OSPF inside vrf-blue). Advertises its loopback 10.9.9.9/32 into
+# area 0 so z1 learns it as an OSPF route in the VRF table, which z1 then
+# redistributes into VPNv4.
+interface:
+- if-name: lo
+  ipv4:
+    address: 10.9.9.9/32
+- if-name: eth0
+  ipv4:
+    address: 10.0.0.2/30
+router:
+  ospf:
+    router-id: 10.9.9.9
+    area:
+    - area-id: 0.0.0.0
+      interface:
+      - if-name: lo
+        enable: true
+      - if-name: eth0
+        enable: true
+        network-type: point-to-point

@@ -4190,6 +4190,14 @@ impl Bgp {
             super::vrf_config::config_vrf_afi_ipv4_redistribute_static,
         );
         self.callback_add(
+            "/router/bgp/vrf/afi-safi/ipv4/redistribute/ospf",
+            super::vrf_config::config_vrf_afi_ipv4_redistribute_ospf,
+        );
+        self.callback_add(
+            "/router/bgp/vrf/afi-safi/ipv4/redistribute/isis",
+            super::vrf_config::config_vrf_afi_ipv4_redistribute_isis,
+        );
+        self.callback_add(
             "/router/bgp/vrf/afi-safi/ipv6",
             super::vrf_config::config_vrf_afi_ipv6,
         );
@@ -4208,6 +4216,14 @@ impl Bgp {
         self.callback_add(
             "/router/bgp/vrf/afi-safi/ipv6/redistribute/static",
             super::vrf_config::config_vrf_afi_ipv6_redistribute_static,
+        );
+        self.callback_add(
+            "/router/bgp/vrf/afi-safi/ipv6/redistribute/ospf",
+            super::vrf_config::config_vrf_afi_ipv6_redistribute_ospf,
+        );
+        self.callback_add(
+            "/router/bgp/vrf/afi-safi/ipv6/redistribute/isis",
+            super::vrf_config::config_vrf_afi_ipv6_redistribute_isis,
         );
         self.callback_add(
             "/router/bgp/vrf/evpn/advertise-ipv4",

@@ -835,6 +835,26 @@ pub fn config_vrf_afi_ipv4_redistribute_static(
     vrf_redist_set(bgp, name, RedistAfi::Ipv4, BgpRedistSource::Static, op)
 }
 
+/// `set router bgp vrf <NAME> afi-safi ipv4 redistribute ospf`.
+pub fn config_vrf_afi_ipv4_redistribute_ospf(
+    bgp: &mut Bgp,
+    mut args: Args,
+    op: ConfigOp,
+) -> Option<()> {
+    let name = args.string()?;
+    vrf_redist_set(bgp, name, RedistAfi::Ipv4, BgpRedistSource::Ospf, op)
+}
+
+/// `set router bgp vrf <NAME> afi-safi ipv4 redistribute isis`.
+pub fn config_vrf_afi_ipv4_redistribute_isis(
+    bgp: &mut Bgp,
+    mut args: Args,
+    op: ConfigOp,
+) -> Option<()> {
+    let name = args.string()?;
+    vrf_redist_set(bgp, name, RedistAfi::Ipv4, BgpRedistSource::Isis, op)
+}
+
 /// `delete router bgp vrf <NAME> afi-safi ipv6 redistribute`.
 pub fn config_vrf_afi_ipv6_redistribute(bgp: &mut Bgp, mut args: Args, op: ConfigOp) -> Option<()> {
     let name = args.string()?;
@@ -862,6 +882,26 @@ pub fn config_vrf_afi_ipv6_redistribute_static(
 ) -> Option<()> {
     let name = args.string()?;
     vrf_redist_set(bgp, name, RedistAfi::Ipv6, BgpRedistSource::Static, op)
+}
+
+/// `set router bgp vrf <NAME> afi-safi ipv6 redistribute ospf`.
+pub fn config_vrf_afi_ipv6_redistribute_ospf(
+    bgp: &mut Bgp,
+    mut args: Args,
+    op: ConfigOp,
+) -> Option<()> {
+    let name = args.string()?;
+    vrf_redist_set(bgp, name, RedistAfi::Ipv6, BgpRedistSource::Ospf, op)
+}
+
+/// `set router bgp vrf <NAME> afi-safi ipv6 redistribute isis`.
+pub fn config_vrf_afi_ipv6_redistribute_isis(
+    bgp: &mut Bgp,
+    mut args: Args,
+    op: ConfigOp,
+) -> Option<()> {
+    let name = args.string()?;
+    vrf_redist_set(bgp, name, RedistAfi::Ipv6, BgpRedistSource::Isis, op)
 }
 
 /// `set router bgp vrf <NAME> evpn advertise-ipv4 <bool>`.
