@@ -420,7 +420,7 @@ fn redist_remote_id(rtype: crate::rib::RibType) -> u32 {
 
 /// Map a configured redistribute source to the RIB route type the
 /// subscription filters on.
-fn redist_source_rtype(source: BgpRedistSource) -> crate::rib::RibType {
+pub(super) fn redist_source_rtype(source: BgpRedistSource) -> crate::rib::RibType {
     match source {
         BgpRedistSource::Connected => crate::rib::RibType::Connected,
         BgpRedistSource::Static => crate::rib::RibType::Static,

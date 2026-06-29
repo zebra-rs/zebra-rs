@@ -205,7 +205,7 @@ pub fn spawn_bgp_vrf(
     // once the event loop runs. A placeholder-ctx spawn has no live RIB
     // client, so the sends are dropped harmlessly; the kernel-ctx
     // respawn (which reads the same staged config) replays them.
-    let redist_count = materialize_vrf_redistribute(&vrf, cfg);
+    let redist_count = materialize_vrf_redistribute(&name, cfg, rib_subscriber);
 
     // Install the AF_MPLS DecapVrf ILM at the allocated label so a
     // remote PE's VPNv4 packet with this label pops + lands in
@@ -406,17 +406,39 @@ fn materialize_self_originated_networks_v6(vrf: &mut BgpVrf, cfg: &BgpVrfConfig)
 /// [`BgpVrfMsg::RedistEnable`] path, so initial-config and post-spawn
 /// subscription stay identical. Returns the number of (afi, source)
 /// subscriptions replayed.
-fn materialize_vrf_redistribute(vrf: &BgpVrf, cfg: &BgpVrfConfig) -> usize {
+fn materialize_vrf_redistribute(
+    name: &str,
+    cfg: &BgpVrfConfig,
+    rib_subscriber: &RibSubscriber,
+) -> usize {
+    // Issue the RedistAdds on the main RIB channel (`rib_tx`) so they
+    // stay FIFO-ordered after this spawn's `Subscribe` (and a respawn's
+    // `ProtoCleanup`). Going through the per-task `RibClient` (`ctx.rib`,
+    // a separate channel) races the `Subscribe` and can lose the filter —
+    // see `RibSubscriber::send_redist_add`. The live reconfig path
+    // (`BgpVrfMsg::RedistEnable`) keeps using `ctx.rib`: by then the
+    // subscriber is long registered, so there is no ordering hazard.
+    let proto = format!("bgp:vrf:{name}");
     let mut count = 0;
     if let Some(af) = cfg.ipv4_unicast.as_ref() {
         for source in &af.redistribute {
-            vrf.redist_subscribe(crate::rib::RedistAfi::Ipv4, *source);
+            rib_subscriber.send_redist_add(
+                &proto,
+                crate::rib::RedistAfi::Ipv4,
+                super::inst::redist_source_rtype(*source),
+                Default::default(),
+            );
             count += 1;
         }
     }
     if let Some(af) = cfg.ipv6_unicast.as_ref() {
         for source in &af.redistribute {
-            vrf.redist_subscribe(crate::rib::RedistAfi::Ipv6, *source);
+            rib_subscriber.send_redist_add(
+                &proto,
+                crate::rib::RedistAfi::Ipv6,
+                super::inst::redist_source_rtype(*source),
+                Default::default(),
+            );
             count += 1;
         }
     }

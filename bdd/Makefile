@@ -160,6 +160,10 @@ bgp_vrf_redistribute:
 	mkdir -p allure-results
 	cargo test --test cucumber -- --concurrency=1 --tags "@bgp_vrf_redistribute"
 
+bgp_vrf_ospf_redist:
+	mkdir -p allure-results
+	cargo test --test cucumber -- --concurrency=1 --tags "@bgp_vrf_ospf_redist"
+
 isis_afi_enable:
 	mkdir -p allure-results
 	cargo test --test cucumber -- --concurrency=1 --tags "@isis_afi_enable"

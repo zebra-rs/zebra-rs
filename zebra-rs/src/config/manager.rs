@@ -156,6 +156,33 @@ impl RibSubscriber {
         });
     }
 
+    /// Register a redistribute subscription on the **main** RIB channel
+    /// (`rib_tx`), the same channel `Subscribe` and `ProtoCleanup` use.
+    ///
+    /// Spawn-time per-VRF redistribution must use this rather than the
+    /// per-task `RibClient` (`ctx.rib`, which rides the separate
+    /// `inbound` channel): the `Subscribe` that registers the VRF's
+    /// subscriber and this `RedistAdd` are issued back-to-back at spawn,
+    /// and `redist_register` drops the filter if the subscriber isn't
+    /// recorded yet. Cross-channel ordering is undefined, so a `RibClient`
+    /// `RedistAdd` can race ahead of the `Subscribe` and silently lose
+    /// the filter. Routing it through `rib_tx` keeps it FIFO-ordered
+    /// after the `Subscribe` (and after a respawn's `ProtoCleanup`).
+    pub fn send_redist_add(
+        &self,
+        proto: &str,
+        afi: crate::rib::RedistAfi,
+        rtype: crate::rib::RibType,
+        subtypes: std::collections::BTreeSet<crate::rib::RibSubType>,
+    ) {
+        let _ = self.rib_tx.send(crate::rib::Message::RedistAdd {
+            proto: proto.to_string(),
+            afi,
+            rtype,
+            subtypes,
+        });
+    }
+
     /// Request a dynamic MPLS label block of `size` labels for `proto`
     /// from the RIB label manager. The RIB replies asynchronously with
     /// a `RibRx::LabelBlock` on `proto`'s subscriber channel.
@@ -1645,8 +1672,12 @@ mod yang_load_tests {
         for cmd in [
             "set router bgp vrf N3 afi-safi ipv4 redistribute connected",
             "set router bgp vrf N3 afi-safi ipv4 redistribute static",
+            "set router bgp vrf N3 afi-safi ipv4 redistribute ospf",
+            "set router bgp vrf N3 afi-safi ipv4 redistribute isis",
             "set router bgp vrf N3 afi-safi ipv6 redistribute connected",
             "set router bgp vrf N3 afi-safi ipv6 redistribute static",
+            "set router bgp vrf N3 afi-safi ipv6 redistribute ospf",
+            "set router bgp vrf N3 afi-safi ipv6 redistribute isis",
         ] {
             let (code, _comps, _state) = parse(cmd, entry.clone(), None, State::new());
             assert_eq!(
