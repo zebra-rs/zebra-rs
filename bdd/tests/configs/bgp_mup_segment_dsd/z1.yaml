@@ -11,6 +11,8 @@ vrf:
     route-target:
       export:
       - "65501:10"
+      import:
+      - "65501:10"
 interface:
 - if-name: lo
   ipv6:

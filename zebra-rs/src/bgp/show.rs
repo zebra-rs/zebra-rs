@@ -4229,10 +4229,10 @@ fn show_bgp_mup(
 }
 
 /// `show bgp vrf <name> mup` — the per-VRF MUP view. The manager
-/// redirects this into the VRF's task, which holds the MUP best-paths the
-/// global instance mirrored to it (those whose RD matches this VRF's
-/// `rd`); renders just the route table. Generic over [`BgpShowView`] so it
-/// runs against either the per-VRF task or (in tests) any view.
+/// redirects this into the VRF's task, which imports (RT-matched) and
+/// best-paths its own slice of the global MUP RIB; renders just the route
+/// table. Generic over [`BgpShowView`] so it runs against either the
+/// per-VRF task or (in tests) any view.
 fn show_bgp_vrf_mup<V: BgpShowView>(
     bgp: &V,
     _args: Args,
@@ -4241,11 +4241,12 @@ fn show_bgp_vrf_mup<V: BgpShowView>(
     if json {
         return Ok(mup_routes_json(&bgp.local_rib().mup));
     }
-    // The per-VRF task holds only the best-paths mirrored to it (by RD) and
-    // none of the config, so ST2 -> Direct-segment resolution (which spans
-    // the whole MUP Loc-RIB on an interwork node) is rendered only by the
-    // global `show bgp mup`.
-    render_mup_table(&bgp.local_rib().mup, false)
+    // Resolve ST2 -> Direct-segment over the VRF's *own* imported set: a
+    // resolution line is emitted only when this VRF imported both a DSD
+    // (with its End.DT46 SID + Direct-segment id) and an ST2 sharing that
+    // id — so an interwork (SRGW) VRF shows the bind and a plain VRF, which
+    // imports no DSDs, renders exactly as before.
+    render_mup_table(&bgp.local_rib().mup, true)
 }
 
 /// Render the MUP Loc-RIB table body. Split out from `show_bgp_mup` so it

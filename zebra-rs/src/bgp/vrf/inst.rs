@@ -1452,22 +1452,35 @@ impl BgpVrf {
             BgpVrfMsg::RedistDisable { afi, source } => {
                 self.redist_unsubscribe(afi, source);
             }
-            // Display-only mirror of the global MUP best-path for this
-            // VRF's RD, so `show bgp vrf <name> mup` (redirected here)
-            // renders the VRF's ST routes. We touch only `selected`
-            // (what `render_mup_table` reads) in the per-RD table; the
-            // per-VRF task never re-advertises or best-paths MUP.
+            // Authoritative per-VRF MUP import (RT-matched at the global
+            // dispatch): insert the route as a candidate in this VRF's own
+            // per-RD MUP RIB and best-path it. The VRF receives the global
+            // winner per prefix, so best-path is single-candidate here, but
+            // the table is authoritative — `show bgp vrf <name> mup`
+            // (redirected here) reads the resulting `selected`. MUP has no
+            // CE peers and no kernel FIB yet, so this neither re-advertises
+            // nor installs; it owns the control-plane RIB only.
             BgpVrfMsg::MupUpdate { rd, prefix, rib } => {
-                self.local_rib
+                let _ = self
+                    .local_rib
                     .mup
                     .entry(rd)
                     .or_default()
-                    .selected
-                    .insert(prefix, rib);
+                    .update(prefix, rib);
             }
             BgpVrfMsg::MupWithdraw { rd, prefix } => {
-                if let Some(table) = self.local_rib.mup.get_mut(&rd) {
+                // The VRF holds the single dispatched winner per prefix, so a
+                // prefix-keyed removal clears it; prune the per-RD table when
+                // it empties so an empty RD never renders.
+                let empty = if let Some(table) = self.local_rib.mup.get_mut(&rd) {
+                    table.cands.remove(&prefix);
                     table.selected.remove(&prefix);
+                    table.cands.is_empty() && table.selected.is_empty()
+                } else {
+                    false
+                };
+                if empty {
+                    self.local_rib.mup.remove(&rd);
                 }
             }
             BgpVrfMsg::Shutdown => unreachable!("handled in event_loop"),

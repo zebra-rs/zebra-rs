@@ -12865,9 +12865,18 @@ impl Bgp {
         prefix: bgp_packet::MupPrefix,
         selected: Vec<BgpRib>,
     ) {
-        // Mirror the best-path to the per-VRF task whose `rd` matches this
-        // route's RD (display-only, for `show bgp vrf <name> mup`).
-        self.forward_mup_to_vrf(rd, &prefix, selected.first());
+        // Import the best-path into every VRF whose `mup_import_rts` match
+        // the route's RTs — the same RT-matched dispatch the receive path
+        // uses, so locally-originated and peer-learned MUP routes reach the
+        // per-VRF tasks by one consistent rule. (Originated routes carry the
+        // VRF's export RTs; a VRF self-imports when it also imports them.)
+        {
+            let dispatcher = super::vrf::VrfImportDispatcher {
+                rib_known_vrfs: &self.rib_known_vrfs,
+                vrf_registry: &self.vrf_registry,
+            };
+            super::vrf::dispatch_mup(&dispatcher, rd, &prefix, selected.first());
+        }
         if selected.is_empty() {
             route_withdraw_mup_to_peers(rd, prefix, &mut self.peers);
             return;
@@ -12893,41 +12902,6 @@ impl Bgp {
             central_label_alloc: None,
         };
         route_advertise_mup_to_peers(rd, prefix, &selected, &mut bgp_ref, &mut self.peers);
-    }
-
-    /// Forward a MUP best-path (or its withdrawal) to the per-VRF task
-    /// whose configured `rd` matches the route's RD, for display under
-    /// `show bgp vrf <name> mup`. No-op when no VRF owns the RD or that
-    /// VRF has no running per-VRF task. Display-only: the global instance
-    /// stays the authoritative MUP RIB and advertiser.
-    fn forward_mup_to_vrf(
-        &self,
-        rd: RouteDistinguisher,
-        prefix: &bgp_packet::MupPrefix,
-        best: Option<&BgpRib>,
-    ) {
-        let Some(name) = self
-            .vrfs
-            .iter()
-            .find_map(|(n, c)| (c.rd == Some(rd)).then_some(n))
-        else {
-            return;
-        };
-        let Some(handle) = self.vrf_registry.get(name) else {
-            return;
-        };
-        let msg = match best {
-            Some(rib) => super::vrf::msg::BgpVrfMsg::MupUpdate {
-                rd,
-                prefix: prefix.clone(),
-                rib: rib.clone(),
-            },
-            None => super::vrf::msg::BgpVrfMsg::MupWithdraw {
-                rd,
-                prefix: prefix.clone(),
-            },
-        };
-        let _ = handle.inbox.send(msg);
     }
 
     /// Reconcile config-driven MUP Segment Discovery origination — DSD
@@ -18071,6 +18045,63 @@ mod tests {
         // the prefix is withdrawn.
         let (_, selected, _) = t.update(prefix, mk(2, 10, false));
         assert!(selected.is_empty(), "all-unreachable → withdraw");
+    }
+
+    /// The per-VRF `BgpVrfMsg::MupUpdate` / `MupWithdraw` handler is
+    /// authoritative, not a display mirror: an RT-matched import inserts the
+    /// route as a candidate and best-paths it (populating `selected` with
+    /// `best_path` set), and a withdraw removes the prefix and prunes the
+    /// now-empty per-RD table so an empty RD never renders. This exercises
+    /// the exact RIB operations the handler performs (see
+    /// `bgp::vrf::inst` `BgpVrfMsg::MupUpdate`).
+    #[test]
+    fn per_vrf_mup_import_is_authoritative_and_prunes() {
+        use std::collections::BTreeMap;
+
+        use bgp_packet::{MupPrefix, RouteDistinguisher};
+
+        let rd = RouteDistinguisher::from_str("65501:10").unwrap();
+        let prefix = MupPrefix::Dsd {
+            address: IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1)),
+        };
+        let attr = BgpAttr::default();
+        let rib = super::BgpRib::new(
+            super::ORIGINATED_PEER,
+            Ipv4Addr::new(10, 0, 0, 1),
+            super::BgpRibType::IBGP,
+            0,
+            0,
+            &attr,
+            None,
+            None,
+            false,
+        );
+
+        let mut tables: BTreeMap<RouteDistinguisher, super::LocalRibMupTable> = BTreeMap::new();
+
+        // MupUpdate: authoritative insert + best-path (not a bare `selected`
+        // mirror).
+        let _ = tables.entry(rd).or_default().update(prefix.clone(), rib);
+        let table = tables.get(&rd).expect("per-RD table created");
+        let best = table.selected.get(&prefix).expect("best-path selected");
+        assert!(best.best_path, "imported route is best-pathed");
+        assert_eq!(table.cands.get(&prefix).map(Vec::len), Some(1));
+
+        // MupWithdraw: remove + prune the now-empty per-RD table.
+        let empty = if let Some(table) = tables.get_mut(&rd) {
+            table.cands.remove(&prefix);
+            table.selected.remove(&prefix);
+            table.cands.is_empty() && table.selected.is_empty()
+        } else {
+            false
+        };
+        if empty {
+            tables.remove(&rd);
+        }
+        assert!(
+            tables.is_empty(),
+            "empty per-RD table pruned after withdraw"
+        );
     }
 
     #[test]
