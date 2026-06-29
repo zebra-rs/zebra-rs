@@ -1,0 +1,28 @@
+# C1 — customer site 1 (AS 65101). Originates its IPv6 loopback
+# 2001:db8:c1::1/128 into BGP via `redistribute connected` and eBGPs to
+# CE1. The loopback is the ping target reached from C2 across the SRv6
+# L3VPN core.
+interface:
+- if-name: lo
+  ipv6:
+    address: 2001:db8:c1::1/128
+- if-name: ce1
+  ipv6:
+    address: 2001:db8:1c::1/64
+router:
+  bgp:
+    global:
+      as: 65101
+      router-id: 10.0.1.1
+    neighbor:
+    - remote-address: 2001:db8:1c::2
+      remote-as: 65001
+      timers: {connect-retry-time: 3}
+      enabled: true
+      afi-safi:
+      - name: ipv6
+        enabled: true
+    afi-safi:
+    - name: ipv6
+      redistribute:
+        connected: {}
