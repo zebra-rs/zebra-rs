@@ -59,19 +59,22 @@ pub enum BgpVrfMsg {
         prefix: ipnet::Ipv4Net,
     },
 
-    /// A MUP (SAFI 85) best-path the global Loc-RIB selected whose RD
-    /// matches this VRF's `rd`. Forwarded for **display only**: the
-    /// per-VRF task mirrors it into `local_rib.mup.selected` so a
-    /// `show bgp vrf <name> mup` (which the manager redirects into this
-    /// task) renders the VRF's Session-Transformed routes. The global
-    /// `Bgp` instance remains the authoritative MUP RIB / advertiser.
+    /// A MUP (SAFI 85) best-path the global Loc-RIB selected whose route
+    /// targets match this VRF's `mup_import_rts` (RT-import, dispatched via
+    /// [`super::inst::dispatch_mup`]). The per-VRF task imports it
+    /// authoritatively into its own per-RD MUP Loc-RIB and best-paths it, so
+    /// `show bgp vrf <name> mup` (which the manager redirects into this task)
+    /// renders the VRF's imported MUP routes. The global `Bgp` instance
+    /// remains the BGP-peer advertiser (MUP has no CE peers); the per-VRF
+    /// task owns only the control-plane RIB — no re-advertise, no FIB yet.
     MupUpdate {
         rd: RouteDistinguisher,
         prefix: bgp_packet::MupPrefix,
         rib: crate::bgp::route::BgpRib,
     },
-    /// Withdraw a previously-forwarded MUP best-path (the global RIB no
-    /// longer has a selected path for it).
+    /// Withdraw a previously-imported MUP route (the global RIB no longer has
+    /// a selected path for it). Flooded to every VRF; the per-VRF removal is
+    /// idempotent for a VRF that never imported the prefix.
     MupWithdraw {
         rd: RouteDistinguisher,
         prefix: bgp_packet::MupPrefix,

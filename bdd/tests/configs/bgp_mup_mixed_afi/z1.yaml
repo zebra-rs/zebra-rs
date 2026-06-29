@@ -49,3 +49,5 @@ vrf:
     route-target:
       export:
       - "65000:200"
+      import:
+      - "65000:200"
