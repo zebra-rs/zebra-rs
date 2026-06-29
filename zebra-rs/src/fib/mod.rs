@@ -3,6 +3,10 @@ pub mod netlink;
 #[cfg(target_os = "linux")]
 pub use netlink::*;
 
+// Optional tee of FIB route installs into the cradle eBPF data plane.
+#[cfg(target_os = "linux")]
+pub mod cradle;
+
 #[cfg(target_os = "macos")]
 pub mod macos;
 #[cfg(target_os = "macos")]

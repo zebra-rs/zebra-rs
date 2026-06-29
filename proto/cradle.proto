@@ -1,0 +1,91 @@
+syntax = "proto3";
+
+// cradle-rs data-plane control API.
+//
+// This is the seam between a routing control plane (ultimately zebra-rs's
+// FibHandle backend) and the eBPF data plane. Interface references are by name;
+// the server resolves them to ifindex and attaches the datapath to ports on
+// demand.
+package cradle.v1;
+
+message Empty {}
+
+message Port {
+  string name = 1;  // interface name
+  string mac = 2;   // empty => read from the interface
+  bool l3 = 3;      // routed port; false => L2 bridge member in `vlan`
+  uint32 vlan = 4;
+}
+
+message L2Domain {
+  uint32 vlan = 1;
+  repeated string members = 2;  // interface names flooded within the domain
+}
+
+message Nexthop {
+  uint32 id = 1;
+  string gateway = 2;     // empty => on-link / connected
+  string oif = 3;         // output interface name (used when oif_index == 0)
+  uint32 oif_index = 4;   // output ifindex; preferred when non-zero
+  bool v6 = 5;            // IPv6 nexthop (gateway parsed as IPv6)
+}
+
+// A nexthop group for ECMP: ordered member nexthop ids. A route whose flags
+// include FIB_F_ECMP and whose nexthop_id is this group's id load-balances over
+// the members.
+message NexthopGroup {
+  uint32 id = 1;
+  repeated uint32 members = 2;
+}
+
+message Route4 {
+  string prefix = 1;   // "a.b.c.d/len"
+  uint32 nexthop_id = 2;
+  uint32 flags = 3;
+}
+
+message Route4Del {
+  string prefix = 1;
+}
+
+message Route6 {
+  string prefix = 1;   // "addr/len"
+  uint32 nexthop_id = 2;
+  uint32 flags = 3;
+}
+
+message Route6Del {
+  string prefix = 1;
+}
+
+message Neighbor4 {
+  string oif = 1;
+  string ip = 2;
+  string mac = 3;
+}
+
+message Backend {
+  string ip = 1;
+  uint32 port = 2;
+}
+
+message Service {
+  uint32 svc_id = 1;
+  string vip = 2;
+  uint32 port = 3;
+  string proto = 4;  // tcp | udp
+  repeated Backend backends = 5;
+}
+
+service Cradle {
+  rpc SetPort(Port) returns (Empty);
+  rpc SetL2Domain(L2Domain) returns (Empty);
+  rpc SetNexthop(Nexthop) returns (Empty);
+  rpc SetNexthopGroup(NexthopGroup) returns (Empty);
+  rpc AddRoute4(Route4) returns (Empty);
+  rpc DelRoute4(Route4Del) returns (Empty);
+  rpc AddRoute6(Route6) returns (Empty);
+  rpc DelRoute6(Route6Del) returns (Empty);
+  rpc SetNeighbor4(Neighbor4) returns (Empty);
+  rpc AddService(Service) returns (Empty);
+}
