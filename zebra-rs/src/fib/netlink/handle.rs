@@ -32,6 +32,7 @@ use rtnetlink::{
 };
 use tokio::sync::mpsc::UnboundedSender;
 
+use crate::fib::cradle::CradleFib;
 use crate::fib::sysctl::sysctl_enable;
 use crate::fib::{FibAddr, FibLink, FibMdbEntry, FibMessage, FibNeighbor, FibRoute};
 use crate::rib::entry::RibEntry;
@@ -320,6 +321,61 @@ pub struct FibHandle {
     /// VNI to VXLAN interface index mapping
     /// Used to resolve VNI to the correct VXLAN device for FDB operations
     pub vni_ifindex_map: BTreeMap<u32, u32>,
+    /// Optional tee of route installs into the cradle eBPF data plane
+    /// (`CRADLE_GRPC`).
+    pub cradle: Option<CradleFib>,
+}
+
+/// Extract all IPv4 `(gateway, oif)` members of a nexthop for the cradle tee.
+/// A single member installs a plain route; multiple members install an ECMP
+/// group. (Protect/backup nexthops are not teed.)
+fn cradle_members_v4(nexthop: &Nexthop) -> Vec<(Option<Ipv4Addr>, u32)> {
+    fn member(u: &NexthopUni) -> (Option<Ipv4Addr>, u32) {
+        let oif = u.ifindex().unwrap_or(0);
+        let gw = match u.addr {
+            IpAddr::V4(a) if !a.is_unspecified() => Some(a),
+            _ => None,
+        };
+        (gw, oif)
+    }
+    match nexthop {
+        Nexthop::Uni(u) => vec![member(u)],
+        Nexthop::Multi(m) => m.nexthops.iter().map(member).collect(),
+        Nexthop::List(l) => l
+            .nexthops
+            .iter()
+            .filter_map(|m| match m {
+                NexthopMember::Uni(u) => Some(member(u)),
+                _ => None,
+            })
+            .collect(),
+        _ => vec![],
+    }
+}
+
+/// IPv6 counterpart of [`cradle_members_v4`].
+fn cradle_members_v6(nexthop: &Nexthop) -> Vec<(Option<Ipv6Addr>, u32)> {
+    fn member(u: &NexthopUni) -> (Option<Ipv6Addr>, u32) {
+        let oif = u.ifindex().unwrap_or(0);
+        let gw = match u.addr {
+            IpAddr::V6(a) if !a.is_unspecified() => Some(a),
+            _ => None,
+        };
+        (gw, oif)
+    }
+    match nexthop {
+        Nexthop::Uni(u) => vec![member(u)],
+        Nexthop::Multi(m) => m.nexthops.iter().map(member).collect(),
+        Nexthop::List(l) => l
+            .nexthops
+            .iter()
+            .filter_map(|m| match m {
+                NexthopMember::Uni(u) => Some(member(u)),
+                _ => None,
+            })
+            .collect(),
+        _ => vec![],
+    }
 }
 
 /// Op selector for `fdb_neigh_send`. The kernel netlink flag set
@@ -419,6 +475,7 @@ impl FibHandle {
             handle,
             use_nhid,
             vni_ifindex_map: BTreeMap::new(),
+            cradle: CradleFib::from_env(),
         })
     }
 
@@ -551,6 +608,12 @@ impl FibHandle {
     pub async fn route_ipv4_add(&self, prefix: &Ipv4Net, entry: &RibEntry, table_id: u32) -> bool {
         if !entry.is_protocol() {
             return true;
+        }
+        if let Some(cradle) = &self.cradle {
+            let members = cradle_members_v4(&entry.nexthop);
+            if !members.is_empty() {
+                cradle.route_install(*prefix, members).await;
+            }
         }
         match &entry.nexthop {
             Nexthop::Uni(_) | Nexthop::Multi(_) => {
@@ -693,6 +756,9 @@ impl FibHandle {
     pub async fn route_ipv4_del(&self, prefix: &Ipv4Net, entry: &RibEntry, table_id: u32) {
         if !entry.is_protocol() {
             return;
+        }
+        if let Some(cradle) = &self.cradle {
+            cradle.route_del(*prefix).await;
         }
 
         match &entry.nexthop {
@@ -946,6 +1012,12 @@ impl FibHandle {
         if !entry.is_protocol() {
             return true;
         }
+        if let Some(cradle) = &self.cradle {
+            let members = cradle_members_v6(&entry.nexthop);
+            if !members.is_empty() {
+                cradle.route_install6(*prefix, members).await;
+            }
+        }
         match &entry.nexthop {
             Nexthop::Uni(_) | Nexthop::Multi(_) => {
                 self.route_ipv6_add_uni(prefix, entry, &entry.nexthop, table_id)
@@ -1105,6 +1177,9 @@ impl FibHandle {
     pub async fn route_ipv6_del(&self, prefix: &Ipv6Net, entry: &RibEntry, table_id: u32) {
         if !entry.is_protocol() {
             return;
+        }
+        if let Some(cradle) = &self.cradle {
+            cradle.route_del6(*prefix).await;
         }
 
         match &entry.nexthop {

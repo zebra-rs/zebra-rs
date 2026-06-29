@@ -2,6 +2,8 @@ use std::process::Command;
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     tonic_prost_build::compile_protos("../proto/vty.proto")?;
+    // cradle eBPF data-plane control API (FibHandle tee target).
+    tonic_prost_build::compile_protos("../proto/cradle.proto")?;
 
     // Capture git information at build time
     set_git_info();
