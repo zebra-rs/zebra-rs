@@ -374,6 +374,7 @@ pub fn dispatch_withdraw_import_v6(
 /// prefix simply ignores it.
 pub fn dispatch_mup(
     dispatcher: &VrfImportDispatcher<'_>,
+    rd: bgp_packet::RouteDistinguisher,
     prefix: &bgp_packet::MupPrefix,
     best: Option<&super::super::route::BgpRib>,
 ) {
@@ -388,6 +389,7 @@ pub fn dispatch_mup(
                     continue;
                 };
                 let _ = handle.inbox.send(BgpVrfMsg::MupUpdate {
+                    rd,
                     prefix: prefix.clone(),
                     rib: rib.clone(),
                 });
@@ -396,6 +398,7 @@ pub fn dispatch_mup(
         None => {
             for handle in dispatcher.vrf_registry.values() {
                 let _ = handle.inbox.send(BgpVrfMsg::MupWithdraw {
+                    rd,
                     prefix: prefix.clone(),
                 });
             }
@@ -1452,13 +1455,20 @@ impl BgpVrf {
             // Display-only mirror of the global MUP best-path for this
             // VRF's RD, so `show bgp vrf <name> mup` (redirected here)
             // renders the VRF's ST routes. We touch only `selected`
-            // (what `render_mup_table` reads); the per-VRF task never
-            // re-advertises or best-paths MUP.
-            BgpVrfMsg::MupUpdate { prefix, rib } => {
-                self.local_rib.mup.selected.insert(prefix, rib);
+            // (what `render_mup_table` reads) in the per-RD table; the
+            // per-VRF task never re-advertises or best-paths MUP.
+            BgpVrfMsg::MupUpdate { rd, prefix, rib } => {
+                self.local_rib
+                    .mup
+                    .entry(rd)
+                    .or_default()
+                    .selected
+                    .insert(prefix, rib);
             }
-            BgpVrfMsg::MupWithdraw { prefix } => {
-                self.local_rib.mup.selected.remove(&prefix);
+            BgpVrfMsg::MupWithdraw { rd, prefix } => {
+                if let Some(table) = self.local_rib.mup.get_mut(&rd) {
+                    table.selected.remove(&prefix);
+                }
             }
             BgpVrfMsg::Shutdown => unreachable!("handled in event_loop"),
         }

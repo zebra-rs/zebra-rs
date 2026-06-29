@@ -7761,13 +7761,13 @@ mod mup_dual_origination_tests {
         assert!(
             routes
                 .iter()
-                .any(|(p, _)| matches!(p, MupPrefix::T1st { .. })),
+                .any(|(_, p, _)| matches!(p, MupPrefix::T1st { .. })),
             "downlink Type-1 ST originated from the st1 VRF",
         );
         assert!(
             routes
                 .iter()
-                .any(|(p, _)| matches!(p, MupPrefix::T2st { .. })),
+                .any(|(_, p, _)| matches!(p, MupPrefix::T2st { .. })),
             "uplink Type-2 ST originated from the st2 VRF",
         );
     }

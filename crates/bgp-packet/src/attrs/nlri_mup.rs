@@ -630,30 +630,26 @@ impl MupRoute {
     }
 }
 
-/// MUP NLRI key with the add-path Path Identifier (and the constant
-/// architecture type) stripped off, used to index the MUP RIB tables.
+/// MUP NLRI key with the add-path Path Identifier, the constant
+/// architecture type, *and* the Route Distinguisher stripped off, used as
+/// the inner key of the per-RD MUP RIB tables.
 ///
-/// This is a *full-NLRI* key: every wire field except the add-path `id`
-/// (which lives on `BgpRib.remote_id`) is part of the key, so two routes
-/// that differ only in TEID/QFI/endpoint/source coexist, and replacement
-/// is by explicit withdraw. Variant declaration order (`Dsd, Isd, T1st,
-/// T2st`) drives the derived `Ord`, so a RIB walk lists routes grouped by
-/// type (DSD then ISD then ST1 then ST2).
+/// Like EVPN's `EvpnPrefix` (and VPN's `Ipv4Net`), the RD is **not** part
+/// of this key — it is the outer `BTreeMap<RouteDistinguisher, _>` key, so
+/// [`MupPrefix::from_route`] returns `(rd, key)`. Every other wire field
+/// except the add-path `id` (which lives on `BgpRib.remote_id`) is part of
+/// the key, so two routes that differ only in TEID/QFI/endpoint/source
+/// coexist, and replacement is by explicit withdraw. Variant declaration
+/// order (`Dsd, Isd, T1st, T2st`) drives the derived `Ord`, so a RIB walk
+/// lists routes grouped by type (DSD then ISD then ST1 then ST2).
 #[derive(Debug, Clone, Eq, PartialEq, Ord, PartialOrd, Hash)]
 pub enum MupPrefix {
     /// Direct Segment Discovery Route key (RFC 9833 §3.1.2).
-    Dsd {
-        rd: RouteDistinguisher,
-        address: IpAddr,
-    },
+    Dsd { address: IpAddr },
     /// Interwork Segment Discovery Route key (§3.1.1).
-    Isd {
-        rd: RouteDistinguisher,
-        prefix: IpNet,
-    },
+    Isd { prefix: IpNet },
     /// Type 1 Session Transformed Route (ST1) key (§3.2.1).
     T1st {
-        rd: RouteDistinguisher,
         prefix: IpNet,
         teid: u32,
         qfi: u8,
@@ -662,7 +658,6 @@ pub enum MupPrefix {
     },
     /// Type 2 Session Transformed Route (ST2) key (§3.2.2).
     T2st {
-        rd: RouteDistinguisher,
         endpoint: IpAddr,
         endpoint_len: u8,
         teid: u32,
@@ -684,31 +679,15 @@ impl MupPrefix {
         }
     }
 
-    /// The Route Distinguisher carried by every defined MUP route type
-    /// (`None` only for the opaque `Unknown` variant).
-    pub fn rd(&self) -> Option<RouteDistinguisher> {
-        match self {
-            MupPrefix::Dsd { rd, .. }
-            | MupPrefix::Isd { rd, .. }
-            | MupPrefix::T1st { rd, .. }
-            | MupPrefix::T2st { rd, .. } => Some(*rd),
-            MupPrefix::Unknown { .. } => None,
-        }
-    }
-
-    /// Split a parsed `MupRoute` into the RD-and-id-stripped key used to
-    /// index the MUP RIB. The add-path `id` and the (constant) arch type
-    /// are dropped; the `id` lives on `BgpRib.remote_id`.
-    pub fn from_route(route: &MupRoute) -> MupPrefix {
+    /// Split a parsed `MupRoute` into its Route Distinguisher and the
+    /// RD-and-id-stripped inner key used to index the per-RD MUP RIB.
+    /// The add-path `id` and the (constant) arch type are dropped; the
+    /// `id` lives on `BgpRib.remote_id`. The `Unknown` variant has no
+    /// decoded RD, so it pairs with the default (`0:0`) RD.
+    pub fn from_route(route: &MupRoute) -> (RouteDistinguisher, MupPrefix) {
         match route {
-            MupRoute::Isd { rd, prefix, .. } => MupPrefix::Isd {
-                rd: *rd,
-                prefix: *prefix,
-            },
-            MupRoute::Dsd { rd, address, .. } => MupPrefix::Dsd {
-                rd: *rd,
-                address: *address,
-            },
+            MupRoute::Isd { rd, prefix, .. } => (*rd, MupPrefix::Isd { prefix: *prefix }),
+            MupRoute::Dsd { rd, address, .. } => (*rd, MupPrefix::Dsd { address: *address }),
             MupRoute::T1st {
                 rd,
                 prefix,
@@ -717,32 +696,39 @@ impl MupPrefix {
                 endpoint,
                 source,
                 ..
-            } => MupPrefix::T1st {
-                rd: *rd,
-                prefix: *prefix,
-                teid: *teid,
-                qfi: *qfi,
-                endpoint: *endpoint,
-                source: *source,
-            },
+            } => (
+                *rd,
+                MupPrefix::T1st {
+                    prefix: *prefix,
+                    teid: *teid,
+                    qfi: *qfi,
+                    endpoint: *endpoint,
+                    source: *source,
+                },
+            ),
             MupRoute::T2st {
                 rd,
                 endpoint,
                 endpoint_len,
                 teid,
                 ..
-            } => MupPrefix::T2st {
-                rd: *rd,
-                endpoint: *endpoint,
-                endpoint_len: *endpoint_len,
-                teid: *teid,
-            },
+            } => (
+                *rd,
+                MupPrefix::T2st {
+                    endpoint: *endpoint,
+                    endpoint_len: *endpoint_len,
+                    teid: *teid,
+                },
+            ),
             MupRoute::Unknown {
                 route_type, body, ..
-            } => MupPrefix::Unknown {
-                route_type: *route_type,
-                body: body.clone(),
-            },
+            } => (
+                RouteDistinguisher::default(),
+                MupPrefix::Unknown {
+                    route_type: *route_type,
+                    body: body.clone(),
+                },
+            ),
         }
     }
 
@@ -764,26 +750,27 @@ impl MupPrefix {
         if v6 { Afi::Ip6 } else { Afi::Ip }
     }
 
-    /// Reconstruct a wire `MupRoute` from the key for re-advertisement.
-    /// The full-NLRI key carries every field, so the only synthesized
-    /// values are the 3GPP-5G architecture type and a zero add-path id.
-    pub fn to_route(&self) -> MupRoute {
+    /// Reconstruct a wire `MupRoute` from the inner key and its RD (the
+    /// outer per-RD map key) for re-advertisement. The only other
+    /// synthesized values are the 3GPP-5G architecture type and a zero
+    /// add-path id. The RD is ignored for the `Unknown` variant (its
+    /// opaque body already carries the original bytes).
+    pub fn to_route(&self, rd: RouteDistinguisher) -> MupRoute {
         let arch = MupArchitectureType::Gpp5g;
         match self {
-            MupPrefix::Isd { rd, prefix } => MupRoute::Isd {
+            MupPrefix::Isd { prefix } => MupRoute::Isd {
                 id: 0,
                 arch,
-                rd: *rd,
+                rd,
                 prefix: *prefix,
             },
-            MupPrefix::Dsd { rd, address } => MupRoute::Dsd {
+            MupPrefix::Dsd { address } => MupRoute::Dsd {
                 id: 0,
                 arch,
-                rd: *rd,
+                rd,
                 address: *address,
             },
             MupPrefix::T1st {
-                rd,
                 prefix,
                 teid,
                 qfi,
@@ -792,7 +779,7 @@ impl MupPrefix {
             } => MupRoute::T1st {
                 id: 0,
                 arch,
-                rd: *rd,
+                rd,
                 prefix: *prefix,
                 teid: *teid,
                 qfi: *qfi,
@@ -800,14 +787,13 @@ impl MupPrefix {
                 source: *source,
             },
             MupPrefix::T2st {
-                rd,
                 endpoint,
                 endpoint_len,
                 teid,
             } => MupRoute::T2st {
                 id: 0,
                 arch,
-                rd: *rd,
+                rd,
                 endpoint: *endpoint,
                 endpoint_len: *endpoint_len,
                 teid: *teid,
@@ -1580,28 +1566,28 @@ mod tests {
         ];
         let expect_afi = [Afi::Ip, Afi::Ip, Afi::Ip6, Afi::Ip];
         for (route, afi) in cases.iter().zip(expect_afi) {
-            let prefix = MupPrefix::from_route(route);
+            let (rd, prefix) = MupPrefix::from_route(route);
             assert_eq!(prefix.afi(), afi);
-            // to_route() round-trips back to the same key.
-            assert_eq!(MupPrefix::from_route(&prefix.to_route()), prefix);
+            // to_route() round-trips back to the same (rd, key).
+            assert_eq!(MupPrefix::from_route(&prefix.to_route(rd)), (rd, prefix));
         }
     }
 
     #[test]
     fn mup_prefix_orders_dsd_before_isd_before_st() {
-        let dsd = MupPrefix::from_route(&MupRoute::Dsd {
+        let (_, dsd) = MupPrefix::from_route(&MupRoute::Dsd {
             id: 0,
             arch: MupArchitectureType::Gpp5g,
             rd: sample_rd(),
             address: "1.1.1.1".parse().unwrap(),
         });
-        let isd = MupPrefix::from_route(&MupRoute::Isd {
+        let (isd_rd, isd) = MupPrefix::from_route(&MupRoute::Isd {
             id: 0,
             arch: MupArchitectureType::Gpp5g,
             rd: sample_rd(),
             prefix: "10.0.0.0/24".parse().unwrap(),
         });
-        let st2 = MupPrefix::from_route(&MupRoute::T2st {
+        let (_, st2) = MupPrefix::from_route(&MupRoute::T2st {
             id: 0,
             arch: MupArchitectureType::Gpp5g,
             rd: sample_rd(),
@@ -1614,6 +1600,7 @@ mod tests {
         assert_eq!(dsd.route_type(), 2);
         assert_eq!(isd.route_type(), 1);
         assert_eq!(st2.route_type(), 4);
-        assert_eq!(isd.rd(), Some(sample_rd()));
+        // The RD is now the outer per-RD map key, returned alongside the key.
+        assert_eq!(isd_rd, sample_rd());
     }
 }
