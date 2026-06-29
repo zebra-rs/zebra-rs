@@ -1,0 +1,29 @@
+# CE2 — customer edge 2 (AS 65002). Mirror of CE1: IPv6 eBGP relay
+# between C2 (AS 65102) and PE2 (AS 65000).
+interface:
+- if-name: c2
+  ipv6:
+    address: 2001:db8:2c::2/64
+- if-name: pe2
+  ipv6:
+    address: 2001:db8:2e::1/64
+router:
+  bgp:
+    global:
+      as: 65002
+      router-id: 10.2.0.5
+    neighbor:
+    - remote-address: 2001:db8:2c::1
+      remote-as: 65102
+      timers: {connect-retry-time: 3}
+      enabled: true
+      afi-safi:
+      - name: ipv6
+        enabled: true
+    - remote-address: 2001:db8:2e::2
+      remote-as: 65000
+      timers: {connect-retry-time: 3}
+      enabled: true
+      afi-safi:
+      - name: ipv6
+        enabled: true

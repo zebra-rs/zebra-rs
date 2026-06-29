@@ -10486,6 +10486,34 @@ pub fn route_update_ipv6(
         }
     }
 
+    // Don't leak a *relayed* SRv6 L3 Service SID onto a plain v6-unicast
+    // advertisement to a non-SRv6 peer. The SID is a provider-side
+    // construct: when a PE imports a VPNv6 route into a VRF (carrying the
+    // remote PE's End.DT46 service SID) and re-advertises it to a plain
+    // eBGP CE, the route keeps that SID in its Prefix-SID attribute.
+    // Leaking it to a non-SRv6 CE is fatal — `nht_target` prefers the SID
+    // over the BGP next-hop, so the CE tracks the unresolvable provider
+    // locator, the route never becomes reachable, and it is never
+    // re-advertised onward toward the customer site. Strip the Prefix-SID
+    // attribute when ALL hold:
+    //   - this speaker does not originate SRv6 IPv6-unicast service
+    //     (`srv6_ipv6_export` is `None`) — a node advertising its OWN
+    //     SRv6 service SID (e.g. `redistribute` under a local locator with
+    //     `segment-routing srv6 ipv6-unicast`) must keep it; a per-VRF
+    //     task (which always carries `srv6_ipv6_export: None`) relaying an
+    //     imported VPN SID is exactly the leak case;
+    //   - the peer did not negotiate SRv6 IPv6-unicast (`afi-safi ipv6
+    //     encapsulation-type srv6[-relax]`);
+    //   - the advertisement is plain v6-unicast (a bare IPv6 next-hop, not
+    //     a VPNv6 next-hop).
+    if bgp.srv6_ipv6_export.is_none()
+        && peer.ipv6_srv6_encap().is_none()
+        && matches!(attrs.nexthop, Some(BgpNexthop::Ipv6(_)))
+        && attrs.srv6_l3_sid().is_some()
+    {
+        attrs.prefix_sid = None;
+    }
+
     // LOCAL_PREF for iBGP.
     if peer.is_ibgp() && attrs.local_pref.is_none() {
         attrs.local_pref = Some(LocalPref::default());
