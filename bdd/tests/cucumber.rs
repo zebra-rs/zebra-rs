@@ -2785,6 +2785,21 @@ async fn main() {
                             .tee::<World, _>(writer::Json::for_tee(json_file))
                             .normalized(),
                     )
+                    // Treat a SKIPPED step as a FAILURE. cucumber silently
+                    // skips a step whose phrasing matches no step definition
+                    // (a typo'd `When`/`Then`, or a wait like `I wait 90
+                    // seconds for OSPF and BGP to operate` when only `I wait
+                    // {int} seconds [for BGP to operate]` is registered). A
+                    // skipped wait reads identically to "converged instantly"
+                    // and the *next* assertion then fails on an un-converged
+                    // topology — which looks like a product bug. Failing on
+                    // skip surfaces the real cause (the unmatched step) loudly
+                    // at its own line. Wraps the whole writer so the terminal
+                    // output, the summary stats, and the Allure JSON all agree.
+                    // A scenario that legitimately expects a skip can opt out
+                    // with the `@allow.skipped` tag (already excluded from
+                    // `feature_tag` selection in the `before` hook above).
+                    .fail_on_skipped()
                     // Ignore the process CLI for the per-feature runner so
                     // `--concurrency` doesn't override `max_concurrent_scenarios`;
                     // the tag / name filter is re-applied in the closure below.
