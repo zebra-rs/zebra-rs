@@ -229,17 +229,57 @@ When an SMF establishes a session, the controller:
    endpoint), and the Network Instance from the PFCP Session
    Establishment Request;
 2. correlates the Network Instance against the per-VRF `mup` config to
-   find the RD and the ST route type (`st1` / `st2`), and the VRF's
-   export route-targets from the top-level VRF;
-3. originates the ST route into the MUP Loc-RIB with the
-   controller-address as next hop and the VRF's export route-targets —
-   and **no** service SID (PE-derived forwarding, the draft default);
-4. advertises it to every `mup` peer.
+   find the matching VRF(s) and the ST route type (`st1` / `st2`), and
+   dispatches the session to each matching VRF task (one session can map
+   to several VRFs — see the dual-ST note above);
+3. each VRF task builds the **RD-free** Session-Transformed NLRI and exports
+   it to the global instance, which stamps the VRF's RD, its export
+   route-targets and the controller-address next hop **at the export
+   boundary** (see [VRF-first origination](#vrf-first-origination-and-the-rd)
+   below), installs it into the global MUP Loc-RIB — with **no** service SID
+   (PE-derived forwarding, the draft default) — and advertises it to every
+   `mup` peer.
 
 A Session Deletion withdraws the route. For an IPv6 UE whose GTP
 endpoint is IPv4 (IPv4 N3 transport), the endpoint/source address family
 is taken from its own length octet, so the route rides the IPv6-MUP AFI
 while carrying the IPv4 endpoint.
+
+## VRF-first origination and the RD
+
+zebra-rs organizes MUP routes the same way it organizes L3VPN: the
+**Route Distinguisher lives only in the global SAFI-85 table**, applied at
+the export boundary — never inside a per-VRF RIB.
+
+* A **per-VRF MUP RIB** holds the routes that belong to that VRF, keyed by
+  the VRF's **own RD** (the RD-free NLRI under the VRF's `rd`). This mirrors
+  an L3VPN VRF's IPv4 RIB, which drops the VPNv4 RD on import: a route a VRF
+  imports from a *different* origin RD is held — and shown — under **this**
+  VRF's RD, not the origin RD.
+* The **global MUP Loc-RIB** is the SAFI-85 table — keyed by the origin RD —
+  and the only BGP-peer advertiser.
+
+Origination is **VRF-first**. A controller ST route (from a PFCP session)
+and a PE segment route (DSD/ISD from `afi-safi mup segment`) are built in
+the per-VRF task as an **RD-free** NLRI plus only the route-specific extended
+communities (the st2 / DSD Direct-segment id). The VRF exports it to the
+global instance, which stamps the **infrastructure attributes at the export
+boundary**, exactly like the VPNv4 `Export` handler:
+
+* the VRF's **RD** (`vrf <name> rd`, also the global table key);
+* its **export route-targets** (`vrf <name> mup route-target export`);
+* the **next hop** — the controller-address for ST routes, or the SRv6
+  locator's node SID for segments, with the per-VRF **End.DT46** SID attached
+  as the segment's Prefix-SID.
+
+The fully-stamped route is advertised to `mup` peers and mirrored back into
+the per-VRF tasks, so the originating VRF's `show bgp vrf <name> mup` reflects
+it (under its own RD) and any other VRF that imports its RT picks it up.
+
+Segment-origination **gating** — `encapsulation srv6`, a configured RD, the
+per-VRF End.DT46 SID, the SR locator, and the kernel VRF being up — is
+evaluated on the global side (all of that is global state) before a segment is
+dispatched to its VRF.
 
 ## Route-target import and cross-VRF import
 
@@ -247,14 +287,15 @@ Per-VRF MUP populates `show bgp vrf <name> mup` two ways, mirroring
 VPNv4/v6:
 
 * **Locally-originated routes** always appear in the VRF that originated
-  them — the VRF whose `rd` the route carries — **regardless of
-  route-targets**, even with no `mup route-target` configured at all. A
-  `route st1`/`st2` ST route and a `segment` DSD/ISD are born in their VRF,
-  so that VRF owns them. (Origination itself runs in the global BGP task;
-  the route is mirrored back to its VRF by RD.)
+  them, **regardless of route-targets** — even with no `mup route-target`
+  configured at all. A `route st1`/`st2` ST route and a `segment` DSD/ISD are
+  built in their VRF task (see
+  [VRF-first origination](#vrf-first-origination-and-the-rd) above), so that
+  VRF owns them; they are shown under the VRF's own `rd`.
 * **Route-target import** pulls in routes from *other* VRFs and from peers:
   a route also lands in any VRF whose `mup route-target import` set overlaps
-  the route's route-targets, regardless of whether its RD matches.
+  the route's route-targets, regardless of its origin RD. As on the import
+  side of L3VPN, the route is re-keyed under the **importing** VRF's own RD.
 
 The second rule is what makes **cross-VRF import** work, exactly as it does
 for L3VPN: a route originated under one RD can be imported into a VRF whose
@@ -278,12 +319,14 @@ vrf N3 {                      # rd 65501:10 — a different VRF
 }
 ```
 
-Here VRF N6 originates an ISD (`segment interwork`) whose NLRI carries RD
-`65501:20` and RT `65501:10`. N6 shows that ISD in `show bgp vrf N6 mup` by
-virtue of having originated it (the RD-origin rule) — no import is needed.
-VRF N3's `rd` is `65501:10`, which does **not** match the ISD's RD, yet
-because N3 imports RT `65501:10` the ISD also appears in `show bgp vrf N3
-mup`. The `@bgp_mup_vrf_import` BDD feature exercises this cross-RD import.
+Here VRF N6 originates an ISD (`segment interwork`); in the global SAFI-85
+table it carries N6's origin RD `65501:20` and RT `65501:10`, and `show bgp
+vrf N6 mup` shows it under N6's own RD because N6 originated it — no import is
+needed. VRF N3's `rd` is `65501:10`, which does **not** match the origin RD,
+yet because N3 imports RT `65501:10` the ISD also appears in `show bgp vrf N3
+mup` — re-keyed under **N3's own RD** (`[ISD][65501:10][…]`), not the origin
+`65501:20`. The `@bgp_mup_vrf_import` BDD feature exercises this cross-RD
+import.
 
 ## Showing MUP state
 
@@ -301,13 +344,14 @@ MUP VRFs:
        rt:65000:200
 ```
 
-`show bgp vrf <name> mup` renders the MUP routes that belong to one VRF:
-the routes that VRF **originated** (matched by RD) plus the routes it
-**imports** by route-target (see
+`show bgp vrf <name> mup` renders the MUP routes that belong to one VRF —
+the routes that VRF **originated** plus the routes it **imports** by
+route-target (see
 [Route-target import and cross-VRF import](#route-target-import-and-cross-vrf-import)
-above) — the latter possibly originated under a different RD. The global
-MUP Loc-RIB stays the authoritative advertiser; the per-VRF task holds its
-own RIB of these routes so the per-VRF view renders them:
+above) — all keyed under the VRF's own RD, even those originally advertised
+under a different origin RD. The global MUP Loc-RIB (keyed by origin RD)
+stays the authoritative advertiser; the per-VRF task holds its own RIB of
+these routes so the per-VRF view renders them:
 
 ```
 # show bgp vrf mobile-up mup
