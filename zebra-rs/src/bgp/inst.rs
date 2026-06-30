@@ -3324,10 +3324,17 @@ impl Bgp {
                 if export_v6_changed {
                     self.retag_vrf_exports_v6(&name);
                 }
-                // Re-stamp the VRF's DSD segment route with the new MUP
-                // export RTs (same race the v4/v6 retag above closes).
+                // Re-stamp the VRF's originated MUP routes with the new
+                // export RTs (same race the v4/v6 retag above closes, plus
+                // a later `set ... mup route-target export` commit). The
+                // DSD/ISD segment is rebuilt by `reconcile_mup_segment`
+                // (its skip-check compares the full ecom); the controller's
+                // ST1/ST2 routes are re-tagged in place by
+                // `retag_mup_st_exports` — without it they keep the RTs
+                // present at session-establish time.
                 if export_mup_changed {
                     self.reconcile_mup_segment();
+                    self.retag_mup_st_exports(&name);
                 }
             }
             // Redistribute deliveries from RIB — initial walk
