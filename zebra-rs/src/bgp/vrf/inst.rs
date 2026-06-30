@@ -149,6 +149,12 @@ pub struct BgpVrf {
     /// SID. Empty until the first snapshot arrives.
     pub color_policy: super::super::color_policy::ColorPolicy,
     pub flex_algo_srv6_routes: super::super::color_policy::FlexAlgoSrv6Shadow,
+    /// VRF-first MUP origination tracking: per PFCP SEID, the RD-free ST
+    /// prefixes this VRF exported to the global SAFI-85 RIB. Lets a Session
+    /// Deletion / Modification (`MupWithdrawOriginate`) withdraw exactly the
+    /// routes that session created. A VRF binds one direction, so this is
+    /// normally one prefix per SEID.
+    pub mup_originated: std::collections::BTreeMap<u64, Vec<bgp_packet::MupPrefix>>,
 }
 
 /// Sender side of the per-VRF inbound channel — handed back to
@@ -421,6 +427,71 @@ pub fn dispatch_mup(
     }
 }
 
+/// The VRFs a PFCP session should originate ST routes in: every VRF whose
+/// `afi-safi mup route {st1|st2}` binding (`srv6_mobile.network_instance`)
+/// matches the session's Network Instance, paired with its resolved direction
+/// (st1 = Encapsulation / st2 = Decapsulation) and st2 Direct-segment
+/// ext-comm. This is the dual-ST fan-out: one NI bound by both an st1 and an
+/// st2 VRF yields two targets. Pure (no I/O) so the correlation is unit
+/// testable; [`dispatch_mup_session`] turns each target into a `MupOriginate`.
+pub fn mup_session_targets(
+    vrfs: &std::collections::BTreeMap<String, super::super::vrf_config::BgpVrfConfig>,
+    session: &crate::mup_c::session::MupSession,
+) -> Vec<(
+    String,
+    super::super::vrf_config::MupSrv6Direction,
+    Option<bgp_packet::RouteDistinguisher>,
+)> {
+    let Some(ni) = session.network_instance.as_deref() else {
+        return Vec::new();
+    };
+    vrfs.iter()
+        .filter_map(|(name, cfg)| {
+            let sm = cfg.mobile_uplane.srv6_mobile.as_ref()?;
+            if sm.network_instance.as_deref() != Some(ni) {
+                return None;
+            }
+            Some((name.clone(), sm.direction, sm.mup_ext_comm))
+        })
+        .collect()
+}
+
+/// VRF-first MUP session dispatch: send each VRF that [`mup_session_targets`]
+/// matches a `MupOriginate` with its resolved direction + st2 Direct-segment
+/// ext-comm. The per-VRF task builds the RD-free ST NLRI and exports it back
+/// via `MupExport`; the global export handler stamps the RD / export-RTs /
+/// controller next-hop. One session can fan out to several VRFs (an st1 and an
+/// st2 VRF sharing the NI). Replaces the old global `build_mup_origination` +
+/// `originate_mup_route`.
+pub fn dispatch_mup_session(
+    vrfs: &std::collections::BTreeMap<String, super::super::vrf_config::BgpVrfConfig>,
+    vrf_registry: &std::collections::BTreeMap<String, super::spawn::BgpVrfHandle>,
+    session: &crate::mup_c::session::MupSession,
+) {
+    for (name, direction, ext_comm) in mup_session_targets(vrfs, session) {
+        let Some(handle) = vrf_registry.get(&name) else {
+            continue;
+        };
+        let _ = handle.inbox.send(BgpVrfMsg::MupOriginate {
+            session: session.clone(),
+            direction,
+            ext_comm,
+        });
+    }
+}
+
+/// Withdraw the ST routes a PFCP session originated across all VRFs (Session
+/// Deletion / association teardown). Broadcasts `MupWithdrawOriginate`; the
+/// per-VRF removal is idempotent for a VRF that never originated for `seid`.
+pub fn withdraw_mup_session(
+    vrf_registry: &std::collections::BTreeMap<String, super::spawn::BgpVrfHandle>,
+    seid: u64,
+) {
+    for handle in vrf_registry.values() {
+        let _ = handle.inbox.send(BgpVrfMsg::MupWithdrawOriginate { seid });
+    }
+}
+
 /// Per-rtype `remote_id` discriminator for redistribute-originated VRF
 /// rows (matches the global `Bgp::redist_remote_id`), so connected /
 /// static / IGP sources — and a `network` row at id 0 — coexist for
@@ -491,8 +562,25 @@ impl BgpVrf {
             transport_v6: std::collections::BTreeMap::new(),
             color_policy: Default::default(),
             flex_algo_srv6_routes: Default::default(),
+            mup_originated: std::collections::BTreeMap::new(),
         };
         (vrf, inbox_tx)
+    }
+
+    /// Withdraw every controller ST route this VRF exported for `seid`: emit a
+    /// `WithdrawMupExport` for each tracked RD-free prefix so the global
+    /// SAFI-85 RIB removes it and re-runs best-path. No-op when nothing was
+    /// originated for the session.
+    fn withdraw_mup_originate(&mut self, seid: u64) {
+        let Some(prefixes) = self.mup_originated.remove(&seid) else {
+            return;
+        };
+        for prefix in prefixes {
+            let _ = self.global_tx.send(BgpGlobalMsg::WithdrawMupExport {
+                vrf: self.name.clone(),
+                prefix,
+            });
+        }
     }
 
     /// Drive the per-VRF task. The loop exits cleanly when the
@@ -1510,6 +1598,36 @@ impl BgpVrf {
                 if empty {
                     self.local_rib.mup.remove(&rd);
                 }
+            }
+            // VRF-first MUP origination: build the RD-free ST NLRI from the
+            // dispatched session + resolved direction, and export it to the
+            // global SAFI-85 RIB. The global export handler applies the RD,
+            // export route-targets and controller next-hop; the resulting
+            // route is mirrored back here (RT/RD-origin) so this VRF's own
+            // `show bgp vrf <name> mup` reflects it. A Modification replaces:
+            // withdraw the session's prior exports first.
+            BgpVrfMsg::MupOriginate {
+                session,
+                direction,
+                ext_comm,
+            } => {
+                self.withdraw_mup_originate(session.seid);
+                if let Some((prefix, attr)) =
+                    super::super::route::build_mup_st_route(&session, direction, ext_comm)
+                {
+                    self.mup_originated
+                        .entry(session.seid)
+                        .or_default()
+                        .push(prefix.clone());
+                    let _ = self.global_tx.send(BgpGlobalMsg::MupExport {
+                        vrf: self.name.clone(),
+                        prefix,
+                        attr,
+                    });
+                }
+            }
+            BgpVrfMsg::MupWithdrawOriginate { seid } => {
+                self.withdraw_mup_originate(seid);
             }
             BgpVrfMsg::Shutdown => unreachable!("handled in event_loop"),
         }

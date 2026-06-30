@@ -7662,52 +7662,22 @@ mod afi_safi_next_hop_self_tests {
 
 #[cfg(test)]
 mod mup_dual_origination_tests {
-    //! `build_mup_origination` fans one PFCP session out to *every* VRF
-    //! whose `afi-safi mup route {st1|st2}` binding matches the session's
-    //! Network Instance — so a single session under `internet` originates
-    //! both the downlink (st1 / Type-1 ST, the N6 VRF) and the uplink
-    //! (st2 / Type-2 ST, the N3 VRF) routes. The earlier `find_map`
-    //! returned only the first match. Independent test module with its own
-    //! mock channels, mirroring `afi_safi_next_hop_self_tests`.
+    //! VRF-first MUP origination splits into a pure NI→VRF correlation
+    //! (`mup_session_targets`) and per-direction NLRI building
+    //! (`build_mup_st_route`). `mup_session_targets` fans one PFCP session out
+    //! to *every* VRF whose `afi-safi mup route {st1|st2}` binding matches the
+    //! session's Network Instance — so a single session under `internet`
+    //! targets both the downlink (st1 / N6) and uplink (st2 / N3) VRF —
+    //! and `build_mup_st_route` builds the RD-free T1ST / T2ST NLRI.
 
+    use std::collections::BTreeMap;
     use std::str::FromStr;
 
     use bgp_packet::{MupPrefix, RouteDistinguisher};
-    use tokio::sync::mpsc;
 
+    use super::super::route::build_mup_st_route;
+    use super::super::vrf::inst::mup_session_targets;
     use super::super::vrf_config::{BgpVrfConfig, MupSrv6Direction, MupSrv6Mobile};
-    use super::*;
-
-    fn fresh_bgp() -> Bgp {
-        let (inbound_tx, _inbound_rx) = mpsc::unbounded_channel();
-        let (_rib_rx_tx, rib_rx) = mpsc::unbounded_channel();
-        let client = crate::rib::client::RibClient::new(
-            inbound_tx,
-            crate::rib::client::ProtoId::from_raw(0),
-        );
-        Box::leak(Box::new(_inbound_rx));
-        let ctx = crate::context::ProtoContext::default_table(client);
-
-        let (rib_tx, _rib_rx) = mpsc::unbounded_channel();
-        let (rib_inbound_tx, _sub_inbound_rx) = mpsc::unbounded_channel();
-        Box::leak(Box::new(_rib_rx));
-        Box::leak(Box::new(_sub_inbound_rx));
-        let next_proto_id = std::sync::Arc::new(std::sync::atomic::AtomicU32::new(1));
-        let subscriber =
-            crate::config::RibSubscriber::for_test(rib_tx, rib_inbound_tx, next_proto_id);
-
-        let (policy_tx, _policy_rx) = mpsc::unbounded_channel();
-        Box::leak(Box::new(_policy_rx));
-        Bgp::new(
-            ctx,
-            rib_rx,
-            subscriber,
-            policy_tx,
-            None,
-            None,
-            tokio::sync::mpsc::channel(1).0,
-        )
-    }
 
     fn mup_vrf(rd: &str, direction: MupSrv6Direction, ni: &str, ext: Option<&str>) -> BgpVrfConfig {
         let mut cfg = BgpVrfConfig {
@@ -7737,16 +7707,16 @@ mod mup_dual_origination_tests {
     }
 
     /// One NI bound by both an st1 (N6 / downlink) VRF and an st2 (N3 /
-    /// uplink) VRF originates BOTH Session-Transformed routes from a single
-    /// session.
+    /// uplink) VRF targets BOTH VRFs from a single session — the dual-ST
+    /// fan-out.
     #[test]
-    fn one_session_originates_both_st1_and_st2() {
-        let mut bgp = fresh_bgp();
-        bgp.vrfs.insert(
+    fn one_session_targets_both_st1_and_st2() {
+        let mut vrfs = BTreeMap::new();
+        vrfs.insert(
             "N6".to_string(),
             mup_vrf("65501:1", MupSrv6Direction::Encapsulation, "internet", None),
         );
-        bgp.vrfs.insert(
+        vrfs.insert(
             "N3".to_string(),
             mup_vrf(
                 "65501:2",
@@ -7756,33 +7726,63 @@ mod mup_dual_origination_tests {
             ),
         );
 
-        let routes = bgp.build_mup_origination(&session("internet"));
-        assert_eq!(routes.len(), 2, "one session → both st1 and st2 routes");
+        let targets = mup_session_targets(&vrfs, &session("internet"));
+        assert_eq!(targets.len(), 2, "one session → both st1 and st2 VRFs");
         assert!(
-            routes
+            targets
                 .iter()
-                .any(|(_, p, _)| matches!(p, MupPrefix::T1st { .. })),
-            "downlink Type-1 ST originated from the st1 VRF",
+                .any(|(_, d, _)| matches!(d, MupSrv6Direction::Encapsulation)),
+            "downlink st1 (N6) is a target",
         );
         assert!(
-            routes
+            targets
                 .iter()
-                .any(|(_, p, _)| matches!(p, MupPrefix::T2st { .. })),
-            "uplink Type-2 ST originated from the st2 VRF",
+                .any(|(_, d, _)| matches!(d, MupSrv6Direction::Decapsulation)),
+            "uplink st2 (N3) is a target",
         );
     }
 
-    /// A session whose NI matches no VRF binding originates nothing.
+    /// A session whose NI matches no VRF binding targets nothing.
     #[test]
-    fn unmatched_ni_originates_nothing() {
-        let mut bgp = fresh_bgp();
-        bgp.vrfs.insert(
+    fn unmatched_ni_targets_nothing() {
+        let mut vrfs = BTreeMap::new();
+        vrfs.insert(
             "N3".to_string(),
             mup_vrf("65501:2", MupSrv6Direction::Decapsulation, "internet", None),
         );
         assert!(
-            bgp.build_mup_origination(&session("ims")).is_empty(),
+            mup_session_targets(&vrfs, &session("ims")).is_empty(),
             "no VRF binds NI `ims`",
+        );
+    }
+
+    /// st1 (Encapsulation) builds a Type-1 ST NLRI; st2 (Decapsulation)
+    /// builds a Type-2 ST NLRI carrying the Direct-segment MUP ext-comm. The
+    /// RD / export-RTs / next-hop are applied later at the global export
+    /// boundary, so the bare attr here carries only the route-specific ecom.
+    #[test]
+    fn st1_builds_t1st_st2_builds_t2st_with_ext_comm() {
+        let (p1, attr1) =
+            build_mup_st_route(&session("internet"), MupSrv6Direction::Encapsulation, None)
+                .unwrap();
+        assert!(matches!(p1, MupPrefix::T1st { .. }), "st1 → Type-1 ST");
+        assert!(attr1.ecom.is_none(), "st1 carries no ext-comm");
+
+        let seg = RouteDistinguisher::from_str("100:1").unwrap();
+        let (p2, attr2) = build_mup_st_route(
+            &session("internet"),
+            MupSrv6Direction::Decapsulation,
+            Some(seg),
+        )
+        .unwrap();
+        assert!(matches!(p2, MupPrefix::T2st { .. }), "st2 → Type-2 ST");
+        assert!(
+            attr2.ecom.is_some(),
+            "st2 carries the Direct-segment MUP ext-comm",
+        );
+        assert!(
+            attr2.nexthop.is_none(),
+            "next-hop applied at export, not here"
         );
     }
 }
