@@ -243,30 +243,35 @@ while carrying the IPv4 endpoint.
 
 ## Route-target import and cross-VRF import
 
-Per-VRF MUP follows the **same route-target import model as VPNv4/v6**: a
-MUP route lands in a VRF when the route's route-targets overlap that VRF's
-`mup route-target import` set — **not** when the route's RD matches the
-VRF's `rd`. The RD on a MUP NLRI is just an identifier; which VRFs a route
-reaches is driven entirely by route-targets.
+Per-VRF MUP populates `show bgp vrf <name> mup` two ways, mirroring
+VPNv4/v6:
 
-This makes **cross-VRF import** work exactly as it does for L3VPN: a route
-originated under one RD can be imported into a VRF whose own `rd` is
-different, purely because the importing VRF's `import` RT matches an RT the
-route carries.
+* **Locally-originated routes** always appear in the VRF that originated
+  them — the VRF whose `rd` the route carries — **regardless of
+  route-targets**, even with no `mup route-target` configured at all. A
+  `route st1`/`st2` ST route and a `segment` DSD/ISD are born in their VRF,
+  so that VRF owns them. (Origination itself runs in the global BGP task;
+  the route is mirrored back to its VRF by RD.)
+* **Route-target import** pulls in routes from *other* VRFs and from peers:
+  a route also lands in any VRF whose `mup route-target import` set overlaps
+  the route's route-targets, regardless of whether its RD matches.
+
+The second rule is what makes **cross-VRF import** work, exactly as it does
+for L3VPN: a route originated under one RD can be imported into a VRF whose
+own `rd` is different, purely because the importing VRF's `import` RT matches
+an RT the route carries.
 
 ```
 vrf N6 {                      # rd 65501:20 — originates the ISD
   mup {
     route-target {
       export 65501:10;        # the ISD it originates carries RT 65501:10
-      import 65501:10;        # …and N6 self-imports it, so it shows its own ISD
     }
   }
 }
 vrf N3 {                      # rd 65501:10 — a different VRF
   mup {
     route-target {
-      export 65501:20;
       import 65501:10;        # N3 imports RT 65501:10 → pulls in N6's ISD
     }
   }
@@ -274,16 +279,11 @@ vrf N3 {                      # rd 65501:10 — a different VRF
 ```
 
 Here VRF N6 originates an ISD (`segment interwork`) whose NLRI carries RD
-`65501:20` and RT `65501:10`. VRF N3's `rd` is `65501:10`, which does **not**
-match the ISD's RD — yet because N3 imports RT `65501:10`, the ISD appears in
-`show bgp vrf N3 mup`. N6 also imports `65501:10`, so it still shows its own
-originated ISD.
-
-Note the consequence: origination is **global**, while the per-VRF view is
-**import-only**. A VRF therefore shows a route it originated in
-`show bgp vrf <name> mup` only if it also imports that route's RT (as N6 does
-above). The `@bgp_mup_vrf_import` BDD feature exercises exactly this cross-RD
-import.
+`65501:20` and RT `65501:10`. N6 shows that ISD in `show bgp vrf N6 mup` by
+virtue of having originated it (the RD-origin rule) — no import is needed.
+VRF N3's `rd` is `65501:10`, which does **not** match the ISD's RD, yet
+because N3 imports RT `65501:10` the ISD also appears in `show bgp vrf N3
+mup`. The `@bgp_mup_vrf_import` BDD feature exercises this cross-RD import.
 
 ## Showing MUP state
 
@@ -301,12 +301,13 @@ MUP VRFs:
        rt:65000:200
 ```
 
-`show bgp vrf <name> mup` renders the MUP routes that VRF imports — every
-route whose route-targets overlap the VRF's `mup route-target import` set
-(see [Route-target import and cross-VRF import](#route-target-import-and-cross-vrf-import) above), which may include routes
-originated under a different RD. The authoritative MUP Loc-RIB and the
-advertiser stay on the global instance; the RT-matched best-paths are
-mirrored into the per-VRF task so the per-VRF view renders them:
+`show bgp vrf <name> mup` renders the MUP routes that belong to one VRF:
+the routes that VRF **originated** (matched by RD) plus the routes it
+**imports** by route-target (see
+[Route-target import and cross-VRF import](#route-target-import-and-cross-vrf-import)
+above) — the latter possibly originated under a different RD. The global
+MUP Loc-RIB stays the authoritative advertiser; the per-VRF task holds its
+own RIB of these routes so the per-VRF view renders them:
 
 ```
 # show bgp vrf mobile-up mup
