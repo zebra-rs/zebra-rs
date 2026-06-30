@@ -1,0 +1,51 @@
+# z1 — MUP Controller (MUP-C) used to verify DYNAMIC apply of the per-VRF
+# MUP export route-target. AS 65001, iBGP to z2 (192.168.0.2) with the mup
+# afi-safi negotiated; PFCP/N4 listener on 192.168.0.1:8805.
+#
+# The VRF `mobile-up` binds Network Instance `core` to a Type-2 ST route
+# (`afi-safi mup route st2`) carrying the Direct segment id `1:2`. The
+# top-level `vrf mobile-up` exists but carries NO `mup route-target export`
+# initially — so the ST2 is first originated with no RT. The feature then
+# applies `set vrf mobile-up mup route-target export 100:10` at runtime,
+# which must re-stamp the already-originated ST2 with `rt:100:10` (the MUP
+# Extended Community `mup:1:2` preserved) and re-advertise it to z2 —
+# WITHOUT re-injecting the PFCP session. Before the fix, the export-RT
+# change only refreshed segment (DSD/ISD) routes, never the controller ST
+# routes, so the new RT never reached the route or the peer.
+#
+# No SRv6 locator is needed: a controller ST route carries no service SID
+# (the receiving PE derives forwarding from its own segments), only the
+# controller-address next hop.
+router:
+  bgp:
+    global:
+      as: 65001
+      router-id: 192.168.0.1
+    neighbor:
+    - remote-address: 192.168.0.2
+      remote-as: 65001
+      enabled: true
+      afi-safi:
+      - name: ipv4
+        enabled: true
+      - name: mup
+        enabled: true
+    vrf:
+    - name: mobile-up
+      rd: "65000:100"
+      afi-safi:
+        mup:
+          route:
+          - type: st2
+            network-instance: core
+            mup-ext-comm: "1:2"
+    mup-c:
+      enable: true
+      controller-address: 2001:db8::1
+      pfcp:
+        listen-address: 192.168.0.1
+        port: 8805
+# Top-level VRF exists but carries NO export route-target yet — the feature
+# adds `mup route-target export 100:10` at runtime.
+vrf:
+- name: mobile-up

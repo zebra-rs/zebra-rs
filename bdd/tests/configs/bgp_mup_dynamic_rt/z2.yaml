@@ -1,0 +1,35 @@
+# z2 — MUP ST2 route receiver. AS 65001, iBGP to z1 (192.168.0.1) with the
+# mup afi-safi negotiated. Plain BGP speaker: no controller, originates
+# nothing.
+#
+# `vrf mobile-up` imports MUP route-target 100:10. The peer-learned ST2 is
+# stored in the global MUP Loc-RIB on receipt regardless of RT, but only
+# mirrored into the per-VRF view (`show bgp vrf mobile-up mup`) when its
+# route-targets match this import set. So z2's per-VRF view stays EMPTY
+# until z1 dynamically gains `mup route-target export 100:10` and
+# re-advertises the re-stamped ST2 — which is the end-to-end proof that the
+# dynamic export-RT apply re-originated and re-advertised the route. The
+# `router bgp vrf` block spawns the per-VRF task the show is redirected to.
+vrf:
+- name: mobile-up
+  mup:
+    route-target:
+      import:
+      - "100:10"
+router:
+  bgp:
+    global:
+      as: 65001
+      router-id: 192.168.0.2
+    neighbor:
+    - remote-address: 192.168.0.1
+      remote-as: 65001
+      enabled: true
+      afi-safi:
+      - name: ipv4
+        enabled: true
+      - name: mup
+        enabled: true
+    vrf:
+    - name: mobile-up
+      rd: "65000:100"

@@ -84,6 +84,16 @@ bgp_mup_vrf_import:
 	mkdir -p allure-results
 	cargo test --test cucumber -- --concurrency=1 --tags "@bgp_mup_vrf_import"
 
+# MUP dynamic export RT: a controller ST2 is originated with no export
+# route-target, then `set vrf mobile-up mup route-target export 100:10` is
+# applied at runtime — the already-originated ST2 must be re-stamped with
+# rt:100:10 and re-advertised so the peer's per-VRF view (imports 100:10)
+# populates. Needs `pfcp-inject` on the host PATH and root netns (kernel VRF
+# for the export-RT to flow through the RIB Vrf row).
+bgp_mup_dynamic_rt:
+	mkdir -p allure-results
+	cargo test --test cucumber -- --concurrency=1 --tags "@bgp_mup_dynamic_rt"
+
 rib_static_ipv6:
 	mkdir -p allure-results
 	cargo test --test cucumber -- --concurrency=1 --tags "@rib_static_ipv6"
