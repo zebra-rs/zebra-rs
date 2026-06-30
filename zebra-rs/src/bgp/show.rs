@@ -4063,7 +4063,7 @@ fn mup_prefix_display(rd: &RouteDistinguisher, prefix: &MupPrefix) -> String {
     }
 }
 
-/// `show bgp mup mup-c` — MUP controller (MUP-C) status: admin
+/// `show bgp mup-c` — MUP controller (MUP-C) status: admin
 /// state, the PFCP listener, and association / session counts. Rendered
 /// from the read-only [`crate::mup_c::inst::MupCView`] the controller
 /// feeds over `Message::MupC`.
@@ -4110,7 +4110,7 @@ fn show_bgp_mup_c(
     Ok(buf)
 }
 
-/// `show bgp mup mup-c session` — the PFCP sessions the
+/// `show bgp mup-c session` — the PFCP sessions the
 /// controller has learned (one row each).
 fn show_bgp_mup_c_session(
     bgp: &Bgp,
@@ -4172,7 +4172,7 @@ fn show_bgp_mup_c_session(
     Ok(buf)
 }
 
-/// `show bgp mup mup-c association` — the PFCP associations
+/// `show bgp mup-c association` — the PFCP associations
 /// (control-plane peers) the controller currently holds.
 fn show_bgp_mup_c_association(
     bgp: &Bgp,
@@ -6623,11 +6623,11 @@ impl Bgp {
             .set(show_bgp_mup)
             .path("/show/bgp/mup/summary")
             .set(show_bgp_mup_summary)
-            .path("/show/bgp/mup/mup-c")
+            .path("/show/bgp/mup-c")
             .set(show_bgp_mup_c)
-            .path("/show/bgp/mup/mup-c/session")
+            .path("/show/bgp/mup-c/session")
             .set(show_bgp_mup_c_session)
-            .path("/show/bgp/mup/mup-c/association")
+            .path("/show/bgp/mup-c/association")
             .set(show_bgp_mup_c_association)
             .path("/show/bgp/summary")
             .set(show_bgp_summary::<Bgp>)

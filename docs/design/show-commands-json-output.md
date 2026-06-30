@@ -116,7 +116,7 @@ its non-VRF sibling** in the tables below.
 | `show bgp neighbor-group [<name>]` | Neighbor-group inheritance state | ✅ |
 | `show bgp update-group [<id>]` | Update-groups (IOS-XR style) | ✅ |
 | `show bgp mup [summary]` | Mobile User Plane RIB (SAFI 85) | ✅ |
-| `show bgp mup mup-c [session\|association]` | MUP Controller status | ✅ |
+| `show bgp mup-c [session\|association]` | MUP Controller status | ✅ |
 | `show bgp vrf [<name>] [summary\|neighbor\|ipv4\|ipv6\|mup]` | Per-VRF BGP (redirected) | ✅ |
 
 Every per-AFI route dump (EVPN / labeled-unicast / flowspec / sr-policy /

@@ -193,7 +193,7 @@ mirror the EVPN LLGR two-branch.
 
 ### 6. Full `MUP controller:` show block — **DONE (P5)**
 
-`show bgp mup mup-c [session|association]` now renders the
+`show bgp mup-c [session|association]` now renders the
 controller runtime (admin state, PFCP listen address, association /
 session counts, and the per-session table) from the BGP-held
 `mup_c_view` the controller feeds over `Message::MupC`. The
@@ -358,7 +358,7 @@ zenoh encoding to design).
   reconfigure / teardown in `Bgp::apply_mup_c_commit_diff`.
 * **PR-A (ingest):** PFCP listener (own tokio UDP socket); Association
   Setup/Release, Heartbeat, Session Establishment/Modification/Deletion;
-  per-session table; `show bgp mup mup-c [session|association]`.
+  per-session table; `show bgp mup-c [session|association]`.
   Hardened (commit security review): session-ownership check on
   Modify/Delete, association precondition on Establish, bounded tables.
 * **PR-B (origination):** `Bgp::originate_mup_route` correlates the

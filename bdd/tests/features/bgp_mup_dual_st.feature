@@ -54,13 +54,13 @@ Feature: BGP MUP Controller originates both ST1 and ST2 from one PFCP session
     Then BGP session in "z1" to "192.168.0.2" should be "Established"
     And BGP session in "z2" to "192.168.0.1" should be "Established"
     And show command "show bgp neighbor 192.168.0.2" in namespace "z1" should contain "IPv4 MUP: advertised and received"
-    And show command "show bgp mup mup-c" in namespace "z1" should contain "PFCP listen : 192.168.0.1:8805"
+    And show command "show bgp mup-c" in namespace "z1" should contain "PFCP listen : 192.168.0.1:8805"
 
   Scenario: One PFCP session originates both an ST1 and an ST2 route received by the peer
     Given the test topology exists
     When I execute "pfcp-inject --target 192.168.0.1 --port 8805 --ue-ipv4 192.0.2.5 --teid 0x12345678 --endpoint 10.0.0.1 --network-instance internet" in namespace "z1"
     # PFCP ingest learned the single session.
-    Then show command "show bgp mup mup-c session" in namespace "z1" should eventually contain "192.0.2.5"
+    Then show command "show bgp mup-c session" in namespace "z1" should eventually contain "192.0.2.5"
     # The downlink VRF (st1) originates a Type-1 ST: UE prefix + access tunnel.
     And show command "show bgp mup" in namespace "z1" should contain "[ST1][65000:101][ue=192.0.2.5/32][teid=305419896]"
     # The uplink VRF (st2) originates a Type-2 ST from the SAME session:

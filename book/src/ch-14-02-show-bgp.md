@@ -123,10 +123,12 @@ Type-1/Type-2 Session-Transformed routes. `summary` shows the
 IPv4-MUP / IPv6-MUP neighbor sections. See
 [Mobile User Plane (MUP)](ch-02-35-bgp-mup.md).
 
-- `show bgp mup mup-c [session|association]` — the MUP Controller
-  (MUP-C): admin state and PFCP listen address; `session` lists learned
-  PFCP sessions (SEID, UE address, TEID, QFI); `association` lists PFCP
-  CP/UP associations.
+### `show bgp mup-c [session|association]`
+
+The MUP Controller (MUP-C): admin state and PFCP listen address;
+`session` lists learned PFCP sessions (SEID, UE address, TEID, QFI);
+`association` lists PFCP CP/UP associations. See
+[Mobile User Plane (MUP)](ch-02-35-bgp-mup.md).
 
 JSON: an array of MUP route objects; `mup-c` returns a controller object
 or an array of session / association objects.
