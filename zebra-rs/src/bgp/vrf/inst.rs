@@ -357,34 +357,40 @@ pub fn dispatch_withdraw_import_v6(
     }
 }
 
-/// Mirror a peer-learned MUP (SAFI 85) best-path — or its withdrawal —
-/// to every VRF whose `mup_import_rts` intersects the route's RT
-/// extcomms, so `show bgp vrf <name> mup` reflects routes received from
-/// peers (not just locally-originated Session-Transformed routes). This
-/// is **display only**: the global `Bgp` Loc-RIB stays the authoritative
-/// MUP RIB and advertiser. It mirrors the originate-side
-/// [`super::super::route::Bgp::forward_mup_to_vrf`], which keys on `rd`
-/// because it already knows the originating VRF; the receive path has no
-/// such context, so it keys on the route's RTs like the VPNv4/v6 import
-/// fan-out.
+/// Mirror a MUP (SAFI 85) best-path — or its withdrawal — into the
+/// per-VRF tasks so `show bgp vrf <name> mup` reflects it. A route reaches
+/// a VRF two ways, mirroring VPNv4/v6:
+///   * **RT import** — every VRF whose `mup_import_rts` intersects the
+///     route's RT extcomms (cross-VRF import + peer-learned routes).
+///   * **RD origin** — when `origin_vrf` is `Some`, the VRF that locally
+///     originated the route (its `rd` equals the route's RD) always
+///     receives it, *regardless of route-targets*, because the route is
+///     conceptually born in that VRF (an N6/N3 ST route, or a per-VRF
+///     DSD/ISD segment route). The receive path passes `None` — a
+///     peer-learned route has no local originating VRF — so it keys purely
+///     on RTs; the originate path passes the RD-matched VRF name.
 ///
-/// On withdrawal (`best` is `None`) the route's RTs are no longer
-/// available, so `BgpVrfMsg::MupWithdraw` is flooded to every VRF — the
-/// per-VRF `selected.remove` is idempotent, so a VRF that never held the
-/// prefix simply ignores it.
+/// The per-VRF MUP RIB is authoritative for its own imported set (it owns
+/// best-path selection); the global `Bgp` Loc-RIB stays the authoritative
+/// advertiser. On withdrawal (`best` is `None`) the route's RTs are no
+/// longer available, so `BgpVrfMsg::MupWithdraw` is flooded to every VRF —
+/// the per-VRF removal is idempotent, so a VRF that never held the prefix
+/// simply ignores it (this covers the RD-origin VRF too).
 pub fn dispatch_mup(
     dispatcher: &VrfImportDispatcher<'_>,
     rd: bgp_packet::RouteDistinguisher,
     prefix: &bgp_packet::MupPrefix,
     best: Option<&super::super::route::BgpRib>,
+    origin_vrf: Option<&str>,
 ) {
     match best {
         Some(rib) => {
-            let matches = super::super::inst::matching_import_vrfs_mup(
+            let targets = super::super::inst::mup_dispatch_targets(
                 dispatcher.rib_known_vrfs,
                 &rib.attr.ecom,
+                origin_vrf,
             );
-            for vrf_name in matches {
+            for vrf_name in targets {
                 let Some(handle) = dispatcher.vrf_registry.get(&vrf_name) else {
                     continue;
                 };

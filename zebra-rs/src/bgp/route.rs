@@ -7610,10 +7610,11 @@ pub fn route_mup_update(
     let _ = bgp.local_rib.update_mup(rd, prefix.clone(), rib);
     let selected = bgp.local_rib.select_best_path_mup(&rd, &prefix);
     // Mirror the new best-path to every VRF whose `mup import` RT set
-    // matches, so `show bgp vrf <name> mup` reflects peer-learned routes
-    // (display only; the global Loc-RIB stays authoritative).
+    // matches, so `show bgp vrf <name> mup` reflects peer-learned routes.
+    // A peer-learned route has no local originating VRF (`origin_vrf =
+    // None`), so it is imported purely by route-target.
     if let Some(dispatcher) = bgp.vrf_import {
-        super::vrf::dispatch_mup(dispatcher, rd, &prefix, selected.first());
+        super::vrf::dispatch_mup(dispatcher, rd, &prefix, selected.first(), None);
     }
     if !selected.is_empty() {
         route_advertise_mup_to_peers(rd, prefix, &selected, bgp, peers);
@@ -7633,9 +7634,10 @@ pub fn route_mup_withdraw(ident: usize, route: &MupRoute, bgp: &mut BgpTop, peer
     let selected = bgp.local_rib.select_best_path_mup(&rd, &prefix);
     // Mirror the post-withdraw state to per-VRF tasks: a remaining best
     // path is re-forwarded (matched by RT), otherwise the prefix is
-    // withdrawn from every VRF's display copy.
+    // withdrawn from every VRF's copy. A peer-learned route has no local
+    // originating VRF (`origin_vrf = None`).
     if let Some(dispatcher) = bgp.vrf_import {
-        super::vrf::dispatch_mup(dispatcher, rd, &prefix, selected.first());
+        super::vrf::dispatch_mup(dispatcher, rd, &prefix, selected.first(), None);
     }
     if selected.is_empty() {
         route_withdraw_mup_to_peers(rd, prefix, peers);
@@ -12896,17 +12898,35 @@ impl Bgp {
         prefix: bgp_packet::MupPrefix,
         selected: Vec<BgpRib>,
     ) {
-        // Import the best-path into every VRF whose `mup_import_rts` match
-        // the route's RTs — the same RT-matched dispatch the receive path
-        // uses, so locally-originated and peer-learned MUP routes reach the
-        // per-VRF tasks by one consistent rule. (Originated routes carry the
-        // VRF's export RTs; a VRF self-imports when it also imports them.)
+        // Mirror the best-path into the per-VRF tasks. Other VRFs import it
+        // by route-target (cross-VRF import). The VRF that *originated* it —
+        // the one whose `rd` equals the route's RD — also gets it regardless
+        // of route-targets: origination runs in this global task, but the
+        // route is conceptually born in that VRF (an ST route from its
+        // `route st1/st2`, or its `segment` DSD/ISD), so it must appear in
+        // `show bgp vrf <name> mup` even with no import/export configured,
+        // mirroring VPNv4/v6 where a VRF owns the routes it originates.
         {
+            let origin_vrf = selected
+                .first()
+                .filter(|best| best.typ.is_originated())
+                .and_then(|_| {
+                    self.vrfs
+                        .iter()
+                        .find(|(_, cfg)| cfg.rd == Some(rd))
+                        .map(|(name, _)| name.clone())
+                });
             let dispatcher = super::vrf::VrfImportDispatcher {
                 rib_known_vrfs: &self.rib_known_vrfs,
                 vrf_registry: &self.vrf_registry,
             };
-            super::vrf::dispatch_mup(&dispatcher, rd, &prefix, selected.first());
+            super::vrf::dispatch_mup(
+                &dispatcher,
+                rd,
+                &prefix,
+                selected.first(),
+                origin_vrf.as_deref(),
+            );
         }
         if selected.is_empty() {
             route_withdraw_mup_to_peers(rd, prefix, &mut self.peers);
