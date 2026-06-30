@@ -1,0 +1,21 @@
+# CE2 — customer edge 2. Mirror of CE1: transit OSPFv3 in area 0 between
+# C2 and PE2.
+interface:
+- if-name: c2
+  ipv6:
+    address: 2001:db8:2c::2/64
+- if-name: pe2
+  ipv6:
+    address: 2001:db8:2e::1/64
+router:
+  ospfv3:
+    router-id: 10.2.0.5
+    area:
+    - area-id: 0.0.0.0
+      interface:
+      - if-name: c2
+        enable: true
+        network-type: point-to-point
+      - if-name: pe2
+        enable: true
+        network-type: point-to-point
