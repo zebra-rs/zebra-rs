@@ -56,10 +56,13 @@ Feature: BGP MUP cross-VRF import by route-target (RD-independent)
 
   Scenario: N3 imports N6's ISD across the RD boundary by route-target
     Given the test topology exists
-    # The crux: N3's own rd is 65501:10, but the ISD's RD is 65501:20. It
-    # appears here only because N3 imports RT 65501:10, which the ISD carries
-    # — RT-matched import, not RD-matched.
-    Then show command "show bgp vrf N3 mup" in namespace "z1" should eventually contain "[ISD][65501:20][10.60.0.0/16]"
+    # The crux: the ISD is originated under RD 65501:20, but N3 imports it
+    # because it carries RT 65501:10 (which N3 imports) — RT-matched import,
+    # not RD-matched. In N3's per-VRF view the route is keyed under N3's OWN
+    # rd (65501:10), not the origin RD 65501:20: a VRF holds its MUP routes
+    # under its own RD, the way an L3VPN VRF drops the VPNv4 RD on import.
+    # The carried route-target (rt:65501:10) is unchanged.
+    Then show command "show bgp vrf N3 mup" in namespace "z1" should eventually contain "[ISD][65501:10][10.60.0.0/16]"
     And show command "show bgp vrf N3 mup" in namespace "z1" should contain "End.DT46"
     And show command "show bgp vrf N3 mup" in namespace "z1" should contain "rt:65501:10"
 

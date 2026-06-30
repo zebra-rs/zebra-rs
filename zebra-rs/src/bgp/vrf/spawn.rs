@@ -173,6 +173,11 @@ pub fn spawn_bgp_vrf(
     // Inter-AS Option AB: re-export imported VPNv4 routes (see the field
     // doc on `BgpVrf`). Carried from the staged VRF config.
     vrf.inter_as_hybrid = cfg.inter_as_hybrid;
+    // The VRF's RD scopes its per-VRF MUP RIB to its own RD (imported MUP
+    // routes are re-keyed under it, not their origin RD). Captured at spawn
+    // like router-id; an `rd` edit on a live VRF doesn't re-key the running
+    // task yet (a follow-up adds respawn-on-edit, same as router-id).
+    vrf.rd = cfg.rd;
 
     // Materialise per-VRF peers from the BgpVrfConfig snapshot.
     // `peer.start()`'s timer events get logged at debug and
