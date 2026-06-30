@@ -1,0 +1,21 @@
+# CE2 — customer edge 2. Mirror of CE1: transit OSPFv2 in area 0 between
+# C2 and PE2.
+interface:
+- if-name: c2
+  ipv4:
+    address: 10.2.0.2/30
+- if-name: pe2
+  ipv4:
+    address: 10.2.0.5/30
+router:
+  ospf:
+    router-id: 10.2.0.5
+    area:
+    - area-id: 0.0.0.0
+      interface:
+      - if-name: c2
+        enable: true
+        network-type: point-to-point
+      - if-name: pe2
+        enable: true
+        network-type: point-to-point
