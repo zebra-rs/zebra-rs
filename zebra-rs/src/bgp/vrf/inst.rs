@@ -53,6 +53,15 @@ pub struct BgpVrf {
     /// `set router bgp vrf <name> router-id <addr>`, in which case
     /// the VRF is respawned with the new value.
     pub router_id: Ipv4Addr,
+    /// This VRF's Route Distinguisher (`set router bgp vrf <name> rd`),
+    /// or `None` if unset. The per-VRF MUP RIB is scoped to this single
+    /// RD: an imported MUP route is re-keyed under the VRF's *own* RD,
+    /// not the route's origin RD — the MUP analog of L3VPN dropping the
+    /// VPNv4 RD on import (a VRF owns its routes under its own RD).
+    /// Captured from the VRF config at spawn; an `rd` edit on a live VRF
+    /// doesn't yet re-key the running task (same spawn-time-capture
+    /// limitation as `router_id`).
+    pub rd: Option<bgp_packet::RouteDistinguisher>,
     /// Config-manager subscription. Path-dispatch routes
     /// `/router/bgp/vrf/<name>/...` callbacks here so the per-VRF
     /// runtime owns its own commit sequencing.
@@ -462,6 +471,8 @@ impl BgpVrf {
             local_rib: LocalRib::default(),
             shard: BgpShard::default(),
             router_id,
+            // Default unset; `spawn_bgp_vrf` sets it from the VRF config.
+            rd: None,
             cm: ConfigChannel::new(),
             show: ShowChannel::new(),
             global_tx,
@@ -1460,13 +1471,22 @@ impl BgpVrf {
             }
             // Authoritative per-VRF MUP import (RT-matched at the global
             // dispatch): insert the route as a candidate in this VRF's own
-            // per-RD MUP RIB and best-path it. The VRF receives the global
-            // winner per prefix, so best-path is single-candidate here, but
-            // the table is authoritative — `show bgp vrf <name> mup`
-            // (redirected here) reads the resulting `selected`. MUP has no
-            // CE peers and no kernel FIB yet, so this neither re-advertises
-            // nor installs; it owns the control-plane RIB only.
+            // MUP RIB and best-path it. The VRF receives the global winner
+            // per prefix, so best-path is single-candidate here, but the
+            // table is authoritative — `show bgp vrf <name> mup` (redirected
+            // here) reads the resulting `selected`. MUP has no CE peers and
+            // no kernel FIB yet, so this neither re-advertises nor installs;
+            // it owns the control-plane RIB only.
+            //
+            // The route is keyed under the VRF's *own* RD, not the message's
+            // origin RD: a VRF holds its MUP routes under its own RD (the one
+            // it would re-originate them with), exactly as an L3VPN VRF drops
+            // the VPNv4 RD on import. So a cross-RD import (e.g. an ISD
+            // originated under RD 65501:20, imported by a VRF whose rd is
+            // 65501:10) lands under 65501:10 here. A VRF with no `rd` falls
+            // back to the message RD.
             BgpVrfMsg::MupUpdate { rd, prefix, rib } => {
+                let rd = self.rd.unwrap_or(rd);
                 let _ = self
                     .local_rib
                     .mup
@@ -1475,9 +1495,11 @@ impl BgpVrf {
                     .update(prefix, rib);
             }
             BgpVrfMsg::MupWithdraw { rd, prefix } => {
-                // The VRF holds the single dispatched winner per prefix, so a
-                // prefix-keyed removal clears it; prune the per-RD table when
-                // it empties so an empty RD never renders.
+                // Same own-RD scoping as MupUpdate. The VRF holds the single
+                // dispatched winner per prefix, so a prefix-keyed removal
+                // clears it; prune the per-RD table when it empties so an
+                // empty RD never renders.
+                let rd = self.rd.unwrap_or(rd);
                 let empty = if let Some(table) = self.local_rib.mup.get_mut(&rd) {
                     table.cands.remove(&prefix);
                     table.selected.remove(&prefix);
