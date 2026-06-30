@@ -1,0 +1,76 @@
+# PE2 — provider edge 2 (AS 65000). Mirror of PE1: core IS-IS+SR-MPLS
+# (Prefix-SID index 3), iBGP VPNv4 to PE1, per-VRF IS-IS to CE2 with
+# two-way redistribution (redistribute isis -> VPNv4 up, redistribute bgp
+# -> IS-IS down).
+vrf:
+- name: vrf-cust
+  ipv4:
+    route-target:
+      import:
+      - 65000:100
+      export:
+      - 65000:100
+interface:
+- if-name: lo
+  ipv4:
+    address: 1.1.1.3/32
+- if-name: p
+  ipv4:
+    address: 10.250.0.6/30
+- if-name: ce2
+  vrf: vrf-cust
+  ipv4:
+    address: 10.2.0.6/30
+router:
+  isis:
+    net: 49.0000.0000.0000.0003.00
+    hostname: pe2
+    is-type: level-2-only
+    segment-routing: mpls
+    te-router-id: 1.1.1.3
+    interface:
+    - if-name: lo
+      ipv4:
+        enable: true
+        prefix-sid:
+          index: 3
+    - if-name: p
+      network-type: point-to-point
+      metric: 10
+      ipv4:
+        enable: true
+    vrf:
+    - name: vrf-cust
+      net: 49.0001.0000.0000.0023.00
+      is-type: level-2-only
+      afi-safi:
+      - name: ipv4
+        redistribute:
+          bgp: {}
+      interface:
+      - if-name: ce2
+        circuit-type: level-2-only
+        network-type: point-to-point
+        metric: 10
+        ipv4:
+          enable: true
+  bgp:
+    global:
+      as: 65000
+      router-id: 1.1.1.3
+    neighbor:
+    - remote-address: 1.1.1.1
+      remote-as: 65000
+      timers: {connect-retry-time: 3}
+      update-source: 1.1.1.3
+      enabled: true
+      afi-safi:
+      - name: vpnv4
+        enabled: true
+    vrf:
+    - name: vrf-cust
+      rd: 65000:2
+      afi-safi:
+        ipv4:
+          redistribute:
+            isis: {}

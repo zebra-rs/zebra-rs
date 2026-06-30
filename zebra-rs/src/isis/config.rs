@@ -1710,7 +1710,13 @@ fn wire_subtypes(
 fn send_redist(isis: &Isis, afi: IsisRedistAfi, src: IsisRedistSource, first_time: bool) {
     let wire_afi = wire_afi(afi);
     let rtype = wire_rtype(src);
-    let proto = "isis".to_string();
+    // Use this instance's proto label, not the literal "isis": a per-VRF
+    // instance registers as "isis:vrf:<name>", and the RIB routes the
+    // redistribute subscription by the proto string in the message. With
+    // the literal, a VRF child's subscription resolved to the default
+    // instance — so per-VRF redistribute never delivered. Mirrors the
+    // equivalent OSPF fix.
+    let proto = isis.proto_label.clone();
     let msg = match isis.config.redistribute.get(&(afi, src)) {
         None => crate::rib::Message::RedistDel {
             proto,

@@ -1,0 +1,28 @@
+# CE1 — customer edge 1. Transit IS-IS L2 router peering with C1 and PE1
+# on its two point-to-point links; carries C1's routes up to PE1 and
+# PE1's redistributed remote routes down to C1.
+interface:
+- if-name: c1
+  ipv4:
+    address: 10.1.0.2/30
+- if-name: pe1
+  ipv4:
+    address: 10.1.0.5/30
+router:
+  isis:
+    net: 49.0001.0000.0000.0012.00
+    hostname: ce1
+    is-type: level-2-only
+    interface:
+    - if-name: c1
+      circuit-type: level-2-only
+      network-type: point-to-point
+      metric: 10
+      ipv4:
+        enable: true
+    - if-name: pe1
+      circuit-type: level-2-only
+      network-type: point-to-point
+      metric: 10
+      ipv4:
+        enable: true

@@ -1,0 +1,25 @@
+# C1 — customer site 1. IS-IS L2 (IPv6) to CE1; redistributes connected
+# (loopback 2001:db8:c1::1/128 + the C-CE link) into IS-IS.
+interface:
+- if-name: lo
+  ipv6:
+    address: 2001:db8:c1::1/128
+- if-name: ce1
+  ipv6:
+    address: 2001:db8:1c::1/64
+router:
+  isis:
+    net: 49.0001.0000.0000.0011.00
+    hostname: c1
+    is-type: level-2-only
+    afi-safi:
+    - name: ipv6
+      redistribute:
+        connected: {}
+    interface:
+    - if-name: ce1
+      circuit-type: level-2-only
+      network-type: point-to-point
+      metric: 10
+      ipv6:
+        enable: true
