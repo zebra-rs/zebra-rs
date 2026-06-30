@@ -11,7 +11,10 @@ This chapter focuses on the per-VRF label: how it is allocated,
 advertised, and programmed into the forwarding plane. The companion
 control-plane machinery — route-target import/export, recursive
 next-hop resolution, and FIB arbitration between imported and
-CE-learned routes — is summarised where it bears on the data path.
+CE-learned routes — is summarised where it bears on the data path. The
+PE-CE side — which routing protocol runs to the customer, and how its
+routes are redistributed into and out of the VPN — is covered in
+[L3VPN PE-CE Routing Protocols](ch-02-36-bgp-l3vpn-pe-ce.md).
 
 ## The moving parts
 

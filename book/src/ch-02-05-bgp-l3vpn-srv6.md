@@ -23,6 +23,12 @@ The two ends of a VPN flow map as follows:
 One End.DT46 SID serves both address families (`DT46` = the dual-family
 decap), so a single per-VRF SID terminates VPNv4 and VPNv6 alike.
 
+The PE-CE side — which routing protocol runs to the customer, and how
+its routes are redistributed into and out of the VPN — is covered in
+[L3VPN PE-CE Routing Protocols](ch-02-36-bgp-l3vpn-pe-ce.md). Because
+zebra-rs has no 6VPE, IPv6 PE-CE rides this SRv6 VPNv6 path while IPv4
+PE-CE rides the MPLS VPNv4 path.
+
 ## The moving parts
 
 An SRv6 L3VPN PE on zebra-rs touches three configuration trees:
