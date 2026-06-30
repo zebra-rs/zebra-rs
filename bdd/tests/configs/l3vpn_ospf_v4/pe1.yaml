@@ -1,0 +1,78 @@
+# PE1 — provider edge 1 (AS 65000). IS-IS L2 + SR-MPLS core; iBGP VPNv4
+# to PE2. OSPFv2 PE-CE in vrf-cust (area 0 to CE1), with two-way
+# redistribution:
+#   - up:   router bgp vrf ... redistribute ospf  -> VPNv4 carries the
+#           customer routes OSPF learned from CE1.
+#   - down: router ospf vrf ... redistribute bgp  -> the VPNv4 routes
+#           imported into the VRF are injected into the CE-facing OSPF as
+#           Type-5 AS-External LSAs, so CE1/C1 learn the remote customers.
+vrf:
+- name: vrf-cust
+  ipv4:
+    route-target:
+      import:
+      - 65000:100
+      export:
+      - 65000:100
+interface:
+- if-name: lo
+  ipv4:
+    address: 1.1.1.1/32
+- if-name: p
+  ipv4:
+    address: 10.250.0.1/30
+- if-name: ce1
+  vrf: vrf-cust
+  ipv4:
+    address: 10.1.0.6/30
+router:
+  ospf:
+    vrf:
+    - name: vrf-cust
+      router-id: 1.1.1.1
+      redistribute:
+        bgp:
+          metric: 20
+      area:
+      - area-id: 0.0.0.0
+        interface:
+        - if-name: ce1
+          enable: true
+          network-type: point-to-point
+  isis:
+    net: 49.0000.0000.0000.0001.00
+    hostname: pe1
+    is-type: level-2-only
+    segment-routing: mpls
+    te-router-id: 1.1.1.1
+    interface:
+    - if-name: lo
+      ipv4:
+        enable: true
+        prefix-sid:
+          index: 1
+    - if-name: p
+      network-type: point-to-point
+      metric: 10
+      ipv4:
+        enable: true
+  bgp:
+    global:
+      as: 65000
+      router-id: 1.1.1.1
+    neighbor:
+    - remote-address: 1.1.1.3
+      remote-as: 65000
+      timers: {connect-retry-time: 3}
+      update-source: 1.1.1.1
+      enabled: true
+      afi-safi:
+      - name: vpnv4
+        enabled: true
+    vrf:
+    - name: vrf-cust
+      rd: 65000:1
+      afi-safi:
+        ipv4:
+          redistribute:
+            ospf: {}

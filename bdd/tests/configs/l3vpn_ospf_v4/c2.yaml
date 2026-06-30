@@ -1,0 +1,21 @@
+# C2 — customer site 2. Mirror of C1: OSPFv2 to CE2, redistribute
+# connected (loopback 10.0.2.1/32 + C-CE link) into OSPF.
+interface:
+- if-name: lo
+  ipv4:
+    address: 10.0.2.1/32
+- if-name: ce2
+  ipv4:
+    address: 10.2.0.1/30
+router:
+  ospf:
+    router-id: 10.0.2.1
+    redistribute:
+      connected:
+        metric: 20
+    area:
+    - area-id: 0.0.0.0
+      interface:
+      - if-name: ce2
+        enable: true
+        network-type: point-to-point
