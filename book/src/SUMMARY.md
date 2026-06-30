@@ -36,6 +36,7 @@
   - [Timer Configuration](ch-02-03-bgp-timers.md)
   - [L3VPN and Per-VRF Labels](ch-02-04-bgp-l3vpn.md)
   - [L3VPN over an SRv6 Underlay](ch-02-05-bgp-l3vpn-srv6.md)
+  - [L3VPN PE-CE Routing Protocols](ch-02-36-bgp-l3vpn-pe-ce.md)
   - [EVPN Type-5 (IP Prefix Routes)](ch-02-06-bgp-evpn-type5.md)
   - [EVPN IGMP/MLD Proxy (Selective Multicast)](ch-02-32-bgp-evpn-igmp-mld-proxy.md)
   - [EVPN BUM & Assisted Replication](ch-02-33-bgp-evpn-assisted-replication.md)
