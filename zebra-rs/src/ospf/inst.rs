@@ -294,6 +294,10 @@ pub struct Ospf<V: OspfVersion = Ospfv2> {
     /// Prefixes of Type-5 LSAs we self-originated from instance-level
     /// `redistribute bgp`. Flushed when the knob is removed.
     pub redist_bgp_originated: BTreeSet<Ipv4Net>,
+    /// IPv6 counterpart of [`Self::redist_bgp_originated`]: prefixes of
+    /// OSPFv3 AS-External (Type-5) LSAs self-originated from instance-level
+    /// `redistribute bgp`. A v2 instance leaves this empty.
+    pub redist_bgp_originated_v6: BTreeSet<ipnet::Ipv6Net>,
     /// Staged Flexible Algorithm definitions for this instance
     /// (`/router/ospf{,v3}/flex-algo`, RFC 9350). Shared staging engine
     /// keyed by the version's `FLEX_ALGO_PREFIX`; origination from the
@@ -1229,6 +1233,7 @@ impl Ospf<Ospfv2> {
             redist_connected_originated: BTreeSet::new(),
             redist_bgp: None,
             redist_bgp_originated: BTreeSet::new(),
+            redist_bgp_originated_v6: BTreeSet::new(),
             flex_algo: crate::flex_algo::FlexAlgoConfig::new(Ospfv2::FLEX_ALGO_PREFIX),
             affinity_map: crate::flex_algo::AffinityMap::new(),
             srlg_config: crate::flex_algo::SrlgGroupBuilder::new(),
@@ -2665,7 +2670,7 @@ impl Ospf<Ospfv2> {
     /// (RFC 2328 §3.3 ASBR definition). Today this requires the
     /// instance-level `redistribute connected` knob to be set.
     pub fn is_asbr(&self) -> bool {
-        self.redist_connected.is_some()
+        self.redist_connected.is_some() || self.redist_bgp.is_some()
     }
 
     /// True when this router should translate Type-7 → Type-5 for
@@ -5422,6 +5427,7 @@ impl Ospf<Ospfv3> {
             redist_connected_originated: BTreeSet::new(),
             redist_bgp: None,
             redist_bgp_originated: BTreeSet::new(),
+            redist_bgp_originated_v6: BTreeSet::new(),
             flex_algo: crate::flex_algo::FlexAlgoConfig::new(Ospfv3::FLEX_ALGO_PREFIX),
             affinity_map: crate::flex_algo::AffinityMap::new(),
             srlg_config: crate::flex_algo::SrlgGroupBuilder::new(),
@@ -5605,6 +5611,7 @@ impl Ospf<Ospfv3> {
         for area_id in area_ids {
             self.nssa_redist_connected_resync_v3(area_id);
         }
+        self.as_external_redist_bgp_resync_v3();
     }
 
     /// `RibRx::RouteDel` handler (v3). Mirror of `route_redist_add`.
@@ -5618,6 +5625,7 @@ impl Ospf<Ospfv3> {
         for area_id in area_ids {
             self.nssa_redist_connected_resync_v3(area_id);
         }
+        self.as_external_redist_bgp_resync_v3();
     }
 
     /// Stash an IPv6 address learned from netlink on the matching
@@ -6405,6 +6413,141 @@ impl Ospf<Ospfv3> {
         if let Some(lsa) = flushed {
             self.flood_self_originated_lsa(area_id, &lsa);
         }
+    }
+
+    /// Originate (or refresh) an OSPFv3 AS-External (Type-5, 0x4005) LSA
+    /// for `prefix` into the AS-scope LSDB and flood it AS-wide. The v3
+    /// sibling of `as_external_lsa_originate_for_prefix`; the body build
+    /// mirrors `nssa_lsa_originate_for_prefix_v3` but with the AS-External
+    /// LSA type, no P-bit (Propagate is NSSA-only), FA absent, and
+    /// AS-scope install/flood instead of per-area.
+    fn as_external_lsa_originate_for_prefix_v3(
+        &mut self,
+        prefix: ipnet::Ipv6Net,
+        metric: u32,
+        metric_type_2: bool,
+    ) {
+        use ospf_packet::{
+            OSPFV3_AS_EXTERNAL_FLAG_E, OSPFV3_AS_EXTERNAL_LSA_TYPE, Ospfv3AsExternalLsa,
+            Ospfv3LsBody, Ospfv3LsaHeader, Ospfv3PrefixOptions, ospfv3_prefix_wire_len,
+        };
+
+        let link_state_id = nssa_v3_ls_id(&prefix);
+
+        let mut flags = 0u8;
+        if metric_type_2 {
+            flags |= OSPFV3_AS_EXTERNAL_FLAG_E;
+        }
+
+        let wire_len = ospfv3_prefix_wire_len(prefix.prefix_len());
+        let mut address_prefix = vec![0u8; wire_len];
+        let net_bytes = prefix.network().octets();
+        let copy_len = wire_len.min(net_bytes.len());
+        address_prefix[..copy_len].copy_from_slice(&net_bytes[..copy_len]);
+
+        // No P-bit: that is an NSSA-LSA construct (RFC 3101). A Type-5
+        // ASBR leaves prefix-options clear and emits no forwarding address.
+        let body = Ospfv3AsExternalLsa {
+            flags,
+            metric,
+            prefix_length: prefix.prefix_len(),
+            prefix_options: Ospfv3PrefixOptions::new(),
+            referenced_ls_type: 0,
+            address_prefix,
+            forwarding_address: None,
+            external_route_tag: None,
+            referenced_link_state_id: None,
+        };
+
+        let header = Ospfv3LsaHeader {
+            ls_age: 0,
+            ls_type: OSPFV3_AS_EXTERNAL_LSA_TYPE,
+            link_state_id,
+            advertising_router: self.router_id,
+            ls_seq_number: 0x8000_0001,
+            ls_checksum: 0,
+            length: 0,
+        };
+        let mut lsa = ospf_packet::Ospfv3Lsa {
+            h: header,
+            body: Ospfv3LsBody::AsExternal(body),
+            raw: None,
+        };
+
+        let key: super::lsdb::OspfLsaKey =
+            (OSPFV3_AS_EXTERNAL_LSA_TYPE, link_state_id, self.router_id);
+        if let Some(existing) = self.lsdb_as.lookup_by_raw_key(key) {
+            lsa.h.ls_seq_number = seq_max(
+                lsa.h.ls_seq_number,
+                existing.h.ls_seq_number.saturating_add(1),
+            );
+        }
+        lsa.update();
+
+        let flood_lsa = lsa.clone();
+        self.lsdb_as.install_originated(lsa, &self.tx, None);
+        self.flood_lsa_through_as_v3(&flood_lsa, None);
+    }
+
+    /// Flush a self-originated v3 AS-External LSA keyed by the
+    /// prefix-derived ls-id and reflood the MaxAge copy AS-wide.
+    fn as_external_lsa_flush_for_prefix_v3(&mut self, prefix: ipnet::Ipv6Net) {
+        use ospf_packet::OSPFV3_AS_EXTERNAL_LSA_TYPE;
+        let link_state_id = nssa_v3_ls_id(&prefix);
+        let key: super::lsdb::OspfLsaKey =
+            (OSPFV3_AS_EXTERNAL_LSA_TYPE, link_state_id, self.router_id);
+        let flushed = self.lsdb_as.flush_lsa_by_raw_key(key, &self.tx, None);
+        if let Some(lsa) = flushed {
+            self.flood_lsa_through_as_v3(&lsa, None);
+        }
+    }
+
+    /// v3 sibling of `as_external_redist_bgp_resync`: rebuild this
+    /// instance's self-originated AS-External (Type-5) LSAs for the cached
+    /// BGP routes (`redist_v6` entries with `rtype == RibType::Bgp`),
+    /// diffing against `redist_bgp_originated_v6`. In a per-VRF OSPFv3
+    /// instance these are the VPNv6 routes BGP imported into the VRF —
+    /// injecting them into the CE-facing OSPFv3 is the L3VPN PE-CE down
+    /// direction.
+    pub fn as_external_redist_bgp_resync_v3(&mut self) {
+        use crate::rib::RibType;
+
+        let entry = self.redist_bgp;
+        let prev_originated = self.redist_bgp_originated_v6.clone();
+
+        let desired: BTreeSet<ipnet::Ipv6Net> = if entry.is_some() {
+            self.redist_v6
+                .iter()
+                .filter(|((rtype, _), _)| *rtype == RibType::Bgp)
+                .map(|((_, prefix), _)| *prefix)
+                .collect()
+        } else {
+            BTreeSet::new()
+        };
+
+        for prefix in prev_originated
+            .difference(&desired)
+            .copied()
+            .collect::<Vec<_>>()
+        {
+            self.as_external_lsa_flush_for_prefix_v3(prefix);
+            self.redist_bgp_originated_v6.remove(&prefix);
+        }
+
+        if let Some(redist_entry) = entry {
+            for prefix in &desired {
+                self.as_external_lsa_originate_for_prefix_v3(
+                    *prefix,
+                    redist_entry.metric,
+                    redist_entry.metric_type.is_type_2(),
+                );
+                self.redist_bgp_originated_v6.insert(*prefix);
+            }
+        }
+
+        // A v3 router that redistributes is an ASBR; refresh the
+        // Router-LSA so the E-bit reflects it.
+        self.router_lsa_originate();
     }
 
     /// v3 sibling of `nssa_redist_connected_resync`: rebuild this
