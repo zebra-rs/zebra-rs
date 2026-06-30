@@ -12804,6 +12804,64 @@ impl Bgp {
         }
     }
 
+    /// Re-stamp this VRF's originated controller Session-Transformed routes
+    /// (T1ST / T2ST) with the current `mup route-target export` set, then
+    /// re-advertise. The MUP counterpart of
+    /// [`super::inst::Bgp::retag_vrf_exports_v4`]: `build_mup_origination`
+    /// reads the export RTs from `rib_known_vrfs` at session-establish time,
+    /// so an ST route originated before its `VrfRouteTargets` lands — or
+    /// before a later `set vrf <name> mup route-target export` commit —
+    /// keeps stale (or empty) RTs until this runs. Only the Route-Target
+    /// ecoms (sub-type 0x02) are replaced; the MUP Extended Community (0x0c)
+    /// and the controller next-hop are preserved. Segment (DSD/ISD) routes
+    /// are refreshed separately by [`Self::reconcile_mup_segment`], whose
+    /// skip-check already compares the full ecom set.
+    pub(super) fn retag_mup_st_exports(&mut self, vrf: &str) {
+        let Some(rd) = self.vrfs.get(vrf).and_then(|c| c.rd) else {
+            return;
+        };
+        let export_rts = self
+            .rib_known_vrfs
+            .get(vrf)
+            .map(|k| k.mup_export_rts.clone())
+            .unwrap_or_default();
+        // Snapshot the originated ST rows (clone to release the `local_rib`
+        // borrow before re-advertising mutates it / `peers`).
+        let rows: Vec<(MupPrefix, BgpRib)> = self
+            .local_rib
+            .mup
+            .get(&rd)
+            .map(|t| {
+                t.cands
+                    .iter()
+                    .filter(|(p, _)| matches!(p, MupPrefix::T1st { .. } | MupPrefix::T2st { .. }))
+                    .filter_map(|(p, ribs)| {
+                        ribs.iter()
+                            .find(|r| r.typ == BgpRibType::Originated)
+                            .map(|r| (p.clone(), r.clone()))
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+        for (prefix, mut rib) in rows {
+            let mut attr = (*rib.attr).clone();
+            // Strip existing Route-Target ecoms (sub-type 0x02) so a genuine
+            // RT change replaces rather than accumulates; keep the MUP
+            // Extended Community and anything else.
+            if let Some(ref mut ecom) = attr.ecom {
+                ecom.0.retain(|v| v.low_type != 0x02);
+                if ecom.0.is_empty() {
+                    attr.ecom = None;
+                }
+            }
+            let tagged = super::inst::tag_attr_with_export_rts(attr, &export_rts);
+            rib.attr = self.attr_store.intern(tagged);
+            let _ = self.local_rib.update_mup(rd, prefix.clone(), rib);
+            let selected = self.local_rib.select_best_path_mup(&rd, &prefix);
+            self.mup_apply_selected(rd, prefix, selected);
+        }
+    }
+
     /// Correlate a session to the VRF `mup` configs and build one ST prefix +
     /// attributes per matching VRF. A single Network Instance can be bound by
     /// more than one VRF — e.g. an N3 VRF binds `route st1` and an N6 VRF
