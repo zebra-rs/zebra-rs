@@ -1,0 +1,22 @@
+# C1 — customer site 1. OSPFv3 to CE1 (area 0). The loopback
+# 2001:db8:c1::1/128 and the C-CE link are advertised as intra-area
+# prefixes (OSPFv3 has no instance-level redistribute-connected; enabling
+# the interfaces in the area is the idiomatic way to originate them).
+interface:
+- if-name: lo
+  ipv6:
+    address: 2001:db8:c1::1/128
+- if-name: ce1
+  ipv6:
+    address: 2001:db8:1c::1/64
+router:
+  ospfv3:
+    router-id: 10.0.1.1
+    area:
+    - area-id: 0.0.0.0
+      interface:
+      - if-name: lo
+        enable: true
+      - if-name: ce1
+        enable: true
+        network-type: point-to-point

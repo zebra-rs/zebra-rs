@@ -1750,6 +1750,11 @@ mod yang_load_tests {
             "set router ospf vrf vrf-cust redistribute bgp",
             "set router ospf vrf vrf-cust redistribute bgp metric 30",
             "set router ospf vrf vrf-cust redistribute connected",
+            "set router ospfv3 redistribute bgp",
+            "set router ospfv3 redistribute bgp metric 30",
+            "set router ospfv3 redistribute bgp metric-type type-1",
+            "set router ospfv3 vrf vrf-cust redistribute bgp",
+            "set router ospfv3 vrf vrf-cust redistribute bgp metric 30",
         ] {
             let (code, _comps, _state) = parse(cmd, entry.clone(), None, State::new());
             assert_eq!(

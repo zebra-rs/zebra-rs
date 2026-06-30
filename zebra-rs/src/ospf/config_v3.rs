@@ -66,6 +66,12 @@ impl Ospf<Ospfv3> {
                 "/area/redistribute/connected/metric-type",
                 config_ospfv3_area_redist_connected_metric_type,
             ),
+            ("/redistribute/bgp", config_ospfv3_redist_bgp),
+            ("/redistribute/bgp/metric", config_ospfv3_redist_bgp_metric),
+            (
+                "/redistribute/bgp/metric-type",
+                config_ospfv3_redist_bgp_metric_type,
+            ),
             ("/area/interface/enable", config_ospfv3_interface_enable),
             (
                 "/area/interface/bfd/enable",
@@ -452,11 +458,14 @@ fn config_ospfv3_area_nssa_translator_role(
 /// into NSSA Type-7 LSAs. Keyed by `(proto, afi, rtype)` — not per
 /// area — so multiple NSSA areas share one subscription.
 fn ospfv3_send_redist_connected(ospf: &Ospf<Ospfv3>, first_time: bool) {
-    use super::version::OspfVersion;
     use crate::rib::{Message as RibMsg, RedistAfi, RibType};
-    // Subscribe under the v3 proto ("ospfv3"); the RIB routes redist
-    // delivery by proto, and "ospf" would land on the v2 instance.
-    let proto = Ospfv3::PROTO.to_string();
+    // Subscribe under this instance's proto label, not the literal
+    // "ospfv3": a per-VRF v3 instance registers as "ospfv3:vrf:<name>",
+    // and the RIB routes redist delivery by the proto string. With the
+    // literal, a VRF child's subscription resolved to the default v3
+    // instance — so per-VRF redistribute never delivered. Same bug fixed
+    // for v2 (config.rs) and IS-IS.
+    let proto = ospf.proto_label.clone();
     let afi = RedistAfi::Ipv6;
     let rtype = RibType::Connected;
 
@@ -483,6 +492,88 @@ fn ospfv3_send_redist_connected(ospf: &Ospf<Ospfv3>, first_time: bool) {
         }
     };
     let _ = ospf.ctx.rib.send(msg);
+}
+
+/// Subscribe / unsubscribe this v3 instance's RIB redistribution for the
+/// IPv6 BGP source, gated on the instance-level `redistribute bgp` knob.
+/// Uses `proto_label` so a per-VRF instance receives only its VRF's BGP
+/// routes. v3 sibling of v2's `ospf_send_redist_bgp`.
+fn ospfv3_send_redist_bgp(ospf: &Ospf<Ospfv3>, first_time: bool) {
+    use crate::rib::{Message as RibMsg, RedistAfi, RibType};
+    let proto = ospf.proto_label.clone();
+    let afi = RedistAfi::Ipv6;
+    let rtype = RibType::Bgp;
+
+    let msg = if ospf.redist_bgp.is_none() {
+        RibMsg::RedistDel { proto, afi, rtype }
+    } else if first_time {
+        RibMsg::RedistAdd {
+            proto,
+            afi,
+            rtype,
+            subtypes: std::collections::BTreeSet::new(),
+        }
+    } else {
+        RibMsg::RedistUpdate {
+            proto,
+            afi,
+            rtype,
+            subtypes: std::collections::BTreeSet::new(),
+        }
+    };
+    let _ = ospf.ctx.rib.send(msg);
+}
+
+/// `/router/ospfv3/redistribute/bgp` — instance-level presence container.
+/// On Set: subscribe to the VRF's BGP routes and originate an AS-External
+/// (Type-5) LSA for each. On Delete: unsubscribe and flush them.
+fn config_ospfv3_redist_bgp(ospf: &mut Ospf<Ospfv3>, _args: Args, op: ConfigOp) -> Option<()> {
+    let first_time = ospf.redist_bgp.is_none();
+    if op.is_set() {
+        ospf.redist_bgp = Some(RedistEntry {
+            metric: RedistEntry::DEFAULT_METRIC,
+            ..Default::default()
+        });
+    } else {
+        ospf.redist_bgp = None;
+    }
+    ospfv3_send_redist_bgp(ospf, first_time && op.is_set());
+    ospf.as_external_redist_bgp_resync_v3();
+    Some(())
+}
+
+/// `/router/ospfv3/redistribute/bgp/metric`.
+fn config_ospfv3_redist_bgp_metric(
+    ospf: &mut Ospf<Ospfv3>,
+    mut args: Args,
+    op: ConfigOp,
+) -> Option<()> {
+    let metric = if op.is_set() {
+        args.u32()?
+    } else {
+        RedistEntry::DEFAULT_METRIC
+    };
+    ospf.redist_bgp.get_or_insert_with(Default::default).metric = metric;
+    ospf.as_external_redist_bgp_resync_v3();
+    Some(())
+}
+
+/// `/router/ospfv3/redistribute/bgp/metric-type`.
+fn config_ospfv3_redist_bgp_metric_type(
+    ospf: &mut Ospf<Ospfv3>,
+    mut args: Args,
+    op: ConfigOp,
+) -> Option<()> {
+    let mtype = if op.is_set() {
+        ExternalMetricType::from_yang(&args.string()?)?
+    } else {
+        ExternalMetricType::default()
+    };
+    ospf.redist_bgp
+        .get_or_insert_with(Default::default)
+        .metric_type = mtype;
+    ospf.as_external_redist_bgp_resync_v3();
+    Some(())
 }
 
 /// `/router/ospfv3/area/<id>/redistribute/connected` — presence

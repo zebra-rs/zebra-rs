@@ -1,0 +1,21 @@
+# CE1 — customer edge 1. Transit OSPFv3 router in area 0, peering with C1
+# and PE1 on its two point-to-point links.
+interface:
+- if-name: c1
+  ipv6:
+    address: 2001:db8:1c::2/64
+- if-name: pe1
+  ipv6:
+    address: 2001:db8:1e::1/64
+router:
+  ospfv3:
+    router-id: 10.1.0.5
+    area:
+    - area-id: 0.0.0.0
+      interface:
+      - if-name: c1
+        enable: true
+        network-type: point-to-point
+      - if-name: pe1
+        enable: true
+        network-type: point-to-point
