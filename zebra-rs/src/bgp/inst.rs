@@ -319,6 +319,28 @@ pub(crate) fn matching_import_vrfs_mup(
         .collect()
 }
 
+/// The set of per-VRF tasks a MUP best-path should be mirrored into: the
+/// RT-importing VRFs ([`matching_import_vrfs_mup`]) plus the originating
+/// VRF `origin_vrf` when set. The originating VRF (the one whose `rd`
+/// equals the route's RD) is included **regardless of route-targets** —
+/// a route is always shown in the VRF that originated it, even with no
+/// import/export configured, mirroring VPNv4/v6 where a VRF owns the
+/// routes it originates. The receive path passes `origin_vrf = None`
+/// (a peer-learned route has no local originating VRF).
+pub(crate) fn mup_dispatch_targets(
+    vrf_index: &BTreeMap<String, RibKnownVrf>,
+    ecom: &Option<bgp_packet::ExtCommunity>,
+    origin_vrf: Option<&str>,
+) -> Vec<String> {
+    let mut targets = matching_import_vrfs_mup(vrf_index, ecom);
+    if let Some(origin) = origin_vrf
+        && !targets.iter().any(|n| n == origin)
+    {
+        targets.push(origin.to_string());
+    }
+    targets
+}
+
 /// Extract the route-target set a route carries: every extended
 /// community with RT sub-type (`low_type == 0x02`), reinterpreted as a
 /// `RouteDistinguisher` (RT and RD share the on-wire 6-octet shape).
@@ -5506,7 +5528,7 @@ mod tests {
 
         use super::super::{
             RibKnownVrf, import_targets, import_targets_v6, matching_import_vrfs,
-            matching_import_vrfs_mup, matching_import_vrfs_v6,
+            matching_import_vrfs_mup, matching_import_vrfs_v6, mup_dispatch_targets,
         };
 
         fn rt(s: &str) -> RouteDistinguisher {
@@ -5678,6 +5700,62 @@ mod tests {
             let mut index = BTreeMap::new();
             index.insert("N3".to_string(), vrf_with_mup_imports(&["65501:10"]));
             assert!(matching_import_vrfs_mup(&index, &None).is_empty());
+        }
+
+        #[test]
+        fn mup_dispatch_includes_origin_vrf_without_rt() {
+            // A locally-originated MUP route whose VRF has NO matching
+            // import RT (and the route carries no RTs at all) is still
+            // mirrored into its originating VRF, so `show bgp vrf <name>
+            // mup` shows it with no import/export configured.
+            let mut index = BTreeMap::new();
+            index.insert("N6".to_string(), vrf_with_mup_imports(&[]));
+            assert_eq!(
+                mup_dispatch_targets(&index, &None, Some("N6")),
+                vec!["N6".to_string()]
+            );
+        }
+
+        #[test]
+        fn mup_dispatch_origin_not_duplicated_when_rt_also_matches() {
+            // When the originating VRF also imports the route's own RT, it
+            // is a target exactly once (not via both the RT match and the
+            // RD origin).
+            let mut index = BTreeMap::new();
+            index.insert("N6".to_string(), vrf_with_mup_imports(&["65501:10"]));
+            let ecom = Some(ExtCommunity::from([rt_extcom("65501:10")]));
+            assert_eq!(
+                mup_dispatch_targets(&index, &ecom, Some("N6")),
+                vec!["N6".to_string()]
+            );
+        }
+
+        #[test]
+        fn mup_dispatch_origin_plus_cross_vrf_rt_import() {
+            // The #1681 cross-VRF case: N6 originates a route (RD origin),
+            // and a sibling N3 imports the route's RT. Both are targets —
+            // N6 by RD origin, N3 by RT import.
+            let mut index = BTreeMap::new();
+            index.insert("N3".to_string(), vrf_with_mup_imports(&["65501:10"]));
+            index.insert("N6".to_string(), vrf_with_mup_imports(&[]));
+            let ecom = Some(ExtCommunity::from([rt_extcom("65501:10")]));
+            let mut got = mup_dispatch_targets(&index, &ecom, Some("N6"));
+            got.sort();
+            assert_eq!(got, vec!["N3".to_string(), "N6".to_string()]);
+        }
+
+        #[test]
+        fn mup_dispatch_no_origin_is_rt_only() {
+            // The receive path passes `origin = None` → pure RT import,
+            // identical to `matching_import_vrfs_mup`.
+            let mut index = BTreeMap::new();
+            index.insert("N3".to_string(), vrf_with_mup_imports(&["65501:10"]));
+            index.insert("N6".to_string(), vrf_with_mup_imports(&[]));
+            let ecom = Some(ExtCommunity::from([rt_extcom("65501:10")]));
+            assert_eq!(
+                mup_dispatch_targets(&index, &ecom, None),
+                vec!["N3".to_string()]
+            );
         }
 
         #[test]
