@@ -286,6 +286,14 @@ pub struct Ospf<V: OspfVersion = Ospfv2> {
     /// Prefixes of Type-5 LSAs we self-originated from instance-level
     /// `redistribute connected`. Flushed when the knob is removed.
     pub redist_connected_originated: BTreeSet<Ipv4Net>,
+    /// Instance-level `redistribute bgp` — originates Type-5 AS-External
+    /// LSAs (FA=0) for every BGP route from `redist_v4`. In a per-VRF
+    /// OSPF instance this injects the VPNv4 routes BGP imported into the
+    /// VRF into the CE-facing OSPF (the L3VPN PE-CE down direction).
+    pub redist_bgp: Option<crate::ospf::area::RedistEntry>,
+    /// Prefixes of Type-5 LSAs we self-originated from instance-level
+    /// `redistribute bgp`. Flushed when the knob is removed.
+    pub redist_bgp_originated: BTreeSet<Ipv4Net>,
     /// Staged Flexible Algorithm definitions for this instance
     /// (`/router/ospf{,v3}/flex-algo`, RFC 9350). Shared staging engine
     /// keyed by the version's `FLEX_ALGO_PREFIX`; origination from the
@@ -1219,6 +1227,8 @@ impl Ospf<Ospfv2> {
             redist_v6: BTreeMap::new(),
             redist_connected: None,
             redist_connected_originated: BTreeSet::new(),
+            redist_bgp: None,
+            redist_bgp_originated: BTreeSet::new(),
             flex_algo: crate::flex_algo::FlexAlgoConfig::new(Ospfv2::FLEX_ALGO_PREFIX),
             affinity_map: crate::flex_algo::AffinityMap::new(),
             srlg_config: crate::flex_algo::SrlgGroupBuilder::new(),
@@ -2488,6 +2498,52 @@ impl Ospf<Ospfv2> {
         self.router_lsa_originate();
     }
 
+    /// `redistribute bgp` sibling of
+    /// [`Self::as_external_redist_connected_resync`]: rebuild this
+    /// instance's self-originated Type-5 AS-External LSAs for the cached
+    /// BGP routes (`redist_v4` entries with `rtype == RibType::Bgp`),
+    /// diffing against `redist_bgp_originated`. In a per-VRF OSPF instance
+    /// these are the VPNv4 routes BGP imported into the VRF — injecting
+    /// them into the CE-facing OSPF is the L3VPN PE-CE down direction.
+    pub fn as_external_redist_bgp_resync(&mut self) {
+        use crate::rib::RibType;
+
+        let entry = self.redist_bgp;
+        let prev_originated = self.redist_bgp_originated.clone();
+
+        let desired: BTreeSet<Ipv4Net> = if entry.is_some() {
+            self.redist_v4
+                .iter()
+                .filter(|((rtype, _), _)| *rtype == RibType::Bgp)
+                .map(|((_, prefix), _)| *prefix)
+                .collect()
+        } else {
+            BTreeSet::new()
+        };
+
+        for prefix in prev_originated
+            .difference(&desired)
+            .copied()
+            .collect::<Vec<_>>()
+        {
+            self.as_external_lsa_flush_for_prefix(prefix);
+            self.redist_bgp_originated.remove(&prefix);
+        }
+
+        if let Some(redist_entry) = entry {
+            for prefix in &desired {
+                self.as_external_lsa_originate_for_prefix(
+                    *prefix,
+                    redist_entry.metric,
+                    redist_entry.metric_type.is_type_2(),
+                );
+                self.redist_bgp_originated.insert(*prefix);
+            }
+        }
+
+        self.router_lsa_originate();
+    }
+
     /// RFC 3101 §2.3 NSSA default-LSA origination. Thin wrapper
     /// around `nssa_lsa_originate_for_prefix` that gates on area
     /// type + `nssa_default_originate` knob and calls the generic
@@ -2896,6 +2952,7 @@ impl Ospf<Ospfv2> {
             self.nssa_redist_connected_resync(area_id);
         }
         self.as_external_redist_connected_resync();
+        self.as_external_redist_bgp_resync();
     }
 
     /// `RibRx::RouteDel` handler. Mirror of `route_redist_add`.
@@ -2911,6 +2968,7 @@ impl Ospf<Ospfv2> {
             self.nssa_redist_connected_resync(area_id);
         }
         self.as_external_redist_connected_resync();
+        self.as_external_redist_bgp_resync();
     }
 
     fn process_lsdb(&mut self, ev: LsdbEvent, area_id: Option<Ipv4Addr>, key: OspfLsaKey) {
@@ -5362,6 +5420,8 @@ impl Ospf<Ospfv3> {
             redist_v6: BTreeMap::new(),
             redist_connected: None,
             redist_connected_originated: BTreeSet::new(),
+            redist_bgp: None,
+            redist_bgp_originated: BTreeSet::new(),
             flex_algo: crate::flex_algo::FlexAlgoConfig::new(Ospfv3::FLEX_ALGO_PREFIX),
             affinity_map: crate::flex_algo::AffinityMap::new(),
             srlg_config: crate::flex_algo::SrlgGroupBuilder::new(),

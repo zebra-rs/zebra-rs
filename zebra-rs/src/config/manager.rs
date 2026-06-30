@@ -1724,6 +1724,42 @@ mod yang_load_tests {
         }
     }
 
+    /// Regression guard for OSPFv2 `redistribute bgp` (config.yang) at both
+    /// the instance level and the per-VRF instance level — the L3VPN PE-CE
+    /// down direction (PE injects VPNv4 routes into the CE-facing OSPF as
+    /// Type-5 AS-External LSAs). Pins the new paths so a broken container or
+    /// a stale callback registration is caught in the unit suite.
+    #[test]
+    fn ospf_redistribute_bgp_paths_parse() {
+        use crate::config::ExecCode;
+        use crate::config::parse::{State, parse};
+        use libyang::to_entry;
+
+        let mut yang = YangStore::new();
+        yang.add_path(concat!(env!("CARGO_MANIFEST_DIR"), "/yang"));
+        yang.read_with_resolve("configure")
+            .unwrap_or_else(|e| panic!("configure failed to load: {e:#}"));
+        yang.identity_resolve();
+        let module = yang.find_module("configure").unwrap();
+        let entry = to_entry(&yang, module);
+
+        for cmd in [
+            "set router ospf redistribute bgp",
+            "set router ospf redistribute bgp metric 30",
+            "set router ospf redistribute bgp metric-type type-1",
+            "set router ospf vrf vrf-cust redistribute bgp",
+            "set router ospf vrf vrf-cust redistribute bgp metric 30",
+            "set router ospf vrf vrf-cust redistribute connected",
+        ] {
+            let (code, _comps, _state) = parse(cmd, entry.clone(), None, State::new());
+            assert_eq!(
+                code,
+                ExecCode::Success,
+                "should parse as a settable path: {cmd}"
+            );
+        }
+    }
+
     /// Regression guard for the per-VRF MUP `route` list (zebra-bgp-vrf.yang).
     /// Both ST bindings now live under `afi-safi mup route {st1|st2}`
     /// (collapsed enum-keyed list): st1 (downlink / N6) and st2 (uplink /

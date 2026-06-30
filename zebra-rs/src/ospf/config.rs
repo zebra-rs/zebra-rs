@@ -77,6 +77,12 @@ impl Ospf {
         );
         // Instance-level `router ospf { redistribute connected ... }`.
         self.ospf_add("/redistribute/connected", config_ospf_redist_connected);
+        self.ospf_add("/redistribute/bgp", config_ospf_redist_bgp);
+        self.ospf_add("/redistribute/bgp/metric", config_ospf_redist_bgp_metric);
+        self.ospf_add(
+            "/redistribute/bgp/metric-type",
+            config_ospf_redist_bgp_metric_type,
+        );
         self.ospf_add(
             "/redistribute/connected/metric",
             config_ospf_redist_connected_metric,
@@ -487,7 +493,12 @@ fn config_ospf_area_nssa_translator_role(
 /// whether the subscription should exist at all.
 fn ospf_send_redist_connected(ospf: &Ospf, first_time: bool) {
     use crate::rib::{Message as RibMsg, RedistAfi, RibType};
-    let proto = "ospf".to_string();
+    // Use this instance's proto label, not the literal "ospf": a per-VRF
+    // instance registers as "ospf:vrf:<name>", and the RIB routes the
+    // redistribute subscription by the proto string in the message. With
+    // the literal, a VRF child's subscription resolved to the default
+    // instance — so per-VRF redistribute never delivered. See proto_label.
+    let proto = ospf.proto_label.clone();
     let afi = RedistAfi::Ipv4;
     let rtype = RibType::Connected;
 
@@ -515,6 +526,81 @@ fn ospf_send_redist_connected(ospf: &Ospf, first_time: bool) {
         }
     };
     let _ = ospf.ctx.rib.send(msg);
+}
+
+/// Subscribe / unsubscribe this instance's RIB redistribution for the
+/// IPv4 BGP source, gated on the instance-level `redistribute bgp` knob.
+/// Independent of the connected subscription (each `(afi, rtype)` row is
+/// its own subscription). Uses `proto_label` so a per-VRF instance
+/// receives only its VRF's BGP routes.
+fn ospf_send_redist_bgp(ospf: &Ospf, first_time: bool) {
+    use crate::rib::{Message as RibMsg, RedistAfi, RibType};
+    let proto = ospf.proto_label.clone();
+    let afi = RedistAfi::Ipv4;
+    let rtype = RibType::Bgp;
+
+    let msg = if ospf.redist_bgp.is_none() {
+        RibMsg::RedistDel { proto, afi, rtype }
+    } else if first_time {
+        RibMsg::RedistAdd {
+            proto,
+            afi,
+            rtype,
+            subtypes: std::collections::BTreeSet::new(),
+        }
+    } else {
+        RibMsg::RedistUpdate {
+            proto,
+            afi,
+            rtype,
+            subtypes: std::collections::BTreeSet::new(),
+        }
+    };
+    let _ = ospf.ctx.rib.send(msg);
+}
+
+/// `/router/ospf/redistribute/bgp` — instance-level presence container.
+/// On Set: subscribe to the VRF's BGP routes and originate a Type-5
+/// AS-External LSA for each. On Delete: unsubscribe and flush them.
+fn config_ospf_redist_bgp(ospf: &mut Ospf, _args: Args, op: ConfigOp) -> Option<()> {
+    let first_time = ospf.redist_bgp.is_none();
+    if op.is_set() {
+        ospf.redist_bgp = Some(RedistEntry {
+            metric: RedistEntry::DEFAULT_METRIC,
+            ..Default::default()
+        });
+    } else {
+        ospf.redist_bgp = None;
+    }
+    ospf_send_redist_bgp(ospf, first_time && op.is_set());
+    ospf.as_external_redist_bgp_resync();
+    Some(())
+}
+
+/// `/router/ospf/redistribute/bgp/metric`.
+fn config_ospf_redist_bgp_metric(ospf: &mut Ospf, mut args: Args, op: ConfigOp) -> Option<()> {
+    let metric = if op.is_set() {
+        args.u32()?
+    } else {
+        RedistEntry::DEFAULT_METRIC
+    };
+    ospf.redist_bgp.get_or_insert_with(Default::default).metric = metric;
+    ospf.as_external_redist_bgp_resync();
+    Some(())
+}
+
+/// `/router/ospf/redistribute/bgp/metric-type`.
+fn config_ospf_redist_bgp_metric_type(ospf: &mut Ospf, mut args: Args, op: ConfigOp) -> Option<()> {
+    let mtype = if op.is_set() {
+        ExternalMetricType::from_yang(&args.string()?)?
+    } else {
+        ExternalMetricType::default()
+    };
+    ospf.redist_bgp
+        .get_or_insert_with(Default::default)
+        .metric_type = mtype;
+    ospf.as_external_redist_bgp_resync();
+    Some(())
 }
 
 /// `/router/ospf/area/<id>/redistribute/connected` — presence
