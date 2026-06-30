@@ -121,7 +121,7 @@ pub enum Message {
     /// controller (`src/mup-c/`), which the BGP task spawns when
     /// `router bgp mup-c enable true` is committed and hands
     /// `self.tx`. Recorded in [`Bgp::mup_c_view`] for `show bgp
-    /// mup mup-c`; MUP route origination from these lands in a
+    /// mup-c`; MUP route origination from these lands in a
     /// follow-up. Mirrors the IS-IS `BgpLs` producer seam.
     MupC(crate::mup_c::inst::MupCEvent),
     /// `router bgp port <0-65535>` changed: close the BGP listen
@@ -2068,7 +2068,7 @@ impl Bgp {
             Message::MupC(ev) => {
                 // A session/association change from the in-process MUP
                 // controller. Drive MUP route origination, then record it
-                // in the read-only view `show bgp mup mup-c`
+                // in the read-only view `show bgp mup-c`
                 // renders.
                 use crate::mup_c::inst::MupCEvent;
                 match &ev {

@@ -57,14 +57,14 @@ Feature: BGP MUP export route-target applies dynamically to an originated ST rou
     Then BGP session in "z1" to "192.168.0.2" should be "Established"
     And BGP session in "z2" to "192.168.0.1" should be "Established"
     And show command "show bgp neighbor 192.168.0.2" in namespace "z1" should contain "IPv4 MUP: advertised and received"
-    And show command "show bgp mup mup-c" in namespace "z1" should contain "PFCP listen : 192.168.0.1:8805"
+    And show command "show bgp mup-c" in namespace "z1" should contain "PFCP listen : 192.168.0.1:8805"
 
   Scenario: Originate an ST2 with no export RT, then apply the export RT dynamically
     Given the test topology exists
     When I execute "pfcp-inject --target 192.168.0.1 --port 8805 --ue-ipv4 192.0.2.5 --teid 0x12345678 --endpoint 10.0.0.1 --network-instance core" in namespace "z1"
     # PFCP ingest learned the session and z1 originated the ST2 — carrying
     # the Direct segment id (mup:1:2) but NO route-target yet.
-    Then show command "show bgp mup mup-c session" in namespace "z1" should eventually contain "192.0.2.5"
+    Then show command "show bgp mup-c session" in namespace "z1" should eventually contain "192.0.2.5"
     And show command "show bgp mup" in namespace "z1" should eventually contain "[ST2][65000:100][ep=10.0.0.1][teid=305419896]"
     And show command "show bgp mup" in namespace "z1" should not contain "rt:100:10"
     # z2 receives the route into its global MUP Loc-RIB (RT-independent)...

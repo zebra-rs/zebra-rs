@@ -416,17 +416,17 @@ module exec {
           ext:help "Summary of MUP-enabled neighbors";
           type empty;
         }
-        container mup-c {
-          ext:help "MUP Controller (MUP-C) status";
-          presence "MUP Controller (MUP-C) status";
-          leaf session {
-            ext:help "Learned PFCP sessions";
-            type empty;
-          }
-          leaf association {
-            ext:help "PFCP associations";
-            type empty;
-          }
+      }
+      container mup-c {
+        ext:help "MUP Controller (MUP-C) status";
+        presence "MUP Controller (MUP-C) status";
+        leaf session {
+          ext:help "Learned PFCP sessions";
+          type empty;
+        }
+        leaf association {
+          ext:help "PFCP associations";
+          type empty;
         }
       }
       list update-group {

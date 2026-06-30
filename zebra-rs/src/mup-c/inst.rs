@@ -70,7 +70,7 @@ pub enum MupCEvent {
 }
 
 /// Read-only controller snapshot held by the BGP task, fed by
-/// [`MupCEvent`]. Renders `show bgp mup mup-c [session |
+/// [`MupCEvent`]. Renders `show bgp mup-c [session |
 /// association]`.
 #[derive(Debug, Default)]
 pub struct MupCView {

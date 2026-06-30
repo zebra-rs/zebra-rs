@@ -361,18 +361,18 @@ these routes so the per-VRF view renders them:
        rt:65000:200
 ```
 
-`show bgp mup mup-c` shows the controller status, and the
+`show bgp mup-c` shows the controller status, and the
 `session` / `association` sub-commands show the learned PFCP state:
 
 ```
-# show bgp mup mup-c
+# show bgp mup-c
 MUP controller (MUP-C)
   Admin state : enabled
   PFCP listen : 192.168.0.1:8805
   Associations: 1
   Sessions    : 1
 
-# show bgp mup mup-c session
+# show bgp mup-c session
 SEID       UE address     TEID         Endpoint     QFI   Network-Instance
 1          192.0.2.5      0x12345678   10.0.0.1     -     access
 ```
@@ -397,7 +397,7 @@ pfcp-inject --target 192.168.0.1 --port 8805 \
             --endpoint 10.0.0.1 --network-instance access
 ```
 
-After it runs, the session appears under `show bgp mup mup-c
+After it runs, the session appears under `show bgp mup-c
 session` and the controller's ST route appears in `show bgp
 mup` on both the controller and its peers.
 

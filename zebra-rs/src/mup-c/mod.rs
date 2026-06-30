@@ -17,7 +17,7 @@
 //! instance receives the global BGP channel. The controller reports
 //! neutral session/association events back over that channel
 //! ([`inst::MupCEvent`]); the BGP task records them for
-//! `show bgp mup mup-c` (this slice) and originates MUP routes
+//! `show bgp mup-c` (this slice) and originates MUP routes
 //! from them (follow-up).
 //!
 //! Module layout: [`inst`] owns the task + the BGP-facing types,
