@@ -1,0 +1,39 @@
+# CE1 — customer edge 1 (AS 65001). OSPFv3 toward C1, IPv6 eBGP toward
+# PE1, mutual redistribution: redistribute ospf -> BGP (up), redistribute
+# bgp -> OSPFv3 AS-External (down).
+interface:
+- if-name: c1
+  ipv6:
+    address: 2001:db8:1c::2/64
+- if-name: pe1
+  ipv6:
+    address: 2001:db8:1e::1/64
+router:
+  ospfv3:
+    router-id: 10.1.0.5
+    redistribute:
+      bgp:
+        metric: 20
+    area:
+    - area-id: 0.0.0.0
+      interface:
+      - if-name: c1
+        enable: true
+        network-type: point-to-point
+  bgp:
+    global:
+      as: 65001
+      router-id: 10.1.0.5
+    neighbor:
+    - remote-address: 2001:db8:1e::2
+      remote-as: 65000
+      timers: {connect-retry-time: 3}
+      enabled: true
+      afi-safi:
+      - name: ipv6
+        enabled: true
+    afi-safi:
+    - name: ipv6
+      redistribute:
+        ospf: {}
+        connected: {}

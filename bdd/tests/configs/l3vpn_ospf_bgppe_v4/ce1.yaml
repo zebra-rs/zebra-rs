@@ -1,0 +1,43 @@
+# CE1 — customer edge 1 (AS 65001). Second L3VPN variant: OSPFv2 toward
+# C1, eBGP toward PE1, with mutual redistribution on the CE:
+#   - up:   router bgp ... redistribute ospf  -> C1's OSPF-learned routes
+#           are advertised to PE1 over eBGP.
+#   - down: router ospf ... redistribute bgp  -> the routes PE1 sends over
+#           eBGP (remote customers) are injected into the C-facing OSPF as
+#           Type-5 AS-External LSAs.
+interface:
+- if-name: c1
+  ipv4:
+    address: 10.1.0.2/30
+- if-name: pe1
+  ipv4:
+    address: 10.1.0.5/30
+router:
+  ospf:
+    router-id: 10.1.0.5
+    redistribute:
+      bgp:
+        metric: 20
+    area:
+    - area-id: 0.0.0.0
+      interface:
+      - if-name: c1
+        enable: true
+        network-type: point-to-point
+  bgp:
+    global:
+      as: 65001
+      router-id: 10.1.0.5
+    neighbor:
+    - remote-address: 10.1.0.6
+      remote-as: 65000
+      timers: {connect-retry-time: 3}
+      enabled: true
+      afi-safi:
+      - name: ipv4
+        enabled: true
+    afi-safi:
+    - name: ipv4
+      redistribute:
+        ospf: {}
+        connected: {}
