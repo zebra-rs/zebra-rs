@@ -155,6 +155,12 @@ pub struct BgpVrf {
     /// routes that session created. A VRF binds one direction, so this is
     /// normally one prefix per SEID.
     pub mup_originated: std::collections::BTreeMap<u64, Vec<bgp_packet::MupPrefix>>,
+    /// VRF-first MUP segment tracking: the RD-free DSD/ISD prefix this VRF
+    /// currently has exported (`MupSegmentOriginate`), or `None`. A VRF has at
+    /// most one segment route, so a re-originate under a different NLRI key
+    /// (direct↔interwork switch / router-id change) withdraws this prior one
+    /// first.
+    pub mup_segment_prefix: Option<bgp_packet::MupPrefix>,
 }
 
 /// Sender side of the per-VRF inbound channel — handed back to
@@ -492,6 +498,38 @@ pub fn withdraw_mup_session(
     }
 }
 
+/// Tell one VRF task to originate (or refresh) its MUP Segment Discovery route
+/// with the resolved config (VRF-first segment origination). The global gated
+/// on the SID/locator/kernel-VRF/RD being ready; the VRF builds the RD-free
+/// NLRI and exports it back via `MupExport`. No-op if the VRF task is gone.
+pub fn dispatch_mup_segment(
+    vrf_registry: &std::collections::BTreeMap<String, super::spawn::BgpVrfHandle>,
+    vrf: &str,
+    mode: super::super::vrf_config::MupSegmentMode,
+    ext_comm: Option<bgp_packet::RouteDistinguisher>,
+    interwork_prefix: Option<ipnet::IpNet>,
+) {
+    if let Some(handle) = vrf_registry.get(vrf) {
+        let _ = handle.inbox.send(BgpVrfMsg::MupSegmentOriginate {
+            mode,
+            ext_comm,
+            interwork_prefix,
+        });
+    }
+}
+
+/// Tell one VRF task to withdraw its MUP Segment Discovery route (a SID /
+/// locator / kernel-VRF / config precondition dropped). No-op if the VRF task
+/// is gone.
+pub fn withdraw_mup_segment(
+    vrf_registry: &std::collections::BTreeMap<String, super::spawn::BgpVrfHandle>,
+    vrf: &str,
+) {
+    if let Some(handle) = vrf_registry.get(vrf) {
+        let _ = handle.inbox.send(BgpVrfMsg::MupSegmentWithdraw);
+    }
+}
+
 /// Per-rtype `remote_id` discriminator for redistribute-originated VRF
 /// rows (matches the global `Bgp::redist_remote_id`), so connected /
 /// static / IGP sources — and a `network` row at id 0 — coexist for
@@ -563,6 +601,7 @@ impl BgpVrf {
             color_policy: Default::default(),
             flex_algo_srv6_routes: Default::default(),
             mup_originated: std::collections::BTreeMap::new(),
+            mup_segment_prefix: None,
         };
         (vrf, inbox_tx)
     }
@@ -1628,6 +1667,46 @@ impl BgpVrf {
             }
             BgpVrfMsg::MupWithdrawOriginate { seid } => {
                 self.withdraw_mup_originate(seid);
+            }
+            // VRF-first MUP segment origination: build the RD-free DSD/ISD NLRI
+            // (DSD = this VRF's router-id, ISD = the interwork prefix) and
+            // export it. The global gated on SID/locator/kernel-VRF/RD before
+            // sending this; the global export handler stamps the RD,
+            // export-RTs, locator next-hop and End.DT46 Prefix-SID. If the NLRI
+            // key changed from a prior segment (direct↔interwork / router-id),
+            // withdraw the old one first.
+            BgpVrfMsg::MupSegmentOriginate {
+                mode,
+                ext_comm,
+                interwork_prefix,
+            } => {
+                let prefix =
+                    super::super::route::mup_segment_nlri(mode, self.router_id, interwork_prefix);
+                if let Some(old) = self.mup_segment_prefix.take()
+                    && Some(&old) != prefix.as_ref()
+                {
+                    let _ = self.global_tx.send(BgpGlobalMsg::WithdrawMupExport {
+                        vrf: self.name.clone(),
+                        prefix: old,
+                    });
+                }
+                if let Some(prefix) = prefix {
+                    let attr = super::super::route::build_mup_segment_attr(mode, ext_comm);
+                    self.mup_segment_prefix = Some(prefix.clone());
+                    let _ = self.global_tx.send(BgpGlobalMsg::MupExport {
+                        vrf: self.name.clone(),
+                        prefix,
+                        attr,
+                    });
+                }
+            }
+            BgpVrfMsg::MupSegmentWithdraw => {
+                if let Some(prefix) = self.mup_segment_prefix.take() {
+                    let _ = self.global_tx.send(BgpGlobalMsg::WithdrawMupExport {
+                        vrf: self.name.clone(),
+                        prefix,
+                    });
+                }
             }
             BgpVrfMsg::Shutdown => unreachable!("handled in event_loop"),
         }

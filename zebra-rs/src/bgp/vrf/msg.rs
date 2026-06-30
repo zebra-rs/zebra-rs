@@ -102,6 +102,27 @@ pub enum BgpVrfMsg {
     /// idempotent for a VRF that never originated for this session.
     MupWithdrawOriginate { seid: u64 },
 
+    /// Originate (or refresh) this VRF's MUP Segment Discovery route — a DSD
+    /// (`Direct`) or ISD (`Interwork`) (VRF-first segment origination). The
+    /// global task gates on the SID / locator / kernel-VRF / RD being ready
+    /// and sends the resolved segment config; the per-VRF task builds the
+    /// RD-free segment NLRI (DSD = its router-id, ISD = `interwork_prefix`)
+    /// and emits [`BgpGlobalMsg::MupExport`]. The global export handler stamps
+    /// the RD, export route-targets, locator next-hop and End.DT46
+    /// Prefix-SID. A VRF has at most one segment, so a new `MupSegmentOriginate`
+    /// replaces a prior one (the per-VRF task withdraws the old NLRI if the
+    /// key changed — a direct↔interwork switch or router-id change).
+    MupSegmentOriginate {
+        mode: crate::bgp::vrf_config::MupSegmentMode,
+        ext_comm: Option<RouteDistinguisher>,
+        interwork_prefix: Option<ipnet::IpNet>,
+    },
+
+    /// Withdraw this VRF's MUP Segment Discovery route (a SID / locator /
+    /// kernel-VRF / config precondition dropped). Idempotent for a VRF that
+    /// never originated a segment.
+    MupSegmentWithdraw,
+
     /// VPNv6 counterpart of [`Self::ImportV4`] — a VPNv6 route whose
     /// RT list intersects this VRF's `import_rts_v6`; inserted into
     /// the VRF's IPv6 unicast Loc-RIB and advertised to CE peers.

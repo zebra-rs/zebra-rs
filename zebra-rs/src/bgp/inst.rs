@@ -697,24 +697,15 @@ pub struct Bgp {
     /// commit; consumed (and cleared) at `CommitEnd` to decide whether to
     /// reconfigure a running controller.
     pub mup_c_dirty: bool,
-    /// Config-driven MUP Segment Discovery routes originated per VRF — a DSD
-    /// (Direct, type 2, `afi-safi mup segment direct`) or an ISD (Interwork,
-    /// type 1, `afi-safi mup segment interwork prefix <p>`); a VRF has at
-    /// most one. Keyed by VRF name → `(originated NLRI, End.DT46 SID,
-    /// ext-communities)`. The SID and the ext-community set (export RTs + the
-    /// Direct-segment MUP ext-comm, DSD only) are tracked alongside the
-    /// prefix so a locator-driven SID change *or* a later RT / `mup-ext-comm`
-    /// change re-advertises even though the NLRI key is stable. See
-    /// [`Bgp::reconcile_mup_segment`].
-    pub mup_segment_originated: BTreeMap<
-        String,
-        (
-            bgp_packet::RouteDistinguisher,
-            bgp_packet::MupPrefix,
-            std::net::Ipv6Addr,
-            Option<bgp_packet::ExtCommunity>,
-        ),
-    >,
+    /// VRF-first MUP Segment Discovery change-detection: keyed by VRF name →
+    /// the last resolved segment inputs [`Bgp::reconcile_mup_segment`]
+    /// dispatched to that VRF (RD, NLRI, End.DT46 SID, export RTs, and the
+    /// Direct-segment ext-comm). The reconcile only re-dispatches a
+    /// `MupSegmentOriginate` when this key changes, so a locator-driven SID
+    /// change *or* a later RT / router-id / `mup-ext-comm` change refreshes the
+    /// route while an unrelated commit doesn't churn a re-advertise. A VRF has
+    /// at most one segment (its `segment` is direct XOR interwork).
+    pub mup_segment_desired: BTreeMap<String, super::route::MupSegmentKey>,
     /// Local bridge FDB shadow keyed by `(vni, mac)`. Populated from
     /// every `RibRx::FdbAdd`, removed on `RibRx::FdbDel`. We need
     /// durable state (not just one-shot event handling) because the
@@ -1159,7 +1150,7 @@ impl Bgp {
             mup_c: None,
             mup_c_view: crate::mup_c::inst::MupCView::default(),
             mup_c_dirty: false,
-            mup_segment_originated: BTreeMap::new(),
+            mup_segment_desired: BTreeMap::new(),
             local_fdb: BTreeMap::new(),
             local_vxlans: BTreeMap::new(),
             local_smet: BTreeMap::new(),
