@@ -26,8 +26,9 @@ pub use sid::{BgpSidPool, Srv6VrfSid};
 // inside `vrf::spawn` only.
 pub use inst::{
     VrfExporter, VrfImportDispatcher, dispatch_import_v4, dispatch_import_v6, dispatch_mup,
-    dispatch_withdraw_import_v4, dispatch_withdraw_import_v6, vrf_emit_export, vrf_emit_export_v6,
-    vrf_emit_withdraw, vrf_emit_withdraw_v6,
+    dispatch_mup_session, dispatch_withdraw_import_v4, dispatch_withdraw_import_v6,
+    vrf_emit_export, vrf_emit_export_v6, vrf_emit_withdraw, vrf_emit_withdraw_v6,
+    withdraw_mup_session,
 };
 pub use msg::BgpGlobalMsg;
 pub use spawn::{BgpVrfHandle, compute_vrf_diff, despawn_bgp_vrf, spawn_bgp_vrf};

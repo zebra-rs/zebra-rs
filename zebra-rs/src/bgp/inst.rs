@@ -697,15 +697,6 @@ pub struct Bgp {
     /// commit; consumed (and cleared) at `CommitEnd` to decide whether to
     /// reconfigure a running controller.
     pub mup_c_dirty: bool,
-    /// MUP routes the controller has originated, keyed by session SEID →
-    /// the originated NLRIs. One session can map to several ST routes (an
-    /// st1 and an st2 VRF binding the same Network Instance), so a Vec of
-    /// prefixes is retained — a Session Deletion / Modification withdraws
-    /// the exact prior routes. No SRv6 SID is allocated for these (the PE
-    /// derives forwarding from its ISD/DSD routes), so only the prefixes
-    /// are retained.
-    pub mup_c_originated:
-        BTreeMap<u64, Vec<(bgp_packet::RouteDistinguisher, bgp_packet::MupPrefix)>>,
     /// Config-driven MUP Segment Discovery routes originated per VRF — a DSD
     /// (Direct, type 2, `afi-safi mup segment direct`) or an ISD (Interwork,
     /// type 1, `afi-safi mup segment interwork prefix <p>`); a VRF has at
@@ -1168,7 +1159,6 @@ impl Bgp {
             mup_c: None,
             mup_c_view: crate::mup_c::inst::MupCView::default(),
             mup_c_dirty: false,
-            mup_c_originated: BTreeMap::new(),
             mup_segment_originated: BTreeMap::new(),
             local_fdb: BTreeMap::new(),
             local_vxlans: BTreeMap::new(),
@@ -2091,8 +2081,17 @@ impl Bgp {
                 // renders.
                 use crate::mup_c::inst::MupCEvent;
                 match &ev {
-                    MupCEvent::SessionUp(session) => self.originate_mup_route(session),
-                    MupCEvent::SessionDown { seid } => self.withdraw_mup_route(*seid),
+                    // VRF-first origination: dispatch the session to the
+                    // matching VRF task(s), which build the RD-free ST NLRI and
+                    // export it back. A Modification (SessionUp for an existing
+                    // seid) is handled per-VRF: the `MupOriginate` handler
+                    // withdraws the session's prior exports before re-building.
+                    MupCEvent::SessionUp(session) => {
+                        super::vrf::dispatch_mup_session(&self.vrfs, &self.vrf_registry, session)
+                    }
+                    MupCEvent::SessionDown { seid } => {
+                        super::vrf::withdraw_mup_session(&self.vrf_registry, *seid)
+                    }
                     MupCEvent::AssocDown { peer } => {
                         // The peer's sessions are about to drop from the
                         // view; withdraw their routes first.
@@ -2104,7 +2103,7 @@ impl Bgp {
                             .map(|(seid, _)| *seid)
                             .collect();
                         for seid in seids {
-                            self.withdraw_mup_route(seid);
+                            super::vrf::withdraw_mup_session(&self.vrf_registry, seid);
                         }
                     }
                     MupCEvent::Listener { .. } | MupCEvent::AssocUp { .. } => {}
@@ -5119,6 +5118,15 @@ impl Bgp {
             }
             super::vrf::BgpGlobalMsg::RegisterPeer { vrf, addr } => {
                 peer_index_register(&mut self.peer_index, vrf, addr);
+            }
+            // VRF-first MUP origination: a per-VRF task built a controller ST
+            // route and exported it. Stamp the RD / export-RTs / controller
+            // next-hop and promote it into the SAFI-85 Loc-RIB + advertise.
+            super::vrf::BgpGlobalMsg::MupExport { vrf, prefix, attr } => {
+                self.mup_export(vrf, prefix, attr);
+            }
+            super::vrf::BgpGlobalMsg::WithdrawMupExport { vrf, prefix } => {
+                self.mup_withdraw_export(vrf, prefix);
             }
         }
     }

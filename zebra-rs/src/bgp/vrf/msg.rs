@@ -80,6 +80,28 @@ pub enum BgpVrfMsg {
         prefix: bgp_packet::MupPrefix,
     },
 
+    /// Originate a controller Session-Transformed (ST1/ST2) route in this
+    /// VRF (VRF-first MUP origination). The global task correlates a PFCP
+    /// session's Network Instance to the matching VRF(s) and forwards the
+    /// session here with the resolved `direction` (st1=Encapsulation /
+    /// st2=Decapsulation) and the optional st2 Direct-segment ext-comm. The
+    /// per-VRF task builds the **RD-free** ST NLRI and emits
+    /// [`BgpGlobalMsg::MupExport`]; the global export handler applies the RD,
+    /// export route-targets and controller next-hop. One session can fan out
+    /// to several VRFs (an st1 and an st2 VRF sharing the NI) — each gets its
+    /// own `MupOriginate` for its direction.
+    MupOriginate {
+        session: crate::mup_c::session::MupSession,
+        direction: crate::bgp::vrf_config::MupSrv6Direction,
+        ext_comm: Option<RouteDistinguisher>,
+    },
+
+    /// Withdraw every ST route this VRF originated for `seid` (PFCP Session
+    /// Deletion, association teardown, or the replace step of a
+    /// Modification). Broadcast to every VRF; the per-VRF removal is
+    /// idempotent for a VRF that never originated for this session.
+    MupWithdrawOriginate { seid: u64 },
+
     /// VPNv6 counterpart of [`Self::ImportV4`] — a VPNv6 route whose
     /// RT list intersects this VRF's `import_rts_v6`; inserted into
     /// the VRF's IPv6 unicast Loc-RIB and advertised to CE peers.
@@ -194,6 +216,27 @@ pub enum BgpGlobalMsg {
 
     /// Inverse of [`Self::ExportV6`].
     WithdrawExportV6 { vrf: String, prefix: Ipv6Net },
+
+    /// A controller ST route this VRF originated (VRF-first MUP), for the
+    /// global task to promote into the SAFI-85 Loc-RIB and advertise. The
+    /// VRF name lets the global side resolve the RD (from `Bgp::vrfs`), the
+    /// export route-targets (from `Bgp::rib_known_vrfs`) and the controller
+    /// next-hop (from `Bgp::mup_c_config`) — applied at this export boundary,
+    /// mirroring [`Self::Export`] for VPNv4. `prefix` is RD-free; `attr`
+    /// carries only route-specific extended communities (e.g. the st2
+    /// Direct-segment id), no RD / RT / next-hop.
+    MupExport {
+        vrf: String,
+        prefix: bgp_packet::MupPrefix,
+        attr: BgpAttr,
+    },
+
+    /// Inverse of [`Self::MupExport`]. The global instance removes the
+    /// originated ST route under this VRF's RD and re-runs best-path.
+    WithdrawMupExport {
+        vrf: String,
+        prefix: bgp_packet::MupPrefix,
+    },
 
     /// Register a peer IP with the global accept dispatcher so an
     /// inbound `:179` connect from that IP is handed to this VRF
