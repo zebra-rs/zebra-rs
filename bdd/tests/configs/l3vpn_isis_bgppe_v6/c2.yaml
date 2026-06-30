@@ -1,0 +1,25 @@
+# C2 — customer site 2. Mirror of C1: IS-IS L2 (IPv6) to CE2,
+# redistribute connected (loopback 2001:db8:c2::1/128 + C-CE link).
+interface:
+- if-name: lo
+  ipv6:
+    address: 2001:db8:c2::1/128
+- if-name: ce2
+  ipv6:
+    address: 2001:db8:2c::1/64
+router:
+  isis:
+    net: 49.0001.0000.0000.0021.00
+    hostname: c2
+    is-type: level-2-only
+    afi-safi:
+    - name: ipv6
+      redistribute:
+        connected: {}
+    interface:
+    - if-name: ce2
+      circuit-type: level-2-only
+      network-type: point-to-point
+      metric: 10
+      ipv6:
+        enable: true

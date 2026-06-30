@@ -1,0 +1,33 @@
+# P — provider core transit (runs no BGP, no SRv6). Pure IS-IS L2 with
+# IPv6 enabled; learns the PE loopbacks (/128) and SRv6 locators (/48)
+# via IS-IS and natively forwards the SRv6-encapsulated transit traffic
+# between PE1 and PE2.
+interface:
+- if-name: lo
+  ipv6:
+    address: 2001:db8::2/128
+- if-name: pe1
+  ipv6:
+    address: 2001:db8:cafe:1::2/64
+- if-name: pe2
+  ipv6:
+    address: 2001:db8:cafe:2::1/64
+router:
+  isis:
+    net: 49.0000.0000.0000.0002.00
+    hostname: p
+    is-type: level-2-only
+    interface:
+    - if-name: lo
+      ipv6:
+        enable: true
+    - if-name: pe1
+      network-type: point-to-point
+      metric: 10
+      ipv6:
+        enable: true
+    - if-name: pe2
+      network-type: point-to-point
+      metric: 10
+      ipv6:
+        enable: true

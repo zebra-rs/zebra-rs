@@ -1,0 +1,39 @@
+# CE2 — customer edge 2 (AS 65002). Mirror of CE1: OSPFv2 toward C2,
+# eBGP toward PE2, mutual redistribution (redistribute ospf -> BGP up,
+# redistribute bgp -> OSPF down).
+interface:
+- if-name: c2
+  ipv4:
+    address: 10.2.0.2/30
+- if-name: pe2
+  ipv4:
+    address: 10.2.0.5/30
+router:
+  ospf:
+    router-id: 10.2.0.5
+    redistribute:
+      bgp:
+        metric: 20
+    area:
+    - area-id: 0.0.0.0
+      interface:
+      - if-name: c2
+        enable: true
+        network-type: point-to-point
+  bgp:
+    global:
+      as: 65002
+      router-id: 10.2.0.5
+    neighbor:
+    - remote-address: 10.2.0.6
+      remote-as: 65000
+      timers: {connect-retry-time: 3}
+      enabled: true
+      afi-safi:
+      - name: ipv4
+        enabled: true
+    afi-safi:
+    - name: ipv4
+      redistribute:
+        ospf: {}
+        connected: {}

@@ -1,0 +1,64 @@
+# PE1 — provider edge 1 (AS 65000). IS-IS L2 + SR-MPLS transport to PE2
+# via P (loopback Prefix-SID index 1 -> label 16001). iBGP VPNv4 to PE2
+# over loopbacks (rides the SR LSP). vrf-cust holds the eBGP PE-CE
+# session to CE1; CE-learned customer routes export to VPNv4 with
+# RD 65000:1 + RT 65000:100.
+vrf:
+- name: vrf-cust
+  ipv4:
+    route-target:
+      import:
+      - 65000:100
+      export:
+      - 65000:100
+interface:
+- if-name: lo
+  ipv4:
+    address: 1.1.1.1/32
+- if-name: p
+  ipv4:
+    address: 10.250.0.1/30
+- if-name: ce1
+  vrf: vrf-cust
+  ipv4:
+    address: 10.1.0.6/30
+router:
+  isis:
+    net: 49.0000.0000.0000.0001.00
+    hostname: pe1
+    is-type: level-2-only
+    segment-routing: mpls
+    te-router-id: 1.1.1.1
+    interface:
+    - if-name: lo
+      ipv4:
+        enable: true
+        prefix-sid:
+          index: 1
+    - if-name: p
+      network-type: point-to-point
+      metric: 10
+      ipv4:
+        enable: true
+  bgp:
+    global:
+      as: 65000
+      router-id: 1.1.1.1
+    neighbor:
+    - remote-address: 1.1.1.3
+      remote-as: 65000
+      timers: {connect-retry-time: 3}
+      update-source: 1.1.1.1
+      enabled: true
+      afi-safi:
+      - name: vpnv4
+        enabled: true
+    vrf:
+    - name: vrf-cust
+      rd: 65000:1
+      neighbor:
+      - remote-address: 10.1.0.5
+        remote-as: 65001
+        afi-safi:
+        - name: ipv4
+          enabled: true

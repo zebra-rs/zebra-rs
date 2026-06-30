@@ -1,0 +1,26 @@
+# C1 — customer site 1. IS-IS L2 to CE1; redistributes its connected
+# routes (loopback 10.0.1.1/32 + the C-CE link) into IS-IS, which reach
+# the PE through CE1.
+interface:
+- if-name: lo
+  ipv4:
+    address: 10.0.1.1/32
+- if-name: ce1
+  ipv4:
+    address: 10.1.0.1/30
+router:
+  isis:
+    net: 49.0001.0000.0000.0011.00
+    hostname: c1
+    is-type: level-2-only
+    afi-safi:
+    - name: ipv4
+      redistribute:
+        connected: {}
+    interface:
+    - if-name: ce1
+      circuit-type: level-2-only
+      network-type: point-to-point
+      metric: 10
+      ipv4:
+        enable: true

@@ -1,0 +1,42 @@
+# CE2 — customer edge 2 (AS 65002). Mirror of CE1: IS-IS (IPv6) toward
+# C2, IPv6 eBGP toward PE2, mutual redistribution.
+interface:
+- if-name: c2
+  ipv6:
+    address: 2001:db8:2c::2/64
+- if-name: pe2
+  ipv6:
+    address: 2001:db8:2e::1/64
+router:
+  isis:
+    net: 49.0001.0000.0000.0022.00
+    hostname: ce2
+    is-type: level-2-only
+    afi-safi:
+    - name: ipv6
+      redistribute:
+        bgp: {}
+    interface:
+    - if-name: c2
+      circuit-type: level-2-only
+      network-type: point-to-point
+      metric: 10
+      ipv6:
+        enable: true
+  bgp:
+    global:
+      as: 65002
+      router-id: 10.2.0.5
+    neighbor:
+    - remote-address: 2001:db8:2e::2
+      remote-as: 65000
+      timers: {connect-retry-time: 3}
+      enabled: true
+      afi-safi:
+      - name: ipv6
+        enabled: true
+    afi-safi:
+    - name: ipv6
+      redistribute:
+        isis: {}
+        connected: {}
