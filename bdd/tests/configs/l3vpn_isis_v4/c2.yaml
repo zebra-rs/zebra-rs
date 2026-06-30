@@ -1,0 +1,25 @@
+# C2 — customer site 2. Mirror of C1: IS-IS L2 to CE2, redistribute
+# connected (loopback 10.0.2.1/32 + C-CE link) into IS-IS.
+interface:
+- if-name: lo
+  ipv4:
+    address: 10.0.2.1/32
+- if-name: ce2
+  ipv4:
+    address: 10.2.0.1/30
+router:
+  isis:
+    net: 49.0001.0000.0000.0021.00
+    hostname: c2
+    is-type: level-2-only
+    afi-safi:
+    - name: ipv4
+      redistribute:
+        connected: {}
+    interface:
+    - if-name: ce2
+      circuit-type: level-2-only
+      network-type: point-to-point
+      metric: 10
+      ipv4:
+        enable: true

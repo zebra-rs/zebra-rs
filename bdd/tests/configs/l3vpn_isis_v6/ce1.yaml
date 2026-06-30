@@ -1,0 +1,26 @@
+# CE1 — customer edge 1. Transit IS-IS L2 (IPv6) between C1 and PE1.
+interface:
+- if-name: c1
+  ipv6:
+    address: 2001:db8:1c::2/64
+- if-name: pe1
+  ipv6:
+    address: 2001:db8:1e::1/64
+router:
+  isis:
+    net: 49.0001.0000.0000.0012.00
+    hostname: ce1
+    is-type: level-2-only
+    interface:
+    - if-name: c1
+      circuit-type: level-2-only
+      network-type: point-to-point
+      metric: 10
+      ipv6:
+        enable: true
+    - if-name: pe1
+      circuit-type: level-2-only
+      network-type: point-to-point
+      metric: 10
+      ipv6:
+        enable: true

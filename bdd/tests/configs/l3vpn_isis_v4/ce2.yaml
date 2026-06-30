@@ -1,0 +1,26 @@
+# CE2 — customer edge 2. Mirror of CE1: transit IS-IS L2 between C2 and PE2.
+interface:
+- if-name: c2
+  ipv4:
+    address: 10.2.0.2/30
+- if-name: pe2
+  ipv4:
+    address: 10.2.0.5/30
+router:
+  isis:
+    net: 49.0001.0000.0000.0022.00
+    hostname: ce2
+    is-type: level-2-only
+    interface:
+    - if-name: c2
+      circuit-type: level-2-only
+      network-type: point-to-point
+      metric: 10
+      ipv4:
+        enable: true
+    - if-name: pe2
+      circuit-type: level-2-only
+      network-type: point-to-point
+      metric: 10
+      ipv4:
+        enable: true
