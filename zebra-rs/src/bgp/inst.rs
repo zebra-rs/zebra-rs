@@ -3672,25 +3672,26 @@ impl Bgp {
                     endpoint,
                 );
             }
-            // MUP: a received DSD's next-hop rerouted → re-dispatch it to
-            // importing VRFs with the fresh transport so each dependent
-            // ST2→DSD endpoint encap re-installs toward the new egress.
+            // MUP: a received segment route (DSD/ISD) next-hop rerouted →
+            // re-dispatch it to importing VRFs with the fresh transport so
+            // each dependent encap (ST2→DSD / ST1→ISD) re-installs toward the
+            // new egress.
             NhtDep::Mup(rd, prefix) => {
-                self.mup_redispatch_dsd(nh, rd, prefix, true);
+                self.mup_redispatch_segment(nh, rd, prefix, true);
             }
             NhtDep::V4(_) | NhtDep::V6(_) => {}
         }
     }
 
-    /// Re-dispatch a received DSD to importing VRFs with its current
-    /// underlay transport (empty when `reachable` is false), so each
-    /// dependent ST2→DSD endpoint encap re-installs or is withdrawn. The
-    /// register-then-gate first resolution and every later reroute both
-    /// land here. Standalone (`&mut self`, no live `BgpTop`), so it is
-    /// safe to call from `nht_reinstall_transport`; the reachability path
-    /// (`nht_reeval_dep`) inlines the same logic because a `BgpTop`
+    /// Re-dispatch a received MUP segment route (DSD or ISD) to importing
+    /// VRFs with its current underlay transport (empty when `reachable` is
+    /// false), so each dependent encap (ST2→DSD / ST1→ISD) re-installs or is
+    /// withdrawn. The register-then-gate first resolution and every later
+    /// reroute both land here. Standalone (`&mut self`, no live `BgpTop`), so
+    /// it is safe to call from `nht_reinstall_transport`; the reachability
+    /// path (`nht_reeval_dep`) inlines the same logic because a `BgpTop`
     /// already borrows `local_rib` there.
-    fn mup_redispatch_dsd(
+    fn mup_redispatch_segment(
         &mut self,
         nh: std::net::IpAddr,
         rd: bgp_packet::RouteDistinguisher,
@@ -4000,7 +4001,7 @@ impl Bgp {
             // importing VRFs with its resolved transport (empty when
             // unreachable), so each dependent ST2→DSD endpoint encap
             // installs or is withdrawn. Inlined rather than
-            // `mup_redispatch_dsd` because `top` already borrows local_rib.
+            // `mup_redispatch_segment` because `top` already borrows local_rib.
             NhtDep::Mup(rd, prefix) => {
                 let selected = top.local_rib.select_best_path_mup(rd, prefix);
                 if let Some(winner) = selected.first() {

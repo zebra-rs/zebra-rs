@@ -33,8 +33,12 @@ Tests on the rebased base: 342 `bgp-packet` + 1378 `zebra-rs`, fmt +
 workspace clippy clean.
 
 **P5 (the MUP Controller) is now built** over PR-A/B/C using a **PFCP/N4**
-northbound (not zenoh) — see the P5 section below. **P6 (the
-SRv6-mobile dataplane) remains the one large deferred phase.**
+northbound (not zenoh) — see the P5 section below. **P6 (the SRv6-mobile
+dataplane) is now largely done**: origination, ST↔segment resolution, and
+the interwork node's SRv6 H.Encaps forwarding (both ST2→DSD and ST1→ISD)
+all land (P6 slices 1–6). Only the mobile-edge **GTP-U endpoint
+behaviours** (GTP4.E / GTP6.E / H.M.GTP4.D) remain, and those are out of
+stock-Linux scope (VPP/eBPF).
 
 The items below were consciously left out so each phase could ship as a
 small PR. None block the control-plane path for the common case
@@ -127,19 +131,15 @@ policy plumbing in `zebra-rs/src/bgp/config.rs` (`config_afi_safi_policy_*`)
 
 **Size:** medium (~250 lines: policy binding + apply + tests).
 
-### 2. Next-Hop Tracking (NHT) for MUP next-hops
+### 2. Next-Hop Tracking (NHT) for MUP segment next-hops — **DONE (P6 slice 6)**
 
-**What:** The MUP next-hop (PE/controller IPv6 address) is not registered
-with NHT, so reachability/recursive-resolution gating isn't applied to
-MUP routes.
-
-**Why deferred:** P2/P4 are control-plane only; the NHT gate matters once
-MUP routes drive forwarding (P6) or feed the controller's resolution.
-
-**Where:** `route_mup_update` + the NHT register/gate path
-(`zebra-rs/src/bgp/nht*`), mirroring how VPNv4/VPNv6 next-hops register.
-
-**Size:** medium (~200 lines).
+A received **segment** route (DSD/ISD) now registers its next-hop with NHT
+(`NhtDep::Mup`, `mup_segment_track` in `route.rs`), so the dependent ST →
+segment H.Encaps re-installs on the first resolution and every underlay
+reroute, and withdraws when unreachable. This is what drives the interwork
+node's forwarding (P6 slice 6). The ST routes' own next-hops (the
+controller address, in the draft-default no-SID model) are not FIB-relevant
+and stay untracked.
 
 ### 3. VRF import (route-target → VRF) for received MUP routes
 
@@ -575,24 +575,73 @@ sibling of the slice-1 DSD:
   selection + the empty-prefix / zero-router-id gates). Run live via
   `make -C bdd bgp_mup_isd`.
 
+#### P6 slice 5 — ST1 → ISD resolution + show — **DONE**
+
+The prefix-containment twin of slice 3's ST2 → DSD resolution: a selected
+ST1 whose UE prefix is covered (longest-match) by an ISD's advertised
+prefix resolves to that ISD's End.DT46 segment. `render_mup_table` indexes
+the ISD routes by prefix and prints `resolved <ue> -> End.DT46 <sid> (via
+[ISD]…)` in `show bgp mup` / `show bgp vrf <name> mup`. Matched by prefix
+containment (no MUP Extended Community). A `render_mup_table` unit test
+covers in-range resolve, out-of-range no-resolve, and the opt-in gate.
+
+#### P6 slice 6 — SRv6 forwarding install (ST → segment H.Encaps) — **DONE**
+
+The interwork node now programs the FIB for each resolved ST route. On a
+**forwarding VRF** (`encapsulation srv6` + `route-target import`) the ST
+routes and the segment routes both land in the per-VRF MUP RIB, and the
+per-VRF task installs an SRv6 **H.Encaps** route for the ST route's
+destination into the VRF table:
+
+- **ST2 → DSD** (by Direct-segment id): `dst = the ST2 endpoint /32|/128`.
+- **ST1 → ISD** (by prefix containment): `dst = the ST1 UE prefix`.
+
+The segment is **remote** (received from the peer owning the End.DT46 SID),
+so the encap resolves through the underlay via **Next-Hop Tracking** — this
+closes followup #2 (*NHT for MUP next-hops*). The pipeline mirrors the L3VPN
+import + NHT path:
+
+- **`nht.rs`** — `NhtDep::Mup(rd, prefix)` tracks a received segment route's
+  next-hop.
+- **`route.rs`** — `mup_segment_track` / `mup_segment_untrack` register /
+  release a received DSD **or** ISD next-hop (register-then-gate) and read
+  its resolved transport; `build_srv6_vpn_fib_entry` is reused.
+- **`vrf/msg.rs`** — `MupUpdate.transport` carries the resolved transport to
+  the importing VRF (like `ImportV4`).
+- **`vrf/inst.rs`** — the per-VRF task stashes each segment route's transport
+  (`mup_segment_transport`) and `reconcile_mup_st2_dsd` /
+  `reconcile_mup_st1_isd` install/withdraw the endpoint / UE encap
+  (`mup_encap_install`), diff-gated.
+- **`inst.rs`** — the NHT reachability + transport-reroute handlers
+  re-dispatch the segment route with fresh transport, so the encap
+  (re)installs on first resolution and every underlay reroute, and withdraws
+  when unreachable.
+
+Both directions install `dst via <underlay egress> encap seg6 mode encap
+segs [End.DT46 SID] table <VRF>`. **History:** ST1→ISD first landed as an
+*oif-only, local-SID* install (the ISD originated on the same node); it was
+then revisited to the *remote-SID, NHT-resolved* model so both directions
+share one path. The oif-only seg6-encap netlink capability is retained as a
+general FIB primitive.
+
+Tests: `@bgp_mup_st2_dsd_fib` and `@bgp_mup_st1_isd` BDDs (root, two-node) —
+z-access-PE originates the segment, z-interwork imports it + originates the
+ST, and the kernel installs `<dst> via <underlay> encap seg6 segs [SID]`.
+Run live via `make -C bdd bgp_mup_st2_dsd_fib` / `bgp_mup_st1_isd`.
+
 #### Remaining
 
-**What:** Install the FIB state that actually forwards MUP traffic. With
-the draft-default model (see *Draft-default forwarding* above), the PE
-receiving an ST route resolves its forwarding SID from the matching
-ISD / DSD route rather than from a SID carried on the ST route — so P6
-gains an *ISD/DSD-route → segment-SID resolution* step ahead of the FIB
-write. Per the chosen "install what the kernel supports" scope: program
-`End.DT4/6` + the route-level SIDs we already do for L3VPN/SRv6, and flag
-the GTP behaviours (`End.M.GTP4.E` / `End.M.GTP6.E` / `GTP4.E` /
-`GTP6.E`) as needing VPP or eBPF — mainline Linux `seg6local` has no
-`End.M.GTP*` actions. See the kernel-support note in
-[`bgp-prefix-sid-rfc9252.md`](bgp-prefix-sid-rfc9252.md) and
-[`srv6-l3vpn` forwarding notes](../../zebra-rs-srv6-l3vpn-forwarding-bugs.md).
+**What:** the **GTP-U endpoint behaviours** at the mobile edge (GTP4.E /
+GTP6.E / H.M.GTP4.D / `End.M.GTP*`). Mainline Linux `seg6local` has no
+`End.M.GTP*` actions, so the actual GTP encap/decap is left to a VPP/eBPF
+forwarder — zebra-rs uses End.DT46 as the kernel stand-in for the segment.
+The control plane, the ST↔segment resolution, and the SRv6 H.Encaps toward
+the segment are all done (slices 5–6). See the kernel-support note in
+[`bgp-prefix-sid-rfc9252.md`](bgp-prefix-sid-rfc9252.md).
 
-**Where:** the FIB install path + `seg6local` programming.
+**Where:** a VPP/eBPF dataplane.
 
-**Size:** large.
+**Size:** large (out of stock-Linux scope).
 
 ## Quick-pick recommendations
 

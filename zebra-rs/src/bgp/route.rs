@@ -3030,18 +3030,19 @@ fn nht_track_received_attr(bgp: &mut BgpTop, attr: &BgpAttr, dep: super::nht::Nh
     reachable
 }
 
-/// NHT for a received MUP **DSD**: register its next-hop so an underlay
-/// reroute re-installs the dependent ST2→DSD encap, and return the
-/// next-hop's currently-resolved underlay transport (empty while a fresh
-/// registration is pending, the next-hop is unreachable, or `best` is not
-/// a DSD). No-op outside the global instance (`nexthop_cache` is `None`).
-fn mup_dsd_track(
+/// NHT for a received MUP **segment** route (DSD or ISD): register its
+/// next-hop so an underlay reroute re-installs the dependent encap (ST2→DSD
+/// or ST1→ISD), and return the next-hop's currently-resolved underlay
+/// transport (empty while a fresh registration is pending, the next-hop is
+/// unreachable, or `best` is not a segment route). No-op outside the global
+/// instance (`nexthop_cache` is `None`).
+fn mup_segment_track(
     bgp: &mut BgpTop,
     rd: RouteDistinguisher,
     prefix: &MupPrefix,
     best: Option<&BgpRib>,
 ) -> Vec<rib::nht::ResolvedNexthop> {
-    if !matches!(prefix, MupPrefix::Dsd { .. }) {
+    if !matches!(prefix, MupPrefix::Dsd { .. } | MupPrefix::Isd { .. }) {
         return Vec::new();
     }
     let Some(best) = best else {
@@ -3064,9 +3065,10 @@ fn mup_dsd_track(
     cache.transport_for(nh).to_vec()
 }
 
-/// Symmetric to [`mup_dsd_track`]: drop the DSD dep from `nh` and, once it
-/// has no deps left, unregister it. `nh` is the pre-withdraw next-hop.
-fn mup_dsd_untrack(bgp: &mut BgpTop, rd: RouteDistinguisher, prefix: &MupPrefix, nh: IpAddr) {
+/// Symmetric to [`mup_segment_track`]: drop the segment dep from `nh` and,
+/// once it has no deps left, unregister it. `nh` is the pre-withdraw
+/// next-hop.
+fn mup_segment_untrack(bgp: &mut BgpTop, rd: RouteDistinguisher, prefix: &MupPrefix, nh: IpAddr) {
     let dep = super::nht::NhtDep::Mup(rd, prefix.clone());
     let Some(cache) = bgp.nexthop_cache.as_deref_mut() else {
         return;
@@ -7662,7 +7664,7 @@ pub fn route_mup_update(
     // reroute re-installs the dependent ST2→DSD encap) and read the
     // resolved transport to hand the importing VRF. Empty for non-DSD /
     // unresolved. Must precede the `bgp.vrf_import` borrow below.
-    let transport = mup_dsd_track(bgp, rd, &prefix, selected.first());
+    let transport = mup_segment_track(bgp, rd, &prefix, selected.first());
     // Mirror the new best-path to every VRF whose `mup import` RT set
     // matches, so `show bgp vrf <name> mup` reflects peer-learned routes.
     // A peer-learned route has no local originating VRF (`origin_vrf =
@@ -7686,25 +7688,25 @@ pub fn route_mup_withdraw(ident: usize, route: &MupRoute, bgp: &mut BgpTop, peer
     }
     // Capture the pre-withdraw DSD next-hop so it can be released from NHT
     // if this withdrawal drops the last path using it.
-    let old_dsd_nh = bgp
+    let old_segment_nh = bgp
         .local_rib
         .select_best_path_mup(&rd, &prefix)
         .first()
-        .filter(|_| matches!(prefix, MupPrefix::Dsd { .. }))
+        .filter(|_| matches!(prefix, MupPrefix::Dsd { .. } | MupPrefix::Isd { .. }))
         .and_then(|r| super::nht::nht_target(&r.attr));
     let _ = bgp.local_rib.remove_mup(rd, &prefix, id, ident);
     let selected = bgp.local_rib.select_best_path_mup(&rd, &prefix);
     // Release the NHT registration when no surviving path keeps the
     // pre-withdraw DSD next-hop.
-    if let Some(nh) = old_dsd_nh
+    if let Some(nh) = old_segment_nh
         && selected
             .first()
             .and_then(|r| super::nht::nht_target(&r.attr))
             != Some(nh)
     {
-        mup_dsd_untrack(bgp, rd, &prefix, nh);
+        mup_segment_untrack(bgp, rd, &prefix, nh);
     }
-    let transport = mup_dsd_track(bgp, rd, &prefix, selected.first());
+    let transport = mup_segment_track(bgp, rd, &prefix, selected.first());
     // Mirror the post-withdraw state to per-VRF tasks: a remaining best
     // path is re-forwarded (matched by RT), otherwise the prefix is
     // withdrawn from every VRF's copy. A peer-learned route has no local

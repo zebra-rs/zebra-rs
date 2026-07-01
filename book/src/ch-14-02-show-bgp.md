@@ -120,8 +120,11 @@ JSON: an array of `{ nlri_type, nlri, neighbor, best }`.
 
 The Mobile User Plane Loc-RIB (SAFI 85): Direct-Segment, ISD, and
 Type-1/Type-2 Session-Transformed routes. `summary` shows the
-IPv4-MUP / IPv6-MUP neighbor sections. See
-[Mobile User Plane (MUP)](ch-02-35-bgp-mup.md).
+IPv4-MUP / IPv6-MUP neighbor sections. On an interwork node, each ST route
+resolved to its segment prints a `resolved <key> -> End.DT46 <sid> (via
+[DSD|ISD]…)` line (ST2→DSD by Direct-segment id, ST1→ISD by prefix
+containment); the per-VRF `show bgp vrf <name> mup` shows the same for a
+forwarding VRF. See [Mobile User Plane (MUP)](ch-02-35-bgp-mup.md).
 
 ### `show bgp mup-c [session|association]`
 
