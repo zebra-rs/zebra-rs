@@ -151,12 +151,18 @@ mup route {st1|st2}`; the two read identically:
 
 * **Downlink (Type-1 ST).** `afi-safi mup route st1 { network-instance
   <ni>; }` — the N6 VRF originates a **Type-1 ST** route carrying the UE
-  prefix (ingress GTP encapsulation).
+  prefix and the **access-side** GTP endpoint (the gNB; draft §3.3.7).
 * **Uplink (Type-2 ST).** `afi-safi mup route st2 { network-instance <ni>;
   mup-ext-comm <2:4>; }` — the N3 VRF originates a **Type-2 ST** route
-  carrying the core endpoint and the GTP TEID (egress GTP decapsulation).
-  The optional `mup-ext-comm` is the BGP MUP Extended Community
-  (Direct-segment id in RD/RT 2:4 form, e.g. `1:2`) the ST2 resolves to.
+  carrying the **core-side** GTP endpoint and the GTP TEID (§3.3.10). The
+  optional `mup-ext-comm` is the BGP MUP Extended Community (Direct-segment
+  id in RD/RT 2:4 form, e.g. `1:2`) the ST2 resolves to.
+
+The access (Type-1) and core (Type-2) endpoints are **distinct** tunnel
+ends: the controller learns each from its own PFCP F-TEID — the
+`SourceInterface=Access` PDR feeds the Type-1 endpoint, the
+`SourceInterface=Core` PDR the Type-2 endpoint. A session that carries only
+one F-TEID reuses it for both (the Type-2 falls back to the access endpoint).
 
 The configured network-instance is matched exactly against the PFCP
 session's Network Instance. The export route-targets the ST route carries

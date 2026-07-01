@@ -49,7 +49,9 @@ sudo cp target/release/pfcp-inject /usr/bin/
 | `--ue-ipv4 <v4>` | — | UE IPv4 address. At least one of `--ue-ipv4` / `--ue-ipv6` is **required**. |
 | `--ue-ipv6 <v6>` | — | UE IPv6 address. |
 | `--teid <u32>` | `0x12345678` | Access-side GTP-U TEID — decimal or `0x`-prefixed hex. |
-| `--endpoint <IP>` | `10.0.0.1` | Access-side GTP-U (F-TEID) endpoint address (the gNB). |
+| `--endpoint <IP>` | `10.0.0.1` | Access-side GTP-U (F-TEID) endpoint address (the gNB) — used for the **Type-1 ST**. |
+| `--core-endpoint <IP>` | — | Core-side GTP-U (F-TEID) endpoint address — used for the **Type-2 ST**. When set, a second `SourceInterface=Core` PDR is added so the controller learns a distinct core endpoint; omit and the Type-2 ST falls back to the access endpoint. |
+| `--core-teid <u32>` | `0x87654321` | Core-side GTP-U TEID (only used with `--core-endpoint`). |
 | `--network-instance <s>` | `access` | Network Instance (APN/DNN). Matched against a per-VRF `mup` config on the controller. |
 | `--seid <u64>` | `1` | CP-side F-SEID advertised in the Session Establishment Request. |
 | `--delete` | `false` | Also delete the session after establishing it. |
@@ -60,9 +62,10 @@ it to a `router bgp vrf <name> afi-safi mup route {st1|st2} network-instance
 <ni>` binding, which decides the route type that gets originated:
 
 - a VRF binding the NI under `route st1` → a **Type-1 ST** (downlink / access;
-  carries the UE prefix + access tunnel);
+  carries the UE prefix + the **access** endpoint, `--endpoint`);
 - a VRF binding the NI under `route st2` → a **Type-2 ST** (uplink / core;
-  carries the endpoint + GTP TEID).
+  carries the **core** endpoint, `--core-endpoint`, + GTP TEID). The access
+  and core endpoints are distinct network functions (draft §3.3.7 / §3.3.10).
 
 A single session can originate both at once when two VRFs (one st1, one st2)
 bind the same NI.

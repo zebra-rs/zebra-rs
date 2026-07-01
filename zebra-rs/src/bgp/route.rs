@@ -8025,14 +8025,21 @@ pub(super) fn build_mup_st_route(
             },
             _ => return None,
         },
-        // Decapsulation (N3 / uplink): Type-2 ST carries the core endpoint +
-        // TEID. The Endpoint Length (draft §3.1.4.1) spans the address *and*
-        // the trailing 32-bit GTP TEID, so it is 64 (IPv4) / 160 (IPv6).
-        MupSrv6Direction::Decapsulation => match session.endpoint {
+        // Decapsulation (N3 / uplink): Type-2 ST carries the *core-side*
+        // endpoint + TEID (draft §3.3.10), distinct from the Type-1 access
+        // endpoint. Falls back to the access endpoint/TEID when the session
+        // carried no core-side F-TEID (single-endpoint session). The Endpoint
+        // Length (§3.1.4.1) spans the address *and* the trailing 32-bit GTP
+        // TEID, so it is 64 (IPv4) / 160 (IPv6).
+        MupSrv6Direction::Decapsulation => match session.core_endpoint.or(session.endpoint) {
             Some(endpoint) => MupPrefix::T2st {
                 endpoint,
                 endpoint_len: if endpoint.is_ipv4() { 64 } else { 160 },
-                teid: session.teid,
+                teid: if session.core_teid != 0 {
+                    session.core_teid
+                } else {
+                    session.teid
+                },
             },
             None => return None,
         },
@@ -18117,6 +18124,8 @@ mod tests {
                 ue_ipv6: v6,
                 teid: 0x1234,
                 endpoint: Some("10.0.0.1".parse().unwrap()),
+                core_teid: 0,
+                core_endpoint: None,
                 network_instance: Some("internet.apn".to_string()),
                 qfi: Some(9),
             }
@@ -18157,6 +18166,37 @@ mod tests {
             attr.prefix_sid.is_none(),
             "no Prefix-SID on a controller ST"
         );
+
+        // Type-1 (access) uses the access endpoint/TEID.
+        assert!(matches!(
+            super::build_mup_st_route(&session(Some(v4), None), MupSrv6Direction::Encapsulation, None)
+                .unwrap()
+                .0,
+            MupPrefix::T1st { endpoint, teid, .. }
+                if endpoint == "10.0.0.1".parse::<std::net::IpAddr>().unwrap() && teid == 0x1234
+        ));
+
+        // Type-2 (Decapsulation) uses the *core-side* endpoint/TEID when the
+        // session carries one — distinct from the Type-1 access endpoint.
+        let mut s2 = session(Some(v4), None);
+        s2.core_endpoint = Some("10.9.0.1".parse().unwrap());
+        s2.core_teid = 0x9999;
+        assert!(matches!(
+            super::build_mup_st_route(&s2, MupSrv6Direction::Decapsulation, None)
+                .unwrap()
+                .0,
+            MupPrefix::T2st { endpoint, teid, .. }
+                if endpoint == "10.9.0.1".parse::<std::net::IpAddr>().unwrap() && teid == 0x9999
+        ));
+
+        // Falls back to the access endpoint/TEID when no core-side F-TEID.
+        assert!(matches!(
+            super::build_mup_st_route(&session(Some(v4), None), MupSrv6Direction::Decapsulation, None)
+                .unwrap()
+                .0,
+            MupPrefix::T2st { endpoint, teid, .. }
+                if endpoint == "10.0.0.1".parse::<std::net::IpAddr>().unwrap() && teid == 0x1234
+        ));
     }
 
     // The Segment Discovery NLRI selector: `segment direct` keys a DSD off

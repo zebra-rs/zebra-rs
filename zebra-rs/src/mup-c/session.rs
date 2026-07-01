@@ -29,10 +29,20 @@ pub struct MupSession {
     pub ue_ipv4: Option<Ipv4Addr>,
     /// UE IPv6 address/prefix, if assigned.
     pub ue_ipv6: Option<Ipv6Addr>,
-    /// Access-side GTP-U TEID (from the uplink PDR's F-TEID).
+    /// Access-side GTP-U TEID (from the `SourceInterface=Access` PDR's
+    /// F-TEID). Used for the **Type-1 ST** route (access side, draft §3.3.7).
     pub teid: u32,
-    /// Access-side GTP-U endpoint (the F-TEID address).
+    /// Access-side GTP-U endpoint — the gNB-facing F-TEID address. Used for
+    /// the **Type-1 ST** route.
     pub endpoint: Option<IpAddr>,
+    /// Core-side GTP-U TEID (from the `SourceInterface=Core` PDR's F-TEID).
+    /// Used for the **Type-2 ST** route (core side, draft §3.3.10). `0` when
+    /// the session carried no core-side F-TEID.
+    pub core_teid: u32,
+    /// Core-side GTP-U endpoint — the core-facing F-TEID address. Used for
+    /// the **Type-2 ST** route. `None` falls back to the access endpoint so a
+    /// single-endpoint session still originates an ST2.
+    pub core_endpoint: Option<IpAddr>,
     /// Network Instance (APN/DNN). Correlated to a BGP VRF `mup`
     /// config when routes are originated.
     pub network_instance: Option<String>,

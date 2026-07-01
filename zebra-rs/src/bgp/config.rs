@@ -7713,6 +7713,8 @@ mod mup_dual_origination_tests {
             ue_ipv6: None,
             teid: 0x1234,
             endpoint: Some("10.0.0.1".parse().unwrap()),
+            core_teid: 0,
+            core_endpoint: None,
             network_instance: Some(ni.to_string()),
             qfi: Some(9),
         }
