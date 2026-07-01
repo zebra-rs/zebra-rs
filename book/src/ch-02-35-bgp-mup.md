@@ -226,9 +226,12 @@ forwarding VRF (`encapsulation srv6` + a matching `route-target import`),
 resolves each ST route to its segment, and installs an SRv6 **H.Encaps**
 route for the ST route's **endpoint** into the VRF table:
 
-* **ST2 → DSD** (by Direct-segment id): `dst = the ST2 endpoint /32|/128`.
-* **ST1 → ISD** (the ST1's gNB endpoint contained in the ISD prefix):
-  `dst = the ST1 endpoint /32|/128`.
+* **ST2 → DSD** — matched by Direct-segment id; `dst = the ST2 endpoint
+  /32|/128` (the uplink core endpoint; the ST2 carries no UE prefix).
+* **ST1 → ISD** — matched by the ST1's gNB **endpoint** contained in the ISD
+  prefix (the lookup key, draft §3.3.9); `dst = the ST1 **UE prefix**` (the
+  Prefix field, §3.1.3) — downlink traffic to the UE is steered toward the
+  gNB's segment.
 
 The segment is **remote** (received from the peer that owns the End.DT46
 SID), so the encap resolves through the IS-IS SRv6 underlay via Next-Hop

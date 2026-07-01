@@ -4,9 +4,10 @@
 # z1's ISD (Interwork Segment Discovery, prefix 10.0.0.0/24 + End.DT46 SID
 # from z1's locator S). Because the ST1's gNB endpoint (10.0.0.1) is covered
 # by the ISD prefix (the gNB N3 network), z2 resolves the ST1 to z1's
-# *remote* segment and installs an SRv6 H.Encaps route for the endpoint into
-# the VRF table, resolved through the IS-IS SRv6 underlay toward z1:
-#   10.0.0.1/32 via <z1 underlay> encap seg6 segs [z1 End.DT46 SID]
+# *remote* segment and installs an SRv6 H.Encaps route for the ST1's UE
+# prefix into the VRF table (endpoint = lookup key, UE prefix = forwarded
+# destination), resolved through the IS-IS SRv6 underlay toward z1:
+#   10.60.1.5/32 via <z1 underlay> encap seg6 segs [z1 End.DT46 SID]
 interface:
 - if-name: lo
   ipv6:
