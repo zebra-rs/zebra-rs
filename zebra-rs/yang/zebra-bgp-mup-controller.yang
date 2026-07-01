@@ -29,7 +29,8 @@ module zebra-bgp-mup-controller {
   description
     "BGP MUP Controller (MUP-C) extensions to the BGP candidate-config
      tree. Adds a `mup-c` container directly under the BGP instance
-     (SAFI 85, RFC 9833). When enabled, the BGP task spawns an in-process
+     (SAFI 85, draft-ietf-bess-mup-safi). When enabled, the BGP task
+     spawns an in-process
      MUP controller that terminates PFCP/N4 (3GPP TS 29.244) as a UP-node,
      learns mobile sessions and originates Type-1 / Type-2
      Session-Transformed routes.
@@ -50,7 +51,8 @@ module zebra-bgp-mup-controller {
        }";
 
   reference
-    "RFC 9833: A YANG ... (BGP MUP, draft-mpmz-bess-mup-safi)
+    "draft-ietf-bess-mup-safi: BGP Extensions for the Mobile User Plane
+     (MUP) SAFI
      3GPP TS 29.244: Interface between the Control Plane and the User
      Plane Nodes (PFCP)";
 

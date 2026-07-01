@@ -6,7 +6,7 @@ controller in tests and by hand.
 It pretends to be a 5G SMF (Session Management Function) and pushes one
 mobile session into the controller (`router bgp mup-c`): a UE IP address,
 an access-side GTP-U F-TEID, and a Network Instance. The controller learns
-the session and **originates a MUP Session-Transformed route** (RFC 9833,
+the session and **originates a MUP Session-Transformed route** (draft-ietf-bess-mup-safi,
 SAFI 85). With `--delete` it tears the session down again.
 
 It is intentionally tiny and synchronous: the [`rs-pfcp`](https://crates.io/crates/rs-pfcp)

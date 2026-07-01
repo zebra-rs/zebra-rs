@@ -1,6 +1,6 @@
 //! BGP MUP (Mobile User Plane) SAFI 85 NLRI.
 //!
-//! Outer envelope (RFC 9833 §3.1):
+//! Outer envelope (draft-ietf-bess-mup-safi §3.1):
 //!
 //! ```text
 //! +------------------------------------+
@@ -43,7 +43,7 @@ use crate::{Afi, RouteDistinguisher, nlri_psize};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum MupArchitectureType {
-    /// 3GPP 5G (RFC 9833 §3.1.1).
+    /// 3GPP 5G (draft-ietf-bess-mup-safi §3.1.1).
     Gpp5g,
     Unknown(u8),
 }
@@ -70,7 +70,7 @@ impl From<u8> for MupArchitectureType {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum MupRouteType {
-    /// Interwork Segment Discovery (RFC 9833 §3.1.1).
+    /// Interwork Segment Discovery (draft-ietf-bess-mup-safi §3.1.1).
     Isd,
     /// Direct Segment Discovery (§3.1.2).
     Dsd,
@@ -114,7 +114,7 @@ impl From<u16> for MupRouteType {
 /// opaque body so the dispatch shell never drops an UPDATE.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum MupRoute {
-    /// Interwork Segment Discovery Route (RFC 9833 §3.1.1).
+    /// Interwork Segment Discovery Route (draft-ietf-bess-mup-safi §3.1.1).
     ///
     /// Wire body: 8-octet RD + 1-octet prefix length + prefix bytes
     /// (variable, sized to cover the prefix length). The address
@@ -125,7 +125,7 @@ pub enum MupRoute {
         rd: RouteDistinguisher,
         prefix: IpNet,
     },
-    /// Direct Segment Discovery Route (RFC 9833 §3.1.2).
+    /// Direct Segment Discovery Route (draft-ietf-bess-mup-safi §3.1.2).
     ///
     /// Wire body: 8-octet RD + 4-octet (IPv4) or 16-octet (IPv6)
     /// segment endpoint address. The address family is selected by
@@ -136,7 +136,7 @@ pub enum MupRoute {
         rd: RouteDistinguisher,
         address: IpAddr,
     },
-    /// Type 1 Session Transformed Route (RFC 9833 §3.2.1).
+    /// Type 1 Session Transformed Route (draft-ietf-bess-mup-safi §3.2.1).
     ///
     /// Wire body: 8-octet RD + 1-octet prefix length (bits) + prefix
     /// bytes + 4-octet TEID + 1-octet QFI + 1-octet endpoint address
@@ -144,10 +144,11 @@ pub enum MupRoute {
     /// source address length (bits, 0/32/128) + optional source
     /// address bytes. The source-address-length octet is always
     /// present on the wire (zero when no source is carried), matching
-    /// GoBGP and RFC 9833 §3.2.1. Only the UE `prefix` follows the outer
-    /// AFI; the `endpoint` (gNB) and `source` (UPF) families are decided
-    /// by their own length octets (32 = IPv4, 128 = IPv6), so an IPv6 UE
-    /// route may carry an IPv4 endpoint/source (the mixed-AFI 5G case).
+    /// GoBGP and draft-ietf-bess-mup-safi §3.2.1. Only the UE `prefix`
+    /// follows the outer AFI; the `endpoint` (gNB) and `source` (UPF)
+    /// families are decided by their own length octets (32 = IPv4,
+    /// 128 = IPv6), so an IPv6 UE route may carry an IPv4 endpoint/source
+    /// (the mixed-AFI 5G case).
     T1st {
         id: u32,
         arch: MupArchitectureType,
@@ -160,7 +161,7 @@ pub enum MupRoute {
         /// source-address-length of 0 on the wire.
         source: Option<IpAddr>,
     },
-    /// Type 2 Session Transformed Route (RFC 9833 §3.2.2).
+    /// Type 2 Session Transformed Route (draft-ietf-bess-mup-safi §3.2.2).
     ///
     /// Wire body: 8-octet RD + 1-octet endpoint address length (bits,
     /// up to 64 for IPv4 / 160 for IPv6) + full-width endpoint address
@@ -383,12 +384,11 @@ impl MupRoute {
                 let (rest, qfi) = be_u8(rest)?;
                 // The endpoint-address-length octet selects the endpoint's
                 // address family on its own (32 = IPv4 gNB, 128 = IPv6
-                // gNB), independent of the outer AFI: draft-ietf-bess-mup-
-                // safi / RFC 9833 §3.2.1 deliberately permits an IPv6 UE
-                // prefix to carry an IPv4 endpoint/source — the real 5G
-                // case where the N3 transport is IPv4. (GoBGP infers the
-                // family from this octet the same way; only the UE prefix
-                // is tied to the outer AFI.)
+                // gNB), independent of the outer AFI: draft-ietf-bess-mup-safi
+                // §3.2.1 deliberately permits an IPv6 UE prefix to carry an
+                // IPv4 endpoint/source — the real 5G case where the N3
+                // transport is IPv4. (GoBGP infers the family from this octet
+                // the same way; only the UE prefix is tied to the outer AFI.)
                 let (rest, ep_len) = be_u8(rest)?;
                 let (endpoint, rest) = match ep_len {
                     32 => {
@@ -644,7 +644,7 @@ impl MupRoute {
 /// lists routes grouped by type (DSD then ISD then ST1 then ST2).
 #[derive(Debug, Clone, Eq, PartialEq, Ord, PartialOrd, Hash)]
 pub enum MupPrefix {
-    /// Direct Segment Discovery Route key (RFC 9833 §3.1.2).
+    /// Direct Segment Discovery Route key (draft-ietf-bess-mup-safi §3.1.2).
     Dsd { address: IpAddr },
     /// Interwork Segment Discovery Route key (§3.1.1).
     Isd { prefix: IpNet },
@@ -1417,7 +1417,7 @@ mod tests {
 
     #[test]
     fn t1st_rejects_non_host_endpoint_len() {
-        // ep_len = 24 is neither 32 nor 128 → malformed (RFC 9833 §3.2.1).
+        // ep_len = 24 is neither 32 nor 128 → malformed (draft-ietf-bess-mup-safi §3.2.1).
         let mut body = vec![0u8; 8];
         body.push(0); // plen=0
         body.extend_from_slice(&[0; 4]); // TEID

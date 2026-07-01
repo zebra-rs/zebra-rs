@@ -1,7 +1,7 @@
 # BGP MUP (Mobile User Plane) — deferred follow-ups
 
-Status as of 2026-06-21. The MUP **control plane** (RFC 9833 /
-draft-mpmz-bess-mup-safi, SAFI 85) landed on branch `bgp-mup` over four
+Status as of 2026-06-21. The MUP **control plane**
+(draft-mpmz-bess-mup-safi, SAFI 85) landed on branch `bgp-mup` over four
 phases, committed and pushed (rebased onto `origin/main`):
 
 - **P0 codec** — completed the `MupRoute` codec to be GoBGP byte-exact:
@@ -259,7 +259,7 @@ an Add-Path id dimension like the v4 path).
 ### 11. eBGP next-hop-self next-hop family
 
 **What:** For eBGP / originated routes, `route_update_mup` sets the
-next-hop to `peer.param.local_addr.ip()`, which may be IPv4. RFC 9833
+next-hop to `peer.param.local_addr.ip()`, which may be IPv4. draft-ietf-bess-mup-safi
 next-hops are IPv6 (PE/controller address).
 
 **Why deferred:** iBGP / route-reflector — the common controller→PE path

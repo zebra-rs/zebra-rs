@@ -1567,7 +1567,7 @@ fn config_afi_safi(bgp: &mut Bgp, mut args: Args, op: ConfigOp) -> Option<()> {
         // simply forgets the statement: IPv4 unicast falls back to the
         // built-in default (or the group's opinion), other families to
         // off (or the group's opinion). The `mup` name expands to
-        // both the IPv4 and IPv6 MUP families (RFC 9833).
+        // both the IPv4 and IPv6 MUP families (draft-ietf-bess-mup-safi).
         if op.is_set() {
             let enabled = enabled?;
             for fam in super::neighbor_group::mp_family_expand(key) {
@@ -4422,7 +4422,7 @@ impl Bgp {
             config_ethernet_segment_interface,
         );
 
-        // MUP controller (`router bgp mup-c …`, RFC 9833).
+        // MUP controller (`router bgp mup-c …`, draft-ietf-bess-mup-safi).
         // Augmented in by zebra-bgp-mup-controller.yang; the controller
         // task is spawned/torn down at CommitEnd by `apply_mup_c_commit_diff`.
         self.callback_add("/router/bgp/mup-c/enable", config_mup_c_enable);

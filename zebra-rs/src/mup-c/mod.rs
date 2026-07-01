@@ -1,7 +1,7 @@
 //! BGP MUP Controller (MUP-C) — Mobile User Plane controller.
 //!
-//! Implements the controller half of BGP MUP (RFC 9833 /
-//! `draft-mpmz-bess-mup-safi`, SAFI 85). Per the draft §3.3.7/§3.3.10 a
+//! Implements the controller half of BGP MUP
+//! (`draft-mpmz-bess-mup-safi`, SAFI 85). Per the draft §3.3.7/§3.3.10 a
 //! MUP Controller learns per-session mobile state through a "northbound
 //! API" (left out of scope by the draft) and originates Type-1 / Type-2
 //! Session-Transformed routes from it. zebra-rs uses **PFCP / N4** (3GPP

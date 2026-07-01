@@ -11,7 +11,7 @@ pub enum ExtCommunityType {
     /// Sub-type 0x09 is the Multicast Flags EC (IGMP/MLD proxy
     /// capability); see `ExtCommunityValue::as_evpn_mcast_flags`.
     Evpn = 0x06,
-    /// RFC 9833 — BGP MUP Extended Community high-type byte. Sub-type
+    /// draft-ietf-bess-mup-safi — BGP MUP Extended Community high-type byte. Sub-type
     /// decode is deferred to a later phase; raw 8-byte value passes
     /// through the generic ExtCommunity path for now.
     Mup = 0x0c,
@@ -54,10 +54,10 @@ impl ExtCommunitySubType {
     }
 }
 
-/// MUP Extended Community sub-type values (high-type 0x0c, RFC 9833 §5).
+/// MUP Extended Community sub-type values (high-type 0x0c, draft-ietf-bess-mup-safi §5).
 ///
 /// Names are kept numeric for now because the exact IANA-assigned
-/// names and payload layouts in RFC 9833 §5 haven't been confirmed
+/// names and payload layouts in draft-ietf-bess-mup-safi §5 haven't been confirmed
 /// against the spec in-tree; the 6-octet value travels as opaque
 /// bytes via `ExtCommunityValue::val`. A follow-up phase will rename
 /// these and add typed accessors once the per-sub-type layout is

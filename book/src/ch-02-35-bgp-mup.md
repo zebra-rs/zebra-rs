@@ -1,7 +1,7 @@
 # BGP Mobile User Plane (MUP) and the MUP Controller
 
 zebra-rs implements **BGP Mobile User Plane** (BGP-MUP, SAFI 85) as
-specified in RFC 9833 / `draft-mpmz-bess-mup-safi`. BGP-MUP carries 5G
+specified in `draft-ietf-bess-mup-safi`. BGP-MUP carries 5G
 mobile-backhaul session state in BGP so that a GTP-U tunnel between a
 mobile gateway and the radio access network can be stitched into an
 **SRv6** transport network — the GTP encap/decap happens at the SRv6

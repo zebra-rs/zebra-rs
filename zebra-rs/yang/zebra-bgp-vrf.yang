@@ -274,7 +274,7 @@ module zebra-bgp-vrf {
       }
       container mup {
         description
-          "Per-VRF MUP (RFC 9833) service. The `segment` list is the PE
+          "Per-VRF MUP (draft-ietf-bess-mup-safi) service. The `segment` list is the PE
            side: `segment direct` originates a Direct Segment Discovery
            (DSD, type 2) route for this VRF carrying the VRF's End.DT46
            SID (carved from `encapsulation srv6`); `segment interwork` an

@@ -1,5 +1,5 @@
 # z1 — MUP Controller (MUP-C) originating a Type-2 Session-Transformed
-# (ST2, RFC 9833 / draft-mpmz-bess-mup-safi §3.1.4) route from a PFCP
+# (ST2, draft-mpmz-bess-mup-safi §3.1.4) route from a PFCP
 # decapsulation session. AS 65001, iBGP to z2 (192.168.0.2) with the mup
 # afi-safi negotiated; PFCP/N4 listener on 192.168.0.1:8805. When
 # pfcp-inject programs a session whose Network Instance is `core`, the VRF

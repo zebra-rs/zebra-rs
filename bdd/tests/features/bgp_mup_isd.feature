@@ -3,7 +3,7 @@
 Feature: BGP MUP PE originates an Interwork Segment Discovery (ISD) route over SRv6
   As a network operator
   I want a zebra-rs BGP MUP PE to originate an Interwork Segment Discovery
-  (ISD, type 1, SAFI 85 / RFC 9833) route for an `encapsulation srv6` VRF
+  (ISD, type 1, SAFI 85 / draft-ietf-bess-mup-safi) route for an `encapsulation srv6` VRF
   when `afi-safi mup segment interwork prefix <p>` is configured, so the
   per-VRF End.DT46 service SID is carved from the locator, installed into the
   kernel FIB, and advertised under the configured interwork prefix as the

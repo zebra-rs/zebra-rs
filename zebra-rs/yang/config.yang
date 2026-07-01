@@ -3124,7 +3124,7 @@ module config {
       }
       container mup {
         description
-          "BGP MUP (RFC 9833 / draft-ietf-bess-mup-safi) route policy for
+          "BGP MUP (draft-ietf-bess-mup-safi) route policy for
            this VRF. The export RTs tag the Session-Transformed routes the
            MUP controller originates from this VRF; the import RTs select
            which received ST routes belong to it (the import side is

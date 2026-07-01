@@ -34,7 +34,7 @@ pub enum MpUnreachAttr {
     Rtcv4Eor,
     Rtcv6(Vec<Rtcv6>),
     Rtcv6Eor,
-    /// BGP MUP withdraws (RFC 9833 §11). The outer AFI is preserved
+    /// BGP MUP withdraws (draft-ietf-bess-mup-safi §11). The outer AFI is preserved
     /// so the emitter can re-encode it without a separate Eor
     /// variant; an empty `withdraws` list represents end-of-RIB.
     Mup {
@@ -218,7 +218,7 @@ fn evpn_unreach_attr_emit(withdraw: &[EvpnRoute], buf: &mut BytesMut) {
 /// `withdraws` encodes an end-of-RIB marker) as a complete
 /// `MP_UNREACH_NLRI` path attribute.
 ///
-/// Wire format (RFC 4760 §4 + RFC 9833 §11):
+/// Wire format (RFC 4760 §4 + draft-ietf-bess-mup-safi §11):
 /// ```text
 ///   AFI  (2 octets) = 1 (IPv4) or 2 (IPv6)
 ///   SAFI (1 octet)  = 85 (MUP)
@@ -773,7 +773,7 @@ mod tests {
 
     /// Minimal T2ST body for the IPv4 outer AFI (its only caller): RD(8),
     /// ep_len=32, endpoint(4) (no TEID bits). The endpoint length covers
-    /// the full-width address per RFC 9833 §3.2.2.
+    /// the full-width address per draft-ietf-bess-mup-safi §3.2.2.
     fn min_t2st_body() -> Vec<u8> {
         let mut v = vec![0u8; 8];
         v.push(32); // endpoint_len = IPv4 address width

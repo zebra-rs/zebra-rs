@@ -90,7 +90,7 @@ module zebra-afi-safi {
         }
         enum mup {
           description
-            "BGP Mobile User Plane (MUP), SAFI 85, RFC 9833. A single
+            "BGP Mobile User Plane (MUP), SAFI 85, draft-ietf-bess-mup-safi. A single
              config name that negotiates BOTH IPv4-MUP (AFI 1) and
              IPv6-MUP (AFI 2).";
         }

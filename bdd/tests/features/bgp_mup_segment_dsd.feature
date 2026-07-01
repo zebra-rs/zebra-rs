@@ -3,7 +3,7 @@
 Feature: BGP MUP PE originates a Direct Segment Discovery (DSD) route over SRv6
   As a network operator
   I want a zebra-rs BGP MUP PE to originate a Direct Segment Discovery
-  (DSD, type 2, SAFI 85 / RFC 9833) route for an `encapsulation srv6` VRF
+  (DSD, type 2, SAFI 85 / draft-ietf-bess-mup-safi) route for an `encapsulation srv6` VRF
   when `afi-safi mup segment direct` is configured, so the per-VRF End.DT46
   service SID is carved from the locator, installed into the kernel FIB, and
   advertised as the segment a receiving PE resolves for matching

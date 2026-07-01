@@ -176,7 +176,7 @@ pub struct MupSrv6Mobile {
     pub mup_ext_comm: Option<RouteDistinguisher>,
 }
 
-/// Per-VRF BGP MUP (RFC 9833) service config — the `mup`
+/// Per-VRF BGP MUP (draft-ietf-bess-mup-safi) service config — the `mup`
 /// container under `router bgp vrf <name>` in zebra-bgp-vrf.yang. Holds
 /// only the `route {st1|st2}` origination binding; the export/import
 /// route-targets live on the top-level `vrf <name> mup
@@ -231,7 +231,7 @@ pub struct BgpVrfConfig {
     /// its own PEs over a single MP-eBGP VPNv4 session while still
     /// forwarding per-VRF. Default `false` (ordinary L3VPN VRF).
     pub inter_as_hybrid: bool,
-    /// Per-VRF BGP MUP (RFC 9833) service config. Mirrors the
+    /// Per-VRF BGP MUP (draft-ietf-bess-mup-safi) service config. Mirrors the
     /// `mup` container in zebra-bgp-vrf.yang.
     pub mobile_uplane: BgpVrfMobileUplane,
 }

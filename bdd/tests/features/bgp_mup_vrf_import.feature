@@ -2,7 +2,7 @@
 @bgp_mup_vrf_import
 Feature: BGP MUP cross-VRF import by route-target (RD-independent)
   As a network operator
-  I want a locally-originated BGP MUP route (SAFI 85 / RFC 9833) to be
+  I want a locally-originated BGP MUP route (SAFI 85 / draft-ietf-bess-mup-safi) to be
   imported into every VRF whose `mup route-target import` overlaps the
   route's RTs — not just the VRF that owns the route's RD — so per-VRF MUP
   matches the VPNv4/v6 import model and a downlink VRF can pull in the
