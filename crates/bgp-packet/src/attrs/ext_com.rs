@@ -90,7 +90,7 @@ impl ExtCommunityValue {
         Color { flags, color }.into()
     }
 
-    /// True iff this entry is a MUP Extended Community (RFC 9833 §5):
+    /// True iff this entry is a MUP Extended Community (draft-ietf-bess-mup-safi §5):
     /// high-type byte 0x0c.
     pub fn is_mup(&self) -> bool {
         self.high_type == ExtCommunityType::Mup as u8
@@ -98,7 +98,7 @@ impl ExtCommunityValue {
 
     /// Decode the MUP Extended Community sub-type and surface the
     /// 6-octet payload as opaque bytes. Typed payload decoding per
-    /// RFC 9833 §5 is deferred to a follow-up.
+    /// draft-ietf-bess-mup-safi §5 is deferred to a follow-up.
     pub fn as_mup(&self) -> Option<MupExtCom> {
         if !self.is_mup() {
             return None;
@@ -456,7 +456,7 @@ impl From<DfElectionEc> for ExtCommunityValue {
     }
 }
 
-/// Decoded MUP Extended Community (RFC 9833 §5). The `value` field
+/// Decoded MUP Extended Community (draft-ietf-bess-mup-safi §5). The `value` field
 /// is the raw 6-octet payload; typed accessors per sub-type will
 /// follow once the spec layout is in-tree.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -523,7 +523,7 @@ impl fmt::Display for ExtCommunityValue {
                 ExtCommunitySubType::display(self.low_type)
             )
         } else if let Some(m) = self.as_mup() {
-            // MUP Extended Community (RFC 9833 §5). Until typed
+            // MUP Extended Community (draft-ietf-bess-mup-safi §5). Until typed
             // payloads land, render the sub-type identifier plus the
             // raw 6-byte value as a colon-joined hex string.
             write!(

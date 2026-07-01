@@ -153,7 +153,7 @@ fn rib_entries_count<V: BgpShowView>(bgp: &V, afi_safi: &AfiSafi) -> usize {
 }
 
 /// Address family a MUP Loc-RIB entry belongs to. The MUP table is a
-/// single flat map (RFC 9833 routes for both AFIs share it), so attribute
+/// single flat map (draft-ietf-bess-mup-safi routes for both AFIs share it), so attribute
 /// each route to v4/v6 by the family of its principal address — the DSD
 /// address, the ISD / ST1 session prefix, or the ST2 endpoint. `Unknown`
 /// routes carry no decoded address and belong to neither family.
@@ -2480,9 +2480,9 @@ fn show_bgp_evpn_summary(
     show_bgp_summary_one(bgp, AfiSafi::new(Afi::L2vpn, Safi::Evpn), json)
 }
 
-/// `show bgp mup summary` — the MUP (SAFI 85, RFC 9833)
+/// `show bgp mup summary` — the MUP (SAFI 85, draft-ietf-bess-mup-safi)
 /// neighbor summary. `mup` enables both IPv4-MUP and IPv6-MUP
-/// at once (RFC 9833), so this renders both sections — the MUP slice of
+/// at once (draft-ietf-bess-mup-safi), so this renders both sections — the MUP slice of
 /// `show bgp summary` — listing the neighbors that have each MUP family
 /// enabled and whether they negotiated the capability.
 fn show_bgp_mup_summary(
@@ -4000,7 +4000,7 @@ fn show_bgp_evpn(
 
 /// Decode a MUP path's extended communities for display: two-octet AS
 /// Route Targets render as `RT:<asn>:<u32>`; the MUP Extended Community
-/// (RFC 9833 §5, type 0x0c) and anything else fall through to a raw
+/// (draft-ietf-bess-mup-safi §5, type 0x0c) and anything else fall through to a raw
 /// 8-octet hex dump (e.g. `0x0c0000010000003d`).
 fn format_mup_ecom_value(v: &ExtCommunityValue) -> String {
     match (v.high_type, v.low_type) {
@@ -4037,7 +4037,7 @@ fn show_mup_ecom(attr: &BgpAttr) -> String {
 
 /// Render a `MupPrefix` (plus its outer-map RD) as the bracketed
 /// `[TYPE][rd][fields]` form used by `show bgp mup`, following the MUP NLRI
-/// layout (RFC 9833).
+/// layout (draft-ietf-bess-mup-safi).
 fn mup_prefix_display(rd: &RouteDistinguisher, prefix: &MupPrefix) -> String {
     match prefix {
         MupPrefix::Dsd { address } => format!("[DSD][{rd}][{address}]"),
@@ -4200,7 +4200,7 @@ fn show_bgp_mup_c_association(
     Ok(buf)
 }
 
-/// `show bgp mup` — the MUP (SAFI 85, RFC 9833) view: the
+/// `show bgp mup` — the MUP (SAFI 85, draft-ietf-bess-mup-safi) view: the
 /// config-driven `MUP VRFs:` block (per-VRF `mup` services)
 /// followed by the Loc-RIB route table. The full `MUP controller:`
 /// wrapper (zenoh source + ingested sessions) lands with the controller

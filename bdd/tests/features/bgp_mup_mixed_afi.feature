@@ -3,7 +3,7 @@
 Feature: BGP MUP mixed-AFI Session-Transformed route (IPv6 UE, IPv4 endpoint)
   As a network operator running 5G backhaul where the UE address family and
   the N3 transport differ, I want the zebra-rs BGP MUP Controller to
-  originate a Type-1 Session-Transformed route (SAFI 85, RFC 9833 /
+  originate a Type-1 Session-Transformed route (SAFI 85,
   draft-ietf-bess-mup-safi) for an IPv6 UE whose GTP endpoint (gNB) is IPv4,
   and a peer zebra-rs to receive and show it. This validates two behaviours:
 

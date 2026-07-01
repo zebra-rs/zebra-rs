@@ -2568,7 +2568,7 @@ pub struct LocalRib {
     /// Per-RD EVPN Loc-RIB tables.
     pub evpn: BTreeMap<RouteDistinguisher, LocalRibEvpnTable>,
 
-    /// Per-RD MUP (SAFI 85, RFC 9833) Loc-RIB tables, mirroring `evpn`.
+    /// Per-RD MUP (SAFI 85, draft-ietf-bess-mup-safi) Loc-RIB tables, mirroring `evpn`.
     pub mup: BTreeMap<RouteDistinguisher, LocalRibMupTable>,
 
     /// IPv4 / IPv6 Flow Specification Loc-RIB (SAFI 133).
@@ -7538,7 +7538,7 @@ pub fn route_evpn_withdraw(ident: usize, route: &EvpnRoute, bgp: &mut BgpTop, pe
     }
 }
 
-/// Store one received MUP NLRI (RFC 9833, SAFI 85) in the peer's
+/// Store one received MUP NLRI (draft-ietf-bess-mup-safi, SAFI 85) in the peer's
 /// Adj-RIB-In and the MUP Loc-RIB, then re-run best-path.
 ///
 /// Phase 2 is receive + show only: there is no inbound route-policy, no
@@ -7751,7 +7751,7 @@ impl MupSegmentDesired {
 /// iBGP-to-iBGP suppression unless the peer is a route-reflector client,
 /// RFC 1997 NO_ADVERTISE/NO_EXPORT, eBGP AS_PATH prepend + next-hop-self,
 /// iBGP default LOCAL_PREF, and stripping iBGP-only attrs on eBGP. The
-/// next-hop rides in MP_REACH (RFC 9833), so the path-attr NEXT_HOP is
+/// next-hop rides in MP_REACH (draft-ietf-bess-mup-safi), so the path-attr NEXT_HOP is
 /// cleared.
 fn route_update_mup(
     peer: &mut Peer,
@@ -7781,7 +7781,7 @@ fn route_update_mup(
     // carrying an End.DT46 Prefix-SID) advertises the PE locator node carried
     // in the attr, so a receiving PE H.Encaps to it; next-hop-self toward
     // eBGP and for our other originations; otherwise preserve the received
-    // next-hop (RFC 9833 — the PE/controller address the ingress PE resolves).
+    // next-hop (draft-ietf-bess-mup-safi — the PE/controller address the ingress PE resolves).
     let nhop: IpAddr = if rib.is_originated() && attrs.prefix_sid.is_some() {
         bgp_nexthop_ip(attrs.nexthop.as_ref()?)?
     } else if peer.is_ebgp() || rib.is_originated() {
@@ -9848,7 +9848,7 @@ pub fn route_clean(
         peer.adj_in.evpn.clear();
     }
 
-    // MUP (RFC 9833). Phase 2 is receive-only with no LLGR retention, so
+    // MUP (draft-ietf-bess-mup-safi). Phase 2 is receive-only with no LLGR retention, so
     // peer-down simply drops every MUP route the peer gave us from the
     // Loc-RIB and clears its Adj-RIB-In. (LLGR stale retention for MUP is
     // a later phase, mirroring the EVPN/VPN two-branch logic above.)
@@ -12801,7 +12801,7 @@ pub fn route_sync(peer: &mut Peer, bgp: &mut BgpTop, v4_via_pool: bool) {
     if peer.is_afi_safi(Afi::L2vpn, Safi::Evpn) {
         route_sync_evpn(peer, bgp);
     }
-    // SAFI 85 (RFC 9833): dump the MUP Loc-RIB. Like EVPN/label, MUP is
+    // SAFI 85 (draft-ietf-bess-mup-safi): dump the MUP Loc-RIB. Like EVPN/label, MUP is
     // advertised event-driven, so a route learned before this peer came
     // up would otherwise never be sent.
     if peer.is_afi_safi(Afi::Ip, Safi::Mup) || peer.is_afi_safi(Afi::Ip6, Safi::Mup) {

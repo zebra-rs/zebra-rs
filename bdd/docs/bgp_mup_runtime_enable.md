@@ -4,7 +4,7 @@
 
 An AFI/SAFI is a BGP Multiprotocol *capability*, advertised once in the
 OPEN — the negotiated set is fixed for the life of the session. So
-enabling `afi-safi mup` (RFC 9833, which turns on BOTH IPv4-MUP
+enabling `afi-safi mup` (draft-ietf-bess-mup-safi, which turns on BOTH IPv4-MUP
 and IPv6-MUP) on an already-Established neighbor has no effect until the
 session renegotiates. zebra-rs therefore bounces the session on the
 change — the same teardown `clear bgp ... hard` uses — so the new MUP

@@ -3,7 +3,7 @@
 Feature: BGP Mobile User Plane (MUP) capability negotiation
   As a network operator
   I want two zebra-rs instances to negotiate the BGP MUP multiprotocol
-  capability (SAFI 85, RFC 9833) for BOTH IPv4-MUP (AFI 1) and IPv6-MUP
+  capability (SAFI 85, draft-ietf-bess-mup-safi) for BOTH IPv4-MUP (AFI 1) and IPv6-MUP
   (AFI 2) from a single `afi-safi mup enabled true` knob, and
   bring an iBGP session to Established, so the foundation for MUP route
   exchange (ISD / DSD / ST1 / ST2) is validated before origination is

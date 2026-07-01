@@ -5,7 +5,7 @@
 As a network operator
 I want the zebra-rs BGP MUP Controller (MUP-C) to learn a mobile session
 over PFCP/N4 and originate a Type-1 Session-Transformed route (SAFI 85,
-RFC 9833) that a peer zebra-rs receives, so the end-to-end control plane
+draft-ietf-bess-mup-safi) that a peer zebra-rs receives, so the end-to-end control plane
 — PFCP ingest, NI -> VRF correlation, SRv6 SID allocation, ST route
 origination, and iBGP advertisement — is validated.
 

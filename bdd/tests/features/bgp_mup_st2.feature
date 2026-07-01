@@ -4,7 +4,7 @@ Feature: BGP MUP Controller originates a Type-2 ST route from a PFCP session
   As a network operator
   I want the zebra-rs BGP MUP Controller (MUP-C) to learn a mobile session
   over PFCP/N4 and originate a Type-2 Session-Transformed route (ST2, SAFI
-  85, RFC 9833 / draft-mpmz-bess-mup-safi §3.1.4) for the uplink (N3) — the
+  85, draft-mpmz-bess-mup-safi §3.1.4) for the uplink (N3) — the
   core endpoint + GTP TEID with the BGP MUP Extended Community of the Direct
   segment — so a peer zebra-rs receives it and the End.DT46 uplink/downlink
   forwarding model can be programmed from the Direct segment.

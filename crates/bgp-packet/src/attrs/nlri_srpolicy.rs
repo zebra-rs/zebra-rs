@@ -23,7 +23,7 @@ use crate::Afi;
 ///
 /// The endpoint address family comes from the enclosing
 /// MP_REACH/MP_UNREACH header AFI, not from the NLRI itself — the same
-/// way BGP MUP (RFC 9833) threads the outer AFI down to
+/// way BGP MUP (draft-ietf-bess-mup-safi) threads the outer AFI down to
 /// `MupRoute::parse`. The candidate-path content (preference, binding
 /// SID, segment lists, …) rides in the Tunnel Encapsulation attribute
 /// (Tunnel-Type 15), decoded separately.

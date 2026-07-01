@@ -45,7 +45,7 @@ pub enum MpReachAttr {
     },
     Rtcv4(Rtcv4Reach),
     Rtcv6(Rtcv6Reach),
-    /// BGP MUP (RFC 9833), SAFI 85. The outer AFI distinguishes the
+    /// BGP MUP (draft-ietf-bess-mup-safi), SAFI 85. The outer AFI distinguishes the
     /// IPv4 from the IPv6 MUP address family; per-route-type bodies
     /// stay opaque at this phase.
     Mup {
@@ -442,7 +442,7 @@ impl MpReachAttr {
             return Ok((input, mp_nlri));
         }
         if (header.afi == Afi::Ip || header.afi == Afi::Ip6) && header.safi == Safi::Mup {
-            // RFC 9833 §11: MUP nexthop matches the underlying IP
+            // draft-ietf-bess-mup-safi §11: MUP nexthop matches the underlying IP
             // SAFI's. Accept 4 (IPv4), 16 (IPv6 single), or 32 (IPv6
             // global || link-local — RFC 8950 style), and surface the
             // global half. Anything else is malformed.
@@ -912,7 +912,7 @@ pub(crate) fn evpn_attr_emit(_snpa: u8, nhop: &IpAddr, updates: &[EvpnRoute], bu
 /// Serialize an `MpReachAttr::Mup { afi, snpa, nhop, updates }` as a
 /// complete `MP_REACH_NLRI` path attribute (header + value).
 ///
-/// Wire format (RFC 4760 §3 + RFC 9833 §11):
+/// Wire format (RFC 4760 §3 + draft-ietf-bess-mup-safi §11):
 /// ```text
 ///   AFI  (2 octets) = 1 (IPv4) or 2 (IPv6)
 ///   SAFI (1 octet)  = 85 (MUP)
@@ -1297,7 +1297,7 @@ mod tests {
     /// Minimal T1ST body for the IPv6 outer AFI (its only caller): RD(8),
     /// plen=0 (no prefix), TEID(4), QFI(1), ep_len=128, endpoint(16),
     /// src_len=0. The endpoint length must equal the AFI host width and
-    /// the source-address-length octet is mandatory (RFC 9833 §3.2.1).
+    /// the source-address-length octet is mandatory (draft-ietf-bess-mup-safi §3.2.1).
     fn min_t1st_body() -> Vec<u8> {
         let mut v = vec![0u8; 8]; // RD
         v.push(0); // plen
