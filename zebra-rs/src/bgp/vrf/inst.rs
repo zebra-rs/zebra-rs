@@ -161,6 +161,13 @@ pub struct BgpVrf {
     /// (direct↔interwork switch / router-id change) withdraws this prior one
     /// first.
     pub mup_segment_prefix: Option<bgp_packet::MupPrefix>,
+    /// Installed ST1→ISD encap FIB entries: UE prefix → the local ISD's
+    /// End.DT46 SID it is steered into. A selected ST1 whose UE prefix is
+    /// covered by a locally-originated ISD's prefix installs an oif-only
+    /// recursive seg6 H.Encaps route into this VRF's table (`dst = UE
+    /// prefix, encap seg6 segs [SID]`). Tracked so `reconcile_mup_st1_isd`
+    /// can diff and withdraw when the ST1 or the covering ISD goes away.
+    pub mup_st1_isd_installed: std::collections::BTreeMap<ipnet::IpNet, std::net::Ipv6Addr>,
 }
 
 /// Sender side of the per-VRF inbound channel — handed back to
@@ -602,6 +609,7 @@ impl BgpVrf {
             flex_algo_srv6_routes: Default::default(),
             mup_originated: std::collections::BTreeMap::new(),
             mup_segment_prefix: None,
+            mup_st1_isd_installed: std::collections::BTreeMap::new(),
         };
         (vrf, inbox_tx)
     }
@@ -619,6 +627,128 @@ impl BgpVrf {
                 vrf: self.name.clone(),
                 prefix,
             });
+        }
+    }
+
+    /// Reconcile ST1→ISD encap FIB entries for this VRF. A selected ST1
+    /// whose UE prefix is covered by a locally-originated ISD's prefix is
+    /// steered into that ISD's local End.DT46 SID: install an oif-only
+    /// recursive seg6 H.Encaps route (`dst = UE prefix, encap seg6 segs
+    /// [SID]`) into this VRF's table so UE-bound traffic in the VRF is
+    /// encapsulated toward that segment. Longest-match when several local
+    /// ISDs cover the UE. Diff-gated against `mup_st1_isd_installed` so an
+    /// unchanged binding doesn't churn the FIB, and a binding that lost its
+    /// ST1 or its covering ISD is withdrawn. Mirrors the show-side
+    /// resolution in `render_mup_table`.
+    fn reconcile_mup_st1_isd(&mut self) {
+        use std::net::Ipv6Addr;
+        // Locally-originated ISD prefixes → their End.DT46 SID.
+        let isd: Vec<(ipnet::IpNet, Ipv6Addr)> = self
+            .local_rib
+            .mup
+            .values()
+            .flat_map(|t| t.selected.iter())
+            .filter_map(|(prefix, rib)| {
+                let bgp_packet::MupPrefix::Isd { prefix: p } = prefix else {
+                    return None;
+                };
+                if !rib.is_originated() {
+                    return None;
+                }
+                let (sid, _behavior) = rib.attr.srv6_l3_sid()?;
+                Some((*p, sid))
+            })
+            .collect();
+        // Desired: each selected ST1 UE prefix → the most-specific covering
+        // local ISD's SID.
+        let mut desired: std::collections::BTreeMap<ipnet::IpNet, Ipv6Addr> =
+            std::collections::BTreeMap::new();
+        if !isd.is_empty() {
+            for (prefix, _rib) in self.local_rib.mup.values().flat_map(|t| t.selected.iter()) {
+                if let bgp_packet::MupPrefix::T1st { prefix: ue, .. } = prefix
+                    && let Some((_p, sid)) = isd
+                        .iter()
+                        .filter(|(p, _)| p.contains(ue))
+                        .max_by_key(|(p, _)| p.prefix_len())
+                {
+                    desired.insert(*ue, *sid);
+                }
+            }
+        }
+        // Withdraw entries no longer desired (or whose SID changed).
+        let stale: Vec<ipnet::IpNet> = self
+            .mup_st1_isd_installed
+            .iter()
+            .filter(|(ue, sid)| desired.get(*ue) != Some(*sid))
+            .map(|(ue, _)| *ue)
+            .collect();
+        for ue in stale {
+            self.mup_st1_isd_withdraw(ue);
+            self.mup_st1_isd_installed.remove(&ue);
+        }
+        // Install new / changed entries.
+        for (ue, sid) in &desired {
+            if self.mup_st1_isd_installed.get(ue) == Some(sid) {
+                continue;
+            }
+            self.mup_st1_isd_install(*ue, *sid);
+            self.mup_st1_isd_installed.insert(*ue, *sid);
+        }
+    }
+
+    /// Build + send the oif-only recursive seg6 H.Encaps RibEntry for one
+    /// resolved ST1→ISD binding into this VRF's table. The local End.DT46
+    /// SID is delivered locally (its decap resolves to loopback), so the
+    /// encap route carries no gateway — just the loopback oif + the seg6
+    /// encap; the kernel re-routes the encapped packet by its outer SID DA
+    /// (see the oif-only branch in the netlink route path).
+    fn mup_st1_isd_install(&self, ue: ipnet::IpNet, sid: std::net::Ipv6Addr) {
+        use std::net::{IpAddr, Ipv6Addr};
+        let mut uni = crate::rib::NexthopUni::new(IpAddr::V6(Ipv6Addr::UNSPECIFIED), 0, Vec::new());
+        uni.ifindex_origin = Some(1); // loopback: the local SID is delivered locally
+        uni.segs = vec![sid];
+        uni.encap_type = Some(isis_packet::srv6::EncapType::HEncap);
+        uni.valid = true;
+        let mut entry = crate::rib::entry::RibEntry::new(crate::rib::RibType::Bgp);
+        entry.distance = 200;
+        entry.metric = 0;
+        entry.valid = true;
+        entry.nexthop = crate::rib::Nexthop::Uni(uni);
+        match ue {
+            ipnet::IpNet::V4(prefix) => {
+                let _ = self
+                    .ctx
+                    .rib
+                    .send(crate::rib::Message::Ipv4Add { prefix, rib: entry });
+            }
+            ipnet::IpNet::V6(prefix) => {
+                let _ = self
+                    .ctx
+                    .rib
+                    .send(crate::rib::Message::Ipv6Add { prefix, rib: entry });
+            }
+        }
+    }
+
+    /// Withdraw a previously-installed ST1→ISD encap entry. The RIB dels
+    /// the kernel route using its own stored nexthop, so a valueless stub
+    /// (like `fib_install_v4`'s withdraw) is enough to trigger it.
+    fn mup_st1_isd_withdraw(&self, ue: ipnet::IpNet) {
+        let mut stub = crate::rib::entry::RibEntry::new(crate::rib::RibType::Bgp);
+        stub.valid = false;
+        match ue {
+            ipnet::IpNet::V4(prefix) => {
+                let _ = self
+                    .ctx
+                    .rib
+                    .send(crate::rib::Message::Ipv4Del { prefix, rib: stub });
+            }
+            ipnet::IpNet::V6(prefix) => {
+                let _ = self
+                    .ctx
+                    .rib
+                    .send(crate::rib::Message::Ipv6Del { prefix, rib: stub });
+            }
         }
     }
 
@@ -1620,6 +1750,7 @@ impl BgpVrf {
                     .entry(rd)
                     .or_default()
                     .update(prefix, rib);
+                self.reconcile_mup_st1_isd();
             }
             BgpVrfMsg::MupWithdraw { rd, prefix } => {
                 // Same own-RD scoping as MupUpdate. The VRF holds the single
@@ -1637,6 +1768,7 @@ impl BgpVrf {
                 if empty {
                     self.local_rib.mup.remove(&rd);
                 }
+                self.reconcile_mup_st1_isd();
             }
             // VRF-first MUP origination: build the RD-free ST NLRI from the
             // dispatched session + resolved direction, and export it to the

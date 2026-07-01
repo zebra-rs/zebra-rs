@@ -50,6 +50,15 @@ bgp_mup_isd:
 	mkdir -p allure-results
 	cargo test --test cucumber -- --concurrency=1 --tags "@bgp_mup_isd"
 
+# MUP ST1->ISD encap: one interwork node originates a local ISD (`segment
+# interwork prefix <p>`) and, via its MUP-C, an ST1 whose UE is inside <p>.
+# The ST1 resolves to the local End.DT46 segment and an oif-only recursive
+# seg6 H.Encaps route for the UE is installed into the VRF table. Needs
+# `pfcp-inject` on the host PATH + root netns (kernel VRF + seg6).
+bgp_mup_st1_isd:
+	mkdir -p allure-results
+	cargo test --test cucumber -- --concurrency=1 --tags "@bgp_mup_st1_isd"
+
 # MUP ST2: the MUP-C learns a PFCP decapsulation session (Network Instance
 # `core`) and originates a Type-2 Session-Transformed route carrying the
 # core endpoint + GTP TEID and the Direct segment id (MUP Extended

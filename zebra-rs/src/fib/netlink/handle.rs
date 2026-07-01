@@ -516,7 +516,36 @@ impl FibHandle {
         let attr = RouteAttribute::Destination(RouteAddress::Inet(prefix.addr()));
         msg.attributes.push(attr);
 
-        if self.use_nhid {
+        if let Nexthop::Uni(uni) = &nexthop
+            && !uni.segs.is_empty()
+            && uni.addr.is_unspecified()
+        {
+            // Oif-only recursive seg6 H.Encaps (e.g. a MUP ST1 UE prefix
+            // steered into a *local* End.DT46 ISD segment): there is no
+            // on-link underlay next-hop — the encapped packet's outer DA is
+            // the SID, which the kernel re-routes via the (local) locator
+            // route. So emit `dev <oif> encap seg6 …` with NO gateway, and
+            // embed the seg6 encap on the route: an unspecified-addr nexthop
+            // has no kernel nh_id, so the Nhid path can't carry it. Mirrors
+            // the seg6local oif-only branch in `route_ipv6_add_uni`.
+            if let Some(ifindex) = uni.ifindex() {
+                msg.attributes.push(RouteAttribute::Oif(ifindex));
+            }
+            let encap_type = uni
+                .encap_type
+                .unwrap_or(isis_packet::srv6::EncapType::HEncap);
+            match super::srv6::build_seg6_attrs(&uni.segs, encap_type) {
+                Ok((encap, encap_type_attr)) => {
+                    msg.attributes.push(encap);
+                    msg.attributes.push(encap_type_attr);
+                }
+                Err(e) => {
+                    tracing::warn!("SRv6 oif-only encap build failed for {prefix}: {e:#}");
+                    return false;
+                }
+            }
+            msg.attributes.push(RouteAttribute::Priority(uni.metric));
+        } else if self.use_nhid {
             // Kernel >= 5.3: use nexthop ID
             if let Nexthop::Uni(uni) = &nexthop {
                 msg.attributes.push(RouteAttribute::Nhid(uni.gid as u32));
@@ -690,7 +719,17 @@ impl FibHandle {
         let attr = RouteAttribute::Priority(entry.metric);
         msg.attributes.push(attr);
 
-        if self.use_nhid {
+        if let Nexthop::Uni(uni) = &nexthop
+            && !uni.segs.is_empty()
+            && uni.addr.is_unspecified()
+        {
+            // Oif-only recursive seg6 encap: delete by {dest, table, oif}.
+            // The route carries no gateway / nh_id, so pushing either would
+            // stop the kernel from matching it (see the add-path branch).
+            if let Some(ifindex) = uni.ifindex() {
+                msg.attributes.push(RouteAttribute::Oif(ifindex));
+            }
+        } else if self.use_nhid {
             // Kernel >= 5.3: use nexthop ID
             if let Nexthop::Uni(uni) = &nexthop {
                 msg.attributes.push(RouteAttribute::Nhid(uni.gid as u32));
@@ -871,7 +910,33 @@ impl FibHandle {
             return ok;
         }
 
-        if self.use_nhid {
+        if let Nexthop::Uni(uni) = &nexthop
+            && !uni.segs.is_empty()
+            && uni.addr.is_unspecified()
+        {
+            // Oif-only recursive seg6 H.Encaps — see the same branch in
+            // `route_ipv4_add_uni` for the rationale. No gateway; embed the
+            // seg6 encap and let the kernel re-route by the outer SID DA.
+            // Must precede the `use_nhid` arm: an unspecified-addr nexthop
+            // has gid 0, which the sanity check below would reject.
+            if let Some(ifindex) = uni.ifindex() {
+                msg.attributes.push(RouteAttribute::Oif(ifindex));
+            }
+            let encap_type = uni
+                .encap_type
+                .unwrap_or(isis_packet::srv6::EncapType::HEncap);
+            match super::srv6::build_seg6_attrs(&uni.segs, encap_type) {
+                Ok((encap, encap_type_attr)) => {
+                    msg.attributes.push(encap);
+                    msg.attributes.push(encap_type_attr);
+                }
+                Err(e) => {
+                    tracing::warn!("SRv6 oif-only encap build failed for {prefix}: {e:#}");
+                    return false;
+                }
+            }
+            msg.attributes.push(RouteAttribute::Priority(uni.metric));
+        } else if self.use_nhid {
             // Pre-send sanity check — mirror of route_ipv4_add_uni.
             let gid_for_check = match &nexthop {
                 Nexthop::Uni(u) => Some(u.gid),
@@ -1117,7 +1182,16 @@ impl FibHandle {
             return;
         }
 
-        if self.use_nhid {
+        if let Nexthop::Uni(uni) = &nexthop
+            && !uni.segs.is_empty()
+            && uni.addr.is_unspecified()
+        {
+            // Oif-only recursive seg6 encap: delete by {dest, table, oif}
+            // (no gateway / nh_id — see route_ipv4_del_uni).
+            if let Some(ifindex) = uni.ifindex() {
+                msg.attributes.push(RouteAttribute::Oif(ifindex));
+            }
+        } else if self.use_nhid {
             if let Nexthop::Uni(uni) = &nexthop {
                 msg.attributes.push(RouteAttribute::Nhid(uni.gid as u32));
                 let attr = RouteAttribute::Priority(uni.metric);
