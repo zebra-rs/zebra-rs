@@ -4,7 +4,7 @@ use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
 use bgp_packet::*;
-use ipnet::{Ipv4Net, Ipv6Net};
+use ipnet::{IpNet, Ipv4Net, Ipv6Net};
 use prefix_trie::{Prefix, PrefixMap};
 use serde::Serialize;
 
@@ -4306,6 +4306,43 @@ fn render_mup_table(
         std::collections::BTreeMap::new()
     };
 
+    // On the node that originated a local ISD (Interwork Segment Discovery)
+    // segment, a selected ST1 route whose UE prefix is covered by the ISD's
+    // advertised prefix is "resolved" by that ISD: UE-bound traffic in the
+    // VRF is encapsulated into the ISD's (local) End.DT46 segment. Index the
+    // local ISD routes (originated, with an SRv6 L3 Service SID) so each ST1
+    // can pick the most-specific covering ISD (longest-prefix match). The FIB
+    // install of this H.Encaps entry lands in a follow-up.
+    let isd_index: Vec<(
+        RouteDistinguisher,
+        MupPrefix,
+        IpNet,
+        std::net::Ipv6Addr,
+        u16,
+    )> = if resolve_segments {
+        tables
+            .iter()
+            .flat_map(|(rd, table)| {
+                table
+                    .selected
+                    .iter()
+                    .map(move |(prefix, rib)| (rd, prefix, rib))
+            })
+            .filter_map(|(rd, prefix, rib)| {
+                let MupPrefix::Isd { prefix: isd_prefix } = prefix else {
+                    return None;
+                };
+                if !rib.is_originated() {
+                    return None;
+                }
+                let (sid, behavior) = rib.attr.srv6_l3_sid()?;
+                Some((*rd, prefix.clone(), *isd_prefix, sid, behavior))
+            })
+            .collect()
+    } else {
+        Vec::new()
+    };
+
     let mut buf = String::new();
     writeln!(
         buf,
@@ -4358,6 +4395,27 @@ fn render_mup_table(
                     srv6_behavior_name(*behavior),
                     sid,
                     mup_prefix_display(dsd_rd, dsd)
+                )?;
+            }
+
+            // ST1 -> ISD resolution on the ISD's originating node: a selected
+            // ST1 whose UE prefix is covered by a local ISD's prefix is
+            // encapsulated into that ISD's End.DT46 segment (longest-match
+            // when several ISDs cover the UE).
+            if resolve_segments
+                && let MupPrefix::T1st { prefix: ue, .. } = prefix
+                && let Some((isd_rd, isd, _, sid, behavior)) = isd_index
+                    .iter()
+                    .filter(|(_, _, isd_prefix, _, _)| isd_prefix.contains(ue))
+                    .max_by_key(|(_, _, isd_prefix, _, _)| isd_prefix.prefix_len())
+            {
+                writeln!(
+                    buf,
+                    "       resolved {} -> {} {} (via {})",
+                    ue,
+                    srv6_behavior_name(*behavior),
+                    sid,
+                    mup_prefix_display(isd_rd, isd)
                 )?;
             }
         }
@@ -5763,6 +5821,93 @@ mod detail_tests {
             ),
             "{out}"
         );
+    }
+
+    /// On the ISD's originating node, a selected ST1 whose UE prefix is
+    /// covered by the local ISD's advertised prefix resolves to that ISD's
+    /// End.DT46 segment (the encap the UE-bound traffic takes). A UE outside
+    /// the ISD prefix does not resolve, and resolution is only shown when the
+    /// caller opts in (`resolve_segments`).
+    #[test]
+    fn render_mup_table_resolves_st1_to_isd_segment() {
+        use std::net::{IpAddr, Ipv4Addr};
+        let mut tables: std::collections::BTreeMap<
+            RouteDistinguisher,
+            super::super::route::LocalRibMupTable,
+        > = std::collections::BTreeMap::new();
+
+        // A locally-originated ISD advertising 10.60.0.0/16 + an End.DT46 SID.
+        let mut isd_attr = BgpAttr::new();
+        isd_attr.nexthop = Some(BgpNexthop::Ipv6("fcbb:bbbb:1::".parse().unwrap()));
+        isd_attr.prefix_sid = Some(super::super::inst::srv6_l3_service_prefix_sid(
+            "fcbb:bbbb:1:40::".parse().unwrap(),
+            None,
+            bgp_packet::SRV6_BEHAVIOR_END_DT46,
+        ));
+        let isd_rib = BgpRib::new(
+            0,
+            Ipv4Addr::new(10, 0, 0, 1),
+            BgpRibType::Originated,
+            0,
+            32768,
+            &isd_attr,
+            None,
+            None,
+            false,
+        );
+        let (isd_rd, isd_prefix) = MupPrefix::from_route(&MupRoute::Isd {
+            id: 0,
+            arch: MupArchitectureType::Gpp5g,
+            rd: "65501:10".parse().unwrap(),
+            prefix: "10.60.0.0/16".parse().unwrap(),
+        });
+        let _ = tables
+            .entry(isd_rd)
+            .or_default()
+            .update(isd_prefix, isd_rib);
+
+        // An ST1 whose UE (10.60.1.5/32) falls inside the ISD prefix.
+        let st1_in = mup_rib("fc00::9".parse::<IpAddr>().unwrap(), 32768, &[]);
+        let (rd_in, p_in) = MupPrefix::from_route(&MupRoute::T1st {
+            id: 0,
+            arch: MupArchitectureType::Gpp5g,
+            rd: "65501:10".parse().unwrap(),
+            prefix: "10.60.1.5/32".parse().unwrap(),
+            teid: 1,
+            qfi: 9,
+            endpoint: "10.0.0.9".parse().unwrap(),
+            source: None,
+        });
+        let _ = tables.entry(rd_in).or_default().update(p_in, st1_in);
+
+        // An ST1 whose UE (10.70.1.5/32) is outside the ISD prefix.
+        let st1_out = mup_rib("fc00::a".parse::<IpAddr>().unwrap(), 32768, &[]);
+        let (rd_out, p_out) = MupPrefix::from_route(&MupRoute::T1st {
+            id: 0,
+            arch: MupArchitectureType::Gpp5g,
+            rd: "65501:10".parse().unwrap(),
+            prefix: "10.70.1.5/32".parse().unwrap(),
+            teid: 2,
+            qfi: 9,
+            endpoint: "10.0.0.10".parse().unwrap(),
+            source: None,
+        });
+        let _ = tables.entry(rd_out).or_default().update(p_out, st1_out);
+
+        // Not opted in: no resolution shown.
+        let plain = render_mup_table(&tables, false).unwrap();
+        assert!(!plain.contains("resolved"), "{plain}");
+
+        // Opted in: the in-range ST1 resolves to the ISD's End.DT46 segment;
+        // the out-of-range ST1 does not.
+        let out = render_mup_table(&tables, true).unwrap();
+        assert!(
+            out.contains(
+                "resolved 10.60.1.5/32 -> End.DT46 fcbb:bbbb:1:40:: (via [ISD][65501:10][10.60.0.0/16])"
+            ),
+            "{out}"
+        );
+        assert!(!out.contains("resolved 10.70.1.5/32"), "{out}");
     }
 
     #[test]

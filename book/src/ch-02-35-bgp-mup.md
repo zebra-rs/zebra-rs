@@ -202,8 +202,13 @@ it:
   Discovery (ISD, type 1)** route — NLRI = RD + the configured `prefix`
   (typically the locally connected gNodeB N3 prefix; its family selects the
   AFI) — carrying the End.DT46 SID. The ISD does not originate until the
-  prefix is set, and carries no `mup-ext-comm` (an ISD is resolved by
-  endpoint-address lookup).
+  prefix is set, and carries no `mup-ext-comm`: an ISD is resolved by
+  **prefix containment** instead. On the ISD's originating node, a selected
+  ST1 whose UE address falls within a local ISD's prefix is bound to that
+  ISD's End.DT46 segment (longest-match when several ISDs cover the UE), and
+  `show bgp mup` / `show bgp vrf <name> mup` print the resolution
+  (`resolved <ue> -> End.DT46 <sid> (via [ISD]…)`). UE-bound traffic in the
+  VRF is then encapsulated into that segment.
 
 ```
 vrf N6 {
