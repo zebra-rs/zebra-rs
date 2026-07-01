@@ -7,8 +7,9 @@ Feature: BGP MUP ST1 resolves to a remote ISD segment and installs SRv6 encap
   Session-Transformed (ST1) route whose GTP endpoint (gNB) address falls
   inside that prefix. Because the endpoint is covered by the (remote) ISD,
   the node resolves the ST1 to the ISD's End.DT46 segment and installs an
-  SRv6 H.Encaps route for the endpoint into the VRF table, resolved through
-  the IS-IS SRv6 underlay toward the ISD's next-hop.
+  SRv6 H.Encaps route for the ST1's **UE prefix** into the VRF table (the
+  endpoint is the lookup key; the UE prefix is the forwarded destination),
+  resolved through the IS-IS SRv6 underlay toward the ISD's next-hop.
 
   Test Topology:
   ```
@@ -26,7 +27,7 @@ Feature: BGP MUP ST1 resolves to a remote ISD segment and installs SRv6 encap
   65501:20, `encapsulation srv6`, import RT 65501:10) imports the ISD and,
   from a PFCP session on NI `access`, originates an ST1 (UE 10.60.1.5, gNB
   endpoint 10.0.0.1 inside 10.0.0.0/24). z2 resolves the ST1's endpoint to
-  z1's segment and installs the endpoint encap.
+  z1's segment and installs the UE-prefix encap.
 
   NOTE: needs `pfcp-inject` on the BDD host PATH and root netns (kernel VRF +
   seg6 + IS-IS SRv6 underlay).
@@ -50,13 +51,14 @@ Feature: BGP MUP ST1 resolves to a remote ISD segment and installs SRv6 encap
     Given the test topology exists
     When I execute "pfcp-inject --target 127.0.0.1 --port 8805 --ue-ipv4 10.60.1.5 --teid 0x12345678 --endpoint 10.0.0.1 --network-instance access" in namespace "z2"
     # The ST1's gNB endpoint (10.0.0.1) is covered by the ISD 10.0.0.0/24, so
-    # the per-VRF view shows the resolution to the ISD's End.DT46 segment.
-    Then show command "show bgp vrf N6 mup" in namespace "z2" should eventually contain "resolved 10.0.0.1 -> End.DT46"
-    # The SRv6 H.Encaps route for the endpoint is installed into the VRF
+    # the per-VRF view resolves the UE prefix to the ISD's End.DT46 segment
+    # (keyed on the endpoint, forwarding the UE prefix).
+    Then show command "show bgp vrf N6 mup" in namespace "z2" should eventually contain "resolved 10.60.1.5/32 (endpoint 10.0.0.1) -> End.DT46"
+    # The SRv6 H.Encaps route for the UE prefix is installed into the VRF
     # table, resolved through the underlay toward z1's End.DT46 SID (locator S
     # = fcbb:bbbb:1::/48).
     And command "ip route show table all" in namespace "z2" should eventually contain "encap seg6 mode encap segs 1 [ fcbb:bbbb:1:"
-    And command "ip route show table all" in namespace "z2" should eventually contain "10.0.0.1"
+    And command "ip route show table all" in namespace "z2" should eventually contain "10.60.1.5"
 
   Scenario: Teardown topology
     Given the test topology exists

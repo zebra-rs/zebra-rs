@@ -580,10 +580,11 @@ sibling of the slice-1 DSD:
 The prefix-containment twin of slice 3's ST2 → DSD resolution: a selected
 ST1 whose **GTP endpoint (gNB) address** is covered (longest-match) by an
 ISD's advertised prefix (the gNB N3 network) resolves to that ISD's End.DT46
-segment. The key is the ST1 *endpoint*, not the UE prefix — mirroring
-ST2 → DSD's endpoint dst, and it handles the mixed-AFI case (an IPv6 UE route
-carrying an IPv4 gNB endpoint). `render_mup_table` indexes the ISD routes by
-prefix and prints `resolved <endpoint> -> End.DT46 <sid> (via [ISD]…)` in
+segment. The *lookup key* is the ST1 endpoint, not the UE prefix (draft
+§3.3.9), which also handles the mixed-AFI case (an IPv6 UE route carrying an
+IPv4 gNB endpoint); the *forwarding destination* is the UE prefix (the Prefix
+field, §3.1.3). `render_mup_table` indexes the ISD routes by prefix and
+prints `resolved <ue> (endpoint <ep>) -> End.DT46 <sid> (via [ISD]…)` in
 `show bgp mup` / `show bgp vrf <name> mup` (no MUP Extended Community). A
 `render_mup_table` unit test covers in-range resolve, out-of-range
 no-resolve, and the opt-in gate.
@@ -596,9 +597,10 @@ routes and the segment routes both land in the per-VRF MUP RIB, and the
 per-VRF task installs an SRv6 **H.Encaps** route for the ST route's
 **endpoint** into the VRF table:
 
-- **ST2 → DSD** (by Direct-segment id): `dst = the ST2 endpoint /32|/128`.
-- **ST1 → ISD** (ST1 gNB endpoint contained in the ISD prefix):
-  `dst = the ST1 endpoint /32|/128`.
+- **ST2 → DSD** (by Direct-segment id): `dst = the ST2 endpoint /32|/128`
+  (uplink; the ST2 carries no UE prefix).
+- **ST1 → ISD** (lookup key = the ST1 gNB endpoint contained in the ISD
+  prefix): `dst = the ST1 UE prefix` (downlink to the UE).
 
 The segment is **remote** (received from the peer owning the End.DT46 SID),
 so the encap resolves through the underlay via **Next-Hop Tracking** — this

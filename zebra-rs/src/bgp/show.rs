@@ -4398,13 +4398,19 @@ fn render_mup_table(
 
             // ST1 -> ISD resolution: a selected ST1 whose GTP endpoint (gNB)
             // address falls within an ISD's advertised prefix (the gNB N3
-            // network) is encapsulated toward that ISD's End.DT46 segment
-            // (longest-match when several ISDs cover the endpoint). The key
-            // is the ST1 *endpoint*, not the UE prefix — mirroring ST2->DSD
-            // (`dst = the ST route's endpoint`) and handling the mixed-AFI
-            // case (an IPv6 UE route may carry an IPv4 gNB endpoint).
+            // network) has its UE prefix encapsulated toward that ISD's
+            // End.DT46 segment (longest-match when several ISDs cover the
+            // endpoint). The lookup *key* is the ST1 endpoint (draft §3.3.9),
+            // but the forwarding destination is the UE prefix (the Prefix
+            // field, §3.1.3) — downlink traffic to the UE is steered toward
+            // the gNB's segment. Matching by the endpoint also handles the
+            // mixed-AFI case (an IPv6 UE route may carry an IPv4 gNB endpoint).
             if resolve_segments
-                && let MupPrefix::T1st { endpoint, .. } = prefix
+                && let MupPrefix::T1st {
+                    prefix: ue,
+                    endpoint,
+                    ..
+                } = prefix
                 && let Some((isd_rd, isd, _, sid, behavior)) = isd_index
                     .iter()
                     .filter(|(_, _, isd_prefix, _, _)| isd_prefix.contains(endpoint))
@@ -4412,7 +4418,8 @@ fn render_mup_table(
             {
                 writeln!(
                     buf,
-                    "       resolved {} -> {} {} (via {})",
+                    "       resolved {} (endpoint {}) -> {} {} (via {})",
+                    ue,
                     endpoint,
                     srv6_behavior_name(*behavior),
                     sid,
@@ -5903,16 +5910,20 @@ mod detail_tests {
         assert!(!plain.contains("resolved"), "{plain}");
 
         // Opted in: the ST1 whose endpoint is in-range resolves to the ISD's
-        // End.DT46 segment (keyed on the endpoint, not the UE prefix); the
-        // out-of-range endpoint does not.
+        // End.DT46 segment (keyed on the endpoint); the installed / shown
+        // destination is the UE prefix, not the endpoint. The out-of-range
+        // endpoint does not resolve.
         let out = render_mup_table(&tables, true).unwrap();
         assert!(
             out.contains(
-                "resolved 10.0.0.9 -> End.DT46 fcbb:bbbb:1:40:: (via [ISD][65501:10][10.0.0.0/24])"
+                "resolved 10.60.1.5/32 (endpoint 10.0.0.9) -> End.DT46 fcbb:bbbb:1:40:: (via [ISD][65501:10][10.0.0.0/24])"
             ),
             "{out}"
         );
-        assert!(!out.contains("resolved 10.70.0.9"), "{out}");
+        // The out-of-range ST1 (endpoint 10.70.0.9, UE 10.60.2.5) resolves
+        // to nothing (10.70.0.9 still appears in its own [ST1] NLRI line, so
+        // assert on the absence of a *resolved* line for its UE).
+        assert!(!out.contains("resolved 10.60.2.5"), "{out}");
     }
 
     #[test]
