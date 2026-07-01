@@ -161,13 +161,13 @@ pub struct BgpVrf {
     /// (direct↔interwork switch / router-id change) withdraws this prior one
     /// first.
     pub mup_segment_prefix: Option<bgp_packet::MupPrefix>,
-    /// Installed ST1→ISD encap FIB entries: UE prefix → the local ISD's
-    /// End.DT46 SID it is steered into. A selected ST1 whose UE prefix is
-    /// covered by a locally-originated ISD's prefix installs an oif-only
-    /// recursive seg6 H.Encaps route into this VRF's table (`dst = UE
-    /// prefix, via <underlay egress> encap seg6 segs [SID]`). Tracked so
-    /// `reconcile_mup_st1_isd` can diff and withdraw when the ST1 or the
-    /// covering ISD goes away.
+    /// Installed ST1→ISD encap FIB entries: ST1 endpoint host prefix → the
+    /// ISD's End.DT46 SID it is steered into. A selected ST1 whose GTP
+    /// endpoint (gNB) address is covered by an imported ISD's prefix installs
+    /// a resolved-underlay seg6 H.Encaps route into this VRF's table (`dst =
+    /// endpoint /32|/128, via <underlay egress> encap seg6 segs [SID]`).
+    /// Tracked so `reconcile_mup_st1_isd` can diff and withdraw when the ST1
+    /// or the covering ISD goes away.
     pub mup_st1_isd_installed: std::collections::BTreeMap<ipnet::IpNet, std::net::Ipv6Addr>,
     /// Resolved underlay transport for each imported segment route (DSD/ISD)
     /// next-hop, keyed by its `(rd, prefix)`. Supplied by the global NHT via
@@ -671,16 +671,17 @@ impl BgpVrf {
     }
 
     /// Reconcile ST1→ISD encap FIB entries for this VRF. A selected ST1
-    /// whose UE prefix is covered (longest-match) by an imported ISD's prefix
-    /// is steered into that ISD's End.DT46 SID: install a resolved-underlay
-    /// seg6 H.Encaps route for the UE prefix (`dst = UE prefix, via <underlay
-    /// egress> encap seg6 segs [SID]`) into this VRF's table so UE-bound
-    /// traffic in the VRF is encapsulated toward that segment. The ISD is
-    /// remote (received from the access-side PE), so the encap resolves
-    /// through the global-supplied `mup_segment_transport`; an unresolved ISD
-    /// next-hop yields no install. Diff-gated against `mup_st1_isd_installed`.
-    /// Mirrors the show-side resolution in `render_mup_table` and the ST2→DSD
-    /// reconcile (matched by prefix containment instead of Direct-segment id).
+    /// whose GTP endpoint (gNB) address is covered (longest-match) by an
+    /// imported ISD's prefix (the gNB N3 network) is steered into that ISD's
+    /// End.DT46 SID: install a resolved-underlay seg6 H.Encaps route for the
+    /// endpoint (`dst = endpoint /32|/128, via <underlay egress> encap seg6
+    /// segs [SID]`) into this VRF's table. The ISD is remote (received from
+    /// the access-side PE), so the encap resolves through the global-supplied
+    /// `mup_segment_transport`; an unresolved ISD next-hop yields no install.
+    /// Diff-gated against `mup_st1_isd_installed`. Mirrors the show-side
+    /// resolution in `render_mup_table` and the ST2→DSD reconcile — both key
+    /// on the ST route's endpoint, ST2→DSD matching by Direct-segment id and
+    /// ST1→ISD by the endpoint's containment in the ISD prefix.
     fn reconcile_mup_st1_isd(&mut self) {
         use std::net::Ipv6Addr;
         type Transport = Vec<crate::rib::nht::ResolvedNexthop>;
@@ -711,13 +712,17 @@ impl BgpVrf {
             std::collections::BTreeMap::new();
         if !isd_index.is_empty() {
             for (prefix, _rib) in self.local_rib.mup.values().flat_map(|t| t.selected.iter()) {
-                if let bgp_packet::MupPrefix::T1st { prefix: ue, .. } = prefix
+                // Key on the ST1 GTP endpoint (gNB), not the UE prefix: the
+                // ISD advertises the gNB N3 network, so the endpoint is what
+                // falls inside it (mirrors ST2->DSD's endpoint dst, and works
+                // for a mixed-AFI IPv6-UE / IPv4-endpoint route).
+                if let bgp_packet::MupPrefix::T1st { endpoint, .. } = prefix
                     && let Some((_p, sid, transport)) = isd_index
                         .iter()
-                        .filter(|(p, _, _)| p.contains(ue))
+                        .filter(|(p, _, _)| p.contains(endpoint))
                         .max_by_key(|(p, _, _)| p.prefix_len())
                 {
-                    desired.insert(*ue, (*sid, transport.clone()));
+                    desired.insert(host_net(*endpoint), (*sid, transport.clone()));
                 }
             }
         }

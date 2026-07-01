@@ -1,12 +1,12 @@
 # z2 — MUP interwork / UPF node. Its MUP-C originates a Type-1 ST (ST1)
 # route from a PFCP session on NI `access` (`afi-safi mup route st1`), and
 # VRF N6 (rd 65501:20, `encapsulation srv6`, import RT 65501:10) imports
-# z1's ISD (Interwork Segment Discovery, prefix 10.60.0.0/16 + End.DT46 SID
-# from z1's locator S). Because the ST1's UE (10.60.1.5) is covered by the
-# ISD prefix, z2 resolves the ST1 to z1's *remote* segment and installs an
-# SRv6 H.Encaps route for the UE into the VRF table, resolved through the
-# IS-IS SRv6 underlay toward z1:
-#   10.60.1.5/32 via <z1 underlay> encap seg6 segs [z1 End.DT46 SID]
+# z1's ISD (Interwork Segment Discovery, prefix 10.0.0.0/24 + End.DT46 SID
+# from z1's locator S). Because the ST1's gNB endpoint (10.0.0.1) is covered
+# by the ISD prefix (the gNB N3 network), z2 resolves the ST1 to z1's
+# *remote* segment and installs an SRv6 H.Encaps route for the endpoint into
+# the VRF table, resolved through the IS-IS SRv6 underlay toward z1:
+#   10.0.0.1/32 via <z1 underlay> encap seg6 segs [z1 End.DT46 SID]
 interface:
 - if-name: lo
   ipv6:

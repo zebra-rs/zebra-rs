@@ -1,5 +1,6 @@
 # z1 — MUP PE originating an Interwork Segment Discovery (ISD, type 1)
-# route for VRF N6 (`afi-safi mup segment interwork prefix 10.60.0.0/16`).
+# route for VRF N6 (`afi-safi mup segment interwork prefix 10.0.0.0/24` —
+# the gNB N3 network the ST1 endpoints resolve against).
 # IS-IS L2 SRv6 underlay + iBGP (mup afi-safi) to z2 over loopbacks. VRF N6
 # is `encapsulation srv6`, so it carves a per-VRF End.DT46 service SID from
 # locator S and installs the seg6local decap into the VRF table; `segment
@@ -70,4 +71,4 @@ router:
         mup:
           segment:
           - type: interwork
-            prefix: 10.60.0.0/16
+            prefix: 10.0.0.0/24
