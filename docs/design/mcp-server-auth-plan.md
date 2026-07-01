@@ -202,19 +202,19 @@ touched.
   changes**: it reuses `SO_PEERCRED` + RBAC directly. (If a network
   transport is ever revived, recover the prior design from this file's git
   history.)
-- **2026-06-27** — **Phase 0 landed (read-only) on branch
-  `mcp-stdio-phase0`.** Added the generic `show` tool (rejects non-`show`
-  commands) and `list-show-commands` (live grammar discovery), alongside
-  the kept `get-isis-graph`. Response wrapping factored into a shared
-  helper for the upcoming write tools. Also fixed a pre-existing bug: the
-  MCP entrypoint prepended `http://` to the host, corrupting `unix:`
-  sockets — including the default `unix:zebra-rs/vty` — so the server
-  could never reach a socket daemon; it now passes the host through to
+- **2026-07-01** — **Phase 0 merged to `main` (PR #1703).** Added the
+  generic `show` tool (rejects non-`show` commands) and
+  `list-show-commands` (live grammar discovery), alongside the kept
+  `get-isis-graph`. Response wrapping factored into a shared helper for
+  the upcoming write tools. Also fixed a pre-existing bug: the MCP
+  entrypoint prepended `http://` to the host, corrupting `unix:` sockets
+  — including the default `unix:zebra-rs/vty` — so the server could never
+  reach a socket daemon; it now passes the host through to
   `ZebraClient::endpoint()` for normalization. Verified end-to-end against
   a live daemon (`show version` runs, `configure terminal` rejected,
   discovery returns 188 entries with help/kind/runnable). 7 unit tests;
-  `cargo fmt`/`clippy --all-targets -D warnings`/`test` green. Not yet
-  committed. **Next: Phase 1** (write tools + `--write` gating + audit).
+  CI green (`cargo fmt`/`clippy`/`test`/`clippy (no-lua)`). **Next:
+  Phase 1** (write tools + `--write` gating + audit).
 - **2026-06-27** — Plan drafted. No code landed yet. Current MCP server is
   stdio-only, unauthenticated, single read-only tool (`get-isis-graph`).
   Daemon-side VTY auth stack (SO_PEERCRED, service accounts, RBAC, PAM)
