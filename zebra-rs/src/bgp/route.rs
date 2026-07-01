@@ -14662,6 +14662,85 @@ impl Bgp {
         route_withdraw_evpn_to_peers(rd, prefix, &mut self.peers);
     }
 
+    /// Originate the per-ES Ethernet Auto-Discovery route (Type-1, RFC 7432
+    /// §8.2.1) for a configured ES: Ethernet Tag = `MAX-ET`, NLRI label 0, with
+    /// the **ESI Label EC** carrying the redundancy mode (and, for VXLAN, a
+    /// zero label — local-bias does the split-horizon, RFC 8365 §8.3.1) plus
+    /// the ES-Import RT. Required for fast convergence and split-horizon.
+    pub fn evpn_originate_ethernet_ad_es(
+        &mut self,
+        esi: [u8; 10],
+        vtep_local: IpAddr,
+        single_active: bool,
+    ) {
+        if self.router_id.is_unspecified() {
+            return;
+        }
+        let Some(rd) = rd_from_router_id_vni(self.router_id, 0) else {
+            return;
+        };
+        let prefix = EvpnPrefix::EthernetAd {
+            esi,
+            eth_tag: MAX_ET,
+        };
+        let mut attr = BgpAttr::new();
+        attr.ecom = Some(ExtCommunity::from([
+            ExtCommunityValue::es_import_rt(&esi),
+            ExtCommunityValue::esi_label(single_active, 0),
+        ]));
+        attr.nexthop = Some(BgpNexthop::Evpn(vtep_local));
+        let mut rib = BgpRib::new(
+            ORIGINATED_PEER,
+            Ipv4Addr::UNSPECIFIED,
+            BgpRibType::Originated,
+            0,
+            32768,
+            &attr,
+            None,
+            None,
+            false,
+        );
+        rib.esi = Some(esi);
+        self.evpn_originate_synch(rd, prefix, rib);
+    }
+
+    /// Inverse of `evpn_originate_ethernet_ad_es`.
+    pub fn evpn_withdraw_ethernet_ad_es(&mut self, esi: [u8; 10]) {
+        let Some(rd) = rd_from_router_id_vni(self.router_id, 0) else {
+            return;
+        };
+        let prefix = EvpnPrefix::EthernetAd {
+            esi,
+            eth_tag: MAX_ET,
+        };
+        let _ = self.local_rib.remove_evpn(rd, &prefix, 0, ORIGINATED_PEER);
+        let _ = self.local_rib.select_best_path_evpn(&rd, &prefix);
+        route_withdraw_evpn_to_peers(rd, prefix, &mut self.peers);
+    }
+
+    /// Originate the full set of routes for a locally-configured ES: the Type-4
+    /// Ethernet Segment route (discovery + DF) and the per-ES Type-1 A-D route
+    /// (fast convergence + split-horizon). Called whenever the ESI is set or
+    /// replayed (router-id change).
+    pub fn evpn_originate_es_routes(
+        &mut self,
+        esi: [u8; 10],
+        vtep_local: IpAddr,
+        single_active: bool,
+    ) {
+        self.evpn_originate_ethernet_seg(esi, vtep_local);
+        self.evpn_originate_ethernet_ad_es(esi, vtep_local, single_active);
+    }
+
+    /// Withdraw the full set of ES routes (the inverse of
+    /// `evpn_originate_es_routes`). A single per-ES A-D withdrawal is the RFC
+    /// 7432 mass-withdraw that lets remote PEs reroute the whole segment at
+    /// once.
+    pub fn evpn_withdraw_es_routes(&mut self, esi: [u8; 10], vtep_local: IpAddr) {
+        self.evpn_withdraw_ethernet_seg(esi, vtep_local);
+        self.evpn_withdraw_ethernet_ad_es(esi);
+    }
+
     /// The DF-election candidates for an ES, computed from the EVPN Loc-RIB:
     /// the `(VTEP, advertised DF algorithm)` of every Type-4 route with this
     /// ESI (our own originated one included), **sorted by ascending VTEP** so
@@ -15067,6 +15146,10 @@ const NTF_EXT_LEARNED: u8 = 0x10;
 /// (RFC 9251 §9.3; IGMP units, ~10s). The real value would come from the
 /// last-member-query timer, which is part of the deferred synch machinery.
 const IGMP_DEBUG_MAX_RESP_TIME: u8 = 100;
+
+/// `MAX-ET` — the reserved Ethernet Tag (all-ones) of a **per-ES** Ethernet
+/// A-D route (RFC 7432 §8.2.1), distinguishing it from a per-EVI A-D.
+const MAX_ET: u32 = 0xffff_ffff;
 
 /// Parse the `vni,esi,group[,source]` spec of the `clear bgp debug
 /// igmp-*-sync-*` test commands into the origination-helper arguments.

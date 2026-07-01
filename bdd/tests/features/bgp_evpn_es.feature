@@ -44,6 +44,16 @@ Feature: BGP EVPN Ethernet Segment discovery (RFC 7432 Type-4)
     # z2 symmetrically sees z1's Type-4.
     And show command "show bgp evpn" in namespace "z2" should eventually contain "[4]:[00:11:22:33:44:55:66:77:88:99]:[32]:[192.168.0.1]"
 
+  Scenario: Each PE originates a per-ES Type-1 A-D route the other imports
+    Given the test topology exists
+    # z1 sees z2's per-ES Ethernet A-D: [1]:[ESI]:[MAX-ET=4294967295].
+    Then show command "show bgp evpn" in namespace "z1" should eventually contain "[1]:[00:11:22:33:44:55:66:77:88:99]:[4294967295]"
+    # ... carrying the ESI Label EC with the redundancy mode (all-active here;
+    # VXLAN local-bias, so label 0).
+    And show command "show bgp evpn" in namespace "z1" should eventually contain "esi-label:all-active:0"
+    # z2 symmetrically sees z1's per-ES A-D.
+    And show command "show bgp evpn" in namespace "z2" should eventually contain "[1]:[00:11:22:33:44:55:66:77:88:99]:[4294967295]"
+
   Scenario: ES membership shows both PEs on z1
     Given the test topology exists
     # z1's ethernet-segment view lists both VTEPs (its own + z2's), keyed by
@@ -67,6 +77,9 @@ Feature: BGP EVPN Ethernet Segment discovery (RFC 7432 Type-4)
   Scenario: Removing the ES on z2 withdraws its Type-4 from z1
     Given the test topology exists
     When I apply config "z2-noes.yaml" to namespace "z2"
+    # The Type-4 has the Originator in its NLRI key, so z2's is distinctly
+    # withdrawn (z1 still keeps its own per-ES A-D, whose [1]:[ESI]:[MAX-ET]
+    # key has no Originator and so renders identically — not separable here).
     Then show command "show bgp evpn" in namespace "z1" should eventually not contain "[4]:[00:11:22:33:44:55:66:77:88:99]:[32]:[192.168.0.2]"
     And show command "show bgp evpn ethernet-segment" in namespace "z1" should eventually contain "Member VTEPs (1)"
 

@@ -38,6 +38,11 @@ impl EsRedundancyMode {
             EsRedundancyMode::SingleActive => "single-active",
         }
     }
+
+    /// The ESI Label EC Single-Active flag value (RFC 7432 §7.5) for this mode.
+    pub fn single_active(&self) -> bool {
+        matches!(self, EsRedundancyMode::SingleActive)
+    }
 }
 
 /// A locally-configured Ethernet Segment: an ESI, a redundancy mode, and the
