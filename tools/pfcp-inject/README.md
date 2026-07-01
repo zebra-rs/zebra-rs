@@ -4,10 +4,12 @@ A minimal **PFCP/N4 SMF simulator** for driving the zebra-rs BGP MUP
 controller in tests and by hand.
 
 It pretends to be a 5G SMF (Session Management Function) and pushes one
-mobile session into the controller (`router bgp mup-c`): a UE IP address,
-an access-side GTP-U F-TEID, and a Network Instance. The controller learns
-the session and **originates a MUP Session-Transformed route** (draft-ietf-bess-mup-safi,
-SAFI 85). With `--delete` it tears the session down again.
+mobile session into the controller (`router bgp mup-c`): a UE IP address, an
+access-side GTP-U F-TEID (and, optionally, a distinct core-side F-TEID), and
+a Network Instance. The controller learns the session and **originates a MUP
+Session-Transformed route** (draft-ietf-bess-mup-safi, SAFI 85) — Type-1 (ST1)
+from the access endpoint, Type-2 (ST2) from the core endpoint. With
+`--delete` it tears the session down again.
 
 It is intentionally tiny and synchronous: the [`rs-pfcp`](https://crates.io/crates/rs-pfcp)
 crate is a pure codec, and the only transport needed is a single blocking
@@ -18,8 +20,10 @@ UDP socket.
 A run performs, in order:
 
 1. **Association Setup** — `AssociationSetupRequest` → expects `AssociationSetupResponse`.
-2. **Session Establishment** — `SessionEstablishmentRequest` (one PDR with the
-   UE IP / access F-TEID / Network Instance + one FAR forwarding to `Core`)
+2. **Session Establishment** — `SessionEstablishmentRequest` (a
+   `SourceInterface=Access` PDR with the UE IP / access F-TEID / Network
+   Instance, an optional `SourceInterface=Core` PDR with the core F-TEID when
+   `--core-endpoint` is set, plus one FAR forwarding to `Core`)
    → expects `SessionEstablishmentResponse`. The controller's UP F-SEID from
    the response is reused as the SEID for any later message.
 3. **Session Deletion** *(only with `--delete`)* — `SessionDeletionRequest`
@@ -88,6 +92,16 @@ pfcp-inject --target 192.168.0.1 \
   --network-instance core
 ```
 
+One session → both ST1 (access endpoint) and ST2 (**distinct** core
+endpoint), when two VRFs bind the same NI under `route st1` / `route st2`:
+
+```bash
+pfcp-inject --target 192.168.0.1 \
+  --ue-ipv4 192.0.2.5 --teid 0x12345678 --endpoint 10.0.0.1 \
+  --core-endpoint 10.9.0.1 --core-teid 0x87654321 \
+  --network-instance internet
+```
+
 Mixed-AFI (IPv6 UE over an IPv4 access transport):
 
 ```bash
@@ -134,9 +148,14 @@ Used from the MUP end-to-end BDD features, for example:
 
 - `bdd/tests/features/bgp_mup_e2e.feature` — ST1 origination;
 - `bdd/tests/features/bgp_mup_st2.feature` — ST2 origination;
-- `bdd/tests/features/bgp_mup_dual_st.feature` — one session → both ST1 + ST2;
+- `bdd/tests/features/bgp_mup_dual_st.feature` — one session → both ST1 + ST2,
+  with distinct `--endpoint` (access) and `--core-endpoint` (core);
 - `bdd/tests/features/bgp_mup_mixed_afi.feature` — IPv6 UE over IPv4 transport;
-- `bdd/tests/features/bgp_mup_interwork.feature` — DSD ↔ ST2 resolution.
+- `bdd/tests/features/bgp_mup_interwork.feature` — ST2 ↔ DSD resolution (show);
+- `bdd/tests/features/bgp_mup_st2_dsd_fib.feature` — ST2 → DSD forwarding
+  (SRv6 H.Encaps for the ST2 endpoint installed into the VRF table);
+- `bdd/tests/features/bgp_mup_st1_isd.feature` — ST1 → ISD forwarding (the
+  gNB endpoint resolves against the ISD; the UE prefix is installed).
 
 > This is a **test-only** tool: it terminates exactly enough of PFCP/N4 to
 > drive route origination. It is not a conformant UPF or SMF.
