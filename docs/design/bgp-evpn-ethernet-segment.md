@@ -21,32 +21,45 @@ Read this first if you're touching
 
 Branch: `evpn-es-foundation-*` (per-phase).
 
-## Status (2026-06-24) — DESIGN ONLY, not started
+## Status (2026-07-01) — CONTROL PLANE COMPLETE (Phases 1–5 merged)
 
-Nothing here is implemented yet. What the tree **already has** (so phases
-build on it, not from scratch):
+The full EVPN-multihoming **control plane** is on `main`: ESI config,
+Type-4 ES discovery, DF election (service-carving), and Type-1 per-ES A-D
+exchange, all BDD-validated (`@bgp_evpn_es`, 7/7). Only **Phase 6 (kernel
+data plane)** remains. What the tree **already has**:
 
 | Building block | State | Where |
 | -------------- | ----- | ----- |
-| `EvpnRouteType::EthernetAd` (1), `EthernetSr` (4) | **enum stub only** — fall through to the parse error arm; no struct / `EvpnPrefix` variant / emit | `nlri_evpn.rs` |
-| ESI as opaque `[u8;10]` + `esi_display()` | **done**; no ESI-Type (0–5) modelling | `nlri_evpn.rs`; `BgpRib.esi: Option<[u8;10]>` in `route.rs` |
-| **ES-Import RT** EC (`0x06`/`0x02`, auto-derived from `esi[1..7]`) | **done** — `es_import_rt()` / `as_es_import_rt()`; today only attached to Type-7/8 | `ext_com.rs` |
-| **DF Election EC** (`0x06`/`0x06`, RFC 8584) | **done** — `DfElectionEc`, `ALG_DEFAULT`=0 / `ALG_HRW`=1, AC-DF bit | `ext_com.rs` |
-| **ESI Label EC** (`0x06`/`0x01`, RFC 7432 §7.5) | **MISSING** — Phase 1 adds it | — |
-| EVPN import-RT filtering | **MISSING** — EVPN routes store globally; no per-RT import gate (Phase 3 adds it) | `route.rs::route_evpn_update` |
-| `evpn ethernet-segment` / per-interface ESI config | **MISSING** — config is VNI-scoped (`advertise-all-vni`), not ES-scoped | `zebra-bgp-evpn.yang`, `config.rs` |
-| Origination pattern (`evpn_originate_*` + `BgpTop` builder), generic advertise (`route_advertise_evpn_to_peers`), receive (`route_evpn_update`) | **done** — Type-4/1 origination + import slot into these | `route.rs` |
+| `EvpnRouteType::EthernetAd` (1), `EthernetSeg` (4) | **done** — struct + `EvpnPrefix` variant + parse/emit/Display/round-trip | `nlri_evpn.rs` |
+| ESI as opaque `[u8;10]` + `esi_display()` / `esi_from_str()` | **done**; no `Esi` newtype / ESI-Type (0–5) modelling (manual Type-0 only) | `nlri_evpn.rs`; `BgpRib.esi: Option<[u8;10]>` in `route.rs` |
+| **ES-Import RT** EC (`0x06`/`0x02`, auto-derived from `esi[1..7]`) | **done** — `es_import_rt()` / `as_es_import_rt()`; attached to Type-4, per-ES A-D, and Type-7/8 | `ext_com.rs` |
+| **DF Election EC** (`0x06`/`0x06`, RFC 8584) | **done** — `DfElectionEc`, `ALG_DEFAULT`=0 / `ALG_HRW`=1, AC-DF bit; on Type-4 | `ext_com.rs` |
+| **ESI Label EC** (`0x06`/`0x01`, RFC 7432 §7.5) | **done** (P1/P5) — `esi_label()` / `as_esi_label()`, single-active flag; on per-ES A-D | `ext_com.rs` |
+| **EVI-RT EC** (`0x06`/`0x0A`–`0x0D`) | **done** (P1) — `evi_rt_from_rt()` / `as_evi_rt()`; Type 3 (IPv6, 20-octet) deferred | `ext_com.rs` |
+| `evpn ethernet-segment <name>` config (esi / redundancy-mode / interface) | **done** (P2) — YANG list + handlers; per-ES state on `Bgp` | `zebra-bgp-evpn.yang`, `config.rs`, `ethernet_segment.rs` |
+| Type-4 ES origination + membership + DF election | **done** (P3/P4) — `evpn_originate_ethernet_seg`, `es_df_candidates`, `negotiate_df_alg`, `designated_forwarder`; `show bgp evpn ethernet-segment` | `route.rs`, `show.rs` |
+| Per-ES Type-1 A-D origination (MAX-ET + ESI Label EC) | **done** (P5) — `evpn_originate_ethernet_ad_es`, combined `evpn_originate/withdraw_es_routes` | `route.rs` |
+| EVPN import-RT filtering | **MISSING** — EVPN routes still store globally; membership is derived by scanning the Loc-RIB for the ES-Import RT, not gated on import (deferred) | `route.rs::route_evpn_update` |
+| Per-EVI A-D (aliasing) | **MISSING** — needs EVI-to-ES mapping config (deferred, feeds Phase 6) | — |
+| DF hold timer (3 s), HRW algorithm | **MISSING** — DF recomputed on membership change, default service-carving only (deferred) | — |
 
 | Phase | Slice | State |
 | ----- | ----- | ----- |
-| 0 | Design doc (this file) | **this PR** |
-| 1 | Codec — Type 1 + Type 4 NLRI, ESI Label EC, `Esi` typing | planned |
-| 2 | ESI configuration (`evpn ethernet-segment`) | planned |
-| 3 | ES discovery — Type-4 origination/import + import-RT filtering | planned |
-| 4 | DF election (service-carving; HRW sub-phase) | planned |
-| 5 | Type 1 A-D — per-ES + per-EVI, fast-convergence withdraw | planned |
-| 6 | Data plane — DF-gated BUM, split-horizon, aliasing | planned (hardest; likely its own plan) |
+| 0 | Design doc (this file) | **done** (#1633) |
+| 1 | Codec — Type 1 + Type 4 NLRI, ESI Label + EVI-RT ECs | **done** (#1634) |
+| 2 | ESI configuration (`evpn ethernet-segment`) | **done** (#1635) |
+| 3 | ES discovery — Type-4 origination + membership | **done** (#1636) |
+| 4 | DF election (service-carving; default-vs-HRW negotiation) | **done** (#1638) |
+| 5 | Type 1 A-D — **per-ES** + fast-convergence mass-withdraw | **done** (#1702) |
+| 6 | Data plane — DF-gated BUM, split-horizon, aliasing | **planned** (hardest; likely its own plan) |
 | — | RFC 9251 synch dataplane (Type 7/8 organic) | unblocked by 1–5, separate |
+
+**Deferred from Phases 1–5** (do not re-derive — recorded here): `Esi`
+newtype / ESI-Type (0–5) modelling; **EVPN import-RT filtering** (membership
+is scanned, not import-gated); **per-EVI A-D** for aliasing (needs
+EVI-to-ES mapping); **HRW** DF algorithm (Alg 1); the **3 s DF hold timer**;
+**EVI-RT Type 3** (IPv6, 20-octet EC). All feed Phase 6 or are independent
+follow-ups.
 
 ## RFC surface
 
@@ -149,46 +162,56 @@ algorithm across the ES.
 
 ## Phases
 
-**Phase 1 — Codec.** Type 1 (`EvpnEthernetAd`) and Type 4
+**Phase 1 — Codec. ✅ (#1634)** Type 1 (`EvpnEthernetAd`) and Type 4
 (`EvpnEthernetSeg`) structs + `EvpnRoute` + `EvpnPrefix` variants +
-parse/emit + `Display` + round-trip tests, in `nlri_evpn.rs` (mirror the
-Type-6/7/8 work). Add the **ESI Label EC** to `ext_com.rs` (constructor +
-`is_/as_` accessor + Display + single-active flag). Introduce an `Esi`
-newtype over `[u8;10]` with type-aware construction/Display (Type-0 parse
-from CLI, reserved-value checks) — used by config and the new routes.
-*Self-contained, fully unit-testable; no behaviour change.*
+parse/emit + `Display` + round-trip tests, in `nlri_evpn.rs` (mirrors the
+Type-6/7/8 work). Added the **ESI Label EC** and **EVI-RT EC** to
+`ext_com.rs` (constructors + `is_/as_` accessors + Display + single-active
+flag). *Delta from plan:* the `Esi` newtype was **not** introduced — ESI
+stays an opaque `[u8;10]` with the shared `esi_display()` / `esi_from_str()`
+helpers (manual Type-0 only; ESI-Type modelling deferred).
 
-**Phase 2 — ESI configuration.** `evpn ethernet-segment <name>` with `esi
-<type-0 value>` and `redundancy-mode {all-active|single-active}`, bound to
-an access interface (new YANG under `zebra-bgp-evpn.yang` + handlers in
-`config.rs`). A per-ES state struct (`EthernetSegment { esi, mode, df_state,
-peers }`) on `Bgp`. Auto-derive the ES-Import RT. No routes yet — just the
-config surface and state.
+**Phase 2 — ESI configuration. ✅ (#1635)** `evpn ethernet-segment <name>`
+with `esi <type-0 value>`, `redundancy-mode {all-active|single-active}`,
+and `interface` (new YANG list under `zebra-bgp-evpn.yang` + handlers in
+`config.rs`). Per-ES state `EthernetSegment { esi, redundancy_mode,
+interface }` on `Bgp::ethernet_segments` (`ethernet_segment.rs`);
+ES-Import RT auto-derived. Config surface + state only.
 
-**Phase 3 — ES discovery + import-RT filtering.** Originate the **Type-4**
-(ES-Import RT + DF Election EC; reuse the `evpn_originate_*` + `BgpTop`
-pattern). Add **EVPN import-RT filtering** to `route_evpn_update`: import a
-Type-4 only when its ES-Import RT matches a locally-configured ES, and
-build the per-ES PE membership set. **Gotcha:** `route_rts_from_ecom`
-matches `low_type == 0x02` regardless of high-type — the ES-Import RT
-(`0x06/0x02`) must be disambiguated by high-type so it isn't mistaken for a
-standard RT. (This filtering also lets the already-shipped Type-7/8
-ES-Import RT scope actually take effect — closes that follow-up.)
+**Phase 3 — ES discovery. ✅ (#1636)** Originate the **Type-4** (ES-Import
+RT + DF Election EC) via `evpn_originate_ethernet_seg`. *Delta from plan:*
+**import-RT filtering was NOT added** — EVPN routes still store globally,
+and per-ES membership is derived by **scanning the Loc-RIB** for Type-4s
+carrying the matching ES-Import RT (`es_df_candidates`), rather than by an
+import gate on `route_evpn_update`. The `route_rts_from_ecom` high-type
+disambiguation gotcha therefore remains a Phase-6/follow-up concern, not yet
+hit. (Type-7/8 ES-Import RT scoping likewise still un-enforced.)
 
-**Phase 4 — DF election.** Service-carving (§8.5) over the membership set,
-per `(ES, VNI)`: a hold timer (default 3 s, re-armed on membership change),
-ordered PE-IP list, `V mod N` ⇒ DF. Per-ES `df_state` + `show evpn
-ethernet-segment`. RFC 8584 **default-vs-HRW** negotiation via the
-`DfElectionEc` (lowest common algorithm); HRW itself an optional sub-phase.
-Still control-plane: DF state is computed and shown, not yet enforced.
+**Phase 4 — DF election. ✅ (#1638)** Service-carving (§8.5) over the
+membership set: ascending PE-IP ordinals, `tag mod N` ⇒ DF
+(`designated_forwarder`), with RFC 8584 **default-vs-HRW** negotiation
+(`negotiate_df_alg`, lowest common algorithm). `show bgp evpn
+ethernet-segment` renders candidates + elected DF. *Delta from plan:* **no
+3 s hold timer** (DF recomputed directly on membership change) and **HRW
+itself deferred** (any non-zero negotiated alg falls back to carving).
+Control-plane only — DF is computed and shown, not enforced.
 
-**Phase 5 — Type 1 A-D routes.** Originate the **per-ES A-D** (MAX-ET + ESI
-Label EC carrying the single-active flag) and, per EVI, the **per-EVI
-A-D**. **Mass-withdraw** the per-ES A-D on ES/link-down so remote PEs
-reroute in one update (RFC 7432 fast convergence). Import + store the peers'
-A-D routes (feeds Phase 6 aliasing).
+**Phase 5 — Type 1 A-D routes. ✅ (#1702)** Originate the **per-ES A-D**
+(MAX-ET + ESI Label EC carrying the single-active flag; zero VXLAN
+local-bias label) via `evpn_originate_ethernet_ad_es`, combined with the
+Type-4 in `evpn_originate/withdraw_es_routes`. A single per-ES A-D withdraw
+is the RFC 7432 **mass-withdraw**. *Delta from plan:* the **per-EVI A-D was
+NOT added** — it needs EVI-to-ES mapping config that doesn't exist yet, so
+aliasing (Phase 6) is still blocked on it. Import/storage of peers' A-D
+routes rides the generic EVPN Loc-RIB.
 
-**Phase 6 — Data plane (hardest; likely its own multi-PR plan).**
+**Phase 6 — Data plane (hardest; likely its own multi-PR plan). Planned.**
+- **Control-plane prerequisites carried over** (must land first, both
+  deferred from earlier phases): the **per-EVI A-D** route (Phase 5 shipped
+  only per-ES; aliasing needs the per-ES + per-EVI pair) and — if the DF/
+  membership derivation is tightened — **EVPN import-RT filtering** (Phase 3
+  left routes stored globally; the `route_rts_from_ecom` high-type gotcha
+  bites here).
 - **DF-gated BUM**: only the DF floods BUM toward the local segment.
 - **Split-horizon (local-bias, RFC 8365 §8.3.1)**: drop overlay BUM whose
   ingress VTEP is a known peer on the same ES (no MPLS ESI label in VXLAN).
@@ -224,9 +247,11 @@ that closes `bgp-evpn-igmp-mld-proxy-followups.md` §6.
 
 - **Per phase:** `cargo fmt` + workspace clippy + unit tests
   (codec round-trip, EC, DF-election algorithm); smallest-reviewable-PR-first.
-- **BDD:** a `@bgp_evpn_ethernet_segment` feature — two PEs (z1/z2) on a
-  shared ES (manual Type-0 ESI), assert Type-4 exchange, DF election outcome
-  (`show evpn ethernet-segment`), and per-ES/per-EVI A-D presence. Data-plane
-  assertions (DF-gated flood, aliasing) gate on the Phase-6 mechanism and a
-  dual-homed-CE topology. End every feature with an explicit teardown.
+- **BDD:** the `@bgp_evpn_es` feature (`bgp_evpn_es.feature`) — two PEs
+  (z1/z2) on a shared ES (manual Type-0 ESI) — asserts Type-4 exchange, the
+  auto-derived ES-Import RT + DF Election EC, DF election outcome (`show bgp
+  evpn ethernet-segment`), per-ES A-D presence (`[1]:[ESI]:[MAX-ET]` +
+  `esi-label:all-active:0`), and ES-removal withdraw; ends with an explicit
+  teardown. Per-EVI A-D and data-plane assertions (DF-gated flood, aliasing)
+  gate on Phase 6 and a dual-homed-CE topology.
 - **Interop:** spot-check Type-1/4 + DF against FRR before the data plane.
