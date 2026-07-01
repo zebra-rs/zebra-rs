@@ -59,6 +59,14 @@ bgp_mup_st1_isd:
 	mkdir -p allure-results
 	cargo test --test cucumber -- --concurrency=1 --tags "@bgp_mup_st1_isd"
 
+# MUP ST2->DSD encap: an interwork node imports an ST2 + a *remote* DSD into
+# a forwarding VRF, resolves them by Direct-segment id, and installs the ST2
+# endpoint encap toward the DSD's End.DT46 SID resolved through the IS-IS
+# SRv6 underlay. Needs `pfcp-inject` on the host PATH + root netns.
+bgp_mup_st2_dsd_fib:
+	mkdir -p allure-results
+	cargo test --test cucumber -- --concurrency=1 --tags "@bgp_mup_st2_dsd_fib"
+
 # MUP ST2: the MUP-C learns a PFCP decapsulation session (Network Instance
 # `core`) and originates a Type-2 Session-Transformed route carrying the
 # core endpoint + GTP TEID and the Direct segment id (MUP Extended

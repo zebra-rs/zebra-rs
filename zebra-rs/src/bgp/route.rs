@@ -473,7 +473,7 @@ fn build_vpn_fib_entry(
 /// is installable and the caller withdraws instead. This is the SRv6
 /// analogue of [`build_vpn_fib_entry`]; the SID + seg6 encap replace the
 /// `{transport,service}` MPLS label stack.
-fn build_srv6_vpn_fib_entry(
+pub(crate) fn build_srv6_vpn_fib_entry(
     sid: std::net::Ipv6Addr,
     transport: &[rib::nht::ResolvedNexthop],
 ) -> Option<rib::entry::RibEntry> {
@@ -3028,6 +3028,55 @@ fn nht_track_received_attr(bgp: &mut BgpTop, attr: &BgpAttr, dep: super::nht::Nh
         });
     }
     reachable
+}
+
+/// NHT for a received MUP **DSD**: register its next-hop so an underlay
+/// reroute re-installs the dependent ST2→DSD encap, and return the
+/// next-hop's currently-resolved underlay transport (empty while a fresh
+/// registration is pending, the next-hop is unreachable, or `best` is not
+/// a DSD). No-op outside the global instance (`nexthop_cache` is `None`).
+fn mup_dsd_track(
+    bgp: &mut BgpTop,
+    rd: RouteDistinguisher,
+    prefix: &MupPrefix,
+    best: Option<&BgpRib>,
+) -> Vec<rib::nht::ResolvedNexthop> {
+    if !matches!(prefix, MupPrefix::Dsd { .. }) {
+        return Vec::new();
+    }
+    let Some(best) = best else {
+        return Vec::new();
+    };
+    let Some(nh) = super::nht::nht_target(&best.attr) else {
+        return Vec::new();
+    };
+    let dep = super::nht::NhtDep::Mup(rd, prefix.clone());
+    let Some(cache) = bgp.nexthop_cache.as_deref_mut() else {
+        return Vec::new();
+    };
+    let (needs_register, _reachable) = cache.track(nh, dep);
+    if needs_register {
+        let _ = bgp.rib_client.send(rib::Message::NexthopRegister {
+            proto: "bgp".to_string(),
+            nh,
+        });
+    }
+    cache.transport_for(nh).to_vec()
+}
+
+/// Symmetric to [`mup_dsd_track`]: drop the DSD dep from `nh` and, once it
+/// has no deps left, unregister it. `nh` is the pre-withdraw next-hop.
+fn mup_dsd_untrack(bgp: &mut BgpTop, rd: RouteDistinguisher, prefix: &MupPrefix, nh: IpAddr) {
+    let dep = super::nht::NhtDep::Mup(rd, prefix.clone());
+    let Some(cache) = bgp.nexthop_cache.as_deref_mut() else {
+        return;
+    };
+    if cache.untrack(nh, &dep) {
+        let _ = bgp.rib_client.send(rib::Message::NexthopUnregister {
+            proto: "bgp".to_string(),
+            nh,
+        });
+    }
 }
 
 /// Symmetric to [`nht_track_received`]: on a withdrawal, drop `dep` from
@@ -7609,12 +7658,17 @@ pub fn route_mup_update(
     rib.attr = bgp.attr_store.intern(attr.clone());
     let _ = bgp.local_rib.update_mup(rd, prefix.clone(), rib);
     let selected = bgp.local_rib.select_best_path_mup(&rd, &prefix);
+    // A received DSD: register its next-hop with NHT (so an underlay
+    // reroute re-installs the dependent ST2→DSD encap) and read the
+    // resolved transport to hand the importing VRF. Empty for non-DSD /
+    // unresolved. Must precede the `bgp.vrf_import` borrow below.
+    let transport = mup_dsd_track(bgp, rd, &prefix, selected.first());
     // Mirror the new best-path to every VRF whose `mup import` RT set
     // matches, so `show bgp vrf <name> mup` reflects peer-learned routes.
     // A peer-learned route has no local originating VRF (`origin_vrf =
     // None`), so it is imported purely by route-target.
     if let Some(dispatcher) = bgp.vrf_import {
-        super::vrf::dispatch_mup(dispatcher, rd, &prefix, selected.first(), None);
+        super::vrf::dispatch_mup(dispatcher, rd, &prefix, selected.first(), None, &transport);
     }
     if !selected.is_empty() {
         route_advertise_mup_to_peers(rd, prefix, &selected, bgp, peers);
@@ -7630,14 +7684,33 @@ pub fn route_mup_withdraw(ident: usize, route: &MupRoute, bgp: &mut BgpTop, peer
         let peer = peers.get_mut_by_idx(ident).expect("peer must exist");
         peer.adj_in.remove_mup(rd, &prefix, id);
     }
+    // Capture the pre-withdraw DSD next-hop so it can be released from NHT
+    // if this withdrawal drops the last path using it.
+    let old_dsd_nh = bgp
+        .local_rib
+        .select_best_path_mup(&rd, &prefix)
+        .first()
+        .filter(|_| matches!(prefix, MupPrefix::Dsd { .. }))
+        .and_then(|r| super::nht::nht_target(&r.attr));
     let _ = bgp.local_rib.remove_mup(rd, &prefix, id, ident);
     let selected = bgp.local_rib.select_best_path_mup(&rd, &prefix);
+    // Release the NHT registration when no surviving path keeps the
+    // pre-withdraw DSD next-hop.
+    if let Some(nh) = old_dsd_nh
+        && selected
+            .first()
+            .and_then(|r| super::nht::nht_target(&r.attr))
+            != Some(nh)
+    {
+        mup_dsd_untrack(bgp, rd, &prefix, nh);
+    }
+    let transport = mup_dsd_track(bgp, rd, &prefix, selected.first());
     // Mirror the post-withdraw state to per-VRF tasks: a remaining best
     // path is re-forwarded (matched by RT), otherwise the prefix is
     // withdrawn from every VRF's copy. A peer-learned route has no local
     // originating VRF (`origin_vrf = None`).
     if let Some(dispatcher) = bgp.vrf_import {
-        super::vrf::dispatch_mup(dispatcher, rd, &prefix, selected.first(), None);
+        super::vrf::dispatch_mup(dispatcher, rd, &prefix, selected.first(), None, &transport);
     }
     if selected.is_empty() {
         route_withdraw_mup_to_peers(rd, prefix, peers);
@@ -13004,12 +13077,17 @@ impl Bgp {
                 rib_known_vrfs: &self.rib_known_vrfs,
                 vrf_registry: &self.vrf_registry,
             };
+            // Locally-originated / exported routes carry no remote underlay
+            // transport (a local DSD's SID is on this node); the ST2→DSD
+            // encap only fires for *received* DSDs, tracked in
+            // `route_mup_update`.
             super::vrf::dispatch_mup(
                 &dispatcher,
                 rd,
                 &prefix,
                 selected.first(),
                 origin_vrf.as_deref(),
+                &[],
             );
         }
         if selected.is_empty() {
