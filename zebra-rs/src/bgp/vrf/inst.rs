@@ -165,16 +165,18 @@ pub struct BgpVrf {
     /// End.DT46 SID it is steered into. A selected ST1 whose UE prefix is
     /// covered by a locally-originated ISD's prefix installs an oif-only
     /// recursive seg6 H.Encaps route into this VRF's table (`dst = UE
-    /// prefix, encap seg6 segs [SID]`). Tracked so `reconcile_mup_st1_isd`
-    /// can diff and withdraw when the ST1 or the covering ISD goes away.
+    /// prefix, via <underlay egress> encap seg6 segs [SID]`). Tracked so
+    /// `reconcile_mup_st1_isd` can diff and withdraw when the ST1 or the
+    /// covering ISD goes away.
     pub mup_st1_isd_installed: std::collections::BTreeMap<ipnet::IpNet, std::net::Ipv6Addr>,
-    /// Resolved underlay transport for each imported DSD's next-hop, keyed
-    /// by the DSD's `(rd, prefix)`. Supplied by the global NHT via
-    /// `MupUpdate.transport` and consumed by `reconcile_mup_st2_dsd` to
-    /// build the resolved-underlay seg6 encap for an ST2 whose
-    /// Direct-segment id matches the DSD. Absent/empty ⇒ the DSD next-hop
-    /// hasn't resolved, so no ST2 encap is installable for it.
-    pub mup_dsd_transport: std::collections::BTreeMap<
+    /// Resolved underlay transport for each imported segment route (DSD/ISD)
+    /// next-hop, keyed by its `(rd, prefix)`. Supplied by the global NHT via
+    /// `MupUpdate.transport` and consumed by `reconcile_mup_st2_dsd` /
+    /// `reconcile_mup_st1_isd` to build the resolved-underlay seg6 encap for
+    /// an ST2 (by Direct-segment id) / ST1 (by prefix containment) that
+    /// matches. Absent/empty ⇒ the segment next-hop hasn't resolved, so no
+    /// encap is installable for it.
+    pub mup_segment_transport: std::collections::BTreeMap<
         (bgp_packet::RouteDistinguisher, bgp_packet::MupPrefix),
         Vec<crate::rib::nht::ResolvedNexthop>,
     >,
@@ -646,7 +648,7 @@ impl BgpVrf {
             mup_originated: std::collections::BTreeMap::new(),
             mup_segment_prefix: None,
             mup_st1_isd_installed: std::collections::BTreeMap::new(),
-            mup_dsd_transport: std::collections::BTreeMap::new(),
+            mup_segment_transport: std::collections::BTreeMap::new(),
             mup_st2_dsd_installed: std::collections::BTreeMap::new(),
         };
         (vrf, inbox_tx)
@@ -669,47 +671,53 @@ impl BgpVrf {
     }
 
     /// Reconcile ST1→ISD encap FIB entries for this VRF. A selected ST1
-    /// whose UE prefix is covered by a locally-originated ISD's prefix is
-    /// steered into that ISD's local End.DT46 SID: install an oif-only
-    /// recursive seg6 H.Encaps route (`dst = UE prefix, encap seg6 segs
-    /// [SID]`) into this VRF's table so UE-bound traffic in the VRF is
-    /// encapsulated toward that segment. Longest-match when several local
-    /// ISDs cover the UE. Diff-gated against `mup_st1_isd_installed` so an
-    /// unchanged binding doesn't churn the FIB, and a binding that lost its
-    /// ST1 or its covering ISD is withdrawn. Mirrors the show-side
-    /// resolution in `render_mup_table`.
+    /// whose UE prefix is covered (longest-match) by an imported ISD's prefix
+    /// is steered into that ISD's End.DT46 SID: install a resolved-underlay
+    /// seg6 H.Encaps route for the UE prefix (`dst = UE prefix, via <underlay
+    /// egress> encap seg6 segs [SID]`) into this VRF's table so UE-bound
+    /// traffic in the VRF is encapsulated toward that segment. The ISD is
+    /// remote (received from the access-side PE), so the encap resolves
+    /// through the global-supplied `mup_segment_transport`; an unresolved ISD
+    /// next-hop yields no install. Diff-gated against `mup_st1_isd_installed`.
+    /// Mirrors the show-side resolution in `render_mup_table` and the ST2→DSD
+    /// reconcile (matched by prefix containment instead of Direct-segment id).
     fn reconcile_mup_st1_isd(&mut self) {
         use std::net::Ipv6Addr;
-        // Locally-originated ISD prefixes → their End.DT46 SID.
-        let isd: Vec<(ipnet::IpNet, Ipv6Addr)> = self
-            .local_rib
-            .mup
-            .values()
-            .flat_map(|t| t.selected.iter())
-            .filter_map(|(prefix, rib)| {
-                let bgp_packet::MupPrefix::Isd { prefix: p } = prefix else {
-                    return None;
+        type Transport = Vec<crate::rib::nht::ResolvedNexthop>;
+        // Index imported ISDs by their advertised prefix → (SID, transport).
+        // Only an ISD with both a SID and a resolved underlay transport
+        // qualifies.
+        let mut isd_index: Vec<(ipnet::IpNet, Ipv6Addr, Transport)> = Vec::new();
+        for (rd, table) in self.local_rib.mup.iter() {
+            for (prefix, rib) in table.selected.iter() {
+                let bgp_packet::MupPrefix::Isd { prefix: isd_prefix } = prefix else {
+                    continue;
                 };
-                if !rib.is_originated() {
-                    return None;
+                let Some((sid, _behavior)) = rib.attr.srv6_l3_sid() else {
+                    continue;
+                };
+                let Some(transport) = self.mup_segment_transport.get(&(*rd, prefix.clone())) else {
+                    continue;
+                };
+                if transport.is_empty() {
+                    continue;
                 }
-                let (sid, _behavior) = rib.attr.srv6_l3_sid()?;
-                Some((*p, sid))
-            })
-            .collect();
+                isd_index.push((*isd_prefix, sid, transport.clone()));
+            }
+        }
         // Desired: each selected ST1 UE prefix → the most-specific covering
-        // local ISD's SID.
-        let mut desired: std::collections::BTreeMap<ipnet::IpNet, Ipv6Addr> =
+        // ISD's (SID, transport).
+        let mut desired: std::collections::BTreeMap<ipnet::IpNet, (Ipv6Addr, Transport)> =
             std::collections::BTreeMap::new();
-        if !isd.is_empty() {
+        if !isd_index.is_empty() {
             for (prefix, _rib) in self.local_rib.mup.values().flat_map(|t| t.selected.iter()) {
                 if let bgp_packet::MupPrefix::T1st { prefix: ue, .. } = prefix
-                    && let Some((_p, sid)) = isd
+                    && let Some((_p, sid, transport)) = isd_index
                         .iter()
-                        .filter(|(p, _)| p.contains(ue))
-                        .max_by_key(|(p, _)| p.prefix_len())
+                        .filter(|(p, _, _)| p.contains(ue))
+                        .max_by_key(|(p, _, _)| p.prefix_len())
                 {
-                    desired.insert(*ue, *sid);
+                    desired.insert(*ue, (*sid, transport.clone()));
                 }
             }
         }
@@ -717,7 +725,7 @@ impl BgpVrf {
         let stale: Vec<ipnet::IpNet> = self
             .mup_st1_isd_installed
             .iter()
-            .filter(|(ue, sid)| desired.get(*ue) != Some(*sid))
+            .filter(|(ue, sid)| desired.get(*ue).map(|(s, _)| s) != Some(*sid))
             .map(|(ue, _)| *ue)
             .collect();
         for ue in stale {
@@ -725,46 +733,12 @@ impl BgpVrf {
             self.mup_st1_isd_installed.remove(&ue);
         }
         // Install new / changed entries.
-        for (ue, sid) in &desired {
+        for (ue, (sid, transport)) in &desired {
             if self.mup_st1_isd_installed.get(ue) == Some(sid) {
                 continue;
             }
-            self.mup_st1_isd_install(*ue, *sid);
+            self.mup_encap_install(*ue, *sid, transport);
             self.mup_st1_isd_installed.insert(*ue, *sid);
-        }
-    }
-
-    /// Build + send the oif-only recursive seg6 H.Encaps RibEntry for one
-    /// resolved ST1→ISD binding into this VRF's table. The local End.DT46
-    /// SID is delivered locally (its decap resolves to loopback), so the
-    /// encap route carries no gateway — just the loopback oif + the seg6
-    /// encap; the kernel re-routes the encapped packet by its outer SID DA
-    /// (see the oif-only branch in the netlink route path).
-    fn mup_st1_isd_install(&self, ue: ipnet::IpNet, sid: std::net::Ipv6Addr) {
-        use std::net::{IpAddr, Ipv6Addr};
-        let mut uni = crate::rib::NexthopUni::new(IpAddr::V6(Ipv6Addr::UNSPECIFIED), 0, Vec::new());
-        uni.ifindex_origin = Some(1); // loopback: the local SID is delivered locally
-        uni.segs = vec![sid];
-        uni.encap_type = Some(isis_packet::srv6::EncapType::HEncap);
-        uni.valid = true;
-        let mut entry = crate::rib::entry::RibEntry::new(crate::rib::RibType::Bgp);
-        entry.distance = 200;
-        entry.metric = 0;
-        entry.valid = true;
-        entry.nexthop = crate::rib::Nexthop::Uni(uni);
-        match ue {
-            ipnet::IpNet::V4(prefix) => {
-                let _ = self
-                    .ctx
-                    .rib
-                    .send(crate::rib::Message::Ipv4Add { prefix, rib: entry });
-            }
-            ipnet::IpNet::V6(prefix) => {
-                let _ = self
-                    .ctx
-                    .rib
-                    .send(crate::rib::Message::Ipv6Add { prefix, rib: entry });
-            }
         }
     }
 
@@ -799,11 +773,11 @@ impl BgpVrf {
     /// DSD is steered into that DSD's End.DT46 SID: install a resolved-
     /// underlay seg6 H.Encaps route for the ST2 endpoint (`dst = endpoint
     /// /32|/128, via <underlay egress> encap seg6 segs [SID]`) into this
-    /// VRF's table. Unlike ST1→ISD (a local SID, oif-only), the DSD is
-    /// remote, so the encap resolves through the global-supplied
-    /// `mup_dsd_transport`; an unresolved DSD next-hop yields no install.
-    /// Diff-gated against `mup_st2_dsd_installed`. Mirrors the show-side
-    /// ST2→DSD resolution in `render_mup_table`.
+    /// VRF's table. The DSD is remote, so the encap resolves through the
+    /// global-supplied `mup_segment_transport`; an unresolved DSD next-hop
+    /// yields no install. Diff-gated against `mup_st2_dsd_installed`. The
+    /// prefix-containment twin is `reconcile_mup_st1_isd`; both mirror the
+    /// show-side resolution in `render_mup_table`.
     fn reconcile_mup_st2_dsd(&mut self) {
         use std::net::Ipv6Addr;
         type Transport = Vec<crate::rib::nht::ResolvedNexthop>;
@@ -822,7 +796,7 @@ impl BgpVrf {
                 let Some((sid, _behavior)) = rib.attr.srv6_l3_sid() else {
                     continue;
                 };
-                let Some(transport) = self.mup_dsd_transport.get(&(*rd, prefix.clone())) else {
+                let Some(transport) = self.mup_segment_transport.get(&(*rd, prefix.clone())) else {
                     continue;
                 };
                 if transport.is_empty() {
@@ -863,26 +837,27 @@ impl BgpVrf {
             if self.mup_st2_dsd_installed.get(ep) == Some(sid) {
                 continue;
             }
-            self.mup_st2_dsd_install(*ep, *sid, transport);
+            self.mup_encap_install(*ep, *sid, transport);
             self.mup_st2_dsd_installed.insert(*ep, *sid);
         }
     }
 
-    /// Build + send the resolved-underlay seg6 H.Encaps RibEntry for one
-    /// ST2→DSD binding into this VRF's table. The remote DSD's End.DT46 SID
-    /// rides an `H.Encaps` toward the resolved underlay egress(es) — the
-    /// SRv6-L3VPN dataplane shape ([`build_srv6_vpn_fib_entry`]). A no-op
-    /// when the transport doesn't resolve to any egress.
-    fn mup_st2_dsd_install(
+    /// Build + send the resolved-underlay seg6 H.Encaps RibEntry for one MUP
+    /// encap binding (ST2→DSD endpoint or ST1→ISD UE prefix) into this VRF's
+    /// table. The remote segment's End.DT46 SID rides an `H.Encaps` toward
+    /// the resolved underlay egress(es) — the SRv6-L3VPN dataplane shape
+    /// ([`build_srv6_vpn_fib_entry`]). A no-op when the transport doesn't
+    /// resolve to any egress.
+    fn mup_encap_install(
         &self,
-        ep: ipnet::IpNet,
+        dst: ipnet::IpNet,
         sid: std::net::Ipv6Addr,
         transport: &[crate::rib::nht::ResolvedNexthop],
     ) {
         let Some(entry) = super::super::route::build_srv6_vpn_fib_entry(sid, transport) else {
             return;
         };
-        match ep {
+        match dst {
             ipnet::IpNet::V4(prefix) => {
                 let _ = self
                     .ctx
@@ -1895,15 +1870,19 @@ impl BgpVrf {
                 transport,
             } => {
                 let rd = self.rd.unwrap_or(rd);
-                // A received DSD carries the global-resolved underlay
-                // transport for its next-hop; stash it (keyed by the
-                // re-keyed rd + prefix) so `reconcile_mup_st2_dsd` can build
-                // the ST2 endpoint encap. Empty transport ⇒ unresolved.
-                if matches!(prefix, bgp_packet::MupPrefix::Dsd { .. }) {
+                // A received segment route (DSD/ISD) carries the
+                // global-resolved underlay transport for its next-hop; stash
+                // it (keyed by the re-keyed rd + prefix) so the ST2→DSD /
+                // ST1→ISD reconcile can build the endpoint / UE encap. Empty
+                // transport ⇒ unresolved.
+                if matches!(
+                    prefix,
+                    bgp_packet::MupPrefix::Dsd { .. } | bgp_packet::MupPrefix::Isd { .. }
+                ) {
                     if transport.is_empty() {
-                        self.mup_dsd_transport.remove(&(rd, prefix.clone()));
+                        self.mup_segment_transport.remove(&(rd, prefix.clone()));
                     } else {
-                        self.mup_dsd_transport
+                        self.mup_segment_transport
                             .insert((rd, prefix.clone()), transport);
                     }
                 }
@@ -1922,7 +1901,7 @@ impl BgpVrf {
                 // clears it; prune the per-RD table when it empties so an
                 // empty RD never renders.
                 let rd = self.rd.unwrap_or(rd);
-                self.mup_dsd_transport.remove(&(rd, prefix.clone()));
+                self.mup_segment_transport.remove(&(rd, prefix.clone()));
                 let empty = if let Some(table) = self.local_rib.mup.get_mut(&rd) {
                     table.cands.remove(&prefix);
                     table.selected.remove(&prefix);

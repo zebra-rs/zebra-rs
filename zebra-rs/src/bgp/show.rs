@@ -4306,13 +4306,14 @@ fn render_mup_table(
         std::collections::BTreeMap::new()
     };
 
-    // On the node that originated a local ISD (Interwork Segment Discovery)
-    // segment, a selected ST1 route whose UE prefix is covered by the ISD's
-    // advertised prefix is "resolved" by that ISD: UE-bound traffic in the
-    // VRF is encapsulated into the ISD's (local) End.DT46 segment. Index the
-    // local ISD routes (originated, with an SRv6 L3 Service SID) so each ST1
-    // can pick the most-specific covering ISD (longest-prefix match). The FIB
-    // install of this H.Encaps entry lands in a follow-up.
+    // On an interwork node, a selected ST1 route whose UE prefix is covered
+    // by an ISD (Interwork Segment Discovery) route's advertised prefix is
+    // "resolved" by that ISD: UE-bound traffic in the VRF is encapsulated
+    // toward the ISD's End.DT46 segment. Index the ISD routes (with an SRv6
+    // L3 Service SID) so each ST1 can pick the most-specific covering ISD
+    // (longest-prefix match). Like the DSD index, this resolves against
+    // *received* (remote) ISDs — the interwork node imports the ISD from the
+    // access-side PE and steers the UE prefix through the underlay toward it.
     let isd_index: Vec<(
         RouteDistinguisher,
         MupPrefix,
@@ -4332,9 +4333,6 @@ fn render_mup_table(
                 let MupPrefix::Isd { prefix: isd_prefix } = prefix else {
                     return None;
                 };
-                if !rib.is_originated() {
-                    return None;
-                }
                 let (sid, behavior) = rib.attr.srv6_l3_sid()?;
                 Some((*rd, prefix.clone(), *isd_prefix, sid, behavior))
             })
@@ -5823,11 +5821,11 @@ mod detail_tests {
         );
     }
 
-    /// On the ISD's originating node, a selected ST1 whose UE prefix is
-    /// covered by the local ISD's advertised prefix resolves to that ISD's
-    /// End.DT46 segment (the encap the UE-bound traffic takes). A UE outside
-    /// the ISD prefix does not resolve, and resolution is only shown when the
-    /// caller opts in (`resolve_segments`).
+    /// On an interwork node, a selected ST1 whose UE prefix is covered by a
+    /// received ISD's advertised prefix resolves to that ISD's End.DT46
+    /// segment (the encap the UE-bound traffic takes). A UE outside the ISD
+    /// prefix does not resolve, and resolution is only shown when the caller
+    /// opts in (`resolve_segments`).
     #[test]
     fn render_mup_table_resolves_st1_to_isd_segment() {
         use std::net::{IpAddr, Ipv4Addr};
@@ -5836,7 +5834,7 @@ mod detail_tests {
             super::super::route::LocalRibMupTable,
         > = std::collections::BTreeMap::new();
 
-        // A locally-originated ISD advertising 10.60.0.0/16 + an End.DT46 SID.
+        // A received ISD advertising 10.60.0.0/16 + an End.DT46 SID.
         let mut isd_attr = BgpAttr::new();
         isd_attr.nexthop = Some(BgpNexthop::Ipv6("fcbb:bbbb:1::".parse().unwrap()));
         isd_attr.prefix_sid = Some(super::super::inst::srv6_l3_service_prefix_sid(
@@ -5847,7 +5845,7 @@ mod detail_tests {
         let isd_rib = BgpRib::new(
             0,
             Ipv4Addr::new(10, 0, 0, 1),
-            BgpRibType::Originated,
+            BgpRibType::IBGP,
             0,
             32768,
             &isd_attr,

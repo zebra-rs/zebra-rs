@@ -1,56 +1,73 @@
-# z1 — a single MUP interwork node that both originates a local ISD segment
-# and (via its MUP-C) an ST1 whose UE falls inside the ISD prefix, so the
-# ST1 resolves to the local End.DT46 segment and an SRv6 H.Encaps entry for
-# the UE prefix is installed into the VRF's table.
-#
-# VRF N6 is `encapsulation srv6`, so it carves a per-VRF End.DT46 SID from
-# locator LOC1 and installs the seg6local decap into the VRF table.
-#   * `segment interwork prefix 10.60.0.0/16` originates the ISD advertising
-#     that SID under 10.60.0.0/16.
-#   * `route st1 network-instance access` makes the MUP-C originate a Type-1
-#     ST route for PFCP sessions on NI `access`.
-# A PFCP session with UE 10.60.1.5 (inside 10.60.0.0/16) therefore yields an
-# ST1 that resolves to the local ISD, and zebra-rs installs
-#   10.60.1.5/32 encap seg6 mode encap segs [End.DT46 SID] dev lo table <N6>
-segment-routing:
-  locator:
-  - name: LOC1
-    prefix: fcbb:bb01::/48
-    behavior: usid
-router:
-  bgp:
-    global:
-      as: 65001
-      router-id: 192.168.0.1
-    segment-routing:
-      srv6:
-        locator: LOC1
-    vrf:
-    - name: N6
-      rd: "65000:100"
-      encapsulation: srv6
-      afi-safi:
-        mup:
-          route:
-          - type: st1
-            network-instance: access
-          segment:
-          - type: interwork
-            prefix: 10.60.0.0/16
-    mup-c:
-      enable: true
-      controller-address: fcbb:bb01::1
-      pfcp:
-        listen-address: 192.168.0.1
-        port: 8805
-      srv6:
-        locator: LOC1
-# Top-level VRF: MUP route-targets live here (same framework as ipv4/ipv6).
+# z1 — MUP PE originating an Interwork Segment Discovery (ISD, type 1)
+# route for VRF N6 (`afi-safi mup segment interwork prefix 10.60.0.0/16`).
+# IS-IS L2 SRv6 underlay + iBGP (mup afi-safi) to z2 over loopbacks. VRF N6
+# is `encapsulation srv6`, so it carves a per-VRF End.DT46 service SID from
+# locator S and installs the seg6local decap into the VRF table; `segment
+# interwork` advertises that segment as an ISD route (NLRI = rd + the
+# configured interwork prefix) carrying the End.DT46 SID as the SRv6 L3
+# Service, received by z2. (zebra-rs uses End.DT46 for the interwork segment
+# too; the draft's GTP4.E/GTP6.E behaviours are VPP/eBPF, deferred.)
 vrf:
 - name: N6
   mup:
     route-target:
       export:
-      - "65000:200"
+      - "65501:10"
       import:
-      - "65000:200"
+      - "65501:10"
+interface:
+- if-name: lo
+  ipv6:
+    address: 2001:db8::1/128
+- if-name: z1-z2
+  ipv6:
+    address: 2001:db8:0:12::1/64
+segment-routing:
+  locator:
+  - name: S
+    prefix: fcbb:bbbb:1::/48
+    behavior: usid
+router:
+  isis:
+    net: 49.0000.0000.0000.0001.00
+    hostname: z1
+    is-type: level-2-only
+    segment-routing:
+      srv6:
+        locator: S
+    interface:
+    - if-name: lo
+      ipv6:
+        enable: true
+    - if-name: z1-z2
+      network-type: point-to-point
+      metric: 1
+      ipv6:
+        enable: true
+  bgp:
+    global:
+      as: 65501
+      router-id: 10.0.0.1
+    timer:
+      adv-interval:
+        ibgp: 1
+    segment-routing:
+      srv6:
+        locator: S
+    neighbor:
+    - remote-address: 2001:db8::2
+      remote-as: 65501
+      update-source: 2001:db8::1
+      enabled: true
+      afi-safi:
+      - name: mup
+        enabled: true
+    vrf:
+    - name: N6
+      rd: "65501:10"
+      encapsulation: srv6
+      afi-safi:
+        mup:
+          segment:
+          - type: interwork
+            prefix: 10.60.0.0/16
