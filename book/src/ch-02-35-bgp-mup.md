@@ -200,11 +200,12 @@ it:
   **Direct-segment id**.
 * **`segment interwork { prefix <p>; }`** originates an **Interwork Segment
   Discovery (ISD, type 1)** route — NLRI = RD + the configured `prefix`
-  (typically the locally connected gNodeB N3 prefix; its family selects the
-  AFI) — carrying the End.DT46 SID. The ISD does not originate until the
-  prefix is set, and carries no `mup-ext-comm`: a receiving interwork node
-  matches each received **ST1** to the ISD by **prefix containment**
-  (longest-match when several ISDs cover the UE).
+  (the locally connected **gNodeB N3 network**; its family selects the AFI) —
+  carrying the End.DT46 SID. The ISD does not originate until the prefix is
+  set, and carries no `mup-ext-comm`: a receiving interwork node matches each
+  received **ST1** to the ISD by **endpoint containment** — the ST1's GTP
+  endpoint (gNB) address falling inside the ISD prefix (longest-match when
+  several ISDs cover the endpoint).
 
 ```
 vrf N6 {
@@ -212,7 +213,7 @@ vrf N6 {
   encapsulation srv6;
   afi-safi mup {
     segment interwork {
-      prefix 10.60.0.0/16;     # originate the End.DT46 ISD under this prefix
+      prefix 10.0.0.0/24;      # the gNB N3 network the ST1 endpoints resolve against
     }
   }
 }
@@ -223,10 +224,11 @@ vrf N6 {
 An interwork node imports the ST routes **and** the segment routes into a
 forwarding VRF (`encapsulation srv6` + a matching `route-target import`),
 resolves each ST route to its segment, and installs an SRv6 **H.Encaps**
-route for the ST route's destination into the VRF table:
+route for the ST route's **endpoint** into the VRF table:
 
 * **ST2 → DSD** (by Direct-segment id): `dst = the ST2 endpoint /32|/128`.
-* **ST1 → ISD** (by prefix containment): `dst = the ST1 UE prefix`.
+* **ST1 → ISD** (the ST1's gNB endpoint contained in the ISD prefix):
+  `dst = the ST1 endpoint /32|/128`.
 
 The segment is **remote** (received from the peer that owns the End.DT46
 SID), so the encap resolves through the IS-IS SRv6 underlay via Next-Hop

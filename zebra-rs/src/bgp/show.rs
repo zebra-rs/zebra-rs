@@ -4396,21 +4396,24 @@ fn render_mup_table(
                 )?;
             }
 
-            // ST1 -> ISD resolution on the ISD's originating node: a selected
-            // ST1 whose UE prefix is covered by a local ISD's prefix is
-            // encapsulated into that ISD's End.DT46 segment (longest-match
-            // when several ISDs cover the UE).
+            // ST1 -> ISD resolution: a selected ST1 whose GTP endpoint (gNB)
+            // address falls within an ISD's advertised prefix (the gNB N3
+            // network) is encapsulated toward that ISD's End.DT46 segment
+            // (longest-match when several ISDs cover the endpoint). The key
+            // is the ST1 *endpoint*, not the UE prefix — mirroring ST2->DSD
+            // (`dst = the ST route's endpoint`) and handling the mixed-AFI
+            // case (an IPv6 UE route may carry an IPv4 gNB endpoint).
             if resolve_segments
-                && let MupPrefix::T1st { prefix: ue, .. } = prefix
+                && let MupPrefix::T1st { endpoint, .. } = prefix
                 && let Some((isd_rd, isd, _, sid, behavior)) = isd_index
                     .iter()
-                    .filter(|(_, _, isd_prefix, _, _)| isd_prefix.contains(ue))
+                    .filter(|(_, _, isd_prefix, _, _)| isd_prefix.contains(endpoint))
                     .max_by_key(|(_, _, isd_prefix, _, _)| isd_prefix.prefix_len())
             {
                 writeln!(
                     buf,
                     "       resolved {} -> {} {} (via {})",
-                    ue,
+                    endpoint,
                     srv6_behavior_name(*behavior),
                     sid,
                     mup_prefix_display(isd_rd, isd)
@@ -5834,7 +5837,8 @@ mod detail_tests {
             super::super::route::LocalRibMupTable,
         > = std::collections::BTreeMap::new();
 
-        // A received ISD advertising 10.60.0.0/16 + an End.DT46 SID.
+        // A received ISD advertising the gNB N3 network 10.0.0.0/24 + an
+        // End.DT46 SID.
         let mut isd_attr = BgpAttr::new();
         isd_attr.nexthop = Some(BgpNexthop::Ipv6("fcbb:bbbb:1::".parse().unwrap()));
         isd_attr.prefix_sid = Some(super::super::inst::srv6_l3_service_prefix_sid(
@@ -5857,14 +5861,15 @@ mod detail_tests {
             id: 0,
             arch: MupArchitectureType::Gpp5g,
             rd: "65501:10".parse().unwrap(),
-            prefix: "10.60.0.0/16".parse().unwrap(),
+            prefix: "10.0.0.0/24".parse().unwrap(),
         });
         let _ = tables
             .entry(isd_rd)
             .or_default()
             .update(isd_prefix, isd_rib);
 
-        // An ST1 whose UE (10.60.1.5/32) falls inside the ISD prefix.
+        // An ST1 whose gNB endpoint (10.0.0.9) falls inside the ISD prefix —
+        // the UE (10.60.1.5/32) is a different network and is not the key.
         let st1_in = mup_rib("fc00::9".parse::<IpAddr>().unwrap(), 32768, &[]);
         let (rd_in, p_in) = MupPrefix::from_route(&MupRoute::T1st {
             id: 0,
@@ -5878,16 +5883,17 @@ mod detail_tests {
         });
         let _ = tables.entry(rd_in).or_default().update(p_in, st1_in);
 
-        // An ST1 whose UE (10.70.1.5/32) is outside the ISD prefix.
+        // An ST1 whose gNB endpoint (10.70.0.9) is outside the ISD prefix,
+        // even though its UE happens to sit in a nearby network.
         let st1_out = mup_rib("fc00::a".parse::<IpAddr>().unwrap(), 32768, &[]);
         let (rd_out, p_out) = MupPrefix::from_route(&MupRoute::T1st {
             id: 0,
             arch: MupArchitectureType::Gpp5g,
             rd: "65501:10".parse().unwrap(),
-            prefix: "10.70.1.5/32".parse().unwrap(),
+            prefix: "10.60.2.5/32".parse().unwrap(),
             teid: 2,
             qfi: 9,
-            endpoint: "10.0.0.10".parse().unwrap(),
+            endpoint: "10.70.0.9".parse().unwrap(),
             source: None,
         });
         let _ = tables.entry(rd_out).or_default().update(p_out, st1_out);
@@ -5896,16 +5902,17 @@ mod detail_tests {
         let plain = render_mup_table(&tables, false).unwrap();
         assert!(!plain.contains("resolved"), "{plain}");
 
-        // Opted in: the in-range ST1 resolves to the ISD's End.DT46 segment;
-        // the out-of-range ST1 does not.
+        // Opted in: the ST1 whose endpoint is in-range resolves to the ISD's
+        // End.DT46 segment (keyed on the endpoint, not the UE prefix); the
+        // out-of-range endpoint does not.
         let out = render_mup_table(&tables, true).unwrap();
         assert!(
             out.contains(
-                "resolved 10.60.1.5/32 -> End.DT46 fcbb:bbbb:1:40:: (via [ISD][65501:10][10.60.0.0/16])"
+                "resolved 10.0.0.9 -> End.DT46 fcbb:bbbb:1:40:: (via [ISD][65501:10][10.0.0.0/24])"
             ),
             "{out}"
         );
-        assert!(!out.contains("resolved 10.70.1.5/32"), "{out}");
+        assert!(!out.contains("resolved 10.70.0.9"), "{out}");
     }
 
     #[test]
