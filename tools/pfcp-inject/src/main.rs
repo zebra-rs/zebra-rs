@@ -68,9 +68,22 @@ struct Args {
     #[arg(long, default_value_t = 0x1234_5678, value_parser = parse_u32)]
     teid: u32,
 
-    /// Access-side GTP-U endpoint (F-TEID) address.
+    /// Access-side GTP-U endpoint (F-TEID) address. Used for the Type-1 ST
+    /// (access side).
     #[arg(long, default_value = "10.0.0.1")]
     endpoint: IpAddr,
+
+    /// Core-side GTP-U endpoint (F-TEID) address, used for the Type-2 ST
+    /// (core side). When set, a second `SourceInterface=Core` PDR is added so
+    /// the controller can distinguish the access and core endpoints; omit for
+    /// a single-endpoint session (Type-2 falls back to the access endpoint).
+    #[arg(long)]
+    core_endpoint: Option<IpAddr>,
+
+    /// Core-side GTP-U TEID (decimal, or `0x`-prefixed hex). Only used when
+    /// `--core-endpoint` is set.
+    #[arg(long, default_value_t = 0x8765_4321, value_parser = parse_u32)]
+    core_teid: u32,
 
     /// Network Instance (APN/DNN) — matched against a VRF `mup`
     /// config on the controller.
@@ -151,10 +164,36 @@ fn main() -> Result<()> {
         .forward_to(Interface::Core)
         .build()
         .context("build Create FAR")?;
+    // Optional second (`SourceInterface=Core`) PDR carrying the core-side
+    // F-TEID, so the controller learns a distinct Type-2 (core) endpoint.
+    let mut create_pdrs = vec![pdr.to_ie()];
+    if let Some(core_endpoint) = args.core_endpoint {
+        let core_fteid = {
+            let b = FteidBuilder::new().teid(args.core_teid);
+            match core_endpoint {
+                IpAddr::V4(v4) => b.ipv4(v4),
+                IpAddr::V6(v6) => b.ipv6(v6),
+            }
+            .build()
+            .context("build core F-TEID")?
+        };
+        let core_pdi = PdiBuilder::new(SourceInterface::new(SourceInterfaceValue::Core))
+            .f_teid(core_fteid)
+            .network_instance(NetworkInstance::new(&args.network_instance))
+            .build()
+            .context("build core PDI")?;
+        let core_pdr = CreatePdrBuilder::new(PdrId::new(2))
+            .precedence(Precedence::new(200))
+            .pdi(core_pdi)
+            .far_id(FarId::new(1))
+            .build()
+            .context("build core Create PDR")?;
+        create_pdrs.push(core_pdr.to_ie());
+    }
     let establish = SessionEstablishmentRequestBuilder::new(args.seid, 2u32)
         .node_id(args.node_id)
         .fseid(args.seid, args.node_id)
-        .create_pdrs(vec![pdr.to_ie()])
+        .create_pdrs(create_pdrs)
         .create_fars(vec![far.to_ie()])
         .build()
         .context("build Session Establishment Request")?;

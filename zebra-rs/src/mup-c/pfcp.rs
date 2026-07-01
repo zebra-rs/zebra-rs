@@ -241,26 +241,43 @@ impl MupC {
             );
         }
 
-        // Walk the Create PDRs for the access-side F-TEID, UE IP and NI.
+        // Walk the Create PDRs for the F-TEIDs, UE IP and NI. The PDI Source
+        // Interface tells access (gNB-facing, → Type-1 ST) from core
+        // (core-facing, → Type-2 ST), so each direction's endpoint is
+        // captured separately.
+        use rs_pfcp::ie::source_interface::SourceInterfaceValue;
         let mut ue_ipv4 = None;
         let mut ue_ipv6 = None;
         let mut teid = 0u32;
         let mut endpoint = None;
+        let mut core_teid = 0u32;
+        let mut core_endpoint = None;
         let mut network_instance = None;
         for ie in msg.ies(IeType::CreatePdr) {
             let Ok(pdr) = CreatePdr::unmarshal(&ie.payload) else {
                 continue;
             };
             let pdi = &pdr.pdi;
+            let is_core = pdi.source_interface.value == SourceInterfaceValue::Core;
             if let Some(f) = &pdi.f_teid {
-                if teid == 0 {
-                    teid = f.teid.value();
-                }
-                if endpoint.is_none() {
-                    endpoint = f
-                        .ipv4_address
-                        .map(IpAddr::V4)
-                        .or(f.ipv6_address.map(IpAddr::V6));
+                let addr = f
+                    .ipv4_address
+                    .map(IpAddr::V4)
+                    .or(f.ipv6_address.map(IpAddr::V6));
+                if is_core {
+                    if core_teid == 0 {
+                        core_teid = f.teid.value();
+                    }
+                    if core_endpoint.is_none() {
+                        core_endpoint = addr;
+                    }
+                } else {
+                    if teid == 0 {
+                        teid = f.teid.value();
+                    }
+                    if endpoint.is_none() {
+                        endpoint = addr;
+                    }
                 }
             }
             if let Some(ue) = &pdi.ue_ip_address {
@@ -287,6 +304,8 @@ impl MupC {
             ue_ipv6,
             teid,
             endpoint,
+            core_teid,
+            core_endpoint,
             network_instance,
             qfi: None,
         };
@@ -511,6 +530,77 @@ mod tests {
             .build()
             .unwrap()
             .marshal()
+    }
+
+    /// A Session Establishment Request with both an `Access` PDR (gNB-facing
+    /// F-TEID → Type-1) and a `Core` PDR (core-facing F-TEID → Type-2), so
+    /// the controller captures a distinct endpoint per direction.
+    fn establishment_two_endpoints_bytes() -> Vec<u8> {
+        let mk_pdr = |id, si, teid, addr: Ipv4Addr, ue: Option<Ipv4Addr>| {
+            let fteid = FteidBuilder::new().teid(teid).ipv4(addr).build().unwrap();
+            let mut b = PdiBuilder::new(SourceInterface::new(si))
+                .f_teid(fteid)
+                .network_instance(NetworkInstance::new("internet.apn"));
+            if let Some(ue) = ue {
+                b = b.ue_ip_address(UeIpAddress::new(Some(ue), None));
+            }
+            CreatePdrBuilder::new(PdrId::new(id))
+                .precedence(Precedence::new(100))
+                .pdi(b.build().unwrap())
+                .far_id(FarId::new(1))
+                .build()
+                .unwrap()
+        };
+        let access = mk_pdr(
+            1,
+            SourceInterfaceValue::Access,
+            0x1234_5678,
+            Ipv4Addr::new(10, 0, 0, 1),
+            Some(Ipv4Addr::new(192, 0, 2, 5)),
+        );
+        let core = mk_pdr(
+            2,
+            SourceInterfaceValue::Core,
+            0x8765_4321,
+            Ipv4Addr::new(10, 9, 0, 1),
+            None,
+        );
+        let far = CreateFar::builder(FarId::new(1))
+            .forward_to(Interface::Core)
+            .build()
+            .unwrap();
+        SessionEstablishmentRequestBuilder::new(0u64, 1u32)
+            .node_id(Ipv4Addr::new(10, 0, 0, 2))
+            .fseid(0x1111u64, Ipv4Addr::new(10, 0, 0, 2))
+            .create_pdrs(vec![access.to_ie(), core.to_ie()])
+            .create_fars(vec![far.to_ie()])
+            .build()
+            .unwrap()
+            .marshal()
+    }
+
+    #[test]
+    fn session_establishment_captures_access_and_core_endpoints() {
+        let (mut mupc, _bgp_rx) = MupC::new_for_test(MupCConfig::default());
+        associate(&mut mupc);
+        let bytes = establishment_two_endpoints_bytes();
+        let msg = message::parse(&bytes).unwrap();
+        let (_reply, events) = mupc.handle_session_establishment(msg.as_ref(), peer());
+        let MupCEvent::SessionUp(session) = &events[0] else {
+            panic!("expected SessionUp, got {:?}", events[0]);
+        };
+        // Access (Type-1) endpoint from the SourceInterface=Access PDR.
+        assert_eq!(session.teid, 0x1234_5678);
+        assert_eq!(
+            session.endpoint,
+            Some(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1)))
+        );
+        // Core (Type-2) endpoint from the SourceInterface=Core PDR — distinct.
+        assert_eq!(session.core_teid, 0x8765_4321);
+        assert_eq!(
+            session.core_endpoint,
+            Some(IpAddr::V4(Ipv4Addr::new(10, 9, 0, 1)))
+        );
     }
 
     #[test]
