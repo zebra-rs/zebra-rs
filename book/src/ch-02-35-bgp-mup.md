@@ -196,19 +196,15 @@ it:
 * **`segment direct { mup-ext-comm <2:4>; }`** originates a **Direct
   Segment Discovery (DSD, type 2)** route — NLRI = RD + router-id — carrying
   the End.DT46 SID and the Direct-segment id (`mup-ext-comm`). A receiving
-  *interwork* node (`segment interwork`) matches each received ST2 to the
-  DSD by this id and `show bgp mup` prints the resolution.
+  interwork node matches each received **ST2** to the DSD by this
+  **Direct-segment id**.
 * **`segment interwork { prefix <p>; }`** originates an **Interwork Segment
   Discovery (ISD, type 1)** route — NLRI = RD + the configured `prefix`
   (typically the locally connected gNodeB N3 prefix; its family selects the
   AFI) — carrying the End.DT46 SID. The ISD does not originate until the
-  prefix is set, and carries no `mup-ext-comm`: an ISD is resolved by
-  **prefix containment** instead. On the ISD's originating node, a selected
-  ST1 whose UE address falls within a local ISD's prefix is bound to that
-  ISD's End.DT46 segment (longest-match when several ISDs cover the UE), and
-  `show bgp mup` / `show bgp vrf <name> mup` print the resolution
-  (`resolved <ue> -> End.DT46 <sid> (via [ISD]…)`). UE-bound traffic in the
-  VRF is then encapsulated into that segment.
+  prefix is set, and carries no `mup-ext-comm`: a receiving interwork node
+  matches each received **ST1** to the ISD by **prefix containment**
+  (longest-match when several ISDs cover the UE).
 
 ```
 vrf N6 {
@@ -222,9 +218,33 @@ vrf N6 {
 }
 ```
 
+#### Resolving ST routes to a segment (forwarding)
+
+An interwork node imports the ST routes **and** the segment routes into a
+forwarding VRF (`encapsulation srv6` + a matching `route-target import`),
+resolves each ST route to its segment, and installs an SRv6 **H.Encaps**
+route for the ST route's destination into the VRF table:
+
+* **ST2 → DSD** (by Direct-segment id): `dst = the ST2 endpoint /32|/128`.
+* **ST1 → ISD** (by prefix containment): `dst = the ST1 UE prefix`.
+
+The segment is **remote** (received from the peer that owns the End.DT46
+SID), so the encap resolves through the IS-IS SRv6 underlay via Next-Hop
+Tracking toward the segment's next-hop:
+
+```
+dst  via <underlay egress> dev <link>  encap seg6 mode encap segs [End.DT46 SID]  table <VRF>
+```
+
+`show bgp mup` / `show bgp vrf <name> mup` print the resolution
+(`resolved <key> -> End.DT46 <sid> (via [DSD|ISD]…)`), and the entry
+re-installs (or withdraws) automatically as the underlay reroutes or the ST
+/ segment route comes and goes.
+
 zebra-rs uses **End.DT46** for both Direct and Interwork segments; the
-draft's GTP-interwork behaviours (GTP4.E / GTP6.E / H.M.GTP4.D) are
-VPP/eBPF and not yet implemented.
+draft's GTP-U endpoint behaviours (GTP4.E / GTP6.E / H.M.GTP4.D) themselves
+are VPP/eBPF and not yet implemented — the kernel dataplane performs the
+SRv6 H.Encaps toward the segment, and the End.DT46 decap at the far end.
 
 ## From PFCP session to ST route
 
@@ -412,13 +432,19 @@ The control plane is complete: capability negotiation, ISD/DSD/T1ST/T2ST
 codec, Loc-RIB receive/store/show, controller ST origination, PE-side
 Segment Discovery origination (DSD and ISD, each with the per-VRF End.DT46
 SID + `seg6local` decap installed into the kernel FIB), and the interwork
-node's control-plane resolution of received ST2 routes to the matching
-Direct segment.
+node's resolution of received ST routes to the matching segment.
 
-The **GTP-interwork forwarding plane** is **not** implemented: the
-End.DT46 decap that the segment routes advertise is installed, but the
-GTP-U SRv6 endpoint behaviours themselves (GTP4.E / GTP6.E / H.M.GTP4.D)
-have no stock-Linux `seg6local` action, so the actual GTP encap/decap is
-left to a VPP/eBPF-based forwarder. The controller's PFCP northbound
-currently handles Association and Session lifecycle messages;
-heartbeat-driven eviction of idle associations is a follow-up.
+The interwork node's **SRv6 forwarding** is installed: on a forwarding VRF
+(`encapsulation srv6` + `route-target import`), each resolved ST route
+programs an SRv6 H.Encaps entry for its destination (ST2 endpoint / ST1 UE
+prefix) toward the remote segment's End.DT46 SID, resolved through the
+underlay via Next-Hop Tracking (`dst via <underlay egress> encap seg6 segs
+[SID]`), and the far-end PE's `seg6local End.DT46` decaps into its VRF.
+
+The **GTP-U endpoint behaviours** themselves (GTP4.E / GTP6.E / H.M.GTP4.D)
+are **not** implemented: they have no stock-Linux `seg6local` action, so the
+GTP encap/decap at the mobile edge is left to a VPP/eBPF-based forwarder —
+zebra-rs uses End.DT46 as the kernel stand-in for the segment. The
+controller's PFCP northbound currently handles Association and Session
+lifecycle messages; heartbeat-driven eviction of idle associations is a
+follow-up.
