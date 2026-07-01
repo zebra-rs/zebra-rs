@@ -3671,8 +3671,45 @@ impl Bgp {
                     endpoint,
                 );
             }
+            // MUP: a received DSD's next-hop rerouted → re-dispatch it to
+            // importing VRFs with the fresh transport so each dependent
+            // ST2→DSD endpoint encap re-installs toward the new egress.
+            NhtDep::Mup(rd, prefix) => {
+                self.mup_redispatch_dsd(nh, rd, prefix, true);
+            }
             NhtDep::V4(_) | NhtDep::V6(_) => {}
         }
+    }
+
+    /// Re-dispatch a received DSD to importing VRFs with its current
+    /// underlay transport (empty when `reachable` is false), so each
+    /// dependent ST2→DSD endpoint encap re-installs or is withdrawn. The
+    /// register-then-gate first resolution and every later reroute both
+    /// land here. Standalone (`&mut self`, no live `BgpTop`), so it is
+    /// safe to call from `nht_reinstall_transport`; the reachability path
+    /// (`nht_reeval_dep`) inlines the same logic because a `BgpTop`
+    /// already borrows `local_rib` there.
+    fn mup_redispatch_dsd(
+        &mut self,
+        nh: std::net::IpAddr,
+        rd: bgp_packet::RouteDistinguisher,
+        prefix: bgp_packet::MupPrefix,
+        reachable: bool,
+    ) {
+        let selected = self.local_rib.select_best_path_mup(&rd, &prefix);
+        let Some(winner) = selected.first() else {
+            return;
+        };
+        let transport = if reachable {
+            self.nexthop_cache.transport_for(nh).to_vec()
+        } else {
+            Vec::new()
+        };
+        let dispatcher = super::vrf::VrfImportDispatcher {
+            rib_known_vrfs: &self.rib_known_vrfs,
+            vrf_registry: &self.vrf_registry,
+        };
+        super::vrf::dispatch_mup(&dispatcher, rd, &prefix, Some(winner), None, &transport);
     }
 
     /// Re-evaluate one dependent prefix after its next-hop's
@@ -3728,6 +3765,9 @@ impl Bgp {
             // SR Policy has no BGP best-path / advertise step; its ILM is
             // reconciled in the dispatch below, not via `selected`.
             NhtDep::SrPolicy { .. } => Vec::new(),
+            // MUP has no shard best-path; the ST2→DSD re-dispatch is done
+            // inline in the match below (it needs `nexthop_cache`).
+            NhtDep::Mup(..) => Vec::new(),
         };
 
         let mut top = super::peer::BgpTop {
@@ -3954,6 +3994,33 @@ impl Bgp {
                     *color,
                     *endpoint,
                 );
+            }
+            // MUP reachability flip: (re)dispatch the received DSD to
+            // importing VRFs with its resolved transport (empty when
+            // unreachable), so each dependent ST2→DSD endpoint encap
+            // installs or is withdrawn. Inlined rather than
+            // `mup_redispatch_dsd` because `top` already borrows local_rib.
+            NhtDep::Mup(rd, prefix) => {
+                let selected = top.local_rib.select_best_path_mup(rd, prefix);
+                if let Some(winner) = selected.first() {
+                    let transport = if reachable {
+                        self.nexthop_cache.transport_for(nh).to_vec()
+                    } else {
+                        Vec::new()
+                    };
+                    let dispatcher = super::vrf::VrfImportDispatcher {
+                        rib_known_vrfs: &self.rib_known_vrfs,
+                        vrf_registry: &self.vrf_registry,
+                    };
+                    super::vrf::dispatch_mup(
+                        &dispatcher,
+                        *rd,
+                        prefix,
+                        Some(winner),
+                        None,
+                        &transport,
+                    );
+                }
             }
         }
     }

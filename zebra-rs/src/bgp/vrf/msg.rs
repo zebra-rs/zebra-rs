@@ -71,6 +71,13 @@ pub enum BgpVrfMsg {
         rd: RouteDistinguisher,
         prefix: bgp_packet::MupPrefix,
         rib: crate::bgp::route::BgpRib,
+        /// Resolved underlay transport for the route's next-hop, when the
+        /// global instance has NHT-resolved it (currently only populated
+        /// for a received DSD, whose next-hop the ST2→DSD encap install
+        /// resolves through). Empty for locally-originated routes and for
+        /// route types the install doesn't steer. Mirrors `ImportV4`'s
+        /// `transport`.
+        transport: Vec<ResolvedNexthop>,
     },
     /// Withdraw a previously-imported MUP route (the global RIB no longer has
     /// a selected path for it). Flooded to every VRF; the per-VRF removal is

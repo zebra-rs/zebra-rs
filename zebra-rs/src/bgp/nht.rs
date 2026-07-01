@@ -48,6 +48,14 @@ pub enum NhtDep {
         color: u32,
         endpoint: IpAddr,
     },
+    /// MUP (SAFI 85) Direct Segment Discovery (DSD) route in
+    /// `local_rib.mup`. A *received* DSD's next-hop is tracked so the
+    /// per-VRF ST2→DSD encap install re-runs when the underlay resolves
+    /// or reroutes: on a change the DSD is re-dispatched to importing
+    /// VRFs with the freshly-resolved transport, so each ST2 whose
+    /// Direct-segment id matches re-programs its endpoint encap. Keyed by
+    /// the DSD's `(rd, MupPrefix)` like the VPN deps.
+    Mup(RouteDistinguisher, bgp_packet::MupPrefix),
 }
 
 /// How a tracked next-hop's resolution changed, returned by
