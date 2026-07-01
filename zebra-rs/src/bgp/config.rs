@@ -1701,7 +1701,7 @@ fn config_ethernet_segment(bgp: &mut Bgp, mut args: Args, op: ConfigOp) -> Optio
         ConfigOp::Delete => {
             let vtep = IpAddr::V4(bgp.router_id);
             if let Some(esi) = bgp.ethernet_segments.get(&name).and_then(|es| es.esi) {
-                bgp.evpn_withdraw_ethernet_seg(esi, vtep);
+                bgp.evpn_withdraw_es_routes(esi, vtep);
             }
             bgp.ethernet_segments.remove(&name);
         }
@@ -1712,8 +1712,8 @@ fn config_ethernet_segment(bgp: &mut Bgp, mut args: Args, op: ConfigOp) -> Optio
 
 /// `router bgp afi-safi evpn ethernet-segment <name> esi <value>` — the
 /// 10-octet ESI (colon-hex or 20 hex digits). A malformed value is rejected.
-/// Setting the ESI originates the Type-4 ES route (RFC 7432 §7.4); changing or
-/// clearing it withdraws the previous one first.
+/// Setting the ESI originates the ES routes (Type-4 + per-ES Type-1 A-D);
+/// changing or clearing it withdraws the previous ones first.
 fn config_ethernet_segment_esi(bgp: &mut Bgp, mut args: Args, op: ConfigOp) -> Option<()> {
     let afi_safi: AfiSafi = args.afi_safi()?;
     if afi_safi.afi != Afi::L2vpn || afi_safi.safi != Safi::Evpn {
@@ -1726,14 +1726,18 @@ fn config_ethernet_segment_esi(bgp: &mut Bgp, mut args: Args, op: ConfigOp) -> O
         None
     };
     let vtep = IpAddr::V4(bgp.router_id);
-    // Withdraw the Type-4 for the previously-configured ESI (if any), then set
-    // the new one and originate.
+    // Withdraw the ES routes for the previously-configured ESI (if any), then
+    // set the new one and originate under it.
     if let Some(old) = bgp.ethernet_segments.get(&name).and_then(|es| es.esi) {
-        bgp.evpn_withdraw_ethernet_seg(old, vtep);
+        bgp.evpn_withdraw_es_routes(old, vtep);
     }
-    bgp.ethernet_segments.entry(name).or_default().esi = new_esi;
+    let single_active = {
+        let es = bgp.ethernet_segments.entry(name).or_default();
+        es.esi = new_esi;
+        es.redundancy_mode.single_active()
+    };
     if let Some(esi) = new_esi {
-        bgp.evpn_originate_ethernet_seg(esi, vtep);
+        bgp.evpn_originate_es_routes(esi, vtep, single_active);
     }
     Some(())
 }
@@ -1755,10 +1759,18 @@ fn config_ethernet_segment_redundancy_mode(
     } else {
         super::ethernet_segment::EsRedundancyMode::default()
     };
-    bgp.ethernet_segments
-        .entry(name)
-        .or_default()
-        .redundancy_mode = mode;
+    let esi = {
+        let es = bgp.ethernet_segments.entry(name).or_default();
+        es.redundancy_mode = mode;
+        es.esi
+    };
+    // The redundancy mode rides the per-ES A-D's ESI Label EC flag, so
+    // re-originate the ES routes with the new mode (a no-op for the Type-4,
+    // an in-place update for the per-ES A-D).
+    if let Some(esi) = esi {
+        let vtep = IpAddr::V4(bgp.router_id);
+        bgp.evpn_originate_es_routes(esi, vtep, mode.single_active());
+    }
     Some(())
 }
 

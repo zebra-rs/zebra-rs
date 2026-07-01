@@ -1689,7 +1689,7 @@ impl Bgp {
                 .filter_map(|es| es.esi)
                 .collect();
             for esi in esis {
-                self.evpn_withdraw_ethernet_seg(esi, std::net::IpAddr::V4(old_router_id));
+                self.evpn_withdraw_es_routes(esi, std::net::IpAddr::V4(old_router_id));
             }
         }
 
@@ -1719,16 +1719,17 @@ impl Bgp {
             }
         }
 
-        // Re-originate the Type-4 ES routes under the new router-id (the
-        // inverse of the withdraw above; gated only on a valid router-id).
+        // Re-originate the ES routes (Type-4 + per-ES A-D) under the new
+        // router-id (the inverse of the withdraw above; gated only on a valid
+        // router-id), carrying each ES's redundancy mode.
         if !router_id.is_unspecified() {
-            let esis: Vec<[u8; 10]> = self
+            let es_list: Vec<([u8; 10], bool)> = self
                 .ethernet_segments
                 .values()
-                .filter_map(|es| es.esi)
+                .filter_map(|es| es.esi.map(|esi| (esi, es.redundancy_mode.single_active())))
                 .collect();
-            for esi in esis {
-                self.evpn_originate_ethernet_seg(esi, std::net::IpAddr::V4(router_id));
+            for (esi, single_active) in es_list {
+                self.evpn_originate_es_routes(esi, std::net::IpAddr::V4(router_id), single_active);
             }
         }
 
