@@ -1,86 +1,83 @@
-# MCP Server Authentication — Design & Phasing Plan
+# MCP Server Authentication — Design & Phasing Plan (stdio)
 
 Tracks the addition of authentication and authorization to the zebra-rs
 MCP (Model Context Protocol) server that ships inside `vtyctl` (the
 `vtyctl mcp` subcommand). This document is the living plan + status: it
 captures the trust model, how it reuses the daemon's existing VTY
-auth/authz stack, the architecture decisions, the transport/credential
-choices, the phase-by-phase slice, and **what has landed vs what's left**
-so a contributor can resume without the conversation history.
+auth/authz stack, the architecture decisions, the tool surface, the
+phase-by-phase slice, and **what has landed vs what's left** so a
+contributor can resume without the conversation history.
 
-Read this first if you're touching `vtyctl/src/mcp/*`, the daemon VTY
-gRPC server `zebra-rs/src/config/serve.rs`, session/RBAC in
-`zebra-rs/src/config/session.rs`, the VTY proto `proto/vty.proto`, or
-`zebra-rs/yang/vty.yang`.
+**Scope: stdio transport only.** A network-exposed transport (Streamable
+HTTP) and OAuth 2.1 are **out of scope** and were dropped 2026-06-27 (see
+Status). The MCP server runs only as a **local subprocess spawned per
+user** over stdin/stdout — there is no network listener, no bearer
+tokens, and no trusted-asserter delegation. If a network transport is
+revived later, restore it from git history rather than carrying dead
+HTTP/OAuth scaffolding in this plan.
+
+Read this first if you're touching `vtyctl/src/mcp/*`. You should **not**
+need to touch the daemon for this work — the daemon's VTY auth stack is
+reused unchanged (see §4).
 
 References:
 
-- Model Context Protocol — base spec and **Authorization** spec (OAuth 2.1
-  for the Streamable HTTP transport). <https://modelcontextprotocol.io/>
-- RFC 9728 — OAuth 2.0 Protected Resource Metadata (required by the MCP
-  auth spec for resource-server discovery).
-- RFC 6749 / OAuth 2.1 draft — authorization framework; PKCE mandatory.
-- RFC 7519 / RFC 7515 / RFC 7517 — JWT, JWS, JWKS (access-token validation).
+- Model Context Protocol — base spec. <https://modelcontextprotocol.io/>
 - `book/src/ch-06-01-session-design.md` — the existing VTY session/RBAC
-  design (decisions D1–D26). **This plan extends it; new decisions are
-  numbered D27+.**
+  design (decisions D1–D26). **This plan reuses it as-is; stdio requires
+  no new daemon-side decisions.**
 - `book/src/ch-13-00-mcp-server.md` — the user-facing MCP chapter.
 
 ## Decisions captured up front
 
-The scope was fixed by three product decisions:
+The scope is fixed by three product decisions:
 
-1. **Both transports** — keep local **stdio** (subprocess) and add a
-   network-exposed **Streamable HTTP** transport. Build stdio first.
+1. **stdio only** — local subprocess (stdin/stdout) transport. No network
+   transport, no OAuth. (HTTP + OAuth 2.1 were considered and dropped.)
 2. **Read + write** — MCP tools may run `show` *and* push configuration
    (`configure`/`apply`/`clear`), not read-only.
-3. **OAuth 2.1** — the network transport authenticates clients with OAuth
-   2.1 bearer tokens per the MCP Authorization spec.
+3. **Least privilege by default** — a session exposes read-only tools
+   unless the human who spawned it explicitly opts the process into write
+   mode (see §5 / §8.1). The daemon's RBAC remains the hard gate
+   regardless.
 
-## 1. The core problem
+## 1. Trust model — `SO_PEERCRED`, exact reuse
 
 The daemon's trust anchor is **`SO_PEERCRED`**: the VTY gRPC server reads
 the connecting process's uid/gid/pid from the kernel and derives identity
 and role from it (`serve.rs` `VtyPeerInterceptor`, ~lines 621–716). A
 client cannot forge this.
 
-That model is exact for **stdio**: one human spawns their *own*
+That model is **exact** for stdio: one human spawns their *own*
 `vtyctl mcp` process, so their uid flows to the daemon and existing RBAC
-(`View`/`Admin`) applies directly.
+(`View`/`Admin`) applies directly. The MCP server is just another VTY
+client — JSON-RPC to an AI assistant on one side, gRPC to the daemon on
+the other — that happens to run as the invoking user.
 
-It **breaks for HTTP**: a single long-lived `vtyctl mcp` process serves
-many remote OAuth users. `SO_PEERCRED` only tells the daemon "this is
-vtyctl's uid" — it cannot distinguish remote user Alice from Bob, so the
-daemon's per-uid RBAC cannot apply to remote identities.
-
-**Resolution — Trusted Subsystem (constrained delegation).** In HTTP mode
-`vtyctl mcp` runs as a dedicated, *allowlisted* service-account uid. It
-authenticates the remote client itself (OAuth), then **asserts** the
-authenticated principal + requested role to the daemon via gRPC metadata.
-The daemon honors that assertion **only** when the connecting
-`SO_PEERCRED` uid is in a new "trusted asserter" allowlist. The kernel
-remains the root of trust; an authorized front-end is permitted to speak
-for end users. **The daemon never sees the OAuth token.**
-
-This is the spine of the design; everything else hangs off it.
+**Consequence: no new trust mechanism, and no daemon-side change.** This
+is the whole reason stdio ships cleanly on its own. The entire
+trusted-asserter / asserted-identity apparatus that a multi-user network
+transport would require (a single front-end process speaking for many
+remote principals) is unnecessary here and has been removed from this
+plan.
 
 ## 2. Identity & role model
 
 | Transport | Authn of MCP client | Identity reaching daemon | Role source |
 | --- | --- | --- | --- |
-| **stdio** | OS — user spawns their own `vtyctl mcp` | `SO_PEERCRED` uid (unchanged) | Existing RBAC; new `enable` tool (PAM) for Admin |
-| **HTTP** | OAuth 2.1 bearer JWT | **Asserted** principal + role in gRPC metadata; vtyctl runs as a *trusted-asserter* service account | Token `scope` → View/Admin, bounded by asserter's max grant |
+| **stdio** | OS — user spawns their own `vtyctl mcp` | `SO_PEERCRED` uid (unchanged) | Existing RBAC (uid/gid → View/Admin) |
 
-Two invariants hold across both transports:
+Two invariants:
 
 - **The daemon is the source of truth.** The MCP server pre-checks the
   required role for fast, clear errors, but `enforce_admin()` in the
   daemon (`serve.rs` ~lines 44–64, applied to `Apply`/`Clear`/configure
   entry) is the real gate. The front-end check is defense in depth, never
   the sole control.
-- **Least privilege by default.** Every session starts `View`. Writes
-  require explicit elevation: the OAuth `zebra.write` scope (HTTP) or a
-  PAM `enable` (stdio). Existing admin-session TTLs (15-min idle / 4-h
+- **Least privilege by default.** A spawned MCP session exposes read-only
+  tools unless the user opted it into write mode at launch (§5). Even in
+  write mode, a write only succeeds if the user's uid already maps to
+  `Admin` in daemon RBAC. Existing admin-session TTLs (15-min idle / 4-h
   hard cap, session-design D2) apply unchanged.
 
 ## 3. Tool surface (read + write)
@@ -92,108 +89,132 @@ re-checks:
 
 | Tool | Daemon RPC | Required role | Notes |
 | --- | --- | --- | --- |
-| `show` (+ keep `get-isis-graph`) | `Show` (stream) | View | unchanged path |
-| `configure` / `apply` | `Apply` (stream) | Admin | every call audited (principal + lines) |
-| `clear` | `Clear` | Admin | audited |
-| `enable` | `Enable` (PAM) | — | **stdio only**; elevates the session for the TTL window |
+| `list-show-commands` | `Exec` (completion) | View | discovery; flat `command → help` list generated live from the grammar |
+| `show` (+ keep `get-isis-graph`) | `Show` (stream) | View | unchanged path; rejects any command not starting with `show` |
+| `configure` / `apply` | `Apply` (stream) | Admin | only registered in write mode; every call audited (principal + lines) |
+| `clear` | `Clear` | Admin | only registered in write mode; audited |
 
-For HTTP, `enable` is unnecessary: elevation comes from the token's
-`scope`, not an interactive password.
+Write tools are **not even advertised** in `tools/list` unless the
+process was launched in write mode — the AI cannot call a tool it cannot
+see, and a read-only session has no write surface to misuse.
 
-## 4. Daemon-side changes (new — D27+)
+**Command discovery.** The MCP client cannot guess zebra-rs's
+YANG-defined command surface, so `list-show-commands` enumerates it by
+walking the daemon's completion engine (`DoExec` with
+`COMPLETE_TRAILING_SPACE`, the same path that backs CLI `?`/TAB) from
+`show` downward. Every token already carries an `ext:help` string in
+`exec.yang`, so each entry gets a one-line explanation *and* a `kind`
+(`command` runnable keyword / `category` has subcommands / `value` expects
+an argument) and a `runnable` flag — all generated live, no hand-maintained
+list to drift. `<cr>` markers are folded into `runnable`; bare value
+placeholders (`<A.B.C.D>`) are never descended into. The result is cached
+for the process lifetime.
 
-Slots into the existing `serve.rs` / `session.rs` design:
+## 4. Daemon-side changes — none
 
-- **D27 — Trusted-asserter allowlist.** `ZEBRA_VTY_TRUSTED_ASSERTERS`
-  (env, CSV uids) **and** YANG `vty trusted-asserter uid N`, unioned the
-  same way the existing service-account sources are (env
-  `ZEBRA_VTY_SERVICE_ACCOUNTS` ∪ YANG `vty service-account uid N`).
-- **D28 — Asserted-identity metadata.** New gRPC metadata keys
-  (`x-zebra-principal`, `x-zebra-role`, `x-zebra-auth-method`).
-  `VtyPeerInterceptor` reads them **only** if the peer `SO_PEERCRED` uid ∈
-  trusted asserters; otherwise it ignores them and falls back to plain uid
-  identity. A non-asserter that sets the headers is rejected
-  (`permission_denied`).
-- **D29 — Session keying for asserted sessions.** Key on
-  `(asserter_uid, principal)` instead of `(uid, pid)`, so each remote
-  principal gets its own View/Admin session and independent TTL.
-- **D30 — Bounded grant.** An asserter may only assert *up to* a
-  configured maximum role, so a compromised front-end cannot exceed its
-  mandate. Default cap configurable per asserter.
-- **D31 — Audit.** Record the asserted principal + auth method on every
-  `Apply`/`Clear` (extend existing logging). This is what makes exposing
-  "read + write" safe.
+Dropping the network transport removes the entire daemon-side workstream.
+The former plan's D27–D31 (trusted-asserter allowlist, asserted-identity
+metadata, asserted-session keying, bounded grant, asserted-write audit)
+existed **only** to let one front-end process speak for many remote OAuth
+users. stdio has no such multiplexing: each user is their own process.
 
-All of D27–D31 is testable with a fake asserter and **zero MCP/HTTP
-code**, which is why it is its own phase (Phase 1).
+So stdio needs **zero** changes to `serve.rs`, `session.rs`, `vty.yang`,
+or `proto/vty.proto`. It is pure reuse of the existing `SO_PEERCRED` +
+RBAC stack. Audit of writes (§5) is done by the MCP front-end with the OS
+principal; the daemon's existing logging is unchanged.
 
 ## 5. vtyctl `mcp` changes (new)
 
-1. **Streamable-HTTP transport** alongside stdio (`axum` + `tower` /
-   `hyper-util`, already in the dep tree). **Open decision (§8):** evaluate
-   adopting the `rmcp` SDK here for a spec-compliant Streamable HTTP
-   implementation + OAuth resource-server scaffolding, versus hand-rolling
-   the JSON-RPC loop a second time.
-2. **OAuth 2.1 resource server:**
-   - Serve **Protected Resource Metadata** (RFC 9728) at
-     `/.well-known/oauth-protected-resource`, and emit `WWW-Authenticate`
-     with the `resource_metadata` pointer on 401 — both required by the
-     MCP auth spec.
-   - Validate the bearer JWT: signature via the AS's **JWKS**, plus `iss`,
-     `exp`, and **strict `aud`** equal to this server's canonical URI.
-   - **Reject any token whose `aud` is not this server** — closes the
-     confused-deputy / token-passthrough hole the MCP spec calls out. The
-     daemon never receives the token; only the validated principal +
-     mapped role.
-   - Map `scope` → role: `zebra.read` → View, `zebra.write` → Admin.
-3. **Trusted-asserter client.** HTTP mode connects to the daemon as the
-   configured asserter service account and sets the asserted-identity
-   metadata (D28) per request. Pool/reuse gRPC channels.
-4. **stdio `enable` tool.** Thin wrapper over the daemon `Enable` RPC —
-   reuses PAM, rate-limiting, and TTL as-is.
-5. **Config home.** Follow the existing env-∪-YANG convention: listen
-   addr, TLS cert/key, OAuth `issuer` / `jwks_uri` / `audience` /
-   `required_scopes`, asserter identity. CLI flags for dev, YANG
-   (`vty mcp …`) for production.
+1. **Generalize the tool set** from the single `get-isis-graph` to
+   `show` / `configure` / `clear` (keep `get-isis-graph`). Each tool is
+   tagged with its required role; the server pre-checks and the daemon
+   re-checks.
+2. **Write-mode gating.** Default the process to **read-only**: only
+   `View` tools are registered. A human opts the process into write mode
+   at spawn (e.g. a `--write` / `--allow-write` flag on `vtyctl mcp`, or
+   equivalent env var) — this is the *human's* decision, made outside the
+   AI's control. In write mode, `configure`/`apply`/`clear` are
+   registered; the daemon still gates each on the uid's `Admin` role, so
+   write mode on a non-admin uid simply yields `permission_denied`.
+3. **Audit writes.** Log the OS principal (uid + resolved username) and
+   the submitted lines on every `configure`/`apply`/`clear`.
+4. **Config home.** Minimal: the daemon host/port to connect to (already
+   present as `vtyctl mcp` args). No listen address, TLS, or OAuth config
+   — none of that exists in stdio mode.
 
 ## 6. Phase map (smallest shippable first)
 
 | Phase | Scope | Touches |
 | --- | --- | --- |
-| 0 | **stdio least-privilege + tool surface.** Generalize tools to `show`/`configure`/`clear`, gate writes, add the `enable` tool. Delivers authenticated read+write **locally** with *zero* new trust mechanisms — pure reuse of `SO_PEERCRED` + RBAC + PAM. Audit writes with the OS principal. This is the entire "stdio first" deliverable and ships independently. | `vtyctl/src/mcp/*` |
-| 1 | **Daemon trusted-asserter + asserted identity** (D27–D31). Daemon-only; fake-asserter tests. No MCP/HTTP code yet. | `serve.rs`, `session.rs`, `vty.yang`, `proto/vty.proto` (metadata) |
-| 2 | **MCP HTTP transport, loopback, no OAuth yet.** Streamable HTTP up, connecting as the asserter service account with a fixed principal. Proves transport + assertion path end-to-end. | `vtyctl/src/mcp/*` |
-| 3 | **OAuth 2.1 resource server** (§5.2). PRM, JWT/JWKS validation, audience binding, scope→role, TLS. | `vtyctl/src/mcp/*` |
-| 4 | **Hardening.** JWKS refresh/caching, rate-limit, structured write audit, TTL alignment, full YANG config, BDD coverage, threat-model doc + book chapter update. | all of the above |
+| 0 | **Read-only generalization.** Replace the single hard-coded tool with a generic `show` tool (plus the kept `get-isis-graph`), still read-only. No new privileges, no behavior change to writes. Smallest useful slice. | `vtyctl/src/mcp/*` |
+| 1 | **Write tools + write-mode gating + audit.** Add `configure`/`apply`/`clear`, register them only in write mode, audit every write with the OS principal. Daemon `enforce_admin()` is the hard gate. | `vtyctl/src/mcp/*` |
+| 2 | **Hardening.** Error-path polish, rate/size limits on tool input, BDD coverage for stdio read + write, threat-model note + book chapter (`ch-13-00`) update. | `vtyctl/src/mcp/*`, `book/` |
+
+All three phases are confined to `vtyctl/src/mcp/*`. The daemon is not
+touched.
 
 ## 7. Security properties (threat model summary)
 
-- **Trust anchor stays the kernel.** Asserted identity is honored only
-  from allowlisted asserter uids → a random local process cannot
-  impersonate a user.
-- **No token passthrough.** Strict `aud` binding + the daemon never seeing
-  the OAuth token kills the confused-deputy class.
-- **Bounded blast radius.** A compromised asserter is capped by its
-  max-grant role (D30) and fully audited (D31).
-- **TLS mandatory** for the HTTP transport (bearer tokens require
-  confidentiality).
+- **Trust anchor stays the kernel.** Identity is the `SO_PEERCRED` uid of
+  the user who spawned the process; a user can only ever act as
+  themselves. No impersonation surface exists.
+- **No network surface.** No listener, no bearer tokens, no TLS to
+  misconfigure, no remote-auth code to get wrong.
+- **Least privilege.** Read-only by default; write tools are not even
+  advertised unless the human opted in at spawn, and the daemon still
+  requires `Admin` for each write.
 - **Defense in depth.** Front-end pre-check + daemon `enforce_admin()`
-  re-check; daemon is authoritative.
+  re-check; the daemon is authoritative.
+- **Audited writes.** Every `configure`/`apply`/`clear` records the OS
+  principal and the lines submitted.
+- **Residual risk (inherent to MCP):** the tools are driven by an AI
+  assistant running as the user, so the AI can do anything the user's
+  role permits. Read-only-by-default + explicit, human-gated write mode
+  bound the blast radius; the AI never gains privilege the user didn't
+  deliberately grant.
 
-## 8. Open decisions
+## 8. Decisions resolved / still open
 
-1. **`rmcp` SDK vs. extend the hand-rolled server** for the HTTP transport
-   (§5.1). Leaning `rmcp` for spec compliance; biggest architectural call.
-2. **Which OAuth Authorization Server** (Keycloak / Auth0 / Okta /
-   internal)? The resource server is AS-agnostic but needs `issuer` /
-   `jwks_uri` / `audience`. Also: support **Dynamic Client Registration**
-   (spec-recommended) or pre-register clients?
-3. **Authz granularity** — scope→role (View/Admin) only for now, or start
+1. **Write mode & `enable`/PAM — RESOLVED (2026-06-27): no `enable` tool.**
+   In stdio the process already runs as the user's uid, so daemon RBAC
+   grants `Admin` to admin users directly — no Cisco-style `enable`
+   password is needed to *have* the role. A PAM `enable` flow would also
+   force a **secret through the AI assistant** (the human would paste the
+   enable password into the chat, where it is visible to and logged by the
+   model), which is undesirable. **Decision:** drop the `enable` tool
+   entirely. Writes are gated purely by (a) a human-set spawn flag
+   (`--write`) that decides whether write tools are advertised, plus
+   (b) the daemon's existing uid→`Admin` RBAC check. Revisit only if a
+   future use case needs elevation *within* a running session.
+2. **Authz granularity — OPEN.** View/Admin only for now, or start
    leveraging the proto's currently-unused `privilege` field for
-   per-command levels later?
+   per-command levels later? Not needed for the initial stdio slice.
 
 ## Status
 
+- **2026-06-27** — **Scope reduced to stdio only; HTTP transport and
+  OAuth 2.1 dropped.** This removes the entire trusted-asserter /
+  asserted-identity design (former decisions D27–D31), the OAuth 2.1
+  resource server (PRM, JWT/JWKS validation, audience binding,
+  scope→role), the Streamable HTTP transport, and the
+  `rmcp`-vs-hand-rolled open question — all of which existed only to serve
+  many remote users through one process. stdio needs **no daemon-side
+  changes**: it reuses `SO_PEERCRED` + RBAC directly. (If a network
+  transport is ever revived, recover the prior design from this file's git
+  history.)
+- **2026-06-27** — **Phase 0 landed (read-only) on branch
+  `mcp-stdio-phase0`.** Added the generic `show` tool (rejects non-`show`
+  commands) and `list-show-commands` (live grammar discovery), alongside
+  the kept `get-isis-graph`. Response wrapping factored into a shared
+  helper for the upcoming write tools. Also fixed a pre-existing bug: the
+  MCP entrypoint prepended `http://` to the host, corrupting `unix:`
+  sockets — including the default `unix:zebra-rs/vty` — so the server
+  could never reach a socket daemon; it now passes the host through to
+  `ZebraClient::endpoint()` for normalization. Verified end-to-end against
+  a live daemon (`show version` runs, `configure terminal` rejected,
+  discovery returns 188 entries with help/kind/runnable). 7 unit tests;
+  `cargo fmt`/`clippy --all-targets -D warnings`/`test` green. Not yet
+  committed. **Next: Phase 1** (write tools + `--write` gating + audit).
 - **2026-06-27** — Plan drafted. No code landed yet. Current MCP server is
   stdio-only, unauthenticated, single read-only tool (`get-isis-graph`).
   Daemon-side VTY auth stack (SO_PEERCRED, service accounts, RBAC, PAM)

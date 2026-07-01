@@ -30,13 +30,12 @@ pub async fn run(host: &str, port: u32, debug_mode: bool) -> Result<()> {
     debug!("Starting vtyctl mcp server v{}", env!("CARGO_PKG_VERSION"));
     debug!("Connecting to zebra-rs at {}:{}", host, port);
 
-    let base_url = if host.starts_with("http://") || host.starts_with("https://") {
-        host.to_string()
-    } else {
-        format!("http://{}", host)
-    };
-
-    let server = ZmcpServer::new(base_url, port);
+    // Pass the host through unchanged; `ZebraClient::endpoint()` normalizes
+    // it (bare host → `http://host:port`, while `unix:NAME` and full
+    // `http(s)://` / `tcp://` URIs are used as-is). Pre-prepending `http://`
+    // here would corrupt `unix:` sockets — including the default
+    // `unix:zebra-rs/vty` — into the unparseable `http://unix:...`.
+    let server = ZmcpServer::new(host.to_string(), port);
 
     // Test connection to zebra-rs
     if let Err(e) = server.zebra_client().test_connection().await {

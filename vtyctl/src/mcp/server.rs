@@ -5,21 +5,42 @@ use tokio::io::{self, AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tracing::{debug, error, warn};
 
 use super::client::ZebraClient;
+use super::tools::commands::CommandsTool;
 use super::tools::isis::IsisTools;
+use super::tools::show::ShowTool;
+
+/// Wrap tool output in the MCP `tools/call` result shape.
+fn tool_result(text: String, is_error: bool) -> Value {
+    json!({
+        "content": [
+            {
+                "type": "text",
+                "text": text
+            }
+        ],
+        "isError": is_error
+    })
+}
 
 pub struct ZmcpServer {
     zebra_client: ZebraClient,
     isis_tools: IsisTools,
+    show_tool: ShowTool,
+    commands_tool: CommandsTool,
 }
 
 impl ZmcpServer {
     pub fn new(base_url: String, port: u32) -> Self {
         let zebra_client = ZebraClient::new(base_url, port);
         let isis_tools = IsisTools::new(zebra_client.clone());
+        let show_tool = ShowTool::new(zebra_client.clone());
+        let commands_tool = CommandsTool::new(zebra_client.clone());
 
         Self {
             zebra_client,
             isis_tools,
+            show_tool,
+            commands_tool,
         }
     }
 
@@ -68,6 +89,34 @@ impl ZmcpServer {
                 debug!("Listing available tools");
                 json!({
                     "tools": [
+                        {
+                            "name": "list-show-commands",
+                            "description": "List every available read-only `show` command with a one-line explanation of each, generated live from the daemon's command grammar. Call this first to discover what `show` can do.",
+                            "inputSchema": {
+                                "type": "object",
+                                "properties": {},
+                                "additionalProperties": false
+                            }
+                        },
+                        {
+                            "name": "show",
+                            "description": "Run a read-only zebra-rs operational `show` command and return its output. The command must begin with 'show' (e.g. 'show ip route', 'show bgp summary', 'show isis neighbor'). Use 'list-show-commands' to discover the available commands.",
+                            "inputSchema": {
+                                "type": "object",
+                                "properties": {
+                                    "command": {
+                                        "type": "string",
+                                        "description": "Full show command to execute, beginning with 'show'."
+                                    },
+                                    "json": {
+                                        "type": "boolean",
+                                        "description": "Return JSON-formatted output when the command supports it (default false)."
+                                    }
+                                },
+                                "required": ["command"],
+                                "additionalProperties": false
+                            }
+                        },
                         {
                             "name": "get-isis-graph",
                             "description": "Get IS-IS topology graph data for network visualization and analysis",
@@ -131,41 +180,21 @@ impl ZmcpServer {
 
         debug!("Calling tool: {}", tool_name);
 
-        match tool_name {
-            "get-isis-graph" => match self.isis_tools.get_isis_graph(arguments).await {
-                Ok(result) => json!({
-                    "content": [
-                        {
-                            "type": "text",
-                            "text": result
-                        }
-                    ],
-                    "isError": false
-                }),
-                Err(e) => {
-                    error!("Tool execution failed: {}", e);
-                    json!({
-                        "content": [
-                            {
-                                "type": "text",
-                                "text": format!("Error: {}", e)
-                            }
-                        ],
-                        "isError": true
-                    })
-                }
-            },
+        let result = match tool_name {
+            "list-show-commands" => self.commands_tool.list_show_commands().await,
+            "show" => self.show_tool.run(arguments).await,
+            "get-isis-graph" => self.isis_tools.get_isis_graph(arguments).await,
             _ => {
                 warn!("Unknown tool requested: {}", tool_name);
-                json!({
-                    "content": [
-                        {
-                            "type": "text",
-                            "text": format!("Unknown tool: {}", tool_name)
-                        }
-                    ],
-                    "isError": true
-                })
+                return tool_result(format!("Unknown tool: {}", tool_name), true);
+            }
+        };
+
+        match result {
+            Ok(text) => tool_result(text, false),
+            Err(e) => {
+                error!("Tool execution failed: {}", e);
+                tool_result(format!("Error: {}", e), true)
             }
         }
     }
@@ -218,5 +247,44 @@ impl ZmcpServer {
 
         debug!("MCP server shutdown");
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn server() -> ZmcpServer {
+        ZmcpServer::new("127.0.0.1".to_string(), 2650)
+    }
+
+    #[tokio::test]
+    async fn tools_list_advertises_expected_tools() {
+        let req = json!({"jsonrpc": "2.0", "id": 1, "method": "tools/list"});
+        let resp = server().handle_request(req).await.expect("response");
+        let names: Vec<&str> = resp["result"]["tools"]
+            .as_array()
+            .expect("tools array")
+            .iter()
+            .filter_map(|t| t["name"].as_str())
+            .collect();
+        for expected in ["list-show-commands", "show", "get-isis-graph"] {
+            assert!(
+                names.contains(&expected),
+                "missing {expected}; tools: {names:?}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn unknown_tool_call_is_error() {
+        let req = json!({
+            "jsonrpc": "2.0",
+            "id": 2,
+            "method": "tools/call",
+            "params": {"name": "configure", "arguments": {}}
+        });
+        let resp = server().handle_request(req).await.expect("response");
+        assert_eq!(resp["result"]["isError"], json!(true));
     }
 }
