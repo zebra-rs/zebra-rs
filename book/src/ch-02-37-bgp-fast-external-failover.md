@@ -99,6 +99,17 @@ WARN zebra-rs/src/bgp/inst.rs: bgp: fast-external-failover: interface down — r
 
 and the neighbor drops out of `Established` in `show bgp summary`
 immediately after the link event, rather than at hold-time expiry.
+The cause is recorded on the neighbor and survives re-establishment:
+
+```
+show bgp neighbor 10.107.0.2
+  ...
+  Last reset 00:00:07, due to Interface down
+```
+
+(Other reset causes — `BFD down`, `Hold timer expired`, `NOTIFICATION
+received`, `Admin. reset` for `clear bgp … hard`, `Config change` for a
+knob bounce — are reported on the same line.)
 When the link returns, the session re-establishes right away — link-up
 re-kicks peers parked on that interface instead of leaving them to the
 connect-retry backoff.

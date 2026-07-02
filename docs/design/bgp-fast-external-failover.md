@@ -446,8 +446,14 @@ Smallest-first; each lands green on its own.
   - cached `session_ifindex` at Established — **done** (closes edge
     cases 1–2; snapshot in the `became_established` block of
     `process_msg`, keyed off `PeerParam::local_addr`);
-  - `Peer.last_reset` reason plumbed into `show bgp neighbors`
-    (serves BFD-down/hold-timer/collision too);
+  - `Peer.last_reset` reason plumbed into `show bgp neighbor` —
+    **done**: initiators park a `PeerDownReason` on the peer
+    (failover → `InterfaceDown`, BFD → `BfdDown`, hard clear →
+    `AdminReset`) and the FSM stamps `last_reset` on leaving
+    Established, deriving the cause from the event when nothing is
+    parked (hold-timer, NOTIFICATION, TCP fail, update error;
+    unattributed `Stop` = config bounce). Shown as
+    `Last reset <elapsed>, due to <reason>` (text + JSON);
   - per-neighbor override via `InheritableKnobs` (classic-IOS-style
     granularity; XR itself has none — only add on real demand).
 

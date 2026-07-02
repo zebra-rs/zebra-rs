@@ -157,6 +157,66 @@ pub enum Event {
     AdvTimerEvpnExpires,
 }
 
+/// Why the last established session ended — FRR's `PEER_DOWN_*`
+/// analog, shown as `Last reset …, due to <reason>` in
+/// `show bgp neighbor`. Initiators that know the cause park it in
+/// [`Peer::down_reason`] just before sending `Event::Stop`
+/// (fast-external-failover, BFD-down, `clear … hard`); causes the FSM
+/// can see for itself are derived from the triggering event.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PeerDownReason {
+    /// fast-external-failover: the session's interface went down.
+    InterfaceDown,
+    /// BFD declared the forwarding path dead (RFC 5882 §5).
+    BfdDown,
+    /// RFC 4271 hold timer expired.
+    HoldTimerExpired,
+    /// The peer sent a NOTIFICATION.
+    NotificationReceived,
+    /// The TCP connection failed (reset / EOF / unreachable).
+    ConnectionFailed,
+    /// A received UPDATE failed validation (NOTIFICATION sent).
+    UpdateError,
+    /// Operator `clear bgp … hard`.
+    AdminReset,
+    /// A neighbor knob change bounced the session.
+    ConfigChange,
+    /// The FSM left Established on an event with no self-evident cause.
+    Unknown,
+}
+
+impl PeerDownReason {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::InterfaceDown => "Interface down",
+            Self::BfdDown => "BFD down",
+            Self::HoldTimerExpired => "Hold timer expired",
+            Self::NotificationReceived => "NOTIFICATION received",
+            Self::ConnectionFailed => "TCP connection failed",
+            Self::UpdateError => "Update error",
+            Self::AdminReset => "Admin. reset",
+            Self::ConfigChange => "Config change",
+            Self::Unknown => "Unknown",
+        }
+    }
+
+    /// The cause implied by the FSM event that ended the session, for
+    /// events whose meaning is self-evident. `Event::Stop` maps to
+    /// `ConfigChange`: every Stop initiator with a more specific cause
+    /// (clear / BFD / failover) parks it in [`Peer::down_reason`]
+    /// first, so an unattributed Stop is a config-driven bounce.
+    fn from_event(event: &Event) -> Option<Self> {
+        match event {
+            Event::Stop => Some(Self::ConfigChange),
+            Event::HoldTimerExpires => Some(Self::HoldTimerExpired),
+            Event::ConnFail(_) | Event::DialFail => Some(Self::ConnectionFailed),
+            Event::NotifMsg(..) => Some(Self::NotificationReceived),
+            Event::UpdateError(..) => Some(Self::UpdateError),
+            _ => None,
+        }
+    }
+}
+
 pub enum FsmEffect {
     None,
     RouteUpdate(UpdatePacket),
@@ -809,6 +869,18 @@ pub struct Peer {
     /// (FRR's cached `peer->nexthop.ifp`). `None` while not
     /// established — the sweep falls back to live resolution.
     pub session_ifindex: Option<u32>,
+    /// Pending session-down cause, parked by the initiator right
+    /// before it sends `Event::Stop` (fast-external-failover,
+    /// BFD-down, `clear … hard`). Consumed (`take`) by [`fsm`] when
+    /// the session actually leaves Established; cleared on entering
+    /// Established so a stale label cannot mis-attribute a later
+    /// reset.
+    pub down_reason: Option<PeerDownReason>,
+    /// Why and when the last established session ended — the
+    /// `Last reset …, due to <reason>` line in `show bgp neighbor`.
+    /// Survives re-establishment (FRR semantics: it describes the
+    /// *last* reset, not the current session).
+    pub last_reset: Option<(PeerDownReason, Instant)>,
     pub peer_type: PeerType,
     /// RFC 9572 §6.1 region identifier, resolved from this peer's
     /// neighbor-group (`region-id`) by `apply_inherited`. `Some` marks the
@@ -1019,6 +1091,8 @@ impl Peer {
             // interface-address events (see `shared_network`).
             shared_network: true,
             session_ifindex: None,
+            down_reason: None,
+            last_reset: None,
             peer_type: PeerType::IBGP,
             region_id: None,
             state: State::Idle,
@@ -1689,6 +1763,10 @@ pub fn fsm(
     event: Event,
     shards: Option<&super::shard::pool::ShardPool>,
 ) {
+    // Captured before `event` is consumed: the down-cause this event
+    // implies, in case it ends the established session below.
+    let event_reason = PeerDownReason::from_event(&event);
+
     // Compute new state (single match, only &mut Peer).
     let (prev_state, effect) = {
         let peer = peer_map.get_mut_by_idx(id).unwrap();
@@ -1727,9 +1805,22 @@ pub fn fsm(
         }
         if prev_state.is_established() && !peer.state.is_established() {
             peer.instant = Some(Instant::now());
+            // Record why the session ended: the initiator's parked
+            // cause wins; else derive from the event itself.
+            peer.last_reset = Some((
+                peer.down_reason
+                    .take()
+                    .or(event_reason)
+                    .unwrap_or(PeerDownReason::Unknown),
+                Instant::now(),
+            ));
         }
         if !prev_state.is_established() && peer.state.is_established() {
             peer.instant = Some(Instant::now());
+            // A parked cause that never fired (its Stop lost a race
+            // with the session coming up) must not mislabel the next
+            // reset.
+            peer.down_reason = None;
             // A2 ⑥ (gate-on): spawn the per-peer egress task. Phase 0 — it
             // is idle (lifecycle only); Phase 1 routes the v4 egress to it.
             if super::peer_egress::peer_egress_task_enabled() {
@@ -3268,6 +3359,9 @@ pub fn clear_bgp_action(
     for &peer_idx in &targets {
         match op {
             BgpClearOp::Hard => {
+                if let Some(peer) = bgp.peers.get_mut_by_idx(peer_idx) {
+                    peer.down_reason = Some(PeerDownReason::AdminReset);
+                }
                 let _ = bgp.tx.try_send(Message::Event(peer_idx, Event::Stop));
             }
             BgpClearOp::SoftBoth => {
