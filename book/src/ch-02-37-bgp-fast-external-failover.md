@@ -36,6 +36,15 @@ returns. When the interface comes back up, zebra-rs additionally
 re-kicks peers parked on it, so recovery does not wait out the
 connect-retry backoff either.
 
+What counts as *down* is the operational state: admin-down or loss of
+carrier (`LOWER_UP` cleared). On a point-to-point link (a veth pair, a
+direct fiber) cutting either end drops carrier on **both** routers, so
+both sides fast-reset — this is exactly what the BDD feature
+(`bgp_fast_external_failover`) validates. Across a switch, only the
+router whose own port failed loses carrier; the far side still sees
+link-up and keeps waiting on the hold timer, so pair the feature with
+BFD when the path between the peers is switched.
+
 With the feature disabled, a link cut is only detected when the hold
 timer expires — or by [BFD](ch-02-08-bgp-bfd.md), which detects
 *forwarding* failures the link state never reports and works for
@@ -82,11 +91,19 @@ short link drops.
 
 ## Verification
 
-A triggered failover logs the reset:
+A triggered failover logs the reset at `warn` level:
 
 ```
-bgp: fast-external-failover: interface down — resetting eBGP peer peer=10.0.3.2 ifindex=3
+WARN zebra-rs/src/bgp/inst.rs: bgp: fast-external-failover: interface down — resetting eBGP peer peer=10.107.0.2 ifindex=207
 ```
 
 and the neighbor drops out of `Established` in `show bgp summary`
 immediately after the link event, rather than at hold-time expiry.
+When the link returns, the session re-establishes right away — link-up
+re-kicks peers parked on that interface instead of leaving them to the
+connect-retry backoff.
+
+The full behavior — immediate reset on link-down at both ends of a
+point-to-point link, prompt recovery on link-up, and the session
+riding through the same cut when the knob is off — is exercised
+end-to-end by the BDD feature `bdd/tests/features/bgp_fast_external_failover.feature`.

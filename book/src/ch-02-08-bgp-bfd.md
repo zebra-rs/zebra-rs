@@ -9,6 +9,13 @@ See the [BFD overview](ch-10-00-bfd.md) for the session model, the
 single- vs multi-hop transport, and the `show bfd` commands. This
 section covers only the BGP-side configuration.
 
+For the special case of a directly connected eBGP peer whose
+*interface* goes down, no BFD is needed:
+[fast external failover](ch-02-37-bgp-fast-external-failover.md)
+resets the session on the link event itself, by default. BFD earns its
+keep on everything link state cannot see — forwarding failures,
+switched paths, multihop and iBGP sessions.
+
 ## Enabling BFD on a neighbour
 
 BFD is a flat block under the neighbour. The minimal form is just
