@@ -1,18 +1,18 @@
-# tc-evpn-replicate
+# evpn-replicate
 
 eBPF **TC/clsact** dataplane for EVPN BUM replication over an **RFC 9524 SR
-replication segment** (the SR-MPLS / SRv6 P2MP tree signalled by EVPN Type-3
-IMET, `draft-ietf-bess-mvpn-evpn-sr-p2mp`).
+replication segment** (the SRv6 P2MP tree signalled by EVPN Type-3 IMET,
+`draft-ietf-bess-mvpn-evpn-sr-p2mp`).
 
 ## Why TC, not XDP
 
 The stock Linux kernel cannot forward RFC 9524 natively — there is no
-`End.Replicate` seg6local action, no MPLS P2MP/multicast, and no `End.DT2M` for
-the L2 leaf flood. Replication means *one copy per downstream branch, each with
-a different rewritten header*. The TC layer can express that with
-`bpf_clone_redirect` in a loop (mutating the skb between clones); XDP cannot
-clone per-copy. So this is a `#[classifier]` program on `clsact`, unlike the
-sibling [`xdp-bfd-echo`](../xdp-bfd-echo) offload.
+`End.Replicate` seg6local action and no `End.DT2M` for the L2 leaf flood.
+Replication means *one copy per downstream branch, each with a different
+rewritten header*. The TC layer can express that with `bpf_clone_redirect` in a
+loop (mutating the skb between clones); XDP cannot clone per-copy. So this is a
+`#[classifier]` program on `clsact`, unlike the sibling
+[`xdp-bfd-echo`](../xdp-bfd-echo) offload.
 
 Roles:
 - **root / bud** (clsact ingress) — **implemented**: match the local
