@@ -753,6 +753,12 @@ pub struct Bgp {
     /// field mirrors it for `show` / re-application. Scope is the
     /// default-VRF instance; per-VRF suppression is a follow-up.
     pub no_fib_install: bool,
+    /// `router bgp global fast-external-failover` (IOS-XR
+    /// `bgp fast-external-fallover`, on by default): on
+    /// `RibRx::LinkDown`/`LinkDel`, immediately hard-reset every
+    /// single-hop eBGP session riding the downed interface instead of
+    /// waiting out the hold timer. See [`Self::link_down_failover`].
+    pub fast_external_failover: bool,
     pub peers: PeerMap,
     /// Instance-level BFD defaults (`router bgp { bfd {} }`), inherited by
     /// every neighbor and overridden per neighbor (see
@@ -1157,6 +1163,7 @@ impl Bgp {
             ethernet_segments: BTreeMap::new(),
             hostname: None,
             no_fib_install: false,
+            fast_external_failover: true,
             peers: PeerMap::new(),
             bfd: PeerBfdConfig::default(),
             tx,
@@ -2940,6 +2947,60 @@ impl Bgp {
         }
     }
 
+    /// `RibRx::LinkDown`/`LinkDel` handler — fast external failover
+    /// (IOS-XR `bgp fast-external-fallover`, FRR
+    /// `bgp fast-external-failover`; on by default). Hard-resets every
+    /// non-Idle single-hop eBGP peer whose session rides the downed
+    /// interface, so failure detection is the link event rather than
+    /// hold-timer expiry. `Event::Stop` → `fsm_stop` sends no
+    /// NOTIFICATION — matching FRR's interface-down path, and the link
+    /// is down so nothing would be delivered anyway. The idle-hold
+    /// timer re-dials afterwards as usual.
+    fn link_down_failover(&mut self, ifindex: u32) {
+        use super::peer::State;
+        if !self.fast_external_failover {
+            return;
+        }
+        let victims: Vec<_> = self
+            .peers
+            .iter_all() // NOT iter(): that skips interface-keyed peers
+            .map(|(_, p)| p)
+            .filter(|p| p.state != State::Idle)
+            .filter(|p| p.fast_failover_applies())
+            .filter(|p| p.session_ifindex(&self.connected_subnets) == Some(ifindex))
+            .map(|p| (p.ident, p.address))
+            .collect();
+        for (ident, addr) in victims {
+            tracing::warn!(
+                peer = %addr,
+                ifindex,
+                "bgp: fast-external-failover: interface down — resetting eBGP peer",
+            );
+            let _ = self.tx.try_send(Message::Event(ident, Event::Stop));
+        }
+    }
+
+    /// `RibRx::LinkUp` — re-kick peers parked on this interface
+    /// (by an earlier failover reset, a failed dial while the link was
+    /// down, or the connected-check gate) so reconvergence doesn't wait
+    /// out the connect-retry backstop. Not gated on
+    /// `fast_external_failover`: `fsm_start` re-runs its own gates, so
+    /// an early Start is harmless for peers we didn't reset.
+    fn link_up_kick(&mut self, ifindex: u32) {
+        use super::peer::State;
+        let kicks: Vec<_> = self
+            .peers
+            .iter_all()
+            .map(|(_, p)| p)
+            .filter(|p| p.active && matches!(p.state, State::Idle | State::Active))
+            .filter(|p| p.session_ifindex(&self.connected_subnets) == Some(ifindex))
+            .map(|p| p.ident)
+            .collect();
+        for ident in kicks {
+            let _ = self.tx.try_send(Message::Event(ident, Event::Start));
+        }
+    }
+
     /// Re-tag and re-advertise a VRF's locally-originated VPNv4 routes
     /// with the current export route-targets. Called when a VRF's RT
     /// policy is (re-)learned: the per-VRF route export can race ahead of
@@ -3139,6 +3200,17 @@ impl Bgp {
                 if self.interface_neighbors.contains_key(&link.name) {
                     super::interface_neighbor::materialize_dormant(self, &link.name);
                 }
+            }
+            // Fast external failover: a link going operationally down
+            // (or disappearing) immediately resets the single-hop eBGP
+            // sessions riding it, instead of leaving them to hold-timer
+            // expiry. LinkUp re-kicks parked peers for fast
+            // reconvergence.
+            RibRx::LinkDown(ifindex) | RibRx::LinkDel(ifindex) => {
+                self.link_down_failover(ifindex);
+            }
+            RibRx::LinkUp(ifindex) => {
+                self.link_up_kick(ifindex);
             }
             RibRx::AddrAdd(addr) => {
                 self.interface_addrs.record(&addr);

@@ -2797,6 +2797,47 @@ mod yang_load_tests {
         );
     }
 
+    /// `router bgp global fast-external-failover <bool>` (a zebra-rs
+    /// leaf added to the ietf-bgp `container global`) must be a
+    /// settable path, and — being a boolean leaf, not a presence
+    /// container — the value-less spelling must not parse.
+    #[test]
+    fn bgp_global_fast_external_failover_is_settable() {
+        use crate::config::ExecCode;
+        use crate::config::parse::{State, parse};
+        use libyang::to_entry;
+
+        let mut yang = YangStore::new();
+        yang.add_path(concat!(env!("CARGO_MANIFEST_DIR"), "/yang"));
+        yang.read_with_resolve("configure")
+            .expect("configure mode loads");
+        yang.identity_resolve();
+        let module = yang
+            .find_module("configure")
+            .expect("configure module present");
+        let entry = to_entry(&yang, module);
+
+        for cmd in [
+            "set router bgp global fast-external-failover false",
+            "set router bgp global fast-external-failover true",
+        ] {
+            let (code, _comps, _state) = parse(cmd, entry.clone(), None, State::new());
+            assert_eq!(code, ExecCode::Success, "`{cmd}` must be a valid path",);
+        }
+
+        let (code, _comps, _state) = parse(
+            "set router bgp global fast-external-failover",
+            entry,
+            None,
+            State::new(),
+        );
+        assert_ne!(
+            code,
+            ExecCode::Success,
+            "boolean leaf — the value-less spelling must not parse",
+        );
+    }
+
     /// `neighbor X ip-transparent` (zebra-bgp-transport.yang) must be a
     /// settable path on the neighbor and on the neighbor-group (the
     /// group reuses the transport grouping via `uses`). Guards against

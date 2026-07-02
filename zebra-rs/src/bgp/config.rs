@@ -76,6 +76,20 @@ fn config_global_no_fib_install(bgp: &mut Bgp, mut args: Args, op: ConfigOp) -> 
     Some(())
 }
 
+/// `set router bgp global fast-external-failover <true|false>` —
+/// IOS-XR `bgp fast-external-fallover` parity, on by default: reset
+/// directly connected eBGP sessions immediately on interface down
+/// (`Bgp::link_down_failover`) instead of waiting for hold-timer
+/// expiry. Unlike `no-fib-install` this knob defaults *true*, so
+/// Delete restores `true`; and a missing value token must not
+/// early-return into stale state. Flipping the knob never bounces
+/// sessions — it only changes how a future link-down is handled.
+fn config_global_fast_external_failover(bgp: &mut Bgp, mut args: Args, op: ConfigOp) -> Option<()> {
+    let flag = args.boolean().unwrap_or(true);
+    bgp.fast_external_failover = !op.is_set() || flag;
+    Some(())
+}
+
 /// `set router bgp lua-script <name> source-path <path>` — load a named
 /// Lua script from a file into the global script registry. With the `lua`
 /// build feature off the registry is still populated (so a config
@@ -3903,6 +3917,10 @@ impl Bgp {
             "/router/bgp/global/no-fib-install",
             config_global_no_fib_install,
         );
+        self.callback_add(
+            "/router/bgp/global/fast-external-failover",
+            config_global_fast_external_failover,
+        );
         // `router bgp port <0-65535>` (zebra-bgp-transport.yang): the
         // listener port; 0 disables listening.
         self.callback_add("/router/bgp/port", config_global_port);
@@ -5615,6 +5633,138 @@ mod neighbor_group_wiring_tests {
             config: false,
             fib: true,
         }
+    }
+
+    /// Like [`link_addr`] but on a caller-chosen interface.
+    fn link_addr_on(cidr: &str, ifindex: u32) -> crate::rib::link::LinkAddr {
+        crate::rib::link::LinkAddr {
+            ifindex,
+            ..link_addr(cidr)
+        }
+    }
+
+    /// Drain `bgp.rx`, returning the peer-ident of every queued
+    /// `Event::Start`. Other event variants are ignored.
+    fn drain_start_events(bgp: &mut Bgp) -> Vec<usize> {
+        use crate::bgp::inst::Message;
+        use crate::bgp::peer::Event;
+        let mut out = Vec::new();
+        while let Ok(msg) = bgp.rx.try_recv() {
+            if let Message::Event(ident, Event::Start) = msg {
+                out.push(ident);
+            }
+        }
+        out
+    }
+
+    /// `fast-external-failover` is a default-ON global boolean (IOS-XR
+    /// `bgp fast-external-fallover` parity): Set false disables, Set
+    /// true re-enables, and Delete restores the default (true) rather
+    /// than clearing to false. Flipping the knob never bounces
+    /// sessions — it only changes how a future link-down is handled.
+    #[tokio::test]
+    async fn fast_external_failover_knob_transitions() {
+        use crate::bgp::peer::State;
+        let mut bgp = fresh_bgp();
+        assert!(bgp.fast_external_failover, "must default to enabled");
+
+        config_peer(&mut bgp, arg_words(&["10.0.0.1"]), ConfigOp::Set).unwrap();
+        config_remote_as(&mut bgp, arg_words(&["10.0.0.1", "65001"]), ConfigOp::Set).unwrap();
+        let _ = drain_stop_events(&mut bgp);
+        bgp.peers.get_mut(&peer_addr()).unwrap().state = State::Established;
+
+        config_global_fast_external_failover(&mut bgp, arg_words(&["false"]), ConfigOp::Set)
+            .unwrap();
+        assert!(!bgp.fast_external_failover, "set false must disable");
+
+        config_global_fast_external_failover(&mut bgp, arg_words(&["true"]), ConfigOp::Set)
+            .unwrap();
+        assert!(bgp.fast_external_failover, "set true must re-enable");
+
+        config_global_fast_external_failover(&mut bgp, arg_words(&["false"]), ConfigOp::Set)
+            .unwrap();
+        config_global_fast_external_failover(&mut bgp, arg_words(&["false"]), ConfigOp::Delete)
+            .unwrap();
+        assert!(
+            bgp.fast_external_failover,
+            "delete must restore the default (true)",
+        );
+
+        assert!(
+            drain_stop_events(&mut bgp).is_empty(),
+            "knob flips must not bounce sessions",
+        );
+    }
+
+    /// Park a configured peer in a chosen FSM state, returning its ident.
+    fn park_peer(bgp: &mut Bgp, addr: &str, state: crate::bgp::peer::State) -> usize {
+        let ip: IpAddr = addr.parse().unwrap();
+        let peer = bgp.peers.get_mut(&ip).unwrap();
+        peer.state = state;
+        peer.ident
+    }
+
+    /// `RibRx::LinkDown` resets exactly the non-Idle single-hop eBGP
+    /// peers whose session rides the downed interface: `ebgp-multihop`,
+    /// iBGP and other-interface peers survive; with the knob off nobody
+    /// is reset. `RibRx::LinkUp` re-kicks parked (Idle/Active) peers on
+    /// that interface with `Event::Start`.
+    #[tokio::test]
+    async fn fast_external_failover_sweep_selection() {
+        use crate::bgp::peer::State;
+        use crate::rib::api::RibRx;
+        let mut bgp = fresh_bgp();
+        config_global_asn(&mut bgp, arg_words(&["65000"]), ConfigOp::Set).unwrap();
+
+        // Two connected subnets: 10.0.3.0/24 on ifindex 3, 10.0.4.0/24 on 4.
+        bgp.connected_subnets
+            .record(&link_addr_on("10.0.3.1/24", 3));
+        bgp.connected_subnets
+            .record(&link_addr_on("10.0.4.1/24", 4));
+
+        for (addr, remote_as) in [
+            ("10.0.3.2", "65001"), // single-hop eBGP on ifindex 3 — the victim
+            ("10.0.3.3", "65001"), // eBGP but multihop — survives
+            ("10.0.3.4", "65000"), // iBGP on ifindex 3 — survives
+            ("10.0.4.2", "65001"), // single-hop eBGP on ifindex 4 — survives
+        ] {
+            config_peer(&mut bgp, arg_words(&[addr]), ConfigOp::Set).unwrap();
+            config_remote_as(&mut bgp, arg_words(&[addr, remote_as]), ConfigOp::Set).unwrap();
+        }
+        config_ebgp_multihop(&mut bgp, arg_words(&["10.0.3.3", "2"]), ConfigOp::Set).unwrap();
+        let _ = drain_stop_events(&mut bgp);
+        let _ = drain_start_events(&mut bgp);
+
+        let victim = park_peer(&mut bgp, "10.0.3.2", State::Established);
+        park_peer(&mut bgp, "10.0.3.3", State::Established);
+        park_peer(&mut bgp, "10.0.3.4", State::Established);
+        park_peer(&mut bgp, "10.0.4.2", State::Established);
+
+        bgp.process_rib_msg(RibRx::LinkDown(3));
+        assert_eq!(
+            drain_stop_events(&mut bgp),
+            vec![victim],
+            "exactly the single-hop eBGP peer on the downed interface must be reset",
+        );
+
+        // LinkUp re-kicks a parked peer on that interface; Established
+        // peers are left alone.
+        park_peer(&mut bgp, "10.0.3.2", State::Active);
+        bgp.process_rib_msg(RibRx::LinkUp(3));
+        assert_eq!(
+            drain_start_events(&mut bgp),
+            vec![victim],
+            "LinkUp must re-kick the parked peer (and only it)",
+        );
+
+        // Knob off: even an eligible peer survives its interface going down.
+        config_global_fast_external_failover(&mut bgp, arg_words(&["false"]), ConfigOp::Set)
+            .unwrap();
+        bgp.process_rib_msg(RibRx::LinkDown(4));
+        assert!(
+            drain_stop_events(&mut bgp).is_empty(),
+            "knob off must disable the failover sweep",
+        );
     }
 
     /// `disable-connected-check` is a presence flag: Set/Delete toggle

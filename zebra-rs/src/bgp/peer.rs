@@ -1233,6 +1233,34 @@ impl Peer {
         !self.connected_check_applies() || self.shared_network
     }
 
+    /// Whether fast-external-failover governs this peer: single-hop
+    /// eBGP. FRR parity (`bgp_ifp_down`): default TTL-1 eBGP and GTSM
+    /// (`ttl-security` — connected-only in zebra-rs) participate;
+    /// `ebgp-multihop` opts out; iBGP (TTL 255) never participates.
+    /// Deliberately NOT [`Self::connected_check_applies`]: that also
+    /// exempts `disable-connected-check` and link-local peers, which
+    /// FRR does fail over.
+    pub fn fast_failover_applies(&self) -> bool {
+        self.is_ebgp() && self.config.transport.ebgp_multihop.is_none()
+    }
+
+    /// The interface this peer's session rides, as far as it can be
+    /// determined at link-down time. FRR caches `peer->nexthop.ifp` at
+    /// session establish; we resolve live instead — safe on a flap
+    /// because the RIB emits `LinkDown` before withdrawing anything
+    /// and does not emit `AddrDel` for retained addresses, so the
+    /// subnet table still maps the peer to the downed ifindex. (The
+    /// escape — operator deletes the address, then downs the link — is
+    /// an accepted v1 gap; see the design doc.)
+    pub fn session_ifindex(&self, subnets: &super::connected::ConnectedSubnets) -> Option<u32> {
+        match self.origin {
+            PeerOrigin::Interface { ifindex } => Some(ifindex),
+            _ => self
+                .scope_id // v6 link-local numbered peer
+                .or_else(|| subnets.ifindex_for(self.address)),
+        }
+    }
+
     /// Effective BFD hop mode for this neighbour: the explicit
     /// `bfd multihop` override if set, else inferred from the BGP
     /// session type (iBGP ⇒ multihop), mirroring FRR's
