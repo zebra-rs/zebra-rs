@@ -2531,6 +2531,11 @@ struct Neighbor<'a> {
     remote_router_id: Ipv4Addr,
     state: &'a str,
     uptime: String,
+    /// Why and when the last established session ended (`Last reset
+    /// <elapsed>, due to <reason>`). Absent until a session has been
+    /// reset at least once; survives re-establishment.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    last_reset: Option<LastReset>,
     timer: PeerParam,
     timer_sent: PeerParam,
     timer_recv: PeerParam,
@@ -2811,6 +2816,15 @@ fn uptime(instant: &Option<Instant>) -> String {
     peer_uptime(instant, false).0
 }
 
+/// `show bgp neighbor` view of [`Peer::last_reset`].
+#[derive(Debug, Serialize)]
+struct LastReset {
+    /// Elapsed time since the reset, `peer_uptime` format.
+    ago: String,
+    /// Human-readable cause ([`super::peer::PeerDownReason::as_str`]).
+    reason: &'static str,
+}
+
 fn fetch(peer: &Peer) -> Neighbor<'_> {
     // Get remaining time for keepalive and hold timers
     let keepalive_timer_rem = peer.timer.keepalive.as_ref().map(|t| t.rem_sec());
@@ -2854,6 +2868,10 @@ fn fetch(peer: &Peer) -> Neighbor<'_> {
         remote_router_id: peer.remote_id,
         state: peer.state.to_str(),
         uptime: uptime(&peer.instant),
+        last_reset: peer.last_reset.map(|(reason, at)| LastReset {
+            ago: uptime(&Some(at)),
+            reason: reason.as_str(),
+        }),
         timer: peer.param.clone(),
         timer_sent: peer.param_tx.clone(),
         timer_recv: peer.param_rx.clone(),
@@ -2997,6 +3015,14 @@ fn render(out: &mut String, neighbor: &Neighbor) -> std::fmt::Result {
         neighbor.timer_recv.hold_time,
         neighbor.timer_recv.keepalive,
     )?;
+
+    if let Some(last_reset) = &neighbor.last_reset {
+        writeln!(
+            out,
+            "  Last reset {}, due to {}",
+            last_reset.ago, last_reset.reason
+        )?;
+    }
 
     // ND discovery block — interface-keyed (unnumbered) peers only.
     if let Some(discovered_secs) = neighbor.nd_discovered_secs_ago {
@@ -5255,6 +5281,31 @@ Neighbor        V         AS   MsgRcvd   MsgSent   TblVer  InQ OutQ  Up/Down Sta
         );
     }
 
+    /// A peer that has never been reset renders no `Last reset` line;
+    /// one that has renders elapsed time and the cause.
+    #[test]
+    fn last_reset_line_rendered_only_when_present() {
+        let mut out = String::new();
+        let n = minimal_neighbor(None);
+        render(&mut out, &n).unwrap();
+        assert!(
+            !out.contains("Last reset"),
+            "no Last reset line before any reset:\n{out}"
+        );
+
+        let mut out = String::new();
+        let mut n = minimal_neighbor(None);
+        n.last_reset = Some(LastReset {
+            ago: "00:01:02".to_string(),
+            reason: "Interface down",
+        });
+        render(&mut out, &n).unwrap();
+        assert!(
+            out.contains("Last reset 00:01:02, due to Interface down"),
+            "Last reset line missing or malformed:\n{out}"
+        );
+    }
+
     /// Build a `Neighbor` DTO directly (all-`None` ND fields) and
     /// verify that `render` does NOT emit any ND block — address-keyed
     /// peers must be unaffected.
@@ -5392,6 +5443,7 @@ Neighbor        V         AS   MsgRcvd   MsgSent   TblVer  InQ OutQ  Up/Down Sta
             remote_router_id: Ipv4Addr::UNSPECIFIED,
             state: "Idle",
             uptime: String::from("never"),
+            last_reset: None,
             timer: PeerParam::default(),
             timer_sent: PeerParam::default(),
             timer_recv: PeerParam::default(),

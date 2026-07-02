@@ -5800,6 +5800,53 @@ mod neighbor_group_wiring_tests {
         );
     }
 
+    /// Reset initiators park the session-down cause on the peer just
+    /// before sending `Event::Stop`: the fast-external-failover sweep
+    /// parks `InterfaceDown`, `clear … hard` parks `AdminReset`. (The
+    /// FSM consumes the parked cause into `last_reset` when the
+    /// session actually leaves Established.)
+    #[tokio::test]
+    async fn reset_initiators_park_down_reason() {
+        use crate::bgp::peer::{BgpClearOp, PeerDownReason, State, clear_bgp_action};
+        use crate::rib::api::RibRx;
+        let mut bgp = fresh_bgp();
+        config_global_asn(&mut bgp, arg_words(&["65000"]), ConfigOp::Set).unwrap();
+        config_peer(&mut bgp, arg_words(&["10.0.3.2"]), ConfigOp::Set).unwrap();
+        config_remote_as(&mut bgp, arg_words(&["10.0.3.2", "65001"]), ConfigOp::Set).unwrap();
+        bgp.connected_subnets
+            .record(&link_addr_on("10.0.3.1/24", 3));
+        let _ = drain_stop_events(&mut bgp);
+        park_peer(&mut bgp, "10.0.3.2", State::Established);
+        let ip: IpAddr = "10.0.3.2".parse().unwrap();
+
+        bgp.process_rib_msg(RibRx::LinkDown(3));
+        assert_eq!(
+            bgp.peers.get(&ip).unwrap().down_reason,
+            Some(PeerDownReason::InterfaceDown),
+            "failover sweep must park InterfaceDown",
+        );
+        assert_eq!(drain_stop_events(&mut bgp).len(), 1);
+
+        bgp.peers.get_mut(&ip).unwrap().down_reason = None;
+        let msg = clear_bgp_action(
+            &mut bgp,
+            &mut arg_words(&["10.0.3.2"]),
+            None,
+            BgpClearOp::Hard,
+        )
+        .unwrap();
+        assert!(
+            msg.contains("cleared 1 peer"),
+            "unexpected clear reply: {msg}"
+        );
+        assert_eq!(
+            bgp.peers.get(&ip).unwrap().down_reason,
+            Some(PeerDownReason::AdminReset),
+            "hard clear must park AdminReset",
+        );
+        assert_eq!(drain_stop_events(&mut bgp).len(), 1);
+    }
+
     /// `resolve_session_ifindex` precedence: the *local* socket address
     /// beats the peer-address subnet (it stays unambiguous across
     /// parallel links), and a link-local v6 local address resolves by

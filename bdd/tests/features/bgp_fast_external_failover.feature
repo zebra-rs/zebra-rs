@@ -51,6 +51,7 @@ Feature: BGP fast-external-failover (immediate eBGP reset on link down)
     And BGP session in "z2" to "10.107.0.1" should eventually not be "Established"
     And the zebra-rs log in namespace "z1" should contain "fast-external-failover: interface down"
     And the zebra-rs log in namespace "z2" should contain "fast-external-failover: interface down"
+    And show command "show bgp neighbor" in namespace "z1" should contain "due to Interface down"
 
   Scenario: Link up re-establishes the session without waiting out connect-retry
     Given the test topology exists

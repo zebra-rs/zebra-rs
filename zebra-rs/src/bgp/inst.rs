@@ -3001,6 +3001,9 @@ impl Bgp {
                 ifindex,
                 "bgp: fast-external-failover: interface down — resetting eBGP peer",
             );
+            if let Some(peer) = self.peers.get_mut_by_idx(ident) {
+                peer.down_reason = Some(super::peer::PeerDownReason::InterfaceDown);
+            }
             let _ = self.tx.try_send(Message::Event(ident, Event::Stop));
         }
     }
@@ -5347,7 +5350,7 @@ impl Bgp {
         // SessionKey.remote is the BGP neighbor address — direct
         // lookup. A missing peer means the user removed the
         // neighbor since BGP last subscribed; safe to ignore.
-        let Some(peer) = self.peers.get(&key.remote) else {
+        let Some(peer) = self.peers.get_mut(&key.remote) else {
             bgp_bfd_trace!(
                 self.tracing,
                 ?key,
@@ -5356,6 +5359,7 @@ impl Bgp {
             return;
         };
         let peer_idx = peer.ident;
+        peer.down_reason = Some(super::peer::PeerDownReason::BfdDown);
         tracing::warn!(
             peer = %key.remote,
             diag = %change.diag,
