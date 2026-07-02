@@ -28,6 +28,7 @@ message Nexthop {
   string oif = 3;         // output interface name (used when oif_index == 0)
   uint32 oif_index = 4;   // output ifindex; preferred when non-zero
   bool v6 = 5;            // IPv6 nexthop (gateway parsed as IPv6)
+  repeated uint32 labels = 6;  // MPLS out-label stack, [0] = outermost
 }
 
 // A nexthop group for ECMP: ordered member nexthop ids. A route whose flags
@@ -48,6 +49,22 @@ message Route4Del {
   string prefix = 1;
 }
 
+// Bulk route install — the initial-load path. In dir24 mode each affected
+// /24 block is recomputed once per batch instead of once per route.
+message Route4Batch {
+  repeated Route4 routes = 1;
+}
+
+message FibSummaryRequest {}
+
+// IPv4 FIB engine state (`cradle ctl fib`).
+message FibSummary {
+  string fib4_mode = 1;  // "lpm" | "dir24"
+  uint64 routes4 = 2;    // dir24 shadow route count (0 in lpm mode)
+  uint32 tbl8_used = 3;
+  uint32 tbl8_free = 4;
+}
+
 message Route6 {
   string prefix = 1;   // "addr/len"
   uint32 nexthop_id = 2;
@@ -59,9 +76,32 @@ message Route6Del {
 }
 
 message Neighbor4 {
-  string oif = 1;
+  string oif = 1;       // interface name (used when oif_index == 0)
   string ip = 2;
   string mac = 3;
+  uint32 oif_index = 4; // ifindex; preferred when non-zero
+}
+
+message Neighbor6 {
+  string oif = 1;       // interface name (used when oif_index == 0)
+  string ip = 2;
+  string mac = 3;
+  uint32 oif_index = 4; // ifindex; preferred when non-zero
+}
+
+// An incoming-label map (ILM) entry — mirrors zebra-rs's FibHandle
+// ilm_add/ilm_replace/ilm_del. `action` is MPLS_OP_*: 0 = swap (the nexthop's
+// labels are the out stack), 1 = pop-to-IP (PHP / L3VPN egress),
+// 2 = pop one label.
+message Ilm {
+  uint32 in_label = 1;      // 20-bit incoming label (the LFIB key)
+  uint32 nexthop_id = 2;    // resolved nexthop; its labels are the swap stack
+  uint32 action = 3;        // MPLS_OP_SWAP | POP_L3 | POP
+  uint32 vrf_table_id = 4;  // for POP_L3 into a VRF (0 = global)
+}
+
+message IlmDel {
+  uint32 in_label = 1;
 }
 
 message Backend {
@@ -77,15 +117,49 @@ message Service {
   repeated Backend backends = 5;
 }
 
+message StatsRequest {}
+
+// One datapath counter: a packet count at a forwarding decision point.
+message StatEntry {
+  string name = 1;
+  uint64 packets = 2;
+}
+
+message StatsReply {
+  repeated StatEntry entries = 1;
+}
+
+// An L7 (HTTP) path-prefix route to a backend.
+message L7Route {
+  string path_prefix = 1;  // longest-prefix match on the request path
+  string backend_ip = 2;
+  uint32 backend_port = 3;
+}
+
+// An L7 service: TCP flows to vip:port are steered to the transparent proxy,
+// which routes by HTTP path to one of `routes`.
+message L7Service {
+  string vip = 1;
+  uint32 port = 2;
+  repeated L7Route routes = 3;
+}
+
 service Cradle {
   rpc SetPort(Port) returns (Empty);
   rpc SetL2Domain(L2Domain) returns (Empty);
   rpc SetNexthop(Nexthop) returns (Empty);
   rpc SetNexthopGroup(NexthopGroup) returns (Empty);
   rpc AddRoute4(Route4) returns (Empty);
+  rpc AddRoute4Batch(Route4Batch) returns (Empty);
   rpc DelRoute4(Route4Del) returns (Empty);
+  rpc GetFibSummary(FibSummaryRequest) returns (FibSummary);
   rpc AddRoute6(Route6) returns (Empty);
   rpc DelRoute6(Route6Del) returns (Empty);
   rpc SetNeighbor4(Neighbor4) returns (Empty);
+  rpc SetNeighbor6(Neighbor6) returns (Empty);
+  rpc AddIlm(Ilm) returns (Empty);
+  rpc DelIlm(IlmDel) returns (Empty);
   rpc AddService(Service) returns (Empty);
+  rpc GetStats(StatsRequest) returns (StatsReply);
+  rpc AddL7Service(L7Service) returns (Empty);
 }

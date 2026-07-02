@@ -3134,6 +3134,13 @@ impl Rib {
                 self.fib_nexthop_removed(id);
             }
             FibMessage::NewNeighbor(nbr) => {
+                // Tee resolved ARP/ND to the cradle eBPF data plane — its
+                // MPLS egress rewrite resolves next-hop MACs from this state.
+                if let (Some(dst), Some(mac)) = (nbr.dst, &nbr.lladdr) {
+                    self.fib_handle
+                        .cradle_neighbor_add(dst, nbr.ifindex, mac.octets())
+                        .await;
+                }
                 let fdb_entry = fdb_entry_from_neighbor(self, &nbr);
                 if let Some(key) = neighbor_key(&nbr) {
                     self.neighbors.insert(key, nbr);
