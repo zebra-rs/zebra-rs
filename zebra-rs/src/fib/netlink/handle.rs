@@ -328,17 +328,18 @@ pub struct FibHandle {
     pub cradle: Option<CradleFib>,
 }
 
-/// Extract all IPv4 `(gateway, oif)` members of a nexthop for the cradle tee.
-/// A single member installs a plain route; multiple members install an ECMP
-/// group. (Protect/backup nexthops are not teed.)
-fn cradle_members_v4(nexthop: &Nexthop) -> Vec<(Option<Ipv4Addr>, u32)> {
-    fn member(u: &NexthopUni) -> (Option<Ipv4Addr>, u32) {
+/// Extract all IPv4 `(gateway, oif, out-label stack)` members of a nexthop
+/// for the cradle tee. A single member installs a plain route; multiple
+/// members install an ECMP group. A non-empty label stack makes the leg an
+/// MPLS imposition. (Protect/backup nexthops are not teed.)
+fn cradle_members_v4(nexthop: &Nexthop) -> Vec<(Option<Ipv4Addr>, u32, Vec<u32>)> {
+    fn member(u: &NexthopUni) -> (Option<Ipv4Addr>, u32, Vec<u32>) {
         let oif = u.ifindex().unwrap_or(0);
         let gw = match u.addr {
             IpAddr::V4(a) if !a.is_unspecified() => Some(a),
             _ => None,
         };
-        (gw, oif)
+        (gw, oif, u.mpls_label.clone())
     }
     match nexthop {
         Nexthop::Uni(u) => vec![member(u)],
@@ -356,14 +357,14 @@ fn cradle_members_v4(nexthop: &Nexthop) -> Vec<(Option<Ipv4Addr>, u32)> {
 }
 
 /// IPv6 counterpart of [`cradle_members_v4`].
-fn cradle_members_v6(nexthop: &Nexthop) -> Vec<(Option<Ipv6Addr>, u32)> {
-    fn member(u: &NexthopUni) -> (Option<Ipv6Addr>, u32) {
+fn cradle_members_v6(nexthop: &Nexthop) -> Vec<(Option<Ipv6Addr>, u32, Vec<u32>)> {
+    fn member(u: &NexthopUni) -> (Option<Ipv6Addr>, u32, Vec<u32>) {
         let oif = u.ifindex().unwrap_or(0);
         let gw = match u.addr {
             IpAddr::V6(a) if !a.is_unspecified() => Some(a),
             _ => None,
         };
-        (gw, oif)
+        (gw, oif, u.mpls_label.clone())
     }
     match nexthop {
         Nexthop::Uni(u) => vec![member(u)],
@@ -487,6 +488,15 @@ impl FibHandle {
         self.cradle = endpoint.map(CradleFib::new);
         if self.cradle.is_none() {
             tracing::info!("fib: cradle eBPF tee disabled");
+        }
+    }
+
+    /// Tee a resolved neighbor (ARP/ND) into the cradle data plane — its MPLS
+    /// egress rewrite resolves destination MACs from this state. No-op when
+    /// the tee is disabled.
+    pub async fn cradle_neighbor_add(&self, ip: IpAddr, oif_index: u32, mac: [u8; 6]) {
+        if let Some(cradle) = &self.cradle {
+            cradle.neighbor_add(ip, oif_index, mac).await;
         }
     }
 
@@ -2456,6 +2466,52 @@ impl FibHandle {
     }
 
     async fn ilm_install(&self, label: u32, ilm: &IlmEntry, replace: bool) {
+        // Tee the ILM to the cradle eBPF data plane (mirrors the netlink
+        // install below). DecapVrf/ContextLabel decap to IP in a VRF; every
+        // other type is a swap whose out stack rides the nexthop — an empty
+        // stack is PHP, popped by the data plane on the packet's S bit.
+        // Multi-member ILM ECMP is not teed yet (first member only).
+        if let Some(cradle) = &self.cradle {
+            match &ilm.ilm_type {
+                IlmType::DecapVrf { table_id, .. } | IlmType::ContextLabel { table_id, .. } => {
+                    cradle
+                        .ilm_install(
+                            label,
+                            crate::fib::cradle::MPLS_OP_POP_L3,
+                            *table_id,
+                            None,
+                            0,
+                            &[],
+                        )
+                        .await;
+                }
+                _ => {
+                    let uni = match &ilm.nexthop {
+                        Nexthop::Uni(u) => Some(u),
+                        Nexthop::Multi(m) => m.nexthops.first(),
+                        _ => None,
+                    };
+                    if let Some(u) = uni {
+                        let gw = if u.addr.is_unspecified() {
+                            None
+                        } else {
+                            Some(u.addr)
+                        };
+                        cradle
+                            .ilm_install(
+                                label,
+                                crate::fib::cradle::MPLS_OP_SWAP,
+                                0,
+                                gw,
+                                u.ifindex().unwrap_or(0),
+                                &u.mpls_label,
+                            )
+                            .await;
+                    }
+                }
+            }
+        }
+
         let create_flags = if replace {
             NLM_F_REPLACE | NLM_F_CREATE
         } else {
@@ -2614,6 +2670,10 @@ impl FibHandle {
     }
 
     pub async fn ilm_del(&self, label: u32, ilm: &IlmEntry) {
+        if let Some(cradle) = &self.cradle {
+            cradle.ilm_uninstall(label).await;
+        }
+
         let mut msg = RouteMessage::default();
         msg.header.address_family = AddressFamily::Mpls;
         msg.header.destination_prefix_length = 20;
