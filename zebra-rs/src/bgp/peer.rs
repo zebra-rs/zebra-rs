@@ -800,6 +800,15 @@ pub struct Peer {
     /// fails open (see [`super::connected::ConnectedSubnets`]). Consulted
     /// only by [`Peer::connected_check_ok`].
     pub shared_network: bool,
+    /// The interface the established session rides, snapshotted by the
+    /// owning instance on the transition into Established (from
+    /// [`Self::resolve_session_ifindex`]) and cleared when the session
+    /// ends. Consulted first by fast-external-failover's link-down
+    /// sweep, so a session outlives `AddrDel` reordering and parallel
+    /// links: the mapping was pinned while the connection was up
+    /// (FRR's cached `peer->nexthop.ifp`). `None` while not
+    /// established — the sweep falls back to live resolution.
+    pub session_ifindex: Option<u32>,
     pub peer_type: PeerType,
     /// RFC 9572 §6.1 region identifier, resolved from this peer's
     /// neighbor-group (`region-id`) by `apply_inherited`. `Some` marks the
@@ -1009,6 +1018,7 @@ impl Peer {
             // Fail open until the instance computes connectedness from
             // interface-address events (see `shared_network`).
             shared_network: true,
+            session_ifindex: None,
             peer_type: PeerType::IBGP,
             region_id: None,
             state: State::Idle,
@@ -1244,21 +1254,39 @@ impl Peer {
         self.is_ebgp() && self.config.transport.ebgp_multihop.is_none()
     }
 
-    /// The interface this peer's session rides, as far as it can be
-    /// determined at link-down time. FRR caches `peer->nexthop.ifp` at
-    /// session establish; we resolve live instead — safe on a flap
-    /// because the RIB emits `LinkDown` before withdrawing anything
-    /// and does not emit `AddrDel` for retained addresses, so the
-    /// subnet table still maps the peer to the downed ifindex. (The
-    /// escape — operator deletes the address, then downs the link — is
-    /// an accepted v1 gap; see the design doc.)
-    pub fn session_ifindex(&self, subnets: &super::connected::ConnectedSubnets) -> Option<u32> {
-        match self.origin {
-            PeerOrigin::Interface { ifindex } => Some(ifindex),
-            _ => self
-                .scope_id // v6 link-local numbered peer
-                .or_else(|| subnets.ifindex_for(self.address)),
+    /// Resolve the interface this peer's session rides right now, most
+    /// precise source first: the interface key itself for unnumbered
+    /// peers; the link-local connect scope; then the *local* socket
+    /// address of the live/last connection (a v6 scope-id directly,
+    /// else the connected subnet the local address sits on — unlike
+    /// the peer address, the local address stays unambiguous across
+    /// parallel links to the same neighbor); and only then the subnet
+    /// covering the peer address. The owning instance snapshots this
+    /// into [`Self::session_ifindex`] when the session establishes
+    /// (FRR caches `peer->nexthop.ifp` the same way); the live form
+    /// remains the fallback for peers that never established.
+    pub fn resolve_session_ifindex(
+        &self,
+        subnets: &super::connected::ConnectedSubnets,
+    ) -> Option<u32> {
+        if let PeerOrigin::Interface { ifindex } = self.origin {
+            return Some(ifindex);
         }
+        if let Some(scope) = self.scope_id {
+            // v6 link-local numbered peer
+            return Some(scope);
+        }
+        if let Some(local) = self.param.local_addr {
+            if let std::net::SocketAddr::V6(v6) = local
+                && v6.scope_id() != 0
+            {
+                return Some(v6.scope_id());
+            }
+            if let Some(ifindex) = subnets.ifindex_for(local.ip()) {
+                return Some(ifindex);
+            }
+        }
+        subnets.ifindex_for(self.address)
     }
 
     /// Effective BFD hop mode for this neighbour: the explicit

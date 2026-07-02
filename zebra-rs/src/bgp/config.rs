@@ -5767,6 +5767,82 @@ mod neighbor_group_wiring_tests {
         );
     }
 
+    /// The link-down sweep prefers the ifindex pinned at session
+    /// establish over live subnet resolution, so a session whose
+    /// connected address was already deleted (AddrDel raced ahead of
+    /// LinkDown) is still reset — and only by the pinned interface.
+    #[tokio::test]
+    async fn fast_external_failover_uses_pinned_session_ifindex() {
+        use crate::bgp::peer::State;
+        use crate::rib::api::RibRx;
+        let mut bgp = fresh_bgp();
+        config_global_asn(&mut bgp, arg_words(&["65000"]), ConfigOp::Set).unwrap();
+        config_peer(&mut bgp, arg_words(&["10.0.3.2"]), ConfigOp::Set).unwrap();
+        config_remote_as(&mut bgp, arg_words(&["10.0.3.2", "65001"]), ConfigOp::Set).unwrap();
+        let _ = drain_stop_events(&mut bgp);
+
+        // No connected-subnet knowledge at all — live resolution has
+        // nothing to offer; only the pinned mapping can match.
+        let victim = park_peer(&mut bgp, "10.0.3.2", State::Established);
+        let ip: IpAddr = "10.0.3.2".parse().unwrap();
+        bgp.peers.get_mut(&ip).unwrap().session_ifindex = Some(3);
+
+        bgp.process_rib_msg(RibRx::LinkDown(4));
+        assert!(
+            drain_stop_events(&mut bgp).is_empty(),
+            "a different interface going down must not reset the peer",
+        );
+        bgp.process_rib_msg(RibRx::LinkDown(3));
+        assert_eq!(
+            drain_stop_events(&mut bgp),
+            vec![victim],
+            "the pinned ifindex must drive the reset",
+        );
+    }
+
+    /// `resolve_session_ifindex` precedence: the *local* socket address
+    /// beats the peer-address subnet (it stays unambiguous across
+    /// parallel links), and a link-local v6 local address resolves by
+    /// its scope-id outright.
+    #[tokio::test]
+    async fn resolve_session_ifindex_prefers_local_address() {
+        use std::net::{SocketAddr, SocketAddrV6};
+        let mut bgp = fresh_bgp();
+        config_peer(&mut bgp, arg_words(&["10.0.3.2"]), ConfigOp::Set).unwrap();
+        bgp.connected_subnets
+            .record(&link_addr_on("10.0.3.1/24", 8));
+        bgp.connected_subnets
+            .record(&link_addr_on("10.0.99.1/24", 7));
+        let ip: IpAddr = "10.0.3.2".parse().unwrap();
+        let subnets = &bgp.connected_subnets;
+        let peer = bgp.peers.get_mut(&ip).unwrap();
+
+        assert_eq!(
+            peer.resolve_session_ifindex(subnets),
+            Some(8),
+            "without a local address, the peer-address subnet decides",
+        );
+
+        peer.param.local_addr = Some("10.0.99.1:34567".parse().unwrap());
+        assert_eq!(
+            peer.resolve_session_ifindex(subnets),
+            Some(7),
+            "the local socket address must win over the peer-address subnet",
+        );
+
+        peer.param.local_addr = Some(SocketAddr::V6(SocketAddrV6::new(
+            "fe80::1".parse().unwrap(),
+            179,
+            0,
+            9,
+        )));
+        assert_eq!(
+            peer.resolve_session_ifindex(subnets),
+            Some(9),
+            "a link-local local address must resolve by its scope-id",
+        );
+    }
+
     /// `disable-connected-check` is a presence flag: Set/Delete toggle
     /// it and a change to a live session is bounced (FRR resets the peer
     /// on this flag); a no-op set does not bounce, an Idle peer is not

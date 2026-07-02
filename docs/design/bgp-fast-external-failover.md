@@ -365,21 +365,21 @@ Notes on the sweep:
 
 ### Edge cases & deliberate simplifications
 
-1. **Live ifindex resolution vs FRR's cached `nexthop.ifp`.** We
-   resolve peer→ifindex at link-down time. This works because the RIB
-   emits `LinkDown` *before* withdrawing anything and does not emit
-   `AddrDel` on a flap — `ConnectedSubnets` still holds the mapping.
-   The one ordering that escapes: operator deletes the address
-   (`AddrDel` prunes the subnet) *and then* the link goes down — the
-   session survives until hold-timer, as today. Caching a
-   `session_ifindex: Option<u32>` on the Established transition (FRR's
-   approach) closes that hole; deferred as a follow-up since the flap
-   path — the case the feature exists for — is fully covered.
+1. **Live ifindex resolution vs FRR's cached `nexthop.ifp`.**
+   *Closed by the follow-up:* `Peer.session_ifindex` is snapshotted on
+   the transition into Established (from
+   `Peer::resolve_session_ifindex`, which prefers the session's
+   **local** socket address — a v6 scope-id directly, else the
+   connected subnet the local address sits on) and cleared when the
+   session ends; the link-down sweep consults it before live
+   resolution. An established session now survives `AddrDel`
+   reordering. Live resolution remains the fallback for
+   never-established peers.
 2. **Peer address covered by two connected subnets on different
-   interfaces** (parallel links): `ifindex_for` returns the first
-   match, so the reset may key on the wrong link or be skipped. Same
-   limitation as the BFD single-hop keying that `ifindex_for` was built
-   for; the cached-ifindex follow-up fixes this too.
+   interfaces** (parallel links): *closed by the same follow-up* for
+   established sessions — the local socket address is unambiguous per
+   link. Non-established peers still fall back to first-match
+   `ifindex_for` on the peer address.
 3. **GTSM iBGP.** FRR technically fails over a directly connected GTSM
    *iBGP* peer; we scope to eBGP only — the feature is named
    *external*, XR documents "directly adjacent **external** peers",
@@ -443,7 +443,9 @@ Smallest-first; each lands green on its own.
   table row. This is the whole IOS-XR-parity feature.
 - **PR 2 — BDD.** Feature file + configs + doc page as above.
 - **Follow-ups (separate, optional):**
-  - cached `session_ifindex` at Established (closes edge cases 1–2);
+  - cached `session_ifindex` at Established — **done** (closes edge
+    cases 1–2; snapshot in the `became_established` block of
+    `process_msg`, keyed off `PeerParam::local_addr`);
   - `Peer.last_reset` reason plumbed into `show bgp neighbors`
     (serves BFD-down/hold-timer/collision too);
   - per-neighbor override via `InheritableKnobs` (classic-IOS-style
