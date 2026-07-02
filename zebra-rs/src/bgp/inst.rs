@@ -1994,6 +1994,23 @@ impl Bgp {
                     self.broadcast_dump_v4(ident);
                 }
 
+                // Pin (or drop) the session↔interface mapping for
+                // fast-external-failover: snapshot on the transition
+                // into Established — while the connection is up the
+                // local socket address resolves the link
+                // unambiguously — and clear when the session ends, so
+                // the link-down sweep never acts on a stale mapping.
+                {
+                    let subnets = &self.connected_subnets;
+                    if let Some(peer) = self.peers.get_mut_by_idx(ident) {
+                        if became_established {
+                            peer.session_ifindex = peer.resolve_session_ifindex(subnets);
+                        } else if !peer.state.is_established() {
+                            peer.session_ifindex = None;
+                        }
+                    }
+                }
+
                 self.gc_dynamic_peer_if_session_ended(ident, prev_state);
             }
             Message::Accept(socket, sockaddr) => {
@@ -2967,7 +2984,15 @@ impl Bgp {
             .map(|(_, p)| p)
             .filter(|p| p.state != State::Idle)
             .filter(|p| p.fast_failover_applies())
-            .filter(|p| p.session_ifindex(&self.connected_subnets) == Some(ifindex))
+            .filter(|p| {
+                // Prefer the ifindex pinned at session establish — it
+                // survives AddrDel reordering and disambiguates
+                // parallel links; live resolution covers peers that
+                // never established.
+                p.session_ifindex
+                    .or_else(|| p.resolve_session_ifindex(&self.connected_subnets))
+                    == Some(ifindex)
+            })
             .map(|p| (p.ident, p.address))
             .collect();
         for (ident, addr) in victims {
@@ -2993,7 +3018,7 @@ impl Bgp {
             .iter_all()
             .map(|(_, p)| p)
             .filter(|p| p.active && matches!(p.state, State::Idle | State::Active))
-            .filter(|p| p.session_ifindex(&self.connected_subnets) == Some(ifindex))
+            .filter(|p| p.resolve_session_ifindex(&self.connected_subnets) == Some(ifindex))
             .map(|p| p.ident)
             .collect();
         for ident in kicks {
