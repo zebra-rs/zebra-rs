@@ -662,7 +662,7 @@ impl FibHandle {
         if let Some(cradle) = &self.cradle {
             let members = cradle_members_v4(&entry.nexthop);
             if !members.is_empty() {
-                cradle.route_install(*prefix, members).await;
+                cradle.route_install(*prefix, table_id, members).await;
             }
         }
         match &entry.nexthop {
@@ -818,7 +818,7 @@ impl FibHandle {
             return;
         }
         if let Some(cradle) = &self.cradle {
-            cradle.route_del(*prefix).await;
+            cradle.route_del(*prefix, table_id).await;
         }
 
         match &entry.nexthop {
@@ -1101,7 +1101,7 @@ impl FibHandle {
         if let Some(cradle) = &self.cradle {
             let members = cradle_members_v6(&entry.nexthop);
             if !members.is_empty() {
-                cradle.route_install6(*prefix, members).await;
+                cradle.route_install6(*prefix, table_id, members).await;
             }
         }
         match &entry.nexthop {
@@ -1274,7 +1274,7 @@ impl FibHandle {
             return;
         }
         if let Some(cradle) = &self.cradle {
-            cradle.route_del6(*prefix).await;
+            cradle.route_del6(*prefix, table_id).await;
         }
 
         match &entry.nexthop {

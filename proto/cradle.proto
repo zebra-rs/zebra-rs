@@ -15,6 +15,7 @@ message Port {
   string mac = 2;   // empty => read from the interface
   bool l3 = 3;      // routed port; false => L2 bridge member in `vlan`
   uint32 vlan = 4;
+  uint32 vrf_id = 5;  // VRF table for L3 ports (0 = global)
 }
 
 message L2Domain {
@@ -43,10 +44,12 @@ message Route4 {
   string prefix = 1;   // "a.b.c.d/len"
   uint32 nexthop_id = 2;
   uint32 flags = 3;
+  uint32 vrf_table_id = 4;  // 0 = global (mirrors Ilm.vrf_table_id)
 }
 
 message Route4Del {
   string prefix = 1;
+  uint32 vrf_table_id = 2;
 }
 
 // Bulk route install — the initial-load path. In dir24 mode each affected

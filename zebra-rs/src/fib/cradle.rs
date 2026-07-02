@@ -28,6 +28,17 @@ const FIB_F_ECMP: u32 = 1 << 3;
 pub const MPLS_OP_SWAP: u32 = 0;
 pub const MPLS_OP_POP_L3: u32 = 1;
 
+/// Map a kernel routing-table id to cradle's VRF-table convention: 0 is
+/// global, and so is RT_TABLE_MAIN (254) — connected routes arrive with it.
+/// Any other value is the RIB-allocated VRF table id, which is byte-identical
+/// to the `vrf_table_id` the DecapVrf ILM tee sends.
+fn cradle_vrf(table_id: u32) -> u32 {
+    match table_id {
+        0 | 254 => 0,
+        id => id,
+    }
+}
+
 #[derive(Clone)]
 pub struct CradleFib {
     endpoint: String,
@@ -108,13 +119,16 @@ impl CradleFib {
     /// Install an IPv4 route with one or more nexthops. A single member becomes
     /// a plain route; multiple members become an ECMP nexthop group. Each
     /// member is `(gateway, oif, out-label stack)` — a non-empty stack makes
-    /// the leg an MPLS imposition (ingress LER).
+    /// the leg an MPLS imposition (ingress LER). `table_id` is the kernel
+    /// routing table the route belongs to; VRF tables map to cradle's
+    /// per-VRF FIB.
     pub async fn route_install(
         &self,
         prefix: Ipv4Net,
+        table_id: u32,
         members: Vec<(Option<Ipv4Addr>, u32, Vec<u32>)>,
     ) {
-        if let Err(e) = self.try_route_install(prefix, members).await {
+        if let Err(e) = self.try_route_install(prefix, table_id, members).await {
             tracing::warn!("fib: cradle route_install {prefix} failed: {e}");
         }
     }
@@ -122,11 +136,13 @@ impl CradleFib {
     async fn try_route_install(
         &self,
         prefix: Ipv4Net,
+        table_id: u32,
         members: Vec<(Option<Ipv4Addr>, u32, Vec<u32>)>,
     ) -> anyhow::Result<()> {
         if members.is_empty() {
             return Ok(());
         }
+        let vrf_table_id = cradle_vrf(table_id);
         if members.len() == 1 {
             let (gw, oif, labels) = &members[0];
             let id = self.nexthop_id(*gw, *oif, labels).await?;
@@ -136,6 +152,7 @@ impl CradleFib {
                     prefix: prefix.to_string(),
                     nexthop_id: id,
                     flags: 0,
+                    vrf_table_id,
                 })
                 .await?;
             return Ok(());
@@ -158,6 +175,7 @@ impl CradleFib {
                 prefix: prefix.to_string(),
                 nexthop_id: gid,
                 flags: FIB_F_ECMP,
+                vrf_table_id,
             })
             .await?;
         tracing::debug!(
@@ -167,12 +185,13 @@ impl CradleFib {
         Ok(())
     }
 
-    pub async fn route_del(&self, prefix: Ipv4Net) {
+    pub async fn route_del(&self, prefix: Ipv4Net, table_id: u32) {
         let result = async {
             self.client()
                 .await?
                 .del_route4(pb::Route4Del {
                     prefix: prefix.to_string(),
+                    vrf_table_id: cradle_vrf(table_id),
                 })
                 .await?;
             anyhow::Ok(())
@@ -221,8 +240,17 @@ impl CradleFib {
     pub async fn route_install6(
         &self,
         prefix: Ipv6Net,
+        table_id: u32,
         members: Vec<(Option<Ipv6Addr>, u32, Vec<u32>)>,
     ) {
+        // cradle has no per-VRF v6 FIB yet: skip VRF-scoped v6 routes rather
+        // than leak them into the global table.
+        if cradle_vrf(table_id) != 0 {
+            tracing::debug!(
+                "fib: cradle route_install6 {prefix}: v6 VRF tee not supported, skipped"
+            );
+            return;
+        }
         if let Err(e) = self.try_route_install6(prefix, members).await {
             tracing::warn!("fib: cradle route_install6 {prefix} failed: {e}");
         }
@@ -271,7 +299,10 @@ impl CradleFib {
         Ok(())
     }
 
-    pub async fn route_del6(&self, prefix: Ipv6Net) {
+    pub async fn route_del6(&self, prefix: Ipv6Net, table_id: u32) {
+        if cradle_vrf(table_id) != 0 {
+            return; // v6 VRF routes are never teed (see route_install6)
+        }
         let result = async {
             self.client()
                 .await?
