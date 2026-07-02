@@ -1,0 +1,72 @@
+# z2 — MUP peer that receives z1's ISD and imports it into VRF N3 by
+# route-target. VRF N3's own rd (65501:99) does NOT match the ISD's origin RD
+# (65501:20); N3 pulls the route in purely because its `mup route-target
+# import` (65501:10) overlaps the ISD's RTs, so on import the route is re-keyed
+# under N3's own rd — the RT-matched per-VRF MUP import model.
+#
+# This is the receiver side of the peer-down leak test: when z1 goes down, z2's
+# peer-down cleanup must withdraw the ISD from BOTH its main MUP Loc-RIB and
+# this RT-imported VRF copy. Before the fix only the main copy was dropped.
+vrf:
+- name: N3
+  mup:
+    route-target:
+      export:
+      - "65501:99"
+      import:
+      - "65501:10"
+interface:
+- if-name: lo
+  ipv6:
+    address: 2001:db8::2/128
+- if-name: z2-z1
+  ipv6:
+    address: 2001:db8:0:12::2/64
+segment-routing:
+  locator:
+  - name: LOC2
+    prefix: fcbb:bbbb:2::/48
+    behavior: usid
+router:
+  isis:
+    net: 49.0000.0000.0000.0002.00
+    hostname: z2
+    is-type: level-2-only
+    segment-routing:
+      srv6:
+        locator: LOC2
+    interface:
+    - if-name: lo
+      ipv6:
+        enable: true
+    - if-name: z2-z1
+      network-type: point-to-point
+      metric: 1
+      ipv6:
+        enable: true
+  bgp:
+    global:
+      as: 65501
+      router-id: 10.0.0.2
+    timer:
+      adv-interval:
+        ibgp: 1
+    segment-routing:
+      srv6:
+        locator: LOC2
+    neighbor:
+    - remote-address: 2001:db8::1
+      remote-as: 65501
+      update-source: 2001:db8::2
+      enabled: true
+      afi-safi:
+      - name: mup
+        enabled: true
+    vrf:
+    - name: N3
+      rd: "65501:99"
+      afi-safi:
+        mup:
+          route:
+          - type: st1
+            network-instance: internet

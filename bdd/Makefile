@@ -111,6 +111,14 @@ bgp_mup_dynamic_rt:
 	mkdir -p allure-results
 	cargo test --test cucumber -- --concurrency=1 --tags "@bgp_mup_dynamic_rt"
 
+# MUP peer-down withdraw: z1 originates an ISD carrying rt 65501:10 that z2
+# imports into VRF N3 (rd 65501:99) by route-target. When z1 is stopped, z2's
+# peer-down cleanup must withdraw the ISD from BOTH its main MUP Loc-RIB and
+# N3's RT-imported copy — the regression test for the leaked per-VRF copy.
+bgp_mup_peerdown:
+	mkdir -p allure-results
+	cargo test --test cucumber -- --concurrency=1 --tags "@bgp_mup_peerdown"
+
 rib_static_ipv6:
 	mkdir -p allure-results
 	cargo test --test cucumber -- --concurrency=1 --tags "@rib_static_ipv6"

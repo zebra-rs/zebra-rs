@@ -7686,6 +7686,26 @@ pub fn route_mup_withdraw(ident: usize, route: &MupRoute, bgp: &mut BgpTop, peer
         let peer = peers.get_mut_by_idx(ident).expect("peer must exist");
         peer.adj_in.remove_mup(rd, &prefix, id);
     }
+    route_mup_locrib_withdraw(ident, rd, prefix, id, bgp, peers);
+}
+
+/// Drop one MUP path from the Loc-RIB and propagate the consequences: release
+/// the NHT registration when no surviving path keeps the pre-withdraw DSD/ISD
+/// next-hop, mirror the post-withdraw best path (or a withdrawal) to every
+/// RT-importing per-VRF task, and withdraw / re-advertise to downstream peers.
+///
+/// Shared by the explicit MP_UNREACH path ([`route_mup_withdraw`]) and the
+/// peer-down cleanup ([`route_clean`]) so both clean the RT-imported per-VRF
+/// copy identically — the caller is responsible only for removing the entry
+/// from the peer's Adj-RIB-In (individually, or in bulk on session down).
+fn route_mup_locrib_withdraw(
+    ident: usize,
+    rd: RouteDistinguisher,
+    prefix: MupPrefix,
+    id: u32,
+    bgp: &mut BgpTop,
+    peers: &mut PeerMap,
+) {
     // Capture the pre-withdraw DSD next-hop so it can be released from NHT
     // if this withdrawal drops the last path using it.
     let old_segment_nh = bgp
@@ -9930,10 +9950,16 @@ pub fn route_clean(
         peer.adj_in.evpn.clear();
     }
 
-    // MUP (draft-ietf-bess-mup-safi). Phase 2 is receive-only with no LLGR retention, so
-    // peer-down simply drops every MUP route the peer gave us from the
-    // Loc-RIB and clears its Adj-RIB-In. (LLGR stale retention for MUP is
-    // a later phase, mirroring the EVPN/VPN two-branch logic above.)
+    // MUP (draft-ietf-bess-mup-safi). Phase 2 is receive-only with no LLGR
+    // retention, so peer-down withdraws every MUP route the peer gave us.
+    // Route it through the same `route_mup_locrib_withdraw` helper the
+    // explicit MP_UNREACH path uses so the withdrawal is *propagated*, not
+    // just dropped locally: RT-importing per-VRF copies are withdrawn (with
+    // their derived SRv6 FIB entries), the received DSD/ISD next-hop is
+    // released from NHT, and downstream peers get the MP_UNREACH. Dropping it
+    // from `bgp.local_rib` alone leaked the imported VRF RIB + FIB.
+    // (LLGR stale retention for MUP is a later phase, mirroring the EVPN/VPN
+    // two-branch logic above.)
     let mup_keys: Vec<(RouteDistinguisher, MupPrefix, u32)> = {
         let peer = peers.get_mut_by_idx(peer_id).expect("peer must exist");
         let mut out = Vec::new();
@@ -9946,12 +9972,13 @@ pub fn route_clean(
         }
         out
     };
-    for (rd, prefix, id) in mup_keys.iter() {
-        let _ = bgp.local_rib.remove_mup(*rd, prefix, *id, peer_id);
-        let _ = bgp.local_rib.select_best_path_mup(rd, prefix);
-    }
+    // Clear the peer's Adj-RIB-In up front; the helper re-selects best-path
+    // from the Loc-RIB (a distinct store), so it never re-picks these paths.
     let peer = peers.get_mut_by_idx(peer_id).expect("peer must exist");
     peer.adj_in.mup.clear();
+    for (rd, prefix, id) in mup_keys.into_iter() {
+        route_mup_locrib_withdraw(peer_id, rd, prefix, id, bgp, peers);
+    }
 
     let peer = peers.get_mut_by_idx(peer_id).expect("peer must exist");
     peer.adj_out.evpn.clear();
