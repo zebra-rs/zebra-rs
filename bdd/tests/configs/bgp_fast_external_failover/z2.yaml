@@ -1,0 +1,25 @@
+# z2 (AS 65002): mirror of z1.yaml — see that file for the rationale.
+interface:
+- if-name: i1
+  ipv4:
+    address: 10.107.0.2/24
+router:
+  bgp:
+    global:
+      as: 65002
+      router-id: 10.107.0.2
+    timer:
+      adv-interval:
+        ibgp: 1
+        ebgp: 1
+    neighbor:
+    - remote-address: 10.107.0.1
+      afi-safi:
+      - name: ipv4
+        enabled: true
+      enabled: true
+      remote-as: 65001
+    afi-safi:
+    - name: ipv4
+      network:
+      - prefix: 10.2.2.2/32

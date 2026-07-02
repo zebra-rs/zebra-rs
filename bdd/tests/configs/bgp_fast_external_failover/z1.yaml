@@ -1,0 +1,30 @@
+# z1 (AS 65001): single-hop eBGP to z2 over the direct veth link
+# (10.107.0.0/24). fast-external-failover is left at its default
+# (enabled); the feature flips it off at runtime with
+# `set router bgp global fast-external-failover false` for the
+# disabled-case scenario. Default timers (hold 180) on purpose — the
+# feature under test is exactly "don't wait for the hold timer".
+interface:
+- if-name: i1
+  ipv4:
+    address: 10.107.0.1/24
+router:
+  bgp:
+    global:
+      as: 65001
+      router-id: 10.107.0.1
+    timer:
+      adv-interval:
+        ibgp: 1
+        ebgp: 1
+    neighbor:
+    - remote-address: 10.107.0.2
+      afi-safi:
+      - name: ipv4
+        enabled: true
+      enabled: true
+      remote-as: 65002
+    afi-safi:
+    - name: ipv4
+      network:
+      - prefix: 10.1.1.1/32

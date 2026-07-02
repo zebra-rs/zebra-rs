@@ -9,9 +9,11 @@ exactly IOS-XR's `bgp fast-external-fallover disable` (XR spells it
 
 ## Status (2026-07-02)
 
-**PR 1 (knob + failover core, unit tests, book chapter) implemented on
-branch `fast-external-failover`**, as specified below. PR 2 (BDD) and
-the listed follow-ups are still open. Original recon, kept for context:
+**PR 1 (knob + failover core, unit tests, book chapter) merged
+(#1713); PR 2 (BDD feature, validated live: both the admin-down and
+the carrier-down side reset and recover) implemented on branch
+`fast-external-failover-bdd`.** Only the listed follow-ups remain
+open. Original recon, kept for context:
 before PR 1, no `fast-external`/`fast_external` symbol existed
 anywhere in the tree, and BGP **silently discarded link events** —
 `process_rib_msg` has no arm for `RibRx::LinkUp/LinkDown/LinkDel`; they
