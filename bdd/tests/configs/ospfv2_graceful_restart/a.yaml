@@ -1,0 +1,25 @@
+# Helper side. graceful-restart defaults (helper-enabled true,
+# max-grace-period 1800s, strict LSA checking) are already what the
+# test needs; the block is spelled out so the feature also covers the
+# config path.
+interface:
+- if-name: lo
+  ipv4:
+    address: 10.0.0.1/32
+- if-name: ethb
+  ipv4:
+    address: 10.0.12.1/30
+router:
+  ospf:
+    router-id: 10.0.0.1
+    graceful-restart:
+      helper-enabled: true
+      max-grace-period: 1800
+    area:
+    - area-id: 0.0.0.0
+      interface:
+      - if-name: lo
+        enable: true
+      - if-name: ethb
+        enable: true
+        network-type: point-to-point

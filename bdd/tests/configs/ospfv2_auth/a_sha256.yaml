@@ -1,0 +1,26 @@
+# HMAC-SHA-256 cryptographic authentication (RFC 5709): same
+# `message-digest` mode as keyed-MD5, but the key lives in the
+# crypto-key list where the leaf name picks the algorithm and the
+# trailer is HMAC(key, packet) — 32 octets on the wire.
+interface:
+- if-name: lo
+  ipv4:
+    address: 10.0.0.1/32
+- if-name: ethb
+  ipv4:
+    address: 10.0.12.1/30
+router:
+  ospf:
+    router-id: 10.0.0.1
+    area:
+    - area-id: 0.0.0.0
+      interface:
+      - if-name: lo
+        enable: true
+      - if-name: ethb
+        enable: true
+        network-type: point-to-point
+        authentication: message-digest
+        crypto-key:
+        - key-id: 1
+          hmac-sha-256: zebra-ospf-sha256-secret
