@@ -2,8 +2,6 @@
 
 OSPFv3 features not yet implemented in zebra-rs:
 
-- Discard (Null0) routes for active area ranges — the aggregation
-  and suppression themselves are implemented.
 - Redistribution `route-map` filtering (the zebra-rs sources are
   connected, static, kernel, IS-IS, and BGP, matching v2).
 - Non-zero forwarding-address resolution on received externals.

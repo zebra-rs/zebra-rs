@@ -44,6 +44,10 @@ Feature: OSPFv3 area ranges aggregate Inter-Area-Prefix-LSAs at the ABR
     And show command "show ospfv3 route" in namespace "c" should contain "2001:db8::2/128"
     # Traffic to a component follows the aggregate end to end.
     And ping from "c" to "2001:db8:1:1::1" should succeed
+    # The ABR installs a discard (blackhole) route for the active
+    # range so traffic to a non-existent component is dropped locally
+    # instead of following a default and looping.
+    And kernel route "2001:db8:1::/48" in namespace "a" should eventually contain "blackhole"
 
     # Teardown.
     When I stop zebra-rs in namespace "a"
@@ -76,6 +80,8 @@ Feature: OSPFv3 area ranges aggregate Inter-Area-Prefix-LSAs at the ABR
     And show command "show ospfv3 route" in namespace "c" should not contain "2001:db8:1:1::/64"
     And show command "show ospfv3 route" in namespace "c" should not contain "2001:db8:1:2::/64"
     And show command "show ospfv3 route" in namespace "c" should contain "2001:db8::2/128"
+    # The discard route is installed even with not-advertise.
+    And kernel route "2001:db8:1::/48" in namespace "a" should eventually contain "blackhole"
 
     # Teardown.
     When I stop zebra-rs in namespace "a"

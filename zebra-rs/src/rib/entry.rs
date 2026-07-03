@@ -102,6 +102,9 @@ impl RibEntry {
             Nexthop::Protect(pro) => pro
                 .iter_unis()
                 .any(|nhop| nmap.get(nhop.gid).is_some_and(|group| group.is_valid())),
+            // A discard route is self-contained — no gateway to
+            // resolve, so it is always installable.
+            Nexthop::Blackhole(_) => true,
             _ => false,
         }
     }
@@ -136,7 +139,9 @@ impl RibEntry {
             return;
         }
         match &self.nexthop {
-            Nexthop::Link(_) => {}
+            // No kernel nexthop group backs a Link or Blackhole route,
+            // so there is nothing to unsync.
+            Nexthop::Link(_) | Nexthop::Blackhole(_) => {}
             Nexthop::Uni(uni) => {
                 // println!(" uni {}", uni.addr);
                 self.handle_nexthop_group(nmap, fib, uni.gid).await;

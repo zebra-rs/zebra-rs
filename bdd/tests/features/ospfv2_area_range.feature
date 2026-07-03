@@ -54,6 +54,10 @@ Feature: OSPFv2 area ranges aggregate Type-3 summaries at the ABR
     And show command "show ospf route" in namespace "c" should contain "10.0.0.2/32"
     # Traffic to a component follows the aggregate end to end.
     And ping from "c" to "10.1.1.1" should succeed
+    # The ABR installs a discard (blackhole) route for the active
+    # range so traffic to a non-existent component (e.g. 10.1.9.9)
+    # is dropped locally instead of following a default and looping.
+    And kernel route "10.1.0.0/16" in namespace "a" should eventually contain "blackhole"
 
     # Teardown.
     When I stop zebra-rs in namespace "a"
@@ -88,6 +92,10 @@ Feature: OSPFv2 area ranges aggregate Type-3 summaries at the ABR
     And show command "show ospf route" in namespace "c" should not contain "10.1.2.0/24"
     # Prefixes outside the range are unaffected.
     And show command "show ospf route" in namespace "c" should contain "10.0.0.2/32"
+    # The discard route is installed even with not-advertise — hiding
+    # the aggregate from neighbors doesn't remove the local loop
+    # protection for the range's gaps.
+    And kernel route "10.1.0.0/16" in namespace "a" should eventually contain "blackhole"
 
     # Teardown.
     When I stop zebra-rs in namespace "a"

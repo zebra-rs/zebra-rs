@@ -110,6 +110,7 @@ fn fmt_nexthop_for_trace(nh: &Nexthop) -> String {
             )
         }
         Nexthop::Link(ifindex) => format!("Link(ifindex={ifindex})"),
+        Nexthop::Blackhole(metric) => format!("Blackhole(metric={metric})"),
     }
 }
 
@@ -744,8 +745,79 @@ impl FibHandle {
                     .await;
                 ok
             }
+            Nexthop::Blackhole(metric) => {
+                self.route_ipv4_blackhole(prefix, entry, *metric, table_id, true)
+                    .await
+            }
             _ => true,
         }
+    }
+
+    /// Install (or delete) a discard route (`RTN_BLACKHOLE`): kernel
+    /// drops packets to `prefix` with no gateway or nexthop group.
+    /// `add` selects `RTM_NEWROUTE` vs `RTM_DELROUTE`.
+    pub async fn route_ipv4_blackhole(
+        &self,
+        prefix: &Ipv4Net,
+        entry: &RibEntry,
+        metric: u32,
+        table_id: u32,
+        add: bool,
+    ) -> bool {
+        let mut msg = RouteMessage::default();
+        msg.header.address_family = AddressFamily::Inet;
+        msg.header.destination_prefix_length = prefix.prefix_len();
+        set_route_table(&mut msg, table_id);
+        msg.header.protocol = match entry.rtype {
+            RibType::Static => RouteProtocol::Static,
+            RibType::Bgp => RouteProtocol::Bgp,
+            RibType::Ospf => RouteProtocol::Ospf,
+            RibType::Isis => RouteProtocol::Isis,
+            _ => RouteProtocol::Static,
+        };
+        msg.header.scope = RouteScope::Universe;
+        msg.header.kind = RouteType::BlackHole;
+        msg.attributes
+            .push(RouteAttribute::Destination(RouteAddress::Inet(
+                prefix.addr(),
+            )));
+        msg.attributes.push(RouteAttribute::Priority(metric));
+
+        let inner = if add {
+            RouteNetlinkMessage::NewRoute(msg)
+        } else {
+            RouteNetlinkMessage::DelRoute(msg)
+        };
+        let mut req = NetlinkMessage::from(inner);
+        req.header.flags = if add {
+            NLM_F_REQUEST | NLM_F_ACK | NLM_F_CREATE | NLM_F_EXCL
+        } else {
+            NLM_F_REQUEST | NLM_F_ACK
+        };
+
+        let mut ok = true;
+        let mut response = self.handle.clone().request(req).unwrap();
+        while let Some(msg) = response.next().await {
+            if let NetlinkPayload::Error(e) = msg.payload {
+                let errno = e.to_io().raw_os_error();
+                // EEXIST on add / ESRCH|ENOENT on delete: the kernel
+                // is already in the desired state — treat as success.
+                if (add && errno == Some(libc::EEXIST))
+                    || (!add && matches!(errno, Some(libc::ESRCH) | Some(libc::ENOENT)))
+                {
+                    continue;
+                }
+                ok = false;
+                if fib_route() {
+                    tracing::info!(
+                        "Blackhole {} error: {prefix} {e} table={table_id} rtype={:?}",
+                        if add { "add" } else { "del" },
+                        entry.rtype,
+                    );
+                }
+            }
+        }
+        ok
     }
 
     pub async fn route_ipv4_del_uni(
@@ -889,6 +961,10 @@ impl FibHandle {
                 self.route_ipv4_del_uni(prefix, entry, &protect_primary_nexthop(pro), table_id)
                     .await;
                 self.route_ipv4_del_uni(prefix, entry, &pro.backup.as_nexthop(), table_id)
+                    .await;
+            }
+            Nexthop::Blackhole(metric) => {
+                self.route_ipv4_blackhole(prefix, entry, *metric, table_id, false)
                     .await;
             }
         }
@@ -1183,8 +1259,75 @@ impl FibHandle {
                     .await;
                 ok
             }
+            Nexthop::Blackhole(metric) => {
+                self.route_ipv6_blackhole(prefix, entry, *metric, table_id, true)
+                    .await
+            }
             _ => true,
         }
+    }
+
+    /// IPv6 sibling of [`Self::route_ipv4_blackhole`].
+    pub async fn route_ipv6_blackhole(
+        &self,
+        prefix: &Ipv6Net,
+        entry: &RibEntry,
+        metric: u32,
+        table_id: u32,
+        add: bool,
+    ) -> bool {
+        let mut msg = RouteMessage::default();
+        msg.header.address_family = AddressFamily::Inet6;
+        msg.header.destination_prefix_length = prefix.prefix_len();
+        set_route_table(&mut msg, table_id);
+        msg.header.protocol = match entry.rtype {
+            RibType::Static => RouteProtocol::Static,
+            RibType::Bgp => RouteProtocol::Bgp,
+            RibType::Ospf => RouteProtocol::Ospf,
+            RibType::Isis => RouteProtocol::Isis,
+            _ => RouteProtocol::Static,
+        };
+        msg.header.scope = RouteScope::Universe;
+        msg.header.kind = RouteType::BlackHole;
+        msg.attributes
+            .push(RouteAttribute::Destination(RouteAddress::Inet6(
+                prefix.addr(),
+            )));
+        msg.attributes.push(RouteAttribute::Priority(metric));
+
+        let inner = if add {
+            RouteNetlinkMessage::NewRoute(msg)
+        } else {
+            RouteNetlinkMessage::DelRoute(msg)
+        };
+        let mut req = NetlinkMessage::from(inner);
+        req.header.flags = if add {
+            NLM_F_REQUEST | NLM_F_ACK | NLM_F_CREATE | NLM_F_EXCL
+        } else {
+            NLM_F_REQUEST | NLM_F_ACK
+        };
+
+        let mut ok = true;
+        let mut response = self.handle.clone().request(req).unwrap();
+        while let Some(msg) = response.next().await {
+            if let NetlinkPayload::Error(e) = msg.payload {
+                let errno = e.to_io().raw_os_error();
+                if (add && errno == Some(libc::EEXIST))
+                    || (!add && matches!(errno, Some(libc::ESRCH) | Some(libc::ENOENT)))
+                {
+                    continue;
+                }
+                ok = false;
+                if fib_route() {
+                    tracing::info!(
+                        "Blackhole {} error: {prefix} {e} table={table_id} rtype={:?}",
+                        if add { "add" } else { "del" },
+                        entry.rtype,
+                    );
+                }
+            }
+        }
+        ok
     }
 
     pub async fn route_ipv6_del_uni(
@@ -1345,6 +1488,10 @@ impl FibHandle {
                 self.route_ipv6_del_uni(prefix, entry, &protect_primary_nexthop(pro), table_id)
                     .await;
                 self.route_ipv6_del_uni(prefix, entry, &pro.backup.as_nexthop(), table_id)
+                    .await;
+            }
+            Nexthop::Blackhole(metric) => {
+                self.route_ipv6_blackhole(prefix, entry, *metric, table_id, false)
                     .await;
             }
         }

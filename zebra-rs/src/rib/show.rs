@@ -139,6 +139,16 @@ fn rib_entry_to_json(rib: &Rib, prefix: &Ipv4Net, e: &RibEntry) -> RouteEntry {
                 backup: false,
             }]
         }
+        Nexthop::Blackhole(metric) => {
+            vec![NexthopJson {
+                address: None,
+                interface: "blackhole".to_string(),
+                weight: None,
+                metric: Some(*metric),
+                mpls_labels: vec![],
+                backup: false,
+            }]
+        }
         Nexthop::Uni(uni) => {
             let grp = rib.nmap.get(uni.gid);
             // Prefer the group's view (post-resolution) but fall back
@@ -275,6 +285,16 @@ fn rib_entry_to_json_v6(rib: &Rib, prefix: &Ipv6Net, e: &RibEntry) -> RouteEntry
                 interface: rib.link_name(*ifindex),
                 weight: None,
                 metric: None,
+                mpls_labels: vec![],
+                backup: false,
+            }]
+        }
+        Nexthop::Blackhole(metric) => {
+            vec![NexthopJson {
+                address: None,
+                interface: "blackhole".to_string(),
+                weight: None,
+                metric: Some(*metric),
                 mpls_labels: vec![],
                 backup: false,
             }]
@@ -424,6 +444,9 @@ pub fn rib_entry_show(
             Nexthop::Link(_ifindex) => {
                 let _ = writeln!(buf, " via {}, {}", rib.link_name(e.ifindex), uptime);
             }
+            Nexthop::Blackhole(_) => {
+                let _ = writeln!(buf, " is a discard (blackhole), {}", uptime);
+            }
             Nexthop::Uni(uni) => {
                 let grp = rib.nmap.get(uni.gid);
 
@@ -513,6 +536,9 @@ pub fn rib_entry_show_v6(
         match &e.nexthop {
             Nexthop::Link(_ifindex) => {
                 let _ = writeln!(buf, " via {}, {}", rib.link_name(e.ifindex), uptime);
+            }
+            Nexthop::Blackhole(_) => {
+                let _ = writeln!(buf, " is a discard (blackhole), {}", uptime);
             }
             Nexthop::Uni(uni) => {
                 let grp = rib.nmap.get(uni.gid);
@@ -806,7 +832,7 @@ fn entry_has_mpls(e: &RibEntry) -> bool {
             NexthopMember::Multi(mm) => mm.nexthops.iter().any(uni_has),
         }),
         Nexthop::Protect(p) => p.iter_unis().any(uni_has),
-        Nexthop::Link(_) => false,
+        Nexthop::Link(_) | Nexthop::Blackhole(_) => false,
     }
 }
 
@@ -824,7 +850,7 @@ fn entry_has_srv6(e: &RibEntry) -> bool {
             NexthopMember::Multi(mm) => mm.nexthops.iter().any(uni_has),
         }),
         Nexthop::Protect(p) => p.iter_unis().any(uni_has),
-        Nexthop::Link(_) => false,
+        Nexthop::Link(_) | Nexthop::Blackhole(_) => false,
     }
 }
 
@@ -896,6 +922,9 @@ fn write_nexthop_blocks_v4(buf: &mut String, rib: &Rib, nh: &Nexthop) {
         Nexthop::Link(ifindex) => {
             let _ = writeln!(buf, "    directly attached via {}", rib.link_name(*ifindex));
         }
+        Nexthop::Blackhole(_) => {
+            let _ = writeln!(buf, "    discard (blackhole)");
+        }
         Nexthop::Uni(uni) => write_descriptor_block_v4(buf, rib, uni, "Protected"),
         Nexthop::Multi(multi) => {
             for uni in multi.nexthops.iter() {
@@ -925,6 +954,9 @@ fn write_nexthop_blocks_v6(buf: &mut String, rib: &Rib, nh: &Nexthop) {
     match nh {
         Nexthop::Link(ifindex) => {
             let _ = writeln!(buf, "    directly attached via {}", rib.link_name(*ifindex));
+        }
+        Nexthop::Blackhole(_) => {
+            let _ = writeln!(buf, "    discard (blackhole)");
         }
         Nexthop::Uni(uni) => write_descriptor_block_v6(buf, rib, uni, "Protected"),
         Nexthop::Multi(multi) => {

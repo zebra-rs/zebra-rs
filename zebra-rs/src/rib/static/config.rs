@@ -366,12 +366,25 @@ fn config_builder<F: StaticFamily>(base: &str) -> ConfigBuilder<F> {
         .path(&format!("{base}/{}/route/nexthop", F::FAMILY))
         .set(|config, cache, prefix, args| {
             let s = cache_get::<F>(config, cache, prefix).context(CONFIG_ERR)?;
+            // `nexthop blackhole` — the discard keyword sits at the
+            // nexthop key position (a union with the address type),
+            // so it satisfies the route's `ext:non-empty "nexthop"`.
+            if args.peek_str() == Some("blackhole") {
+                let _ = args.string();
+                s.blackhole = true;
+                return Ok(());
+            }
             let naddr = F::parse_addr(args).context(NEXTHOP_ERR)?;
             let _ = s.nexthops.entry(naddr).or_default();
             Ok(())
         })
         .del(|config, cache, prefix, args| {
             let s = cache_lookup::<F>(config, cache, prefix).context(CONFIG_ERR)?;
+            if args.peek_str() == Some("blackhole") {
+                let _ = args.string();
+                s.blackhole = false;
+                return Ok(());
+            }
             let naddr = F::parse_addr(args).context(NEXTHOP_ERR)?;
             s.nexthops.remove(&naddr).context(CONFIG_ERR)?;
             Ok(())

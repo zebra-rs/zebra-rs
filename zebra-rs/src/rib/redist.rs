@@ -231,7 +231,7 @@ fn first_v4_nexthop(nh: &Nexthop) -> Option<std::net::Ipv4Addr> {
             std::net::IpAddr::V4(a) => Some(a),
             _ => None,
         }),
-        Nexthop::Link(_) => None,
+        Nexthop::Link(_) | Nexthop::Blackhole(_) => None,
     }
 }
 
@@ -262,7 +262,7 @@ fn first_v6_nexthop(nh: &Nexthop) -> Option<std::net::Ipv6Addr> {
             std::net::IpAddr::V6(a) => Some(a),
             _ => None,
         }),
-        Nexthop::Link(_) => None,
+        Nexthop::Link(_) | Nexthop::Blackhole(_) => None,
     }
 }
 

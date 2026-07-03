@@ -216,6 +216,14 @@ pub struct Ospf<V: OspfVersion = Ospfv2> {
     /// area's SPF; merged into `rib6` by `merge_area_ribs6` and read
     /// by the ABR Inter-Area-Prefix origination (`abr_summary_*_v3`).
     pub rib6_areas: BTreeMap<Ipv4Addr, PrefixMap<ipnet::Ipv6Net, SpfRouteV3>>,
+    /// Aggregate prefixes for which this ABR has installed a discard
+    /// (blackhole) route into the RIB — the forwarding-plane companion
+    /// to an active `area range` (RFC 2328 §12.4.3). Traffic to a
+    /// non-existent component of the range is dropped locally instead
+    /// of following a default and looping. Diffed by
+    /// `abr_range_discard_sync`; v6 sibling below.
+    pub range_discards: BTreeSet<Ipv4Net>,
+    pub range_discards_v6: BTreeSet<ipnet::Ipv6Net>,
     pub tracing: OspfTracing,
     pub segment_routing: super::srmpls::SegmentRoutingMode,
 
@@ -1227,6 +1235,8 @@ impl Ospf<Ospfv2> {
             lan_adj_sids: BTreeMap::new(),
             rib6: PrefixMap::new(),
             rib6_areas: BTreeMap::new(),
+            range_discards: BTreeSet::new(),
+            range_discards_v6: BTreeSet::new(),
             tracing: OspfTracing::default(),
             segment_routing: super::srmpls::SegmentRoutingMode::default(),
             srv6_locator_name: None,
@@ -1688,12 +1698,106 @@ impl Ospf<Ospfv2> {
             for area_id in all {
                 self.abr_summary_sync_area(area_id, &BTreeMap::new());
             }
+            // No longer an ABR — withdraw any range discard routes too.
+            self.abr_range_discard_sync(&BTreeMap::new());
             return;
         }
 
         for &area_a in &attached {
             let desired = self.abr_summary_desired(area_a, &attached);
             self.abr_summary_sync_area(area_a, &desired);
+        }
+
+        // Forwarding-plane companion to the summaries: a discard
+        // (blackhole) route for each active range so traffic to a
+        // non-existent component is dropped locally rather than
+        // following a default and looping.
+        let discards = self.active_range_discards_v4();
+        self.abr_range_discard_sync(&discards);
+    }
+
+    /// Compute the active `area range` prefixes and their discard-route
+    /// metric (RFC 2328 §12.4.3). A range is active when its own area's
+    /// intra-area RIB slice holds at least one *strictly more-specific*
+    /// component; the metric is the configured `cost`, else the largest
+    /// component metric. Installed regardless of `not-advertise` — the
+    /// discard prevents loops whether or not the aggregate is
+    /// advertised.
+    fn active_range_discards_v4(&self) -> BTreeMap<Ipv4Net, u32> {
+        let mut desired: BTreeMap<Ipv4Net, u32> = BTreeMap::new();
+        for (area_id, area) in self.areas.iter() {
+            if area.ranges.is_empty() {
+                continue;
+            }
+            let Some(rib) = self.rib_areas.get(area_id) else {
+                continue;
+            };
+            for (prefix, route) in rib.iter() {
+                if route.path_type != RouteType::IntraArea {
+                    continue;
+                }
+                let Some(range_prefix) = area
+                    .ranges
+                    .keys()
+                    .filter(|r| r.prefix_len() < prefix.prefix_len() && r.contains(&prefix))
+                    .max_by_key(|r| r.prefix_len())
+                    .copied()
+                else {
+                    continue;
+                };
+                // Never blackhole a prefix a real OSPF route already
+                // reaches at the exact range prefix (e.g. an inter-area
+                // route from another area) — that would fight the SPF
+                // install for the same `RibType::Ospf` slot.
+                if self.rib.get(&range_prefix).is_some() {
+                    continue;
+                }
+                let cost = area.ranges.get(&range_prefix).and_then(|e| e.cost);
+                match cost {
+                    Some(c) => {
+                        desired.entry(range_prefix).or_insert(c);
+                    }
+                    None => {
+                        desired
+                            .entry(range_prefix)
+                            .and_modify(|m| *m = (*m).max(route.metric))
+                            .or_insert(route.metric);
+                    }
+                }
+            }
+        }
+        desired
+    }
+
+    /// Reconcile the installed range discard routes against `desired`:
+    /// install a blackhole route for each newly-active range, withdraw
+    /// those no longer active.
+    fn abr_range_discard_sync(&mut self, desired: &BTreeMap<Ipv4Net, u32>) {
+        let installed = self.range_discards.clone();
+        for prefix in &installed {
+            if !desired.contains_key(prefix) {
+                let mut rib = rib::entry::RibEntry::new(RibType::Ospf);
+                rib.distance = 110;
+                rib.nexthop = rib::Nexthop::Blackhole(0);
+                let _ = self.ctx.rib.send(rib::Message::Ipv4Del {
+                    prefix: *prefix,
+                    rib,
+                });
+                self.range_discards.remove(prefix);
+            }
+        }
+        for (prefix, metric) in desired {
+            if !installed.contains(prefix) {
+                let mut rib = rib::entry::RibEntry::new(RibType::Ospf);
+                rib.distance = 110;
+                rib.metric = *metric;
+                rib.nexthop = rib::Nexthop::Blackhole(*metric);
+                let _ = self.ctx.rib.send(rib::Message::Ipv4Add {
+                    prefix: *prefix,
+                    rib,
+                });
+                self.range_discards.insert(*prefix);
+            }
         }
     }
 
@@ -5514,6 +5618,8 @@ impl Ospf<Ospfv3> {
             lan_adj_sids: BTreeMap::new(),
             rib6: PrefixMap::new(),
             rib6_areas: BTreeMap::new(),
+            range_discards: BTreeSet::new(),
+            range_discards_v6: BTreeSet::new(),
             tracing: OspfTracing::default(),
             segment_routing: super::srmpls::SegmentRoutingMode::default(),
             srv6_locator_name: None,
@@ -5562,12 +5668,11 @@ impl Ospf<Ospfv3> {
         ospf.tracing.proto = Ospfv3::PROTO;
         ospf.callback_build();
         ospf.show_build();
-        // v3 has no on-disk GR checkpoint load today, so nothing to
-        // gate here (a per-VRF child would otherwise need the same
-        // default-instance guard the v2 path uses).
         // Restart-aware boot (v3): replay a fresh ospfv3 checkpoint
-        // before any adjacency forms. Only the default instance —
-        // per-VRF children have no checkpoint file.
+        // before any adjacency forms, so a committed graceful restart
+        // resumes from the saved LSDB. Only the default instance —
+        // per-VRF children have no checkpoint file (they'd otherwise
+        // need the same default-instance guard the v2 path uses).
         if ospf.proto_label == "ospfv3" {
             ospf.gr_restart_load_checkpoint_v3();
         }
@@ -6896,12 +7001,91 @@ impl Ospf<Ospfv3> {
             for area_id in all {
                 self.abr_summary_sync_area_v3(area_id, &BTreeMap::new());
             }
+            // No longer an ABR — withdraw any range discard routes too.
+            self.abr_range_discard_sync_v3(&BTreeMap::new());
             return;
         }
 
         for &area_a in &attached {
             let desired = self.abr_summary_desired_v3(area_a, &attached);
             self.abr_summary_sync_area_v3(area_a, &desired);
+        }
+
+        let discards = self.active_range_discards_v6();
+        self.abr_range_discard_sync_v3(&discards);
+    }
+
+    /// v6 sibling of `active_range_discards_v4`: the active
+    /// Inter-Area-Prefix ranges and their discard-route metric.
+    fn active_range_discards_v6(&self) -> BTreeMap<ipnet::Ipv6Net, u32> {
+        let mut desired: BTreeMap<ipnet::Ipv6Net, u32> = BTreeMap::new();
+        for (area_id, area) in self.areas.iter() {
+            if area.ranges_v6.is_empty() {
+                continue;
+            }
+            let Some(rib) = self.rib6_areas.get(area_id) else {
+                continue;
+            };
+            for (prefix, route) in rib.iter() {
+                if route.path_type != RouteType::IntraArea {
+                    continue;
+                }
+                let Some(range_prefix) = area
+                    .ranges_v6
+                    .keys()
+                    .filter(|r| r.prefix_len() < prefix.prefix_len() && r.contains(&prefix))
+                    .max_by_key(|r| r.prefix_len())
+                    .copied()
+                else {
+                    continue;
+                };
+                if self.rib6.get(&range_prefix).is_some() {
+                    continue;
+                }
+                let cost = area.ranges_v6.get(&range_prefix).and_then(|e| e.cost);
+                match cost {
+                    Some(c) => {
+                        desired.entry(range_prefix).or_insert(c);
+                    }
+                    None => {
+                        desired
+                            .entry(range_prefix)
+                            .and_modify(|m| *m = (*m).max(route.metric))
+                            .or_insert(route.metric);
+                    }
+                }
+            }
+        }
+        desired
+    }
+
+    /// v6 sibling of `abr_range_discard_sync`.
+    fn abr_range_discard_sync_v3(&mut self, desired: &BTreeMap<ipnet::Ipv6Net, u32>) {
+        let installed = self.range_discards_v6.clone();
+        for prefix in &installed {
+            if !desired.contains_key(prefix) {
+                let mut rib = rib::entry::RibEntry::new(RibType::Ospf);
+                rib.distance = 110;
+                rib.nexthop = rib::Nexthop::Blackhole(0);
+                let _ = self.ctx.rib.send(rib::Message::Ipv6Del {
+                    prefix: *prefix,
+                    rib,
+                });
+                self.range_discards_v6.remove(prefix);
+            }
+        }
+        for (prefix, metric) in desired {
+            if !installed.contains(prefix) {
+                let mut rib = rib::entry::RibEntry::new(RibType::Ospf);
+                rib.distance = 110;
+                rib.metric = *metric;
+                rib.nexthop = rib::Nexthop::Blackhole(*metric);
+                let _ = self.ctx.rib.send(rib::Message::Ipv6Add {
+                    prefix: *prefix,
+                    rib,
+                });
+                self.range_discards_v6.insert(*prefix);
+            }
         }
     }
 

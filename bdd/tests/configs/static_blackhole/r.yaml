@@ -1,0 +1,21 @@
+# Discard routes via `nexthop blackhole` — the keyword sits at the
+# nexthop-key position, satisfying the route's ext:non-empty "nexthop"
+# while installing a kernel RTN_BLACKHOLE route (no gateway).
+interface:
+- if-name: lo
+  ipv4:
+    address: 10.0.0.1/32
+  ipv6:
+    address: 2001:db8::1/128
+router:
+  static:
+    ipv4:
+      route:
+      - prefix: 10.9.9.0/24
+        nexthop:
+        - address: blackhole
+    ipv6:
+      route:
+      - prefix: 2001:db8:dead::/48
+        nexthop:
+        - address: blackhole

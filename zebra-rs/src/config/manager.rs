@@ -3670,4 +3670,35 @@ mod yang_load_tests {
             assert_ne!(code, ExecCode::Success, "`{path}` must NOT be settable");
         }
     }
+
+    /// `router static <afi> route <prefix> nexthop blackhole` — the
+    /// discard keyword sits at the nexthop-key position (a union with
+    /// the address type). Pin both AFIs as settable alongside a normal
+    /// address nexthop.
+    #[test]
+    fn static_route_nexthop_blackhole_paths_parse() {
+        use crate::config::ExecCode;
+        use crate::config::parse::{State, parse};
+        use libyang::to_entry;
+
+        let mut yang = YangStore::new();
+        yang.add_path(concat!(env!("CARGO_MANIFEST_DIR"), "/yang"));
+        yang.read_with_resolve("configure")
+            .expect("configure mode loads");
+        yang.identity_resolve();
+        let module = yang
+            .find_module("configure")
+            .expect("configure module present");
+        let entry = to_entry(&yang, module);
+
+        for path in [
+            "set router static ipv4 route 10.9.9.0/24 nexthop blackhole",
+            "set router static ipv4 route 10.9.9.0/24 nexthop 10.0.0.2",
+            "set router static ipv6 route 2001:db8:dead::/48 nexthop blackhole",
+            "set router static ipv6 route 2001:db8:dead::/48 nexthop 2001:db8::2",
+        ] {
+            let (code, _comps, _state) = parse(path, entry.clone(), None, State::new());
+            assert_eq!(code, ExecCode::Success, "`{path}` must be a settable path");
+        }
+    }
 }
