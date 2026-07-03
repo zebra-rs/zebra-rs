@@ -1,0 +1,22 @@
+interface:
+- if-name: lo
+  ipv4:
+    address: 10.0.0.1/32
+- if-name: ethb
+  ipv4:
+    address: 10.0.12.1/30
+router:
+  ospf:
+    router-id: 10.0.0.1
+    # Non-default MinLSInterval (RFC 2328 §12.4), surfaced by
+    # `show ospf` so the BDD can confirm it reached the instance.
+    # 1500ms keeps convergence brisk while still exercising the knob.
+    min-ls-interval: 1500
+    area:
+    - area-id: 0.0.0.0
+      interface:
+      - if-name: lo
+        enable: true
+      - if-name: ethb
+        enable: true
+        network-type: point-to-point

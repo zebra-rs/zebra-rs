@@ -425,6 +425,8 @@ struct Ospfv3SummaryJson {
     spf_initial_wait_ms: u32,
     spf_secondary_wait_ms: u32,
     spf_maximum_wait_ms: u32,
+    /// RFC 2328 §12.4 MinLSInterval (`min-ls-interval`), ms.
+    min_ls_interval_ms: u32,
     /// TI-LFA compute telemetry for the most-recent run, preformatted
     /// (`targets=… mode=… workers=… spf{…} took … us`). None until
     /// TI-LFA runs (and cleared when it is disabled).
@@ -456,6 +458,7 @@ fn show_ospfv3_summary(
         link_count: top.links.len(),
         spf_last_ms_ago: top.spf_last.map(|t| t.elapsed().as_millis()),
         spf_duration_us: top.spf_duration.map(|d| d.as_micros()),
+        min_ls_interval_ms: top.min_ls_interval_ms,
         spf_initial_wait_ms: top.spf_interval.initial_wait_ms,
         spf_secondary_wait_ms: top.spf_interval.secondary_wait_ms,
         spf_maximum_wait_ms: top.spf_interval.maximum_wait_ms,
@@ -489,6 +492,7 @@ fn show_ospfv3_summary(
         "  SPF timers:   initial {} ms, secondary {} ms, maximum {} ms",
         summary.spf_initial_wait_ms, summary.spf_secondary_wait_ms, summary.spf_maximum_wait_ms,
     )?;
+    writeln!(text, "  MinLSInterval: {} ms", summary.min_ls_interval_ms,)?;
     if let Some(tilfa) = &summary.tilfa_compute {
         writeln!(text, "  TI-LFA compute: {}", tilfa)?;
     }

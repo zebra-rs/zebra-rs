@@ -70,3 +70,37 @@ configured bounds (`SPF timers: initial … secondary … maximum …`).
 OSPFv3 exposes the identical `spf-interval` block under
 `router ospfv3`. These defaults replace the earlier fixed 1-second
 coalescing timer.
+
+## MinLSInterval (`min-ls-interval`)
+
+Where `spf-interval` throttles the *route calculation*,
+`min-ls-interval` throttles *self-LSA origination* — RFC 2328 §12.4
+MinLSInterval, the same knob as FRR's `timers throttle lsa all`:
+
+```
+router ospf {
+  min-ls-interval 5000;
+}
+```
+
+| YANG leaf (`/router/ospf[v3]/min-ls-interval`) | Default | Range | Units |
+|---|---|---|---|
+| `min-ls-interval` | 5000 | 0..5000 | milliseconds |
+
+A self-LSA may be re-originated at most once per `min-ls-interval`. A
+re-origination requested sooner (the second of two rapid topology
+changes) is deferred to the interval boundary, and further triggers
+in that window coalesce into the single deferred update — so a
+flapping link produces one Router-LSA every `min-ls-interval` instead
+of a flood. The first origination after a quiet period is always
+immediate. The throttle covers the topology-churn LSAs — the
+**Router-LSA** and the per-interface **Network-LSA**; Summary /
+AS-External LSAs re-originate only on route changes and are already
+diff-gated, so they don't storm. Graceful-restart exit re-originates
+promptly, bypassing the throttle.
+
+`show ospf` reports the value (`MinLSInterval (self-LSA
+re-origination): … ms`); OSPFv3 exposes the identical
+`min-ls-interval` leaf under `router ospfv3`. The companion
+receive-side limit (RFC 2328 §13 MinLSArrival) is fixed at 1 s and
+not yet configurable.
