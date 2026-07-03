@@ -114,7 +114,10 @@ Feature: OSPFv2 graceful restart keeps forwarding through a daemon restart
     And I apply config "b.yaml" to namespace "b"
     Then show command "show ospf neighbor" in namespace "b" should eventually contain "Full"
     And show command "show ospf neighbor" in namespace "a" should eventually contain "Full"
-    And show command "show ospf route" in namespace "a" should contain "10.0.0.2/32"
+    # Eventually: SPF runs on a 1s coalescing timer after the
+    # adjacency reaches Full, so the route install trails the
+    # neighbor-state check by a beat.
+    And show command "show ospf route" in namespace "a" should eventually contain "10.0.0.2/32"
     And ping from "a" to "10.0.0.2" should eventually succeed
 
     # Teardown.
