@@ -134,6 +134,25 @@ message ReplSlot {
   string remote_sid = 2;
 }
 
+// An egress-protection mirror route (End.M context): traffic exposed by an
+// End.M decap whose destination falls in `prefix` (the FAILED egress PE's
+// SID space) is served locally with DT-style semantics — decap once more
+// and look the inner packet up in `vrf_table_id`. `ctx` scopes the entry to
+// the End.M SID's context id.
+message MirrorRoute {
+  uint32 ctx          = 1;
+  string prefix       = 2;  // the protected locator, e.g. fcbb:bbbb:3::/48
+  uint32 prefix_len   = 3;
+  uint32 behavior     = 4;  // SRV6_BH_END_DT4/DT6/DT46
+  uint32 vrf_table_id = 5;
+}
+
+message MirrorRouteDel {
+  uint32 ctx        = 1;
+  string prefix     = 2;
+  uint32 prefix_len = 3;
+}
+
 // Subscribe to datapath MAC learning (EVPN over SRv6): cradle streams every
 // locally-learned (mac, bridge-domain) so the control plane can originate
 // EVPN Type-2 routes for it. Only local entries are reported (never
@@ -242,6 +261,8 @@ service Cradle {
   rpc WatchFdb(WatchFdbRequest) returns (stream FdbEvent);
   rpc AddReplSlot(ReplSlot) returns (Empty);
   rpc DelReplSlot(ReplSlot) returns (Empty);
+  rpc AddMirrorRoute(MirrorRoute) returns (Empty);
+  rpc DelMirrorRoute(MirrorRouteDel) returns (Empty);
   rpc AddService(Service) returns (Empty);
   rpc GetStats(StatsRequest) returns (StatsReply);
   rpc AddL7Service(L7Service) returns (Empty);
