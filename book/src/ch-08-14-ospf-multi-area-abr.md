@@ -56,9 +56,41 @@ standard backbone split-horizon:
   see [Area Types](ch-08-13-ospf-area-types.md)) receive no Type-3
   at all.
 
-There is no `area range` prefix aggregation yet — each routing
-table entry becomes its own Type-3 (see
-[Gaps Relative to FRR ospfd](ch-08-12-ospf-frr-gaps.md)).
+## Area ranges
+
+`area <id> range <prefix>` condenses an area's own intra-area
+routes at the ABR (RFC 2328 §12.4.3): components falling inside a
+configured range are not advertised individually — one aggregate
+Type-3 is originated instead, as long as at least one component
+exists.
+
+```
+router ospf {
+  area 0.0.0.1 {
+    range 10.1.0.0/16;
+    range 10.9.0.0/16 {
+      not-advertise true;
+    }
+    interface enp0s7 {
+      enable true;
+    }
+  }
+}
+```
+
+| YANG leaf (`/router/ospf/area/<id>/range/<prefix>/…`) | Default | Notes |
+|---|---|---|
+| `<prefix>` | list key | The aggregate to advertise. |
+| `not-advertise` | `false` | Hide the whole range — no aggregate, no components. |
+| `cost` | — (largest component) | Fixed aggregate metric instead of the RFC's largest-component rule. |
+
+The most-specific configured range wins when several contain a
+component. Ranges apply only to the area's own intra-area routes —
+inter-area routes re-advertised from the backbone pass through
+unaffected — and prefixes outside every range keep advertising
+individually. The RFC's companion discard route for active ranges
+(FRR's Null0) is not installed yet; see
+[Gaps Relative to FRR ospfd](ch-08-12-ospf-frr-gaps.md).
 
 ## Type-4 ASBR-Summary origination
 
