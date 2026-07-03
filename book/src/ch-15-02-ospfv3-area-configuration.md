@@ -36,10 +36,10 @@ Per-area knobs:
 | `redistribute/connected` | Per-NSSA-area Type-7 origination — see [Route Redistribution](ch-15-09-ospfv3-redistribution.md). |
 | `interface/<n>/…` | Per-interface knobs — see [Per-Interface Configuration](ch-15-06-ospfv3-per-interface.md). |
 
-Multi-area configurations form adjacencies and run per-area SPF
-correctly (one Router-LSA per attached area), but note the current
-ABR limitation for inter-area routing described in
-[Multi-Area Topologies and the ABR](ch-15-04-ospfv3-multi-area-abr.md).
+Multi-area configurations run per-area SPF (one Router-LSA per
+attached area), and an ABR summarizes between its areas with
+Inter-Area-Prefix-LSAs — see
+[Multi-Area Routing and the ABR](ch-15-04-ospfv3-multi-area-abr.md).
 
 ## Per-VRF instances
 

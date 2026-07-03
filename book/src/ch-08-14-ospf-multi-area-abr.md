@@ -79,12 +79,8 @@ external metrics come out right across area boundaries — see
 
 ## OSPFv3
 
-OSPFv3 supports multi-area topologies at the adjacency and
-intra-area level — the instance originates one Router-LSA per
-attached area (RFC 5340 §3.4.3), so non-backbone areas form
-adjacencies and run SPF normally, and NSSA translation works
-per-area. However, **ABR summary origination is not yet implemented
-for v3**: an OSPFv3 ABR floods and displays Inter-Area-Prefix
-(0x2003) and Inter-Area-Router (0x2004) LSAs received from others
-but does not originate them, so v3 inter-area reachability through
-a zebra-rs ABR is a known gap.
+OSPFv3 implements the same ABR machinery using its own LSA types —
+Inter-Area-Prefix-LSAs (0x2003) in place of Type-3 and
+Inter-Area-Router-LSAs (0x2004) in place of Type-4, with identical
+direction rules, diff-gating, and receive-side computation. See
+[the OSPFv3 chapter's Multi-Area page](ch-15-04-ospfv3-multi-area-abr.md).

@@ -211,6 +211,11 @@ pub struct Ospf<V: OspfVersion = Ospfv2> {
     /// `rib::Message::Ipv6Add` / `Ipv6Del` for changed entries.
     /// Empty on v2 instances (they don't compute v6 routes).
     pub rib6: PrefixMap<ipnet::Ipv6Net, SpfRouteV3>,
+    /// Per-area v6 route slices, keyed by area — the v3 sibling of
+    /// `rib_areas`. Refreshed by `apply_v3_spf_result` after each
+    /// area's SPF; merged into `rib6` by `merge_area_ribs6` and read
+    /// by the ABR Inter-Area-Prefix origination (`abr_summary_*_v3`).
+    pub rib6_areas: BTreeMap<Ipv4Addr, PrefixMap<ipnet::Ipv6Net, SpfRouteV3>>,
     pub tracing: OspfTracing,
     pub segment_routing: super::srmpls::SegmentRoutingMode,
 
@@ -1208,6 +1213,7 @@ impl Ospf<Ospfv2> {
             local_pool: None,
             lan_adj_sids: BTreeMap::new(),
             rib6: PrefixMap::new(),
+            rib6_areas: BTreeMap::new(),
             tracing: OspfTracing::default(),
             segment_routing: super::srmpls::SegmentRoutingMode::default(),
             srv6_locator_name: None,
@@ -5385,6 +5391,7 @@ impl Ospf<Ospfv3> {
             local_pool: None,
             lan_adj_sids: BTreeMap::new(),
             rib6: PrefixMap::new(),
+            rib6_areas: BTreeMap::new(),
             tracing: OspfTracing::default(),
             segment_routing: super::srmpls::SegmentRoutingMode::default(),
             srv6_locator_name: None,
@@ -6187,9 +6194,13 @@ impl Ospf<Ospfv3> {
         // B-bit is set when this router attaches to two or more
         // areas — both peers (and our own NSSA Candidate election in
         // `is_nssa_translator_for`) read it to identify ABRs. The
-        // pre-existing E-bit is kept for parity with the v2 build
-        // (ASBR tracking lands later for both versions).
-        let mut router_flags = OSPFV3_ROUTER_LSA_FLAG_E;
+        // E-bit follows `is_asbr()` (any instance-level redistribute)
+        // so remote ABRs originate Inter-Area-Router-LSAs only for
+        // real ASBRs — v2 parity.
+        let mut router_flags = 0u8;
+        if self.is_asbr() {
+            router_flags |= OSPFV3_ROUTER_LSA_FLAG_E;
+        }
         if self.is_abr() {
             router_flags |= OSPFV3_ROUTER_LSA_FLAG_B;
         }
@@ -6655,6 +6666,439 @@ impl Ospf<Ospfv3> {
             .filter(|(_, area)| !area.links.is_empty())
             .count()
             >= 2
+    }
+
+    /// True when this router originates AS-External LSAs (RFC 2328
+    /// §3.3 ASBR definition) — any instance-level `redistribute`
+    /// source is configured. v3 sibling of the v2 `is_asbr`.
+    pub fn is_asbr(&self) -> bool {
+        !self.redist.is_empty()
+    }
+
+    /// RFC 2328 §12.4.3 for OSPFv3 (RFC 5340 §4.4.3.4) — an Area
+    /// Border Router condenses each area's route slice into
+    /// Inter-Area-Prefix-LSAs (0x2003) flooded into the *other*
+    /// attached areas. Driven from `apply_v3_spf_result` after the
+    /// per-area slices (`rib6_areas`) are refreshed.
+    ///
+    /// Loop-safety mirrors v2: our own inter-area route computation
+    /// (`add_inter_area_routes_v3`) skips self-originated LSAs, and
+    /// origination is diff-gated against the LSDB, so a converged
+    /// topology re-floods nothing.
+    pub fn abr_summary_originate_v3(&mut self) {
+        let attached: Vec<Ipv4Addr> = self
+            .areas
+            .iter()
+            .filter(|(_, a)| !a.links.is_empty())
+            .map(|(id, _)| *id)
+            .collect();
+
+        if attached.len() < 2 {
+            let all: Vec<Ipv4Addr> = self.areas.iter().map(|(id, _)| *id).collect();
+            for area_id in all {
+                self.abr_summary_sync_area_v3(area_id, &BTreeMap::new());
+            }
+            return;
+        }
+
+        for &area_a in &attached {
+            let desired = self.abr_summary_desired_v3(area_a, &attached);
+            self.abr_summary_sync_area_v3(area_a, &desired);
+        }
+    }
+
+    /// Compute the `prefix -> metric` set of Inter-Area-Prefix-LSAs
+    /// to advertise into `area_a` from the other attached areas'
+    /// route slices — same rules as v2's `abr_summary_desired`:
+    /// intra-area routes of any other area; inter-area routes only
+    /// from the backbone into non-backbone areas; skip prefixes
+    /// `area_a` reaches intra-area; externals and LSInfinity never;
+    /// lowest metric wins; `no-summary` areas take nothing.
+    fn abr_summary_desired_v3(
+        &self,
+        area_a: Ipv4Addr,
+        attached: &[Ipv4Addr],
+    ) -> BTreeMap<ipnet::Ipv6Net, u32> {
+        use ospf_packet::OSPFV3_LS_INFINITY;
+
+        let mut desired: BTreeMap<ipnet::Ipv6Net, u32> = BTreeMap::new();
+
+        if self
+            .areas
+            .get(area_a)
+            .map(|a| a.area_type.no_summary)
+            .unwrap_or(false)
+        {
+            return desired;
+        }
+
+        for &area_b in attached {
+            if area_b == area_a {
+                continue;
+            }
+            let Some(rib_b) = self.rib6_areas.get(&area_b) else {
+                continue;
+            };
+            for (prefix, route) in rib_b.iter() {
+                let advertise = match route.path_type {
+                    RouteType::IntraArea => true,
+                    RouteType::InterArea => area_b == AREA0 && area_a != AREA0,
+                    RouteType::External => false,
+                };
+                if !advertise || route.metric >= OSPFV3_LS_INFINITY {
+                    continue;
+                }
+                let intra_in_a = self
+                    .rib6_areas
+                    .get(&area_a)
+                    .and_then(|r| r.get(&prefix))
+                    .map(|r| r.path_type == RouteType::IntraArea)
+                    .unwrap_or(false);
+                if intra_in_a {
+                    continue;
+                }
+                let metric = route.metric.min(OSPFV3_LS_INFINITY - 1);
+                desired
+                    .entry(prefix)
+                    .and_modify(|m| *m = (*m).min(metric))
+                    .or_insert(metric);
+            }
+        }
+        desired
+    }
+
+    /// Reconcile the self-originated Inter-Area-Prefix-LSAs in
+    /// `area_id`'s LSDB against `desired`: flush stale, (re)originate
+    /// new / metric-changed, leave unchanged untouched.
+    fn abr_summary_sync_area_v3(
+        &mut self,
+        area_id: Ipv4Addr,
+        desired: &BTreeMap<ipnet::Ipv6Net, u32>,
+    ) {
+        use crate::ospf::lsdb::OSPF_MAX_AGE;
+        use ospf_packet::{OSPFV3_INTER_AREA_PREFIX_LSA_TYPE, Ospfv3LsBody};
+
+        // Snapshot current self-originated (ls_id, prefix, metric).
+        let current: Vec<(u32, ipnet::Ipv6Net, u32)> = {
+            let Some(area) = self.areas.get(area_id) else {
+                return;
+            };
+            area.lsdb
+                .iter_by_raw_type(OSPFV3_INTER_AREA_PREFIX_LSA_TYPE)
+                .filter(|(_, lsa)| lsa.data.h.advertising_router == self.router_id)
+                .filter(|(_, lsa)| lsa.data.h.ls_age < OSPF_MAX_AGE)
+                .filter_map(|((ls_id, _), lsa)| {
+                    let Ospfv3LsBody::InterAreaPrefix(ref body) = lsa.data.body else {
+                        return None;
+                    };
+                    ospfv3_prefix_to_ipv6net(body.prefix_length, &body.address_prefix)
+                        .map(|p| (ls_id, p, body.metric))
+                })
+                .collect()
+        };
+
+        for (ls_id, prefix, _metric) in &current {
+            if !desired.contains_key(prefix) {
+                self.inter_area_prefix_lsa_flush_v3(area_id, *ls_id);
+            }
+        }
+
+        for (prefix, metric) in desired {
+            let unchanged = current.iter().any(|(_, p, m)| p == prefix && m == metric);
+            if !unchanged {
+                self.inter_area_prefix_lsa_originate_v3(area_id, *prefix, *metric);
+            }
+        }
+    }
+
+    /// Originate (or re-originate at seq+1) one Inter-Area-Prefix-LSA
+    /// for `prefix`/`metric` into `area_id` and flood it. LS-ID is the
+    /// same FNV-1a prefix hash the v3 NSSA/AS-External originators use
+    /// (v3 LS-IDs carry no addressing semantics, RFC 5340 §4.4.3.4).
+    fn inter_area_prefix_lsa_originate_v3(
+        &mut self,
+        area_id: Ipv4Addr,
+        prefix: ipnet::Ipv6Net,
+        metric: u32,
+    ) {
+        use ospf_packet::{
+            OSPFV3_INTER_AREA_PREFIX_LSA_TYPE, Ospfv3InterAreaPrefixLsa, Ospfv3LsBody,
+            Ospfv3LsaHeader, Ospfv3PrefixOptions, ospfv3_prefix_wire_len,
+        };
+
+        let link_state_id = nssa_v3_ls_id(&prefix);
+
+        let wire_len = ospfv3_prefix_wire_len(prefix.prefix_len());
+        let mut address_prefix = vec![0u8; wire_len];
+        let net_bytes = prefix.network().octets();
+        let copy_len = wire_len.min(net_bytes.len());
+        address_prefix[..copy_len].copy_from_slice(&net_bytes[..copy_len]);
+
+        let body = Ospfv3InterAreaPrefixLsa {
+            metric: metric & 0x00FF_FFFF,
+            prefix_length: prefix.prefix_len(),
+            prefix_options: Ospfv3PrefixOptions::new(),
+            address_prefix,
+        };
+        let header = Ospfv3LsaHeader {
+            ls_age: 0,
+            ls_type: OSPFV3_INTER_AREA_PREFIX_LSA_TYPE,
+            link_state_id,
+            advertising_router: self.router_id,
+            ls_seq_number: 0x8000_0001,
+            ls_checksum: 0,
+            length: 0,
+        };
+        let mut lsa = ospf_packet::Ospfv3Lsa {
+            h: header,
+            body: Ospfv3LsBody::InterAreaPrefix(body),
+            raw: None,
+        };
+
+        let key: super::lsdb::OspfLsaKey = (
+            OSPFV3_INTER_AREA_PREFIX_LSA_TYPE,
+            link_state_id,
+            self.router_id,
+        );
+        let flood_lsa = if let Some(area) = self.areas.get_mut(area_id) {
+            if let Some(existing) = area.lsdb.lookup_by_raw_key(key) {
+                lsa.h.ls_seq_number = seq_max(
+                    lsa.h.ls_seq_number,
+                    existing.h.ls_seq_number.saturating_add(1),
+                );
+            }
+            lsa.update();
+            let flood_lsa = lsa.clone();
+            area.lsdb.install_originated(lsa, &self.tx, Some(area_id));
+            Some(flood_lsa)
+        } else {
+            None
+        };
+        if let Some(lsa) = flood_lsa {
+            self.flood_self_originated_lsa(area_id, &lsa);
+        }
+    }
+
+    /// Flush (MaxAge) one self-originated Inter-Area-Prefix-LSA out of
+    /// `area_id` and re-flood so neighbors drop it.
+    fn inter_area_prefix_lsa_flush_v3(&mut self, area_id: Ipv4Addr, ls_id: u32) {
+        use ospf_packet::OSPFV3_INTER_AREA_PREFIX_LSA_TYPE;
+
+        let key: super::lsdb::OspfLsaKey =
+            (OSPFV3_INTER_AREA_PREFIX_LSA_TYPE, ls_id, self.router_id);
+        let flushed = if let Some(area) = self.areas.get_mut(area_id) {
+            area.lsdb.flush_lsa_by_raw_key(key, &self.tx, Some(area_id))
+        } else {
+            None
+        };
+        if let Some(lsa) = flushed {
+            self.flood_self_originated_lsa(area_id, &lsa);
+        }
+    }
+
+    /// (Re)originate / flush Inter-Area-Router-LSAs (0x2004) for all
+    /// ASBRs known to this ABR — v3 sibling of v2's Type-4 machinery
+    /// (RFC 2328 §12.4.3 / RFC 5340 §4.4.3.5). A router in area A
+    /// cannot see the E-bit of an ASBR in area B; these LSAs give it
+    /// the ASBR reachability that AS-External route computation needs.
+    pub fn abr_summary_asbr_originate_v3(&mut self) {
+        let attached: Vec<Ipv4Addr> = self
+            .areas
+            .iter()
+            .filter(|(_, a)| !a.links.is_empty())
+            .map(|(id, _)| *id)
+            .collect();
+
+        if attached.len() < 2 {
+            let all: Vec<Ipv4Addr> = self.areas.iter().map(|(id, _)| *id).collect();
+            for area_id in all {
+                self.abr_summary_asbr_sync_area_v3(area_id, &BTreeMap::new());
+            }
+            return;
+        }
+
+        for &area_a in &attached {
+            let desired = self.abr_summary_asbr_desired_v3(area_a, &attached);
+            self.abr_summary_asbr_sync_area_v3(area_a, &desired);
+        }
+    }
+
+    /// Compute the `asbr_router_id -> metric` map of
+    /// Inter-Area-Router-LSAs to advertise into `area_a`: walk the
+    /// other attached areas' Router-LSAs for the E-bit, and use our
+    /// SPF cost to that router (from `spf_results`) as the metric.
+    fn abr_summary_asbr_desired_v3(
+        &self,
+        area_a: Ipv4Addr,
+        attached: &[Ipv4Addr],
+    ) -> BTreeMap<Ipv4Addr, u32> {
+        use ospf_packet::{
+            OSPFV3_LS_INFINITY, OSPFV3_ROUTER_LSA_FLAG_E, OSPFV3_ROUTER_LSA_TYPE, Ospfv3LsBody,
+        };
+
+        let mut desired: BTreeMap<Ipv4Addr, u32> = BTreeMap::new();
+
+        for &area_b in attached {
+            if area_b == area_a {
+                continue;
+            }
+            let Some(spf_b) = self.spf_results.get(&area_b) else {
+                continue;
+            };
+            let Some(area_b_ref) = self.areas.get(area_b) else {
+                continue;
+            };
+            for (_, lsa) in area_b_ref.lsdb.iter_by_raw_type(OSPFV3_ROUTER_LSA_TYPE) {
+                let Ospfv3LsBody::Router(ref body) = lsa.data.body else {
+                    continue;
+                };
+                if (body.flags & OSPFV3_ROUTER_LSA_FLAG_E) == 0 {
+                    continue;
+                }
+                let asbr_id = lsa.data.h.advertising_router;
+                if asbr_id == self.router_id {
+                    continue;
+                }
+                let Some(vertex) = self.lsp_map.lookup(asbr_id) else {
+                    continue;
+                };
+                let Some(path) = spf_b.get(&vertex) else {
+                    continue;
+                };
+                let metric = path.cost.min(OSPFV3_LS_INFINITY - 1);
+                desired
+                    .entry(asbr_id)
+                    .and_modify(|m| *m = (*m).min(metric))
+                    .or_insert(metric);
+            }
+        }
+        desired
+    }
+
+    /// Reconcile self-originated Inter-Area-Router-LSAs in `area_id`
+    /// against `desired`.
+    fn abr_summary_asbr_sync_area_v3(
+        &mut self,
+        area_id: Ipv4Addr,
+        desired: &BTreeMap<Ipv4Addr, u32>,
+    ) {
+        use crate::ospf::lsdb::OSPF_MAX_AGE;
+        use ospf_packet::{OSPFV3_INTER_AREA_ROUTER_LSA_TYPE, Ospfv3LsBody};
+
+        let current: Vec<(Ipv4Addr, u32)> = {
+            let Some(area) = self.areas.get(area_id) else {
+                return;
+            };
+            area.lsdb
+                .iter_by_raw_type(OSPFV3_INTER_AREA_ROUTER_LSA_TYPE)
+                .filter(|(_, lsa)| lsa.data.h.advertising_router == self.router_id)
+                .filter(|(_, lsa)| lsa.data.h.ls_age < OSPF_MAX_AGE)
+                .filter_map(|(_, lsa)| {
+                    let Ospfv3LsBody::InterAreaRouter(ref body) = lsa.data.body else {
+                        return None;
+                    };
+                    Some((Ipv4Addr::from(body.destination_router_id), body.metric))
+                })
+                .collect()
+        };
+
+        for (asbr_id, _) in &current {
+            if !desired.contains_key(asbr_id) {
+                self.inter_area_router_lsa_flush_v3(area_id, *asbr_id);
+                if let Some(area) = self.areas.get_mut(area_id) {
+                    area.asbr_summaries_originated.remove(asbr_id);
+                }
+            }
+        }
+
+        for (asbr_id, metric) in desired {
+            let unchanged = current.iter().any(|(id, m)| id == asbr_id && m == metric);
+            if !unchanged {
+                self.inter_area_router_lsa_originate_v3(area_id, *asbr_id, *metric);
+                if let Some(area) = self.areas.get_mut(area_id) {
+                    area.asbr_summaries_originated.insert(*asbr_id);
+                }
+            }
+        }
+    }
+
+    /// Originate (or refresh) one Inter-Area-Router-LSA for `asbr_id`
+    /// into `area_id`. LS-ID is the destination router-id, mirroring
+    /// v2's Type-4 convention.
+    fn inter_area_router_lsa_originate_v3(
+        &mut self,
+        area_id: Ipv4Addr,
+        asbr_id: Ipv4Addr,
+        metric: u32,
+    ) {
+        use ospf_packet::{
+            OSPFV3_INTER_AREA_ROUTER_LSA_TYPE, Ospfv3InterAreaRouterLsa, Ospfv3LsBody,
+            Ospfv3LsaHeader, Ospfv3Options,
+        };
+
+        let link_state_id = u32::from(asbr_id);
+        let body = Ospfv3InterAreaRouterLsa {
+            options: Ospfv3Options::default(),
+            metric: metric & 0x00FF_FFFF,
+            destination_router_id: u32::from(asbr_id),
+        };
+        let header = Ospfv3LsaHeader {
+            ls_age: 0,
+            ls_type: OSPFV3_INTER_AREA_ROUTER_LSA_TYPE,
+            link_state_id,
+            advertising_router: self.router_id,
+            ls_seq_number: 0x8000_0001,
+            ls_checksum: 0,
+            length: 0,
+        };
+        let mut lsa = ospf_packet::Ospfv3Lsa {
+            h: header,
+            body: Ospfv3LsBody::InterAreaRouter(body),
+            raw: None,
+        };
+
+        let key: super::lsdb::OspfLsaKey = (
+            OSPFV3_INTER_AREA_ROUTER_LSA_TYPE,
+            link_state_id,
+            self.router_id,
+        );
+        let flood_lsa = if let Some(area) = self.areas.get_mut(area_id) {
+            if let Some(existing) = area.lsdb.lookup_by_raw_key(key) {
+                lsa.h.ls_seq_number = seq_max(
+                    lsa.h.ls_seq_number,
+                    existing.h.ls_seq_number.saturating_add(1),
+                );
+            }
+            lsa.update();
+            let flood_lsa = lsa.clone();
+            area.lsdb.install_originated(lsa, &self.tx, Some(area_id));
+            Some(flood_lsa)
+        } else {
+            None
+        };
+        if let Some(lsa) = flood_lsa {
+            self.flood_self_originated_lsa(area_id, &lsa);
+        }
+    }
+
+    /// Flush one self-originated Inter-Area-Router-LSA for `asbr_id`
+    /// from `area_id`.
+    fn inter_area_router_lsa_flush_v3(&mut self, area_id: Ipv4Addr, asbr_id: Ipv4Addr) {
+        use ospf_packet::OSPFV3_INTER_AREA_ROUTER_LSA_TYPE;
+
+        let key: super::lsdb::OspfLsaKey = (
+            OSPFV3_INTER_AREA_ROUTER_LSA_TYPE,
+            u32::from(asbr_id),
+            self.router_id,
+        );
+        let flushed = if let Some(area) = self.areas.get_mut(area_id) {
+            area.lsdb.flush_lsa_by_raw_key(key, &self.tx, Some(area_id))
+        } else {
+            None
+        };
+        if let Some(lsa) = flushed {
+            self.flood_self_originated_lsa(area_id, &lsa);
+        }
     }
 
     /// v3 mirror of v2's `is_nssa_translator_for`. RFC 3101 §3.1
@@ -9889,9 +10333,14 @@ pub struct SpfNexthop {
 /// removed entries are computed via `spf::table_diff` between two
 /// `PrefixMap<Ipv6Net, SpfRouteV3>` snapshots, mirroring how v2
 /// diffs `top.rib`.
-#[derive(Debug, PartialEq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct SpfRouteV3 {
     pub metric: u32,
+    /// RFC 2328 §16.4.1 path preference class (intra-area beats
+    /// inter-area beats external), shared with v2's `SpfRoute`.
+    /// Consulted by `rib6_insert` when two sources offer the same
+    /// prefix — the class wins outright regardless of metric.
+    pub path_type: RouteType,
     pub nhops: BTreeMap<std::net::Ipv6Addr, SpfNexthopV3>,
     /// Resolved absolute MPLS label for this prefix's SR Prefix-SID,
     /// or `None` if no E-Intra-Area-Prefix-LSA covers this prefix or
@@ -9951,6 +10400,33 @@ fn rib_insert(rib: &mut PrefixMap<Ipv4Net, SpfRoute>, prefix: Ipv4Net, route: Sp
         // regardless of metric (intra-area beats inter-area beats
         // external). Within the same type, lower metric wins and an
         // exact tie merges nexthops (ECMP).
+        match route.path_type.cmp(&curr.path_type) {
+            std::cmp::Ordering::Less => *curr = route,
+            std::cmp::Ordering::Greater => {}
+            std::cmp::Ordering::Equal => {
+                if curr.metric > route.metric {
+                    *curr = route;
+                } else if curr.metric == route.metric {
+                    for (addr, nhop) in route.nhops {
+                        curr.nhops.insert(addr, nhop);
+                    }
+                }
+            }
+        }
+    } else {
+        rib.insert(prefix, route);
+    }
+}
+
+/// v6 sibling of `rib_insert`: RFC 2328 §16.4.1 preference — a
+/// more-preferred path type wins outright; within a type, lower
+/// metric wins and an exact tie merges nexthops (ECMP).
+fn rib6_insert(
+    rib: &mut PrefixMap<ipnet::Ipv6Net, SpfRouteV3>,
+    prefix: ipnet::Ipv6Net,
+    route: SpfRouteV3,
+) {
+    if let Some(curr) = rib.get_mut(&prefix) {
         match route.path_type.cmp(&curr.path_type) {
             std::cmp::Ordering::Less => *curr = route,
             std::cmp::Ordering::Greater => {}
@@ -10474,26 +10950,6 @@ fn build_rib_from_flex_algo(
     rib
 }
 
-/// v6 sibling of `rib_insert`: keep the lowest-metric route for a
-/// prefix, merging nexthops on an exact metric tie (ECMP).
-fn rib6_insert(
-    rib: &mut PrefixMap<ipnet::Ipv6Net, SpfRouteV3>,
-    prefix: ipnet::Ipv6Net,
-    route: SpfRouteV3,
-) {
-    if let Some(curr) = rib.get_mut(&prefix) {
-        if curr.metric > route.metric {
-            *curr = route;
-        } else if curr.metric == route.metric {
-            for (addr, nhop) in route.nhops {
-                curr.nhops.insert(addr, nhop);
-            }
-        }
-    } else {
-        rib.insert(prefix, route);
-    }
-}
-
 /// OSPFv3 sibling of `build_rib_from_flex_algo`: build the per-algo
 /// IPv6 RIB from peer E-Intra-Area-Prefix-LSAs carrying a per-algo
 /// Prefix-SID (RFC 9350 §7). For each such prefix whose originator is
@@ -10585,6 +11041,7 @@ fn build_rib6_from_flex_algo(
                 };
                 let route = SpfRouteV3 {
                     metric: path.cost,
+                    path_type: RouteType::IntraArea,
                     nhops: nhops.clone(),
                     sid: sid_label,
                     prefix_sid: Some((value, label_config.clone())),
@@ -11278,11 +11735,28 @@ fn apply_v3_spf_result(top: &mut Ospf<Ospfv3>, output: SpfOutput) {
     }
     top.rib6_flex_algo = rib6_flex_algo;
 
-    apply_routing_updates_v3(top, area_id, source, &spf_result, &tilfa_result);
+    // Build this area's route slice, attach Prefix-SIDs, store it,
+    // and merge all attached areas' slices into the instance RIB —
+    // mirroring v2's apply_spf_result. The per-area slices and SPF
+    // results also feed the ABR Inter-Area-Prefix/-Router origination
+    // below.
+    let mut area_rib = build_rib6_from_spf(top, area_id, source, &spf_result, &tilfa_result);
+    add_prefix_sids_v3(top, area_id, &mut area_rib);
+    top.rib6_areas.insert(area_id, area_rib);
+    top.spf_results.insert(area_id, spf_result.clone());
+    let merged = merge_area_ribs6(top);
+    apply_routing_updates_v3(top, merged);
 
     top.spf_result = Some(spf_result);
     top.graph = Some(graph);
     top.tilfa_result = Some(tilfa_result);
+
+    // RFC 2328 §12.4.3 (RFC 5340 §4.4.3.4): reconcile the ABR
+    // Inter-Area-Prefix and Inter-Area-Router LSAs after the route
+    // slices moved. Diff-gated — a converged topology re-floods
+    // nothing.
+    top.abr_summary_originate_v3();
+    top.abr_summary_asbr_originate_v3();
 
     // Per-algo SPF trees, for `show ospfv3 flex-algo`.
     top.spf_flex_algo = flex_algos
@@ -11447,34 +11921,26 @@ fn build_rib6_from_spf(
 
             let entry = SpfRouteV3 {
                 metric: total_metric,
+                path_type: RouteType::IntraArea,
                 nhops: nhops_map,
                 sid: None,
                 prefix_sid: None,
                 dest_vertex: Some(ref_vertex),
                 backup_as_primary: top.fast_reroute_backup_as_primary,
             };
-            // Equal-cost: take the lowest-metric. If equal, merge
-            // nexthop sets so we end up with ECMP at the same
-            // metric — same shape as v2's `rib_insert`.
-            match rib.get_mut(&net) {
-                None => {
-                    rib.insert(net, entry);
-                }
-                Some(curr) => {
-                    if curr.metric > entry.metric {
-                        *curr = entry;
-                    } else if curr.metric == entry.metric {
-                        for (addr, nhop) in entry.nhops {
-                            curr.nhops.insert(addr, nhop);
-                        }
-                    }
-                }
-            }
+            rib6_insert(&mut rib, net, entry);
         }
     }
 
     // AS-External: walk Type-5 LSAs (incl. those translated from a
     // Type-7 by an NSSA ABR) and install via the SPF nexthop to the
+    // Inter-area: walk Inter-Area-Prefix-LSAs (0x2003) an ABR
+    // originated into this area and install routes through that ABR
+    // (RFC 2328 §16.2 for v3). Ordered between intra-area and
+    // external so `rib6_insert`'s path-type preference resolves
+    // collisions per §16.4.1.
+    add_inter_area_routes_v3(top, area_id, spf_result, &mut rib);
+
     // originating ASBR. `lsdb_as` is empty for stub / NSSA-internal
     // routers (Type-5 isn't flooded into those areas), so this is a
     // no-op there.
@@ -11601,28 +12067,14 @@ fn add_srv6_locator_routes_v3(
             let net = net.trunc();
             let entry = SpfRouteV3 {
                 metric: path.cost.saturating_add(loc.metric),
+                path_type: RouteType::IntraArea,
                 nhops: nhops_map.clone(),
                 sid: None,
                 prefix_sid: None,
                 dest_vertex: Some(vertex),
                 backup_as_primary: top.fast_reroute_backup_as_primary,
             };
-            // Same lowest-metric / equal-cost-ECMP merge as the
-            // Intra-Area-Prefix pass.
-            match rib.get_mut(&net) {
-                None => {
-                    rib.insert(net, entry);
-                }
-                Some(curr) => {
-                    if curr.metric > entry.metric {
-                        *curr = entry;
-                    } else if curr.metric == entry.metric {
-                        for (addr, nhop) in entry.nhops {
-                            curr.nhops.insert(addr, nhop);
-                        }
-                    }
-                }
-            }
+            rib6_insert(rib, net, entry);
         }
     }
 }
@@ -11663,9 +12115,135 @@ fn nssa_v3_ls_id(prefix: &ipnet::Ipv6Net) -> u32 {
     if h == 0 { 1 } else { h }
 }
 
+/// Walk Inter-Area-Prefix-LSAs (0x2003) in `area_id`'s LSDB and
+/// install inter-area routes per RFC 2328 §16.2 (RFC 5340 §4.8.3):
+/// for each LSA whose advertising ABR is reachable via SPF, install
+/// the prefix at cost SPF(ABR) + LSA.metric with the ABR's nexthops.
+/// Self-originated LSAs are skipped — we are the ABR for those,
+/// which is the loop-safety half of `abr_summary_originate_v3`.
+fn add_inter_area_routes_v3(
+    top: &Ospf<Ospfv3>,
+    area_id: Ipv4Addr,
+    spf_result: &BTreeMap<usize, spf::Path>,
+    rib: &mut PrefixMap<ipnet::Ipv6Net, SpfRouteV3>,
+) {
+    use crate::ospf::lsdb::OSPF_MAX_AGE;
+    use ospf_packet::{OSPFV3_INTER_AREA_PREFIX_LSA_TYPE, OSPFV3_LS_INFINITY, Ospfv3LsBody};
+
+    let Some(area) = top.areas.get(area_id) else {
+        return;
+    };
+
+    for (_key, lsa) in area
+        .lsdb
+        .iter_by_raw_type(OSPFV3_INTER_AREA_PREFIX_LSA_TYPE)
+    {
+        if lsa.data.h.ls_age >= OSPF_MAX_AGE {
+            continue;
+        }
+        if lsa.data.h.advertising_router == top.router_id {
+            continue;
+        }
+        let Ospfv3LsBody::InterAreaPrefix(ref body) = lsa.data.body else {
+            continue;
+        };
+        if body.metric >= OSPFV3_LS_INFINITY {
+            continue;
+        }
+        let Some(abr_vertex) = top.lsp_map.lookup(lsa.data.h.advertising_router) else {
+            continue;
+        };
+        let Some(abr_path) = spf_result.get(&abr_vertex) else {
+            continue;
+        };
+        let Some(net) = ospfv3_prefix_to_ipv6net(body.prefix_length, &body.address_prefix) else {
+            continue;
+        };
+
+        let nhops = collect_v3_nexthops(top, abr_path);
+        if nhops.is_empty() {
+            continue;
+        }
+        let nhops_map: BTreeMap<std::net::Ipv6Addr, SpfNexthopV3> = nhops
+            .into_iter()
+            .map(|(addr, ifindex)| {
+                (
+                    addr,
+                    SpfNexthopV3 {
+                        ifindex,
+                        adjacency: false,
+                        backup: None,
+                    },
+                )
+            })
+            .collect();
+
+        let entry = SpfRouteV3 {
+            metric: abr_path.cost.saturating_add(body.metric),
+            path_type: RouteType::InterArea,
+            nhops: nhops_map,
+            sid: None,
+            prefix_sid: None,
+            // Protect the path to the ABR.
+            dest_vertex: Some(abr_vertex),
+            backup_as_primary: top.fast_reroute_backup_as_primary,
+        };
+        rib6_insert(rib, net, entry);
+    }
+}
+
+/// RFC 2328 §16.4 step 5 for v3: when an AS-External LSA's ASBR is
+/// not reachable in this area's SPF (its Router-LSA is area-scoped),
+/// fall back to an Inter-Area-Router-LSA (0x2004) an ABR originated
+/// into this area. Returns the cheapest `(abr_vertex, abr_path,
+/// cost_to_asbr)` across all advertising ABRs, or None.
+fn inter_area_asbr_fallback_v3<'a>(
+    top: &Ospf<Ospfv3>,
+    area_id: Ipv4Addr,
+    asbr_id: Ipv4Addr,
+    spf_result: &'a BTreeMap<usize, spf::Path>,
+) -> Option<(usize, &'a spf::Path, u32)> {
+    use crate::ospf::lsdb::OSPF_MAX_AGE;
+    use ospf_packet::{OSPFV3_INTER_AREA_ROUTER_LSA_TYPE, OSPFV3_LS_INFINITY, Ospfv3LsBody};
+
+    let area = top.areas.get(area_id)?;
+    let mut best: Option<(usize, &spf::Path, u32)> = None;
+    for (_key, lsa) in area
+        .lsdb
+        .iter_by_raw_type(OSPFV3_INTER_AREA_ROUTER_LSA_TYPE)
+    {
+        if lsa.data.h.ls_age >= OSPF_MAX_AGE {
+            continue;
+        }
+        if lsa.data.h.advertising_router == top.router_id {
+            continue;
+        }
+        let Ospfv3LsBody::InterAreaRouter(ref body) = lsa.data.body else {
+            continue;
+        };
+        if Ipv4Addr::from(body.destination_router_id) != asbr_id {
+            continue;
+        }
+        if body.metric >= OSPFV3_LS_INFINITY {
+            continue;
+        }
+        let Some(abr_vertex) = top.lsp_map.lookup(lsa.data.h.advertising_router) else {
+            continue;
+        };
+        let Some(abr_path) = spf_result.get(&abr_vertex) else {
+            continue;
+        };
+        let cost = abr_path.cost.saturating_add(body.metric);
+        if best.as_ref().map(|(_, _, c)| cost < *c).unwrap_or(true) {
+            best = Some((abr_vertex, abr_path, cost));
+        }
+    }
+    best
+}
+
 fn add_as_external_routes_v3(
     top: &Ospf<Ospfv3>,
-    _area_id: Ipv4Addr,
+    area_id: Ipv4Addr,
     spf_result: &BTreeMap<usize, spf::Path>,
     rib: &mut PrefixMap<ipnet::Ipv6Net, SpfRouteV3>,
 ) {
@@ -11691,10 +12269,17 @@ fn add_as_external_routes_v3(
             continue;
         }
 
-        let Some(asbr_vertex) = top.lsp_map.lookup(lsa.data.h.advertising_router) else {
-            continue;
-        };
-        let Some(asbr_path) = spf_result.get(&asbr_vertex) else {
+        // Resolve the path to the ASBR: intra-area SPF first, else the
+        // Inter-Area-Router-LSA fallback (RFC 2328 §16.4 step 5) so a
+        // cross-area ASBR's externals still compute.
+        let advertiser = lsa.data.h.advertising_router;
+        let direct = top
+            .lsp_map
+            .lookup(advertiser)
+            .and_then(|v| spf_result.get(&v).map(|p| (v, p, p.cost)));
+        let resolved =
+            direct.or_else(|| inter_area_asbr_fallback_v3(top, area_id, advertiser, spf_result));
+        let Some((asbr_vertex, asbr_path, asbr_cost)) = resolved else {
             continue;
         };
 
@@ -11702,7 +12287,7 @@ fn add_as_external_routes_v3(
         let metric = if is_e2 {
             ext.metric
         } else {
-            asbr_path.cost.saturating_add(ext.metric)
+            asbr_cost.saturating_add(ext.metric)
         };
 
         let Some(net) = ospfv3_prefix_to_ipv6net(ext.prefix_length, &ext.address_prefix) else {
@@ -11729,26 +12314,14 @@ fn add_as_external_routes_v3(
 
         let entry = SpfRouteV3 {
             metric,
+            path_type: RouteType::External,
             nhops: nhops_map,
             sid: None,
             prefix_sid: None,
             dest_vertex: Some(asbr_vertex),
             backup_as_primary: top.fast_reroute_backup_as_primary,
         };
-        match rib.get_mut(&net) {
-            None => {
-                rib.insert(net, entry);
-            }
-            Some(curr) => {
-                if curr.metric > entry.metric {
-                    *curr = entry;
-                } else if curr.metric == entry.metric {
-                    for (addr, nhop) in entry.nhops {
-                        curr.nhops.insert(addr, nhop);
-                    }
-                }
-            }
-        }
+        rib6_insert(rib, net, entry);
     }
 }
 
@@ -11852,6 +12425,7 @@ fn add_nssa_routes_v3(
 
         let entry = SpfRouteV3 {
             metric,
+            path_type: RouteType::External,
             nhops: nhops_map,
             sid: None,
             prefix_sid: None,
@@ -11861,20 +12435,7 @@ fn add_nssa_routes_v3(
         };
         // Equal-cost merge — same shape as the intra-area insert
         // above in `build_rib6_from_spf`.
-        match rib.get_mut(&net) {
-            None => {
-                rib.insert(net, entry);
-            }
-            Some(curr) => {
-                if curr.metric > entry.metric {
-                    *curr = entry;
-                } else if curr.metric == entry.metric {
-                    for (addr, nhop) in entry.nhops {
-                        curr.nhops.insert(addr, nhop);
-                    }
-                }
-            }
-        }
+        rib6_insert(rib, net, entry);
     }
 }
 
@@ -12059,22 +12620,33 @@ fn add_prefix_sids_v3(
     }
 }
 
+/// Merge the per-area v6 route slices into one instance RIB —
+/// v3 sibling of `merge_area_ribs`. Slices of areas with no
+/// enabled links are skipped (stale after an area teardown);
+/// cross-area collisions resolve via `rib6_insert` (§16.4.1
+/// path-type preference, then metric, then ECMP merge).
+fn merge_area_ribs6(top: &Ospf<Ospfv3>) -> PrefixMap<ipnet::Ipv6Net, SpfRouteV3> {
+    let mut merged = PrefixMap::<ipnet::Ipv6Net, SpfRouteV3>::new();
+    for (area_id, rib) in &top.rib6_areas {
+        match top.areas.get(*area_id) {
+            Some(area) if !area.links.is_empty() => {}
+            _ => continue,
+        }
+        for (prefix, route) in rib.iter() {
+            rib6_insert(&mut merged, prefix, route.clone());
+        }
+    }
+    merged
+}
+
 /// Diff the freshly-built v3 RIB against the prior snapshot and
 /// emit `Ipv6Del` for prefixes only in the old, `Ipv6Add` for
 /// prefixes new or changed. Replaces `top.rib6` with `new_rib`
 /// so the next SPF run diffs against this new baseline.
 fn apply_routing_updates_v3(
     top: &mut Ospf<Ospfv3>,
-    area_id: Ipv4Addr,
-    source: usize,
-    spf_result: &BTreeMap<usize, spf::Path>,
-    tilfa_result: &BTreeMap<usize, Vec<spf::RepairPath>>,
+    new_rib: PrefixMap<ipnet::Ipv6Net, SpfRouteV3>,
 ) {
-    let mut new_rib = build_rib6_from_spf(top, area_id, source, spf_result, tilfa_result);
-    // Attach SR Prefix-SIDs to matching routes so `make_rib6_entry`
-    // pushes the label onto each nexthop (egress imposition).
-    add_prefix_sids_v3(top, area_id, &mut new_rib);
-
     // SR-MPLS LFIB shadow: build a fresh ILM from labeled routes in
     // the new RIB, diff against `top.ilm6`, emit IlmAdd / IlmDel so
     // the kernel MPLS table tracks our SR-MPLS state. Self-Prefix-SID

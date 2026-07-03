@@ -49,8 +49,9 @@ Notes:
   [Area Types: Stub and NSSA](ch-15-03-ospfv3-area-types.md).
 
 Receive-side handling installs AS-External routes with the standard
-RFC 2328 §16.4 preference and metric arithmetic; as with v2,
-externals carrying a non-zero forwarding address are skipped, and
-inter-area ASBR resolution (Inter-Area-Router-LSA fallback) is not
-yet implemented for v3 — a backbone observer must share an area
-with the ASBR or translator.
+RFC 2328 §16.4 preference and metric arithmetic, including
+inter-area ASBR resolution through Inter-Area-Router-LSAs (§16.4
+step 5) when the ASBR sits in another area — see
+[Multi-Area Routing and the ABR](ch-15-04-ospfv3-multi-area-abr.md).
+As with v2, externals carrying a non-zero forwarding address are
+skipped.
