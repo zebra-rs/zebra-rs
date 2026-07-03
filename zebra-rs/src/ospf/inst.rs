@@ -300,6 +300,19 @@ pub struct Ospf<V: OspfVersion = Ospfv2> {
     /// prefixes of OSPFv3 AS-External (Type-5) LSAs self-originated from
     /// instance-level `redistribute`. A v2 instance leaves this empty.
     pub redist_originated_v6: BTreeMap<crate::rib::RibType, BTreeSet<ipnet::Ipv6Net>>,
+    /// Instance-level `default-information originate` knob. `Some`
+    /// makes this router an ASBR; whether the Type-5 default is
+    /// actually on the wire depends on `always` / the RIB default
+    /// watch — see `default_originate_resync`.
+    pub default_originate: Option<crate::ospf::area::DefaultOriginate>,
+    /// True while we have a self-originated Type-5 default installed
+    /// (v4 / v6 respectively) — the flush guard, so removing the knob
+    /// never flushes a 0/0 Type-5 that `redistribute` owns.
+    pub default_originated: bool,
+    pub default_originated_v6: bool,
+    /// True while the RIB default watch subscription is active,
+    /// avoiding duplicate RedistDefaultAdd/Del sends.
+    pub default_watch_active: bool,
     /// Staged Flexible Algorithm definitions for this instance
     /// (`/router/ospf{,v3}/flex-algo`, RFC 9350). Shared staging engine
     /// keyed by the version's `FLEX_ALGO_PREFIX`; origination from the
@@ -1235,6 +1248,10 @@ impl Ospf<Ospfv2> {
             redist: BTreeMap::new(),
             redist_originated: BTreeMap::new(),
             redist_originated_v6: BTreeMap::new(),
+            default_originate: None,
+            default_originated: false,
+            default_originated_v6: false,
+            default_watch_active: false,
             flex_algo: crate::flex_algo::FlexAlgoConfig::new(Ospfv2::FLEX_ALGO_PREFIX),
             affinity_map: crate::flex_algo::AffinityMap::new(),
             srlg_config: crate::flex_algo::SrlgGroupBuilder::new(),
@@ -2706,7 +2723,42 @@ impl Ospf<Ospfv2> {
     /// (RFC 2328 §3.3 ASBR definition). Today this requires the
     /// instance-level `redistribute connected` knob to be set.
     pub fn is_asbr(&self) -> bool {
-        !self.redist.is_empty()
+        !self.redist.is_empty() || self.default_originate.is_some()
+    }
+
+    /// Reconcile the self-originated Type-5 default (0.0.0.0/0)
+    /// against the `default-information originate` knob: originate
+    /// when configured with `always`, or when the RIB default watch
+    /// has delivered a non-OSPF default route; flush (guarded by
+    /// `default_originated`, so a redistribute-owned 0/0 survives)
+    /// otherwise. Called from config changes and the RIB route-churn
+    /// handlers.
+    pub fn default_originate_resync(&mut self) {
+        use crate::rib::RibType;
+        let prefix = Ipv4Net::new(Ipv4Addr::UNSPECIFIED, 0).unwrap();
+        let should = match self.default_originate {
+            None => false,
+            Some(cfg) => {
+                cfg.always
+                    || self
+                        .redist_v4
+                        .iter()
+                        .any(|((rt, p), _)| p.prefix_len() == 0 && *rt != RibType::Ospf)
+            }
+        };
+        if should {
+            let cfg = self.default_originate.expect("gated on Some above");
+            self.as_external_lsa_originate_for_prefix(
+                prefix,
+                cfg.metric,
+                cfg.metric_type.is_type_2(),
+            );
+            self.default_originated = true;
+        } else if self.default_originated {
+            self.as_external_lsa_flush_for_prefix(prefix);
+            self.default_originated = false;
+        }
+        self.router_lsa_originate();
     }
 
     /// True when this router should translate Type-7 → Type-5 for
@@ -2993,6 +3045,7 @@ impl Ospf<Ospfv2> {
             self.nssa_redist_connected_resync(area_id);
         }
         self.as_external_redist_resync_all();
+        self.default_originate_resync();
     }
 
     /// `RibRx::RouteDel` handler. Mirror of `route_redist_add`.
@@ -3008,6 +3061,7 @@ impl Ospf<Ospfv2> {
             self.nssa_redist_connected_resync(area_id);
         }
         self.as_external_redist_resync_all();
+        self.default_originate_resync();
     }
 
     fn process_lsdb(&mut self, ev: LsdbEvent, area_id: Option<Ipv4Addr>, key: OspfLsaKey) {
@@ -3292,6 +3346,7 @@ impl Ospf<Ospfv2> {
                         received_seq
                     );
                     self.as_external_redist_resync_all();
+                    self.default_originate_resync();
                 } else {
                     let owning_area = self
                         .areas
@@ -4660,6 +4715,23 @@ impl Ospf<Ospfv2> {
             link.ident.router_id = router_id;
         }
         self.router_lsa_originate();
+        // Re-originate the config-driven LSAs under the new identity —
+        // the flush above withdrew them under the old Router-ID, and
+        // unlike the RIB-driven originations (which recover on the
+        // next route churn) `default-information originate always` and
+        // the NSSA defaults have no later trigger.
+        self.as_external_redist_resync_all();
+        self.default_originate_resync();
+        let nssa_areas: Vec<Ipv4Addr> = self
+            .areas
+            .iter()
+            .filter(|(_, a)| a.area_type.is_nssa())
+            .map(|(id, _)| *id)
+            .collect();
+        for area_id in nssa_areas {
+            self.nssa_default_lsa_originate(area_id);
+            self.nssa_redist_connected_resync(area_id);
+        }
     }
 
     /// Flush (pre-age to MaxAge + re-flood) every LSA we originated
@@ -5463,6 +5535,10 @@ impl Ospf<Ospfv3> {
             redist: BTreeMap::new(),
             redist_originated: BTreeMap::new(),
             redist_originated_v6: BTreeMap::new(),
+            default_originate: None,
+            default_originated: false,
+            default_originated_v6: false,
+            default_watch_active: false,
             flex_algo: crate::flex_algo::FlexAlgoConfig::new(Ospfv3::FLEX_ALGO_PREFIX),
             affinity_map: crate::flex_algo::AffinityMap::new(),
             srlg_config: crate::flex_algo::SrlgGroupBuilder::new(),
@@ -5647,6 +5723,7 @@ impl Ospf<Ospfv3> {
             self.nssa_redist_connected_resync_v3(area_id);
         }
         self.as_external_redist_resync_all_v3();
+        self.default_originate_resync_v3();
     }
 
     /// `RibRx::RouteDel` handler (v3). Mirror of `route_redist_add`.
@@ -5661,6 +5738,7 @@ impl Ospf<Ospfv3> {
             self.nssa_redist_connected_resync_v3(area_id);
         }
         self.as_external_redist_resync_all_v3();
+        self.default_originate_resync_v3();
     }
 
     /// Stash an IPv6 address learned from netlink on the matching
@@ -5721,6 +5799,20 @@ impl Ospf<Ospfv3> {
             link.ident.router_id = router_id;
         }
         self.router_lsa_originate();
+        // See the v2 sibling: re-originate the config-driven LSAs
+        // under the new identity.
+        self.as_external_redist_resync_all_v3();
+        self.default_originate_resync_v3();
+        let nssa_areas: Vec<Ipv4Addr> = self
+            .areas
+            .iter()
+            .filter(|(_, a)| a.area_type.is_nssa())
+            .map(|(id, _)| *id)
+            .collect();
+        for area_id in nssa_areas {
+            self.nssa_default_lsa_originate(area_id);
+            self.nssa_redist_connected_resync_v3(area_id);
+        }
     }
 
     /// v3 sibling of the v2 `flush_self_originated_under`: pre-age to
@@ -6720,9 +6812,39 @@ impl Ospf<Ospfv3> {
 
     /// True when this router originates AS-External LSAs (RFC 2328
     /// §3.3 ASBR definition) — any instance-level `redistribute`
-    /// source is configured. v3 sibling of the v2 `is_asbr`.
+    /// source or `default-information originate` is configured. v3
+    /// sibling of the v2 `is_asbr`.
     pub fn is_asbr(&self) -> bool {
-        !self.redist.is_empty()
+        !self.redist.is_empty() || self.default_originate.is_some()
+    }
+
+    /// v3 sibling of `default_originate_resync` (::/0).
+    pub fn default_originate_resync_v3(&mut self) {
+        use crate::rib::RibType;
+        let prefix = ipnet::Ipv6Net::new(std::net::Ipv6Addr::UNSPECIFIED, 0).unwrap();
+        let should = match self.default_originate {
+            None => false,
+            Some(cfg) => {
+                cfg.always
+                    || self
+                        .redist_v6
+                        .iter()
+                        .any(|((rt, p), _)| p.prefix_len() == 0 && *rt != RibType::Ospf)
+            }
+        };
+        if should {
+            let cfg = self.default_originate.expect("gated on Some above");
+            self.as_external_lsa_originate_for_prefix_v3(
+                prefix,
+                cfg.metric,
+                cfg.metric_type.is_type_2(),
+            );
+            self.default_originated_v6 = true;
+        } else if self.default_originated_v6 {
+            self.as_external_lsa_flush_for_prefix_v3(prefix);
+            self.default_originated_v6 = false;
+        }
+        self.router_lsa_originate();
     }
 
     /// RFC 2328 §12.4.3 for OSPFv3 (RFC 5340 §4.4.3.4) — an Area

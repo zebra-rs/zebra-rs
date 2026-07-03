@@ -50,6 +50,22 @@ impl Ospf {
             "/area/redistribute/connected/metric-type",
             config_ospf_area_redist_connected_metric_type,
         );
+        self.ospf_add(
+            "/default-information/originate",
+            config_ospf_default_originate,
+        );
+        self.ospf_add(
+            "/default-information/originate/always",
+            config_ospf_default_originate_always,
+        );
+        self.ospf_add(
+            "/default-information/originate/metric",
+            config_ospf_default_originate_metric,
+        );
+        self.ospf_add(
+            "/default-information/originate/metric-type",
+            config_ospf_default_originate_metric_type,
+        );
         self.ospf_add("/area/range", config_ospf_area_range);
         self.ospf_add(
             "/area/range/not-advertise",
@@ -661,6 +677,100 @@ ospf_redist_handlers!(
     config_ospf_redist_isis_metric_type,
     crate::rib::RibType::Isis
 );
+
+/// Keep the RIB default watch aligned with the knob: subscribed
+/// while `default-information originate` is set without `always`.
+/// When the watch turns off, purge cached default entries that no
+/// active per-rtype redistribute row covers — the RIB deliberately
+/// does no Del replay (an overlapping row's cache entry must
+/// survive), so the consumer owns this cleanup.
+fn ospf_sync_default_watch(ospf: &mut Ospf) {
+    use crate::rib::{Message as RibMsg, RedistAfi};
+    let want = matches!(ospf.default_originate, Some(cfg) if !cfg.always);
+    if want == ospf.default_watch_active {
+        return;
+    }
+    let proto = ospf.proto_label.clone();
+    let msg = if want {
+        RibMsg::RedistDefaultAdd {
+            proto,
+            afi: RedistAfi::Ipv4,
+        }
+    } else {
+        RibMsg::RedistDefaultDel {
+            proto,
+            afi: RedistAfi::Ipv4,
+        }
+    };
+    let _ = ospf.ctx.rib.send(msg);
+    ospf.default_watch_active = want;
+    if !want {
+        let covered = ospf.redist.clone();
+        ospf.redist_v4
+            .retain(|(rt, p), _| p.prefix_len() != 0 || covered.contains_key(rt));
+    }
+}
+
+/// `/router/ospf/default-information/originate` — presence. Makes
+/// this router an ASBR and (conditionally or with `always`)
+/// originates the Type-5 default.
+fn config_ospf_default_originate(ospf: &mut Ospf, _args: Args, op: ConfigOp) -> Option<()> {
+    if op.is_set() {
+        ospf.default_originate.get_or_insert_with(Default::default);
+    } else {
+        ospf.default_originate = None;
+    }
+    ospf_sync_default_watch(ospf);
+    ospf.default_originate_resync();
+    Some(())
+}
+
+/// `/router/ospf/default-information/originate/always`.
+fn config_ospf_default_originate_always(
+    ospf: &mut Ospf,
+    mut args: Args,
+    op: ConfigOp,
+) -> Option<()> {
+    let value = if op.is_set() { args.boolean()? } else { false };
+    ospf.default_originate
+        .get_or_insert_with(Default::default)
+        .always = value;
+    ospf_sync_default_watch(ospf);
+    ospf.default_originate_resync();
+    Some(())
+}
+
+/// `/router/ospf/default-information/originate/metric`.
+fn config_ospf_default_originate_metric(
+    ospf: &mut Ospf,
+    mut args: Args,
+    op: ConfigOp,
+) -> Option<()> {
+    let value = if op.is_set() { args.u32()? } else { 10 };
+    ospf.default_originate
+        .get_or_insert_with(Default::default)
+        .metric = value;
+    ospf.default_originate_resync();
+    Some(())
+}
+
+/// `/router/ospf/default-information/originate/metric-type`.
+fn config_ospf_default_originate_metric_type(
+    ospf: &mut Ospf,
+    mut args: Args,
+    op: ConfigOp,
+) -> Option<()> {
+    let value = if op.is_set() {
+        ExternalMetricType::from_yang(&args.string()?)?
+    } else {
+        ExternalMetricType::default()
+    };
+    ospf.default_originate
+        .get_or_insert_with(Default::default)
+        .metric_type = value;
+    ospf.default_originate_resync();
+    Some(())
+}
 
 /// `/router/ospf/area/<id>/range` — one RFC 2328 §12.4.3 address
 /// range entry (list keyed by prefix). Set creates it with defaults

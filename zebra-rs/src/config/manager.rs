@@ -3572,4 +3572,30 @@ mod yang_load_tests {
             assert_eq!(code, ExecCode::Success, "`{path}` must be a settable path");
         }
     }
+    /// `default-information originate [always|metric|metric-type]` —
+    /// Type-5 default origination, v2 and v3. Pin every spelling.
+    #[test]
+    fn ospf_default_information_paths_parse() {
+        use crate::config::ExecCode;
+        use crate::config::parse::{State, parse};
+        use libyang::to_entry;
+
+        let mut yang = YangStore::new();
+        yang.add_path(concat!(env!("CARGO_MANIFEST_DIR"), "/yang"));
+        yang.read_with_resolve("configure")
+            .expect("configure mode loads");
+        yang.identity_resolve();
+        let module = yang
+            .find_module("configure")
+            .expect("configure module present");
+        let entry = to_entry(&yang, module);
+
+        for proto in ["ospf", "ospfv3"] {
+            for suffix in ["", " always true", " metric 5", " metric-type type-1"] {
+                let path = format!("set router {proto} default-information originate{suffix}");
+                let (code, _comps, _state) = parse(&path, entry.clone(), None, State::new());
+                assert_eq!(code, ExecCode::Success, "`{path}` must be a settable path");
+            }
+        }
+    }
 }
