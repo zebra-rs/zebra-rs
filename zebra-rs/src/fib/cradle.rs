@@ -537,6 +537,7 @@ impl CradleFib {
                     fun_bits: fun as u32,
                     arg_bits: arg as u32,
                     nexthop_id,
+                    flavors: sid.flavors as u32,
                 })
                 .await?;
             anyhow::Ok(())

@@ -3155,6 +3155,7 @@ impl Isis {
                 structure,
                 table_id: 0,
                 segs: Vec::new(),
+                flavors: locator.flavors,
             };
             let _ = self.ctx.rib.send(rib::Message::SidAdd { sid });
             self.sr_flex_algo_end_sid.insert(algo, addr);
@@ -3220,6 +3221,7 @@ impl Isis {
                 // End / uN is local-processing, no table decap.
                 table_id: 0,
                 segs: Vec::new(),
+                flavors: locator.flavors,
             };
             let _ = self.ctx.rib.send(rib::Message::SidAdd { sid });
             self.sr_end_sid = Some(addr);
@@ -3280,6 +3282,8 @@ impl Isis {
                 // mirror-context table.
                 table_id: Self::MIRROR_CONTEXT_TABLE,
                 segs: Vec::new(),
+                // Flavors don't apply to the End.M mirror decap.
+                flavors: 0,
             };
             let _ = self.ctx.rib.send(rib::Message::SidAdd { sid });
             self.installed_mirror_sids.insert(addr);

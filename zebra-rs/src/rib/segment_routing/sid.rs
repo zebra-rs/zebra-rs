@@ -248,6 +248,11 @@ pub struct Sid {
     /// SRH segment list pushed by `End.B6.Encaps` (RFC 8986 §4.14), in
     /// forwarding order. Empty for every other behavior.
     pub segs: Vec<Ipv6Addr>,
+    /// RFC 8986 §4.16 flavor bits (`locator::FLAVOR_*`), copied from the
+    /// owning locator at allocation. Meaningful for End/uN (full mask) and
+    /// End.X/uA (PSP only — their USP/USD variants are not implemented);
+    /// always 0 for the DT*/B6/End.M service behaviors.
+    pub flavors: u8,
 }
 
 impl Sid {

@@ -3099,6 +3099,19 @@ module config {
              RFC 9800 NEXT-C-SID (micro-SID) format; absent means
              the classic RFC 8986 full-SID layout.";
         }
+        leaf-list flavor {
+          type enumeration {
+            enum psp;
+            enum usp;
+            enum usd;
+          }
+          description
+            "RFC 8986 4.16 endpoint flavors applied to the End/uN and
+             End.X/uA SIDs allocated from this locator (End.X SIDs take
+             only psp — their usp/usd variants are not implemented).
+             psp pops the SRH at the penultimate segment, usp pops it
+             at the ultimate segment, usd decapsulates there.";
+        }
       }
     }
 

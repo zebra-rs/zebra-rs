@@ -120,6 +120,46 @@ impl Behavior {
                 | EndXCSIDPSPUSPUSD
         )
     }
+
+    /// Fold RFC 8986 §4.16 flavors into a base endpoint behavior,
+    /// returning the flavored IANA codepoint. Supported bases: `End`,
+    /// `EndX`, `EndCSID` (uN) and `EndXCSID` (uA); any other base — and
+    /// an empty flavor set — returns `self` unchanged.
+    pub fn with_flavors(self, psp: bool, usp: bool, usd: bool) -> Behavior {
+        use Behavior::*;
+        match (self, psp, usp, usd) {
+            (_, false, false, false) => self,
+            (End, true, false, false) => EndPSP,
+            (End, false, true, false) => EndUSP,
+            (End, true, true, false) => EndPSPUSP,
+            (End, false, false, true) => EndUSD,
+            (End, true, false, true) => EndPSPUSD,
+            (End, false, true, true) => EndUSPUSD,
+            (End, true, true, true) => EndPSPUSPUSD,
+            (EndX, true, false, false) => EndXPSP,
+            (EndX, false, true, false) => EndXUSP,
+            (EndX, true, true, false) => EndXPSPUSP,
+            (EndX, false, false, true) => EndXUSD,
+            (EndX, true, false, true) => EndXPSPUSD,
+            (EndX, false, true, true) => EndXUSPUSD,
+            (EndX, true, true, true) => EndXPSPUSPUSD,
+            (EndCSID, true, false, false) => EndCSIDPSP,
+            (EndCSID, false, true, false) => EndCSIDUSP,
+            (EndCSID, true, true, false) => EndCSIDPSPUSP,
+            (EndCSID, false, false, true) => EndCSIDUSD,
+            (EndCSID, true, false, true) => EndCSIDPSPUSD,
+            (EndCSID, false, true, true) => EndCSIDUSPUSD,
+            (EndCSID, true, true, true) => EndCSIDPSPUSPUSD,
+            (EndXCSID, true, false, false) => EndXCSIDPSP,
+            (EndXCSID, false, true, false) => EndXCSIDUSP,
+            (EndXCSID, true, true, false) => EndXCSIDPSPUSP,
+            (EndXCSID, false, false, true) => EndXCSIDUSD,
+            (EndXCSID, true, false, true) => EndXCSIDPSPUSD,
+            (EndXCSID, false, true, true) => EndXCSIDUSPUSD,
+            (EndXCSID, true, true, true) => EndXCSIDPSPUSPUSD,
+            _ => self,
+        }
+    }
 }
 
 impl From<Behavior> for u16 {
@@ -149,19 +189,19 @@ impl From<Behavior> for u16 {
             EndDX2V => 22,
             EndDT2U => 23,
             EndDT2M => 24,
-            EndB6EncapsRed => 26,
-            EndUSD => 27,
-            EndPSPUSD => 28,
-            EndUSPUSD => 29,
-            EndPSPUSPUSD => 30,
-            EndXUSD => 31,
-            EndXPSPUSD => 32,
-            EndXUSPUSD => 33,
-            EndXPSPUSPUSD => 34,
-            EndTUSD => 35,
-            EndTPSPUSD => 36,
-            EndTUSPUSD => 37,
-            EndTPSPUSPUSD => 38,
+            EndB6EncapsRed => 27,
+            EndUSD => 28,
+            EndPSPUSD => 29,
+            EndUSPUSD => 30,
+            EndPSPUSPUSD => 31,
+            EndXUSD => 32,
+            EndXPSPUSD => 33,
+            EndXUSPUSD => 34,
+            EndXPSPUSPUSD => 35,
+            EndTUSD => 36,
+            EndTPSPUSD => 37,
+            EndTUSPUSD => 38,
+            EndTPSPUSPUSD => 39,
             EndCSID => 43,
             EndCSIDPSP => 44,
             EndCSIDUSP => 45,
@@ -224,19 +264,19 @@ impl From<u16> for Behavior {
             22 => EndDX2V,
             23 => EndDT2U,
             24 => EndDT2M,
-            26 => EndB6EncapsRed,
-            27 => EndUSD,
-            28 => EndPSPUSD,
-            29 => EndUSPUSD,
-            30 => EndPSPUSPUSD,
-            31 => EndXUSD,
-            32 => EndXPSPUSD,
-            33 => EndXUSPUSD,
-            34 => EndXPSPUSPUSD,
-            35 => EndTUSD,
-            36 => EndTPSPUSD,
-            37 => EndTUSPUSD,
-            38 => EndTPSPUSPUSD,
+            27 => EndB6EncapsRed,
+            28 => EndUSD,
+            29 => EndPSPUSD,
+            30 => EndUSPUSD,
+            31 => EndPSPUSPUSD,
+            32 => EndXUSD,
+            33 => EndXPSPUSD,
+            34 => EndXUSPUSD,
+            35 => EndXPSPUSPUSD,
+            36 => EndTUSD,
+            37 => EndTPSPUSD,
+            38 => EndTUSPUSD,
+            39 => EndTPSPUSPUSD,
             43 => EndCSID,
             44 => EndCSIDPSP,
             45 => EndCSIDUSP,
@@ -405,6 +445,70 @@ impl FromStr for EncapType {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Pin the flavored endpoint-behavior codepoints to the IANA "SRv6
+    /// Endpoint Behaviors" registry (RFC 8986 §10.2 + RFC 9800). The
+    /// classic USD block was once off by one (shifted onto
+    /// End.B6.Encaps.Red), which a conformant receiver would misread —
+    /// this test keeps the registry values load-bearing.
+    #[test]
+    fn behavior_codepoints_match_iana() {
+        use Behavior::*;
+        let table: [(Behavior, u16); 24] = [
+            (End, 1),
+            (EndPSP, 2),
+            (EndUSP, 3),
+            (EndPSPUSP, 4),
+            (EndX, 5),
+            (EndXPSP, 6),
+            (EndB6EncapsRed, 27),
+            (EndUSD, 28),
+            (EndPSPUSD, 29),
+            (EndUSPUSD, 30),
+            (EndPSPUSPUSD, 31),
+            (EndXUSD, 32),
+            (EndXPSPUSPUSD, 35),
+            (EndTUSD, 36),
+            (EndTPSPUSPUSD, 39),
+            (EndCSID, 43),
+            (EndCSIDPSP, 44),
+            (EndCSIDUSP, 45),
+            (EndCSIDUSD, 47),
+            (EndCSIDPSPUSPUSD, 50),
+            (EndXCSID, 52),
+            (EndXCSIDPSP, 53),
+            (EndXCSIDPSPUSPUSD, 59),
+            (EndM, 74),
+        ];
+        for (behavior, code) in table {
+            assert_eq!(u16::from(behavior), code, "{behavior:?} -> {code}");
+            assert_eq!(Behavior::from(code), behavior, "{code} -> {behavior:?}");
+        }
+    }
+
+    /// Every (base × flavor-set) fold, including that flavored results
+    /// keep their NEXT-C-SID classification and non-foldable bases pass
+    /// through unchanged.
+    #[test]
+    fn with_flavors_folds_every_combination() {
+        use Behavior::*;
+        for base in [End, EndX, EndCSID, EndXCSID] {
+            let mut seen = std::collections::BTreeSet::new();
+            for bits in 0u8..8 {
+                let (psp, usp, usd) = (bits & 1 != 0, bits & 2 != 0, bits & 4 != 0);
+                let folded = base.with_flavors(psp, usp, usd);
+                assert!(seen.insert(u16::from(folded)), "collision at {bits:03b}");
+                if bits == 0 {
+                    assert_eq!(folded, base);
+                }
+                assert_eq!(folded.is_end_next_csid(), base.is_end_next_csid());
+                assert_eq!(folded.is_endx_next_csid(), base.is_endx_next_csid());
+            }
+        }
+        assert_eq!(EndDT46.with_flavors(true, true, true), EndDT46);
+        assert_eq!(EndCSID.with_flavors(true, false, false), EndCSIDPSP);
+        assert_eq!(End.with_flavors(true, false, true), EndPSPUSD);
+    }
 
     const ALL: [EncapType; 4] = [
         EncapType::HEncap,

@@ -3957,6 +3957,7 @@ mod tests {
         let loc = Locator {
             prefix: Some("2001:db8:a:2::/64".parse().unwrap()),
             behavior: None,
+            flavors: 0,
         };
         let row = render_locator_row("LOC_N1", Some(&loc));
         assert!(row.contains("LOC_N1"));
@@ -3970,6 +3971,7 @@ mod tests {
         let loc = Locator {
             prefix: Some("2001:db8:a:2::/64".parse().unwrap()),
             behavior: Some(LocatorBehavior::Usid),
+            flavors: 0,
         };
         let row = render_locator_row("LOC_N1", Some(&loc));
         assert!(row.contains("uSID"));
@@ -3995,6 +3997,7 @@ mod tests {
         let loc = Locator {
             prefix: None,
             behavior: None,
+            flavors: 0,
         };
         let row = render_locator_row("LOC_N1", Some(&loc));
         assert!(row.trim_end().ends_with("Down"));

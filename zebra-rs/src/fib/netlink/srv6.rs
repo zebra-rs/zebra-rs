@@ -156,7 +156,22 @@ fn seg6local_action(behavior: SidBehavior) -> Seg6LocalAction {
 fn build_seg6local_flavors(
     behavior: SidBehavior,
     structure: Option<SidStructure>,
+    flavors: u8,
 ) -> Option<RouteSeg6LocalIpTunnel> {
+    // `SEG6_LOCAL_FLV_OPERATION` is ONE u32 NLA carrying an OR'd bitmask
+    // of operations — composing NEXT-CSID with PSP/USP/USD means one
+    // `Operation` attribute holding the combined mask (`Other`), never two.
+    let mut flavor_mask = 0u32;
+    if flavors & crate::rib::FLAVOR_PSP != 0 {
+        flavor_mask |= u32::from(Seg6LocalFlavorOps::Psp);
+    }
+    if flavors & crate::rib::FLAVOR_USP != 0 {
+        flavor_mask |= u32::from(Seg6LocalFlavorOps::Usp);
+    }
+    if flavors & crate::rib::FLAVOR_USD != 0 {
+        flavor_mask |= u32::from(Seg6LocalFlavorOps::Usd);
+    }
+
     // Nflen is the width of the uSID identifier being consumed at this
     // entry — the bits the kernel shifts out to expose the next uSID.
     // Lblen is the shared block portion that stays put. For uN that
@@ -166,11 +181,26 @@ fn build_seg6local_flavors(
     let nflen = match behavior {
         SidBehavior::UN => structure?.ln_bits,
         SidBehavior::UALib => structure?.fun_bits,
-        _ => return None,
+        _ => {
+            // Classic End / End.X: a flavor-only Operation attribute (the
+            // kernel supports PSP on End from ~6.6; unsupported combos
+            // fail the install, which the caller logs non-fatally).
+            if flavor_mask == 0 {
+                return None;
+            }
+            return Some(RouteSeg6LocalIpTunnel::Flavors(vec![
+                Seg6LocalFlavors::Operation(Seg6LocalFlavorOps::Other(flavor_mask)),
+            ]));
+        }
     };
     let s = structure?;
+    let op = if flavor_mask == 0 {
+        Seg6LocalFlavorOps::NextCsid
+    } else {
+        Seg6LocalFlavorOps::Other(u32::from(Seg6LocalFlavorOps::NextCsid) | flavor_mask)
+    };
     Some(RouteSeg6LocalIpTunnel::Flavors(vec![
-        Seg6LocalFlavors::Operation(Seg6LocalFlavorOps::NextCsid),
+        Seg6LocalFlavors::Operation(op),
         Seg6LocalFlavors::Lblen(s.lb_bits),
         Seg6LocalFlavors::Nflen(nflen),
     ]))
@@ -202,6 +232,7 @@ fn build_seg6local_lwtunnel(
     structure: Option<SidStructure>,
     table_id: u32,
     segs: &[Ipv6Addr],
+    flavors: u8,
 ) -> Option<Vec<RouteLwTunnelEncap>> {
     let mut attrs: Vec<RouteSeg6LocalIpTunnel> =
         vec![RouteSeg6LocalIpTunnel::Action(seg6local_action(behavior))];
@@ -241,7 +272,7 @@ fn build_seg6local_lwtunnel(
         // table id — BGP passes the VRF's kernel table.
         attrs.push(RouteSeg6LocalIpTunnel::VrfTable(table_id));
     }
-    if let Some(flavors) = build_seg6local_flavors(behavior, structure) {
+    if let Some(flavors) = build_seg6local_flavors(behavior, structure, flavors) {
         attrs.push(flavors);
     }
     Some(
@@ -262,8 +293,9 @@ pub fn build_seg6local_attrs(
     structure: Option<SidStructure>,
     table_id: u32,
     segs: &[Ipv6Addr],
+    flavors: u8,
 ) -> Option<(RouteAttribute, RouteAttribute)> {
-    let encaps = build_seg6local_lwtunnel(behavior, nh6, structure, table_id, segs)?;
+    let encaps = build_seg6local_lwtunnel(behavior, nh6, structure, table_id, segs, flavors)?;
     Some((
         RouteAttribute::Encap(encaps),
         RouteAttribute::EncapType(RouteLwEnCapType::Seg6Local),
@@ -296,7 +328,7 @@ mod tests {
     fn end_dt46_uses_vrftable_with_given_table() {
         // BGP L3VPN-over-SRv6: an End.DT46 SID decaps into the VRF's
         // kernel table via SEG6_LOCAL_VRFTABLE, never a plain table.
-        let encaps = build_seg6local_lwtunnel(SidBehavior::EndDT46, None, None, 100, &[])
+        let encaps = build_seg6local_lwtunnel(SidBehavior::EndDT46, None, None, 100, &[], 0)
             .expect("encap built");
         assert!(
             encaps.iter().any(|e| matches!(
@@ -314,15 +346,15 @@ mod tests {
     #[test]
     fn end_dt6_table_zero_maps_to_main() {
         // table_id 0 must preserve the legacy static / IS-IS default.
-        let encaps =
-            build_seg6local_lwtunnel(SidBehavior::EndDT6, None, None, 0, &[]).expect("encap built");
+        let encaps = build_seg6local_lwtunnel(SidBehavior::EndDT6, None, None, 0, &[], 0)
+            .expect("encap built");
         assert_eq!(table_attr(&encaps), Some(RouteHeader::RT_TABLE_MAIN as u32));
         assert_eq!(vrftable_attr(&encaps), None);
     }
 
     #[test]
     fn end_dt4_honors_nonzero_table() {
-        let encaps = build_seg6local_lwtunnel(SidBehavior::EndDT4, None, None, 42, &[])
+        let encaps = build_seg6local_lwtunnel(SidBehavior::EndDT4, None, None, 42, &[], 0)
             .expect("encap built");
         assert_eq!(table_attr(&encaps), Some(42));
     }
@@ -332,7 +364,7 @@ mod tests {
         // End.M (egress protection): reuses the End.DT6 kernel action and
         // looks the inner packet up in the mirror-context table via a
         // plain SEG6_LOCAL_TABLE — never a VRF table.
-        let encaps = build_seg6local_lwtunnel(SidBehavior::EndM, None, None, 0x4D00_0000, &[])
+        let encaps = build_seg6local_lwtunnel(SidBehavior::EndM, None, None, 0x4D00_0000, &[], 0)
             .expect("encap built");
         assert!(
             encaps.iter().any(|e| matches!(
@@ -352,7 +384,7 @@ mod tests {
         // SR Policy Binding SID: End.B6.Encaps carries the policy's
         // segment list as a SEG6_LOCAL_SRH attribute.
         let segs = vec!["fc00:0:2::".parse().unwrap(), "fc00:0:9::".parse().unwrap()];
-        let encaps = build_seg6local_lwtunnel(SidBehavior::EndB6Encap, None, None, 0, &segs)
+        let encaps = build_seg6local_lwtunnel(SidBehavior::EndB6Encap, None, None, 0, &segs, 0)
             .expect("encap built");
         assert!(encaps.iter().any(|e| matches!(
             e,
@@ -370,7 +402,7 @@ mod tests {
     #[test]
     fn end_b6_encaps_without_segments_skips_install() {
         // No segment list → no SRH to push → skip the FIB install.
-        assert!(build_seg6local_lwtunnel(SidBehavior::EndB6Encap, None, None, 0, &[]).is_none());
+        assert!(build_seg6local_lwtunnel(SidBehavior::EndB6Encap, None, None, 0, &[], 0).is_none());
     }
 
     #[test]
@@ -405,7 +437,7 @@ mod tests {
             fun_bits: 16,
             arg_bits: 64,
         });
-        let encaps = build_seg6local_lwtunnel(SidBehavior::UA, Some(nh6), structure, 0, &[])
+        let encaps = build_seg6local_lwtunnel(SidBehavior::UA, Some(nh6), structure, 0, &[], 0)
             .expect("encap built");
         assert!(
             !encaps.iter().any(|e| matches!(
@@ -421,7 +453,7 @@ mod tests {
 
         // uN keeps the flavor — it is a prefix install where carriers
         // with a remaining argument legitimately shift.
-        let encaps = build_seg6local_lwtunnel(SidBehavior::UN, None, structure, 0, &[])
+        let encaps = build_seg6local_lwtunnel(SidBehavior::UN, None, structure, 0, &[], 0)
             .expect("encap built");
         assert!(encaps.iter().any(|e| matches!(
             e,

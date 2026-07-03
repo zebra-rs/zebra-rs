@@ -8625,6 +8625,7 @@ fn apply_srpolicy_fib(delta: super::sr_policy::SrPolicyFibDelta, bgp: &mut BgpTo
             structure: None,
             table_id: 0,
             segs: install.segments,
+            flavors: 0,
         };
         let _ = bgp.rib_client.send(rib::Message::SidAdd { sid });
     }
