@@ -3319,6 +3319,16 @@ module config {
              LB 48 / LN 16 / Fun 16 / Arg 48); absent means the
              classic RFC 8986 full-SID layout.";
         }
+        leaf vrf {
+          type string;
+          description
+            "Bind the locator's node SID to this VRF's IPv6 table:
+             the End SID becomes End.T (RFC 8986 4.3) — or uT when
+             the locator behavior is usid — and the End walk's
+             egress lookup happens in the VRF's table. Adjacency
+             (End.X/uA) SIDs are unaffected. Ignored for behavior
+             replace.";
+        }
         leaf-list flavor {
           type enumeration {
             enum psp;

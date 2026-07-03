@@ -1216,6 +1216,8 @@ impl Rib {
             | SidBehavior::EndDT6
             | SidBehavior::EndDT46
             | SidBehavior::EndM
+            | SidBehavior::EndT
+            | SidBehavior::UT
             // End.B6.Encaps is a seg6local action too — bound to `lo` the
             // kernel strips it exactly like the decap group.
             | SidBehavior::EndB6Encap => self.resolve_sr0_ifindex(),
@@ -2538,6 +2540,22 @@ impl Rib {
                 // per-`ProtoId` dispatcher writes routes here when a
                 // VRF-attached protocol installs.
                 self.vrf_tables.insert(table_id, VrfRibTables::new());
+                // A locator may bind this VRF by name (End.T/uT). If it
+                // was configured before the VRF existed its snapshot holds
+                // table 0 — resolve it now and re-notify the IGPs.
+                let bound: Vec<String> = self
+                    .locators
+                    .iter()
+                    .filter(|(_, l)| l.vrf.as_deref() == Some(name.as_str()))
+                    .filter(|(_, l)| l.table_id != table_id)
+                    .map(|(n, _)| n.clone())
+                    .collect();
+                for lname in bound {
+                    if let Some(l) = self.locators.get_mut(&lname) {
+                        l.table_id = table_id;
+                    }
+                    self.notify_locator_watchers(&lname);
+                }
                 // Adopting a pre-existing kernel VRF can surface members
                 // that were already enslaved before we knew this VRF, so
                 // their connected routes were filed in the default table
@@ -2610,6 +2628,22 @@ impl Rib {
                 self.router_id_update();
             }
             Message::VrfDel { name } => {
+                // Unbind any End.T/uT locator that referenced this VRF —
+                // its node SID degrades to plain End/uN until the VRF
+                // returns.
+                let bound: Vec<String> = self
+                    .locators
+                    .iter()
+                    .filter(|(_, l)| l.vrf.as_deref() == Some(name.as_str()))
+                    .filter(|(_, l)| l.table_id != 0)
+                    .map(|(n, _)| n.clone())
+                    .collect();
+                for lname in bound {
+                    if let Some(l) = self.locators.get_mut(&lname) {
+                        l.table_id = 0;
+                    }
+                    self.notify_locator_watchers(&lname);
+                }
                 let Some(vrf) = self.vrfs.remove(&name) else {
                     // Either never created, or a previous VrfAdd failed
                     // partway through. Nothing to undo locally; defer to
@@ -2844,7 +2878,13 @@ impl Rib {
                 self.notify_block_watchers(&name);
             }
             Message::LocatorAdd { name, config } => {
-                let locator = config.to_locator();
+                let mut locator = config.to_locator();
+                // Resolve the End.T/uT VRF binding against the registry.
+                // The VRF may not exist yet (netlink creation is async) —
+                // vrf_add re-resolves and re-notifies when it appears.
+                if let Some(vrf) = &locator.vrf {
+                    locator.table_id = self.vrfs.get(vrf).map(|v| v.table_id).unwrap_or(0);
+                }
                 self.locators.insert(name.clone(), locator);
                 self.notify_locator_watchers(&name);
             }

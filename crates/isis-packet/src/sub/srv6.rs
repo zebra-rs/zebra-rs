@@ -213,6 +213,20 @@ impl Behavior {
             (EndXCSID, true, false, true) => EndXCSIDPSPUSD,
             (EndXCSID, false, true, true) => EndXCSIDUSPUSD,
             (EndXCSID, true, true, true) => EndXCSIDPSPUSPUSD,
+            (EndT, true, false, false) => EndTPSP,
+            (EndT, false, true, false) => EndTUSP,
+            (EndT, true, true, false) => EndTPSPUSP,
+            (EndT, false, false, true) => EndTUSD,
+            (EndT, true, false, true) => EndTPSPUSD,
+            (EndT, false, true, true) => EndTUSPUSD,
+            (EndT, true, true, true) => EndTPSPUSPUSD,
+            (EndTCSID, true, false, false) => EndTCSIDPSP,
+            (EndTCSID, false, true, false) => EndTCSIDUSP,
+            (EndTCSID, true, true, false) => EndTCSIDPSPUSP,
+            (EndTCSID, false, false, true) => EndTCSIDUSD,
+            (EndTCSID, true, false, true) => EndTCSIDPSPUSD,
+            (EndTCSID, false, true, true) => EndTCSIDUSPUSD,
+            (EndTCSID, true, true, true) => EndTCSIDPSPUSPUSD,
             (EndRep, true, false, false) => EndRepPSP,
             (EndRep, false, true, false) => EndRepUSP,
             (EndRep, true, true, false) => EndRepPSPUSP,
@@ -622,7 +636,9 @@ mod tests {
     #[test]
     fn with_flavors_folds_every_combination() {
         use Behavior::*;
-        for base in [End, EndX, EndCSID, EndXCSID, EndRep, EndXRep] {
+        for base in [
+            End, EndX, EndT, EndCSID, EndXCSID, EndTCSID, EndRep, EndXRep,
+        ] {
             let mut seen = std::collections::BTreeSet::new();
             for bits in 0u8..8 {
                 let (psp, usp, usd) = (bits & 1 != 0, bits & 2 != 0, bits & 4 != 0);

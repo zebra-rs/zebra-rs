@@ -1505,13 +1505,14 @@ fn write_local_sids(buf: &mut String, isis: &Isis) -> std::fmt::Result {
 
     // End / uN — at most one entry, derived from the configured locator.
     if let (Some(addr), Some(locator)) = (isis.sr_end_sid, isis.sr_locator.as_ref()) {
+        let table_bound = locator.table_id != 0;
         let (behavior, prefix_len) = match locator.behavior {
             Some(crate::rib::LocatorBehavior::Usid) => {
                 let plen = locator
                     .sid_structure()
                     .map(|s| s.lb_bits.saturating_add(s.ln_bits))
                     .unwrap_or(128);
-                ("uN", plen)
+                (if table_bound { "uT" } else { "uN" }, plen)
             }
             Some(crate::rib::LocatorBehavior::Replace) => {
                 let plen = locator
@@ -1524,7 +1525,7 @@ fn write_local_sids(buf: &mut String, isis: &Isis) -> std::fmt::Result {
                     .unwrap_or(128);
                 ("End(REP)", plen)
             }
-            None => ("End", 128),
+            None => (if table_bound { "End.T" } else { "End" }, 128),
         };
         let masked = mask_v6(addr, prefix_len);
         // End / uN SIDs install on the sr0 dummy in the FIB. IS-IS
@@ -3972,6 +3973,8 @@ mod tests {
             prefix: Some("2001:db8:a:2::/64".parse().unwrap()),
             behavior: None,
             flavors: 0,
+            vrf: None,
+            table_id: 0,
         };
         let row = render_locator_row("LOC_N1", Some(&loc));
         assert!(row.contains("LOC_N1"));
@@ -3986,6 +3989,8 @@ mod tests {
             prefix: Some("2001:db8:a:2::/64".parse().unwrap()),
             behavior: Some(LocatorBehavior::Usid),
             flavors: 0,
+            vrf: None,
+            table_id: 0,
         };
         let row = render_locator_row("LOC_N1", Some(&loc));
         assert!(row.contains("uSID"));
@@ -4012,6 +4017,8 @@ mod tests {
             prefix: None,
             behavior: None,
             flavors: 0,
+            vrf: None,
+            table_id: 0,
         };
         let row = render_locator_row("LOC_N1", Some(&loc));
         assert!(row.trim_end().ends_with("Down"));

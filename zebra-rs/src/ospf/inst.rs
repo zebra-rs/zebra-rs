@@ -9891,10 +9891,14 @@ impl Ospf<Ospfv3> {
             && let Some(addr) = locator.node_sid_addr()
             && let Some(loc_name) = self.watched_locator.clone()
         {
-            let (behavior, structure) = match locator.behavior {
-                Some(LocatorBehavior::Usid) => (SidBehavior::UN, locator.sid_structure()),
-                Some(LocatorBehavior::Replace) => (SidBehavior::EndRep, locator.sid_structure()),
-                None => (SidBehavior::End, None),
+            let (behavior, structure) = match (&locator.behavior, locator.table_id) {
+                (Some(LocatorBehavior::Usid), 0) => (SidBehavior::UN, locator.sid_structure()),
+                (Some(LocatorBehavior::Usid), _) => (SidBehavior::UT, locator.sid_structure()),
+                (Some(LocatorBehavior::Replace), _) => {
+                    (SidBehavior::EndRep, locator.sid_structure())
+                }
+                (None, 0) => (SidBehavior::End, None),
+                (None, _) => (SidBehavior::EndT, None),
             };
             let sid = Sid {
                 addr,
@@ -9908,7 +9912,7 @@ impl Ospf<Ospfv3> {
                 ifindex: 0,
                 nh6: None,
                 structure,
-                table_id: 0,
+                table_id: locator.table_id,
                 segs: Vec::new(),
                 flavors: locator.flavors,
             };

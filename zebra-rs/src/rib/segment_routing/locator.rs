@@ -60,6 +60,13 @@ pub struct Locator {
     pub behavior: Option<LocatorBehavior>,
     /// `FLAVOR_*` bitmask applied to the SIDs allocated from this locator.
     pub flavors: u8,
+    /// VRF the node SID's egress lookup is scoped to (End.T / uT,
+    /// RFC 8986 §4.3). `None` = plain End/uN.
+    pub vrf: Option<String>,
+    /// The VRF's resolved table id — filled by the RIB when the locator
+    /// snapshot is committed (and re-resolved when the VRF appears or
+    /// disappears); 0 while unresolved.
+    pub table_id: u32,
 }
 
 impl Locator {
@@ -130,6 +137,7 @@ pub struct LocatorConfig {
     pub prefix: Option<Ipv6Net>,
     pub behavior: Option<LocatorBehavior>,
     pub flavors: u8,
+    pub vrf: Option<String>,
 }
 
 impl LocatorConfig {
@@ -138,6 +146,9 @@ impl LocatorConfig {
             prefix: self.prefix,
             behavior: self.behavior.clone(),
             flavors: self.flavors,
+            vrf: self.vrf.clone(),
+            // Resolved by the RIB against its VRF registry at commit.
+            table_id: 0,
         }
     }
 }
@@ -239,6 +250,7 @@ impl ConfigBuilder {
         const PREFIX_ERR: &str = "expected ipv6 prefix";
         const BEHAVIOR_ERR: &str = "unknown locator behavior";
         const FLAVOR_ERR: &str = "unknown locator flavor";
+        const VRF_ERR: &str = "locator vrf must be a string";
 
         ConfigBuilder::default()
             .path("")
@@ -279,6 +291,18 @@ impl ConfigBuilder {
             .del(|config, cache, name, _args| {
                 let s = cache_lookup(config, cache, name).context(CONFIG_ERR)?;
                 s.behavior = None;
+                Ok(())
+            })
+            .path("/vrf")
+            .set(|config, cache, name, args| {
+                let raw = args.string().context(VRF_ERR)?;
+                let s = cache_get(config, cache, name).context(CONFIG_ERR)?;
+                s.vrf = Some(raw);
+                Ok(())
+            })
+            .del(|config, cache, name, _args| {
+                let s = cache_lookup(config, cache, name).context(CONFIG_ERR)?;
+                s.vrf = None;
                 Ok(())
             })
             // Leaf-list: set ORs one member's bit in, delete removes that
@@ -328,6 +352,8 @@ mod tests {
             prefix: Some("2001:db8:a:2::/64".parse().unwrap()),
             behavior: None,
             flavors: 0,
+            vrf: None,
+            table_id: 0,
         };
         assert_eq!(loc.node_sid_addr(), Some("2001:db8:a:2::".parse().unwrap()));
     }
@@ -341,6 +367,8 @@ mod tests {
             prefix: Some("2001:db8:a:2::5/64".parse().unwrap()),
             behavior: None,
             flavors: 0,
+            vrf: None,
+            table_id: 0,
         };
         assert_eq!(loc.node_sid_addr(), Some("2001:db8:a:2::".parse().unwrap()));
     }
@@ -351,6 +379,8 @@ mod tests {
             prefix: None,
             behavior: None,
             flavors: 0,
+            vrf: None,
+            table_id: 0,
         };
         assert_eq!(loc.node_sid_addr(), None);
     }

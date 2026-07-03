@@ -36,10 +36,13 @@ pub fn srv6_locator_lsa_build(router_id: Ipv4Addr, locator: &Locator) -> Option<
     let prefix = locator.prefix?;
     let end_sid = locator.node_sid_addr()?;
 
-    let base = match locator.behavior {
-        Some(LocatorBehavior::Usid) => isis_packet::Behavior::EndCSID,
-        Some(LocatorBehavior::Replace) => isis_packet::Behavior::EndRep,
-        None => isis_packet::Behavior::End,
+    let base = match (&locator.behavior, locator.table_id) {
+        (Some(LocatorBehavior::Usid), 0) => isis_packet::Behavior::EndCSID,
+        // VRF-bound: the node SID is uT / End.T (RFC 8986 §4.3).
+        (Some(LocatorBehavior::Usid), _) => isis_packet::Behavior::EndTCSID,
+        (Some(LocatorBehavior::Replace), _) => isis_packet::Behavior::EndRep,
+        (None, 0) => isis_packet::Behavior::End,
+        (None, _) => isis_packet::Behavior::EndT,
     };
     let behavior = u16::from(base.with_flavors(
         locator.flavors & crate::rib::FLAVOR_PSP != 0,
@@ -103,6 +106,8 @@ mod tests {
             prefix: Some(prefix.parse::<Ipv6Net>().unwrap()),
             behavior: usid.then_some(LocatorBehavior::Usid),
             flavors: 0,
+            vrf: None,
+            table_id: 0,
         }
     }
 
@@ -174,6 +179,8 @@ mod tests {
             prefix: None,
             behavior: None,
             flavors: 0,
+            vrf: None,
+            table_id: 0,
         };
         assert!(srv6_locator_lsa_build("10.0.0.1".parse().unwrap(), &unresolved).is_none());
     }
@@ -263,6 +270,8 @@ mod endx_tests {
             prefix: Some("fcbb:bbbb:1::/48".parse::<Ipv6Net>().unwrap()),
             behavior: Some(LocatorBehavior::Usid),
             flavors: 0,
+            vrf: None,
+            table_id: 0,
         }
     }
 
@@ -286,6 +295,8 @@ mod endx_tests {
             prefix: Some("2001:db8:f:2::/64".parse::<Ipv6Net>().unwrap()),
             behavior: None,
             flavors: 0,
+            vrf: None,
+            table_id: 0,
         };
         let sub = build_v3_lan_endx_sub(
             &classic,
