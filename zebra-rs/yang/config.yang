@@ -3263,11 +3263,15 @@ module config {
         leaf behavior {
           type enumeration {
             enum usid;
+            enum replace;
           }
           description
             "Locator-wide endpoint behavior. 'usid' selects the
-             RFC 9800 NEXT-C-SID (micro-SID) format; absent means
-             the classic RFC 8986 full-SID layout.";
+             RFC 9800 NEXT-C-SID (micro-SID) format; 'replace' the
+             RFC 9800 REPLACE-C-SID format (32-bit C-SIDs consumed
+             from packed containers, e.g. a /64 locator advertises
+             LB 48 / LN 16 / Fun 16 / Arg 48); absent means the
+             classic RFC 8986 full-SID layout.";
         }
         leaf-list flavor {
           type enumeration {

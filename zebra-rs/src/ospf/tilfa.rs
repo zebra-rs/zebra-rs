@@ -515,6 +515,12 @@ pub(super) fn build_repair_path_srv6_v3(
         let part = match seg {
             spf::SrSegment::NodeSid(v) => {
                 let info = srv6_end_sid_for_vertex_v3(top, area, *v)?;
+                // REPLACE-C-SID SIDs are only valid inside packed C-SID
+                // containers (RFC 9800 §6.4) — unprotectable as plain
+                // repair segments (same guard as the IS-IS builder).
+                if isis_packet::Behavior::from(info.behavior).is_end_replace_csid() {
+                    return None;
+                }
                 RepairSeg {
                     sid: info.sid,
                     landing: *v,
@@ -523,6 +529,9 @@ pub(super) fn build_repair_path_srv6_v3(
             }
             spf::SrSegment::AdjSid(from, to, _via) => {
                 let info = srv6_endx_sid_for_link_v3(top, area, *from, *to)?;
+                if isis_packet::Behavior::from(info.behavior).is_endx_replace_csid() {
+                    return None;
+                }
                 RepairSeg {
                     sid: info.sid,
                     landing: *to,

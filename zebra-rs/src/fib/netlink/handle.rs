@@ -260,6 +260,24 @@ fn sid_route_target(
             )
         }
         SidBehavior::UA => (RouteHeader::RT_TABLE_MAIN, RouteType::Unicast, 128, addr),
+        // REPLACE-C-SID (cradle-only — never reaches the kernel): the
+        // /(LB+LN+Fun) prefix leaves the index argument wild; the tee
+        // takes its prefix_len from here.
+        SidBehavior::EndRep | SidBehavior::EndXRep => {
+            let plen = structure
+                .map(|s| {
+                    s.lb_bits
+                        .saturating_add(s.ln_bits)
+                        .saturating_add(s.fun_bits)
+                })
+                .unwrap_or(128);
+            (
+                RouteHeader::RT_TABLE_MAIN,
+                RouteType::Unicast,
+                plen,
+                mask_v6(addr, plen),
+            )
+        }
         // LIB twin of a uA: a block:function prefix entry that matches
         // the uA when it is the carrier's *active* uSID (post-uN-shift
         // DA). /(LB+Fun) with the NEXT-CSID flavor — verified live on
@@ -1804,10 +1822,15 @@ impl FibHandle {
         }
         // EVPN-over-SRv6 L2 SIDs are cradle-only: the kernel has no
         // End.DT2U/DT2M seg6local actions, so there is nothing to install
-        // via netlink.
+        // via netlink. Same for REPLACE-C-SID (RFC 9800 §4.2): no kernel
+        // flavor op exists through 6.8, and a plain-End fallback would
+        // misread the packed containers as full SIDs — worse than no entry.
         if matches!(
             sid.behavior,
-            crate::rib::SidBehavior::EndDT2U | crate::rib::SidBehavior::EndDT2M
+            crate::rib::SidBehavior::EndDT2U
+                | crate::rib::SidBehavior::EndDT2M
+                | crate::rib::SidBehavior::EndRep
+                | crate::rib::SidBehavior::EndXRep
         ) {
             return;
         }
@@ -1968,10 +1991,13 @@ impl FibHandle {
         if let Some(cradle) = &self.cradle {
             cradle.local_sid_uninstall(sid, prefix_len).await;
         }
-        // Cradle-only L2 SIDs (see route_sid_install): nothing in the kernel.
+        // Cradle-only SIDs (see route_sid_install): nothing in the kernel.
         if matches!(
             sid.behavior,
-            crate::rib::SidBehavior::EndDT2U | crate::rib::SidBehavior::EndDT2M
+            crate::rib::SidBehavior::EndDT2U
+                | crate::rib::SidBehavior::EndDT2M
+                | crate::rib::SidBehavior::EndRep
+                | crate::rib::SidBehavior::EndXRep
         ) {
             return;
         }

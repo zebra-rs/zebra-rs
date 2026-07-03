@@ -356,6 +356,7 @@ fn show_isis_summary(
                 Some(p) => {
                     let beh = match loc.and_then(|l| l.behavior.as_ref()) {
                         Some(LocatorBehavior::Usid) => "uSID",
+                        Some(LocatorBehavior::Replace) => "REPLACE",
                         None => "Classic",
                     };
                     (Some(p.to_string()), Some(beh.to_string()), "Up")
@@ -700,6 +701,7 @@ fn render_locator_row(name: &str, locator: Option<&crate::rib::Locator>) -> Stri
             Some(p) => {
                 let beh = match loc.behavior {
                     Some(LocatorBehavior::Usid) => "uSID",
+                    Some(LocatorBehavior::Replace) => "REPLACE",
                     None => "Classic",
                 };
                 (p.to_string(), beh.to_string(), "Up")
@@ -1511,6 +1513,17 @@ fn write_local_sids(buf: &mut String, isis: &Isis) -> std::fmt::Result {
                     .unwrap_or(128);
                 ("uN", plen)
             }
+            Some(crate::rib::LocatorBehavior::Replace) => {
+                let plen = locator
+                    .sid_structure()
+                    .map(|s| {
+                        s.lb_bits
+                            .saturating_add(s.ln_bits)
+                            .saturating_add(s.fun_bits)
+                    })
+                    .unwrap_or(128);
+                ("End(REP)", plen)
+            }
             None => ("End", 128),
         };
         let masked = mask_v6(addr, prefix_len);
@@ -1542,6 +1555,7 @@ fn write_local_sids(buf: &mut String, isis: &Isis) -> std::fmt::Result {
                 };
                 let behavior = match isis.sr_locator.as_ref().and_then(|l| l.behavior.as_ref()) {
                     Some(crate::rib::LocatorBehavior::Usid) => "uA",
+                    Some(crate::rib::LocatorBehavior::Replace) => "End.X(REP)",
                     _ => "End.X",
                 };
                 rows.push(LocalSidRow {

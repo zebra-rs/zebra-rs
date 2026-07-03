@@ -3141,6 +3141,7 @@ impl Isis {
         {
             let (behavior, structure) = match locator.behavior {
                 Some(LocatorBehavior::Usid) => (SidBehavior::UN, locator.sid_structure()),
+                Some(LocatorBehavior::Replace) => (SidBehavior::EndRep, locator.sid_structure()),
                 None => (SidBehavior::End, None),
             };
             let sid = Sid {
@@ -3203,6 +3204,7 @@ impl Isis {
         {
             let (behavior, structure) = match locator.behavior {
                 Some(LocatorBehavior::Usid) => (SidBehavior::UN, locator.sid_structure()),
+                Some(LocatorBehavior::Replace) => (SidBehavior::EndRep, locator.sid_structure()),
                 None => (SidBehavior::End, None),
             };
             let sid = Sid {
