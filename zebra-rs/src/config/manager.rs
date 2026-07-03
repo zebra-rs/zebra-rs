@@ -3523,4 +3523,30 @@ mod yang_load_tests {
             }
         }
     }
+    /// `area <id> range <prefix> [not-advertise|cost]` — RFC 2328
+    /// §12.4.3 aggregation, v2 and v3. Pin every spelling settable.
+    #[test]
+    fn ospf_area_range_paths_parse() {
+        use crate::config::ExecCode;
+        use crate::config::parse::{State, parse};
+        use libyang::to_entry;
+
+        let mut yang = YangStore::new();
+        yang.add_path(concat!(env!("CARGO_MANIFEST_DIR"), "/yang"));
+        yang.read_with_resolve("configure")
+            .expect("configure mode loads");
+        yang.identity_resolve();
+        let module = yang
+            .find_module("configure")
+            .expect("configure module present");
+        let entry = to_entry(&yang, module);
+
+        for (proto, prefix) in [("ospf", "10.1.0.0/16"), ("ospfv3", "2001:db8:1::/48")] {
+            for suffix in ["", " not-advertise true", " cost 100"] {
+                let path = format!("set router {proto} area 1 range {prefix}{suffix}");
+                let (code, _comps, _state) = parse(&path, entry.clone(), None, State::new());
+                assert_eq!(code, ExecCode::Success, "`{path}` must be a settable path");
+            }
+        }
+    }
 }

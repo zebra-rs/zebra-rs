@@ -67,8 +67,27 @@ use), and the prefix itself rides in the LSA body.
 The whole path — two ABRs, three areas, cross-area reachability in
 both directions, and cost-honoring metrics — is BDD-validated by
 `ospfv3_multi_area.feature`, the v6 mirror of the v2 multi-area
-topology. Area ranges (`area <id> range` aggregation) remain
-unimplemented for both versions — see
-[Gaps Relative to FRR ospf6d](ch-15-15-ospfv3-frr-gaps.md). For the
-v2 behavior this chapter mirrors, see
+topology. For the v2 behavior this chapter mirrors, see
 [Multi-Area Routing and the ABR](ch-08-14-ospf-multi-area-abr.md).
+
+## Area ranges
+
+`area <id> range <prefix>` aggregates exactly as in OSPFv2 — the
+area's intra-area components fold into one Inter-Area-Prefix-LSA at
+the largest component metric (or a fixed `cost`), `not-advertise`
+hides the whole range, and the most-specific range wins:
+
+```
+router ospfv3 {
+  area 0.0.0.1 {
+    range 2001:db8:1::/48;
+    interface enp0s7 {
+      enable true;
+    }
+  }
+}
+```
+
+The `not-advertise` and `cost` leaves match
+[the v2 page's table](ch-08-14-ospf-multi-area-abr.md); the discard
+route for active ranges is likewise not installed yet.

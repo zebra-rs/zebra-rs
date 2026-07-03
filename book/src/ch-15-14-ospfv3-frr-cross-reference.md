@@ -20,6 +20,7 @@ interface to an area with a per-interface command.
 | `area/<id>/area-type stub` | `area <id> stub` |
 | `area/<id>/area-type nssa` | `area <id> nssa` |
 | `area/<id>/no-summary true` | `area <id> stub no-summary` / `area <id> nssa no-summary` |
+| `area/<id>/range <prefix> { not-advertise; cost; }` | `area <id> range <prefix> [not-advertise \| cost <c>]` |
 | `redistribute <connected\|static\|kernel\|isis\|bgp> { metric; metric-type; }` | `redistribute <source> metric <m> metric-type <1\|2>` |
 | `clear ospfv3 neighbor` | `clear ipv6 ospf6 interface [IFNAME]` |
 | `show ospfv3 neighbor / database / route` | `show ipv6 ospf6 neighbor / database / route` |

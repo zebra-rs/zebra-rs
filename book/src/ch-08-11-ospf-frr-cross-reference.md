@@ -20,6 +20,7 @@ configuration surface to the equivalent FRR `ospfd` commands.
 | `area/<id>/nssa-default-originate true` | `area <id> nssa default-information-originate` |
 | `area/<id>/nssa-suppress-fa true` | `area <id> nssa suppress-fa` |
 | `area/<id>/nssa-translator-role` | `area <id> nssa translate-candidate` / `translate-always` / `translate-never` |
+| `area/<id>/range <prefix> { not-advertise; cost; }` | `area <id> range <prefix> [not-advertise \| cost <c>]` |
 | `redistribute <connected\|static\|kernel\|isis\|bgp> { metric; metric-type; }` | `redistribute <source> metric <m> metric-type <1\|2>` |
 | `area/<id>/interface/<n>/authentication simple` + `authentication-key` | `ip ospf authentication` + `ip ospf authentication-key` (interface) |
 | `area/<id>/interface/<n>/authentication message-digest` + `message-digest-key <id> { md5; }` | `ip ospf authentication message-digest` + `ip ospf message-digest-key <id> md5 <key>` (interface) |

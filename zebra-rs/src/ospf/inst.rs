@@ -1722,6 +1722,14 @@ impl Ospf<Ospfv2> {
             let Some(rib_b) = self.rib_areas.get(&area_b) else {
                 continue;
             };
+            let ranges_b = self
+                .areas
+                .get(area_b)
+                .map(|a| a.ranges.clone())
+                .unwrap_or_default();
+            // Active ranges of area B this walk: range prefix ->
+            // largest component metric (RFC 2328 §12.4.3).
+            let mut active_ranges: BTreeMap<Ipv4Net, u32> = BTreeMap::new();
             for (prefix, route) in rib_b.iter() {
                 let advertise = match route.path_type {
                     RouteType::IntraArea => true,
@@ -1729,6 +1737,23 @@ impl Ospf<Ospfv2> {
                     RouteType::External => false,
                 };
                 if !advertise || route.metric >= LS_INFINITY {
+                    continue;
+                }
+                // Address ranges condense area B's own intra-area
+                // routes: a component inside a configured range is
+                // never advertised individually — it activates the
+                // aggregate instead (most-specific range wins).
+                if route.path_type == RouteType::IntraArea
+                    && let Some(range_prefix) = ranges_b
+                        .keys()
+                        .filter(|r| r.contains(&prefix))
+                        .max_by_key(|r| r.prefix_len())
+                        .copied()
+                {
+                    active_ranges
+                        .entry(range_prefix)
+                        .and_modify(|m| *m = (*m).max(route.metric))
+                        .or_insert(route.metric);
                     continue;
                 }
                 // Don't summarize a prefix that A reaches intra-area.
@@ -1744,6 +1769,31 @@ impl Ospf<Ospfv2> {
                 let metric = route.metric.min(LS_INFINITY - 1);
                 desired
                     .entry(prefix)
+                    .and_modify(|m| *m = (*m).min(metric))
+                    .or_insert(metric);
+            }
+            // Fold the aggregates in: an active range advertises one
+            // summary at the largest component metric (or the
+            // configured cost); `not-advertise` hides it entirely.
+            for (range_prefix, max_metric) in active_ranges {
+                let Some(entry) = ranges_b.get(&range_prefix) else {
+                    continue;
+                };
+                if entry.not_advertise {
+                    continue;
+                }
+                let intra_in_a = self
+                    .rib_areas
+                    .get(&area_a)
+                    .and_then(|r| r.get(&range_prefix))
+                    .map(|r| r.path_type == RouteType::IntraArea)
+                    .unwrap_or(false);
+                if intra_in_a {
+                    continue;
+                }
+                let metric = entry.cost.unwrap_or(max_metric).min(LS_INFINITY - 1);
+                desired
+                    .entry(range_prefix)
                     .and_modify(|m| *m = (*m).min(metric))
                     .or_insert(metric);
             }
@@ -6739,6 +6789,14 @@ impl Ospf<Ospfv3> {
             let Some(rib_b) = self.rib6_areas.get(&area_b) else {
                 continue;
             };
+            let ranges_b = self
+                .areas
+                .get(area_b)
+                .map(|a| a.ranges_v6.clone())
+                .unwrap_or_default();
+            // Active ranges of area B this walk: range prefix ->
+            // largest component metric (RFC 2328 §12.4.3).
+            let mut active_ranges: BTreeMap<ipnet::Ipv6Net, u32> = BTreeMap::new();
             for (prefix, route) in rib_b.iter() {
                 let advertise = match route.path_type {
                     RouteType::IntraArea => true,
@@ -6746,6 +6804,22 @@ impl Ospf<Ospfv3> {
                     RouteType::External => false,
                 };
                 if !advertise || route.metric >= OSPFV3_LS_INFINITY {
+                    continue;
+                }
+                // Address ranges condense area B's own intra-area
+                // routes — the component activates the aggregate
+                // instead of advertising (most-specific range wins).
+                if route.path_type == RouteType::IntraArea
+                    && let Some(range_prefix) = ranges_b
+                        .keys()
+                        .filter(|r| r.contains(&prefix))
+                        .max_by_key(|r| r.prefix_len())
+                        .copied()
+                {
+                    active_ranges
+                        .entry(range_prefix)
+                        .and_modify(|m| *m = (*m).max(route.metric))
+                        .or_insert(route.metric);
                     continue;
                 }
                 let intra_in_a = self
@@ -6760,6 +6834,30 @@ impl Ospf<Ospfv3> {
                 let metric = route.metric.min(OSPFV3_LS_INFINITY - 1);
                 desired
                     .entry(prefix)
+                    .and_modify(|m| *m = (*m).min(metric))
+                    .or_insert(metric);
+            }
+            // Fold the aggregates in — largest component metric or
+            // the configured cost; `not-advertise` hides the range.
+            for (range_prefix, max_metric) in active_ranges {
+                let Some(entry) = ranges_b.get(&range_prefix) else {
+                    continue;
+                };
+                if entry.not_advertise {
+                    continue;
+                }
+                let intra_in_a = self
+                    .rib6_areas
+                    .get(&area_a)
+                    .and_then(|r| r.get(&range_prefix))
+                    .map(|r| r.path_type == RouteType::IntraArea)
+                    .unwrap_or(false);
+                if intra_in_a {
+                    continue;
+                }
+                let metric = entry.cost.unwrap_or(max_metric).min(OSPFV3_LS_INFINITY - 1);
+                desired
+                    .entry(range_prefix)
                     .and_modify(|m| *m = (*m).min(metric))
                     .or_insert(metric);
             }

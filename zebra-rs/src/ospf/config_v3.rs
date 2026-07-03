@@ -66,6 +66,12 @@ impl Ospf<Ospfv3> {
                 "/area/redistribute/connected/metric-type",
                 config_ospfv3_area_redist_connected_metric_type,
             ),
+            ("/area/range", config_ospfv3_area_range),
+            (
+                "/area/range/not-advertise",
+                config_ospfv3_area_range_not_advertise,
+            ),
+            ("/area/range/cost", config_ospfv3_area_range_cost),
             ("/redistribute/connected", config_ospfv3_redist_connected),
             (
                 "/redistribute/connected/metric",
@@ -641,6 +647,62 @@ ospfv3_redist_handlers!(
     config_ospfv3_redist_bgp_metric_type,
     crate::rib::RibType::Bgp
 );
+
+/// `/router/ospfv3/area/<id>/range` — v3 sibling of
+/// `config_ospf_area_range` (Inter-Area-Prefix aggregation).
+fn config_ospfv3_area_range(ospf: &mut Ospf<Ospfv3>, mut args: Args, op: ConfigOp) -> Option<()> {
+    let area_id = parse_area_id(&args.string()?)?;
+    let prefix = args.v6net()?.trunc();
+    if op.is_set() {
+        ospf.areas
+            .fetch(area_id)
+            .ranges_v6
+            .entry(prefix)
+            .or_default();
+    } else if let Some(area) = ospf.areas.get_mut(area_id) {
+        area.ranges_v6.remove(&prefix);
+    }
+    ospf.abr_summary_originate_v3();
+    Some(())
+}
+
+/// `/router/ospfv3/area/<id>/range/<prefix>/not-advertise`.
+fn config_ospfv3_area_range_not_advertise(
+    ospf: &mut Ospf<Ospfv3>,
+    mut args: Args,
+    op: ConfigOp,
+) -> Option<()> {
+    let area_id = parse_area_id(&args.string()?)?;
+    let prefix = args.v6net()?.trunc();
+    let value = if op.is_set() { args.boolean()? } else { false };
+    ospf.areas
+        .fetch(area_id)
+        .ranges_v6
+        .entry(prefix)
+        .or_default()
+        .not_advertise = value;
+    ospf.abr_summary_originate_v3();
+    Some(())
+}
+
+/// `/router/ospfv3/area/<id>/range/<prefix>/cost`.
+fn config_ospfv3_area_range_cost(
+    ospf: &mut Ospf<Ospfv3>,
+    mut args: Args,
+    op: ConfigOp,
+) -> Option<()> {
+    let area_id = parse_area_id(&args.string()?)?;
+    let prefix = args.v6net()?.trunc();
+    let cost = if op.is_set() { Some(args.u32()?) } else { None };
+    ospf.areas
+        .fetch(area_id)
+        .ranges_v6
+        .entry(prefix)
+        .or_default()
+        .cost = cost;
+    ospf.abr_summary_originate_v3();
+    Some(())
+}
 
 /// `/router/ospfv3/area/<id>/redistribute/connected` — presence
 /// container. Mirrors v2's `config_ospf_area_redist_connected` but
