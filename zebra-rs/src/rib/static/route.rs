@@ -28,6 +28,11 @@ pub struct StaticRoute<F: StaticFamily> {
     /// produces a Uni nexthop that the FIB installs as a kernel
     /// `seg6local` route on the sr0 dummy.
     pub seg6local_action: Option<SidBehavior>,
+    /// Discard route (`route <prefix> blackhole`): `to_entry`
+    /// produces a `Nexthop::Blackhole` the FIB installs as an
+    /// `RTN_BLACKHOLE` kernel route. Mutually exclusive with
+    /// nexthops / segs.
+    pub blackhole: bool,
     pub delete: bool,
 }
 
@@ -40,6 +45,7 @@ impl<F: StaticFamily> Default for StaticRoute<F> {
             segs: Vec::new(),
             encap_type: None,
             seg6local_action: None,
+            blackhole: false,
             delete: false,
         }
     }
@@ -54,6 +60,7 @@ impl<F: StaticFamily> Clone for StaticRoute<F> {
             segs: self.segs.clone(),
             encap_type: self.encap_type,
             seg6local_action: self.seg6local_action,
+            blackhole: self.blackhole,
             delete: self.delete,
         }
     }
@@ -71,6 +78,7 @@ where
             .field("segs", &self.segs)
             .field("encap_type", &self.encap_type)
             .field("seg6local_action", &self.seg6local_action)
+            .field("blackhole", &self.blackhole)
             .field("delete", &self.delete)
             .finish()
     }
@@ -78,7 +86,11 @@ where
 
 impl<F: StaticFamily> StaticRoute<F> {
     pub fn to_entry(&self) -> Option<RibEntry> {
-        if self.nexthops.is_empty() && self.segs.is_empty() && self.seg6local_action.is_none() {
+        if self.nexthops.is_empty()
+            && self.segs.is_empty()
+            && self.seg6local_action.is_none()
+            && !self.blackhole
+        {
             return None;
         }
 
@@ -86,6 +98,13 @@ impl<F: StaticFamily> StaticRoute<F> {
         entry.distance = self.distance.unwrap_or(1);
 
         let metric = self.metric.unwrap_or(0);
+
+        if self.blackhole {
+            // A discard route drops matching traffic; no nexthop.
+            entry.nexthop = Nexthop::Blackhole(metric);
+            entry.metric = metric;
+            return Some(entry);
+        }
 
         if let Some(action) = self.seg6local_action {
             // Terminal seg6local action (End.DT6 etc.). The address
@@ -396,5 +415,27 @@ mod tests {
         let uni = as_uni(&entry);
         assert_eq!(uni.seg6local_action, Some(SidBehavior::EndDT6));
         assert!(uni.segs.is_empty());
+    }
+
+    #[test]
+    fn blackhole_route_builds_blackhole_nexthop() {
+        // A `blackhole` route carries no gateway; to_entry yields a
+        // Nexthop::Blackhole even with an empty nexthops map, and the
+        // metric flows through.
+        let r = StaticRoute::<V4> {
+            blackhole: true,
+            metric: Some(50),
+            ..Default::default()
+        };
+        let entry = r.to_entry().expect("blackhole entry built");
+        assert_eq!(entry.nexthop, Nexthop::Blackhole(50));
+        assert_eq!(entry.metric, 50);
+    }
+
+    #[test]
+    fn empty_route_without_blackhole_yields_none() {
+        // No nexthop, no segs, no blackhole → nothing to install.
+        let r = StaticRoute::<V4>::default();
+        assert!(r.to_entry().is_none());
     }
 }

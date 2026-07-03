@@ -20,6 +20,9 @@ impl Display for Nexthop {
             Nexthop::Protect(pro) => {
                 write!(f, "{}", pro)
             }
+            Nexthop::Blackhole(_) => {
+                write!(f, "blackhole")
+            }
         }
     }
 }

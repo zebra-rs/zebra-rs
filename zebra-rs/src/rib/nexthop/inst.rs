@@ -113,6 +113,13 @@ pub enum Nexthop {
     Multi(NexthopMulti),
     List(NexthopList),
     Protect(NexthopProtect),
+    /// A discard route — packets to the prefix are dropped in the
+    /// forwarding plane (kernel `RTN_BLACKHOLE`) with no gateway or
+    /// nexthop group. Used for aggregate summarization discards
+    /// (OSPF `area range` / BGP `aggregate-address`) so component
+    /// traffic that no more-specific route covers is dropped at the
+    /// aggregator instead of looping. Carries only the route metric.
+    Blackhole(u32),
 }
 
 impl Default for Nexthop {
