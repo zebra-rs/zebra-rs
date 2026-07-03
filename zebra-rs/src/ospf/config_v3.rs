@@ -541,12 +541,12 @@ fn ospfv3_redist_set(
     op: ConfigOp,
 ) -> Option<()> {
     use crate::rib::RibType;
-    let first_time = !ospf.redist.contains_key(&rtype)
-        && !(rtype == RibType::Connected
-            && ospf
-                .areas
-                .iter()
-                .any(|(_, area)| area.redistribute.connected.is_some()));
+    let nssa_connected = rtype == RibType::Connected
+        && ospf
+            .areas
+            .iter()
+            .any(|(_, area)| area.redistribute.connected.is_some());
+    let first_time = !(ospf.redist.contains_key(&rtype) || nssa_connected);
     if op.is_set() {
         ospf.redist.insert(
             rtype,
