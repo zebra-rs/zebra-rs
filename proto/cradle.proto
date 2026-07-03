@@ -142,6 +142,9 @@ message WatchFdbRequest {}
 message FdbEvent {
   string mac = 1;
   uint32 bd  = 2;
+  // 0 = learned; 1 = aged out (the entry was removed after `fdb_age_secs`
+  // idle — the control plane should withdraw its Type-2).
+  uint32 event = 3;
 }
 
 message Neighbor4 {

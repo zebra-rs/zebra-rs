@@ -343,6 +343,13 @@ pub enum Message {
         vni: u32,
         mac: MacAddr,
     },
+    /// A cradle-learned MAC aged out (idle past `fdb_age_secs`) — withdraw
+    /// its Type-2 by re-emitting the same synthesized entry as a
+    /// `RibRx::FdbDel`.
+    CradleFdbAge {
+        vni: u32,
+        mac: MacAddr,
+    },
     MdbAdd {
         vni: u32,
         group: IpAddr,
@@ -2936,6 +2943,9 @@ impl Rib {
             Message::CradleFdbLearn { vni, mac } => {
                 self.cradle_fdb_learn(vni, mac);
             }
+            Message::CradleFdbAge { vni, mac } => {
+                self.cradle_fdb_age(vni, mac);
+            }
             Message::CradleReplAdd { vni, sid } => {
                 self.fib_handle.cradle_repl_add(vni, sid).await;
             }
@@ -3252,7 +3262,12 @@ impl Rib {
                                 let Ok(mac) = ev.mac.parse::<MacAddr>() else {
                                     continue;
                                 };
-                                let _ = tx.send(Message::CradleFdbLearn { vni: ev.bd, mac });
+                                let msg = if ev.event == 1 {
+                                    Message::CradleFdbAge { vni: ev.bd, mac }
+                                } else {
+                                    Message::CradleFdbLearn { vni: ev.bd, mac }
+                                };
+                                let _ = tx.send(msg);
                             }
                         }
                         Err(e) => {
@@ -3292,6 +3307,29 @@ impl Rib {
             vxlan_local,
         };
         self.api_fdb_add(&entry);
+    }
+
+    /// A cradle-datapath MAC aged out: dispatch the same synthesized entry
+    /// as an `FdbDel` so BGP withdraws the Type-2 it originated for the
+    /// learn (`evpn_withdraw_macip` matches on `(vni, mac)`).
+    fn cradle_fdb_age(&mut self, vni: u32, mac: MacAddr) {
+        if mac.is_multicast() {
+            return;
+        }
+        let vxlan_local = self
+            .links
+            .values()
+            .find(|link| link.vni == Some(vni))
+            .and_then(|link| link.vxlan_local);
+        let entry = FdbEntry {
+            vni,
+            mac,
+            ifindex: 0,
+            bridge_ifindex: 0,
+            flags: 0,
+            vxlan_local,
+        };
+        self.api_fdb_del(&entry);
     }
 
     async fn process_cm_msg(&mut self, msg: ConfigRequest) {
