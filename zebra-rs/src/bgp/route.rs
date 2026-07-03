@@ -6778,6 +6778,14 @@ fn extract_mac_mobility_seq(attr: &BgpAttr) -> u32 {
 /// produced `tunnel_endpoint = None` for every received Type-2,
 /// which made `mac_add` build an FDB row with no NDA_DST and the
 /// kernel rejected the install with EINVAL.
+/// The SRv6 L2 Service SID of the wanted behavior on an EVPN route's
+/// Prefix-SID attribute (RFC 9252), if any.
+fn evpn_srv6_sid(attr: &BgpAttr, behavior: u16) -> Option<std::net::Ipv6Addr> {
+    attr.srv6_l2_sid()
+        .filter(|(_, b)| *b == behavior)
+        .map(|(sid, _)| sid)
+}
+
 fn extract_tunnel_endpoint(rib: &BgpRib) -> Option<IpAddr> {
     match rib.attr.nexthop.as_ref()? {
         BgpNexthop::Evpn(addr) => Some(*addr),
@@ -6832,6 +6840,14 @@ fn route_evpn_export_selected(
             }
             EvpnPrefix::InclusiveMulticast { orig, .. } => {
                 if let Some(vni) = extract_vni_from_attr(&wd.attr) {
+                    // Mirror the announce side: the withdrawn IMET carried a
+                    // DT2M SID -> remove the BUM sentinel.
+                    if evpn_srv6_sid(&wd.attr, bgp_packet::SRV6_BEHAVIOR_END_DT2M).is_some() {
+                        let _ = bgp.rib_client.send(rib::Message::MacDel {
+                            vni,
+                            mac: MacAddr::from([0xff; 6]),
+                        });
+                    }
                     bgp.local_rib.evpn_flood.remove_remote(vni, *orig);
                     evpn_gateway_tree_set(bgp.local_rib, *bgp.router_id, vni);
                     bgp.local_rib.evpn_flood.reconcile(vni, bgp.rib_client);
@@ -6908,6 +6924,9 @@ fn route_evpn_export_selected(
                     flags: extract_flags_from_attr(&best.attr),
                     seq: extract_mac_mobility_seq(&best.attr),
                     esi: best.esi, // Extracted from EVPN route.
+                    // RFC 9252: a remote End.DT2U SID selects the SRv6 L2
+                    // data plane (cradle tee) over the kernel VXLAN FDB.
+                    srv6_sid: evpn_srv6_sid(&best.attr, bgp_packet::SRV6_BEHAVIOR_END_DT2U),
                 };
                 let _ = bgp.rib_client.send(msg);
             } else {
@@ -6925,6 +6944,22 @@ fn route_evpn_export_selected(
             // type 0x0A carries the AR-IP) and reconcile the role-aware flood
             // list, rather than blindly flooding toward the originating IP.
             if let Some(vni) = extract_vni_from_attr(&best.attr) {
+                // RFC 9252 §6.4: a remote End.DT2M SID on the IMET is the BUM
+                // tunnel target for this VNI. Install it as the bridge
+                // domain's all-ones BUM sentinel (the cradle-tee L2 data
+                // plane encapsulates broadcast/multicast toward it);
+                // independent of the PMSI mode below.
+                if let Some(dt2m) = evpn_srv6_sid(&best.attr, bgp_packet::SRV6_BEHAVIOR_END_DT2M) {
+                    let _ = bgp.rib_client.send(rib::Message::MacAdd {
+                        vni,
+                        mac: MacAddr::from([0xff; 6]),
+                        tunnel_endpoint: None,
+                        flags: 0,
+                        seq: 0,
+                        esi: None,
+                        srv6_sid: Some(dt2m),
+                    });
+                }
                 let pmsi = best.attr.pmsi_tunnel.as_ref();
                 if let Some(p) = pmsi.filter(|p| p.is_sr_p2mp()) {
                     // SR P2MP tree (RFC 9574 -> RFC 9524): record the
@@ -14194,6 +14229,12 @@ impl Bgp {
             );
         }
         attr.nexthop = Some(BgpNexthop::Evpn(nexthop));
+        // RFC 9252 §6.1/§6.2: under `encapsulation srv6` the Type-2 carries
+        // this PE's per-VNI End.DT2U SID (SRv6 L2 Service TLV) so receivers
+        // install the MAC against the SID instead of a VXLAN VTEP.
+        if self.evpn_encap_srv6 {
+            attr.prefix_sid = self.vni_dt2u_prefix_sid(entry.vni);
+        }
 
         let mut rib = BgpRib::new(
             ORIGINATED_PEER,
@@ -14456,7 +14497,7 @@ impl Bgp {
         // for the VNI on the IMET route (SRv6 L2 Service TLV in the Prefix-SID
         // attribute) so remote roots fan replicated BUM to it. SID-less when no
         // locator has resolved yet (reconciled on the next locator update).
-        if matches!(bum, EvpnBumTunnel::SrV6P2mp) {
+        if matches!(bum, EvpnBumTunnel::SrV6P2mp) || self.evpn_encap_srv6 {
             attr.prefix_sid = self.vni_dt2m_prefix_sid(vni);
         }
 
@@ -14520,9 +14561,10 @@ impl Bgp {
         route_withdraw_evpn_to_peers(rd, prefix, &mut self.peers);
         // We no longer originate this VNI — drop its SR P2MP tree Root so a
         // subsequent reconcile withdraws any replication segment, and release
-        // its End.DT2M SID back to the pool.
+        // its End.DT2M / End.DT2U SIDs back to the pool.
         self.local_rib.evpn_flood.clear_local_root(vni);
         self.free_vni_dt2m_sid(vni);
+        self.free_vni_dt2u_sid(vni);
     }
 
     /// Originate a Type-6 SMET route for a locally-snooped `(*,G)` /

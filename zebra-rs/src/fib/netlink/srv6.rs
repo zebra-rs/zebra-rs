@@ -119,6 +119,11 @@ fn build_srh(segments: &[Ipv6Addr]) -> Ipv6SrHdr {
 fn seg6local_action(behavior: SidBehavior) -> Seg6LocalAction {
     match behavior {
         SidBehavior::End | SidBehavior::UN => Seg6LocalAction::End,
+        // EVPN L2 SIDs never reach the kernel (route_sid_install returns
+        // after the cradle tee — no End.DT2U/DT2M seg6local action exists);
+        // map to End so an unexpected call is a visible no-op rather than
+        // a panic.
+        SidBehavior::EndDT2U | SidBehavior::EndDT2M => Seg6LocalAction::End,
         SidBehavior::EndX | SidBehavior::UA | SidBehavior::UALib => Seg6LocalAction::EndX,
         SidBehavior::EndDT4 => Seg6LocalAction::EndDt4,
         // End.M reuses the End.DT6 kernel action: decapsulate and look the

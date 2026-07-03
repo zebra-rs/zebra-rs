@@ -975,6 +975,15 @@ pub struct Bgp {
     /// [`Self::srv6_sid_pool`] (same band as a per-VRF SID) and freed when
     /// the VNI stops originating.
     pub evpn_dt2m_sids: BTreeMap<u32, (std::net::Ipv6Addr, u16)>,
+    /// Per-VNI `End.DT2U` service SID `(addr, function)` for EVPN unicast
+    /// over SRv6 (RFC 9252 §6.1/§6.2), carved like the DT2M SID and
+    /// advertised on every Type-2 the VNI originates when
+    /// [`Self::evpn_encap_srv6`] is set.
+    pub evpn_dt2u_sids: BTreeMap<u32, (std::net::Ipv6Addr, u16)>,
+    /// `router bgp afi-safi evpn encapsulation srv6` (RFC 9252): EVPN rides
+    /// SRv6 L2 service SIDs (End.DT2U on Type-2, End.DT2M on Type-3) instead
+    /// of VXLAN. The L2 data plane is the cradle eBPF tee.
+    pub evpn_encap_srv6: bool,
     /// `sr-p2mp-dataplane` config (interfaces + next hop for the SRv6 P2MP BUM
     /// replication eBPF dataplane), pushed to the RIB supervisor on change.
     pub evpn_sr_dataplane: EvpnSrDataplaneCfg,
@@ -1211,6 +1220,8 @@ impl Bgp {
             srv6_ipv6_unicast: false,
             srv6_ipv6_sid: None,
             evpn_dt2m_sids: BTreeMap::new(),
+            evpn_dt2u_sids: BTreeMap::new(),
+            evpn_encap_srv6: false,
             evpn_sr_dataplane: EvpnSrDataplaneCfg::default(),
             srv6_ipv6_export: None,
             networks_v6: std::collections::BTreeSet::new(),
@@ -1383,6 +1394,32 @@ impl Bgp {
         }
     }
 
+    /// Register a per-VNI L2 service SID (`End.DT2U`/`End.DT2M`) with the
+    /// RIB SID registry — `table_id` carries the VNI (the bridge domain).
+    /// The kernel has no L2 seg6local actions, so `route_sid_install`
+    /// skips netlink for these; the cradle eBPF tee is the data plane.
+    fn send_vni_l2_sid_add(
+        &self,
+        vni: u32,
+        addr: std::net::Ipv6Addr,
+        behavior: crate::rib::SidBehavior,
+    ) {
+        let sid = crate::rib::Sid {
+            addr,
+            behavior,
+            context: crate::rib::SidContext::None,
+            owner: crate::rib::SidOwner::new("bgp", 0),
+            locator: self.srv6_locator_name.clone().unwrap_or_default(),
+            allocation_type: crate::rib::SidAllocationType::Dynamic,
+            ifindex: 0,
+            nh6: None,
+            structure: None,
+            table_id: vni,
+            segs: Vec::new(),
+        };
+        let _ = self.ctx.rib.send(crate::rib::Message::SidAdd { sid });
+    }
+
     /// Allocate (or return the existing) `End.DT2M` SID for `vni`, carved from
     /// the resolved locator. Stable per VNI for as long as it originates;
     /// `None` when no locator has resolved or the function band is exhausted.
@@ -1401,6 +1438,8 @@ impl Bgp {
                     .ctx
                     .rib
                     .send(crate::rib::Message::ReplLeafAdd { vni, sid: addr });
+                // And the SID registry / cradle tee (decap + BD flood there).
+                self.send_vni_l2_sid_add(vni, addr, crate::rib::SidBehavior::EndDT2M);
                 Some(addr)
             }
             None => {
@@ -1413,10 +1452,54 @@ impl Bgp {
     /// Release `vni`'s `End.DT2M` SID back to the pool (it stopped
     /// originating). No-op if it had none (e.g. no locator was resolved).
     pub(super) fn free_vni_dt2m_sid(&mut self, vni: u32) {
-        if let Some((_addr, function)) = self.evpn_dt2m_sids.remove(&vni) {
+        if let Some((addr, function)) = self.evpn_dt2m_sids.remove(&vni) {
             self.srv6_sid_pool.release(function);
             let _ = self.ctx.rib.send(crate::rib::Message::ReplLeafDel { vni });
+            let _ = self.ctx.rib.send(crate::rib::Message::SidDel { addr });
         }
+    }
+
+    /// Allocate (or return the existing) `End.DT2U` SID for `vni` — the
+    /// EVPN-over-SRv6 unicast service SID (RFC 9252 §6.1/§6.2), advertised
+    /// on every Type-2 the VNI originates under `encapsulation srv6`.
+    fn alloc_vni_dt2u_sid(&mut self, vni: u32) -> Option<std::net::Ipv6Addr> {
+        if let Some((addr, _function)) = self.evpn_dt2u_sids.get(&vni) {
+            return Some(*addr);
+        }
+        let prefix = self.srv6_locator.as_ref().and_then(|l| l.prefix)?;
+        let function = self.srv6_sid_pool.allocate()?;
+        match crate::isis::srv6::function_addr(prefix, function) {
+            Some(addr) => {
+                self.evpn_dt2u_sids.insert(vni, (addr, function));
+                self.send_vni_l2_sid_add(vni, addr, crate::rib::SidBehavior::EndDT2U);
+                Some(addr)
+            }
+            None => {
+                self.srv6_sid_pool.release(function);
+                None
+            }
+        }
+    }
+
+    /// Release `vni`'s `End.DT2U` SID back to the pool.
+    pub(super) fn free_vni_dt2u_sid(&mut self, vni: u32) {
+        if let Some((addr, function)) = self.evpn_dt2u_sids.remove(&vni) {
+            self.srv6_sid_pool.release(function);
+            let _ = self.ctx.rib.send(crate::rib::Message::SidDel { addr });
+        }
+    }
+
+    /// Build the SRv6 L2 Service Prefix-SID attribute advertised on `vni`'s
+    /// Type-2 MAC/IP routes — this PE's `End.DT2U` SID for the VNI. `None`
+    /// when no locator has resolved.
+    pub(super) fn vni_dt2u_prefix_sid(&mut self, vni: u32) -> Option<bgp_packet::PrefixSid> {
+        let sid = self.alloc_vni_dt2u_sid(vni)?;
+        let structure = self.srv6_locator.as_ref().and_then(|l| l.sid_structure());
+        Some(srv6_l2_service_prefix_sid(
+            sid,
+            structure,
+            bgp_packet::SRV6_BEHAVIOR_END_DT2U,
+        ))
     }
 
     /// Build the SRv6 L2 Service Prefix-SID attribute advertised on `vni`'s
@@ -1456,9 +1539,11 @@ impl Bgp {
         // maps to a now-invalid address. Throw the pool away and
         // re-allocate from the base under the new prefix.
         self.srv6_sid_pool.reset();
-        // Per-VNI End.DT2M SIDs were carved from the same pool; drop them so
-        // the next Type-3 (re)origination re-allocates under the new prefix.
+        // Per-VNI End.DT2M / End.DT2U SIDs were carved from the same pool;
+        // drop them so the next (re)origination re-allocates under the new
+        // prefix.
         self.evpn_dt2m_sids.clear();
+        self.evpn_dt2u_sids.clear();
         let srv6_vrfs: Vec<String> = self
             .vrf_registry
             .keys()
