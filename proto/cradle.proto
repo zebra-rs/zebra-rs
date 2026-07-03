@@ -30,6 +30,8 @@ message Nexthop {
   uint32 oif_index = 4;   // output ifindex; preferred when non-zero
   bool v6 = 5;            // IPv6 nexthop (gateway parsed as IPv6)
   repeated uint32 labels = 6;  // MPLS out-label stack, [0] = outermost
+  repeated string segs = 7;    // SRv6 SID list, forwarding order ([0] = outer DA)
+  uint32 encap_mode = 8;       // H.Encap | H.Encap.Red (carried; Phase 1 = reduced)
 }
 
 // A nexthop group for ECMP: ordered member nexthop ids. A route whose flags
@@ -72,11 +74,34 @@ message Route6 {
   string prefix = 1;   // "addr/len"
   uint32 nexthop_id = 2;
   uint32 flags = 3;
+  uint32 vrf_table_id = 4;  // 0 = global (feeds FIB6_VRF)
 }
 
 message Route6Del {
   string prefix = 1;
+  uint32 vrf_table_id = 2;
 }
+
+// An SRv6 local SID (seg6local) — mirrors zebra's route_sid_install. Phase 1
+// implements the End.DT4/DT6/DT46 behaviors; other fields are carried so
+// later phases (End.X, uN/uA, End.B6) need no ABI break.
+message LocalSid {
+  string sid          = 1;   // SID address (or locator prefix for uSID)
+  uint32 prefix_len   = 2;   // /128 for End/End.X/End.DT*; masked for uSID
+  uint32 behavior     = 3;   // SRV6_BH_* value
+  uint32 vrf_table_id = 4;   // End.DT* table (0 = global)
+  uint32 oif          = 5;   // seg6 device (End/uN) or egress link (End.X)
+  string nh6          = 6;   // adjacency IPv6 for End.X / uA
+  uint32 lb_bits = 7; uint32 ln_bits = 8; uint32 fun_bits = 9; uint32 arg_bits = 10;
+  uint32 nexthop_id = 11;    // cross-connect adjacency for End.X (into NEXTHOPS)
+}
+
+message LocalSidDel {
+  string sid = 1;
+  uint32 prefix_len = 2;
+}
+
+message Srv6EncapSource { string addr = 1; }  // outer IPv6 SA for H.Encaps
 
 message Neighbor4 {
   string oif = 1;       // interface name (used when oif_index == 0)
@@ -162,6 +187,9 @@ service Cradle {
   rpc SetNeighbor6(Neighbor6) returns (Empty);
   rpc AddIlm(Ilm) returns (Empty);
   rpc DelIlm(IlmDel) returns (Empty);
+  rpc AddLocalSid(LocalSid) returns (Empty);
+  rpc DelLocalSid(LocalSidDel) returns (Empty);
+  rpc SetSrv6EncapSource(Srv6EncapSource) returns (Empty);
   rpc AddService(Service) returns (Empty);
   rpc GetStats(StatsRequest) returns (StatsReply);
   rpc AddL7Service(L7Service) returns (Empty);

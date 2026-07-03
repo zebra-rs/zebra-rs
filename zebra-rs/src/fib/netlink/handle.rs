@@ -328,43 +328,25 @@ pub struct FibHandle {
     pub cradle: Option<CradleFib>,
 }
 
-/// Extract all IPv4 `(gateway, oif, out-label stack)` members of a nexthop
-/// for the cradle tee. A single member installs a plain route; multiple
-/// members install an ECMP group. A non-empty label stack makes the leg an
-/// MPLS imposition. (Protect/backup nexthops are not teed.)
-fn cradle_members_v4(nexthop: &Nexthop) -> Vec<(Option<Ipv4Addr>, u32, Vec<u32>)> {
-    fn member(u: &NexthopUni) -> (Option<Ipv4Addr>, u32, Vec<u32>) {
-        let oif = u.ifindex().unwrap_or(0);
-        let gw = match u.addr {
-            IpAddr::V4(a) if !a.is_unspecified() => Some(a),
-            _ => None,
-        };
-        (gw, oif, u.mpls_label.clone())
-    }
-    match nexthop {
-        Nexthop::Uni(u) => vec![member(u)],
-        Nexthop::Multi(m) => m.nexthops.iter().map(member).collect(),
-        Nexthop::List(l) => l
-            .nexthops
-            .iter()
-            .filter_map(|m| match m {
-                NexthopMember::Uni(u) => Some(member(u)),
-                _ => None,
-            })
-            .collect(),
-        _ => vec![],
-    }
-}
+/// A cradle-tee route member — mirrors `crate::fib::cradle::Member`:
+/// `(link gateway, oif, MPLS out-labels, SRv6 segment list, SRv6 encap mode)`.
+/// A non-empty `segs` makes it an SRv6 (v6-underlay) nexthop; MPLS labels and
+/// SRv6 segs are mutually exclusive per nexthop.
+type CradleMember = (Option<IpAddr>, u32, Vec<u32>, Vec<std::net::Ipv6Addr>, u32);
 
-/// IPv6 counterpart of [`cradle_members_v4`].
-fn cradle_members_v6(nexthop: &Nexthop) -> Vec<(Option<Ipv6Addr>, u32, Vec<u32>)> {
-    fn member(u: &NexthopUni) -> (Option<Ipv6Addr>, u32, Vec<u32>) {
+/// Extract a nexthop's cradle-tee members. The gateway is passed as the raw
+/// `IpAddr` (v4 for plain/MPLS legs, v6 for the SRv6 underlay), plus the MPLS
+/// out-label stack and the SRv6 segment list + encap mode. (Protect/backup
+/// nexthops are not teed.)
+fn cradle_members(nexthop: &Nexthop) -> Vec<CradleMember> {
+    fn member(u: &NexthopUni) -> CradleMember {
         let oif = u.ifindex().unwrap_or(0);
         let gw = match u.addr {
-            IpAddr::V6(a) if !a.is_unspecified() => Some(a),
-            _ => None,
+            a if a.is_unspecified() => None,
+            a => Some(a),
         };
-        (gw, oif, u.mpls_label.clone())
+        let encap_mode = crate::fib::cradle::srv6_encap_mode(u.encap_type);
+        (gw, oif, u.mpls_label.clone(), u.segs.clone(), encap_mode)
     }
     match nexthop {
         Nexthop::Uni(u) => vec![member(u)],
@@ -660,7 +642,7 @@ impl FibHandle {
             return true;
         }
         if let Some(cradle) = &self.cradle {
-            let members = cradle_members_v4(&entry.nexthop);
+            let members = cradle_members(&entry.nexthop);
             if !members.is_empty() {
                 cradle.route_install(*prefix, table_id, members).await;
             }
@@ -1099,7 +1081,7 @@ impl FibHandle {
             return true;
         }
         if let Some(cradle) = &self.cradle {
-            let members = cradle_members_v6(&entry.nexthop);
+            let members = cradle_members(&entry.nexthop);
             if !members.is_empty() {
                 cradle.route_install6(*prefix, table_id, members).await;
             }
@@ -1618,6 +1600,11 @@ impl FibHandle {
         // constant for it, so hard-code. See linux/rtnetlink.h.
         let (table, kind, prefix_len, dest_addr) =
             sid_route_target(sid.behavior, sid.addr, sid.structure);
+        // Tee the local SID to the cradle eBPF data plane (mirrors the netlink
+        // install below) — the SRv6 analogue of the ILM tee.
+        if let Some(cradle) = &self.cradle {
+            cradle.local_sid_install(sid, prefix_len, ifindex).await;
+        }
         msg.header.table = table;
         msg.header.destination_prefix_length = prefix_len;
         msg.header.protocol = RouteProtocol::Isis;
@@ -1771,6 +1758,9 @@ impl FibHandle {
         // prefixlen, kind).
         let (table, kind, prefix_len, dest_addr) =
             sid_route_target(sid.behavior, sid.addr, sid.structure);
+        if let Some(cradle) = &self.cradle {
+            cradle.local_sid_uninstall(sid, prefix_len).await;
+        }
         msg.header.table = table;
         msg.header.destination_prefix_length = prefix_len;
         msg.header.protocol = RouteProtocol::Isis;

@@ -28,6 +28,40 @@ const FIB_F_ECMP: u32 = 1 << 3;
 pub const MPLS_OP_SWAP: u32 = 0;
 pub const MPLS_OP_POP_L3: u32 = 1;
 
+/// A teed route member: `(link gateway, oif, MPLS out-labels, SRv6 segment
+/// list, SRv6 encap mode)`. A non-empty `segs` makes it an SRv6 (v6-underlay)
+/// nexthop regardless of the route's family; `labels` and `segs` are mutually
+/// exclusive.
+type Member = (Option<IpAddr>, u32, Vec<u32>, Vec<Ipv6Addr>, u32);
+
+/// Map zebra's `SidBehavior` to cradle's `SRV6_BH_*` (data-plane ABI). cradle
+/// executes End/End.X/End.DT4/DT6/DT46; uN/uA/B6/M are teed but the datapath
+/// passes them (they never match in single-service-SID L3VPN).
+fn srv6_behavior(b: crate::rib::SidBehavior) -> u32 {
+    use crate::rib::SidBehavior::*;
+    match b {
+        End => 0,
+        EndX => 1,
+        EndDT4 => 2,
+        EndDT6 => 3,
+        EndDT46 => 4,
+        EndB6Encap => 5,
+        UN => 6,
+        UA | UALib => 7,
+        EndM => 3, // mirror-context ~ End.DT6 (best-effort; not implemented)
+    }
+}
+
+/// Map an H.Encaps `EncapType` to cradle's `encap_mode`. cradle emits reduced
+/// single-SID form regardless, so this only annotates.
+pub fn srv6_encap_mode(t: Option<isis_packet::srv6::EncapType>) -> u32 {
+    use isis_packet::srv6::EncapType;
+    match t {
+        Some(EncapType::HEncapRed | EncapType::HEncapL2Red) => 1,
+        _ => 0,
+    }
+}
+
 /// Map a kernel routing-table id to cradle's VRF-table convention: 0 is
 /// global, and so is RT_TABLE_MAIN (254) — connected routes arrive with it.
 /// Any other value is the RIB-allocated VRF table id, which is byte-identical
@@ -47,7 +81,11 @@ pub struct CradleFib {
     /// `SetNexthop` once per distinct nexthop.
     nh_ids: Arc<Mutex<HashMap<(u32, u32, Vec<u32>), u32>>>,
     nh_ids6: Arc<Mutex<HashMap<([u8; 16], u32, Vec<u32>), u32>>>,
+    /// SRv6 nexthop dedup: `(underlay gateway, oif, segment list) -> id`.
+    nh_ids_srv6: Arc<Mutex<HashMap<([u8; 16], u32, Vec<[u8; 16]>), u32>>>,
     next_id: Arc<AtomicU32>,
+    /// The SRv6 H.Encaps source is pushed once (best-effort).
+    encap_src_set: Arc<std::sync::atomic::AtomicBool>,
 }
 
 impl CradleFib {
@@ -65,7 +103,9 @@ impl CradleFib {
             client: Arc::new(Mutex::new(None)),
             nh_ids: Arc::new(Mutex::new(HashMap::new())),
             nh_ids6: Arc::new(Mutex::new(HashMap::new())),
+            nh_ids_srv6: Arc::new(Mutex::new(HashMap::new())),
             next_id: Arc::new(AtomicU32::new(1)),
+            encap_src_set: Arc::new(std::sync::atomic::AtomicBool::new(false)),
         }
     }
 
@@ -110,24 +150,76 @@ impl CradleFib {
                 oif_index: oif,
                 v6: false,
                 labels: labels.to_vec(),
+                segs: Vec::new(),
+                encap_mode: 0,
             })
             .await?;
         self.nh_ids.lock().await.insert(key, id);
         Ok(id)
     }
 
-    /// Install an IPv4 route with one or more nexthops. A single member becomes
-    /// a plain route; multiple members become an ECMP nexthop group. Each
-    /// member is `(gateway, oif, out-label stack)` — a non-empty stack makes
-    /// the leg an MPLS imposition (ingress LER). `table_id` is the kernel
-    /// routing table the route belongs to; VRF tables map to cradle's
-    /// per-VRF FIB.
-    pub async fn route_install(
+    /// Resolve (creating if needed) an SRv6-encap nexthop id: a v6 underlay
+    /// nexthop (`gw6`/`oif`) that imposes the segment list `segs` (H.Encaps).
+    async fn srv6_nexthop_id(
         &self,
-        prefix: Ipv4Net,
-        table_id: u32,
-        members: Vec<(Option<Ipv4Addr>, u32, Vec<u32>)>,
-    ) {
+        gw6: Option<Ipv6Addr>,
+        oif: u32,
+        segs: &[Ipv6Addr],
+        encap_mode: u32,
+    ) -> anyhow::Result<u32> {
+        let key = (
+            gw6.map(|a| a.octets()).unwrap_or([0; 16]),
+            oif,
+            segs.iter().map(|a| a.octets()).collect::<Vec<_>>(),
+        );
+        {
+            let ids = self.nh_ids_srv6.lock().await;
+            if let Some(id) = ids.get(&key) {
+                return Ok(*id);
+            }
+        }
+        let id = self.next_id.fetch_add(1, Ordering::Relaxed);
+        self.client()
+            .await?
+            .set_nexthop(pb::Nexthop {
+                id,
+                gateway: gw6.map(|a| a.to_string()).unwrap_or_default(),
+                oif: String::new(),
+                oif_index: oif,
+                v6: true,
+                labels: Vec::new(),
+                segs: segs.iter().map(|a| a.to_string()).collect(),
+                encap_mode,
+            })
+            .await?;
+        self.nh_ids_srv6.lock().await.insert(key, id);
+        Ok(id)
+    }
+
+    /// Resolve a teed member to a cradle nexthop id. SRv6 members (non-empty
+    /// `segs`) are always v6-underlay; otherwise the family follows the
+    /// gateway, or `route_v6` for an on-link (gateway-less) member.
+    async fn member_nexthop_id(&self, m: &Member, route_v6: bool) -> anyhow::Result<u32> {
+        let (gw, oif, labels, segs, encap_mode) = m;
+        if !segs.is_empty() {
+            let gw6 = match gw {
+                Some(IpAddr::V6(a)) => Some(*a),
+                _ => None,
+            };
+            return self.srv6_nexthop_id(gw6, *oif, segs, *encap_mode).await;
+        }
+        match gw {
+            Some(IpAddr::V4(a)) => self.nexthop_id(Some(*a), *oif, labels).await,
+            Some(IpAddr::V6(a)) => self.nexthop_id6(Some(*a), *oif, labels).await,
+            None if route_v6 => self.nexthop_id6(None, *oif, labels).await,
+            None => self.nexthop_id(None, *oif, labels).await,
+        }
+    }
+
+    /// Install an IPv4 route with one or more nexthops. A single member becomes
+    /// a plain route; multiple members become an ECMP nexthop group. `table_id`
+    /// is the kernel routing table; VRF tables map to cradle's per-VRF FIB.
+    pub async fn route_install(&self, prefix: Ipv4Net, table_id: u32, members: Vec<Member>) {
         if let Err(e) = self.try_route_install(prefix, table_id, members).await {
             tracing::warn!("fib: cradle route_install {prefix} failed: {e}");
         }
@@ -137,15 +229,14 @@ impl CradleFib {
         &self,
         prefix: Ipv4Net,
         table_id: u32,
-        members: Vec<(Option<Ipv4Addr>, u32, Vec<u32>)>,
+        members: Vec<Member>,
     ) -> anyhow::Result<()> {
         if members.is_empty() {
             return Ok(());
         }
         let vrf_table_id = cradle_vrf(table_id);
         if members.len() == 1 {
-            let (gw, oif, labels) = &members[0];
-            let id = self.nexthop_id(*gw, *oif, labels).await?;
+            let id = self.member_nexthop_id(&members[0], false).await?;
             self.client()
                 .await?
                 .add_route4(pb::Route4 {
@@ -159,8 +250,8 @@ impl CradleFib {
         }
         // ECMP: one nexthop per member, then a group the route points at.
         let mut ids = Vec::with_capacity(members.len());
-        for (gw, oif, labels) in &members {
-            ids.push(self.nexthop_id(*gw, *oif, labels).await?);
+        for m in &members {
+            ids.push(self.member_nexthop_id(m, false).await?);
         }
         let gid = self.next_id.fetch_add(1, Ordering::Relaxed);
         let mut client = self.client().await?;
@@ -229,6 +320,8 @@ impl CradleFib {
                 oif_index: oif,
                 v6: true,
                 labels: labels.to_vec(),
+                segs: Vec::new(),
+                encap_mode: 0,
             })
             .await?;
         self.nh_ids6.lock().await.insert(key, id);
@@ -236,22 +329,10 @@ impl CradleFib {
     }
 
     /// Install an IPv6 route with one or more nexthops (single = plain route,
-    /// multiple = ECMP nexthop group).
-    pub async fn route_install6(
-        &self,
-        prefix: Ipv6Net,
-        table_id: u32,
-        members: Vec<(Option<Ipv6Addr>, u32, Vec<u32>)>,
-    ) {
-        // cradle has no per-VRF v6 FIB yet: skip VRF-scoped v6 routes rather
-        // than leak them into the global table.
-        if cradle_vrf(table_id) != 0 {
-            tracing::debug!(
-                "fib: cradle route_install6 {prefix}: v6 VRF tee not supported, skipped"
-            );
-            return;
-        }
-        if let Err(e) = self.try_route_install6(prefix, members).await {
+    /// multiple = ECMP nexthop group). VRF tables map to cradle's per-VRF v6
+    /// FIB (`FIB6_VRF`).
+    pub async fn route_install6(&self, prefix: Ipv6Net, table_id: u32, members: Vec<Member>) {
+        if let Err(e) = self.try_route_install6(prefix, table_id, members).await {
             tracing::warn!("fib: cradle route_install6 {prefix} failed: {e}");
         }
     }
@@ -259,27 +340,29 @@ impl CradleFib {
     async fn try_route_install6(
         &self,
         prefix: Ipv6Net,
-        members: Vec<(Option<Ipv6Addr>, u32, Vec<u32>)>,
+        table_id: u32,
+        members: Vec<Member>,
     ) -> anyhow::Result<()> {
         if members.is_empty() {
             return Ok(());
         }
+        let vrf_table_id = cradle_vrf(table_id);
         if members.len() == 1 {
-            let (gw, oif, labels) = &members[0];
-            let id = self.nexthop_id6(*gw, *oif, labels).await?;
+            let id = self.member_nexthop_id(&members[0], true).await?;
             self.client()
                 .await?
                 .add_route6(pb::Route6 {
                     prefix: prefix.to_string(),
                     nexthop_id: id,
                     flags: 0,
+                    vrf_table_id,
                 })
                 .await?;
             return Ok(());
         }
         let mut ids = Vec::with_capacity(members.len());
-        for (gw, oif, labels) in &members {
-            ids.push(self.nexthop_id6(*gw, *oif, labels).await?);
+        for m in &members {
+            ids.push(self.member_nexthop_id(m, true).await?);
         }
         let gid = self.next_id.fetch_add(1, Ordering::Relaxed);
         let mut client = self.client().await?;
@@ -294,20 +377,19 @@ impl CradleFib {
                 prefix: prefix.to_string(),
                 nexthop_id: gid,
                 flags: FIB_F_ECMP,
+                vrf_table_id,
             })
             .await?;
         Ok(())
     }
 
     pub async fn route_del6(&self, prefix: Ipv6Net, table_id: u32) {
-        if cradle_vrf(table_id) != 0 {
-            return; // v6 VRF routes are never teed (see route_install6)
-        }
         let result = async {
             self.client()
                 .await?
                 .del_route6(pb::Route6Del {
                     prefix: prefix.to_string(),
+                    vrf_table_id: cradle_vrf(table_id),
                 })
                 .await?;
             anyhow::Ok(())
@@ -365,6 +447,81 @@ impl CradleFib {
         .await;
         if let Err(e) = result {
             tracing::warn!("fib: cradle ilm_uninstall {in_label} failed: {e}");
+        }
+    }
+
+    /// Install an SRv6 local SID (seg6local) into the cradle data plane —
+    /// the SRv6 analogue of the ILM tee. Maps the behavior to `SRV6_BH_*`;
+    /// `End.DT*` carry the VRF table id; `End.X`/`uA` resolve their
+    /// cross-connect adjacency (`nh6`) to a cradle nexthop.
+    pub async fn local_sid_install(&self, sid: &crate::rib::Sid, prefix_len: u8, ifindex: u32) {
+        let result = async {
+            let nexthop_id = match sid.nh6 {
+                Some(nh6) => self.nexthop_id6(Some(nh6), ifindex, &[]).await?,
+                None => 0,
+            };
+            let (lb, ln, fun, arg) = sid
+                .structure
+                .map(|s| (s.lb_bits, s.ln_bits, s.fun_bits, s.arg_bits))
+                .unwrap_or((0, 0, 0, 0));
+            self.client()
+                .await?
+                .add_local_sid(pb::LocalSid {
+                    sid: sid.addr.to_string(),
+                    prefix_len: prefix_len as u32,
+                    behavior: srv6_behavior(sid.behavior),
+                    vrf_table_id: cradle_vrf(sid.table_id),
+                    oif: ifindex,
+                    nh6: sid.nh6.map(|a| a.to_string()).unwrap_or_default(),
+                    lb_bits: lb as u32,
+                    ln_bits: ln as u32,
+                    fun_bits: fun as u32,
+                    arg_bits: arg as u32,
+                    nexthop_id,
+                })
+                .await?;
+            anyhow::Ok(())
+        }
+        .await;
+        if let Err(e) = result {
+            tracing::warn!("fib: cradle local_sid_install {} failed: {e}", sid.addr);
+        }
+        // Best-effort: the SRv6 H.Encaps outer source (zebra has no explicit
+        // config for it). A local SID is in the node's locator, so its
+        // address is a routable node source; forwarding does not depend on it.
+        // Set it once, from the first local SID installed.
+        if self.encap_src_set.swap(true, Ordering::Relaxed) {
+            return;
+        }
+        if let Err(e) = async {
+            self.client()
+                .await?
+                .set_srv6_encap_source(pb::Srv6EncapSource {
+                    addr: sid.addr.to_string(),
+                })
+                .await?;
+            anyhow::Ok(())
+        }
+        .await
+        {
+            tracing::debug!("fib: cradle set_srv6_encap_source failed: {e}");
+        }
+    }
+
+    pub async fn local_sid_uninstall(&self, sid: &crate::rib::Sid, prefix_len: u8) {
+        let result = async {
+            self.client()
+                .await?
+                .del_local_sid(pb::LocalSidDel {
+                    sid: sid.addr.to_string(),
+                    prefix_len: prefix_len as u32,
+                })
+                .await?;
+            anyhow::Ok(())
+        }
+        .await;
+        if let Err(e) = result {
+            tracing::warn!("fib: cradle local_sid_uninstall {} failed: {e}", sid.addr);
         }
     }
 
