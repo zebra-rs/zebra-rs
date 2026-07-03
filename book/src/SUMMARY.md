@@ -12,6 +12,7 @@
 - [Static Route](ch-01-00-what-is-static-route.md)
   - [Floating Static Route](ch-01-01-floating-static-route.md)
   - [Recursive Static Route](ch-01-02-recursive-static-route.md)
+  - [Blackhole (Discard) Static Route](ch-01-03-blackhole-static-route.md)
 
 ## Routing Protocols
 
