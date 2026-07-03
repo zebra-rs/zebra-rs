@@ -60,6 +60,13 @@ impl Args {
         self.0.pop_front()
     }
 
+    /// Peek the next argument without consuming it. Used where a
+    /// list-key position accepts a keyword (e.g. static `nexthop
+    /// blackhole`) alongside a typed value.
+    pub fn peek_str(&self) -> Option<&str> {
+        self.0.front().map(|s| s.as_str())
+    }
+
     pub fn u8(&mut self) -> Option<u8> {
         arg_parse_type!(self, u8);
     }

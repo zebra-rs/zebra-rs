@@ -39,8 +39,16 @@ module config-static {
         list nexthop {
           key "address";
           leaf "address" {
-            type inet:ipv4-address;
-            description "Nexthop of the route";
+            type union {
+              type inet:ipv4-address;
+              // `blackhole` at the nexthop-key position turns the
+              // route into a discard route (kernel RTN_BLACKHOLE),
+              // satisfying the route's `ext:non-empty "nexthop"`.
+              type enumeration {
+                enum blackhole;
+              }
+            }
+            description "Nexthop address, or `blackhole` to discard";
           }
           leaf "outgoing-label" {
             type uint32;
@@ -64,8 +72,16 @@ module config-static {
         list nexthop {
           key "address";
           leaf "address" {
-            type inet:ipv4-address;
-            description "Nexthop of the route";
+            type union {
+              type inet:ipv4-address;
+              // `blackhole` at the nexthop-key position turns the
+              // route into a discard route (kernel RTN_BLACKHOLE),
+              // satisfying the route's `ext:non-empty "nexthop"`.
+              type enumeration {
+                enum blackhole;
+              }
+            }
+            description "Nexthop address, or `blackhole` to discard";
           }
           leaf metric {
             type uint32;
@@ -82,6 +98,13 @@ module config-static {
         leaf distance {
           type uint8;
           description "Distance of the route.";
+        }
+        leaf blackhole {
+          type boolean;
+          description
+            "Discard route: matching traffic is dropped in the
+             forwarding plane (kernel RTN_BLACKHOLE) with no
+             nexthop. Mutually exclusive with `nexthop`.";
         }
         leaf metric {
           type uint32;
@@ -188,8 +211,13 @@ module config-static {
         list nexthop {
           key "address";
           leaf "address" {
-            type inet:ipv6-address;
-            description "Nexthop of the route";
+            type union {
+              type inet:ipv6-address;
+              type enumeration {
+                enum blackhole;
+              }
+            }
+            description "Nexthop address, or `blackhole` to discard";
           }
           leaf metric {
             type uint32;
@@ -203,6 +231,13 @@ module config-static {
         leaf distance {
           type uint8;
           description "Distance of the route.";
+        }
+        leaf blackhole {
+          type boolean;
+          description
+            "Discard route: matching traffic is dropped in the
+             forwarding plane (kernel RTN_BLACKHOLE) with no
+             nexthop. Mutually exclusive with `nexthop`.";
         }
         leaf metric {
           type uint32;
