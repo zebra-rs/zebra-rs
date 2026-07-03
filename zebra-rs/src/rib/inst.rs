@@ -324,6 +324,14 @@ pub enum Message {
         vni: u32,
         mac: MacAddr,
     },
+    /// A MAC the cradle eBPF datapath learned on a local L2 port (via the
+    /// `WatchFdb` stream). Re-emitted to EVPN subscribers as a synthesized
+    /// `RibRx::FdbAdd` — the cradle analogue of a kernel bridge FDB learn —
+    /// so BGP originates a Type-2 for it.
+    CradleFdbLearn {
+        vni: u32,
+        mac: MacAddr,
+    },
     MdbAdd {
         vni: u32,
         group: IpAddr,
@@ -617,6 +625,10 @@ pub enum NeighborKey {
 }
 
 pub struct Rib {
+    /// The cradle `WatchFdb` subscriber task (datapath MAC learning →
+    /// EVPN Type-2 origination); aborted and respawned when the
+    /// `system cradle-grpc` endpoint changes.
+    pub cradle_fdb_watch: Option<tokio::task::JoinHandle<()>>,
     pub cm: ConfigChannel,
     pub show: ShowChannel,
     pub show_cb: HashMap<String, ShowCallback>,
@@ -832,6 +844,7 @@ impl Rib {
         let (tx, rx) = mpsc::unbounded_channel();
         let (inbound_tx, inbound_rx) = mpsc::unbounded_channel();
         let mut rib = Rib {
+            cradle_fdb_watch: None,
             cm: ConfigChannel::new(),
             show: ShowChannel::new(),
             show_cb: HashMap::new(),
@@ -2909,6 +2922,9 @@ impl Rib {
             Message::MacDel { vni, mac } => {
                 self.mac_del(vni, mac).await;
             }
+            Message::CradleFdbLearn { vni, mac } => {
+                self.cradle_fdb_learn(vni, mac);
+            }
             Message::MdbAdd {
                 vni,
                 group,
@@ -3198,13 +3214,67 @@ impl Rib {
         mut args: crate::config::Args,
         op: ConfigOp,
     ) -> Option<()> {
+        // Tear down any previous watcher before re-pointing/disabling.
+        if let Some(watch) = self.cradle_fdb_watch.take() {
+            watch.abort();
+        }
         if op.is_set() {
             let endpoint = args.string()?;
             self.fib_handle.set_cradle(Some(&endpoint));
+            // The reverse channel: subscribe to cradle's datapath MAC
+            // learning and feed each entry back into this RIB as a
+            // `CradleFdbLearn`, which re-emits it to EVPN subscribers.
+            // Reconnects with backoff for the daemon-lifetime.
+            let cradle = crate::fib::cradle::CradleFib::new(&endpoint);
+            let tx = self.tx.clone();
+            self.cradle_fdb_watch = Some(tokio::spawn(async move {
+                loop {
+                    match cradle.watch_fdb().await {
+                        Ok(mut stream) => {
+                            while let Ok(Some(ev)) = stream.message().await {
+                                let Ok(mac) = ev.mac.parse::<MacAddr>() else {
+                                    continue;
+                                };
+                                let _ = tx.send(Message::CradleFdbLearn { vni: ev.bd, mac });
+                            }
+                        }
+                        Err(e) => {
+                            tracing::debug!("rib: cradle WatchFdb connect failed: {e}");
+                        }
+                    }
+                    tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+                }
+            }));
         } else {
             self.fib_handle.set_cradle(None);
         }
         Some(())
+    }
+
+    /// A cradle-datapath MAC learn: synthesize the same `FdbEntry` a kernel
+    /// bridge learn produces (VNI = the cradle bridge domain) and dispatch
+    /// it to EVPN subscribers, so BGP originates a Type-2 exactly as it
+    /// would for a kernel-learned MAC. The VXLAN local address (the BGP
+    /// nexthop source) resolves from the VNI's vxlan device when one is
+    /// configured; router-id is the callers' fallback.
+    fn cradle_fdb_learn(&mut self, vni: u32, mac: MacAddr) {
+        if mac.is_multicast() {
+            return;
+        }
+        let vxlan_local = self
+            .links
+            .values()
+            .find(|link| link.vni == Some(vni))
+            .and_then(|link| link.vxlan_local);
+        let entry = FdbEntry {
+            vni,
+            mac,
+            ifindex: 0,
+            bridge_ifindex: 0,
+            flags: 0,
+            vxlan_local,
+        };
+        self.api_fdb_add(&entry);
     }
 
     async fn process_cm_msg(&mut self, msg: ConfigRequest) {

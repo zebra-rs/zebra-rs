@@ -120,6 +120,19 @@ message FdbRemoteDel {
   uint32 bd  = 2;
 }
 
+// Subscribe to datapath MAC learning (EVPN over SRv6): cradle streams every
+// locally-learned (mac, bridge-domain) so the control plane can originate
+// EVPN Type-2 routes for it. Only local entries are reported (never
+// FDB_F_REMOTE overlay entries or the BUM sentinel). Learns only — cradle
+// has no FDB aging yet; entries persist for the datapath's lifetime. On
+// (re)subscribe the full current set is replayed first.
+message WatchFdbRequest {}
+
+message FdbEvent {
+  string mac = 1;
+  uint32 bd  = 2;
+}
+
 message Neighbor4 {
   string oif = 1;       // interface name (used when oif_index == 0)
   string ip = 2;
@@ -209,6 +222,7 @@ service Cradle {
   rpc SetSrv6EncapSource(Srv6EncapSource) returns (Empty);
   rpc AddFdbRemote(FdbRemote) returns (Empty);
   rpc DelFdbRemote(FdbRemoteDel) returns (Empty);
+  rpc WatchFdb(WatchFdbRequest) returns (stream FdbEvent);
   rpc AddService(Service) returns (Empty);
   rpc GetStats(StatsRequest) returns (StatsReply);
   rpc AddL7Service(L7Service) returns (Empty);
