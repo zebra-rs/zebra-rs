@@ -67,6 +67,22 @@ impl Ospf<Ospfv3> {
                 config_ospfv3_area_redist_connected_metric_type,
             ),
             (
+                "/graceful-restart/helper-enabled",
+                config_ospfv3_gr_helper_enabled,
+            ),
+            (
+                "/graceful-restart/max-grace-period",
+                config_ospfv3_gr_max_grace_period,
+            ),
+            (
+                "/graceful-restart/helper-strict-lsa-checking",
+                config_ospfv3_gr_helper_strict_lsa_checking,
+            ),
+            (
+                "/graceful-restart/drain-time-ms",
+                config_ospfv3_gr_drain_time_ms,
+            ),
+            (
                 "/default-information/originate",
                 config_ospfv3_default_originate,
             ),
@@ -664,6 +680,53 @@ ospfv3_redist_handlers!(
     config_ospfv3_redist_bgp_metric_type,
     crate::rib::RibType::Bgp
 );
+
+/// `router ospfv3 / graceful-restart / helper-enabled` — v3 sibling
+/// of the v2 handler; writes the shared per-instance `gr_config`
+/// that the v3 helper entry reads.
+fn config_ospfv3_gr_helper_enabled(
+    ospf: &mut Ospf<Ospfv3>,
+    mut args: Args,
+    op: ConfigOp,
+) -> Option<()> {
+    let value = if op.is_set() { args.boolean()? } else { true };
+    ospf.gr_config.helper_enabled = value;
+    Some(())
+}
+
+/// `router ospfv3 / graceful-restart / max-grace-period`.
+fn config_ospfv3_gr_max_grace_period(
+    ospf: &mut Ospf<Ospfv3>,
+    mut args: Args,
+    op: ConfigOp,
+) -> Option<()> {
+    let value = if op.is_set() { args.u32()? } else { 1800 };
+    ospf.gr_config.max_grace_period = value;
+    Some(())
+}
+
+/// `router ospfv3 / graceful-restart / helper-strict-lsa-checking`.
+fn config_ospfv3_gr_helper_strict_lsa_checking(
+    ospf: &mut Ospf<Ospfv3>,
+    mut args: Args,
+    op: ConfigOp,
+) -> Option<()> {
+    let value = if op.is_set() { args.boolean()? } else { true };
+    ospf.gr_config.helper_strict_lsa_checking = value;
+    Some(())
+}
+
+/// `router ospfv3 / graceful-restart / drain-time-ms` (50..2000ms,
+/// default 200) — window between checkpoint write and process exit.
+fn config_ospfv3_gr_drain_time_ms(
+    ospf: &mut Ospf<Ospfv3>,
+    mut args: Args,
+    op: ConfigOp,
+) -> Option<()> {
+    let value = if op.is_set() { args.u32()? } else { 200 };
+    ospf.gr_config.drain_time_ms = value.clamp(50, 2000);
+    Some(())
+}
 
 /// v3 sibling of `ospf_sync_default_watch` (IPv6 default watch).
 fn ospfv3_sync_default_watch(ospf: &mut Ospf<Ospfv3>) {

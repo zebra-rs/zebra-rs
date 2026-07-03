@@ -27,7 +27,8 @@ configuration shape mirrors [the OSPFv2 chapter](ch-08-00-ospf.md)
 — a v3 config differs from v2 only in the top-level keyword
 (`router ospfv3`). The implementation is validated against FRR's
 `ospf6d` and by the BDD suite (adjacency, multi-area, NSSA,
-redistribution, SRv6, TI-LFA, router-id change, BFD topologies).
+redistribution, graceful restart, SRv6, TI-LFA, router-id change,
+BFD topologies).
 
 This chapter documents the OSPFv3 configuration surface. Where
 behavior is identical to OSPFv2 the pages summarize and link to the

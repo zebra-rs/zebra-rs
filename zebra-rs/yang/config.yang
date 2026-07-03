@@ -1389,6 +1389,32 @@ module config {
             }
           }
         }
+        // RFC 3623/5187 graceful-restart configuration — v3 sibling
+        // of the v2 block. Helper knobs plus the restarter drain
+        // window; the restart itself is operator-driven via
+        // `clear ospfv3 graceful-restart begin|commit|abort`.
+        container graceful-restart {
+          leaf helper-enabled {
+            type boolean;
+            default true;
+          }
+          leaf max-grace-period {
+            type uint32;
+            units "seconds";
+            default 1800;
+          }
+          leaf helper-strict-lsa-checking {
+            type boolean;
+            default true;
+          }
+          leaf drain-time-ms {
+            type uint32 {
+              range "50..2000";
+            }
+            units "milliseconds";
+            default 200;
+          }
+        }
         list area {
           key "area-id";
           leaf area-id {

@@ -5565,6 +5565,13 @@ impl Ospf<Ospfv3> {
         // v3 has no on-disk GR checkpoint load today, so nothing to
         // gate here (a per-VRF child would otherwise need the same
         // default-instance guard the v2 path uses).
+        // Restart-aware boot (v3): replay a fresh ospfv3 checkpoint
+        // before any adjacency forms. Only the default instance —
+        // per-VRF children have no checkpoint file.
+        if ospf.proto_label == "ospfv3" {
+            ospf.gr_restart_load_checkpoint_v3();
+        }
+
         ospf
     }
 
@@ -5619,6 +5626,19 @@ impl Ospf<Ospfv3> {
         if msg.op == ConfigOp::Clear {
             if path == "/clear/ospfv3/spf" {
                 self.clear_spf();
+            } else if path == "/clear/ospfv3/checkpoint/write" {
+                self.checkpoint_write_debug_v3();
+            } else if path == "/clear/ospfv3/checkpoint/clear" {
+                self.checkpoint_clear_debug_v3();
+            } else if path == "/clear/ospfv3/graceful-restart/begin" {
+                // Grace period / reason mirror the v2 defaults (120s,
+                // SoftwareRestart); optional args are deferred.
+                let _ =
+                    self.gr_restart_begin_v3(120, ospf_packet::GraceRestartReason::SoftwareRestart);
+            } else if path == "/clear/ospfv3/graceful-restart/abort" {
+                self.gr_restart_abort_v3();
+            } else if path == "/clear/ospfv3/graceful-restart/commit" {
+                let _ = self.gr_restart_commit_v3();
             } else if path == "/clear/ospfv3/neighbor" {
                 // v3 sibling of `clear ospf neighbor`. For v3 the
                 // `nbrs` map key already IS the Router-ID, but
@@ -6380,6 +6400,9 @@ impl Ospf<Ospfv3> {
     /// - After install, flood the LSA to every Exchange-or-later
     ///   neighbor in the area via `flood_self_originated_lsa`.
     pub fn router_lsa_originate(&mut self) {
+        if self.in_restart() {
+            return;
+        }
         // Router-LSAs are area-scoped (RFC 5340 §3.4.3): originate one
         // per area this router has enabled links in, each carrying only
         // that area's links. Previously hardcoded to AREA0, which left
@@ -6858,6 +6881,9 @@ impl Ospf<Ospfv3> {
     /// origination is diff-gated against the LSDB, so a converged
     /// topology re-floods nothing.
     pub fn abr_summary_originate_v3(&mut self) {
+        if self.in_restart() {
+            return;
+        }
         let attached: Vec<Ipv4Addr> = self
             .areas
             .iter()
@@ -7122,6 +7148,9 @@ impl Ospf<Ospfv3> {
     /// cannot see the E-bit of an ASBR in area B; these LSAs give it
     /// the ASBR reachability that AS-External route computation needs.
     pub fn abr_summary_asbr_originate_v3(&mut self) {
+        if self.in_restart() {
+            return;
+        }
         let attached: Vec<Ipv4Addr> = self
             .areas
             .iter()
@@ -7319,6 +7348,398 @@ impl Ospf<Ospfv3> {
         if let Some(lsa) = flushed {
             self.flood_self_originated_lsa(area_id, &lsa);
         }
+    }
+
+    /// True while a graceful restart (staged or post-reboot replay)
+    /// is in progress — v3 sibling of the v2 `in_restart`. Gates the
+    /// topology-affecting self-LSA originators so the LSDB restored
+    /// from the checkpoint re-floods byte-identical (helpers compare
+    /// against their snapshot).
+    pub fn in_restart(&self) -> bool {
+        self.restarting.is_some()
+    }
+
+    /// Build + install + link-scope-flood one v3 Grace-LSA
+    /// (RFC 5187 §3: LS type 0x000B, link-local scope, LS-ID = the
+    /// link's Interface ID). Body carries the GracePeriod and Reason
+    /// TLVs; the v2 IP-Interface-Address TLV is unused in v3 (the
+    /// LSA header identifies the interface).
+    fn originate_grace_lsa_v3(
+        &mut self,
+        ifindex: u32,
+        grace_period: u32,
+        reason: ospf_packet::GraceRestartReason,
+    ) -> bool {
+        use ospf_packet::{
+            GraceLsa, GraceTlv, OSPFV3_GRACE_LSA_TYPE, Ospfv3LsBody, Ospfv3LsaHeader,
+        };
+
+        let Some(link) = self.links.get(&ifindex) else {
+            return false;
+        };
+        if !link.enabled {
+            return false;
+        }
+        let area_id = link.area;
+        let link_state_id = link.interface_id;
+
+        let body = GraceLsa {
+            tlvs: vec![
+                GraceTlv::GracePeriod(grace_period),
+                GraceTlv::Reason(reason),
+            ],
+        };
+        let header = Ospfv3LsaHeader {
+            ls_age: 0,
+            ls_type: OSPFV3_GRACE_LSA_TYPE,
+            link_state_id,
+            advertising_router: self.router_id,
+            ls_seq_number: 0x8000_0001,
+            ls_checksum: 0,
+            length: 0,
+        };
+        let mut lsa = ospf_packet::Ospfv3Lsa {
+            h: header,
+            body: Ospfv3LsBody::Grace(body),
+            raw: None,
+        };
+
+        let key: super::lsdb::OspfLsaKey = (OSPFV3_GRACE_LSA_TYPE, link_state_id, self.router_id);
+        let flood_lsa = if let Some(area) = self.areas.get_mut(area_id) {
+            if let Some(existing) = area.lsdb.lookup_by_raw_key(key) {
+                lsa.h.ls_seq_number = seq_max(
+                    lsa.h.ls_seq_number,
+                    existing.h.ls_seq_number.saturating_add(1),
+                );
+            }
+            lsa.update();
+            let flood_lsa = lsa.clone();
+            area.lsdb.install_originated(lsa, &self.tx, Some(area_id));
+            Some(flood_lsa)
+        } else {
+            None
+        };
+        if let Some(lsa) = flood_lsa {
+            self.flood_link_scope_lsa(ifindex, &lsa);
+            true
+        } else {
+            false
+        }
+    }
+
+    /// Pre-age a previously-originated v3 Grace-LSA to MaxAge and
+    /// re-flood on `ifindex`. No-op when none exists.
+    fn flush_grace_lsa_v3(&mut self, ifindex: u32) {
+        use ospf_packet::OSPFV3_GRACE_LSA_TYPE;
+
+        let Some(link) = self.links.get(&ifindex) else {
+            return;
+        };
+        let area_id = link.area;
+        let key: super::lsdb::OspfLsaKey =
+            (OSPFV3_GRACE_LSA_TYPE, link.interface_id, self.router_id);
+        let flushed = if let Some(area) = self.areas.get_mut(area_id) {
+            area.lsdb.flush_lsa_by_raw_key(key, &self.tx, Some(area_id))
+        } else {
+            None
+        };
+        if let Some(lsa) = flushed {
+            self.flood_link_scope_lsa(ifindex, &lsa);
+        }
+    }
+
+    /// Stage a v3 graceful restart: flood Grace-LSAs on every enabled
+    /// interface, arm the auto-abort timer, and snapshot the
+    /// Full-neighbor count for the post-reboot exit check. v3 sibling
+    /// of `gr_restart_begin`; unlike v2 there is no Router-Info
+    /// gr_capable bit to advertise — the Grace-LSA is the sole entry
+    /// trigger (which FRR also accepts).
+    pub fn gr_restart_begin_v3(
+        &mut self,
+        grace_period: u32,
+        reason: ospf_packet::GraceRestartReason,
+    ) -> bool {
+        use super::neigh::RestartingState;
+        use crate::context::{Timer, TimerType};
+
+        if self.restarting.is_some() {
+            tracing::info!("[GR Restart v3] begin rejected — already staged");
+            return false;
+        }
+
+        let ifindices: Vec<u32> = self
+            .links
+            .iter()
+            .filter(|(_, link)| link.enabled)
+            .map(|(ifindex, _)| *ifindex)
+            .collect();
+        let mut originated = 0usize;
+        for ifindex in &ifindices {
+            if self.originate_grace_lsa_v3(*ifindex, grace_period, reason) {
+                originated += 1;
+            }
+        }
+
+        let tx = self.tx.clone();
+        let abort_timer = Timer::new(grace_period as u64, TimerType::Once, move || {
+            let tx = tx.clone();
+            async move {
+                let _ = tx.send(Message::GrRestartAbort);
+            }
+        });
+
+        let expected_full_count = self
+            .links
+            .values()
+            .flat_map(|link| link.nbrs.values())
+            .filter(|nbr| nbr.state == NfsmState::Full)
+            .count();
+        self.restarting = Some(RestartingState {
+            grace_period,
+            reason,
+            entered_at: tokio::time::Instant::now(),
+            abort_timer: Some(abort_timer),
+            expected_full_count,
+            current_full_count: 0,
+        });
+
+        tracing::info!(
+            "[GR Restart v3] staged: grace={}s, reason={:?}, {} Grace LSA(s) emitted",
+            grace_period,
+            reason,
+            originated
+        );
+        true
+    }
+
+    /// Commit a staged v3 restart: write the checkpoint to
+    /// `ospfv3.cbor`, arm the drain timer, and let the drain handler
+    /// exit the process for the supervisor to relaunch. v3 sibling of
+    /// `gr_restart_commit`.
+    pub fn gr_restart_commit_v3(&mut self) -> bool {
+        use super::checkpoint::{OspfCheckpoint, default_path};
+        use crate::context::Timer;
+
+        let Some(state) = self.restarting.as_ref() else {
+            tracing::warn!("[GR Restart v3] commit rejected — no restart staged");
+            return false;
+        };
+        let grace_period = state.grace_period;
+        let reason: u8 = state.reason.into();
+
+        let cp = OspfCheckpoint::from_instance_v3(self, grace_period, reason);
+        let path = default_path("ospfv3");
+        if let Err(e) = cp.write_to_path(&path) {
+            tracing::warn!(
+                "[GR Restart v3] commit aborted: checkpoint write to {} failed: {}",
+                path.display(),
+                e
+            );
+            return false;
+        }
+        tracing::info!(
+            "[GR Restart v3] committed: checkpoint at {} ({} areas, {} links), drain={}ms",
+            path.display(),
+            cp.areas.len(),
+            cp.links.len(),
+            self.gr_config.drain_time_ms
+        );
+
+        let tx = self.tx.clone();
+        let drain_ms = self.gr_config.drain_time_ms as u64;
+        let drain_timer = Timer::once_ms(drain_ms, move || {
+            let tx = tx.clone();
+            async move {
+                let _ = tx.send(Message::GrRestartExit);
+            }
+        });
+        if let Some(state) = self.restarting.as_mut() {
+            state.abort_timer = Some(drain_timer);
+        }
+        true
+    }
+
+    /// Abort a staged v3 restart: flush the Grace-LSAs and resume
+    /// normal operation. v3 sibling of `gr_restart_abort`.
+    pub fn gr_restart_abort_v3(&mut self) {
+        if self.restarting.take().is_none() {
+            return;
+        }
+
+        let ifindices: Vec<u32> = self
+            .links
+            .iter()
+            .filter(|(_, link)| link.enabled)
+            .map(|(ifindex, _)| *ifindex)
+            .collect();
+        for ifindex in &ifindices {
+            self.flush_grace_lsa_v3(*ifindex);
+        }
+        tracing::info!("[GR Restart v3] aborted; Grace LSAs flushed");
+    }
+
+    /// Exit-restart success — fired once `current_full_count`
+    /// reaches `expected_full_count`. Clears the `in_restart()`
+    /// gates, flushes the Grace-LSAs, and re-originates every
+    /// topology-affecting self-LSA at seq+1 so helpers see the
+    /// restart conclude cleanly. v3 sibling of
+    /// `gr_restart_exit_success`.
+    pub fn gr_restart_exit_success_v3(&mut self) {
+        if self.restarting.take().is_none() {
+            return;
+        }
+
+        let ifindices: Vec<u32> = self
+            .links
+            .iter()
+            .filter(|(_, link)| link.enabled)
+            .map(|(ifindex, _)| *ifindex)
+            .collect();
+
+        for ifindex in &ifindices {
+            self.flush_grace_lsa_v3(*ifindex);
+        }
+
+        // Re-originate at seq+1. Router-LSA covers topology; the
+        // per-area Intra-Area-Prefix and per-link Link/Network/
+        // E-Intra-Area-Prefix LSAs cover addressing and SR.
+        self.router_lsa_originate();
+        let area_ids: Vec<Ipv4Addr> = self.areas.iter().map(|(id, _)| *id).collect();
+        for area_id in area_ids {
+            self.router_intra_area_prefix_lsa_originate(area_id);
+        }
+        for ifindex in &ifindices {
+            self.link_lsa_originate(*ifindex);
+            self.network_lsa_originate(*ifindex);
+            self.ext_intra_area_prefix_v3_lsa_originate(*ifindex);
+        }
+
+        tracing::info!("[GR Restart v3] exit-restart success; LSAs re-originated at seq+1");
+    }
+
+    /// Debug helper mirroring the v2 `checkpoint_write_debug`.
+    pub fn checkpoint_write_debug_v3(&self) {
+        use super::checkpoint::{OspfCheckpoint, default_path};
+        let cp = OspfCheckpoint::from_instance_v3(self, 60, 1);
+        let path = default_path("ospfv3");
+        match cp.write_to_path(&path) {
+            Ok(()) => tracing::info!("[Checkpoint v3] wrote {}", path.display()),
+            Err(e) => tracing::warn!("[Checkpoint v3] write to {} failed: {}", path.display(), e),
+        }
+    }
+
+    /// Debug helper mirroring the v2 `checkpoint_clear_debug`.
+    pub fn checkpoint_clear_debug_v3(&self) {
+        use super::checkpoint::{OspfCheckpoint, default_path};
+        let path = default_path("ospfv3");
+        match OspfCheckpoint::delete(&path) {
+            Ok(()) => tracing::info!("[Checkpoint v3] deleted {}", path.display()),
+            Err(e) => tracing::warn!("[Checkpoint v3] delete {} failed: {}", path.display(), e),
+        }
+    }
+
+    /// Restart-aware boot: replay a fresh v3 checkpoint (router-id +
+    /// per-area LSDBs restored byte-identical) and enter restart mode
+    /// for the remaining grace window. v3 sibling of
+    /// `gr_restart_load_checkpoint`; `lan_adj_sids` has no v3
+    /// counterpart (SRv6 End.X SIDs re-reconcile per adjacency).
+    fn gr_restart_load_checkpoint_v3(&mut self) {
+        use super::checkpoint::{OspfCheckpoint, default_path};
+        use super::neigh::RestartingState;
+        use crate::context::{Timer, TimerType};
+        use std::time::{Duration, SystemTime};
+
+        let path = default_path("ospfv3");
+        let cp = match OspfCheckpoint::read_from_path(&path) {
+            Ok(cp) => cp,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return,
+            Err(e) => {
+                tracing::warn!(
+                    "[GR Restart v3] checkpoint at {} unreadable, cold-starting: {}",
+                    path.display(),
+                    e
+                );
+                return;
+            }
+        };
+
+        let max_age = Duration::from_secs((cp.grace_period_secs as u64).saturating_mul(3) / 2);
+        let age = SystemTime::now()
+            .duration_since(cp.written_at)
+            .unwrap_or(Duration::ZERO);
+        if age > max_age {
+            tracing::warn!(
+                "[GR Restart v3] checkpoint at {} stale (age {:?} > {:?}), cold-starting",
+                path.display(),
+                age,
+                max_age
+            );
+            let _ = OspfCheckpoint::delete(&path);
+            return;
+        }
+
+        self.router_id = cp.router_id;
+        let mut total_lsas = 0usize;
+        for area_cp in &cp.areas {
+            let area = self.areas.fetch(area_cp.area_id);
+            area.area_type.kind = area_cp.area_type_kind.into();
+            for snap in &area_cp.lsas {
+                let Some(lsa) = ospf_packet::Ospfv3Lsa::decode(&snap.body) else {
+                    tracing::warn!(
+                        "[GR Restart v3] failed to decode checkpointed LSA key={:?}, skipping",
+                        snap.key
+                    );
+                    continue;
+                };
+                if snap.self_originated {
+                    // The decoded LSA carries its exact wire bytes in
+                    // `raw`, so the re-flood matches helpers' snapshot
+                    // verbatim; install_originated arms hold/refresh.
+                    area.lsdb
+                        .install_originated(lsa, &self.tx, Some(area_cp.area_id));
+                } else {
+                    area.lsdb
+                        .insert_received_v3(lsa, &self.tx, Some(area_cp.area_id));
+                }
+                total_lsas += 1;
+            }
+        }
+
+        let remaining = max_age.saturating_sub(age);
+        let remaining_secs = remaining.as_secs().max(1);
+        let tx = self.tx.clone();
+        let abort_timer = Timer::new(remaining_secs, TimerType::Once, move || {
+            let tx = tx.clone();
+            async move {
+                let _ = tx.send(Message::GrRestartAbort);
+            }
+        });
+        let entered_at = tokio::time::Instant::now() - age;
+        let expected_full_count = cp
+            .links
+            .iter()
+            .flat_map(|l| l.neighbors.iter())
+            .filter(|n| n.was_full)
+            .count();
+        self.restarting = Some(RestartingState {
+            grace_period: cp.grace_period_secs,
+            reason: ospf_packet::GraceRestartReason::from(cp.restart_reason),
+            entered_at,
+            abort_timer: Some(abort_timer),
+            expected_full_count,
+            current_full_count: 0,
+        });
+
+        let _ = OspfCheckpoint::delete(&path);
+
+        tracing::info!(
+            "[GR Restart v3] restored from checkpoint at {}: router-id={}, {} area(s), {} LSA(s), grace remaining ~{:?}",
+            path.display(),
+            cp.router_id,
+            cp.areas.len(),
+            total_lsas,
+            remaining,
+        );
     }
 
     /// v3 mirror of v2's `is_nssa_translator_for`. RFC 3101 §3.1
@@ -8266,6 +8687,17 @@ impl Ospf<Ospfv3> {
             Message::GrHelperExpire(ifindex, router_id) => {
                 self.gr_helper_expire(ifindex, router_id);
             }
+            Message::GrRestartAbort => {
+                tracing::info!("[GR Restart v3] abort message received");
+                self.gr_restart_abort_v3();
+            }
+            Message::GrRestartExit => {
+                tracing::info!("[GR Restart v3] drain complete; exiting process");
+                std::process::exit(0);
+            }
+            Message::GrRestartExitSuccess => {
+                self.gr_restart_exit_success_v3();
+            }
             Message::NssaTranslateResync(area_id) => {
                 self.nssa_translate_resync(area_id);
             }
@@ -8317,6 +8749,9 @@ impl Ospf<Ospfv3> {
     /// Returns silently if `build_link_lsa(ifindex)` declines (the
     /// interface is unknown or disabled).
     pub fn link_lsa_originate(&mut self, ifindex: u32) {
+        if self.in_restart() {
+            return;
+        }
         use ospf_packet::OSPFV3_LINK_LSA_TYPE;
 
         let Some(mut lsa) = self.build_link_lsa(ifindex) else {
@@ -8461,6 +8896,9 @@ impl Ospf<Ospfv3> {
     /// `process_msg` — the link's address set changes when an
     /// interface joins or leaves the area.
     pub fn router_intra_area_prefix_lsa_originate(&mut self, area_id: Ipv4Addr) {
+        if self.in_restart() {
+            return;
+        }
         use ospf_packet::OSPFV3_INTRA_AREA_PREFIX_LSA_TYPE;
 
         let key: super::lsdb::OspfLsaKey = (OSPFV3_INTRA_AREA_PREFIX_LSA_TYPE, 0, self.router_id);
@@ -8512,6 +8950,9 @@ impl Ospf<Ospfv3> {
     /// interface ifindex so the per-link LSA gets a stable key
     /// across re-originations -- same convention as the v2 opaque-id.
     pub fn ext_intra_area_prefix_v3_lsa_originate(&mut self, ifindex: u32) {
+        if self.in_restart() {
+            return;
+        }
         use ipnet::Ipv6Net;
         use ospf_packet::OSPFV3_E_INTRA_AREA_PREFIX_LSA_TYPE;
 
@@ -9360,6 +9801,26 @@ impl Ospf<Ospfv3> {
             new_state
         );
 
+        // GR exit-restart: count fresh Full transitions against the
+        // checkpointed expectation; once every pre-restart adjacency
+        // is back, conclude the restart (v3 sibling of the v2 hook).
+        if new_state == NfsmState::Full
+            && old_state != NfsmState::Full
+            && let Some(state) = self.restarting.as_mut()
+        {
+            state.current_full_count = state.current_full_count.saturating_add(1);
+            if state.current_full_count >= state.expected_full_count
+                && state.expected_full_count > 0
+            {
+                tracing::info!(
+                    "[GR Restart v3] exit-restart triggered ({}/{} adjacencies recovered)",
+                    state.current_full_count,
+                    state.expected_full_count
+                );
+                let _ = self.tx.send(Message::GrRestartExitSuccess);
+            }
+        }
+
         // Adjacency-SID label allocation. Mirrors v2 (#850): each Full
         // adjacency claims one label out of the SRLB on transition
         // into Full and releases it on regression. Consumed by the
@@ -9437,6 +9898,9 @@ impl Ospf<Ospfv3> {
     /// otherwise installs the fresh LSA and floods it to every
     /// Exchange-or-later neighbor in the area.
     pub fn network_lsa_originate(&mut self, ifindex: u32) {
+        if self.in_restart() {
+            return;
+        }
         use ospf_packet::OSPFV3_NETWORK_LSA_TYPE;
 
         let Some(link) = self.links.get(&ifindex) else {

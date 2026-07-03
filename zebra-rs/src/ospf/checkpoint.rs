@@ -19,7 +19,14 @@
 //!   matching FRR's convention. Tests / dev workflows override via
 //!   `ZEBRA_OSPF_CHECKPOINT_DIR=<path>`.
 //!
-//! Scope: OSPFv2 only.
+//! Scope: OSPFv2 (`ospf.cbor`) and OSPFv3 (`ospfv3.cbor`). The
+//! serde shapes are wire-agnostic — LSDB keys are raw
+//! `(u16, u32, Ipv4Addr)` tuples and LSA bodies raw wire bytes —
+//! so both versions share the same container; only the
+//! `from_instance*` builders and the load-side decode differ.
+//! For v3, `NeighborCheckpoint::interface_addr` holds the
+//! neighbor's Router-ID (the v3 `nbrs` map key) rather than an
+//! interface address.
 
 use std::fs;
 use std::io::{self, Write};
@@ -240,6 +247,80 @@ impl OspfCheckpoint {
             areas,
             links,
             lan_adj_sids,
+        }
+    }
+
+    /// v3 sibling of [`Self::from_instance`]. Differences: LSAs emit
+    /// through the v3 codec (`Ospfv3Lsa::emit` is header+body in one
+    /// call), the neighbor key column carries the v3 `nbrs` map key
+    /// (the neighbor Router-ID), and `lan_adj_sids` stays empty —
+    /// v3 SRv6 End.X SIDs re-reconcile per adjacency after restart.
+    pub fn from_instance_v3(
+        ospf: &Ospf<super::version::Ospfv3>,
+        grace_period_secs: u32,
+        restart_reason: u8,
+    ) -> Self {
+        use bytes::BytesMut;
+        let areas = ospf
+            .areas
+            .iter()
+            .map(|(area_id, area)| {
+                let lsas = area
+                    .lsdb
+                    .tables
+                    .iter()
+                    .map(|(key, lsa)| {
+                        let mut buf = BytesMut::new();
+                        lsa.data.emit(&mut buf);
+                        LsaSnapshot {
+                            key: *key,
+                            ls_seq_number: lsa.data.h.ls_seq_number,
+                            ls_checksum: lsa.data.h.ls_checksum,
+                            body: buf.to_vec(),
+                            self_originated: lsa.data.h.advertising_router == ospf.router_id,
+                        }
+                    })
+                    .collect();
+                AreaCheckpoint {
+                    area_id: *area_id,
+                    area_type_kind: area.area_type.kind.into(),
+                    lsas,
+                }
+            })
+            .collect();
+
+        let links = ospf
+            .links
+            .iter()
+            .filter(|(_, link)| link.enabled)
+            .map(|(ifindex, link)| {
+                let neighbors = link
+                    .nbrs
+                    .iter()
+                    .map(|(router_id, nbr)| NeighborCheckpoint {
+                        router_id: nbr.ident.router_id,
+                        interface_addr: *router_id,
+                        was_full: nbr.state == super::nfsm::NfsmState::Full,
+                    })
+                    .collect();
+                LinkCheckpoint {
+                    ifindex: *ifindex,
+                    area_id: link.area,
+                    ifname: link.name.clone(),
+                    neighbors,
+                }
+            })
+            .collect();
+
+        Self {
+            format_version: CHECKPOINT_FORMAT_VERSION,
+            written_at: SystemTime::now(),
+            grace_period_secs,
+            restart_reason,
+            router_id: ospf.router_id,
+            areas,
+            links,
+            lan_adj_sids: Vec::new(),
         }
     }
 

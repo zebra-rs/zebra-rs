@@ -6,9 +6,6 @@ OSPFv3 features not yet implemented in zebra-rs:
   and suppression themselves are implemented.
 - Redistribution `route-map` filtering (the zebra-rs sources are
   connected, static, kernel, IS-IS, and BGP, matching v2).
-- Graceful-restart configuration and restarter mode — v3 is
-  helper-only with fixed defaults (v2 has both roles; `ospf6d` has
-  helper configuration and restarting support).
 - A native `router ospfv3` authentication config path — the
   RFC 7166 Authentication Trailer is implemented, but its keys are
   configured through the shared v2 interface tree (`ospf6d` has

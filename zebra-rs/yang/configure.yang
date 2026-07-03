@@ -245,6 +245,30 @@ module configure {
     }
     container ospfv3 {
       ext:help "OSPFv3 clear actions";
+      container checkpoint {
+        leaf write {
+          ext:help "Write the current instance state to /var/lib/zebra-rs/checkpoint/ospfv3.cbor";
+          type empty;
+        }
+        leaf clear {
+          ext:help "Delete the on-disk OSPFv3 graceful-restart checkpoint";
+          type empty;
+        }
+      }
+      container graceful-restart {
+        leaf begin {
+          ext:help "Stage a graceful restart: flood v3 Grace LSAs";
+          type empty;
+        }
+        leaf commit {
+          ext:help "Write the GR checkpoint, drain, and exit the process";
+          type empty;
+        }
+        leaf abort {
+          ext:help "Abort a staged graceful restart and resume normal operation";
+          type empty;
+        }
+      }
       // Force-recalculate the OSPFv3 SPF for every attached area.
       // Sibling of `clear ospf spf` for the v3 instance.
       leaf spf {

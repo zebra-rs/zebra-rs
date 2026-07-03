@@ -2884,6 +2884,27 @@ impl Ospfv3Lsa {
         Self { h, body, raw: None }
     }
 
+    /// Decode a complete OSPFv3 LSA (20-octet header + body) from
+    /// raw bytes — the v3 sibling of `OspfLsa::decode`, used by the
+    /// graceful-restart checkpoint replay. `raw` keeps the exact
+    /// input slice so a re-emit is byte-identical (helpers' LSA
+    /// snapshot comparison must pass verbatim); any later mutation
+    /// via `update()` invalidates it.
+    pub fn decode(bytes: &[u8]) -> Option<Self> {
+        let (_, h) = Ospfv3LsaHeader::parse_be(bytes).ok()?;
+        let total = h.length as usize;
+        let hdr = OSPFV3_LSA_HEADER_LEN as usize;
+        if total < hdr || bytes.len() < total {
+            return None;
+        }
+        let (_, body) = Ospfv3LsBody::parse_be(&bytes[hdr..total], h.ls_type).ok()?;
+        Some(Self {
+            h,
+            body,
+            raw: Some(bytes::Bytes::copy_from_slice(&bytes[..total])),
+        })
+    }
+
     pub fn emit(&self, buf: &mut BytesMut) {
         if let Some(raw) = self.raw.as_ref() {
             buf.put_slice(raw);
