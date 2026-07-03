@@ -585,6 +585,11 @@ fn show_ospf(ospf: &Ospf, _args: Args, json: bool) -> std::result::Result<String
         " MinLSInterval (self-LSA re-origination): {} ms",
         ospf.min_ls_interval_ms,
     )?;
+    writeln!(
+        buf,
+        " MinLSArrival (received-LSA rate limit): {} ms",
+        ospf.min_ls_arrival_ms,
+    )?;
     // TI-LFA compute telemetry for the same run (last-area-wins, like
     // `spf_duration`). None while TI-LFA is disabled.
     if let Some(stats) = &ospf.tilfa_stats {

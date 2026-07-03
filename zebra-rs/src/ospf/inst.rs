@@ -102,6 +102,11 @@ impl Default for SpfIntervalConfig {
 /// same self-LSA.
 pub const OSPF_MIN_LS_INTERVAL_MS: u32 = 5000;
 
+/// RFC 2328 §13 MinLSArrival default (FRR `timers lsa min-arrival`
+/// default; ms). The minimum spacing between two accepted flooded
+/// copies of the same LSA.
+pub const OSPF_MIN_LS_ARRIVAL_MS: u32 = 1000;
+
 /// Identifies a self-originated LSA for the MinLSInterval throttle, so
 /// a deferred re-origination knows which originator to re-run. One
 /// entry per distinct self-LSA the throttle covers (the topology-churn
@@ -320,6 +325,11 @@ pub struct Ospf<V: OspfVersion = Ospfv2> {
     /// the minimum spacing between two originations of the same
     /// self-LSA. Default [`OSPF_MIN_LS_INTERVAL_MS`].
     pub min_ls_interval_ms: u32,
+    /// RFC 2328 §13 MinLSArrival, ms (`timers lsa min-arrival`): the
+    /// receive-side per-LSA rate limit — a flooded instance arriving
+    /// less than this after the last accepted copy is discarded
+    /// without acknowledgement. Default [`OSPF_MIN_LS_ARRIVAL_MS`].
+    pub min_ls_arrival_ms: u32,
     /// Per-self-LSA MinLSInterval throttle state, keyed by
     /// [`LsaGenKey`]. Runtime-only (not checkpointed / inherited).
     lsa_gen: std::collections::HashMap<LsaGenKey, LsaGenState>,
@@ -519,6 +529,10 @@ pub struct OspfInterface<'a, V: OspfVersion = Ospfv2> {
     /// policy. Read by `gr_maybe_enter_helper` to gate Grace-LSA
     /// acceptance against `helper_enabled` and `max_grace_period`.
     pub gr_config: super::neigh::GracefulRestartConfig,
+    /// RFC 2328 §13 MinLSArrival, ms (`timers lsa min-arrival`): the
+    /// receive-side per-LSA rate limit, read by `ospf_ls_upd_proc`.
+    /// Snapshot of the instance's `min_ls_arrival_ms`.
+    pub min_ls_arrival_ms: u32,
     pub tracing: &'a OspfTracing,
     /// v3-only outbound packet channel borrow. Carries the `Ospfv3Send`
     /// sender that the `network_v6::write_packet_v6` task consumes.
@@ -1087,6 +1101,7 @@ impl<V: OspfVersion> Ospf<V> {
                             crypto_key,
                             md5_seq: &link.md5_seq,
                             gr_config: self.gr_config,
+                            min_ls_arrival_ms: self.min_ls_arrival_ms,
                             tracing: &self.tracing,
                             v3_send_tx: self.v3_send_tx.as_ref(),
                             link_lsdb: &mut link.lsdb,
@@ -1393,6 +1408,7 @@ impl Ospf<Ospfv2> {
             gr_config: super::neigh::GracefulRestartConfig::default(),
             spf_interval: SpfIntervalConfig::default(),
             min_ls_interval_ms: OSPF_MIN_LS_INTERVAL_MS,
+            min_ls_arrival_ms: OSPF_MIN_LS_ARRIVAL_MS,
             lsa_gen: std::collections::HashMap::new(),
             restarting: None,
             key_chains: BTreeMap::new(),
@@ -5822,6 +5838,7 @@ impl Ospf<Ospfv3> {
             gr_config: super::neigh::GracefulRestartConfig::default(),
             spf_interval: SpfIntervalConfig::default(),
             min_ls_interval_ms: OSPF_MIN_LS_INTERVAL_MS,
+            min_ls_arrival_ms: OSPF_MIN_LS_ARRIVAL_MS,
             lsa_gen: std::collections::HashMap::new(),
             restarting: None,
             key_chains: BTreeMap::new(),

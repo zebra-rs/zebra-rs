@@ -101,6 +101,29 @@ promptly, bypassing the throttle.
 
 `show ospf` reports the value (`MinLSInterval (self-LSA
 re-origination): … ms`); OSPFv3 exposes the identical
-`min-ls-interval` leaf under `router ospfv3`. The companion
-receive-side limit (RFC 2328 §13 MinLSArrival) is fixed at 1 s and
-not yet configurable.
+`min-ls-interval` leaf under `router ospfv3`.
+
+## MinLSArrival (`min-ls-arrival`)
+
+The receive-side companion — RFC 2328 §13 MinLSArrival, FRR's
+`timers lsa min-arrival`:
+
+```
+router ospf {
+  min-ls-arrival 1000;
+}
+```
+
+| YANG leaf (`/router/ospf[v3]/min-ls-arrival`) | Default | Range | Units |
+|---|---|---|---|
+| `min-ls-arrival` | 1000 | 0..600000 | milliseconds |
+
+A flooded instance of an LSA that arrives less than `min-ls-arrival`
+after the last accepted copy is **discarded without acknowledgement**
+(RFC 2328 §13 step 5a) — the neighbor's retransmit timer redelivers
+the genuinely newer instance once the window passes. This damps a
+neighbor that floods the same LSA in a tight loop. The gate is
+skipped for self-originated LSAs so the §13.4 seq-reclaim path can
+still fire. `show ospf` reports the value (`MinLSArrival (received-LSA
+rate limit): … ms`); OSPFv3 exposes the identical `min-ls-arrival`
+leaf under `router ospfv3`.
