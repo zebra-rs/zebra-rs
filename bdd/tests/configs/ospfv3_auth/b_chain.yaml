@@ -1,0 +1,29 @@
+key-chains:
+  key-chain:
+  - name: OSPF6-KC
+    key:
+    - key-id: 1
+      crypto-algorithm: hmac-sha-256
+      key-string:
+        keystring: "zebra-v3-chain-secret"
+
+interface:
+- if-name: lo
+  ipv6:
+    address: 2001:db8::2/128
+- if-name: etha
+  ipv6:
+    address: 2001:db8:12::2/64
+router:
+  ospfv3:
+    router-id: 10.0.0.2
+    area:
+    - area-id: 0.0.0.0
+      interface:
+      - if-name: lo
+        enable: true
+      - if-name: etha
+        enable: true
+        network-type: point-to-point
+        authentication: message-digest
+        key-chain: OSPF6-KC
