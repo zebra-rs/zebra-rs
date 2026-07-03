@@ -105,7 +105,23 @@ pub async fn read_packet_v6(sock: Arc<AsyncFd<Socket>>, tx: UnboundedSender<Ospf
 
                 // RFC 5340 §4.4: drop packets whose pseudo-header
                 // checksum is wrong before any further processing.
-                if !ospfv3_verify_checksum(&src, &dst, input) {
+                // RFC 7166 §2.3/§4.1: an Authentication Trailer rides
+                // after the OSPF packet, excluded from the header
+                // length field and from the checksum — when one is
+                // present (datagram longer than the length field),
+                // checksum verification is omitted entirely and
+                // integrity comes from the digest in the auth gate.
+                // Verifying over the full datagram here corrupted the
+                // sum on every AT ingress.
+                if input.len() < 16 {
+                    return Err(ErrorKind::UnexpectedEof.into());
+                }
+                let pkt_len = u16::from_be_bytes([input[2], input[3]]) as usize;
+                if pkt_len < 16 || input.len() < pkt_len {
+                    return Err(ErrorKind::InvalidData.into());
+                }
+                let has_trailer = input.len() > pkt_len;
+                if !has_trailer && !ospfv3_verify_checksum(&src, &dst, input) {
                     return Err(ErrorKind::InvalidData.into());
                 }
 
