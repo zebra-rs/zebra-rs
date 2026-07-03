@@ -1358,7 +1358,7 @@ fn ospfv3_ls_upd_proc(
     lsa: &Ospfv3Lsa,
     src: &Ipv6Addr,
 ) -> LsaProcessResult {
-    use super::lsdb::{OSPF_MAX_AGE, OSPF_MAX_LSA_SEQ, OSPF_MIN_LS_ARRIVAL};
+    use super::lsdb::{OSPF_MAX_AGE, OSPF_MAX_LSA_SEQ};
 
     let h = &lsa.h;
     let scope = ospfv3_ls_type_scope(h.ls_type);
@@ -1421,7 +1421,8 @@ fn ospfv3_ls_upd_proc(
         // hold the stale copy until the next refresh. Mirror of
         // v2's `ospf_ls_upd_proc` step 5(a).
         if let Some(install_time) = current_install_time
-            && install_time.elapsed() < std::time::Duration::from_secs(OSPF_MIN_LS_ARRIVAL)
+            && install_time.elapsed()
+                < std::time::Duration::from_millis(oi.min_ls_arrival_ms as u64)
         {
             tracing::info!(
                 "[v3 LSUpd] Step 5(a) MinLSArrival: discarding (no ack) LSA type={:#x} id={} adv={} seq={:#x}",

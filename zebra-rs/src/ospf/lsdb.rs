@@ -16,7 +16,8 @@ pub const OSPF_MAX_AGE: u16 = 3600;
 pub const OSPF_MAX_AGE_DIFF: u16 = 900; // 15 minutes (RFC 2328 Section 13.1)
 pub const OSPF_LS_REFRESH_TIME: u64 = 1800;
 pub const OSPF_MAX_LSA_SEQ: u32 = 0x7FFFFFFF;
-pub const OSPF_MIN_LS_ARRIVAL: u64 = 1; // 1 second (RFC 2328)
+// MinLSArrival (RFC 2328 §13) is now configurable per instance —
+// see `Ospf::min_ls_arrival_ms` / `OSPF_MIN_LS_ARRIVAL_MS`.
 
 /// Signed-aware max for LS Sequence Numbers. RFC 2328 §13.1 /
 /// §A.4.1 treats `ls_seq_number` as a SIGNED 32-bit integer —
