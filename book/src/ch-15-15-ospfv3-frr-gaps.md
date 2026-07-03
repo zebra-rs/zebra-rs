@@ -8,9 +8,8 @@ OSPFv3 features not yet implemented in zebra-rs:
   generate inter-area routes. See
   [Multi-Area Topologies and the ABR](ch-15-04-ospfv3-multi-area-abr.md).
 - Area ranges (`area <id> range` prefix aggregation).
-- Instance-level redistribution of sources other than `bgp`
-  (`connected`, `static`, kernel routes); per-NSSA-area `connected`
-  is the only other source today.
+- Redistribution `route-map` filtering (the zebra-rs sources are
+  connected, static, kernel, IS-IS, and BGP, matching v2).
 - Graceful-restart configuration and restarter mode — v3 is
   helper-only with fixed defaults (v2 has both roles; `ospf6d` has
   helper configuration and restarting support).

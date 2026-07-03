@@ -14,8 +14,8 @@ OSPFv2 features not yet implemented in zebra-rs:
   `network-type` knob accepts `broadcast` and `point-to-point`
   only.
 - Stub-router advertisement (`max-metric router-lsa`, RFC 6987).
-- Redistribution sources beyond `connected` and `bgp` (FRR also
-  offers static, kernel, IS-IS, table, …).
+- Redistribution `route-map` filtering and the `table` source (the
+  zebra-rs sources are connected, static, kernel, IS-IS, and BGP).
 - Forwarding-address resolution on received externals: Type-5/
   Type-7 LSAs carrying a non-zero forwarding address are skipped
   (RFC 2328 §16.4 step 3); zebra-rs itself always originates with
