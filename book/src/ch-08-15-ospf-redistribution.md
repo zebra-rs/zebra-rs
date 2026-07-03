@@ -30,15 +30,19 @@ router ospf {
 | YANG leaf (`/router/ospf/redistribute/…`) | Type | Default |
 |---|---|---|
 | `connected` | presence container | — (absent = off) |
+| `static` | presence container | — (absent = off) |
+| `kernel` | presence container | — (absent = off) |
+| `isis` | presence container | — (absent = off) |
 | `bgp` | presence container | — (absent = off) |
 | `<source>/metric` | uint32, 0..16777214 | 20 |
 | `<source>/metric-type` | `type-1` \| `type-2` | `type-2` |
 
-`connected` and `bgp` are the two supported sources today; each is a
-presence container — naming it enables redistribution of that
-source, deleting it flushes the corresponding Type-5s. Both knobs
-also exist per VRF instance, where the subscription is scoped so a
-VRF's OSPF sees only that VRF's routes.
+Each source is a presence container — naming it enables
+redistribution of that source, deleting it flushes the corresponding
+Type-5s. Sources are independent subscriptions to the RIB, so any
+combination can be active at once. The knobs also exist per VRF
+instance, where the subscription is scoped so a VRF's OSPF sees only
+that VRF's routes.
 
 ## E1 vs E2 metrics
 

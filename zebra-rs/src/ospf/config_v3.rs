@@ -66,6 +66,42 @@ impl Ospf<Ospfv3> {
                 "/area/redistribute/connected/metric-type",
                 config_ospfv3_area_redist_connected_metric_type,
             ),
+            ("/redistribute/connected", config_ospfv3_redist_connected),
+            (
+                "/redistribute/connected/metric",
+                config_ospfv3_redist_connected_metric,
+            ),
+            (
+                "/redistribute/connected/metric-type",
+                config_ospfv3_redist_connected_metric_type,
+            ),
+            ("/redistribute/static", config_ospfv3_redist_static),
+            (
+                "/redistribute/static/metric",
+                config_ospfv3_redist_static_metric,
+            ),
+            (
+                "/redistribute/static/metric-type",
+                config_ospfv3_redist_static_metric_type,
+            ),
+            ("/redistribute/kernel", config_ospfv3_redist_kernel),
+            (
+                "/redistribute/kernel/metric",
+                config_ospfv3_redist_kernel_metric,
+            ),
+            (
+                "/redistribute/kernel/metric-type",
+                config_ospfv3_redist_kernel_metric_type,
+            ),
+            ("/redistribute/isis", config_ospfv3_redist_isis),
+            (
+                "/redistribute/isis/metric",
+                config_ospfv3_redist_isis_metric,
+            ),
+            (
+                "/redistribute/isis/metric-type",
+                config_ospfv3_redist_isis_metric_type,
+            ),
             ("/redistribute/bgp", config_ospfv3_redist_bgp),
             ("/redistribute/bgp/metric", config_ospfv3_redist_bgp_metric),
             (
@@ -453,26 +489,27 @@ fn config_ospfv3_area_nssa_translator_role(
     Some(())
 }
 
-/// v3 sibling of `ospf_send_redist_connected` (`config.rs`): subscribe
-/// (or unsubscribe) to RIB IPv6 connected routes for redistribution
-/// into NSSA Type-7 LSAs. Keyed by `(proto, afi, rtype)` — not per
-/// area — so multiple NSSA areas share one subscription.
-fn ospfv3_send_redist_connected(ospf: &Ospf<Ospfv3>, first_time: bool) {
+/// Subscribe / unsubscribe this v3 instance's RIB redistribution for
+/// one IPv6 source, gated on the instance-level knob (and, for
+/// connected, the per-NSSA-area knobs too). Keyed by
+/// `(proto, afi, rtype)` — not per area — so multiple NSSA areas share
+/// one subscription. Subscribes under this instance's proto label, not
+/// the literal "ospfv3": a per-VRF v3 instance registers as
+/// "ospfv3:vrf:<name>", and the RIB routes redist delivery by the proto
+/// string. With the literal, a VRF child's subscription resolved to the
+/// default v3 instance — so per-VRF redistribute never delivered. Same
+/// bug fixed for v2 (config.rs) and IS-IS.
+fn ospfv3_send_redist(ospf: &Ospf<Ospfv3>, rtype: crate::rib::RibType, first_time: bool) {
     use crate::rib::{Message as RibMsg, RedistAfi, RibType};
-    // Subscribe under this instance's proto label, not the literal
-    // "ospfv3": a per-VRF v3 instance registers as "ospfv3:vrf:<name>",
-    // and the RIB routes redist delivery by the proto string. With the
-    // literal, a VRF child's subscription resolved to the default v3
-    // instance — so per-VRF redistribute never delivered. Same bug fixed
-    // for v2 (config.rs) and IS-IS.
     let proto = ospf.proto_label.clone();
     let afi = RedistAfi::Ipv6;
-    let rtype = RibType::Connected;
 
-    let any_enabled = ospf
-        .areas
-        .iter()
-        .any(|(_, area)| area.redistribute.connected.is_some());
+    let any_enabled = ospf.redist.contains_key(&rtype)
+        || (rtype == RibType::Connected
+            && ospf
+                .areas
+                .iter()
+                .any(|(_, area)| area.redistribute.connected.is_some()));
 
     let msg = if !any_enabled {
         RibMsg::RedistDel { proto, afi, rtype }
@@ -494,57 +531,42 @@ fn ospfv3_send_redist_connected(ospf: &Ospf<Ospfv3>, first_time: bool) {
     let _ = ospf.ctx.rib.send(msg);
 }
 
-/// Subscribe / unsubscribe this v3 instance's RIB redistribution for the
-/// IPv6 BGP source, gated on the instance-level `redistribute bgp` knob.
-/// Uses `proto_label` so a per-VRF instance receives only its VRF's BGP
-/// routes. v3 sibling of v2's `ospf_send_redist_bgp`.
-fn ospfv3_send_redist_bgp(ospf: &Ospf<Ospfv3>, first_time: bool) {
-    use crate::rib::{Message as RibMsg, RedistAfi, RibType};
-    let proto = ospf.proto_label.clone();
-    let afi = RedistAfi::Ipv6;
-    let rtype = RibType::Bgp;
-
-    let msg = if ospf.redist_bgp.is_none() {
-        RibMsg::RedistDel { proto, afi, rtype }
-    } else if first_time {
-        RibMsg::RedistAdd {
-            proto,
-            afi,
-            rtype,
-            subtypes: std::collections::BTreeSet::new(),
-        }
-    } else {
-        RibMsg::RedistUpdate {
-            proto,
-            afi,
-            rtype,
-            subtypes: std::collections::BTreeSet::new(),
-        }
-    };
-    let _ = ospf.ctx.rib.send(msg);
-}
-
-/// `/router/ospfv3/redistribute/bgp` — instance-level presence container.
-/// On Set: subscribe to the VRF's BGP routes and originate an AS-External
-/// (Type-5) LSA for each. On Delete: unsubscribe and flush them.
-fn config_ospfv3_redist_bgp(ospf: &mut Ospf<Ospfv3>, _args: Args, op: ConfigOp) -> Option<()> {
-    let first_time = ospf.redist_bgp.is_none();
+/// Shared body of the v3 instance-level `redistribute <source>`
+/// presence handlers. On Set: subscribe to the source's IPv6 routes and
+/// originate an AS-External (Type-5) LSA for each. On Delete:
+/// unsubscribe and flush.
+fn ospfv3_redist_set(
+    ospf: &mut Ospf<Ospfv3>,
+    rtype: crate::rib::RibType,
+    op: ConfigOp,
+) -> Option<()> {
+    use crate::rib::RibType;
+    let nssa_connected = rtype == RibType::Connected
+        && ospf
+            .areas
+            .iter()
+            .any(|(_, area)| area.redistribute.connected.is_some());
+    let first_time = !(ospf.redist.contains_key(&rtype) || nssa_connected);
     if op.is_set() {
-        ospf.redist_bgp = Some(RedistEntry {
-            metric: RedistEntry::DEFAULT_METRIC,
-            ..Default::default()
-        });
+        ospf.redist.insert(
+            rtype,
+            RedistEntry {
+                metric: RedistEntry::DEFAULT_METRIC,
+                ..Default::default()
+            },
+        );
     } else {
-        ospf.redist_bgp = None;
+        ospf.redist.remove(&rtype);
     }
-    ospfv3_send_redist_bgp(ospf, first_time && op.is_set());
-    ospf.as_external_redist_bgp_resync_v3();
+    ospfv3_send_redist(ospf, rtype, first_time && op.is_set());
+    ospf.as_external_redist_resync_v3(rtype);
     Some(())
 }
 
-/// `/router/ospfv3/redistribute/bgp/metric`.
-fn config_ospfv3_redist_bgp_metric(
+/// Shared body of the v3 `redistribute <source> metric` handlers.
+fn ospfv3_redist_metric_set(
     ospf: &mut Ospf<Ospfv3>,
+    rtype: crate::rib::RibType,
     mut args: Args,
     op: ConfigOp,
 ) -> Option<()> {
@@ -553,14 +575,15 @@ fn config_ospfv3_redist_bgp_metric(
     } else {
         RedistEntry::DEFAULT_METRIC
     };
-    ospf.redist_bgp.get_or_insert_with(Default::default).metric = metric;
-    ospf.as_external_redist_bgp_resync_v3();
+    ospf.redist.entry(rtype).or_default().metric = metric;
+    ospf.as_external_redist_resync_v3(rtype);
     Some(())
 }
 
-/// `/router/ospfv3/redistribute/bgp/metric-type`.
-fn config_ospfv3_redist_bgp_metric_type(
+/// Shared body of the v3 `redistribute <source> metric-type` handlers.
+fn ospfv3_redist_metric_type_set(
     ospf: &mut Ospf<Ospfv3>,
+    rtype: crate::rib::RibType,
     mut args: Args,
     op: ConfigOp,
 ) -> Option<()> {
@@ -569,12 +592,55 @@ fn config_ospfv3_redist_bgp_metric_type(
     } else {
         ExternalMetricType::default()
     };
-    ospf.redist_bgp
-        .get_or_insert_with(Default::default)
-        .metric_type = mtype;
-    ospf.as_external_redist_bgp_resync_v3();
+    ospf.redist.entry(rtype).or_default().metric_type = mtype;
+    ospf.as_external_redist_resync_v3(rtype);
     Some(())
 }
+
+macro_rules! ospfv3_redist_handlers {
+    ($set:ident, $metric:ident, $mtype:ident, $rtype:expr) => {
+        fn $set(ospf: &mut Ospf<Ospfv3>, _args: Args, op: ConfigOp) -> Option<()> {
+            ospfv3_redist_set(ospf, $rtype, op)
+        }
+        fn $metric(ospf: &mut Ospf<Ospfv3>, args: Args, op: ConfigOp) -> Option<()> {
+            ospfv3_redist_metric_set(ospf, $rtype, args, op)
+        }
+        fn $mtype(ospf: &mut Ospf<Ospfv3>, args: Args, op: ConfigOp) -> Option<()> {
+            ospfv3_redist_metric_type_set(ospf, $rtype, args, op)
+        }
+    };
+}
+
+ospfv3_redist_handlers!(
+    config_ospfv3_redist_connected,
+    config_ospfv3_redist_connected_metric,
+    config_ospfv3_redist_connected_metric_type,
+    crate::rib::RibType::Connected
+);
+ospfv3_redist_handlers!(
+    config_ospfv3_redist_static,
+    config_ospfv3_redist_static_metric,
+    config_ospfv3_redist_static_metric_type,
+    crate::rib::RibType::Static
+);
+ospfv3_redist_handlers!(
+    config_ospfv3_redist_kernel,
+    config_ospfv3_redist_kernel_metric,
+    config_ospfv3_redist_kernel_metric_type,
+    crate::rib::RibType::Kernel
+);
+ospfv3_redist_handlers!(
+    config_ospfv3_redist_isis,
+    config_ospfv3_redist_isis_metric,
+    config_ospfv3_redist_isis_metric_type,
+    crate::rib::RibType::Isis
+);
+ospfv3_redist_handlers!(
+    config_ospfv3_redist_bgp,
+    config_ospfv3_redist_bgp_metric,
+    config_ospfv3_redist_bgp_metric_type,
+    crate::rib::RibType::Bgp
+);
 
 /// `/router/ospfv3/area/<id>/redistribute/connected` — presence
 /// container. Mirrors v2's `config_ospf_area_redist_connected` but
@@ -589,7 +655,8 @@ fn config_ospfv3_area_redist_connected(
     let first_time = !ospf
         .areas
         .iter()
-        .any(|(_, area)| area.redistribute.connected.is_some());
+        .any(|(_, area)| area.redistribute.connected.is_some())
+        && !ospf.redist.contains_key(&crate::rib::RibType::Connected);
 
     if op.is_set() {
         ospf.areas.fetch(area_id).redistribute.connected = Some(RedistEntry {
@@ -600,7 +667,11 @@ fn config_ospfv3_area_redist_connected(
         area.redistribute.connected = None;
     }
 
-    ospfv3_send_redist_connected(ospf, first_time && op.is_set());
+    ospfv3_send_redist(
+        ospf,
+        crate::rib::RibType::Connected,
+        first_time && op.is_set(),
+    );
     ospf.nssa_redist_connected_resync_v3(area_id);
     Some(())
 }

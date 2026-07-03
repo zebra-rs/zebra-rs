@@ -3491,4 +3491,36 @@ mod yang_load_tests {
             assert_eq!(code, ExecCode::Success, "`{path}` must be a settable path");
         }
     }
+
+    /// Instance-level OSPF redistribution grew beyond connected/bgp:
+    /// static, kernel and isis are settable for OSPFv2, and OSPFv3
+    /// gained connected/static/kernel/isis alongside bgp. Pin every
+    /// source spelling (with its metric knobs) as a settable path so
+    /// the YANG containers can't drift from the config handlers.
+    #[test]
+    fn ospf_redistribute_source_paths_parse() {
+        use crate::config::ExecCode;
+        use crate::config::parse::{State, parse};
+        use libyang::to_entry;
+
+        let mut yang = YangStore::new();
+        yang.add_path(concat!(env!("CARGO_MANIFEST_DIR"), "/yang"));
+        yang.read_with_resolve("configure")
+            .expect("configure mode loads");
+        yang.identity_resolve();
+        let module = yang
+            .find_module("configure")
+            .expect("configure module present");
+        let entry = to_entry(&yang, module);
+
+        for proto in ["ospf", "ospfv3"] {
+            for source in ["connected", "static", "kernel", "isis", "bgp"] {
+                for suffix in ["", " metric 30", " metric-type type-1"] {
+                    let path = format!("set router {proto} redistribute {source}{suffix}");
+                    let (code, _comps, _state) = parse(&path, entry.clone(), None, State::new());
+                    assert_eq!(code, ExecCode::Success, "`{path}` must be a settable path");
+                }
+            }
+        }
+    }
 }

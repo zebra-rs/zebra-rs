@@ -77,6 +77,30 @@ impl Ospf {
         );
         // Instance-level `router ospf { redistribute connected ... }`.
         self.ospf_add("/redistribute/connected", config_ospf_redist_connected);
+        self.ospf_add("/redistribute/static", config_ospf_redist_static);
+        self.ospf_add(
+            "/redistribute/static/metric",
+            config_ospf_redist_static_metric,
+        );
+        self.ospf_add(
+            "/redistribute/static/metric-type",
+            config_ospf_redist_static_metric_type,
+        );
+        self.ospf_add("/redistribute/kernel", config_ospf_redist_kernel);
+        self.ospf_add(
+            "/redistribute/kernel/metric",
+            config_ospf_redist_kernel_metric,
+        );
+        self.ospf_add(
+            "/redistribute/kernel/metric-type",
+            config_ospf_redist_kernel_metric_type,
+        );
+        self.ospf_add("/redistribute/isis", config_ospf_redist_isis);
+        self.ospf_add("/redistribute/isis/metric", config_ospf_redist_isis_metric);
+        self.ospf_add(
+            "/redistribute/isis/metric-type",
+            config_ospf_redist_isis_metric_type,
+        );
         self.ospf_add("/redistribute/bgp", config_ospf_redist_bgp);
         self.ospf_add("/redistribute/bgp/metric", config_ospf_redist_bgp_metric);
         self.ospf_add(
@@ -491,22 +515,25 @@ fn config_ospf_area_nssa_translator_role(
 /// area — so multiple NSSA areas with `redistribute connected`
 /// share a single subscription. `any_connected_enabled` decides
 /// whether the subscription should exist at all.
-fn ospf_send_redist_connected(ospf: &Ospf, first_time: bool) {
+/// Subscribe / unsubscribe this instance's RIB redistribution for one
+/// IPv4 source, gated on the instance-level knob (and, for connected,
+/// the per-NSSA-area knobs too). Each `(afi, rtype)` row is its own
+/// subscription. Uses this instance's proto label, not the literal
+/// "ospf": a per-VRF instance registers as "ospf:vrf:<name>", and the
+/// RIB routes the redistribute subscription by the proto string in the
+/// message. With the literal, a VRF child's subscription resolved to
+/// the default instance — so per-VRF redistribute never delivered.
+fn ospf_send_redist(ospf: &Ospf, rtype: crate::rib::RibType, first_time: bool) {
     use crate::rib::{Message as RibMsg, RedistAfi, RibType};
-    // Use this instance's proto label, not the literal "ospf": a per-VRF
-    // instance registers as "ospf:vrf:<name>", and the RIB routes the
-    // redistribute subscription by the proto string in the message. With
-    // the literal, a VRF child's subscription resolved to the default
-    // instance — so per-VRF redistribute never delivered. See proto_label.
     let proto = ospf.proto_label.clone();
     let afi = RedistAfi::Ipv4;
-    let rtype = RibType::Connected;
 
-    let any_enabled = ospf
-        .areas
-        .iter()
-        .any(|(_, area)| area.redistribute.connected.is_some())
-        || ospf.redist_connected.is_some();
+    let any_enabled = ospf.redist.contains_key(&rtype)
+        || (rtype == RibType::Connected
+            && ospf
+                .areas
+                .iter()
+                .any(|(_, area)| area.redistribute.connected.is_some()));
 
     let msg = if !any_enabled {
         RibMsg::RedistDel { proto, afi, rtype }
@@ -528,80 +555,105 @@ fn ospf_send_redist_connected(ospf: &Ospf, first_time: bool) {
     let _ = ospf.ctx.rib.send(msg);
 }
 
-/// Subscribe / unsubscribe this instance's RIB redistribution for the
-/// IPv4 BGP source, gated on the instance-level `redistribute bgp` knob.
-/// Independent of the connected subscription (each `(afi, rtype)` row is
-/// its own subscription). Uses `proto_label` so a per-VRF instance
-/// receives only its VRF's BGP routes.
-fn ospf_send_redist_bgp(ospf: &Ospf, first_time: bool) {
-    use crate::rib::{Message as RibMsg, RedistAfi, RibType};
-    let proto = ospf.proto_label.clone();
-    let afi = RedistAfi::Ipv4;
-    let rtype = RibType::Bgp;
-
-    let msg = if ospf.redist_bgp.is_none() {
-        RibMsg::RedistDel { proto, afi, rtype }
-    } else if first_time {
-        RibMsg::RedistAdd {
-            proto,
-            afi,
-            rtype,
-            subtypes: std::collections::BTreeSet::new(),
-        }
-    } else {
-        RibMsg::RedistUpdate {
-            proto,
-            afi,
-            rtype,
-            subtypes: std::collections::BTreeSet::new(),
-        }
-    };
-    let _ = ospf.ctx.rib.send(msg);
-}
-
-/// `/router/ospf/redistribute/bgp` — instance-level presence container.
-/// On Set: subscribe to the VRF's BGP routes and originate a Type-5
-/// AS-External LSA for each. On Delete: unsubscribe and flush them.
-fn config_ospf_redist_bgp(ospf: &mut Ospf, _args: Args, op: ConfigOp) -> Option<()> {
-    let first_time = ospf.redist_bgp.is_none();
+/// Shared body of the instance-level `redistribute <source>` presence
+/// handlers. On Set: subscribe to the source's routes and originate a
+/// Type-5 AS-External LSA for each. On Delete: unsubscribe and flush.
+fn ospf_redist_set(ospf: &mut Ospf, rtype: crate::rib::RibType, op: ConfigOp) -> Option<()> {
+    use crate::rib::RibType;
+    let nssa_connected = rtype == RibType::Connected
+        && ospf
+            .areas
+            .iter()
+            .any(|(_, area)| area.redistribute.connected.is_some());
+    let first_time = !(ospf.redist.contains_key(&rtype) || nssa_connected);
     if op.is_set() {
-        ospf.redist_bgp = Some(RedistEntry {
-            metric: RedistEntry::DEFAULT_METRIC,
-            ..Default::default()
-        });
+        ospf.redist.insert(
+            rtype,
+            RedistEntry {
+                metric: RedistEntry::DEFAULT_METRIC,
+                ..Default::default()
+            },
+        );
     } else {
-        ospf.redist_bgp = None;
+        ospf.redist.remove(&rtype);
     }
-    ospf_send_redist_bgp(ospf, first_time && op.is_set());
-    ospf.as_external_redist_bgp_resync();
+    ospf_send_redist(ospf, rtype, first_time && op.is_set());
+    ospf.as_external_redist_resync(rtype);
     Some(())
 }
 
-/// `/router/ospf/redistribute/bgp/metric`.
-fn config_ospf_redist_bgp_metric(ospf: &mut Ospf, mut args: Args, op: ConfigOp) -> Option<()> {
+/// Shared body of `redistribute <source> metric`.
+fn ospf_redist_metric_set(
+    ospf: &mut Ospf,
+    rtype: crate::rib::RibType,
+    mut args: Args,
+    op: ConfigOp,
+) -> Option<()> {
     let metric = if op.is_set() {
         args.u32()?
     } else {
         RedistEntry::DEFAULT_METRIC
     };
-    ospf.redist_bgp.get_or_insert_with(Default::default).metric = metric;
-    ospf.as_external_redist_bgp_resync();
+    ospf.redist.entry(rtype).or_default().metric = metric;
+    ospf.as_external_redist_resync(rtype);
     Some(())
 }
 
-/// `/router/ospf/redistribute/bgp/metric-type`.
-fn config_ospf_redist_bgp_metric_type(ospf: &mut Ospf, mut args: Args, op: ConfigOp) -> Option<()> {
+/// Shared body of `redistribute <source> metric-type`.
+fn ospf_redist_metric_type_set(
+    ospf: &mut Ospf,
+    rtype: crate::rib::RibType,
+    mut args: Args,
+    op: ConfigOp,
+) -> Option<()> {
     let mtype = if op.is_set() {
         ExternalMetricType::from_yang(&args.string()?)?
     } else {
         ExternalMetricType::default()
     };
-    ospf.redist_bgp
-        .get_or_insert_with(Default::default)
-        .metric_type = mtype;
-    ospf.as_external_redist_bgp_resync();
+    ospf.redist.entry(rtype).or_default().metric_type = mtype;
+    ospf.as_external_redist_resync(rtype);
     Some(())
 }
+
+macro_rules! ospf_redist_handlers {
+    ($set:ident, $metric:ident, $mtype:ident, $rtype:expr) => {
+        fn $set(ospf: &mut Ospf, _args: Args, op: ConfigOp) -> Option<()> {
+            ospf_redist_set(ospf, $rtype, op)
+        }
+        fn $metric(ospf: &mut Ospf, args: Args, op: ConfigOp) -> Option<()> {
+            ospf_redist_metric_set(ospf, $rtype, args, op)
+        }
+        fn $mtype(ospf: &mut Ospf, args: Args, op: ConfigOp) -> Option<()> {
+            ospf_redist_metric_type_set(ospf, $rtype, args, op)
+        }
+    };
+}
+
+ospf_redist_handlers!(
+    config_ospf_redist_bgp,
+    config_ospf_redist_bgp_metric,
+    config_ospf_redist_bgp_metric_type,
+    crate::rib::RibType::Bgp
+);
+ospf_redist_handlers!(
+    config_ospf_redist_static,
+    config_ospf_redist_static_metric,
+    config_ospf_redist_static_metric_type,
+    crate::rib::RibType::Static
+);
+ospf_redist_handlers!(
+    config_ospf_redist_kernel,
+    config_ospf_redist_kernel_metric,
+    config_ospf_redist_kernel_metric_type,
+    crate::rib::RibType::Kernel
+);
+ospf_redist_handlers!(
+    config_ospf_redist_isis,
+    config_ospf_redist_isis_metric,
+    config_ospf_redist_isis_metric_type,
+    crate::rib::RibType::Isis
+);
 
 /// `/router/ospf/area/<id>/redistribute/connected` — presence
 /// container. On Set: create the area's `RedistEntry` with
@@ -616,7 +668,8 @@ fn config_ospf_area_redist_connected(ospf: &mut Ospf, mut args: Args, op: Config
     let first_time = !ospf
         .areas
         .iter()
-        .any(|(_, area)| area.redistribute.connected.is_some());
+        .any(|(_, area)| area.redistribute.connected.is_some())
+        && !ospf.redist.contains_key(&crate::rib::RibType::Connected);
 
     if op.is_set() {
         ospf.areas.fetch(area_id).redistribute.connected = Some(RedistEntry {
@@ -627,7 +680,11 @@ fn config_ospf_area_redist_connected(ospf: &mut Ospf, mut args: Args, op: Config
         area.redistribute.connected = None;
     }
 
-    ospf_send_redist_connected(ospf, first_time && op.is_set());
+    ospf_send_redist(
+        ospf,
+        crate::rib::RibType::Connected,
+        first_time && op.is_set(),
+    );
     ospf.nssa_redist_connected_resync(area_id);
     Some(())
 }
@@ -1864,62 +1921,11 @@ fn config_ospf_gr_drain_time_ms(ospf: &mut Ospf, mut args: Args, op: ConfigOp) -
     Some(())
 }
 
-/// `/router/ospf/redistribute/connected` — instance-level presence
-/// container. On Set: enable Type-5 AS-External origination for every
-/// connected route. On Delete: flush all self-originated Type-5s.
-fn config_ospf_redist_connected(ospf: &mut Ospf, _args: Args, op: ConfigOp) -> Option<()> {
-    let first_time = !ospf
-        .areas
-        .iter()
-        .any(|(_, area)| area.redistribute.connected.is_some())
-        && ospf.redist_connected.is_none();
-
-    if op.is_set() {
-        ospf.redist_connected = Some(RedistEntry {
-            metric: RedistEntry::DEFAULT_METRIC,
-            ..Default::default()
-        });
-    } else {
-        ospf.redist_connected = None;
-    }
-
-    ospf_send_redist_connected(ospf, first_time && op.is_set());
-    ospf.as_external_redist_connected_resync();
-    Some(())
-}
-
-/// `/router/ospf/redistribute/connected/metric`.
-fn config_ospf_redist_connected_metric(
-    ospf: &mut Ospf,
-    mut args: Args,
-    op: ConfigOp,
-) -> Option<()> {
-    let metric = if op.is_set() {
-        args.u32()?
-    } else {
-        RedistEntry::DEFAULT_METRIC
-    };
-    ospf.redist_connected
-        .get_or_insert_with(Default::default)
-        .metric = metric;
-    ospf.as_external_redist_connected_resync();
-    Some(())
-}
-
-/// `/router/ospf/redistribute/connected/metric-type`.
-fn config_ospf_redist_connected_metric_type(
-    ospf: &mut Ospf,
-    mut args: Args,
-    op: ConfigOp,
-) -> Option<()> {
-    let mtype = if op.is_set() {
-        ExternalMetricType::from_yang(&args.string()?)?
-    } else {
-        ExternalMetricType::default()
-    };
-    ospf.redist_connected
-        .get_or_insert_with(Default::default)
-        .metric_type = mtype;
-    ospf.as_external_redist_connected_resync();
-    Some(())
-}
+// `/router/ospf/redistribute/connected` and its metric knobs share
+// the generic instance-level redistribute bodies above.
+ospf_redist_handlers!(
+    config_ospf_redist_connected,
+    config_ospf_redist_connected_metric,
+    config_ospf_redist_connected_metric_type,
+    crate::rib::RibType::Connected
+);

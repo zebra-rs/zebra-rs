@@ -279,25 +279,22 @@ pub struct Ospf<V: OspfVersion = Ospfv2> {
     /// `nssa_redist_connected_resync_v3`. The generic `Ospf<V>` carries
     /// both maps; a v2 instance leaves this empty.
     pub redist_v6: BTreeMap<(crate::rib::RibType, ipnet::Ipv6Net), crate::rib::RouteEntryV6>,
-    /// Instance-level `redistribute connected` — originates Type-5
-    /// AS-External LSAs (FA=0) for every connected route from
-    /// `redist_v4`. `Some(entry)` enables origination; `None` stops it.
-    pub redist_connected: Option<crate::ospf::area::RedistEntry>,
-    /// Prefixes of Type-5 LSAs we self-originated from instance-level
-    /// `redistribute connected`. Flushed when the knob is removed.
-    pub redist_connected_originated: BTreeSet<Ipv4Net>,
-    /// Instance-level `redistribute bgp` — originates Type-5 AS-External
-    /// LSAs (FA=0) for every BGP route from `redist_v4`. In a per-VRF
-    /// OSPF instance this injects the VPNv4 routes BGP imported into the
-    /// VRF into the CE-facing OSPF (the L3VPN PE-CE down direction).
-    pub redist_bgp: Option<crate::ospf::area::RedistEntry>,
-    /// Prefixes of Type-5 LSAs we self-originated from instance-level
-    /// `redistribute bgp`. Flushed when the knob is removed.
-    pub redist_bgp_originated: BTreeSet<Ipv4Net>,
-    /// IPv6 counterpart of [`Self::redist_bgp_originated`]: prefixes of
-    /// OSPFv3 AS-External (Type-5) LSAs self-originated from instance-level
-    /// `redistribute bgp`. A v2 instance leaves this empty.
-    pub redist_bgp_originated_v6: BTreeSet<ipnet::Ipv6Net>,
+    /// Instance-level `redistribute <source>` knobs, keyed by the RIB
+    /// route type (connected / static / kernel / isis / bgp). An entry
+    /// enables Type-5 AS-External origination (FA=0) for every route of
+    /// that source in `redist_v4` / `redist_v6`; removing it stops and
+    /// flushes. In a per-VRF instance the bgp source injects the
+    /// VPNv4/VPNv6 routes BGP imported into the VRF into the CE-facing
+    /// OSPF (the L3VPN PE-CE down direction).
+    pub redist: BTreeMap<crate::rib::RibType, crate::ospf::area::RedistEntry>,
+    /// Per-source prefixes of Type-5 LSAs we self-originated from the
+    /// instance-level `redistribute` knobs (v2 / IPv4). Diffed by
+    /// `as_external_redist_resync`; flushed when the knob is removed.
+    pub redist_originated: BTreeMap<crate::rib::RibType, BTreeSet<Ipv4Net>>,
+    /// IPv6 counterpart of [`Self::redist_originated`]: per-source
+    /// prefixes of OSPFv3 AS-External (Type-5) LSAs self-originated from
+    /// instance-level `redistribute`. A v2 instance leaves this empty.
+    pub redist_originated_v6: BTreeMap<crate::rib::RibType, BTreeSet<ipnet::Ipv6Net>>,
     /// Staged Flexible Algorithm definitions for this instance
     /// (`/router/ospf{,v3}/flex-algo`, RFC 9350). Shared staging engine
     /// keyed by the version's `FLEX_ALGO_PREFIX`; origination from the
@@ -1229,11 +1226,9 @@ impl Ospf<Ospfv2> {
             spf_duration: None,
             redist_v4: BTreeMap::new(),
             redist_v6: BTreeMap::new(),
-            redist_connected: None,
-            redist_connected_originated: BTreeSet::new(),
-            redist_bgp: None,
-            redist_bgp_originated: BTreeSet::new(),
-            redist_bgp_originated_v6: BTreeSet::new(),
+            redist: BTreeMap::new(),
+            redist_originated: BTreeMap::new(),
+            redist_originated_v6: BTreeMap::new(),
             flex_algo: crate::flex_algo::FlexAlgoConfig::new(Ospfv2::FLEX_ALGO_PREFIX),
             affinity_map: crate::flex_algo::AffinityMap::new(),
             srlg_config: crate::flex_algo::SrlgGroupBuilder::new(),
@@ -2458,22 +2453,25 @@ impl Ospf<Ospfv2> {
         }
     }
 
-    /// Rebuild self-originated Type-5 AS-External LSAs from the
-    /// instance-level `redistribute connected` knob and `redist_v4`.
+    /// Rebuild self-originated Type-5 AS-External LSAs for one
+    /// instance-level `redistribute <source>` knob from `redist_v4`.
     /// Idempotent: originates missing, refreshes changed, flushes stale.
-    pub fn as_external_redist_connected_resync(&mut self) {
-        use crate::rib::RibType;
-
-        let (entry, prev_originated) = {
-            let entry = self.redist_connected;
-            let prev = self.redist_connected_originated.clone();
-            (entry, prev)
-        };
+    /// Generic over the source — connected, static, kernel, isis, and
+    /// bgp all share this body; for a per-VRF instance the bgp source
+    /// carries the VPNv4 routes BGP imported into the VRF (the L3VPN
+    /// PE-CE down direction).
+    pub fn as_external_redist_resync(&mut self, rtype: crate::rib::RibType) {
+        let entry = self.redist.get(&rtype).copied();
+        let prev_originated = self
+            .redist_originated
+            .get(&rtype)
+            .cloned()
+            .unwrap_or_default();
 
         let desired: BTreeSet<Ipv4Net> = if entry.is_some() {
             self.redist_v4
                 .iter()
-                .filter(|((rtype, _), _)| *rtype == RibType::Connected)
+                .filter(|((rt, _), _)| *rt == rtype)
                 .map(|((_, prefix), _)| *prefix)
                 .collect()
         } else {
@@ -2486,7 +2484,9 @@ impl Ospf<Ospfv2> {
             .collect::<Vec<_>>()
         {
             self.as_external_lsa_flush_for_prefix(prefix);
-            self.redist_connected_originated.remove(&prefix);
+            if let Some(set) = self.redist_originated.get_mut(&rtype) {
+                set.remove(&prefix);
+            }
         }
 
         if let Some(redist_entry) = entry {
@@ -2496,57 +2496,37 @@ impl Ospf<Ospfv2> {
                     redist_entry.metric,
                     redist_entry.metric_type.is_type_2(),
                 );
-                self.redist_connected_originated.insert(*prefix);
+                self.redist_originated
+                    .entry(rtype)
+                    .or_default()
+                    .insert(*prefix);
             }
+        }
+        if self
+            .redist_originated
+            .get(&rtype)
+            .is_some_and(|s| s.is_empty())
+        {
+            self.redist_originated.remove(&rtype);
         }
 
         self.router_lsa_originate();
     }
 
-    /// `redistribute bgp` sibling of
-    /// [`Self::as_external_redist_connected_resync`]: rebuild this
-    /// instance's self-originated Type-5 AS-External LSAs for the cached
-    /// BGP routes (`redist_v4` entries with `rtype == RibType::Bgp`),
-    /// diffing against `redist_bgp_originated`. In a per-VRF OSPF instance
-    /// these are the VPNv4 routes BGP imported into the VRF — injecting
-    /// them into the CE-facing OSPF is the L3VPN PE-CE down direction.
-    pub fn as_external_redist_bgp_resync(&mut self) {
-        use crate::rib::RibType;
-
-        let entry = self.redist_bgp;
-        let prev_originated = self.redist_bgp_originated.clone();
-
-        let desired: BTreeSet<Ipv4Net> = if entry.is_some() {
-            self.redist_v4
-                .iter()
-                .filter(|((rtype, _), _)| *rtype == RibType::Bgp)
-                .map(|((_, prefix), _)| *prefix)
-                .collect()
-        } else {
-            BTreeSet::new()
-        };
-
-        for prefix in prev_originated
-            .difference(&desired)
+    /// Run [`Self::as_external_redist_resync`] for every source that is
+    /// either configured or still has originated state to clean up.
+    /// Called from the RIB route-churn handlers, where any subscribed
+    /// source may have changed.
+    pub fn as_external_redist_resync_all(&mut self) {
+        let rtypes: BTreeSet<crate::rib::RibType> = self
+            .redist
+            .keys()
             .copied()
-            .collect::<Vec<_>>()
-        {
-            self.as_external_lsa_flush_for_prefix(prefix);
-            self.redist_bgp_originated.remove(&prefix);
+            .chain(self.redist_originated.keys().copied())
+            .collect();
+        for rtype in rtypes {
+            self.as_external_redist_resync(rtype);
         }
-
-        if let Some(redist_entry) = entry {
-            for prefix in &desired {
-                self.as_external_lsa_originate_for_prefix(
-                    *prefix,
-                    redist_entry.metric,
-                    redist_entry.metric_type.is_type_2(),
-                );
-                self.redist_bgp_originated.insert(*prefix);
-            }
-        }
-
-        self.router_lsa_originate();
     }
 
     /// RFC 3101 §2.3 NSSA default-LSA origination. Thin wrapper
@@ -2670,7 +2650,7 @@ impl Ospf<Ospfv2> {
     /// (RFC 2328 §3.3 ASBR definition). Today this requires the
     /// instance-level `redistribute connected` knob to be set.
     pub fn is_asbr(&self) -> bool {
-        self.redist_connected.is_some() || self.redist_bgp.is_some()
+        !self.redist.is_empty()
     }
 
     /// True when this router should translate Type-7 → Type-5 for
@@ -2956,8 +2936,7 @@ impl Ospf<Ospfv2> {
         for area_id in area_ids {
             self.nssa_redist_connected_resync(area_id);
         }
-        self.as_external_redist_connected_resync();
-        self.as_external_redist_bgp_resync();
+        self.as_external_redist_resync_all();
     }
 
     /// `RibRx::RouteDel` handler. Mirror of `route_redist_add`.
@@ -2972,8 +2951,7 @@ impl Ospf<Ospfv2> {
         for area_id in area_ids {
             self.nssa_redist_connected_resync(area_id);
         }
-        self.as_external_redist_connected_resync();
-        self.as_external_redist_bgp_resync();
+        self.as_external_redist_resync_all();
     }
 
     fn process_lsdb(&mut self, ev: LsdbEvent, area_id: Option<Ipv4Addr>, key: OspfLsaKey) {
@@ -3231,7 +3209,7 @@ impl Ospf<Ospfv2> {
             }
             OspfLsType::AsExternal => {
                 // Type-5s can be self-originated via two paths:
-                //   1. instance-level `redistribute connected` → `redist_connected_originated`
+                //   1. instance-level `redistribute <source>` → `redist_originated`
                 //   2. NSSA Type-7→Type-5 translation → `nssa_translated`
                 // Check the redistribute set first, then NSSA, then flush.
                 let network = {
@@ -3249,13 +3227,15 @@ impl Ospf<Ospfv2> {
                         .and_then(|plen| Ipv4Net::new(ls_id, plen).ok())
                         .map(|p| p.trunc())
                 };
-                if network.is_some_and(|p| self.redist_connected_originated.contains(&p)) {
+                if network
+                    .is_some_and(|p| self.redist_originated.values().any(|set| set.contains(&p)))
+                {
                     tracing::info!(
                         "[Self-Originated] Re-originating redistribute Type-5 id={} seq={:#x}",
                         ls_id,
                         received_seq
                     );
-                    self.as_external_redist_connected_resync();
+                    self.as_external_redist_resync_all();
                 } else {
                     let owning_area = self
                         .areas
@@ -5423,11 +5403,9 @@ impl Ospf<Ospfv3> {
             spf_duration: None,
             redist_v4: BTreeMap::new(),
             redist_v6: BTreeMap::new(),
-            redist_connected: None,
-            redist_connected_originated: BTreeSet::new(),
-            redist_bgp: None,
-            redist_bgp_originated: BTreeSet::new(),
-            redist_bgp_originated_v6: BTreeSet::new(),
+            redist: BTreeMap::new(),
+            redist_originated: BTreeMap::new(),
+            redist_originated_v6: BTreeMap::new(),
             flex_algo: crate::flex_algo::FlexAlgoConfig::new(Ospfv3::FLEX_ALGO_PREFIX),
             affinity_map: crate::flex_algo::AffinityMap::new(),
             srlg_config: crate::flex_algo::SrlgGroupBuilder::new(),
@@ -5611,7 +5589,7 @@ impl Ospf<Ospfv3> {
         for area_id in area_ids {
             self.nssa_redist_connected_resync_v3(area_id);
         }
-        self.as_external_redist_bgp_resync_v3();
+        self.as_external_redist_resync_all_v3();
     }
 
     /// `RibRx::RouteDel` handler (v3). Mirror of `route_redist_add`.
@@ -5625,7 +5603,7 @@ impl Ospf<Ospfv3> {
         for area_id in area_ids {
             self.nssa_redist_connected_resync_v3(area_id);
         }
-        self.as_external_redist_bgp_resync_v3();
+        self.as_external_redist_resync_all_v3();
     }
 
     /// Stash an IPv6 address learned from netlink on the matching
@@ -6502,23 +6480,26 @@ impl Ospf<Ospfv3> {
         }
     }
 
-    /// v3 sibling of `as_external_redist_bgp_resync`: rebuild this
-    /// instance's self-originated AS-External (Type-5) LSAs for the cached
-    /// BGP routes (`redist_v6` entries with `rtype == RibType::Bgp`),
-    /// diffing against `redist_bgp_originated_v6`. In a per-VRF OSPFv3
-    /// instance these are the VPNv6 routes BGP imported into the VRF —
+    /// v3 sibling of `as_external_redist_resync`: rebuild this
+    /// instance's self-originated AS-External (Type-5) LSAs for one
+    /// instance-level `redistribute <source>` knob from the cached
+    /// routes (`redist_v6` entries with a matching rtype), diffing
+    /// against `redist_originated_v6`. In a per-VRF OSPFv3 instance the
+    /// bgp source carries the VPNv6 routes BGP imported into the VRF —
     /// injecting them into the CE-facing OSPFv3 is the L3VPN PE-CE down
     /// direction.
-    pub fn as_external_redist_bgp_resync_v3(&mut self) {
-        use crate::rib::RibType;
-
-        let entry = self.redist_bgp;
-        let prev_originated = self.redist_bgp_originated_v6.clone();
+    pub fn as_external_redist_resync_v3(&mut self, rtype: crate::rib::RibType) {
+        let entry = self.redist.get(&rtype).copied();
+        let prev_originated = self
+            .redist_originated_v6
+            .get(&rtype)
+            .cloned()
+            .unwrap_or_default();
 
         let desired: BTreeSet<ipnet::Ipv6Net> = if entry.is_some() {
             self.redist_v6
                 .iter()
-                .filter(|((rtype, _), _)| *rtype == RibType::Bgp)
+                .filter(|((rt, _), _)| *rt == rtype)
                 .map(|((_, prefix), _)| *prefix)
                 .collect()
         } else {
@@ -6531,7 +6512,9 @@ impl Ospf<Ospfv3> {
             .collect::<Vec<_>>()
         {
             self.as_external_lsa_flush_for_prefix_v3(prefix);
-            self.redist_bgp_originated_v6.remove(&prefix);
+            if let Some(set) = self.redist_originated_v6.get_mut(&rtype) {
+                set.remove(&prefix);
+            }
         }
 
         if let Some(redist_entry) = entry {
@@ -6541,13 +6524,38 @@ impl Ospf<Ospfv3> {
                     redist_entry.metric,
                     redist_entry.metric_type.is_type_2(),
                 );
-                self.redist_bgp_originated_v6.insert(*prefix);
+                self.redist_originated_v6
+                    .entry(rtype)
+                    .or_default()
+                    .insert(*prefix);
             }
+        }
+        if self
+            .redist_originated_v6
+            .get(&rtype)
+            .is_some_and(|s| s.is_empty())
+        {
+            self.redist_originated_v6.remove(&rtype);
         }
 
         // A v3 router that redistributes is an ASBR; refresh the
         // Router-LSA so the E-bit reflects it.
         self.router_lsa_originate();
+    }
+
+    /// Run [`Self::as_external_redist_resync_v3`] for every source that
+    /// is either configured or still has originated state to clean up.
+    /// Called from the RIB route-churn handlers.
+    pub fn as_external_redist_resync_all_v3(&mut self) {
+        let rtypes: BTreeSet<crate::rib::RibType> = self
+            .redist
+            .keys()
+            .copied()
+            .chain(self.redist_originated_v6.keys().copied())
+            .collect();
+        for rtype in rtypes {
+            self.as_external_redist_resync_v3(rtype);
+        }
     }
 
     /// v3 sibling of `nssa_redist_connected_resync`: rebuild this
