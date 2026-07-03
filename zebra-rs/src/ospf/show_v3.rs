@@ -60,6 +60,10 @@ impl Ospf<Ospfv3> {
             .set(show_ospfv3_segment_routing)
             .path("/show/ospfv3/srv6")
             .set(show_ospfv3_srv6)
+            .path("/show/ospfv3/graceful-restart")
+            .set(show_ospfv3_graceful_restart)
+            .path("/show/ospfv3/checkpoint")
+            .set(show_ospfv3_checkpoint)
             .path("/show/ospfv3/flex-algo")
             .set(show_ospfv3_flex_algo)
             .map();
@@ -2616,4 +2620,207 @@ mod srv6_show_tests {
                 .contains("Locator: LOC1 (unresolved)")
         );
     }
+}
+
+#[derive(Serialize)]
+struct GrHelperV3Json {
+    neighbor_id: String,
+    ifindex: u32,
+    restart_reason: String,
+    grace_period_secs: u32,
+    remaining_secs: u32,
+}
+
+#[derive(Serialize)]
+struct GrRestartingV3Json {
+    grace_period_secs: u32,
+    reason: String,
+    age_secs: u64,
+}
+
+#[derive(Serialize)]
+struct GracefulRestartV3Json {
+    helper_enabled: bool,
+    max_grace_period_secs: u32,
+    strict_lsa_checking: bool,
+    drain_time_ms: u32,
+    restarting: Option<GrRestartingV3Json>,
+    helpers: Vec<GrHelperV3Json>,
+}
+
+/// `show ospfv3 graceful-restart` — v3 sibling of the v2 handler:
+/// helper configuration, staged-restart line, active helper table.
+fn show_ospfv3_graceful_restart(
+    top: &Ospf<Ospfv3>,
+    _args: Args,
+    json: bool,
+) -> Result<String, std::fmt::Error> {
+    use std::fmt::Write;
+    let cfg = &top.gr_config;
+    if json {
+        let mut helpers = Vec::new();
+        for (ifindex, link) in top.links.iter() {
+            for nbr in link.nbrs.values() {
+                let Some(helper) = nbr.gr_helper.as_ref() else {
+                    continue;
+                };
+                let elapsed = helper.entered_at.elapsed().as_secs() as u32;
+                helpers.push(GrHelperV3Json {
+                    neighbor_id: nbr.ident.router_id.to_string(),
+                    ifindex: *ifindex,
+                    restart_reason: format!("{:?}", helper.reason),
+                    grace_period_secs: helper.grace_period,
+                    remaining_secs: helper.grace_period.saturating_sub(elapsed),
+                });
+            }
+        }
+        let out = GracefulRestartV3Json {
+            helper_enabled: cfg.helper_enabled,
+            max_grace_period_secs: cfg.max_grace_period,
+            strict_lsa_checking: cfg.helper_strict_lsa_checking,
+            drain_time_ms: cfg.drain_time_ms,
+            restarting: top.restarting.as_ref().map(|state| GrRestartingV3Json {
+                grace_period_secs: state.grace_period,
+                reason: format!("{:?}", state.reason),
+                age_secs: state.entered_at.elapsed().as_secs(),
+            }),
+            helpers,
+        };
+        return Ok(serde_json::to_string_pretty(&out)
+            .unwrap_or_else(|e| format!("{{\"error\": \"{}\"}}", e)));
+    }
+    let mut buf = String::new();
+
+    writeln!(buf, "Graceful-restart configuration:")?;
+    writeln!(buf, "  Helper enabled: {}", cfg.helper_enabled)?;
+    writeln!(buf, "  Max grace period: {}s", cfg.max_grace_period)?;
+    writeln!(
+        buf,
+        "  Strict LSA checking: {}",
+        cfg.helper_strict_lsa_checking
+    )?;
+    writeln!(buf, "  Drain time: {}ms", cfg.drain_time_ms)?;
+    if let Some(ref state) = top.restarting {
+        writeln!(
+            buf,
+            "  Restart staged: grace={}s, reason={:?}, age={:?}",
+            state.grace_period,
+            state.reason,
+            state.entered_at.elapsed()
+        )?;
+    }
+    writeln!(buf)?;
+
+    let mut any = false;
+    writeln!(
+        buf,
+        "{:<15} {:<10} {:<22} {:<14} {:<10}",
+        "Neighbor ID", "Interface", "Restart Reason", "Grace Period", "Remaining"
+    )?;
+    for (ifindex, link) in top.links.iter() {
+        for nbr in link.nbrs.values() {
+            let Some(helper) = nbr.gr_helper.as_ref() else {
+                continue;
+            };
+            any = true;
+            let elapsed = helper.entered_at.elapsed().as_secs() as u32;
+            let remaining = helper.grace_period.saturating_sub(elapsed);
+            writeln!(
+                buf,
+                "{:<15} {:<10} {:<22} {:<14} {:<10}",
+                nbr.ident.router_id.to_string(),
+                format!("if{}", ifindex),
+                format!("{:?}", helper.reason),
+                format!("{}s", helper.grace_period),
+                format!("{}s", remaining),
+            )?;
+        }
+    }
+    if !any {
+        writeln!(buf, "  (no active helpers)")?;
+    }
+    Ok(buf)
+}
+
+#[derive(Serialize)]
+struct CheckpointV3Json {
+    path: String,
+    present: bool,
+    error: Option<String>,
+    router_id: Option<String>,
+    grace_period_secs: Option<u32>,
+    areas: usize,
+    lsas: usize,
+    links: usize,
+}
+
+/// `show ospfv3 checkpoint` — summary of the on-disk ospfv3.cbor
+/// graceful-restart checkpoint.
+fn show_ospfv3_checkpoint(
+    _top: &Ospf<Ospfv3>,
+    _args: Args,
+    json: bool,
+) -> Result<String, std::fmt::Error> {
+    use super::checkpoint::{OspfCheckpoint, default_path};
+    use std::fmt::Write;
+
+    let path = default_path("ospfv3");
+    let read = OspfCheckpoint::read_from_path(&path);
+    if json {
+        let mut out = CheckpointV3Json {
+            path: path.display().to_string(),
+            present: false,
+            error: None,
+            router_id: None,
+            grace_period_secs: None,
+            areas: 0,
+            lsas: 0,
+            links: 0,
+        };
+        match read {
+            Ok(cp) => {
+                out.present = true;
+                out.router_id = Some(cp.router_id.to_string());
+                out.grace_period_secs = Some(cp.grace_period_secs);
+                out.areas = cp.areas.len();
+                out.lsas = cp.areas.iter().map(|a| a.lsas.len()).sum();
+                out.links = cp.links.len();
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+            Err(e) => out.error = Some(e.to_string()),
+        }
+        return Ok(serde_json::to_string_pretty(&out)
+            .unwrap_or_else(|e| format!("{{\"error\": \"{}\"}}", e)));
+    }
+    let mut buf = String::new();
+    match read {
+        Ok(cp) => {
+            writeln!(buf, "Checkpoint: {}", path.display())?;
+            writeln!(buf, "  Router ID: {}", cp.router_id)?;
+            writeln!(buf, "  Grace period: {}s", cp.grace_period_secs)?;
+            writeln!(
+                buf,
+                "  Areas: {} ({} LSAs), Links: {}",
+                cp.areas.len(),
+                cp.areas.iter().map(|a| a.lsas.len()).sum::<usize>(),
+                cp.links.len()
+            )?;
+            for link in &cp.links {
+                for nbr in &link.neighbors {
+                    writeln!(
+                        buf,
+                        "  Link {} ({}): neighbor {} was_full={}",
+                        link.ifname, link.ifindex, nbr.router_id, nbr.was_full
+                    )?;
+                }
+            }
+        }
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            writeln!(buf, "No checkpoint at {}", path.display())?;
+        }
+        Err(e) => {
+            writeln!(buf, "Checkpoint at {} unreadable: {}", path.display(), e)?;
+        }
+    }
+    Ok(buf)
 }

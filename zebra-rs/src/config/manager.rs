@@ -3598,4 +3598,33 @@ mod yang_load_tests {
             }
         }
     }
+    /// `router ospfv3 graceful-restart` config knobs — pin all four
+    /// spellings settable (they previously existed only for v2).
+    #[test]
+    fn ospfv3_graceful_restart_paths_parse() {
+        use crate::config::ExecCode;
+        use crate::config::parse::{State, parse};
+        use libyang::to_entry;
+
+        let mut yang = YangStore::new();
+        yang.add_path(concat!(env!("CARGO_MANIFEST_DIR"), "/yang"));
+        yang.read_with_resolve("configure")
+            .expect("configure mode loads");
+        yang.identity_resolve();
+        let module = yang
+            .find_module("configure")
+            .expect("configure module present");
+        let entry = to_entry(&yang, module);
+
+        for suffix in [
+            "helper-enabled true",
+            "max-grace-period 900",
+            "helper-strict-lsa-checking false",
+            "drain-time-ms 500",
+        ] {
+            let path = format!("set router ospfv3 graceful-restart {suffix}");
+            let (code, _comps, _state) = parse(&path, entry.clone(), None, State::new());
+            assert_eq!(code, ExecCode::Success, "`{path}` must be a settable path");
+        }
+    }
 }
