@@ -65,7 +65,13 @@ pub async fn read_packet(sock: Arc<AsyncFd<Socket>>, tx: UnboundedSender<Message
                 if pkt_len < 24 || ospf_input.len() < pkt_len {
                     return Err(ErrorKind::InvalidData.into());
                 }
-                if ospf_packet::validate_checksum(&ospf_input[..pkt_len]).is_err() {
+                // RFC 2328 §D.4.3: cryptographic authentication
+                // (AuType 2) does not use the standard checksum —
+                // the field is zero on the wire and integrity is
+                // verified via the digest trailer in the auth gate.
+                let auth_type = u16::from_be_bytes([ospf_input[14], ospf_input[15]]);
+                if auth_type != 2 && ospf_packet::validate_checksum(&ospf_input[..pkt_len]).is_err()
+                {
                     return Err(ErrorKind::InvalidData.into());
                 }
 

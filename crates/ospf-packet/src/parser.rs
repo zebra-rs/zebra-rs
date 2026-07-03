@@ -88,11 +88,23 @@ impl Ospfv2Packet {
         let len = buf.len() as u16;
         BigEndian::write_u16(&mut buf[2..4], len);
 
-        // Update checksum.
-        const CHECKSUM_RANGE: std::ops::Range<usize> = 12..14;
-        let mut cksum = Checksum::new();
-        cksum.add_bytes(buf);
-        buf[CHECKSUM_RANGE].copy_from_slice(&cksum.checksum());
+        // Update checksum. RFC 2328 §D.4.1-D.4.3: the checksum is
+        // computed over the packet EXCLUDING the 64-bit
+        // authentication field (bytes 16..24) — summing it too
+        // corrupts the value for any nonzero auth field (a Simple
+        // password, the Crypto key-id/seq overlay), and the peer's
+        // `validate_checksum` (which excludes the field) drops every
+        // packet. For cryptographic authentication (AuType 2) the
+        // standard checksum is not computed at all and the field
+        // stays zero — integrity is the digest trailer's job.
+        if self.auth_type != 2 {
+            const CHECKSUM_RANGE: std::ops::Range<usize> = 12..14;
+            const AUTH_RANGE: std::ops::Range<usize> = 16..24;
+            let mut cksum = Checksum::new();
+            cksum.add_bytes(&buf[..AUTH_RANGE.start]);
+            cksum.add_bytes(&buf[AUTH_RANGE.end..]);
+            buf[CHECKSUM_RANGE].copy_from_slice(&cksum.checksum());
+        }
 
         if !self.auth_trailer.is_empty() {
             buf.put(&self.auth_trailer[..]);
@@ -2859,6 +2871,39 @@ mod tests {
         assert_eq!(parsed.auth_type, 0);
         assert!(matches!(parsed.auth, Ospfv2Auth::Null(_)));
         assert!(parsed.auth_trailer.is_empty());
+    }
+
+    /// RFC 2328 §D.4.1-D.4.2: the checksum excludes the 64-bit
+    /// authentication field, so an emitted Simple-password packet
+    /// must verify at a receiver that also excludes it. This was
+    /// broken (emit summed the password too) and every
+    /// authenticated packet was dropped at ingress checksum
+    /// validation before the auth gate ever ran.
+    #[test]
+    fn simple_password_checksum_excludes_auth_field() {
+        let mut pkt = null_hello_packet();
+        pkt.auth_type = 1;
+        pkt.auth = Ospfv2Auth::Simple(*b"zebra8ch");
+        let mut buf = BytesMut::new();
+        pkt.emit(&mut buf);
+        validate_checksum(&buf).expect("Simple-auth checksum must verify");
+    }
+
+    /// RFC 2328 §D.4.3: with cryptographic authentication the
+    /// standard checksum is not computed — the field stays zero and
+    /// the digest trailer carries the integrity check.
+    #[test]
+    fn crypto_auth_leaves_checksum_zero() {
+        let mut pkt = null_hello_packet();
+        pkt.auth_type = 2;
+        pkt.auth = Ospfv2Auth::Crypto(Ospfv2AuthCrypto {
+            key_id: 1,
+            auth_data_len: 16,
+            seq: 42,
+        });
+        let mut buf = BytesMut::new();
+        pkt.emit(&mut buf);
+        assert_eq!(&buf[12..14], &[0, 0], "AuType 2 checksum must stay zero");
     }
 
     #[test]
