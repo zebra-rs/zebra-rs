@@ -10,11 +10,13 @@ use crate::{AttrType, ParseBe};
 use super::{AttrEmitter, AttrFlags};
 
 /// SRv6 Endpoint Behavior codepoints (IANA "SRv6 Endpoint Behaviors",
-/// RFC 8986). The L3VPN decap behaviors plus the L2 multicast/BUM decap
-/// (`End.DT2M`) used by EVPN-over-SRv6 (RFC 9252 §6.4).
+/// RFC 8986). The L3VPN decap behaviors plus the L2 decaps used by
+/// EVPN-over-SRv6: unicast (`End.DT2U`, RFC 9252 §6.1/§6.2 on Type-2) and
+/// multicast/BUM (`End.DT2M`, §6.4 on Type-3).
 pub const SRV6_BEHAVIOR_END_DT6: u16 = 0x0012;
 pub const SRV6_BEHAVIOR_END_DT4: u16 = 0x0013;
 pub const SRV6_BEHAVIOR_END_DT46: u16 = 0x0014;
+pub const SRV6_BEHAVIOR_END_DT2U: u16 = 0x0015;
 pub const SRV6_BEHAVIOR_END_DT2M: u16 = 0x0016;
 
 /// BGP Prefix-SID TLV Types (IANA "BGP Prefix-SID TLV Types", RFC 8669 /

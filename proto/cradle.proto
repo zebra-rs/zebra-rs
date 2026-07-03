@@ -103,6 +103,23 @@ message LocalSidDel {
 
 message Srv6EncapSource { string addr = 1; }  // outer IPv6 SA for H.Encaps
 
+// EVPN-over-SRv6 overlay FDB entry: MAC `mac` in bridge domain `bd` sits
+// behind the remote PE's End.DT2U/DT2M service SID. `nexthop_id` selects the
+// underlay adjacency; 0 = resolve by a FIB6 lookup on `remote_sid` in the
+// datapath (the control plane doesn't need to pre-resolve). The all-ones MAC
+// is the per-BD BUM sentinel (remote End.DT2M).
+message FdbRemote {
+  string mac        = 1;
+  uint32 bd         = 2;
+  string remote_sid = 3;
+  uint32 nexthop_id = 4;
+}
+
+message FdbRemoteDel {
+  string mac = 1;
+  uint32 bd  = 2;
+}
+
 message Neighbor4 {
   string oif = 1;       // interface name (used when oif_index == 0)
   string ip = 2;
@@ -190,6 +207,8 @@ service Cradle {
   rpc AddLocalSid(LocalSid) returns (Empty);
   rpc DelLocalSid(LocalSidDel) returns (Empty);
   rpc SetSrv6EncapSource(Srv6EncapSource) returns (Empty);
+  rpc AddFdbRemote(FdbRemote) returns (Empty);
+  rpc DelFdbRemote(FdbRemoteDel) returns (Empty);
   rpc AddService(Service) returns (Empty);
   rpc GetStats(StatsRequest) returns (StatsReply);
   rpc AddL7Service(L7Service) returns (Empty);

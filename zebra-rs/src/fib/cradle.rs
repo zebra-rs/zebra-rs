@@ -47,9 +47,11 @@ fn srv6_behavior(b: crate::rib::SidBehavior) -> u32 {
         EndDT46 => 4,
         EndB6Encap => 5,
         UN => 6,
-        UA => 7,    // classic End.X at /128 (no shift)
-        UALib => 8, // compressed carrier: shift + adjacency
-        EndM => 3,  // mirror-context ~ End.DT6 (best-effort; not implemented)
+        UA => 7,       // classic End.X at /128 (no shift)
+        UALib => 8,    // compressed carrier: shift + adjacency
+        EndDT2U => 9,  // EVPN L2 unicast decap+bridge
+        EndDT2M => 10, // EVPN L2 BUM decap+flood
+        EndM => 3,     // mirror-context ~ End.DT6 (best-effort; not implemented)
     }
 }
 
@@ -523,6 +525,56 @@ impl CradleFib {
         .await;
         if let Err(e) = result {
             tracing::warn!("fib: cradle local_sid_uninstall {} failed: {e}", sid.addr);
+        }
+    }
+
+    /// EVPN-over-SRv6 overlay FDB entry (RFC 9252): `mac` in bridge domain
+    /// `vni` sits behind the remote PE's L2 service SID (End.DT2U for
+    /// unicast; the all-ones BUM sentinel carries End.DT2M). `nexthop_id: 0`
+    /// — cradle resolves the underlay adjacency with a FIB6 lookup on the
+    /// SID (the IGP's locator route, already teed).
+    pub async fn fdb_add(&self, vni: u32, mac: [u8; 6], sid: std::net::Ipv6Addr) {
+        let mac_str = format!(
+            "{:02x}:{:02x}:{:02x}:{:02x}:{:02x}:{:02x}",
+            mac[0], mac[1], mac[2], mac[3], mac[4], mac[5]
+        );
+        let result = async {
+            self.client()
+                .await?
+                .add_fdb_remote(pb::FdbRemote {
+                    mac: mac_str.clone(),
+                    bd: vni,
+                    remote_sid: sid.to_string(),
+                    nexthop_id: 0,
+                })
+                .await?;
+            anyhow::Ok(())
+        }
+        .await;
+        if let Err(e) = result {
+            tracing::warn!("fib: cradle fdb_add {mac_str} vni {vni} failed: {e}");
+        }
+    }
+
+    /// Remove an overlay FDB entry.
+    pub async fn fdb_del(&self, vni: u32, mac: [u8; 6]) {
+        let mac_str = format!(
+            "{:02x}:{:02x}:{:02x}:{:02x}:{:02x}:{:02x}",
+            mac[0], mac[1], mac[2], mac[3], mac[4], mac[5]
+        );
+        let result = async {
+            self.client()
+                .await?
+                .del_fdb_remote(pb::FdbRemoteDel {
+                    mac: mac_str.clone(),
+                    bd: vni,
+                })
+                .await?;
+            anyhow::Ok(())
+        }
+        .await;
+        if let Err(e) = result {
+            tracing::warn!("fib: cradle fdb_del {mac_str} vni {vni} failed: {e}");
         }
     }
 

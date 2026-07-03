@@ -60,6 +60,20 @@ pub enum SidBehavior {
     /// (carried in [`Sid::segs`]) and forwarded. BGP SR Policy
     /// (SAFI 73) installs the advertised SRv6 Binding SID this way.
     EndB6Encap,
+    /// End.DT2U — RFC 8986 §4.9 (IANA codepoint 0x15). Decapsulates and
+    /// switches the inner **Ethernet frame** by unicast destination MAC in
+    /// the bridge domain carried in [`Sid::table_id`] (the VNI). The EVPN-
+    /// over-SRv6 unicast service SID (RFC 9252 §6.1/§6.2), one per VNI,
+    /// advertised on Type-2 routes. The kernel has no such seg6local
+    /// action — the cradle eBPF tee is the data plane, so the FIB skips
+    /// the netlink install.
+    EndDT2U,
+    /// End.DT2M — RFC 8986 §4.10 (IANA codepoint 0x16). Decapsulates and
+    /// **floods** the inner Ethernet frame in the bridge domain
+    /// ([`Sid::table_id`] = VNI). The EVPN-over-SRv6 BUM service SID
+    /// (RFC 9252 §6.4), advertised on Type-3 IMET routes. Cradle-tee-only,
+    /// like End.DT2U.
+    EndDT2M,
     /// End.M — Mirroring Context segment (IANA codepoint 74,
     /// draft-ietf-rtgwg-srv6-egress-protection). A variant of End.DT6:
     /// the protector decapsulates the outer IPv6/SRH and looks the inner
@@ -81,6 +95,8 @@ impl fmt::Display for SidBehavior {
             Self::EndDT6 => write!(f, "End.DT6"),
             Self::EndDT46 => write!(f, "End.DT46"),
             Self::EndB6Encap => write!(f, "End.B6.Encaps"),
+            Self::EndDT2U => write!(f, "End.DT2U"),
+            Self::EndDT2M => write!(f, "End.DT2M"),
             Self::EndM => write!(f, "End.M"),
         }
     }
@@ -104,6 +120,9 @@ impl FromStr for SidBehavior {
             "End.DT6" => Ok(Self::EndDT6),
             "End.DT46" => Ok(Self::EndDT46),
             "End.B6.Encaps" => Ok(Self::EndB6Encap),
+            // End.DT2U / End.DT2M are deliberately absent: they are
+            // allocated per-VNI by BGP EVPN (`encapsulation srv6`), never
+            // named in config.
             "End.M" => Ok(Self::EndM),
             other => Err(SidBehaviorParseError(other.to_string())),
         }
@@ -249,6 +268,8 @@ impl Sid {
             | SidBehavior::EndDT6
             | SidBehavior::EndDT46
             | SidBehavior::EndB6Encap
+            | SidBehavior::EndDT2U
+            | SidBehavior::EndDT2M
             | SidBehavior::EndM => Ipv6Net::new(self.addr, 128).expect("/128 is always valid"),
             SidBehavior::UALib => {
                 let plen = self

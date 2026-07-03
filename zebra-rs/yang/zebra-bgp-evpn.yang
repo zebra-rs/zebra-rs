@@ -78,6 +78,29 @@ module zebra-bgp-evpn {
          Equivalent to FRR's `advertise-all-vni` under
          `address-family l2vpn evpn`.";
     }
+    leaf encapsulation {
+      type enumeration {
+        enum vxlan {
+          description
+            "VXLAN tunnels (RFC 8365) — the kernel bridge/VXLAN FDB
+             data plane. The default.";
+        }
+        enum srv6 {
+          description
+            "SRv6 (RFC 9252) — advertise a per-VNI End.DT2U SID on
+             Type-2 (MAC/IP) routes and an End.DT2M SID on Type-3
+             (IMET) routes, carved from the BGP SRv6 locator, and
+             install received MACs against the peer's L2 service SIDs.
+             Requires `segment-routing srv6 locator`; the L2 data
+             plane is the cradle eBPF tee (`system cradle-grpc`) —
+             the kernel has no End.DT2U/DT2M seg6local actions.";
+        }
+      }
+      default vxlan;
+      description
+        "EVPN overlay encapsulation for locally originated and
+         received MAC routes.";
+    }
     leaf igmp-mld-proxy {
       type boolean;
       default false;

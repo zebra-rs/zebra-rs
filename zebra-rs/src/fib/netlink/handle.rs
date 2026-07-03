@@ -284,6 +284,13 @@ fn sid_route_target(
         SidBehavior::EndDT4 | SidBehavior::EndDT6 | SidBehavior::EndDT46 | SidBehavior::EndM => {
             (RouteHeader::RT_TABLE_MAIN, RouteType::Unicast, 128, addr)
         }
+        // EVPN-over-SRv6 L2 service SIDs: same /128 host-route shape, but
+        // they never reach the kernel (no End.DT2U/DT2M seg6local action) —
+        // `route_sid_install` returns after the cradle tee. The target is
+        // computed anyway so the tee gets the right prefix length.
+        SidBehavior::EndDT2U | SidBehavior::EndDT2M => {
+            (RouteHeader::RT_TABLE_MAIN, RouteType::Unicast, 128, addr)
+        }
         // End.B6.Encaps (SR Policy Binding SID): a /128 host route in
         // table=main; the SRH it pushes rides inside the seg6local
         // encap, not in the route header.
@@ -1605,6 +1612,15 @@ impl FibHandle {
         if let Some(cradle) = &self.cradle {
             cradle.local_sid_install(sid, prefix_len, ifindex).await;
         }
+        // EVPN-over-SRv6 L2 SIDs are cradle-only: the kernel has no
+        // End.DT2U/DT2M seg6local actions, so there is nothing to install
+        // via netlink.
+        if matches!(
+            sid.behavior,
+            crate::rib::SidBehavior::EndDT2U | crate::rib::SidBehavior::EndDT2M
+        ) {
+            return;
+        }
         msg.header.table = table;
         msg.header.destination_prefix_length = prefix_len;
         msg.header.protocol = RouteProtocol::Isis;
@@ -1760,6 +1776,13 @@ impl FibHandle {
             sid_route_target(sid.behavior, sid.addr, sid.structure);
         if let Some(cradle) = &self.cradle {
             cradle.local_sid_uninstall(sid, prefix_len).await;
+        }
+        // Cradle-only L2 SIDs (see route_sid_install): nothing in the kernel.
+        if matches!(
+            sid.behavior,
+            crate::rib::SidBehavior::EndDT2U | crate::rib::SidBehavior::EndDT2M
+        ) {
+            return;
         }
         msg.header.table = table;
         msg.header.destination_prefix_length = prefix_len;
@@ -2743,6 +2766,7 @@ impl FibHandle {
     /// from BGP. Both are required and FRR programs both. The third
     /// VLAN-tagged variant FRR sometimes adds is only needed when the
     /// bridge is `vlan_filtering 1`; not implemented here yet.
+    #[allow(clippy::too_many_arguments)]
     pub async fn mac_add(
         &self,
         vni: u32,
@@ -2751,7 +2775,18 @@ impl FibHandle {
         flags: u8,
         _seq: u32,
         esi: Option<[u8; 10]>,
+        srv6_sid: Option<std::net::Ipv6Addr>,
     ) {
+        // EVPN over SRv6 (RFC 9252): the MAC sits behind a remote L2 service
+        // SID (End.DT2U; the all-ones BUM sentinel behind End.DT2M). The
+        // cradle eBPF tee is the L2 data plane — there is no kernel VXLAN
+        // FDB row to install (and no VXLAN device is required).
+        if let Some(sid) = srv6_sid {
+            if let Some(cradle) = &self.cradle {
+                cradle.fdb_add(vni, mac.octets(), sid).await;
+            }
+            return;
+        }
         let Some(&vxlan_ifindex) = self.vni_ifindex_map.get(&vni) else {
             if fib_l2_fdb() {
                 tracing::info!(
@@ -3038,6 +3073,11 @@ impl FibHandle {
 
     /// Delete EVPN MAC entry from bridge FDB
     pub async fn mac_del(&self, vni: u32, mac: &MacAddr) {
+        // Tee the delete to cradle first (harmless when the entry was never
+        // teed): `MacDel` doesn't say whether the add was VXLAN or SRv6.
+        if let Some(cradle) = &self.cradle {
+            cradle.fdb_del(vni, mac.octets()).await;
+        }
         // Mirror `mac_add` — skip when no local VXLAN registered for
         // this VNI. With `mac_add` skipping installs in the same case,
         // there's nothing in the kernel to delete; the old

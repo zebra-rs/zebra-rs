@@ -314,6 +314,11 @@ pub enum Message {
         flags: u8,
         seq: u32,
         esi: Option<[u8; 10]>,
+        /// EVPN-over-SRv6 (RFC 9252): the remote PE's L2 service SID this
+        /// MAC sits behind — End.DT2U for a unicast MAC, End.DT2M for the
+        /// all-ones BUM sentinel. `Some` selects the cradle L2 tee over the
+        /// kernel VXLAN FDB.
+        srv6_sid: Option<std::net::Ipv6Addr>,
     },
     MacDel {
         vni: u32,
@@ -2896,8 +2901,9 @@ impl Rib {
                 flags,
                 seq,
                 esi,
+                srv6_sid,
             } => {
-                self.mac_add(vni, mac, tunnel_endpoint, flags, seq, esi)
+                self.mac_add(vni, mac, tunnel_endpoint, flags, seq, esi, srv6_sid)
                     .await;
             }
             Message::MacDel { vni, mac } => {
@@ -3305,6 +3311,7 @@ impl Rib {
         }
     }
 
+    #[allow(clippy::too_many_arguments)]
     async fn mac_add(
         &mut self,
         vni: u32,
@@ -3313,6 +3320,7 @@ impl Rib {
         flags: u8,
         seq: u32,
         esi: Option<[u8; 10]>,
+        srv6_sid: Option<std::net::Ipv6Addr>,
     ) {
         // MAC Mobility: ignore stale duplicates (lower sequence number)
         if let Some(existing) = self.mac_table.get(&(vni, mac))
@@ -3330,9 +3338,10 @@ impl Rib {
 
         self.mac_table.insert((vni, mac), entry);
 
-        // Forward to kernel FIB
+        // Forward to kernel FIB (or, with an SRv6 L2 service SID, the
+        // cradle eBPF tee).
         self.fib_handle
-            .mac_add(vni, &mac, tunnel_endpoint, flags, seq, esi)
+            .mac_add(vni, &mac, tunnel_endpoint, flags, seq, esi, srv6_sid)
             .await;
     }
 

@@ -1706,6 +1706,39 @@ fn config_advertise_all_vni(bgp: &mut Bgp, mut args: Args, op: ConfigOp) -> Opti
     Some(())
 }
 
+/// `router bgp afi-safi evpn encapsulation {vxlan|srv6}` (RFC 9252).
+/// With `srv6`, Type-2 routes carry a per-VNI End.DT2U SID and Type-3
+/// IMETs an End.DT2M SID (SRv6 L2 Service TLVs), both carved from the
+/// BGP SRv6 locator; received MACs install against the peer's SIDs.
+/// Toggling re-originates the local FDB and IMETs so the SIDs are
+/// attached/dropped in place.
+fn config_evpn_encapsulation(bgp: &mut Bgp, mut args: Args, op: ConfigOp) -> Option<()> {
+    let afi_safi: AfiSafi = args.afi_safi()?;
+    if afi_safi.afi != Afi::L2vpn || afi_safi.safi != Safi::Evpn {
+        return None;
+    }
+    let srv6 = if op.is_set() {
+        args.string()?.as_str() == "srv6"
+    } else {
+        false
+    };
+    if bgp.evpn_encap_srv6 == srv6 {
+        return Some(());
+    }
+    bgp.evpn_encap_srv6 = srv6;
+    // Re-originate under the new encapsulation (no-op when
+    // advertise-all-vni is off; the config-load gate replay covers
+    // cold boot, where this leaf lands before the FdbAdds arrive).
+    if bgp.advertise_all_vni {
+        let entries: Vec<FdbEntry> = bgp.local_fdb.values().cloned().collect();
+        for entry in entries {
+            bgp.evpn_originate_macip(&entry);
+        }
+    }
+    reoriginate_all_imet(bgp);
+    Some(())
+}
+
 /// `router bgp afi-safi evpn igmp-mld-proxy <bool>` (RFC 9251 §6).
 /// When enabled, the Multicast Flags Extended Community (IGMP + MLD
 /// proxy capability) is attached to every originated Type-3 IMET
@@ -4420,6 +4453,14 @@ impl Bgp {
         self.callback_add(
             "/router/bgp/afi-safi/advertise-all-vni",
             config_advertise_all_vni,
+        );
+
+        // EVPN overlay encapsulation (RFC 9252) under
+        // `router bgp afi-safi evpn encapsulation {vxlan|srv6}`. With
+        // srv6, Type-2/Type-3 routes carry End.DT2U/End.DT2M SIDs.
+        self.callback_add(
+            "/router/bgp/afi-safi/encapsulation",
+            config_evpn_encapsulation,
         );
 
         // EVPN IGMP/MLD proxy capability (RFC 9251 §6) under
