@@ -1140,6 +1140,49 @@ module config {
           }
         }
 
+        container spf-interval {
+          ext:help "SPF calculation throttle timers";
+          // Adaptive IOS-XR-style exponential hold-down, replacing the
+          // old fixed 1-second coalescing timer. The first SPF after a
+          // quiet period waits `initial-wait`; sustained churn backs
+          // off `secondary-wait` then doubles up to `maximum-wait`.
+          // Per-area state, so a churning area backs off without
+          // slowing a stable one. Defaults 50/200/5000ms match
+          // zebra-rs IS-IS `spf-interval`.
+          leaf initial-wait {
+            type uint32 {
+              range "1..120000";
+            }
+            units "milliseconds";
+            default 50;
+            description
+              "Delay from the first topology change after a quiet
+               period to the first SPF run.";
+          }
+          leaf secondary-wait {
+            type uint32 {
+              range "1..120000";
+            }
+            units "milliseconds";
+            default 200;
+            description
+              "Hold-down before the next SPF while a burst is in
+               progress; doubles each successive run up to
+               maximum-wait.";
+          }
+          leaf maximum-wait {
+            type uint32 {
+              range "1..120000";
+            }
+            units "milliseconds";
+            default 5000;
+            description
+              "Upper bound on the SPF hold-down. A quiet period
+               longer than twice this value resets the backoff to
+               initial-wait.";
+          }
+        }
+
         list vrf {
           // Per-VRF OSPFv2 instance. The default `router ospf` task
           // forwards each `vrf <name> ...` line (with the `vrf <name>`
@@ -1417,6 +1460,32 @@ module config {
             }
             units "milliseconds";
             default 200;
+          }
+        }
+        // Adaptive SPF throttle — v6 sibling of the v2 spf-interval
+        // block. Same IOS-XR backoff and 50/200/5000ms defaults.
+        container spf-interval {
+          ext:help "SPF calculation throttle timers";
+          leaf initial-wait {
+            type uint32 {
+              range "1..120000";
+            }
+            units "milliseconds";
+            default 50;
+          }
+          leaf secondary-wait {
+            type uint32 {
+              range "1..120000";
+            }
+            units "milliseconds";
+            default 200;
+          }
+          leaf maximum-wait {
+            type uint32 {
+              range "1..120000";
+            }
+            units "milliseconds";
+            default 5000;
           }
         }
         list area {

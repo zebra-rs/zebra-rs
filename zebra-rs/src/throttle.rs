@@ -46,3 +46,39 @@ impl Throttle {
         self.last_run_at = Some(Instant::now());
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A schedule/run alternation (as the OSPF and IS-IS schedulers do)
+    /// yields the initial wait first, then the secondary, then doubles
+    /// up to — and holds at — the maximum.
+    #[test]
+    fn backoff_progression_within_burst() {
+        let (init, sec, max) = (50, 200, 5000);
+        let mut t = Throttle::default();
+        let mut seq = Vec::new();
+        for _ in 0..9 {
+            seq.push(t.schedule(init, sec, max));
+            t.mark_run();
+        }
+        assert_eq!(seq, vec![50, 200, 400, 800, 1600, 3200, 5000, 5000, 5000]);
+    }
+
+    /// A quiet period longer than `2 × maximum` resets the next
+    /// schedule back to `initial`.
+    #[test]
+    fn resets_after_quiet_period() {
+        // Tiny maximum (>= secondary) so the quiet window (2×max = 6ms)
+        // elapses in a short sleep with generous margin.
+        let (init, sec, max) = (1, 2, 3);
+        let mut t = Throttle::default();
+        assert_eq!(t.schedule(init, sec, max), 1); // initial
+        t.mark_run();
+        assert_eq!(t.schedule(init, sec, max), 2); // secondary (in burst)
+        t.mark_run();
+        std::thread::sleep(Duration::from_millis(30));
+        assert_eq!(t.schedule(init, sec, max), 1); // quiet → back to initial
+    }
+}

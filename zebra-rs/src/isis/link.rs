@@ -170,7 +170,7 @@ pub struct LinkTop<'a> {
         >,
     >,
     pub spf_timer: &'a mut Levels<Option<Timer>>,
-    pub spf_throttle: &'a mut Levels<super::throttle::Throttle>,
+    pub spf_throttle: &'a mut Levels<crate::throttle::Throttle>,
 
     /// SR state needed for End.X (adjacency) SID allocation. Threaded
     /// through so packet handlers can carve a function from the ELIB

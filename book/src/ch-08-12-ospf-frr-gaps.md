@@ -13,12 +13,9 @@ OSPFv2 features not yet implemented in zebra-rs:
   Type-7 LSAs carrying a non-zero forwarding address are skipped
   (RFC 2328 §16.4 step 3); zebra-rs itself always originates with
   FA 0.0.0.0.
-- Configurable SPF / LSA-generation throttles. SPF is coalesced
-  behind a fixed 1-second timer (an LSDB change arms it; further
-  changes within the window ride the same run), but the adaptive
-  initial/secondary/maximum-wait throttle that FRR
-  (`timers throttle spf`) and zebra-rs IS-IS (`spf-interval`)
-  expose is not configurable for OSPF.
+- Configurable **LSA-generation** throttle. The SPF calculation now
+  has an adaptive throttle (see below), but LSA origination is not
+  yet rate-limited by a matching `timers throttle lsa-all`.
 
 ## Previously listed gaps that are now closed
 
@@ -58,3 +55,8 @@ per feature — see each feature's page):
   and OSPFv3 (RFC 5187). See
   [Graceful Restart](ch-08-17-ospf-graceful-restart.md) and the
   [OSPFv3 sibling](ch-15-12-ospfv3-graceful-restart.md).
+- **Adaptive SPF throttle** (`spf-interval`) — the IOS-XR-style
+  exponential backoff (`initial` / `secondary` / `maximum` wait,
+  FRR's `timers throttle spf`), per-area and shared with IS-IS,
+  for both OSPFv2 and OSPFv3. Replaces the old fixed 1-second
+  coalescing timer. See [Timer Configuration](ch-08-08-ospf-timers.md).

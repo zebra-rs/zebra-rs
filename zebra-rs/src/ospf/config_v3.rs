@@ -82,6 +82,12 @@ impl Ospf<Ospfv3> {
                 "/graceful-restart/drain-time-ms",
                 config_ospfv3_gr_drain_time_ms,
             ),
+            ("/spf-interval/initial-wait", config_ospfv3_spf_initial_wait),
+            (
+                "/spf-interval/secondary-wait",
+                config_ospfv3_spf_secondary_wait,
+            ),
+            ("/spf-interval/maximum-wait", config_ospfv3_spf_maximum_wait),
             (
                 "/default-information/originate",
                 config_ospfv3_default_originate,
@@ -749,6 +755,38 @@ fn config_ospfv3_gr_drain_time_ms(
 ) -> Option<()> {
     let value = if op.is_set() { args.u32()? } else { 200 };
     ospf.gr_config.drain_time_ms = value.clamp(50, 2000);
+    Some(())
+}
+
+// `/router/ospfv3/spf-interval/{initial,secondary,maximum}-wait` —
+// v6 siblings of the v2 spf-interval handlers.
+fn config_ospfv3_spf_initial_wait(
+    ospf: &mut Ospf<Ospfv3>,
+    mut args: Args,
+    op: ConfigOp,
+) -> Option<()> {
+    let default = super::inst::SpfIntervalConfig::default().initial_wait_ms;
+    ospf.spf_interval.initial_wait_ms = if op.is_set() { args.u32()? } else { default };
+    Some(())
+}
+
+fn config_ospfv3_spf_secondary_wait(
+    ospf: &mut Ospf<Ospfv3>,
+    mut args: Args,
+    op: ConfigOp,
+) -> Option<()> {
+    let default = super::inst::SpfIntervalConfig::default().secondary_wait_ms;
+    ospf.spf_interval.secondary_wait_ms = if op.is_set() { args.u32()? } else { default };
+    Some(())
+}
+
+fn config_ospfv3_spf_maximum_wait(
+    ospf: &mut Ospf<Ospfv3>,
+    mut args: Args,
+    op: ConfigOp,
+) -> Option<()> {
+    let default = super::inst::SpfIntervalConfig::default().maximum_wait_ms;
+    ospf.spf_interval.maximum_wait_ms = if op.is_set() { args.u32()? } else { default };
     Some(())
 }
 

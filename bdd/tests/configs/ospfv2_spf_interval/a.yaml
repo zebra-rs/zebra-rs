@@ -1,0 +1,25 @@
+interface:
+- if-name: lo
+  ipv4:
+    address: 10.0.0.1/32
+- if-name: ethb
+  ipv4:
+    address: 10.0.12.1/30
+router:
+  ospf:
+    router-id: 10.0.0.1
+    # Non-default adaptive SPF throttle. Surfaced verbatim by
+    # `show ospf` so the BDD can confirm the config reached the
+    # instance, not just that it parsed.
+    spf-interval:
+      initial-wait: 100
+      secondary-wait: 300
+      maximum-wait: 4000
+    area:
+    - area-id: 0.0.0.0
+      interface:
+      - if-name: lo
+        enable: true
+      - if-name: ethb
+        enable: true
+        network-type: point-to-point
