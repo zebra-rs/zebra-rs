@@ -1,0 +1,21 @@
+# r3 is internal to area 2 — it can only learn area-0 destinations
+# through r2's summaries, which require r2 to be backbone-attached
+# via the virtual link.
+interface:
+- if-name: lo
+  ipv4:
+    address: 10.0.0.3/32
+- if-name: ethb
+  ipv4:
+    address: 10.0.23.2/30
+router:
+  ospf:
+    router-id: 10.0.0.3
+    area:
+    - area-id: 0.0.0.2
+      interface:
+      - if-name: lo
+        enable: true
+      - if-name: ethb
+        enable: true
+        network-type: point-to-point

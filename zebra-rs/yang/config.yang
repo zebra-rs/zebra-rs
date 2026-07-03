@@ -737,6 +737,39 @@ module config {
               }
             }
           }
+          list virtual-link {
+            ext:help "Virtual link through this (transit) area to a remote ABR";
+            // RFC 2328 §15: a logical backbone point-to-point link to
+            // the ABR `router-id`, transiting THIS area. Comes up when
+            // the transit-area SPF finds the peer reachable; cost and
+            // endpoints are derived from that SPF. The list-key area
+            // must be a non-backbone, non-stub area.
+            key "router-id";
+            leaf router-id {
+              type inet:ipv4-address;
+            }
+            leaf hello-interval {
+              type uint16 {
+                range "1..65535";
+              }
+              units "seconds";
+              default 10;
+            }
+            leaf dead-interval {
+              type uint32 {
+                range "1..4294967295";
+              }
+              units "seconds";
+              default 40;
+            }
+            leaf retransmit-interval {
+              type uint16 {
+                range "1..65535";
+              }
+              units "seconds";
+              default 5;
+            }
+          }
           list interface {
             key "if-name";
             leaf if-name {

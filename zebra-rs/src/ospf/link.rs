@@ -483,6 +483,42 @@ pub struct OspfLink<V: OspfVersion = Ospfv2> {
         crate::stamp::session::SessionKey,
         crate::stamp::session::SessionParams,
     )>,
+    /// `Some` when this is a synthetic RFC 2328 §15 virtual link
+    /// rather than a physical interface. The discriminator gates the
+    /// VL-specific behavior: no multicast join, unicast sends to
+    /// `peer_addr` over `first_hop_ifindex`, a `VirtualLink` entry
+    /// (never a stub) in the area-0 Router-LSA, and `output_cost`
+    /// tracking the transit-area SPF distance. Maintained by
+    /// `Ospf::vl_reconcile`.
+    pub vl: Option<VirtualLinkState>,
+}
+
+/// First synthetic ifindex used for virtual-link `OspfLink`s. Kernel
+/// ifindexes are small positive integers, so the top-bit range can
+/// never collide. `network::write_packet` uses the same bound to
+/// route VL packets by the kernel FIB (`ipi_ifindex = 0`) instead of
+/// forcing egress out a (non-existent) interface.
+pub const VL_IFINDEX_BASE: u32 = 0x8000_0000;
+
+/// Runtime state of one virtual link (RFC 2328 §15), carried on its
+/// synthetic `OspfLink`. Configuration lives on the transit area
+/// (`OspfArea::virtual_links`); everything here is *derived* from the
+/// transit-area SPF and refreshed by `Ospf::vl_reconcile` after each
+/// SPF run.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct VirtualLinkState {
+    /// The non-backbone area the virtual link transits.
+    pub transit_area: Ipv4Addr,
+    /// Router-ID of the ABR at the far end (the config key).
+    pub peer_router_id: Ipv4Addr,
+    /// Unicast destination for OSPF packets on this VL: the peer's
+    /// interface address on the transit-area path (single-hop transit:
+    /// the first-hop neighbor address from `build_spf_nexthops`).
+    pub peer_addr: Ipv4Addr,
+    /// Physical egress ifindex toward the peer through the transit
+    /// area — the ifindex handed to `Message::Send` in place of the
+    /// synthetic one.
+    pub first_hop_ifindex: u32,
 }
 
 #[derive(Default)]
@@ -544,6 +580,74 @@ where
             lsdb: super::lsdb::Lsdb::new(),
             measured_te_metric: LinkTeMetric::default(),
             stamp_session: None,
+            vl: None,
+        }
+    }
+
+    /// Construct the synthetic `OspfLink` backing one RFC 2328 §15
+    /// virtual link. `index` is a synthetic ifindex (allocated from
+    /// the `VL_IFINDEX_BASE` range, never a kernel ifindex); the
+    /// socket is the instance's shared raw socket. The link is born
+    /// point-to-point in the backbone; `vl_reconcile` populates
+    /// `addr` / `output_cost` / `vl.{peer_addr,first_hop_ifindex}`
+    /// from the transit-area SPF before firing `InterfaceUp`.
+    pub fn new_virtual(
+        tx: UnboundedSender<Message<V>>,
+        index: u32,
+        sock: Arc<AsyncFd<Socket>>,
+        router_id: Ipv4Addr,
+        ptx: UnboundedSender<Message<V>>,
+        transit_area: Ipv4Addr,
+        peer_router_id: Ipv4Addr,
+    ) -> Self {
+        let config = LinkConfig {
+            enable: true,
+            network_type: Some(OspfNetworkType::PointToPoint),
+            ..LinkConfig::default()
+        };
+        Self {
+            index,
+            name: format!("VLINK{}-{}", transit_area, peer_router_id),
+            mtu: 1500,
+            enabled: true,
+            addr: Vec::new(),
+            area: crate::ospf::AREA0,
+            area_id: crate::ospf::AREA0,
+            area_type: super::area::AreaType::default(),
+            state: IfsmState::Down,
+            ostate: IfsmState::Down,
+            sock,
+            ident: Identity::<V>::new(router_id),
+            tx,
+            nbrs: BTreeMap::new(),
+            flags: 0.into(),
+            link_flags: LinkFlags::Up | LinkFlags::LowerUp | LinkFlags::Pointopoint,
+            network_type: OspfNetworkType::PointToPoint,
+            output_cost: OSPF_DEFAULT_OUTPUT_COST,
+            multicast_memberships: 0.into(),
+            timer: LinkTimer::default(),
+            state_change: 0,
+            db_desc_in: 0,
+            full_nbr_count: 0,
+            ptx,
+            config,
+            md5_seq: std::sync::atomic::AtomicU32::new(
+                std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map(|d| d.as_secs() as u32)
+                    .unwrap_or(0),
+            ),
+            ls_ack_delayed: Vec::new(),
+            interface_id: index,
+            lsdb: super::lsdb::Lsdb::new(),
+            measured_te_metric: LinkTeMetric::default(),
+            stamp_session: None,
+            vl: Some(VirtualLinkState {
+                transit_area,
+                peer_router_id,
+                peer_addr: Ipv4Addr::UNSPECIFIED,
+                first_hop_ifindex: 0,
+            }),
         }
     }
 }

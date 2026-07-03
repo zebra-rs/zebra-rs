@@ -163,7 +163,11 @@ pub fn ospf_ifsm_interface_up<V: OspfVersion>(link: &mut OspfLink<V>) -> Option<
     // same (group, ifindex) returns EADDRINUSE; the tracked flag
     // lets us no-op the second join instead. Same pattern the DR
     // path already uses for AllDRouters.
-    if !link.multicast_memberships.all_routers() {
+    //
+    // Virtual links skip the join entirely: their ifindex is
+    // synthetic (no kernel interface behind it) and every VL packet
+    // is unicast (RFC 2328 §15).
+    if link.vl.is_none() && !link.multicast_memberships.all_routers() {
         V::join_if(&link.sock, link.index);
         link.multicast_memberships.set_all_routers(true);
     }

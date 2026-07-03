@@ -122,8 +122,19 @@ pub async fn write_packet(sock: Arc<AsyncFd<Socket>>, mut rx: UnboundedReceiver<
             Ipv4Addr::from_str("224.0.0.5").unwrap()
         };
         let sockaddr: SockaddrIn = std::net::SocketAddrV4::new(dest, 0).into();
+        // Virtual-link packets carry a synthetic ifindex (no kernel
+        // interface behind it). They are always unicast to the far
+        // ABR through the transit area, so hand egress selection to
+        // the kernel FIB (`ipi_ifindex = 0`) instead of forcing an
+        // interface — this also keeps multi-hop transit paths
+        // working. Physical interfaces keep the forced egress.
+        let egress_ifindex = if ifindex >= super::link::VL_IFINDEX_BASE {
+            0
+        } else {
+            ifindex as i32
+        };
         let pktinfo = libc::in_pktinfo {
-            ipi_ifindex: ifindex as i32,
+            ipi_ifindex: egress_ifindex,
             ipi_spec_dst: libc::in_addr { s_addr: 0 },
             ipi_addr: libc::in_addr { s_addr: 0 },
         };
