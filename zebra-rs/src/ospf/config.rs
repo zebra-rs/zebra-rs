@@ -307,6 +307,12 @@ impl Ospf {
             "/graceful-restart/drain-time-ms",
             config_ospf_gr_drain_time_ms,
         );
+        self.ospf_add("/spf-interval/initial-wait", config_ospf_spf_initial_wait);
+        self.ospf_add(
+            "/spf-interval/secondary-wait",
+            config_ospf_spf_secondary_wait,
+        );
+        self.ospf_add("/spf-interval/maximum-wait", config_ospf_spf_maximum_wait);
         // `/router/ospf/tracing/...` is handled by the subtree dispatcher
         // `super::tracing::config_tracing_dispatch` (called from
         // `process_cm_msg` for paths this callback table does not claim),
@@ -2111,6 +2117,29 @@ fn config_ospf_gr_helper_strict_lsa_checking(
 fn config_ospf_gr_drain_time_ms(ospf: &mut Ospf, mut args: Args, op: ConfigOp) -> Option<()> {
     let value = if op.is_set() { args.u32()? } else { 200 };
     ospf.gr_config.drain_time_ms = value.clamp(50, 2000);
+    Some(())
+}
+
+// `/router/ospf/spf-interval/{initial,secondary,maximum}-wait`.
+// Adaptive SPF-throttle bounds (milliseconds). Delete restores the
+// per-field default from `SpfIntervalConfig::default()` (50/200/5000).
+// Live per-area timers pick the new bounds up on the next schedule; a
+// mid-flight timer keeps its already-computed wait.
+fn config_ospf_spf_initial_wait(ospf: &mut Ospf, mut args: Args, op: ConfigOp) -> Option<()> {
+    let default = super::inst::SpfIntervalConfig::default().initial_wait_ms;
+    ospf.spf_interval.initial_wait_ms = if op.is_set() { args.u32()? } else { default };
+    Some(())
+}
+
+fn config_ospf_spf_secondary_wait(ospf: &mut Ospf, mut args: Args, op: ConfigOp) -> Option<()> {
+    let default = super::inst::SpfIntervalConfig::default().secondary_wait_ms;
+    ospf.spf_interval.secondary_wait_ms = if op.is_set() { args.u32()? } else { default };
+    Some(())
+}
+
+fn config_ospf_spf_maximum_wait(ospf: &mut Ospf, mut args: Args, op: ConfigOp) -> Option<()> {
+    let default = super::inst::SpfIntervalConfig::default().maximum_wait_ms;
+    ospf.spf_interval.maximum_wait_ms = if op.is_set() { args.u32()? } else { default };
     Some(())
 }
 

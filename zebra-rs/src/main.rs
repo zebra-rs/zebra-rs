@@ -42,6 +42,9 @@ mod script;
 mod spf;
 mod srv6;
 mod stamp;
+/// IOS-XR-style exponential-backoff throttle, shared by the IS-IS and
+/// OSPF SPF/LSA schedulers.
+mod throttle;
 mod version;
 
 #[derive(Parser)]

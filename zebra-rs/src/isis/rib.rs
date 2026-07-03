@@ -9,12 +9,12 @@ use tokio::sync::mpsc::UnboundedSender;
 
 use super::config::IsisConfig;
 use super::level::Levels;
-use super::throttle::Throttle;
 use crate::context::Timer;
 use crate::rib::inst::{IlmEntry, IlmType};
 use crate::rib::link_ext::LinkFlagsExt;
 use crate::rib::{self, Nexthop, NexthopMulti, NexthopUni, RibSubType, RibType};
 use crate::spf;
+use crate::throttle::Throttle;
 // EncapType: TI-LFA repairs route through `tilfa::build_repair_path_srv6`,
 // but the Mirror SID egress-protection backup builds an H.Encaps repair
 // here directly (`inject_mirror_sid_backups`).

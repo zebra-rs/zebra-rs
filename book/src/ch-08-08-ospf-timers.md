@@ -33,3 +33,40 @@ Notes:
 - **`retransmit-interval`** governs how often unacknowledged LSAs in
   the per-neighbor `ls_rxmt` list are re-sent. The default of 5 s
   is conservative and rarely needs tuning on healthy links.
+
+## SPF throttle (`spf-interval`)
+
+The route calculation is rate-limited by an adaptive
+exponential-backoff throttle (IOS-XR style, shared with IS-IS),
+configured at the instance level:
+
+```
+router ospf {
+  spf-interval {
+    initial-wait 50;
+    secondary-wait 200;
+    maximum-wait 5000;
+  }
+}
+```
+
+| YANG leaf (`/router/ospf[v3]/spf-interval/…`) | Default | Range | Units |
+|---|---|---|---|
+| `initial-wait` | 50 | 1..120000 | milliseconds |
+| `secondary-wait` | 200 | 1..120000 | milliseconds |
+| `maximum-wait` | 5000 | 1..120000 | milliseconds |
+
+After a quiet period, the first topology change schedules SPF
+`initial-wait` ms later — fast convergence when the network is
+stable. If further changes arrive while a burst is in progress, the
+hold-down grows to `secondary-wait`, then doubles on each successive
+run up to `maximum-wait`, damping churn during instability. Once the
+area has been quiet for longer than `2 × maximum-wait`, the backoff
+resets to `initial-wait`.
+
+The backoff *state* is per-area, so a flapping area backs off without
+slowing convergence in a stable one. `show ospf` reports the
+configured bounds (`SPF timers: initial … secondary … maximum …`).
+OSPFv3 exposes the identical `spf-interval` block under
+`router ospfv3`. These defaults replace the earlier fixed 1-second
+coalescing timer.

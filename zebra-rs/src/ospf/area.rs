@@ -221,6 +221,13 @@ pub struct OspfArea<V: OspfVersion = Ospfv2> {
     // SPF calculation timer.
     pub spf_timer: Option<Timer>,
 
+    // Per-area adaptive SPF-throttle backoff state (IOS-XR style).
+    // Fed the `spf-interval` bounds each time a run is scheduled; the
+    // wait grows initial -> secondary -> ... -> maximum within a burst
+    // and resets after a quiet period. Isolated per area so a churning
+    // area backs off without slowing a stable one.
+    pub spf_throttle: crate::throttle::Throttle,
+
     // SPF in-flight gate: true while a SPF run for this area is
     // executing. New `Message::SpfCalc(area_id)` events that arrive
     // during a run set `spf_pending` instead of starting a second
@@ -316,6 +323,7 @@ impl<V: OspfVersion> OspfArea<V> {
             links: BTreeSet::new(),
             lsdb: Lsdb::<V>::new(),
             spf_timer: None,
+            spf_throttle: crate::throttle::Throttle::default(),
             spf_inflight: false,
             spf_pending: false,
             redistribute: AreaRedistribute::default(),

@@ -74,6 +74,29 @@ pub const DEFAULT_ROUTER_ID: Ipv4Addr = Ipv4Addr::new(10, 0, 0, 1);
 /// `Message` enum directly. They generalize when the
 /// `OspfVersion` trait grows accessor methods, in a future round
 /// of trait expansion.
+/// Adaptive SPF-throttle configuration (`router ospf[v3] spf-interval`).
+/// Feeds the per-area [`crate::throttle::Throttle`]: the first SPF after a
+/// quiet period waits `initial_wait_ms`; a run inside a burst backs off
+/// `secondary_wait_ms` then doubles up to `maximum_wait_ms`. Defaults
+/// mirror zebra-rs IS-IS (`50 / 200 / 5000`), replacing the old fixed
+/// 1-second coalescing timer.
+#[derive(Clone, Copy, Debug)]
+pub struct SpfIntervalConfig {
+    pub initial_wait_ms: u32,
+    pub secondary_wait_ms: u32,
+    pub maximum_wait_ms: u32,
+}
+
+impl Default for SpfIntervalConfig {
+    fn default() -> Self {
+        Self {
+            initial_wait_ms: 50,
+            secondary_wait_ms: 200,
+            maximum_wait_ms: 5000,
+        }
+    }
+}
+
 pub struct Ospf<V: OspfVersion = Ospfv2> {
     pub tx: UnboundedSender<Message<V>>,
     pub rx: UnboundedReceiver<Message<V>>,
@@ -250,6 +273,10 @@ pub struct Ospf<V: OspfVersion = Ospfv2> {
     /// Defaults: helper enabled, max grace 1800s, strict LSA
     /// checking on — same as the YANG model's defaults.
     pub gr_config: super::neigh::GracefulRestartConfig,
+    /// Adaptive SPF-throttle timers (`spf-interval`). The backoff
+    /// *state* is per-area (`OspfArea::spf_throttle`); this holds the
+    /// configured bounds fed into it each time a run is scheduled.
+    pub spf_interval: SpfIntervalConfig,
     /// RFC 3623 §2 restarting-router state. `Some` once
     /// `gr_restart_begin` floods Grace LSAs and stages the
     /// restart; `None` in steady state. While `Some`, the
@@ -1145,12 +1172,16 @@ impl<V: OspfVersion> Ospf<V> {
             .map_or_else(|| "unknown".to_string(), |link| link.name.clone())
     }
 
-    /// One-second deferred SPF trigger for `area_id`. Same shape
-    /// for v2 and v3; the `Message::SpfCalc` variant doesn't carry
-    /// V-specific data, so the timer body is generic.
-    fn ospf_spf_timer_generic(tx: &UnboundedSender<Message<V>>, area_id: Ipv4Addr) -> Timer {
+    /// Deferred SPF trigger for `area_id`, fired after `wait_ms`.
+    /// Same shape for v2 and v3; the `Message::SpfCalc` variant
+    /// doesn't carry V-specific data, so the timer body is generic.
+    fn ospf_spf_timer_generic(
+        tx: &UnboundedSender<Message<V>>,
+        area_id: Ipv4Addr,
+        wait_ms: u64,
+    ) -> Timer {
         let tx = tx.clone();
-        Timer::new(1, TimerType::Once, move || {
+        Timer::once_ms(wait_ms, move || {
             let tx = tx.clone();
             async move {
                 let _ = tx.send(Message::SpfCalc(area_id));
@@ -1158,13 +1189,25 @@ impl<V: OspfVersion> Ospf<V> {
         })
     }
 
-    /// Arm the SPF timer on `area` if not already armed. v3 calls
-    /// this from `router_lsa_originate` / `network_lsa_originate`
-    /// / `router_intra_area_prefix_lsa_originate` so any LSA
-    /// install kicks off an SPF after a 1-second coalescing window.
-    fn ospf_spf_schedule_generic(tx: &UnboundedSender<Message<V>>, area: &mut OspfArea<V>) {
+    /// Arm the adaptive SPF timer on `area` if not already armed.
+    /// Called from every LSA-install / topology-change path so a
+    /// change kicks off an SPF after the throttle-computed delay:
+    /// `initial_wait` when the area has been quiet, backing off to
+    /// `maximum_wait` under sustained churn (`spf-interval`). The
+    /// timer clears `spf_timer` and calls `spf_throttle.mark_run()`
+    /// when it fires (see the `Message::SpfCalc` handlers).
+    fn ospf_spf_schedule_generic(
+        tx: &UnboundedSender<Message<V>>,
+        area: &mut OspfArea<V>,
+        cfg: SpfIntervalConfig,
+    ) {
         if area.spf_timer.is_none() {
-            area.spf_timer = Some(Self::ospf_spf_timer_generic(tx, area.id));
+            let wait_ms = area.spf_throttle.schedule(
+                cfg.initial_wait_ms,
+                cfg.secondary_wait_ms,
+                cfg.maximum_wait_ms,
+            );
+            area.spf_timer = Some(Self::ospf_spf_timer_generic(tx, area.id, wait_ms as u64));
         }
     }
 }
@@ -1247,6 +1290,7 @@ impl Ospf<Ospfv2> {
             endx_sids: BTreeMap::new(),
             sr_rx,
             gr_config: super::neigh::GracefulRestartConfig::default(),
+            spf_interval: SpfIntervalConfig::default(),
             restarting: None,
             key_chains: BTreeMap::new(),
             policy_tx,
@@ -1447,14 +1491,12 @@ impl Ospf<Ospfv2> {
         }
     }
 
-    fn ospf_spf_timer(tx: &UnboundedSender<Message>, area_id: Ipv4Addr) -> Timer {
-        Self::ospf_spf_timer_generic(tx, area_id)
-    }
-
-    fn ospf_spf_schedule(tx: &UnboundedSender<Message>, area: &mut OspfArea) {
-        if area.spf_timer.is_none() {
-            area.spf_timer = Some(Self::ospf_spf_timer(tx, area.id));
-        }
+    fn ospf_spf_schedule(
+        tx: &UnboundedSender<Message>,
+        area: &mut OspfArea,
+        cfg: SpfIntervalConfig,
+    ) {
+        Self::ospf_spf_schedule_generic(tx, area, cfg);
     }
 
     fn router_lsa_stub_link(prefix: Ipv4Net, metric: u16) -> RouterLsaLink {
@@ -1649,7 +1691,7 @@ impl Ospf<Ospfv2> {
                 let flood_lsa = lsa.clone();
                 area.lsdb
                     .insert_self_originated(lsa, &self.tx, Some(area_id));
-                Self::ospf_spf_schedule(&self.tx, area);
+                Self::ospf_spf_schedule(&self.tx, area, self.spf_interval);
                 Some(flood_lsa)
             } else {
                 None
@@ -3280,7 +3322,7 @@ impl Ospf<Ospfv2> {
                     if let Some(area_id) = area_id
                         && let Some(area) = self.areas.get_mut(area_id)
                     {
-                        Self::ospf_spf_schedule(&self.tx, area);
+                        Self::ospf_spf_schedule(&self.tx, area, self.spf_interval);
                     }
                 }
                 OspfLsType::AsExternal => {
@@ -3703,7 +3745,7 @@ impl Ospf<Ospfv2> {
         if let Some(lsa) = flood_lsa {
             self.flood_self_originated_lsa(area_id, &lsa);
             if let Some(area) = self.areas.get_mut(area_id) {
-                Self::ospf_spf_schedule(&self.tx, area);
+                Self::ospf_spf_schedule(&self.tx, area, self.spf_interval);
             }
         }
     }
@@ -5289,7 +5331,7 @@ impl Ospf<Ospfv2> {
             Message::SpfSchedule(area_id) => {
                 if let Some(area_id) = area_id {
                     if let Some(area) = self.areas.get_mut(area_id) {
-                        Self::ospf_spf_schedule(&self.tx, area);
+                        Self::ospf_spf_schedule(&self.tx, area, self.spf_interval);
                     }
                 } else {
                     // None = AS-scope event (e.g. AS-external LSA install /
@@ -5298,7 +5340,7 @@ impl Ospf<Ospfv2> {
                     let area_ids: Vec<Ipv4Addr> = self.areas.iter().map(|(id, _)| *id).collect();
                     for id in area_ids {
                         if let Some(area) = self.areas.get_mut(id) {
-                            Self::ospf_spf_schedule(&self.tx, area);
+                            Self::ospf_spf_schedule(&self.tx, area, self.spf_interval);
                         }
                     }
                 }
@@ -5315,6 +5357,9 @@ impl Ospf<Ospfv2> {
                     return;
                 }
                 area.spf_timer = None;
+                // Record the run so the throttle backs off the *next*
+                // schedule (initial -> secondary -> ... -> maximum).
+                area.spf_throttle.mark_run();
                 // Build the SPF input (graph + source vertex) on the
                 // main task — reads the LSDB and is cheap. If there
                 // is no source node yet, there is nothing to compute.
@@ -5630,6 +5675,7 @@ impl Ospf<Ospfv3> {
             endx_sids: BTreeMap::new(),
             sr_rx,
             gr_config: super::neigh::GracefulRestartConfig::default(),
+            spf_interval: SpfIntervalConfig::default(),
             restarting: None,
             key_chains: BTreeMap::new(),
             policy_tx,
@@ -6546,7 +6592,7 @@ impl Ospf<Ospfv3> {
         let flood_lsa = lsa.clone();
         if let Some(area) = self.areas.get_mut(area_id) {
             area.lsdb.install_originated(lsa, &self.tx, Some(area_id));
-            Self::ospf_spf_schedule_generic(&self.tx, area);
+            Self::ospf_spf_schedule_generic(&self.tx, area, self.spf_interval);
         }
 
         self.flood_self_originated_lsa(area_id, &flood_lsa);
@@ -8716,7 +8762,7 @@ impl Ospf<Ospfv3> {
             Message::SpfSchedule(area_id) => {
                 if let Some(area_id) = area_id {
                     if let Some(area) = self.areas.get_mut(area_id) {
-                        Self::ospf_spf_schedule_generic(&self.tx, area);
+                        Self::ospf_spf_schedule_generic(&self.tx, area, self.spf_interval);
                     }
                 } else {
                     // None = AS-scope event (Type-5 AS-External install /
@@ -8726,7 +8772,7 @@ impl Ospf<Ospfv3> {
                     let area_ids: Vec<Ipv4Addr> = self.areas.iter().map(|(id, _)| *id).collect();
                     for id in area_ids {
                         if let Some(area) = self.areas.get_mut(id) {
-                            Self::ospf_spf_schedule_generic(&self.tx, area);
+                            Self::ospf_spf_schedule_generic(&self.tx, area, self.spf_interval);
                         }
                     }
                 }
@@ -8743,6 +8789,9 @@ impl Ospf<Ospfv3> {
                     return;
                 }
                 area.spf_timer = None;
+                // Record the run so the throttle backs off the next
+                // schedule (v3 sibling of the v2 handler).
+                area.spf_throttle.mark_run();
                 // Build the SPF input on the main task; if there is
                 // no source Router-LSA yet there is nothing to do.
                 let Some(input) = build_v3_spf_input(self, area_id) else {
@@ -9166,7 +9215,7 @@ impl Ospf<Ospfv3> {
         let flood_lsa = lsa.clone();
         if let Some(area) = self.areas.get_mut(area_id) {
             area.lsdb.install_originated(lsa, &self.tx, Some(area_id));
-            Self::ospf_spf_schedule_generic(&self.tx, area);
+            Self::ospf_spf_schedule_generic(&self.tx, area, self.spf_interval);
         }
         self.flood_self_originated_lsa(area_id, &flood_lsa);
     }
@@ -10190,7 +10239,7 @@ impl Ospf<Ospfv3> {
         let flood_lsa = lsa.clone();
         if let Some(area) = self.areas.get_mut(area_id) {
             area.lsdb.install_originated(lsa, &self.tx, Some(area_id));
-            Self::ospf_spf_schedule_generic(&self.tx, area);
+            Self::ospf_spf_schedule_generic(&self.tx, area, self.spf_interval);
         }
         self.flood_self_originated_lsa(area_id, &flood_lsa);
     }
@@ -10362,7 +10411,7 @@ impl Ospf<Ospfv3> {
         let flood_lsa = lsa.clone();
         if let Some(area) = self.areas.get_mut(area_id) {
             area.lsdb.install_originated(lsa, &self.tx, Some(area_id));
-            Self::ospf_spf_schedule_generic(&self.tx, area);
+            Self::ospf_spf_schedule_generic(&self.tx, area, self.spf_interval);
         }
         self.flood_self_originated_lsa(area_id, &flood_lsa);
     }

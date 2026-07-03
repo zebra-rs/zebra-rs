@@ -573,6 +573,13 @@ fn show_ospf(ospf: &Ospf, _args: Args, json: bool) -> std::result::Result<String
     if let Some(spf_duration) = ospf.spf_duration {
         writeln!(buf, " Last SPF duration {} usecs", spf_duration.as_micros())?;
     }
+    writeln!(
+        buf,
+        " SPF timers: initial {} ms, secondary {} ms, maximum {} ms",
+        ospf.spf_interval.initial_wait_ms,
+        ospf.spf_interval.secondary_wait_ms,
+        ospf.spf_interval.maximum_wait_ms,
+    )?;
     // TI-LFA compute telemetry for the same run (last-area-wins, like
     // `spf_duration`). None while TI-LFA is disabled.
     if let Some(stats) = &ospf.tilfa_stats {

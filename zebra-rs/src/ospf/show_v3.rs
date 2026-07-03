@@ -421,6 +421,10 @@ struct Ospfv3SummaryJson {
     link_count: usize,
     spf_last_ms_ago: Option<u128>,
     spf_duration_us: Option<u128>,
+    /// Configured adaptive SPF-throttle bounds (`spf-interval`), ms.
+    spf_initial_wait_ms: u32,
+    spf_secondary_wait_ms: u32,
+    spf_maximum_wait_ms: u32,
     /// TI-LFA compute telemetry for the most-recent run, preformatted
     /// (`targets=… mode=… workers=… spf{…} took … us`). None until
     /// TI-LFA runs (and cleared when it is disabled).
@@ -452,6 +456,9 @@ fn show_ospfv3_summary(
         link_count: top.links.len(),
         spf_last_ms_ago: top.spf_last.map(|t| t.elapsed().as_millis()),
         spf_duration_us: top.spf_duration.map(|d| d.as_micros()),
+        spf_initial_wait_ms: top.spf_interval.initial_wait_ms,
+        spf_secondary_wait_ms: top.spf_interval.secondary_wait_ms,
+        spf_maximum_wait_ms: top.spf_interval.maximum_wait_ms,
         tilfa_compute: top.tilfa_stats.as_ref().map(|s| {
             format!(
                 "targets={} mode={} workers={} spf{{q={} pc={} dedup-saved={}}} took {} us",
@@ -477,6 +484,11 @@ fn show_ospfv3_summary(
     if let Some(us) = summary.spf_duration_us {
         writeln!(text, "  SPF duration: {} us", us)?;
     }
+    writeln!(
+        text,
+        "  SPF timers:   initial {} ms, secondary {} ms, maximum {} ms",
+        summary.spf_initial_wait_ms, summary.spf_secondary_wait_ms, summary.spf_maximum_wait_ms,
+    )?;
     if let Some(tilfa) = &summary.tilfa_compute {
         writeln!(text, "  TI-LFA compute: {}", tilfa)?;
     }

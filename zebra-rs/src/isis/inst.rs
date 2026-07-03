@@ -45,12 +45,12 @@ use super::rib::{
 };
 use super::srlg::{SrlgGroup, SrlgGroupBuilder};
 use super::srmpls::IsisLabelMap;
-use super::throttle::Throttle;
 use super::{
     Hostname, IfsmEvent, Lsdb, LsdbEvent, NfsmEvent, NfsmState, csnp_send, srm_set_for_all_lsp,
 };
 use super::{Level, Levels, process_packet};
 use crate::spf::label_pool::LabelPool;
+use crate::throttle::Throttle;
 
 pub type Callback = fn(&mut Isis, Args, ConfigOp) -> Option<()>;
 pub type ShowCallback = fn(&Isis, Args, bool) -> std::result::Result<String, std::fmt::Error>;
