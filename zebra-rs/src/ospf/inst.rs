@@ -2052,6 +2052,7 @@ impl Ospf<Ospfv2> {
             cost: u32,
             local_addr: Ipv4Addr,
             peer_addr: Ipv4Addr,
+            first_hop_addr: Ipv4Addr,
             first_hop_ifindex: u32,
         }
 
@@ -2076,26 +2077,32 @@ impl Ospf<Ospfv2> {
                     .filter(|(_, path)| path.cost < LS_INFINITY)
                     .and_then(|(vertex, path)| {
                         let nhops = build_spf_nexthops(self, vertex, path);
+                        // The far endpoint address: for a directly-
+                        // adjacent peer the SPF first-hop address IS
+                        // the peer; otherwise walk the peer's
+                        // Router-LSA backlink toward the penultimate
+                        // SPF vertex (RFC 2328 §15 / FRR
+                        // `ospf_vl_set_params`).
                         let direct = nhops.iter().find(|(_, nh)| nh.adjacency);
-                        if direct.is_none() && !nhops.is_empty() {
-                            tracing::debug!(
-                                "[VL] peer {} reachable in area {} but not adjacent (multi-hop transit unsupported)",
-                                peer,
-                                area_id
-                            );
-                        }
-                        direct.and_then(|(addr, nh)| {
-                            let local_addr = self
-                                .links
-                                .get(&nh.ifindex)
-                                .and_then(|l| l.addr.first())
-                                .map(|a| a.prefix.addr())?;
-                            Some(Viable {
-                                cost: path.cost,
-                                local_addr,
-                                peer_addr: *addr,
-                                first_hop_ifindex: nh.ifindex,
-                            })
+                        let (peer_addr, first_hop_addr, nh) = match direct {
+                            Some((addr, nh)) => (*addr, *addr, nh),
+                            None => {
+                                let addr = self.vl_peer_addr_backlink(*area_id, *peer, path)?;
+                                let (fh_addr, nh) = nhops.iter().next()?;
+                                (addr, *fh_addr, nh)
+                            }
+                        };
+                        let local_addr = self
+                            .links
+                            .get(&nh.ifindex)
+                            .and_then(|l| l.addr.first())
+                            .map(|a| a.prefix.addr())?;
+                        Some(Viable {
+                            cost: path.cost,
+                            local_addr,
+                            peer_addr,
+                            first_hop_addr,
+                            first_hop_ifindex: nh.ifindex,
                         })
                     });
                 desired.push((*area_id, *peer, viable));
@@ -2128,11 +2135,13 @@ impl Ospf<Ospfv2> {
                 let prefix = Ipv4Net::new(v.local_addr, 32).unwrap();
                 let vl = link.vl.as_mut().unwrap();
                 if vl.peer_addr != v.peer_addr
+                    || vl.first_hop_addr != v.first_hop_addr
                     || vl.first_hop_ifindex != v.first_hop_ifindex
                     || link.output_cost != v.cost
                     || link.addr.first().map(|a| a.prefix.addr()) != Some(v.local_addr)
                 {
                     vl.peer_addr = v.peer_addr;
+                    vl.first_hop_addr = v.first_hop_addr;
                     vl.first_hop_ifindex = v.first_hop_ifindex;
                     link.output_cost = v.cost;
                     link.addr = vec![super::addr::OspfAddr { prefix }];
@@ -2176,6 +2185,7 @@ impl Ospf<Ospfv2> {
                 {
                     let vl = link.vl.as_mut().unwrap();
                     vl.peer_addr = v.peer_addr;
+                    vl.first_hop_addr = v.first_hop_addr;
                     vl.first_hop_ifindex = v.first_hop_ifindex;
                 }
                 self.links.insert(idx, link);
@@ -2221,6 +2231,51 @@ impl Ospf<Ospfv2> {
             self.abr_summary_originate();
             self.nssa_translate_resync_all();
         }
+    }
+
+    /// Multi-hop VL peer-endpoint derivation — the FRR
+    /// `ospf_vl_set_params` backlink walk. Given the transit-area SPF
+    /// `path` to the peer ABR (computed with `SpfOpt::full_path()`,
+    /// which `build_spf_input` enables for VL transit areas), take a
+    /// full vertex chain `[first_hop, ..., penultimate, peer]`,
+    /// resolve the penultimate vertex to its `lsp_map` key (a
+    /// router-id for router vertices, the DR interface address for
+    /// network pseudo-vertices — both live in the same id-space), and
+    /// return the `link_data` of the peer's transit-area Router-LSA
+    /// link that points back at it. That link_data is the peer's
+    /// interface address on the last hop of the path: a unicast
+    /// destination the transit area can route to.
+    fn vl_peer_addr_backlink(
+        &self,
+        transit_area: Ipv4Addr,
+        peer: Ipv4Addr,
+        path: &spf::Path,
+    ) -> Option<Ipv4Addr> {
+        let chain = path.paths.iter().find(|c| c.len() >= 2)?;
+        let penultimate = chain[chain.len() - 2];
+        let prev_key = *self.lsp_map.resolve(penultimate)?;
+        let area = self.areas.get(transit_area)?;
+        let lsa = area.lsdb.lookup_by_id(OspfLsType::Router, peer, peer)?;
+        let OspfLsp::Router(ref rl) = lsa.lsp else {
+            return None;
+        };
+        let addr = rl
+            .links
+            .iter()
+            .find(|l| {
+                matches!(l.link_type, OspfLinkType::P2p | OspfLinkType::Transit)
+                    && l.link_id == prev_key
+            })
+            .map(|l| l.link_data);
+        if addr.is_none() {
+            tracing::debug!(
+                "[VL] peer {} in area {}: no backlink toward {} in its Router-LSA",
+                peer,
+                transit_area,
+                prev_key
+            );
+        }
+        addr
     }
 
     /// Compute the set of `prefix -> metric` Type-3 summaries to
@@ -11921,15 +11976,18 @@ fn build_spf_nexthops(
         for (ifindex, link) in top.links.iter() {
             for (_, nbr) in link.nbrs.iter() {
                 if *nhop_id == nbr.ident.router_id {
-                    let addr = nbr.ident.prefix.addr();
                     // A virtual-link adjacency has a synthetic ifindex
-                    // with no kernel interface behind it; forwarding
-                    // toward the VL peer egresses the physical
-                    // transit-area interface (RFC 2328 §16.1.1 — the
-                    // VL inherits the transit path's next hop).
-                    let egress = match &link.vl {
-                        Some(vl) => vl.first_hop_ifindex,
-                        None => *ifindex,
+                    // with no kernel interface behind it, and on a
+                    // multi-hop transit path the VL neighbor's address
+                    // is not on-link. Routes through the VL inherit
+                    // the *transit-area path's* first hop instead
+                    // (RFC 2328 §16.1.1): `first_hop_addr` +
+                    // `first_hop_ifindex`, both derived by
+                    // `vl_reconcile` (equal to the neighbor address /
+                    // physical egress when the peer is adjacent).
+                    let (addr, egress) = match &link.vl {
+                        Some(vl) => (vl.first_hop_addr, vl.first_hop_ifindex),
+                        None => (nbr.ident.prefix.addr(), *ifindex),
                     };
                     let nhop = SpfNexthop {
                         ifindex: egress,
@@ -13148,6 +13206,8 @@ fn build_v3_spf_input(top: &mut Ospf<Ospfv3>, area_id: Ipv4Addr) -> Option<SpfIn
         area_id,
         graph,
         source,
+        // Virtual links are v2-only; v3 never needs full chains.
+        full_path: false,
         ti_lfa_enabled: top.ti_lfa_enabled,
         tilfa_mode: top
             .ti_lfa_compute_mode
@@ -14215,6 +14275,12 @@ struct SpfInput {
     area_id: Ipv4Addr,
     graph: spf::Graph,
     source: usize,
+    /// Run the primary SPF with `SpfOpt::full_path()` — set when this
+    /// area is the transit area of a configured virtual link, whose
+    /// multi-hop peer-endpoint derivation needs the full vertex chains
+    /// (RFC 2328 §15 / the FRR backlink walk). `nexthops` is populated
+    /// in both modes, so every other consumer is unaffected.
+    full_path: bool,
     /// `/router/ospf/fast-reroute/ti-lfa` snapshot. Gates the
     /// graph-only TI-LFA repair computation on the worker.
     ti_lfa_enabled: bool,
@@ -14292,6 +14358,13 @@ fn build_spf_input(top: &mut Ospf, area_id: Ipv4Addr) -> Option<SpfInput> {
         area_id,
         graph,
         source,
+        // Transit area of a configured VL: keep the full vertex
+        // chains so `vl_reconcile` can walk to the penultimate hop
+        // for the multi-hop peer-endpoint derivation.
+        full_path: top
+            .areas
+            .get(area_id)
+            .is_some_and(|a| !a.virtual_links.is_empty()),
         ti_lfa_enabled: top.ti_lfa_enabled,
         tilfa_mode: top
             .ti_lfa_compute_mode
@@ -14307,12 +14380,18 @@ fn compute_spf(input: SpfInput) -> SpfOutput {
         area_id,
         graph,
         source,
+        full_path,
         ti_lfa_enabled,
         tilfa_mode,
         flex_algos,
     } = input;
     let start = Instant::now();
-    let spf_result = spf::spf(&graph, source, &spf::SpfOpt::default());
+    let opt = if full_path {
+        spf::SpfOpt::full_path()
+    } else {
+        spf::SpfOpt::default()
+    };
+    let spf_result = spf::spf(&graph, source, &opt);
 
     // TI-LFA repair lists, graph-only. Gated on `fast-reroute ti-lfa`;
     // when off, the SPF primary RIB still installs — only the repair

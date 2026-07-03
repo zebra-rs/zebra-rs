@@ -512,9 +512,16 @@ pub struct VirtualLinkState {
     /// Router-ID of the ABR at the far end (the config key).
     pub peer_router_id: Ipv4Addr,
     /// Unicast destination for OSPF packets on this VL: the peer's
-    /// interface address on the transit-area path (single-hop transit:
-    /// the first-hop neighbor address from `build_spf_nexthops`).
+    /// interface address on the transit-area path (single-hop: the
+    /// first-hop neighbor address; multi-hop: the backlink-derived
+    /// endpoint from the peer's transit-area Router-LSA).
     pub peer_addr: Ipv4Addr,
+    /// The transit-area path's first-hop neighbor address. Routes
+    /// computed *through* the VL inherit this as their forwarding
+    /// next hop (RFC 2328 §16.1.1) — it is on-link, unlike
+    /// `peer_addr` on a multi-hop transit path. Equal to `peer_addr`
+    /// when the peer is directly adjacent.
+    pub first_hop_addr: Ipv4Addr,
     /// Physical egress ifindex toward the peer through the transit
     /// area — the ifindex handed to `Message::Send` in place of the
     /// synthetic one.
@@ -646,6 +653,7 @@ where
                 transit_area,
                 peer_router_id,
                 peer_addr: Ipv4Addr::UNSPECIFIED,
+                first_hop_addr: Ipv4Addr::UNSPECIFIED,
                 first_hop_ifindex: 0,
             }),
         }

@@ -62,3 +62,56 @@ Feature: OSPFv2 virtual links connect a remote ABR to the backbone
     And I delete namespace "r2"
     And I delete namespace "r3"
     Then the test environment should be clean
+
+  Scenario: Multi-hop transit — the ABRs are two hops apart through the transit area
+    # r1 -- rm -- r2 inside area 1: the VL endpoints are NOT
+    # adjacent, so the peer endpoint address comes from the
+    # full-path SPF backlink walk (FRR ospf_vl_set_params), and the
+    # unicast VL packets are forwarded by rm like ordinary transit
+    # traffic. Routes through the VL must inherit the transit path's
+    # first hop (rm), not the far endpoint (RFC 2328 §16.1.1).
+    Given a clean test environment
+    When I create namespace "r1"
+    And I create namespace "rm"
+    And I create namespace "r2"
+    And I create namespace "r3"
+    And I connect namespace "r1" interface "ethm" to namespace "rm" interface "etha"
+    And I connect namespace "rm" interface "ethb" to namespace "r2" interface "ethm"
+    And I connect namespace "r2" interface "ethc" to namespace "r3" interface "ethb"
+    And I start zebra-rs in namespace "r1"
+    And I start zebra-rs in namespace "rm"
+    And I start zebra-rs in namespace "r2"
+    And I start zebra-rs in namespace "r3"
+    And I apply config "r1m.yaml" to namespace "r1"
+    And I apply config "rm.yaml" to namespace "rm"
+    And I apply config "r2m.yaml" to namespace "r2"
+    And I apply config "r3m.yaml" to namespace "r3"
+    And I wait 45 seconds
+
+    # Transit-area adjacencies (r1-rm, rm-r2) and area 2 (r2-r3).
+    Then show command "show ospf neighbor" in namespace "rm" should contain "Full"
+    And show command "show ospf neighbor" in namespace "r3" should contain "Full"
+
+    # The multi-hop virtual link is up on both ABRs.
+    And show command "show ospf interface" in namespace "r1" should contain "VLINK"
+    And show command "show ospf interface" in namespace "r2" should contain "VLINK"
+
+    # Backbone routes cross the two-hop VL in both directions.
+    And show command "show ospf route" in namespace "r2" should contain "10.0.0.1/32"
+    And show command "show ospf route" in namespace "r1" should contain "10.0.0.3/32"
+    And show command "show ospf route" in namespace "r3" should contain "10.0.0.1/32"
+
+    # End to end across the multi-hop transit path.
+    And ping from "r3" to "10.0.0.1" should succeed
+    And ping from "r1" to "10.0.0.3" should succeed
+
+    # Teardown.
+    When I stop zebra-rs in namespace "r1"
+    And I stop zebra-rs in namespace "rm"
+    And I stop zebra-rs in namespace "r2"
+    And I stop zebra-rs in namespace "r3"
+    And I delete namespace "r1"
+    And I delete namespace "rm"
+    And I delete namespace "r2"
+    And I delete namespace "r3"
+    Then the test environment should be clean

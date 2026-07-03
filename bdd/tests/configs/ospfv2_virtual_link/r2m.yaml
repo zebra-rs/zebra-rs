@@ -1,0 +1,30 @@
+# r2 is the far-end ABR, two transit hops away from r1 — still no
+# physical backbone interface.
+interface:
+- if-name: lo
+  ipv4:
+    address: 10.0.0.2/32
+- if-name: ethm
+  ipv4:
+    address: 10.0.24.2/30
+- if-name: ethc
+  ipv4:
+    address: 10.0.23.1/30
+router:
+  ospf:
+    router-id: 10.0.0.2
+    area:
+    - area-id: 0.0.0.1
+      virtual-link:
+      - router-id: 10.0.0.1
+      interface:
+      - if-name: lo
+        enable: true
+      - if-name: ethm
+        enable: true
+        network-type: point-to-point
+    - area-id: 0.0.0.2
+      interface:
+      - if-name: ethc
+        enable: true
+        network-type: point-to-point

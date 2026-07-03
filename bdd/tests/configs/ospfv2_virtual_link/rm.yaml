@@ -1,0 +1,27 @@
+# rm is a plain transit-area internal router between the two VL
+# endpoints — it knows nothing about the virtual link; it just
+# forwards the unicast VL packets like any transit traffic.
+interface:
+- if-name: lo
+  ipv4:
+    address: 10.0.0.4/32
+- if-name: etha
+  ipv4:
+    address: 10.0.12.2/30
+- if-name: ethb
+  ipv4:
+    address: 10.0.24.1/30
+router:
+  ospf:
+    router-id: 10.0.0.4
+    area:
+    - area-id: 0.0.0.1
+      interface:
+      - if-name: lo
+        enable: true
+      - if-name: etha
+        enable: true
+        network-type: point-to-point
+      - if-name: ethb
+        enable: true
+        network-type: point-to-point

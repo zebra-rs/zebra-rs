@@ -174,13 +174,22 @@ backbone SPF flows through the link and the far ABR becomes
 backbone-attached, originating summaries for its other areas as
 usual. If the transit path fails, the SPF re-run tears the VL down.
 
+The two ABRs need not be adjacent: on a **multi-hop transit path**
+the peer's endpoint address is derived from the full-path SPF
+backlink walk (the peer's transit-area Router-LSA link pointing back
+at the penultimate SPF hop — FRR's `ospf_vl_set_params`), the VL
+packets are forwarded by the intermediate transit routers like any
+unicast traffic, and routes computed *through* the VL inherit the
+transit path's first hop as their forwarding next hop
+(RFC 2328 §16.1.1).
+
 Current limits: the transit area must be a normal area (not stub /
-NSSA — §3.6 forbids it), and the two ABRs must be **directly
-adjacent within the transit area** (single-hop transit); a
-multi-hop transit path keeps the VL down with a debug log. OSPFv2
-only — same as FRR, whose `ospf6d` has no virtual-link support
-either. Validated end to end by `ospfv2_virtual_link.feature`
-(area 2 reaching an area-0 loopback exclusively through the VL).
+NSSA — §3.6 forbids it), and per-virtual-link authentication is not
+yet configurable. OSPFv2 only — same as FRR, whose `ospf6d` has no
+virtual-link support either. Validated end to end by
+`ospfv2_virtual_link.feature`: single-hop and two-hop transit
+topologies, each with area 2 reaching an area-0 loopback exclusively
+through the VL.
 
 ## OSPFv3
 
