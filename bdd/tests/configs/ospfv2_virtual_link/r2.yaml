@@ -1,0 +1,31 @@
+# r2 is the far-end ABR: attached to areas 1 and 2 but with NO
+# physical backbone interface. The virtual link through area 1 is
+# what makes it backbone-attached.
+interface:
+- if-name: lo
+  ipv4:
+    address: 10.0.0.2/32
+- if-name: etha
+  ipv4:
+    address: 10.0.12.2/30
+- if-name: ethc
+  ipv4:
+    address: 10.0.23.1/30
+router:
+  ospf:
+    router-id: 10.0.0.2
+    area:
+    - area-id: 0.0.0.1
+      virtual-link:
+      - router-id: 10.0.0.1
+      interface:
+      - if-name: lo
+        enable: true
+      - if-name: etha
+        enable: true
+        network-type: point-to-point
+    - area-id: 0.0.0.2
+      interface:
+      - if-name: ethc
+        enable: true
+        network-type: point-to-point
