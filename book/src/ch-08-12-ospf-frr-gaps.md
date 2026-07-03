@@ -2,10 +2,10 @@
 
 OSPFv2 features not yet implemented in zebra-rs:
 
-- Multi-hop virtual-link transit — virtual links themselves are
-  implemented (see below), but the two ABRs must be directly
-  adjacent within the transit area; per-interface authentication on
-  a virtual link is also not yet configurable.
+- Per-virtual-link authentication — virtual links themselves,
+  including multi-hop transit, are implemented (see below), but the
+  `authentication` / key leaves under `virtual-link` are not yet
+  wired.
 - NBMA and point-to-multipoint network types — the per-interface
   `network-type` knob accepts `broadcast` and `point-to-point`
   only.
@@ -72,6 +72,7 @@ per feature — see each feature's page):
 - **Virtual links** (RFC 2328 §15, `area <transit> virtual-link
   <router-id>`) — a synthetic backbone interface derived from the
   transit area's SPF, unicast OSPF over the transit area, the
-  VirtualLink Router-LSA entry and transit-area V-bit. Single-hop
-  transit; OSPFv2 only (`ospf6d` has no virtual links either). See
+  VirtualLink Router-LSA entry and transit-area V-bit; multi-hop
+  transit supported via the full-path SPF backlink walk. OSPFv2
+  only (`ospf6d` has no virtual links either). See
   [Multi-Area Routing and the ABR](ch-08-14-ospf-multi-area-abr.md#virtual-links).
