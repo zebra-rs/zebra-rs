@@ -76,6 +76,18 @@ module config {
     prefix zob;
   }
 
+  import zebra-ospf-auth-simple {
+    prefix zoas;
+  }
+
+  import zebra-ospf-auth-md5 {
+    prefix zoam;
+  }
+
+  import zebra-ospf-auth-trailer {
+    prefix zoat;
+  }
+
   import zebra-ospf-tracing {
     prefix zotr;
   }
@@ -504,6 +516,54 @@ module config {
         container redistribute {
           container connected {
             presence "Redistribute connected routes as Type-5 AS-External LSAs";
+            leaf metric {
+              type uint32 {
+                range "0..16777214";
+              }
+              default 20;
+            }
+            leaf metric-type {
+              type enumeration {
+                enum type-1;
+                enum type-2;
+              }
+              default type-2;
+            }
+          }
+          container static {
+            presence "Redistribute static routes as Type-5 AS-External LSAs";
+            leaf metric {
+              type uint32 {
+                range "0..16777214";
+              }
+              default 20;
+            }
+            leaf metric-type {
+              type enumeration {
+                enum type-1;
+                enum type-2;
+              }
+              default type-2;
+            }
+          }
+          container kernel {
+            presence "Redistribute kernel routes as Type-5 AS-External LSAs";
+            leaf metric {
+              type uint32 {
+                range "0..16777214";
+              }
+              default 20;
+            }
+            leaf metric-type {
+              type enumeration {
+                enum type-1;
+                enum type-2;
+              }
+              default type-2;
+            }
+          }
+          container isis {
+            presence "Redistribute IS-IS routes as Type-5 AS-External LSAs";
             leaf metric {
               type uint32 {
                 range "0..16777214";
@@ -1151,10 +1211,78 @@ module config {
           type inet:ipv4-address;
         }
         // Instance-level redistribution into AS-External (Type-5) LSAs.
-        // `redistribute bgp` is the SRv6 L3VPN PE-CE down direction: a PE
-        // injects the VPNv6 routes it imported into a VRF into the
-        // CE-facing OSPFv3.
+        // Instance-level redistribute into AS-External (Type-5) LSAs,
+        // flooded AS-wide into all normal areas. Sources mirror the v2
+        // sibling (connected / static / kernel / isis / bgp);
+        // `redistribute bgp` additionally serves the SRv6 L3VPN PE-CE
+        // down direction: a PE injects the VPNv6 routes it imported
+        // into a VRF into the CE-facing OSPFv3. Per-area NSSA
+        // redistribution is under list area / redistribute.
         container redistribute {
+          container connected {
+            presence "Redistribute connected routes as AS-External (Type-5) LSAs";
+            leaf metric {
+              type uint32 {
+                range "0..16777214";
+              }
+              default 20;
+            }
+            leaf metric-type {
+              type enumeration {
+                enum type-1;
+                enum type-2;
+              }
+              default type-2;
+            }
+          }
+          container static {
+            presence "Redistribute static routes as AS-External (Type-5) LSAs";
+            leaf metric {
+              type uint32 {
+                range "0..16777214";
+              }
+              default 20;
+            }
+            leaf metric-type {
+              type enumeration {
+                enum type-1;
+                enum type-2;
+              }
+              default type-2;
+            }
+          }
+          container kernel {
+            presence "Redistribute kernel routes as AS-External (Type-5) LSAs";
+            leaf metric {
+              type uint32 {
+                range "0..16777214";
+              }
+              default 20;
+            }
+            leaf metric-type {
+              type enumeration {
+                enum type-1;
+                enum type-2;
+              }
+              default type-2;
+            }
+          }
+          container isis {
+            presence "Redistribute IS-IS routes as AS-External (Type-5) LSAs";
+            leaf metric {
+              type uint32 {
+                range "0..16777214";
+              }
+              default 20;
+            }
+            leaf metric-type {
+              type enumeration {
+                enum type-1;
+                enum type-2;
+              }
+              default type-2;
+            }
+          }
           container bgp {
             presence "Redistribute BGP routes as AS-External (Type-5) LSAs";
             leaf metric {

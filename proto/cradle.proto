@@ -31,7 +31,10 @@ message Nexthop {
   bool v6 = 5;            // IPv6 nexthop (gateway parsed as IPv6)
   repeated uint32 labels = 6;  // MPLS out-label stack, [0] = outermost
   repeated string segs = 7;    // SRv6 SID list, forwarding order ([0] = outer DA)
-  uint32 encap_mode = 8;       // H.Encap | H.Encap.Red (carried; Phase 1 = reduced)
+  uint32 encap_mode = 8;       // 0 = H.Encaps(.Red), 2 = H.Insert (TI-LFA repair)
+  // Fast-reroute: the nexthop to switch to when this one's link goes down —
+  // typically the TI-LFA repair (segs + encap_mode 2). 0 = unprotected.
+  uint32 backup_id = 12;
 }
 
 // A nexthop group for ECMP: ordered member nexthop ids. A route whose flags
