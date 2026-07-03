@@ -131,4 +131,20 @@ module zebra-ospf-auth-simple {
        is path-valid.";
     uses ospf-interface-auth-simple-extension;
   }
+
+  augment "/configure:set/config:router"
+        + "/config:ospf/config:area/config:virtual-link" {
+    description
+      "RFC 2328 §15 gives a virtual link its own authentication,
+       independent of the transit area's interfaces — attach the
+       same flat leaves to each virtual-link entry.";
+    uses ospf-interface-auth-simple-extension;
+  }
+
+  augment "/configure:delete/config:router"
+        + "/config:ospf/config:area/config:virtual-link" {
+    description
+      "Delete-subtree mirror for the virtual-link attachment.";
+    uses ospf-interface-auth-simple-extension;
+  }
 }

@@ -2058,7 +2058,13 @@ impl Ospf<Ospfv2> {
 
         // Pass 1 (immutable): resolve every configured VL to its
         // desired state. `None` viable = configured but unreachable.
-        let mut desired: Vec<(Ipv4Addr, Ipv4Addr, Option<Viable>)> = Vec::new();
+        type VlDesired = (
+            Ipv4Addr,
+            Ipv4Addr,
+            super::area::VirtualLinkConfig,
+            Option<Viable>,
+        );
+        let mut desired: Vec<VlDesired> = Vec::new();
         for (area_id, area) in self.areas.iter() {
             if area.virtual_links.is_empty() {
                 continue;
@@ -2068,7 +2074,7 @@ impl Ospf<Ospfv2> {
             if *area_id == AREA0 || area.area_type.is_stub_or_nssa() {
                 continue;
             }
-            for peer in area.virtual_links.keys() {
+            for (peer, cfg) in area.virtual_links.iter() {
                 let viable = self
                     .spf_results
                     .get(area_id)
@@ -2105,7 +2111,7 @@ impl Ospf<Ospfv2> {
                             first_hop_ifindex: nh.ifindex,
                         })
                     });
-                desired.push((*area_id, *peer, viable));
+                desired.push((*area_id, *peer, cfg.clone(), viable));
             }
         }
 
@@ -2123,7 +2129,7 @@ impl Ospf<Ospfv2> {
         let mut keep: BTreeSet<u32> = BTreeSet::new();
 
         // Pass 2 (mutable): create / refresh viable VLs.
-        for (transit, peer, viable) in &desired {
+        for (transit, peer, cfg, viable) in &desired {
             let Some(v) = viable else {
                 continue;
             };
@@ -2132,6 +2138,11 @@ impl Ospf<Ospfv2> {
                 let Some(link) = self.links.get_mut(&idx) else {
                     continue;
                 };
+                // Config (intervals + authentication) re-applies on
+                // every refresh so a live VL picks up changes; auth
+                // affects only packet emit/verify, not the LSA state,
+                // so it doesn't count as a `changed` trigger.
+                Self::vl_apply_config(link, cfg);
                 let prefix = Ipv4Net::new(v.local_addr, 32).unwrap();
                 let vl = link.vl.as_mut().unwrap();
                 if vl.peer_addr != v.peer_addr
@@ -2168,16 +2179,9 @@ impl Ospf<Ospfv2> {
                     *transit,
                     *peer,
                 );
-                // Interval overrides from the transit area's config.
-                if let Some(cfg) = self
-                    .areas
-                    .get(*transit)
-                    .and_then(|a| a.virtual_links.get(peer))
-                {
-                    link.config.hello_interval = cfg.hello_interval;
-                    link.config.dead_interval = cfg.dead_interval;
-                    link.config.retransmit_interval = cfg.retransmit_interval;
-                }
+                // Intervals + authentication from the transit area's
+                // virtual-link config.
+                Self::vl_apply_config(&mut link, cfg);
                 let prefix = Ipv4Net::new(v.local_addr, 32).unwrap();
                 link.output_cost = v.cost;
                 link.addr = vec![super::addr::OspfAddr { prefix }];
@@ -2231,6 +2235,20 @@ impl Ospf<Ospfv2> {
             self.abr_summary_originate();
             self.nssa_translate_resync_all();
         }
+    }
+
+    /// Copy a virtual link's configuration (interval overrides +
+    /// authentication) onto its synthetic link's `LinkConfig`.
+    /// Re-applied on every reconcile so a live VL picks up config
+    /// changes; the send/verify paths read `link.config` directly.
+    fn vl_apply_config(link: &mut OspfLink, cfg: &super::area::VirtualLinkConfig) {
+        link.config.hello_interval = cfg.hello_interval;
+        link.config.dead_interval = cfg.dead_interval;
+        link.config.retransmit_interval = cfg.retransmit_interval;
+        link.config.auth_mode = cfg.auth_mode;
+        link.config.auth_key = cfg.auth_key;
+        link.config.crypto_keys = cfg.crypto_keys.clone();
+        link.config.key_chain = cfg.key_chain.clone();
     }
 
     /// Multi-hop VL peer-endpoint derivation — the FRR
