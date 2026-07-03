@@ -1,0 +1,33 @@
+# z2 — uSID locator bound to vrf-two: the node SID must advertise as
+# `uT` (End.T with NEXT-CSID, IANA 85).
+vrf:
+- name: vrf-two
+interface:
+- if-name: lo
+  ipv6:
+    address: 2001:db8::2/128
+- if-name: z2-z1
+  ipv6:
+    address: 2001:db8:0:12::2/64
+segment-routing:
+  locator:
+  - name: LOC2
+    prefix: fcbb:bbbb:2::/48
+    behavior: usid
+    vrf: vrf-two
+router:
+  isis:
+    net: 49.0000.0000.0000.0002.00
+    hostname: z2
+    is-type: level-2-only
+    segment-routing:
+      srv6:
+        locator: LOC2
+    interface:
+    - if-name: lo
+      ipv6:
+        enable: true
+    - if-name: z2-z1
+      network-type: point-to-point
+      ipv6:
+        enable: true

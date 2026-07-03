@@ -67,6 +67,10 @@ fn srv6_behavior(b: crate::rib::SidBehavior) -> u32 {
         EndM => 11,    // egress-protection mirror (decap + mirror-context lookup)
         EndRep => 12,  // RFC 9800 REPLACE-C-SID (C-SID rewrite from containers)
         EndXRep => 13, // REPLACE-C-SID + adjacency cross-connect
+        EndT => 14,    // End walk + table-scoped egress lookup (vrf_table_id)
+        // uT = a uN whose end-of-carrier lookup is table-scoped: cradle
+        // models it as UN with a non-zero vrf_id (vrf_table_id below).
+        UT => 6,
     }
 }
 

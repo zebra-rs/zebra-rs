@@ -119,6 +119,12 @@ fn build_srh(segments: &[Ipv6Addr]) -> Ipv6SrHdr {
 fn seg6local_action(behavior: SidBehavior) -> Seg6LocalAction {
     match behavior {
         SidBehavior::End | SidBehavior::UN => Seg6LocalAction::End,
+        // End.T has a native kernel action (+ SEG6_LOCAL_TABLE). uT never
+        // reaches the kernel (no NEXT-CSID composition with End.T exists;
+        // route_sid_install returns after the cradle tee) — map like the
+        // other cradle-only behaviors so a stray call is a visible no-op.
+        SidBehavior::EndT => Seg6LocalAction::EndT,
+        SidBehavior::UT => Seg6LocalAction::End,
         // EVPN L2 SIDs never reach the kernel (route_sid_install returns
         // after the cradle tee — no End.DT2U/DT2M seg6local action exists);
         // map to End so an unexpected call is a visible no-op rather than
@@ -259,7 +265,7 @@ fn build_seg6local_lwtunnel(
     }
     if matches!(
         behavior,
-        SidBehavior::EndDT4 | SidBehavior::EndDT6 | SidBehavior::EndM
+        SidBehavior::EndDT4 | SidBehavior::EndDT6 | SidBehavior::EndM | SidBehavior::EndT
     ) {
         // `SEG6_LOCAL_TABLE`: 0 maps to RT_TABLE_MAIN to preserve the
         // existing static / IS-IS terminal behavior. End.M passes the

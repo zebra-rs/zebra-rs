@@ -1,0 +1,35 @@
+# z1 — classic locator bound to vrf-one: the End SID must advertise as
+# `End.T (PSP)` (IANA 10) — the End walk's egress lookup is scoped to
+# the VRF's table (RFC 8986 4.3).
+vrf:
+- name: vrf-one
+interface:
+- if-name: lo
+  ipv6:
+    address: 2001:db8::1/128
+- if-name: z1-z2
+  ipv6:
+    address: 2001:db8:0:12::1/64
+segment-routing:
+  locator:
+  - name: LOC1
+    prefix: fcbb:bbbb:1::/48
+    vrf: vrf-one
+    flavor:
+    - psp
+router:
+  isis:
+    net: 49.0000.0000.0000.0001.00
+    hostname: z1
+    is-type: level-2-only
+    segment-routing:
+      srv6:
+        locator: LOC1
+    interface:
+    - if-name: lo
+      ipv6:
+        enable: true
+    - if-name: z1-z2
+      network-type: point-to-point
+      ipv6:
+        enable: true

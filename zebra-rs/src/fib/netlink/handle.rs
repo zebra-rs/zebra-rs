@@ -246,9 +246,11 @@ fn sid_route_target(
 ) -> (u8, RouteType, u8, std::net::Ipv6Addr) {
     use crate::rib::SidBehavior;
     match behavior {
-        SidBehavior::End => (RouteHeader::RT_TABLE_MAIN, RouteType::Unicast, 128, addr),
+        SidBehavior::End | SidBehavior::EndT => {
+            (RouteHeader::RT_TABLE_MAIN, RouteType::Unicast, 128, addr)
+        }
         SidBehavior::EndX => (RouteHeader::RT_TABLE_MAIN, RouteType::Unicast, 128, addr),
-        SidBehavior::UN => {
+        SidBehavior::UN | SidBehavior::UT => {
             let plen = structure
                 .map(|s| s.lb_bits.saturating_add(s.ln_bits))
                 .unwrap_or(128);
@@ -1831,6 +1833,7 @@ impl FibHandle {
                 | crate::rib::SidBehavior::EndDT2M
                 | crate::rib::SidBehavior::EndRep
                 | crate::rib::SidBehavior::EndXRep
+                | crate::rib::SidBehavior::UT
         ) {
             return;
         }
@@ -1998,6 +2001,7 @@ impl FibHandle {
                 | crate::rib::SidBehavior::EndDT2M
                 | crate::rib::SidBehavior::EndRep
                 | crate::rib::SidBehavior::EndXRep
+                | crate::rib::SidBehavior::UT
         ) {
             return;
         }

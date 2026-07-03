@@ -3139,10 +3139,16 @@ impl Isis {
             && let Some(addr) = locator.node_sid_addr()
             && let Some(loc_name) = self.watched_flex_algo_locators.get(&algo).cloned()
         {
-            let (behavior, structure) = match locator.behavior {
-                Some(LocatorBehavior::Usid) => (SidBehavior::UN, locator.sid_structure()),
-                Some(LocatorBehavior::Replace) => (SidBehavior::EndRep, locator.sid_structure()),
-                None => (SidBehavior::End, None),
+            let (behavior, structure) = match (&locator.behavior, locator.table_id) {
+                (Some(LocatorBehavior::Usid), 0) => (SidBehavior::UN, locator.sid_structure()),
+                // A VRF-bound locator's node SID is uT / End.T — the End
+                // walk's egress lookup scoped to the VRF's table.
+                (Some(LocatorBehavior::Usid), _) => (SidBehavior::UT, locator.sid_structure()),
+                (Some(LocatorBehavior::Replace), _) => {
+                    (SidBehavior::EndRep, locator.sid_structure())
+                }
+                (None, 0) => (SidBehavior::End, None),
+                (None, _) => (SidBehavior::EndT, None),
             };
             let sid = Sid {
                 addr,
@@ -3154,7 +3160,7 @@ impl Isis {
                 ifindex: 0,
                 nh6: None,
                 structure,
-                table_id: 0,
+                table_id: locator.table_id,
                 segs: Vec::new(),
                 flavors: locator.flavors,
             };
@@ -3202,10 +3208,16 @@ impl Isis {
             && let Some(addr) = locator.node_sid_addr()
             && let Some(loc_name) = self.watched_locator.clone()
         {
-            let (behavior, structure) = match locator.behavior {
-                Some(LocatorBehavior::Usid) => (SidBehavior::UN, locator.sid_structure()),
-                Some(LocatorBehavior::Replace) => (SidBehavior::EndRep, locator.sid_structure()),
-                None => (SidBehavior::End, None),
+            let (behavior, structure) = match (&locator.behavior, locator.table_id) {
+                (Some(LocatorBehavior::Usid), 0) => (SidBehavior::UN, locator.sid_structure()),
+                // A VRF-bound locator's node SID is uT / End.T — the End
+                // walk's egress lookup scoped to the VRF's table.
+                (Some(LocatorBehavior::Usid), _) => (SidBehavior::UT, locator.sid_structure()),
+                (Some(LocatorBehavior::Replace), _) => {
+                    (SidBehavior::EndRep, locator.sid_structure())
+                }
+                (None, 0) => (SidBehavior::End, None),
+                (None, _) => (SidBehavior::EndT, None),
             };
             let sid = Sid {
                 addr,
@@ -3220,8 +3232,9 @@ impl Isis {
                 ifindex: 0,
                 nh6: None,
                 structure,
-                // End / uN is local-processing, no table decap.
-                table_id: 0,
+                // End.T / uT scope the walk's egress lookup to the bound
+                // VRF's table; plain End / uN carry 0.
+                table_id: locator.table_id,
                 segs: Vec::new(),
                 flavors: locator.flavors,
             };

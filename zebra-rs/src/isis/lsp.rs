@@ -494,9 +494,14 @@ fn flavored(base: Behavior, mask: u8) -> Behavior {
 /// `EndRep`; each folded with the locator's flavors. Per-locator so
 /// each per-Flex-Algorithm locator gets its own structure.
 fn srv6_end_structure(locator: &Locator) -> (Behavior, Vec<IsisSub2Tlv>) {
+    // A VRF-bound locator advertises its node SID as End.T / uT
+    // (RFC 8986 §4.3): the End walk's egress lookup is table-scoped.
+    let table_bound = locator.table_id != 0;
     let (base, subs) = match srv6_sid_structure(locator) {
+        Some((Some(LocatorBehavior::Usid), subs)) if table_bound => (Behavior::EndTCSID, subs),
         Some((Some(LocatorBehavior::Usid), subs)) => (Behavior::EndCSID, subs),
         Some((Some(LocatorBehavior::Replace), subs)) => (Behavior::EndRep, subs),
+        Some((None, subs)) if table_bound => (Behavior::EndT, subs),
         Some((None, subs)) => (Behavior::End, subs),
         None => (Behavior::End, Vec::new()),
     };

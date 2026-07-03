@@ -92,6 +92,16 @@ pub enum SidBehavior {
     /// As `EndRep`, then forwards out the bound adjacency. Cradle tee
     /// only, like `EndRep`.
     EndXRep,
+    /// End.T — RFC 8986 §4.3 (IANA codepoint 9). The End walk with the
+    /// egress lookup scoped to the table in [`Sid::table_id`] (a locator
+    /// bound to a VRF via its `vrf` leaf). Installs at /128; the kernel
+    /// has a native End.T seg6local action.
+    EndT,
+    /// uT — End.T with NEXT-C-SID (IANA codepoint 85): a uN whose
+    /// end-of-carrier lookup is scoped to [`Sid::table_id`]. Installs as
+    /// a /(LB+LN) prefix like uN. No kernel flavor op composes NEXT-CSID
+    /// with End.T — cradle tee only.
+    UT,
 }
 
 impl fmt::Display for SidBehavior {
@@ -111,6 +121,8 @@ impl fmt::Display for SidBehavior {
             Self::EndM => write!(f, "End.M"),
             Self::EndRep => write!(f, "End(REP)"),
             Self::EndXRep => write!(f, "End.X(REP)"),
+            Self::EndT => write!(f, "End.T"),
+            Self::UT => write!(f, "uT"),
         }
     }
 }
@@ -288,7 +300,8 @@ impl Sid {
             | SidBehavior::EndB6Encap
             | SidBehavior::EndDT2U
             | SidBehavior::EndDT2M
-            | SidBehavior::EndM => Ipv6Net::new(self.addr, 128).expect("/128 is always valid"),
+            | SidBehavior::EndM
+            | SidBehavior::EndT => Ipv6Net::new(self.addr, 128).expect("/128 is always valid"),
             SidBehavior::UALib => {
                 let plen = self
                     .structure
@@ -298,7 +311,7 @@ impl Sid {
                 Ipv6Net::new(masked, plen)
                     .unwrap_or_else(|_| Ipv6Net::new(self.addr, 128).expect("/128 is always valid"))
             }
-            SidBehavior::UN => {
+            SidBehavior::UN | SidBehavior::UT => {
                 let plen = self
                     .structure
                     .map(|s| s.lb_bits.saturating_add(s.ln_bits))
