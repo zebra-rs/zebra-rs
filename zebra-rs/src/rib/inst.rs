@@ -483,6 +483,22 @@ pub enum Message {
         afi: super::RedistAfi,
         rtype: RibType,
     },
+    /// Watch the default route (0.0.0.0/0 or ::/0) for
+    /// `default-information originate` tracking: RIB replays the
+    /// current default (if any, self-routes excluded) and keeps
+    /// delivering RouteAdd/RouteDel for the default prefix from any
+    /// source protocol.
+    RedistDefaultAdd {
+        proto: String,
+        afi: super::RedistAfi,
+    },
+    /// Tear down a default-route watch. No Del replay: the default
+    /// prefix may also be covered by an overlapping per-rtype
+    /// subscription, so cache cleanup is the consumer's job.
+    RedistDefaultDel {
+        proto: String,
+        afi: super::RedistAfi,
+    },
     /// Tear down all RIB state owned by a protocol whose task is
     /// being despawned (`no router bgp` / `no router isis` / `no
     /// router ospf`). Withdraws every route / ILM whose `rtype`
@@ -673,6 +689,12 @@ pub struct Rib {
     /// RedistDel; consulted by `redist::notify_v*_delta`, which
     /// resolves each row's sender through `client_registry`.
     pub redist_filters: HashMap<String, super::redist::FilterMap>,
+    /// Default-prefix watch registry (`default-information originate`
+    /// tracking): per-proto set of AFIs for which the subscriber wants
+    /// RouteAdd/RouteDel deliveries for the default route only, any
+    /// rtype (self-routes excluded). Updated by RedistDefaultAdd /
+    /// RedistDefaultDel; consulted by `redist::notify_v*_delta`.
+    pub redist_default_watch: HashMap<String, std::collections::BTreeSet<super::RedistAfi>>,
     pub links: BTreeMap<u32, Link>,
     pub bridges: BTreeMap<String, Bridge>,
     pub vxlan: BTreeMap<String, Vxlan>,
@@ -872,6 +894,7 @@ impl Rib {
             inbound_tx,
             inbound_rx,
             redist_filters: HashMap::new(),
+            redist_default_watch: HashMap::new(),
             links: BTreeMap::new(),
             bridges: BTreeMap::new(),
             vxlan: BTreeMap::new(),
@@ -2063,6 +2086,80 @@ impl Rib {
     /// `0` walks the default `self.table` / `self.table_v6`; any other
     /// value is the kernel table id keying `vrf_tables`. A VRF whose
     /// table has since been torn down walks nothing.
+    /// `RedistDefaultAdd`: record the watch and replay the currently
+    /// selected default route (if any and not the subscriber's own)
+    /// as a RouteAdd, mirroring the walk-and-replay of `redist_add`.
+    fn redist_default_add(&mut self, proto: String, afi: super::RedistAfi) {
+        self.redist_default_watch
+            .entry(proto.clone())
+            .or_default()
+            .insert(afi);
+        self.redist_default_replay_add(&proto, afi);
+    }
+
+    /// `RedistDefaultDel`: drop the watch. Deliberately no Del
+    /// replay — the default prefix may also match an overlapping
+    /// per-rtype subscription whose cache entry must survive, so the
+    /// consumer purges its own cache when it stops watching.
+    fn redist_default_del(&mut self, proto: String, afi: super::RedistAfi) {
+        let emptied = if let Some(afis) = self.redist_default_watch.get_mut(&proto) {
+            afis.remove(&afi);
+            afis.is_empty()
+        } else {
+            false
+        };
+        if emptied {
+            self.redist_default_watch.remove(&proto);
+        }
+    }
+
+    /// Emit the current default route (per the subscriber's VRF) as a
+    /// single RouteAdd, self-routes excluded. No-op when no default
+    /// exists or the subscriber is unknown.
+    fn redist_default_replay_add(&self, proto: &str, afi: super::RedistAfi) {
+        let Some(sub) = self.client_registry.subscriber_for_proto(proto) else {
+            return;
+        };
+        let vrf_id = sub.vrf_id;
+        let tx = sub.rib_rx_tx.clone();
+        match afi {
+            super::RedistAfi::Ipv4 => {
+                let prefix: Ipv4Net = Ipv4Net::new(std::net::Ipv4Addr::UNSPECIFIED, 0).unwrap();
+                let table = if vrf_id == 0 {
+                    &self.table
+                } else {
+                    match self.vrf_tables.get(&vrf_id) {
+                        Some(t) => &t.table,
+                        None => return,
+                    }
+                };
+                let entry = table
+                    .get(&prefix)
+                    .and_then(|entries| entries.iter().find(|e| e.is_selected()));
+                if let Some((rt, e)) = super::redist::entry_for_default_v4(&prefix, entry, proto) {
+                    super::redist::emit_default_v4(&tx, None, Some((rt, e)));
+                }
+            }
+            super::RedistAfi::Ipv6 => {
+                let prefix: Ipv6Net = Ipv6Net::new(std::net::Ipv6Addr::UNSPECIFIED, 0).unwrap();
+                let table = if vrf_id == 0 {
+                    &self.table_v6
+                } else {
+                    match self.vrf_tables.get(&vrf_id) {
+                        Some(t) => &t.table_v6,
+                        None => return,
+                    }
+                };
+                let entry = table
+                    .get(&prefix)
+                    .and_then(|entries| entries.iter().find(|e| e.is_selected()));
+                if let Some((rt, e)) = super::redist::entry_for_default_v6(&prefix, entry, proto) {
+                    super::redist::emit_default_v6(&tx, None, Some((rt, e)));
+                }
+            }
+        }
+    }
+
     fn redist_walk(
         &self,
         proto: &str,
@@ -3042,6 +3139,12 @@ impl Rib {
             }
             Message::RedistDel { proto, afi, rtype } => {
                 self.redist_del(proto, afi, rtype);
+            }
+            Message::RedistDefaultAdd { proto, afi } => {
+                self.redist_default_add(proto, afi);
+            }
+            Message::RedistDefaultDel { proto, afi } => {
+                self.redist_default_del(proto, afi);
             }
         }
     }
