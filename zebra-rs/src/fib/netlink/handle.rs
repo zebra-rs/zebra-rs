@@ -1866,6 +1866,11 @@ impl FibHandle {
         vrf_table: u32,
         ifindex: u32,
     ) {
+        if let Some(cradle) = &self.cradle {
+            cradle
+                .mirror_route_add(context_table, *prefix, vrf_table)
+                .await;
+        }
         let mut msg = RouteMessage::default();
         msg.header.address_family = AddressFamily::Inet6;
         set_route_table(&mut msg, context_table);
@@ -1914,6 +1919,9 @@ impl FibHandle {
     /// matches RTM_DELROUTE on (table, family, dst, prefixlen, kind), so
     /// only the prefix and context table are needed.
     pub async fn route_mirror_context_uninstall(&self, prefix: &Ipv6Net, context_table: u32) {
+        if let Some(cradle) = &self.cradle {
+            cradle.mirror_route_del(context_table, *prefix).await;
+        }
         let mut msg = RouteMessage::default();
         msg.header.address_family = AddressFamily::Inet6;
         set_route_table(&mut msg, context_table);

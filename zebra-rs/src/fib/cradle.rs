@@ -63,7 +63,7 @@ fn srv6_behavior(b: crate::rib::SidBehavior) -> u32 {
         UALib => 8,    // compressed carrier: shift + adjacency
         EndDT2U => 9,  // EVPN L2 unicast decap+bridge
         EndDT2M => 10, // EVPN L2 BUM decap+flood
-        EndM => 3,     // mirror-context ~ End.DT6 (best-effort; not implemented)
+        EndM => 11,    // egress-protection mirror (decap + mirror-context lookup)
     }
 }
 
@@ -683,6 +683,49 @@ impl CradleFib {
         .await;
         if let Err(e) = result {
             tracing::warn!("fib: cradle repl_slot_del vni {vni} {sid} failed: {e}");
+        }
+    }
+
+    /// Install an egress-protection mirror route (the End.M context): the
+    /// protected egress PE's locator `prefix` reproduces locally as an
+    /// `End.DT46` decap into `vrf_table` — the cradle twin of the kernel's
+    /// mirror-context-table route.
+    pub async fn mirror_route_add(&self, ctx: u32, prefix: ipnet::Ipv6Net, vrf_table: u32) {
+        let result = async {
+            self.client()
+                .await?
+                .add_mirror_route(pb::MirrorRoute {
+                    ctx,
+                    prefix: prefix.addr().to_string(),
+                    prefix_len: prefix.prefix_len() as u32,
+                    behavior: 4, // SRV6_BH_END_DT46
+                    vrf_table_id: cradle_vrf(vrf_table),
+                })
+                .await?;
+            anyhow::Ok(())
+        }
+        .await;
+        if let Err(e) = result {
+            tracing::warn!("fib: cradle mirror_route_add {prefix} failed: {e}");
+        }
+    }
+
+    /// Remove a mirror route.
+    pub async fn mirror_route_del(&self, ctx: u32, prefix: ipnet::Ipv6Net) {
+        let result = async {
+            self.client()
+                .await?
+                .del_mirror_route(pb::MirrorRouteDel {
+                    ctx,
+                    prefix: prefix.addr().to_string(),
+                    prefix_len: prefix.prefix_len() as u32,
+                })
+                .await?;
+            anyhow::Ok(())
+        }
+        .await;
+        if let Err(e) = result {
+            tracing::warn!("fib: cradle mirror_route_del {prefix} failed: {e}");
         }
     }
 
