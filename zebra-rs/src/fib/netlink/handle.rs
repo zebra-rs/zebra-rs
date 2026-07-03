@@ -339,14 +339,21 @@ pub struct FibHandle {
 /// `(link gateway, oif, MPLS out-labels, SRv6 segment list, SRv6 encap mode)`.
 /// A non-empty `segs` makes it an SRv6 (v6-underlay) nexthop; MPLS labels and
 /// SRv6 segs are mutually exclusive per nexthop.
-type CradleMember = (Option<IpAddr>, u32, Vec<u32>, Vec<std::net::Ipv6Addr>, u32);
+type CradleMember = (
+    Option<IpAddr>,
+    u32,
+    Vec<u32>,
+    Vec<std::net::Ipv6Addr>,
+    u32,
+    Option<crate::fib::cradle::Leaf>,
+);
 
 /// Extract a nexthop's cradle-tee members. The gateway is passed as the raw
 /// `IpAddr` (v4 for plain/MPLS legs, v6 for the SRv6 underlay), plus the MPLS
 /// out-label stack and the SRv6 segment list + encap mode. (Protect/backup
 /// nexthops are not teed.)
 fn cradle_members(nexthop: &Nexthop) -> Vec<CradleMember> {
-    fn member(u: &NexthopUni) -> CradleMember {
+    fn leaf(u: &NexthopUni) -> crate::fib::cradle::Leaf {
         let oif = u.ifindex().unwrap_or(0);
         let gw = match u.addr {
             a if a.is_unspecified() => None,
@@ -354,6 +361,10 @@ fn cradle_members(nexthop: &Nexthop) -> Vec<CradleMember> {
         };
         let encap_mode = crate::fib::cradle::srv6_encap_mode(u.encap_type);
         (gw, oif, u.mpls_label.clone(), u.segs.clone(), encap_mode)
+    }
+    fn member(u: &NexthopUni) -> CradleMember {
+        let (gw, oif, labels, segs, encap_mode) = leaf(u);
+        (gw, oif, labels, segs, encap_mode, None)
     }
     match nexthop {
         Nexthop::Uni(u) => vec![member(u)],
@@ -366,6 +377,24 @@ fn cradle_members(nexthop: &Nexthop) -> Vec<CradleMember> {
                 _ => None,
             })
             .collect(),
+        // Fast-reroute: the primary rides with its backup leaf attached (the
+        // TI-LFA SRv6 repair — packed uSID carriers + H.Insert), so cradle
+        // programs a protected nexthop pair. ECMP primaries are teed
+        // unprotected (MVP).
+        Nexthop::Protect(pro) => {
+            let backup = match &pro.backup {
+                NexthopMember::Uni(u) => Some(leaf(u)),
+                _ => None,
+            };
+            match &pro.primary {
+                NexthopMember::Uni(u) => {
+                    let mut m = member(u);
+                    m.5 = backup;
+                    vec![m]
+                }
+                NexthopMember::Multi(mm) => mm.nexthops.iter().map(member).collect(),
+            }
+        }
         _ => vec![],
     }
 }
