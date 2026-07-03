@@ -1591,6 +1591,12 @@ fn entry_resolve(entry: &mut RibEntry, nmap: &NexthopMap, _ifdown: bool) {
         Nexthop::Link(iflink) => {
             tracing::info!("Nexthop::Link({}): this won't happen", iflink);
         }
+        // A discard route needs no gateway resolution — it is always
+        // valid and forwards nothing.
+        Nexthop::Blackhole(_) => {
+            entry.valid = true;
+            entry.fib = true;
+        }
         Nexthop::Uni(uni) => {
             nexthop_uni_resolve(uni, nmap);
             entry.valid = uni.valid;
@@ -1979,6 +1985,7 @@ fn rib_replace_system(
         }
         // System (kernel) routes are never primary+backup protected.
         Nexthop::Protect(_) => false,
+        Nexthop::Blackhole(m) => *m == entry.metric,
     };
     // println!("replace {}", replace);
     if replace {
@@ -2250,6 +2257,7 @@ fn rib_replace_system_v6(
         }
         // System (kernel) routes are never primary+backup protected.
         Nexthop::Protect(_) => false,
+        Nexthop::Blackhole(m) => *m == entry.metric,
     };
     if replace {
         return rib_replace_v6(table, prefix, entry.rtype);
