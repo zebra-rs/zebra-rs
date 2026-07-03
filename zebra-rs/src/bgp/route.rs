@@ -2602,6 +2602,16 @@ pub struct LocalRib {
     /// RFC 9574 EVPN Assisted Replication flood-list state (role/AR-IP +
     /// per-VNI flood model). See [`EvpnFloodState`].
     pub evpn_flood: EvpnFloodState,
+
+    /// RFC 7432 §7.7 MAC Mobility: the highest sequence number seen on any
+    /// *remote* Type-2 per `(vni, mac)`. Consulted at origination — a MAC
+    /// that is (or was) remote is a MOVE, so our Type-2 carries
+    /// `max_remote + 1` and every PE prefers it over the stale route.
+    /// Never pruned (monotonic memory; a handful of bytes per MAC).
+    pub evpn_remote_mac_seq: std::collections::BTreeMap<(u32, MacAddr), u32>,
+    /// The sequence number on our own current Type-2 origination per
+    /// `(vni, mac)`, for monotonicity across re-advertisements.
+    pub evpn_local_mac_seq: std::collections::BTreeMap<(u32, MacAddr), u32>,
 }
 
 impl LocalRib {
@@ -6917,6 +6927,18 @@ fn route_evpn_export_selected(
             }
             // RFC 8365: VNI must come from Route Target extended community
             if let Some(vni) = extract_vni_from_attr(&best.attr) {
+                // RFC 7432 §7.7: remember the highest remote sequence per
+                // (vni, mac) — if this station later appears locally, our
+                // Type-2 must carry max_remote + 1.
+                let seq = extract_mac_mobility_seq(&best.attr);
+                let remote = bgp
+                    .local_rib
+                    .evpn_remote_mac_seq
+                    .entry((vni, mac_addr))
+                    .or_insert(0);
+                if seq > *remote {
+                    *remote = seq;
+                }
                 let msg = rib::Message::MacAdd {
                     vni,
                     mac: mac_addr,
@@ -14210,10 +14232,28 @@ impl Bgp {
         // 16-byte nexthop). Per-peer NEXT_HOP rewrite for eBGP
         // still happens inside `route_update_evpn`.
         let mut attr = BgpAttr::new();
-        attr.ecom = Some(ExtCommunity::from([
-            evpn_route_target(self.asn, entry.vni),
-            evpn_encap_vxlan(),
-        ]));
+        let mut ecom =
+            ExtCommunity::from([evpn_route_target(self.asn, entry.vni), evpn_encap_vxlan()]);
+        // RFC 7432 §7.7 MAC Mobility: a MAC that is (or was) advertised by
+        // a remote PE makes this origination a MOVE — carry sequence
+        // `max_remote + 1` so every PE (including the previous owner)
+        // prefers it over the stale route; monotonic across our own
+        // re-advertisements. First-time local MACs stay at 0 (no EC).
+        let key = (entry.vni, entry.mac);
+        let mut seq = self
+            .local_rib
+            .evpn_local_mac_seq
+            .get(&key)
+            .copied()
+            .unwrap_or(0);
+        if let Some(&remote) = self.local_rib.evpn_remote_mac_seq.get(&key) {
+            seq = seq.max(remote + 1);
+        }
+        self.local_rib.evpn_local_mac_seq.insert(key, seq);
+        if seq > 0 {
+            ecom.0.insert(evpn_mac_mobility(seq));
+        }
+        attr.ecom = Some(ecom);
         let nexthop = entry.vxlan_local.unwrap_or(IpAddr::V4(self.router_id));
         if entry.vxlan_local.is_none() {
             tracing::warn!(
@@ -15651,6 +15691,20 @@ fn evpn_route_target(asn: u32, vni: u32) -> ExtCommunityValue {
     rt.val[0..2].copy_from_slice(&asn16.to_be_bytes());
     rt.val[2..6].copy_from_slice(&vni.to_be_bytes());
     rt
+}
+
+/// Build the MAC Mobility extended community (RFC 7432 §7.7): type 0x06
+/// (EVPN) / sub-type 0x00; flags octet unused (no sticky bit), sequence
+/// number in the trailing 4 octets — the layout
+/// `extract_mac_mobility_seq` parses.
+fn evpn_mac_mobility(seq: u32) -> ExtCommunityValue {
+    let mut ec = ExtCommunityValue {
+        high_type: 0x06,
+        low_type: 0x00,
+        val: [0; 6],
+    };
+    ec.val[2..6].copy_from_slice(&seq.to_be_bytes());
+    ec
 }
 
 /// Build the Tunnel Encapsulation extended community for VXLAN per
