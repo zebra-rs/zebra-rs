@@ -1,0 +1,29 @@
+# on-startup variant: r2 is a stub router only for the first 60
+# seconds after the config applies, then resumes normal metrics.
+interface:
+- if-name: lo
+  ipv4:
+    address: 10.0.0.2/32
+- if-name: etha
+  ipv4:
+    address: 10.0.12.2/30
+- if-name: ethc
+  ipv4:
+    address: 10.0.23.1/30
+router:
+  ospf:
+    router-id: 10.0.0.2
+    max-metric:
+      router-lsa:
+        on-startup: 60
+    area:
+    - area-id: 0.0.0.0
+      interface:
+      - if-name: lo
+        enable: true
+      - if-name: etha
+        enable: true
+        network-type: point-to-point
+      - if-name: ethc
+        enable: true
+        network-type: point-to-point

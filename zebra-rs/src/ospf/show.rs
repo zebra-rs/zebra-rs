@@ -590,6 +590,24 @@ fn show_ospf(ospf: &Ospf, _args: Args, json: bool) -> std::result::Result<String
         " MinLSArrival (received-LSA rate limit): {} ms",
         ospf.min_ls_arrival_ms,
     )?;
+    // RFC 6987 stub router — only shown while active, mirroring FRR.
+    if ospf.stub_router_admin {
+        writeln!(
+            buf,
+            " Stub router: administrative (transit links at max-metric)"
+        )?;
+    } else if ospf.stub_router_startup_active {
+        let remaining = ospf
+            .stub_router_startup_timer
+            .as_ref()
+            .map(|t| t.remaining().as_secs())
+            .unwrap_or(0);
+        writeln!(
+            buf,
+            " Stub router: on-startup ({}s remaining, transit links at max-metric)",
+            remaining
+        )?;
+    }
     // TI-LFA compute telemetry for the same run (last-area-wins, like
     // `spf_duration`). None while TI-LFA is disabled.
     if let Some(stats) = &ospf.tilfa_stats {

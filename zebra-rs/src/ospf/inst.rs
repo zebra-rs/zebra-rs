@@ -335,6 +335,19 @@ pub struct Ospf<V: OspfVersion = Ospfv2> {
     /// monotonically increasing so a torn-down-and-recreated VL never
     /// aliases stale timers keyed on the old index. v2-only.
     vl_ifindex_next: u32,
+    /// RFC 6987 stub router, administrative mode (`max-metric
+    /// router-lsa administrative`): advertise every transit link in
+    /// our Router-LSAs at MaxLinkMetric (0xFFFF) indefinitely, so
+    /// other routers stop using us for transit while our own
+    /// prefixes (stub links, normal cost) stay reachable. v2-only.
+    pub stub_router_admin: bool,
+    /// RFC 6987 stub router, `on-startup <secs>` window: true while
+    /// the post-config grace timer runs; cleared by
+    /// `Message::StubRouterExpire`. v2-only.
+    pub stub_router_startup_active: bool,
+    /// The armed on-startup timer (held so Drop doesn't cancel it).
+    /// Its `remaining()` feeds the `show ospf` stub-router line.
+    pub stub_router_startup_timer: Option<Timer>,
     /// Per-self-LSA MinLSInterval throttle state, keyed by
     /// [`LsaGenKey`]. Runtime-only (not checkpointed / inherited).
     lsa_gen: std::collections::HashMap<LsaGenKey, LsaGenState>,
@@ -1415,6 +1428,9 @@ impl Ospf<Ospfv2> {
             min_ls_interval_ms: OSPF_MIN_LS_INTERVAL_MS,
             min_ls_arrival_ms: OSPF_MIN_LS_ARRIVAL_MS,
             vl_ifindex_next: super::link::VL_IFINDEX_BASE,
+            stub_router_admin: false,
+            stub_router_startup_active: false,
+            stub_router_startup_timer: None,
             lsa_gen: std::collections::HashMap::new(),
             restarting: None,
             key_chains: BTreeMap::new(),
@@ -1701,6 +1717,12 @@ impl Ospf<Ospfv2> {
             router_lsa.flags |= 0x0004;
         }
 
+        // RFC 6987 stub router: transit links (P2p / Transit /
+        // VirtualLink) advertise MaxLinkMetric so other routers stop
+        // using us for transit; stub links keep their configured cost
+        // so our own prefixes remain reachable (§2).
+        let stub_router = self.stub_router_active();
+
         for link in self.links.values() {
             if !link.enabled {
                 continue;
@@ -1721,6 +1743,8 @@ impl Ospf<Ospfv2> {
             } else {
                 link.output_cost.min(u16::MAX as u32) as u16
             };
+            // Transit-link metric: MaxLinkMetric while stub-routed.
+            let transit_metric = if stub_router { u16::MAX } else { metric };
 
             // RFC 2328 §12.4.1.1, virtual link: once the VL neighbor
             // is Full, emit one Type-4 VirtualLink entry into the
@@ -1743,7 +1767,7 @@ impl Ospf<Ospfv2> {
                             .unwrap_or(Ipv4Addr::UNSPECIFIED),
                         link_type: OspfLinkType::VirtualLink,
                         num_tos: 0,
-                        tos_0_metric: metric,
+                        tos_0_metric: transit_metric,
                         toses: vec![],
                     });
                 }
@@ -1770,7 +1794,7 @@ impl Ospf<Ospfv2> {
                             link_data: addr.prefix.addr(),
                             link_type: OspfLinkType::P2p,
                             num_tos: 0,
-                            tos_0_metric: metric,
+                            tos_0_metric: transit_metric,
                             toses: vec![],
                         });
                     }
@@ -1798,7 +1822,7 @@ impl Ospf<Ospfv2> {
                         link_data: addr.prefix.addr(),
                         link_type: OspfLinkType::Transit,
                         num_tos: 0,
-                        tos_0_metric: metric,
+                        tos_0_metric: transit_metric,
                         toses: vec![],
                     }
                 } else {
@@ -1810,6 +1834,38 @@ impl Ospf<Ospfv2> {
 
         router_lsa.num_links = router_lsa.links.len() as u16;
         router_lsa
+    }
+
+    /// RFC 6987: `true` while this router should advertise its
+    /// transit links at MaxLinkMetric — either administratively
+    /// (`max-metric router-lsa administrative`, indefinite) or during
+    /// the `on-startup` grace window.
+    pub fn stub_router_active(&self) -> bool {
+        self.stub_router_admin || self.stub_router_startup_active
+    }
+
+    /// Arm (or re-arm) the RFC 6987 `on-startup` stub-router window:
+    /// advertise MaxLinkMetric for `secs`, then `StubRouterExpire`
+    /// resumes real metrics.
+    pub fn stub_router_startup_arm(&mut self, secs: u32) {
+        let tx = self.tx.clone();
+        self.stub_router_startup_active = true;
+        self.stub_router_startup_timer =
+            Some(Timer::new(secs as u64, TimerType::Once, move || {
+                let tx = tx.clone();
+                async move {
+                    let _ = tx.send(Message::StubRouterExpire);
+                }
+            }));
+        tracing::info!("[StubRouter] on-startup window armed for {}s", secs);
+        self.router_lsa_originate();
+    }
+
+    /// Cancel a pending `on-startup` window (config delete).
+    pub fn stub_router_startup_clear(&mut self) {
+        self.stub_router_startup_active = false;
+        self.stub_router_startup_timer = None;
+        self.router_lsa_originate();
     }
 
     fn router_lsa_originate_with_min_seq(&mut self, min_seq: Option<u32>) {
@@ -5912,6 +5968,15 @@ impl Ospf<Ospfv2> {
                     }
                 }
             }
+            Message::StubRouterExpire => {
+                // RFC 6987 on-startup window over — resume real
+                // transit metrics (unless administrative mode holds
+                // the stub state).
+                self.stub_router_startup_active = false;
+                self.stub_router_startup_timer = None;
+                tracing::info!("[StubRouter] on-startup window expired");
+                self.router_lsa_originate();
+            }
             _ => {}
         }
     }
@@ -6186,6 +6251,9 @@ impl Ospf<Ospfv3> {
             min_ls_interval_ms: OSPF_MIN_LS_INTERVAL_MS,
             min_ls_arrival_ms: OSPF_MIN_LS_ARRIVAL_MS,
             vl_ifindex_next: super::link::VL_IFINDEX_BASE,
+            stub_router_admin: false,
+            stub_router_startup_active: false,
+            stub_router_startup_timer: None,
             lsa_gen: std::collections::HashMap::new(),
             restarting: None,
             key_chains: BTreeMap::new(),
@@ -11303,6 +11371,9 @@ pub enum Message<V: OspfVersion = Ospfv2> {
     /// A MinLSInterval deferral window elapsed — re-originate the
     /// self-LSA identified by the key now (RFC 2328 §12.4).
     LsaGenFire(LsaGenKey),
+    /// The RFC 6987 `max-metric router-lsa on-startup` window
+    /// elapsed — resume advertising real transit metrics.
+    StubRouterExpire,
 }
 
 use crate::spf::{self, Path};

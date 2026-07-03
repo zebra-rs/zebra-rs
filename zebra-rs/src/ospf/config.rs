@@ -336,6 +336,15 @@ impl Ospf {
             "/graceful-restart/drain-time-ms",
             config_ospf_gr_drain_time_ms,
         );
+        self.ospf_add("/max-metric/router-lsa", config_ospf_max_metric_router_lsa);
+        self.ospf_add(
+            "/max-metric/router-lsa/administrative",
+            config_ospf_max_metric_administrative,
+        );
+        self.ospf_add(
+            "/max-metric/router-lsa/on-startup",
+            config_ospf_max_metric_on_startup,
+        );
         self.ospf_add("/spf-interval/initial-wait", config_ospf_spf_initial_wait);
         self.ospf_add(
             "/spf-interval/secondary-wait",
@@ -2354,6 +2363,44 @@ fn config_ospf_gr_helper_strict_lsa_checking(
 fn config_ospf_gr_drain_time_ms(ospf: &mut Ospf, mut args: Args, op: ConfigOp) -> Option<()> {
     let value = if op.is_set() { args.u32()? } else { 200 };
     ospf.gr_config.drain_time_ms = value.clamp(50, 2000);
+    Some(())
+}
+
+/// `/router/ospf/max-metric/router-lsa` — RFC 6987 stub-router
+/// presence container. Set is a no-op (the sub-leaves drive the
+/// modes); delete clears both administrative and on-startup state.
+fn config_ospf_max_metric_router_lsa(ospf: &mut Ospf, _args: Args, op: ConfigOp) -> Option<()> {
+    if !op.is_set() {
+        ospf.stub_router_admin = false;
+        ospf.stub_router_startup_clear();
+    }
+    Some(())
+}
+
+/// `/router/ospf/max-metric/router-lsa/administrative` — indefinite
+/// stub router (maintenance mode).
+fn config_ospf_max_metric_administrative(
+    ospf: &mut Ospf,
+    mut args: Args,
+    op: ConfigOp,
+) -> Option<()> {
+    let value = if op.is_set() { args.boolean()? } else { false };
+    if ospf.stub_router_admin != value {
+        ospf.stub_router_admin = value;
+        ospf.router_lsa_originate();
+    }
+    Some(())
+}
+
+/// `/router/ospf/max-metric/router-lsa/on-startup` — stub router for
+/// N seconds after the config applies (boot grace window).
+fn config_ospf_max_metric_on_startup(ospf: &mut Ospf, mut args: Args, op: ConfigOp) -> Option<()> {
+    if op.is_set() {
+        let secs = args.u32()?;
+        ospf.stub_router_startup_arm(secs);
+    } else {
+        ospf.stub_router_startup_clear();
+    }
     Some(())
 }
 
