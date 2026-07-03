@@ -8148,6 +8148,16 @@ impl Ospf<Ospfv3> {
                 continue;
             };
             let retransmit_interval = link.retransmit_interval();
+            // Auth send state captured before the neighbor loop (it
+            // borrows `link` immutably; the per-packet seq comes from
+            // the `md5_seq` atomic field directly). RFC 7166: a flood
+            // LSU needs the trailer just like any other packet — the
+            // earlier gap here left authenticated adjacencies unable
+            // to converge re-originated LSAs.
+            let auth_mode = link.auth_mode();
+            let auth_simple_key = link.config.auth_key;
+            let auth_crypto_key =
+                link.resolve_active_send_key(&self.key_chains, chrono::Utc::now());
 
             for nbr in link.nbrs.values_mut() {
                 if nbr.state < NfsmState::Exchange {
@@ -8169,16 +8179,26 @@ impl Ospf<Ospfv3> {
                 let ls_upd = Ospfv3LsUpdate {
                     lsas: vec![lsa.clone()],
                 };
-                let packet = Ospfv3Packet::new(
+                let mut packet = Ospfv3Packet::new(
                     &self.router_id,
                     &area_id,
                     0,
                     Ospfv3Payload::LsUpdate(ls_upd),
                 );
+                let dst = nbr.ident.prefix.addr();
+                let ctx = super::packet::AuthSendCtx {
+                    mode: auth_mode,
+                    simple_key: auth_simple_key,
+                    crypto_key: auth_crypto_key.clone(),
+                    md5_seq: link
+                        .md5_seq
+                        .fetch_add(1, std::sync::atomic::Ordering::Relaxed),
+                };
+                super::packet_v3::apply_v3_auth_trailer(&mut packet, &ctx, &src, &dst);
                 let item = super::network_v6::Ospfv3Send {
                     packet,
                     ifindex,
-                    dest: Some(nbr.ident.prefix.addr()),
+                    dest: Some(dst),
                     src,
                 };
                 if let Err(e) = tx.send(item) {
@@ -8231,6 +8251,14 @@ impl Ospf<Ospfv3> {
         }) else {
             return;
         };
+        // Auth send state captured before the neighbor borrow (see
+        // `flood_lsa_through_area`).
+        let auth_mode = link.auth_mode();
+        let auth_simple_key = link.config.auth_key;
+        let auth_crypto_key = link.resolve_active_send_key(&self.key_chains, chrono::Utc::now());
+        let auth_seq = link
+            .md5_seq
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         let Some(nbr) = link.nbrs.get_mut(&router_id) else {
             return;
         };
@@ -8247,12 +8275,22 @@ impl Ospf<Ospfv3> {
         );
         let dest = nbr.ident.prefix.addr();
         let ls_upd = Ospfv3LsUpdate { lsas };
-        let packet = Ospfv3Packet::new(
+        let mut packet = Ospfv3Packet::new(
             &self.router_id,
             &area_id,
             0,
             Ospfv3Payload::LsUpdate(ls_upd),
         );
+        // RFC 7166: a retransmitted LSU carries the trailer like any
+        // other packet, else an authenticated neighbor drops it and
+        // the retransmit never clears.
+        let ctx = super::packet::AuthSendCtx {
+            mode: auth_mode,
+            simple_key: auth_simple_key,
+            crypto_key: auth_crypto_key,
+            md5_seq: auth_seq,
+        };
+        super::packet_v3::apply_v3_auth_trailer(&mut packet, &ctx, &src, &dest);
         let item = super::network_v6::Ospfv3Send {
             packet,
             ifindex,
@@ -8844,6 +8882,11 @@ impl Ospf<Ospfv3> {
             return;
         };
         let retransmit_interval = link.retransmit_interval();
+        // Auth send state captured before the neighbor loop (see
+        // `flood_lsa_through_area`).
+        let auth_mode = link.auth_mode();
+        let auth_simple_key = link.config.auth_key;
+        let auth_crypto_key = link.resolve_active_send_key(&self.key_chains, chrono::Utc::now());
 
         for nbr in link.nbrs.values_mut() {
             if nbr.state < NfsmState::Exchange {
@@ -8858,16 +8901,26 @@ impl Ospf<Ospfv3> {
             let ls_upd = Ospfv3LsUpdate {
                 lsas: vec![lsa.clone()],
             };
-            let packet = Ospfv3Packet::new(
+            let mut packet = Ospfv3Packet::new(
                 &self.router_id,
                 &area_id,
                 0,
                 Ospfv3Payload::LsUpdate(ls_upd),
             );
+            let dst = nbr.ident.prefix.addr();
+            let ctx = super::packet::AuthSendCtx {
+                mode: auth_mode,
+                simple_key: auth_simple_key,
+                crypto_key: auth_crypto_key.clone(),
+                md5_seq: link
+                    .md5_seq
+                    .fetch_add(1, std::sync::atomic::Ordering::Relaxed),
+            };
+            super::packet_v3::apply_v3_auth_trailer(&mut packet, &ctx, &src, &dst);
             let item = super::network_v6::Ospfv3Send {
                 packet,
                 ifindex,
-                dest: Some(nbr.ident.prefix.addr()),
+                dest: Some(dst),
                 src,
             };
             if let Err(e) = tx.send(item) {
