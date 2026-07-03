@@ -8,9 +8,13 @@ OSPFv3 features not yet implemented in zebra-rs:
 - NBMA and point-to-multipoint network types.
 - Configurable Instance ID (always 0 — one instance per link).
 
-The adaptive SPF throttle (`spf-interval`) is now configurable for
-OSPFv3, identical to v2 — see
-[Timer Configuration](ch-08-08-ospf-timers.md).
+The adaptive SPF throttle (`spf-interval`), the send-side
+MinLSInterval (`min-ls-interval`), and the receive-side MinLSArrival
+(`min-ls-arrival`) are all configurable for OSPFv3, identical to v2 —
+see [Timer Configuration](ch-08-08-ospf-timers.md). MinLSInterval on
+v3 actually goes beyond `ospf6d`, which has no `timers throttle lsa`
+command at all (only the receive-side `timers lsa min-arrival`, which
+zebra-rs also exposes).
 
 The balance runs the other way for Segment Routing: zebra-rs
 OSPFv3 implements SR-MPLS (RFC 8666), SRv6 (RFC 9513), TI-LFA

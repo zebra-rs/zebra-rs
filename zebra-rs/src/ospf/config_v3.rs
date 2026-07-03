@@ -88,6 +88,8 @@ impl Ospf<Ospfv3> {
                 config_ospfv3_spf_secondary_wait,
             ),
             ("/spf-interval/maximum-wait", config_ospfv3_spf_maximum_wait),
+            ("/min-ls-interval", config_ospfv3_min_ls_interval),
+            ("/min-ls-arrival", config_ospfv3_min_ls_arrival),
             (
                 "/default-information/originate",
                 config_ospfv3_default_originate,
@@ -787,6 +789,36 @@ fn config_ospfv3_spf_maximum_wait(
 ) -> Option<()> {
     let default = super::inst::SpfIntervalConfig::default().maximum_wait_ms;
     ospf.spf_interval.maximum_wait_ms = if op.is_set() { args.u32()? } else { default };
+    Some(())
+}
+
+// `/router/ospfv3/min-ls-interval` — v6 sibling of the v2 handler.
+fn config_ospfv3_min_ls_interval(
+    ospf: &mut Ospf<Ospfv3>,
+    mut args: Args,
+    op: ConfigOp,
+) -> Option<()> {
+    let value = if op.is_set() {
+        args.u32()?
+    } else {
+        super::inst::OSPF_MIN_LS_INTERVAL_MS
+    };
+    ospf.min_ls_interval_ms = value;
+    Some(())
+}
+
+// `/router/ospfv3/min-ls-arrival` — v6 sibling of the v2 handler.
+fn config_ospfv3_min_ls_arrival(
+    ospf: &mut Ospf<Ospfv3>,
+    mut args: Args,
+    op: ConfigOp,
+) -> Option<()> {
+    let value = if op.is_set() {
+        args.u32()?
+    } else {
+        super::inst::OSPF_MIN_LS_ARRIVAL_MS
+    };
+    ospf.min_ls_arrival_ms = value;
     Some(())
 }
 

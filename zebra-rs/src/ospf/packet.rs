@@ -16,9 +16,8 @@ use crate::{
 use super::{
     FloodScope, Identity, IfsmEvent, IfsmState, Message, Neighbor, NfsmEvent, NfsmState, OspfLink,
     inst::OspfInterface, link::OspfAuthMode, lsa_flood_scope, lsdb::OSPF_MAX_AGE,
-    lsdb::OSPF_MAX_AGE_DIFF, lsdb::OSPF_MAX_LSA_SEQ, lsdb::OSPF_MIN_LS_ARRIVAL, ospf_flood,
-    ospf_flood_self_originated_lsa, ospf_is_self_originated, ospf_ls_request_lookup,
-    tracing::OspfTracing,
+    lsdb::OSPF_MAX_AGE_DIFF, lsdb::OSPF_MAX_LSA_SEQ, ospf_flood, ospf_flood_self_originated_lsa,
+    ospf_is_self_originated, ospf_ls_request_lookup, tracing::OspfTracing,
 };
 
 /// Resolved authentication state for a single outbound packet.
@@ -1079,7 +1078,8 @@ fn ospf_ls_upd_proc(oi: &mut OspfInterface, nbr: &mut Neighbor, lsa: &OspfLsa) -
         // never catch up to a high-seq pre-restart LSA the neighbors
         // still hold — especially one carrying DO_NOT_AGE).
         if let Some(install_time) = current_install_time
-            && install_time.elapsed() < std::time::Duration::from_secs(OSPF_MIN_LS_ARRIVAL)
+            && install_time.elapsed()
+                < std::time::Duration::from_millis(oi.min_ls_arrival_ms as u64)
             && !ospf_is_self_originated(oi, lsa)
         {
             tracing::debug!(
@@ -1175,7 +1175,7 @@ fn ospf_ls_upd_proc(oi: &mut OspfInterface, nbr: &mut Neighbor, lsa: &OspfLsa) -
     // send-back per LSDB entry and skip when we're inside the
     // MinLSArrival window.
     if let Some(last) = current_last_flood_out
-        && last.elapsed() < std::time::Duration::from_secs(OSPF_MIN_LS_ARRIVAL)
+        && last.elapsed() < std::time::Duration::from_millis(oi.min_ls_arrival_ms as u64)
     {
         tracing::debug!(
             "[LS Update] DB copy newer but within MinLSArrival, skip send: type={:?} id={} adv={} seq={:#x}",

@@ -1140,6 +1140,34 @@ module config {
           }
         }
 
+        leaf min-ls-interval {
+          ext:help "Minimum interval between re-originations of a self-LSA (MinLSInterval)";
+          // RFC 2328 §12.4 MinLSInterval (FRR `timers throttle lsa
+          // all`): the minimum spacing between two originations of the
+          // same self-LSA. A re-origination requested sooner is
+          // deferred to the interval boundary, coalescing a burst of
+          // topology changes into one Router-LSA / Network-LSA update.
+          // Default 5000ms per the RFC.
+          type uint32 {
+            range "0..5000";
+          }
+          units "milliseconds";
+          default 5000;
+        }
+
+        leaf min-ls-arrival {
+          ext:help "Minimum interval between accepted flooded copies of an LSA (MinLSArrival)";
+          // RFC 2328 §13 MinLSArrival (FRR `timers lsa min-arrival`):
+          // the receive-side rate limit. A flooded instance arriving
+          // less than this after the last accepted copy is discarded
+          // without acknowledgement. Default 1000ms per the RFC.
+          type uint32 {
+            range "0..600000";
+          }
+          units "milliseconds";
+          default 1000;
+        }
+
         container spf-interval {
           ext:help "SPF calculation throttle timers";
           // Adaptive IOS-XR-style exponential hold-down, replacing the
@@ -1461,6 +1489,24 @@ module config {
             units "milliseconds";
             default 200;
           }
+        }
+        // MinLSInterval — v6 sibling of the v2 min-ls-interval leaf.
+        leaf min-ls-interval {
+          ext:help "Minimum interval between re-originations of a self-LSA (MinLSInterval)";
+          type uint32 {
+            range "0..5000";
+          }
+          units "milliseconds";
+          default 5000;
+        }
+        // MinLSArrival — v6 sibling of the v2 min-ls-arrival leaf.
+        leaf min-ls-arrival {
+          ext:help "Minimum interval between accepted flooded copies of an LSA (MinLSArrival)";
+          type uint32 {
+            range "0..600000";
+          }
+          units "milliseconds";
+          default 1000;
         }
         // Adaptive SPF throttle — v6 sibling of the v2 spf-interval
         // block. Same IOS-XR backoff and 50/200/5000ms defaults.

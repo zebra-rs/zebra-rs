@@ -70,3 +70,60 @@ configured bounds (`SPF timers: initial … secondary … maximum …`).
 OSPFv3 exposes the identical `spf-interval` block under
 `router ospfv3`. These defaults replace the earlier fixed 1-second
 coalescing timer.
+
+## MinLSInterval (`min-ls-interval`)
+
+Where `spf-interval` throttles the *route calculation*,
+`min-ls-interval` throttles *self-LSA origination* — RFC 2328 §12.4
+MinLSInterval, the same knob as FRR's `timers throttle lsa all`:
+
+```
+router ospf {
+  min-ls-interval 5000;
+}
+```
+
+| YANG leaf (`/router/ospf[v3]/min-ls-interval`) | Default | Range | Units |
+|---|---|---|---|
+| `min-ls-interval` | 5000 | 0..5000 | milliseconds |
+
+A self-LSA may be re-originated at most once per `min-ls-interval`. A
+re-origination requested sooner (the second of two rapid topology
+changes) is deferred to the interval boundary, and further triggers
+in that window coalesce into the single deferred update — so a
+flapping link produces one Router-LSA every `min-ls-interval` instead
+of a flood. The first origination after a quiet period is always
+immediate. The throttle covers the topology-churn LSAs — the
+**Router-LSA** and the per-interface **Network-LSA**; Summary /
+AS-External LSAs re-originate only on route changes and are already
+diff-gated, so they don't storm. Graceful-restart exit re-originates
+promptly, bypassing the throttle.
+
+`show ospf` reports the value (`MinLSInterval (self-LSA
+re-origination): … ms`); OSPFv3 exposes the identical
+`min-ls-interval` leaf under `router ospfv3`.
+
+## MinLSArrival (`min-ls-arrival`)
+
+The receive-side companion — RFC 2328 §13 MinLSArrival, FRR's
+`timers lsa min-arrival`:
+
+```
+router ospf {
+  min-ls-arrival 1000;
+}
+```
+
+| YANG leaf (`/router/ospf[v3]/min-ls-arrival`) | Default | Range | Units |
+|---|---|---|---|
+| `min-ls-arrival` | 1000 | 0..600000 | milliseconds |
+
+A flooded instance of an LSA that arrives less than `min-ls-arrival`
+after the last accepted copy is **discarded without acknowledgement**
+(RFC 2328 §13 step 5a) — the neighbor's retransmit timer redelivers
+the genuinely newer instance once the window passes. This damps a
+neighbor that floods the same LSA in a tight loop. The gate is
+skipped for self-originated LSAs so the §13.4 seq-reclaim path can
+still fire. `show ospf` reports the value (`MinLSArrival (received-LSA
+rate limit): … ms`); OSPFv3 exposes the identical `min-ls-arrival`
+leaf under `router ospfv3`.
