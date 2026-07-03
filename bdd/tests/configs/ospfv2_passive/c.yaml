@@ -1,0 +1,20 @@
+# c actively runs OSPF toward b's passive interface — the adjacency
+# must never form.
+interface:
+- if-name: lo
+  ipv4:
+    address: 10.0.0.3/32
+- if-name: ethb
+  ipv4:
+    address: 10.0.23.2/30
+router:
+  ospf:
+    router-id: 10.0.0.3
+    area:
+    - area-id: 0.0.0.0
+      interface:
+      - if-name: lo
+        enable: true
+      - if-name: ethb
+        enable: true
+        network-type: point-to-point

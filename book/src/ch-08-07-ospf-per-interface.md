@@ -14,6 +14,7 @@ The per-link timers (`hello-interval`, `dead-interval`,
 | `/router/ospf/area/<id>/interface/<n>/priority` | 64 | 0..255 | (count) |
 | `/router/ospf/area/<id>/interface/<n>/cost` | 10 | 0..65535 | (metric) |
 | `/router/ospf/area/<id>/interface/<n>/mtu-ignore` | `false` | — | boolean |
+| `/router/ospf/area/<id>/interface/<n>/passive` | `false` | — | boolean |
 
 Notes:
 
@@ -44,3 +45,11 @@ Notes:
   to `true` only when intentionally peering across links with
   different MTUs and accepting the resulting black-hole risk for
   jumbo packets.
+- **`passive`** keeps advertising the interface's prefix into the
+  area (as a stub network in the Router-LSA) while sending and
+  accepting no Hellos — no adjacency ever forms on the segment.
+  Use it for user-facing networks that must be reachable without
+  exposing an OSPF speaker. Loopback interfaces are implicitly
+  passive regardless of this leaf. Toggling bounces the interface
+  so an adjacency formed while active is dropped cleanly;
+  `show ospf interface` reports `No Hellos (Passive interface)`.

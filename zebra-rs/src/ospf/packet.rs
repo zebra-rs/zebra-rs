@@ -482,6 +482,9 @@ pub fn ospf_hello_send(
     now: chrono::DateTime<chrono::Utc>,
     tracing: &OspfTracing,
 ) {
+    if oi.is_passive() {
+        return;
+    }
     ospf_pdu_trace!(tracing, "[Hello:Send] on {}", oi.name);
 
     let packet = ospf_hello_packet(oi, chains, now).unwrap();

@@ -739,6 +739,14 @@ module config {
             leaf mtu-ignore {
               type boolean;
             }
+            // Passive interface: its prefixes keep advertising into
+            // the area (Router-LSA stub / Intra-Area-Prefix-LSA) but
+            // no Hello is sent or accepted, so no adjacency forms.
+            // Loopbacks are implicitly passive even when unset.
+            leaf passive {
+              type boolean;
+              default false;
+            }
             container prefix-sid {
               leaf index {
                 type uint32;
@@ -1444,6 +1452,11 @@ module config {
             }
             leaf mtu-ignore {
               type boolean;
+            }
+            // Passive interface — same semantics as the v2 sibling.
+            leaf passive {
+              type boolean;
+              default false;
             }
             container prefix-sid {
               leaf index {

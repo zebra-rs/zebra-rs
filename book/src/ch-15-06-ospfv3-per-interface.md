@@ -16,6 +16,7 @@ core). Timers are covered separately in
 | `priority` | 64 | 0..255 |
 | `cost` | 10 | 0..65535 |
 | `mtu-ignore` | `false` | boolean |
+| `passive` | `false` | boolean |
 | `affinity` | — | leaf-list of `/affinity-map` names |
 
 Notes:
@@ -39,6 +40,11 @@ Notes:
   `cost`, matching v2/FRR/Junos convention.
 - **`mtu-ignore`** disables the MTU-mismatch check in the DBD
   exchange, as in v2.
+- **`passive`** advertises the interface's prefixes (via the
+  Intra-Area-Prefix-LSA) while sending and accepting no Hellos, so
+  no adjacency forms on the segment. Loopbacks are implicitly
+  passive. Semantics as in
+  [the v2 page](ch-08-07-ospf-per-interface.md).
 - **`affinity`** attaches named admin-group bits (from the global
   `/affinity-map`) to the link, advertised in the RFC 9492 ASLA
   sub-TLV of the E-Router-LSA — consumed by

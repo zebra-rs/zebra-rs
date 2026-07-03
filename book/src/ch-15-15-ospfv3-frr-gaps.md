@@ -13,7 +13,6 @@ OSPFv3 features not yet implemented in zebra-rs:
   RFC 7166 Authentication Trailer is implemented, but its keys are
   configured through the shared v2 interface tree (`ospf6d` has
   `ipv6 ospf6 authentication` per interface).
-- Passive interfaces.
 - Instance-level `default-information originate` (the NSSA-scoped
   default via `nssa-default-originate` is implemented).
 - Non-zero forwarding-address resolution on received externals.
