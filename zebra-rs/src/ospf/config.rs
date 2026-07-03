@@ -313,6 +313,7 @@ impl Ospf {
             config_ospf_spf_secondary_wait,
         );
         self.ospf_add("/spf-interval/maximum-wait", config_ospf_spf_maximum_wait);
+        self.ospf_add("/min-ls-interval", config_ospf_min_ls_interval);
         // `/router/ospf/tracing/...` is handled by the subtree dispatcher
         // `super::tracing::config_tracing_dispatch` (called from
         // `process_cm_msg` for paths this callback table does not claim),
@@ -2140,6 +2141,19 @@ fn config_ospf_spf_secondary_wait(ospf: &mut Ospf, mut args: Args, op: ConfigOp)
 fn config_ospf_spf_maximum_wait(ospf: &mut Ospf, mut args: Args, op: ConfigOp) -> Option<()> {
     let default = super::inst::SpfIntervalConfig::default().maximum_wait_ms;
     ospf.spf_interval.maximum_wait_ms = if op.is_set() { args.u32()? } else { default };
+    Some(())
+}
+
+// `/router/ospf/min-ls-interval` — RFC 2328 §12.4 MinLSInterval (ms).
+// Delete restores the RFC/FRR default. Applies from the next
+// re-origination; a deferral already in flight keeps its timer.
+fn config_ospf_min_ls_interval(ospf: &mut Ospf, mut args: Args, op: ConfigOp) -> Option<()> {
+    let value = if op.is_set() {
+        args.u32()?
+    } else {
+        super::inst::OSPF_MIN_LS_INTERVAL_MS
+    };
+    ospf.min_ls_interval_ms = value;
     Some(())
 }
 

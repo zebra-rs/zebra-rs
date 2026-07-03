@@ -13,9 +13,10 @@ OSPFv2 features not yet implemented in zebra-rs:
   Type-7 LSAs carrying a non-zero forwarding address are skipped
   (RFC 2328 §16.4 step 3); zebra-rs itself always originates with
   FA 0.0.0.0.
-- Configurable **LSA-generation** throttle. The SPF calculation now
-  has an adaptive throttle (see below), but LSA origination is not
-  yet rate-limited by a matching `timers throttle lsa-all`.
+- Configurable **MinLSArrival** (`timers lsa min-arrival`, RFC 2328
+  §13) — the receive-side per-LSA rate limit is enforced but fixed at
+  1 s. (The send-side MinLSInterval / `timers throttle lsa all` *is*
+  configurable — see below.)
 
 ## Previously listed gaps that are now closed
 
@@ -60,3 +61,8 @@ per feature — see each feature's page):
   FRR's `timers throttle spf`), per-area and shared with IS-IS,
   for both OSPFv2 and OSPFv3. Replaces the old fixed 1-second
   coalescing timer. See [Timer Configuration](ch-08-08-ospf-timers.md).
+- **Send-side MinLSInterval** (`min-ls-interval`, RFC 2328 §12.4 /
+  FRR `timers throttle lsa all`) — self-LSA re-origination is now
+  rate-limited (Router-LSA and Network-LSA coalesce a burst of
+  topology changes into one update), configurable for both OSPFv2 and
+  OSPFv3. See [Timer Configuration](ch-08-08-ospf-timers.md).

@@ -97,6 +97,45 @@ impl Default for SpfIntervalConfig {
     }
 }
 
+/// RFC 2328 §12.4 MinLSInterval default (FRR `timers throttle lsa all`
+/// default; ms). The minimum spacing between two originations of the
+/// same self-LSA.
+pub const OSPF_MIN_LS_INTERVAL_MS: u32 = 5000;
+
+/// Identifies a self-originated LSA for the MinLSInterval throttle, so
+/// a deferred re-origination knows which originator to re-run. One
+/// entry per distinct self-LSA the throttle covers (the topology-churn
+/// LSAs — Router-LSA and the per-interface Network-LSA); summaries /
+/// externals re-originate on route changes and are diff-gated, so they
+/// don't storm and aren't tracked here.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum LsaGenKey {
+    /// The router's own Router-LSA(s) — regenerated for every attached
+    /// area in a single pass, so one key covers them all.
+    Router,
+    /// The Network-LSA this router originates as DR on `ifindex`.
+    Network(u32),
+}
+
+/// Per-self-LSA MinLSInterval throttle state (RFC 2328 §12.4): hold a
+/// self-LSA back if it was originated less than `min_ls_interval` ago,
+/// coalescing the burst of triggers into one deferred origination.
+#[derive(Default)]
+struct LsaGenState {
+    /// When this LSA was last actually originated. `None` until the
+    /// first origination, which is never throttled.
+    last_originate: Option<tokio::time::Instant>,
+    /// Armed while a throttled re-origination waits out the interval;
+    /// fires `Message::LsaGenFire(key)`. Held so `Drop` doesn't cancel
+    /// it before it fires.
+    timer: Option<Timer>,
+    /// Highest sequence floor demanded by any request coalesced into
+    /// the current deferral window (Router-LSA seq reclaim, RFC 2328
+    /// §13.4). Folded as `max`; consumed when the LSA finally
+    /// originates.
+    pending_min_seq: Option<u32>,
+}
+
 pub struct Ospf<V: OspfVersion = Ospfv2> {
     pub tx: UnboundedSender<Message<V>>,
     pub rx: UnboundedReceiver<Message<V>>,
@@ -277,6 +316,13 @@ pub struct Ospf<V: OspfVersion = Ospfv2> {
     /// *state* is per-area (`OspfArea::spf_throttle`); this holds the
     /// configured bounds fed into it each time a run is scheduled.
     pub spf_interval: SpfIntervalConfig,
+    /// RFC 2328 §12.4 MinLSInterval, ms (`timers throttle lsa all`):
+    /// the minimum spacing between two originations of the same
+    /// self-LSA. Default [`OSPF_MIN_LS_INTERVAL_MS`].
+    pub min_ls_interval_ms: u32,
+    /// Per-self-LSA MinLSInterval throttle state, keyed by
+    /// [`LsaGenKey`]. Runtime-only (not checkpointed / inherited).
+    lsa_gen: std::collections::HashMap<LsaGenKey, LsaGenState>,
     /// RFC 3623 §2 restarting-router state. `Some` once
     /// `gr_restart_begin` floods Grace LSAs and stages the
     /// restart; `None` in steady state. While `Some`, the
@@ -1210,6 +1256,61 @@ impl<V: OspfVersion> Ospf<V> {
             area.spf_timer = Some(Self::ospf_spf_timer_generic(tx, area.id, wait_ms as u64));
         }
     }
+
+    /// MinLSInterval gate (RFC 2328 §12.4) for self-LSA `key`. Folds
+    /// `min_seq` into the pending sequence floor, then either returns
+    /// `true` — clear to originate now, recording the time — or, if
+    /// this LSA was originated less than `min_ls_interval` ago, arms a
+    /// deferred `LsaGenFire(key)` timer and returns `false`. Idempotent
+    /// while a deferral is pending: further calls only fold the seq
+    /// floor, so a burst of triggers collapses to one origination.
+    fn lsa_gen_allow(&mut self, key: LsaGenKey, min_seq: Option<u32>) -> bool {
+        let interval = std::time::Duration::from_millis(self.min_ls_interval_ms as u64);
+        let tx = self.tx.clone();
+        let entry = self.lsa_gen.entry(key).or_default();
+        entry.pending_min_seq = match (entry.pending_min_seq, min_seq) {
+            (Some(a), Some(b)) => Some(a.max(b)),
+            (a, None) => a,
+            (None, b) => b,
+        };
+        if let Some(last) = entry.last_originate {
+            let elapsed = last.elapsed();
+            if elapsed < interval {
+                if entry.timer.is_none() {
+                    let remaining_ms = (interval - elapsed).as_millis().max(1) as u64;
+                    entry.timer = Some(Timer::once_ms(remaining_ms, move || {
+                        let tx = tx.clone();
+                        async move {
+                            let _ = tx.send(Message::LsaGenFire(key));
+                        }
+                    }));
+                }
+                return false;
+            }
+        }
+        entry.last_originate = Some(tokio::time::Instant::now());
+        entry.timer = None;
+        true
+    }
+
+    /// Consume the folded pending sequence floor for `key` after a
+    /// successful `lsa_gen_allow` (or a fire), so the origination bumps
+    /// past the highest seq any coalesced request demanded.
+    fn lsa_gen_take_pending(&mut self, key: LsaGenKey) -> Option<u32> {
+        self.lsa_gen
+            .get_mut(&key)
+            .and_then(|e| e.pending_min_seq.take())
+    }
+
+    /// A `LsaGenFire` deferral window elapsed: clear the (already-fired)
+    /// timer, stamp the new origination time, and return the folded
+    /// seq floor. The caller re-runs the matching `*_now` originator.
+    fn lsa_gen_fire_prepare(&mut self, key: LsaGenKey) -> Option<u32> {
+        let entry = self.lsa_gen.entry(key).or_default();
+        entry.timer = None;
+        entry.last_originate = Some(tokio::time::Instant::now());
+        entry.pending_min_seq.take()
+    }
 }
 
 impl Ospf<Ospfv2> {
@@ -1291,6 +1392,8 @@ impl Ospf<Ospfv2> {
             sr_rx,
             gr_config: super::neigh::GracefulRestartConfig::default(),
             spf_interval: SpfIntervalConfig::default(),
+            min_ls_interval_ms: OSPF_MIN_LS_INTERVAL_MS,
+            lsa_gen: std::collections::HashMap::new(),
             restarting: None,
             key_chains: BTreeMap::new(),
             policy_tx,
@@ -1655,6 +1758,21 @@ impl Ospf<Ospfv2> {
         // `gr_helper_check_exit`. Skip; the exit-restart path
         // re-originates at seq+1 once we declare the restart
         // complete.
+        if self.in_restart() {
+            return;
+        }
+        // MinLSInterval (RFC 2328 §12.4): if we originated a Router-LSA
+        // less than `min_ls_interval` ago, defer — the throttle arms a
+        // `LsaGenFire(Router)` timer and folds `min_seq` for the
+        // coalesced run.
+        if !self.lsa_gen_allow(LsaGenKey::Router, min_seq) {
+            return;
+        }
+        let min_seq = self.lsa_gen_take_pending(LsaGenKey::Router);
+        self.router_lsa_originate_now(min_seq);
+    }
+
+    fn router_lsa_originate_now(&mut self, min_seq: Option<u32>) {
         if self.in_restart() {
             return;
         }
@@ -3662,6 +3780,18 @@ impl Ospf<Ospfv2> {
     /// Network-LSA per RFC 2328 §14.1) does not fire while a
     /// helper-mode neighbor remains.
     fn update_network_lsa_by_interface(&mut self, ifindex: u32) {
+        if self.in_restart() {
+            return;
+        }
+        // MinLSInterval (RFC 2328 §12.4): coalesce rapid Network-LSA
+        // regenerations (DR neighbor churn) on this interface.
+        if !self.lsa_gen_allow(LsaGenKey::Network(ifindex), None) {
+            return;
+        }
+        self.update_network_lsa_by_interface_now(ifindex);
+    }
+
+    fn update_network_lsa_by_interface_now(&mut self, ifindex: u32) {
         // Network-LSA is topology-affecting, so the checkpoint-loaded
         // copy stays verbatim during restart. The exit-restart path
         // re-emits at seq+1 once adjacencies re-converge.
@@ -4377,9 +4507,12 @@ impl Ospf<Ospfv2> {
         // `update_network_lsa_by_interface` /
         // `ext_link_lsa_originate` per DR-eligible link. The
         // `in_restart()` gates were lifted by the take() above.
-        self.router_lsa_originate();
+        // GR exit must originate promptly (helpers are waiting on the
+        // fresh-seq LSA before dropping helper mode), so bypass the
+        // MinLSInterval throttle via the `_now` originators.
+        self.router_lsa_originate_now(None);
         for ifindex in &ifindices {
-            self.update_network_lsa_by_interface(*ifindex);
+            self.update_network_lsa_by_interface_now(*ifindex);
             self.ext_link_lsa_originate(*ifindex);
         }
         // Router-Info refresh clears the gr_capable bit.
@@ -5405,6 +5538,18 @@ impl Ospf<Ospfv2> {
             Message::NssaTranslateResync(area_id) => {
                 self.nssa_translate_resync(area_id);
             }
+            Message::LsaGenFire(key) => {
+                // MinLSInterval deferral elapsed — clear the timer,
+                // stamp the origination, and re-run the matching
+                // originator with the folded seq floor.
+                let min_seq = self.lsa_gen_fire_prepare(key);
+                match key {
+                    LsaGenKey::Router => self.router_lsa_originate_now(min_seq),
+                    LsaGenKey::Network(ifindex) => {
+                        self.update_network_lsa_by_interface_now(ifindex)
+                    }
+                }
+            }
             _ => {}
         }
     }
@@ -5676,6 +5821,8 @@ impl Ospf<Ospfv3> {
             sr_rx,
             gr_config: super::neigh::GracefulRestartConfig::default(),
             spf_interval: SpfIntervalConfig::default(),
+            min_ls_interval_ms: OSPF_MIN_LS_INTERVAL_MS,
+            lsa_gen: std::collections::HashMap::new(),
             restarting: None,
             key_chains: BTreeMap::new(),
             policy_tx,
@@ -6551,6 +6698,19 @@ impl Ospf<Ospfv3> {
     /// - After install, flood the LSA to every Exchange-or-later
     ///   neighbor in the area via `flood_self_originated_lsa`.
     pub fn router_lsa_originate(&mut self) {
+        if self.in_restart() {
+            return;
+        }
+        // MinLSInterval (RFC 2328 §12.4 / RFC 5340): coalesce rapid
+        // Router-LSA regenerations. v3 manages its own seq internally,
+        // so no seq floor to fold.
+        if !self.lsa_gen_allow(LsaGenKey::Router, None) {
+            return;
+        }
+        self.router_lsa_originate_now();
+    }
+
+    fn router_lsa_originate_now(&mut self) {
         if self.in_restart() {
             return;
         }
@@ -7833,14 +7993,16 @@ impl Ospf<Ospfv3> {
         // Re-originate at seq+1. Router-LSA covers topology; the
         // per-area Intra-Area-Prefix and per-link Link/Network/
         // E-Intra-Area-Prefix LSAs cover addressing and SR.
-        self.router_lsa_originate();
+        // Bypass the MinLSInterval throttle (`_now`) — GR exit must
+        // flood the fresh-seq LSAs promptly so helpers drop helper mode.
+        self.router_lsa_originate_now();
         let area_ids: Vec<Ipv4Addr> = self.areas.iter().map(|(id, _)| *id).collect();
         for area_id in area_ids {
             self.router_intra_area_prefix_lsa_originate(area_id);
         }
         for ifindex in &ifindices {
             self.link_lsa_originate(*ifindex);
-            self.network_lsa_originate(*ifindex);
+            self.network_lsa_originate_now(*ifindex);
             self.ext_intra_area_prefix_v3_lsa_originate(*ifindex);
         }
 
@@ -8971,6 +9133,16 @@ impl Ospf<Ospfv3> {
             }
             Message::NssaTranslateResync(area_id) => {
                 self.nssa_translate_resync(area_id);
+            }
+            Message::LsaGenFire(key) => {
+                // MinLSInterval deferral elapsed — re-run the matching
+                // v3 originator (seq is managed internally, so the
+                // folded floor is unused here).
+                let _ = self.lsa_gen_fire_prepare(key);
+                match key {
+                    LsaGenKey::Router => self.router_lsa_originate_now(),
+                    LsaGenKey::Network(ifindex) => self.network_lsa_originate_now(ifindex),
+                }
             }
             other => {
                 tracing::debug!(
@@ -10194,6 +10366,18 @@ impl Ospf<Ospfv3> {
         if self.in_restart() {
             return;
         }
+        // MinLSInterval (RFC 2328 §12.4): coalesce Network-LSA churn on
+        // this interface.
+        if !self.lsa_gen_allow(LsaGenKey::Network(ifindex), None) {
+            return;
+        }
+        self.network_lsa_originate_now(ifindex);
+    }
+
+    fn network_lsa_originate_now(&mut self, ifindex: u32) {
+        if self.in_restart() {
+            return;
+        }
         use ospf_packet::OSPFV3_NETWORK_LSA_TYPE;
 
         let Some(link) = self.links.get(&ifindex) else {
@@ -10752,6 +10936,9 @@ pub enum Message<V: OspfVersion = Ospfv2> {
     /// changed. The handler is idempotent; multiple coalescing
     /// triggers in flight is fine.
     NssaTranslateResync(Ipv4Addr),
+    /// A MinLSInterval deferral window elapsed — re-originate the
+    /// self-LSA identified by the key now (RFC 2328 §12.4).
+    LsaGenFire(LsaGenKey),
 }
 
 use crate::spf::{self, Path};
