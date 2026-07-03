@@ -3627,4 +3627,47 @@ mod yang_load_tests {
             assert_eq!(code, ExecCode::Success, "`{path}` must be a settable path");
         }
     }
+    /// Native `router ospfv3` authentication paths (RFC 7166 trailer)
+    /// — previously the v3 trailer was configurable only through the
+    /// shared v2 interface tree. Pin every spelling settable.
+    #[test]
+    fn ospfv3_interface_authentication_paths_parse() {
+        use crate::config::ExecCode;
+        use crate::config::parse::{State, parse};
+        use libyang::to_entry;
+
+        let mut yang = YangStore::new();
+        yang.add_path(concat!(env!("CARGO_MANIFEST_DIR"), "/yang"));
+        yang.read_with_resolve("configure")
+            .expect("configure mode loads");
+        yang.identity_resolve();
+        let module = yang
+            .find_module("configure")
+            .expect("configure module present");
+        let entry = to_entry(&yang, module);
+
+        for path in [
+            "set router ospfv3 area 0 interface eth0 authentication null",
+            "set router ospfv3 area 0 interface eth0 authentication message-digest",
+            "set router ospfv3 area 0 interface eth0 crypto-key 1 hmac-sha-1 shasecret",
+            "set router ospfv3 area 0 interface eth0 crypto-key 1 hmac-sha-256 shasecret",
+            "set router ospfv3 area 0 interface eth0 crypto-key 1 hmac-sha-384 shasecret",
+            "set router ospfv3 area 0 interface eth0 crypto-key 1 hmac-sha-512 shasecret",
+            "set router ospfv3 area 0 interface eth0 key-chain OSPF-KC",
+        ] {
+            let (code, _comps, _state) = parse(path, entry.clone(), None, State::new());
+            assert_eq!(code, ExecCode::Success, "`{path}` must be a settable path");
+        }
+
+        // RFC 7166 has no simple-password mode — the v2-only
+        // spellings must NOT parse under router ospfv3.
+        for path in [
+            "set router ospfv3 area 0 interface eth0 authentication simple",
+            "set router ospfv3 area 0 interface eth0 authentication-key secret08",
+            "set router ospfv3 area 0 interface eth0 message-digest-key 1 md5 md5secret",
+        ] {
+            let (code, _comps, _state) = parse(path, entry.clone(), None, State::new());
+            assert_ne!(code, ExecCode::Success, "`{path}` must NOT be settable");
+        }
+    }
 }

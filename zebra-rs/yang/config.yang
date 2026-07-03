@@ -88,6 +88,10 @@ module config {
     prefix zoat;
   }
 
+  import zebra-ospfv3-auth {
+    prefix zo3a;
+  }
+
   import zebra-ospf-tracing {
     prefix zotr;
   }

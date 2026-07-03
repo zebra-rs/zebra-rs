@@ -1,0 +1,31 @@
+# RFC 8177 key-chain supplying the RFC 7166 trailer key, via the
+# native router-ospfv3 key-chain leaf.
+key-chains:
+  key-chain:
+  - name: OSPF6-KC
+    key:
+    - key-id: 1
+      crypto-algorithm: hmac-sha-256
+      key-string:
+        keystring: "zebra-v3-chain-secret"
+
+interface:
+- if-name: lo
+  ipv6:
+    address: 2001:db8::1/128
+- if-name: ethb
+  ipv6:
+    address: 2001:db8:12::1/64
+router:
+  ospfv3:
+    router-id: 10.0.0.1
+    area:
+    - area-id: 0.0.0.0
+      interface:
+      - if-name: lo
+        enable: true
+      - if-name: ethb
+        enable: true
+        network-type: point-to-point
+        authentication: message-digest
+        key-chain: OSPF6-KC

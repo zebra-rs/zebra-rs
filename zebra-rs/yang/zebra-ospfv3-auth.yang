@@ -1,0 +1,165 @@
+module zebra-ospfv3-auth {
+  yang-version "1";
+
+  namespace "urn:ietf:params:xml:ns:yang:zebra-ospfv3-auth";
+  prefix "zo3a";
+
+  import config {
+    prefix config;
+  }
+
+  import configure {
+    prefix configure;
+  }
+
+  import extension {
+    prefix ext;
+  }
+
+  organization
+    "zebra-rs";
+
+  contact
+    "https://github.com/zebra-rs";
+
+  description
+    "Native per-interface OSPFv3 authentication configuration for the
+     RFC 7166 Authentication Trailer. OSPFv3 has no per-packet
+     authentication field of its own (RFC 5340 delegated security to
+     IPsec); zebra-rs appends the RFC 7166 trailer instead — an
+     HMAC-SHA digest with a 16-bit Security Association ID and a
+     64-bit sequence number, computed with the Apad construction over
+     the IPv6 source address and packet.
+
+     The surface is deliberately narrower than the OSPFv2 siblings
+     (zebra-ospf-auth-simple / -md5 / -trailer): RFC 7166 §4 defines
+     only HMAC-SHA algorithms, so there is no simple-password mode
+     and no keyed-MD5 list here. `authentication message-digest`
+     turns the trailer on; keys come from the `crypto-key` list (the
+     leaf name selects the algorithm) or from an RFC 8177 key-chain
+     referenced by name, which supersedes inline keys.
+
+     Example:
+
+       router ospfv3 {
+         area 0 {
+           interface eth0 {
+             authentication message-digest;
+             crypto-key 1 {
+               hmac-sha-256 SECRET;
+             }
+           }
+         }
+       }";
+
+  revision 2026-07-03 {
+    description
+      "Initial version — native `router ospfv3` authentication path
+       (previously the v3 trailer was configurable only through the
+       shared OSPFv2 interface tree, which required a `router ospf`
+       block to exist in an IPv6-only deployment).";
+  }
+
+  grouping ospfv3-interface-auth-extension {
+    leaf authentication {
+      ext:help "OSPFv3 authentication mode (RFC 7166 trailer)";
+      type enumeration {
+        enum null {
+          description
+            "No authentication trailer (the default when unset).";
+        }
+        enum message-digest {
+          description
+            "Append and require the RFC 7166 Authentication
+             Trailer (AT-bit set in Hello/DBD options).";
+        }
+      }
+      description
+        "Authentication mode for this interface. RFC 7166 has no
+         simple-password equivalent, so unlike the v2 leaf the enum
+         carries only `null` and `message-digest`.";
+    }
+
+    leaf key-chain {
+      ext:help "RFC 8177 key chain supplying the trailer keys";
+      type string;
+      description
+        "Name of a key chain defined under /key-chains/key-chain.
+         When set and `authentication` is `message-digest`, the
+         chain supersedes per-interface `crypto-key` entries:
+         send-side uses the chain's currently active key (lowest
+         key-id whose send-lifetime contains now); receive-side
+         validates the sender's SA-ID against the accept-lifetime
+         window.";
+      reference
+        "RFC 8177: YANG Data Model for Key Chains";
+    }
+
+    list crypto-key {
+      ext:help "RFC 7166 trailer key (algorithm chosen by leaf)";
+      key "key-id";
+      description
+        "One trailer key. Exactly one per-algorithm leaf should be
+         set per entry; the leaf name selects the HMAC-SHA
+         algorithm. The key-id is carried on the wire as the
+         trailer's Security Association ID.";
+
+      leaf key-id {
+        ext:help "Security Association ID (1-255)";
+        type uint8 {
+          range "1..255";
+        }
+        description
+          "Key identifier carried as the RFC 7166 §4.1 Security
+           Association ID. Zero is reserved and rejected. The
+           16-bit wire field is constrained to 8 bits so keys stay
+           interchangeable with the shared per-link keyring.";
+      }
+
+      leaf hmac-sha-1 {
+        ext:help "HMAC-SHA-1 secret (1..20 octets)";
+        type string {
+          length "1..20";
+        }
+      }
+
+      leaf hmac-sha-256 {
+        ext:help "HMAC-SHA-256 secret (1..32 octets)";
+        type string {
+          length "1..32";
+        }
+      }
+
+      leaf hmac-sha-384 {
+        ext:help "HMAC-SHA-384 secret (1..48 octets)";
+        type string {
+          length "1..48";
+        }
+      }
+
+      leaf hmac-sha-512 {
+        ext:help "HMAC-SHA-512 secret (1..64 octets)";
+        type string {
+          length "1..64";
+        }
+      }
+    }
+  }
+
+  augment "/configure:set/config:router"
+        + "/config:ospfv3/config:area/config:interface" {
+    description
+      "Attach the OSPFv3 authentication leaves to each interface
+       in the candidate-set subtree.";
+    uses ospfv3-interface-auth-extension;
+  }
+
+  augment "/configure:delete/config:router"
+        + "/config:ospfv3/config:area/config:interface" {
+    description
+      "Same attachment in the delete subtree so
+       `delete router ospfv3 area X interface Y crypto-key Z`
+       is path-valid.";
+    uses ospfv3-interface-auth-extension;
+  }
+}
