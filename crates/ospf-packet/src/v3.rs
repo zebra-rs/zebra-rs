@@ -132,14 +132,20 @@ pub fn parse_v3(input: &[u8]) -> IResult<&[u8], Ospfv3Packet> {
     let (_, mut packet) = Ospfv3Packet::parse_be(&input[..pkt_len])?;
     packet.raw_body = input[..pkt_len].to_vec();
 
-    // RFC 7166: the trailer follows the OSPF body when the AT-bit
-    // is set in the packet's Options. The trailer's own
-    // `auth_data_len` field (first 4 octets at offset 2..4 of the
-    // trailer) gives its total length. We probe rather than parse
-    // the full struct here so an unknown auth_type still consumes
-    // the right number of bytes.
+    // RFC 7166: once the AT-bit is negotiated (advertised in the
+    // Hello/DBD Options), EVERY subsequent OSPF packet carries the
+    // trailer — but LSReq / LSUpd / LSAck have no Options field to
+    // re-signal it, so the packet type alone can't tell us. The
+    // trailer is instead identified positionally: any bytes trailing
+    // the OSPF `len` are the trailer. We probe its `auth_data_len`
+    // (offset 2..4 of the trailer) rather than parsing the full
+    // struct so an unknown auth_type still consumes the right length.
+    // (`packet_has_at_bit` remains the cheap confirmation for the
+    // Options-bearing types but is not required — gating on it
+    // dropped the trailer on LSUpd/LSReq/LSAck and wedged
+    // authenticated adjacencies in Loading.)
     let mut consumed = pkt_len;
-    if packet_has_at_bit(&packet) && input.len() >= pkt_len + 4 {
+    if input.len() >= pkt_len + 4 {
         let trailer_len = BigEndian::read_u16(&input[pkt_len + 2..pkt_len + 4]) as usize;
         // Minimum sanity bound: 16-byte fixed prefix; reject
         // obviously-bogus lengths so we don't allocate gigabytes.
@@ -149,20 +155,6 @@ pub fn parse_v3(input: &[u8]) -> IResult<&[u8], Ospfv3Packet> {
         }
     }
     Ok((&input[consumed..], packet))
-}
-
-/// Peek at a parsed v3 packet's Options field for the AT-bit.
-/// Only Hello and DBD carry Options on the wire; LSReq / LSUpd /
-/// LSAck don't, so the trailer is signaled by the adjacency's
-/// negotiated state (out of scope for the parser — we still
-/// consume a trailer if one happens to be present, but the
-/// AT-bit probe is the cheap check).
-fn packet_has_at_bit(packet: &Ospfv3Packet) -> bool {
-    match &packet.payload {
-        Ospfv3Payload::Hello(h) => h.options.at(),
-        Ospfv3Payload::DbDesc(d) => d.options.at(),
-        _ => false,
-    }
 }
 
 /// RFC 7166 §4.1 Authentication Trailer header. Sits between the
