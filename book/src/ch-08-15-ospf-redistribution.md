@@ -69,6 +69,35 @@ LSAs carrying a non-zero forwarding address are currently skipped —
 resolving the FA against an intra-area route (RFC 2328 §16.4
 step 3) is not yet implemented.
 
+## Default route origination
+
+`default-information originate` advertises a Type-5 default
+(0.0.0.0/0) from this router:
+
+```
+router ospf {
+  default-information {
+    originate {
+      always true;
+    }
+  }
+}
+```
+
+| YANG leaf (`/router/ospf/default-information/originate/…`) | Default | Notes |
+|---|---|---|
+| `originate` | presence | Makes the router an ASBR (E-bit set). |
+| `always` | `false` | Originate unconditionally. |
+| `metric` | 10 | FRR-parity default for the originated default (redistribute uses 20). |
+| `metric-type` | `type-2` | E1/E2 semantics as for redistribution. |
+
+Without `always`, the default is originated **only while a non-OSPF
+default route exists in the RIB** — zebra-rs tracks this through a
+dedicated RIB default-route watch, so a static or BGP default
+appearing or disappearing originates or flushes the Type-5 without
+any table-wide subscription. With `always`, it is advertised
+unconditionally.
+
 ## Redistribution into NSSA areas
 
 Stub and NSSA areas do not carry Type-5. To originate externals
