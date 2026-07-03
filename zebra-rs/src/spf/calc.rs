@@ -237,7 +237,12 @@ pub fn spf_calc(
                 c.cost = v.cost.saturating_add(link.cost);
                 c.paths.clear();
                 // Strictly better path replaces everything; old
-                // first-hop set was from a worse-cost relaxation.
+                // first-hop / nexthop sets were from a worse-cost
+                // relaxation. (Without the `nexthops` clear, a
+                // worse-then-better relaxation order left the stale
+                // first hop in the set and it installed as phantom
+                // ECMP.)
+                c.nexthops.clear();
                 c.first_hop_links.clear();
             }
 
@@ -245,10 +250,14 @@ pub fn spf_calc(
                 let path = vec![c.id];
 
                 if opt.full_path {
-                    c.paths.push(path);
-                } else {
-                    c.nexthops.insert(path);
+                    c.paths.push(path.clone());
                 }
+                // `nexthops` is populated in BOTH modes: full-path
+                // consumers (TI-LFA target selection, the OSPF/IS-IS
+                // rib builders) read first hops from it regardless,
+                // so `full_path` is a strict superset, not a
+                // different shape.
+                c.nexthops.insert(path);
                 // c is a direct neighbour of root — this relaxation
                 // is itself the first hop. Record it with the link's
                 // identifier so the rib-builder can resolve back to
@@ -261,6 +270,14 @@ pub fn spf_calc(
                         newpath.push(c.id);
                         c.paths.push(newpath);
                     }
+                }
+                // First hops inherit exactly as in the default mode.
+                for nhop in &v.nexthops {
+                    let mut newnhop = nhop.clone();
+                    if nhop.is_empty() {
+                        newnhop.push(c.id);
+                    }
+                    c.nexthops.insert(newnhop);
                 }
                 // Deeper hop — propagate v's first-hop set unchanged.
                 c.first_hop_links.extend(v.first_hop_links.iter().copied());
@@ -284,9 +301,10 @@ pub fn spf_calc(
                 if let Some(v) = bt.get_mut(&(c.cost, c.id)) {
                     if opt.full_path {
                         v.paths = c.paths.clone();
-                    } else {
-                        v.nexthops = c.nexthops.clone();
                     }
+                    // Synced in both modes — `nexthops` is always
+                    // populated (see the relaxation above).
+                    v.nexthops = c.nexthops.clone();
                     v.first_hop_links = c.first_hop_links.clone();
                 }
             } else {
@@ -1560,5 +1578,89 @@ mod tests {
             "r1↔r2 is P2P — via must be None, not the absorbed n2.04 LAN"
         );
         assert_eq!(seg_disp(&graph, &repair.segs[2]), "AdjSid(r2, r3)");
+    }
+
+    /// Tiny triangle where the destination is relaxed via a worse
+    /// direct edge FIRST (root pops before the cheaper intermediate),
+    /// then strictly better through the intermediate. The stale
+    /// worse-cost first hop must not survive in `nexthops` as phantom
+    /// ECMP — regression test for the missing `nexthops.clear()` on
+    /// strictly-better relaxation.
+    #[test]
+    fn better_relaxation_clears_stale_nexthop() {
+        let mut graph: Graph = BTreeMap::new();
+        for (name, id) in [("root", 0), ("mid", 1), ("dest", 2)] {
+            graph.insert(id, Vertex::new_node(name, id));
+        }
+        for (from, to, cost) in [
+            (0, 2, 20),
+            (0, 1, 5),
+            (1, 2, 2),
+            (2, 0, 20),
+            (1, 0, 5),
+            (2, 1, 2),
+        ] {
+            graph
+                .get_mut(&from)
+                .unwrap()
+                .olinks
+                .push(Link::new(from, to, cost));
+            graph
+                .get_mut(&to)
+                .unwrap()
+                .ilinks
+                .push(Link::new(from, to, cost));
+        }
+
+        for opt in [SpfOpt::default(), SpfOpt::full_path()] {
+            let tree = spf(&graph, 0, &opt);
+            let dest = tree.get(&2).expect("dest reachable");
+            assert_eq!(dest.cost, 7, "0->1->2 is the only best path");
+            assert_eq!(
+                dest.nexthops.len(),
+                1,
+                "stale direct first hop must be cleared, got {:?}",
+                dest.nexthops
+            );
+            let nhop = dest.nexthops.iter().next().unwrap();
+            assert_eq!(nhop[0], 1, "first hop must be mid, not the direct edge");
+        }
+    }
+
+    /// `full_path` mode must populate `nexthops` too (a strict
+    /// superset of the default mode): TI-LFA target selection and the
+    /// OSPF/IS-IS rib builders read first hops from `nexthops`
+    /// regardless of which mode produced the tree — needed by the
+    /// virtual-link transit-area SPF, which runs full-path.
+    #[test]
+    fn full_path_also_populates_nexthops() {
+        let graph = tilfa_graph();
+        let full = spf(&graph, 0, &SpfOpt::full_path());
+        let dflt = spf(&graph, 0, &SpfOpt::default());
+
+        for (id, d_path) in dflt.iter() {
+            // The root's own entry carries the empty chain sentinel.
+            if *id == 0 {
+                continue;
+            }
+            let f_path = full.get(id).expect("same reachability");
+            assert_eq!(f_path.cost, d_path.cost, "vertex {id} cost");
+            // First-hop sets must agree between modes.
+            let f_hops: BTreeSet<usize> = f_path
+                .nexthops
+                .iter()
+                .filter_map(|p| p.first().copied())
+                .collect();
+            let d_hops: BTreeSet<usize> = d_path
+                .nexthops
+                .iter()
+                .filter_map(|p| p.first().copied())
+                .collect();
+            assert_eq!(f_hops, d_hops, "vertex {id} first hops");
+            // And every full chain's first element must be a first hop.
+            for chain in &f_path.paths {
+                assert!(f_hops.contains(&chain[0]), "vertex {id} chain {chain:?}");
+            }
+        }
     }
 }

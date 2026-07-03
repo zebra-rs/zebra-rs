@@ -280,6 +280,14 @@ pub struct OspfArea<V: OspfVersion = Ospfv2> {
     pub ranges: BTreeMap<Ipv4Net, AreaRange>,
     /// v6 sibling of `ranges` (OSPFv3 Inter-Area-Prefix aggregation).
     pub ranges_v6: BTreeMap<Ipv6Net, AreaRange>,
+
+    /// RFC 2328 §15 virtual links configured *through* this area
+    /// (`area <id> virtual-link <router-id>`) — this area is the
+    /// transit area; the key is the remote ABR's router-id. The VL
+    /// itself is a synthetic area-0 interface materialized by
+    /// `Ospf::vl_reconcile` once the transit-area SPF finds the peer
+    /// reachable. v2-only today.
+    pub virtual_links: BTreeMap<Ipv4Addr, VirtualLinkConfig>,
 }
 
 /// Instance-level `default-information originate` configuration.
@@ -315,6 +323,28 @@ pub struct AreaRange {
     pub cost: Option<u32>,
 }
 
+/// One configured `area <id> virtual-link <router-id>` entry
+/// (RFC 2328 §15). Interval and authentication overrides mirror the
+/// per-interface leaves; `None`/empty falls back to the defaults the
+/// synthetic link's `LinkConfig` already carries (hello 10s / dead
+/// 40s / retransmit 5s, Null auth). Copied onto the synthetic link
+/// by `Ospf::vl_reconcile` on every create/refresh.
+#[derive(Debug, Default, Clone)]
+pub struct VirtualLinkConfig {
+    pub hello_interval: Option<u16>,
+    pub dead_interval: Option<u32>,
+    pub retransmit_interval: Option<u16>,
+    /// RFC 2328 §D authentication mode (null / simple /
+    /// message-digest), same semantics as the per-interface leaf.
+    pub auth_mode: Option<super::link::OspfAuthMode>,
+    /// Simple-password key, zero-padded to the 8-octet wire field.
+    pub auth_key: Option<[u8; 8]>,
+    /// MD5 keys keyed by key-id (`message-digest-key <id> md5 <key>`).
+    pub crypto_keys: BTreeMap<u8, super::link::AuthKey>,
+    /// RFC 8177 key-chain name; supersedes `crypto_keys` when set.
+    pub key_chain: Option<String>,
+}
+
 impl<V: OspfVersion> OspfArea<V> {
     pub fn new(id: Ipv4Addr) -> Self {
         Self {
@@ -333,6 +363,7 @@ impl<V: OspfVersion> OspfArea<V> {
             asbr_summaries_originated: BTreeSet::new(),
             ranges: BTreeMap::new(),
             ranges_v6: BTreeMap::new(),
+            virtual_links: BTreeMap::new(),
         }
     }
 }

@@ -487,7 +487,10 @@ pub fn ospf_hello_send(
     ospf_pdu_trace!(tracing, "[Hello:Send] on {}", oi.name);
 
     let packet = ospf_hello_packet(oi, chains, now).unwrap();
-    if let Err(e) = oi.ptx.send(Message::Send(packet, oi.index, None)) {
+    // Virtual links unicast their Hellos to the far ABR (RFC 2328
+    // §15); physical interfaces multicast to AllSPFRouters (None).
+    let dest = oi.vl.as_ref().map(|vl| vl.peer_addr);
+    if let Err(e) = oi.ptx.send(Message::Send(packet, oi.index, dest)) {
         tracing::warn!("[Hello:Send] channel send failed: {}", e);
         return;
     }

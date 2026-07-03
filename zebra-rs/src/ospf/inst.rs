@@ -330,6 +330,11 @@ pub struct Ospf<V: OspfVersion = Ospfv2> {
     /// less than this after the last accepted copy is discarded
     /// without acknowledgement. Default [`OSPF_MIN_LS_ARRIVAL_MS`].
     pub min_ls_arrival_ms: u32,
+    /// Next synthetic ifindex to hand to a virtual-link `OspfLink`
+    /// (RFC 2328 §15). Starts at [`super::link::VL_IFINDEX_BASE`];
+    /// monotonically increasing so a torn-down-and-recreated VL never
+    /// aliases stale timers keyed on the old index. v2-only.
+    vl_ifindex_next: u32,
     /// Per-self-LSA MinLSInterval throttle state, keyed by
     /// [`LsaGenKey`]. Runtime-only (not checkpointed / inherited).
     lsa_gen: std::collections::HashMap<LsaGenKey, LsaGenState>,
@@ -1409,6 +1414,7 @@ impl Ospf<Ospfv2> {
             spf_interval: SpfIntervalConfig::default(),
             min_ls_interval_ms: OSPF_MIN_LS_INTERVAL_MS,
             min_ls_arrival_ms: OSPF_MIN_LS_ARRIVAL_MS,
+            vl_ifindex_next: super::link::VL_IFINDEX_BASE,
             lsa_gen: std::collections::HashMap::new(),
             restarting: None,
             key_chains: BTreeMap::new(),
@@ -1683,6 +1689,17 @@ impl Ospf<Ospfv2> {
         if self.is_asbr() {
             router_lsa.flags |= 0x0002;
         }
+        // RFC 2328 §12.4.2 V-bit (0x04): set in the *transit area's*
+        // Router-LSA when this router is the endpoint of one or more
+        // fully-adjacent virtual links transiting that area — it is
+        // what marks the area transit-capable for §16.3.
+        let vl_full_through_area = self.links.values().any(|l| {
+            l.vl.as_ref().is_some_and(|vl| vl.transit_area == area_id)
+                && l.nbrs.values().any(|n| n.state == NfsmState::Full)
+        });
+        if vl_full_through_area {
+            router_lsa.flags |= 0x0004;
+        }
 
         for link in self.links.values() {
             if !link.enabled {
@@ -1704,6 +1721,34 @@ impl Ospf<Ospfv2> {
             } else {
                 link.output_cost.min(u16::MAX as u32) as u16
             };
+
+            // RFC 2328 §12.4.1.1, virtual link: once the VL neighbor
+            // is Full, emit one Type-4 VirtualLink entry into the
+            // backbone Router-LSA — link_id = the far ABR's router-id,
+            // link_data = our (SPF-derived) VL endpoint address,
+            // metric = the transit-area path cost. Never a stub link:
+            // the endpoint address belongs to the transit area, and
+            // §12.4.1.1 gives a VL no associated network.
+            if let Some(vl) = &link.vl {
+                for nbr in link.nbrs.values() {
+                    if nbr.state != NfsmState::Full {
+                        continue;
+                    }
+                    router_lsa.links.push(RouterLsaLink {
+                        link_id: vl.peer_router_id,
+                        link_data: link
+                            .addr
+                            .first()
+                            .map(|a| a.prefix.addr())
+                            .unwrap_or(Ipv4Addr::UNSPECIFIED),
+                        link_type: OspfLinkType::VirtualLink,
+                        num_tos: 0,
+                        tos_0_metric: metric,
+                        toses: vec![],
+                    });
+                }
+                continue;
+            }
 
             // RFC 2328 §12.4.1.1, numbered point-to-point: one Type-1
             // P2p link per Full neighbor (pointing at the neighbor's
@@ -1975,6 +2020,280 @@ impl Ospf<Ospfv2> {
                 self.range_discards.insert(*prefix);
             }
         }
+    }
+
+    /// RFC 2328 §15: reconcile the synthetic backbone interfaces
+    /// backing configured virtual links against the latest transit-area
+    /// SPF results. Called after every SPF apply and on VL config
+    /// change.
+    ///
+    /// A VL is *viable* when its transit area is a non-backbone,
+    /// non-stub area whose SPF reaches the peer ABR **as a direct
+    /// adjacency** (single-hop transit — the peer is our SPF first hop,
+    /// so the first-hop neighbor address IS the far VL endpoint).
+    /// Multi-hop transit needs the FRR-style backlink walk over a
+    /// full-path SPF and is deferred; such VLs stay down with a debug
+    /// log.
+    ///
+    /// Viable VLs materialize as a synthetic `OspfLink` in area 0
+    /// (making this router backbone-attached): unicast Hellos to
+    /// `peer_addr` drive a normal P2P adjacency, and `router_lsa_build`
+    /// emits a `VirtualLink` entry once the neighbor is Full. VLs that
+    /// stop being viable (or are deconfigured) tear down synchronously.
+    ///
+    /// Loop-safety: `router_lsa_originate` fires only when something
+    /// actually changed, so a converged topology re-floods nothing and
+    /// the SPF -> reconcile -> SPF chain terminates.
+    pub fn vl_reconcile(&mut self) {
+        use super::link::VL_IFINDEX_BASE;
+        const LS_INFINITY: u32 = 0x00FF_FFFF;
+
+        struct Viable {
+            cost: u32,
+            local_addr: Ipv4Addr,
+            peer_addr: Ipv4Addr,
+            first_hop_addr: Ipv4Addr,
+            first_hop_ifindex: u32,
+        }
+
+        // Pass 1 (immutable): resolve every configured VL to its
+        // desired state. `None` viable = configured but unreachable.
+        type VlDesired = (
+            Ipv4Addr,
+            Ipv4Addr,
+            super::area::VirtualLinkConfig,
+            Option<Viable>,
+        );
+        let mut desired: Vec<VlDesired> = Vec::new();
+        for (area_id, area) in self.areas.iter() {
+            if area.virtual_links.is_empty() {
+                continue;
+            }
+            // The backbone cannot be a transit area, and stub/NSSA
+            // areas cannot carry virtual links (RFC 2328 §3.6).
+            if *area_id == AREA0 || area.area_type.is_stub_or_nssa() {
+                continue;
+            }
+            for (peer, cfg) in area.virtual_links.iter() {
+                let viable = self
+                    .spf_results
+                    .get(area_id)
+                    .zip(self.lsp_map.lookup(*peer))
+                    .and_then(|(spf, vertex)| spf.get(&vertex).map(|p| (vertex, p)))
+                    .filter(|(_, path)| path.cost < LS_INFINITY)
+                    .and_then(|(vertex, path)| {
+                        let nhops = build_spf_nexthops(self, vertex, path);
+                        // The far endpoint address: for a directly-
+                        // adjacent peer the SPF first-hop address IS
+                        // the peer; otherwise walk the peer's
+                        // Router-LSA backlink toward the penultimate
+                        // SPF vertex (RFC 2328 §15 / FRR
+                        // `ospf_vl_set_params`).
+                        let direct = nhops.iter().find(|(_, nh)| nh.adjacency);
+                        let (peer_addr, first_hop_addr, nh) = match direct {
+                            Some((addr, nh)) => (*addr, *addr, nh),
+                            None => {
+                                let addr = self.vl_peer_addr_backlink(*area_id, *peer, path)?;
+                                let (fh_addr, nh) = nhops.iter().next()?;
+                                (addr, *fh_addr, nh)
+                            }
+                        };
+                        let local_addr = self
+                            .links
+                            .get(&nh.ifindex)
+                            .and_then(|l| l.addr.first())
+                            .map(|a| a.prefix.addr())?;
+                        Some(Viable {
+                            cost: path.cost,
+                            local_addr,
+                            peer_addr,
+                            first_hop_addr,
+                            first_hop_ifindex: nh.ifindex,
+                        })
+                    });
+                desired.push((*area_id, *peer, cfg.clone(), viable));
+            }
+        }
+
+        // Existing synthetic links, keyed by (transit_area, peer).
+        let existing: BTreeMap<(Ipv4Addr, Ipv4Addr), u32> = self
+            .links
+            .values()
+            .filter_map(|l| {
+                l.vl.as_ref()
+                    .map(|vl| ((vl.transit_area, vl.peer_router_id), l.index))
+            })
+            .collect();
+
+        let mut changed = false;
+        let mut keep: BTreeSet<u32> = BTreeSet::new();
+
+        // Pass 2 (mutable): create / refresh viable VLs.
+        for (transit, peer, cfg, viable) in &desired {
+            let Some(v) = viable else {
+                continue;
+            };
+            if let Some(&idx) = existing.get(&(*transit, *peer)) {
+                keep.insert(idx);
+                let Some(link) = self.links.get_mut(&idx) else {
+                    continue;
+                };
+                // Config (intervals + authentication) re-applies on
+                // every refresh so a live VL picks up changes; auth
+                // affects only packet emit/verify, not the LSA state,
+                // so it doesn't count as a `changed` trigger.
+                Self::vl_apply_config(link, cfg);
+                let prefix = Ipv4Net::new(v.local_addr, 32).unwrap();
+                let vl = link.vl.as_mut().unwrap();
+                if vl.peer_addr != v.peer_addr
+                    || vl.first_hop_addr != v.first_hop_addr
+                    || vl.first_hop_ifindex != v.first_hop_ifindex
+                    || link.output_cost != v.cost
+                    || link.addr.first().map(|a| a.prefix.addr()) != Some(v.local_addr)
+                {
+                    vl.peer_addr = v.peer_addr;
+                    vl.first_hop_addr = v.first_hop_addr;
+                    vl.first_hop_ifindex = v.first_hop_ifindex;
+                    link.output_cost = v.cost;
+                    link.addr = vec![super::addr::OspfAddr { prefix }];
+                    link.ident.prefix = prefix;
+                    changed = true;
+                    tracing::info!(
+                        "[VL] area {} peer {} refreshed: cost={} local={} remote={}",
+                        transit,
+                        peer,
+                        v.cost,
+                        v.local_addr,
+                        v.peer_addr
+                    );
+                }
+            } else {
+                let idx = self.vl_ifindex_next;
+                self.vl_ifindex_next = self.vl_ifindex_next.wrapping_add(1).max(VL_IFINDEX_BASE);
+                let mut link = OspfLink::new_virtual(
+                    self.tx.clone(),
+                    idx,
+                    self.sock.clone(),
+                    self.router_id,
+                    self.ptx.clone(),
+                    *transit,
+                    *peer,
+                );
+                // Intervals + authentication from the transit area's
+                // virtual-link config.
+                Self::vl_apply_config(&mut link, cfg);
+                let prefix = Ipv4Net::new(v.local_addr, 32).unwrap();
+                link.output_cost = v.cost;
+                link.addr = vec![super::addr::OspfAddr { prefix }];
+                link.ident.prefix = prefix;
+                {
+                    let vl = link.vl.as_mut().unwrap();
+                    vl.peer_addr = v.peer_addr;
+                    vl.first_hop_addr = v.first_hop_addr;
+                    vl.first_hop_ifindex = v.first_hop_ifindex;
+                }
+                self.links.insert(idx, link);
+                self.areas.fetch(AREA0).links.insert(idx);
+                keep.insert(idx);
+                let _ = self.tx.send(Message::Ifsm(idx, IfsmEvent::InterfaceUp));
+                changed = true;
+                tracing::info!(
+                    "[VL] area {} peer {} up: cost={} local={} remote={} ifindex={:#x}",
+                    transit,
+                    peer,
+                    v.cost,
+                    v.local_addr,
+                    v.peer_addr,
+                    idx
+                );
+            }
+        }
+
+        // Pass 3: tear down VLs that are gone from config or no
+        // longer viable.
+        let stale: Vec<u32> = existing
+            .values()
+            .filter(|idx| !keep.contains(idx))
+            .copied()
+            .collect();
+        for idx in stale {
+            if let Some(link) = self.links.get_mut(&idx) {
+                tracing::info!("[VL] {} down (unreachable or deconfigured)", link.name);
+                ospf_ifsm(link, IfsmEvent::InterfaceDown);
+            }
+            if let Some(area0) = self.areas.get_mut(AREA0) {
+                area0.links.remove(&idx);
+            }
+            self.links.remove(&idx);
+            changed = true;
+        }
+
+        // Becoming (or ceasing to be) backbone-attached changes the
+        // Router-LSA link set and the ABR summary sets.
+        if changed {
+            self.router_lsa_originate();
+            self.abr_summary_originate();
+            self.nssa_translate_resync_all();
+        }
+    }
+
+    /// Copy a virtual link's configuration (interval overrides +
+    /// authentication) onto its synthetic link's `LinkConfig`.
+    /// Re-applied on every reconcile so a live VL picks up config
+    /// changes; the send/verify paths read `link.config` directly.
+    fn vl_apply_config(link: &mut OspfLink, cfg: &super::area::VirtualLinkConfig) {
+        link.config.hello_interval = cfg.hello_interval;
+        link.config.dead_interval = cfg.dead_interval;
+        link.config.retransmit_interval = cfg.retransmit_interval;
+        link.config.auth_mode = cfg.auth_mode;
+        link.config.auth_key = cfg.auth_key;
+        link.config.crypto_keys = cfg.crypto_keys.clone();
+        link.config.key_chain = cfg.key_chain.clone();
+    }
+
+    /// Multi-hop VL peer-endpoint derivation — the FRR
+    /// `ospf_vl_set_params` backlink walk. Given the transit-area SPF
+    /// `path` to the peer ABR (computed with `SpfOpt::full_path()`,
+    /// which `build_spf_input` enables for VL transit areas), take a
+    /// full vertex chain `[first_hop, ..., penultimate, peer]`,
+    /// resolve the penultimate vertex to its `lsp_map` key (a
+    /// router-id for router vertices, the DR interface address for
+    /// network pseudo-vertices — both live in the same id-space), and
+    /// return the `link_data` of the peer's transit-area Router-LSA
+    /// link that points back at it. That link_data is the peer's
+    /// interface address on the last hop of the path: a unicast
+    /// destination the transit area can route to.
+    fn vl_peer_addr_backlink(
+        &self,
+        transit_area: Ipv4Addr,
+        peer: Ipv4Addr,
+        path: &spf::Path,
+    ) -> Option<Ipv4Addr> {
+        let chain = path.paths.iter().find(|c| c.len() >= 2)?;
+        let penultimate = chain[chain.len() - 2];
+        let prev_key = *self.lsp_map.resolve(penultimate)?;
+        let area = self.areas.get(transit_area)?;
+        let lsa = area.lsdb.lookup_by_id(OspfLsType::Router, peer, peer)?;
+        let OspfLsp::Router(ref rl) = lsa.lsp else {
+            return None;
+        };
+        let addr = rl
+            .links
+            .iter()
+            .find(|l| {
+                matches!(l.link_type, OspfLinkType::P2p | OspfLinkType::Transit)
+                    && l.link_id == prev_key
+            })
+            .map(|l| l.link_data);
+        if addr.is_none() {
+            tracing::debug!(
+                "[VL] peer {} in area {}: no backlink toward {} in its Router-LSA",
+                peer,
+                transit_area,
+                prev_key
+            );
+        }
+        addr
     }
 
     /// Compute the set of `prefix -> metric` Type-3 summaries to
@@ -4970,8 +5289,10 @@ impl Ospf<Ospfv2> {
         let mut packet =
             Ospfv2Packet::new(&self.router_id, &link.area, Ospfv2Payload::LsAck(ls_ack));
         apply_link_auth(&mut packet, &link.auth_send_ctx(chains, now));
-        // Send to AllSPFRouters multicast.
-        let _ = link.ptx.send(Message::Send(packet, ifindex, None));
+        // AllSPFRouters multicast on physical interfaces; unicast to
+        // the far ABR on a virtual link.
+        let dest = link.vl.as_ref().map(|vl| vl.peer_addr);
+        let _ = link.ptx.send(Message::Send(packet, ifindex, dest));
     }
 
     /// Queue delayed ack headers and start delayed ack timer if needed.
@@ -5188,12 +5509,37 @@ impl Ospf<Ospfv2> {
         packet: Ospfv2Packet,
         src: Ipv4Addr,
         _from: Ipv4Addr,
-        index: u32,
-        _dest: Ipv4Addr,
+        mut index: u32,
+        dest: Ipv4Addr,
     ) {
         // Drop self-originated packets (e.g. received on loopback interface).
         if packet.router_id == self.router_id {
             return;
+        }
+
+        // RFC 2328 §15 virtual-link association (FRR's
+        // `ospf_associate_packet_vl`): VL packets are unicast, carry
+        // the backbone Area ID (RFC §A.3.1), and arrive on the
+        // physical transit-area interface. Re-associate them with the
+        // matching synthetic VL interface — keyed by (ingress link's
+        // area == VL transit area, header router-id == VL peer) — so
+        // the adjacency runs on the VL, not the physical link.
+        if !dest.is_multicast() && packet.area_id == AREA0 {
+            let ingress_area = self.links.get(&index).map(|l| l.area);
+            if let Some(ingress_area) = ingress_area
+                && ingress_area != AREA0
+            {
+                let vl_index = self.links.values().find_map(|l| {
+                    l.vl.as_ref()
+                        .filter(|vl| {
+                            vl.transit_area == ingress_area && vl.peer_router_id == packet.router_id
+                        })
+                        .map(|_| l.index)
+                });
+                if let Some(vl_index) = vl_index {
+                    index = vl_index;
+                }
+            }
         }
 
         // RFC 2328 §D.4: AuType + auth field must match the
@@ -5839,6 +6185,7 @@ impl Ospf<Ospfv3> {
             spf_interval: SpfIntervalConfig::default(),
             min_ls_interval_ms: OSPF_MIN_LS_INTERVAL_MS,
             min_ls_arrival_ms: OSPF_MIN_LS_ARRIVAL_MS,
+            vl_ifindex_next: super::link::VL_IFINDEX_BASE,
             lsa_gen: std::collections::HashMap::new(),
             restarting: None,
             key_chains: BTreeMap::new(),
@@ -11651,9 +11998,21 @@ fn build_spf_nexthops(
         for (ifindex, link) in top.links.iter() {
             for (_, nbr) in link.nbrs.iter() {
                 if *nhop_id == nbr.ident.router_id {
-                    let addr = nbr.ident.prefix.addr();
+                    // A virtual-link adjacency has a synthetic ifindex
+                    // with no kernel interface behind it, and on a
+                    // multi-hop transit path the VL neighbor's address
+                    // is not on-link. Routes through the VL inherit
+                    // the *transit-area path's* first hop instead
+                    // (RFC 2328 §16.1.1): `first_hop_addr` +
+                    // `first_hop_ifindex`, both derived by
+                    // `vl_reconcile` (equal to the neighbor address /
+                    // physical egress when the peer is adjacent).
+                    let (addr, egress) = match &link.vl {
+                        Some(vl) => (vl.first_hop_addr, vl.first_hop_ifindex),
+                        None => (nbr.ident.prefix.addr(), *ifindex),
+                    };
                     let nhop = SpfNexthop {
-                        ifindex: *ifindex,
+                        ifindex: egress,
                         adjacency: p[0] == target_id,
                         router_id: Some(*nhop_id),
                         // Stamped by the TI-LFA second pass (single-
@@ -12869,6 +13228,8 @@ fn build_v3_spf_input(top: &mut Ospf<Ospfv3>, area_id: Ipv4Addr) -> Option<SpfIn
         area_id,
         graph,
         source,
+        // Virtual links are v2-only; v3 never needs full chains.
+        full_path: false,
         ti_lfa_enabled: top.ti_lfa_enabled,
         tilfa_mode: top
             .ti_lfa_compute_mode
@@ -13936,6 +14297,12 @@ struct SpfInput {
     area_id: Ipv4Addr,
     graph: spf::Graph,
     source: usize,
+    /// Run the primary SPF with `SpfOpt::full_path()` — set when this
+    /// area is the transit area of a configured virtual link, whose
+    /// multi-hop peer-endpoint derivation needs the full vertex chains
+    /// (RFC 2328 §15 / the FRR backlink walk). `nexthops` is populated
+    /// in both modes, so every other consumer is unaffected.
+    full_path: bool,
     /// `/router/ospf/fast-reroute/ti-lfa` snapshot. Gates the
     /// graph-only TI-LFA repair computation on the worker.
     ti_lfa_enabled: bool,
@@ -14013,6 +14380,13 @@ fn build_spf_input(top: &mut Ospf, area_id: Ipv4Addr) -> Option<SpfInput> {
         area_id,
         graph,
         source,
+        // Transit area of a configured VL: keep the full vertex
+        // chains so `vl_reconcile` can walk to the penultimate hop
+        // for the multi-hop peer-endpoint derivation.
+        full_path: top
+            .areas
+            .get(area_id)
+            .is_some_and(|a| !a.virtual_links.is_empty()),
         ti_lfa_enabled: top.ti_lfa_enabled,
         tilfa_mode: top
             .ti_lfa_compute_mode
@@ -14028,12 +14402,18 @@ fn compute_spf(input: SpfInput) -> SpfOutput {
         area_id,
         graph,
         source,
+        full_path,
         ti_lfa_enabled,
         tilfa_mode,
         flex_algos,
     } = input;
     let start = Instant::now();
-    let spf_result = spf::spf(&graph, source, &spf::SpfOpt::default());
+    let opt = if full_path {
+        spf::SpfOpt::full_path()
+    } else {
+        spf::SpfOpt::default()
+    };
+    let spf_result = spf::spf(&graph, source, &opt);
 
     // TI-LFA repair lists, graph-only. Gated on `fast-reroute ti-lfa`;
     // when off, the SPF primary RIB still installs — only the repair
@@ -14150,6 +14530,11 @@ fn apply_spf_result(top: &mut Ospf, output: SpfOutput) {
     // reachable in the other area. Enables non-backbone routers to
     // compute E1 metrics to ASBRs they cannot reach intra-area.
     top.abr_summary_asbr_originate();
+    // Virtual links ride the transit area's SPF: (re)derive each VL's
+    // cost / endpoints from the fresh results, bringing VLs up or
+    // down as reachability changes. Change-gated internally, so a
+    // converged topology triggers nothing.
+    top.vl_reconcile();
 }
 
 /// Merge every attached area's route slice (`rib_areas`) into one

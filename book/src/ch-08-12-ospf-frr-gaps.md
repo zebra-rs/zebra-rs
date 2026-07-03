@@ -2,7 +2,6 @@
 
 OSPFv2 features not yet implemented in zebra-rs:
 
-- Virtual links across non-backbone areas.
 - NBMA and point-to-multipoint network types — the per-interface
   `network-type` knob accepts `broadcast` and `point-to-point`
   only.
@@ -66,3 +65,11 @@ per feature — see each feature's page):
   FRR `timers lsa min-arrival`) — the receive-side per-LSA rate limit
   was already enforced but fixed at 1 s; it is now tunable for both
   OSPFv2 and OSPFv3. See [Timer Configuration](ch-08-08-ospf-timers.md).
+- **Virtual links** (RFC 2328 §15, `area <transit> virtual-link
+  <router-id>`) — a synthetic backbone interface derived from the
+  transit area's SPF, unicast OSPF over the transit area, the
+  VirtualLink Router-LSA entry and transit-area V-bit; multi-hop
+  transit via the full-path SPF backlink walk, and per-virtual-link
+  authentication (simple / MD5 / key-chain). OSPFv2 only (`ospf6d`
+  has no virtual links either). See
+  [Multi-Area Routing and the ABR](ch-08-14-ospf-multi-area-abr.md#virtual-links).

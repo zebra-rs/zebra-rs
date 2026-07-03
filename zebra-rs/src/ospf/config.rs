@@ -72,6 +72,35 @@ impl Ospf {
             config_ospf_area_range_not_advertise,
         );
         self.ospf_add("/area/range/cost", config_ospf_area_range_cost);
+        self.ospf_add("/area/virtual-link", config_ospf_area_virtual_link);
+        self.ospf_add(
+            "/area/virtual-link/hello-interval",
+            config_ospf_area_virtual_link_hello_interval,
+        );
+        self.ospf_add(
+            "/area/virtual-link/dead-interval",
+            config_ospf_area_virtual_link_dead_interval,
+        );
+        self.ospf_add(
+            "/area/virtual-link/retransmit-interval",
+            config_ospf_area_virtual_link_retransmit_interval,
+        );
+        self.ospf_add(
+            "/area/virtual-link/authentication",
+            config_ospf_area_virtual_link_authentication,
+        );
+        self.ospf_add(
+            "/area/virtual-link/authentication-key",
+            config_ospf_area_virtual_link_authentication_key,
+        );
+        self.ospf_add(
+            "/area/virtual-link/message-digest-key/md5",
+            config_ospf_area_virtual_link_md5_key,
+        );
+        self.ospf_add(
+            "/area/virtual-link/key-chain",
+            config_ospf_area_virtual_link_key_chain,
+        );
         self.ospf_add("/area/interface/enable", config_ospf_interface_enable);
         self.ospf_add(
             "/area/interface/bfd/enable",
@@ -829,6 +858,212 @@ fn config_ospf_area_range_cost(ospf: &mut Ospf, mut args: Args, op: ConfigOp) ->
         .or_default()
         .cost = cost;
     ospf.abr_summary_originate();
+    Some(())
+}
+
+/// `/router/ospf/area/<transit-id>/virtual-link/<router-id>` —
+/// RFC 2328 §15 virtual link through the list-key (transit) area to
+/// the ABR `router-id`. The synthetic backbone interface itself is
+/// materialized/torn down by `vl_reconcile` (driven off the transit
+/// area's SPF), so config just records intent and reconciles.
+fn config_ospf_area_virtual_link(ospf: &mut Ospf, mut args: Args, op: ConfigOp) -> Option<()> {
+    let area_id = parse_area_id(&args.string()?)?;
+    let peer = args.v4addr()?;
+    if op.is_set() {
+        ospf.areas
+            .fetch(area_id)
+            .virtual_links
+            .entry(peer)
+            .or_default();
+    } else if let Some(area) = ospf.areas.get_mut(area_id) {
+        area.virtual_links.remove(&peer);
+    }
+    ospf.vl_reconcile();
+    Some(())
+}
+
+/// `/router/ospf/area/<id>/virtual-link/<rid>/hello-interval`.
+fn config_ospf_area_virtual_link_hello_interval(
+    ospf: &mut Ospf,
+    mut args: Args,
+    op: ConfigOp,
+) -> Option<()> {
+    let area_id = parse_area_id(&args.string()?)?;
+    let peer = args.v4addr()?;
+    let value = if op.is_set() { Some(args.u16()?) } else { None };
+    ospf.areas
+        .fetch(area_id)
+        .virtual_links
+        .entry(peer)
+        .or_default()
+        .hello_interval = value;
+    ospf.vl_reconcile();
+    Some(())
+}
+
+/// `/router/ospf/area/<id>/virtual-link/<rid>/dead-interval`.
+fn config_ospf_area_virtual_link_dead_interval(
+    ospf: &mut Ospf,
+    mut args: Args,
+    op: ConfigOp,
+) -> Option<()> {
+    let area_id = parse_area_id(&args.string()?)?;
+    let peer = args.v4addr()?;
+    let value = if op.is_set() { Some(args.u32()?) } else { None };
+    ospf.areas
+        .fetch(area_id)
+        .virtual_links
+        .entry(peer)
+        .or_default()
+        .dead_interval = value;
+    ospf.vl_reconcile();
+    Some(())
+}
+
+/// `/router/ospf/area/<id>/virtual-link/<rid>/retransmit-interval`.
+fn config_ospf_area_virtual_link_retransmit_interval(
+    ospf: &mut Ospf,
+    mut args: Args,
+    op: ConfigOp,
+) -> Option<()> {
+    let area_id = parse_area_id(&args.string()?)?;
+    let peer = args.v4addr()?;
+    let value = if op.is_set() { Some(args.u16()?) } else { None };
+    ospf.areas
+        .fetch(area_id)
+        .virtual_links
+        .entry(peer)
+        .or_default()
+        .retransmit_interval = value;
+    ospf.vl_reconcile();
+    Some(())
+}
+
+/// `/router/ospf/area/<id>/virtual-link/<rid>/authentication` —
+/// RFC 2328 §15: a virtual link carries its own authentication,
+/// independent of the transit area's interfaces. Same modes as the
+/// per-interface leaf.
+fn config_ospf_area_virtual_link_authentication(
+    ospf: &mut Ospf,
+    mut args: Args,
+    op: ConfigOp,
+) -> Option<()> {
+    let area_id = parse_area_id(&args.string()?)?;
+    let peer = args.v4addr()?;
+    let mode = if op.is_set() {
+        Some(match args.string()?.as_str() {
+            "null" => OspfAuthMode::Null,
+            "simple" => OspfAuthMode::Simple,
+            "message-digest" => OspfAuthMode::MessageDigest,
+            _ => return None,
+        })
+    } else {
+        None
+    };
+    ospf.areas
+        .fetch(area_id)
+        .virtual_links
+        .entry(peer)
+        .or_default()
+        .auth_mode = mode;
+    ospf.vl_reconcile();
+    Some(())
+}
+
+/// `/router/ospf/area/<id>/virtual-link/<rid>/authentication-key`.
+fn config_ospf_area_virtual_link_authentication_key(
+    ospf: &mut Ospf,
+    mut args: Args,
+    op: ConfigOp,
+) -> Option<()> {
+    let area_id = parse_area_id(&args.string()?)?;
+    let peer = args.v4addr()?;
+    let key = if op.is_set() {
+        let key = args.string()?;
+        let bytes = key.as_bytes();
+        // RFC 2328 §D.3 caps the simple-password at 8 octets.
+        if bytes.is_empty() || bytes.len() > 8 {
+            return None;
+        }
+        let mut padded = [0u8; 8];
+        padded[..bytes.len()].copy_from_slice(bytes);
+        Some(padded)
+    } else {
+        None
+    };
+    ospf.areas
+        .fetch(area_id)
+        .virtual_links
+        .entry(peer)
+        .or_default()
+        .auth_key = key;
+    ospf.vl_reconcile();
+    Some(())
+}
+
+/// `/router/ospf/area/<id>/virtual-link/<rid>/message-digest-key/<key-id>/md5`.
+fn config_ospf_area_virtual_link_md5_key(
+    ospf: &mut Ospf,
+    mut args: Args,
+    op: ConfigOp,
+) -> Option<()> {
+    use super::link::{AuthKey, OspfCryptoAlgo};
+
+    let area_id = parse_area_id(&args.string()?)?;
+    let peer = args.v4addr()?;
+    let key_id: u8 = args.string()?.parse().ok()?;
+    if key_id == 0 {
+        return None;
+    }
+    let vl = ospf
+        .areas
+        .fetch(area_id)
+        .virtual_links
+        .entry(peer)
+        .or_default();
+    if op.is_set() {
+        let key = args.string()?;
+        let bytes = key.as_bytes();
+        // RFC 2328 §D.4 caps the simple MD5 key at 16 octets.
+        if bytes.is_empty() || bytes.len() > 16 {
+            return None;
+        }
+        let mut padded = vec![0u8; 16];
+        padded[..bytes.len()].copy_from_slice(bytes);
+        vl.crypto_keys.insert(
+            key_id,
+            AuthKey {
+                algo: OspfCryptoAlgo::Md5,
+                raw: padded,
+            },
+        );
+    } else {
+        vl.crypto_keys.remove(&key_id);
+    }
+    ospf.vl_reconcile();
+    Some(())
+}
+
+/// `/router/ospf/area/<id>/virtual-link/<rid>/key-chain`.
+fn config_ospf_area_virtual_link_key_chain(
+    ospf: &mut Ospf,
+    mut args: Args,
+    op: ConfigOp,
+) -> Option<()> {
+    let area_id = parse_area_id(&args.string()?)?;
+    let peer = args.v4addr()?;
+    let value = if op.is_set() {
+        Some(args.string()?)
+    } else {
+        None
+    };
+    ospf.areas
+        .fetch(area_id)
+        .virtual_links
+        .entry(peer)
+        .or_default()
+        .key_chain = value;
+    ospf.vl_reconcile();
     Some(())
 }
 

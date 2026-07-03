@@ -137,6 +137,81 @@ picking the cheapest advertising ABR. This is what makes E1
 external metrics come out right across area boundaries — see
 [Route Redistribution](ch-08-15-ospf-redistribution.md).
 
+## Virtual links
+
+RFC 2328 requires every area to attach to the backbone, but topology
+does not always cooperate — an ABR may sit behind another area with
+no physical area-0 interface. A **virtual link** (RFC 2328 §15)
+closes the gap: a logical backbone point-to-point link between two
+ABRs, tunneled *through* a shared non-backbone area (the **transit
+area**):
+
+```
+router ospf {
+  area 0.0.0.1 {
+    virtual-link 10.0.0.2;         # remote ABR's router-id
+    interface enp0s7 { enable true; }
+  }
+}
+```
+
+Both endpoints configure the link under the transit area, naming the
+*other* router's router-id. Optional `hello-interval`,
+`dead-interval`, and `retransmit-interval` leaves override the
+RFC defaults (10/40/5 s) and must match on both ends.
+
+A virtual link carries its **own authentication**, independent of
+the transit area's interfaces (§15) — the same leaves as a physical
+interface, on the `virtual-link` entry:
+
+```
+router ospf {
+  area 0.0.0.1 {
+    virtual-link 10.0.0.2 {
+      authentication message-digest;
+      message-digest-key 1 {
+        md5 SECRET;
+      }
+    }
+  }
+}
+```
+
+`authentication` (`null` / `simple` / `message-digest`),
+`authentication-key`, the `message-digest-key` list, and `key-chain`
+(RFC 8177) behave exactly as on
+[a physical interface](ch-08-16-ospf-authentication.md).
+
+Everything else is derived, not configured. When the transit area's
+SPF finds the peer ABR reachable, zebra-rs materializes a synthetic
+backbone interface (`VLINK<area>-<router-id>` in `show ospf
+interface`): its cost is the transit-area path cost, its endpoint
+addresses come from the SPF next hops, and its OSPF packets travel
+as **unicast** IP between the two endpoint addresses, routed by the
+transit area (VL packets carry Area ID 0.0.0.0 per §A.3.1). The
+adjacency runs the normal point-to-point state machine to Full, at
+which point each ABR advertises a type-4 **VirtualLink** entry in
+its area-0 Router-LSA and sets the V-bit in the transit area's — so
+backbone SPF flows through the link and the far ABR becomes
+backbone-attached, originating summaries for its other areas as
+usual. If the transit path fails, the SPF re-run tears the VL down.
+
+The two ABRs need not be adjacent: on a **multi-hop transit path**
+the peer's endpoint address is derived from the full-path SPF
+backlink walk (the peer's transit-area Router-LSA link pointing back
+at the penultimate SPF hop — FRR's `ospf_vl_set_params`), the VL
+packets are forwarded by the intermediate transit routers like any
+unicast traffic, and routes computed *through* the VL inherit the
+transit path's first hop as their forwarding next hop
+(RFC 2328 §16.1.1).
+
+Current limits: the transit area must be a normal area (not stub /
+NSSA — §3.6 forbids it). OSPFv2 only — same as FRR, whose `ospf6d`
+has no virtual-link support either. Validated end to end by
+`ospfv2_virtual_link.feature`: single-hop, two-hop, and
+MD5-authenticated transit topologies, each with area 2 reaching an
+area-0 loopback exclusively through the VL.
+
 ## OSPFv3
 
 OSPFv3 implements the same ABR machinery using its own LSA types —
