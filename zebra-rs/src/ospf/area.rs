@@ -324,15 +324,25 @@ pub struct AreaRange {
 }
 
 /// One configured `area <id> virtual-link <router-id>` entry
-/// (RFC 2328 §15). Interval overrides mirror the per-interface
-/// leaves; `None` falls back to the RFC defaults the synthetic
-/// link's `LinkConfig` already carries (hello 10s / dead 40s /
-/// retransmit 5s).
-#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+/// (RFC 2328 §15). Interval and authentication overrides mirror the
+/// per-interface leaves; `None`/empty falls back to the defaults the
+/// synthetic link's `LinkConfig` already carries (hello 10s / dead
+/// 40s / retransmit 5s, Null auth). Copied onto the synthetic link
+/// by `Ospf::vl_reconcile` on every create/refresh.
+#[derive(Debug, Default, Clone)]
 pub struct VirtualLinkConfig {
     pub hello_interval: Option<u16>,
     pub dead_interval: Option<u32>,
     pub retransmit_interval: Option<u16>,
+    /// RFC 2328 §D authentication mode (null / simple /
+    /// message-digest), same semantics as the per-interface leaf.
+    pub auth_mode: Option<super::link::OspfAuthMode>,
+    /// Simple-password key, zero-padded to the 8-octet wire field.
+    pub auth_key: Option<[u8; 8]>,
+    /// MD5 keys keyed by key-id (`message-digest-key <id> md5 <key>`).
+    pub crypto_keys: BTreeMap<u8, super::link::AuthKey>,
+    /// RFC 8177 key-chain name; supersedes `crypto_keys` when set.
+    pub key_chain: Option<String>,
 }
 
 impl<V: OspfVersion> OspfArea<V> {

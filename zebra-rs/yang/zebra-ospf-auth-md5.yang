@@ -108,4 +108,20 @@ module zebra-ospf-auth-md5 {
        is path-valid.";
     uses ospf-interface-md5-extension;
   }
+
+  augment "/configure:set/config:router"
+        + "/config:ospf/config:area/config:virtual-link" {
+    description
+      "RFC 2328 §15 gives a virtual link its own authentication —
+       attach the message-digest-key list to each virtual-link
+       entry.";
+    uses ospf-interface-md5-extension;
+  }
+
+  augment "/configure:delete/config:router"
+        + "/config:ospf/config:area/config:virtual-link" {
+    description
+      "Delete-subtree mirror for the virtual-link attachment.";
+    uses ospf-interface-md5-extension;
+  }
 }

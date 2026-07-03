@@ -115,3 +115,38 @@ Feature: OSPFv2 virtual links connect a remote ABR to the backbone
     And I delete namespace "r2"
     And I delete namespace "r3"
     Then the test environment should be clean
+
+  Scenario: Virtual link with MD5 authentication forms and carries routes
+    # RFC 2328 §15: the VL has its own authentication (message-digest
+    # key VLSECRET on both ends), independent of the unauthenticated
+    # transit-area adjacency. Same topology as the first scenario.
+    Given a clean test environment
+    When I create namespace "r1"
+    And I create namespace "r2"
+    And I create namespace "r3"
+    And I connect namespace "r1" interface "ethb" to namespace "r2" interface "etha"
+    And I connect namespace "r2" interface "ethc" to namespace "r3" interface "ethb"
+    And I start zebra-rs in namespace "r1"
+    And I start zebra-rs in namespace "r2"
+    And I start zebra-rs in namespace "r3"
+    And I apply config "r1a.yaml" to namespace "r1"
+    And I apply config "r2a.yaml" to namespace "r2"
+    And I apply config "r3.yaml" to namespace "r3"
+    And I wait 40 seconds
+
+    # The authenticated VL is up on both ABRs and carries routes.
+    Then show command "show ospf interface" in namespace "r1" should contain "VLINK"
+    And show command "show ospf interface" in namespace "r2" should contain "VLINK"
+    And show command "show ospf route" in namespace "r2" should contain "10.0.0.1/32"
+    And show command "show ospf route" in namespace "r1" should contain "10.0.0.3/32"
+    And show command "show ospf route" in namespace "r3" should contain "10.0.0.1/32"
+    And ping from "r3" to "10.0.0.1" should succeed
+
+    # Teardown.
+    When I stop zebra-rs in namespace "r1"
+    And I stop zebra-rs in namespace "r2"
+    And I stop zebra-rs in namespace "r3"
+    And I delete namespace "r1"
+    And I delete namespace "r2"
+    And I delete namespace "r3"
+    Then the test environment should be clean

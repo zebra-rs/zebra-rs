@@ -160,6 +160,28 @@ Both endpoints configure the link under the transit area, naming the
 `dead-interval`, and `retransmit-interval` leaves override the
 RFC defaults (10/40/5 s) and must match on both ends.
 
+A virtual link carries its **own authentication**, independent of
+the transit area's interfaces (§15) — the same leaves as a physical
+interface, on the `virtual-link` entry:
+
+```
+router ospf {
+  area 0.0.0.1 {
+    virtual-link 10.0.0.2 {
+      authentication message-digest;
+      message-digest-key 1 {
+        md5 SECRET;
+      }
+    }
+  }
+}
+```
+
+`authentication` (`null` / `simple` / `message-digest`),
+`authentication-key`, the `message-digest-key` list, and `key-chain`
+(RFC 8177) behave exactly as on
+[a physical interface](ch-08-16-ospf-authentication.md).
+
 Everything else is derived, not configured. When the transit area's
 SPF finds the peer ABR reachable, zebra-rs materializes a synthetic
 backbone interface (`VLINK<area>-<router-id>` in `show ospf
@@ -184,12 +206,11 @@ transit path's first hop as their forwarding next hop
 (RFC 2328 §16.1.1).
 
 Current limits: the transit area must be a normal area (not stub /
-NSSA — §3.6 forbids it), and per-virtual-link authentication is not
-yet configurable. OSPFv2 only — same as FRR, whose `ospf6d` has no
-virtual-link support either. Validated end to end by
-`ospfv2_virtual_link.feature`: single-hop and two-hop transit
-topologies, each with area 2 reaching an area-0 loopback exclusively
-through the VL.
+NSSA — §3.6 forbids it). OSPFv2 only — same as FRR, whose `ospf6d`
+has no virtual-link support either. Validated end to end by
+`ospfv2_virtual_link.feature`: single-hop, two-hop, and
+MD5-authenticated transit topologies, each with area 2 reaching an
+area-0 loopback exclusively through the VL.
 
 ## OSPFv3
 
