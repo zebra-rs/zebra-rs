@@ -25,6 +25,10 @@ interface to an area with a per-interface command.
 | `redistribute <connected\|static\|kernel\|isis\|bgp> { metric; metric-type; }` | `redistribute <source> metric <m> metric-type <1\|2>` |
 | `default-information originate { always; metric; metric-type; }` | `default-information originate [always] [metric <m>] [metric-type <1\|2>]` |
 | `clear ospfv3 neighbor` | `clear ipv6 ospf6 interface [IFNAME]` |
+| `graceful-restart helper-enabled` | `graceful-restart helper enable` |
+| `graceful-restart helper-strict-lsa-checking` | `graceful-restart helper strict-lsa-checking` |
+| `graceful-restart max-grace-period` | `graceful-restart helper supported-grace-time` |
+| `clear ospfv3 graceful-restart begin` + `commit` | `graceful-restart prepare ipv6 ospf` (vtysh) |
 | `show ospfv3 neighbor / database / route` | `show ipv6 ospf6 neighbor / database / route` |
 
 Segment Routing has no `ospf6d` counterpart: FRR's `ospf6d` does not

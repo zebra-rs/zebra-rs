@@ -114,7 +114,7 @@ a dead-timer kill.
 
 ## OSPFv3
 
-OSPFv3 implements the helper side only, with the default policy
-(helper on, 1800 s bound, strict LSA checking) — there is no
-`router ospfv3 graceful-restart` configuration block, no v3
-checkpoint, and no v3 restarter mode yet.
+OSPFv3 implements both roles with the same configuration block,
+staging commands, and checkpoint flow (on `ospfv3.cbor`), using the
+RFC 5187 v3 Grace-LSA — see
+[the OSPFv3 chapter's Graceful Restart page](ch-15-12-ospfv3-graceful-restart.md).

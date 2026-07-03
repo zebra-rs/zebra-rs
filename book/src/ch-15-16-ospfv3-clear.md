@@ -34,10 +34,15 @@ Force-recalculates the OSPFv3 SPF for every attached area from the
 current LSDB, without touching adjacencies. Useful to rule the SPF
 scheduler in or out when a route looks stale.
 
-## Not in the v3 clear tree
+## Graceful-restart staging — `clear ospfv3 graceful-restart`
 
-The graceful-restart staging commands (`clear ospf graceful-restart
-begin | commit | abort`) and the checkpoint debug commands exist for
-OSPFv2 only — OSPFv3 graceful restart is currently helper-only with
-no restarter mode, so there is nothing to stage. See
-[Graceful Restart](ch-15-12-ospfv3-graceful-restart.md).
+```
+clear ospfv3 graceful-restart begin
+clear ospfv3 graceful-restart commit
+clear ospfv3 graceful-restart abort
+```
+
+Stage, commit, or cancel a graceful restart of the local daemon —
+see [Graceful Restart](ch-15-12-ospfv3-graceful-restart.md) for the
+full flow. `clear ospfv3 checkpoint write | clear` are the matching
+checkpoint debug commands.
