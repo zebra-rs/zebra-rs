@@ -1,0 +1,31 @@
+# Internal router of area 0.0.0.1. The two dummy interfaces carry
+# component /64s inside the ABR's 2001:db8:1::/48 range; the loopback
+# /128 sits outside and must keep advertising individually.
+interface:
+- if-name: lo
+  ipv6:
+    address: 2001:db8::2/128
+- if-name: etha
+  ipv6:
+    address: 2001:db8:12::2/64
+- if-name: r1
+  ipv6:
+    address: 2001:db8:1:1::1/64
+- if-name: r2
+  ipv6:
+    address: 2001:db8:1:2::1/64
+router:
+  ospfv3:
+    router-id: 10.0.0.2
+    area:
+    - area-id: 0.0.0.1
+      interface:
+      - if-name: lo
+        enable: true
+      - if-name: etha
+        enable: true
+        network-type: point-to-point
+      - if-name: r1
+        enable: true
+      - if-name: r2
+        enable: true

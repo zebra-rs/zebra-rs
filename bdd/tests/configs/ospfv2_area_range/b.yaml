@@ -1,0 +1,31 @@
+# Internal router of area 0.0.0.1. The two dummy interfaces carry
+# component prefixes inside the ABR's 10.1.0.0/16 range; the loopback
+# /32 sits outside the range and must keep advertising individually.
+interface:
+- if-name: lo
+  ipv4:
+    address: 10.0.0.2/32
+- if-name: etha
+  ipv4:
+    address: 10.0.12.2/30
+- if-name: r1
+  ipv4:
+    address: 10.1.1.1/24
+- if-name: r2
+  ipv4:
+    address: 10.1.2.1/24
+router:
+  ospf:
+    router-id: 10.0.0.2
+    area:
+    - area-id: 0.0.0.1
+      interface:
+      - if-name: lo
+        enable: true
+      - if-name: etha
+        enable: true
+        network-type: point-to-point
+      - if-name: r1
+        enable: true
+      - if-name: r2
+        enable: true
