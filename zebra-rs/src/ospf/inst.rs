@@ -1743,19 +1743,18 @@ impl Ospf<Ospfv2> {
                 // routes: a component inside a configured range is
                 // never advertised individually — it activates the
                 // aggregate instead (most-specific range wins).
-                if route.path_type == RouteType::IntraArea {
-                    if let Some(range_prefix) = ranges_b
+                if route.path_type == RouteType::IntraArea
+                    && let Some(range_prefix) = ranges_b
                         .keys()
                         .filter(|r| r.contains(&prefix))
                         .max_by_key(|r| r.prefix_len())
                         .copied()
-                    {
-                        active_ranges
-                            .entry(range_prefix)
-                            .and_modify(|m| *m = (*m).max(route.metric))
-                            .or_insert(route.metric);
-                        continue;
-                    }
+                {
+                    active_ranges
+                        .entry(range_prefix)
+                        .and_modify(|m| *m = (*m).max(route.metric))
+                        .or_insert(route.metric);
+                    continue;
                 }
                 // Don't summarize a prefix that A reaches intra-area.
                 let intra_in_a = self
@@ -6810,19 +6809,18 @@ impl Ospf<Ospfv3> {
                 // Address ranges condense area B's own intra-area
                 // routes — the component activates the aggregate
                 // instead of advertising (most-specific range wins).
-                if route.path_type == RouteType::IntraArea {
-                    if let Some(range_prefix) = ranges_b
+                if route.path_type == RouteType::IntraArea
+                    && let Some(range_prefix) = ranges_b
                         .keys()
                         .filter(|r| r.contains(&prefix))
                         .max_by_key(|r| r.prefix_len())
                         .copied()
-                    {
-                        active_ranges
-                            .entry(range_prefix)
-                            .and_modify(|m| *m = (*m).max(route.metric))
-                            .or_insert(route.metric);
-                        continue;
-                    }
+                {
+                    active_ranges
+                        .entry(range_prefix)
+                        .and_modify(|m| *m = (*m).max(route.metric))
+                        .or_insert(route.metric);
+                    continue;
                 }
                 let intra_in_a = self
                     .rib6_areas
