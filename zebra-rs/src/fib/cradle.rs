@@ -578,6 +578,19 @@ impl CradleFib {
         }
     }
 
+    /// Subscribe to cradle's datapath MAC learning (EVPN over SRv6): the
+    /// stream yields every locally-learned `(mac, bridge domain)` so the
+    /// caller can originate EVPN Type-2 routes. A fresh subscription
+    /// replays the full current set first; learns only (no aging yet).
+    pub async fn watch_fdb(&self) -> anyhow::Result<tonic::Streaming<pb::FdbEvent>> {
+        let resp = self
+            .client()
+            .await?
+            .watch_fdb(pb::WatchFdbRequest {})
+            .await?;
+        Ok(resp.into_inner())
+    }
+
     /// Feed a resolved neighbor (ARP/ND) into the cradle data plane — the
     /// MPLS egress rewrite (`mpls_l2_xmit`) resolves destination MACs from
     /// this state rather than the kernel neighbor table.

@@ -30,6 +30,27 @@ impl MacAddr {
     }
 }
 
+impl std::str::FromStr for MacAddr {
+    type Err = ();
+
+    /// Parse the colon-separated form (`aa:bb:cc:dd:ee:ff`).
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        let mut octets = [0u8; 6];
+        let mut n = 0;
+        for part in s.split(':') {
+            if n >= 6 {
+                return Err(());
+            }
+            octets[n] = u8::from_str_radix(part, 16).map_err(|_| ())?;
+            n += 1;
+        }
+        if n != 6 {
+            return Err(());
+        }
+        Ok(Self { octets })
+    }
+}
+
 impl From<[u8; 6]> for MacAddr {
     fn from(octets: [u8; 6]) -> Self {
         Self { octets }
