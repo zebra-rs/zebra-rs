@@ -460,23 +460,22 @@ pub fn dis_generate(
     fragments
 }
 
-/// SID Structure sub-sub-TLV (RFC 9352 §9) for one locator: `Some`
-/// pair `(is_usid, [structure])` when the locator has a prefix, `None`
-/// when it doesn't (no structure to advertise). uSID locators cap LB at
-/// 32, classic at 40; function is 16 bits (what `function_addr` places),
-/// argument 0.
-fn srv6_sid_structure(locator: &Locator) -> Option<(bool, Vec<IsisSub2Tlv>)> {
-    let prefix = locator.prefix?;
-    let plen = prefix.prefix_len();
-    let is_usid = matches!(locator.behavior, Some(LocatorBehavior::Usid));
-    let lb_len = if is_usid { plen.min(32) } else { plen.min(40) };
+/// SID Structure sub-sub-TLV (RFC 9352 §9) for one locator: the
+/// locator's behavior plus `[structure]` when it has a prefix, `None`
+/// when it doesn't (no structure to advertise). Geometry comes from
+/// `Locator::sid_structure()` — the same source the FIB installs from —
+/// so the wire and the data plane can't drift. Note REPLACE-C-SID
+/// advertises a non-zero argument length (AL = 128-LBL-LNFL): that is
+/// how RFC 9800 §6.4 receivers infer the compression scheme.
+fn srv6_sid_structure(locator: &Locator) -> Option<(Option<LocatorBehavior>, Vec<IsisSub2Tlv>)> {
+    let st = locator.sid_structure()?;
     let structure = IsisSub2Tlv::SidStructure(IsisSub2SidStructure {
-        lb_len,
-        ln_len: plen.saturating_sub(lb_len),
-        fun_len: 16,
-        arg_len: 0,
+        lb_len: st.lb_bits,
+        ln_len: st.ln_bits,
+        fun_len: st.fun_bits,
+        arg_len: st.arg_bits,
     });
-    Some((is_usid, vec![structure]))
+    Some((locator.behavior.clone(), vec![structure]))
 }
 
 /// Fold a locator's configured RFC 8986 §4.16 flavor mask into a base
@@ -491,27 +490,30 @@ fn flavored(base: Behavior, mask: u8) -> Behavior {
 }
 
 /// SRv6 End-SID endpoint behavior + SID Structure for one locator
-/// (RFC 9352 §9). Classic → `End`; uSID → `EndCSID` (uN); either folded
-/// with the locator's flavors. Per-locator so each per-Flex-Algorithm
-/// locator gets its own structure.
+/// (RFC 9352 §9). Classic → `End`; uSID → `EndCSID` (uN); REPLACE →
+/// `EndRep`; each folded with the locator's flavors. Per-locator so
+/// each per-Flex-Algorithm locator gets its own structure.
 fn srv6_end_structure(locator: &Locator) -> (Behavior, Vec<IsisSub2Tlv>) {
     let (base, subs) = match srv6_sid_structure(locator) {
-        Some((true, subs)) => (Behavior::EndCSID, subs),
-        Some((false, subs)) => (Behavior::End, subs),
+        Some((Some(LocatorBehavior::Usid), subs)) => (Behavior::EndCSID, subs),
+        Some((Some(LocatorBehavior::Replace), subs)) => (Behavior::EndRep, subs),
+        Some((None, subs)) => (Behavior::End, subs),
         None => (Behavior::End, Vec::new()),
     };
     (flavored(base, locator.flavors), subs)
 }
 
 /// SRv6 End.X SID endpoint behavior + SID Structure for one locator
-/// (RFC 9352 §8/§9). Classic → `EndX`; uSID → `EndXCSID` (uA). The
-/// End.X sibling of `srv6_end_structure`. Adjacency SIDs fold only the
-/// PSP flavor — their USP/USD variants are not implemented in the data
-/// plane, so they must not be advertised either.
+/// (RFC 9352 §8/§9). Classic → `EndX`; uSID → `EndXCSID` (uA); REPLACE
+/// → `EndXRep`. The End.X sibling of `srv6_end_structure`. Adjacency
+/// SIDs fold only the PSP flavor — their USP/USD variants are not
+/// implemented in the data plane, so they must not be advertised
+/// either.
 fn srv6_endx_structure(locator: &Locator) -> (Behavior, Vec<IsisSub2Tlv>) {
     let (base, subs) = match srv6_sid_structure(locator) {
-        Some((true, subs)) => (Behavior::EndXCSID, subs),
-        Some((false, subs)) => (Behavior::EndX, subs),
+        Some((Some(LocatorBehavior::Usid), subs)) => (Behavior::EndXCSID, subs),
+        Some((Some(LocatorBehavior::Replace), subs)) => (Behavior::EndXRep, subs),
+        Some((None, subs)) => (Behavior::EndX, subs),
         None => (Behavior::EndX, Vec::new()),
     };
     (
@@ -892,42 +894,13 @@ pub fn lsp_generate(top: &mut IsisTop, level: Level, seq_floor: Option<u32>) -> 
     //
     // Function is 16 bits — the width function_addr() places into the
     // SID. Argument is 0; we don't allocate argument-bearing SIDs.
-    let (end_behavior, endx_behavior, sid_structure_subs) = match top
-        .sr_locator
-        .as_ref()
-        .and_then(|loc| loc.prefix.map(|p| (loc.behavior.as_ref(), p, loc.flavors)))
-    {
-        Some((Some(LocatorBehavior::Usid), prefix, flavors)) => {
-            let plen = prefix.prefix_len();
-            let lb_len = plen.min(32);
-            let structure = IsisSub2Tlv::SidStructure(IsisSub2SidStructure {
-                lb_len,
-                ln_len: plen.saturating_sub(lb_len),
-                fun_len: 16,
-                arg_len: 0,
-            });
-            (
-                flavored(Behavior::EndCSID, flavors),
-                flavored(Behavior::EndXCSID, flavors & crate::rib::FLAVOR_PSP),
-                vec![structure],
-            )
+    let (end_behavior, endx_behavior, sid_structure_subs) = match top.sr_locator.as_ref() {
+        Some(loc) if loc.prefix.is_some() => {
+            let (end_behavior, subs) = srv6_end_structure(loc);
+            let (endx_behavior, _) = srv6_endx_structure(loc);
+            (end_behavior, endx_behavior, subs)
         }
-        Some((None, prefix, flavors)) => {
-            let plen = prefix.prefix_len();
-            let lb_len = plen.min(40);
-            let structure = IsisSub2Tlv::SidStructure(IsisSub2SidStructure {
-                lb_len,
-                ln_len: plen.saturating_sub(lb_len),
-                fun_len: 16,
-                arg_len: 0,
-            });
-            (
-                flavored(Behavior::End, flavors),
-                flavored(Behavior::EndX, flavors & crate::rib::FLAVOR_PSP),
-                vec![structure],
-            )
-        }
-        None => (Behavior::End, Behavior::EndX, Vec::new()),
+        _ => (Behavior::End, Behavior::EndX, Vec::new()),
     };
 
     // SRv6 Locators TLV (RFC 9352 §7.1, type 27). One sub-locator for

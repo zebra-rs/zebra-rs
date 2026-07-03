@@ -38,6 +38,7 @@ pub fn srv6_locator_lsa_build(router_id: Ipv4Addr, locator: &Locator) -> Option<
 
     let base = match locator.behavior {
         Some(LocatorBehavior::Usid) => isis_packet::Behavior::EndCSID,
+        Some(LocatorBehavior::Replace) => isis_packet::Behavior::EndRep,
         None => isis_packet::Behavior::End,
     };
     let behavior = u16::from(base.with_flavors(
@@ -199,6 +200,7 @@ pub struct EndxSidState {
 pub fn endx_behavior(locator: &Locator) -> u16 {
     let base = match locator.behavior {
         Some(LocatorBehavior::Usid) => isis_packet::Behavior::EndXCSID,
+        Some(LocatorBehavior::Replace) => isis_packet::Behavior::EndXRep,
         None => isis_packet::Behavior::EndX,
     };
     // Adjacency SIDs fold only PSP — the USP/USD End.X variants are not

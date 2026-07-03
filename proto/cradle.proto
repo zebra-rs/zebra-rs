@@ -95,6 +95,8 @@ message LocalSid {
   uint32 vrf_table_id = 4;   // End.DT* table (0 = global)
   uint32 oif          = 5;   // seg6 device (End/uN) or egress link (End.X)
   string nh6          = 6;   // adjacency IPv6 for End.X / uA
+  // SID structure. uN/uA shift by ln (block=lb); REPLACE-C-SID rewrites a
+  // C-SID of ln+fun bits after a block of lb bits (RFC 9800).
   uint32 lb_bits = 7; uint32 ln_bits = 8; uint32 fun_bits = 9; uint32 arg_bits = 10;
   uint32 nexthop_id = 11;    // cross-connect adjacency for End.X (into NEXTHOPS)
   uint32 flavors    = 12;    // SRV6_FLAVOR_* bitmask (PSP=1, USP=2, USD=4)

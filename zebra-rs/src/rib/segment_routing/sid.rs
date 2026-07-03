@@ -81,6 +81,17 @@ pub enum SidBehavior {
     /// (carried in [`Sid::table_id`]), reproducing that egress's
     /// forwarding. Installed by IS-IS egress-protection on the protector.
     EndM,
+    /// End with REPLACE-C-SID — RFC 9800 §4.2.1 (IANA codepoint 101).
+    /// The endpoint rewrites only the C-SID bits of the DA from packed
+    /// containers in the segment list, driven by the index argument in
+    /// the DA. Carries a [`SidStructure`]; installs at /(LB+LN+Fun) so
+    /// the argument stays wild. No kernel seg6local support — cradle
+    /// tee only.
+    EndRep,
+    /// End.X with REPLACE-C-SID — RFC 9800 §4.2.2 (IANA codepoint 105).
+    /// As `EndRep`, then forwards out the bound adjacency. Cradle tee
+    /// only, like `EndRep`.
+    EndXRep,
 }
 
 impl fmt::Display for SidBehavior {
@@ -98,6 +109,8 @@ impl fmt::Display for SidBehavior {
             Self::EndDT2U => write!(f, "End.DT2U"),
             Self::EndDT2M => write!(f, "End.DT2M"),
             Self::EndM => write!(f, "End.M"),
+            Self::EndRep => write!(f, "End(REP)"),
+            Self::EndXRep => write!(f, "End.X(REP)"),
         }
     }
 }
@@ -289,6 +302,21 @@ impl Sid {
                 let plen = self
                     .structure
                     .map(|s| s.lb_bits.saturating_add(s.ln_bits))
+                    .unwrap_or(128);
+                let masked = mask_v6(self.addr, plen);
+                Ipv6Net::new(masked, plen)
+                    .unwrap_or_else(|_| Ipv6Net::new(self.addr, 128).expect("/128 is always valid"))
+            }
+            // REPLACE-C-SID SIDs match Block + C-SID (LB+LN+Fun) — the
+            // argument (with its container index) must stay wild.
+            SidBehavior::EndRep | SidBehavior::EndXRep => {
+                let plen = self
+                    .structure
+                    .map(|s| {
+                        s.lb_bits
+                            .saturating_add(s.ln_bits)
+                            .saturating_add(s.fun_bits)
+                    })
                     .unwrap_or(128);
                 let masked = mask_v6(self.addr, plen);
                 Ipv6Net::new(masked, plen)

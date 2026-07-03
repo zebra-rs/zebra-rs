@@ -64,6 +64,8 @@ fn srv6_behavior(b: crate::rib::SidBehavior) -> u32 {
         EndDT2U => 9,  // EVPN L2 unicast decap+bridge
         EndDT2M => 10, // EVPN L2 BUM decap+flood
         EndM => 11,    // egress-protection mirror (decap + mirror-context lookup)
+        EndRep => 12,  // RFC 9800 REPLACE-C-SID (C-SID rewrite from containers)
+        EndXRep => 13, // REPLACE-C-SID + adjacency cross-connect
     }
 }
 

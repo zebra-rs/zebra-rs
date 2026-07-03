@@ -12,20 +12,24 @@ use tokio::sync::mpsc::UnboundedSender;
 use crate::config::{Args, ConfigOp};
 use crate::rib::Message;
 
-/// Locator-wide endpoint behavior. The YANG enum currently lists only
-/// `usid` (RFC 9800 NEXT-C-SID); the variant is `Option<...>` on Locator
-/// because the absence of the leaf means the classic RFC 8986 full SID
-/// layout, not "uSID".
+/// Locator-wide endpoint behavior. The YANG enum lists `usid` (RFC 9800
+/// NEXT-C-SID) and `replace` (RFC 9800 REPLACE-C-SID); the variant is
+/// `Option<...>` on Locator because the absence of the leaf means the
+/// classic RFC 8986 full SID layout.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum LocatorBehavior {
     /// RFC 9800 NEXT-C-SID (micro-SID) format.
     Usid,
+    /// RFC 9800 REPLACE-C-SID format: 32-bit C-SIDs (LN 16 + Fun 16)
+    /// consumed from packed containers, index argument in the DA.
+    Replace,
 }
 
 impl LocatorBehavior {
     pub fn parse(s: &str) -> Option<Self> {
         match s {
             "usid" => Some(Self::Usid),
+            "replace" => Some(Self::Replace),
             _ => None,
         }
     }
@@ -78,12 +82,28 @@ impl Locator {
     /// (IPv6 DOC / SR block convention). Function is fixed at 16 bits
     /// — the width `function_addr()` actually places into the SID.
     /// Argument is 0; we don't allocate argument-bearing SIDs.
+    ///
+    /// REPLACE-C-SID locators (RFC 9800 §4.2): the locator prefix is
+    /// Block + Node with a fixed 16-bit Node, the C-SID is Node +
+    /// Function = 32 bits, and the Argument is everything left —
+    /// mandatory, since the index that drives the container walk lives
+    /// in its least significant bits (AL = 128 - LBL - LNFL, §8's
+    /// canonical example: /64 locator → LB 48, LN 16, Fun 16, Arg 48).
     pub fn sid_structure(&self) -> Option<crate::rib::SidStructure> {
         let prefix = self.prefix?;
         let plen = prefix.prefix_len();
+        if matches!(self.behavior, Some(LocatorBehavior::Replace)) {
+            let lb_bits = plen.saturating_sub(16);
+            return Some(crate::rib::SidStructure {
+                lb_bits,
+                ln_bits: plen - lb_bits,
+                fun_bits: 16,
+                arg_bits: 128u8.saturating_sub(plen).saturating_sub(16),
+            });
+        }
         let lb_bits = match self.behavior {
             Some(LocatorBehavior::Usid) => plen.min(32),
-            None => plen.min(40),
+            _ => plen.min(40),
         };
         Some(crate::rib::SidStructure {
             lb_bits,

@@ -132,18 +132,27 @@ pub(super) fn build_repair_path_srv6(
     for (idx, seg) in rp.segs.iter().enumerate() {
         let resolved = match seg {
             spf::SrSegment::NodeSid(v) => {
-                node_sid_info(top, level, *v, algo).map(|info| RepairSeg {
-                    sid: info.sid,
-                    landing: *v,
-                    csid: csid_bits_end(&info),
-                })
+                // REPLACE-C-SID SIDs are only valid inside packed C-SID
+                // containers (RFC 9800 §6.4) — as a plain 128-bit repair
+                // segment the endpoint would misread the neighbouring
+                // list entries as containers. No compression-aware
+                // repair encoder exists, so such a hop is unprotectable.
+                node_sid_info(top, level, *v, algo)
+                    .filter(|info| !info.behavior.is_end_replace_csid())
+                    .map(|info| RepairSeg {
+                        sid: info.sid,
+                        landing: *v,
+                        csid: csid_bits_end(&info),
+                    })
             }
             spf::SrSegment::AdjSid(from, to, via) => {
-                srv6_endx_sid_for_link(top, level, *from, *to, *via, algo).map(|endx| RepairSeg {
-                    sid: endx.sid,
-                    landing: *to,
-                    csid: csid_bits_endx(&endx, *from),
-                })
+                srv6_endx_sid_for_link(top, level, *from, *to, *via, algo)
+                    .filter(|endx| !endx.behavior.is_endx_replace_csid())
+                    .map(|endx| RepairSeg {
+                        sid: endx.sid,
+                        landing: *to,
+                        csid: csid_bits_endx(&endx, *from),
+                    })
             }
         };
         let Some(part) = resolved else {

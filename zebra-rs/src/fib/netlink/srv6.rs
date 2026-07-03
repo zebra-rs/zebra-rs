@@ -125,6 +125,11 @@ fn seg6local_action(behavior: SidBehavior) -> Seg6LocalAction {
         // a panic.
         SidBehavior::EndDT2U | SidBehavior::EndDT2M => Seg6LocalAction::End,
         SidBehavior::EndX | SidBehavior::UA | SidBehavior::UALib => Seg6LocalAction::EndX,
+        // REPLACE-C-SID never reaches the kernel (route_sid_install
+        // returns after the cradle tee — no kernel flavor op exists);
+        // map like DT2U/DT2M so an unexpected call is a visible no-op.
+        SidBehavior::EndRep => Seg6LocalAction::End,
+        SidBehavior::EndXRep => Seg6LocalAction::EndX,
         SidBehavior::EndDT4 => Seg6LocalAction::EndDt4,
         // End.M reuses the End.DT6 kernel action: decapsulate and look the
         // inner IPv6 packet up in a table — for End.M that is the

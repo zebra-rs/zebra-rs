@@ -9471,6 +9471,7 @@ impl Ospf<Ospfv3> {
         {
             let (behavior, structure) = match locator.behavior {
                 Some(LocatorBehavior::Usid) => (SidBehavior::UN, locator.sid_structure()),
+                Some(LocatorBehavior::Replace) => (SidBehavior::EndRep, locator.sid_structure()),
                 None => (SidBehavior::End, None),
             };
             let sid = Sid {
@@ -9678,6 +9679,7 @@ impl Ospf<Ospfv3> {
         let loc_name = self.watched_locator.clone().unwrap_or_default();
         let (behavior, structure) = match locator.behavior {
             Some(LocatorBehavior::Usid) => (SidBehavior::UA, locator.sid_structure()),
+            Some(LocatorBehavior::Replace) => (SidBehavior::EndXRep, locator.sid_structure()),
             None => (SidBehavior::EndX, None),
         };
         let sid = Sid {

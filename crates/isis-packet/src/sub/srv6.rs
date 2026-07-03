@@ -76,6 +76,25 @@ pub enum Behavior {
     EndBMCSID,
     EndLBSCSID,
     EndXLBSCSID,
+    // RFC 9800 §4.2 — REPLACE-C-SID variants: the segment list carries
+    // packed containers of 16/32-bit C-SIDs and the DA argument indexes
+    // the active position; the endpoint rewrites only the C-SID bits.
+    EndRep,
+    EndRepPSP,
+    EndRepUSP,
+    EndRepPSPUSP,
+    EndRepUSD,
+    EndRepPSPUSD,
+    EndRepUSPUSD,
+    EndRepPSPUSPUSD,
+    EndXRep,
+    EndXRepPSP,
+    EndXRepUSP,
+    EndXRepPSPUSP,
+    EndXRepUSD,
+    EndXRepPSPUSD,
+    EndXRepUSPUSD,
+    EndXRepPSPUSPUSD,
     // draft-ietf-rtgwg-srv6-egress-protection — End.M (Mirroring
     // Context segment). Egress-protection variant of End.DT6: the
     // protector decapsulates and submits the inner packet to the
@@ -121,10 +140,47 @@ impl Behavior {
         )
     }
 
+    /// RFC 9800 REPLACE-C-SID flavor of End, any PSP/USP/USD
+    /// combination. A SID advertised with one of these is consumed from
+    /// packed C-SID containers — it must never appear as a plain
+    /// 128-bit segment in an uncompressed list.
+    pub fn is_end_replace_csid(&self) -> bool {
+        use Behavior::*;
+        matches!(
+            self,
+            EndRep
+                | EndRepPSP
+                | EndRepUSP
+                | EndRepPSPUSP
+                | EndRepUSD
+                | EndRepPSPUSD
+                | EndRepUSPUSD
+                | EndRepPSPUSPUSD
+        )
+    }
+
+    /// RFC 9800 REPLACE-C-SID flavor of End.X, any PSP/USP/USD
+    /// combination.
+    pub fn is_endx_replace_csid(&self) -> bool {
+        use Behavior::*;
+        matches!(
+            self,
+            EndXRep
+                | EndXRepPSP
+                | EndXRepUSP
+                | EndXRepPSPUSP
+                | EndXRepUSD
+                | EndXRepPSPUSD
+                | EndXRepUSPUSD
+                | EndXRepPSPUSPUSD
+        )
+    }
+
     /// Fold RFC 8986 §4.16 flavors into a base endpoint behavior,
     /// returning the flavored IANA codepoint. Supported bases: `End`,
-    /// `EndX`, `EndCSID` (uN) and `EndXCSID` (uA); any other base — and
-    /// an empty flavor set — returns `self` unchanged.
+    /// `EndX`, `EndCSID` (uN), `EndXCSID` (uA), `EndRep` and `EndXRep`
+    /// (REPLACE-C-SID); any other base — and an empty flavor set —
+    /// returns `self` unchanged.
     pub fn with_flavors(self, psp: bool, usp: bool, usd: bool) -> Behavior {
         use Behavior::*;
         match (self, psp, usp, usd) {
@@ -157,6 +213,20 @@ impl Behavior {
             (EndXCSID, true, false, true) => EndXCSIDPSPUSD,
             (EndXCSID, false, true, true) => EndXCSIDUSPUSD,
             (EndXCSID, true, true, true) => EndXCSIDPSPUSPUSD,
+            (EndRep, true, false, false) => EndRepPSP,
+            (EndRep, false, true, false) => EndRepUSP,
+            (EndRep, true, true, false) => EndRepPSPUSP,
+            (EndRep, false, false, true) => EndRepUSD,
+            (EndRep, true, false, true) => EndRepPSPUSD,
+            (EndRep, false, true, true) => EndRepUSPUSD,
+            (EndRep, true, true, true) => EndRepPSPUSPUSD,
+            (EndXRep, true, false, false) => EndXRepPSP,
+            (EndXRep, false, true, false) => EndXRepUSP,
+            (EndXRep, true, true, false) => EndXRepPSPUSP,
+            (EndXRep, false, false, true) => EndXRepUSD,
+            (EndXRep, true, false, true) => EndXRepPSPUSD,
+            (EndXRep, false, true, true) => EndXRepUSPUSD,
+            (EndXRep, true, true, true) => EndXRepPSPUSPUSD,
             _ => self,
         }
     }
@@ -231,6 +301,22 @@ impl From<Behavior> for u16 {
             EndBMCSID => 95,
             EndLBSCSID => 96,
             EndXLBSCSID => 97,
+            EndRep => 101,
+            EndRepPSP => 102,
+            EndRepUSP => 103,
+            EndRepPSPUSP => 104,
+            EndXRep => 105,
+            EndXRepPSP => 106,
+            EndXRepUSP => 107,
+            EndXRepPSPUSP => 108,
+            EndRepUSD => 128,
+            EndRepPSPUSD => 129,
+            EndRepUSPUSD => 130,
+            EndRepPSPUSPUSD => 131,
+            EndXRepUSD => 132,
+            EndXRepPSPUSD => 133,
+            EndXRepUSPUSD => 134,
+            EndXRepPSPUSPUSD => 135,
             EndM => 74,
             Resv(v) => v,
         }
@@ -307,6 +393,22 @@ impl From<u16> for Behavior {
             95 => EndBMCSID,
             96 => EndLBSCSID,
             97 => EndXLBSCSID,
+            101 => EndRep,
+            102 => EndRepPSP,
+            103 => EndRepUSP,
+            104 => EndRepPSPUSP,
+            105 => EndXRep,
+            106 => EndXRepPSP,
+            107 => EndXRepUSP,
+            108 => EndXRepPSPUSP,
+            128 => EndRepUSD,
+            129 => EndRepPSPUSD,
+            130 => EndRepUSPUSD,
+            131 => EndRepPSPUSPUSD,
+            132 => EndXRepUSD,
+            133 => EndXRepPSPUSD,
+            134 => EndXRepUSPUSD,
+            135 => EndXRepPSPUSPUSD,
             v => Resv(v),
         }
     }
@@ -381,6 +483,22 @@ impl Display for Behavior {
             EndBMCSID => write!(f, "uBM"),
             EndLBSCSID => write!(f, "uLBS"),
             EndXLBSCSID => write!(f, "uXLBS"),
+            EndRep => write!(f, "End (REP)"),
+            EndRepPSP => write!(f, "End (REP, PSP)"),
+            EndRepUSP => write!(f, "End (REP, USP)"),
+            EndRepPSPUSP => write!(f, "End (REP, PSP, USP)"),
+            EndRepUSD => write!(f, "End (REP, USD)"),
+            EndRepPSPUSD => write!(f, "End (REP, PSP, USD)"),
+            EndRepUSPUSD => write!(f, "End (REP, USP, USD)"),
+            EndRepPSPUSPUSD => write!(f, "End (REP, PSP, USP, USD)"),
+            EndXRep => write!(f, "End.X (REP)"),
+            EndXRepPSP => write!(f, "End.X (REP, PSP)"),
+            EndXRepUSP => write!(f, "End.X (REP, USP)"),
+            EndXRepPSPUSP => write!(f, "End.X (REP, PSP, USP)"),
+            EndXRepUSD => write!(f, "End.X (REP, USD)"),
+            EndXRepPSPUSD => write!(f, "End.X (REP, PSP, USD)"),
+            EndXRepUSPUSD => write!(f, "End.X (REP, USP, USD)"),
+            EndXRepPSPUSPUSD => write!(f, "End.X (REP, PSP, USP, USD)"),
             EndM => write!(f, "End.M"),
             Resv(v) => write!(f, "Resv({})", v),
         }
@@ -454,7 +572,7 @@ mod tests {
     #[test]
     fn behavior_codepoints_match_iana() {
         use Behavior::*;
-        let table: [(Behavior, u16); 24] = [
+        let table: [(Behavior, u16); 34] = [
             (End, 1),
             (EndPSP, 2),
             (EndUSP, 3),
@@ -479,6 +597,18 @@ mod tests {
             (EndXCSIDPSP, 53),
             (EndXCSIDPSPUSPUSD, 59),
             (EndM, 74),
+            // RFC 9800 REPLACE-C-SID rows: 101–108, then the USD combos
+            // continue at 128 (109–124 are End.T/DT*/B6 with REPLACE).
+            (EndRep, 101),
+            (EndRepPSP, 102),
+            (EndRepUSP, 103),
+            (EndRepPSPUSP, 104),
+            (EndXRep, 105),
+            (EndXRepPSP, 106),
+            (EndRepUSD, 128),
+            (EndRepPSPUSPUSD, 131),
+            (EndXRepUSD, 132),
+            (EndXRepPSPUSPUSD, 135),
         ];
         for (behavior, code) in table {
             assert_eq!(u16::from(behavior), code, "{behavior:?} -> {code}");
@@ -487,12 +617,12 @@ mod tests {
     }
 
     /// Every (base × flavor-set) fold, including that flavored results
-    /// keep their NEXT-C-SID classification and non-foldable bases pass
-    /// through unchanged.
+    /// keep their NEXT-C-SID / REPLACE-C-SID classification and
+    /// non-foldable bases pass through unchanged.
     #[test]
     fn with_flavors_folds_every_combination() {
         use Behavior::*;
-        for base in [End, EndX, EndCSID, EndXCSID] {
+        for base in [End, EndX, EndCSID, EndXCSID, EndRep, EndXRep] {
             let mut seen = std::collections::BTreeSet::new();
             for bits in 0u8..8 {
                 let (psp, usp, usd) = (bits & 1 != 0, bits & 2 != 0, bits & 4 != 0);
@@ -503,11 +633,15 @@ mod tests {
                 }
                 assert_eq!(folded.is_end_next_csid(), base.is_end_next_csid());
                 assert_eq!(folded.is_endx_next_csid(), base.is_endx_next_csid());
+                assert_eq!(folded.is_end_replace_csid(), base.is_end_replace_csid());
+                assert_eq!(folded.is_endx_replace_csid(), base.is_endx_replace_csid());
             }
         }
         assert_eq!(EndDT46.with_flavors(true, true, true), EndDT46);
         assert_eq!(EndCSID.with_flavors(true, false, false), EndCSIDPSP);
         assert_eq!(End.with_flavors(true, false, true), EndPSPUSD);
+        assert_eq!(EndRep.with_flavors(true, false, false), EndRepPSP);
+        assert_eq!(EndXRep.with_flavors(false, false, true), EndXRepUSD);
     }
 
     const ALL: [EncapType; 4] = [

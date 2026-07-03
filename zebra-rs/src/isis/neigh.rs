@@ -398,10 +398,14 @@ impl Neighbor {
             }
 
             // Main End.X registration; behavior from the per-algo
-            // locator (uA for uSID, End.X for classic).
+            // locator (uA for uSID, End.X(REP) for REPLACE-C-SID,
+            // End.X for classic).
             let (behavior, structure) = match locator.behavior {
                 Some(crate::rib::LocatorBehavior::Usid) => {
                     (SidBehavior::UA, locator.sid_structure())
+                }
+                Some(crate::rib::LocatorBehavior::Replace) => {
+                    (SidBehavior::EndXRep, locator.sid_structure())
                 }
                 None => (SidBehavior::EndX, None),
             };
@@ -526,6 +530,9 @@ impl Neighbor {
     ) -> Sid {
         let (behavior, structure) = match locator.behavior {
             Some(crate::rib::LocatorBehavior::Usid) => (SidBehavior::UA, locator.sid_structure()),
+            Some(crate::rib::LocatorBehavior::Replace) => {
+                (SidBehavior::EndXRep, locator.sid_structure())
+            }
             None => (SidBehavior::EndX, None),
         };
         Sid {

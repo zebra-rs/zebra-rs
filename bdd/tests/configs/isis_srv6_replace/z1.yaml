@@ -1,0 +1,35 @@
+# z1 — REPLACE-C-SID locator: the End SID must advertise as
+# `End (REP, PSP, USD)` (IANA 129) with structure LB 48 / LN 16 /
+# Fun 16 / Arg 48, and the End.X SID as `End.X (REP, PSP)` (106) —
+# adjacency SIDs fold only the PSP bit.
+interface:
+- if-name: lo
+  ipv6:
+    address: 2001:db8::1/128
+- if-name: z1-z2
+  ipv6:
+    address: 2001:db8:0:12::1/64
+segment-routing:
+  locator:
+  - name: LOC1
+    prefix: fcbb:bbbb:1:1::/64
+    behavior: replace
+    flavor:
+    - psp
+    - usd
+router:
+  isis:
+    net: 49.0000.0000.0000.0001.00
+    hostname: z1
+    is-type: level-2-only
+    segment-routing:
+      srv6:
+        locator: LOC1
+    interface:
+    - if-name: lo
+      ipv6:
+        enable: true
+    - if-name: z1-z2
+      network-type: point-to-point
+      ipv6:
+        enable: true
