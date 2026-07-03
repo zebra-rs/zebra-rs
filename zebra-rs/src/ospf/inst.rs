@@ -9487,6 +9487,7 @@ impl Ospf<Ospfv3> {
                 structure,
                 table_id: 0,
                 segs: Vec::new(),
+                flavors: locator.flavors,
             };
             let _ = self.ctx.rib.send(rib::Message::SidAdd { sid });
             self.sr_end_sid = Some(addr);
@@ -9691,6 +9692,9 @@ impl Ospf<Ospfv3> {
             structure,
             table_id: 0,
             segs: Vec::new(),
+            // Adjacency SIDs take only PSP (USP/USD would need an
+            // adjacency-forward decap — not implemented).
+            flavors: locator.flavors & crate::rib::FLAVOR_PSP,
         };
         let _ = self.ctx.rib.send(rib::Message::SidAdd { sid });
 
@@ -9715,6 +9719,7 @@ impl Ospf<Ospfv3> {
             structure: Some(structure),
             table_id: 0,
             segs: Vec::new(),
+            flavors: locator.flavors & crate::rib::FLAVOR_PSP,
         };
         let _ = self.ctx.rib.send(rib::Message::SidAdd { sid });
         Some(lib)

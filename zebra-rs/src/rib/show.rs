@@ -2249,6 +2249,7 @@ mod tests {
             structure: None,
             table_id: 0,
             segs: Vec::new(),
+            flavors: 0,
         }
     }
 

@@ -97,6 +97,7 @@ message LocalSid {
   string nh6          = 6;   // adjacency IPv6 for End.X / uA
   uint32 lb_bits = 7; uint32 ln_bits = 8; uint32 fun_bits = 9; uint32 arg_bits = 10;
   uint32 nexthop_id = 11;    // cross-connect adjacency for End.X (into NEXTHOPS)
+  uint32 flavors    = 12;    // SRV6_FLAVOR_* bitmask (PSP=1, USP=2, USD=4)
 }
 
 message LocalSidDel {

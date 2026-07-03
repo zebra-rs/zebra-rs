@@ -1429,6 +1429,7 @@ impl Bgp {
             structure: None,
             table_id: vni,
             segs: Vec::new(),
+            flavors: 0,
         };
         let _ = self.ctx.rib.send(crate::rib::Message::SidAdd { sid });
     }
@@ -1648,6 +1649,7 @@ impl Bgp {
             nh6: None,
             structure: None,
             table_id: 0,
+            flavors: 0,
             segs: Vec::new(),
         });
         self.srv6_ipv6_sid = Some((addr, function));

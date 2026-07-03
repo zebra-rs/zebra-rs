@@ -8,7 +8,9 @@ pub mod block;
 pub use block::{Block, BlockBuilder, BlockConfig, DEFAULT_BLOCK_NAME};
 
 pub mod locator;
-pub use locator::{Locator, LocatorBehavior, LocatorBuilder, LocatorConfig};
+pub use locator::{
+    FLAVOR_PSP, FLAVOR_USD, FLAVOR_USP, Locator, LocatorBehavior, LocatorBuilder, LocatorConfig,
+};
 
 pub mod sid;
 pub use sid::{Sid, SidAllocationType, SidBehavior, SidContext, SidOwner, SidStructure};

@@ -1,0 +1,33 @@
+# z1 — advertises a PSP-flavored uSID locator: the End (uN) SID must go
+# out as `uN (PSP)` (IANA 44, End with NEXT-CSID & PSP) and the End.X
+# (uA) SID as `uA (PSP)` — the adjacency SID folds only the PSP bit.
+interface:
+- if-name: lo
+  ipv6:
+    address: 2001:db8::1/128
+- if-name: z1-z2
+  ipv6:
+    address: 2001:db8:0:12::1/64
+segment-routing:
+  locator:
+  - name: LOC1
+    prefix: fcbb:bbbb:1::/48
+    behavior: usid
+    flavor:
+    - psp
+router:
+  isis:
+    net: 49.0000.0000.0000.0001.00
+    hostname: z1
+    is-type: level-2-only
+    segment-routing:
+      srv6:
+        locator: LOC1
+    interface:
+    - if-name: lo
+      ipv6:
+        enable: true
+    - if-name: z1-z2
+      network-type: point-to-point
+      ipv6:
+        enable: true

@@ -36,10 +36,15 @@ pub fn srv6_locator_lsa_build(router_id: Ipv4Addr, locator: &Locator) -> Option<
     let prefix = locator.prefix?;
     let end_sid = locator.node_sid_addr()?;
 
-    let behavior = match locator.behavior {
-        Some(LocatorBehavior::Usid) => u16::from(isis_packet::Behavior::EndCSID),
-        None => u16::from(isis_packet::Behavior::End),
+    let base = match locator.behavior {
+        Some(LocatorBehavior::Usid) => isis_packet::Behavior::EndCSID,
+        None => isis_packet::Behavior::End,
     };
+    let behavior = u16::from(base.with_flavors(
+        locator.flavors & crate::rib::FLAVOR_PSP != 0,
+        locator.flavors & crate::rib::FLAVOR_USP != 0,
+        locator.flavors & crate::rib::FLAVOR_USD != 0,
+    ));
     let structure = locator.sid_structure().map(|s| Ospfv3Srv6SidStructure {
         lb_len: s.lb_bits,
         ln_len: s.ln_bits,
@@ -96,6 +101,7 @@ mod tests {
         Locator {
             prefix: Some(prefix.parse::<Ipv6Net>().unwrap()),
             behavior: usid.then_some(LocatorBehavior::Usid),
+            flavors: 0,
         }
     }
 
@@ -166,6 +172,7 @@ mod tests {
         let unresolved = Locator {
             prefix: None,
             behavior: None,
+            flavors: 0,
         };
         assert!(srv6_locator_lsa_build("10.0.0.1".parse().unwrap(), &unresolved).is_none());
     }
@@ -190,10 +197,13 @@ pub struct EndxSidState {
 /// `End.X with NEXT-CSID` (uA) for uSID locators, plain `End.X`
 /// otherwise. Shared by the LSA advertisement and the show side.
 pub fn endx_behavior(locator: &Locator) -> u16 {
-    match locator.behavior {
-        Some(LocatorBehavior::Usid) => u16::from(isis_packet::Behavior::EndXCSID),
-        None => u16::from(isis_packet::Behavior::EndX),
-    }
+    let base = match locator.behavior {
+        Some(LocatorBehavior::Usid) => isis_packet::Behavior::EndXCSID,
+        None => isis_packet::Behavior::EndX,
+    };
+    // Adjacency SIDs fold only PSP — the USP/USD End.X variants are not
+    // implemented in the data plane, so they must not be advertised.
+    u16::from(base.with_flavors(locator.flavors & crate::rib::FLAVOR_PSP != 0, false, false))
 }
 
 /// Nested SID-Structure sub-TLV (Extended-LSA registry type 30) for
@@ -250,6 +260,7 @@ mod endx_tests {
         Locator {
             prefix: Some("fcbb:bbbb:1::/48".parse::<Ipv6Net>().unwrap()),
             behavior: Some(LocatorBehavior::Usid),
+            flavors: 0,
         }
     }
 
@@ -272,6 +283,7 @@ mod endx_tests {
         let classic = Locator {
             prefix: Some("2001:db8:f:2::/64".parse::<Ipv6Net>().unwrap()),
             behavior: None,
+            flavors: 0,
         };
         let sub = build_v3_lan_endx_sub(
             &classic,

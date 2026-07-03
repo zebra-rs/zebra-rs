@@ -31,12 +31,31 @@ impl LocatorBehavior {
     }
 }
 
+/// RFC 8986 §4.16 endpoint-flavor bits, OR-able in `Locator::flavors`.
+/// Deliberately the same encoding as cradle's `SRV6_FLAVOR_*` ABI so the
+/// mask travels the tee unchanged.
+pub const FLAVOR_PSP: u8 = 1;
+pub const FLAVOR_USP: u8 = 2;
+pub const FLAVOR_USD: u8 = 4;
+
+/// Parse one YANG `flavor` leaf-list member to its bit.
+pub fn flavor_bit(s: &str) -> Option<u8> {
+    match s {
+        "psp" => Some(FLAVOR_PSP),
+        "usp" => Some(FLAVOR_USP),
+        "usd" => Some(FLAVOR_USD),
+        _ => None,
+    }
+}
+
 /// Applied snapshot of an SRv6 locator, exported to the rest of the system
 /// once a config commit lands. Keyed by name in `Rib::locators`.
 #[derive(Debug, Default, Clone, PartialEq, Eq)]
 pub struct Locator {
     pub prefix: Option<Ipv6Net>,
     pub behavior: Option<LocatorBehavior>,
+    /// `FLAVOR_*` bitmask applied to the SIDs allocated from this locator.
+    pub flavors: u8,
 }
 
 impl Locator {
@@ -90,6 +109,7 @@ pub struct LocatorConfig {
     pub delete: bool,
     pub prefix: Option<Ipv6Net>,
     pub behavior: Option<LocatorBehavior>,
+    pub flavors: u8,
 }
 
 impl LocatorConfig {
@@ -97,6 +117,7 @@ impl LocatorConfig {
         Locator {
             prefix: self.prefix,
             behavior: self.behavior.clone(),
+            flavors: self.flavors,
         }
     }
 }
@@ -197,6 +218,7 @@ impl ConfigBuilder {
         const CONFIG_ERR: &str = "missing config";
         const PREFIX_ERR: &str = "expected ipv6 prefix";
         const BEHAVIOR_ERR: &str = "unknown locator behavior";
+        const FLAVOR_ERR: &str = "unknown locator flavor";
 
         ConfigBuilder::default()
             .path("")
@@ -239,6 +261,24 @@ impl ConfigBuilder {
                 s.behavior = None;
                 Ok(())
             })
+            // Leaf-list: set ORs one member's bit in, delete removes that
+            // one member (the value rides as the argument) — not the whole
+            // field.
+            .path("/flavor")
+            .set(|config, cache, name, args| {
+                let raw = args.string().context(FLAVOR_ERR)?;
+                let bit = flavor_bit(&raw).context(FLAVOR_ERR)?;
+                let s = cache_get(config, cache, name).context(CONFIG_ERR)?;
+                s.flavors |= bit;
+                Ok(())
+            })
+            .del(|config, cache, name, args| {
+                let raw = args.string().context(FLAVOR_ERR)?;
+                let bit = flavor_bit(&raw).context(FLAVOR_ERR)?;
+                let s = cache_lookup(config, cache, name).context(CONFIG_ERR)?;
+                s.flavors &= !bit;
+                Ok(())
+            })
     }
 
     pub fn path(mut self, path: &str) -> Self {
@@ -267,6 +307,7 @@ mod tests {
         let loc = Locator {
             prefix: Some("2001:db8:a:2::/64".parse().unwrap()),
             behavior: None,
+            flavors: 0,
         };
         assert_eq!(loc.node_sid_addr(), Some("2001:db8:a:2::".parse().unwrap()));
     }
@@ -279,6 +320,7 @@ mod tests {
         let loc = Locator {
             prefix: Some("2001:db8:a:2::5/64".parse().unwrap()),
             behavior: None,
+            flavors: 0,
         };
         assert_eq!(loc.node_sid_addr(), Some("2001:db8:a:2::".parse().unwrap()));
     }
@@ -288,6 +330,7 @@ mod tests {
         let loc = Locator {
             prefix: None,
             behavior: None,
+            flavors: 0,
         };
         assert_eq!(loc.node_sid_addr(), None);
     }

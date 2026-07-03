@@ -930,7 +930,7 @@ impl FibHandle {
                 // Static seg6local action routes keep the legacy
                 // RT_TABLE_MAIN decap (table_id 0); per-VRF table
                 // selection arrives via the protocol SID path.
-                super::srv6::build_seg6local_attrs(action, None, None, 0, &[])
+                super::srv6::build_seg6local_attrs(action, None, None, 0, &[], 0)
             {
                 msg.attributes.push(encap);
                 msg.attributes.push(encap_type);
@@ -1688,6 +1688,7 @@ impl FibHandle {
             sid.structure,
             sid.table_id,
             &sid.segs,
+            sid.flavors,
         ) else {
             tracing::warn!(
                 "seg6local route encap build skipped for {} (End.X / uA without IPv6 nexthop)",
@@ -1891,6 +1892,7 @@ impl FibHandle {
             None,
             vrf_table,
             &[],
+            0,
         ) else {
             return;
         };

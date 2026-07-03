@@ -417,6 +417,9 @@ impl Neighbor {
                 structure,
                 table_id: 0,
                 segs: Vec::new(),
+                // Adjacency SIDs take only PSP — their USP/USD variants
+                // (adjacency-forward decap) are not implemented.
+                flavors: locator.flavors & crate::rib::FLAVOR_PSP,
             };
             let _ = rib_client.send(rib::Message::SidAdd { sid });
 
@@ -439,6 +442,7 @@ impl Neighbor {
                             structure: Some(st),
                             table_id: 0,
                             segs: Vec::new(),
+                            flavors: locator.flavors & crate::rib::FLAVOR_PSP,
                         };
                         let _ = rib_client.send(rib::Message::SidAdd { sid: lib_sid });
                         la
@@ -505,6 +509,7 @@ impl Neighbor {
             structure: Some(structure),
             table_id: 0,
             segs: Vec::new(),
+            flavors: locator.flavors & crate::rib::FLAVOR_PSP,
         };
         let _ = rib_client.send(rib::Message::SidAdd { sid });
         self.endx_lib_sid = Some(addr);
@@ -536,6 +541,8 @@ impl Neighbor {
             // End.X is a local cross-connect, not a table decap.
             table_id: 0,
             segs: Vec::new(),
+            // Adjacency SIDs take only PSP (see the main registration).
+            flavors: locator.flavors & crate::rib::FLAVOR_PSP,
         }
     }
 

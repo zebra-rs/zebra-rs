@@ -1,0 +1,31 @@
+# z2 — plain uSID locator (no flavor): its own SIDs stay `uN`/`uA`, and
+# it must still classify z1's flavored codepoints as NEXT-C-SID
+# (adjacency + SPF unaffected).
+interface:
+- if-name: lo
+  ipv6:
+    address: 2001:db8::2/128
+- if-name: z2-z1
+  ipv6:
+    address: 2001:db8:0:12::2/64
+segment-routing:
+  locator:
+  - name: LOC2
+    prefix: fcbb:bbbb:2::/48
+    behavior: usid
+router:
+  isis:
+    net: 49.0000.0000.0000.0002.00
+    hostname: z2
+    is-type: level-2-only
+    segment-routing:
+      srv6:
+        locator: LOC2
+    interface:
+    - if-name: lo
+      ipv6:
+        enable: true
+    - if-name: z2-z1
+      network-type: point-to-point
+      ipv6:
+        enable: true

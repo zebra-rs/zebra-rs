@@ -479,26 +479,45 @@ fn srv6_sid_structure(locator: &Locator) -> Option<(bool, Vec<IsisSub2Tlv>)> {
     Some((is_usid, vec![structure]))
 }
 
+/// Fold a locator's configured RFC 8986 §4.16 flavor mask into a base
+/// endpoint behavior — the advertised codepoint must carry the flavors
+/// the data plane executes.
+fn flavored(base: Behavior, mask: u8) -> Behavior {
+    base.with_flavors(
+        mask & crate::rib::FLAVOR_PSP != 0,
+        mask & crate::rib::FLAVOR_USP != 0,
+        mask & crate::rib::FLAVOR_USD != 0,
+    )
+}
+
 /// SRv6 End-SID endpoint behavior + SID Structure for one locator
-/// (RFC 9352 §9). Classic → `End`; uSID → `EndCSID` (uN). Per-locator so
-/// each per-Flex-Algorithm locator gets its own structure.
+/// (RFC 9352 §9). Classic → `End`; uSID → `EndCSID` (uN); either folded
+/// with the locator's flavors. Per-locator so each per-Flex-Algorithm
+/// locator gets its own structure.
 fn srv6_end_structure(locator: &Locator) -> (Behavior, Vec<IsisSub2Tlv>) {
-    match srv6_sid_structure(locator) {
+    let (base, subs) = match srv6_sid_structure(locator) {
         Some((true, subs)) => (Behavior::EndCSID, subs),
         Some((false, subs)) => (Behavior::End, subs),
         None => (Behavior::End, Vec::new()),
-    }
+    };
+    (flavored(base, locator.flavors), subs)
 }
 
 /// SRv6 End.X SID endpoint behavior + SID Structure for one locator
 /// (RFC 9352 §8/§9). Classic → `EndX`; uSID → `EndXCSID` (uA). The
-/// End.X sibling of `srv6_end_structure`.
+/// End.X sibling of `srv6_end_structure`. Adjacency SIDs fold only the
+/// PSP flavor — their USP/USD variants are not implemented in the data
+/// plane, so they must not be advertised either.
 fn srv6_endx_structure(locator: &Locator) -> (Behavior, Vec<IsisSub2Tlv>) {
-    match srv6_sid_structure(locator) {
+    let (base, subs) = match srv6_sid_structure(locator) {
         Some((true, subs)) => (Behavior::EndXCSID, subs),
         Some((false, subs)) => (Behavior::EndX, subs),
         None => (Behavior::EndX, Vec::new()),
-    }
+    };
+    (
+        flavored(base, locator.flavors & crate::rib::FLAVOR_PSP),
+        subs,
+    )
 }
 
 /// SRv6 Mirror SID sub-TLVs to advertise inside the base SRv6 Locator
@@ -876,9 +895,9 @@ pub fn lsp_generate(top: &mut IsisTop, level: Level, seq_floor: Option<u32>) -> 
     let (end_behavior, endx_behavior, sid_structure_subs) = match top
         .sr_locator
         .as_ref()
-        .and_then(|loc| loc.prefix.map(|p| (loc.behavior.as_ref(), p)))
+        .and_then(|loc| loc.prefix.map(|p| (loc.behavior.as_ref(), p, loc.flavors)))
     {
-        Some((Some(LocatorBehavior::Usid), prefix)) => {
+        Some((Some(LocatorBehavior::Usid), prefix, flavors)) => {
             let plen = prefix.prefix_len();
             let lb_len = plen.min(32);
             let structure = IsisSub2Tlv::SidStructure(IsisSub2SidStructure {
@@ -887,9 +906,13 @@ pub fn lsp_generate(top: &mut IsisTop, level: Level, seq_floor: Option<u32>) -> 
                 fun_len: 16,
                 arg_len: 0,
             });
-            (Behavior::EndCSID, Behavior::EndXCSID, vec![structure])
+            (
+                flavored(Behavior::EndCSID, flavors),
+                flavored(Behavior::EndXCSID, flavors & crate::rib::FLAVOR_PSP),
+                vec![structure],
+            )
         }
-        Some((None, prefix)) => {
+        Some((None, prefix, flavors)) => {
             let plen = prefix.prefix_len();
             let lb_len = plen.min(40);
             let structure = IsisSub2Tlv::SidStructure(IsisSub2SidStructure {
@@ -898,7 +921,11 @@ pub fn lsp_generate(top: &mut IsisTop, level: Level, seq_floor: Option<u32>) -> 
                 fun_len: 16,
                 arg_len: 0,
             });
-            (Behavior::End, Behavior::EndX, vec![structure])
+            (
+                flavored(Behavior::End, flavors),
+                flavored(Behavior::EndX, flavors & crate::rib::FLAVOR_PSP),
+                vec![structure],
+            )
         }
         None => (Behavior::End, Behavior::EndX, Vec::new()),
     };
