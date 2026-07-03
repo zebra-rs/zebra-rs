@@ -192,6 +192,30 @@ impl Ospf<Ospfv3> {
                 config_ospfv3_interface_network_type,
             ),
             ("/area/interface/passive", config_ospfv3_interface_passive),
+            (
+                "/area/interface/authentication",
+                config_ospfv3_interface_authentication,
+            ),
+            (
+                "/area/interface/key-chain",
+                config_ospfv3_interface_key_chain,
+            ),
+            (
+                "/area/interface/crypto-key/hmac-sha-1",
+                config_ospfv3_interface_crypto_key_hmac_sha_1,
+            ),
+            (
+                "/area/interface/crypto-key/hmac-sha-256",
+                config_ospfv3_interface_crypto_key_hmac_sha_256,
+            ),
+            (
+                "/area/interface/crypto-key/hmac-sha-384",
+                config_ospfv3_interface_crypto_key_hmac_sha_384,
+            ),
+            (
+                "/area/interface/crypto-key/hmac-sha-512",
+                config_ospfv3_interface_crypto_key_hmac_sha_512,
+            ),
             ("/area/interface/priority", config_ospfv3_interface_priority),
             ("/area/interface/cost", config_ospfv3_interface_cost),
             (
@@ -725,6 +749,148 @@ fn config_ospfv3_gr_drain_time_ms(
 ) -> Option<()> {
     let value = if op.is_set() { args.u32()? } else { 200 };
     ospf.gr_config.drain_time_ms = value.clamp(50, 2000);
+    Some(())
+}
+
+/// `/router/ospfv3/area/<id>/interface/<name>/authentication` —
+/// RFC 7166 trailer mode. Only `null` and `message-digest` exist for
+/// v3 (RFC 7166 §4 defines only HMAC-SHA algorithms; there is no
+/// simple-password equivalent).
+fn config_ospfv3_interface_authentication(
+    ospf: &mut Ospf<Ospfv3>,
+    mut args: Args,
+    op: ConfigOp,
+) -> Option<()> {
+    use super::link::OspfAuthMode;
+
+    let _area_id = parse_area_id(&args.string()?)?;
+    let name = args.string()?;
+    let mode = args.string()?;
+
+    let link = ospf_link_get_mut_by_name(&mut ospf.links, &name)?;
+    if op.is_set() {
+        link.config.auth_mode = Some(match mode.as_str() {
+            "null" => OspfAuthMode::Null,
+            "message-digest" => OspfAuthMode::MessageDigest,
+            _ => return None,
+        });
+    } else {
+        link.config.auth_mode = None;
+    }
+
+    Some(())
+}
+
+/// Shared body for the four v3 `/area/interface/crypto-key/hmac-sha-*`
+/// callbacks — v3 sibling of `install_crypto_hmac_key`. Keys land in
+/// the same per-link keyring the RFC 7166 trailer send/verify reads.
+fn install_crypto_hmac_key_v3(
+    ospf: &mut Ospf<Ospfv3>,
+    mut args: Args,
+    op: ConfigOp,
+    algo: super::link::OspfCryptoAlgo,
+) -> Option<()> {
+    use super::link::AuthKey;
+
+    let _area_id = parse_area_id(&args.string()?)?;
+    let name = args.string()?;
+    let key_id: u8 = args.string()?.parse().ok()?;
+    if key_id == 0 {
+        return None;
+    }
+
+    let link = ospf_link_get_mut_by_name(&mut ospf.links, &name)?;
+    if op.is_set() {
+        let key = args.string()?;
+        let bytes = key.as_bytes();
+        // RFC 5709 §3.4 block-size cap, shared with the v2 path.
+        if bytes.is_empty() || bytes.len() > algo.digest_len() {
+            return None;
+        }
+        link.config.crypto_keys.insert(
+            key_id,
+            AuthKey {
+                algo,
+                raw: bytes.to_vec(),
+            },
+        );
+    } else {
+        link.config.crypto_keys.remove(&key_id);
+    }
+
+    Some(())
+}
+
+fn config_ospfv3_interface_crypto_key_hmac_sha_1(
+    ospf: &mut Ospf<Ospfv3>,
+    args: Args,
+    op: ConfigOp,
+) -> Option<()> {
+    install_crypto_hmac_key_v3(ospf, args, op, super::link::OspfCryptoAlgo::HmacSha1)
+}
+
+fn config_ospfv3_interface_crypto_key_hmac_sha_256(
+    ospf: &mut Ospf<Ospfv3>,
+    args: Args,
+    op: ConfigOp,
+) -> Option<()> {
+    install_crypto_hmac_key_v3(ospf, args, op, super::link::OspfCryptoAlgo::HmacSha256)
+}
+
+fn config_ospfv3_interface_crypto_key_hmac_sha_384(
+    ospf: &mut Ospf<Ospfv3>,
+    args: Args,
+    op: ConfigOp,
+) -> Option<()> {
+    install_crypto_hmac_key_v3(ospf, args, op, super::link::OspfCryptoAlgo::HmacSha384)
+}
+
+fn config_ospfv3_interface_crypto_key_hmac_sha_512(
+    ospf: &mut Ospf<Ospfv3>,
+    args: Args,
+    op: ConfigOp,
+) -> Option<()> {
+    install_crypto_hmac_key_v3(ospf, args, op, super::link::OspfCryptoAlgo::HmacSha512)
+}
+
+/// `/router/ospfv3/area/<id>/interface/<name>/key-chain` — v3
+/// sibling of `config_ospf_interface_key_chain`, registering under
+/// proto "ospfv3" so the policy actor pushes chain updates to this
+/// instance's `key_chains` (the v3 policy_rx arm already consumes
+/// them).
+fn config_ospfv3_interface_key_chain(
+    ospf: &mut Ospf<Ospfv3>,
+    mut args: Args,
+    op: ConfigOp,
+) -> Option<()> {
+    let _area_id = parse_area_id(&args.string()?)?;
+    let name = args.string()?;
+    let link = ospf_link_get_mut_by_name(&mut ospf.links, &name)?;
+    let link_index = link.index;
+    let prev = link.config.key_chain.clone();
+    let next = if op.is_set() { args.string() } else { None };
+    link.config.key_chain = next.clone();
+
+    use crate::policy::{KeyChainScope, Message as PolicyMsg, PolicyType};
+    let scope = PolicyType::KeyChain(KeyChainScope::OspfInterface);
+    if prev != next {
+        if let Some(prev_name) = prev {
+            let _ = ospf.policy_tx.send(PolicyMsg::Unregister {
+                proto: "ospfv3".into(),
+                name: prev_name,
+                ident: link_index as usize,
+                policy_type: scope,
+            });
+        }
+        if let Some(new_name) = next {
+            let _ = ospf.policy_tx.send(PolicyMsg::Register {
+                proto: "ospfv3".into(),
+                name: new_name,
+                ident: link_index as usize,
+                policy_type: scope,
+            });
+        }
+    }
     Some(())
 }
 
