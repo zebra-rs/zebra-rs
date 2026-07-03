@@ -17,6 +17,7 @@ interface to an area with a per-interface command.
 | `area/<id>/interface/<n>/dead-interval` | `ipv6 ospf6 dead-interval` (interface) |
 | `area/<id>/interface/<n>/retransmit-interval` | `ipv6 ospf6 retransmit-interval` (interface) |
 | `area/<id>/interface/<n>/mtu-ignore` | `ipv6 ospf6 mtu-ignore` (interface) |
+| `area/<id>/interface/<n>/passive true` | `ipv6 ospf6 passive` (interface) |
 | `area/<id>/area-type stub` | `area <id> stub` |
 | `area/<id>/area-type nssa` | `area <id> nssa` |
 | `area/<id>/no-summary true` | `area <id> stub no-summary` / `area <id> nssa no-summary` |

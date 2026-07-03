@@ -5,8 +5,6 @@ OSPFv2 features not yet implemented in zebra-rs:
 - Virtual links across non-backbone areas.
 - Discard (Null0) routes for active area ranges — the aggregation
   and suppression themselves are implemented.
-- Passive interfaces (advertise a prefix without forming
-  adjacencies on it).
 - Instance-level `default-information originate` (Type-5 default
   route). The NSSA-scoped Type-7 default
   (`nssa-default-originate`) is implemented.

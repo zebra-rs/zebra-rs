@@ -12,6 +12,7 @@ configuration surface to the equivalent FRR `ospfd` commands.
 | `area/<id>/interface/<n>/dead-interval` | `ip ospf dead-interval` (interface) |
 | `area/<id>/interface/<n>/retransmit-interval` | `ip ospf retransmit-interval` (interface) |
 | `area/<id>/interface/<n>/mtu-ignore` | `ip ospf mtu-ignore` (interface) |
+| `area/<id>/interface/<n>/passive true` | `ip ospf passive` (interface) |
 | `area/<id>/interface/<n>/network-type point-to-point` | `ip ospf network point-to-point` (interface) |
 | `area/<id>/interface/<n>/cost` | `ip ospf cost` (interface) |
 | `area/<id>/area-type stub` | `area <id> stub` |
