@@ -156,18 +156,11 @@ also serves IS-IS and BGP.
 ## OSPFv3 — Authentication Trailer (RFC 7166)
 
 OSPFv3 has no authentication field of its own in the packet header;
-zebra-rs implements the RFC 7166 Authentication Trailer instead:
-the AT-bit is set in the options of Hellos and DBDs, and an
-HMAC-SHA trailer — with a 16-bit Security Association ID, a 64-bit
-sequence number, and the Apad construction of RFC 7166 §3.5
-covering the IPv6 source address — is appended outside the OSPF
-length and checksum. The same HMAC-SHA algorithm set as v2 applies,
-and the per-interface authentication state (mode, keys, key-chain)
-is shared between the v2 and v3 instances of a link.
-
-Note the configuration caveat: the authentication leaves shown
-above attach to the `router ospf` (v2) interface tree only — there
-is currently no separate `router ospfv3 … authentication` path.
+zebra-rs implements the RFC 7166 Authentication Trailer, configured
+natively on the `router ospfv3` interface tree (`authentication
+message-digest` plus `crypto-key` / `key-chain` — HMAC-SHA only, per
+the RFC). See
+[the OSPFv3 chapter's Authentication page](ch-15-08-ospfv3-authentication.md).
 
 All four OSPFv2 modes — simple password, keyed-MD5, HMAC-SHA-256,
 and key-chain — are BDD-validated end to end

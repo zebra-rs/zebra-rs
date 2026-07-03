@@ -6,10 +6,6 @@ OSPFv3 features not yet implemented in zebra-rs:
   and suppression themselves are implemented.
 - Redistribution `route-map` filtering (the zebra-rs sources are
   connected, static, kernel, IS-IS, and BGP, matching v2).
-- A native `router ospfv3` authentication config path — the
-  RFC 7166 Authentication Trailer is implemented, but its keys are
-  configured through the shared v2 interface tree (`ospf6d` has
-  `ipv6 ospf6 authentication` per interface).
 - Non-zero forwarding-address resolution on received externals.
 - NBMA and point-to-multipoint network types.
 - Configurable SPF throttling (SPF is coalesced behind a fixed
