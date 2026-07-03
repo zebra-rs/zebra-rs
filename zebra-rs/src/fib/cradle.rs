@@ -46,9 +46,10 @@ type Member = (
     Option<Leaf>,
 );
 
-/// Map zebra's `SidBehavior` to cradle's `SRV6_BH_*` (data-plane ABI). cradle
-/// executes End/End.X/End.DT4/DT6/DT46; uN/uA/B6/M are teed but the datapath
-/// passes them (they never match in single-service-SID L3VPN).
+/// Map zebra's `SidBehavior` to cradle's `SRV6_BH_*` (data-plane ABI). The
+/// cradle datapath executes every behavior below; End.B6.Encaps additionally
+/// carries its bound policy as a synthesized SRv6 nexthop (see
+/// `local_sid_install`).
 fn srv6_behavior(b: crate::rib::SidBehavior) -> u32 {
     use crate::rib::SidBehavior::*;
     match b {
@@ -517,10 +518,21 @@ impl CradleFib {
     /// cross-connect adjacency (`nh6`) to a cradle nexthop.
     pub async fn local_sid_install(&self, sid: &crate::rib::Sid, prefix_len: u8, ifindex: u32) {
         let result = async {
-            let nexthop_id = match sid.nh6 {
-                Some(nh6) => self.nexthop_id6(Some(nh6), ifindex, &[], 0).await?,
-                None => 0,
-            };
+            let nexthop_id =
+                if sid.behavior == crate::rib::SidBehavior::EndB6Encap && !sid.segs.is_empty() {
+                    // The Binding SID's bound policy rides as a cradle SRv6
+                    // nexthop (its id keys the `SRV6_ENCAP` segment list, which
+                    // the eBPF End.B6 handler reads through
+                    // `LocalSid.nexthop_id`). The gw/oif of this nexthop are
+                    // not used by the push — the packet re-enters the FIB by
+                    // the new outer DA, per S19.
+                    self.srv6_nexthop_id(None, ifindex, &sid.segs, 0).await?
+                } else {
+                    match sid.nh6 {
+                        Some(nh6) => self.nexthop_id6(Some(nh6), ifindex, &[], 0).await?,
+                        None => 0,
+                    }
+                };
             let (lb, ln, fun, arg) = sid
                 .structure
                 .map(|s| (s.lb_bits, s.ln_bits, s.fun_bits, s.arg_bits))
