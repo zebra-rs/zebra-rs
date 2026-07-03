@@ -422,9 +422,11 @@ mod tests {
         // A `blackhole` route carries no gateway; to_entry yields a
         // Nexthop::Blackhole even with an empty nexthops map, and the
         // metric flows through.
-        let mut r = StaticRoute::<V4>::default();
-        r.blackhole = true;
-        r.metric = Some(50);
+        let r = StaticRoute::<V4> {
+            blackhole: true,
+            metric: Some(50),
+            ..Default::default()
+        };
         let entry = r.to_entry().expect("blackhole entry built");
         assert_eq!(entry.nexthop, Nexthop::Blackhole(50));
         assert_eq!(entry.metric, 50);
