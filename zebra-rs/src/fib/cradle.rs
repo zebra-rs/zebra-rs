@@ -47,8 +47,9 @@ fn srv6_behavior(b: crate::rib::SidBehavior) -> u32 {
         EndDT46 => 4,
         EndB6Encap => 5,
         UN => 6,
-        UA | UALib => 7,
-        EndM => 3, // mirror-context ~ End.DT6 (best-effort; not implemented)
+        UA => 7,    // classic End.X at /128 (no shift)
+        UALib => 8, // compressed carrier: shift + adjacency
+        EndM => 3,  // mirror-context ~ End.DT6 (best-effort; not implemented)
     }
 }
 
