@@ -2002,7 +2002,7 @@ fn config_mup_c_architecture(bgp: &mut Bgp, mut args: Args, op: ConfigOp) -> Opt
 /// next hop. `evpn_originate_imet` replaces the existing Originated path
 /// in place (the prefix key is the local VTEP, which does not change) and
 /// re-advertises to peers. No-op unless `advertise-all-vni` is on.
-fn reoriginate_all_imet(bgp: &mut Bgp) {
+pub(super) fn reoriginate_all_imet(bgp: &mut Bgp) {
     if !bgp.advertise_all_vni {
         return;
     }

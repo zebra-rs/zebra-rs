@@ -1354,6 +1354,19 @@ impl Bgp {
                 // Re-stamp originated IPv6 routes now the SID exists (the
                 // route delivery may have raced ahead of locator resolution).
                 self.reoriginate_srv6_ipv6();
+                // EVPN: Type-2s / IMETs originated before the locator
+                // resolved went out without their DT2U/DT2M SIDs (or carry
+                // stale ones after a prefix move) — re-originate them so
+                // the SIDs are (re)attached. The per-VNI allocators
+                // re-allocate lazily inside the origination path
+                // (`reconcile_srv6_vrfs` above just cleared them).
+                if self.advertise_all_vni {
+                    let entries: Vec<FdbEntry> = self.local_fdb.values().cloned().collect();
+                    for entry in entries {
+                        self.evpn_originate_macip(&entry);
+                    }
+                }
+                super::config::reoriginate_all_imet(self);
             }
             crate::rib::RibSrRx::Block { .. } => {}
         }
