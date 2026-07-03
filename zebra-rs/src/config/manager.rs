@@ -3453,4 +3453,42 @@ mod yang_load_tests {
             assert_eq!(code, ExecCode::Success, "`{path}` must be a settable path");
         }
     }
+
+    /// The three OSPF authentication modules (zebra-ospf-auth-simple /
+    /// -md5 / -trailer) augment the per-interface subtree but were
+    /// never imported by config.yang, so their leaves resolved as
+    /// "unknown key" and per-interface authentication was
+    /// unconfigurable. Pin every auth spelling as settable so the
+    /// imports can't be dropped again.
+    #[test]
+    fn ospf_interface_authentication_paths_parse() {
+        use crate::config::ExecCode;
+        use crate::config::parse::{State, parse};
+        use libyang::to_entry;
+
+        let mut yang = YangStore::new();
+        yang.add_path(concat!(env!("CARGO_MANIFEST_DIR"), "/yang"));
+        yang.read_with_resolve("configure")
+            .expect("configure mode loads");
+        yang.identity_resolve();
+        let module = yang
+            .find_module("configure")
+            .expect("configure module present");
+        let entry = to_entry(&yang, module);
+
+        for path in [
+            "set router ospf area 0 interface eth0 authentication simple",
+            "set router ospf area 0 interface eth0 authentication message-digest",
+            "set router ospf area 0 interface eth0 authentication-key secret08",
+            "set router ospf area 0 interface eth0 message-digest-key 1 md5 md5secret",
+            "set router ospf area 0 interface eth0 crypto-key 1 hmac-sha-1 shasecret",
+            "set router ospf area 0 interface eth0 crypto-key 1 hmac-sha-256 shasecret",
+            "set router ospf area 0 interface eth0 crypto-key 1 hmac-sha-384 shasecret",
+            "set router ospf area 0 interface eth0 crypto-key 1 hmac-sha-512 shasecret",
+            "set router ospf area 0 interface eth0 key-chain OSPF-KC",
+        ] {
+            let (code, _comps, _state) = parse(path, entry.clone(), None, State::new());
+            assert_eq!(code, ExecCode::Success, "`{path}` must be a settable path");
+        }
+    }
 }
