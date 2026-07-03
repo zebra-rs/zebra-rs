@@ -1,0 +1,35 @@
+# RFC 8177 key-chain authentication: the interface references a named
+# chain instead of carrying inline keys. The chain's key supplies the
+# algorithm (crypto-algorithm), the key-id stamped on the wire, and
+# the key material; with no lifetime configured the key is always
+# active. b must define the same chain content (name may differ; the
+# wire carries only the key-id).
+key-chains:
+  key-chain:
+  - name: OSPF-KC
+    key:
+    - key-id: 1
+      crypto-algorithm: hmac-sha-256
+      key-string:
+        keystring: "zebra-ospf-chain-secret"
+
+interface:
+- if-name: lo
+  ipv4:
+    address: 10.0.0.1/32
+- if-name: ethb
+  ipv4:
+    address: 10.0.12.1/30
+router:
+  ospf:
+    router-id: 10.0.0.1
+    area:
+    - area-id: 0.0.0.0
+      interface:
+      - if-name: lo
+        enable: true
+      - if-name: ethb
+        enable: true
+        network-type: point-to-point
+        authentication: message-digest
+        key-chain: OSPF-KC

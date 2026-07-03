@@ -76,6 +76,18 @@ module config {
     prefix zob;
   }
 
+  import zebra-ospf-auth-simple {
+    prefix zoas;
+  }
+
+  import zebra-ospf-auth-md5 {
+    prefix zoam;
+  }
+
+  import zebra-ospf-auth-trailer {
+    prefix zoat;
+  }
+
   import zebra-ospf-tracing {
     prefix zotr;
   }

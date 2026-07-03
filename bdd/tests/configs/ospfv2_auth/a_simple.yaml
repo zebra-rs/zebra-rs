@@ -1,0 +1,23 @@
+# Simple-password authentication (RFC 2328 §D.3, AuType=1): an 8-octet
+# cleartext password carried in every OSPF packet header. b must carry
+# the identical authentication-key for the adjacency to come up.
+interface:
+- if-name: lo
+  ipv4:
+    address: 10.0.0.1/32
+- if-name: ethb
+  ipv4:
+    address: 10.0.12.1/30
+router:
+  ospf:
+    router-id: 10.0.0.1
+    area:
+    - area-id: 0.0.0.0
+      interface:
+      - if-name: lo
+        enable: true
+      - if-name: ethb
+        enable: true
+        network-type: point-to-point
+        authentication: simple
+        authentication-key: zebra8ch

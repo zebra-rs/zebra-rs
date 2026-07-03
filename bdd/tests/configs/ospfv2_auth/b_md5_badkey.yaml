@@ -1,0 +1,26 @@
+# Negative case: same mode (message-digest) and same key-id 1 as a's
+# config, but a different secret. Every packet from a fails digest
+# verification here (and vice versa), so neither side ever creates a
+# neighbor — the drop happens before neighbor state exists.
+interface:
+- if-name: lo
+  ipv4:
+    address: 10.0.0.2/32
+- if-name: etha
+  ipv4:
+    address: 10.0.12.2/30
+router:
+  ospf:
+    router-id: 10.0.0.2
+    area:
+    - area-id: 0.0.0.0
+      interface:
+      - if-name: lo
+        enable: true
+      - if-name: etha
+        enable: true
+        network-type: point-to-point
+        authentication: message-digest
+        message-digest-key:
+        - key-id: 1
+          md5: wrong-md5-secret

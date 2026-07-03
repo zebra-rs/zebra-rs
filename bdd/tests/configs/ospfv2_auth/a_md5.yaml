@@ -1,0 +1,27 @@
+# Keyed-MD5 cryptographic authentication (RFC 2328 §D.4, AuType=2):
+# `authentication message-digest` selects crypto mode; the digest is
+# MD5(packet || key) with the key selected by key-id. The active send
+# key is the lowest configured key-id; receive accepts any known
+# key-id, which is what makes key rollover hitless.
+interface:
+- if-name: lo
+  ipv4:
+    address: 10.0.0.1/32
+- if-name: ethb
+  ipv4:
+    address: 10.0.12.1/30
+router:
+  ospf:
+    router-id: 10.0.0.1
+    area:
+    - area-id: 0.0.0.0
+      interface:
+      - if-name: lo
+        enable: true
+      - if-name: ethb
+        enable: true
+        network-type: point-to-point
+        authentication: message-digest
+        message-digest-key:
+        - key-id: 1
+          md5: zebra-md5-secret
