@@ -1,3 +1,4 @@
+use crate::rib::LinkFlagsExt;
 use std::fmt::Display;
 use std::str::FromStr;
 use std::sync::Arc;
@@ -82,6 +83,13 @@ pub struct LinkConfig {
     pub retransmit_interval: Option<u16>,
     pub transmit_delay: Option<u16>,
     pub mtu_ignore: bool,
+    /// Passive interface (`/router/ospf{,v3}/area/<id>/interface/<n>/
+    /// passive`): the interface's prefixes keep advertising (Router-LSA
+    /// stub / Intra-Area-Prefix-LSA — the LSA builds gate on `enable`,
+    /// not on adjacency), but no Hello is sent or accepted, so no
+    /// adjacency ever forms. `OspfLink::is_passive()` also folds in
+    /// loopback interfaces, which are implicitly passive.
+    pub passive: bool,
     pub prefix_sid: Option<PrefixSid>,
     /// Per-Flexible-Algorithm Prefix-SIDs for this interface's prefix
     /// (RFC 9350 §7), keyed by algo id (128..=255). Emitted as extra
@@ -577,8 +585,13 @@ impl<V: OspfVersion> OspfLink<V> {
             .unwrap_or(OSPF_DEFAULT_TRANSMIT_DELAY)
     }
 
+    /// A passive interface runs no Hello protocol: it advertises its
+    /// prefixes but sends/accepts no Hellos and forms no adjacency.
+    /// True when the operator set `passive`, and implicitly for
+    /// loopback interfaces (which have no segment to speak on) —
+    /// mirroring the IS-IS `is_passive` semantics.
     pub fn is_passive(&self) -> bool {
-        false
+        self.config.passive || self.link_flags.is_loopback()
     }
 
     pub fn is_multicast_if(&self) -> bool {

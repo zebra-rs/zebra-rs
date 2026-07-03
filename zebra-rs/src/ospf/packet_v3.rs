@@ -300,6 +300,9 @@ pub fn ospfv3_hello_send(
     now: chrono::DateTime<chrono::Utc>,
     tracing: &OspfTracing,
 ) {
+    if link.is_passive() {
+        return;
+    }
     ospf_pdu_trace!(tracing, "[Hello:Send] on {}", link.name);
     let Some(src) = link_local_src(link) else {
         tracing::debug!(

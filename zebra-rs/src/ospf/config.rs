@@ -141,6 +141,7 @@ impl Ospf {
             "/area/interface/network-type",
             config_ospf_interface_network_type,
         );
+        self.ospf_add("/area/interface/passive", config_ospf_interface_passive);
         self.ospf_add("/area/interface/priority", config_ospf_interface_priority);
         self.ospf_add("/area/interface/cost", config_ospf_interface_cost);
         self.ospf_add("/area/interface/affinity", config_ospf_interface_affinity);
@@ -848,6 +849,30 @@ fn config_ospf_interface_network_type(ospf: &mut Ospf, mut args: Args, op: Confi
     // shouldn't be in PointToPoint) and the cached neighbor list.
     // Disable+Enable through the existing channel rebuilds both.
     if old != new && link.enabled {
+        let area_id = link.area_id;
+        let _ = link.tx.send(Message::Disable(link.index, area_id));
+        let _ = link.tx.send(Message::Enable(link.index, area_id));
+    }
+
+    Some(())
+}
+
+/// `/router/ospf/area/<id>/interface/<name>/passive` — passive
+/// interface: prefixes keep advertising, but the Hello send/receive
+/// paths gate on `OspfLink::is_passive()`, so no Hello flows and no
+/// adjacency forms. Toggling bounces the interface (Disable→Enable)
+/// so an adjacency formed while active is dropped and the IFSM
+/// re-enters from the correct state.
+fn config_ospf_interface_passive(ospf: &mut Ospf, mut args: Args, op: ConfigOp) -> Option<()> {
+    let _area_id = parse_area_id(&args.string()?)?;
+    let name = args.string()?;
+    let passive = args.boolean()?;
+
+    let link = ospf_link_get_mut_by_name(&mut ospf.links, &name)?;
+    let old = link.config.passive;
+    link.config.passive = op.is_set() && passive;
+
+    if old != link.config.passive && link.enabled {
         let area_id = link.area_id;
         let _ = link.tx.send(Message::Disable(link.index, area_id));
         let _ = link.tx.send(Message::Enable(link.index, area_id));

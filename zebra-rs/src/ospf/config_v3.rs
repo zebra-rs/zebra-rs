@@ -159,6 +159,7 @@ impl Ospf<Ospfv3> {
                 "/area/interface/network-type",
                 config_ospfv3_interface_network_type,
             ),
+            ("/area/interface/passive", config_ospfv3_interface_passive),
             ("/area/interface/priority", config_ospfv3_interface_priority),
             ("/area/interface/cost", config_ospfv3_interface_cost),
             (
@@ -845,6 +846,30 @@ fn config_ospfv3_interface_network_type(
     let new = link.config_network_type();
 
     if old != new && link.enabled {
+        let area_id = link.area_id;
+        let _ = link.tx.send(Message::Disable(link.index, area_id));
+        let _ = link.tx.send(Message::Enable(link.index, area_id));
+    }
+
+    Some(())
+}
+
+/// `/router/ospfv3/area/<id>/interface/<name>/passive` — v3 sibling
+/// of `config_ospf_interface_passive`.
+fn config_ospfv3_interface_passive(
+    ospf: &mut Ospf<Ospfv3>,
+    mut args: Args,
+    op: ConfigOp,
+) -> Option<()> {
+    let _area_id = parse_area_id(&args.string()?)?;
+    let name = args.string()?;
+    let passive = args.boolean()?;
+
+    let link = ospf_link_get_mut_by_name(&mut ospf.links, &name)?;
+    let old = link.config.passive;
+    link.config.passive = op.is_set() && passive;
+
+    if old != link.config.passive && link.enabled {
         let area_id = link.area_id;
         let _ = link.tx.send(Message::Disable(link.index, area_id));
         let _ = link.tx.send(Message::Enable(link.index, area_id));
