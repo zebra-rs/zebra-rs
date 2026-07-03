@@ -35,8 +35,9 @@ per feature — see each feature's page):
   OSPFv3. See [Area Types](ch-08-13-ospf-area-types.md).
 - **ABR Type-3 (Summary) and Type-4 (ASBR-Summary) origination**,
   including cross-area E1/E2 external-route computation and
-  Type-4 fallback for inter-area ASBR resolution. v2 only —
-  OSPFv3 ABR summary origination is still pending. See
+  Type-4 fallback for inter-area ASBR resolution. Implemented for
+  both OSPFv2 and OSPFv3 (v3 Inter-Area-Prefix 0x2003 /
+  Inter-Area-Router 0x2004). See
   [Multi-Area Routing and the ABR](ch-08-14-ospf-multi-area-abr.md).
 - **Discard (blackhole) routes for active area ranges**
   (RFC 2328 §12.4.3) — the loop-safety companion to range
@@ -51,8 +52,9 @@ per feature — see each feature's page):
   (RFC 5709), RFC 8177 key-chains, and the OSPFv3 Authentication
   Trailer (RFC 7166). See
   [Authentication](ch-08-16-ospf-authentication.md).
-- **Graceful Restart** (RFC 3623) — helper mode (Grace-LSA
-  acceptance with optional strict-LSA-checking) and restarter
-  mode backed by an on-disk LSDB checkpoint; OSPFv3 is
-  helper-only. See
-  [Graceful Restart](ch-08-17-ospf-graceful-restart.md).
+- **Graceful Restart** — helper mode (Grace-LSA acceptance with
+  optional strict-LSA-checking) and restarter mode backed by an
+  on-disk LSDB checkpoint, in **both** roles for OSPFv2 (RFC 3623)
+  and OSPFv3 (RFC 5187). See
+  [Graceful Restart](ch-08-17-ospf-graceful-restart.md) and the
+  [OSPFv3 sibling](ch-15-12-ospfv3-graceful-restart.md).
