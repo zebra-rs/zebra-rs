@@ -66,6 +66,22 @@ impl Ospf<Ospfv3> {
                 "/area/redistribute/connected/metric-type",
                 config_ospfv3_area_redist_connected_metric_type,
             ),
+            (
+                "/default-information/originate",
+                config_ospfv3_default_originate,
+            ),
+            (
+                "/default-information/originate/always",
+                config_ospfv3_default_originate_always,
+            ),
+            (
+                "/default-information/originate/metric",
+                config_ospfv3_default_originate_metric,
+            ),
+            (
+                "/default-information/originate/metric-type",
+                config_ospfv3_default_originate_metric_type,
+            ),
             ("/area/range", config_ospfv3_area_range),
             (
                 "/area/range/not-advertise",
@@ -648,6 +664,97 @@ ospfv3_redist_handlers!(
     config_ospfv3_redist_bgp_metric_type,
     crate::rib::RibType::Bgp
 );
+
+/// v3 sibling of `ospf_sync_default_watch` (IPv6 default watch).
+fn ospfv3_sync_default_watch(ospf: &mut Ospf<Ospfv3>) {
+    use crate::rib::{Message as RibMsg, RedistAfi};
+    let want = matches!(ospf.default_originate, Some(cfg) if !cfg.always);
+    if want == ospf.default_watch_active {
+        return;
+    }
+    let proto = ospf.proto_label.clone();
+    let msg = if want {
+        RibMsg::RedistDefaultAdd {
+            proto,
+            afi: RedistAfi::Ipv6,
+        }
+    } else {
+        RibMsg::RedistDefaultDel {
+            proto,
+            afi: RedistAfi::Ipv6,
+        }
+    };
+    let _ = ospf.ctx.rib.send(msg);
+    ospf.default_watch_active = want;
+    if !want {
+        let covered = ospf.redist.clone();
+        ospf.redist_v6
+            .retain(|(rt, p), _| p.prefix_len() != 0 || covered.contains_key(rt));
+    }
+}
+
+/// `/router/ospfv3/default-information/originate` — presence.
+fn config_ospfv3_default_originate(
+    ospf: &mut Ospf<Ospfv3>,
+    _args: Args,
+    op: ConfigOp,
+) -> Option<()> {
+    if op.is_set() {
+        ospf.default_originate.get_or_insert_with(Default::default);
+    } else {
+        ospf.default_originate = None;
+    }
+    ospfv3_sync_default_watch(ospf);
+    ospf.default_originate_resync_v3();
+    Some(())
+}
+
+/// `/router/ospfv3/default-information/originate/always`.
+fn config_ospfv3_default_originate_always(
+    ospf: &mut Ospf<Ospfv3>,
+    mut args: Args,
+    op: ConfigOp,
+) -> Option<()> {
+    let value = if op.is_set() { args.boolean()? } else { false };
+    ospf.default_originate
+        .get_or_insert_with(Default::default)
+        .always = value;
+    ospfv3_sync_default_watch(ospf);
+    ospf.default_originate_resync_v3();
+    Some(())
+}
+
+/// `/router/ospfv3/default-information/originate/metric`.
+fn config_ospfv3_default_originate_metric(
+    ospf: &mut Ospf<Ospfv3>,
+    mut args: Args,
+    op: ConfigOp,
+) -> Option<()> {
+    let value = if op.is_set() { args.u32()? } else { 10 };
+    ospf.default_originate
+        .get_or_insert_with(Default::default)
+        .metric = value;
+    ospf.default_originate_resync_v3();
+    Some(())
+}
+
+/// `/router/ospfv3/default-information/originate/metric-type`.
+fn config_ospfv3_default_originate_metric_type(
+    ospf: &mut Ospf<Ospfv3>,
+    mut args: Args,
+    op: ConfigOp,
+) -> Option<()> {
+    let value = if op.is_set() {
+        ExternalMetricType::from_yang(&args.string()?)?
+    } else {
+        ExternalMetricType::default()
+    };
+    ospf.default_originate
+        .get_or_insert_with(Default::default)
+        .metric_type = value;
+    ospf.default_originate_resync_v3();
+    Some(())
+}
 
 /// `/router/ospfv3/area/<id>/range` — v3 sibling of
 /// `config_ospf_area_range` (Inter-Area-Prefix aggregation).

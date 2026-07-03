@@ -595,6 +595,35 @@ module config {
             }
           }
         }
+        // FRR-parity `default-information originate`: advertise a
+        // Type-5 default route. Without `always` it is originated
+        // only while a non-OSPF default route sits in the RIB
+        // (tracked via the RIB default-route watch); `always`
+        // originates unconditionally. Metric defaults to 10 (FRR
+        // convention for the originated default; redistribute uses
+        // 20), E2 semantics.
+        container default-information {
+          container originate {
+            presence "Originate a Type-5 default route";
+            leaf always {
+              type boolean;
+              default false;
+            }
+            leaf metric {
+              type uint32 {
+                range "0..16777214";
+              }
+              default 10;
+            }
+            leaf metric-type {
+              type enumeration {
+                enum type-1;
+                enum type-2;
+              }
+              default type-2;
+            }
+          }
+        }
         list area {
           // Area key accepts either a plain decimal (`area 0`) or a
           // dotted-quad (`area 0.0.0.1`). Both normalize to a 32-bit
@@ -1321,6 +1350,35 @@ module config {
                 range "0..16777214";
               }
               default 20;
+            }
+            leaf metric-type {
+              type enumeration {
+                enum type-1;
+                enum type-2;
+              }
+              default type-2;
+            }
+          }
+        }
+        // FRR-parity `default-information originate`: advertise a
+        // Type-5 default route. Without `always` it is originated
+        // only while a non-OSPF default route sits in the RIB
+        // (tracked via the RIB default-route watch); `always`
+        // originates unconditionally. Metric defaults to 10 (FRR
+        // convention for the originated default; redistribute uses
+        // 20), E2 semantics.
+        container default-information {
+          container originate {
+            presence "Originate a Type-5 default route";
+            leaf always {
+              type boolean;
+              default false;
+            }
+            leaf metric {
+              type uint32 {
+                range "0..16777214";
+              }
+              default 10;
             }
             leaf metric-type {
               type enumeration {

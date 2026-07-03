@@ -275,6 +275,28 @@ pub struct OspfArea<V: OspfVersion = Ospfv2> {
     pub ranges_v6: BTreeMap<Ipv6Net, AreaRange>,
 }
 
+/// Instance-level `default-information originate` configuration.
+/// Without `always`, the Type-5 default is originated only while a
+/// non-OSPF default route sits in the RIB (tracked via the RIB
+/// default watch); `always` originates unconditionally. Metric
+/// defaults to 10 (FRR parity) with E2 semantics.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct DefaultOriginate {
+    pub always: bool,
+    pub metric: u32,
+    pub metric_type: ExternalMetricType,
+}
+
+impl Default for DefaultOriginate {
+    fn default() -> Self {
+        Self {
+            always: false,
+            metric: 10,
+            metric_type: ExternalMetricType::default(),
+        }
+    }
+}
+
 /// One configured `area <id> range <prefix>` entry.
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
 pub struct AreaRange {

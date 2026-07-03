@@ -590,6 +590,7 @@ impl Rib {
             .cloned();
         super::redist::notify_v4_delta(
             &self.redist_filters,
+            &self.redist_default_watch,
             &self.client_registry,
             prefix,
             before.as_ref(),
@@ -622,6 +623,7 @@ impl Rib {
             .cloned();
         super::redist::notify_v4_delta(
             &self.redist_filters,
+            &self.redist_default_watch,
             &self.client_registry,
             prefix,
             before.as_ref(),
@@ -668,6 +670,7 @@ impl Rib {
             .cloned();
         super::redist::notify_v6_delta(
             &self.redist_filters,
+            &self.redist_default_watch,
             &self.client_registry,
             prefix,
             before.as_ref(),
@@ -700,6 +703,7 @@ impl Rib {
             .cloned();
         super::redist::notify_v6_delta(
             &self.redist_filters,
+            &self.redist_default_watch,
             &self.client_registry,
             prefix,
             before.as_ref(),
@@ -785,6 +789,7 @@ impl Rib {
         let after = selected_v4(&self.table, prefix).cloned();
         super::redist::notify_v4_delta(
             &self.redist_filters,
+            &self.redist_default_watch,
             &self.client_registry,
             prefix,
             before.as_ref(),
@@ -811,6 +816,7 @@ impl Rib {
         let after = selected_v4(&self.table, prefix).cloned();
         super::redist::notify_v4_delta(
             &self.redist_filters,
+            &self.redist_default_watch,
             &self.client_registry,
             prefix,
             before.as_ref(),
@@ -933,6 +939,7 @@ impl Rib {
         let after = selected_v6(&self.table_v6, prefix).cloned();
         super::redist::notify_v6_delta(
             &self.redist_filters,
+            &self.redist_default_watch,
             &self.client_registry,
             prefix,
             before.as_ref(),
@@ -959,6 +966,7 @@ impl Rib {
         let after = selected_v6(&self.table_v6, prefix).cloned();
         super::redist::notify_v6_delta(
             &self.redist_filters,
+            &self.redist_default_watch,
             &self.client_registry,
             prefix,
             before.as_ref(),
@@ -998,6 +1006,7 @@ impl Rib {
         for (prefix, before, after) in deltas {
             super::redist::notify_v4_delta(
                 &self.redist_filters,
+                &self.redist_default_watch,
                 &self.client_registry,
                 &prefix,
                 before.as_ref(),
@@ -1029,6 +1038,7 @@ impl Rib {
         for (prefix, before, after) in deltas {
             super::redist::notify_v6_delta(
                 &self.redist_filters,
+                &self.redist_default_watch,
                 &self.client_registry,
                 &prefix,
                 before.as_ref(),
@@ -1070,6 +1080,7 @@ impl Rib {
         for (prefix, before, after) in deltas {
             super::redist::notify_v4_delta(
                 &self.redist_filters,
+                &self.redist_default_watch,
                 &self.client_registry,
                 &prefix,
                 before.as_ref(),
@@ -1095,6 +1106,7 @@ impl Rib {
         for (prefix, before, after) in deltas {
             super::redist::notify_v6_delta(
                 &self.redist_filters,
+                &self.redist_default_watch,
                 &self.client_registry,
                 &prefix,
                 before.as_ref(),

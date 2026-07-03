@@ -48,6 +48,15 @@ Notes:
   to AS-External at the NSSA ABR — see
   [Area Types: Stub and NSSA](ch-15-03-ospfv3-area-types.md).
 
+## Default route origination
+
+`default-information originate [always] [metric] [metric-type]`
+advertises an AS-External default (`::/0`) with the same knobs and
+semantics as [the v2 page](ch-08-15-ospf-redistribution.md): with
+`always` unconditionally, without it only while a non-OSPF default
+route exists in the RIB (tracked via the RIB default-route watch).
+The metric defaults to 10, E2.
+
 Receive-side handling installs AS-External routes with the standard
 RFC 2328 §16.4 preference and metric arithmetic, including
 inter-area ASBR resolution through Inter-Area-Router-LSAs (§16.4

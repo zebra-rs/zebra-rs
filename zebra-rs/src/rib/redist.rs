@@ -402,6 +402,7 @@ pub(super) fn selected_changed_v6(
 /// versa.
 pub fn notify_v4_delta(
     filters: &HashMap<String, FilterMap>,
+    default_watch: &HashMap<String, BTreeSet<super::RedistAfi>>,
     registry: &ClientRegistry,
     prefix: &Ipv4Net,
     before: Option<&RibEntry>,
@@ -411,6 +412,14 @@ pub fn notify_v4_delta(
     if before.is_none() && after.is_none() {
         return;
     }
+    notify_default_v4(
+        default_watch,
+        registry,
+        prefix,
+        before,
+        after,
+        target_vrf_id,
+    );
     for (proto, filter_map) in filters {
         let Some(sub) = registry.subscriber_for_proto(proto) else {
             continue;
@@ -437,6 +446,7 @@ pub fn notify_v4_delta(
 /// `target_vrf_id` scoping rules.
 pub fn notify_v6_delta(
     filters: &HashMap<String, FilterMap>,
+    default_watch: &HashMap<String, BTreeSet<super::RedistAfi>>,
     registry: &ClientRegistry,
     prefix: &Ipv6Net,
     before: Option<&RibEntry>,
@@ -446,6 +456,14 @@ pub fn notify_v6_delta(
     if before.is_none() && after.is_none() {
         return;
     }
+    notify_default_v6(
+        default_watch,
+        registry,
+        prefix,
+        before,
+        after,
+        target_vrf_id,
+    );
     for (proto, filter_map) in filters {
         let Some(sub) = registry.subscriber_for_proto(proto) else {
             continue;
@@ -461,6 +479,133 @@ pub fn notify_v6_delta(
             let old = entry_for_subscriber_v6(prefix, before, *rtype, subtypes, proto);
             let new = entry_for_subscriber_v6(prefix, after, *rtype, subtypes, proto);
             emit_v6_diff(tx, *rtype, old, new);
+        }
+    }
+}
+
+/// Default-prefix watch: like the per-rtype rows but matching only
+/// the default route (0.0.0.0/0), any rtype, self-routes excluded.
+/// Feeds `default-information originate` tracking — the consumer
+/// learns whether a non-self default exists without subscribing to
+/// whole routing tables. Deliveries ride the ordinary RouteAdd /
+/// RouteDel channel with the route's real rtype.
+fn notify_default_v4(
+    default_watch: &HashMap<String, BTreeSet<super::RedistAfi>>,
+    registry: &ClientRegistry,
+    prefix: &Ipv4Net,
+    before: Option<&RibEntry>,
+    after: Option<&RibEntry>,
+    target_vrf_id: u32,
+) {
+    if prefix.prefix_len() != 0 {
+        return;
+    }
+    for (proto, afis) in default_watch {
+        if !afis.contains(&super::RedistAfi::Ipv4) {
+            continue;
+        }
+        let Some(sub) = registry.subscriber_for_proto(proto) else {
+            continue;
+        };
+        if sub.vrf_id != target_vrf_id {
+            continue;
+        }
+        let old = entry_for_default_v4(prefix, before, proto);
+        let new = entry_for_default_v4(prefix, after, proto);
+        emit_default_v4(&sub.rib_rx_tx, old, new);
+    }
+}
+
+/// IPv6 sibling of [`notify_default_v4`] (::/0).
+fn notify_default_v6(
+    default_watch: &HashMap<String, BTreeSet<super::RedistAfi>>,
+    registry: &ClientRegistry,
+    prefix: &Ipv6Net,
+    before: Option<&RibEntry>,
+    after: Option<&RibEntry>,
+    target_vrf_id: u32,
+) {
+    if prefix.prefix_len() != 0 {
+        return;
+    }
+    for (proto, afis) in default_watch {
+        if !afis.contains(&super::RedistAfi::Ipv6) {
+            continue;
+        }
+        let Some(sub) = registry.subscriber_for_proto(proto) else {
+            continue;
+        };
+        if sub.vrf_id != target_vrf_id {
+            continue;
+        }
+        let old = entry_for_default_v6(prefix, before, proto);
+        let new = entry_for_default_v6(prefix, after, proto);
+        emit_default_v6(&sub.rib_rx_tx, old, new);
+    }
+}
+
+/// Watch-entry builder: any rtype accepted (the watch is per-prefix,
+/// not per-source), self-routes still excluded via `deliverable`.
+pub(super) fn entry_for_default_v4(
+    prefix: &Ipv4Net,
+    entry: Option<&RibEntry>,
+    proto: &str,
+) -> Option<(RibType, RouteEntryV4)> {
+    let e = entry?;
+    if !deliverable(proto, e.rtype) {
+        return None;
+    }
+    build_v4_entry(prefix, e).map(|b| (e.rtype, b))
+}
+
+/// IPv6 sibling of [`entry_for_default_v4`].
+pub(super) fn entry_for_default_v6(
+    prefix: &Ipv6Net,
+    entry: Option<&RibEntry>,
+    proto: &str,
+) -> Option<(RibType, RouteEntryV6)> {
+    let e = entry?;
+    if !deliverable(proto, e.rtype) {
+        return None;
+    }
+    build_v6_entry(prefix, e).map(|b| (e.rtype, b))
+}
+
+/// Diff-emit for the default watch. Unlike `emit_v4_diff` the rtype
+/// can change across the transition (default moved from static to
+/// bgp), so a changed entry is a Del under the old rtype followed by
+/// an Add under the new one.
+pub(super) fn emit_default_v4(
+    tx: &UnboundedSender<RibRx>,
+    old: Option<(RibType, RouteEntryV4)>,
+    new: Option<(RibType, RouteEntryV4)>,
+) {
+    match (old, new) {
+        (None, None) => {}
+        (Some((rt, o)), None) => send_v4_one(tx, rt, WalkOp::Del, o),
+        (None, Some((rt, n))) => send_v4_one(tx, rt, WalkOp::Add, n),
+        (Some((ort, o)), Some((nrt, n))) if ort == nrt && o == n => {}
+        (Some((ort, o)), Some((nrt, n))) => {
+            send_v4_one(tx, ort, WalkOp::Del, o);
+            send_v4_one(tx, nrt, WalkOp::Add, n);
+        }
+    }
+}
+
+/// IPv6 sibling of [`emit_default_v4`].
+pub(super) fn emit_default_v6(
+    tx: &UnboundedSender<RibRx>,
+    old: Option<(RibType, RouteEntryV6)>,
+    new: Option<(RibType, RouteEntryV6)>,
+) {
+    match (old, new) {
+        (None, None) => {}
+        (Some((rt, o)), None) => send_v6_one(tx, rt, WalkOp::Del, o),
+        (None, Some((rt, n))) => send_v6_one(tx, rt, WalkOp::Add, n),
+        (Some((ort, o)), Some((nrt, n))) if ort == nrt && o == n => {}
+        (Some((ort, o)), Some((nrt, n))) => {
+            send_v6_one(tx, ort, WalkOp::Del, o);
+            send_v6_one(tx, nrt, WalkOp::Add, n);
         }
     }
 }
@@ -747,7 +892,15 @@ mod tests {
         let conn = connected_link(7);
 
         // Connected route appears in VRF 100 → only the VRF subscriber.
-        notify_v4_delta(&filters, &reg, &prefix, None, Some(&conn), 100);
+        notify_v4_delta(
+            &filters,
+            &HashMap::new(),
+            &reg,
+            &prefix,
+            None,
+            Some(&conn),
+            100,
+        );
         assert!(
             matches!(rx_vrf.try_recv(), Ok(RibRx::RouteAdd { .. })),
             "VRF subscriber must hear the VRF-100 add"
@@ -759,7 +912,15 @@ mod tests {
 
         // Same prefix appears in the default table → only the default
         // subscriber.
-        notify_v4_delta(&filters, &reg, &prefix, None, Some(&conn), 0);
+        notify_v4_delta(
+            &filters,
+            &HashMap::new(),
+            &reg,
+            &prefix,
+            None,
+            Some(&conn),
+            0,
+        );
         assert!(
             matches!(rx_def.try_recv(), Ok(RibRx::RouteAdd { .. })),
             "default subscriber must hear the default-table add"
@@ -779,7 +940,15 @@ mod tests {
         let prefix: Ipv4Net = "203.0.113.0/24".parse().unwrap();
         let conn = connected_link(7);
 
-        notify_v4_delta(&filters, &reg, &prefix, None, Some(&conn), 777);
+        notify_v4_delta(
+            &filters,
+            &HashMap::new(),
+            &reg,
+            &prefix,
+            None,
+            Some(&conn),
+            777,
+        );
         assert!(rx_def.try_recv().is_err());
         assert!(rx_vrf.try_recv().is_err());
     }
