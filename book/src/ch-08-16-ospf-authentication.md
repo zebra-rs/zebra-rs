@@ -126,8 +126,16 @@ validates the sender's key-id against its accept-lifetime window.
 Key chains are shared infrastructure — the same `/key-chains` tree
 also serves IS-IS and BGP.
 
-## Verification behavior
+## Wire format and verification behavior
 
+- The OSPF packet checksum follows RFC 2328 Appendix D exactly:
+  for Null and Simple authentication it is computed over the packet
+  *excluding* the 64-bit authentication field, and for
+  cryptographic authentication (AuType 2) it is **not computed at
+  all** — the field stays zero and the digest trailer carries the
+  integrity check (§D.4.3). Ingress likewise skips checksum
+  validation on AuType-2 packets, so FRR's checksum-zero
+  cryptographic packets interoperate in both directions.
 - Cryptographic packets carry a per-link 32-bit sequence number;
   a received sequence lower than the neighbor's last-seen value is
   dropped as a replay (equal is accepted, matching FRR, so
@@ -160,3 +168,8 @@ is shared between the v2 and v3 instances of a link.
 Note the configuration caveat: the authentication leaves shown
 above attach to the `router ospf` (v2) interface tree only — there
 is currently no separate `router ospfv3 … authentication` path.
+
+All four OSPFv2 modes — simple password, keyed-MD5, HMAC-SHA-256,
+and key-chain — are BDD-validated end to end
+(`ospfv2_auth.feature`), including the negative case: mismatched
+secrets never create a neighbor.

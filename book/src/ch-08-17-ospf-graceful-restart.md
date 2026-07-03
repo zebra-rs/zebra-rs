@@ -104,6 +104,14 @@ summarizes the on-disk checkpoint, and `show ospf database` marks
 neighbors advertising the Router Information "Graceful Restart
 helper" capability.
 
+The full cycle is BDD-validated (`ospfv2_graceful_restart.feature`):
+a staged restart drives helper entry on the peer and abort recovers,
+and a committed restart holds the adjacency and route on the helper
+well past the 40 s dead interval while the daemon is down, then
+resumes from the checkpoint — the adjacency re-exchanges
+(Full → ExStart → Full) inside the grace window without ever taking
+a dead-timer kill.
+
 ## OSPFv3
 
 OSPFv3 implements the helper side only, with the default policy
