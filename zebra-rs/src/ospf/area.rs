@@ -262,6 +262,28 @@ pub struct OspfArea<V: OspfVersion = Ospfv2> {
     /// Type-4 Summary-ASBR LSA into this area. Flushed when the
     /// ABR loses connectivity to the ASBR or the area.
     pub asbr_summaries_originated: BTreeSet<Ipv4Addr>,
+
+    /// RFC 2328 §12.4.3 address ranges configured on this area
+    /// (`area <id> range <prefix>`), consulted by the ABR summary
+    /// desired-set computation: intra-area routes of this area that
+    /// fall inside a range are folded into one aggregate (largest
+    /// component metric, or the configured cost) or suppressed
+    /// entirely (`not-advertise`). The generic `OspfArea<V>` carries
+    /// both the v4 and v6 maps; each version touches its own.
+    pub ranges: BTreeMap<Ipv4Net, AreaRange>,
+    /// v6 sibling of `ranges` (OSPFv3 Inter-Area-Prefix aggregation).
+    pub ranges_v6: BTreeMap<Ipv6Net, AreaRange>,
+}
+
+/// One configured `area <id> range <prefix>` entry.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub struct AreaRange {
+    /// Suppress the aggregate as well — the whole range (components
+    /// and summary) stays hidden from the other areas.
+    pub not_advertise: bool,
+    /// Advertise the aggregate at this fixed cost instead of the
+    /// largest component metric.
+    pub cost: Option<u32>,
 }
 
 impl<V: OspfVersion> OspfArea<V> {
@@ -279,6 +301,8 @@ impl<V: OspfVersion> OspfArea<V> {
             redist_connected_originated_v6: BTreeSet::new(),
             nssa_translated: BTreeSet::new(),
             asbr_summaries_originated: BTreeSet::new(),
+            ranges: BTreeMap::new(),
+            ranges_v6: BTreeMap::new(),
         }
     }
 }

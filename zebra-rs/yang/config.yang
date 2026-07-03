@@ -681,6 +681,29 @@ module config {
               }
             }
           }
+          // RFC 2328 §12.4.3 address ranges: at an ABR, intra-area
+          // routes of THIS area that fall inside a range are not
+          // advertised individually into the other areas — one
+          // aggregate is advertised instead, at the largest component
+          // metric (or the configured `cost`). `not-advertise`
+          // suppresses the aggregate too, hiding the whole range.
+          // Ranges never apply to routes re-advertised from other
+          // areas.
+          list range {
+            key "prefix";
+            leaf prefix {
+              type inet:ipv4-prefix;
+            }
+            leaf not-advertise {
+              type boolean;
+              default false;
+            }
+            leaf cost {
+              type uint32 {
+                range "0..16777214";
+              }
+            }
+          }
           list interface {
             key "if-name";
             leaf if-name {
@@ -1359,6 +1382,29 @@ module config {
                   enum type-2;
                 }
                 default type-2;
+              }
+            }
+          }
+          // RFC 2328 §12.4.3 address ranges: at an ABR, intra-area
+          // routes of THIS area that fall inside a range are not
+          // advertised individually into the other areas — one
+          // aggregate is advertised instead, at the largest component
+          // metric (or the configured `cost`). `not-advertise`
+          // suppresses the aggregate too, hiding the whole range.
+          // Ranges never apply to routes re-advertised from other
+          // areas.
+          list range {
+            key "prefix";
+            leaf prefix {
+              type inet:ipv6-prefix;
+            }
+            leaf not-advertise {
+              type boolean;
+              default false;
+            }
+            leaf cost {
+              type uint32 {
+                range "0..16777214";
               }
             }
           }

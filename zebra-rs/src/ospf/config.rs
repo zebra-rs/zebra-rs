@@ -50,6 +50,12 @@ impl Ospf {
             "/area/redistribute/connected/metric-type",
             config_ospf_area_redist_connected_metric_type,
         );
+        self.ospf_add("/area/range", config_ospf_area_range);
+        self.ospf_add(
+            "/area/range/not-advertise",
+            config_ospf_area_range_not_advertise,
+        );
+        self.ospf_add("/area/range/cost", config_ospf_area_range_cost);
         self.ospf_add("/area/interface/enable", config_ospf_interface_enable);
         self.ospf_add(
             "/area/interface/bfd/enable",
@@ -654,6 +660,58 @@ ospf_redist_handlers!(
     config_ospf_redist_isis_metric_type,
     crate::rib::RibType::Isis
 );
+
+/// `/router/ospf/area/<id>/range` — one RFC 2328 §12.4.3 address
+/// range entry (list keyed by prefix). Set creates it with defaults
+/// (advertise, largest-component metric); delete removes it. Either
+/// way the ABR summary reconciliation re-runs so aggregation applies
+/// immediately.
+fn config_ospf_area_range(ospf: &mut Ospf, mut args: Args, op: ConfigOp) -> Option<()> {
+    let area_id = parse_area_id(&args.string()?)?;
+    let prefix = args.v4net()?.trunc();
+    if op.is_set() {
+        ospf.areas.fetch(area_id).ranges.entry(prefix).or_default();
+    } else if let Some(area) = ospf.areas.get_mut(area_id) {
+        area.ranges.remove(&prefix);
+    }
+    ospf.abr_summary_originate();
+    Some(())
+}
+
+/// `/router/ospf/area/<id>/range/<prefix>/not-advertise`.
+fn config_ospf_area_range_not_advertise(
+    ospf: &mut Ospf,
+    mut args: Args,
+    op: ConfigOp,
+) -> Option<()> {
+    let area_id = parse_area_id(&args.string()?)?;
+    let prefix = args.v4net()?.trunc();
+    let value = if op.is_set() { args.boolean()? } else { false };
+    ospf.areas
+        .fetch(area_id)
+        .ranges
+        .entry(prefix)
+        .or_default()
+        .not_advertise = value;
+    ospf.abr_summary_originate();
+    Some(())
+}
+
+/// `/router/ospf/area/<id>/range/<prefix>/cost` — fixed aggregate
+/// metric; delete reverts to largest-component.
+fn config_ospf_area_range_cost(ospf: &mut Ospf, mut args: Args, op: ConfigOp) -> Option<()> {
+    let area_id = parse_area_id(&args.string()?)?;
+    let prefix = args.v4net()?.trunc();
+    let cost = if op.is_set() { Some(args.u32()?) } else { None };
+    ospf.areas
+        .fetch(area_id)
+        .ranges
+        .entry(prefix)
+        .or_default()
+        .cost = cost;
+    ospf.abr_summary_originate();
+    Some(())
+}
 
 /// `/router/ospf/area/<id>/redistribute/connected` — presence
 /// container. On Set: create the area's `RedistEntry` with
