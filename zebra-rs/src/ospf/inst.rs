@@ -5668,12 +5668,11 @@ impl Ospf<Ospfv3> {
         ospf.tracing.proto = Ospfv3::PROTO;
         ospf.callback_build();
         ospf.show_build();
-        // v3 has no on-disk GR checkpoint load today, so nothing to
-        // gate here (a per-VRF child would otherwise need the same
-        // default-instance guard the v2 path uses).
         // Restart-aware boot (v3): replay a fresh ospfv3 checkpoint
-        // before any adjacency forms. Only the default instance —
-        // per-VRF children have no checkpoint file.
+        // before any adjacency forms, so a committed graceful restart
+        // resumes from the saved LSDB. Only the default instance —
+        // per-VRF children have no checkpoint file (they'd otherwise
+        // need the same default-instance guard the v2 path uses).
         if ospf.proto_label == "ospfv3" {
             ospf.gr_restart_load_checkpoint_v3();
         }
