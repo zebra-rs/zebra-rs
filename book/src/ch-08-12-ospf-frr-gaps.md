@@ -3,8 +3,6 @@
 OSPFv2 features not yet implemented in zebra-rs:
 
 - Virtual links across non-backbone areas.
-- Discard (Null0) routes for active area ranges — the aggregation
-  and suppression themselves are implemented.
 - NBMA and point-to-multipoint network types — the per-interface
   `network-type` knob accepts `broadcast` and `point-to-point`
   only.
@@ -40,6 +38,11 @@ per feature — see each feature's page):
   Type-4 fallback for inter-area ASBR resolution. v2 only —
   OSPFv3 ABR summary origination is still pending. See
   [Multi-Area Routing and the ABR](ch-08-14-ospf-multi-area-abr.md).
+- **Discard (blackhole) routes for active area ranges**
+  (RFC 2328 §12.4.3) — the loop-safety companion to range
+  aggregation, installed via the RIB `nexthop blackhole` type for
+  both OSPFv2 and OSPFv3. See
+  [Multi-Area Routing and the ABR](ch-08-14-ospf-multi-area-abr.md#discard-route).
 - **Type-5 (AS-External) origination from redistribution** and
   **Type-7 (NSSA-External) translation**. See
   [Route Redistribution](ch-08-15-ospf-redistribution.md).

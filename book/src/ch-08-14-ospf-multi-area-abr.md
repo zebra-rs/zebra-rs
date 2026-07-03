@@ -88,9 +88,37 @@ The most-specific configured range wins when several contain a
 component. Ranges apply only to the area's own intra-area routes —
 inter-area routes re-advertised from the backbone pass through
 unaffected — and prefixes outside every range keep advertising
-individually. The RFC's companion discard route for active ranges
-(FRR's Null0) is not installed yet; see
-[Gaps Relative to FRR ospfd](ch-08-12-ospf-frr-gaps.md).
+individually.
+
+### Discard route
+
+Advertising one aggregate for a whole range means the ABR draws
+traffic for *every* address in the range, including sub-prefixes
+that no component actually covers. Without protection that traffic
+would fall through to the ABR's own default route and could loop
+straight back. RFC 2328 §12.4.3 closes the hole with a companion
+*discard* route: while a range is active the ABR installs a
+blackhole covering the aggregate, so a packet to a non-existent
+component is dropped locally instead of forwarded.
+
+zebra-rs installs this discard through the RIB `nexthop blackhole`
+type (kernel `RTN_BLACKHOLE`, the same primitive as
+[static blackhole routes](ch-01-03-blackhole-static-route.md)):
+
+```
+$ ip route show 10.1.0.0/16
+blackhole 10.1.0.0/16 proto ospf
+```
+
+The discard is more general (shorter prefix) than every component,
+so real destinations still match their specific intra-area route by
+longest-prefix; only the gaps hit the blackhole. It is installed for
+every active range — including `not-advertise` ranges, since hiding
+the aggregate from neighbors does not remove the local loop
+exposure — and withdrawn as soon as the range loses its last
+component or the router stops being an ABR. A range prefix that a
+real OSPF route already reaches exactly is left alone rather than
+blackholed.
 
 ## Type-4 ASBR-Summary origination
 

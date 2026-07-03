@@ -89,5 +89,12 @@ router ospfv3 {
 ```
 
 The `not-advertise` and `cost` leaves match
-[the v2 page's table](ch-08-14-ospf-multi-area-abr.md); the discard
-route for active ranges is likewise not installed yet.
+[the v2 page's table](ch-08-14-ospf-multi-area-abr.md). The
+loop-safety [discard route](ch-08-14-ospf-multi-area-abr.md#discard-route)
+for active ranges is installed identically — a `nexthop blackhole`
+covering the aggregate, withdrawn when the range empties:
+
+```
+$ ip -6 route show 2001:db8:1::/48
+blackhole 2001:db8:1::/48 proto ospf
+```
