@@ -6841,12 +6841,12 @@ fn route_evpn_export_selected(
             EvpnPrefix::InclusiveMulticast { orig, .. } => {
                 if let Some(vni) = extract_vni_from_attr(&wd.attr) {
                     // Mirror the announce side: the withdrawn IMET carried a
-                    // DT2M SID -> remove the BUM sentinel.
-                    if evpn_srv6_sid(&wd.attr, bgp_packet::SRV6_BEHAVIOR_END_DT2M).is_some() {
-                        let _ = bgp.rib_client.send(rib::Message::MacDel {
-                            vni,
-                            mac: MacAddr::from([0xff; 6]),
-                        });
+                    // DT2M SID -> drop its replication slot.
+                    if let Some(dt2m) = evpn_srv6_sid(&wd.attr, bgp_packet::SRV6_BEHAVIOR_END_DT2M)
+                    {
+                        let _ = bgp
+                            .rib_client
+                            .send(rib::Message::CradleReplDel { vni, sid: dt2m });
                     }
                     bgp.local_rib.evpn_flood.remove_remote(vni, *orig);
                     evpn_gateway_tree_set(bgp.local_rib, *bgp.router_id, vni);
@@ -6944,21 +6944,16 @@ fn route_evpn_export_selected(
             // type 0x0A carries the AR-IP) and reconcile the role-aware flood
             // list, rather than blindly flooding toward the originating IP.
             if let Some(vni) = extract_vni_from_attr(&best.attr) {
-                // RFC 9252 §6.4: a remote End.DT2M SID on the IMET is the BUM
-                // tunnel target for this VNI. Install it as the bridge
-                // domain's all-ones BUM sentinel (the cradle-tee L2 data
-                // plane encapsulates broadcast/multicast toward it);
-                // independent of the PMSI mode below.
+                // RFC 9252 §6.4: a remote End.DT2M SID on the IMET is a BUM
+                // flood-set member for this VNI. Tee it to cradle as a
+                // replication slot — per-copy MAC-in-SRv6 encap in the
+                // bridge domain's flood list, one slot per remote PE, so any
+                // number of remotes works (the old single-remote all-ones
+                // sentinel is superseded). Independent of the PMSI mode.
                 if let Some(dt2m) = evpn_srv6_sid(&best.attr, bgp_packet::SRV6_BEHAVIOR_END_DT2M) {
-                    let _ = bgp.rib_client.send(rib::Message::MacAdd {
-                        vni,
-                        mac: MacAddr::from([0xff; 6]),
-                        tunnel_endpoint: None,
-                        flags: 0,
-                        seq: 0,
-                        esi: None,
-                        srv6_sid: Some(dt2m),
-                    });
+                    let _ = bgp
+                        .rib_client
+                        .send(rib::Message::CradleReplAdd { vni, sid: dt2m });
                 }
                 let pmsi = best.attr.pmsi_tunnel.as_ref();
                 if let Some(p) = pmsi.filter(|p| p.is_sr_p2mp()) {

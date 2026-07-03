@@ -591,6 +591,45 @@ impl CradleFib {
         Ok(resp.into_inner())
     }
 
+    /// Add a BUM replication slot (EVPN Type-3 tee): the remote PE behind
+    /// `sid` (its `End.DT2M`) joins VNI `vni`'s flood set. cradle owns the
+    /// slot plumbing (veth pair + flood membership + per-copy encap);
+    /// idempotent per `(vni, sid)`.
+    pub async fn repl_slot_add(&self, vni: u32, sid: std::net::Ipv6Addr) {
+        let result = async {
+            self.client()
+                .await?
+                .add_repl_slot(pb::ReplSlot {
+                    bd: vni,
+                    remote_sid: sid.to_string(),
+                })
+                .await?;
+            anyhow::Ok(())
+        }
+        .await;
+        if let Err(e) = result {
+            tracing::warn!("fib: cradle repl_slot_add vni {vni} {sid} failed: {e}");
+        }
+    }
+
+    /// Remove a `(vni, sid)` replication slot.
+    pub async fn repl_slot_del(&self, vni: u32, sid: std::net::Ipv6Addr) {
+        let result = async {
+            self.client()
+                .await?
+                .del_repl_slot(pb::ReplSlot {
+                    bd: vni,
+                    remote_sid: sid.to_string(),
+                })
+                .await?;
+            anyhow::Ok(())
+        }
+        .await;
+        if let Err(e) = result {
+            tracing::warn!("fib: cradle repl_slot_del vni {vni} {sid} failed: {e}");
+        }
+    }
+
     /// Feed a resolved neighbor (ARP/ND) into the cradle data plane — the
     /// MPLS egress rewrite (`mpls_l2_xmit`) resolves destination MACs from
     /// this state rather than the kernel neighbor table.

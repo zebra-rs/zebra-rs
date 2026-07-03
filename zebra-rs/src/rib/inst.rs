@@ -324,6 +324,17 @@ pub enum Message {
         vni: u32,
         mac: MacAddr,
     },
+    /// A remote PE joined/left a VNI's BUM flood set (EVPN Type-3 with an
+    /// SRv6 `End.DT2M` SID, RFC 9252 §6.4) — teed to cradle as a BUM
+    /// replication slot (per-copy MAC-in-SRv6 encap in the flood list).
+    CradleReplAdd {
+        vni: u32,
+        sid: std::net::Ipv6Addr,
+    },
+    CradleReplDel {
+        vni: u32,
+        sid: std::net::Ipv6Addr,
+    },
     /// A MAC the cradle eBPF datapath learned on a local L2 port (via the
     /// `WatchFdb` stream). Re-emitted to EVPN subscribers as a synthesized
     /// `RibRx::FdbAdd` — the cradle analogue of a kernel bridge FDB learn —
@@ -2924,6 +2935,12 @@ impl Rib {
             }
             Message::CradleFdbLearn { vni, mac } => {
                 self.cradle_fdb_learn(vni, mac);
+            }
+            Message::CradleReplAdd { vni, sid } => {
+                self.fib_handle.cradle_repl_add(vni, sid).await;
+            }
+            Message::CradleReplDel { vni, sid } => {
+                self.fib_handle.cradle_repl_del(vni, sid).await;
             }
             Message::MdbAdd {
                 vni,

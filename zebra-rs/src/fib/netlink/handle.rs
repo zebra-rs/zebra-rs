@@ -480,6 +480,20 @@ impl FibHandle {
         }
     }
 
+    /// Tee an EVPN BUM replication slot to cradle (Type-3 with an SRv6
+    /// End.DT2M SID). No kernel counterpart — cradle is the L2 data plane.
+    pub async fn cradle_repl_add(&self, vni: u32, sid: std::net::Ipv6Addr) {
+        if let Some(cradle) = &self.cradle {
+            cradle.repl_slot_add(vni, sid).await;
+        }
+    }
+
+    pub async fn cradle_repl_del(&self, vni: u32, sid: std::net::Ipv6Addr) {
+        if let Some(cradle) = &self.cradle {
+            cradle.repl_slot_del(vni, sid).await;
+        }
+    }
+
     /// Tee a resolved neighbor (ARP/ND) into the cradle data plane — its MPLS
     /// egress rewrite resolves destination MACs from this state. No-op when
     /// the tee is disabled.

@@ -120,6 +120,17 @@ message FdbRemoteDel {
   uint32 bd  = 2;
 }
 
+// A BUM ingress-replication slot: one remote PE in bridge domain `bd`,
+// reached by MAC-in-SRv6 toward its End.DT2M `remote_sid`. cradle manages
+// the slot's plumbing itself (a veth pair in the flood list whose far end
+// per-copy encapsulates — see docs/design/evpn-srv6.md). Idempotent per
+// (bd, remote_sid). The EVPN Type-3 tee drives these; a bridge domain using
+// slots must not also program the all-ones-MAC sentinel.
+message ReplSlot {
+  uint32 bd         = 1;
+  string remote_sid = 2;
+}
+
 // Subscribe to datapath MAC learning (EVPN over SRv6): cradle streams every
 // locally-learned (mac, bridge-domain) so the control plane can originate
 // EVPN Type-2 routes for it. Only local entries are reported (never
@@ -223,6 +234,8 @@ service Cradle {
   rpc AddFdbRemote(FdbRemote) returns (Empty);
   rpc DelFdbRemote(FdbRemoteDel) returns (Empty);
   rpc WatchFdb(WatchFdbRequest) returns (stream FdbEvent);
+  rpc AddReplSlot(ReplSlot) returns (Empty);
+  rpc DelReplSlot(ReplSlot) returns (Empty);
   rpc AddService(Service) returns (Empty);
   rpc GetStats(StatsRequest) returns (StatsReply);
   rpc AddL7Service(L7Service) returns (Empty);
