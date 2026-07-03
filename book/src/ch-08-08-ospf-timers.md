@@ -127,3 +127,41 @@ skipped for self-originated LSAs so the §13.4 seq-reclaim path can
 still fire. `show ospf` reports the value (`MinLSArrival (received-LSA
 rate limit): … ms`); OSPFv3 exposes the identical `min-ls-arrival`
 leaf under `router ospfv3`.
+
+## Stub router (`max-metric router-lsa`)
+
+RFC 6987 stub-router advertisement: while active, every **transit**
+link (point-to-point, transit, virtual-link) in this router's
+Router-LSAs is advertised at MaxLinkMetric (`0xFFFF`), so neighbors
+route transit traffic around it — while its **stub** links keep
+their configured cost, leaving the router's own prefixes reachable:
+
+```
+router ospf {
+  max-metric {
+    router-lsa {
+      administrative true;    # indefinite (maintenance)
+      on-startup 300;         # or: a boot grace window, seconds
+    }
+  }
+}
+```
+
+| YANG leaf (`/router/ospf/max-metric/router-lsa/…`) | Default | Range | Units |
+|---|---|---|---|
+| `administrative` | false | — | boolean |
+| `on-startup` | — | 5..86400 | seconds |
+
+`administrative true` holds the stub-router state until removed —
+the standard way to drain a router before maintenance.
+`on-startup <secs>` holds it for a window after the configuration
+applies, the classic use being a reboot grace period so BGP can
+converge before the router draws transit traffic; when the window
+expires the Router-LSAs re-originate with real metrics
+automatically. `show ospf` reports the active mode (`Stub router:
+administrative` / `on-startup (Ns remaining)`). OSPFv2 only —
+FRR's `ospf6d` implements the equivalent via the RFC 5340 R-bit
+instead, which zebra-rs does not yet expose. Validated by
+`ospfv2_stub_router.feature` (traffic detours around the stub
+router onto a higher-cost path and returns when the window
+expires).

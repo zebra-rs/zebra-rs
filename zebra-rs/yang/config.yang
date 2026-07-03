@@ -1201,6 +1201,35 @@ module config {
           default 1000;
         }
 
+        container max-metric {
+          ext:help "Advertise own Router-LSA with maximum metric (RFC 6987 stub router)";
+          container router-lsa {
+            ext:help "Advertise transit links at MaxLinkMetric (0xFFFF)";
+            // RFC 6987 stub router (FRR `max-metric router-lsa ...`):
+            // while active, every transit link (P2p / Transit /
+            // VirtualLink) in our Router-LSAs carries MaxLinkMetric so
+            // neighbors stop routing transit traffic through us; stub
+            // links keep their configured cost, so our own prefixes
+            // stay reachable. `administrative` holds the state
+            // indefinitely (maintenance); `on-startup` holds it for N
+            // seconds after the config applies (boot grace, e.g. to
+            // let BGP converge before drawing transit traffic).
+            presence "RFC 6987 stub-router configuration";
+            leaf administrative {
+              ext:help "Indefinite (administrative) stub router";
+              type boolean;
+              default false;
+            }
+            leaf on-startup {
+              ext:help "Stub-router window after startup, seconds";
+              type uint32 {
+                range "5..86400";
+              }
+              units "seconds";
+            }
+          }
+        }
+
         container spf-interval {
           ext:help "SPF calculation throttle timers";
           // Adaptive IOS-XR-style exponential hold-down, replacing the

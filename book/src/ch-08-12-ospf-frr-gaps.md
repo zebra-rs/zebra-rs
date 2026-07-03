@@ -5,7 +5,6 @@ OSPFv2 features not yet implemented in zebra-rs:
 - NBMA and point-to-multipoint network types — the per-interface
   `network-type` knob accepts `broadcast` and `point-to-point`
   only.
-- Stub-router advertisement (`max-metric router-lsa`, RFC 6987).
 - Redistribution `route-map` filtering and the `table` source (the
   zebra-rs sources are connected, static, kernel, IS-IS, and BGP).
 - Forwarding-address resolution on received externals: Type-5/
@@ -73,3 +72,8 @@ per feature — see each feature's page):
   authentication (simple / MD5 / key-chain). OSPFv2 only (`ospf6d`
   has no virtual links either). See
   [Multi-Area Routing and the ABR](ch-08-14-ospf-multi-area-abr.md#virtual-links).
+- **Stub-router advertisement** (`max-metric router-lsa`, RFC 6987)
+  — administrative and `on-startup` modes advertise transit links at
+  MaxLinkMetric while stub links keep their cost. OSPFv2 only
+  (`ospf6d` uses the R-bit mechanism instead). See
+  [Timer Configuration](ch-08-08-ospf-timers.md#stub-router-max-metric-router-lsa).
