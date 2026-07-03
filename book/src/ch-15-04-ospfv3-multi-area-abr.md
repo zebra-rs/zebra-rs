@@ -1,9 +1,10 @@
-# Multi-Area Topologies and the ABR
+# Multi-Area Routing and the ABR
 
-OSPFv3 supports multi-area configurations at the adjacency and
-intra-area level. As in OSPFv2, an area is declared by listing
-interfaces under it, and a router with enabled interfaces in two or
-more areas is an Area Border Router:
+A router with enabled interfaces in two or more areas is an Area
+Border Router, exactly as in OSPFv2: ABR status is derived from the
+`area` list, the B-bit is set in every attached area's Router-LSA,
+and inter-area origination follows automatically — there is nothing
+to configure.
 
 ```
 router ospfv3 {
@@ -26,28 +27,48 @@ router ospfv3 {
 }
 ```
 
-The instance originates **one Router-LSA per attached area**
-containing only that area's links (RFC 5340 §3.4.3), so non-backbone
-areas form adjacencies, flood, and run SPF exactly like the
-backbone. NSSA machinery (redistribution, translation) is fully
-per-area.
+The instance originates one Router-LSA per attached area (RFC 5340
+§3.4.3) and keeps a per-area route slice; the ABR condenses each
+area's slice into the other areas using the v3 LSA equivalents of
+OSPFv2's summaries:
 
-## Current limitation: no ABR summary origination
+- **Inter-Area-Prefix-LSAs** (`0x2003`, the Type-3 equivalent) carry
+  the prefixes. The direction rules are the OSPFv2 ones (RFC 2328
+  §12.4.3): intra-area routes of any attached area are summarized
+  into every other; inter-area routes only from the backbone into
+  non-backbone areas (the split-horizon that makes the backbone
+  mandatory); a prefix the destination area reaches intra-area is
+  skipped; the lowest metric wins; `no-summary` areas
+  (totally-stubby / totally-NSSA) receive none. Origination is
+  diff-gated against the LSDB, so a converged topology re-floods
+  nothing.
+- **Inter-Area-Router-LSAs** (`0x2004`, the Type-4 equivalent)
+  advertise reachability to ASBRs whose Router-LSA E-bit the other
+  areas cannot see, carrying the ABR's SPF cost to the ASBR. On the
+  consuming side, AS-External route computation falls back to them
+  when the ASBR is not in the local area's SPF (RFC 2328 §16.4
+  step 5), using `cost-to-ABR + LSA metric` and picking the
+  cheapest advertising ABR — which is what makes E1 external
+  metrics and cross-area external reachability come out right.
 
-Unlike OSPFv2, the OSPFv3 ABR does **not yet originate**
-Inter-Area-Prefix-LSAs (`0x2003`, the v3 Type-3 equivalent) or
-Inter-Area-Router-LSAs (`0x2004`, the Type-4 equivalent). Received
-inter-area LSAs are flooded, stored, and displayed
-(`show ospfv3 database` lists them), but a zebra-rs v3 ABR does not
-generate them from its routing table — so **inter-area reachability
-through a zebra-rs OSPFv3 ABR does not work today**. This is the
-most significant OSPFv2/OSPFv3 feature gap; see
-[Gaps Relative to FRR ospf6d](ch-15-15-ospfv3-frr-gaps.md).
+Receivers install inter-area routes per RFC 2328 §16.2: for each
+Inter-Area-Prefix-LSA whose advertising ABR is reachable in the
+area's SPF, the prefix goes in at `cost-to-ABR + LSA metric` with
+the ABR's nexthops, at inter-area preference (intra-area beats
+inter-area beats external, §16.4.1). Self-originated LSAs are
+skipped, which together with the diff-gating prevents any
+SPF → summary → SPF loop.
 
-Until it lands, multi-area OSPFv3 deployments with zebra-rs are
-limited to topologies where inter-area routing is not required of
-the zebra-rs ABR (e.g. NSSA translation at the area edge, which
-works — translated AS-External-LSAs are AS-scoped and don't need
-Inter-Area-Prefix origination), or where another vendor's ABR does
-the summarization. For the v2 behavior this chapter mirrors, see
+Unlike v2's `Summary-LSA`, the v3 Link-State ID carries no
+addressing semantics — zebra-rs derives it from a hash of the full
+prefix (the same scheme the v3 NSSA and AS-External originators
+use), and the prefix itself rides in the LSA body.
+
+The whole path — two ABRs, three areas, cross-area reachability in
+both directions, and cost-honoring metrics — is BDD-validated by
+`ospfv3_multi_area.feature`, the v6 mirror of the v2 multi-area
+topology. Area ranges (`area <id> range` aggregation) remain
+unimplemented for both versions — see
+[Gaps Relative to FRR ospf6d](ch-15-15-ospfv3-frr-gaps.md). For the
+v2 behavior this chapter mirrors, see
 [Multi-Area Routing and the ABR](ch-08-14-ospf-multi-area-abr.md).

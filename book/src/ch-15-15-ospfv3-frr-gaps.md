@@ -2,11 +2,6 @@
 
 OSPFv3 features not yet implemented in zebra-rs:
 
-- **ABR Inter-Area-Prefix (0x2003) / Inter-Area-Router (0x2004)
-  origination** — the most significant gap: multi-area topologies
-  form and run per-area SPF, but a zebra-rs v3 ABR does not
-  generate inter-area routes. See
-  [Multi-Area Topologies and the ABR](ch-15-04-ospfv3-multi-area-abr.md).
 - Area ranges (`area <id> range` prefix aggregation).
 - Redistribution `route-map` filtering (the zebra-rs sources are
   connected, static, kernel, IS-IS, and BGP, matching v2).
@@ -20,8 +15,7 @@ OSPFv3 features not yet implemented in zebra-rs:
 - Passive interfaces.
 - Instance-level `default-information originate` (the NSSA-scoped
   default via `nssa-default-originate` is implemented).
-- Inter-area ASBR resolution (Inter-Area-Router-LSA fallback) and
-  non-zero forwarding-address resolution on received externals.
+- Non-zero forwarding-address resolution on received externals.
 - NBMA and point-to-multipoint network types.
 - Configurable SPF throttling (SPF is coalesced behind a fixed
   1-second timer, as in v2).
