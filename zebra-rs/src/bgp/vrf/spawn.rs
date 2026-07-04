@@ -178,6 +178,9 @@ pub fn spawn_bgp_vrf(
     // like router-id; an `rd` edit on a live VRF doesn't re-key the running
     // task yet (a follow-up adds respawn-on-edit, same as router-id).
     vrf.rd = cfg.rd;
+    // The MUP forwarding-plane mode (End.DT46 stand-in vs cradle GTP-U).
+    // Spawn-time capture like `rd`; a live `dataplane` edit respawns the VRF.
+    vrf.dataplane = cfg.mobile_uplane.dataplane;
 
     // Materialise per-VRF peers from the BgpVrfConfig snapshot.
     // `peer.start()`'s timer events get logged at debug and

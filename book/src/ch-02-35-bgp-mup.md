@@ -214,7 +214,10 @@ dataplane`:
 * **`gtp`** — real **GTP-U**. The tunnel is programmed from the ST route's own
   endpoint and TEID (`GTP4.E` downlink / `H.M.GTP4.D` uplink) by the **cradle**
   eBPF forwarder, which zebra-rs drives over gRPC (`system cradle-grpc`). The
-  mainline kernel has no GTP action, so this mode requires cradle.
+  mainline kernel has no GTP action, so this mode requires cradle. The uplink
+  decap is wired: each Type-2 ST route's `(endpoint, TEID)` becomes a cradle
+  GTP-U PDR (`H.M.GTP4.D`) that strips a matching G-PDU into the VRF. The
+  downlink `GTP4.E` encap (the Type-1 ST toward the gNB) follows.
 
 ```
 vrf N6 {

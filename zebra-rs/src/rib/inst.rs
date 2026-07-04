@@ -335,6 +335,18 @@ pub enum Message {
         vni: u32,
         sid: std::net::Ipv6Addr,
     },
+    /// MUP `dataplane gtp` uplink decap (`H.M.GTP4.D`): a GTP-U decap PDR teed
+    /// to cradle — a G-PDU on (`dst`, `teid`) is stripped and its inner packet
+    /// forwarded in VRF `table_id`. Cradle-only (the kernel has no GTP action).
+    CradleGtpPdrAdd {
+        dst: std::net::Ipv4Addr,
+        teid: u32,
+        table_id: u32,
+    },
+    CradleGtpPdrDel {
+        dst: std::net::Ipv4Addr,
+        teid: u32,
+    },
     /// A MAC the cradle eBPF datapath learned on a local L2 port (via the
     /// `WatchFdb` stream). Re-emitted to EVPN subscribers as a synthesized
     /// `RibRx::FdbAdd` — the cradle analogue of a kernel bridge FDB learn —
@@ -3122,6 +3134,18 @@ impl Rib {
             }
             Message::CradleReplDel { vni, sid } => {
                 self.fib_handle.cradle_repl_del(vni, sid).await;
+            }
+            Message::CradleGtpPdrAdd {
+                dst,
+                teid,
+                table_id,
+            } => {
+                self.fib_handle
+                    .cradle_gtp_pdr_add(dst, teid, table_id)
+                    .await;
+            }
+            Message::CradleGtpPdrDel { dst, teid } => {
+                self.fib_handle.cradle_gtp_pdr_del(dst, teid).await;
             }
             Message::MdbAdd {
                 vni,
