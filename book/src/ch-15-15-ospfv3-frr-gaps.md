@@ -21,6 +21,8 @@ Redistribution `route-map` filtering is implemented for OSPFv3
 identically to v2 (policy lists shared with BGP, live
 re-application) — see
 [Route Redistribution](ch-08-15-ospf-redistribution.md#route-map-filtering).
+The `redistribute table` source is OSPFv2-only in zebra-rs, but
+that is parity, not a gap: `ospf6d` has no table source either.
 
 The adaptive SPF throttle (`spf-interval`), the send-side
 MinLSInterval (`min-ls-interval`), and the receive-side MinLSArrival

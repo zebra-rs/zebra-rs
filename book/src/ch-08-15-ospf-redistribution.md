@@ -34,6 +34,7 @@ router ospf {
 | `kernel` | presence container | — (absent = off) |
 | `isis` | presence container | — (absent = off) |
 | `bgp` | presence container | — (absent = off) |
+| `table` | list, key `id` (1..65535) | — (empty = off) |
 | `<source>/metric` | uint32, 0..16777214 | 20 |
 | `<source>/metric-type` | `type-1` \| `type-2` | `type-2` |
 | `<source>/route-map` | string (policy name) | — (no filtering) |
@@ -44,6 +45,47 @@ Type-5s. Sources are independent subscriptions to the RIB, so any
 combination can be active at once. The knobs also exist per VRF
 instance, where the subscription is scoped so a VRF's OSPF sees only
 that VRF's routes.
+
+## Kernel routing tables (`redistribute table`)
+
+`redistribute table <id>` — FRR's `redistribute table (1-65535)` —
+imports the routes a specific **non-main kernel routing table**
+holds, regardless of who installed them. This is the classic escape
+hatch for advertising routes maintained outside the routing daemon:
+policy-routing tables, routes injected by an external controller or
+script via `ip route ... table N`, or tables populated by another
+routing stack.
+
+```
+router ospf {
+  redistribute {
+    table 100 {
+      metric 30;
+      metric-type type-2;
+      route-map RM;    # optional, same live-re-apply semantics
+    }
+  }
+}
+```
+
+`table` is a list keyed by table ID, so several tables can be
+redistributed at once, each with its own `metric` / `metric-type` /
+`route-map`. The RIB watches the kernel table through netlink — the
+startup route dump seeds it and the monitor tracks it live — so a
+route added to the table while OSPF runs originates its Type-5
+immediately, and a deleted one flushes it, without any daemon
+restart. Configuring a `table` source makes the router an ASBR
+exactly as the other sources do.
+
+Two scope notes, both matching FRR: the `table` source exists on
+**OSPFv2 only** (`ospf6d` has no `redistribute table`), and the
+**main** table is not a valid target — routes there are covered by
+the ordinary `kernel` / `static` / protocol sources.
+
+Validated by `ospfv2_redist_table.feature`, which installs kernel
+routes into table 100 both before the daemon starts (dump path) and
+while it runs (monitor path), and asserts the externals appear on —
+and, on deletion, disappear from — the neighbor.
 
 ## Route-map filtering
 
@@ -109,11 +151,13 @@ internal cost (RFC 2328 §16.4):
 
 ## Forwarding address
 
-zebra-rs always originates Type-5 LSAs with forwarding address
-0.0.0.0, meaning traffic flows via the ASBR itself. On receipt,
-LSAs carrying a non-zero forwarding address are currently skipped —
-resolving the FA against an intra-area route (RFC 2328 §16.4
-step 3) is not yet implemented.
+Instance-level Type-5s are originated with forwarding address
+0.0.0.0, meaning traffic flows via the ASBR itself. NSSA Type-7s
+originate with a non-zero FA where RFC 3101 §2.3 calls for one, and
+received LSAs carrying a non-zero forwarding address are resolved
+against the intra/inter-area route to the FA (RFC 2328 §16.4
+step 3) — see [Area Types](ch-08-13-ospf-area-types.md) for the
+full forwarding-address story.
 
 ## Default route origination
 
@@ -159,7 +203,9 @@ semantics.
 `router ospfv3` exposes the same five instance-level redistribute
 sources (connected, static, kernel, isis, bgp) with the same
 `metric` / `metric-type` / `route-map` leaves — including the live
-route-map re-application. The bgp source's flagship role is the SRv6
+route-map re-application. The `table` source is the one exception:
+it is OSPFv2-only, matching FRR, where `ospf6d` has no
+`redistribute table` either. The bgp source's flagship role is the SRv6
 L3VPN PE–CE "down" direction, where a PE injects the VPNv6 routes it
 imported into a VRF into the CE-facing OSPFv3 instance. Per-area
 NSSA `redistribute connected` is available for v3 exactly as for

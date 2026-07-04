@@ -410,6 +410,18 @@ pub struct Ospf<V: OspfVersion = Ospfv2> {
     /// names bound in `redist_route_map` (kept fresh via the
     /// Register/watch machinery, like BGP's per-peer policies).
     pub policy_lists: BTreeMap<String, crate::policy::PolicyList>,
+    /// `redistribute table <id>` config (FRR parity, v2-only):
+    /// kernel routing-table id -> metric/metric-type. Routes arrive
+    /// via `RibRx::TableRouteAdd/Del` from the RIB's table watch.
+    pub redist_table: BTreeMap<u32, crate::ospf::area::RedistEntry>,
+    /// Per-table `route-map` bindings, mirroring `redist_route_map`.
+    pub redist_table_route_map: BTreeMap<u32, String>,
+    /// Cached kernel-table routes, keyed by `(table_id, prefix)` —
+    /// the table sibling of `redist_v4`.
+    pub redist_table_v4: BTreeMap<(u32, Ipv4Net), crate::rib::RouteEntryV4>,
+    /// Per-table originated Type-5 prefixes — the table sibling of
+    /// `redist_originated`.
+    pub redist_table_originated: BTreeMap<u32, BTreeSet<Ipv4Net>>,
     /// Per-source prefixes of Type-5 LSAs we self-originated from the
     /// instance-level `redistribute` knobs (v2 / IPv4). Diffed by
     /// `as_external_redist_resync`; flushed when the knob is removed.
@@ -1573,6 +1585,10 @@ impl Ospf<Ospfv2> {
             redist: BTreeMap::new(),
             redist_route_map: BTreeMap::new(),
             policy_lists: BTreeMap::new(),
+            redist_table: BTreeMap::new(),
+            redist_table_route_map: BTreeMap::new(),
+            redist_table_v4: BTreeMap::new(),
+            redist_table_originated: BTreeMap::new(),
             redist_originated: BTreeMap::new(),
             redist_originated_v6: BTreeMap::new(),
             default_originate: None,
@@ -3542,7 +3558,7 @@ impl Ospf<Ospfv2> {
     /// (RFC 2328 §3.3 ASBR definition). Today this requires the
     /// instance-level `redistribute connected` knob to be set.
     pub fn is_asbr(&self) -> bool {
-        !self.redist.is_empty() || self.default_originate.is_some()
+        !self.redist.is_empty() || !self.redist_table.is_empty() || self.default_originate.is_some()
     }
 
     /// Reconcile the self-originated Type-5 default (0.0.0.0/0)
@@ -3889,6 +3905,135 @@ impl Ospf<Ospfv2> {
         }
         self.as_external_redist_resync_all();
         self.default_originate_resync();
+    }
+
+    /// `RibRx::TableRouteAdd` handler (`redistribute table <id>`).
+    fn table_route_add(&mut self, table_id: u32, batch: crate::rib::RouteBatch) {
+        if let crate::rib::RouteBatch::V4(entries) = batch {
+            for e in entries {
+                self.redist_table_v4.insert((table_id, e.prefix), e);
+            }
+        }
+        self.as_external_table_resync(table_id);
+    }
+
+    /// `RibRx::TableRouteDel` handler — mirror of `table_route_add`.
+    fn table_route_del(&mut self, table_id: u32, batch: crate::rib::RouteBatch) {
+        if let crate::rib::RouteBatch::V4(entries) = batch {
+            for e in entries {
+                self.redist_table_v4.remove(&(table_id, e.prefix));
+            }
+        }
+        self.as_external_table_resync(table_id);
+    }
+
+    /// Reconcile the self-originated Type-5 set for one
+    /// `redistribute table <id>` row — the table sibling of
+    /// `as_external_redist_resync`, sharing its route-map semantics
+    /// (deny drops the prefix so the stale LSA flushes; `set med`
+    /// overrides the metric; unresolved map = deny-all).
+    pub fn as_external_table_resync(&mut self, table_id: u32) {
+        let entry = self.redist_table.get(&table_id).copied();
+        let prev_originated = self
+            .redist_table_originated
+            .get(&table_id)
+            .cloned()
+            .unwrap_or_default();
+
+        let route_map = self.redist_table_route_map.get(&table_id);
+        let desired: BTreeMap<Ipv4Net, u32> = if let Some(e) = entry {
+            self.redist_table_v4
+                .iter()
+                .filter(|((t, _), _)| *t == table_id)
+                .filter_map(|((_, prefix), _)| {
+                    let metric = match route_map {
+                        None => e.metric,
+                        Some(name) => {
+                            let list = self.policy_lists.get(name)?;
+                            redist_policy_eval(list, (*prefix).into(), e.metric)?
+                        }
+                    };
+                    Some((*prefix, metric))
+                })
+                .collect()
+        } else {
+            BTreeMap::new()
+        };
+
+        for prefix in prev_originated
+            .iter()
+            .filter(|p| !desired.contains_key(p))
+            .copied()
+            .collect::<Vec<_>>()
+        {
+            self.as_external_lsa_flush_for_prefix(prefix);
+            if let Some(set) = self.redist_table_originated.get_mut(&table_id) {
+                set.remove(&prefix);
+            }
+        }
+
+        if let Some(redist_entry) = entry {
+            for (prefix, metric) in &desired {
+                self.as_external_lsa_originate_for_prefix(
+                    *prefix,
+                    *metric,
+                    redist_entry.metric_type.is_type_2(),
+                );
+                self.redist_table_originated
+                    .entry(table_id)
+                    .or_default()
+                    .insert(*prefix);
+            }
+        }
+        if self
+            .redist_table_originated
+            .get(&table_id)
+            .is_some_and(|s| s.is_empty())
+        {
+            self.redist_table_originated.remove(&table_id);
+        }
+
+        self.router_lsa_originate();
+    }
+
+    /// Run [`Self::as_external_table_resync`] for every table that is
+    /// configured or still has originated state to clean up.
+    pub fn as_external_table_resync_all(&mut self) {
+        let tables: BTreeSet<u32> = self
+            .redist_table
+            .keys()
+            .copied()
+            .chain(self.redist_table_originated.keys().copied())
+            .collect();
+        for table_id in tables {
+            self.as_external_table_resync(table_id);
+        }
+    }
+
+    /// Bind (or unbind) a `redistribute table <id> route-map` —
+    /// table sibling of `redist_route_map_bind`, with a disjoint
+    /// ident space so table and rtype bindings to the same list name
+    /// hold distinct policy-actor watches.
+    pub fn redist_table_route_map_bind(&mut self, table_id: u32, name: Option<String>) {
+        use crate::policy::{Message as PolicyMsg, PolicyType};
+        let ident = 0x10000 + table_id as usize;
+        if let Some(old) = self.redist_table_route_map.remove(&table_id) {
+            let _ = self.policy_tx.send(PolicyMsg::Unregister {
+                proto: self.proto_label.clone(),
+                name: old,
+                ident,
+                policy_type: PolicyType::PolicyListIn,
+            });
+        }
+        if let Some(name) = name {
+            let _ = self.policy_tx.send(PolicyMsg::Register {
+                proto: self.proto_label.clone(),
+                name: name.clone(),
+                ident,
+                policy_type: PolicyType::PolicyListIn,
+            });
+            self.redist_table_route_map.insert(table_id, name);
+        }
     }
 
     fn process_lsdb(&mut self, ev: LsdbEvent, area_id: Option<Ipv4Addr>, key: OspfLsaKey) {
@@ -6192,6 +6337,16 @@ impl Ospf<Ospfv2> {
             RibRx::RouteAdd { rtype, routes, .. } => {
                 self.route_redist_add(rtype, routes);
             }
+            RibRx::TableRouteAdd {
+                table_id, routes, ..
+            } => {
+                self.table_route_add(table_id, routes);
+            }
+            RibRx::TableRouteDel {
+                table_id, routes, ..
+            } => {
+                self.table_route_del(table_id, routes);
+            }
             RibRx::RouteDel { rtype, routes, .. } => {
                 self.route_redist_del(rtype, routes);
             }
@@ -6286,6 +6441,7 @@ impl Ospf<Ospfv2> {
                     self.policy_lists.remove(&name);
                 }
                 self.as_external_redist_resync_all();
+                self.as_external_table_resync_all();
             }
             crate::policy::PolicyRx::PrefixSet { .. } => {
                 // OSPF doesn't subscribe to bare prefix-sets (the
@@ -6453,6 +6609,10 @@ impl Ospf<Ospfv3> {
             redist: BTreeMap::new(),
             redist_route_map: BTreeMap::new(),
             policy_lists: BTreeMap::new(),
+            redist_table: BTreeMap::new(),
+            redist_table_route_map: BTreeMap::new(),
+            redist_table_v4: BTreeMap::new(),
+            redist_table_originated: BTreeMap::new(),
             redist_originated: BTreeMap::new(),
             redist_originated_v6: BTreeMap::new(),
             default_originate: None,

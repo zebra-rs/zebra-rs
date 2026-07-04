@@ -5,9 +5,6 @@ OSPFv2 features not yet implemented in zebra-rs:
 - NBMA and point-to-multipoint network types — the per-interface
   `network-type` knob accepts `broadcast` and `point-to-point`
   only.
-- The redistribution `table` source (the zebra-rs sources are
-  connected, static, kernel, IS-IS, and BGP; `route-map` filtering
-  on those sources is implemented — see below).
 
 ## Previously listed gaps that are now closed
 
@@ -81,6 +78,13 @@ per feature — see each feature's page):
   route-map semantics; edits to the list or its prefix-sets re-apply
   live. Both OSPFv2 and OSPFv3. See
   [Route Redistribution](ch-08-15-ospf-redistribution.md#route-map-filtering).
+- **Redistribution `table` source** (`redistribute table
+  (1-65535)`) — imports routes from a non-main kernel routing
+  table as Type-5s, tracked live through the RIB's netlink dump +
+  monitor, with the same `metric` / `metric-type` / `route-map`
+  knobs as the other sources. OSPFv2 only, matching FRR (`ospf6d`
+  has no table source). See
+  [Route Redistribution](ch-08-15-ospf-redistribution.md#kernel-routing-tables-redistribute-table).
 - **Forwarding-address origination and resolution** — NSSA ASBRs
   now originate P-bit Type-7s with a non-zero forwarding address
   (RFC 3101 §2.3, an address on an NSSA-connected interface); the

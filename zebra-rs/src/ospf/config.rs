@@ -186,6 +186,19 @@ impl Ospf {
             "/redistribute/bgp/route-map",
             config_ospf_redist_bgp_route_map,
         );
+        self.ospf_add("/redistribute/table", config_ospf_redist_table);
+        self.ospf_add(
+            "/redistribute/table/metric",
+            config_ospf_redist_table_metric,
+        );
+        self.ospf_add(
+            "/redistribute/table/metric-type",
+            config_ospf_redist_table_metric_type,
+        );
+        self.ospf_add(
+            "/redistribute/table/route-map",
+            config_ospf_redist_table_route_map,
+        );
         // Instance-level `router ospf { bfd { ... } }` defaults.
         self.ospf_add("/bfd/enable", config_ospf_bfd_enable);
         self.ospf_add(
@@ -723,6 +736,77 @@ fn ospf_redist_route_map_set(
     };
     ospf.redist_route_map_bind(rtype, name);
     ospf.as_external_redist_resync(rtype);
+    Some(())
+}
+
+/// `/router/ospf/redistribute/table/<id>` — FRR `redistribute
+/// table (1-65535)`: import routes the kernel holds in routing
+/// table `<id>` as Type-5 AS-External LSAs. Set subscribes the RIB's
+/// table watch (replay + deltas via `RibRx::TableRouteAdd/Del`);
+/// delete unsubscribes, which replays withdrawals so the cache and
+/// LSAs flush.
+fn config_ospf_redist_table(ospf: &mut Ospf, mut args: Args, op: ConfigOp) -> Option<()> {
+    let table_id = args.u32()?;
+    if op.is_set() {
+        ospf.redist_table.entry(table_id).or_default();
+        let _ = ospf.ctx.rib.send(crate::rib::Message::RedistTableAdd {
+            proto: ospf.proto_label.clone(),
+            table_id,
+        });
+    } else {
+        ospf.redist_table.remove(&table_id);
+        let _ = ospf.ctx.rib.send(crate::rib::Message::RedistTableDel {
+            proto: ospf.proto_label.clone(),
+            table_id,
+        });
+        // The Del replay will clear the cache entries; drop them
+        // eagerly too so the resync below flushes immediately.
+        ospf.redist_table_v4.retain(|(t, _), _| *t != table_id);
+    }
+    ospf.as_external_table_resync(table_id);
+    Some(())
+}
+
+/// `/router/ospf/redistribute/table/<id>/metric`.
+fn config_ospf_redist_table_metric(ospf: &mut Ospf, mut args: Args, op: ConfigOp) -> Option<()> {
+    let table_id = args.u32()?;
+    let metric = if op.is_set() {
+        args.u32()?
+    } else {
+        crate::ospf::area::RedistEntry::DEFAULT_METRIC
+    };
+    ospf.redist_table.entry(table_id).or_default().metric = metric;
+    ospf.as_external_table_resync(table_id);
+    Some(())
+}
+
+/// `/router/ospf/redistribute/table/<id>/metric-type`.
+fn config_ospf_redist_table_metric_type(
+    ospf: &mut Ospf,
+    mut args: Args,
+    op: ConfigOp,
+) -> Option<()> {
+    let table_id = args.u32()?;
+    let mtype = if op.is_set() {
+        ExternalMetricType::from_yang(&args.string()?)?
+    } else {
+        ExternalMetricType::default()
+    };
+    ospf.redist_table.entry(table_id).or_default().metric_type = mtype;
+    ospf.as_external_table_resync(table_id);
+    Some(())
+}
+
+/// `/router/ospf/redistribute/table/<id>/route-map`.
+fn config_ospf_redist_table_route_map(ospf: &mut Ospf, mut args: Args, op: ConfigOp) -> Option<()> {
+    let table_id = args.u32()?;
+    let name = if op.is_set() {
+        Some(args.string()?)
+    } else {
+        None
+    };
+    ospf.redist_table_route_map_bind(table_id, name);
+    ospf.as_external_table_resync(table_id);
     Some(())
 }
 
