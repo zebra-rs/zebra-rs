@@ -1946,6 +1946,18 @@ fn config_mup_c_controller_address(bgp: &mut Bgp, mut args: Args, op: ConfigOp) 
     Some(())
 }
 
+/// `… mup-c upf-address <ip>` — Core (N6) endpoint for ST2 routes when the
+/// session carries no core-side GTP tunnel.
+fn config_mup_c_upf_address(bgp: &mut Bgp, mut args: Args, op: ConfigOp) -> Option<()> {
+    bgp.mup_c_config.upf_address = if op.is_set() {
+        Some(args.addr()?)
+    } else {
+        None
+    };
+    bgp.mup_c_dirty = true;
+    Some(())
+}
+
 /// `… mup-c pfcp node-id <ip>` — our PFCP Node ID for responses.
 fn config_mup_c_pfcp_node_id(bgp: &mut Bgp, mut args: Args, op: ConfigOp) -> Option<()> {
     bgp.mup_c_config.node_id = if op.is_set() {
@@ -4501,6 +4513,7 @@ impl Bgp {
             "/router/bgp/mup-c/controller-address",
             config_mup_c_controller_address,
         );
+        self.callback_add("/router/bgp/mup-c/upf-address", config_mup_c_upf_address);
         self.callback_add("/router/bgp/mup-c/pfcp/node-id", config_mup_c_pfcp_node_id);
         self.callback_add(
             "/router/bgp/mup-c/pfcp/listen-address",

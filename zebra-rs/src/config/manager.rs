@@ -3352,6 +3352,32 @@ mod yang_load_tests {
     }
 
     #[test]
+    fn mup_c_upf_address_is_settable() {
+        use crate::config::ExecCode;
+        use crate::config::parse::{State, parse};
+        use libyang::to_entry;
+
+        let mut yang = YangStore::new();
+        yang.add_path(concat!(env!("CARGO_MANIFEST_DIR"), "/yang"));
+        yang.read_with_resolve("configure")
+            .expect("configure mode loads");
+        yang.identity_resolve();
+        let module = yang
+            .find_module("configure")
+            .expect("configure module present");
+        let entry = to_entry(&yang, module);
+
+        // `mup-c upf-address` accepts both IPv4 and IPv6 (inet:ip-address).
+        for path in [
+            "set router bgp mup-c upf-address 10.100.0.1",
+            "set router bgp mup-c upf-address 2001:db8::1",
+        ] {
+            let (code, _comps, _state) = parse(path, entry.clone(), None, State::new());
+            assert_eq!(code, ExecCode::Success, "`{path}` must be a settable path");
+        }
+    }
+
+    #[test]
     fn bgp_evpn_segmentation_is_settable() {
         use crate::config::ExecCode;
         use crate::config::parse::{State, parse};

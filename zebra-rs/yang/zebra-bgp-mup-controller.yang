@@ -41,6 +41,7 @@ module zebra-bgp-mup-controller {
          mup-c {
            enable true;
            controller-address 2001:db8::1;
+           upf-address 10.100.0.1;
            pfcp {
              node-id 10.0.0.1;
              listen-address ::;
@@ -78,6 +79,17 @@ module zebra-bgp-mup-controller {
         description
           "Controller IPv6 address advertised as the next hop on
            originated Type-1 / Type-2 Session-Transformed routes.";
+      }
+
+      leaf upf-address {
+        type inet:ip-address;
+        description
+          "Core (N6) UPF endpoint address used as the Type-2 Session
+           Transformed (ST2) route endpoint when the PFCP session carries
+           no core-side GTP tunnel (the common N6-breakout case, where the
+           SMF programs only the access/gNB tunnel). A session that does
+           learn a core-facing F-TEID over PFCP (e.g. an N9 tunnel) keeps
+           that learned endpoint in preference to this configured one.";
       }
 
       container pfcp {
