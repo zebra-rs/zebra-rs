@@ -4317,6 +4317,10 @@ impl Bgp {
             super::vrf_config::config_vrf_evpn_advertise_ipv6,
         );
         self.callback_add(
+            "/router/bgp/vrf/afi-safi/mup/dataplane",
+            super::vrf_config::config_vrf_mup_dataplane,
+        );
+        self.callback_add(
             "/router/bgp/vrf/afi-safi/mup/segment",
             super::vrf_config::config_vrf_mup_segment,
         );

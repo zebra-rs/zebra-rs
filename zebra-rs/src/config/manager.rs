@@ -1636,6 +1636,8 @@ mod yang_load_tests {
         let entry = to_entry(&yang, module);
 
         for cmd in [
+            "set router bgp vrf N3 afi-safi mup dataplane end-dt46",
+            "set router bgp vrf N3 afi-safi mup dataplane gtp",
             "set router bgp vrf N3 afi-safi mup segment direct",
             "set router bgp vrf N3 afi-safi mup segment interwork",
             "set router bgp vrf N3 afi-safi mup segment direct mup-ext-comm 1:20",

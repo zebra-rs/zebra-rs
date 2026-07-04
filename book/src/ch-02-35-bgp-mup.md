@@ -201,6 +201,41 @@ vrf N3 {
 }
 ```
 
+### Selecting the forwarding plane (`dataplane`)
+
+Each MUP VRF chooses its forwarding-plane behaviour with `afi-safi mup
+dataplane`:
+
+* **`end-dt46`** (default) — the SRv6 **End.DT46** stand-in. A resolved ST
+  route installs a `seg6local End.DT46` decap plus an SRv6 H.Encaps toward the
+  segment SID, entirely in the **mainline kernel**. The GTP-U TEID rides the
+  control plane only; the subscriber path is L3VPN-over-SRv6. This is what the
+  rest of this chapter describes, and it runs on stock Linux.
+* **`gtp`** — real **GTP-U**. The tunnel is programmed from the ST route's own
+  endpoint and TEID (`GTP4.E` downlink / `H.M.GTP4.D` uplink) by the **cradle**
+  eBPF forwarder, which zebra-rs drives over gRPC (`system cradle-grpc`). The
+  mainline kernel has no GTP action, so this mode requires cradle.
+
+```
+vrf N6 {
+  rd 65501:10;
+  encapsulation srv6;
+  afi-safi mup {
+    dataplane gtp;         # program real GTP-U via cradle (default: end-dt46)
+    segment direct { mup-ext-comm 1:2; }
+    route st2 { network-instance core; }
+  }
+}
+```
+
+The **control plane is identical** either way — the same ISD/DSD/ST routes are
+signalled — so `dataplane` selects only the endpoint behaviour advertised and
+whether the FIB install targets the kernel `seg6local` or the cradle GTP maps.
+`show bgp vrf <name> mup` reports the mode (`dataplane=end-dt46|gtp`). The two
+forwarding planes — Plan A (End.DT46, mainline kernel) and Plan B (real GTP-U
+via cradle) — are scoped in
+[`docs/design/bgp-mup-dataplane-plan.md`](https://github.com/zebra-rs/zebra-rs/blob/main/docs/design/bgp-mup-dataplane-plan.md).
+
 ### Segment Discovery routes (`segment direct` / `segment interwork`)
 
 A PE VRF with `encapsulation srv6` carves a per-VRF **End.DT46** SID from

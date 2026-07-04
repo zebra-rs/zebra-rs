@@ -284,6 +284,32 @@ module zebra-bgp-vrf {
            origination. A receiving PE derives forwarding for matching ST
            routes from the segment routes (draft-ietf-bess-mup-safi
            default).";
+        leaf dataplane {
+          type enumeration {
+            enum end-dt46 {
+              description
+                "SRv6 End.DT46, the mainline-kernel stand-in: a resolved ST
+                 route installs a seg6local End.DT46 decap plus an SRv6
+                 H.Encaps toward the segment SID. The GTP-U TEID rides the
+                 control plane only. Works on stock Linux. This is the
+                 default.";
+            }
+            enum gtp {
+              description
+                "Real GTP-U: install the tunnel from the ST route's endpoint
+                 and TEID via the cradle eBPF forwarder (GTP4.E downlink /
+                 H.M.GTP4.D uplink). Requires `system cradle-grpc` to point at
+                 the forwarder; the mainline kernel has no GTP action.";
+            }
+          }
+          default end-dt46;
+          description
+            "MUP forwarding-plane behaviour for this VRF: the SRv6 End.DT46
+             stand-in (mainline kernel) or real GTP-U (cradle eBPF). The
+             control plane is identical either way — this selects only the
+             endpoint behaviour advertised and whether the FIB install targets
+             the kernel seg6local or the cradle GTP maps.";
+        }
         list segment {
           key "type";
           description
