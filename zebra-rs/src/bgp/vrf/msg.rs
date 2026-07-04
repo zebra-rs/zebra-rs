@@ -256,6 +256,11 @@ pub enum BgpGlobalMsg {
     MupExport {
         vrf: String,
         prefix: bgp_packet::MupPrefix,
+        /// The ST1 (Type-1 Session-Transformed) off-key NLRI fields
+        /// (draft §3.2.1), when `prefix` is a `MupPrefix::T1st`. Stamped onto
+        /// the originated path so the global re-advertise / FIB reconcile see
+        /// the real TEID/QFI/endpoint. `None` for DSD/ISD/ST2.
+        st1: Option<bgp_packet::MupSt1Fields>,
         attr: BgpAttr,
     },
 

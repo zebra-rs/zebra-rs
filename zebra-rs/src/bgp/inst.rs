@@ -4928,6 +4928,7 @@ impl Bgp {
                     smet_flags: 0,
                     igmp_max_resp_time: 0,
                     ingress_region: None,
+                    mup_st1: None,
                 };
 
                 let (_, selected, _gen) = self.shard.update(Some(rd), prefix, rib);
@@ -5212,6 +5213,7 @@ impl Bgp {
                     smet_flags: 0,
                     igmp_max_resp_time: 0,
                     ingress_region: None,
+                    mup_st1: None,
                 };
 
                 let (_, selected, _gen) = self.shard.update_v6vpn(rd, prefix, rib);
@@ -5382,8 +5384,13 @@ impl Bgp {
             // VRF-first MUP origination: a per-VRF task built a controller ST
             // route and exported it. Stamp the RD / export-RTs / controller
             // next-hop and promote it into the SAFI-85 Loc-RIB + advertise.
-            super::vrf::BgpGlobalMsg::MupExport { vrf, prefix, attr } => {
-                self.mup_export(vrf, prefix, attr);
+            super::vrf::BgpGlobalMsg::MupExport {
+                vrf,
+                prefix,
+                st1,
+                attr,
+            } => {
+                self.mup_export(vrf, prefix, st1, attr);
             }
             super::vrf::BgpGlobalMsg::WithdrawMupExport { vrf, prefix } => {
                 self.mup_withdraw_export(vrf, prefix);
