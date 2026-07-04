@@ -1,0 +1,91 @@
+# z1 — MUP anchor / UPF + interwork node A (combined MUP-C + forwarding).
+# From a PFCP session on NI `core` it originates a Type-2 ST (ST2) route whose
+# endpoint is ceA (10.10.1.2, a host in VRF N6 behind z1) plus a Direct Segment
+# Discovery (DSD, id 1:1) carrying the per-VRF End.DT46 SID from LOC1. It
+# imports z2's DSD+ST2 (id 2:2) and installs the ST2->DSD encap for ceB
+# (10.20.2.2 -> H.Encaps toward z2's End.DT46 SID, resolved through the IS-IS
+# SRv6 underlay). So ceA->ceB uplink traffic rides the SRv6 core End.DT46
+# datapath, and z1 decapsulates ceB->ceA traffic into VRF N6 for local delivery
+# to ceA. A bidirectional ceA<->ceB ping therefore traverses the MUP End.DT46
+# datapath in both directions (ST2->DSD), using only MUP-installed routes (no
+# static/redistribute). zebra-rs uses End.DT46 as the kernel stand-in for the
+# GTP-U edge behaviours (deferred to a VPP/eBPF forwarder).
+vrf:
+- name: N6
+  mup:
+    route-target:
+      export:
+      - "65501:10"
+      import:
+      - "65501:20"
+interface:
+- if-name: lo
+  ipv6:
+    address: 2001:db8::1/128
+- if-name: z1-z2
+  ipv6:
+    address: 2001:db8:0:12::1/64
+- if-name: ce1
+  vrf: N6
+  ipv4:
+    address: 10.10.1.1/24
+segment-routing:
+  locator:
+  - name: LOC1
+    prefix: fcbb:bbbb:1::/48
+    behavior: usid
+router:
+  isis:
+    net: 49.0000.0000.0000.0001.00
+    hostname: z1
+    is-type: level-2-only
+    segment-routing:
+      srv6:
+        locator: LOC1
+    interface:
+    - if-name: lo
+      ipv6:
+        enable: true
+    - if-name: z1-z2
+      network-type: point-to-point
+      metric: 1
+      ipv6:
+        enable: true
+  bgp:
+    global:
+      as: 65501
+      router-id: 10.0.0.1
+    timer:
+      adv-interval:
+        ibgp: 1
+    segment-routing:
+      srv6:
+        locator: LOC1
+    neighbor:
+    - remote-address: 2001:db8::2
+      remote-as: 65501
+      update-source: 2001:db8::1
+      enabled: true
+      afi-safi:
+      - name: mup
+        enabled: true
+    vrf:
+    - name: N6
+      rd: "65501:10"
+      encapsulation: srv6
+      afi-safi:
+        mup:
+          segment:
+          - type: direct
+            mup-ext-comm: "1:1"
+          route:
+          - type: st2
+            network-instance: core
+            mup-ext-comm: "1:1"
+    mup-c:
+      enable: true
+      controller-address: 2001:db8::1
+      pfcp:
+        listen-address: 127.0.0.1
+      srv6:
+        locator: LOC1

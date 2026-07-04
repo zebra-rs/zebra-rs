@@ -80,9 +80,8 @@ This is achievable on **mainline Linux** — `End.DT46` maps to kernel seg6local
 actions 7/8/16, "already wired" (`bgp-prefix-sid-rfc9252.md:124-159`) — and
 reuses every primitive from P6 slices 5–6.
 
-Plan A's job is to make the **co-located PFCP-terminating node forward its own
-sessions' subscriber traffic**, which today only a *separate* interwork node
-does for *received* routes.
+Plan A's job is to prove the **PFCP-terminating node forwards its own sessions'
+subscriber traffic** end-to-end over `End.DT46`.
 
 ### What already exists (reuse, don't rebuild)
 
@@ -91,75 +90,65 @@ does for *received* routes.
 - ST↔segment resolution (`reconcile_mup_st1_isd` / `reconcile_mup_st2_dsd`).
 - NHT for remote segment next-hops (`nht.rs` `NhtDep::Mup`, followup #2, DONE).
 
-### Plan-A gaps (what to build)
+### Verified findings (2026-07-04) — the per-session install already works
 
-- **A-gap-1 — no local per-session downlink encap.** The session's own UE
-  prefix gets an `H.Encaps` only on a separate interwork node (received ST1 +
-  covering ISD + non-empty NHT transport). On the origin node the re-imported
-  route has `transport = &[]` → no-op.
-- **A-gap-2 — no N6 / breakout egress.** `End.DT46` drops the inner packet into
-  the VRF table, but nothing routes it toward the data network.
-  `session.core_endpoint` (`pfcp.rs:294-297`) is never converted to FIB.
-- **A-gap-3 — collocated ingress (gNB-facing) encap.** The uplink ingress encap
-  (dst = gNB endpoint) runs only on the interwork node; a node that both
-  terminates PFCP and faces the gNB has no ingress-encap install.
+An earlier draft of this plan (following an imprecise investigation summary)
+claimed the PFCP-terminating node "installs nothing per-session". **That is
+wrong** — verified by running the BDDs against the tree:
 
-### Phases
+- **The origin/UPF node installs its own encap.** `reconcile_mup_st1_isd` /
+  `reconcile_mup_st2_dsd` gate on the *segment's* resolved transport
+  (`mup_segment_transport`), **not** the ST route's. The node's own ST route
+  re-imports into its per-VRF MUP RIB (carrying `mup_st1`) and the reconcile
+  installs the encap as soon as a covering **remote** segment (imported by RT)
+  resolves via NHT. The `transport = &[]` on the re-imported ST route is
+  irrelevant to that gate. `bgp_mup_st1_isd` already proves the UPF+MUP-C node
+  (z2) originates the ST1 *and* installs the UE-prefix `H.Encaps` itself.
+- **Real packets forward end-to-end.** The new `@bgp_mup_forwarding` BDD drives
+  a bidirectional `ceA↔ceB` ping through the `End.DT46` datapath (downlink and
+  uplink), passing on the first run — not just route presence, actual ICMP.
 
-#### A1 — local per-session downlink encap — *the loop-closer*
+So the "A1 — local per-session downlink encap" gap the earlier draft posited is
+**already implemented (DONE)**, and A2/A3 are not shaped the way it assumed.
 
-For a locally-originated ST1 (and the co-located ST2's endpoint), install the
-UE-prefix `H.Encaps` toward the **downlink segment SID** on the origin node
-itself, resolving the local transport (the node's own `End.DT46` for the N6
-VRF, or a resolvable remote via NHT).
+### One real structural constraint
 
-- **Where:** a new same-node reconcile in `bgp/vrf/inst.rs` called from the
-  `MupOriginate` handler (`:1939`), **or** extend `dispatch_mup`
-  (`bgp/route.rs:13249`) to pass a resolved local transport for `origin_vrf`
-  instead of `&[]`. Reuse `mup_encap_install` unchanged.
-- **Size:** S–M. First per-session FIB write MUP-C ever makes.
+`mup_session_targets` (`bgp/vrf/inst.rs:468`) reads a **single** `srv6_mobile`
+binding per VRF, so **a VRF carries exactly one MUP direction** (st1 *or* st2).
+A single anchor VRF therefore cannot do both the downlink encap and the uplink
+decap for one subscriber: a *bidirectional* subscriber path is realized by two
+collocated ST2 anchors (each terminating one host), as `@bgp_mup_forwarding`
+does, not by one anchor VRF. Lifting this — one VRF binding both directions —
+is the only genuine code change Plan A could still make, and it is optional
+(the two-node model forwards correctly today).
 
-#### A2 — N6 breakout egress
+### A2 — N6 breakout egress (config, not per-session code)
 
-On `SessionUp`, install a VRF route toward `core_endpoint` / the N6 next-hop so
-the decapped inner subscriber packet has a path to the data network.
-
-- **Where:** `mup-c/inst.rs` `SessionUp` path, or a new VRF-task install in
-  `bgp/vrf/inst.rs`. Withdraw on Session Deletion / AN-release deactivation
-  (mirror the #1766 deactivation handling).
-- **Size:** S–M.
-
-#### A3 — collocated ingress encap (topology-dependent, optional)
-
-For a node that also faces the gNB, install the ingress SRv6 encap (dst = gNB
-endpoint, like `reconcile_mup_st2_dsd`) on the same node, so uplink works
-without a separate interwork hop. Skip when the deployment keeps a distinct
-access PE.
-
-- **Size:** M.
-
-### Config model
-
-No new grammar required for A1–A2 in the collocated model: a VRF with
-`encapsulation srv6` + `afi-safi mup route st1|st2 network-instance <ni>` + an
-RD already carries everything. A1 changes *when* the encap fires (local origin,
-not only received). Optionally add an explicit `mup dataplane end-dt46` opt-in
-so the local-install is gated and the pure-signalling deployments are
-unaffected.
+The remaining honest gap is N6 egress: after `End.DT46` decap the inner packet
+is in the VRF table, but reaching an arbitrary **data network** needs a route
+out of the VRF. This is **operator config** (a per-VRF default/static route, or
+redistribution of the DN prefix), *not* a per-session PFCP-derived install —
+and note `session.core_endpoint` is the **ST2 core-tunnel endpoint**, not the
+N6 DN gateway, so routing toward it is not "breakout". If a per-session N6
+route is ever wanted, its semantics (target next-hop, config vs PFCP-derived)
+need a product decision first; `router static vrf` covers the lab case today.
 
 ### Tests
 
-Extend the existing MUP BDDs (`bgp_mup_st2_dsd_fib`, `bgp_mup_st1_isd`) with an
-assertion that the **originating collocated node** (z1) installs its own
-UE-prefix `H.Encaps` and an N6 route — assert via `ip -6 route show table all`
-in z1's namespace, alongside the existing z2 interwork assertions.
+`@bgp_mup_forwarding` (`bdd/tests/features/bgp_mup_forwarding.feature`) — two
+collocated UPF+interwork nodes, each originates an ST2 (endpoint = a host
+behind it) + a DSD from a PFCP session, imports the other's, installs the
+ST2→DSD encap, and a bidirectional `ceA↔ceB` ping traverses the `End.DT46`
+datapath both ways. Run live via `make -C bdd bgp_mup_forwarding` (root netns).
+Complements `bgp_mup_st2_dsd_fib` / `bgp_mup_st1_isd` (which assert the install;
+this drives real traffic through it).
 
 ### Limits / non-goals
 
 No GTP-U on the wire; the gNB↔fabric edge must speak SRv6 (or a separate SRGW
 does the GTP⇄SRv6 bridge — that's Plan B). No per-QFI, buffering, or usage
-reporting. This is an SRv6 L3VPN user plane with MUP control-plane semantics —
-not a 3GPP-conformant N3 UPF.
+reporting. A single VRF binds one MUP direction (above). This is an SRv6 L3VPN
+user plane with MUP control-plane semantics — not a 3GPP-conformant N3 UPF.
 
 ---
 
