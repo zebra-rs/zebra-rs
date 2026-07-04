@@ -649,6 +649,12 @@ the segment are all done (slices 5–6). See the kernel-support note in
 
 **Size:** large (out of stock-Linux scope).
 
+**Plan:** this remaining dataplane work is now scoped in
+[`bgp-mup-dataplane-plan.md`](bgp-mup-dataplane-plan.md), split into **Plan A**
+(complete the End.DT46 user plane on the co-located MUP-U node — stock Linux,
+first priority) and **Plan B** (real `H.M.GTP4.D` / `GTP4.E` via the cradle-rs
+eBPF dataplane — second priority).
+
 ## Quick-pick recommendations
 
 By value-per-line, if picking one up independently of P5/P6:
