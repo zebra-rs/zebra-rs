@@ -492,6 +492,24 @@ pub enum Message {
         proto: String,
         afi: super::RedistAfi,
     },
+    /// Subscribe to `redistribute table <id>`: routes the kernel
+    /// holds in the non-main, non-VRF routing table `table_id`
+    /// (installed externally, e.g. `ip route ... table N`). RIB
+    /// replays the table's current contents as
+    /// `RibRx::TableRouteAdd` batches ending in `BulkPhase::Eor`,
+    /// then streams deltas. v4-only today (FRR parity: only ospfd
+    /// has a `table` redistribute source).
+    RedistTableAdd {
+        proto: String,
+        table_id: u32,
+    },
+    /// Tear down a table subscription. RIB replays the table's
+    /// current contents as `TableRouteDel` (ending in Eor) so the
+    /// consumer can withdraw without duplicating per-table state.
+    RedistTableDel {
+        proto: String,
+        table_id: u32,
+    },
     /// Tear down a default-route watch. No Del replay: the default
     /// prefix may also be covered by an overlapping per-rtype
     /// subscription, so cache cleanup is the consumer's job.
@@ -695,6 +713,15 @@ pub struct Rib {
     /// rtype (self-routes excluded). Updated by RedistDefaultAdd /
     /// RedistDefaultDel; consulted by `redist::notify_v*_delta`.
     pub redist_default_watch: HashMap<String, std::collections::BTreeSet<super::RedistAfi>>,
+    /// `redistribute table <id>` watches: kernel table id -> the
+    /// protocols subscribed to it (`Message::RedistTableAdd`).
+    pub redist_table_watch: BTreeMap<u32, std::collections::BTreeSet<String>>,
+    /// v4 routes the kernel holds in non-main, non-VRF tables,
+    /// stored in the redistribute delivery shape. Populated from the
+    /// netlink dump/monitor (previously these routes were dropped);
+    /// consulted for `RedistTableAdd` replay and kept fresh so
+    /// deltas notify `redist_table_watch` subscribers.
+    pub table_routes_v4: BTreeMap<u32, BTreeMap<Ipv4Net, super::RouteEntryV4>>,
     pub links: BTreeMap<u32, Link>,
     pub bridges: BTreeMap<String, Bridge>,
     pub vxlan: BTreeMap<String, Vxlan>,
@@ -895,6 +922,8 @@ impl Rib {
             inbound_rx,
             redist_filters: HashMap::new(),
             redist_default_watch: HashMap::new(),
+            redist_table_watch: BTreeMap::new(),
+            table_routes_v4: BTreeMap::new(),
             links: BTreeMap::new(),
             bridges: BTreeMap::new(),
             vxlan: BTreeMap::new(),
@@ -3191,6 +3220,131 @@ impl Rib {
             Message::RedistDefaultDel { proto, afi } => {
                 self.redist_default_del(proto, afi);
             }
+            Message::RedistTableAdd { proto, table_id } => {
+                self.redist_table_add(proto, table_id);
+            }
+            Message::RedistTableDel { proto, table_id } => {
+                self.redist_table_del(proto, table_id);
+            }
+        }
+    }
+
+    /// Store or refresh one non-main, non-VRF kernel-table route and
+    /// stream the delta to `redistribute table <id>` subscribers.
+    fn table_route_upsert(&mut self, table_id: u32, prefix: Ipv4Net, entry: &RibEntry) {
+        if !super::redist::redistributable_v4(&prefix) {
+            return;
+        }
+        let e = super::RouteEntryV4 {
+            prefix,
+            nexthop: super::redist::first_v4_nexthop(&entry.nexthop)
+                .unwrap_or(std::net::Ipv4Addr::UNSPECIFIED),
+            subtype: entry.rsubtype.clone(),
+            metric: entry.metric,
+            tag: 0,
+            ifindex: entry.ifindex,
+        };
+        let slot = self
+            .table_routes_v4
+            .entry(table_id)
+            .or_default()
+            .insert(prefix, e.clone());
+        if slot.as_ref() == Some(&e) {
+            return;
+        }
+        if let Some(protos) = self.redist_table_watch.get(&table_id) {
+            for proto in protos {
+                if let Some(sub) = self.client_registry.subscriber_for_proto(proto) {
+                    let _ = sub.rib_rx_tx.send(RibRx::TableRouteAdd {
+                        table_id,
+                        routes: super::RouteBatch::V4(vec![e.clone()]),
+                        bulk: super::BulkPhase::Eor,
+                    });
+                }
+            }
+        }
+    }
+
+    /// Remove one kernel-table route and stream the withdrawal.
+    fn table_route_remove(&mut self, table_id: u32, prefix: Ipv4Net) {
+        let Some(routes) = self.table_routes_v4.get_mut(&table_id) else {
+            return;
+        };
+        let Some(e) = routes.remove(&prefix) else {
+            return;
+        };
+        if routes.is_empty() {
+            self.table_routes_v4.remove(&table_id);
+        }
+        if let Some(protos) = self.redist_table_watch.get(&table_id) {
+            for proto in protos {
+                if let Some(sub) = self.client_registry.subscriber_for_proto(proto) {
+                    let _ = sub.rib_rx_tx.send(RibRx::TableRouteDel {
+                        table_id,
+                        routes: super::RouteBatch::V4(vec![e.clone()]),
+                        bulk: super::BulkPhase::Eor,
+                    });
+                }
+            }
+        }
+    }
+
+    /// `Message::RedistTableAdd`: register the watch and replay the
+    /// table's current contents, ending in Eor.
+    fn redist_table_add(&mut self, proto: String, table_id: u32) {
+        self.redist_table_watch
+            .entry(table_id)
+            .or_default()
+            .insert(proto.clone());
+        let entries: Vec<super::RouteEntryV4> = self
+            .table_routes_v4
+            .get(&table_id)
+            .map(|m| m.values().cloned().collect())
+            .unwrap_or_default();
+        if let Some(sub) = self.client_registry.subscriber_for_proto(&proto) {
+            for chunk in entries.chunks(super::types::REDIST_BATCH_MAX.max(1)) {
+                let _ = sub.rib_rx_tx.send(RibRx::TableRouteAdd {
+                    table_id,
+                    routes: super::RouteBatch::V4(chunk.to_vec()),
+                    bulk: super::BulkPhase::More,
+                });
+            }
+            let _ = sub.rib_rx_tx.send(RibRx::TableRouteAdd {
+                table_id,
+                routes: super::RouteBatch::V4(Vec::new()),
+                bulk: super::BulkPhase::Eor,
+            });
+        }
+    }
+
+    /// `Message::RedistTableDel`: drop the watch and replay the
+    /// table's contents as withdrawals so the consumer can flush
+    /// without duplicating per-table state.
+    fn redist_table_del(&mut self, proto: String, table_id: u32) {
+        if let Some(protos) = self.redist_table_watch.get_mut(&table_id) {
+            protos.remove(&proto);
+            if protos.is_empty() {
+                self.redist_table_watch.remove(&table_id);
+            }
+        }
+        let entries: Vec<super::RouteEntryV4> = self
+            .table_routes_v4
+            .get(&table_id)
+            .map(|m| m.values().cloned().collect())
+            .unwrap_or_default();
+        if let Some(sub) = self.client_registry.subscriber_for_proto(&proto) {
+            for chunk in entries.chunks(super::types::REDIST_BATCH_MAX.max(1)) {
+                let _ = sub.rib_rx_tx.send(RibRx::TableRouteDel {
+                    table_id,
+                    routes: super::RouteBatch::V4(chunk.to_vec()),
+                    bulk: super::BulkPhase::More,
+                });
+            }
+            let _ = sub.rib_rx_tx.send(RibRx::TableRouteDel {
+                table_id,
+                routes: super::RouteBatch::V4(Vec::new()),
+                bulk: super::BulkPhase::Eor,
+            });
         }
     }
 
@@ -3310,6 +3464,11 @@ impl Rib {
                         // are ignored rather than dumped into the default.
                         self.ipv4_route_add_vrf(route.table_id, &prefix, route.entry)
                             .await;
+                    } else {
+                        // A non-main, non-VRF kernel table: keep it in
+                        // the `redistribute table <id>` store and
+                        // notify subscribers.
+                        self.table_route_upsert(route.table_id, prefix, &route.entry);
                     }
                 }
             }
@@ -3321,6 +3480,8 @@ impl Rib {
                     } else if self.vrf_tables.contains_key(&route.table_id) {
                         self.ipv4_route_del_vrf(route.table_id, &prefix, route.entry)
                             .await;
+                    } else {
+                        self.table_route_remove(route.table_id, prefix);
                     }
                 }
             }

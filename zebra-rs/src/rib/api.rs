@@ -210,6 +210,26 @@ pub enum RibRx {
         bulk: BulkPhase,
     },
 
+    // ---- `redistribute table <id>` route push ---------------------
+    //
+    // Per-kernel-table delivery for `Message::RedistTableAdd`
+    // subscribers: routes the kernel holds in a non-main, non-VRF
+    // routing table (installed externally, e.g. `ip route ... table
+    // N`). Same batch/EoR discipline as RouteAdd/RouteDel; keyed by
+    // `table_id` so a consumer redistributing several tables can
+    // demux. v4-only today (FRR parity: only ospfd has a `table`
+    // source).
+    TableRouteAdd {
+        table_id: u32,
+        routes: RouteBatch,
+        bulk: BulkPhase,
+    },
+    TableRouteDel {
+        table_id: u32,
+        routes: RouteBatch,
+        bulk: BulkPhase,
+    },
+
     // ---- IS-IS Flex-Algorithm route fan-out -----------------------
     //
     // BGP ↔ IS-IS Flex-Algorithm integration: IS-IS publishes per-algo

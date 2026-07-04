@@ -618,6 +618,38 @@ module config {
               type string;
             }
           }
+          list table {
+            ext:help "Redistribute routes from a kernel routing table";
+            // FRR `redistribute table (1-65535)`: import routes the
+            // kernel holds in a non-main routing table (installed
+            // externally, e.g. `ip route ... table N`) as Type-5
+            // AS-External LSAs. Keyed by table id so several tables
+            // can redistribute at once, each with its own metric /
+            // metric-type / route-map.
+            key "id";
+            leaf id {
+              type uint32 {
+                range "1..65535";
+              }
+            }
+            leaf metric {
+              type uint32 {
+                range "0..16777214";
+              }
+              default 20;
+            }
+            leaf metric-type {
+              type enumeration {
+                enum type-1;
+                enum type-2;
+              }
+              default type-2;
+            }
+            leaf route-map {
+              ext:help "Filter/modify redistributed routes via a named policy-list";
+              type string;
+            }
+          }
         }
         // FRR-parity `default-information originate`: advertise a
         // Type-5 default route. Without `always` it is originated

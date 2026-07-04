@@ -184,7 +184,7 @@ fn pick_entry<'a>(
 /// they're not routable beyond the local host. Mirrors the Router-LSA
 /// builder's 127.x skip, but here it also guards Type-5 / NSSA Type-7
 /// origination and every other redistribute consumer.
-fn redistributable_v4(prefix: &Ipv4Net) -> bool {
+pub(crate) fn redistributable_v4(prefix: &Ipv4Net) -> bool {
     let a = prefix.addr();
     !a.is_loopback() && !a.is_link_local()
 }
@@ -204,7 +204,7 @@ fn redistributable_v6(prefix: &Ipv6Net) -> bool {
 /// `None` for Link-only (connected) or empty / non-v4 Multi/List —
 /// callers skip the route in that case rather than emit a malformed
 /// entry.
-fn first_v4_nexthop(nh: &Nexthop) -> Option<std::net::Ipv4Addr> {
+pub(crate) fn first_v4_nexthop(nh: &Nexthop) -> Option<std::net::Ipv4Addr> {
     match nh {
         Nexthop::Uni(uni) => match uni.addr {
             std::net::IpAddr::V4(a) => Some(a),
