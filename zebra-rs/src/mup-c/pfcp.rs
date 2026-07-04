@@ -259,7 +259,7 @@ impl MupC {
         let (core_teid, core_endpoint) = ex.core.map_or((0, None), |(t, e)| (t, Some(e)));
 
         let seid = self.sessions.alloc_seid();
-        let session = MupSession {
+        let mut session = MupSession {
             seid,
             cp_seid,
             peer: src,
@@ -272,6 +272,11 @@ impl MupC {
             network_instance: ex.network_instance,
             qfi: None,
         };
+        // N6-breakout fallback: a session with no core-side GTP tunnel (the
+        // common case — the SMF programs only the access/gNB tunnel) has no
+        // Type-2 ST endpoint. Use the configured Core (N6) UPF address so an
+        // ST2 route can still be originated toward the anchor UPF.
+        session.core_endpoint = session.core_endpoint.or(self.config.upf_address);
         self.sessions.insert(session.clone());
 
         let local_ip = self.local_ip();
@@ -989,6 +994,57 @@ mod tests {
             created.f_teid.ipv4_address,
             Some(Ipv4Addr::LOCALHOST),
             "N3 F-TEID address = controller local_ip (default 127.0.0.1)"
+        );
+    }
+
+    /// N6 breakout: a session with only an access/gNB tunnel (no core-side
+    /// F-TEID) gets its Type-2 ST endpoint from the configured `upf-address`.
+    #[test]
+    fn upf_address_fills_core_endpoint_for_n6_breakout() {
+        let cfg = MupCConfig {
+            upf_address: Some(IpAddr::V4(Ipv4Addr::new(10, 100, 0, 1))),
+            ..Default::default()
+        };
+        let (mut mupc, _bgp_rx) = MupC::new_for_test(cfg);
+        associate(&mut mupc);
+        // establishment_bytes carries a gNB tunnel (Access FAR OHC) but no
+        // core-side tunnel.
+        let est = message::parse(&establishment_bytes()).unwrap();
+        let (_reply, events) = mupc.handle_session_establishment(est.as_ref(), peer());
+        let MupCEvent::SessionUp(session) = &events[0] else {
+            panic!("expected SessionUp");
+        };
+        assert_eq!(
+            session.core_endpoint,
+            Some(IpAddr::V4(Ipv4Addr::new(10, 100, 0, 1))),
+            "no core tunnel → ST2 endpoint from configured upf-address"
+        );
+        // The gNB (access) side is unaffected.
+        assert_eq!(
+            session.endpoint,
+            Some(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1)))
+        );
+    }
+
+    /// A session that learns a core-side F-TEID over PFCP (e.g. an N9 tunnel)
+    /// keeps that learned endpoint in preference to the configured one.
+    #[test]
+    fn learned_core_endpoint_beats_upf_address() {
+        let cfg = MupCConfig {
+            upf_address: Some(IpAddr::V4(Ipv4Addr::new(10, 100, 0, 1))),
+            ..Default::default()
+        };
+        let (mut mupc, _bgp_rx) = MupC::new_for_test(cfg);
+        associate(&mut mupc);
+        let est = message::parse(&establishment_two_endpoints_bytes()).unwrap();
+        let (_reply, events) = mupc.handle_session_establishment(est.as_ref(), peer());
+        let MupCEvent::SessionUp(session) = &events[0] else {
+            panic!("expected SessionUp");
+        };
+        assert_eq!(
+            session.core_endpoint,
+            Some(IpAddr::V4(Ipv4Addr::new(10, 9, 0, 1))),
+            "learned core F-TEID wins over configured upf-address"
         );
     }
 

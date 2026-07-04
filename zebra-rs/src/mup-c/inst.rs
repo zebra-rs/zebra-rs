@@ -29,6 +29,10 @@ pub struct MupCConfig {
     pub enable: bool,
     /// IPv6 next-hop stamped on originated ST routes (route phase).
     pub controller_address: Option<Ipv6Addr>,
+    /// Core (N6) UPF endpoint used as the Type-2 ST route endpoint when a
+    /// learned session carries no core-side GTP tunnel (the N6-breakout case).
+    /// A session that learns a core F-TEID over PFCP keeps that in preference.
+    pub upf_address: Option<IpAddr>,
     /// Our PFCP Node ID, used in responses. Falls back to the bind
     /// address / `controller_address` when unset.
     pub node_id: Option<IpAddr>,
