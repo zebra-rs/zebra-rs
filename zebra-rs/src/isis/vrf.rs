@@ -109,7 +109,7 @@ pub fn spawn_isis_vrf(
         ctx,
         rib_rx,
         /* bfd_client_tx */ None,
-        /* stamp_client_tx (default-VRF only in Phase 1) */ None,
+        /* stamp_client_tx (default-VRF only) */ None,
         /* bgp_tx */ None,
         policy_tx.clone(),
         proto.clone(),

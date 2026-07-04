@@ -716,7 +716,7 @@ fn ospfv3_lsa_lookup_raw<'a>(
 }
 
 /// Convenience wrapper that takes an `Ospfv3LsaHeader`. Used by
-/// DBD recv (#779) where the header is what gets iterated.
+/// DBD recv where the header is what gets iterated.
 fn ospfv3_lsa_lookup<'a>(
     oi: &'a OspfInterface<Ospfv3>,
     h: &Ospfv3LsaHeader,
@@ -921,7 +921,7 @@ fn ospfv3_packet_ls_req_set(nbr: &Neighbor<Ospfv3>, ls_req: &mut Ospfv3LsRequest
 /// 12-octet `Ospfv3LsRequestEntry` records (reserved/u16 + ls_type/u16 +
 /// link_state_id/u32 + advertising_router/Ipv4Addr), one for each
 /// LSA the peer holds but we don't (populated by
-/// `ospfv3_db_desc_proc` in #779). Sent unicast to the neighbor's
+/// `ospfv3_db_desc_proc`). Sent unicast to the neighbor's
 /// link-local v6 via the dedicated v3 send channel.
 #[ospf_packet_handler(LsRequest, Send)]
 pub fn ospfv3_ls_req_send(
@@ -1385,7 +1385,7 @@ fn ospfv3_ls_upd_proc(
     }
     // RFC 3101 §2.5 (inherited by v3): Type-7 NSSA-LSAs (0x2007)
     // are accepted only in NSSA areas. Option-bit negotiation
-    // (phase 1) usually prevents the adjacency in the first
+    // usually prevents the adjacency in the first
     // place, but defend against misconfigured peers.
     if h.ls_type == OSPFV3_NSSA_LSA_TYPE && !oi.area_type.is_nssa() {
         tracing::info!(

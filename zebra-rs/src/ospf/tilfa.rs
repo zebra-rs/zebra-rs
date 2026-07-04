@@ -467,7 +467,7 @@ fn adj_sid_label_for_link_v3(
 }
 
 // ---------------------------------------------------------------------
-// SRv6 TI-LFA repairs (RFC 9513) — Phase 5 of
+// SRv6 TI-LFA repairs (RFC 9513) — Part of
 // docs/design/ospfv3-srv6-plan.md.
 // ---------------------------------------------------------------------
 

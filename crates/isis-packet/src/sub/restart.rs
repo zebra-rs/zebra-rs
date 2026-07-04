@@ -31,7 +31,7 @@ use crate::util::{ParseBe, TlvEmitter};
 /// `remaining_time` and `restarting_neighbor` are required by the RFC
 /// when `RA=1` and otherwise MUST be absent. The codec carries them as
 /// `Option` so the absent case is representable; the IIH-level state
-/// machine (Phase 3) is responsible for enforcing the RA-bit pairing.
+/// machine is responsible for enforcing the RA-bit pairing.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct IsisTlvRestart {
     pub flags: u8,

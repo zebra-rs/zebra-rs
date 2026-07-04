@@ -10,8 +10,7 @@ to emit packets with a non-local source; IP_TRANSPARENT (which requires
 together: **`update-source` names the address you don't own,
 `ip-transparent` makes the kernel accept it.**
 
-This mirrors FRR 10.4 `neighbor PEER ip-transparent`
-(FRRouting/frr PR #18789).
+This mirrors FRR 10.4 `neighbor PEER ip-transparent`.
 
 ## When you need it
 

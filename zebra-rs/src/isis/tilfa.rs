@@ -523,8 +523,8 @@ fn repair_segments_to_mpls_labels(
 
 /// Plan the TI-LFA targets from the primary SPF result: every
 /// destination that isn't `source`, has a single primary first-hop
-/// (ECMP at the SPF level is skipped — see PR #547 for the design
-/// rationale), and isn't a pseudonode, paired with the protected
+/// (ECMP at the SPF level is skipped by design), and isn't a
+/// pseudonode, paired with the protected
 /// vertex X. Pure planning — the SPF work happens in
 /// `spf::tilfa_compute`.
 pub(super) fn tilfa_targets(

@@ -511,7 +511,7 @@ pub struct Isis {
     /// by [`Self::stamp_reconcile_link`] to (un)subscribe measurement
     /// sessions for `te-metric measurement` interfaces. Same capture
     /// contract as `bfd_client_tx`; `None` for per-VRF children
-    /// (sessions are default-VRF only in Phase 1).
+    /// (sessions are default-VRF only).
     pub stamp_client_tx: Option<UnboundedSender<crate::stamp::client::ClientReq>>,
     /// Sender half of the per-instance `StampEvent` channel, handed to
     /// STAMP as the `notifier` on every `Subscribe`.
@@ -2823,7 +2823,7 @@ impl Isis {
         // if the neighbour entry is absent from `nbrs` at that point (race:
         // BFD Up fires before the next IIH re-creates the entry).
         link.state.bfd_holddown_nbr.insert(*key, (level, sys_id));
-        // Fast-reroute switchover (kernel-failover phase 3): rewire the
+        // Fast-reroute switchover: rewire the
         // pre-installed protection groups onto their TI-LFA repairs NOW,
         // before the LSP regeneration / SPF / per-prefix reinstall pipeline
         // even starts. One message per failed nexthop address; the RIB

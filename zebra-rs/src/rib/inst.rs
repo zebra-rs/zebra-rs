@@ -167,7 +167,7 @@ pub enum Message {
         proto: String,
         nh: std::net::IpAddr,
     },
-    /// Fast-reroute switchover trigger (phase 2 of
+    /// Fast-reroute switchover trigger (see
     /// `docs/design/nexthop-protect-kernel-failover.md`): the sender
     /// detected a primary-adjacency failure the kernel can't see (BFD
     /// down while the link stays up) at gateway `addr`. RIB rewires
@@ -176,7 +176,7 @@ pub enum Message {
     /// per group, independent of prefix count. The sender's normal
     /// SPF reconvergence then supersedes the bridge.
     // Constructed by RibClient::protect_switch, whose own
-    // expect(dead_code) (callers land in phase 3/4) roots it — and
+    // expect(dead_code) (callers arrive later) roots it — and
     // the construction inside keeps this variant live with it.
     ProtectSwitch {
         addr: IpAddr,

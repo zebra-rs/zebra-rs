@@ -1,4 +1,4 @@
-//! OSPFv3 SRv6 (RFC 9513) — SRv6 Locator LSA origination. Phase 2 of
+//! OSPFv3 SRv6 (RFC 9513) — SRv6 Locator LSA origination. Part of
 //! `docs/design/ospfv3-srv6-plan.md`: the locator configured under
 //! `router ospfv3 segment-routing srv6 locator <name>` resolves
 //! against the RIB locator registry and is advertised as an SRv6

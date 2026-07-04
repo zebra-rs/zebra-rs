@@ -135,8 +135,8 @@ pub struct Stamp {
     /// requested and the bind succeeded (the `[::]:862` listener is
     /// non-fatal — `None` means v6 sessions can't be reflected).
     pub local_addr_v6: Option<SocketAddrV6>,
-    /// Config-manager subscription endpoints. STAMP has no own config
-    /// in Phase 1; every commit broadcast is drained (registering as a
+    /// Config-manager subscription endpoints. STAMP has no own config;
+    /// every commit broadcast is drained (registering as a
     /// config client also lets the manager see the task is running).
     pub cm: ConfigChannel,
     /// `show stamp ...` endpoints, dispatched through [`Self::show_cb`].
@@ -488,7 +488,7 @@ impl Stamp {
             return;
         }
         session.rx_count += 1;
-        // Track the T4 source on accepted samples (Phase 1.5 rung 1) —
+        // Track the T4 source on accepted samples —
         // the figure of merit for "is kernel timestamping live".
         if t4_kernel {
             session.t4_kernel += 1;
@@ -577,7 +577,7 @@ impl Stamp {
         }
     }
 
-    /// STAMP has no own config in Phase 1 — drain every broadcast.
+    /// STAMP has no own config — drain every broadcast.
     fn process_cm_msg(&mut self, _msg: ConfigRequest) {}
 
     async fn process_show_msg(&self, msg: DisplayRequest) {
@@ -875,7 +875,7 @@ mod tests {
         }
     }
 
-    /// Step 3: with a v6 reflector bound, a v6 session key takes the
+    /// With a v6 reflector bound, a v6 session key takes the
     /// `add_session` v6 branch — a v6 connected sender socket and a
     /// live session with a real ssid.
     #[tokio::test]
@@ -890,7 +890,7 @@ mod tests {
         assert_ne!(stamp.sessions.get(&key).unwrap().ssid, 0);
     }
 
-    /// Step 3: a probe from a registered v6 remote is reflected over the
+    /// A probe from a registered v6 remote is reflected over the
     /// v6 write loop; the same probe is dropped (no reflection counted)
     /// when no v6 reflector bound — the family-routing in `on_probe_recv`.
     #[tokio::test]

@@ -272,8 +272,8 @@ Admin role across multiple commands without re-authenticating.
 
 Configure-mode locking (single-writer mutex) is intentionally not
 yet implemented; multiple admins can simultaneously enter
-configure mode and pile up candidate edits. This will land with
-the deferred Phase 5 work.
+configure mode and pile up candidate edits. This is deferred to
+future work.
 
 ### `ZEBRA_VTY_SERVICE_ACCOUNTS` — permanent-admin uids
 

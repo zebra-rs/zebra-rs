@@ -5,7 +5,7 @@
 //!   * [`reflector_read`] — `recvmsg` on the wildcard reflector socket
 //!     with `IP_PKTINFO` + `IP_RECVTTL` + `SCM_TIMESTAMPING` ancillary
 //!     data; takes T2 from the kernel software receive stamp when
-//!     present (Phase 1.5 rung 1), else a userspace read, and forwards
+//!     present, else a userspace read, and forwards
 //!     parsed probes to the event loop;
 //!   * [`reflector_write`] — drains [`ReflectRequest`]s, sending each
 //!     reply via `sendmsg` with the source address forced to the
@@ -135,7 +135,7 @@ pub async fn reflector_read(sock: Arc<AsyncFd<Socket>>, tx: UnboundedSender<Mess
 /// `SCM_TIMESTAMPING` ancillary data. The probe `src` carries its
 /// scope id (the ingress ifindex), and the probed link-local
 /// destination (`dst`) plus the ingress `ifindex` flow through so the
-/// reply can be stamped and pinned (Step 3 / [`reflector_write_v6`]).
+/// reply can be stamped and pinned (see [`reflector_write_v6`]).
 /// T2 comes from the kernel software stamp when present, else a
 /// userspace read — identical to the v4 path.
 pub async fn reflector_read_v6(sock: Arc<AsyncFd<Socket>>, tx: UnboundedSender<Message>) {
@@ -226,7 +226,7 @@ pub async fn reflector_write(
 ) {
     while let Some(req) = rx.recv().await {
         let SocketAddr::V4(dst) = req.dst else {
-            continue; // IPv4 only in Phase 1
+            continue; // IPv4 only
         };
         let mut buf = BytesMut::new();
         req.reply.emit(&mut buf);
@@ -323,8 +323,8 @@ pub async fn reflector_write_v6(
 }
 
 /// Extract the software receive timestamp from an `SCM_TIMESTAMPING`
-/// ancillary message, if the kernel attached one (Phase 1.5 rung 1,
-/// enabled by [`super::socket::set_so_timestamping_rx`]). The `system`
+/// ancillary message, if the kernel attached one (enabled by
+/// [`super::socket::set_so_timestamping_rx`]). The `system`
 /// field carries the software (CLOCK_REALTIME) stamp; an all-zero value
 /// means the kernel didn't stamp this datagram, so we report `None` and
 /// the caller falls back to a userspace `now_ntp()`.
@@ -406,7 +406,7 @@ mod tests {
     use crate::context::ProtoContext;
     use crate::stamp::socket::{stamp_reflector_socket, stamp_reflector_socket_v6};
 
-    /// Phase 1.5 rung 1: a socket built with `set_so_timestamping_rx`
+    /// A socket built with `set_so_timestamping_rx`
     /// receives a software RX timestamp in the `SCM_TIMESTAMPING`
     /// ancillary message on loopback (software stamps are stack-level,
     /// so they work without NIC support), and `kernel_rx_stamp`
@@ -456,7 +456,7 @@ mod tests {
         );
     }
 
-    /// v6 parity for the rung-1 RX stamp (Step 6): a `[::]`-bound v6
+    /// v6 parity for the rung-1 RX stamp: a `[::]`-bound v6
     /// reflector socket also gets a software `SCM_TIMESTAMPING` stamp on
     /// the `::1` loopback, decoded the same way as the v4 path. This
     /// exercises the v6 receive cmsg set (`in6_pktinfo` + hop-limit +

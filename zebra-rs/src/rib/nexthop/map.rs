@@ -208,7 +208,7 @@ impl NexthopMap {
 
     /// Fetch (or create) the protection indirection group for a
     /// (primary, backup) member pair. Protected routes reference this
-    /// gid; phase 2's switchover replaces its membership in place.
+    /// gid; the switchover replaces its membership in place.
     pub fn fetch_protect(&mut self, primary_gid: usize, backup_gid: usize) -> Option<&mut Group> {
         let key = (primary_gid, backup_gid);
         if let Some(&gid) = self.protect.get(&key) {

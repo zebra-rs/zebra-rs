@@ -5,7 +5,7 @@ use crate::typ::AuthType;
 
 /// Authentication Section (RFC 5880 §4.2 – §4.4).
 ///
-/// Phase 1 parses the section but does not validate digests, sequence
+/// This parses the section but does not validate digests, sequence
 /// numbers, or password contents — the session layer decides whether to
 /// honour or drop authenticated packets.
 #[derive(Debug, Clone, PartialEq, Eq)]

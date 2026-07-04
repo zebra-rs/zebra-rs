@@ -862,7 +862,7 @@ pub struct Bgp {
 
     /// Local shadow of `Rib::flex_algo_routes`, populated by
     /// `RibRx::FlexAlgoRouteAdd/Del` events emitted from IS-IS via
-    /// RIB (PR #697). Outer key is the IS-IS Flex-Algorithm id; inner
+    /// RIB. Outer key is the IS-IS Flex-Algorithm id; inner
     /// map is the per-algo IPv4 RIB. The colour-aware resolver does
     /// a longest-prefix match on the BGP next-hop against the
     /// inner map for the algo bound to the route's Color extcomm,
@@ -3539,7 +3539,7 @@ impl Bgp {
             RibRx::RouteDel { rtype, routes, .. } => {
                 self.route_redist_del(rtype, routes);
             }
-            // IS-IS per-algo routes published via RIB (#697). We
+            // IS-IS per-algo routes published via RIB. We
             // shadow only the first nexthop per (algo, prefix); a
             // future ECMP-aware resolver can extend this to walk the
             // full set.
@@ -4675,7 +4675,7 @@ impl Bgp {
                     // At gate-on `adj_out` lives in the egress task (group or
                     // PET), so forward the dump rows there as record-only — the
                     // shard already put the bytes on the wire. Group-task first
-                    // (the N>1 twin of route_sync_ipv4's RecordAdjOut, Phase 3),
+                    // (the N>1 twin of route_sync_ipv4's RecordAdjOut),
                     // then the per-peer PET, then main's adj_out at gate-off.
                     let v4 =
                         bgp_packet::AfiSafi::new(bgp_packet::Afi::Ip, bgp_packet::Safi::Unicast);
@@ -6015,7 +6015,7 @@ mod tests {
 
         #[test]
         fn mup_dispatch_origin_plus_cross_vrf_rt_import() {
-            // The #1681 cross-VRF case: N6 originates a route (RD origin),
+            // The cross-VRF case: N6 originates a route (RD origin),
             // and a sibling N3 imports the route's RT. Both are targets —
             // N6 by RD origin, N3 by RT import.
             let mut index = BTreeMap::new();

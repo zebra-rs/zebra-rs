@@ -155,7 +155,7 @@ impl MpUnreachAttr {
 ///
 /// MP_UNREACH carries neither nexthop nor SNPA — only the AFI/SAFI
 /// header and the NLRI list. The NLRI body bytes are produced by
-/// `EvpnRoute::nlri_emit` (PR #399), the same encoder used by the
+/// `EvpnRoute::nlri_emit`, the same encoder used by the
 /// MP_REACH advertise path.
 /// Serialize an `MpUnreachAttr::Ipv6Nlri(withdraws)` (or `Ipv6Eor`
 /// when `withdraws` is empty) as a complete MP_UNREACH_NLRI path

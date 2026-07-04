@@ -389,7 +389,7 @@ pub(super) fn rebuild_sys_state(
     // neighbor_id. Multiple entries for the same neighbor_id across
     // fragments (or across TLV 22 / TLV 222 for the same link) yield
     // last-wins via BTreeMap::insert — by construction the producer
-    // emits the same bytes on both topologies (PR #613), so any
+    // emits the same bytes on both topologies, so any
     // duplication is benign.
     let mut link_affinity: BTreeMap<IsisNeighborId, ExtAdminGroup> = BTreeMap::new();
     for f in &frags {

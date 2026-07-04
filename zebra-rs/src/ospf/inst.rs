@@ -512,7 +512,7 @@ pub struct Ospf<V: OspfVersion = Ospfv2> {
     /// before OSPF). Used by [`Ospf::stamp_reconcile_link`] to
     /// (un)subscribe per-link measurement sessions for `te-metric
     /// measurement` interfaces. `None` for per-VRF children (sessions
-    /// are default-VRF only in Phase 1) or if STAMP failed to start.
+    /// are default-VRF only) or if STAMP failed to start.
     /// Only v2 ever subscribes — the v3 config tree has no
     /// measurement block.
     pub stamp_client_tx: Option<UnboundedSender<crate::stamp::client::ClientReq>>,
@@ -907,7 +907,7 @@ impl<V: OspfVersion> Ospf<V> {
             nbr.bfd_session_key = None;
             nbr.bfd_session_params = None;
         }
-        // Fast-reroute switchover (kernel-failover phase 4): rewire the
+        // Fast-reroute switchover (kernel-failover): rewire the
         // pre-installed protection groups onto their TI-LFA repairs NOW,
         // before the teardown-driven SPF / per-prefix reinstall pipeline
         // starts. The address is the neighbour's hello source — exactly
@@ -6656,7 +6656,7 @@ impl Ospf<Ospfv3> {
 
     /// Look up the v3 YANG-path handler for `msg.paths` and invoke
     /// it. Mirrors v2's `process_cm_msg`. Currently only
-    /// `/router/ospfv3/area/interface/enable` is registered (#791-stub
+    /// `/router/ospfv3/area/interface/enable` is registered (stub
     /// path); more leaves land alongside the YANG schema expansion.
     pub fn process_cm_msg(&mut self, msg: ConfigRequest) {
         // CommitEnd: fan out to per-VRF children and prune deleted
@@ -7223,7 +7223,7 @@ impl Ospf<Ospfv3> {
         // interface address as a /128 host prefix. Peers use it as the
         // SRv6 End.X nexthop — Linux's seg6local End.X cannot resolve
         // a link-local nexthop correctly (it re-looks nh6 up with the
-        // packet's ingress iif, PR #1361), so the global is the only
+        // packet's ingress iif), so the global is the only
         // reliable kernel programming and OSPFv3 has no other channel
         // that carries neighbor global addresses.
         prefixes.extend(
@@ -10144,7 +10144,7 @@ impl Ospf<Ospfv3> {
     /// Per RFC 2328 §13.3 step 1(d), every LSA sent to a neighbor
     /// is added to that neighbor's retransmit list so the
     /// retransmit timer can resend it until acknowledged. Same
-    /// shape as `flood_lsa_through_area`'s bookkeeping (#808).
+    /// shape as `flood_lsa_through_area`'s bookkeeping.
     fn flood_link_scope_lsa(&mut self, ifindex: u32, lsa: &ospf_packet::Ospfv3Lsa) {
         use ospf_packet::{Ospfv3LsUpdate, Ospfv3Packet, Ospfv3Payload};
 
@@ -10219,7 +10219,7 @@ impl Ospf<Ospfv3> {
     ///   in that case, flush the previous LSA so receivers age it
     ///   out.
     /// - Look up the existing area-LSDB entry via
-    ///   `lookup_by_raw_key` (#779). Key is
+    ///   `lookup_by_raw_key`. Key is
     ///   `(OSPFV3_INTRA_AREA_PREFIX_LSA_TYPE, link_state_id=0,
     ///   advertising_router=self.router_id)`.
     /// - Bump `ls_seq_number` past the prior entry, restamp via
@@ -10831,8 +10831,8 @@ impl Ospf<Ospfv3> {
     /// caller then uses the hello-source link-local, and the
     /// Link-LSA-arrival reconcile upgrades the install later.
     ///
-    /// The preference is the same Linux kernel constraint as IS-IS
-    /// (PR #1361): seg6local End.X resolves nh6 with iif = the
+    /// The preference is the same Linux kernel constraint as IS-IS:
+    /// seg6local End.X resolves nh6 with iif = the
     /// packet's ingress interface, so a link-local nexthop matches
     /// fe80::/64 on the wrong link and blackholes.
     fn neighbor_global_nh6(&self, ifindex: u32, nbr_router_id: Ipv4Addr) -> Option<Ipv6Addr> {
@@ -10944,7 +10944,7 @@ impl Ospf<Ospfv3> {
 
     /// Send the SidAdd pair for an End.X: the advertised /128 (classic
     /// End.X or uA) and, for uSID locators, the LIB twin at
-    /// block:function with the NEXT-CSID flavor (PR #1364 semantics).
+    /// block:function with the NEXT-CSID flavor.
     /// Returns the LIB twin address when one was installed.
     fn install_endx_kernel(
         &self,
@@ -11041,7 +11041,7 @@ impl Ospf<Ospfv3> {
     /// the catch-up sweep after a locator resolves (adjacencies may
     /// have reached Full before SRv6 was active). Enumerates ALL
     /// links unconditionally: filtering on config/state here is the
-    /// PR #1358 disable-after-teardown trap.
+    /// disable-after-teardown trap.
     fn sweep_endx_sids(&mut self) {
         let pairs: Vec<(u32, Ipv4Addr)> = self
             .links
@@ -11166,7 +11166,7 @@ impl Ospf<Ospfv3> {
             }
         }
 
-        // Adjacency-SID label allocation. Mirrors v2 (#850): each Full
+        // Adjacency-SID label allocation. Mirrors v2: each Full
         // adjacency claims one label out of the SRLB on transition
         // into Full and releases it on regression. Consumed by the
         // LAN-Adj-SID origination path (broadcast / NBMA links) and
@@ -11656,7 +11656,7 @@ impl Ospf<Ospfv3> {
     /// `self.v3_recv_rx` is taken out of the `Option` at start so
     /// the `select!` arm doesn't have to re-borrow it through the
     /// `&mut self` used by `process_*`. `Ospf<Ospfv3>::new` always
-    /// populates it (#768).
+    /// populates it.
     pub async fn event_loop(&mut self) {
         let mut v3_recv_rx = self
             .v3_recv_rx
@@ -11790,7 +11790,7 @@ pub enum Message<V: OspfVersion = Ospfv2> {
     /// re-evaluate SRv6 End.X nexthops, because the neighbor's global
     /// address (LA-bit /128 in its Link-LSA) may have just arrived
     /// and the kernel End.X entry must drift from the link-local to
-    /// it (Linux resolves End.X nh6 by ingress iif — PR #1361).
+    /// it (Linux resolves End.X nh6 by ingress iif).
     /// v3-only; the v2 handler ignores it.
     Srv6EndxReconcile(u32),
     /// Retransmit LSAs to a specific neighbor.

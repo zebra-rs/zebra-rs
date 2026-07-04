@@ -1750,7 +1750,7 @@ fn rib_resolve_nexthop(
 /// primary and stamp its id into `pro.gid`. Only a Uni primary gets
 /// one — kernel groups can't nest, so a Multi primary's ECMP group is
 /// itself the future switch point and `pro.gid` stays 0 (routes then
-/// reference the member gids directly, exactly as before phase 1).
+/// reference the member gids directly, exactly as without protection).
 fn resolve_nexthop_protect(pro: &mut NexthopProtect, nmap: &mut NexthopMap) {
     let NexthopMember::Uni(primary) = &pro.primary else {
         return;
@@ -1787,7 +1787,7 @@ fn resolve_nexthop_protect(pro: &mut NexthopProtect, nmap: &mut NexthopMap) {
     pro.gid = group.gid();
 }
 
-/// Fast-reroute switchover (phase 2 of the kernel-failover design):
+/// Fast-reroute switchover in the kernel-failover design:
 /// rewire every protection indirection group whose primary rides the
 /// failed `(table_id, addr)` adjacency onto its repair — one atomic
 /// `RTM_NEWNEXTHOP` replace per group, O(protected adjacencies) and
@@ -1818,7 +1818,7 @@ pub async fn protect_switch(
         switched += 1;
     }
 
-    // ECMP leg eviction (phase 5): TI-LFA computes no repair for
+    // ECMP leg eviction: TI-LFA computes no repair for
     // SPF-level ECMP destinations — the surviving legs are the
     // protection — so for Multi groups the fast path is dropping the
     // dead leg from the kernel membership, one atomic replace per
@@ -1844,7 +1844,7 @@ pub async fn protect_switch(
             // deleting the group would cascade-remove its routes out
             // from under the route sync. Mark it invalid and let the
             // teardown-driven SPF replace the routes (same blackhole
-            // window as before phase 5).
+            // window as without leg eviction).
             multi.set_valid(false);
             continue;
         }
@@ -2851,11 +2851,11 @@ mod tests {
         assert!(backup_uni.gid != 0, "backup Uni gets its own group");
     }
 
-    /// Phase 1 of the kernel-failover design: a Uni primary gets a
+    /// In the kernel-failover design, a Uni primary gets a
     /// protection indirection group allocated and stamped into
     /// `pro.gid`; the same (primary, backup) pair on a second entry
     /// dedupes onto the same gid (that sharing is what makes the
-    /// phase-2 switchover O(1) in prefixes).
+    /// switchover O(1) in prefixes).
     #[test]
     fn protect_uni_primary_allocates_indirection_group() {
         use super::super::entry::RibEntry;
@@ -2912,7 +2912,7 @@ mod tests {
         assert_eq!(nmap.get(pro_b.gid).unwrap().refcnt(), 2);
     }
 
-    /// Phase 2: candidate selection for the switchover walks only
+    /// Candidate selection for the switchover walks only
     /// protection groups whose ACTIVE primary rides the failed
     /// (table, addr) adjacency and whose repair is actually usable.
     #[test]
@@ -3016,7 +3016,7 @@ mod tests {
         );
     }
 
-    /// Phase 2: a switched group encodes the repair as its kernel
+    /// A switched group encodes the repair as its kernel
     /// member, and a producer re-adding the same pair (post-flap SPF)
     /// reverts it to the primary with a pending re-install.
     #[test]
@@ -3079,7 +3079,7 @@ mod tests {
         );
     }
 
-    /// Phase 5: a BFD-dead leg makes its ECMP groups eviction
+    /// A BFD-dead leg makes its ECMP groups eviction
     /// candidates, keyed by the leg's (table, addr); the leg itself
     /// is marked invalid so the sync passes can't resurrect it.
     #[test]
@@ -3195,7 +3195,7 @@ mod tests {
     /// The nesting constraint: a Multi (ECMP) primary gets NO
     /// indirection group — its own ECMP group is the future switch
     /// point — so `pro.gid` stays 0 and routes reference member gids
-    /// exactly as before phase 1.
+    /// exactly as without protection.
     #[test]
     fn protect_multi_primary_gets_no_indirection_group() {
         use super::super::entry::RibEntry;

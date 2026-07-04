@@ -757,7 +757,7 @@ mod tests {
         assert!(eng.is_enabled(7));
     }
 
-    // ── New tests for PR 2 ───────────────────────────────────────────────
+    // ── New tests ────────────────────────────────────────────────────────
 
     #[test]
     fn rx_counters_increment_per_type() {

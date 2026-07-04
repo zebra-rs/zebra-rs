@@ -3432,7 +3432,7 @@ pub(super) fn apply_disable_connected_check(peer: &mut Peer, want: bool) -> bool
 }
 
 /// `[no] router bgp neighbor <addr> ip-transparent` (presence container,
-/// FRR 10.4 PR #18789) — set IP_TRANSPARENT / IPV6_TRANSPARENT on this
+/// FRR 10.4) — set IP_TRANSPARENT / IPV6_TRANSPARENT on this
 /// neighbor's TCP socket so the session can use a local address the
 /// host does not own (the address itself comes from `update-source`;
 /// the two are used together). Consumed at connect time by
@@ -5499,9 +5499,9 @@ mod bfd_wiring_tests {
 #[cfg(test)]
 mod neighbor_group_wiring_tests {
     //! End-to-end exercise of the neighbor-group inheritance callback
-    //! paths landed across PR #758 (static-peer resolver), PR #760
-    //! (reactive sweep on group remote-as Set/Delete), and PR #762
-    //! (group-level delete cascade). Asserts the user-observable
+    //! paths for the static-peer resolver, the reactive sweep on group
+    //! remote-as Set/Delete, and the group-level delete cascade. Asserts
+    //! the user-observable
     //! state after each callback rather than the internal sweep
     //! decision — the decision matrix itself is unit-tested in
     //! `neighbor_group::tests`.

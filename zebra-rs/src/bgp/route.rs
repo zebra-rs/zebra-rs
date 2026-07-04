@@ -3705,7 +3705,7 @@ fn apply_ipv4_advertise_job(
         added,
         replaced,
     } = job;
-    // Group-task migration Phase 1b (gate-on): the v4-unicast event-driven
+    // Group-task migration (gate-on): the v4-unicast event-driven
     // advertise/withdraw runs in the per-update-group egress tasks — fan one
     // delta per group and bypass the update-group flush. Takes precedence over
     // the per-peer PET below (they are alternative egress models). VPNv4
@@ -4113,7 +4113,7 @@ fn fan_advertise_to_pets(prefix: Ipv4Net, selected: &[BgpRib], peers: &PeerMap) 
     }
 }
 
-/// Group-task migration Phase 1b — fan the reduce's best-path delta to the
+/// Group-task migration — fan the reduce's best-path delta to the
 /// per-update-group egress tasks: **one** delta per group (deduped across the
 /// established members), keyed by `peer.update_group_id`. An empty `selected`
 /// is a withdraw (the path is gone). The per-member split-horizon is the
@@ -4278,7 +4278,7 @@ fn soft_out_v4_to_pet(peer_idx: usize, bgp: &BgpTop, peers: &PeerMap) {
     }
 }
 
-/// Group-task migration Phase 4 — soft-out for a v4-unicast peer at gate-on.
+/// Group-task migration — soft-out for a v4-unicast peer at gate-on.
 /// Refresh every member of the peer's update group with a fresh `SyncCtx` (the
 /// out-policy snapshot changed) by re-sending `AddMember` (which overwrites the
 /// member's ctx), then re-fan the whole v4 Loc-RIB so the group re-evaluates
@@ -4336,7 +4336,7 @@ fn soft_out_v4_to_group(peer_idx: usize, bgp: &BgpTop, peers: &PeerMap) {
 }
 
 /// Per-AF hooks for the generic update-group/memo advertise path
-/// ([`route_advertise_batch`]). Phase 2 of the Adj-RIB-Out unification:
+/// ([`route_advertise_batch`]). Part of the Adj-RIB-Out unification:
 /// v4-unicast/VPNv4 (`V4Batch`) and v6-unicast/VPNv6 (`V6Batch`) share the
 /// memo loop + group-counter logic; the AF impls own the prefix/NLRI type,
 /// the build (`compute_outcome`), and the per-peer `advertise` / `withdraw`
@@ -6383,7 +6383,7 @@ pub fn route_labelv4_update(
             rib.weight = decision.weight;
             nht_track_received(bgp, &mut rib, dep.clone());
             // Allocate a per-prefix local label so re-advertising with
-            // next-hop-self forwards via a swap ILM (Phase 5b). `None`
+            // next-hop-self forwards via a swap ILM. `None`
             // when no dynamic block is granted yet — advertise the
             // received label until then.
             rib.local_label = bgp
@@ -7652,9 +7652,9 @@ pub fn route_evpn_withdraw(ident: usize, route: &EvpnRoute, bgp: &mut BgpTop, pe
 /// Store one received MUP NLRI (draft-ietf-bess-mup-safi, SAFI 85) in the peer's
 /// Adj-RIB-In and the MUP Loc-RIB, then re-run best-path.
 ///
-/// Phase 2 is receive + show only: there is no inbound route-policy, no
-/// VRF import, no re-advertise, and no FIB install yet (those land in
-/// P3/P4/P6). The caller stamps the MP_REACH next-hop into `attr` so
+/// This is receive + show only: there is no inbound route-policy, no
+/// VRF import, no re-advertise, and no FIB install yet (those land
+/// later). The caller stamps the MP_REACH next-hop into `attr` so
 /// `show bgp mup` can render it. Loop detection mirrors
 /// `route_evpn_update` — a route carrying our own AS / ORIGINATOR_ID /
 /// CLUSTER_LIST is dropped silently.
@@ -8237,10 +8237,10 @@ pub fn route_sync_mup(peer: &mut Peer, bgp: &mut BgpTop) {
 
 /// Store one received Flow Specification NLRI in the peer's Adj-RIB-In.
 ///
-/// Phase 1 (receive/reflect) is control-plane only: the flow spec is
+/// Receive/reflect is control-plane only: the flow spec is
 /// kept in Adj-RIB-In so it can be shown, but it is not validated
-/// (RFC 9117 — Phase 2), not selected into a Loc-RIB or re-advertised
-/// (Phase 3), and not installed (Phase 4). Loop detection mirrors
+/// (RFC 9117), not selected into a Loc-RIB or re-advertised, and
+/// not installed. Loop detection mirrors
 /// `route_evpn_update` so a route carrying our own AS / ORIGINATOR_ID /
 /// CLUSTER_LIST is dropped silently.
 pub fn route_flowspec_update(
@@ -8306,13 +8306,13 @@ pub fn route_flowspec_update(
         peer.adj_in.add_flowspec(afi, nlri.clone(), rib.clone());
     }
 
-    // Phase 3: run best-path selection into the Loc-RIB. Validity
-    // (Phase 2 / RFC 9117) gates re-advertise and install, not Loc-RIB
+    // Run best-path selection into the Loc-RIB. Validity
+    // (RFC 9117) gates re-advertise and install, not Loc-RIB
     // membership, so the selected best path is recorded regardless of
     // the validation verdict.
     let (_, selected, _) = bgp.local_rib.update_flowspec(afi, nlri.clone(), rib);
 
-    // Phase 3b: re-advertise (or withdraw) the new best path to flowspec
+    // Re-advertise (or withdraw) the new best path to flowspec
     // peers, gated on RFC 9117 validity.
     route_flowspec_propagate(afi, nlri, &selected, bgp, peers);
 }
@@ -10069,7 +10069,7 @@ pub fn route_clean(
         peer.adj_in.evpn.clear();
     }
 
-    // MUP (draft-ietf-bess-mup-safi). Phase 2 is receive-only with no LLGR
+    // MUP (draft-ietf-bess-mup-safi) is receive-only with no LLGR
     // retention, so peer-down withdraws every MUP route the peer gave us.
     // Route it through the same `route_mup_locrib_withdraw` helper the
     // explicit MP_UNREACH path uses so the withdrawal is *propagated*, not
@@ -11110,8 +11110,8 @@ fn bgp_nexthop_to_ipaddr(nh: &BgpNexthop) -> Option<IpAddr> {
 ///
 /// The advertised label is the row's label — the received label when
 /// propagating, implicit-null (3) for self-originated FECs. The real
-/// per-prefix local label + ILM swap is Phase 5; Phase 4 installs
-/// nothing in the dataplane, so this is control-plane only.
+/// per-prefix local label + ILM swap comes later; nothing is
+/// installed in the dataplane yet, so this is control-plane only.
 ///
 /// `attrs.nexthop` is cleared: an MP_REACH carries the next-hop itself,
 /// and a `BgpNexthop::Ipv4` left on the attr would also emit a legacy
@@ -11272,7 +11272,7 @@ fn route_update_labelv6(
 }
 
 /// Per-AF hooks that let one generic [`route_advertise_labeled`] cover the
-/// SAFI-4 (labeled-unicast) v4 and v6 advertise paths. Phase 2 of the
+/// SAFI-4 (labeled-unicast) v4 and v6 advertise paths. Part of the
 /// Adj-RIB-Out unification: the two families differ only in prefix/NLRI
 /// type, which `adj_out` table records reach, their update builder and
 /// out-policy, and which `Mp{Reach,Unreach}Attr` variant they encode.
@@ -12422,7 +12422,7 @@ pub fn route_sync_ipv4(peer: &mut Peer, bgp: &mut BgpTop) {
         // Register to AdjOut.
         rib.attr = bgp.attr_store.intern(decision.attr);
         let arc_attr = rib.attr.clone();
-        // Group-task migration Phase 3: also record the synced route into the
+        // Group-task migration: also record the synced route into the
         // group adj_out (without re-sending — the direct dump below delivers
         // the bytes) so a late member that is the first of its group stays
         // withdrawable by the group's later withdraws.
@@ -13607,7 +13607,7 @@ impl Bgp {
     /// advertised label is implicit-null (3): we are the egress for this
     /// FEC, so a labeled-unicast peer does penultimate-hop-pop and
     /// forwards as IP to us. The real per-prefix local label + ILM swap
-    /// is Phase 5; no FIB install here (control-plane only).
+    /// comes later; no FIB install here (control-plane only).
     pub fn route_add_label_v4(&mut self, prefix: Ipv4Net) {
         let ident = ORIGINATED_PEER;
         let attr = BgpAttr::new();
@@ -14040,7 +14040,7 @@ impl Bgp {
     /// `redist_remote_id` discriminator and MED-from-metric, but
     /// originates into `v4lu` with implicit-null (we are the egress FEC)
     /// and advertises via the labelv4 path. No FIB install (control-plane
-    /// only; the per-prefix local label + ILM is Phase 5).
+    /// only; the per-prefix local label + ILM comes later).
     pub fn route_redist_inject_labelv4(
         &mut self,
         rtype: crate::rib::RibType,
@@ -15682,7 +15682,7 @@ fn evpn_withdraw_leaf_ad(
 ///
 /// Note: RFC 9574 has the leaf join a *single* chosen replicator's set; we
 /// currently join every selective replicator. Harmless with no replicator
-/// dataplane (Phase 4); chosen-replicator selection is a follow-up.
+/// dataplane; chosen-replicator selection is a follow-up.
 fn evpn_selective_ar_on_receive(
     route: &EvpnRoute,
     attr: &BgpAttr,
