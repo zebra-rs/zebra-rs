@@ -20,13 +20,15 @@ use anyhow::{Context, Result, bail};
 use clap::Parser;
 
 use rs_pfcp::ie::IeType;
+use rs_pfcp::ie::apply_action::ApplyAction;
 use rs_pfcp::ie::create_far::CreateFar;
 use rs_pfcp::ie::create_pdr::CreatePdrBuilder;
-use rs_pfcp::ie::destination_interface::Interface;
-use rs_pfcp::ie::f_teid::FteidBuilder;
+use rs_pfcp::ie::destination_interface::{DestinationInterface, Interface};
 use rs_pfcp::ie::far_id::FarId;
+use rs_pfcp::ie::forwarding_parameters::ForwardingParameters;
 use rs_pfcp::ie::fseid::Fseid;
 use rs_pfcp::ie::network_instance::NetworkInstance;
+use rs_pfcp::ie::outer_header_creation::OuterHeaderCreation;
 use rs_pfcp::ie::pdi::PdiBuilder;
 use rs_pfcp::ie::pdr_id::PdrId;
 use rs_pfcp::ie::precedence::Precedence;
@@ -113,6 +115,24 @@ fn parse_u32(s: &str) -> std::result::Result<u32, String> {
     parsed.map_err(|e| format!("invalid u32 `{s}`: {e}"))
 }
 
+/// A Create FAR that forwards to `dest` and GTP-U-encapsulates toward
+/// `(teid, addr)` — the wire shape an SMF programs a gNB (Dest = Access) or
+/// core (Dest = Core) GTP tunnel with. The MUP controller reads the ST-route
+/// endpoints from these FAR Outer Header Creation IEs, not the PDI F-TEIDs.
+fn gtpu_far(far_id: u32, dest: Interface, teid: u32, addr: IpAddr) -> Result<CreateFar> {
+    let ohc = match addr {
+        IpAddr::V4(v4) => OuterHeaderCreation::gtpu_ipv4(teid, v4),
+        IpAddr::V6(v6) => OuterHeaderCreation::gtpu_ipv6(teid, v6),
+    };
+    let fp =
+        ForwardingParameters::new(DestinationInterface::new(dest)).with_outer_header_creation(ohc);
+    CreateFar::builder(FarId::new(far_id))
+        .apply_action(ApplyAction::FORW)
+        .forwarding_parameters(fp)
+        .build()
+        .context("build Create FAR")
+}
+
 fn main() -> Result<()> {
     let args = Args::parse();
     if args.ue_ipv4.is_none() && args.ue_ipv6.is_none() {
@@ -139,17 +159,12 @@ fn main() -> Result<()> {
     println!("pfcp-inject: association established with {dst}");
 
     // 2. Session Establishment.
-    let fteid = {
-        let b = FteidBuilder::new().teid(args.teid);
-        match args.endpoint {
-            IpAddr::V4(v4) => b.ipv4(v4),
-            IpAddr::V6(v6) => b.ipv6(v6),
-        }
-        .build()
-        .context("build F-TEID")?
-    };
+    // The UE prefix + Network Instance ride in a PDR; the GTP-U tunnels ride
+    // in the FARs' Outer Header Creation — the gNB (access) tunnel for the
+    // Type-1 ST route, an optional core-facing tunnel for the Type-2 ST route.
+    // This mirrors the real 5G model (the gNB F-TEID is programmed in the
+    // downlink FAR, not the PDI), which the controller extracts from.
     let pdi = PdiBuilder::new(SourceInterface::new(SourceInterfaceValue::Access))
-        .f_teid(fteid)
         .ue_ip_address(UeIpAddress::new(args.ue_ipv4, args.ue_ipv6))
         .network_instance(NetworkInstance::new(&args.network_instance))
         .build()
@@ -160,41 +175,19 @@ fn main() -> Result<()> {
         .far_id(FarId::new(1))
         .build()
         .context("build Create PDR")?;
-    let far = CreateFar::builder(FarId::new(1))
-        .forward_to(Interface::Core)
-        .build()
-        .context("build Create FAR")?;
-    // Optional second (`SourceInterface=Core`) PDR carrying the core-side
-    // F-TEID, so the controller learns a distinct Type-2 (core) endpoint.
-    let mut create_pdrs = vec![pdr.to_ie()];
+    // gNB (access) tunnel → Type-1 ST route.
+    let gnb_far = gtpu_far(1, Interface::Access, args.teid, args.endpoint)?;
+    let mut create_fars = vec![gnb_far.to_ie()];
+    // Optional core-facing GTP tunnel (e.g. N9) → Type-2 ST route.
     if let Some(core_endpoint) = args.core_endpoint {
-        let core_fteid = {
-            let b = FteidBuilder::new().teid(args.core_teid);
-            match core_endpoint {
-                IpAddr::V4(v4) => b.ipv4(v4),
-                IpAddr::V6(v6) => b.ipv6(v6),
-            }
-            .build()
-            .context("build core F-TEID")?
-        };
-        let core_pdi = PdiBuilder::new(SourceInterface::new(SourceInterfaceValue::Core))
-            .f_teid(core_fteid)
-            .network_instance(NetworkInstance::new(&args.network_instance))
-            .build()
-            .context("build core PDI")?;
-        let core_pdr = CreatePdrBuilder::new(PdrId::new(2))
-            .precedence(Precedence::new(200))
-            .pdi(core_pdi)
-            .far_id(FarId::new(1))
-            .build()
-            .context("build core Create PDR")?;
-        create_pdrs.push(core_pdr.to_ie());
+        let core_far = gtpu_far(2, Interface::Core, args.core_teid, core_endpoint)?;
+        create_fars.push(core_far.to_ie());
     }
     let establish = SessionEstablishmentRequestBuilder::new(args.seid, 2u32)
         .node_id(args.node_id)
         .fseid(args.seid, args.node_id)
-        .create_pdrs(create_pdrs)
-        .create_fars(vec![far.to_ie()])
+        .create_pdrs(vec![pdr.to_ie()])
+        .create_fars(create_fars)
         .build()
         .context("build Session Establishment Request")?;
     let resp = exchange(&sock, &establish.marshal(), "Session Establishment")?;

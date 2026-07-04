@@ -16,9 +16,13 @@ use tokio::sync::mpsc::UnboundedSender;
 
 use rs_pfcp::ie::IeType;
 use rs_pfcp::ie::cause::CauseValue;
+use rs_pfcp::ie::create_far::CreateFar;
 use rs_pfcp::ie::create_pdr::CreatePdr;
+use rs_pfcp::ie::destination_interface::Interface as DestInterface;
 use rs_pfcp::ie::fseid::Fseid;
 use rs_pfcp::ie::node_id::NodeId;
+use rs_pfcp::ie::outer_header_creation::OuterHeaderCreation;
+use rs_pfcp::ie::update_far::UpdateFar;
 use rs_pfcp::message::association_release_response::AssociationReleaseResponseBuilder;
 use rs_pfcp::message::association_setup_response::AssociationSetupResponseBuilder;
 use rs_pfcp::message::heartbeat_response::HeartbeatResponseBuilder;
@@ -241,72 +245,27 @@ impl MupC {
             );
         }
 
-        // Walk the Create PDRs for the F-TEIDs, UE IP and NI. The PDI Source
-        // Interface tells access (gNB-facing, → Type-1 ST) from core
-        // (core-facing, → Type-2 ST), so each direction's endpoint is
-        // captured separately.
-        use rs_pfcp::ie::source_interface::SourceInterfaceValue;
-        let mut ue_ipv4 = None;
-        let mut ue_ipv6 = None;
-        let mut teid = 0u32;
-        let mut endpoint = None;
-        let mut core_teid = 0u32;
-        let mut core_endpoint = None;
-        let mut network_instance = None;
-        for ie in msg.ies(IeType::CreatePdr) {
-            let Ok(pdr) = CreatePdr::unmarshal(&ie.payload) else {
-                continue;
-            };
-            let pdi = &pdr.pdi;
-            let is_core = pdi.source_interface.value == SourceInterfaceValue::Core;
-            if let Some(f) = &pdi.f_teid {
-                let addr = f
-                    .ipv4_address
-                    .map(IpAddr::V4)
-                    .or(f.ipv6_address.map(IpAddr::V6));
-                if is_core {
-                    if core_teid == 0 {
-                        core_teid = f.teid.value();
-                    }
-                    if core_endpoint.is_none() {
-                        core_endpoint = addr;
-                    }
-                } else {
-                    if teid == 0 {
-                        teid = f.teid.value();
-                    }
-                    if endpoint.is_none() {
-                        endpoint = addr;
-                    }
-                }
-            }
-            if let Some(ue) = &pdi.ue_ip_address {
-                if ue.ipv4_address.is_some() {
-                    ue_ipv4 = ue.ipv4_address;
-                }
-                if ue.ipv6_address.is_some() {
-                    ue_ipv6 = ue.ipv6_address;
-                }
-            }
-            if network_instance.is_none()
-                && let Some(ni) = &pdi.network_instance
-            {
-                network_instance = Some(ni.instance.clone());
-            }
-        }
+        // Extract the session fields: UE IP + Network Instance from the PDRs,
+        // and the GTP-U tunnel endpoints from the FARs' Outer Header Creation
+        // (the gNB tunnel for the Type-1 ST route, the core tunnel for the
+        // Type-2 ST route). See [`extract_pfcp`] for why the endpoints come
+        // from the FARs, not the PDI F-TEIDs.
+        let ex = extract_pfcp(msg);
+        let (teid, endpoint) = ex.gnb.map_or((0, None), |(t, e)| (t, Some(e)));
+        let (core_teid, core_endpoint) = ex.core.map_or((0, None), |(t, e)| (t, Some(e)));
 
         let seid = self.sessions.alloc_seid();
         let session = MupSession {
             seid,
             cp_seid,
             peer: src,
-            ue_ipv4,
-            ue_ipv6,
+            ue_ipv4: ex.ue_ipv4,
+            ue_ipv6: ex.ue_ipv6,
             teid,
             endpoint,
             core_teid,
             core_endpoint,
-            network_instance,
+            network_instance: ex.network_instance,
             qfi: None,
         };
         self.sessions.insert(session.clone());
@@ -363,15 +322,39 @@ impl MupC {
         // (or unknown SEID) is rejected without touching state. We have no
         // session to echo a CP F-SEID from, so the error response carries
         // the request's SEID.
-        let Some(session) = self.sessions.get(seid).filter(|s| s.peer == src).cloned() else {
+        let Some(mut session) = self.sessions.get(seid).filter(|s| s.peer == src).cloned() else {
             let resp = SessionModificationResponseBuilder::new(seid, seq)
                 .cause(CauseValue::SessionContextNotFound)
                 .build();
             return (Some(resp.marshal()), Vec::new());
         };
-        // PR-A re-reports the existing session unchanged (field-level
-        // re-extraction from Update/Create PDRs is a follow-up). The
-        // response header SEID echoes the CP's F-SEID, not our own.
+        // Merge in whatever this modification carries. In 5G the gNB GTP-U
+        // tunnel is programmed *here* — in an Update FAR's Outer Header
+        // Creation, after the N2 PDU-session setup completes — not in the
+        // establishment, so the Type-1 ST endpoint/TEID typically first
+        // becomes known at modification time. Only overwrite a field the
+        // modification actually provides (a modification carries just the
+        // changed IEs, so an absent field means "unchanged").
+        let ex = extract_pfcp(msg);
+        if let Some((t, e)) = ex.gnb {
+            session.teid = t;
+            session.endpoint = Some(e);
+        }
+        if let Some((t, e)) = ex.core {
+            session.core_teid = t;
+            session.core_endpoint = Some(e);
+        }
+        if ex.ue_ipv4.is_some() {
+            session.ue_ipv4 = ex.ue_ipv4;
+        }
+        if ex.ue_ipv6.is_some() {
+            session.ue_ipv6 = ex.ue_ipv6;
+        }
+        if ex.network_instance.is_some() {
+            session.network_instance = ex.network_instance;
+        }
+        self.sessions.insert(session.clone());
+        // The response header SEID echoes the CP's F-SEID, not our own.
         let resp = SessionModificationResponseBuilder::new(session.cp_seid, seq)
             .cause_accepted()
             .build();
@@ -456,26 +439,165 @@ fn node_id_string(node_id: &NodeId) -> String {
     }
 }
 
+/// The session fields extracted from one PFCP Session Establishment or
+/// Modification message. Every field is optional so a modification (which
+/// carries only the changed IEs) can be merged into an existing session.
+#[derive(Default)]
+struct PfcpExtract {
+    ue_ipv4: Option<std::net::Ipv4Addr>,
+    ue_ipv6: Option<std::net::Ipv6Addr>,
+    network_instance: Option<String>,
+    /// gNB (access-side) GTP-U F-TEID — the `(TEID, endpoint)` the UPF
+    /// encapsulates *downlink* traffic toward. Drives the Type-1 ST route.
+    gnb: Option<(u32, IpAddr)>,
+    /// Core-side GTP-U F-TEID — the `(TEID, endpoint)` of a core-facing GTP
+    /// tunnel (e.g. an N9 to an anchor UPF). Drives the Type-2 ST route.
+    /// Absent for a plain N6 breakout, which has no core-side GTP tunnel.
+    core: Option<(u32, IpAddr)>,
+}
+
+/// `(TEID, endpoint)` of a GTP-U Outer Header Creation, or `None` when the
+/// OHC is not a GTP-U tunnel (e.g. an N6 native-IP forward) or lacks a
+/// TEID/address.
+fn ohc_gtpu(ohc: &OuterHeaderCreation) -> Option<(u32, IpAddr)> {
+    if !(ohc.description.gtpu_udp_ipv4 || ohc.description.gtpu_udp_ipv6) {
+        return None;
+    }
+    let teid = ohc.teid.as_ref()?.value();
+    let addr = ohc
+        .ipv4_address
+        .map(IpAddr::V4)
+        .or(ohc.ipv6_address.map(IpAddr::V6))?;
+    Some((teid, addr))
+}
+
+/// Fold one FAR's forwarding info into `ex`: a GTP-U Outer Header Creation
+/// bound for the `Access` interface is the gNB (downlink) tunnel (Type-1 ST);
+/// one bound for `Core` is the core-facing tunnel (Type-2 ST). A GTP-U OHC
+/// with no destination interface — an Update FAR that carries only the
+/// changed OHC — is the downlink/gNB tunnel in every standard 5G call flow,
+/// so it defaults to `Access`. The first tunnel of each kind wins.
+fn apply_far_ohc(
+    ex: &mut PfcpExtract,
+    dest: Option<DestInterface>,
+    ohc: Option<&OuterHeaderCreation>,
+) {
+    let Some(tunnel) = ohc.and_then(ohc_gtpu) else {
+        return;
+    };
+    match dest.unwrap_or(DestInterface::Access) {
+        DestInterface::Core => {
+            if ex.core.is_none() {
+                ex.core = Some(tunnel);
+            }
+        }
+        _ => {
+            if ex.gnb.is_none() {
+                ex.gnb = Some(tunnel);
+            }
+        }
+    }
+}
+
+/// Extract the MUP-relevant session fields from a PFCP Establishment or
+/// Modification message.
+///
+/// UE IP and Network Instance come from the Create PDRs (matched by UE
+/// address / carried per-PDI). The GTP-U tunnel endpoints come from the
+/// **FARs' Outer Header Creation**, *not* the PDI F-TEIDs — this is the key
+/// correctness point (draft-ietf-bess-mup-safi §3.2.1 / TS 29.244):
+///
+///   * The Type-1 ST route's endpoint is the **gNB** (the access-side tunnel
+///     the PE encapsulates downlink traffic toward). In PFCP that gNB F-TEID
+///     lives in the **downlink FAR's Outer Header Creation** (Destination
+///     Interface = Access), which the SMF programs from the N2 setup — often
+///     only in a later Session Modification. The Access-side PDI F-TEID is the
+///     UPF's *own* N3 receive endpoint (where the gNB sends uplink), which is
+///     neither the gNB nor the core anchor, so it is deliberately ignored.
+///   * The Type-2 ST route's endpoint is the **core**-side GTP tunnel, from a
+///     FAR bound for the Core interface — present only when the UPF has a
+///     core-facing GTP tunnel (N9 / interworking), absent for N6 breakout.
+fn extract_pfcp(msg: &dyn PfcpMessage) -> PfcpExtract {
+    let mut ex = PfcpExtract::default();
+    // UE IP + Network Instance from the PDRs (source-interface-agnostic).
+    for ie in msg.ies(IeType::CreatePdr) {
+        let Ok(pdr) = CreatePdr::unmarshal(&ie.payload) else {
+            continue;
+        };
+        let pdi = &pdr.pdi;
+        if let Some(ue) = &pdi.ue_ip_address {
+            if ue.ipv4_address.is_some() {
+                ex.ue_ipv4 = ue.ipv4_address;
+            }
+            if ue.ipv6_address.is_some() {
+                ex.ue_ipv6 = ue.ipv6_address;
+            }
+        }
+        if ex.network_instance.is_none()
+            && let Some(ni) = &pdi.network_instance
+        {
+            ex.network_instance = Some(ni.instance.clone());
+        }
+    }
+    // GTP-U tunnel endpoints from the FARs' Outer Header Creation.
+    for ie in msg.ies(IeType::CreateFar) {
+        let Ok(far) = CreateFar::unmarshal(&ie.payload) else {
+            continue;
+        };
+        if let Some(fp) = &far.forwarding_parameters {
+            apply_far_ohc(
+                &mut ex,
+                Some(fp.destination_interface.interface),
+                fp.outer_header_creation.as_ref(),
+            );
+            if ex.network_instance.is_none()
+                && let Some(ni) = &fp.network_instance
+            {
+                ex.network_instance = Some(ni.instance.clone());
+            }
+        }
+    }
+    for ie in msg.ies(IeType::UpdateFar) {
+        let Ok(far) = UpdateFar::unmarshal(&ie.payload) else {
+            continue;
+        };
+        if let Some(fp) = &far.update_forwarding_parameters {
+            apply_far_ohc(
+                &mut ex,
+                fp.destination_interface.as_ref().map(|d| d.interface),
+                fp.outer_header_creation.as_ref(),
+            );
+        }
+    }
+    ex
+}
+
 #[cfg(test)]
 mod tests {
     use std::net::Ipv4Addr;
 
     use rs_pfcp::ie::IeType;
+    use rs_pfcp::ie::apply_action::ApplyAction;
     use rs_pfcp::ie::create_far::CreateFar;
     use rs_pfcp::ie::create_pdr::CreatePdrBuilder;
-    use rs_pfcp::ie::destination_interface::Interface;
+    use rs_pfcp::ie::destination_interface::{DestinationInterface, Interface};
     use rs_pfcp::ie::f_teid::FteidBuilder;
     use rs_pfcp::ie::far_id::FarId;
+    use rs_pfcp::ie::forwarding_parameters::ForwardingParameters;
     use rs_pfcp::ie::network_instance::NetworkInstance;
+    use rs_pfcp::ie::outer_header_creation::OuterHeaderCreation;
     use rs_pfcp::ie::pdi::PdiBuilder;
     use rs_pfcp::ie::pdr_id::PdrId;
     use rs_pfcp::ie::precedence::Precedence;
     use rs_pfcp::ie::source_interface::{SourceInterface, SourceInterfaceValue};
     use rs_pfcp::ie::ue_ip_address::UeIpAddress;
+    use rs_pfcp::ie::update_far::UpdateFar;
+    use rs_pfcp::ie::update_forwarding_parameters::UpdateForwardingParameters;
     use rs_pfcp::message::association_setup_request::AssociationSetupRequestBuilder;
     use rs_pfcp::message::heartbeat_request::HeartbeatRequestBuilder;
     use rs_pfcp::message::session_deletion_request::SessionDeletionRequestBuilder;
     use rs_pfcp::message::session_establishment_request::SessionEstablishmentRequestBuilder;
+    use rs_pfcp::message::session_modification_request::SessionModificationRequestBuilder;
     use rs_pfcp::message::{self, Message as PfcpMessage, MsgType};
 
     use super::super::inst::{MupC, MupCConfig, MupCEvent};
@@ -497,17 +619,34 @@ mod tests {
         let _ = mupc.handle_association_setup(msg.as_ref(), peer());
     }
 
-    /// A Session Establishment Request whose uplink/access PDR carries an
-    /// F-TEID (teid + GTP endpoint), a UE IPv4 address and a Network
-    /// Instance — the three things the controller extracts.
+    /// A Create FAR that forwards to `dest` and GTP-U-encapsulates toward
+    /// `(teid, addr)` — the wire shape the SMF programs the gNB (Dest =
+    /// Access) or a core (Dest = Core) tunnel with. This is where the ST
+    /// endpoints come from, not the PDI F-TEIDs.
+    fn gtpu_far(far_id: u32, dest: Interface, teid: u32, addr: Ipv4Addr) -> CreateFar {
+        let fp = ForwardingParameters::new(DestinationInterface::new(dest))
+            .with_outer_header_creation(OuterHeaderCreation::gtpu_ipv4(teid, addr));
+        CreateFar::builder(FarId::new(far_id))
+            .apply_action(ApplyAction::FORW)
+            .forwarding_parameters(fp)
+            .build()
+            .unwrap()
+    }
+
+    /// A Session Establishment Request carrying UE IPv4 + Network Instance in a
+    /// PDR, the UPF's *own* N3 F-TEID in that PDR's PDI (a red herring the
+    /// controller must IGNORE — it is the UPF address, not the gNB), and the
+    /// gNB tunnel in a downlink FAR's Outer Header Creation (Destination
+    /// Interface = Access) — the endpoint the controller must pick for the
+    /// Type-1 ST route.
     fn establishment_bytes() -> Vec<u8> {
-        let fteid = FteidBuilder::new()
-            .teid(0x1234_5678u32)
-            .ipv4(Ipv4Addr::new(10, 0, 0, 1))
+        let upf_n3 = FteidBuilder::new()
+            .teid(0xDEAD_BEEFu32)
+            .ipv4(Ipv4Addr::new(127, 0, 0, 8))
             .build()
             .unwrap();
         let pdi = PdiBuilder::new(SourceInterface::new(SourceInterfaceValue::Access))
-            .f_teid(fteid)
+            .f_teid(upf_n3)
             .ue_ip_address(UeIpAddress::new(Some(Ipv4Addr::new(192, 0, 2, 5)), None))
             .network_instance(NetworkInstance::new("internet.apn"))
             .build()
@@ -518,10 +657,12 @@ mod tests {
             .far_id(FarId::new(1))
             .build()
             .unwrap();
-        let far = CreateFar::builder(FarId::new(1))
-            .forward_to(Interface::Core)
-            .build()
-            .unwrap();
+        let far = gtpu_far(
+            1,
+            Interface::Access,
+            0x1234_5678,
+            Ipv4Addr::new(10, 0, 0, 1),
+        );
         SessionEstablishmentRequestBuilder::new(0u64, 1u32)
             .node_id(Ipv4Addr::new(10, 0, 0, 2))
             .fseid(0x1111u64, Ipv4Addr::new(10, 0, 0, 2))
@@ -532,48 +673,33 @@ mod tests {
             .marshal()
     }
 
-    /// A Session Establishment Request with both an `Access` PDR (gNB-facing
-    /// F-TEID → Type-1) and a `Core` PDR (core-facing F-TEID → Type-2), so
-    /// the controller captures a distinct endpoint per direction.
+    /// A Session Establishment Request with both a gNB tunnel (downlink FAR,
+    /// Dest = Access → Type-1 ST) and a core tunnel (FAR, Dest = Core →
+    /// Type-2 ST), so the controller captures a distinct endpoint per side.
     fn establishment_two_endpoints_bytes() -> Vec<u8> {
-        let mk_pdr = |id, si, teid, addr: Ipv4Addr, ue: Option<Ipv4Addr>| {
-            let fteid = FteidBuilder::new().teid(teid).ipv4(addr).build().unwrap();
-            let mut b = PdiBuilder::new(SourceInterface::new(si))
-                .f_teid(fteid)
-                .network_instance(NetworkInstance::new("internet.apn"));
-            if let Some(ue) = ue {
-                b = b.ue_ip_address(UeIpAddress::new(Some(ue), None));
-            }
-            CreatePdrBuilder::new(PdrId::new(id))
-                .precedence(Precedence::new(100))
-                .pdi(b.build().unwrap())
-                .far_id(FarId::new(1))
-                .build()
-                .unwrap()
-        };
-        let access = mk_pdr(
-            1,
-            SourceInterfaceValue::Access,
-            0x1234_5678,
-            Ipv4Addr::new(10, 0, 0, 1),
-            Some(Ipv4Addr::new(192, 0, 2, 5)),
-        );
-        let core = mk_pdr(
-            2,
-            SourceInterfaceValue::Core,
-            0x8765_4321,
-            Ipv4Addr::new(10, 9, 0, 1),
-            None,
-        );
-        let far = CreateFar::builder(FarId::new(1))
-            .forward_to(Interface::Core)
+        let pdi = PdiBuilder::new(SourceInterface::new(SourceInterfaceValue::Access))
+            .ue_ip_address(UeIpAddress::new(Some(Ipv4Addr::new(192, 0, 2, 5)), None))
+            .network_instance(NetworkInstance::new("internet.apn"))
             .build()
             .unwrap();
+        let pdr = CreatePdrBuilder::new(PdrId::new(1))
+            .precedence(Precedence::new(100))
+            .pdi(pdi)
+            .far_id(FarId::new(1))
+            .build()
+            .unwrap();
+        let gnb = gtpu_far(
+            1,
+            Interface::Access,
+            0x1234_5678,
+            Ipv4Addr::new(10, 0, 0, 1),
+        );
+        let core = gtpu_far(2, Interface::Core, 0x8765_4321, Ipv4Addr::new(10, 9, 0, 1));
         SessionEstablishmentRequestBuilder::new(0u64, 1u32)
             .node_id(Ipv4Addr::new(10, 0, 0, 2))
             .fseid(0x1111u64, Ipv4Addr::new(10, 0, 0, 2))
-            .create_pdrs(vec![access.to_ie(), core.to_ie()])
-            .create_fars(vec![far.to_ie()])
+            .create_pdrs(vec![pdr.to_ie()])
+            .create_fars(vec![gnb.to_ie(), core.to_ie()])
             .build()
             .unwrap()
             .marshal()
@@ -589,17 +715,106 @@ mod tests {
         let MupCEvent::SessionUp(session) = &events[0] else {
             panic!("expected SessionUp, got {:?}", events[0]);
         };
-        // Access (Type-1) endpoint from the SourceInterface=Access PDR.
+        // gNB (Type-1 ST) endpoint from the downlink FAR (Dest = Access) OHC.
         assert_eq!(session.teid, 0x1234_5678);
         assert_eq!(
             session.endpoint,
             Some(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1)))
         );
-        // Core (Type-2) endpoint from the SourceInterface=Core PDR — distinct.
+        // Core (Type-2 ST) endpoint from the FAR (Dest = Core) OHC — distinct.
         assert_eq!(session.core_teid, 0x8765_4321);
         assert_eq!(
             session.core_endpoint,
             Some(IpAddr::V4(Ipv4Addr::new(10, 9, 0, 1)))
+        );
+    }
+
+    /// An establishment that carries the UE IP + NI but a downlink FAR with no
+    /// Outer Header Creation yet — the state right after PDU-session setup,
+    /// before the N2 tunnel is programmed. No gNB endpoint is known yet.
+    fn establishment_no_gnb_bytes() -> Vec<u8> {
+        let pdi = PdiBuilder::new(SourceInterface::new(SourceInterfaceValue::Access))
+            .ue_ip_address(UeIpAddress::new(Some(Ipv4Addr::new(192, 0, 2, 5)), None))
+            .network_instance(NetworkInstance::new("internet.apn"))
+            .build()
+            .unwrap();
+        let pdr = CreatePdrBuilder::new(PdrId::new(1))
+            .precedence(Precedence::new(100))
+            .pdi(pdi)
+            .far_id(FarId::new(1))
+            .build()
+            .unwrap();
+        // Downlink FAR present but no GTP-U OHC yet (buffer/drop until N2).
+        let far = CreateFar::builder(FarId::new(1))
+            .forward_to(Interface::Access)
+            .build()
+            .unwrap();
+        SessionEstablishmentRequestBuilder::new(0u64, 1u32)
+            .node_id(Ipv4Addr::new(10, 0, 0, 2))
+            .fseid(0x1111u64, Ipv4Addr::new(10, 0, 0, 2))
+            .create_pdrs(vec![pdr.to_ie()])
+            .create_fars(vec![far.to_ie()])
+            .build()
+            .unwrap()
+            .marshal()
+    }
+
+    /// The MUP-C learns the gNB tunnel from a Session *Modification* (post-N2),
+    /// not the establishment: an Update FAR whose Update Forwarding Parameters
+    /// program the gNB GTP-U Outer Header Creation. Before it, the Type-1 ST
+    /// endpoint is unknown; after it, it is populated.
+    #[test]
+    fn session_modification_learns_gnb_tunnel() {
+        let (mut mupc, _bgp_rx) = MupC::new_for_test(MupCConfig::default());
+        associate(&mut mupc);
+
+        // Establishment: UE IP + NI, but no gNB tunnel yet.
+        let est = message::parse(&establishment_no_gnb_bytes()).unwrap();
+        let (_reply, events) = mupc.handle_session_establishment(est.as_ref(), peer());
+        let MupCEvent::SessionUp(session) = &events[0] else {
+            panic!("expected SessionUp");
+        };
+        let seid = session.seid;
+        assert_eq!(
+            session.endpoint, None,
+            "no gNB tunnel known at establishment"
+        );
+        assert_eq!(session.teid, 0);
+
+        // Modification: program the gNB tunnel in an Update FAR's OHC.
+        let ufp = UpdateForwardingParameters::new()
+            .with_destination_interface(DestinationInterface::new(Interface::Access))
+            .with_outer_header_creation(OuterHeaderCreation::gtpu_ipv4(
+                0x1234_5678u32,
+                Ipv4Addr::new(10, 0, 0, 1),
+            ));
+        let ufar = UpdateFar::builder(FarId::new(1))
+            .update_forwarding_parameters(ufp)
+            .build()
+            .unwrap();
+        let modify = SessionModificationRequestBuilder::new(seid, 3u32)
+            .update_fars(vec![ufar.to_ie()])
+            .build()
+            .marshal();
+        let msg = message::parse(&modify).unwrap();
+        let (_reply, events) = mupc.handle_session_modification(msg.as_ref(), peer());
+
+        let MupCEvent::SessionUp(session) = &events[0] else {
+            panic!("expected SessionUp after modification");
+        };
+        // The gNB (Type-1 ST) endpoint/TEID are now learned from the Update FAR.
+        assert_eq!(
+            session.endpoint,
+            Some(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1)))
+        );
+        assert_eq!(session.teid, 0x1234_5678);
+        // Pre-existing fields survive the merge.
+        assert_eq!(session.ue_ipv4, Some(Ipv4Addr::new(192, 0, 2, 5)));
+        assert_eq!(session.network_instance.as_deref(), Some("internet.apn"));
+        // And the stored session reflects the update.
+        assert_eq!(
+            mupc.sessions.get(seid).and_then(|s| s.endpoint),
+            Some(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1)))
         );
     }
 
