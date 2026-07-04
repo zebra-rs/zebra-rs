@@ -2492,6 +2492,97 @@ fn show_bgp_evpn_summary(
     show_bgp_summary_one(bgp, AfiSafi::new(Afi::L2vpn, Safi::Evpn), json)
 }
 
+/// `show bgp evpn vpws` — the configured EVPN VPWS E-Line services (RFC
+/// 8214): EVI, service instance ids, attachment circuit, the local End.DX2
+/// SID our Type-1 advertises, the imported remote SID, and the service
+/// state — `partial-config` (mandatory leaves missing), `pending` (config
+/// complete, Type-1 not originated: no router-id / locator yet),
+/// `advertised` (Type-1 out, remote not yet matched), `up` (remote SID
+/// bound to the AC).
+#[derive(Serialize)]
+struct VpwsServiceJson {
+    name: String,
+    evi: Option<u32>,
+    local_service_id: Option<u32>,
+    remote_service_id: Option<u32>,
+    interface: Option<String>,
+    local_sid: Option<String>,
+    remote_sid: Option<String>,
+    state: String,
+}
+
+fn vpws_state(svc: &super::vpws::VpwsService) -> &'static str {
+    if svc.params().is_none() {
+        "partial-config"
+    } else if svc.originated.is_none() {
+        "pending"
+    } else if svc.remote_sid.is_none() {
+        "advertised"
+    } else {
+        "up"
+    }
+}
+
+fn show_bgp_evpn_vpws(
+    bgp: &Bgp,
+    _args: Args,
+    json: bool,
+) -> std::result::Result<String, std::fmt::Error> {
+    use std::fmt::Write;
+
+    let vpws = &bgp.local_rib.evpn_vpws;
+    if json {
+        let list: Vec<VpwsServiceJson> = vpws
+            .services
+            .iter()
+            .map(|(name, svc)| VpwsServiceJson {
+                name: name.clone(),
+                evi: svc.evi,
+                local_service_id: svc.local_service_id,
+                remote_service_id: svc.remote_service_id,
+                interface: svc.interface.clone(),
+                local_sid: vpws.sids.get(name).map(|(addr, _)| addr.to_string()),
+                remote_sid: svc.remote_sid.map(|sid| sid.to_string()),
+                state: vpws_state(svc).to_string(),
+            })
+            .collect();
+        return Ok(serde_json::to_string_pretty(&list)
+            .unwrap_or_else(|e| format!("{{\"error\": \"{e}\"}}")));
+    }
+
+    let mut buf = String::new();
+    if vpws.services.is_empty() {
+        writeln!(buf, "No EVPN VPWS services configured")?;
+        return Ok(buf);
+    }
+    for (name, svc) in vpws.services.iter() {
+        writeln!(buf, "VPWS service: {name}")?;
+        match svc.evi {
+            Some(evi) => writeln!(buf, "  EVI: {evi}")?,
+            None => writeln!(buf, "  EVI: (unset)")?,
+        }
+        writeln!(
+            buf,
+            "  Service ID: local {}, remote {}",
+            svc.local_service_id
+                .map_or("(unset)".to_string(), |id| id.to_string()),
+            svc.remote_service_id
+                .map_or("(unset)".to_string(), |id| id.to_string()),
+        )?;
+        if let Some(ifname) = &svc.interface {
+            writeln!(buf, "  Interface: {ifname}")?;
+        }
+        if let Some((sid, _)) = vpws.sids.get(name) {
+            writeln!(buf, "  Local SID (End.DX2): {sid}")?;
+        }
+        if let Some(sid) = svc.remote_sid {
+            writeln!(buf, "  Remote SID: {sid}")?;
+        }
+        writeln!(buf, "  State: {}", vpws_state(svc))?;
+    }
+    Ok(buf)
+}
+
 /// `show bgp mup summary` — the MUP (SAFI 85, draft-ietf-bess-mup-safi)
 /// neighbor summary. `mup` enables both IPv4-MUP and IPv6-MUP
 /// at once (draft-ietf-bess-mup-safi), so this renders both sections — the MUP slice of
@@ -6970,6 +7061,8 @@ impl Bgp {
             .set(show_bgp_evpn)
             .path("/show/bgp/evpn/ethernet-segment")
             .set(show_bgp_evpn_ethernet_segment)
+            .path("/show/bgp/evpn/vpws")
+            .set(show_bgp_evpn_vpws)
             .path("/show/bgp/mup")
             .set(show_bgp_mup)
             .path("/show/bgp/mup/summary")
