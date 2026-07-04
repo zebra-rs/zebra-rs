@@ -102,6 +102,14 @@ pub enum SidBehavior {
     /// a /(LB+LN) prefix like uN. No kernel flavor op composes NEXT-CSID
     /// with End.T — cradle tee only.
     UT,
+    /// End.DX4 — RFC 8986 §4.5 (IANA codepoint 17): decapsulate and
+    /// cross-connect the inner IPv4 packet to a bound adjacency — the
+    /// per-CE VPN egress. Static-config only today (`action End.DX4` +
+    /// `nh4`); kernel-native seg6local action.
+    EndDX4,
+    /// End.DX6 — RFC 8986 §4.4 (IANA codepoint 16): the IPv6 sibling of
+    /// `EndDX4` (`action End.DX6` + `nh6`).
+    EndDX6,
 }
 
 impl fmt::Display for SidBehavior {
@@ -123,6 +131,8 @@ impl fmt::Display for SidBehavior {
             Self::EndXRep => write!(f, "End.X(REP)"),
             Self::EndT => write!(f, "End.T"),
             Self::UT => write!(f, "uT"),
+            Self::EndDX4 => write!(f, "End.DX4"),
+            Self::EndDX6 => write!(f, "End.DX6"),
         }
     }
 }
@@ -141,6 +151,8 @@ impl FromStr for SidBehavior {
             // UALib is deliberately absent: it is derived from a uA at
             // install time, never named in config.
             "uA" => Ok(Self::UA),
+            "End.DX4" => Ok(Self::EndDX4),
+            "End.DX6" => Ok(Self::EndDX6),
             "End.DT4" => Ok(Self::EndDT4),
             "End.DT6" => Ok(Self::EndDT6),
             "End.DT46" => Ok(Self::EndDT46),
@@ -301,7 +313,9 @@ impl Sid {
             | SidBehavior::EndDT2U
             | SidBehavior::EndDT2M
             | SidBehavior::EndM
-            | SidBehavior::EndT => Ipv6Net::new(self.addr, 128).expect("/128 is always valid"),
+            | SidBehavior::EndT
+            | SidBehavior::EndDX4
+            | SidBehavior::EndDX6 => Ipv6Net::new(self.addr, 128).expect("/128 is always valid"),
             SidBehavior::UALib => {
                 let plen = self
                     .structure

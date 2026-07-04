@@ -1218,6 +1218,8 @@ impl Rib {
             | SidBehavior::EndM
             | SidBehavior::EndT
             | SidBehavior::UT
+            | SidBehavior::EndDX4
+            | SidBehavior::EndDX6
             // End.B6.Encaps is a seg6local action too — bound to `lo` the
             // kernel strips it exactly like the decap group.
             | SidBehavior::EndB6Encap => self.resolve_sr0_ifindex(),

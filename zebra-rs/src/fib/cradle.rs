@@ -68,6 +68,8 @@ fn srv6_behavior(b: crate::rib::SidBehavior) -> u32 {
         EndRep => 12,  // RFC 9800 REPLACE-C-SID (C-SID rewrite from containers)
         EndXRep => 13, // REPLACE-C-SID + adjacency cross-connect
         EndT => 14,    // End walk + table-scoped egress lookup (vrf_table_id)
+        EndDX4 => 15,  // decap + IPv4 cross-connect (per-CE VPN egress)
+        EndDX6 => 16,  // decap + IPv6 cross-connect
         // uT = a uN whose end-of-carrier lookup is table-scoped: cradle
         // models it as UN with a non-zero vrf_id (vrf_table_id below).
         UT => 6,
@@ -520,6 +522,55 @@ impl CradleFib {
     /// the SRv6 analogue of the ILM tee. Maps the behavior to `SRV6_BH_*`;
     /// `End.DT*` carry the VRF table id; `End.X`/`uA` resolve their
     /// cross-connect adjacency (`nh6`) to a cradle nexthop.
+    /// Tee a STATIC seg6local action route (config-static `action` leaf)
+    /// as a cradle local SID. These install as route-embedded encaps on
+    /// the kernel side and never pass through the SID registry, so
+    /// `local_sid_install` never sees them — without this tee a static
+    /// End/uN/DT*/DX* SID exists in the kernel but not in eBPF. `adj` is
+    /// the DX cross-connect adjacency (v6 or v4), unspecified/absent for
+    /// the decap-only actions.
+    pub async fn static_sid_install(
+        &self,
+        prefix: Ipv6Net,
+        behavior: crate::rib::SidBehavior,
+        adj: Option<IpAddr>,
+        oif: u32,
+    ) {
+        let result = async {
+            let nexthop_id = match adj {
+                Some(IpAddr::V6(a)) if !a.is_unspecified() => {
+                    self.nexthop_id6(Some(a), oif, &[], 0).await?
+                }
+                Some(IpAddr::V4(a)) if !a.is_unspecified() => {
+                    self.nexthop_id(Some(a), oif, &[]).await?
+                }
+                _ => 0,
+            };
+            self.client()
+                .await?
+                .add_local_sid(pb::LocalSid {
+                    sid: prefix.addr().to_string(),
+                    prefix_len: prefix.prefix_len() as u32,
+                    behavior: srv6_behavior(behavior),
+                    vrf_table_id: 0,
+                    oif,
+                    nh6: String::new(),
+                    lb_bits: 0,
+                    ln_bits: 0,
+                    fun_bits: 0,
+                    arg_bits: 0,
+                    nexthop_id,
+                    flavors: 0,
+                })
+                .await?;
+            anyhow::Ok(())
+        }
+        .await;
+        if let Err(e) = result {
+            tracing::warn!("fib: cradle static_sid_install {} failed: {e}", prefix);
+        }
+    }
+
     pub async fn local_sid_install(&self, sid: &crate::rib::Sid, prefix_len: u8, ifindex: u32) {
         let result = async {
             let nexthop_id =
