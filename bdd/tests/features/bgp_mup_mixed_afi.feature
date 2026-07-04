@@ -57,7 +57,7 @@ Feature: BGP MUP mixed-AFI Session-Transformed route (IPv6 UE, IPv4 endpoint)
     Given the test topology exists
     When I execute "pfcp-inject --target 192.168.0.1 --port 8805 --ue-ipv6 2001:db8::5 --teid 0x12345678 --endpoint 10.0.0.1 --network-instance access" in namespace "z1"
     Then show command "show bgp mup-c session" in namespace "z1" should eventually contain "2001:db8::5"
-    And show command "show bgp mup" in namespace "z1" should contain "ue=2001:db8::5/128"
+    And show command "show bgp mup" in namespace "z1" should contain "ue=2001:db8::/64"
     And show command "show bgp mup" in namespace "z1" should contain "ep=10.0.0.1"
     # The export route-target comes from the top-level `vrf mobile-up mup
     # route-target export` (the ipv4/ipv6 framework), proving it reaches
@@ -65,8 +65,8 @@ Feature: BGP MUP mixed-AFI Session-Transformed route (IPv6 UE, IPv4 endpoint)
     And show command "show bgp mup" in namespace "z1" should contain "rt:65000:200"
     # Per-VRF MUP view: the global best-path is mirrored into the
     # mobile-up per-VRF task, so `show bgp vrf mobile-up mup` renders it.
-    And show command "show bgp vrf mobile-up mup" in namespace "z1" should contain "ue=2001:db8::5/128"
-    And show command "show bgp mup" in namespace "z2" should eventually contain "ue=2001:db8::5/128"
+    And show command "show bgp vrf mobile-up mup" in namespace "z1" should contain "ue=2001:db8::/64"
+    And show command "show bgp mup" in namespace "z2" should eventually contain "ue=2001:db8::/64"
     And show command "show bgp mup" in namespace "z2" should contain "ep=10.0.0.1"
 
   Scenario: Teardown topology
