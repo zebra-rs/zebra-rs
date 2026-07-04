@@ -389,6 +389,11 @@ fn cradle_members(nexthop: &Nexthop) -> Vec<CradleMember> {
     }
     match nexthop {
         Nexthop::Uni(u) => vec![member(u)],
+        // Connected routes: an interface-only (gateway-less) member. The
+        // eBPF forward falls back to `bpf_redirect_neigh` on the
+        // destination itself, which also drives kernel ND — so delivery
+        // to directly-connected hosts needs no pinned neighbors.
+        Nexthop::Link(ifindex) => vec![(None, *ifindex, vec![], vec![], 0, None)],
         Nexthop::Multi(m) => m.nexthops.iter().map(member).collect(),
         Nexthop::List(l) => l
             .nexthops
@@ -709,14 +714,17 @@ impl FibHandle {
     /// clear and forces the nexthop's recreation so the next resolve
     /// pass re-adds it.
     pub async fn route_ipv4_add(&self, prefix: &Ipv4Net, entry: &RibEntry, table_id: u32) -> bool {
-        if !entry.is_protocol() {
-            return true;
-        }
-        if let Some(cradle) = &self.cradle {
+        // Tee protocol AND connected routes — see the v6 sibling.
+        if (entry.is_protocol() || matches!(entry.rtype, RibType::Connected))
+            && let Some(cradle) = &self.cradle
+        {
             let members = cradle_members(&entry.nexthop);
             if !members.is_empty() {
                 cradle.route_install(*prefix, table_id, members).await;
             }
+        }
+        if !entry.is_protocol() {
+            return true;
         }
         match &entry.nexthop {
             Nexthop::Uni(_) | Nexthop::Multi(_) => {
@@ -938,11 +946,13 @@ impl FibHandle {
     }
 
     pub async fn route_ipv4_del(&self, prefix: &Ipv4Net, entry: &RibEntry, table_id: u32) {
+        if (entry.is_protocol() || matches!(entry.rtype, RibType::Connected))
+            && let Some(cradle) = &self.cradle
+        {
+            cradle.route_del(*prefix, table_id).await;
+        }
         if !entry.is_protocol() {
             return;
-        }
-        if let Some(cradle) = &self.cradle {
-            cradle.route_del(*prefix, table_id).await;
         }
 
         match &entry.nexthop {
@@ -1238,14 +1248,21 @@ impl FibHandle {
     /// IPv6 sibling of [`Self::route_ipv4_add`]; returns whether the
     /// kernel accepted the install.
     pub async fn route_ipv6_add(&self, prefix: &Ipv6Net, entry: &RibEntry, table_id: u32) -> bool {
-        if !entry.is_protocol() {
-            return true;
-        }
-        if let Some(cradle) = &self.cradle {
+        // The kernel originates connected routes itself, so they never
+        // take the netlink-install path below — but the cradle datapath
+        // still needs them or a zebra-driven node cannot deliver to
+        // directly-connected hosts. Tee protocol AND connected routes;
+        // kernel-learned ones stay out (they would echo).
+        if (entry.is_protocol() || matches!(entry.rtype, RibType::Connected))
+            && let Some(cradle) = &self.cradle
+        {
             let members = cradle_members(&entry.nexthop);
             if !members.is_empty() {
                 cradle.route_install6(*prefix, table_id, members).await;
             }
+        }
+        if !entry.is_protocol() {
+            return true;
         }
         match &entry.nexthop {
             Nexthop::Uni(_) | Nexthop::Multi(_) => {
@@ -1480,11 +1497,20 @@ impl FibHandle {
     }
 
     pub async fn route_ipv6_del(&self, prefix: &Ipv6Net, entry: &RibEntry, table_id: u32) {
+        if (entry.is_protocol() || matches!(entry.rtype, RibType::Connected))
+            && let Some(cradle) = &self.cradle
+        {
+            cradle.route_del6(*prefix, table_id).await;
+            // A static seg6local action route also teed a local SID
+            // on install — withdraw it or the eBPF entry goes stale.
+            if let Nexthop::Uni(uni) = &entry.nexthop
+                && uni.seg6local_action.is_some()
+            {
+                cradle.static_sid_uninstall(*prefix).await;
+            }
+        }
         if !entry.is_protocol() {
             return;
-        }
-        if let Some(cradle) = &self.cradle {
-            cradle.route_del6(*prefix, table_id).await;
         }
 
         match &entry.nexthop {
