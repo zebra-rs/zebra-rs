@@ -9,7 +9,7 @@ interface to an area with a per-interface command.
 | zebra-rs YANG (`router ospfv3 …`) | FRR `ospf6d` command |
 |---|---|
 | `router-id` | `ospf6 router-id` |
-| `area/<id>/interface/<n>/enable true` | `ipv6 ospf6 area <id>` (interface) |
+| `area/<id>/interface/<n>/enabled true` | `ipv6 ospf6 area <id>` (interface) |
 | `area/<id>/interface/<n>/network-type point-to-point` | `ipv6 ospf6 network point-to-point` (interface) |
 | `area/<id>/interface/<n>/priority` | `ipv6 ospf6 priority` (interface) |
 | `area/<id>/interface/<n>/cost` | `ipv6 ospf6 cost` (interface) |

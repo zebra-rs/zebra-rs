@@ -1542,6 +1542,95 @@ mod yang_load_tests {
         load_mode("exec");
     }
 
+    /// Naming-convention guard for the `enable` → `enabled` consolidation.
+    /// Boolean activation leaves in zebra-owned modules are spelled
+    /// `enabled` — the OpenConfig style-guide name, and already the
+    /// spelling of the inherited `ietf-bgp` knobs (`afi-safi <af>
+    /// enabled`). The vendored `ietf-*` modules keep their published
+    /// spelling (including the two `leaf enable` holdouts:
+    /// `route-flap-damping` and RFC 8177 AES key wrap, neither wired to a
+    /// handler), and `exec.yang` is excluded because its (commented-out)
+    /// `enable` is the session privilege-promotion command, not a config
+    /// boolean.
+    #[test]
+    fn zebra_yang_activation_leaves_are_named_enabled() {
+        let dir = concat!(env!("CARGO_MANIFEST_DIR"), "/yang");
+        let mut offenders = Vec::new();
+        for entry in std::fs::read_dir(dir).expect("yang dir readable") {
+            let path = entry.expect("dir entry").path();
+            let name = path.file_name().unwrap().to_string_lossy().into_owned();
+            let owned = name == "config.yang"
+                || name == "config-static.yang"
+                || name == "configure.yang"
+                || name == "vty.yang"
+                || name.starts_with("zebra-");
+            if !owned {
+                continue;
+            }
+            let text = std::fs::read_to_string(&path).expect("yang file readable");
+            for (lineno, line) in text.lines().enumerate() {
+                let t = line.trim_start();
+                if t == "leaf enable"
+                    || t.starts_with("leaf enable ")
+                    || t.starts_with("leaf enable{")
+                {
+                    offenders.push(format!("{name}:{}", lineno + 1));
+                }
+            }
+        }
+        assert!(
+            offenders.is_empty(),
+            "zebra-owned YANG must spell activation leaves `enabled` \
+             (OpenConfig convention); found `leaf enable` at: {offenders:?}"
+        );
+    }
+
+    /// The other half of the consolidation guard: every renamed activation
+    /// leaf must resolve as a settable path under its new `enabled` name,
+    /// so a silent schema regression (leaf dropped, grouping unwired) is
+    /// caught here and not only in the BDD.
+    #[test]
+    fn enabled_activation_leaf_paths_parse() {
+        use crate::config::ExecCode;
+        use crate::config::parse::{State, parse};
+        use libyang::to_entry;
+
+        let mut yang = YangStore::new();
+        yang.add_path(concat!(env!("CARGO_MANIFEST_DIR"), "/yang"));
+        yang.read_with_resolve("configure")
+            .unwrap_or_else(|e| panic!("configure failed to load: {e:#}"));
+        yang.identity_resolve();
+        let module = yang.find_module("configure").unwrap();
+        let entry = to_entry(&yang, module);
+
+        for cmd in [
+            "set router ospf area 0.0.0.0 interface eth0 enabled true",
+            "set router ospf area 0.0.0.0 interface eth0 bfd enabled true",
+            "set router ospf bfd enabled true",
+            "set router ospf vrf blue area 0.0.0.0 interface eth0 enabled true",
+            "set router ospfv3 area 0.0.0.0 interface eth0 enabled true",
+            "set router ospfv3 area 0.0.0.0 interface eth0 bfd enabled true",
+            "set router ospfv3 bfd enabled true",
+            "set router ospfv3 vrf blue area 0.0.0.0 interface eth0 enabled true",
+            "set router isis interface eth0 ipv4 enabled true",
+            "set router isis interface eth0 ipv6 enabled true",
+            "set router isis interface eth0 bfd enabled true",
+            "set router isis bfd enabled true",
+            "set router isis vrf blue interface eth0 ipv4 enabled true",
+            "set router isis vrf blue interface eth0 ipv6 enabled true",
+            "set router bgp bfd enabled true",
+            "set router bgp neighbor 192.168.1.3 bfd enabled true",
+            "set router bgp mup-c enabled true",
+        ] {
+            let (code, _comps, _state) = parse(cmd, entry.clone(), None, State::new());
+            assert_eq!(
+                code,
+                ExecCode::Success,
+                "should parse as a settable path: {cmd}"
+            );
+        }
+    }
+
     /// Regression guard for `remove-private-as`. The IETF model
     /// (`ietf-bgp`) shipped a `remove-private-as` identityref leaf on the
     /// neighbor whose IANA base this libyang can't resolve to a value
@@ -2442,10 +2531,10 @@ mod yang_load_tests {
         let entry = to_entry(&yang, module);
 
         for cmd in [
-            "set router isis interface eth0 te-metric measurement enable true",
+            "set router isis interface eth0 te-metric measurement enabled true",
             "set router isis interface eth0 te-metric measurement interval 100",
             "set router isis interface eth0 te-metric measurement damping-period 2",
-            "set router ospf area 0 interface eth0 te-metric measurement enable true",
+            "set router ospf area 0 interface eth0 te-metric measurement enabled true",
             "set router ospf area 0 interface eth0 te-metric measurement interval 100",
             "set router ospf area 0 interface eth0 te-metric measurement damping-period 2",
         ] {

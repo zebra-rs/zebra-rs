@@ -45,7 +45,7 @@ router ospf {
   area 0.0.0.1 {
     area-type stub;
     interface enp0s7 {
-      enable true;
+      enabled true;
     }
   }
 }
@@ -70,14 +70,14 @@ originating a default Type-7 into the area (RFC 3101 §2.3):
 router ospf {
   area 0 {
     interface enp0s6 {
-      enable true;
+      enabled true;
     }
   }
   area 0.0.0.1 {
     area-type nssa;
     nssa-default-originate true;
     interface enp0s7 {
-      enable true;
+      enabled true;
     }
   }
 }
@@ -99,10 +99,10 @@ router ospf {
       }
     }
     interface lo {
-      enable true;
+      enabled true;
     }
     interface enp0s8 {
-      enable true;
+      enabled true;
     }
   }
 }

@@ -1226,12 +1226,12 @@ fn config_local_as_dual_as(bgp: &mut Bgp, args: Args, op: ConfigOp) -> Option<()
     config_local_as_flag(bgp, args, op, |la, v| la.dual_as = v)
 }
 
-/// `set router bgp neighbor X bfd enable true|false` — flips the
+/// `set router bgp neighbor X bfd enabled true|false` — flips the
 /// Reconcile this neighbor's live BFD subscription with its current
 /// `peer.config.bfd` state. Idempotent and order-independent: every
 /// `/bfd/*` callback funnels through here, so whichever leaf lands last
 /// in a commit leaves the correct session subscribed regardless of the
-/// order `enable` / `multihop` / `minimum-ttl` arrive.
+/// order `enabled` / `multihop` / `minimum-ttl` arrive.
 ///
 /// The desired key is recomputed from scratch (local source, hop mode,
 /// remote). It's compared against `peer.bfd_session_key` — the key we
@@ -1390,7 +1390,7 @@ fn config_peer_bfd_enable(bgp: &mut Bgp, mut args: Args, op: ConfigOp) -> Option
     let enable = args.boolean()?;
     {
         let peer = bgp.peers.get_mut(&addr)?;
-        // `None` ⇒ inherit `router bgp { bfd { enable } }`; `Some(false)` opts
+        // `None` ⇒ inherit `router bgp { bfd { enabled } }`; `Some(false)` opts
         // this neighbor out of a blanket instance enable.
         peer.config.bfd.enable = op.is_set().then_some(enable);
     }
@@ -1488,7 +1488,7 @@ fn config_peer_bfd_detect_offload(bgp: &mut Bgp, mut args: Args, op: ConfigOp) -
 
 /// Re-reconcile BFD for every neighbor — used by the instance-level
 /// `router bgp { bfd {} }` callbacks, whose defaults (notably a blanket
-/// `enable`) affect neighbors that set nothing of their own, and by the
+/// `enabled`) affect neighbors that set nothing of their own, and by the
 /// `RibRx::AddrAdd`/`AddrDel` handlers, whose connected-interface knowledge
 /// feeds the single-hop session key's ifindex. `bfd_apply` is a per-neighbor
 /// reconcile that diffs against the recorded session key, so this is just a
@@ -1502,7 +1502,7 @@ pub(super) fn bfd_reconcile_all(bgp: &mut Bgp) {
 // ---- instance-level `router bgp { bfd { ... } }` defaults -------------------
 
 /// `router bgp bfd enable <bool>` — blanket-enable BFD on every neighbor
-/// (a per-neighbor `bfd { enable false }` opts one out).
+/// (a per-neighbor `bfd { enabled false }` opts one out).
 fn config_bgp_bfd_enable(bgp: &mut Bgp, mut args: Args, op: ConfigOp) -> Option<()> {
     let enable = args.boolean()?;
     bgp.bfd.enable = op.is_set().then_some(enable);
@@ -4513,7 +4513,7 @@ impl Bgp {
         // zebra-bgp-bfd.yang. Stores the leaves on
         // `peer.config.bfd` and wires the runtime subscribe /
         // unsubscribe path to the BFD client API.
-        self.callback_peer("/bfd/enable", config_peer_bfd_enable);
+        self.callback_peer("/bfd/enabled", config_peer_bfd_enable);
         self.callback_peer("/bfd/multihop", config_peer_bfd_multihop);
         self.callback_peer("/bfd/minimum-ttl", config_peer_bfd_min_ttl);
         self.callback_peer("/bfd/echo-mode", config_peer_bfd_echo_mode);
@@ -4521,7 +4521,7 @@ impl Bgp {
         self.callback_peer("/bfd/echo-receive-interval", config_peer_bfd_echo_rx);
         self.callback_peer("/bfd/detect-offload", config_peer_bfd_detect_offload);
         // Instance-level `router bgp { bfd { ... } }` defaults.
-        self.callback_add("/router/bgp/bfd/enable", config_bgp_bfd_enable);
+        self.callback_add("/router/bgp/bfd/enabled", config_bgp_bfd_enable);
         self.callback_add("/router/bgp/bfd/echo-mode", config_bgp_bfd_echo_mode);
         self.callback_add(
             "/router/bgp/bfd/echo-transmit-interval",
@@ -4648,7 +4648,7 @@ impl Bgp {
         // MUP controller (`router bgp mup-c …`, draft-ietf-bess-mup-safi).
         // Augmented in by zebra-bgp-mup-controller.yang; the controller
         // task is spawned/torn down at CommitEnd by `apply_mup_c_commit_diff`.
-        self.callback_add("/router/bgp/mup-c/enable", config_mup_c_enable);
+        self.callback_add("/router/bgp/mup-c/enabled", config_mup_c_enable);
         self.callback_add(
             "/router/bgp/mup-c/controller-address",
             config_mup_c_controller_address,
@@ -4979,7 +4979,7 @@ mod bfd_wiring_tests {
         (bgp, bfd_client_rx)
     }
 
-    /// `bfd enable true` on a known iBGP neighbor (the default peer
+    /// `bfd enabled true` on a known iBGP neighbor (the default peer
     /// type) auto-infers multihop and subscribes on the 4784 port.
     #[tokio::test]
     async fn enable_sends_subscribe() {

@@ -46,24 +46,24 @@ router:
     interface:
     - if-name: lo
       ipv6:
-        enable: true
+        enabled: true
     - if-name: n1-s
       network-type: point-to-point
       metric: 1
       ipv6:
-        enable: true
+        enabled: true
     - if-name: n1-r1
       network-type: point-to-point
       metric: 1
       ipv6:
-        enable: true
+        enabled: true
     - if-name: n1-r2
       network-type: point-to-point
       metric: 1
       ipv6:
-        enable: true
+        enabled: true
     - if-name: n1-d
       network-type: point-to-point
       metric: 1
       ipv6:
-        enable: true
+        enabled: true

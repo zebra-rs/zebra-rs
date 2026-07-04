@@ -24,8 +24,8 @@ Config surface:
 router {
   bgp {
     neighbor 10.0.0.1 {
-      afi-safi label-v4 { enable true; }
-      afi-safi label-v6 { enable true; }
+      afi-safi label-v4 { enabled true; }
+      afi-safi label-v6 { enabled true; }
     }
     afi-safi label-v4 {
       network 10.0.0.0/24;

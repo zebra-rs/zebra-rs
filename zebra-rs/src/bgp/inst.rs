@@ -119,7 +119,7 @@ pub enum Message {
     },
     /// A session/association change reported by the in-process MUP
     /// controller (`src/mup-c/`), which the BGP task spawns when
-    /// `router bgp mup-c enable true` is committed and hands
+    /// `router bgp mup-c enabled true` is committed and hands
     /// `self.tx`. Recorded in [`Bgp::mup_c_view`] for `show bgp
     /// mup-c`; MUP route origination from these lands in a
     /// follow-up. Mirrors the IS-IS `BgpLs` producer seam.
@@ -1045,7 +1045,7 @@ pub struct Bgp {
     pub policy_tx: UnboundedSender<policy::Message>,
     pub policy_rx: UnboundedReceiver<policy::PolicyRx>,
     /// Handle into the BFD instance's client-request channel — used
-    /// by the per-neighbor `bfd { enable }` path to submit
+    /// by the per-neighbor `bfd { enabled }` path to submit
     /// `ClientReq::Subscribe` / `Unsubscribe`. `None` means BFD has
     /// not (yet) been configured: BGP silently skips its BFD attach
     /// logic in that case. Captured at spawn time from

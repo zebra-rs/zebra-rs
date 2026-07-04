@@ -16,7 +16,7 @@ router:
       area-type: nssa
       interface:
       - if-name: lo
-        enable: true
+        enabled: true
       - if-name: etha
-        enable: true
+        enabled: true
         network-type: point-to-point

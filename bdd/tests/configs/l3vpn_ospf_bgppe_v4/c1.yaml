@@ -18,5 +18,5 @@ router:
     - area-id: 0.0.0.0
       interface:
       - if-name: ce1
-        enable: true
+        enabled: true
         network-type: point-to-point

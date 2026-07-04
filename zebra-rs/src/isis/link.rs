@@ -979,7 +979,7 @@ pub fn config_priority(isis: &mut Isis, mut args: Args, _op: ConfigOp) -> Option
     Some(())
 }
 
-/// `set router isis interface X bfd enable true|false` — flips the
+/// `set router isis interface X bfd enabled true|false` — flips the
 /// per-interface BFD attachment recorded on the IS-IS link. The
 /// runtime subscribe path runs on adjacency FSM Up; the teardown
 /// path runs on `BfdEvent::Down`.
@@ -987,7 +987,7 @@ pub fn config_bfd_enable(isis: &mut Isis, mut args: Args, op: ConfigOp) -> Optio
     let name = args.string()?;
     let enable = args.boolean()?;
     let link = isis.links.get_mut_by_name(&name)?;
-    // `None` ⇒ inherit `router isis { bfd { enable } }`; `Some(false)` opts this
+    // `None` ⇒ inherit `router isis { bfd { enabled } }`; `Some(false)` opts this
     // interface out of a blanket instance enable.
     link.config.bfd.enable = op.is_set().then_some(enable);
     isis.bfd_reconcile_all();
@@ -1066,7 +1066,7 @@ pub fn config_bfd_detect_offload(isis: &mut Isis, mut args: Args, op: ConfigOp) 
 // ---- instance-level `router isis { bfd { ... } }` defaults ------------------
 
 /// `router isis bfd enable <bool>` — blanket-enable BFD on every IS-IS
-/// interface (a per-interface `bfd { enable false }` opts one out).
+/// interface (a per-interface `bfd { enabled false }` opts one out).
 pub fn config_isis_bfd_enable(isis: &mut Isis, mut args: Args, op: ConfigOp) -> Option<()> {
     let enable = args.boolean()?;
     isis.config.bfd.enable = op.is_set().then_some(enable);
@@ -1217,7 +1217,7 @@ fn config_afi_enable(isis: &mut Isis, mut args: Args, op: ConfigOp, afi: Afi) ->
     // TLVs depend on which interfaces have the AFI enabled (and, on a
     // 0<->non-zero *global* transition, so does the Protocols Supported /
     // NLPID TLV). Gating only on the global transition missed the common
-    // case — e.g. `set router isis interface lo ipv6 enable true` while
+    // case — e.g. `set router isis interface lo ipv6 enabled true` while
     // another interface already carries IPv6 — leaving the loopback's IPv6
     // prefix out of the LSP until the next periodic refresh. The per-level
     // guard skips a level whose self-LSP hasn't been originated yet (e.g.
@@ -2443,7 +2443,7 @@ mod bfd_config_tests {
     }
 
     /// Round-trip: setting enable + echo-mode mirrors the CLI flow
-    /// (`bfd enable true; bfd echo-mode both`) producing the state
+    /// (`bfd enabled true; bfd echo-mode both`) producing the state
     /// the adjacency-FSM subscribe path reads.
     #[test]
     fn enable_round_trip() {

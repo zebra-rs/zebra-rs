@@ -22,16 +22,16 @@ router:
     interface:
     - if-name: lo
       ipv4:
-        enable: true
+        enabled: true
         prefix-sid:
           index: 2
     - if-name: pe1
       network-type: point-to-point
       metric: 10
       ipv4:
-        enable: true
+        enabled: true
     - if-name: asbr1
       network-type: point-to-point
       metric: 10
       ipv4:
-        enable: true
+        enabled: true

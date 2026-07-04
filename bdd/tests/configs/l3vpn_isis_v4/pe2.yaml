@@ -31,14 +31,14 @@ router:
     interface:
     - if-name: lo
       ipv4:
-        enable: true
+        enabled: true
         prefix-sid:
           index: 3
     - if-name: p
       network-type: point-to-point
       metric: 10
       ipv4:
-        enable: true
+        enabled: true
     vrf:
     - name: vrf-cust
       net: 49.0001.0000.0000.0023.00
@@ -53,7 +53,7 @@ router:
         network-type: point-to-point
         metric: 10
         ipv4:
-          enable: true
+          enabled: true
   bgp:
     global:
       as: 65000

@@ -37,7 +37,7 @@ pub fn spawn_bgp(config: &ConfigManager) {
         }
         return;
     }
-    // Capture BFD / ND client handles so per-neighbor `bfd { enable }`
+    // Capture BFD / ND client handles so per-neighbor `bfd { enabled }`
     // and IPv6 unnumbered RA hand-off can submit requests later. Both
     // are guaranteed to be populated when BGP is spawned via
     // `commit_config`: the BGP arm there spawns ND *and* BFD eagerly,

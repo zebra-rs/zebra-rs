@@ -47,7 +47,7 @@ router:
             network-instance: core
             mup-ext-comm: "1:2"
     mup-c:
-      enable: true
+      enabled: true
       controller-address: fcbb:bb01::1
       pfcp:
         listen-address: 192.168.0.1

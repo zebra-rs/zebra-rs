@@ -11,16 +11,16 @@ router ospfv3 {
   router-id 10.0.0.1;
   area 0 {
     interface lo {
-      enable true;
+      enabled true;
     }
     interface enp0s6 {
-      enable true;
+      enabled true;
       network-type point-to-point;
     }
   }
   area 0.0.0.1 {
     interface enp0s7 {
-      enable true;
+      enabled true;
       network-type point-to-point;
     }
   }
@@ -82,7 +82,7 @@ router ospfv3 {
   area 0.0.0.1 {
     range 2001:db8:1::/48;
     interface enp0s7 {
-      enable true;
+      enabled true;
     }
   }
 }

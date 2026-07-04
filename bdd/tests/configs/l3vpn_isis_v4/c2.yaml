@@ -22,4 +22,4 @@ router:
       network-type: point-to-point
       metric: 10
       ipv4:
-        enable: true
+        enabled: true

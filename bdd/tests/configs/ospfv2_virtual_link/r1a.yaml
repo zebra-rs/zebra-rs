@@ -12,7 +12,7 @@ router:
     - area-id: 0.0.0.0
       interface:
       - if-name: lo
-        enable: true
+        enabled: true
     - area-id: 0.0.0.1
       # RFC 2328 §15: the virtual link carries its OWN authentication,
       # independent of the (unauthenticated) transit-area interfaces.
@@ -24,5 +24,5 @@ router:
           md5: VLSECRET
       interface:
       - if-name: ethb
-        enable: true
+        enabled: true
         network-type: point-to-point

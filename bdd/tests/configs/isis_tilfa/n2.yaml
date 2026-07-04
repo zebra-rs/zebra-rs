@@ -19,14 +19,14 @@ router:
     interface:
     - if-name: lo
       ipv4:
-        enable: true
+        enabled: true
         prefix-sid:
           index: 300
     - if-name: n2-s
       ipv4:
-        enable: true
+        enabled: true
       metric: 1
     - if-name: n2-r1
       ipv4:
-        enable: true
+        enabled: true
       metric: 1

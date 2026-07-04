@@ -2,7 +2,7 @@
 
 OSPFv3 configuration lives under `router ospfv3` and uses the same
 `area { interface }` hierarchy as OSPFv2: an interface participates
-if and only if it appears under some area with `enable true`. The
+if and only if it appears under some area with `enabled true`. The
 smallest useful topology is two routers on a point-to-point link.
 
 R1:
@@ -14,10 +14,10 @@ router ospfv3 {
   router-id 10.0.0.1;
   area 0 {
     interface lo {
-      enable true;
+      enabled true;
     }
     interface enp0s6 {
-      enable true;
+      enabled true;
       network-type point-to-point;
     }
   }
@@ -33,10 +33,10 @@ router ospfv3 {
   router-id 10.0.0.2;
   area 0 {
     interface lo {
-      enable true;
+      enabled true;
     }
     interface enp0s6 {
-      enable true;
+      enabled true;
       network-type point-to-point;
     }
   }

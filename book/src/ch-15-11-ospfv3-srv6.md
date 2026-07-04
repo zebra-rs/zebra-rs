@@ -27,10 +27,10 @@ router ospfv3 {
   }
   area 0 {
     interface lo {
-      enable true;
+      enabled true;
     }
     interface enp0s6 {
-      enable true;
+      enabled true;
       network-type point-to-point;
     }
   }

@@ -33,13 +33,13 @@ module zebra-bgp-bfd {
 
        router bgp {
          bfd {
-           enable true;          // blanket-enable all neighbors
+           enabled true;          // blanket-enable all neighbors
            echo-mode receive;    // default Echo role
          }
          neighbor 10.0.0.5 {
            remote-as 65501;
            bfd {
-             enable true;
+             enabled true;
              multihop true;       // eBGP-over-loopback; iBGP infers this
              minimum-ttl 250;
              echo-mode both;      // override (single-hop neighbors only)
@@ -48,9 +48,9 @@ module zebra-bgp-bfd {
        }
 
      The effective value of each `bfd` leaf is the per-neighbor setting if
-     present, else the instance default, else a hard default. `enable true`
+     present, else the instance default, else a hard default. `enabled true`
      at the instance level activates BFD on every neighbor (a per-neighbor
-     `enable false` opts one out). Echo is **single-hop only** (RFC 5883
+     `enabled false` opts one out). Echo is **single-hop only** (RFC 5883
      multihop has no Echo), so `echo-mode` is inert on multihop sessions
      (iBGP and multihop eBGP). Hop-mode (`multihop`) and `minimum-ttl` are
      per-neighbor only.";
@@ -92,7 +92,7 @@ module zebra-bgp-bfd {
   // Leaves shared by the instance-level and per-neighbor `bfd {}` containers.
   // No YANG `default` (absent ⇒ inherit, then a hard default in code).
   grouping bgp-bfd-common {
-    leaf enable {
+    leaf enabled {
       ext:help "Activate BFD (omit to inherit the instance default)";
       type boolean;
       description
@@ -190,9 +190,9 @@ module zebra-bgp-bfd {
     container bfd {
       ext:help "BFD defaults for this BGP instance";
       description
-        "Defaults applied to every neighbor's BFD session. `enable true`
+        "Defaults applied to every neighbor's BFD session. `enabled true`
          here blanket-enables BFD on all neighbors; a per-neighbor
-         `bfd { enable false }` opts one out. Every leaf is overridable per
+         `bfd { enabled false }` opts one out. Every leaf is overridable per
          neighbor. (Hop-mode / minimum-ttl are per-neighbor only.)";
       uses bgp-bfd-common;
     }

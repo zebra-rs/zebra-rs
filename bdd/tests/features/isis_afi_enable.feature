@@ -51,7 +51,7 @@ Feature: IS-IS re-originates its LSP when an interface address-family is toggled
 
   Scenario: Enabling IPv6 on the loopback re-originates the LSP and advertises the prefix
     Given the test topology exists
-    # Re-apply a1's config with one line added: `ipv6 enable true` on lo. The
+    # Re-apply a1's config with one line added: `ipv6 enabled true` on lo. The
     # diff-based apply turns that single leaf on. With the fix, a1 immediately
     # re-originates its L2 LSP carrying 2001:db8::1/128 in the IPv6
     # Reachability TLV; a2 floods it in, runs SPF, and installs the route.

@@ -6,7 +6,7 @@ configuration surface to the equivalent FRR `ospfd` commands.
 | zebra-rs YANG | FRR `ospfd` command |
 |---|---|
 | `router-id` | `ospf router-id` |
-| `area/<id>/interface/<n>/enable true` | `network <prefix> area <id>` (interface inferred from prefix) |
+| `area/<id>/interface/<n>/enabled true` | `network <prefix> area <id>` (interface inferred from prefix) |
 | `area/<id>/interface/<n>/priority` | `ip ospf priority` (interface) |
 | `area/<id>/interface/<n>/hello-interval` | `ip ospf hello-interval` (interface) |
 | `area/<id>/interface/<n>/dead-interval` | `ip ospf dead-interval` (interface) |

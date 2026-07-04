@@ -14,10 +14,10 @@ interface entry (with instance-level defaults available under
 router ospfv3 {
   area 0 {
     interface enp0s6 {
-      enable true;
+      enabled true;
       network-type point-to-point;
       bfd {
-        enable true;
+        enabled true;
       }
     }
   }

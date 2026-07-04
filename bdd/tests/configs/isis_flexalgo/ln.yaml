@@ -28,7 +28,7 @@ router:
     interface:
     - if-name: lo
       ipv4:
-        enable: true
+        enabled: true
         prefix-sid:
           index: 4
         flex-algo-prefix-sid:
@@ -38,12 +38,12 @@ router:
           index: 24
     - if-name: ln-ch
       ipv4:
-        enable: true
+        enabled: true
       affinity:
       - transatlantic
     - if-name: ln-fr
       ipv4:
-        enable: true
+        enabled: true
       affinity:
       - eu
     flex-algo:

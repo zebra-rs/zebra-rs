@@ -126,7 +126,7 @@ router isis {
     network-type point-to-point;
     te-metric {
       measurement {
-        enable true;
+        enabled true;
         interval 100;        # probe TX interval, ms  (100..60000, default 1000)
         damping-period 2;    # export window, seconds  (1..3600, default 30)
       }

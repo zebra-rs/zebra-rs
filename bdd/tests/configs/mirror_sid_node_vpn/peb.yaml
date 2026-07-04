@@ -59,12 +59,12 @@ router:
     interface:
     - if-name: lo
       ipv6:
-        enable: true
+        enabled: true
     - if-name: peb-pe1
       network-type: point-to-point
       metric: 1
       ipv6:
-        enable: true
+        enabled: true
   bgp:
     global:
       as: 65001

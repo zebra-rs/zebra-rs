@@ -18,7 +18,7 @@ router:
     - area-id: 0.0.0.0
       interface:
       - if-name: c1
-        enable: true
+        enabled: true
         network-type: point-to-point
   bgp:
     global:

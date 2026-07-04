@@ -26,7 +26,7 @@ How it works on the wire:
 router ospfv3 {
   area 0 {
     interface enp0s6 {
-      enable true;
+      enabled true;
       authentication message-digest;
       crypto-key 1 {
         hmac-sha-256 SECRET;

@@ -20,7 +20,7 @@ Feature: IS-IS SRv6 End.X (adjacency) SID is gated on the neighbor's IPv6
 
   x1 runs SRv6 with a classic locator, so it owns an End SID and would carve
   an End.X for each IPv6-capable adjacency. The x1–x2 IS-IS circuit starts
-  IPv4-only (IS-IS `ipv4 enable` only), so x2 advertises no IPv6 and x1 must
+  IPv4-only (IS-IS `ipv4 enabled` only), so x2 advertises no IPv6 and x1 must
   NOT allocate an End.X for it. A later scenario enables IPv6 on the circuit;
   x2 then advertises IPv6 and x1 allocates the End.X by re-evaluation.
 
@@ -53,7 +53,7 @@ Feature: IS-IS SRv6 End.X (adjacency) SID is gated on the neighbor's IPv6
   Scenario: Enabling IPv6 on the neighbor re-evaluates and allocates the End.X SID
     Given the test topology exists
     # Turn IPv6 on for the IS-IS circuit at both ends. The diff-based apply
-    # adds `ipv6 enable true`; the adjacency stays Up. x2 now advertises the
+    # adds `ipv6 enabled true`; the adjacency stays Up. x2 now advertises the
     # IPv6 NLPID and an IPv6 link-local, so x1 re-evaluates this neighbor,
     # allocates an End.X SID, and re-originates its LSP.
     When I apply config "x1-v6.conf" to namespace "x1"

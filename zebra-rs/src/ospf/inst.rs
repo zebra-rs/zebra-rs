@@ -627,7 +627,7 @@ impl<V: OspfVersion> Ospf<V> {
     fn bfd_reconcile_nbr(&mut self, ifindex: u32, nbr_addr: Ipv4Addr) {
         // Effective BFD config for this interface = the per-interface `bfd {}`
         // merged over the instance-level `router ospf { bfd {} }` default, per
-        // leaf (so an instance `enable true` blanket-enables interfaces that
+        // leaf (so an instance `enabled true` blanket-enables interfaces that
         // didn't set their own). No link ⇒ nothing to reconcile.
         let eff = match self.links.get(&ifindex) {
             Some(link) => link.config.bfd.resolve(&self.bfd),
@@ -721,7 +721,7 @@ impl<V: OspfVersion> Ospf<V> {
 
     /// Re-evaluate every neighbor on every interface — used by the
     /// instance-level `bfd {}` config callbacks, whose defaults (e.g. a
-    /// blanket `enable`) affect interfaces that set nothing of their own.
+    /// blanket `enabled`) affect interfaces that set nothing of their own.
     pub(crate) fn bfd_reconcile_all(&mut self) {
         let ifindexes: Vec<u32> = self.links.keys().copied().collect();
         for ifindex in ifindexes {
@@ -11665,7 +11665,7 @@ impl Ospf<Ospfv3> {
         // Pre-roll: drain the RIB subscribe-time replay (LinkAdd,
         // AddrAdd, RouterIdUpdate, ...) before touching `cm.rx`.
         // Without this, a `set router ospfv3 area ... interface
-        // <name> enable true` config message can race ahead of the
+        // <name> enabled true` config message can race ahead of the
         // `LinkAdd` for that ifname; `ospf_link_get_mut_by_name`
         // then returns `None` and the enable silently no-ops.
         // Mirrors v2's pre-roll in `Ospf<Ospfv2>::event_loop`.

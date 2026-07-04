@@ -106,7 +106,7 @@ router bgp {
   # Turn on the controller: the PFCP/N4 listener + route origination.
   # The `mup-c` block sits directly under the BGP instance.
   mup-c {
-    enable true;
+    enabled true;
     controller-address fcbb:bb01::1;
     pfcp {
       listen-address 192.168.0.1;
@@ -131,7 +131,7 @@ vrf mobile-up {
 }
 ```
 
-* **`enable true`** spawns the in-process controller. It is configured
+* **`enabled true`** spawns the in-process controller. It is configured
   under the BGP instance (not as a separate daemon) so that it is handed
   the BGP instance's own channel, the same way a per-VRF BGP instance is
   — route origination is a direct in-process call, not a cross-process

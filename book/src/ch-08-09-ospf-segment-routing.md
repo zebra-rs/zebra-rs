@@ -8,7 +8,7 @@ router ospf {
   segment-routing mpls;
   area 0 {
     interface enp0s6 {
-      enable true;
+      enabled true;
       prefix-sid {
         index 16001;
       }

@@ -18,9 +18,9 @@ router:
     - area-id: 0.0.0.0
       interface:
       - if-name: lo
-        enable: true
+        enabled: true
       - if-name: ethb
-        enable: true
+        enabled: true
         network-type: point-to-point
     # `nssa-translator-role: never` disables Type-7->Type-5 translation
     # on this ABR (RFC 3101 §2.2). The Type-7 still floods the NSSA and
@@ -32,8 +32,8 @@ router:
       nssa-translator-role: never
       interface:
       - if-name: ethc
-        enable: true
+        enabled: true
         network-type: point-to-point
       - if-name: ethd
-        enable: true
+        enabled: true
         network-type: point-to-point

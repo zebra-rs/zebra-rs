@@ -19,12 +19,12 @@ router:
       - router-id: 10.0.0.1
       interface:
       - if-name: lo
-        enable: true
+        enabled: true
       - if-name: ethm
-        enable: true
+        enabled: true
         network-type: point-to-point
     - area-id: 0.0.0.2
       interface:
       - if-name: ethc
-        enable: true
+        enabled: true
         network-type: point-to-point

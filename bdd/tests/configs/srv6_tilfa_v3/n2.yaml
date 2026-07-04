@@ -27,12 +27,12 @@ router:
     - area-id: 0.0.0.0
       interface:
       - if-name: lo
-        enable: true
+        enabled: true
       - if-name: n2-s
-        enable: true
+        enabled: true
         network-type: point-to-point
         cost: 1
       - if-name: n2-r1
-        enable: true
+        enabled: true
         network-type: point-to-point
         cost: 1

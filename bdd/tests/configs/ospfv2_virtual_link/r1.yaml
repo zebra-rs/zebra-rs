@@ -12,12 +12,12 @@ router:
     - area-id: 0.0.0.0
       interface:
       - if-name: lo
-        enable: true
+        enabled: true
     - area-id: 0.0.0.1
       # RFC 2328 §15: virtual link to r2 through transit area 1.
       virtual-link:
       - router-id: 10.0.0.2
       interface:
       - if-name: ethb
-        enable: true
+        enabled: true
         network-type: point-to-point

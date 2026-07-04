@@ -349,14 +349,14 @@ pub struct PeerTransportConfig {
 }
 
 /// Per-neighbor BFD attachment recorded from
-/// `set router bgp neighbor <addr> bfd { enable | multihop |
+/// `set router bgp neighbor <addr> bfd { enabled | multihop |
 /// minimum-ttl }` (zebra-bgp-bfd.yang). The configuration is
-/// stored here; `enable` flips translate into subscribe / unsubscribe
+/// stored here; `enabled` flips translate into subscribe / unsubscribe
 /// calls on the BFD instance via `bfd::inst::Bfd::client_req_tx`.
 #[derive(Debug, Default, Clone, PartialEq, Eq)]
 pub struct PeerBfdConfig {
     /// Activate BFD. `None` ⇒ inherit the instance-level
-    /// `router bgp { bfd { enable } }`; `Some(false)` opts this neighbor out
+    /// `router bgp { bfd { enabled } }`; `Some(false)` opts this neighbor out
     /// of a blanket instance enable. Off if unset everywhere.
     pub enable: Option<bool>,
     /// Hop-mode override. `None` (the default) means "infer": the
@@ -3433,7 +3433,7 @@ mod bfd_config_tests {
     }
 
     /// Round-trip: setting enable + multihop + minimum-ttl mirrors the CLI
-    /// flow (`bfd enable true; bfd multihop true; bfd minimum-ttl 250`)
+    /// flow (`bfd enabled true; bfd multihop true; bfd minimum-ttl 250`)
     /// producing the recorded state the BFD subscribe path reads.
     #[test]
     fn enable_and_multihop_round_trip() {

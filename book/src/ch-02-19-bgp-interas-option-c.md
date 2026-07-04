@@ -56,11 +56,11 @@ router:
     segment-routing: mpls
     interface:
     - if-name: lo
-      ipv4: { enable: true, prefix-sid: { index: 1 } }
+      ipv4: { enabled: true, prefix-sid: { index: 1 } }
     - if-name: p1
       network-type: point-to-point
       metric: 10
-      ipv4: { enable: true }
+      ipv4: { enabled: true }
 ```
 
 This gives `pe1` a transport LSP to `asbr1` (its BGP-LU peer's

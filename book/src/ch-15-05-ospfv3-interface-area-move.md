@@ -5,7 +5,7 @@ an interface from area 0 to area 0.0.0.1 is two operations:
 
 ```
 no router ospfv3 area 0 interface enp0s6
-router ospfv3 area 0.0.0.1 interface enp0s6 enable true
+router ospfv3 area 0.0.0.1 interface enp0s6 enabled true
 ```
 
 Internally this is the same `Disable → Enable` transition pair as
@@ -18,6 +18,6 @@ link-scoped Link-LSA re-originates on the fresh interface state. No
 daemon restart is required.
 
 The same caveat as v2 applies if one interface name accidentally
-appears under two areas at once: the last-applied `enable true`
+appears under two areas at once: the last-applied `enabled true`
 wins, because the link's cached area is a single value. This is not
 a supported configuration.

@@ -23,7 +23,7 @@ router:
     - area-id: 0.0.0.0
       interface:
       - if-name: lo
-        enable: true
+        enabled: true
       - if-name: i2
-        enable: true
+        enabled: true
         network-type: point-to-point

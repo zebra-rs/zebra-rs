@@ -298,11 +298,14 @@ impl Isis {
             link::config_hello_padding,
         );
         self.callback_add(
-            "/router/isis/interface/ipv4/enable",
+            "/router/isis/interface/ipv4/enabled",
             link::config_ipv4_enable,
         );
         // Per-interface BFD attachment.
-        self.callback_add("/router/isis/interface/bfd/enable", link::config_bfd_enable);
+        self.callback_add(
+            "/router/isis/interface/bfd/enabled",
+            link::config_bfd_enable,
+        );
         self.callback_add(
             "/router/isis/interface/bfd/echo-mode",
             link::config_bfd_echo_mode,
@@ -320,7 +323,7 @@ impl Isis {
             link::config_bfd_detect_offload,
         );
         // Instance-level `router isis { bfd { ... } }` defaults.
-        self.callback_add("/router/isis/bfd/enable", link::config_isis_bfd_enable);
+        self.callback_add("/router/isis/bfd/enabled", link::config_isis_bfd_enable);
         self.callback_add(
             "/router/isis/bfd/echo-mode",
             link::config_isis_bfd_echo_mode,
@@ -394,7 +397,7 @@ impl Isis {
             link::config_te_loss,
         );
         self.callback_add(
-            "/router/isis/interface/te-metric/measurement/enable",
+            "/router/isis/interface/te-metric/measurement/enabled",
             link::config_te_measurement_enable,
         );
         self.callback_add(
@@ -418,7 +421,7 @@ impl Isis {
             config_sr_srv6_flex_algo_locator,
         );
         self.callback_add(
-            "/router/isis/interface/ipv6/enable",
+            "/router/isis/interface/ipv6/enabled",
             link::config_ipv6_enable,
         );
         self.callback_add("/router/isis/distribute/rib", config_distribute_rib);
