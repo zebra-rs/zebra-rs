@@ -5,8 +5,9 @@ OSPFv2 features not yet implemented in zebra-rs:
 - NBMA and point-to-multipoint network types — the per-interface
   `network-type` knob accepts `broadcast` and `point-to-point`
   only.
-- Redistribution `route-map` filtering and the `table` source (the
-  zebra-rs sources are connected, static, kernel, IS-IS, and BGP).
+- The redistribution `table` source (the zebra-rs sources are
+  connected, static, kernel, IS-IS, and BGP; `route-map` filtering
+  on those sources is implemented — see below).
 - Forwarding-address resolution on received externals: Type-5/
   Type-7 LSAs carrying a non-zero forwarding address are skipped
   (RFC 2328 §16.4 step 3); zebra-rs itself always originates with
@@ -77,3 +78,9 @@ per feature — see each feature's page):
   MaxLinkMetric while stub links keep their cost. OSPFv2 only
   (`ospf6d` uses the R-bit mechanism instead). See
   [Timer Configuration](ch-08-08-ospf-timers.md#stub-router-max-metric-router-lsa).
+- **Redistribution `route-map` filtering** — `redistribute <source>
+  route-map <name>` binds a policy list (shared with BGP) as the
+  Type-5 filter, with `set med` as the metric override and FRR
+  route-map semantics; edits to the list or its prefix-sets re-apply
+  live. Both OSPFv2 and OSPFv3. See
+  [Route Redistribution](ch-08-15-ospf-redistribution.md#route-map-filtering).

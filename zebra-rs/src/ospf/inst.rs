@@ -401,6 +401,15 @@ pub struct Ospf<V: OspfVersion = Ospfv2> {
     /// VPNv4/VPNv6 routes BGP imported into the VRF into the CE-facing
     /// OSPF (the L3VPN PE-CE down direction).
     pub redist: BTreeMap<crate::rib::RibType, crate::ospf::area::RedistEntry>,
+    /// `redistribute <source> route-map <name>` bindings (FRR
+    /// parity): the named policy-list filters/modifies routes as
+    /// they redistribute into AS-External LSAs. An unresolved name
+    /// is deny-all, matching FRR.
+    pub redist_route_map: BTreeMap<crate::rib::RibType, String>,
+    /// Policy-list snapshots pushed by the policy actor for the
+    /// names bound in `redist_route_map` (kept fresh via the
+    /// Register/watch machinery, like BGP's per-peer policies).
+    pub policy_lists: BTreeMap<String, crate::policy::PolicyList>,
     /// Per-source prefixes of Type-5 LSAs we self-originated from the
     /// instance-level `redistribute` knobs (v2 / IPv4). Diffed by
     /// `as_external_redist_resync`; flushed when the knob is removed.
@@ -1344,6 +1353,113 @@ impl<V: OspfVersion> Ospf<V> {
         entry.last_originate = Some(tokio::time::Instant::now());
         entry.pending_min_seq.take()
     }
+
+    /// Bind (or unbind, `name == None`) a `redistribute <source>
+    /// route-map` to a named policy-list. Registers with the policy
+    /// actor so the current definition arrives immediately and every
+    /// later edit is pushed (`process_policy_msg` keeps
+    /// `policy_lists` fresh and resyncs). Rebinding unregisters the
+    /// old watch so the actor's watcher list doesn't grow unbounded.
+    pub fn redist_route_map_bind(&mut self, rtype: crate::rib::RibType, name: Option<String>) {
+        use crate::policy::{Message as PolicyMsg, PolicyType};
+        let ident = redist_rtype_ident(rtype);
+        if let Some(old) = self.redist_route_map.remove(&rtype) {
+            let _ = self.policy_tx.send(PolicyMsg::Unregister {
+                proto: self.proto_label.clone(),
+                name: old,
+                ident,
+                policy_type: PolicyType::PolicyListIn,
+            });
+        }
+        if let Some(name) = name {
+            let _ = self.policy_tx.send(PolicyMsg::Register {
+                proto: self.proto_label.clone(),
+                name: name.clone(),
+                ident,
+                policy_type: PolicyType::PolicyListIn,
+            });
+            self.redist_route_map.insert(rtype, name);
+        }
+    }
+}
+
+/// Stable per-source ident for the policy actor's watch registry, so
+/// two redistribute sources bound to the same policy-list name hold
+/// distinct watch entries (unbinding one must not drop the other's).
+fn redist_rtype_ident(rtype: crate::rib::RibType) -> usize {
+    use crate::rib::RibType;
+    match rtype {
+        RibType::Connected => 1,
+        RibType::Static => 2,
+        RibType::Kernel => 3,
+        RibType::Isis => 4,
+        RibType::Bgp => 5,
+        _ => 0,
+    }
+}
+
+/// Evaluate a policy-list (route-map) against one redistributed
+/// prefix. Returns the final metric (`base_metric` unless a matching
+/// entry `set med`/metric) or `None` when the route is denied.
+///
+/// Semantics mirror the BGP engine and FRR route-maps: entries run
+/// in sequence order; an entry with no prefix-set matches
+/// everything; an entry naming an unresolved prefix-set never
+/// matches; an entry carrying any BGP-only match clause (communities,
+/// as-path, MED, origin, ...) never matches a redistributed IGP
+/// route; falling off the end of the list is an implicit deny.
+fn redist_policy_eval(
+    list: &crate::policy::PolicyList,
+    prefix: ipnet::IpNet,
+    base_metric: u32,
+) -> Option<u32> {
+    use crate::policy::PolicyAction;
+    let mut metric = base_metric;
+    for entry in list.entry.values() {
+        // BGP-only match clauses can never hold for a redistributed
+        // IGP route — the entry is skipped, mirroring FRR's "match
+        // of an inapplicable type never matches".
+        if entry.community_set_name.is_some()
+            || entry.ext_community_set_name.is_some()
+            || entry.large_community_set_name.is_some()
+            || entry.as_path_set_name.is_some()
+            || entry.match_next_hop.is_some()
+            || entry.match_med.is_some()
+            || entry.match_as_path_len.is_some()
+            || entry.match_as_path_len_uniq.is_some()
+            || entry.match_local_pref.is_some()
+            || entry.match_weight.is_some()
+            || entry.match_origin.is_some()
+            || entry.match_evpn_route_type.is_some()
+            || entry.match_evpn_vni.is_some()
+            || entry.match_color.is_some()
+        {
+            continue;
+        }
+        let matched = match (&entry.prefix_set_name, &entry.prefix_set) {
+            // No prefix match clause — matches everything.
+            (None, _) => true,
+            // Named but unresolved — never matches (deny-ish),
+            // consistent with the BGP policy engine.
+            (Some(_), None) => false,
+            (Some(_), Some(set)) => set.matches(prefix),
+        };
+        if !matched {
+            continue;
+        }
+        // `set med` doubles as FRR's `set metric` for IGP
+        // redistribution.
+        if let Some(med) = &entry.med {
+            metric = med.apply(metric);
+        }
+        match entry.action {
+            PolicyAction::Permit => return Some(metric),
+            PolicyAction::Deny => return None,
+            PolicyAction::Next => continue,
+        }
+    }
+    // Implicit deny at end-of-list (FRR route-map semantics).
+    None
 }
 
 impl Ospf<Ospfv2> {
@@ -1441,6 +1557,8 @@ impl Ospf<Ospfv2> {
             redist_v4: BTreeMap::new(),
             redist_v6: BTreeMap::new(),
             redist: BTreeMap::new(),
+            redist_route_map: BTreeMap::new(),
+            policy_lists: BTreeMap::new(),
             redist_originated: BTreeMap::new(),
             redist_originated_v6: BTreeMap::new(),
             default_originate: None,
@@ -3196,18 +3314,34 @@ impl Ospf<Ospfv2> {
             .cloned()
             .unwrap_or_default();
 
-        let desired: BTreeSet<Ipv4Net> = if entry.is_some() {
+        // Desired prefix -> advertised metric. A bound route-map
+        // filters (deny drops the prefix from the set, so a stale
+        // LSA flushes below) and can override the metric via
+        // `set med`; an unresolved map name is deny-all (FRR
+        // parity).
+        let route_map = self.redist_route_map.get(&rtype);
+        let desired: BTreeMap<Ipv4Net, u32> = if let Some(e) = entry {
             self.redist_v4
                 .iter()
                 .filter(|((rt, _), _)| *rt == rtype)
-                .map(|((_, prefix), _)| *prefix)
+                .filter_map(|((_, prefix), _)| {
+                    let metric = match route_map {
+                        None => e.metric,
+                        Some(name) => {
+                            let list = self.policy_lists.get(name)?;
+                            redist_policy_eval(list, (*prefix).into(), e.metric)?
+                        }
+                    };
+                    Some((*prefix, metric))
+                })
                 .collect()
         } else {
-            BTreeSet::new()
+            BTreeMap::new()
         };
 
         for prefix in prev_originated
-            .difference(&desired)
+            .iter()
+            .filter(|p| !desired.contains_key(p))
             .copied()
             .collect::<Vec<_>>()
         {
@@ -3218,10 +3352,10 @@ impl Ospf<Ospfv2> {
         }
 
         if let Some(redist_entry) = entry {
-            for prefix in &desired {
+            for (prefix, metric) in &desired {
                 self.as_external_lsa_originate_for_prefix(
                     *prefix,
-                    redist_entry.metric,
+                    *metric,
                     redist_entry.metric_type.is_type_2(),
                 );
                 self.redist_originated
@@ -6100,9 +6234,24 @@ impl Ospf<Ospfv2> {
                     self.key_chains.remove(&name);
                 }
             }
-            crate::policy::PolicyRx::PrefixSet { .. }
-            | crate::policy::PolicyRx::PolicyList { .. } => {
-                // OSPF doesn't subscribe to prefix-set or policy-list.
+            crate::policy::PolicyRx::PolicyList {
+                name, policy_list, ..
+            } => {
+                // A `redistribute ... route-map` binding: keep the
+                // snapshot fresh and re-filter the redistributed
+                // set. `None` (deleted / undefined list) clears the
+                // snapshot — an unresolved map is deny-all, so the
+                // resync flushes everything the map had admitted.
+                if let Some(list) = policy_list {
+                    self.policy_lists.insert(name, list);
+                } else {
+                    self.policy_lists.remove(&name);
+                }
+                self.as_external_redist_resync_all();
+            }
+            crate::policy::PolicyRx::PrefixSet { .. } => {
+                // OSPF doesn't subscribe to bare prefix-sets (the
+                // policy actor resolves them into pushed lists).
             }
         }
     }
@@ -6264,6 +6413,8 @@ impl Ospf<Ospfv3> {
             redist_v4: BTreeMap::new(),
             redist_v6: BTreeMap::new(),
             redist: BTreeMap::new(),
+            redist_route_map: BTreeMap::new(),
+            policy_lists: BTreeMap::new(),
             redist_originated: BTreeMap::new(),
             redist_originated_v6: BTreeMap::new(),
             default_originate: None,
@@ -7415,18 +7566,31 @@ impl Ospf<Ospfv3> {
             .cloned()
             .unwrap_or_default();
 
-        let desired: BTreeSet<ipnet::Ipv6Net> = if entry.is_some() {
+        // Desired prefix -> advertised metric, filtered/modified by a
+        // bound route-map exactly like the v2 sibling.
+        let route_map = self.redist_route_map.get(&rtype);
+        let desired: BTreeMap<ipnet::Ipv6Net, u32> = if let Some(e) = entry {
             self.redist_v6
                 .iter()
                 .filter(|((rt, _), _)| *rt == rtype)
-                .map(|((_, prefix), _)| *prefix)
+                .filter_map(|((_, prefix), _)| {
+                    let metric = match route_map {
+                        None => e.metric,
+                        Some(name) => {
+                            let list = self.policy_lists.get(name)?;
+                            redist_policy_eval(list, (*prefix).into(), e.metric)?
+                        }
+                    };
+                    Some((*prefix, metric))
+                })
                 .collect()
         } else {
-            BTreeSet::new()
+            BTreeMap::new()
         };
 
         for prefix in prev_originated
-            .difference(&desired)
+            .iter()
+            .filter(|p| !desired.contains_key(p))
             .copied()
             .collect::<Vec<_>>()
         {
@@ -7437,10 +7601,10 @@ impl Ospf<Ospfv3> {
         }
 
         if let Some(redist_entry) = entry {
-            for prefix in &desired {
+            for (prefix, metric) in &desired {
                 self.as_external_lsa_originate_for_prefix_v3(
                     *prefix,
-                    redist_entry.metric,
+                    *metric,
                     redist_entry.metric_type.is_type_2(),
                 );
                 self.redist_originated_v6
@@ -11243,8 +11407,8 @@ impl Ospf<Ospfv3> {
     }
 
     /// Mirror of `Ospf<Ospfv2>::process_policy_msg` for the v3
-    /// instance. Same shape — only key-chain updates are consumed
-    /// today.
+    /// instance: key-chain updates (auth) and policy-list updates
+    /// (redistribute route-maps).
     fn process_policy_msg(&mut self, msg: crate::policy::PolicyRx) {
         match msg {
             crate::policy::PolicyRx::KeyChain {
@@ -11256,8 +11420,17 @@ impl Ospf<Ospfv3> {
                     self.key_chains.remove(&name);
                 }
             }
-            crate::policy::PolicyRx::PrefixSet { .. }
-            | crate::policy::PolicyRx::PolicyList { .. } => {}
+            crate::policy::PolicyRx::PolicyList {
+                name, policy_list, ..
+            } => {
+                if let Some(list) = policy_list {
+                    self.policy_lists.insert(name, list);
+                } else {
+                    self.policy_lists.remove(&name);
+                }
+                self.as_external_redist_resync_all_v3();
+            }
+            crate::policy::PolicyRx::PrefixSet { .. } => {}
         }
     }
 }

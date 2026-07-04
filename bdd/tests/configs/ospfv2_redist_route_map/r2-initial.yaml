@@ -1,0 +1,38 @@
+# r2 redistributes connected through route-map RM: only prefixes in
+# prefix-set PS are admitted (implicit deny drops the rest, including
+# the transit /30), and the matching entry sets metric 555.
+prefix-set:
+- name: PS
+  prefixes:
+  - prefix: 10.1.1.0/24
+policy:
+- name: RM
+  entry:
+  - number: 10
+    action: permit
+    match:
+      prefix-set: PS
+    set:
+      med:
+        set: 555
+interface:
+- if-name: lo
+  ipv4:
+    address: 10.0.0.2/32
+- if-name: etha
+  ipv4:
+    address: 10.0.12.2/30
+router:
+  ospf:
+    router-id: 10.0.0.2
+    redistribute:
+      connected:
+        route-map: RM
+    area:
+    - area-id: 0.0.0.0
+      interface:
+      - if-name: lo
+        enable: true
+      - if-name: etha
+        enable: true
+        network-type: point-to-point
