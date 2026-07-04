@@ -1,10 +1,17 @@
 # Gaps Relative to FRR ospfd
 
-OSPFv2 features not yet implemented in zebra-rs:
+zebra-rs OSPFv2 has reached feature parity with FRR ospfd — there
+are no open gaps.
 
-- NBMA and point-to-multipoint network types — the per-interface
-  `network-type` knob accepts `broadcast` and `point-to-point`
-  only.
+## Deliberately not supported
+
+- **NBMA and point-to-multipoint network types** — the
+  per-interface `network-type` knob accepts `broadcast` and
+  `point-to-point` only. NBMA and P2MP exist for legacy
+  multi-access WAN fabrics (Frame Relay, X.25, ATM); modern
+  networks are Ethernet, which broadcast and point-to-point cover.
+  zebra-rs does not support them by design — this is a non-goal,
+  not a to-do.
 
 ## Previously listed gaps that are now closed
 

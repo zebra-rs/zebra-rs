@@ -28,7 +28,9 @@ Notes:
   a single adjacency. Changing it on a live interface bounces the
   IFSM (an internal `Disable → Enable` pair) so state machine and
   neighbor list re-initialize under the new type. NBMA and
-  point-to-multipoint are not supported.
+  point-to-multipoint are deliberately not supported: they serve
+  legacy WAN fabrics (Frame Relay, X.25, ATM), which modern
+  Ethernet networks no longer use.
 - **`priority`** is the DR-election priority advertised in Hellos.
   Higher wins; zero forbids the router from becoming DR or BDR on
   that segment. The zebra-rs default of 64 is the IOS-XR baseline; a

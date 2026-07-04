@@ -1,8 +1,14 @@
 # Gaps Relative to FRR ospf6d
 
-OSPFv3 features not yet implemented in zebra-rs:
+zebra-rs OSPFv3 has reached feature parity with FRR ospf6d — there
+are no open gaps.
 
-- NBMA and point-to-multipoint network types.
+One item is deliberately not supported: **NBMA and
+point-to-multipoint network types**. They exist for legacy
+multi-access WAN fabrics (Frame Relay, X.25, ATM); modern networks
+are Ethernet, which `broadcast` and `point-to-point` cover, so
+zebra-rs omits them by design (see
+[the v2 gaps page](ch-08-12-ospf-frr-gaps.md#deliberately-not-supported)).
 
 Forwarding-address origination (NSSA Type-7, F-flag) and resolution
 on received externals are implemented for OSPFv3 identically to v2
