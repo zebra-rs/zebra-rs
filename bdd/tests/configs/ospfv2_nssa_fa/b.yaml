@@ -1,0 +1,22 @@
+# b is a pure backbone router: it receives the translated Type-5
+# whose forwarding address (c's NSSA interface 10.0.13.2) must
+# resolve via b's inter-area route to 10.0.13.0/30 — the RFC 2328
+# §16.4 step 3 path this feature exercises.
+interface:
+- if-name: lo
+  ipv4:
+    address: 10.0.0.2/32
+- if-name: etha
+  ipv4:
+    address: 10.0.12.2/30
+router:
+  ospf:
+    router-id: 10.0.0.2
+    area:
+    - area-id: 0.0.0.0
+      interface:
+      - if-name: lo
+        enable: true
+      - if-name: etha
+        enable: true
+        network-type: point-to-point

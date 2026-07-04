@@ -137,10 +137,20 @@ Election is computed locally with no protocol negotiation; the
 Nt-bit announcement in the Router-LSA is intentionally not emitted,
 matching how FRR, IOS and Junos behave in practice.
 
+An NSSA ASBR originates its P-bit Type-7s with a **non-zero
+forwarding address** — an address on one of its NSSA-connected
+interfaces (RFC 3101 §2.3) — and the translator preserves it in the
+Type-5, so backbone receivers route (and measure E1 metrics) to the
+true AS exit rather than the translating ABR. Receivers resolve a
+non-zero FA via their intra-/inter-area route to it (RFC 2328 §16.4
+step 3); an FA with no such route makes the LSA unusable, as the RFC
+requires.
+
 `nssa-suppress-fa true` zeroes the forwarding address when
 translating Type-7 to Type-5 (RFC 3101 §2.6), forcing traffic
 through the translating ABR instead of the FA — useful when the FA
-prefix is not reachable outside the NSSA.
+prefix is not reachable outside the NSSA. Both behaviors are
+validated by `ospfv2_nssa_fa.feature`.
 
 ## Runtime transitions
 

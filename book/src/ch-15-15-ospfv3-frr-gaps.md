@@ -2,9 +2,12 @@
 
 OSPFv3 features not yet implemented in zebra-rs:
 
-- Non-zero forwarding-address resolution on received externals.
 - NBMA and point-to-multipoint network types.
 - Configurable Instance ID (always 0 — one instance per link).
+
+Forwarding-address origination (NSSA Type-7, F-flag) and resolution
+on received externals are implemented for OSPFv3 identically to v2
+— see [the v2 gaps page](ch-08-12-ospf-frr-gaps.md).
 
 Redistribution `route-map` filtering is implemented for OSPFv3
 identically to v2 (policy lists shared with BGP, live

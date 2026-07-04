@@ -1,0 +1,31 @@
+# a is the NSSA ABR / translator: area 0 toward b, NSSA area 1
+# toward c. Type-7s from c (carrying c's NSSA interface address as
+# the RFC 3101 §2.3 forwarding address) translate to Type-5s with
+# the FA preserved.
+interface:
+- if-name: lo
+  ipv4:
+    address: 10.0.0.1/32
+- if-name: ethb
+  ipv4:
+    address: 10.0.12.1/30
+- if-name: ethc
+  ipv4:
+    address: 10.0.13.1/30
+router:
+  ospf:
+    router-id: 10.0.0.1
+    area:
+    - area-id: 0.0.0.0
+      interface:
+      - if-name: lo
+        enable: true
+      - if-name: ethb
+        enable: true
+        network-type: point-to-point
+    - area-id: 0.0.0.1
+      area-type: nssa
+      interface:
+      - if-name: ethc
+        enable: true
+        network-type: point-to-point
