@@ -416,7 +416,7 @@ impl<F: IsisRibFamily> PartialEq for SpfNexthop<F> {
 /// backup's metric inside a `NexthopProtect`. The value is RIB-internal
 /// and never reaches the wire — it only governs the metric grouping
 /// that makes the lower-metric group the `primary` member. See the
-/// design discussion that landed PR #489: blanket `+1` keeps show
+/// design rationale: blanket `+1` keeps show
 /// output legible and avoids `u32::MAX` sentinels.
 pub const BACKUP_METRIC_OFFSET: u32 = 1;
 

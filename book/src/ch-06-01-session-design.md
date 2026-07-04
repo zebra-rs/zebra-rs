@@ -261,7 +261,7 @@ The Session struct carries a `role` field (`View`, `Operator`,
   Service accounts bypass PAM (no password to ship in scripts) and
   are identified by uid alone via SO_PEERCRED. The env var is read
   once at daemon startup (D21); changes require restart. Future
-  YANG-driven runtime mutability is the deferred Phase 4-d-ii.
+  YANG-driven runtime mutability is deferred to a follow-up.
 
 `vtyctl` invocations are short-lived; their sessions exist for one
 or two RPCs and then idle out. Because session state is per-bash_pid
@@ -300,7 +300,7 @@ When `SO_PEERCRED` returns `peer_pid == 0`, the peer is not visible
 in the daemon's PID namespace; the connection is rejected with
 `FailedPrecondition`.
 
-## Streaming RPCs (Phase 7)
+## Streaming RPCs
 
 Some commands need server-streaming RPCs rather than unary calls:
 
@@ -342,7 +342,7 @@ Each phase is intended to ship as an independent PR.
 | D2 | enable TTL is sliding 15 min with a 4 h hard cap. |
 | D3 | enable state is not persisted across daemon restart. |
 | D4 | enable does not propagate to other shell tabs. Each bash is its own session. |
-| D5 | The Phase 1 Session struct is minimal; enable-related fields are added in Phase 4. |
+| D5 | The initial Session struct is minimal; enable-related fields are added later. |
 | D6 | PAM is invoked via a separate setuid (or capability-restricted) helper named `vtypam`, installed at `/usr/sbin/vtypam` for distribution. |
 | D7 | The initial Enable RPC uses a single password field. Bidirectional PAM conversation (for OTP, password change) is deferred. |
 | D8 | Session key derivation assumes the direct vty-bash-to-vtyhelper parent relationship; the daemon verifies via `/proc` (orphan check + parent uid match) but does not inspect the parent's command name. |
@@ -357,19 +357,19 @@ Each phase is intended to ship as an independent PR.
 | D17 | enable failure rate-limit lives in the daemon (per-uid counter, 5 failures within 30 s triggers a 30 s lockout, in-memory only). `pam_faillock` is documented as an optional stronger layer that admins can stack in the PAM service file. |
 | D18 | RBAC is 3-tier: `View`, `Operator`, `Admin`. Maps cleanly onto Cisco priv-lvl ranges 0-1 / 2-14 / 15. YANG-configurable roles are explicitly out of scope. |
 | D19 | Default idle session TTL is **600 s** with a 60 s sweep interval (Cisco IOS `exec-timeout 10 0` convention). Configurable later if a deployment needs it. |
-| D20 | **Root (uid=0) is implicitly Admin.** New sessions for uid=0 are created with `role=Admin` / `enabled=true` / no deadlines; the `enable` RPC short-circuits to success without spawning vtypam. Service-account configuration (Phase 4-d) does not need to list uid 0. Reason: root already owns the host and `pam_unix` against the daemon's own owning account is awkward UX. |
-| D21 | **Service-accounts via env var** for Phase 4-d initial implementation. `ZEBRA_VTY_SERVICE_ACCOUNTS=999,1001,...` (CSV of decimal uids) names uids that are permanent Admin from session creation, with the same shape as root (no deadlines, enable short-circuits to success). State is fixed at daemon startup; runtime changes require a restart. Full YANG integration is deferred to a follow-up (Phase 4-d-ii) if a deployment demands runtime mutability. |
+| D20 | **Root (uid=0) is implicitly Admin.** New sessions for uid=0 are created with `role=Admin` / `enabled=true` / no deadlines; the `enable` RPC short-circuits to success without spawning vtypam. Service-account configuration does not need to list uid 0. Reason: root already owns the host and `pam_unix` against the daemon's own owning account is awkward UX. |
+| D21 | **Service-accounts via env var** for the initial implementation. `ZEBRA_VTY_SERVICE_ACCOUNTS=999,1001,...` (CSV of decimal uids) names uids that are permanent Admin from session creation, with the same shape as root (no deadlines, enable short-circuits to success). State is fixed at daemon startup; runtime changes require a restart. Full YANG integration is deferred to a follow-up if a deployment demands runtime mutability. |
 | D22 | **Initial admin gates: Apply and Clear RPCs.** `SessionTable::require_admin` checks `enabled`, enforces sliding TTL + hard cap (with auto-downgrade on expiry), and slides the idle deadline on each authorized call. |
 | D23 | **Configure-mode admin gate** on `DoExec`. For `ExecType::Exec` only (completion paths remain free): admin is required when `mode != "exec"` (catches a client that sets `mode=configure` directly) and when `mode == "exec" && first_word == "configure"` (UX courtesy — block at entry so the prompt doesn't flip uselessly). Configure-mode mutex/lock is deliberately NOT included; multiple admins can enter configure simultaneously (D11 still deferred). |
 | D24 | **Auto-elevate on `configure`**. When a non-admin user types `configure`, the vty bash shell function optimistically tries first (admins succeed silently). On `PermissionDenied` it prompts for `Password:` (echo off) and sends an `Enable` RPC against the caller's own account (sudo-style) — so the same password that works for `enable` works here. On success it retries `configure` and flips `CLI_PRIVILEGE`. `EnableRequest` carries an optional `auth_user` field that the daemon honors when non-empty (kept for future su-style flows); the configure auto-elevate path leaves it empty. |
-| D25 | **YANG-driven service-accounts** (Phase 4-d-ii). New `vty.yang` module with `list service-account { key uid; leaf description; }` under `container vty` in the global `grouping config`. `ConfigManager` maintains an `Arc<RwLock<HashSet<u32>>>` updated by `commit_config` on `vty service-account uid N` Set/Delete diffs; `SessionTable` reads the union of this set and the env-var set in `is_service_account`. The env var (D21) remains as a startup-only seed for environments where YANG config is unavailable; YANG is the runtime-mutable path. |
+| D25 | **YANG-driven service-accounts** (follow-up). New `vty.yang` module with `list service-account { key uid; leaf description; }` under `container vty` in the global `grouping config`. `ConfigManager` maintains an `Arc<RwLock<HashSet<u32>>>` updated by `commit_config` on `vty service-account uid N` Set/Delete diffs; `SessionTable` reads the union of this set and the env-var set in `is_service_account`. The env var (D21) remains as a startup-only seed for environments where YANG config is unavailable; YANG is the runtime-mutable path. |
 | D26 | **Root peers bypass the parent-uid check.** `resolve_session_key` skips Guard 2 when `peer_uid == 0`. Rationale: the strict match rejected the common `sudo <cmd>` pattern, where the outer `sudo` process retains the invoking user's ruid while the client itself runs as uid 0. Risk surface: any uid-0 connector is trusted regardless of ancestry, but `SO_PEERCRED`'s effective-uid attestation already implies that — a process running as root can already do anything on the host. The remaining guards (D12 cross-PID-namespace, OrphanClient, ParentVanished) still fire for root peers. Non-root peers are unaffected — the parent-uid match is still enforced, so a setuid escalation to a non-zero uid is still refused. |
 
 ## Deferred work
 
 Items intentionally left out of the initial roadmap:
 
-- **Configure-mode lock** (Phase 5). Add if multi-operator
+- **Configure-mode lock** (future work). Add if multi-operator
   contention becomes a real problem.
 - **TACACS+ per-command authorization and accounting**. Requires
   a TACACS+ client in the daemon (Rust `tacacs-plus` crate or

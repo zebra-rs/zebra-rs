@@ -797,7 +797,7 @@ pub const ISIS_AUTH_HMAC_SHA512_LEN: usize = 64;
 
 impl IsisTlvAuth {
     /// Build a placeholder Auth TLV with the digest area zero-filled.
-    /// The signer (Phase 4) emits this into the PDU first, then computes
+    /// The signer emits this into the PDU first, then computes
     /// the HMAC over the serialized PDU and patches the digest bytes in
     /// place — RFC 5304 §3 / RFC 5310 §3.
     pub fn placeholder(auth_type: u8, value_len: usize) -> Self {
@@ -1425,7 +1425,7 @@ mod tests {
 
     /// Round-trip a TLV 14 LSP Buffer Size: emit through tlv_emit,
     /// then re-parse via parse_tlvs and recover the original size.
-    /// Frags emitted by the send-side packer (Phase 3) will rely on
+    /// Frags emitted by the send-side packer will rely on
     /// the type+length header being exactly 4 bytes (2 header + 2
     /// value) so reach packing math stays predictable.
     #[test]
@@ -1644,7 +1644,7 @@ mod tests {
         }
     }
 
-    /// Phase 4 LSP signer builds the PDU with a zero-filled placeholder,
+    /// The LSP signer builds the PDU with a zero-filled placeholder,
     /// then patches the digest in. Verify placeholder() shape and that
     /// the emitted bytes match `[type, len, auth_type, 0x00 * N]`.
     #[test]

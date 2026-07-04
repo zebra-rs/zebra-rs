@@ -281,10 +281,10 @@ pub struct UpdateGroup {
     pub flush_inflight_ipv6: bool,
     pub flush_pending_ipv6: bool,
     pub deferred_withdraw_ipv6: Vec<(usize, Ipv6Nlri)>,
-    /// Per-update-group egress task (migration Phase 0,
+    /// Per-update-group egress task (see
     /// `docs/design/bgp-egress-group-task-migration.md`). `Some` only at
     /// gate-on (`ZEBRA_BGP_EGRESS_GROUP_TASK`); spawned when the group is
-    /// created, dropped (abort-on-drop) when it empties. Phase 0 is idle —
+    /// created, dropped (abort-on-drop) when it empties. For now it is idle —
     /// it tracks the member set and routes no egress yet.
     pub task: Option<super::group_egress::GroupEgressTask>,
 }
@@ -489,7 +489,7 @@ pub fn attach(
         let entry = af.groups.entry(sig.clone()).or_insert_with(|| {
             let id = UpdateGroupId::new(afi_safi.afi, afi_safi.safi, af.next_seq);
             af.next_seq += 1;
-            // Phase 0/1a: spawn the per-group egress task at gate-on for
+            // Spawn the per-group egress task at gate-on for
             // v4-unicast (the family being migrated); dropped (abort-on-drop)
             // when this group is removed in `detach`.
             let task = (afi_safi.afi == Afi::Ip
@@ -519,9 +519,9 @@ pub fn attach(
             }
         });
         entry.members.insert(peer_idx);
-        // Phase 1a: mirror the membership into the group's egress task with the
+        // Mirror the membership into the group's egress task with the
         // member's SyncCtx (its packet sink + the shared egress identity) so the
-        // engine can build + fan once advertises are routed there (Phase 1b).
+        // engine can build + fan once advertises are routed there (later).
         if let Some(t) = &entry.task
             && let Some(peer) = peers.get_by_idx(peer_idx)
         {

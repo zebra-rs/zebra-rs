@@ -516,7 +516,7 @@ fn config_ospfv3_area_type(ospf: &mut Ospf<Ospfv3>, mut args: Args, op: ConfigOp
     // fresh on entry, flushes on exit.
     ospf.nssa_redist_connected_resync_v3(area_id);
     // Area-type also flips whether we should be translating
-    // Type-7→Type-5 for this area (phase 6d). Resync clears
+    // Type-7→Type-5 for this area. Resync clears
     // stale Type-5s on exit and seeds fresh ones on entry (if
     // we are an ABR with translator-role = Always or are the
     // Candidate-elected winner).
@@ -1737,7 +1737,7 @@ fn config_ospfv3_interface_flex_algo_prefix_sid_absolute(
 /// originated (on enable) or flushed (on disable). Mirrors v2's
 /// `config_ospf_sr_mpls`.
 /// `/router/ospfv3/segment-routing/srv6/locator` — name of a locator
-/// from the global /segment-routing/locator list (RFC 9513 Phase 2,
+/// from the global /segment-routing/locator list (RFC 9513,
 /// `docs/design/ospfv3-srv6-plan.md`). Mirrors the IS-IS staging
 /// convention: the name is held as a string and only resolves once
 /// the global locator commits — `reconcile_locator_watch` registers

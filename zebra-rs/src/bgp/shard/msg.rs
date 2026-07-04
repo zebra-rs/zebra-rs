@@ -129,7 +129,7 @@ pub enum ShardMsg {
     /// [`ShardOut::BestPathV4`] per contributed prefix — re-electing
     /// any surviving path (another peer may now win) or signalling a
     /// withdraw (empty winners). Centralizing the sweep here closes the
-    /// "new SAFI forgot a route_clean block" bug-class (#1329). At N>1
+    /// "new SAFI forgot a route_clean block" bug-class. At N>1
     /// `route_clean` dispatches this to every pool shard so each sweeps
     /// the peer's v4-unicast slice.
     PeerDown { ident: usize },

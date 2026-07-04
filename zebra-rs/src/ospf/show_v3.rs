@@ -2531,7 +2531,7 @@ fn render_ospfv3_srv6_text(v: &Ospfv3Srv6Json) -> Result<String, std::fmt::Error
 /// `show ospfv3 srv6` — the operational SRv6 view: the configured /
 /// resolved locator, the End/uN SID, and one row per adjacency End.X
 /// with the *installed* nexthop (the neighbor's global once its
-/// Link-LSA delivered one — the #1361 kernel constraint makes this
+/// Link-LSA delivered one — the kernel constraint makes this
 /// the column operators check first) and the uA(LIB) twin.
 fn show_ospfv3_srv6(
     top: &Ospf<Ospfv3>,

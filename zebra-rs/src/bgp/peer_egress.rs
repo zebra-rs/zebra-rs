@@ -10,9 +10,9 @@
 //! connection's `packet_tx`, which the unchanged per-connection writer
 //! drains.
 //!
-//! **Phase 0 (this file) is lifecycle only:** the task is spawned at
+//! **This file is lifecycle only:** the task is spawned at
 //! Established and dropped on session end, and it drains its delta channel
-//! without acting. `adj_out` and the egress work move into it in Phase 1.
+//! without acting. `adj_out` and the egress work move into it later.
 //! Gate-off (the default) is untouched — the egress stays on the main task
 //! via update-groups.
 
@@ -90,7 +90,7 @@ pub fn peer_egress_task_enabled() -> bool {
 
 /// One v4-unicast egress operation main forwards to a peer's task — the
 /// ordered delta stream (main sequences for per-prefix ordering; the PET
-/// does the work). Phase 0 defines the protocol; Phase 1 sends + handles it.
+/// does the work). This defines the protocol; sending + handling come later.
 #[derive(Debug)]
 pub enum EgressDeltaV4 {
     /// A best path won for `prefix` (the event-driven advertise): build +
@@ -165,7 +165,7 @@ impl PeerEgressTask {
 }
 
 /// A peer's owned v4-unicast egress state + per-delta logic, run inside the
-/// task. Build / policy / send reuse the `&SyncCtx` primitives (A2 Phase 0),
+/// task. Build / policy / send reuse the `&SyncCtx` primitives,
 /// so this is the per-peer, off-main twin of `compute_advertise_outcome` +
 /// `send_ipv4_direct` — no update-groups (gate-on is the GoBGP model).
 struct Engine {

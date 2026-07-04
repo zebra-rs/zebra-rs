@@ -1,6 +1,6 @@
 //! STAMP (RFC 8762) active link-delay measurement.
 //!
-//! Phase 1 of the SR-MPLS TE plan (`docs/design/stamp-sr-mpls-te-plan.md`,
+//! Part of the SR-MPLS TE plan (`docs/design/stamp-sr-mpls-te-plan.md`,
 //! steps in `docs/design/stamp-phase1-implementation-plan.md`): an
 //! unauthenticated Session-Sender per measured P2P link plus an
 //! implicit Session-Reflector for registered peers. The damped

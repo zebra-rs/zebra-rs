@@ -132,7 +132,7 @@ impl RibClient {
 
     /// Trigger the fast-reroute switchover for every protection
     /// indirection group whose primary rides the failed adjacency at
-    /// `addr` (phase 2 of the kernel-failover design). Protocols call
+    /// `addr` (the switchover in the kernel-failover design). Protocols call
     /// this on a BFD-down-with-link-up detection, BEFORE starting
     /// SPF, so traffic moves to the pre-installed TI-LFA repairs in
     /// O(adjacencies) while reconvergence runs.

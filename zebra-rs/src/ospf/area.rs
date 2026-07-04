@@ -12,7 +12,7 @@ pub const AREA0: Ipv4Addr = Ipv4Addr::UNSPECIFIED;
 /// RFC 3101 §2.2 NSSA translator-role configuration knob for an
 /// NSSA ABR. `Candidate` is the default and triggers election among
 /// the area's ABRs via the Nt-bit. `Always` forces translation
-/// unconditionally; `Never` disables it. Storage-only in phase 1.
+/// unconditionally; `Never` disables it. Storage-only for now.
 #[derive(Debug, Default, PartialEq, Clone, Copy)]
 pub enum NssaTranslatorRole {
     #[default]

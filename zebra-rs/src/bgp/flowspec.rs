@@ -10,11 +10,11 @@
 //!   * **(b.1)** the originator of the flow spec matches the originator
 //!     of the best-match unicast route for the destination prefix.
 //!
-//! Phase 2 computes this verdict on demand for `show bgp flowspec`;
+//! This computes the verdict on demand for `show bgp flowspec`;
 //! nothing yet *gates* behaviour on it. Stored verdicts, event-driven
 //! re-validation when the unicast RIB changes, the more-specific-route
 //! check (RFC 8955 rule c), and the per-neighbor disable knob land with
-//! the Phase 3 enforcement path (where validity gates re-advertise and,
+//! the enforcement path (where validity gates re-advertise and,
 //! later, install).
 
 use std::fmt;

@@ -106,7 +106,7 @@ ff ff ff ff ff ff ff ff ff ff ff ff ff ff ff ff
 }
 
 // Test that ESI field exists and is properly structured in EvpnMac
-// This verifies the Phase 4D change where esi was changed from a type field to full 10-byte array
+// This verifies the change where esi was changed from a type field to full 10-byte array
 #[test]
 pub fn evpn_mac_esi_field_structure() {
     use bgp_packet::attrs::nlri_evpn::EvpnMac;
@@ -164,7 +164,7 @@ pub fn bgp_rib_esi_propagation() {
     // should contain the full ESI for downstream use in:
     // - Route Distinguisher handling
     // - MAC Mobility conflict resolution
-    // - ECMP nexthop group formation (Phase 5)
+    // - ECMP nexthop group formation
     //
     // The ESI preservation test above validates that parsing works correctly.
     // This test validates that the information is available for route selection.

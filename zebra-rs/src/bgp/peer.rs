@@ -933,9 +933,9 @@ pub struct Peer {
     /// Per-peer egress task (A2 ⑥ / (a′)). `Some` only at gate-on
     /// (`ZEBRA_BGP_PEER_TASK`) while Established: it owns the v4-unicast
     /// egress off the main loop. `None` at gate-off (egress on main via
-    /// update-groups, today's default) and between sessions. Phase 0: the
-    /// task is spawned/torn down here but idle; Phase 1 routes the egress
-    /// through it.
+    /// update-groups, today's default) and between sessions. For now the
+    /// task is spawned/torn down here but idle; routing the egress
+    /// through it comes later.
     pub pet: Option<super::peer_egress::PeerEgressTask>,
     /// Egress backlog gauge (Tier 1b backpressure): the per-peer writer
     /// task publishes `packet_rx.len()` (pending UPDATE messages) here
@@ -1376,7 +1376,7 @@ impl Peer {
         self.reflector_client
     }
 
-    /// Borrowed view of this peer's outbound policy (A2 Phase 0). The
+    /// Borrowed view of this peer's outbound policy. The
     /// egress build takes this instead of `&Peer` so the same evaluation
     /// can run in a shard worker (which holds a `SyncCtx`, not a `Peer`).
     /// Rebuild the cached outbound-policy snapshot from the current
@@ -1821,8 +1821,8 @@ pub fn fsm(
             // with the session coming up) must not mislabel the next
             // reset.
             peer.down_reason = None;
-            // A2 ⑥ (gate-on): spawn the per-peer egress task. Phase 0 — it
-            // is idle (lifecycle only); Phase 1 routes the v4 egress to it.
+            // A2 ⑥ (gate-on): spawn the per-peer egress task. For now it
+            // is idle (lifecycle only); routing the v4 egress to it comes later.
             if super::peer_egress::peer_egress_task_enabled() {
                 let ctx = peer.sync_ctx(*bgp_ref.router_id);
                 let add_path = peer.opt.is_add_path_send(Afi::Ip, Safi::Unicast);

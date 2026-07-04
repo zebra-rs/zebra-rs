@@ -1,4 +1,4 @@
-// BGP `neighbor X ip-transparent` (FRR 10.4, FRRouting/frr PR #18789):
+// BGP `neighbor X ip-transparent` (FRR 10.4):
 // the IP_TRANSPARENT / IPV6_TRANSPARENT socket option, which lets a BGP
 // session use a local address the host does not own.
 //

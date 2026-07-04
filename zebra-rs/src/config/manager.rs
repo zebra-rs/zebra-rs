@@ -562,7 +562,7 @@ impl ConfigManager {
                 // same contract as `bfd_client_tx` — bring STAMP up
                 // first so `te-metric measurement` works regardless of
                 // commit order. (The ospfv3 arm doesn't: OSPFv3 has no
-                // measurement YANG in Phase 1.)
+                // measurement YANG yet.)
                 if !stamp {
                     stamp = true;
                     spawn_stamp(self);
@@ -2419,7 +2419,7 @@ mod yang_load_tests {
         }
     }
 
-    /// STAMP Phase 1 grammar: the `te-metric measurement` block on
+    /// STAMP measurement grammar: the `te-metric measurement` block on
     /// both IGP interfaces (configure mode) and the `show stamp`
     /// surface (exec mode). Pinned because vtyctl apply/show are
     /// garbage-tolerant — an unwired grammar silently no-ops.

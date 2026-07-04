@@ -111,7 +111,7 @@ pub struct Session {
     /// computed negative / absurd (clock step during the probe).
     pub rx_invalid_count: u64,
     /// Accepted samples whose T4 came from a kernel `SO_TIMESTAMPING`
-    /// stamp (Phase 1.5 rung 1) vs a userspace fallback read. The ratio
+    /// stamp vs a userspace fallback read. The ratio
     /// is the figure of merit for whether kernel timestamping is live.
     pub t4_kernel: u64,
     pub t4_userspace: u64,
@@ -299,7 +299,7 @@ mod tests {
         Session::new(key, SessionParams::default(), ssid, sock, read_task)
     }
 
-    /// Step 4: two IPv6 link-local sessions share remote `fe80::1` but
+    /// Two IPv6 link-local sessions share remote `fe80::1` but
     /// hang off different interfaces. The allow-list disambiguates by
     /// ingress ifindex, matching the probe to the session on its own
     /// link — never the other that merely shares the address.

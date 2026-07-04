@@ -14,15 +14,15 @@
 //!     `SocketAddrV6` scope id (ifindex) makes the 4-tuple unambiguous
 //!     across interfaces that share an `fe80::` address.
 //!
-//! All of them enable software RX `SO_TIMESTAMPING` (Phase 1.5 rung 1)
+//! All of them enable software RX `SO_TIMESTAMPING`
 //! so the receive timestamps (T2 / T4) come from the kernel network
 //! stack rather than a post-wakeup userspace read — see
 //! [`set_so_timestamping_rx`].
 //!
 //! Egress TTL / Hop Limit is 255 on every socket: probes between direct
 //! IGP neighbors should arrive with TTL 255, and the received value is
-//! surfaced for `show stamp` (a GTSM-style floor is *not* enforced in
-//! Phase 1 — the reflector allow-list is the admission gate).
+//! surfaced for `show stamp` (a GTSM-style floor is *not* enforced —
+//! the reflector allow-list is the admission gate).
 
 use std::net::{SocketAddrV4, SocketAddrV6};
 use std::os::fd::AsRawFd;
@@ -44,7 +44,7 @@ pub fn stamp_reflector_socket(ctx: &ProtoContext, bind: SocketAddrV4) -> std::io
     socket.set_ttl_v4(255)?;
     set_ipv4_recvttl(&socket)?;
     set_ipv4_pktinfo(&socket)?;
-    // Phase 1.5 rung 1: kernel-stamp the probe receive (T2) so the
+    // Kernel-stamp the probe receive (T2) so the
     // reflector residence we report to peers excludes our RX scheduling
     // latency. Non-fatal — falls back to the userspace stamp.
     set_so_timestamping_rx(&socket);
@@ -66,7 +66,7 @@ pub fn stamp_sender_socket(
 
     socket.set_nonblocking(true)?;
     socket.set_ttl_v4(255)?;
-    // Phase 1.5 rung 1: kernel-stamp the reply receive (T4) so our own
+    // Kernel-stamp the reply receive (T4) so our own
     // delay math excludes the daemon RX scheduling tail (the `d` term
     // in the offload-notes §9b.1 error budget). Non-fatal.
     set_so_timestamping_rx(&socket);
@@ -95,7 +95,7 @@ pub fn stamp_reflector_socket_v6(
     socket.set_unicast_hops_v6(255)?;
     set_ipv6_recvhoplimit(&socket)?;
     set_ipv6_recvpktinfo(&socket)?;
-    // Phase 1.5 rung 1: kernel-stamp the probe receive (T2). Non-fatal.
+    // Kernel-stamp the probe receive (T2). Non-fatal.
     set_so_timestamping_rx(&socket);
 
     socket.bind(&bind.into())?;
@@ -117,7 +117,7 @@ pub fn stamp_sender_socket_v6(
 
     socket.set_nonblocking(true)?;
     socket.set_unicast_hops_v6(255)?;
-    // Phase 1.5 rung 1: kernel-stamp the reply receive (T4). Non-fatal.
+    // Kernel-stamp the reply receive (T4). Non-fatal.
     set_so_timestamping_rx(&socket);
 
     socket.bind(&local.into())?;
@@ -230,13 +230,13 @@ mod tests {
     use super::*;
     use crate::context::ProtoContext;
 
-    /// Step 1 of the STAMP IPv6 slice: both v6 socket builders succeed
+    /// Both v6 socket builders succeed
     /// on the `::1` loopback. This pins the option set the kernel must
     /// accept — `IPV6_V6ONLY`, hop-limit 255, `IPV6_RECVHOPLIMIT` /
     /// `IPV6_RECVPKTINFO`, and software RX `SO_TIMESTAMPING` — and that
     /// a connected sender can be `bind`/`connect`ed to the reflector's
     /// ephemeral port. The v6 read/write/stamp paths are exercised in
-    /// the `network` module (Step 2).
+    /// the `network` module.
     #[tokio::test]
     async fn ipv6_sockets_build() {
         let ctx = ProtoContext::default_table_no_rib();
@@ -252,7 +252,7 @@ mod tests {
             .port();
 
         // Loopback has no link scope, so scope id 0 is correct here; the
-        // ifindex-scoped link-local path is covered by the BDD (Step 6).
+        // ifindex-scoped link-local path is covered by the BDD.
         let local = SocketAddrV6::new(Ipv6Addr::LOCALHOST, 0, 0, 0);
         let remote = SocketAddrV6::new(Ipv6Addr::LOCALHOST, port, 0, 0);
         let _sender = stamp_sender_socket_v6(&ctx, local, remote).expect("v6 sender socket builds");

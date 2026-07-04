@@ -4594,7 +4594,7 @@ fn show_flowspec_actions(attr: &BgpAttr) -> String {
 
 /// `show bgp flowspec [ipv6]` — list the Flow Specification rules in
 /// Adj-RIB-In across all peers for the given AFI, each with its decoded
-/// traffic-filtering actions and the advertising neighbor. Phase 1 is
+/// traffic-filtering actions and the advertising neighbor. It is
 /// receive-only: there is no Loc-RIB / best-path for flow specs yet, so
 /// this is the raw received view.
 fn show_bgp_flowspec(

@@ -74,7 +74,7 @@ struct StampSessionJson {
     tx_failed_count: u64,
     reflected_count: u64,
     /// Accepted samples whose T4 came from a kernel `SO_TIMESTAMPING`
-    /// stamp vs a userspace fallback (Phase 1.5 rung 1).
+    /// stamp vs a userspace fallback.
     t4_kernel: u64,
     t4_userspace: u64,
     window_sent: u32,

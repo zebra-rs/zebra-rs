@@ -925,7 +925,7 @@ pub(crate) fn evpn_attr_emit(_snpa: u8, nhop: &IpAddr, updates: &[EvpnRoute], bu
 /// Nexthop is encoded per the address family of `nhop` (`IpAddr::V4`
 /// → 4 octets, `IpAddr::V6` → 16 octets); senders that need the
 /// 32-octet "global || link-local" form will be added when a caller
-/// asks for it (Phase 3 keeps the emit side single-address).
+/// asks for it (the emit side is single-address for now).
 pub(crate) fn mup_attr_emit(
     afi: Afi,
     _snpa: u8,

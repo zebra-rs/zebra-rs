@@ -1,6 +1,6 @@
 //! EVPN Ethernet Segment (RFC 7432) configuration state.
 //!
-//! Phase 2 of the ES foundation (see `docs/design/bgp-evpn-ethernet-segment.md`):
+//! Part of the ES foundation (see `docs/design/bgp-evpn-ethernet-segment.md`):
 //! the `router bgp afi-safi evpn ethernet-segment <name>` config surface and
 //! the per-ES state it populates. No routes / DF election / data plane yet —
 //! those are later phases. The config handlers live in `config.rs` alongside

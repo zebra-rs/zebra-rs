@@ -1,4 +1,4 @@
-//! Per-update-group egress task — **Phase 1a (the engine; not yet reduce-wired)**.
+//! Per-update-group egress task — **the engine (not yet reduce-wired)**.
 //!
 //! Plan: `docs/design/bgp-egress-group-task-migration.md`. One persistent task
 //! per [`UpdateGroup`](super::update_group::UpdateGroup) that — at the end of
@@ -6,16 +6,16 @@
 //! member peers: **M tasks (groups), not N (peers)**, coalescing *and*
 //! off-main-parallel. A per-peer egress task (PET) is the M=1 case.
 //!
-//! Phase 0 was the lifecycle shell (member tracking, idle). **Phase 1a** adds
+//! The lifecycle shell (member tracking, idle) came first. This step adds
 //! the [`Engine`]: it captures each member's [`SyncCtx`] and can build one
 //! best-path advertisement **once** (the shared group transform), record it in
 //! the group's `adj_out`, encode it **once**, and **fan** the bytes to every
 //! member except the path's source (split-horizon). It is the per-group twin
 //! of the PET `Engine` — `send_ipv4_direct` fanned across members.
 //!
-//! 1a is **not wired into the reduce yet**: `attach`/`detach` feed the member
+//! The engine is **not wired into the reduce yet**: `attach`/`detach` feed the member
 //! set live (so the engine holds real `SyncCtx`s at gate-on), but no
-//! `Advertise`/`Withdraw` delta is routed to it — those land in Phase 1b. So
+//! `Advertise`/`Withdraw` delta is routed to it — those land later. So
 //! gate-on egress is unchanged; the engine is exercised by the unit tests.
 //! Default off; gate-off is byte-identical.
 
@@ -47,7 +47,7 @@ pub fn egress_group_task_enabled() -> bool {
     })
 }
 
-/// One egress operation the `attach`/`detach` (and, from Phase 1b, the reduce)
+/// One egress operation the `attach`/`detach` (and, later, the reduce)
 /// machinery forwards to a group's task. `AddMember` carries the member's
 /// `SyncCtx` (its packet sink and the shared egress identity) so the engine can
 /// build and fan, plus the group's `add_path` flag. `Advertise` and `Withdraw`
@@ -110,7 +110,7 @@ pub enum GroupEgressDeltaV4 {
 /// closes the channel.
 #[derive(Debug)]
 pub struct GroupEgressTask {
-    /// `attach` / `detach` (and, from Phase 1b, the reduce) push deltas here.
+    /// `attach` / `detach` (and, later, the reduce) push deltas here.
     delta_tx: UnboundedSender<GroupEgressDeltaV4>,
     // Held only for its abort-on-drop teardown; the task is driven entirely by
     // the channel, so the handle is never read after spawn.

@@ -198,7 +198,7 @@ pub struct NexthopProtect {
 
     // Kernel id of the protection indirection group (a 1-member
     // NHA_GROUP holding the primary) that protected routes reference
-    // instead of the member's own gid — the handle the phase-2
+    // instead of the member's own gid — the handle the
     // switchover swaps. 0 = no indirection: producers always emit 0
     // and the resolver allocates one only for a Uni primary (groups
     // can't nest, so a Multi primary's ECMP group is itself the

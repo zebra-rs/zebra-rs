@@ -1,13 +1,13 @@
 // IS-IS Mirror SID egress node/link protection — configuration and
-// state (Phase 2).
+// state.
 //
 // draft-ietf-rtgwg-srv6-egress-protection (SRv6 End.M) and RFC 8667 /
 // RFC 8679 (SR-MPLS context label). A protector node (PEB) advertises a
 // Mirror SID and the protected egress's locator(s); on egress failure a
 // PLR redirects traffic to PEB, which processes the inner packet in the
 // failed egress's mirrored context. This module only holds the operator
-// config and the parsed state — origination (Phase 3), dataplane (Phase
-// 4) and PLR repair (Phase 6) consume it later.
+// config and the parsed state — origination, dataplane and PLR
+// repair consume it later.
 
 use std::collections::BTreeMap;
 use std::net::Ipv6Addr;
@@ -58,7 +58,7 @@ pub struct MirrorProtect {
     /// (IPv4, since the SR-MPLS dataplane has no IPv6 prefix-SID).
     pub protected_locator: IpNet,
     /// Mirror SID (End.M) to advertise. `None` ⇒ auto-allocate from
-    /// the local SRv6 locator at origination time (Phase 3).
+    /// the local SRv6 locator at origination time.
     pub mirror_sid: Option<Ipv6Addr>,
     /// Local VRF whose forwarding reaches the dual-homed CE. `None` ⇒
     /// no static context mapping yet (BGP-learned path, later phase).
@@ -138,7 +138,7 @@ pub(crate) fn desired_context_labels(
         .collect()
 }
 
-// ── PLR-side reception (Phase 6a) ─────────────────────────────────────
+// ── PLR-side reception ────────────────────────────────────────────────
 
 /// A Mirror SID advertisement received from a peer — the PLR's view of
 /// the network. The `protector` node advertises `mirror_sid` (End.M)
@@ -272,9 +272,9 @@ pub fn node_te_router_id(lsdb: &Lsdb, sys_id: IsisSysId) -> Option<std::net::Ipv
 //
 // Each shim parses the list key (`protected-locator`) and, for leaf
 // callbacks, the leaf value, mutates the config map, then re-originates
-// the self LSP so the Phase 3 emit picks the change up. Today nothing is
+// the self LSP so the origination emit picks the change up. Today nothing is
 // emitted, so the re-origination is a harmless no-op; keeping it wired
-// here means Phase 3 needs no callback changes.
+// here means origination needs no callback changes.
 
 /// `/router/isis/egress-protection/protect` — list-entry lifecycle.
 /// Creates the entry on set, removes it on delete.
