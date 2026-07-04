@@ -699,16 +699,28 @@ struct MupCControllerJson {
 
 #[derive(Serialize)]
 struct MupCSessionJson {
+    /// Local SEID (our F-SEID, the session-table key).
     seid: u64,
+    /// The CP/SMF F-SEID learned from the Session Establishment Request.
+    cp_seid: u64,
+    /// PFCP peer (SMF) transport address that owns the session.
+    peer: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     ue_address: Option<String>,
-    teid: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    endpoint: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    qfi: Option<u8>,
     #[serde(skip_serializing_if = "Option::is_none")]
     network_instance: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    qfi: Option<u8>,
+    /// Access-side (N3, gNB-facing) GTP-U TEID — feeds the Type-1 ST route.
+    teid: String,
+    /// Access-side (N3) GTP-U endpoint — feeds the Type-1 ST route.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    endpoint: Option<String>,
+    /// Core-side (N6, core-facing) GTP-U TEID — feeds the Type-2 ST route.
+    core_teid: String,
+    /// Core-side (N6) GTP-U endpoint — feeds the Type-2 ST route.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    core_endpoint: Option<String>,
 }
 
 #[derive(Serialize)]
@@ -4162,49 +4174,74 @@ fn show_bgp_mup_c_session(
             .values()
             .map(|s| MupCSessionJson {
                 seid: s.seid,
+                cp_seid: s.cp_seid,
+                peer: s.peer.to_string(),
                 ue_address: s
                     .ue_ipv4
                     .map(|v| v.to_string())
                     .or_else(|| s.ue_ipv6.map(|v| v.to_string())),
+                network_instance: s.network_instance.clone(),
+                qfi: s.qfi,
                 teid: format!("0x{:08x}", s.teid),
                 endpoint: s.endpoint.map(|e| e.to_string()),
-                qfi: s.qfi,
-                network_instance: s.network_instance.clone(),
+                core_teid: format!("0x{:08x}", s.core_teid),
+                core_endpoint: s.core_endpoint.map(|e| e.to_string()),
             })
             .collect();
         return Ok(serde_json::to_string_pretty(&out)
             .unwrap_or_else(|e| format!("{{\"error\": \"{e}\"}}")));
     }
+    render_mup_c_sessions(&bgp.mup_c_view.sessions)
+}
+
+/// Render the MUP-C PFCP session table as text — one detail block per
+/// session showing every captured PFCP field. A flat table could not hold
+/// them all (CP-SEID, PFCP peer, and the whole core/N6 side), so this groups
+/// the access (N3 → Type-1 ST) and core (N6 → Type-2 ST) sides, mirroring the
+/// per-route detail layout of `show bgp mup`. Split out from
+/// [`show_bgp_mup_c_session`] so it is unit-testable without a full `Bgp`.
+fn render_mup_c_sessions(
+    sessions: &std::collections::BTreeMap<u64, crate::mup_c::session::MupSession>,
+) -> std::result::Result<String, std::fmt::Error> {
     let mut buf = String::new();
-    writeln!(
-        buf,
-        "{:<10} {:<40} {:<12} {:<40} {:<5} Network-Instance",
-        "SEID", "UE address", "TEID", "Endpoint", "QFI"
-    )?;
-    for s in bgp.mup_c_view.sessions.values() {
+    writeln!(buf, "PFCP sessions ({})", sessions.len())?;
+    let ep = |e: Option<IpAddr>| e.map(|e| e.to_string()).unwrap_or_else(|| "-".to_string());
+    for s in sessions.values() {
         let ue = match (s.ue_ipv4, s.ue_ipv6) {
             (Some(v4), _) => v4.to_string(),
             (None, Some(v6)) => v6.to_string(),
             (None, None) => "-".to_string(),
         };
-        let teid = format!("0x{:08x}", s.teid);
-        let endpoint = s
-            .endpoint
-            .map(|e| e.to_string())
-            .unwrap_or_else(|| "-".to_string());
-        let qfi = s
-            .qfi
-            .map(|q| q.to_string())
-            .unwrap_or_else(|| "-".to_string());
+        writeln!(buf)?;
         writeln!(
             buf,
-            "{:<10} {:<40} {:<12} {:<40} {:<5} {}",
-            s.seid,
-            ue,
-            teid,
-            endpoint,
-            qfi,
+            " SEID {}  CP-SEID 0x{:016x}  peer {}",
+            s.seid, s.cp_seid, s.peer
+        )?;
+        writeln!(buf, "     UE address        {ue}")?;
+        writeln!(
+            buf,
+            "     Network-Instance  {}",
             s.network_instance.as_deref().unwrap_or("-")
+        )?;
+        writeln!(
+            buf,
+            "     QFI               {}",
+            s.qfi
+                .map(|q| q.to_string())
+                .unwrap_or_else(|| "-".to_string())
+        )?;
+        writeln!(
+            buf,
+            "     Access (N3/ST1)   TEID 0x{:08x}  endpoint {}",
+            s.teid,
+            ep(s.endpoint)
+        )?;
+        writeln!(
+            buf,
+            "     Core   (N6/ST2)   TEID 0x{:08x}  endpoint {}",
+            s.core_teid,
+            ep(s.core_endpoint)
         )?;
     }
     Ok(buf)
@@ -5998,6 +6035,77 @@ mod detail_tests {
         // to nothing (10.70.0.9 still appears in its own [ST1] NLRI line, so
         // assert on the absence of a *resolved* line for its UE).
         assert!(!out.contains("resolved 10.60.2.5"), "{out}");
+    }
+
+    #[test]
+    fn mup_c_session_render_shows_all_pfcp_fields() {
+        use crate::mup_c::session::MupSession;
+        let mut sessions = std::collections::BTreeMap::new();
+        sessions.insert(
+            1u64,
+            MupSession {
+                seid: 1,
+                cp_seid: 0xdead_beef,
+                peer: "10.0.0.1:8805".parse().unwrap(),
+                ue_ipv4: Some("192.0.2.5".parse().unwrap()),
+                ue_ipv6: None,
+                teid: 0x1234_5678,
+                endpoint: Some("10.0.0.9".parse().unwrap()),
+                core_teid: 0x8765_4321,
+                core_endpoint: Some("10.9.0.1".parse().unwrap()),
+                network_instance: Some("internet.apn".to_string()),
+                qfi: Some(9),
+            },
+        );
+        let out = render_mup_c_sessions(&sessions).unwrap();
+        // Every captured PFCP field is rendered — including the fields the old
+        // 6-column table dropped (CP-SEID, peer, and the whole core/N6 side).
+        for needle in [
+            "PFCP sessions (1)",
+            "SEID 1",
+            "CP-SEID 0x00000000deadbeef",
+            "peer 10.0.0.1:8805",
+            "UE address        192.0.2.5",
+            "Network-Instance  internet.apn",
+            "QFI               9",
+            "Access (N3/ST1)   TEID 0x12345678  endpoint 10.0.0.9",
+            "Core   (N6/ST2)   TEID 0x87654321  endpoint 10.9.0.1",
+        ] {
+            assert!(out.contains(needle), "missing {needle:?} in:\n{out}");
+        }
+    }
+
+    #[test]
+    fn mup_c_session_render_v6_ue_and_placeholders() {
+        use crate::mup_c::session::MupSession;
+        // An IPv6 UE, no QFI, no Network Instance, and no core-side F-TEID:
+        // the absent fields render as "-", the empty core TEID as 0x00000000.
+        let mut sessions = std::collections::BTreeMap::new();
+        sessions.insert(
+            7u64,
+            MupSession {
+                seid: 7,
+                cp_seid: 0,
+                peer: "[2001:db8::1]:8805".parse().unwrap(),
+                ue_ipv4: None,
+                ue_ipv6: Some("2001:db8::5".parse().unwrap()),
+                teid: 0x0000_0001,
+                endpoint: Some("10.0.0.9".parse().unwrap()),
+                core_teid: 0,
+                core_endpoint: None,
+                network_instance: None,
+                qfi: None,
+            },
+        );
+        let out = render_mup_c_sessions(&sessions).unwrap();
+        for needle in [
+            "UE address        2001:db8::5",
+            "Network-Instance  -",
+            "QFI               -",
+            "Core   (N6/ST2)   TEID 0x00000000  endpoint -",
+        ] {
+            assert!(out.contains(needle), "missing {needle:?} in:\n{out}");
+        }
     }
 
     #[test]
