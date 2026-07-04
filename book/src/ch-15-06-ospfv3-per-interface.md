@@ -27,7 +27,9 @@ Notes:
 - **`network-type`** mirrors the v2 knob: `point-to-point` skips
   Waiting and DR election; changing it on a live interface bounces
   the IFSM through an internal `Disable → Enable` pair. NBMA and
-  point-to-multipoint are not supported.
+  point-to-multipoint are deliberately not supported: they serve
+  legacy WAN fabrics (Frame Relay, X.25, ATM), which modern
+  Ethernet networks no longer use.
 - **`priority`** is the DR-election priority carried in v3 Hellos
   (and recorded in the Link-LSA). Semantics as v2: higher wins,
   zero forbids DR/BDR.
