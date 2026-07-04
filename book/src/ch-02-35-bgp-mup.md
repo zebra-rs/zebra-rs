@@ -145,6 +145,11 @@ vrf mobile-up {
   Per draft-ietf-bess-mup-safi the controller originates ST routes
   **without** a service SID — the receiving PE derives forwarding from
   its own ISD/DSD routes — so no per-session SID is allocated.
+* **`upf-address`** / **`upf-teid`** supply a static core (N6/N9) tunnel
+  endpoint + TEID for the Type-2 ST when a session carries no learned
+  `Dest=Core` F-TEID (the N6-breakout case). With neither set, a node acting
+  as the anchor UPF self-allocates its own core receive F-TEID, so an ST2
+  still originates. A learned core F-TEID always wins over both.
 
 A VRF binds one ST direction to a PFCP Network Instance under `afi-safi
 mup route {st1|st2}`; the two read identically:
@@ -159,10 +164,14 @@ mup route {st1|st2}`; the two read identically:
   id in RD/RT 2:4 form, e.g. `1:2`) the ST2 resolves to.
 
 The access (Type-1) and core (Type-2) endpoints are **distinct** tunnel
-ends: the controller learns each from its own PFCP F-TEID — the
-`SourceInterface=Access` PDR feeds the Type-1 endpoint, the
-`SourceInterface=Core` PDR the Type-2 endpoint. A session that carries only
-one F-TEID reuses it for both (the Type-2 falls back to the access endpoint).
+ends, each learned from its own PFCP F-TEID — the downlink FAR's Outer Header
+Creation (`Dest=Access`) feeds the Type-1 (gNB) endpoint, a `Dest=Core` FAR
+the Type-2 (core / N9) endpoint. The Type-2 **never** borrows the access
+tunnel (it is the wrong direction, and a TEID of 0 is invalid per §3.1.4.1):
+its `(endpoint, TEID)` resolves in three tiers — a learned core F-TEID, else
+the statically configured anchor (`upf-address` + `upf-teid`), else, when this
+node is itself the anchor UPF, a **self-allocated** core receive F-TEID at its
+own address. So an ST2 always carries a non-zero core TEID.
 
 The configured network-instance is matched exactly against the PFCP
 session's Network Instance. The export route-targets the ST route carries
@@ -445,17 +454,24 @@ Segment Discovery origination (DSD and ISD, each with the per-VRF End.DT46
 SID + `seg6local` decap installed into the kernel FIB), and the interwork
 node's resolution of received ST routes to the matching segment.
 
-The interwork node's **SRv6 forwarding** is installed: on a forwarding VRF
-(`encapsulation srv6` + `route-target import`), each resolved ST route
-programs an SRv6 H.Encaps entry for its destination (ST2 endpoint / ST1 UE
-prefix) toward the remote segment's End.DT46 SID, resolved through the
-underlay via Next-Hop Tracking (`dst via <underlay egress> encap seg6 segs
-[SID]`), and the far-end PE's `seg6local End.DT46` decaps into its VRF.
+The **SRv6 forwarding** is installed and validated end-to-end: on a forwarding
+VRF (`encapsulation srv6` + `route-target import`) — including a co-located
+UPF + controller node — each resolved ST route programs an SRv6 H.Encaps entry
+for its destination (ST2 endpoint / ST1 UE prefix) toward the remote segment's
+End.DT46 SID, resolved through the underlay via Next-Hop Tracking (`dst via
+<underlay egress> encap seg6 segs [SID]`), and the far-end PE's `seg6local
+End.DT46` decaps into its VRF. Real bidirectional subscriber traffic across the
+End.DT46 datapath is exercised by the `bgp_mup_forwarding` BDD.
 
 The **GTP-U endpoint behaviours** themselves (GTP4.E / GTP6.E / H.M.GTP4.D)
-are **not** implemented: they have no stock-Linux `seg6local` action, so the
-GTP encap/decap at the mobile edge is left to a VPP/eBPF-based forwarder —
-zebra-rs uses End.DT46 as the kernel stand-in for the segment. The
-controller's PFCP northbound currently handles Association and Session
-lifecycle messages; heartbeat-driven eviction of idle associations is a
-follow-up.
+have no stock-Linux `seg6local` action, so on the mainline-kernel dataplane
+zebra-rs uses **End.DT46 as the stand-in** for the segment — the whole path is
+L3VPN-over-SRv6 and the GTP-U TEID is control-plane metadata only. Real GTP-U
+forwarding is delivered by an **eBPF dataplane** (`cradle`) that zebra-rs
+drives over gRPC. The roadmap — **Plan A** (complete the End.DT46 user plane on
+stock Linux, done) and **Plan B** (real `H.M.GTP4.D` / `GTP4.E` in the cradle
+eBPF forwarder) — is scoped in
+[`docs/design/bgp-mup-dataplane-plan.md`](https://github.com/zebra-rs/zebra-rs/blob/main/docs/design/bgp-mup-dataplane-plan.md).
+
+The controller's PFCP northbound handles Association and Session lifecycle
+messages; heartbeat-driven eviction of idle associations is a follow-up.
