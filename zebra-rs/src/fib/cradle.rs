@@ -112,6 +112,9 @@ pub struct CradleFib {
     nh_ids6: Arc<Mutex<HashMap<([u8; 16], u32, Vec<u32>, u32), u32>>>,
     /// SRv6 nexthop dedup: `(underlay gateway, oif, segment list) -> id`.
     nh_ids_srv6: Arc<Mutex<HashMap<([u8; 16], u32, Vec<[u8; 16]>), u32>>>,
+    /// GTP-U encap nexthop dedup:
+    /// `(gtp_src, gtp_dst, teid, underlay gateway, oif) -> id`.
+    nh_ids_gtp: Arc<Mutex<HashMap<([u8; 4], [u8; 4], u32, u32, u32), u32>>>,
     next_id: Arc<AtomicU32>,
     /// The SRv6 H.Encaps source is pushed once (best-effort).
     encap_src_set: Arc<std::sync::atomic::AtomicBool>,
@@ -133,6 +136,7 @@ impl CradleFib {
             nh_ids: Arc::new(Mutex::new(HashMap::new())),
             nh_ids6: Arc::new(Mutex::new(HashMap::new())),
             nh_ids_srv6: Arc::new(Mutex::new(HashMap::new())),
+            nh_ids_gtp: Arc::new(Mutex::new(HashMap::new())),
             next_id: Arc::new(AtomicU32::new(1)),
             encap_src_set: Arc::new(std::sync::atomic::AtomicBool::new(false)),
         }
@@ -182,6 +186,9 @@ impl CradleFib {
                 segs: Vec::new(),
                 encap_mode: 0,
                 backup_id: 0,
+                gtp_src: String::new(),
+                gtp_dst: String::new(),
+                gtp_teid: 0,
             })
             .await?;
         self.nh_ids.lock().await.insert(key, id);
@@ -221,6 +228,9 @@ impl CradleFib {
                 segs: segs.iter().map(|a| a.to_string()).collect(),
                 encap_mode,
                 backup_id: 0,
+                gtp_src: String::new(),
+                gtp_dst: String::new(),
+                gtp_teid: 0,
             })
             .await?;
         self.nh_ids_srv6.lock().await.insert(key, id);
@@ -391,6 +401,9 @@ impl CradleFib {
                 segs: Vec::new(),
                 encap_mode: 0,
                 backup_id,
+                gtp_src: String::new(),
+                gtp_dst: String::new(),
+                gtp_teid: 0,
             })
             .await?;
         self.nh_ids6.lock().await.insert(key, id);
@@ -710,6 +723,105 @@ impl CradleFib {
         .await
         {
             tracing::debug!("fib: cradle gtp_pdr_del {dst} teid {teid} failed: {e}");
+        }
+    }
+
+    /// Resolve (creating if needed) a GTP-U encap nexthop id: a v4 underlay
+    /// nexthop (`gw`/`oif`) that wraps the packet in outer IPv4 + UDP(2152) +
+    /// GTP-U toward `gtp_dst` (sourced from `gtp_src`, TEID `teid`).
+    async fn gtp_nexthop_id(
+        &self,
+        gtp_src: Ipv4Addr,
+        gtp_dst: Ipv4Addr,
+        teid: u32,
+        gw: Option<Ipv4Addr>,
+        oif: u32,
+    ) -> anyhow::Result<u32> {
+        let key = (
+            gtp_src.octets(),
+            gtp_dst.octets(),
+            teid,
+            gw.map(u32::from).unwrap_or(0),
+            oif,
+        );
+        {
+            let ids = self.nh_ids_gtp.lock().await;
+            if let Some(id) = ids.get(&key) {
+                return Ok(*id);
+            }
+        }
+        let id = self.next_id.fetch_add(1, Ordering::Relaxed);
+        self.client()
+            .await?
+            .set_nexthop(pb::Nexthop {
+                id,
+                gateway: gw.map(|a| a.to_string()).unwrap_or_default(),
+                oif: String::new(),
+                oif_index: oif,
+                v6: false,
+                labels: Vec::new(),
+                segs: Vec::new(),
+                encap_mode: 0,
+                backup_id: 0,
+                gtp_src: gtp_src.to_string(),
+                gtp_dst: gtp_dst.to_string(),
+                gtp_teid: teid,
+            })
+            .await?;
+        self.nh_ids_gtp.lock().await.insert(key, id);
+        Ok(id)
+    }
+
+    /// Install a GTP-U encap route (`GTP4.E`): traffic to `prefix` in `table_id`
+    /// is wrapped in outer IPv4 + UDP(2152) + GTP-U(`teid`) toward `gtp_dst`
+    /// (sourced from `gtp_src`) over the resolved v4 underlay `gw`/`oif`.
+    #[allow(clippy::too_many_arguments)]
+    pub async fn gtp_encap_install(
+        &self,
+        prefix: Ipv4Net,
+        table_id: u32,
+        gtp_src: Ipv4Addr,
+        gtp_dst: Ipv4Addr,
+        teid: u32,
+        gw: Option<Ipv4Addr>,
+        oif: u32,
+    ) {
+        if let Err(e) = async {
+            let id = self.gtp_nexthop_id(gtp_src, gtp_dst, teid, gw, oif).await?;
+            self.client()
+                .await?
+                .add_route4(pb::Route4 {
+                    prefix: prefix.to_string(),
+                    nexthop_id: id,
+                    flags: 0,
+                    vrf_table_id: cradle_vrf(table_id),
+                })
+                .await?;
+            anyhow::Ok(())
+        }
+        .await
+        {
+            tracing::warn!(
+                "fib: cradle gtp_encap_install {prefix} -> {gtp_dst} teid {teid} failed: {e}"
+            );
+        }
+    }
+
+    /// Remove a GTP-U encap route (the nexthop is kept for dedup reuse).
+    pub async fn gtp_encap_del(&self, prefix: Ipv4Net, table_id: u32) {
+        if let Err(e) = async {
+            self.client()
+                .await?
+                .del_route4(pb::Route4Del {
+                    prefix: prefix.to_string(),
+                    vrf_table_id: cradle_vrf(table_id),
+                })
+                .await?;
+            anyhow::Ok(())
+        }
+        .await
+        {
+            tracing::debug!("fib: cradle gtp_encap_del {prefix} failed: {e}");
         }
     }
 

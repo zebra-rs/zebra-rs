@@ -3105,6 +3105,74 @@ fn mup_segment_untrack(bgp: &mut BgpTop, rd: RouteDistinguisher, prefix: &MupPre
     }
 }
 
+/// NHT for a received MUP Type-1 ST route's GTP **endpoint** (gNB): register
+/// the `st1.endpoint` address (not the BGP next-hop) so the `dataplane gtp`
+/// downlink `GTP4.E` encap re-resolves its outer v4 underlay when the gNB
+/// reroutes, and return the endpoint's currently-resolved transport (empty
+/// while a fresh registration is pending, the endpoint is unreachable, `best`
+/// is not a Type-1 ST, or carries no endpoint). No-op outside the global
+/// instance (`nexthop_cache` is `None`). Symmetric release is
+/// [`mup_endpoint_untrack`].
+fn mup_endpoint_track(
+    bgp: &mut BgpTop,
+    rd: RouteDistinguisher,
+    prefix: &MupPrefix,
+    best: Option<&BgpRib>,
+) -> Vec<rib::nht::ResolvedNexthop> {
+    let Some(cache) = bgp.nexthop_cache.as_deref_mut() else {
+        return Vec::new();
+    };
+    mup_endpoint_track_cache(cache, bgp.rib_client, rd, prefix, best)
+}
+
+/// Cache-level core of [`mup_endpoint_track`], shared with the local
+/// origination path ([`super::inst::Bgp::mup_apply_selected`]) which holds the
+/// `NexthopCache` directly rather than through a [`BgpTop`].
+pub(super) fn mup_endpoint_track_cache(
+    cache: &mut super::nht::NexthopCache,
+    rib_client: &crate::rib::client::RibClient,
+    rd: RouteDistinguisher,
+    prefix: &MupPrefix,
+    best: Option<&BgpRib>,
+) -> Vec<rib::nht::ResolvedNexthop> {
+    if !matches!(prefix, MupPrefix::T1st { .. }) {
+        return Vec::new();
+    }
+    let Some(endpoint) = best.and_then(|b| b.mup_st1).map(|st1| st1.endpoint) else {
+        return Vec::new();
+    };
+    let dep = super::nht::NhtDep::MupEndpoint(rd, prefix.clone());
+    let (needs_register, _reachable) = cache.track(endpoint, dep);
+    if needs_register {
+        let _ = rib_client.send(rib::Message::NexthopRegister {
+            proto: "bgp".to_string(),
+            nh: endpoint,
+        });
+    }
+    cache.transport_for(endpoint).to_vec()
+}
+
+/// Symmetric to [`mup_endpoint_track`]: drop the endpoint dep from `endpoint`
+/// and, once it has no deps left, unregister it. `endpoint` is the pre-withdraw
+/// ST1 GTP endpoint address.
+fn mup_endpoint_untrack(
+    bgp: &mut BgpTop,
+    rd: RouteDistinguisher,
+    prefix: &MupPrefix,
+    endpoint: IpAddr,
+) {
+    let dep = super::nht::NhtDep::MupEndpoint(rd, prefix.clone());
+    let Some(cache) = bgp.nexthop_cache.as_deref_mut() else {
+        return;
+    };
+    if cache.untrack(endpoint, &dep) {
+        let _ = bgp.rib_client.send(rib::Message::NexthopUnregister {
+            proto: "bgp".to_string(),
+            nh: endpoint,
+        });
+    }
+}
+
 /// Symmetric to [`nht_track_received`]: on a withdrawal, drop `dep` from
 /// each distinct next-hop the `removed` paths used, and unregister a
 /// next-hop from the RIB once it has no deps left. `survivor_nhs` are
@@ -7830,12 +7898,24 @@ pub fn route_mup_update(
     // resolved transport to hand the importing VRF. Empty for non-DSD /
     // unresolved. Must precede the `bgp.vrf_import` borrow below.
     let transport = mup_segment_track(bgp, rd, &prefix, selected.first());
+    // A received ST1: register its GTP endpoint (gNB) with NHT and read the
+    // resolved v4 underlay so the `dataplane gtp` downlink encap can steer
+    // toward it. Empty for non-ST1 / unresolved.
+    let endpoint_transport = mup_endpoint_track(bgp, rd, &prefix, selected.first());
     // Mirror the new best-path to every VRF whose `mup import` RT set
     // matches, so `show bgp vrf <name> mup` reflects peer-learned routes.
     // A peer-learned route has no local originating VRF (`origin_vrf =
     // None`), so it is imported purely by route-target.
     if let Some(dispatcher) = bgp.vrf_import {
-        super::vrf::dispatch_mup(dispatcher, rd, &prefix, selected.first(), None, &transport);
+        super::vrf::dispatch_mup(
+            dispatcher,
+            rd,
+            &prefix,
+            selected.first(),
+            None,
+            &transport,
+            &endpoint_transport,
+        );
     }
     if !selected.is_empty() {
         route_advertise_mup_to_peers(rd, prefix, &selected, bgp, peers);
@@ -7879,6 +7959,15 @@ fn route_mup_locrib_withdraw(
         .first()
         .filter(|_| matches!(prefix, MupPrefix::Dsd { .. } | MupPrefix::Isd { .. }))
         .and_then(|r| super::nht::nht_target(&r.attr));
+    // Likewise the pre-withdraw ST1 GTP endpoint (tracked separately from the
+    // BGP next-hop), so its `dataplane gtp` endpoint registration is released.
+    let old_endpoint = bgp
+        .local_rib
+        .select_best_path_mup(&rd, &prefix)
+        .first()
+        .filter(|_| matches!(prefix, MupPrefix::T1st { .. }))
+        .and_then(|r| r.mup_st1)
+        .map(|st1| st1.endpoint);
     let removed = bgp.local_rib.remove_mup(rd, &prefix, id, ident);
     let selected = bgp.local_rib.select_best_path_mup(&rd, &prefix);
     // Release the NHT registration when no surviving path keeps the
@@ -7891,13 +7980,28 @@ fn route_mup_locrib_withdraw(
     {
         mup_segment_untrack(bgp, rd, &prefix, nh);
     }
+    // Same for the ST1 endpoint registration.
+    if let Some(endpoint) = old_endpoint
+        && selected.first().and_then(|r| r.mup_st1).map(|s| s.endpoint) != Some(endpoint)
+    {
+        mup_endpoint_untrack(bgp, rd, &prefix, endpoint);
+    }
     let transport = mup_segment_track(bgp, rd, &prefix, selected.first());
+    let endpoint_transport = mup_endpoint_track(bgp, rd, &prefix, selected.first());
     // Mirror the post-withdraw state to per-VRF tasks: a remaining best
     // path is re-forwarded (matched by RT), otherwise the prefix is
     // withdrawn from every VRF's copy. A peer-learned route has no local
     // originating VRF (`origin_vrf = None`).
     if let Some(dispatcher) = bgp.vrf_import {
-        super::vrf::dispatch_mup(dispatcher, rd, &prefix, selected.first(), None, &transport);
+        super::vrf::dispatch_mup(
+            dispatcher,
+            rd,
+            &prefix,
+            selected.first(),
+            None,
+            &transport,
+            &endpoint_transport,
+        );
     }
     // Only propagate when the Loc-RIB actually changed. A withdraw for an
     // already-absent route (nothing removed, no surviving best path) is a
@@ -13328,13 +13432,25 @@ impl Bgp {
                         .find(|(_, cfg)| cfg.rd == Some(rd))
                         .map(|(name, _)| name.clone())
                 });
+            // A locally-originated ST1 (the MUP-C's downlink session) still
+            // needs its GTP endpoint (gNB) resolved against the local underlay
+            // so the `dataplane gtp` downlink `GTP4.E` encap can steer toward
+            // it — register it here (this global task holds the cache directly)
+            // and hand the resolved v4 transport to the VRF. Empty for non-ST1.
+            let endpoint_transport = super::route::mup_endpoint_track_cache(
+                &mut self.nexthop_cache,
+                &self.ctx.rib,
+                rd,
+                &prefix,
+                selected.first(),
+            );
             let dispatcher = super::vrf::VrfImportDispatcher {
                 rib_known_vrfs: &self.rib_known_vrfs,
                 vrf_registry: &self.vrf_registry,
             };
             // Locally-originated / exported routes carry no remote underlay
-            // transport (a local DSD's SID is on this node); the ST2→DSD
-            // encap only fires for *received* DSDs, tracked in
+            // segment transport (a local DSD's SID is on this node); the
+            // ST2→DSD encap only fires for *received* DSDs, tracked in
             // `route_mup_update`.
             super::vrf::dispatch_mup(
                 &dispatcher,
@@ -13343,6 +13459,7 @@ impl Bgp {
                 selected.first(),
                 origin_vrf.as_deref(),
                 &[],
+                &endpoint_transport,
             );
         }
         if selected.is_empty() {

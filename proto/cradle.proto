@@ -35,6 +35,12 @@ message Nexthop {
   // Fast-reroute: the nexthop to switch to when this one's link goes down —
   // typically the TI-LFA repair (segs + encap_mode 2). 0 = unprotected.
   uint32 backup_id = 12;
+  // GTP-U encap (GTP4.E): a non-empty gtp_dst makes this a GTP nexthop that
+  // wraps the packet in outer IPv4 + UDP(2152) + GTP-U(gtp_teid) over the v4
+  // underlay gateway/oif. Mutually exclusive with segs/labels.
+  string gtp_src = 13;   // outer IPv4 source (local N3/N9 tunnel address)
+  string gtp_dst = 14;   // outer IPv4 destination (peer gNB / UPF address)
+  uint32 gtp_teid = 15;  // GTP-U TEID
 }
 
 // A nexthop group for ECMP: ordered member nexthop ids. A route whose flags

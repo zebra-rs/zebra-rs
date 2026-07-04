@@ -56,6 +56,14 @@ pub enum NhtDep {
     /// Direct-segment id matches re-programs its endpoint encap. Keyed by
     /// the DSD's `(rd, MupPrefix)` like the VPN deps.
     Mup(RouteDistinguisher, bgp_packet::MupPrefix),
+    /// MUP (SAFI 85) Type-1 ST route's GTP **endpoint** (gNB) in
+    /// `local_rib.mup`. Unlike [`Self::Mup`] (which tracks the BGP next-hop),
+    /// this tracks the ST1's `st1.endpoint` address so the `dataplane gtp`
+    /// downlink `GTP4.E` encap re-resolves its outer v4 underlay when the gNB's
+    /// reachability or route changes: on a change the ST1 is re-dispatched to
+    /// importing VRFs with the freshly-resolved endpoint transport. Keyed by
+    /// the ST1's `(rd, MupPrefix)`.
+    MupEndpoint(RouteDistinguisher, bgp_packet::MupPrefix),
 }
 
 /// How a tracked next-hop's resolution changed, returned by

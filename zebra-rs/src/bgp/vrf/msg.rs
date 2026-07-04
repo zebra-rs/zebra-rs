@@ -78,6 +78,13 @@ pub enum BgpVrfMsg {
         /// route types the install doesn't steer. Mirrors `ImportV4`'s
         /// `transport`.
         transport: Vec<ResolvedNexthop>,
+        /// Resolved v4 underlay transport for a Type-1 ST route's GTP endpoint
+        /// (gNB), when the global instance has NHT-resolved it
+        /// (register-then-gate on `st1.endpoint`). Consumed by the `dataplane
+        /// gtp` downlink reconcile to fill the cradle `GTP4.E` encap nexthop's
+        /// underlay gateway/oif. Empty for non-ST1 routes and unresolved
+        /// endpoints.
+        endpoint_transport: Vec<ResolvedNexthop>,
     },
     /// Withdraw a previously-imported MUP route (the global RIB no longer has
     /// a selected path for it). Flooded to every VRF; the per-VRF removal is
