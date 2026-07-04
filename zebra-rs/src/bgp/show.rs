@@ -4104,11 +4104,7 @@ fn mup_prefix_display(
             }) => format!("[ST1][{rd}][ue={prefix}][teid={teid}][qfi={qfi}][ep={endpoint}]"),
             None => format!("[ST1][{rd}][ue={prefix}]"),
         },
-        MupPrefix::T2st {
-            endpoint,
-            endpoint_len: _,
-            teid,
-        } => format!("[ST2][{rd}][ep={endpoint}][teid={teid}]"),
+        MupPrefix::T2st { endpoint, teid } => format!("[ST2][{rd}][ep={endpoint}][teid={teid}]"),
         MupPrefix::Unknown { route_type, .. } => format!("[UNKNOWN type {route_type}]"),
     }
 }

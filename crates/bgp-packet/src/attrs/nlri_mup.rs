@@ -697,8 +697,9 @@ pub struct MupSt1Fields {
 ///     same UE prefix *replaces* the prior one rather than coexisting.
 ///   * DSD (Type 2): the RD + Address (§3.1.2).
 ///   * ST2 (Type 4): the RD + Endpoint Address + architecture-specific
-///     Endpoint Identifier (the TEID), so `endpoint`/`endpoint_len`/`teid`
-///     stay in the key (§3.2.2).
+///     Endpoint Identifier (the TEID), so only `endpoint`/`teid` key it. The
+///     Endpoint *Length* is explicitly excluded from the key (§3.2.2), so it
+///     is not carried here.
 ///
 /// The add-path `id` lives on `BgpRib.remote_id`. Variant declaration order
 /// (`Dsd, Isd, T1st, T2st`) drives the derived `Ord`, so a RIB walk lists
@@ -713,12 +714,12 @@ pub enum MupPrefix {
     /// `prefix` (with the outer RD) keys an ST1; the TEID / QFI / endpoint /
     /// source are off-key path data ([`MupSt1Fields`] on `BgpRib.mup_st1`).
     T1st { prefix: IpNet },
-    /// Type 2 Session Transformed Route (ST2) key (§3.2.2).
-    T2st {
-        endpoint: IpAddr,
-        endpoint_len: u8,
-        teid: u32,
-    },
+    /// Type 2 Session Transformed Route (ST2) key (§3.2.2). Per the draft the
+    /// key is the RD (outer) + Endpoint Address + the architecture-specific
+    /// Endpoint Identifier (the TEID) — the Endpoint *Length* is explicitly
+    /// **not** part of the key, so it is kept only on the wire `MupRoute` and
+    /// re-derived (address bits + a full 32-bit TEID) on reconstruction.
+    T2st { endpoint: IpAddr, teid: u32 },
     /// Unrecognized route type — keyed by its raw type and opaque body so
     /// the RIB never coalesces distinct unknown routes.
     Unknown { route_type: u16, body: Vec<u8> },
@@ -749,17 +750,14 @@ impl MupPrefix {
             // TEID/QFI/endpoint/source are off-key path data, extracted
             // separately via [`MupRoute::st1_fields`].
             MupRoute::T1st { rd, prefix, .. } => (*rd, MupPrefix::T1st { prefix: *prefix }),
+            // §3.2.2: the Endpoint Length is not part of the key — only the
+            // Endpoint Address and the TEID (with the outer RD).
             MupRoute::T2st {
-                rd,
-                endpoint,
-                endpoint_len,
-                teid,
-                ..
+                rd, endpoint, teid, ..
             } => (
                 *rd,
                 MupPrefix::T2st {
                     endpoint: *endpoint,
-                    endpoint_len: *endpoint_len,
                     teid: *teid,
                 },
             ),
@@ -845,18 +843,23 @@ impl MupPrefix {
                     source,
                 }
             }
-            MupPrefix::T2st {
-                endpoint,
-                endpoint_len,
-                teid,
-            } => MupRoute::T2st {
-                id: 0,
-                arch,
-                rd,
-                endpoint: *endpoint,
-                endpoint_len: *endpoint_len,
-                teid: *teid,
-            },
+            // The Endpoint Length is off-key (§3.2.2), so re-derive the
+            // canonical value on reconstruction: the address bits plus a full
+            // 32-bit TEID (64 for IPv4, 160 for IPv6).
+            MupPrefix::T2st { endpoint, teid } => {
+                let endpoint_len = match endpoint {
+                    IpAddr::V4(_) => 64,
+                    IpAddr::V6(_) => 160,
+                };
+                MupRoute::T2st {
+                    id: 0,
+                    arch,
+                    rd,
+                    endpoint: *endpoint,
+                    endpoint_len,
+                    teid: *teid,
+                }
+            }
             MupPrefix::Unknown { route_type, body } => MupRoute::Unknown {
                 id: 0,
                 arch,
@@ -1660,6 +1663,37 @@ mod tests {
                 source: None,
             })
         );
+    }
+
+    #[test]
+    fn st2_route_key_excludes_endpoint_len() {
+        // draft §3.2.2: only the RD + Endpoint Address + TEID key an ST2 — the
+        // Endpoint Length is NOT part of the key. Two ST2 with the same
+        // endpoint + TEID but a different Endpoint Length map to one key.
+        let mk = |endpoint_len| MupRoute::T2st {
+            id: 0,
+            arch: MupArchitectureType::Gpp5g,
+            rd: sample_rd(),
+            endpoint: "10.0.0.1".parse().unwrap(),
+            endpoint_len,
+            teid: 600,
+        };
+        assert_eq!(
+            MupPrefix::from_route(&mk(64)),
+            MupPrefix::from_route(&mk(48)),
+            "Endpoint Length is off-key — same endpoint+TEID ⇒ same key"
+        );
+        assert_eq!(
+            MupPrefix::from_route(&mk(64)).1,
+            MupPrefix::T2st {
+                endpoint: "10.0.0.1".parse().unwrap(),
+                teid: 600,
+            }
+        );
+        // to_route re-derives the canonical Endpoint Length (32 addr + 32 TEID
+        // = 64 for IPv4); the key round-trips regardless of the original length.
+        let (rd, key) = MupPrefix::from_route(&mk(48));
+        assert_eq!(MupPrefix::from_route(&key.to_route(rd)), (rd, key));
     }
 
     #[test]

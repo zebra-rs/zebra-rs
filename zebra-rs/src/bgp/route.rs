@@ -7669,6 +7669,16 @@ pub fn route_mup_update(
     let (rd, prefix) = MupPrefix::from_route(route);
     let id = route.add_path_id();
 
+    // draft §3.1.4.1: an ST2 (Type-2 ST) with TEID 0 is malformed. RFC 7606
+    // §7 treat-as-withdraw: drop any stale copy of this key and do not install
+    // it, rather than reset the session. (The TEID is part of the ST2 route
+    // key, so a `teid=0` route would also collapse distinct sessions onto one
+    // key.)
+    if matches!(prefix, MupPrefix::T2st { teid: 0, .. }) {
+        route_mup_withdraw(ident, route, bgp, peers);
+        return;
+    }
+
     let (peer_ident, peer_router_id, typ) = {
         let peer = peers.get_mut_by_idx(ident).expect("peer must exist");
 
@@ -8135,21 +8145,23 @@ pub(super) fn build_mup_st_route(
         // carried no core-side F-TEID (single-endpoint session). The Endpoint
         // Length (§3.1.4.1) spans the address *and* the trailing 32-bit GTP
         // TEID, so it is 64 (IPv4) / 160 (IPv6).
-        MupSrv6Direction::Decapsulation => match session.core_endpoint.or(session.endpoint) {
-            Some(endpoint) => (
-                MupPrefix::T2st {
-                    endpoint,
-                    endpoint_len: if endpoint.is_ipv4() { 64 } else { 160 },
-                    teid: if session.core_teid != 0 {
-                        session.core_teid
-                    } else {
-                        session.teid
-                    },
-                },
-                None,
-            ),
-            None => return None,
-        },
+        MupSrv6Direction::Decapsulation => {
+            let endpoint = session.core_endpoint.or(session.endpoint)?;
+            let teid = if session.core_teid != 0 {
+                session.core_teid
+            } else {
+                session.teid
+            };
+            // draft §3.1.4.1: a TEID of 0 is invalid / malformed. A session
+            // with no usable core (or fallback access) TEID must not originate
+            // an ST2 — a `teid=0` route would be malformed and, because the
+            // TEID is part of the ST2 route key, several such sessions would
+            // collapse onto the single `(endpoint, teid=0)` key.
+            if teid == 0 {
+                return None;
+            }
+            (MupPrefix::T2st { endpoint, teid }, None)
+        }
     };
     let mut attr = BgpAttr::new();
     // §3.3.10: a Type-2 ST route SHOULD carry the BGP MUP Extended Community
@@ -18374,6 +18386,16 @@ mod tests {
             MupPrefix::T2st { endpoint, teid, .. }
                 if endpoint == "10.0.0.1".parse::<std::net::IpAddr>().unwrap() && teid == 0x1234
         ));
+
+        // draft §3.1.4.1: a session with no usable TEID (both core and access
+        // TEID are 0) must NOT originate a malformed `teid=0` ST2.
+        let mut s0 = session(Some(v4), None);
+        s0.teid = 0;
+        s0.core_teid = 0;
+        assert!(
+            super::build_mup_st_route(&s0, MupSrv6Direction::Decapsulation, None).is_none(),
+            "no ST2 for a session with TEID 0 (malformed per draft)"
+        );
     }
 
     // The Segment Discovery NLRI selector: `segment direct` keys a DSD off
