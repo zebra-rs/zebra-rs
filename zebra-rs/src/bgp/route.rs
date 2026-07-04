@@ -15040,25 +15040,74 @@ impl Bgp {
         route_withdraw_evpn_to_peers(rd, prefix, &mut self.peers);
     }
 
+    /// Find the currently-selected remote end of a VPWS service in the EVPN
+    /// Loc-RIB: a non-originated per-EVI Type-1 (RFC 8214) whose Ethernet Tag
+    /// is the service's `remote-service-id` within the same EVI, carrying an
+    /// `End.DX2` L2-Service SID. `None` while no such route is selected.
+    fn vpws_lookup_remote_sid(&self, evi: u32, remote_id: u32) -> Option<std::net::Ipv6Addr> {
+        if remote_id == MAX_ET {
+            // MAX-ET tags per-ES A-D routes, never a VPWS service instance.
+            return None;
+        }
+        for table in self.local_rib.evpn.values() {
+            for (prefix, rib) in table.selected.iter() {
+                let EvpnPrefix::EthernetAd { eth_tag, .. } = prefix else {
+                    continue;
+                };
+                if *eth_tag != remote_id
+                    || rib.typ == BgpRibType::Originated
+                    || extract_vni_from_attr(&rib.attr) != Some(evi)
+                {
+                    continue;
+                }
+                if let Some(sid) = evpn_srv6_sid(&rib.attr, bgp_packet::SRV6_BEHAVIOR_END_DX2) {
+                    return Some(sid);
+                }
+            }
+        }
+        None
+    }
+
     /// Re-sync VPWS service `name` after a config or locator change:
     /// withdraw the stale Type-1 (if any), originate afresh when the
-    /// config is complete, and re-push the AC cross-connect if a remote
-    /// SID had already been imported (so the change takes effect without
-    /// waiting for a route churn).
+    /// config is complete, and re-derive the AC cross-connect from the
+    /// Loc-RIB — the matching remote Type-1 may have arrived before this
+    /// service was (fully) configured, or a re-pointed `remote-service-id`
+    /// / `evi` may now select a different remote, or none at all.
     pub fn vpws_reconcile(&mut self, name: &str) {
         self.evpn_withdraw_vpws(name);
         self.evpn_originate_vpws(name);
         let Some(svc) = self.local_rib.evpn_vpws.services.get(name) else {
             return;
         };
-        if let (Some(remote_sid), Some((_, _, _, ifname))) = (svc.remote_sid, svc.params()) {
-            let ifname = ifname.to_string();
-            let local_sid = self.local_rib.evpn_vpws.sids.get(name).map(|(a, _)| *a);
-            let _ = self.ctx.rib.send(crate::rib::Message::XconnectAdd {
-                ifname,
-                remote_sid,
-                local_sid,
-            });
+        let cached = svc.remote_sid;
+        let ifname = svc.interface.clone();
+        let remote = svc
+            .params()
+            .and_then(|(evi, _, remote_id, _)| self.vpws_lookup_remote_sid(evi, remote_id));
+        if let Some(svc) = self.local_rib.evpn_vpws.services.get_mut(name) {
+            svc.remote_sid = remote;
+        }
+        let local_sid = self.local_rib.evpn_vpws.sids.get(name).map(|(a, _)| *a);
+        match (remote, ifname) {
+            (Some(remote_sid), Some(ifname)) => {
+                let _ = self.ctx.rib.send(crate::rib::Message::XconnectAdd {
+                    ifname,
+                    remote_sid,
+                    local_sid,
+                });
+            }
+            // A previously-bound AC whose remote no longer matches (config
+            // re-pointed, or now partial): unbind. Interface *changes* are
+            // unbound by `config_vpws_interface`, which still knows the old
+            // AC name.
+            (None, Some(ifname)) if cached.is_some() => {
+                let _ = self
+                    .ctx
+                    .rib
+                    .send(crate::rib::Message::XconnectDel { ifname, local_sid });
+            }
+            _ => {}
         }
     }
 

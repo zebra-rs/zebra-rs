@@ -3353,6 +3353,37 @@ mod yang_load_tests {
         }
     }
 
+    /// `router bgp afi-safi evpn vpws <name> …` (RFC 8214, the `vpws` list in
+    /// zebra-bgp-evpn.yang). Guards the VPWS service grammar so a regression
+    /// is caught in the unit suite.
+    #[test]
+    fn bgp_evpn_vpws_is_settable() {
+        use crate::config::ExecCode;
+        use crate::config::parse::{State, parse};
+        use libyang::to_entry;
+
+        let mut yang = YangStore::new();
+        yang.add_path(concat!(env!("CARGO_MANIFEST_DIR"), "/yang"));
+        yang.read_with_resolve("configure")
+            .expect("configure mode loads");
+        yang.identity_resolve();
+        let module = yang
+            .find_module("configure")
+            .expect("configure module present");
+        let entry = to_entry(&yang, module);
+
+        for path in [
+            "set router bgp afi-safi evpn vpws eline1",
+            "set router bgp afi-safi evpn vpws eline1 evi 100",
+            "set router bgp afi-safi evpn vpws eline1 local-service-id 101",
+            "set router bgp afi-safi evpn vpws eline1 remote-service-id 102",
+            "set router bgp afi-safi evpn vpws eline1 interface eth0",
+        ] {
+            let (code, _comps, _state) = parse(path, entry.clone(), None, State::new());
+            assert_eq!(code, ExecCode::Success, "`{path}` must be a settable path");
+        }
+    }
+
     #[test]
     fn mup_c_upf_address_is_settable() {
         use crate::config::ExecCode;
