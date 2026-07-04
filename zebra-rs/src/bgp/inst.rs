@@ -3966,6 +3966,12 @@ impl Bgp {
             NhtDep::Mup(rd, prefix) => {
                 self.mup_redispatch_segment(nh, rd, prefix, true);
             }
+            // MUP: a received/originated ST1's GTP endpoint (gNB) rerouted →
+            // re-dispatch the ST1 with the fresh endpoint transport so the
+            // `dataplane gtp` downlink encap re-installs toward the new egress.
+            NhtDep::MupEndpoint(rd, prefix) => {
+                self.mup_redispatch_endpoint(nh, rd, prefix, true);
+            }
             NhtDep::V4(_) | NhtDep::V6(_) => {}
         }
     }
@@ -3998,7 +4004,54 @@ impl Bgp {
             rib_known_vrfs: &self.rib_known_vrfs,
             vrf_registry: &self.vrf_registry,
         };
-        super::vrf::dispatch_mup(&dispatcher, rd, &prefix, Some(winner), None, &transport);
+        super::vrf::dispatch_mup(
+            &dispatcher,
+            rd,
+            &prefix,
+            Some(winner),
+            None,
+            &transport,
+            &[],
+        );
+    }
+
+    /// Re-dispatch an ST1 route to importing VRFs with its GTP endpoint's
+    /// current v4 underlay transport (empty when `reachable` is false), so the
+    /// `dataplane gtp` downlink `GTP4.E` encap re-installs or is withdrawn. The
+    /// endpoint's register-then-gate first resolution and every later reroute
+    /// both land here. Parallel to [`Self::mup_redispatch_segment`], but the
+    /// tracked next-hop is the ST1's `st1.endpoint` (not the BGP next-hop), so
+    /// the fresh value rides `MupUpdate.endpoint_transport` (segment transport
+    /// stays empty for an ST1).
+    fn mup_redispatch_endpoint(
+        &mut self,
+        nh: std::net::IpAddr,
+        rd: bgp_packet::RouteDistinguisher,
+        prefix: bgp_packet::MupPrefix,
+        reachable: bool,
+    ) {
+        let selected = self.local_rib.select_best_path_mup(&rd, &prefix);
+        let Some(winner) = selected.first() else {
+            return;
+        };
+        let endpoint_transport = if reachable {
+            self.nexthop_cache.transport_for(nh).to_vec()
+        } else {
+            Vec::new()
+        };
+        let dispatcher = super::vrf::VrfImportDispatcher {
+            rib_known_vrfs: &self.rib_known_vrfs,
+            vrf_registry: &self.vrf_registry,
+        };
+        super::vrf::dispatch_mup(
+            &dispatcher,
+            rd,
+            &prefix,
+            Some(winner),
+            None,
+            &[],
+            &endpoint_transport,
+        );
     }
 
     /// Re-evaluate one dependent prefix after its next-hop's
@@ -4056,7 +4109,7 @@ impl Bgp {
             NhtDep::SrPolicy { .. } => Vec::new(),
             // MUP has no shard best-path; the ST2→DSD re-dispatch is done
             // inline in the match below (it needs `nexthop_cache`).
-            NhtDep::Mup(..) => Vec::new(),
+            NhtDep::Mup(..) | NhtDep::MupEndpoint(..) => Vec::new(),
         };
 
         let mut top = super::peer::BgpTop {
@@ -4308,6 +4361,34 @@ impl Bgp {
                         Some(winner),
                         None,
                         &transport,
+                        &[],
+                    );
+                }
+            }
+            // MUP endpoint reachability flip: (re)dispatch the ST1 with its GTP
+            // endpoint's resolved transport (empty when unreachable), so the
+            // `dataplane gtp` downlink encap installs or is withdrawn. The
+            // endpoint rides `endpoint_transport`; segment transport stays empty.
+            NhtDep::MupEndpoint(rd, prefix) => {
+                let selected = top.local_rib.select_best_path_mup(rd, prefix);
+                if let Some(winner) = selected.first() {
+                    let endpoint_transport = if reachable {
+                        self.nexthop_cache.transport_for(nh).to_vec()
+                    } else {
+                        Vec::new()
+                    };
+                    let dispatcher = super::vrf::VrfImportDispatcher {
+                        rib_known_vrfs: &self.rib_known_vrfs,
+                        vrf_registry: &self.vrf_registry,
+                    };
+                    super::vrf::dispatch_mup(
+                        &dispatcher,
+                        *rd,
+                        prefix,
+                        Some(winner),
+                        None,
+                        &[],
+                        &endpoint_transport,
                     );
                 }
             }

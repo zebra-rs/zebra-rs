@@ -564,6 +564,28 @@ impl FibHandle {
             cradle.gtp_pdr_del(dst, teid).await;
         }
     }
+    #[allow(clippy::too_many_arguments)]
+    pub async fn cradle_gtp_encap_add(
+        &self,
+        prefix: ipnet::Ipv4Net,
+        table_id: u32,
+        gtp_src: std::net::Ipv4Addr,
+        gtp_dst: std::net::Ipv4Addr,
+        teid: u32,
+        gw: Option<std::net::Ipv4Addr>,
+        oif: u32,
+    ) {
+        if let Some(cradle) = &self.cradle {
+            cradle
+                .gtp_encap_install(prefix, table_id, gtp_src, gtp_dst, teid, gw, oif)
+                .await;
+        }
+    }
+    pub async fn cradle_gtp_encap_del(&self, prefix: ipnet::Ipv4Net, table_id: u32) {
+        if let Some(cradle) = &self.cradle {
+            cradle.gtp_encap_del(prefix, table_id).await;
+        }
+    }
 
     /// Tee an EVPN VPWS cross-connect to cradle (RFC 8214 Type-1 with an
     /// SRv6 End.DX2 SID): bind AC `port` to the remote service SID, and —

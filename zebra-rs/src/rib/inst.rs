@@ -362,6 +362,23 @@ pub enum Message {
         ifname: String,
         local_sid: Option<std::net::Ipv6Addr>,
     },
+    /// MUP `dataplane gtp` downlink encap (`GTP4.E`): a GTP-U encap route teed
+    /// to cradle — traffic to `prefix` in VRF `table_id` is wrapped in outer
+    /// IPv4 + UDP(2152) + GTP-U(`teid`) toward `gtp_dst` (sourced from
+    /// `gtp_src`) over the resolved v4 underlay `gw`/`oif`. Cradle-only.
+    CradleGtpEncapAdd {
+        prefix: ipnet::Ipv4Net,
+        table_id: u32,
+        gtp_src: std::net::Ipv4Addr,
+        gtp_dst: std::net::Ipv4Addr,
+        teid: u32,
+        gw: Option<std::net::Ipv4Addr>,
+        oif: u32,
+    },
+    CradleGtpEncapDel {
+        prefix: ipnet::Ipv4Net,
+        table_id: u32,
+    },
     /// A MAC the cradle eBPF datapath learned on a local L2 port (via the
     /// `WatchFdb` stream). Re-emitted to EVPN subscribers as a synthesized
     /// `RibRx::FdbAdd` — the cradle analogue of a kernel bridge FDB learn —
@@ -3175,6 +3192,22 @@ impl Rib {
                 self.fib_handle
                     .cradle_xconnect_del(&ifname, local_sid)
                     .await;
+            }
+            Message::CradleGtpEncapAdd {
+                prefix,
+                table_id,
+                gtp_src,
+                gtp_dst,
+                teid,
+                gw,
+                oif,
+            } => {
+                self.fib_handle
+                    .cradle_gtp_encap_add(prefix, table_id, gtp_src, gtp_dst, teid, gw, oif)
+                    .await;
+            }
+            Message::CradleGtpEncapDel { prefix, table_id } => {
+                self.fib_handle.cradle_gtp_encap_del(prefix, table_id).await;
             }
             Message::MdbAdd {
                 vni,

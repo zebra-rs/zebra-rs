@@ -192,7 +192,33 @@ pub struct BgpVrf {
     /// `H.M.GTP4.D`): the set of (endpoint, TEID) tunnels teed to cradle. Diff
     /// base for `reconcile_mup_gtp`.
     pub mup_gtp_pdr_installed: std::collections::BTreeSet<(std::net::Ipv4Addr, u32)>,
+    /// Resolved v4 underlay transport for each selected ST1's GTP endpoint
+    /// (gNB), keyed by the ST1's `(rd, prefix)`. Supplied by the global NHT via
+    /// `MupUpdate.endpoint_transport` (register-then-gate on `st1.endpoint`) and
+    /// consumed by the `dataplane gtp` downlink reconcile to fill the cradle
+    /// GTP encap nexthop's underlay gateway/oif. Absent/empty ⇒ the endpoint
+    /// hasn't resolved, so no `GTP4.E` encap is installable for it.
+    pub mup_endpoint_transport: std::collections::BTreeMap<
+        (bgp_packet::RouteDistinguisher, bgp_packet::MupPrefix),
+        Vec<crate::rib::nht::ResolvedNexthop>,
+    >,
+    /// Installed GTP-U encap routes for `dataplane gtp` (the ST1 downlink /
+    /// `GTP4.E`): UE prefix → the encap key `(gtp_src, endpoint, TEID, gw,
+    /// oif)` teed to cradle. Diff base for the downlink reconcile — a changed
+    /// key re-installs, a vanished UE prefix withdraws.
+    pub mup_gtp_encap_installed: std::collections::BTreeMap<ipnet::Ipv4Net, MupGtpEncapKey>,
 }
+
+/// The cradle GTP-U encap install key for one downlink (`GTP4.E`) UE prefix:
+/// outer source, gNB endpoint, TEID, and the resolved v4 underlay
+/// `(gateway, oif)`. Re-installed only when this tuple changes.
+pub type MupGtpEncapKey = (
+    std::net::Ipv4Addr,
+    std::net::Ipv4Addr,
+    u32,
+    Option<std::net::Ipv4Addr>,
+    u32,
+);
 
 /// Sender side of the per-VRF inbound channel — handed back to
 /// the global task at spawn time so `despawn_bgp_vrf` can send
@@ -435,6 +461,7 @@ pub fn dispatch_mup(
     best: Option<&super::super::route::BgpRib>,
     origin_vrf: Option<&str>,
     transport: &[crate::rib::nht::ResolvedNexthop],
+    endpoint_transport: &[crate::rib::nht::ResolvedNexthop],
 ) {
     match best {
         Some(rib) => {
@@ -452,6 +479,7 @@ pub fn dispatch_mup(
                     prefix: prefix.clone(),
                     rib: rib.clone(),
                     transport: transport.to_vec(),
+                    endpoint_transport: endpoint_transport.to_vec(),
                 });
             }
         }
@@ -661,6 +689,8 @@ impl BgpVrf {
             mup_segment_transport: std::collections::BTreeMap::new(),
             mup_st2_dsd_installed: std::collections::BTreeMap::new(),
             mup_gtp_pdr_installed: std::collections::BTreeSet::new(),
+            mup_endpoint_transport: std::collections::BTreeMap::new(),
+            mup_gtp_encap_installed: std::collections::BTreeMap::new(),
         };
         (vrf, inbox_tx)
     }
@@ -864,15 +894,21 @@ impl BgpVrf {
         }
     }
 
+    /// Program the real GTP-U datapath for a `dataplane gtp` VRF via cradle:
+    /// the ST2 uplink decap (`H.M.GTP4.D`) and the ST1 downlink encap
+    /// (`GTP4.E`). Runs in place of the End.DT46 reconcilers when the VRF's
+    /// `dataplane` is `gtp`.
+    fn reconcile_mup_gtp(&mut self) {
+        self.reconcile_mup_gtp_uplink();
+        self.reconcile_mup_gtp_downlink();
+    }
+
     /// Install GTP-U decap PDRs for a `dataplane gtp` VRF — the ST2 uplink
     /// (`H.M.GTP4.D`). Each selected Type-2 ST route's `(endpoint, TEID)`
     /// becomes a cradle PDR: a G-PDU arriving on that tunnel is stripped and
     /// its inner packet forwarded in this VRF's table. Cradle-only (the kernel
-    /// has no GTP action), diff-gated against `mup_gtp_pdr_installed`. The
-    /// downlink `GTP4.E` encap (ST1 → the gNB) is a follow-up; only the uplink
-    /// decap is installed here. Runs in place of the End.DT46 reconcilers when
-    /// the VRF's `dataplane` is `gtp`.
-    fn reconcile_mup_gtp(&mut self) {
+    /// has no GTP action), diff-gated against `mup_gtp_pdr_installed`.
+    fn reconcile_mup_gtp_uplink(&mut self) {
         use std::net::{IpAddr, Ipv4Addr};
         let table_id = self.ctx.vrf_id();
         // Desired PDRs: each selected ST2 with a v4 endpoint + non-zero TEID.
@@ -912,6 +948,92 @@ impl BgpVrf {
                 teid: *teid,
                 table_id,
             });
+        }
+    }
+
+    /// Install GTP-U encap routes for a `dataplane gtp` VRF — the ST1 downlink
+    /// (`GTP4.E`). Each selected Type-1 ST route with a v4 UE prefix, a v4 GTP
+    /// endpoint (gNB), a non-zero TEID and a v4 source becomes a cradle GTP
+    /// encap route: traffic to the UE prefix in this VRF's table is wrapped in
+    /// outer IPv4 + UDP(2152) + GTP-U(TEID) toward the endpoint (sourced from
+    /// the ST1 source), forwarded over the endpoint's resolved v4 underlay
+    /// (`mup_endpoint_transport`, register-then-gate on the global NHT). An
+    /// unresolved endpoint or a missing source yields no install. Cradle-only,
+    /// diff-gated against `mup_gtp_encap_installed`. The ST1 endpoint is the
+    /// lookup key; the UE prefix is the FIB destination (draft §3.1.3 / §3.3.9)
+    /// — the same key/destination split as `reconcile_mup_st1_isd`, but a real
+    /// GTP tunnel instead of the End.DT46 stand-in.
+    fn reconcile_mup_gtp_downlink(&mut self) {
+        use std::net::IpAddr;
+        let table_id = self.ctx.vrf_id();
+        // Desired encaps: each selected ST1 (v4 UE prefix) whose GTP endpoint
+        // has resolved to a v4 underlay next-hop → the cradle encap key.
+        let mut desired: std::collections::BTreeMap<ipnet::Ipv4Net, MupGtpEncapKey> =
+            std::collections::BTreeMap::new();
+        for (rd, table) in self.local_rib.mup.iter() {
+            for (prefix, rib) in table.selected.iter() {
+                let bgp_packet::MupPrefix::T1st { prefix: ue } = prefix else {
+                    continue;
+                };
+                let ipnet::IpNet::V4(ue4) = ue else {
+                    continue;
+                };
+                let Some(st1) = &rib.mup_st1 else {
+                    continue;
+                };
+                let (IpAddr::V4(endpoint), Some(IpAddr::V4(src))) = (st1.endpoint, st1.source)
+                else {
+                    continue;
+                };
+                if st1.teid == 0 {
+                    continue;
+                }
+                // The gNB endpoint must have resolved to a v4 underlay egress
+                // (register-then-gate); take the first (primary) next-hop.
+                let Some(nh) = self
+                    .mup_endpoint_transport
+                    .get(&(*rd, prefix.clone()))
+                    .and_then(|t| t.first())
+                else {
+                    continue;
+                };
+                let gw = match nh.addr {
+                    IpAddr::V4(a) if !a.is_unspecified() => Some(a),
+                    _ => None,
+                };
+                desired.insert(*ue4, (src, endpoint, st1.teid, gw, nh.ifindex));
+            }
+        }
+        // Withdraw encaps no longer desired (or whose key changed).
+        let stale: Vec<ipnet::Ipv4Net> = self
+            .mup_gtp_encap_installed
+            .iter()
+            .filter(|(ue, key)| desired.get(*ue) != Some(*key))
+            .map(|(ue, _)| *ue)
+            .collect();
+        for ue in stale {
+            let _ = self.ctx.rib.send(crate::rib::Message::CradleGtpEncapDel {
+                prefix: ue,
+                table_id,
+            });
+            self.mup_gtp_encap_installed.remove(&ue);
+        }
+        // Install new / changed encaps.
+        for (ue, key) in &desired {
+            if self.mup_gtp_encap_installed.get(ue) == Some(key) {
+                continue;
+            }
+            let (gtp_src, gtp_dst, teid, gw, oif) = *key;
+            let _ = self.ctx.rib.send(crate::rib::Message::CradleGtpEncapAdd {
+                prefix: *ue,
+                table_id,
+                gtp_src,
+                gtp_dst,
+                teid,
+                gw,
+                oif,
+            });
+            self.mup_gtp_encap_installed.insert(*ue, *key);
         }
     }
 
@@ -1944,6 +2066,7 @@ impl BgpVrf {
                 prefix,
                 rib,
                 transport,
+                endpoint_transport,
             } => {
                 let rd = self.rd.unwrap_or(rd);
                 // A received segment route (DSD/ISD) carries the
@@ -1960,6 +2083,17 @@ impl BgpVrf {
                     } else {
                         self.mup_segment_transport
                             .insert((rd, prefix.clone()), transport);
+                    }
+                }
+                // A Type-1 ST carries the global-resolved v4 underlay transport
+                // for its GTP endpoint (gNB); stash it for the `dataplane gtp`
+                // downlink `GTP4.E` encap. Empty ⇒ the endpoint is unresolved.
+                if matches!(prefix, bgp_packet::MupPrefix::T1st { .. }) {
+                    if endpoint_transport.is_empty() {
+                        self.mup_endpoint_transport.remove(&(rd, prefix.clone()));
+                    } else {
+                        self.mup_endpoint_transport
+                            .insert((rd, prefix.clone()), endpoint_transport);
                     }
                 }
                 let _ = self
@@ -1983,6 +2117,7 @@ impl BgpVrf {
                 // empty RD never renders.
                 let rd = self.rd.unwrap_or(rd);
                 self.mup_segment_transport.remove(&(rd, prefix.clone()));
+                self.mup_endpoint_transport.remove(&(rd, prefix.clone()));
                 let empty = if let Some(table) = self.local_rib.mup.get_mut(&rd) {
                     table.cands.remove(&prefix);
                     table.selected.remove(&prefix);
@@ -2214,6 +2349,117 @@ mod tests {
         assert!(
             vrf.mup_gtp_pdr_installed.is_empty(),
             "the decap PDR is withdrawn when its ST2 is gone"
+        );
+    }
+
+    #[tokio::test]
+    async fn dataplane_gtp_reconciles_st1_to_encaps() {
+        use crate::bgp::route::{BgpRib, BgpRibType};
+        use crate::rib::nht::ResolvedNexthop;
+        use bgp_packet::{BgpAttr, MupPrefix, MupSt1Fields};
+        use std::net::{IpAddr, Ipv4Addr};
+
+        let (global_tx, _global_rx) = unbounded_channel::<BgpGlobalMsg>();
+        let ctx = test_ctx_for_vrf(43, "vrf-gtp-dl");
+        let (_rib_tx, rib_rx) = mpsc::unbounded_channel();
+        let (mut vrf, _inbox) = BgpVrf::new(
+            "vrf-gtp-dl".to_string(),
+            ctx,
+            Ipv4Addr::UNSPECIFIED,
+            65000,
+            /* label */ 16,
+            global_tx,
+            rib_rx,
+        );
+        vrf.dataplane = crate::bgp::vrf_config::MupDataplane::Gtp;
+
+        let attr = BgpAttr::new();
+        let mk_st1 = |teid: u32, endpoint: IpAddr, source: Option<IpAddr>| {
+            let mut rib = BgpRib::new(
+                1,
+                Ipv4Addr::UNSPECIFIED,
+                BgpRibType::EBGP,
+                0,
+                0,
+                &attr,
+                None,
+                None,
+                false,
+            );
+            rib.mup_st1 = Some(MupSt1Fields {
+                teid,
+                qfi: 5,
+                endpoint,
+                source,
+            });
+            rib
+        };
+        let rd: bgp_packet::RouteDistinguisher = "65000:1".parse().unwrap();
+        let gnb = IpAddr::V4(Ipv4Addr::new(10, 0, 12, 1));
+        let src = IpAddr::V4(Ipv4Addr::new(10, 0, 12, 2));
+        // A fully-specified ST1 whose gNB endpoint has resolved to a v4
+        // underlay egress (gateway 10.0.99.1, oif 7).
+        let ue_ok: ipnet::Ipv4Net = "10.60.1.0/24".parse().unwrap();
+        let p_ok = MupPrefix::T1st {
+            prefix: ipnet::IpNet::V4(ue_ok),
+        };
+        // An ST1 with no source → cannot build a GTP outer header → skipped.
+        let ue_nosrc: ipnet::Ipv4Net = "10.60.2.0/24".parse().unwrap();
+        let p_nosrc = MupPrefix::T1st {
+            prefix: ipnet::IpNet::V4(ue_nosrc),
+        };
+        // An ST1 whose endpoint hasn't resolved (no endpoint transport) →
+        // skipped.
+        let ue_unres: ipnet::Ipv4Net = "10.60.3.0/24".parse().unwrap();
+        let p_unres = MupPrefix::T1st {
+            prefix: ipnet::IpNet::V4(ue_unres),
+        };
+        {
+            let table = vrf.local_rib.mup.entry(rd).or_default();
+            table
+                .selected
+                .insert(p_ok.clone(), mk_st1(0x2222, gnb, Some(src)));
+            table
+                .selected
+                .insert(p_nosrc.clone(), mk_st1(0x3333, gnb, None));
+            table
+                .selected
+                .insert(p_unres.clone(), mk_st1(0x4444, gnb, Some(src)));
+        }
+        // Only the first ST1's endpoint is resolved.
+        vrf.mup_endpoint_transport.insert(
+            (rd, p_ok.clone()),
+            vec![ResolvedNexthop {
+                addr: IpAddr::V4(Ipv4Addr::new(10, 0, 99, 1)),
+                ifindex: 7,
+                labels: Vec::new(),
+            }],
+        );
+
+        vrf.reconcile_mup_gtp();
+        assert_eq!(
+            vrf.mup_gtp_encap_installed.get(&ue_ok),
+            Some(&(
+                Ipv4Addr::new(10, 0, 12, 2),       // gtp_src
+                Ipv4Addr::new(10, 0, 12, 1),       // gtp_dst (gNB endpoint)
+                0x2222,                            // teid
+                Some(Ipv4Addr::new(10, 0, 99, 1)), // resolved gateway
+                7,                                 // resolved oif
+            )),
+            "the resolved ST1 with a source installs a GTP4.E encap"
+        );
+        assert_eq!(
+            vrf.mup_gtp_encap_installed.len(),
+            1,
+            "only the source-carrying, endpoint-resolved ST1 installs an encap"
+        );
+
+        // The endpoint resolution goes away → the encap is withdrawn.
+        vrf.mup_endpoint_transport.remove(&(rd, p_ok.clone()));
+        vrf.reconcile_mup_gtp();
+        assert!(
+            vrf.mup_gtp_encap_installed.is_empty(),
+            "the GTP4.E encap is withdrawn when its endpoint stops resolving"
         );
     }
 
