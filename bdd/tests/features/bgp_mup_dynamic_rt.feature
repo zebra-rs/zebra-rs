@@ -61,7 +61,7 @@ Feature: BGP MUP export route-target applies dynamically to an originated ST rou
 
   Scenario: Originate an ST2 with no export RT, then apply the export RT dynamically
     Given the test topology exists
-    When I execute "pfcp-inject --target 192.168.0.1 --port 8805 --ue-ipv4 192.0.2.5 --teid 0x12345678 --endpoint 10.0.0.1 --network-instance core" in namespace "z1"
+    When I execute "pfcp-inject --target 192.168.0.1 --port 8805 --ue-ipv4 192.0.2.5 --teid 0x12345678 --endpoint 10.0.0.1 --core-endpoint 10.0.0.1 --core-teid 0x12345678 --network-instance core" in namespace "z1"
     # PFCP ingest learned the session and z1 originated the ST2 — carrying
     # the Direct segment id (mup:1:2) but NO route-target yet.
     Then show command "show bgp mup-c session" in namespace "z1" should eventually contain "192.0.2.5"

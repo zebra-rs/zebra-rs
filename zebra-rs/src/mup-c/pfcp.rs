@@ -274,9 +274,14 @@ impl MupC {
         };
         // N6-breakout fallback: a session with no core-side GTP tunnel (the
         // common case — the SMF programs only the access/gNB tunnel) has no
-        // Type-2 ST endpoint. Use the configured Core (N6) UPF address so an
-        // ST2 route can still be originated toward the anchor UPF.
+        // core-side endpoint/TEID, so an ST2 could not be originated. Use the
+        // configured Core (N6) `upf-address` + `upf-teid` so an ST2 can still
+        // be built toward the anchor UPF; a learned core F-TEID takes
+        // precedence over both.
         session.core_endpoint = session.core_endpoint.or(self.config.upf_address);
+        if session.core_teid == 0 {
+            session.core_teid = self.config.upf_teid.unwrap_or(0);
+        }
         self.sessions.insert(session.clone());
 
         let local_ip = self.local_ip();
@@ -998,11 +1003,13 @@ mod tests {
     }
 
     /// N6 breakout: a session with only an access/gNB tunnel (no core-side
-    /// F-TEID) gets its Type-2 ST endpoint from the configured `upf-address`.
+    /// F-TEID) gets its Type-2 ST endpoint AND TEID from the configured
+    /// `upf-address` / `upf-teid` (both are needed for an ST2).
     #[test]
     fn upf_address_fills_core_endpoint_for_n6_breakout() {
         let cfg = MupCConfig {
             upf_address: Some(IpAddr::V4(Ipv4Addr::new(10, 100, 0, 1))),
+            upf_teid: Some(0x0102_0304),
             ..Default::default()
         };
         let (mut mupc, _bgp_rx) = MupC::new_for_test(cfg);
@@ -1019,7 +1026,11 @@ mod tests {
             Some(IpAddr::V4(Ipv4Addr::new(10, 100, 0, 1))),
             "no core tunnel → ST2 endpoint from configured upf-address"
         );
-        // The gNB (access) side is unaffected.
+        assert_eq!(
+            session.core_teid, 0x0102_0304,
+            "no core F-TEID → ST2 TEID from configured upf-teid"
+        );
+        // The gNB (access) side is unaffected (and is NOT copied to the core).
         assert_eq!(
             session.endpoint,
             Some(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1)))

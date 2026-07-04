@@ -8154,21 +8154,25 @@ pub(super) fn build_mup_st_route(
         // Length (§3.1.4.1) spans the address *and* the trailing 32-bit GTP
         // TEID, so it is 64 (IPv4) / 160 (IPv6).
         MupSrv6Direction::Decapsulation => {
-            let endpoint = session.core_endpoint.or(session.endpoint)?;
-            let teid = if session.core_teid != 0 {
-                session.core_teid
-            } else {
-                session.teid
-            };
-            // draft §3.1.4.1: a TEID of 0 is invalid / malformed. A session
-            // with no usable core (or fallback access) TEID must not originate
-            // an ST2 — a `teid=0` route would be malformed and, because the
-            // TEID is part of the ST2 route key, several such sessions would
-            // collapse onto the single `(endpoint, teid=0)` key.
-            if teid == 0 {
+            // ST2 is the core / uplink decapsulation route: it must carry the
+            // *core* GTP tunnel — endpoint + TEID from a `Dest=Core` FAR Outer
+            // Header Creation (an N9 tunnel) or the configured `upf-address` /
+            // `upf-teid`. It must NOT borrow the access (gNB) tunnel: that is
+            // the wrong direction, and `session.teid` (the gNB *downlink*
+            // F-TEID) is 0 whenever the access tunnel isn't currently
+            // programmed. So a session with no core endpoint, or a core TEID
+            // of 0 (invalid per draft §3.1.4.1), originates no ST2.
+            let endpoint = session.core_endpoint?;
+            if session.core_teid == 0 {
                 return None;
             }
-            (MupPrefix::T2st { endpoint, teid }, None)
+            (
+                MupPrefix::T2st {
+                    endpoint,
+                    teid: session.core_teid,
+                },
+                None,
+            )
         }
     };
     let mut attr = BgpAttr::new();
@@ -18376,8 +18380,7 @@ mod tests {
         );
         assert_eq!(st1.teid, 0x1234);
 
-        // Type-2 (Decapsulation) uses the *core-side* endpoint/TEID when the
-        // session carries one — distinct from the Type-1 access endpoint.
+        // Type-2 (Decapsulation) carries the *core-side* endpoint/TEID only.
         let mut s2 = session(Some(v4), None);
         s2.core_endpoint = Some("10.9.0.1".parse().unwrap());
         s2.core_teid = 0x9999;
@@ -18385,27 +18388,31 @@ mod tests {
             super::build_mup_st_route(&s2, MupSrv6Direction::Decapsulation, None)
                 .unwrap()
                 .0,
-            MupPrefix::T2st { endpoint, teid, .. }
+            MupPrefix::T2st { endpoint, teid }
                 if endpoint == "10.9.0.1".parse::<std::net::IpAddr>().unwrap() && teid == 0x9999
         ));
 
-        // Falls back to the access endpoint/TEID when no core-side F-TEID.
-        assert!(matches!(
-            super::build_mup_st_route(&session(Some(v4), None), MupSrv6Direction::Decapsulation, None)
-                .unwrap()
-                .0,
-            MupPrefix::T2st { endpoint, teid, .. }
-                if endpoint == "10.0.0.1".parse::<std::net::IpAddr>().unwrap() && teid == 0x1234
-        ));
+        // No core-side tunnel → no ST2. The access (gNB) endpoint/TEID is never
+        // borrowed — `session(Some(v4), None)` has only an access tunnel.
+        assert!(
+            super::build_mup_st_route(
+                &session(Some(v4), None),
+                MupSrv6Direction::Decapsulation,
+                None
+            )
+            .is_none(),
+            "no ST2 for a session without a core tunnel"
+        );
 
-        // draft §3.1.4.1: a session with no usable TEID (both core and access
-        // TEID are 0) must NOT originate a malformed `teid=0` ST2.
+        // A core endpoint with TEID 0 is still no ST2 (draft §3.1.4.1) — and a
+        // core TEID is never faked from the access TEID.
         let mut s0 = session(Some(v4), None);
-        s0.teid = 0;
+        s0.core_endpoint = Some("10.9.0.1".parse().unwrap());
         s0.core_teid = 0;
+        s0.teid = 0x1234; // access TEID present but must NOT be used
         assert!(
             super::build_mup_st_route(&s0, MupSrv6Direction::Decapsulation, None).is_none(),
-            "no ST2 for a session with TEID 0 (malformed per draft)"
+            "no ST2 when the core TEID is 0, even with an access TEID"
         );
     }
 

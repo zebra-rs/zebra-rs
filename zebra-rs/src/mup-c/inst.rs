@@ -33,6 +33,10 @@ pub struct MupCConfig {
     /// learned session carries no core-side GTP tunnel (the N6-breakout case).
     /// A session that learns a core F-TEID over PFCP keeps that in preference.
     pub upf_address: Option<IpAddr>,
+    /// Core (N6) GTP-U TEID paired with [`Self::upf_address`], used as the ST2
+    /// route TEID when the session carries no core-side F-TEID. An ST2 needs a
+    /// (non-zero) core TEID; without a learned or configured one, no ST2.
+    pub upf_teid: Option<u32>,
     /// Our PFCP Node ID, used in responses. Falls back to the bind
     /// address / `controller_address` when unset.
     pub node_id: Option<IpAddr>,
