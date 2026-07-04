@@ -728,7 +728,7 @@ fn mup_routes_json(
             table.selected.iter().map(move |(prefix, rib)| {
                 let ecom = show_mup_ecom(&rib.attr);
                 MupRouteJson {
-                    prefix: mup_prefix_display(rd, prefix),
+                    prefix: mup_prefix_display(rd, prefix, rib.mup_st1.as_ref()),
                     attrs: common_route_attrs(rib),
                     extended_communities: (!ecom.is_empty()).then_some(ecom),
                 }
@@ -4064,21 +4064,33 @@ fn show_mup_ecom(attr: &BgpAttr) -> String {
 /// Render a `MupPrefix` (plus its outer-map RD) as the bracketed
 /// `[TYPE][rd][fields]` form used by `show bgp mup`, following the MUP NLRI
 /// layout (draft-ietf-bess-mup-safi).
-fn mup_prefix_display(rd: &RouteDistinguisher, prefix: &MupPrefix) -> String {
+fn mup_prefix_display(
+    rd: &RouteDistinguisher,
+    prefix: &MupPrefix,
+    st1: Option<&MupSt1Fields>,
+) -> String {
     match prefix {
         MupPrefix::Dsd { address } => format!("[DSD][{rd}][{address}]"),
         MupPrefix::Isd { prefix } => format!("[ISD][{rd}][{prefix}]"),
-        MupPrefix::T1st {
-            prefix,
-            teid,
-            qfi,
-            endpoint,
-            source,
-        } => match source {
-            Some(src) => {
+        // An ST1's TEID/QFI/endpoint/source are off the route key (§3.2.1) and
+        // ride on the path, so render them from `st1` (the selected `BgpRib`'s
+        // `mup_st1`). A key-only render (no path) shows just the UE prefix.
+        MupPrefix::T1st { prefix } => match st1 {
+            Some(MupSt1Fields {
+                teid,
+                qfi,
+                endpoint,
+                source: Some(src),
+            }) => {
                 format!("[ST1][{rd}][ue={prefix}][teid={teid}][qfi={qfi}][ep={endpoint}:src={src}]")
             }
-            None => format!("[ST1][{rd}][ue={prefix}][teid={teid}][qfi={qfi}][ep={endpoint}]"),
+            Some(MupSt1Fields {
+                teid,
+                qfi,
+                endpoint,
+                source: None,
+            }) => format!("[ST1][{rd}][ue={prefix}][teid={teid}][qfi={qfi}][ep={endpoint}]"),
+            None => format!("[ST1][{rd}][ue={prefix}]"),
         },
         MupPrefix::T2st {
             endpoint,
@@ -4378,7 +4390,11 @@ fn render_mup_table(
     for (rd, table) in tables.iter() {
         for (prefix, rib) in table.selected.iter() {
             let best = if rib.best_path { ">" } else { " " };
-            writeln!(buf, " *{best} {}", mup_prefix_display(rd, prefix))?;
+            writeln!(
+                buf,
+                " *{best} {}",
+                mup_prefix_display(rd, prefix, rib.mup_st1.as_ref())
+            )?;
 
             let nexthop = show_nexthop(&rib.attr);
             writeln!(buf, "       next-hop {nexthop}  weight {}", rib.weight)?;
@@ -4418,7 +4434,7 @@ fn render_mup_table(
                     fmt_direct_segment_id(&seg),
                     srv6_behavior_name(*behavior),
                     sid,
-                    mup_prefix_display(dsd_rd, dsd)
+                    mup_prefix_display(dsd_rd, dsd, None)
                 )?;
             }
 
@@ -4432,24 +4448,21 @@ fn render_mup_table(
             // the gNB's segment. Matching by the endpoint also handles the
             // mixed-AFI case (an IPv6 UE route may carry an IPv4 gNB endpoint).
             if resolve_segments
-                && let MupPrefix::T1st {
-                    prefix: ue,
-                    endpoint,
-                    ..
-                } = prefix
+                && let MupPrefix::T1st { prefix: ue } = prefix
+                && let Some(st1) = &rib.mup_st1
                 && let Some((isd_rd, isd, _, sid, behavior)) = isd_index
                     .iter()
-                    .filter(|(_, _, isd_prefix, _, _)| isd_prefix.contains(endpoint))
+                    .filter(|(_, _, isd_prefix, _, _)| isd_prefix.contains(&st1.endpoint))
                     .max_by_key(|(_, _, isd_prefix, _, _)| isd_prefix.prefix_len())
             {
                 writeln!(
                     buf,
                     "       resolved {} (endpoint {}) -> {} {} (via {})",
                     ue,
-                    endpoint,
+                    st1.endpoint,
                     srv6_behavior_name(*behavior),
                     sid,
-                    mup_prefix_display(isd_rd, isd)
+                    mup_prefix_display(isd_rd, isd, None)
                 )?;
             }
         }
@@ -5725,8 +5738,12 @@ mod detail_tests {
         // RD-major, like `show bgp evpn`; that is covered by the resolve test.)
         let rd = "65000:1";
         {
-            let mut insert = |route: &MupRoute, rib| {
+            let mut insert = |route: &MupRoute, mut rib: BgpRib| {
                 let (rd, prefix) = MupPrefix::from_route(route);
+                // Carry an ST1's off-key fields on the path, as the live
+                // receive path (`route_mup_update`) does, so the render shows
+                // the TEID/QFI/endpoint.
+                rib.mup_st1 = route.st1_fields();
                 let _ = tables.entry(rd).or_default().update(prefix, rib);
             };
             insert(
@@ -5929,8 +5946,8 @@ mod detail_tests {
 
         // An ST1 whose gNB endpoint (10.0.0.9) falls inside the ISD prefix —
         // the UE (10.60.1.5/32) is a different network and is not the key.
-        let st1_in = mup_rib("fc00::9".parse::<IpAddr>().unwrap(), 32768, &[]);
-        let (rd_in, p_in) = MupPrefix::from_route(&MupRoute::T1st {
+        let mut st1_in = mup_rib("fc00::9".parse::<IpAddr>().unwrap(), 32768, &[]);
+        let route_in = MupRoute::T1st {
             id: 0,
             arch: MupArchitectureType::Gpp5g,
             rd: "65501:10".parse().unwrap(),
@@ -5939,13 +5956,16 @@ mod detail_tests {
             qfi: 9,
             endpoint: "10.0.0.9".parse().unwrap(),
             source: None,
-        });
+        };
+        // The gNB endpoint is off the ST1 key (§3.2.1); it rides on the path.
+        st1_in.mup_st1 = route_in.st1_fields();
+        let (rd_in, p_in) = MupPrefix::from_route(&route_in);
         let _ = tables.entry(rd_in).or_default().update(p_in, st1_in);
 
         // An ST1 whose gNB endpoint (10.70.0.9) is outside the ISD prefix,
         // even though its UE happens to sit in a nearby network.
-        let st1_out = mup_rib("fc00::a".parse::<IpAddr>().unwrap(), 32768, &[]);
-        let (rd_out, p_out) = MupPrefix::from_route(&MupRoute::T1st {
+        let mut st1_out = mup_rib("fc00::a".parse::<IpAddr>().unwrap(), 32768, &[]);
+        let route_out = MupRoute::T1st {
             id: 0,
             arch: MupArchitectureType::Gpp5g,
             rd: "65501:10".parse().unwrap(),
@@ -5954,7 +5974,9 @@ mod detail_tests {
             qfi: 9,
             endpoint: "10.70.0.9".parse().unwrap(),
             source: None,
-        });
+        };
+        st1_out.mup_st1 = route_out.st1_fields();
+        let (rd_out, p_out) = MupPrefix::from_route(&route_out);
         let _ = tables.entry(rd_out).or_default().update(p_out, st1_out);
 
         // Not opted in: no resolution shown.

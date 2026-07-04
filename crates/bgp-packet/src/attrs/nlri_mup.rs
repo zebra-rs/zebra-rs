@@ -218,6 +218,29 @@ impl MupRoute {
         }
     }
 
+    /// The off-key ST1 (Type-1 Session-Transformed) NLRI fields
+    /// (TEID/QFI/endpoint/source), or `None` for every other route type.
+    /// draft-ietf-bess-mup-safi §3.2.1 keeps these out of the route key, so
+    /// they ride on the path; pair with [`MupPrefix::to_route_with`] to
+    /// rebuild the wire NLRI for re-advertisement.
+    pub fn st1_fields(&self) -> Option<MupSt1Fields> {
+        match self {
+            MupRoute::T1st {
+                teid,
+                qfi,
+                endpoint,
+                source,
+                ..
+            } => Some(MupSt1Fields {
+                teid: *teid,
+                qfi: *qfi,
+                endpoint: *endpoint,
+                source: *source,
+            }),
+            _ => None,
+        }
+    }
+
     /// Wire-encoded payload length (the value the Length byte carries
     /// on the wire — bytes *after* the length byte itself).
     pub fn body_len(&self) -> usize {
@@ -519,6 +542,18 @@ fn t2st_teid_size(endpoint_len: u8, addr_bits: u8) -> usize {
     nlri_psize(endpoint_len.saturating_sub(addr_bits)).min(4)
 }
 
+/// The unspecified host address (`0.0.0.0` / `::`) in the same family as
+/// `prefix`. Used as the ST1 endpoint placeholder when reconstructing a
+/// key-only [`MupPrefix::T1st`] for a withdraw — the endpoint is not part of
+/// the ST1 route key (draft §3.2.1), so its value is immaterial to the peer's
+/// key match.
+fn unspecified_host(prefix: &IpNet) -> IpAddr {
+    match prefix {
+        IpNet::V4(_) => IpAddr::V4(Ipv4Addr::UNSPECIFIED),
+        IpNet::V6(_) => IpAddr::V6(Ipv6Addr::UNSPECIFIED),
+    }
+}
+
 impl MupRoute {
     /// Emit one MUP NLRI (optional Path Identifier + architecture +
     /// route type + length + body) onto `buf`. Mirror of `parse`.
@@ -630,32 +665,54 @@ impl MupRoute {
     }
 }
 
+/// The Type-1 Session-Transformed (ST1) NLRI fields that
+/// draft-ietf-bess-mup-safi §3.2.1 excludes from the BGP route key: the GTP
+/// TEID, the QFI, the GTP endpoint (gNB) address and the optional source
+/// (UPF) address. Only the RD + Prefix Length + Prefix key an ST1, so these
+/// ride on the path (`BgpRib.mup_st1`) rather than the [`MupPrefix`] key —
+/// a re-advertised ST1 for the same UE prefix therefore *replaces* the prior
+/// session transform (new TEID/endpoint) instead of coexisting with it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct MupSt1Fields {
+    pub teid: u32,
+    pub qfi: u8,
+    pub endpoint: IpAddr,
+    pub source: Option<IpAddr>,
+}
+
 /// MUP NLRI key with the add-path Path Identifier, the constant
 /// architecture type, *and* the Route Distinguisher stripped off, used as
 /// the inner key of the per-RD MUP RIB tables.
 ///
 /// Like EVPN's `EvpnPrefix` (and VPN's `Ipv4Net`), the RD is **not** part
 /// of this key — it is the outer `BTreeMap<RouteDistinguisher, _>` key, so
-/// [`MupPrefix::from_route`] returns `(rd, key)`. Every other wire field
-/// except the add-path `id` (which lives on `BgpRib.remote_id`) is part of
-/// the key, so two routes that differ only in TEID/QFI/endpoint/source
-/// coexist, and replacement is by explicit withdraw. Variant declaration
-/// order (`Dsd, Isd, T1st, T2st`) drives the derived `Ord`, so a RIB walk
-/// lists routes grouped by type (DSD then ISD then ST1 then ST2).
+/// [`MupPrefix::from_route`] returns `(rd, key)`.
+///
+/// Only the fields the draft designates part of the prefix in the NLRI
+/// "for the purpose of BGP route key processing" are kept here:
+///   * ISD / ST1 (Type 1 / Type 3): the RD + Prefix Length + Prefix only
+///     (§3.1.1 / §3.2.1). An ST1's TEID / QFI / GTP endpoint / source are
+///     **excluded** from the key, so they ride on the path as a
+///     [`MupSt1Fields`] (`BgpRib.mup_st1`) — a re-advertised ST1 for the
+///     same UE prefix *replaces* the prior one rather than coexisting.
+///   * DSD (Type 2): the RD + Address (§3.1.2).
+///   * ST2 (Type 4): the RD + Endpoint Address + architecture-specific
+///     Endpoint Identifier (the TEID), so `endpoint`/`endpoint_len`/`teid`
+///     stay in the key (§3.2.2).
+///
+/// The add-path `id` lives on `BgpRib.remote_id`. Variant declaration order
+/// (`Dsd, Isd, T1st, T2st`) drives the derived `Ord`, so a RIB walk lists
+/// routes grouped by type (DSD then ISD then ST1 then ST2).
 #[derive(Debug, Clone, Eq, PartialEq, Ord, PartialOrd, Hash)]
 pub enum MupPrefix {
     /// Direct Segment Discovery Route key (draft-ietf-bess-mup-safi §3.1.2).
     Dsd { address: IpAddr },
     /// Interwork Segment Discovery Route key (§3.1.1).
     Isd { prefix: IpNet },
-    /// Type 1 Session Transformed Route (ST1) key (§3.2.1).
-    T1st {
-        prefix: IpNet,
-        teid: u32,
-        qfi: u8,
-        endpoint: IpAddr,
-        source: Option<IpAddr>,
-    },
+    /// Type 1 Session Transformed Route (ST1) key (§3.2.1). Only the UE
+    /// `prefix` (with the outer RD) keys an ST1; the TEID / QFI / endpoint /
+    /// source are off-key path data ([`MupSt1Fields`] on `BgpRib.mup_st1`).
+    T1st { prefix: IpNet },
     /// Type 2 Session Transformed Route (ST2) key (§3.2.2).
     T2st {
         endpoint: IpAddr,
@@ -688,24 +745,10 @@ impl MupPrefix {
         match route {
             MupRoute::Isd { rd, prefix, .. } => (*rd, MupPrefix::Isd { prefix: *prefix }),
             MupRoute::Dsd { rd, address, .. } => (*rd, MupPrefix::Dsd { address: *address }),
-            MupRoute::T1st {
-                rd,
-                prefix,
-                teid,
-                qfi,
-                endpoint,
-                source,
-                ..
-            } => (
-                *rd,
-                MupPrefix::T1st {
-                    prefix: *prefix,
-                    teid: *teid,
-                    qfi: *qfi,
-                    endpoint: *endpoint,
-                    source: *source,
-                },
-            ),
+            // §3.2.1: only the RD + Prefix Length + Prefix key an ST1. The
+            // TEID/QFI/endpoint/source are off-key path data, extracted
+            // separately via [`MupRoute::st1_fields`].
+            MupRoute::T1st { rd, prefix, .. } => (*rd, MupPrefix::T1st { prefix: *prefix }),
             MupRoute::T2st {
                 rd,
                 endpoint,
@@ -750,12 +793,28 @@ impl MupPrefix {
         if v6 { Afi::Ip6 } else { Afi::Ip }
     }
 
-    /// Reconstruct a wire `MupRoute` from the inner key and its RD (the
-    /// outer per-RD map key) for re-advertisement. The only other
-    /// synthesized values are the 3GPP-5G architecture type and a zero
-    /// add-path id. The RD is ignored for the `Unknown` variant (its
-    /// opaque body already carries the original bytes).
+    /// Reconstruct a wire `MupRoute` from the inner key and its RD (the outer
+    /// per-RD map key), with no off-key ST1 fields. Equivalent to
+    /// [`Self::to_route_with`] with `st1 = None`: for an ST1 key the resulting
+    /// TEID/QFI/endpoint/source are zero placeholders, which is valid for an
+    /// MP_UNREACH withdraw (the peer matches on the RD+Prefix key alone) but
+    /// **not** for advertisement — advertisement must overlay the selected
+    /// path's real [`MupSt1Fields`] via [`Self::to_route_with`].
     pub fn to_route(&self, rd: RouteDistinguisher) -> MupRoute {
+        self.to_route_with(rd, None)
+    }
+
+    /// Reconstruct a wire `MupRoute` from the key + its RD, overlaying an ST1
+    /// key with its off-key fields (`st1`). The 3GPP-5G architecture type and
+    /// a zero add-path id are synthesized; the RD is ignored for the
+    /// `Unknown` variant (its opaque body already carries the original bytes).
+    ///
+    /// `st1` is ignored for every non-ST1 variant (they carry no off-key
+    /// data). For a [`MupPrefix::T1st`] key, `Some(fields)` restores the real
+    /// TEID/QFI/endpoint/source for re-advertisement; `None` yields zero
+    /// placeholders (endpoint = the UE prefix's unspecified address) — only
+    /// safe for a key-matched withdraw, never for an advertised route.
+    pub fn to_route_with(&self, rd: RouteDistinguisher, st1: Option<&MupSt1Fields>) -> MupRoute {
         let arch = MupArchitectureType::Gpp5g;
         match self {
             MupPrefix::Isd { prefix } => MupRoute::Isd {
@@ -770,22 +829,22 @@ impl MupPrefix {
                 rd,
                 address: *address,
             },
-            MupPrefix::T1st {
-                prefix,
-                teid,
-                qfi,
-                endpoint,
-                source,
-            } => MupRoute::T1st {
-                id: 0,
-                arch,
-                rd,
-                prefix: *prefix,
-                teid: *teid,
-                qfi: *qfi,
-                endpoint: *endpoint,
-                source: *source,
-            },
+            MupPrefix::T1st { prefix } => {
+                let (teid, qfi, endpoint, source) = match st1 {
+                    Some(f) => (f.teid, f.qfi, f.endpoint, f.source),
+                    None => (0, 0, unspecified_host(prefix), None),
+                };
+                MupRoute::T1st {
+                    id: 0,
+                    arch,
+                    rd,
+                    prefix: *prefix,
+                    teid,
+                    qfi,
+                    endpoint,
+                    source,
+                }
+            }
             MupPrefix::T2st {
                 endpoint,
                 endpoint_len,
@@ -1526,6 +1585,81 @@ mod tests {
             prefix: "10.0.0.0/24".parse().unwrap(),
         };
         assert_eq!(MupPrefix::from_route(&a), MupPrefix::from_route(&b));
+    }
+
+    #[test]
+    fn st1_route_key_is_rd_and_prefix_only() {
+        // draft-ietf-bess-mup-safi §3.2.1: only the RD + Prefix Length +
+        // Prefix key an ST1. Two ST1 routes for the same UE prefix but
+        // different TEID / QFI / endpoint / source must therefore map to the
+        // SAME (rd, key) — a re-advertisement *replaces* rather than
+        // coexists. Their off-key fields differ, extracted via `st1_fields`.
+        let base = |teid, qfi, endpoint: &str, source: Option<&str>| MupRoute::T1st {
+            id: 0,
+            arch: MupArchitectureType::Gpp5g,
+            rd: sample_rd(),
+            prefix: "2001:db8::/64".parse().unwrap(),
+            teid,
+            qfi,
+            endpoint: endpoint.parse().unwrap(),
+            source: source.map(|s| s.parse().unwrap()),
+        };
+        let a = base(1, 1, "10.0.0.1", None);
+        let b = base(999, 5, "10.0.0.2", Some("198.51.100.7"));
+
+        // Same route key despite different off-key fields.
+        assert_eq!(MupPrefix::from_route(&a), MupPrefix::from_route(&b));
+        assert_eq!(
+            MupPrefix::from_route(&a).1,
+            MupPrefix::T1st {
+                prefix: "2001:db8::/64".parse().unwrap(),
+            }
+        );
+        // ...but the off-key fields are distinct and preserved.
+        assert_ne!(a.st1_fields(), b.st1_fields());
+        assert_eq!(
+            a.st1_fields(),
+            Some(MupSt1Fields {
+                teid: 1,
+                qfi: 1,
+                endpoint: "10.0.0.1".parse().unwrap(),
+                source: None,
+            })
+        );
+    }
+
+    #[test]
+    fn st1_to_route_with_restores_off_key_fields() {
+        // Advertisement fidelity: from a (rd, key) + the path's `MupSt1Fields`,
+        // `to_route_with` reconstructs the exact wire ST1 — endpoint/TEID/QFI/
+        // source all restored. This is how re-advertise rebuilds the NLRI.
+        let orig = MupRoute::T1st {
+            id: 0,
+            arch: MupArchitectureType::Gpp5g,
+            rd: sample_rd(),
+            prefix: "2001:db8::5/128".parse().unwrap(),
+            teid: 601,
+            qfi: 9,
+            endpoint: "10.0.0.9".parse().unwrap(),
+            source: Some("198.51.100.7".parse().unwrap()),
+        };
+        let (rd, key) = MupPrefix::from_route(&orig);
+        let st1 = orig.st1_fields();
+        assert_eq!(key.to_route_with(rd, st1.as_ref()), orig);
+
+        // Key-only reconstruction (a withdraw) drops the off-key fields to
+        // zero placeholders but preserves the RD+Prefix key the peer matches.
+        let withdraw = key.to_route(rd);
+        assert_eq!(MupPrefix::from_route(&withdraw), (rd, key));
+        assert_eq!(
+            withdraw.st1_fields(),
+            Some(MupSt1Fields {
+                teid: 0,
+                qfi: 0,
+                endpoint: "::".parse().unwrap(),
+                source: None,
+            })
+        );
     }
 
     #[test]

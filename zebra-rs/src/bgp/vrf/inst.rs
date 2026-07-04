@@ -713,21 +713,19 @@ impl BgpVrf {
         let mut desired: std::collections::BTreeMap<ipnet::IpNet, (Ipv6Addr, Transport)> =
             std::collections::BTreeMap::new();
         if !isd_index.is_empty() {
-            for (prefix, _rib) in self.local_rib.mup.values().flat_map(|t| t.selected.iter()) {
+            for (prefix, rib) in self.local_rib.mup.values().flat_map(|t| t.selected.iter()) {
                 // Resolve on the ST1 GTP endpoint (gNB) — the ISD advertises
                 // the gNB N3 network, so the endpoint is what falls inside it
                 // (draft §3.3.9; also handles a mixed-AFI IPv6-UE /
                 // IPv4-endpoint route) — but install the *UE prefix* as the
                 // FIB destination (§3.1.3): downlink traffic to the UE is
-                // steered toward the gNB's segment.
-                if let bgp_packet::MupPrefix::T1st {
-                    prefix: ue,
-                    endpoint,
-                    ..
-                } = prefix
+                // steered toward the gNB's segment. The endpoint is off the
+                // ST1 route key (§3.2.1), so read it from the path.
+                if let bgp_packet::MupPrefix::T1st { prefix: ue } = prefix
+                    && let Some(st1) = &rib.mup_st1
                     && let Some((_p, sid, transport)) = isd_index
                         .iter()
-                        .filter(|(p, _, _)| p.contains(endpoint))
+                        .filter(|(p, _, _)| p.contains(&st1.endpoint))
                         .max_by_key(|(p, _, _)| p.prefix_len())
                 {
                     desired.insert(*ue, (*sid, transport.clone()));
@@ -1127,6 +1125,7 @@ impl BgpVrf {
             smet_flags: 0,
             igmp_max_resp_time: 0,
             ingress_region: None,
+            mup_st1: None,
         };
 
         let (_, selected, _gen) = self.shard.update(None, prefix, rib);
@@ -1352,6 +1351,7 @@ impl BgpVrf {
             smet_flags: 0,
             igmp_max_resp_time: 0,
             ingress_region: None,
+            mup_st1: None,
         };
 
         let (_, selected, _gen) = self.shard.update_v6(prefix, rib);
@@ -1768,6 +1768,7 @@ impl BgpVrf {
             smet_flags: 0,
             igmp_max_resp_time: 0,
             ingress_region: None,
+            mup_st1: None,
         }
     }
 
@@ -1941,7 +1942,7 @@ impl BgpVrf {
                 ext_comm,
             } => {
                 self.withdraw_mup_originate(session.seid);
-                if let Some((prefix, attr)) =
+                if let Some((prefix, st1, attr)) =
                     super::super::route::build_mup_st_route(&session, direction, ext_comm)
                 {
                     self.mup_originated
@@ -1951,6 +1952,7 @@ impl BgpVrf {
                     let _ = self.global_tx.send(BgpGlobalMsg::MupExport {
                         vrf: self.name.clone(),
                         prefix,
+                        st1,
                         attr,
                     });
                 }
@@ -1986,6 +1988,8 @@ impl BgpVrf {
                     let _ = self.global_tx.send(BgpGlobalMsg::MupExport {
                         vrf: self.name.clone(),
                         prefix,
+                        // A DSD/ISD segment carries no off-key ST1 fields.
+                        st1: None,
                         attr,
                     });
                 }

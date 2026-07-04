@@ -1235,6 +1235,13 @@ pub struct BgpRib {
     /// advertise gate uses it to suppress per-PE IMET (Type-3) across region
     /// boundaries. `None` for originated/local rows and non-region peers.
     pub ingress_region: Option<[u8; 8]>,
+    /// MUP Type-1 Session-Transformed (ST1) off-key NLRI fields (TEID, QFI,
+    /// GTP endpoint, optional source). draft-ietf-bess-mup-safi §3.2.1 keys an
+    /// ST1 by RD+Prefix only, so these ride here on the path — exactly like
+    /// EVPN's `smet_flags`/`igmp_max_resp_time` — and the advertise/rebuild
+    /// helpers (`to_route_with`) and the SRv6 ST1→ISD FIB reconcile re-read
+    /// them from the selected path. `None` on every non-ST1 row.
+    pub mup_st1: Option<MupSt1Fields>,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -1334,6 +1341,7 @@ impl BgpRib {
             smet_flags: 0,
             igmp_max_resp_time: 0,
             ingress_region: None,
+            mup_st1: None,
         }
     }
 
@@ -7703,6 +7711,11 @@ pub fn route_mup_update(
         None, // nexthop (VpnNexthop) — not used by MUP at this layer
         stale,
     );
+    // §3.2.1: an ST1's TEID/QFI/endpoint/source are off the route key, so
+    // carry them on the path — the FIB reconcile, show and re-advertise all
+    // read them here rather than from the (RD+Prefix-only) key. `None` for
+    // every other MUP route type.
+    rib.mup_st1 = route.st1_fields();
 
     {
         let peer = peers.get_mut_by_idx(ident).expect("peer must exist");
@@ -7920,7 +7933,10 @@ fn route_update_mup(
         return None;
     }
 
-    let route = prefix.to_route(rd);
+    // Overlay the selected path's off-key ST1 fields (TEID/QFI/endpoint/
+    // source) onto the RD+Prefix key so the advertised NLRI carries the real
+    // session transform; ignored for non-ST1 keys (§3.2.1).
+    let route = prefix.to_route_with(rd, rib.mup_st1.as_ref());
     let mut attrs = (*rib.attr).clone();
     ebgp_egress_aspath(&peer.egress_as(), &mut attrs);
 
@@ -8081,20 +8097,25 @@ pub(super) fn build_mup_st_route(
     session: &crate::mup_c::session::MupSession,
     direction: super::vrf_config::MupSrv6Direction,
     ext_comm: Option<RouteDistinguisher>,
-) -> Option<(MupPrefix, BgpAttr)> {
+) -> Option<(MupPrefix, Option<MupSt1Fields>, BgpAttr)> {
     use super::vrf_config::MupSrv6Direction;
-    let prefix = match direction {
+    // ST1 carries off-key fields (§3.2.1); an ST2 key is self-contained, so
+    // `st1` stays `None` for it.
+    let (prefix, st1): (MupPrefix, Option<MupSt1Fields>) = match direction {
         // Encapsulation (N6 / downlink): Type-1 ST carries the UE prefix +
         // access tunnel. The endpoint (gNB) family may differ from the UE
-        // prefix family (mixed-AFI 5G).
+        // prefix family (mixed-AFI 5G). Only the UE prefix keys the route; the
+        // TEID/QFI/endpoint ride on the path.
         MupSrv6Direction::Encapsulation => match (mup_ue_prefix(session), session.endpoint) {
-            (Some(prefix), Some(endpoint)) => MupPrefix::T1st {
-                prefix,
-                teid: session.teid,
-                qfi: session.qfi.unwrap_or(0),
-                endpoint,
-                source: None,
-            },
+            (Some(prefix), Some(endpoint)) => (
+                MupPrefix::T1st { prefix },
+                Some(MupSt1Fields {
+                    teid: session.teid,
+                    qfi: session.qfi.unwrap_or(0),
+                    endpoint,
+                    source: None,
+                }),
+            ),
             _ => return None,
         },
         // Decapsulation (N3 / uplink): Type-2 ST carries the *core-side*
@@ -8104,15 +8125,18 @@ pub(super) fn build_mup_st_route(
         // Length (§3.1.4.1) spans the address *and* the trailing 32-bit GTP
         // TEID, so it is 64 (IPv4) / 160 (IPv6).
         MupSrv6Direction::Decapsulation => match session.core_endpoint.or(session.endpoint) {
-            Some(endpoint) => MupPrefix::T2st {
-                endpoint,
-                endpoint_len: if endpoint.is_ipv4() { 64 } else { 160 },
-                teid: if session.core_teid != 0 {
-                    session.core_teid
-                } else {
-                    session.teid
+            Some(endpoint) => (
+                MupPrefix::T2st {
+                    endpoint,
+                    endpoint_len: if endpoint.is_ipv4() { 64 } else { 160 },
+                    teid: if session.core_teid != 0 {
+                        session.core_teid
+                    } else {
+                        session.teid
+                    },
                 },
-            },
+                None,
+            ),
             None => return None,
         },
     };
@@ -8125,7 +8149,7 @@ pub(super) fn build_mup_st_route(
     {
         attr_add_ecom(&mut attr, mup_direct_segment_ecom(&seg));
     }
-    Some((prefix, attr))
+    Some((prefix, st1, attr))
 }
 
 /// Replay every selected MUP route from the Loc-RIB to a peer that just
@@ -12999,7 +13023,13 @@ impl Bgp {
     /// `Originated` and runs best-path → advertise + mirror (the mirror feeds
     /// the route back to the originating VRF, so its `show bgp vrf <name> mup`
     /// reflects the fully-stamped route). No-op when the VRF has no RD.
-    pub fn mup_export(&mut self, vrf: String, prefix: MupPrefix, attr: BgpAttr) {
+    pub fn mup_export(
+        &mut self,
+        vrf: String,
+        prefix: MupPrefix,
+        st1: Option<MupSt1Fields>,
+        attr: BgpAttr,
+    ) {
         let Some(rd) = self.vrfs.get(&vrf).and_then(|c| c.rd) else {
             return;
         };
@@ -13059,6 +13089,10 @@ impl Bgp {
             None,
             false,
         );
+        // Carry the ST1 off-key fields on the originated path (§3.2.1) so the
+        // mirror-back to the VRF, the re-advertise and the FIB reconcile see
+        // the real TEID/QFI/endpoint. `None` for DSD/ISD/ST2 exports.
+        rib.mup_st1 = st1;
         rib.attr = self.attr_store.intern(attr);
         let _ = self.local_rib.update_mup(rd, prefix.clone(), rib);
         let selected = self.local_rib.select_best_path_mup(&rd, &prefix);
@@ -18269,7 +18303,7 @@ mod tests {
         // next-hop are stamped later at the global export boundary
         // (`Bgp::mup_export`), so the bare attr here has no next-hop / RT and
         // no Prefix-SID (the receiving PE derives the SID from its ISD/DSD).
-        let (prefix, attr) = super::build_mup_st_route(
+        let (prefix, _st1, attr) = super::build_mup_st_route(
             &session(Some(v4), None),
             MupSrv6Direction::Encapsulation,
             None,
@@ -18286,14 +18320,20 @@ mod tests {
             "no Prefix-SID on a controller ST"
         );
 
-        // Type-1 (access) uses the access endpoint/TEID.
-        assert!(matches!(
-            super::build_mup_st_route(&session(Some(v4), None), MupSrv6Direction::Encapsulation, None)
-                .unwrap()
-                .0,
-            MupPrefix::T1st { endpoint, teid, .. }
-                if endpoint == "10.0.0.1".parse::<std::net::IpAddr>().unwrap() && teid == 0x1234
-        ));
+        // Type-1 (access) carries the access endpoint/TEID on the ST1 *path*
+        // fields, which are off the route key (draft §3.2.1).
+        let (_prefix, st1, _attr) = super::build_mup_st_route(
+            &session(Some(v4), None),
+            MupSrv6Direction::Encapsulation,
+            None,
+        )
+        .unwrap();
+        let st1 = st1.expect("ST1 carries off-key fields");
+        assert_eq!(
+            st1.endpoint,
+            "10.0.0.1".parse::<std::net::IpAddr>().unwrap()
+        );
+        assert_eq!(st1.teid, 0x1234);
 
         // Type-2 (Decapsulation) uses the *core-side* endpoint/TEID when the
         // session carries one — distinct from the Type-1 access endpoint.

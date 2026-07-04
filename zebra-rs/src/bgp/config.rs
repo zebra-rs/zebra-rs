@@ -8090,14 +8090,14 @@ mod mup_dual_origination_tests {
     /// boundary, so the bare attr here carries only the route-specific ecom.
     #[test]
     fn st1_builds_t1st_st2_builds_t2st_with_ext_comm() {
-        let (p1, attr1) =
+        let (p1, _st1, attr1) =
             build_mup_st_route(&session("internet"), MupSrv6Direction::Encapsulation, None)
                 .unwrap();
         assert!(matches!(p1, MupPrefix::T1st { .. }), "st1 → Type-1 ST");
         assert!(attr1.ecom.is_none(), "st1 carries no ext-comm");
 
         let seg = RouteDistinguisher::from_str("100:1").unwrap();
-        let (p2, attr2) = build_mup_st_route(
+        let (p2, _st1, attr2) = build_mup_st_route(
             &session("internet"),
             MupSrv6Direction::Decapsulation,
             Some(seg),
