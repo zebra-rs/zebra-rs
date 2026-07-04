@@ -37,7 +37,7 @@ neighbour is then a single per-neighbour / per-interface flag:
 router ospf {
   area 0 {
     interface eth0 {
-      bfd { enable true; }
+      bfd { enabled true; }
     }
   }
 }

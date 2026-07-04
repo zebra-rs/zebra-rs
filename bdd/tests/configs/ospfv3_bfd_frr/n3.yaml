@@ -19,14 +19,14 @@ router:
     - area-id: 0.0.0.0
       interface:
       - if-name: lo
-        enable: true
+        enabled: true
         prefix-sid:
           index: 400
       - if-name: n3-s
-        enable: true
+        enabled: true
         network-type: point-to-point
         cost: 1000
       - if-name: n3-r1
-        enable: true
+        enabled: true
         network-type: point-to-point
         cost: 1000

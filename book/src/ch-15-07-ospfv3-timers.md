@@ -8,7 +8,7 @@ versions share the OSPF core's timer constants).
 router ospfv3 {
   area 0 {
     interface enp0s6 {
-      enable true;
+      enabled true;
       hello-interval 5;
       dead-interval 20;
     }

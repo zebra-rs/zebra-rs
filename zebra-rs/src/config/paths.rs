@@ -201,7 +201,7 @@ mod tests {
             cp("ospf", 0),
             cp("vrf", 2),
             cp("blue", 3),
-            cp("enable", 4),
+            cp("enabled", 4),
         ];
         assert!(vrf_config_split("isis", &paths).is_none());
         // ...but the OSPFv2 instance itself still splits it.

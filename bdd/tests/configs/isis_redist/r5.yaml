@@ -18,16 +18,16 @@ router:
     - if-name: lo
       circuit-type: level-1
       ipv4:
-        enable: true
+        enabled: true
     - if-name: i4
       circuit-type: level-1
       network-type: point-to-point
       metric: 10
       ipv4:
-        enable: true
+        enabled: true
     - if-name: i3
       circuit-type: level-1
       network-type: point-to-point
       metric: 10
       ipv4:
-        enable: true
+        enabled: true

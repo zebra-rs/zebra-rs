@@ -14,14 +14,14 @@ router:
     interface:
     - if-name: lo
       ipv4:
-        enable: true
+        enabled: true
     - if-name: st2-st1
       network-type: point-to-point
       ipv4:
-        enable: true
+        enabled: true
       te-metric:
         measurement:
-          enable: true
+          enabled: true
           interval: 100
           damping-period: 2
   ospf:
@@ -32,12 +32,12 @@ router:
     - area-id: 0.0.0.0
       interface:
       - if-name: lo
-        enable: true
+        enabled: true
       - if-name: st2-st1
-        enable: true
+        enabled: true
         network-type: point-to-point
         te-metric:
           measurement:
-            enable: true
+            enabled: true
             interval: 100
             damping-period: 2

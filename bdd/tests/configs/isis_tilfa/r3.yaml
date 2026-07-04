@@ -15,16 +15,16 @@ router:
     interface:
     - if-name: lo
       ipv4:
-        enable: true
+        enabled: true
         prefix-sid:
           index: 700
     - if-name: r3-r2
       ipv4:
-        enable: true
+        enabled: true
       metric: 1000
     - if-name: r3-d
       ipv4:
-        enable: true
+        enabled: true
       metric: 1
     is-type: level-2-only
     segment-routing: mpls

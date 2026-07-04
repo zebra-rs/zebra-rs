@@ -20,18 +20,18 @@ router:
     - area-id: 0.0.0.0
       interface:
       - if-name: lo
-        enable: true
+        enabled: true
         prefix-sid:
           index: 100
       - if-name: s-n1
-        enable: true
+        enabled: true
         network-type: point-to-point
         cost: 1
       - if-name: s-n2
-        enable: true
+        enabled: true
         network-type: point-to-point
         cost: 1
       - if-name: s-n3
-        enable: true
+        enabled: true
         network-type: point-to-point
         cost: 1000

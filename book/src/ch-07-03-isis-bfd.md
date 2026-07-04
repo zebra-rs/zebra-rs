@@ -18,7 +18,7 @@ BFD is a flat block under the IS-IS interface:
 ```
 router isis {
   interface eth0 {
-    bfd { enable true; }
+    bfd { enabled true; }
   }
 }
 ```
@@ -31,7 +31,7 @@ interface, overridden per interface (see
 
 | Leaf | Type | Default | Meaning |
 |---|---|---|---|
-| `enable` | boolean | _(off)_ | Attach (or detach) BFD for adjacencies on this interface. |
+| `enabled` | boolean | _(off)_ | Attach (or detach) BFD for adjacencies on this interface. |
 | `echo-mode` | `transmit` \| `receive` \| `both` | _(off)_ | Enable the [BFD Echo function](ch-10-00-bfd.md#echo-function) on this interface's single-hop adjacencies (IPv4 or IPv6). |
 | `echo-transmit-interval` | uint (ms) | `50` | Rate we originate Echo at (`transmit` / `both`). |
 | `echo-receive-interval` | uint (ms) | `50` | Advertised Required Min Echo RX (`receive` / `both`). |
@@ -61,7 +61,7 @@ zebra-rs therefore pins a neighbour whose BFD session is `Down` at the
 reports the session `Down` (alongside the adjacency teardown), and
 lifted the moment BFD reports it `Up` again — the next received IIH
 then promotes the neighbour normally. It applies per neighbour and
-level, and only while `bfd enable` is in effect for the interface.
+level, and only while `bfd enabled` is in effect for the interface.
 
 > To make this work, the BFD session deliberately stays subscribed
 > across the teardown — it keeps probing while the adjacency is down,
@@ -83,7 +83,7 @@ helper, whose XDP reflector handles 0x0800 and 0x86DD frames alike.
 router isis {
   interface eth0 {
     bfd {
-      enable true;
+      enabled true;
       echo-mode both;
       echo-transmit-interval 50;
       echo-receive-interval 50;
@@ -108,7 +108,7 @@ for the mechanism and guard-rails.
 router isis {
   interface eth0 {
     bfd {
-      enable true;
+      enabled true;
       detect-offload true;   // expiration detection in kernel/XDP
     }
   }
@@ -119,14 +119,14 @@ router isis {
 
 A `bfd {}` block directly under `router isis` supplies defaults for **every**
 interface; each leaf's effective value is the per-interface setting if present,
-else the instance default, else the hard default. `enable true` at the instance
+else the instance default, else the hard default. `enabled true` at the instance
 level **blanket-enables** BFD on all IS-IS interfaces; a per-interface
-`bfd { enable false }` opts one out.
+`bfd { enabled false }` opts one out.
 
 ```
 router isis {
   bfd {
-    enable true;          // BFD on every interface…
+    enabled true;          // BFD on every interface…
     echo-mode receive;    // …default Echo role
   }
   interface eth0 {
@@ -144,7 +144,7 @@ show bfd peers <neighbor-address>
 
 If a session stays `Down` with a remote discriminator of `0x0`, the
 local side is transmitting but nothing is coming back — confirm the
-neighbour also has `bfd enable` on its side of the link and that UDP
+neighbour also has `bfd enabled` on its side of the link and that UDP
 3784 is not filtered. See the
 [overview](ch-10-00-bfd.md#verifying-sessions) for the full command set.
 

@@ -19,7 +19,7 @@ The per-link timers (`hello-interval`, `dead-interval`,
 Notes:
 
 - **`enable`** is the participation switch: an interface runs OSPF if
-  and only if it appears under some area with `enable true`. There is
+  and only if it appears under some area with `enabled true`. There is
   no separate `network X area Y` statement.
 - **`network-type`** selects the interface's OSPF network type,
   mirroring the IS-IS knob of the same name. `broadcast` (the

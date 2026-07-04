@@ -25,22 +25,22 @@ router:
     interface:
     - if-name: lo
       ipv4:
-        enable: true
+        enabled: true
         prefix-sid:
           index: 200
     - if-name: n1-s
       ipv4:
-        enable: true
+        enabled: true
       metric: 1
     - if-name: n1-r1
       ipv4:
-        enable: true
+        enabled: true
       metric: 1
     - if-name: n1-r2
       ipv4:
-        enable: true
+        enabled: true
       metric: 1
     - if-name: n1-d
       ipv4:
-        enable: true
+        enabled: true
       metric: 1

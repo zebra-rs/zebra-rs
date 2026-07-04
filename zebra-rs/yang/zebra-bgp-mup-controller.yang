@@ -39,7 +39,7 @@ module zebra-bgp-mup-controller {
 
        router bgp {
          mup-c {
-           enable true;
+           enabled true;
            controller-address 2001:db8::1;
            upf-address 10.100.0.1;
            pfcp {
@@ -66,7 +66,7 @@ module zebra-bgp-mup-controller {
         "BGP MUP Controller (MUP-C). Terminates PFCP/N4 as a UP-node and
          originates MUP Session-Transformed routes from learned sessions.";
 
-      leaf enable {
+      leaf enabled {
         type boolean;
         default false;
         description

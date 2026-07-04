@@ -342,7 +342,7 @@ router isis {
   interface eth1 {
     te-metric {
       measurement {
-        enable true;
+        enabled true;
         interval 100;        # ms between probes
         damping-period 30;   # s minimum between IGP exports
       }
@@ -358,7 +358,7 @@ router ospf {
     interface eth1 {
       te-metric {
         measurement {
-          enable true;
+          enabled true;
           interval 100;
           damping-period 30;
         }

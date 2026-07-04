@@ -29,7 +29,7 @@ module zebra-ospf-bfd {
 
        router ospf {
          bfd {
-           enable true;          // blanket-enable all interfaces
+           enabled true;          // blanket-enable all interfaces
            echo-mode receive;    // default Echo role for the instance
          }
          area 0 {
@@ -43,8 +43,8 @@ module zebra-ospf-bfd {
 
      The effective value of each `bfd` leaf is the per-interface setting
      if present, else the instance-level default, else a hard default.
-     `enable true` at the instance level activates BFD on every interface
-     in the instance; a per-interface `enable false` opts one out. When
+     `enabled true` at the instance level activates BFD on every interface
+     in the instance; a per-interface `enabled false` opts one out. When
      enabled, OSPF attaches a single-hop BFD session to each neighbor on
      the interface once it reaches the configured `min-neighbor-state`; a
      session going Down tears the adjacency down (RFC 5882 §5). OSPF
@@ -90,7 +90,7 @@ module zebra-ospf-bfd {
   // default, then a hard default in code) — that is how a per-interface
   // value can override an instance default per leaf.
   grouping ospf-bfd-params {
-    leaf enable {
+    leaf enabled {
       ext:help "Activate BFD (omit to inherit the instance default)";
       type boolean;
       description
@@ -209,8 +209,8 @@ module zebra-ospf-bfd {
       ext:help "BFD defaults for this OSPF instance";
       description
         "Defaults applied to every interface's BFD sessions in this OSPF
-         instance. `enable true` here activates BFD on all of the
-         instance's interfaces (blanket); a per-interface `bfd { enable
+         instance. `enabled true` here activates BFD on all of the
+         instance's interfaces (blanket); a per-interface `bfd { enabled
          false }` opts one out. Every leaf is overridable per interface.";
       uses ospf-bfd-params;
     }

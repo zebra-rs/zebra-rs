@@ -21,12 +21,12 @@ router:
           md5: VLSECRET
       interface:
       - if-name: lo
-        enable: true
+        enabled: true
       - if-name: etha
-        enable: true
+        enabled: true
         network-type: point-to-point
     - area-id: 0.0.0.2
       interface:
       - if-name: ethc
-        enable: true
+        enabled: true
         network-type: point-to-point

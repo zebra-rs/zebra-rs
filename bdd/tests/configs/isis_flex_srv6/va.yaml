@@ -52,21 +52,21 @@ router:
     interface:
     - if-name: lo
       ipv4:
-        enable: true
+        enabled: true
       ipv6:
-        enable: true
+        enabled: true
     - if-name: va-ch
       ipv4:
-        enable: true
+        enabled: true
       ipv6:
-        enable: true
+        enabled: true
       affinity:
       - us
     - if-name: va-fr
       ipv4:
-        enable: true
+        enabled: true
       ipv6:
-        enable: true
+        enabled: true
       affinity:
       - transatlantic
     flex-algo:

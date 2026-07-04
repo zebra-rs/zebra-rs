@@ -1,7 +1,7 @@
 //! OSPFv3 YANG-path callback handlers.
 //!
 //! Sibling of v2's `config.rs`. Registers the
-//! `/router/ospfv3/area/interface/*` handlers — `enable`,
+//! `/router/ospfv3/area/interface/*` handlers — `enabled`,
 //! `priority`, `hello-interval`, `dead-interval`,
 //! `retransmit-interval`, `mtu-ignore`. The handler bodies mirror
 //! v2 almost line-for-line; the generic helpers in `config.rs`
@@ -34,7 +34,7 @@ const OSPFV3: &str = "/router/ospfv3";
 impl Ospf<Ospfv3> {
     /// Register the v3 YANG-path → handler dispatch table. Mirrors
     /// v2's `callback_build` shape; the table is keyed by full path
-    /// (e.g. `/router/ospfv3/area/interface/enable`) so `process_msg`
+    /// (e.g. `/router/ospfv3/area/interface/enabled`) so `process_msg`
     /// can look up handlers directly.
     pub fn callback_build(&mut self) {
         let prefix = OSPFV3;
@@ -186,9 +186,9 @@ impl Ospf<Ospfv3> {
                 "/redistribute/bgp/route-map",
                 config_ospfv3_redist_bgp_route_map,
             ),
-            ("/area/interface/enable", config_ospfv3_interface_enable),
+            ("/area/interface/enabled", config_ospfv3_interface_enable),
             (
-                "/area/interface/bfd/enable",
+                "/area/interface/bfd/enabled",
                 config_ospf_interface_bfd_enable,
             ),
             (
@@ -212,7 +212,7 @@ impl Ospf<Ospfv3> {
                 config_ospf_interface_bfd_detect_offload,
             ),
             // Instance-level `router ospfv3 { bfd { ... } }` defaults.
-            ("/bfd/enable", config_ospf_bfd_enable),
+            ("/bfd/enabled", config_ospf_bfd_enable),
             (
                 "/bfd/min-neighbor-state",
                 config_ospf_bfd_min_neighbor_state,

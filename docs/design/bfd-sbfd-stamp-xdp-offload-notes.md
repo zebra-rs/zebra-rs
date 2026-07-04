@@ -171,7 +171,7 @@ BFD control packets on UDP/3784**.
   start**, so BGP echo was effectively inert. `ConnectedSubnets` now keeps the
   recording ifindex (`ifindex_for`, v6 link-locals excluded), and single-hop
   sessions are keyed by the connected interface. If the address is learned
-  after `bfd enable`, the `RibRx::AddrAdd` hook's `bfd_reconcile_all` re-keys
+  after `bfd enabled`, the `RibRx::AddrAdd` hook's `bfd_reconcile_all` re-keys
   the session (unsubscribe → subscribe). With this, both BGP echo and BGP
   detect-offload actually work.
 - **Validation**: `scripts/veth-detect-test.sh` — with a 600 ms detection

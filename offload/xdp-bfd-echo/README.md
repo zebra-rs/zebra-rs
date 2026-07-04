@@ -190,9 +190,9 @@ router {
       interface enp0s6 {
         bfd {
           echo-mode receive;
-          enable true;
+          enabled true;
         }
-        enable true;
+        enabled true;
       }
     }
   }

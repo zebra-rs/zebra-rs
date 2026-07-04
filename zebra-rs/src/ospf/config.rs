@@ -101,9 +101,9 @@ impl Ospf {
             "/area/virtual-link/key-chain",
             config_ospf_area_virtual_link_key_chain,
         );
-        self.ospf_add("/area/interface/enable", config_ospf_interface_enable);
+        self.ospf_add("/area/interface/enabled", config_ospf_interface_enable);
         self.ospf_add(
-            "/area/interface/bfd/enable",
+            "/area/interface/bfd/enabled",
             config_ospf_interface_bfd_enable,
         );
         self.ospf_add(
@@ -200,7 +200,7 @@ impl Ospf {
             config_ospf_redist_table_route_map,
         );
         // Instance-level `router ospf { bfd { ... } }` defaults.
-        self.ospf_add("/bfd/enable", config_ospf_bfd_enable);
+        self.ospf_add("/bfd/enabled", config_ospf_bfd_enable);
         self.ospf_add(
             "/bfd/min-neighbor-state",
             config_ospf_bfd_min_neighbor_state,
@@ -247,7 +247,7 @@ impl Ospf {
         // `impl Ospf<Ospfv2>`; `config_v3.rs` registers nothing here,
         // so the v3 instance never enables measurement).
         self.ospf_add(
-            "/area/interface/te-metric/measurement/enable",
+            "/area/interface/te-metric/measurement/enabled",
             config_ospf_interface_te_measurement_enable,
         );
         self.ospf_add(
@@ -1589,7 +1589,7 @@ pub(super) fn config_ospf_interface_bfd_enable<V: OspfVersion>(
 
     let ifindex = {
         let link = ospf_link_get_mut_by_name(&mut ospf.links, &name)?;
-        // `None` ⇒ inherit the instance-level `bfd { enable }`; `Some(false)`
+        // `None` ⇒ inherit the instance-level `bfd { enabled }`; `Some(false)`
         // explicitly opts this interface out of a blanket instance enable.
         link.config.bfd.enable = op.is_set().then_some(enable);
         link.index
@@ -1729,7 +1729,7 @@ pub(super) fn config_ospf_interface_bfd_min_neighbor_state<V: OspfVersion>(
 // `V`; registered by both v2 (`config.rs`) and v3 (`config_v3.rs`).
 
 /// `router ospf bfd enable <bool>` — blanket-enable BFD on every interface in
-/// the instance (a per-interface `bfd { enable false }` opts one out).
+/// the instance (a per-interface `bfd { enabled false }` opts one out).
 pub(super) fn config_ospf_bfd_enable<V: OspfVersion>(
     ospf: &mut Ospf<V>,
     mut args: Args,

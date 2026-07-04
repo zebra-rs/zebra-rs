@@ -39,12 +39,12 @@ router:
     interface:
     - if-name: lo
       ipv6:
-        enable: true
+        enabled: true
     - if-name: z2-z1
       network-type: point-to-point
       metric: 1
       ipv6:
-        enable: true
+        enabled: true
   bgp:
     global:
       as: 65501
@@ -77,7 +77,7 @@ router:
             network-instance: core
             mup-ext-comm: "2:2"
     mup-c:
-      enable: true
+      enabled: true
       controller-address: 2001:db8::2
       pfcp:
         listen-address: 127.0.0.1

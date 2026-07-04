@@ -18,20 +18,20 @@ router:
     interface:
     - if-name: lo
       ipv4:
-        enable: true
+        enabled: true
         prefix-sid:
           index: 100
     - if-name: s-n1
       ipv4:
-        enable: true
+        enabled: true
       metric: 1
     - if-name: s-n2
       ipv4:
-        enable: true
+        enabled: true
       metric: 1
     - if-name: s-n3
       ipv4:
-        enable: true
+        enabled: true
       metric: 1000
     is-type: level-2-only
     segment-routing: mpls

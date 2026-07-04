@@ -25,7 +25,7 @@ BFD is a flat block under the neighbour. The minimal form is just
 router bgp {
   neighbor 10.0.0.2 {
     remote-as 65002;
-    bfd { enable true; }
+    bfd { enabled true; }
   }
 }
 ```
@@ -37,7 +37,7 @@ overridden per neighbour (see [Instance-level defaults](#instance-level-defaults
 
 | Leaf | Type | Default | Meaning |
 |---|---|---|---|
-| `enable` | boolean | _(off)_ | Attach (or, on `false` / delete, detach) a BFD session for this neighbour. |
+| `enabled` | boolean | _(off)_ | Attach (or, on `false` / delete, detach) a BFD session for this neighbour. |
 | `multihop` | boolean | *inferred* | Force the hop mode. Unset ⇒ inferred (see below). Per-neighbour only. |
 | `minimum-ttl` | 1–254 | 254 | Multi-hop only: lowest accepted received TTL (RFC 5883). Ignored single-hop. Per-neighbour only. |
 | `echo-mode` | `transmit` \| `receive` \| `both` | _(off)_ | [Echo function](ch-10-00-bfd.md#echo-function) role — **single-hop only** (see [Echo](#echo)). |
@@ -72,7 +72,7 @@ router bgp {
     remote-as 65002;
     update-source 10.0.0.1;
     bfd {
-      enable true;
+      enabled true;
       multihop true;       // eBGP-over-loopback; iBGP would infer this
       minimum-ttl 250;
     }
@@ -103,7 +103,7 @@ router bgp {
   neighbor 10.0.0.2 {        // directly-connected eBGP
     remote-as 65002;
     bfd {
-      enable true;
+      enabled true;
       echo-mode both;
       echo-transmit-interval 50;
       echo-receive-interval 50;
@@ -126,7 +126,7 @@ router bgp {
   neighbor 10.0.0.2 {        // directly-connected eBGP
     remote-as 65002;
     bfd {
-      enable true;
+      enabled true;
       detect-offload true;   // expiration detection in kernel/XDP
     }
   }
@@ -144,15 +144,15 @@ same keying also lets the Echo helper attach for BGP neighbours.
 
 A `bfd {}` block directly under `router bgp` supplies defaults for **every**
 neighbour; the effective value of each leaf is the per-neighbour setting if
-present, else the instance default, else the hard default. `enable true` at the
+present, else the instance default, else the hard default. `enabled true` at the
 instance level **blanket-enables** BFD on all neighbours; a per-neighbour
-`bfd { enable false }` opts one out. (`multihop` / `minimum-ttl` are
+`bfd { enabled false }` opts one out. (`multihop` / `minimum-ttl` are
 per-neighbour only — they are not inherited.)
 
 ```
 router bgp {
   bfd {
-    enable true;          // BFD on every neighbour…
+    enabled true;          // BFD on every neighbour…
     echo-mode receive;    // …default Echo role (single-hop neighbours)
   }
   neighbor 10.0.0.2 {

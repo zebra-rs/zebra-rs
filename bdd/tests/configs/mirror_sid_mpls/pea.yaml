@@ -48,19 +48,19 @@ router:
     interface:
     - if-name: lo
       ipv4:
-        enable: true
+        enabled: true
         prefix-sid:
           index: 3
     - if-name: pea-pe1
       network-type: point-to-point
       metric: 10
       ipv4:
-        enable: true
+        enabled: true
     - if-name: pea-peb
       network-type: point-to-point
       metric: 10
       ipv4:
-        enable: true
+        enabled: true
   bgp:
     global:
       as: 65000

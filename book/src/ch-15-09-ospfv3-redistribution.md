@@ -28,7 +28,7 @@ router ospfv3 {
   }
   area 0 {
     interface enp0s6 {
-      enable true;
+      enabled true;
     }
   }
 }

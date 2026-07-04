@@ -486,7 +486,7 @@ pub struct Isis {
 
     /// Handle into the BFD instance's client-request channel — used
     /// by [`Self::process_bfd_subscribe`] / [`Self::process_bfd_unsubscribe`]
-    /// when an adjacency on a `bfd { enable true }` interface
+    /// when an adjacency on a `bfd { enabled true }` interface
     /// reaches Up (or backslides). `None` means BFD has not (yet)
     /// been configured. Captured at spawn time from
     /// `ConfigManager::bfd_client_tx`; not refreshed if BFD respawns
@@ -2101,7 +2101,7 @@ impl Isis {
 
     /// Re-evaluate BFD for every Up adjacency on every interface — used by the
     /// `bfd {}` config callbacks (per-interface and instance-level), whose
-    /// changes (notably a blanket `enable`) affect adjacencies that are already
+    /// changes (notably a blanket `enabled`) affect adjacencies that are already
     /// Up. Subscribe / Unsubscribe is idempotent at the BFD instance (keyed by
     /// client+key), so we can re-drive without tracking per-adjacency state;
     /// a re-Subscribe also applies Echo-param changes to the live session
@@ -3636,14 +3636,14 @@ pub enum Message {
     /// which will compute seq = 1 for the freshly-unfrozen fragment
     /// (no existing entry in LSDB once the purge has been removed).
     LspSeqWrapClear(Level, u8),
-    /// An adjacency on a `bfd { enable true }` interface reached
+    /// An adjacency on a `bfd { enabled true }` interface reached
     /// Up. The IS-IS event loop forwards this as a
     /// `ClientReq::Subscribe` against the BFD instance — see
     /// [`Isis::process_bfd_subscribe`].
     BfdSubscribe(crate::bfd::session::SessionKey),
     /// An adjacency on a previously-subscribed interface backslid
     /// from Up (Hello timer expiry, peer signaling Down, etc.) or
-    /// the interface had `bfd { enable }` removed; release the BFD
+    /// the interface had `bfd { enabled }` removed; release the BFD
     /// session by sending `ClientReq::Unsubscribe`.
     BfdUnsubscribe(crate::bfd::session::SessionKey),
     /// Something that can flip this interface's STAMP measurement

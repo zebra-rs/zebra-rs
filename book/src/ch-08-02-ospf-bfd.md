@@ -20,7 +20,7 @@ applies to OSPFv2 (`router ospf`) and OSPFv3 (`router ospfv3`):
 router ospf {
   area 0 {
     interface eth0 {
-      bfd { enable true; }
+      bfd { enabled true; }
     }
   }
 }
@@ -36,7 +36,7 @@ The same `bfd {}` leaves can also be set once at the **instance level**
 
 | Leaf | Type | Default | Meaning |
 |---|---|---|---|
-| `enable` | boolean | `false` | Attach (or detach) BFD for neighbours on this interface. |
+| `enabled` | boolean | `false` | Attach (or detach) BFD for neighbours on this interface. |
 | `min-neighbor-state` | `two-way` \| `full` | `two-way` | Neighbour state at which the session starts / stops. |
 | `echo-mode` | `transmit` \| `receive` \| `both` | _(off)_ | Enable the [BFD Echo function](ch-10-00-bfd.md#echo-function) on this interface's sessions (IPv4 on OSPFv2, IPv6 on OSPFv3), choosing which half is active. |
 | `echo-transmit-interval` | uint (ms) | `50` | Rate we originate Echo at (`transmit` / `both`). |
@@ -68,7 +68,7 @@ router ospf {
   area 0 {
     interface eth0 {
       bfd {
-        enable true;
+        enabled true;
         min-neighbor-state full;   // Cisco-style; default is two-way
       }
     }
@@ -97,7 +97,7 @@ router ospf {
   area 0 {
     interface eth0 {
       bfd {
-        enable true;
+        enabled true;
         echo-mode both;
         echo-transmit-interval 50;   // ms; rate we send Echo (default 50)
         echo-receive-interval 50;    // ms; advertised RX floor (default 50)
@@ -132,7 +132,7 @@ router ospf {
   area 0 {
     interface eth0 {
       bfd {
-        enable true;
+        enabled true;
         detect-offload true;   // expiration detection in kernel/XDP
       }
     }
@@ -161,13 +161,13 @@ defaults for **every** interface in the instance. Each leaf is the same as the
 per-interface block, and the effective value for an interface is its own
 setting if present, otherwise the instance default, otherwise the hard default.
 
-`enable true` at the instance level **blanket-enables** BFD on all of the
-instance's interfaces; a per-interface `bfd { enable false }` opts one out.
+`enabled true` at the instance level **blanket-enables** BFD on all of the
+instance's interfaces; a per-interface `bfd { enabled false }` opts one out.
 
 ```
 router ospf {
   bfd {
-    enable true;            // BFD on every interface…
+    enabled true;            // BFD on every interface…
     echo-mode receive;      // …default Echo role: reflect only
     echo-receive-interval 50;
   }
@@ -176,7 +176,7 @@ router ospf {
       bfd { echo-mode both; }   // eth0 also originates; inherits enable + interval
     }
     interface eth1 {
-      bfd { enable false; }     // opt eth1 out of the blanket enable
+      bfd { enabled false; }     // opt eth1 out of the blanket enable
     }
   }
 }
@@ -200,6 +200,6 @@ show bfd peers <neighbor-address>
 ```
 
 If a session stays `Down` with a remote discriminator of `0x0`, confirm
-the neighbour also has `bfd enable` on its side and that UDP 3784 is not
+the neighbour also has `bfd enabled` on its side and that UDP 3784 is not
 filtered on the link. See the
 [overview](ch-10-00-bfd.md#verifying-sessions) for the full command set.

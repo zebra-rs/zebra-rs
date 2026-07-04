@@ -12,16 +12,16 @@ router ospf {
   router-id 10.0.0.1;
   area 0 {
     interface lo {
-      enable true;
+      enabled true;
     }
     interface enp0s6 {
-      enable true;
+      enabled true;
       network-type point-to-point;
     }
   }
   area 0.0.0.1 {
     interface enp0s7 {
-      enable true;
+      enabled true;
       network-type point-to-point;
     }
   }
@@ -72,7 +72,7 @@ router ospf {
       not-advertise true;
     }
     interface enp0s7 {
-      enable true;
+      enabled true;
     }
   }
 }
@@ -150,7 +150,7 @@ area**):
 router ospf {
   area 0.0.0.1 {
     virtual-link 10.0.0.2;         # remote ABR's router-id
-    interface enp0s7 { enable true; }
+    interface enp0s7 { enabled true; }
   }
 }
 ```

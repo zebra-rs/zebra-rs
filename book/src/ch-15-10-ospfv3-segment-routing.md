@@ -13,13 +13,13 @@ router ospfv3 {
   }
   area 0 {
     interface lo {
-      enable true;
+      enabled true;
       prefix-sid {
         index 100;
       }
     }
     interface enp0s6 {
-      enable true;
+      enabled true;
       network-type point-to-point;
     }
   }
@@ -82,7 +82,7 @@ router ospfv3 {
   }
   area 0 {
     interface lo {
-      enable true;
+      enabled true;
       flex-algo-prefix-sid 128 {
         index 1100;
       }

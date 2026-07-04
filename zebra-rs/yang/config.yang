@@ -828,7 +828,7 @@ module config {
               ext:dynamic "rib:interface";
               type string;
             }
-            leaf enable {
+            leaf enabled {
               type boolean;
             }
             leaf network-type {
@@ -983,7 +983,7 @@ module config {
                    probes are answered by the neighbor's implicit
                    Session-Reflector, so measurement must be enabled on
                    both ends of the link.";
-                leaf enable {
+                leaf enabled {
                   type boolean;
                   description "Activate measurement on this interface.";
                 }
@@ -1334,7 +1334,7 @@ module config {
           // `router static`'s per-VRF list) so the VRF need not yet
           // exist at the top-level `vrf` list when parsed. The exposed
           // subset tracks the default instance's per-interface knobs
-          // (enable / network-type / priority / timers) plus per-area
+          // (enabled / network-type / priority / timers) plus per-area
           // NSSA `redistribute connected`; more leaves land as the
           // per-VRF surface widens.
           key "name";
@@ -1420,7 +1420,7 @@ module config {
                 ext:dynamic "rib:interface";
                 type string;
               }
-              leaf enable {
+              leaf enabled {
                 type boolean;
               }
               leaf network-type {
@@ -1784,7 +1784,7 @@ module config {
               ext:dynamic "rib:interface";
               type string;
             }
-            leaf enable {
+            leaf enabled {
               type boolean;
             }
             leaf network-type {
@@ -2049,7 +2049,7 @@ module config {
         list vrf {
           // Per-VRF OSPFv3 instance. See `container ospf`'s `vrf`
           // list for the forwarding model. Exposes the per-interface
-          // knobs the v3 instance handles (enable / network-type /
+          // knobs the v3 instance handles (enabled / network-type /
           // priority / timers) plus `router-id` (the forwarded line
           // hits the same `/router/ospfv3/router-id` callback on the
           // child). `redistribute` stays omitted — the v3 instance
@@ -2099,7 +2099,7 @@ module config {
                 ext:dynamic "rib:interface";
                 type string;
               }
-              leaf enable {
+              leaf enabled {
                 type boolean;
               }
               leaf network-type {
@@ -2147,11 +2147,11 @@ module config {
           ext:help "BFD defaults for this IS-IS instance";
           description
             "Instance-level BFD defaults applied to every IS-IS
-             interface, overridable per interface. `enable true` here
+             interface, overridable per interface. `enabled true` here
              blanket-enables BFD on all of the instance's interfaces; a
-             per-interface `bfd { enable false }` opts one out. Each leaf
+             per-interface `bfd { enabled false }` opts one out. Each leaf
              is overridable per interface.";
-          leaf enable {
+          leaf enabled {
             ext:help "Blanket-enable BFD on all IS-IS interfaces";
             type boolean;
             description
@@ -2870,7 +2870,7 @@ module config {
           }
 
           container ipv4 {
-            leaf enable {
+            leaf enabled {
               type boolean;
             }
             container prefix-sid {
@@ -2911,7 +2911,7 @@ module config {
             }
           }
           container ipv6 {
-            leaf enable {
+            leaf enabled {
               type boolean;
             }
           }
@@ -2975,14 +2975,14 @@ module config {
           container bfd {
             ext:help "BFD attachment for this IS-IS interface";
             description
-              "Per-interface BFD attachment for IS-IS. When `enable`
+              "Per-interface BFD attachment for IS-IS. When `enabled`
                is true the IS-IS adjacency FSM subscribes a BFD
                session at the moment it reaches Up; a subsequent
                BFD Down event drives the adjacency back to Down
                per RFC 5882 §5. Storage-only in PR 6; PR 7 wires
                the runtime subscribe / teardown calls.";
 
-            leaf enable {
+            leaf enabled {
               type boolean;
               default false;
               description
@@ -3107,7 +3107,7 @@ module config {
                  are answered by the neighbor's implicit
                  Session-Reflector, so measurement must be enabled on
                  both ends of the link.";
-              leaf enable {
+              leaf enabled {
                 type boolean;
                 description "Activate measurement on this interface.";
               }
@@ -3366,12 +3366,12 @@ module config {
               type uint32;
             }
             container ipv4 {
-              leaf enable {
+              leaf enabled {
                 type boolean;
               }
             }
             container ipv6 {
-              leaf enable {
+              leaf enabled {
                 type boolean;
               }
             }

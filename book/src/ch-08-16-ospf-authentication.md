@@ -31,7 +31,7 @@ Both ends must carry the same password:
 router ospf {
   area 0 {
     interface enp0s6 {
-      enable true;
+      enabled true;
       authentication simple;
       authentication-key MYPASS;
     }
@@ -45,7 +45,7 @@ router ospf {
 router ospf {
   area 0 {
     interface enp0s6 {
-      enable true;
+      enabled true;
       authentication message-digest;
       message-digest-key 1 {
         md5 SECRET;
@@ -64,7 +64,7 @@ inside a `crypto-key` entry:
 router ospf {
   area 0 {
     interface enp0s6 {
-      enable true;
+      enabled true;
       authentication message-digest;
       crypto-key 1 {
         hmac-sha-256 SECRET;
@@ -110,7 +110,7 @@ key-chains {
 router ospf {
   area 0 {
     interface enp0s6 {
-      enable true;
+      enabled true;
       authentication message-digest;
       key-chain OSPF-KC;
     }

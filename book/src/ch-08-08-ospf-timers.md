@@ -8,7 +8,7 @@ area/interface entry. All defaults match RFC 2328 Appendix C
 router ospf {
   area 0.0.0.1 {
     interface enp0s7 {
-      enable true;
+      enabled true;
       hello-interval 5;
       dead-interval 20;
     }

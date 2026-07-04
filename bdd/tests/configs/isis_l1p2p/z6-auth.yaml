@@ -27,17 +27,17 @@ router:
     - if-name: lo
       circuit-type: level-1
       ipv4:
-        enable: true
+        enabled: true
       ipv6:
-        enable: true
+        enabled: true
     - if-name: i1
       circuit-type: level-1
       network-type: point-to-point
       metric: 40
       ipv4:
-        enable: true
+        enabled: true
       ipv6:
-        enable: true
+        enabled: true
       hello-authentication:
         password: zebra-isis-secret
         auth-type: hmac-sha-256
@@ -47,9 +47,9 @@ router:
       network-type: point-to-point
       metric: 20
       ipv4:
-        enable: true
+        enabled: true
       ipv6:
-        enable: true
+        enabled: true
       hello-authentication:
         password: zebra-isis-secret
         auth-type: hmac-sha-256

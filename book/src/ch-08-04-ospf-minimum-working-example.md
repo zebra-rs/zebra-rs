@@ -5,7 +5,7 @@ shaped around the standard `area { interface }` hierarchy: each
 participating interface is declared inside the area it belongs to.
 There is no separate `network X area Y` table — an interface
 participates in OSPF if and only if it appears under some area with
-`enable true`, and the area it belongs to is implicit from the parent
+`enabled true`, and the area it belongs to is implicit from the parent
 list entry.
 
 The smallest useful topology is two routers on a shared segment, both
@@ -17,7 +17,7 @@ router ospf {
   router-id 10.0.0.1;
   area 0 {
     interface enp0s6 {
-      enable true;
+      enabled true;
     }
   }
 }
@@ -29,7 +29,7 @@ router ospf {
   router-id 10.0.0.2;
   area 0 {
     interface enp0s6 {
-      enable true;
+      enabled true;
     }
   }
 }

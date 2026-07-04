@@ -19,10 +19,10 @@ router:
       network-type: point-to-point
       metric: 10
       ipv4:
-        enable: true
+        enabled: true
     - if-name: pe1
       circuit-type: level-2-only
       network-type: point-to-point
       metric: 10
       ipv4:
-        enable: true
+        enabled: true

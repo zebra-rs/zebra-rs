@@ -14,8 +14,8 @@ router:
     - if-name: lo
       circuit-type: level-2-only
       ipv4:
-        enable: true
+        enabled: true
     - if-name: vz2ns
       circuit-type: level-2-only
       ipv4:
-        enable: true
+        enabled: true

@@ -8,12 +8,12 @@ router ospfv3 {
   router-id 10.0.0.1;
   area 0 {
     interface enp0s6 {
-      enable true;
+      enabled true;
     }
   }
   area 0.0.0.1 {
     interface enp0s7 {
-      enable true;
+      enabled true;
     }
   }
 }

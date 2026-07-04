@@ -26,7 +26,7 @@ router isis {
   net 49.0000.0000.0000.0001.00;
   interface lo {
     ipv4 {
-      enable true;
+      enabled true;
       prefix-sid {
         index 100;
       }
@@ -35,7 +35,7 @@ router isis {
   interface eth2 {
     passive true;          // advertise eth2's subnet, run no Hellos on it
     ipv4 {
-      enable true;
+      enabled true;
     }
   }
 }
@@ -50,7 +50,7 @@ router:
     - if-name: eth2
       passive: true
       ipv4:
-        enable: true
+        enabled: true
 ```
 
 What `passive` changes, and what it does not:
@@ -59,7 +59,7 @@ What `passive` changes, and what it does not:
   ignored, so **no adjacency** ever forms over it.
 - The interface's prefixes **are still advertised** into the LSP. Prefix
   advertisement is gated on the interface being IS-IS-enabled
-  (`ipv4`/`ipv6 enable`) and participating at the circuit's level — not
+  (`ipv4`/`ipv6 enabled`) and participating at the circuit's level — not
   on any adjacency — so a passive circuit's subnet stays reachable from
   the rest of the network.
 - Any Prefix-SID configured on the interface is advertised as usual.
@@ -75,7 +75,7 @@ set**. Running the Hello protocol on a loopback would make the router
 peer with itself (the loopback echoes its own Hellos), which is never
 useful, so zebra-rs suppresses Hellos on every loopback and still
 advertises its prefixes. You therefore do **not** need to write `passive
-true` on `lo`; enabling IS-IS (`ipv4 { enable true; }`) is enough to get
+true` on `lo`; enabling IS-IS (`ipv4 { enabled true; }`) is enough to get
 the loopback advertised.
 
 ## The self-sourced-Hello guard

@@ -37,7 +37,7 @@ router:
       - area-id: 0.0.0.0
         interface:
         - if-name: ce1
-          enable: true
+          enabled: true
           network-type: point-to-point
   isis:
     net: 49.0000.0000.0000.0001.00
@@ -48,14 +48,14 @@ router:
     interface:
     - if-name: lo
       ipv4:
-        enable: true
+        enabled: true
         prefix-sid:
           index: 1
     - if-name: p
       network-type: point-to-point
       metric: 10
       ipv4:
-        enable: true
+        enabled: true
   bgp:
     global:
       as: 65000

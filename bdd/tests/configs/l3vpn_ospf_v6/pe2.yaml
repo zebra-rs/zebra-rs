@@ -36,12 +36,12 @@ router:
     interface:
     - if-name: lo
       ipv6:
-        enable: true
+        enabled: true
     - if-name: p
       network-type: point-to-point
       metric: 10
       ipv6:
-        enable: true
+        enabled: true
   ospfv3:
     vrf:
     - name: vrf-cust
@@ -53,7 +53,7 @@ router:
       - area-id: 0.0.0.0
         interface:
         - if-name: ce2
-          enable: true
+          enabled: true
           network-type: point-to-point
   bgp:
     global:

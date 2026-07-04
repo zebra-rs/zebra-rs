@@ -23,7 +23,7 @@ router:
       network-type: point-to-point
       metric: 10
       ipv6:
-        enable: true
+        enabled: true
   bgp:
     global:
       as: 65001

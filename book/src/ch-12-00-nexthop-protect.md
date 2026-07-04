@@ -56,8 +56,8 @@ router isis {
   segment-routing mpls;
   fast-reroute { ti-lfa; }
   interface eth0 {
-    ipv4 { enable true; }
-    bfd { enable true; }      // sub-second detection on this adjacency
+    ipv4 { enabled true; }
+    bfd { enabled true; }      // sub-second detection on this adjacency
   }
 }
 ```
@@ -70,9 +70,9 @@ router ospf {
   fast-reroute { ti-lfa; }
   area 0 {
     interface eth0 {
-      enable true;
+      enabled true;
       network-type point-to-point;
-      bfd { enable true; }
+      bfd { enabled true; }
     }
   }
 }

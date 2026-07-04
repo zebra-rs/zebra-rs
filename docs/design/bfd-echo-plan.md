@@ -29,7 +29,7 @@ Tracks the BFD **Echo function** (RFC 5880 §6.4 / §6.8.5 / §6.8.8 /
 >   (`router ospf|isis|bgp { bfd {} }`) as a default and overridden per
 >   interface / neighbor *per leaf*
 >   (`{Ospf,}LinkBfdConfig::resolve` / `PeerBfdConfig::resolve`); instance
->   `enable true` blanket-enables, a per-link/neighbor `enable false` opts
+>   `enabled true` blanket-enables, a per-link/neighbor `enabled false` opts
 >   out. There is **no global top-level `bfd {}`** container — BFD spawns
 >   eagerly with its first consumer. BGP echo is **single-hop only**
 >   (RFC 5883 multihop has no Echo) — inert on iBGP / multihop eBGP.
@@ -169,12 +169,12 @@ reflector.
 ## Config surface (when/if built)
 
 Mirror FRR. Since standalone `bfd { … }` config was removed this cycle,
-Echo config would live **per-protocol** alongside `bfd { enable; }`:
+Echo config would live **per-protocol** alongside `bfd { enabled; }`:
 
 ```
 # illustrative — not implemented
 router ospf { area 0 { interface eth0 {
-  bfd { enable true; echo-mode true; echo-interval 50; }
+  bfd { enabled true; echo-mode true; echo-interval 50; }
 }}}
 ```
 

@@ -19,18 +19,18 @@ router:
     - if-name: lo
       circuit-type: level-2-only
       ipv4:
-        enable: true
+        enabled: true
       ipv6:
-        enable: true
+        enabled: true
     - if-name: sa
       circuit-type: level-2-only
       network-type: point-to-point
       metric: 10
       ipv4:
-        enable: true
+        enabled: true
     - if-name: sb
       circuit-type: level-2-only
       network-type: point-to-point
       metric: 10
       ipv4:
-        enable: true
+        enabled: true

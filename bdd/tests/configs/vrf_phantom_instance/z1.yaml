@@ -27,13 +27,13 @@ router:
     - if-name: lo
       circuit-type: level-2-only
       ipv4:
-        enable: true
+        enabled: true
       ipv6:
-        enable: true
+        enabled: true
   ospf:
     router-id: 10.0.0.1
     area:
     - area-id: 0.0.0.0
       interface:
       - if-name: lo
-        enable: true
+        enabled: true

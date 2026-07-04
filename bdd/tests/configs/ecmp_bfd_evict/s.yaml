@@ -16,14 +16,14 @@ router:
     interface:
     - if-name: lo
       ipv4:
-        enable: true
+        enabled: true
     - if-name: s-a
       ipv4:
-        enable: true
+        enabled: true
       metric: 1
       bfd:
-        enable: true
+        enabled: true
     - if-name: s-b
       ipv4:
-        enable: true
+        enabled: true
       metric: 1

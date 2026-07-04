@@ -11,7 +11,7 @@ core). Timers are covered separately in
 
 | YANG leaf (`/router/ospfv3/area/<id>/interface/<n>/…`) | Default | Range |
 |---|---|---|
-| `enable` | `false` | boolean |
+| `enabled` | `false` | boolean |
 | `network-type` | `broadcast` | `broadcast` \| `point-to-point` |
 | `priority` | 64 | 0..255 |
 | `cost` | 10 | 0..65535 |

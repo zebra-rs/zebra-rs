@@ -23,22 +23,22 @@ router:
     - if-name: lo
       circuit-type: level-1
       ipv4:
-        enable: true
+        enabled: true
       ipv6:
-        enable: true
+        enabled: true
     - if-name: i9
       circuit-type: level-1
       network-type: point-to-point
       metric: 20
       ipv4:
-        enable: true
+        enabled: true
       ipv6:
-        enable: true
+        enabled: true
     - if-name: i5
       circuit-type: level-1
       network-type: point-to-point
       metric: 40
       ipv4:
-        enable: true
+        enabled: true
       ipv6:
-        enable: true
+        enabled: true

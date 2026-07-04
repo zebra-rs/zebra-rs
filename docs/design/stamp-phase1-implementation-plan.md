@@ -172,7 +172,7 @@ New files, mirroring `bfd/` file-for-file where a sibling exists:
 
 3. Pin with parse tests in `config/manager.rs` `yang_load_tests` (`:1263`, the
    `remove_private_as` test is the template): one config path per protocol
-   (`set router isis interface eth0 te-metric measurement enable true`,
+   (`set router isis interface eth0 te-metric measurement enabled true`,
    `set router ospf area 0 interface eth0 te-metric measurement interval 100`) and the three
    show paths. (`configure_mode_loads` / `exec_mode_loads` already gate schema validity.)
 
@@ -278,7 +278,7 @@ New files, mirroring `bfd/` file-for-file where a sibling exists:
    - Both routers run **both** `router isis` (P2P, ipv4 enable) and `router ospf`
      (area 0, `network-type: point-to-point`, `segment-routing: mpls` — required for the
      Extended-Link LSA gate) with
-     `te-metric: { measurement: { enable: true, interval: 100, damping-period: 2 } }`
+     `te-metric: { measurement: { enabled: true, interval: 100, damping-period: 2 } }`
      on the link interface — deliberately exercising the shared-session/multi-client path (D11).
    - Scenario 1 (bring-up): clean env, namespaces, veth, start, apply, wait, ping across.
    - Scenario 2 (IS-IS): `show isis database detail` **eventually contains**

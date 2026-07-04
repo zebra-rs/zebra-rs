@@ -18,9 +18,9 @@ router:
     - area-id: 0.0.0.0
       interface:
       - if-name: lo
-        enable: true
+        enabled: true
       - if-name: ethb
-        enable: true
+        enabled: true
         network-type: point-to-point
     # Totally-NSSA: `no-summary` makes the ABR suppress every Type-3
     # summary into the area, so the only way out is the default Type-7
@@ -32,8 +32,8 @@ router:
       nssa-default-originate: true
       interface:
       - if-name: ethc
-        enable: true
+        enabled: true
         network-type: point-to-point
       - if-name: ethd
-        enable: true
+        enabled: true
         network-type: point-to-point

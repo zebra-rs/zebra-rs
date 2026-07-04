@@ -16,9 +16,9 @@ router:
     - area-id: 0.0.0.0
       interface:
       - if-name: lo
-        enable: true
+        enabled: true
       - if-name: ethb
-        enable: true
+        enabled: true
         network-type: point-to-point
     # Stub (0.0.0.1): drops Type-5 AS-External (E-bit clear in
     # Hello/DBD) but still floods inter-area Type-3 summaries inward.
@@ -26,5 +26,5 @@ router:
       area-type: stub
       interface:
       - if-name: ethc
-        enable: true
+        enabled: true
         network-type: point-to-point
