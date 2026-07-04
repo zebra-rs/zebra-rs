@@ -258,33 +258,43 @@ impl SrPolicyDb {
     /// `<color, endpoint, discriminator>`, re-run selection, and return
     /// the FIB delta. Drops the whole policy (tearing down any installed
     /// Binding SID) when its last candidate is withdrawn.
+    /// Withdraw one candidate path (keyed by `discriminator` + originating
+    /// `peer`). Returns `(removed, delta)`: `removed` is `true` only when a
+    /// candidate was actually present and dropped — the caller reflects the
+    /// withdrawal to RR peers only then, so a no-op withdraw (policy/candidate
+    /// already absent) is not re-flooded into a reflection-cycle storm.
     pub fn withdraw(
         &mut self,
         color: u32,
         endpoint: IpAddr,
         discriminator: u32,
         peer: usize,
-    ) -> SrPolicyFibDelta {
+    ) -> (bool, SrPolicyFibDelta) {
         let key = SrPolicyKey { color, endpoint };
         let Some(policy) = self.policies.get_mut(&key) else {
-            return SrPolicyFibDelta::default();
+            return (false, SrPolicyFibDelta::default());
         };
         let prev = policy.active.clone();
+        let before = policy.candidates.len();
         policy
             .candidates
             .retain(|k, cp| !(k.discriminator == discriminator && cp.peer == peer));
+        let removed = policy.candidates.len() != before;
         if policy.candidates.is_empty() {
             let remove = policy.installed.take().map(|b| b.bsid);
             let mpls_remove = policy.installed_mpls.take();
             self.policies.remove(&key);
-            SrPolicyFibDelta {
-                remove,
-                install: None,
-                mpls_remove,
-            }
+            (
+                removed,
+                SrPolicyFibDelta {
+                    remove,
+                    install: None,
+                    mpls_remove,
+                },
+            )
         } else {
             policy.active = select_active(&policy.candidates, prev.as_ref());
-            policy.reconcile_fib()
+            (removed, policy.reconcile_fib())
         }
     }
 
@@ -955,6 +965,38 @@ mod tests {
         assert!(!db.policies.contains_key(&key));
     }
 
+    /// The `removed` flag drives the reflection guard: it is `true` only when
+    /// a candidate was actually dropped. A no-op withdraw (absent policy,
+    /// absent candidate, or re-withdraw) returns `false`, so the caller does
+    /// not reflect it — breaking the SR-Policy withdraw ping-pong.
+    #[test]
+    fn withdraw_removed_flag_gates_reflection() {
+        let mut db = SrPolicyDb::default();
+        let key = SrPolicyKey {
+            color: 100,
+            endpoint: endpoint("10.0.0.9"),
+        };
+        let mut a = cp(20, "10.0.0.1", 1, 100, true);
+        a.peer = 1;
+        db.insert(key.clone(), a.clone());
+
+        // Absent policy color → no-op.
+        let (removed, _) = db.withdraw(999, endpoint("10.0.0.9"), 1, 1);
+        assert!(!removed, "withdraw of an absent policy removes nothing");
+        // Policy exists but not this (discriminator, peer) → no-op.
+        let (removed, _) = db.withdraw(100, endpoint("10.0.0.9"), 7, 7);
+        assert!(!removed, "withdraw of an absent candidate removes nothing");
+        // The real candidate → removed.
+        let (removed, _) = db.withdraw(100, endpoint("10.0.0.9"), 1, 1);
+        assert!(removed, "withdraw of a present candidate removes it");
+        // Re-withdraw the now-absent candidate → no-op (breaks the storm).
+        let (removed, _) = db.withdraw(100, endpoint("10.0.0.9"), 1, 1);
+        assert!(
+            !removed,
+            "re-withdraw of an already-absent candidate is a no-op"
+        );
+    }
+
     #[test]
     fn invalid_only_policy_has_no_active() {
         let mut db = SrPolicyDb::default();
@@ -1024,7 +1066,7 @@ mod tests {
         assert_eq!(delta.remove, Some(v6("fc00:0:9::1")));
         assert_eq!(delta.install.unwrap().bsid, v6("fc00:0:9::2"));
         // Withdrawing the winner falls back to the remaining path's BSID.
-        let delta = db.withdraw(100, ep, 2, 2);
+        let (_, delta) = db.withdraw(100, ep, 2, 2);
         assert_eq!(delta.remove, Some(v6("fc00:0:9::2")));
         assert_eq!(delta.install.unwrap().bsid, v6("fc00:0:9::1"));
     }
@@ -1038,7 +1080,7 @@ mod tests {
             endpoint: ep,
         };
         db.insert(key.clone(), srv6_cp(1, 100, 1, "fc00:0:9::1", "fc00:0:2::"));
-        let delta = db.withdraw(5, ep, 1, 1);
+        let (_, delta) = db.withdraw(5, ep, 1, 1);
         assert_eq!(delta.remove, Some(v6("fc00:0:9::1")));
         assert_eq!(delta.install, None);
         assert!(!db.policies.contains_key(&key));
@@ -1133,7 +1175,7 @@ mod tests {
         // Install it (records installed_mpls).
         assert!(db.mpls_reconcile(9, ep, true).install.is_some());
         // Withdrawing the last path reports the LFIB label to tear down.
-        let delta = db.withdraw(9, ep, 1, 1);
+        let (_, delta) = db.withdraw(9, ep, 1, 1);
         assert_eq!(delta.mpls_remove, Some(1000));
     }
 

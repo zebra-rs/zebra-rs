@@ -7779,7 +7779,7 @@ fn route_mup_locrib_withdraw(
         .first()
         .filter(|_| matches!(prefix, MupPrefix::Dsd { .. } | MupPrefix::Isd { .. }))
         .and_then(|r| super::nht::nht_target(&r.attr));
-    let _ = bgp.local_rib.remove_mup(rd, &prefix, id, ident);
+    let removed = bgp.local_rib.remove_mup(rd, &prefix, id, ident);
     let selected = bgp.local_rib.select_best_path_mup(&rd, &prefix);
     // Release the NHT registration when no surviving path keeps the
     // pre-withdraw DSD next-hop.
@@ -7799,8 +7799,13 @@ fn route_mup_locrib_withdraw(
     if let Some(dispatcher) = bgp.vrf_import {
         super::vrf::dispatch_mup(dispatcher, rd, &prefix, selected.first(), None, &transport);
     }
+    // Only propagate when the Loc-RIB actually changed. A withdraw for an
+    // already-absent route (nothing removed, no surviving best path) is a
+    // no-op; re-flooding it makes peers echo it back — the MUP withdraw storm.
     if selected.is_empty() {
-        route_withdraw_mup_to_peers(rd, prefix, peers);
+        if !removed.is_empty() {
+            route_withdraw_mup_to_peers(rd, prefix, peers);
+        }
     } else {
         // Another path remains best for this key — re-advertise it.
         route_advertise_mup_to_peers(rd, prefix, &selected, bgp, peers);
@@ -8030,10 +8035,16 @@ pub fn route_advertise_mup_to_peers(
     }
 }
 
-/// Send one id-less MUP MP_UNREACH to a peer and drop the Adj-RIB-Out
-/// entry so a later policy diff doesn't re-withdraw it.
+/// Send one id-less MUP MP_UNREACH to a peer — but only if the peer actually
+/// holds the route in its Adj-RIB-Out. Sending an MP_UNREACH for a route we
+/// never advertised (or already withdrew) is a no-op the peer echoes straight
+/// back: with the empty-Loc-RIB withdraw path also un-gated, that ping-pongs
+/// into a MUP withdraw storm (TCP ZeroWindow). Gating on Adj-RIB-Out makes
+/// every MUP withdraw idempotent, mirroring the adj_out-gated v4/v6 withdraw.
 fn mup_withdraw_one(peer: &mut Peer, rd: RouteDistinguisher, prefix: &MupPrefix) {
-    peer.adj_out.remove_mup(rd, prefix, 0);
+    if peer.adj_out.remove_mup(rd, prefix, 0).is_none() {
+        return;
+    }
     let mut update = UpdatePacket::with_max_packet_size(peer.max_packet_size());
     update.mp_withdraw = Some(MpUnreachAttr::Mup {
         afi: prefix.afi(),
@@ -8400,11 +8411,18 @@ pub fn route_srpolicy_withdraw(
     bgp: &mut BgpTop,
     peers: &mut PeerMap,
 ) {
-    srpolicy_reflect_withdraw(ident, nlri, peers);
-    let delta =
+    // Withdraw from the Loc-RIB first, then reflect to RR peers ONLY if a
+    // candidate was actually removed. Reflecting a no-op withdrawal (policy
+    // already absent) would echo back around a route-reflector cycle into an
+    // SR-Policy withdraw storm — withdraws carry no AS_PATH/ORIGINATOR_ID, so
+    // loop detection cannot stop them (the same class of bug fixed in MUP).
+    let (removed, delta) =
         bgp.local_rib
             .sr_policy
             .withdraw(nlri.color, nlri.endpoint, nlri.distinguisher, ident);
+    if removed {
+        srpolicy_reflect_withdraw(ident, nlri, peers);
+    }
     apply_srpolicy_fib(delta, bgp);
     sr_policy_mpls_sync(bgp, nlri.color, nlri.endpoint);
 }
