@@ -8096,9 +8096,17 @@ fn attr_add_ecom(attr: &mut BgpAttr, ecv: ExtCommunityValue) {
 /// prefix carried in a Type-1 Session-Transformed route.
 fn mup_ue_prefix(session: &crate::mup_c::session::MupSession) -> Option<IpNet> {
     if let Some(v4) = session.ue_ipv4 {
+        // 3GPP assigns the UE a single IPv4 address → a /32 host route.
         Ipv4Net::new(v4, 32).ok().map(IpNet::V4)
     } else if let Some(v6) = session.ue_ipv6 {
-        Ipv6Net::new(v6, 128).ok().map(IpNet::V6)
+        // 3GPP assigns each IPv6 PDU session a /64 prefix (RFC 7066 §4.1, TS
+        // 23.501), not a single address — the UE forms its address(es) inside
+        // it via SLAAC. Advertise that /64, masked to the network so it equals
+        // the zero-filled form a *received* prefix parses to (keeping the
+        // ST1 route key stable). The PFCP UE IP Address IE can carry an
+        // explicit IPv6 prefix length, but the `rs-pfcp` codec doesn't expose
+        // it, so /64 (the architecture default) is used.
+        Ipv6Net::new(v6, 64).ok().map(|n| IpNet::V6(n.trunc()))
     } else {
         None
     }
@@ -18317,14 +18325,17 @@ mod tests {
         let v4: Ipv4Addr = "192.0.2.5".parse().unwrap();
         let v6: Ipv6Addr = "2001:db8::5".parse().unwrap();
 
-        // UE host prefix: /32 for v4, /128 for v6, prefer v4, None when absent.
+        // UE prefix: /32 host route for IPv4; the 3GPP-assigned /64 for IPv6
+        // (masked to the network — `2001:db8::5` → `2001:db8::/64`). Prefer
+        // IPv4; None when the session has neither.
         assert_eq!(
             super::mup_ue_prefix(&session(Some(v4), None)),
             "192.0.2.5/32".parse::<ipnet::IpNet>().ok()
         );
         assert_eq!(
             super::mup_ue_prefix(&session(None, Some(v6))),
-            "2001:db8::5/128".parse::<ipnet::IpNet>().ok()
+            "2001:db8::/64".parse::<ipnet::IpNet>().ok(),
+            "IPv6 UE → /64 (RFC 7066), masked to the network"
         );
         assert_eq!(super::mup_ue_prefix(&session(None, None)), None);
 
