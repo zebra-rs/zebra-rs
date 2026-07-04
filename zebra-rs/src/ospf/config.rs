@@ -166,6 +166,26 @@ impl Ospf {
             "/redistribute/connected/metric-type",
             config_ospf_redist_connected_metric_type,
         );
+        self.ospf_add(
+            "/redistribute/connected/route-map",
+            config_ospf_redist_connected_route_map,
+        );
+        self.ospf_add(
+            "/redistribute/static/route-map",
+            config_ospf_redist_static_route_map,
+        );
+        self.ospf_add(
+            "/redistribute/kernel/route-map",
+            config_ospf_redist_kernel_route_map,
+        );
+        self.ospf_add(
+            "/redistribute/isis/route-map",
+            config_ospf_redist_isis_route_map,
+        );
+        self.ospf_add(
+            "/redistribute/bgp/route-map",
+            config_ospf_redist_bgp_route_map,
+        );
         // Instance-level `router ospf { bfd { ... } }` defaults.
         self.ospf_add("/bfd/enable", config_ospf_bfd_enable);
         self.ospf_add(
@@ -335,6 +355,15 @@ impl Ospf {
         self.ospf_add(
             "/graceful-restart/drain-time-ms",
             config_ospf_gr_drain_time_ms,
+        );
+        self.ospf_add("/max-metric/router-lsa", config_ospf_max_metric_router_lsa);
+        self.ospf_add(
+            "/max-metric/router-lsa/administrative",
+            config_ospf_max_metric_administrative,
+        );
+        self.ospf_add(
+            "/max-metric/router-lsa/on-startup",
+            config_ospf_max_metric_on_startup,
         );
         self.ospf_add("/spf-interval/initial-wait", config_ospf_spf_initial_wait);
         self.ospf_add(
@@ -676,8 +705,29 @@ fn ospf_redist_metric_type_set(
     Some(())
 }
 
+/// `/router/ospf/redistribute/<source>/route-map` — bind a named
+/// policy-list as the redistribution filter for this source (FRR
+/// `redistribute <proto> route-map <name>`). The bind registers with
+/// the policy actor (immediate definition push + change watching)
+/// and resyncs; an unresolved name is deny-all.
+fn ospf_redist_route_map_set(
+    ospf: &mut Ospf,
+    rtype: crate::rib::RibType,
+    mut args: Args,
+    op: ConfigOp,
+) -> Option<()> {
+    let name = if op.is_set() {
+        Some(args.string()?)
+    } else {
+        None
+    };
+    ospf.redist_route_map_bind(rtype, name);
+    ospf.as_external_redist_resync(rtype);
+    Some(())
+}
+
 macro_rules! ospf_redist_handlers {
-    ($set:ident, $metric:ident, $mtype:ident, $rtype:expr) => {
+    ($set:ident, $metric:ident, $mtype:ident, $rmap:ident, $rtype:expr) => {
         fn $set(ospf: &mut Ospf, _args: Args, op: ConfigOp) -> Option<()> {
             ospf_redist_set(ospf, $rtype, op)
         }
@@ -687,6 +737,9 @@ macro_rules! ospf_redist_handlers {
         fn $mtype(ospf: &mut Ospf, args: Args, op: ConfigOp) -> Option<()> {
             ospf_redist_metric_type_set(ospf, $rtype, args, op)
         }
+        fn $rmap(ospf: &mut Ospf, args: Args, op: ConfigOp) -> Option<()> {
+            ospf_redist_route_map_set(ospf, $rtype, args, op)
+        }
     };
 }
 
@@ -694,24 +747,28 @@ ospf_redist_handlers!(
     config_ospf_redist_bgp,
     config_ospf_redist_bgp_metric,
     config_ospf_redist_bgp_metric_type,
+    config_ospf_redist_bgp_route_map,
     crate::rib::RibType::Bgp
 );
 ospf_redist_handlers!(
     config_ospf_redist_static,
     config_ospf_redist_static_metric,
     config_ospf_redist_static_metric_type,
+    config_ospf_redist_static_route_map,
     crate::rib::RibType::Static
 );
 ospf_redist_handlers!(
     config_ospf_redist_kernel,
     config_ospf_redist_kernel_metric,
     config_ospf_redist_kernel_metric_type,
+    config_ospf_redist_kernel_route_map,
     crate::rib::RibType::Kernel
 );
 ospf_redist_handlers!(
     config_ospf_redist_isis,
     config_ospf_redist_isis_metric,
     config_ospf_redist_isis_metric_type,
+    config_ospf_redist_isis_route_map,
     crate::rib::RibType::Isis
 );
 
@@ -2357,6 +2414,44 @@ fn config_ospf_gr_drain_time_ms(ospf: &mut Ospf, mut args: Args, op: ConfigOp) -
     Some(())
 }
 
+/// `/router/ospf/max-metric/router-lsa` — RFC 6987 stub-router
+/// presence container. Set is a no-op (the sub-leaves drive the
+/// modes); delete clears both administrative and on-startup state.
+fn config_ospf_max_metric_router_lsa(ospf: &mut Ospf, _args: Args, op: ConfigOp) -> Option<()> {
+    if !op.is_set() {
+        ospf.stub_router_admin = false;
+        ospf.stub_router_startup_clear();
+    }
+    Some(())
+}
+
+/// `/router/ospf/max-metric/router-lsa/administrative` — indefinite
+/// stub router (maintenance mode).
+fn config_ospf_max_metric_administrative(
+    ospf: &mut Ospf,
+    mut args: Args,
+    op: ConfigOp,
+) -> Option<()> {
+    let value = if op.is_set() { args.boolean()? } else { false };
+    if ospf.stub_router_admin != value {
+        ospf.stub_router_admin = value;
+        ospf.router_lsa_originate();
+    }
+    Some(())
+}
+
+/// `/router/ospf/max-metric/router-lsa/on-startup` — stub router for
+/// N seconds after the config applies (boot grace window).
+fn config_ospf_max_metric_on_startup(ospf: &mut Ospf, mut args: Args, op: ConfigOp) -> Option<()> {
+    if op.is_set() {
+        let secs = args.u32()?;
+        ospf.stub_router_startup_arm(secs);
+    } else {
+        ospf.stub_router_startup_clear();
+    }
+    Some(())
+}
+
 // `/router/ospf/spf-interval/{initial,secondary,maximum}-wait`.
 // Adaptive SPF-throttle bounds (milliseconds). Delete restores the
 // per-field default from `SpfIntervalConfig::default()` (50/200/5000).
@@ -2412,5 +2507,6 @@ ospf_redist_handlers!(
     config_ospf_redist_connected,
     config_ospf_redist_connected_metric,
     config_ospf_redist_connected_metric_type,
+    config_ospf_redist_connected_route_map,
     crate::rib::RibType::Connected
 );

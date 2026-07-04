@@ -36,6 +36,7 @@ router ospf {
 | `bgp` | presence container | — (absent = off) |
 | `<source>/metric` | uint32, 0..16777214 | 20 |
 | `<source>/metric-type` | `type-1` \| `type-2` | `type-2` |
+| `<source>/route-map` | string (policy name) | — (no filtering) |
 
 Each source is a presence container — naming it enables
 redistribution of that source, deleting it flushes the corresponding
@@ -43,6 +44,51 @@ Type-5s. Sources are independent subscriptions to the RIB, so any
 combination can be active at once. The knobs also exist per VRF
 instance, where the subscription is scoped so a VRF's OSPF sees only
 that VRF's routes.
+
+## Route-map filtering
+
+`route-map <name>` binds a policy list (the same `policy` /
+`prefix-set` objects BGP uses) as the redistribution filter for that
+source, mirroring FRR's `redistribute <proto> route-map <name>`:
+
+```
+prefix-set PS {
+  prefix 10.1.0.0/16;
+}
+policy RM {
+  entry 10 {
+    action permit;
+    match prefix-set PS;
+    set med set 555;       # doubles as FRR's `set metric`
+  }
+}
+router ospf {
+  redistribute {
+    connected {
+      route-map RM;
+    }
+  }
+}
+```
+
+Entries run in sequence order with FRR route-map semantics: an entry
+with no `match prefix-set` matches everything, an entry naming an
+undefined prefix-set never matches, and falling off the end of the
+list is an **implicit deny** — so the map above admits only
+`10.1.0.0/16` and drops every other connected prefix. A matching
+entry's `set med` overrides the advertised external metric.
+BGP-specific match clauses (communities, as-path, MED, origin, …)
+never match a redistributed IGP route. Binding a `route-map` name
+that has no definition is deny-all, matching FRR.
+
+**Edits re-apply live.** OSPF subscribes to the policy engine's
+change feed, so editing the policy list — or a prefix-set it
+references — immediately re-filters the redistributed set: newly
+permitted prefixes originate Type-5s, newly denied ones flush,
+without touching adjacencies. Validated by
+`ospfv2_redist_route_map.feature`, whose scenarios add and remove
+prefixes from a live prefix-set and assert the externals appear and
+disappear on the neighbor.
 
 ## E1 vs E2 metrics
 
@@ -110,9 +156,11 @@ semantics.
 
 ## OSPFv3
 
-`router ospfv3` has instance-level `redistribute bgp` only (no
-instance-level `connected`) — its primary role is the SRv6 L3VPN
-PE–CE "down" direction, where a PE injects the VPNv6 routes it
+`router ospfv3` exposes the same five instance-level redistribute
+sources (connected, static, kernel, isis, bgp) with the same
+`metric` / `metric-type` / `route-map` leaves — including the live
+route-map re-application. The bgp source's flagship role is the SRv6
+L3VPN PE–CE "down" direction, where a PE injects the VPNv6 routes it
 imported into a VRF into the CE-facing OSPFv3 instance. Per-area
 NSSA `redistribute connected` is available for v3 exactly as for
 v2.

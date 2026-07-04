@@ -1,0 +1,30 @@
+# r2 is the cheap transit path (cost 10+10) — and the stub router
+# under test: with max-metric active its transit links advertise
+# 0xFFFF, pushing r1->r3 traffic onto the expensive r4 path.
+interface:
+- if-name: lo
+  ipv4:
+    address: 10.0.0.2/32
+- if-name: etha
+  ipv4:
+    address: 10.0.12.2/30
+- if-name: ethc
+  ipv4:
+    address: 10.0.23.1/30
+router:
+  ospf:
+    router-id: 10.0.0.2
+    max-metric:
+      router-lsa:
+        administrative: true
+    area:
+    - area-id: 0.0.0.0
+      interface:
+      - if-name: lo
+        enable: true
+      - if-name: etha
+        enable: true
+        network-type: point-to-point
+      - if-name: ethc
+        enable: true
+        network-type: point-to-point

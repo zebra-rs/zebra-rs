@@ -2,11 +2,14 @@
 
 OSPFv3 features not yet implemented in zebra-rs:
 
-- Redistribution `route-map` filtering (the zebra-rs sources are
-  connected, static, kernel, IS-IS, and BGP, matching v2).
 - Non-zero forwarding-address resolution on received externals.
 - NBMA and point-to-multipoint network types.
 - Configurable Instance ID (always 0 — one instance per link).
+
+Redistribution `route-map` filtering is implemented for OSPFv3
+identically to v2 (policy lists shared with BGP, live
+re-application) — see
+[Route Redistribution](ch-08-15-ospf-redistribution.md#route-map-filtering).
 
 The adaptive SPF throttle (`spf-interval`), the send-side
 MinLSInterval (`min-ls-interval`), and the receive-side MinLSArrival

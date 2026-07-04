@@ -154,6 +154,26 @@ impl Ospf<Ospfv3> {
                 "/redistribute/bgp/metric-type",
                 config_ospfv3_redist_bgp_metric_type,
             ),
+            (
+                "/redistribute/connected/route-map",
+                config_ospfv3_redist_connected_route_map,
+            ),
+            (
+                "/redistribute/static/route-map",
+                config_ospfv3_redist_static_route_map,
+            ),
+            (
+                "/redistribute/kernel/route-map",
+                config_ospfv3_redist_kernel_route_map,
+            ),
+            (
+                "/redistribute/isis/route-map",
+                config_ospfv3_redist_isis_route_map,
+            ),
+            (
+                "/redistribute/bgp/route-map",
+                config_ospfv3_redist_bgp_route_map,
+            ),
             ("/area/interface/enable", config_ospfv3_interface_enable),
             (
                 "/area/interface/bfd/enable",
@@ -668,8 +688,29 @@ fn ospfv3_redist_metric_type_set(
     Some(())
 }
 
+/// `/router/ospfv3/redistribute/<source>/route-map` — v6 sibling of
+/// the v2 handler: bind a named policy-list as the redistribution
+/// filter and resync. Changes to the bound list (or a prefix-set it
+/// references) re-apply dynamically via the policy actor's watch +
+/// cascade machinery.
+fn ospfv3_redist_route_map_set(
+    ospf: &mut Ospf<Ospfv3>,
+    rtype: crate::rib::RibType,
+    mut args: Args,
+    op: ConfigOp,
+) -> Option<()> {
+    let name = if op.is_set() {
+        Some(args.string()?)
+    } else {
+        None
+    };
+    ospf.redist_route_map_bind(rtype, name);
+    ospf.as_external_redist_resync_v3(rtype);
+    Some(())
+}
+
 macro_rules! ospfv3_redist_handlers {
-    ($set:ident, $metric:ident, $mtype:ident, $rtype:expr) => {
+    ($set:ident, $metric:ident, $mtype:ident, $rmap:ident, $rtype:expr) => {
         fn $set(ospf: &mut Ospf<Ospfv3>, _args: Args, op: ConfigOp) -> Option<()> {
             ospfv3_redist_set(ospf, $rtype, op)
         }
@@ -679,6 +720,9 @@ macro_rules! ospfv3_redist_handlers {
         fn $mtype(ospf: &mut Ospf<Ospfv3>, args: Args, op: ConfigOp) -> Option<()> {
             ospfv3_redist_metric_type_set(ospf, $rtype, args, op)
         }
+        fn $rmap(ospf: &mut Ospf<Ospfv3>, args: Args, op: ConfigOp) -> Option<()> {
+            ospfv3_redist_route_map_set(ospf, $rtype, args, op)
+        }
     };
 }
 
@@ -686,30 +730,35 @@ ospfv3_redist_handlers!(
     config_ospfv3_redist_connected,
     config_ospfv3_redist_connected_metric,
     config_ospfv3_redist_connected_metric_type,
+    config_ospfv3_redist_connected_route_map,
     crate::rib::RibType::Connected
 );
 ospfv3_redist_handlers!(
     config_ospfv3_redist_static,
     config_ospfv3_redist_static_metric,
     config_ospfv3_redist_static_metric_type,
+    config_ospfv3_redist_static_route_map,
     crate::rib::RibType::Static
 );
 ospfv3_redist_handlers!(
     config_ospfv3_redist_kernel,
     config_ospfv3_redist_kernel_metric,
     config_ospfv3_redist_kernel_metric_type,
+    config_ospfv3_redist_kernel_route_map,
     crate::rib::RibType::Kernel
 );
 ospfv3_redist_handlers!(
     config_ospfv3_redist_isis,
     config_ospfv3_redist_isis_metric,
     config_ospfv3_redist_isis_metric_type,
+    config_ospfv3_redist_isis_route_map,
     crate::rib::RibType::Isis
 );
 ospfv3_redist_handlers!(
     config_ospfv3_redist_bgp,
     config_ospfv3_redist_bgp_metric,
     config_ospfv3_redist_bgp_metric_type,
+    config_ospfv3_redist_bgp_route_map,
     crate::rib::RibType::Bgp
 );
 
