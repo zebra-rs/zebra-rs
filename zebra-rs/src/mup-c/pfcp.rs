@@ -272,11 +272,35 @@ impl MupC {
             network_instance: ex.network_instance,
             qfi: None,
         };
-        // N6-breakout fallback: a session with no core-side GTP tunnel (the
-        // common case — the SMF programs only the access/gNB tunnel) has no
-        // Type-2 ST endpoint. Use the configured Core (N6) UPF address so an
-        // ST2 route can still be originated toward the anchor UPF.
-        session.core_endpoint = session.core_endpoint.or(self.config.upf_address);
+        // Core (N9) tunnel for the ST2 (decapsulation / uplink) route. Its
+        // endpoint + TEID identify the *core* GTP-U tunnel uplink traffic is
+        // decapsulated toward; the access/gNB tunnel is never borrowed (wrong
+        // direction). Resolved in three tiers, most-specific first, endpoint
+        // and TEID independently:
+        //   1. learned over PFCP — a Dest = Core FAR Outer Header Creation, a
+        //      real N9 tunnel to a downstream anchor. Already on the session.
+        //   2. the statically configured anchor: `upf-address` + `upf-teid`.
+        //   3. self-allocated — MUP-U *is* the anchor UPF, so it owns the core
+        //      receive F-TEID: its own address (`local_ip`) plus a fresh TEID
+        //      from the same pool as the N3 F-TEID. A real UPF allocates the
+        //      TEIDs of the tunnels it terminates; today (control-plane only)
+        //      this is a nominal value like the N3 one, and a real datapath
+        //      must install it. `local_ip` mirrors the N3 F-TEID's address; a
+        //      full deployment would use the interwork gateway's N9 endpoint
+        //      (a future config knob).
+        // teid 0 is the null TEID and never a valid tunnel, so a learned or
+        // configured 0 self-allocates too — an ST2 always carries a non-zero
+        // core TEID.
+        session.core_endpoint = session
+            .core_endpoint
+            .or(self.config.upf_address)
+            .or(Some(self.local_ip()));
+        if session.core_teid == 0 {
+            session.core_teid = match self.config.upf_teid {
+                Some(teid) if teid != 0 => teid,
+                _ => self.sessions.alloc_teid(),
+            };
+        }
         self.sessions.insert(session.clone());
 
         let local_ip = self.local_ip();
@@ -998,11 +1022,13 @@ mod tests {
     }
 
     /// N6 breakout: a session with only an access/gNB tunnel (no core-side
-    /// F-TEID) gets its Type-2 ST endpoint from the configured `upf-address`.
+    /// F-TEID) gets its Type-2 ST endpoint AND TEID from the configured
+    /// `upf-address` / `upf-teid` (both are needed for an ST2).
     #[test]
     fn upf_address_fills_core_endpoint_for_n6_breakout() {
         let cfg = MupCConfig {
             upf_address: Some(IpAddr::V4(Ipv4Addr::new(10, 100, 0, 1))),
+            upf_teid: Some(0x0102_0304),
             ..Default::default()
         };
         let (mut mupc, _bgp_rx) = MupC::new_for_test(cfg);
@@ -1019,7 +1045,11 @@ mod tests {
             Some(IpAddr::V4(Ipv4Addr::new(10, 100, 0, 1))),
             "no core tunnel → ST2 endpoint from configured upf-address"
         );
-        // The gNB (access) side is unaffected.
+        assert_eq!(
+            session.core_teid, 0x0102_0304,
+            "no core F-TEID → ST2 TEID from configured upf-teid"
+        );
+        // The gNB (access) side is unaffected (and is NOT copied to the core).
         assert_eq!(
             session.endpoint,
             Some(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1)))
@@ -1045,6 +1075,37 @@ mod tests {
             session.core_endpoint,
             Some(IpAddr::V4(Ipv4Addr::new(10, 9, 0, 1))),
             "learned core F-TEID wins over configured upf-address"
+        );
+    }
+
+    /// MUP-U as the anchor UPF: a session with no learned core F-TEID and no
+    /// configured `upf-address`/`upf-teid` still originates an ST2 — the UPF
+    /// allocates its own core receive F-TEID (a non-zero TEID at its own
+    /// `local_ip`), just as it allocates the N3 F-TEID. It is never borrowed
+    /// from the access/gNB tunnel.
+    #[test]
+    fn anchor_upf_self_allocates_core_teid() {
+        let (mut mupc, _bgp_rx) = MupC::new_for_test(MupCConfig::default());
+        associate(&mut mupc);
+        // A gNB tunnel (access teid 0x1234_5678) but no core tunnel, and no
+        // upf-address / upf-teid configured.
+        let est = message::parse(&establishment_bytes()).unwrap();
+        let (_reply, events) = mupc.handle_session_establishment(est.as_ref(), peer());
+        let MupCEvent::SessionUp(session) = &events[0] else {
+            panic!("expected SessionUp");
+        };
+        assert_ne!(
+            session.core_teid, 0,
+            "anchor UPF self-allocates a non-zero core F-TEID for the ST2"
+        );
+        assert_eq!(
+            session.core_endpoint,
+            Some(IpAddr::V4(Ipv4Addr::LOCALHOST)),
+            "self-allocated core tunnel terminates at the UPF's own address"
+        );
+        assert_ne!(
+            session.core_teid, session.teid,
+            "core F-TEID is self-allocated, not copied from the access tunnel"
         );
     }
 

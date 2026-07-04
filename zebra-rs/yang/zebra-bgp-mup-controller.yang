@@ -89,7 +89,20 @@ module zebra-bgp-mup-controller {
            no core-side GTP tunnel (the common N6-breakout case, where the
            SMF programs only the access/gNB tunnel). A session that does
            learn a core-facing F-TEID over PFCP (e.g. an N9 tunnel) keeps
-           that learned endpoint in preference to this configured one.";
+           that learned endpoint in preference to this configured one.
+           Pair with `upf-teid`: an ST2 needs both a core endpoint and a
+           (non-zero) core TEID to be originated.";
+      }
+
+      leaf upf-teid {
+        type uint32;
+        description
+          "Core (N6) GTP-U TEID paired with `upf-address`. Used as the ST2
+           route TEID when the PFCP session carries no core-side F-TEID. An
+           ST2 is a core/uplink route, so it never borrows the access (gNB)
+           tunnel's TEID; without a learned or configured core TEID no ST2 is
+           originated. A learned core F-TEID takes precedence. A TEID of 0 is
+           invalid (draft §3.1.4.1) and yields no ST2.";
       }
 
       container pfcp {

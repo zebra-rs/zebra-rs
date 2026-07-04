@@ -47,7 +47,7 @@ Feature: BGP MUP interwork node resolves ST2 to the Direct segment
 
   Scenario: z1 originates the DSD and (from PFCP) the ST2, both with id 1:2
     Given the test topology exists
-    When I execute "pfcp-inject --target 127.0.0.1 --port 8805 --ue-ipv4 192.0.2.5 --teid 0x12345678 --endpoint 10.0.0.1 --network-instance core" in namespace "z1"
+    When I execute "pfcp-inject --target 127.0.0.1 --port 8805 --ue-ipv4 192.0.2.5 --teid 0x12345678 --endpoint 10.0.0.1 --core-endpoint 10.0.0.1 --core-teid 0x12345678 --network-instance core" in namespace "z1"
     Then show command "show bgp mup" in namespace "z1" should eventually contain "[DSD][65501:10][10.0.0.1]"
     And show command "show bgp mup" in namespace "z1" should eventually contain "[ST2][65501:10][ep=10.0.0.1][teid=305419896]"
     # z1 is a `segment direct` node, not interwork, so it shows no resolution.

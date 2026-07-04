@@ -1958,6 +1958,14 @@ fn config_mup_c_upf_address(bgp: &mut Bgp, mut args: Args, op: ConfigOp) -> Opti
     Some(())
 }
 
+/// `… mup-c upf-teid <u32>` — Core (N6) TEID paired with `upf-address` for ST2
+/// routes when the session carries no core-side F-TEID.
+fn config_mup_c_upf_teid(bgp: &mut Bgp, mut args: Args, op: ConfigOp) -> Option<()> {
+    bgp.mup_c_config.upf_teid = if op.is_set() { Some(args.u32()?) } else { None };
+    bgp.mup_c_dirty = true;
+    Some(())
+}
+
 /// `… mup-c pfcp node-id <ip>` — our PFCP Node ID for responses.
 fn config_mup_c_pfcp_node_id(bgp: &mut Bgp, mut args: Args, op: ConfigOp) -> Option<()> {
     bgp.mup_c_config.node_id = if op.is_set() {
@@ -4514,6 +4522,7 @@ impl Bgp {
             config_mup_c_controller_address,
         );
         self.callback_add("/router/bgp/mup-c/upf-address", config_mup_c_upf_address);
+        self.callback_add("/router/bgp/mup-c/upf-teid", config_mup_c_upf_teid);
         self.callback_add("/router/bgp/mup-c/pfcp/node-id", config_mup_c_pfcp_node_id);
         self.callback_add(
             "/router/bgp/mup-c/pfcp/listen-address",
@@ -8109,13 +8118,14 @@ mod mup_dual_origination_tests {
         assert!(matches!(p1, MupPrefix::T1st { .. }), "st1 → Type-1 ST");
         assert!(attr1.ecom.is_none(), "st1 carries no ext-comm");
 
+        // ST2 needs a real core tunnel (endpoint + non-zero TEID); it never
+        // borrows the access tunnel.
         let seg = RouteDistinguisher::from_str("100:1").unwrap();
-        let (p2, _st1, attr2) = build_mup_st_route(
-            &session("internet"),
-            MupSrv6Direction::Decapsulation,
-            Some(seg),
-        )
-        .unwrap();
+        let mut s2 = session("internet");
+        s2.core_endpoint = Some("10.9.0.1".parse().unwrap());
+        s2.core_teid = 0x9999;
+        let (p2, _st1, attr2) =
+            build_mup_st_route(&s2, MupSrv6Direction::Decapsulation, Some(seg)).unwrap();
         assert!(matches!(p2, MupPrefix::T2st { .. }), "st2 → Type-2 ST");
         assert!(
             attr2.ecom.is_some(),

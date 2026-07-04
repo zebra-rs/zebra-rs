@@ -46,7 +46,7 @@ Feature: BGP MUP interwork node installs the ST2->DSD SRv6 encap
 
   Scenario: z2 resolves the ST2 to z1's Direct segment and installs the encap
     Given the test topology exists
-    When I execute "pfcp-inject --target 127.0.0.1 --port 8805 --ue-ipv4 192.0.2.5 --teid 0x12345678 --endpoint 10.0.0.1 --network-instance core" in namespace "z1"
+    When I execute "pfcp-inject --target 127.0.0.1 --port 8805 --ue-ipv4 192.0.2.5 --teid 0x12345678 --endpoint 10.0.0.1 --core-endpoint 10.0.0.1 --core-teid 0x12345678 --network-instance core" in namespace "z1"
     # z2 imports the ST2 + DSD into VRF N6 (re-keyed under its own rd) and
     # resolves the ST2 to the DSD's End.DT46 segment by the id 1:2.
     Then show command "show bgp vrf N6 mup" in namespace "z2" should eventually contain "[ST2][65501:20][ep=10.0.0.1]"

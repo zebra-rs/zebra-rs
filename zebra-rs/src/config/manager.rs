@@ -3367,10 +3367,12 @@ mod yang_load_tests {
             .expect("configure module present");
         let entry = to_entry(&yang, module);
 
-        // `mup-c upf-address` accepts both IPv4 and IPv6 (inet:ip-address).
+        // `mup-c upf-address` accepts both IPv4 and IPv6 (inet:ip-address);
+        // `mup-c upf-teid` is a uint32.
         for path in [
             "set router bgp mup-c upf-address 10.100.0.1",
             "set router bgp mup-c upf-address 2001:db8::1",
+            "set router bgp mup-c upf-teid 305419896",
         ] {
             let (code, _comps, _state) = parse(path, entry.clone(), None, State::new());
             assert_eq!(code, ExecCode::Success, "`{path}` must be a settable path");
