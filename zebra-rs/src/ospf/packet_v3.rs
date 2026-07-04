@@ -281,9 +281,9 @@ fn build_hello_packet(link: &OspfLink<Ospfv3>) -> Option<Ospfv3Packet> {
     let packet = Ospfv3Packet::new(
         &link.ident.router_id,
         &link.area_id,
-        0, // Instance ID — RFC 5340 §A.3.1: zero unless multiple
-        //   OSPF processes share the link. zebra-rs doesn't yet
-        //   support multi-instance, so we always emit zero.
+        // RFC 5340 §A.3.1 Instance ID: separates multiple OSPFv3
+        // instances sharing this link; receivers drop mismatches.
+        link.v3_instance_id(),
         Ospfv3Payload::Hello(hello),
     );
     Some(packet)
@@ -594,7 +594,7 @@ pub fn ospfv3_db_desc_send(
     let mut packet = Ospfv3Packet::new(
         &oident.router_id,
         &area,
-        0, // instance_id (RFC 5340 §A.3.1)
+        oi.v3_instance_id,
         Ospfv3Payload::DbDesc(dd),
     );
 
@@ -655,7 +655,7 @@ pub(super) fn ospfv3_db_desc_resend(oi: &OspfInterface<Ospfv3>, nbr: &Neighbor<O
     let mut packet = Ospfv3Packet::new(
         oi.router_id,
         &oi.area_id,
-        0,
+        oi.v3_instance_id,
         Ospfv3Payload::DbDesc(sent.clone()),
     );
     let dst = nbr.ident.prefix.addr();
@@ -942,7 +942,7 @@ pub fn ospfv3_ls_req_send(
     let mut packet = Ospfv3Packet::new(
         &oident.router_id,
         &area,
-        0,
+        oi.v3_instance_id,
         Ospfv3Payload::LsRequest(ls_req),
     );
 
@@ -987,7 +987,12 @@ pub fn ospfv3_ls_upd_send(
     );
     let ls_upd = Ospfv3LsUpdate { lsas };
 
-    let mut packet = Ospfv3Packet::new(oi.router_id, &area, 0, Ospfv3Payload::LsUpdate(ls_upd));
+    let mut packet = Ospfv3Packet::new(
+        oi.router_id,
+        &area,
+        oi.v3_instance_id,
+        Ospfv3Payload::LsUpdate(ls_upd),
+    );
 
     let Some(tx) = oi.v3_send_tx else {
         tracing::debug!("[v3 LSUpd:Send] no v3 send channel on OspfInterface");
@@ -1081,7 +1086,12 @@ pub fn ospfv3_ls_ack_send(
     );
     let ls_ack = Ospfv3LsAck { lsa_headers };
 
-    let mut packet = Ospfv3Packet::new(oi.router_id, &area, 0, Ospfv3Payload::LsAck(ls_ack));
+    let mut packet = Ospfv3Packet::new(
+        oi.router_id,
+        &area,
+        oi.v3_instance_id,
+        Ospfv3Payload::LsAck(ls_ack),
+    );
 
     let Some(tx) = oi.v3_send_tx else {
         tracing::debug!("[v3 LSAck:Send] no v3 send channel on OspfInterface");

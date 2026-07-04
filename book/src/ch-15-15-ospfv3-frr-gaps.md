@@ -3,11 +3,14 @@
 OSPFv3 features not yet implemented in zebra-rs:
 
 - NBMA and point-to-multipoint network types.
-- Configurable Instance ID (always 0 — one instance per link).
 
 Forwarding-address origination (NSSA Type-7, F-flag) and resolution
 on received externals are implemented for OSPFv3 identically to v2
 — see [the v2 gaps page](ch-08-12-ospf-frr-gaps.md).
+
+The per-interface Instance ID (RFC 5340 §A.3.1) is configurable —
+`instance-id` on the interface entry, enforced on receive — see
+[Per-Interface Settings](ch-15-06-ospfv3-per-interface.md).
 
 Redistribution `route-map` filtering is implemented for OSPFv3
 identically to v2 (policy lists shared with BGP, live

@@ -560,6 +560,9 @@ pub struct OspfInterface<'a, V: OspfVersion = Ospfv2> {
     /// receive-side per-LSA rate limit, read by `ospf_ls_upd_proc`.
     /// Snapshot of the instance's `min_ls_arrival_ms`.
     pub min_ls_arrival_ms: u32,
+    /// RFC 5340 §A.3.1 OSPFv3 Instance ID stamped into outbound v3
+    /// packets (0 on v2). Snapshot of the link's configured value.
+    pub v3_instance_id: u8,
     pub tracing: &'a OspfTracing,
     /// v3-only outbound packet channel borrow. Carries the `Ospfv3Send`
     /// sender that the `network_v6::write_packet_v6` task consumes.
@@ -1104,6 +1107,7 @@ impl<V: OspfVersion> Ospf<V> {
             let auth_mode = link.auth_mode();
             let auth_key = link.config.auth_key;
             let crypto_key = link.resolve_active_send_key(&self.key_chains, chrono::Utc::now());
+            let v3_instance_id = link.v3_instance_id();
             self.areas.get_mut(link_area).and_then(|area| {
                 let area_type = area.area_type;
                 link.nbrs.get_mut(src).map(|nbr| {
@@ -1129,6 +1133,7 @@ impl<V: OspfVersion> Ospf<V> {
                             md5_seq: &link.md5_seq,
                             gr_config: self.gr_config,
                             min_ls_arrival_ms: self.min_ls_arrival_ms,
+                            v3_instance_id,
                             tracing: &self.tracing,
                             v3_send_tx: self.v3_send_tx.as_ref(),
                             link_lsdb: &mut link.lsdb,
@@ -9206,6 +9211,7 @@ impl Ospf<Ospfv3> {
             // earlier gap here left authenticated adjacencies unable
             // to converge re-originated LSAs.
             let auth_mode = link.auth_mode();
+            let v3_instance_id = link.v3_instance_id();
             let auth_simple_key = link.config.auth_key;
             let auth_crypto_key =
                 link.resolve_active_send_key(&self.key_chains, chrono::Utc::now());
@@ -9233,7 +9239,7 @@ impl Ospf<Ospfv3> {
                 let mut packet = Ospfv3Packet::new(
                     &self.router_id,
                     &area_id,
-                    0,
+                    v3_instance_id,
                     Ospfv3Payload::LsUpdate(ls_upd),
                 );
                 let dst = nbr.ident.prefix.addr();
@@ -9295,6 +9301,7 @@ impl Ospf<Ospfv3> {
             return;
         };
         let area_id = link.area;
+        let v3_instance_id = link.v3_instance_id();
         let retransmit_interval = link.retransmit_interval();
         let Some(src) = link.addr.iter().find_map(|a| {
             let addr = a.prefix.addr();
@@ -9329,7 +9336,7 @@ impl Ospf<Ospfv3> {
         let mut packet = Ospfv3Packet::new(
             &self.router_id,
             &area_id,
-            0,
+            v3_instance_id,
             Ospfv3Payload::LsUpdate(ls_upd),
         );
         // RFC 7166: a retransmitted LSU carries the trailer like any
@@ -9946,6 +9953,7 @@ impl Ospf<Ospfv3> {
             return;
         };
         let retransmit_interval = link.retransmit_interval();
+        let v3_instance_id = link.v3_instance_id();
         // Auth send state captured before the neighbor loop (see
         // `flood_lsa_through_area`).
         let auth_mode = link.auth_mode();
@@ -9968,7 +9976,7 @@ impl Ospf<Ospfv3> {
             let mut packet = Ospfv3Packet::new(
                 &self.router_id,
                 &area_id,
-                0,
+                v3_instance_id,
                 Ospfv3Payload::LsUpdate(ls_upd),
             );
             let dst = nbr.ident.prefix.addr();
@@ -11307,6 +11315,26 @@ impl Ospf<Ospfv3> {
         } = recv;
         let our_router_id = self.router_id;
         let nbr_router_id = packet.router_id;
+
+        // RFC 5340 §8.2: the packet's Instance ID must match the
+        // receiving interface's — a mismatch means the packet belongs
+        // to a different OSPFv3 instance sharing this link, so drop
+        // it silently (before any further processing, auth included).
+        {
+            let Some(link) = self.links.get(&ifindex) else {
+                return;
+            };
+            if packet.instance_id != link.v3_instance_id() {
+                tracing::debug!(
+                    "[v3 Recv] Instance ID mismatch on {} from {}: got {}, ours {}",
+                    link.name,
+                    src,
+                    packet.instance_id,
+                    link.v3_instance_id()
+                );
+                return;
+            }
+        }
 
         // RFC 7166 Authentication Trailer verification — chain-
         // aware via `KeySource`, mirrors the v2 path in

@@ -1755,6 +1755,15 @@ module config {
             leaf retransmit-interval {
               type uint16;
             }
+            leaf instance-id {
+              ext:help "OSPFv3 Instance ID carried in packet headers (RFC 5340)";
+              // RFC 5340 §A.3.1: separates multiple OSPFv3 instances
+              // sharing one link. Both ends must match — a receiver
+              // drops packets whose Instance ID differs from the
+              // interface's (§8.2). Default 0.
+              type uint8;
+              default 0;
+            }
             leaf mtu-ignore {
               type boolean;
             }
