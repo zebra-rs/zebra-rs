@@ -1,0 +1,85 @@
+# z2 — MUP anchor / UPF + interwork node B (mirror of z1). From a PFCP session
+# on NI `core` it originates an ST2 whose endpoint is ceB (10.20.2.2, a host in
+# VRF N6 behind z2) plus a DSD (id 2:2) carrying the per-VRF End.DT46 SID from
+# LOC2. It imports z1's DSD+ST2 (id 1:1) and installs the ST2->DSD encap for
+# ceA (10.10.1.2 -> H.Encaps toward z1's End.DT46 SID). Together with z1 this
+# closes a bidirectional ceA<->ceB End.DT46 datapath (ST2->DSD both ways).
+vrf:
+- name: N6
+  mup:
+    route-target:
+      export:
+      - "65501:20"
+      import:
+      - "65501:10"
+interface:
+- if-name: lo
+  ipv6:
+    address: 2001:db8::2/128
+- if-name: z2-z1
+  ipv6:
+    address: 2001:db8:0:12::2/64
+- if-name: ce2
+  vrf: N6
+  ipv4:
+    address: 10.20.2.1/24
+segment-routing:
+  locator:
+  - name: LOC2
+    prefix: fcbb:bbbb:2::/48
+    behavior: usid
+router:
+  isis:
+    net: 49.0000.0000.0000.0002.00
+    hostname: z2
+    is-type: level-2-only
+    segment-routing:
+      srv6:
+        locator: LOC2
+    interface:
+    - if-name: lo
+      ipv6:
+        enable: true
+    - if-name: z2-z1
+      network-type: point-to-point
+      metric: 1
+      ipv6:
+        enable: true
+  bgp:
+    global:
+      as: 65501
+      router-id: 10.0.0.2
+    timer:
+      adv-interval:
+        ibgp: 1
+    segment-routing:
+      srv6:
+        locator: LOC2
+    neighbor:
+    - remote-address: 2001:db8::1
+      remote-as: 65501
+      update-source: 2001:db8::2
+      enabled: true
+      afi-safi:
+      - name: mup
+        enabled: true
+    vrf:
+    - name: N6
+      rd: "65501:20"
+      encapsulation: srv6
+      afi-safi:
+        mup:
+          segment:
+          - type: direct
+            mup-ext-comm: "2:2"
+          route:
+          - type: st2
+            network-instance: core
+            mup-ext-comm: "2:2"
+    mup-c:
+      enable: true
+      controller-address: 2001:db8::2
+      pfcp:
+        listen-address: 127.0.0.1
+      srv6:
+        locator: LOC2

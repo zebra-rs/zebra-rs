@@ -67,6 +67,16 @@ bgp_mup_st2_dsd_fib:
 	mkdir -p allure-results
 	cargo test --test cucumber -- --concurrency=1 --tags "@bgp_mup_st2_dsd_fib"
 
+# MUP End.DT46 dataplane forwarding: two collocated UPF+interwork nodes each
+# originate an ST2 (endpoint = a host behind it) + a DSD from a PFCP session,
+# import the other's, and install the ST2->DSD encap. A bidirectional ceA<->ceB
+# ping then traverses the MUP End.DT46 datapath both ways (real traffic, the
+# forwarding counterpart of bgp_mup_st2_dsd_fib). Needs `pfcp-inject` on the
+# host PATH + root netns (kernel VRF + seg6 + IS-IS SRv6 underlay).
+bgp_mup_forwarding:
+	mkdir -p allure-results
+	cargo test --test cucumber -- --concurrency=1 --tags "@bgp_mup_forwarding"
+
 # MUP ST2: the MUP-C learns a PFCP decapsulation session (Network Instance
 # `core`) and originates a Type-2 Session-Transformed route carrying the
 # core endpoint + GTP TEID and the Direct segment id (MUP Extended
