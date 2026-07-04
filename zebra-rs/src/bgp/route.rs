@@ -6810,6 +6810,16 @@ fn evpn_srv6_sid(attr: &BgpAttr, behavior: u16) -> Option<std::net::Ipv6Addr> {
         .map(|(sid, _)| sid)
 }
 
+/// The L2 MTU from an EVPN route's Layer-2 Attributes EC (RFC 8214 §3.1).
+/// 0 when the EC is absent or carries no MTU — either way, no MTU check.
+fn evpn_l2_attr_mtu(attr: &BgpAttr) -> u16 {
+    attr.ecom
+        .as_ref()
+        .and_then(|ecom| ecom.0.iter().find_map(|v| v.as_l2_attr()))
+        .map(|a| a.mtu)
+        .unwrap_or(0)
+}
+
 fn extract_tunnel_endpoint(rib: &BgpRib) -> Option<IpAddr> {
     match rib.attr.nexthop.as_ref()? {
         BgpNexthop::Evpn(addr) => Some(*addr),
@@ -6925,6 +6935,7 @@ fn route_evpn_export_selected(
                             continue;
                         }
                         svc.remote_sid = None;
+                        svc.remote_mtu_mismatch = None;
                         if let Some(ifname) = svc.interface.clone() {
                             let local_sid = vpws.sids.get(name).map(|(a, _)| *a);
                             let _ = bgp
@@ -7117,11 +7128,27 @@ fn route_evpn_export_selected(
                     // RFC 9572 A-D form) has no SRv6 dataplane binding.
                     return;
                 };
+                let remote_mtu = evpn_l2_attr_mtu(&best.attr);
                 let vpws = &mut bgp.local_rib.evpn_vpws;
                 for (name, svc) in vpws.services.iter_mut() {
                     if svc.remote_service_id != Some(*eth_tag) || svc.evi != Some(evi) {
                         continue;
                     }
+                    // RFC 8214 §3.1: both ends non-zero and different —
+                    // the remote MUST NOT be used. Unbind if it had been.
+                    if !svc.mtu_compatible(remote_mtu) {
+                        svc.remote_mtu_mismatch = Some(remote_mtu);
+                        if svc.remote_sid.take().is_some()
+                            && let Some(ifname) = svc.interface.clone()
+                        {
+                            let local_sid = vpws.sids.get(name).map(|(a, _)| *a);
+                            let _ = bgp
+                                .rib_client
+                                .send(rib::Message::XconnectDel { ifname, local_sid });
+                        }
+                        continue;
+                    }
+                    svc.remote_mtu_mismatch = None;
                     svc.remote_sid = Some(remote_sid);
                     if let Some(ifname) = svc.interface.clone() {
                         let local_sid = vpws.sids.get(name).map(|(a, _)| *a);
@@ -14980,12 +15007,12 @@ impl Bgp {
         if self.router_id.is_unspecified() {
             return;
         }
-        let Some((evi, local_id)) = self
+        let Some((evi, local_id, mtu)) = self
             .local_rib
             .evpn_vpws
             .services
             .get(name)
-            .and_then(|s| s.params().map(|(evi, local, _, _)| (evi, local)))
+            .and_then(|s| s.params().map(|(evi, local, _, _)| (evi, local, s.mtu)))
         else {
             return;
         };
@@ -14998,7 +15025,13 @@ impl Bgp {
             eth_tag: local_id,
         };
         let mut attr = BgpAttr::new();
-        attr.ecom = Some(ExtCommunity::from([evpn_route_target(self.asn, evi)]));
+        // The EVI RT plus the RFC 8214 §3.1 Layer-2 Attributes EC: P bit
+        // (single-homed primary), no backup, no control word (SRv6), and
+        // the configured L2 MTU (0 = no MTU check at the remote).
+        attr.ecom = Some(ExtCommunity::from([
+            evpn_route_target(self.asn, evi),
+            ExtCommunityValue::l2_attr(true, false, false, mtu.unwrap_or(0)),
+        ]));
         attr.prefix_sid = prefix_sid;
         attr.nexthop = Some(BgpNexthop::Evpn(IpAddr::V4(self.router_id)));
         let rib = BgpRib::new(
@@ -15043,8 +15076,14 @@ impl Bgp {
     /// Find the currently-selected remote end of a VPWS service in the EVPN
     /// Loc-RIB: a non-originated per-EVI Type-1 (RFC 8214) whose Ethernet Tag
     /// is the service's `remote-service-id` within the same EVI, carrying an
-    /// `End.DX2` L2-Service SID. `None` while no such route is selected.
-    fn vpws_lookup_remote_sid(&self, evi: u32, remote_id: u32) -> Option<std::net::Ipv6Addr> {
+    /// `End.DX2` L2-Service SID. Returns the SID plus the route's Layer-2
+    /// Attributes MTU (0 = none signalled); `None` while no such route is
+    /// selected.
+    fn vpws_lookup_remote_sid(
+        &self,
+        evi: u32,
+        remote_id: u32,
+    ) -> Option<(std::net::Ipv6Addr, u16)> {
         if remote_id == MAX_ET {
             // MAX-ET tags per-ES A-D routes, never a VPWS service instance.
             return None;
@@ -15061,7 +15100,7 @@ impl Bgp {
                     continue;
                 }
                 if let Some(sid) = evpn_srv6_sid(&rib.attr, bgp_packet::SRV6_BEHAVIOR_END_DX2) {
-                    return Some(sid);
+                    return Some((sid, evpn_l2_attr_mtu(&rib.attr)));
                 }
             }
         }
@@ -15082,11 +15121,20 @@ impl Bgp {
         };
         let cached = svc.remote_sid;
         let ifname = svc.interface.clone();
-        let remote = svc
+        // The RFC 8214 §3.1 MTU gate: a found remote whose non-zero MTU
+        // differs from our non-zero MTU is unusable — treated as no match,
+        // remembered for `show` as mtu-mismatch.
+        let found = svc
             .params()
             .and_then(|(evi, _, remote_id, _)| self.vpws_lookup_remote_sid(evi, remote_id));
+        let (remote, mismatch) = match found {
+            Some((sid, remote_mtu)) if svc.mtu_compatible(remote_mtu) => (Some(sid), None),
+            Some((_, remote_mtu)) => (None, Some(remote_mtu)),
+            None => (None, None),
+        };
         if let Some(svc) = self.local_rib.evpn_vpws.services.get_mut(name) {
             svc.remote_sid = remote;
+            svc.remote_mtu_mismatch = mismatch;
         }
         let local_sid = self.local_rib.evpn_vpws.sids.get(name).map(|(a, _)| *a);
         match (remote, ifname) {
@@ -15098,9 +15146,9 @@ impl Bgp {
                 });
             }
             // A previously-bound AC whose remote no longer matches (config
-            // re-pointed, or now partial): unbind. Interface *changes* are
-            // unbound by `config_vpws_interface`, which still knows the old
-            // AC name.
+            // re-pointed, MTU now clashing, or partial config): unbind.
+            // Interface *changes* are unbound by `config_vpws_interface`,
+            // which still knows the old AC name.
             (None, Some(ifname)) if cached.is_some() => {
                 let _ = self
                     .ctx

@@ -1,0 +1,34 @@
+# (MTU variant) — eline1 signals L2 MTU 1500, matching z1: the E-Line comes back up.
+# z2 — the other EVPN VPWS PE (mirror of z1): local service instance id 102,
+# remote 101, End.DX2 SID carved from LOC2.
+segment-routing:
+  locator:
+  - name: LOC2
+    prefix: fcbb:bbbb:2::/48
+    behavior: usid
+router:
+  bgp:
+    global:
+      as: 65001
+      router-id: 192.168.0.2
+    segment-routing:
+      srv6:
+        locator: LOC2
+    afi-safi:
+    - name: evpn
+      vpws:
+      - name: eline1
+        evi: 100
+        local-service-id: 102
+        remote-service-id: 101
+        interface: ce2
+        mtu: 1500
+    neighbor:
+    - remote-address: 192.168.0.1
+      enabled: true
+      remote-as: 65001
+      afi-safi:
+      - name: ipv4
+        enabled: true
+      - name: evpn
+        enabled: true

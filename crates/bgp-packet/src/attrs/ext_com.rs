@@ -236,6 +236,54 @@ impl ExtCommunityValue {
         })
     }
 
+    /// Build an EVPN Layer-2 Attributes Extended Community (RFC 8214 §3.1):
+    /// EVPN high-type (0x06) + Layer-2 Attributes sub-type (0x04). Carried on
+    /// the **per-EVI** Ethernet A-D (Type-1) route of a VPWS service. The
+    /// 2-octet Control Flags carry P (primary), B (backup) and C
+    /// (control word); the 2-octet L2 MTU is 0 when no MTU check is wanted.
+    pub fn l2_attr(primary: bool, backup: bool, control_word: bool, mtu: u16) -> Self {
+        let mut flags: u16 = 0;
+        if primary {
+            flags |= L2AttrEc::PRIMARY;
+        }
+        if backup {
+            flags |= L2AttrEc::BACKUP;
+        }
+        if control_word {
+            flags |= L2AttrEc::CONTROL_WORD;
+        }
+        let mut val = [0u8; 6];
+        val[0..2].copy_from_slice(&flags.to_be_bytes());
+        val[2..4].copy_from_slice(&mtu.to_be_bytes());
+        ExtCommunityValue {
+            high_type: ExtCommunityType::Evpn as u8,
+            low_type: EVPN_L2_ATTR_SUB_TYPE,
+            val,
+        }
+    }
+
+    /// True iff this entry is an EVPN Layer-2 Attributes EC (RFC 8214 §3.1):
+    /// EVPN high-type (0x06) + Layer-2 Attributes sub-type (0x04).
+    pub fn is_l2_attr(&self) -> bool {
+        self.high_type == ExtCommunityType::Evpn as u8 && self.low_type == EVPN_L2_ATTR_SUB_TYPE
+    }
+
+    /// Decode the Layer-2 Attributes EC (RFC 8214 §3.1): the P/B/C control
+    /// flags and the L2 MTU (0 = no MTU check). `None` for any non-matching
+    /// EC.
+    pub fn as_l2_attr(&self) -> Option<L2AttrEc> {
+        if !self.is_l2_attr() {
+            return None;
+        }
+        let flags = u16::from_be_bytes([self.val[0], self.val[1]]);
+        Some(L2AttrEc {
+            primary: flags & L2AttrEc::PRIMARY != 0,
+            backup: flags & L2AttrEc::BACKUP != 0,
+            control_word: flags & L2AttrEc::CONTROL_WORD != 0,
+            mtu: u16::from_be_bytes([self.val[2], self.val[3]]),
+        })
+    }
+
     /// Build an EVI-RT Extended Community (RFC 9251 §9.5) from the EVI's
     /// (BD's) Route Target. The EVI-RT carries the same 6-octet RT value
     /// under the EVPN high-type (0x06), with the sub-type selecting the RT
@@ -313,6 +361,43 @@ const EVPN_ES_IMPORT_RT_SUB_TYPE: u8 = 0x02;
 /// ESI Label Extended Community sub-type (RFC 7432 §7.5), carried under the
 /// EVPN high-type (0x06).
 const EVPN_ESI_LABEL_SUB_TYPE: u8 = 0x01;
+
+/// Layer-2 Attributes Extended Community sub-type (RFC 8214 §3.1), carried
+/// under the EVPN high-type (0x06).
+const EVPN_L2_ATTR_SUB_TYPE: u8 = 0x04;
+
+/// Decoded EVPN Layer-2 Attributes Extended Community (RFC 8214 §3.1).
+/// Carried on the per-EVI Ethernet A-D (Type-1) route of a VPWS service to
+/// signal the endpoint role and the attachment circuit's L2 MTU.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct L2AttrEc {
+    /// P bit: this PE is the primary endpoint for the service.
+    pub primary: bool,
+    /// B bit: this PE is the backup endpoint (multihomed single-active).
+    pub backup: bool,
+    /// C bit: a control word is inserted between the label stack and the
+    /// L2 frame (MPLS pseudowire framing; unused over SRv6).
+    pub control_word: bool,
+    /// L2 MTU of the attachment circuit; 0 = no MTU check (RFC 8214 §3.1:
+    /// mismatched non-zero MTUs mean the remote MUST NOT be used).
+    pub mtu: u16,
+}
+
+impl L2AttrEc {
+    /// Control Flags bit 15 (LSB of the 16-bit field, MSB-0 numbering):
+    /// B — backup endpoint.
+    const BACKUP: u16 = 0x0001;
+    /// Control Flags bit 14: P — primary endpoint.
+    const PRIMARY: u16 = 0x0002;
+    /// Control Flags bit 13: C — control word present.
+    const CONTROL_WORD: u16 = 0x0004;
+}
+
+impl From<L2AttrEc> for ExtCommunityValue {
+    fn from(a: L2AttrEc) -> Self {
+        ExtCommunityValue::l2_attr(a.primary, a.backup, a.control_word, a.mtu)
+    }
+}
 
 /// Decoded EVPN ESI Label Extended Community (RFC 7432 §7.5). Carried on the
 /// per-ES Ethernet A-D (Type-1) route to signal the redundancy mode and the
@@ -596,6 +681,20 @@ impl fmt::Display for ExtCommunityValue {
                 "all-active"
             };
             write!(f, "esi-label:{mode}:{}", es.label)
+        } else if let Some(a) = self.as_l2_attr() {
+            // Layer-2 Attributes EC (RFC 8214 §3.1): the P/B/C control
+            // flags then the L2 MTU, e.g. `l2-attr:P:mtu1500`.
+            let mut s = String::new();
+            if a.primary {
+                s.push('P');
+            }
+            if a.backup {
+                s.push('B');
+            }
+            if a.control_word {
+                s.push('C');
+            }
+            write!(f, "l2-attr:{s}:mtu{}", a.mtu)
         } else if self.is_evi_rt() {
             // EVI-RT EC (RFC 9251 §9.5): render `evi-rt:` then the underlying
             // Route Target. The IPv6 form (0x0D) has no 8-octet RT, so fall
@@ -862,6 +961,39 @@ mod tests {
         }
         .into();
         assert_eq!(mld.to_string(), "mcast-flags:M");
+    }
+
+    #[test]
+    fn evpn_l2_attr_roundtrip() {
+        // RFC 8214 §3.1: single-homed primary, MTU 1500. Wire layout: flags
+        // in val[0..2] (B=0x0001, P=0x0002, C=0x0004), MTU in val[2..4].
+        let ec = ExtCommunityValue::l2_attr(true, false, false, 1500);
+        assert_eq!(ec.high_type, 0x06);
+        assert_eq!(ec.low_type, 0x04);
+        assert_eq!(ec.val, [0x00, 0x02, 0x05, 0xdc, 0x00, 0x00]);
+        let a = ec.as_l2_attr().expect("decodes");
+        assert!(a.primary && !a.backup && !a.control_word);
+        assert_eq!(a.mtu, 1500);
+        assert_eq!(ec.to_string(), "l2-attr:P:mtu1500");
+
+        let all: ExtCommunityValue = L2AttrEc {
+            primary: true,
+            backup: true,
+            control_word: true,
+            mtu: 0,
+        }
+        .into();
+        assert_eq!(all.val[0..2], [0x00, 0x07]);
+        assert_eq!(all.to_string(), "l2-attr:PBC:mtu0");
+    }
+
+    #[test]
+    fn evpn_l2_attr_false_for_esi_label() {
+        // Same EVPN high-type, different sub-type — must not cross-decode.
+        let esi = ExtCommunityValue::esi_label(false, 0);
+        assert!(esi.as_l2_attr().is_none());
+        let l2 = ExtCommunityValue::l2_attr(true, false, false, 0);
+        assert!(l2.as_esi_label().is_none());
     }
 
     #[test]

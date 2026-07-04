@@ -1954,6 +1954,13 @@ fn config_vpws_remote_service_id(bgp: &mut Bgp, args: Args, op: ConfigOp) -> Opt
     config_vpws_leaf(bgp, args, op, |svc, v| svc.remote_service_id = v, true)
 }
 
+/// `router bgp afi-safi evpn vpws <name> mtu <0..65535>` — the L2 MTU
+/// signalled in the Type-1's Layer-2 Attributes EC (RFC 8214 §3.1);
+/// 0 (or unset) disables the MTU check.
+fn config_vpws_mtu(bgp: &mut Bgp, args: Args, op: ConfigOp) -> Option<()> {
+    config_vpws_leaf(bgp, args, op, |svc, v| svc.mtu = v.map(|m| m as u16), true)
+}
+
 /// `router bgp afi-safi evpn vpws <name> interface <name>` — the
 /// attachment circuit. Changing (or clearing) it unbinds the old AC's
 /// cross-connect first.
@@ -4636,6 +4643,7 @@ impl Bgp {
             config_vpws_remote_service_id,
         );
         self.callback_add("/router/bgp/afi-safi/vpws/interface", config_vpws_interface);
+        self.callback_add("/router/bgp/afi-safi/vpws/mtu", config_vpws_mtu);
 
         // MUP controller (`router bgp mup-c …`, draft-ietf-bess-mup-safi).
         // Augmented in by zebra-bgp-mup-controller.yang; the controller
