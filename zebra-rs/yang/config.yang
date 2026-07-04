@@ -533,6 +533,10 @@ module config {
               }
               default type-2;
             }
+            leaf route-map {
+              ext:help "Filter/modify redistributed routes via a named policy-list";
+              type string;
+            }
           }
           container static {
             presence "Redistribute static routes as Type-5 AS-External LSAs";
@@ -548,6 +552,10 @@ module config {
                 enum type-2;
               }
               default type-2;
+            }
+            leaf route-map {
+              ext:help "Filter/modify redistributed routes via a named policy-list";
+              type string;
             }
           }
           container kernel {
@@ -565,6 +573,10 @@ module config {
               }
               default type-2;
             }
+            leaf route-map {
+              ext:help "Filter/modify redistributed routes via a named policy-list";
+              type string;
+            }
           }
           container isis {
             presence "Redistribute IS-IS routes as Type-5 AS-External LSAs";
@@ -581,6 +593,10 @@ module config {
               }
               default type-2;
             }
+            leaf route-map {
+              ext:help "Filter/modify redistributed routes via a named policy-list";
+              type string;
+            }
           }
           container bgp {
             presence "Redistribute BGP routes as Type-5 AS-External LSAs";
@@ -596,6 +612,10 @@ module config {
                 enum type-2;
               }
               default type-2;
+            }
+            leaf route-map {
+              ext:help "Filter/modify redistributed routes via a named policy-list";
+              type string;
             }
           }
         }
@@ -1431,6 +1451,10 @@ module config {
               }
               default type-2;
             }
+            leaf route-map {
+              ext:help "Filter/modify redistributed routes via a named policy-list";
+              type string;
+            }
           }
           container static {
             presence "Redistribute static routes as AS-External (Type-5) LSAs";
@@ -1446,6 +1470,10 @@ module config {
                 enum type-2;
               }
               default type-2;
+            }
+            leaf route-map {
+              ext:help "Filter/modify redistributed routes via a named policy-list";
+              type string;
             }
           }
           container kernel {
@@ -1463,6 +1491,10 @@ module config {
               }
               default type-2;
             }
+            leaf route-map {
+              ext:help "Filter/modify redistributed routes via a named policy-list";
+              type string;
+            }
           }
           container isis {
             presence "Redistribute IS-IS routes as AS-External (Type-5) LSAs";
@@ -1479,6 +1511,10 @@ module config {
               }
               default type-2;
             }
+            leaf route-map {
+              ext:help "Filter/modify redistributed routes via a named policy-list";
+              type string;
+            }
           }
           container bgp {
             presence "Redistribute BGP routes as AS-External (Type-5) LSAs";
@@ -1494,6 +1530,10 @@ module config {
                 enum type-2;
               }
               default type-2;
+            }
+            leaf route-map {
+              ext:help "Filter/modify redistributed routes via a named policy-list";
+              type string;
             }
           }
         }
