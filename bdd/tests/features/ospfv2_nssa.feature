@@ -248,11 +248,15 @@ Feature: OSPFv2 NSSA (Not-So-Stubby Area) Type-7 origination and translation
     # --- d: intra-NSSA Type-7, E1 metric = cost(d->c) 20 + ext 20 = 40. ---
     Then show command "show ospf route" in namespace "d" should contain "192.168.1.0/24"
     And show command "show ospf route" in namespace "d" should contain "[40]"
-    # --- b: translated Type-5 advertised by ABR a, E1 metric =
-    #     cost(b->a) 10 + ext 20 = 30. The differing metric (30 vs 40)
-    #     is the proof E1's distance term survives translation. ---
+    # --- b: translated Type-5. The Type-7 carries c's NSSA address
+    #     as the RFC 3101 §2.3 forwarding address and translation
+    #     preserves it, so b's E1 distance term measures the path to
+    #     the FA (the true AS exit at c), not to the translator a:
+    #     cost(b->FA 10.0.13.2) 20 + ext 20 = 40 — matching d, which
+    #     is equally 2 hops from c. (Before FA support this read
+    #     cost(b->a) 10 + 20 = 30.) ---
     And show command "show ospf route" in namespace "b" should contain "192.168.1.0/24"
-    And show command "show ospf route" in namespace "b" should contain "[30]"
+    And show command "show ospf route" in namespace "b" should contain "[40]"
 
     When I stop zebra-rs in namespace "a"
     And I stop zebra-rs in namespace "b"

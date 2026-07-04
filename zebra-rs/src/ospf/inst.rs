@@ -3481,19 +3481,43 @@ impl Ospf<Ospfv2> {
         if let Some(redist_entry) = entry
             && area_type.is_nssa()
         {
+            // RFC 3101 §2.3: a P-bit Type-7 must carry a non-zero
+            // forwarding address so translated Type-5 receivers can
+            // route to the prefix without an NSSA-internal path to
+            // this ASBR — use an address on one of our
+            // NSSA-connected interfaces.
+            let fwd_addr = self
+                .nssa_fa_for_area(area_id)
+                .unwrap_or(Ipv4Addr::UNSPECIFIED);
             for prefix in &desired {
                 self.nssa_lsa_originate_for_prefix(
                     area_id,
                     *prefix,
                     redist_entry.metric,
                     redist_entry.metric_type.is_type_2(),
-                    Ipv4Addr::UNSPECIFIED,
+                    fwd_addr,
                 );
                 if let Some(area) = self.areas.get_mut(area_id) {
                     area.redist_connected_originated.insert(*prefix);
                 }
             }
         }
+    }
+
+    /// RFC 3101 §2.3 forwarding-address selection: the first
+    /// non-loopback-range address on an enabled interface in the
+    /// NSSA. Deterministic (lowest ifindex first) so refreshes don't
+    /// flap the LSA body.
+    fn nssa_fa_for_area(&self, area_id: Ipv4Addr) -> Option<Ipv4Addr> {
+        self.links.values().find_map(|l| {
+            if !l.enabled || l.area_id != area_id {
+                return None;
+            }
+            l.addr
+                .iter()
+                .map(|a| a.prefix.addr())
+                .find(|a| a.octets()[0] != 127)
+        })
     }
 
     /// True when this router has interfaces in two or more OSPF
@@ -3630,13 +3654,13 @@ impl Ospf<Ospfv2> {
     /// - P-bit set in the source — RFC 3101 §3.2.1
     ///
     /// The forwarding address is copied verbatim into the Type-5
-    /// (RFC 3101 §3.2). A zero FA is permitted: the translated
-    /// Type-5 then also carries FA=0, so receivers reach the prefix
-    /// via the path to *this* ABR (the Type-5's advertising router),
-    /// which itself installs the Type-7 route into the NSSA — the
-    /// same FA=0 semantics `add_as_external_routes` /
-    /// `add_nssa_routes` already implement on the receive side.
-    fn nssa_translate_one(&mut self, type7: &OspfLsa) -> bool {
+    /// (RFC 3101 §3.2), unless the area's `nssa-suppress-fa` knob is
+    /// set — then it is zeroed, and receivers reach the prefix via
+    /// the path to *this* ABR (the Type-5's advertising router),
+    /// which itself installs the Type-7 route into the NSSA. A zero
+    /// FA on the source Type-7 is also permitted, with the same
+    /// via-the-ABR semantics on the receive side.
+    fn nssa_translate_one(&mut self, type7: &OspfLsa, suppress_fa: bool) -> bool {
         use crate::ospf::lsdb::OSPF_MAX_AGE;
         const P_BIT: u8 = 0x08;
 
@@ -3668,7 +3692,11 @@ impl Ospf<Ospfv2> {
             // RFC 3101 §3.2: preserve E-bit + TOS byte verbatim.
             ext_and_resvd: body.ext_and_tos,
             metric: body.metric,
-            forwarding_address: body.forwarding_address,
+            forwarding_address: if suppress_fa {
+                Ipv4Addr::UNSPECIFIED
+            } else {
+                body.forwarding_address
+            },
             external_route_tag: body.external_route_tag,
             tos_list: body.tos_list.clone(),
         };
@@ -3792,8 +3820,12 @@ impl Ospf<Ospfv2> {
         // Adv-Router)`, so iteration here yields at most one
         // source per ls_id — fine until cross-NSSA collision
         // becomes a real shape worth handling (deferred).
+        let suppress_fa = self
+            .areas
+            .get(area_id)
+            .is_some_and(|a| a.area_type.nssa_suppress_fa);
         for source in &sources {
-            if self.nssa_translate_one(source)
+            if self.nssa_translate_one(source, suppress_fa)
                 && let Some(area) = self.areas.get_mut(area_id)
             {
                 area.nssa_translated.insert(source.h.ls_id);
@@ -7685,19 +7717,40 @@ impl Ospf<Ospfv3> {
         if let Some(redist_entry) = entry
             && area_type.is_nssa()
         {
+            // RFC 3101 §2.3 (over the RFC 5340 F-flag): carry a
+            // forwarding address on one of our NSSA-connected
+            // interfaces so translated Type-5 receivers can route
+            // to the prefix directly. v6 sibling of the v2 FA
+            // selection.
+            let fwd_addr = self.nssa_fa_for_area_v3(area_id);
             for prefix in &desired {
                 self.nssa_lsa_originate_for_prefix_v3(
                     area_id,
                     *prefix,
                     redist_entry.metric,
                     redist_entry.metric_type.is_type_2(),
-                    None,
+                    fwd_addr,
                 );
                 if let Some(area) = self.areas.get_mut(area_id) {
                     area.redist_connected_originated_v6.insert(*prefix);
                 }
             }
         }
+    }
+
+    /// RFC 3101 §2.3 forwarding-address selection, v6: the first
+    /// global (non-link-local, non-loopback) address on an enabled
+    /// interface in the NSSA. Deterministic (lowest ifindex first).
+    fn nssa_fa_for_area_v3(&self, area_id: Ipv4Addr) -> Option<std::net::Ipv6Addr> {
+        self.links.values().find_map(|l| {
+            if !l.enabled || l.area_id != area_id {
+                return None;
+            }
+            l.addr
+                .iter()
+                .map(|a| a.prefix.addr())
+                .find(|a| !a.is_loopback() && (a.segments()[0] & 0xffc0) != 0xfe80)
+        })
     }
 
     /// RFC 3101 §2.3 v3 NSSA default-LSA origination. Thin
@@ -8795,7 +8848,7 @@ impl Ospf<Ospfv3> {
     ///   the LSA header as in v2)
     /// - forwarding-address present — FA=None mirrors v2's
     ///   FA=0.0.0.0 skip (defer FA-resolution symmetrically)
-    fn nssa_translate_one_v3(&mut self, type7: &ospf_packet::Ospfv3Lsa) -> bool {
+    fn nssa_translate_one_v3(&mut self, type7: &ospf_packet::Ospfv3Lsa, suppress_fa: bool) -> bool {
         use crate::ospf::lsdb::OSPF_MAX_AGE;
         use ospf_packet::{OSPFV3_AS_EXTERNAL_LSA_TYPE, Ospfv3LsBody, Ospfv3Lsa, Ospfv3LsaHeader};
 
@@ -8815,12 +8868,18 @@ impl Ospf<Ospfv3> {
         // translated Type-5 also carries no FA, so receivers reach the
         // prefix via the path to this ABR, which itself installs the
         // Type-7 route. Mirrors the v2 `nssa_translate_one` FA=0
-        // handling.
+        // handling. `nssa-suppress-fa` strips a present FA the same
+        // way.
 
         let link_state_id = type7.h.link_state_id;
         // Build a Type-5 wrapping the same body — RFC 5340 §A.4.9
         // says NSSA-LSA and AS-External-LSA share the wire body.
-        let translated_body = body.clone();
+        let mut translated_body = body.clone();
+        if suppress_fa && translated_body.forwarding_address.is_some() {
+            translated_body.forwarding_address = None;
+            // The F-flag advertises FA presence (RFC 5340 §A.4.7).
+            translated_body.flags &= !ospf_packet::OSPFV3_AS_EXTERNAL_FLAG_F;
+        }
         let header = Ospfv3LsaHeader {
             ls_age: 0,
             ls_type: OSPFV3_AS_EXTERNAL_LSA_TYPE,
@@ -8938,8 +8997,12 @@ impl Ospf<Ospfv3> {
             })
             .unwrap_or_default();
 
+        let suppress_fa = self
+            .areas
+            .get(area_id)
+            .is_some_and(|a| a.area_type.nssa_suppress_fa);
         for source in &sources {
-            if self.nssa_translate_one_v3(source)
+            if self.nssa_translate_one_v3(source, suppress_fa)
                 && let Some(area) = self.areas.get_mut(area_id)
             {
                 area.nssa_translated
@@ -12882,10 +12945,6 @@ fn add_as_external_routes(
         if ext.metric >= LS_INFINITY {
             continue;
         }
-        // Forwarding-address resolution (§16.4 step 3) deferred.
-        if !ext.forwarding_address.is_unspecified() {
-            continue;
-        }
 
         let asbr_id = lsa.data.h.adv_router;
         // The ASBR may not appear in THIS area's lsp_map / SPF at all when
@@ -12941,11 +13000,43 @@ fn add_as_external_routes(
             }
         };
 
+        // §16.4 step 3: with a zero forwarding address, packets go to
+        // the ASBR itself — cost and nexthops come from the ASBR
+        // path resolved above. With a NON-zero forwarding address,
+        // packets go to the FA: look it up in the routing table
+        // built so far (intra + inter-area routes precede externals
+        // in `build_rib_from_spf`); the match must be an intra- or
+        // inter-area path, else the LSA is unusable. Cost and
+        // nexthops then come from the FA's route, so traffic can
+        // bypass the ASBR entirely.
+        let (base_cost, nhops, dest_vertex) = if ext.forwarding_address.is_unspecified() {
+            let nhops = build_spf_nexthops(top, nexthop_vertex, &nexthop_path);
+            (asbr_cost, nhops, Some(nexthop_vertex))
+        } else {
+            let Ok(host) = Ipv4Net::new(ext.forwarding_address, 32) else {
+                continue;
+            };
+            let Some((_, fa_route)) = rib.get_lpm(&host) else {
+                continue;
+            };
+            if !matches!(
+                fa_route.path_type,
+                RouteType::IntraArea | RouteType::InterArea
+            ) {
+                continue;
+            }
+            (
+                fa_route.metric,
+                fa_route.nhops.clone(),
+                fa_route.dest_vertex,
+            )
+        };
+
         let is_type2 = (ext.ext_and_resvd & E_FLAG) != 0;
         let metric = if is_type2 {
             ext.metric
         } else {
-            asbr_cost.saturating_add(ext.metric)
+            base_cost.saturating_add(ext.metric)
         };
 
         let mask = u32::from(ext.netmask).leading_ones() as u8;
@@ -12954,7 +13045,6 @@ fn add_as_external_routes(
         };
         let prefix = prefix.trunc();
 
-        let nhops = build_spf_nexthops(top, nexthop_vertex, &nexthop_path);
         if nhops.is_empty() {
             continue;
         }
@@ -12965,7 +13055,7 @@ fn add_as_external_routes(
             nhops,
             sid: None,
             prefix_sid: None,
-            dest_vertex: Some(nexthop_vertex),
+            dest_vertex,
             backup_as_primary: top.fast_reroute_backup_as_primary,
         };
         rib_insert(rib, prefix, spf_route);
@@ -13017,14 +13107,6 @@ fn add_nssa_routes(
         if ext.metric >= LS_INFINITY {
             continue;
         }
-        // RFC 3101 §2.5 step 5: non-zero FA resolves the route via
-        // an intra-area path to the FA, not to the originator. The
-        // resolver lands in a follow-up — same shape that Type-5
-        // is missing today.
-        if !ext.forwarding_address.is_unspecified() {
-            continue;
-        }
-
         let Some(originator_vertex) = top.lsp_map.lookup(lsa.data.h.adv_router) else {
             continue;
         };
@@ -13032,11 +13114,41 @@ fn add_nssa_routes(
             continue;
         };
 
+        // RFC 3101 §2.5 step 5: a non-zero forwarding address
+        // resolves the route via the path to the FA, not to the
+        // originator. The FA must match an *intra-area* route within
+        // this NSSA (Type-7s never leave the area, so neither may
+        // their FA resolution).
+        let (base_cost, nhops, dest_vertex) = if ext.forwarding_address.is_unspecified() {
+            let nhops = build_spf_nexthops(top, originator_vertex, originator_path);
+            (
+                originator_path.cost,
+                nhops,
+                // Protect the path to the NSSA originator (ASBR).
+                Some(originator_vertex),
+            )
+        } else {
+            let Ok(host) = Ipv4Net::new(ext.forwarding_address, 32) else {
+                continue;
+            };
+            let Some((_, fa_route)) = rib.get_lpm(&host) else {
+                continue;
+            };
+            if fa_route.path_type != RouteType::IntraArea {
+                continue;
+            }
+            (
+                fa_route.metric,
+                fa_route.nhops.clone(),
+                fa_route.dest_vertex,
+            )
+        };
+
         let is_e2 = (ext.ext_and_tos & E_FLAG) != 0;
         let metric = if is_e2 {
             ext.metric
         } else {
-            originator_path.cost.saturating_add(ext.metric)
+            base_cost.saturating_add(ext.metric)
         };
 
         let mask = u32::from(ext.netmask).leading_ones() as u8;
@@ -13045,7 +13157,6 @@ fn add_nssa_routes(
         };
         let prefix = prefix.trunc();
 
-        let nhops = build_spf_nexthops(top, originator_vertex, originator_path);
         if nhops.is_empty() {
             continue;
         }
@@ -13056,8 +13167,7 @@ fn add_nssa_routes(
             nhops,
             sid: None,
             prefix_sid: None,
-            // Protect the path to the NSSA originator (ASBR).
-            dest_vertex: Some(originator_vertex),
+            dest_vertex,
             backup_as_primary: top.fast_reroute_backup_as_primary,
         };
         rib_insert(rib, prefix, spf_route);
@@ -14055,9 +14165,6 @@ fn add_as_external_routes_v3(
         if ext.metric >= OSPFV3_LS_INFINITY {
             continue;
         }
-        if ext.forwarding_address.is_some() {
-            continue;
-        }
 
         // Resolve the path to the ASBR: intra-area SPF first, else the
         // Inter-Area-Router-LSA fallback (RFC 2328 §16.4 step 5) so a
@@ -14073,34 +14180,64 @@ fn add_as_external_routes_v3(
             continue;
         };
 
+        // RFC 5340 §4.8.5 / RFC 2328 §16.4 step 3: an F-flagged
+        // forwarding address routes the external via the FA — its
+        // route (looked up in the intra + inter routes already in
+        // `rib`) supplies cost and nexthops; the ASBR resolution
+        // above stays as the reachability gate.
+        let (base_cost, nhops_map, dest_vertex) = match ext.forwarding_address {
+            None => {
+                let nhops = collect_v3_nexthops(top, asbr_path);
+                let nhops_map: BTreeMap<std::net::Ipv6Addr, SpfNexthopV3> = nhops
+                    .into_iter()
+                    .map(|(addr, ifindex)| {
+                        (
+                            addr,
+                            SpfNexthopV3 {
+                                ifindex,
+                                adjacency: false,
+                                backup: None,
+                            },
+                        )
+                    })
+                    .collect();
+                (asbr_cost, nhops_map, Some(asbr_vertex))
+            }
+            Some(fa) => {
+                let Ok(host) = ipnet::Ipv6Net::new(fa, 128) else {
+                    continue;
+                };
+                let Some((_, fa_route)) = rib.get_lpm(&host) else {
+                    continue;
+                };
+                if !matches!(
+                    fa_route.path_type,
+                    RouteType::IntraArea | RouteType::InterArea
+                ) {
+                    continue;
+                }
+                (
+                    fa_route.metric,
+                    fa_route.nhops.clone(),
+                    fa_route.dest_vertex,
+                )
+            }
+        };
+
         let is_e2 = (ext.flags & OSPFV3_AS_EXTERNAL_FLAG_E) != 0;
         let metric = if is_e2 {
             ext.metric
         } else {
-            asbr_cost.saturating_add(ext.metric)
+            base_cost.saturating_add(ext.metric)
         };
 
         let Some(net) = ospfv3_prefix_to_ipv6net(ext.prefix_length, &ext.address_prefix) else {
             continue;
         };
 
-        let nhops = collect_v3_nexthops(top, asbr_path);
-        if nhops.is_empty() {
+        if nhops_map.is_empty() {
             continue;
         }
-        let nhops_map: BTreeMap<std::net::Ipv6Addr, SpfNexthopV3> = nhops
-            .into_iter()
-            .map(|(addr, ifindex)| {
-                (
-                    addr,
-                    SpfNexthopV3 {
-                        ifindex,
-                        adjacency: false,
-                        backup: None,
-                    },
-                )
-            })
-            .collect();
 
         let entry = SpfRouteV3 {
             metric,
@@ -14108,7 +14245,7 @@ fn add_as_external_routes_v3(
             nhops: nhops_map,
             sid: None,
             prefix_sid: None,
-            dest_vertex: Some(asbr_vertex),
+            dest_vertex,
             backup_as_primary: top.fast_reroute_backup_as_primary,
         };
         rib6_insert(rib, net, entry);
@@ -14169,14 +14306,6 @@ fn add_nssa_routes_v3(
         if ext.metric >= OSPFV3_LS_INFINITY {
             continue;
         }
-        // RFC 3101 §2.5 step 5: non-zero FA resolves the route via
-        // an intra-area path to the FA, not to the originator. The
-        // resolver lands in a follow-up (same shape as v2 and the
-        // not-yet-written v3 AS-External walker).
-        if ext.forwarding_address.is_some() {
-            continue;
-        }
-
         let Some(originator_vertex) = top.lsp_map.lookup(lsa.data.h.advertising_router) else {
             continue;
         };
@@ -14184,34 +14313,65 @@ fn add_nssa_routes_v3(
             continue;
         };
 
+        // RFC 3101 §2.5 step 5: a non-zero forwarding address
+        // resolves the route via the path to the FA, which must be
+        // an intra-area route within this NSSA (v3 mirror of the v2
+        // walker).
+        let (base_cost, nhops_map, dest_vertex) = match ext.forwarding_address {
+            None => {
+                let nhops = collect_v3_nexthops(top, originator_path);
+                let nhops_map: BTreeMap<std::net::Ipv6Addr, SpfNexthopV3> = nhops
+                    .into_iter()
+                    .map(|(addr, ifindex)| {
+                        (
+                            addr,
+                            SpfNexthopV3 {
+                                ifindex,
+                                adjacency: false,
+                                backup: None,
+                            },
+                        )
+                    })
+                    .collect();
+                (
+                    originator_path.cost,
+                    nhops_map,
+                    // Protect the path to the NSSA originator (ASBR).
+                    Some(originator_vertex),
+                )
+            }
+            Some(fa) => {
+                let Ok(host) = ipnet::Ipv6Net::new(fa, 128) else {
+                    continue;
+                };
+                let Some((_, fa_route)) = rib.get_lpm(&host) else {
+                    continue;
+                };
+                if fa_route.path_type != RouteType::IntraArea {
+                    continue;
+                }
+                (
+                    fa_route.metric,
+                    fa_route.nhops.clone(),
+                    fa_route.dest_vertex,
+                )
+            }
+        };
+
         let is_e2 = (ext.flags & OSPFV3_AS_EXTERNAL_FLAG_E) != 0;
         let metric = if is_e2 {
             ext.metric
         } else {
-            originator_path.cost.saturating_add(ext.metric)
+            base_cost.saturating_add(ext.metric)
         };
 
         let Some(net) = ospfv3_prefix_to_ipv6net(ext.prefix_length, &ext.address_prefix) else {
             continue;
         };
 
-        let nhops = collect_v3_nexthops(top, originator_path);
-        if nhops.is_empty() {
+        if nhops_map.is_empty() {
             continue;
         }
-        let nhops_map: BTreeMap<std::net::Ipv6Addr, SpfNexthopV3> = nhops
-            .into_iter()
-            .map(|(addr, ifindex)| {
-                (
-                    addr,
-                    SpfNexthopV3 {
-                        ifindex,
-                        adjacency: false,
-                        backup: None,
-                    },
-                )
-            })
-            .collect();
 
         let entry = SpfRouteV3 {
             metric,
@@ -14219,8 +14379,7 @@ fn add_nssa_routes_v3(
             nhops: nhops_map,
             sid: None,
             prefix_sid: None,
-            // Protect the path to the NSSA originator (ASBR).
-            dest_vertex: Some(originator_vertex),
+            dest_vertex,
             backup_as_primary: top.fast_reroute_backup_as_primary,
         };
         // Equal-cost merge — same shape as the intra-area insert

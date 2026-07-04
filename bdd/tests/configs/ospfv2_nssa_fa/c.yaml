@@ -1,0 +1,26 @@
+# c is the NSSA-internal ASBR: redistributes its dummy as a P-bit
+# Type-7 which (RFC 3101 §2.3) now carries a non-zero forwarding
+# address — c's NSSA interface 10.0.13.2.
+interface:
+- if-name: lo
+  ipv4:
+    address: 10.0.0.3/32
+- if-name: etha
+  ipv4:
+    address: 10.0.13.2/30
+router:
+  ospf:
+    router-id: 10.0.0.3
+    area:
+    - area-id: 0.0.0.1
+      area-type: nssa
+      redistribute:
+        connected:
+          metric: 20
+          metric-type: type-2
+      interface:
+      - if-name: lo
+        enable: true
+      - if-name: etha
+        enable: true
+        network-type: point-to-point

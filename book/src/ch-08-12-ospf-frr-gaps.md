@@ -8,10 +8,6 @@ OSPFv2 features not yet implemented in zebra-rs:
 - The redistribution `table` source (the zebra-rs sources are
   connected, static, kernel, IS-IS, and BGP; `route-map` filtering
   on those sources is implemented — see below).
-- Forwarding-address resolution on received externals: Type-5/
-  Type-7 LSAs carrying a non-zero forwarding address are skipped
-  (RFC 2328 §16.4 step 3); zebra-rs itself always originates with
-  FA 0.0.0.0.
 
 ## Previously listed gaps that are now closed
 
@@ -84,3 +80,12 @@ per feature — see each feature's page):
   route-map semantics; edits to the list or its prefix-sets re-apply
   live. Both OSPFv2 and OSPFv3. See
   [Route Redistribution](ch-08-15-ospf-redistribution.md#route-map-filtering).
+- **Forwarding-address origination and resolution** — NSSA ASBRs
+  now originate P-bit Type-7s with a non-zero forwarding address
+  (RFC 3101 §2.3, an address on an NSSA-connected interface); the
+  translator preserves it (or zeroes it under `nssa-suppress-fa`,
+  which previously had no effect); and receivers resolve
+  FA-carrying Type-5/Type-7s via the intra/inter-area path to the
+  FA (RFC 2328 §16.4 step 3) instead of skipping them — E1 metrics
+  now measure the distance to the true AS exit. Both OSPFv2 and
+  OSPFv3. See [Area Types](ch-08-13-ospf-area-types.md).
