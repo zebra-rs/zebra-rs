@@ -29,19 +29,25 @@ pub struct MupSession {
     pub ue_ipv4: Option<Ipv4Addr>,
     /// UE IPv6 address/prefix, if assigned.
     pub ue_ipv6: Option<Ipv6Addr>,
-    /// Access-side GTP-U TEID (from the `SourceInterface=Access` PDR's
-    /// F-TEID). Used for the **Type-1 ST** route (access side, draft §3.3.7).
+    /// gNB (access-side) GTP-U TEID, from the downlink FAR's Outer Header
+    /// Creation (Destination Interface = Access) — the tunnel the UPF
+    /// encapsulates downlink traffic toward, *not* the UPF's own N3 F-TEID.
+    /// Used for the **Type-1 ST** route (access side, draft §3.3.7). `0` until
+    /// the gNB tunnel is programmed (typically a post-N2 Session Modification).
     pub teid: u32,
-    /// Access-side GTP-U endpoint — the gNB-facing F-TEID address. Used for
-    /// the **Type-1 ST** route.
+    /// gNB (access-side) GTP-U endpoint — the gNB address from the downlink
+    /// FAR's Outer Header Creation. Used for the **Type-1 ST** route. `None`
+    /// until the gNB tunnel is programmed (post-N2 Session Modification).
     pub endpoint: Option<IpAddr>,
-    /// Core-side GTP-U TEID (from the `SourceInterface=Core` PDR's F-TEID).
-    /// Used for the **Type-2 ST** route (core side, draft §3.3.10). `0` when
-    /// the session carried no core-side F-TEID.
+    /// Core-side GTP-U TEID, from a FAR's Outer Header Creation bound for the
+    /// Core interface — a core-facing GTP tunnel (e.g. N9 to an anchor UPF).
+    /// Used for the **Type-2 ST** route (core side, draft §3.3.10). `0` for a
+    /// plain N6 breakout, which has no core-side GTP tunnel.
     pub core_teid: u32,
-    /// Core-side GTP-U endpoint — the core-facing F-TEID address. Used for
-    /// the **Type-2 ST** route. `None` falls back to the access endpoint so a
-    /// single-endpoint session still originates an ST2.
+    /// Core-side GTP-U endpoint — the core address from a Core-bound FAR's
+    /// Outer Header Creation. Used for the **Type-2 ST** route. `None` falls
+    /// back to the access endpoint so a single-tunnel session still
+    /// originates an ST2.
     pub core_endpoint: Option<IpAddr>,
     /// Network Instance (APN/DNN). Correlated to a BGP VRF `mup`
     /// config when routes are originated.
