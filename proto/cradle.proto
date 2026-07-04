@@ -126,6 +126,24 @@ message FdbRemoteDel {
   uint32 bd  = 2;
 }
 
+// A VPWS cross-connect (EVPN E-Line, RFC 8214): bind the attachment
+// circuit `port` to the remote End.DX2/DX2V service SID — every frame
+// arriving on the AC is MAC-in-SRv6 encapsulated toward it (no FDB).
+message Xconnect {
+  string port      = 1;  // AC interface name (or use port_index)
+  uint32 port_index = 2; // AC ifindex (0 = resolve `port` by name)
+  string remote_sid = 3;
+  // When non-empty, also install this End.DX2 LocalSid bound to the same
+  // AC (decap + raw emit) — one RPC binds the E-Line both directions.
+  string local_sid  = 4;
+}
+
+message XconnectDel {
+  string port       = 1;
+  uint32 port_index = 2;
+  string local_sid  = 3; // when non-empty, also remove this End.DX2 LocalSid
+}
+
 // A BUM ingress-replication slot: one remote PE in bridge domain `bd`,
 // reached by MAC-in-SRv6 toward its End.DT2M `remote_sid`. cradle manages
 // the slot's plumbing itself (a veth pair in the flood list whose far end
@@ -276,6 +294,8 @@ service Cradle {
   rpc AddFdbRemote(FdbRemote) returns (Empty);
   rpc DelFdbRemote(FdbRemoteDel) returns (Empty);
   rpc WatchFdb(WatchFdbRequest) returns (stream FdbEvent);
+  rpc AddXconnect(Xconnect) returns (Empty);
+  rpc DelXconnect(XconnectDel) returns (Empty);
   rpc AddReplSlot(ReplSlot) returns (Empty);
   rpc DelReplSlot(ReplSlot) returns (Empty);
   rpc AddMirrorRoute(MirrorRoute) returns (Empty);

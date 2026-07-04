@@ -10,14 +10,17 @@ use crate::{AttrType, ParseBe};
 use super::{AttrEmitter, AttrFlags};
 
 /// SRv6 Endpoint Behavior codepoints (IANA "SRv6 Endpoint Behaviors",
-/// RFC 8986). The L3VPN decap behaviors plus the L2 decaps used by
-/// EVPN-over-SRv6: unicast (`End.DT2U`, RFC 9252 §6.1/§6.2 on Type-2) and
-/// multicast/BUM (`End.DT2M`, §6.4 on Type-3).
+/// RFC 8986). The L3VPN decap behaviors plus the L2 behaviors used by
+/// EVPN-over-SRv6: VPWS cross-connect (`End.DX2`/`End.DX2V`, RFC 9252
+/// §6.3 on Type-1), unicast bridging (`End.DT2U`, §6.1/§6.2 on Type-2)
+/// and multicast/BUM (`End.DT2M`, §6.4 on Type-3).
 pub const SRV6_BEHAVIOR_END_DT6: u16 = 0x0012;
 pub const SRV6_BEHAVIOR_END_DT4: u16 = 0x0013;
 pub const SRV6_BEHAVIOR_END_DT46: u16 = 0x0014;
-pub const SRV6_BEHAVIOR_END_DT2U: u16 = 0x0015;
-pub const SRV6_BEHAVIOR_END_DT2M: u16 = 0x0016;
+pub const SRV6_BEHAVIOR_END_DX2: u16 = 0x0015;
+pub const SRV6_BEHAVIOR_END_DX2V: u16 = 0x0016;
+pub const SRV6_BEHAVIOR_END_DT2U: u16 = 0x0017;
+pub const SRV6_BEHAVIOR_END_DT2M: u16 = 0x0018;
 
 /// BGP Prefix-SID TLV Types (IANA "BGP Prefix-SID TLV Types", RFC 8669 /
 /// RFC 9252 §8.1).
@@ -540,6 +543,20 @@ mod tests {
         let (rest, parsed) = PrefixSid::parse_be(&bytes).expect("parse");
         assert!(rest.is_empty(), "trailing bytes after parse");
         parsed
+    }
+
+    /// Pin the IANA "SRv6 Endpoint Behaviors" codepoints — End.DX2/DX2V
+    /// sit at 21/22 and End.DT2U/DT2M at 23/24; an off-by-two here once
+    /// shipped DT2U/DT2M as 21/22.
+    #[test]
+    fn behavior_codepoints_match_iana() {
+        assert_eq!(SRV6_BEHAVIOR_END_DT6, 18);
+        assert_eq!(SRV6_BEHAVIOR_END_DT4, 19);
+        assert_eq!(SRV6_BEHAVIOR_END_DT46, 20);
+        assert_eq!(SRV6_BEHAVIOR_END_DX2, 21);
+        assert_eq!(SRV6_BEHAVIOR_END_DX2V, 22);
+        assert_eq!(SRV6_BEHAVIOR_END_DT2U, 23);
+        assert_eq!(SRV6_BEHAVIOR_END_DT2M, 24);
     }
 
     #[test]

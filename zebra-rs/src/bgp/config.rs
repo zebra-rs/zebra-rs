@@ -1884,6 +1884,111 @@ fn config_ethernet_segment_interface(bgp: &mut Bgp, mut args: Args, op: ConfigOp
     Some(())
 }
 
+/// `router bgp afi-safi evpn vpws <name>` (RFC 8214) — create or delete a
+/// VPWS E-Line service. Deleting withdraws its Type-1, unbinds the AC
+/// cross-connect, and releases its End.DX2 SID.
+fn config_vpws(bgp: &mut Bgp, mut args: Args, op: ConfigOp) -> Option<()> {
+    let afi_safi: AfiSafi = args.afi_safi()?;
+    if afi_safi.afi != Afi::L2vpn || afi_safi.safi != Safi::Evpn {
+        return None;
+    }
+    let name = args.string()?;
+    match op {
+        ConfigOp::Set => {
+            bgp.local_rib.evpn_vpws.services.entry(name).or_default();
+        }
+        ConfigOp::Delete => {
+            bgp.vpws_teardown(&name);
+            bgp.local_rib.evpn_vpws.services.remove(&name);
+        }
+        _ => {}
+    }
+    Some(())
+}
+
+/// Shared body for the VPWS leaf handlers: mutate one field, then
+/// reconcile the service (withdraw + re-originate + re-push the AC
+/// cross-connect as needed).
+fn config_vpws_leaf(
+    bgp: &mut Bgp,
+    mut args: Args,
+    op: ConfigOp,
+    set: impl FnOnce(&mut super::vpws::VpwsService, Option<u32>),
+    parse_u32: bool,
+) -> Option<()> {
+    let afi_safi: AfiSafi = args.afi_safi()?;
+    if afi_safi.afi != Afi::L2vpn || afi_safi.safi != Safi::Evpn {
+        return None;
+    }
+    let name = args.string()?;
+    let value = if op.is_set() && parse_u32 {
+        Some(args.u32()?)
+    } else {
+        None
+    };
+    let svc = bgp
+        .local_rib
+        .evpn_vpws
+        .services
+        .entry(name.clone())
+        .or_default();
+    set(svc, value);
+    bgp.vpws_reconcile(&name);
+    Some(())
+}
+
+/// `router bgp afi-safi evpn vpws <name> evi <1..16777215>`.
+fn config_vpws_evi(bgp: &mut Bgp, args: Args, op: ConfigOp) -> Option<()> {
+    config_vpws_leaf(bgp, args, op, |svc, v| svc.evi = v, true)
+}
+
+/// `router bgp afi-safi evpn vpws <name> local-service-id <id>` — the
+/// Ethernet Tag of our Type-1.
+fn config_vpws_local_service_id(bgp: &mut Bgp, args: Args, op: ConfigOp) -> Option<()> {
+    config_vpws_leaf(bgp, args, op, |svc, v| svc.local_service_id = v, true)
+}
+
+/// `router bgp afi-safi evpn vpws <name> remote-service-id <id>` — the
+/// Ethernet Tag expected on the remote PE's Type-1.
+fn config_vpws_remote_service_id(bgp: &mut Bgp, args: Args, op: ConfigOp) -> Option<()> {
+    config_vpws_leaf(bgp, args, op, |svc, v| svc.remote_service_id = v, true)
+}
+
+/// `router bgp afi-safi evpn vpws <name> interface <name>` — the
+/// attachment circuit. Changing (or clearing) it unbinds the old AC's
+/// cross-connect first.
+fn config_vpws_interface(bgp: &mut Bgp, mut args: Args, op: ConfigOp) -> Option<()> {
+    let afi_safi: AfiSafi = args.afi_safi()?;
+    if afi_safi.afi != Afi::L2vpn || afi_safi.safi != Safi::Evpn {
+        return None;
+    }
+    let name = args.string()?;
+    let interface = if op.is_set() {
+        Some(args.string()?)
+    } else {
+        None
+    };
+    let svc = bgp
+        .local_rib
+        .evpn_vpws
+        .services
+        .entry(name.clone())
+        .or_default();
+    let old = std::mem::replace(&mut svc.interface, interface);
+    if old != svc.interface
+        && svc.remote_sid.is_some()
+        && let Some(old_ifname) = old
+    {
+        let local_sid = bgp.local_rib.evpn_vpws.sids.get(&name).map(|(a, _)| *a);
+        let _ = bgp.ctx.rib.send(crate::rib::Message::XconnectDel {
+            ifname: old_ifname,
+            local_sid,
+        });
+    }
+    bgp.vpws_reconcile(&name);
+    Some(())
+}
+
 /// `router bgp afi-safi evpn segmentation <bool>` (RFC 9572 §8). When
 /// enabled, the Multicast Flags Extended Community's segmentation-support
 /// bit (bit 8) is attached to every originated Type-3 IMET route, telling
@@ -4516,6 +4621,21 @@ impl Bgp {
             "/router/bgp/afi-safi/ethernet-segment/interface",
             config_ethernet_segment_interface,
         );
+
+        // EVPN VPWS E-Line services (RFC 8214), under
+        // `router bgp afi-safi evpn vpws <name> …`. Augmented in by
+        // zebra-bgp-evpn.yang.
+        self.callback_add("/router/bgp/afi-safi/vpws", config_vpws);
+        self.callback_add("/router/bgp/afi-safi/vpws/evi", config_vpws_evi);
+        self.callback_add(
+            "/router/bgp/afi-safi/vpws/local-service-id",
+            config_vpws_local_service_id,
+        );
+        self.callback_add(
+            "/router/bgp/afi-safi/vpws/remote-service-id",
+            config_vpws_remote_service_id,
+        );
+        self.callback_add("/router/bgp/afi-safi/vpws/interface", config_vpws_interface);
 
         // MUP controller (`router bgp mup-c …`, draft-ietf-bess-mup-safi).
         // Augmented in by zebra-bgp-mup-controller.yang; the controller

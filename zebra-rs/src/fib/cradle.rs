@@ -70,6 +70,7 @@ fn srv6_behavior(b: crate::rib::SidBehavior) -> u32 {
         EndT => 14,    // End walk + table-scoped egress lookup (vrf_table_id)
         EndDX4 => 15,  // decap + IPv4 cross-connect (per-CE VPN egress)
         EndDX6 => 16,  // decap + IPv6 cross-connect
+        EndDX2 => 17,  // decap + raw L2 emit on the AC (EVPN VPWS egress)
         // uT = a uN whose end-of-carrier lookup is table-scoped: cradle
         // models it as UN with a non-zero vrf_id (vrf_table_id below).
         UT => 6,
@@ -797,6 +798,54 @@ impl CradleFib {
     }
 
     /// Remove a `(vni, sid)` replication slot.
+    /// EVPN VPWS cross-connect (RFC 8214 / RFC 9252 §6.3): bind AC `port`
+    /// to the remote PE's End.DX2 service SID. `local_sid`, when present,
+    /// rides in the same RPC so cradle also installs the local End.DX2
+    /// decap bound to the AC — one message programs the E-Line both ways.
+    pub async fn xconnect_add(
+        &self,
+        port: &str,
+        remote_sid: std::net::Ipv6Addr,
+        local_sid: Option<std::net::Ipv6Addr>,
+    ) {
+        let result = async {
+            self.client()
+                .await?
+                .add_xconnect(pb::Xconnect {
+                    port: port.to_string(),
+                    port_index: 0,
+                    remote_sid: remote_sid.to_string(),
+                    local_sid: local_sid.map(|s| s.to_string()).unwrap_or_default(),
+                })
+                .await?;
+            anyhow::Ok(())
+        }
+        .await;
+        if let Err(e) = result {
+            tracing::warn!("fib: cradle xconnect_add {port} -> {remote_sid} failed: {e}");
+        }
+    }
+
+    /// Remove a VPWS cross-connect (and its local End.DX2 decap, when
+    /// `local_sid` is present).
+    pub async fn xconnect_del(&self, port: &str, local_sid: Option<std::net::Ipv6Addr>) {
+        let result = async {
+            self.client()
+                .await?
+                .del_xconnect(pb::XconnectDel {
+                    port: port.to_string(),
+                    port_index: 0,
+                    local_sid: local_sid.map(|s| s.to_string()).unwrap_or_default(),
+                })
+                .await?;
+            anyhow::Ok(())
+        }
+        .await;
+        if let Err(e) = result {
+            tracing::warn!("fib: cradle xconnect_del {port} failed: {e}");
+        }
+    }
+
     pub async fn repl_slot_del(&self, vni: u32, sid: std::net::Ipv6Addr) {
         let result = async {
             self.client()

@@ -161,6 +161,50 @@ module zebra-bgp-evpn {
         description "Access interface (CE-facing port) bound to this ES.";
       }
     }
+    list vpws {
+      key "name";
+      description
+        "EVPN VPWS service (RFC 8214) — a point-to-point E-Line between one
+         local attachment circuit and one remote PE's AC, no MAC learning.
+         Advertises an Ethernet A-D per-EVI route (Type-1) whose Ethernet
+         Tag is the local VPWS service instance id, carrying an End.DX2
+         L2-Service Prefix-SID (RFC 9252 §6.3); imports the remote's
+         Type-1 by matching its Ethernet Tag against remote-service-id and
+         cross-connects the AC to the remote SID.";
+      leaf name {
+        type string;
+        description "Operator-chosen VPWS service name (the list key).";
+      }
+      leaf evi {
+        type uint32 {
+          range "1..16777215";
+        }
+        mandatory true;
+        description
+          "EVPN Instance the service belongs to — scopes the auto-derived
+           RD (router-id:evi) and RT (AS:evi) both ends must share.";
+      }
+      leaf local-service-id {
+        type uint32;
+        mandatory true;
+        description
+          "VPWS service instance id advertised as the Ethernet Tag of the
+           local Type-1 route; the remote end configures this value as its
+           remote-service-id.";
+      }
+      leaf remote-service-id {
+        type uint32;
+        mandatory true;
+        description
+          "Ethernet Tag expected on the remote PE's Type-1 route; a match
+           binds the remote End.DX2 SID as this AC's cross-connect target.";
+      }
+      leaf interface {
+        type string;
+        mandatory true;
+        description "Attachment circuit (CE-facing port) of the E-Line.";
+      }
+    }
     leaf bum-tunnel-type {
       type enumeration {
         enum ingress-replication {

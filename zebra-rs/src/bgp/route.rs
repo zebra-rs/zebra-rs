@@ -2620,6 +2620,12 @@ pub struct LocalRib {
     /// The sequence number on our own current Type-2 origination per
     /// `(vni, mac)`, for monotonicity across re-advertisements.
     pub evpn_local_mac_seq: std::collections::BTreeMap<(u32, MacAddr), u32>,
+
+    /// EVPN VPWS (RFC 8214) services + their allocated `End.DX2` SIDs.
+    /// Lives here — like `sr_policy_local` — so both the config callbacks
+    /// (`&mut Bgp`) and the Type-1 import arm (`BgpTop`) reach it without
+    /// threading a new `BgpTop` field.
+    pub evpn_vpws: super::vpws::VpwsState,
 }
 
 impl LocalRib {
@@ -6904,11 +6910,34 @@ fn route_evpn_export_selected(
                     });
                 }
             }
-            // RFC 7432 Type-1/4 ES routes, RFC 9251 Type-7/8 Synch, and RFC
+            // A withdrawn per-EVI Type-1 (RFC 8214): the remote end of a
+            // VPWS E-Line went away — unbind the AC cross-connect of every
+            // service that had matched it. Per-ES A-D (eth-tag MAX-ET) and
+            // our own originations don't bind anything.
+            EvpnPrefix::EthernetAd { eth_tag, .. } => {
+                if *eth_tag != MAX_ET
+                    && wd.typ != BgpRibType::Originated
+                    && let Some(evi) = extract_vni_from_attr(&wd.attr)
+                {
+                    let vpws = &mut bgp.local_rib.evpn_vpws;
+                    for (name, svc) in vpws.services.iter_mut() {
+                        if svc.remote_service_id != Some(*eth_tag) || svc.evi != Some(evi) {
+                            continue;
+                        }
+                        svc.remote_sid = None;
+                        if let Some(ifname) = svc.interface.clone() {
+                            let local_sid = vpws.sids.get(name).map(|(a, _)| *a);
+                            let _ = bgp
+                                .rib_client
+                                .send(rib::Message::XconnectDel { ifname, local_sid });
+                        }
+                    }
+                }
+            }
+            // RFC 7432 Type-4 ES routes, RFC 9251 Type-7/8 Synch, and RFC
             // 9572 A-D routes have no VXLAN dataplane action here — withdraw
             // is a control-plane no-op.
-            EvpnPrefix::EthernetAd { .. }
-            | EvpnPrefix::EthernetSeg { .. }
+            EvpnPrefix::EthernetSeg { .. }
             | EvpnPrefix::IgmpJoinSync { .. }
             | EvpnPrefix::IgmpLeaveSync { .. }
             | EvpnPrefix::PerRegionImet { .. }
@@ -7070,13 +7099,47 @@ fn route_evpn_export_selected(
                 });
             }
         }
-        // RFC 7432 Type-1/4 ES routes, RFC 9251 Type-7/8 Synch, and RFC 9572
+        // A per-EVI Type-1 (RFC 8214): a remote VPWS endpoint. Match its
+        // Ethernet Tag against each configured service's remote-service-id
+        // (within the same EVI, via the RT) and cross-connect the service's
+        // AC to the route's End.DX2 SID through the cradle tee — the
+        // XconnectAdd carries our own End.DX2 SID too, so one message
+        // programs both the ingress encap and the egress decap. Per-ES A-D
+        // (eth-tag MAX-ET) and our own originations bind nothing.
+        EvpnPrefix::EthernetAd { eth_tag, .. } => {
+            if *eth_tag != MAX_ET
+                && best.typ != BgpRibType::Originated
+                && let Some(evi) = extract_vni_from_attr(&best.attr)
+            {
+                let Some(remote_sid) = evpn_srv6_sid(&best.attr, bgp_packet::SRV6_BEHAVIOR_END_DX2)
+                else {
+                    // A Type-1 without an End.DX2 L2-Service SID (e.g. an
+                    // RFC 9572 A-D form) has no SRv6 dataplane binding.
+                    return;
+                };
+                let vpws = &mut bgp.local_rib.evpn_vpws;
+                for (name, svc) in vpws.services.iter_mut() {
+                    if svc.remote_service_id != Some(*eth_tag) || svc.evi != Some(evi) {
+                        continue;
+                    }
+                    svc.remote_sid = Some(remote_sid);
+                    if let Some(ifname) = svc.interface.clone() {
+                        let local_sid = vpws.sids.get(name).map(|(a, _)| *a);
+                        let _ = bgp.rib_client.send(rib::Message::XconnectAdd {
+                            ifname,
+                            remote_sid,
+                            local_sid,
+                        });
+                    }
+                }
+            }
+        }
+        // RFC 7432 Type-4 ES routes, RFC 9251 Type-7/8 Synch, and RFC 9572
         // Per-Region I-PMSI / S-PMSI / Leaf A-D have no VXLAN dataplane action
         // in the current control-plane phase — install is a no-op (the routes
         // are still stored and re-advertised; only kernel programming is
         // skipped).
-        EvpnPrefix::EthernetAd { .. }
-        | EvpnPrefix::EthernetSeg { .. }
+        EvpnPrefix::EthernetSeg { .. }
         | EvpnPrefix::IgmpJoinSync { .. }
         | EvpnPrefix::IgmpLeaveSync { .. }
         | EvpnPrefix::PerRegionImet { .. }
@@ -14906,6 +14969,163 @@ impl Bgp {
         let _ = self.local_rib.remove_evpn(rd, &prefix, 0, ORIGINATED_PEER);
         let _ = self.local_rib.select_best_path_evpn(&rd, &prefix);
         route_withdraw_evpn_to_peers(rd, prefix, &mut self.peers);
+    }
+
+    /// Originate VPWS service `name`'s Ethernet A-D per-EVI route (Type-1,
+    /// RFC 8214 §3.1): RD = `<router-id>:<evi>`, Ethernet Tag = the local
+    /// service instance id, all-zero ESI (single-homed), the EVI RT, and
+    /// this PE's `End.DX2` L2-Service Prefix-SID (RFC 9252 §6.3). No-op
+    /// while the config is partial or the router-id is unset.
+    pub fn evpn_originate_vpws(&mut self, name: &str) {
+        if self.router_id.is_unspecified() {
+            return;
+        }
+        let Some((evi, local_id)) = self
+            .local_rib
+            .evpn_vpws
+            .services
+            .get(name)
+            .and_then(|s| s.params().map(|(evi, local, _, _)| (evi, local)))
+        else {
+            return;
+        };
+        let Some(rd) = rd_from_router_id_vni(self.router_id, evi) else {
+            return;
+        };
+        let prefix_sid = self.vpws_dx2_prefix_sid(name);
+        let prefix = EvpnPrefix::EthernetAd {
+            esi: [0; 10],
+            eth_tag: local_id,
+        };
+        let mut attr = BgpAttr::new();
+        attr.ecom = Some(ExtCommunity::from([evpn_route_target(self.asn, evi)]));
+        attr.prefix_sid = prefix_sid;
+        attr.nexthop = Some(BgpNexthop::Evpn(IpAddr::V4(self.router_id)));
+        let rib = BgpRib::new(
+            ORIGINATED_PEER,
+            Ipv4Addr::UNSPECIFIED,
+            BgpRibType::Originated,
+            0,
+            32768,
+            &attr,
+            None,
+            None,
+            false,
+        );
+        if let Some(svc) = self.local_rib.evpn_vpws.services.get_mut(name) {
+            svc.originated = Some((evi, local_id));
+        }
+        self.evpn_originate_synch(rd, prefix, rib);
+    }
+
+    /// Withdraw VPWS service `name`'s Type-1 — keyed by what was actually
+    /// originated, so it stays correct after config-field changes. No-op
+    /// if nothing is originated.
+    pub fn evpn_withdraw_vpws(&mut self, name: &str) {
+        let Some(svc) = self.local_rib.evpn_vpws.services.get_mut(name) else {
+            return;
+        };
+        let Some((evi, eth_tag)) = svc.originated.take() else {
+            return;
+        };
+        let Some(rd) = rd_from_router_id_vni(self.router_id, evi) else {
+            return;
+        };
+        let prefix = EvpnPrefix::EthernetAd {
+            esi: [0; 10],
+            eth_tag,
+        };
+        let _ = self.local_rib.remove_evpn(rd, &prefix, 0, ORIGINATED_PEER);
+        let _ = self.local_rib.select_best_path_evpn(&rd, &prefix);
+        route_withdraw_evpn_to_peers(rd, prefix, &mut self.peers);
+    }
+
+    /// Find the currently-selected remote end of a VPWS service in the EVPN
+    /// Loc-RIB: a non-originated per-EVI Type-1 (RFC 8214) whose Ethernet Tag
+    /// is the service's `remote-service-id` within the same EVI, carrying an
+    /// `End.DX2` L2-Service SID. `None` while no such route is selected.
+    fn vpws_lookup_remote_sid(&self, evi: u32, remote_id: u32) -> Option<std::net::Ipv6Addr> {
+        if remote_id == MAX_ET {
+            // MAX-ET tags per-ES A-D routes, never a VPWS service instance.
+            return None;
+        }
+        for table in self.local_rib.evpn.values() {
+            for (prefix, rib) in table.selected.iter() {
+                let EvpnPrefix::EthernetAd { eth_tag, .. } = prefix else {
+                    continue;
+                };
+                if *eth_tag != remote_id
+                    || rib.typ == BgpRibType::Originated
+                    || extract_vni_from_attr(&rib.attr) != Some(evi)
+                {
+                    continue;
+                }
+                if let Some(sid) = evpn_srv6_sid(&rib.attr, bgp_packet::SRV6_BEHAVIOR_END_DX2) {
+                    return Some(sid);
+                }
+            }
+        }
+        None
+    }
+
+    /// Re-sync VPWS service `name` after a config or locator change:
+    /// withdraw the stale Type-1 (if any), originate afresh when the
+    /// config is complete, and re-derive the AC cross-connect from the
+    /// Loc-RIB — the matching remote Type-1 may have arrived before this
+    /// service was (fully) configured, or a re-pointed `remote-service-id`
+    /// / `evi` may now select a different remote, or none at all.
+    pub fn vpws_reconcile(&mut self, name: &str) {
+        self.evpn_withdraw_vpws(name);
+        self.evpn_originate_vpws(name);
+        let Some(svc) = self.local_rib.evpn_vpws.services.get(name) else {
+            return;
+        };
+        let cached = svc.remote_sid;
+        let ifname = svc.interface.clone();
+        let remote = svc
+            .params()
+            .and_then(|(evi, _, remote_id, _)| self.vpws_lookup_remote_sid(evi, remote_id));
+        if let Some(svc) = self.local_rib.evpn_vpws.services.get_mut(name) {
+            svc.remote_sid = remote;
+        }
+        let local_sid = self.local_rib.evpn_vpws.sids.get(name).map(|(a, _)| *a);
+        match (remote, ifname) {
+            (Some(remote_sid), Some(ifname)) => {
+                let _ = self.ctx.rib.send(crate::rib::Message::XconnectAdd {
+                    ifname,
+                    remote_sid,
+                    local_sid,
+                });
+            }
+            // A previously-bound AC whose remote no longer matches (config
+            // re-pointed, or now partial): unbind. Interface *changes* are
+            // unbound by `config_vpws_interface`, which still knows the old
+            // AC name.
+            (None, Some(ifname)) if cached.is_some() => {
+                let _ = self
+                    .ctx
+                    .rib
+                    .send(crate::rib::Message::XconnectDel { ifname, local_sid });
+            }
+            _ => {}
+        }
+    }
+
+    /// Full teardown for a deleted VPWS service: withdraw the Type-1,
+    /// unbind the AC cross-connect, release the `End.DX2` SID.
+    pub fn vpws_teardown(&mut self, name: &str) {
+        self.evpn_withdraw_vpws(name);
+        if let Some(svc) = self.local_rib.evpn_vpws.services.get_mut(name)
+            && svc.remote_sid.take().is_some()
+            && let Some(ifname) = svc.interface.clone()
+        {
+            let local_sid = self.local_rib.evpn_vpws.sids.get(name).map(|(a, _)| *a);
+            let _ = self
+                .ctx
+                .rib
+                .send(crate::rib::Message::XconnectDel { ifname, local_sid });
+        }
+        self.free_vpws_dx2_sid(name);
     }
 
     /// Originate the full set of routes for a locally-configured ES: the Type-4

@@ -21,6 +21,7 @@ pub mod peer_map;
 pub mod show;
 pub mod show_update_group;
 pub mod update_group;
+pub mod vpws;
 pub mod vrf;
 pub mod vrf_config;
 
