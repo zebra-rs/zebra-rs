@@ -1349,6 +1349,15 @@ impl<V: OspfVersion> Ospf<V> {
             .and_then(|e| e.pending_min_seq.take())
     }
 
+    /// `true` while this router should advertise itself as a stub
+    /// router — administratively (`max-metric router-lsa
+    /// administrative`, indefinite) or during the `on-startup` grace
+    /// window. v2 realizes it as RFC 6987 MaxLinkMetric on transit
+    /// links; v3 clears the RFC 5340 R/V6 option bits.
+    pub fn stub_router_active(&self) -> bool {
+        self.stub_router_admin || self.stub_router_startup_active
+    }
+
     /// A `LsaGenFire` deferral window elapsed: clear the (already-fired)
     /// timer, stamp the new origination time, and return the folded
     /// seq floor. The caller re-runs the matching `*_now` originator.
@@ -1957,14 +1966,6 @@ impl Ospf<Ospfv2> {
 
         router_lsa.num_links = router_lsa.links.len() as u16;
         router_lsa
-    }
-
-    /// RFC 6987: `true` while this router should advertise its
-    /// transit links at MaxLinkMetric — either administratively
-    /// (`max-metric router-lsa administrative`, indefinite) or during
-    /// the `on-startup` grace window.
-    pub fn stub_router_active(&self) -> bool {
-        self.stub_router_admin || self.stub_router_startup_active
     }
 
     /// Arm (or re-arm) the RFC 6987 `on-startup` stub-router window:
@@ -7284,7 +7285,23 @@ impl Ospf<Ospfv3> {
         if self.is_abr() {
             router_flags |= OSPFV3_ROUTER_LSA_FLAG_B;
         }
-        let body = Ospfv3RouterLsa::new(router_flags, Ospfv3Options::default(), links);
+        // RFC 5340 §A.2 options: an active router advertises V6 + R
+        // (+E outside stub/NSSA). The v3 stub router (`max-metric
+        // router-lsa`, ospf6d's `stub-router`) clears R and V6, so
+        // other routers exclude this vertex from transit paths
+        // (§4.8.1) while its own prefixes stay reachable — the v3
+        // counterpart of v2's MaxLinkMetric mechanism.
+        let stub_router = self.stub_router_active();
+        let area_e_bit = self
+            .areas
+            .get(area_id)
+            .map(|a| a.area_type.e_bit())
+            .unwrap_or(true);
+        let mut options = Ospfv3Options::default();
+        options.set_v6(!stub_router);
+        options.set_r(!stub_router);
+        options.set_e(area_e_bit);
+        let body = Ospfv3RouterLsa::new(router_flags, options, links);
         let mut lsa = Ospfv3Lsa {
             h: Ospfv3LsaHeader {
                 ls_age: 0,
@@ -7741,6 +7758,30 @@ impl Ospf<Ospfv3> {
                 }
             }
         }
+    }
+
+    /// v3 sibling of `stub_router_startup_arm`: hold the RFC 5340
+    /// R/V6-clear stub-router state for `secs` after config apply,
+    /// then `StubRouterExpire` resumes normal options.
+    pub fn stub_router_startup_arm_v3(&mut self, secs: u32) {
+        let tx = self.tx.clone();
+        self.stub_router_startup_active = true;
+        self.stub_router_startup_timer =
+            Some(Timer::new(secs as u64, TimerType::Once, move || {
+                let tx = tx.clone();
+                async move {
+                    let _ = tx.send(Message::StubRouterExpire);
+                }
+            }));
+        tracing::info!("[StubRouter v3] on-startup window armed for {}s", secs);
+        self.router_lsa_originate();
+    }
+
+    /// v3 sibling of `stub_router_startup_clear`.
+    pub fn stub_router_startup_clear_v3(&mut self) {
+        self.stub_router_startup_active = false;
+        self.stub_router_startup_timer = None;
+        self.router_lsa_originate();
     }
 
     /// RFC 3101 §2.3 forwarding-address selection, v6: the first
@@ -9809,6 +9850,14 @@ impl Ospf<Ospfv3> {
                     LsaGenKey::Router => self.router_lsa_originate_now(),
                     LsaGenKey::Network(ifindex) => self.network_lsa_originate_now(ifindex),
                 }
+            }
+            Message::StubRouterExpire => {
+                // RFC 5340 stub-router on-startup window over —
+                // re-originate Router-LSAs with R/V6 set again.
+                self.stub_router_startup_active = false;
+                self.stub_router_startup_timer = None;
+                tracing::info!("[StubRouter v3] on-startup window expired");
+                self.router_lsa_originate();
             }
             other => {
                 tracing::debug!(
@@ -13292,6 +13341,18 @@ fn graph_v3(top: &mut Ospf<Ospfv3>, area_id: Ipv4Addr) -> (spf::Graph, Option<us
         let Ospfv3LsBody::Router(ref router_body) = lsa_data.body else {
             continue;
         };
+        // RFC 5340 §4.8.1: a remote Router-LSA with the R-bit (or
+        // V6-bit) clear is a stub router — it must not be used for
+        // transit, so none of its outgoing edges enter the graph.
+        // Edges INTO it still wire from its neighbors' LSAs (their
+        // back-link checks read this LSA's link list directly), so
+        // the vertex stays reachable and its Intra-Area-Prefix
+        // routes resolve. The root's own edges always wire (the
+        // "V != root" rule) so a stub router still computes its own
+        // full SPF.
+        if !originated && (!router_body.options.r() || !router_body.options.v6()) {
+            continue;
+        }
         for link in &router_body.links {
             use ospf_packet::Ospfv3RouterLinkType;
             match link.link_type {

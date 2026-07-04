@@ -1,0 +1,31 @@
+# r2 is the cheap transit path — and the stub router under test:
+# with max-metric active its Router-LSAs carry R=0/V6=0, so
+# neighbors exclude it from transit (RFC 5340 §4.8.1) and r1->r3
+# traffic detours via r4.
+interface:
+- if-name: lo
+  ipv6:
+    address: 2001:db8::2/128
+- if-name: etha
+  ipv6:
+    address: 2001:db8:12::2/64
+- if-name: ethc
+  ipv6:
+    address: 2001:db8:23::1/64
+router:
+  ospfv3:
+    router-id: 10.0.0.2
+    max-metric:
+      router-lsa:
+        administrative: true
+    area:
+    - area-id: 0.0.0.0
+      interface:
+      - if-name: lo
+        enable: true
+      - if-name: etha
+        enable: true
+        network-type: point-to-point
+      - if-name: ethc
+        enable: true
+        network-type: point-to-point

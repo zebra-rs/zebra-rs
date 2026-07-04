@@ -69,10 +69,11 @@ per feature — see each feature's page):
   authentication (simple / MD5 / key-chain). OSPFv2 only (`ospf6d`
   has no virtual links either). See
   [Multi-Area Routing and the ABR](ch-08-14-ospf-multi-area-abr.md#virtual-links).
-- **Stub-router advertisement** (`max-metric router-lsa`, RFC 6987)
-  — administrative and `on-startup` modes advertise transit links at
-  MaxLinkMetric while stub links keep their cost. OSPFv2 only
-  (`ospf6d` uses the R-bit mechanism instead). See
+- **Stub-router advertisement** (`max-metric router-lsa`) —
+  administrative and `on-startup` modes; OSPFv2 advertises transit
+  links at MaxLinkMetric (RFC 6987) while OSPFv3 clears the R/V6
+  option bits (RFC 5340 §4.8.1, `ospf6d stub-router` parity), with
+  matching receive-side transit exclusion in the v3 SPF. See
   [Timer Configuration](ch-08-08-ospf-timers.md#stub-router-max-metric-router-lsa).
 - **Redistribution `route-map` filtering** — `redistribute <source>
   route-map <name>` binds a policy list (shared with BGP) as the

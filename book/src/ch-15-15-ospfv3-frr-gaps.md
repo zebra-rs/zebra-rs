@@ -12,6 +12,11 @@ The per-interface Instance ID (RFC 5340 §A.3.1) is configurable —
 `instance-id` on the interface entry, enforced on receive — see
 [Per-Interface Settings](ch-15-06-ospfv3-per-interface.md).
 
+Stub-router advertisement (`max-metric router-lsa`, `ospf6d`'s
+`stub-router`) is implemented via the RFC 5340 R/V6 option bits,
+including receive-side transit exclusion — see
+[Timer Configuration](ch-08-08-ospf-timers.md#stub-router-max-metric-router-lsa).
+
 Redistribution `route-map` filtering is implemented for OSPFv3
 identically to v2 (policy lists shared with BGP, live
 re-application) — see

@@ -89,6 +89,18 @@ impl Ospf<Ospfv3> {
             ),
             ("/spf-interval/maximum-wait", config_ospfv3_spf_maximum_wait),
             ("/min-ls-interval", config_ospfv3_min_ls_interval),
+            (
+                "/max-metric/router-lsa",
+                config_ospfv3_max_metric_router_lsa,
+            ),
+            (
+                "/max-metric/router-lsa/administrative",
+                config_ospfv3_max_metric_administrative,
+            ),
+            (
+                "/max-metric/router-lsa/on-startup",
+                config_ospfv3_max_metric_on_startup,
+            ),
             ("/min-ls-arrival", config_ospfv3_min_ls_arrival),
             (
                 "/default-information/originate",
@@ -842,6 +854,50 @@ fn config_ospfv3_spf_maximum_wait(
 ) -> Option<()> {
     let default = super::inst::SpfIntervalConfig::default().maximum_wait_ms;
     ospf.spf_interval.maximum_wait_ms = if op.is_set() { args.u32()? } else { default };
+    Some(())
+}
+
+/// `/router/ospfv3/max-metric/router-lsa` — RFC 5340 stub-router
+/// presence container (v6 sibling of the v2 handler; realized by
+/// clearing the R/V6 option bits instead of MaxLinkMetric).
+fn config_ospfv3_max_metric_router_lsa(
+    ospf: &mut Ospf<Ospfv3>,
+    _args: Args,
+    op: ConfigOp,
+) -> Option<()> {
+    if !op.is_set() {
+        ospf.stub_router_admin = false;
+        ospf.stub_router_startup_clear_v3();
+    }
+    Some(())
+}
+
+/// `/router/ospfv3/max-metric/router-lsa/administrative`.
+fn config_ospfv3_max_metric_administrative(
+    ospf: &mut Ospf<Ospfv3>,
+    mut args: Args,
+    op: ConfigOp,
+) -> Option<()> {
+    let value = if op.is_set() { args.boolean()? } else { false };
+    if ospf.stub_router_admin != value {
+        ospf.stub_router_admin = value;
+        ospf.router_lsa_originate();
+    }
+    Some(())
+}
+
+/// `/router/ospfv3/max-metric/router-lsa/on-startup`.
+fn config_ospfv3_max_metric_on_startup(
+    ospf: &mut Ospf<Ospfv3>,
+    mut args: Args,
+    op: ConfigOp,
+) -> Option<()> {
+    if op.is_set() {
+        let secs = args.u32()?;
+        ospf.stub_router_startup_arm_v3(secs);
+    } else {
+        ospf.stub_router_startup_clear_v3();
+    }
     Some(())
 }
 

@@ -159,9 +159,15 @@ applies, the classic use being a reboot grace period so BGP can
 converge before the router draws transit traffic; when the window
 expires the Router-LSAs re-originate with real metrics
 automatically. `show ospf` reports the active mode (`Stub router:
-administrative` / `on-startup (Ns remaining)`). OSPFv2 only —
-FRR's `ospf6d` implements the equivalent via the RFC 5340 R-bit
-instead, which zebra-rs does not yet expose. Validated by
-`ospfv2_stub_router.feature` (traffic detours around the stub
+administrative` / `on-startup (Ns remaining)`).
+
+OSPFv3 exposes the identical `max-metric { router-lsa { ... } }`
+block under `router ospfv3`, realized the RFC 5340 way (as in
+FRR's `ospf6d stub-router`): while active, the router's own
+Router-LSAs carry the **R and V6 option bits cleared**, and
+receivers exclude such a vertex from transit paths (§4.8.1) while
+its own prefixes stay reachable. `show ospfv3` reports the mode.
+Validated by `ospfv2_stub_router.feature` and
+`ospfv3_stub_router.feature` (traffic detours around the stub
 router onto a higher-cost path and returns when the window
 expires).

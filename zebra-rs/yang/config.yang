@@ -1601,6 +1601,31 @@ module config {
           units "milliseconds";
           default 5000;
         }
+        container max-metric {
+          ext:help "Advertise self as a stub router (RFC 5340 R-bit clear)";
+          container router-lsa {
+            ext:help "Clear the R/V6 option bits in own Router-LSAs";
+            // v6 sibling of the v2 max-metric block, realized the
+            // RFC 5340 way (ospf6d's `stub-router`): while active,
+            // own Router-LSAs carry R=0/V6=0 so other routers
+            // exclude this vertex from transit paths (§4.8.1) while
+            // its own prefixes stay reachable.
+            presence "RFC 5340 stub-router configuration";
+            leaf administrative {
+              ext:help "Indefinite (administrative) stub router";
+              type boolean;
+              default false;
+            }
+            leaf on-startup {
+              ext:help "Stub-router window after startup, seconds";
+              type uint32 {
+                range "5..86400";
+              }
+              units "seconds";
+            }
+          }
+        }
+
         // MinLSArrival — v6 sibling of the v2 min-ls-arrival leaf.
         leaf min-ls-arrival {
           ext:help "Minimum interval between accepted flooded copies of an LSA (MinLSArrival)";

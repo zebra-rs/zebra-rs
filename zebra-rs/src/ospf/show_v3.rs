@@ -497,6 +497,20 @@ fn show_ospfv3_summary(
     )?;
     writeln!(text, "  MinLSInterval: {} ms", summary.min_ls_interval_ms,)?;
     writeln!(text, "  MinLSArrival: {} ms", summary.min_ls_arrival_ms,)?;
+    if top.stub_router_admin {
+        writeln!(text, "  Stub router: administrative (R/V6 bits clear)")?;
+    } else if top.stub_router_startup_active {
+        let remaining = top
+            .stub_router_startup_timer
+            .as_ref()
+            .map(|t| t.remaining().as_secs())
+            .unwrap_or(0);
+        writeln!(
+            text,
+            "  Stub router: on-startup ({}s remaining, R/V6 bits clear)",
+            remaining
+        )?;
+    }
     if let Some(tilfa) = &summary.tilfa_compute {
         writeln!(text, "  TI-LFA compute: {}", tilfa)?;
     }
