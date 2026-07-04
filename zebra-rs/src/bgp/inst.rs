@@ -1367,6 +1367,14 @@ impl Bgp {
                     }
                 }
                 super::config::reoriginate_all_imet(self);
+                // VPWS Type-1s carry a per-service End.DX2 SID from the
+                // same pool — re-originate so each re-allocates under the
+                // new prefix (the reconcile above cleared them).
+                let vpws_names: Vec<String> =
+                    self.local_rib.evpn_vpws.services.keys().cloned().collect();
+                for name in vpws_names {
+                    self.vpws_reconcile(&name);
+                }
             }
             crate::rib::RibSrRx::Block { .. } => {}
         }
@@ -1530,6 +1538,69 @@ impl Bgp {
         ))
     }
 
+    /// Allocate (or return the existing) `End.DX2` SID for VPWS service
+    /// `name` — the EVPN VPWS egress SID (RFC 9252 §6.3), advertised on
+    /// the service's Type-1 Ethernet A-D per-EVI route. Registry-only at
+    /// this point: the cradle datapath entry is programmed by the
+    /// `XconnectAdd` tee once the AC binding is known (import side), so
+    /// `route_sid_install` skips the cradle LocalSid write for `EndDX2`.
+    fn alloc_vpws_dx2_sid(&mut self, name: &str) -> Option<std::net::Ipv6Addr> {
+        if let Some((addr, _function)) = self.local_rib.evpn_vpws.sids.get(name) {
+            return Some(*addr);
+        }
+        let prefix = self.srv6_locator.as_ref().and_then(|l| l.prefix)?;
+        let function = self.srv6_sid_pool.allocate()?;
+        match crate::isis::srv6::function_addr(prefix, function) {
+            Some(addr) => {
+                self.local_rib
+                    .evpn_vpws
+                    .sids
+                    .insert(name.to_string(), (addr, function));
+                let sid = crate::rib::Sid {
+                    addr,
+                    behavior: crate::rib::SidBehavior::EndDX2,
+                    context: crate::rib::SidContext::None,
+                    owner: crate::rib::SidOwner::new("bgp", 0),
+                    locator: self.srv6_locator_name.clone().unwrap_or_default(),
+                    allocation_type: crate::rib::SidAllocationType::Dynamic,
+                    ifindex: 0,
+                    nh6: None,
+                    structure: None,
+                    table_id: 0,
+                    segs: Vec::new(),
+                    flavors: 0,
+                };
+                let _ = self.ctx.rib.send(crate::rib::Message::SidAdd { sid });
+                Some(addr)
+            }
+            None => {
+                self.srv6_sid_pool.release(function);
+                None
+            }
+        }
+    }
+
+    /// Release VPWS service `name`'s `End.DX2` SID back to the pool.
+    pub(super) fn free_vpws_dx2_sid(&mut self, name: &str) {
+        if let Some((addr, function)) = self.local_rib.evpn_vpws.sids.remove(name) {
+            self.srv6_sid_pool.release(function);
+            let _ = self.ctx.rib.send(crate::rib::Message::SidDel { addr });
+        }
+    }
+
+    /// Build the SRv6 L2 Service Prefix-SID attribute advertised on VPWS
+    /// service `name`'s Type-1 route — this PE's `End.DX2` SID. `None`
+    /// when no locator has resolved.
+    pub(super) fn vpws_dx2_prefix_sid(&mut self, name: &str) -> Option<bgp_packet::PrefixSid> {
+        let sid = self.alloc_vpws_dx2_sid(name)?;
+        let structure = self.srv6_locator.as_ref().and_then(|l| l.sid_structure());
+        Some(srv6_l2_service_prefix_sid(
+            sid,
+            structure,
+            bgp_packet::SRV6_BEHAVIOR_END_DX2,
+        ))
+    }
+
     /// Rebuild a [`super::vrf::Srv6VrfSid`] from a handle's preserved
     /// `(addr, function)` so a relabel / kernel-ctx respawn re-installs
     /// the *same* SID rather than churning the address.
@@ -1558,6 +1629,8 @@ impl Bgp {
         // prefix.
         self.evpn_dt2m_sids.clear();
         self.evpn_dt2u_sids.clear();
+        // Same for the per-service VPWS End.DX2 SIDs.
+        self.local_rib.evpn_vpws.sids.clear();
         let srv6_vrfs: Vec<String> = self
             .vrf_registry
             .keys()
@@ -1807,6 +1880,13 @@ impl Bgp {
             for esi in esis {
                 self.evpn_withdraw_es_routes(esi, std::net::IpAddr::V4(old_router_id));
             }
+            // VPWS Type-1s are keyed by the <router-id>:<evi> RD — same
+            // rebind story; withdraw under the old id before it changes.
+            let vpws_names: Vec<String> =
+                self.local_rib.evpn_vpws.services.keys().cloned().collect();
+            for name in vpws_names {
+                self.evpn_withdraw_vpws(&name);
+            }
         }
 
         self.router_id = router_id;
@@ -1846,6 +1926,13 @@ impl Bgp {
                 .collect();
             for (esi, single_active) in es_list {
                 self.evpn_originate_es_routes(esi, std::net::IpAddr::V4(router_id), single_active);
+            }
+            // Re-originate VPWS Type-1s under the new router-id RD (the
+            // originate body re-checks that the config is complete).
+            let vpws_names: Vec<String> =
+                self.local_rib.evpn_vpws.services.keys().cloned().collect();
+            for name in vpws_names {
+                self.evpn_originate_vpws(&name);
             }
         }
 

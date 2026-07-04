@@ -347,6 +347,21 @@ pub enum Message {
         dst: std::net::Ipv4Addr,
         teid: u32,
     },
+    /// EVPN VPWS (RFC 8214): bind attachment circuit `ifname` to a remote
+    /// PE's `End.DX2` service SID — teed to cradle as an XCONNECT entry
+    /// (every AC frame MAC-in-SRv6 encapsulates toward it, no FDB) plus,
+    /// when `local_sid` is present, the local `End.DX2` LocalSid whose
+    /// decap emits raw on the same AC. No kernel counterpart — cradle is
+    /// the L2 data plane.
+    XconnectAdd {
+        ifname: String,
+        remote_sid: std::net::Ipv6Addr,
+        local_sid: Option<std::net::Ipv6Addr>,
+    },
+    XconnectDel {
+        ifname: String,
+        local_sid: Option<std::net::Ipv6Addr>,
+    },
     /// A MAC the cradle eBPF datapath learned on a local L2 port (via the
     /// `WatchFdb` stream). Re-emitted to EVPN subscribers as a synthesized
     /// `RibRx::FdbAdd` — the cradle analogue of a kernel bridge FDB learn —
@@ -3146,6 +3161,20 @@ impl Rib {
             }
             Message::CradleGtpPdrDel { dst, teid } => {
                 self.fib_handle.cradle_gtp_pdr_del(dst, teid).await;
+            }
+            Message::XconnectAdd {
+                ifname,
+                remote_sid,
+                local_sid,
+            } => {
+                self.fib_handle
+                    .cradle_xconnect_add(&ifname, remote_sid, local_sid)
+                    .await;
+            }
+            Message::XconnectDel { ifname, local_sid } => {
+                self.fib_handle
+                    .cradle_xconnect_del(&ifname, local_sid)
+                    .await;
             }
             Message::MdbAdd {
                 vni,

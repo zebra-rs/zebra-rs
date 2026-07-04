@@ -309,7 +309,7 @@ fn sid_route_target(
         // they never reach the kernel (no End.DT2U/DT2M seg6local action) —
         // `route_sid_install` returns after the cradle tee. The target is
         // computed anyway so the tee gets the right prefix length.
-        SidBehavior::EndDT2U | SidBehavior::EndDT2M => {
+        SidBehavior::EndDT2U | SidBehavior::EndDT2M | SidBehavior::EndDX2 => {
             (RouteHeader::RT_TABLE_MAIN, RouteType::Unicast, 128, addr)
         }
         // End.B6.Encaps (SR Policy Binding SID): a /128 host route in
@@ -562,6 +562,27 @@ impl FibHandle {
     pub async fn cradle_gtp_pdr_del(&self, dst: std::net::Ipv4Addr, teid: u32) {
         if let Some(cradle) = &self.cradle {
             cradle.gtp_pdr_del(dst, teid).await;
+        }
+    }
+
+    /// Tee an EVPN VPWS cross-connect to cradle (RFC 8214 Type-1 with an
+    /// SRv6 End.DX2 SID): bind AC `port` to the remote service SID, and —
+    /// when `local_sid` is present — install the local End.DX2 decap on
+    /// the same AC. No kernel counterpart — cradle is the L2 data plane.
+    pub async fn cradle_xconnect_add(
+        &self,
+        port: &str,
+        remote_sid: std::net::Ipv6Addr,
+        local_sid: Option<std::net::Ipv6Addr>,
+    ) {
+        if let Some(cradle) = &self.cradle {
+            cradle.xconnect_add(port, remote_sid, local_sid).await;
+        }
+    }
+
+    pub async fn cradle_xconnect_del(&self, port: &str, local_sid: Option<std::net::Ipv6Addr>) {
+        if let Some(cradle) = &self.cradle {
+            cradle.xconnect_del(port, local_sid).await;
         }
     }
 
@@ -1875,19 +1896,25 @@ impl FibHandle {
         let (table, kind, prefix_len, dest_addr) =
             sid_route_target(sid.behavior, sid.addr, sid.structure);
         // Tee the local SID to the cradle eBPF data plane (mirrors the netlink
-        // install below) — the SRv6 analogue of the ILM tee.
-        if let Some(cradle) = &self.cradle {
+        // install below) — the SRv6 analogue of the ILM tee. End.DX2 is
+        // registry-only here: its cradle entry is owned by the AddXconnect
+        // tee (which knows the AC binding); installing from the Sid — whose
+        // ifindex is 0 — would clobber a live cross-connect on replay.
+        if let Some(cradle) = &self.cradle
+            && sid.behavior != crate::rib::SidBehavior::EndDX2
+        {
             cradle.local_sid_install(sid, prefix_len, ifindex).await;
         }
         // EVPN-over-SRv6 L2 SIDs are cradle-only: the kernel has no
-        // End.DT2U/DT2M seg6local actions, so there is nothing to install
-        // via netlink. Same for REPLACE-C-SID (RFC 9800 §4.2): no kernel
+        // End.DT2U/DT2M/DX2 seg6local actions, so there is nothing to
+        // install via netlink. Same for REPLACE-C-SID (RFC 9800 §4.2): no kernel
         // flavor op exists through 6.8, and a plain-End fallback would
         // misread the packed containers as full SIDs — worse than no entry.
         if matches!(
             sid.behavior,
             crate::rib::SidBehavior::EndDT2U
                 | crate::rib::SidBehavior::EndDT2M
+                | crate::rib::SidBehavior::EndDX2
                 | crate::rib::SidBehavior::EndRep
                 | crate::rib::SidBehavior::EndXRep
                 | crate::rib::SidBehavior::UT
@@ -2057,6 +2084,7 @@ impl FibHandle {
             sid.behavior,
             crate::rib::SidBehavior::EndDT2U
                 | crate::rib::SidBehavior::EndDT2M
+                | crate::rib::SidBehavior::EndDX2
                 | crate::rib::SidBehavior::EndRep
                 | crate::rib::SidBehavior::EndXRep
                 | crate::rib::SidBehavior::UT

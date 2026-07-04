@@ -128,10 +128,10 @@ fn seg6local_action(behavior: SidBehavior) -> Seg6LocalAction {
         SidBehavior::EndDX4 => Seg6LocalAction::EndDx4,
         SidBehavior::EndDX6 => Seg6LocalAction::EndDx6,
         // EVPN L2 SIDs never reach the kernel (route_sid_install returns
-        // after the cradle tee — no End.DT2U/DT2M seg6local action exists);
+        // after the cradle tee — no End.DT2U/DT2M/DX2 seg6local action exists);
         // map to End so an unexpected call is a visible no-op rather than
         // a panic.
-        SidBehavior::EndDT2U | SidBehavior::EndDT2M => Seg6LocalAction::End,
+        SidBehavior::EndDT2U | SidBehavior::EndDT2M | SidBehavior::EndDX2 => Seg6LocalAction::End,
         SidBehavior::EndX | SidBehavior::UA | SidBehavior::UALib => Seg6LocalAction::EndX,
         // REPLACE-C-SID never reaches the kernel (route_sid_install
         // returns after the cradle tee — no kernel flavor op exists);

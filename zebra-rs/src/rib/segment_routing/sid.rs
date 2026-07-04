@@ -60,7 +60,7 @@ pub enum SidBehavior {
     /// (carried in [`Sid::segs`]) and forwarded. BGP SR Policy
     /// (SAFI 73) installs the advertised SRv6 Binding SID this way.
     EndB6Encap,
-    /// End.DT2U — RFC 8986 §4.9 (IANA codepoint 0x15). Decapsulates and
+    /// End.DT2U — RFC 8986 §4.11 (IANA codepoint 23). Decapsulates and
     /// switches the inner **Ethernet frame** by unicast destination MAC in
     /// the bridge domain carried in [`Sid::table_id`] (the VNI). The EVPN-
     /// over-SRv6 unicast service SID (RFC 9252 §6.1/§6.2), one per VNI,
@@ -68,12 +68,19 @@ pub enum SidBehavior {
     /// action — the cradle eBPF tee is the data plane, so the FIB skips
     /// the netlink install.
     EndDT2U,
-    /// End.DT2M — RFC 8986 §4.10 (IANA codepoint 0x16). Decapsulates and
+    /// End.DT2M — RFC 8986 §4.12 (IANA codepoint 24). Decapsulates and
     /// **floods** the inner Ethernet frame in the bridge domain
     /// ([`Sid::table_id`] = VNI). The EVPN-over-SRv6 BUM service SID
     /// (RFC 9252 §6.4), advertised on Type-3 IMET routes. Cradle-tee-only,
     /// like End.DT2U.
     EndDT2M,
+    /// End.DX2 — RFC 8986 §4.9 (IANA codepoint 21). Decapsulates and
+    /// emits the inner Ethernet frame **raw** on one bound attachment
+    /// circuit ([`Sid::ifindex`]) — the EVPN VPWS (E-Line, RFC 8214)
+    /// egress, advertised on Type-1 Ethernet A-D per-EVI routes with an
+    /// L2 Service Prefix-SID (RFC 9252 §6.3). Cradle-tee-only, like
+    /// End.DT2U.
+    EndDX2,
     /// End.M — Mirroring Context segment (IANA codepoint 74,
     /// draft-ietf-rtgwg-srv6-egress-protection). A variant of End.DT6:
     /// the protector decapsulates the outer IPv6/SRH and looks the inner
@@ -133,6 +140,7 @@ impl fmt::Display for SidBehavior {
             Self::UT => write!(f, "uT"),
             Self::EndDX4 => write!(f, "End.DX4"),
             Self::EndDX6 => write!(f, "End.DX6"),
+            Self::EndDX2 => write!(f, "End.DX2"),
         }
     }
 }
@@ -157,9 +165,9 @@ impl FromStr for SidBehavior {
             "End.DT6" => Ok(Self::EndDT6),
             "End.DT46" => Ok(Self::EndDT46),
             "End.B6.Encaps" => Ok(Self::EndB6Encap),
-            // End.DT2U / End.DT2M are deliberately absent: they are
-            // allocated per-VNI by BGP EVPN (`encapsulation srv6`), never
-            // named in config.
+            // End.DT2U / End.DT2M / End.DX2 are deliberately absent: they
+            // are allocated by BGP EVPN (per-VNI or per-VPWS service),
+            // never named in config.
             "End.M" => Ok(Self::EndM),
             other => Err(SidBehaviorParseError(other.to_string())),
         }
@@ -315,7 +323,8 @@ impl Sid {
             | SidBehavior::EndM
             | SidBehavior::EndT
             | SidBehavior::EndDX4
-            | SidBehavior::EndDX6 => Ipv6Net::new(self.addr, 128).expect("/128 is always valid"),
+            | SidBehavior::EndDX6
+            | SidBehavior::EndDX2 => Ipv6Net::new(self.addr, 128).expect("/128 is always valid"),
             SidBehavior::UALib => {
                 let plen = self
                     .structure
