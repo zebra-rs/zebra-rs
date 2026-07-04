@@ -56,11 +56,13 @@ pub struct MupSession {
     pub qfi: Option<u8>,
 }
 
-/// Session store keyed by local SEID, plus the local-SEID allocator.
+/// Session store keyed by local SEID, plus the local-SEID and N3-TEID
+/// allocators.
 #[derive(Debug, Default)]
 pub struct SessionTable {
     sessions: BTreeMap<u64, MupSession>,
     next_seid: u64,
+    next_teid: u32,
 }
 
 impl SessionTable {
@@ -68,6 +70,7 @@ impl SessionTable {
         Self {
             sessions: BTreeMap::new(),
             next_seid: 1,
+            next_teid: 1,
         }
     }
 
@@ -76,6 +79,15 @@ impl SessionTable {
         let seid = self.next_seid.max(1);
         self.next_seid = seid.wrapping_add(1).max(1);
         seid
+    }
+
+    /// Allocate a fresh non-zero N3 GTP-U TEID. Returned to the SMF in the
+    /// Session Establishment Response's Created PDR as the UP-side F-TEID —
+    /// the tunnel endpoint the gNB is told to send uplink G-PDUs to.
+    pub fn alloc_teid(&mut self) -> u32 {
+        let teid = self.next_teid.max(1);
+        self.next_teid = teid.wrapping_add(1).max(1);
+        teid
     }
 
     pub fn insert(&mut self, session: MupSession) {

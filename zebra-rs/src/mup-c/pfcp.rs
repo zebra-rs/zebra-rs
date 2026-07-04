@@ -15,13 +15,17 @@ use tokio::net::UdpSocket;
 use tokio::sync::mpsc::UnboundedSender;
 
 use rs_pfcp::ie::IeType;
+use rs_pfcp::ie::apply_action::ApplyAction;
 use rs_pfcp::ie::cause::CauseValue;
 use rs_pfcp::ie::create_far::CreateFar;
 use rs_pfcp::ie::create_pdr::CreatePdr;
+use rs_pfcp::ie::created_pdr::CreatedPdr;
 use rs_pfcp::ie::destination_interface::Interface as DestInterface;
+use rs_pfcp::ie::f_teid::FteidBuilder;
 use rs_pfcp::ie::fseid::Fseid;
 use rs_pfcp::ie::node_id::NodeId;
 use rs_pfcp::ie::outer_header_creation::OuterHeaderCreation;
+use rs_pfcp::ie::pdr_id::PdrId;
 use rs_pfcp::ie::update_far::UpdateFar;
 use rs_pfcp::message::association_release_response::AssociationReleaseResponseBuilder;
 use rs_pfcp::message::association_setup_response::AssociationSetupResponseBuilder;
@@ -271,19 +275,15 @@ impl MupC {
         self.sessions.insert(session.clone());
 
         let local_ip = self.local_ip();
-        // Response header SEID = the CP's F-SEID (so the SMF correlates the
-        // response); our own SEID goes only in the F-SEID IE.
-        let reply = match SessionEstablishmentResponseBuilder::accepted(cp_seid, seq)
-            .node_id(local_ip)
-            .fseid(seid, local_ip)
-            .build()
-        {
-            Ok(resp) => Some(resp.marshal()),
-            Err(e) => {
-                tracing::warn!("mup-c: build SessionEstablishmentResponse failed: {e}");
-                None
-            }
-        };
+        // UPF role: allocate our N3 F-TEID and return it in a Created PDR (PDR
+        // id 1). The SMF reads the UP-side N3 F-TEID from the establishment
+        // response's Created PDR (TS 29.244 §7.5.3) and hands it to the gNB as
+        // the uplink tunnel target — without it the CP cannot complete the PDU
+        // session. The address is the controller's own (`local_ip`); a full
+        // MUP deployment would advertise the interwork gateway's N3 endpoint
+        // here (a future config knob).
+        let n3_teid = self.sessions.alloc_teid();
+        let reply = build_establishment_response(cp_seid, seq, seid, local_ip, n3_teid);
         (reply, vec![MupCEvent::SessionUp(session)])
     }
 
@@ -339,6 +339,13 @@ impl MupC {
         if let Some((t, e)) = ex.gnb {
             session.teid = t;
             session.endpoint = Some(e);
+        } else if ex.downlink_deactivated {
+            // AN release / UE idle: tear down the gNB tunnel so the Type-1 ST
+            // route is withdrawn (re-emitting `SessionUp` with no endpoint
+            // makes the per-VRF `MupOriginate` handler withdraw and not
+            // re-originate). A later activation modification re-programs it.
+            session.teid = 0;
+            session.endpoint = None;
         }
         if let Some((t, e)) = ex.core {
             session.core_teid = t;
@@ -382,6 +389,47 @@ impl MupC {
             .cause_accepted()
             .build();
         (Some(resp.marshal()), vec![MupCEvent::SessionDown { seid }])
+    }
+}
+
+/// Build an accepted Session Establishment Response carrying our allocated N3
+/// F-TEID in a Created PDR (PDR id 1). The SMF reads the UP-side N3 F-TEID
+/// from here to give the gNB an uplink target. The response header SEID = the
+/// CP's F-SEID (so the SMF correlates it); our own SEID rides only in the
+/// F-SEID IE. Returns `None` if the codec fails to build the message.
+fn build_establishment_response(
+    cp_seid: u64,
+    seq: SequenceNumber,
+    up_seid: u64,
+    node_ip: IpAddr,
+    n3_teid: u32,
+) -> Option<Vec<u8>> {
+    let fteid = {
+        let b = FteidBuilder::new().teid(n3_teid);
+        let b = match node_ip {
+            IpAddr::V4(v4) => b.ipv4(v4),
+            IpAddr::V6(v6) => b.ipv6(v6),
+        };
+        match b.build() {
+            Ok(f) => f,
+            Err(e) => {
+                tracing::warn!("mup-c: build N3 F-TEID failed: {e}");
+                return None;
+            }
+        }
+    };
+    let created = CreatedPdr::new(PdrId::new(1), fteid).to_ie();
+    match SessionEstablishmentResponseBuilder::accepted(cp_seid, seq)
+        .node_id(node_ip)
+        .fseid(up_seid, node_ip)
+        .created_pdr(created)
+        .build()
+    {
+        Ok(resp) => Some(resp.marshal()),
+        Err(e) => {
+            tracing::warn!("mup-c: build SessionEstablishmentResponse failed: {e}");
+            None
+        }
     }
 }
 
@@ -454,6 +502,11 @@ struct PfcpExtract {
     /// tunnel (e.g. an N9 to an anchor UPF). Drives the Type-2 ST route.
     /// Absent for a plain N6 breakout, which has no core-side GTP tunnel.
     core: Option<(u32, IpAddr)>,
+    /// The message deactivated the downlink: an Update FAR switched to
+    /// BUFF/DROP with no new Outer Header Creation (the AN-release / UE-idle
+    /// flow). The gNB tunnel is torn down, so the Type-1 ST route must be
+    /// withdrawn until a later modification re-programs it.
+    downlink_deactivated: bool,
 }
 
 /// `(TEID, endpoint)` of a GTP-U Outer Header Creation, or `None` when the
@@ -561,12 +614,26 @@ fn extract_pfcp(msg: &dyn PfcpMessage) -> PfcpExtract {
         let Ok(far) = UpdateFar::unmarshal(&ie.payload) else {
             continue;
         };
+        let ohc = far
+            .update_forwarding_parameters
+            .as_ref()
+            .and_then(|fp| fp.outer_header_creation.as_ref());
         if let Some(fp) = &far.update_forwarding_parameters {
             apply_far_ohc(
                 &mut ex,
                 fp.destination_interface.as_ref().map(|d| d.interface),
                 fp.outer_header_creation.as_ref(),
             );
+        }
+        // A FAR that switches to BUFF/DROP without programming a new GTP-U
+        // tunnel is an AN-release / UE-idle deactivation — the downlink gNB
+        // tunnel is gone.
+        if ohc.is_none()
+            && far
+                .apply_action
+                .is_some_and(|aa| aa.intersects(ApplyAction::BUFF | ApplyAction::DROP))
+        {
+            ex.downlink_deactivated = true;
         }
     }
     ex
@@ -580,6 +647,7 @@ mod tests {
     use rs_pfcp::ie::apply_action::ApplyAction;
     use rs_pfcp::ie::create_far::CreateFar;
     use rs_pfcp::ie::create_pdr::CreatePdrBuilder;
+    use rs_pfcp::ie::created_pdr::CreatedPdr;
     use rs_pfcp::ie::destination_interface::{DestinationInterface, Interface};
     use rs_pfcp::ie::f_teid::FteidBuilder;
     use rs_pfcp::ie::far_id::FarId;
@@ -818,6 +886,51 @@ mod tests {
         );
     }
 
+    /// AN release / UE idle: a Session Modification whose Update FAR switches
+    /// to BUFF with no Outer Header Creation tears down the gNB tunnel, so the
+    /// controller clears the Type-1 ST endpoint (which makes the per-VRF
+    /// origination withdraw the ST1). A later activation re-programs it.
+    #[test]
+    fn session_modification_deactivates_downlink() {
+        let (mut mupc, _bgp_rx) = MupC::new_for_test(MupCConfig::default());
+        associate(&mut mupc);
+
+        // Establish with a gNB tunnel already present.
+        let est = message::parse(&establishment_bytes()).unwrap();
+        let (_reply, events) = mupc.handle_session_establishment(est.as_ref(), peer());
+        let MupCEvent::SessionUp(session) = &events[0] else {
+            panic!("expected SessionUp");
+        };
+        let seid = session.seid;
+        assert_eq!(
+            session.endpoint,
+            Some(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1))),
+            "gNB tunnel present after establishment"
+        );
+
+        // Deactivate: Update FAR → BUFF, no OHC.
+        let ufar = UpdateFar::builder(FarId::new(1))
+            .apply_action(ApplyAction::BUFF)
+            .build()
+            .unwrap();
+        let modify = SessionModificationRequestBuilder::new(seid, 4u32)
+            .update_fars(vec![ufar.to_ie()])
+            .build()
+            .marshal();
+        let msg = message::parse(&modify).unwrap();
+        let (_reply, events) = mupc.handle_session_modification(msg.as_ref(), peer());
+
+        let MupCEvent::SessionUp(session) = &events[0] else {
+            panic!("expected SessionUp after deactivation");
+        };
+        // The gNB tunnel is torn down → Type-1 ST endpoint cleared.
+        assert_eq!(session.endpoint, None, "gNB tunnel cleared on deactivation");
+        assert_eq!(session.teid, 0);
+        // UE IP survives — the session still exists, just idle.
+        assert_eq!(session.ue_ipv4, Some(Ipv4Addr::new(192, 0, 2, 5)));
+        assert_eq!(mupc.sessions.get(seid).and_then(|s| s.endpoint), None);
+    }
+
     #[test]
     fn session_establishment_extracts_and_acks() {
         let (mut mupc, _bgp_rx) = MupC::new_for_test(MupCConfig::default());
@@ -860,6 +973,22 @@ mod tests {
             resp.seid().map(|s| s.value()),
             Some(session.seid),
             "header SEID must not be our own allocated SEID"
+        );
+
+        // UPF role: the response must return our allocated N3 F-TEID in a
+        // Created PDR (PDR id 1) — the SMF reads the UP N3 F-TEID from here to
+        // give the gNB an uplink target. Without it a strict SMF (radian-rs)
+        // cannot complete the PDU session.
+        let created = resp
+            .ies(IeType::CreatedPdr)
+            .next()
+            .and_then(|ie| CreatedPdr::unmarshal(&ie.payload).ok())
+            .expect("establishment response must carry a Created PDR");
+        assert_ne!(created.f_teid.teid.value(), 0, "N3 F-TEID must be non-zero");
+        assert_eq!(
+            created.f_teid.ipv4_address,
+            Some(Ipv4Addr::LOCALHOST),
+            "N3 F-TEID address = controller local_ip (default 127.0.0.1)"
         );
     }
 
