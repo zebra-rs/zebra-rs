@@ -156,6 +156,29 @@ impl MupSegmentMode {
     }
 }
 
+/// MUP forwarding-plane behaviour for a per-VRF service (`afi-safi mup
+/// dataplane {end-dt46|gtp}`). `EndDt46` (default) installs the SRv6 End.DT46
+/// stand-in into the mainline kernel; `Gtp` programs a real GTP-U tunnel from
+/// the ST route's endpoint + TEID via the cradle eBPF forwarder. The control
+/// plane is identical either way — this selects only the endpoint behaviour
+/// advertised and the FIB-install target.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum MupDataplane {
+    #[default]
+    EndDt46,
+    Gtp,
+}
+
+impl MupDataplane {
+    fn parse(s: &str) -> Option<Self> {
+        match s {
+            "end-dt46" => Some(Self::EndDt46),
+            "gtp" => Some(Self::Gtp),
+            _ => None,
+        }
+    }
+}
+
 /// `afi-safi mup route {st1|st2} { network-instance <ni>; [mup-ext-comm
 /// <2:4>;] }` for one VRF: the ST route type (as a direction) plus the
 /// session network-instance matched, and (st2 only) the Direct-segment
@@ -206,6 +229,12 @@ pub struct BgpVrfMobileUplane {
     /// `interwork` segment; the ISD does not originate until it is set, and
     /// its AFI follows this prefix's family.
     pub interwork_prefix: Option<IpNet>,
+    /// `afi-safi mup dataplane {end-dt46|gtp}` — the forwarding-plane
+    /// behaviour for this VRF's MUP service. `EndDt46` (default) installs the
+    /// SRv6 End.DT46 stand-in into the mainline kernel; `Gtp` programs a real
+    /// GTP-U tunnel from the resolved ST route's endpoint + TEID via the
+    /// cradle eBPF forwarder.
+    pub dataplane: MupDataplane,
 }
 
 /// Staged candidate configuration for one VRF entry. Mirrors the
@@ -459,6 +488,21 @@ pub fn config_vrf_mup_segment(bgp: &mut Bgp, mut args: Args, op: ConfigOp) -> Op
         ConfigOp::Delete if cfg.mobile_uplane.segment == Some(mode) => {
             cfg.mobile_uplane.segment = None;
         }
+        _ => {}
+    }
+    Some(())
+}
+
+/// `set router bgp vrf <NAME> afi-safi mup dataplane {end-dt46|gtp}` — the
+/// MUP forwarding-plane behaviour for this VRF (the SRv6 End.DT46 stand-in vs
+/// real GTP-U via cradle). Delete restores the default (End.DT46).
+pub fn config_vrf_mup_dataplane(bgp: &mut Bgp, mut args: Args, op: ConfigOp) -> Option<()> {
+    let name = args.string()?;
+    let mode = MupDataplane::parse(&args.string()?)?;
+    let cfg = vrf_entry(bgp, name);
+    match op {
+        ConfigOp::Set => cfg.mobile_uplane.dataplane = mode,
+        ConfigOp::Delete => cfg.mobile_uplane.dataplane = MupDataplane::default(),
         _ => {}
     }
     Some(())

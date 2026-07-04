@@ -4513,7 +4513,7 @@ fn render_mup_vrfs(
     vrfs: &std::collections::BTreeMap<String, super::vrf_config::BgpVrfConfig>,
     rib_known_vrfs: &std::collections::BTreeMap<String, super::inst::RibKnownVrf>,
 ) -> std::result::Result<String, std::fmt::Error> {
-    use super::vrf_config::MupSrv6Direction;
+    use super::vrf_config::{MupDataplane, MupSrv6Direction};
     let mut buf = String::new();
     let mut any = false;
     for (name, cfg) in vrfs {
@@ -4536,6 +4536,10 @@ fn render_mup_vrfs(
             .as_ref()
             .map(|r| r.to_string())
             .unwrap_or_else(|| "-".into());
+        let dp = match mup.dataplane {
+            MupDataplane::EndDt46 => "end-dt46",
+            MupDataplane::Gtp => "gtp",
+        };
         match &mup.srv6_mobile {
             Some(sm) => {
                 let (dir, st) = match sm.direction {
@@ -4545,10 +4549,10 @@ fn render_mup_vrfs(
                 let ni = sm.network_instance.as_deref().unwrap_or("-");
                 writeln!(
                     buf,
-                    "  {name}: rd={rd} {dir}/{st} ni={ni} route-targets={rts}"
+                    "  {name}: rd={rd} {dir}/{st} ni={ni} dataplane={dp} route-targets={rts}"
                 )?;
             }
-            None => writeln!(buf, "  {name}: rd={rd} route-targets={rts}")?,
+            None => writeln!(buf, "  {name}: rd={rd} dataplane={dp} route-targets={rts}")?,
         }
     }
     Ok(buf)
@@ -5699,6 +5703,7 @@ mod detail_tests {
                 segment: None,
                 mup_ext_comm: None,
                 interwork_prefix: None,
+                dataplane: Default::default(),
             },
             ..Default::default()
         };
@@ -5713,6 +5718,7 @@ mod detail_tests {
                 segment: None,
                 mup_ext_comm: None,
                 interwork_prefix: None,
+                dataplane: Default::default(),
             },
             ..Default::default()
         };
@@ -5740,8 +5746,14 @@ mod detail_tests {
 
         let out = render_mup_vrfs(&vrfs, &rib_known_vrfs).unwrap();
         assert!(out.contains("MUP VRFs:"));
-        assert!(out.contains("N3: rd=65000:1 decap/ST2 ni=core-ni route-targets=1"));
-        assert!(out.contains("N6: rd=65000:2 encap/ST1 ni=access-ni route-targets=1"));
+        assert!(
+            out.contains("N3: rd=65000:1 decap/ST2 ni=core-ni dataplane=end-dt46 route-targets=1")
+        );
+        assert!(
+            out.contains(
+                "N6: rd=65000:2 encap/ST1 ni=access-ni dataplane=end-dt46 route-targets=1"
+            )
+        );
 
         // No mup config anywhere → empty section.
         let empty: BTreeMap<String, BgpVrfConfig> = BTreeMap::new();
