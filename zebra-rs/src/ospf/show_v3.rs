@@ -529,6 +529,8 @@ struct Ospfv3InterfaceJson {
     cost: u32,
     hello_interval: u16,
     dead_interval: u32,
+    /// RFC 5340 §A.3.1 Instance ID (`instance-id`, default 0).
+    instance_id: u8,
     neighbor_count: usize,
 }
 
@@ -558,6 +560,7 @@ fn show_ospfv3_interface(
             cost: link.output_cost,
             hello_interval: link.hello_interval(),
             dead_interval: link.dead_interval(),
+            instance_id: link.v3_instance_id(),
             neighbor_count: link.nbrs.len(),
         })
         .collect();
@@ -570,8 +573,8 @@ fn show_ospfv3_interface(
         )?;
         writeln!(
             text,
-            "  Interface ID: {}  Priority: {}  Cost: {}  Hello {}s  Dead {}s",
-            e.interface_id, e.priority, e.cost, e.hello_interval, e.dead_interval
+            "  Interface ID: {}  Instance ID: {}  Priority: {}  Cost: {}  Hello {}s  Dead {}s",
+            e.interface_id, e.instance_id, e.priority, e.cost, e.hello_interval, e.dead_interval
         )?;
         writeln!(text, "  DR: {}  BDR: {}", e.d_router, e.bd_router)?;
     }

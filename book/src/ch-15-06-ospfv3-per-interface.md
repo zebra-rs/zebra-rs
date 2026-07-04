@@ -49,6 +49,14 @@ Notes:
   `/affinity-map`) to the link, advertised in the RFC 9492 ASLA
   sub-TLV of the E-Router-LSA — consumed by
   [Flex-Algo](ch-15-10-ospfv3-segment-routing.md) constraints.
+- **`instance-id`** (0..255, default 0) sets the RFC 5340 §A.3.1
+  OSPFv3 Instance ID stamped into every packet sent on the link;
+  received packets whose Instance ID differs are dropped (§8.2).
+  This separates multiple OSPFv3 instances sharing one link — both
+  ends of an adjacency must configure the same value, and a
+  mismatch simply never forms a neighbor. Shown by
+  `show ospfv3 interface`; validated by
+  `ospfv3_instance_id.feature` (matched and mismatched scenarios).
 
 The v2-only `te-metric` block (RFC 7471 delay/loss attributes and
 the STAMP measurement hook) has no OSPFv3 counterpart yet.

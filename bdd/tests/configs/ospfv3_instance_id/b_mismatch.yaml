@@ -1,0 +1,21 @@
+# Same as b.yaml but instance-id 7: a (instance 5) must drop b's
+# packets and vice versa — no adjacency may form.
+interface:
+- if-name: lo
+  ipv6:
+    address: 2001:db8::2/128
+- if-name: etha
+  ipv6:
+    address: 2001:db8:12::2/64
+router:
+  ospfv3:
+    router-id: 10.0.0.2
+    area:
+    - area-id: 0.0.0.0
+      interface:
+      - if-name: lo
+        enable: true
+      - if-name: etha
+        enable: true
+        network-type: point-to-point
+        instance-id: 7

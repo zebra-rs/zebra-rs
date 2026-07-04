@@ -247,6 +247,10 @@ impl Ospf<Ospfv3> {
             ("/area/interface/priority", config_ospfv3_interface_priority),
             ("/area/interface/cost", config_ospfv3_interface_cost),
             (
+                "/area/interface/instance-id",
+                config_ospfv3_interface_instance_id,
+            ),
+            (
                 "/area/interface/hello-interval",
                 config_ospfv3_interface_hello_interval,
             ),
@@ -1390,6 +1394,26 @@ fn config_ospfv3_interface_cost(
     ospf.router_intra_area_prefix_lsa_originate(area_id);
     ospf.ext_intra_area_prefix_v3_lsa_originate(ifindex);
 
+    Some(())
+}
+
+/// `/router/ospfv3/area/<id>/interface/<name>/instance-id` —
+/// RFC 5340 §A.3.1 OSPFv3 Instance ID. Applies to the next packets
+/// sent/received on the link; a live mismatch ages the neighbor out
+/// via the dead interval (both ends must be configured alike).
+fn config_ospfv3_interface_instance_id(
+    ospf: &mut Ospf<Ospfv3>,
+    mut args: Args,
+    op: ConfigOp,
+) -> Option<()> {
+    let _area_id = parse_area_id(&args.string()?)?;
+    let name = args.string()?;
+    let link = ospf_link_get_mut_by_name(&mut ospf.links, &name)?;
+    if op.is_set() {
+        link.config.instance_id = Some(args.u8()?);
+    } else {
+        link.config.instance_id = None;
+    }
     Some(())
 }
 

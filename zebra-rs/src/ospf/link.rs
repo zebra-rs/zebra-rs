@@ -83,6 +83,11 @@ pub struct LinkConfig {
     pub retransmit_interval: Option<u16>,
     pub transmit_delay: Option<u16>,
     pub mtu_ignore: bool,
+    /// RFC 5340 §A.3.1 OSPFv3 Instance ID for this link (default 0).
+    /// Stamped into every outbound v3 packet header; inbound packets
+    /// whose Instance ID differs are dropped (§8.2), separating
+    /// multiple OSPFv3 instances sharing one link. v2 ignores it.
+    pub instance_id: Option<u8>,
     /// Passive interface (`/router/ospf{,v3}/area/<id>/interface/<n>/
     /// passive`): the interface's prefixes keep advertising (Router-LSA
     /// stub / Intra-Area-Prefix-LSA — the LSA builds gate on `enable`,
@@ -677,6 +682,12 @@ impl<V: OspfVersion> OspfLink<V> {
         self.config
             .hello_interval
             .unwrap_or(OSPF_DEFAULT_HELLO_INTERVAL)
+    }
+
+    /// RFC 5340 §A.3.1 OSPFv3 Instance ID (default 0). Meaningless
+    /// on v2 links.
+    pub fn v3_instance_id(&self) -> u8 {
+        self.config.instance_id.unwrap_or(0)
     }
 
     pub fn dead_interval(&self) -> u32 {
