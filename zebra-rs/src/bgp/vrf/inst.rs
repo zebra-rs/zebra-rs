@@ -62,6 +62,10 @@ pub struct BgpVrf {
     /// doesn't yet re-key the running task (same spawn-time-capture
     /// limitation as `router_id`).
     pub rd: Option<bgp_packet::RouteDistinguisher>,
+    /// MUP `dataplane {end-dt46|gtp}` mode for this VRF, captured from the
+    /// config at spawn (same spawn-time-capture as `rd`/`router_id`). `Gtp`
+    /// programs GTP-U tunnels via cradle instead of the End.DT46 stand-in.
+    pub dataplane: super::super::vrf_config::MupDataplane,
     /// Config-manager subscription. Path-dispatch routes
     /// `/router/bgp/vrf/<name>/...` callbacks here so the per-VRF
     /// runtime owns its own commit sequencing.
@@ -184,6 +188,10 @@ pub struct BgpVrf {
     /// DSD's End.DT46 SID it is steered into. Diff base for
     /// `reconcile_mup_st2_dsd`, mirroring `mup_st1_isd_installed`.
     pub mup_st2_dsd_installed: std::collections::BTreeMap<ipnet::IpNet, std::net::Ipv6Addr>,
+    /// Installed GTP-U decap PDRs for `dataplane gtp` (the ST2 uplink /
+    /// `H.M.GTP4.D`): the set of (endpoint, TEID) tunnels teed to cradle. Diff
+    /// base for `reconcile_mup_gtp`.
+    pub mup_gtp_pdr_installed: std::collections::BTreeSet<(std::net::Ipv4Addr, u32)>,
 }
 
 /// Sender side of the per-VRF inbound channel — handed back to
@@ -627,6 +635,8 @@ impl BgpVrf {
             router_id,
             // Default unset; `spawn_bgp_vrf` sets it from the VRF config.
             rd: None,
+            // Default End.DT46; `spawn_bgp_vrf` sets it from the VRF config.
+            dataplane: super::super::vrf_config::MupDataplane::default(),
             cm: ConfigChannel::new(),
             show: ShowChannel::new(),
             global_tx,
@@ -650,6 +660,7 @@ impl BgpVrf {
             mup_st1_isd_installed: std::collections::BTreeMap::new(),
             mup_segment_transport: std::collections::BTreeMap::new(),
             mup_st2_dsd_installed: std::collections::BTreeMap::new(),
+            mup_gtp_pdr_installed: std::collections::BTreeSet::new(),
         };
         (vrf, inbox_tx)
     }
@@ -850,6 +861,57 @@ impl BgpVrf {
             }
             self.mup_encap_install(*ep, *sid, transport);
             self.mup_st2_dsd_installed.insert(*ep, *sid);
+        }
+    }
+
+    /// Install GTP-U decap PDRs for a `dataplane gtp` VRF — the ST2 uplink
+    /// (`H.M.GTP4.D`). Each selected Type-2 ST route's `(endpoint, TEID)`
+    /// becomes a cradle PDR: a G-PDU arriving on that tunnel is stripped and
+    /// its inner packet forwarded in this VRF's table. Cradle-only (the kernel
+    /// has no GTP action), diff-gated against `mup_gtp_pdr_installed`. The
+    /// downlink `GTP4.E` encap (ST1 → the gNB) is a follow-up; only the uplink
+    /// decap is installed here. Runs in place of the End.DT46 reconcilers when
+    /// the VRF's `dataplane` is `gtp`.
+    fn reconcile_mup_gtp(&mut self) {
+        use std::net::{IpAddr, Ipv4Addr};
+        let table_id = self.ctx.vrf_id();
+        // Desired PDRs: each selected ST2 with a v4 endpoint + non-zero TEID.
+        let mut desired: std::collections::BTreeSet<(Ipv4Addr, u32)> =
+            std::collections::BTreeSet::new();
+        for table in self.local_rib.mup.values() {
+            for prefix in table.selected.keys() {
+                if let bgp_packet::MupPrefix::T2st { endpoint, teid } = prefix
+                    && let IpAddr::V4(v4) = endpoint
+                    && *teid != 0
+                {
+                    desired.insert((*v4, *teid));
+                }
+            }
+        }
+        // Withdraw PDRs no longer desired.
+        let stale: Vec<(Ipv4Addr, u32)> = self
+            .mup_gtp_pdr_installed
+            .iter()
+            .filter(|k| !desired.contains(k))
+            .copied()
+            .collect();
+        for (dst, teid) in stale {
+            let _ = self
+                .ctx
+                .rib
+                .send(crate::rib::Message::CradleGtpPdrDel { dst, teid });
+            self.mup_gtp_pdr_installed.remove(&(dst, teid));
+        }
+        // Install new PDRs.
+        for (dst, teid) in &desired {
+            if !self.mup_gtp_pdr_installed.insert((*dst, *teid)) {
+                continue;
+            }
+            let _ = self.ctx.rib.send(crate::rib::Message::CradleGtpPdrAdd {
+                dst: *dst,
+                teid: *teid,
+                table_id,
+            });
         }
     }
 
@@ -1906,8 +1968,13 @@ impl BgpVrf {
                     .entry(rd)
                     .or_default()
                     .update(prefix, rib);
-                self.reconcile_mup_st1_isd();
-                self.reconcile_mup_st2_dsd();
+                match self.dataplane {
+                    super::super::vrf_config::MupDataplane::Gtp => self.reconcile_mup_gtp(),
+                    super::super::vrf_config::MupDataplane::EndDt46 => {
+                        self.reconcile_mup_st1_isd();
+                        self.reconcile_mup_st2_dsd();
+                    }
+                }
             }
             BgpVrfMsg::MupWithdraw { rd, prefix } => {
                 // Same own-RD scoping as MupUpdate. The VRF holds the single
@@ -1926,8 +1993,13 @@ impl BgpVrf {
                 if empty {
                     self.local_rib.mup.remove(&rd);
                 }
-                self.reconcile_mup_st1_isd();
-                self.reconcile_mup_st2_dsd();
+                match self.dataplane {
+                    super::super::vrf_config::MupDataplane::Gtp => self.reconcile_mup_gtp(),
+                    super::super::vrf_config::MupDataplane::EndDt46 => {
+                        self.reconcile_mup_st1_isd();
+                        self.reconcile_mup_st2_dsd();
+                    }
+                }
             }
             // VRF-first MUP origination: build the RD-free ST NLRI from the
             // dispatched session + resolved direction, and export it to the
@@ -2060,6 +2132,89 @@ mod tests {
         tokio::time::timeout(Duration::from_secs(2), vrf.event_loop())
             .await
             .expect("event_loop returns after Shutdown");
+    }
+
+    #[tokio::test]
+    async fn dataplane_gtp_reconciles_st2_endpoints_to_pdrs() {
+        use crate::bgp::route::{BgpRib, BgpRibType};
+        use bgp_packet::{BgpAttr, MupPrefix};
+        use std::net::{IpAddr, Ipv4Addr};
+
+        let (global_tx, _global_rx) = unbounded_channel::<BgpGlobalMsg>();
+        let ctx = test_ctx_for_vrf(42, "vrf-gtp");
+        let (_rib_tx, rib_rx) = mpsc::unbounded_channel();
+        let (mut vrf, _inbox) = BgpVrf::new(
+            "vrf-gtp".to_string(),
+            ctx,
+            Ipv4Addr::UNSPECIFIED,
+            65000,
+            /* label */ 16,
+            global_tx,
+            rib_rx,
+        );
+        vrf.dataplane = crate::bgp::vrf_config::MupDataplane::Gtp;
+
+        let attr = BgpAttr::new();
+        let mk = || {
+            BgpRib::new(
+                1,
+                Ipv4Addr::UNSPECIFIED,
+                BgpRibType::EBGP,
+                0,
+                0,
+                &attr,
+                None,
+                None,
+                false,
+            )
+        };
+        let rd: bgp_packet::RouteDistinguisher = "65000:1".parse().unwrap();
+        {
+            let table = vrf.local_rib.mup.entry(rd).or_default();
+            // v4 endpoint + non-zero TEID → a decap PDR.
+            table.selected.insert(
+                MupPrefix::T2st {
+                    endpoint: IpAddr::V4(Ipv4Addr::new(10, 9, 0, 1)),
+                    teid: 0x1234,
+                },
+                mk(),
+            );
+            // teid 0 (the null TEID) → skipped.
+            table.selected.insert(
+                MupPrefix::T2st {
+                    endpoint: IpAddr::V4(Ipv4Addr::new(10, 9, 0, 2)),
+                    teid: 0,
+                },
+                mk(),
+            );
+            // v6 endpoint → skipped (GTP4 only in this slice).
+            table.selected.insert(
+                MupPrefix::T2st {
+                    endpoint: "2001:db8::1".parse().unwrap(),
+                    teid: 0x5678,
+                },
+                mk(),
+            );
+        }
+
+        vrf.reconcile_mup_gtp();
+        assert!(
+            vrf.mup_gtp_pdr_installed
+                .contains(&(Ipv4Addr::new(10, 9, 0, 1), 0x1234))
+        );
+        assert_eq!(
+            vrf.mup_gtp_pdr_installed.len(),
+            1,
+            "only the v4, non-zero-TEID ST2 installs a decap PDR"
+        );
+
+        // The ST2 goes away → its PDR is withdrawn from the tracker.
+        vrf.local_rib.mup.get_mut(&rd).unwrap().selected.clear();
+        vrf.reconcile_mup_gtp();
+        assert!(
+            vrf.mup_gtp_pdr_installed.is_empty(),
+            "the decap PDR is withdrawn when its ST2 is gone"
+        );
     }
 
     #[tokio::test]

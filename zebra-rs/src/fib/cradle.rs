@@ -672,6 +672,46 @@ impl CradleFib {
         }
     }
 
+    /// Install a GTP-U decap PDR (`H.M.GTP4.D`): a G-PDU arriving on
+    /// (`dst`, `teid`) is stripped and its inner packet forwarded in the VRF
+    /// table `table_id` (0 = global). Cradle-only — the mainline kernel has no
+    /// GTP action, so this is never a kernel route.
+    pub async fn gtp_pdr_add(&self, dst: Ipv4Addr, teid: u32, table_id: u32) {
+        if let Err(e) = async {
+            self.client()
+                .await?
+                .add_gtp_pdr(pb::GtpPdr {
+                    dst: dst.to_string(),
+                    teid,
+                    vrf: cradle_vrf(table_id),
+                })
+                .await?;
+            anyhow::Ok(())
+        }
+        .await
+        {
+            tracing::warn!("fib: cradle gtp_pdr_add {dst} teid {teid} failed: {e}");
+        }
+    }
+
+    /// Remove a GTP-U decap PDR.
+    pub async fn gtp_pdr_del(&self, dst: Ipv4Addr, teid: u32) {
+        if let Err(e) = async {
+            self.client()
+                .await?
+                .del_gtp_pdr(pb::GtpPdrDel {
+                    dst: dst.to_string(),
+                    teid,
+                })
+                .await?;
+            anyhow::Ok(())
+        }
+        .await
+        {
+            tracing::debug!("fib: cradle gtp_pdr_del {dst} teid {teid} failed: {e}");
+        }
+    }
+
     /// EVPN-over-SRv6 overlay FDB entry (RFC 9252): `mac` in bridge domain
     /// `vni` sits behind the remote PE's L2 service SID (End.DT2U for
     /// unicast; the all-ones BUM sentinel carries End.DT2M). `nexthop_id: 0`

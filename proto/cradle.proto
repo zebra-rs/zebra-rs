@@ -241,6 +241,18 @@ message L7Service {
   repeated L7Route routes = 3;
 }
 
+// A GTP-U decap PDR (H.M.GTP4.D): a G-PDU arriving on (dst, teid) is stripped
+// and its inner packet forwarded in vrf (0 = global). Mirrors the cradle server.
+message GtpPdr {
+  string dst = 1;   // local outer IPv4 destination the G-PDU arrives on
+  uint32 teid = 2;  // GTP-U TEID
+  uint32 vrf = 3;   // inner VRF table id (0 = global)
+}
+message GtpPdrDel {
+  string dst = 1;
+  uint32 teid = 2;
+}
+
 service Cradle {
   rpc SetPort(Port) returns (Empty);
   rpc SetL2Domain(L2Domain) returns (Empty);
@@ -258,6 +270,8 @@ service Cradle {
   rpc DelIlm(IlmDel) returns (Empty);
   rpc AddLocalSid(LocalSid) returns (Empty);
   rpc DelLocalSid(LocalSidDel) returns (Empty);
+  rpc AddGtpPdr(GtpPdr) returns (Empty);
+  rpc DelGtpPdr(GtpPdrDel) returns (Empty);
   rpc SetSrv6EncapSource(Srv6EncapSource) returns (Empty);
   rpc AddFdbRemote(FdbRemote) returns (Empty);
   rpc DelFdbRemote(FdbRemoteDel) returns (Empty);
