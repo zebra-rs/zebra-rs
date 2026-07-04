@@ -28,6 +28,11 @@ pub struct StaticRoute<F: StaticFamily> {
     /// produces a Uni nexthop that the FIB installs as a kernel
     /// `seg6local` route on the sr0 dummy.
     pub seg6local_action: Option<SidBehavior>,
+    /// IPv6 cross-connect adjacency for `action End.DX6` (also honored
+    /// for End.X / uA), mirroring iproute2's `nh6`.
+    pub nh6: Option<Ipv6Addr>,
+    /// IPv4 cross-connect adjacency for `action End.DX4` (`nh4`).
+    pub nh4: Option<std::net::Ipv4Addr>,
     /// Discard route (`route <prefix> blackhole`): `to_entry`
     /// produces a `Nexthop::Blackhole` the FIB installs as an
     /// `RTN_BLACKHOLE` kernel route. Mutually exclusive with
@@ -45,6 +50,8 @@ impl<F: StaticFamily> Default for StaticRoute<F> {
             segs: Vec::new(),
             encap_type: None,
             seg6local_action: None,
+            nh6: None,
+            nh4: None,
             blackhole: false,
             delete: false,
         }
@@ -60,6 +67,8 @@ impl<F: StaticFamily> Clone for StaticRoute<F> {
             segs: self.segs.clone(),
             encap_type: self.encap_type,
             seg6local_action: self.seg6local_action,
+            nh6: self.nh6,
+            nh4: self.nh4,
             blackhole: self.blackhole,
             delete: self.delete,
         }
@@ -89,6 +98,8 @@ impl<F: StaticFamily> StaticRoute<F> {
         if self.nexthops.is_empty()
             && self.segs.is_empty()
             && self.seg6local_action.is_none()
+            && self.nh6.is_none()
+            && self.nh4.is_none()
             && !self.blackhole
         {
             return None;
@@ -121,8 +132,21 @@ impl<F: StaticFamily> StaticRoute<F> {
             // a separate shared-state reference into the static
             // commit pipeline, which isn't worth it for a one-line
             // fill-in.
+            // The DX cross-connect adjacency rides on the uni addr:
+            // `nh4` for End.DX4, `nh6` for End.DX6 (and End.X / uA).
+            // The other actions keep the unspecified placeholder.
+            let addr = match action {
+                SidBehavior::EndDX4 => self
+                    .nh4
+                    .map(IpAddr::V4)
+                    .unwrap_or(IpAddr::V6(Ipv6Addr::UNSPECIFIED)),
+                _ => self
+                    .nh6
+                    .map(IpAddr::V6)
+                    .unwrap_or(IpAddr::V6(Ipv6Addr::UNSPECIFIED)),
+            };
             let nhop = NexthopUni {
-                addr: IpAddr::V6(Ipv6Addr::UNSPECIFIED),
+                addr,
                 metric,
                 weight: 1,
                 seg6local_action: Some(action),

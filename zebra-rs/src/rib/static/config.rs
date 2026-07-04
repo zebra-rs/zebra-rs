@@ -471,6 +471,32 @@ fn config_builder<F: StaticFamily>(base: &str) -> ConfigBuilder<F> {
             s.encap_type = None;
             Ok(())
         })
+        .path(&format!("{base}/{}/route/nh6", F::FAMILY))
+        .set(|config, cache, prefix, args| {
+            const NH6_ERR: &str = "nh6 address parse error";
+            let s = cache_get::<F>(config, cache, prefix).context(CONFIG_ERR)?;
+            let arg = args.string().context(NH6_ERR)?;
+            s.nh6 = Some(arg.parse::<Ipv6Addr>().context(NH6_ERR)?);
+            Ok(())
+        })
+        .del(|config, cache, prefix, _args| {
+            let s = cache_lookup::<F>(config, cache, prefix).context(CONFIG_ERR)?;
+            s.nh6 = None;
+            Ok(())
+        })
+        .path(&format!("{base}/{}/route/nh4", F::FAMILY))
+        .set(|config, cache, prefix, args| {
+            const NH4_ERR: &str = "nh4 address parse error";
+            let s = cache_get::<F>(config, cache, prefix).context(CONFIG_ERR)?;
+            let arg = args.string().context(NH4_ERR)?;
+            s.nh4 = Some(arg.parse::<std::net::Ipv4Addr>().context(NH4_ERR)?);
+            Ok(())
+        })
+        .del(|config, cache, prefix, _args| {
+            let s = cache_lookup::<F>(config, cache, prefix).context(CONFIG_ERR)?;
+            s.nh4 = None;
+            Ok(())
+        })
         .path(&format!("{base}/{}/route/action", F::FAMILY))
         .set(|config, cache, prefix, args| {
             const ACTION_ERR: &str = "missing seg6local action arg";

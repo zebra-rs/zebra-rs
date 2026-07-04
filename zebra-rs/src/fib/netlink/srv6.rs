@@ -1,4 +1,4 @@
-use std::net::Ipv6Addr;
+use std::net::{Ipv4Addr, Ipv6Addr};
 
 use anyhow::{Result, bail};
 use isis_packet::srv6::EncapType;
@@ -125,6 +125,8 @@ fn seg6local_action(behavior: SidBehavior) -> Seg6LocalAction {
         // other cradle-only behaviors so a stray call is a visible no-op.
         SidBehavior::EndT => Seg6LocalAction::EndT,
         SidBehavior::UT => Seg6LocalAction::End,
+        SidBehavior::EndDX4 => Seg6LocalAction::EndDx4,
+        SidBehavior::EndDX6 => Seg6LocalAction::EndDx6,
         // EVPN L2 SIDs never reach the kernel (route_sid_install returns
         // after the cradle tee — no End.DT2U/DT2M seg6local action exists);
         // map to End so an unexpected call is a visible no-op rather than
@@ -240,6 +242,7 @@ fn build_seg6local_flavors(
 fn build_seg6local_lwtunnel(
     behavior: SidBehavior,
     nh6: Option<Ipv6Addr>,
+    nh4: Option<Ipv4Addr>,
     structure: Option<SidStructure>,
     table_id: u32,
     segs: &[Ipv6Addr],
@@ -249,10 +252,16 @@ fn build_seg6local_lwtunnel(
         vec![RouteSeg6LocalIpTunnel::Action(seg6local_action(behavior))];
     if matches!(
         behavior,
-        SidBehavior::EndX | SidBehavior::UA | SidBehavior::UALib
+        SidBehavior::EndX | SidBehavior::UA | SidBehavior::UALib | SidBehavior::EndDX6
     ) {
         let nh = nh6?;
         attrs.push(RouteSeg6LocalIpTunnel::Nh6(nh));
+    }
+    if matches!(behavior, SidBehavior::EndDX4) {
+        // `SEG6_LOCAL_NH4`: the IPv4 cross-connect adjacency. Missing →
+        // skip the FIB install (the registry row is harmless).
+        let nh = nh4?;
+        attrs.push(RouteSeg6LocalIpTunnel::Nh4(nh));
     }
     if matches!(behavior, SidBehavior::EndB6Encap) {
         // `SEG6_LOCAL_SRH`: the SR Policy segment list this Binding SID
@@ -301,12 +310,13 @@ fn build_seg6local_lwtunnel(
 pub fn build_seg6local_attrs(
     behavior: SidBehavior,
     nh6: Option<Ipv6Addr>,
+    nh4: Option<Ipv4Addr>,
     structure: Option<SidStructure>,
     table_id: u32,
     segs: &[Ipv6Addr],
     flavors: u8,
 ) -> Option<(RouteAttribute, RouteAttribute)> {
-    let encaps = build_seg6local_lwtunnel(behavior, nh6, structure, table_id, segs, flavors)?;
+    let encaps = build_seg6local_lwtunnel(behavior, nh6, nh4, structure, table_id, segs, flavors)?;
     Some((
         RouteAttribute::Encap(encaps),
         RouteAttribute::EncapType(RouteLwEnCapType::Seg6Local),
@@ -339,7 +349,7 @@ mod tests {
     fn end_dt46_uses_vrftable_with_given_table() {
         // BGP L3VPN-over-SRv6: an End.DT46 SID decaps into the VRF's
         // kernel table via SEG6_LOCAL_VRFTABLE, never a plain table.
-        let encaps = build_seg6local_lwtunnel(SidBehavior::EndDT46, None, None, 100, &[], 0)
+        let encaps = build_seg6local_lwtunnel(SidBehavior::EndDT46, None, None, None, 100, &[], 0)
             .expect("encap built");
         assert!(
             encaps.iter().any(|e| matches!(
@@ -357,7 +367,7 @@ mod tests {
     #[test]
     fn end_dt6_table_zero_maps_to_main() {
         // table_id 0 must preserve the legacy static / IS-IS default.
-        let encaps = build_seg6local_lwtunnel(SidBehavior::EndDT6, None, None, 0, &[], 0)
+        let encaps = build_seg6local_lwtunnel(SidBehavior::EndDT6, None, None, None, 0, &[], 0)
             .expect("encap built");
         assert_eq!(table_attr(&encaps), Some(RouteHeader::RT_TABLE_MAIN as u32));
         assert_eq!(vrftable_attr(&encaps), None);
@@ -365,7 +375,7 @@ mod tests {
 
     #[test]
     fn end_dt4_honors_nonzero_table() {
-        let encaps = build_seg6local_lwtunnel(SidBehavior::EndDT4, None, None, 42, &[], 0)
+        let encaps = build_seg6local_lwtunnel(SidBehavior::EndDT4, None, None, None, 42, &[], 0)
             .expect("encap built");
         assert_eq!(table_attr(&encaps), Some(42));
     }
@@ -375,8 +385,9 @@ mod tests {
         // End.M (egress protection): reuses the End.DT6 kernel action and
         // looks the inner packet up in the mirror-context table via a
         // plain SEG6_LOCAL_TABLE — never a VRF table.
-        let encaps = build_seg6local_lwtunnel(SidBehavior::EndM, None, None, 0x4D00_0000, &[], 0)
-            .expect("encap built");
+        let encaps =
+            build_seg6local_lwtunnel(SidBehavior::EndM, None, None, None, 0x4D00_0000, &[], 0)
+                .expect("encap built");
         assert!(
             encaps.iter().any(|e| matches!(
                 e,
@@ -395,8 +406,9 @@ mod tests {
         // SR Policy Binding SID: End.B6.Encaps carries the policy's
         // segment list as a SEG6_LOCAL_SRH attribute.
         let segs = vec!["fc00:0:2::".parse().unwrap(), "fc00:0:9::".parse().unwrap()];
-        let encaps = build_seg6local_lwtunnel(SidBehavior::EndB6Encap, None, None, 0, &segs, 0)
-            .expect("encap built");
+        let encaps =
+            build_seg6local_lwtunnel(SidBehavior::EndB6Encap, None, None, None, 0, &segs, 0)
+                .expect("encap built");
         assert!(encaps.iter().any(|e| matches!(
             e,
             RouteLwTunnelEncap::Seg6Local(RouteSeg6LocalIpTunnel::Action(
@@ -413,7 +425,50 @@ mod tests {
     #[test]
     fn end_b6_encaps_without_segments_skips_install() {
         // No segment list → no SRH to push → skip the FIB install.
-        assert!(build_seg6local_lwtunnel(SidBehavior::EndB6Encap, None, None, 0, &[], 0).is_none());
+        assert!(
+            build_seg6local_lwtunnel(SidBehavior::EndB6Encap, None, None, None, 0, &[], 0)
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn end_dx6_pushes_nh6_adjacency() {
+        // End.DX6 (RFC 8986 §4.4): decap + v6 cross-connect — the
+        // adjacency rides as SEG6_LOCAL_NH6; without one there is
+        // nothing to cross-connect to, so the install is skipped.
+        let nh6: Ipv6Addr = "fc00:0:2::1".parse().unwrap();
+        let encaps =
+            build_seg6local_lwtunnel(SidBehavior::EndDX6, Some(nh6), None, None, 0, &[], 0)
+                .expect("encap built");
+        assert!(encaps.iter().any(|e| matches!(
+            e,
+            RouteLwTunnelEncap::Seg6Local(RouteSeg6LocalIpTunnel::Action(Seg6LocalAction::EndDx6))
+        )));
+        assert!(encaps.iter().any(
+            |e| matches!(e, RouteLwTunnelEncap::Seg6Local(RouteSeg6LocalIpTunnel::Nh6(a)) if *a == nh6)
+        ));
+        assert!(
+            build_seg6local_lwtunnel(SidBehavior::EndDX6, None, None, None, 0, &[], 0).is_none()
+        );
+    }
+
+    #[test]
+    fn end_dx4_pushes_nh4_adjacency() {
+        // End.DX4 (RFC 8986 §4.5): the IPv4 sibling — SEG6_LOCAL_NH4.
+        let nh4: Ipv4Addr = "10.0.2.1".parse().unwrap();
+        let encaps =
+            build_seg6local_lwtunnel(SidBehavior::EndDX4, None, Some(nh4), None, 0, &[], 0)
+                .expect("encap built");
+        assert!(encaps.iter().any(|e| matches!(
+            e,
+            RouteLwTunnelEncap::Seg6Local(RouteSeg6LocalIpTunnel::Action(Seg6LocalAction::EndDx4))
+        )));
+        assert!(encaps.iter().any(
+            |e| matches!(e, RouteLwTunnelEncap::Seg6Local(RouteSeg6LocalIpTunnel::Nh4(a)) if *a == nh4)
+        ));
+        assert!(
+            build_seg6local_lwtunnel(SidBehavior::EndDX4, None, None, None, 0, &[], 0).is_none()
+        );
     }
 
     #[test]
@@ -448,8 +503,9 @@ mod tests {
             fun_bits: 16,
             arg_bits: 64,
         });
-        let encaps = build_seg6local_lwtunnel(SidBehavior::UA, Some(nh6), structure, 0, &[], 0)
-            .expect("encap built");
+        let encaps =
+            build_seg6local_lwtunnel(SidBehavior::UA, Some(nh6), None, structure, 0, &[], 0)
+                .expect("encap built");
         assert!(
             !encaps.iter().any(|e| matches!(
                 e,
@@ -464,7 +520,7 @@ mod tests {
 
         // uN keeps the flavor — it is a prefix install where carriers
         // with a remaining argument legitimately shift.
-        let encaps = build_seg6local_lwtunnel(SidBehavior::UN, None, structure, 0, &[], 0)
+        let encaps = build_seg6local_lwtunnel(SidBehavior::UN, None, None, structure, 0, &[], 0)
             .expect("encap built");
         assert!(encaps.iter().any(|e| matches!(
             e,

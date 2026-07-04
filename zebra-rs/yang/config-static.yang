@@ -257,10 +257,10 @@ module config-static {
             "SRv6 endpoint behavior installed as a seg6local
              terminal action on this prefix. Mutually exclusive
              with `segments` (which configures an outer H.Encap
-             push). Only the local-action variants — End, uN,
-             End.DT4, End.DT6, End.DT46 — are usable today;
-             End.X / uA require a per-adjacency nexthop that this
-             list doesn't model yet.
+             push). Usable variants: End, uN, End.DT4, End.DT6,
+             End.DT46, and — with the sibling `nh6`/`nh4`
+             adjacency leaves — End.DX6 / End.DX4. End.X / uA
+             also take `nh6`.
 
              End.DT4 / End.DT6 / End.DT46 decapsulate the outer
              IPv6 header and look the inner packet up in the VRF
@@ -276,7 +276,23 @@ module config-static {
             enum "End.DT4";
             enum "End.DT6";
             enum "End.DT46";
+            enum "End.DX4";
+            enum "End.DX6";
           }
+        }
+        leaf nh6 {
+          type inet:ipv6-address;
+          description
+            "IPv6 cross-connect adjacency for `action End.DX6`
+             (decap + forward straight to this neighbor, RFC 8986
+             4.4) — also honored for End.X / uA. Mirrors
+             iproute2's `nh6` keyword.";
+        }
+        leaf nh4 {
+          type inet:ipv4-address;
+          description
+            "IPv4 cross-connect adjacency for `action End.DX4`
+             (RFC 8986 4.5). Mirrors iproute2's `nh4` keyword.";
         }
         leaf vrf {
           type string;

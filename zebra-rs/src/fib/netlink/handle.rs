@@ -246,7 +246,7 @@ fn sid_route_target(
 ) -> (u8, RouteType, u8, std::net::Ipv6Addr) {
     use crate::rib::SidBehavior;
     match behavior {
-        SidBehavior::End | SidBehavior::EndT => {
+        SidBehavior::End | SidBehavior::EndT | SidBehavior::EndDX4 | SidBehavior::EndDX6 => {
             (RouteHeader::RT_TABLE_MAIN, RouteType::Unicast, 128, addr)
         }
         SidBehavior::EndX => (RouteHeader::RT_TABLE_MAIN, RouteType::Unicast, 128, addr),
@@ -1022,11 +1022,26 @@ impl FibHandle {
             if let Some(ifindex) = uni.ifindex() {
                 msg.attributes.push(RouteAttribute::Oif(ifindex));
             }
+            // Tee the static action SID to cradle — these never pass
+            // through the SID registry (route-embedded install), so the
+            // eBPF datapath would otherwise not know them.
+            if let Some(cradle) = &self.cradle {
+                cradle
+                    .static_sid_install(*prefix, action, Some(uni.addr), uni.ifindex().unwrap_or(0))
+                    .await;
+            }
+            // The DX cross-connect adjacency rides on the uni's addr
+            // (End.DX6 / End.X families in `nh6`, End.DX4 in `nh4`).
+            let (nh6, nh4) = match uni.addr {
+                std::net::IpAddr::V6(a) if !a.is_unspecified() => (Some(a), None),
+                std::net::IpAddr::V4(a) if !a.is_unspecified() => (None, Some(a)),
+                _ => (None, None),
+            };
             if let Some((encap, encap_type)) =
                 // Static seg6local action routes keep the legacy
                 // RT_TABLE_MAIN decap (table_id 0); per-VRF table
                 // selection arrives via the protocol SID path.
-                super::srv6::build_seg6local_attrs(action, None, None, 0, &[], 0)
+                super::srv6::build_seg6local_attrs(action, nh6, nh4, None, 0, &[], 0)
             {
                 msg.attributes.push(encap);
                 msg.attributes.push(encap_type);
@@ -1858,6 +1873,7 @@ impl FibHandle {
         let Some((encap, encap_type)) = super::srv6::build_seg6local_attrs(
             sid.behavior,
             sid.nh6,
+            None,
             sid.structure,
             sid.table_id,
             &sid.segs,
@@ -2065,6 +2081,7 @@ impl FibHandle {
         }
         let Some((encap, encap_type)) = super::srv6::build_seg6local_attrs(
             crate::rib::SidBehavior::EndDT46,
+            None,
             None,
             None,
             vrf_table,
