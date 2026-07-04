@@ -72,6 +72,20 @@ Feature: BGP EVPN VPWS E-Line signalling over SRv6 (RFC 8214)
     Then show command "show bgp evpn vpws" in namespace "z1" should eventually contain "State: up"
     And show command "show bgp evpn vpws" in namespace "z1" should contain "Remote SID: fcbb:bbbb:2:"
 
+  Scenario: Mismatched L2 MTUs block the bind until they agree (RFC 8214 §3.1)
+    Given the test topology exists
+    # z1 signals MTU 1500, z2 signals 9000: both ends see the clash in the
+    # received Layer-2 Attributes EC and refuse to bind the remote.
+    When I apply config "z1-mtu.yaml" to namespace "z1"
+    And I apply config "z2-mtu9k.yaml" to namespace "z2"
+    Then show command "show bgp evpn" in namespace "z1" should eventually contain "l2-attr:P:mtu9000"
+    And show command "show bgp evpn vpws" in namespace "z1" should eventually contain "State: mtu-mismatch"
+    And show command "show bgp evpn vpws" in namespace "z1" should contain "Remote MTU (mismatch): 9000"
+    # Fix z2's MTU to match: the E-Line binds again without touching z1.
+    When I apply config "z2-mtu.yaml" to namespace "z2"
+    Then show command "show bgp evpn vpws" in namespace "z1" should eventually contain "State: up"
+    And show command "show bgp evpn vpws" in namespace "z2" should eventually contain "State: up"
+
   Scenario: Teardown topology
     Given the test topology exists
     When I stop zebra-rs in namespace "z1"

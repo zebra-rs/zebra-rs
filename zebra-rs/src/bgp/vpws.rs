@@ -10,9 +10,10 @@
 //! → cradle `AddXconnect`, which programs both the ingress XCONNECT map and
 //! the local `End.DX2` decap).
 //!
-//! Scope: single-homed (all-zero ESI), untagged AC (`End.DX2`). The RFC
-//! 8214 Layer-2 Attributes extended community (MTU/control-flags
-//! signalling) is not attached yet.
+//! Scope: single-homed (all-zero ESI), untagged AC (`End.DX2`). The Type-1
+//! carries the RFC 8214 §3.1 Layer-2 Attributes extended community (P bit
+//! set — single-homed primary — plus the configured L2 MTU); a remote whose
+//! non-zero MTU differs from our non-zero MTU is not bound (`mtu-mismatch`).
 
 use std::collections::BTreeMap;
 use std::net::Ipv6Addr;
@@ -36,6 +37,12 @@ pub struct VpwsService {
     /// import side) — lets a config change re-program the xconnect
     /// without waiting for a route churn.
     pub remote_sid: Option<Ipv6Addr>,
+    /// L2 MTU signalled in our Type-1's Layer-2 Attributes EC (RFC 8214
+    /// §3.1) and checked against the remote's. `None`/0 = no MTU check.
+    pub mtu: Option<u16>,
+    /// The remote's L2 MTU when a matching Type-1 was **rejected** for an
+    /// MTU mismatch — the service shows `mtu-mismatch` instead of `up`.
+    pub remote_mtu_mismatch: Option<u16>,
 }
 
 impl VpwsService {
@@ -48,6 +55,15 @@ impl VpwsService {
             self.remote_service_id?,
             self.interface.as_deref()?,
         ))
+    }
+
+    /// RFC 8214 §3.1 MTU check: a remote is usable unless **both** ends
+    /// signal a non-zero L2 MTU and they differ.
+    pub fn mtu_compatible(&self, remote_mtu: u16) -> bool {
+        match self.mtu {
+            Some(local) if local != 0 && remote_mtu != 0 => local == remote_mtu,
+            _ => true,
+        }
     }
 }
 

@@ -204,6 +204,15 @@ module zebra-bgp-evpn {
         mandatory true;
         description "Attachment circuit (CE-facing port) of the E-Line.";
       }
+      leaf mtu {
+        type uint16;
+        default 0;
+        description
+          "L2 MTU signalled in the RFC 8214 §3.1 Layer-2 Attributes
+           extended community on the Type-1 route. 0 disables the MTU
+           check; when both ends signal non-zero MTUs that differ, the
+           remote is not bound (the service shows mtu-mismatch).";
+      }
     }
     leaf bum-tunnel-type {
       type enumeration {
