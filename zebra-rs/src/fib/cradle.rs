@@ -571,6 +571,24 @@ impl CradleFib {
         }
     }
 
+    /// Withdraw a static seg6local action SID teed by `static_sid_install`.
+    pub async fn static_sid_uninstall(&self, prefix: Ipv6Net) {
+        let result = async {
+            self.client()
+                .await?
+                .del_local_sid(pb::LocalSidDel {
+                    sid: prefix.addr().to_string(),
+                    prefix_len: prefix.prefix_len() as u32,
+                })
+                .await?;
+            anyhow::Ok(())
+        }
+        .await;
+        if let Err(e) = result {
+            tracing::warn!("fib: cradle static_sid_uninstall {} failed: {e}", prefix);
+        }
+    }
+
     pub async fn local_sid_install(&self, sid: &crate::rib::Sid, prefix_len: u8, ifindex: u32) {
         let result = async {
             let nexthop_id =
