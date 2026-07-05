@@ -66,9 +66,11 @@ Feature: BGP MUP Controller originates both ST1 and ST2 from one PFCP session
     # core-side F-TEID).
     Then show command "show bgp mup-c session" in namespace "z1" should eventually contain "192.0.2.5"
     # The downlink VRF (st1) originates a Type-1 ST: UE prefix + the ACCESS
-    # tunnel endpoint (gNB, 10.0.0.1).
+    # tunnel endpoint (gNB, 10.0.0.1), with the Source Address (draft §3.2.1)
+    # stamped from the session's core-side endpoint (the UPF anchor) so a
+    # `dataplane gtp` receiver can build the GTP4.E outer header.
     And show command "show bgp mup" in namespace "z1" should contain "[ST1][65000:101][ue=192.0.2.5/32][teid=305419896]"
-    And show command "show bgp mup" in namespace "z1" should contain "[ep=10.0.0.1]"
+    And show command "show bgp mup" in namespace "z1" should contain "[ep=10.0.0.1:src=10.9.0.1]"
     # The uplink VRF (st2) originates a Type-2 ST from the SAME session with
     # the distinct CORE endpoint (10.9.0.1) + its own TEID (0x87654321), plus
     # the Direct segment id.
