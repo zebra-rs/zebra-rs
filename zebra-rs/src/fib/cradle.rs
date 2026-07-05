@@ -35,8 +35,9 @@ pub const MPLS_OP_POP_L3: u32 = 1;
 pub type Leaf = (Option<IpAddr>, u32, Vec<u32>, Vec<Ipv6Addr>, u32);
 
 /// A teed route member: a leaf plus an optional fast-reroute backup leaf
-/// (`Nexthop::Protect` — the backup carries the TI-LFA SRv6 repair: packed
-/// uSID carriers + H.Insert). Backups never nest.
+/// (`Nexthop::Protect` — the backup carries the TI-LFA repair: packed uSID
+/// carriers + H.Insert for SRv6, the repair label stack for SR-MPLS).
+/// Backups never nest.
 type Member = (
     Option<IpAddr>,
     u32,
@@ -107,9 +108,9 @@ fn cradle_vrf(table_id: u32) -> u32 {
 pub struct CradleFib {
     endpoint: String,
     client: Arc<Mutex<Option<CradleClient<Channel>>>>,
-    /// Dedup `(gateway, oif, out-label stack) -> nexthop id` so we
+    /// Dedup `(gateway, oif, out-label stack, backup id) -> nexthop id` so we
     /// `SetNexthop` once per distinct nexthop.
-    nh_ids: Arc<Mutex<HashMap<(u32, u32, Vec<u32>), u32>>>,
+    nh_ids: Arc<Mutex<HashMap<(u32, u32, Vec<u32>, u32), u32>>>,
     nh_ids6: Arc<Mutex<HashMap<([u8; 16], u32, Vec<u32>, u32), u32>>>,
     /// SRv6 nexthop dedup: `(underlay gateway, oif, segment list) -> id`.
     nh_ids_srv6: Arc<Mutex<HashMap<([u8; 16], u32, Vec<[u8; 16]>), u32>>>,
@@ -161,13 +162,21 @@ impl CradleFib {
     /// Resolve (creating if needed) the cradle nexthop id for
     /// `(gw, oif, out-label stack)`. A non-empty `labels` makes this an MPLS
     /// nexthop: the stack is the imposition (route) or swap (ILM) labels.
+    /// A non-zero `backup_id` marks a protected primary — the data plane
+    /// fails over to that nexthop on link-down (SR-MPLS TI-LFA).
     async fn nexthop_id(
         &self,
         gw: Option<Ipv4Addr>,
         oif: u32,
         labels: &[u32],
+        backup_id: u32,
     ) -> anyhow::Result<u32> {
-        let key = (gw.map(u32::from).unwrap_or(0), oif, labels.to_vec());
+        let key = (
+            gw.map(u32::from).unwrap_or(0),
+            oif,
+            labels.to_vec(),
+            backup_id,
+        );
         {
             let ids = self.nh_ids.lock().await;
             if let Some(id) = ids.get(&key) {
@@ -186,7 +195,7 @@ impl CradleFib {
                 labels: labels.to_vec(),
                 segs: Vec::new(),
                 encap_mode: 0,
-                backup_id: 0,
+                backup_id,
                 gtp_src: String::new(),
                 gtp_dst: String::new(),
                 gtp_teid: 0,
@@ -243,9 +252,10 @@ impl CradleFib {
     /// gateway, or `route_v6` for an on-link (gateway-less) member.
     async fn member_nexthop_id(&self, m: &Member, route_v6: bool) -> anyhow::Result<u32> {
         let (gw, oif, labels, segs, encap_mode, backup) = m;
-        // Fast-reroute: resolve the backup leaf first (typically the TI-LFA
-        // SRv6 repair: packed carriers + H.Insert), then hang its id off the
-        // primary so the datapath fails over on link-down.
+        // Fast-reroute: resolve the backup leaf first (the TI-LFA repair —
+        // packed carriers + H.Insert for SRv6, the repair label stack for
+        // SR-MPLS), then hang its id off the primary so the datapath fails
+        // over on link-down.
         let backup_id = match backup {
             Some((bgw, boif, blabels, bsegs, bmode)) => {
                 self.leaf_nexthop_id(bgw, *boif, blabels, bsegs, *bmode, route_v6)
@@ -261,10 +271,10 @@ impl CradleFib {
             return self.srv6_nexthop_id(gw6, *oif, segs, *encap_mode).await;
         }
         match gw {
-            Some(IpAddr::V4(a)) => self.nexthop_id(Some(*a), *oif, labels).await,
+            Some(IpAddr::V4(a)) => self.nexthop_id(Some(*a), *oif, labels, backup_id).await,
             Some(IpAddr::V6(a)) => self.nexthop_id6(Some(*a), *oif, labels, backup_id).await,
             None if route_v6 => self.nexthop_id6(None, *oif, labels, backup_id).await,
-            None => self.nexthop_id(None, *oif, labels).await,
+            None => self.nexthop_id(None, *oif, labels, backup_id).await,
         }
     }
 
@@ -286,10 +296,10 @@ impl CradleFib {
             return self.srv6_nexthop_id(gw6, oif, segs, encap_mode).await;
         }
         match gw {
-            Some(IpAddr::V4(a)) => self.nexthop_id(Some(*a), oif, labels).await,
+            Some(IpAddr::V4(a)) => self.nexthop_id(Some(*a), oif, labels, 0).await,
             Some(IpAddr::V6(a)) => self.nexthop_id6(Some(*a), oif, labels, 0).await,
             None if route_v6 => self.nexthop_id6(None, oif, labels, 0).await,
-            None => self.nexthop_id(None, oif, labels).await,
+            None => self.nexthop_id(None, oif, labels, 0).await,
         }
     }
 
@@ -499,8 +509,8 @@ impl CradleFib {
         let result = async {
             let nexthop_id = match gw {
                 Some(IpAddr::V6(v6)) => self.nexthop_id6(Some(v6), oif, out_labels, 0).await?,
-                Some(IpAddr::V4(v4)) => self.nexthop_id(Some(v4), oif, out_labels).await?,
-                None => self.nexthop_id(None, oif, out_labels).await?,
+                Some(IpAddr::V4(v4)) => self.nexthop_id(Some(v4), oif, out_labels, 0).await?,
+                None => self.nexthop_id(None, oif, out_labels, 0).await?,
             };
             self.client()
                 .await?
@@ -557,7 +567,7 @@ impl CradleFib {
                     self.nexthop_id6(Some(a), oif, &[], 0).await?
                 }
                 Some(IpAddr::V4(a)) if !a.is_unspecified() => {
-                    self.nexthop_id(Some(a), oif, &[]).await?
+                    self.nexthop_id(Some(a), oif, &[], 0).await?
                 }
                 _ => 0,
             };
