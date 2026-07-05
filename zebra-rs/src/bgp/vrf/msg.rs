@@ -103,7 +103,11 @@ pub enum BgpVrfMsg {
     /// [`BgpGlobalMsg::MupExport`]; the global export handler applies the RD,
     /// export route-targets and controller next-hop. One session can fan out
     /// to several VRFs (an st1 and an st2 VRF sharing the NI) — each gets its
-    /// own `MupOriginate` for its direction.
+    /// own `MupOriginate` for its direction. A repeat for a known seid (PFCP
+    /// Modification) re-exports in place when the rebuilt NLRI key is
+    /// unchanged — an ST1 keys on RD+Prefix alone, so a handover's new
+    /// TEID/QFI/endpoint replaces without a withdraw — and explicitly
+    /// withdraws only a prior export whose key changed.
     MupOriginate {
         session: crate::mup_c::session::MupSession,
         direction: crate::bgp::vrf_config::MupSrv6Direction,
@@ -111,9 +115,9 @@ pub enum BgpVrfMsg {
     },
 
     /// Withdraw every ST route this VRF originated for `seid` (PFCP Session
-    /// Deletion, association teardown, or the replace step of a
-    /// Modification). Broadcast to every VRF; the per-VRF removal is
-    /// idempotent for a VRF that never originated for this session.
+    /// Deletion or association teardown; a Modification instead replaces via
+    /// [`Self::MupOriginate`]). Broadcast to every VRF; the per-VRF removal
+    /// is idempotent for a VRF that never originated for this session.
     MupWithdrawOriginate { seid: u64 },
 
     /// Originate (or refresh) this VRF's MUP Segment Discovery route — a DSD

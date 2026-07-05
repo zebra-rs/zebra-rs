@@ -3161,12 +3161,29 @@ fn mup_endpoint_untrack(
     prefix: &MupPrefix,
     endpoint: IpAddr,
 ) {
-    let dep = super::nht::NhtDep::MupEndpoint(rd, prefix.clone());
     let Some(cache) = bgp.nexthop_cache.as_deref_mut() else {
         return;
     };
+    mup_endpoint_untrack_cache(cache, bgp.rib_client, rd, prefix, endpoint);
+}
+
+/// Cache-level core of [`mup_endpoint_untrack`], shared with the local
+/// origination path ([`super::inst::Bgp::mup_export`] /
+/// [`super::inst::Bgp::mup_withdraw_export`]) which holds the `NexthopCache`
+/// directly rather than through a [`BgpTop`]. Releases the stale endpoint when
+/// a re-exported ST1 moves its GTP endpoint in place (handover — the RD+Prefix
+/// key survives, so no withdraw path runs to release it) or when the
+/// originated ST1 is withdrawn outright.
+pub(super) fn mup_endpoint_untrack_cache(
+    cache: &mut super::nht::NexthopCache,
+    rib_client: &crate::rib::client::RibClient,
+    rd: RouteDistinguisher,
+    prefix: &MupPrefix,
+    endpoint: IpAddr,
+) {
+    let dep = super::nht::NhtDep::MupEndpoint(rd, prefix.clone());
     if cache.untrack(endpoint, &dep) {
-        let _ = bgp.rib_client.send(rib::Message::NexthopUnregister {
+        let _ = rib_client.send(rib::Message::NexthopUnregister {
             proto: "bgp".to_string(),
             nh: endpoint,
         });
@@ -13355,9 +13372,45 @@ impl Bgp {
         // the real TEID/QFI/endpoint. `None` for DSD/ISD/ST2 exports.
         rib.mup_st1 = st1;
         rib.attr = self.attr_store.intern(attr);
+        // A re-export for the same RD+Prefix key can move the ST1 GTP
+        // endpoint in place (handover) — capture the pre-update endpoint so
+        // its NHT registration is released when the new best no longer uses
+        // it (mirrors the peer-learned path in `route_mup_locrib_withdraw`).
+        let old_endpoint = self.mup_st1_selected_endpoint(rd, &prefix);
         let _ = self.local_rib.update_mup(rd, prefix.clone(), rib);
         let selected = self.local_rib.select_best_path_mup(&rd, &prefix);
+        if let Some(old) = old_endpoint
+            && selected.first().and_then(|r| r.mup_st1).map(|s| s.endpoint) != Some(old)
+        {
+            super::route::mup_endpoint_untrack_cache(
+                &mut self.nexthop_cache,
+                &self.ctx.rib,
+                rd,
+                &prefix,
+                old,
+            );
+        }
         self.mup_apply_selected(rd, prefix, selected);
+    }
+
+    /// The GTP endpoint (gNB) of the currently-selected ST1 path for
+    /// `rd`+`prefix`, or `None` for non-ST1 keys / no selected path / a path
+    /// without off-key fields. Read before a Loc-RIB mutation so the caller
+    /// can release the old endpoint's NHT registration if the mutation moved
+    /// (or removed) it.
+    fn mup_st1_selected_endpoint(
+        &mut self,
+        rd: RouteDistinguisher,
+        prefix: &MupPrefix,
+    ) -> Option<IpAddr> {
+        if !matches!(prefix, MupPrefix::T1st { .. }) {
+            return None;
+        }
+        self.local_rib
+            .select_best_path_mup(&rd, prefix)
+            .first()
+            .and_then(|r| r.mup_st1)
+            .map(|s| s.endpoint)
     }
 
     /// Inverse of [`Self::mup_export`] (`BgpGlobalMsg::WithdrawMupExport`):
@@ -13368,8 +13421,23 @@ impl Bgp {
         let Some(rd) = self.vrfs.get(&vrf).and_then(|c| c.rd) else {
             return;
         };
+        // Same pre-mutation capture as `mup_export`: release the withdrawn
+        // ST1's GTP-endpoint NHT registration unless a surviving path (e.g. a
+        // peer-learned candidate) still uses the same endpoint.
+        let old_endpoint = self.mup_st1_selected_endpoint(rd, &prefix);
         self.local_rib.remove_mup(rd, &prefix, 0, ORIGINATED_PEER);
         let selected = self.local_rib.select_best_path_mup(&rd, &prefix);
+        if let Some(old) = old_endpoint
+            && selected.first().and_then(|r| r.mup_st1).map(|s| s.endpoint) != Some(old)
+        {
+            super::route::mup_endpoint_untrack_cache(
+                &mut self.nexthop_cache,
+                &self.ctx.rib,
+                rd,
+                &prefix,
+                old,
+            );
+        }
         self.mup_apply_selected(rd, prefix, selected);
     }
 
