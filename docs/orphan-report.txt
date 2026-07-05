@@ -1,0 +1,182 @@
+== Collapsed orphan report ==
+ORPHAN-SUBTREE container    /router/bgp/global/graceful-restart  (5 settable nodes)
+    - /router/bgp/global/graceful-restart/enabled  [leaf]
+    - /router/bgp/global/graceful-restart/restart-time  [leaf]
+    - /router/bgp/global/graceful-restart/stale-routes-time  [leaf]
+    - /router/bgp/global/graceful-restart/helper-only  [leaf]
+    - /router/bgp/global/graceful-restart/long-lived-enabled  [leaf]
+ORPHAN-SUBTREE container    /router/bgp/peer-groups  (92 settable nodes)
+    - /router/bgp/peer-groups/peer-group  [list]
+    - /router/bgp/peer-groups/peer-group/route-reflector/cluster-id  [leaf]
+    - /router/bgp/peer-groups/peer-group/route-reflector/client  [leaf]
+    - /router/bgp/peer-groups/peer-group/as-path-options/allow-own-as  [leaf]
+    - /router/bgp/peer-groups/peer-group/as-path-options/replace-peer-as  [leaf]
+    - /router/bgp/peer-groups/peer-group/as-path-options/disable-peer-as-filter  [leaf]
+    - /router/bgp/peer-groups/peer-group/add-paths/receive  [leaf]
+    - /router/bgp/peer-groups/peer-group/add-paths/send-max  [leaf]
+    - /router/bgp/peer-groups/peer-group/add-paths/eligible-prefix-policy  [leaf]
+    - /router/bgp/peer-groups/peer-group/add-paths/max  [leaf]
+    - /router/bgp/peer-groups/peer-group/add-paths/all  [leaf]
+    - /router/bgp/peer-groups/peer-group/use-multiple-paths/ebgp/allow-multiple-as  [leaf]
+    - /router/bgp/peer-groups/peer-group/use-multiple-paths/enabled  [leaf]
+    - /router/bgp/peer-groups/peer-group/route-flap-damping/enable  [leaf]
+    - /router/bgp/peer-groups/peer-group/route-flap-damping/suppress-above  [leaf]
+    - /router/bgp/peer-groups/peer-group/route-flap-damping/reuse-above  [leaf]
+    - /router/bgp/peer-groups/peer-group/route-flap-damping/max-flap  [leaf]
+    - /router/bgp/peer-groups/peer-group/route-flap-damping/reach-decay  [leaf]
+    - /router/bgp/peer-groups/peer-group/route-flap-damping/unreach-decay  [leaf]
+    - /router/bgp/peer-groups/peer-group/route-flap-damping/keep-history  [leaf]
+    - /router/bgp/peer-groups/peer-group/timers/connect-retry-time  [leaf]
+    - /router/bgp/peer-groups/peer-group/timers/hold-time  [leaf]
+    - /router/bgp/peer-groups/peer-group/timers/keepalive  [leaf]
+    - /router/bgp/peer-groups/peer-group/timers/idle-hold-time  [leaf]
+    - /router/bgp/peer-groups/peer-group/timers/delay-open-time  [leaf]
+    - /router/bgp/peer-groups/peer-group/timers/originate-interval  [leaf]
+    - /router/bgp/peer-groups/peer-group/timers/advertisement-interval  [leaf]
+    - /router/bgp/peer-groups/peer-group/transport/ebgp-multihop/enabled  [leaf]
+    - /router/bgp/peer-groups/peer-group/transport/ebgp-multihop/multihop-ttl  [leaf]
+    - /router/bgp/peer-groups/peer-group/transport/secure-session/options/ao-keychain  [leaf]
+    - /router/bgp/peer-groups/peer-group/transport/secure-session/options/md5-keychain  [leaf]
+    - /router/bgp/peer-groups/peer-group/transport/secure-session/options/sa  [leaf]
+    - /router/bgp/peer-groups/peer-group/transport/secure-session/enabled  [leaf]
+    - /router/bgp/peer-groups/peer-group/transport/bfd/local-multiplier  [leaf]
+    - /router/bgp/peer-groups/peer-group/transport/bfd/desired-min-tx-interval  [leaf]
+    - /router/bgp/peer-groups/peer-group/transport/bfd/required-min-rx-interval  [leaf]
+    - /router/bgp/peer-groups/peer-group/transport/bfd/min-interval  [leaf]
+    - /router/bgp/peer-groups/peer-group/transport/bfd/enabled  [leaf]
+    - /router/bgp/peer-groups/peer-group/transport/local-address  [leaf]
+    - /router/bgp/peer-groups/peer-group/transport/tcp-mss  [leaf]
+    - /router/bgp/peer-groups/peer-group/transport/mtu-discovery  [leaf]
+    - /router/bgp/peer-groups/peer-group/transport/passive-mode  [leaf]
+    - /router/bgp/peer-groups/peer-group/transport/ttl-security  [leaf]
+    - /router/bgp/peer-groups/peer-group/logging-options/log-neighbor-state-changes  [leaf]
+    - /router/bgp/peer-groups/peer-group/remote-as  [leaf]
+    - /router/bgp/peer-groups/peer-group/description  [leaf]
+    - /router/bgp/peer-groups/peer-group/treat-as-withdraw  [leaf]
+    - /router/bgp/peer-groups/peer-group/send-community  [leaf-list]
+    - /router/bgp/peer-groups/peer-group/dynamic-peers/dynamic-peer-list  [list]
+    - /router/bgp/peer-groups/peer-group/graceful-restart/enabled  [leaf]
+    - /router/bgp/peer-groups/peer-group/graceful-restart/restart-time  [leaf]
+    - /router/bgp/peer-groups/peer-group/graceful-restart/stale-routes-time  [leaf]
+    - /router/bgp/peer-groups/peer-group/graceful-restart/helper-only  [leaf]
+    - /router/bgp/peer-groups/peer-group/graceful-restart/long-lived-enabled  [leaf]
+    - /router/bgp/peer-groups/peer-group/prefix-limit/max-prefixes  [leaf]
+    - /router/bgp/peer-groups/peer-group/prefix-limit/warning-threshold-pct  [leaf]
+    - /router/bgp/peer-groups/peer-group/prefix-limit/teardown  [leaf]
+    - /router/bgp/peer-groups/peer-group/prefix-limit/idle-time  [leaf]
+    - /router/bgp/peer-groups/peer-group/afi-safis/afi-safi  [list]
+    - /router/bgp/peer-groups/peer-group/afi-safis/afi-safi/enabled  [leaf]
+    - /router/bgp/peer-groups/peer-group/afi-safis/afi-safi/add-paths/receive  [leaf]
+    - /router/bgp/peer-groups/peer-group/afi-safis/afi-safi/add-paths/send-max  [leaf]
+    - /router/bgp/peer-groups/peer-group/afi-safis/afi-safi/add-paths/eligible-prefix-policy  [leaf]
+    - /router/bgp/peer-groups/peer-group/afi-safis/afi-safi/add-paths/max  [leaf]
+    - /router/bgp/peer-groups/peer-group/afi-safis/afi-safi/add-paths/all  [leaf]
+    - /router/bgp/peer-groups/peer-group/afi-safis/afi-safi/use-multiple-paths/ebgp/allow-multiple-as  [leaf]
+    - /router/bgp/peer-groups/peer-group/afi-safis/afi-safi/use-multiple-paths/enabled  [leaf]
+    - /router/bgp/peer-groups/peer-group/afi-safis/afi-safi/policy/in  [leaf]
+    - /router/bgp/peer-groups/peer-group/afi-safis/afi-safi/policy/out  [leaf]
+    - /router/bgp/peer-groups/peer-group/afi-safis/afi-safi/ipv4/prefix-limit/max-prefixes  [leaf]
+    - /router/bgp/peer-groups/peer-group/afi-safis/afi-safi/ipv4/prefix-limit/warning-threshold-pct  [leaf]
+    - /router/bgp/peer-groups/peer-group/afi-safis/afi-safi/ipv4/prefix-limit/teardown  [leaf]
+    - /router/bgp/peer-groups/peer-group/afi-safis/afi-safi/ipv4/prefix-limit/idle-time  [leaf]
+    - /router/bgp/peer-groups/peer-group/afi-safis/afi-safi/ipv4/send-default-route  [leaf]
+    - /router/bgp/peer-groups/peer-group/afi-safis/afi-safi/ipv6/prefix-limit/max-prefixes  [leaf]
+    - /router/bgp/peer-groups/peer-group/afi-safis/afi-safi/ipv6/prefix-limit/warning-threshold-pct  [leaf]
+    - /router/bgp/peer-groups/peer-group/afi-safis/afi-safi/ipv6/prefix-limit/teardown  [leaf]
+    - /router/bgp/peer-groups/peer-group/afi-safis/afi-safi/ipv6/prefix-limit/idle-time  [leaf]
+    - /router/bgp/peer-groups/peer-group/afi-safis/afi-safi/ipv6/send-default-route  [leaf]
+    - /router/bgp/peer-groups/peer-group/afi-safis/afi-safi/vpnv4/prefix-limit/max-prefixes  [leaf]
+    - /router/bgp/peer-groups/peer-group/afi-safis/afi-safi/vpnv4/prefix-limit/warning-threshold-pct  [leaf]
+    - /router/bgp/peer-groups/peer-group/afi-safis/afi-safi/vpnv4/prefix-limit/teardown  [leaf]
+    - /router/bgp/peer-groups/peer-group/afi-safis/afi-safi/vpnv4/prefix-limit/idle-time  [leaf]
+    - /router/bgp/peer-groups/peer-group/afi-safis/afi-safi/vpnv6/prefix-limit/max-prefixes  [leaf]
+    - /router/bgp/peer-groups/peer-group/afi-safis/afi-safi/vpnv6/prefix-limit/warning-threshold-pct  [leaf]
+    - /router/bgp/peer-groups/peer-group/afi-safis/afi-safi/vpnv6/prefix-limit/teardown  [leaf]
+    - /router/bgp/peer-groups/peer-group/afi-safis/afi-safi/vpnv6/prefix-limit/idle-time  [leaf]
+    - /router/bgp/peer-groups/peer-group/afi-safis/afi-safi/evpn/prefix-limit/max-prefixes  [leaf]
+    - /router/bgp/peer-groups/peer-group/afi-safis/afi-safi/evpn/prefix-limit/warning-threshold-pct  [leaf]
+    - /router/bgp/peer-groups/peer-group/afi-safis/afi-safi/evpn/prefix-limit/teardown  [leaf]
+    - /router/bgp/peer-groups/peer-group/afi-safis/afi-safi/evpn/prefix-limit/idle-time  [leaf]
+    - /router/bgp/peer-groups/peer-group/afi-safis/afi-safi/graceful-restart/enabled  [leaf]
+ORPHAN leaf         /router/bgp/neighbor/route-reflector/cluster-id
+ORPHAN-SUBTREE container    /router/bgp/neighbor/as-path-options  (3 settable nodes)
+    - /router/bgp/neighbor/as-path-options/allow-own-as  [leaf]
+    - /router/bgp/neighbor/as-path-options/replace-peer-as  [leaf]
+    - /router/bgp/neighbor/as-path-options/disable-peer-as-filter  [leaf]
+ORPHAN-SUBTREE container    /router/bgp/neighbor/add-paths  (5 settable nodes)
+    - /router/bgp/neighbor/add-paths/receive  [leaf]
+    - /router/bgp/neighbor/add-paths/send-max  [leaf]
+    - /router/bgp/neighbor/add-paths/eligible-prefix-policy  [leaf]
+    - /router/bgp/neighbor/add-paths/max  [leaf]
+    - /router/bgp/neighbor/add-paths/all  [leaf]
+ORPHAN-SUBTREE container    /router/bgp/neighbor/use-multiple-paths  (2 settable nodes)
+    - /router/bgp/neighbor/use-multiple-paths/ebgp/allow-multiple-as  [leaf]
+    - /router/bgp/neighbor/use-multiple-paths/enabled  [leaf]
+ORPHAN-SUBTREE container    /router/bgp/neighbor/route-flap-damping  (7 settable nodes)
+    - /router/bgp/neighbor/route-flap-damping/enable  [leaf]
+    - /router/bgp/neighbor/route-flap-damping/suppress-above  [leaf]
+    - /router/bgp/neighbor/route-flap-damping/reuse-above  [leaf]
+    - /router/bgp/neighbor/route-flap-damping/max-flap  [leaf]
+    - /router/bgp/neighbor/route-flap-damping/reach-decay  [leaf]
+    - /router/bgp/neighbor/route-flap-damping/unreach-decay  [leaf]
+    - /router/bgp/neighbor/route-flap-damping/keep-history  [leaf]
+ORPHAN leaf         /router/bgp/neighbor/timers/keepalive
+ORPHAN-SUBTREE container    /router/bgp/neighbor/transport/ebgp-multihop  (2 settable nodes)
+    - /router/bgp/neighbor/transport/ebgp-multihop/enabled  [leaf]
+    - /router/bgp/neighbor/transport/ebgp-multihop/multihop-ttl  [leaf]
+ORPHAN-SUBTREE container    /router/bgp/neighbor/transport/secure-session  (4 settable nodes)
+    - /router/bgp/neighbor/transport/secure-session/options/ao-keychain  [leaf]
+    - /router/bgp/neighbor/transport/secure-session/options/md5-keychain  [leaf]
+    - /router/bgp/neighbor/transport/secure-session/options/sa  [leaf]
+    - /router/bgp/neighbor/transport/secure-session/enabled  [leaf]
+ORPHAN-SUBTREE container    /router/bgp/neighbor/transport/bfd  (5 settable nodes)
+    - /router/bgp/neighbor/transport/bfd/local-multiplier  [leaf]
+    - /router/bgp/neighbor/transport/bfd/desired-min-tx-interval  [leaf]
+    - /router/bgp/neighbor/transport/bfd/required-min-rx-interval  [leaf]
+    - /router/bgp/neighbor/transport/bfd/min-interval  [leaf]
+    - /router/bgp/neighbor/transport/bfd/enabled  [leaf]
+ORPHAN leaf         /router/bgp/neighbor/transport/tcp-mss
+ORPHAN leaf         /router/bgp/neighbor/transport/mtu-discovery
+ORPHAN leaf         /router/bgp/neighbor/transport/ttl-security
+ORPHAN-SUBTREE container    /router/bgp/neighbor/logging-options  (1 settable nodes)
+    - /router/bgp/neighbor/logging-options/log-neighbor-state-changes  [leaf]
+ORPHAN leaf         /router/bgp/neighbor/description
+ORPHAN leaf         /router/bgp/neighbor/treat-as-withdraw
+ORPHAN leaf-list    /router/bgp/neighbor/send-community
+ORPHAN-SUBTREE container    /router/bgp/neighbor/afi-safi/use-multiple-paths  (2 settable nodes)
+    - /router/bgp/neighbor/afi-safi/use-multiple-paths/ebgp/allow-multiple-as  [leaf]
+    - /router/bgp/neighbor/afi-safi/use-multiple-paths/enabled  [leaf]
+ORPHAN-SUBTREE container    /router/bgp/neighbor/graceful-restart  (5 settable nodes)
+    - /router/bgp/neighbor/graceful-restart/enabled  [leaf]
+    - /router/bgp/neighbor/graceful-restart/restart-time  [leaf]
+    - /router/bgp/neighbor/graceful-restart/stale-routes-time  [leaf]
+    - /router/bgp/neighbor/graceful-restart/helper-only  [leaf]
+    - /router/bgp/neighbor/graceful-restart/long-lived-enabled  [leaf]
+ORPHAN-SUBTREE container    /router/bgp/neighbor/prefix-limit  (4 settable nodes)
+    - /router/bgp/neighbor/prefix-limit/max-prefixes  [leaf]
+    - /router/bgp/neighbor/prefix-limit/warning-threshold-pct  [leaf]
+    - /router/bgp/neighbor/prefix-limit/teardown  [leaf]
+    - /router/bgp/neighbor/prefix-limit/idle-time  [leaf]
+ORPHAN leaf         /router/bgp/neighbor/peer-group
+ORPHAN leaf         /router/bgp/neighbor/enabled
+ORPHAN leaf         /router/bgp/neighbor/session-state
+ORPHAN leaf         /router/bgp/shards
+ORPHAN leaf         /router/bgp/peer-task
+
+== Bare list/presence-container path unhandled (children handled) ==
+  /router/bgp/global  [p-container]
+  /router/bgp/afi-safi  [list]
+  /router/bgp/afi-safi/redistribute  [p-container]
+  /router/bgp/neighbor/afi-safi  [list]
+  /router/bgp/neighbor/tcp-md5  [p-container]
+  /router/bgp/neighbor/tcp-ao  [p-container]
+  /router/bgp/sr-policy  [p-container]
+  /router/bgp/color-policy  [p-container]
+  /router/bgp/vrf/neighbor/afi-safi  [list]
+
+Total settable schema nodes: 430
+Handled: 271
+Orphans: 150
+
+== Handler paths with no schema node (stale/other) ==
+  /router/bgp/neighbor/flowspec/validation
