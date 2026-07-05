@@ -4059,6 +4059,19 @@ impl Bgp {
         let Some(winner) = selected.first() else {
             return;
         };
+        // A locally-originated ST1 reaches its origin VRF by RD (not RT), so
+        // the endpoint-resolution re-dispatch must carry the same `origin_vrf`
+        // as the initial `mup_apply_selected` — otherwise a route with no
+        // export RT never gets its resolved endpoint and the `dataplane gtp`
+        // downlink encap never installs.
+        let origin_vrf = if winner.typ.is_originated() {
+            self.vrfs
+                .iter()
+                .find(|(_, cfg)| cfg.rd == Some(rd))
+                .map(|(name, _)| name.clone())
+        } else {
+            None
+        };
         let endpoint_transport = if reachable {
             self.nexthop_cache.transport_for(nh).to_vec()
         } else {
@@ -4073,7 +4086,7 @@ impl Bgp {
             rd,
             &prefix,
             Some(winner),
-            None,
+            origin_vrf.as_deref(),
             &[],
             &endpoint_transport,
         );
@@ -4397,6 +4410,18 @@ impl Bgp {
             NhtDep::MupEndpoint(rd, prefix) => {
                 let selected = top.local_rib.select_best_path_mup(rd, prefix);
                 if let Some(winner) = selected.first() {
+                    // Same RD-origin dispatch as `mup_redispatch_endpoint`: a
+                    // locally-originated ST1 with no export RT reaches its
+                    // origin VRF only by RD, so the first endpoint resolution
+                    // (a reachability flip) must carry `origin_vrf`.
+                    let origin_vrf = if winner.typ.is_originated() {
+                        self.vrfs
+                            .iter()
+                            .find(|(_, cfg)| cfg.rd == Some(*rd))
+                            .map(|(name, _)| name.clone())
+                    } else {
+                        None
+                    };
                     let endpoint_transport = if reachable {
                         self.nexthop_cache.transport_for(nh).to_vec()
                     } else {
@@ -4411,7 +4436,7 @@ impl Bgp {
                         *rd,
                         prefix,
                         Some(winner),
-                        None,
+                        origin_vrf.as_deref(),
                         &[],
                         &endpoint_transport,
                     );
