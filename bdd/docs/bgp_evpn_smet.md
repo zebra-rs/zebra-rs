@@ -19,6 +19,13 @@ z2 carries a local (*,G)=239.1.1.1 membership (injected via
 `bridge mdb add`); the kernel emits RTM_NEWMDB, zebra-rs maps br10 to
 VNI 10 and originates a Type-6 SMET. z1 imports it and programs a
 selective kernel bridge MDB entry on br10 with `dst` = z2's VTEP.
+NOTE: the per-VTEP assertions read `dst`/`src_vni` from
+`bridge mdb show dev vxlan10`, which iproute2 renders only from 6.5 on
+(VXLAN MDB support). The stock Ubuntu 24.04 `bridge` (6.1) lists the
+group but silently omits `dst`, failing the assertion even though the
+kernel entry is correct — keep a >= 6.5 `bridge` on the BDD host
+(e.g. `sudo install ~/iproute2/bridge/bridge /usr/local/sbin/bridge`;
+`sudo` resolves /usr/local/sbin ahead of /usr/sbin).
 
 ## Notes
 
@@ -26,6 +33,13 @@ z2 carries a local (*,G)=239.1.1.1 membership (injected via
 `bridge mdb add`); the kernel emits RTM_NEWMDB, zebra-rs maps br10 to
 VNI 10 and originates a Type-6 SMET. z1 imports it and programs a
 selective kernel bridge MDB entry on br10 with `dst` = z2's VTEP.
+NOTE: the per-VTEP assertions read `dst`/`src_vni` from
+`bridge mdb show dev vxlan10`, which iproute2 renders only from 6.5 on
+(VXLAN MDB support). The stock Ubuntu 24.04 `bridge` (6.1) lists the
+group but silently omits `dst`, failing the assertion even though the
+kernel entry is correct — keep a >= 6.5 `bridge` on the BDD host
+(e.g. `sudo install ~/iproute2/bridge/bridge /usr/local/sbin/bridge`;
+`sudo` resolves /usr/local/sbin ahead of /usr/sbin).
 
 ## Test Scenarios
 

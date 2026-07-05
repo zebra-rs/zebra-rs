@@ -29,10 +29,12 @@ Feature: IPv6 NLRI over a v4-addressed BGP session carries a usable next-hop
     And I apply config "z1.yaml" to namespace "z1"
     And I apply config "z2.yaml" to namespace "z2"
     And I wait 10 seconds
-    Then show command "show bgp summary" in namespace "z1" should contain "Established"
+    # "eventually": 10s is a margin, not a guarantee, when the host is
+    # running other features concurrently.
+    Then show command "show bgp summary" in namespace "z1" should eventually contain "Established"
     # z2's loopback arrived over the v6 AFI with z2's interface global
     # (2001:db8:12::2) as the next-hop — not `::`.
-    And show command "show bgp ipv6" in namespace "z1" should contain "2001:db8::2/128"
+    And show command "show bgp ipv6" in namespace "z1" should eventually contain "2001:db8::2/128"
     And show command "show bgp ipv6" in namespace "z1" should contain "2001:db8:12::2"
     # Symmetric on z2.
     And show command "show bgp ipv6" in namespace "z2" should contain "2001:db8::1/128"
@@ -42,7 +44,7 @@ Feature: IPv6 NLRI over a v4-addressed BGP session carries a usable next-hop
     Given the test topology exists
     # A resolvable next-hop means the route makes it past best-path
     # into the main v6 RIB (it never did while the next-hop was `::`)...
-    Then show command "show ipv6 route" in namespace "z1" should contain "2001:db8::2/128"
+    Then show command "show ipv6 route" in namespace "z1" should eventually contain "2001:db8::2/128"
     And show command "show ipv6 route" in namespace "z2" should contain "2001:db8::1/128"
     # ...and the dataplane forwards loopback-to-loopback both ways.
     And ping from "z1" to "2001:db8::2" should succeed

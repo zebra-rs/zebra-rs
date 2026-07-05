@@ -61,4 +61,3 @@ router:
       neighbor:
       - remote-address: 172.16.0.2
         remote-as: 65001
-        enabled: true
