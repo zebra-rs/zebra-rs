@@ -2313,7 +2313,9 @@ impl Bgp {
                     // matching VRF task(s), which build the RD-free ST NLRI and
                     // export it back. A Modification (SessionUp for an existing
                     // seid) is handled per-VRF: the `MupOriginate` handler
-                    // withdraws the session's prior exports before re-building.
+                    // re-exports in place when the rebuilt NLRI key is
+                    // unchanged (a handover only moves off-key tunnel fields)
+                    // and withdraws only the prior exports whose key changed.
                     MupCEvent::SessionUp(session) => {
                         super::vrf::dispatch_mup_session(&self.vrfs, &self.vrf_registry, session)
                     }

@@ -2141,17 +2141,34 @@ impl BgpVrf {
             // global SAFI-85 RIB. The global export handler applies the RD,
             // export route-targets and controller next-hop; the resulting
             // route is mirrored back here (RT/RD-origin) so this VRF's own
-            // `show bgp vrf <name> mup` reflects it. A Modification replaces:
-            // withdraw the session's prior exports first.
+            // `show bgp vrf <name> mup` reflects it. A Modification replaces —
+            // but the ST keys exclude the session-transform fields (an ST1
+            // keys on RD+Prefix alone, §3.2.1), so a handover that only moves
+            // the tunnel (new TEID/QFI/endpoint) rebuilds the *same* NLRI key:
+            // re-export it and let the Loc-RIB replace in place (an implicit
+            // withdraw on the wire). Only a prior export whose key actually
+            // changed (UE prefix / ST2 core tunnel) — or one the modified
+            // session no longer builds — gets an explicit withdraw, so peers
+            // and the dataplane never see the route flap mid-handover.
             BgpVrfMsg::MupOriginate {
                 session,
                 direction,
                 ext_comm,
             } => {
-                self.withdraw_mup_originate(session.seid);
-                if let Some((prefix, st1, attr)) =
-                    super::super::route::build_mup_st_route(&session, direction, ext_comm)
-                {
+                let built = super::super::route::build_mup_st_route(&session, direction, ext_comm);
+                let prior = self
+                    .mup_originated
+                    .remove(&session.seid)
+                    .unwrap_or_default();
+                for old in prior {
+                    if built.as_ref().map(|(p, _, _)| p) != Some(&old) {
+                        let _ = self.global_tx.send(BgpGlobalMsg::WithdrawMupExport {
+                            vrf: self.name.clone(),
+                            prefix: old,
+                        });
+                    }
+                }
+                if let Some((prefix, st1, attr)) = built {
                     self.mup_originated
                         .entry(session.seid)
                         .or_default()
@@ -2542,5 +2559,110 @@ mod tests {
             }
             other => panic!("expected WithdrawExport, got {other:?}"),
         }
+    }
+
+    /// A PFCP Modification that only moves the GTP tunnel (handover: new
+    /// gNB endpoint / TEID) rebuilds the *same* ST1 NLRI key — RD+Prefix
+    /// alone keys an ST1 (§3.2.1) — so the repeat `MupOriginate` must
+    /// re-export in place with NO `WithdrawMupExport`: peers replace via
+    /// implicit withdraw and the UE prefix never flaps mid-handover. A
+    /// modification after which the ST no longer builds still withdraws
+    /// the prior export explicitly.
+    #[tokio::test]
+    async fn mup_handover_reexports_in_place_without_withdraw() {
+        use crate::bgp::vrf_config::MupSrv6Direction;
+        use crate::mup_c::session::MupSession;
+        use std::net::IpAddr;
+
+        fn session(endpoint: Option<&str>, teid: u32) -> MupSession {
+            MupSession {
+                seid: 7,
+                cp_seid: 0x1111,
+                peer: "10.0.0.2:8805".parse().unwrap(),
+                ue_ipv4: Some("192.0.2.5".parse().unwrap()),
+                ue_ipv6: None,
+                teid,
+                endpoint: endpoint.map(|e| e.parse().unwrap()),
+                core_teid: 0,
+                core_endpoint: None,
+                network_instance: Some("internet".to_string()),
+                qfi: Some(9),
+            }
+        }
+
+        let (global_tx, mut global_rx) = unbounded_channel::<BgpGlobalMsg>();
+        let ctx = test_ctx_for_vrf(12, "vrf-ho");
+        let (_rib_tx, rib_rx) = mpsc::unbounded_channel();
+        let (mut vrf, _inbox) = BgpVrf::new(
+            "vrf-ho".to_string(),
+            ctx,
+            Ipv4Addr::UNSPECIFIED,
+            65000,
+            /* label */ 16,
+            global_tx,
+            rib_rx,
+        );
+
+        // Establishment: one export, nothing withdrawn.
+        vrf.process_global_msg(BgpVrfMsg::MupOriginate {
+            session: session(Some("10.0.1.1"), 0x100),
+            direction: MupSrv6Direction::Encapsulation,
+            ext_comm: None,
+        });
+        let first = global_rx.try_recv().expect("establishment exports");
+        let BgpGlobalMsg::MupExport {
+            prefix: key,
+            st1: Some(st1),
+            ..
+        } = first
+        else {
+            panic!("expected MupExport, got {first:?}");
+        };
+        assert_eq!(st1.teid, 0x100);
+        assert!(
+            global_rx.try_recv().is_err(),
+            "establishment sends exactly one message"
+        );
+
+        // Handover: same seid + UE prefix, new endpoint/TEID.
+        vrf.process_global_msg(BgpVrfMsg::MupOriginate {
+            session: session(Some("10.0.2.1"), 0x200),
+            direction: MupSrv6Direction::Encapsulation,
+            ext_comm: None,
+        });
+        let second = global_rx.try_recv().expect("handover re-exports");
+        let BgpGlobalMsg::MupExport {
+            prefix: rekey,
+            st1: Some(moved),
+            ..
+        } = second
+        else {
+            panic!("handover must re-export in place, got {second:?}");
+        };
+        assert_eq!(rekey, key, "handover keeps the RD-free ST1 key");
+        assert_eq!(moved.teid, 0x200);
+        assert_eq!(moved.endpoint, "10.0.2.1".parse::<IpAddr>().unwrap());
+        assert!(
+            global_rx.try_recv().is_err(),
+            "no WithdrawMupExport around the handover re-export"
+        );
+
+        // The access tunnel drops out of the session → the ST1 no longer
+        // builds → the prior export is withdrawn explicitly.
+        vrf.process_global_msg(BgpVrfMsg::MupOriginate {
+            session: session(None, 0),
+            direction: MupSrv6Direction::Encapsulation,
+            ext_comm: None,
+        });
+        let third = global_rx.try_recv().expect("unbuildable ST withdraws");
+        let BgpGlobalMsg::WithdrawMupExport { prefix: gone, .. } = third else {
+            panic!("expected WithdrawMupExport, got {third:?}");
+        };
+        assert_eq!(gone, key);
+        assert!(global_rx.try_recv().is_err());
+        assert!(
+            vrf.mup_originated.is_empty(),
+            "nothing is tracked once the session exports no ST"
+        );
     }
 }
