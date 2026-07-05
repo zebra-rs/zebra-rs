@@ -309,9 +309,10 @@ fn sid_route_target(
         // they never reach the kernel (no End.DT2U/DT2M seg6local action) —
         // `route_sid_install` returns after the cradle tee. The target is
         // computed anyway so the tee gets the right prefix length.
-        SidBehavior::EndDT2U | SidBehavior::EndDT2M | SidBehavior::EndDX2 => {
-            (RouteHeader::RT_TABLE_MAIN, RouteType::Unicast, 128, addr)
-        }
+        SidBehavior::EndDT2U
+        | SidBehavior::EndDT2M
+        | SidBehavior::EndDX2
+        | SidBehavior::EndDX2V => (RouteHeader::RT_TABLE_MAIN, RouteType::Unicast, 128, addr),
         // End.B6.Encaps (SR Policy Binding SID): a /128 host route in
         // table=main; the SRH it pushes rides inside the seg6local
         // encap, not in the route header.
@@ -566,23 +567,35 @@ impl FibHandle {
     }
 
     /// Tee an EVPN VPWS cross-connect to cradle (RFC 8214 Type-1 with an
-    /// SRv6 End.DX2 SID): bind AC `port` to the remote service SID, and —
-    /// when `local_sid` is present — install the local End.DX2 decap on
-    /// the same AC. No kernel counterpart — cradle is the L2 data plane.
+    /// SRv6 End.DX2/DX2V SID): bind AC `port` to the remote service SID,
+    /// and — when `local_sid` is present — install the local decap on the
+    /// same AC. A non-zero `vid` scopes the binding to that 802.1Q VID
+    /// (End.DX2V over VLAN table `table`). No kernel counterpart — cradle
+    /// is the L2 data plane.
     pub async fn cradle_xconnect_add(
         &self,
         port: &str,
         remote_sid: std::net::Ipv6Addr,
         local_sid: Option<std::net::Ipv6Addr>,
+        vid: u16,
+        table: u32,
     ) {
         if let Some(cradle) = &self.cradle {
-            cradle.xconnect_add(port, remote_sid, local_sid).await;
+            cradle
+                .xconnect_add(port, remote_sid, local_sid, vid, table)
+                .await;
         }
     }
 
-    pub async fn cradle_xconnect_del(&self, port: &str, local_sid: Option<std::net::Ipv6Addr>) {
+    pub async fn cradle_xconnect_del(
+        &self,
+        port: &str,
+        local_sid: Option<std::net::Ipv6Addr>,
+        vid: u16,
+        table: u32,
+    ) {
         if let Some(cradle) = &self.cradle {
-            cradle.xconnect_del(port, local_sid).await;
+            cradle.xconnect_del(port, local_sid, vid, table).await;
         }
     }
 
@@ -1896,17 +1909,21 @@ impl FibHandle {
         let (table, kind, prefix_len, dest_addr) =
             sid_route_target(sid.behavior, sid.addr, sid.structure);
         // Tee the local SID to the cradle eBPF data plane (mirrors the netlink
-        // install below) — the SRv6 analogue of the ILM tee. End.DX2 is
-        // registry-only here: its cradle entry is owned by the AddXconnect
-        // tee (which knows the AC binding); installing from the Sid — whose
-        // ifindex is 0 — would clobber a live cross-connect on replay.
+        // install below) — the SRv6 analogue of the ILM tee. End.DX2/DX2V are
+        // registry-only here: their cradle entries are owned by the
+        // AddXconnect tee (which knows the AC / VLAN-table binding);
+        // installing from the Sid — whose ifindex is 0 — would clobber a
+        // live cross-connect on replay.
         if let Some(cradle) = &self.cradle
-            && sid.behavior != crate::rib::SidBehavior::EndDX2
+            && !matches!(
+                sid.behavior,
+                crate::rib::SidBehavior::EndDX2 | crate::rib::SidBehavior::EndDX2V
+            )
         {
             cradle.local_sid_install(sid, prefix_len, ifindex).await;
         }
         // EVPN-over-SRv6 L2 SIDs are cradle-only: the kernel has no
-        // End.DT2U/DT2M/DX2 seg6local actions, so there is nothing to
+        // End.DT2U/DT2M/DX2/DX2V seg6local actions, so there is nothing to
         // install via netlink. Same for REPLACE-C-SID (RFC 9800 §4.2): no kernel
         // flavor op exists through 6.8, and a plain-End fallback would
         // misread the packed containers as full SIDs — worse than no entry.
@@ -1915,6 +1932,7 @@ impl FibHandle {
             crate::rib::SidBehavior::EndDT2U
                 | crate::rib::SidBehavior::EndDT2M
                 | crate::rib::SidBehavior::EndDX2
+                | crate::rib::SidBehavior::EndDX2V
                 | crate::rib::SidBehavior::EndRep
                 | crate::rib::SidBehavior::EndXRep
                 | crate::rib::SidBehavior::UT
@@ -2085,6 +2103,7 @@ impl FibHandle {
             crate::rib::SidBehavior::EndDT2U
                 | crate::rib::SidBehavior::EndDT2M
                 | crate::rib::SidBehavior::EndDX2
+                | crate::rib::SidBehavior::EndDX2V
                 | crate::rib::SidBehavior::EndRep
                 | crate::rib::SidBehavior::EndXRep
                 | crate::rib::SidBehavior::UT

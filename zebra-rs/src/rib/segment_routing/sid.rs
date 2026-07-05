@@ -81,6 +81,12 @@ pub enum SidBehavior {
     /// L2 Service Prefix-SID (RFC 9252 §6.3). Cradle-tee-only, like
     /// End.DT2U.
     EndDX2,
+    /// End.DX2V — decapsulation and VLAN L2 table lookup (IANA codepoint
+    /// 22, RFC 8986 §4.10): the VLAN-scoped EVPN VPWS (E-Line) egress —
+    /// the inner frame's 802.1Q VID picks the attachment circuit from
+    /// the SID's VLAN table ([`Sid::table_id`]). Cradle-tee-only, like
+    /// End.DX2.
+    EndDX2V,
     /// End.M — Mirroring Context segment (IANA codepoint 74,
     /// draft-ietf-rtgwg-srv6-egress-protection). A variant of End.DT6:
     /// the protector decapsulates the outer IPv6/SRH and looks the inner
@@ -141,6 +147,7 @@ impl fmt::Display for SidBehavior {
             Self::EndDX4 => write!(f, "End.DX4"),
             Self::EndDX6 => write!(f, "End.DX6"),
             Self::EndDX2 => write!(f, "End.DX2"),
+            Self::EndDX2V => write!(f, "End.DX2V"),
         }
     }
 }
@@ -165,9 +172,9 @@ impl FromStr for SidBehavior {
             "End.DT6" => Ok(Self::EndDT6),
             "End.DT46" => Ok(Self::EndDT46),
             "End.B6.Encaps" => Ok(Self::EndB6Encap),
-            // End.DT2U / End.DT2M / End.DX2 are deliberately absent: they
-            // are allocated by BGP EVPN (per-VNI or per-VPWS service),
-            // never named in config.
+            // End.DT2U / End.DT2M / End.DX2 / End.DX2V are deliberately
+            // absent: they are allocated by BGP EVPN (per-VNI or per-VPWS
+            // service), never named in config.
             "End.M" => Ok(Self::EndM),
             other => Err(SidBehaviorParseError(other.to_string())),
         }
@@ -324,7 +331,8 @@ impl Sid {
             | SidBehavior::EndT
             | SidBehavior::EndDX4
             | SidBehavior::EndDX6
-            | SidBehavior::EndDX2 => Ipv6Net::new(self.addr, 128).expect("/128 is always valid"),
+            | SidBehavior::EndDX2
+            | SidBehavior::EndDX2V => Ipv6Net::new(self.addr, 128).expect("/128 is always valid"),
             SidBehavior::UALib => {
                 let plen = self
                     .structure

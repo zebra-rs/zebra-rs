@@ -135,13 +135,22 @@ message Xconnect {
   string remote_sid = 3;
   // When non-empty, also install this End.DX2 LocalSid bound to the same
   // AC (decap + raw emit) — one RPC binds the E-Line both directions.
+  // With a non-zero vid the LocalSid is an End.DX2V over dx2v_table.
   string local_sid  = 4;
+  // Non-zero = VLAN-scoped E-Line (RFC 8214 VLAN-based service): only
+  // 802.1Q frames with this VID on the AC enter the cross-connect (the
+  // tag rides inside the encapsulation), and local_sid's End.DX2V demuxes
+  // the return direction from its (dx2v_table, vid) entry onto the AC.
+  uint32 vid        = 5;
+  uint32 dx2v_table = 6; // End.DX2V VLAN-table id (only with vid != 0)
 }
 
 message XconnectDel {
   string port       = 1;
   uint32 port_index = 2;
-  string local_sid  = 3; // when non-empty, also remove this End.DX2 LocalSid
+  string local_sid  = 3; // when non-empty, also remove this End.DX2/DX2V LocalSid
+  uint32 vid        = 4; // non-zero = remove the VLAN-scoped binding
+  uint32 dx2v_table = 5;
 }
 
 // A BUM ingress-replication slot: one remote PE in bridge domain `bd`,

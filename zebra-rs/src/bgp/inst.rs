@@ -1538,16 +1538,25 @@ impl Bgp {
         ))
     }
 
-    /// Allocate (or return the existing) `End.DX2` SID for VPWS service
-    /// `name` — the EVPN VPWS egress SID (RFC 9252 §6.3), advertised on
-    /// the service's Type-1 Ethernet A-D per-EVI route. Registry-only at
-    /// this point: the cradle datapath entry is programmed by the
-    /// `XconnectAdd` tee once the AC binding is known (import side), so
-    /// `route_sid_install` skips the cradle LocalSid write for `EndDX2`.
+    /// Allocate (or return the existing) `End.DX2` / `End.DX2V` SID for
+    /// VPWS service `name` — the EVPN VPWS egress SID (RFC 9252 §6.3),
+    /// advertised on the service's Type-1 Ethernet A-D per-EVI route. A
+    /// VLAN-scoped service (`vlan` set) gets `End.DX2V` with the EVI as
+    /// its VLAN-table id. Registry-only at this point: the cradle datapath
+    /// entry is programmed by the `XconnectAdd` tee once the AC binding is
+    /// known (import side), so `route_sid_install` skips the cradle
+    /// LocalSid write for `EndDX2`/`EndDX2V`.
     fn alloc_vpws_dx2_sid(&mut self, name: &str) -> Option<std::net::Ipv6Addr> {
         if let Some((addr, _function)) = self.local_rib.evpn_vpws.sids.get(name) {
             return Some(*addr);
         }
+        let (vid, table) = self
+            .local_rib
+            .evpn_vpws
+            .services
+            .get(name)
+            .map(|s| s.vid_table())
+            .unwrap_or((0, 0));
         let prefix = self.srv6_locator.as_ref().and_then(|l| l.prefix)?;
         let function = self.srv6_sid_pool.allocate()?;
         match crate::isis::srv6::function_addr(prefix, function) {
@@ -1558,7 +1567,11 @@ impl Bgp {
                     .insert(name.to_string(), (addr, function));
                 let sid = crate::rib::Sid {
                     addr,
-                    behavior: crate::rib::SidBehavior::EndDX2,
+                    behavior: if vid != 0 {
+                        crate::rib::SidBehavior::EndDX2V
+                    } else {
+                        crate::rib::SidBehavior::EndDX2
+                    },
                     context: crate::rib::SidContext::None,
                     owner: crate::rib::SidOwner::new("bgp", 0),
                     locator: self.srv6_locator_name.clone().unwrap_or_default(),
@@ -1566,7 +1579,7 @@ impl Bgp {
                     ifindex: 0,
                     nh6: None,
                     structure: None,
-                    table_id: 0,
+                    table_id: table,
                     segs: Vec::new(),
                     flavors: 0,
                 };
@@ -1580,7 +1593,8 @@ impl Bgp {
         }
     }
 
-    /// Release VPWS service `name`'s `End.DX2` SID back to the pool.
+    /// Release VPWS service `name`'s `End.DX2`/`End.DX2V` SID back to the
+    /// pool.
     pub(super) fn free_vpws_dx2_sid(&mut self, name: &str) {
         if let Some((addr, function)) = self.local_rib.evpn_vpws.sids.remove(name) {
             self.srv6_sid_pool.release(function);
@@ -1589,15 +1603,26 @@ impl Bgp {
     }
 
     /// Build the SRv6 L2 Service Prefix-SID attribute advertised on VPWS
-    /// service `name`'s Type-1 route — this PE's `End.DX2` SID. `None`
-    /// when no locator has resolved.
+    /// service `name`'s Type-1 route — this PE's `End.DX2` (or, for a
+    /// VLAN-scoped service, `End.DX2V`) SID. `None` when no locator has
+    /// resolved.
     pub(super) fn vpws_dx2_prefix_sid(&mut self, name: &str) -> Option<bgp_packet::PrefixSid> {
         let sid = self.alloc_vpws_dx2_sid(name)?;
+        let vlan_scoped = self
+            .local_rib
+            .evpn_vpws
+            .services
+            .get(name)
+            .is_some_and(|s| s.vid_table().0 != 0);
         let structure = self.srv6_locator.as_ref().and_then(|l| l.sid_structure());
         Some(srv6_l2_service_prefix_sid(
             sid,
             structure,
-            bgp_packet::SRV6_BEHAVIOR_END_DX2,
+            if vlan_scoped {
+                bgp_packet::SRV6_BEHAVIOR_END_DX2V
+            } else {
+                bgp_packet::SRV6_BEHAVIOR_END_DX2
+            },
         ))
     }
 

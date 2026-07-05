@@ -213,6 +213,17 @@ module zebra-bgp-evpn {
            check; when both ends signal non-zero MTUs that differ, the
            remote is not bound (the service shows mtu-mismatch).";
       }
+      leaf vlan {
+        type uint16 {
+          range "1..4094";
+        }
+        description
+          "802.1Q VID scoping the attachment circuit (RFC 8214 VLAN-based
+           E-Line): only tagged frames with this VID enter the
+           cross-connect (the tag rides through the service), and the
+           local SID becomes End.DX2V demuxed over the EVI's VLAN table.
+           Absent = whole-port service (End.DX2).";
+      }
     }
     leaf bum-tunnel-type {
       type enumeration {
