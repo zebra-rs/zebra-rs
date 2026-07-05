@@ -9,7 +9,7 @@ Feature: OSPFv3 NSSA (Not-So-Stubby Area) Type-7 origination and translation
   external prefix born inside an NSSA reaches both the area and the rest
   of the OSPFv3 domain.
 
-  This is the IPv6 counterpart of @ospfv2_nssa. Four routers, two areas:
+  This is the IPv6 counterpart of @ospfv2_nssa_base. Four routers, two areas:
   the backbone (0.0.0.0) holds the ABR a and a pure backbone router b;
   the NSSA (0.0.0.1) hangs off a as a hub-and-spoke with the ASBR c and
   the plain internal router d.

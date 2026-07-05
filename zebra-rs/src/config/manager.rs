@@ -1709,7 +1709,7 @@ mod yang_load_tests {
     /// nested `mup-ext-comm` leaf must each parse as settable paths. Pins
     /// the new shape (`segment <type> { mup-ext-comm <2:4>; }`) so a broken
     /// list key or a stale callback path is caught in the unit suite, not
-    /// only in the `@bgp_mup_segment_dsd` / `@bgp_mup_st2` BDDs.
+    /// only in the `@bgp_mup_segment_dsd` / `@bgp_mup_st2_base` BDDs.
     #[test]
     fn bgp_vrf_mup_segment_paths_parse() {
         use crate::config::ExecCode;
@@ -1862,7 +1862,7 @@ mod yang_load_tests {
     /// N3), each with a `network-instance`, and st2 additionally with a
     /// `mup-ext-comm`. Pins the new shape so a broken list key or a stale
     /// callback path is caught in the unit suite, not only in the
-    /// `@bgp_mup_st2` / `@bgp_mup_e2e` BDDs.
+    /// `@bgp_mup_st2_base` / `@bgp_mup_e2e` BDDs.
     #[test]
     fn bgp_vrf_mup_route_paths_parse() {
         use crate::config::ExecCode;

@@ -147,7 +147,7 @@ tool is invoked as `When I execute "pfcp-inject …" in namespace "z1"`.
 Used from the MUP end-to-end BDD features, for example:
 
 - `bdd/tests/features/bgp_mup_e2e.feature` — ST1 origination;
-- `bdd/tests/features/bgp_mup_st2.feature` — ST2 origination;
+- `bdd/tests/features/bgp_mup_st2_base.feature` — ST2 origination;
 - `bdd/tests/features/bgp_mup_dual_st.feature` — one session → both ST1 + ST2,
   with distinct `--endpoint` (access) and `--core-endpoint` (core);
 - `bdd/tests/features/bgp_mup_mixed_afi.feature` — IPv6 UE over IPv4 transport;

@@ -9,7 +9,7 @@ connected, intra-NSSA Type-7 route install, and the ABR's RFC 5340 /
 RFC 3101 Type-7->Type-5 translation into the backbone — so that an IPv6
 external prefix born inside an NSSA reaches both the area and the rest
 of the OSPFv3 domain.
-This is the IPv6 counterpart of @ospfv2_nssa. Four routers, two areas:
+This is the IPv6 counterpart of @ospfv2_nssa_base. Four routers, two areas:
 the backbone (0.0.0.0) holds the ABR a and a pure backbone router b;
 the NSSA (0.0.0.1) hangs off a as a hub-and-spoke with the ASBR c and
 the plain internal router d.
