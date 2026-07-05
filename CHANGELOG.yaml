@@ -5,6 +5,81 @@
 # Fields "distribution" and "urgency" are optional per-entry; if you omit
 # them, the defaults from .chglog.yml (or chglog config) are used.
 
+- semver: 26.7.1
+  date: 2026-07-04T18:00:00+09:00
+  distribution: unstable
+  urgency: medium
+  packager: Kunihiro Ishiguro <kunihiro@zebra.rs>
+  changes:
+    - note: |
+        ### BGP Mobile User Plane (MUP, SAFI 85)
+        * ISD / DSD / Type-1 / Type-2 session-transformed routes:
+          origination (dual-ST, ISD), per-VRF RT-based import, VRF-first
+          model with RD applied at the export boundary, per-VRF label block
+        * MUP-C: PFCP N4 session handling (gNB F-TEID, Created-PDR,
+          UPF address, SEID echo) and session show commands
+        * GTP-U dataplane via cradle: downlink encapsulation, forwarding
+          install, local-endpoint re-dispatch, dataplane selector
+
+    - note: |
+        ### BGP EVPN
+        * VPWS (RFC 8214): E-Line service instances, Layer-2 Attributes
+          extended community, VLAN handling, DX2/DX2V forwarding, show
+        * Ethernet Segment multihoming foundations: ES config and codec,
+          Type-4 ES routes, Type-1 ES-AD routes, DF election; MAC Mobility
+        * BUM tunnel segmentation completion: per-VTEP SMET destinations,
+          RBR fixes; PMSI show; IGMP sync codec and debug commands
+
+    - note: |
+        ### OSPF / OSPFv3 (FRR parity arc)
+        * Virtual links (RFC 2328 §15) with multi-hop backlinks and
+          per-VL authentication; stub router for v2 and v3
+        * SPF and LSA-generation throttling, min LS arrival, area-range
+          with discard routes, passive-interface, default-originate
+        * Redistribute: BGP (v2 and v3), kernel table, route-map filtering
+        * OSPFv3: graceful restart (helper and restarter), instance-id,
+          ABR inter-area summaries, authentication (RFC 7166) wire fixes
+        * Inter-area ASBR Type-4 fallback; Flex-Algo nexthop resolution
+
+    - note: |
+        ### IS-IS
+        * Mirror-SID egress protection over SR-MPLS: codec, origination,
+          ILM programming, link/node failover, hold-down, withdrawal
+        * BGP-PIC integration: NHT retention, node failover via Mirror SID
+        * L3VPN PE-CE with IS-IS as the CE routing protocol
+
+    - note: |
+        ### SRv6 / dataplane (cradle tees)
+        * SRv6 behaviors: static End.DX4/DX6, VRF-bound End.T/uT,
+          endpoint flavors PSP/USP/USD, End.B6.Encaps Binding SID,
+          REPLACE-C-SID locators (RFC 9800)
+        * cradle dataplane tees: VRF, MPLS, SRv6, EVPN-over-SRv6,
+          replication slots, FDB watch/aging, End.M mirror context,
+          TI-LFA repair pairs and SR-MPLS backup, connected routes
+        * RIB: `nexthop blackhole` discard routes; static routes in VRF
+
+    - note: |
+        ### BGP (other)
+        * Lua policy scripting: import/withdraw and egress hooks (IPv4,
+          EVPN), side-effect channel, example scripts, on by default
+        * Fast external failover; peer last-reset; withdraw-storm guard
+        * Unknown transitive attribute propagation (RFC 4271 §9)
+        * Per-VRF redistribute (connected / static / IGP), IPv6 VRF
+          neighbors, eBGP VRF peers; Inter-AS Option B transit label
+        * Encode-side clamps for capabilities and attributes (security
+          audit follow-up); soft-out stale update-group cache fix
+
+    - note: |
+        ### Infrastructure
+        * JSON output across show commands (RIB, BGP, OSPF, OSPFv3,
+          IS-IS, policy) and interactive `show version`
+        * MCP server foundations (stdio); vty tab completion
+        * Config: multi-value leaf-list commit fix, activation leaves
+          consolidated on `enabled`, tokenizer and format fixes,
+          bridge/vxlan ordering, `--config-file` option
+        * mdBook documentation expansion (OSPFv2/v3, MUP, VPWS, Lua,
+          L3VPN PE-CE); BDD hardening (fail on unmatched steps)
+
 - semver: 26.6.2
   date: 2026-06-19T18:00:00+09:00
   distribution: unstable
