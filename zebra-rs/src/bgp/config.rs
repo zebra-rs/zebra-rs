@@ -8279,11 +8279,28 @@ mod mup_dual_origination_tests {
     /// boundary, so the bare attr here carries only the route-specific ecom.
     #[test]
     fn st1_builds_t1st_st2_builds_t2st_with_ext_comm() {
-        let (p1, _st1, attr1) =
-            build_mup_st_route(&session("internet"), MupSrv6Direction::Encapsulation, None)
-                .unwrap();
+        // ST1's downlink outer source is the UPF anchor (core-side) endpoint,
+        // so a session with a core endpoint carries it as the ST1 source.
+        let mut s1 = session("internet");
+        s1.core_endpoint = Some("10.9.0.1".parse().unwrap());
+        let (p1, st1, attr1) =
+            build_mup_st_route(&s1, MupSrv6Direction::Encapsulation, None).unwrap();
         assert!(matches!(p1, MupPrefix::T1st { .. }), "st1 → Type-1 ST");
         assert!(attr1.ecom.is_none(), "st1 carries no ext-comm");
+        assert_eq!(
+            st1.and_then(|f| f.source),
+            Some("10.9.0.1".parse().unwrap()),
+            "st1 source is the UPF anchor (core) endpoint for the GTP4.E outer src",
+        );
+        // No core endpoint ⇒ no anchor source ⇒ the GTP encap can't be built.
+        let (_p, st1_nosrc, _a) =
+            build_mup_st_route(&session("internet"), MupSrv6Direction::Encapsulation, None)
+                .unwrap();
+        assert_eq!(
+            st1_nosrc.and_then(|f| f.source),
+            None,
+            "st1 source is absent when the session has no core endpoint",
+        );
 
         // ST2 needs a real core tunnel (endpoint + non-zero TEID); it never
         // borrows the access tunnel.
