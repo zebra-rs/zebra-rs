@@ -1908,7 +1908,12 @@ fn config_vpws(bgp: &mut Bgp, mut args: Args, op: ConfigOp) -> Option<()> {
 
 /// Shared body for the VPWS leaf handlers: mutate one field, then
 /// reconcile the service (withdraw + re-originate + re-push the AC
-/// cross-connect as needed).
+/// cross-connect as needed). Two invariants ride here so every leaf gets
+/// them: a live binding whose `(vid, VLAN-table)` scoping changed (vlan
+/// or evi edits) is unbound under its OLD pair first — the reconcile's
+/// re-add can't reach the stale cradle entry — and a vlan-presence flip
+/// releases the End.DX2/DX2V SID so the re-originate allocates one with
+/// the right behavior.
 fn config_vpws_leaf(
     bgp: &mut Bgp,
     mut args: Args,
@@ -1932,7 +1937,26 @@ fn config_vpws_leaf(
         .services
         .entry(name.clone())
         .or_default();
+    let old_bound = svc.remote_sid.is_some().then(|| svc.interface.clone());
+    let old_vt = svc.vid_table();
+    let old_vlan_set = svc.vlan.is_some();
     set(svc, value);
+    let new_vt = svc.vid_table();
+    let vlan_flipped = svc.vlan.is_some() != old_vlan_set;
+    if old_vt != new_vt
+        && let Some(Some(ifname)) = old_bound
+    {
+        let local_sid = bgp.local_rib.evpn_vpws.sids.get(&name).map(|(a, _)| *a);
+        let _ = bgp.ctx.rib.send(crate::rib::Message::XconnectDel {
+            ifname,
+            local_sid,
+            vid: old_vt.0,
+            table: old_vt.1,
+        });
+    }
+    if vlan_flipped {
+        bgp.free_vpws_dx2_sid(&name);
+    }
     bgp.vpws_reconcile(&name);
     Some(())
 }
@@ -1961,6 +1985,13 @@ fn config_vpws_mtu(bgp: &mut Bgp, args: Args, op: ConfigOp) -> Option<()> {
     config_vpws_leaf(bgp, args, op, |svc, v| svc.mtu = v.map(|m| m as u16), true)
 }
 
+/// `router bgp afi-safi evpn vpws <name> vlan <1..4094>` — scope the AC to
+/// one 802.1Q VID (RFC 8214 VLAN-based E-Line, End.DX2V). The shared leaf
+/// body unbinds the old scoping and re-allocates the SID on a flip.
+fn config_vpws_vlan(bgp: &mut Bgp, args: Args, op: ConfigOp) -> Option<()> {
+    config_vpws_leaf(bgp, args, op, |svc, v| svc.vlan = v.map(|x| x as u16), true)
+}
+
 /// `router bgp afi-safi evpn vpws <name> interface <name>` — the
 /// attachment circuit. Changing (or clearing) it unbinds the old AC's
 /// cross-connect first.
@@ -1982,6 +2013,7 @@ fn config_vpws_interface(bgp: &mut Bgp, mut args: Args, op: ConfigOp) -> Option<
         .entry(name.clone())
         .or_default();
     let old = std::mem::replace(&mut svc.interface, interface);
+    let (vid, table) = svc.vid_table();
     if old != svc.interface
         && svc.remote_sid.is_some()
         && let Some(old_ifname) = old
@@ -1990,6 +2022,8 @@ fn config_vpws_interface(bgp: &mut Bgp, mut args: Args, op: ConfigOp) -> Option<
         let _ = bgp.ctx.rib.send(crate::rib::Message::XconnectDel {
             ifname: old_ifname,
             local_sid,
+            vid,
+            table,
         });
     }
     bgp.vpws_reconcile(&name);
@@ -4644,6 +4678,7 @@ impl Bgp {
         );
         self.callback_add("/router/bgp/afi-safi/vpws/interface", config_vpws_interface);
         self.callback_add("/router/bgp/afi-safi/vpws/mtu", config_vpws_mtu);
+        self.callback_add("/router/bgp/afi-safi/vpws/vlan", config_vpws_vlan);
 
         // MUP controller (`router bgp mup-c …`, draft-ietf-bess-mup-safi).
         // Augmented in by zebra-bgp-mup-controller.yang; the controller

@@ -71,6 +71,7 @@ fn srv6_behavior(b: crate::rib::SidBehavior) -> u32 {
         EndDX4 => 15,  // decap + IPv4 cross-connect (per-CE VPN egress)
         EndDX6 => 16,  // decap + IPv6 cross-connect
         EndDX2 => 17,  // decap + raw L2 emit on the AC (EVPN VPWS egress)
+        EndDX2V => 18, // decap + VLAN-table AC demux (VLAN-scoped VPWS egress)
         // uT = a uN whose end-of-carrier lookup is table-scoped: cradle
         // models it as UN with a non-zero vrf_id (vrf_table_id below).
         UT => 6,
@@ -909,16 +910,19 @@ impl CradleFib {
         }
     }
 
-    /// Remove a `(vni, sid)` replication slot.
     /// EVPN VPWS cross-connect (RFC 8214 / RFC 9252 §6.3): bind AC `port`
-    /// to the remote PE's End.DX2 service SID. `local_sid`, when present,
-    /// rides in the same RPC so cradle also installs the local End.DX2
+    /// to the remote PE's End.DX2/DX2V service SID. `local_sid`, when
+    /// present, rides in the same RPC so cradle also installs the local
     /// decap bound to the AC — one message programs the E-Line both ways.
+    /// A non-zero `vid` makes the binding VLAN-scoped (End.DX2V over VLAN
+    /// table `table`).
     pub async fn xconnect_add(
         &self,
         port: &str,
         remote_sid: std::net::Ipv6Addr,
         local_sid: Option<std::net::Ipv6Addr>,
+        vid: u16,
+        table: u32,
     ) {
         let result = async {
             self.client()
@@ -928,6 +932,8 @@ impl CradleFib {
                     port_index: 0,
                     remote_sid: remote_sid.to_string(),
                     local_sid: local_sid.map(|s| s.to_string()).unwrap_or_default(),
+                    vid: vid as u32,
+                    dx2v_table: table,
                 })
                 .await?;
             anyhow::Ok(())
@@ -938,9 +944,15 @@ impl CradleFib {
         }
     }
 
-    /// Remove a VPWS cross-connect (and its local End.DX2 decap, when
+    /// Remove a VPWS cross-connect (and its local End.DX2/DX2V decap, when
     /// `local_sid` is present).
-    pub async fn xconnect_del(&self, port: &str, local_sid: Option<std::net::Ipv6Addr>) {
+    pub async fn xconnect_del(
+        &self,
+        port: &str,
+        local_sid: Option<std::net::Ipv6Addr>,
+        vid: u16,
+        table: u32,
+    ) {
         let result = async {
             self.client()
                 .await?
@@ -948,6 +960,8 @@ impl CradleFib {
                     port: port.to_string(),
                     port_index: 0,
                     local_sid: local_sid.map(|s| s.to_string()).unwrap_or_default(),
+                    vid: vid as u32,
+                    dx2v_table: table,
                 })
                 .await?;
             anyhow::Ok(())
@@ -958,6 +972,7 @@ impl CradleFib {
         }
     }
 
+    /// Remove a `(vni, sid)` replication slot.
     pub async fn repl_slot_del(&self, vni: u32, sid: std::net::Ipv6Addr) {
         let result = async {
             self.client()

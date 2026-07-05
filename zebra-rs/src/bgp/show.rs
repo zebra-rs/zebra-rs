@@ -2506,6 +2506,7 @@ struct VpwsServiceJson {
     local_service_id: Option<u32>,
     remote_service_id: Option<u32>,
     interface: Option<String>,
+    vlan: Option<u16>,
     mtu: Option<u16>,
     local_sid: Option<String>,
     remote_sid: Option<String>,
@@ -2545,6 +2546,7 @@ fn show_bgp_evpn_vpws(
                 local_service_id: svc.local_service_id,
                 remote_service_id: svc.remote_service_id,
                 interface: svc.interface.clone(),
+                vlan: svc.vlan,
                 mtu: svc.mtu,
                 local_sid: vpws.sids.get(name).map(|(addr, _)| addr.to_string()),
                 remote_sid: svc.remote_sid.map(|sid| sid.to_string()),
@@ -2578,11 +2580,19 @@ fn show_bgp_evpn_vpws(
         if let Some(ifname) = &svc.interface {
             writeln!(buf, "  Interface: {ifname}")?;
         }
+        if let Some(vid) = svc.vlan {
+            writeln!(buf, "  VLAN: {vid}")?;
+        }
         if let Some(mtu) = svc.mtu.filter(|m| *m != 0) {
             writeln!(buf, "  MTU: {mtu}")?;
         }
         if let Some((sid, _)) = vpws.sids.get(name) {
-            writeln!(buf, "  Local SID (End.DX2): {sid}")?;
+            let behavior = if svc.vlan.is_some() {
+                "End.DX2V"
+            } else {
+                "End.DX2"
+            };
+            writeln!(buf, "  Local SID ({behavior}): {sid}")?;
         }
         if let Some(sid) = svc.remote_sid {
             writeln!(buf, "  Remote SID: {sid}")?;

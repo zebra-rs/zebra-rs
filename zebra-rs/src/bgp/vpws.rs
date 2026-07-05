@@ -40,6 +40,11 @@ pub struct VpwsService {
     /// L2 MTU signalled in our Type-1's Layer-2 Attributes EC (RFC 8214
     /// §3.1) and checked against the remote's. `None`/0 = no MTU check.
     pub mtu: Option<u16>,
+    /// 802.1Q VID scoping the AC (RFC 8214 VLAN-based E-Line): only tagged
+    /// frames with this VID enter the cross-connect and the local SID
+    /// becomes `End.DX2V` (VLAN table = the EVI). `None` = whole-port
+    /// service (`End.DX2`).
+    pub vlan: Option<u16>,
     /// The remote's L2 MTU when a matching Type-1 was **rejected** for an
     /// MTU mismatch — the service shows `mtu-mismatch` instead of `up`.
     pub remote_mtu_mismatch: Option<u16>,
@@ -63,6 +68,15 @@ impl VpwsService {
         match self.mtu {
             Some(local) if local != 0 && remote_mtu != 0 => local == remote_mtu,
             _ => true,
+        }
+    }
+
+    /// The cradle xconnect scoping pair `(802.1Q VID, End.DX2V VLAN-table
+    /// id — the EVI)`; `(0, 0)` for a whole-port `End.DX2` service.
+    pub fn vid_table(&self) -> (u16, u32) {
+        match self.vlan {
+            Some(vid) if vid != 0 => (vid, self.evi.unwrap_or(0)),
+            _ => (0, 0),
         }
     }
 }

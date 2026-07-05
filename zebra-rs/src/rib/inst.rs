@@ -348,19 +348,24 @@ pub enum Message {
         teid: u32,
     },
     /// EVPN VPWS (RFC 8214): bind attachment circuit `ifname` to a remote
-    /// PE's `End.DX2` service SID — teed to cradle as an XCONNECT entry
-    /// (every AC frame MAC-in-SRv6 encapsulates toward it, no FDB) plus,
-    /// when `local_sid` is present, the local `End.DX2` LocalSid whose
-    /// decap emits raw on the same AC. No kernel counterpart — cradle is
-    /// the L2 data plane.
+    /// PE's `End.DX2`/`End.DX2V` service SID — teed to cradle as an
+    /// XCONNECT entry (every AC frame MAC-in-SRv6 encapsulates toward it,
+    /// no FDB) plus, when `local_sid` is present, the local decap LocalSid
+    /// that emits raw on the same AC. A non-zero `vid` scopes the binding
+    /// to that 802.1Q VID (End.DX2V over VLAN table `table`). No kernel
+    /// counterpart — cradle is the L2 data plane.
     XconnectAdd {
         ifname: String,
         remote_sid: std::net::Ipv6Addr,
         local_sid: Option<std::net::Ipv6Addr>,
+        vid: u16,
+        table: u32,
     },
     XconnectDel {
         ifname: String,
         local_sid: Option<std::net::Ipv6Addr>,
+        vid: u16,
+        table: u32,
     },
     /// MUP `dataplane gtp` downlink encap (`GTP4.E`): a GTP-U encap route teed
     /// to cradle — traffic to `prefix` in VRF `table_id` is wrapped in outer
@@ -3183,14 +3188,21 @@ impl Rib {
                 ifname,
                 remote_sid,
                 local_sid,
+                vid,
+                table,
             } => {
                 self.fib_handle
-                    .cradle_xconnect_add(&ifname, remote_sid, local_sid)
+                    .cradle_xconnect_add(&ifname, remote_sid, local_sid, vid, table)
                     .await;
             }
-            Message::XconnectDel { ifname, local_sid } => {
+            Message::XconnectDel {
+                ifname,
+                local_sid,
+                vid,
+                table,
+            } => {
                 self.fib_handle
-                    .cradle_xconnect_del(&ifname, local_sid)
+                    .cradle_xconnect_del(&ifname, local_sid, vid, table)
                     .await;
             }
             Message::CradleGtpEncapAdd {

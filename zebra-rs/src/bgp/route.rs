@@ -6878,6 +6878,14 @@ fn evpn_srv6_sid(attr: &BgpAttr, behavior: u16) -> Option<std::net::Ipv6Addr> {
         .map(|(sid, _)| sid)
 }
 
+/// The remote VPWS service SID on a Type-1 (RFC 9252 §6.3): `End.DX2`, or
+/// `End.DX2V` when the remote's attachment circuit is VLAN-scoped. The
+/// ingress encapsulation treats the SID as opaque either way.
+fn evpn_vpws_sid(attr: &BgpAttr) -> Option<std::net::Ipv6Addr> {
+    evpn_srv6_sid(attr, bgp_packet::SRV6_BEHAVIOR_END_DX2)
+        .or_else(|| evpn_srv6_sid(attr, bgp_packet::SRV6_BEHAVIOR_END_DX2V))
+}
+
 /// The L2 MTU from an EVPN route's Layer-2 Attributes EC (RFC 8214 §3.1).
 /// 0 when the EC is absent or carries no MTU — either way, no MTU check.
 fn evpn_l2_attr_mtu(attr: &BgpAttr) -> u16 {
@@ -7006,9 +7014,13 @@ fn route_evpn_export_selected(
                         svc.remote_mtu_mismatch = None;
                         if let Some(ifname) = svc.interface.clone() {
                             let local_sid = vpws.sids.get(name).map(|(a, _)| *a);
-                            let _ = bgp
-                                .rib_client
-                                .send(rib::Message::XconnectDel { ifname, local_sid });
+                            let (vid, table) = svc.vid_table();
+                            let _ = bgp.rib_client.send(rib::Message::XconnectDel {
+                                ifname,
+                                local_sid,
+                                vid,
+                                table,
+                            });
                         }
                     }
                 }
@@ -7190,10 +7202,9 @@ fn route_evpn_export_selected(
                 && best.typ != BgpRibType::Originated
                 && let Some(evi) = extract_vni_from_attr(&best.attr)
             {
-                let Some(remote_sid) = evpn_srv6_sid(&best.attr, bgp_packet::SRV6_BEHAVIOR_END_DX2)
-                else {
-                    // A Type-1 without an End.DX2 L2-Service SID (e.g. an
-                    // RFC 9572 A-D form) has no SRv6 dataplane binding.
+                let Some(remote_sid) = evpn_vpws_sid(&best.attr) else {
+                    // A Type-1 without an End.DX2/DX2V L2-Service SID (e.g.
+                    // an RFC 9572 A-D form) has no SRv6 dataplane binding.
                     return;
                 };
                 let remote_mtu = evpn_l2_attr_mtu(&best.attr);
@@ -7202,6 +7213,7 @@ fn route_evpn_export_selected(
                     if svc.remote_service_id != Some(*eth_tag) || svc.evi != Some(evi) {
                         continue;
                     }
+                    let (vid, table) = svc.vid_table();
                     // RFC 8214 §3.1: both ends non-zero and different —
                     // the remote MUST NOT be used. Unbind if it had been.
                     if !svc.mtu_compatible(remote_mtu) {
@@ -7210,9 +7222,12 @@ fn route_evpn_export_selected(
                             && let Some(ifname) = svc.interface.clone()
                         {
                             let local_sid = vpws.sids.get(name).map(|(a, _)| *a);
-                            let _ = bgp
-                                .rib_client
-                                .send(rib::Message::XconnectDel { ifname, local_sid });
+                            let _ = bgp.rib_client.send(rib::Message::XconnectDel {
+                                ifname,
+                                local_sid,
+                                vid,
+                                table,
+                            });
                         }
                         continue;
                     }
@@ -7224,6 +7239,8 @@ fn route_evpn_export_selected(
                             ifname,
                             remote_sid,
                             local_sid,
+                            vid,
+                            table,
                         });
                     }
                 }
@@ -15216,7 +15233,7 @@ impl Bgp {
                 {
                     continue;
                 }
-                if let Some(sid) = evpn_srv6_sid(&rib.attr, bgp_packet::SRV6_BEHAVIOR_END_DX2) {
+                if let Some(sid) = evpn_vpws_sid(&rib.attr) {
                     return Some((sid, evpn_l2_attr_mtu(&rib.attr)));
                 }
             }
@@ -15249,6 +15266,7 @@ impl Bgp {
             Some((_, remote_mtu)) => (None, Some(remote_mtu)),
             None => (None, None),
         };
+        let (vid, table) = svc.vid_table();
         if let Some(svc) = self.local_rib.evpn_vpws.services.get_mut(name) {
             svc.remote_sid = remote;
             svc.remote_mtu_mismatch = mismatch;
@@ -15260,6 +15278,8 @@ impl Bgp {
                     ifname,
                     remote_sid,
                     local_sid,
+                    vid,
+                    table,
                 });
             }
             // A previously-bound AC whose remote no longer matches (config
@@ -15267,28 +15287,33 @@ impl Bgp {
             // Interface *changes* are unbound by `config_vpws_interface`,
             // which still knows the old AC name.
             (None, Some(ifname)) if cached.is_some() => {
-                let _ = self
-                    .ctx
-                    .rib
-                    .send(crate::rib::Message::XconnectDel { ifname, local_sid });
+                let _ = self.ctx.rib.send(crate::rib::Message::XconnectDel {
+                    ifname,
+                    local_sid,
+                    vid,
+                    table,
+                });
             }
             _ => {}
         }
     }
 
     /// Full teardown for a deleted VPWS service: withdraw the Type-1,
-    /// unbind the AC cross-connect, release the `End.DX2` SID.
+    /// unbind the AC cross-connect, release the `End.DX2`/`End.DX2V` SID.
     pub fn vpws_teardown(&mut self, name: &str) {
         self.evpn_withdraw_vpws(name);
         if let Some(svc) = self.local_rib.evpn_vpws.services.get_mut(name)
             && svc.remote_sid.take().is_some()
             && let Some(ifname) = svc.interface.clone()
         {
+            let (vid, table) = svc.vid_table();
             let local_sid = self.local_rib.evpn_vpws.sids.get(name).map(|(a, _)| *a);
-            let _ = self
-                .ctx
-                .rib
-                .send(crate::rib::Message::XconnectDel { ifname, local_sid });
+            let _ = self.ctx.rib.send(crate::rib::Message::XconnectDel {
+                ifname,
+                local_sid,
+                vid,
+                table,
+            });
         }
         self.free_vpws_dx2_sid(name);
     }
