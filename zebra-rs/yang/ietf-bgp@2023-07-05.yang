@@ -359,51 +359,6 @@ module ietf-bgp {
              'bgp fast-external-fallover disable' and FRR
              'no bgp fast-external-failover'.";
         }
-        container distance {
-          description
-            "Administrative distances (or preferences) assigned to
-             routes received from different sources (external, and
-             internal).";
-          leaf external {
-            type uint8 {
-              range "1..255";
-            }
-            description
-              "Administrative distances for routes learned from
-               external BGP (eBGP).";
-          }
-          leaf internal {
-            type uint8 {
-              range "1..255";
-            }
-            description
-              "Administrative distances for routes learned from
-               internal BGP (iBGP).";
-          }
-        }
-        container confederation {
-          description
-            "Configuration options specifying parameters when the
-             local router is within an autonomous system which is
-             part of a BGP confederation.";
-          leaf enabled {
-            type boolean;
-            description
-              "When this leaf is set to true it indicates that
-               the local-AS is part of a BGP confederation.";
-          }
-          leaf identifier {
-            type inet:as-number;
-            description
-              "Confederation identifier for the autonomous system.";
-          }
-          leaf-list member-as {
-            type inet:as-number;
-            description
-              "Remote autonomous systems that are to be treated
-               as part of the local confederation.";
-          }
-        }
         container graceful-restart {
           if-feature "bt:graceful-restart";
           description
@@ -413,34 +368,6 @@ module ietf-bgp {
             "RFC 4724: Graceful Restart Mechanism for BGP.";
           uses graceful-restart-config;
         }
-        uses global-group-use-multiple-paths;
-        uses route-selection-options;
-        container afi-safis {
-          description
-            "List of address-families associated with the BGP
-             instance.";
-          list afi-safi {
-            key "name";
-            description
-              "AFI,SAFI configuration available for the
-               neighbor or group.";
-            uses mp-afi-safi-config;
-            uses state;
-            container graceful-restart {
-              if-feature "bt:graceful-restart";
-              description
-                "Parameters relating to BGP graceful-restart";
-              reference
-                "RFC 4724: Graceful Restart Mechanism for BGP.";
-              uses mp-afi-safi-graceful-restart-config;
-            }
-            uses route-selection-options;
-            uses structure-add-paths;
-            uses global-group-use-multiple-paths;
-            uses mp-all-afi-safi-list-contents;
-          }
-        }
-        uses rt-pol:apply-policy-group;
         uses state;
       }
 
