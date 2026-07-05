@@ -662,6 +662,17 @@ pub struct IlmEntry {
     /// True for the winning candidate at this label — the one
     /// installed to the kernel LFIB. Set by `Rib::ilm_select_sync`.
     pub selected: bool,
+    /// The pop delivers locally: the nexthop egress is a loopback
+    /// (a node's own prefix-SID / UHP entry), so whatever sits under
+    /// the label is also ours. Stamped by `Rib::ilm_add` from the
+    /// link table — producers install the loopback nexthop the
+    /// kernel LFIB needs and don't set this themselves. The cradle
+    /// tee keys on it: a local pop must NOT be teed with the
+    /// loopback nexthop (the eBPF pop-and-forward would try to
+    /// resolve an L2 neighbor on `lo` and punt); it becomes a
+    /// nexthop-less pop so the data plane's chained-pop path
+    /// continues into the label(s)/IP underneath.
+    pub local_pop: bool,
 }
 
 impl IlmEntry {
@@ -673,6 +684,7 @@ impl IlmEntry {
             distance: ilm_distance(rtype),
             metric: 0,
             selected: false,
+            local_pop: false,
         }
     }
 }

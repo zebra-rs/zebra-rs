@@ -835,7 +835,16 @@ impl Rib {
     /// table per VRF. So `ilm_add` / `ilm_del` don't take a
     /// `table_id` parameter, and the inbound dispatcher doesn't pass
     /// one for these variants.
-    pub async fn ilm_add(&mut self, label: u32, ilm: IlmEntry) {
+    pub async fn ilm_add(&mut self, label: u32, mut ilm: IlmEntry) {
+        // Stamp the local-delivery pops (see `IlmEntry::local_pop`): a
+        // nexthop egressing a loopback means the label's owner is this
+        // node — every producer's self prefix-SID entry has this shape.
+        ilm.local_pop = match &ilm.nexthop {
+            Nexthop::Uni(u) => u
+                .ifindex()
+                .is_some_and(|i| self.links.get(&i).is_some_and(|l| l.flags.is_loopback())),
+            _ => false,
+        };
         let prev = self.ilm_installed(label);
         let entries = self.ilm.entry(label).or_default();
         // One candidate per protocol: drop this protocol's previous

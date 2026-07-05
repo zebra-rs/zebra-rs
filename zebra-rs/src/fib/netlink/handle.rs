@@ -405,9 +405,9 @@ fn cradle_members(nexthop: &Nexthop) -> Vec<CradleMember> {
             })
             .collect(),
         // Fast-reroute: the primary rides with its backup leaf attached (the
-        // TI-LFA SRv6 repair — packed uSID carriers + H.Insert), so cradle
-        // programs a protected nexthop pair. ECMP primaries are teed
-        // unprotected (MVP).
+        // TI-LFA repair — packed uSID carriers + H.Insert for SRv6, the
+        // repair label stack for SR-MPLS), so cradle programs a protected
+        // nexthop pair. ECMP primaries are teed unprotected (MVP).
         Nexthop::Protect(pro) => {
             let backup = match &pro.backup {
                 NexthopMember::Uni(u) => Some(leaf(u)),
@@ -2854,6 +2854,17 @@ impl FibHandle {
                             0,
                             &[],
                         )
+                        .await;
+                }
+                // Self prefix-SID (UHP local pop): the loopback nexthop is
+                // for the kernel LFIB only — teeing it would make the eBPF
+                // pop-and-forward resolve an L2 neighbor on `lo` and punt.
+                // A nexthop-less pop takes the chained-pop path instead:
+                // whatever sits underneath (a further label, or the IP
+                // payload) is also this node's to process.
+                _ if ilm.local_pop => {
+                    cradle
+                        .ilm_install(label, crate::fib::cradle::MPLS_OP_SWAP, 0, None, 0, &[])
                         .await;
                 }
                 _ => {
