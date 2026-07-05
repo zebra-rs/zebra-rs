@@ -8353,7 +8353,15 @@ pub(super) fn build_mup_st_route(
                     teid: session.teid,
                     qfi: session.qfi.unwrap_or(0),
                     endpoint,
-                    source: None,
+                    // The downlink outer source is the UPF's own anchor tunnel
+                    // address — the same core-side endpoint the gNB tunnels
+                    // uplink *to* (ST2's endpoint), populated from the core FAR
+                    // or the configured `mup-c upf-address`. Carrying it here
+                    // lets a `dataplane gtp` VRF build the GTP4.E outer header
+                    // (draft §3.2.1 optional Source Address). `None` when the
+                    // session has no core-side endpoint (no anchor source, so
+                    // the GTP encap can't be built).
+                    source: session.core_endpoint,
                 }),
             ),
             _ => return None,
