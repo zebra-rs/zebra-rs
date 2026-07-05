@@ -28,7 +28,9 @@ Feature: BGP session loss withdraws every AFI/SAFI the peer contributed
     And I apply config "z1.yaml" to namespace "z1"
     And I apply config "z2.yaml" to namespace "z2"
     And I wait 10 seconds
-    Then show command "show bgp summary" in namespace "z1" should contain "Established"
+    # "eventually": 10s is a margin, not a guarantee, when the host is
+    # running other features concurrently.
+    Then show command "show bgp summary" in namespace "z1" should eventually contain "Established"
     # z2's loopbacks arrived over both AFIs.
     And show command "show bgp" in namespace "z1" should contain "10.0.0.2/32"
     And show command "show bgp ipv6" in namespace "z1" should contain "2001:db8::2/128"

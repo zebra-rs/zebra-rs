@@ -1,5 +1,5 @@
 @serial
-@ospfv2_stub
+@ospfv2_stub_base
 Feature: OSPFv2 stub area drops Type-5 AS-External while keeping inter-area routes
   As a network operator
   I want zebra-rs to support OSPFv2 stub areas — E-bit adjacency

@@ -44,6 +44,12 @@ router:
     global:
       as: 65000
       router-id: 1.1.1.1
+    # Cut the default 30s eBGP MRAI: the C-CE-PE chain cascades one
+    # advertisement interval per eBGP hop per direction, which under a
+    # loaded host overruns the e2e ping budget (~120s worst case).
+    timer:
+      adv-interval:
+        ebgp: 3
     neighbor:
     - remote-address: 1.1.1.3
       remote-as: 65000

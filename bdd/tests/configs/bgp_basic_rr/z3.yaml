@@ -1,0 +1,12 @@
+router:
+  bgp:
+    global:
+      as: 64512
+      router-id: 192.168.0.4
+    neighbor:
+    - remote-address: 192.168.0.1
+      afi-safi:
+      - name: ipv4
+        enabled: true
+      enabled: true
+      remote-as: 64512

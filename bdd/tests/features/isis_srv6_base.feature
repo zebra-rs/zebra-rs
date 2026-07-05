@@ -1,4 +1,4 @@
-@isis_srv6
+@isis_srv6_base
 @isis
 Feature: IS-IS SRv6 end-to-end with H.Encap and End.DT6
   As a network operator
@@ -29,7 +29,7 @@ Feature: IS-IS SRv6 end-to-end with H.Encap and End.DT6
     z1, transit through z2, decap on z3 via End.DT6, then plain
     IPv6 forwarding to z4.
 
-  Config files (in `bdd/tests/configs/isis_srv6/`):
+  Config files (in `bdd/tests/configs/isis_srv6_base/`):
   - z1.conf, z2.conf, z3.conf, z4.conf
 
   Scenario: Setup the SRv6 chain and ping the far end through the SID

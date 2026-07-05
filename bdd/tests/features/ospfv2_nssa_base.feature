@@ -1,5 +1,5 @@
 @serial
-@ospfv2_nssa
+@ospfv2_nssa_base
 Feature: OSPFv2 NSSA (Not-So-Stubby Area) Type-7 origination and translation
   As a network operator
   I want zebra-rs to support OSPFv2 NSSA areas — N-bit adjacency

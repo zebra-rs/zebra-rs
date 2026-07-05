@@ -79,7 +79,9 @@ Feature: OSPFv3 TI-LFA kernel-side fast-reroute on BFD failure
     And daemon log in namespace "s" should eventually contain "protection group(s) onto repairs"
     # SPF reconvergence then re-routes around n1 entirely.
     And kernel route "2001:db8::8" in namespace "s" should eventually contain "dev s-n2"
-    And ping from "s" to "2001:db8::8" should succeed
+    # "eventually": the rewired route may still be resolving ND on the
+    # repair path when the first probe fires under host load.
+    And ping from "s" to "2001:db8::8" should eventually succeed
     # Recovery: BFD re-establishes and the primary path returns.
     When I restore bfd control packets in namespace "s"
     And I wait 15 seconds

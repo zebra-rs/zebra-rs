@@ -40,3 +40,4 @@ via a shared bridge.
 | Egress interface goes down — static route is invalidated. | |
 | Egress interface comes back up — static route recovers. | |
 | Bounce egress interface again — recovery is repeatable. | |
+| Teardown topology | |

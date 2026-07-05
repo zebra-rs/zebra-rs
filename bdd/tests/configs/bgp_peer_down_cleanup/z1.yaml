@@ -16,6 +16,9 @@ router:
       router-id: 10.0.0.1
     neighbor:
     - remote-address: 192.168.0.2
+      # 3s connect retry: a colliding initial connect under host load
+      # otherwise backs off the default 120s, past the assert budget.
+      timers: {connect-retry-time: 3}
       remote-as: 65002
       enabled: true
       afi-safi:

@@ -47,8 +47,9 @@ Feature: BGP IPv6 redistribute connected with SRv6 End.DT6 origination
     Then show command "show bgp ipv6 2001:db8:cafe::/64" in namespace "z1" should contain "Local SID"
     And show command "show bgp ipv6 2001:db8:cafe::/64" in namespace "z1" should contain "End.DT6"
     # Receiver (encapsulation-type srv6): accepted the SID-bearing route;
-    # it is in the BGP table tagged as a "Remote SID".
-    And show command "show bgp ipv6 2001:db8:cafe::/64" in namespace "z2" should contain "Remote SID"
+    # it is in the BGP table tagged as a "Remote SID". "eventually":
+    # propagation to z2 can outlast the fixed wait under host load.
+    And show command "show bgp ipv6 2001:db8:cafe::/64" in namespace "z2" should eventually contain "Remote SID"
     And show command "show bgp ipv6 2001:db8:cafe::/64" in namespace "z2" should contain "End.DT6"
     # Ingress dataplane: the received route is installed with an SRv6
     # H.Encaps entry toward the SID (not a plain next-hop), so matched

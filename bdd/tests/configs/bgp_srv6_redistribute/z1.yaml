@@ -26,6 +26,9 @@ router:
         ipv6-unicast: {}
     neighbor:
     - remote-address: 2001:db8:12::2
+      # 3s connect retry: a colliding initial connect under host load
+      # otherwise backs off the default 120s, past the assert budget.
+      timers: {connect-retry-time: 3}
       remote-as: 65002
       enabled: true
       afi-safi:

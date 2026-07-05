@@ -1934,6 +1934,53 @@ impl Rib {
         }
         self.client_registry
             .register_with_id(proto_id, &proto, tx, vrf_id);
+        // Redistribute registrations ride the inbound channel while this
+        // Subscribe rides the message channel, and `event_loop`'s
+        // `select!` gives the two no relative order. A RedistAdd /
+        // RedistTableAdd / RedistDefaultAdd processed before this row
+        // landed found no subscriber and its walk-and-replay was dropped
+        // — permanently, because routes already in the store never
+        // re-fire as deltas. Replay whatever the recorded filters and
+        // watches imply now that the row exists.
+        self.replay_pending_redist(&proto);
+    }
+
+    /// Replay every redistribute walk this protocol's recorded
+    /// filters/watches imply. Called from `subscribe` to close the
+    /// cross-channel registration race (bit `@ospfv2_redist_table`
+    /// in a loaded concurrent BDD run: the pre-start table-100 route
+    /// was never originated). In the unraced order the filter maps
+    /// are still empty at Subscribe time, so this is a no-op.
+    fn replay_pending_redist(&self, proto: &str) {
+        let Some(tx) = self
+            .client_registry
+            .subscriber_for_proto(proto)
+            .map(|s| s.rib_rx_tx.clone())
+        else {
+            return;
+        };
+        if let Some(rows) = self.redist_filters.get(proto) {
+            for ((afi, rtype), subtypes) in rows.clone() {
+                self.redist_walk(
+                    proto,
+                    afi,
+                    rtype,
+                    &subtypes,
+                    super::redist::WalkOp::Add,
+                    &tx,
+                );
+            }
+        }
+        if let Some(afis) = self.redist_default_watch.get(proto) {
+            for afi in afis.clone() {
+                self.redist_default_replay_add(proto, afi);
+            }
+        }
+        for (table_id, protos) in self.redist_table_watch.iter() {
+            if protos.contains(proto) {
+                self.replay_table_routes_to(*table_id, &tx);
+            }
+        }
     }
 
     async fn proto_cleanup(&mut self, proto: String) {
@@ -2007,6 +2054,11 @@ impl Rib {
             self.client_registry.unregister(proto_id);
         }
         self.redist_filters.remove(proto);
+        self.redist_default_watch.remove(proto);
+        self.redist_table_watch.retain(|_, protos| {
+            protos.remove(proto);
+            !protos.is_empty()
+        });
         self.sr_clients.remove(proto);
         for watchers in self.block_watch.values_mut() {
             watchers.remove(proto);
@@ -2038,16 +2090,18 @@ impl Rib {
         if !super::redist::deliverable(proto, rtype) {
             return None;
         }
-        let tx = self
-            .client_registry
-            .subscriber_for_proto(proto)?
-            .rib_rx_tx
-            .clone();
+        // Record the filter row even when the subscriber row hasn't
+        // landed yet (Subscribe rides the other channel): steady-state
+        // deltas resolve the subscriber at delta time, and `subscribe`
+        // replays the initial walk via `replay_pending_redist`. Bailing
+        // before the insert used to drop BOTH permanently.
         self.redist_filters
             .entry(proto.to_string())
             .or_default()
             .insert((afi, rtype), subtypes);
-        Some(tx)
+        self.client_registry
+            .subscriber_for_proto(proto)
+            .map(|s| s.rib_rx_tx.clone())
     }
 
     fn redist_add(
@@ -2091,13 +2145,6 @@ impl Rib {
         if !super::redist::deliverable(&proto, rtype) {
             return;
         }
-        let Some(tx) = self
-            .client_registry
-            .subscriber_for_proto(&proto)
-            .map(|s| s.rib_rx_tx.clone())
-        else {
-            return;
-        };
         let prior = self
             .redist_filters
             .get(&proto)
@@ -2107,6 +2154,20 @@ impl Rib {
         if prior == subtypes {
             return; // no-op
         }
+        let Some(tx) = self
+            .client_registry
+            .subscriber_for_proto(&proto)
+            .map(|s| s.rib_rx_tx.clone())
+        else {
+            // Subscriber row not landed yet (cross-channel race with
+            // Subscribe) — still record the new set; `subscribe`
+            // replays the whole filter as an Add walk.
+            self.redist_filters
+                .entry(proto)
+                .or_default()
+                .insert((afi, rtype), subtypes);
+            return;
+        };
 
         if prior.is_empty() || subtypes.is_empty() {
             // Wildcard on either side — fall back to full re-walk.
@@ -3400,31 +3461,40 @@ impl Rib {
     }
 
     /// `Message::RedistTableAdd`: register the watch and replay the
-    /// table's current contents, ending in Eor.
+    /// table's current contents, ending in Eor. When the subscriber
+    /// row hasn't landed yet (cross-channel race with Subscribe),
+    /// the watch still registers and `subscribe` runs the replay.
     fn redist_table_add(&mut self, proto: String, table_id: u32) {
         self.redist_table_watch
             .entry(table_id)
             .or_default()
             .insert(proto.clone());
+        if let Some(sub) = self.client_registry.subscriber_for_proto(&proto) {
+            self.replay_table_routes_to(table_id, &sub.rib_rx_tx);
+        }
+    }
+
+    /// Chunked replay of one kernel table's stored routes to a
+    /// subscriber Tx, closed with an Eor marker. Shared by
+    /// `redist_table_add` and the Subscribe-side race replay.
+    fn replay_table_routes_to(&self, table_id: u32, tx: &UnboundedSender<RibRx>) {
         let entries: Vec<super::RouteEntryV4> = self
             .table_routes_v4
             .get(&table_id)
             .map(|m| m.values().cloned().collect())
             .unwrap_or_default();
-        if let Some(sub) = self.client_registry.subscriber_for_proto(&proto) {
-            for chunk in entries.chunks(super::types::REDIST_BATCH_MAX.max(1)) {
-                let _ = sub.rib_rx_tx.send(RibRx::TableRouteAdd {
-                    table_id,
-                    routes: super::RouteBatch::V4(chunk.to_vec()),
-                    bulk: super::BulkPhase::More,
-                });
-            }
-            let _ = sub.rib_rx_tx.send(RibRx::TableRouteAdd {
+        for chunk in entries.chunks(super::types::REDIST_BATCH_MAX.max(1)) {
+            let _ = tx.send(RibRx::TableRouteAdd {
                 table_id,
-                routes: super::RouteBatch::V4(Vec::new()),
-                bulk: super::BulkPhase::Eor,
+                routes: super::RouteBatch::V4(chunk.to_vec()),
+                bulk: super::BulkPhase::More,
             });
         }
+        let _ = tx.send(RibRx::TableRouteAdd {
+            table_id,
+            routes: super::RouteBatch::V4(Vec::new()),
+            bulk: super::BulkPhase::Eor,
+        });
     }
 
     /// `Message::RedistTableDel`: drop the watch and replay the

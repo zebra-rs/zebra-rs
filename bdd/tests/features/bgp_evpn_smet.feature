@@ -29,6 +29,14 @@ Feature: BGP EVPN IGMP/MLD Proxy — Selective Multicast (RFC 9251)
   VNI 10 and originates a Type-6 SMET. z1 imports it and programs a
   selective kernel bridge MDB entry on br10 with `dst` = z2's VTEP.
 
+  NOTE: the per-VTEP assertions read `dst`/`src_vni` from
+  `bridge mdb show dev vxlan10`, which iproute2 renders only from 6.5 on
+  (VXLAN MDB support). The stock Ubuntu 24.04 `bridge` (6.1) lists the
+  group but silently omits `dst`, failing the assertion even though the
+  kernel entry is correct — keep a >= 6.5 `bridge` on the BDD host
+  (e.g. `sudo install ~/iproute2/bridge/bridge /usr/local/sbin/bridge`;
+  `sudo` resolves /usr/local/sbin ahead of /usr/sbin).
+
   Scenario: Setup topology, EVPN iBGP, and per-node snooping bridges
     Given a clean test environment
     When I create bridge "br0"

@@ -477,12 +477,12 @@ MUP Extended Community:
   `mup route st1 dest-network-instance access exact <ni>` container, so
   st1 and st2 now read identically. `build_mup_origination` /
   `render_mup_vrfs` consume the same `srv6_mobile` binding.
-- **Tests.** `@bgp_mup_st2` BDD (controller, `afi-safi mup segment direct`
+- **Tests.** `@bgp_mup_st2_base` BDD (controller, `afi-safi mup segment direct`
   + `route st2 network-instance core mup-ext-comm 1:2`, drives
   `pfcp-inject` with a `core` Network
   Instance → ST2 with endpoint + TEID + Direct segment id, received by the
   peer); `@bgp_mup_segment_dsd` extended to assert the DSD carries
-  `RT:65501:10 1:2`. Run live via `make -C bdd bgp_mup_st2` /
+  `RT:65501:10 1:2`. Run live via `make -C bdd bgp_mup_st2_base` /
   `bgp_mup_segment_dsd`.
 
 **Still open in P6 (unchanged):** the *receive* side (ST2 → Direct-segment

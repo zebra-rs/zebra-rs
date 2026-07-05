@@ -27,6 +27,9 @@ router:
         ebgp: 1
     neighbor:
     - remote-address: 2001:db8:12::1
+      # 3s connect retry: a colliding initial connect under host load
+      # otherwise backs off the default 120s, past the assert budget.
+      timers: {connect-retry-time: 3}
       remote-as: 65001
       enabled: true
       afi-safi:

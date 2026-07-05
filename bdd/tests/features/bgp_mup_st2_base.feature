@@ -1,5 +1,5 @@
 @serial
-@bgp_mup_st2
+@bgp_mup_st2_base
 Feature: BGP MUP Controller originates a Type-2 ST route from a PFCP session
   As a network operator
   I want the zebra-rs BGP MUP Controller (MUP-C) to learn a mobile session

@@ -1,4 +1,4 @@
-@mirror_sid_node
+@mirror_sid_node_base
 @isis
 Feature: IS-IS SRv6 Mirror SID egress NODE protection — stale-route retention
   TI-LFA and the egress-link redirect both need the protected egress to
