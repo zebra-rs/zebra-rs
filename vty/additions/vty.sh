@@ -413,9 +413,9 @@ enable ()
   return ${rc}
 }
 
-# `configure` with auto-elevate: root and group members run passwordless
-# enable; everyone else is prompted for the root password immediately (no
-# probe).
+# `configure` with auto-elevate: root enters silently (already admin
+# server-side); group members run passwordless enable; everyone else is
+# prompted for the root password immediately (no probe).
 configure ()
 {
   if [[ ${CLI_MODE} != "exec" ]]; then
@@ -423,8 +423,11 @@ configure ()
     return 1
   fi
 
-  if (( CLI_PRIVILEGE < 15 )); then
-    if [[ ${EUID} -eq 0 ]] || _cli_in_config_group; then
+  # Root is admin server-side, so `_cli_exec configure` below enters
+  # configure mode on its own — skip the enable RPC so no "% Enabled"
+  # line is printed.
+  if (( CLI_PRIVILEGE < 15 )) && [[ ${EUID} -ne 0 ]]; then
+    if _cli_in_config_group; then
       ${cli_command} -e -m ${CLI_MODE}
       local rc=$?
       if [[ ${rc} -ne 0 ]]; then
