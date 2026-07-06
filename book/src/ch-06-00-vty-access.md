@@ -271,7 +271,7 @@ Package lifecycle (Debian/Ubuntu `.deb`):
   missing.
 - **`apt remove`** — the group is **kept** so memberships survive a
   reinstall.
-- **`apt purge`** — `postrm` removes the group (when `delgroup` is
+- **`apt purge`** — `postrm` removes the group (when `groupdel` is
   available).
 
 #### `configure` auto-elevate
