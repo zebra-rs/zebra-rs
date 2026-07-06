@@ -1,6 +1,6 @@
-# zebra-rs Routing Software
+# Introduction
 
-[zebra-rs Routing Software](ch-00-00-introduction.md)
+[Introduction](ch-00-00-introduction.md)
 - [Install](ch-00-06-install.md)
 - [Building](ch-00-07-building.md)
 - [Router ID Selection](ch-00-01-router-id.md)
