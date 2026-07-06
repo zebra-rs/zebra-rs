@@ -384,7 +384,7 @@ enable ()
     echo "% 'enable' is only available in exec mode."
     return 1
   fi
-  if _cli_in_config_group; then
+  if [[ ${EUID} -eq 0 ]] || _cli_in_config_group; then
     ${cli_command} -e -m ${CLI_MODE}
     local rc=$?
     if [[ ${rc} -eq 0 ]]; then
@@ -413,8 +413,9 @@ enable ()
   return ${rc}
 }
 
-# `configure` with auto-elevate: try configure first; on failure,
-# group members run passwordless enable, everyone else enters root password.
+# `configure` with auto-elevate: root and group members run passwordless
+# enable; everyone else is prompted for the root password immediately (no
+# probe).
 configure ()
 {
   if [[ ${CLI_MODE} != "exec" ]]; then
@@ -423,35 +424,30 @@ configure ()
   fi
 
   if (( CLI_PRIVILEGE < 15 )); then
-    local out first_line
-    out=$(${cli_command} -m exec configure 2>&1)
-    first_line=$(echo "$out" | head -n 1)
-    if [[ "${first_line}" != "SuccessExec" ]]; then
-      if _cli_in_config_group; then
-        ${cli_command} -e -m ${CLI_MODE}
-        local rc=$?
-        if [[ ${rc} -ne 0 ]]; then
-          echo "% Configuration access denied"
-          return 1
-        fi
+    if [[ ${EUID} -eq 0 ]] || _cli_in_config_group; then
+      ${cli_command} -e -m ${CLI_MODE}
+      local rc=$?
+      if [[ ${rc} -ne 0 ]]; then
+        echo "% Configuration access denied"
+        return 1
+      fi
+    else
+      local pw
+      if [[ -t 0 ]]; then
+        stty -echo
+        read -r -p "Root password: " pw
+        stty echo
+        echo
       else
-        local pw
-        if [[ -t 0 ]]; then
-          stty -echo
-          read -r -p "Root password: " pw
-          stty echo
-          echo
-        else
-          IFS= read -r pw
-        fi
-        CLI_ENABLE_PASSWORD="${pw}" ${cli_command} -e -m ${CLI_MODE}
-        local rc=$?
-        pw=""
-        unset pw
-        if [[ ${rc} -ne 0 ]]; then
-          echo "% Configuration access denied"
-          return 1
-        fi
+        IFS= read -r pw
+      fi
+      CLI_ENABLE_PASSWORD="${pw}" ${cli_command} -e -m ${CLI_MODE}
+      local rc=$?
+      pw=""
+      unset pw
+      if [[ ${rc} -ne 0 ]]; then
+        echo "% Configuration access denied"
+        return 1
       fi
     fi
   fi

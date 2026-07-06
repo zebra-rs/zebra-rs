@@ -276,24 +276,25 @@ Package lifecycle (Debian/Ubuntu `.deb`):
 
 #### `configure` auto-elevate
 
-When a non-admin user types `configure`, the shell first tries
-configure directly (root succeeds immediately). On failure, group
-members run passwordless `enable`; everyone else is prompted for
-the **root password** before retry:
-
-```text
-host> configure
-host(configure)#
-```
-
-Group members and users who already ran `enable` within the current
-TTL enter configure mode with no prompt. Non-members see:
+When a non-admin user types `configure`, root and group members run
+passwordless `enable` first. Everyone else is prompted for the **root
+password** immediately — there is no passwordless probe:
 
 ```text
 host> configure
 Root password: ********
 host(configure)#
 ```
+
+Root (uid 0) and group members enter configure mode with no prompt:
+
+```text
+host> configure
+host(configure)#
+```
+
+Users who already ran `enable` within the current TTL enter configure
+mode with no prompt.
 
 `configure` combines `enable` + mode entry for one-shot
 configuration sessions; `enable` is for operators who want to hold

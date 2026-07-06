@@ -70,3 +70,45 @@ ubuntu>show ip route
 ```
 
 See the configuration chapters for how to drive it from there.
+
+## Configure
+
+Changing the running configuration means entering *configure mode*, which
+requires the Admin role. There are three ways to obtain it:
+
+1. **Run `vty` as root.** The `root` user (uid 0) is Admin automatically, so
+   `configure` enters configure mode with no prompt.
+2. **Enter the root password.** Any user can run `configure` and, when
+   prompted, type the **root** password to elevate for the session.
+3. **Join the `zebra-rs` group.** Members of the `zebra-rs` group run
+   `configure` (or `enable`) with no password at all.
+
+The package installer creates the `zebra-rs` group. To let user `kunihiro`
+configure without a password, add them to it:
+
+``` shell
+sudo usermod -aG zebra-rs kunihiro
+newgrp zebra-rs
+```
+
+`usermod` records the membership, but an existing login shell keeps the groups
+it started with; `newgrp zebra-rs` (or logging out and back in) picks up the
+new group in the current session. You might need to reboot the system to
+reflect the `zebra-rs` group across every session.
+
+Once you are a member, run `vty` and enter configure mode:
+
+``` shell
+vty
+ubuntu>configure
+% Enabled (admin role active for 900 seconds)
+ubuntu#
+```
+
+The `% Enabled` line confirms the Admin role, which is held for 900 seconds of
+idle time — refreshed on each command — up to a four-hour hard cap. In configure
+mode you can review the running configuration with `show`, edit it with `set`
+and `delete`, and apply your changes with `commit`.
+
+See [VTY Access Control](ch-06-00-vty-access.md) for the full role and
+authentication model.
