@@ -245,29 +245,18 @@ The Session struct carries a `role` field (`View`, `Operator`,
 - **Root (uid=0)**: implicit Admin from session creation, no enable
   required (D20). The `enable` RPC short-circuits to success
   without invoking PAM.
-- **Interactive**: type `enable`, authenticate via PAM, hold Admin
-  for the TTL.
-- **Service account** (for automation): a uid listed in the env
-  var `ZEBRA_VTY_SERVICE_ACCOUNTS` (CSV of decimal uids) is
-  permanently Admin without enable. Typically set in the
-  daemon's systemd unit:
-
-  ```ini
-  # /etc/systemd/system/zebra-rs.service.d/service-accounts.conf
-  [Service]
-  Environment=ZEBRA_VTY_SERVICE_ACCOUNTS=999,1001
-  ```
-
-  Service accounts bypass PAM (no password to ship in scripts) and
-  are identified by uid alone via SO_PEERCRED. The env var is read
-  once at daemon startup (D21); changes require restart. Future
-  YANG-driven runtime mutability is deferred to a follow-up.
+- **`zebra-rs` group member**: run `enable` or `configure` with no
+  password; the daemon promotes the session to Admin with the usual
+  sliding idle TTL and hard cap (D27).
+- **Root password via PAM**: type `enable` or `configure` and
+  authenticate the **root** account through `vtypam` (D28). Hold
+  Admin for the TTL.
 
 `vtyctl` invocations are short-lived; their sessions exist for one
 or two RPCs and then idle out. Because session state is per-bash_pid
 and `vtyctl` rarely has a long-lived parent shell, **interactive
-`enable` is effectively a `vty` shell-only feature**. Automated
-admin work uses service accounts.
+`enable` is effectively a `vty` shell-only feature**. Scripted
+admin work uses `sudo vtyctl …`.
 
 ## Pipeline / parent-process conventions
 
@@ -327,7 +316,7 @@ dispatch with or without `$(...)` capture.
 | 1 | SessionTable, `(uid, ppid)` resolver, peer-validation guards. No proto changes. |
 | 2 | Idle TTL + periodic procfs sweep. |
 | 3 | pidfd-based immediate parent-death detection. |
-| 4 | RBAC, enable RPC, vtypam helper, PAM service file, service-accounts in YANG. |
+| 4 | RBAC, enable RPC, vtypam helper, PAM service file, `zebra-rs` group auth. |
 | 5 | *(deferred)* configure-mode lock. |
 | 6 | Logout RPC + bash EXIT trap integration. |
 | 7 | Streaming RPCs (ping, traceroute, monitor terminal, commit confirmed). |
@@ -347,7 +336,7 @@ Each phase is intended to ship as an independent PR.
 | D7 | The initial Enable RPC uses a single password field. Bidirectional PAM conversation (for OTP, password change) is deferred. |
 | D8 | Session key derivation assumes the direct vty-bash-to-vtyhelper parent relationship; the daemon verifies via `/proc` (orphan check + parent uid match) but does not inspect the parent's command name. |
 | D9 | vtyctl receives no special-casing. Stateful RPCs (configure, enable, monitor) naturally fail across vtyctl invocations because the session is not continuous. |
-| D10 | Script-driven admin operations use YANG `service-accounts` (permanent admin by uid), not interactive enable. |
+| D10 | Script-driven admin operations use `sudo vtyctl …` (root), not interactive enable. |
 | D11 | Configure-mode locking is not part of the initial implementation. Concurrent edits are tolerated; conflict-resolution policy is left to commit semantics. |
 | D12 | The daemon and its clients must share a PID namespace. `peer_pid == 0` from SO_PEERCRED is rejected as cross-PID-ns access. |
 | D13 | TACACS+ integration is authentication-only via `pam_tacplus`. No login/command accounting, no per-command authorization. |
@@ -357,13 +346,13 @@ Each phase is intended to ship as an independent PR.
 | D17 | enable failure rate-limit lives in the daemon (per-uid counter, 5 failures within 30 s triggers a 30 s lockout, in-memory only). `pam_faillock` is documented as an optional stronger layer that admins can stack in the PAM service file. |
 | D18 | RBAC is 3-tier: `View`, `Operator`, `Admin`. Maps cleanly onto Cisco priv-lvl ranges 0-1 / 2-14 / 15. YANG-configurable roles are explicitly out of scope. |
 | D19 | Default idle session TTL is **600 s** with a 60 s sweep interval (Cisco IOS `exec-timeout 10 0` convention). Configurable later if a deployment needs it. |
-| D20 | **Root (uid=0) is implicitly Admin.** New sessions for uid=0 are created with `role=Admin` / `enabled=true` / no deadlines; the `enable` RPC short-circuits to success without spawning vtypam. Service-account configuration does not need to list uid 0. Reason: root already owns the host and `pam_unix` against the daemon's own owning account is awkward UX. |
-| D21 | **Service-accounts via env var** for the initial implementation. `ZEBRA_VTY_SERVICE_ACCOUNTS=999,1001,...` (CSV of decimal uids) names uids that are permanent Admin from session creation, with the same shape as root (no deadlines, enable short-circuits to success). State is fixed at daemon startup; runtime changes require a restart. Full YANG integration is deferred to a follow-up if a deployment demands runtime mutability. |
+| D20 | **Root (uid=0) is implicitly Admin.** New sessions for uid=0 are created with `role=Admin` / `enabled=true` / no deadlines; the `enable` RPC short-circuits to success without spawning vtypam. |
 | D22 | **Initial admin gates: Apply and Clear RPCs.** `SessionTable::require_admin` checks `enabled`, enforces sliding TTL + hard cap (with auto-downgrade on expiry), and slides the idle deadline on each authorized call. |
 | D23 | **Configure-mode admin gate** on `DoExec`. For `ExecType::Exec` only (completion paths remain free): admin is required when `mode != "exec"` (catches a client that sets `mode=configure` directly) and when `mode == "exec" && first_word == "configure"` (UX courtesy — block at entry so the prompt doesn't flip uselessly). Configure-mode mutex/lock is deliberately NOT included; multiple admins can enter configure simultaneously (D11 still deferred). |
-| D24 | **Auto-elevate on `configure`**. When a non-admin user types `configure`, the vty bash shell function optimistically tries first (admins succeed silently). On `PermissionDenied` it prompts for `Password:` (echo off) and sends an `Enable` RPC against the caller's own account (sudo-style) — so the same password that works for `enable` works here. On success it retries `configure` and flips `CLI_PRIVILEGE`. `EnableRequest` carries an optional `auth_user` field that the daemon honors when non-empty (kept for future su-style flows); the configure auto-elevate path leaves it empty. |
-| D25 | **YANG-driven service-accounts** (follow-up). New `vty.yang` module with `list service-account { key uid; leaf description; }` under `container vty` in the global `grouping config`. `ConfigManager` maintains an `Arc<RwLock<HashSet<u32>>>` updated by `commit_config` on `vty service-account uid N` Set/Delete diffs; `SessionTable` reads the union of this set and the env-var set in `is_service_account`. The env var (D21) remains as a startup-only seed for environments where YANG config is unavailable; YANG is the runtime-mutable path. |
+| D24 | **Auto-elevate on `configure`**. When a non-admin user types `configure`, the vty bash shell optimistically tries configure first (root succeeds). On failure, group members send a passwordless `Enable` RPC; non-members are prompted for **Root password:** before retry. |
 | D26 | **Root peers bypass the parent-uid check.** `resolve_session_key` skips Guard 2 when `peer_uid == 0`. Rationale: the strict match rejected the common `sudo <cmd>` pattern, where the outer `sudo` process retains the invoking user's ruid while the client itself runs as uid 0. Risk surface: any uid-0 connector is trusted regardless of ancestry, but `SO_PEERCRED`'s effective-uid attestation already implies that — a process running as root can already do anything on the host. The remaining guards (D12 cross-PID-namespace, OrphanClient, ParentVanished) still fire for root peers. Non-root peers are unaffected — the parent-uid match is still enforced, so a setuid escalation to a non-zero uid is still refused. |
+| D27 | **`zebra-rs` Linux group for passwordless enable.** Package postinstall creates the group. Supplementary membership is checked on `enable` via `getgrouplist`; members are promoted without PAM. Group name overridable with `ZEBRA_VTY_CONFIG_GROUP`. Missing group → PAM-only fallback. |
+| D28 | **PAM authenticates root for non-group callers.** Non-members who type `enable`/`configure` are prompted for the root password immediately (no passwordless probe). Client `auth_user` is ignored. |
 
 ## Deferred work
 

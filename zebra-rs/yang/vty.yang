@@ -13,12 +13,7 @@ module vty {
   contact
     "https://zebra.dev";
   description
-    "VTY (CLI) configuration for zebra-rs.
-
-     Phase 4-d-ii (D25): service-accounts can be defined via YANG
-     in addition to (and on top of) the ZEBRA_VTY_SERVICE_ACCOUNTS
-     env var. Both sources are unioned; a uid present in either is
-     a permanent Admin from session creation.";
+    "VTY (CLI) configuration for zebra-rs.";
 
   revision "2026-05-18" {
     description
@@ -28,27 +23,5 @@ module vty {
   grouping vty {
     description
       "VTY configuration container.";
-
-    list service-account {
-      ext:help "Permanent Admin uid (no enable required)";
-      key uid;
-      description
-        "A uid that is permanently granted the Admin role from
-         session creation. Use for automation accounts (Ansible,
-         monitoring, cron) that cannot meaningfully type a
-         password. SO_PEERCRED supplies the uid; matching the
-         configured list grants Admin without spawning vtypam.";
-      leaf uid {
-        type uint32;
-        description
-          "Numeric uid as reported by SO_PEERCRED.";
-      }
-      leaf description {
-        type string;
-        description
-          "Free-form note about the account's purpose. Ignored
-           by the daemon — present only for operator clarity.";
-      }
-    }
   }
 }

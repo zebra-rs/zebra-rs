@@ -7,8 +7,7 @@
 //! sources (`SO_PEERCRED` plus `/proc/{pid}/status`) and never from
 //! client-supplied data. Per-RPC integration lives in `serve.rs`.
 
-use std::collections::HashSet;
-use std::sync::{Arc, RwLock};
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 #[cfg(target_os = "linux")]
@@ -34,10 +33,9 @@ pub type SessionKey = (u32, u32);
 /// - `Operator`: intermediate (clear, restart, ping/traceroute, etc.).
 /// - `Admin`: full configuration access; required for configure/commit.
 ///
-/// Sessions start at `View`. The `enable` command authenticates the
-/// operator via PAM and promotes them to `Admin` for a bounded window
-/// (see [`Session::enable_expires`] / [`Session::enable_hard_deadline`]).
-/// Service accounts start at `Admin` permanently.
+/// Sessions start at `View`. Root (uid 0) and members of the
+/// `zebra-rs` group start at Admin permanently. Everyone else must
+/// `enable` with the root password (PAM).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Role {
     View,
@@ -59,9 +57,9 @@ pub struct SessionContext {
 #[derive(Debug, Clone)]
 pub struct Session {
     pub bash_pid: u32,
-    /// Resolved via `getpwuid_r` at session creation. `None` only when the
-    /// lookup failed (uid not in passwd db); in that case enable cannot
-    /// run and admin operations fail closed.
+    /// Resolved via `getpwuid_r` at session creation. Retained for
+    /// future audit logging; not used by the enable/PAM path today.
+    #[allow(dead_code)]
     pub username: Option<String>,
     pub last_active: Instant,
     /// Current authorization role. Defaults to `View`.
@@ -76,6 +74,12 @@ pub struct Session {
     /// activity (see D2).
     pub enable_hard_deadline: Option<Instant>,
 }
+
+/// Default Linux group whose members may `enable` without a password.
+pub const CONFIG_GROUP_NAME: &str = "zebra-rs";
+
+/// PAM account verified for non-group callers who type `enable`.
+pub const ENABLE_PAM_USER: &str = "root";
 
 /// Default sliding idle TTL for the admin role granted by `enable`.
 /// 15 minutes per D2.
@@ -143,50 +147,48 @@ pub enum SessionError {
 
 /// Concurrent table of active sessions.
 #[cfg(target_os = "linux")]
-#[derive(Debug, Default)]
+#[derive(Debug)]
 pub struct SessionTable {
     sessions: DashMap<SessionKey, Session>,
-    /// uids that are permanently Admin via the `ZEBRA_VTY_SERVICE_ACCOUNTS`
-    /// env var (D21). Fixed at daemon startup; immutable thereafter.
-    env_service_accounts: HashSet<u32>,
-    /// uids that are permanently Admin via the YANG config (D25). Mutable
-    /// at runtime — `commit_config` updates this set when the operator
-    /// adds or removes `vty service-account uid N`.
-    yang_service_accounts: Arc<RwLock<HashSet<u32>>>,
+    /// Gid of the configure-authorization group (`zebra-rs` by default).
+    /// `None` when the group does not exist at daemon startup.
+    config_group_gid: Option<u32>,
 }
 
 #[cfg(target_os = "linux")]
 impl SessionTable {
     #[cfg(test)]
-    pub fn new() -> Arc<Self> {
-        Self::with_service_accounts(HashSet::new(), Arc::new(RwLock::new(HashSet::new())))
+    pub fn new() -> std::sync::Arc<Self> {
+        Self::with_config_group(None)
     }
 
-    /// Construct a SessionTable with the two service-account sources
-    /// (env-driven and YANG-driven). uid 0 is always implicitly Admin via
-    /// [D20]; passing it in either set is allowed but redundant.
-    pub fn with_service_accounts(
-        env_service_accounts: HashSet<u32>,
-        yang_service_accounts: Arc<RwLock<HashSet<u32>>>,
-    ) -> Arc<Self> {
-        Arc::new(Self {
+    /// Construct a SessionTable. uid 0 is always implicitly Admin (D20).
+    pub fn with_config_group(config_group_gid: Option<u32>) -> std::sync::Arc<Self> {
+        std::sync::Arc::new(Self {
             sessions: DashMap::new(),
-            env_service_accounts,
-            yang_service_accounts,
+            config_group_gid,
         })
     }
 
-    /// Whether the given uid is permanently Admin via either of the
-    /// service-account sources (env var or YANG). Used by the Enable
-    /// handler to short-circuit PAM (a service account that mistakenly
-    /// runs `enable` gets fast success instead of a baffling PAM failure).
-    pub fn is_service_account(&self, uid: u32) -> bool {
-        self.env_service_accounts.contains(&uid)
-            || self
-                .yang_service_accounts
-                .read()
-                .map(|s| s.contains(&uid))
-                .unwrap_or(false)
+    /// Resolve the configure-authorization group gid at startup.
+    ///
+    /// Reads `ZEBRA_VTY_CONFIG_GROUP` when set; otherwise [`CONFIG_GROUP_NAME`].
+    /// Returns `None` when the group is absent (PAM-only fallback).
+    pub fn resolve_config_group_gid() -> Option<u32> {
+        let name = std::env::var("ZEBRA_VTY_CONFIG_GROUP")
+            .unwrap_or_else(|_| CONFIG_GROUP_NAME.to_string());
+        lookup_group_gid(&name)
+    }
+
+    /// Whether the given uid belongs to the configure-authorization group.
+    pub fn is_config_group_member<P: ProcStatusReader>(&self, reader: &P, uid: u32) -> bool {
+        let Some(gid) = self
+            .config_group_gid
+            .or_else(Self::resolve_config_group_gid)
+        else {
+            return false;
+        };
+        reader.user_in_group(uid, gid)
     }
 
     /// Resolve the session for an incoming RPC.
@@ -245,11 +247,8 @@ impl SessionTable {
 
         let username = reader.resolve_username(peer_uid);
         let mut session = Session::new(ppid_u32, username);
-        // Permanent-admin uids: root (D20) and any uid in the
-        // service-account allow-list (D21/D25). Both bypass enable and
-        // have no deadlines. The yang set is consulted via the same
-        // is_service_account helper used by the Enable handler.
-        if peer_uid == 0 || self.is_service_account(peer_uid) {
+        // Permanent admin: root only (D20).
+        if peer_uid == 0 {
             session.role = Role::Admin;
             session.enabled = true;
         }
@@ -292,16 +291,11 @@ impl SessionTable {
         }
     }
 
-    /// Read the username cached on the session, if present.
-    pub fn username(&self, key: &SessionKey) -> Option<String> {
-        self.sessions.get(key).and_then(|s| s.username.clone())
-    }
-
     /// Authorize an Admin-required RPC for the given session.
     ///
     /// On success, also extends the sliding idle TTL by `ENABLE_IDLE_TTL`
-    /// (D2). For permanent admins (root, service-accounts) deadlines stay
-    /// `None` and are not touched. Time-bounded admins whose `expires` or
+    /// (D2). For permanent admins (root) deadlines stay `None` and are
+    /// not touched. Time-bounded admins whose `expires` or
     /// `hard_deadline` have passed are downgraded to View as a side effect
     /// and `EnableExpired` is returned.
     pub fn require_admin(&self, key: &SessionKey) -> Result<(), AuthzError> {
@@ -323,7 +317,7 @@ impl SessionTable {
                 s.enable_expires = Some(now + ENABLE_IDLE_TTL);
             }
             (None, None) => {
-                // Permanent admin (root or service-account). No deadlines.
+                // Permanent admin (root). No deadlines.
             }
             _ => {
                 // Defensive: invariant says either both are Some or both
@@ -534,6 +528,82 @@ pub trait ProcStatusReader {
     /// Resolve uid -> username via the system passwd database. `None` when
     /// the uid has no passwd entry.
     fn resolve_username(&self, uid: u32) -> Option<String>;
+    /// Whether `uid` belongs to supplementary group `gid`.
+    fn user_in_group(&self, uid: u32, gid: u32) -> bool;
+}
+
+/// Look up a group name via NSS and return its gid.
+#[cfg(target_os = "linux")]
+pub fn lookup_group_gid(name: &str) -> Option<u32> {
+    use std::ffi::CString;
+
+    let name_c = CString::new(name).ok()?;
+    let mut grp = std::mem::MaybeUninit::<libc::group>::uninit();
+    let mut buf = vec![0u8; 1024];
+    let mut result: *mut libc::group = std::ptr::null_mut();
+    let rc = unsafe {
+        libc::getgrnam_r(
+            name_c.as_ptr(),
+            grp.as_mut_ptr(),
+            buf.as_mut_ptr() as *mut libc::c_char,
+            buf.len(),
+            &mut result,
+        )
+    };
+    if rc != 0 || result.is_null() {
+        return None;
+    }
+    Some(unsafe { grp.assume_init().gr_gid })
+}
+
+/// Return every gid (primary + supplementary) for `uid`.
+#[cfg(target_os = "linux")]
+pub fn user_group_list(uid: u32) -> Vec<u32> {
+    use std::ffi::{CStr, CString};
+
+    let mut buf = vec![0u8; 1024];
+    let mut pwd: std::mem::MaybeUninit<libc::passwd> = std::mem::MaybeUninit::uninit();
+    let mut result: *mut libc::passwd = std::ptr::null_mut();
+    let rc = unsafe {
+        libc::getpwuid_r(
+            uid,
+            pwd.as_mut_ptr(),
+            buf.as_mut_ptr() as *mut libc::c_char,
+            buf.len(),
+            &mut result,
+        )
+    };
+    if rc != 0 || result.is_null() {
+        return Vec::new();
+    }
+    let pwd = unsafe { pwd.assume_init() };
+    let username = unsafe { CStr::from_ptr(pwd.pw_name) };
+    let username = match username.to_str() {
+        Ok(s) => s,
+        Err(_) => return vec![pwd.pw_gid],
+    };
+    let user_c = match CString::new(username) {
+        Ok(c) => c,
+        Err(_) => return vec![pwd.pw_gid],
+    };
+    let mut ngroups: libc::c_int = 64;
+    loop {
+        let mut groups = vec![0 as libc::gid_t; ngroups as usize];
+        let mut count = ngroups;
+        let rc = unsafe {
+            libc::getgrouplist(user_c.as_ptr(), pwd.pw_gid, groups.as_mut_ptr(), &mut count)
+        };
+        if rc >= 0 {
+            groups.truncate(rc as usize);
+            return groups;
+        }
+        // rc == -1: buffer too small; `count` holds the required size.
+        if count <= ngroups {
+            break;
+        }
+        ngroups = count;
+    }
+    vec![pwd.pw_gid]
 }
 
 #[cfg(target_os = "linux")]
@@ -592,6 +662,10 @@ impl ProcStatusReader for ProcfsReader {
         let name = unsafe { CStr::from_ptr(pwd.pw_name) };
         name.to_str().ok().map(String::from)
     }
+
+    fn user_in_group(&self, uid: u32, gid: u32) -> bool {
+        user_group_list(uid).contains(&gid)
+    }
 }
 
 #[cfg(all(test, target_os = "linux"))]
@@ -605,6 +679,8 @@ mod tests {
     struct StubReader {
         ppid: Mutex<HashMap<i32, i32>>,
         ruid: Mutex<HashMap<i32, u32>>,
+        /// Supplementary groups keyed by uid.
+        groups: Mutex<HashMap<u32, Vec<u32>>>,
         /// When set, the named pid returns `NotFound` to simulate a vanished
         /// parent.
         missing: Mutex<Vec<i32>>,
@@ -616,6 +692,9 @@ mod tests {
         }
         fn set_ruid(&self, pid: i32, ruid: u32) {
             self.ruid.lock().unwrap().insert(pid, ruid);
+        }
+        fn set_groups(&self, uid: u32, gids: Vec<u32>) {
+            self.groups.lock().unwrap().insert(uid, gids);
         }
         fn set_missing(&self, pid: i32) {
             self.missing.lock().unwrap().push(pid);
@@ -649,9 +728,14 @@ mod tests {
             !self.missing.lock().unwrap().contains(&pid)
         }
         fn resolve_username(&self, uid: u32) -> Option<String> {
-            // Tests don't care about the real passwd db; synthesize a
-            // deterministic name so they can verify the field is populated.
             Some(format!("u{uid}"))
+        }
+        fn user_in_group(&self, uid: u32, gid: u32) -> bool {
+            self.groups
+                .lock()
+                .unwrap()
+                .get(&uid)
+                .is_some_and(|gids| gids.contains(&gid))
         }
     }
 
@@ -747,33 +831,106 @@ mod tests {
     }
 
     #[test]
-    fn service_account_session_starts_as_permanent_admin() {
-        // D21: any uid listed in service_accounts is implicit Admin from
-        // session creation, with no deadlines (same shape as root).
-        let mut accounts = HashSet::new();
-        accounts.insert(999);
-        let table =
-            SessionTable::with_service_accounts(accounts, Arc::new(RwLock::new(HashSet::new())));
+    fn config_group_member_is_detected() {
+        let table = SessionTable::with_config_group(Some(4242));
+        let reader = StubReader::default();
+        reader.set_groups(1000, vec![1000, 4242]);
+        assert!(table.is_config_group_member(&reader, 1000));
+        reader.set_groups(2000, vec![2000]);
+        assert!(!table.is_config_group_member(&reader, 2000));
+    }
+
+    #[test]
+    fn config_group_absent_yields_no_members() {
+        let table = SessionTable::with_config_group(None);
+        let reader = StubReader::default();
+        reader.set_groups(1000, vec![1000, 4242]);
+        assert!(!table.is_config_group_member(&reader, 1000));
+    }
+
+    #[test]
+    fn non_root_group_member_starts_as_view() {
+        let table = SessionTable::with_config_group(Some(4242));
         let reader = StubReader::default();
         reader.set_ppid(1234, 2000);
         reader.set_ruid(2000, 999);
+        reader.set_groups(999, vec![999, 4242]);
 
         let (key, is_new) = table.resolve(&reader, 999, 1234).unwrap();
-        assert_eq!(key, (999, 2000));
         assert!(is_new);
+        let sess = table.get(&key).unwrap();
+        assert_eq!(sess.role, Role::View);
+        assert!(!sess.enabled);
+        assert_eq!(table.require_admin(&key).unwrap_err(), AuthzError::NotAdmin);
+    }
+
+    #[test]
+    fn group_member_promoted_by_enable() {
+        let table = SessionTable::with_config_group(Some(4242));
+        let reader = StubReader::default();
+        reader.set_ppid(1234, 2000);
+        reader.set_ruid(2000, 999);
+        reader.set_groups(999, vec![999, 4242]);
+
+        let (key, _) = table.resolve(&reader, 999, 1234).unwrap();
+        assert!(
+            table.promote_to_admin(&key, Duration::from_secs(900), Duration::from_secs(14400),)
+        );
         let sess = table.get(&key).unwrap();
         assert_eq!(sess.role, Role::Admin);
         assert!(sess.enabled);
-        assert!(sess.enable_expires.is_none());
-        assert!(sess.enable_hard_deadline.is_none());
+        assert!(sess.enable_expires.is_some());
+        assert!(sess.enable_hard_deadline.is_some());
+        assert!(table.require_admin(&key).is_ok());
+    }
 
-        // Non-service-account uid on the same table stays View.
-        reader.set_ppid(1235, 3000);
-        reader.set_ruid(3000, 1000);
-        let (other, _) = table.resolve(&reader, 1000, 1235).unwrap();
-        let other_sess = table.get(&other).unwrap();
-        assert_eq!(other_sess.role, Role::View);
-        assert!(!other_sess.enabled);
+    /// Regression: `getgrouplist(3)` returns the number of groups on success
+    /// (not 0). A mistaken `rc == 0` check dropped supplementary groups and
+    /// broke passwordless enable for `zebra-rs` members.
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn user_group_list_matches_getgrouplist() {
+        use std::ffi::{CStr, CString};
+
+        let uid = unsafe { libc::getuid() };
+        let mut buf = vec![0u8; 1024];
+        let mut pwd: std::mem::MaybeUninit<libc::passwd> = std::mem::MaybeUninit::uninit();
+        let mut result: *mut libc::passwd = std::ptr::null_mut();
+        let rc = unsafe {
+            libc::getpwuid_r(
+                uid,
+                pwd.as_mut_ptr(),
+                buf.as_mut_ptr() as *mut libc::c_char,
+                buf.len(),
+                &mut result,
+            )
+        };
+        assert_eq!(rc, 0);
+        assert!(!result.is_null());
+        let pwd = unsafe { pwd.assume_init() };
+        let name = unsafe { CStr::from_ptr(pwd.pw_name) };
+        let user_c = CString::new(name.to_str().unwrap()).unwrap();
+
+        let mut ngroups: libc::c_int = 64;
+        let expected: Vec<u32> = loop {
+            let mut groups = vec![0 as libc::gid_t; ngroups as usize];
+            let mut count = ngroups;
+            let rc = unsafe {
+                libc::getgrouplist(user_c.as_ptr(), pwd.pw_gid, groups.as_mut_ptr(), &mut count)
+            };
+            if rc >= 0 {
+                break groups[..rc as usize].to_vec();
+            }
+            assert_eq!(rc, -1);
+            ngroups = count;
+        };
+
+        let actual = user_group_list(uid);
+        assert_eq!(actual, expected);
+        assert!(
+            expected.len() > 1 || expected == [pwd.pw_gid],
+            "expected at least primary gid"
+        );
     }
 
     #[test]
@@ -851,78 +1008,17 @@ mod tests {
     }
 
     #[test]
-    fn require_admin_is_noop_for_permanent_admin() {
-        // Root and service-account sessions have no deadlines; require_admin
-        // should succeed without touching the (None) deadline fields.
-        let mut accounts = HashSet::new();
-        accounts.insert(999);
-        let table =
-            SessionTable::with_service_accounts(accounts, Arc::new(RwLock::new(HashSet::new())));
+    fn require_admin_is_noop_for_root_session() {
+        let table = SessionTable::new();
         let reader = StubReader::default();
-        reader.set_ppid(1234, 2000);
-        reader.set_ruid(2000, 999);
-        table.resolve(&reader, 999, 1234).unwrap();
-        assert!(table.require_admin(&(999, 2000)).is_ok());
-        let s = table.get(&(999, 2000)).unwrap();
+        reader.set_ppid(1234, 999);
+        reader.set_ruid(999, 0);
+        table.resolve(&reader, 0, 1234).unwrap();
+        assert!(table.require_admin(&(0, 999)).is_ok());
+        let s = table.get(&(0, 999)).unwrap();
         assert!(s.enabled);
         assert!(s.enable_expires.is_none());
         assert!(s.enable_hard_deadline.is_none());
-    }
-
-    #[test]
-    fn is_service_account_reports_membership() {
-        let mut accounts = HashSet::new();
-        accounts.insert(999);
-        accounts.insert(1001);
-        let table =
-            SessionTable::with_service_accounts(accounts, Arc::new(RwLock::new(HashSet::new())));
-        assert!(table.is_service_account(999));
-        assert!(table.is_service_account(1001));
-        assert!(!table.is_service_account(1000));
-        assert!(!table.is_service_account(0));
-    }
-
-    #[test]
-    fn yang_service_accounts_union_with_env() {
-        // Env contributes 999. YANG arc is mutated externally to add 1001.
-        // is_service_account reports the union.
-        let mut env_accounts = HashSet::new();
-        env_accounts.insert(999);
-        let yang = Arc::new(RwLock::new(HashSet::new()));
-        let table = SessionTable::with_service_accounts(env_accounts, yang.clone());
-
-        assert!(table.is_service_account(999));
-        assert!(!table.is_service_account(1001));
-
-        // Simulate ConfigManager committing `set vty service-account uid 1001`.
-        yang.write().unwrap().insert(1001);
-
-        assert!(table.is_service_account(999));
-        assert!(table.is_service_account(1001));
-        assert!(!table.is_service_account(2000));
-
-        // Simulate a delete commit.
-        yang.write().unwrap().remove(&1001);
-        assert!(table.is_service_account(999));
-        assert!(!table.is_service_account(1001));
-    }
-
-    #[test]
-    fn yang_service_account_session_starts_as_permanent_admin() {
-        // Mirror of the env-set test, but the uid lives in the YANG arc.
-        let yang = Arc::new(RwLock::new(HashSet::new()));
-        yang.write().unwrap().insert(1001);
-        let table = SessionTable::with_service_accounts(HashSet::new(), yang);
-        let reader = StubReader::default();
-        reader.set_ppid(1234, 4000);
-        reader.set_ruid(4000, 1001);
-
-        let (key, is_new) = table.resolve(&reader, 1001, 1234).unwrap();
-        assert!(is_new);
-        let sess = table.get(&key).unwrap();
-        assert_eq!(sess.role, Role::Admin);
-        assert!(sess.enabled);
-        assert!(sess.enable_expires.is_none());
     }
 
     #[test]

@@ -5,8 +5,9 @@
 # Copy this file to /etc/pam.d/zebra-rs and adjust to match your
 # distribution's PAM conventions. The daemon (via the `vtypam` helper)
 # starts a PAM transaction with the service name "zebra-rs" and runs
-# the `auth` and `account` phases. No session or password phases are
-# used today.
+# the `auth` and `account` phases against the **root** account for
+# callers who are not members of the `zebra-rs` group. No session or
+# password phases are used today.
 #
 # ------------------------------------------------------------
 # Option A — Distribution-stacked configuration (recommended)
@@ -63,5 +64,5 @@ account   required  pam_unix.so
 #
 # zebra-rs uses TACACS+ for authentication only. It does NOT consume
 # the priv-lvl attribute from TACACS+ responses; role assignment is
-# decided locally via `enable` + service-accounts. See
+# decided locally via `enable` and the `zebra-rs` group. See
 # book/src/ch-06-01-session-design.md (D13, D14).

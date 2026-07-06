@@ -39,6 +39,11 @@ cli_command=vtyhelper
 declare -x CLI_MODE="exec"
 declare -x CLI_MODE_STR="Exec"
 declare -x CLI_MODE_PROMPT=""
+_cli_in_config_group ()
+{
+  id -nG 2>/dev/null | tr ' \t' '\n' | grep -qx zebra-rs
+}
+
 declare -x CLI_PRIVILEGE=1
 declare -a _cli_array_completions
 declare -A _cli_array_helps
@@ -379,14 +384,22 @@ enable ()
     echo "% 'enable' is only available in exec mode."
     return 1
   fi
+  if _cli_in_config_group; then
+    ${cli_command} -e -m ${CLI_MODE}
+    local rc=$?
+    if [[ ${rc} -eq 0 ]]; then
+      CLI_PRIVILEGE=15
+      _cli_prompt_setup
+    fi
+    return ${rc}
+  fi
   local pw
   if [[ -t 0 ]]; then
     stty -echo
-    read -r -p "Password: " pw
+    read -r -p "Root password: " pw
     stty echo
     echo
   else
-    # Non-interactive: read a single password line from stdin.
     IFS= read -r pw
   fi
   CLI_ENABLE_PASSWORD="${pw}" ${cli_command} -e -m ${CLI_MODE}
@@ -400,11 +413,8 @@ enable ()
   return ${rc}
 }
 
-# `configure` with auto-elevate (D24): when the caller is not already
-# admin (root / service-account / prior `enable`), prompt for a
-# password and run a PAM authentication against the caller's own
-# account (sudo-style) before entering configure mode. The same
-# password that works for `enable` works here.
+# `configure` with auto-elevate: try configure first; on failure,
+# group members run passwordless enable, everyone else enters root password.
 configure ()
 {
   if [[ ${CLI_MODE} != "exec" ]]; then
@@ -412,42 +422,40 @@ configure ()
     return 1
   fi
 
-  # Fast path: if the caller already enabled (CLI_PRIVILEGE >= 15),
-  # skip the auto-elevate probe entirely. enable() sets
-  # CLI_PRIVILEGE=15 on success, so this avoids re-prompting an
-  # already-authenticated operator under any circumstance.
   if (( CLI_PRIVILEGE < 15 )); then
-    # Optimistic first attempt — root / service-account sessions
-    # succeed immediately without any prompt.
     local out first_line
     out=$(${cli_command} -m exec configure 2>&1)
     first_line=$(echo "$out" | head -n 1)
     if [[ "${first_line}" != "SuccessExec" ]]; then
-      # Permission denied (or other error). Prompt for the root
-      # password and elevate via PAM.
-      local pw
-      if [[ -t 0 ]]; then
-        stty -echo
-        read -r -p "Password: " pw
-        stty echo
-        echo
+      if _cli_in_config_group; then
+        ${cli_command} -e -m ${CLI_MODE}
+        local rc=$?
+        if [[ ${rc} -ne 0 ]]; then
+          echo "% Configuration access denied"
+          return 1
+        fi
       else
-        IFS= read -r pw
-      fi
-      CLI_ENABLE_PASSWORD="${pw}" ${cli_command} -e -m ${CLI_MODE}
-      local rc=$?
-      pw=""
-      unset pw
-      if [[ ${rc} -ne 0 ]]; then
-        echo "% Configuration access denied"
-        return 1
+        local pw
+        if [[ -t 0 ]]; then
+          stty -echo
+          read -r -p "Root password: " pw
+          stty echo
+          echo
+        else
+          IFS= read -r pw
+        fi
+        CLI_ENABLE_PASSWORD="${pw}" ${cli_command} -e -m ${CLI_MODE}
+        local rc=$?
+        pw=""
+        unset pw
+        if [[ ${rc} -ne 0 ]]; then
+          echo "% Configuration access denied"
+          return 1
+        fi
       fi
     fi
   fi
 
-  # Either we were already admin, the optimistic attempt succeeded,
-  # or we just elevated. Run the command for real via the standard
-  # exec path so the daemon's SuccessExec script flips CLI_MODE etc.
   _cli_exec configure
   CLI_PRIVILEGE=15
   _cli_prompt_setup
