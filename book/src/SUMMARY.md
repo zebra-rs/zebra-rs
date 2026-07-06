@@ -165,3 +165,4 @@
 # Appendices
 
 - [Appendix A: Logging Quick Reference](appendix-a-logging-quick-reference.md)
+- [Appendix B: Supported RFCs and Internet-Drafts](appendix-b-supported-rfcs.md)
