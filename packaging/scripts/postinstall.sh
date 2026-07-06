@@ -1,5 +1,10 @@
 #! /bin/bash
 
+# Configuration operators belong to this group for passwordless enable.
+if ! getent group zebra-rs >/dev/null 2>&1; then
+    groupadd -r zebra-rs
+fi
+
 setcap 'cap_net_bind_service=ep cap_net_admin=ep cap_net_bind_service=ep cap_net_broadcast=ep cap_net_raw=ep' /usr/bin/zebra-rs
 
 # Grant vtypam the minimum capabilities it needs to authenticate users

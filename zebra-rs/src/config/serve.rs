@@ -11,7 +11,8 @@ use crate::config::api::DeployRequest;
 use crate::config::enable_rate::EnableRateLimiter;
 use crate::config::session::{
     AuthzError, DEFAULT_GC_INTERVAL, DEFAULT_IDLE_TTL, ENABLE_HARD_CAP, ENABLE_IDLE_TTL,
-    ProcfsReader, SessionContext, SessionError, SessionTable, run_gc, watch_bash_death,
+    ENABLE_PAM_USER, ProcfsReader, SessionContext, SessionError, SessionTable, run_gc,
+    watch_bash_death,
 };
 
 use super::api::{
@@ -61,20 +62,6 @@ fn enforce_admin<T>(
             "enable session expired; run 'enable' again",
         )),
     }
-}
-
-/// Parse the `ZEBRA_VTY_SERVICE_ACCOUNTS` env var into a uid set (D21).
-///
-/// Format: comma-separated decimal uids, optional whitespace around each
-/// entry. Anything that doesn't parse as a `u32` is silently dropped so a
-/// typo in one entry doesn't take out the rest.
-fn parse_service_accounts(raw: Option<&str>) -> std::collections::HashSet<u32> {
-    let Some(raw) = raw else {
-        return std::collections::HashSet::new();
-    };
-    raw.split(',')
-        .filter_map(|s| s.trim().parse::<u32>().ok())
-        .collect()
 }
 
 /// Resolve the path to the `vtypam` helper.
@@ -247,17 +234,33 @@ impl Exec for ExecService {
             .ok_or_else(|| tonic::Status::unauthenticated("no session"))?;
         let uid = key.0;
 
-        // Root (D20) and configured service accounts (D21) are already
-        // Admin from session creation. Acknowledge the enable RPC without
-        // spawning PAM so no password is prompted.
-        if uid == 0 || self.sessions.is_service_account(uid) {
+        // Root (D20) is already Admin from session creation.
+        if uid == 0 {
             if VTY_TRACING {
-                tracing::info!(uid, "enable noop (permanent admin)");
+                tracing::info!(uid, "enable noop (root permanent admin)");
             }
             return Ok(Response::new(EnableReply {
                 ok: true,
                 message: String::new(),
                 ttl_secs: 0,
+            }));
+        }
+
+        // Configure-authorization group: passwordless enable (D27).
+        if self.sessions.is_config_group_member(&ProcfsReader, uid) {
+            let promoted = self
+                .sessions
+                .promote_to_admin(&key, ENABLE_IDLE_TTL, ENABLE_HARD_CAP);
+            if !promoted {
+                return Err(tonic::Status::unauthenticated("session vanished"));
+            }
+            if VTY_TRACING {
+                tracing::info!(uid, "enable success (config group)");
+            }
+            return Ok(Response::new(EnableReply {
+                ok: true,
+                message: String::new(),
+                ttl_secs: ENABLE_IDLE_TTL.as_secs() as u32,
             }));
         }
 
@@ -275,21 +278,10 @@ impl Exec for ExecService {
 
         let inner = request.into_inner();
         let password = inner.password;
-        // su-style: when the client passes auth_user explicitly, PAM
-        // authenticates against that account name instead of the caller's
-        // own. The vty `configure` auto-elevate flow uses this with
-        // auth_user="root". When auth_user is empty, fall back to the
-        // session's resolved username (the standard `enable` flow).
-        let target_user = if !inner.auth_user.is_empty() {
-            inner.auth_user.clone()
-        } else {
-            self.sessions.username(&key).ok_or_else(|| {
-                tracing::warn!(uid, "enable refused: uid not in passwd db");
-                tonic::Status::permission_denied("uid has no system account")
-            })?
-        };
+        let _ = inner.auth_user;
+        let target_user = ENABLE_PAM_USER;
 
-        let exit = match spawn_vtypam(&target_user, &password).await {
+        let exit = match spawn_vtypam(target_user, &password).await {
             Ok(code) => code,
             Err(e) => {
                 tracing::error!(uid, error = %e, "vtypam spawn failed");
@@ -512,21 +504,11 @@ impl Clear for ClearService {
 
 pub struct Cli {
     pub tx: mpsc::Sender<Message>,
-    /// Runtime-mutable set of YANG-defined service-account uids. Shared
-    /// with `ConfigManager`, which updates it on commit of
-    /// `vty service-account uid N` changes (D25).
-    pub yang_service_accounts: Arc<std::sync::RwLock<std::collections::HashSet<u32>>>,
 }
 
 impl Cli {
-    pub fn new(
-        config_tx: Sender<Message>,
-        yang_service_accounts: Arc<std::sync::RwLock<std::collections::HashSet<u32>>>,
-    ) -> Self {
-        Self {
-            tx: config_tx,
-            yang_service_accounts,
-        }
+    pub fn new(config_tx: Sender<Message>) -> Self {
+        Self { tx: config_tx }
     }
 }
 
@@ -716,17 +698,13 @@ impl tonic::service::Interceptor for VtyPeerInterceptor {
 }
 
 pub fn serve(cli: Cli, addr: VtyAddr) -> anyhow::Result<()> {
-    let sessions = {
-        let env_accounts =
-            parse_service_accounts(std::env::var("ZEBRA_VTY_SERVICE_ACCOUNTS").ok().as_deref());
-        if !env_accounts.is_empty() && VTY_TRACING {
-            tracing::info!(
-                uids = ?env_accounts,
-                "VTY service-account uids from env (permanent admin)",
-            );
-        }
-        SessionTable::with_service_accounts(env_accounts, cli.yang_service_accounts.clone())
-    };
+    let config_group_gid = SessionTable::resolve_config_group_gid();
+    if let Some(gid) = config_group_gid {
+        tracing::info!(gid, "VTY configure-authorization group active");
+    } else {
+        tracing::debug!("VTY configure-authorization group not found; PAM-only fallback");
+    }
+    let sessions = SessionTable::with_config_group(config_group_gid);
     let enable_rate = EnableRateLimiter::new();
 
     let exec_service = ExecService {
@@ -832,34 +810,4 @@ fn bind_abstract_uds(name: &str) -> anyhow::Result<tokio_stream::wrappers::UnixL
     let listener = UnixListener::from_std(std_listener)
         .map_err(|e| anyhow::anyhow!("register abstract VTY socket '@{name}' with tokio: {e}"))?;
     Ok(UnixListenerStream::new(listener))
-}
-
-#[cfg(test)]
-mod tests {
-    use super::parse_service_accounts;
-
-    #[test]
-    fn parse_service_accounts_handles_csv_with_whitespace() {
-        let set = parse_service_accounts(Some(" 999, 1001 ,1003"));
-        assert_eq!(set.len(), 3);
-        assert!(set.contains(&999));
-        assert!(set.contains(&1001));
-        assert!(set.contains(&1003));
-    }
-
-    #[test]
-    fn parse_service_accounts_silently_drops_non_numeric_entries() {
-        // One bad entry should not take out the rest of the list.
-        let set = parse_service_accounts(Some("999,not-a-uid,1001"));
-        assert_eq!(set.len(), 2);
-        assert!(set.contains(&999));
-        assert!(set.contains(&1001));
-    }
-
-    #[test]
-    fn parse_service_accounts_unset_yields_empty() {
-        assert!(parse_service_accounts(None).is_empty());
-        assert!(parse_service_accounts(Some("")).is_empty());
-        assert!(parse_service_accounts(Some(",,,")).is_empty());
-    }
 }

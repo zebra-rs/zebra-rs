@@ -1,8 +1,5 @@
-use std::collections::HashSet;
 use std::path::Path;
 use std::path::PathBuf;
-use std::sync::Arc;
-use std::sync::RwLock;
 
 use clap::Parser;
 use daemonize::Daemonize;
@@ -198,17 +195,12 @@ async fn run(arg: Arg) -> anyhow::Result<()> {
 
     let policy = Policy::new();
 
-    // Runtime-mutable YANG-defined service-accounts. Shared between
-    // ConfigManager and SessionTable.
-    let service_accounts: Arc<RwLock<HashSet<u32>>> = Arc::new(RwLock::new(HashSet::new()));
-
     let config = ConfigManager::new(
         yang_path,
         arg.config_file.clone(),
         rib.tx.clone(),
         rib.inbound_tx.clone(),
         policy.tx.clone(),
-        service_accounts.clone(),
     )?;
 
     config.subscribe("rib", rib.cm.tx.clone());
@@ -216,7 +208,7 @@ async fn run(arg: Arg) -> anyhow::Result<()> {
     config.subscribe_show("rib", rib.show.tx.clone());
     config.subscribe_show("policy", policy.show.tx.clone());
 
-    let cli = Cli::new(config.tx.clone(), service_accounts);
+    let cli = Cli::new(config.tx.clone());
 
     let vty_addr = config::VtyAddr::parse(&arg.vty_socket)?;
 

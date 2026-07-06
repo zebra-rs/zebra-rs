@@ -63,10 +63,7 @@ struct Cli {
 
     #[arg(
         long,
-        help = "Override the PAM account name authenticated against. \
-                Defaults to the calling uid's own username (sudo-style). \
-                Set to 'root' for su-style elevation via the configure \
-                auto-elevate flow."
+        help = "Deprecated and ignored; the daemon always authenticates enable against root."
     )]
     auth_user: Option<String>,
 

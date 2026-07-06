@@ -234,103 +234,80 @@ Three ways to acquire Admin:
 
 - **Root (uid 0)**: implicit Admin from session creation — no
   `enable` needed.
-- **Interactive**: run `enable` in the vty shell, type your
-  password (PAM auth via `vtypam`). The Admin role is held for 15
-  minutes idle (sliding — refreshed on each authorized RPC) with a
-  4-hour absolute cap.
-- **Service account**: list your uid in
-  `ZEBRA_VTY_SERVICE_ACCOUNTS` (see below) — permanent Admin from
-  session creation.
+- **`zebra-rs` group member**: run `enable` or `configure` — no
+  password prompt; Admin is held for 15 minutes idle (sliding) with
+  a 4-hour absolute cap, same as a successful PAM enable.
+- **Everyone else**: run `enable` or `configure` and enter the
+  **root password** (PAM via `vtypam`). Admin is held for 15 minutes
+  idle (sliding) with a 4-hour absolute cap.
 
 Read-only commands (`vtyctl show`, `vty` show) and Tab/`?`
 completion are not gated — a non-admin user can still see what
 commands exist.
 
+#### `zebra-rs` configure-authorization group
+
+The Debian/RPM package creates a system group named `zebra-rs`:
+
+```bash
+getent group zebra-rs
+sudo usermod -aG zebra-rs alice
+# alice must log out and back in (or `newgrp zebra-rs`) for membership
+# to take effect in an existing shell.
+```
+
+Members of this group can run `enable` or `configure` **without a
+password**. The daemon checks supplementary group membership via
+NSS (`getgrouplist`) when handling the `Enable` RPC; the group
+name defaults to `zebra-rs` and can be overridden with
+`ZEBRA_VTY_CONFIG_GROUP` on the daemon.
+
+If the group does not exist on the host, the check is skipped and
+only root-PAM elevation is available (aside from uid 0).
+
+Package lifecycle (Debian/Ubuntu `.deb`):
+
+- **Install** — `postinst` creates the `zebra-rs` system group if
+  missing.
+- **`apt remove`** — the group is **kept** so memberships survive a
+  reinstall.
+- **`apt purge`** — `postrm` removes the group (when `delgroup` is
+  available).
+
 #### `configure` auto-elevate
 
-When a non-admin user types `configure` in the vty shell, the
-shell automatically prompts for a password and authenticates
-against the **caller's own account** (sudo-style — same as
-`enable`):
+When a non-admin user types `configure`, the shell first tries
+configure directly (root succeeds immediately). On failure, group
+members run passwordless `enable`; everyone else is prompted for
+the **root password** before retry:
 
 ```text
 host> configure
-Password: ********
 host(configure)#
 ```
 
-Admin sessions (root, service-accounts, users within a current
-`enable` TTL) bypass the prompt entirely — the optimistic first
-attempt succeeds and configure mode is entered immediately. The
-prompt only appears for users who would otherwise be denied.
+Group members and users who already ran `enable` within the current
+TTL enter configure mode with no prompt. Non-members see:
 
-The same password that authenticates `enable` works here.
-`configure` is the convenience flow that combines `enable` + mode
-entry in one step for one-shot configuration sessions; `enable`
-is the standalone command for operators who want to hold the
-Admin role across multiple commands without re-authenticating.
+```text
+host> configure
+Root password: ********
+host(configure)#
+```
+
+`configure` combines `enable` + mode entry for one-shot
+configuration sessions; `enable` is for operators who want to hold
+the Admin role across multiple commands.
 
 Configure-mode locking (single-writer mutex) is intentionally not
 yet implemented; multiple admins can simultaneously enter
 configure mode and pile up candidate edits. This is deferred to
 future work.
 
-### `ZEBRA_VTY_SERVICE_ACCOUNTS` — permanent-admin uids
+#### Scripted admin (`vtyctl apply` / `clear`)
 
-Sessions for uids listed here start with the `Admin` role from
-session creation and do not require an interactive `enable`. Use
-this for automation accounts (Ansible, cron jobs, monitoring) that
-cannot meaningfully type a password.
-
-```bash
-# uid 999 and 1001 are permanent admins; no PAM auth required for them.
-ZEBRA_VTY_SERVICE_ACCOUNTS=999,1001 zebra-rs
-```
-
-The typical deployment sets this in a systemd drop-in:
-
-```ini
-# /etc/systemd/system/zebra-rs.service.d/service-accounts.conf
-[Service]
-Environment=ZEBRA_VTY_SERVICE_ACCOUNTS=999,1001
-```
-
-Notes:
-
-- The value is read once at daemon startup; runtime changes require
-  a `systemctl restart zebra-rs`.
-- Root (uid 0) is always implicit admin and does not need to be
-  listed.
-- If a service-account uid happens to type `enable`, the daemon
-  returns success without invoking PAM (no password prompt).
-- A service-account session can still call `disable` to drop to
-  View for that session only; reconnecting yields a fresh Admin
-  session.
-
-### YANG configuration (runtime-mutable)
-
-Service-accounts can also be defined via YANG, in which case they
-are mutable at runtime and persist across daemon restarts (via the
-config file):
-
-```
-host# configure
-host(configure)# set vty service-account 999 description "Ansible automation"
-host(configure)# set vty service-account 1001
-host(configure)# commit
-```
-
-YANG-defined accounts are the **union** with the env-var set;
-either source grants Admin. `delete vty service-account 999`
-removes the uid from the YANG set immediately on commit (existing
-sessions for that uid keep their Admin role until reconnect — the
-gate is applied at session creation, not on each RPC).
-
-In practice, pick **one** mechanism per deployment:
-- env var (via systemd Environment=) when admin lifecycle is
-  managed by the host (provisioning tools, package configs)
-- YANG when admin lifecycle should be managed via the CLI itself
-  (live operator changes, no daemon restart)
+`vtyctl` does not call `enable`. Use `sudo vtyctl …` for
+non-interactive pushes, or run from a root session.
 
 ## Migration from earlier versions
 

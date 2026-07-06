@@ -60,3 +60,4 @@ overrides:
   deb:
     scripts:
       postinstall: ./scripts/postinstall.sh
+      postremove: ./scripts/postrm.sh
