@@ -6,7 +6,7 @@
 # them, the defaults from .chglog.yml (or chglog config) are used.
 
 - semver: 26.7.1
-  date: 2026-07-04T18:00:00+09:00
+  date: 2026-07-06T18:00:00+09:00
   distribution: unstable
   urgency: medium
   packager: Kunihiro Ishiguro <kunihiro@zebra.rs>
@@ -20,6 +20,7 @@
           UPF address, SEID echo) and session show commands
         * GTP-U dataplane via cradle: downlink encapsulation, forwarding
           install, local-endpoint re-dispatch, dataplane selector
+        * In-place ST export replace on PFCP Session Modification (handover)
 
     - note: |
         ### BGP EVPN
@@ -56,7 +57,8 @@
         * cradle dataplane tees: VRF, MPLS, SRv6, EVPN-over-SRv6,
           replication slots, FDB watch/aging, End.M mirror context,
           TI-LFA repair pairs and SR-MPLS backup, connected routes
-        * RIB: `nexthop blackhole` discard routes; static routes in VRF
+        * RIB: `nexthop blackhole` discard routes; static routes in VRF;
+          close a redistribute-registration cross-channel race
 
     - note: |
         ### BGP (other)
@@ -70,6 +72,20 @@
           audit follow-up); soft-out stale update-group cache fix
 
     - note: |
+        ### VTY access control
+        * Per-session RBAC (View / Operator / Admin) keyed on SO_PEERCRED
+          (uid + parent PID) with procfs validation and idle-TTL session GC
+        * `enable` authenticates via PAM (the capability-scoped `vtypam`
+          helper) and holds Admin on a sliding idle TTL with a hard cap;
+          per-uid enable rate-limiting; TACACS+ supported through PAM
+        * Root (uid 0) is implicitly Admin; members of the `zebra-rs` Linux
+          group run `enable` / `configure` with no password; everyone else
+          authenticates the root account via PAM
+        * `configure` auto-elevate: root and group members enter configure
+          mode silently, non-members are prompted for the root password;
+          the package creates the `zebra-rs` group on install
+
+    - note: |
         ### Infrastructure
         * JSON output across show commands (RIB, BGP, OSPF, OSPFv3,
           IS-IS, policy) and interactive `show version`
@@ -78,7 +94,8 @@
           consolidated on `enabled`, tokenizer and format fixes,
           bridge/vxlan ordering, `--config-file` option
         * mdBook documentation expansion (OSPFv2/v3, MUP, VPWS, Lua,
-          L3VPN PE-CE); BDD hardening (fail on unmatched steps)
+          L3VPN PE-CE, Install / Building, VTY access, supported-RFCs
+          appendix); BDD hardening (fail on unmatched steps)
 
 - semver: 26.6.2
   date: 2026-06-19T18:00:00+09:00
