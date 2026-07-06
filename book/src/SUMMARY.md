@@ -3,11 +3,14 @@
 [zebra-rs Routing Software](ch-00-00-introduction.md)
 - [Install](ch-00-06-install.md)
 - [Building](ch-00-07-building.md)
+- [Command Line Options](ch-00-05-command-line-options.md)
+
+## Interface
+
 - [Router ID Selection](ch-00-01-router-id.md)
 - [Interface Configuration](ch-00-02-interface-configuration.md)
 - [VXLAN Configuration](ch-00-03-vxlan-configuration.md)
 - [Bridge Configuration](ch-00-04-bridge-configuration.md)
-- [Command Line Options](ch-00-05-command-line-options.md)
 
 ## Static Route
 
@@ -103,19 +106,6 @@
   - [BFD](ch-15-17-ospfv3-bfd.md)
   - [Clearing OSPFv3 State](ch-15-16-ospfv3-clear.md)
 
-## Failure Detection
-
-- [BFD](ch-10-00-bfd.md)
-  - [The XDP/eBPF Data-Plane Helper](ch-10-01-bfd-xdp-helper.md)
-
-## Fast Reroute
-
-- [Fast Failover: TI-LFA + BFD (NexthopProtect)](ch-12-00-nexthop-protect.md)
-
-## Performance Measurement
-
-- [STAMP](ch-09-00-twamp-stamp.md)
-
 ## SRv6
 
 - [SRv6](ch-04-00-srv6.md)
@@ -128,21 +118,34 @@
   - [Set](ch-05-03-policy-set.md)
   - [Lua Scripting](ch-05-04-lua-scripting.md)
 
+## Failure Detection
+
+- [BFD](ch-10-00-bfd.md)
+  - [The XDP/eBPF Data-Plane Helper](ch-10-01-bfd-xdp-helper.md)
+
+## Fast Reroute
+
+- [Fast Failover](ch-12-00-nexthop-protect.md)
+
+## Performance Measurement
+
+- [STAMP](ch-09-00-twamp-stamp.md)
+
 ## Management Interface
 
-- [VTY Access and Authentication](ch-06-00-vty-access.md)
+- [VTY](ch-06-00-vty-access.md)
   - [Session Management Design](ch-06-01-session-design.md)
   - [Show Config Commands](ch-06-02-show-config-commands.md)
 
-## Operational Show Commands
+## Show Commands
 
 - [Overview](ch-14-00-show-overview.md)
-  - [System, RIB and Forwarding](ch-14-01-show-system-rib.md)
-  - [BGP](ch-14-02-show-bgp.md)
-  - [OSPFv2 and OSPFv3](ch-14-03-show-ospf.md)
-  - [IS-IS](ch-14-04-show-isis.md)
-  - [Neighbor Discovery, BFD and STAMP](ch-14-05-show-bfd-stamp-nd.md)
-  - [Policy Objects](ch-14-06-show-policy.md)
+- [System, RIB and Forwarding](ch-14-01-show-system-rib.md)
+- [BGP](ch-14-02-show-bgp.md)
+- [OSPFv2 and OSPFv3](ch-14-03-show-ospf.md)
+- [IS-IS](ch-14-04-show-isis.md)
+- [Neighbor Discovery, BFD and STAMP](ch-14-05-show-bfd-stamp-nd.md)
+- [Policy Objects](ch-14-06-show-policy.md)
 
 ## AI Native
 
