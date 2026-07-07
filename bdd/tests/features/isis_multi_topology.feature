@@ -28,6 +28,13 @@ Feature: IS-IS multi-topology (RFC 5120)
   so the LSPs carry TLV 229 (capability), TLV 222 (MT IS Reach), and
   TLV 237 (MT IPv6 Reach).
 
+  Both vzXns interfaces set a base `metric 55` and a per-MT override
+  `multi-topology ipv6-unicast metric 77`. Because IPv6 rides MT 2, the
+  connected prefix 2001:db8:1::/64 must be advertised in TLV 237 with the
+  per-MT metric 77 — not the base 55 and not a fixed 10. The loopback
+  leaves both unset, so it falls all the way back to the default 10: a
+  built-in check of the per-MT → base → default fallback chain.
+
   Scenario: Setup IS-IS L2 with MT 2 over a shared bridge and confirm the link is up
     Given a clean test environment
     When I create bridge "br0"
@@ -52,6 +59,15 @@ Feature: IS-IS multi-topology (RFC 5120)
     And show command "show isis database detail" in namespace "z1" should contain "MT IPv6 Reachability:"
     And show command "show isis database detail" in namespace "z2" should contain "MT Router Info: ipv6-unicast"
     And show command "show isis database detail" in namespace "z2" should contain "MT IPv6 Reachability:"
+
+  Scenario: MT IPv6 Reachability carries the per-MT interface metric
+    Given the test topology exists
+    Then show command "show isis database detail" in namespace "z1" should contain "MT IPv6 Reachability: 2001:db8:1::/64 (Metric: 77)"
+    And show command "show isis database detail" in namespace "z2" should contain "MT IPv6 Reachability: 2001:db8:1::/64 (Metric: 77)"
+
+  Scenario: MT metric falls back to the default for an interface without an override
+    Given the test topology exists
+    Then show command "show isis database detail" in namespace "z1" should contain "MT IPv6 Reachability: 2001:db8:0:ffff::1/128 (Metric: 10)"
 
   Scenario: Teardown topology
     Given the test topology exists

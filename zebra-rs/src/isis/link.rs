@@ -514,6 +514,20 @@ impl LinkConfig {
         self.metric.unwrap_or(Self::DEFAULT_METRIC)
     }
 
+    /// Metric for this link within a given Multi-Topology (RFC 5120).
+    /// Three-level fallback: the per-MT override
+    /// (`multi-topology/<id>/metric`), else the plain `metric` leaf,
+    /// else the default (10). Callers use this for every MT-keyed
+    /// advertisement (TLV 222 MT IS-reach, TLV 237 MT IPv6-reach) so a
+    /// per-topology metric is honored consistently across adjacency and
+    /// prefix cost.
+    pub fn mt_metric(&self, mt: MtId) -> u32 {
+        self.mt_metrics
+            .get(&mt)
+            .copied()
+            .unwrap_or_else(|| self.metric())
+    }
+
     pub fn priority(&self) -> u8 {
         self.priority.unwrap_or(Self::DEFAULT_PRIORITY)
     }

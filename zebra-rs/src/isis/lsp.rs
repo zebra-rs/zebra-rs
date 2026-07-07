@@ -1206,14 +1206,9 @@ pub fn lsp_generate(top: &mut IsisTop, level: Level, seq_floor: Option<u32>) -> 
             let Some((adj, _)) = &link.state.adj.get(&level) else {
                 continue;
             };
-            // Per-MT metric override falls back to the link's plain
-            // metric leaf. Future PR can layer per-MT defaults too.
-            let metric = link
-                .config
-                .mt_metrics
-                .get(&MtId::Ipv6Unicast)
-                .copied()
-                .unwrap_or_else(|| link.config.metric());
+            // Per-MT metric override, falling back to the link's plain
+            // metric leaf (see LinkConfig::mt_metric).
+            let metric = link.config.mt_metric(MtId::Ipv6Unicast);
             let mut entry = IsisTlvExtIsReachEntry {
                 neighbor_id: *adj,
                 metric,
@@ -1317,7 +1312,7 @@ pub fn lsp_generate(top: &mut IsisTop, level: Level, seq_floor: Option<u32>) -> 
                         .with_sub_tlv(has_subs)
                         .with_distribution(false);
                     let mut entry = IsisTlvExtIpReachEntry {
-                        metric: 10,
+                        metric: link.config.metric(),
                         flags,
                         prefix,
                         subs: vec![],
@@ -1333,11 +1328,11 @@ pub fn lsp_generate(top: &mut IsisTop, level: Level, seq_floor: Option<u32>) -> 
             }
         }
     }
-    // Operator-configured `network` prefixes — BGP-style. Default
-    // metric 10, matching the per-interface metric we advertise for
-    // local connected prefixes above (`metric: 10` in the link loop),
-    // so a `network` entry looks like an interface route in receivers'
-    // RIBs rather than a zero-cost shortcut.
+    // Operator-configured `network` prefixes — BGP-style. Fixed
+    // metric 10 (the default interface metric): a `network` entry has
+    // no interface to inherit a metric from, so it looks like a
+    // default-cost interface route in receivers' RIBs rather than a
+    // zero-cost shortcut.
     ext_ip_reach.entries.extend(
         top.config
             .networks_v4
@@ -1365,14 +1360,28 @@ pub fn lsp_generate(top: &mut IsisTop, level: Level, seq_floor: Option<u32>) -> 
     }
 
     // IPv6 Reachability.
+    //
+    // When MT is enabled with MT 2 (IPv6 unicast) configured, IPv6
+    // rides the MT-keyed TLV 237 (see the emit decision below) and each
+    // connected prefix must resolve its metric through the per-MT
+    // fallback — the same chain the MT IS-reach (TLV 222) uses above, so
+    // a per-topology metric applies consistently to both the adjacency
+    // and the prefix cost. In legacy (non-MT) mode there is a single
+    // topology, so the plain interface metric leaf is the metric.
+    let mt_v6 = top.config.mt_enabled && top.config.mt_topologies.contains(&MtId::Ipv6Unicast);
     let mut ipv6_reach = IsisTlvIpv6Reach::default();
     for (_, link) in top.links.iter() {
         if link.config.enable.v6 && has_level(link.state.level(), level) {
+            let metric = if mt_v6 {
+                link.config.mt_metric(MtId::Ipv6Unicast)
+            } else {
+                link.config.metric()
+            };
             for v6addr in link.state.v6addr.iter() {
                 if !v6addr.addr().is_loopback() {
                     ipv6_reach
                         .entries
-                        .push(ipv6_reach_entry(*v6addr, 10, false));
+                        .push(ipv6_reach_entry(*v6addr, metric, false));
                 }
             }
         }
@@ -1389,7 +1398,7 @@ pub fn lsp_generate(top: &mut IsisTop, level: Level, seq_floor: Option<u32>) -> 
         ipv6_reach.entries.push(ipv6_reach_entry(prefix, 0, false));
     }
     // Operator-configured IPv6 `network` prefixes — sibling of the
-    // IPv4 path above. Same metric-10 default for the same reason.
+    // IPv4 path above. Same fixed metric 10 for the same reason.
     ipv6_reach.entries.extend(
         top.config
             .networks_v6
@@ -1411,7 +1420,7 @@ pub fn lsp_generate(top: &mut IsisTop, level: Level, seq_floor: Option<u32>) -> 
         },
     ));
     if !ipv6_reach.entries.is_empty() {
-        if top.config.mt_enabled && top.config.mt_topologies.contains(&MtId::Ipv6Unicast) {
+        if mt_v6 {
             // MT 2 mode: same entries, MT-keyed TLV 237 instead of
             // TLV 236. RFC 5120 §7.3.
             let mt_ipv6_reach = IsisTlvMtIpv6Reach {
