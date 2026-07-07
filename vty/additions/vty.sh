@@ -140,6 +140,20 @@ _cli_help_mode ()
   done
 }
 
+# Render the "?" / possible-completions help through the pager so a help
+# list taller than the terminal doesn't scroll off the top of the screen.
+# CLI_PAGER already carries `less --quit-if-one-screen`, so help that fits
+# on one screen is printed inline and less exits immediately (identical to
+# the previous direct echo); only over-long help enters interactive paging.
+# This runs inside the readline completion callback: less reads keystrokes
+# from /dev/tty and writes to the callback's stdout (the terminal), then
+# readline redraws the prompt with the typed input restored. In a
+# non-interactive shell CLI_PAGER is `cat`, so this stays a plain dump.
+_cli_page_help ()
+{
+  _cli_help_mode "$@" | ${CLI_PAGER}
+}
+
 get_prefix_filtered_list ()
 {
   # $1: prefix
@@ -240,7 +254,7 @@ _cli_completion ()
   fi
 
   if [[ "$COMP_KEY" -eq 63 ]];then
-    _cli_help_mode ${current_empty} "${CLI_MODE_STR}" "${completions[@]}"
+    _cli_page_help ${current_empty} "${CLI_MODE_STR}" "${completions[@]}"
     COMPREPLY=("" " ")
   else
     COMPREPLY=($(compgen -W "${_cli_array_completions[*]}" -- $current_prefix))
@@ -250,7 +264,7 @@ _cli_completion ()
       COMPREPLY=( "${COMPREPLY[0]} " )
     else
       if [[ ${#COMP_WORDS[@]} -eq 0 ]];then
-        _cli_help_mode ${current_empty} "${CLI_MODE_STR}" "${_cli_array_completions[@]}"
+        _cli_page_help ${current_empty} "${CLI_MODE_STR}" "${_cli_array_completions[@]}"
         COMPREPLY=("" " ")
       fi
     fi
