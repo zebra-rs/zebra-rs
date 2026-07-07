@@ -110,7 +110,7 @@ module zebra-bgp-transport {
     }
 
     container ttl-security {
-      ext:help "Enable GTSM: accept this peer only when directly connected (TTL 255)";
+      ext:help "Enable GTSM: require directly-connected peer (TTL 255)";
       presence "Enable GTSM (TTL 255 send + receive enforcement) for this neighbor";
       description
         "When present, enable the Generalized TTL Security Mechanism
@@ -137,7 +137,7 @@ module zebra-bgp-transport {
     }
 
     leaf ebgp-multihop {
-      ext:help "Allow an eBGP peer up to N hops away; sets the BGP TTL (1-255)";
+      ext:help "Allow an eBGP peer up to N hops away (TTL 1-255)";
       type uint8 {
         range "1..255";
       }
@@ -164,7 +164,7 @@ module zebra-bgp-transport {
     }
 
     leaf tcp-mss {
-      ext:help "Cap the TCP Maximum Segment Size for this neighbor (1-65535)";
+      ext:help "Cap the TCP MSS for this neighbor (1-65535)";
       type uint16 {
         range "1..65535";
       }
@@ -200,7 +200,7 @@ module zebra-bgp-transport {
     }
 
     leaf port {
-      ext:help "TCP destination port used to connect to this neighbor (1-65535, default 179)";
+      ext:help "TCP port to dial this neighbor (default 179)";
       type uint16 {
         range "1..65535";
       }
@@ -229,7 +229,7 @@ module zebra-bgp-transport {
     }
 
     container ip-transparent {
-      ext:help "Allow this session to use a local address the host does not own (with update-source)";
+      ext:help "Bind a local address the host does not own";
       presence "Set IP_TRANSPARENT on this neighbor's TCP socket";
       description
         "When present, set the IP_TRANSPARENT (IPv4) / IPV6_TRANSPARENT
@@ -272,7 +272,7 @@ module zebra-bgp-transport {
     }
 
     container disable-connected-check {
-      ext:help "Allow a single-hop eBGP peer that is not on a connected subnet";
+      ext:help "Allow a single-hop eBGP peer off-subnet";
       presence "Skip the directly-connected-network check for this eBGP neighbor";
       description
         "When present, skip the directly-connected-network check for this

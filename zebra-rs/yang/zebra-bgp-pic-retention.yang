@@ -69,7 +69,7 @@ module zebra-bgp-pic-retention {
       "Per-neighbor NHT-gated route retention presence container.";
 
     container pic-retention {
-      ext:help "Keep this peer's VPN routes on session-down while their next hop stays reachable";
+      ext:help "Retain VPN routes on session-down while NH reachable";
       presence "Enable NHT-gated route retention for this neighbor";
       description
         "When present, a session-down marks this peer's VPN routes stale

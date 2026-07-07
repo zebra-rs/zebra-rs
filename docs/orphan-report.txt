@@ -1,57 +1,4 @@
 == Collapsed orphan report ==
-ORPHAN leaf         /router/bgp/neighbor/route-reflector/cluster-id
-ORPHAN-SUBTREE container    /router/bgp/neighbor/as-path-options  (3 settable nodes)
-    - /router/bgp/neighbor/as-path-options/allow-own-as  [leaf]
-    - /router/bgp/neighbor/as-path-options/replace-peer-as  [leaf]
-    - /router/bgp/neighbor/as-path-options/disable-peer-as-filter  [leaf]
-ORPHAN-SUBTREE container    /router/bgp/neighbor/add-paths  (5 settable nodes)
-    - /router/bgp/neighbor/add-paths/receive  [leaf]
-    - /router/bgp/neighbor/add-paths/send-max  [leaf]
-    - /router/bgp/neighbor/add-paths/eligible-prefix-policy  [leaf]
-    - /router/bgp/neighbor/add-paths/max  [leaf]
-    - /router/bgp/neighbor/add-paths/all  [leaf]
-ORPHAN-SUBTREE container    /router/bgp/neighbor/use-multiple-paths  (2 settable nodes)
-    - /router/bgp/neighbor/use-multiple-paths/ebgp/allow-multiple-as  [leaf]
-    - /router/bgp/neighbor/use-multiple-paths/enabled  [leaf]
-ORPHAN leaf         /router/bgp/neighbor/timers/keepalive
-ORPHAN-SUBTREE container    /router/bgp/neighbor/transport/ebgp-multihop  (2 settable nodes)
-    - /router/bgp/neighbor/transport/ebgp-multihop/enabled  [leaf]
-    - /router/bgp/neighbor/transport/ebgp-multihop/multihop-ttl  [leaf]
-ORPHAN-SUBTREE container    /router/bgp/neighbor/transport/secure-session  (4 settable nodes)
-    - /router/bgp/neighbor/transport/secure-session/options/ao-keychain  [leaf]
-    - /router/bgp/neighbor/transport/secure-session/options/md5-keychain  [leaf]
-    - /router/bgp/neighbor/transport/secure-session/options/sa  [leaf]
-    - /router/bgp/neighbor/transport/secure-session/enabled  [leaf]
-ORPHAN-SUBTREE container    /router/bgp/neighbor/transport/bfd  (5 settable nodes)
-    - /router/bgp/neighbor/transport/bfd/local-multiplier  [leaf]
-    - /router/bgp/neighbor/transport/bfd/desired-min-tx-interval  [leaf]
-    - /router/bgp/neighbor/transport/bfd/required-min-rx-interval  [leaf]
-    - /router/bgp/neighbor/transport/bfd/min-interval  [leaf]
-    - /router/bgp/neighbor/transport/bfd/enabled  [leaf]
-ORPHAN leaf         /router/bgp/neighbor/transport/tcp-mss
-ORPHAN leaf         /router/bgp/neighbor/transport/mtu-discovery
-ORPHAN leaf         /router/bgp/neighbor/transport/ttl-security
-ORPHAN-SUBTREE container    /router/bgp/neighbor/logging-options  (1 settable nodes)
-    - /router/bgp/neighbor/logging-options/log-neighbor-state-changes  [leaf]
-ORPHAN leaf         /router/bgp/neighbor/description
-ORPHAN leaf         /router/bgp/neighbor/treat-as-withdraw
-ORPHAN leaf-list    /router/bgp/neighbor/send-community
-ORPHAN-SUBTREE container    /router/bgp/neighbor/afi-safi/use-multiple-paths  (2 settable nodes)
-    - /router/bgp/neighbor/afi-safi/use-multiple-paths/ebgp/allow-multiple-as  [leaf]
-    - /router/bgp/neighbor/afi-safi/use-multiple-paths/enabled  [leaf]
-ORPHAN-SUBTREE container    /router/bgp/neighbor/graceful-restart  (5 settable nodes)
-    - /router/bgp/neighbor/graceful-restart/enabled  [leaf]
-    - /router/bgp/neighbor/graceful-restart/restart-time  [leaf]
-    - /router/bgp/neighbor/graceful-restart/stale-routes-time  [leaf]
-    - /router/bgp/neighbor/graceful-restart/helper-only  [leaf]
-    - /router/bgp/neighbor/graceful-restart/long-lived-enabled  [leaf]
-ORPHAN-SUBTREE container    /router/bgp/neighbor/prefix-limit  (4 settable nodes)
-    - /router/bgp/neighbor/prefix-limit/max-prefixes  [leaf]
-    - /router/bgp/neighbor/prefix-limit/warning-threshold-pct  [leaf]
-    - /router/bgp/neighbor/prefix-limit/teardown  [leaf]
-    - /router/bgp/neighbor/prefix-limit/idle-time  [leaf]
-ORPHAN leaf         /router/bgp/neighbor/enabled
-ORPHAN leaf         /router/bgp/neighbor/session-state
 ORPHAN leaf         /router/bgp/shards
 ORPHAN leaf         /router/bgp/peer-task
 
@@ -66,9 +13,16 @@ ORPHAN leaf         /router/bgp/peer-task
   /router/bgp/color-policy  [p-container]
   /router/bgp/vrf/neighbor/afi-safi  [list]
 
-Total settable schema nodes: 325
+Total settable schema nodes: 282
 Handled: 271
-Orphans: 45
+Orphans: 2
+
+Note: the two remaining orphans (shards, peer-task) have no config
+callback but are NOT dead — they are consumed at BGP task spawn by the
+flattened-config text scan in src/config/bgp.rs (configured_shards /
+configured_peer_task). The 43 handler-less nodes formerly listed under
+/router/bgp/neighbor were removed from the BGP YANG (they duplicated
+handled zebra knobs or were vendored ietf leftovers).
 
 == Handler paths with no schema node (stale/other) ==
   /router/bgp/neighbor/flowspec/validation

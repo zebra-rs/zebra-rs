@@ -19,6 +19,9 @@ submodule ietf-bgp-common-structure {
     reference
       "RFC 6991: Common YANG Data Types.";
   }
+  import extension {
+    prefix ext;
+  }
   include ietf-bgp-common-multiprotocol;
 
   // meta
@@ -72,22 +75,13 @@ submodule ietf-bgp-common-structure {
        configuration and state for both BGP neighbors and peer
        groups";
     container route-reflector {
+      ext:help "Route reflector settings for this neighbor";
       description
         "Route reflector parameters for the BGP peer-group";
       reference
         "RFC 4456: BGP Route Reflection.";
-      leaf cluster-id {
-        type bt:rr-cluster-id-type;
-        description
-          "Route Reflector cluster id to use when local router is
-           configured as a route reflector.  Commonly set at the
-           group level, but allows a different cluster id to be set
-           for each neighbor.";
-        reference
-          "RFC 4456: BGP Route Reflection: An Alternative to
-                     Full Mesh.";
-      }
       leaf client {
+        ext:help "Treat this neighbor as a route-reflector client";
         type boolean;
         default "false";
         description
@@ -99,93 +93,4 @@ submodule ietf-bgp-common-structure {
     }
   }
 
-  grouping structure-neighbor-group-as-path-options {
-    description
-      "Structural grouping used to include AS_PATH manipulation
-       configuration and state for both BGP neighbors and peer
-       groups";
-    container as-path-options {
-      description
-        "AS_PATH manipulation parameters for the BGP neighbor or
-         group";
-      leaf allow-own-as {
-        type uint8;
-        default "0";
-        description
-          "Specify the number of occurrences of the local BGP
-           speaker's AS that can occur within the AS_PATH before it
-           is rejected as looped.";
-      }
-      leaf replace-peer-as {
-        type boolean;
-        default "false";
-        description
-          "Replace occurrences of the peer's AS in the AS_PATH with
-           the local autonomous system number";
-      }
-      leaf disable-peer-as-filter {
-        type boolean;
-        default "false";
-        description
-          "When set to true, the system advertises routes to a peer
-           even if the peer's AS was in the AS path.  The default
-           behavior (false) suppresses advertisements to peers if
-           their AS number is in the AS path of the route.";
-      }
-    }
-  }
-
-  grouping structure-add-paths {
-    description
-      "Structural grouping used to include ADD-PATHs configuration
-       and state.";
-    container add-paths {
-      if-feature "bt:add-paths";
-      description
-        "Parameters relating to the advertisement and receipt of
-         multiple paths for a single NLRI (add-paths)";
-      reference
-        "RFC 7911: Advertisements of Multiple Paths in BGP.";
-      leaf receive {
-        type boolean;
-        default "false";
-        description
-          "Enable ability to receive multiple path advertisements for
-           an NLRI from the neighbor or group";
-      }
-      leaf send-max {
-        type uint8;
-      }
-      choice send {
-        description
-          "Choice of sending the max. number of paths or to send
-           all.";
-        case max {
-          leaf max {
-            type uint8;
-            description
-              "The maximum number of paths to advertise to neighbors
-               for a single NLRI";
-          }
-        }
-        case all {
-          leaf all {
-            type empty;
-            description
-              "Send all the path advertisements to neighbors for a
-               single NLRI.";
-          }
-        }
-      }
-      leaf eligible-prefix-policy {
-        type leafref {
-          path "/rt-pol:routing-policy/rt-pol:policy-definitions/"
-             + "rt-pol:policy-definition/rt-pol:name";
-        }
-        description
-          "A reference to a routing policy which can be used to
-           restrict the prefixes for which add-paths is enabled";
-      }
-    }
-  }
 }

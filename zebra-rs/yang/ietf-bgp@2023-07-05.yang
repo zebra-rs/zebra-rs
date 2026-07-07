@@ -428,6 +428,7 @@ module ietf-bgp {
              uniquely identified by remote IPv[46] address.";
 
         leaf local-identifier {
+          ext:help "Local BGP identifier (router-id) for this session";
           type inet:ipv4-address;
           description
             "When present, this peer has been created
@@ -515,112 +516,10 @@ module ietf-bgp {
               dynamically.";
         }
 
-        leaf enabled {
-          type boolean;
-          default "true";
-          description
-            "Whether the BGP peer is enabled. In cases where the
-               enabled leaf is set to false, the local system should
-               not initiate connections to the neighbor, and should
-               not respond to TCP connections attempts from the
-               neighbor. If the state of the BGP session is
-               Established at the time that this leaf is set to
-               false, the BGP session should be ceased.
-
-               A transition from 'false' to 'true' will cause
-               the BGP Manual Start Event to be generated.
-               A transition from 'true' to 'false' will cause
-               the BGP Manual Stop Event to be generated.
-               This parameter can be used to restart BGP peer
-               connections. Care should be used in providing
-               write access to this object without adequate
-               authentication.";
-          reference
-            "RFC 4271: A Border Gateway Protocol 4 (BGP-4),
-               Section 8.1.2.";
-        }
-
         uses neighbor-group-config;
-
-        container graceful-restart {
-          if-feature "bt:graceful-restart";
-          description
-            "Parameters relating the graceful restart mechanism for
-               BGP";
-          reference
-            "RFC 4724: Graceful Restart Mechanism for BGP.";
-          uses graceful-restart-config;
-          leaf peer-restart-time {
-            type uint16 {
-              range "0..4096";
-            }
-            config false;
-            description
-              "The period of time (advertised by the peer) that the
-                 peer expects a restart of a BGP session to take.";
-          }
-
-          leaf peer-restarting {
-            type boolean;
-            config false;
-            description
-              "This flag indicates whether the remote neighbor is
-                 currently in the process of restarting, and hence
-                 received routes are currently stale.";
-          }
-
-          leaf local-restarting {
-            type boolean;
-            config false;
-            description
-              "This flag indicates whether the local neighbor is
-                 currently restarting. The flag is cleared after all
-                 NLRI have been advertised to the peer, and the
-                 End-of-RIB (EOR) marker has been cleared.";
-          }
-
-          leaf mode {
-            type enumeration {
-              enum helper-only {
-                description
-                  "The local router is operating in helper-only
-                     mode, and hence will not retain forwarding state
-                     during a local session restart, but will do so
-                     during a restart of the remote peer";
-              }
-              enum bilateral {
-                description
-                "The local router is operating in both helper
-                     mode, and hence retains forwarding state during
-                     a remote restart, and also maintains forwarding
-                     state during local session restart";
-              }
-              enum remote-helper {
-                description
-                  "The local system is able to retain routes during
-                     restart but the remote system is only able to
-                     act as a helper";
-              }
-            }
-            config false;
-            description
-              "This leaf indicates the mode of operation of BGP
-                 graceful restart with the peer";
-          }
-        }
         // The per-neighbor `prefix-set {in,out}` moved under
         // `afi-safi <name> prefix-set {in,out}` (per-family). No
         // backward-compatibility alias is kept (unlike `policy`).
-
-        container prefix-limit {
-          description
-            "Parameters relating to the prefix limit for the
-               AFI-SAFI";
-
-          uses prefix-limit-config-common;
-
-          uses prefix-limit-state-common;
-        }
 
         //container afi-safis {
           description
@@ -629,49 +528,6 @@ module ietf-bgp {
           uses bgp-neighbor-afi-safi-list;
         //}
 
-        leaf session-state {
-          type enumeration {
-            enum idle {
-              description
-              "Neighbor is down, and in the Idle state of the
-                   FSM.";
-            }
-            enum connect {
-              description
-              "Neighbor is down, and the session is waiting for
-                   the underlying transport session to be
-                   established.";
-            }
-            enum active {
-              description
-              "Neighbor is down, and the local system is awaiting
-                   a connection from the remote peer.";
-            }
-            enum opensent {
-              description
-              "Neighbor is in the process of being established.
-                   The local system has sent an OPEN message.";
-            }
-            enum openconfirm {
-              description
-              "Neighbor is in the process of being established.
-                   The local system is awaiting a NOTIFICATION or
-                   KEEPALIVE message.";
-            }
-            enum established {
-              description
-              "Neighbor is up - the BGP session with the peer is
-                   established.";
-            }
-          }
-          //  notification does not like a non-config statement.
-          //  config false;
-          description
-            "The BGP peer connection state.";
-          reference
-            "RFC 4271: A Border Gateway Protocol 4 (BGP-4),
-               Section 8.1.2.";
-        }
         leaf last-established {
           type yang:date-and-time;
           config false;

@@ -69,7 +69,7 @@ module zebra-bgp-soft-reconfiguration {
         "Soft-reconfiguration knobs for this neighbor.";
 
       leaf inbound {
-        ext:help "Store received UPDATEs so inbound policy can be re-applied without a session reset";
+        ext:help "Store received UPDATEs for inbound re-application";
         type boolean;
         default "false";
         description

@@ -51,6 +51,9 @@ submodule ietf-bgp-common {
       "I-D.ietf-tcpm-yang-tcp: Transmission Control Protocol (TCP)
        YANG Model.";
   }
+  import extension {
+    prefix ext;
+  }
   include ietf-bgp-common-structure {
     revision-date 2023-07-05;
   }
@@ -104,6 +107,7 @@ submodule ietf-bgp-common {
       "Config parameters related to timers associated with the BGP
        peer";
     leaf connect-retry-time {
+      ext:help "ConnectRetry timer (seconds)";
       type uint16 {
         range "1..max";
       }
@@ -117,6 +121,7 @@ submodule ietf-bgp-common {
          Section 8.2.2.";
     }
     leaf hold-time {
+      ext:help "Hold timer negotiated with the peer (seconds)";
       type uint16 {
         range "0 | 3..65535";
       }
@@ -152,42 +157,20 @@ submodule ietf-bgp-common {
         "RFC 4271: A Border Gateway Protocol 4 (BGP-4), Section 4.2,
          RFC 4271: A Border Gateway Protocol 4 (BGP-4), Section 10.";
     }
-    leaf keepalive {
-      type uint16 {
-        range "0..21845";
-      }
-      units "seconds";
-      description
-        "When used as a configuration (rw) value, this Time interval
-         (in seconds) for the KeepAlive timer configured for this BGP
-         speaker with this peer.  A reasonable maximum value for this
-         timer would be one-third of the configured hold-time.
-
-         In the absence of explicit configuration of the keepalive
-         value, operationally it SHOULD have a value of one-third of
-         the negotiated hold-time.
-
-         If the value of this object is zero (0), no periodic
-         KEEPALIVE messages are sent to the peer after the BGP
-         connection has been established.
-
-         The actual time interval for the KEEPALIVE messages is
-         indicated by operational value of keepalive.";
-      reference
-        "RFC 4271: A Border Gateway Protocol 4 (BGP-4), Section 4.4,
-         RFC 4271: A Border Gateway Protocol 4 (BGP-4), Section 10.";
-    }
     leaf idle-hold-time {
+      ext:help "IdleHold timer before reconnect (seconds)";
       type uint16 {
         range "0..max";
       }
     }
     leaf delay-open-time {
+      ext:help "DelayOpen timer (seconds)";
       type uint16 {
         range "0..max";
       }
     }
     leaf originate-interval {
+      ext:help "Minimum AS-origination interval (seconds)";
       type uint16 {
         range "0..max";
       }
@@ -201,6 +184,7 @@ submodule ietf-bgp-common {
          RFC 4271: A Border Gateway Protocol 4 (BGP-4), Section 10.";
     }
     leaf advertisement-interval {
+      ext:help "Minimum route advertisement interval (MRAI)";
       type uint16 {
         range "0..max";
       }
@@ -218,40 +202,11 @@ submodule ietf-bgp-common {
     }
   }
 
-  grouping bgp-neighbor-use-multiple-paths {
-    description
-      "Multi-path configuration and state applicable to a BGP
-       neighbor";
-    container use-multiple-paths {
-      description
-        "Parameters related to the use of multiple-paths for the same
-         NLRI when they are received only from this neighbor";
-      leaf enabled {
-        type boolean;
-        default "false";
-        description
-          "Whether the use of multiple paths for the same NLRI is
-           enabled for the neighbor.";
-      }
-      container ebgp {
-        description
-          "Multi-path configuration for eBGP";
-        leaf allow-multiple-as {
-          type boolean;
-          default "false";
-          description
-            "Allow multi-path to use paths from different neighboring
-             ASes. The default is to only consider multiple paths
-             from the same neighboring AS.";
-        }
-      }
-    }
-  }
-
   grouping neighbor-group-config {
     description
       "Neighbor level configuration items.";
     leaf remote-as {
+      ext:help "Autonomous system number of the peer";
       type inet:as-number;
       description
         "AS number of the peer.";
@@ -278,68 +233,21 @@ submodule ietf-bgp-common {
     // route-flap-damping was removed from neighbor-group-config: it was an
     // unhandled orphan (no config handler) on every consumer of this
     // grouping and has been dropped.
-    leaf-list send-community {
-      if-feature "bct:send-communities";
-      type identityref {
-        base "bct:send-community-feature";
-      }
-      description
-        "When supported, this tells the router to propagate any
-         prefixes that are attached to these community-types.";
-    }
-    leaf description {
-      type string {
-        pattern '.*';
-      }
-      description
-        "An optional textual description (intended primarily for use
-         with a peer or group";
-    }
-
     container timers {
+      ext:help "Per-neighbor BGP timers";
       description
         "Timers related to a BGP neighbor";
       uses neighbor-group-timers;
     }
 
     container transport {
+      ext:help "Transport (TCP) session parameters";
       description
         "Transport session parameters for the BGP neighbor";
       uses neighbor-group-transport-config;
     }
 
-    leaf treat-as-withdraw {
-      type boolean;
-      default "false";
-      description
-        "Specify whether erroneous UPDATE messages for which the NLRI
-         can be extracted are treated as though the NLRI is withdrawn
-         - avoiding session reset";
-      reference
-        "RFC 7606: Revised Error Handling for BGP UPDATE Messages.";
-    }
-
-    container logging-options {
-      description
-        "Logging options for events related to the BGP neighbor or
-         group";
-      leaf log-neighbor-state-changes {
-        type boolean;
-        default "true";
-        description
-          "Configure logging of peer state changes.  Default is to
-           enable logging of peer state changes.
-
-           Note: Documenting demotion from ESTABLISHED state is
-                 desirable, but documenting all backward transitions
-                 is problematic, and should be avoided.";
-      }
-    }
-
     uses structure-neighbor-group-route-reflector;
-    uses structure-neighbor-group-as-path-options;
-    uses structure-add-paths;
-    uses bgp-neighbor-use-multiple-paths;
     // The peer-wide `neighbor X policy {in,out}` (rt-pol:apply-policy-group)
     // was retired; per-family route-policy now lives under
     // `neighbor X afi-safi <name> policy {in,out}` (ietf-bgp-neighbor).
@@ -351,6 +259,7 @@ submodule ietf-bgp-common {
        used by the BGP session to the peer.";
 
     leaf local-address {
+      ext:help "Local address to bind for the BGP session";
       type union {
         type inet:ipv4-address;
         type inet:ipv6-address;
@@ -362,48 +271,8 @@ submodule ietf-bgp-common {
          of an interface.";
     }
 
-    leaf tcp-mss {
-      type tcp:mss;
-      description
-        "Maximum Segment Size (MSS) desired on this connection.
-         Note, the 'effective send MSS' can be smaller than
-         what is configured here.";
-       reference
-         "RFC 9293: Transmission Control Protocol (TCP)
-                    Specification.";
-    }
-
-    leaf mtu-discovery {
-      type boolean;
-      default "true";
-      description
-        "Turns path mtu discovery for BGP TCP sessions on (true) or
-         off (false).";
-      reference
-        "RFC 1191: Path MTU discovery.";
-    }
-
-    container ebgp-multihop {
-      description
-        "eBGP multi-hop parameters for the BGP peer-group";
-      leaf enabled {
-        type boolean;
-        default "false";
-        description
-          "When enabled, the referenced group or neighbors are
-           permitted to be indirectly connected - including cases
-           where the TTL can be decremented between the BGP peers";
-      }
-      leaf multihop-ttl {
-        type uint8;
-        description
-          "Time-to-live value to use when packets are sent to the
-           referenced group or neighbors and ebgp-multihop is
-           enabled";
-      }
-    }
-
     leaf passive-mode {
+      ext:help "Wait for the peer to initiate the connection";
       type boolean;
       default "false";
       description
@@ -411,151 +280,6 @@ submodule ietf-bgp-common {
          rather than initiating sessions from the local router.";
     }
 
-    leaf ttl-security {
-      if-feature "bt:ttl-security";
-      type uint8;
-      default "255";
-      description
-        "BGP Time To Live (TTL) security check.";
-      reference
-        "RFC 5082: The Generalized TTL Security Mechanism (GTSM),
-         RFC 7454: BGP Operations and Security.";
-    }
-
-    container secure-session {
-      must "enabled = 'false' or " +
-           "(enabled = 'true' and options)" {
-        error-message "When secure-session is enabled " +
-          "secure-session options MUST be set";
-      }
-      description
-        "Container for describing how a particular BGP session
-         is to be secured.";
-
-      leaf enabled {
-        type boolean;
-        default "false";
-        description
-          "When set to true, session is secured with the
-           configured options.";
-      }
-
-      container options {
-        description
-          "Options for securing the BGP session.";
-        choice option {
-          case ao {
-            leaf ao-keychain {
-              type key-chain:key-chain-ref;
-              description
-                "Reference to the key chain that will be used by this
-                 model. Applicable for TCP-AO and TCP-MD5 only";
-              reference
-                "RFC 8177: YANG Data Model for Key Chains.";
-            }
-            description
-              "Uses TCP-AO to secure the session. Parameters for
-               those are defined as a grouping in the TCP YANG
-               model.";
-            reference
-              "RFC 5925: The TCP Authentication Option.";
-          }
-
-          case md5 {
-            leaf md5-keychain {
-              type key-chain:key-chain-ref;
-              description
-                "Reference to the key chain that will be used by this
-                 model. Applicable for TCP-AO and TCP-MD5 only";
-              reference
-                "RFC 8177: YANG Data Model for Key Chains.";
-            }
-            description
-              "Uses TCP-MD5 to secure the session. Parameters for
-               those are defined as a grouping in the TCP YANG
-               model.";
-            reference
-              "RFC 5925: The TCP Authentication Option.";
-          }
-
-          case ipsec {
-            leaf sa {
-              type string;
-              description
-                "Security Association (SA) name.";
-            }
-            description
-              "Currently, the IPsec/IKE YANG model has no
-               grouping defined that this model can use. When
-               such a grouping is defined, this model can import
-               the grouping to add the key parameters
-               needed to kick of IKE.";
-          }
-
-          description
-            "Choice of authentication options.";
-        }
-      }
-    }
-
-    container bfd {
-      if-feature "bt:bfd";
-      uses bfd-types:client-cfg-parms;
-      description
-        "BFD client configuration.";
-      reference
-        "RFC 9127: YANG Data Model for Bidirectional Forwarding
-         Detection.";
-    }
-  }
-
-  grouping graceful-restart-config {
-    description
-      "Configuration parameters relating to BGP graceful restart.";
-    leaf enabled {
-      type boolean;
-      default "false";
-      description
-        "Enable or disable the graceful-restart capability.";
-    }
-    leaf restart-time {
-      type bt:graceful-restart-time-type;
-      description
-        "Estimated time (in seconds) for the local BGP speaker to
-         restart a session. This value is advertise in the graceful
-         restart BGP capability.  This is a 12-bit value, referred to
-         as Restart Time in RFC4724.  Per RFC4724, the suggested
-         default value is <= the hold-time value.";
-      reference
-        "RFC 4724: Graceful Restart Mechanism for BGP.";
-    }
-    leaf stale-routes-time {
-      type uint32;
-      description
-        "An upper-bound on the time that stale routes will be
-         retained by a router after a session is restarted. If an
-         End-of-RIB (EOR) marker is received prior to this timer
-         expiring, stale-routes will be flushed upon its receipt - if
-         no EOR is received, then when this timer expires stale paths
-         will be purged. This timer is referred to as the
-         Selection_Deferral_Timer in RFC4724";
-      reference
-        "RFC 4724: Graceful Restart Mechanism for BGP.";
-    }
-    leaf helper-only {
-      type boolean;
-      default "true";
-      description
-        "Enable graceful-restart in helper mode only. When this leaf
-         is set, the local system does not retain forwarding its own
-         state during a restart, but supports procedures for the
-         receiving speaker, as defined in RFC4724.";
-      reference
-        "RFC 4724: Graceful Restart Mechanism for BGP.";
-    }
-    leaf long-lived-enabled {
-      type boolean;
-    }
   }
 
   grouping global-group-use-multiple-paths {

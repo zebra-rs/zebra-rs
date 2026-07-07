@@ -73,6 +73,7 @@ submodule ietf-bgp-neighbor {
     description
       "List of address-families associated with the BGP neighbor";
     list afi-safi {
+      ext:help "Per-address-family (AFI/SAFI) configuration";
       key "name";
       description
         "AFI, SAFI configuration available for the neighbor or
@@ -110,14 +111,18 @@ submodule ietf-bgp-neighbor {
         }
       }
       container long-lived-graceful-restart {
+        ext:help "Per-family long-lived GR settings (RFC 9494)";
         leaf enabled {
+          ext:help "Enable long-lived graceful-restart (RFC 9494)";
           type boolean;
         }
         leaf restart-time {
+          ext:help "LLGR stale-retention time (seconds)";
           type uint32;
         }
       }
       container graceful-restart {
+        ext:help "Per-family graceful-restart settings";
         if-feature "bt:graceful-restart";
         description
           "Parameters relating to BGP graceful-restart";
@@ -178,8 +183,8 @@ submodule ietf-bgp-neighbor {
         }
       }
       // uses mp-all-afi-safi-list-contents;
-      uses bgp-neighbor-use-multiple-paths;
       leaf add-path {
+        ext:help "Additional-Paths send/receive mode (RFC 7911)";
         ext:sort "10";
         type enumeration {
           enum send;
@@ -188,6 +193,7 @@ submodule ietf-bgp-neighbor {
         }
       }
       leaf encapsulation-type {
+        ext:help "Encapsulation for advertised routes (srv6)";
         when "../name = 'ipv6'" {
           description
             "SRv6 encapsulation only applies to the IPv6 unicast
@@ -216,6 +222,7 @@ submodule ietf-bgp-neighbor {
            family.";
       }
       leaf next-hop-self {
+        ext:help "Advertise self as next hop to this neighbor";
         ext:sort "30";
         type boolean;
         description
@@ -248,9 +255,11 @@ submodule ietf-bgp-neighbor {
            it falls back to a route-policy inherited from a
            neighbor-group (if any).";
         leaf in {
+          ext:help "Inbound route-policy for this family";
           type string;
         }
         leaf out {
+          ext:help "Outbound route-policy for this family";
           type string;
         }
       }
@@ -262,9 +271,11 @@ submodule ietf-bgp-neighbor {
            address family. The per-family successor of the (removed)
            peer-wide `neighbor X prefix-set {in,out}`.";
         leaf in {
+          ext:help "Inbound prefix-set filter for this family";
           type string;
         }
         leaf out {
+          ext:help "Outbound prefix-set filter for this family";
           type string;
         }
       }
