@@ -4111,13 +4111,15 @@ impl Bgp {
     pub fn callback_build(&mut self) {
         self.callback_add("/router/bgp/global/as", config_global_asn);
         self.callback_add("/router/bgp/global/router-id", config_global_router_id);
-        self.callback_add("/router/bgp/global/hostname", config_global_hostname);
+        // `hostname`, `no-fib-install` and `fast-external-failover` were
+        // hoisted out of the `global` container to be direct children of
+        // `bgp` (ietf-bgp.yang), so the paths dropped the `/global`
+        // segment. The handlers are unchanged — `global` is a presence
+        // container with no key, so it never contributed an arg.
+        self.callback_add("/router/bgp/hostname", config_global_hostname);
+        self.callback_add("/router/bgp/no-fib-install", config_global_no_fib_install);
         self.callback_add(
-            "/router/bgp/global/no-fib-install",
-            config_global_no_fib_install,
-        );
-        self.callback_add(
-            "/router/bgp/global/fast-external-failover",
+            "/router/bgp/fast-external-failover",
             config_global_fast_external_failover,
         );
         // `router bgp port <0-65535>` (zebra-bgp-transport.yang): the

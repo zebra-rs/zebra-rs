@@ -27,7 +27,7 @@ Feature: BGP fast-external-failover (immediate eBGP reset on link down)
   - z1.yaml / z2.yaml: direct eBGP over the veth, one originated
     prefix each, fast-external-failover left at its default (enabled).
     The disabled case is applied at runtime with
-    `set router bgp global fast-external-failover false`.
+    `set router bgp fast-external-failover false`.
 
   Scenario: Setup direct eBGP topology and establish the session
     Given a clean test environment
@@ -61,8 +61,8 @@ Feature: BGP fast-external-failover (immediate eBGP reset on link down)
 
   Scenario: Disabling fast-external-failover does not bounce the session
     Given the test topology exists
-    When I apply command "set router bgp global fast-external-failover false" in namespace "z1"
-    And I apply command "set router bgp global fast-external-failover false" in namespace "z2"
+    When I apply command "set router bgp fast-external-failover false" in namespace "z1"
+    And I apply command "set router bgp fast-external-failover false" in namespace "z2"
     And I wait 2 seconds
     Then BGP session in "z1" to "10.107.0.2" should be "Established"
     And BGP session in "z2" to "10.107.0.1" should be "Established"

@@ -315,49 +315,57 @@ module ietf-bgp {
           reference
             "RFC 6286: AS-Wide Unique BGP ID for BGP-4. Section 2.1";
         }
-        leaf hostname {
-          type string;
-          description
-            "Hostname of the local BGP speaker. Advertised to peers
-             via the FQDN capability (draft-walton-bgp-hostname-
-             capability-02, capability code 73). When unset, the OS
-             hostname is used; when neither is available the
-             capability is not sent.";
-        }
-        leaf no-fib-install {
-          type boolean;
-          default "false";
-          description
-            "When true, routes selected by this BGP speaker are not
-             installed into the forwarding table (FIB). The Loc-RIB is
-             still built and routes are still reflected and advertised
-             to peers, but no kernel forwarding entry is programmed for
-             IPv4/IPv6 unicast or for VPN, EVPN and labeled-unicast
-             MPLS routes. Next-hop tracking and best-path selection are
-             unaffected. Intended for a dedicated route reflector that
-             is out of the forwarding path. Best set at startup;
-             toggling at run time applies to subsequent route updates
-             rather than retroactively withdrawing already-installed
-             entries.";
-        }
-        // zebra-rs extension: not part of the IETF model.
-        leaf fast-external-failover {
-          type boolean;
-          default "true";
-          description
-            "When true (the default), immediately reset the session of
-             any directly connected (single-hop) eBGP neighbor whose
-             interface goes operationally down, instead of waiting for
-             the hold timer to expire. Single-hop means the session TTL
-             is 1 or the neighbor uses ttl-security (GTSM, directly
-             connected by definition); neighbors configured with
-             ebgp-multihop and all iBGP neighbors are unaffected.
-             Setting this to false restores hold-timer-only failure
-             detection, equivalent to IOS-XR
-             'bgp fast-external-fallover disable' and FRR
-             'no bgp fast-external-failover'.";
-        }
         uses state;
+      }
+
+      // zebra-rs divergence: hoisted out of `global` to be direct
+      // children of `bgp` so the CLI reads `router bgp <knob>` (FRR /
+      // IOS-XR shape) rather than `router bgp global <knob>`. The
+      // config handlers lower onto the same `Bgp` fields as before.
+      leaf hostname {
+        ext:help "Hostname advertised to peers via the FQDN capability";
+        type string;
+        description
+          "Hostname of the local BGP speaker. Advertised to peers
+           via the FQDN capability (draft-walton-bgp-hostname-
+           capability-02, capability code 73). When unset, the OS
+           hostname is used; when neither is available the
+           capability is not sent.";
+      }
+      leaf no-fib-install {
+        ext:help "Keep selected routes out of the kernel FIB";
+        type boolean;
+        default "false";
+        description
+          "When true, routes selected by this BGP speaker are not
+           installed into the forwarding table (FIB). The Loc-RIB is
+           still built and routes are still reflected and advertised
+           to peers, but no kernel forwarding entry is programmed for
+           IPv4/IPv6 unicast or for VPN, EVPN and labeled-unicast
+           MPLS routes. Next-hop tracking and best-path selection are
+           unaffected. Intended for a dedicated route reflector that
+           is out of the forwarding path. Best set at startup;
+           toggling at run time applies to subsequent route updates
+           rather than retroactively withdrawing already-installed
+           entries.";
+      }
+      // zebra-rs extension: not part of the IETF model.
+      leaf fast-external-failover {
+        ext:help "Reset single-hop eBGP sessions on link down";
+        type boolean;
+        default "true";
+        description
+          "When true (the default), immediately reset the session of
+           any directly connected (single-hop) eBGP neighbor whose
+           interface goes operationally down, instead of waiting for
+           the hold timer to expire. Single-hop means the session TTL
+           is 1 or the neighbor uses ttl-security (GTSM, directly
+           connected by definition); neighbors configured with
+           ebgp-multihop and all iBGP neighbors are unaffected.
+           Setting this to false restores hold-timer-only failure
+           detection, equivalent to IOS-XR
+           'bgp fast-external-fallover disable' and FRR
+           'no bgp fast-external-failover'.";
       }
 
       container segment-routing {
