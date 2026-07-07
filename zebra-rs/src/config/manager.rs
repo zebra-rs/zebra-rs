@@ -2785,12 +2785,15 @@ mod yang_load_tests {
         );
     }
 
-    /// `router bgp global fast-external-failover <bool>` (a zebra-rs
-    /// leaf added to the ietf-bgp `container global`) must be a
-    /// settable path, and — being a boolean leaf, not a presence
-    /// container — the value-less spelling must not parse.
+    /// `fast-external-failover`, `hostname` and `no-fib-install` are
+    /// zebra-rs leaves hoisted out of the ietf-bgp `container global` to
+    /// be direct children of `bgp` (`router bgp <knob>`, FRR/IOS-XR
+    /// shape). Each new path must be settable; the two boolean leaves
+    /// must reject the value-less spelling; and the old `global/` paths
+    /// must no longer parse (locks in the move so a stray re-add under
+    /// `global` doesn't silently resurrect the old path).
     #[test]
-    fn bgp_global_fast_external_failover_is_settable() {
+    fn bgp_hoisted_global_leaves_are_settable() {
         use crate::config::ExecCode;
         use crate::config::parse::{State, parse};
         use libyang::to_entry;
@@ -2805,25 +2808,43 @@ mod yang_load_tests {
             .expect("configure module present");
         let entry = to_entry(&yang, module);
 
+        // New, hoisted paths parse as valid `set` commands.
         for cmd in [
-            "set router bgp global fast-external-failover false",
-            "set router bgp global fast-external-failover true",
+            "set router bgp fast-external-failover false",
+            "set router bgp fast-external-failover true",
+            "set router bgp hostname r1",
+            "set router bgp no-fib-install true",
         ] {
             let (code, _comps, _state) = parse(cmd, entry.clone(), None, State::new());
-            assert_eq!(code, ExecCode::Success, "`{cmd}` must be a valid path",);
+            assert_eq!(code, ExecCode::Success, "`{cmd}` must be a valid path");
         }
 
-        let (code, _comps, _state) = parse(
-            "set router bgp global fast-external-failover",
-            entry,
-            None,
-            State::new(),
-        );
-        assert_ne!(
-            code,
-            ExecCode::Success,
-            "boolean leaf — the value-less spelling must not parse",
-        );
+        // Boolean leaves reject the value-less spelling.
+        for cmd in [
+            "set router bgp fast-external-failover",
+            "set router bgp no-fib-install",
+        ] {
+            let (code, _comps, _state) = parse(cmd, entry.clone(), None, State::new());
+            assert_ne!(
+                code,
+                ExecCode::Success,
+                "`{cmd}`: boolean leaf — the value-less spelling must not parse",
+            );
+        }
+
+        // The pre-move paths under `global` no longer exist.
+        for cmd in [
+            "set router bgp global fast-external-failover false",
+            "set router bgp global hostname r1",
+            "set router bgp global no-fib-install true",
+        ] {
+            let (code, _comps, _state) = parse(cmd, entry.clone(), None, State::new());
+            assert_ne!(
+                code,
+                ExecCode::Success,
+                "`{cmd}`: the leaf moved out of `global`, so this path must not parse",
+            );
+        }
     }
 
     /// `neighbor X ip-transparent` (zebra-bgp-transport.yang) must be a

@@ -1,7 +1,7 @@
 # z1 (AS 65001): single-hop eBGP to z2 over the direct veth link
 # (10.107.0.0/24). fast-external-failover is left at its default
 # (enabled); the feature flips it off at runtime with
-# `set router bgp global fast-external-failover false` for the
+# `set router bgp fast-external-failover false` for the
 # disabled-case scenario. Default timers (hold 180) on purpose — the
 # feature under test is exactly "don't wait for the hold timer".
 interface:

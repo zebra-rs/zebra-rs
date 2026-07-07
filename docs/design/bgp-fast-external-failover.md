@@ -153,6 +153,16 @@ the ietf-bgp `container global`
 `no-fib-install` at :329). No new module, no `config.yang` import, and
 the config path comes out as `/router/bgp/global/fast-external-failover`.
 
+> **Update (post-landing):** `fast-external-failover`, `hostname` and
+> `no-fib-install` were later hoisted out of the `global` container to be
+> direct children of `bgp`, so the CLI is now `router bgp
+> fast-external-failover ...` and the config path is
+> `/router/bgp/fast-external-failover` (likewise
+> `/router/bgp/{hostname,no-fib-install}`). `as` and `router-id` stay
+> under `global`. The handlers are otherwise unchanged; the `global {`
+> CLI/YAML examples and the callback path below reflect the original
+> layout.
+
 ```yang
 leaf fast-external-failover {
   type boolean;
