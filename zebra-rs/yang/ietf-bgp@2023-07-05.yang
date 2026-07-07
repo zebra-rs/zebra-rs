@@ -276,6 +276,7 @@ module ietf-bgp {
         uses zas:afi-safi;
 
         list network {
+          ext:help "Prefix to originate into BGP";
           key "prefix";
           leaf prefix {
             // IPv4 prefix for ipv4 / label-v4 families; IPv6 prefix for
@@ -293,6 +294,7 @@ module ietf-bgp {
         description
           "Global configuration for the BGP router.";
         leaf as {
+          ext:help "Local BGP autonomous system number";
           type inet:as-number;
           mandatory true;
           description
@@ -305,6 +307,7 @@ module ietf-bgp {
         // (`system router-id`, `vrf <name> router-id`,
         // `router ospf{,v3} router-id`, `router bgp vrf <n> router-id`).
         leaf router-id {
+          ext:help "BGP router identifier (32-bit, dotted-quad)";
           type inet:ipv4-address;
           description
             "BGP Identifier of the router - an unsigned 32-bit,
