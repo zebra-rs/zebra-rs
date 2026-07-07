@@ -55,6 +55,12 @@ module zebra-bgp-lua {
        per-AFI Loc-RIB import hook binding for ipv4-unicast.";
   }
 
+  // Temporarily disabled: the embedded Lua scripting engine is turned
+  // off for now (the `lua` build feature defaults off), so this BGP
+  // config surface is commented out and the bootstrap import in
+  // config.yang is disabled as well. Re-enable both together with the
+  // `lua` feature.
+  /*
   grouping bgp-lua-extension {
     description
       "Lua script definitions and Loc-RIB hook bindings on the BGP
@@ -147,4 +153,5 @@ module zebra-bgp-lua {
        ipv4-unicast import` are path-valid.";
     uses bgp-lua-extension;
   }
+  */
 }

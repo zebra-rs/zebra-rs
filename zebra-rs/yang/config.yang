@@ -60,9 +60,18 @@ module config {
     prefix zbt;
   }
 
+  // Temporarily disabled: the embedded Lua scripting engine is turned
+  // off for now (the `lua` build feature defaults off). This bootstrap
+  // import is the only thing that pulls zebra-bgp-lua's augments into
+  // the configure tree, so commenting it out removes `router bgp
+  // lua-script / lua-map / loc-rib-hook / adj-rib-out-hook` from the
+  // schema. Re-enable together with the `lua` feature (and uncomment the
+  // schema body in zebra-bgp-lua.yang).
+  /*
   import zebra-bgp-lua {
     prefix zbl;
   }
+  */
 
   import zebra-bgp-password {
     prefix zbp;
