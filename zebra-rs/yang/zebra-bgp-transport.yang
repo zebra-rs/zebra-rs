@@ -310,7 +310,7 @@ module zebra-bgp-transport {
       "FRR-style transport leaves on the BGP instance itself.";
 
     leaf port {
-      ext:help "TCP port the BGP listener binds (0-65535; 0 disables listening, default 179)";
+      ext:help "TCP listen port (0-65535; 0 disables, default 179)";
       type uint16 {
         range "0..65535";
       }
