@@ -30,3 +30,4 @@ zebra knobs).
 
 == Handler paths with no schema node (stale/other) ==
   /router/bgp/neighbor/flowspec/validation
+  /router/bgp/neighbor/soft-reconfiguration/inbound

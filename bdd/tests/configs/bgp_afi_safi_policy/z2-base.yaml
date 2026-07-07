@@ -8,7 +8,5 @@ router:
       afi-safi:
       - name: ipv4
         enabled: true
-      soft-reconfiguration:
-        inbound: true
       enabled: true
       remote-as: 65001

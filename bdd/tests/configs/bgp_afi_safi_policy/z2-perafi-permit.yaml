@@ -27,8 +27,6 @@ router:
         enabled: true
         policy:
           in: PERMIT-ALL
-      soft-reconfiguration:
-        inbound: true
       neighbor-group: PEER-WIDE
       enabled: true
       remote-as: 65001
