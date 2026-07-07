@@ -69,6 +69,7 @@ module zebra-bgp-redistribute {
     description
       "Common per-source knobs for BGP redistribution.";
     leaf policy {
+      ext:help "Route policy name for redistributed routes";
       type string;
       description
         "Name of a top-level `policy`. Plain string (not a leafref)
@@ -76,12 +77,14 @@ module zebra-bgp-redistribute {
          is committed.";
     }
     leaf metric {
+      ext:help "Static MED override for redistributed routes";
       type uint32;
       description
         "Static MED override for redistributed routes. When omitted,
          MED follows the source RIB cost / protocol default.";
     }
     leaf multipath {
+      ext:help "Redistribute all resolved paths not just best";
       type empty;
       description
         "Install all RIB-resolved paths from this source, not just
@@ -95,6 +98,7 @@ module zebra-bgp-redistribute {
        `level <N>` tokens (`level 1 level 2 level 1-inter-area`),
        so modeled as a leaf-list — order is insignificant.";
     leaf-list level {
+      ext:help "IS-IS level to redistribute from";
       type enumeration {
         enum level-1;
         enum level-2;
@@ -110,7 +114,9 @@ module zebra-bgp-redistribute {
        nssa-external-2 in a single redistribute entry (unlike
        OSPF-into-IS-IS, which is single-value).";
     container match {
+      ext:help "OSPF route-type match filter";
       leaf-list type {
+        ext:help "OSPF route type to match";
         type enumeration {
           enum internal;
           enum external-1;
@@ -129,21 +135,26 @@ module zebra-bgp-redistribute {
        multicast); harmless on other AFI/SAFIs — the Rust callback
        filters at commit time.";
     container redistribute {
+      ext:help "Redistribute routes into BGP";
       presence "Enable route redistribution into BGP for this AFI";
       container connected {
+        ext:help "Redistribute connected routes";
         presence "Redistribute connected routes";
         uses bgp-redist-common;
       }
       container static {
+        ext:help "Redistribute static routes";
         presence "Redistribute static routes";
         uses bgp-redist-common;
       }
       container isis {
+        ext:help "Redistribute IS-IS routes";
         presence "Redistribute IS-IS routes";
         uses bgp-redist-common;
         uses bgp-redist-isis-level;
       }
       container ospf {
+        ext:help "Redistribute OSPF routes";
         presence "Redistribute OSPF routes";
         uses bgp-redist-common;
         uses bgp-redist-ospf-match;

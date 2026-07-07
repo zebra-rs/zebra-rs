@@ -57,6 +57,7 @@ module zebra-bgp-table-map {
     description
       "Attached to every global afi-safi list entry.";
     leaf table-map {
+      ext:help "Policy applied to best paths at RIB install";
       type string;
       description
         "Name of a top-level `policy` applied to best paths at

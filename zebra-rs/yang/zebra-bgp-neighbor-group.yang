@@ -105,11 +105,13 @@ module zebra-bgp-neighbor-group {
         "List of BGP neighbor-groups configured on the local
          system, uniquely identified by name.";
       leaf name {
+        ext:help "Neighbor-group name";
         type string;
         description
           "Name of the neighbor-group.";
       }
       leaf remote-as {
+        ext:help "Remote AS number inherited by group members";
         type inet:as-number;
         description
           "AS number inherited by neighbors that reference this
@@ -156,9 +158,11 @@ module zebra-bgp-neighbor-group {
           "Per-direction route-policy references, mirroring the
            per-neighbor `policy` container.";
         leaf in {
+          ext:help "Inbound route policy";
           type string;
         }
         leaf out {
+          ext:help "Outbound route policy";
           type string;
         }
       }
@@ -168,9 +172,11 @@ module zebra-bgp-neighbor-group {
           "Per-direction prefix-set references, mirroring the
            per-neighbor `prefix-set` container.";
         leaf in {
+          ext:help "Inbound prefix filter";
           type string;
         }
         leaf out {
+          ext:help "Outbound prefix filter";
           type string;
         }
       }
@@ -180,6 +186,7 @@ module zebra-bgp-neighbor-group {
           "Mirror of the per-neighbor `route-reflector` container
            (client leaf only — `cluster-id` stays per-neighbor).";
         leaf client {
+          ext:help "Members are route-reflector clients";
           type boolean;
           description
             "Members are route-reflector clients.";
@@ -187,6 +194,7 @@ module zebra-bgp-neighbor-group {
       }
 
       list afi-safi {
+        ext:help "Per-family settings inherited by members";
         key "name";
         description
           "Per-family toggles inherited by neighbors that reference
@@ -200,6 +208,7 @@ module zebra-bgp-neighbor-group {
            the session next negotiates capabilities (`clear bgp`).";
         uses zas:afi-safi;
         leaf enabled {
+          ext:help "Enable this address family for group members";
           type boolean;
           mandatory true;
           description
@@ -207,6 +216,7 @@ module zebra-bgp-neighbor-group {
              from the group.";
         }
         leaf next-hop-self {
+          ext:help "Inherited per-family next-hop-self";
           type boolean;
           description
             "Inherited per-family next-hop-self, mirroring the
@@ -223,6 +233,7 @@ module zebra-bgp-neighbor-group {
       "Per-neighbor reference leaf attaching the neighbor to a
        neighbor-group.";
     leaf neighbor-group {
+      ext:help "Neighbor-group to inherit attributes from";
       type string;
       description
         "Name of the `neighbor-group` whose attributes this

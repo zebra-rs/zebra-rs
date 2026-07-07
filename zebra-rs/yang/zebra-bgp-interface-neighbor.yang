@@ -108,6 +108,7 @@ module zebra-bgp-interface-neighbor {
          `interface X ipv6 router-advertisements send-advertisements
          true`).";
       leaf interface {
+        ext:help "Interface for the unnumbered BGP peer";
         type string;
         description
           "Outbound interface name. Resolved to ifindex via the RIB
@@ -115,6 +116,7 @@ module zebra-bgp-interface-neighbor {
            materialization until the kernel surfaces the link.";
       }
       leaf neighbor-group {
+        ext:help "Neighbor-group to inherit attributes from";
         type string;
         description
           "Optional reference to a `neighbor-group` whose attributes
@@ -124,6 +126,7 @@ module zebra-bgp-interface-neighbor {
            zebra-bgp-* augments.";
       }
       leaf remote-as {
+        ext:help "Remote autonomous system number";
         type remote-as-type;
         description
           "Remote AS. May be omitted if the referenced

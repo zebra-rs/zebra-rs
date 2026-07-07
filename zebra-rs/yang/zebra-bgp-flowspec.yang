@@ -56,6 +56,7 @@ module zebra-bgp-flowspec {
       "Flow Specification knobs on a BGP neighbor.";
 
     container flowspec {
+      ext:help "BGP Flow Specification settings";
       description
         "BGP Flow Specification knobs for this neighbor.";
 

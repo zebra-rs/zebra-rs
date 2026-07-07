@@ -31,14 +31,19 @@ module config-static {
        configuration is needed.";
 
     container mpls {
+      ext:help "MPLS label configuration";
       list label {
+        ext:help "MPLS label entry";
         key "value";
         leaf value {
+          ext:help "Incoming label value";
           type uint32;
         }
         list nexthop {
+          ext:help "Label nexthop";
           key "address";
           leaf "address" {
+            ext:help "Nexthop address, or blackhole to discard";
             type union {
               type inet:ipv4-address;
               // `blackhole` at the nexthop-key position turns the
@@ -51,6 +56,7 @@ module config-static {
             description "Nexthop address, or `blackhole` to discard";
           }
           leaf "outgoing-label" {
+            ext:help "Outgoing MPLS label";
             type uint32;
           }
         }
@@ -60,6 +66,7 @@ module config-static {
     container ipv4 {
       ext:help "IPv4 configuration";
       list route {
+        ext:help "IPv4 static route";
         // A bare `route <prefix>` carries no forwarding information — it
         // needs at least a nexthop (or SRv6 / distance / metric child).
         // Reject the key-only entry at commit, and prune it when its last
@@ -67,11 +74,14 @@ module config-static {
         ext:non-empty "nexthop";
         key "prefix";
         leaf prefix {
+          ext:help "IPv4 destination prefix";
           type inet:ipv4-prefix;
         }
         list nexthop {
+          ext:help "Route nexthop";
           key "address";
           leaf "address" {
+            ext:help "Nexthop address, or blackhole to discard";
             type union {
               type inet:ipv4-address;
               // `blackhole` at the nexthop-key position turns the
@@ -84,22 +94,27 @@ module config-static {
             description "Nexthop address, or `blackhole` to discard";
           }
           leaf metric {
+            ext:help "Nexthop metric";
             type uint32;
             description "Metric of the route.";
           }
           leaf weight {
+            ext:help "ECMP nexthop weight";
             type uint8;
             description "Weight of ECMP route.";
           }
           leaf-list label {
+            ext:help "MPLS labels to push";
             type uint32;
           }
         }
         leaf distance {
+          ext:help "Administrative distance";
           type uint8;
           description "Distance of the route.";
         }
         leaf blackhole {
+          ext:help "Discard route, drop matching traffic";
           type boolean;
           description
             "Discard route: matching traffic is dropped in the
@@ -107,14 +122,18 @@ module config-static {
              nexthop. Mutually exclusive with `nexthop`.";
         }
         leaf metric {
+          ext:help "Route metric";
           type uint32;
           description "Metric of the route.";
         }
         container srv6 {
+          ext:help "SRv6 encapsulation";
           leaf-list segments {
+            ext:help "SRv6 segment list";
             type inet:ipv6-address;
           }
           leaf if-name {
+            ext:help "Outgoing interface";
             ext:dynamic "rib:interface";
             type string;
           }
@@ -122,52 +141,64 @@ module config-static {
       }
 
       list arp {
+        ext:help "Static ARP entry";
         key "address";
         leaf "address" {
+          ext:help "ARP neighbor address";
           type inet:ipv4-address;
           description "ARP neighbor address";
         }
         leaf mac {
+          ext:help "MAC address";
           type yang:mac-address;
           description "MAC Address";
         }
       }
 
       list srv6 {
+        ext:help "SRv6 route entry";
         key "prefix";
         leaf prefix {
+          ext:help "IPv4 destination prefix";
           type inet:ipv4-prefix;
         }
         leaf encap {
+          ext:help "SRv6 encapsulation type";
           type enumeration {
             enum seg6;
             enum seg6local;
           }
         }
         leaf mode {
+          ext:help "seg6 mode: encap or inline";
           type enumeration {
             enum encap;
             enum inline;
           }
         }
         leaf-list segs {
+          ext:help "SRv6 segment list";
           type string;
           description "SRv6 segments";
         }
         leaf action {
+          ext:help "seg6local endpoint action";
           type enumeration {
             enum End;
             enum End.DT4;
           }
         }
         leaf dev {
+          ext:help "Outgoing interface";
           type string;
           description "Outgoing interface";
         }
         leaf table {
+          ext:help "Routing table ID";
           type uint32;
         }
         leaf flavors {
+          ext:help "SRv6 endpoint flavor";
           type enumeration {
             enum next-csid;
             enum psp;
@@ -176,9 +207,11 @@ module config-static {
           }
         }
         leaf lblen {
+          ext:help "Locator block length";
           type uint8;
         }
         leaf nflen {
+          ext:help "Node function length";
           type uint8;
         }
       }
@@ -188,29 +221,36 @@ module config-static {
       ext:help "IPv6 configuration";
 
       list neighbor {
+        ext:help "Static IPv6 neighbor";
         key "address";
         leaf "address" {
+          ext:help "IPv6 neighbor address";
           type inet:ipv6-address;
           description "ARP neighbor address";
         }
         leaf mac {
+          ext:help "MAC address";
           type yang:mac-address;
           description "MAC Address";
         }
       }
 
       list route {
+        ext:help "IPv6 static route";
         // Sibling of the IPv4 route list: a bare `route <prefix>` is dead
         // config (no nexthop / SRv6 / metric), so reject the key-only entry
         // at commit and prune it on last-child delete.
         ext:non-empty "nexthop";
         key "prefix";
         leaf prefix {
+          ext:help "IPv6 destination prefix";
           type inet:ipv6-prefix;
         }
         list nexthop {
+          ext:help "Route nexthop";
           key "address";
           leaf "address" {
+            ext:help "Nexthop address, or blackhole to discard";
             type union {
               type inet:ipv6-address;
               type enumeration {
@@ -220,19 +260,23 @@ module config-static {
             description "Nexthop address, or `blackhole` to discard";
           }
           leaf metric {
+            ext:help "Nexthop metric";
             type uint32;
             description "Metric of the route.";
           }
           leaf weight {
+            ext:help "ECMP nexthop weight";
             type uint8;
             description "Weight of ECMP route.";
           }
         }
         leaf distance {
+          ext:help "Administrative distance";
           type uint8;
           description "Distance of the route.";
         }
         leaf blackhole {
+          ext:help "Discard route, drop matching traffic";
           type boolean;
           description
             "Discard route: matching traffic is dropped in the
@@ -240,19 +284,23 @@ module config-static {
              nexthop. Mutually exclusive with `nexthop`.";
         }
         leaf metric {
+          ext:help "Route metric";
           type uint32;
           description "Metric of the route.";
         }
         leaf-list segments {
+          ext:help "SRv6 segment list";
           type inet:ipv6-address;
         }
         leaf encap-type {
+          ext:help "SRv6 encapsulation type";
           type enumeration {
             enum "H.Encap";
             enum "H.Encap.Red";
           }
         }
         leaf action {
+          ext:help "SRv6 seg6local endpoint behavior";
           description
             "SRv6 endpoint behavior installed as a seg6local
              terminal action on this prefix. Mutually exclusive
@@ -281,6 +329,7 @@ module config-static {
           }
         }
         leaf nh6 {
+          ext:help "IPv6 cross-connect nexthop (End.DX6)";
           type inet:ipv6-address;
           description
             "IPv6 cross-connect adjacency for `action End.DX6`
@@ -289,12 +338,14 @@ module config-static {
              iproute2's `nh6` keyword.";
         }
         leaf nh4 {
+          ext:help "IPv4 cross-connect nexthop (End.DX4)";
           type inet:ipv4-address;
           description
             "IPv4 cross-connect adjacency for `action End.DX4`
              (RFC 8986 4.5). Mirrors iproute2's `nh4` keyword.";
         }
         leaf vrf {
+          ext:help "VRF for End.DT decapsulation lookup";
           type string;
           description
             "Name of the VRF whose routing table is consulted

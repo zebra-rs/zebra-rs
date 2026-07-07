@@ -67,6 +67,7 @@ module zebra-bgp-dynamic-neighbors {
     container dynamic-neighbors {
       ext:help "BGP dynamic neighbors (listen-range)";
       leaf listen-limit {
+        ext:help "Max number of dynamic peers to accept";
         type uint32;
         default 100;
         description
@@ -77,6 +78,7 @@ module zebra-bgp-dynamic-neighbors {
            list.";
       }
       list listen-range {
+        ext:help "Prefix range authorized for dynamic peers";
         // A bare `listen-range <prefix>` synthesizes no peer attributes
         // without a `neighbor-group`, so it's dead config. `neighbor-group`
         // is this list's only child, so `ext:non-empty` is equivalent to the
@@ -90,12 +92,14 @@ module zebra-bgp-dynamic-neighbors {
           "Per-prefix authorization to accept dynamic peers. Multiple
            ranges may overlap; longest-prefix-match wins.";
         leaf prefix {
+          ext:help "Source prefix to match (IPv4 or IPv6)";
           type inet:ip-prefix;
           description
             "TCP source prefix to match against. Both IPv4 and IPv6
              prefixes are accepted; lookup is per-AF.";
         }
         leaf neighbor-group {
+          ext:help "Neighbor-group applied to new dynamic peers";
           type string;
           description
             "Name of the `neighbor-group` whose attributes the newly

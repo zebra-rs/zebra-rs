@@ -62,11 +62,13 @@ module zebra-bgp-mup-controller {
       "MUP controller config, hung directly off the BGP instance.";
 
     container mup-c {
+      ext:help "BGP MUP Controller (PFCP/N4 UP-node)";
       description
         "BGP MUP Controller (MUP-C). Terminates PFCP/N4 as a UP-node and
          originates MUP Session-Transformed routes from learned sessions.";
 
       leaf enabled {
+        ext:help "Spawn the in-process MUP controller (PFCP listener)";
         type boolean;
         default false;
         description
@@ -75,6 +77,7 @@ module zebra-bgp-mup-controller {
       }
 
       leaf controller-address {
+        ext:help "Controller IPv6 next hop (ST routes)";
         type inet:ipv6-address;
         description
           "Controller IPv6 address advertised as the next hop on
@@ -82,6 +85,7 @@ module zebra-bgp-mup-controller {
       }
 
       leaf upf-address {
+        ext:help "Core-side UPF endpoint for originated ST2 routes";
         type inet:ip-address;
         description
           "Core (N6) UPF endpoint address used as the Type-2 Session
@@ -95,6 +99,7 @@ module zebra-bgp-mup-controller {
       }
 
       leaf upf-teid {
+        ext:help "Core-side GTP-U TEID for originated ST2 routes";
         type uint32;
         description
           "Core (N6) GTP-U TEID paired with `upf-address`. Used as the ST2
@@ -106,22 +111,26 @@ module zebra-bgp-mup-controller {
       }
 
       container pfcp {
+        ext:help "PFCP/N4 listener parameters (3GPP TS 29.244)";
         description
           "PFCP / N4 listener parameters (3GPP TS 29.244).";
 
         leaf node-id {
+          ext:help "Our PFCP Node ID returned in responses";
           type inet:ip-address;
           description
             "Our PFCP Node ID, returned in responses. Falls back to the
              bind address / controller-address when unset.";
         }
         leaf listen-address {
+          ext:help "PFCP listen address (default all addresses)";
           type inet:ip-address;
           description
             "PFCP listen address. Defaults to `::` (all addresses) when
              unset.";
         }
         leaf port {
+          ext:help "PFCP listen port (default 8805)";
           type inet:port-number;
           description
             "PFCP listen port. Defaults to 8805 when unset.";
@@ -129,9 +138,11 @@ module zebra-bgp-mup-controller {
       }
 
       container srv6 {
+        ext:help "SRv6 parameters for originated routes";
         description
           "SRv6 parameters for originated routes (route phase).";
         leaf locator {
+          ext:help "SRv6 locator name for per-session SIDs";
           type string;
           description
             "Name of the SRv6 locator per-session SIDs are drawn from.";
@@ -139,6 +150,7 @@ module zebra-bgp-mup-controller {
       }
 
       leaf architecture {
+        ext:help "Mobile architecture served (informational)";
         type enumeration {
           enum "3gpp-5g";
         }

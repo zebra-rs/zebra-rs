@@ -140,10 +140,12 @@ module zebra-bgp-vrf {
        string so the block is parse-valid before its referenced
        neighbor-group has committed.";
     list neighbor {
+      ext:help "BGP CE peer attached to this VRF";
       key "remote-address";
       description
         "List of BGP CE peers attached to this VRF.";
       leaf remote-address {
+        ext:help "Remote CE peer IP address";
         type inet:ip-address;
         description
           "Remote peer IP address. Same address MUST NOT appear in
@@ -153,24 +155,28 @@ module zebra-bgp-vrf {
            VRF task.";
       }
       leaf remote-as {
+        ext:help "Remote peer autonomous system number";
         type inet:as-number;
         description
           "AS number of the remote peer. When unset, the value
            inherited from the referenced `peer-group` applies.";
       }
       leaf peer-group {
+        ext:help "Peer-group to inherit attributes from";
         type string;
         description
           "Name of a `peer-group` whose attributes this neighbor
            inherits. Plain string (not leafref) for staging.";
       }
       leaf description {
+        ext:help "Free-form neighbor description";
         type string;
         description
           "Free-form description string echoed in `show bgp vrf X
            neighbors` output.";
       }
       list afi-safi {
+        ext:help "Per-address-family activation for this CE peer";
         key "name";
         description
           "Per-address-family activation for this CE peer — the
@@ -192,6 +198,7 @@ module zebra-bgp-vrf {
            renegotiates capabilities (`clear bgp`).";
         uses zas:afi-safi-unicast;
         leaf enabled {
+          ext:help "Enable this address family for the CE peer";
           type boolean;
           mandatory true;
           description
@@ -219,17 +226,22 @@ module zebra-bgp-vrf {
        per-source level / match filter (deferred with the other
        modifiers).";
     container redistribute {
+      ext:help "Redistribute RIB routes into this VRF's BGP";
       presence "Enable route redistribution into this VRF's BGP table";
       container connected {
+        ext:help "Redistribute this VRF's connected routes";
         presence "Redistribute this VRF's connected routes";
       }
       container static {
+        ext:help "Redistribute this VRF's static routes";
         presence "Redistribute this VRF's static routes";
       }
       container ospf {
+        ext:help "Redistribute this VRF's OSPF routes";
         presence "Redistribute this VRF's OSPF routes";
       }
       container isis {
+        ext:help "Redistribute this VRF's IS-IS routes";
         presence "Redistribute this VRF's IS-IS routes";
       }
     }
@@ -247,9 +259,12 @@ module zebra-bgp-vrf {
        container of two presence containers (one per family) for
        path-based config ergonomics (`set ... afi-safi ipv4 ...`).";
     container afi-safi {
+      ext:help "Per-VRF address-family configuration";
       container ipv4 {
+        ext:help "Enable the IPv4 unicast family for this VRF";
         presence "Enables the IPv4 unicast family for this VRF";
         list network {
+          ext:help "Network prefix to originate into VPNv4";
           key "prefix";
           description
             "Configured network the VRF should originate as a BGP
@@ -257,22 +272,27 @@ module zebra-bgp-vrf {
              the VRF). Same semantics as the IS-IS network leaf and
              the top-level BGP network knob.";
           leaf prefix {
+            ext:help "IPv4 network prefix";
             type inet:ipv4-prefix;
           }
         }
         uses bgp-vrf-redistribute;
       }
       container ipv6 {
+        ext:help "Enable the IPv6 unicast family for this VRF";
         presence "Enables the IPv6 unicast family for this VRF";
         list network {
+          ext:help "Network prefix to originate into VPNv6";
           key "prefix";
           leaf prefix {
+            ext:help "IPv6 network prefix";
             type inet:ipv6-prefix;
           }
         }
         uses bgp-vrf-redistribute;
       }
       container mup {
+        ext:help "Per-VRF MUP (Mobile User Plane) service";
         description
           "Per-VRF MUP (draft-ietf-bess-mup-safi) service. The `segment` list is the PE
            side: `segment direct` originates a Direct Segment Discovery
@@ -285,6 +305,7 @@ module zebra-bgp-vrf {
            routes from the segment routes (draft-ietf-bess-mup-safi
            default).";
         leaf dataplane {
+          ext:help "MUP forwarding-plane behaviour for this VRF";
           type enumeration {
             enum end-dt46 {
               description
@@ -311,6 +332,7 @@ module zebra-bgp-vrf {
              the kernel seg6local or the cradle GTP maps.";
         }
         list segment {
+          ext:help "MUP Segment Discovery route to originate";
           key "type";
           description
             "MUP Segment Discovery route type originated for this VRF.
@@ -320,6 +342,7 @@ module zebra-bgp-vrf {
              route. The `direct` entry additionally carries the
              `mup-ext-comm` identifying this VRF's Direct segment.";
           leaf type {
+            ext:help "Segment Discovery type (direct | interwork)";
             type enumeration {
               enum direct {
                 description
@@ -339,6 +362,7 @@ module zebra-bgp-vrf {
               "MUP Segment Discovery route type originated for this VRF.";
           }
           leaf mup-ext-comm {
+            ext:help "MUP Extended Community for the Direct segment";
             type route-distinguisher;
             description
               "BGP MUP Extended Community (transitive type 0x0c, sub-type
@@ -351,6 +375,7 @@ module zebra-bgp-vrf {
                Meaningful only under the `direct` segment.";
           }
           leaf prefix {
+            ext:help "Interwork segment prefix for the ISD route";
             type inet:ip-prefix;
             description
               "Interwork segment prefix advertised in the Interwork Segment
@@ -364,6 +389,7 @@ module zebra-bgp-vrf {
           }
         }
         list route {
+          ext:help "Session-Transformed (ST) route to originate";
           key "type";
           description
             "Session-Transformed route origination for this VRF, keyed by
@@ -375,6 +401,7 @@ module zebra-bgp-vrf {
              `mup-ext-comm` of the Direct segment those ST2 routes resolve
              to.";
           leaf type {
+            ext:help "ST route type (st1 downlink | st2 uplink)";
             type enumeration {
               enum st1 {
                 description
@@ -392,6 +419,7 @@ module zebra-bgp-vrf {
                st2 = uplink / N3).";
           }
           leaf network-instance {
+            ext:help "PFCP session Network Instance to match";
             type string;
             description
               "PFCP session Network Instance whose sessions this VRF
@@ -402,6 +430,7 @@ module zebra-bgp-vrf {
                segment).";
           }
           leaf mup-ext-comm {
+            ext:help "Direct-segment MUP Ext Comm for ST2 routes";
             type route-distinguisher;
             description
               "BGP MUP Extended Community (Direct-Type Segment Identifier,
@@ -420,6 +449,7 @@ module zebra-bgp-vrf {
     description
       "Per-VRF BGP block hung off the top-level `router bgp` tree.";
     list vrf {
+      ext:help "Per-VRF BGP context";
       key "name";
       description
         "Per-VRF BGP context. The VRF name is a plain string and need
@@ -427,18 +457,21 @@ module zebra-bgp-vrf {
          config is parsed — same staging pattern as IS-IS uses for
          `block` and `locator`.";
       leaf name {
+        ext:help "VRF name this BGP block applies to";
         ext:dynamic "rib:vrf";
         type string;
         description
           "Name of the VRF this BGP block applies to.";
       }
       leaf rd {
+        ext:help "Route Distinguisher for this VRF's VPN routes";
         type route-distinguisher;
         description
           "Route Distinguisher prepended to VPNv4 / VPNv6 NLRIs
            originating from this VRF. See RFC 4364 §4.2.";
       }
       leaf router-id {
+        ext:help "Per-VRF BGP router-id (overrides global)";
         type inet:ipv4-address;
         description
           "Per-VRF BGP router-id. Overrides the global router-id
@@ -448,6 +481,7 @@ module zebra-bgp-vrf {
            value applies — same fallback Cisco IOS-XR uses.";
       }
       leaf label-mode {
+        ext:help "VPN label allocation strategy for this VRF";
         type enumeration {
           enum per-vrf {
             description
@@ -476,6 +510,7 @@ module zebra-bgp-vrf {
            this VRF. Consulted by the label allocator in step 19.";
       }
       leaf encapsulation {
+        ext:help "VPN data-plane encapsulation (mpls | srv6)";
         type enumeration {
           enum mpls {
             description
@@ -498,6 +533,7 @@ module zebra-bgp-vrf {
            imported into this VRF.";
       }
       leaf inter-as-hybrid {
+        ext:help "RFC 4364 Inter-AS VPN Option AB re-export";
         type boolean;
         default "false";
         description
@@ -514,6 +550,7 @@ module zebra-bgp-vrf {
            ordinary intra-AS L3VPN VRF unchanged.";
       }
       container evpn {
+        ext:help "EVPN Type-5 (IP Prefix) service for this VRF";
         description
           "EVPN (RFC 9136 Type-5 / IP Prefix) service for this VRF.
            When advertise-ipv4 / advertise-ipv6 is enabled, the VRF's
@@ -526,6 +563,7 @@ module zebra-bgp-vrf {
            VPNv4/VPNv6 rather than replacing it. Named to match the
            `evpn` family in zebra-afi-safi.yang.";
         leaf advertise-ipv4 {
+          ext:help "Advertise IPv4 routes as EVPN Type-5";
           type boolean;
           default false;
           description
@@ -533,6 +571,7 @@ module zebra-bgp-vrf {
              (IP Prefix) routes. Requires `rd` to be set.";
         }
         leaf advertise-ipv6 {
+          ext:help "Advertise IPv6 routes as EVPN Type-5";
           type boolean;
           default false;
           description

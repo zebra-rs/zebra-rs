@@ -141,6 +141,7 @@ module configure {
         }
       }
       container checkpoint {
+        ext:help "IS-IS graceful-restart checkpoint storage";
         // Debug entry for the graceful-restart checkpoint storage
         // layer (Phase 5b of docs/design/isis-graceful-restart-
         // restarter.md). Becomes operator-facing once the
@@ -155,6 +156,7 @@ module configure {
         }
       }
       container graceful-restart {
+        ext:help "Stage or commit an IS-IS graceful restart";
         // RFC 5306 restarter-side staging + commit. `begin` floods
         // IIH+RR and freezes self-LSP refresh without exiting;
         // `abort` walks the staging back. `commit` extends `begin`
@@ -183,6 +185,7 @@ module configure {
       // coalescing timer. Mirrors FRR's `clear ip ospf process`
       // SPF-side effect.
       leaf spf {
+        ext:help "Force an OSPFv2 SPF recalculation";
         type empty;
       }
       // Juniper-style `clear ospf neighbor [<router-id>]`. The bare
@@ -210,6 +213,7 @@ module configure {
         }
       }
       container checkpoint {
+        ext:help "OSPFv2 graceful-restart checkpoint storage";
         // Debug entry for the graceful-restart checkpoint storage
         // layer (Phase 5b). Becomes operator-facing once the
         // restart-commit flow lands in Phase 5d.
@@ -223,6 +227,7 @@ module configure {
         }
       }
       container graceful-restart {
+        ext:help "Stage or commit an OSPFv2 graceful restart";
         // Stage / commit / unstage a planned restart.
         // `begin` (Phase 5c) floods Grace LSAs and sets
         // `gr_capable`; `commit` (Phase 5d) writes the
@@ -246,6 +251,7 @@ module configure {
     container ospfv3 {
       ext:help "OSPFv3 clear actions";
       container checkpoint {
+        ext:help "OSPFv3 graceful-restart checkpoint storage";
         leaf write {
           ext:help "Write the current instance state to /var/lib/zebra-rs/checkpoint/ospfv3.cbor";
           type empty;
@@ -256,6 +262,7 @@ module configure {
         }
       }
       container graceful-restart {
+        ext:help "Stage or commit an OSPFv3 graceful restart";
         leaf begin {
           ext:help "Stage a graceful restart: flood v3 Grace LSAs";
           type empty;
@@ -272,6 +279,7 @@ module configure {
       // Force-recalculate the OSPFv3 SPF for every attached area.
       // Sibling of `clear ospf spf` for the v3 instance.
       leaf spf {
+        ext:help "Force an OSPFv3 SPF recalculation";
         type empty;
       }
       // `clear ospfv3 neighbor [<router-id>]` — v3 sibling of the
