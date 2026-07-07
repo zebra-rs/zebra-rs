@@ -516,6 +516,25 @@ module ietf-bgp {
               dynamically.";
         }
 
+        // `enabled` is a standard IETF/OpenConfig/FRR neighbor knob
+        // (`neighbor X enabled true`) present in many configs. It has no
+        // config handler yet, so it is accepted and inert (a neighbor is
+        // brought up by configuring remote-as); the schema keeps it so
+        // those configs load. Intentionally retained, not a removal
+        // candidate — wire a handler if administrative disable is wanted.
+        leaf enabled {
+          ext:help "Administratively enable this neighbor";
+          type boolean;
+          default "true";
+          description
+            "Whether the BGP peer is enabled. When set to false the local
+             system should not initiate connections to the neighbor and
+             should tear down an established session. zebra-rs currently
+             accepts this leaf but does not enforce it.";
+          reference
+            "RFC 4271: A Border Gateway Protocol 4 (BGP-4), Section 8.1.2.";
+        }
+
         uses neighbor-group-config;
         // The per-neighbor `prefix-set {in,out}` moved under
         // `afi-safi <name> prefix-set {in,out}` (per-family). No
