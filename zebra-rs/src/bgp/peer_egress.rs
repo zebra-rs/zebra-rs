@@ -44,7 +44,7 @@ fn peer_task_env() -> Option<bool> {
         .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
 }
 
-/// Pure resolution policy (unit-tested): the YANG `router bgp peer-task` leaf
+/// Pure resolution policy (unit-tested): the YANG `router bgp sharding peer-sharding` leaf
 /// wins over the env var, which wins over the default `false` (update-group
 /// egress, unchanged).
 fn resolve_peer_task(config: Option<bool>, env: Option<bool>) -> bool {

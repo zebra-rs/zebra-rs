@@ -3,7 +3,8 @@ router:
     global:
       as: 65002
       router-id: 10.0.0.2
-    shards: 4
+    sharding:
+      rib-sharding: 4
     timer:
       adv-interval:
         ebgp: 1

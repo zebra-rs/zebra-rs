@@ -3,8 +3,9 @@ router:
     global:
       as: 65002
       router-id: 10.0.0.2
-    shards: 4
-    peer-task: true
+    sharding:
+      rib-sharding: 4
+      peer-sharding: true
     timer:
       adv-interval:
         ebgp: 1

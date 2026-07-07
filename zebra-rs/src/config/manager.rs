@@ -2268,7 +2268,7 @@ mod yang_load_tests {
         }
     }
 
-    /// C.4 `router bgp shards <1-64>` — the shipping form of the
+    /// C.4 `router bgp sharding rib-sharding <1-64>` — the shipping form of the
     /// `ZEBRA_BGP_SHARDS` env var (`zebra-bgp-sharding.yang`). Pinned
     /// because vtyctl apply is garbage-tolerant — an unwired grammar
     /// silently no-ops, and `configured_shards` reads this leaf at spawn,
@@ -2290,13 +2290,13 @@ mod yang_load_tests {
             .expect("configure module present");
         let entry = to_entry(&yang, module);
 
-        // The shards leaf must be a settable path directly under `router
-        // bgp` across the valid range — this is the exact text
-        // `configured_shards` scans for (`router bgp shards <n>`).
+        // The rib-sharding leaf must be a settable path under `router bgp
+        // sharding` across the valid range — this is the exact text
+        // `configured_shards` scans for (`router bgp sharding rib-sharding <n>`).
         for cmd in [
-            "set router bgp shards 1",
-            "set router bgp shards 4",
-            "set router bgp shards 64",
+            "set router bgp sharding rib-sharding 1",
+            "set router bgp sharding rib-sharding 4",
+            "set router bgp sharding rib-sharding 64",
         ] {
             let (code, _comps, _state) = parse(cmd, entry.clone(), None, State::new());
             assert_eq!(
@@ -2307,9 +2307,9 @@ mod yang_load_tests {
         }
     }
 
-    /// `router bgp peer-task <true|false>` — the per-peer egress-task model
-    /// knob (`zebra-bgp-sharding.yang`), the shipping form of
-    /// `ZEBRA_BGP_PEER_TASK`. Pinned for the same reason as `shards`:
+    /// `router bgp sharding peer-sharding <true|false>` — the per-peer
+    /// egress-task model knob (`zebra-bgp-sharding.yang`), the shipping form
+    /// of `ZEBRA_BGP_PEER_TASK`. Pinned for the same reason as rib-sharding:
     /// `configured_peer_task` reads this leaf at spawn, and a broken path
     /// would silently fall back to the env/default.
     #[test]
@@ -2328,11 +2328,11 @@ mod yang_load_tests {
             .expect("configure module present");
         let entry = to_entry(&yang, module);
 
-        // Both boolean forms must be settable paths directly under `router
-        // bgp` — the exact text `configured_peer_task` scans for.
+        // Both boolean forms must be settable paths under `router bgp
+        // sharding` — the exact text `configured_peer_task` scans for.
         for cmd in [
-            "set router bgp peer-task true",
-            "set router bgp peer-task false",
+            "set router bgp sharding peer-sharding true",
+            "set router bgp sharding peer-sharding false",
         ] {
             let (code, _comps, _state) = parse(cmd, entry.clone(), None, State::new());
             assert_eq!(

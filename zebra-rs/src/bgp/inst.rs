@@ -479,7 +479,7 @@ fn shard_count_env() -> Option<usize> {
         .and_then(|s| s.parse::<usize>().ok())
 }
 
-/// Pure resolution policy (unit-tested): the YANG `router bgp shards <n>`
+/// Pure resolution policy (unit-tested): the YANG `router bgp sharding rib-sharding <n>`
 /// leaf (C.4) wins over the env var, which wins over the default `1`. The
 /// chosen value is clamped to `1..=64` (so `0` and out-of-range fold to the
 /// nearest valid degree).

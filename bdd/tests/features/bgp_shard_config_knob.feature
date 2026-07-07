@@ -1,9 +1,9 @@
 @serial
 @bgp_shard_config_knob
-Feature: BGP RIB sharding configured via the router bgp shards YANG knob
+Feature: BGP RIB sharding configured via the router bgp sharding rib-sharding YANG knob
 
   Validates the C.4 shipping form of RIB sharding: the shard count comes
-  from config (`router bgp shards <1-64>`, zebra-bgp-sharding.yang) instead
+  from config (`router bgp sharding rib-sharding <1-64>`, zebra-bgp-sharding.yang) instead
   of the `ZEBRA_BGP_SHARDS` environment variable. The sharded device z2 is
   started with the PLAIN `start zebra-rs` step — no env var — and gets its
   shard count purely from `shards: 4` in its applied config.
