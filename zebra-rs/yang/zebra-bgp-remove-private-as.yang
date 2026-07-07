@@ -96,7 +96,7 @@ module zebra-bgp-remove-private-as {
          The bare form acts only on an all-private path.";
 
       leaf all {
-        ext:help "Remove private ASNs even from a mixed public/private AS_PATH";
+        ext:help "Remove private ASNs from a mixed AS_PATH";
         type empty;
         description
           "Act on any AS_PATH containing a private AS, not only one
@@ -104,7 +104,7 @@ module zebra-bgp-remove-private-as {
       }
 
       leaf replace-as {
-        ext:help "Replace each private ASN with the local AS instead of removing it";
+        ext:help "Replace private ASNs with the local AS";
         type empty;
         description
           "Rewrite each stripped private AS to the local AS rather than

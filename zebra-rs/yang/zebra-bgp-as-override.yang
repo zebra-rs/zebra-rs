@@ -59,7 +59,7 @@ module zebra-bgp-as-override {
       "FRR-style `as-override` presence container on a BGP neighbor.";
 
     container as-override {
-      ext:help "Override the neighbor's AS in outbound AS_PATH with the local AS";
+      ext:help "Replace the peer's AS in outbound AS_PATH";
       presence "Enable as-override on the egress path toward this neighbor";
       description
         "When present, replace every occurrence of this neighbor's AS in

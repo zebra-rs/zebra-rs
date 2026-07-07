@@ -65,7 +65,7 @@ module zebra-bgp-enforce-first-as {
        neighbor.";
 
     container enforce-first-as {
-      ext:help "Discard updates whose AS_PATH does not start with this neighbor's AS";
+      ext:help "Require AS_PATH to start with the peer's AS";
       presence "Enable the first-AS check on inbound updates from this neighbor";
       description
         "When present, drop an inbound eBGP UPDATE from this neighbor

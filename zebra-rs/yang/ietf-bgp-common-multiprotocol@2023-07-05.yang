@@ -124,6 +124,7 @@ submodule ietf-bgp-common-multiprotocol {
       "BGP graceful restart parameters that apply on a per-AFI-SAFI
        basis";
     leaf enabled {
+      ext:help "Enable graceful-restart for this family";
       type boolean;
       must ". = ../../../../graceful-restart/enabled";
       default "false";
@@ -140,6 +141,7 @@ submodule ietf-bgp-common-multiprotocol {
       "Configuration parameters used for all BGP AFI-SAFIs";
     uses zas:afi-safi;
     leaf enabled {
+      ext:help "Enable this address family for the neighbor";
       ext:sort "50";
       mandatory true;
       type boolean;

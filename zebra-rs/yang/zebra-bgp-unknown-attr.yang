@@ -66,7 +66,7 @@ module zebra-bgp-unknown-attr {
 
     leaf attach-unknown-attribute {
       type string;
-      ext:help "Attach a synthetic unrecognized attribute: <type>:<flags>:<value-hex>";
+      ext:help "Attach a synthetic unrecognized attribute";
       description
         "When set, stamp a synthetic unrecognized path attribute onto
          every IPv4-unicast route advertised to this neighbor. Format is
