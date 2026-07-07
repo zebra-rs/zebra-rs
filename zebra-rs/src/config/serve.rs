@@ -699,7 +699,7 @@ impl tonic::service::Interceptor for VtyPeerInterceptor {
 
 pub fn serve(cli: Cli, addr: VtyAddr) -> anyhow::Result<()> {
     let config_group_gid = SessionTable::resolve_config_group_gid();
-    if let Some(gid) = config_group_gid {
+    if VTY_TRACING && let Some(gid) = config_group_gid {
         tracing::info!(gid, "VTY configure-authorization group active");
     } else {
         tracing::debug!("VTY configure-authorization group not found; PAM-only fallback");
