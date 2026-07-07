@@ -1823,9 +1823,15 @@ impl Rib {
         // bail out without registering the subscriber, so we don't
         // panic and don't leave a dead entry in `client_registry`.
         if tx.is_closed() {
-            tracing::warn!(
-                "rib: subscriber '{proto}' dropped before subscribe could deliver dump; skipping"
-            );
+            // Benign during startup churn: a per-VRF task that respawns
+            // (table_id / SID fill in) drops its earlier subscribe before
+            // this handler delivers the dump. Gated with the task
+            // lifecycle traces rather than logged unconditionally.
+            if crate::rib::tracing::task() {
+                tracing::warn!(
+                    "rib: subscriber '{proto}' dropped before subscribe could deliver dump; skipping"
+                );
+            }
             return;
         }
         // Link dump.
@@ -2749,12 +2755,14 @@ impl Rib {
                 // install was dropped if it raced ahead of the VRF.
                 self.static_vrf_v4.reinstall(&name, &self.tx);
                 self.static_vrf_v6.reinstall(&name, &self.tx);
-                tracing::info!(
-                    "vrf_add: {} table_id={} ifindex={}",
-                    name,
-                    table_id,
-                    ifindex
-                );
+                if crate::rib::tracing::fib_vrf() {
+                    tracing::info!(
+                        "vrf_add: {} table_id={} ifindex={}",
+                        name,
+                        table_id,
+                        ifindex
+                    );
+                }
                 // Notify default-VRF subscribers (currently only the
                 // global BGP instance). The per-VRF spawn site lifts
                 // the placeholder `ProtoContext` to a real
@@ -2878,10 +2886,12 @@ impl Rib {
                 {
                     Some(link) => (link.index, link.master.unwrap_or(0)),
                     None => {
-                        tracing::info!(
-                            "link_vrf_bind: interface {} not present yet — pending",
-                            ifname
-                        );
+                        if crate::rib::tracing::fib_vrf() {
+                            tracing::info!(
+                                "link_vrf_bind: interface {} not present yet — pending",
+                                ifname
+                            );
+                        }
                         return;
                     }
                 };
@@ -2890,10 +2900,12 @@ impl Rib {
                     Some(vrf_name) => match self.vrfs.get(vrf_name) {
                         Some(v) => v.ifindex,
                         None => {
-                            tracing::info!(
-                                "link_vrf_bind: vrf {} not present yet — pending",
-                                vrf_name
-                            );
+                            if crate::rib::tracing::fib_vrf() {
+                                tracing::info!(
+                                    "link_vrf_bind: vrf {} not present yet — pending",
+                                    vrf_name
+                                );
+                            }
                             return;
                         }
                     },
@@ -2913,13 +2925,15 @@ impl Rib {
                 }
 
                 self.fib_handle.link_set_master(ifindex, master).await;
-                tracing::info!(
-                    "link_vrf_bind: ifname={} ifindex={} master={} vrf={:?}",
-                    ifname,
-                    ifindex,
-                    master,
-                    vrf
-                );
+                if crate::rib::tracing::fib_vrf() {
+                    tracing::info!(
+                        "link_vrf_bind: ifname={} ifindex={} master={} vrf={:?}",
+                        ifname,
+                        ifindex,
+                        master,
+                        vrf
+                    );
+                }
             }
             Message::LinkBridgeBind { ifname, bridge } => {
                 // Always record operator intent so a later kernel

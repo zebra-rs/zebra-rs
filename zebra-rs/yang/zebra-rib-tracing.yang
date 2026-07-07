@@ -88,6 +88,16 @@ module zebra-rib-tracing {
      BGP `tracing` blocks: the config callbacks key off set vs delete
      and never read a value, so `type empty` is the honest type.";
 
+  revision 2026-07-07 {
+    description
+      "Add the top-level `task` category — gates daemon task
+       spawn / despawn lifecycle traces (the BGP per-VRF task spawn /
+       Shutdown logs and the RIB subscribe-race warning that
+       accompanies a respawn) that previously logged unconditionally.
+       Unlike `rib` / `fib`, `task` is a cross-cutting category rather
+       than a forwarding plane.";
+  }
+
   revision 2026-06-19 {
     description
       "Add the `fib link` category — gates the link master-binding
@@ -143,9 +153,22 @@ module zebra-rib-tracing {
         ext:help "Enable every tracing category";
         type empty;
         description
-          "Master switch — when present, every category under both
-           `rib` and `fib` is traced regardless of its individual
-           leaf.";
+          "Master switch — when present, every tracing category is
+           traced regardless of its individual leaf: `task` and
+           everything under `rib` and `fib`.";
+      }
+
+      leaf task {
+        ext:help "Trace daemon task spawn / despawn lifecycle";
+        type empty;
+        description
+          "Log daemon task spawn / despawn lifecycle. Currently the BGP
+           per-VRF tasks: task spawn (with its RD / router-id / table /
+           label / SID summary), the `Shutdown` sent on despawn, and the
+           RIB subscribe race that surfaces when a task is respawned
+           before its earlier subscribe delivered its dump. Unlike `rib`
+           and `fib`, this is a cross-cutting category, not tied to a
+           single forwarding plane.";
       }
 
       container rib {

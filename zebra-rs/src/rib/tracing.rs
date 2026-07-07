@@ -33,6 +33,11 @@ use crate::config::{Args, ConfigOp};
 struct State {
     all: AtomicBool,
 
+    /// Cross-cutting daemon task spawn / despawn lifecycle — not tied to
+    /// a forwarding plane, so it sits beside `all` rather than under
+    /// `rib` / `fib`.
+    task: AtomicBool,
+
     rib_route: AtomicBool,
     rib_route_detail: AtomicBool,
     rib_nexthop: AtomicBool,
@@ -71,6 +76,7 @@ impl State {
     const fn new() -> Self {
         State {
             all: AtomicBool::new(false),
+            task: AtomicBool::new(false),
             rib_route: AtomicBool::new(false),
             rib_route_detail: AtomicBool::new(false),
             rib_nexthop: AtomicBool::new(false),
@@ -122,6 +128,7 @@ impl State {
         let set = op.is_set();
         match rest {
             "" | "/all" => self.all.store(set, Relaxed),
+            "/task" => self.task.store(set, Relaxed),
 
             "/rib/route" => toggle(&self.rib_route, &self.rib_route_detail, op),
             "/rib/route/detail" => detail(&self.rib_route, &self.rib_route_detail, op),
@@ -210,6 +217,9 @@ pub fn config_dispatch(path: &str, mut args: Args, op: ConfigOp) {
 
 // ---- readers: one per category with a live trace site --------------
 
+pub fn task() -> bool {
+    STATE.on(&STATE.task)
+}
 pub fn rib_route() -> bool {
     STATE.on(&STATE.rib_route)
 }
@@ -233,6 +243,9 @@ pub fn fib_srv6() -> bool {
 }
 pub fn fib_link() -> bool {
     STATE.on(&STATE.fib_link)
+}
+pub fn fib_vrf() -> bool {
+    STATE.on(&STATE.fib_vrf)
 }
 pub fn fib_l2_vxlan() -> bool {
     STATE.on(&STATE.fib_l2_vxlan)
@@ -289,9 +302,19 @@ mod tests {
     }
 
     #[test]
+    fn task_toggle_set_delete() {
+        let s = State::new();
+        s.apply("/task", &mut args(&[]), ConfigOp::Set);
+        assert!(s.on(&s.task));
+        s.apply("/task", &mut args(&[]), ConfigOp::Delete);
+        assert!(!s.on(&s.task));
+    }
+
+    #[test]
     fn all_master_switch_lights_every_category() {
         let s = State::new();
         s.apply("/all", &mut args(&[]), ConfigOp::Set);
+        assert!(s.on(&s.task));
         assert!(s.on(&s.rib_route));
         assert!(s.on(&s.fib_l2_fdb));
         assert!(s.on(&s.fib_srv6));

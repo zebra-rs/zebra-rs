@@ -97,7 +97,7 @@ impl MupC {
         self.recv_task = Some(Task::spawn(async move {
             recv_loop(sock, tx).await;
         }));
-        tracing::info!("mup-c: PFCP listening on {local:?}");
+        // tracing::info!("mup-c: PFCP listening on {local:?}");
         self.set_listener(local).await;
     }
 

@@ -283,19 +283,21 @@ pub fn spawn_bgp_vrf(
     // `show bgp vrf <name> …` redirection.
     let show_tx = vrf.show.tx.clone();
     let task = serve_vrf(vrf);
-    tracing::info!(
-        vrf = %name,
-        rd = ?cfg.rd,
-        router_id = %effective_router_id,
-        table_id = ?kernel_table_id,
-        label,
-        ilm_installed = ilm_decap_ifindex.is_some(),
-        srv6_sid = ?srv6_sid.map(|(addr, _)| addr),
-        peers = peer_count,
-        networks = network_count,
-        redistribute = redist_count,
-        "bgp: spawned per-VRF task",
-    );
+    if crate::rib::tracing::task() {
+        tracing::info!(
+            vrf = %name,
+            rd = ?cfg.rd,
+            router_id = %effective_router_id,
+            table_id = ?kernel_table_id,
+            label,
+            ilm_installed = ilm_decap_ifindex.is_some(),
+            srv6_sid = ?srv6_sid.map(|(addr, _)| addr),
+            peers = peer_count,
+            networks = network_count,
+            redistribute = redist_count,
+            "bgp: spawned per-VRF task",
+        );
+    }
     BgpVrfHandle {
         inbox,
         show_tx,
@@ -555,7 +557,9 @@ pub fn despawn_bgp_vrf(name: &str, handle: &BgpVrfHandle, rib_subscriber: &RibSu
         );
         return;
     }
-    tracing::info!(vrf = %name, "bgp: sent Shutdown to per-VRF task");
+    if crate::rib::tracing::task() {
+        tracing::info!(vrf = %name, "bgp: sent Shutdown to per-VRF task");
+    }
 }
 
 #[cfg(test)]
