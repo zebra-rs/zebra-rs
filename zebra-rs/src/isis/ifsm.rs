@@ -656,15 +656,6 @@ pub fn dis_selection(link: &mut LinkTop, level: Level) {
         // Update link's DIS status to the new one.
         *link.state.dis_status.get_mut(&level) = new_status;
 
-        // If my role is DIS, we originate DIS. dis_becoming has just
-        // registered the pseudonode adjacency on this link, so the
-        // neighbor_id we pass identifies our pseudonode LSP.
-        if new_status == DisStatus::Myself
-            && let Some((neighbor_id, _)) = link.state.adj.get(&level)
-        {
-            link.event(Message::DisOriginate(level, *neighbor_id, None));
-        }
-
         // LSP Originate.
         link.event(Message::LspOriginate(level, None));
 
@@ -678,5 +669,25 @@ pub fn dis_selection(link: &mut LinkTop, level: Level) {
             .dis_stats
             .get_mut(&level)
             .record_change(old_status, new_status, new_sys_id, new_sys_id, reason);
+    }
+
+    // (Re)originate our pseudonode LSP whenever we are the DIS on this
+    // LAN — not only when we *became* DIS. `dis_selection` runs on every
+    // LAN adjacency Up/Down transition (packet.rs Init<->Up, nfsm hold
+    // expiry), so a router that joins or leaves while we stay DIS reaches
+    // this point with old_status == new_status == Myself and the block
+    // above is skipped. Without re-originating here that member is never
+    // folded into (ISO 10589 §7.3.16) — or out of — the pseudonode LSP's
+    // TLV 22 IS-reach list, so it is unreachable in every speaker's SPF.
+    // `process_dis_originate` is idempotent on the member set (it only
+    // bumps the sequence when the set actually changed), so firing this on
+    // every transition does not churn the LSP. `dis_becoming` registered
+    // the pseudonode adjacency when we first became DIS, so the
+    // neighbor_id is present. Mirrors FRR lsp_regenerate_schedule_pseudo()
+    // on adjacency state change (isis_adjacency.c).
+    if new_status == DisStatus::Myself
+        && let Some((neighbor_id, _)) = link.state.adj.get(&level)
+    {
+        link.event(Message::DisOriginate(level, *neighbor_id, None));
     }
 }

@@ -2521,6 +2521,49 @@ impl Isis {
             return;
         }
 
+        // Idempotency (ISO 10589 §7.3.16 / minimumLSPGenerationInterval
+        // intent): only re-originate when the pseudonode's IS-reach
+        // member set actually changed. `dis_selection` fires DisOriginate
+        // on every LAN adjacency transition, and the §7.3.16.4 reflection
+        // path re-fires it when a peer echoes a higher seq — without this
+        // guard each trigger would bump the sequence and re-flood, and the
+        // reflected bump would loop the sequence unbounded. A pseudonode
+        // LSP carries only ExtIsReach (TLV 22), so comparing the
+        // neighbor-id set is exact and ignores auth/other TLVs. `base =
+        // Some` means we must reclaim ownership above a reflected seq, so
+        // originate regardless.
+        if base.is_none() {
+            let members = |lsp: &IsisLsp| -> std::collections::BTreeSet<IsisNeighborId> {
+                lsp.tlvs
+                    .iter()
+                    .filter_map(|t| match t {
+                        IsisTlv::ExtIsReach(r) => Some(r.entries.iter().map(|e| e.neighbor_id)),
+                        _ => None,
+                    })
+                    .flatten()
+                    .collect()
+            };
+            let new_members: std::collections::BTreeSet<IsisNeighborId> =
+                fragments.iter().flat_map(&members).collect();
+            let self_sys = top.config.net.sys_id();
+            let pseudo_id = neighbor_id.pseudo_id();
+            let cur_members: std::collections::BTreeSet<IsisNeighborId> = top
+                .lsdb
+                .get(&level)
+                .iter()
+                .filter(|(id, lsa)| {
+                    lsa.originated
+                        && id.sys_id() == self_sys
+                        && id.pseudo_id() == pseudo_id
+                        && id.is_pseudo()
+                })
+                .flat_map(|(_, lsa)| members(&lsa.lsp))
+                .collect();
+            if !cur_members.is_empty() && new_members == cur_members {
+                return;
+            }
+        }
+
         let max_frag = fragments
             .iter()
             .map(|l| l.lsp_id.fragment_id())

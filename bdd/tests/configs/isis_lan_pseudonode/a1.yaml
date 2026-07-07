@@ -1,0 +1,24 @@
+# a1: one of three L2 IS-IS routers sharing broadcast LAN br0 (iface
+# va1ns, IP 192.168.100.1/24 assigned by the topology step). Loopback
+# 10.0.0.1/32 is advertised into IS-IS. Regression: whichever router wins
+# DIS must list all three members in its pseudonode LSP, so every loopback
+# is reachable from every speaker.
+interface:
+- if-name: lo
+  ipv4:
+    address: 10.0.0.1/32
+router:
+  isis:
+    net: 49.0000.0000.0000.0001.00
+    is-type: level-2
+    hostname: a1
+    interface:
+    - if-name: lo
+      circuit-type: level-2
+      ipv4:
+        enabled: true
+    - if-name: va1ns
+      circuit-type: level-2
+      metric: 10
+      ipv4:
+        enabled: true
