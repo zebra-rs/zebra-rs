@@ -59,15 +59,15 @@ jobs:
         # exclude them here. They are intended to be run locally.
         run: cargo test --workspace --exclude bdd
 
-  no-lua:
-    name: cargo clippy (no-lua)
+  lua:
+    name: cargo clippy (lua)
     runs-on: ubuntu-22.04
-    # The `lua` feature is ON by default, so the fmt / clippy / test jobs
-    # already build and test the embedded scripting engine. This lane
-    # guards the OTHER direction: that the feature-off build still
-    # compiles cleanly (the hooks' `#[cfg(not(feature = "lua"))]` no-op
-    # stubs and the feature-gated wiring), so `lua` stays genuinely
-    # optional.
+    # The `lua` feature is DISABLED by default for now, so the fmt /
+    # clippy / test jobs build the feature-OFF path (the hooks'
+    # `#[cfg(not(feature = "lua"))]` no-op stubs). This lane guards the
+    # OTHER direction: that the embedded scripting engine still compiles
+    # cleanly with `--features lua`, so the optional code doesn't rot
+    # while it is off.
     steps:
       - name: Checkout code
         uses: actions/checkout@v5
@@ -79,5 +79,5 @@ jobs:
         uses: actions-rust-lang/setup-rust-toolchain@v1
         with:
           components: clippy
-      - name: Clippy (no default features)
-        run: cargo clippy -p zebra-rs --no-default-features --all-targets -- -D warnings
+      - name: Clippy (lua feature)
+        run: cargo clippy -p zebra-rs --features lua --all-targets -- -D warnings
