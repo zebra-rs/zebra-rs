@@ -25,7 +25,7 @@ mod tests {
             .take_while(|l| l.trim_start().starts_with('@') || l.trim().is_empty())
             .flat_map(|l| l.split_whitespace())
             .filter_map(|w| w.strip_prefix('@'))
-            .find(|t| *t != "serial" && *t != "allow.skipped")
+            .find(|t| *t != "serial" && *t != "allow.skipped" && *t != "disabled")
             .map(str::to_string)
     }
 

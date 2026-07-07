@@ -1,10 +1,10 @@
 .PHONY: zebra
 
 zebra:
-	RUSTFLAGS="--cfg tokio_unstable" cargo build --release --features lua
+	RUSTFLAGS="--cfg tokio_unstable" cargo build --release
 
 all:
-	cargo build --release --features lua
+	cargo build --release
 	$(MAKE) -C vty
 
 console:
@@ -20,7 +20,7 @@ xdp-bfd-echo:
 	@echo '[built offload/xdp-bfd-echo/target/release/xdp-bfd-echo]'
 
 install:
-	cargo build --release --features lua
+	cargo build --release
 	sudo cp target/release/zebra-rs /usr/bin/zebra-rs
 	sudo cp target/release/vtyctl /usr/bin/vtyctl
 	sudo cp target/release/vtyhelper /usr/bin/vtyhelper
@@ -76,7 +76,7 @@ run:
 	@mkdir -p /tmp/ipc/sync
 	@sudo rm -f /tmp/ipc/pair/config-ng_isisd
 	@sudo rm -f /tmp/ipc/pair/config-ng_bgpd
-	@RUSTFLAGS="--cfg tokio_unstable" cargo build --bin zebra-rs --release --features lua
+	@RUSTFLAGS="--cfg tokio_unstable" cargo build --bin zebra-rs --release
 	@sudo setcap 'cap_net_bind_service=ep cap_net_admin=ep cap_net_bind_service=ep cap_net_broadcast=ep cap_net_raw=ep' target/release/zebra-rs
 	@target/release/zebra-rs
 	#target/release/zebra-rs --no-nhid

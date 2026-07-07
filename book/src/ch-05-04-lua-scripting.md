@@ -8,8 +8,18 @@ the route — or trigger a non-blocking side effect such as programming
 nftables. This is zebra-rs's analogue of FRR's `route-map match script`,
 redesigned around that feature's limitations.
 
-The embedded Lua 5.4 engine is **on by default**. Builds without it
-(`cargo build --no-default-features`) compile every hook to a no-op.
+> **Note: the Lua engine is currently disabled by default.** The `lua`
+> Cargo feature is **off** for now, so stock builds (`make all`,
+> `cargo build`) ship without the scripting engine and every hook
+> compiles to a no-op. To use the features described in this chapter,
+> build with the feature explicitly enabled:
+>
+> ```sh
+> cargo build --release --features lua
+> ```
+>
+> The rest of this chapter describes the engine as it behaves once that
+> feature is enabled.
 
 ## Hook points
 

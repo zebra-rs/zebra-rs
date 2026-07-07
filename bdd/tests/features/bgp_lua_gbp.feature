@@ -1,6 +1,15 @@
 @serial
+@disabled
 @bgp_lua_gbp
 Feature: BGP EVPN Group-Based Policy via Lua scripting
+  DISABLED for now: the embedded Lua scripting engine is off (the `lua`
+  build feature defaults off and its BGP config schema is commented out),
+  so this scenario's lua-script / lua-map / adj-rib-out-hook config no
+  longer applies. The `@disabled` tag makes the harness skip this feature
+  in every run (full suite and explicit --tags). To re-enable: remove
+  `@disabled`, rebuild with `--features lua`, and uncomment the
+  zebra-bgp-lua schema.
+
   As a network operator
   I want zebra-rs to carry a Group-Based Policy tag on EVPN Type-2 routes
   and enforce it in the dataplane, driven entirely by embedded Lua hooks,
