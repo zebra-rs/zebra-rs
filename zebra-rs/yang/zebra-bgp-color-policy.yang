@@ -68,18 +68,18 @@ module zebra-bgp-color-policy {
        at runtime (ascending color id).";
 
     container color-policy {
-      ext:help "Color → Flex-Algorithm binding table";
+      ext:help "Color to Flex-Algorithm binding table";
       presence "Configure color-policy entries";
 
       list color {
-        ext:help "One color → flex-algorithm binding";
+        ext:help "One color to flex-algorithm binding";
         key value;
         leaf value {
-          ext:help "BGP Color community value (RFC 9012 §4.3, 0..2^32-1)";
+          ext:help "BGP Color community value (RFC 9012, 0..2^32-1)";
           type uint32;
         }
         leaf flex-algorithm {
-          ext:help "IS-IS Flex-Algorithm id (128..255 per RFC 9350 §4)";
+          ext:help "IS-IS Flex-Algorithm id (128..255 per RFC 9350)";
           type uint8 {
             range "128..255";
           }

@@ -267,6 +267,7 @@ module ietf-bgp {
         "Top-level configuration for the BGP router.";
 
       list afi-safi {
+        ext:help "Per-address-family (AFI/SAFI) configuration";
         ext:sort "-1";
         key "name";
         description
@@ -287,6 +288,7 @@ module ietf-bgp {
         }
       }
       container global {
+        ext:help "Global BGP configuration (local AS, router-id)";
         presence "Enables global configuration of BGP";
         description
           "Global configuration for the BGP router.";
@@ -407,6 +409,7 @@ module ietf-bgp {
         // child is deleted, so a meaningless neighbor can't linger.
         // Interface-based (unnumbered) and dynamic listen-range peers are
         // separate lists and unaffected.
+        ext:help "BGP neighbor configuration (keyed by remote address)";
         ext:non-empty "remote-as";
         key "remote-address";
         description

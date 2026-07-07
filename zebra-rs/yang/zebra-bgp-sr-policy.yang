@@ -84,7 +84,7 @@ module zebra-bgp-sr-policy {
           type string;
         }
         leaf color {
-          ext:help "Policy color (RFC 9256 §2.1, non-zero)";
+          ext:help "Policy color (RFC 9256, non-zero)";
           type uint32;
         }
         leaf endpoint {
