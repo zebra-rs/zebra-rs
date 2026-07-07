@@ -3,7 +3,7 @@
 Feature: BGP IPv4 network origination is advertised under shards + peer-task
 
   Repro for a reported bug: a speaker with the RIB sharded
-  (router bgp shards 4) AND per-peer egress tasks (router bgp peer-task true)
+  (router bgp sharding rib-sharding 4) AND per-peer egress tasks (router bgp sharding peer-sharding true)
   configured with IPv4 network statements never advertises those networks to
   its neighbor.
 

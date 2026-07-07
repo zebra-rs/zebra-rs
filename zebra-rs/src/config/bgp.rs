@@ -9,7 +9,7 @@ pub fn spawn_bgp(config: &ConfigManager) {
     // replace the live task and tear down every BGP session + Loc-RIB.
     // Config reaches the running instance via its `cm` subscription.
     if config.protocol_tasks.borrow().contains_key("bgp") {
-        // Already spawned. The shard count (C.4 `router bgp shards <n>`) is
+        // Already spawned. The shard count (`router bgp sharding rib-sharding <n>`) is
         // frozen at spawn — the pool can't be resized without re-hashing the
         // whole RIB — so warn rather than silently diverge if the operator
         // changes it on the live instance.
@@ -17,7 +17,7 @@ pub fn spawn_bgp(config: &ConfigManager) {
             let live = inst::shard_count();
             if requested.clamp(1, 64) != live {
                 tracing::warn!(
-                    "router bgp shards {requested} ignored: the shard count is fixed \
+                    "router bgp sharding rib-sharding {requested} ignored: the shard count is fixed \
                      at {live} for the BGP instance lifetime — clear `router bgp` or \
                      restart the daemon to re-shard"
                 );
@@ -29,7 +29,7 @@ pub fn spawn_bgp(config: &ConfigManager) {
             let live = crate::bgp::peer_egress::peer_egress_task_enabled();
             if requested != live {
                 tracing::warn!(
-                    "router bgp peer-task {requested} ignored: the egress model is \
+                    "router bgp sharding peer-sharding {requested} ignored: the egress model is \
                      fixed for the BGP instance lifetime — clear `router bgp` or \
                      restart the daemon to switch"
                 );
@@ -49,11 +49,13 @@ pub fn spawn_bgp(config: &ConfigManager) {
     let nd_client_tx = config.nd_client_tx.borrow().clone();
     let (rib_client, rib_rx) = config.subscribe_to_rib("bgp");
     let ctx = crate::context::ProtoContext::default_table(rib_client);
-    // C.4: freeze the shard count from the `router bgp shards <n>` leaf (else
-    // `ZEBRA_BGP_SHARDS`, else 1) before `Bgp::new` spawns the pool.
+    // C.4: freeze the shard count from the `router bgp sharding rib-sharding
+    // <n>` leaf (else `ZEBRA_BGP_SHARDS`, else 1) before `Bgp::new` spawns the
+    // pool.
     inst::init_shard_count(configured_shards(config));
-    // Freeze the per-peer egress-task model from the `router bgp peer-task`
-    // leaf (else `ZEBRA_BGP_PEER_TASK`, else off) before any peer establishes.
+    // Freeze the per-peer egress-task model from the `router bgp sharding
+    // peer-sharding` leaf (else `ZEBRA_BGP_PEER_TASK`, else off) before any
+    // peer establishes.
     crate::bgp::peer_egress::init_peer_task(configured_peer_task(config));
     let bgp = inst::Bgp::new(
         ctx,
@@ -87,7 +89,7 @@ pub fn despawn_bgp(config: &ConfigManager) {
     });
 }
 
-/// Read the `router bgp shards <n>` leaf (RIB sharding C.4) from the
+/// Read the `router bgp sharding rib-sharding <n>` leaf (RIB sharding C.4) from the
 /// committed candidate config, if set. Scans the flattened config lines —
 /// the same text `commit_config`'s `proto_in_candidate` reads — rather than
 /// the diff, so the value is visible at spawn regardless of where the
@@ -102,19 +104,19 @@ fn configured_shards(config: &ConfigManager) -> Option<usize> {
 
 /// Pure line-scan (unit-tested): pull the `shards` value out of the
 /// flattened config text. The leaf augments `router bgp` directly, so the
-/// `Config::list` line is `router bgp shards <n>` — the same flattened form
-/// `proto_in_candidate` matches and the `bgp_shards_grammar` parse test
+/// `Config::list` line is `router bgp sharding rib-sharding <n>` — the same
+/// flattened form `proto_in_candidate` matches and the `bgp_shards_grammar` parse test
 /// pins.
 fn shards_from_config_text(text: &str) -> Option<usize> {
     text.lines().find_map(|line| {
-        line.strip_prefix("router bgp shards ")?
+        line.strip_prefix("router bgp sharding rib-sharding ")?
             .trim()
             .parse::<usize>()
             .ok()
     })
 }
 
-/// Read the `router bgp peer-task <bool>` leaf from the committed candidate
+/// Read the `router bgp sharding peer-sharding <bool>` leaf from the committed candidate
 /// config, if set. Same flattened-text scan as [`configured_shards`].
 /// `None` ⇒ the caller falls back to `ZEBRA_BGP_PEER_TASK` / off.
 fn configured_peer_task(config: &ConfigManager) -> Option<bool> {
@@ -124,11 +126,13 @@ fn configured_peer_task(config: &ConfigManager) -> Option<bool> {
 }
 
 /// Pure line-scan (unit-tested): pull the `peer-task` boolean out of the
-/// flattened config text — `router bgp peer-task <true|false>`, the form the
+/// flattened config text — `router bgp sharding peer-sharding <true|false>`, the form the
 /// `bgp_peer_task_grammar` parse test pins.
 fn peer_task_from_config_text(text: &str) -> Option<bool> {
     text.lines().find_map(|line| {
-        let v = line.strip_prefix("router bgp peer-task ")?.trim();
+        let v = line
+            .strip_prefix("router bgp sharding peer-sharding ")?
+            .trim();
         Some(v == "true" || v == "1")
     })
 }
@@ -142,13 +146,13 @@ mod tests {
         // Picked out among other `router bgp` lines.
         assert_eq!(
             shards_from_config_text(
-                "router bgp shards 4\nrouter bgp neighbor 10.0.0.1 remote-as 65000\n"
+                "router bgp sharding rib-sharding 4\nrouter bgp neighbor 10.0.0.1 remote-as 65000\n"
             ),
             Some(4)
         );
         // Order-independent — a preceding unrelated line doesn't hide it.
         assert_eq!(
-            shards_from_config_text("interface eth0\nrouter bgp shards 8\n"),
+            shards_from_config_text("interface eth0\nrouter bgp sharding rib-sharding 8\n"),
             Some(8)
         );
         // Absent ⇒ None (caller falls back to env / default).
@@ -163,17 +167,20 @@ mod tests {
     fn peer_task_line_scan() {
         use super::peer_task_from_config_text;
         assert_eq!(
-            peer_task_from_config_text("router bgp peer-task true\n"),
+            peer_task_from_config_text("router bgp sharding peer-sharding true\n"),
             Some(true)
         );
         // Explicit false is distinguishable from absent (so config can
         // override an env-on).
         assert_eq!(
-            peer_task_from_config_text("router bgp peer-task false\n"),
+            peer_task_from_config_text("router bgp sharding peer-sharding false\n"),
             Some(false)
         );
         // Absent ⇒ None (caller falls back to env / off).
-        assert_eq!(peer_task_from_config_text("router bgp shards 4\n"), None);
+        assert_eq!(
+            peer_task_from_config_text("router bgp sharding rib-sharding 4\n"),
+            None
+        );
         assert_eq!(peer_task_from_config_text(""), None);
     }
 }

@@ -1,9 +1,9 @@
 @serial
 @bgp_peer_task_config_knob
-Feature: BGP per-peer egress task configured via the router bgp peer-task knob
+Feature: BGP per-peer egress task configured via the router bgp sharding peer-sharding knob
 
   Validates the shipping form of the per-peer egress task (PET): the egress
-  model comes from config (router bgp peer-task true, zebra-bgp-sharding.yang)
+  model comes from config (router bgp sharding peer-sharding true, zebra-bgp-sharding.yang)
   instead of the ZEBRA_BGP_PEER_TASK environment variable. The device z2 is
   started with the PLAIN start step — no env vars — and reads BOTH its shard
   count (shards: 4) and its egress model (peer-task: true) from config.

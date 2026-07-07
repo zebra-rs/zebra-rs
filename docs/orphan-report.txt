@@ -1,7 +1,7 @@
 == Collapsed orphan report ==
 ORPHAN leaf         /router/bgp/neighbor/enabled
-ORPHAN leaf         /router/bgp/shards
-ORPHAN leaf         /router/bgp/peer-task
+ORPHAN leaf         /router/bgp/sharding/rib-sharding
+ORPHAN leaf         /router/bgp/sharding/peer-sharding
 
 == Bare list/presence-container path unhandled (children handled) ==
   /router/bgp/global  [p-container]
@@ -19,14 +19,14 @@ Handled: 271
 Orphans: 3
 
 Note: these orphans have no config callback but are kept intentionally.
-shards / peer-task are consumed at BGP task spawn by the flattened-config
-text scan in src/config/bgp.rs (configured_shards / configured_peer_task).
-neighbor/enabled is a standard IETF/OpenConfig/FRR idiom (`neighbor X
-enabled true`, present in ~418 test configs); it is accepted and inert (a
-neighbor is enabled by configuring remote-as) and the schema must accept
-it so those configs load. The other 42 handler-less neighbor nodes were
-removed from the BGP YANG (vendored ietf leftovers / duplicates of handled
-zebra knobs).
+sharding/rib-sharding and sharding/peer-sharding are consumed at BGP task
+spawn by the flattened-config text scan in src/config/bgp.rs
+(configured_shards / configured_peer_task). neighbor/enabled is a standard
+IETF/OpenConfig/FRR idiom (`neighbor X enabled true`, present in ~418 test
+configs); it is accepted and inert (a neighbor is enabled by configuring
+remote-as) and the schema must accept it so those configs load. The other
+42 handler-less neighbor nodes were removed from the BGP YANG (vendored
+ietf leftovers / duplicates of handled zebra knobs).
 
 == Handler paths with no schema node (stale/other) ==
   /router/bgp/neighbor/flowspec/validation

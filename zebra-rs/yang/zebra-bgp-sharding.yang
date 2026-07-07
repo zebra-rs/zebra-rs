@@ -45,38 +45,49 @@ module zebra-bgp-sharding {
      Resulting config shape:
 
        router bgp {
-         shards 4;
+         sharding {
+           rib-sharding 4;
+         }
        }";
 
   grouping bgp-sharding-extension {
     description
-      "Sharding degree leaf hung off `router bgp`.";
-    leaf shards {
-      ext:help "Number of parallel RIB shards (1-64, default 1)";
-      type uint8 {
-        range "1..64";
+      "Spawn-time sharding container hung off `router bgp`.";
+    container sharding {
+      ext:help "BGP sharding knobs (read once at instance spawn)";
+      description
+        "Spawn-time BGP sharding knobs. Both leaves are read once when the
+         BGP instance spawns (the first `router bgp` commit) and are
+         immutable thereafter; changing either on a live instance is
+         ignored with a warning.";
+      leaf rib-sharding {
+        ext:help "Number of parallel RIB shards (1-64, default 1)";
+        type uint8 {
+          range "1..64";
+        }
+        description
+          "Number of parallel BGP RIB worker shards. 1 = synchronous
+           single-shard path (default when unset). Read once at instance
+           spawn and immutable thereafter (live resharding is out of scope).
+           No YANG default is declared on purpose: an unset leaf must stay
+           absent so it does not shadow the ZEBRA_BGP_SHARDS fallback.";
       }
-      description
-        "Number of parallel BGP RIB worker shards. 1 = synchronous
-         single-shard path (default when unset). Read once at instance
-         spawn and immutable thereafter (live resharding is out of scope).
-         No YANG default is declared on purpose: an unset leaf must stay
-         absent so it does not shadow the ZEBRA_BGP_SHARDS fallback.";
-    }
-    leaf peer-task {
-      ext:help "Per-peer egress task model (GoBGP-style; default false)";
-      type boolean;
-      description
-        "Egress model for plain IPv4-unicast. false (default) keeps the
-         FRR-style update-group egress on the main task; true runs the
-         GoBGP-style per-peer egress task, spawned per peer at Established.
-         The two models are alternatives, never interleaved, so this is read
-         once at instance spawn and immutable thereafter — changing it on a
-         live instance is ignored with a warning. Supersedes the
-         ZEBRA_BGP_PEER_TASK environment variable (the fallback when unset);
-         no YANG default is declared so an unset leaf stays absent and does
-         not shadow that fallback. Experimental — the update-group model
-         remains the supported default, especially for route reflectors.";
+      leaf peer-sharding {
+        ext:help "Per-peer egress task model (default false)";
+        type boolean;
+        description
+          "Egress model for plain IPv4-unicast. false (default) keeps the
+           FRR-style update-group egress on the main task; true runs the
+           per-peer egress task, spawned per peer at Established. The two
+           models are alternatives, never interleaved, so this is read once
+           at instance spawn and immutable thereafter — changing it on a
+           live instance is ignored with a warning. Supersedes the
+           ZEBRA_BGP_PEER_TASK environment variable (the fallback when
+           unset); no YANG default is declared so an unset leaf stays absent
+           and does not shadow that fallback. Experimental — the
+           update-group model remains the supported default, especially for
+           route reflectors.";
+      }
     }
   }
 
@@ -86,14 +97,14 @@ module zebra-bgp-sharding {
 
   augment "/configure:set/config:router/bgp:bgp" {
     description
-      "Attach the shards leaf in the candidate-set subtree.";
+      "Attach the sharding container in the candidate-set subtree.";
     uses bgp-sharding-extension;
   }
 
   augment "/configure:delete/config:router/bgp:bgp" {
     description
       "Same attachment for the delete subtree so
-       `delete router bgp shards` is path-valid.";
+       `delete router bgp sharding rib-sharding` is path-valid.";
     uses bgp-sharding-extension;
   }
 }
