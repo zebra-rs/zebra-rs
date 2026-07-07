@@ -2774,7 +2774,9 @@ async fn main() {
                             world.feature_tag = feature
                                 .tags
                                 .iter()
-                                .find(|t| *t != "serial" && *t != "allow.skipped")
+                                .find(|t| {
+                                    *t != "serial" && *t != "allow.skipped" && *t != "disabled"
+                                })
                                 .cloned()
                                 .unwrap_or_default();
                         })
@@ -2805,6 +2807,23 @@ async fn main() {
                     // the tag / name filter is re-applied in the closure below.
                     .with_default_cli()
                     .filter_run(path, move |feat, rule, scenario| {
+                        // A feature/scenario tagged `@disabled` is turned off
+                        // by annotation: never run it, even under an explicit
+                        // `--tags` / `--name` selection. Used to park scenarios
+                        // whose product feature is temporarily compiled out
+                        // (e.g. `@bgp_lua_gbp` while the `lua` build feature is
+                        // off). Remove the tag to re-enable. Skipped features
+                        // stay at `matched == 0`, so their empty artifacts are
+                        // dropped below like any unmatched feature.
+                        let disabled = feat
+                            .tags
+                            .iter()
+                            .chain(rule.iter().flat_map(|r| &r.tags))
+                            .chain(scenario.tags.iter())
+                            .any(|t| t == "disabled");
+                        if disabled {
+                            return false;
+                        }
                         let pass = match &re_filter {
                             Some(re) => re.is_match(&scenario.name),
                             None => match &tags_filter {
