@@ -93,12 +93,8 @@ module ietf-bgp {
         |
         +-> [ global BGP configuration ]
           +-> AFI / SAFI global
-        +-> peer group
-          +-> [ peer group config ]
-          +-> AFI / SAFI [ per-AFI overrides ]
         +-> neighbor
           +-> [ neighbor config ]
-          +-> [ optional pointer to peer-group ]
           +-> AFI / SAFI [ per-AFI overrides ]
 
      Copyright (c) 2023 IETF Trust and the persons identified as
@@ -359,15 +355,6 @@ module ietf-bgp {
              'bgp fast-external-fallover disable' and FRR
              'no bgp fast-external-failover'.";
         }
-        container graceful-restart {
-          if-feature "bt:graceful-restart";
-          description
-            "Parameters relating the graceful restart mechanism for
-             BGP.";
-          reference
-            "RFC 4724: Graceful Restart Mechanism for BGP.";
-          uses graceful-restart-config;
-        }
         uses state;
       }
 
@@ -415,12 +402,12 @@ module ietf-bgp {
 
       list neighbor {
         // A bare `neighbor <addr>` carries no session intent — without a
-        // `remote-as` (or a `peer-group` that supplies one) it can never
-        // form a session, so it's dead config. Reject the key-only entry at
-        // commit, and prune it when its last child is deleted, so a
-        // meaningless neighbor can't linger. Interface-based (unnumbered)
-        // and dynamic listen-range peers are separate lists and unaffected.
-        ext:non-empty "remote-as or peer-group";
+        // `remote-as` it can never form a session, so it's dead config.
+        // Reject the key-only entry at commit, and prune it when its last
+        // child is deleted, so a meaningless neighbor can't linger.
+        // Interface-based (unnumbered) and dynamic listen-range peers are
+        // separate lists and unaffected.
+        ext:non-empty "remote-as";
         key "remote-address";
         description
           "List of BGP neighbors configured on the local system,
@@ -451,15 +438,6 @@ module ietf-bgp {
           output {
             leaf result { type string; }
           }
-        }
-
-        leaf peer-group {
-          type leafref {
-            path "../../../peer-groups/peer-group/name";
-          }
-          description
-            "The peer-group with which this neighbor is
-               associated.";
         }
 
         leaf local-address {
@@ -944,69 +922,6 @@ module ietf-bgp {
           "The backward-transition event is
              generated when the BGP FSM moves from a higher
              numbered state to a lower numbered state.";
-      }
-
-      container peer-groups {
-        description
-          "Configuration for BGP peer-groups";
-
-        list peer-group {
-          key "name";
-          description
-            "List of BGP peer-groups configured on the local system -
-             uniquely identified by peer-group name";
-
-          leaf name {
-            type string;
-            description
-              "Name of the BGP peer-group";
-          }
-
-          uses neighbor-group-config;
-          uses structure-dynamic-peers;
-
-          container graceful-restart {
-            if-feature "bt:graceful-restart";
-            description
-              "Parameters relating the graceful restart mechanism for
-               BGP";
-            reference
-              "RFC 4724: Graceful Restart Mechanism for BGP.";
-            uses graceful-restart-config;
-          }
-
-          container prefix-limit {
-            description
-              "Parameters relating to the prefix limit for the
-               AFI-SAFI";
-
-            uses prefix-limit-config-common;
-          }
-
-          container afi-safis {
-            description
-              "Per-address-family configuration parameters
-               associated with the peer-group.";
-            list afi-safi {
-              key "name";
-              description
-                "AFI, SAFI configuration available for the
-                 neighbor or group";
-              reference
-                "RFC 4724: Graceful Restart Mechanism for BGP.";
-              uses mp-afi-safi-config;
-              container graceful-restart {
-                if-feature "bt:graceful-restart";
-                description
-                  "Parameters relating to BGP graceful-restart";
-                uses mp-afi-safi-graceful-restart-config;
-              }
-              uses structure-add-paths;
-              uses bgp-neighbor-use-multiple-paths;
-              uses mp-all-afi-safi-list-contents;
-            }
-          }
-        }
       }
 
       uses rib;

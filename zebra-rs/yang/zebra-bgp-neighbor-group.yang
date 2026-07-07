@@ -59,10 +59,11 @@ module zebra-bgp-neighbor-group {
     "https://github.com/zebra-rs";
 
   description
-    "IOS-XR-style `neighbor-group` for zebra-rs BGP. Sits alongside
-     the existing `peer-groups/peer-group` with a deliberately
-     focused attribute surface — the goal is to make the common
-     'these N peers share these few attributes' case ergonomic,
+    "IOS-XR-style `neighbor-group` for zebra-rs BGP. The sole
+     peer-grouping mechanism (the unimplemented IETF
+     `peer-groups/peer-group` container was removed), with a
+     deliberately focused attribute surface — the goal is to make the
+     common 'these N peers share these few attributes' case ergonomic,
      not to mirror every leaf of `neighbor-group-config`.
 
      The surface exposes `remote-as` and per-family `afi-safi
