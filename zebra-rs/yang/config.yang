@@ -117,10 +117,6 @@ module config {
     prefix zbsp;
   }
 
-  import zebra-bgp-soft-reconfiguration {
-    prefix zbsr;
-  }
-
   import zebra-bgp-allowas-in {
     prefix zbai;
   }
