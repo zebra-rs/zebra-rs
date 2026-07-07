@@ -76,12 +76,19 @@ _cli_prompt_setup ()
 
 _cli_pager_setup ()
 {
+  # NOTE: deliberately no --raw-control-chars (-R). `show` output is plain
+  # ASCII (no ANSI colour is emitted anywhere), and -R makes less mis-count
+  # how many screen rows a wrapped line occupies: a `show ip route` entry that
+  # is one column too wide (e.g. an ECMP leg with an MPLS label + "weight 1")
+  # folds onto two physical rows, and under -R less overshoots the first page
+  # so the top lines scroll off before the ":" prompt appears. Without -R less
+  # counts the folded rows correctly and the first screen starts at the top.
+  # Re-add -R only alongside genuine colour output, and re-test wrapping.
   [[ -z ${CLI_PAGER} ]] && \
     CLI_PAGER="less \
       --no-lessopen\
       --quit-at-eof\
       --quit-if-one-screen\
-      --raw-control-chars\
       --squeeze-blank-lines\
       --no-init"
 }
