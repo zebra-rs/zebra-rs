@@ -67,6 +67,7 @@ module zebra-ospf-auth-md5 {
          cryptographic-auth header overlay (RFC 2328 §D.4.2).";
 
       leaf key-id {
+        ext:help "MD5 authentication key identifier";
         type uint8 {
           range "1..255";
         }

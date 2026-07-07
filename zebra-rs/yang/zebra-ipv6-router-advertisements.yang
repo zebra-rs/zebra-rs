@@ -42,6 +42,7 @@ module zebra-ipv6-router-advertisements {
     container router-advertisements {
       ext:help "IPv6 Router Advertisement configuration";
       leaf send-advertisements {
+        ext:help "Send unsolicited Router Advertisements";
         type boolean;
         default false;
         description

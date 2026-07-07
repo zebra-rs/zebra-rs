@@ -103,11 +103,13 @@ module zebra-bgp-auth {
         "All configured key-chains on this system.";
 
       list key-chain {
+        ext:help "Named key chain";
         key "name";
         description
           "A named key chain.";
 
         leaf name {
+          ext:help "Key chain name";
           type string;
           description
             "Key chain name, referenced from a BGP neighbor's
@@ -115,12 +117,14 @@ module zebra-bgp-auth {
         }
 
         leaf description {
+          ext:help "Key chain description";
           type string;
           description
             "Human-readable description.";
         }
 
         list key {
+          ext:help "Key within the chain";
           key "key-id";
           description
             "A single key within the chain. `key-id` is a local
@@ -128,6 +132,7 @@ module zebra-bgp-auth {
              from the on-the-wire SendID/RecvID.";
 
           leaf key-id {
+            ext:help "Local key identifier";
             type uint64;
             description
               "Local administrative identifier for this key within
@@ -135,6 +140,7 @@ module zebra-bgp-auth {
           }
 
           leaf crypto-algorithm {
+            ext:help "MAC algorithm";
             type identityref {
               base kc:crypto-algorithm;
             }
@@ -149,6 +155,7 @@ module zebra-bgp-auth {
           }
 
           container key-string {
+            ext:help "Key material";
             description
               "The key material.";
             choice key-string-style {
@@ -156,6 +163,7 @@ module zebra-bgp-auth {
                 "Key string encoding.";
               case keystring {
                 leaf keystring {
+                  ext:help "Key material in ASCII";
                   type string;
                   description
                     "Key material in ASCII.";
@@ -163,6 +171,7 @@ module zebra-bgp-auth {
               }
               case hexadecimal {
                 leaf hexadecimal-string {
+                  ext:help "Key material in hexadecimal";
                   type string;
                   description
                     "Key material in hexadecimal form. Even number
@@ -173,6 +182,7 @@ module zebra-bgp-auth {
           }
 
           leaf send-id {
+            ext:help "TCP-AO SendID for this key";
             type uint8;
             description
               "TCP-AO SendID written into outgoing TCP-AO option
@@ -182,6 +192,7 @@ module zebra-bgp-auth {
           }
 
           leaf recv-id {
+            ext:help "TCP-AO RecvID for this key";
             type uint8;
             description
               "TCP-AO RecvID expected in incoming TCP-AO option

@@ -220,6 +220,7 @@ module config {
        every `container redistribute/<source>` entry under
        `router isis / afi-safi`.";
     leaf policy {
+      ext:help "Route-policy name for redistribution filter";
       // Name of a top-level `policy` (the /policy list). Held as a
       // plain string (not a leafref) so the redistribute config can
       // be staged before the policy is committed — same convention
@@ -227,6 +228,7 @@ module config {
       type string;
     }
     leaf metric {
+      ext:help "Static metric for redistributed routes";
       type uint32 {
         range "0..16777215";
       }
@@ -235,6 +237,7 @@ module config {
          the source RIB cost is used (subject to `metric-type` below).";
     }
     leaf level {
+      ext:help "IS-IS level for originated reachability";
       type enumeration {
         enum level-1;
         enum level-2;
@@ -246,6 +249,7 @@ module config {
          matches IOS-XR.";
     }
     leaf metric-type {
+      ext:help "IS-IS internal/external metric-type (RFC 5305)";
       type enumeration {
         enum internal;
         enum external;
@@ -267,7 +271,9 @@ module config {
        Modeled as a leaf-list for shape simplicity; the IS-IS callback
        enforces the single-value rule at commit time.";
     container match {
+      ext:help "OSPF route-type filter for redistribution";
       leaf-list type {
+        ext:help "OSPF route type to redistribute";
         type enumeration {
           enum internal;
           enum external;
@@ -281,13 +287,16 @@ module config {
     description
       "Per-address-family RT import/export sets attached to a VRF.";
     container route-target {
+      ext:help "Route Target import/export sets for this VRF";
       leaf-list import {
+        ext:help "Route Targets imported into this VRF";
         type vrf-route-target;
         description
           "Route Targets accepted into this VRF. A VPN route is
            imported if any of its attached RTs matches an entry here.";
       }
       leaf-list export {
+        ext:help "Route Targets attached to exported routes";
         type vrf-route-target;
         description
           "Route Targets attached to routes exported from this VRF.
@@ -301,7 +310,9 @@ module config {
     uses "zba:key-chains-group";
 
     container logging {
+      ext:help "Logging configuration";
       leaf output {
+        ext:help "Log output destination";
         type enumeration {
           enum stdout;
           enum syslog;
@@ -311,12 +322,15 @@ module config {
     }
 
     list bridge {
+      ext:help "Bridge interface configuration";
       ext:sort "100";
       key "name";
       leaf name {
+        ext:help "Bridge name";
         type string;
       }
       leaf address-gen-mode {
+        ext:help "IPv6 address generation mode";
         type enumeration {
           enum none;
           enum eui64;
@@ -327,26 +341,32 @@ module config {
     }
 
     list vxlan {
+      ext:help "VXLAN interface configuration";
       ext:sort "90";
       key "name";
       leaf name {
+        ext:help "VXLAN interface name";
         type string;
       }
       leaf local-address {
+        ext:help "VXLAN local tunnel (VTEP) address";
         type union {
           type inet:ipv4-address;
           type inet:ipv6-address;
         }
       }
       leaf vni {
+        ext:help "VXLAN Network Identifier (VNI)";
         ext:sort "5";
         mandatory true;
         type uint32;
       }
       leaf dest-port {
+        ext:help "VXLAN UDP destination port";
         type uint16;
       }
       leaf address-gen-mode {
+        ext:help "IPv6 address generation mode";
         type enumeration {
           enum none;
           enum eui64;
@@ -355,6 +375,7 @@ module config {
         }
       }
       leaf bridge {
+        ext:help "Bridge master to enslave this VXLAN device";
         ext:dynamic "rib:bridge";
         type leafref {
           path "/bridge/name";
@@ -379,6 +400,7 @@ module config {
         "System group configuration.";
 
       leaf hostname {
+        ext:help "System host name";
         type string;
         description
           "The name of the host. This name can be a single domain label or the
@@ -407,16 +429,21 @@ module config {
         type string;
       }
       container dhcp {
+        ext:help "DHCP configuration";
         uses "dhcp:dhcp";
       }
       container etcd {
+        ext:help "etcd datastore configuration";
         list endpoints {
+          ext:help "etcd server endpoint";
           key "url";
           leaf url {
+            ext:help "etcd endpoint URL";
             type string;
           }
         }
         leaf path {
+          ext:help "etcd key path prefix";
           type string;
         }
       }
@@ -430,6 +457,7 @@ module config {
     container bfd {
       ext:help "BFD (Bidirectional Forwarding Detection) configuration";
       leaf tracing {
+        ext:help "Enable conditional BFD task tracing";
         type boolean;
         description
           "Enable conditional tracing for the BFD task. When true, the
@@ -451,11 +479,14 @@ module config {
       // Each protocol task keeps its own copy fed by the config
       // broadcast.
       list affinity {
+        ext:help "Named affinity (admin-group) entry";
         key "name";
         leaf name {
+          ext:help "Affinity name";
           type string;
         }
         leaf bit-position {
+          ext:help "Bit index in the Extended Admin Group (0-255)";
           type uint16 { range "0..255"; }
           mandatory true;
           description
@@ -480,6 +511,7 @@ module config {
          building LSPs/LSAs.";
 
       list group {
+        ext:help "Named SRLG group";
         key "name";
         description
           "Named SRLG group. The name is the handle used by the
@@ -487,11 +519,13 @@ module config {
            subtree; the value is the 32-bit identifier emitted on the
            wire.";
         leaf name {
+          ext:help "SRLG group name";
           type string;
           description
             "Operator-assigned SRLG group identifier.";
         }
         leaf value {
+          ext:help "32-bit SRLG value advertised by IGPs";
           type uint32;
           mandatory true;
           description
@@ -510,23 +544,29 @@ module config {
       uses "ietf-bgp:bgp";
       // uses "policy:defined-sets";
       container ospf {
+        ext:help "OSPFv2 configuration";
         presence "Enables configuration of OSPFv2";
         leaf router-id {
+          ext:help "OSPF router identifier";
           type inet:ipv4-address;
         }
         // Instance-level redistribute into Type-5 AS-External LSAs
         // (RFC 2328 §12.4.5). Flooded AS-wide into all normal areas.
         // Per-area NSSA redistribution is under list area / redistribute.
         container redistribute {
+          ext:help "Redistribute routes into OSPF";
           container connected {
+            ext:help "Redistribute connected routes";
             presence "Redistribute connected routes as Type-5 AS-External LSAs";
             leaf metric {
+              ext:help "Metric for redistributed routes";
               type uint32 {
                 range "0..16777214";
               }
               default 20;
             }
             leaf metric-type {
+              ext:help "OSPF external metric type (1 or 2)";
               type enumeration {
                 enum type-1;
                 enum type-2;
@@ -539,14 +579,17 @@ module config {
             }
           }
           container static {
+            ext:help "Redistribute static routes";
             presence "Redistribute static routes as Type-5 AS-External LSAs";
             leaf metric {
+              ext:help "Metric for redistributed routes";
               type uint32 {
                 range "0..16777214";
               }
               default 20;
             }
             leaf metric-type {
+              ext:help "OSPF external metric type (1 or 2)";
               type enumeration {
                 enum type-1;
                 enum type-2;
@@ -559,14 +602,17 @@ module config {
             }
           }
           container kernel {
+            ext:help "Redistribute kernel routes";
             presence "Redistribute kernel routes as Type-5 AS-External LSAs";
             leaf metric {
+              ext:help "Metric for redistributed routes";
               type uint32 {
                 range "0..16777214";
               }
               default 20;
             }
             leaf metric-type {
+              ext:help "OSPF external metric type (1 or 2)";
               type enumeration {
                 enum type-1;
                 enum type-2;
@@ -579,14 +625,17 @@ module config {
             }
           }
           container isis {
+            ext:help "Redistribute IS-IS routes";
             presence "Redistribute IS-IS routes as Type-5 AS-External LSAs";
             leaf metric {
+              ext:help "Metric for redistributed routes";
               type uint32 {
                 range "0..16777214";
               }
               default 20;
             }
             leaf metric-type {
+              ext:help "OSPF external metric type (1 or 2)";
               type enumeration {
                 enum type-1;
                 enum type-2;
@@ -599,14 +648,17 @@ module config {
             }
           }
           container bgp {
+            ext:help "Redistribute BGP routes";
             presence "Redistribute BGP routes as Type-5 AS-External LSAs";
             leaf metric {
+              ext:help "Metric for redistributed routes";
               type uint32 {
                 range "0..16777214";
               }
               default 20;
             }
             leaf metric-type {
+              ext:help "OSPF external metric type (1 or 2)";
               type enumeration {
                 enum type-1;
                 enum type-2;
@@ -628,17 +680,20 @@ module config {
             // metric-type / route-map.
             key "id";
             leaf id {
+              ext:help "Kernel routing table ID";
               type uint32 {
                 range "1..65535";
               }
             }
             leaf metric {
+              ext:help "Metric for redistributed routes";
               type uint32 {
                 range "0..16777214";
               }
               default 20;
             }
             leaf metric-type {
+              ext:help "OSPF external metric type (1 or 2)";
               type enumeration {
                 enum type-1;
                 enum type-2;
@@ -659,19 +714,24 @@ module config {
         // convention for the originated default; redistribute uses
         // 20), E2 semantics.
         container default-information {
+          ext:help "Control default-route origination";
           container originate {
+            ext:help "Originate a default route";
             presence "Originate a Type-5 default route";
             leaf always {
+              ext:help "Originate default even without one in RIB";
               type boolean;
               default false;
             }
             leaf metric {
+              ext:help "Metric for the originated default route";
               type uint32 {
                 range "0..16777214";
               }
               default 10;
             }
             leaf metric-type {
+              ext:help "OSPF external metric type (1 or 2)";
               type enumeration {
                 enum type-1;
                 enum type-2;
@@ -681,11 +741,13 @@ module config {
           }
         }
         list area {
+          ext:help "OSPF area";
           // Area key accepts either a plain decimal (`area 0`) or a
           // dotted-quad (`area 0.0.0.1`). Both normalize to a 32-bit
           // area ID at the callback boundary.
           key "area-id";
           leaf area-id {
+            ext:help "OSPF area identifier";
             type union {
               type uint32;
               type inet:ipv4-address;
@@ -699,6 +761,7 @@ module config {
           // mismatch with a neighbor causes Hello rejection per
           // RFC 3101 §2.5 / RFC 2328 §10.5.
           leaf area-type {
+            ext:help "OSPF area type (normal/stub/nssa)";
             type enumeration {
               enum normal;
               enum stub;
@@ -710,12 +773,14 @@ module config {
           // entering this area. Only meaningful when area-type is
           // `stub` or `nssa`.
           leaf no-summary {
+            ext:help "Block Type-3 summaries (totally stub/NSSA)";
             type boolean;
             default false;
           }
           // NSSA ABR originates a default Type-7 LSA into the area
           // (RFC 3101 §2.3). Ignored unless area-type is `nssa`.
           leaf nssa-default-originate {
+            ext:help "Originate default Type-7 into the NSSA";
             type boolean;
             default false;
           }
@@ -723,6 +788,7 @@ module config {
           // the forwarding address. Ignored unless area-type is
           // `nssa`.
           leaf nssa-suppress-fa {
+            ext:help "Zero forwarding address in Type-7 to Type-5";
             type boolean;
             default false;
           }
@@ -731,6 +797,7 @@ module config {
           // `always` translates unconditionally; `never` disables.
           // Ignored unless area-type is `nssa`.
           leaf nssa-translator-role {
+            ext:help "NSSA Type-7 to Type-5 translator role";
             type enumeration {
               enum candidate;
               enum always;
@@ -749,15 +816,19 @@ module config {
           // 2 (E2). Type-1 (E1) lifts the SPF cost to the originator
           // and adds the LSA metric; Type-2 uses LSA metric alone.
           container redistribute {
+            ext:help "Redistribute into this NSSA area (Type-7)";
             container connected {
+              ext:help "Redistribute connected routes";
               presence "Redistribute connected routes into Type-7";
               leaf metric {
+                ext:help "Metric for redistributed routes";
                 type uint32 {
                   range "0..16777214";
                 }
                 default 20;
               }
               leaf metric-type {
+                ext:help "OSPF external metric type (1 or 2)";
                 type enumeration {
                   enum type-1;
                   enum type-2;
@@ -775,15 +846,19 @@ module config {
           // Ranges never apply to routes re-advertised from other
           // areas.
           list range {
+            ext:help "Area address range for aggregation";
             key "prefix";
             leaf prefix {
+              ext:help "Aggregate prefix (A.B.C.D/len)";
               type inet:ipv4-prefix;
             }
             leaf not-advertise {
+              ext:help "Suppress the aggregate and hide the range";
               type boolean;
               default false;
             }
             leaf cost {
+              ext:help "Metric advertised for the aggregate";
               type uint32 {
                 range "0..16777214";
               }
@@ -798,9 +873,11 @@ module config {
             // must be a non-backbone, non-stub area.
             key "router-id";
             leaf router-id {
+              ext:help "Remote ABR router-id of the virtual link";
               type inet:ipv4-address;
             }
             leaf hello-interval {
+              ext:help "Hello interval in seconds";
               type uint16 {
                 range "1..65535";
               }
@@ -808,6 +885,7 @@ module config {
               default 10;
             }
             leaf dead-interval {
+              ext:help "Dead (router) interval in seconds";
               type uint32 {
                 range "1..4294967295";
               }
@@ -815,6 +893,7 @@ module config {
               default 40;
             }
             leaf retransmit-interval {
+              ext:help "LSA retransmit interval in seconds";
               type uint16 {
                 range "1..65535";
               }
@@ -823,38 +902,48 @@ module config {
             }
           }
           list interface {
+            ext:help "OSPF interface";
             key "if-name";
             leaf if-name {
+              ext:help "Interface name";
               ext:dynamic "rib:interface";
               type string;
             }
             leaf enabled {
+              ext:help "Enable OSPF on this interface";
               type boolean;
             }
             leaf network-type {
+              ext:help "OSPF network type (broadcast/p2p)";
               type enumeration {
                 enum broadcast;
                 enum point-to-point;
               }
             }
             leaf priority {
+              ext:help "Router priority for DR election";
               type uint8;
             }
             leaf cost {
+              ext:help "Interface output cost (SPF metric)";
               // RFC 2328 §C.3 interface output cost (Router-LSA link
               // metric / SPF edge weight). 16-bit; default 10.
               type uint16;
             }
             leaf hello-interval {
+              ext:help "Hello interval in seconds";
               type uint16;
             }
             leaf dead-interval {
+              ext:help "Dead (router) interval in seconds";
               type uint32;
             }
             leaf retransmit-interval {
+              ext:help "LSA retransmit interval in seconds";
               type uint16;
             }
             leaf mtu-ignore {
+              ext:help "Ignore MTU mismatch in DBD packets";
               type boolean;
             }
             // Passive interface: its prefixes keep advertising into
@@ -862,18 +951,23 @@ module config {
             // no Hello is sent or accepted, so no adjacency forms.
             // Loopbacks are implicitly passive even when unset.
             leaf passive {
+              ext:help "Advertise but form no adjacency (passive)";
               type boolean;
               default false;
             }
             container prefix-sid {
+              ext:help "Segment Routing Prefix-SID for this interface";
               leaf index {
+                ext:help "Prefix-SID index into the SRGB";
                 type uint32;
               }
               leaf absolute {
+                ext:help "Absolute Prefix-SID label value";
                 type uint32;
               }
             }
             list flex-algo-prefix-sid {
+              ext:help "Per-flex-algo Prefix-SID for this interface";
               // Per-Flexible-Algorithm Prefix-SID for this interface's
               // prefix (RFC 9350 §7). Emitted as an extra Prefix-SID
               // sub-TLV (Algorithm = the keyed algo) in the
@@ -881,29 +975,36 @@ module config {
               // `prefix-sid` above.
               key "algo";
               leaf algo {
+                ext:help "Flex-Algorithm identifier (128-255)";
                 type uint8 { range "128..255"; }
               }
               leaf index {
+                ext:help "Prefix-SID index into the SRGB";
                 type uint32;
               }
               leaf absolute {
+                ext:help "Absolute Prefix-SID label value";
                 type uint32;
               }
             }
             container adjacency-sid {
+              ext:help "Segment Routing Adjacency-SID for this link";
               // Per-link Adjacency-SID (RFC 8665 §6). Originated in
               // the Extended-Link Opaque LSA (type 10 / opaque-type 8)
               // as an AdjSid sub-TLV. Either form is allowed; the
               // origination side picks the wire encoding from whichever
               // leaf is set.
               leaf index {
+                ext:help "Adjacency-SID index value";
                 type uint32;
               }
               leaf absolute {
+                ext:help "Absolute Adjacency-SID label value";
                 type uint32;
               }
             }
             leaf-list affinity {
+              ext:help "Affinity (admin-group) names on this link";
               // Names of /affinity-map entries this link carries.
               // Advertised as an Extended Admin Group bitmap inside the
               // ASLA sub-TLV (RFC 9492) and tested against each FAD's
@@ -925,6 +1026,7 @@ module config {
                  dynamically. All delay values are in microseconds.";
 
               leaf unidirectional-delay {
+                ext:help "Average unidirectional link delay (us)";
                 type uint32 {
                   range "0..16777215";
                 }
@@ -934,6 +1036,7 @@ module config {
                    sub-TLV 27).";
               }
               leaf min-delay {
+                ext:help "Minimum unidirectional link delay (us)";
                 type uint32 {
                   range "0..16777215";
                 }
@@ -944,6 +1047,7 @@ module config {
                    sub-TLV is emitted only when both are set.";
               }
               leaf max-delay {
+                ext:help "Maximum unidirectional link delay (us)";
                 type uint32 {
                   range "0..16777215";
                 }
@@ -953,6 +1057,7 @@ module config {
                    sub-TLV 28).";
               }
               leaf delay-variation {
+                ext:help "Unidirectional delay variation / jitter (us)";
                 type uint32 {
                   range "0..16777215";
                 }
@@ -962,6 +1067,7 @@ module config {
                    §4.3, sub-TLV 29).";
               }
               leaf loss {
+                ext:help "Unidirectional link loss ratio";
                 type uint32 {
                   range "0..16777214";
                 }
@@ -984,10 +1090,12 @@ module config {
                    Session-Reflector, so measurement must be enabled on
                    both ends of the link.";
                 leaf enabled {
+                  ext:help "Activate measurement on this interface";
                   type boolean;
                   description "Activate measurement on this interface.";
                 }
                 leaf interval {
+                  ext:help "Probe transmit interval in milliseconds";
                   type uint32 {
                     range "100..60000";
                   }
@@ -995,6 +1103,7 @@ module config {
                   description "Probe transmit interval. Default 1000 ms.";
                 }
                 leaf damping-period {
+                  ext:help "Minimum spacing between IGP exports (s)";
                   type uint32 {
                     range "1..3600";
                   }
@@ -1009,16 +1118,19 @@ module config {
           }
         }
         container segment-routing {
+          ext:help "Segment Routing configuration";
           // Mirrors `router isis / segment-routing` (config.yang L516).
           // OSPFv2 carries SR over MPLS only — there is no OSPFv2 SRv6
           // (OSPFv2 is IPv4-only on the wire); the SRv6 sibling lives
           // under `router ospfv3 / segment-routing` instead.
           container mpls {
+            ext:help "Segment Routing over MPLS dataplane";
             presence "Enable Segment Routing over MPLS dataplane";
           }
         }
 
         list flex-algo {
+          ext:help "Flexible Algorithm (RFC 9350) definition";
           // OSPFv2 Flexible Algorithm (RFC 9350 §6) definition. Mirrors
           // `router isis / flex-algo`; keyed by the on-the-wire numeric
           // identifier (128..255). `advertise-definition true` causes
@@ -1029,6 +1141,7 @@ module config {
           // advertise the definition.
           key "algo";
           leaf algo {
+            ext:help "Flex-Algorithm identifier (128..255)";
             type uint8 { range "128..255"; }
             description
               "Flex-Algorithm identifier (RFC 9350 §4). 0..127 are
@@ -1036,6 +1149,7 @@ module config {
           }
 
           leaf advertise-definition {
+            ext:help "Originate the FAD TLV for this algorithm";
             type boolean;
             default false;
             description
@@ -1046,6 +1160,7 @@ module config {
           }
 
           leaf metric-type {
+            ext:help "FAD metric-type (igp, delay, te)";
             type enumeration {
               enum igp;                   // FAD Metric-Type 0
               enum min-unidir-link-delay; // FAD Metric-Type 1 (RFC 8570)
@@ -1055,6 +1170,7 @@ module config {
           }
 
           leaf priority {
+            ext:help "FAD advertisement priority (higher wins)";
             // FAD Priority (RFC 9350 §6.5). Tie-breaker when more than
             // one router originates a FAD for the same algo; higher
             // priority wins.
@@ -1063,6 +1179,7 @@ module config {
           }
 
           leaf prefix-metric {
+            ext:help "Include Flex-Algo prefix metric (M-flag)";
             // M-flag in the FAD Flags sub-TLV (RFC 9350 §6.4). When set,
             // the computed path metric to a prefix includes the
             // advertised Flexible Algorithm Prefix Metric.
@@ -1071,44 +1188,61 @@ module config {
           }
 
           container dataplane {
+            ext:help "Per-algorithm dataplane selection";
             // Per-algorithm dataplane participation. OSPFv2 carries SR
             // over MPLS only (no OSPFv2 SRv6); the `ip` flag selects
             // plain IP forwarding for the algo's computed paths.
-            leaf sr-mpls { type boolean; default false; }
-            leaf ip      { type boolean; default false; }
+            leaf sr-mpls {
+              ext:help "Use SR-MPLS forwarding for this algo";
+              type boolean; default false; }
+            leaf ip      {
+              ext:help "Use plain IP forwarding for this algo";
+              type boolean; default false; }
           }
 
           container affinity {
+            ext:help "Flex-Algo admin-group (affinity) constraints";
             // FAD Exclude / Include-Any / Include-All Admin Group
             // sub-TLVs (RFC 9350 §6.2-6.4). Each leaf-list value is a
             // name from the global /affinity-map table.
-            leaf-list include-any { type string; }
-            leaf-list include-all { type string; }
-            leaf-list exclude-any { type string; }
+            leaf-list include-any {
+              ext:help "Admin-groups a link must include any of";
+              type string; }
+            leaf-list include-all {
+              ext:help "Admin-groups a link must include all of";
+              type string; }
+            leaf-list exclude-any {
+              ext:help "Admin-groups that exclude a link";
+              type string; }
           }
 
           leaf-list srlg-exclude {
+            ext:help "SRLG groups excluded from this algo";
             // FAD Exclude SRLG sub-TLV (RFC 9350 §6.5). Each entry
             // references a /srlg/group name.
             type string;
           }
 
           container fast-reroute {
+            ext:help "Per-algo fast-reroute (TI-LFA)";
             // Per-algo TI-LFA toggle. Empty container is a no-op; the
             // child presence container turns the per-algo TI-LFA
             // computation on (deferred — no OSPF per-algo TI-LFA yet).
             container ti-lfa {
+              ext:help "Topology-Independent LFA for this flex-algo";
               presence "Enable Topology-Independent LFA for this flex-algo";
             }
           }
         }
 
         container fast-reroute {
+          ext:help "IP fast-reroute (LFA) mechanisms";
           // OSPFv2 fast-reroute mechanisms (RFC 7490 LFA family).
           // Empty container is a no-op; the per-mechanism child
           // presence containers turn features on. Shape mirrors
           // `router isis / fast-reroute`.
           container ti-lfa {
+            ext:help "Topology-Independent LFA (TI-LFA)";
             // Topology-Independent Loop-Free Alternate (TI-LFA,
             // RFC 9490). Computes a post-convergence repair path
             // expressed as SR-MPLS labels, so segment-routing/mpls
@@ -1164,6 +1298,7 @@ module config {
             }
           }
           container backup-as-primary {
+            ext:help "Install TI-LFA backup as primary nexthop";
             // Swap the metric-sort offset between the SPF primary
             // nexthop and the TI-LFA repair: the repair installs at
             // route.metric (sorted first) and the primary installs at
@@ -1175,11 +1310,13 @@ module config {
         }
 
         container graceful-restart {
+          ext:help "Graceful restart (RFC 3623) helper config";
           // RFC 3623 helper-side configuration. zebra-rs is
           // helper-only today (Phase 5 restarter mode is deferred).
           // Defaults match the IETF YANG model
           // (ietf-ospf@2022-10-19.yang) and FRR's helper defaults.
           leaf helper-enabled {
+            ext:help "Accept Grace LSAs and act as helper";
             type boolean;
             default true;
             description
@@ -1189,6 +1326,7 @@ module config {
                state.";
           }
           leaf max-grace-period {
+            ext:help "Max grace period honoured, seconds";
             type uint32;
             units "seconds";
             default 1800;
@@ -1199,6 +1337,7 @@ module config {
                helper's policy).";
           }
           leaf helper-strict-lsa-checking {
+            ext:help "Exit helper on topology change";
             type boolean;
             default true;
             description
@@ -1210,6 +1349,7 @@ module config {
                cut the restart short.";
           }
           leaf drain-time-ms {
+            ext:help "Grace-LSA drain window before exit, ms";
             type uint32 {
               range "50..2000";
             }
@@ -1292,6 +1432,7 @@ module config {
           // slowing a stable one. Defaults 50/200/5000ms match
           // zebra-rs IS-IS `spf-interval`.
           leaf initial-wait {
+            ext:help "Delay before the first SPF run, ms";
             type uint32 {
               range "1..120000";
             }
@@ -1302,6 +1443,7 @@ module config {
                period to the first SPF run.";
           }
           leaf secondary-wait {
+            ext:help "Hold-down between SPF runs in a burst, ms";
             type uint32 {
               range "1..120000";
             }
@@ -1313,6 +1455,7 @@ module config {
                maximum-wait.";
           }
           leaf maximum-wait {
+            ext:help "Maximum SPF hold-down, ms";
             type uint32 {
               range "1..120000";
             }
@@ -1326,6 +1469,7 @@ module config {
         }
 
         list vrf {
+          ext:help "Per-VRF OSPFv2 instance";
           // Per-VRF OSPFv2 instance. The default `router ospf` task
           // forwards each `vrf <name> ...` line (with the `vrf <name>`
           // prefix stripped) to a full per-VRF OSPFv2 instance whose
@@ -1339,10 +1483,12 @@ module config {
           // per-VRF surface widens.
           key "name";
           leaf name {
+            ext:help "VRF name";
             ext:dynamic "rib:vrf";
             type string;
           }
           leaf router-id {
+            ext:help "OSPF router identifier for this VRF";
             type inet:ipv4-address;
           }
           // Instance-level redistribution into Type-5 AS-External LSAs,
@@ -1351,15 +1497,19 @@ module config {
           // lets a PE inject VPNv4 routes it imported into this VRF into the
           // CE-facing OSPF (the L3VPN PE-CE down direction).
           container redistribute {
+            ext:help "Redistribute routes into this VRF's OSPF";
             container connected {
+              ext:help "Redistribute connected routes (Type-5)";
               presence "Redistribute connected routes as Type-5 AS-External LSAs";
               leaf metric {
+                ext:help "External metric for redistributed routes";
                 type uint32 {
                   range "0..16777214";
                 }
                 default 20;
               }
               leaf metric-type {
+                ext:help "External metric type (E1 or E2)";
                 type enumeration {
                   enum type-1;
                   enum type-2;
@@ -1368,14 +1518,17 @@ module config {
               }
             }
             container bgp {
+              ext:help "Redistribute BGP routes (Type-5)";
               presence "Redistribute BGP routes as Type-5 AS-External LSAs";
               leaf metric {
+                ext:help "External metric for redistributed routes";
                 type uint32 {
                   range "0..16777214";
                 }
                 default 20;
               }
               leaf metric-type {
+                ext:help "External metric type (E1 or E2)";
                 type enumeration {
                   enum type-1;
                   enum type-2;
@@ -1385,8 +1538,10 @@ module config {
             }
           }
           list area {
+            ext:help "OSPF area within this VRF";
             key "area-id";
             leaf area-id {
+              ext:help "Area identifier (decimal or A.B.C.D)";
               type union {
                 type uint32;
                 type inet:ipv4-address;
@@ -1397,15 +1552,19 @@ module config {
             // `/router/ospf/area/redistribute/connected[/metric|
             // /metric-type]` match the existing v2 callbacks.
             container redistribute {
+              ext:help "Per-area NSSA redistribution (Type-7)";
               container connected {
+                ext:help "Redistribute connected routes into Type-7";
                 presence "Redistribute connected routes into Type-7";
                 leaf metric {
+                  ext:help "External metric for redistributed routes";
                   type uint32 {
                     range "0..16777214";
                   }
                   default 20;
                 }
                 leaf metric-type {
+                  ext:help "External metric type (E1 or E2)";
                   type enumeration {
                     enum type-1;
                     enum type-2;
@@ -1415,33 +1574,42 @@ module config {
               }
             }
             list interface {
+              ext:help "Per-interface OSPF configuration";
               key "if-name";
               leaf if-name {
+                ext:help "Interface name";
                 ext:dynamic "rib:interface";
                 type string;
               }
               leaf enabled {
+                ext:help "Enable OSPF on this interface";
                 type boolean;
               }
               leaf network-type {
+                ext:help "OSPF network type (broadcast or p2p)";
                 type enumeration {
                   enum broadcast;
                   enum point-to-point;
                 }
               }
               leaf priority {
+                ext:help "DR election priority";
                 type uint8;
               }
               leaf hello-interval {
+                ext:help "Hello packet interval, seconds";
                 type uint16;
               }
               leaf dead-interval {
+                ext:help "Neighbor dead interval, seconds";
                 type uint32;
               }
               leaf retransmit-interval {
+                ext:help "LSA retransmit interval, seconds";
                 type uint16;
               }
               leaf mtu-ignore {
+                ext:help "Ignore MTU mismatch in DBD packets";
                 type boolean;
               }
             }
@@ -1449,6 +1617,7 @@ module config {
         }
       }
       container ospfv3 {
+        ext:help "OSPFv3 (IPv6) configuration";
         // OSPFv3 (RFC 5340). Shape mirrors `container ospf` so a
         // v3 config differs from v2 only in the top-level keyword.
         // Per-interface knobs (`priority`, `hello-interval`,
@@ -1457,6 +1626,7 @@ module config {
         // counterparts; the v3 callbacks live in `config_v3.rs`.
         presence "Enables configuration of OSPFv3";
         leaf router-id {
+          ext:help "OSPFv3 router identifier";
           type inet:ipv4-address;
         }
         // Instance-level redistribution into AS-External (Type-5) LSAs.
@@ -1468,15 +1638,19 @@ module config {
         // into a VRF into the CE-facing OSPFv3. Per-area NSSA
         // redistribution is under list area / redistribute.
         container redistribute {
+          ext:help "Redistribute routes into OSPFv3";
           container connected {
+            ext:help "Redistribute connected routes (Type-5)";
             presence "Redistribute connected routes as AS-External (Type-5) LSAs";
             leaf metric {
+              ext:help "External metric for redistributed routes";
               type uint32 {
                 range "0..16777214";
               }
               default 20;
             }
             leaf metric-type {
+              ext:help "External metric type (E1 or E2)";
               type enumeration {
                 enum type-1;
                 enum type-2;
@@ -1489,14 +1663,17 @@ module config {
             }
           }
           container static {
+            ext:help "Redistribute static routes (Type-5)";
             presence "Redistribute static routes as AS-External (Type-5) LSAs";
             leaf metric {
+              ext:help "External metric for redistributed routes";
               type uint32 {
                 range "0..16777214";
               }
               default 20;
             }
             leaf metric-type {
+              ext:help "External metric type (E1 or E2)";
               type enumeration {
                 enum type-1;
                 enum type-2;
@@ -1509,14 +1686,17 @@ module config {
             }
           }
           container kernel {
+            ext:help "Redistribute kernel routes (Type-5)";
             presence "Redistribute kernel routes as AS-External (Type-5) LSAs";
             leaf metric {
+              ext:help "External metric for redistributed routes";
               type uint32 {
                 range "0..16777214";
               }
               default 20;
             }
             leaf metric-type {
+              ext:help "External metric type (E1 or E2)";
               type enumeration {
                 enum type-1;
                 enum type-2;
@@ -1529,14 +1709,17 @@ module config {
             }
           }
           container isis {
+            ext:help "Redistribute IS-IS routes (Type-5)";
             presence "Redistribute IS-IS routes as AS-External (Type-5) LSAs";
             leaf metric {
+              ext:help "External metric for redistributed routes";
               type uint32 {
                 range "0..16777214";
               }
               default 20;
             }
             leaf metric-type {
+              ext:help "External metric type (E1 or E2)";
               type enumeration {
                 enum type-1;
                 enum type-2;
@@ -1549,14 +1732,17 @@ module config {
             }
           }
           container bgp {
+            ext:help "Redistribute BGP routes (Type-5)";
             presence "Redistribute BGP routes as AS-External (Type-5) LSAs";
             leaf metric {
+              ext:help "External metric for redistributed routes";
               type uint32 {
                 range "0..16777214";
               }
               default 20;
             }
             leaf metric-type {
+              ext:help "External metric type (E1 or E2)";
               type enumeration {
                 enum type-1;
                 enum type-2;
@@ -1577,19 +1763,24 @@ module config {
         // convention for the originated default; redistribute uses
         // 20), E2 semantics.
         container default-information {
+          ext:help "Control default-route origination";
           container originate {
+            ext:help "Originate a Type-5 default route";
             presence "Originate a Type-5 default route";
             leaf always {
+              ext:help "Originate default even without a RIB default";
               type boolean;
               default false;
             }
             leaf metric {
+              ext:help "Metric for the originated default route";
               type uint32 {
                 range "0..16777214";
               }
               default 10;
             }
             leaf metric-type {
+              ext:help "Default-route metric type (E1 or E2)";
               type enumeration {
                 enum type-1;
                 enum type-2;
@@ -1603,20 +1794,25 @@ module config {
         // window; the restart itself is operator-driven via
         // `clear ospfv3 graceful-restart begin|commit|abort`.
         container graceful-restart {
+          ext:help "Graceful restart helper configuration";
           leaf helper-enabled {
+            ext:help "Accept Grace LSAs and act as helper";
             type boolean;
             default true;
           }
           leaf max-grace-period {
+            ext:help "Max grace period honoured, seconds";
             type uint32;
             units "seconds";
             default 1800;
           }
           leaf helper-strict-lsa-checking {
+            ext:help "Exit helper on topology change";
             type boolean;
             default true;
           }
           leaf drain-time-ms {
+            ext:help "Grace-LSA drain window before exit, ms";
             type uint32 {
               range "50..2000";
             }
@@ -1672,6 +1868,7 @@ module config {
         container spf-interval {
           ext:help "SPF calculation throttle timers";
           leaf initial-wait {
+            ext:help "Delay before the first SPF run, ms";
             type uint32 {
               range "1..120000";
             }
@@ -1679,6 +1876,7 @@ module config {
             default 50;
           }
           leaf secondary-wait {
+            ext:help "Hold-down between SPF runs in a burst, ms";
             type uint32 {
               range "1..120000";
             }
@@ -1686,6 +1884,7 @@ module config {
             default 200;
           }
           leaf maximum-wait {
+            ext:help "Maximum SPF hold-down, ms";
             type uint32 {
               range "1..120000";
             }
@@ -1694,8 +1893,10 @@ module config {
           }
         }
         list area {
+          ext:help "OSPFv3 area";
           key "area-id";
           leaf area-id {
+            ext:help "Area identifier (decimal or A.B.C.D)";
             type union {
               type uint32;
               type inet:ipv4-address;
@@ -1706,6 +1907,7 @@ module config {
           // negotiation only; v3 Type-7 (0x2007) codec + handling
           // arrives in phases 5/6.
           leaf area-type {
+            ext:help "Area type (normal, stub, or nssa)";
             type enumeration {
               enum normal;
               enum stub;
@@ -1714,18 +1916,22 @@ module config {
             default normal;
           }
           leaf no-summary {
+            ext:help "Totally-stubby: drop Type-3 summaries too";
             type boolean;
             default false;
           }
           leaf nssa-default-originate {
+            ext:help "Originate a Type-7 default into NSSA";
             type boolean;
             default false;
           }
           leaf nssa-suppress-fa {
+            ext:help "Zero the forwarding address in translation";
             type boolean;
             default false;
           }
           leaf nssa-translator-role {
+            ext:help "Type-7-to-Type-5 translator role";
             type enumeration {
               enum candidate;
               enum always;
@@ -1738,15 +1944,19 @@ module config {
           // schema lives here today so v3 callers don't see a
           // schema drift between v2 and v3 NSSA config surfaces.
           container redistribute {
+            ext:help "Per-area NSSA redistribution (Type-7)";
             container connected {
+              ext:help "Redistribute connected routes into Type-7";
               presence "Redistribute connected routes into Type-7";
               leaf metric {
+                ext:help "External metric for redistributed routes";
                 type uint32 {
                   range "0..16777214";
                 }
                 default 20;
               }
               leaf metric-type {
+                ext:help "External metric type (E1 or E2)";
                 type enumeration {
                   enum type-1;
                   enum type-2;
@@ -1764,39 +1974,49 @@ module config {
           // Ranges never apply to routes re-advertised from other
           // areas.
           list range {
+            ext:help "Area address range for summarization";
             key "prefix";
             leaf prefix {
+              ext:help "IPv6 prefix to summarize";
               type inet:ipv6-prefix;
             }
             leaf not-advertise {
+              ext:help "Suppress the aggregate and its components";
               type boolean;
               default false;
             }
             leaf cost {
+              ext:help "Metric for the aggregated range";
               type uint32 {
                 range "0..16777214";
               }
             }
           }
           list interface {
+            ext:help "Per-interface OSPFv3 configuration";
             key "if-name";
             leaf if-name {
+              ext:help "Interface name";
               ext:dynamic "rib:interface";
               type string;
             }
             leaf enabled {
+              ext:help "Enable OSPFv3 on this interface";
               type boolean;
             }
             leaf network-type {
+              ext:help "OSPFv3 network type (broadcast or p2p)";
               type enumeration {
                 enum broadcast;
                 enum point-to-point;
               }
             }
             leaf priority {
+              ext:help "DR election priority";
               type uint8;
             }
             leaf cost {
+              ext:help "Interface output cost (link metric)";
               // RFC 2328 §C.3 interface output cost, kept by RFC 5340:
               // the metric stamped on this link in the Router-LSA and
               // on its prefixes in the Intra-Area-Prefix-LSA (SPF edge
@@ -1804,12 +2024,15 @@ module config {
               type uint16;
             }
             leaf hello-interval {
+              ext:help "Hello packet interval, seconds";
               type uint16;
             }
             leaf dead-interval {
+              ext:help "Neighbor dead interval, seconds";
               type uint32;
             }
             leaf retransmit-interval {
+              ext:help "LSA retransmit interval, seconds";
               type uint16;
             }
             leaf instance-id {
@@ -1822,34 +2045,43 @@ module config {
               default 0;
             }
             leaf mtu-ignore {
+              ext:help "Ignore MTU mismatch in DBD packets";
               type boolean;
             }
             // Passive interface — same semantics as the v2 sibling.
             leaf passive {
+              ext:help "Advertise prefix but form no adjacency";
               type boolean;
               default false;
             }
             container prefix-sid {
+              ext:help "Prefix-SID for this interface prefix (algo 0)";
               leaf index {
+                ext:help "Prefix-SID as an SRGB index";
                 type uint32;
               }
               leaf absolute {
+                ext:help "Prefix-SID as an absolute label value";
                 type uint32;
               }
             }
             container adjacency-sid {
+              ext:help "Per-link Adjacency-SID (SR-MPLS)";
               // Per-link Adjacency-SID. OSPFv3 SR-MPLS carries it in
               // the RFC 8666 Extended-Link LSA; storage-only here.
               // Either form is allowed; the origination side picks
               // the wire encoding from whichever leaf is set.
               leaf index {
+                ext:help "Adjacency-SID as an SRGB index";
                 type uint32;
               }
               leaf absolute {
+                ext:help "Adjacency-SID as an absolute label value";
                 type uint32;
               }
             }
             list flex-algo-prefix-sid {
+              ext:help "Per-flex-algo Prefix-SID for this prefix";
               // Per-Flexible-Algorithm Prefix-SID for this interface's
               // prefix (RFC 9350 §7). Emitted as an extra Prefix-SID
               // sub-TLV (Algorithm = the keyed algo) in the
@@ -1857,16 +2089,20 @@ module config {
               // `prefix-sid` above. Mirrors `router ospf` interface.
               key "algo";
               leaf algo {
+                ext:help "Flex-Algorithm identifier (128..255)";
                 type uint8 { range "128..255"; }
               }
               leaf index {
+                ext:help "Prefix-SID as an SRGB index";
                 type uint32;
               }
               leaf absolute {
+                ext:help "Prefix-SID as an absolute label value";
                 type uint32;
               }
             }
             leaf-list affinity {
+              ext:help "Affinity (admin-group) names on this link";
               // Names of /affinity-map entries this link carries.
               // Advertised as an Extended Admin Group bitmap inside the
               // RFC 9492 ASLA sub-TLV on the E-Router-LSA Router-Link
@@ -1877,17 +2113,21 @@ module config {
           }
         }
         container segment-routing {
+          ext:help "Segment Routing (SR-MPLS / SRv6) configuration";
           // Mirrors `router isis / segment-routing` (config.yang L516).
           // OSPFv3 carries SR over both dataplanes: MPLS (RFC 8666 via
           // E-LSAs) and SRv6 (RFC 9513). The `mpls` and `srv6` sibling
           // containers match the IS-IS shape so operators see a uniform
           // CLI surface across protocols.
           container mpls {
+            ext:help "Segment Routing over MPLS dataplane";
             presence "Enable Segment Routing over MPLS dataplane";
           }
           container srv6 {
+            ext:help "Segment Routing over IPv6 dataplane (SRv6)";
             presence "Enable Segment Routing over IPv6 dataplane";
             leaf locator {
+              ext:help "Global SRv6 locator name for this instance";
               // Name of a locator defined under the global
               // /segment-routing/locator list. Held as a string (not a
               // leafref) so an OSPFv3 config can be staged before the
@@ -1899,6 +2139,7 @@ module config {
         }
 
         list flex-algo {
+          ext:help "Flexible Algorithm definitions (RFC 9350)";
           // OSPFv3 Flexible Algorithm (RFC 9350 §7) definition. Shape
           // mirrors `router ospf / flex-algo`; keyed by the on-the-wire
           // numeric identifier (128..255). `advertise-definition true`
@@ -1909,6 +2150,7 @@ module config {
           // advertise the definition.
           key "algo";
           leaf algo {
+            ext:help "Flex-Algorithm identifier (128..255)";
             type uint8 { range "128..255"; }
             description
               "Flex-Algorithm identifier (RFC 9350 §4). 0..127 are
@@ -1916,6 +2158,7 @@ module config {
           }
 
           leaf advertise-definition {
+            ext:help "Originate the FAD TLV for this algorithm";
             type boolean;
             default false;
             description
@@ -1925,6 +2168,7 @@ module config {
           }
 
           leaf metric-type {
+            ext:help "FAD metric type (igp / delay / te-default)";
             type enumeration {
               enum igp;                   // FAD Metric-Type 0
               enum min-unidir-link-delay; // FAD Metric-Type 1 (RFC 8570)
@@ -1934,6 +2178,7 @@ module config {
           }
 
           leaf priority {
+            ext:help "FAD advertisement priority (higher wins)";
             // FAD Priority (RFC 9350 §6.5). Tie-breaker when more than
             // one router originates a FAD for the same algo; higher
             // priority wins.
@@ -1942,6 +2187,7 @@ module config {
           }
 
           leaf prefix-metric {
+            ext:help "Include advertised flex-algo prefix metric";
             // M-flag in the FAD Flags sub-TLV (RFC 9350 §6.4). When set,
             // the computed path metric to a prefix includes the
             // advertised Flexible Algorithm Prefix Metric.
@@ -1950,45 +2196,62 @@ module config {
           }
 
           container dataplane {
+            ext:help "Per-algorithm dataplane participation";
             // Per-algorithm dataplane participation. OSPFv3 flex-algo
             // forwards over SR-MPLS (per-algo Prefix-SID labels); the
             // `ip` flag selects plain IPv6 forwarding for the algo's
             // computed paths.
-            leaf sr-mpls { type boolean; default false; }
-            leaf ip      { type boolean; default false; }
+            leaf sr-mpls {
+              ext:help "Forward this algorithm over SR-MPLS";
+              type boolean; default false; }
+            leaf ip      {
+              ext:help "Forward this algorithm over plain IPv6";
+              type boolean; default false; }
           }
 
           container affinity {
+            ext:help "FAD affinity (admin-group) constraints";
             // FAD Exclude / Include-Any / Include-All Admin Group
             // sub-TLVs (RFC 9350 §6.2-6.4). Each leaf-list value is a
             // name from the global /affinity-map table.
-            leaf-list include-any { type string; }
-            leaf-list include-all { type string; }
-            leaf-list exclude-any { type string; }
+            leaf-list include-any {
+              ext:help "Include links with any of these affinities";
+              type string; }
+            leaf-list include-all {
+              ext:help "Include links with all of these affinities";
+              type string; }
+            leaf-list exclude-any {
+              ext:help "Exclude links with any of these affinities";
+              type string; }
           }
 
           leaf-list srlg-exclude {
+            ext:help "Exclude links in these SRLG groups";
             // FAD Exclude SRLG sub-TLV (RFC 9350 §6.5). Each entry
             // references a /srlg/group name.
             type string;
           }
 
           container fast-reroute {
+            ext:help "Per-flex-algo fast-reroute (TI-LFA)";
             // Per-algo TI-LFA toggle. Empty container is a no-op; the
             // child presence container turns the per-algo TI-LFA
             // computation on (deferred — no OSPF per-algo TI-LFA yet).
             container ti-lfa {
+              ext:help "Topology-Independent LFA for this flex-algo";
               presence "Enable Topology-Independent LFA for this flex-algo";
             }
           }
         }
 
         container fast-reroute {
+          ext:help "Fast-reroute / TI-LFA protection (RFC 9490)";
           // OSPFv3 fast-reroute mechanisms (RFC 7490 LFA family).
           // Same shape as `router ospf / fast-reroute`; the repair is
           // expressed as SR-MPLS labels, so segment-routing/mpls must
           // also be enabled for the dataplane install.
           container ti-lfa {
+            ext:help "Topology-Independent LFA (TI-LFA)";
             // Topology-Independent Loop-Free Alternate (TI-LFA,
             // RFC 9490). Post-convergence repair over the v3 LSDB.
             presence "Enable Topology-Independent LFA (TI-LFA)";
@@ -2039,6 +2302,7 @@ module config {
             }
           }
           container backup-as-primary {
+            ext:help "Install TI-LFA backup as the primary nexthop";
             // Swap the metric-sort offset between the SPF primary and
             // the TI-LFA repair so the repair installs first. Protection
             // testing knob; see `router ospf` for the full rationale.
@@ -2047,6 +2311,7 @@ module config {
         }
 
         list vrf {
+          ext:help "Per-VRF OSPFv3 instance";
           // Per-VRF OSPFv3 instance. See `container ospf`'s `vrf`
           // list for the forwarding model. Exposes the per-interface
           // knobs the v3 instance handles (enabled / network-type /
@@ -2057,10 +2322,12 @@ module config {
           // would be a no-op).
           key "name";
           leaf name {
+            ext:help "VRF instance name";
             ext:dynamic "rib:vrf";
             type string;
           }
           leaf router-id {
+            ext:help "OSPFv3 router identifier for this VRF";
             type inet:ipv4-address;
           }
           // Instance-level redistribution, forwarded to the per-VRF v3
@@ -2068,15 +2335,19 @@ module config {
           // VPNv6 routes imported into this VRF into the CE-facing OSPFv3
           // (the L3VPN PE-CE down direction).
           container redistribute {
+            ext:help "Redistribute external routes into OSPFv3";
             container bgp {
+              ext:help "Redistribute BGP routes as AS-External LSAs";
               presence "Redistribute BGP routes as AS-External (Type-5) LSAs";
               leaf metric {
+                ext:help "Metric for redistributed BGP routes";
                 type uint32 {
                   range "0..16777214";
                 }
                 default 20;
               }
               leaf metric-type {
+                ext:help "AS-External metric type (type-1 / type-2)";
                 type enumeration {
                   enum type-1;
                   enum type-2;
@@ -2086,41 +2357,52 @@ module config {
             }
           }
           list area {
+            ext:help "OSPFv3 area for this VRF";
             key "area-id";
             leaf area-id {
+              ext:help "Area identifier (dotted or decimal)";
               type union {
                 type uint32;
                 type inet:ipv4-address;
               }
             }
             list interface {
+              ext:help "Interface in this OSPFv3 area";
               key "if-name";
               leaf if-name {
+                ext:help "Interface name";
                 ext:dynamic "rib:interface";
                 type string;
               }
               leaf enabled {
+                ext:help "Enable OSPFv3 on this interface";
                 type boolean;
               }
               leaf network-type {
+                ext:help "Interface network type (broadcast / p2p)";
                 type enumeration {
                   enum broadcast;
                   enum point-to-point;
                 }
               }
               leaf priority {
+                ext:help "Router priority for DR/BDR election";
                 type uint8;
               }
               leaf hello-interval {
+                ext:help "Hello packet interval in seconds";
                 type uint16;
               }
               leaf dead-interval {
+                ext:help "Neighbor dead interval in seconds";
                 type uint32;
               }
               leaf retransmit-interval {
+                ext:help "LSA retransmit interval in seconds";
                 type uint16;
               }
               leaf mtu-ignore {
+                ext:help "Ignore MTU mismatch in DBD packets";
                 type boolean;
               }
             }
@@ -2128,6 +2410,7 @@ module config {
         }
       }
       container isis {
+        ext:help "IS-IS routing protocol configuration";
         presence "Enables configuration of IS-IS";
         leaf net {
           ext:help "Network Entity Title (area address + system-id)";
@@ -2139,6 +2422,7 @@ module config {
         container distribute {
           ext:help "Control installing IS-IS routes into the RIB";
           leaf rib {
+            ext:help "Install IS-IS routes into the RIB";
             type boolean;
           }
         }
@@ -2203,8 +2487,10 @@ module config {
         container segment-routing {
           ext:help "Segment Routing (SR-MPLS / SRv6) configuration";
           container mpls {
+            ext:help "Segment Routing over MPLS dataplane";
             presence "Enable Segment Routing over MPLS dataplane";
             leaf no-local-prefix-sid {
+              ext:help "Skip the local Prefix-SID label";
               type empty;
               description
                 "Suppress installing the local (self-originated)
@@ -2218,8 +2504,10 @@ module config {
             }
           }
           container srv6 {
+            ext:help "Segment Routing over IPv6 dataplane (SRv6)";
             presence "Enable Segment Routing over IPv6 dataplane";
             leaf locator {
+              ext:help "Global SRv6 locator name for this instance";
               // Name of a locator defined under the global
               // /segment-routing/locator list. Held as a string (not a
               // leafref) so an IS-IS config can be staged before the
@@ -2227,6 +2515,7 @@ module config {
               type string;
             }
             list flex-algo-locator {
+              ext:help "Per-flex-algo SRv6 locator binding";
               // Per-Flex-Algorithm SRv6 locator binding. The named
               // locator is advertised in SRv6 Locator TLV 27 with the
               // Algorithm field set to `algo` (RFC 9352 §7.1). The
@@ -2237,9 +2526,11 @@ module config {
               // /segment-routing/locator entry is committed.
               key "algo";
               leaf algo {
+                ext:help "Flex-Algorithm identifier (128..255)";
                 type uint8 { range "128..255"; }
               }
               leaf locator {
+                ext:help "SRv6 locator name for this algorithm";
                 type string;
               }
             }
@@ -2263,6 +2554,7 @@ module config {
           // two) routers per area MUST advertise.
           key "algo";
           leaf algo {
+            ext:help "Flex-Algorithm identifier (128..255)";
             type uint8 { range "128..255"; }
             description
               "Flex-Algorithm identifier (RFC 9350 §4). 0..127 are
@@ -2270,6 +2562,7 @@ module config {
           }
 
           leaf advertise-definition {
+            ext:help "Originate the FAD sub-TLV";
             type boolean;
             default false;
             description
@@ -2279,6 +2572,7 @@ module config {
           }
 
           leaf metric-type {
+            ext:help "FAD metric type (igp / delay / te-default)";
             type enumeration {
               enum igp;                   // FAD Metric-Type 0
               enum min-unidir-link-delay; // FAD Metric-Type 1 (RFC 8570)
@@ -2288,6 +2582,7 @@ module config {
           }
 
           leaf priority {
+            ext:help "FAD advertisement priority (higher wins)";
             // FAD Priority (RFC 9350 §5.1). Tie-breaker when more
             // than one router originates a FAD for the same algo;
             // higher priority wins.
@@ -2296,6 +2591,7 @@ module config {
           }
 
           leaf prefix-metric {
+            ext:help "Include advertised flex-algo prefix metric";
             // M-flag in the FAD Flags sub-TLV (RFC 9350 §6.4).
             // When set, the computed path metric to a prefix
             // includes the advertised prefix metric in addition
@@ -2305,26 +2601,41 @@ module config {
           }
 
           container dataplane {
+            ext:help "Per-algorithm dataplane participation";
             // Per-algorithm dataplane participation. Explicit flags
             // (FRR style) so the FAD sub-TLV bits, the SPF graph
             // filter, and the SID-install path can all be driven
             // from configuration rather than inferred from which
             // SIDs happen to be present.
-            leaf sr-mpls { type boolean; default false; }
-            leaf srv6    { type boolean; default false; }
-            leaf ip      { type boolean; default false; }
+            leaf sr-mpls {
+              ext:help "Forward this algorithm over SR-MPLS";
+              type boolean; default false; }
+            leaf srv6    {
+              ext:help "Forward this algorithm over SRv6";
+              type boolean; default false; }
+            leaf ip      {
+              ext:help "Forward this algorithm over plain IP";
+              type boolean; default false; }
           }
 
           container affinity {
+            ext:help "FAD affinity (admin-group) constraints";
             // FAD Exclude / Include-Any / Include-All Affinity
             // sub-TLVs (RFC 9350 §6.1). Each leaf-list value is a
             // name from this instance's /affinity-map table.
-            leaf-list include-any { type string; }
-            leaf-list include-all { type string; }
-            leaf-list exclude-any { type string; }
+            leaf-list include-any {
+              ext:help "Include links with any of these affinities";
+              type string; }
+            leaf-list include-all {
+              ext:help "Include links with all of these affinities";
+              type string; }
+            leaf-list exclude-any {
+              ext:help "Exclude links with any of these affinities";
+              type string; }
           }
 
           leaf-list srlg-exclude {
+            ext:help "Exclude links in these SRLG groups";
             // FAD Exclude SRLG sub-TLV (RFC 9350 §6.2). Each entry
             // references a /srlg/group name; the per-link SRLG
             // memberships configured under
@@ -2334,11 +2645,13 @@ module config {
           }
 
           container fast-reroute {
+            ext:help "Per-flex-algo fast-reroute (TI-LFA)";
             // Per-algo override of the instance-level
             // /router/isis/fast-reroute/ti-lfa toggle. Empty
             // container is a no-op; the child presence container
             // turns the per-algo TI-LFA computation on.
             container ti-lfa {
+              ext:help "Topology-Independent LFA for this flex-algo";
               presence "Enable Topology-Independent LFA for this flex-algo";
             }
           }
@@ -2349,6 +2662,7 @@ module config {
           // IS-IS fast-reroute mechanisms. Empty container is a no-op;
           // the per-mechanism child presence containers turn features on.
           container ti-lfa {
+            ext:help "Topology-Independent LFA (TI-LFA)";
             // Topology-Independent Loop-Free Alternate (TI-LFA, RFC 9490).
             // Computes a post-convergence repair path expressed as
             // SR-MPLS labels, so segment-routing/mpls must also be
@@ -2416,6 +2730,7 @@ module config {
             }
           }
           container backup-as-primary {
+            ext:help "Install TI-LFA backup as the primary nexthop";
             // Swap the metric-sort offset between the SPF primary
             // nexthop and the TI-LFA repair: the repair installs at
             // route.metric (sorted first), and the primary installs
@@ -2429,6 +2744,7 @@ module config {
         container egress-protection {
           ext:help "Mirror SID egress node/link protection (SRv6/SR-MPLS)";
           leaf hold-down {
+            ext:help "Stale-route retention hold-down in seconds";
             type uint32;
             units seconds;
             description
@@ -2452,6 +2768,7 @@ module config {
             ext:help "Protect one egress node, keyed by its SRv6 locator";
             key "protected-locator";
             leaf protected-locator {
+              ext:help "Prefix of the protected egress PE";
               type inet:ip-prefix;
               description
                 "Prefix identifying the protected egress PE (PEA). For
@@ -2464,6 +2781,7 @@ module config {
                  protected egress matches it to identify PEA.";
             }
             leaf mirror-sid {
+              ext:help "Mirror SID (End.M) to advertise";
               type inet:ipv6-address;
               description
                 "Mirror SID (End.M) to advertise for the protected
@@ -2472,6 +2790,7 @@ module config {
                  locator at origination time.";
             }
             leaf via-vrf {
+              ext:help "Local VRF that reaches the protected CE";
               type string;
               description
                 "Name of the local VRF whose forwarding reaches the
@@ -2480,6 +2799,7 @@ module config {
                  path; the BGP-learned path lands in a later phase).";
             }
             leaf dataplane {
+              ext:help "Dataplane this entry protects (srv6 / mpls)";
               type enumeration {
                 enum srv6;
                 enum mpls;
@@ -2504,6 +2824,7 @@ module config {
           // exit path would tear down routes on every restart while
           // still claiming GR to peers — worse than no GR.
           leaf helper-enabled {
+            ext:help "Act as graceful-restart helper for peers";
             type boolean;
             default true;
             description
@@ -2518,6 +2839,7 @@ module config {
                treated as any other IIH.";
           }
           leaf restarter-enabled {
+            ext:help "Act as the graceful-restart restarter";
             type boolean;
             default false;
             description
@@ -2557,30 +2879,37 @@ module config {
           key "name";
           uses zas:afi-safi-unicast;
           list network {
+            ext:help "Prefix to advertise as reachable";
             key "prefix";
             leaf prefix {
+              ext:help "Prefix to advertise";
               type inet:ip-prefix;
             }
           }
           container redistribute {
+            ext:help "Redistribute routes into IS-IS for this AFI";
             presence "Enable route redistribution into IS-IS for this AFI";
             description
               "Per-source redistribution into the IS-IS RIB. Each
                source is a presence container — there is no instance
                keying (zebra-rs has a single instance per protocol).";
             container connected {
+              ext:help "Redistribute connected routes";
               presence "Redistribute connected routes";
               uses isis-redist-common;
             }
             container static {
+              ext:help "Redistribute static routes";
               presence "Redistribute static routes";
               uses isis-redist-common;
             }
             container bgp {
+              ext:help "Redistribute BGP routes";
               presence "Redistribute BGP routes";
               uses isis-redist-common;
             }
             container ospf {
+              ext:help "Redistribute OSPF routes";
               presence "Redistribute OSPF routes";
               uses isis-redist-common;
               uses isis-redist-ospf-match;
@@ -2612,12 +2941,14 @@ module config {
              accidentally get chain-resolved bytes on the wire.";
 
           leaf password {
+            ext:help "Authentication key (cleartext or HMAC key)";
             type string;
             description
               "Authentication key bytes. Sent cleartext on the wire
                when auth-type is text; used as the HMAC key when md5.";
           }
           leaf key-chain {
+            ext:help "Named key-chain reference for auth";
             type string;
             description
               "Reference to a named key-chain under /key-chains.
@@ -2626,6 +2957,7 @@ module config {
                at sign/verify time.";
           }
           leaf auth-type {
+            ext:help "Authentication type (text / md5 / hmac-sha)";
             type enumeration {
               enum text;         // ISO 10589 §9.5, TLV-10 auth-type 1
               enum md5;          // RFC 5304, TLV-10 auth-type 54
@@ -2637,6 +2969,7 @@ module config {
             default text;
           }
           leaf key-id {
+            ext:help "Key ID for hmac-sha auth-types";
             type uint16;
             default 1;
             description
@@ -2646,6 +2979,7 @@ module config {
                Receivers MUST present the same Key ID to verify.";
           }
           leaf send-only {
+            ext:help "Sign outbound but accept any inbound";
             type boolean;
             default false;
             description
@@ -2663,15 +2997,18 @@ module config {
              Inline `password` wins over `key-chain` when both are set.";
 
           leaf password {
+            ext:help "Authentication key (cleartext or HMAC key)";
             type string;
           }
           leaf key-chain {
+            ext:help "Named key-chain reference for auth";
             type string;
             description
               "Reference to a named key-chain under /key-chains.
                Only consulted when `password` is unset.";
           }
           leaf auth-type {
+            ext:help "Authentication type (text / md5 / hmac-sha)";
             type enumeration {
               enum text;
               enum md5;
@@ -2683,10 +3020,12 @@ module config {
             default text;
           }
           leaf key-id {
+            ext:help "Key ID for hmac-sha auth-types";
             type uint16;
             default 1;
           }
           leaf send-only {
+            ext:help "Sign outbound but accept any inbound";
             type boolean;
             default false;
           }
@@ -2698,15 +3037,18 @@ module config {
           // `/router/isis/timers/hold-time`; the previous `hold_time`
           // spelling never dispatched (dead leaf).
           leaf hold-time {
+            ext:help "Adjacency hold time in seconds";
             type uint16;
           }
           leaf lsp-refresh-interval {
+            ext:help "LSP refresh interval in seconds";
             type uint16 {
               range "1..65535";
             }
             units "seconds";
           }
           leaf min-lsp-arrival-time {
+            ext:help "Minimum LSP arrival time in ms";
             type uint32 {
               range "1..600000";
             }
@@ -2717,18 +3059,21 @@ module config {
         container spf-interval {
           ext:help "SPF calculation throttle timers";
           leaf initial-wait {
+            ext:help "Initial SPF delay in milliseconds";
             type uint32 {
               range "1..120000";
             }
             units "milliseconds";
           }
           leaf secondary-wait {
+            ext:help "Secondary SPF delay in milliseconds";
             type uint32 {
               range "1..120000";
             }
             units "milliseconds";
           }
           leaf maximum-wait {
+            ext:help "Maximum SPF delay in milliseconds";
             type uint32 {
               range "1..120000";
             }
@@ -2739,18 +3084,21 @@ module config {
         container lsp-gen-interval {
           ext:help "LSP generation throttle timers";
           leaf initial-wait {
+            ext:help "Initial LSP generation delay in ms";
             type uint32 {
               range "1..120000";
             }
             units "milliseconds";
           }
           leaf secondary-wait {
+            ext:help "Secondary LSP-generation wait (ms)";
             type uint32 {
               range "1..120000";
             }
             units "milliseconds";
           }
           leaf maximum-wait {
+            ext:help "Maximum LSP-generation wait (ms)";
             type uint32 {
               range "1..120000";
             }
@@ -2795,11 +3143,13 @@ module config {
           ext:sort "-10";
           key "if-name";
           leaf if-name {
+            ext:help "Interface name";
             ext:dynamic "rib:interface";
             type string;
           }
 
           leaf circuit-type {
+            ext:help "IS-IS level(s): L1 / L1-2 / L2-only";
             type enumeration {
               enum level-1;
               enum level-1-2;
@@ -2808,6 +3158,7 @@ module config {
           }
 
           leaf network-type {
+            ext:help "Media type: LAN or point-to-point";
             type enumeration {
               enum lan;
               enum point-to-point;
@@ -2815,6 +3166,7 @@ module config {
           }
 
           leaf passive {
+            ext:help "Passive circuit: advertise prefixes, no adjacency";
             type boolean;
             description
               "Run this interface as a passive IS-IS circuit: its
@@ -2827,11 +3179,14 @@ module config {
           }
 
           leaf priority {
+            ext:help "DIS election priority on LAN circuits";
             type uint8;
           }
 
           container hello {
+            ext:help "IS-IS Hello (IIH) parameters";
             leaf padding {
+              ext:help "Pad Hello PDUs to full MTU";
               type enumeration {
                 enum always;
                 /* enum during-adjacency-only; */
@@ -2839,12 +3194,14 @@ module config {
               }
             }
             leaf interval {
+              ext:help "Hello PDU transmit interval (seconds)";
               type uint16 {
                 range "1..65535";
               }
               units "seconds";
             }
             leaf multiplier {
+              ext:help "Hold-time multiplier (missed Hellos to drop)";
               type uint16 {
                 range "2..1000";
               }
@@ -2852,6 +3209,7 @@ module config {
           }
 
           leaf csnp-interval {
+            ext:help "CSNP transmit interval (seconds)";
             type uint16 {
               range "1..65535";
             }
@@ -2859,6 +3217,7 @@ module config {
           }
 
           leaf psnp-interval {
+            ext:help "PSNP transmit interval (seconds)";
             type uint16 {
               range "1..65535";
             }
@@ -2866,21 +3225,28 @@ module config {
           }
 
           leaf metric {
+            ext:help "IS-IS metric for this interface";
             type uint32;
           }
 
           container ipv4 {
+            ext:help "IPv4 address-family settings";
             leaf enabled {
+              ext:help "Enable IPv4 on this interface";
               type boolean;
             }
             container prefix-sid {
+              ext:help "IPv4 Prefix-SID for this interface";
               leaf index {
+                ext:help "Prefix-SID index (offset into SRGB)";
                 type uint32;
               }
               leaf absolute {
+                ext:help "Absolute Prefix-SID label value";
                 type uint32;
               }
               leaf no-php {
+                ext:help "Set P-flag: keep node-SID label (no PHP)";
                 type empty;
                 description
                   "Set the P (no-PHP) flag (RFC 8667 §2.1.1) on this
@@ -2891,6 +3257,7 @@ module config {
               }
             }
             list flex-algo-prefix-sid {
+              ext:help "Per-Flex-Algo IPv4 Prefix-SID";
               // Per-Flex-Algorithm Prefix-SID for the IPv4 address(es)
               // of this interface. Advertised as additional Prefix-SID
               // sub-TLVs (RFC 8667) with the Algorithm field set to
@@ -2900,37 +3267,46 @@ module config {
               // flex-algo's topology.
               key "algo";
               leaf algo {
+                ext:help "Flex-Algorithm identifier (128-255)";
                 type uint8 { range "128..255"; }
               }
               leaf index {
+                ext:help "Prefix-SID index (offset into SRGB)";
                 type uint32;
               }
               leaf absolute {
+                ext:help "Absolute Prefix-SID label value";
                 type uint32;
               }
             }
           }
           container ipv6 {
+            ext:help "IPv6 address-family settings";
             leaf enabled {
+              ext:help "Enable IPv6 on this interface";
               type boolean;
             }
           }
           list multi-topology {
+            ext:help "Per-topology metric override for this link";
             // Per-link, per-MT metric override. Absence falls back to
             // the link's `metric` leaf above.
             key "id";
             leaf id {
+              ext:help "Topology (standard or ipv6-unicast)";
               type enumeration {
                 enum standard;
                 enum ipv6-unicast;
               }
             }
             leaf metric {
+              ext:help "Per-topology metric for this link";
               type uint32;
             }
           }
 
           container hello-authentication {
+            ext:help "Hello/CSNP/PSNP authentication";
             presence "Per-interface IIH/CSNP/PSNP authentication";
             description
               "Authentication key applied to IS-IS Hello (IIH), CSNP,
@@ -2943,15 +3319,18 @@ module config {
                `key-chain` when both are set.";
 
             leaf password {
+              ext:help "Inline authentication key";
               type string;
             }
             leaf key-chain {
+              ext:help "Named key-chain (used when password unset)";
               type string;
               description
                 "Reference to a named key-chain under /key-chains.
                  Only consulted when `password` is unset.";
             }
             leaf auth-type {
+              ext:help "Authentication algorithm (text/md5/hmac-sha)";
               type enumeration {
                 enum text;
                 enum md5;
@@ -2963,10 +3342,12 @@ module config {
               default text;
             }
             leaf key-id {
+              ext:help "Key identifier for hmac-sha auth-types";
               type uint16;
               default 1;
             }
             leaf send-only {
+              ext:help "Sign outbound, accept any inbound (rollover)";
               type boolean;
               default false;
             }
@@ -2983,6 +3364,7 @@ module config {
                the runtime subscribe / teardown calls.";
 
             leaf enabled {
+              ext:help "Enable BFD on this interface";
               type boolean;
               default false;
               description
@@ -3049,6 +3431,7 @@ module config {
                values are in microseconds.";
 
             leaf unidirectional-delay {
+              ext:help "Average one-way link delay (us)";
               type uint32 {
                 range "0..16777215";
               }
@@ -3058,6 +3441,7 @@ module config {
                  sub-TLV 33).";
             }
             leaf min-delay {
+              ext:help "Minimum one-way link delay (us)";
               type uint32 {
                 range "0..16777215";
               }
@@ -3068,6 +3452,7 @@ module config {
                  sub-TLV is emitted only when both are set.";
             }
             leaf max-delay {
+              ext:help "Maximum one-way link delay (us)";
               type uint32 {
                 range "0..16777215";
               }
@@ -3077,6 +3462,7 @@ module config {
                  sub-TLV 34).";
             }
             leaf delay-variation {
+              ext:help "One-way delay variation / jitter (us)";
               type uint32 {
                 range "0..16777215";
               }
@@ -3086,6 +3472,7 @@ module config {
                  §4.3, sub-TLV 35).";
             }
             leaf loss {
+              ext:help "Unidirectional link loss ratio";
               type uint32 {
                 range "0..16777214";
               }
@@ -3108,10 +3495,12 @@ module config {
                  Session-Reflector, so measurement must be enabled on
                  both ends of the link.";
               leaf enabled {
+                ext:help "Activate delay measurement on this link";
                 type boolean;
                 description "Activate measurement on this interface.";
               }
               leaf interval {
+                ext:help "STAMP probe transmit interval (ms)";
                 type uint32 {
                   range "100..60000";
                 }
@@ -3119,6 +3508,7 @@ module config {
                 description "Probe transmit interval. Default 1000 ms.";
               }
               leaf damping-period {
+                ext:help "Minimum spacing between IGP exports (s)";
                 type uint32 {
                   range "1..3600";
                 }
@@ -3132,6 +3522,7 @@ module config {
           }
 
           leaf-list affinity {
+            ext:help "Affinity-map (admin-group) memberships";
             // Names of /router/isis/affinity-map entries this link
             // belongs to. The union of their bit-positions forms the
             // 256-bit Extended Admin Group bitmap (RFC 7308)
@@ -3145,6 +3536,7 @@ module config {
           }
 
           leaf-list srlg {
+            ext:help "SRLG group memberships for this link";
             // Names of SRLG groups this link is a member of. Each name
             // references a /router/isis/srlg/group entry; the
             // name->value mapping (uint32s advertised in the IS-IS
@@ -3176,10 +3568,12 @@ module config {
           // widens toward full parity with the default instance.
           key "name";
           leaf name {
+            ext:help "VRF name";
             ext:dynamic "rib:vrf";
             type string;
           }
           leaf net {
+            ext:help "Network Entity Title (area + system-id)";
             // First entry in "router isis vrf X" node (mirrors the
             // top-level `net` sort) so forwarded config arrives
             // system-id-first.
@@ -3187,6 +3581,7 @@ module config {
             type isis:net;
           }
           leaf is-type {
+            ext:help "IS-IS level for this VRF (L1 / L1-2 / L2-only)";
             type enumeration {
               enum level-1;
               enum level-1-2;
@@ -3205,19 +3600,23 @@ module config {
             type inet:ipv4-address;
           }
           container timers {
+            ext:help "IS-IS protocol timers";
             // `hold-time` (hyphen) matches the callback path
             // `/router/isis/timers/hold-time`. (The top-level leaf is
             // also `hold-time`.)
             leaf hold-time {
+              ext:help "Adjacency hold time and LSP lifetime (seconds)";
               type uint16;
             }
             leaf lsp-refresh-interval {
+              ext:help "LSP refresh interval (seconds)";
               type uint16 {
                 range "1..65535";
               }
               units "seconds";
             }
             leaf min-lsp-arrival-time {
+              ext:help "Minimum LSP arrival spacing (ms)";
               type uint32 {
                 range "1..600000";
               }
@@ -3225,19 +3624,23 @@ module config {
             }
           }
           container spf-interval {
+            ext:help "SPF calculation throttle timers";
             leaf initial-wait {
+              ext:help "Initial SPF delay (ms)";
               type uint32 {
                 range "1..120000";
               }
               units "milliseconds";
             }
             leaf secondary-wait {
+              ext:help "Secondary SPF wait (ms)";
               type uint32 {
                 range "1..120000";
               }
               units "milliseconds";
             }
             leaf maximum-wait {
+              ext:help "Maximum SPF wait (ms)";
               type uint32 {
                 range "1..120000";
               }
@@ -3245,19 +3648,23 @@ module config {
             }
           }
           container lsp-gen-interval {
+            ext:help "LSP generation throttle timers";
             leaf initial-wait {
+              ext:help "Initial LSP-generation delay (ms)";
               type uint32 {
                 range "1..120000";
               }
               units "milliseconds";
             }
             leaf secondary-wait {
+              ext:help "Secondary LSP-generation wait (ms)";
               type uint32 {
                 range "1..120000";
               }
               units "milliseconds";
             }
             leaf maximum-wait {
+              ext:help "Maximum LSP-generation wait (ms)";
               type uint32 {
                 range "1..120000";
               }
@@ -3265,6 +3672,7 @@ module config {
             }
           }
           list afi-safi {
+            ext:help "Per-AFI networks and redistribution";
             // Per-AFI self-originated networks + redistribution
             // (mirrors the default instance, reusing the same
             // groupings). Forwarded `/router/isis/afi-safi/...` paths
@@ -3273,26 +3681,33 @@ module config {
             key "name";
             uses zas:afi-safi-unicast;
             list network {
+              ext:help "Network advertised into IS-IS";
               key "prefix";
               leaf prefix {
+                ext:help "Prefix to advertise";
                 type inet:ip-prefix;
               }
             }
             container redistribute {
+              ext:help "Redistribute routes into IS-IS";
               presence "Enable route redistribution into IS-IS for this AFI";
               container connected {
+                ext:help "Redistribute connected routes";
                 presence "Redistribute connected routes";
                 uses isis-redist-common;
               }
               container static {
+                ext:help "Redistribute static routes";
                 presence "Redistribute static routes";
                 uses isis-redist-common;
               }
               container bgp {
+                ext:help "Redistribute BGP routes";
                 presence "Redistribute BGP routes";
                 uses isis-redist-common;
               }
               container ospf {
+                ext:help "Redistribute OSPF routes";
                 presence "Redistribute OSPF routes";
                 uses isis-redist-common;
                 uses isis-redist-ospf-match;
@@ -3300,14 +3715,17 @@ module config {
             }
           }
           list interface {
+            ext:help "Per-interface IS-IS configuration";
             // Last item, mirroring the top-level interface sort.
             ext:sort "-10";
             key "if-name";
             leaf if-name {
+              ext:help "Interface name";
               ext:dynamic "rib:interface";
               type string;
             }
             leaf circuit-type {
+              ext:help "IS-IS level(s): L1 / L1-2 / L2-only";
               type enumeration {
                 enum level-1;
                 enum level-1-2;
@@ -3315,12 +3733,14 @@ module config {
               }
             }
             leaf network-type {
+              ext:help "Media type: LAN or point-to-point";
               type enumeration {
                 enum lan;
                 enum point-to-point;
               }
             }
             leaf passive {
+              ext:help "Passive circuit: advertise prefixes, no adjacency";
               type boolean;
               description
                 "Passive IS-IS circuit: advertise the interface's
@@ -3329,49 +3749,61 @@ module config {
                  leaf.";
             }
             leaf priority {
+              ext:help "DIS election priority on LAN circuits";
               type uint8;
             }
             container hello {
+              ext:help "IS-IS Hello (IIH) parameters";
               leaf padding {
+                ext:help "Pad Hello PDUs to full MTU";
                 type enumeration {
                   enum always;
                   enum disable;
                 }
               }
               leaf interval {
+                ext:help "Hello PDU transmit interval (seconds)";
                 type uint16 {
                   range "1..65535";
                 }
                 units "seconds";
               }
               leaf multiplier {
+                ext:help "Hold-time multiplier (missed Hellos to drop)";
                 type uint16 {
                   range "2..1000";
                 }
               }
             }
             leaf csnp-interval {
+              ext:help "CSNP transmit interval (seconds)";
               type uint16 {
                 range "1..65535";
               }
               units "seconds";
             }
             leaf psnp-interval {
+              ext:help "PSNP transmit interval (seconds)";
               type uint16 {
                 range "1..65535";
               }
               units "seconds";
             }
             leaf metric {
+              ext:help "IS-IS metric for this interface";
               type uint32;
             }
             container ipv4 {
+              ext:help "IPv4 address-family settings";
               leaf enabled {
+                ext:help "Enable IPv4 on this interface";
                 type boolean;
               }
             }
             container ipv6 {
+              ext:help "IPv6 address-family settings";
               leaf enabled {
+                ext:help "Enable IPv6 on this interface";
                 type boolean;
               }
             }
@@ -3395,11 +3827,13 @@ module config {
         // `locator`) — the VRF need not yet be declared at the
         // top-level `vrf` list when this config is parsed.
         list vrf {
+          ext:help "Per-VRF static route configuration";
           key "name";
           description
             "Per-VRF static-routing tree. All address families allowed
              at the global level are also allowed here.";
           leaf name {
+            ext:help "VRF name";
             type string;
             description
               "Name of the VRF this static block applies to. Matches
@@ -3427,6 +3861,7 @@ module config {
          per-block / per-locator install state.";
 
       list block {
+        ext:help "SR-MPLS label block (SRGB + SRLB)";
         key "name";
         description
           "SR-MPLS label block. Each block bundles an SR Global Block
@@ -3434,47 +3869,58 @@ module config {
            protocols (IS-IS, OSPF, BGP-LU) can share the same
            configuration by reference.";
         leaf name {
+          ext:help "Label block name";
           type string;
         }
         container global {
+          ext:help "SR Global Block (SRGB) label range";
           description
             "SR Global Block (SRGB) — prefix-SID label range advertised
              to the SR domain. Matches the IS-IS SR Capability TLV
              (RFC 8667 §3.1) <base-label, range> shape.";
           leaf start {
+            ext:help "First label of the SRGB range";
             type uint32;
           }
           leaf range {
+            ext:help "Number of labels in the SRGB";
             type uint32;
           }
         }
         container local {
+          ext:help "SR Local Block (SRLB) label range";
           description
             "SR Local Block (SRLB) — adjacency-SID label range used
              locally. Same <base-label, range> shape as global.";
           leaf start {
+            ext:help "First label of the SRLB range";
             type uint32;
           }
           leaf range {
+            ext:help "Number of labels in the SRLB";
             type uint32;
           }
         }
       }
 
       list locator {
+        ext:help "SRv6 locator (SID prefix)";
         key "name";
         description
           "SRv6 locator. The prefix is the IPv6 range from which SIDs
            are allocated; behavior selects the SID layout.";
         leaf name {
+          ext:help "Locator name";
           type string;
         }
         leaf prefix {
+          ext:help "IPv6 prefix for SID allocation";
           type inet:ipv6-prefix;
           description
             "IPv6 prefix from which SIDs are allocated for this locator.";
         }
         leaf behavior {
+          ext:help "SID layout (usid / replace / full)";
           type enumeration {
             enum usid;
             enum replace;
@@ -3488,6 +3934,7 @@ module config {
              classic RFC 8986 full-SID layout.";
         }
         leaf vrf {
+          ext:help "Bind node SID to this VRF (End.T)";
           type string;
           description
             "Bind the locator's node SID to this VRF's IPv6 table:
@@ -3498,6 +3945,7 @@ module config {
              replace.";
         }
         leaf-list flavor {
+          ext:help "Endpoint flavors (psp / usp / usd)";
           type enumeration {
             enum psp;
             enum usp;
@@ -3514,12 +3962,15 @@ module config {
     }
 
     list community-set {
+      ext:help "BGP standard community set";
       ext:sort "5";
       key "name";
       leaf name {
+        ext:help "Community-set name";
         type string;
       }
       leaf-list members {
+        ext:help "Community values in this set";
         type string;
         description
           "Members of the community set";
@@ -3527,12 +3978,15 @@ module config {
     }
 
     list ext-community-set {
+      ext:help "BGP extended community set";
       ext:sort "5";
       key "name";
       leaf name {
+        ext:help "Ext-community-set name";
         type string;
       }
       leaf-list members {
+        ext:help "RT / SoO matchers (rt: / soo:)";
         type string;
         description
           "Ext-community matchers. Each member is one of:
@@ -3546,12 +4000,15 @@ module config {
     }
 
     list large-community-set {
+      ext:help "BGP large community set";
       ext:sort "5";
       key "name";
       leaf name {
+        ext:help "Large-community-set name";
         type string;
       }
       leaf-list members {
+        ext:help "Large-community matchers (A:B:C or regex)";
         type string;
         description
           "Large-community matchers. Each member is either an
@@ -3563,12 +4020,15 @@ module config {
     }
 
     list as-path-set {
+      ext:help "AS-path match set";
       ext:sort "5";
       key "name";
       leaf name {
+        ext:help "AS-path set name";
         type string;
       }
       leaf-list members {
+        ext:help "AS-path regex matchers";
         type string;
         description
           "Regular expression members matched against the route's
@@ -3578,30 +4038,37 @@ module config {
     }
 
     list prefix-set {
+      ext:help "Prefix match set";
       ext:sort "6";
       key "name";
       leaf name {
+        ext:help "Prefix-set name";
         type string;
       }
       list "prefixes" {
+        ext:help "Prefix entry in the set";
         key "prefix";
         leaf "prefix" {
+          ext:help "IPv4/IPv6 prefix to match";
           type union {
             type inet:ipv4-prefix;
             type inet:ipv6-prefix;
           }
         }
         leaf le {
+          ext:help "Maximum prefix length to match";
           type uint8;
           description
             "Members of the prefix set";
         }
         leaf eq {
+          ext:help "Exact prefix length to match";
           type uint8;
           description
             "Members of the prefix set";
         }
         leaf ge {
+          ext:help "Minimum prefix length to match";
           type uint8;
           description
             "Members of the prefix set";
@@ -3609,13 +4076,16 @@ module config {
       }
     }
     list interface {
+      ext:help "Interface configuration";
       ext:sort "20";
       key "if-name";
       leaf if-name {
+        ext:help "Interface name";
         ext:dynamic "rib:interface";
         type string;
       }
       leaf vrf {
+        ext:help "Enslave interface to this VRF";
         // Highest priority among interface children so the enslave to
         // the VRF master is applied before any address: the kernel then
         // creates the connected route directly in the VRF table instead
@@ -3632,6 +4102,7 @@ module config {
            instance.";
       }
       leaf bridge {
+        ext:help "Enslave interface to this bridge";
         // Same priority as `vrf` (and mutually exclusive with it in
         // practice — an interface has a single kernel IFLA_MASTER):
         // apply the enslave before any address.
@@ -3662,17 +4133,22 @@ module config {
            kernel and reported by `show interface`.";
       }
       container ipv4 {
+        ext:help "IPv4 configuration";
         leaf address {
+          ext:help "IPv4 interface address";
           type inet:ipv4-prefix;
         }
       }
       container ipv6 {
+        ext:help "IPv6 configuration";
         leaf address {
+          ext:help "IPv6 interface address";
           type inet:ipv6-prefix;
         }
       }
     }
     list vrf {
+      ext:help "VRF routing instance";
       ext:sort "30";
       key "name";
       description
@@ -3680,6 +4156,7 @@ module config {
          The optional ipv4 / ipv6 containers carry the per-address-
          family Route Target import/export policy.";
       leaf name {
+        ext:help "VRF name";
         type string;
         description
           "Operator-assigned VRF identifier (e.g. CUST-A). Keys this
@@ -3698,16 +4175,19 @@ module config {
         type inet:ipv4-address;
       }
       container ipv4 {
+        ext:help "IPv4 unicast (VPNv4) route policy";
         description
           "IPv4 unicast (VPNv4 / RFC 4364) route policy for this VRF.";
         uses vrf-route-target-policy;
       }
       container ipv6 {
+        ext:help "IPv6 unicast (VPNv6) route policy";
         description
           "IPv6 unicast (VPNv6 / RFC 4659) route policy for this VRF.";
         uses vrf-route-target-policy;
       }
       container mup {
+        ext:help "BGP MUP route policy";
         description
           "BGP MUP (draft-ietf-bess-mup-safi) route policy for
            this VRF. The export RTs tag the Session-Transformed routes the
@@ -3719,30 +4199,38 @@ module config {
       }
     }
     list policy {
+      ext:help "Routing policy (route-map)";
       ext:sort "4";
       key "name";
       leaf "name" {
+        ext:help "Policy name";
         type string;
       }
       list entry {
+        ext:help "Policy entry (clause)";
         ext:sort "5";
         key "number";
         leaf "number" {
+          ext:help "Entry sequence number";
           type uint32;
         }
         container "match" {
+          ext:help "Match conditions";
           ext:sort "7";
           leaf "prefix-set" {
+            ext:help "Match a prefix-set by name";
             type string;
             description
               "Reference to a `prefix-set` by name.";
           }
           leaf "community" {
+            ext:help "Match a community-set by name";
             type string;
             description
               "Reference to a `community-set` by name.";
           }
           leaf "ext-community" {
+            ext:help "Match an ext-community-set by name";
             type string;
             description
               "Reference to an `ext-community-set` by name. The
@@ -3750,6 +4238,7 @@ module config {
                EXT_COMMUNITIES attribute.";
           }
           leaf "large-community" {
+            ext:help "Match a large-community-set by name";
             type string;
             description
               "Reference to a `large-community-set` by name. The
@@ -3757,11 +4246,13 @@ module config {
                LARGE_COMMUNITIES attribute.";
           }
           leaf "as-path" {
+            ext:help "Match an as-path-set by name";
             type string;
             description
               "Reference to an `as-path-set` by name.";
           }
           leaf "next-hop" {
+            ext:help "Match the BGP next-hop address";
             type union {
               type inet:ipv4-address;
               type inet:ipv6-address;
@@ -3773,6 +4264,7 @@ module config {
                with a prefix-set instead.";
           }
           container "med" {
+            ext:help "Match the MED (MULTI_EXIT_DISC)";
             presence "match med";
             description
               "Match the route's MULTI_EXIT_DISC against a single
@@ -3788,22 +4280,26 @@ module config {
                  `match med le NUM`, `match med ge NUM`.";
               case eq-case {
                 leaf "eq" {
+                  ext:help "Equal to this value";
                   type uint32;
                 }
               }
               case le-case {
                 leaf "le" {
+                  ext:help "Less than or equal to this value";
                   type uint32;
                 }
               }
               case ge-case {
                 leaf "ge" {
+                  ext:help "Greater than or equal to this value";
                   type uint32;
                 }
               }
             }
           }
           container "as-path-len" {
+            ext:help "Match the AS_PATH length";
             presence "match as-path-len";
             description
               "Match the total length of the route's AS_PATH
@@ -3813,22 +4309,26 @@ module config {
               mandatory true;
               case eq-case {
                 leaf "eq" {
+                  ext:help "Equal to this value";
                   type uint32;
                 }
               }
               case le-case {
                 leaf "le" {
+                  ext:help "Less than or equal to this value";
                   type uint32;
                 }
               }
               case ge-case {
                 leaf "ge" {
+                  ext:help "Greater than or equal to this value";
                   type uint32;
                 }
               }
             }
           }
           container "as-path-len-uniq" {
+            ext:help "Match count of distinct ASes";
             presence "match as-path-len-uniq";
             description
               "Match the count of distinct ASes in the route's
@@ -3838,22 +4338,26 @@ module config {
               mandatory true;
               case eq-case {
                 leaf "eq" {
+                  ext:help "Equal to this value";
                   type uint32;
                 }
               }
               case le-case {
                 leaf "le" {
+                  ext:help "Less than or equal to this value";
                   type uint32;
                 }
               }
               case ge-case {
                 leaf "ge" {
+                  ext:help "Greater than or equal to this value";
                   type uint32;
                 }
               }
             }
           }
           container "local-preference" {
+            ext:help "Match LOCAL_PREF value";
             presence "match local-preference";
             description
               "Match the route's LOCAL_PREF attribute against
@@ -3862,22 +4366,26 @@ module config {
               mandatory true;
               case eq-case {
                 leaf "eq" {
+                  ext:help "Equal to this value";
                   type uint32;
                 }
               }
               case le-case {
                 leaf "le" {
+                  ext:help "Less than or equal to this value";
                   type uint32;
                 }
               }
               case ge-case {
                 leaf "ge" {
+                  ext:help "Greater than or equal to this value";
                   type uint32;
                 }
               }
             }
           }
           container "weight" {
+            ext:help "Match the BGP weight";
             presence "match weight";
             description
               "Match the route's BGP weight (per-router,
@@ -3887,22 +4395,26 @@ module config {
               mandatory true;
               case eq-case {
                 leaf "eq" {
+                  ext:help "Equal to this value";
                   type uint32;
                 }
               }
               case le-case {
                 leaf "le" {
+                  ext:help "Less than or equal to this value";
                   type uint32;
                 }
               }
               case ge-case {
                 leaf "ge" {
+                  ext:help "Greater than or equal to this value";
                   type uint32;
                 }
               }
             }
           }
           leaf "origin" {
+            ext:help "Match the ORIGIN attribute";
             type enumeration {
               enum igp;
               enum egp;
@@ -3910,6 +4422,7 @@ module config {
             }
           }
           leaf "color" {
+            ext:help "Match the BGP Color community";
             type uint32;
             description
               "Match a BGP Color Extended Community (RFC 9012 §4.3,
@@ -3920,6 +4433,7 @@ module config {
                the predicate.";
           }
           container "evpn" {
+            ext:help "Match EVPN route attributes";
             description
               "Match EVPN route attributes. `route-type` selects
                one of the BGP-EVPN NLRI route types (RFC 7432
@@ -3928,6 +4442,7 @@ module config {
                route (encapsulation extended community or
                Type-2/Type-3 MPLS label field).";
             leaf "route-type" {
+              ext:help "Match the EVPN route type";
               type enumeration {
                 enum ead {
                   description
@@ -3958,6 +4473,7 @@ module config {
                 "Match EVPN route type.";
             }
             leaf "vni" {
+              ext:help "Match the EVPN VNI";
               type uint32 {
                 range "1..16777215";
               }
@@ -3967,8 +4483,10 @@ module config {
           }
         }
         container "set" {
+          ext:help "Set (modify) route attributes";
           ext:sort "3";
           container "local-preference" {
+            ext:help "Set the LOCAL_PREF attribute";
             presence "set local-preference";
             description
               "Set the route's LOCAL_PREF attribute. Exactly one
@@ -3979,22 +4497,26 @@ module config {
               mandatory true;
               case set-case {
                 leaf "set" {
+                  ext:help "Overwrite with this value";
                   type uint32;
                 }
               }
               case add-case {
                 leaf "add" {
+                  ext:help "Add to the current value";
                   type uint32;
                 }
               }
               case sub-case {
                 leaf "sub" {
+                  ext:help "Subtract from the current value";
                   type uint32;
                 }
               }
             }
           }
           container "med" {
+            ext:help "Set the MED (MULTI_EXIT_DISC)";
             presence "set med";
             description
               "Set the route's MULTI_EXIT_DISC. Same shape as
@@ -4004,22 +4526,26 @@ module config {
               mandatory true;
               case set-case {
                 leaf "set" {
+                  ext:help "Overwrite with this value";
                   type uint32;
                 }
               }
               case add-case {
                 leaf "add" {
+                  ext:help "Add to the current value";
                   type uint32;
                 }
               }
               case sub-case {
                 leaf "sub" {
+                  ext:help "Subtract from the current value";
                   type uint32;
                 }
               }
             }
           }
           leaf "weight" {
+            ext:help "Set the local BGP weight";
             type uint32;
             description
               "Set the route's local BGP weight. Higher weight
@@ -4029,6 +4555,7 @@ module config {
                updates.";
           }
           container "next-hop" {
+            ext:help "Set the BGP next-hop";
             presence "set next-hop";
             description
               "Set the route's BGP NEXT_HOP attribute. Either an
@@ -4042,6 +4569,7 @@ module config {
               mandatory true;
               case address-case {
                 leaf "address" {
+                  ext:help "Next-hop IP address";
                   type union {
                     type inet:ipv4-address;
                     type inet:ipv6-address;
@@ -4050,12 +4578,14 @@ module config {
               }
               case self-case {
                 leaf "self" {
+                  ext:help "Use this router as the next-hop";
                   type empty;
                 }
               }
             }
           }
           leaf "origin" {
+            ext:help "Set the ORIGIN attribute";
             type enumeration {
               enum igp;
               enum egp;
@@ -4066,6 +4596,7 @@ module config {
                three values that `match origin` accepts.";
           }
           leaf "color" {
+            ext:help "Set the BGP Color community";
             type uint32;
             description
               "Append a BGP Color Extended Community (RFC 9012 §4.3)
@@ -4075,6 +4606,7 @@ module config {
                `/router/bgp/color-policy`.";
           }
           container "prefix-sid" {
+            ext:help "Set the BGP Prefix-SID attribute";
             presence "set prefix-sid";
             description
               "Install a BGP Prefix-SID attribute (RFC 8669, attr 40)
@@ -4082,6 +4614,7 @@ module config {
                settable; Originator-SRGB and SRv6 service TLVs are
                populated by other code paths.";
             leaf "label-index" {
+              ext:help "Prefix-SID label index (RFC 8669)";
               type uint32;
               description
                 "Replace the route's Prefix-SID attribute with a
@@ -4090,6 +4623,7 @@ module config {
             }
           }
           container "community" {
+            ext:help "Set/add/delete route communities";
             presence "set community";
             description
               "Apply a community-set to the route. The choice
@@ -4099,6 +4633,7 @@ module config {
                additive merges them in, delete removes them from
                the existing attribute (set difference).";
             leaf "name" {
+              ext:help "Community-set to apply";
               type string;
               mandatory true;
               description
@@ -4115,6 +4650,7 @@ module config {
               }
               case additive-case {
                 leaf "additive" {
+                  ext:help "Merge into existing communities";
                   type empty;
                   description
                     "Merge the set's members into the existing
@@ -4123,6 +4659,7 @@ module config {
               }
               case delete-case {
                 leaf "delete" {
+                  ext:help "Remove from existing communities";
                   type empty;
                   description
                     "Remove the set's members from the existing
@@ -4132,6 +4669,7 @@ module config {
             }
           }
           container "as-path-prepend" {
+            ext:help "Prepend an AS to AS_PATH";
             presence "Prepend `asn` onto AS_PATH `repeat` times.";
             description
               "Prepend a single AS number to AS_PATH. The same `asn`
@@ -4140,12 +4678,14 @@ module config {
                BGP traffic-engineering knob for biasing best-path
                selection on the receiver.";
             leaf "asn" {
+              ext:help "AS number to prepend";
               type inet:as-number;
               mandatory true;
               description
                 "AS number to prepend onto AS_PATH.";
             }
             leaf "repeat" {
+              ext:help "Times to prepend the AS (default 1)";
               type uint8 {
                 range "1..255";
               }
@@ -4156,6 +4696,7 @@ module config {
           }
         }
         leaf "action" {
+          ext:help "Terminal action: permit, deny, or next";
           ext:sort "1";
           mandatory true;
           description

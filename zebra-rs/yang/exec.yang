@@ -135,7 +135,9 @@ module exec {
       }
     }
     container mpls {
+      ext:help "MPLS forwarding information";
       leaf ilm {
+        ext:help "MPLS incoming label map (ILM)";
         type empty;
       }
     }
@@ -170,8 +172,10 @@ module exec {
       ext:help "Show community-set";
       presence "Show community-set";
       list name {
+        ext:help "A named community-set";
         key name;
         leaf name {
+          ext:help "Community-set name";
           type string;
         }
       }
@@ -180,8 +184,10 @@ module exec {
       ext:help "Show ext-community-set";
       presence "Show ext-community-set";
       list name {
+        ext:help "A named ext-community-set";
         key name;
         leaf name {
+          ext:help "Ext-community-set name";
           type string;
         }
       }
@@ -190,8 +196,10 @@ module exec {
       ext:help "Show large-community-set";
       presence "Show large-community-set";
       list name {
+        ext:help "A named large-community-set";
         key name;
         leaf name {
+          ext:help "Large-community-set name";
           type string;
         }
       }
@@ -200,8 +208,10 @@ module exec {
       ext:help "Show as-path-set";
       presence "Show as-path-set";
       list name {
+        ext:help "A named as-path-set";
         key name;
         leaf name {
+          ext:help "As-path-set name";
           type string;
         }
       }
@@ -210,8 +220,10 @@ module exec {
       ext:help "Show key-chains";
       presence "Show key-chains";
       list name {
+        ext:help "A named key-chain";
         key name;
         leaf name {
+          ext:help "Key-chain name";
           type string;
         }
       }
@@ -221,22 +233,28 @@ module exec {
       ext:presence "Show presence";
       key "if-name-brief";
       leaf if-name-brief {
+        ext:help "Interface name";
         ext:dynamic "rib:interface";
         type string;
       }
       leaf detail {
+        ext:help "Interface detail";
         type empty;
       }
     }
     leaf hostname {
+      ext:help "System host name";
       type empty;
       description
         "The name of the host.  This name can be a single domain
         label or the fully qualified domain name of the host.";
     }
     container evpn {
+      ext:help "EVPN information";
       container vni {
+        ext:help "EVPN VNI information";
         leaf all {
+          ext:help "All EVPN VNIs";
           type empty;
         }
       }
@@ -290,6 +308,7 @@ module exec {
         ext:presence "BGP all neighbor information";
         key name;
         leaf name {
+          ext:help "Neighbor address or interface";
           ext:dynamic "bgp:neighbor";
           // Accept either address family (peers are keyed by
           // `IpAddr`) or an `interface-neighbor` name — IPv6
@@ -309,15 +328,18 @@ module exec {
           }
         }
         leaf rtcv4 {
+          ext:help "Route Target Constraint (RTC) routes";
           type empty;
         }
         container advertised-routes {
+          ext:help "Advertised routes (Adj-RIB-Out)";
           presence "";
           leaf ipv6 {
             ext:help "IPv6 unicast Adj-RIB-Out";
             type empty;
           }
           leaf vpnv4 {
+            ext:help "VPNv4 Adj-RIB-Out";
             type empty;
           }
           leaf evpn {
@@ -326,12 +348,14 @@ module exec {
           }
         }
         container received-routes {
+          ext:help "Received routes (Adj-RIB-In)";
           presence "";
           leaf ipv6 {
             ext:help "IPv6 unicast Adj-RIB-In";
             type empty;
           }
           leaf vpnv4 {
+            ext:help "VPNv4 Adj-RIB-In";
             type empty;
           }
           leaf evpn {
@@ -468,6 +492,7 @@ module exec {
         type empty;
       }
       leaf attributes {
+        ext:help "BGP path attribute table";
         type empty;
       }
       list neighbor-group {
@@ -475,6 +500,7 @@ module exec {
         ext:presence "Show every configured neighbor-group";
         key name;
         leaf name {
+          ext:help "Neighbor-group name";
           ext:dynamic "bgp:neighbor-group";
           type string;
         }
@@ -523,6 +549,7 @@ module exec {
           ext:presence "Show one IPv4 prefix";
           key value;
           leaf value {
+            ext:help "IPv4 prefix (A.B.C.D/M)";
             type inet:ipv4-prefix;
           }
           leaf detail {
@@ -558,6 +585,7 @@ module exec {
         ext:help "OSPF neighbor";
         presence "OSPF neighbor";
         leaf detail {
+          ext:help "OSPF neighbor detail";
           type empty;
         }
       }
@@ -565,16 +593,20 @@ module exec {
         ext:help "OSPF database";
         presence "OSPF ddtabase";
         leaf detail {
+          ext:help "OSPF database detail";
           type empty;
         }
       }
       leaf route {
+        ext:help "OSPF routes";
         type empty;
       }
       leaf graph {
+        ext:help "OSPF topology graph";
         type empty;
       }
       leaf spf {
+        ext:help "OSPF SPF results";
         type empty;
       }
       leaf ti-lfa {
@@ -594,6 +626,7 @@ module exec {
         type empty;
       }
       leaf segment-routing {
+        ext:help "OSPF Segment Routing state";
         type empty;
       }
       leaf graceful-restart {
@@ -628,6 +661,7 @@ module exec {
           ext:help "OSPF neighbors in this VRF";
           presence "OSPF neighbor";
           leaf detail {
+            ext:help "OSPF neighbor detail in this VRF";
             type empty;
           }
         }
@@ -635,6 +669,7 @@ module exec {
           ext:help "OSPF database in this VRF";
           presence "OSPF database";
           leaf detail {
+            ext:help "OSPF database detail in this VRF";
             type empty;
           }
         }
@@ -672,6 +707,7 @@ module exec {
           ext:presence "Show TI-LFA repair detail for one prefix";
           key value;
           leaf value {
+            ext:help "IPv4 prefix (A.B.C.D/M)";
             type inet:ipv4-prefix;
           }
           leaf detail {
@@ -693,14 +729,18 @@ module exec {
         }
       }
       container dis {
+        ext:help "IS-IS DIS election";
         leaf statistics {
+          ext:help "DIS election statistics";
           type empty;
         }
         leaf history {
+          ext:help "DIS election history";
           type empty;
         }
       }
       leaf graph {
+        ext:help "IS-IS topology graph";
         type empty;
       }
       container spf {
@@ -766,6 +806,7 @@ module exec {
             ext:presence "Show flex-algo routes for one algorithm";
             key value;
             leaf value {
+              ext:help "Algorithm ID (0-255)";
               type uint8;
             }
           }
@@ -827,6 +868,7 @@ module exec {
           ext:presence "Show one IPv6 prefix";
           key value;
           leaf value {
+            ext:help "IPv6 prefix (X:X::X:X/M)";
             type inet:ipv6-prefix;
           }
           leaf detail {
@@ -857,6 +899,7 @@ module exec {
           ext:presence "Show all interfaces";
           key if-name;
           leaf if-name {
+            ext:help "Interface name";
             ext:dynamic "rib:interface";
             type string;
           }
@@ -875,6 +918,7 @@ module exec {
         ext:help "OSPFv3 neighbor";
         presence "OSPFv3 neighbor";
         leaf detail {
+          ext:help "OSPFv3 neighbor detail";
           type empty;
         }
       }
@@ -882,16 +926,20 @@ module exec {
         ext:help "OSPFv3 LSDB";
         presence "OSPFv3 LSDB";
         leaf detail {
+          ext:help "OSPFv3 LSDB detail";
           type empty;
         }
       }
       leaf route {
+        ext:help "OSPFv3 routes";
         type empty;
       }
       leaf graph {
+        ext:help "OSPFv3 topology graph";
         type empty;
       }
       leaf spf {
+        ext:help "OSPFv3 SPF results";
         type empty;
       }
       leaf ti-lfa {
@@ -911,6 +959,7 @@ module exec {
         type empty;
       }
       leaf segment-routing {
+        ext:help "OSPFv3 Segment Routing state";
         type empty;
       }
       leaf srv6 {
@@ -947,6 +996,7 @@ module exec {
           ext:help "OSPFv3 neighbors in this VRF";
           presence "OSPFv3 neighbor";
           leaf detail {
+            ext:help "OSPFv3 neighbor detail in this VRF";
             type empty;
           }
         }
@@ -954,6 +1004,7 @@ module exec {
           ext:help "OSPFv3 database in this VRF";
           presence "OSPFv3 database";
           leaf detail {
+            ext:help "OSPFv3 database detail in this VRF";
             type empty;
           }
         }
@@ -983,8 +1034,10 @@ module exec {
       ext:help "Show prefix-set";
       presence "Show prefix-set";
       list name {
+        ext:help "A named prefix-set";
         key name;
         leaf name {
+          ext:help "Prefix-set name";
           type string;
         }
       }

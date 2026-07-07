@@ -65,6 +65,7 @@ module zebra-bgp-evpn {
        meaningful when the list entry's name is `bt:evpn` —
        harmless and ignored on other AFI/SAFIs.";
     leaf advertise-all-vni {
+      ext:help "Advertise routes for all local VNIs";
       type boolean;
       default false;
       description
@@ -79,6 +80,7 @@ module zebra-bgp-evpn {
          `address-family l2vpn evpn`.";
     }
     leaf encapsulation {
+      ext:help "EVPN overlay encapsulation (vxlan or srv6)";
       type enumeration {
         enum vxlan {
           description
@@ -102,6 +104,7 @@ module zebra-bgp-evpn {
          received MAC routes.";
     }
     leaf igmp-mld-proxy {
+      ext:help "Advertise IGMP/MLD proxy capability (RFC 9251)";
       type boolean;
       default false;
       description
@@ -114,6 +117,7 @@ module zebra-bgp-evpn {
          (IGMP-only / MLD-only) is a follow-up.";
     }
     leaf segmentation {
+      ext:help "Advertise BUM tunnel segmentation (RFC 9572)";
       type boolean;
       default false;
       description
@@ -124,6 +128,7 @@ module zebra-bgp-evpn {
          supports the RFC 9572 segmentation procedures.";
     }
     list ethernet-segment {
+      ext:help "EVPN Ethernet Segment, a multihomed CE (RFC 7432)";
       key "name";
       description
         "EVPN Ethernet Segment (RFC 7432) — a CE multihomed to two or more
@@ -132,16 +137,19 @@ module zebra-bgp-evpn {
          Designated-Forwarder election. Config + state only in this phase;
          Type-1/4 origination and DF election are later phases.";
       leaf name {
+        ext:help "Ethernet Segment name";
         type string;
         description "Operator-chosen Ethernet Segment name (the list key).";
       }
       leaf esi {
+        ext:help "10-octet Ethernet Segment Identifier";
         type string;
         description
           "10-octet Ethernet Segment Identifier, colon-hex (00:11:..:99) or
            20 bare hex digits. Manual Type-0 ESI in this phase.";
       }
       leaf redundancy-mode {
+        ext:help "All-active or single-active multihoming";
         type enumeration {
           enum all-active {
             description
@@ -157,11 +165,13 @@ module zebra-bgp-evpn {
         description "All-active (default) or single-active multihoming.";
       }
       leaf interface {
+        ext:help "Access interface (CE-facing port) for this ES";
         type string;
         description "Access interface (CE-facing port) bound to this ES.";
       }
     }
     list vpws {
+      ext:help "EVPN VPWS point-to-point E-Line service (RFC 8214)";
       key "name";
       description
         "EVPN VPWS service (RFC 8214) — a point-to-point E-Line between one
@@ -172,10 +182,12 @@ module zebra-bgp-evpn {
          Type-1 by matching its Ethernet Tag against remote-service-id and
          cross-connects the AC to the remote SID.";
       leaf name {
+        ext:help "VPWS service name";
         type string;
         description "Operator-chosen VPWS service name (the list key).";
       }
       leaf evi {
+        ext:help "EVPN Instance the service belongs to";
         type uint32 {
           range "1..16777215";
         }
@@ -185,6 +197,7 @@ module zebra-bgp-evpn {
            RD (router-id:evi) and RT (AS:evi) both ends must share.";
       }
       leaf local-service-id {
+        ext:help "Local VPWS service id (Type-1 Eth Tag)";
         type uint32;
         mandatory true;
         description
@@ -193,6 +206,7 @@ module zebra-bgp-evpn {
            remote-service-id.";
       }
       leaf remote-service-id {
+        ext:help "Remote VPWS service id to match on Type-1";
         type uint32;
         mandatory true;
         description
@@ -200,11 +214,13 @@ module zebra-bgp-evpn {
            binds the remote End.DX2 SID as this AC's cross-connect target.";
       }
       leaf interface {
+        ext:help "Attachment circuit (CE-facing port) of the E-Line";
         type string;
         mandatory true;
         description "Attachment circuit (CE-facing port) of the E-Line.";
       }
       leaf mtu {
+        ext:help "L2 MTU signalled on the Type-1 route (0 disables)";
         type uint16;
         default 0;
         description
@@ -214,6 +230,7 @@ module zebra-bgp-evpn {
            remote is not bound (the service shows mtu-mismatch).";
       }
       leaf vlan {
+        ext:help "802.1Q VID scoping the attachment circuit";
         type uint16 {
           range "1..4094";
         }
@@ -226,6 +243,7 @@ module zebra-bgp-evpn {
       }
     }
     leaf bum-tunnel-type {
+      ext:help "Inclusive BUM P-tunnel type (Type-3 PMSI)";
       type enumeration {
         enum ingress-replication {
           description
@@ -252,6 +270,7 @@ module zebra-bgp-evpn {
          tree Root; they bypass Assisted Replication.";
     }
     container pruned-flood-list {
+      ext:help "RFC 9574 Pruned-Flood-List pruning request";
       description
         "RFC 9574 Pruned-Flood-List: request that remote PEs prune this
          node from the named BUM flood categories by setting the matching
@@ -260,6 +279,7 @@ module zebra-bgp-evpn {
          (one flood list per VNI), so a remote is dropped from the flood
          list only when it prunes BOTH categories.";
       leaf broadcast-multicast {
+        ext:help "Prune from broadcast/multicast flood list";
         type boolean;
         default false;
         description
@@ -267,6 +287,7 @@ module zebra-bgp-evpn {
            list (RFC 9574 BM flag).";
       }
       leaf unknown-unicast {
+        ext:help "Prune from unknown-unicast flood (U flag)";
         type boolean;
         default false;
         description
@@ -275,11 +296,13 @@ module zebra-bgp-evpn {
       }
     }
     container assisted-replication {
+      ext:help "Assisted Replication role (RFC 9574)";
       description
         "RFC 9574 Optimized Ingress Replication (Assisted Replication)
          role for the local speaker. Applies to every VNI advertised
          under `advertise-all-vni`.";
       leaf role {
+        ext:help "Assisted Replication role for this speaker";
         type enumeration {
           enum none {
             description
@@ -303,6 +326,7 @@ module zebra-bgp-evpn {
            Tunnel attribute (RFC 9574 §4, the T field).";
       }
       leaf replicator-ip {
+        ext:help "AR-IP address advertised by an AR-REPLICATOR";
         type inet:ip-address;
         description
           "The AR-IP — a distinct routable local address advertised in
@@ -311,6 +335,7 @@ module zebra-bgp-evpn {
            `replicator`; ignored otherwise.";
       }
       leaf selective {
+        ext:help "Enable Selective Assisted Replication (RFC 9574)";
         type boolean;
         default false;
         description
@@ -324,12 +349,14 @@ module zebra-bgp-evpn {
       }
     }
     container sr-p2mp-dataplane {
+      ext:help "SRv6 P2MP BUM-replication dataplane binding";
       description
         "Interfaces + next hop the SRv6 P2MP (RFC 9524) BUM-replication eBPF
          dataplane (offload/tc-evpn-replicate) attaches to. Consulted only
          when bum-tunnel-type is srv6-p2mp; with the offload absent the
          control plane still signals and nothing forwards.";
       leaf overlay-interface {
+        ext:help "Bridge port for root H.Encaps classifier";
         type string;
         description
           "Bridge port the root H.Encaps classifier attaches to (egress):
@@ -337,18 +364,21 @@ module zebra-bgp-evpn {
            leaf End.DT2M SID.";
       }
       leaf underlay-interface {
+        ext:help "SR underlay NIC for replicated copies";
         type string;
         description
           "SR underlay NIC: replicated copies leave here, and the leaf
            End.DT2M decap classifier attaches to its ingress.";
       }
       leaf bridge-interface {
+        ext:help "Bridge port a leaf floods decapped BUM into";
         type string;
         description
           "Bridge port a leaf floods decapped BUM frames into for native
            delivery to the local attachment circuits.";
       }
       leaf next-hop-mac {
+        ext:help "Outer Ethernet next-hop MAC on the underlay";
         type string;
         description
           "Outer Ethernet next-hop MAC (aa:bb:cc:dd:ee:ff) the encapsulated

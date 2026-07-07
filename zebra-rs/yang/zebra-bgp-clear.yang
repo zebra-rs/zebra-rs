@@ -87,9 +87,11 @@ module zebra-bgp-clear {
        every AFI container under /clear/bgp/. Used by ipv4, ipv6,
        vpnv4, evpn alike.";
     list neighbor {
+      ext:help "Clear one or all BGP neighbors";
       ext:presence "BGP neighbor clear actions";
       key address;
       leaf address {
+        ext:help "Neighbor address (or all)";
         ext:dynamic "bgp:neighbor";
         type peer-id-or-all;
       }

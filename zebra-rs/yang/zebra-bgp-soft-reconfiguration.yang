@@ -64,6 +64,7 @@ module zebra-bgp-soft-reconfiguration {
       "FRR-style soft-reconfiguration leaves on a BGP neighbor.";
 
     container soft-reconfiguration {
+      ext:help "Inbound soft-reconfiguration settings";
       description
         "Soft-reconfiguration knobs for this neighbor.";
 

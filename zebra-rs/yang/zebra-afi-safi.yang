@@ -37,6 +37,7 @@ module zebra-afi-safi {
       "The `name` key for a BGP `afi-safi` list — the full set of
        families zebra-rs's BGP supports.";
     leaf name {
+      ext:help "Address family / sub-address family";
       ext:no-sort "true";
       type enumeration {
         enum ipv4 {
@@ -107,6 +108,7 @@ module zebra-afi-safi {
       "The `name` key for a unicast-only `afi-safi` list — used by
        IS-IS and the per-VRF BGP afi-safi.";
     leaf name {
+      ext:help "Address family";
       type enumeration {
         enum ipv4 {
           description "IPv4 unicast.";
