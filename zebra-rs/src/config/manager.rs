@@ -1445,9 +1445,9 @@ mod yang_load_tests {
     /// `enabled` — the OpenConfig style-guide name, and already the
     /// spelling of the inherited `ietf-bgp` knobs (`afi-safi <af>
     /// enabled`). The vendored `ietf-*` modules keep their published
-    /// spelling (including the two `leaf enable` holdouts:
-    /// `route-flap-damping` and RFC 8177 AES key wrap, neither wired to a
-    /// handler), and `exec.yang` is excluded because its (commented-out)
+    /// spelling (including the remaining `leaf enable` holdout, the
+    /// RFC 8177 AES key wrap, not wired to a handler), and `exec.yang`
+    /// is excluded because its (commented-out)
     /// `enable` is the session privilege-promotion command, not a config
     /// boolean.
     #[test]
@@ -2040,11 +2040,10 @@ mod yang_load_tests {
     }
 
     /// `router bgp neighbor <addr>` is dead config on its own — without a
-    /// `remote-as` (or a `peer-group` that supplies one) it can never form a
-    /// session. The address-keyed neighbor list is tagged
-    /// `ext:non-empty "remote-as or peer-group"`: a bare entry is rejected at
-    /// commit, and deleting its last child prunes it. Same generic machinery
-    /// as the IS-IS afi-safi / static-route cases — this pins the
+    /// `remote-as` it can never form a session. The address-keyed neighbor
+    /// list is tagged `ext:non-empty "remote-as"`: a bare entry is rejected
+    /// at commit, and deleting its last child prunes it. Same generic
+    /// machinery as the IS-IS afi-safi / static-route cases — this pins the
     /// `ietf-bgp` neighbor tag through the real schema.
     #[test]
     fn bgp_neighbor_bare_entry_rejected_and_pruned() {
@@ -2085,9 +2084,9 @@ mod yang_load_tests {
         // Bare `neighbor 192.168.1.3` → rejected.
         let errors = validate_errors(&paths("router bgp neighbor 192.168.1.3"));
         assert!(
-            errors.iter().any(
-                |e| e.contains("neighbor 192.168.1.3") && e.contains("remote-as or peer-group")
-            ),
+            errors
+                .iter()
+                .any(|e| e.contains("neighbor 192.168.1.3") && e.contains("remote-as")),
             "bare bgp neighbor must be rejected, got: {errors:?}"
         );
 

@@ -275,83 +275,9 @@ submodule ietf-bgp-common {
     //  leaf remove-private-as {
     //    type bt:remove-private-as-option;
     //  }
-    container route-flap-damping {
-      if-feature "bt:damping";
-      leaf enable {
-        type boolean;
-        default "false";
-        description
-          "Enable route flap damping.";
-      }
-      leaf suppress-above {
-        type decimal64 {
-          fraction-digits 1;
-        }
-        default "3.0";
-        description
-          "This is the value of the instability metric at which
-           route suppression takes place. A route is not installed
-           in the forwarding information base (FIB), or announced
-           even if it is reachable during the period that it is
-           suppressed.";
-      }
-      leaf reuse-above {
-        type decimal64 {
-          fraction-digits 1;
-        }
-        default "2.0";
-        description
-          "This is the value of the instability metric at which a
-           suppressed route becomes unsuppressed if it is reachable
-           but currently suppressed. The value assigned to
-           reuse-below must be less than suppress-above.";
-      }
-      leaf max-flap {
-        type decimal64 {
-          fraction-digits 1;
-        }
-        default "16.0";
-        description
-          "This is the upper limit of the instability metric. This
-           value must be greater than the larger of 1 and
-           suppress-above.";
-      }
-      leaf reach-decay {
-        type uint32;
-        units "seconds";
-        default "300";
-        description
-          "This value specifies the time desired for the instability
-           metric value to reach one-half of its current value when
-           the route is reachable. This half-life value determines
-           the rate at which the metric value is decayed. A smaller
-           half-life value makes a suppressed route reusable sooner
-           than a larger value.";
-      }
-      leaf unreach-decay {
-        type uint32;
-        units "seconds";
-        default "900";
-        description
-          "This value acts the same as reach-decay except that it
-           specifies the rate at which the instability metric is
-           decayed when a route is unreachable. It should have a
-           value greater than or equal to reach-decay.";
-      }
-      leaf keep-history {
-        type uint32;
-        units "seconds";
-        default "1800";
-        description
-          "This value specifies the period over which the route
-           flapping history is to be maintained for a given route.
-           The size of the configuration arrays described below is
-           directly affected by this value.";
-      }
-      description
-        "Routes learned via BGP are subject to weighted route
-         dampening.";
-    }
+    // route-flap-damping was removed from neighbor-group-config: it was an
+    // unhandled orphan (no config handler) on every consumer of this
+    // grouping and has been dropped.
     leaf-list send-community {
       if-feature "bct:send-communities";
       type identityref {
