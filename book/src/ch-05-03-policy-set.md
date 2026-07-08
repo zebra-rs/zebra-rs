@@ -12,7 +12,8 @@ This chapter walks every `set` clause grouped by what it touches:
 2. **Numeric attribute (plain assign)** — `weight`.
 3. **Enum** — `origin`.
 4. **Address** — `next-hop` (IPv4 / IPv6 / `self`).
-5. **Communities** — `community` (replace / additive / delete).
+5. **Communities** — `community`, `ext-community`, and
+   `large-community` (each replace / additive / delete).
 6. **AS path** — `as-path-prepend`.
 
 ## Numeric attributes with deltas
@@ -275,6 +276,73 @@ policy STRIP-NO-EXPORT {
 }
 ```
 
+## `set ext-community`
+
+The extended-community twin of `set community`: apply an
+`ext-community-set` to the route's EXT_COMMUNITIES attribute, with
+the same three modes (`replace` default / `additive` / `delete`).
+Only the set's **exact** `rt:` / `soo:` members contribute concrete
+values — regex members (e.g. `rt:^65001:.*`) are matchers, not
+values, and are skipped.
+
+```console
+ext-community-set TENANT-RTS {
+    members {
+        rt:65001:100;
+        rt:1.2.3.4:200;
+    }
+}
+
+policy TAG-TENANT {
+    entry 10 {
+        action permit;
+        set {
+            ext-community {
+                name TENANT-RTS;
+                additive;
+            }
+        }
+    }
+}
+```
+
+`replace` (no keyword) overwrites the whole EXT_COMMUNITIES
+attribute — **including any route targets or Color community the
+route already carried** — so reach for `additive` whenever you mean
+to add rather than reset. `delete` removes the named members
+(set difference).
+
+## `set large-community`
+
+The large-community twin, over the LARGE_COMMUNITIES attribute.
+Members are exact `A:B:C` triples (RFC 8092); the three modes match
+`set community`.
+
+```console
+large-community-set REGION-TAGS {
+    members {
+        65001:1:100;
+        65001:1:200;
+    }
+}
+
+policy TAG-REGION {
+    entry 10 {
+        action permit;
+        set {
+            large-community {
+                name REGION-TAGS;
+                additive;
+            }
+        }
+    }
+}
+```
+
+All three community set-actions surface in `show bgp -j` as the
+`community`, `ext_community`, and `large_community` route fields, so
+you can confirm what a policy stamped.
+
 ## `set as-path-prepend`
 
 Prepend an ASN onto the AS_PATH a configurable number of times.
@@ -309,9 +377,11 @@ order against the working attribute set:
 2. `med`
 3. `weight`
 4. `community`
-5. `as-path-prepend`
-6. `next-hop`
-7. `origin`
+5. `ext-community`
+6. `large-community`
+7. `as-path-prepend`
+8. `next-hop`
+9. `origin`
 
 The order matters in two cases:
 

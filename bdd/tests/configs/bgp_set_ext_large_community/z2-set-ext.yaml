@@ -1,0 +1,26 @@
+ext-community-set:
+- name: RT-SET
+  members:
+  - "rt:65001:100"
+policy:
+- name: STAMP-EXT
+  entry:
+  - number: 10
+    action: permit
+    set:
+      ext-community:
+        name: RT-SET
+router:
+  bgp:
+    global:
+      as: 65002
+      router-id: 192.168.0.2
+    neighbor:
+    - remote-address: 192.168.0.1
+      afi-safi:
+      - name: ipv4
+        enabled: true
+        policy:
+          in: STAMP-EXT
+      enabled: true
+      remote-as: 65001
