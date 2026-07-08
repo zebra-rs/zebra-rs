@@ -1,7 +1,7 @@
 all:
 	rm -rf allure-results
 	mkdir -p allure-results
-	cargo test --test cucumber -- --concurrency=1
+	cargo test --test cucumber -- --concurrency=8
 
 ibgp:
 	mkdir -p allure-results
