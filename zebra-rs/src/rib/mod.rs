@@ -54,8 +54,6 @@ pub mod nht;
 
 pub mod label_manager;
 
-// pub mod nanomsg;
-
 pub mod router_id;
 
 pub mod mac_addr;

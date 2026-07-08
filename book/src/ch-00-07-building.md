@@ -53,7 +53,7 @@ On Ubuntu/Debian:
 ``` shell
 sudo apt update
 sudo apt install -y build-essential pkg-config curl \
-    protobuf-compiler libpam0g-dev libnanomsg-dev bison xxd
+    protobuf-compiler libpam0g-dev bison xxd
 ```
 
 | Package | Needed for |
@@ -61,7 +61,6 @@ sudo apt install -y build-essential pkg-config curl \
 | `build-essential`, `pkg-config`, `curl` | C toolchain for the `vty` shell — GNU bash 5.3 is downloaded and compiled from source |
 | `protobuf-compiler` | `protoc`, which generates the gRPC/protobuf management API code |
 | `libpam0g-dev` | the `vtypam` PAM authentication helper |
-| `libnanomsg-dev` | the vty hooks built into the `vty` shell |
 | `bison` | bash's grammar, regenerated during the `vty` build |
 | `xxd` | embeds `vty.sh` into the `vty` binary during the build |
 
