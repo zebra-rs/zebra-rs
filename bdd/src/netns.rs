@@ -29,6 +29,30 @@ async fn run_cmd(args: &[&str], error_msg: &str) -> Result<()> {
     }
 }
 
+/// Remove the shared daemon startup config, best effort.
+///
+/// A BDD daemon is launched without `--config-file`, so it falls back to
+/// loading `<yang-path>/../zebra-rs.conf` at startup — and under `sudo ip
+/// netns exec` (HOME=/root) the yang path resolves to `/etc/zebra-rs/yang`,
+/// so that file is `/etc/zebra-rs/zebra-rs.conf`. This path is host-global
+/// and shared by every namespace's daemon. A stale copy left there (e.g. a
+/// manual `save`, or a hand-run debug session) is loaded by EVERY BDD daemon
+/// before the feature applies its own config — and because `vtyctl apply`
+/// is a diff, any element that overlaps the leftover (a neighbor address, a
+/// VRF, an `interface lo` address, a global `as`) keeps the leftover's stale
+/// attributes, silently breaking dozens of unrelated features. BDD daemons
+/// must always start from an empty config, so sweep it here like the host
+/// loopback addresses above — it is only ever a leftover, never anything a
+/// live feature needs.
+pub async fn remove_stale_startup_config() {
+    let _ = Command::new("sudo")
+        .args(["rm", "-f", "/etc/zebra-rs/zebra-rs.conf"])
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .await;
+}
+
 /// Execute a command in a network namespace
 pub async fn exec_in_netns(netns: &str, cmd: &str, args: &[&str]) -> Result<String> {
     let output = Command::new("sudo")
