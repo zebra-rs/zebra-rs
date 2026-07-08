@@ -1,0 +1,24 @@
+# a1: L2 IS-IS router on broadcast LAN br0 (iface va1ns, IP
+# 192.168.100.1/24 assigned by the topology step). Loopback 10.0.0.1/32.
+# Default LAN priority, so a3 (priority 100) wins DIS. Used to check
+# `show isis topology`: a1's own 10.0.0.1/32 must appear as an "IP
+# internal" self-prefix, the DIS's pseudonode as "pseudo_TE-IS".
+interface:
+- if-name: lo
+  ipv4:
+    address: 10.0.0.1/32
+router:
+  isis:
+    net: 49.0000.0000.0000.0001.00
+    is-type: level-2
+    hostname: a1
+    interface:
+    - if-name: lo
+      circuit-type: level-2
+      ipv4:
+        enabled: true
+    - if-name: va1ns
+      circuit-type: level-2
+      metric: 10
+      ipv4:
+        enabled: true

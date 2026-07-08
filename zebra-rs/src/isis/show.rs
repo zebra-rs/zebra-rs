@@ -1,7 +1,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::Write;
 
-use isis_packet::{IsisSysId, Nsap};
+use isis_packet::{IsisSysId, IsisTlv, IsisTlvExtIpReachEntry, IsisTlvIpv6ReachEntry, Nsap};
 use prefix_trie::PrefixMap;
 use serde::Serialize;
 
@@ -1201,17 +1201,17 @@ fn show_isis_topology(
             Level::L2 => "level-2",
         };
 
-        // IPv4 SPF tree.
-        writeln!(buf)?;
+        // IPv4 SPF tree. No blank line between `Area:` and the first
+        // tree (FRR shape); a blank line follows each tree instead.
         writeln!(buf, "IS-IS paths to {} routers that speak IP", level_long)?;
         write_spf_tree::<V4>(&mut buf, isis, level, &local_sys_id, spf_result, false)?;
+        writeln!(buf)?;
 
         // IPv6 SPF tree. When MT 2 is enabled, render from the MT 2
         // SPF result (matches what's actually installed in the v6
         // RIB); otherwise the legacy NLPID-gated single-topology
         // tree.
         let mt2 = mt2_v6_active(isis);
-        writeln!(buf)?;
         if mt2 {
             writeln!(
                 buf,
@@ -1227,6 +1227,7 @@ fn show_isis_topology(
             writeln!(buf, "IS-IS paths to {} routers that speak IPv6", level_long)?;
             write_spf_tree::<V6>(&mut buf, isis, level, &local_sys_id, spf_result, false)?;
         }
+        writeln!(buf)?;
     }
 
     if !wrote_any_level {
@@ -1724,12 +1725,54 @@ where
 
     let local_hostname = hostname_for(isis, level, local_sys_id);
 
+    // First real forwarding hop on a path: the first vertex that is not a
+    // pseudonode. On a broadcast LAN the SPF path is
+    // [pseudonode, ..., dest], so `path[0]` is the DIS's pseudonode, whose
+    // sys-id is the DIS itself — using it as the next-hop prints the DIS
+    // (and, on the DIS's own view, a bare "-" interface) instead of the
+    // real neighbour we forward to. Skipping pseudonodes yields the
+    // adjacency FRR shows in the Next-Hop column.
+    let first_real_hop = |p: &[usize]| -> Option<IsisSysId> {
+        p.iter()
+            .find(|v| !isis.lsp_map.get(level).is_pseudo(**v))
+            .and_then(|v| isis.lsp_map.get(level).resolve(*v).copied())
+    };
+
+    // One flat vertex list matching FRR's SPF-tree layout: routers,
+    // pseudonodes, and prefixes are all vertices, ordered by SPF distance
+    // (metric) then kind so a pseudonode is listed before the members
+    // reached through it and a node's prefixes trail the routers at the
+    // same cost. FRR's raw parent-type suffix (`n1(4)`) and circuit index
+    // are intentionally dropped — the parent column is the plain hostname.
+    struct TreeRow {
+        metric: u32,
+        // 0 root, 1 pseudonode, 2 router, 3 prefix — also the intra-metric
+        // sort key (pseudonode before its members, prefixes after routers).
+        kind: u8,
+        vertex: String,
+        typ: &'static str,
+        // (next-hop, interface, parent) per equal-cost path; empty for the
+        // root, whose row is just its hostname. ECMP → one row each, the
+        // continuations blanking Vertex/Type/Metric.
+        hops: Vec<(String, String, String)>,
+    }
+
+    let mut rows: Vec<TreeRow> = Vec::new();
     for (node_id, path) in &nodes {
         let Some(node_sys_id) = isis.lsp_map.get(level).resolve(*node_id) else {
             continue;
         };
         let node_sys_id = *node_sys_id;
-        let is_self = node_sys_id == *local_sys_id;
+        // A pseudonode (LAN DIS) is a real, separate SPF vertex whose
+        // sys-id resolves to the DIS; label it `pseudo_TE-IS` so it is not
+        // mistaken for the DIS's own router vertex.
+        let is_pseudo = isis.lsp_map.get(level).is_pseudo(*node_id);
+        // The root is the non-pseudonode self vertex. On the DIS, its own
+        // pseudonode also resolves to the local sys-id, but it is a
+        // distinct vertex (rendered pseudo_TE-IS), not a second root — so
+        // exclude pseudonodes here or the DIS prints a duplicate root row
+        // and duplicate self-prefixes.
+        let is_self = node_sys_id == *local_sys_id && !is_pseudo;
         if let Some(set) = &capable
             && !set.contains(&node_sys_id)
         {
@@ -1737,24 +1780,41 @@ where
         }
         let node_hostname = hostname_for(isis, level, &node_sys_id);
 
-        // First-hop hostname / interface (blank for self).
-        let (nexthop_str, iface_str, parent_str) = if is_self {
-            (String::new(), String::new(), String::new())
-        } else {
-            // Each path = [first_hop, ..., destination]; take the first as
-            // first-hop and the previous-to-last as parent. For a direct
-            // neighbor (path len 1), parent is the local node.
-            let p = path.paths.first().cloned().unwrap_or_default();
-            if p.is_empty() {
+        if is_self {
+            // Root: just the hostname (metric 0, other columns blank).
+            rows.push(TreeRow {
+                metric: 0,
+                kind: 0,
+                vertex: node_hostname.clone(),
+                typ: "",
+                hops: Vec::new(),
+            });
+            // The root's own prefixes. reach_map skips self, so read them
+            // from the self LSP. FRR lists them "IP internal", metric 0,
+            // parent = root, no next-hop.
+            for entry in F::self_reach_entries(isis, level, &node_sys_id, mt2_mode) {
+                rows.push(TreeRow {
+                    metric: 0,
+                    kind: 3,
+                    vertex: F::trunc_prefix(F::entry_prefix(&entry)).to_string(),
+                    typ: F::spf_prefix_type(true),
+                    hops: vec![(String::new(), String::new(), node_hostname.clone())],
+                });
+            }
+            continue;
+        }
+
+        // Distinct (first-hop, interface, parent) triples across all
+        // equal-cost paths. path = [first_hop, ..., destination]; parent is
+        // the previous-to-last hop (the local node for a direct neighbour,
+        // the pseudonode for a LAN member).
+        let mut hops: Vec<(String, String, String)> = Vec::new();
+        for p in &path.paths {
+            let hop = if p.is_empty() {
                 (String::new(), String::new(), local_hostname.clone())
             } else {
-                let first_hop_sys_id = isis
-                    .lsp_map
-                    .get(level)
-                    .resolve(p[0])
-                    .copied()
-                    .unwrap_or(node_sys_id);
-                let parent_sys_id = if p.len() <= 1 {
+                let fh = first_real_hop(p).unwrap_or(node_sys_id);
+                let parent = if p.len() <= 1 {
                     *local_sys_id
                 } else {
                     isis.lsp_map
@@ -1764,60 +1824,97 @@ where
                         .unwrap_or(*local_sys_id)
                 };
                 (
-                    hostname_for(isis, level, &first_hop_sys_id),
-                    ifname_for_neighbor(isis, level, &first_hop_sys_id),
-                    hostname_for(isis, level, &parent_sys_id),
+                    hostname_for(isis, level, &fh),
+                    ifname_for_neighbor(isis, level, &fh),
+                    hostname_for(isis, level, &parent),
                 )
+            };
+            if !hops.contains(&hop) {
+                hops.push(hop);
             }
-        };
+        }
+        if hops.is_empty() {
+            hops.push((String::new(), String::new(), local_hostname.clone()));
+        }
 
-        // Vertex row for the node itself.
-        if is_self {
-            // Match reference: just the hostname, all other columns blank.
-            writeln!(buf, " {}", node_hostname)?;
+        let (typ, kind) = if is_pseudo {
+            ("pseudo_TE-IS", 1u8)
         } else {
+            ("TE-IS", 2u8)
+        };
+        rows.push(TreeRow {
+            metric: path.cost,
+            kind,
+            vertex: node_hostname.clone(),
+            typ,
+            hops,
+        });
+
+        // Prefixes hanging off this node. Skipped for pseudonodes: a
+        // pseudonode LSP carries only IS reachability, and its sys-id
+        // resolves to the DIS, so reusing the reach-map here would re-print
+        // the DIS's own prefixes under the pseudonode. All the node's
+        // prefixes share its first hop.
+        if !is_pseudo
+            && let Some(entries) = F::reach_entries_show(isis, level, &node_sys_id, mt2_mode)
+        {
+            let (pnh, piface) = path
+                .paths
+                .first()
+                .and_then(|p| first_real_hop(p))
+                .map(|fh| {
+                    (
+                        hostname_for(isis, level, &fh),
+                        ifname_for_neighbor(isis, level, &fh),
+                    )
+                })
+                .unwrap_or_default();
+            for entry in entries.iter() {
+                rows.push(TreeRow {
+                    metric: path.cost + F::entry_metric(entry),
+                    kind: 3,
+                    vertex: F::trunc_prefix(F::entry_prefix(entry)).to_string(),
+                    typ: F::spf_prefix_type(false),
+                    hops: vec![(pnh.clone(), piface.clone(), node_hostname.clone())],
+                });
+            }
+        }
+    }
+
+    // Order by SPF distance, then kind (pseudonode < router < prefix), then
+    // vertex name for a stable, deterministic tree. The root (kind 0,
+    // metric 0) sorts first.
+    rows.sort_by(|a, b| {
+        (a.metric, a.kind, a.vertex.as_str()).cmp(&(b.metric, b.kind, b.vertex.as_str()))
+    });
+
+    for row in &rows {
+        if row.hops.is_empty() {
+            // Root row: hostname only.
+            writeln!(buf, " {}", row.vertex)?;
+            continue;
+        }
+        for (i, (nh, iface, parent)) in row.hops.iter().enumerate() {
+            let (vtx, typ, metric) = if i == 0 {
+                (row.vertex.as_str(), row.typ, row.metric.to_string())
+            } else {
+                ("", "", String::new())
+            };
             writeln!(
                 buf,
-                " {:<wv$} {:<wt$} {:<wm$} {:<wn$} {:<wi$} {}(0)",
-                node_hostname,
-                "TE-IS",
-                path.cost,
-                nexthop_str,
-                iface_str,
-                parent_str,
+                " {:<wv$} {:<wt$} {:<wm$} {:<wn$} {:<wi$} {}",
+                vtx,
+                typ,
+                metric,
+                nh,
+                iface,
+                parent,
                 wv = W_VERTEX,
                 wt = W_TYPE,
                 wm = W_METRIC,
                 wn = W_NEXTHOP,
                 wi = W_INTERFACE,
             )?;
-        }
-
-        // Prefix rows hanging off this node.
-        if let Some(entries) = F::reach_entries_show(isis, level, &node_sys_id, mt2_mode) {
-            for entry in entries.iter() {
-                let total_metric = path.cost + F::entry_metric(entry);
-                let (nh, iface) = if is_self {
-                    (String::new(), String::new())
-                } else {
-                    (nexthop_str.clone(), iface_str.clone())
-                };
-                writeln!(
-                    buf,
-                    " {:<wv$} {:<wt$} {:<wm$} {:<wn$} {:<wi$} {}(0)",
-                    F::trunc_prefix(F::entry_prefix(entry)).to_string(),
-                    F::spf_prefix_type(is_self),
-                    total_metric,
-                    nh,
-                    iface,
-                    node_hostname,
-                    wv = W_VERTEX,
-                    wt = W_TYPE,
-                    wm = W_METRIC,
-                    wn = W_NEXTHOP,
-                    wi = W_INTERFACE,
-                )?;
-            }
         }
     }
 
@@ -1921,6 +2018,18 @@ trait IsisRibFamilyShow: IsisRibFamily {
         sys_id: &IsisSysId,
         mt2_mode: bool,
     ) -> Option<&'a Vec<Self::Entry>>;
+    /// Reach entries advertised by a node, read straight from its
+    /// self-originated LSP fragments. `reach_entries_show` / reach_map
+    /// deliberately skip the local sys-id (`rebuild_sys_state` returns
+    /// early for self), but the topology tree still lists the root's own
+    /// prefixes (FRR renders them as "IP internal", metric 0), so the
+    /// SPF-tree renderer reads them from the LSDB instead.
+    fn self_reach_entries(
+        isis: &Isis,
+        level: &Level,
+        sys_id: &IsisSysId,
+        mt2_mode: bool,
+    ) -> Vec<Self::Entry>;
     /// "Type" column / field for a prefix row in the SPF tree.
     fn spf_prefix_type(is_self: bool) -> &'static str;
     /// Family tag in JSON rows.
@@ -2000,6 +2109,24 @@ impl IsisRibFamilyShow for V4 {
     ) -> Option<&'a Vec<Self::Entry>> {
         isis.reach_map.get(level).get(&Afi::Ip).get(sys_id)
     }
+    fn self_reach_entries(
+        isis: &Isis,
+        level: &Level,
+        sys_id: &IsisSysId,
+        _mt2_mode: bool,
+    ) -> Vec<IsisTlvExtIpReachEntry> {
+        let mut out = Vec::new();
+        for (id, lsa) in isis.lsdb.get(level).iter() {
+            if id.sys_id() == *sys_id && !id.is_pseudo() {
+                for tlv in &lsa.lsp.tlvs {
+                    if let IsisTlv::ExtIpReach(t) = tlv {
+                        out.extend(t.entries.iter().cloned());
+                    }
+                }
+            }
+        }
+        out
+    }
     fn spf_prefix_type(is_self: bool) -> &'static str {
         if is_self { "IP internal" } else { "IP TE" }
     }
@@ -2072,6 +2199,28 @@ impl IsisRibFamilyShow for V6 {
         } else {
             isis.reach_map_v6.get(level).get(sys_id)
         }
+    }
+    fn self_reach_entries(
+        isis: &Isis,
+        level: &Level,
+        sys_id: &IsisSysId,
+        mt2_mode: bool,
+    ) -> Vec<IsisTlvIpv6ReachEntry> {
+        let mut out = Vec::new();
+        for (id, lsa) in isis.lsdb.get(level).iter() {
+            if id.sys_id() == *sys_id && !id.is_pseudo() {
+                for tlv in &lsa.lsp.tlvs {
+                    match tlv {
+                        IsisTlv::Ipv6Reach(t) if !mt2_mode => out.extend(t.entries.iter().cloned()),
+                        IsisTlv::MtIpv6Reach(t) if mt2_mode && t.mt.id() == 2 => {
+                            out.extend(t.entries.iter().cloned())
+                        }
+                        _ => {}
+                    }
+                }
+            }
+        }
+        out
     }
     fn spf_prefix_type(_is_self: bool) -> &'static str {
         "IP6 internal"

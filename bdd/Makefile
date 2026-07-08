@@ -143,6 +143,10 @@ isis_lan_dis_reelection:
 	mkdir -p allure-results
 	cargo test --test cucumber -- --concurrency=1 --tags "@isis_lan_dis_reelection"
 
+isis_topology_output:
+	mkdir -p allure-results
+	cargo test --test cucumber -- --concurrency=1 --tags "@isis_topology_output"
+
 # Run all BFD tests.
 bfd:
 	rm -rf allure-results
