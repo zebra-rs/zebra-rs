@@ -1,12 +1,12 @@
 all: arm64
 
 arm64: ../vty/vty
-	cargo build --release --features lua
+	cargo build --release
 	$(MAKE) -C .. xdp-bfd-echo
 	nfpm package --packager=deb --config=nfpm-arm64.yaml
 
 amd64: ../vty/vty
-	cargo build --release --features lua
+	cargo build --release
 	$(MAKE) -C .. xdp-bfd-echo
 	nfpm package --packager=deb --config=nfpm-amd64.yaml
 
