@@ -12086,6 +12086,12 @@ pub fn policy_list_apply_net(
                 if let Some(cfg) = &entry.set_community {
                     apply_set_community(&mut decision.attr, cfg);
                 }
+                if let Some(cfg) = &entry.set_ext_community {
+                    apply_set_ext_community(&mut decision.attr, cfg);
+                }
+                if let Some(cfg) = &entry.set_large_community {
+                    apply_set_large_community(&mut decision.attr, cfg);
+                }
                 if let Some(prepend) = &entry.set_as_path_prepend {
                     apply_set_as_path_prepend(&mut decision.attr, prepend);
                 }
@@ -12296,6 +12302,12 @@ pub fn policy_list_apply_evpn(
                 if let Some(cfg) = &entry.set_community {
                     apply_set_community(&mut decision.attr, cfg);
                 }
+                if let Some(cfg) = &entry.set_ext_community {
+                    apply_set_ext_community(&mut decision.attr, cfg);
+                }
+                if let Some(cfg) = &entry.set_large_community {
+                    apply_set_large_community(&mut decision.attr, cfg);
+                }
                 if let Some(prepend) = &entry.set_as_path_prepend {
                     apply_set_as_path_prepend(&mut decision.attr, prepend);
                 }
@@ -12474,6 +12486,97 @@ fn apply_set_community(bgp_attr: &mut BgpAttr, cfg: &crate::policy::SetCommunity
             let drop: std::collections::HashSet<u32> = new_vals.into_iter().collect();
             com.0.retain(|v| !drop.contains(v));
             bgp_attr.com = if com.0.is_empty() { None } else { Some(com) };
+        }
+    }
+}
+
+/// Apply a `set ext-community <ext-community-set> [additive|delete]`
+/// action to `bgp_attr`. The extended-community twin of
+/// [`apply_set_community`]: only `Exact` matchers (`rt:`/`soo:`)
+/// contribute concrete values; regex matchers are skipped. `Replace`
+/// overwrites the EXT_COMMUNITIES attribute (dropping any route
+/// targets / Color already present), `Additive` merges, `Delete`
+/// removes (set difference). The result stays sorted and deduplicated
+/// via the underlying `BTreeSet`.
+fn apply_set_ext_community(bgp_attr: &mut BgpAttr, cfg: &crate::policy::SetExtCommunityConfig) {
+    let Some(set) = cfg.resolved.as_ref() else {
+        return;
+    };
+    let new_vals: Vec<ExtCommunityValue> = set
+        .vals
+        .iter()
+        .filter_map(|m| match m {
+            crate::policy::ExtCommunityMatcher::Exact(v) => Some(v.clone()),
+            _ => None,
+        })
+        .collect();
+
+    use crate::policy::SetCommunityMode;
+    match cfg.mode {
+        SetCommunityMode::Replace => {
+            if new_vals.is_empty() {
+                bgp_attr.ecom = None;
+                return;
+            }
+            bgp_attr.ecom = Some(new_vals.into_iter().collect());
+        }
+        SetCommunityMode::Additive => {
+            let mut ecom = bgp_attr.ecom.clone().unwrap_or_default();
+            for v in new_vals {
+                ecom.0.insert(v);
+            }
+            bgp_attr.ecom = Some(ecom);
+        }
+        SetCommunityMode::Delete => {
+            let Some(mut ecom) = bgp_attr.ecom.clone() else {
+                return;
+            };
+            ecom.0.retain(|v| !new_vals.contains(v));
+            bgp_attr.ecom = if ecom.0.is_empty() { None } else { Some(ecom) };
+        }
+    }
+}
+
+/// Apply a `set large-community <large-community-set> [additive|delete]`
+/// action to `bgp_attr`. The large-community twin of
+/// [`apply_set_community`]: only `Exact` `A:B:C` matchers contribute
+/// concrete values; regex matchers are skipped. `Replace` overwrites
+/// the LARGE_COMMUNITIES attribute, `Additive` merges, `Delete` removes.
+fn apply_set_large_community(bgp_attr: &mut BgpAttr, cfg: &crate::policy::SetLargeCommunityConfig) {
+    let Some(set) = cfg.resolved.as_ref() else {
+        return;
+    };
+    let new_vals: Vec<LargeCommunityValue> = set
+        .vals
+        .iter()
+        .filter_map(|m| match m {
+            crate::policy::LargeCommunityMatcher::Exact(v) => Some(v.clone()),
+            _ => None,
+        })
+        .collect();
+
+    use crate::policy::SetCommunityMode;
+    match cfg.mode {
+        SetCommunityMode::Replace => {
+            if new_vals.is_empty() {
+                bgp_attr.lcom = None;
+                return;
+            }
+            bgp_attr.lcom = Some(new_vals.into_iter().collect());
+        }
+        SetCommunityMode::Additive => {
+            let mut lcom = bgp_attr.lcom.clone().unwrap_or_default();
+            for v in new_vals {
+                lcom.0.insert(v);
+            }
+            bgp_attr.lcom = Some(lcom);
+        }
+        SetCommunityMode::Delete => {
+            let Some(mut lcom) = bgp_attr.lcom.clone() else {
+                return;
+            };
+            lcom.0.retain(|v| !new_vals.contains(v));
+            bgp_attr.lcom = if lcom.0.is_empty() { None } else { Some(lcom) };
         }
     }
 }
@@ -17059,8 +17162,8 @@ mod policy_apply_tests {
     #[test]
     fn match_as_path_set() {
         let mut set = AsPathSet::default();
-        set.vals
-            .insert(AsPathMatcher::from_str("\\b65001\\b").unwrap());
+        // FRR `_` magic char: 65001 anywhere in the path.
+        set.vals.insert(AsPathMatcher::from_str("_65001_").unwrap());
 
         let mut list = PolicyList::default();
         let entry = list.entry(10);
@@ -17190,8 +17293,8 @@ mod policy_apply_tests {
     #[test]
     fn multiple_match_clauses_all_required() {
         let mut set = AsPathSet::default();
-        set.vals
-            .insert(AsPathMatcher::from_str("^65001\\b").unwrap());
+        // FRR `_` magic char: path whose neighbor (leftmost) AS is 65001.
+        set.vals.insert(AsPathMatcher::from_str("^65001_").unwrap());
 
         let mut list = PolicyList::default();
         let entry = list.entry(10);
@@ -18288,14 +18391,17 @@ mod tests {
     use std::net::{IpAddr, Ipv4Addr};
 
     use bgp_packet::{
-        As4Path, BgpAttr, BgpNexthop, Community, CommunityValue, Ipv4Nlri, LocalPref,
+        As4Path, BgpAttr, BgpNexthop, Community, CommunityValue, ExtCommunity, ExtCommunityValue,
+        Ipv4Nlri, LargeCommunity, LargeCommunityValue, LocalPref,
     };
     use ipnet::Ipv4Net;
 
     use crate::policy::prefix::set::PrefixSetEntry;
     use crate::policy::{
-        AsPathPrependConfig, CommunityMatcher, CommunitySet, NumericSet, PolicyList, PrefixSet,
-        SetCommunityConfig, SetCommunityMode, SetNextHop,
+        AsPathPrependConfig, CommunityMatcher, CommunitySet, ExtCommunityMatcher, ExtCommunitySet,
+        LargeCommunityMatcher, LargeCommunitySet, NumericSet, PolicyList, PrefixSet,
+        SetCommunityConfig, SetCommunityMode, SetExtCommunityConfig, SetLargeCommunityConfig,
+        SetNextHop,
     };
 
     #[test]
@@ -18607,6 +18713,187 @@ mod tests {
 
         let out = policy_list_apply(&list, &nlri("10.0.0.0/24"), attr).unwrap();
         assert!(out.com.is_none());
+    }
+
+    // --- set ext-community -----------------------------------------------
+
+    fn ext_community_set(members: &[&str]) -> ExtCommunitySet {
+        let mut set = ExtCommunitySet::default();
+        for m in members {
+            set.vals
+                .insert(ExtCommunityMatcher::from_str(m).unwrap_or_else(|_| panic!("parse {m}")));
+        }
+        set
+    }
+
+    fn set_ext_community_cfg(members: &[&str], mode: SetCommunityMode) -> SetExtCommunityConfig {
+        SetExtCommunityConfig {
+            name: "test".into(),
+            mode,
+            resolved: Some(ext_community_set(members)),
+        }
+    }
+
+    fn ext_val(s: &str) -> ExtCommunityValue {
+        ExtCommunity::from_str(s)
+            .unwrap_or_else(|_| panic!("parse {s}"))
+            .0
+            .into_iter()
+            .next()
+            .unwrap()
+    }
+
+    #[test]
+    fn policy_list_apply_ext_community_replace() {
+        let mut list = PolicyList::default();
+        list.entry(10).set_ext_community = Some(set_ext_community_cfg(
+            &["rt:100:200"],
+            SetCommunityMode::Replace,
+        ));
+
+        // Existing rt:999:999 must be wiped on replace.
+        let attr = BgpAttr {
+            ecom: Some(ExtCommunity::from([ext_val("rt:999:999")])),
+            ..Default::default()
+        };
+        let out = policy_list_apply(&list, &nlri("10.0.0.0/24"), attr).unwrap();
+        let ecom = out.ecom.expect("ext-community attribute set");
+        assert_eq!(ecom, ExtCommunity::from([ext_val("rt:100:200")]));
+    }
+
+    #[test]
+    fn policy_list_apply_ext_community_additive_preserves_existing() {
+        let mut list = PolicyList::default();
+        list.entry(10).set_ext_community = Some(set_ext_community_cfg(
+            &["soo:100:200"],
+            SetCommunityMode::Additive,
+        ));
+
+        let attr = BgpAttr {
+            ecom: Some(ExtCommunity::from([ext_val("rt:65001:100")])),
+            ..Default::default()
+        };
+        let out = policy_list_apply(&list, &nlri("10.0.0.0/24"), attr).unwrap();
+        let ecom = out.ecom.expect("ext-community attribute set");
+        assert!(ecom.0.contains(&ext_val("rt:65001:100")));
+        assert!(ecom.0.contains(&ext_val("soo:100:200")));
+        assert_eq!(ecom.0.len(), 2);
+    }
+
+    #[test]
+    fn policy_list_apply_ext_community_replace_skips_regex() {
+        let mut list = PolicyList::default();
+        // Regex member has no concrete value to set; only rt:100:200 lands.
+        list.entry(10).set_ext_community = Some(set_ext_community_cfg(
+            &["rt:100:200", "rt:^65000:.*"],
+            SetCommunityMode::Replace,
+        ));
+        let out = policy_list_apply(&list, &nlri("10.0.0.0/24"), BgpAttr::default()).unwrap();
+        let ecom = out.ecom.expect("ext-community attribute set");
+        assert_eq!(ecom, ExtCommunity::from([ext_val("rt:100:200")]));
+    }
+
+    #[test]
+    fn policy_list_apply_ext_community_delete_removes_matching() {
+        let mut list = PolicyList::default();
+        list.entry(10).set_ext_community = Some(set_ext_community_cfg(
+            &["rt:100:200"],
+            SetCommunityMode::Delete,
+        ));
+
+        let attr = BgpAttr {
+            ecom: Some(ExtCommunity::from([
+                ext_val("rt:100:200"),
+                ext_val("rt:999:999"),
+            ])),
+            ..Default::default()
+        };
+        let out = policy_list_apply(&list, &nlri("10.0.0.0/24"), attr).unwrap();
+        let ecom = out.ecom.expect("ext-community survives");
+        assert_eq!(ecom, ExtCommunity::from([ext_val("rt:999:999")]));
+    }
+
+    // --- set large-community ---------------------------------------------
+
+    fn large_community_set(members: &[&str]) -> LargeCommunitySet {
+        let mut set = LargeCommunitySet::default();
+        for m in members {
+            set.vals
+                .insert(LargeCommunityMatcher::from_str(m).unwrap_or_else(|_| panic!("parse {m}")));
+        }
+        set
+    }
+
+    fn set_large_community_cfg(
+        members: &[&str],
+        mode: SetCommunityMode,
+    ) -> SetLargeCommunityConfig {
+        SetLargeCommunityConfig {
+            name: "test".into(),
+            mode,
+            resolved: Some(large_community_set(members)),
+        }
+    }
+
+    fn lc_val(s: &str) -> LargeCommunityValue {
+        LargeCommunity::from_str(s)
+            .unwrap_or_else(|_| panic!("parse {s}"))
+            .0
+            .into_iter()
+            .next()
+            .unwrap()
+    }
+
+    #[test]
+    fn policy_list_apply_large_community_replace() {
+        let mut list = PolicyList::default();
+        list.entry(10).set_large_community = Some(set_large_community_cfg(
+            &["65001:100:200"],
+            SetCommunityMode::Replace,
+        ));
+
+        let attr = BgpAttr {
+            lcom: Some(LargeCommunity::from_iter([lc_val("1:2:3")])),
+            ..Default::default()
+        };
+        let out = policy_list_apply(&list, &nlri("10.0.0.0/24"), attr).unwrap();
+        let lcom = out.lcom.expect("large-community attribute set");
+        assert_eq!(lcom, LargeCommunity::from_iter([lc_val("65001:100:200")]));
+    }
+
+    #[test]
+    fn policy_list_apply_large_community_additive_preserves_existing() {
+        let mut list = PolicyList::default();
+        list.entry(10).set_large_community = Some(set_large_community_cfg(
+            &["65001:100:200"],
+            SetCommunityMode::Additive,
+        ));
+
+        let attr = BgpAttr {
+            lcom: Some(LargeCommunity::from_iter([lc_val("1:2:3")])),
+            ..Default::default()
+        };
+        let out = policy_list_apply(&list, &nlri("10.0.0.0/24"), attr).unwrap();
+        let lcom = out.lcom.expect("large-community attribute set");
+        assert!(lcom.0.contains(&lc_val("1:2:3")));
+        assert!(lcom.0.contains(&lc_val("65001:100:200")));
+        assert_eq!(lcom.0.len(), 2);
+    }
+
+    #[test]
+    fn policy_list_apply_large_community_delete_drops_attr_when_empty() {
+        let mut list = PolicyList::default();
+        list.entry(10).set_large_community = Some(set_large_community_cfg(
+            &["65001:100:200"],
+            SetCommunityMode::Delete,
+        ));
+
+        let attr = BgpAttr {
+            lcom: Some(LargeCommunity::from_iter([lc_val("65001:100:200")])),
+            ..Default::default()
+        };
+        let out = policy_list_apply(&list, &nlri("10.0.0.0/24"), attr).unwrap();
+        assert!(out.lcom.is_none());
     }
 
     #[test]

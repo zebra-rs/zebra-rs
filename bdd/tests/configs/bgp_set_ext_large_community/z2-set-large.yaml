@@ -1,0 +1,26 @@
+large-community-set:
+- name: LC-SET
+  members:
+  - "65001:100:200"
+policy:
+- name: STAMP-LARGE
+  entry:
+  - number: 10
+    action: permit
+    set:
+      large-community:
+        name: LC-SET
+router:
+  bgp:
+    global:
+      as: 65002
+      router-id: 192.168.0.2
+    neighbor:
+    - remote-address: 192.168.0.1
+      afi-safi:
+      - name: ipv4
+        enabled: true
+        policy:
+          in: STAMP-LARGE
+      enabled: true
+      remote-as: 65001

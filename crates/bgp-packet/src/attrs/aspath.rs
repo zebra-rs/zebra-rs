@@ -169,6 +169,33 @@ impl As4Segment {
             _ => v,
         }
     }
+
+    /// Render this segment exactly like FRR's `aspath_make_str_count`
+    /// (`bgpd/bgp_aspath.c`), for AS-path regular-expression matching.
+    ///
+    /// FRR joins the members of an AS_SET / AS_CONFED_SET with a comma and
+    /// an AS_SEQUENCE / AS_CONFED_SEQUENCE with a space, wrapping SET and
+    /// CONFED segments in their delimiter characters. Matching against this
+    /// exact form keeps zebra-rs byte-compatible with FRR AS-path regexes,
+    /// including patterns that reference the internal `,` separator.
+    fn format_frr(&self) -> String {
+        let separator = match self.typ {
+            AS_SET | AS_CONFED_SET => ",",
+            _ => " ",
+        };
+        let v = self
+            .asn
+            .iter()
+            .map(|x| asn_to_string(*x))
+            .collect::<Vec<String>>()
+            .join(separator);
+        match self.typ {
+            AS_SET => format!("{{{v}}}"),
+            AS_CONFED_SEQ => format!("({v})"),
+            AS_CONFED_SET => format!("[{v}]"),
+            _ => v,
+        }
+    }
 }
 
 impl fmt::Display for As4Segment {
@@ -228,6 +255,20 @@ impl As4Path {
         self.segs
             .iter()
             .map(|x| x.format_explicit())
+            .collect::<Vec<String>>()
+            .join(" ")
+    }
+
+    /// AS-Path rendered exactly like FRR's `aspath->str`, the form FRR runs
+    /// its AS-path access-list regexes against. Segments are space-joined;
+    /// AS_SET / AS_CONFED_SET members are comma-separated inside their
+    /// delimiters (e.g. `65001 {65010,65011} 65003`). Used only for policy
+    /// AS-path matching so patterns behave identically to FRR; `show`
+    /// output continues to use [`as_path_display`](Self::as_path_display).
+    pub fn as_path_frr_string(&self) -> String {
+        self.segs
+            .iter()
+            .map(|x| x.format_frr())
             .collect::<Vec<String>>()
             .join(" ")
     }
@@ -621,6 +662,20 @@ mod tests {
         let mut aspath: As4Path = As4Path::from_str("{1 2} (3 4)").unwrap();
         aspath.consolidate();
         assert_eq!(aspath.as_path_explicit(), "{1 2} (3 4)");
+    }
+
+    #[test]
+    fn frr_string_uses_comma_in_sets() {
+        // FRR's aspath->str comma-joins AS_SET / AS_CONFED_SET members and
+        // space-joins AS_SEQUENCE / AS_CONFED_SEQUENCE members. This is the
+        // string AS-path regexes run against, so it must match FRR exactly.
+        let aspath: As4Path = As4Path::from_str("1 2 3 {4 5} (6 7) [8 9]").unwrap();
+        assert_eq!(aspath.as_path_display(), "1 2 3 {4 5} (6 7) [8 9]");
+        assert_eq!(aspath.as_path_frr_string(), "1 2 3 {4,5} (6 7) [8,9]");
+
+        // A plain AS_SEQUENCE is identical in both renderings.
+        let aspath: As4Path = As4Path::from_str("65001 65002 65003").unwrap();
+        assert_eq!(aspath.as_path_frr_string(), "65001 65002 65003");
     }
 
     #[test]

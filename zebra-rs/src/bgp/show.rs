@@ -440,6 +440,14 @@ fn show_ecom(attr: &BgpAttr) -> String {
     }
 }
 
+fn show_lcom(attr: &BgpAttr) -> String {
+    if let Some(lcom) = &attr.lcom {
+        lcom.to_string()
+    } else {
+        "".to_string()
+    }
+}
+
 /// Human-readable name for an SRv6 endpoint-behavior codepoint (IANA
 /// "SRv6 Endpoint Behaviors", RFC 8986). Only the L3-service decap
 /// behaviors that ride a BGP Prefix-SID SRv6 L3 Service TLV are named;
@@ -504,10 +512,34 @@ struct BgpRouteJson {
     as_path: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     origin: Option<String>,
+    /// COMMUNITIES attribute rendered as a space-separated list
+    /// (e.g. "65001:100 no-export"); absent when the route carries none.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    community: Option<String>,
+    /// EXT_COMMUNITIES attribute (e.g. "rt:65001:100"); absent when none.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    ext_community: Option<String>,
+    /// LARGE_COMMUNITIES attribute (e.g. "65001:100:200"); absent when none.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    large_community: Option<String>,
     /// Unrecognized optional transitive path attributes (RFC 4271 §9)
     /// carried verbatim on this route. Empty for routes without any.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     unknown_attributes: Vec<UnknownAttrJson>,
+}
+
+/// Render the standard / extended / large COMMUNITIES attributes of a
+/// route into the three optional `show bgp -j` fields (None when the
+/// attribute is absent), shared by every `BgpRouteJson` construction.
+fn show_communities(attr: &BgpAttr) -> (Option<String>, Option<String>, Option<String>) {
+    let com = show_com(attr);
+    let ecom = show_ecom(attr);
+    let lcom = show_lcom(attr);
+    (
+        (!com.is_empty()).then_some(com),
+        (!ecom.is_empty()).then_some(ecom),
+        (!lcom.is_empty()).then_some(lcom),
+    )
 }
 
 /// One unrecognized path attribute (RFC 4271 §9) as rendered for
@@ -546,6 +578,7 @@ fn show_unknown_attrs(attr: &BgpAttr) -> Vec<UnknownAttrJson> {
 fn bgp_route_json(prefix: String, rib: &BgpRib) -> BgpRouteJson {
     let aspath_str = show_aspath(&rib.attr);
     let origin_str = show_origin(&rib.attr);
+    let (community, ext_community, large_community) = show_communities(&rib.attr);
     BgpRouteJson {
         prefix,
         valid: true,
@@ -562,6 +595,9 @@ fn bgp_route_json(prefix: String, rib: &BgpRib) -> BgpRouteJson {
         weight: rib.weight,
         as_path: (!aspath_str.is_empty()).then_some(aspath_str),
         origin: (!origin_str.is_empty()).then_some(origin_str),
+        community,
+        ext_community,
+        large_community,
         unknown_attributes: show_unknown_attrs(&rib.attr),
     }
 }
@@ -822,6 +858,7 @@ where
             for rib in value.iter() {
                 let aspath_str = show_aspath(&rib.attr);
                 let origin_str = show_origin(&rib.attr);
+                let (community, ext_community, large_community) = show_communities(&rib.attr);
                 routes.push(BgpRouteJson {
                     prefix: key.to_string(),
                     valid: true,
@@ -846,6 +883,9 @@ where
                     } else {
                         Some(origin_str)
                     },
+                    community,
+                    ext_community,
+                    large_community,
                     unknown_attributes: show_unknown_attrs(&rib.attr),
                 });
             }
@@ -1978,6 +2018,7 @@ pub(super) fn show_adj_rib_routes<P: std::fmt::Display>(
             for rib in value.iter() {
                 let aspath_str = show_aspath(&rib.attr);
                 let origin_str = show_origin(&rib.attr);
+                let (community, ext_community, large_community) = show_communities(&rib.attr);
 
                 route_list.push(BgpRouteJson {
                     prefix: key.to_string(),
@@ -2003,6 +2044,9 @@ pub(super) fn show_adj_rib_routes<P: std::fmt::Display>(
                     } else {
                         Some(origin_str)
                     },
+                    community,
+                    ext_community,
+                    large_community,
                     unknown_attributes: show_unknown_attrs(&rib.attr),
                 });
             }

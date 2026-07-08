@@ -1,0 +1,25 @@
+as-path-set:
+- name: EXACT-OK
+  members:
+  - "^65002 65001$"
+policy:
+- name: IN-ASPATH
+  entry:
+  - number: 10
+    action: permit
+    match:
+      as-path: EXACT-OK
+router:
+  bgp:
+    global:
+      as: 65003
+      router-id: 192.168.0.3
+    neighbor:
+    - remote-address: 192.168.0.2
+      afi-safi:
+      - name: ipv4
+        enabled: true
+        policy:
+          in: IN-ASPATH
+      enabled: true
+      remote-as: 65002

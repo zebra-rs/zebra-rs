@@ -131,13 +131,17 @@ policy MATCH-LARGE {
 
 ### `match as-path`
 
-References an `as-path-set`. Each member is a regex matched
-against the AS_PATH formatted as a space-separated list of ASNs.
+References an `as-path-set`. Each member is a regular expression
+matched against the route's AS_PATH. The regex syntax is
+**compatible with FRR's `bgp as-path access-list`** — patterns port
+between zebra-rs and FRR unchanged (see
+[AS-path regex syntax](#as-path-regex-syntax) below). The entry
+matches if **any** member of the set matches the AS_PATH.
 
 ```console
 as-path-set FROM-65003 {
     members {
-        \\b65003\\b;
+        _65003_;
     }
 }
 
@@ -154,8 +158,47 @@ policy DROP-65003-TRANSIT {
 }
 ```
 
-`\\b` is a regex word-boundary anchor that prevents `65003` from
-matching `650030` or `650031`.
+`_65003_` matches AS 65003 anywhere in the path without also matching
+`650030` or `165003` — see below for why.
+
+#### AS-path regex syntax
+
+The AS_PATH is rendered as a space-separated list of ASNs — for
+example `65001 65002 65003`. AS_SET segments (created by route
+aggregation) render inside braces with **comma-separated** members,
+exactly as FRR does: `65001 {65010,65011} 65003`. Confederation
+segments render as `(65001 65002)` (sequence) and `[65001,65002]`
+(set). Members are matched against this string.
+
+The **`_` magic character** is the key to FRR compatibility. It
+expands to `(^|[,{}() ]|$)` — the start of the string, the end of the
+string, or any one of the separators `, { } ( ) <space>`. This is the
+same substitution FRR's `bgp_regcomp` performs, so a `_` matches a
+"word boundary" between ASNs regardless of which separator sits there.
+Use it instead of a bare space or a Perl-style `\b`:
+
+| Pattern | Meaning | Matches `65002 65001` |
+|---------|---------|-----------------------|
+| `^65002_` | neighbor (leftmost) AS is 65002 | yes |
+| `_65001$` | route originated by 65001 | yes |
+| `_65002_` | 65002 appears anywhere (transit) | yes |
+| `^65002 65001$` | exact whole-path match | yes |
+| `_65099_` | 65099 appears anywhere | no |
+| `^65001_` | neighbor AS is 65001 | no |
+
+Anchoring with `^` and `$` gives an **exact match** of the entire
+AS_PATH; `_` on one side matches the origin or the neighbor; `_` on
+both sides matches a transit AS. Because `_` requires a boundary,
+`_65003_` does not match `650030` (no boundary after `65003`) or
+`165003` (no boundary before it).
+
+> **Porting from FRR.** FRR expresses the same idea with
+> `bgp as-path access-list NAME permit REGEX`. Copy the regex verbatim
+> into an `as-path-set` member — `^65002_`, `_65001$`, `_65002_`, and
+> exact `^65002 65001$` all behave identically. zebra-rs additionally
+> accepts the richer Rust `regex` syntax (e.g. `\b`, `\d`) as a
+> superset, but stick to the FRR-portable subset if you need both
+> routers to agree.
 
 ## Direct address
 

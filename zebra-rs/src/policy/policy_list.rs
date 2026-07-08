@@ -217,6 +217,49 @@ impl SetCommunityConfig {
     }
 }
 
+/// Set-action config for `set ext-community NAME {|additive|delete}`.
+/// `name` references an ext-community-set; `resolved` is populated by
+/// `policy_entry_sync` from the ext-community-set registry. Reuses
+/// [`SetCommunityMode`]: replace overwrites the EXT_COMMUNITIES
+/// attribute with the set's members, additive merges, delete removes.
+#[derive(Clone, Debug, PartialEq)]
+pub struct SetExtCommunityConfig {
+    pub name: String,
+    pub mode: SetCommunityMode,
+    pub resolved: Option<ExtCommunitySet>,
+}
+
+impl SetExtCommunityConfig {
+    pub fn new(name: String) -> Self {
+        Self {
+            name,
+            mode: SetCommunityMode::Replace,
+            resolved: None,
+        }
+    }
+}
+
+/// Set-action config for `set large-community NAME {|additive|delete}`.
+/// `name` references a large-community-set; `resolved` is populated by
+/// `policy_entry_sync` from the large-community-set registry. Reuses
+/// [`SetCommunityMode`] over the LARGE_COMMUNITIES attribute.
+#[derive(Clone, Debug, PartialEq)]
+pub struct SetLargeCommunityConfig {
+    pub name: String,
+    pub mode: SetCommunityMode,
+    pub resolved: Option<LargeCommunitySet>,
+}
+
+impl SetLargeCommunityConfig {
+    pub fn new(name: String) -> Self {
+        Self {
+            name,
+            mode: SetCommunityMode::Replace,
+            resolved: None,
+        }
+    }
+}
+
 #[derive(Default, Clone, Debug, PartialEq)]
 pub struct PolicyEntry {
     // Match.
@@ -249,6 +292,8 @@ pub struct PolicyEntry {
     pub med: Option<NumericSet>,
     pub weight: Option<u32>,
     pub set_community: Option<SetCommunityConfig>,
+    pub set_ext_community: Option<SetExtCommunityConfig>,
+    pub set_large_community: Option<SetLargeCommunityConfig>,
     pub set_as_path_prepend: Option<AsPathPrependConfig>,
     pub set_next_hop: Option<SetNextHop>,
     pub set_origin: Option<Origin>,
@@ -307,6 +352,12 @@ pub fn policy_entry_sync(
         }
         if let Some(cfg) = policy.set_community.as_mut() {
             cfg.resolved = community_set.config.get(&cfg.name).cloned();
+        }
+        if let Some(cfg) = policy.set_ext_community.as_mut() {
+            cfg.resolved = ext_community_set.config.get(&cfg.name).cloned();
+        }
+        if let Some(cfg) = policy.set_large_community.as_mut() {
+            cfg.resolved = large_community_set.config.get(&cfg.name).cloned();
         }
     }
 }
@@ -1071,6 +1122,135 @@ impl ConfigBuilder {
                 entry.set_community = None;
                 Ok(())
             })
+            // `set ext-community NAME {|additive|delete}` — same presence
+            // container shape as `set community`, over the EXT_COMMUNITIES
+            // attribute. Only exact `rt:`/`soo:` members contribute values.
+            .path("/entry/set/ext-community/name")
+            .set(|policy, cache, name, seq, args| {
+                let list = cache_get(policy, cache, &name).context(ARG_ERR)?;
+                let entry = list.entry(seq);
+                let ext_name = args.string().context(ARG_ERR)?;
+                match entry.set_ext_community.as_mut() {
+                    Some(cfg) => cfg.name = ext_name,
+                    None => entry.set_ext_community = Some(SetExtCommunityConfig::new(ext_name)),
+                }
+                Ok(())
+            })
+            .del(|policy, cache, name, seq, _args| {
+                let list = cache_lookup(policy, cache, &name).context(ARG_ERR)?;
+                let entry = list.lookup(&seq).context(ARG_ERR)?;
+                entry.set_ext_community = None;
+                Ok(())
+            })
+            .path("/entry/set/ext-community/additive")
+            .set(|policy, cache, name, seq, _args| {
+                let list = cache_get(policy, cache, &name).context(ARG_ERR)?;
+                let entry = list.entry(seq);
+                if let Some(cfg) = entry.set_ext_community.as_mut() {
+                    cfg.mode = SetCommunityMode::Additive;
+                }
+                Ok(())
+            })
+            .del(|policy, cache, name, seq, _args| {
+                let list = cache_lookup(policy, cache, &name).context(ARG_ERR)?;
+                let entry = list.lookup(&seq).context(ARG_ERR)?;
+                if let Some(cfg) = entry.set_ext_community.as_mut()
+                    && cfg.mode == SetCommunityMode::Additive
+                {
+                    cfg.mode = SetCommunityMode::Replace;
+                }
+                Ok(())
+            })
+            .path("/entry/set/ext-community/delete")
+            .set(|policy, cache, name, seq, _args| {
+                let list = cache_get(policy, cache, &name).context(ARG_ERR)?;
+                let entry = list.entry(seq);
+                if let Some(cfg) = entry.set_ext_community.as_mut() {
+                    cfg.mode = SetCommunityMode::Delete;
+                }
+                Ok(())
+            })
+            .del(|policy, cache, name, seq, _args| {
+                let list = cache_lookup(policy, cache, &name).context(ARG_ERR)?;
+                let entry = list.lookup(&seq).context(ARG_ERR)?;
+                if let Some(cfg) = entry.set_ext_community.as_mut()
+                    && cfg.mode == SetCommunityMode::Delete
+                {
+                    cfg.mode = SetCommunityMode::Replace;
+                }
+                Ok(())
+            })
+            .path("/entry/set/ext-community")
+            .del(|policy, cache, name, seq, _args| {
+                let list = cache_lookup(policy, cache, &name).context(ARG_ERR)?;
+                let entry = list.lookup(&seq).context(ARG_ERR)?;
+                entry.set_ext_community = None;
+                Ok(())
+            })
+            // `set large-community NAME {|additive|delete}` — same shape,
+            // over the LARGE_COMMUNITIES attribute.
+            .path("/entry/set/large-community/name")
+            .set(|policy, cache, name, seq, args| {
+                let list = cache_get(policy, cache, &name).context(ARG_ERR)?;
+                let entry = list.entry(seq);
+                let lc_name = args.string().context(ARG_ERR)?;
+                match entry.set_large_community.as_mut() {
+                    Some(cfg) => cfg.name = lc_name,
+                    None => entry.set_large_community = Some(SetLargeCommunityConfig::new(lc_name)),
+                }
+                Ok(())
+            })
+            .del(|policy, cache, name, seq, _args| {
+                let list = cache_lookup(policy, cache, &name).context(ARG_ERR)?;
+                let entry = list.lookup(&seq).context(ARG_ERR)?;
+                entry.set_large_community = None;
+                Ok(())
+            })
+            .path("/entry/set/large-community/additive")
+            .set(|policy, cache, name, seq, _args| {
+                let list = cache_get(policy, cache, &name).context(ARG_ERR)?;
+                let entry = list.entry(seq);
+                if let Some(cfg) = entry.set_large_community.as_mut() {
+                    cfg.mode = SetCommunityMode::Additive;
+                }
+                Ok(())
+            })
+            .del(|policy, cache, name, seq, _args| {
+                let list = cache_lookup(policy, cache, &name).context(ARG_ERR)?;
+                let entry = list.lookup(&seq).context(ARG_ERR)?;
+                if let Some(cfg) = entry.set_large_community.as_mut()
+                    && cfg.mode == SetCommunityMode::Additive
+                {
+                    cfg.mode = SetCommunityMode::Replace;
+                }
+                Ok(())
+            })
+            .path("/entry/set/large-community/delete")
+            .set(|policy, cache, name, seq, _args| {
+                let list = cache_get(policy, cache, &name).context(ARG_ERR)?;
+                let entry = list.entry(seq);
+                if let Some(cfg) = entry.set_large_community.as_mut() {
+                    cfg.mode = SetCommunityMode::Delete;
+                }
+                Ok(())
+            })
+            .del(|policy, cache, name, seq, _args| {
+                let list = cache_lookup(policy, cache, &name).context(ARG_ERR)?;
+                let entry = list.lookup(&seq).context(ARG_ERR)?;
+                if let Some(cfg) = entry.set_large_community.as_mut()
+                    && cfg.mode == SetCommunityMode::Delete
+                {
+                    cfg.mode = SetCommunityMode::Replace;
+                }
+                Ok(())
+            })
+            .path("/entry/set/large-community")
+            .del(|policy, cache, name, seq, _args| {
+                let list = cache_lookup(policy, cache, &name).context(ARG_ERR)?;
+                let entry = list.lookup(&seq).context(ARG_ERR)?;
+                entry.set_large_community = None;
+                Ok(())
+            })
             // `set as-path-prepend ASN [repeat NUM]` is modeled as
             // a presence container with two leaves. YANG fires
             // callbacks per leaf, so we patch the partial config
@@ -1323,6 +1503,28 @@ fn entry_to_json(seq: u32, entry: &PolicyEntry) -> serde_json::Value {
             json!({ "name": cfg.name, "mode": mode }),
         );
     }
+    if let Some(cfg) = &entry.set_ext_community {
+        let mode = match cfg.mode {
+            SetCommunityMode::Replace => "replace",
+            SetCommunityMode::Additive => "additive",
+            SetCommunityMode::Delete => "delete",
+        };
+        s.insert(
+            "ext_community".into(),
+            json!({ "name": cfg.name, "mode": mode }),
+        );
+    }
+    if let Some(cfg) = &entry.set_large_community {
+        let mode = match cfg.mode {
+            SetCommunityMode::Replace => "replace",
+            SetCommunityMode::Additive => "additive",
+            SetCommunityMode::Delete => "delete",
+        };
+        s.insert(
+            "large_community".into(),
+            json!({ "name": cfg.name, "mode": mode }),
+        );
+    }
     if let Some(p) = &entry.set_as_path_prepend {
         s.insert(
             "as_path_prepend".into(),
@@ -1439,6 +1641,22 @@ pub fn show(policy: &Policy, _args: Args, json: bool) -> Result<String, Error> {
                     SetCommunityMode::Delete => " delete",
                 };
                 let _ = writeln!(buf, "  set: community {}{}", cfg.name, suffix);
+            }
+            if let Some(cfg) = &entry.set_ext_community {
+                let suffix = match cfg.mode {
+                    SetCommunityMode::Replace => "",
+                    SetCommunityMode::Additive => " additive",
+                    SetCommunityMode::Delete => " delete",
+                };
+                let _ = writeln!(buf, "  set: ext-community {}{}", cfg.name, suffix);
+            }
+            if let Some(cfg) = &entry.set_large_community {
+                let suffix = match cfg.mode {
+                    SetCommunityMode::Replace => "",
+                    SetCommunityMode::Additive => " additive",
+                    SetCommunityMode::Delete => " delete",
+                };
+                let _ = writeln!(buf, "  set: large-community {}{}", cfg.name, suffix);
             }
             if let Some(prepend) = &entry.set_as_path_prepend {
                 let _ = writeln!(

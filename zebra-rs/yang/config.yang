@@ -4038,7 +4038,12 @@ module config {
         description
           "Regular expression members matched against the route's
            AS_PATH attribute, rendered as a space-separated list of
-           ASNs (e.g. \"65001 65002 65003\").";
+           ASNs (e.g. \"65001 65002 65003\"; AS_SET members are
+           comma-separated, e.g. \"{65010,65011}\"). Syntax is
+           compatible with FRR's `bgp as-path access-list`: the `_`
+           magic character expands to (^|[,{}() ]|$), so `_65001_`
+           matches AS 65001 anywhere in the path, `^65001_` matches the
+           neighbor AS, and `_65001$` matches the origin AS.";
       }
     }
 
@@ -4669,6 +4674,97 @@ module config {
                   description
                     "Remove the set's members from the existing
                      COMMUNITIES attribute.";
+                }
+              }
+            }
+          }
+          container "ext-community" {
+            ext:help "Set/add/delete route extended communities";
+            presence "set ext-community";
+            description
+              "Apply an ext-community-set to the route. Same
+               {replace|additive|delete} choice as `set community`,
+               applied to the EXT_COMMUNITIES attribute. Only exact
+               `rt:`/`soo:` members of the set contribute concrete
+               values; regex members are skipped. replace (default)
+               overwrites the attribute — including any route targets
+               or Color community already present — so use additive to
+               preserve them.";
+            leaf "name" {
+              ext:help "Ext-community-set to apply";
+              type string;
+              mandatory true;
+              description
+                "Reference to an ext-community-set by name.";
+            }
+            choice "mode" {
+              default replace-case;
+              description
+                "Operation applied to the route's EXT_COMMUNITIES
+                 attribute.";
+              case replace-case {
+                description "Default — overwrite the attribute.";
+              }
+              case additive-case {
+                leaf "additive" {
+                  ext:help "Merge into existing ext-communities";
+                  type empty;
+                  description
+                    "Merge the set's members into the existing
+                     EXT_COMMUNITIES attribute.";
+                }
+              }
+              case delete-case {
+                leaf "delete" {
+                  ext:help "Remove from existing ext-communities";
+                  type empty;
+                  description
+                    "Remove the set's members from the existing
+                     EXT_COMMUNITIES attribute.";
+                }
+              }
+            }
+          }
+          container "large-community" {
+            ext:help "Set/add/delete route large communities";
+            presence "set large-community";
+            description
+              "Apply a large-community-set to the route. Same
+               {replace|additive|delete} choice as `set community`,
+               applied to the LARGE_COMMUNITIES attribute. Only exact
+               `A:B:C` members contribute concrete values; regex
+               members are skipped.";
+            leaf "name" {
+              ext:help "Large-community-set to apply";
+              type string;
+              mandatory true;
+              description
+                "Reference to a large-community-set by name.";
+            }
+            choice "mode" {
+              default replace-case;
+              description
+                "Operation applied to the route's LARGE_COMMUNITIES
+                 attribute.";
+              case replace-case {
+                description "Default — overwrite the attribute.";
+              }
+              case additive-case {
+                leaf "additive" {
+                  ext:help "Merge into existing large communities";
+                  type empty;
+                  description
+                    "Merge the set's members into the existing
+                     LARGE_COMMUNITIES attribute.";
+                }
+              }
+              case delete-case {
+                leaf "delete" {
+                  ext:help "Remove from existing large communities";
+                  type empty;
+                  description
+                    "Remove the set's members from the existing
+                     LARGE_COMMUNITIES attribute.";
                 }
               }
             }
