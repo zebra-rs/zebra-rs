@@ -139,6 +139,10 @@ isis:
 	mkdir -p allure-results
 	cargo test --test cucumber -- --concurrency=20 --tags "@isis"
 
+isis_lan_dis_reelection:
+	mkdir -p allure-results
+	cargo test --test cucumber -- --concurrency=1 --tags "@isis_lan_dis_reelection"
+
 # Run all BFD tests.
 bfd:
 	rm -rf allure-results

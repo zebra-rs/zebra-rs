@@ -41,6 +41,11 @@ use crate::spf::label_pool::LabelPool;
 pub struct LinkTimer {
     pub hello: Levels<Option<Timer>>,
     pub csnp: Levels<Option<Timer>>,
+    /// Debounce timer for LAN DIS (re)election. Coalesces the election
+    /// triggers (adjacency up/down, a neighbour's priority/SNPA/LAN-ID
+    /// change) that arrive close together into a single run against the
+    /// settled neighbour state — see `ifsm::dis_schedule`.
+    pub dis: Levels<Option<Timer>>,
 }
 
 #[derive(Default, Debug)]

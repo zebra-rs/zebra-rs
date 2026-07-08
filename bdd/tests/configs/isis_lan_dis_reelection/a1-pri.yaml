@@ -1,0 +1,26 @@
+# a1 with LAN priority raised to 200 (above a3's 100), applied to the
+# running a1 daemon mid-scenario so a1 takes the DIS over from a3. This is
+# the trigger for the DIS re-election: a1 goes Other -> Myself, a3 goes
+# Myself -> Other (and purges its pseudonode), and the non-DIS bystander
+# a2 goes Other -> Other, re-pointing its pseudonode adjacency from a3 to
+# a1. Only the va1ns priority differs from a1.yaml.
+interface:
+- if-name: lo
+  ipv4:
+    address: 10.0.0.1/32
+router:
+  isis:
+    net: 49.0000.0000.0000.0001.00
+    is-type: level-2
+    hostname: a1
+    interface:
+    - if-name: lo
+      circuit-type: level-2
+      ipv4:
+        enabled: true
+    - if-name: va1ns
+      circuit-type: level-2
+      metric: 10
+      priority: 200
+      ipv4:
+        enabled: true

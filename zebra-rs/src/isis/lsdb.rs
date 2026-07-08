@@ -743,6 +743,19 @@ pub fn refresh_lsp(top: &mut IsisTop, level: Level, key: IsisLspId) {
         return;
     }
     if let Some(lsa) = top.lsdb.get(&level).get(&key) {
+        // Never refresh a purge (Remaining Lifetime == 0). A purge is
+        // meant to die — its ZeroAgeLifetime `hold_timer` evicts it —
+        // but `insert_self_originate` arms a ~1s refresh timer for any
+        // entry whose remaining lifetime is below the refresh threshold,
+        // a purge included. Without this guard the refresh clones the
+        // purge into a live LSP at seq+1 every second, un-purging it and
+        // climbing the sequence unbounded. The `has_level` guard above
+        // only catches an is-type demotion; a DIS that *resigns* purges
+        // its pseudonode LSP while staying in the level, so it slips past
+        // that guard and needs this one. Covers any self-purge.
+        if lsa.lsp.hold_time == 0 {
+            return;
+        }
         let mut lsp = lsp_clone_with_seqno_inc(&lsa.lsp);
         let auth_cfg = crate::isis::lsp::level_auth_cfg(top.config, level).clone();
         let resolved =
