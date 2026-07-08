@@ -1,0 +1,25 @@
+# a3: L2 IS-IS router on broadcast LAN br0 (iface va3ns, IP
+# 192.168.100.3/24 assigned by the topology step). Loopback 10.0.0.3/32.
+# LAN priority 100 makes a3 the initial DIS deterministically (a1/a2 sit
+# at the default 64). When a1 is later raised to 200, a3 resigns
+# (DisStatus Myself -> Other) and must purge its pseudonode LSP cleanly.
+interface:
+- if-name: lo
+  ipv4:
+    address: 10.0.0.3/32
+router:
+  isis:
+    net: 49.0000.0000.0000.0003.00
+    is-type: level-2
+    hostname: a3
+    interface:
+    - if-name: lo
+      circuit-type: level-2
+      ipv4:
+        enabled: true
+    - if-name: va3ns
+      circuit-type: level-2
+      metric: 10
+      priority: 100
+      ipv4:
+        enabled: true

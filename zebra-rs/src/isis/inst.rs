@@ -2636,11 +2636,25 @@ impl Isis {
             },
             IfsmEvent::DisSelection => match level {
                 Some(level) => {
+                    // Consume the debounce slot so the next trigger re-arms
+                    // it (a trigger that lands while we are running here
+                    // then schedules a fresh follow-up election).
+                    *top.timer.dis.get_mut(&level) = None;
                     ifsm::dis_selection(&mut top, level);
                 }
                 None => {
-                    // ifsm::dis_selection(&mut top, Level::L1);
-                    // ifsm::dis_selection(&mut top, Level::L2);
+                    // Level-agnostic re-election (e.g. a `priority` config
+                    // change on the interface, which fires DisSelection
+                    // with no level): run both levels. `dis_selection` is a
+                    // no-op for a level with no Up neighbours, so this is
+                    // safe on a link that only runs one level. Without this
+                    // the priority change was silently dropped and the DIS
+                    // never re-elected — a higher-priority router could not
+                    // take over an already-elected LAN (ISO 10589 §8.4.5).
+                    for lvl in [Level::L1, Level::L2] {
+                        *top.timer.dis.get_mut(&lvl) = None;
+                        ifsm::dis_selection(&mut top, lvl);
+                    }
                 }
             },
         }

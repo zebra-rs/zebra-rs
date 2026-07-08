@@ -482,6 +482,37 @@ pub fn csnp_timer(link: &LinkTop, level: Level) -> Timer {
 }
 
 // DIS Selection
+/// Debounce interval for a LAN DIS (re)election, in milliseconds.
+/// Election triggers that arrive within this window coalesce into one
+/// run — long enough to let a burst of hellos (each carrying a peer's
+/// priority / SNPA / LAN-ID) settle, short enough that convergence is
+/// not visibly delayed.
+const DIS_ELECT_DEBOUNCE_MS: u64 = 100;
+
+/// Schedule a debounced LAN DIS (re)election on this circuit and level.
+///
+/// Running `dis_selection` synchronously at every trigger (each hello,
+/// each adjacency change) elected from inconsistent, mid-update snapshots
+/// and could split-brain / flap the DIS. Instead every trigger arms this
+/// single coalescing timer: the first arms it, later ones fold in while
+/// it is pending, and when it fires exactly one election runs against the
+/// settled neighbour state. Mirrors FRR's scheduled `isis_run_dr`
+/// (`run_dr_elect` flag + `t_run_dr` timer, isis_dr.c). The timer slot is
+/// cleared in the `DisSelection` handler so the next trigger re-arms it.
+pub fn dis_schedule(link: &mut LinkTop, level: Level) {
+    if link.timer.dis.get(&level).is_some() {
+        return;
+    }
+    let tx = link.tx.clone();
+    let ifindex = link.ifindex;
+    *link.timer.dis.get_mut(&level) = Some(Timer::once_ms(DIS_ELECT_DEBOUNCE_MS, move || {
+        let tx = tx.clone();
+        async move {
+            let _ = tx.send(Message::Ifsm(IfsmEvent::DisSelection, ifindex, Some(level)));
+        }
+    }));
+}
+
 pub fn dis_selection(link: &mut LinkTop, level: Level) {
     // 8.4.5 LAN designated intermediate systems
     //
@@ -563,9 +594,10 @@ pub fn dis_selection(link: &mut LinkTop, level: Level) {
         // csnp_recv guards on adj.is_some()), the self LSP would miss
         // its pseudonode reach entry, and `show isis interface` would
         // report an inconsistent DIS without a binding. Election
-        // outcome is recorded (`nbr.is_dis = true`); the late-LAN-ID
-        // path in hello_recv re-fires DisSelection once lan_id arrives,
-        // and that run will complete the transition cleanly.
+        // outcome is recorded (`nbr.is_dis = true`); the next hello from
+        // this DIS carries a non-empty LAN-ID, which hello_recv detects
+        // as a changed DIS input and schedules a re-election for — and
+        // that run completes the transition cleanly.
         if nbr.lan_id.is_empty() {
             if link.tracing.should_trace_fsm() {
                 tracing::info!(
@@ -604,8 +636,22 @@ pub fn dis_selection(link: &mut LinkTop, level: Level) {
         );
     }
 
-    // Perform DIS change when status or sys_id has been changed.
-    if old_status != new_status {
+    // A change of the *elected DIS* while our status stays Other (a
+    // higher-priority IS joined or a peer raised its priority, so the LAN
+    // switches from DIS X to DIS Y — both leaving us a non-DIS member).
+    // Status is unchanged (Other -> Other), but the pseudonode we point at
+    // moved: the currently registered adjacency LAN-ID no longer matches
+    // the newly elected DIS's. Without treating this as a change, the block
+    // below is skipped and we keep a dangling adjacency to the old DIS's
+    // pseudonode — which that ex-DIS has since purged — so SPF routes
+    // through a pseudonode that no longer exists and the LAN splits.
+    let dis_identity_changed = match (link.state.adj.get(&level), &lan_id) {
+        (Some((cur_lan_id, _)), Some(new_lan_id)) => cur_lan_id != new_lan_id,
+        _ => false,
+    };
+
+    // Perform DIS change when status or the elected DIS identity changed.
+    if old_status != new_status || dis_identity_changed {
         match old_status {
             DisStatus::NotSelected => {
                 // Nothing to do.

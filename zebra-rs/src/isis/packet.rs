@@ -116,7 +116,7 @@ fn stamp_nfsm_dispatch(link: &super::link::LinkTop<'_>, was_up: bool, state: Nfs
 
 use super::Level;
 use super::flood;
-use super::ifsm::has_level;
+use super::ifsm::{dis_schedule, has_level};
 use super::link::{LinkTop, NetworkType};
 use super::lsdb;
 use super::lsp::{Packet, PacketMessage};
@@ -405,11 +405,22 @@ pub fn hello_recv(link: &mut LinkTop, level: Level, pdu: IsisHello, mac: Option<
     //    areaAddressesOfNeighbour according to the values in the PDU., and
     // c) set the neighbourSNPAAddress according to the MAC source address of
     //    the PDU.
+    // Capture the DIS-election inputs (priority, SNPA, LAN-ID) before
+    // overwriting them, so we can schedule a (debounced) re-election below
+    // whenever any of them changes while the adjacency stays Up: a peer
+    // raising/lowering its priority, and — importantly — the elected DIS
+    // first publishing its LAN-ID, which is what resolves a deferred
+    // Other transition and lets a DIS switch complete.
+    let old_priority = nbr.priority;
+    let old_mac = nbr.mac;
+    let old_lan_id = nbr.lan_id;
     nbr.circuit_type = pdu.circuit_type;
     nbr.hold_time = pdu.hold_time;
     nbr.priority = pdu.priority;
     nbr.lan_id = pdu.lan_id;
     nbr.mac = mac;
+    let dis_input_changed =
+        nbr.priority != old_priority || nbr.mac != old_mac || nbr.lan_id != old_lan_id;
 
     // Interpret TLVs first so the Restart TLV — if present — has fed
     // helper-mode state before we decide whether to refresh the hold
@@ -499,7 +510,6 @@ pub fn hello_recv(link: &mut LinkTop, level: Level, pdu: IsisHello, mac: Option<
             }
             // XXX Adjacency(Up)
             nbr.event(Message::Ifsm(HelloOriginate, nbr.ifindex, Some(level)));
-            nbr.event(Message::Ifsm(DisSelection, nbr.ifindex, Some(level)));
             // Drive exit-success when every checkpointed peer has
             // come back to Up. No-op outside a loaded-checkpoint
             // restart.
@@ -520,26 +530,7 @@ pub fn hello_recv(link: &mut LinkTop, level: Level, pdu: IsisHello, mac: Option<
             }
             // XXX Adjacency(Down)
             nbr.event(Message::Ifsm(HelloOriginate, nbr.ifindex, Some(level)));
-            nbr.event(Message::Ifsm(DisSelection, nbr.ifindex, Some(level)));
         }
-    }
-
-    // Late-LAN-ID arrival: dis_selection deferred the
-    // DisStatus::Other transition because the elected DIS hadn't
-    // published a LAN ID yet. Now that this Hello carries one and we
-    // still have no pseudonode adjacency on this link, re-fire DIS
-    // selection — this time `nbr.lan_id` is non-empty, so the
-    // election will transition to Other and register the adjacency
-    // through the normal path (no inline state mutation here).
-    if nbr.is_dis() && !nbr.lan_id.is_empty() && link.state.adj.get(&level).is_none() {
-        if link.tracing.should_trace_fsm() {
-            tracing::info!(
-                "[NBR] Late LAN ID {} from elected DIS {} - re-running DIS selection",
-                nbr.lan_id,
-                nbr.sys_id
-            );
-        }
-        nbr.event(Message::Ifsm(DisSelection, nbr.ifindex, Some(level)));
     }
 
     // When neighbor state has been changed.
@@ -565,6 +556,21 @@ pub fn hello_recv(link: &mut LinkTop, level: Level, pdu: IsisHello, mac: Option<
     if was_up && state != NfsmState::Up {
         let _ = link.tx.send(Message::LspOriginate(level, None));
         spf_schedule(link, level);
+    }
+
+    // Schedule a debounced DIS (re)election whenever this Hello could have
+    // changed the election outcome: an adjacency Up/Down transition changes
+    // the member set, and a priority/SNPA/LAN-ID change on an Up neighbour
+    // changes who wins (ISO 10589 §8.4.5 elects by priority then SNPA).
+    // `dis_schedule` coalesces the burst of Hellos a topology change
+    // produces into one election run against the settled neighbour table
+    // (100ms debounce), mirroring FRR's debounced DR election (isis_dr.c).
+    // Running the election synchronously on every trigger caused
+    // split-brain flapping: speakers re-elected against half-updated
+    // neighbour state and never agreed on a single DIS.
+    let now_up = state == NfsmState::Up;
+    if (was_up != now_up) || (now_up && dis_input_changed) {
+        dis_schedule(link, level);
     }
 
     // RFC 5882 §5 BFD attachment, post-FSM. nbr has been dropped so
