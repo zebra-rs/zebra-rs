@@ -182,12 +182,14 @@ impl<F: StaticFamily> StaticRoute<F> {
 
         if self.nexthops.len() == 1 {
             let (p, n) = self.nexthops.iter().next()?;
+            let addr = F::to_ip_addr(*p);
             let nhop = NexthopUni {
-                addr: F::to_ip_addr(*p),
+                addr,
                 metric: n.metric.unwrap_or(metric),
                 weight: n.weight.unwrap_or(1),
                 mpls: n.labels.iter().map(|&l| Label::Explicit(l)).collect(),
                 mpls_label: n.labels.clone(),
+                addr_origin: n.labels.is_empty().then_some(addr),
                 ..Default::default()
             };
             entry.nexthop = Nexthop::Uni(nhop);
@@ -211,12 +213,14 @@ impl<F: StaticFamily> StaticRoute<F> {
                 ..Default::default()
             };
             for (p, n) in set.iter() {
+                let addr = F::to_ip_addr(*p);
                 let nhop = NexthopUni {
-                    addr: F::to_ip_addr(*p),
+                    addr,
                     metric: n.metric.unwrap_or(metric),
                     weight: n.weight.unwrap_or(1),
                     mpls: n.labels.iter().map(|&l| Label::Explicit(l)).collect(),
                     mpls_label: n.labels.clone(),
+                    addr_origin: n.labels.is_empty().then_some(addr),
                     ..Default::default()
                 };
                 multi.nexthops.push(nhop);
@@ -229,12 +233,14 @@ impl<F: StaticFamily> StaticRoute<F> {
                     entry.metric = *metric;
                 }
                 let (p, n) = set.first()?;
+                let addr = F::to_ip_addr(*p);
                 let nhop = NexthopUni {
-                    addr: F::to_ip_addr(*p),
+                    addr,
                     metric: *metric,
                     weight: n.weight.unwrap_or(1),
                     mpls: n.labels.iter().map(|&l| Label::Explicit(l)).collect(),
                     mpls_label: n.labels.clone(),
+                    addr_origin: n.labels.is_empty().then_some(addr),
                     ..Default::default()
                 };
                 pro.nexthops.push(NexthopMember::Uni(nhop));

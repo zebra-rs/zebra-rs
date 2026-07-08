@@ -80,7 +80,7 @@ fn via_word(uni: &NexthopUni) -> &'static str {
 // Non-SRv6 nexthops render the bare address.
 fn via_addr(uni: &NexthopUni) -> String {
     if uni.segs.is_empty() {
-        uni.addr.to_string()
+        uni.display_addr().to_string()
     } else {
         let parts: Vec<String> = uni.segs.iter().map(|s| s.to_string()).collect();
         format!("[{}]", parts.join(", "))
