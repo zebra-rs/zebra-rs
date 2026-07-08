@@ -9,7 +9,7 @@
 #
 # What it installs:
 #   * APT system packages (build-essential, protobuf-compiler, libpam0g-dev,
-#     libnanomsg-dev, bison, xxd, ...) for the workspace and the `vty` build.
+#     bison, xxd, ...) for the workspace and the `vty` build.
 #   * The stable Rust toolchain via rustup (if cargo is not already present).
 #   * The nightly Rust toolchain + rust-src for the bpfel-unknown-none target.
 #   * LLVM (default 18) from apt.llvm.org, required to link bpf-linker.
@@ -45,7 +45,7 @@ INSTALL_RUST=1
 
 # System packages. build-essential/pkg-config/curl drive the `vty` C build (GNU
 # bash compiled from source); protobuf-compiler + libpam0g-dev are the only ones
-# the plain `cargo build`/`cargo test` needs; libnanomsg-dev/bison/xxd complete
+# the plain `cargo build`/`cargo test` needs; bison/xxd complete
 # the `vty` shell build. wget is used to fetch the LLVM installer; git/make round
 # out the build.
 APT_PACKAGES=(
@@ -57,7 +57,6 @@ APT_PACKAGES=(
     make
     protobuf-compiler
     libpam0g-dev
-    libnanomsg-dev
     bison
     xxd
 )

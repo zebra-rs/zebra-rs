@@ -218,8 +218,6 @@ async fn run(arg: Arg) -> anyhow::Result<()> {
 
     rib::serve(rib);
 
-    // rib::nanomsg::serve();
-
     // Background drainer for Lua scripts' non-blocking side-effects
     // (sideeffect.nft → nftables). Must run inside the tokio runtime.
     #[cfg(feature = "lua")]
