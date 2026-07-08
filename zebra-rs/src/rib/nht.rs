@@ -38,8 +38,9 @@ use prefix_trie::PrefixMap;
 
 use super::Nexthop;
 use super::RibEntries;
-use super::nexthop::NexthopUni;
+use super::nexthop::{Label, NexthopUni};
 use super::resolve::entry_resolvable;
+use super::types::RibType;
 
 /// Cap on recursive resolution depth — also the loop backstop until a
 /// per-branch visited-set lands. Matches `resolve.rs`'s default.
@@ -106,42 +107,37 @@ fn resolve_v4_inner(
         return None;
     }
 
-    for entry in entries.iter() {
-        if !entry_resolvable(entry) {
-            continue;
-        }
-        // Connected: `target` is directly on-link via this entry.
-        if entry.is_connected() {
-            if entry.ifindex != 0 {
-                out.push(ResolvedNexthop {
-                    addr: IpAddr::V4(target),
-                    ifindex: entry.ifindex,
-                    labels: accum.to_vec(),
-                });
-            }
-            return Some(entry.metric);
-        }
-        // Protocol route: resolve each (ECMP) nexthop, accumulating
-        // labels and recursing on not-yet-on-link addresses.
-        for uni in entry_unis(&entry.nexthop) {
-            let mut labels = accum.to_vec();
-            labels.extend_from_slice(&uni.mpls_label);
-            match uni.ifindex() {
-                Some(ifindex) => out.push(ResolvedNexthop {
-                    addr: uni.addr,
-                    ifindex,
-                    labels,
-                }),
-                None => {
-                    if let IpAddr::V4(next) = uni.addr {
-                        resolve_v4_inner(table, next, depth - 1, &labels, out);
-                    }
-                }
-            }
+    let entry = nht_best_entry(entries)?;
+    // Connected: `target` is directly on-link via this entry.
+    if entry.is_connected() {
+        if entry.ifindex != 0 {
+            out.push(ResolvedNexthop {
+                addr: IpAddr::V4(target),
+                ifindex: entry.ifindex,
+                labels: accum.to_vec(),
+            });
         }
         return Some(entry.metric);
     }
-    None
+    // Protocol route: resolve each (ECMP) nexthop, accumulating
+    // labels and recursing on not-yet-on-link addresses.
+    for uni in entry_unis(&entry.nexthop) {
+        let mut labels = accum.to_vec();
+        labels.extend_from_slice(&uni_transport_labels(uni));
+        match uni.ifindex() {
+            Some(ifindex) => out.push(ResolvedNexthop {
+                addr: uni.addr,
+                ifindex,
+                labels,
+            }),
+            None => {
+                if let IpAddr::V4(next) = uni.addr {
+                    resolve_v4_inner(table, next, depth - 1, &labels, out);
+                }
+            }
+        }
+    }
+    Some(entry.metric)
 }
 
 fn resolve_v6_inner(
@@ -160,39 +156,71 @@ fn resolve_v6_inner(
         return None;
     }
 
-    for entry in entries.iter() {
-        if !entry_resolvable(entry) {
-            continue;
-        }
-        if entry.is_connected() {
-            if entry.ifindex != 0 {
-                out.push(ResolvedNexthop {
-                    addr: IpAddr::V6(target),
-                    ifindex: entry.ifindex,
-                    labels: accum.to_vec(),
-                });
-            }
-            return Some(entry.metric);
-        }
-        for uni in entry_unis(&entry.nexthop) {
-            let mut labels = accum.to_vec();
-            labels.extend_from_slice(&uni.mpls_label);
-            match uni.ifindex() {
-                Some(ifindex) => out.push(ResolvedNexthop {
-                    addr: uni.addr,
-                    ifindex,
-                    labels,
-                }),
-                None => {
-                    if let IpAddr::V6(next) = uni.addr {
-                        resolve_v6_inner(table, next, depth - 1, &labels, out);
-                    }
-                }
-            }
+    let entry = nht_best_entry(entries)?;
+    if entry.is_connected() {
+        if entry.ifindex != 0 {
+            out.push(ResolvedNexthop {
+                addr: IpAddr::V6(target),
+                ifindex: entry.ifindex,
+                labels: accum.to_vec(),
+            });
         }
         return Some(entry.metric);
     }
-    None
+    for uni in entry_unis(&entry.nexthop) {
+        let mut labels = accum.to_vec();
+        labels.extend_from_slice(&uni_transport_labels(uni));
+        match uni.ifindex() {
+            Some(ifindex) => out.push(ResolvedNexthop {
+                addr: uni.addr,
+                ifindex,
+                labels,
+            }),
+            None => {
+                if let IpAddr::V6(next) = uni.addr {
+                    resolve_v6_inner(table, next, depth - 1, &labels, out);
+                }
+            }
+        }
+    }
+    Some(entry.metric)
+}
+
+/// Pick the covering route NHT should recurse through. Kernel/DHCP
+/// shadows of zebra-installed routes are skipped — they carry no MPLS
+/// metadata and would otherwise hide the protocol path's label stack.
+fn nht_best_entry(entries: &RibEntries) -> Option<&crate::rib::entry::RibEntry> {
+    entries
+        .iter()
+        .filter(|e| {
+            e.is_valid()
+                && e.rtype != RibType::Kernel
+                && e.rtype != RibType::Dhcp
+                && entry_resolvable(e)
+        })
+        .min_by(|a, b| {
+            a.distance
+                .cmp(&b.distance)
+                .then(a.metric.cmp(&b.metric))
+                .then(a.rtype.u8().cmp(&b.rtype.u8()))
+        })
+}
+
+/// MPLS labels to push for recursive resolution. Prefer the explicit
+/// install stack (`mpls_label`); fall back to `mpls` when only the
+/// protocol label vector was populated (implicit-null entries are
+/// omitted — PHP does not push).
+fn uni_transport_labels(uni: &NexthopUni) -> Vec<u32> {
+    if !uni.mpls_label.is_empty() {
+        return uni.mpls_label.clone();
+    }
+    uni.mpls
+        .iter()
+        .filter_map(|label| match label {
+            Label::Explicit(label) => Some(*label),
+            Label::Implicit(_) => None,
+        })
+        .collect()
 }
 
 /// Flatten a `Nexthop` into its unicast members (ECMP-aware).
@@ -275,6 +303,44 @@ mod tests {
         e
     }
 
+    fn isis_mpls_via(addr: Ipv4Addr, label: u32, ifindex: u32) -> RibEntry {
+        let mut e = RibEntry::new(RibType::Isis);
+        e.valid = true;
+        e.distance = 115;
+        e.metric = 13;
+        let mut uni = NexthopUni::new(IpAddr::V4(addr), 13, vec![Label::Explicit(label)]);
+        uni.ifindex_origin = Some(ifindex);
+        e.nexthop = Nexthop::Uni(uni);
+        e
+    }
+
+    fn kernel_shadow(addr: Ipv4Addr, ifindex: u32) -> RibEntry {
+        let mut e = RibEntry::new(RibType::Kernel);
+        e.valid = true;
+        e.distance = 0;
+        e.metric = 13;
+        let mut uni = NexthopUni::new(IpAddr::V4(addr), 13, vec![]);
+        uni.ifindex_origin = Some(ifindex);
+        e.nexthop = Nexthop::Uni(uni);
+        e
+    }
+
+    fn table_rows(rows: Vec<(&str, RibEntry)>) -> PrefixMap<Ipv4Net, RibEntries> {
+        let mut t: PrefixMap<Ipv4Net, RibEntries> = PrefixMap::new();
+        for (p, e) in rows {
+            t.insert(p.parse().unwrap(), vec![e]);
+        }
+        t
+    }
+
+    fn table_multi(rows: Vec<(&str, Vec<RibEntry>)>) -> PrefixMap<Ipv4Net, RibEntries> {
+        let mut t: PrefixMap<Ipv4Net, RibEntries> = PrefixMap::new();
+        for (p, es) in rows {
+            t.insert(p.parse().unwrap(), es);
+        }
+        t
+    }
+
     fn table(rows: Vec<(&str, RibEntry)>) -> PrefixMap<Ipv4Net, RibEntries> {
         let mut t: PrefixMap<Ipv4Net, RibEntries> = PrefixMap::new();
         for (p, e) in rows {
@@ -340,6 +406,39 @@ mod tests {
         let r = resolve_v4(&t, "9.9.9.9".parse().unwrap());
         assert!(!r.reachable);
         assert!(r.nexthops.is_empty());
+    }
+
+    #[test]
+    fn kernel_shadow_does_not_hide_isis_mpls_transport() {
+        let t = table_multi(vec![(
+            "10.0.0.3/32",
+            vec![
+                kernel_shadow("192.168.2.1".parse().unwrap(), 11),
+                isis_mpls_via("192.168.2.1".parse().unwrap(), 16600, 11),
+            ],
+        )]);
+        let r = resolve_v4(&t, "10.0.0.3".parse().unwrap());
+        assert!(r.reachable);
+        assert_eq!(r.nexthops.len(), 1);
+        assert_eq!(r.nexthops[0].labels, vec![16600]);
+    }
+
+    #[test]
+    fn transport_labels_fall_back_to_mpls_vector() {
+        let mut e = RibEntry::new(RibType::Isis);
+        e.valid = true;
+        e.distance = 115;
+        let uni = NexthopUni {
+            addr: "192.168.2.1".parse::<IpAddr>().unwrap(),
+            mpls: vec![Label::Explicit(16500)],
+            ifindex_origin: Some(11),
+            valid: true,
+            ..Default::default()
+        };
+        e.nexthop = Nexthop::Uni(uni);
+        let t = table_rows(vec![("10.0.0.2/32", e)]);
+        let r = resolve_v4(&t, "10.0.0.2".parse().unwrap());
+        assert_eq!(r.nexthops[0].labels, vec![16500]);
     }
 
     #[test]

@@ -1125,8 +1125,164 @@ impl Rib {
         }
         retry
     }
+}
+
+fn static_reresolve_uni_v4(
+    uni: &mut NexthopUni,
+    nmap: &mut NexthopMap,
+    table: &PrefixMap<Ipv4Net, RibEntries>,
+    table_id: u32,
+) {
+    if uni.addr_origin.is_none() {
+        return;
+    }
+    super::r#static::resolve::release_nexthop_gid(uni, nmap);
+    let _ = resolve_nexthop_uni(uni, nmap, table, table_id);
+}
+
+fn static_reresolve_entry_v4(
+    entry: &mut RibEntry,
+    table: &PrefixMap<Ipv4Net, RibEntries>,
+    nmap: &mut NexthopMap,
+    table_id: u32,
+) {
+    if entry.rtype != RibType::Static {
+        return;
+    }
+    match &mut entry.nexthop {
+        Nexthop::Uni(uni) => static_reresolve_uni_v4(uni, nmap, table, table_id),
+        Nexthop::Multi(multi) => {
+            for uni in multi.nexthops.iter_mut() {
+                static_reresolve_uni_v4(uni, nmap, table, table_id);
+            }
+        }
+        Nexthop::List(list) => {
+            for member in list.nexthops.iter_mut() {
+                if let NexthopMember::Uni(uni) = member {
+                    static_reresolve_uni_v4(uni, nmap, table, table_id);
+                }
+            }
+        }
+        Nexthop::Protect(pro) => {
+            for member in pro.members_mut() {
+                if let NexthopMember::Uni(uni) = member {
+                    static_reresolve_uni_v4(uni, nmap, table, table_id);
+                }
+            }
+        }
+        _ => {}
+    }
+}
+
+fn static_reresolve_uni_v6(
+    uni: &mut NexthopUni,
+    nmap: &mut NexthopMap,
+    table: &PrefixMap<Ipv6Net, RibEntries>,
+    table_id: u32,
+) {
+    if uni.addr_origin.is_none() {
+        return;
+    }
+    super::r#static::resolve::release_nexthop_gid(uni, nmap);
+    let _ = resolve_nexthop_uni_v6(uni, nmap, table, table_id);
+}
+
+fn static_reresolve_entry_v6(
+    entry: &mut RibEntry,
+    table: &PrefixMap<Ipv6Net, RibEntries>,
+    nmap: &mut NexthopMap,
+    table_id: u32,
+) {
+    if entry.rtype != RibType::Static {
+        return;
+    }
+    match &mut entry.nexthop {
+        Nexthop::Uni(uni) => static_reresolve_uni_v6(uni, nmap, table, table_id),
+        Nexthop::Multi(multi) => {
+            for uni in multi.nexthops.iter_mut() {
+                static_reresolve_uni_v6(uni, nmap, table, table_id);
+            }
+        }
+        _ => {}
+    }
+}
+
+/// Cheap, allocation-free gate for the static-NHT re-resolve pass.
+///
+/// `refresh_static_nht_*` clones the whole table so each static
+/// nexthop can be re-resolved against a stable snapshot. That clone is
+/// pure overhead on every resolve cycle for any table with no static
+/// routes — i.e. the common case (OSPF/IS-IS/BGP topologies). Loading
+/// the RIB event loop with it widened the pre-existing cross-channel
+/// `redistribute table` origination race (`@ospfv2_redist_table`), so
+/// skip the clone entirely unless a static route is actually present.
+fn table_has_static_v4(table: &PrefixMap<Ipv4Net, RibEntries>) -> bool {
+    table
+        .iter()
+        .any(|(_, entries)| entries.iter().any(|e| e.rtype == RibType::Static))
+}
+
+fn table_has_static_v6(table: &PrefixMap<Ipv6Net, RibEntries>) -> bool {
+    table
+        .iter()
+        .any(|(_, entries)| entries.iter().any(|e| e.rtype == RibType::Static))
+}
+
+impl Rib {
+    fn refresh_static_nht_v4(&mut self) {
+        if table_has_static_v4(&self.table) {
+            let snapshot = self.table.clone();
+            for (_, entries) in self.table.iter_mut() {
+                for entry in entries.iter_mut() {
+                    static_reresolve_entry_v4(entry, &snapshot, &mut self.nmap, RT_TABLE_MAIN);
+                }
+            }
+        }
+        let vrf_ids: Vec<u32> = self.vrf_tables.keys().copied().collect();
+        for table_id in vrf_ids {
+            let Some(vrf) = self.vrf_tables.get_mut(&table_id) else {
+                continue;
+            };
+            if !table_has_static_v4(&vrf.table) {
+                continue;
+            }
+            let snapshot = vrf.table.clone();
+            for (_, entries) in vrf.table.iter_mut() {
+                for entry in entries.iter_mut() {
+                    static_reresolve_entry_v4(entry, &snapshot, &mut self.nmap, table_id);
+                }
+            }
+        }
+    }
+
+    fn refresh_static_nht_v6(&mut self) {
+        if table_has_static_v6(&self.table_v6) {
+            let snapshot = self.table_v6.clone();
+            for (_, entries) in self.table_v6.iter_mut() {
+                for entry in entries.iter_mut() {
+                    static_reresolve_entry_v6(entry, &snapshot, &mut self.nmap, RT_TABLE_MAIN);
+                }
+            }
+        }
+        let vrf_ids: Vec<u32> = self.vrf_tables.keys().copied().collect();
+        for table_id in vrf_ids {
+            let Some(vrf) = self.vrf_tables.get_mut(&table_id) else {
+                continue;
+            };
+            if !table_has_static_v6(&vrf.table_v6) {
+                continue;
+            }
+            let snapshot = vrf.table_v6.clone();
+            for (_, entries) in vrf.table_v6.iter_mut() {
+                for entry in entries.iter_mut() {
+                    static_reresolve_entry_v6(entry, &snapshot, &mut self.nmap, table_id);
+                }
+            }
+        }
+    }
 
     pub async fn ipv6_route_resolve(&mut self) {
+        self.refresh_static_nht_v6();
         ipv6_nexthop_sync(
             &mut self.nmap,
             &self.table_v6,
@@ -1146,6 +1302,7 @@ impl Rib {
     }
 
     pub async fn ipv4_route_resolve(&mut self) {
+        self.refresh_static_nht_v4();
         // One nexthop sync handles every table: each group resolves
         // against the table its `table_id` names (default or a VRF).
         ipv4_nexthop_sync(
@@ -1666,6 +1823,10 @@ fn resolve_nexthop_uni(
     table: &PrefixMap<Ipv4Net, RibEntries>,
     table_id: u32,
 ) -> bool {
+    if uni.addr_origin.is_some() && !super::r#static::resolve::apply_nht_v4(uni, table) {
+        uni.valid = false;
+        return false;
+    }
     let Some(Group::Uni(group)) = nmap.fetch(uni, table_id) else {
         return false;
     };
@@ -2426,6 +2587,10 @@ fn resolve_nexthop_uni_v6(
     table: &PrefixMap<Ipv6Net, RibEntries>,
     table_id: u32,
 ) -> bool {
+    if uni.addr_origin.is_some() && !super::r#static::resolve::apply_nht_v6(uni, table) {
+        uni.valid = false;
+        return false;
+    }
     if rib_nexthop() {
         println!(
             "[resolve_nexthop_uni_v6] addr={} gid_before={}",

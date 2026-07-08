@@ -22,14 +22,18 @@ pub struct NexthopUni {
     /// pre-resolve to loopback / per-adjacency. `None` means "the
     /// source didn't know; please resolve via the RIB."
     ///
-    /// Origin is the source of truth for FIB install and show output;
-    /// the resolver must never overwrite it. Future work will give
-    /// `addr` the same origin/resolved split for static routes that
-    /// recurse through a chain of nexthop addresses.
+    /// Origin is the source of truth for FIB install; show output uses
+    /// `addr_origin` when set. `addr` may carry the resolved forwarding
+    /// target after NHT walks the underlay.
     pub ifindex_origin: Option<u32>,
     /// What the RIB resolver looked up when origin was `None`.
     /// `None` means "not resolved yet" or "no covering route found."
     pub ifindex_resolved: Option<u32>,
+
+    /// Configured gateway for static routes that recurse through the
+    /// RIB (NHT). `addr` carries the resolved forwarding target after
+    /// lookup; show output prefers this field when set.
+    pub addr_origin: Option<IpAddr>,
 
     pub valid: bool,
     pub mpls: Vec<Label>,
@@ -59,6 +63,12 @@ impl NexthopUni {
     /// `.unwrap_or(0)`.
     pub fn ifindex(&self) -> Option<u32> {
         self.ifindex_origin.or(self.ifindex_resolved)
+    }
+
+    /// Address to show the operator — configured gateway when present,
+    /// otherwise the forwarding address used for FIB install.
+    pub fn display_addr(&self) -> IpAddr {
+        self.addr_origin.unwrap_or(self.addr)
     }
 }
 
@@ -93,6 +103,7 @@ impl Default for NexthopUni {
             addr: IpAddr::V4(Ipv4Addr::UNSPECIFIED),
             ifindex_origin: None,
             ifindex_resolved: None,
+            addr_origin: None,
             metric: 0,
             weight: 1,
             mpls: vec![],
