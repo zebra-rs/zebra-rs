@@ -1,7 +1,8 @@
 //! Optional tee of FIB route installs into the **cradle** eBPF data plane.
 //!
-//! Enabled by the `system cradle grpc-endpoint <endpoint>` config leaf (or the
-//! `CRADLE_GRPC` env var as a fallback). When set, the protocol routes the RIB
+//! Enabled by `system cradle enabled true`; the endpoint is the
+//! `system cradle grpc-endpoint` override or the default `unix:cradle/grpc`
+//! (the `CRADLE_GRPC` env var is a startup fallback). When active, the RIB
 //! installs are also pushed to a running `cradle` via its gRPC control API, so
 //! zebra-rs-computed routes (static, BGP, OSPF, IS-IS, …) program the eBPF FIB
 //! in addition to the kernel. This is the zebra-rs side of the cradle-rs

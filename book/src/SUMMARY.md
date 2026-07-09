@@ -127,6 +127,10 @@
 
 - [Fast Failover](ch-12-00-nexthop-protect.md)
 
+## Data Plane
+
+- [cradle eBPF Integration](ch-16-00-cradle.md)
+
 ## Performance Measurement
 
 - [STAMP](ch-09-00-twamp-stamp.md)
