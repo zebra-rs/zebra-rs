@@ -1,6 +1,6 @@
 //! Optional tee of FIB route installs into the **cradle** eBPF data plane.
 //!
-//! Enabled by the `system cradle-grpc <endpoint>` config leaf (or the
+//! Enabled by the `system cradle grpc-endpoint <endpoint>` config leaf (or the
 //! `CRADLE_GRPC` env var as a fallback). When set, the protocol routes the RIB
 //! installs are also pushed to a running `cradle` via its gRPC control API, so
 //! zebra-rs-computed routes (static, BGP, OSPF, IS-IS, …) program the eBPF FIB
@@ -191,7 +191,7 @@ impl CradleFib {
     }
 
     /// Construct from `CRADLE_GRPC` if set (env fallback; the primary control is
-    /// the `system cradle-grpc` config leaf). Returns `None` when unset.
+    /// the `system cradle grpc-endpoint` config leaf). Returns `None` when unset.
     pub fn from_env() -> Option<Self> {
         std::env::var("CRADLE_GRPC").ok().map(|ep| Self::new(&ep))
     }

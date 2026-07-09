@@ -112,6 +112,6 @@ configured (or re-pointed) is found without waiting for a route churn.
 
 Single-homed only (all-zero ESI): no multihoming, DF election, or
 primary/backup signalling yet — the L2-Attributes P/B bits are fixed at
-P=1/B=0. The data plane is cradle eBPF (`system cradle-grpc`); the
+P=1/B=0. The data plane is cradle eBPF (`system cradle grpc-endpoint`); the
 kernel has no End.DX2/DX2V seg6local action, so these SIDs are never
 installed via netlink.

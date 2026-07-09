@@ -94,7 +94,7 @@ module zebra-bgp-evpn {
              (IMET) routes, carved from the BGP SRv6 locator, and
              install received MACs against the peer's L2 service SIDs.
              Requires `segment-routing srv6 locator`; the L2 data
-             plane is the cradle eBPF tee (`system cradle-grpc`) —
+             plane is the cradle eBPF tee (`system cradle grpc-endpoint`) —
              the kernel has no End.DT2U/DT2M seg6local actions.";
         }
       }

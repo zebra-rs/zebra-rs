@@ -2697,12 +2697,12 @@ mod yang_load_tests {
         );
     }
 
-    /// The cradle eBPF integration exposes two settable knobs under the
-    /// `system` container: the `system cradle enabled <bool>` master switch
+    /// The cradle eBPF integration exposes two settable leaves under the
+    /// `system cradle` container: the `system cradle enabled <bool>` switch
     /// (dispatched in `rib/inst.rs` at the literal `/system/cradle/enabled`
-    /// path) and the optional `system cradle-grpc <endpoint>` override. Pin
-    /// both at the grammar level so a typo in the container/leaf naming
-    /// (which `load_mode` would not catch) fails loudly.
+    /// path) and the optional `system cradle grpc-endpoint <endpoint>`
+    /// override. Pin both at the grammar level so a typo in the container/leaf
+    /// naming (which `load_mode` would not catch) fails loudly.
     #[test]
     fn cradle_knobs_are_settable() {
         use crate::config::ExecCode;
@@ -2721,7 +2721,7 @@ mod yang_load_tests {
 
         for cmd in [
             "set system cradle enabled true",
-            "set system cradle-grpc unix:cradle/grpc",
+            "set system cradle grpc-endpoint unix:cradle/grpc",
         ] {
             let (code, _comps, _state) = parse(cmd, entry.clone(), None, State::new());
             assert_eq!(code, ExecCode::Success, "must be a settable path: {cmd}");

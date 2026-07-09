@@ -740,11 +740,11 @@ pub enum NeighborKey {
 pub struct Rib {
     /// The cradle `WatchFdb` subscriber task (datapath MAC learning →
     /// EVPN Type-2 origination); aborted and respawned when the
-    /// `system cradle-grpc` endpoint changes.
+    /// `system cradle grpc-endpoint` endpoint changes.
     pub cradle_fdb_watch: Option<tokio::task::JoinHandle<()>>,
     /// `system cradle enabled` — master switch for the cradle eBPF tee.
     pub cradle_enabled: bool,
-    /// `system cradle-grpc <endpoint>` override. When the tee is enabled
+    /// `system cradle grpc-endpoint <endpoint>` override. When the tee is enabled
     /// but this is unset, the endpoint defaults to `unix:cradle/grpc`.
     pub cradle_grpc: Option<String>,
     pub cm: ConfigChannel,
@@ -3756,9 +3756,9 @@ impl Rib {
         Some((vni, vtep_local))
     }
 
-    /// `set system cradle enabled <bool>` — master switch for the cradle
+    /// `set system cradle enabled <bool>` — the sole switch for the cradle
     /// eBPF data-plane tee. Deleting it (or setting false) disables the tee
-    /// unless a `system cradle-grpc` endpoint keeps it on.
+    /// regardless of any `system cradle grpc-endpoint` endpoint.
     #[cfg(target_os = "linux")]
     pub(crate) fn cradle_enabled_config_exec(
         &mut self,
@@ -3770,11 +3770,12 @@ impl Rib {
         Some(())
     }
 
-    /// `set system cradle-grpc <endpoint>` overrides (or re-points) the cradle
-    /// tee endpoint; deleting it falls back to the `unix:cradle/grpc` default
-    /// (when the tee is otherwise enabled). Setting it also enables the tee on
-    /// its own. The endpoint is `unix:NAME` / `unix:/path`, `http://host:port`
-    /// or a bare `host:port` (treated as TCP).
+    /// `set system cradle grpc-endpoint <endpoint>` overrides (or re-points) the cradle
+    /// tee endpoint; deleting it falls back to the `unix:cradle/grpc` default.
+    /// This only takes effect while the tee is enabled (`system cradle
+    /// enabled`); on its own it does not enable the tee. The endpoint is
+    /// `unix:NAME` / `unix:/path`, `http://host:port` or a bare `host:port`
+    /// (treated as TCP).
     #[cfg(target_os = "linux")]
     pub(crate) fn cradle_grpc_config_exec(
         &mut self,
@@ -3791,13 +3792,13 @@ impl Rib {
     }
 
     /// Effective cradle tee endpoint: `None` when disabled, else the
-    /// `system cradle-grpc` override or the `unix:cradle/grpc` default.
+    /// `system cradle grpc-endpoint` override or the `unix:cradle/grpc` default.
     #[cfg(target_os = "linux")]
     fn cradle_endpoint(&self) -> Option<String> {
         cradle_effective_endpoint(self.cradle_enabled, self.cradle_grpc.as_deref())
     }
 
-    /// Re-derive the cradle tee from the current `enabled` / `cradle-grpc`
+    /// Re-derive the cradle tee from the current `enabled` / `grpc-endpoint`
     /// state and (re)start or stop the forward tee plus the reverse
     /// `WatchFdb` subscriber accordingly. Called on any change to either
     /// config knob.
@@ -3904,7 +3905,7 @@ impl Rib {
                 } else if path.as_str() == "/system/cradle/enabled" {
                     #[cfg(target_os = "linux")]
                     let _ = self.cradle_enabled_config_exec(args, msg.op);
-                } else if path.as_str() == "/system/cradle-grpc" {
+                } else if path.as_str() == "/system/cradle/grpc-endpoint" {
                     #[cfg(target_os = "linux")]
                     let _ = self.cradle_grpc_config_exec(args, msg.op);
                 } else if path.as_str().starts_with("/router/static/vrf/ipv4/route") {
@@ -4286,11 +4287,12 @@ fn neighbor_key(nbr: &FibNeighbor) -> Option<NeighborKey> {
 }
 
 /// Resolve the effective cradle tee endpoint from the two `system cradle`
-/// knobs. `None` disables the tee. The tee is active when `enabled` is true,
-/// or (for backward compatibility) when a `cradle-grpc` override is set on its
-/// own; the endpoint is that override, else the `unix:cradle/grpc` default.
+/// knobs. The tee is active only when `system cradle enabled` is true; the
+/// endpoint is the `system cradle grpc-endpoint` override if set, else the
+/// `unix:cradle/grpc` default. `system cradle grpc-endpoint` on its own does not enable
+/// the tee — it only points an already-enabled tee somewhere else.
 fn cradle_effective_endpoint(enabled: bool, grpc: Option<&str>) -> Option<String> {
-    if enabled || grpc.is_some() {
+    if enabled {
         Some(grpc.unwrap_or("unix:cradle/grpc").to_string())
     } else {
         None
@@ -4342,10 +4344,11 @@ mod cradle_endpoint_tests {
     }
 
     #[test]
-    fn override_alone_enables_tee_for_backward_compat() {
+    fn override_alone_does_not_enable_tee() {
+        // `system cradle grpc-endpoint` without `system cradle enabled` is inert.
         assert_eq!(
-            cradle_effective_endpoint(false, Some("127.0.0.1:50151")).as_deref(),
-            Some("127.0.0.1:50151"),
+            cradle_effective_endpoint(false, Some("127.0.0.1:50151")),
+            None
         );
     }
 }

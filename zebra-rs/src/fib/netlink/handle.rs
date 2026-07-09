@@ -351,7 +351,7 @@ pub struct FibHandle {
     /// Used to resolve VNI to the correct VXLAN device for FDB operations
     pub vni_ifindex_map: BTreeMap<u32, u32>,
     /// Optional tee of route installs into the cradle eBPF data plane. Driven by
-    /// the `system cradle-grpc <endpoint>` config leaf (`set_cradle`, dispatched
+    /// the `system cradle grpc-endpoint <endpoint>` config leaf (`set_cradle`, dispatched
     /// from `Rib::cradle_grpc_config_exec`), with `CRADLE_GRPC` as an env
     /// fallback.
     pub cradle: Option<CradleFib>,
@@ -528,7 +528,7 @@ impl FibHandle {
     }
 
     /// Enable/re-point (`Some`) or disable (`None`) the cradle eBPF tee at
-    /// runtime. Driven by the `system cradle-grpc` config leaf.
+    /// runtime. Driven by the `system cradle grpc-endpoint` config leaf.
     pub fn set_cradle(&mut self, endpoint: Option<&str>) {
         self.cradle = endpoint.map(CradleFib::new);
         if self.cradle.is_none() {
