@@ -742,6 +742,11 @@ pub struct Rib {
     /// EVPN Type-2 origination); aborted and respawned when the
     /// `system cradle-grpc` endpoint changes.
     pub cradle_fdb_watch: Option<tokio::task::JoinHandle<()>>,
+    /// `system cradle enabled` — master switch for the cradle eBPF tee.
+    pub cradle_enabled: bool,
+    /// `system cradle-grpc <endpoint>` override. When the tee is enabled
+    /// but this is unset, the endpoint defaults to `unix:cradle/grpc`.
+    pub cradle_grpc: Option<String>,
     pub cm: ConfigChannel,
     pub show: ShowChannel,
     pub show_cb: HashMap<String, ShowCallback>,
@@ -973,6 +978,8 @@ impl Rib {
         let (inbound_tx, inbound_rx) = mpsc::unbounded_channel();
         let mut rib = Rib {
             cradle_fdb_watch: None,
+            cradle_enabled: false,
+            cradle_grpc: None,
             cm: ConfigChannel::new(),
             show: ShowChannel::new(),
             show_cb: HashMap::new(),
@@ -3749,9 +3756,24 @@ impl Rib {
         Some((vni, vtep_local))
     }
 
-    /// `set system cradle-grpc <endpoint>` enables (or re-points) the cradle
-    /// eBPF data-plane tee; deleting it disables the tee. Mirrors
-    /// `router_id_config_exec`. The endpoint is `unix:/path`, `http://host:port`
+    /// `set system cradle enabled <bool>` — master switch for the cradle
+    /// eBPF data-plane tee. Deleting it (or setting false) disables the tee
+    /// unless a `system cradle-grpc` endpoint keeps it on.
+    #[cfg(target_os = "linux")]
+    pub(crate) fn cradle_enabled_config_exec(
+        &mut self,
+        mut args: crate::config::Args,
+        op: ConfigOp,
+    ) -> Option<()> {
+        self.cradle_enabled = op.is_set() && args.boolean()?;
+        self.cradle_apply();
+        Some(())
+    }
+
+    /// `set system cradle-grpc <endpoint>` overrides (or re-points) the cradle
+    /// tee endpoint; deleting it falls back to the `unix:cradle/grpc` default
+    /// (when the tee is otherwise enabled). Setting it also enables the tee on
+    /// its own. The endpoint is `unix:NAME` / `unix:/path`, `http://host:port`
     /// or a bare `host:port` (treated as TCP).
     #[cfg(target_os = "linux")]
     pub(crate) fn cradle_grpc_config_exec(
@@ -3759,46 +3781,66 @@ impl Rib {
         mut args: crate::config::Args,
         op: ConfigOp,
     ) -> Option<()> {
+        self.cradle_grpc = if op.is_set() {
+            Some(args.string()?)
+        } else {
+            None
+        };
+        self.cradle_apply();
+        Some(())
+    }
+
+    /// Effective cradle tee endpoint: `None` when disabled, else the
+    /// `system cradle-grpc` override or the `unix:cradle/grpc` default.
+    #[cfg(target_os = "linux")]
+    fn cradle_endpoint(&self) -> Option<String> {
+        cradle_effective_endpoint(self.cradle_enabled, self.cradle_grpc.as_deref())
+    }
+
+    /// Re-derive the cradle tee from the current `enabled` / `cradle-grpc`
+    /// state and (re)start or stop the forward tee plus the reverse
+    /// `WatchFdb` subscriber accordingly. Called on any change to either
+    /// config knob.
+    #[cfg(target_os = "linux")]
+    fn cradle_apply(&mut self) {
         // Tear down any previous watcher before re-pointing/disabling.
         if let Some(watch) = self.cradle_fdb_watch.take() {
             watch.abort();
         }
-        if op.is_set() {
-            let endpoint = args.string()?;
-            self.fib_handle.set_cradle(Some(&endpoint));
-            // The reverse channel: subscribe to cradle's datapath MAC
-            // learning and feed each entry back into this RIB as a
-            // `CradleFdbLearn`, which re-emits it to EVPN subscribers.
-            // Reconnects with backoff for the daemon-lifetime.
-            let cradle = crate::fib::cradle::CradleFib::new(&endpoint);
-            let tx = self.tx.clone();
-            self.cradle_fdb_watch = Some(tokio::spawn(async move {
-                loop {
-                    match cradle.watch_fdb().await {
-                        Ok(mut stream) => {
-                            while let Ok(Some(ev)) = stream.message().await {
-                                let Ok(mac) = ev.mac.parse::<MacAddr>() else {
-                                    continue;
-                                };
-                                let msg = if ev.event == 1 {
-                                    Message::CradleFdbAge { vni: ev.bd, mac }
-                                } else {
-                                    Message::CradleFdbLearn { vni: ev.bd, mac }
-                                };
-                                let _ = tx.send(msg);
-                            }
-                        }
-                        Err(e) => {
-                            tracing::debug!("rib: cradle WatchFdb connect failed: {e}");
+        let Some(endpoint) = self.cradle_endpoint() else {
+            self.fib_handle.set_cradle(None);
+            return;
+        };
+        self.fib_handle.set_cradle(Some(&endpoint));
+        // The reverse channel: subscribe to cradle's datapath MAC learning
+        // and feed each entry back into this RIB as a `CradleFdbLearn`, which
+        // re-emits it to EVPN subscribers. Reconnects with backoff for the
+        // daemon lifetime.
+        let cradle = crate::fib::cradle::CradleFib::new(&endpoint);
+        let tx = self.tx.clone();
+        self.cradle_fdb_watch = Some(tokio::spawn(async move {
+            loop {
+                match cradle.watch_fdb().await {
+                    Ok(mut stream) => {
+                        while let Ok(Some(ev)) = stream.message().await {
+                            let Ok(mac) = ev.mac.parse::<MacAddr>() else {
+                                continue;
+                            };
+                            let msg = if ev.event == 1 {
+                                Message::CradleFdbAge { vni: ev.bd, mac }
+                            } else {
+                                Message::CradleFdbLearn { vni: ev.bd, mac }
+                            };
+                            let _ = tx.send(msg);
                         }
                     }
-                    tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+                    Err(e) => {
+                        tracing::debug!("rib: cradle WatchFdb connect failed: {e}");
+                    }
                 }
-            }));
-        } else {
-            self.fib_handle.set_cradle(None);
-        }
-        Some(())
+                tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+            }
+        }));
     }
 
     /// A cradle-datapath MAC learn: synthesize the same `FdbEntry` a kernel
@@ -3859,6 +3901,9 @@ impl Rib {
                 let (path, mut args) = path_from_command(&msg.paths);
                 if path.as_str() == "/system/router-id" {
                     let _ = self.router_id_config_exec(args, msg.op);
+                } else if path.as_str() == "/system/cradle/enabled" {
+                    #[cfg(target_os = "linux")]
+                    let _ = self.cradle_enabled_config_exec(args, msg.op);
                 } else if path.as_str() == "/system/cradle-grpc" {
                     #[cfg(target_os = "linux")]
                     let _ = self.cradle_grpc_config_exec(args, msg.op);
@@ -4240,6 +4285,18 @@ fn neighbor_key(nbr: &FibNeighbor) -> Option<NeighborKey> {
     }
 }
 
+/// Resolve the effective cradle tee endpoint from the two `system cradle`
+/// knobs. `None` disables the tee. The tee is active when `enabled` is true,
+/// or (for backward compatibility) when a `cradle-grpc` override is set on its
+/// own; the endpoint is that override, else the `unix:cradle/grpc` default.
+fn cradle_effective_endpoint(enabled: bool, grpc: Option<&str>) -> Option<String> {
+    if enabled || grpc.is_some() {
+        Some(grpc.unwrap_or("unix:cradle/grpc").to_string())
+    } else {
+        None
+    }
+}
+
 pub fn serve(mut rib: Rib) {
     let rib_tx = rib.tx.clone();
     tokio::spawn(async move {
@@ -4257,4 +4314,38 @@ pub fn serve(mut rib: Rib) {
         let _ = rx.await;
         std::process::exit(0);
     });
+}
+
+#[cfg(test)]
+mod cradle_endpoint_tests {
+    use super::cradle_effective_endpoint;
+
+    #[test]
+    fn disabled_without_override_is_none() {
+        assert_eq!(cradle_effective_endpoint(false, None), None);
+    }
+
+    #[test]
+    fn enabled_without_override_uses_default() {
+        assert_eq!(
+            cradle_effective_endpoint(true, None).as_deref(),
+            Some("unix:cradle/grpc"),
+        );
+    }
+
+    #[test]
+    fn override_wins_when_enabled() {
+        assert_eq!(
+            cradle_effective_endpoint(true, Some("unix:/tmp/c.sock")).as_deref(),
+            Some("unix:/tmp/c.sock"),
+        );
+    }
+
+    #[test]
+    fn override_alone_enables_tee_for_backward_compat() {
+        assert_eq!(
+            cradle_effective_endpoint(false, Some("127.0.0.1:50151")).as_deref(),
+            Some("127.0.0.1:50151"),
+        );
+    }
 }
