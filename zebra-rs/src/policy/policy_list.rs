@@ -322,7 +322,7 @@ pub fn policy_entry_sync(
     large_community_set: &LargeCommunitySetConfig,
     as_path_set: &AsPathSetConfig,
 ) {
-    for (_, policy) in policy_list.entry.iter_mut() {
+    for policy in policy_list.entry.values_mut() {
         if let Some(name) = &policy.prefix_set_name {
             if let Some(prefix_set) = prefix_set.config.get(name) {
                 policy.prefix_set = Some(prefix_set.clone());

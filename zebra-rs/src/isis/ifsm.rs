@@ -161,7 +161,7 @@ pub fn hello_generate(link: &LinkTop, level: Level) -> IsisHello {
     push_if_addr_tlvs(&mut hello.tlvs, link);
 
     let mut neighbors = Vec::new();
-    for (_, nbr) in link.state.nbrs.get(&level).iter() {
+    for nbr in link.state.nbrs.get(&level).values() {
         if (nbr.state == NfsmState::Init || nbr.state == NfsmState::Up)
             && let Some(mac) = nbr.mac
         {

@@ -1261,7 +1261,7 @@ impl<V: OspfVersion> Ospf<V> {
         let mut count = 0;
         for &link_ifindex in area.links.iter() {
             if let Some(area_link) = self.links.get(&link_ifindex) {
-                for (_, nbr) in area_link.nbrs.iter() {
+                for nbr in area_link.nbrs.values() {
                     if nbr.state == NfsmState::Exchange || nbr.state == NfsmState::Loading {
                         count += 1;
                     }
@@ -4877,7 +4877,7 @@ impl Ospf<Ospfv2> {
             let Some(link) = self.links.get(&ifindex) else {
                 continue;
             };
-            for (_nbr_addr, nbr) in link.nbrs.iter() {
+            for nbr in link.nbrs.values() {
                 let Some(helper) = nbr.gr_helper.as_ref() else {
                     continue;
                 };
@@ -4908,7 +4908,7 @@ impl Ospf<Ospfv2> {
 
     /// Check if we are currently the DR for the network identified by ls_id.
     fn is_dr_for_network_lsa(&self, ls_id: Ipv4Addr) -> bool {
-        for (_, link) in self.links.iter() {
+        for link in self.links.values() {
             if !link.enabled {
                 continue;
             }
@@ -5396,7 +5396,7 @@ impl Ospf<Ospfv2> {
         };
         let area = link.area;
         let ctx = link.auth_send_ctx(&chains, now);
-        for (_, nbr) in link.nbrs.iter_mut() {
+        for nbr in link.nbrs.values_mut() {
             if nbr.state < NfsmState::Exchange {
                 continue;
             }
@@ -5472,7 +5472,7 @@ impl Ospf<Ospfv2> {
                 }
             }
 
-            for (_, nbr) in link.nbrs.iter_mut() {
+            for nbr in link.nbrs.values_mut() {
                 // RFC 2328 Section 13.3 Step 1(a): Skip neighbors below Exchange.
                 if nbr.state < NfsmState::Exchange {
                     continue;
@@ -5700,7 +5700,7 @@ impl Ospf<Ospfv2> {
         }
 
         self.router_id = router_id;
-        for (_, link) in self.links.iter_mut() {
+        for link in self.links.values_mut() {
             link.ident.router_id = router_id;
         }
         self.router_lsa_originate();
@@ -6894,7 +6894,7 @@ impl Ospf<Ospfv3> {
         }
 
         self.router_id = router_id;
-        for (_, link) in self.links.iter_mut() {
+        for link in self.links.values_mut() {
             link.ident.router_id = router_id;
         }
         self.router_lsa_originate();
@@ -11948,7 +11948,7 @@ fn graph(top: &mut Ospf, area_id: Ipv4Addr) -> (spf::Graph, Option<usize>) {
     // same trade-off IS-IS accepts.
     let mut nbr_to_ifindex: HashMap<Ipv4Addr, u32> = HashMap::new();
     for (ifindex, link) in top.links.iter() {
-        for (_, nbr) in link.nbrs.iter() {
+        for nbr in link.nbrs.values() {
             nbr_to_ifindex.insert(nbr.ident.router_id, *ifindex);
         }
     }
@@ -12540,7 +12540,7 @@ fn build_spf_nexthops(
             continue;
         };
         for (ifindex, link) in top.links.iter() {
-            for (_, nbr) in link.nbrs.iter() {
+            for nbr in link.nbrs.values() {
                 if *nhop_id == nbr.ident.router_id {
                     // A virtual-link adjacency has a synthetic ifindex
                     // with no kernel interface behind it, and on a

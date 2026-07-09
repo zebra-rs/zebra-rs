@@ -30,7 +30,7 @@ pub struct BgpCap {
 
 impl BgpCap {
     pub fn emit(&self, buf: &mut BytesMut) {
-        for (_, v) in self.mp.iter() {
+        for v in self.mp.values() {
             v.emit(buf, false);
         }
         if let Some(v) = &self.refresh {
@@ -50,7 +50,7 @@ impl BgpCap {
         }
         if !self.restart.is_empty() {
             let mut v = CapRestart::default();
-            for (_, val) in self.restart.iter() {
+            for val in self.restart.values() {
                 v.values.push(val.clone());
             }
             v.emit(buf, false);
@@ -63,14 +63,14 @@ impl BgpCap {
         }
         if !self.addpath.is_empty() {
             let mut v = CapAddPath::default();
-            for (_, val) in self.addpath.iter() {
+            for val in self.addpath.values() {
                 v.values.push(val.clone());
             }
             v.emit(buf, false);
         }
         if !self.llgr.is_empty() {
             let mut v = CapLlgr::default();
-            for (_, val) in self.llgr.iter() {
+            for val in self.llgr.values() {
                 v.values.push(val.clone());
             }
             v.emit(buf, false);
@@ -83,7 +83,7 @@ impl BgpCap {
         }
         if !self.path_limit.is_empty() {
             let mut v = CapPathLimit::default();
-            for (_, val) in self.path_limit.iter() {
+            for val in self.path_limit.values() {
                 v.values.push(val.clone());
             }
             v.emit(buf, false);
@@ -168,7 +168,7 @@ impl BgpCap {
 
 impl fmt::Display for BgpCap {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        for (_, v) in self.mp.iter() {
+        for v in self.mp.values() {
             writeln!(f, " {}", v)?;
         }
         if let Some(v) = &self.refresh {
@@ -185,7 +185,7 @@ impl fmt::Display for BgpCap {
         }
         if !self.restart.is_empty() {
             let mut v = CapRestart::default();
-            for (_, val) in self.restart.iter() {
+            for val in self.restart.values() {
                 v.values.push(val.clone());
             }
             writeln!(f, " {}", v)?;
@@ -198,14 +198,14 @@ impl fmt::Display for BgpCap {
         }
         if !self.addpath.is_empty() {
             let mut v = CapAddPath::default();
-            for (_, val) in self.addpath.iter() {
+            for val in self.addpath.values() {
                 v.values.push(val.clone());
             }
             writeln!(f, " {}", v)?;
         }
         if !self.llgr.is_empty() {
             let mut v = CapLlgr::default();
-            for (_, val) in self.llgr.iter() {
+            for val in self.llgr.values() {
                 v.values.push(val.clone());
             }
             writeln!(f, " {}", v)?;
@@ -218,7 +218,7 @@ impl fmt::Display for BgpCap {
         }
         if !self.path_limit.is_empty() {
             let mut v = CapPathLimit::default();
-            for (_, val) in self.path_limit.iter() {
+            for val in self.path_limit.values() {
                 v.values.push(val.clone());
             }
             writeln!(f, " {}", v)?;

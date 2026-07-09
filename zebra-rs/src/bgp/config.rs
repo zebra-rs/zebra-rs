@@ -317,9 +317,9 @@ fn config_peer(bgp: &mut Bgp, mut args: Args, op: ConfigOp) -> Option<()> {
         // dialing yet, so no kick fires here.
         bgp.refresh_connected();
     } else {
-        let peer_idx = match bgp.peers.get(&addr) {
-            Some(peer) => peer.ident,
-            None => return None,
+        let peer_idx = {
+            let peer = bgp.peers.get(&addr)?;
+            peer.ident
         };
 
         // Defensively clear any listener auth entries associated with
@@ -3079,10 +3079,9 @@ fn config_llgr_restart_time(bgp: &mut Bgp, mut args: Args, op: ConfigOp) -> Opti
 fn config_local_identifier(bgp: &mut Bgp, mut args: Args, op: ConfigOp) -> Option<()> {
     let addr = if let Some(addr) = args.v4addr() {
         IpAddr::V4(addr)
-    } else if let Some(addr) = args.v6addr() {
-        IpAddr::V6(addr)
     } else {
-        return None;
+        let addr = args.v6addr()?;
+        IpAddr::V6(addr)
     };
     let identifier = if op == ConfigOp::Set {
         Some(args.v4addr()?)
@@ -3159,10 +3158,9 @@ pub(super) fn apply_passive(peer: &mut Peer, want: bool) -> bool {
 fn config_transport_local_address(bgp: &mut Bgp, mut args: Args, op: ConfigOp) -> Option<()> {
     let peer_addr = if let Some(addr) = args.v4addr() {
         IpAddr::V4(addr)
-    } else if let Some(addr) = args.v6addr() {
-        IpAddr::V6(addr)
     } else {
-        return None;
+        let addr = args.v6addr()?;
+        IpAddr::V6(addr)
     };
 
     {
@@ -3174,10 +3172,9 @@ fn config_transport_local_address(bgp: &mut Bgp, mut args: Args, op: ConfigOp) -
         if op == ConfigOp::Set {
             let source = if let Some(addr) = args.v4addr() {
                 IpAddr::V4(addr)
-            } else if let Some(addr) = args.v6addr() {
-                IpAddr::V6(addr)
             } else {
-                return None;
+                let addr = args.v6addr()?;
+                IpAddr::V6(addr)
             };
             // Address family of the source must match the peer; an
             // invalid statement is refused outright (not recorded).
@@ -3686,10 +3683,9 @@ pub(super) fn apply_ip_transparent_refresh_all(bgp: &mut Bgp) {
 fn config_peer_tcp_md5_password(bgp: &mut Bgp, mut args: Args, op: ConfigOp) -> Option<()> {
     let addr = if let Some(addr) = args.v4addr() {
         IpAddr::V4(addr)
-    } else if let Some(addr) = args.v6addr() {
-        IpAddr::V6(addr)
     } else {
-        return None;
+        let addr = args.v6addr()?;
+        IpAddr::V6(addr)
     };
 
     // Record the verbatim statement on the peer if it exists, then
@@ -3850,10 +3846,9 @@ pub(super) fn apply_md5_refresh_all(bgp: &mut Bgp) {
 fn config_peer_tcp_md5_encoding(bgp: &mut Bgp, mut args: Args, op: ConfigOp) -> Option<()> {
     let addr = if let Some(addr) = args.v4addr() {
         IpAddr::V4(addr)
-    } else if let Some(addr) = args.v6addr() {
-        IpAddr::V6(addr)
     } else {
-        return None;
+        let addr = args.v6addr()?;
+        IpAddr::V6(addr)
     };
 
     let peer = bgp.peers.get_mut(&addr)?;
@@ -4015,10 +4010,9 @@ pub(super) fn apply_ao_refresh_all(bgp: &mut Bgp) {
 fn config_peer_tcp_ao_key_chain(bgp: &mut Bgp, mut args: Args, op: ConfigOp) -> Option<()> {
     let addr = if let Some(addr) = args.v4addr() {
         IpAddr::V4(addr)
-    } else if let Some(addr) = args.v6addr() {
-        IpAddr::V6(addr)
     } else {
-        return None;
+        let addr = args.v6addr()?;
+        IpAddr::V6(addr)
     };
 
     let (peer_ident, prior, new) = {
@@ -4074,10 +4068,9 @@ fn config_peer_tcp_ao_include_tcp_options(
 ) -> Option<()> {
     let addr = if let Some(addr) = args.v4addr() {
         IpAddr::V4(addr)
-    } else if let Some(addr) = args.v6addr() {
-        IpAddr::V6(addr)
     } else {
-        return None;
+        let addr = args.v6addr()?;
+        IpAddr::V6(addr)
     };
 
     {

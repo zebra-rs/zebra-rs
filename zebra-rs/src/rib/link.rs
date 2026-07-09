@@ -374,7 +374,7 @@ pub fn link_show(rib: &Rib, mut args: Args, json: bool) -> String {
         if json {
             return link_detailed_show_json(rib, None);
         } else {
-            for (_, link) in rib.links.iter() {
+            for link in rib.links.values() {
                 link_info_show(rib, link, &mut buf, &cb);
             }
         }
@@ -1217,7 +1217,7 @@ pub async fn link_config_exec(
 }
 
 pub fn link_lookup(rib: &Rib, name: String) -> Option<u32> {
-    for (_, link) in rib.links.iter() {
+    for link in rib.links.values() {
         if link.name == name {
             return Some(link.index);
         }

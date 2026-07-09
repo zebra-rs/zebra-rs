@@ -574,14 +574,13 @@ impl LocalSrPolicy {
         for seg in self.segments.values() {
             if let Some(label) = seg.mpls_label {
                 segments.push(Segment::TypeA { flags: 0, label });
-            } else if let Some(sid) = seg.srv6_sid {
+            } else {
+                let sid = seg.srv6_sid?;
                 segments.push(Segment::TypeB {
                     flags: 0,
                     sid,
                     structure: None,
                 });
-            } else {
-                return None;
             }
         }
         if segments.is_empty() {

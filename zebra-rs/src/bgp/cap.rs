@@ -75,7 +75,7 @@ impl CapAfiMap {
 }
 
 pub fn cap_register_send(bgp_cap: &BgpCap, cap_map: &mut CapAfiMap) {
-    for (_, mp) in bgp_cap.mp.iter() {
+    for mp in bgp_cap.mp.values() {
         if let Some(entry) = cap_map.get_mut(mp) {
             entry.send = true;
         }
@@ -83,7 +83,7 @@ pub fn cap_register_send(bgp_cap: &BgpCap, cap_map: &mut CapAfiMap) {
 }
 
 pub fn cap_register_recv(bgp_cap: &BgpCap, cap_map: &mut CapAfiMap) {
-    for (_, mp) in bgp_cap.mp.iter() {
+    for mp in bgp_cap.mp.values() {
         if let Some(entry) = cap_map.get_mut(mp) {
             entry.recv = true;
         }
@@ -116,7 +116,7 @@ pub fn addpath_send_implemented(afi: Afi, safi: Safi) -> bool {
 }
 
 pub fn cap_addpath_recv(bgp_cap: &BgpCap, opt: &mut ParseOption, configs: &AfiSafis<AddPathValue>) {
-    for (_, cap) in bgp_cap.addpath.iter() {
+    for cap in bgp_cap.addpath.values() {
         for (_, config) in configs.iter() {
             if cap.afi == config.afi && cap.safi == config.safi {
                 // Send is additionally gated on the family having a

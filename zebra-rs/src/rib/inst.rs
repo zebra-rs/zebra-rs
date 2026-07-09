@@ -1835,7 +1835,7 @@ impl Rib {
             return;
         }
         // Link dump.
-        for (_, link) in self.links.iter() {
+        for link in self.links.values() {
             let msg = RibRx::LinkAdd(link.clone());
             if tx.send(msg).is_err() {
                 return;
@@ -3176,10 +3176,10 @@ impl Rib {
                     self.fib_handle.mdb_del(vni, group, None, 0).await;
                 }
                 self.vtep_table.clear();
-                for (_, bridge) in self.bridges.iter() {
+                for bridge in self.bridges.values() {
                     self.fib_handle.bridge_del(bridge).await;
                 }
-                for (_, vxlan) in self.vxlan.iter() {
+                for vxlan in self.vxlan.values() {
                     self.fib_handle.vxlan_del(vxlan).await;
                 }
                 // Tear down the VRF master devices this process created

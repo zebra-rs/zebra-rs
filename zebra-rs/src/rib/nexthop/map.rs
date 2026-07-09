@@ -331,7 +331,7 @@ impl NexthopMap {
         // Indirection groups first — a group must leave the kernel
         // before its members so member deletion can't cascade-empty
         // it behind our back.
-        for (_, id) in self.protect.iter() {
+        for id in self.protect.values() {
             let entry = self.get(*id);
             if let Some(grp) = entry
                 && grp.is_installed()
@@ -339,7 +339,7 @@ impl NexthopMap {
                 fib.nexthop_del(grp).await;
             }
         }
-        for (_, id) in self.set.iter() {
+        for id in self.set.values() {
             let entry = self.get(*id);
             if let Some(grp) = entry
                 && grp.is_installed()
@@ -347,7 +347,7 @@ impl NexthopMap {
                 fib.nexthop_del(grp).await;
             }
         }
-        for (_, id) in self.map.iter() {
+        for id in self.map.values() {
             let entry = self.get(*id);
             if let Some(grp) = entry
                 && grp.is_installed()
@@ -355,7 +355,7 @@ impl NexthopMap {
                 fib.nexthop_del(grp).await;
             }
         }
-        for (_, id) in self.mpls.iter() {
+        for id in self.mpls.values() {
             let entry = self.get(*id);
             if let Some(grp) = entry
                 && grp.is_installed()
@@ -363,7 +363,7 @@ impl NexthopMap {
                 fib.nexthop_del(grp).await;
             }
         }
-        for (_, id) in self.seg6.iter() {
+        for id in self.seg6.values() {
             let entry = self.get(*id);
             if let Some(grp) = entry
                 && grp.is_installed()
@@ -371,7 +371,7 @@ impl NexthopMap {
                 fib.nexthop_del(grp).await;
             }
         }
-        for (_, id) in self.seg6local.iter() {
+        for id in self.seg6local.values() {
             let entry = self.get(*id);
             if let Some(grp) = entry
                 && grp.is_installed()

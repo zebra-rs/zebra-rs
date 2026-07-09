@@ -126,7 +126,7 @@ fn afi_safi_summary_label(afi: Afi, safi: Safi) -> &'static str {
 fn configured_afi_safis<V: BgpShowView>(bgp: &V) -> Vec<AfiSafi> {
     let mut set: std::collections::BTreeSet<AfiSafi> = std::collections::BTreeSet::new();
     for (_, peer) in bgp.peers().iter_all() {
-        for (afi_safi, _) in peer.config.mp.0.iter() {
+        for afi_safi in peer.config.mp.0.keys() {
             set.insert(*afi_safi);
         }
     }

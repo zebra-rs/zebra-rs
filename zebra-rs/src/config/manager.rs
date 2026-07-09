@@ -643,12 +643,12 @@ impl ConfigManager {
                     continue;
                 }
                 let paths = paths.unwrap();
-                for (_, tx) in self.cm_clients.borrow().iter() {
+                for tx in self.cm_clients.borrow().values() {
                     tx.send(ConfigRequest::new(paths.clone(), op)).unwrap();
                 }
             }
         }
-        for (_, tx) in self.cm_clients.borrow().iter() {
+        for tx in self.cm_clients.borrow().values() {
             tx.send(ConfigRequest::new(Vec::new(), ConfigOp::CommitEnd))
                 .unwrap();
         }
@@ -813,7 +813,7 @@ impl ConfigManager {
     }
 
     pub fn clear(&self, paths: &[CommandPath]) {
-        for (_, tx) in self.cm_clients.borrow().iter() {
+        for tx in self.cm_clients.borrow().values() {
             tx.send(ConfigRequest::new(paths.to_vec(), ConfigOp::Clear))
                 .unwrap();
         }

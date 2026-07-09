@@ -1034,8 +1034,8 @@ pub fn lsp_generate(top: &mut IsisTop, level: Level, seq_floor: Option<u32>) -> 
         // general TE visibility (non-flex-algo consumers).
         is_reach.subs.extend(te_metric.sub_tlvs());
         // Neighbor
-        for (_, nbr) in link.state.nbrs.get(&level).iter() {
-            for (_key, value) in nbr.addr4.iter() {
+        for nbr in link.state.nbrs.get(&level).values() {
+            for value in nbr.addr4.values() {
                 if let Some(label) = value.label {
                     // RFC 8667 §2.2.1 B-flag: "Adj-SID is eligible for
                     // protection." We flip it on whenever TI-LFA is
@@ -1230,7 +1230,7 @@ pub fn lsp_generate(top: &mut IsisTop, level: Level, seq_floor: Option<u32>) -> 
             // also advertised inline for general TE visibility — link
             // delay/loss are MT-agnostic physical properties.
             entry.subs.extend(te_metric.sub_tlvs());
-            for (_, nbr) in link.state.nbrs.get(&level).iter() {
+            for nbr in link.state.nbrs.get(&level).values() {
                 if let Some((_, sid_addr)) = nbr.endx_sid {
                     if nbr.network_type.is_p2p() {
                         let sub = IsisSubSrv6EndXSid {

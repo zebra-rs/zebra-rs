@@ -503,7 +503,8 @@ fn apply_tracing(t: &mut OspfTracing, rest: &str, args: &mut Args, op: ConfigOp)
                     Some("direction") => packet_set_direction(pc, args, op),
                     Some(_) => return None,
                 }
-            } else if let Some(fsm) = other.strip_prefix("/fsm/") {
+            } else {
+                let fsm = other.strip_prefix("/fsm/")?;
                 let (typ, sub) = match fsm.split_once('/') {
                     Some((typ, sub)) => (typ, Some(sub)),
                     None => (fsm, None),
@@ -514,8 +515,6 @@ fn apply_tracing(t: &mut OspfTracing, rest: &str, args: &mut Args, op: ConfigOp)
                     Some("detail") => fsm_set_detail(fc, op),
                     Some(_) => return None,
                 }
-            } else {
-                return None;
             }
         }
     }
