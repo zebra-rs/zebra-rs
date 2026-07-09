@@ -178,7 +178,6 @@ impl CradleFib {
         } else {
             format!("http://{ep}")
         };
-        tracing::info!("fib: cradle eBPF tee enabled -> {endpoint}");
         Self {
             endpoint,
             client: Arc::new(Mutex::new(None)),
@@ -191,10 +190,19 @@ impl CradleFib {
         }
     }
 
+    /// The normalized gRPC endpoint this tee dials (as stored by `new`).
+    pub(crate) fn endpoint(&self) -> &str {
+        &self.endpoint
+    }
+
     /// Construct from `CRADLE_GRPC` if set (env fallback; the primary control is
     /// the `system cradle grpc-endpoint` config leaf). Returns `None` when unset.
     pub fn from_env() -> Option<Self> {
-        std::env::var("CRADLE_GRPC").ok().map(|ep| Self::new(&ep))
+        std::env::var("CRADLE_GRPC").ok().map(|ep| {
+            let fib = Self::new(&ep);
+            tracing::info!("fib: cradle eBPF tee enabled -> {}", fib.endpoint());
+            fib
+        })
     }
 
     /// Lazily connect (and cache) the gRPC client.
