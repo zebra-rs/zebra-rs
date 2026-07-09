@@ -122,9 +122,55 @@ pub struct CradleFib {
     encap_src_set: Arc<std::sync::atomic::AtomicBool>,
 }
 
+/// Connect a cradle gRPC client. `unix:/path` (filesystem UDS) and
+/// `http://…` dial through tonic's built-in support; `unix:NAME` (no leading
+/// `/`) is a Linux abstract socket — the default `unix:cradle/grpc` — which
+/// tonic can't dial natively, so it gets a custom connector.
+async fn connect_cradle(endpoint: &str) -> anyhow::Result<CradleClient<Channel>> {
+    if let Some(name) = endpoint
+        .strip_prefix("unix:")
+        .filter(|name| !name.starts_with('/'))
+    {
+        return connect_abstract_cradle(name.trim_start_matches('@')).await;
+    }
+    Ok(CradleClient::connect(endpoint.to_string()).await?)
+}
+
+/// Dial a cradle server on a Linux abstract Unix socket by name. tonic's UDS
+/// connector calls `UnixStream::connect(path)` (filesystem only), so we hand
+/// it a connector that dials the abstract address. Mirrors `vtyhelper`.
+async fn connect_abstract_cradle(name: &str) -> anyhow::Result<CradleClient<Channel>> {
+    use hyper_util::rt::TokioIo;
+    use std::os::linux::net::SocketAddrExt;
+    use std::os::unix::net::{SocketAddr as StdSockAddr, UnixStream as StdUnixStream};
+    use tokio::net::UnixStream;
+    use tonic::transport::Endpoint;
+    use tower::service_fn;
+
+    let name = name.to_string();
+    // The URI is a placeholder; the connector ignores it and dials the
+    // abstract Unix socket each time tonic calls it.
+    let channel = Endpoint::try_from("http://[::]:50051")?
+        .connect_with_connector(service_fn(move |_: tonic::transport::Uri| {
+            let name = name.clone();
+            async move {
+                let addr = StdSockAddr::from_abstract_name(name.as_bytes())
+                    .map_err(std::io::Error::other)?;
+                let std = StdUnixStream::connect_addr(&addr)?;
+                std.set_nonblocking(true)?;
+                let stream = UnixStream::from_std(std)?;
+                Ok::<_, std::io::Error>(TokioIo::new(stream))
+            }
+        }))
+        .await?;
+    Ok(CradleClient::new(channel))
+}
+
 impl CradleFib {
-    /// Build a tee to the cradle gRPC endpoint `ep`. `unix:/path` (UDS) and
-    /// `http://...` pass through; a bare `host:port` is treated as TCP.
+    /// Build a tee to the cradle gRPC endpoint `ep`. `unix:/path` (filesystem
+    /// UDS), `unix:NAME` (Linux abstract socket, e.g. the default
+    /// `unix:cradle/grpc`), and `http://...` pass through; a bare `host:port`
+    /// is treated as TCP.
     pub fn new(ep: &str) -> Self {
         let endpoint = if ep.starts_with("unix:") || ep.starts_with("http") {
             ep.to_string()
@@ -154,7 +200,7 @@ impl CradleFib {
     async fn client(&self) -> anyhow::Result<CradleClient<Channel>> {
         let mut guard = self.client.lock().await;
         if guard.is_none() {
-            *guard = Some(CradleClient::connect(self.endpoint.clone()).await?);
+            *guard = Some(connect_cradle(&self.endpoint).await?);
         }
         Ok(guard.as_ref().unwrap().clone())
     }

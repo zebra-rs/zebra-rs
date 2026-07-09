@@ -423,12 +423,28 @@ module config {
         ext:help "Global router identifier";
         type inet:ipv4-address;
       }
-      // gRPC endpoint of a cradle eBPF data plane to tee FIB route
+      // The zebra-rs side of the cradle-rs eBPF data-plane integration:
+      // when active, every route zebra-rs installs is teed to cradle in
+      // addition to the kernel, and cradle's datapath MAC learning is fed
+      // back into EVPN (see `rib/inst.rs cradle_apply`). The tee is active
+      // when `system cradle enabled true` is set, or (for backward
+      // compatibility) when `system cradle-grpc` is set on its own.
+      container cradle {
+        ext:help "cradle eBPF data-plane integration";
+        leaf enabled {
+          ext:help "Enable the cradle eBPF data-plane tee";
+          type boolean;
+          description
+            "Enables the cradle eBPF data-plane tee. The endpoint is
+             `system cradle-grpc` when set, otherwise the default
+             `unix:cradle/grpc` (a Linux abstract socket, matching
+             cradle's own default).";
+        }
+      }
+      // gRPC endpoint of the cradle eBPF data plane to tee FIB route
       // installs to (e.g. `unix:/run/cradle.sock` or `127.0.0.1:50151`).
-      // When set, every route zebra-rs installs is pushed to cradle in
-      // addition to the kernel (see `rib/inst.rs cradle_grpc_config_exec`);
-      // unset disables the tee. The zebra-rs side of the cradle-rs eBPF
-      // data-plane integration.
+      // Optional override for the `system cradle enabled` default endpoint
+      // `unix:cradle/grpc`; setting it also enables the tee on its own.
       leaf cradle-grpc {
         ext:help "cradle eBPF data-plane gRPC endpoint";
         type string;
