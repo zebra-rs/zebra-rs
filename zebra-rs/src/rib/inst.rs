@@ -3698,7 +3698,16 @@ impl Rib {
                     self.neighbors.insert(key, nbr);
                 }
                 if let Some(entry) = fdb_entry {
-                    self.api_fdb_add(&entry);
+                    // When the cradle eBPF tee owns the data plane, cradle's
+                    // WatchFdb is the single source of truth for bridge-domain
+                    // MAC learning. The kernel bridge FDB (e.g. br100/vxlan100)
+                    // does not forward here, so its stale/racy NEWNEIGH events
+                    // would conflict with the cradle learn/age stream and thrash
+                    // EVPN Type-2 origination on MAC mobility (RFC 7432 §7.7).
+                    // Suppress the kernel feed while the tee is active.
+                    if self.cradle_fdb_watch.is_none() {
+                        self.api_fdb_add(&entry);
+                    }
                 }
             }
             FibMessage::DelNeighbor(nbr) => {
@@ -3707,7 +3716,13 @@ impl Rib {
                     self.neighbors.remove(&key);
                 }
                 if let Some(entry) = fdb_entry {
-                    self.api_fdb_del(&entry);
+                    // See NewNeighbor: cradle's WatchFdb owns bridge MAC
+                    // learning/aging when the tee is active; ignore the kernel
+                    // bridge FDB feed so a stale DELNEIGH can't withdraw a
+                    // cradle-originated Type-2 out from under a live station.
+                    if self.cradle_fdb_watch.is_none() {
+                        self.api_fdb_del(&entry);
+                    }
                 }
             }
             FibMessage::NewMdb(entry) => {
