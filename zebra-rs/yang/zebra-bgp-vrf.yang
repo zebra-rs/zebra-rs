@@ -319,7 +319,7 @@ module zebra-bgp-vrf {
               description
                 "Real GTP-U: install the tunnel from the ST route's endpoint
                  and TEID via the cradle eBPF forwarder (GTP4.E downlink /
-                 H.M.GTP4.D uplink). Requires `system cradle-grpc` to point at
+                 H.M.GTP4.D uplink). Requires `system cradle grpc-endpoint` to point at
                  the forwarder; the mainline kernel has no GTP action.";
             }
           }
