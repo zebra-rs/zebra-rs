@@ -1551,7 +1551,7 @@ fn write_local_sids(buf: &mut String, isis: &Isis) -> std::fmt::Result {
     // End.X / uA — one per Up adjacency that has carved a function.
     for level in &[Level::L1, Level::L2] {
         for (ifindex, link) in isis.links.iter() {
-            for (_sys_id, nbr) in link.state.nbrs.get(level).iter() {
+            for nbr in link.state.nbrs.get(level).values() {
                 let Some((_, addr)) = nbr.endx_sid else {
                     continue;
                 };

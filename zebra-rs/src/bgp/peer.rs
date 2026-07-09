@@ -747,7 +747,7 @@ pub struct PeerStat(BTreeMap<AfiSafi, PeerStatEntry>);
 
 impl PeerStat {
     pub fn clear(&mut self) {
-        for (_, entry) in self.0.iter_mut() {
+        for entry in self.0.values_mut() {
             entry.tx = 0;
             entry.rx = 0;
         }
@@ -2778,7 +2778,7 @@ fn build_open_packet(peer: &mut Peer) -> BytesMut {
     }
     let mut bgp_cap = BgpCap::default();
 
-    for (afi_safi, _) in peer.config.mp.0.iter() {
+    for afi_safi in peer.config.mp.0.keys() {
         let cap = CapMultiProtocol::new(&afi_safi.afi, &afi_safi.safi);
         bgp_cap.mp.insert(*afi_safi, cap);
     }

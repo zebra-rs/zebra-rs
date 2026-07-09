@@ -403,7 +403,7 @@ fn show_ospf_interface(
 ) -> std::result::Result<String, std::fmt::Error> {
     if json {
         let mut ifaces: Vec<OspfInterfaceJson> = Vec::new();
-        for (_, oi) in ospf.links.iter() {
+        for oi in ospf.links.values() {
             if !oi.enabled {
                 continue;
             }
@@ -491,7 +491,7 @@ fn show_ospf_interface(
 
     let mut buf = String::new();
 
-    for (_, oi) in ospf.links.iter() {
+    for oi in ospf.links.values() {
         if oi.enabled {
             render_link(&mut buf, oi, ospf);
         }
@@ -686,11 +686,11 @@ fn show_ospf_neighbor(
 ) -> std::result::Result<String, std::fmt::Error> {
     if json {
         let mut nbrs_json: Vec<OspfNeighborJson> = Vec::new();
-        for (_, oi) in ospf.links.iter() {
+        for oi in ospf.links.values() {
             if !oi.enabled {
                 continue;
             }
-            for (_, nbr) in oi.nbrs.iter() {
+            for nbr in oi.nbrs.values() {
                 let state = nbr_state_string(
                     &nbr.state,
                     &nbr.ident.prefix.addr(),
@@ -738,11 +738,11 @@ fn show_ospf_neighbor(
         "DBsmL"
     )?;
 
-    for (_, oi) in ospf.links.iter() {
+    for oi in ospf.links.values() {
         if !oi.enabled {
             continue;
         }
-        for (_, nbr) in oi.nbrs.iter() {
+        for nbr in oi.nbrs.values() {
             let state = nbr_state_string(
                 &nbr.state,
                 &nbr.ident.prefix.addr(),
@@ -921,11 +921,11 @@ fn show_ospf_neighbor_detail(
 ) -> std::result::Result<String, std::fmt::Error> {
     if json {
         let mut nbrs_json: Vec<OspfNeighborDetailJson> = Vec::new();
-        for (_, oi) in ospf.links.iter() {
+        for oi in ospf.links.values() {
             if !oi.enabled {
                 continue;
             }
-            for (_, nbr) in oi.nbrs.iter() {
+            for nbr in oi.nbrs.values() {
                 let role = nbr_role(
                     &nbr.ident.prefix.addr(),
                     &oi.ident.d_router,
@@ -979,11 +979,11 @@ fn show_ospf_neighbor_detail(
 
     let mut buf = String::new();
 
-    for (_, oi) in ospf.links.iter() {
+    for oi in ospf.links.values() {
         if !oi.enabled {
             continue;
         }
-        for (_, nbr) in oi.nbrs.iter() {
+        for nbr in oi.nbrs.values() {
             render_nbr_detail(&mut buf, oi, nbr);
         }
     }

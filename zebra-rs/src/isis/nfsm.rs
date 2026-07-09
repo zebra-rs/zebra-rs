@@ -100,7 +100,7 @@ pub fn nbr_hold_timer_expire(
     }
 
     // Release labels.
-    for (_key, value) in nbr.addr4.iter_mut() {
+    for value in nbr.addr4.values_mut() {
         if let Some(label) = value.label {
             if let Some(local_pool) = link.local_pool {
                 local_pool.release(label as usize);

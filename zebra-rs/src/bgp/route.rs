@@ -9926,8 +9926,8 @@ pub fn route_clean(
                 adj_in, attr_store, ..
             } = &mut *bgp.shard;
             if let Some(slice) = adj_in.get_mut(&peer_id) {
-                for (_rd, table) in slice.v4vpn.iter_mut() {
-                    for (_prefix, ribs) in table.0.iter_mut() {
+                for table in slice.v4vpn.values_mut() {
+                    for ribs in table.0.values_mut() {
                         for rib in ribs.iter_mut() {
                             rib.stale = true;
                             // LLGR_STALE community is LLGR-only (see VPNv6).
@@ -10097,8 +10097,8 @@ pub fn route_clean(
                 adj_in, attr_store, ..
             } = &mut *bgp.shard;
             if let Some(slice) = adj_in.get_mut(&peer_id) {
-                for (_rd, table) in slice.v6vpn.iter_mut() {
-                    for (_prefix, ribs) in table.0.iter_mut() {
+                for table in slice.v6vpn.values_mut() {
+                    for ribs in table.0.values_mut() {
                         for rib in ribs.iter_mut() {
                             rib.stale = true;
                             // The LLGR_STALE community is an LLGR re-advertise
@@ -10241,8 +10241,8 @@ pub fn route_clean(
         }
         let peer = peers.get_mut_by_idx(peer_id).expect("peer must exist");
 
-        for (_rd, table) in peer.adj_in.evpn.iter_mut() {
-            for (_prefix, ribs) in table.0.iter_mut() {
+        for table in peer.adj_in.evpn.values_mut() {
+            for ribs in table.0.values_mut() {
                 for rib in ribs.iter_mut() {
                     rib.stale = true;
                     let mut new_attr = (*rib.attr).clone();
@@ -12052,7 +12052,7 @@ pub fn policy_list_apply_net(
         attr: bgp_attr,
         weight,
     };
-    for (_, entry) in policy_list.entry.iter() {
+    for entry in policy_list.entry.values() {
         if !entry_matches(entry, prefix, &decision.attr, decision.weight) {
             continue;
         }
@@ -12274,7 +12274,7 @@ pub fn policy_list_apply_evpn(
         attr: bgp_attr,
         weight,
     };
-    for (_, entry) in policy_list.entry.iter() {
+    for entry in policy_list.entry.values() {
         if !entry_matches_evpn(entry, route, &decision.attr, decision.weight) {
             continue;
         }

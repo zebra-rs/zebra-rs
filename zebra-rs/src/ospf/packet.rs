@@ -301,7 +301,7 @@ pub fn ospf_hello_packet(
     // logs `O-bit abuse?` when it sees one here.
     hello.options.set_external(oi.area_type.e_bit());
     hello.options.set_nssa(oi.area_type.n_bit());
-    for (_, nbr) in oi.nbrs.iter() {
+    for nbr in oi.nbrs.values() {
         if nbr.state == NfsmState::Down {
             continue;
         }

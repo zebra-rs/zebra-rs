@@ -715,21 +715,21 @@ fn hdr_to_json(h: &ospf_packet::Ospfv3LsaHeader) -> Ospfv3LsaHeaderJson {
 fn collect_database(top: &Ospf<Ospfv3>) -> Ospfv3DatabaseJson {
     let mut db = Ospfv3DatabaseJson::default();
     for (_, area) in top.areas.iter() {
-        for (_, lsa) in area.lsdb.tables.iter() {
+        for lsa in area.lsdb.tables.values() {
             if lsa.data.h.ls_age >= OSPF_MAX_AGE {
                 continue;
             }
             db.area.push(hdr_to_json(&lsa.data.h));
         }
     }
-    for (_, lsa) in top.lsdb_as.tables.iter() {
+    for lsa in top.lsdb_as.tables.values() {
         if lsa.data.h.ls_age >= OSPF_MAX_AGE {
             continue;
         }
         db.as_scope.push(hdr_to_json(&lsa.data.h));
     }
     for link in top.links.values() {
-        for (_, lsa) in link.lsdb.tables.iter() {
+        for lsa in link.lsdb.tables.values() {
             if lsa.data.h.ls_age >= OSPF_MAX_AGE {
                 continue;
             }

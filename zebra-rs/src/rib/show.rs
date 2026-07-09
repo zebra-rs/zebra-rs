@@ -425,7 +425,7 @@ pub fn rib_entry_show(
     // their own arm (each repair path can carry a different metric),
     // so skip the shared route-level bracket for them.
     if !e.is_connected() && !matches!(e.nexthop, Nexthop::List(_) | Nexthop::Protect(_)) {
-        write!(buf, " [{}/{}]", &e.distance, &e.metric).unwrap();
+        write!(buf, " [{}/{}]", e.distance, e.metric).unwrap();
     }
 
     let offset = buf.len();
@@ -518,7 +518,7 @@ pub fn rib_entry_show_v6(
     // their own arm (each repair path can carry a different metric),
     // so skip the shared route-level bracket for them.
     if !e.is_connected() && !matches!(e.nexthop, Nexthop::List(_) | Nexthop::Protect(_)) {
-        write!(buf, " [{}/{}]", &e.distance, &e.metric).unwrap();
+        write!(buf, " [{}/{}]", e.distance, e.metric).unwrap();
     }
 
     let offset = buf.len();

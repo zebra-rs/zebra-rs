@@ -261,7 +261,7 @@ pub fn nbr_hello_interpret(
         }
         keep
     });
-    for (&key, _) in addr4.iter() {
+    for &key in addr4.keys() {
         if let std::collections::btree_map::Entry::Vacant(e) = nbr.addr4.entry(key) {
             // Fix borrow checker.
             let label = local_pool

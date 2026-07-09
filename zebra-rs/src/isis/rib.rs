@@ -824,7 +824,7 @@ fn build_adjacency_ilm(
 
         for (ifindex, link) in top.links.iter() {
             if let Some(nbr) = link.state.nbrs.get(&level).get(nhop_id) {
-                for (addr, _) in nbr.addr4.iter() {
+                for addr in nbr.addr4.keys() {
                     let nhop = SpfNexthop::<V4> {
                         ifindex: *ifindex,
                         adjacency: true,
@@ -2236,7 +2236,7 @@ fn build_rib_from_flex_algo(
                 let Some(nbr) = link.state.nbrs.get(&level).get(&nhop_sys_id) else {
                     continue;
                 };
-                for (addr, _) in nbr.addr4.iter() {
+                for addr in nbr.addr4.keys() {
                     let nhop = SpfNexthop::<V4> {
                         ifindex: *link_id,
                         adjacency: *node == nhop_id,

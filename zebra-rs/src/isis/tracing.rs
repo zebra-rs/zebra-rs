@@ -356,7 +356,8 @@ fn apply_tracing(t: &mut IsisTracing, rest: &str, args: &mut Args, op: ConfigOp)
                     "nfsm" => fsm_set_enable(&mut t.fsm.nfsm, op),
                     _ => return None,
                 }
-            } else if let Some(ev) = other.strip_prefix('/') {
+            } else {
+                let ev = other.strip_prefix('/')?;
                 let (name, sub) = match ev.split_once('/') {
                     Some((name, sub)) => (name, Some(sub)),
                     None => (ev, None),
@@ -372,8 +373,6 @@ fn apply_tracing(t: &mut IsisTracing, rest: &str, args: &mut Args, op: ConfigOp)
                     Some("level") => event_set_level(ec, args, op),
                     Some(_) => return None,
                 }
-            } else {
-                return None;
             }
         }
     }
