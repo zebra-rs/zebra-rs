@@ -127,10 +127,11 @@ pub struct CradleFib {
 /// `/`) is a Linux abstract socket — the default `unix:cradle/grpc` — which
 /// tonic can't dial natively, so it gets a custom connector.
 async fn connect_cradle(endpoint: &str) -> anyhow::Result<CradleClient<Channel>> {
-    if let Some(name) = endpoint.strip_prefix("unix:") {
-        if !name.starts_with('/') {
-            return connect_abstract_cradle(name.trim_start_matches('@')).await;
-        }
+    if let Some(name) = endpoint
+        .strip_prefix("unix:")
+        .filter(|name| !name.starts_with('/'))
+    {
+        return connect_abstract_cradle(name.trim_start_matches('@')).await;
     }
     Ok(CradleClient::connect(endpoint.to_string()).await?)
 }
