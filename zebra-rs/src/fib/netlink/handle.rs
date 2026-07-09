@@ -531,8 +531,9 @@ impl FibHandle {
     /// runtime. Driven by the `system cradle grpc-endpoint` config leaf.
     pub fn set_cradle(&mut self, endpoint: Option<&str>) {
         self.cradle = endpoint.map(CradleFib::new);
-        if self.cradle.is_none() {
-            tracing::info!("fib: cradle eBPF tee disabled");
+        match &self.cradle {
+            Some(cradle) => tracing::info!("fib: cradle eBPF tee enabled -> {}", cradle.endpoint()),
+            None => tracing::info!("fib: cradle eBPF tee disabled"),
         }
     }
 
