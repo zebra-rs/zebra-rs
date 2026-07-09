@@ -19,8 +19,8 @@ provides:
 maintainer: "Kunihiro Ishiguro <kunihiro@zebra.rs>"
 description: |
   zebra-rs is reincarnation of GNU zebra in Rust.
-homepage: "https://zebra.dev"
-license: "MIT"
+homepage: "https://zebra.rs"
+license: "AGPLv3"
 changelog: "../CHANGELOG.yaml"
 contents:
   - src: ../target/release/zebra-rs
