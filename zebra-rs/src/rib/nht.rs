@@ -223,13 +223,17 @@ fn uni_transport_labels(uni: &NexthopUni) -> Vec<u32> {
         .collect()
 }
 
-/// Flatten a `Nexthop` into its unicast members (ECMP-aware).
+/// Flatten a `Nexthop` into its unicast members (ECMP-aware). A
+/// `Protect` yields only its primary member — that slot always holds
+/// the active path (a `backup-as-primary` promotion swaps the repair
+/// into it), and resolving through the standby too would hand
+/// dependents a bogus ECMP over primary + repair.
 fn entry_unis(nexthop: &Nexthop) -> Vec<&NexthopUni> {
     match nexthop {
         Nexthop::Uni(u) => vec![u],
         Nexthop::Multi(m) => m.nexthops.iter().collect(),
         Nexthop::List(l) => l.iter_unis().collect(),
-        Nexthop::Protect(p) => p.iter_unis().collect(),
+        Nexthop::Protect(p) => p.primary.iter_unis().collect(),
         _ => Vec::new(),
     }
 }
@@ -439,6 +443,62 @@ mod tests {
         let t = table_rows(vec![("10.0.0.2/32", e)]);
         let r = resolve_v4(&t, "10.0.0.2".parse().unwrap());
         assert_eq!(r.nexthops[0].labels, vec![16500]);
+    }
+
+    #[test]
+    fn protect_resolution_follows_promoted_primary() {
+        use crate::rib::nexthop::{NexthopMember, NexthopProtect};
+
+        fn uni(addr: &str, metric: u32, labels: Vec<u32>, ifindex: u32) -> NexthopUni {
+            let mut u = NexthopUni::new(
+                addr.parse::<IpAddr>().unwrap(),
+                metric,
+                labels.into_iter().map(Label::Explicit).collect(),
+            );
+            u.ifindex_origin = Some(ifindex);
+            u
+        }
+        fn protect(primary: NexthopUni, backup: NexthopUni) -> RibEntry {
+            let mut e = RibEntry::new(RibType::Isis);
+            e.valid = true;
+            e.distance = 115;
+            e.metric = 12;
+            e.nexthop = Nexthop::Protect(NexthopProtect {
+                primary: NexthopMember::Uni(primary),
+                backup: NexthopMember::Uni(backup),
+                gid: 0,
+            });
+            e
+        }
+        let spf = || uni("192.168.10.2", 12, vec![16800], 2);
+        let repair = || uni("192.168.3.2", 13, vec![16500, 15003, 15002], 3);
+
+        // Normal orientation: only the SPF primary resolves — the
+        // standby repair must not surface as a second ECMP egress.
+        let t = table_rows(vec![("10.0.0.8/32", protect(spf(), repair()))]);
+        let before = resolve_v4(&t, "10.0.0.8".parse().unwrap());
+        assert!(before.reachable);
+        assert_eq!(before.nexthops.len(), 1);
+        assert_eq!(
+            before.nexthops[0].addr,
+            "192.168.10.2".parse::<IpAddr>().unwrap()
+        );
+        assert_eq!(before.nexthops[0].labels, vec![16800]);
+
+        // A backup-as-primary promotion swaps the members: the
+        // resolution must follow the promoted repair — and differ
+        // from the pre-promotion result so registered watchers are
+        // notified of the transport change.
+        let t = table_rows(vec![("10.0.0.8/32", protect(repair(), spf()))]);
+        let after = resolve_v4(&t, "10.0.0.8".parse().unwrap());
+        assert!(after.reachable);
+        assert_eq!(after.nexthops.len(), 1);
+        assert_eq!(
+            after.nexthops[0].addr,
+            "192.168.3.2".parse::<IpAddr>().unwrap()
+        );
+        assert_eq!(after.nexthops[0].labels, vec![16500, 15003, 15002]);
+        assert_ne!(before, after);
     }
 
     #[test]
