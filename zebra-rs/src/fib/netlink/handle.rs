@@ -2453,9 +2453,12 @@ impl FibHandle {
 
     /// Apply the VXLAN bridge-slave defaults to the port at `ifindex`:
     /// neighbour suppression on (ARP/ND answered locally from the FDB
-    /// instead of flooded) and bridge-port MAC learning off (EVPN's BGP
-    /// control plane owns the FDB). Equivalent to:
-    ///   ip link set <dev> type bridge_slave neigh_suppress on learning off
+    /// instead of flooded), bridge-port MAC learning off (EVPN's BGP
+    /// control plane owns the FDB), and per-VLAN tunnel mapping enabled
+    /// (required for the single-VXLAN-device egress path — see
+    /// `vxlan_svd_datapath`). Equivalent to:
+    ///   ip link set <dev> type bridge_slave \
+    ///     neigh_suppress on learning off vlan_tunnel on
     /// Called when the RIB observes a VXLAN device gaining a bridge
     /// master; a no-op error is logged if the master is not a bridge.
     pub async fn vxlan_bridge_port_defaults(&self, ifindex: u32) {
@@ -2465,6 +2468,7 @@ impl FibHandle {
         let port_data = InfoPortData::BridgePort(vec![
             InfoBridgePort::NeighSupress(true),
             InfoBridgePort::Learning(false),
+            InfoBridgePort::VlanTunnel(true),
         ]);
         let link_info = LinkAttribute::LinkInfo(vec![
             LinkInfo::PortKind(InfoPortKind::Bridge),
@@ -2479,6 +2483,105 @@ impl FibHandle {
         while let Some(msg) = response.next().await {
             if let NetlinkPayload::Error(e) = msg.payload {
                 tracing::info!("SetLink bridge-port defaults error: {e}");
+            }
+        }
+    }
+
+    /// Wire the single-VXLAN-device (external / vnifilter) kernel
+    /// datapath for a VXLAN port that joined a bridge, so bridged
+    /// traffic actually encapsulates:
+    ///
+    ///   1. enable `vlan_filtering` on the bridge master — the per-VLAN
+    ///      machinery (and thus the tunnel mapping) is dormant without
+    ///      it; other ports keep the kernel's `default_pvid 1` untagged
+    ///      behaviour, so a flat bridge forwards exactly as before;
+    ///   2. add VLAN 1 on the VXLAN port as a TAGGED member (deliberately
+    ///      NOT `untagged`: `br_handle_vlan` strips the tag *before* the
+    ///      egress tunnel hook runs, and a tag-less frame makes
+    ///      `br_handle_egress_vlan_tunnel` bail without attaching the
+    ///      tunnel metadata — the hook itself pops the tag);
+    ///   3. map VLAN 1 -> the VNI (`bridge vlan add dev <vxlan> vid 1
+    ///      tunnel_info id <vni>`), which the bridge egress hook turns
+    ///      into `IP_TUNNEL_INFO_BRIDGE|TX` dst-metadata. Without that
+    ///      metadata a COLLECT_METADATA device drops every bridged frame
+    ///      in `vxlan_xmit` with SKB_DROP_REASON_TUNNEL_TXINFO.
+    ///
+    /// The decap direction needs no PVID: `br_handle_ingress_vlan_tunnel`
+    /// maps the received tunnel id back to VLAN 1 through the same table.
+    /// `vlan_tunnel on` for the port is set by
+    /// `vxlan_bridge_port_defaults`.
+    pub async fn vxlan_svd_datapath(&self, ifindex: u32, bridge_ifindex: u32, vni: u32) {
+        use netlink_packet_route::AddressFamily;
+        use netlink_packet_route::link::{AfSpecBridge, BridgeVlanInfo, InfoBridge, InfoData};
+        use netlink_packet_utils::nla::DefaultNla;
+
+        // 1. vlan_filtering on the bridge master.
+        let mut msg = LinkMessage::default();
+        msg.header.index = bridge_ifindex;
+        msg.attributes.push(LinkAttribute::LinkInfo(vec![
+            LinkInfo::Kind(InfoKind::Bridge),
+            LinkInfo::Data(InfoData::Bridge(vec![InfoBridge::VlanFiltering(true)])),
+        ]));
+        let mut req = NetlinkMessage::from(RouteNetlinkMessage::NewLink(msg));
+        req.header.flags = NLM_F_REQUEST | NLM_F_ACK;
+        let mut response = self.handle.clone().request(req).unwrap();
+        while let Some(msg) = response.next().await {
+            if let NetlinkPayload::Error(e) = msg.payload {
+                tracing::info!("SetLink bridge vlan_filtering error: {e}");
+            }
+        }
+
+        // 2. VLAN 1 on the VXLAN port, tagged (flags = 0).
+        let mut vinfo = BridgeVlanInfo::default();
+        vinfo.flags = 0;
+        vinfo.vid = 1;
+        let mut msg = LinkMessage::default();
+        msg.header.interface_family = AddressFamily::Bridge;
+        msg.header.index = ifindex;
+        msg.attributes
+            .push(LinkAttribute::AfSpecBridge(vec![AfSpecBridge::VlanInfo(
+                vinfo,
+            )]));
+        let mut req = NetlinkMessage::from(RouteNetlinkMessage::SetLink(msg));
+        req.header.flags = NLM_F_REQUEST | NLM_F_ACK;
+        let mut response = self.handle.clone().request(req).unwrap();
+        while let Some(msg) = response.next().await {
+            if let NetlinkPayload::Error(e) = msg.payload {
+                tracing::info!("SetLink vxlan port vlan error: {e}");
+            }
+        }
+
+        // 3. VLAN 1 -> VNI tunnel mapping. The crate has no typed
+        // IFLA_BRIDGE_VLAN_TUNNEL_INFO (3) support, so hand-encode the
+        // nest exactly as iproute2 does:
+        //   IFLA_BRIDGE_VLAN_TUNNEL_ID   (1): u32 vni
+        //   IFLA_BRIDGE_VLAN_TUNNEL_VID  (2): u16 1
+        const NLA_F_NESTED: u16 = 0x8000;
+        const IFLA_BRIDGE_VLAN_TUNNEL_INFO: u16 = 3;
+        let mut nest: Vec<u8> = Vec::new();
+        // TUNNEL_ID: nla_len 8, type 1, u32 payload.
+        nest.extend_from_slice(&8u16.to_ne_bytes());
+        nest.extend_from_slice(&1u16.to_ne_bytes());
+        nest.extend_from_slice(&vni.to_ne_bytes());
+        // TUNNEL_VID: nla_len 6, type 2, u16 payload + 2 pad bytes.
+        nest.extend_from_slice(&6u16.to_ne_bytes());
+        nest.extend_from_slice(&2u16.to_ne_bytes());
+        nest.extend_from_slice(&1u16.to_ne_bytes());
+        nest.extend_from_slice(&[0u8; 2]);
+
+        let mut msg = LinkMessage::default();
+        msg.header.interface_family = AddressFamily::Bridge;
+        msg.header.index = ifindex;
+        msg.attributes
+            .push(LinkAttribute::AfSpecBridge(vec![AfSpecBridge::Other(
+                DefaultNla::new(IFLA_BRIDGE_VLAN_TUNNEL_INFO | NLA_F_NESTED, nest),
+            )]));
+        let mut req = NetlinkMessage::from(RouteNetlinkMessage::SetLink(msg));
+        req.header.flags = NLM_F_REQUEST | NLM_F_ACK;
+        let mut response = self.handle.clone().request(req).unwrap();
+        while let Some(msg) = response.next().await {
+            if let NetlinkPayload::Error(e) = msg.payload {
+                tracing::info!("SetLink vxlan vlan-tunnel map error: {e}");
             }
         }
     }

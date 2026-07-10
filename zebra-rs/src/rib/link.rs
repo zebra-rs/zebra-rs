@@ -725,8 +725,16 @@ impl Rib {
             && prev_evpn_bridge != Some(bridge)
         {
             // The VXLAN just joined a bridge: apply the EVPN bridge-slave
-            // defaults on its port (`neigh_suppress on`, `learning off`).
+            // defaults on its port (`neigh_suppress on`, `learning off`,
+            // `vlan_tunnel on`), and wire the single-VXLAN-device kernel
+            // datapath (bridge vlan_filtering + the VLAN 1 -> VNI tunnel
+            // mapping) so bridged traffic actually encapsulates.
             self.fib_handle.vxlan_bridge_port_defaults(ifindex).await;
+            if let Some(vni) = now_vni {
+                self.fib_handle
+                    .vxlan_svd_datapath(ifindex, bridge, vni)
+                    .await;
+            }
             self.rescan_fdb_for_bridge(bridge);
         }
 
