@@ -64,7 +64,7 @@ L2 *> 2001:db8::8/128 [115/12] via fe80::d093:4fff:fee7:d2fa, s-n1, 00:00:45
 C  *> 2001:db8:100::/64 is directly connected, s-e1, 00:00:51
 B  *> 2001:db8:200::/64 [200/0] via seg6 [fcbb:bbbb:8:40::], s-n1, 00:00:46
 i  *> fcbb:bbbb:1::/128 [115/0] is directly connected, sr0, seg6local End, 00:00:51
-i  *> fcbb:bbbb:1:40::/128 [115/0] is directly connected, sr0, seg6local End.DT6, 00:00:51
+B  *> fcbb:bbbb:1:40::/128 [200/0] is directly connected, sr0, seg6local End.DT6, 00:00:51
 i  *> fcbb:bbbb:1:e000::/128 [115/0] is directly connected, s-n2, seg6local End.X nh6 2001:db8:0:2::2, s-n2, 00:00:51
 i  *> fcbb:bbbb:1:e001::/128 [115/0] is directly connected, s-n1, seg6local End.X nh6 2001:db8:0:1::2, s-n1, 00:00:51
 i  *> fcbb:bbbb:1:e002::/128 [115/0] is directly connected, s-n3, seg6local End.X nh6 2001:db8:0:3::2, s-n3, 00:00:51
@@ -88,7 +88,8 @@ Compared with the SR-MPLS playsets, several things stand out:
   locator `fcbb:bbbb:1::/48`: the **End** SID (`fcbb:bbbb:1::`, on the
   dedicated `sr0` device), the **End.DT6** service SID
   (`fcbb:bbbb:1:40::` — decapsulate and look the inner packet up in the
-  IPv6 table), and one **End.X** per adjacency
+  IPv6 table; BGP carves it, so the entry renders `B` [200/0]), and one
+  **End.X** per adjacency
   (`...:e000::`–`...:e002::`). These are the SRv6 equivalents of the MPLS
   ILM entries.
 * Every remote locator is a routed `/48` — reaching another node's SIDs is

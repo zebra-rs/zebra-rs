@@ -19,12 +19,13 @@ The locator's 48 bits split into the domain-wide 32-bit uSID block
 (`fcbb:bbbb`) and a 16-bit node id; SIDs become 16-bit micro-instructions
 packed into 128-bit carriers. See the IS-IS uSID README for the full
 shift-and-forward mechanics (uN on the locator /48, dual addressed/shifted
-uA forms) — the kernel state here is the same, advertised through the
-OSPFv3 RFC 9513 extensions instead of IS-IS TLVs:
+uA forms) — the kernel state here is identical apart from the `proto ospf`
+attribution, advertised through the OSPFv3 RFC 9513 extensions instead of
+IS-IS TLVs:
 
 ``` shell
 s>ip -6 route show fcbb:bbbb:1::/48
-fcbb:bbbb:1::/48  encap seg6local action End flavors next-csid lblen 32 nflen 16 dev sr0 proto isis metric 1024
+fcbb:bbbb:1::/48  encap seg6local action End flavors next-csid lblen 32 nflen 16 dev sr0 proto ospf metric 1024
 ```
 
 ## TI-LFA: packed carriers in the v3 repair list
