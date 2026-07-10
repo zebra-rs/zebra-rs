@@ -8,6 +8,8 @@ interface:
 - if-name: r3-d
   ipv4:
     address: 192.168.5.2/24
+system:
+  hostname: r3
 router:
   isis:
     net: 49.0000.0000.0000.0007.00

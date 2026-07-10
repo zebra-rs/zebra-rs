@@ -1,7 +1,7 @@
 interface:
 - if-name: d-e2
   ipv4:
-    address: 172.168.1.1/24
+    address: 172.16.1.1/24
 - if-name: d-n1
   ipv4:
     address: 192.168.2.2/24
@@ -11,6 +11,8 @@ interface:
 - if-name: lo
   ipv4:
     address: 10.0.0.8/32
+system:
+  hostname: d
 router:
   isis:
     net: 49.0000.0000.0000.0008.00
@@ -36,6 +38,6 @@ router:
   static:
     ipv4:
       route:
-      - prefix: 172.168.0.0/24
+      - prefix: 172.16.0.0/24
         nexthop:
         - address: 10.0.0.1

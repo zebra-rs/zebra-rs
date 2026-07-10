@@ -1,11 +1,13 @@
 interface:
 - if-name: e1-s
   ipv4:
-    address: 172.168.0.1/24
+    address: 172.16.0.1/24
+system:
+  hostname: e1
 router:
   static:
     ipv4:
       route:
       - prefix: 0.0.0.0/0
         nexthop:
-        - address: 172.168.0.2
+        - address: 172.16.0.2
