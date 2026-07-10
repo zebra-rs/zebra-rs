@@ -12860,9 +12860,23 @@ fn build_rib_from_spf(
             let Some(repair) = tilfa_result.get(&dest).and_then(|paths| paths.first()) else {
                 continue;
             };
-            let Some(backup) = build_repair_path_mpls(top, area, repair) else {
+            let Some(mut backup) = build_repair_path_mpls(top, area, repair) else {
                 continue;
             };
+            // A repair list only steers the packet to its release
+            // point; from there the inner packet is IP-routed. That
+            // suffices for traffic addressed inside the protected
+            // prefix, but traffic tunneled through this route (a
+            // recursive static/BGP nexthop resolved onto it) carries
+            // an inner destination the release point may not know.
+            // Append the prefix's own node-SID label below the repair
+            // segments so the repair label-switches all the way to
+            // the destination node — mirrors IS-IS
+            // (`backup_append_prefix_sid`). `add_prefix_sids` ran
+            // above, so `route.sid` is already resolved here.
+            if let Some(sid) = route.sid {
+                backup.labels.push(rib::Label::Explicit(sid));
+            }
             if let Some(nhop) = route.nhops.values_mut().next() {
                 nhop.backup = Some(backup);
             }
@@ -13891,6 +13905,7 @@ fn apply_v3_spf_result(top: &mut Ospf<Ospfv3>, output: SpfOutput) {
     // below.
     let mut area_rib = build_rib6_from_spf(top, area_id, source, &spf_result, &tilfa_result);
     add_prefix_sids_v3(top, area_id, &mut area_rib);
+    append_repair_tail_sids_v3(&mut area_rib);
     top.rib6_areas.insert(area_id, area_rib);
     top.spf_results.insert(area_id, spf_result.clone());
     let merged = merge_area_ribs6(top);
@@ -14813,6 +14828,32 @@ fn add_prefix_sids_v3(
                 route.prefix_sid = Some((value, label_config.clone()));
                 route.sid = sid_label;
                 break;
+            }
+        }
+    }
+}
+
+/// Close each stamped SR-MPLS TI-LFA repair into a full SR path by
+/// appending the prefix's own node-SID label below the repair
+/// segments — the v3 sibling of the append in v2's TI-LFA second
+/// pass (and IS-IS's `backup_append_prefix_sid`). A repair list only
+/// steers the packet to its release point; traffic tunneled through
+/// the route (a recursive static/BGP nexthop resolved onto it) needs
+/// the tail label to reach the destination node. This runs as its
+/// own pass because v3 resolves Prefix-SIDs (`add_prefix_sids_v3`)
+/// only after the repair stamping inside `build_rib6_from_spf`; the
+/// area slice is rebuilt from scratch every SPF run, so the append
+/// happens exactly once per stack. SRv6 repairs are SRH-inserted and
+/// keep the original destination as the SRH's final segment, so they
+/// need no tail.
+fn append_repair_tail_sids_v3(rib: &mut PrefixMap<ipnet::Ipv6Net, SpfRouteV3>) {
+    for (_, route) in rib.iter_mut() {
+        let Some(label) = route.sid else {
+            continue;
+        };
+        for nhop in route.nhops.values_mut() {
+            if let Some(super::tilfa::RepairBackupV3::Mpls(b)) = nhop.backup.as_mut() {
+                b.labels.push(rib::Label::Explicit(label));
             }
         }
     }
@@ -16163,6 +16204,90 @@ mod multi_area_tests {
         rib_insert(&mut rib, p, route(20, RouteType::InterArea));
         rib_insert(&mut rib, p, route(40, RouteType::InterArea));
         assert_eq!(rib.get(&p).unwrap().metric, 20);
+    }
+}
+
+#[cfg(test)]
+mod repair_tail_sid_tests {
+    use super::{RouteType, SpfNexthopV3, SpfRouteV3, append_repair_tail_sids_v3};
+    use crate::ospf::tilfa::{RepairBackupV3, RepairPathMplsV3};
+    use crate::rib::Label;
+    use ipnet::Ipv6Net;
+    use prefix_trie::PrefixMap;
+    use std::collections::BTreeMap;
+
+    fn route_v3(sid: Option<u32>, backup: Option<RepairBackupV3>) -> SpfRouteV3 {
+        let mut nhops = BTreeMap::new();
+        nhops.insert(
+            "fe80::1".parse().unwrap(),
+            SpfNexthopV3 {
+                ifindex: 3,
+                adjacency: false,
+                backup,
+            },
+        );
+        SpfRouteV3 {
+            metric: 12,
+            path_type: RouteType::IntraArea,
+            nhops,
+            sid,
+            prefix_sid: None,
+            dest_vertex: Some(1),
+            backup_as_primary: false,
+        }
+    }
+
+    fn mpls_backup(labels: Vec<u32>) -> RepairBackupV3 {
+        RepairBackupV3::Mpls(RepairPathMplsV3 {
+            ifindex: 3,
+            addr: "fe80::2".parse().unwrap(),
+            labels: labels.into_iter().map(Label::Explicit).collect(),
+        })
+    }
+
+    #[test]
+    fn appends_prefix_sid_below_repair_segments() {
+        let mut rib: PrefixMap<Ipv6Net, SpfRouteV3> = PrefixMap::new();
+        rib.insert(
+            "2001:db8::8/128".parse().unwrap(),
+            route_v3(Some(16800), Some(mpls_backup(vec![16500, 15003]))),
+        );
+        append_repair_tail_sids_v3(&mut rib);
+        let route = rib.get(&"2001:db8::8/128".parse().unwrap()).unwrap();
+        let Some(RepairBackupV3::Mpls(b)) = &route.nhops.values().next().unwrap().backup else {
+            panic!("Mpls backup preserved");
+        };
+        assert_eq!(
+            b.labels,
+            vec![
+                Label::Explicit(16500),
+                Label::Explicit(15003),
+                Label::Explicit(16800)
+            ]
+        );
+    }
+
+    #[test]
+    fn no_sid_or_no_backup_is_a_no_op() {
+        let mut rib: PrefixMap<Ipv6Net, SpfRouteV3> = PrefixMap::new();
+        // Repair but no resolved Prefix-SID: stack must stay as built.
+        rib.insert(
+            "2001:db8::7/128".parse().unwrap(),
+            route_v3(None, Some(mpls_backup(vec![16500]))),
+        );
+        // SID but no repair: nothing to append to.
+        rib.insert(
+            "2001:db8::6/128".parse().unwrap(),
+            route_v3(Some(16600), None),
+        );
+        append_repair_tail_sids_v3(&mut rib);
+        let r7 = rib.get(&"2001:db8::7/128".parse().unwrap()).unwrap();
+        let Some(RepairBackupV3::Mpls(b)) = &r7.nhops.values().next().unwrap().backup else {
+            panic!("Mpls backup preserved");
+        };
+        assert_eq!(b.labels, vec![Label::Explicit(16500)]);
+        let r6 = rib.get(&"2001:db8::6/128".parse().unwrap()).unwrap();
+        assert!(r6.nhops.values().next().unwrap().backup.is_none());
     }
 }
 
