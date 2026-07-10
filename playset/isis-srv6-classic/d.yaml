@@ -39,7 +39,28 @@ router:
       metric: 1
       ipv6:
         enabled: true
-    - if-name: d-e2
-      passive: true
-      ipv6:
+  bgp:
+    global:
+      as: 65000
+      router-id: 10.0.0.8
+    timer:
+      adv-interval:
+        ibgp: 1
+        ebgp: 1
+    segment-routing:
+      srv6:
+        locator: LOC8
+        ipv6-unicast: {}
+    neighbor:
+    - remote-address: 2001:db8::1
+      remote-as: 65000
+      update-source: 2001:db8::8
+      enabled: true
+      afi-safi:
+      - name: ipv6
         enabled: true
+        encapsulation-type: srv6
+    afi-safi:
+    - name: ipv6
+      redistribute:
+        connected: {}
