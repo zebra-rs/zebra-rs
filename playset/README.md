@@ -69,6 +69,12 @@ Some cross-cutting themes to look for:
   onto the TI-LFA repair while every link stays up, which makes the repair
   path observable with plain `tcpdump`.
 
+## BGP EVPN
+
+| playset | scheme |
+|:--|:--|
+| [bgp-evpn-vxlan](bgp-evpn-vxlan/README.md) | one L2 segment stretched across two VTEPs — Type-2/Type-3 EVPN control plane driving the kernel's single-VXLAN-device data plane, hosts pinging at `ttl=64` |
+
 ## BGP Inter-AS L3VPN (templates)
 
 Topology templates for the Inter-AS VPN options; walkthroughs to follow.
