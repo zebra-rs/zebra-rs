@@ -543,11 +543,8 @@ Option A boundary).
 
 ## Sources
 
-* Cisco, *MPLS VPN Inter-AS Option AB* (defines Options A/B/AB and the
-  back-to-back VRF model):
-  <https://www.cisco.com/c/en/us/td/docs/routers/ios/config/17-x/mpls/b-mpls/m_mp-vpn-ias-optab.html>
-* Cisco, *Configuring MPLS VPN Inter-AS Options* (Catalyst switch
-  configuration guide):
+* Cisco, *Configuring MPLS VPN Inter-AS Options* (defines Options A/B/C,
+  including the back-to-back VRF model, with configuration examples):
   <https://www.cisco.com/c/en/us/td/docs/switches/lan/catalyst9400/software/release/17-16/configuration_guide/mpls/b_1716_mpls_9400_cg/configuring_mpls_vpn_interas_options.html>
 * netquirks, *Inter-AS Option A* (IOS vs IOS-XR configuration
   walkthrough): <https://netquirks.co.uk/ios-vs-xr/inter-as-option-a/>

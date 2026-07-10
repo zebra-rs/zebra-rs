@@ -355,9 +355,9 @@ ASBR-ASBR eBGP VPNv4 session — the Option B boundary.
 * RFC 4364, *BGP/MPLS IP Virtual Private Networks*, §10 — "Multi-AS
   Backbones", method (b); RFC 8277, *Using BGP to Bind MPLS Labels to
   Address Prefixes*.
-* Cisco, *MPLS VPN Inter-AS Option AB* (defines Options A/B and the
-  ASBR-to-ASBR labeled VPNv4 model):
-  <https://www.cisco.com/c/en/us/td/docs/routers/ios/config/17-x/mpls/b-mpls/m_mp-vpn-ias-optab.html>
+* Cisco, *MPLS VPN Inter-AS with ASBRs Exchanging VPN-IPv4 Addresses*
+  (the Option B configuration guide):
+  <https://www.cisco.com/c/en/us/td/docs/routers/ios/config/17-x/mpls/b-mpls/m_mp-vpn-connect-asbr.html>
 * Cisco, *Configuring MPLS VPN Inter-AS Options*:
   <https://www.cisco.com/c/en/us/td/docs/switches/lan/catalyst9400/software/release/17-16/configuration_guide/mpls/b_1716_mpls_9400_cg/configuring_mpls_vpn_interas_options.html>
 * netquirks, *Inter-AS Option B*:

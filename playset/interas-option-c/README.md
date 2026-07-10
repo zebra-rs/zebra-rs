@@ -327,11 +327,11 @@ directly between pe1 and pe2** — the Option C control plane.
   Address Prefixes*.
 * Cisco, *MPLS VPN Inter-AS with ASBRs Exchanging IPv4 Routes and MPLS
   Labels* (the Option C configuration guide):
-  <https://www.cisco.com/c/en/us/td/docs/ios-xml/ios/mp_ias_and_csc/configuration/xe-16/mp-ias-and-csc-xe-16-book/mp-vpn-ias-ipv4-mpls.html>
+  <https://www.cisco.com/c/en/us/td/docs/routers/ios/config/17-x/mpls/b-mpls/m_mp-vpn-connect-ipv4.html>
 * Cisco, *Configuring MPLS VPN Inter-AS Options*:
   <https://www.cisco.com/c/en/us/td/docs/switches/lan/catalyst9400/software/release/17-16/configuration_guide/mpls/b_1716_mpls_9400_cg/configuring_mpls_vpn_interas_options.html>
 * netquirks, *Inter-AS Option C*:
-  <https://netquirks.co.uk/ios-vs-xr/inter-as-option-c/>
+  <https://netquirks.co.uk/ios-vs-xr/option-c/>
 * QuistED, *Inter-AS MPLS L3VPN Options (A, B, C)*:
   <https://www.quisted.net/index.php/2025/09/12/inter-as-mpls-l3vpn-options-a-b-c/>
 * Juniper, *Interprovider VPNs*:
