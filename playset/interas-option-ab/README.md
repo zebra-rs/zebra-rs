@@ -27,6 +27,8 @@ is, line for line, Cisco's Option AB route-distribution procedure:
 > it into VPN 1 as RD 7:N [and] advertises the route with the export RT
 > configured on the VRF rather than the originally received RTs.
 
+<img src="../images/InterASOptionAB.svg" alt="Inter-AS Option AB topology">
+
 ```
   ce1 ─┐                                                  ┌─ ce3   (cust1)
        pe1 ── p1 ── asbr1 ═══ one eBGP VPNv4 session ═══ asbr2 ── p2 ── pe2

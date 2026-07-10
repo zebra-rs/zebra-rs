@@ -22,6 +22,8 @@ eBGP rewrite-to-self would pull traffic toward a router that does not
 forward it. The border ASBRs are unchanged from the direct-PE lab:
 labeled loopbacks (BGP-LU) only, zero VPN state.
 
+<img src="../images/InterASOptionCRR.svg" alt="Inter-AS Option C (RR-based) topology">
+
 ```
            rr1 ══ multihop eBGP VPNv4, next-hop-unchanged ══ rr2
             │                                                 │
