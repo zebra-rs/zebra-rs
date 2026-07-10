@@ -4,7 +4,7 @@
 
 As a network operator
 I want eight zebra-rs instances running IS-IS Level-2 with SRv6
-locators and TI-LFA (RFC 9490) to pre-compute a topology-independent
+locators and TI-LFA (RFC 9855) to pre-compute a topology-independent
 repair for the source's primary path as an SRv6 SID list (End /
 End.X SIDs, SRH-inserted), so that when the primary link fails the
 source still reaches the destination — including BGP-carried SRv6

@@ -3,7 +3,7 @@
 Feature: IS-IS TI-LFA fast-reroute over SR-MPLS
   As a network operator
   I want eight zebra-rs instances running IS-IS Level-2 with SR-MPLS and
-  TI-LFA (RFC 9490) to pre-compute a topology-independent loop-free
+  TI-LFA (RFC 9855) to pre-compute a topology-independent loop-free
   repair for the source's primary path, so that when the primary link
   fails the source still reaches the destination over the SR repair /
   post-convergence path.

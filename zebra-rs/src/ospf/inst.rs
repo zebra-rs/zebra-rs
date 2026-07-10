@@ -176,7 +176,7 @@ pub struct Ospf<V: OspfVersion = Ospfv2> {
     pub spf_result: Option<BTreeMap<usize, Path>>,
     pub graph: Option<spf::Graph>,
     /// `/router/ospf/fast-reroute/ti-lfa` — gates the per-destination
-    /// TI-LFA repair-path computation (RFC 9490). When off, the SPF
+    /// TI-LFA repair-path computation (RFC 9855). When off, the SPF
     /// primary RIB still installs; only the repair backups are skipped.
     pub ti_lfa_enabled: bool,
     /// `/router/ospf/fast-reroute/backup-as-primary` — swap the

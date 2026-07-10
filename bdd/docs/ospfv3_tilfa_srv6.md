@@ -4,7 +4,7 @@
 
 As a network operator
 I want eight zebra-rs instances running OSPFv3 with SRv6 locators
-(RFC 9513) and TI-LFA (RFC 9490) to pre-compute a topology-
+(RFC 9513) and TI-LFA (RFC 9855) to pre-compute a topology-
 independent repair for the source's primary path as an SRv6 SID
 list — End/uN of the P-node plus uA hops, NEXT-C-SID-compressed and
 SRH-inserted — so that when the primary link fails the source still

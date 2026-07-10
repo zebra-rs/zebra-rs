@@ -87,6 +87,34 @@ fn via_addr(uni: &NexthopUni) -> String {
     }
 }
 
+// A recursively-resolved nexthop: NHT rewrote the configured gateway
+// (`addr_origin`, e.g. a static route's `via 10.0.0.8`) to an on-link
+// egress that differs from it. Only static routes populate
+// `addr_origin`, so this is exactly the recursive-static case.
+fn uni_is_recursive(uni: &NexthopUni) -> bool {
+    uni.segs.is_empty() && uni.addr_origin.is_some_and(|origin| origin != uni.addr)
+}
+
+// Render a recursive nexthop as two lines, FRR-style: the configured
+// gateway tagged `(recursive)`, then the resolved egress with its
+// inherited transport label stack underneath:
+//
+//   S  *> 172.168.1.0/24 [1/0] via 10.0.0.8 (recursive), 00:00:12
+//                        via 192.168.10.2, s-n1, label 16800
+fn write_uni_recursive(
+    buf: &mut String,
+    uni: &NexthopUni,
+    ifname: &str,
+    offset: usize,
+    uptime: &str,
+) {
+    writeln!(buf, " via {} (recursive), {}", uni.display_addr(), uptime).unwrap();
+    buf.push_str(&" ".repeat(offset));
+    write!(buf, " via {}, {}", uni.addr, ifname).unwrap();
+    write_mpls_labels(buf, uni);
+    buf.push('\n');
+}
+
 // JSON-serializable structures for route display
 #[derive(Serialize)]
 pub struct RouteEntry {
@@ -455,18 +483,22 @@ pub fn rib_entry_show(
                 } else {
                     uni.ifindex().unwrap_or(0)
                 };
-                write!(
-                    buf,
-                    " {} {}, {}",
-                    via_word(uni),
-                    via_addr(uni),
-                    rib.link_name(ifindex)
-                )
-                .unwrap();
-                write_mpls_labels(&mut buf, uni);
-                // Single nexthop — `weight` is an ECMP-only column,
-                // so we omit it here. Multi prints it per leg below.
-                writeln!(buf, ", {}", uptime).unwrap();
+                if uni_is_recursive(uni) {
+                    write_uni_recursive(&mut buf, uni, &rib.link_name(ifindex), offset, &uptime);
+                } else {
+                    write!(
+                        buf,
+                        " {} {}, {}",
+                        via_word(uni),
+                        via_addr(uni),
+                        rib.link_name(ifindex)
+                    )
+                    .unwrap();
+                    write_mpls_labels(&mut buf, uni);
+                    // Single nexthop — `weight` is an ECMP-only column,
+                    // so we omit it here. Multi prints it per leg below.
+                    writeln!(buf, ", {}", uptime).unwrap();
+                }
             }
             Nexthop::Multi(multi) => {
                 for (i, uni) in multi.nexthops.iter().enumerate() {
@@ -569,6 +601,8 @@ pub fn rib_entry_show_v6(
                         write!(buf, " nh6 {}, {}", nh6, iface).unwrap();
                     }
                     writeln!(buf, ", {}", uptime).unwrap();
+                } else if uni_is_recursive(uni) {
+                    write_uni_recursive(&mut buf, uni, &rib.link_name(ifindex), offset, &uptime);
                 } else {
                     write!(
                         buf,

@@ -60,7 +60,7 @@ implementation; the corresponding features track the referenced draft revision.
 | RFC 7471 | OSPF Traffic Engineering Metric Extensions (unidirectional delay / loss). |
 | RFC 9492 | OSPF Application-Specific Link Attributes (ASLA). |
 | RFC 9350 | IGP Flexible Algorithm (Flex-Algo) constraint-based SPF. |
-| RFC 9490 | Topology-Independent Loop-Free Alternate (TI-LFA) fast reroute using Segment Routing. |
+| RFC 9855 | Topology-Independent Loop-Free Alternate (TI-LFA) fast reroute using Segment Routing. |
 
 ## OSPFv3
 
@@ -75,7 +75,7 @@ implementation; the corresponding features track the referenced draft revision.
 | RFC 3101 | The OSPF Not-So-Stubby Area (NSSA) Option. |
 | RFC 6987 | OSPF Stub Router Advertisement (max-metric). |
 | RFC 9350 | IGP Flexible Algorithm (Flex-Algo) constraint-based SPF. |
-| RFC 9490 | Topology-Independent Loop-Free Alternate (TI-LFA) fast reroute using Segment Routing. |
+| RFC 9855 | Topology-Independent Loop-Free Alternate (TI-LFA) fast reroute using Segment Routing. |
 
 ## IS-IS
 
@@ -101,7 +101,7 @@ implementation; the corresponding features track the referenced draft revision.
 | RFC 9479 | IS-IS Application-Specific Link Attributes (ASLA). |
 | RFC 9352 | IS-IS Extensions to Support Segment Routing over the IPv6 Data Plane (SRv6). |
 | RFC 9350 | IGP Flexible Algorithm (Flex-Algo) constraint-based SPF. |
-| RFC 9490 | Topology-Independent Loop-Free Alternate (TI-LFA) fast reroute using Segment Routing. |
+| RFC 9855 | Topology-Independent Loop-Free Alternate (TI-LFA) fast reroute using Segment Routing. |
 
 ## BFD
 

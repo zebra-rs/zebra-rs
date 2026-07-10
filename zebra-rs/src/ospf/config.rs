@@ -2210,7 +2210,7 @@ fn config_ospf_interface_adjacency_sid_absolute(
 }
 
 /// `/router/ospf/fast-reroute/ti-lfa`. Gates the per-destination
-/// TI-LFA repair computation (RFC 9490). On a state change, kick an
+/// TI-LFA repair computation (RFC 9855). On a state change, kick an
 /// SPF recompute for every attached area so the RIB picks up repair
 /// paths (on enable) or drops them (on disable). No LSA re-origination
 /// is needed: the repair is a local install-side decision and changes

@@ -4,7 +4,7 @@
 
 As a network operator
 I want eight zebra-rs instances running OSPFv3 with classic
-(RFC 8986 full-SID) SRv6 locators and TI-LFA (RFC 9490) to
+(RFC 8986 full-SID) SRv6 locators and TI-LFA (RFC 9855) to
 pre-compute a topology-independent repair as an SRv6 SID list, so
 that when the primary link fails the source still reaches the
 destination.

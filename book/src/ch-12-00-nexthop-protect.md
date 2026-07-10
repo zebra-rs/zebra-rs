@@ -29,7 +29,7 @@ the daemon ground through SPF and per-prefix FIB churn.
 
 ## What each layer contributes
 
-- **TI-LFA** (RFC 9490, in IS-IS, OSPFv2 and OSPFv3) computes the
+- **TI-LFA** (RFC 9855, in IS-IS, OSPFv2 and OSPFv3) computes the
   post-convergence repair path for each destination and expresses it as
   a segment-routing encapsulation — an SR-MPLS label stack or an SRv6
   segment list — so the repair is loop-free *during* convergence, not

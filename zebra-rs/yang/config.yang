@@ -1264,7 +1264,7 @@ module config {
           container ti-lfa {
             ext:help "Topology-Independent LFA (TI-LFA)";
             // Topology-Independent Loop-Free Alternate (TI-LFA,
-            // RFC 9490). Computes a post-convergence repair path
+            // RFC 9855). Computes a post-convergence repair path
             // expressed as SR-MPLS labels, so segment-routing/mpls
             // must also be enabled for the repair to install in the
             // dataplane.
@@ -2265,7 +2265,7 @@ module config {
         }
 
         container fast-reroute {
-          ext:help "Fast-reroute / TI-LFA protection (RFC 9490)";
+          ext:help "Fast-reroute / TI-LFA protection (RFC 9855)";
           // OSPFv3 fast-reroute mechanisms (RFC 7490 LFA family).
           // Same shape as `router ospf / fast-reroute`; the repair is
           // expressed as SR-MPLS labels, so segment-routing/mpls must
@@ -2273,7 +2273,7 @@ module config {
           container ti-lfa {
             ext:help "Topology-Independent LFA (TI-LFA)";
             // Topology-Independent Loop-Free Alternate (TI-LFA,
-            // RFC 9490). Post-convergence repair over the v3 LSDB.
+            // RFC 9855). Post-convergence repair over the v3 LSDB.
             presence "Enable Topology-Independent LFA (TI-LFA)";
 
             container compute-mode {
@@ -2678,12 +2678,12 @@ module config {
         }
 
         container fast-reroute {
-          ext:help "Fast-reroute / TI-LFA protection (RFC 9490)";
+          ext:help "Fast-reroute / TI-LFA protection (RFC 9855)";
           // IS-IS fast-reroute mechanisms. Empty container is a no-op;
           // the per-mechanism child presence containers turn features on.
           container ti-lfa {
             ext:help "Topology-Independent LFA (TI-LFA)";
-            // Topology-Independent Loop-Free Alternate (TI-LFA, RFC 9490).
+            // Topology-Independent Loop-Free Alternate (TI-LFA, RFC 9855).
             // Computes a post-convergence repair path expressed as
             // SR-MPLS labels, so segment-routing/mpls must also be
             // enabled for the repair to install in the dataplane.
