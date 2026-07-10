@@ -467,6 +467,7 @@ pub fn attach(
     peers: &mut PeerMap,
     peer_idx: usize,
     router_id: Ipv4Addr,
+    as_sets_withdraw: bool,
 ) {
     let Some(peer) = peers.get_by_idx(peer_idx) else {
         return;
@@ -528,7 +529,7 @@ pub fn attach(
             let add_path = peer.opt.is_add_path_send(afi_safi.afi, afi_safi.safi);
             t.send(super::group_egress::GroupEgressDeltaV4::AddMember {
                 ident: peer_idx,
-                ctx: Box::new(peer.sync_ctx(router_id)),
+                ctx: Box::new(peer.sync_ctx(router_id, as_sets_withdraw)),
                 add_path,
             });
         }
@@ -1634,8 +1635,8 @@ mod tests {
 
         let mut groups = empty_map();
         let rid = "1.1.1.1".parse().unwrap();
-        attach(&mut groups, &mut peers, dual_idx, rid);
-        attach(&mut groups, &mut peers, v4only_idx, rid);
+        attach(&mut groups, &mut peers, dual_idx, rid, true);
+        attach(&mut groups, &mut peers, v4only_idx, rid, true);
 
         let v4_key = AfiSafi::new(Afi::Ip, Safi::Unicast);
         let v6_key = AfiSafi::new(Afi::Ip6, Safi::Unicast);

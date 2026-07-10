@@ -1166,6 +1166,7 @@ impl BgpVrf {
                     vrf_transport_v4: Some(&self.transport_v4),
                     vrf_transport_v6: Some(&self.transport_v6),
                     central_label_alloc: None,
+                    as_sets_withdraw: true,
                 };
                 // Per-VRF tasks don't drive the global shard pool (their
                 // RIB is the VRF's own); ingest stays synchronous.
@@ -1346,6 +1347,7 @@ impl BgpVrf {
             vrf_transport_v4: Some(&self.transport_v4),
             vrf_transport_v6: Some(&self.transport_v6),
             central_label_alloc: None,
+            as_sets_withdraw: true,
         };
         super::super::route::route_advertise_to_peers(
             None,
@@ -1433,6 +1435,7 @@ impl BgpVrf {
             vrf_transport_v4: Some(&self.transport_v4),
             vrf_transport_v6: Some(&self.transport_v6),
             central_label_alloc: None,
+            as_sets_withdraw: true,
         };
         super::super::route::route_advertise_to_peers(
             None,
@@ -1567,6 +1570,7 @@ impl BgpVrf {
             vrf_transport_v4: Some(&self.transport_v4),
             vrf_transport_v6: Some(&self.transport_v6),
             central_label_alloc: None,
+            as_sets_withdraw: true,
         };
         super::super::route::route_advertise_to_peers_v6(
             prefix,
@@ -1638,6 +1642,7 @@ impl BgpVrf {
             vrf_transport_v4: Some(&self.transport_v4),
             vrf_transport_v6: Some(&self.transport_v6),
             central_label_alloc: None,
+            as_sets_withdraw: true,
         };
         super::super::route::route_advertise_to_peers_v6(
             prefix,

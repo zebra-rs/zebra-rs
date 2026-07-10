@@ -199,6 +199,8 @@ pub struct SyncCtx {
     /// §9 origination test). `None` = off. See
     /// [`super::peer::PeerConfig::attach_unknown_attr`].
     pub attach_unknown_attr: Option<bgp_packet::UnknownAttr>,
+    /// RFC 9774 global toggle (`router bgp as-sets-withdraw`).
+    pub as_sets_withdraw: bool,
 }
 
 impl SyncCtx {
@@ -289,6 +291,7 @@ impl SyncCtx {
             egress_depth: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
             extended_message: false,
             attach_unknown_attr: None,
+            as_sets_withdraw: true,
         }
     }
 }
@@ -4100,7 +4103,7 @@ fn compute_advertise_outcome(
     bgp: &BgpTop,
     add_path: bool,
 ) -> AdvertiseOutcome<Ipv4Nlri> {
-    let ctx = peer.sync_ctx(*bgp.router_id);
+    let ctx = peer.sync_ctx(*bgp.router_id, bgp.as_sets_withdraw);
     if let Some((nlri, attr)) = route_update_ipv4(&ctx, prefix, best, add_path) {
         // v4-unicast reads the cached `SyncCtx` snapshot (the egress can run
         // off-main in a shard worker); VPNv4 reads its own per-AFI Output
@@ -4340,7 +4343,7 @@ fn soft_out_v4_to_pet(peer_idx: usize, bgp: &BgpTop, peers: &PeerMap) {
         return;
     };
     let add_path = peer.opt.is_add_path_send(Afi::Ip, Safi::Unicast);
-    let ctx = peer.sync_ctx(*bgp.router_id);
+    let ctx = peer.sync_ctx(*bgp.router_id, bgp.as_sets_withdraw);
     let _ = pet
         .delta_tx
         .send(super::peer_egress::EgressDeltaV4::Refresh {
@@ -4400,7 +4403,7 @@ fn soft_out_v4_to_group(peer_idx: usize, bgp: &BgpTop, peers: &PeerMap) {
         if let Some(m) = peers.get_by_idx(ident) {
             task.send(super::group_egress::GroupEgressDeltaV4::AddMember {
                 ident,
-                ctx: Box::new(m.sync_ctx(*bgp.router_id)),
+                ctx: Box::new(m.sync_ctx(*bgp.router_id, bgp.as_sets_withdraw)),
                 add_path: m.opt.is_add_path_send(Afi::Ip, Safi::Unicast),
             });
         }
@@ -4584,7 +4587,7 @@ impl BatchAfi for V4Batch {
         rib: &BgpRib,
         bgp: &mut BgpTop,
     ) {
-        let ctx = peer.sync_ctx(*bgp.router_id);
+        let ctx = peer.sync_ctx(*bgp.router_id, bgp.as_sets_withdraw);
         let Some((nlri, attr)) = route_update_ipv4(&ctx, &prefix, rib, true) else {
             return;
         };
@@ -5085,6 +5088,9 @@ pub fn route_update_evpn(
     let mut attrs = (*rib.attr).clone();
 
     ebgp_egress_aspath(&peer.egress_as(), &mut attrs);
+    if as_sets_withdraw_suppresses_egress(bgp.as_sets_withdraw, &attrs) {
+        return None;
+    }
 
     if peer.is_ebgp() || rib.is_originated() {
         let nexthop: IpAddr = if let Some(ref local_addr) = peer.param.local_addr {
@@ -5561,7 +5567,7 @@ fn route_soft_out_peer_table(
         if llgr_blocks_advertisement(rib.stale, &peer.cap_recv, afi, safi) {
             continue;
         }
-        let ctx = peer.sync_ctx(*bgp.router_id);
+        let ctx = peer.sync_ctx(*bgp.router_id, bgp.as_sets_withdraw);
         let Some((nlri, attr)) = route_update_ipv4(&ctx, prefix, rib, add_path) else {
             continue;
         };
@@ -5613,7 +5619,7 @@ fn route_soft_out_peer_table(
             .then(|| super::update_group::compose_enhe_next_hop(peer, bgp.interface_addrs))
             .flatten();
         super::update_group::send_ipv4_direct(
-            &peer.sync_ctx(*bgp.router_id),
+            &peer.sync_ctx(*bgp.router_id, bgp.as_sets_withdraw),
             ipv4_entries,
             enhe_v6,
         );
@@ -8182,6 +8188,9 @@ fn route_update_mup(
     let route = prefix.to_route_with(rd, rib.mup_st1.as_ref());
     let mut attrs = (*rib.attr).clone();
     ebgp_egress_aspath(&peer.egress_as(), &mut attrs);
+    if as_sets_withdraw_suppresses_egress(bgp.as_sets_withdraw, &attrs) {
+        return None;
+    }
 
     // MP_REACH next-hop: an SRv6 segment route we originate (a DSD or ISD
     // carrying an End.DT46 Prefix-SID) advertises the PE locator node carried
@@ -9217,6 +9226,7 @@ pub fn route_update_flowspec(
     nlri: &FlowspecNlri,
     rib: &BgpRib,
     add_path: bool,
+    as_sets_withdraw: bool,
 ) -> Option<(FlowspecNlri, BgpAttr)> {
     if rib.ident == peer.ident {
         return None;
@@ -9233,6 +9243,9 @@ pub fn route_update_flowspec(
 
     let mut attrs = (*rib.attr).clone();
     ebgp_egress_aspath(&peer.egress_as(), &mut attrs);
+    if as_sets_withdraw_suppresses_egress(as_sets_withdraw, &attrs) {
+        return None;
+    }
     if peer.is_ibgp() && attrs.local_pref.is_none() {
         attrs.local_pref = Some(LocalPref::default());
     }
@@ -9274,7 +9287,9 @@ pub fn route_advertise_flowspec_to_peers(
         let peer = peers.get_mut_by_idx(ident).expect("peer exists");
         let add_path = peer.opt.is_add_path_send(afi, Safi::Flowspec);
 
-        let Some((out_nlri, attr)) = route_update_flowspec(peer, nlri, best, add_path) else {
+        let Some((out_nlri, attr)) =
+            route_update_flowspec(peer, nlri, best, add_path, bgp.as_sets_withdraw)
+        else {
             continue;
         };
 
@@ -9441,7 +9456,10 @@ pub fn route_from_peer(
     // remove any installed copy from this peer instead of installing —
     // while the UPDATE's explicit withdrawals are still honoured and the
     // session stays up.
-    let treat_as_withdraw = packet.treat_as_withdraw;
+    let mut treat_as_withdraw = packet.treat_as_withdraw;
+    if as_sets_withdraw_treat_as_withdraw(bgp.as_sets_withdraw, packet.bgp_attr.as_ref()) {
+        treat_as_withdraw = true;
+    }
 
     if treat_as_withdraw {
         for update in packet.ipv4_update.iter() {
@@ -10705,6 +10723,26 @@ fn community_suppresses_advertisement(attr: &BgpAttr, peer_type: PeerType) -> bo
             || com.contains(&CommunityValue::NO_EXPORT_SUBCONFED.value()))
 }
 
+/// RFC 9774 §3 ingress: treat-as-withdraw when the AS_PATH carries
+/// AS_SET or AS_CONFED_SET and the global knob is enabled.
+fn as_sets_withdraw_treat_as_withdraw(as_sets_withdraw: bool, attr: Option<&BgpAttr>) -> bool {
+    as_sets_withdraw
+        && attr
+            .and_then(|a| a.aspath.as_ref())
+            .is_some_and(|p| p.contains_as_set_or_confed_set())
+}
+
+/// RFC 9774 §3 egress: when enabled, routes whose post-transform AS_PATH
+/// still carries AS_SET or AS_CONFED_SET must not be advertised. Call
+/// after `ebgp_egress_aspath`.
+fn as_sets_withdraw_suppresses_egress(as_sets_withdraw: bool, attrs: &BgpAttr) -> bool {
+    as_sets_withdraw
+        && attrs
+            .aspath
+            .as_ref()
+            .is_some_and(|p| p.contains_as_set_or_confed_set())
+}
+
 /// RFC 9494 §4.3/§4.4 ingest side: a route received with the
 /// LLGR_STALE community is depreferenced exactly like a route we
 /// stale-marked ourselves — the ingest paths OR this into the
@@ -10813,6 +10851,9 @@ pub fn route_update_ipv4(
 
     // 2. AS_PATH
     ebgp_egress_aspath(&ctx.egress_as, &mut attrs);
+    if as_sets_withdraw_suppresses_egress(ctx.as_sets_withdraw, &attrs) {
+        return None;
+    }
 
     // 3. NEXT_HOP
     //
@@ -10976,6 +11017,9 @@ pub fn route_update_ipv6(
 
     // AS_PATH prepend for eBGP.
     ebgp_egress_aspath(&peer.egress_as(), &mut attrs);
+    if as_sets_withdraw_suppresses_egress(bgp.as_sets_withdraw, &attrs) {
+        return None;
+    }
 
     // NEXT_HOP: next-hop-self for eBGP / locally-originated routes.
     // RFC 2545 §2 requires the MP_REACH next-hop be one of OUR IPv6
@@ -11376,6 +11420,9 @@ fn route_update_labelv4(
     let mut attrs = (*rib.attr).clone();
 
     ebgp_egress_aspath(&peer.egress_as(), &mut attrs);
+    if as_sets_withdraw_suppresses_egress(bgp.as_sets_withdraw, &attrs) {
+        return None;
+    }
 
     // Next-hop-self for eBGP / locally-originated, or when the neighbor
     // has `afi-safi label-v4 next-hop-self` (Inter-AS Option C ASBR → PE);
@@ -11455,6 +11502,9 @@ fn route_update_labelv6(
     let mut attrs = (*rib.attr).clone();
 
     ebgp_egress_aspath(&peer.egress_as(), &mut attrs);
+    if as_sets_withdraw_suppresses_egress(bgp.as_sets_withdraw, &attrs) {
+        return None;
+    }
 
     let needs_self =
         peer.is_ebgp() || rib.is_originated() || peer.next_hop_self(Afi::Ip6, Safi::MplsLabel);
@@ -12683,7 +12733,7 @@ pub(super) fn route_sync_v4_chunk(peer: &mut Peer, bgp: &mut BgpTop, chunk: usiz
             if llgr_blocks_advertisement(rib.stale, &peer.cap_recv, Afi::Ip, Safi::Unicast) {
                 continue;
             }
-            let ctx = peer.sync_ctx(*bgp.router_id);
+            let ctx = peer.sync_ctx(*bgp.router_id, bgp.as_sets_withdraw);
             let Some((nlri, attr)) = route_update_ipv4(&ctx, &prefix, &rib, add_path) else {
                 continue;
             };
@@ -12708,7 +12758,11 @@ pub(super) fn route_sync_v4_chunk(peer: &mut Peer, bgp: &mut BgpTop, chunk: usiz
         .is_enhe_v4_negotiated()
         .then(|| super::update_group::compose_enhe_next_hop(peer, bgp.interface_addrs))
         .flatten();
-    super::update_group::send_ipv4_direct(&peer.sync_ctx(*bgp.router_id), entries, enhe_v6);
+    super::update_group::send_ipv4_direct(
+        &peer.sync_ctx(*bgp.router_id, bgp.as_sets_withdraw),
+        entries,
+        enhe_v6,
+    );
 
     if done {
         send_eor_ipv4_unicast(peer);
@@ -12749,7 +12803,7 @@ pub fn route_sync_ipv4(peer: &mut Peer, bgp: &mut BgpTop) {
         if llgr_blocks_advertisement(rib.stale, &peer.cap_recv, Afi::Ip, Safi::Unicast) {
             continue;
         }
-        let ctx = peer.sync_ctx(*bgp.router_id);
+        let ctx = peer.sync_ctx(*bgp.router_id, bgp.as_sets_withdraw);
         let Some((nlri, attr)) = route_update_ipv4(&ctx, &prefix, &rib, add_path) else {
             continue;
         };
@@ -12785,7 +12839,11 @@ pub fn route_sync_ipv4(peer: &mut Peer, bgp: &mut BgpTop) {
         .is_enhe_v4_negotiated()
         .then(|| super::update_group::compose_enhe_next_hop(peer, bgp.interface_addrs))
         .flatten();
-    super::update_group::send_ipv4_direct(&peer.sync_ctx(*bgp.router_id), entries, enhe_v6);
+    super::update_group::send_ipv4_direct(
+        &peer.sync_ctx(*bgp.router_id, bgp.as_sets_withdraw),
+        entries,
+        enhe_v6,
+    );
 
     // Send End-of-RIB marker for IPv4 Unicast
     send_eor_ipv4_unicast(peer);
@@ -12897,7 +12955,7 @@ pub fn route_sync_vpnv4(peer: &mut Peer, bgp: &mut BgpTop) {
             if llgr_blocks_advertisement(rib.stale, &peer.cap_recv, Afi::Ip, Safi::MplsVpn) {
                 continue;
             }
-            let ctx = peer.sync_ctx(*bgp.router_id);
+            let ctx = peer.sync_ctx(*bgp.router_id, bgp.as_sets_withdraw);
             let Some((nlri, attr)) = route_update_ipv4(&ctx, &prefix, &rib, add_path) else {
                 continue;
             };
@@ -13681,6 +13739,7 @@ impl Bgp {
             vrf_transport_v4: None,
             vrf_transport_v6: None,
             central_label_alloc: None,
+            as_sets_withdraw: self.as_sets_withdraw,
         };
         route_advertise_mup_to_peers(rd, prefix, &selected, &mut bgp_ref, &mut self.peers);
     }
@@ -13837,6 +13896,7 @@ impl Bgp {
             vrf_transport_v4: None,
             vrf_transport_v6: None,
             central_label_alloc: None,
+            as_sets_withdraw: self.as_sets_withdraw,
         };
 
         // An originated route lacks a v4 NEXT_HOP attribute, so when
@@ -13895,6 +13955,7 @@ impl Bgp {
             vrf_transport_v4: None,
             vrf_transport_v6: None,
             central_label_alloc: None,
+            as_sets_withdraw: self.as_sets_withdraw,
         };
 
         let selected = bgp_ref.shard.select_best_path(prefix);
@@ -13962,6 +14023,7 @@ impl Bgp {
             vrf_transport_v4: None,
             vrf_transport_v6: None,
             central_label_alloc: None,
+            as_sets_withdraw: self.as_sets_withdraw,
         };
 
         fib_install_v6(&bgp_ref, prefix, &selected);
@@ -13995,6 +14057,7 @@ impl Bgp {
             vrf_transport_v4: None,
             vrf_transport_v6: None,
             central_label_alloc: None,
+            as_sets_withdraw: self.as_sets_withdraw,
         };
 
         let selected = bgp_ref.shard.select_best_path_v6(prefix);
@@ -14047,6 +14110,7 @@ impl Bgp {
             vrf_transport_v4: None,
             vrf_transport_v6: None,
             central_label_alloc: None,
+            as_sets_withdraw: self.as_sets_withdraw,
         };
 
         // Reconcile the FIB: a self-originated winner withdraws any BGP
@@ -14085,6 +14149,7 @@ impl Bgp {
             vrf_transport_v4: None,
             vrf_transport_v6: None,
             central_label_alloc: None,
+            as_sets_withdraw: self.as_sets_withdraw,
         };
 
         let selected = bgp_ref.shard.select_best_path_v4lu(prefix);
@@ -14142,6 +14207,7 @@ impl Bgp {
             vrf_transport_v4: None,
             vrf_transport_v6: None,
             central_label_alloc: None,
+            as_sets_withdraw: self.as_sets_withdraw,
         };
 
         fib_install_labelv6(
@@ -14178,6 +14244,7 @@ impl Bgp {
             vrf_transport_v4: None,
             vrf_transport_v6: None,
             central_label_alloc: None,
+            as_sets_withdraw: self.as_sets_withdraw,
         };
 
         let selected = bgp_ref.shard.select_best_path_v6lu(prefix);
@@ -14267,6 +14334,7 @@ impl Bgp {
             vrf_transport_v4: None,
             vrf_transport_v6: None,
             central_label_alloc: None,
+            as_sets_withdraw: self.as_sets_withdraw,
         };
 
         // Same logic as `route_add`: the redistributed BGP route has
@@ -14311,6 +14379,7 @@ impl Bgp {
             vrf_transport_v4: None,
             vrf_transport_v6: None,
             central_label_alloc: None,
+            as_sets_withdraw: self.as_sets_withdraw,
         };
 
         let selected = bgp_ref.shard.select_best_path(prefix);
@@ -14387,6 +14456,7 @@ impl Bgp {
             vrf_transport_v4: None,
             vrf_transport_v6: None,
             central_label_alloc: None,
+            as_sets_withdraw: self.as_sets_withdraw,
         };
 
         fib_install_v6(&bgp_ref, prefix, &selected);
@@ -14428,6 +14498,7 @@ impl Bgp {
             vrf_transport_v4: None,
             vrf_transport_v6: None,
             central_label_alloc: None,
+            as_sets_withdraw: self.as_sets_withdraw,
         };
 
         let selected = bgp_ref.shard.select_best_path_v6(prefix);
@@ -14487,6 +14558,7 @@ impl Bgp {
             vrf_transport_v4: None,
             vrf_transport_v6: None,
             central_label_alloc: None,
+            as_sets_withdraw: self.as_sets_withdraw,
         };
 
         // Reconcile the FIB: a self-originated winner withdraws any BGP
@@ -14526,6 +14598,7 @@ impl Bgp {
             vrf_transport_v4: None,
             vrf_transport_v6: None,
             central_label_alloc: None,
+            as_sets_withdraw: self.as_sets_withdraw,
         };
 
         let selected = bgp_ref.shard.select_best_path_v4lu(prefix);
@@ -14587,6 +14660,7 @@ impl Bgp {
             vrf_transport_v4: None,
             vrf_transport_v6: None,
             central_label_alloc: None,
+            as_sets_withdraw: self.as_sets_withdraw,
         };
 
         fib_install_labelv6(
@@ -14624,6 +14698,7 @@ impl Bgp {
             vrf_transport_v4: None,
             vrf_transport_v6: None,
             central_label_alloc: None,
+            as_sets_withdraw: self.as_sets_withdraw,
         };
 
         let selected = bgp_ref.shard.select_best_path_v6lu(prefix);
@@ -14786,6 +14861,7 @@ impl Bgp {
             vrf_transport_v4: None,
             vrf_transport_v6: None,
             central_label_alloc: None,
+            as_sets_withdraw: self.as_sets_withdraw,
         };
 
         if !selected.is_empty() {
@@ -14906,6 +14982,7 @@ impl Bgp {
             vrf_transport_v4: None,
             vrf_transport_v6: None,
             central_label_alloc: None,
+            as_sets_withdraw: self.as_sets_withdraw,
         };
 
         if !selected.is_empty() {
@@ -15050,6 +15127,7 @@ impl Bgp {
             vrf_transport_v4: None,
             vrf_transport_v6: None,
             central_label_alloc: None,
+            as_sets_withdraw: self.as_sets_withdraw,
         };
 
         if !selected.is_empty() {
@@ -15162,6 +15240,7 @@ impl Bgp {
             vrf_transport_v4: None,
             vrf_transport_v6: None,
             central_label_alloc: None,
+            as_sets_withdraw: self.as_sets_withdraw,
         };
 
         if !selected.is_empty() {
@@ -15744,6 +15823,7 @@ impl Bgp {
             vrf_transport_v4: None,
             vrf_transport_v6: None,
             central_label_alloc: None,
+            as_sets_withdraw: self.as_sets_withdraw,
         };
 
         if !selected.is_empty() {
@@ -15869,6 +15949,7 @@ impl Bgp {
             vrf_transport_v4: None,
             vrf_transport_v6: None,
             central_label_alloc: None,
+            as_sets_withdraw: self.as_sets_withdraw,
         };
         if !selected.is_empty() {
             route_advertise_evpn_to_peers(rd, prefix, &selected, &mut bgp_ref, &mut self.peers);
@@ -20259,5 +20340,91 @@ mod llgr_tests {
             Afi::Ip,
             Safi::MplsVpn
         ));
+    }
+}
+
+#[cfg(test)]
+mod as_sets_withdraw_tests {
+    use std::str::FromStr;
+
+    use bgp_packet::{As4Path, BgpAttr};
+
+    use super::{
+        SyncCtx, as_sets_withdraw_suppresses_egress, as_sets_withdraw_treat_as_withdraw,
+        route_update_ipv4,
+    };
+    use crate::bgp::peer::PeerType;
+    use crate::bgp::route::{BgpRib, BgpRibType, EgressAs};
+    use std::net::Ipv4Addr;
+    use std::sync::Arc;
+
+    fn attr_with_path(path: &str) -> BgpAttr {
+        BgpAttr {
+            aspath: Some(As4Path::from_str(path).unwrap()),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn ingress_treat_as_withdraw_when_enabled_and_path_has_as_set() {
+        let attr = attr_with_path("65001 {65010 65011}");
+        assert!(as_sets_withdraw_treat_as_withdraw(true, Some(&attr)));
+        assert!(!as_sets_withdraw_treat_as_withdraw(false, Some(&attr)));
+        assert!(!as_sets_withdraw_treat_as_withdraw(
+            true,
+            Some(&attr_with_path("65001 65002"))
+        ));
+    }
+
+    #[test]
+    fn egress_suppresses_when_enabled_and_path_has_as_set() {
+        let attr = attr_with_path("65001 {65010 65011}");
+        assert!(as_sets_withdraw_suppresses_egress(true, &attr));
+        assert!(!as_sets_withdraw_suppresses_egress(false, &attr));
+    }
+
+    #[test]
+    fn route_update_ipv4_returns_none_when_as_set_present() {
+        let ctx = SyncCtx {
+            ident: 1,
+            peer_type: PeerType::EBGP,
+            reflector_client: false,
+            local_addr_v4: None,
+            router_id: Ipv4Addr::new(1, 1, 1, 1),
+            remote_id: Ipv4Addr::new(2, 2, 2, 2),
+            remote_address: "10.0.0.2".parse().unwrap(),
+            vpnv4_next_hop_self: false,
+            egress_as: EgressAs {
+                is_ebgp: true,
+                local_as: 65000,
+                remote_as: 65001,
+                as_override: false,
+                remove_private_as: None,
+                local_as_substitute: None,
+                local_as_replace: false,
+            },
+            out_policy: Arc::new(crate::bgp::policy::OutPolicy::default()),
+            packet_tx: None,
+            egress_depth: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+            extended_message: false,
+            attach_unknown_attr: None,
+            as_sets_withdraw: true,
+        };
+        let rib = BgpRib::new(
+            2,
+            Ipv4Addr::new(3, 3, 3, 3),
+            BgpRibType::EBGP,
+            0,
+            0,
+            &attr_with_path("65002 {65010}"),
+            None,
+            None,
+            false,
+        );
+        let prefix = "10.0.0.0/24".parse().unwrap();
+        assert!(
+            route_update_ipv4(&ctx, &prefix, &rib, false).is_none(),
+            "RFC 9774 must suppress egress of AS_SET paths",
+        );
     }
 }

@@ -1454,7 +1454,7 @@ impl Peer {
     /// next-hop fallback and the cluster-id. Cheap (all-`Copy`); the
     /// egress build (`route_update_ipv4`) takes this instead of `&Peer`
     /// so the same build can run in a shard worker that has no `Peer`.
-    pub fn sync_ctx(&self, router_id: Ipv4Addr) -> super::route::SyncCtx {
+    pub fn sync_ctx(&self, router_id: Ipv4Addr, as_sets_withdraw: bool) -> super::route::SyncCtx {
         super::route::SyncCtx {
             ident: self.ident,
             peer_type: self.peer_type,
@@ -1473,6 +1473,7 @@ impl Peer {
             egress_depth: self.egress_depth.clone(),
             extended_message: self.opt.extended_message,
             attach_unknown_attr: self.config.attach_unknown_attr.clone(),
+            as_sets_withdraw,
         }
     }
 
@@ -1665,6 +1666,9 @@ pub struct BgpTop<'a> {
     /// locally-originated routes with its End.DT6 Prefix-SID + locator
     /// next-hop. `None` on per-VRF tasks and whenever origination is off.
     pub srv6_ipv6_export: Option<&'a super::inst::Srv6Ipv6Export>,
+    /// RFC 9774 global toggle (`router bgp as-sets-withdraw`). Borrowed
+    /// from the owning [`super::inst::Bgp`].
+    pub as_sets_withdraw: bool,
 }
 
 /// Resolve a connection identity against the peer's current slots.
@@ -1828,7 +1832,7 @@ pub fn fsm(
             // A2 ⑥ (gate-on): spawn the per-peer egress task. For now it
             // is idle (lifecycle only); routing the v4 egress to it comes later.
             if super::peer_egress::peer_egress_task_enabled() {
-                let ctx = peer.sync_ctx(*bgp_ref.router_id);
+                let ctx = peer.sync_ctx(*bgp_ref.router_id, bgp_ref.as_sets_withdraw);
                 let add_path = peer.opt.is_add_path_send(Afi::Ip, Safi::Unicast);
                 peer.pet = Some(super::peer_egress::PeerEgressTask::spawn(ctx, add_path));
             }
@@ -1865,7 +1869,13 @@ pub fn fsm(
         if prev_state.is_established() && !now_established {
             super::update_group::detach(bgp_ref.update_groups, peer_map, id);
         } else if !prev_state.is_established() && now_established {
-            super::update_group::attach(bgp_ref.update_groups, peer_map, id, *bgp_ref.router_id);
+            super::update_group::attach(
+                bgp_ref.update_groups,
+                peer_map,
+                id,
+                *bgp_ref.router_id,
+                bgp_ref.as_sets_withdraw,
+            );
         }
         peer_map.debug_verify_membership();
     }
@@ -3243,6 +3253,7 @@ pub fn apply_soft_in_peer(bgp: &mut Bgp, peer_idx: usize) {
             vrf_transport_v4: None,
             vrf_transport_v6: None,
             central_label_alloc: None,
+            as_sets_withdraw: bgp.as_sets_withdraw,
         };
         super::route::route_soft_in_peer(
             peer_idx,
@@ -3288,6 +3299,7 @@ pub fn apply_soft_out_peer(bgp: &mut Bgp, peer_idx: usize) {
         vrf_transport_v4: None,
         vrf_transport_v6: None,
         central_label_alloc: None,
+        as_sets_withdraw: bgp.as_sets_withdraw,
     };
     super::route::route_soft_out_peer(peer_idx, &mut bgp_ref, &mut bgp.peers);
 }

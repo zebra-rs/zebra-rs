@@ -3037,6 +3037,47 @@ mod yang_load_tests {
         }
     }
 
+    /// `router bgp as-sets-withdraw <true|false>` — RFC 9774 global toggle
+    /// (`zebra-bgp-as-sets-withdraw.yang`). Default-on; `false` opts out
+    /// during a transition period. Pinned because vtyctl apply is
+    /// garbage-tolerant — an unwired grammar silently no-ops.
+    #[test]
+    fn bgp_as_sets_withdraw_grammar() {
+        use crate::config::ExecCode;
+        use crate::config::parse::{State, parse};
+        use libyang::to_entry;
+
+        let mut yang = YangStore::new();
+        yang.add_path(concat!(env!("CARGO_MANIFEST_DIR"), "/yang"));
+        yang.read_with_resolve("configure")
+            .expect("configure mode loads");
+        yang.identity_resolve();
+        let module = yang
+            .find_module("configure")
+            .expect("configure module present");
+        let entry = to_entry(&yang, module);
+
+        for cmd in [
+            "set router bgp as-sets-withdraw true",
+            "set router bgp as-sets-withdraw false",
+        ] {
+            let (code, _comps, _state) = parse(cmd, entry.clone(), None, State::new());
+            assert_eq!(code, ExecCode::Success, "`{cmd}` must be a valid path",);
+        }
+
+        let (code, _comps, _state) = parse(
+            "set router bgp as-sets-withdraw",
+            entry.clone(),
+            None,
+            State::new(),
+        );
+        assert_ne!(
+            code,
+            ExecCode::Success,
+            "boolean leaf — the value-less spelling must not parse",
+        );
+    }
+
     /// `neighbor X ip-transparent` (zebra-bgp-transport.yang) must be a
     /// settable path on the neighbor and on the neighbor-group (the
     /// group reuses the transport grouping via `uses`). Guards against

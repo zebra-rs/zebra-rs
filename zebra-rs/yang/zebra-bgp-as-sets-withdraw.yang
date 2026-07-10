@@ -1,0 +1,91 @@
+module zebra-bgp-as-sets-withdraw {
+  yang-version "1";
+
+  namespace "urn:ietf:params:xml:ns:yang:zebra-bgp-as-sets-withdraw";
+  prefix "zbasw";
+
+  import ietf-bgp {
+    prefix bgp;
+  }
+
+  import config {
+    prefix config;
+  }
+
+  import configure {
+    prefix configure;
+  }
+
+  import extension {
+    prefix ext;
+  }
+
+  organization
+    "zebra-rs";
+
+  contact
+    "https://github.com/zebra-rs";
+
+  description
+    "Global BGP knob for RFC 9774 deprecation of AS_SET and
+     AS_CONFED_SET in the AS_PATH.
+
+     Unless opted out, a BGP speaker must not originate UPDATEs
+     containing AS_SET or AS_CONFED_SET path segments and must apply
+     treat-as-withdraw (RFC 7606) when such segments appear in a
+     received AS_PATH or AS4_PATH.
+
+       router bgp {
+         as-sets-withdraw false;   // transition: permit legacy AS_SETs
+       }
+
+     The knob is on by default (`as-sets-withdraw true`). Setting it
+     to false opts out during a transition period. Equivalent to FRR
+     `no bgp reject-as-sets`; the enabled default matches FRR
+     `bgp reject-as-sets` (on by default since FRR 10.5).";
+
+  revision 2026-07-08 {
+    description "Initial revision: global as-sets-withdraw toggle.";
+    reference
+      "RFC 9774: Deprecation of AS_SET and AS_CONFED_SET in BGP.
+       RFC 7606: Revised Error Handling for BGP UPDATE Messages.";
+  }
+
+  grouping bgp-as-sets-withdraw-extension {
+    description
+      "RFC 9774 global toggle on the BGP top-level.";
+
+    leaf as-sets-withdraw {
+      ext:help "Treat AS_SET/AS_CONFED_SET per RFC 9774 (withdraw on receive)";
+      type boolean;
+      default "true";
+      description
+        "When true (default), enforce RFC 9774: received UPDATEs whose
+         AS_PATH or AS4_PATH contain AS_SET or AS_CONFED_SET segments
+         are handled with treat-as-withdraw (RFC 7606), and such
+         segments are not originated on egress.
+
+         When false, opt out during a transition period and permit
+         legacy AS_SET / AS_CONFED_SET handling. Equivalent to FRR
+         `no bgp reject-as-sets`.";
+    }
+  }
+
+  /* =========================================================
+   * Augments into the zebra-rs configure tree
+   * ========================================================= */
+
+  augment "/configure:set/config:router/bgp:bgp" {
+    description
+      "Attach as-sets-withdraw to the BGP top-level in the
+       candidate-set subtree.";
+    uses bgp-as-sets-withdraw-extension;
+  }
+
+  augment "/configure:delete/config:router/bgp:bgp" {
+    description
+      "Same attachment for the delete subtree so
+       `delete router bgp as-sets-withdraw` is path-valid.";
+    uses bgp-as-sets-withdraw-extension;
+  }
+}
