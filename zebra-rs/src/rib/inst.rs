@@ -4192,8 +4192,16 @@ impl Rib {
 /// carrying `seg6local_action` so the show callback can render
 /// `seg6local <action> [nh6 <addr>]`.
 fn sid_rib_entry(sid: &Sid) -> RibEntry {
-    let mut entry = RibEntry::new(RibType::Isis);
-    entry.distance = 115;
+    // Attribute the entry to the SID's owning protocol so the show
+    // table renders the right code letter and distance (an OSPFv3 SID
+    // used to show as `i ... [115/0]`).
+    let rtype = sid.owner.rib_type();
+    let mut entry = RibEntry::new(rtype);
+    entry.distance = match rtype {
+        RibType::Ospf => 110,
+        RibType::Bgp => 200,
+        _ => 115,
+    };
     entry.metric = 0;
     entry.set_valid(true);
     entry.set_selected(true);
