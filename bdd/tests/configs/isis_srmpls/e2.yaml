@@ -1,0 +1,11 @@
+interface:
+- if-name: e2-d
+  ipv4:
+    address: 172.168.1.2/24
+router:
+  static:
+    ipv4:
+      route:
+      - prefix: 0.0.0.0/0
+        nexthop:
+        - address: 172.168.1.1
