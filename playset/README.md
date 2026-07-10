@@ -39,7 +39,7 @@ gitignored.
 
 ## SRv6 & SR-MPLS with TI-LFA fast-reroute
 
-Four labs, one topology — the RFC 9855 example network with two edge hosts
+Five labs, one topology — the RFC 9855 example network with two edge hosts
 attached — covering the IGP x data-plane matrix. Every walkthrough follows
 the same arc: examine SR routing at the source, enable
 `fast-reroute ti-lfa` at runtime, force the repair into use with
@@ -48,8 +48,9 @@ protected edge-to-edge traffic.
 
 | playset | IGP | data plane | edge service |
 |:--|:--|:--|:--|
-| [isis-srmpls](isis-srmpls/README.md) | IS-IS | SR-MPLS (SRGB 16000 / SRLB 15000) | recursive static routes inheriting the SR label stack |
-| [ospfv2-srmpls](ospfv2-srmpls/README.md) | OSPFv2 (area 0) | SR-MPLS (RFC 8665 extended LSAs) | recursive static routes inheriting the SR label stack |
+| [isis-srmpls](isis-srmpls/README.md) | IS-IS | SR-MPLS (SRGB 16000 / SRLB 15000) | recursive IPv4 statics inheriting the SR label stack |
+| [ospfv2-srmpls](ospfv2-srmpls/README.md) | OSPFv2 (area 0) | SR-MPLS (RFC 8665 extended LSAs) | recursive IPv4 statics inheriting the SR label stack |
+| [ospfv3-srmpls](ospfv3-srmpls/README.md) | OSPFv3 (area 0) | SR-MPLS over IPv6 (RFC 8666, NP-flag / no PHP) | recursive IPv6 statics inheriting the SR label stack |
 | [isis-srv6-classic](isis-srv6-classic/README.md) | IS-IS | SRv6, classic RFC 8986 SIDs (RFC 9352) | RFC 9252 iBGP IPv6-unicast with End.DT6 service SIDs |
 | [ospfv3-srv6-classic](ospfv3-srv6-classic/README.md) | OSPFv3 (area 0) | SRv6, classic RFC 8986 SIDs (RFC 9513) | RFC 9252 iBGP IPv6-unicast with End.DT6 service SIDs |
 
