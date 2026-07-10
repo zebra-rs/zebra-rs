@@ -62,6 +62,14 @@ struct Cli {
     disable: bool,
 
     #[arg(
+        short = 'H',
+        long = "hostname",
+        help = "Print the daemon's configured `system hostname` (empty when unset); \
+                used once at vty startup to seed CLI_HOSTNAME for the prompt"
+    )]
+    hostname: bool,
+
+    #[arg(
         long,
         help = "Deprecated and ignored; the daemon always authenticates enable against root."
     )]
@@ -197,6 +205,24 @@ async fn redirect(cli: Cli, port: u32) -> Result<()> {
     Ok(())
 }
 
+/// Print the daemon's configured `system hostname` (empty when
+/// unset). Invoked as `vtyhelper -H` by the vty shell — once at
+/// startup to seed `CLI_HOSTNAME`, and after every executed command
+/// (`_cli_hostname_refresh`) so the prompt tracks `set system
+/// hostname` / `delete system hostname` as soon as they commit.
+async fn hostname_fetch(cli: Cli) -> Result<()> {
+    let channel = endpoint::connect(&endpoint_uri(&cli.base, cli.port)).await?;
+    let mut client = ExecClient::new(channel);
+    let request = tonic::Request::new(exec_request(
+        ExecType::Exec as i32,
+        &String::from("exec"),
+        &Vec::new(),
+    ));
+    let reply = client.do_exec(request).await?.into_inner();
+    println!("{}", reply.hostname);
+    Ok(())
+}
+
 async fn exec(cli: Cli) -> Result<()> {
     let channel = endpoint::connect(&endpoint_uri(&cli.base, cli.port)).await?;
     let mut client = ExecClient::new(channel);
@@ -308,6 +334,8 @@ async fn disable(cli: Cli) -> i32 {
 async fn run(cli: Cli) -> Result<()> {
     if cli.logout {
         logout(cli).await?;
+    } else if cli.hostname {
+        hostname_fetch(cli).await?;
     } else if cli.show {
         show(cli, None, Vec::new()).await?;
     } else if cli.completion || cli.trailing || cli.first {
