@@ -235,10 +235,17 @@ submodule ietf-bgp-common {
     // grouping and has been dropped.
     leaf description {
       ext:help "Free-form neighbor description";
-      type string;
+      // The pattern makes the value consume the rest of the command
+      // line, whitespace included (`match_regexp` in config/parse.rs)
+      // — FRR's `neighbor X description LINE`. A pattern-less string
+      // would stop at the first space.
+      type string {
+        pattern '.*';
+      }
       description
         "Free-form description string echoed in `show bgp neighbors`
-         output.";
+         output. May contain spaces: the value is the rest of the
+         line.";
     }
     container timers {
       ext:help "Per-neighbor BGP timers";
