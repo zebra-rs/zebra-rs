@@ -1,0 +1,38 @@
+# P1 — provider core transit LSR of AS 65501 (runs no BGP, knows no
+# VPN). Pure IS-IS L2 + SR-MPLS; swaps / PHPs the transport label
+# between PE1 (sid 11 -> 16011) and ASBR1 (sid 13 -> 16013).
+interface:
+- if-name: lo
+  ipv4:
+    address: 1.1.1.2/32
+- if-name: p1-pe1
+  ipv4:
+    address: 10.1.0.2/30
+- if-name: p1-asbr1
+  ipv4:
+    address: 10.1.0.5/30
+system:
+  hostname: p1
+router:
+  isis:
+    net: 49.0001.0000.0000.0002.00
+    hostname: p1
+    is-type: level-2-only
+    segment-routing: mpls
+    te-router-id: 1.1.1.2
+    interface:
+    - if-name: lo
+      ipv4:
+        enabled: true
+        prefix-sid:
+          index: 12
+    - if-name: p1-pe1
+      network-type: point-to-point
+      metric: 10
+      ipv4:
+        enabled: true
+    - if-name: p1-asbr1
+      network-type: point-to-point
+      metric: 10
+      ipv4:
+        enabled: true

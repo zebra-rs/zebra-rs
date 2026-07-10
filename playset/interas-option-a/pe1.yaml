@@ -1,0 +1,88 @@
+# PE1 — provider edge, AS 65501. IS-IS L2 + SR-MPLS transport to ASBR1
+# (loopback Prefix-SID index 11 -> label 16011). Two customer VRFs with
+# their PE-CE eBGP sessions; customer routes export to VPNv4 (RD
+# 65501:1/65501:2, RT 65501:100/65501:200) and ride the iBGP VPNv4
+# session to ASBR1 over the loopbacks.
+vrf:
+- name: cust1
+  ipv4:
+    route-target:
+      import:
+      - 65501:100
+      export:
+      - 65501:100
+- name: cust2
+  ipv4:
+    route-target:
+      import:
+      - 65501:200
+      export:
+      - 65501:200
+interface:
+- if-name: lo
+  ipv4:
+    address: 1.1.1.1/32
+- if-name: pe1-ce1
+  vrf: cust1
+  ipv4:
+    address: 10.11.0.2/30
+- if-name: pe1-ce2
+  vrf: cust2
+  ipv4:
+    address: 10.12.0.2/30
+- if-name: pe1-p1
+  ipv4:
+    address: 10.1.0.1/30
+system:
+  hostname: pe1
+router:
+  isis:
+    net: 49.0001.0000.0000.0001.00
+    hostname: pe1
+    is-type: level-2-only
+    segment-routing: mpls
+    te-router-id: 1.1.1.1
+    interface:
+    - if-name: lo
+      ipv4:
+        enabled: true
+        prefix-sid:
+          index: 11
+    - if-name: pe1-p1
+      network-type: point-to-point
+      metric: 10
+      ipv4:
+        enabled: true
+  bgp:
+    global:
+      as: 65501
+      router-id: 1.1.1.1
+    timer:
+      adv-interval:
+        ebgp: 3
+    neighbor:
+    - remote-address: 1.1.1.3
+      remote-as: 65501
+      timers: {connect-retry-time: 3}
+      update-source: 1.1.1.1
+      enabled: true
+      afi-safi:
+      - name: vpnv4
+        enabled: true
+    vrf:
+    - name: cust1
+      rd: 65501:1
+      neighbor:
+      - remote-address: 10.11.0.1
+        remote-as: 65511
+        afi-safi:
+        - name: ipv4
+          enabled: true
+    - name: cust2
+      rd: 65501:2
+      neighbor:
+      - remote-address: 10.12.0.1
+        remote-as: 65512
+        afi-safi:
+        - name: ipv4
+          enabled: true

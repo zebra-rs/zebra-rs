@@ -93,15 +93,16 @@ The four EVPN labs reuse the same namespace names (`vtep1`..`vtep3`,
 `h1`..`h4`), so bring up only one at a time — `up.sh` sweeps leftovers of
 the same names first.
 
-## BGP Inter-AS L3VPN (templates)
+## BGP Inter-AS L3VPN
 
-Topology templates for the Inter-AS VPN options; walkthroughs to follow.
+Two providers, one VPN — the RFC 4364 §10 options for handing L3VPN
+routes across an AS boundary.
 
 | playset | scheme |
 |:--|:--|
-| [interas-option-a](interas-option-a/README.md) | Option A — back-to-back VRFs |
-| [interas-option-b](interas-option-b/README.md) | Option B — eBGP VPNv4 between ASBRs |
-| [interas-option-c](interas-option-c/README.md) | Option C — multihop eBGP VPNv4 between route reflectors, labeled transport between ASes |
+| [interas-option-a](interas-option-a/README.md) | Option A — back-to-back VRFs: a dedicated link and a plain eBGP IPv4 session per customer between the ASBRs, MPLS never crossing the boundary. Two ASes with independent RD/RT spaces, two customers with deliberately overlapping addressing, and a three-point capture of one ping riding MPLS → plain IP → MPLS |
+| [interas-option-b](interas-option-b/README.md) | Option B — eBGP VPNv4 between ASBRs (topology template; walkthrough to follow) |
+| [interas-option-c](interas-option-c/README.md) | Option C — multihop eBGP VPNv4 between route reflectors, labeled transport between ASes (topology template; walkthrough to follow) |
 
 ## Directory layout
 
