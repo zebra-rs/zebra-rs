@@ -1,0 +1,13 @@
+interface:
+- if-name: e1-s
+  ipv6:
+    address: 2001:db8:100::100/64
+system:
+  hostname: e1
+router:
+  static:
+    ipv6:
+      route:
+      - prefix: ::/0
+        nexthop:
+        - address: 2001:db8:100::1
