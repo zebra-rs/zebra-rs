@@ -1,0 +1,30 @@
+interface:
+- if-name: vtep2-vtep1
+  ipv6:
+    address: 2001:db8:ff::2/64
+- if-name: vtep2-h2
+  bridge: br10
+system:
+  hostname: vtep2
+bridge:
+- name: br10
+vxlan:
+- name: vxlan10
+  vni: 10
+  local-address: 2001:db8:ff::2
+  bridge: br10
+router:
+  bgp:
+    global:
+      as: 65001
+      router-id: 10.0.0.2
+    afi-safi:
+    - name: evpn
+      advertise-all-vni: true
+    neighbor:
+    - remote-address: 2001:db8:ff::1
+      enabled: true
+      remote-as: 65001
+      afi-safi:
+      - name: evpn
+        enabled: true
