@@ -199,6 +199,13 @@ Feature: OSPFv2 TI-LFA fast-reroute over SR-MPLS
     # kernel entry, out the repair egress s-n2.
     Then kernel route "10.0.0.8" in namespace "s" should eventually contain "encap mpls"
     And kernel route "10.0.0.8" in namespace "s" should eventually contain "dev s-n2 proto ospf metric 2"
+    # The repair stack ends with d's own node-SID label (16800), so
+    # traffic tunneled through the route — a recursive static/BGP
+    # nexthop resolved onto it — label-switches all the way to d
+    # instead of being IP-routed (and possibly dropped) at the repair
+    # release point. "/16800 via" pins 16800 to the stack tail: the
+    # demoted plain-primary's "encap mpls 16800 via" has no slash.
+    And kernel route "10.0.0.8" in namespace "s" should eventually contain "/16800 via"
     # End-to-end over the repair: dies if any label hop on the repair
     # path fails to swap/pop/forward.
     And ping from "s" to "10.0.0.8" should succeed
