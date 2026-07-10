@@ -802,6 +802,20 @@ fn config_pic_retention(bgp: &mut Bgp, mut args: Args, op: ConfigOp) -> Option<(
     Some(())
 }
 
+/// `set router bgp neighbor X description <TEXT>` — free-form operator
+/// note stored on the peer and echoed under the header line of
+/// `show bgp neighbors`.
+fn config_peer_description(bgp: &mut Bgp, mut args: Args, op: ConfigOp) -> Option<()> {
+    let addr = args.addr()?;
+    let peer = bgp.peers.get_mut(&addr)?;
+    match op {
+        ConfigOp::Set => peer.config.description = Some(args.string()?),
+        ConfigOp::Delete => peer.config.description = None,
+        _ => {}
+    }
+    Some(())
+}
+
 /// `set router bgp neighbor X flowspec validation true|false` — per
 /// RFC 9117, toggle whether flow specs received from this neighbor are
 /// validated against the unicast RIB before re-advertising. Defaults to
@@ -4168,6 +4182,9 @@ impl Bgp {
         // back-reference and resolves the inheritable attributes
         // (remote-as, afi-safi).
         self.callback_peer("/neighbor-group", config_peer_neighbor_group);
+        // Free-form operator note; storage-only, shown by
+        // `show bgp neighbors`.
+        self.callback_peer("/description", config_peer_description);
         // `set router bgp neighbor-group <name> [...]`.
         self.callback_add(
             "/router/bgp/neighbor-group",
@@ -8166,6 +8183,102 @@ mod afi_safi_next_hop_self_tests {
                 .unwrap()
                 .next_hop_self(Afi::Ip, Safi::MplsLabel),
             "delete clears the flag",
+        );
+    }
+}
+
+#[cfg(test)]
+mod neighbor_description_tests {
+    //! `neighbor <addr> description <text>` callback wiring.
+    //! `yang_load_tests` validates that the restored leaf loads; this
+    //! asserts the callback actually records the note on the peer.
+    //! Independent test module with its own mock channels, mirroring
+    //! `bfd_wiring_tests`.
+
+    use std::collections::VecDeque;
+    use std::net::{IpAddr, Ipv4Addr};
+
+    use tokio::sync::mpsc;
+
+    use super::*;
+
+    fn arg_words(parts: &[&str]) -> Args {
+        Args(
+            parts
+                .iter()
+                .map(|s| (*s).to_string())
+                .collect::<VecDeque<_>>(),
+        )
+    }
+
+    fn fresh_bgp() -> Bgp {
+        let (inbound_tx, _inbound_rx) = mpsc::unbounded_channel();
+        let (_rib_rx_tx, rib_rx) = mpsc::unbounded_channel();
+        let client = crate::rib::client::RibClient::new(
+            inbound_tx,
+            crate::rib::client::ProtoId::from_raw(0),
+        );
+        Box::leak(Box::new(_inbound_rx));
+        let ctx = crate::context::ProtoContext::default_table(client);
+
+        let (rib_tx, _rib_rx) = mpsc::unbounded_channel();
+        let (rib_inbound_tx, _sub_inbound_rx) = mpsc::unbounded_channel();
+        Box::leak(Box::new(_rib_rx));
+        Box::leak(Box::new(_sub_inbound_rx));
+        let next_proto_id = std::sync::Arc::new(std::sync::atomic::AtomicU32::new(1));
+        let subscriber =
+            crate::config::RibSubscriber::for_test(rib_tx, rib_inbound_tx, next_proto_id);
+
+        let (policy_tx, _policy_rx) = mpsc::unbounded_channel();
+        Box::leak(Box::new(_policy_rx));
+        Bgp::new(
+            ctx,
+            rib_rx,
+            subscriber,
+            policy_tx,
+            None,
+            None,
+            tokio::sync::mpsc::channel(1).0,
+        )
+    }
+
+    /// `neighbor X description <text>` records the note on the peer;
+    /// a re-set overwrites it and `delete` clears it.
+    #[tokio::test]
+    async fn description_set_overwrite_delete() {
+        let mut bgp = fresh_bgp();
+        config_peer(&mut bgp, arg_words(&["10.0.0.2"]), ConfigOp::Set).unwrap();
+        let addr = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2));
+
+        assert!(bgp.peers.get(&addr).unwrap().config.description.is_none());
+
+        config_peer_description(
+            &mut bgp,
+            arg_words(&["10.0.0.2", "core uplink"]),
+            ConfigOp::Set,
+        )
+        .unwrap();
+        assert_eq!(
+            bgp.peers.get(&addr).unwrap().config.description.as_deref(),
+            Some("core uplink"),
+        );
+
+        config_peer_description(
+            &mut bgp,
+            arg_words(&["10.0.0.2", "lab peer"]),
+            ConfigOp::Set,
+        )
+        .unwrap();
+        assert_eq!(
+            bgp.peers.get(&addr).unwrap().config.description.as_deref(),
+            Some("lab peer"),
+            "re-set overwrites",
+        );
+
+        config_peer_description(&mut bgp, arg_words(&["10.0.0.2"]), ConfigOp::Delete).unwrap();
+        assert!(
+            bgp.peers.get(&addr).unwrap().config.description.is_none(),
+            "delete clears the note",
         );
     }
 }
