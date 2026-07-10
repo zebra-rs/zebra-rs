@@ -743,7 +743,13 @@ impl FibHandle {
         }
 
         let mut req = NetlinkMessage::from(RouteNetlinkMessage::NewRoute(msg));
-        req.header.flags = NLM_F_REQUEST | NLM_F_ACK | NLM_F_CREATE | NLM_F_EXCL;
+        // Upsert (`NLM_F_REPLACE`), not `NLM_F_EXCL`: the kernel keys a
+        // route on (table, dst, priority), NOT on its nexthop — a
+        // re-resolved route (e.g. a recursive static whose underlay
+        // moved to a TI-LFA promoted repair) keeps its key but changes
+        // its nhid. With EXCL that re-add came back EEXIST — swallowed
+        // as success below — and the stale nexthop stayed in the FIB.
+        req.header.flags = NLM_F_REQUEST | NLM_F_ACK | NLM_F_CREATE | NLM_F_REPLACE;
 
         // Pre-send dump — `tracing::debug!` so production stays
         // quiet; enable via `RUST_LOG=zebra_rs::fib=debug` when
@@ -1285,7 +1291,11 @@ impl FibHandle {
         }
 
         let mut req = NetlinkMessage::from(RouteNetlinkMessage::NewRoute(msg));
-        req.header.flags = NLM_F_REQUEST | NLM_F_ACK | NLM_F_CREATE | NLM_F_EXCL;
+        // Upsert (`NLM_F_REPLACE`) — see the v4 sibling: a re-resolved
+        // route keeps its (table, dst, priority) key but changes its
+        // nhid; EXCL + the EEXIST-swallow left the stale nexthop in
+        // the FIB.
+        req.header.flags = NLM_F_REQUEST | NLM_F_ACK | NLM_F_CREATE | NLM_F_REPLACE;
 
         // Pre-send dump — `tracing::debug!` so production stays
         // quiet; enable via `RUST_LOG=zebra_rs::fib=debug` when
