@@ -13,17 +13,7 @@ from the VNI, not from addressing — pings work inside a tenant and fail
 across tenants because the ARP broadcast never leaves the tenant's
 flood domain.
 
-```
-  h1 ──── vtep1 ═════ VNI 10 ═════ vtep2 ──── h2
- .1     ┌───┘ 192.168.0.1   192.168.0.2       .2
-  h4 ───┤
- .4     └─┐ 192.168.1.1
-          ║ VNI 20
-          ║ 192.168.1.2
-         vtep3 ──── h3
-                     .3
-        (hosts: 172.16.10.x/24, iBGP AS 65001, VXLAN UDP 4789)
-```
+<img src="../images/BgpEvpnVxlan4Multi.svg" alt="BGP EVPN VXLAN multi-tenant topology">
 
 ## Bring up all nodes
 
