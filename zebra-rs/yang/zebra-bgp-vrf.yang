@@ -170,10 +170,17 @@ module zebra-bgp-vrf {
       }
       leaf description {
         ext:help "Free-form neighbor description";
-        type string;
+        // The pattern makes the value consume the rest of the command
+        // line, whitespace included (`match_regexp` in config/parse.rs)
+        // — same rest-of-line semantics as the global neighbor's
+        // description leaf in ietf-bgp-common.
+        type string {
+          pattern '.*';
+        }
         description
           "Free-form description string echoed in `show bgp vrf X
-           neighbors` output.";
+           neighbors` output. May contain spaces: the value is the
+           rest of the line.";
       }
       list afi-safi {
         ext:help "Per-address-family activation for this CE peer";
