@@ -61,6 +61,14 @@ pub struct ExecuteResponse {
     pub code: ExecCode,
     pub output: String,
     pub paths: Vec<CommandPath>,
+    /// The running-config `system hostname` value, or `None` when
+    /// unconfigured. Carried on every Execute reply; the vty shell
+    /// queries it via `vtyhelper -H` (startup seed + the
+    /// post-command `_cli_hostname_refresh`) to keep the prompt in
+    /// sync. Read from the running store, so the reply to the very
+    /// `commit` that changes the hostname already carries the new
+    /// name.
+    pub hostname: Option<String>,
 }
 
 #[derive(Debug)]

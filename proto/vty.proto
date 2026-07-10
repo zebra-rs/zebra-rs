@@ -91,6 +91,11 @@ message ExecReply {
   uint32 port = 3;
   repeated string candidates = 4;
   repeated CommandPath paths = 5;
+  // Running-config `system hostname`, empty when unconfigured. Set on
+  // ExecType.EXEC replies; the vty shell tracks it in CLI_HOSTNAME so
+  // the prompt renders the configured name (falling back to the OS
+  // hostname when empty).
+  string hostname = 6;
 }
 
 // The Command register.

@@ -125,6 +125,7 @@ impl ExecService {
             lines,
             port: 2666,
             paths: Vec::new(),
+            hostname: String::new(),
         };
         Ok(Response::new(reply))
     }
@@ -134,6 +135,7 @@ impl ExecService {
         code: ExecCode,
         lines: String,
         paths: Vec<CommandPath>,
+        hostname: String,
     ) -> Result<Response<ExecReply>, tonic::Status> {
         let reply = ExecReply {
             code: code as i32,
@@ -141,6 +143,7 @@ impl ExecService {
             lines,
             port: 2666,
             paths,
+            hostname,
         };
         Ok(Response::new(reply))
     }
@@ -183,8 +186,9 @@ impl Exec for ExecService {
         match request.r#type {
             x if x == ExecType::Exec as i32 => {
                 let resp = self.execute_request(&request.mode, &request.line).await;
+                let hostname = resp.hostname.clone().unwrap_or_default();
                 let (code, output, paths) = exec_commands(&resp);
-                self.reply_exec(code, output, paths)
+                self.reply_exec(code, output, paths, hostname)
             }
             x if x == ExecType::CompleteFirstCommands as i32 => {
                 let resp = self

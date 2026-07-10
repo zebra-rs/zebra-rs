@@ -45,6 +45,13 @@ _cli_in_config_group ()
 }
 
 declare -x CLI_PRIVILEGE=1
+
+# Daemon-configured `system hostname` for the prompt; empty means
+# unconfigured and the prompt falls back to the OS hostname. Seeded
+# at startup via `vtyhelper -H` and re-synced by
+# _cli_hostname_refresh after every executed command, so a committed
+# `set system hostname` shows up on the very next prompt.
+declare -x CLI_HOSTNAME=""
 declare -a _cli_array_completions
 declare -A _cli_array_helps
 declare -A _cli_array_pre
@@ -70,8 +77,10 @@ _cli_prompt_setup ()
 
   # Mode tag (e.g. "(config)") follows the mode character so the user
   # sees `host#(config)` in configure mode and a plain `host>` /
-  # `host#` in exec mode (where CLI_MODE_PROMPT is empty).
-  export PS1="$(hostname)${CLI_MODE_CHAR}${CLI_MODE_PROMPT}"
+  # `host#` in exec mode (where CLI_MODE_PROMPT is empty). The name is
+  # the daemon-configured `system hostname` when set, else the OS
+  # hostname.
+  export PS1="${CLI_HOSTNAME:-$(hostname)}${CLI_MODE_CHAR}${CLI_MODE_PROMPT}"
 }
 
 _cli_pager_setup ()
@@ -317,6 +326,26 @@ _cli_exec ()
         eval "$line"
       fi ;;
   esac
+
+  # A committed `set/delete system hostname` (possibly by another
+  # session) must show on the next prompt; config commands come back
+  # as silent Show replies with nothing eval-able, so re-ask the
+  # daemon after every executed command.
+  _cli_hostname_refresh
+}
+
+# Sync CLI_HOSTNAME (and the prompt) with the daemon's running-config
+# `system hostname`. A failed query (daemon down) leaves the current
+# value untouched.
+_cli_hostname_refresh ()
+{
+  local name
+  if name=$(${cli_command} -H 2>/dev/null); then
+    if [[ ${name} != "${CLI_HOSTNAME}" ]]; then
+      CLI_HOSTNAME=${name}
+      _cli_prompt_setup
+    fi
+  fi
 }
 
 # bash calls this when a typed word matches no alias / function /
@@ -495,6 +524,10 @@ disable ()
 if [[ $interactive ]]; then
   _cli_pager_setup
   _cli_bind_key
+  # Seed the prompt hostname from the daemon's running config; a down
+  # daemon yields an empty value and the OS-hostname fallback (the
+  # next successful exec self-heals it, like _cli_maybe_register).
+  CLI_HOSTNAME=$(${cli_command} -H 2>/dev/null)
   _cli_prompt_setup
   # Tell the daemon to drop our session as soon as the shell exits.
   # The kernel pidfd watcher also catches this case; the explicit

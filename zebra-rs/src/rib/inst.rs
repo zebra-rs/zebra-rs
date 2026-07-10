@@ -925,6 +925,12 @@ pub struct Rib {
     /// pick; `None` falls back to it.
     pub router_id_config: Option<Ipv4Addr>,
 
+    /// Operator-configured `system hostname`. Preferred by
+    /// `show hostname` over the OS hostname; `None` falls back to it.
+    /// The vty prompt tracks the same config through the Execute
+    /// reply path in the config manager, so the two stay consistent.
+    pub hostname_config: Option<String>,
+
     /// Single-shot timer that fires Message::Resolve after a debounce when
     /// the FIB has changed. None when no resolve is pending. Set by
     /// schedule_rib_sync(), cleared by the Message::Resolve handler.
@@ -1042,6 +1048,7 @@ impl Rib {
             nmap: NexthopMap::default(),
             router_id: Ipv4Addr::UNSPECIFIED,
             router_id_config: None,
+            hostname_config: None,
             rib_sync_timer: None,
             rib_sync_interval: DEFAULT_RIB_SYNC_INTERVAL_SEC,
             sr0_owned: false,
@@ -3756,6 +3763,24 @@ impl Rib {
         Some((vni, vtep_local))
     }
 
+    /// `set system hostname <name>` — store the configured hostname so
+    /// `show hostname` prefers it over the OS hostname. Deleting falls
+    /// back to the OS hostname. Purely daemon-internal (FRR-style): no
+    /// `sethostname(2)`, no OS side effects; the vty prompt tracks the
+    /// same leaf via the config manager's Execute-reply path.
+    pub(crate) fn hostname_config_exec(
+        &mut self,
+        mut args: crate::config::Args,
+        op: ConfigOp,
+    ) -> Option<()> {
+        if op.is_set() {
+            self.hostname_config = Some(args.string()?);
+        } else {
+            self.hostname_config = None;
+        }
+        Some(())
+    }
+
     /// `set system cradle enabled <bool>` — the sole switch for the cradle
     /// eBPF data-plane tee. Deleting it (or setting false) disables the tee
     /// regardless of any `system cradle grpc-endpoint` endpoint.
@@ -3902,6 +3927,8 @@ impl Rib {
                 let (path, mut args) = path_from_command(&msg.paths);
                 if path.as_str() == "/system/router-id" {
                     let _ = self.router_id_config_exec(args, msg.op);
+                } else if path.as_str() == "/system/hostname" {
+                    let _ = self.hostname_config_exec(args, msg.op);
                 } else if path.as_str() == "/system/cradle/enabled" {
                     #[cfg(target_os = "linux")]
                     let _ = self.cradle_enabled_config_exec(args, msg.op);
