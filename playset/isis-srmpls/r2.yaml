@@ -11,6 +11,8 @@ interface:
 - if-name: r2-r3
   ipv4:
     address: 192.168.9.1/24
+system:
+  hostname: r2
 router:
   isis:
     net: 49.0000.0000.0000.0006.00

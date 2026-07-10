@@ -4,10 +4,12 @@ interface:
     address: 10.0.0.4/32
 - if-name: n3-s
   ipv4:
-    address: 192.168.11.2/24
+    address: 192.168.1.2/24
 - if-name: n3-r1
   ipv4:
-    address: 192.168.12.1/24
+    address: 192.168.10.1/24
+system:
+  hostname: n3
 router:
   isis:
     net: 49.0000.0000.0000.0004.00
