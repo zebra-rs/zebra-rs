@@ -1,0 +1,49 @@
+interface:
+- if-name: lo
+  ipv6:
+    address: 2001:db8::2/128
+- if-name: n1-s
+  ipv6:
+    address: 2001:db8:1::2/64
+- if-name: n1-r1
+  ipv6:
+    address: 2001:db8:4::1/64
+- if-name: n1-r2
+  ipv6:
+    address: 2001:db8:7::1/64
+- if-name: n1-d
+  ipv6:
+    address: 2001:db8:10::1/64
+system:
+  hostname: n1
+segment-routing:
+  locator:
+  - name: LOC2
+    prefix: fcbb:bbbb:2::/48
+router:
+  ospfv3:
+    router-id: 10.0.0.2
+    segment-routing:
+      srv6:
+        locator: LOC2
+    area:
+    - area-id: 0.0.0.0
+      interface:
+      - if-name: lo
+        enabled: true
+      - if-name: n1-s
+        enabled: true
+        network-type: point-to-point
+        cost: 1
+      - if-name: n1-r1
+        enabled: true
+        network-type: point-to-point
+        cost: 1
+      - if-name: n1-r2
+        enabled: true
+        network-type: point-to-point
+        cost: 1
+      - if-name: n1-d
+        enabled: true
+        network-type: point-to-point
+        cost: 1

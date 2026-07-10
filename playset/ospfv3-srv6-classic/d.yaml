@@ -1,0 +1,63 @@
+interface:
+- if-name: lo
+  ipv6:
+    address: 2001:db8::8/128
+- if-name: d-n1
+  ipv6:
+    address: 2001:db8:10::2/64
+- if-name: d-r3
+  ipv6:
+    address: 2001:db8:11::2/64
+- if-name: d-e2
+  ipv6:
+    address: 2001:db8:200::1/64
+system:
+  hostname: d
+segment-routing:
+  locator:
+  - name: LOC8
+    prefix: fcbb:bbbb:8::/48
+router:
+  ospfv3:
+    router-id: 10.0.0.8
+    segment-routing:
+      srv6:
+        locator: LOC8
+    area:
+    - area-id: 0.0.0.0
+      interface:
+      - if-name: lo
+        enabled: true
+      - if-name: d-n1
+        enabled: true
+        network-type: point-to-point
+        cost: 1
+      - if-name: d-r3
+        enabled: true
+        network-type: point-to-point
+        cost: 1
+  bgp:
+    global:
+      as: 65000
+      router-id: 10.0.0.8
+    timer:
+      adv-interval:
+        ibgp: 1
+        ebgp: 1
+    segment-routing:
+      srv6:
+        locator: LOC8
+        ipv6-unicast: {}
+    neighbor:
+    - remote-address: 2001:db8::1
+      remote-as: 65000
+      update-source: 2001:db8::8
+      enabled: true
+      afi-safi:
+      - name: ipv6
+        enabled: true
+        encapsulation-type: srv6
+    afi-safi:
+    - name: ipv6
+      redistribute:
+        connected: {}
