@@ -256,6 +256,21 @@ impl SidOwner {
             instance,
         }
     }
+
+    /// RIB type for entries installed on behalf of this owner — drives
+    /// the `show ipv6 route` code letter, the entry's administrative
+    /// distance, and the kernel `proto` stamp on the seg6local route.
+    /// Owners register as "isis", "ospfv3", or "bgp" today; unknown
+    /// names conservatively map to IS-IS (the historical default,
+    /// which used to be hard-coded for every SID regardless of owner).
+    pub fn rib_type(&self) -> crate::rib::RibType {
+        use crate::rib::RibType;
+        match self.proto.as_str() {
+            p if p.starts_with("ospf") => RibType::Ospf,
+            "bgp" => RibType::Bgp,
+            _ => RibType::Isis,
+        }
+    }
 }
 
 impl fmt::Display for SidOwner {
@@ -439,6 +454,17 @@ mod tests {
         // No protocol-instance support, so the instance is not shown.
         assert_eq!(SidOwner::new("isis", 0).to_string(), "isis");
         assert_eq!(SidOwner::new("bgp", 1).to_string(), "bgp");
+    }
+
+    #[test]
+    fn sid_owner_maps_to_owning_rib_type() {
+        use crate::rib::RibType;
+        assert_eq!(SidOwner::new("isis", 0).rib_type(), RibType::Isis);
+        assert_eq!(SidOwner::new("ospfv3", 0).rib_type(), RibType::Ospf);
+        assert_eq!(SidOwner::new("ospf", 0).rib_type(), RibType::Ospf);
+        assert_eq!(SidOwner::new("bgp", 0).rib_type(), RibType::Bgp);
+        // Unknown owners keep the historical IS-IS default.
+        assert_eq!(SidOwner::new("static", 0).rib_type(), RibType::Isis);
     }
 
     #[test]

@@ -48,13 +48,13 @@ protected edge-to-edge traffic.
 
 | playset | IGP | data plane | edge service |
 |:--|:--|:--|:--|
-| [isis-srmpls](isis-srmpls/README.md) | IS-IS | SR-MPLS (SRGB 16000 / SRLB 15000) | recursive IPv4 statics inheriting the SR label stack |
-| [ospfv2-srmpls](ospfv2-srmpls/README.md) | OSPFv2 (area 0) | SR-MPLS (RFC 8665 extended LSAs) | recursive IPv4 statics inheriting the SR label stack |
-| [ospfv3-srmpls](ospfv3-srmpls/README.md) | OSPFv3 (area 0) | SR-MPLS over IPv6 (RFC 8666, NP-flag / no PHP) | recursive IPv6 statics inheriting the SR label stack |
 | [isis-srv6-classic](isis-srv6-classic/README.md) | IS-IS | SRv6, classic RFC 8986 SIDs (RFC 9352) | RFC 9252 iBGP IPv6-unicast with End.DT6 service SIDs |
 | [isis-srv6-usid](isis-srv6-usid/README.md) | IS-IS | SRv6, uSID / NEXT-C-SID (RFC 9800) | RFC 9252 iBGP IPv6-unicast with End.DT6 service SIDs |
 | [ospfv3-srv6-classic](ospfv3-srv6-classic/README.md) | OSPFv3 (area 0) | SRv6, classic RFC 8986 SIDs (RFC 9513) | RFC 9252 iBGP IPv6-unicast with End.DT6 service SIDs |
 | [ospfv3-srv6-usid](ospfv3-srv6-usid/README.md) | OSPFv3 (area 0) | SRv6, uSID / NEXT-C-SID (RFC 9800) | RFC 9252 iBGP IPv6-unicast with End.DT6 service SIDs |
+| [isis-srmpls](isis-srmpls/README.md) | IS-IS | SR-MPLS (SRGB 16000 / SRLB 15000) | recursive IPv4 statics inheriting the SR label stack |
+| [ospfv2-srmpls](ospfv2-srmpls/README.md) | OSPFv2 (area 0) | SR-MPLS (RFC 8665 extended LSAs) | recursive IPv4 statics inheriting the SR label stack |
+| [ospfv3-srmpls](ospfv3-srmpls/README.md) | OSPFv3 (area 0) | SR-MPLS over IPv6 (RFC 8666, NP-flag / no PHP) | recursive IPv6 statics inheriting the SR label stack |
 
 Some cross-cutting themes to look for:
 
@@ -77,7 +77,7 @@ Some cross-cutting themes to look for:
 
 | playset | scheme |
 |:--|:--|
-| [bgp-evpn-vxlan](bgp-evpn-vxlan/README.md) | one L2 segment stretched across two VTEPs — Type-2/Type-3 EVPN control plane driving the kernel's single-VXLAN-device data plane, hosts pinging at `ttl=64` |
+| [bgp-evpn-vxlan4](bgp-evpn-vxlan4/README.md) | one L2 segment stretched across two VTEPs over an IPv4 VXLAN underlay — Type-2/Type-3 EVPN control plane driving the kernel's single-VXLAN-device data plane, hosts pinging at `ttl=64` |
 
 ## BGP Inter-AS L3VPN (templates)
 

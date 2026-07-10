@@ -1974,7 +1974,13 @@ impl FibHandle {
         }
         msg.header.table = table;
         msg.header.destination_prefix_length = prefix_len;
-        msg.header.protocol = RouteProtocol::Isis;
+        // Stamp the SID's owning protocol (an OSPFv3 SID used to land
+        // as `proto isis` in the kernel regardless of owner).
+        msg.header.protocol = match sid.owner.rib_type() {
+            crate::rib::RibType::Ospf => RouteProtocol::Ospf,
+            crate::rib::RibType::Bgp => RouteProtocol::Bgp,
+            _ => RouteProtocol::Isis,
+        };
         msg.header.scope = RouteScope::Universe;
         msg.header.kind = kind;
 

@@ -1,7 +1,7 @@
-# BGP EVPN VXLAN
+# BGP EVPN VXLAN (IPv4 transport)
 
 This playset demonstrates BGP EVPN with a VXLAN data plane: two VTEPs
-stretch one L2 segment across an IP underlay, with BGP's EVPN address
+stretch one L2 segment across an IPv4 underlay (VXLAN over UDP/IPv4), with BGP's EVPN address
 family (RFC 7432 / RFC 8365) as the control plane — Type-3 IMET routes
 build the BUM flood list and Type-2 MAC routes populate the remote FDB, so
 no flood-and-learn runs over the tunnel. Two hosts on the same IP subnet,
