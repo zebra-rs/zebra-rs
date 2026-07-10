@@ -1,0 +1,118 @@
+<mxfile host="Electron">
+  <diagram name="bgp-evpn-vxlan4-multi" id="evpnVxlan4Multi">
+    <mxGraphModel dx="900" dy="620" grid="1" gridSize="10" guides="1" tooltips="1" connect="1" arrows="1" fold="1" page="1" pageScale="1" pageWidth="920" pageHeight="470" background="#FFFFFF" math="0" shadow="0">
+      <root>
+        <mxCell id="0" />
+        <mxCell id="1" parent="0" />
+        <mxCell id="domain-vni10" parent="1" style="rounded=1;whiteSpace=wrap;html=1;fillColor=none;dashed=1;strokeColor=#0499D4;" value="" vertex="1">
+          <mxGeometry height="117" width="878" x="20" y="145" as="geometry" />
+        </mxCell>
+        <mxCell id="domain-vni20" parent="1" style="rounded=1;whiteSpace=wrap;html=1;fillColor=none;dashed=1;strokeColor=#4DA72E;" value="" vertex="1">
+          <mxGeometry height="156" width="878" x="20" y="262" as="geometry" />
+        </mxCell>
+        <mxCell id="title" parent="1" style="text;html=1;whiteSpace=wrap;strokeColor=none;fillColor=none;align=center;verticalAlign=middle;fontSize=15;fontColor=#333333;" value="BGP EVPN VXLAN — multi-tenant" vertex="1">
+          <mxGeometry height="22" width="400" x="260" y="14" as="geometry" />
+        </mxCell>
+        <mxCell id="subtitle" parent="1" style="text;html=1;whiteSpace=wrap;strokeColor=none;fillColor=none;align=center;verticalAlign=middle;fontSize=10;fontColor=#777777;" value="iBGP AS 65001 · VXLAN UDP 4789 · vtep1 serves both tenants (br10 = VNI 10, br20 = VNI 20)" vertex="1">
+          <mxGeometry height="16" width="620" x="150" y="38" as="geometry" />
+        </mxCell>
+        <mxCell id="vni10-title" parent="1" style="text;html=1;whiteSpace=wrap;strokeColor=none;fillColor=none;align=left;verticalAlign=middle;fontSize=12;fontColor=#0499D4;" value="VNI 10 flood domain · RT 65001:10" vertex="1">
+          <mxGeometry height="18" width="300" x="28" y="152" as="geometry" />
+        </mxCell>
+        <mxCell id="vni20-title" parent="1" style="text;html=1;whiteSpace=wrap;strokeColor=none;fillColor=none;align=left;verticalAlign=middle;fontSize=12;fontColor=#4DA72E;" value="VNI 20 flood domain · RT 65001:20" vertex="1">
+          <mxGeometry height="18" width="300" x="28" y="401" as="geometry" />
+        </mxCell>
+        <mxCell id="e-h1" edge="1" parent="1" source="h1" target="br10-1" style="endArrow=none;html=1;rounded=0;strokeColor=#0499D4;" value="">
+          <mxGeometry height="50" relative="1" width="50" as="geometry" />
+        </mxCell>
+        <mxCell id="e-h4" edge="1" parent="1" source="h4" target="br20-1" style="endArrow=none;html=1;rounded=0;strokeColor=#4DA72E;" value="">
+          <mxGeometry height="50" relative="1" width="50" as="geometry" />
+        </mxCell>
+        <mxCell id="e-h2" edge="1" parent="1" source="br10-2" target="h2" style="endArrow=none;html=1;rounded=0;strokeColor=#0499D4;" value="">
+          <mxGeometry height="50" relative="1" width="50" as="geometry" />
+        </mxCell>
+        <mxCell id="e-h3" edge="1" parent="1" source="br20-3" target="h3" style="endArrow=none;html=1;rounded=0;strokeColor=#4DA72E;" value="">
+          <mxGeometry height="50" relative="1" width="50" as="geometry" />
+        </mxCell>
+        <mxCell id="e-tun10" edge="1" parent="1" source="br10-1" target="br10-2" style="endArrow=none;html=1;rounded=0;strokeColor=#0499D4;strokeWidth=3;exitX=1;exitY=0.5;exitDx=0;exitDy=0;entryX=0;entryY=0.5;entryDx=0;entryDy=0;" value="">
+          <mxGeometry height="50" relative="1" width="50" as="geometry" />
+        </mxCell>
+        <mxCell id="e-tun20" edge="1" parent="1" source="br20-1" target="br20-3" style="endArrow=none;html=1;rounded=0;strokeColor=#4DA72E;strokeWidth=3;exitX=1;exitY=0.5;exitDx=0;exitDy=0;entryX=0;entryY=0.5;entryDx=0;entryDy=0;" value="">
+          <mxGeometry height="50" relative="1" width="50" as="geometry" />
+        </mxCell>
+        <mxCell id="tun10-a" parent="1" style="text;html=1;whiteSpace=wrap;strokeColor=none;fillColor=none;align=center;verticalAlign=middle;fontSize=9;fontColor=#0499D4;" value="VXLAN · VNI 10" vertex="1">
+          <mxGeometry height="14" width="120" x="452" y="172" as="geometry" />
+        </mxCell>
+        <mxCell id="tun10-b" parent="1" style="text;html=1;whiteSpace=wrap;strokeColor=none;fillColor=none;align=center;verticalAlign=middle;fontSize=8;fontColor=#0499D4;" value="192.168.0.0/24" vertex="1">
+          <mxGeometry height="12" width="120" x="452" y="186" as="geometry" />
+        </mxCell>
+        <mxCell id="tun20-a" parent="1" style="text;html=1;whiteSpace=wrap;strokeColor=none;fillColor=none;align=center;verticalAlign=middle;fontSize=9;fontColor=#4DA72E;" value="VXLAN · VNI 20" vertex="1">
+          <mxGeometry height="14" width="120" x="452" y="344" as="geometry" />
+        </mxCell>
+        <mxCell id="tun20-b" parent="1" style="text;html=1;whiteSpace=wrap;strokeColor=none;fillColor=none;align=center;verticalAlign=middle;fontSize=8;fontColor=#4DA72E;" value="192.168.1.0/24" vertex="1">
+          <mxGeometry height="12" width="120" x="452" y="358" as="geometry" />
+        </mxCell>
+        <mxCell id="vtep1-box" parent="1" style="rounded=1;whiteSpace=wrap;html=1;fillColor=none;strokeColor=#0E9ED5;verticalAlign=top;spacingTop=4;fontSize=11;fontColor=#333333;" value="vtep1" vertex="1">
+          <mxGeometry height="170" width="150" x="250" y="175" as="geometry" />
+        </mxCell>
+        <mxCell id="vtep2-box" parent="1" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#F7FBFE;strokeColor=#0E9ED5;verticalAlign=top;spacingTop=4;fontSize=11;fontColor=#333333;" value="vtep2" vertex="1">
+          <mxGeometry height="64" width="118" x="640" y="155" as="geometry" />
+        </mxCell>
+        <mxCell id="vtep3-box" parent="1" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#F7FBFE;strokeColor=#0E9ED5;verticalAlign=top;spacingTop=4;fontSize=11;fontColor=#333333;" value="vtep3" vertex="1">
+          <mxGeometry height="64" width="118" x="640" y="340" as="geometry" />
+        </mxCell>
+        <mxCell id="br10-1" parent="1" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#EAF6FC;strokeColor=#0499D4;fontSize=9;fontColor=#333333;" value="br10 · VNI 10" vertex="1">
+          <mxGeometry height="48" width="118" x="266" y="205" as="geometry" />
+        </mxCell>
+        <mxCell id="br20-1" parent="1" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#EEF7E9;strokeColor=#4DA72E;fontSize=9;fontColor=#333333;" value="br20 · VNI 20" vertex="1">
+          <mxGeometry height="48" width="118" x="266" y="282" as="geometry" />
+        </mxCell>
+        <mxCell id="br10-2" parent="1" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#EAF6FC;strokeColor=#0499D4;fontSize=9;fontColor=#333333;" value="br10 · VNI 10" vertex="1">
+          <mxGeometry height="30" width="92" x="653" y="180" as="geometry" />
+        </mxCell>
+        <mxCell id="br20-3" parent="1" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#EEF7E9;strokeColor=#4DA72E;fontSize=9;fontColor=#333333;" value="br20 · VNI 20" vertex="1">
+          <mxGeometry height="30" width="92" x="653" y="365" as="geometry" />
+        </mxCell>
+        <mxCell id="h1" parent="1" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#0499D4;strokeColor=none;fontSize=10;fontColor=#FFFFFF;" value="h1" vertex="1">
+          <mxGeometry height="34" width="54" x="40" y="212" as="geometry" />
+        </mxCell>
+        <mxCell id="h4" parent="1" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#4DA72E;strokeColor=none;fontSize=10;fontColor=#FFFFFF;" value="h4" vertex="1">
+          <mxGeometry height="34" width="54" x="40" y="289" as="geometry" />
+        </mxCell>
+        <mxCell id="h2" parent="1" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#0499D4;strokeColor=none;fontSize=10;fontColor=#FFFFFF;" value="h2" vertex="1">
+          <mxGeometry height="34" width="54" x="822" y="178" as="geometry" />
+        </mxCell>
+        <mxCell id="h3" parent="1" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#4DA72E;strokeColor=none;fontSize=10;fontColor=#FFFFFF;" value="h3" vertex="1">
+          <mxGeometry height="34" width="54" x="822" y="363" as="geometry" />
+        </mxCell>
+        <mxCell id="addr-h1" parent="1" style="text;html=1;whiteSpace=wrap;strokeColor=none;fillColor=none;align=center;verticalAlign=middle;fontSize=8;fontColor=#333333;" value="172.16.10.1" vertex="1">
+          <mxGeometry height="12" width="90" x="22" y="250" as="geometry" />
+        </mxCell>
+        <mxCell id="addr-h4" parent="1" style="text;html=1;whiteSpace=wrap;strokeColor=none;fillColor=none;align=center;verticalAlign=middle;fontSize=8;fontColor=#333333;" value="172.16.10.4" vertex="1">
+          <mxGeometry height="12" width="90" x="22" y="329" as="geometry" />
+        </mxCell>
+        <mxCell id="addr-h2" parent="1" style="text;html=1;whiteSpace=wrap;strokeColor=none;fillColor=none;align=center;verticalAlign=middle;fontSize=8;fontColor=#333333;" value="172.16.10.2" vertex="1">
+          <mxGeometry height="12" width="90" x="804" y="218" as="geometry" />
+        </mxCell>
+        <mxCell id="addr-h3" parent="1" style="text;html=1;whiteSpace=wrap;strokeColor=none;fillColor=none;align=center;verticalAlign=middle;fontSize=8;fontColor=#333333;" value="172.16.10.3" vertex="1">
+          <mxGeometry height="12" width="90" x="804" y="403" as="geometry" />
+        </mxCell>
+        <mxCell id="addr-v1a" parent="1" style="text;html=1;whiteSpace=wrap;strokeColor=none;fillColor=none;align=center;verticalAlign=middle;fontSize=8;fontColor=#8A6D00;" value="192.168.0.1" vertex="1">
+          <mxGeometry height="12" width="90" x="387" y="203" as="geometry" />
+        </mxCell>
+        <mxCell id="addr-v1b" parent="1" style="text;html=1;whiteSpace=wrap;strokeColor=none;fillColor=none;align=center;verticalAlign=middle;fontSize=8;fontColor=#8A6D00;" value="192.168.1.1" vertex="1">
+          <mxGeometry height="12" width="90" x="387" y="330" as="geometry" />
+        </mxCell>
+        <mxCell id="addr-v2" parent="1" style="text;html=1;whiteSpace=wrap;strokeColor=none;fillColor=none;align=center;verticalAlign=middle;fontSize=8;fontColor=#8A6D00;" value="192.168.0.2" vertex="1">
+          <mxGeometry height="12" width="90" x="654" y="225" as="geometry" />
+        </mxCell>
+        <mxCell id="addr-v3" parent="1" style="text;html=1;whiteSpace=wrap;strokeColor=none;fillColor=none;align=center;verticalAlign=middle;fontSize=8;fontColor=#8A6D00;" value="192.168.1.2" vertex="1">
+          <mxGeometry height="12" width="90" x="654" y="324" as="geometry" />
+        </mxCell>
+        <mxCell id="caption" parent="1" style="text;html=1;whiteSpace=wrap;strokeColor=none;fillColor=none;align=center;verticalAlign=middle;fontSize=9;fontColor=#777777;" value="All four hosts share 172.16.10.0/24 — isolation is by VNI / route-target, not addressing; a ping succeeds only within its tenant." vertex="1">
+          <mxGeometry height="16" width="760" x="80" y="442" as="geometry" />
+        </mxCell>
+      </root>
+    </mxGraphModel>
+  </diagram>
+</mxfile>

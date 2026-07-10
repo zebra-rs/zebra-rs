@@ -7,11 +7,7 @@ build the BUM flood list and Type-2 MAC routes populate the remote FDB, so
 no flood-and-learn runs over the tunnel. Two hosts on the same IP subnet,
 each behind a different VTEP, talk as if they shared a switch.
 
-```
-  h1 ──── vtep1 ═════════════════ vtep2 ──── h2
- 172.16.10.1   192.168.0.1  192.168.0.2   172.16.10.2
-        (VNI 10 over UDP 4789, iBGP AS 65001)
-```
+<img src="../images/BgpEvpnVxlan4.svg" alt="BGP EVPN VXLAN (IPv4 transport) topology">
 
 Each VTEP runs zebra-rs with a bridge (`br10`), a VXLAN device
 (`vxlan10`, VNI 10) enslaved to it, and the host-facing interface enslaved
