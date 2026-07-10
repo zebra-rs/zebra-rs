@@ -1,0 +1,54 @@
+interface:
+- if-name: lo
+  ipv6:
+    address: 2001:db8::5/128
+- if-name: r1-n1
+  ipv6:
+    address: 2001:db8:0:4::2/64
+- if-name: r1-n2
+  ipv6:
+    address: 2001:db8:0:5::2/64
+- if-name: r1-n3
+  ipv6:
+    address: 2001:db8:0:6::2/64
+- if-name: r1-r2
+  ipv6:
+    address: 2001:db8:0:8::1/64
+system:
+  hostname: r1
+segment-routing:
+  locator:
+  - name: LOC5
+    prefix: fcbb:bbbb:5::/48
+router:
+  isis:
+    net: 49.0000.0000.0000.0005.00
+    hostname: r1
+    is-type: level-2-only
+    segment-routing:
+      srv6:
+        locator: LOC5
+    interface:
+    - if-name: lo
+      ipv6:
+        enabled: true
+    - if-name: r1-n1
+      network-type: point-to-point
+      metric: 1
+      ipv6:
+        enabled: true
+    - if-name: r1-n2
+      network-type: point-to-point
+      metric: 1
+      ipv6:
+        enabled: true
+    - if-name: r1-n3
+      network-type: point-to-point
+      metric: 1000
+      ipv6:
+        enabled: true
+    - if-name: r1-r2
+      network-type: point-to-point
+      metric: 1000
+      ipv6:
+        enabled: true
