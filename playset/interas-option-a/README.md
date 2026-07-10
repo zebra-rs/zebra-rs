@@ -22,18 +22,6 @@ providers.
 
 <img src="../images/InterASOptionA.svg" alt="Inter-AS Option A topology">
 
-```
-      customer cust1                                       customer cust1
-  ce1 ─────────┐                                            ┌───────── ce3
-  lo 172.16.1.1│                                            │ lo 172.16.2.1
-               pe1 ─── p1 ─── asbr1 ═══════════ asbr2 ─── p2 ─── pe2
-  lo 172.16.1.1│    MPLS (SR)      cust1: 192.168.1.0/30    │ lo 172.16.2.1
-  ce2 ─────────┘                   cust2: 192.168.2.0/30    └───────── ce4
-      customer cust2               (two links, plain IP!)  customer cust2
-
-  └────────── AS 65501 ──────────┘          └────────── AS 65502 ─────────┘
-```
-
 Two things are deliberate in this lab:
 
 * **Two customers** (`cust1`: ce1↔ce3, `cust2`: ce2↔ce4) — Option A's
