@@ -78,6 +78,7 @@ Some cross-cutting themes to look for:
 | playset | scheme |
 |:--|:--|
 | [bgp-evpn-vxlan4](bgp-evpn-vxlan4/README.md) | one L2 segment stretched across two VTEPs over an IPv4 VXLAN underlay — Type-2/Type-3 EVPN control plane driving the kernel's single-VXLAN-device data plane, hosts pinging at `ttl=64` |
+| [bgp-evpn-vxlan4-multi](bgp-evpn-vxlan4-multi/README.md) | multi-tenant: two VNIs across three VTEPs, one VTEP serving both — per-VNI RD/RT keep the tenants apart, hosts in different VNIs share a subnet yet cannot reach each other |
 
 ## BGP Inter-AS L3VPN (templates)
 
