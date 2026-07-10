@@ -234,6 +234,10 @@ module zebra-bgp-vrf {
        modifiers).";
     container redistribute {
       ext:help "Redistribute RIB routes into this VRF's BGP";
+      // A bare `redistribute` with no source child enables nothing:
+      // reject it at commit and prune the container when its last
+      // source is deleted (ext:non-empty on a presence container).
+      ext:non-empty "connected, static, ospf or isis";
       presence "Enable route redistribution into this VRF's BGP table";
       container connected {
         ext:help "Redistribute this VRF's connected routes";

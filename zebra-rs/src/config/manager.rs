@@ -2232,6 +2232,107 @@ mod yang_load_tests {
         }
     }
 
+    /// The BGP `redistribute` presence containers (global per-AFI and
+    /// per-VRF per-family) are dead config when bare — presence alone
+    /// redistributes nothing; the source children (`connected` / `static` /
+    /// `ospf` / `isis`) carry the intent. Both are tagged `ext:non-empty`,
+    /// exercising the presence-container arm of the machinery (the list
+    /// cases above ride the key-entry arm): a bare container is rejected at
+    /// commit and pruned when its last source is deleted. Drives the real
+    /// schema.
+    #[test]
+    fn bgp_redistribute_bare_container_rejected_and_pruned() {
+        use crate::config::ExecCode;
+        use crate::config::configs::{delete, set};
+        use crate::config::parse::{State, parse};
+        use crate::config::{Config, paths::path_try_trim};
+        use libyang::to_entry;
+        use std::rc::Rc;
+
+        let mut yang = YangStore::new();
+        yang.add_path(concat!(env!("CARGO_MANIFEST_DIR"), "/yang"));
+        yang.read_with_resolve("configure")
+            .unwrap_or_else(|e| panic!("configure failed to load: {e:#}"));
+        yang.identity_resolve();
+        let module = yang.find_module("configure").unwrap();
+        let entry = to_entry(&yang, module);
+        let set_entry = entry
+            .dir
+            .borrow()
+            .iter()
+            .find(|e| e.name == "set")
+            .cloned()
+            .expect("configure mode has a `set` entry");
+        let paths = |cmd: &str| {
+            let (code, _comps, state) = parse(cmd, set_entry.clone(), None, State::new());
+            assert_eq!(code, ExecCode::Success, "should parse: {cmd}");
+            path_try_trim("set", state.paths)
+        };
+        let validate_errors = |line: &[crate::config::CommandPath]| -> Vec<String> {
+            let root = Rc::new(Config::new("".to_string(), None));
+            set(line.to_vec(), root.clone());
+            let mut errors = Vec::new();
+            root.validate(&mut errors);
+            errors
+        };
+
+        for (bare, with_child) in [
+            (
+                "router bgp afi-safi ipv4 redistribute",
+                "router bgp afi-safi ipv4 redistribute connected",
+            ),
+            (
+                "router bgp vrf blue afi-safi ipv4 redistribute",
+                "router bgp vrf blue afi-safi ipv4 redistribute static",
+            ),
+        ] {
+            // Bare `redistribute` → rejected with the source hint.
+            let errors = validate_errors(&paths(bare));
+            assert!(
+                errors
+                    .iter()
+                    .any(|e| e.contains("redistribute")
+                        && e.contains("connected, static, ospf or isis")),
+                "bare `{bare}` must be rejected, got: {errors:?}"
+            );
+
+            // With a source child → validates clean.
+            let errors = validate_errors(&paths(with_child));
+            assert!(
+                errors.is_empty(),
+                "`{with_child}` must validate clean, got: {errors:?}"
+            );
+
+            // set + delete of the only source → the container is pruned,
+            // leaving no bare `redistribute` to fail the next commit.
+            let root = Rc::new(Config::new("".to_string(), None));
+            let line = paths(with_child);
+            set(line.clone(), root.clone());
+            delete(line, root.clone());
+            let mut errors = Vec::new();
+            root.validate(&mut errors);
+            assert!(
+                errors.is_empty(),
+                "tree must validate clean after set+delete of `{with_child}`, got: {errors:?}"
+            );
+            // Walk down from `router bgp` and assert no `redistribute`
+            // node survives anywhere on the path (global: under the
+            // afi-safi entry; VRF: under the family container — both
+            // subtrees cascade away entirely once emptied).
+            fn find_redistribute(c: &Rc<Config>) -> bool {
+                if c.name == "redistribute" {
+                    return true;
+                }
+                c.configs.borrow().iter().any(find_redistribute)
+                    || c.keys.borrow().iter().any(find_redistribute)
+            }
+            assert!(
+                !find_redistribute(&root),
+                "redistribute container must be pruned after its last source is deleted"
+            );
+        }
+    }
+
     /// Mirror SID egress-protection config paths
     /// (`draft-ietf-rtgwg-srv6-egress-protection`, config.yang). vtyctl
     /// apply is garbage-tolerant, so an unwired list / key / leaf would

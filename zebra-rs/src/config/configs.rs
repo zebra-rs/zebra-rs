@@ -565,6 +565,19 @@ impl Config {
                     errors.push(format!("'{}' requires {}", parents, self.non_empty));
                 }
             }
+            // `ext:non-empty` on a presence container checks the node
+            // itself: a bare `... redistribute` enables nothing, the same
+            // dead config as a key-only list entry. A list node carrying
+            // the tag never has `presence` set, so the two arms are
+            // disjoint.
+            if self.presence && !self.has_dir() && self.list.borrow().is_empty() {
+                let mut parents = VecDeque::<String>::new();
+                self.parents(&mut parents);
+                parents.push_back(self.name.clone());
+                let parents = Vec::from(parents);
+                let parents = parents.join(" ");
+                errors.push(format!("'{}' requires {}", parents, self.non_empty));
+            }
         }
         for key in self.keys.borrow().iter() {
             key.validate(errors);
@@ -771,13 +784,16 @@ pub fn delete(paths: Vec<CommandPath>, mut config: Rc<Config>) {
             // cascading to prune the entry (and the list node, if it too
             // becomes empty) instead of leaving the bare key behind. Gated on
             // the parent list carrying the marker, so ordinary key entries
-            // still stop the cascade as before.
+            // still stop the cascade as before. An `ext:non-empty` presence
+            // container carries the marker on itself (e.g. a `redistribute`
+            // whose last source was deleted) — prune it the same way.
             let prunable_empty_entry = !config.has_dir()
                 && config.list.borrow().is_empty()
-                && config
+                && (config
                     .parent
                     .as_ref()
-                    .is_some_and(|p| !p.non_empty.is_empty());
+                    .is_some_and(|p| !p.non_empty.is_empty())
+                    || (config.presence && !config.non_empty.is_empty()));
             if !prunable_empty_entry {
                 break;
             }
