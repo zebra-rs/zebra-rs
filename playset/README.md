@@ -106,7 +106,14 @@ the same names first.
 ## BGP Inter-AS L3VPN
 
 Two providers, one VPN — the RFC 4364 §10 options for handing L3VPN
-routes across an AS boundary.
+routes across an AS boundary. All three labs run the same ten routers,
+customers, and overlapping addressing; only the border model changes:
+
+|                                 | Option A       | Option B            | Option C       |
+|:--------------------------------|:---------------|:--------------------|:---------------|
+| labels crossing the border      | 0 (plain IP)   | 1 (VPN)             | 2 (LU + VPN)   |
+| VPN routes on the ASBR          | all (in VRFs)  | all (global VPNv4)  | none           |
+| ASBR state scales with          | customers      | VPN routes          | PEs            |
 
 | playset | scheme |
 |:--|:--|
