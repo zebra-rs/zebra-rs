@@ -1,0 +1,36 @@
+interface:
+- if-name: lo
+  ipv6:
+    address: 2001:db8::4/128
+- if-name: n3-s
+  ipv6:
+    address: 2001:db8:3::2/64
+- if-name: n3-r1
+  ipv6:
+    address: 2001:db8:6::1/64
+system:
+  hostname: n3
+segment-routing:
+  locator:
+  - name: LOC4
+    prefix: fcbb:bbbb:4::/48
+    behavior: usid
+router:
+  ospfv3:
+    router-id: 10.0.0.4
+    segment-routing:
+      srv6:
+        locator: LOC4
+    area:
+    - area-id: 0.0.0.0
+      interface:
+      - if-name: lo
+        enabled: true
+      - if-name: n3-s
+        enabled: true
+        network-type: point-to-point
+        cost: 1000
+      - if-name: n3-r1
+        enabled: true
+        network-type: point-to-point
+        cost: 1000
