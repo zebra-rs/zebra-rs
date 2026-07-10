@@ -90,6 +90,14 @@ pub trait IsisRibFamily: Sized + 'static {
         repair: &spf::RepairPath,
     ) -> Option<Self::Backup>;
 
+    /// Append the destination's own prefix-SID label below the repair
+    /// segments, for transports where that closes the repair into a
+    /// full SR path to the destination node (SR-MPLS). Default no-op
+    /// for families whose repair encapsulation already names its
+    /// endpoint (SRv6). See the backup-stamping pass in
+    /// `build_rib_from_spf`.
+    fn backup_append_prefix_sid(_backup: &mut Self::Backup, _sid: u32) {}
+
     /// Return the canonical (host-bits-masked) form of `p`.
     fn trunc_prefix(p: Self::Prefix) -> Self::Prefix;
 }
@@ -121,6 +129,10 @@ impl IsisRibFamily for V4 {
 
     fn backup_sr_len(backup: &RepairPathMpls) -> usize {
         backup.labels.len()
+    }
+
+    fn backup_append_prefix_sid(backup: &mut RepairPathMpls, sid: u32) {
+        backup.labels.push(rib::Label::Explicit(sid));
     }
 
     fn nhop_addrs(nbr: &Neighbor) -> Vec<Ipv4Addr> {
@@ -1023,9 +1035,22 @@ fn build_rib_from_spf<F: IsisRibFamily>(
         let Some(repair) = repair_paths.first() else {
             continue;
         };
-        let Some(backup) = F::build_repair(top, level, repair) else {
+        let Some(mut backup) = F::build_repair(top, level, repair) else {
             continue;
         };
+        // A repair list only steers the packet to its release point
+        // (the last segment's target); from there the inner packet is
+        // IP-routed. That suffices for traffic addressed inside the
+        // protected prefix itself, but not for traffic tunneled
+        // through this route — a recursive static/BGP nexthop that
+        // resolved onto it carries an inner destination the release
+        // point may not know. When the destination advertises a
+        // prefix SID, append its node-SID label below the repair
+        // segments so the repair label-switches all the way to the
+        // destination node.
+        if let Some(sid) = route.sid {
+            F::backup_append_prefix_sid(&mut backup, sid);
+        }
         if let Some(nhop) = route.nhops.values_mut().next() {
             nhop.backup = Some(backup);
         }
