@@ -64,11 +64,11 @@ B     2001:db8::8/128 [200/0] via seg6 [fcbb:bbbb:8:40::], s-n1, 00:00:45
 ...
 C  *> 2001:db8:100::/64 is directly connected, s-e1, 00:02:50
 B  *> 2001:db8:200::/64 [200/0] via seg6 [fcbb:bbbb:8:40::], s-n1, 00:00:45
-i  *> fcbb:bbbb:1::/128 [115/0] is directly connected, sr0, seg6local End, 00:02:50
-i  *> fcbb:bbbb:1:40::/128 [115/0] is directly connected, sr0, seg6local End.DT6, 00:02:50
-i  *> fcbb:bbbb:1:e000::/128 [115/0] is directly connected, s-n1, seg6local End.X nh6 2001:db8:1::2, s-n1, 00:02:40
-i  *> fcbb:bbbb:1:e001::/128 [115/0] is directly connected, s-n2, seg6local End.X nh6 2001:db8:2::2, s-n2, 00:02:40
-i  *> fcbb:bbbb:1:e002::/128 [115/0] is directly connected, s-n3, seg6local End.X nh6 2001:db8:3::2, s-n3, 00:02:40
+O  *> fcbb:bbbb:1::/128 [110/0] is directly connected, sr0, seg6local End, 00:02:50
+B  *> fcbb:bbbb:1:40::/128 [200/0] is directly connected, sr0, seg6local End.DT6, 00:02:50
+O  *> fcbb:bbbb:1:e000::/128 [110/0] is directly connected, s-n1, seg6local End.X nh6 2001:db8:1::2, s-n1, 00:02:40
+O  *> fcbb:bbbb:1:e001::/128 [110/0] is directly connected, s-n2, seg6local End.X nh6 2001:db8:2::2, s-n2, 00:02:40
+O  *> fcbb:bbbb:1:e002::/128 [110/0] is directly connected, s-n3, seg6local End.X nh6 2001:db8:3::2, s-n3, 00:02:40
 O  *> fcbb:bbbb:2::/48 [110/1] via fe80::9461:feff:fe12:9ee9, s-n1, 00:02:34
 O  *> fcbb:bbbb:3::/48 [110/1] via fe80::8c26:f1ff:fe37:472c, s-n2, 00:02:34
 O  *> fcbb:bbbb:4::/48 [110/1000] via fe80::ec58:22ff:fe66:3d20, s-n3, 00:02:34
@@ -84,7 +84,9 @@ The picture matches the IS-IS SRv6 playset with the OSPFv3 flavor: routes
 are code `O` at distance 110, locators are advertised through the RFC 9513
 SRv6 extensions and routed as plain `/48`s, and the node's own SIDs (End,
 End.DT6, End.X) are `seg6local` /128 routes on `sr0` / the adjacency
-interfaces. The unselected `O ... via ::, lo` lines are OSPFv3's
+interfaces — each attributed to its owning protocol: the locator End and
+the End.X entries are `O` [110/0], while the BGP-carved End.DT6 service
+SID is `B` [200/0]. The unselected `O ... via ::, lo` lines are OSPFv3's
 self-originated prefixes losing to their connected counterparts. The remote
 edge LAN `2001:db8:200::/64` is a **BGP** route toward d's End.DT6 service
 SID, and the unselected `B` copies of core prefixes show the same
