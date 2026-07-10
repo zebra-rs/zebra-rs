@@ -1,10 +1,11 @@
-# zebra-rs Playsets
+# Playsets
 
-Playsets are self-contained demo labs for zebra-rs. Each one builds a small
-network out of Linux network namespaces connected by veth pairs, runs a
-zebra-rs daemon in every node, injects per-node YAML configuration with
-`vtyctl apply -f <node>.yaml`, and walks through a feature in its README
-with real command output captured from a live run.
+Playsets are self-contained demo labs for zebra-rs — a simple, easy way to
+experience cutting-edge routing technology. Each one builds a small network out
+of Linux network namespaces connected by veth pairs, runs a zebra-rs daemon in
+every node, injects per-node YAML configuration with `vtyctl apply -f
+<node>.yaml`, and walks through a feature in its README with real command output
+captured from a live run.
 
 ## Running a playset
 
@@ -36,7 +37,7 @@ gitignored.
 > up only one of them at once — `up.sh` tears down leftovers of the same
 > names first.
 
-## TI-LFA fast-reroute family
+## SRv6 & SR-MPLS with TI-LFA fast-reroute
 
 Four labs, one topology — the RFC 9855 example network with two edge hosts
 attached — covering the IGP x data-plane matrix. Every walkthrough follows
@@ -68,6 +69,12 @@ Some cross-cutting themes to look for:
 * **`backup-as-primary`.** All four labs use this knob to pin live traffic
   onto the TI-LFA repair while every link stays up, which makes the repair
   path observable with plain `tcpdump`.
+
+## BGP EVPN
+
+| playset | scheme |
+|:--|:--|
+| [bgp-evpn-vxlan](bgp-evpn-vxlan/README.md) | one L2 segment stretched across two VTEPs — Type-2/Type-3 EVPN control plane driving the kernel's single-VXLAN-device data plane, hosts pinging at `ttl=64` |
 
 ## BGP Inter-AS L3VPN (templates)
 
