@@ -1,0 +1,41 @@
+interface:
+- if-name: d-e2
+  ipv4:
+    address: 172.16.1.1/24
+- if-name: d-n1
+  ipv4:
+    address: 192.168.2.2/24
+- if-name: d-r3
+  ipv4:
+    address: 192.168.5.1/24
+- if-name: lo
+  ipv4:
+    address: 10.0.0.8/32
+system:
+  hostname: d
+router:
+  ospf:
+    router-id: 10.0.0.8
+    segment-routing:
+      mpls: {}
+    area:
+    - area-id: 0.0.0.0
+      interface:
+      - if-name: lo
+        enabled: true
+        prefix-sid:
+          index: 800
+      - if-name: d-n1
+        enabled: true
+        network-type: point-to-point
+        cost: 1
+      - if-name: d-r3
+        enabled: true
+        network-type: point-to-point
+        cost: 1
+  static:
+    ipv4:
+      route:
+      - prefix: 172.16.0.0/24
+        nexthop:
+        - address: 10.0.0.1

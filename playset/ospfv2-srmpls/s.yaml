@@ -1,0 +1,48 @@
+interface:
+- if-name: lo
+  ipv4:
+    address: 10.0.0.1/32
+- if-name: s-e1
+  ipv4:
+    address: 172.16.0.2/24
+- if-name: s-n1
+  ipv4:
+    address: 192.168.0.1/24
+- if-name: s-n2
+  ipv4:
+    address: 192.168.3.1/24
+- if-name: s-n3
+  ipv4:
+    address: 192.168.1.1/24
+system:
+  hostname: s
+router:
+  ospf:
+    router-id: 10.0.0.1
+    segment-routing:
+      mpls: {}
+    area:
+    - area-id: 0.0.0.0
+      interface:
+      - if-name: lo
+        enabled: true
+        prefix-sid:
+          index: 100
+      - if-name: s-n1
+        enabled: true
+        network-type: point-to-point
+        cost: 1
+      - if-name: s-n2
+        enabled: true
+        network-type: point-to-point
+        cost: 1
+      - if-name: s-n3
+        enabled: true
+        network-type: point-to-point
+        cost: 1000
+  static:
+    ipv4:
+      route:
+      - prefix: 172.16.1.0/24
+        nexthop:
+        - address: 10.0.0.8
