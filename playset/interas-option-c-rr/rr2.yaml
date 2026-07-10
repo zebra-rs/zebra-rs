@@ -1,0 +1,71 @@
+# RR2 — the route reflector of AS 65502. Mirror of RR1: PE2 as a VPNv4
+# route-reflector client, multihop eBGP VPNv4 to RR1 with
+# `next-hop-unchanged`, labeled-unicast to ASBR2 for loopback exchange.
+interface:
+- if-name: lo
+  ipv4:
+    address: 2.2.2.9/32
+- if-name: rr2-p2
+  ipv4:
+    address: 10.2.0.10/30
+system:
+  hostname: rr2
+router:
+  isis:
+    net: 49.0002.0000.0000.0009.00
+    hostname: rr2
+    is-type: level-2-only
+    segment-routing: mpls
+    te-router-id: 2.2.2.9
+    interface:
+    - if-name: lo
+      ipv4:
+        enabled: true
+        prefix-sid:
+          index: 29
+    - if-name: rr2-p2
+      network-type: point-to-point
+      metric: 10
+      ipv4:
+        enabled: true
+  bgp:
+    global:
+      as: 65502
+      router-id: 2.2.2.9
+    timer:
+      adv-interval:
+        ibgp: 1
+        ebgp: 1
+    neighbor:
+    - remote-address: 2.2.2.3        # PE2 — VPNv4 route-reflector client
+      remote-as: 65502
+      timers: {connect-retry-time: 3}
+      update-source: 2.2.2.9
+      enabled: true
+      route-reflector:
+        client: true
+      afi-safi:
+      - name: vpnv4
+        enabled: true
+    - remote-address: 2.2.2.1        # ASBR2 — labeled-unicast only
+      remote-as: 65502
+      timers: {connect-retry-time: 3}
+      update-source: 2.2.2.9
+      enabled: true
+      afi-safi:
+      - name: label-v4
+        enabled: true
+    - remote-address: 1.1.1.9        # RR1 — multihop eBGP VPNv4
+      remote-as: 65501
+      ebgp-multihop: 10
+      timers: {connect-retry-time: 3}
+      update-source: 2.2.2.9
+      enabled: true
+      afi-safi:
+      - name: vpnv4
+        enabled: true
+        next-hop-unchanged: true     # <- THE RR-based Option C knob
+    afi-safi:
+    - name: label-v4
+      network:
+      - prefix: 2.2.2.9/32

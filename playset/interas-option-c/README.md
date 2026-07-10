@@ -292,8 +292,9 @@ What it costs:
   the *same* operator and B between different ones.
 * **Multihop eBGP mesh among PEs.** Every PE pair (or, in production, a
   route-reflector pair per AS with `next-hop-unchanged`) must peer
-  across the boundary. This lab wires the two PEs directly; an RR-based
-  variant trades the mesh for reflector configuration.
+  across the boundary. This lab wires the two PEs directly; Cisco's
+  reference design uses the RR form — built as the sibling playset
+  [interas-option-c-rr](../interas-option-c-rr/README.md).
 * Route-target coordination, as in B.
 
 ## Tear down

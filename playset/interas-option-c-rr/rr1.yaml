@@ -1,0 +1,80 @@
+# RR1 — the route reflector of AS 65501 (Cisco's RR-based Option C).
+# Holds every VPN route but forwards NO customer traffic:
+#  - iBGP VPNv4 with PE1, PE1 marked `route-reflector client` — the RR
+#    reflects between its clients and relays to/from the far AS.
+#  - Multihop eBGP VPNv4 to RR2 (2.2.2.9, two IGPs away) with
+#    `next-hop-unchanged`: the reflected routes must keep the
+#    originating PE — the true LSP endpoint — as next-hop (and keep the
+#    PE's VPN label). Without the knob, eBGP would rewrite the next-hop
+#    to the RR, which is not in the forwarding path.
+#  - iBGP labeled-unicast to ASBR1: originates its own loopback into
+#    BGP-LU (so RR2 can reach it) and learns the far AS's loopbacks
+#    (so the multihop session and its TCP path resolve).
+interface:
+- if-name: lo
+  ipv4:
+    address: 1.1.1.9/32
+- if-name: rr1-p1
+  ipv4:
+    address: 10.1.0.10/30
+system:
+  hostname: rr1
+router:
+  isis:
+    net: 49.0001.0000.0000.0009.00
+    hostname: rr1
+    is-type: level-2-only
+    segment-routing: mpls
+    te-router-id: 1.1.1.9
+    interface:
+    - if-name: lo
+      ipv4:
+        enabled: true
+        prefix-sid:
+          index: 19
+    - if-name: rr1-p1
+      network-type: point-to-point
+      metric: 10
+      ipv4:
+        enabled: true
+  bgp:
+    global:
+      as: 65501
+      router-id: 1.1.1.9
+    timer:
+      adv-interval:
+        ibgp: 1
+        ebgp: 1
+    neighbor:
+    - remote-address: 1.1.1.1        # PE1 — VPNv4 route-reflector client
+      remote-as: 65501
+      timers: {connect-retry-time: 3}
+      update-source: 1.1.1.9
+      enabled: true
+      route-reflector:
+        client: true
+      afi-safi:
+      - name: vpnv4
+        enabled: true
+    - remote-address: 1.1.1.3        # ASBR1 — labeled-unicast only
+      remote-as: 65501
+      timers: {connect-retry-time: 3}
+      update-source: 1.1.1.9
+      enabled: true
+      afi-safi:
+      - name: label-v4
+        enabled: true
+    - remote-address: 2.2.2.9        # RR2 — multihop eBGP VPNv4
+      remote-as: 65502
+      ebgp-multihop: 10
+      timers: {connect-retry-time: 3}
+      update-source: 1.1.1.9
+      enabled: true
+      afi-safi:
+      - name: vpnv4
+        enabled: true
+        next-hop-unchanged: true     # <- THE RR-based Option C knob
+    afi-safi:
+    - name: label-v4
+      network:
+      - prefix: 1.1.1.9/32
