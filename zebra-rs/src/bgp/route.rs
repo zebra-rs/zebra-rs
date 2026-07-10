@@ -1229,6 +1229,16 @@ pub struct BgpRib {
     /// (`route_ipv4_update` / `route_ipv6_update`); `route_update_ipv4` /
     /// `…ipv6` suppress the advertise. Default `false` (ordinary route).
     pub vrf_transit_only: bool,
+    /// A per-VRF row imported from the VPN table (`handle_import_v4` /
+    /// `…v6`). Such rows keep `typ: Originated` — the VRF FIB-install
+    /// path recognizes tunnel rows by that type — but semantically they
+    /// are iBGP-learned, so best-path must NOT treat them as locally
+    /// originated: consulted only by `is_better` (skips the
+    /// locally-originated tiebreak and ranks them below eBGP), so a
+    /// directly-connected CE's eBGP route beats a reflected copy of the
+    /// same prefix — e.g. the echo of a PE's own export that an Inter-AS
+    /// Option AB hybrid ASBR re-originates back at it. Default `false`.
+    pub vrf_imported: bool,
     /// EVPN RFC 9251 §9.1 Flags octet (IGMP/MLD version + include/exclude
     /// mode). The Flags field is NOT part of the SMET (Type-6) or Join/Leave
     /// Synch (Type-7/8) route key, so it rides here on the path; the
@@ -1346,6 +1356,7 @@ impl BgpRib {
             stale,
             esi: None,
             vrf_transit_only: false,
+            vrf_imported: false,
             smet_flags: 0,
             igmp_max_resp_time: 0,
             ingress_region: None,
@@ -1572,8 +1583,13 @@ impl<P: Prefix + Copy> LocalRibTable<P> {
         //     return cand_cluster_len < incb_cluster_len;
         // }
 
-        let cand_local = matches!(cand.typ, BgpRibType::Originated);
-        let incb_local = matches!(incb.typ, BgpRibType::Originated);
+        // Genuine local originations only: a VRF row imported from the VPN
+        // table carries `typ: Originated` for FIB-install purposes but is
+        // semantically iBGP-learned (`vrf_imported`) — it must not beat a
+        // directly-connected CE's eBGP route here (Inter-AS Option AB's
+        // hybrid re-export echoes a PE's own prefixes back at it).
+        let cand_local = matches!(cand.typ, BgpRibType::Originated) && !cand.vrf_imported;
+        let incb_local = matches!(incb.typ, BgpRibType::Originated) && !incb.vrf_imported;
         if cand_local != incb_local {
             return (cand_local, Reason::Originated);
         }
@@ -1603,8 +1619,8 @@ impl<P: Prefix + Copy> LocalRibTable<P> {
             }
         }
 
-        let cand_type_rank = Self::route_type_rank(cand.typ);
-        let incb_type_rank = Self::route_type_rank(incb.typ);
+        let cand_type_rank = Self::route_type_rank(cand);
+        let incb_type_rank = Self::route_type_rank(incb);
         if cand_type_rank != incb_type_rank {
             return (cand_type_rank < incb_type_rank, Reason::Origin);
         }
@@ -1644,8 +1660,14 @@ impl<P: Prefix + Copy> LocalRibTable<P> {
         }
     }
 
-    fn route_type_rank(typ: BgpRibType) -> u8 {
-        match typ {
+    fn route_type_rank(rib: &BgpRib) -> u8 {
+        // A VRF-imported row is iBGP-learned in substance (its `Originated`
+        // type only marks the tunnel FIB-install path) — rank it with iBGP
+        // so RFC 4271 §9.1.2.2's prefer-external picks a direct CE route.
+        if rib.vrf_imported {
+            return 2;
+        }
+        match rib.typ {
             BgpRibType::Originated => 0,
             BgpRibType::EBGP => 1,
             BgpRibType::IBGP => 2,
@@ -20534,5 +20556,63 @@ mod as_sets_withdraw_tests {
             }
             ref other => panic!("expected rewritten VPNv4 next-hop, got {other:?}"),
         }
+    }
+
+    /// A VRF row imported from the VPN table keeps `typ: Originated` (the
+    /// tunnel FIB-install path keys on it) but must lose best-path to a
+    /// directly-connected CE's eBGP route for the same prefix — the
+    /// Inter-AS Option AB hybrid re-export echoes a PE's own prefixes
+    /// back at it, and preferring the echo loops traffic into the core.
+    /// A genuine local origination (network statement) still wins.
+    #[test]
+    fn vrf_imported_row_loses_to_direct_ce_ebgp_route() {
+        use super::{LocalRibTable, ORIGINATED_PEER, Reason};
+        use bgp_packet::LocalPref;
+        use ipnet::Ipv4Net;
+
+        let ce_row = || {
+            BgpRib::new(
+                0, // the CE peer's ident
+                Ipv4Addr::new(10, 13, 0, 1),
+                BgpRibType::EBGP,
+                0,
+                0,
+                &attr_with_path("65513"),
+                None,
+                None,
+                false,
+            )
+        };
+        let originated_row = |vrf_imported: bool| {
+            let mut attr = attr_with_path("65513");
+            attr.local_pref = Some(LocalPref::default());
+            let mut rib = BgpRib::new(
+                ORIGINATED_PEER,
+                Ipv4Addr::new(2, 2, 2, 3),
+                BgpRibType::Originated,
+                0,
+                0,
+                &attr,
+                None,
+                None,
+                false,
+            );
+            rib.vrf_imported = vrf_imported;
+            rib
+        };
+
+        // Imported echo vs direct CE route: the CE route wins, both ways.
+        let imported = originated_row(true);
+        let ce = ce_row();
+        let (better, _) = LocalRibTable::<Ipv4Net>::is_better(&ce, &imported);
+        assert!(better, "direct CE eBGP route must beat the imported echo");
+        let (better, _) = LocalRibTable::<Ipv4Net>::is_better(&imported, &ce);
+        assert!(!better, "the imported echo must not beat the CE route");
+
+        // A genuine local origination still beats the CE route.
+        let local = originated_row(false);
+        let (better, reason) = LocalRibTable::<Ipv4Net>::is_better(&local, &ce_row());
+        assert!(better, "genuine local origination must still win");
+        assert!(matches!(reason, Reason::Originated));
     }
 }
