@@ -759,6 +759,11 @@ pub struct Bgp {
     /// single-hop eBGP session riding the downed interface instead of
     /// waiting out the hold timer. See [`Self::link_down_failover`].
     pub fast_external_failover: bool,
+    /// `router bgp as-sets-withdraw` (zebra-bgp-as-sets-withdraw.yang).
+    /// When true (default), enforce RFC 9774: treat received UPDATEs
+    /// whose AS_PATH carries AS_SET or AS_CONFED_SET as withdraw, and
+    /// do not advertise such segments on egress.
+    pub as_sets_withdraw: bool,
     pub peers: PeerMap,
     /// Instance-level BFD defaults (`router bgp { bfd {} }`), inherited by
     /// every neighbor and overridden per neighbor (see
@@ -1173,6 +1178,7 @@ impl Bgp {
             hostname: None,
             no_fib_install: false,
             fast_external_failover: true,
+            as_sets_withdraw: true,
             peers: PeerMap::new(),
             bfd: PeerBfdConfig::default(),
             tx,
@@ -2061,6 +2067,7 @@ impl Bgp {
             vrf_transport_v4: None,
             vrf_transport_v6: None,
             central_label_alloc: self.vrf_label_alloc.as_mut(),
+            as_sets_withdraw: self.as_sets_withdraw,
         };
         let Some(peer) = self.peers.get_mut_by_idx(ident) else {
             return;
@@ -2152,6 +2159,7 @@ impl Bgp {
                     vrf_transport_v4: None,
                     vrf_transport_v6: None,
                     central_label_alloc: self.vrf_label_alloc.as_mut(),
+                    as_sets_withdraw: self.as_sets_withdraw,
                 };
 
                 fsm(
@@ -3311,6 +3319,7 @@ impl Bgp {
                 vrf_transport_v4: None,
                 vrf_transport_v6: None,
                 central_label_alloc: None,
+                as_sets_withdraw: self.as_sets_withdraw,
             };
             super::route::route_advertise_to_peers(
                 Some(rd),
@@ -3386,6 +3395,7 @@ impl Bgp {
                 vrf_transport_v4: None,
                 vrf_transport_v6: None,
                 central_label_alloc: None,
+                as_sets_withdraw: self.as_sets_withdraw,
             };
             super::route::route_advertise_to_peers_vpnv6(
                 rd,
@@ -4171,6 +4181,7 @@ impl Bgp {
             vrf_transport_v4: None,
             vrf_transport_v6: None,
             central_label_alloc: None,
+            as_sets_withdraw: self.as_sets_withdraw,
         };
         match &dep {
             NhtDep::V4(p) => {
@@ -4777,6 +4788,7 @@ impl Bgp {
             vrf_transport_v4: None,
             vrf_transport_v6: None,
             central_label_alloc: None,
+            as_sets_withdraw: self.as_sets_withdraw,
         };
         for (prefix, best) in &winners_v4 {
             super::route::fib_install_v4(&top, *prefix, std::slice::from_ref(best));
@@ -4980,6 +4992,7 @@ impl Bgp {
             vrf_transport_v4: None,
             vrf_transport_v6: None,
             central_label_alloc: self.vrf_label_alloc.as_mut(),
+            as_sets_withdraw: self.as_sets_withdraw,
         };
         super::route::route_apply_bestpath_v4_batch(&mut bgp_ref, &mut self.peers, deltas);
     }
@@ -5011,7 +5024,7 @@ impl Bgp {
                 .flatten(),
             egress_high_water: high_water,
         };
-        let ctx = std::sync::Arc::new(peer.sync_ctx(self.router_id));
+        let ctx = std::sync::Arc::new(peer.sync_ctx(self.router_id, self.as_sets_withdraw));
         let req_id = self.pending_dumps_v4.start(ident, n);
         self.shards
             .as_ref()
@@ -5208,6 +5221,7 @@ impl Bgp {
                     vrf_transport_v4: None,
                     vrf_transport_v6: None,
                     central_label_alloc: None,
+                    as_sets_withdraw: self.as_sets_withdraw,
                 };
                 super::route::route_advertise_to_peers(
                     Some(rd),
@@ -5319,6 +5333,7 @@ impl Bgp {
                     vrf_transport_v4: None,
                     vrf_transport_v6: None,
                     central_label_alloc: None,
+                    as_sets_withdraw: self.as_sets_withdraw,
                 };
                 super::route::route_advertise_to_peers(
                     Some(rd),
@@ -5481,6 +5496,7 @@ impl Bgp {
                     vrf_transport_v4: None,
                     vrf_transport_v6: None,
                     central_label_alloc: None,
+                    as_sets_withdraw: self.as_sets_withdraw,
                 };
                 super::route::route_advertise_to_peers_vpnv6(
                     rd,
@@ -5570,6 +5586,7 @@ impl Bgp {
                     vrf_transport_v4: None,
                     vrf_transport_v6: None,
                     central_label_alloc: None,
+                    as_sets_withdraw: self.as_sets_withdraw,
                 };
                 super::route::route_advertise_to_peers_vpnv6(
                     rd,

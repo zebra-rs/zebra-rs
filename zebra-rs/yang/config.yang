@@ -125,6 +125,10 @@ module config {
     prefix zbao;
   }
 
+  import zebra-bgp-as-sets-withdraw {
+    prefix zbasw;
+  }
+
   import zebra-bgp-remove-private-as {
     prefix zbrpa;
   }

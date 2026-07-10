@@ -34,6 +34,7 @@
   - [allowas-in (Inbound AS_PATH Loop Relaxation)](ch-02-13-bgp-allowas-in.md)
   - [Remove Private AS](ch-02-14-bgp-remove-private-as.md)
   - [Enforce First AS](ch-02-15-bgp-enforce-first-as.md)
+  - [AS_SET / AS_CONFED_SET Withdrawal (RFC 9774)](ch-02-39-bgp-as-sets-withdraw.md)
   - [Well-Known Communities](ch-02-24-bgp-well-known-communities.md)
   - [Table-Map (Policy at the BGP→RIB Install Point)](ch-02-28-bgp-table-map.md)
   - [disable-connected-check](ch-02-16-bgp-disable-connected-check.md)

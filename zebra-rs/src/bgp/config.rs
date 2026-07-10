@@ -90,6 +90,18 @@ fn config_global_fast_external_failover(bgp: &mut Bgp, mut args: Args, op: Confi
     Some(())
 }
 
+/// `set router bgp as-sets-withdraw <true|false>` — RFC 9774 global
+/// toggle (zebra-bgp-as-sets-withdraw.yang). On by default: received
+/// UPDATEs whose AS_PATH or AS4_PATH carry AS_SET / AS_CONFED_SET are
+/// treat-as-withdraw, and such segments are not originated on egress.
+/// Set `false` to opt out during a transition period. Delete restores
+/// the default (`true`).
+fn config_as_sets_withdraw(bgp: &mut Bgp, mut args: Args, op: ConfigOp) -> Option<()> {
+    let flag = args.boolean().unwrap_or(true);
+    bgp.as_sets_withdraw = !op.is_set() || flag;
+    Some(())
+}
+
 /// `set router bgp lua-script <name> source-path <path>` — load a named
 /// Lua script from a file into the global script registry. With the `lua`
 /// build feature off the registry is still populated (so a config
@@ -188,7 +200,13 @@ fn reassign_all_update_groups(bgp: &mut Bgp) {
         .collect();
     for ident in idents {
         super::update_group::detach(&mut bgp.update_groups, &mut bgp.peers, ident);
-        super::update_group::attach(&mut bgp.update_groups, &mut bgp.peers, ident, router_id);
+        super::update_group::attach(
+            &mut bgp.update_groups,
+            &mut bgp.peers,
+            ident,
+            router_id,
+            bgp.as_sets_withdraw,
+        );
     }
 }
 
@@ -347,6 +365,7 @@ fn config_peer(bgp: &mut Bgp, mut args: Args, op: ConfigOp) -> Option<()> {
             vrf_transport_v4: None,
             vrf_transport_v6: None,
             central_label_alloc: None,
+            as_sets_withdraw: bgp.as_sets_withdraw,
         };
         route_clean(peer_idx, &mut bgp_ref, &mut bgp.peers, bgp.shards.as_ref());
         // Update-groups live outside `PeerMap`: removal below purges
@@ -4129,6 +4148,7 @@ impl Bgp {
             "/router/bgp/fast-external-failover",
             config_global_fast_external_failover,
         );
+        self.callback_add("/router/bgp/as-sets-withdraw", config_as_sets_withdraw);
         // `router bgp port <0-65535>` (zebra-bgp-transport.yang): the
         // listener port; 0 disables listening.
         self.callback_add("/router/bgp/port", config_global_port);
@@ -5897,6 +5917,28 @@ mod neighbor_group_wiring_tests {
             }
         }
         out
+    }
+
+    /// `as-sets-withdraw` is a default-ON global boolean (RFC 9774):
+    /// Set false opts out, Set true re-enables, and Delete restores the
+    /// default (true).
+    #[tokio::test]
+    async fn as_sets_withdraw_knob_transitions() {
+        let mut bgp = fresh_bgp();
+        assert!(bgp.as_sets_withdraw, "must default to enabled");
+
+        config_as_sets_withdraw(&mut bgp, arg_words(&["false"]), ConfigOp::Set).unwrap();
+        assert!(!bgp.as_sets_withdraw, "set false must opt out");
+
+        config_as_sets_withdraw(&mut bgp, arg_words(&["true"]), ConfigOp::Set).unwrap();
+        assert!(bgp.as_sets_withdraw, "set true must re-enable");
+
+        config_as_sets_withdraw(&mut bgp, arg_words(&["false"]), ConfigOp::Set).unwrap();
+        config_as_sets_withdraw(&mut bgp, arg_words(&["false"]), ConfigOp::Delete).unwrap();
+        assert!(
+            bgp.as_sets_withdraw,
+            "delete must restore the default (true)",
+        );
     }
 
     /// `fast-external-failover` is a default-ON global boolean (IOS-XR

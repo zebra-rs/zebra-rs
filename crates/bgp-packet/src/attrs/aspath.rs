@@ -389,6 +389,14 @@ impl As4Path {
         self.length
     }
 
+    /// True when the path carries an AS_SET or AS_CONFED_SET segment
+    /// (RFC 9774 deprecated types).
+    pub fn contains_as_set_or_confed_set(&self) -> bool {
+        self.segs
+            .iter()
+            .any(|seg| seg.typ == AS_SET || seg.typ == AS_CONFED_SET)
+    }
+
     /// Returns the count of distinct ASes across all segments
     /// (sequences, sets, confederation segments). Used by the
     /// policy engine for `match as-path-len-uniq`.
@@ -740,6 +748,22 @@ mod tests {
         // AS_SET: Entire set counts as 1
         let aspath: As4Path = As4Path::from_str("1 2 {3 4 5}").unwrap();
         assert_eq!(aspath.length(), 3); // 2 from sequence + 1 from set
+        assert!(aspath.contains_as_set_or_confed_set());
+    }
+
+    #[test]
+    fn contains_as_set_or_confed_set_detects_deprecated_segments() {
+        let seq = As4Path::from_str("65001 65002").unwrap();
+        assert!(!seq.contains_as_set_or_confed_set());
+
+        let as_set = As4Path::from_str("65001 {65010 65011}").unwrap();
+        assert!(as_set.contains_as_set_or_confed_set());
+
+        let confed_set = As4Path::from_str("65001 [65010 65011]").unwrap();
+        assert!(confed_set.contains_as_set_or_confed_set());
+
+        let confed_seq = As4Path::from_str("65001 (65010)").unwrap();
+        assert!(!confed_seq.contains_as_set_or_confed_set());
     }
 
     #[test]

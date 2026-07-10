@@ -31,6 +31,7 @@ implementation; the corresponding features track the referenced draft revision.
 | RFC 9012 | Tunnel Encapsulation Attribute, including the Color extended community. |
 | RFC 7311 | The Accumulated IGP Metric Attribute for BGP (AIGP). |
 | RFC 7606 | Revised Error Handling for BGP UPDATE messages (treat-as-withdraw / attribute discard). |
+| RFC 9774 | Deprecation of AS_SET and AS_CONFED_SET in BGP (`as-sets-withdraw`, on by default). |
 | RFC 4456 | BGP Route Reflection — an alternative to full IBGP mesh. |
 | RFC 7947 | Internet Exchange BGP Route Server behaviour. |
 | RFC 2385 | Protection of BGP Sessions via the TCP MD5 Signature Option. |

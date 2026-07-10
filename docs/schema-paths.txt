@@ -10,6 +10,7 @@
 /router/bgp/global/hostname	leaf
 /router/bgp/global/no-fib-install	leaf
 /router/bgp/global/fast-external-failover	leaf
+/router/bgp/as-sets-withdraw	leaf
 /router/bgp/segment-routing	container
 /router/bgp/segment-routing/srv6	container
 /router/bgp/segment-routing/srv6/ipv6-unicast	p-container

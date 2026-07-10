@@ -31,6 +31,12 @@ AS, so an iBGP UPDATE legitimately starts with whatever AS originated or
 last-prepended the route; the knob is a no-op on iBGP peers and is
 ignored.
 
+Globally, [AS_SET / AS_CONFED_SET withdrawal (RFC
+9774)](ch-02-39-bgp-as-sets-withdraw.md) applies treat-as-withdraw to
+any inbound UPDATE whose path contains `{…}` or `[…]` segments when
+`as-sets-withdraw` is enabled (the default). That is separate from this
+per-neighbor check.
+
 ## The problem it catches
 
 ```
