@@ -1889,11 +1889,15 @@ pub fn router_id_show(rib: &Rib, _args: Args, json: bool) -> String {
     format!("Router ID: {} ({})\n", rib.router_id, source)
 }
 
-pub fn hostname_show(_rib: &Rib, _args: Args, json: bool) -> String {
-    let name = hostname::get()
-        .ok()
-        .and_then(|s| s.into_string().ok())
-        .filter(|s| !s.is_empty());
+pub fn hostname_show(rib: &Rib, _args: Args, json: bool) -> String {
+    // Configured `system hostname` wins; the OS hostname is the
+    // fallback — the same precedence the vty prompt applies.
+    let name = rib.hostname_config.clone().or_else(|| {
+        hostname::get()
+            .ok()
+            .and_then(|s| s.into_string().ok())
+            .filter(|s| !s.is_empty())
+    });
     if json {
         // `name` is `Option<String>`: a resolved hostname or JSON `null`.
         return serde_json::to_string_pretty(&serde_json::json!({ "hostname": name }))

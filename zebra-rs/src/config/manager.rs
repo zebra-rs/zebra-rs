@@ -926,6 +926,14 @@ impl ConfigManager {
         (code, comps)
     }
 
+    /// The running-config `system hostname` value, or `None` when
+    /// unconfigured. Every Execute reply carries this so the vty
+    /// shell's prompt tracks the configured name (see
+    /// `ExecuteResponse::hostname`).
+    fn running_hostname(&self) -> Option<String> {
+        hostname_from_config(&self.store.running.borrow())
+    }
+
     pub async fn process_message(&mut self, m: Message) {
         match m {
             Message::Execute(req) => {
@@ -938,6 +946,9 @@ impl ConfigManager {
                         resp.code = ExecCode::Nomatch;
                     }
                 }
+                // Stamped after `execute` so a `commit` that changed
+                // the hostname reports the just-promoted value.
+                resp.hostname = self.running_hostname();
                 let _ = req.resp.send(resp);
             }
             Message::Completion(req) => {
@@ -1355,6 +1366,53 @@ pub fn config_format_type(config_str: &str) -> ConfigFormat {
         ConfigFormat::SetDelete
     } else {
         ConfigFormat::Yaml
+    }
+}
+
+/// Extract the `system hostname` leaf value from a config tree, or
+/// `None` when the leaf is absent or empty. Free function so the
+/// lookup is unit-testable without a full `ConfigManager`.
+fn hostname_from_config(config: &Config) -> Option<String> {
+    let system = config.lookup(&"system".to_string())?;
+    let hostname = system.lookup(&"hostname".to_string())?;
+    let value = hostname.value.borrow().clone();
+    (!value.is_empty()).then_some(value)
+}
+
+#[cfg(test)]
+mod hostname_lookup_tests {
+    use super::*;
+    use std::rc::Rc;
+
+    fn tree(children: &[(&str, &str)]) -> Rc<Config> {
+        let root = Rc::new(Config::new("".to_string(), None));
+        let system = Rc::new(Config::new("system".to_string(), Some(root.clone())));
+        for (name, value) in children {
+            let leaf = Rc::new(Config::new(name.to_string(), Some(system.clone())));
+            *leaf.value.borrow_mut() = value.to_string();
+            system.configs.borrow_mut().push(leaf);
+        }
+        root.configs.borrow_mut().push(system);
+        root
+    }
+
+    #[test]
+    fn configured_hostname_is_found() {
+        let root = tree(&[("hostname", "n1")]);
+        assert_eq!(hostname_from_config(&root), Some("n1".to_string()));
+    }
+
+    #[test]
+    fn absent_or_empty_hostname_is_none() {
+        // No system container at all.
+        let bare = Rc::new(Config::new("".to_string(), None));
+        assert_eq!(hostname_from_config(&bare), None);
+        // system present, hostname leaf absent.
+        let root = tree(&[("router-id", "10.0.0.1")]);
+        assert_eq!(hostname_from_config(&root), None);
+        // hostname leaf present but empty value.
+        let root = tree(&[("hostname", "")]);
+        assert_eq!(hostname_from_config(&root), None);
     }
 }
 

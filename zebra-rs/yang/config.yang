@@ -406,7 +406,13 @@ module config {
 
       leaf hostname {
         ext:help "System host name";
-        type string;
+        // RFC 1123-ish charset. Deliberately strict: the value is
+        // surfaced to the vty shell and interpolated into the prompt
+        // eval line (see vtyhelper), so quotes / spaces / shell
+        // metacharacters must be impossible by construction.
+        type string {
+          pattern "[A-Za-z0-9][A-Za-z0-9.-]*";
+        }
         description
           "The name of the host. This name can be a single domain label or the
            fully qualified domain name of the host.";
