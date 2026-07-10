@@ -1,0 +1,87 @@
+# ASBR2 — autonomous system border router of AS 65502. Mirror of ASBR1:
+# per-VRF links + per-VRF eBGP toward AS 65501, iBGP VPNv4 toward PE2.
+# Note the RD/RT values differ from AS 65501's on purpose — no VPN
+# attribute crosses the Option A boundary, so the ASes need not agree.
+vrf:
+- name: cust1
+  ipv4:
+    route-target:
+      import:
+      - 65502:100
+      export:
+      - 65502:100
+- name: cust2
+  ipv4:
+    route-target:
+      import:
+      - 65502:200
+      export:
+      - 65502:200
+interface:
+- if-name: lo
+  ipv4:
+    address: 2.2.2.1/32
+- if-name: asbr2-cust1
+  vrf: cust1
+  ipv4:
+    address: 192.168.1.2/30
+- if-name: asbr2-cust2
+  vrf: cust2
+  ipv4:
+    address: 192.168.2.2/30
+- if-name: asbr2-p2
+  ipv4:
+    address: 10.2.0.1/30
+system:
+  hostname: asbr2
+router:
+  isis:
+    net: 49.0002.0000.0000.0001.00
+    hostname: asbr2
+    is-type: level-2-only
+    segment-routing: mpls
+    te-router-id: 2.2.2.1
+    interface:
+    - if-name: lo
+      ipv4:
+        enabled: true
+        prefix-sid:
+          index: 21
+    - if-name: asbr2-p2
+      network-type: point-to-point
+      metric: 10
+      ipv4:
+        enabled: true
+  bgp:
+    global:
+      as: 65502
+      router-id: 2.2.2.1
+    timer:
+      adv-interval:
+        ebgp: 3
+    neighbor:
+    - remote-address: 2.2.2.3
+      remote-as: 65502
+      timers: {connect-retry-time: 3}
+      update-source: 2.2.2.1
+      enabled: true
+      afi-safi:
+      - name: vpnv4
+        enabled: true
+    vrf:
+    - name: cust1
+      rd: 65502:1
+      neighbor:
+      - remote-address: 192.168.1.1
+        remote-as: 65501
+        afi-safi:
+        - name: ipv4
+          enabled: true
+    - name: cust2
+      rd: 65502:2
+      neighbor:
+      - remote-address: 192.168.2.1
+        remote-as: 65501
+        afi-safi:
+        - name: ipv4
+          enabled: true

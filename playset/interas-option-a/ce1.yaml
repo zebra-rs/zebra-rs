@@ -1,0 +1,33 @@
+# CE1 — customer "cust1", site A (AS 65511). Plain eBGP to PE1; the
+# loopback 172.16.1.1/32 is originated via `redistribute connected` and
+# is the ping source toward site B. cust2's CE2 uses the *same* loopback
+# address — the VPNs keep the overlap apart.
+interface:
+- if-name: lo
+  ipv4:
+    address: 172.16.1.1/32
+- if-name: ce1-pe1
+  ipv4:
+    address: 10.11.0.1/30
+system:
+  hostname: ce1
+router:
+  bgp:
+    global:
+      as: 65511
+      router-id: 10.11.0.1
+    timer:
+      adv-interval:
+        ebgp: 3
+    neighbor:
+    - remote-address: 10.11.0.2
+      remote-as: 65501
+      timers: {connect-retry-time: 3}
+      enabled: true
+      afi-safi:
+      - name: ipv4
+        enabled: true
+    afi-safi:
+    - name: ipv4
+      redistribute:
+        connected: {}
