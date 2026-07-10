@@ -36,7 +36,7 @@ gitignored.
 > up only one of them at once — `up.sh` tears down leftovers of the same
 > names first.
 
-## TI-LFA fast-reroute family
+## SRv6 & SR-MPLS with TI-LFA fast-reroute
 
 Four labs, one topology — the RFC 9855 example network with two edge hosts
 attached — covering the IGP x data-plane matrix. Every walkthrough follows
