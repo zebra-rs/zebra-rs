@@ -69,18 +69,29 @@ Some cross-cutting themes to look for:
   (SRv6) — both walkthroughs end with a wire capture of protected
   edge-to-edge traffic (a 4-label stack in one world, a double SRH in the
   other).
-* **`backup-as-primary`.** All four labs use this knob to pin live traffic
+* **`backup-as-primary`.** Every lab uses this knob to pin live traffic
   onto the TI-LFA repair while every link stays up, which makes the repair
   path observable with plain `tcpdump`.
 
-## BGP EVPN
+## BGP EVPN VXLAN
 
-| playset | scheme |
-|:--|:--|
-| [bgp-evpn-vxlan4](bgp-evpn-vxlan4/README.md) | one L2 segment stretched across two VTEPs over an IPv4 VXLAN underlay — Type-2/Type-3 EVPN control plane driving the kernel's single-VXLAN-device data plane, hosts pinging at `ttl=64` |
-| [bgp-evpn-vxlan4-multi](bgp-evpn-vxlan4-multi/README.md) | multi-tenant: two VNIs across three VTEPs, one VTEP serving both — per-VNI RD/RT keep the tenants apart, hosts in different VNIs share a subnet yet cannot reach each other |
-| [bgp-evpn-vxlan6](bgp-evpn-vxlan6/README.md) | the same stretched segment over an **IPv6** VXLAN underlay — IPv6 VTEP endpoints, next hops, PMSI, and FDB `dst`, while the RD stays IPv4 and an IPv4 tenant payload rides across an IPv6-only core |
-| [bgp-evpn-vxlan6-multi](bgp-evpn-vxlan6-multi/README.md) | multi-tenant over an **IPv6** underlay — two VNIs across three VTEPs, one serving both over its own IPv6 link; per-VNI IPv6 next hops/PMSI, IPv4 RDs, cross-VNI hosts share a subnet yet stay isolated |
+Four labs across two axes — **underlay transport** (IPv4 vs IPv6) and
+**tenancy** (single VNI vs two isolated VNIs). All share the same EVPN
+control plane (Type-2 MAC + Type-3 IMET, ingress replication) driving the
+kernel's single-VXLAN-device (`external` / `vnifilter`) data plane, and
+the same IPv4 tenant payload on `172.16.10.0/24`. Start with `vxlan4` (the
+base) and add one dimension at a time.
+
+| playset | underlay | tenancy | what it adds |
+|:--|:--|:--|:--|
+| [bgp-evpn-vxlan4](bgp-evpn-vxlan4/README.md) | IPv4 | single VNI | the base — one L2 segment stretched across two VTEPs, hosts pinging at `ttl=64` |
+| [bgp-evpn-vxlan6](bgp-evpn-vxlan6/README.md) | **IPv6** | single VNI | IPv6 VTEP endpoints, next hops, PMSI, and FDB `dst`, while the RD stays IPv4 — an IPv4 payload across an IPv6-only core |
+| [bgp-evpn-vxlan4-multi](bgp-evpn-vxlan4-multi/README.md) | IPv4 | **two VNIs** | three VTEPs, one serving both VNIs; per-VNI RD/RT isolation — hosts in different VNIs share a subnet yet cannot reach each other |
+| [bgp-evpn-vxlan6-multi](bgp-evpn-vxlan6-multi/README.md) | **IPv6** | **two VNIs** | both dimensions at once — per-VNI IPv6 next hops/PMSI each on its own underlay link, IPv4 RDs, cross-VNI isolation |
+
+The four EVPN labs reuse the same namespace names (`vtep1`..`vtep3`,
+`h1`..`h4`), so bring up only one at a time — `up.sh` sweeps leftovers of
+the same names first.
 
 ## BGP Inter-AS L3VPN (templates)
 
