@@ -339,7 +339,7 @@ impl Ospf<Ospfv3> {
 
 /// `/router/ospfv3/fast-reroute/ti-lfa` — v3 sibling of the v2
 /// `config_ospf_ti_lfa`. Gates the per-destination TI-LFA repair
-/// computation (RFC 9490); on a state change, kick an SPF recompute
+/// computation (RFC 9855); on a state change, kick an SPF recompute
 /// for every area so the v6 RIB picks up or drops repair backups. No
 /// LSA re-origination — the repair is a local install-side decision.
 fn config_ospfv3_ti_lfa(ospf: &mut Ospf<Ospfv3>, _args: Args, op: ConfigOp) -> Option<()> {

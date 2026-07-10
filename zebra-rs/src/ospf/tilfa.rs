@@ -1,4 +1,4 @@
-//! OSPFv2 TI-LFA (Topology-Independent Loop-Free Alternate, RFC 9490)
+//! OSPFv2 TI-LFA (Topology-Independent Loop-Free Alternate, RFC 9855)
 //! repair-path resolution.
 //!
 //! The post-convergence repair *list* (a sequence of Node-SID /

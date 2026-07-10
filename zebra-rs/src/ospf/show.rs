@@ -2373,7 +2373,7 @@ fn show_ospf_graph(
 }
 
 // ---------------------------------------------------------------------
-// TI-LFA (RFC 9490) show commands: `show ospf ti-lfa` (graph-level
+// TI-LFA (RFC 9855) show commands: `show ospf ti-lfa` (graph-level
 // per-destination repair lists) and `show ospf repair-list` (the
 // repair backups actually stamped onto the installed RIB).
 // ---------------------------------------------------------------------

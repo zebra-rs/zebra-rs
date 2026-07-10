@@ -116,7 +116,7 @@ fn ls_type_name(ls_type: u16) -> &'static str {
     }
 }
 
-// ---- TI-LFA (RFC 9490) ------------------------------------------
+// ---- TI-LFA (RFC 9855) ------------------------------------------
 // `show ospfv3 ti-lfa` (graph-level per-destination repair lists)
 // and `show ospfv3 repair-list` (repair backups installed on the
 // v6 RIB). v3 siblings of the v2 handlers in `show.rs`.
