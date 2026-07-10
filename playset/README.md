@@ -1,10 +1,11 @@
-# zebra-rs Playsets
+# Playsets
 
-Playsets are self-contained demo labs for zebra-rs. Each one builds a small
-network out of Linux network namespaces connected by veth pairs, runs a
-zebra-rs daemon in every node, injects per-node YAML configuration with
-`vtyctl apply -f <node>.yaml`, and walks through a feature in its README
-with real command output captured from a live run.
+Playsets are self-contained demo labs for zebra-rs — a simple, easy way to
+experience cutting-edge routing technology. Each one builds a small network out
+of Linux network namespaces connected by veth pairs, runs a zebra-rs daemon in
+every node, injects per-node YAML configuration with `vtyctl apply -f
+<node>.yaml`, and walks through a feature in its README with real command output
+captured from a live run.
 
 ## Running a playset
 
