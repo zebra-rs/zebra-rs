@@ -105,20 +105,22 @@ the same names first.
 
 ## BGP Inter-AS L3VPN
 
-Two providers, one VPN — the RFC 4364 §10 options for handing L3VPN
-routes across an AS boundary. All three labs run the same ten routers,
-customers, and overlapping addressing; only the border model changes:
+Two providers, one VPN — the RFC 4364 §10 options (plus Cisco's AB
+hybrid) for handing L3VPN routes across an AS boundary. All the labs run
+the same ten routers, customers, and overlapping addressing (the RR
+variant adds two route reflectors); only the border model changes:
 
-|                                 | Option A       | Option B            | Option C       |
-|:--------------------------------|:---------------|:--------------------|:---------------|
-| labels crossing the border      | 0 (plain IP)   | 1 (VPN)             | 2 (LU + VPN)   |
-| VPN routes on the ASBR          | all (in VRFs)  | all (global VPNv4)  | none           |
-| ASBR state scales with          | customers      | VPN routes          | PEs            |
+|                                 | Option A       | Option B            | Option AB              | Option C       |
+|:--------------------------------|:---------------|:--------------------|:-----------------------|:---------------|
+| labels crossing the border      | 0 (plain IP)   | 1 (VPN)             | 1 (VPN)                | 2 (LU + VPN)   |
+| VPN routes on the ASBR          | all (in VRFs)  | all (global VPNv4)  | all (in transit VRFs)  | none           |
+| ASBR state scales with          | customers      | VPN routes          | customers              | PEs            |
 
 | playset | scheme |
 |:--|:--|
 | [interas-option-a](interas-option-a/README.md) | Option A — back-to-back VRFs: a dedicated link and a plain eBGP IPv4 session per customer between the ASBRs, MPLS never crossing the boundary. Two ASes with independent RD/RT spaces, two customers with deliberately overlapping addressing, and a three-point capture of one ping riding MPLS → plain IP → MPLS |
 | [interas-option-b](interas-option-b/README.md) | Option B — one eBGP VPNv4 session between the ASBRs carries every customer, MPLS crossing the boundary as a single label switch. Same lab as Option A with only the border changed: no VRFs on the ASBRs, coordinated RTs (independent RDs), per-route swap ILMs, and the far AS's RDs relayed unchanged |
+| [interas-option-ab](interas-option-ab/README.md) | Option AB — Cisco's hybrid: per-customer transit VRFs at each border (like A, but with no interfaces or sessions in them) riding one eBGP VPNv4 session (like B). Each ASBR terminates the VPN label into the customer's VRF, makes an IP routing decision, and re-originates under its own RD with a clean RT — the per-VPN policy point B lost, without A's per-customer sessions |
 | [interas-option-c](interas-option-c/README.md) | Option C — the ASBRs exchange only labeled PE loopbacks (BGP-LU) and hold zero VPN state; the PEs peer VPNv4 directly over a multihop eBGP session, and a three-label stack (SR transport, BGP-LU, VPN) rides from PE to PE — two labels crossing the boundary, completing the 0/1/2-label arc across A/B/C |
 | [interas-option-c-rr](interas-option-c-rr/README.md) | Option C, RR-based — Cisco's reference design: each AS adds a route reflector, the RRs exchange VPNv4 over a multihop eBGP session with `next-hop-unchanged`, and the PEs peer only with their local RR. Same data plane as the direct-PE lab; the RRs hold every VPN route and forward none of the traffic |
 

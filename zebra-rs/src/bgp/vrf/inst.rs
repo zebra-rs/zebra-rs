@@ -1307,6 +1307,11 @@ impl BgpVrf {
             stale: false,
             esi: None,
             vrf_transit_only: false,
+            // Imported from the VPN table: keep `typ: Originated` for the
+            // tunnel FIB-install path, but tell best-path this is NOT a
+            // genuine local origination (a direct CE eBGP route must win
+            // over a reflected copy of the same prefix).
+            vrf_imported: true,
             smet_flags: 0,
             igmp_max_resp_time: 0,
             ingress_region: None,
@@ -1535,6 +1540,11 @@ impl BgpVrf {
             stale: false,
             esi: None,
             vrf_transit_only: false,
+            // Imported from the VPN table: keep `typ: Originated` for the
+            // tunnel FIB-install path, but tell best-path this is NOT a
+            // genuine local origination (a direct CE eBGP route must win
+            // over a reflected copy of the same prefix).
+            vrf_imported: true,
             smet_flags: 0,
             igmp_max_resp_time: 0,
             ingress_region: None,
@@ -1954,6 +1964,7 @@ impl BgpVrf {
             stale: false,
             esi: None,
             vrf_transit_only: false,
+            vrf_imported: false,
             smet_flags: 0,
             igmp_max_resp_time: 0,
             ingress_region: None,

@@ -1,0 +1,90 @@
+# ASBR1 — autonomous system border router of AS 65501, Inter-AS Option
+# AB (Cisco's hybrid of A and B).
+#  - Like Option A it holds a VRF per customer — but with NO interface
+#    and NO per-VRF session: each is a pure transit VRF whose job is the
+#    per-VPN forwarding point (VPN label terminates here -> VRF IP
+#    lookup -> re-impose) and per-VRF RT policy.
+#  - Like Option B a SINGLE MP-eBGP VPNv4 session to ASBR2 carries every
+#    customer; the inter-AS link stays in the GLOBAL table.
+#  - `inter-as-hybrid: true` makes each VRF re-originate the VPNv4
+#    routes it imports: under the ASBR's OWN RD, with itself as next
+#    hop, a freshly allocated per-VRF label, and the VRF's export RT
+#    replacing the received RTs — exactly Cisco's Option AB route
+#    distribution. The re-export is locally originated, so
+#    next-hop-self is automatic on both legs (no knob, unlike B).
+vrf:
+- name: cust1
+  ipv4:
+    route-target:
+      import:
+      - 65501:100
+      export:
+      - 65501:100
+- name: cust2
+  ipv4:
+    route-target:
+      import:
+      - 65501:200
+      export:
+      - 65501:200
+interface:
+- if-name: lo
+  ipv4:
+    address: 1.1.1.3/32
+- if-name: asbr1-p1
+  ipv4:
+    address: 10.1.0.6/30
+- if-name: asbr1-asbr2
+  ipv4:
+    address: 192.168.100.1/30
+system:
+  hostname: asbr1
+router:
+  isis:
+    net: 49.0001.0000.0000.0003.00
+    hostname: asbr1
+    is-type: level-2-only
+    segment-routing: mpls
+    te-router-id: 1.1.1.3
+    interface:
+    - if-name: lo
+      ipv4:
+        enabled: true
+        prefix-sid:
+          index: 13
+    - if-name: asbr1-p1
+      network-type: point-to-point
+      metric: 10
+      ipv4:
+        enabled: true
+  bgp:
+    global:
+      as: 65501
+      router-id: 1.1.1.3
+    timer:
+      adv-interval:
+        ibgp: 1
+        ebgp: 1
+    neighbor:
+    - remote-address: 1.1.1.1        # PE1 — iBGP VPNv4 (no next-hop-self needed)
+      remote-as: 65501
+      timers: {connect-retry-time: 3}
+      update-source: 1.1.1.3
+      enabled: true
+      afi-safi:
+      - name: vpnv4
+        enabled: true
+    - remote-address: 192.168.100.2  # ASBR2 — single eBGP VPNv4, ALL customers
+      remote-as: 65502
+      timers: {connect-retry-time: 3}
+      enabled: true
+      afi-safi:
+      - name: vpnv4
+        enabled: true
+    vrf:
+    - name: cust1
+      rd: 65501:11
+      inter-as-hybrid: true
+    - name: cust2
+      rd: 65501:12
+      inter-as-hybrid: true
