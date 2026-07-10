@@ -215,6 +215,13 @@ Feature: OSPFv3 TI-LFA fast-reroute over SR-MPLS
     Then kernel route "2001:db8::8" in namespace "s" should eventually contain "encap mpls"
     And kernel route "2001:db8::8" in namespace "s" should eventually contain "proto ospf metric 2"
     And kernel route "2001:db8::8" in namespace "s" should eventually contain "dev s-n2"
+    # The repair stack ends with d's own node-SID label (16800), so
+    # traffic tunneled through the route label-switches all the way
+    # to d instead of being IP-routed (and possibly dropped) at the
+    # repair release point. "/16800 via" pins 16800 to the stack
+    # tail: the demoted plain-primary's single-label "encap mpls
+    # 16800 via" has no slash.
+    And kernel route "2001:db8::8" in namespace "s" should eventually contain "/16800 via"
     # End-to-end over the repair: dies if any label hop on the
     # s-n2-r1-r2-r3-d repair path fails to swap/pop/forward.
     And ping from "s" to "2001:db8::8" should succeed
