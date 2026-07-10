@@ -1,0 +1,41 @@
+interface:
+- if-name: lo
+  ipv6:
+    address: 2001:db8::8/128
+- if-name: d-n1
+  ipv6:
+    address: 2001:db8:10::2/64
+- if-name: d-r3
+  ipv6:
+    address: 2001:db8:11::2/64
+- if-name: d-e2
+  ipv6:
+    address: 2001:db8:200::1/64
+system:
+  hostname: d
+router:
+  ospfv3:
+    router-id: 10.0.0.8
+    segment-routing:
+      mpls: {}
+    area:
+    - area-id: 0.0.0.0
+      interface:
+      - if-name: lo
+        enabled: true
+        prefix-sid:
+          index: 800
+      - if-name: d-n1
+        enabled: true
+        network-type: point-to-point
+        cost: 1
+      - if-name: d-r3
+        enabled: true
+        network-type: point-to-point
+        cost: 1
+  static:
+    ipv6:
+      route:
+      - prefix: 2001:db8:100::/64
+        nexthop:
+        - address: 2001:db8::1
