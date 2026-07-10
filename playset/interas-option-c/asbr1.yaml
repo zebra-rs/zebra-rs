@@ -1,0 +1,66 @@
+# ASBR1 — autonomous system border router of AS 65501. The Option C
+# node holds NO VPN state whatsoever — no VRFs, no VPNv4 session, not
+# one customer route. It deals only in PE loopbacks:
+#  - eBGP labeled-unicast (label-v4) to ASBR2 over the global inter-AS
+#    link: exchanges the PE loopback /32s with labels (BGP-LU).
+#  - iBGP labeled-unicast to PE1 with `next-hop-self` — THE Option C
+#    knob: the re-advertised remote loopback must carry ASBR1's
+#    IGP-reachable address (and ASBR1's swap label), not the foreign
+#    inter-AS address.
+# VPN traffic transits as an opaque label swap on the middle label of
+# the stack; the inner VPN label is never touched here.
+interface:
+- if-name: lo
+  ipv4:
+    address: 1.1.1.3/32
+- if-name: asbr1-p1
+  ipv4:
+    address: 10.1.0.6/30
+- if-name: asbr1-asbr2
+  ipv4:
+    address: 192.168.100.1/30
+system:
+  hostname: asbr1
+router:
+  isis:
+    net: 49.0001.0000.0000.0003.00
+    hostname: asbr1
+    is-type: level-2-only
+    segment-routing: mpls
+    te-router-id: 1.1.1.3
+    interface:
+    - if-name: lo
+      ipv4:
+        enabled: true
+        prefix-sid:
+          index: 13
+    - if-name: asbr1-p1
+      network-type: point-to-point
+      metric: 10
+      ipv4:
+        enabled: true
+  bgp:
+    global:
+      as: 65501
+      router-id: 1.1.1.3
+    timer:
+      adv-interval:
+        ibgp: 1
+        ebgp: 1
+    neighbor:
+    - remote-address: 1.1.1.1
+      remote-as: 65501
+      timers: {connect-retry-time: 3}
+      update-source: 1.1.1.3
+      enabled: true
+      afi-safi:
+      - name: label-v4
+        enabled: true
+        next-hop-self: true
+    - remote-address: 192.168.100.2
+      remote-as: 65502
+      timers: {connect-retry-time: 3}
+      enabled: true
+      afi-safi:
+      - name: label-v4
+        enabled: true
