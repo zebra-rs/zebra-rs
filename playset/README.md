@@ -37,7 +37,7 @@ gitignored.
 > up only one of them at once — `up.sh` tears down leftovers of the same
 > names first.
 
-## SRv6 & SR-MPLS with TI-LFA fast-reroute
+## SR-MPLS & SRv6 with TI-LFA fast-reroute
 
 Seven labs, one topology — the RFC 9855 example network with two edge hosts
 attached — covering the IGP x data-plane matrix. Every walkthrough follows
@@ -50,9 +50,9 @@ Rows are the data plane, columns the IGP:
 
 | | IS-IS | OSPFv2 | OSPFv3 |
 |:--|:--|:--|:--|
+| **SR-MPLS** | [isis-srmpls](isis-srmpls/README.md) | [ospfv2-srmpls](ospfv2-srmpls/README.md) | [ospfv3-srmpls](ospfv3-srmpls/README.md) |
 | **SRv6 (classic)** | [isis-srv6-classic](isis-srv6-classic/README.md) | — | [ospfv3-srv6-classic](ospfv3-srv6-classic/README.md) |
 | **SRv6 (uSID)** | [isis-srv6-usid](isis-srv6-usid/README.md) | — | [ospfv3-srv6-usid](ospfv3-srv6-usid/README.md) |
-| **SR-MPLS** | [isis-srmpls](isis-srmpls/README.md) | [ospfv2-srmpls](ospfv2-srmpls/README.md) | [ospfv3-srmpls](ospfv3-srmpls/README.md) |
 
 The two **SRv6** rows differ only in SID encoding — **classic** RFC 8986
 (RFC 9352 for IS-IS, RFC 9513 for OSPFv3) versus **uSID** / NEXT-C-SID
