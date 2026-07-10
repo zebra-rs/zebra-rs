@@ -5,6 +5,71 @@
 # Fields "distribution" and "urgency" are optional per-entry; if you omit
 # them, the defaults from .chglog.yml (or chglog config) are used.
 
+- semver: 26.7.2
+  date: 2026-07-10T18:00:00+09:00
+  distribution: unstable
+  urgency: medium
+  packager: Kunihiro Ishiguro <kunihiro@zebra.rs>
+  changes:
+    - note: |
+        ### BGP configuration / YANG
+        * Neighbor schema audit: remove 43 handler-less (orphan) nodes
+          from the neighbor subtree, restore the standard `enabled`
+          leaf, fill/trim CLI help across the tree; global
+          graceful-restart / route-flap-damping / peer-group orphans
+          removed
+        * `neighbor X description LINE` restored with a real config
+          handler (global and per-VRF CE peers), echoed in
+          `show bgp neighbors`; description values take the rest of
+          the command line
+        * `redistribute` presence containers (global per-AFI and
+          per-VRF per-family) are `ext:non-empty`: a bare container is
+          rejected at commit and pruned when its last source is deleted
+        * FRR-compatible AS-path regex matching; route-map `set`
+          for extended / large communities
+        * `shards` / `peer-task` knobs moved under a `sharding`
+          container; global `hostname` / `no-fib-install` /
+          `fast-external-failover` hoisted to direct `router bgp`
+          children
+
+    - note: |
+        ### IS-IS
+        * LAN DIS stability: converge re-election on priority change,
+          regenerate the DIS pseudonode LSP on LAN membership change
+        * `show isis topology` output matches the FRR layout
+        * Connected-prefix reachability advertised with the interface
+          metric
+
+    - note: |
+        ### cradle dataplane / RIB
+        * `system cradle enabled` knob gates the tee (endpoint moved
+          under it); tee dialed over Linux abstract Unix sockets;
+          FDB guard fix; "enabled" logged once; book chapter for the
+          eBPF data-plane integration
+        * Static route nexthops resolve recursively through the
+          underlay
+        * IS-IS SR-MPLS lab harness (playset)
+
+    - note: |
+        ### VTY / CLI
+        * `?` / possible-completions help paged through the pager;
+          drop `--raw-control-chars` so wrapped route lines keep the
+          top of the output
+        * CLI help filled in for every set/show command node
+        * Root enters configure mode silently; VRF-task and vty-auth
+          startup logs gated behind tracing
+
+    - note: |
+        ### Build / packaging / infrastructure
+        * Lua scripting engine disabled by default for now (BGP Lua
+          schema commented out)
+        * nanomsg dependency removed
+        * Packaging metadata fixes (homepage, license); drop the
+          redundant `--features lua` from the release build; clippy
+          1.97 lint sweep
+        * BDD: clean-env step sweeps a stale shared startup config
+          (/etc/zebra-rs/zebra-rs.conf)
+
 - semver: 26.7.1
   date: 2026-07-06T18:00:00+09:00
   distribution: unstable
