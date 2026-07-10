@@ -233,6 +233,13 @@ submodule ietf-bgp-common {
     // route-flap-damping was removed from neighbor-group-config: it was an
     // unhandled orphan (no config handler) on every consumer of this
     // grouping and has been dropped.
+    leaf description {
+      ext:help "Free-form neighbor description";
+      type string;
+      description
+        "Free-form description string echoed in `show bgp neighbors`
+         output.";
+    }
     container timers {
       ext:help "Per-neighbor BGP timers";
       description

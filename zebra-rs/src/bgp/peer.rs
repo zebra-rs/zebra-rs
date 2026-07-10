@@ -604,6 +604,9 @@ pub struct PeerConfig {
     /// handling (transitive-retain + Partial / non-transitive-drop /
     /// well-known NOTIFICATION) can be exercised end to end. `None` = off.
     pub attach_unknown_attr: Option<UnknownAttr>,
+    /// Free-form operator note (`neighbor <addr> description <text>`),
+    /// echoed under the header line of `show bgp neighbors`.
+    pub description: Option<String>,
 }
 
 impl Default for PeerConfig {
@@ -634,6 +637,7 @@ impl Default for PeerConfig {
             enforce_first_as: false,
             local_as: None,
             attach_unknown_attr: None,
+            description: None,
         }
     }
 }

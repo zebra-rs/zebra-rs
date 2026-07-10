@@ -2693,6 +2693,11 @@ struct Neighbor<'a> {
     /// unnumbered peer from an address-configured one.
     #[serde(skip_serializing_if = "Option::is_none")]
     interface: Option<&'a str>,
+    /// Free-form operator note (`neighbor <addr> description <text>`);
+    /// rendered as `Description: <text>` directly under the header
+    /// line, FRR-style.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    description: Option<&'a str>,
     peer_type: &'a str,
     local_as: u32,
     remote_as: u32,
@@ -3028,6 +3033,7 @@ fn fetch(peer: &Peer) -> Neighbor<'_> {
     let mut n = Neighbor {
         address: peer.address,
         interface: peer.ifname.as_deref(),
+        description: peer.config.description.as_deref(),
         remote_as: peer.remote_as,
         // The AS this session presents — the `local-as` substitute when
         // one is active (FRR prints change_local_as here too).
@@ -3161,17 +3167,22 @@ fn render(out: &mut String, neighbor: &Neighbor) -> std::fmt::Result {
 
     writeln!(
         out,
-        r#"BGP neighbor {}, remote AS {}, local AS {}, {} link
-{}  BGP version 4, remote router ID {}, local router ID {}
+        "BGP neighbor {}, remote AS {}, local AS {}, {} link",
+        identity, neighbor.remote_as, neighbor.local_as, neighbor.peer_type,
+    )?;
+    // FRR prints the operator's free-form description directly under
+    // the header line.
+    if let Some(description) = neighbor.description {
+        writeln!(out, "  Description: {}", description)?;
+    }
+    writeln!(
+        out,
+        r#"{}  BGP version 4, remote router ID {}, local router ID {}
   BGP state = {}, up for {}
   Last read 00:00:00, Last write 00:00:00
   Hold time {} seconds, keepalive {} seconds
   Sent Hold time {} seconds, sent keepalive {} seconds
   Recv Hold time {} seconds, Recieved keepalive {} seconds"#,
-        identity,
-        neighbor.remote_as,
-        neighbor.local_as,
-        neighbor.peer_type,
         host_info,
         neighbor.remote_router_id,
         neighbor.local_router_id,
@@ -5517,6 +5528,28 @@ Neighbor        V         AS   MsgRcvd   MsgSent   TblVer  InQ OutQ  Up/Down Sta
         );
     }
 
+    /// `neighbor X description <text>` renders FRR-style directly
+    /// under the header line; a peer without one gets no line.
+    #[test]
+    fn description_line_rendered_only_when_present() {
+        let mut out = String::new();
+        let n = minimal_neighbor(None);
+        render(&mut out, &n).unwrap();
+        assert!(
+            !out.contains("Description:"),
+            "no Description line without config:\n{out}"
+        );
+
+        let mut out = String::new();
+        let mut n = minimal_neighbor(None);
+        n.description = Some("core uplink");
+        render(&mut out, &n).unwrap();
+        assert!(
+            out.contains("internal link\n  Description: core uplink\n"),
+            "Description line missing or misplaced:\n{out}"
+        );
+    }
+
     /// Build a `Neighbor` DTO directly (all-`None` ND fields) and
     /// verify that `render` does NOT emit any ND block — address-keyed
     /// peers must be unaffected.
@@ -5647,6 +5680,7 @@ Neighbor        V         AS   MsgRcvd   MsgSent   TblVer  InQ OutQ  Up/Down Sta
         Neighbor {
             address: "10.0.0.1".parse().unwrap(),
             interface,
+            description: None,
             peer_type: "internal",
             local_as: 65001,
             remote_as: 65002,
