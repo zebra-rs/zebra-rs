@@ -1,0 +1,38 @@
+# P2 — provider core transit LSR of AS 65502 (runs no BGP, knows no
+# VPN). Pure IS-IS L2 + SR-MPLS; swaps / PHPs the transport label
+# between ASBR2 (sid 21 -> 16021) and PE2 (sid 23 -> 16023).
+interface:
+- if-name: lo
+  ipv4:
+    address: 2.2.2.2/32
+- if-name: p2-asbr2
+  ipv4:
+    address: 10.2.0.2/30
+- if-name: p2-pe2
+  ipv4:
+    address: 10.2.0.5/30
+system:
+  hostname: p2
+router:
+  isis:
+    net: 49.0002.0000.0000.0002.00
+    hostname: p2
+    is-type: level-2-only
+    segment-routing: mpls
+    te-router-id: 2.2.2.2
+    interface:
+    - if-name: lo
+      ipv4:
+        enabled: true
+        prefix-sid:
+          index: 22
+    - if-name: p2-asbr2
+      network-type: point-to-point
+      metric: 10
+      ipv4:
+        enabled: true
+    - if-name: p2-pe2
+      network-type: point-to-point
+      metric: 10
+      ipv4:
+        enabled: true
