@@ -20,6 +20,8 @@ IPv4 session cross it **per customer**. Nothing VPN-flavored — no VPN
 label, no RD, no route-target agreement — is exchanged between the
 providers.
 
+<img src="../images/InterASOptionA.svg" alt="Inter-AS Option A topology">
+
 ```
       customer cust1                                       customer cust1
   ce1 ─────────┐                                            ┌───────── ce3
