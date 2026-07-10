@@ -111,7 +111,7 @@ routes across an AS boundary.
 | playset | scheme |
 |:--|:--|
 | [interas-option-a](interas-option-a/README.md) | Option A — back-to-back VRFs: a dedicated link and a plain eBGP IPv4 session per customer between the ASBRs, MPLS never crossing the boundary. Two ASes with independent RD/RT spaces, two customers with deliberately overlapping addressing, and a three-point capture of one ping riding MPLS → plain IP → MPLS |
-| [interas-option-b](interas-option-b/README.md) | Option B — eBGP VPNv4 between ASBRs (topology template; walkthrough to follow) |
+| [interas-option-b](interas-option-b/README.md) | Option B — one eBGP VPNv4 session between the ASBRs carries every customer, MPLS crossing the boundary as a single label switch. Same lab as Option A with only the border changed: no VRFs on the ASBRs, coordinated RTs (independent RDs), per-route swap ILMs, and the far AS's RDs relayed unchanged |
 | [interas-option-c](interas-option-c/README.md) | Option C — multihop eBGP VPNv4 between route reflectors, labeled transport between ASes (topology template; walkthrough to follow) |
 
 ## Directory layout

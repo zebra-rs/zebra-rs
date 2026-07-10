@@ -1,0 +1,32 @@
+# CE2 — customer "cust2", site A (AS 65512). Same loopback address as
+# CE1 (172.16.1.1/32) on purpose: in Option B both customers' overlapping
+# routes cross ONE inter-AS session, kept apart only by their RDs.
+interface:
+- if-name: lo
+  ipv4:
+    address: 172.16.1.1/32
+- if-name: ce2-pe1
+  ipv4:
+    address: 10.12.0.1/30
+system:
+  hostname: ce2
+router:
+  bgp:
+    global:
+      as: 65512
+      router-id: 10.12.0.1
+    timer:
+      adv-interval:
+        ebgp: 3
+    neighbor:
+    - remote-address: 10.12.0.2
+      remote-as: 65501
+      timers: {connect-retry-time: 3}
+      enabled: true
+      afi-safi:
+      - name: ipv4
+        enabled: true
+    afi-safi:
+    - name: ipv4
+      redistribute:
+        connected: {}

@@ -1,0 +1,32 @@
+# CE1 — customer "cust1", site A (AS 65511). Identical to the Option A
+# playset: plain eBGP to PE1, loopback originated via `redistribute
+# connected`. The customer cannot tell which Inter-AS option carries it.
+interface:
+- if-name: lo
+  ipv4:
+    address: 172.16.1.1/32
+- if-name: ce1-pe1
+  ipv4:
+    address: 10.11.0.1/30
+system:
+  hostname: ce1
+router:
+  bgp:
+    global:
+      as: 65511
+      router-id: 10.11.0.1
+    timer:
+      adv-interval:
+        ebgp: 3
+    neighbor:
+    - remote-address: 10.11.0.2
+      remote-as: 65501
+      timers: {connect-retry-time: 3}
+      enabled: true
+      afi-safi:
+      - name: ipv4
+        enabled: true
+    afi-safi:
+    - name: ipv4
+      redistribute:
+        connected: {}
