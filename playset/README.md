@@ -7,6 +7,14 @@ every node, injects per-node YAML configuration with `vtyctl apply -f
 <node>.yaml`, and walks through a feature in its README with real command output
 captured from a live run.
 
+Sixteen walkthroughs in three series — [SR-MPLS & SRv6 with TI-LFA
+fast-reroute](#sr-mpls--srv6-with-ti-lfa-fast-reroute) (seven labs, one
+topology, the IGP × data-plane matrix), [BGP EVPN
+VXLAN](#bgp-evpn-vxlan) (four labs, underlay × tenancy), and [BGP
+Inter-AS L3VPN](#bgp-inter-as-l3vpn) (five labs, one border model at a
+time) — each series sharing one base topology so the labs diff cleanly
+against each other.
+
 ## Running a playset
 
 ``` shell
@@ -115,6 +123,16 @@ variant adds two route reflectors); only the border model changes:
 | labels crossing the border      | 0 (plain IP)   | 1 (VPN)             | 1 (VPN)                | 2 (LU + VPN)   |
 | VPN routes on the ASBR          | all (in VRFs)  | all (global VPNv4)  | all (in transit VRFs)  | none           |
 | ASBR state scales with          | customers      | VPN routes          | customers              | PEs            |
+
+(`interas-option-c-rr` shares Option C's column — it changes only the
+control plane, swapping the direct PE-to-PE session for Cisco's
+route-reflector design.)
+
+Read them in order — A, B, AB, C, C-RR — and diff each lab against the
+previous one: the CEs never change, the PEs barely change, and the whole
+story lives in the ASBRs. The labs share namespace names
+(`ce1`..`ce4`, `pe1`, `p1`, `asbr1`, `asbr2`, `p2`, `pe2`, plus
+`rr1`/`rr2` in the RR variant), so bring up only one at a time.
 
 | playset | scheme |
 |:--|:--|
