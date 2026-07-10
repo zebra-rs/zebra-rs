@@ -245,6 +245,27 @@ submodule ietf-bgp-neighbor {
            next-hop carried across the inter-AS eBGP link. Honored on the
            Labeled-Unicast (SAFI 4) and VPNv4 (SAFI 128) advertise paths.";
       }
+      leaf next-hop-unchanged {
+        ext:help "Keep the received next hop on eBGP advertisement";
+        ext:sort "31";
+        type boolean;
+        description
+          "Advertise routes of this address family to this eBGP neighbor
+           with their received next-hop preserved, instead of the default
+           eBGP rewrite to self. Equivalent to `neighbor X
+           next-hop-unchanged` (per address-family) in FRR / Cisco IOS.
+
+           Required on the multihop eBGP VPNv4 session between the route
+           reflectors of an RR-based Inter-AS MPLS/VPN Option C (RFC 4364
+           §10c): the RRs sit outside the forwarding path, so the
+           reflected route must keep the originating PE — the true LSP
+           endpoint — as its next-hop (and its original VPN label). The
+           receiving PE resolves that PE loopback over BGP-LU.
+
+           Honored for VPN routes on the VPNv4 (SAFI 128) advertise path;
+           locally-originated routes still advertise with self as the
+           next-hop.";
+      }
       container policy {
         ext:sort "40";
         ext:help "Per-family route-policy references";

@@ -700,6 +700,16 @@ pub struct PeerSubConfig {
     /// and forward via the ASBR's swap label. Honored on the labeled-
     /// unicast advertise paths (`route_update_labelv4` / `…v6`).
     pub next_hop_self: bool,
+    /// `afi-safi <name> next-hop-unchanged` (ietf-bgp-neighbor). When
+    /// `true`, VPN routes re-advertised to this eBGP neighbor keep their
+    /// received next-hop (and their received VPN label) instead of the
+    /// default eBGP rewrite to self. Required on the multihop eBGP VPNv4
+    /// session between the route reflectors of an RR-based Inter-AS
+    /// Option C — the RRs are outside the forwarding path, so the
+    /// reflected route must keep the originating PE as the LSP endpoint.
+    /// Locally-originated routes still rewrite. Honored on the VPNv4
+    /// advertise path (`route_update_ipv4` / `vpnv4_service_label`).
+    pub next_hop_unchanged: bool,
 }
 
 #[derive(Debug, Eq, PartialEq, PartialOrd, Ord, Hash, Clone, Copy)]
@@ -1467,6 +1477,7 @@ impl Peer {
             remote_id: self.remote_id,
             remote_address: self.address,
             vpnv4_next_hop_self: self.next_hop_self(Afi::Ip, Safi::MplsVpn),
+            vpnv4_next_hop_unchanged: self.next_hop_unchanged(Afi::Ip, Safi::MplsVpn),
             egress_as: self.egress_as(),
             out_policy: self.out_policy.clone(),
             packet_tx: self.packet_tx.clone(),
@@ -1500,6 +1511,18 @@ impl Peer {
             .sub
             .get(&AfiSafi::new(afi, safi))
             .map(|c| c.next_hop_self)
+            .unwrap_or(false)
+    }
+
+    /// Whether `afi-safi <name> next-hop-unchanged` is set for this
+    /// neighbor in the given address family. Keeps the received next-hop
+    /// (and VPN label) on eBGP advertisement of forwarded VPN routes —
+    /// see [`PeerSubConfig::next_hop_unchanged`].
+    pub fn next_hop_unchanged(&self, afi: Afi, safi: Safi) -> bool {
+        self.config
+            .sub
+            .get(&AfiSafi::new(afi, safi))
+            .map(|c| c.next_hop_unchanged)
             .unwrap_or(false)
     }
 

@@ -1,0 +1,67 @@
+# ASBR2 — autonomous system border router of AS 65502. Mirror of ASBR1:
+# labeled-unicast only (PE2 + RR2 inside with next-hop-self, ASBR1
+# across), no VRFs, no VPNv4, no customer routes.
+interface:
+- if-name: lo
+  ipv4:
+    address: 2.2.2.1/32
+- if-name: asbr2-asbr1
+  ipv4:
+    address: 192.168.100.2/30
+- if-name: asbr2-p2
+  ipv4:
+    address: 10.2.0.1/30
+system:
+  hostname: asbr2
+router:
+  isis:
+    net: 49.0002.0000.0000.0001.00
+    hostname: asbr2
+    is-type: level-2-only
+    segment-routing: mpls
+    te-router-id: 2.2.2.1
+    interface:
+    - if-name: lo
+      ipv4:
+        enabled: true
+        prefix-sid:
+          index: 21
+    - if-name: asbr2-p2
+      network-type: point-to-point
+      metric: 10
+      ipv4:
+        enabled: true
+  bgp:
+    global:
+      as: 65502
+      router-id: 2.2.2.1
+    timer:
+      adv-interval:
+        ibgp: 1
+        ebgp: 1
+    neighbor:
+    - remote-address: 2.2.2.3        # PE2 — iBGP labeled-unicast
+      remote-as: 65502
+      timers: {connect-retry-time: 3}
+      update-source: 2.2.2.1
+      enabled: true
+      afi-safi:
+      - name: label-v4
+        enabled: true
+        next-hop-self: true
+    - remote-address: 2.2.2.9        # RR2 — iBGP labeled-unicast
+      remote-as: 65502
+      timers: {connect-retry-time: 3}
+      update-source: 2.2.2.1
+      enabled: true
+      afi-safi:
+      - name: label-v4
+        enabled: true
+        next-hop-self: true
+    - remote-address: 192.168.100.1  # ASBR1 — eBGP labeled-unicast
+      remote-as: 65501
+      timers: {connect-retry-time: 3}
+      enabled: true
+      afi-safi:
+      - name: label-v4
+        enabled: true

@@ -184,6 +184,10 @@ pub struct SyncCtx {
     #[cfg_attr(not(feature = "lua"), allow(dead_code))]
     pub remote_address: IpAddr,
     pub vpnv4_next_hop_self: bool,
+    /// `afi-safi vpnv4 next-hop-unchanged` — keep the received next-hop
+    /// (and VPN label) when advertising forwarded VPN routes to this
+    /// eBGP peer. The inter-RR session of an RR-based Inter-AS Option C.
+    pub vpnv4_next_hop_unchanged: bool,
     pub egress_as: EgressAs,
     pub out_policy: Arc<super::policy::OutPolicy>,
     /// Egress sink (Tier 1b): the peer's writer channel, the shared
@@ -277,6 +281,7 @@ impl SyncCtx {
             remote_id: Ipv4Addr::UNSPECIFIED,
             remote_address: IpAddr::V4(Ipv4Addr::UNSPECIFIED),
             vpnv4_next_hop_self: false,
+            vpnv4_next_hop_unchanged: false,
             egress_as: EgressAs {
                 is_ebgp: true,
                 local_as: 65000,
@@ -10687,7 +10692,13 @@ pub fn stale_route_withdraw(peer_id: usize, bgp: &mut BgpTop, peers: &mut PeerMa
 /// passes through unchanged. Mirrors the Labeled-Unicast rule in
 /// [`route_update_labelv4`].
 fn vpnv4_service_label(peer: &Peer, rib: &BgpRib) -> Label {
-    let rewrites_nh = peer.is_ebgp() || peer.next_hop_self(Afi::Ip, Safi::MplsVpn);
+    // `next-hop-unchanged` keeps the received label with the received
+    // next-hop: the label was allocated by (and only means anything to)
+    // the next-hop router, so rewriting one without the other would
+    // black-hole. Locally-originated rows are exempt — the originator's
+    // own local label belongs with its own address.
+    let unchanged = !rib.is_originated() && peer.next_hop_unchanged(Afi::Ip, Safi::MplsVpn);
+    let rewrites_nh = (peer.is_ebgp() && !unchanged) || peer.next_hop_self(Afi::Ip, Safi::MplsVpn);
     match (rewrites_nh, rib.local_label) {
         (true, Some(l)) => Label::new(l, 0, true),
         _ => rib.label.unwrap_or_default(),
@@ -10870,8 +10881,16 @@ pub fn route_update_ipv4(
     // `afi-safi vpnv4 next-hop-self` — an Inter-AS Option B ASBR sets it on
     // the iBGP session to its PE so a re-advertised eBGP-VPNv4 route carries
     // the ASBR (a resolvable next-hop) instead of the unreachable foreign
-    // PE. eBGP and self-originated routes rewrite unconditionally as before.
-    let needs_v4_rewrite = ctx.peer_type.is_ebgp()
+    // PE. eBGP and self-originated routes rewrite unconditionally as before —
+    // except a forwarded VPN row toward an eBGP peer with `afi-safi vpnv4
+    // next-hop-unchanged`: the inter-RR session of an RR-based Inter-AS
+    // Option C reflects routes for PEs it does not forward for, so the
+    // received next-hop (the originating PE, the true LSP endpoint) must
+    // survive. Locally-originated rows still rewrite (the originator IS
+    // the correct next-hop).
+    let vpn_nh_unchanged =
+        rib.nexthop.is_some() && !rib.is_originated() && ctx.vpnv4_next_hop_unchanged;
+    let needs_v4_rewrite = (ctx.peer_type.is_ebgp() && !vpn_nh_unchanged)
         || rib.is_originated()
         || rib.enhe_egress.is_some()
         || (rib.nexthop.is_some() && ctx.vpnv4_next_hop_self);
@@ -20394,6 +20413,7 @@ mod as_sets_withdraw_tests {
             remote_id: Ipv4Addr::new(2, 2, 2, 2),
             remote_address: "10.0.0.2".parse().unwrap(),
             vpnv4_next_hop_self: false,
+            vpnv4_next_hop_unchanged: false,
             egress_as: EgressAs {
                 is_ebgp: true,
                 local_as: 65000,
@@ -20426,5 +20446,93 @@ mod as_sets_withdraw_tests {
             route_update_ipv4(&ctx, &prefix, &rib, false).is_none(),
             "RFC 9774 must suppress egress of AS_SET paths",
         );
+    }
+
+    /// `afi-safi vpnv4 next-hop-unchanged`: a forwarded VPN row advertised
+    /// to an eBGP peer keeps its received next-hop (the RR-to-RR session
+    /// of an RR-based Inter-AS Option C); without the knob the default
+    /// eBGP rewrite to self applies.
+    #[test]
+    fn vpnv4_next_hop_unchanged_preserves_forwarded_next_hop() {
+        use super::VpnNexthop;
+        use bgp_packet::{BgpNexthop, Label, RouteDistinguisher, Vpnv4Nexthop};
+        use std::net::IpAddr;
+
+        let ctx = |unchanged: bool| SyncCtx {
+            ident: 1,
+            peer_type: PeerType::EBGP,
+            reflector_client: false,
+            local_addr_v4: Some(Ipv4Addr::new(9, 9, 9, 1)),
+            router_id: Ipv4Addr::new(9, 9, 9, 1),
+            remote_id: Ipv4Addr::new(9, 9, 9, 2),
+            remote_address: "9.9.9.2".parse().unwrap(),
+            vpnv4_next_hop_self: false,
+            vpnv4_next_hop_unchanged: unchanged,
+            egress_as: EgressAs {
+                is_ebgp: true,
+                local_as: 65501,
+                remote_as: 65502,
+                as_override: false,
+                remove_private_as: None,
+                local_as_substitute: None,
+                local_as_replace: false,
+            },
+            out_policy: Arc::new(crate::bgp::policy::OutPolicy::default()),
+            packet_tx: None,
+            egress_depth: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+            extended_message: false,
+            attach_unknown_attr: None,
+            as_sets_withdraw: false,
+        };
+
+        // A VPNv4 row learned from an iBGP RR client: the originating PE
+        // (2.2.2.3) is the next-hop and its VRF label rides the row.
+        let rd: RouteDistinguisher = "65502:1".parse().unwrap();
+        let pe = Ipv4Addr::new(2, 2, 2, 3);
+        let mut attr = attr_with_path("65513");
+        attr.nexthop = Some(BgpNexthop::Vpnv4(Vpnv4Nexthop {
+            rd,
+            nhop: IpAddr::V4(pe),
+        }));
+        let rib = BgpRib::new(
+            2,
+            Ipv4Addr::new(2, 2, 2, 9),
+            BgpRibType::IBGP,
+            0,
+            0,
+            &attr,
+            Some(Label::new(16, 0, true)),
+            Some(VpnNexthop::V4(Vpnv4Nexthop {
+                rd,
+                nhop: IpAddr::V4(pe),
+            })),
+            false,
+        );
+        let prefix = "172.16.2.1/32".parse().unwrap();
+
+        // Knob on: the received next-hop survives the eBGP advertisement.
+        let (_, attrs) =
+            route_update_ipv4(&ctx(true), &prefix, &rib, false).expect("route must advertise");
+        match attrs.nexthop {
+            Some(BgpNexthop::Vpnv4(ref nh)) => {
+                assert_eq!(nh.nhop, IpAddr::V4(pe), "next-hop must be preserved");
+                assert_eq!(nh.rd, rd);
+            }
+            ref other => panic!("expected preserved VPNv4 next-hop, got {other:?}"),
+        }
+
+        // Knob off: the default eBGP rewrite to self applies.
+        let (_, attrs) =
+            route_update_ipv4(&ctx(false), &prefix, &rib, false).expect("route must advertise");
+        match attrs.nexthop {
+            Some(BgpNexthop::Vpnv4(ref nh)) => {
+                assert_eq!(
+                    nh.nhop,
+                    IpAddr::V4(Ipv4Addr::new(9, 9, 9, 1)),
+                    "default eBGP advertisement must next-hop-self"
+                );
+            }
+            ref other => panic!("expected rewritten VPNv4 next-hop, got {other:?}"),
+        }
     }
 }
