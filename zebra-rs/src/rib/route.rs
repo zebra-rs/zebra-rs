@@ -1127,17 +1127,22 @@ impl Rib {
     }
 }
 
+/// Re-resolve one recursive static nexthop. Returns `true` when the
+/// resolution moved — a different egress gateway, transport label
+/// stack, or nexthop group than before.
 fn static_reresolve_uni_v4(
     uni: &mut NexthopUni,
     nmap: &mut NexthopMap,
     table: &PrefixMap<Ipv4Net, RibEntries>,
     table_id: u32,
-) {
+) -> bool {
     if uni.addr_origin.is_none() {
-        return;
+        return false;
     }
+    let before = (uni.gid, uni.addr, uni.mpls_label.clone());
     super::r#static::resolve::release_nexthop_gid(uni, nmap);
     let _ = resolve_nexthop_uni(uni, nmap, table, table_id);
+    before != (uni.gid, uni.addr, uni.mpls_label.clone())
 }
 
 fn static_reresolve_entry_v4(
@@ -1149,42 +1154,60 @@ fn static_reresolve_entry_v4(
     if entry.rtype != RibType::Static {
         return;
     }
+    let mut changed = false;
     match &mut entry.nexthop {
-        Nexthop::Uni(uni) => static_reresolve_uni_v4(uni, nmap, table, table_id),
+        Nexthop::Uni(uni) => changed |= static_reresolve_uni_v4(uni, nmap, table, table_id),
         Nexthop::Multi(multi) => {
             for uni in multi.nexthops.iter_mut() {
-                static_reresolve_uni_v4(uni, nmap, table, table_id);
+                changed |= static_reresolve_uni_v4(uni, nmap, table, table_id);
             }
         }
         Nexthop::List(list) => {
             for member in list.nexthops.iter_mut() {
                 if let NexthopMember::Uni(uni) = member {
-                    static_reresolve_uni_v4(uni, nmap, table, table_id);
+                    changed |= static_reresolve_uni_v4(uni, nmap, table, table_id);
                 }
             }
         }
         Nexthop::Protect(pro) => {
             for member in pro.members_mut() {
                 if let NexthopMember::Uni(uni) = member {
-                    static_reresolve_uni_v4(uni, nmap, table, table_id);
+                    changed |= static_reresolve_uni_v4(uni, nmap, table, table_id);
                 }
             }
         }
         _ => {}
     }
+    static_reinstall_on_change(entry, changed);
 }
 
+/// The re-resolve above rewrites the entry's nexthop in place, but the
+/// kernel route still references the *previous* nexthop group — which
+/// can stay alive when another route shares its `(addr, labels)`
+/// dedupe key (e.g. the demoted member of an IS-IS `Protect` after a
+/// `backup-as-primary` flip). Drop the installed belief so the sync
+/// pass that follows re-pushes the route (a netlink upsert) at the new
+/// group.
+fn static_reinstall_on_change(entry: &mut RibEntry, changed: bool) {
+    if changed && entry.is_selected() && entry.is_fib() {
+        entry.set_fib(false);
+    }
+}
+
+/// IPv6 sibling of [`static_reresolve_uni_v4`].
 fn static_reresolve_uni_v6(
     uni: &mut NexthopUni,
     nmap: &mut NexthopMap,
     table: &PrefixMap<Ipv6Net, RibEntries>,
     table_id: u32,
-) {
+) -> bool {
     if uni.addr_origin.is_none() {
-        return;
+        return false;
     }
+    let before = (uni.gid, uni.addr, uni.mpls_label.clone());
     super::r#static::resolve::release_nexthop_gid(uni, nmap);
     let _ = resolve_nexthop_uni_v6(uni, nmap, table, table_id);
+    before != (uni.gid, uni.addr, uni.mpls_label.clone())
 }
 
 fn static_reresolve_entry_v6(
@@ -1196,15 +1219,31 @@ fn static_reresolve_entry_v6(
     if entry.rtype != RibType::Static {
         return;
     }
+    let mut changed = false;
     match &mut entry.nexthop {
-        Nexthop::Uni(uni) => static_reresolve_uni_v6(uni, nmap, table, table_id),
+        Nexthop::Uni(uni) => changed |= static_reresolve_uni_v6(uni, nmap, table, table_id),
         Nexthop::Multi(multi) => {
             for uni in multi.nexthops.iter_mut() {
-                static_reresolve_uni_v6(uni, nmap, table, table_id);
+                changed |= static_reresolve_uni_v6(uni, nmap, table, table_id);
+            }
+        }
+        Nexthop::List(list) => {
+            for member in list.nexthops.iter_mut() {
+                if let NexthopMember::Uni(uni) = member {
+                    changed |= static_reresolve_uni_v6(uni, nmap, table, table_id);
+                }
+            }
+        }
+        Nexthop::Protect(pro) => {
+            for member in pro.members_mut() {
+                if let NexthopMember::Uni(uni) = member {
+                    changed |= static_reresolve_uni_v6(uni, nmap, table, table_id);
+                }
             }
         }
         _ => {}
     }
+    static_reinstall_on_change(entry, changed);
 }
 
 /// Cheap, allocation-free gate for the static-NHT re-resolve pass.
@@ -3507,5 +3546,167 @@ mod tests {
             entry.is_valid(),
             "a Protect route with resolvable members must validate"
         );
+    }
+
+    /// A recursive static resolved through an IS-IS `Protect` covering
+    /// route must follow a `backup-as-primary` member swap: the
+    /// re-resolve rewrites the uni to the promoted repair (egress +
+    /// inherited label stack) and clears the FIB flag so the sync pass
+    /// re-pushes the kernel route at the new nexthop group.
+    #[test]
+    fn static_reresolve_follows_protect_promotion() {
+        use super::super::entry::RibEntry;
+        use super::super::nexthop::{Label, NexthopProtect, NexthopUni};
+        use super::super::{Nexthop, NexthopMap, NexthopMember};
+        use super::super::{RibEntries, RibType};
+        use super::{resolve_nexthop_uni, static_reresolve_entry_v4};
+        use ipnet::Ipv4Net;
+        use prefix_trie::PrefixMap;
+        use std::net::IpAddr;
+
+        fn uni(addr: &str, metric: u32, labels: Vec<u32>, ifindex: u32) -> NexthopUni {
+            let mut u = NexthopUni::new(
+                addr.parse::<IpAddr>().unwrap(),
+                metric,
+                labels.into_iter().map(Label::Explicit).collect(),
+            );
+            u.ifindex_origin = Some(ifindex);
+            u
+        }
+        fn protect(primary: NexthopUni, backup: NexthopUni) -> RibEntry {
+            let mut e = RibEntry::new(RibType::Isis);
+            e.valid = true;
+            e.distance = 115;
+            e.metric = 12;
+            e.nexthop = Nexthop::Protect(NexthopProtect {
+                primary: NexthopMember::Uni(primary),
+                backup: NexthopMember::Uni(backup),
+                gid: 0,
+            });
+            e
+        }
+        let spf = || uni("192.168.10.2", 12, vec![16800], 2);
+        let repair = || uni("192.168.3.2", 13, vec![16500, 15003, 15002], 3);
+
+        let mut nmap = NexthopMap::default();
+        let mut table: PrefixMap<Ipv4Net, RibEntries> = PrefixMap::new();
+        table.insert(
+            "10.0.0.8/32".parse().unwrap(),
+            vec![protect(spf(), repair())],
+        );
+
+        // Static 172.168.1.0/24 via 10.0.0.8, resolved and installed.
+        let mut u = NexthopUni {
+            addr: "10.0.0.8".parse::<IpAddr>().unwrap(),
+            addr_origin: Some("10.0.0.8".parse::<IpAddr>().unwrap()),
+            ..Default::default()
+        };
+        let _ = resolve_nexthop_uni(&mut u, &mut nmap, &table, 254);
+        assert_eq!(u.addr, "192.168.10.2".parse::<IpAddr>().unwrap());
+        assert_eq!(u.mpls_label, vec![16800]);
+
+        let mut entry = RibEntry::new(RibType::Static);
+        entry.valid = true;
+        entry.nexthop = Nexthop::Uni(u);
+        entry.set_selected(true);
+        entry.set_fib(true);
+
+        // Same table: nothing moved — the installed belief must stay.
+        let snapshot = table.clone();
+        static_reresolve_entry_v4(&mut entry, &snapshot, &mut nmap, 254);
+        assert!(
+            entry.is_fib(),
+            "unchanged resolution must not force a reinstall"
+        );
+
+        // backup-as-primary: the repair takes the primary slot.
+        table.insert(
+            "10.0.0.8/32".parse().unwrap(),
+            vec![protect(repair(), spf())],
+        );
+        let snapshot = table.clone();
+        static_reresolve_entry_v4(&mut entry, &snapshot, &mut nmap, 254);
+        let Nexthop::Uni(u) = &entry.nexthop else {
+            panic!("static stays a Uni");
+        };
+        assert_eq!(u.addr, "192.168.3.2".parse::<IpAddr>().unwrap());
+        assert_eq!(u.mpls_label, vec![16500, 15003, 15002]);
+        assert!(
+            !entry.is_fib(),
+            "changed resolution must clear the FIB flag so the route is re-pushed"
+        );
+    }
+
+    /// IPv6 sibling: the v6 re-resolve pass walks the same shapes as
+    /// v4 (including the List/Protect arms added for parity) and
+    /// clears the FIB flag on a moved resolution.
+    #[test]
+    fn static_reresolve_v6_follows_protect_promotion() {
+        use super::super::entry::RibEntry;
+        use super::super::nexthop::{Label, NexthopProtect, NexthopUni};
+        use super::super::{Nexthop, NexthopMap, NexthopMember};
+        use super::super::{RibEntries, RibType};
+        use super::{resolve_nexthop_uni_v6, static_reresolve_entry_v6};
+        use ipnet::Ipv6Net;
+        use prefix_trie::PrefixMap;
+        use std::net::IpAddr;
+
+        fn uni(addr: &str, metric: u32, labels: Vec<u32>, ifindex: u32) -> NexthopUni {
+            let mut u = NexthopUni::new(
+                addr.parse::<IpAddr>().unwrap(),
+                metric,
+                labels.into_iter().map(Label::Explicit).collect(),
+            );
+            u.ifindex_origin = Some(ifindex);
+            u
+        }
+        fn protect(primary: NexthopUni, backup: NexthopUni) -> RibEntry {
+            let mut e = RibEntry::new(RibType::Isis);
+            e.valid = true;
+            e.distance = 115;
+            e.metric = 12;
+            e.nexthop = Nexthop::Protect(NexthopProtect {
+                primary: NexthopMember::Uni(primary),
+                backup: NexthopMember::Uni(backup),
+                gid: 0,
+            });
+            e
+        }
+        let spf = || uni("2001:db8:10::2", 12, vec![16800], 2);
+        let repair = || uni("2001:db8:3::2", 13, vec![16500, 15003, 15002], 3);
+
+        let mut nmap = NexthopMap::default();
+        let mut table: PrefixMap<Ipv6Net, RibEntries> = PrefixMap::new();
+        table.insert(
+            "2001:db8::8/128".parse().unwrap(),
+            vec![protect(spf(), repair())],
+        );
+
+        let mut u = NexthopUni {
+            addr: "2001:db8::8".parse::<IpAddr>().unwrap(),
+            addr_origin: Some("2001:db8::8".parse::<IpAddr>().unwrap()),
+            ..Default::default()
+        };
+        let _ = resolve_nexthop_uni_v6(&mut u, &mut nmap, &table, 254);
+        assert_eq!(u.mpls_label, vec![16800]);
+
+        let mut entry = RibEntry::new(RibType::Static);
+        entry.valid = true;
+        entry.nexthop = Nexthop::Uni(u);
+        entry.set_selected(true);
+        entry.set_fib(true);
+
+        table.insert(
+            "2001:db8::8/128".parse().unwrap(),
+            vec![protect(repair(), spf())],
+        );
+        let snapshot = table.clone();
+        static_reresolve_entry_v6(&mut entry, &snapshot, &mut nmap, 254);
+        let Nexthop::Uni(u) = &entry.nexthop else {
+            panic!("static stays a Uni");
+        };
+        assert_eq!(u.addr, "2001:db8:3::2".parse::<IpAddr>().unwrap());
+        assert_eq!(u.mpls_label, vec![16500, 15003, 15002]);
+        assert!(!entry.is_fib());
     }
 }
