@@ -136,6 +136,10 @@ module zebra-bgp-redistribute {
        filters at commit time.";
     container redistribute {
       ext:help "Redistribute routes into BGP";
+      // A bare `redistribute` with no source child enables nothing:
+      // reject it at commit and prune the container when its last
+      // source is deleted (ext:non-empty on a presence container).
+      ext:non-empty "connected, static, ospf or isis";
       presence "Enable route redistribution into BGP for this AFI";
       container connected {
         ext:help "Redistribute connected routes";
