@@ -46,15 +46,21 @@ the same arc: examine SR routing at the source, enable
 `backup-as-primary`, and capture the repair on the wire, including the
 protected edge-to-edge traffic.
 
-| playset | IGP | data plane | edge service |
+Rows are the data plane, columns the IGP:
+
+| | IS-IS | OSPFv2 | OSPFv3 |
 |:--|:--|:--|:--|
-| [isis-srv6-classic](isis-srv6-classic/README.md) | IS-IS | SRv6, classic RFC 8986 SIDs (RFC 9352) | RFC 9252 iBGP IPv6-unicast with End.DT6 service SIDs |
-| [isis-srv6-usid](isis-srv6-usid/README.md) | IS-IS | SRv6, uSID / NEXT-C-SID (RFC 9800) | RFC 9252 iBGP IPv6-unicast with End.DT6 service SIDs |
-| [ospfv3-srv6-classic](ospfv3-srv6-classic/README.md) | OSPFv3 (area 0) | SRv6, classic RFC 8986 SIDs (RFC 9513) | RFC 9252 iBGP IPv6-unicast with End.DT6 service SIDs |
-| [ospfv3-srv6-usid](ospfv3-srv6-usid/README.md) | OSPFv3 (area 0) | SRv6, uSID / NEXT-C-SID (RFC 9800) | RFC 9252 iBGP IPv6-unicast with End.DT6 service SIDs |
-| [isis-srmpls](isis-srmpls/README.md) | IS-IS | SR-MPLS (SRGB 16000 / SRLB 15000) | recursive IPv4 statics inheriting the SR label stack |
-| [ospfv2-srmpls](ospfv2-srmpls/README.md) | OSPFv2 (area 0) | SR-MPLS (RFC 8665 extended LSAs) | recursive IPv4 statics inheriting the SR label stack |
-| [ospfv3-srmpls](ospfv3-srmpls/README.md) | OSPFv3 (area 0) | SR-MPLS over IPv6 (RFC 8666, NP-flag / no PHP) | recursive IPv6 statics inheriting the SR label stack |
+| **SRv6 (classic)** | [isis-srv6-classic](isis-srv6-classic/README.md) | — | [ospfv3-srv6-classic](ospfv3-srv6-classic/README.md) |
+| **SRv6 (uSID)** | [isis-srv6-usid](isis-srv6-usid/README.md) | — | [ospfv3-srv6-usid](ospfv3-srv6-usid/README.md) |
+| **SR-MPLS** | [isis-srmpls](isis-srmpls/README.md) | [ospfv2-srmpls](ospfv2-srmpls/README.md) | [ospfv3-srmpls](ospfv3-srmpls/README.md) |
+
+The two **SRv6** rows differ only in SID encoding — **classic** RFC 8986
+(RFC 9352 for IS-IS, RFC 9513 for OSPFv3) versus **uSID** / NEXT-C-SID
+(RFC 9800) — and each lab carries an RFC 9252 iBGP IPv6-unicast service with
+End.DT6 SIDs. The **SR-MPLS** labs (SRGB 16000 / SRLB 15000; RFC 8665
+extended LSAs for OSPFv2, RFC 8666 NP-flag / no-PHP for OSPFv3 over IPv6)
+carry recursive IP statics that inherit the SR label stack. There is no
+OSPFv2 SRv6 lab.
 
 Some cross-cutting themes to look for:
 
@@ -79,15 +85,19 @@ Four labs across two axes — **underlay transport** (IPv4 vs IPv6) and
 **tenancy** (single VNI vs two isolated VNIs). All share the same EVPN
 control plane (Type-2 MAC + Type-3 IMET, ingress replication) driving the
 kernel's single-VXLAN-device (`external` / `vnifilter`) data plane, and
-the same IPv4 tenant payload on `172.16.10.0/24`. Start with `vxlan4` (the
-base) and add one dimension at a time.
+the same IPv4 tenant payload on `172.16.10.0/24`.
 
-| playset | underlay | tenancy | what it adds |
-|:--|:--|:--|:--|
-| [bgp-evpn-vxlan4](bgp-evpn-vxlan4/README.md) | IPv4 | single VNI | the base — one L2 segment stretched across two VTEPs, hosts pinging at `ttl=64` |
-| [bgp-evpn-vxlan6](bgp-evpn-vxlan6/README.md) | **IPv6** | single VNI | IPv6 VTEP endpoints, next hops, PMSI, and FDB `dst`, while the RD stays IPv4 — an IPv4 payload across an IPv6-only core |
-| [bgp-evpn-vxlan4-multi](bgp-evpn-vxlan4-multi/README.md) | IPv4 | **two VNIs** | three VTEPs, one serving both VNIs; per-VNI RD/RT isolation — hosts in different VNIs share a subnet yet cannot reach each other |
-| [bgp-evpn-vxlan6-multi](bgp-evpn-vxlan6-multi/README.md) | **IPv6** | **two VNIs** | both dimensions at once — per-VNI IPv6 next hops/PMSI each on its own underlay link, IPv4 RDs, cross-VNI isolation |
+Rows are the tenancy, columns the underlay transport:
+
+| | IPv4 | IPv6 |
+|:--|:--|:--|
+| **single VNI** | [bgp-evpn-vxlan4](bgp-evpn-vxlan4/README.md) | [bgp-evpn-vxlan6](bgp-evpn-vxlan6/README.md) |
+| **two VNIs** | [bgp-evpn-vxlan4-multi](bgp-evpn-vxlan4-multi/README.md) | [bgp-evpn-vxlan6-multi](bgp-evpn-vxlan6-multi/README.md) |
+
+`vxlan4` is the base; move right to swap the underlay to **IPv6** (IPv6 VTEP
+endpoints, next hops, PMSI, and FDB `dst`, while the RD stays IPv4), and move
+down to add a **second isolated VNI** (three VTEPs, one serving both; per-VNI
+RD/RT — hosts in different VNIs share a subnet yet cannot reach each other).
 
 The four EVPN labs reuse the same namespace names (`vtep1`..`vtep3`,
 `h1`..`h4`), so bring up only one at a time — `up.sh` sweeps leftovers of
