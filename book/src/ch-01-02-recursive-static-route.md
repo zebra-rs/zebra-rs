@@ -49,11 +49,67 @@ $ ip route show
 ```
 
 The resolving route does not have to be another static route — a
-gateway learned from OSPF, IS-IS, or BGP works the same way. When the
-gateway sits behind an SR-MPLS underlay (an IS-IS route carrying a
-prefix-SID, say), the resolution also inherits the underlay's
-transport label stack, so the static route forwards through the
-labeled path rather than as a plain IP hop.
+gateway learned from OSPF, IS-IS, or BGP works the same way.
+
+## Resolution over an SR-MPLS underlay
+
+When the gateway sits behind an SR-MPLS underlay, resolution inherits
+more than the egress: the static route also picks up the covering
+route's **transport label stack**, so its traffic is label-switched
+through the core rather than forwarded as a plain IP hop.
+
+The [`playset/isis-srmpls`](https://github.com/zebra-rs/zebra-rs/tree/main/playset/isis-srmpls)
+lab is a runnable demonstration (`./up.sh` and walk through its
+README). Its ingress node `s` runs IS-IS with `segment-routing mpls`
+and carries exactly one piece of static configuration — a route to the
+far edge subnet `172.16.1.0/24` (host `e2`, behind node `d`, not part
+of IS-IS at all) via `d`'s loopback:
+
+```yaml
+router:
+  static:
+    ipv4:
+      route:
+      - prefix: 172.16.1.0/24
+        nexthop:
+        - address: 10.0.0.8
+```
+
+`10.0.0.8` is not on any of `s`'s connected subnets. NHT resolves it
+through the IS-IS SR-MPLS route to `10.0.0.8/32`, which carries `d`'s
+Prefix-SID label:
+
+```
+s>show ip route
+...
+L2 *> 10.0.0.8/32 [115/12] via 192.168.0.2, s-n1, label 16800, 00:00:43
+S  *> 172.16.1.0/24 [1/0] via 10.0.0.8 (recursive), 00:00:50
+                          via 192.168.0.2, s-n1, label 16800
+```
+
+The static route displays as the recursive two-liner — the configured
+gateway marked `(recursive)`, and underneath it the resolved nexthop
+with the **inherited label** `16800`. The kernel route carries the
+matching `encap mpls 16800` push, so traffic to the edge subnet is
+label-switched all the way to `d`.
+
+Because the resolution re-runs whenever the covering route changes,
+the static route follows the underlay through IGP reconvergence — the
+playset walks this further: with TI-LFA enabled, promoting the
+repair path (`fast-reroute backup-as-primary`) moves the static route
+onto the full repair label stack with no configuration change.
+
+## Recursive resolution and SRv6
+
+The label inheritance above is an SR-MPLS behavior. Over an **SRv6**
+underlay, recursive resolution still works — the gateway is resolved
+and the route installs with the flattened plain-IPv6 nexthop — but the
+resolution does **not** inherit any SRv6 encapsulation from the
+covering route. When the destination prefix is unknown to the core
+(the usual reason for tunneling), a recursive static route alone will
+not deliver the traffic; steer it into an SRv6 encapsulation
+explicitly with the `segments` leaf instead — see
+[SRv6 Static Routes](ch-01-04-srv6-static-route.md).
 
 ## Tracking topology changes
 

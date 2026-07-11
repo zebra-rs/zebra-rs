@@ -76,8 +76,8 @@ Points worth knowing:
   `router static vrf <name> { ... }` and install into that VRF's
   kernel routing table.
 - IPv6 routes additionally accept SRv6 attributes (`segments`,
-  `encap-type`, seg6local `action`, …); see the
-  [SRv6 chapter](ch-04-00-srv6.md).
+  `encap-type`, seg6local `action`, …); see
+  [SRv6 Static Routes](ch-01-04-srv6-static-route.md).
 
 ## Example
 
