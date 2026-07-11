@@ -37,8 +37,9 @@ Linux tooling works inside the namespaces too — `ip route`, `tcpdump`,
 
 The daemon and CLI binaries are resolved from `target/debug/` when built,
 falling back to the installed ones on `PATH`. Each playset writes its
-runtime state (`*.log`, `*.pid`) into its own directory; those files are
-gitignored.
+runtime state (`*.log`, `*.pid`) into `/tmp/zebra-rs-playset/<playset-name>/`
+(override with `PLAYSET_RUN_DIR`), so the labs also run from a read-only
+install location such as `/usr/share/zebra-rs/playset`.
 
 > **One at a time**: the TI-LFA playsets share the same topology and
 > namespace names (`s`, `n1`..`n3`, `r1`..`r3`, `d`, `e1`, `e2`), so bring

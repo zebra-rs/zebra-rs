@@ -52,6 +52,11 @@ contents:
   # `router bgp { lua-script <name> { source-path ... } }`.
   - src: ../etc/zebra-rs/lua
     dst: /etc/zebra-rs/lua
+  # Playset lab topologies (netns-based example networks). Read-only data,
+  # so they live under /usr/share rather than /etc. Staged into out/ by the
+  # Makefile `playset` target to filter out runtime artifacts (*.log, *.pid).
+  - src: ./out/playset
+    dst: /usr/share/zebra-rs/playset
   - src: ./modules-load.d/zebra-rs.conf
     dst: /etc/modules-load.d/zebra-rs.conf
   - src: ./patch/usr/lib/systemd/system/zebra-rs.service
@@ -60,4 +65,5 @@ overrides:
   deb:
     scripts:
       postinstall: ./scripts/postinstall.sh
+      preremove: ./scripts/prerm.sh
       postremove: ./scripts/postrm.sh
