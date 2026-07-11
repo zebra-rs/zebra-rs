@@ -17,6 +17,7 @@
 //! backoff, so a supervised restart heals without extra wiring here.
 
 pub mod inst;
+mod show;
 pub mod supervisor;
 
 pub use inst::{Cradle, serve};

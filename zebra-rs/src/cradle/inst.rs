@@ -265,14 +265,128 @@ impl Cradle {
         }
     }
 
-    /// `show ebpf` — supervisor and port status, plus the engine's FIB
-    /// summary when it answers. `json` renders the machine-readable form.
+    /// `show ebpf …` dispatch. The bare command renders supervisor/port
+    /// status; the table subcommands proxy the engine's structured
+    /// `Dump`/`GetStats` responses (see `super::show` — text mirrors
+    /// cradle's own CLI, `json` renders the same data as JSON).
     async fn process_show_msg(&self, msg: DisplayRequest) {
-        let (path, _args) = path_from_command(&msg.paths);
-        if path.as_str() != "/show/ebpf" {
-            return;
+        use crate::fib::cradle::pb::DumpTable;
+        let (path, mut args) = path_from_command(&msg.paths);
+        let out = match path.as_str() {
+            "/show/ebpf" => self.render_show(msg.json).await,
+            "/show/ebpf/stats" => self.render_engine_stats(msg.json).await,
+            "/show/ebpf/l2" => {
+                self.render_engine_dump(DumpTable::DumpL2, 0, msg.json)
+                    .await
+            }
+            "/show/ebpf/ipv4" => {
+                self.render_engine_dump(DumpTable::DumpIpv4, 0, msg.json)
+                    .await
+            }
+            "/show/ebpf/ipv6" => {
+                self.render_engine_dump(DumpTable::DumpIpv6, 0, msg.json)
+                    .await
+            }
+            "/show/ebpf/ipv4/vrf" | "/show/ebpf/ipv6/vrf" => {
+                let table = if path.contains("ipv4") {
+                    DumpTable::DumpIpv4
+                } else {
+                    DumpTable::DumpIpv6
+                };
+                let Some(name) = args.string() else { return };
+                match self.vrf_table_by_name(&name) {
+                    Some(vrf) => self.render_engine_dump(table, vrf, msg.json).await,
+                    None => {
+                        if msg.json {
+                            serde_json::json!({ "error": format!("unknown VRF {name}") })
+                                .to_string()
+                        } else {
+                            format!("%% unknown VRF {name}\n")
+                        }
+                    }
+                }
+            }
+            "/show/ebpf/mpls" => {
+                self.render_engine_dump(DumpTable::DumpMpls, 0, msg.json)
+                    .await
+            }
+            "/show/ebpf/srv6" => {
+                self.render_engine_dump(DumpTable::DumpSrv6, 0, msg.json)
+                    .await
+            }
+            "/show/ebpf/nexthop" => {
+                self.render_engine_dump(DumpTable::DumpNexthop, 0, msg.json)
+                    .await
+            }
+            _ => return,
+        };
+        let _ = msg.resp.send(out).await;
+    }
+
+    /// Resolve a VRF name to its kernel table id from link state (the VRF
+    /// master device's `IFLA_VRF_TABLE`) — the same source the port
+    /// reconcile binds with, so `show ebpf ipv4 vrf <name>` and the ports
+    /// agree on table ids.
+    fn vrf_table_by_name(&self, name: &str) -> Option<u32> {
+        self.links
+            .values()
+            .find(|l| l.name == name)
+            .and_then(|l| l.vrf_table)
+    }
+
+    /// The endpoint a `show ebpf <table>` query may reach: same predicate
+    /// as the FIB-summary line (managed engine up, or an enabled external
+    /// tee).
+    fn reachable_endpoint(&self) -> Option<String> {
+        (self.status.up || self.cradle_enabled).then(|| self.endpoint())
+    }
+
+    fn unreachable_msg(json: bool) -> String {
+        if json {
+            serde_json::json!({
+                "error": "eBPF engine not reachable (enable system ebpf or system cradle)"
+            })
+            .to_string()
+        } else {
+            "%% eBPF engine not reachable (enable system ebpf or system cradle)\n".to_string()
         }
-        let _ = msg.resp.send(self.render_show(msg.json).await).await;
+    }
+
+    async fn render_engine_dump(
+        &self,
+        table: crate::fib::cradle::pb::DumpTable,
+        vrf: u32,
+        json: bool,
+    ) -> String {
+        let Some(endpoint) = self.reachable_endpoint() else {
+            return Self::unreachable_msg(json);
+        };
+        match crate::fib::cradle::dump_table(&endpoint, table, vrf).await {
+            Ok(entries) => super::show::render_dump(&entries, json),
+            Err(e) => {
+                if json {
+                    serde_json::json!({ "error": e.to_string() }).to_string()
+                } else {
+                    format!("%% engine dump failed: {e}\n")
+                }
+            }
+        }
+    }
+
+    async fn render_engine_stats(&self, json: bool) -> String {
+        let Some(endpoint) = self.reachable_endpoint() else {
+            return Self::unreachable_msg(json);
+        };
+        match crate::fib::cradle::engine_stats(&endpoint).await {
+            Ok(entries) => super::show::render_stats(&entries, json),
+            Err(e) => {
+                if json {
+                    serde_json::json!({ "error": e.to_string() }).to_string()
+                } else {
+                    format!("%% engine stats failed: {e}\n")
+                }
+            }
+        }
     }
 
     async fn render_show(&self, json: bool) -> String {

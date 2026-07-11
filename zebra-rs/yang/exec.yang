@@ -291,6 +291,44 @@ module exec {
     container ebpf {
       ext:help "eBPF data-plane engine (managed cradle) status";
       presence "Show the engine supervisor and port status";
+      leaf l2 {
+        ext:help "Engine L2 FDB (MAC table)";
+        type empty;
+      }
+      container ipv4 {
+        ext:help "Engine IPv4 FIB";
+        presence "Show the global-table IPv4 FIB";
+        leaf vrf {
+          ext:help "Per-VRF FIB (by VRF name)";
+          ext:dynamic "rib:vrf";
+          type string;
+        }
+      }
+      container ipv6 {
+        ext:help "Engine IPv6 FIB";
+        presence "Show the global-table IPv6 FIB";
+        leaf vrf {
+          ext:help "Per-VRF FIB (by VRF name)";
+          ext:dynamic "rib:vrf";
+          type string;
+        }
+      }
+      leaf mpls {
+        ext:help "Engine MPLS ILM (incoming-label map)";
+        type empty;
+      }
+      leaf srv6 {
+        ext:help "Engine SRv6 local SIDs and transit encaps";
+        type empty;
+      }
+      leaf nexthop {
+        ext:help "Engine nexthops and ECMP groups";
+        type empty;
+      }
+      leaf stats {
+        ext:help "Engine datapath packet counters";
+        type empty;
+      }
     }
     container bgp {
       ext:help "BGP information";
