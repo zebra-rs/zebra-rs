@@ -15,6 +15,7 @@ use crate::config::{ConfigChannel, ConfigOp, ConfigRequest, path_from_command};
 use crate::context::Task;
 use crate::fib::cradle::CradleFib;
 use crate::rib::api::RibRx;
+use crate::rib::client::RibClient;
 
 use super::supervisor::{self, EngineEvent};
 
@@ -41,6 +42,10 @@ struct Engine {
 pub struct Cradle {
     /// Config-manager subscription endpoints; drained by [`Self::event_loop`].
     pub cm: ConfigChannel,
+    /// Sender half of the RIB subscription — carries
+    /// `Message::CradleEngineUp` so the tee replays its mirrored FIB
+    /// state into a fresh engine (`CradleFib::replay`).
+    rib: RibClient,
     rib_rx: UnboundedReceiver<RibRx>,
     /// Engine availability events from the supervisor loop(s); one
     /// persistent channel shared by every engine generation.
@@ -69,10 +74,11 @@ pub struct Cradle {
 }
 
 impl Cradle {
-    pub fn new(rib_rx: UnboundedReceiver<RibRx>) -> Self {
+    pub fn new(rib: RibClient, rib_rx: UnboundedReceiver<RibRx>) -> Self {
         let (events_tx, events_rx) = mpsc::unbounded_channel();
         Self {
             cm: ConfigChannel::new(),
+            rib,
             rib_rx,
             events_tx,
             events_rx,
@@ -161,6 +167,12 @@ impl Cradle {
         // has no ports, so everything must be re-applied on the next Up.
         self.engine_up = ev == EngineEvent::Up;
         self.applied.clear();
+        // Ports re-apply here (reconcile_ports); the FIB half — routes,
+        // ILM, SIDs, EVPN, GTP — is mirrored by the tee in the RIB task,
+        // so ask it to replay into the fresh engine.
+        if self.engine_up {
+            let _ = self.rib.send(crate::rib::Message::CradleEngineUp);
+        }
     }
 
     fn ifindex_of(&self, name: &str) -> Option<u32> {

@@ -399,6 +399,13 @@ pub enum Message {
         vni: u32,
         mac: MacAddr,
     },
+    /// The managed cradle engine (re)became ready — sent by the
+    /// `system ebpf` supervisor task on every `EngineEvent::Up` (respawn
+    /// after a crash, or takeover of a dead adopted instance). A fresh
+    /// engine has empty maps, so the tee replays its entire mirrored
+    /// state (`CradleFib::replay`); without this the datapath would stay
+    /// empty until natural route churn.
+    CradleEngineUp,
     MdbAdd {
         vni: u32,
         group: IpAddr,
@@ -3266,6 +3273,9 @@ impl Rib {
             }
             Message::CradleFdbAge { vni, mac } => {
                 self.cradle_fdb_age(vni, mac);
+            }
+            Message::CradleEngineUp => {
+                self.fib_handle.cradle_replay().await;
             }
             Message::CradleReplAdd { vni, sid } => {
                 self.fib_handle.cradle_repl_add(vni, sid).await;

@@ -537,6 +537,16 @@ impl FibHandle {
         }
     }
 
+    /// Replay the tee's entire mirrored state into a freshly-(re)started
+    /// cradle engine (see `CradleFib::replay`). Triggered by the
+    /// `system ebpf` supervisor's `Message::CradleEngineUp`; a no-op when
+    /// the tee is off.
+    pub async fn cradle_replay(&self) {
+        if let Some(cradle) = &self.cradle {
+            cradle.replay().await;
+        }
+    }
+
     /// Tee an EVPN BUM replication slot to cradle (Type-3 with an SRv6
     /// End.DT2M SID). No kernel counterpart — cradle is the L2 data plane.
     pub async fn cradle_repl_add(&self, vni: u32, sid: std::net::Ipv6Addr) {
