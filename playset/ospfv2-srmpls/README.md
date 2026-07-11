@@ -161,6 +161,108 @@ for multi-hop owners and `Pop` for adjacent/local ones, and per-adjacency
 Adjacency-SIDs from the SRLB (base 15000) install as `Pop` toward each
 neighbor.
 
+## Static routes over the SR-MPLS core
+
+Two short experiments, best run before the TI-LFA sections below (they
+restore the lab as they found it). The SRv6 labs' static-route
+walkthrough ([classic](../isis-srv6-classic/README.md#static-routes-over-the-srv6-core))
+opens by showing that a plain recursive static inherits *nothing* from
+an SRv6 underlay. SR-MPLS is the opposite — and this lab has been
+demonstrating it all along.
+
+### The inheritance, seen from the kernel
+
+The recursive static that ships in `s.yaml` — `172.16.1.0/24 via
+10.0.0.8` — resolves through the OSPF SR-MPLS route to `d`'s loopback
+and inherits its transport label. The vty output above showed the
+recursive two-liner; the kernel view completes the picture:
+
+``` shell
+s>show ip route
+...
+S  *> 172.16.1.0/24 [1/0] via 10.0.0.8 (recursive), 00:00:30
+                          via 192.168.0.2, s-n1, label 16800
+
+s>ip route show 172.16.1.0/24
+172.16.1.0/24 nhid 8  encap mpls  16800 via 192.168.0.2 dev s-n1 proto static onlink
+```
+
+One `encap mpls 16800` push, inherited from the covering route, is why
+the edge subnets cross a core that knows nothing about them. (Static
+routes over SRv6 inherit the same way when the covering route carries
+an H.Encap segment list — see the SRv6 labs for that variant.)
+
+### An all-static MPLS service
+
+The label-switched path itself can also be built by hand — no IGP
+SR involvement, just an ingress push and a transit ILM. Swap `s`'s
+recursive static for one that pushes an arbitrary label toward `n1`:
+
+``` shell
+s#delete router static ipv4 route 172.16.1.0/24
+s#set router static ipv4 route 172.16.1.0/24 nexthop 192.168.0.2 label 200
+s#commit
+s#exit
+s>show ip route
+...
+S  *> 172.16.1.0/24 [1/0] via 192.168.0.2, s-n1, label 200, 00:00:03
+
+s>ip route show 172.16.1.0/24
+172.16.1.0/24 nhid 12  encap mpls  200 via 192.168.0.2 dev s-n1 proto static onlink
+```
+
+Label 200 means nothing to anyone yet — give it meaning on the transit
+node with a static ILM entry. No `outgoing-label` makes it a pop:
+`n1` strips the label and forwards the bare IP packet to `d`, which
+delivers it as connected traffic:
+
+``` shell
+n1#set router static mpls label 200 nexthop 192.168.2.2
+n1#commit
+n1#exit
+n1>show mpls ilm
+   P Dist Local  Outgoing    Prefix             Outgoing     Next Hop
+          Label  Label       or ID              Interface
+-- - ---- ------ ----------- ------------------ ------------ ---------------
+*> S 1    200    Pop         -                  n1-d         192.168.2.2
+*> O 110  15000  Pop         SR Adj (idx 0  )   n1-s         192.168.0.1
+...
+
+n1>ip -f mpls route show
+200 via inet 192.168.2.2 dev n1-d proto static
+...
+```
+
+The static entry sits at distance 1 next to the OSPF SR ones. Its
+Prefix-or-ID column is `-` — an ILM is keyed by its incoming label and
+has no prefix or SID identity (add `outgoing-label <label>` to the
+same command and the entry becomes a swap instead of a pop).
+
+The edge-to-edge ping works over the hand-built LSP, and a capture on
+each side of `n1` shows the push and the pop:
+
+``` shell
+$ sudo ip netns exec e1 ping 172.16.1.2
+3 packets transmitted, 3 received, 0% packet loss
+
+n1>tcpdump -nli n1-s mpls
+13:35:56.054143 MPLS (label 200, tc 0, [S], ttl 63) IP 172.16.0.1 > 172.16.1.2: ICMP echo request, id 12294, seq 1, length 64
+
+d>tcpdump -nli d-n1 icmp
+13:35:56.054148 IP 172.16.0.1 > 172.16.1.2: ICMP echo request, id 12294, seq 1, length 64
+```
+
+(The return traffic still rides `d`'s recursive static over the SR
+path — label 16100 toward `s` — so this is a split-brain service:
+hand-built LSP out, SR-MPLS back.) Restore the lab: delete the
+label-push static and the ILM, and re-add the recursive static —
+
+``` shell
+s#delete router static ipv4 route 172.16.1.0/24
+s#set router static ipv4 route 172.16.1.0/24 nexthop 10.0.0.8
+n1#delete router static mpls label 200
+```
+
 ## Enable TI-LFA
 
 ``` shell
