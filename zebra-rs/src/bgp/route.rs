@@ -431,6 +431,14 @@ fn build_vpn_fib_entry(
     service_label: u32,
     transport: &[rib::nht::ResolvedNexthop],
 ) -> Option<rib::entry::RibEntry> {
+    // An MPLS service label cannot ride SRv6 transport: a kernel
+    // nexthop carries at most one encapsulation, so an egress whose
+    // resolution came back with an SRv6 segment list (the PE next-hop
+    // is covered by a BGP-over-SRv6 route) is unusable here. Refuse
+    // rather than installing an unencapsulated (or seg6-only) entry
+    // that would drop the service label.
+    let transport: Vec<&rib::nht::ResolvedNexthop> =
+        transport.iter().filter(|e| e.segs.is_empty()).collect();
     if transport.is_empty() {
         return None;
     }
@@ -452,10 +460,10 @@ fn build_vpn_fib_entry(
         uni
     };
     let nexthop = if transport.len() == 1 {
-        rib::Nexthop::Uni(mk_uni(&transport[0]))
+        rib::Nexthop::Uni(mk_uni(transport[0]))
     } else {
         let mut multi = rib::NexthopMulti::default();
-        for egress in transport {
+        for &egress in &transport {
             multi.nexthops.push(mk_uni(egress));
         }
         rib::Nexthop::Multi(multi)
@@ -534,14 +542,73 @@ fn is_vpn_fib_winner(best: &BgpRib, transport: Option<&[rib::nht::ResolvedNextho
     best.typ == BgpRibType::Originated && transport.is_some_and(|t| !t.is_empty())
 }
 
+/// The NHT egress a plain unicast winner should inherit SRv6 transport
+/// from: the first resolved egress, when it carries an H.Encap segment
+/// list — i.e. the BGP next-hop is covered by an SRv6-encapsulated
+/// route (typically another BGP-over-SRv6 service route). Plain and
+/// MPLS-labelled resolutions return `None` (labels are the LU/VPN
+/// paths' business; a plain unicast route doesn't consume them).
+fn inherited_seg6_egress(
+    nht_transport: Option<&[rib::nht::ResolvedNexthop]>,
+) -> Option<&rib::nht::ResolvedNexthop> {
+    nht_transport
+        .and_then(|t| t.first())
+        .filter(|egress| !egress.segs.is_empty())
+}
+
+/// Build the FIB entry for a plain unicast winner whose next-hop
+/// resolved through an SRv6-encapsulated covering route: the dependent
+/// inherits the covering route's H.Encap segment list, the BGP-side
+/// twin of the static-route inheritance in `rib::static::resolve`.
+/// `addr`/`ifindex_origin` are the *resolved* underlay egress (the BGP
+/// next-hop itself is not natively routable — that's why the segments
+/// are needed), `segs`/`encap_type` the inherited transport. Same
+/// shape as an explicit-SID entry, so the nexthop group dedupes with
+/// the covering route's group. Address-family-agnostic.
+fn make_bgp_inherited_seg6_entry(
+    best: &BgpRib,
+    egress: &rib::nht::ResolvedNexthop,
+) -> Option<rib::entry::RibEntry> {
+    let distance = match best.typ {
+        BgpRibType::EBGP => 20,
+        BgpRibType::IBGP | BgpRibType::Originated => 200,
+    };
+    let metric = best.attr.med.as_ref().map(|m| m.med).unwrap_or(0);
+
+    let mut uni = rib::NexthopUni::new(egress.addr, 0, Vec::new());
+    uni.segs = egress.segs.clone();
+    uni.encap_type = Some(
+        egress
+            .seg_encap
+            .unwrap_or(isis_packet::srv6::EncapType::HEncap),
+    );
+    if egress.ifindex != 0 {
+        uni.ifindex_origin = Some(egress.ifindex);
+    }
+    uni.metric = metric;
+    uni.weight = 1;
+    uni.valid = true;
+
+    let mut entry = rib::entry::RibEntry::new(rib::RibType::Bgp);
+    entry.distance = distance;
+    entry.metric = metric;
+    entry.valid = true;
+    entry.nexthop = rib::Nexthop::Uni(uni);
+    Some(entry)
+}
+
 /// Choose the IPv4 FIB entry for a best-path winner in a (possibly VRF)
 /// context. An imported VPN winner installs the `{transport,service}`
 /// labelled tunnel entry; a CE-learned / locally-originated / global
-/// route installs the plain next-hop entry. `transport` is `None`
-/// outside a VRF, so this reduces to `make_bgp_rib_entry_v4`.
+/// route installs the plain next-hop entry — unless its next-hop
+/// resolved through an SRv6-encapsulated covering route
+/// (`nht_transport` carries segments), in which case it inherits that
+/// encapsulation. `transport` is `None` outside a VRF, so this
+/// reduces to the inherit-or-plain choice there.
 fn select_fib_entry_v4(
     best: &BgpRib,
     transport: Option<&[rib::nht::ResolvedNexthop]>,
+    nht_transport: Option<&[rib::nht::ResolvedNexthop]>,
 ) -> Option<rib::entry::RibEntry> {
     // SRv6 L3VPN: an imported route carrying an SRv6 L3 Service SID
     // installs an H.Encap entry toward that SID instead of an MPLS
@@ -557,6 +624,8 @@ fn select_fib_entry_v4(
     }
     if is_vpn_fib_winner(best, transport) {
         build_vpn_fib_entry(best.label.map(|l| l.label).unwrap_or(0), transport.unwrap())
+    } else if let Some(egress) = inherited_seg6_egress(nht_transport) {
+        make_bgp_inherited_seg6_entry(best, egress)
     } else {
         make_bgp_rib_entry_v4(best)
     }
@@ -623,17 +692,28 @@ pub(super) fn fib_install_v4(bgp: &super::peer::BgpTop, prefix: Ipv4Net, selecte
         selected.first(),
     );
     let best = best.as_deref();
-    let entry = best.and_then(|b| select_fib_entry_v4(b, transport));
+    // The winner's NHT resolution (global instance only): carries the
+    // SRv6 segment list to inherit when the next-hop is covered by an
+    // SRv6-encapsulated route.
+    let nht_transport = bgp.nexthop_cache.as_deref().and_then(|cache| {
+        best.and_then(|b| super::nht::bgp_nexthop_ip(&b.attr))
+            .map(|nh| cache.transport_for(nh))
+    });
+    let entry = best.and_then(|b| select_fib_entry_v4(b, transport, nht_transport));
     match entry {
         Some(mut rib_entry) => {
             // Colour-aware steering — plain-path only; a VPN tunnel
-            // entry already carries its full label stack. An SR Policy
-            // match (RFC 9256 §8) takes precedence over a Flex-Algo
-            // binding; Flex-Algo is the fallback.
+            // entry already carries its full label stack, and an entry
+            // with inherited SRv6 transport (segs non-empty) is already
+            // tunneled — pushing steering labels on it would mix
+            // encapsulations. An SR Policy match (RFC 9256 §8) takes
+            // precedence over a Flex-Algo binding; Flex-Algo is the
+            // fallback.
             if let Some(best) = best
                 && !is_vpn_fib_winner(best, transport)
                 && let Some(BgpNexthop::Ipv4(nh)) = best.attr.nexthop.as_ref()
                 && let rib::Nexthop::Uni(ref mut uni) = rib_entry.nexthop
+                && uni.segs.is_empty()
             {
                 if let Some(stack) = sr_policy_steer_mpls(bgp, &best.attr, IpAddr::V4(*nh)) {
                     for label in stack {
@@ -766,6 +846,7 @@ fn make_bgp_srv6_encap_entry_v6(
 fn select_fib_entry_v6(
     best: &BgpRib,
     transport: Option<&[rib::nht::ResolvedNexthop]>,
+    nht_transport: Option<&[rib::nht::ResolvedNexthop]>,
 ) -> Option<rib::entry::RibEntry> {
     // SRv6 L3VPN (VPNv6 over an SRv6 underlay) — see `select_fib_entry_v4`.
     if best.typ == BgpRibType::Originated
@@ -783,8 +864,11 @@ fn select_fib_entry_v6(
         // of a plain next-hop entry, so matched traffic is SRv6-
         // encapsulated to the egress PE. (The `Originated` + SID case is
         // VPNv6-over-SRv6, handled above; this is the global-table,
-        // non-VPN ingress.)
+        // non-VPN ingress.) A service SID wins over inherited transport
+        // — the route's own encapsulation is authoritative.
         make_bgp_srv6_encap_entry_v6(best, sid)
+    } else if let Some(egress) = inherited_seg6_egress(nht_transport) {
+        make_bgp_inherited_seg6_entry(best, egress)
     } else {
         make_bgp_rib_entry_v6(best)
     }
@@ -805,7 +889,13 @@ pub(super) fn fib_install_v6(bgp: &super::peer::BgpTop, prefix: Ipv6Net, selecte
         selected.first(),
     );
     let best = best.as_deref();
-    let entry = best.and_then(|b| select_fib_entry_v6(b, transport));
+    // The winner's NHT resolution (global instance only) — see
+    // `fib_install_v4`.
+    let nht_transport = bgp.nexthop_cache.as_deref().and_then(|cache| {
+        best.and_then(|b| super::nht::bgp_nexthop_ip(&b.attr))
+            .map(|nh| cache.transport_for(nh))
+    });
+    let entry = best.and_then(|b| select_fib_entry_v6(b, transport, nht_transport));
     match entry {
         Some(mut rib_entry) => {
             // Colour-aware SRv6 steering — plain-path only. A VPN tunnel
@@ -927,6 +1017,15 @@ fn ilm_swap_install(
     service_label: u32,
     transport: &[rib::nht::ResolvedNexthop],
 ) {
+    // Same refusal as `build_vpn_fib_entry`: a label swap cannot ride
+    // SRv6 transport, so egresses whose resolution carries a segment
+    // list are unusable for the ILM.
+    let transport: Vec<&rib::nht::ResolvedNexthop> =
+        transport.iter().filter(|e| e.segs.is_empty()).collect();
+    if transport.is_empty() {
+        ilm_swap_remove(rib_client, local_label);
+        return;
+    }
     let mk_uni = |egress: &rib::nht::ResolvedNexthop| {
         let mut uni = rib::NexthopUni::new(egress.addr, 0, Vec::new());
         let mut labels = egress.labels.clone();
@@ -941,10 +1040,10 @@ fn ilm_swap_install(
         uni
     };
     let nexthop = if transport.len() == 1 {
-        rib::Nexthop::Uni(mk_uni(&transport[0]))
+        rib::Nexthop::Uni(mk_uni(transport[0]))
     } else {
         let mut multi = rib::NexthopMulti::default();
-        for egress in transport {
+        for &egress in &transport {
             multi.nexthops.push(mk_uni(egress));
         }
         rib::Nexthop::Multi(multi)
@@ -19684,7 +19783,7 @@ mod tests {
             segs: vec![],
             seg_encap: None,
         }];
-        let entry = super::select_fib_entry_v4(&rib, Some(&transport)).expect("labelled");
+        let entry = super::select_fib_entry_v4(&rib, Some(&transport), None).expect("labelled");
         match entry.nexthop {
             crate::rib::Nexthop::Uni(uni) => {
                 assert_eq!(uni.addr, "172.16.0.2".parse::<IpAddr>().unwrap());
@@ -19712,7 +19811,7 @@ mod tests {
             segs: vec![],
             seg_encap: None,
         }];
-        let entry = super::select_fib_entry_v4(&rib, Some(&transport)).expect("plain");
+        let entry = super::select_fib_entry_v4(&rib, Some(&transport), None).expect("plain");
         match entry.nexthop {
             crate::rib::Nexthop::Uni(uni) => {
                 assert_eq!(uni.addr, IpAddr::V4(Ipv4Addr::new(192, 0, 2, 1)));
@@ -19730,7 +19829,7 @@ mod tests {
             Some(BgpNexthop::Ipv4(Ipv4Addr::new(192, 0, 2, 9))),
             super::BgpRibType::Originated,
         );
-        let entry = super::select_fib_entry_v4(&rib, None).expect("plain");
+        let entry = super::select_fib_entry_v4(&rib, None, None).expect("plain");
         match entry.nexthop {
             crate::rib::Nexthop::Uni(uni) => {
                 assert_eq!(uni.addr, IpAddr::V4(Ipv4Addr::new(192, 0, 2, 9)));
@@ -19821,7 +19920,7 @@ mod tests {
             segs: vec![],
             seg_encap: None,
         }];
-        let entry = super::select_fib_entry_v4(&rib, Some(&transport)).expect("srv6 entry");
+        let entry = super::select_fib_entry_v4(&rib, Some(&transport), None).expect("srv6 entry");
         match entry.nexthop {
             crate::rib::Nexthop::Uni(uni) => {
                 assert_eq!(uni.segs, vec![sid]);
@@ -19831,7 +19930,146 @@ mod tests {
         }
     }
 
+    #[test]
+    fn select_fib_entry_v6_inherits_srv6_transport_from_nht() {
+        use crate::rib::nht::ResolvedNexthop;
+        // A plain iBGP v6 route whose next-hop resolved through an
+        // SRv6-encapsulated covering route inherits the segment list:
+        // the entry carries the resolved egress + segs, not the bare
+        // (natively unroutable) BGP next-hop.
+        let sid: std::net::Ipv6Addr = "fcbb:bbbb:1:40::".parse().unwrap();
+        let rib = bgp_rib_with_nexthop(
+            Some(BgpNexthop::Ipv6("2001:db8:cafe::4".parse().unwrap())),
+            super::BgpRibType::IBGP,
+        );
+        let nht = vec![ResolvedNexthop {
+            addr: "fcbb:bbbb:1::".parse().unwrap(),
+            ifindex: 3,
+            labels: vec![],
+            segs: vec![sid],
+            seg_encap: Some(isis_packet::srv6::EncapType::HEncap),
+        }];
+        let entry = super::select_fib_entry_v6(&rib, None, Some(&nht)).expect("inherited");
+        assert_eq!(entry.distance, 200);
+        match entry.nexthop {
+            crate::rib::Nexthop::Uni(uni) => {
+                assert_eq!(uni.addr, "fcbb:bbbb:1::".parse::<IpAddr>().unwrap());
+                assert_eq!(uni.ifindex(), Some(3));
+                assert_eq!(uni.segs, vec![sid]);
+                assert_eq!(uni.encap_type, Some(isis_packet::srv6::EncapType::HEncap));
+                assert!(uni.mpls_label.is_empty());
+            }
+            other => panic!("expected Uni nexthop, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn select_fib_entry_v4_inherits_srv6_transport_from_nht() {
+        use crate::rib::nht::ResolvedNexthop;
+        // v4 sibling (RFC 8950-style v4 service over an SRv6-covered
+        // next-hop): same inheritance, v6 egress under a v4 prefix.
+        let sid: std::net::Ipv6Addr = "fcbb:bbbb:1:40::".parse().unwrap();
+        let rib = bgp_rib_with_nexthop(
+            Some(BgpNexthop::Ipv4(Ipv4Addr::new(10, 2, 0, 1))),
+            super::BgpRibType::IBGP,
+        );
+        let nht = vec![ResolvedNexthop {
+            addr: "fcbb:bbbb:1::".parse().unwrap(),
+            ifindex: 3,
+            labels: vec![],
+            segs: vec![sid],
+            seg_encap: Some(isis_packet::srv6::EncapType::HEncap),
+        }];
+        let entry = super::select_fib_entry_v4(&rib, None, Some(&nht)).expect("inherited");
+        match entry.nexthop {
+            crate::rib::Nexthop::Uni(uni) => {
+                assert_eq!(uni.segs, vec![sid]);
+                assert_eq!(uni.encap_type, Some(isis_packet::srv6::EncapType::HEncap));
+            }
+            other => panic!("expected Uni nexthop, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn select_fib_entry_v6_plain_when_nht_carries_labels_only() {
+        use crate::rib::nht::ResolvedNexthop;
+        // An MPLS-labelled resolution does NOT rewrite a plain unicast
+        // entry — labels are the LU/VPN paths' business. The entry
+        // keeps the bare BGP next-hop for the RIB to resolve.
+        let nh: std::net::Ipv6Addr = "2001:db8::8".parse().unwrap();
+        let rib = bgp_rib_with_nexthop(Some(BgpNexthop::Ipv6(nh)), super::BgpRibType::IBGP);
+        let nht = vec![ResolvedNexthop {
+            addr: "2001:db8:12::2".parse().unwrap(),
+            ifindex: 3,
+            labels: vec![16800],
+            segs: vec![],
+            seg_encap: None,
+        }];
+        let entry = super::select_fib_entry_v6(&rib, None, Some(&nht)).expect("plain");
+        match entry.nexthop {
+            crate::rib::Nexthop::Uni(uni) => {
+                assert_eq!(uni.addr, IpAddr::V6(nh));
+                assert!(uni.segs.is_empty());
+                assert!(uni.mpls_label.is_empty());
+            }
+            other => panic!("expected Uni nexthop, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn select_fib_entry_v6_service_sid_wins_over_inherited_transport() {
+        use crate::rib::nht::ResolvedNexthop;
+        // A route carrying its own SRv6 L3 service SID keeps it — the
+        // route's encapsulation is authoritative over anything the
+        // next-hop resolution would donate.
+        let own_sid: std::net::Ipv6Addr = "fcbb:bbbb:8:40::".parse().unwrap();
+        let transport_sid: std::net::Ipv6Addr = "fcbb:bbbb:1:40::".parse().unwrap();
+        let mut attr = srv6_l3_attr(own_sid);
+        attr.nexthop = Some(BgpNexthop::Ipv6("2001:db8::8".parse().unwrap()));
+        let rib = super::BgpRib::new(
+            0,
+            Ipv4Addr::new(10, 0, 0, 1),
+            super::BgpRibType::IBGP,
+            0,
+            0,
+            &attr,
+            None,
+            None,
+            false,
+        );
+        let nht = vec![ResolvedNexthop {
+            addr: "fcbb:bbbb:1::".parse().unwrap(),
+            ifindex: 3,
+            labels: vec![],
+            segs: vec![transport_sid],
+            seg_encap: Some(isis_packet::srv6::EncapType::HEncap),
+        }];
+        let entry = super::select_fib_entry_v6(&rib, None, Some(&nht)).expect("service entry");
+        match entry.nexthop {
+            crate::rib::Nexthop::Uni(uni) => {
+                assert_eq!(uni.segs, vec![own_sid]);
+            }
+            other => panic!("expected Uni nexthop, got {other:?}"),
+        }
+    }
+
     // --- build_vpn_fib_entry (moved from bgp/vrf/inst.rs) ----------------
+
+    #[test]
+    fn vpn_fib_entry_refuses_srv6_transport() {
+        use crate::rib::nht::ResolvedNexthop;
+        // An MPLS service label cannot ride SRv6 transport: an egress
+        // whose resolution carries a segment list is filtered, and with
+        // no usable egress left the entry is refused (→ withdraw).
+        let transport = vec![ResolvedNexthop {
+            addr: "fcbb:bbbb:1::".parse().unwrap(),
+            ifindex: 5,
+            labels: vec![],
+            segs: vec!["fcbb:bbbb:1:40::".parse().unwrap()],
+            seg_encap: Some(isis_packet::srv6::EncapType::HEncap),
+        }];
+        assert!(super::build_vpn_fib_entry(24001, &transport).is_none());
+    }
 
     #[test]
     fn vpn_fib_entry_pushes_service_label_below_transport() {

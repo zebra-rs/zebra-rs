@@ -1,0 +1,48 @@
+# z3 — SRv6 ingress PE (AS 65000). Two iBGP sessions:
+#  - transport, to z1 over the plain link path, with
+#    `encapsulation-type srv6`: delivers 2001:db8:cafe::/64 (and the
+#    rest of z1's connected prefixes) as SRv6 service routes carrying
+#    z1's End.DT6 SID;
+#  - service, to the node z4 (2001:db8:cafe::4) *behind* z1 — the TCP
+#    session itself rides the SRv6 tunnel (encap at z3, decap at z1's
+#    uDT6, plain delivery to z4). z4's routes arrive with next-hop
+#    cafe::4, an address covered ONLY by the SRv6 transport route —
+#    NHT must resolve through it and inherit the segment list.
+interface:
+- if-name: i1
+  ipv6:
+    address: 2001:db8:23::3/64
+router:
+  static:
+    ipv6:
+      route:
+      - prefix: 2001:db8:12::/64
+        nexthop:
+        - address: 2001:db8:23::2
+      - prefix: fcbb:bbbb:1::/48
+        nexthop:
+        - address: 2001:db8:23::2
+  bgp:
+    global:
+      as: 65000
+      router-id: 10.0.0.3
+    timer:
+      adv-interval:
+        ibgp: 1
+        ebgp: 1
+    neighbor:
+    - remote-address: 2001:db8:12::1
+      timers: {connect-retry-time: 3}
+      remote-as: 65000
+      enabled: true
+      afi-safi:
+      - name: ipv6
+        enabled: true
+        encapsulation-type: srv6
+    - remote-address: 2001:db8:cafe::4
+      timers: {connect-retry-time: 3}
+      remote-as: 65000
+      enabled: true
+      afi-safi:
+      - name: ipv6
+        enabled: true

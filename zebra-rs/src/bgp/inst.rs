@@ -3881,15 +3881,36 @@ impl Bgp {
         }
     }
 
-    /// Re-install the dataplane for a VPN dep after its PE next-hop's
-    /// transport rerouted (reachability unchanged). Re-dispatches the
-    /// per-VRF import with the freshly-resolved transport, so each
-    /// importing VRF re-programs its `{transport,service}`-labelled FIB
-    /// entry. Unicast deps are a no-op: BGP installs the BGP next-hop
-    /// and the RIB recursively re-resolves it, so there's nothing here
-    /// to refresh.
+    /// Re-install the dataplane for a dep after its next-hop's
+    /// transport rerouted (reachability unchanged). VPN deps
+    /// re-dispatch the per-VRF import with the freshly-resolved
+    /// transport, so each importing VRF re-programs its
+    /// `{transport,service}`-labelled FIB entry. Unicast deps re-run
+    /// the FIB install: an entry whose next-hop resolution carries
+    /// SRv6 segments embeds them (inherited encapsulation), so it must
+    /// be re-programmed — a plain entry (bare BGP next-hop, RIB
+    /// re-resolves recursively) makes the re-install an idempotent
+    /// re-send. No re-advertise anywhere here: best-path is unchanged.
     fn nht_reinstall_transport(&mut self, nh: std::net::IpAddr, dep: super::nht::NhtDep) {
         use super::nht::NhtDep;
+        // Unicast arms first — they need a `BgpTop` carrying the NHT
+        // cache, which conflicts with the shared `transport` borrow
+        // the VPN arms use below.
+        match dep {
+            NhtDep::V4(p) => {
+                let selected = self.shard.v4.select_best_path(p);
+                let top = self.nht_install_top();
+                super::route::fib_install_v4(&top, p, &selected);
+                return;
+            }
+            NhtDep::V6(p) => {
+                let selected = self.shard.v6.select_best_path(p);
+                let top = self.nht_install_top();
+                super::route::fib_install_v6(&top, p, &selected);
+                return;
+            }
+            _ => {}
+        }
         let dispatcher = super::vrf::VrfImportDispatcher {
             rib_known_vrfs: &self.rib_known_vrfs,
             vrf_registry: &self.vrf_registry,
@@ -4009,7 +4030,37 @@ impl Bgp {
             NhtDep::MupEndpoint(rd, prefix) => {
                 self.mup_redispatch_endpoint(nh, rd, prefix, true);
             }
+            // Handled by the early match above.
             NhtDep::V4(_) | NhtDep::V6(_) => {}
+        }
+    }
+
+    /// Build the `BgpTop` for a transport-only unicast re-install: the
+    /// same shape `nht_reeval_dep` uses, carrying the NHT cache so
+    /// `fib_install_v4/v6` can re-derive inherited SRv6 transport. A
+    /// method (whole-`self` borrow) is fine here — the re-install path
+    /// touches nothing else on `self` while the top is alive.
+    fn nht_install_top(&mut self) -> super::peer::BgpTop<'_> {
+        super::peer::BgpTop {
+            router_id: &self.router_id,
+            srv6_ipv6_export: self.srv6_ipv6_export.as_ref(),
+            local_rib: &mut self.local_rib,
+            shard: &mut self.shard,
+            tx: &self.tx,
+            rib_client: &self.ctx.rib,
+            attr_store: &mut self.attr_store,
+            update_groups: &mut self.update_groups,
+            interface_addrs: &self.interface_addrs,
+            color_policy: Some(&self.color_policy),
+            flex_algo_routes: Some(&self.flex_algo_routes),
+            flex_algo_srv6_routes: Some(&self.flex_algo_srv6_routes),
+            vrf_export: None,
+            vrf_import: None,
+            nexthop_cache: Some(&mut self.nexthop_cache),
+            vrf_transport_v4: None,
+            vrf_transport_v6: None,
+            central_label_alloc: None,
+            as_sets_withdraw: self.as_sets_withdraw,
         }
     }
 
@@ -4177,7 +4228,10 @@ impl Bgp {
             flex_algo_srv6_routes: Some(&self.flex_algo_srv6_routes),
             vrf_export: None,
             vrf_import: None,
-            nexthop_cache: None,
+            // The re-eval installs unicast winners, whose entry shape
+            // depends on the next-hop's resolved transport (SRv6
+            // segment inheritance) — the install path needs the cache.
+            nexthop_cache: Some(&mut self.nexthop_cache),
             vrf_transport_v4: None,
             vrf_transport_v6: None,
             central_label_alloc: None,
@@ -4201,12 +4255,11 @@ impl Bgp {
             }
             // Labeled-Unicast reachability flip: re-install the FIB
             // label-push entry (or withdraw) and re-advertise. The cache
-            // is passed directly (not via `top`, whose `nexthop_cache` is
-            // `None`) — `top`'s borrows don't include it.
+            // is read through `top`, which holds the borrow.
             NhtDep::V4lu(p) => {
                 super::route::fib_install_labelv4(
                     top.rib_client,
-                    Some(&self.nexthop_cache),
+                    top.nexthop_cache.as_deref(),
                     *p,
                     &selected,
                 );
@@ -4220,7 +4273,7 @@ impl Bgp {
             NhtDep::V6lu(p) => {
                 super::route::fib_install_labelv6(
                     top.rib_client,
-                    Some(&self.nexthop_cache),
+                    top.nexthop_cache.as_deref(),
                     *p,
                     &selected,
                 );
@@ -4252,7 +4305,10 @@ impl Bgp {
                 };
                 if reachable && let Some(winner) = selected.first() {
                     let label = winner.label.map(|l| l.label).unwrap_or(0);
-                    let transport = self.nexthop_cache.transport_for(nh);
+                    let transport = top
+                        .nexthop_cache
+                        .as_deref()
+                        .map_or(&[][..], |c| c.transport_for(nh));
                     super::vrf::dispatch_import_v4(
                         &dispatcher,
                         *rd,
@@ -4263,7 +4319,7 @@ impl Bgp {
                         None,
                     );
                 } else if let Some(attr) =
-                    self.shard.v4vpn.get(rd).and_then(|t| t.candidate_attr(*p))
+                    top.shard.v4vpn.get(rd).and_then(|t| t.candidate_attr(*p))
                 {
                     super::vrf::dispatch_withdraw_import_v4(&dispatcher, *rd, *p, &attr, None);
                 }
@@ -4272,7 +4328,7 @@ impl Bgp {
                 // transport resolved, or tear it down if it went away.
                 super::route::reconcile_swap_ilm(
                     &self.ctx.rib,
-                    Some(&self.nexthop_cache),
+                    top.nexthop_cache.as_deref(),
                     selected.first(),
                 );
             }
@@ -4293,7 +4349,10 @@ impl Bgp {
                 };
                 if reachable && let Some(winner) = selected.first() {
                     let label = winner.label.map(|l| l.label).unwrap_or(0);
-                    let transport = self.nexthop_cache.transport_for(nh);
+                    let transport = top
+                        .nexthop_cache
+                        .as_deref()
+                        .map_or(&[][..], |c| c.transport_for(nh));
                     super::vrf::dispatch_import_v6(
                         &dispatcher,
                         *rd,
@@ -4304,7 +4363,7 @@ impl Bgp {
                         None,
                     );
                 } else if let Some(attr) =
-                    self.shard.v6vpn.get(rd).and_then(|t| t.candidate_attr(*p))
+                    top.shard.v6vpn.get(rd).and_then(|t| t.candidate_attr(*p))
                 {
                     super::vrf::dispatch_withdraw_import_v6(&dispatcher, *rd, *p, &attr, None);
                 }
@@ -4330,7 +4389,10 @@ impl Bgp {
                     && let Some(winner) = selected.last()
                 {
                     let label = winner.label.map(|l| l.label).unwrap_or(0);
-                    let transport = self.nexthop_cache.transport_for(nh);
+                    let transport = top
+                        .nexthop_cache
+                        .as_deref()
+                        .map_or(&[][..], |c| c.transport_for(nh));
                     match net {
                         ipnet::IpNet::V4(p) => {
                             if reachable {
@@ -4382,7 +4444,9 @@ impl Bgp {
             NhtDep::SrPolicy { color, endpoint } => {
                 super::route::sr_policy_reconcile_mpls(
                     top.rib_client,
-                    &self.nexthop_cache,
+                    top.nexthop_cache
+                        .as_deref()
+                        .expect("global task owns the NHT cache"),
                     &mut top.local_rib.sr_policy,
                     *color,
                     *endpoint,
@@ -4397,7 +4461,9 @@ impl Bgp {
                 let selected = top.local_rib.select_best_path_mup(rd, prefix);
                 if let Some(winner) = selected.first() {
                     let transport = if reachable {
-                        self.nexthop_cache.transport_for(nh).to_vec()
+                        top.nexthop_cache
+                            .as_deref()
+                            .map_or(Vec::new(), |c| c.transport_for(nh).to_vec())
                     } else {
                         Vec::new()
                     };
@@ -4436,7 +4502,9 @@ impl Bgp {
                         None
                     };
                     let endpoint_transport = if reachable {
-                        self.nexthop_cache.transport_for(nh).to_vec()
+                        top.nexthop_cache
+                            .as_deref()
+                            .map_or(Vec::new(), |c| c.transport_for(nh).to_vec())
                     } else {
                         Vec::new()
                     };
@@ -4784,7 +4852,11 @@ impl Bgp {
             flex_algo_srv6_routes: Some(&self.flex_algo_srv6_routes),
             vrf_export: None,
             vrf_import: None,
-            nexthop_cache: None,
+            // The re-install must see the NHT cache: a winner whose
+            // next-hop resolution carries SRv6 segments re-derives its
+            // inherited encapsulation here — without the cache it
+            // would degrade to a plain (unencapsulated) entry.
+            nexthop_cache: Some(&mut self.nexthop_cache),
             vrf_transport_v4: None,
             vrf_transport_v6: None,
             central_label_alloc: None,

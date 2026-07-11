@@ -1,0 +1,44 @@
+# z4 — service node behind z1 (AS 65000). Advertises the service
+# aggregate 3001:db8:100::/64 (a blackhole static, redistributed) to
+# z3; the ping responder 3001:db8:100::1 sits on lo, where the local
+# route beats the blackhole aggregate for delivery. `redistribute
+# static` (not connected) keeps the z1-z4 subnet out of this session —
+# z3 must learn 2001:db8:cafe::/64 only from z1's SRv6 transport
+# session, so z4's next-hop (cafe::4) resolves through it.
+interface:
+- if-name: lo
+  ipv6:
+    address: 3001:db8:100::1/128
+- if-name: i1
+  ipv6:
+    address: 2001:db8:cafe::4/64
+router:
+  static:
+    ipv6:
+      route:
+      - prefix: 2001:db8:23::/64
+        nexthop:
+        - address: 2001:db8:cafe::1
+      - prefix: 3001:db8:100::/64
+        nexthop:
+        - address: blackhole
+  bgp:
+    global:
+      as: 65000
+      router-id: 10.0.0.4
+    timer:
+      adv-interval:
+        ibgp: 1
+        ebgp: 1
+    neighbor:
+    - remote-address: 2001:db8:23::3
+      timers: {connect-retry-time: 3}
+      remote-as: 65000
+      enabled: true
+      afi-safi:
+      - name: ipv6
+        enabled: true
+    afi-safi:
+    - name: ipv6
+      redistribute:
+        static: {}

@@ -1,0 +1,20 @@
+# z2 — transit core. Knows the two link subnets (connected) and z1's
+# SRv6 locator — nothing else. Neither 2001:db8:cafe::/64 nor
+# 3001:db8:100::/64 appears here, so traffic for them can only cross
+# z2 inside an SRv6 encapsulation addressed to the locator. That makes
+# both the z4<->z3 BGP session (TCP through the tunnel) and the final
+# ping proof of the inherited encapsulation.
+interface:
+- if-name: i1
+  ipv6:
+    address: 2001:db8:12::2/64
+- if-name: i2
+  ipv6:
+    address: 2001:db8:23::2/64
+router:
+  static:
+    ipv6:
+      route:
+      - prefix: fcbb:bbbb:1::/48
+        nexthop:
+        - address: 2001:db8:12::1
