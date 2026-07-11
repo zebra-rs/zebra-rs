@@ -1,6 +1,6 @@
 # ASBR2 — autonomous system border router of AS 65502. Mirror of ASBR1:
 # no VRFs, eBGP VPNv4 to ASBR1 over the global inter-AS link, iBGP VPNv4
-# with next-hop-self toward PE2, per-route swap ILMs.
+# with next-hop-self toward PE3, per-route swap ILMs.
 interface:
 - if-name: lo
   ipv4:
