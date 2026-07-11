@@ -89,6 +89,9 @@ the whole post-convergence path with the service SID as its final segment.
 ## Everything else
 
 ...is the OSPFv3 classic lab, unchanged: topology and appendix tables, the
-RFC 9252 service layer, the convergence notes, and the walkthrough
-commands. Run the two side by side (one at a time) and compare
-`show ospfv3 repair-list` and the SRH sizes on the wire.
+RFC 9252 service layer, the convergence notes, the
+[static-route walkthrough](../ospfv3-srv6-classic/README.md#static-routes-over-the-srv6-core)
+(its commands run identically here — only the locator routes render as
+uN carriers), and the walkthrough commands. Run the two side by side
+(one at a time) and compare `show ospfv3 repair-list` and the SRH
+sizes on the wire.
