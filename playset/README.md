@@ -100,7 +100,7 @@ Rows are the tenancy, columns the underlay transport:
 | | IPv4 | IPv6 |
 |:--|:--|:--|
 | **single VNI** | [bgp-evpn-vxlan4](bgp-evpn-vxlan4/README.md) | [bgp-evpn-vxlan6](bgp-evpn-vxlan6/README.md) |
-| **two VNIs** | [bgp-evpn-vxlan4-multi](bgp-evpn-vxlan4-multi/README.md) | [bgp-evpn-vxlan6-multi](bgp-evpn-vxlan6-multi/README.md) |
+| **multi VNIs** | [bgp-evpn-vxlan4-multi](bgp-evpn-vxlan4-multi/README.md) | [bgp-evpn-vxlan6-multi](bgp-evpn-vxlan6-multi/README.md) |
 
 `vxlan4` is the base; move right to swap the underlay to **IPv6** (IPv6 VTEP
 endpoints, next hops, PMSI, and FDB `dst`, while the RD stays IPv4), and move
