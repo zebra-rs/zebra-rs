@@ -1621,16 +1621,6 @@ mod tests {
                 "/show/ip/route/prefix",
                 vec!["10.0.0.0/24"],
             ),
-            (
-                "show ip route 10.0.0.1 detail",
-                "/show/ip/route/prefix/detail",
-                vec!["10.0.0.1"],
-            ),
-            (
-                "show ip route 10.0.0.0/24 detail",
-                "/show/ip/route/prefix/detail",
-                vec!["10.0.0.0/24"],
-            ),
             ("show ip route vrf blue", "/show/ip/route/vrf", vec!["blue"]),
             ("show ipv6 route", "/show/ipv6/route", vec![]),
             (
@@ -1641,11 +1631,6 @@ mod tests {
             (
                 "show ipv6 route 2001:db8::/48",
                 "/show/ipv6/route/prefix",
-                vec!["2001:db8::/48"],
-            ),
-            (
-                "show ipv6 route 2001:db8::/48 detail",
-                "/show/ipv6/route/prefix/detail",
                 vec!["2001:db8::/48"],
             ),
         ];
@@ -1659,10 +1644,14 @@ mod tests {
             assert_eq!(&got, want_args, "args for `{cmd}`");
         }
 
-        // The keyword spelling was removed with the move to positional.
+        // The keyword spelling was removed with the move to positional,
+        // and the single-route form carries no `detail` suffix (the
+        // whole-table `show ip route detail` keeps it).
         for cmd in [
             "show ip route prefix 10.0.0.0/24",
             "show ipv6 route prefix 2001:db8::/48",
+            "show ip route 10.0.0.0/24 detail",
+            "show ipv6 route 2001:db8::/48 detail",
         ] {
             let (code, _comps, _state) = parse(cmd, entry.clone(), None, State::new());
             assert_ne!(code, ExecCode::Success, "`{cmd}` must not be a command");

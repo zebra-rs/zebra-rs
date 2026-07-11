@@ -1155,13 +1155,7 @@ pub fn rib_show_detail(rib: &Rib, args: Args, json: bool) -> String {
 /// longest match (the route that contains it); a prefix shows that
 /// exact entry. One-line layout.
 pub fn rib_show_prefix(rib: &Rib, mut args: Args, json: bool) -> String {
-    rib_show_one(rib, args.string(), json, false)
-}
-
-/// `show ip route {A.B.C.D | A.B.C.D/M} detail` — the same route
-/// selection in detail-block format.
-pub fn rib_show_prefix_detail(rib: &Rib, mut args: Args, json: bool) -> String {
-    rib_show_one(rib, args.string(), json, true)
+    rib_show_one(rib, args.string(), json)
 }
 
 /// Resolve the positional `show ip route` selector — a bare address
@@ -1202,7 +1196,7 @@ fn rib_lookup_one<'a>(
     }
 }
 
-fn rib_show_one(rib: &Rib, tok: Option<String>, json: bool, detail: bool) -> String {
+fn rib_show_one(rib: &Rib, tok: Option<String>, json: bool) -> String {
     let (prefix, entries) = match rib_lookup_one(rib, &tok, json) {
         Ok(found) => found,
         Err(out) => return out,
@@ -1219,15 +1213,9 @@ fn rib_show_one(rib: &Rib, tok: Option<String>, json: bool, detail: bool) -> Str
     }
 
     let mut buf = String::new();
-    if detail {
-        for entry in entries.iter() {
-            buf.push_str(&rib_entry_show_detail(rib, prefix, entry));
-        }
-    } else {
-        buf.push_str(SHOW_HEADER);
-        for entry in entries.iter() {
-            let _ = write!(buf, "{}", rib_entry_show(rib, prefix, entry, json).unwrap());
-        }
+    buf.push_str(SHOW_HEADER);
+    for entry in entries.iter() {
+        let _ = write!(buf, "{}", rib_entry_show(rib, prefix, entry, json).unwrap());
     }
     buf
 }
@@ -1437,13 +1425,7 @@ pub fn rib6_show_detail(rib: &Rib, args: Args, json: bool) -> String {
 /// [`rib_show_prefix`]: address does a longest-match lookup, prefix
 /// matches exactly. One-line layout.
 pub fn rib6_show_prefix(rib: &Rib, mut args: Args, json: bool) -> String {
-    rib6_show_one(rib, args.string(), json, false)
-}
-
-/// `show ipv6 route {X:X::X:X | X:X::X:X/M} detail` — the same route
-/// selection in detail-block format.
-pub fn rib6_show_prefix_detail(rib: &Rib, mut args: Args, json: bool) -> String {
-    rib6_show_one(rib, args.string(), json, true)
+    rib6_show_one(rib, args.string(), json)
 }
 
 /// V6 twin of [`rib_lookup_one`].
@@ -1481,7 +1463,7 @@ fn rib6_lookup_one<'a>(
     }
 }
 
-fn rib6_show_one(rib: &Rib, tok: Option<String>, json: bool, detail: bool) -> String {
+fn rib6_show_one(rib: &Rib, tok: Option<String>, json: bool) -> String {
     let (prefix, entries) = match rib6_lookup_one(rib, &tok, json) {
         Ok(found) => found,
         Err(out) => return out,
@@ -1498,19 +1480,13 @@ fn rib6_show_one(rib: &Rib, tok: Option<String>, json: bool, detail: bool) -> St
     }
 
     let mut buf = String::new();
-    if detail {
-        for entry in entries.iter() {
-            buf.push_str(&rib_entry_show_v6_detail(rib, prefix, entry));
-        }
-    } else {
-        buf.push_str(SHOW_HEADER);
-        for entry in entries.iter() {
-            let _ = write!(
-                buf,
-                "{}",
-                rib_entry_show_v6(rib, prefix, entry, json).unwrap()
-            );
-        }
+    buf.push_str(SHOW_HEADER);
+    for entry in entries.iter() {
+        let _ = write!(
+            buf,
+            "{}",
+            rib_entry_show_v6(rib, prefix, entry, json).unwrap()
+        );
     }
     buf
 }
@@ -1890,8 +1866,6 @@ impl Rib {
             .set(rib_show_detail)
             .path("/show/ip/route/prefix")
             .set(rib_show_prefix)
-            .path("/show/ip/route/prefix/detail")
-            .set(rib_show_prefix_detail)
             .path("/show/ip/route/vrf")
             .set(rib_show_vrf)
             .path("/show/ip/route/vrf/detail")
@@ -1902,8 +1876,6 @@ impl Rib {
             .set(rib6_show_detail)
             .path("/show/ipv6/route/prefix")
             .set(rib6_show_prefix)
-            .path("/show/ipv6/route/prefix/detail")
-            .set(rib6_show_prefix_detail)
             .path("/show/ipv6/route/vrf")
             .set(rib6_show_vrf)
             .path("/show/ipv6/route/vrf/detail")

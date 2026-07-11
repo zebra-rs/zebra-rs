@@ -560,10 +560,6 @@ module exec {
               type inet:ipv4-prefix;
             }
           }
-          leaf detail {
-            ext:help "Show this route in detail format";
-            type empty;
-          }
         }
         list vrf {
           ext:help "IPv4 routing table for a VRF";
@@ -884,10 +880,6 @@ module exec {
               type inet:ipv6-address;
               type inet:ipv6-prefix;
             }
-          }
-          leaf detail {
-            ext:help "Show this route in detail format";
-            type empty;
           }
         }
         list vrf {
