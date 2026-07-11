@@ -802,6 +802,57 @@ impl FibHandle {
     /// caller leaves the route's `fib` flag
     /// clear and forces the nexthop's recreation so the next resolve
     /// pass re-adds it.
+    /// Re-emit one v4 route's cradle tee only (no kernel side) — the
+    /// enable-after-routes resync unit. **Protocol routes only**: unlike
+    /// the inline tee (which also mirrors connected routes), the walk
+    /// skips `Connected`, because cradle derives a port's connected +
+    /// local routes itself from the kernel addresses when `SetPort`
+    /// attaches it (`kernel::derive_port`, with the real oif). The
+    /// stored connected `RibEntry` carries only `entry.ifindex` and a
+    /// `Nexthop::Link(0)`, so re-teeing it here would clobber cradle's
+    /// correct entry with an oif-0 one. A disabled tee is a no-op.
+    pub async fn cradle_route_resync_v4(
+        &self,
+        prefix: &Ipv4Net,
+        entry: &RibEntry,
+        table_id: u32,
+    ) -> bool {
+        if entry.is_protocol()
+            && let Some(cradle) = &self.cradle
+        {
+            let members = cradle_members(&entry.nexthop);
+            if !members.is_empty() {
+                cradle.route_install(*prefix, table_id, members).await;
+                return true;
+            }
+        }
+        false
+    }
+
+    /// v6 sibling of [`Self::cradle_route_resync_v4`].
+    pub async fn cradle_route_resync_v6(
+        &self,
+        prefix: &Ipv6Net,
+        entry: &RibEntry,
+        table_id: u32,
+    ) -> bool {
+        if entry.is_protocol()
+            && let Some(cradle) = &self.cradle
+        {
+            let members = cradle_members(&entry.nexthop);
+            if !members.is_empty() {
+                cradle.route_install6(*prefix, table_id, members).await;
+                return true;
+            }
+        }
+        false
+    }
+
+    /// Is the cradle eBPF tee currently attached?
+    pub fn cradle_active(&self) -> bool {
+        self.cradle.is_some()
+    }
+
     pub async fn route_ipv4_add(&self, prefix: &Ipv4Net, entry: &RibEntry, table_id: u32) -> bool {
         // Tee protocol AND connected routes — see the v6 sibling.
         if (entry.is_protocol() || matches!(entry.rtype, RibType::Connected))

@@ -70,6 +70,13 @@ Feature: system ebpf spawns and supervises the cradle eBPF engine
     Then show command "show ebpf" in namespace "crs1" should eventually contain "off (system ebpf disabled)"
     And daemon log in namespace "crs1" should eventually contain "engine stopped (system ebpf disabled)"
 
+  Scenario: Enabling ebpf after routes exist resyncs them into the engine
+    Given the test topology exists
+    When I apply command "set router static ipv4 route 10.222.0.0/24 nexthop 10.210.1.2" in namespace "crs1"
+    And I apply command "set system ebpf enabled true" in namespace "crs1"
+    Then daemon log in namespace "crs1" should eventually contain "cradle resync walked"
+    And show command "show ebpf ipv4" in namespace "crs1" should eventually contain "10.222.0.0/24"
+
   Scenario: Teardown topology
     Given the test topology exists
     When I stop zebra-rs in namespace "crs1"
