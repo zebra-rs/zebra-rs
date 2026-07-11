@@ -3801,6 +3801,8 @@ pub fn link_from_msg(msg: LinkMessage) -> FibLink {
                                 link.vrf_table = Some(t);
                             }
                         }
+                    } else if let LinkInfo::Kind(InfoKind::Bridge) = info {
+                        link.bridge = true;
                     }
                 }
             }

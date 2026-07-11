@@ -53,6 +53,17 @@ Feature: system ebpf spawns and supervises the cradle eBPF engine
     Then show command "show ebpf" in namespace "crs1" should eventually not contain "vrf 1"
     And show command "show ebpf" in namespace "crs1" should eventually contain "attached"
 
+  Scenario: A bridge-enslaved port becomes an L2 port in the bridge's flood domain
+    Given the test topology exists
+    When I apply command "set bridge br99" in namespace "crs1"
+    And I apply command "set interface eth0 bridge br99" in namespace "crs1"
+    Then show command "show ebpf" in namespace "crs1" should eventually contain "bd 1"
+    And show command "show ebpf" in namespace "crs1" should eventually contain "attached"
+    When I apply command "delete interface eth0 bridge br99" in namespace "crs1"
+    Then show command "show ebpf" in namespace "crs1" should eventually not contain "bd 1"
+    And show command "show ebpf" in namespace "crs1" should eventually contain "vrf 0"
+    And daemon log in namespace "crs1" should eventually contain "flushed learned MACs on eth0"
+
   Scenario: Disabling system ebpf stops the engine
     Given the test topology exists
     When I apply command "delete system ebpf enabled true" in namespace "crs1"

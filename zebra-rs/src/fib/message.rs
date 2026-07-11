@@ -51,6 +51,11 @@ pub struct FibLink {
     /// all-VRF consumer (the cradle port reconcile) resolve a slave's
     /// `master` to its VRF table without the RIB's registry.
     pub vrf_table: Option<u32>,
+    /// This device is a kernel bridge (`LinkInfo::Kind(InfoKind::Bridge)`).
+    /// The cradle port reconcile uses it to classify a slave's `master`:
+    /// bridge ⇒ L2 port in the bridge's flood domain, VRF ⇒ routed port
+    /// in that table.
+    pub bridge: bool,
 }
 
 impl FibLink {

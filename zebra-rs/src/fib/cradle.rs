@@ -315,23 +315,56 @@ impl CradleFib {
     }
 
     /// Attach `name` as a data-plane port (`SetPort`): cradle resolves the
-    /// ifindex, attaches the TC/XDP programs, and derives the port's
-    /// local + connected routes — into VRF table `vrf_id` (0 = global)
-    /// when the interface is VRF-enslaved, so ingress lookups use the
-    /// per-VRF FIB. Routed ports only (`l3`, vlan 0) — bridge/L2 domain
-    /// binding follows with the dynamic L2/L3 assignment work. A repeat
-    /// `SetPort` on a live port is an in-place update on cradle's side
-    /// (the attach is idempotent; the port entry and derived routes are
-    /// re-reconciled under the new VRF).
-    pub async fn set_port(&self, name: &str, vrf_id: u32) -> anyhow::Result<()> {
+    /// ifindex and attaches the TC/XDP programs. A routed port (`l3`)
+    /// derives its local + connected routes into VRF table `vrf_id`
+    /// (0 = global); an L2 port (`!l3`) switches in bridge domain `vlan`
+    /// (flood membership is programmed separately — [`Self::set_l2_domain`]).
+    /// A repeat `SetPort` on a live port is an in-place update on cradle's
+    /// side (the attach is idempotent; the port entry and derived routes
+    /// are re-reconciled under the new role/VRF).
+    pub async fn set_port(
+        &self,
+        name: &str,
+        l3: bool,
+        vlan: u16,
+        vrf_id: u32,
+    ) -> anyhow::Result<()> {
         self.client()
             .await?
             .set_port(pb::Port {
                 name: name.to_string(),
                 mac: String::new(),
-                l3: true,
-                vlan: 0,
+                l3,
+                vlan: vlan as u32,
                 vrf_id,
+            })
+            .await?;
+        Ok(())
+    }
+
+    /// Replace bridge domain `vlan`'s flood-member list (the ports BUM /
+    /// unknown-unicast frames replicate to, minus the ingress).
+    pub async fn set_l2_domain(&self, vlan: u16, members: Vec<String>) -> anyhow::Result<()> {
+        self.client()
+            .await?
+            .set_l2_domain(pb::L2Domain {
+                vlan: vlan as u32,
+                members,
+            })
+            .await?;
+        Ok(())
+    }
+
+    /// Flush the locally-learned FDB entries on `port` (control-plane
+    /// remote entries are untouched; `WatchFdb` reports the removals as
+    /// age events). Used when a port leaves a bridge domain but stays
+    /// attached — a detach (`DelPort`) flushes on the engine side already.
+    pub async fn flush_fdb_port(&self, port: &str) -> anyhow::Result<()> {
+        self.client()
+            .await?
+            .flush_fdb(pb::FdbFlush {
+                port: port.to_string(),
+                vlan: 0,
             })
             .await?;
         Ok(())
