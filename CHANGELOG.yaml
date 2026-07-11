@@ -5,6 +5,56 @@
 # Fields "distribution" and "urgency" are optional per-entry; if you omit
 # them, the defaults from .chglog.yml (or chglog config) are used.
 
+- semver: 26.7.3
+  date: 2026-07-11T18:00:00+09:00
+  distribution: unstable
+  urgency: medium
+  packager: Kunihiro Ishiguro <kunihiro@zebra.rs>
+  changes:
+    - note: |
+        ### Playset labs
+        * New lab collection under playset/: the TI-LFA fast-reroute
+          matrix (IS-IS / OSPFv2 / OSPFv3 x SR-MPLS / SRv6 classic /
+          SRv6 uSID), BGP EVPN VXLAN over IPv4 and IPv6 underlays
+          with multi-tenant variants, and Inter-AS L3VPN Options A,
+          B, C, C with route reflector, and AB - each a namespace
+          topology with walkthrough README and reference diagram
+        * Labs ship in the Debian package at
+          /usr/share/zebra-rs/playset and run from a read-only
+          install location: runtime state (logs, pid files) moved
+          to /tmp/zebra-rs-playset/<lab>
+
+    - note: |
+        ### EVPN
+        * Wire the single-VXLAN-device kernel datapath for EVPN
+          bridging
+
+    - note: |
+        ### TI-LFA / SR-MPLS
+        * IS-IS and OSPF TI-LFA repair stacks terminate at the
+          destination's node SID
+        * Recursive static routes over SR-MPLS: NHT resolves through
+          a protected nexthop's active member only, static routes
+          re-push when their recursive resolution moves, recursive
+          nexthops rendered FRR-style in `show ip route`
+        * FIB unicast routes install with NLM_F_REPLACE, so
+          re-resolution updates the kernel route in place
+
+    - note: |
+        ### BGP / RIB
+        * RFC 9774 `as-sets-withdraw` global toggle
+        * SRv6 SID routes are attributed to their owning protocol
+
+    - note: |
+        ### VTY / CLI
+        * Configured `system hostname` is rendered in the vty prompt
+
+    - note: |
+        ### Packaging
+        * Debian prerm stops the zebra-rs service on package
+          removal; previously an orphaned daemon kept running with
+          a deleted binary
+
 - semver: 26.7.2
   date: 2026-07-10T18:00:00+09:00
   distribution: unstable
