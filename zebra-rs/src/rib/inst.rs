@@ -752,8 +752,14 @@ pub struct Rib {
     /// EVPN Type-2 origination); aborted and respawned when the
     /// `system cradle grpc-endpoint` endpoint changes.
     pub cradle_fdb_watch: Option<tokio::task::JoinHandle<()>>,
-    /// `system cradle enabled` — master switch for the cradle eBPF tee.
+    /// `system cradle enabled` — the eBPF tee's standalone switch, for an
+    /// externally-run engine.
     pub cradle_enabled: bool,
+    /// `system ebpf enabled` — the managed-engine switch. It **implies the
+    /// tee**: the operator surface is this single knob, and a supervised
+    /// engine without routes would be useless. The supervisor task owns
+    /// the process; this flag only folds into `cradle_endpoint()`.
+    pub ebpf_enabled: bool,
     /// `system cradle grpc-endpoint <endpoint>` override. When the tee is enabled
     /// but this is unset, the endpoint defaults to `unix:cradle/grpc`.
     pub cradle_grpc: Option<String>,
@@ -995,6 +1001,7 @@ impl Rib {
         let mut rib = Rib {
             cradle_fdb_watch: None,
             cradle_enabled: false,
+            ebpf_enabled: false,
             cradle_grpc: None,
             cm: ConfigChannel::new(),
             show: ShowChannel::new(),
@@ -3796,9 +3803,9 @@ impl Rib {
         Some(())
     }
 
-    /// `set system cradle enabled <bool>` — the sole switch for the cradle
-    /// eBPF data-plane tee. Deleting it (or setting false) disables the tee
-    /// regardless of any `system cradle grpc-endpoint` endpoint.
+    /// `set system cradle enabled <bool>` — the tee's standalone switch
+    /// (externally-run engine). The managed path (`system ebpf enabled`)
+    /// implies the tee without this knob.
     #[cfg(target_os = "linux")]
     pub(crate) fn cradle_enabled_config_exec(
         &mut self,
@@ -3806,6 +3813,25 @@ impl Rib {
         op: ConfigOp,
     ) -> Option<()> {
         self.cradle_enabled = op.is_set() && args.boolean()?;
+        self.cradle_apply();
+        Some(())
+    }
+
+    /// `set system ebpf enabled <bool>` — the managed-engine switch. The
+    /// supervisor task spawns and supervises the engine; here it also
+    /// activates the FIB tee (and the reverse `WatchFdb` subscriber), so
+    /// the single knob yields a fully-programmed data plane. The tee's
+    /// first RPCs may race the engine start; they warn-and-drop until it
+    /// answers, and the supervisor's engine-up replay
+    /// (`Message::CradleEngineUp` → `CradleFib::replay`) squares the
+    /// state as soon as it is ready.
+    #[cfg(target_os = "linux")]
+    pub(crate) fn ebpf_enabled_config_exec(
+        &mut self,
+        mut args: crate::config::Args,
+        op: ConfigOp,
+    ) -> Option<()> {
+        self.ebpf_enabled = op.is_set() && args.boolean()?;
         self.cradle_apply();
         Some(())
     }
@@ -3831,11 +3857,16 @@ impl Rib {
         Some(())
     }
 
-    /// Effective cradle tee endpoint: `None` when disabled, else the
-    /// `system cradle grpc-endpoint` override or the `unix:cradle/grpc` default.
+    /// Effective eBPF tee endpoint: `None` when neither switch is on, else
+    /// the `system cradle grpc-endpoint` override or the
+    /// `unix:cradle/grpc` default. `system ebpf enabled` (managed engine)
+    /// implies the tee; `system cradle enabled` enables it standalone.
     #[cfg(target_os = "linux")]
     fn cradle_endpoint(&self) -> Option<String> {
-        cradle_effective_endpoint(self.cradle_enabled, self.cradle_grpc.as_deref())
+        cradle_effective_endpoint(
+            self.cradle_enabled || self.ebpf_enabled,
+            self.cradle_grpc.as_deref(),
+        )
     }
 
     /// Re-derive the cradle tee from the current `enabled` / `grpc-endpoint`
@@ -3947,6 +3978,9 @@ impl Rib {
                 } else if path.as_str() == "/system/cradle/enabled" {
                     #[cfg(target_os = "linux")]
                     let _ = self.cradle_enabled_config_exec(args, msg.op);
+                } else if path.as_str() == "/system/ebpf/enabled" {
+                    #[cfg(target_os = "linux")]
+                    let _ = self.ebpf_enabled_config_exec(args, msg.op);
                 } else if path.as_str() == "/system/cradle/grpc-endpoint" {
                     #[cfg(target_os = "linux")]
                     let _ = self.cradle_grpc_config_exec(args, msg.op);

@@ -1,8 +1,6 @@
 system:
   ebpf:
     enabled: true
-  cradle:
-    enabled: true
 interface:
 - if-name: eth0
   ebpf:

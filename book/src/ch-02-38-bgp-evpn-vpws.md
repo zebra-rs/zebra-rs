@@ -12,8 +12,9 @@ Ethernet Tag is its *local* VPWS service instance id, carrying an
 **SRv6 End.DX2 L2-Service Prefix-SID** (RFC 9252 §6.3) carved from the
 BGP SRv6 locator. Importing the remote's Type-1 — matched by Ethernet
 Tag == `remote-service-id` within the shared EVI — binds the remote SID
-as the AC's cross-connect target. Forwarding runs in the cradle eBPF
-data plane: the AC's ingress encapsulates every frame (any EtherType)
+as the AC's cross-connect target. Forwarding runs in the
+[eBPF data plane](ch-16-00-ebpf.md): the AC's ingress encapsulates every
+frame (any EtherType)
 MAC-in-SRv6 toward the remote SID, and the local End.DX2 decap emits
 received frames raw on the same AC.
 
@@ -112,6 +113,6 @@ configured (or re-pointed) is found without waiting for a route churn.
 
 Single-homed only (all-zero ESI): no multihoming, DF election, or
 primary/backup signalling yet — the L2-Attributes P/B bits are fixed at
-P=1/B=0. The data plane is cradle eBPF (`system cradle grpc-endpoint`); the
-kernel has no End.DX2/DX2V seg6local action, so these SIDs are never
-installed via netlink.
+P=1/B=0. Forwarding requires the [eBPF data plane](ch-16-00-ebpf.md)
+(`system ebpf enabled`); the kernel has no End.DX2/DX2V seg6local action, so
+these SIDs are never installed via netlink.

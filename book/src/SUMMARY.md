@@ -131,7 +131,7 @@
 
 ## Data Plane
 
-- [cradle eBPF Integration](ch-16-00-cradle.md)
+- [eBPF Data Plane](ch-16-00-ebpf.md)
 
 ## Performance Measurement
 
