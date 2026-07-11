@@ -1,0 +1,36 @@
+# z3 — SRv6 ingress (AS 65000). Peers iBGP with z1 across the z2 core
+# with `encapsulation-type srv6`, so z1's redistributed prefixes arrive
+# as SRv6 service routes and install as H.Encaps entries toward the
+# End.DT6 SID. The statics are the underlay stand-in: reach z1's link
+# (peering) and locator (SID resolution + encapped traffic) through z2.
+interface:
+- if-name: i1
+  ipv6:
+    address: 2001:db8:23::3/64
+router:
+  static:
+    ipv6:
+      route:
+      - prefix: 2001:db8:12::/64
+        nexthop:
+        - address: 2001:db8:23::2
+      - prefix: fcbb:bbbb:1::/48
+        nexthop:
+        - address: 2001:db8:23::2
+  bgp:
+    global:
+      as: 65000
+      router-id: 10.0.0.3
+    timer:
+      adv-interval:
+        ibgp: 1
+        ebgp: 1
+    neighbor:
+    - remote-address: 2001:db8:12::1
+      timers: {connect-retry-time: 3}
+      remote-as: 65000
+      enabled: true
+      afi-safi:
+      - name: ipv6
+        enabled: true
+        encapsulation-type: srv6

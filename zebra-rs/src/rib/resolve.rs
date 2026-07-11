@@ -108,18 +108,33 @@ fn entry_has_mpls(entry: &RibEntry) -> bool {
     }
 }
 
+// Whether `entry`'s nexthop carries an SRv6 H.Encap segment list — i.e. it
+// is a BGP-over-SRv6 service route (`encapsulation-type srv6`). Like an LU
+// label stack, the encapsulation makes the route legitimate transport for
+// recursive resolution: dependents inherit the segment list instead of
+// resolving over plain BGP.
+fn entry_has_segs(entry: &RibEntry) -> bool {
+    match &entry.nexthop {
+        Nexthop::Uni(uni) => !uni.segs.is_empty(),
+        Nexthop::Multi(multi) => multi.nexthops.iter().any(|u| !u.segs.is_empty()),
+        _ => false,
+    }
+}
+
 // Whether an entry is allowed to act as a resolver target during recursive
 // nexthop lookup. Connected and IGP routes are always trusted; static is
 // trusted up to the depth cap. Plain BGP unicast is excluded — BGP
 // next-hops should resolve over the underlay (IGP / connected), not over
-// BGP itself, and allowing it would risk recursive loops. The one BGP
-// exception is a *labeled* (BGP Labeled-Unicast, SAFI 4) route: Inter-AS
-// MPLS/VPN Option C (RFC 4364 §10c) resolves a VPN next-hop — the remote
-// PE loopback — over the BGP-LU LSP that carries it across the AS boundary,
-// stacking the LU + transport labels under the VPN service label. The
-// recursion depth cap still bounds any loop. The validity check skips
-// entries that are still in the table but no longer reachable — e.g. an
-// IS-IS route whose group went invalid because its egress link is down.
+// BGP itself, and allowing it would risk recursive loops. The BGP
+// exceptions are *tunneled* routes, which provide their own transport:
+// a labeled (BGP Labeled-Unicast, SAFI 4) route — Inter-AS MPLS/VPN
+// Option C (RFC 4364 §10c) resolves a VPN next-hop over the BGP-LU LSP,
+// stacking the LU + transport labels under the VPN service label — and
+// an SRv6-encapsulated route (`encapsulation-type srv6`), whose H.Encap
+// segment list dependents inherit the same way. The recursion depth cap
+// still bounds any loop. The validity check skips entries that are still
+// in the table but no longer reachable — e.g. an IS-IS route whose group
+// went invalid because its egress link is down.
 // Without this filter a recursive static would resolve through the dead
 // route and look reachable when it isn't.
 pub(crate) fn entry_resolvable(entry: &RibEntry) -> bool {
@@ -127,7 +142,7 @@ pub(crate) fn entry_resolvable(entry: &RibEntry) -> bool {
         && (matches!(
             entry.rtype,
             RibType::Connected | RibType::Static | RibType::Ospf | RibType::Isis
-        ) || (entry.rtype == RibType::Bgp && entry_has_mpls(entry)))
+        ) || (entry.rtype == RibType::Bgp && (entry_has_mpls(entry) || entry_has_segs(entry))))
 }
 
 pub fn rib_resolve(

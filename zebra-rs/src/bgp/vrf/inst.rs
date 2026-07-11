@@ -2466,6 +2466,8 @@ mod tests {
                 addr: IpAddr::V4(Ipv4Addr::new(10, 0, 99, 1)),
                 ifindex: 7,
                 labels: Vec::new(),
+                segs: vec![],
+                seg_encap: None,
             }],
         );
 

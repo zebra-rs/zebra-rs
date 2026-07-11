@@ -1129,7 +1129,7 @@ impl Rib {
 
 /// Re-resolve one recursive static nexthop. Returns `true` when the
 /// resolution moved — a different egress gateway, transport label
-/// stack, or nexthop group than before.
+/// stack, SRv6 segment list, or nexthop group than before.
 fn static_reresolve_uni_v4(
     uni: &mut NexthopUni,
     nmap: &mut NexthopMap,
@@ -1139,10 +1139,10 @@ fn static_reresolve_uni_v4(
     if uni.addr_origin.is_none() {
         return false;
     }
-    let before = (uni.gid, uni.addr, uni.mpls_label.clone());
+    let before = (uni.gid, uni.addr, uni.mpls_label.clone(), uni.segs.clone());
     super::r#static::resolve::release_nexthop_gid(uni, nmap);
     let _ = resolve_nexthop_uni(uni, nmap, table, table_id);
-    before != (uni.gid, uni.addr, uni.mpls_label.clone())
+    before != (uni.gid, uni.addr, uni.mpls_label.clone(), uni.segs.clone())
 }
 
 fn static_reresolve_entry_v4(
@@ -1204,10 +1204,10 @@ fn static_reresolve_uni_v6(
     if uni.addr_origin.is_none() {
         return false;
     }
-    let before = (uni.gid, uni.addr, uni.mpls_label.clone());
+    let before = (uni.gid, uni.addr, uni.mpls_label.clone(), uni.segs.clone());
     super::r#static::resolve::release_nexthop_gid(uni, nmap);
     let _ = resolve_nexthop_uni_v6(uni, nmap, table, table_id);
-    before != (uni.gid, uni.addr, uni.mpls_label.clone())
+    before != (uni.gid, uni.addr, uni.mpls_label.clone(), uni.segs.clone())
 }
 
 fn static_reresolve_entry_v6(

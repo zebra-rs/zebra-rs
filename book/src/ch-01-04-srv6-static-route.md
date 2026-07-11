@@ -70,11 +70,11 @@ S  *> 2001:db8:200::/64 [1/0] via 2001:db8::8 (recursive), 00:00:02
                               via fe80::f86f:61ff:fecf:b69a, s-n1
 ```
 
-But unlike the SR-MPLS case, nothing is inherited from the underlay
-beyond the plain IPv6 nexthop — the packet leaves `s`
-unencapsulated, still addressed to its final destination. The first
-core router has no route for that destination (only `s` and `d` know
-the edge prefixes), so the traffic dies one hop in:
+But the covering route here — the IGP route to `d`'s loopback — is a
+*plain* IPv6 route, so there is no transport to inherit: the packet
+leaves `s` unencapsulated, still addressed to its final destination.
+The first core router has no route for that destination (only `s` and
+`d` know the edge prefixes), so the traffic dies one hop in:
 
 ```
 $ sudo ip netns exec e1 ping 2001:db8:200::100
@@ -165,6 +165,61 @@ n1>tcpdump -li n1-s ip6 dst net fcbb:bbbb:8::/48
 packet to `e2`. The reverse direction can be built the same way — a
 static End.DT6 SID on `s` and a `segments` route on `d` (in the lab,
 the return path is already covered by BGP over SRv6).
+
+## Inheriting segments from a covering SRv6 route
+
+Explicit `segments` are only needed when nothing in the routing table
+carries the encapsulation already. When the static route's gateway is
+itself covered by an **SRv6-encapsulated route** — a BGP-over-SRv6
+service route learned with `encapsulation-type srv6` — recursive
+resolution inherits that route's segment list, exactly the way an
+SR-MPLS covering route donates its label stack.
+
+Consider an ingress router that learned `2001:db8:cafe::/64` from BGP
+over SRv6 (installed as `via seg6 [fcbb:bbbb:1:40::]`, the egress PE's
+End.DT6 SID), and a static route whose gateway lives inside that
+prefix:
+
+```
+set router static ipv6 route 3001:db8::1/128 nexthop 2001:db8:cafe::1
+```
+
+The gateway is not on-link; NHT resolves it through the BGP route and
+the static comes out carrying the inherited encapsulation:
+
+```
+z3>show ipv6 route 3001:db8::1/128
+S  *> 3001:db8::1/128 [1/0] via 2001:db8:cafe::1 (recursive), 00:00:03
+                            via seg6 [fcbb:bbbb:1:40::], i1
+
+z3$ ip -6 route show 3001:db8::1
+3001:db8::1 nhid 2  encap seg6 mode encap segs 1 [ fcbb:bbbb:1:40:: ] via fcbb:bbbb:1:: dev i1 proto static metric 1024 onlink pref medium
+```
+
+The kernel nexthop is shared with the covering BGP route (same
+`nhid`) — the nexthop group dedupes on the segment list. Traffic to
+the static prefix is encapsulated to the egress PE, decapsulated by
+its End.DT6 SID, and routed onward there — so, as with recursive
+SR-MPLS statics, the egress node must know the inner prefix. The
+resolution is tracked: if the covering BGP route moves or is
+withdrawn, the static is re-resolved or pulled from the FIB, and
+deleting the static releases its shared seg6 nexthop group.
+
+Two boundaries of the inheritance are worth knowing:
+
+- Plain IGP-SRv6 routes (a remote loopback reachable natively) carry
+  no encapsulation, so there is nothing to inherit — that is the
+  explicit-`segments` case above.
+- A resolution chain that would need *both* an MPLS label stack and an
+  SRv6 segment list (mixed transport) does not resolve: a kernel
+  nexthop carries at most one encapsulation, so the route is withheld
+  rather than installed half-encapsulated.
+
+The BDD feature `static_srv6_nht` runs this end to end: a three-router
+line where only the ingress and egress speak BGP, the middle router
+knows nothing but locators, and the ping to a host behind the egress
+succeeds only because the inherited encapsulation tunnels the packet
+across the core.
 
 ## Notes
 

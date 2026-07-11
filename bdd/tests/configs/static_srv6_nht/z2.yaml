@@ -1,0 +1,21 @@
+# z2 — transit core. Knows the two link subnets (connected) and z1's
+# SRv6 locator — and deliberately NOTHING else. The service prefixes
+# (2001:db8:cafe::/64, 3001:db8::1) never appear here, so traffic for
+# them can only cross z2 inside an SRv6 encapsulation addressed to the
+# locator. This is what makes the ping assert meaningful: a static
+# route on z3 that failed to inherit the H.Encap would send a plain
+# packet that dies right here.
+interface:
+- if-name: i1
+  ipv6:
+    address: 2001:db8:12::2/64
+- if-name: i2
+  ipv6:
+    address: 2001:db8:23::2/64
+router:
+  static:
+    ipv6:
+      route:
+      - prefix: fcbb:bbbb:1::/48
+        nexthop:
+        - address: 2001:db8:12::1

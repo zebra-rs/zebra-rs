@@ -231,6 +231,8 @@ mod tests {
                 addr: "172.16.0.2".parse().unwrap(),
                 ifindex: 3,
                 labels,
+                segs: vec![],
+                seg_encap: None,
             }],
         }
     }
