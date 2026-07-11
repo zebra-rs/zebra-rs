@@ -4507,9 +4507,15 @@ fn render_mup_table(
     // can be resolved to the End.DT46 Direct segment its uplink GTP tunnel
     // forwards into (draft-mpmz-bess-mup-safi §3.3.12). The forwarding FIB
     // (H.M.GTP4.D GTP decap) is VPP/eBPF — this is the control-plane bind.
+    // All service SIDs are kept (a DSD may split End.DT4 + End.DT6 instead
+    // of one End.DT46); the per-ST2 resolution picks by endpoint family.
     let dsd_index: std::collections::BTreeMap<
         [u8; 6],
-        (RouteDistinguisher, MupPrefix, std::net::Ipv6Addr, u16),
+        (
+            RouteDistinguisher,
+            MupPrefix,
+            Vec<(std::net::Ipv6Addr, u16)>,
+        ),
     > = if resolve_segments {
         tables
             .iter()
@@ -4524,8 +4530,11 @@ fn render_mup_table(
                     return None;
                 }
                 let seg = mup_direct_segment_id(&rib.attr)?;
-                let (sid, behavior) = rib.attr.srv6_l3_sid()?;
-                Some((seg, (*rd, prefix.clone(), sid, behavior)))
+                let sids: Vec<_> = rib.attr.srv6_l3_sids().collect();
+                if sids.is_empty() {
+                    return None;
+                }
+                Some((seg, (*rd, prefix.clone(), sids)))
             })
             .collect()
     } else {
@@ -4544,8 +4553,7 @@ fn render_mup_table(
         RouteDistinguisher,
         MupPrefix,
         IpNet,
-        std::net::Ipv6Addr,
-        u16,
+        Vec<(std::net::Ipv6Addr, u16)>,
     )> = if resolve_segments {
         tables
             .iter()
@@ -4559,8 +4567,11 @@ fn render_mup_table(
                 let MupPrefix::Isd { prefix: isd_prefix } = prefix else {
                     return None;
                 };
-                let (sid, behavior) = rib.attr.srv6_l3_sid()?;
-                Some((*rd, prefix.clone(), *isd_prefix, sid, behavior))
+                let sids: Vec<_> = rib.attr.srv6_l3_sids().collect();
+                if sids.is_empty() {
+                    return None;
+                }
+                Some((*rd, prefix.clone(), *isd_prefix, sids))
             })
             .collect()
     } else {
@@ -4587,14 +4598,16 @@ fn render_mup_table(
             let nexthop = show_nexthop(&rib.attr);
             writeln!(buf, "       next-hop {nexthop}  weight {}", rib.weight)?;
 
-            // SRv6 L3 Service SID (the segment a DSD/ISD route advertises, or
-            // an explicitly-pushed ST-route SID). "Local" when we originated it.
-            if let Some((sid, behavior)) = rib.attr.srv6_l3_sid() {
-                let kind = if rib.is_originated() {
-                    "Local SID"
-                } else {
-                    "Remote SID"
-                };
+            // SRv6 L3 Service SIDs (the segment a DSD/ISD route advertises,
+            // or an explicitly-pushed ST-route SID) — one line per SID, so a
+            // split End.DT4 + End.DT6 pair shows both. "Local" when we
+            // originated it.
+            let kind = if rib.is_originated() {
+                "Local SID"
+            } else {
+                "Remote SID"
+            };
+            for (sid, behavior) in rib.attr.srv6_l3_sids() {
                 writeln!(
                     buf,
                     "       {kind} {sid} ({})",
@@ -4610,17 +4623,19 @@ fn render_mup_table(
             // ST2 -> Direct-segment resolution on an interwork (SRGW) node:
             // the received ST2's Direct-segment id (MUP Extended Community) is
             // matched against a received DSD to find the End.DT46 segment the
-            // uplink (endpoint, TEID) tunnel forwards into.
+            // uplink (endpoint, TEID) tunnel forwards into. The SID is picked
+            // by the ST2 endpoint's family (the installed FIB destination).
             if resolve_segments
-                && matches!(prefix, MupPrefix::T2st { .. })
+                && let MupPrefix::T2st { endpoint, .. } = prefix
                 && let Some(seg) = mup_direct_segment_id(&rib.attr)
-                && let Some((dsd_rd, dsd, sid, behavior)) = dsd_index.get(&seg)
+                && let Some((dsd_rd, dsd, sids)) = dsd_index.get(&seg)
+                && let Some((sid, behavior)) = srv6_l3_sid_for_dest(sids, endpoint.is_ipv4())
             {
                 writeln!(
                     buf,
                     "       resolved {} -> {} {} (via {})",
                     fmt_direct_segment_id(&seg),
-                    srv6_behavior_name(*behavior),
+                    srv6_behavior_name(behavior),
                     sid,
                     mup_prefix_display(dsd_rd, dsd, None)
                 )?;
@@ -4635,20 +4650,29 @@ fn render_mup_table(
             // field, §3.1.3) — downlink traffic to the UE is steered toward
             // the gNB's segment. Matching by the endpoint also handles the
             // mixed-AFI case (an IPv6 UE route may carry an IPv4 gNB endpoint).
+            // The SID is picked by the UE prefix's family (the installed FIB
+            // destination); an ISD whose SIDs cannot service that family
+            // (e.g. End.DT4-only for an IPv6 UE) is skipped, letting a
+            // less-specific covering ISD with a compatible SID win.
             if resolve_segments
                 && let MupPrefix::T1st { prefix: ue } = prefix
                 && let Some(st1) = &rib.mup_st1
-                && let Some((isd_rd, isd, _, sid, behavior)) = isd_index
+                && let Some((isd_rd, isd, sid, behavior)) = isd_index
                     .iter()
-                    .filter(|(_, _, isd_prefix, _, _)| isd_prefix.contains(&st1.endpoint))
+                    .filter(|(_, _, isd_prefix, _)| isd_prefix.contains(&st1.endpoint))
+                    .filter_map(|(isd_rd, isd, isd_prefix, sids)| {
+                        srv6_l3_sid_for_dest(sids, matches!(ue, IpNet::V4(_)))
+                            .map(|(sid, behavior)| (isd_rd, isd, isd_prefix, sid, behavior))
+                    })
                     .max_by_key(|(_, _, isd_prefix, _, _)| isd_prefix.prefix_len())
+                    .map(|(isd_rd, isd, _, sid, behavior)| (isd_rd, isd, sid, behavior))
             {
                 writeln!(
                     buf,
                     "       resolved {} (endpoint {}) -> {} {} (via {})",
                     ue,
                     st1.endpoint,
-                    srv6_behavior_name(*behavior),
+                    srv6_behavior_name(behavior),
                     sid,
                     mup_prefix_display(isd_rd, isd, None)
                 )?;
@@ -6238,6 +6262,121 @@ mod detail_tests {
         // to nothing (10.70.0.9 still appears in its own [ST1] NLRI line, so
         // assert on the absence of a *resolved* line for its UE).
         assert!(!out.contains("resolved 10.60.2.5"), "{out}");
+    }
+
+    /// An ISD may carry a split End.DT4 + End.DT6 SID pair instead of one
+    /// End.DT46. Every SID gets its own display line, and the ST1→ISD
+    /// resolution picks the SID that can decap the UE prefix's family — an
+    /// ISD without a family-compatible SID is skipped even when it is the
+    /// most-specific covering one, letting a wider compatible ISD win.
+    #[test]
+    fn render_mup_table_multi_sid_isd_resolves_by_ue_family() {
+        use std::net::{IpAddr, Ipv4Addr};
+        let mut tables: std::collections::BTreeMap<
+            RouteDistinguisher,
+            super::super::route::LocalRibMupTable,
+        > = std::collections::BTreeMap::new();
+
+        let isd_rib_with = |sids: Vec<Srv6SidInfo>| {
+            let mut attr = BgpAttr::new();
+            attr.nexthop = Some(BgpNexthop::Ipv6("fcbb:bbbb:1::".parse().unwrap()));
+            attr.prefix_sid = Some(PrefixSid {
+                tlvs: vec![PrefixSidTlv::Srv6L3Service(Srv6ServiceTlv {
+                    sids,
+                    ..Default::default()
+                })],
+            });
+            BgpRib::new(
+                0,
+                Ipv4Addr::new(10, 0, 0, 1),
+                BgpRibType::IBGP,
+                0,
+                0,
+                &attr,
+                None,
+                None,
+                false,
+            )
+        };
+
+        // The wide ISD (10.0.0.0/24) carries the split DT4 + DT6 pair.
+        let wide = isd_rib_with(vec![
+            Srv6SidInfo::new(
+                "fcbb:aaaa::4".parse().unwrap(),
+                0,
+                SRV6_BEHAVIOR_END_DT4,
+                None,
+            ),
+            Srv6SidInfo::new(
+                "fcbb:aaaa::6".parse().unwrap(),
+                0,
+                SRV6_BEHAVIOR_END_DT6,
+                None,
+            ),
+        ]);
+        let (rd, p) = MupPrefix::from_route(&MupRoute::Isd {
+            id: 0,
+            arch: MupArchitectureType::Gpp5g,
+            rd: "65501:10".parse().unwrap(),
+            prefix: "10.0.0.0/24".parse().unwrap(),
+        });
+        let _ = tables.entry(rd).or_default().update(p, wide);
+
+        // The narrow ISD (10.0.0.8/29, more specific, covers the endpoint
+        // too) is DT4-only: it must win the v4 UE and lose the v6 UE.
+        let narrow = isd_rib_with(vec![Srv6SidInfo::new(
+            "fcbb:cccc::4".parse().unwrap(),
+            0,
+            SRV6_BEHAVIOR_END_DT4,
+            None,
+        )]);
+        let (rd, p) = MupPrefix::from_route(&MupRoute::Isd {
+            id: 0,
+            arch: MupArchitectureType::Gpp5g,
+            rd: "65501:11".parse().unwrap(),
+            prefix: "10.0.0.8/29".parse().unwrap(),
+        });
+        let _ = tables.entry(rd).or_default().update(p, narrow);
+
+        // A v4 UE and a v6 UE behind the same gNB endpoint (10.0.0.9 — in
+        // both ISD prefixes; the v6 UE with a v4 endpoint is the mixed-AFI
+        // shape).
+        for (ue, teid) in [("10.60.1.5/32", 1u32), ("2001:db8:cafe::5/128", 2)] {
+            let route = MupRoute::T1st {
+                id: 0,
+                arch: MupArchitectureType::Gpp5g,
+                rd: "65501:12".parse().unwrap(),
+                prefix: ue.parse().unwrap(),
+                teid,
+                qfi: 9,
+                endpoint: "10.0.0.9".parse().unwrap(),
+                source: None,
+            };
+            let mut rib = mup_rib("fc00::9".parse::<IpAddr>().unwrap(), 32768, &[]);
+            rib.mup_st1 = route.st1_fields();
+            let (rd, p) = MupPrefix::from_route(&route);
+            let _ = tables.entry(rd).or_default().update(p, rib);
+        }
+
+        let out = render_mup_table(&tables, true).unwrap();
+        // Both SIDs of the split pair are displayed, not just the first.
+        assert!(out.contains("Remote SID fcbb:aaaa::4 (End.DT4)"), "{out}");
+        assert!(out.contains("Remote SID fcbb:aaaa::6 (End.DT6)"), "{out}");
+        // v4 UE → the most-specific covering ISD's DT4.
+        assert!(
+            out.contains(
+                "resolved 10.60.1.5/32 (endpoint 10.0.0.9) -> End.DT4 fcbb:cccc::4 (via [ISD][65501:11][10.0.0.8/29])"
+            ),
+            "{out}"
+        );
+        // v6 UE → the DT4-only narrow ISD is skipped; the wide ISD's DT6
+        // wins instead of a family-mismatched install.
+        assert!(
+            out.contains(
+                "resolved 2001:db8:cafe::5/128 (endpoint 10.0.0.9) -> End.DT6 fcbb:aaaa::6 (via [ISD][65501:10][10.0.0.0/24])"
+            ),
+            "{out}"
+        );
     }
 
     #[test]

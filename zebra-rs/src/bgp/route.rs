@@ -13644,15 +13644,18 @@ impl Bgp {
     /// `Originated` and runs best-path → advertise + mirror (the mirror feeds
     /// the route back to the originating VRF, so its `show bgp vrf <name> mup`
     /// reflects the fully-stamped route). No-op when the VRF has no RD.
+    /// Returns whether the export landed — `false` when it was dropped, in
+    /// particular a re-export identical to the stored originated path (see
+    /// the identical-re-export gate below).
     pub fn mup_export(
         &mut self,
         vrf: String,
         prefix: MupPrefix,
         st1: Option<MupSt1Fields>,
         attr: BgpAttr,
-    ) {
+    ) -> bool {
         let Some(rd) = self.vrfs.get(&vrf).and_then(|c| c.rd) else {
-            return;
+            return false;
         };
         let rts = self
             .rib_known_vrfs
@@ -13684,10 +13687,10 @@ impl Bgp {
                     self.srv6_locator.as_ref(),
                     self.vrf_registry.get(&vrf).and_then(|h| h.srv6_sid),
                 ) else {
-                    return;
+                    return false;
                 };
                 let Some(node) = locator.node_sid_addr() else {
-                    return;
+                    return false;
                 };
                 attr.nexthop = Some(BgpNexthop::Ipv6(node));
                 attr.prefix_sid = Some(super::inst::srv6_l3_service_prefix_sid(
@@ -13696,9 +13699,30 @@ impl Bgp {
                     bgp_packet::SRV6_BEHAVIOR_END_DT46,
                 ));
             }
-            MupPrefix::Unknown { .. } => return,
+            MupPrefix::Unknown { .. } => return false,
         }
         let attr = super::inst::tag_attr_with_export_rts(attr, &rts);
+        let attr = self.attr_store.intern(attr);
+        // A PFCP Session Modification (handover) re-dispatches `MupOriginate`
+        // to every VRF the session targets, so the direction the modification
+        // didn't touch — typically the ST2: the core tunnel stays put while
+        // the gNB access tunnel moves — arrives here rebuilt identical to
+        // what the Loc-RIB already holds. Drop it: re-updating would re-run
+        // best-path and re-advertise, sending peers a spurious UPDATE for an
+        // unchanged route on every handover. A genuine change (NLRI key, ST1
+        // off-key fields, RTs, next-hop, SID) differs in `attr`/`st1`/key and
+        // falls through.
+        if self
+            .local_rib
+            .mup
+            .get(&rd)
+            .and_then(|t| t.cands.get(&prefix))
+            .into_iter()
+            .flatten()
+            .any(|r| r.typ == BgpRibType::Originated && r.attr == attr && r.mup_st1 == st1)
+        {
+            return false;
+        }
         let mut rib = BgpRib::new(
             ORIGINATED_PEER,
             Ipv4Addr::UNSPECIFIED,
@@ -13714,7 +13738,7 @@ impl Bgp {
         // mirror-back to the VRF, the re-advertise and the FIB reconcile see
         // the real TEID/QFI/endpoint. `None` for DSD/ISD/ST2 exports.
         rib.mup_st1 = st1;
-        rib.attr = self.attr_store.intern(attr);
+        rib.attr = attr;
         // A re-export for the same RD+Prefix key can move the ST1 GTP
         // endpoint in place (handover) — capture the pre-update endpoint so
         // its NHT registration is released when the new best no longer uses
@@ -13734,6 +13758,7 @@ impl Bgp {
             );
         }
         self.mup_apply_selected(rd, prefix, selected);
+        true
     }
 
     /// The GTP endpoint (gNB) of the currently-selected ST1 path for

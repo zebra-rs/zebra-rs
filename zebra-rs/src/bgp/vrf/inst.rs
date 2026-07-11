@@ -728,25 +728,28 @@ impl BgpVrf {
     fn reconcile_mup_st1_isd(&mut self) {
         use std::net::Ipv6Addr;
         type Transport = Vec<crate::rib::nht::ResolvedNexthop>;
-        // Index imported ISDs by their advertised prefix → (SID, transport).
-        // Only an ISD with both a SID and a resolved underlay transport
-        // qualifies.
-        let mut isd_index: Vec<(ipnet::IpNet, Ipv6Addr, Transport)> = Vec::new();
+        // Index imported ISDs by their advertised prefix → (service SIDs,
+        // transport). Only an ISD with at least one SID and a resolved
+        // underlay transport qualifies. All SIDs are kept (an ISD may split
+        // End.DT4 + End.DT6 instead of one End.DT46); the per-ST1 pick
+        // below matches the UE prefix's family.
+        let mut isd_index: Vec<(ipnet::IpNet, Vec<(Ipv6Addr, u16)>, Transport)> = Vec::new();
         for (rd, table) in self.local_rib.mup.iter() {
             for (prefix, rib) in table.selected.iter() {
                 let bgp_packet::MupPrefix::Isd { prefix: isd_prefix } = prefix else {
                     continue;
                 };
-                let Some((sid, _behavior)) = rib.attr.srv6_l3_sid() else {
+                let sids: Vec<_> = rib.attr.srv6_l3_sids().collect();
+                if sids.is_empty() {
                     continue;
-                };
+                }
                 let Some(transport) = self.mup_segment_transport.get(&(*rd, prefix.clone())) else {
                     continue;
                 };
                 if transport.is_empty() {
                     continue;
                 }
-                isd_index.push((*isd_prefix, sid, transport.clone()));
+                isd_index.push((*isd_prefix, sids, transport.clone()));
             }
         }
         // Desired: each selected ST1 UE prefix → the most-specific covering
@@ -761,15 +764,27 @@ impl BgpVrf {
                 // IPv4-endpoint route) — but install the *UE prefix* as the
                 // FIB destination (§3.1.3): downlink traffic to the UE is
                 // steered toward the gNB's segment. The endpoint is off the
-                // ST1 route key (§3.2.1), so read it from the path.
+                // ST1 route key (§3.2.1), so read it from the path. The SID
+                // must be able to decap the UE family (End.DT4 for a v4 UE /
+                // End.DT6 for v6 / End.DT46 for either) — an ISD without a
+                // compatible SID is skipped, letting a less-specific covering
+                // ISD with one win rather than installing a blackhole.
                 if let bgp_packet::MupPrefix::T1st { prefix: ue } = prefix
                     && let Some(st1) = &rib.mup_st1
-                    && let Some((_p, sid, transport)) = isd_index
+                    && let Some((sid, transport)) = isd_index
                         .iter()
                         .filter(|(p, _, _)| p.contains(&st1.endpoint))
+                        .filter_map(|(p, sids, transport)| {
+                            bgp_packet::srv6_l3_sid_for_dest(
+                                sids,
+                                matches!(ue, ipnet::IpNet::V4(_)),
+                            )
+                            .map(|(sid, _behavior)| (p, sid, transport))
+                        })
                         .max_by_key(|(p, _, _)| p.prefix_len())
+                        .map(|(_p, sid, transport)| (sid, transport))
                 {
-                    desired.insert(*ue, (*sid, transport.clone()));
+                    desired.insert(*ue, (sid, transport.clone()));
                 }
             }
         }
@@ -833,9 +848,12 @@ impl BgpVrf {
     fn reconcile_mup_st2_dsd(&mut self) {
         use std::net::Ipv6Addr;
         type Transport = Vec<crate::rib::nht::ResolvedNexthop>;
-        // Index imported DSDs by Direct-segment id → (SID, transport). Only
-        // a DSD with both a SID and a resolved underlay transport qualifies.
-        let mut dsd_index: std::collections::BTreeMap<[u8; 6], (Ipv6Addr, Transport)> =
+        // Index imported DSDs by Direct-segment id → (service SIDs,
+        // transport). Only a DSD with at least one SID and a resolved
+        // underlay transport qualifies. All SIDs are kept (a DSD may split
+        // End.DT4 + End.DT6 instead of one End.DT46); the per-ST2 pick
+        // below matches the endpoint's family.
+        let mut dsd_index: std::collections::BTreeMap<[u8; 6], (Vec<(Ipv6Addr, u16)>, Transport)> =
             std::collections::BTreeMap::new();
         for (rd, table) in self.local_rib.mup.iter() {
             for (prefix, rib) in table.selected.iter() {
@@ -845,20 +863,23 @@ impl BgpVrf {
                 let Some(seg) = mup_direct_segment_id(&rib.attr) else {
                     continue;
                 };
-                let Some((sid, _behavior)) = rib.attr.srv6_l3_sid() else {
+                let sids: Vec<_> = rib.attr.srv6_l3_sids().collect();
+                if sids.is_empty() {
                     continue;
-                };
+                }
                 let Some(transport) = self.mup_segment_transport.get(&(*rd, prefix.clone())) else {
                     continue;
                 };
                 if transport.is_empty() {
                     continue;
                 }
-                dsd_index.insert(seg, (sid, transport.clone()));
+                dsd_index.insert(seg, (sids, transport.clone()));
             }
         }
         // Desired: each selected ST2 whose Direct-segment id matches a DSD →
-        // the ST2 endpoint host prefix → (SID, transport).
+        // the ST2 endpoint host prefix → (SID, transport). The SID must be
+        // able to decap the endpoint's family (the installed FIB
+        // destination); a DSD without a compatible SID yields no install.
         let mut desired: std::collections::BTreeMap<ipnet::IpNet, (Ipv6Addr, Transport)> =
             std::collections::BTreeMap::new();
         if !dsd_index.is_empty() {
@@ -866,9 +887,11 @@ impl BgpVrf {
                 for (prefix, rib) in table.selected.iter() {
                     if let bgp_packet::MupPrefix::T2st { endpoint, .. } = prefix
                         && let Some(seg) = mup_direct_segment_id(&rib.attr)
-                        && let Some((sid, transport)) = dsd_index.get(&seg)
+                        && let Some((sids, transport)) = dsd_index.get(&seg)
+                        && let Some((sid, _behavior)) =
+                            bgp_packet::srv6_l3_sid_for_dest(sids, endpoint.is_ipv4())
                     {
-                        desired.insert(host_net(*endpoint), (*sid, transport.clone()));
+                        desired.insert(host_net(*endpoint), (sid, transport.clone()));
                     }
                 }
             }
@@ -2495,6 +2518,138 @@ mod tests {
         assert!(
             vrf.mup_gtp_encap_installed.is_empty(),
             "the GTP4.E encap is withdrawn when its endpoint stops resolving"
+        );
+    }
+
+    /// An ISD carrying a split End.DT4 + End.DT6 SID pair (instead of one
+    /// End.DT46) must steer each ST1 UE prefix into the SID that can decap
+    /// its family — not blindly the first SID. When the ISD loses the
+    /// v6-capable SID, the v6 UE's encap is withdrawn rather than left (or
+    /// re-pointed) at the End.DT4 SID.
+    #[tokio::test]
+    async fn st1_isd_reconcile_picks_sid_by_ue_family() {
+        use crate::bgp::route::{BgpRib, BgpRibType};
+        use crate::rib::nht::ResolvedNexthop;
+        use bgp_packet::{
+            BgpAttr, MupPrefix, MupSt1Fields, PrefixSid, PrefixSidTlv, SRV6_BEHAVIOR_END_DT4,
+            SRV6_BEHAVIOR_END_DT6, Srv6ServiceTlv, Srv6SidInfo,
+        };
+        use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
+
+        let (global_tx, _global_rx) = unbounded_channel::<BgpGlobalMsg>();
+        let ctx = test_ctx_for_vrf(44, "vrf-isd");
+        let (_rib_tx, rib_rx) = mpsc::unbounded_channel();
+        let (mut vrf, _inbox) = BgpVrf::new(
+            "vrf-isd".to_string(),
+            ctx,
+            Ipv4Addr::UNSPECIFIED,
+            65000,
+            /* label */ 16,
+            global_tx,
+            rib_rx,
+        );
+
+        let dt4: Ipv6Addr = "fcbb:aaaa::4".parse().unwrap();
+        let dt6: Ipv6Addr = "fcbb:aaaa::6".parse().unwrap();
+        let isd_rib = |sids: Vec<Srv6SidInfo>| {
+            let mut attr = BgpAttr::new();
+            attr.prefix_sid = Some(PrefixSid {
+                tlvs: vec![PrefixSidTlv::Srv6L3Service(Srv6ServiceTlv {
+                    sids,
+                    ..Default::default()
+                })],
+            });
+            BgpRib::new(
+                1,
+                Ipv4Addr::UNSPECIFIED,
+                BgpRibType::EBGP,
+                0,
+                0,
+                &attr,
+                None,
+                None,
+                false,
+            )
+        };
+        let mk_st1 = |ue: ipnet::IpNet, endpoint: IpAddr| {
+            let attr = BgpAttr::new();
+            let mut rib = BgpRib::new(
+                1,
+                Ipv4Addr::UNSPECIFIED,
+                BgpRibType::EBGP,
+                0,
+                0,
+                &attr,
+                None,
+                None,
+                false,
+            );
+            rib.mup_st1 = Some(MupSt1Fields {
+                teid: 0x100,
+                qfi: 5,
+                endpoint,
+                source: None,
+            });
+            (MupPrefix::T1st { prefix: ue }, rib)
+        };
+
+        let rd: bgp_packet::RouteDistinguisher = "65000:1".parse().unwrap();
+        let isd_prefix = MupPrefix::Isd {
+            prefix: "10.0.12.0/24".parse().unwrap(),
+        };
+        let gnb = IpAddr::V4(Ipv4Addr::new(10, 0, 12, 1));
+        let ue_v4: ipnet::IpNet = "10.60.1.0/24".parse().unwrap();
+        let ue_v6: ipnet::IpNet = "2001:db8:cafe::/64".parse().unwrap();
+        {
+            let table = vrf.local_rib.mup.entry(rd).or_default();
+            table.selected.insert(
+                isd_prefix.clone(),
+                isd_rib(vec![
+                    Srv6SidInfo::new(dt4, 0, SRV6_BEHAVIOR_END_DT4, None),
+                    Srv6SidInfo::new(dt6, 0, SRV6_BEHAVIOR_END_DT6, None),
+                ]),
+            );
+            let (p, rib) = mk_st1(ue_v4, gnb);
+            table.selected.insert(p, rib);
+            let (p, rib) = mk_st1(ue_v6, gnb);
+            table.selected.insert(p, rib);
+        }
+        // The ISD's next-hop has a resolved underlay.
+        vrf.mup_segment_transport.insert(
+            (rd, isd_prefix.clone()),
+            vec![ResolvedNexthop {
+                addr: IpAddr::V4(Ipv4Addr::new(10, 0, 99, 1)),
+                ifindex: 7,
+                labels: Vec::new(),
+                segs: vec![],
+                seg_encap: None,
+            }],
+        );
+
+        vrf.reconcile_mup_st1_isd();
+        assert_eq!(
+            vrf.mup_st1_isd_installed.get(&ue_v4),
+            Some(&dt4),
+            "the v4 UE prefix is steered into the End.DT4 SID"
+        );
+        assert_eq!(
+            vrf.mup_st1_isd_installed.get(&ue_v6),
+            Some(&dt6),
+            "the v6 UE prefix is steered into the End.DT6 SID"
+        );
+
+        // The ISD drops to DT4-only → the v6 UE cannot be serviced: its
+        // entry is withdrawn, the v4 one stays put.
+        vrf.local_rib.mup.get_mut(&rd).unwrap().selected.insert(
+            isd_prefix.clone(),
+            isd_rib(vec![Srv6SidInfo::new(dt4, 0, SRV6_BEHAVIOR_END_DT4, None)]),
+        );
+        vrf.reconcile_mup_st1_isd();
+        assert_eq!(vrf.mup_st1_isd_installed.get(&ue_v4), Some(&dt4));
+        assert_eq!(
+            vrf.mup_st1_isd_installed.get(&ue_v6),
+            None,
+            "a DT4-only ISD must not carry an IPv6 UE prefix"
         );
     }
 

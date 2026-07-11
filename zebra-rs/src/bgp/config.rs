@@ -8355,10 +8355,124 @@ mod mup_dual_origination_tests {
     use std::str::FromStr;
 
     use bgp_packet::{MupPrefix, RouteDistinguisher};
+    use tokio::sync::mpsc;
 
+    use super::super::inst::Bgp;
     use super::super::route::build_mup_st_route;
     use super::super::vrf::inst::mup_session_targets;
     use super::super::vrf_config::{BgpVrfConfig, MupSrv6Direction, MupSrv6Mobile};
+
+    fn fresh_bgp() -> Bgp {
+        let (inbound_tx, _inbound_rx) = mpsc::unbounded_channel();
+        let (_rib_rx_tx, rib_rx) = mpsc::unbounded_channel();
+        let client = crate::rib::client::RibClient::new(
+            inbound_tx,
+            crate::rib::client::ProtoId::from_raw(0),
+        );
+        Box::leak(Box::new(_inbound_rx));
+        let ctx = crate::context::ProtoContext::default_table(client);
+
+        let (rib_tx, _rib_rx) = mpsc::unbounded_channel();
+        let (rib_inbound_tx, _sub_inbound_rx) = mpsc::unbounded_channel();
+        Box::leak(Box::new(_rib_rx));
+        Box::leak(Box::new(_sub_inbound_rx));
+        let next_proto_id = std::sync::Arc::new(std::sync::atomic::AtomicU32::new(1));
+        let subscriber =
+            crate::config::RibSubscriber::for_test(rib_tx, rib_inbound_tx, next_proto_id);
+
+        let (policy_tx, _policy_rx) = mpsc::unbounded_channel();
+        Box::leak(Box::new(_policy_rx));
+        Bgp::new(
+            ctx,
+            rib_rx,
+            subscriber,
+            policy_tx,
+            None,
+            None,
+            tokio::sync::mpsc::channel(1).0,
+        )
+    }
+
+    /// A handover Session-Modification re-dispatches `MupOriginate` to every
+    /// VRF the session targets, so the direction the modification didn't
+    /// touch (the ST2 — the core tunnel stays put while the gNB moves)
+    /// reaches `mup_export` rebuilt byte-identical. The export boundary must
+    /// drop it — peers used to see a spurious ST2 UPDATE on every handover —
+    /// while the genuinely-changed ST1 (moved endpoint/TEID, off the NLRI
+    /// key) still falls through and replaces in place.
+    #[tokio::test]
+    async fn mup_export_drops_identical_reexport() {
+        use bgp_packet::{BgpAttr, MupSt1Fields};
+
+        let mut bgp = fresh_bgp();
+        let rd: RouteDistinguisher = "65501:2".parse().unwrap();
+        bgp.vrfs.insert(
+            "N3".to_string(),
+            BgpVrfConfig {
+                rd: Some(rd),
+                ..Default::default()
+            },
+        );
+
+        let st2 = MupPrefix::T2st {
+            endpoint: "10.9.0.1".parse().unwrap(),
+            teid: 0x9999,
+        };
+        let attr = BgpAttr::new();
+        assert!(
+            bgp.mup_export("N3".into(), st2.clone(), None, attr.clone()),
+            "first ST2 export lands"
+        );
+        assert!(
+            !bgp.mup_export("N3".into(), st2.clone(), None, attr.clone()),
+            "an identical ST2 re-export (handover re-dispatch) is dropped"
+        );
+
+        let ue = MupPrefix::T1st {
+            prefix: "192.0.2.5/32".parse().unwrap(),
+        };
+        let mk = |endpoint: &str, teid| {
+            Some(MupSt1Fields {
+                teid,
+                qfi: 9,
+                endpoint: endpoint.parse().unwrap(),
+                source: None,
+            })
+        };
+        assert!(bgp.mup_export(
+            "N3".into(),
+            ue.clone(),
+            mk("10.0.0.1", 0x1234),
+            attr.clone()
+        ));
+        assert!(
+            !bgp.mup_export(
+                "N3".into(),
+                ue.clone(),
+                mk("10.0.0.1", 0x1234),
+                attr.clone()
+            ),
+            "an unchanged ST1 re-export is dropped too"
+        );
+        assert!(
+            bgp.mup_export(
+                "N3".into(),
+                ue.clone(),
+                mk("10.0.0.9", 0x5678),
+                attr.clone()
+            ),
+            "the handover's moved gNB endpoint/TEID (off-key ST1 fields) falls through"
+        );
+        // The in-place replace kept a single Originated candidate — the gate
+        // must not let duplicate rows accumulate across handovers.
+        let cands = bgp.local_rib.mup.get(&rd).unwrap().cands.get(&ue).unwrap();
+        assert_eq!(cands.len(), 1, "one Originated candidate after handover");
+        assert_eq!(
+            cands[0].mup_st1.map(|f| (f.teid, f.endpoint)),
+            Some((0x5678, "10.0.0.9".parse().unwrap())),
+            "the stored ST1 carries the post-handover tunnel"
+        );
+    }
 
     fn mup_vrf(rd: &str, direction: MupSrv6Direction, ni: &str, ext: Option<&str>) -> BgpVrfConfig {
         let mut cfg = BgpVrfConfig {
