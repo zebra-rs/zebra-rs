@@ -28,7 +28,7 @@ interfaces {
 }
 routing {
     static {
-        route 172.16.0.0/0 {
+        route 172.16.0.0/16 {
             nexthop 10.0.0.254;
 			recursive true;
         }
