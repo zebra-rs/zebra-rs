@@ -76,7 +76,9 @@ routes.
 Three short experiments, best run from the fresh bring-up (each one
 cleans up after itself). Together they tell one story: what a static
 route does — and doesn't — get from an SRv6 underlay. They are the
-live companion to the *SRv6 Static Routes* chapter of the book.
+live companion to the *SRv6 Static Routes* chapter of the book; the
+[classic lab](../isis-srv6-classic/README.md) has the same walkthrough
+on full-width SIDs.
 
 ### Recursion alone is not enough
 
