@@ -630,12 +630,15 @@ impl ConfigManager {
                 spawn_nd(self);
             }
             // The cradle engine supervisor consumes `system ebpf` (its own
-            // knob) and `system cradle grpc-endpoint` (shared with the FIB
-            // tee, which stays in the RIB task) — spawn on the first line
-            // under either subtree so it sees this commit's leaves.
+            // knob), `system cradle grpc-endpoint` (shared with the FIB
+            // tee, which stays in the RIB task), and the per-interface
+            // `ebpf` port-membership leaves — spawn on the first line
+            // under any of the three so it sees this commit's leaves.
             if !cradle
                 && op == ConfigOp::Set
-                && (line.starts_with("system ebpf") || line.starts_with("system cradle"))
+                && (line.starts_with("system ebpf")
+                    || line.starts_with("system cradle")
+                    || (line.starts_with("interface ") && line.contains(" ebpf ")))
             {
                 cradle = true;
                 spawn_cradle(self);
