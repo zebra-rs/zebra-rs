@@ -47,6 +47,7 @@ playset_apply_configs() {
 
 playset_up() {
     echo "bring up"
+    echo "runtime dir: ${PLAYSET_RUN_DIR}"
     playset_teardown
     echo "cleanup logs"
     playset_cleanup_logs

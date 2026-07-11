@@ -28,7 +28,7 @@ playset_vtyctl_bin() {
 
 playset_pid_file() {
     local netns=$1
-    echo "${PLAYSET_DEMO_DIR}/${netns}.pid"
+    echo "${PLAYSET_RUN_DIR}/${netns}.pid"
 }
 
 playset_stop_zebra_daemon() {
@@ -55,7 +55,7 @@ playset_stop_zebra() {
 playset_start_zebra() {
     local netns=$1
     local log_file pid_file
-    log_file="${PLAYSET_DEMO_DIR}/${netns}.log"
+    log_file="${PLAYSET_RUN_DIR}/${netns}.log"
     pid_file="$(playset_pid_file "$netns")"
     run_in_netns "$netns" "$(playset_zebra_rs_bin)" \
         --daemon \
