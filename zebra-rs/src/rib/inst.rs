@@ -3287,7 +3287,12 @@ impl Rib {
                 self.cradle_fdb_age(vni, mac);
             }
             Message::CradleEngineUp => {
+                // Mirror replay first (everything the tee has seen —
+                // routes, ILM, SIDs, EVPN, GTP, neighbors), then the RIB
+                // walk to seed routes that predate the tee itself
+                // (enable-after-routes). Both are idempotent overwrites.
                 self.fib_handle.cradle_replay().await;
+                self.cradle_rib_walk().await;
             }
             Message::CradleReplAdd { vni, sid } => {
                 self.fib_handle.cradle_repl_add(vni, sid).await;
@@ -3874,6 +3879,71 @@ impl Rib {
     /// `WatchFdb` subscriber accordingly. Called on any change to either
     /// config knob.
     #[cfg(target_os = "linux")]
+    /// Enable-after-routes resync: re-emit every FIB-installed v4/v6
+    /// route — default and VRF tables — to the cradle tee. Runs from
+    /// `CradleEngineUp` alongside the mirror replay: the mirror covers
+    /// everything recorded since the tee existed; this walk seeds the
+    /// routes that predate it (the tee enabled on an already-converged
+    /// RIB). Label/SID and protocol-owned overlay state is not walked —
+    /// those producers are expected to start after the tee (and the
+    /// mirror carries them across engine restarts once seen).
+    #[cfg(target_os = "linux")]
+    async fn cradle_rib_walk(&self) {
+        if !self.fib_handle.cradle_active() {
+            return;
+        }
+        let mut v4 = 0usize;
+        let mut v6 = 0usize;
+        for (prefix, entries) in self.table.iter() {
+            if let Some(entry) = entries.iter().find(|e| e.is_fib())
+                && self
+                    .fib_handle
+                    .cradle_route_resync_v4(&prefix, entry, 0)
+                    .await
+            {
+                v4 += 1;
+            }
+        }
+        for (prefix, entries) in self.table_v6.iter() {
+            if let Some(entry) = entries.iter().find(|e| e.is_fib())
+                && self
+                    .fib_handle
+                    .cradle_route_resync_v6(&prefix, entry, 0)
+                    .await
+            {
+                v6 += 1;
+            }
+        }
+        for (table_id, tables) in self.vrf_tables.iter() {
+            for (prefix, entries) in tables.table.iter() {
+                if let Some(entry) = entries.iter().find(|e| e.is_fib())
+                    && self
+                        .fib_handle
+                        .cradle_route_resync_v4(&prefix, entry, *table_id)
+                        .await
+                {
+                    v4 += 1;
+                }
+            }
+            for (prefix, entries) in tables.table_v6.iter() {
+                if let Some(entry) = entries.iter().find(|e| e.is_fib())
+                    && self
+                        .fib_handle
+                        .cradle_route_resync_v6(&prefix, entry, *table_id)
+                        .await
+                {
+                    v6 += 1;
+                }
+            }
+        }
+        if v4 + v6 > 0 {
+            tracing::info!("rib: cradle resync walked {v4} v4 + {v6} v6 installed routes");
+        }
+    }
+
+    #[cfg(not(target_os = "linux"))]
+    async fn cradle_rib_walk(&self) {}
+
     fn cradle_apply(&mut self) {
         // Tear down any previous watcher before re-pointing/disabling.
         if let Some(watch) = self.cradle_fdb_watch.take() {
@@ -3884,6 +3954,13 @@ impl Rib {
             return;
         };
         self.fib_handle.set_cradle(Some(&endpoint));
+        // Enable-after-routes: a freshly-created tee has an empty mirror,
+        // so routes installed BEFORE this enable would never reach the
+        // engine until they churn. Queue a resync (mirror replay + RIB
+        // walk). For an external engine this fires immediately; for a
+        // managed one the RPCs warn-and-drop until it starts, and the
+        // supervisor re-fires `CradleEngineUp` on the real up-edge.
+        let _ = self.tx.send(Message::CradleEngineUp);
         // The reverse channel: subscribe to cradle's datapath MAC learning
         // and feed each entry back into this RIB as a `CradleFdbLearn`, which
         // re-emits it to EVPN subscribers. Reconnects with backoff for the
