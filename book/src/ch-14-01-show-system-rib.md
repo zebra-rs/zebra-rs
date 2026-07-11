@@ -128,7 +128,8 @@ The full IPv4 (resp. IPv6) routing table.
   one route: a bare address shows the longest match (the route that
   contains it), a prefix matches exactly.
 - `… vrf [<name>] [detail]` — the table for one VRF, or every VRF when
-  `<name>` is omitted.
+  `<name>` is omitted. `vrf <name>` also takes the positional
+  address/prefix filter: `show ip route vrf <name> <A.B.C.D>`.
 
 ```
 r1> show ip route

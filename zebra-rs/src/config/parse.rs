@@ -1622,6 +1622,24 @@ mod tests {
                 vec!["10.0.0.0/24"],
             ),
             ("show ip route vrf blue", "/show/ip/route/vrf", vec!["blue"]),
+            // The `vrf` list carries its own positional filter (the
+            // matcher applies the default-child shortcut after a list
+            // key too), and its keyword children still win over it.
+            (
+                "show ip route vrf blue 10.0.0.1",
+                "/show/ip/route/vrf/prefix",
+                vec!["blue", "10.0.0.1"],
+            ),
+            (
+                "show ip route vrf blue 10.0.0.0/24",
+                "/show/ip/route/vrf/prefix",
+                vec!["blue", "10.0.0.0/24"],
+            ),
+            (
+                "show ip route vrf blue detail",
+                "/show/ip/route/vrf/detail",
+                vec!["blue"],
+            ),
             ("show ipv6 route", "/show/ipv6/route", vec![]),
             (
                 "show ipv6 route 2001:db8::1",
@@ -1632,6 +1650,16 @@ mod tests {
                 "show ipv6 route 2001:db8::/48",
                 "/show/ipv6/route/prefix",
                 vec!["2001:db8::/48"],
+            ),
+            (
+                "show ipv6 route vrf blue 2001:db8::1",
+                "/show/ipv6/route/vrf/prefix",
+                vec!["blue", "2001:db8::1"],
+            ),
+            (
+                "show ipv6 route vrf blue 2001:db8::/48",
+                "/show/ipv6/route/vrf/prefix",
+                vec!["blue", "2001:db8::/48"],
             ),
         ];
 
@@ -1652,6 +1680,8 @@ mod tests {
             "show ipv6 route prefix 2001:db8::/48",
             "show ip route 10.0.0.0/24 detail",
             "show ipv6 route 2001:db8::/48 detail",
+            "show ip route vrf blue prefix 10.0.0.0/24",
+            "show ip route vrf blue 10.0.0.0/24 detail",
         ] {
             let (code, _comps, _state) = parse(cmd, entry.clone(), None, State::new());
             assert_ne!(code, ExecCode::Success, "`{cmd}` must not be a command");
