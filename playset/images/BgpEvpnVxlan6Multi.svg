@@ -1,0 +1,78 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 850 290" font-family="Helvetica, Arial, sans-serif">
+  <!-- BGP EVPN VXLAN multi-tenant (IPv6 transport) — matches playset/bgp-evpn-vxlan6-multi.
+       Editable source: BgpEvpnVxlan6Multi.drawio (re-export from draw.io replaces this file). -->
+  <rect width="850" height="290" fill="#ffffff"/>
+
+  <!-- tenant flood domains -->
+  <rect x="40" y="30" width="770" height="117" rx="8" fill="none" stroke="#0499D4" stroke-dasharray="6,4"/>
+  <rect x="40" y="147" width="770" height="118" rx="8" fill="none" stroke="#4DA72E" stroke-dasharray="6,4"/>
+  <text x="78" y="50" font-size="12" fill="#0499D4">VNI 10 flood domain · RT 65001:10</text>
+  <text x="78" y="258" font-size="12" fill="#4DA72E">VNI 20 flood domain · RT 65001:20</text>
+
+  <!-- access links -->
+  <line x1="144" y1="114" x2="226" y2="114" stroke="#0499D4" stroke-width="1.5"/>
+  <line x1="144" y1="191" x2="226" y2="191" stroke="#4DA72E" stroke-width="1.5"/>
+  <line x1="648" y1="80" x2="725" y2="80" stroke="#0499D4" stroke-width="1.5"/>
+  <line x1="648" y1="227" x2="725" y2="227" stroke="#4DA72E" stroke-width="1.5"/>
+
+  <!-- VXLAN tunnels over the IPv6 underlay -->
+  <line x1="344" y1="114" x2="556" y2="80" stroke="#0499D4" stroke-width="3"/>
+  <line x1="344" y1="191" x2="556" y2="227" stroke="#4DA72E" stroke-width="3"/>
+  <g text-anchor="middle">
+    <text x="472" y="67" font-size="9" fill="#0499D4">VXLAN · VNI 10</text>
+    <text x="472" y="80" font-size="8" fill="#0499D4">2001:db8:ff::/64</text>
+    <text x="472" y="167" font-size="9" fill="#4DA72E">VXLAN · VNI 20</text>
+    <text x="472" y="180" font-size="8" fill="#4DA72E">2001:db8:ee::/64</text>
+  </g>
+
+  <!-- VTEP boxes -->
+  <g fill="none" stroke="#0E9ED5">
+    <rect x="210" y="60" width="150" height="170" rx="6"/>
+    <rect x="543" y="40" width="118" height="64" rx="6" fill="#F7FBFE"/>
+    <rect x="543" y="187" width="118" height="64" rx="6" fill="#F7FBFE"/>
+  </g>
+  <g text-anchor="middle" font-size="11" fill="#333333">
+    <text x="285" y="75">vtep1</text>
+    <text x="602" y="55">vtep2</text>
+    <text x="602" y="202">vtep3</text>
+  </g>
+
+  <!-- per-tenant bridge + VXLAN devices -->
+  <g text-anchor="middle" font-size="9" fill="#333333">
+    <rect x="226" y="90" width="118" height="48" rx="4" fill="#EAF6FC" stroke="#0499D4"/>
+    <text x="285" y="117">br10 · VNI 10</text>
+    <rect x="226" y="167" width="118" height="48" rx="4" fill="#EEF7E9" stroke="#4DA72E"/>
+    <text x="285" y="194">br20 · VNI 20</text>
+    <rect x="556" y="65" width="92" height="30" rx="4" fill="#EAF6FC" stroke="#0499D4"/>
+    <text x="602" y="83">br10 · VNI 10</text>
+    <rect x="556" y="212" width="92" height="30" rx="4" fill="#EEF7E9" stroke="#4DA72E"/>
+    <text x="602" y="230">br20 · VNI 20</text>
+  </g>
+
+  <!-- hosts -->
+  <g text-anchor="middle" font-size="10" fill="#ffffff">
+    <rect x="90" y="97" width="54" height="34" rx="5" fill="#0499D4"/>
+    <text x="117" y="118">h1</text>
+    <rect x="90" y="174" width="54" height="34" rx="5" fill="#4DA72E"/>
+    <text x="117" y="195">h4</text>
+    <rect x="725" y="63" width="54" height="34" rx="5" fill="#0499D4"/>
+    <text x="752" y="84">h2</text>
+    <rect x="725" y="210" width="54" height="34" rx="5" fill="#4DA72E"/>
+    <text x="752" y="231">h3</text>
+  </g>
+
+  <!-- addresses -->
+  <g text-anchor="middle" font-size="8" fill="#333333">
+    <text x="117" y="144">172.16.10.1</text>
+    <text x="117" y="221">172.16.10.4</text>
+    <text x="752" y="112">172.16.10.2</text>
+    <text x="752" y="259">172.16.10.3</text>
+  </g>
+  <g text-anchor="middle" font-size="8" fill="#8A6D00">
+    <text x="392" y="97">2001:db8:ff::1</text>
+    <text x="392" y="224">2001:db8:ee::1</text>
+    <text x="602" y="119">2001:db8:ff::2</text>
+    <text x="602" y="180">2001:db8:ee::2</text>
+  </g>
+</svg>

@@ -13,11 +13,7 @@ an ordinary IPv4 host segment is carried, unchanged, across an IPv6-only
 core. VXLAN's outer/inner independence means the overlay never sees the
 underlay's address family.
 
-```
-  h1 ──── vtep1 ═════════════════════ vtep2 ──── h2
- 172.16.10.1  2001:db8:ff::1   2001:db8:ff::2  172.16.10.2
-        (VNI 10 over UDP/IPv6 4789, iBGP AS 65001)
-```
+<img src="../images/BgpEvpnVxlan6.svg" alt="BGP EVPN VXLAN (IPv6 transport) topology">
 
 ## Bring up all nodes
 

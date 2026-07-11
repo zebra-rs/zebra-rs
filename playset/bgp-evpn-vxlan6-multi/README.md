@@ -15,17 +15,7 @@ even overlap addresses and still never see each other. Isolation comes
 from the VNI and its route-target, not from the underlay's address family
 — which here happens to be IPv6 end to end.
 
-```
-  h1 ──── vtep1 ═════ VNI 10 ═════ vtep2 ──── h2
- .1     ┌───┘ 2001:db8:ff::1  2001:db8:ff::2   .2
-  h4 ───┤
- .4     └─┐ 2001:db8:ee::1
-          ║ VNI 20
-          ║ 2001:db8:ee::2
-         vtep3 ──── h3
-                     .3
-   (hosts 172.16.10.x/24 · iBGP AS 65001 · VXLAN over UDP/IPv6 4789)
-```
+<img src="../images/BgpEvpnVxlan6Multi.svg" alt="BGP EVPN VXLAN multi-tenant (IPv6 transport) topology">
 
 ## Bring up all nodes
 
