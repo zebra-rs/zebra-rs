@@ -103,12 +103,12 @@ Feature: IS-IS SR-MPLS static-route recursive nexthop tracking with TI-LFA
   Scenario: Static route resolves recursively through the SR-MPLS underlay
     Given the test topology exists
     # s's IS-IS route to d's loopback carries d's node-SID label.
-    Then show command "show ip route prefix 10.0.0.8/32" in namespace "s" should eventually contain "[115/12] via 192.168.10.2, s-n1, label 16800"
+    Then show command "show ip route 10.0.0.8/32" in namespace "s" should eventually contain "[115/12] via 192.168.10.2, s-n1, label 16800"
     # The static 172.168.1.0/24 via 10.0.0.8 is not on-link: NHT
     # resolves the gateway through that IS-IS route and inherits its
     # transport label — rendered FRR-style as a recursive two-liner.
-    And show command "show ip route prefix 172.168.1.0/24" in namespace "s" should eventually contain "via 10.0.0.8 (recursive)"
-    And show command "show ip route prefix 172.168.1.0/24" in namespace "s" should contain "via 192.168.10.2, s-n1, label 16800"
+    And show command "show ip route 172.168.1.0/24" in namespace "s" should eventually contain "via 10.0.0.8 (recursive)"
+    And show command "show ip route 172.168.1.0/24" in namespace "s" should contain "via 192.168.10.2, s-n1, label 16800"
     # The kernel forwards the static prefix with the inherited label
     # push toward n1 — the proof the resolution reached the FIB.
     And kernel route "172.168.1.0/24" in namespace "s" should eventually contain "encap mpls"
@@ -129,8 +129,8 @@ Feature: IS-IS SR-MPLS static-route recursive nexthop tracking with TI-LFA
     Then show command "show isis route detail" in namespace "s" should contain "Backup path: TI-LFA, via 192.168.3.2"
     # d's loopback route: primary unchanged, repair standby at
     # metric+1 out s-n2.
-    And show command "show ip route prefix 10.0.0.8/32" in namespace "s" should contain "[115/12] via 192.168.10.2, s-n1, label 16800"
-    And show command "show ip route prefix 10.0.0.8/32" in namespace "s" should contain "[115/13] via 192.168.3.2, s-n2, label 16500"
+    And show command "show ip route 10.0.0.8/32" in namespace "s" should contain "[115/12] via 192.168.10.2, s-n1, label 16800"
+    And show command "show ip route 10.0.0.8/32" in namespace "s" should contain "[115/13] via 192.168.3.2, s-n2, label 16500"
     # Negative control: a standby repair must NOT move the static —
     # NHT resolves through the active (primary) member only.
     And kernel route "172.168.1.0/24" in namespace "s" should eventually contain "16800"
@@ -145,7 +145,7 @@ Feature: IS-IS SR-MPLS static-route recursive nexthop tracking with TI-LFA
     When I apply command "set router isis fast-reroute backup-as-primary" in namespace "s"
     And I wait 5 seconds
     # d's loopback now forwards over the repair label stack.
-    Then show command "show ip route prefix 10.0.0.8/32" in namespace "s" should eventually contain "[115/12] via 192.168.3.2, s-n2, label 16500"
+    Then show command "show ip route 10.0.0.8/32" in namespace "s" should eventually contain "[115/12] via 192.168.3.2, s-n2, label 16500"
     And kernel route "10.0.0.8" in namespace "s" should eventually contain "dev s-n2 proto isis metric 12"
     And kernel route "10.0.0.8" in namespace "s" should eventually contain "16500/"
 
@@ -158,8 +158,8 @@ Feature: IS-IS SR-MPLS static-route recursive nexthop tracking with TI-LFA
     # forwarding via the demoted path.
     Then kernel route "172.168.1.0/24" in namespace "s" should eventually contain "16500/"
     And kernel route "172.168.1.0/24" in namespace "s" should eventually contain "via 192.168.3.2"
-    And show command "show ip route prefix 172.168.1.0/24" in namespace "s" should contain "via 10.0.0.8 (recursive)"
-    And show command "show ip route prefix 172.168.1.0/24" in namespace "s" should contain "via 192.168.3.2, s-n2, label 16500"
+    And show command "show ip route 172.168.1.0/24" in namespace "s" should contain "via 10.0.0.8 (recursive)"
+    And show command "show ip route 172.168.1.0/24" in namespace "s" should contain "via 192.168.3.2, s-n2, label 16500"
     # End-to-end over the promoted repair: e1 -> s (push 16500/adj/adj)
     # -> n2 -> r1 -> n1 -> d -> e2. Dies if any hop mis-forwards.
     And ping from "e1" to "172.168.1.2" should succeed

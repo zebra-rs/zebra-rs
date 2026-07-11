@@ -1,6 +1,6 @@
 use super::Config;
 use super::parse::State;
-use super::parse::{entry_is_key, ymatch_complete, ytype_from_typedef};
+use super::parse::{entry_is_key, is_positional, ymatch_complete, ytype_from_typedef};
 use super::vty::YangMatch;
 use libyang::{Entry, TypeNode, YangType};
 use std::collections::HashSet;
@@ -271,14 +271,18 @@ pub fn comps_add_all(
     let mut no_sort = false;
     match ymatch {
         YangMatch::Dir | YangMatch::DirMatched => {
+            // `ext:positional` children have no typeable keyword — their
+            // key's type hints surface via comps_default_child_key.
             for entry in entry.dir.borrow().iter() {
-                comps.push(centry(entry));
+                if !is_positional(entry) {
+                    comps.push(centry(entry));
+                }
             }
             comps_default_child_key(comps, entry);
         }
         YangMatch::KeyMatched => {
             for e in entry.dir.borrow().iter() {
-                if !entry_is_key(&e.name, &entry.key) {
+                if !entry_is_key(&e.name, &entry.key) && !is_positional(e) {
                     comps.push(centry(e));
                 }
             }

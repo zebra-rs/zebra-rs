@@ -74,12 +74,14 @@ its non-VRF sibling** in the tables below.
 | `show interface [<name>] [detail]` | Interface state | ✅ |
 | `show ip route` | IPv4 routing table | ✅ |
 | `show ip route detail` | IPv4 RIB, IOS-XR detail blocks | ✅ |
-| `show ip route prefix <A.B.C.D/M> [detail]` | One IPv4 prefix | ✅ |
+| `show ip route {<A.B.C.D>\|<A.B.C.D/M>}` | One IPv4 route (address = longest match) | ✅ |
 | `show ip route vrf [<name>] [detail]` | IPv4 RIB per VRF | ✅ |
+| `show ip route vrf <name> {<A.B.C.D>\|<A.B.C.D/M>}` | One IPv4 route in a VRF (address = longest match) | ✅ |
 | `show ipv6 route` | IPv6 routing table | ✅ |
 | `show ipv6 route detail` | IPv6 RIB, IOS-XR detail blocks | ✅ |
-| `show ipv6 route prefix <X::Y/M> [detail]` | One IPv6 prefix | ✅ |
+| `show ipv6 route {<X::X>\|<X::Y/M>}` | One IPv6 route (address = longest match) | ✅ |
 | `show ipv6 route vrf [<name>] [detail]` | IPv6 RIB per VRF | ✅ |
+| `show ipv6 route vrf <name> {<X::X>\|<X::Y/M>}` | One IPv6 route in a VRF (address = longest match) | ✅ |
 | `show nexthop` | Nexthop groups | ✅ |
 | `show mpls ilm` | MPLS incoming-label map | ✅ |
 | `show l2 mac table` | Bridge MAC table (EVPN VNI-keyed) | ✅ |

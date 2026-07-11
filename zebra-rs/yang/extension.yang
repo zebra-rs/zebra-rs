@@ -42,6 +42,17 @@ module extension {
     argument "default-child";
   }
 
+  extension positional {
+    description
+      "Marks a list as reachable only through its parent's
+       `ext:default-child`: the list's own keyword is neither matched
+       against input nor offered in completion, so the key value must be
+       typed positionally (e.g. `show ip route A.B.C.D/M` — there is no
+       `show ip route prefix …` spelling). The argument documents the
+       positional spelling.";
+    argument "positional";
+  }
+
   extension non-empty {
     description
       "Forbids key-only entries on this `list`: every entry must carry at

@@ -434,6 +434,9 @@ fn entry_match_dir(entry: &Rc<Entry>, str: &str, m: &mut Match, state: &State) {
                 continue; // Skip inactive choice case
             }
         }
+        if is_positional(entry) {
+            continue;
+        }
         m.match_entry(entry, str);
     }
 }
@@ -469,10 +472,19 @@ pub fn entry_is_key(name: &String, keys: &[String]) -> bool {
 
 fn entry_match_key_matched(entry: &Rc<Entry>, str: &str, m: &mut Match) {
     for e in entry.dir.borrow().iter() {
-        if !entry_is_key(&e.name, &entry.key) {
+        if !entry_is_key(&e.name, &entry.key) && !is_positional(e) {
             m.match_entry(e, str);
         }
     }
+}
+
+/// A node tagged `ext:positional` is reachable only through its
+/// parent's `ext:default-child`: the keyword itself is neither matched
+/// against input nor offered in completion, so only the positional
+/// spelling exists (`show ip route A.B.C.D/M`, never `show ip route
+/// prefix A.B.C.D/M`).
+pub fn is_positional(entry: &Rc<Entry>) -> bool {
+    entry.extension.contains_key("ext:positional")
 }
 
 /// Resolve a container's `ext:default-child` to the child entry it
@@ -1583,6 +1595,107 @@ mod tests {
             let got: Vec<&str> = args.0.iter().map(|s| s.as_str()).collect();
             assert_eq!(&got, want_args, "args for `{cmd}`");
         }
+    }
+
+    /// `show ip route {<A.B.C.D>|<A.B.C.D/M>}` — the route filter is
+    /// typed positionally, mirroring `show bgp`: the `prefix` list is
+    /// `ext:positional`, reachable only via the route container's
+    /// `ext:default-child`. The old `show ip route prefix …` keyword
+    /// spelling is gone and the internal node name must not leak into
+    /// completion.
+    #[test]
+    fn show_ip_route_positional_prefix() {
+        use crate::config::path_from_command;
+        let entry = exec_entry();
+
+        let cases: Vec<(&str, &str, Vec<&str>)> = vec![
+            ("show ip route", "/show/ip/route", vec![]),
+            ("show ip route detail", "/show/ip/route/detail", vec![]),
+            (
+                "show ip route 10.0.0.1",
+                "/show/ip/route/prefix",
+                vec!["10.0.0.1"],
+            ),
+            (
+                "show ip route 10.0.0.0/24",
+                "/show/ip/route/prefix",
+                vec!["10.0.0.0/24"],
+            ),
+            ("show ip route vrf blue", "/show/ip/route/vrf", vec!["blue"]),
+            // The `vrf` list carries its own positional filter (the
+            // matcher applies the default-child shortcut after a list
+            // key too), and its keyword children still win over it.
+            (
+                "show ip route vrf blue 10.0.0.1",
+                "/show/ip/route/vrf/prefix",
+                vec!["blue", "10.0.0.1"],
+            ),
+            (
+                "show ip route vrf blue 10.0.0.0/24",
+                "/show/ip/route/vrf/prefix",
+                vec!["blue", "10.0.0.0/24"],
+            ),
+            (
+                "show ip route vrf blue detail",
+                "/show/ip/route/vrf/detail",
+                vec!["blue"],
+            ),
+            ("show ipv6 route", "/show/ipv6/route", vec![]),
+            (
+                "show ipv6 route 2001:db8::1",
+                "/show/ipv6/route/prefix",
+                vec!["2001:db8::1"],
+            ),
+            (
+                "show ipv6 route 2001:db8::/48",
+                "/show/ipv6/route/prefix",
+                vec!["2001:db8::/48"],
+            ),
+            (
+                "show ipv6 route vrf blue 2001:db8::1",
+                "/show/ipv6/route/vrf/prefix",
+                vec!["blue", "2001:db8::1"],
+            ),
+            (
+                "show ipv6 route vrf blue 2001:db8::/48",
+                "/show/ipv6/route/vrf/prefix",
+                vec!["blue", "2001:db8::/48"],
+            ),
+        ];
+
+        for &(cmd, want_path, ref want_args) in &cases {
+            let (code, _comps, state) = parse(cmd, entry.clone(), None, State::new());
+            assert_eq!(code, ExecCode::Success, "parse `{cmd}`");
+            let (path, args) = path_from_command(&state.paths);
+            assert_eq!(path, want_path, "path for `{cmd}`");
+            let got: Vec<&str> = args.0.iter().map(|s| s.as_str()).collect();
+            assert_eq!(&got, want_args, "args for `{cmd}`");
+        }
+
+        // The keyword spelling was removed with the move to positional,
+        // and the single-route form carries no `detail` suffix (the
+        // whole-table `show ip route detail` keeps it).
+        for cmd in [
+            "show ip route prefix 10.0.0.0/24",
+            "show ipv6 route prefix 2001:db8::/48",
+            "show ip route 10.0.0.0/24 detail",
+            "show ipv6 route 2001:db8::/48 detail",
+            "show ip route vrf blue prefix 10.0.0.0/24",
+            "show ip route vrf blue 10.0.0.0/24 detail",
+        ] {
+            let (code, _comps, _state) = parse(cmd, entry.clone(), None, State::new());
+            assert_ne!(code, ExecCode::Success, "`{cmd}` must not be a command");
+        }
+
+        // Completion advertises the value hints and the real keyword
+        // children, but never the hidden `prefix` node itself.
+        let (_code, comps, _state) = parse("show ip route ", entry, None, State::new());
+        let names: Vec<&str> = comps.iter().map(|c| c.name.as_str()).collect();
+        assert!(names.contains(&"<A.B.C.D>"), "comps: {names:?}");
+        assert!(names.contains(&"<A.B.C.D/M>"), "comps: {names:?}");
+        assert!(names.contains(&"detail"), "comps: {names:?}");
+        assert!(names.contains(&"vrf"), "comps: {names:?}");
+        assert!(!names.contains(&"prefix"), "comps: {names:?}");
     }
 
     /// After the manager strips the `vrf <name>` selector, the per-VRF

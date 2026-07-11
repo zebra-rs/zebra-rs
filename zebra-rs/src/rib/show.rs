@@ -1,21 +1,23 @@
 use ipnet::{Ipv4Net, Ipv6Net};
+use prefix_trie::PrefixMap;
 use serde::Serialize;
 use serde_json::Value;
 
 use crate::{
     config::{Args, Builder},
     rib::{
-        Label, Nexthop,
+        Label, Nexthop, RibEntries,
         nexthop::{NexthopList, NexthopMember, NexthopProtect, NexthopUni},
+        util::IpAddrExt,
     },
 };
 
 use super::{
     Group, Rib, entry::RibEntry, inst::ShowCallback, link::link_show, nexthop_show,
-    types::RibSubType, types::RibType, vrf::Vrf,
+    types::RibSubType, types::RibType, vrf::Vrf, vrf::VrfRibTables,
 };
 use std::fmt::Write;
-use std::net::IpAddr;
+use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 use std::time::Duration;
 
 // Two-char tag column used in `show ip route` lines. When the route has
@@ -1150,32 +1152,54 @@ pub fn rib_show_detail(rib: &Rib, args: Args, json: bool) -> String {
     buf
 }
 
-/// `show ip route prefix A.B.C.D/N` — single-prefix filter, one-line
-/// layout.
+/// `show ip route {A.B.C.D | A.B.C.D/M}` — an address shows the
+/// longest match (the route that contains it); a prefix shows that
+/// exact entry. One-line layout.
 pub fn rib_show_prefix(rib: &Rib, mut args: Args, json: bool) -> String {
-    let Some(prefix) = args.v4net() else {
-        return "% Invalid IPv4 prefix\n".to_string();
-    };
-    rib_show_one(rib, &prefix, json, false)
+    rib_show_one(rib, args.string(), json)
 }
 
-/// `show ip route prefix A.B.C.D/N detail` — single-prefix block.
-pub fn rib_show_prefix_detail(rib: &Rib, mut args: Args, json: bool) -> String {
-    let Some(prefix) = args.v4net() else {
-        return "% Invalid IPv4 prefix\n".to_string();
-    };
-    rib_show_one(rib, &prefix, json, true)
-}
-
-fn rib_show_one(rib: &Rib, prefix: &Ipv4Net, json: bool, detail: bool) -> String {
-    let Some(entries) = rib.table.get(prefix) else {
-        return if json {
+/// Resolve the positional `show ip route` selector — a bare address
+/// does a longest-match lookup, a prefix matches exactly — to the
+/// entry it names in `table`. `Err` carries the already-formatted
+/// response for malformed input or a lookup miss.
+fn rib_lookup_one<'a>(
+    table: &'a PrefixMap<Ipv4Net, RibEntries>,
+    tok: &Option<String>,
+    json: bool,
+) -> Result<(Ipv4Net, &'a RibEntries), String> {
+    let miss = |what: &dyn std::fmt::Display| {
+        if json {
             "{\"routes\": []}\n".to_string()
         } else {
-            format!("% No route for {prefix}\n")
-        };
+            format!("% No route for {what}\n")
+        }
     };
+    let Some(tok) = tok else {
+        return Err("% Specify an IPv4 address or prefix\n".to_string());
+    };
+    if tok.contains('/') {
+        let Ok(prefix) = tok.parse::<Ipv4Net>() else {
+            return Err(format!("% Malformed IPv4 prefix: {tok}\n"));
+        };
+        match table.get(&prefix) {
+            Some(entries) => Ok((prefix, entries)),
+            None => Err(miss(&prefix)),
+        }
+    } else {
+        let Ok(addr) = tok.parse::<Ipv4Addr>() else {
+            return Err(format!("% Malformed IPv4 address: {tok}\n"));
+        };
+        match table.get_lpm(&addr.to_host_prefix()) {
+            Some((prefix, entries)) => Ok((prefix, entries)),
+            None => Err(miss(&addr)),
+        }
+    }
+}
 
+/// Render one resolved route: the JSON routes array, or the one-line
+/// layout under the codes header.
+fn rib_render_one(rib: &Rib, prefix: &Ipv4Net, entries: &RibEntries, json: bool) -> String {
     if json {
         let routes: Vec<RouteEntry> = entries
             .iter()
@@ -1185,18 +1209,18 @@ fn rib_show_one(rib: &Rib, prefix: &Ipv4Net, json: bool, detail: bool) -> String
             .unwrap_or_else(|e| format!("{{\"error\": \"Failed to serialize routes: {}\"}}", e));
     }
 
-    let mut buf = String::new();
-    if detail {
-        for entry in entries.iter() {
-            buf.push_str(&rib_entry_show_detail(rib, prefix, entry));
-        }
-    } else {
-        buf.push_str(SHOW_HEADER);
-        for entry in entries.iter() {
-            let _ = write!(buf, "{}", rib_entry_show(rib, prefix, entry, json).unwrap());
-        }
+    let mut buf = String::from(SHOW_HEADER);
+    for entry in entries.iter() {
+        let _ = write!(buf, "{}", rib_entry_show(rib, prefix, entry, json).unwrap());
     }
     buf
+}
+
+fn rib_show_one(rib: &Rib, tok: Option<String>, json: bool) -> String {
+    match rib_lookup_one(&rib.table, &tok, json) {
+        Ok((prefix, entries)) => rib_render_one(rib, &prefix, entries, json),
+        Err(out) => out,
+    }
 }
 
 /// Resolve the VRFs a `... route vrf [NAME]` command targets: a single
@@ -1334,6 +1358,73 @@ fn rib6_vrf_render(rib: &Rib, name: Option<String>, json: bool, detail: bool) ->
     buf
 }
 
+/// Resolve the `vrf <name>` selector of a positional single-route
+/// show to the VRF and its RIB tables. `Err` carries the formatted
+/// response (`% No such VRF: …`); a VRF with no tables yet resolves to
+/// an empty default so the route lookup renders its own miss.
+fn vrf_route_target<'a>(
+    rib: &'a Rib,
+    name: &Option<String>,
+    json: bool,
+    empty: &'a VrfRibTables,
+) -> Result<(&'a Vrf, &'a VrfRibTables), String> {
+    if name.is_none() {
+        return Err("% Specify a VRF name\n".to_string());
+    }
+    let selected = vrf_targets(rib, name, json)?;
+    let Some(vrf) = selected.first() else {
+        return Err("% No VRFs configured\n".to_string());
+    };
+    let tables = rib.vrf_tables.get(&vrf.table_id).unwrap_or(empty);
+    Ok((vrf, tables))
+}
+
+/// `show ip route vrf NAME {A.B.C.D | A.B.C.D/M}` — the positional
+/// single-route filter scoped to one VRF: address = longest match,
+/// prefix = exact. One-line layout under the VRF banner.
+pub fn rib_show_vrf_prefix(rib: &Rib, mut args: Args, json: bool) -> String {
+    let name = args.string();
+    let tok = args.string();
+    let empty = VrfRibTables::new();
+    let (vrf, tables) = match vrf_route_target(rib, &name, json, &empty) {
+        Ok(found) => found,
+        Err(out) => return out,
+    };
+    match rib_lookup_one(&tables.table, &tok, json) {
+        Ok((prefix, entries)) => {
+            let mut buf = String::new();
+            if !json {
+                let _ = writeln!(buf, "VRF {} (table {}):", vrf.name, vrf.table_id);
+            }
+            buf.push_str(&rib_render_one(rib, &prefix, entries, json));
+            buf
+        }
+        Err(out) => out,
+    }
+}
+
+/// V6 twin of [`rib_show_vrf_prefix`].
+pub fn rib6_show_vrf_prefix(rib: &Rib, mut args: Args, json: bool) -> String {
+    let name = args.string();
+    let tok = args.string();
+    let empty = VrfRibTables::new();
+    let (vrf, tables) = match vrf_route_target(rib, &name, json, &empty) {
+        Ok(found) => found,
+        Err(out) => return out,
+    };
+    match rib6_lookup_one(&tables.table_v6, &tok, json) {
+        Ok((prefix, entries)) => {
+            let mut buf = String::new();
+            if !json {
+                let _ = writeln!(buf, "VRF {} (table {}):", vrf.name, vrf.table_id);
+            }
+            buf.push_str(&rib6_render_one(rib, &prefix, entries, json));
+            buf
+        }
+        Err(out) => out,
+    }
+}
+
 /// `show ip route vrf [NAME]` — one-line layout.
 pub fn rib_show_vrf(rib: &Rib, mut args: Args, json: bool) -> String {
     rib_vrf_render(rib, args.string(), json, false)
@@ -1400,31 +1491,50 @@ pub fn rib6_show_detail(rib: &Rib, args: Args, json: bool) -> String {
     buf
 }
 
-/// `show ipv6 route prefix X::Y/N` — single-prefix, one-line layout.
+/// `show ipv6 route {X:X::X:X | X:X::X:X/M}` — the v6 twin of
+/// [`rib_show_prefix`]: address does a longest-match lookup, prefix
+/// matches exactly. One-line layout.
 pub fn rib6_show_prefix(rib: &Rib, mut args: Args, json: bool) -> String {
-    let Some(prefix) = args.v6net() else {
-        return "% Invalid IPv6 prefix\n".to_string();
-    };
-    rib6_show_one(rib, &prefix, json, false)
+    rib6_show_one(rib, args.string(), json)
 }
 
-/// `show ipv6 route prefix X::Y/N detail` — single-prefix block.
-pub fn rib6_show_prefix_detail(rib: &Rib, mut args: Args, json: bool) -> String {
-    let Some(prefix) = args.v6net() else {
-        return "% Invalid IPv6 prefix\n".to_string();
-    };
-    rib6_show_one(rib, &prefix, json, true)
-}
-
-fn rib6_show_one(rib: &Rib, prefix: &Ipv6Net, json: bool, detail: bool) -> String {
-    let Some(entries) = rib.table_v6.get(prefix) else {
-        return if json {
+/// V6 twin of [`rib_lookup_one`].
+fn rib6_lookup_one<'a>(
+    table: &'a PrefixMap<Ipv6Net, RibEntries>,
+    tok: &Option<String>,
+    json: bool,
+) -> Result<(Ipv6Net, &'a RibEntries), String> {
+    let miss = |what: &dyn std::fmt::Display| {
+        if json {
             "{\"routes\": []}\n".to_string()
         } else {
-            format!("% No route for {prefix}\n")
-        };
+            format!("% No route for {what}\n")
+        }
     };
+    let Some(tok) = tok else {
+        return Err("% Specify an IPv6 address or prefix\n".to_string());
+    };
+    if tok.contains('/') {
+        let Ok(prefix) = tok.parse::<Ipv6Net>() else {
+            return Err(format!("% Malformed IPv6 prefix: {tok}\n"));
+        };
+        match table.get(&prefix) {
+            Some(entries) => Ok((prefix, entries)),
+            None => Err(miss(&prefix)),
+        }
+    } else {
+        let Ok(addr) = tok.parse::<Ipv6Addr>() else {
+            return Err(format!("% Malformed IPv6 address: {tok}\n"));
+        };
+        match table.get_lpm(&addr.to_host_prefix()) {
+            Some((prefix, entries)) => Ok((prefix, entries)),
+            None => Err(miss(&addr)),
+        }
+    }
+}
 
+/// V6 twin of [`rib_render_one`].
+fn rib6_render_one(rib: &Rib, prefix: &Ipv6Net, entries: &RibEntries, json: bool) -> String {
     if json {
         let routes: Vec<RouteEntry> = entries
             .iter()
@@ -1434,22 +1544,22 @@ fn rib6_show_one(rib: &Rib, prefix: &Ipv6Net, json: bool, detail: bool) -> Strin
             .unwrap_or_else(|e| format!("{{\"error\": \"Failed to serialize routes: {}\"}}", e));
     }
 
-    let mut buf = String::new();
-    if detail {
-        for entry in entries.iter() {
-            buf.push_str(&rib_entry_show_v6_detail(rib, prefix, entry));
-        }
-    } else {
-        buf.push_str(SHOW_HEADER);
-        for entry in entries.iter() {
-            let _ = write!(
-                buf,
-                "{}",
-                rib_entry_show_v6(rib, prefix, entry, json).unwrap()
-            );
-        }
+    let mut buf = String::from(SHOW_HEADER);
+    for entry in entries.iter() {
+        let _ = write!(
+            buf,
+            "{}",
+            rib_entry_show_v6(rib, prefix, entry, json).unwrap()
+        );
     }
     buf
+}
+
+fn rib6_show_one(rib: &Rib, tok: Option<String>, json: bool) -> String {
+    match rib6_lookup_one(&rib.table_v6, &tok, json) {
+        Ok((prefix, entries)) => rib6_render_one(rib, &prefix, entries, json),
+        Err(out) => out,
+    }
 }
 
 // JSON structures for MPLS ILM display
@@ -1827,24 +1937,24 @@ impl Rib {
             .set(rib_show_detail)
             .path("/show/ip/route/prefix")
             .set(rib_show_prefix)
-            .path("/show/ip/route/prefix/detail")
-            .set(rib_show_prefix_detail)
             .path("/show/ip/route/vrf")
             .set(rib_show_vrf)
             .path("/show/ip/route/vrf/detail")
             .set(rib_show_vrf_detail)
+            .path("/show/ip/route/vrf/prefix")
+            .set(rib_show_vrf_prefix)
             .path("/show/ipv6/route")
             .set(rib6_show)
             .path("/show/ipv6/route/detail")
             .set(rib6_show_detail)
             .path("/show/ipv6/route/prefix")
             .set(rib6_show_prefix)
-            .path("/show/ipv6/route/prefix/detail")
-            .set(rib6_show_prefix_detail)
             .path("/show/ipv6/route/vrf")
             .set(rib6_show_vrf)
             .path("/show/ipv6/route/vrf/detail")
             .set(rib6_show_vrf_detail)
+            .path("/show/ipv6/route/vrf/prefix")
+            .set(rib6_show_vrf_prefix)
             .path("/show/nexthop")
             .set(nexthop_show)
             .path("/show/mpls/ilm")
