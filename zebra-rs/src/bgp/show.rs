@@ -96,6 +96,30 @@ pub async fn process_vrf_show(vrf: &BgpVrf, msg: DisplayRequest) {
     let _ = msg.resp.send(out).await;
 }
 
+/// Display order and labels for the multiprotocol capability lines of
+/// `show bgp neighbor`, one entry per family tracked in
+/// [`super::cap::CapAfiMap::new`] — the renderer loops over this table, so
+/// a family present in the capability map but absent here would silently
+/// vanish from the text view (a test asserts the two stay in sync).
+const MP_CAP_LABELS: &[(Afi, Safi, &str)] = &[
+    (Afi::Ip, Safi::Unicast, "IPv4 Unicast"),
+    (Afi::Ip6, Safi::Unicast, "IPv6 Unicast"),
+    (Afi::Ip, Safi::MplsLabel, "IPv4 Labeled Unicast"),
+    (Afi::Ip6, Safi::MplsLabel, "IPv6 Labeled Unicast"),
+    (Afi::Ip, Safi::MplsVpn, "IPv4 MPLS VPN"),
+    (Afi::Ip6, Safi::MplsVpn, "IPv6 MPLS VPN"),
+    (Afi::L2vpn, Safi::Evpn, "L2VPN EVPN"),
+    (Afi::Ip, Safi::Mup, "IPv4 MUP"),
+    (Afi::Ip6, Safi::Mup, "IPv6 MUP"),
+    (Afi::Ip, Safi::Rtc, "IPv4 RTC"),
+    (Afi::Ip6, Safi::Rtc, "IPv6 RTC"),
+    (Afi::Ip, Safi::Flowspec, "IPv4 Flowspec"),
+    (Afi::Ip6, Safi::Flowspec, "IPv6 Flowspec"),
+    (Afi::Ip, Safi::SrTePolicy, "IPv4 SR Policy"),
+    (Afi::Ip6, Safi::SrTePolicy, "IPv6 SR Policy"),
+    (Afi::LinkState, Safi::LinkState, "Link-State"),
+];
+
 /// Human-readable label for an (AFI, SAFI) pair, used as the "<label>
 /// Summary:" header in `show bgp summary`.
 fn afi_safi_summary_label(afi: Afi, safi: Safi) -> &'static str {
@@ -3411,59 +3435,17 @@ fn render(out: &mut String, neighbor: &Neighbor) -> std::fmt::Result {
             writeln!(out)?;
         }
 
-        let afi = CapMultiProtocol::new(&Afi::Ip, &Safi::Unicast);
-        if let Some(cap) = neighbor.cap_map.entries.get(&afi)
-            && (cap.send || cap.recv)
-        {
-            writeln!(out, "    IPv4 Unicast: {}", cap.desc())?;
-        }
-        let afi = CapMultiProtocol::new(&Afi::Ip6, &Safi::Unicast);
-        if let Some(cap) = neighbor.cap_map.entries.get(&afi)
-            && (cap.send || cap.recv)
-        {
-            writeln!(out, "    IPv6 Unicast: {}", cap.desc())?;
-        }
-        let afi = CapMultiProtocol::new(&Afi::Ip, &Safi::MplsLabel);
-        if let Some(cap) = neighbor.cap_map.entries.get(&afi)
-            && (cap.send || cap.recv)
-        {
-            writeln!(out, "    IPv4 Labeled Unicast: {}", cap.desc())?;
-        }
-        let afi = CapMultiProtocol::new(&Afi::Ip6, &Safi::MplsLabel);
-        if let Some(cap) = neighbor.cap_map.entries.get(&afi)
-            && (cap.send || cap.recv)
-        {
-            writeln!(out, "    IPv6 Labeled Unicast: {}", cap.desc())?;
-        }
-        let afi = CapMultiProtocol::new(&Afi::Ip, &Safi::MplsVpn);
-        if let Some(cap) = neighbor.cap_map.entries.get(&afi)
-            && (cap.send || cap.recv)
-        {
-            writeln!(out, "    IPv4 MPLS VPN: {}", cap.desc())?;
-        }
-        let afi = CapMultiProtocol::new(&Afi::L2vpn, &Safi::Evpn);
-        if let Some(cap) = neighbor.cap_map.entries.get(&afi)
-            && (cap.send || cap.recv)
-        {
-            writeln!(out, "    L2VPN EVPN: {}", cap.desc())?;
-        }
-        let afi = CapMultiProtocol::new(&Afi::Ip, &Safi::Mup);
-        if let Some(cap) = neighbor.cap_map.entries.get(&afi)
-            && (cap.send || cap.recv)
-        {
-            writeln!(out, "    IPv4 MUP: {}", cap.desc())?;
-        }
-        let afi = CapMultiProtocol::new(&Afi::Ip6, &Safi::Mup);
-        if let Some(cap) = neighbor.cap_map.entries.get(&afi)
-            && (cap.send || cap.recv)
-        {
-            writeln!(out, "    IPv6 MUP: {}", cap.desc())?;
-        }
-        let afi = CapMultiProtocol::new(&Afi::Ip, &Safi::Rtc);
-        if let Some(cap) = neighbor.cap_map.entries.get(&afi)
-            && (cap.send || cap.recv)
-        {
-            writeln!(out, "    IPv4 RTC: {}", cap.desc())?;
+        // One line per negotiated MP family. Table-driven over the same
+        // family list as `CapAfiMap::new` — the per-family copy-paste this
+        // replaces had silently dropped IPv6 MPLS VPN (and never listed
+        // RTCv6 / Flowspec / SR Policy / Link-State at all).
+        for (afi, safi, label) in MP_CAP_LABELS {
+            let mp = CapMultiProtocol::new(afi, safi);
+            if let Some(cap) = neighbor.cap_map.entries.get(&mp)
+                && (cap.send || cap.recv)
+            {
+                writeln!(out, "    {label}: {}", cap.desc())?;
+            }
         }
 
         if !neighbor.cap_send.addpath.is_empty() || !neighbor.cap_recv.addpath.is_empty() {
@@ -3591,6 +3573,7 @@ fn render(out: &mut String, neighbor: &Neighbor) -> std::fmt::Result {
                     (Afi::Ip, Safi::Unicast) => "IPv4/Unicast",
                     (Afi::Ip, Safi::MplsVpn) => "IPv4/MPLS VPN",
                     (Afi::Ip6, Safi::Unicast) => "IPv6/Unicast",
+                    (Afi::Ip6, Safi::MplsVpn) => "IPv6/MPLS VPN",
                     (Afi::L2vpn, Safi::Evpn) => "L2VPN/EVPN",
                     (Afi::Ip, Safi::Rtc) => "IPv4/RTC",
                     (Afi::Ip6, Safi::Rtc) => "IPv6/RTC",
@@ -5317,6 +5300,23 @@ Neighbor        V         AS   MsgRcvd   MsgSent   TblVer  InQ OutQ  Up/Down Sta
             afi_safi_summary_label(Afi::Ip, Safi::MplsVpn),
             "VPNv4 Unicast"
         );
+    }
+
+    /// Every family the capability map tracks must have a display row in
+    /// `show bgp neighbor` (and vice versa) — a family missing from
+    /// `MP_CAP_LABELS` silently vanishes from the text view even when the
+    /// capability was exchanged, which is exactly how the IPv6 MPLS VPN
+    /// line went missing from the hand-rolled per-family blocks.
+    #[test]
+    fn mp_cap_labels_cover_cap_afi_map() {
+        let map = super::super::cap::CapAfiMap::new();
+        assert_eq!(map.entries.len(), MP_CAP_LABELS.len());
+        for (afi, safi, _) in MP_CAP_LABELS {
+            assert!(
+                map.entries.contains_key(&CapMultiProtocol::new(afi, safi)),
+                "MP_CAP_LABELS lists {afi:?}/{safi:?} but CapAfiMap does not track it"
+            );
+        }
     }
 
     use std::collections::VecDeque;
