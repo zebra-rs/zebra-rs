@@ -68,6 +68,47 @@ async fn probe(endpoint: &str) -> bool {
     crate::fib::cradle::probe_endpoint(endpoint).await
 }
 
+/// Strip ANSI escape sequences (CSI/OSC/two-byte) from a relayed engine log
+/// line. The engine colorizes even into a pipe, and our own subscriber
+/// escapes embedded control bytes (tracing-subscriber >= 0.3.20), which
+/// would otherwise land in the log as literal `\x1b[2m...` noise.
+fn strip_ansi(line: &str) -> std::borrow::Cow<'_, str> {
+    if !line.contains('\x1b') {
+        return std::borrow::Cow::Borrowed(line);
+    }
+    let mut out = String::with_capacity(line.len());
+    let mut chars = line.chars();
+    while let Some(c) = chars.next() {
+        if c != '\x1b' {
+            out.push(c);
+            continue;
+        }
+        match chars.next() {
+            Some('[') => {
+                // CSI: parameter/intermediate bytes, then one final byte.
+                for c in chars.by_ref() {
+                    if ('\x40'..='\x7e').contains(&c) {
+                        break;
+                    }
+                }
+            }
+            Some(']') => {
+                // OSC: terminated by BEL or ST (ESC \).
+                let mut prev_esc = false;
+                for c in chars.by_ref() {
+                    if c == '\x07' || (prev_esc && c == '\\') {
+                        break;
+                    }
+                    prev_esc = c == '\x1b';
+                }
+            }
+            // Two-byte escape: the consumed byte is the whole sequence.
+            _ => {}
+        }
+    }
+    std::borrow::Cow::Owned(out)
+}
+
 /// Spawn `cradle serve --grpc <endpoint>` with its lifetime bound to ours:
 /// `kill_on_drop` (SIGKILL if the handle is dropped) plus
 /// `PR_SET_PDEATHSIG=SIGTERM` (the kernel signals the child even if zebra-rs
@@ -91,7 +132,7 @@ fn spawn_child(bin: &PathBuf, endpoint: &str) -> std::io::Result<Child> {
         tokio::spawn(async move {
             let mut lines = BufReader::new(out).lines();
             while let Ok(Some(line)) = lines.next_line().await {
-                info!(target: "cradle", "{line}");
+                info!(target: "cradle", "{}", strip_ansi(&line));
             }
         });
     }
@@ -99,7 +140,7 @@ fn spawn_child(bin: &PathBuf, endpoint: &str) -> std::io::Result<Child> {
         tokio::spawn(async move {
             let mut lines = BufReader::new(err).lines();
             while let Ok(Some(line)) = lines.next_line().await {
-                warn!(target: "cradle", "{line}");
+                warn!(target: "cradle", "{}", strip_ansi(&line));
             }
         });
     }
@@ -215,5 +256,38 @@ pub(crate) async fn run(
             _ = tokio::time::sleep(backoff) => {}
         }
         backoff = (backoff * 2).min(BACKOFF_MAX);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::strip_ansi;
+
+    #[test]
+    fn strip_ansi_plain_line_is_borrowed() {
+        let line = "port enp0s6: derived v4 192.168.10.1/24 (vrf 0)";
+        assert!(matches!(
+            strip_ansi(line),
+            std::borrow::Cow::Borrowed(s) if s == line
+        ));
+    }
+
+    #[test]
+    fn strip_ansi_removes_sgr_colors() {
+        let line = "\x1b[2m2026-07-11T23:02:57.671010Z\x1b[0m \x1b[32m INFO\x1b[0m \
+                    \x1b[2mcradle::l7\x1b[0m\x1b[2m:\x1b[0m L7 proxy listening";
+        assert_eq!(
+            strip_ansi(line),
+            "2026-07-11T23:02:57.671010Z  INFO cradle::l7: L7 proxy listening"
+        );
+    }
+
+    #[test]
+    fn strip_ansi_removes_csi_with_params_osc_and_two_byte() {
+        assert_eq!(strip_ansi("a\x1b[1;31mb\x1b[Kc"), "abc");
+        assert_eq!(strip_ansi("a\x1b]0;title\x07b"), "ab");
+        assert_eq!(strip_ansi("a\x1b]0;title\x1b\\b"), "ab");
+        assert_eq!(strip_ansi("a\x1bMb"), "ab");
+        assert_eq!(strip_ansi("trailing\x1b["), "trailing");
     }
 }
