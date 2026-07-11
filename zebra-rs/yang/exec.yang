@@ -295,13 +295,23 @@ module exec {
         ext:help "Engine L2 FDB (MAC table)";
         type empty;
       }
-      leaf ipv4 {
+      container ipv4 {
         ext:help "Engine IPv4 FIB";
-        type empty;
+        presence "Show the global-table IPv4 FIB";
+        leaf vrf {
+          ext:help "Per-VRF FIB (by VRF name)";
+          ext:dynamic "rib:vrf";
+          type string;
+        }
       }
-      leaf ipv6 {
+      container ipv6 {
         ext:help "Engine IPv6 FIB";
-        type empty;
+        presence "Show the global-table IPv6 FIB";
+        leaf vrf {
+          ext:help "Per-VRF FIB (by VRF name)";
+          ext:dynamic "rib:vrf";
+          type string;
+        }
       }
       leaf mpls {
         ext:help "Engine MPLS ILM (incoming-label map)";

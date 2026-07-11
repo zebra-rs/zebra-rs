@@ -48,6 +48,7 @@ Feature: system ebpf spawns and supervises the cradle eBPF engine
     And I apply command "set interface eth0 vrf red" in namespace "crs1"
     Then show command "show ebpf" in namespace "crs1" should eventually contain "vrf 1"
     And show command "show ebpf" in namespace "crs1" should eventually contain "attached"
+    And show command "show ebpf ipv4 vrf red" in namespace "crs1" should eventually contain "10.210.1.0/24"
     When I apply command "delete interface eth0 vrf red" in namespace "crs1"
     Then show command "show ebpf" in namespace "crs1" should eventually not contain "vrf 1"
     And show command "show ebpf" in namespace "crs1" should eventually contain "attached"
