@@ -288,6 +288,10 @@ module exec {
         type empty;
       }
     }
+    container ebpf {
+      ext:help "eBPF data-plane engine (managed cradle) status";
+      presence "Show the engine supervisor and port status";
+    }
     container bgp {
       ext:help "BGP information";
       // `show bgp` with no AFI keyword is IPv4 unicast. A bare address

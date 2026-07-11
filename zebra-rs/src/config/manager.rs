@@ -1265,6 +1265,11 @@ fn is_nd(paths: &[CommandPath]) -> bool {
     paths.iter().any(|x| x.name == "nd")
 }
 
+/// `show ebpf` — the cradle engine supervisor's status command.
+fn is_ebpf(paths: &[CommandPath]) -> bool {
+    paths.iter().any(|x| x.name == "ebpf")
+}
+
 fn is_policy(paths: &[CommandPath]) -> bool {
     // Every policy-object root the policy module registers a show
     // handler for. Missing roots fall through to the `"rib"` fallback
@@ -1304,6 +1309,8 @@ fn show_proto(paths: &[CommandPath]) -> &'static str {
         "stamp"
     } else if is_nd(paths) {
         "nd"
+    } else if is_ebpf(paths) {
+        "cradle"
     } else if is_policy(paths) {
         "policy"
     } else {

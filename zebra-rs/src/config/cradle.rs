@@ -26,6 +26,7 @@ pub fn spawn_cradle(config: &ConfigManager) {
         let (rib_client, rib_rx) = config.subscribe_to_rib("cradle");
         let cradle = crate::cradle::Cradle::new(rib_client, rib_rx);
         config.subscribe("cradle", cradle.cm.tx.clone());
+        config.subscribe_show("cradle", cradle.show.tx.clone());
         let task = crate::cradle::serve(cradle);
         config
             .protocol_tasks

@@ -204,6 +204,20 @@ async fn connect_abstract_cradle(name: &str) -> anyhow::Result<CradleClient<Chan
     Ok(CradleClient::new(channel))
 }
 
+/// Fetch the engine's IPv4 FIB summary (`GetFibSummary`) from `endpoint`
+/// with a 2 s budget — `None` when nothing answers. Used by `show ebpf`.
+pub(crate) async fn fib_summary(endpoint: &str) -> Option<pb::FibSummary> {
+    let attempt = async {
+        let mut client = connect_cradle(endpoint).await?;
+        let resp = client.get_fib_summary(pb::FibSummaryRequest {}).await?;
+        anyhow::Ok(resp.into_inner())
+    };
+    tokio::time::timeout(std::time::Duration::from_secs(2), attempt)
+        .await
+        .ok()
+        .and_then(|r| r.ok())
+}
+
 /// Probe whether a cradle gRPC server answers at `endpoint` (fresh connect +
 /// `GetStats`, 2 s budget). Used by the engine supervisor (`crate::cradle`)
 /// for the adopt-if-running check and adopted-instance liveness.

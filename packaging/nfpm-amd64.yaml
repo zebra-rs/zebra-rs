@@ -16,6 +16,10 @@ replaces:
   - zebra-rs
 provides:
   - zebra-rs
+# The eBPF data-plane engine `system ebpf enabled` spawns (/usr/bin/cradle).
+# Optional: everything else works without it.
+recommends:
+  - cradle-rs
 maintainer: "Kunihiro Ishiguro <kunihiro@zebra.rs>"
 description: |
   zebra-rs is reincarnation of GNU zebra in Rust.
