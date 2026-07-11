@@ -10414,6 +10414,15 @@ pub fn route_clean(
     }
 
     let peer = peers.get_mut_by_idx(peer_id).expect("peer must exist");
+    // Drop the MUP Adj-RIB-Out slice too — it records what we advertised on
+    // the session that just ended, and both `mup_withdraw_one`'s adj-out
+    // gate and the `route_sync_mup` replay on re-establish key off it. Every
+    // other family clears its adj_out on peer-down; MUP was missed, so stale
+    // entries survived a session bounce (inflating the advertised count and
+    // letting the gate emit withdraws for routes the new session never
+    // received).
+    peer.adj_out.mup.clear();
+
     peer.adj_out.evpn.clear();
     peer.cache_evpn.clear();
     peer.cache_evpn_rev.clear();
