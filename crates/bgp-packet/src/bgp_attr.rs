@@ -150,11 +150,28 @@ impl BgpAttr {
     /// The first SRv6 L3 Service SID (value + endpoint behavior) carried
     /// in the Prefix-SID attribute — RFC 9252 L3VPN-over-SRv6. `None`
     /// when the attribute is absent or carries no SRv6 L3 Service TLV.
+    /// An originator may carry several service SIDs (e.g. a split
+    /// `End.DT4` + `End.DT6` pair instead of one `End.DT46`); consumers
+    /// that steer traffic should select by destination address family
+    /// ([`crate::srv6_l3_sid_for_dest`] over [`Self::srv6_l3_sids`])
+    /// rather than take the first.
     pub fn srv6_l3_sid(&self) -> Option<(std::net::Ipv6Addr, u16)> {
-        self.prefix_sid.as_ref()?.tlvs.iter().find_map(|t| match t {
-            PrefixSidTlv::Srv6L3Service(svc) => svc.sids.first().map(|s| (s.sid, s.behavior)),
-            _ => None,
-        })
+        self.srv6_l3_sids().next()
+    }
+
+    /// Every SRv6 L3 Service SID (value + endpoint behavior) carried in
+    /// the Prefix-SID attribute, in wire order across all SRv6 L3
+    /// Service TLVs and their SID Information sub-TLVs. Empty when the
+    /// attribute is absent or carries no SRv6 L3 Service TLV.
+    pub fn srv6_l3_sids(&self) -> impl Iterator<Item = (std::net::Ipv6Addr, u16)> + '_ {
+        self.prefix_sid
+            .iter()
+            .flat_map(|ps| ps.tlvs.iter())
+            .filter_map(|t| match t {
+                PrefixSidTlv::Srv6L3Service(svc) => Some(svc),
+                _ => None,
+            })
+            .flat_map(|svc| svc.sids.iter().map(|s| (s.sid, s.behavior)))
     }
 
     /// The first SRv6 L2 Service SID (value + endpoint behavior) carried
@@ -343,6 +360,65 @@ mod tests {
             ..Default::default()
         };
         assert_eq!(attr.prefix_sid_label_index(), Some(42));
+    }
+
+    #[test]
+    fn srv6_l3_sids_yields_every_sid_across_tlvs_in_wire_order() {
+        // A split End.DT4 + End.DT6 pair: one TLV carrying two SID
+        // Information sub-TLVs plus a second L3 Service TLV — all three
+        // SIDs must surface, in wire order, with the L2 TLV skipped.
+        let dt4: std::net::Ipv6Addr = "fcbb:1::4".parse().unwrap();
+        let dt6: std::net::Ipv6Addr = "fcbb:1::6".parse().unwrap();
+        let dt46: std::net::Ipv6Addr = "fcbb:1::46".parse().unwrap();
+        let l2: std::net::Ipv6Addr = "fcbb:1::2".parse().unwrap();
+        let attr = BgpAttr {
+            prefix_sid: Some(PrefixSid {
+                tlvs: vec![
+                    PrefixSidTlv::Srv6L3Service(Srv6ServiceTlv {
+                        sids: vec![
+                            Srv6SidInfo::new(dt4, 0, SRV6_BEHAVIOR_END_DT4, None),
+                            Srv6SidInfo::new(dt6, 0, SRV6_BEHAVIOR_END_DT6, None),
+                        ],
+                        ..Default::default()
+                    }),
+                    PrefixSidTlv::Srv6L2Service(Srv6ServiceTlv {
+                        sids: vec![Srv6SidInfo::new(l2, 0, SRV6_BEHAVIOR_END_DT2M, None)],
+                        ..Default::default()
+                    }),
+                    PrefixSidTlv::Srv6L3Service(Srv6ServiceTlv {
+                        sids: vec![Srv6SidInfo::new(dt46, 0, SRV6_BEHAVIOR_END_DT46, None)],
+                        ..Default::default()
+                    }),
+                ],
+            }),
+            ..Default::default()
+        };
+        let sids: Vec<_> = attr.srv6_l3_sids().collect();
+        assert_eq!(
+            sids,
+            vec![
+                (dt4, SRV6_BEHAVIOR_END_DT4),
+                (dt6, SRV6_BEHAVIOR_END_DT6),
+                (dt46, SRV6_BEHAVIOR_END_DT46),
+            ]
+        );
+        // The single-SID accessor stays the first-in-wire-order SID.
+        assert_eq!(attr.srv6_l3_sid(), Some((dt4, SRV6_BEHAVIOR_END_DT4)));
+    }
+
+    #[test]
+    fn srv6_l3_sids_empty_when_attr_absent_or_l3_free() {
+        assert_eq!(BgpAttr::default().srv6_l3_sids().count(), 0);
+        let attr = BgpAttr {
+            prefix_sid: Some(PrefixSid {
+                tlvs: vec![PrefixSidTlv::LabelIndex {
+                    flags: 0,
+                    label_index: 7,
+                }],
+            }),
+            ..Default::default()
+        };
+        assert_eq!(attr.srv6_l3_sids().count(), 0);
     }
 
     #[test]

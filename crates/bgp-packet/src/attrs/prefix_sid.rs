@@ -22,6 +22,41 @@ pub const SRV6_BEHAVIOR_END_DX2V: u16 = 0x0016;
 pub const SRV6_BEHAVIOR_END_DT2U: u16 = 0x0017;
 pub const SRV6_BEHAVIOR_END_DT2M: u16 = 0x0018;
 
+/// Pick the SRv6 L3 Service SID a destination of the given address
+/// family should be steered into, from a route's `(SID, behavior)`
+/// pairs in wire order (`BgpAttr::srv6_l3_sids`). An originator may
+/// advertise a split `End.DT4` + `End.DT6` pair instead of one
+/// `End.DT46`, so taking the first SID can encapsulate traffic toward
+/// a decap behavior of the wrong family (an `End.DT4` drops IPv6).
+/// Preference: the exact per-family decap behavior (`End.DT4` for v4,
+/// `End.DT6` for v6), then `End.DT46`. `None` when the SIDs carry
+/// known L3-decap behaviors but none is family-compatible — the route
+/// cannot service this destination. When no SID carries a known
+/// L3-decap behavior at all (unmodeled codepoints), fall back to the
+/// first SID rather than second-guessing semantics we don't know.
+pub fn srv6_l3_sid_for_dest(sids: &[(Ipv6Addr, u16)], dest_v4: bool) -> Option<(Ipv6Addr, u16)> {
+    let exact = if dest_v4 {
+        SRV6_BEHAVIOR_END_DT4
+    } else {
+        SRV6_BEHAVIOR_END_DT6
+    };
+    if let Some(hit) = sids.iter().find(|(_, b)| *b == exact) {
+        return Some(*hit);
+    }
+    if let Some(hit) = sids.iter().find(|(_, b)| *b == SRV6_BEHAVIOR_END_DT46) {
+        return Some(*hit);
+    }
+    const L3_DECAP: [u16; 3] = [
+        SRV6_BEHAVIOR_END_DT4,
+        SRV6_BEHAVIOR_END_DT6,
+        SRV6_BEHAVIOR_END_DT46,
+    ];
+    if sids.iter().any(|(_, b)| L3_DECAP.contains(b)) {
+        return None;
+    }
+    sids.first().copied()
+}
+
 /// BGP Prefix-SID TLV Types (IANA "BGP Prefix-SID TLV Types", RFC 8669 /
 /// RFC 9252 §8.1).
 const PREFIX_SID_TLV_LABEL_INDEX: u8 = 1;
@@ -535,6 +570,58 @@ impl fmt::Display for PrefixSid {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn srv6_l3_sid_for_dest_prefers_exact_family_then_dt46() {
+        let dt4: Ipv6Addr = "fcbb:1::4".parse().unwrap();
+        let dt6: Ipv6Addr = "fcbb:1::6".parse().unwrap();
+        let dt46: Ipv6Addr = "fcbb:1::46".parse().unwrap();
+        // Split DT4+DT6 pair: each family gets its own SID regardless of
+        // wire order (DT6 listed first here).
+        let split = [(dt6, SRV6_BEHAVIOR_END_DT6), (dt4, SRV6_BEHAVIOR_END_DT4)];
+        assert_eq!(
+            srv6_l3_sid_for_dest(&split, true),
+            Some((dt4, SRV6_BEHAVIOR_END_DT4))
+        );
+        assert_eq!(
+            srv6_l3_sid_for_dest(&split, false),
+            Some((dt6, SRV6_BEHAVIOR_END_DT6))
+        );
+        // The exact-family SID wins over an also-present DT46; without an
+        // exact match, DT46 serves either family.
+        let mixed = [(dt46, SRV6_BEHAVIOR_END_DT46), (dt4, SRV6_BEHAVIOR_END_DT4)];
+        assert_eq!(
+            srv6_l3_sid_for_dest(&mixed, true),
+            Some((dt4, SRV6_BEHAVIOR_END_DT4))
+        );
+        assert_eq!(
+            srv6_l3_sid_for_dest(&mixed, false),
+            Some((dt46, SRV6_BEHAVIOR_END_DT46))
+        );
+    }
+
+    #[test]
+    fn srv6_l3_sid_for_dest_rejects_family_incompatible_decap() {
+        // A DT4-only segment cannot service an IPv6 destination (End.DT4
+        // decaps into the IPv4 table only) — and vice versa.
+        let dt4: Ipv6Addr = "fcbb:1::4".parse().unwrap();
+        let only_v4 = [(dt4, SRV6_BEHAVIOR_END_DT4)];
+        assert_eq!(srv6_l3_sid_for_dest(&only_v4, false), None);
+        let dt6: Ipv6Addr = "fcbb:1::6".parse().unwrap();
+        let only_v6 = [(dt6, SRV6_BEHAVIOR_END_DT6)];
+        assert_eq!(srv6_l3_sid_for_dest(&only_v6, true), None);
+    }
+
+    #[test]
+    fn srv6_l3_sid_for_dest_falls_back_to_first_for_unmodeled_behaviors() {
+        // No known L3-decap behavior at all → first SID (semantics we
+        // don't model, so keep the historical pick). Empty → None.
+        let odd: Ipv6Addr = "fcbb:1::99".parse().unwrap();
+        let vendor = [(odd, 0x7fff_u16)];
+        assert_eq!(srv6_l3_sid_for_dest(&vendor, true), Some((odd, 0x7fff)));
+        assert_eq!(srv6_l3_sid_for_dest(&vendor, false), Some((odd, 0x7fff)));
+        assert_eq!(srv6_l3_sid_for_dest(&[], true), None);
+    }
 
     fn round_trip(sid: PrefixSid) -> PrefixSid {
         let mut buf = BytesMut::new();
