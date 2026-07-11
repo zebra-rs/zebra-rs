@@ -22,16 +22,21 @@ providers.
 
 <img src="../images/InterASOptionA.svg" alt="Inter-AS Option A topology">
 
-Two things are deliberate in this lab:
+Three things are deliberate in this lab:
 
-* **Two customers** (`cust1`: ce1↔ce3, `cust2`: ce2↔ce4) — Option A's
-  defining property (and its scalability limit) is *one inter-AS link and
-  one BGP session per VPN*, which you can only see with more than one VPN.
-* **Overlapping customer addressing** — both customers use the *same*
-  address plan (site A loopback `172.16.1.1/32`, site B loopback
-  `172.16.2.1/32`). Both providers carry both plans simultaneously, and
-  the walkthrough proves a ping to `172.16.2.1` lands on the right
-  customer's router.
+* **Three customers** (`cust1`: ce1↔ce4, `cust2`: ce2↔ce5, `cust3`:
+  ce3↔ce6) — Option A's defining property (and its scalability limit) is
+  *one inter-AS link and one BGP session per VPN*, so the border carries
+  three parallel links, and every new customer would add another.
+* **Two PEs in AS 65501, one in AS 65502** — cust1/cust2 live behind
+  `pe1`, cust3 behind `pe2`, while `pe3` serves all three on the far
+  side. The asymmetry shows that the border model is independent of how
+  many PEs feed it: the ASBR aggregates whatever its AS's PEs export.
+* **Overlapping customer addressing** — all three customers use the
+  *same* address plan (site A loopback `172.16.1.1/32`, site B loopback
+  `172.16.2.1/32`). Both providers carry all three plans simultaneously,
+  and the walkthrough proves a ping to `172.16.2.1` lands on the right
+  customer's router — three times over.
 
 Inside each AS the transport is IS-IS + SR-MPLS (zebra-rs's label
 distribution; classic Cisco documents use LDP here — the role is
@@ -43,16 +48,16 @@ identical: a labeled path between the PE and ASBR loopbacks).
 $ ./up.sh
 bring up
 ...
-apply config: ce3
+apply config: ce5
 applied
-apply config: ce4
+apply config: ce6
 applied
 ```
 
-Ten namespaces: `ce1 ce2 pe1 p1 asbr1` + `asbr2 p2 pe2 ce3 ce4`. Give the
-BGP chain a minute — a route crosses five BGP sessions each way
-(CE→PE eBGP, PE→ASBR iBGP VPNv4, ASBR→ASBR per-VRF eBGP, then the mirror
-of the same in the far AS).
+Thirteen namespaces: `ce1 ce2 ce3 pe1 pe2 p1 asbr1` + `asbr2 p2 pe3 ce4
+ce5 ce6`. Give the BGP chain a minute — a route crosses five BGP sessions
+each way (CE→PE eBGP, PE→ASBR iBGP VPNv4, ASBR→ASBR per-VRF eBGP, then
+the mirror of the same in the far AS).
 
 ## The roles, from the outside in
 
@@ -86,10 +91,10 @@ router:
         connected: {}
 ```
 
-(`ce2.yaml` is the same router for customer cust2 — with the **same
-loopback address**. The lab's YAML also trims BGP timers,
-`adv-interval`/`connect-retry-time`, so the demo converges in seconds
-instead of minutes; elided here for clarity.)
+(`ce2.yaml` and `ce3.yaml` are the same router for customers cust2 and
+cust3 — with the **same loopback address**. The lab's YAML also trims BGP
+timers, `adv-interval`/`connect-retry-time`, so the demo converges in
+seconds instead of minutes; elided here for clarity.)
 
 ### PE — one VRF per customer, VPNv4 toward the core
 
@@ -175,10 +180,17 @@ router:
           enabled: true
 ```
 
+`pe2.yaml` is the same shape for cust3 alone (loopback `1.1.1.4`,
+Prefix-SID 14, RD `65501:3`, RT `65501:300`) with its own iBGP VPNv4
+session to ASBR1 — PE1 and PE2 share no customer, so they need no
+session between each other. `pe3.yaml` mirrors the pattern on the far
+side with all three VRFs (RD `65502:1`/`2`/`3`, RT
+`65502:100`/`200`/`300`).
+
 ### P — label switching only, no BGP, no VPN state
 
 `p1.yaml` runs nothing but IS-IS with SR-MPLS. It never learns a customer
-prefix; it only swaps transport labels between the PE and ASBR loopbacks:
+prefix; it only swaps transport labels between the two PEs and the ASBR:
 
 ``` shell
 p1>show isis route
@@ -186,6 +198,7 @@ Area 49.0001:
 ...
  asbr1                  TE-IS         10      asbr1     p1-asbr1   p1
  pe1                    TE-IS         10      pe1       p1-pe1     p1
+ pe2                    TE-IS         10      pe2       p1-pe2     p1
  1.1.1.1/32             IP TE         20      pe1       p1-pe1     pe1
  1.1.1.3/32             IP TE         20      asbr1     p1-asbr1   asbr1
 ```
@@ -193,10 +206,10 @@ Area 49.0001:
 ### ASBR — the Option A node
 
 `asbr1.yaml` is where the model lives. Read it as *a PE whose "customers"
-are the other provider's ASBR*: the same `vrf` blocks as PE1, one
+are the other provider's ASBR*: the same `vrf` blocks as the PEs, one
 **dedicated interface per VRF** toward AS 65502, and one **plain eBGP
 IPv4 session per VRF** across it. Toward the inside it is an ordinary
-VPNv4 iBGP speaker:
+VPNv4 iBGP speaker — with one session per PE:
 
 ``` yaml
 vrf:
@@ -207,13 +220,7 @@ vrf:
       - 65501:100
       export:
       - 65501:100
-- name: cust2
-  ipv4:
-    route-target:
-      import:
-      - 65501:200
-      export:
-      - 65501:200
+# ... cust2 (65501:200) and cust3 (65501:300) repeat the pattern
 interface:
 - if-name: lo
   ipv4:
@@ -225,10 +232,14 @@ interface:
   vrf: cust1
   ipv4:
     address: 192.168.1.1/30
-- if-name: asbr1-cust2          # dedicated inter-AS link for cust2
+- if-name: asbr1-cust2          # ... one more link per customer
   vrf: cust2
   ipv4:
     address: 192.168.2.1/30
+- if-name: asbr1-cust3
+  vrf: cust3
+  ipv4:
+    address: 192.168.3.1/30
 router:
   isis:
     net: 49.0001.0000.0000.0003.00
@@ -256,6 +267,12 @@ router:
       afi-safi:
       - name: vpnv4
         enabled: true
+    - remote-address: 1.1.1.4      # PE2: same, one session per PE
+      remote-as: 65501
+      update-source: 1.1.1.3
+      afi-safi:
+      - name: vpnv4
+        enabled: true
     vrf:
     - name: cust1
       rd: 65501:1
@@ -265,14 +282,7 @@ router:
         afi-safi:
         - name: ipv4
           enabled: true
-    - name: cust2
-      rd: 65501:2
-      neighbor:
-      - remote-address: 192.168.2.2
-        remote-as: 65502
-        afi-safi:
-        - name: ipv4
-          enabled: true
+    # ... cust2 (192.168.2.2) and cust3 (192.168.3.2) repeat the pattern
 ```
 
 Note the IS-IS section does **not** include the inter-AS links: the IGP —
@@ -300,7 +310,7 @@ router bgp 65501
   neighbor 192.168.1.2 activate
 ```
 
-One structural difference is worth calling out: this lab uses two
+One structural difference is worth calling out: this lab uses three
 physical (veth) links, one per VRF, where a real deployment typically
 uses **802.1Q subinterfaces of one physical link** — the model is
 identical either way: *some* dedicated L3 interface per VPN must cross
@@ -314,90 +324,116 @@ independently. The lab encodes that independence.
 
 ## Control plane: following 172.16.2.1/32 home
 
-ce3 originates `172.16.2.1/32` into eBGP. pe2 receives it in VRF cust1,
+ce4 originates `172.16.2.1/32` into eBGP. pe3 receives it in VRF cust1,
 exports it to VPNv4 (RD `65502:1`, RT `65502:100`, a VPN label), and iBGP
 carries it to asbr2. asbr2 *imports* it back into VRF cust1 — and from
 there it is just an IPv4 route, advertised over the cust1 inter-AS
 session. On asbr1:
 
 ``` shell
+asbr1>show bgp summary
+...
+VPNv4 Unicast Summary:
+BGP router identifier 1.1.1.3, local AS number 65501 VRF default vrf-id 0
+RIB entries 12
+Peers 2
+
+Neighbor        V         AS   MsgRcvd   MsgSent   TblVer  InQ OutQ  Up/Down State       PfxRcd/Snt Hostname
+1.1.1.1         4      65501        19        15        0    0    0 00:13:20 Established        4/6 s
+1.1.1.4         4      65501        18        15        0    0    0 00:13:20 Established        2/6 s
+
 asbr1>show bgp vpnv4
      Network          Next Hop            Metric LocPrf Weight Path
 Route Distinguisher: 65501:1
  *>i [1] 10.11.0.0/30       1.1.1.1                  0    100      0 65511 i
      rt:65501:100 label=16,
- *>  [1] 10.13.0.0/30       1.1.1.3                  0             0 65502 65513 i
+ *>  [1] 10.14.0.0/30       1.1.1.3                  0             0 65502 65514 i
      rt:65501:100 rt:65502:100 label=16,
  *>i [1] 172.16.1.1/32      1.1.1.1                  0    100      0 65511 i
      rt:65501:100 label=16,
- *>  [1] 172.16.2.1/32      1.1.1.3                  0             0 65502 65513 i
+ *>  [1] 172.16.2.1/32      1.1.1.3                  0             0 65502 65514 i
      rt:65501:100 rt:65502:100 label=16,
 Route Distinguisher: 65501:2
  *>i [1] 10.12.0.0/30       1.1.1.1                  0    100      0 65512 i
      rt:65501:200 label=17,
- *>  [1] 10.14.0.0/30       1.1.1.3                  0             0 65502 65514 i
+ *>  [1] 10.15.0.0/30       1.1.1.3                  0             0 65502 65515 i
      rt:65501:200 rt:65502:200 label=17,
  *>i [1] 172.16.1.1/32      1.1.1.1                  0    100      0 65512 i
      rt:65501:200 label=17,
- *>  [1] 172.16.2.1/32      1.1.1.3                  0             0 65502 65514 i
+ *>  [1] 172.16.2.1/32      1.1.1.3                  0             0 65502 65515 i
      rt:65501:200 rt:65502:200 label=17,
+Route Distinguisher: 65501:3
+ *>i [1] 10.13.0.0/30       1.1.1.4                  0    100      0 65513 i
+     rt:65501:300 label=16,
+ *>  [1] 10.16.0.0/30       1.1.1.3                  0             0 65502 65516 i
+     rt:65501:300 rt:65502:300 label=18,
+ *>i [1] 172.16.1.1/32      1.1.1.4                  0    100      0 65513 i
+     rt:65501:300 label=16,
+ *>  [1] 172.16.2.1/32      1.1.1.3                  0             0 65502 65516 i
+     rt:65501:300 rt:65502:300 label=18,
 ```
 
 This one table tells most of the Option A story:
 
-* **`*>i` rows** came from PE1 over iBGP VPNv4 (next hop `1.1.1.1`,
-  LocPrf 100) — the local AS's own customer routes.
+* **`*>i` rows** came from the PEs over iBGP VPNv4 — and the Next Hop
+  column shows *which* PE: cust1/cust2 from `1.1.1.1` (pe1), cust3 from
+  `1.1.1.4` (pe2). The ASBR aggregates every PE's exports; the border
+  does not care how many PEs feed it.
 * **`*>` rows with next hop `1.1.1.3` (self)** are the far-AS routes:
-  asbr1 learned them as *plain IPv4* over the per-VRF eBGP session and
+  asbr1 learned them as *plain IPv4* over the per-VRF eBGP sessions and
   **re-originated** them into VPNv4 itself — it stamps its own RD, its
   own export RT, allocates a VPN label, and sets itself as next hop.
   This is the ASBR "acting as the PE" for the neighbor provider.
-* The **AS path `65502 65513`** records the plain eBGP crossing: the
+* The **AS paths `65502 6551x`** record the plain eBGP crossing: the
   neighbor provider's AS, then the far customer site — inter-AS route
   distribution with ordinary BGP loop protection.
-* `label=16` / `label=17` are per-VRF VPN labels (aggregate, one per VRF)
-  — the egress router only needs the label to pick the right VRF for the
-  IP lookup.
+* `label=16`/`17`/`18` are per-VRF VPN labels (aggregate, one per VRF)
+  — the egress router only needs the label to pick the right VRF for
+  the IP lookup.
 * The far-AS rows carry **two route-targets** (`rt:65501:100
   rt:65502:100`): RTs are transitive extended communities, so AS 65502's
   RT survived the plain eBGP hop and AS 65501's export RT was added next
   to it. It is inert here — but it quietly leaks one AS's VPN numbering
   into the other, which is why production Option A borders commonly strip
   or filter extended communities on the inter-AS session.
-* Both customers' `172.16.1.1/32` and `172.16.2.1/32` coexist —
+* All three customers' `172.16.1.1/32` and `172.16.2.1/32` coexist —
   distinguished **only by the RD**. Overlapping customer addressing is
   business as usual.
 
-The resulting VRF routing table on asbr1 shows the boundary in two
-adjacent lines — toward the core the route carries a two-label stack,
-toward the neighbor AS it is a naked IP next hop:
+The resulting VRF routing tables on asbr1 show the boundary in adjacent
+lines — toward the core the route carries a two-label stack, toward the
+neighbor AS it is a naked IP next hop. And the transport label names the
+owning PE: cust1 rides `16011` to pe1, cust3 rides `16014` to pe2:
 
 ``` shell
 asbr1>show ip route vrf cust1
 ...
-B  *> 10.11.0.0/30 [200/0] via 10.1.0.5, asbr1-p1, label 16011 16, 00:01:47
-B  *> 10.13.0.0/30 [20/0] via 192.168.1.2, asbr1-cust1, 00:01:12
-B  *> 172.16.1.1/32 [200/0] via 10.1.0.5, asbr1-p1, label 16011 16, 00:01:47
-B  *> 172.16.2.1/32 [20/0] via 192.168.1.2, asbr1-cust1, 00:01:12
-C  *> 192.168.1.0/30 is directly connected, asbr1-cust1, 00:01:52
+B  *> 10.11.0.0/30 [200/0] via 10.1.0.5, asbr1-p1, label 16011 16, 00:13:20
+B  *> 10.14.0.0/30 [20/0] via 192.168.1.2, asbr1-cust1, 00:00:55
+B  *> 172.16.1.1/32 [200/0] via 10.1.0.5, asbr1-p1, label 16011 16, 00:13:20
+B  *> 172.16.2.1/32 [20/0] via 192.168.1.2, asbr1-cust1, 00:00:55
+C  *> 192.168.1.0/30 is directly connected, asbr1-cust1, 00:13:25
+
+asbr1>show ip route vrf cust3
+...
+B  *> 10.13.0.0/30 [200/0] via 10.1.0.5, asbr1-p1, label 16014 16, 00:13:20
+B  *> 10.16.0.0/30 [20/0] via 192.168.3.2, asbr1-cust3, 00:00:55
+B  *> 172.16.1.1/32 [200/0] via 10.1.0.5, asbr1-p1, label 16014 16, 00:13:20
+B  *> 172.16.2.1/32 [20/0] via 192.168.3.2, asbr1-cust3, 00:00:55
+C  *> 192.168.3.0/30 is directly connected, asbr1-cust3, 00:13:25
 ```
 
-(`label 16011 16` = transport label to PE1's loopback SID + PE1's VPN
-label; `[200/0]`/`[20/0]` are iBGP/eBGP distances.)
+(`label 16011 16` = transport label to the PE's loopback SID + the PE's
+VPN label; `[200/0]`/`[20/0]` are iBGP/eBGP distances.)
 
 One more iBGP hop and PE1 has the far site in VRF cust1 with the mirror
 image of that stack — transport `16013` to asbr1 plus asbr1's VPN label:
 
 ``` shell
-pe1>show bgp vpnv4
-Route Distinguisher: 65501:1
-...
- *>i [1] 172.16.2.1/32      1.1.1.3                  0    100      0 65502 65513 i
-     rt:65501:100 rt:65502:100 label=16,
-
 pe1>show ip route vrf cust1
 ...
-B  *> 172.16.2.1/32 [200/0] via 10.1.0.2, pe1-p1, label 16013 16, 00:01:35
+B  *> 10.14.0.0/30 [200/0] via 10.1.0.2, pe1-p1, label 16013 16, 00:01:03
+B  *> 172.16.2.1/32 [200/0] via 10.1.0.2, pe1-p1, label 16013 16, 00:01:03
 ```
 
 And the customer end sees ordinary BGP — no labels, no RDs:
@@ -405,9 +441,9 @@ And the customer end sees ordinary BGP — no labels, no RDs:
 ``` shell
 ce1>show ip route
 ...
-B  *> 10.13.0.0/30 [20/0] via 10.11.0.2, ce1-pe1, 00:00:37
-C  *> 172.16.1.1/32 is directly connected, lo, 00:01:52
-B  *> 172.16.2.1/32 [20/0] via 10.11.0.2, ce1-pe1, 00:00:37
+B  *> 10.14.0.0/30 [20/0] via 10.11.0.2, ce1-pe1, 00:00:33
+C  *> 172.16.1.1/32 is directly connected, lo, 00:13:39
+B  *> 172.16.2.1/32 [20/0] via 10.11.0.2, ce1-pe1, 00:00:33
 ```
 
 ## Data plane: MPLS, then IP, then MPLS again
@@ -416,14 +452,15 @@ B  *> 172.16.2.1/32 [20/0] via 10.11.0.2, ce1-pe1, 00:00:37
 $ sudo ip netns exec ce1 vty
 ce1>ping 172.16.2.1
 PING 172.16.2.1 (172.16.2.1) 56(84) bytes of data.
-64 bytes from 172.16.2.1: icmp_seq=1 ttl=60 time=0.076 ms
-64 bytes from 172.16.2.1: icmp_seq=2 ttl=60 time=0.134 ms
+64 bytes from 172.16.2.1: icmp_seq=1 ttl=60 time=0.080 ms
+64 bytes from 172.16.2.1: icmp_seq=2 ttl=60 time=0.186 ms
 ```
 
-`ttl=60`: four IP routing decisions (pe1, asbr1, asbr2, pe2). The P
-routers only switch labels. Capturing the *same ping* at three points
-shows Option A's signature — the VPN is labeled inside each provider and
-naked in between:
+`ttl=60`: four IP routing decisions (pe1, asbr1, asbr2, pe3). The P
+routers only switch labels. (ce3's ping via pe2 shows the same `ttl=60`
+through its own chain.) Capturing the *same ping* at three points shows
+Option A's signature — the VPN is labeled inside each provider and naked
+in between:
 
 ``` shell
 p1>tcpdump -nli p1-asbr1 mpls                    # inside AS 65501
@@ -434,7 +471,7 @@ asbr1>tcpdump -nli asbr1-cust1 icmp              # between the ASes
 IP 10.11.0.1 > 172.16.2.1: ICMP echo request ...
 IP 172.16.2.1 > 10.11.0.1: ICMP echo reply ...
 
-p2>tcpdump -nli p2-pe2 mpls                      # inside AS 65502
+p2>tcpdump -nli p2-pe3 mpls                      # inside AS 65502
 MPLS (label 16, tc 0, [S], ttl 61) IP 10.11.0.1 > 172.16.2.1: ICMP echo request ...
 MPLS (label 16021, tc 0, ttl 63) (label 16, tc 0, [S], ttl 63) IP 172.16.2.1 > 10.11.0.1: ICMP echo reply ...
 ```
@@ -448,29 +485,24 @@ IP routing decision in VRF cust1, and forwarded a plain IP packet; asbr2
 then re-imposed a fresh two-label stack from its own AS's label space.
 The two providers share no label state whatsoever.
 
-## Overlapping addresses, proven
+## Overlapping addresses, proven three ways
 
-Both customers' site-B routers answer to `172.16.2.1`. Ping it from each
-customer's site A and watch where the echo lands:
+All three customers' site-B routers answer to `172.16.2.1`. Ping it from
+each customer's site A and watch where the echo lands:
 
-``` shell
-# ce1 (cust1) pings 172.16.2.1
-ce3>tcpdump -nli ce3-pe2 icmp
-IP 10.11.0.1 > 172.16.2.1: ICMP echo request ...     <- arrives at ce3
-ce4>tcpdump -nli ce4-pe2 icmp
-0 packets captured                                    <- nothing at ce4
+|                  | arrives at ce4 | arrives at ce5 | arrives at ce6 |
+|:-----------------|:---------------|:---------------|:---------------|
+| ce1 (cust1) pings | **yes**       | —              | —              |
+| ce2 (cust2) pings | —             | **yes**        | —              |
+| ce3 (cust3) pings | —             | —              | **yes**        |
 
-# ce2 (cust2) pings 172.16.2.1
-ce4>tcpdump -nli ce4-pe2 icmp
-IP 10.12.0.1 > 172.16.2.1: ICMP echo request ...     <- arrives at ce4
-ce3>tcpdump -nli ce3-pe2 icmp
-0 packets captured                                    <- nothing at ce3
-```
+(each row from tcpdump on all three `ceX-pe3` interfaces while the ping
+runs — the two silent captures report `0 packets captured`.)
 
-Same destination address, zero leakage. Each customer's traffic stays
-pinned to its own chain of VRFs and its own inter-AS link end to end —
-in Option A there is no shared table anywhere that could even *express* a
-cross-customer route.
+Same destination address, zero leakage, three customers deep. Each
+customer's traffic stays pinned to its own chain of VRFs and its own
+inter-AS link end to end — in Option A there is no shared table anywhere
+that could even *express* a cross-customer route.
 
 ## Why this is "Option A" — and what it costs
 
@@ -479,7 +511,7 @@ What this model buys (and why it is still deployed):
 * **Simplicity and isolation.** Each AS runs a completely independent
   L3VPN; the border is ordinary eBGP over ordinary interfaces. No label
   exchange with, and no label trust in, the neighbor provider — the most
-  contained failure and security model of the three options.
+  contained failure and security model of the options.
 * **Per-VPN policy and QoS.** Because inter-AS traffic is plain IP on a
   dedicated interface per VPN, per-customer QoS, policing, ACLs, and
   billing attach naturally at the boundary.
@@ -491,8 +523,8 @@ What it costs — visible directly in this lab:
 
 * **One interface + one BGP session + one VRF per customer, per border.**
   Adding customer N means touching both ASBRs with a new subinterface,
-  VRF, and session. The two `asbr1-cust*` links here become hundreds of
-  subinterfaces in production.
+  VRF, and session. The three `asbr1-cust*` links here become hundreds
+  of subinterfaces in production.
 * **The ASBR holds every customer's routes as plain IP** — it is a PE for
   every VPN crossing the border, with the FIB and RIB burden that
   implies.
@@ -503,7 +535,9 @@ session between the ASBRs (labeled traffic crosses the boundary);
 **Option C** goes further and keeps PE-to-PE label switching end to end,
 with the ASBRs only exchanging labeled PE loopbacks. See the sibling
 playsets [interas-option-b](../interas-option-b/README.md) and
-[interas-option-c](../interas-option-c/README.md).
+[interas-option-c](../interas-option-c/README.md) — they pare this
+reference topology down to one PE and two customers per side, since
+their border models don't need more to make their point.
 
 ## Tear down
 
@@ -513,33 +547,38 @@ $ ./down.sh
 
 ## Appendix: Addressing & sessions
 
-| node  | role            | AS    | loopback     | SR SID (label)  |
-|:------|:----------------|:------|:-------------|:----------------|
+| node  | role             | AS    | loopback     | SR SID (label)  |
+|:------|:-----------------|:------|:-------------|:----------------|
 | ce1   | CE, cust1 site A | 65511 | 172.16.1.1/32 | —              |
 | ce2   | CE, cust2 site A | 65512 | 172.16.1.1/32 | —              |
-| pe1   | PE              | 65501 | 1.1.1.1/32   | 11 (16011)      |
-| p1    | P               | 65501 | 1.1.1.2/32   | 12 (16012)      |
-| asbr1 | ASBR            | 65501 | 1.1.1.3/32   | 13 (16013)      |
-| asbr2 | ASBR            | 65502 | 2.2.2.1/32   | 21 (16021)      |
-| p2    | P               | 65502 | 2.2.2.2/32   | 22 (16022)      |
-| pe2   | PE              | 65502 | 2.2.2.3/32   | 23 (16023)      |
-| ce3   | CE, cust1 site B | 65513 | 172.16.2.1/32 | —              |
-| ce4   | CE, cust2 site B | 65514 | 172.16.2.1/32 | —              |
+| ce3   | CE, cust3 site A | 65513 | 172.16.1.1/32 | —              |
+| pe1   | PE (cust1, cust2) | 65501 | 1.1.1.1/32  | 11 (16011)      |
+| pe2   | PE (cust3)       | 65501 | 1.1.1.4/32   | 14 (16014)      |
+| p1    | P                | 65501 | 1.1.1.2/32   | 12 (16012)      |
+| asbr1 | ASBR             | 65501 | 1.1.1.3/32   | 13 (16013)      |
+| asbr2 | ASBR             | 65502 | 2.2.2.1/32   | 21 (16021)      |
+| p2    | P                | 65502 | 2.2.2.2/32   | 22 (16022)      |
+| pe3   | PE (all three)   | 65502 | 2.2.2.3/32   | 23 (16023)      |
+| ce4   | CE, cust1 site B | 65514 | 172.16.2.1/32 | —              |
+| ce5   | CE, cust2 site B | 65515 | 172.16.2.1/32 | —              |
+| ce6   | CE, cust3 site B | 65516 | 172.16.2.1/32 | —              |
 
-Links: ce1–pe1 `10.11.0.0/30`, ce2–pe1 `10.12.0.0/30`, pe1–p1
-`10.1.0.0/30`, p1–asbr1 `10.1.0.4/30`, asbr1–asbr2 cust1
-`192.168.1.0/30`, asbr1–asbr2 cust2 `192.168.2.0/30`, asbr2–p2
-`10.2.0.0/30`, p2–pe2 `10.2.0.4/30`, pe2–ce3 `10.13.0.0/30`, pe2–ce4
-`10.14.0.0/30`.
+Links: ce1–pe1 `10.11.0.0/30`, ce2–pe1 `10.12.0.0/30`, ce3–pe2
+`10.13.0.0/30`, pe1–p1 `10.1.0.0/30`, pe2–p1 `10.1.0.8/30`, p1–asbr1
+`10.1.0.4/30`, asbr1–asbr2 cust1 `192.168.1.0/30` / cust2
+`192.168.2.0/30` / cust3 `192.168.3.0/30`, asbr2–p2 `10.2.0.0/30`,
+p2–pe3 `10.2.0.4/30`, pe3–ce4 `10.14.0.0/30`, pe3–ce5 `10.15.0.0/30`,
+pe3–ce6 `10.16.0.0/30`.
 
 | VPN   | AS 65501 RD / RT     | AS 65502 RD / RT     |
 |:------|:---------------------|:---------------------|
 | cust1 | 65501:1 / 65501:100  | 65502:1 / 65502:100  |
 | cust2 | 65501:2 / 65501:200  | 65502:2 / 65502:200  |
+| cust3 | 65501:3 / 65501:300  | 65502:3 / 65502:300  |
 
-BGP sessions: 4× PE-CE eBGP IPv4 (in VRF), 2× iBGP VPNv4 over loopbacks
-(pe1–asbr1, asbr2–pe2), 2× ASBR-ASBR eBGP IPv4 (one per VRF — the
-Option A boundary).
+BGP sessions: 6× PE-CE eBGP IPv4 (in VRF), 3× iBGP VPNv4 over loopbacks
+(pe1–asbr1, pe2–asbr1, asbr2–pe3), 3× ASBR-ASBR eBGP IPv4 (one per VRF —
+the Option A boundary).
 
 ## Sources
 
