@@ -3,10 +3,11 @@
 #  - eBGP VPNv4 directly to ASBR2 over the inter-AS link — labeled VPNv4
 #    NLRI (RFC 8277) crosses the boundary; the link is in the GLOBAL
 #    table and not in the IGP, and it carries MPLS.
-#  - iBGP VPNv4 to PE1 with `next-hop-self`: a route re-advertised from
-#    AS 65502 must reach PE1 carrying ASBR1's IGP-reachable loopback (and
-#    ASBR1's freshly allocated swap label), not the inter-AS link address
-#    ASBR2 set as next hop.
+#  - iBGP VPNv4 to PE1 and PE2 (one session per PE) with
+#    `next-hop-self`: a route re-advertised from AS 65502 must reach the
+#    PEs carrying ASBR1's IGP-reachable loopback (and ASBR1's freshly
+#    allocated swap label), not the inter-AS link address ASBR2 set as
+#    next hop.
 #  - For each re-advertised route the ASBR allocates a local label and
 #    installs a swap ILM (local label -> received label, toward the
 #    original next hop) — the VPN crosses the border as a label switch.
@@ -50,6 +51,15 @@ router:
         ebgp: 1
     neighbor:
     - remote-address: 1.1.1.1
+      remote-as: 65501
+      timers: {connect-retry-time: 3}
+      update-source: 1.1.1.3
+      enabled: true
+      afi-safi:
+      - name: vpnv4
+        enabled: true
+        next-hop-self: true
+    - remote-address: 1.1.1.4
       remote-as: 65501
       timers: {connect-retry-time: 3}
       update-source: 1.1.1.3

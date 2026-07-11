@@ -114,11 +114,11 @@ the same names first.
 ## BGP Inter-AS L3VPN
 
 Two providers, one VPN — the RFC 4364 §10 options (plus Cisco's AB
-hybrid) for handing L3VPN routes across an AS boundary. Option A builds
-the full reference topology (two PEs and three customers feeding one
-border); B, AB, and C pare it to a ten-router variant with one PE and
-two customers per side (the RR lab adds two route reflectors). The
-customers and their overlapping addressing stay the same throughout;
+hybrid) for handing L3VPN routes across an AS boundary. Options A and B
+build the full reference topology (three customers behind two PEs
+feeding one border); AB and C pare it to a ten-router variant with one
+PE and two customers per side (the RR lab adds two route reflectors).
+The customers and their overlapping addressing stay the same throughout;
 only the border model changes:
 
 |                                 | Option A       | Option B            | Option AB              | Option C       |

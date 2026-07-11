@@ -39,8 +39,8 @@ is, line for line, Cisco's Option AB route-distribution procedure:
                               and a fresh label goes on
 ```
 
-The lab is the same ten routers, two customers, and overlapping
-addressing as the B/C playsets — only the ASBRs change. One honest
+The lab is the same pared ten-router variant as the Option C playset
+(two customers, overlapping addressing) — only the ASBRs change. One honest
 note: classic Cisco AB forwards the customer *data* unlabeled over
 per-VRF subinterfaces (that is where the per-customer QoS attaches),
 with only the control session shared. This lab implements the
@@ -273,7 +273,7 @@ $ ./down.sh
 
 ## Appendix: Addressing & sessions
 
-Identical to the [Option B playset](../interas-option-b/README.md)
+Identical to the [Option C playset](../interas-option-c/README.md#appendix-addressing--sessions)
 except the ASBRs' VRFs: nodes, AS numbers, loopbacks, SR SIDs, links,
 customer addressing, and the single global inter-AS link
 (`192.168.100.0/30`) are unchanged.
