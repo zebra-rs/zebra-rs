@@ -1,6 +1,6 @@
 # CE2 — customer "cust2", site A (AS 65512). Same loopback address as
-# CE1 (172.16.1.1/32) on purpose: in Option C both customers' overlapping
-# routes cross ONE PE-to-PE VPNv4 session, kept apart only by their RDs.
+# CE1 (172.16.1.1/32) on purpose: the two customers run overlapping
+# address plans and never notice each other.
 interface:
 - if-name: lo
   ipv4:

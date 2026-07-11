@@ -1,5 +1,5 @@
 # ASBR2 — autonomous system border router of AS 65502. Mirror of ASBR1:
-# labeled-unicast only (PE2 + RR2 inside with next-hop-self, ASBR1
+# labeled-unicast only (PE3 + RR2 inside with next-hop-self, ASBR1
 # across), no VRFs, no VPNv4, no customer routes.
 interface:
 - if-name: lo
@@ -40,7 +40,7 @@ router:
         ibgp: 1
         ebgp: 1
     neighbor:
-    - remote-address: 2.2.2.3        # PE2 — iBGP labeled-unicast
+    - remote-address: 2.2.2.3        # PE3 — iBGP labeled-unicast
       remote-as: 65502
       timers: {connect-retry-time: 3}
       update-source: 2.2.2.1

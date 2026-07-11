@@ -1,8 +1,10 @@
-# PE1 — provider edge, AS 65501. Unlike the direct-PE Option C playset,
-# the VPNv4 session goes to the LOCAL route reflector (RR1, iBGP) — the
-# PE never talks to the far AS at all. Everything else is unchanged:
-# own loopback originated into label-v4, VRFs with PE-CE eBGP, RTs
-# coordinated with AS 65502.
+# PE1 — provider edge, AS 65501, serving cust1 (CE1) and cust2 (CE2).
+# The RR-based Option C PE peers VPNv4 ONLY with the local route
+# reflector (RR1) — it never talks to the far AS. Its own loopback is
+# originated into BGP labeled-unicast (label-v4) so the ASBR chain can
+# export it to AS 65502; the far PE loopback learned the same way is
+# what makes the reflected VPN routes' next hops resolvable, as a
+# labeled path. RTs are coordinated with AS 65502.
 vrf:
 - name: cust1
   ipv4:
@@ -62,7 +64,7 @@ router:
         ibgp: 1
         ebgp: 3
     neighbor:
-    - remote-address: 1.1.1.3        # ASBR1 — labeled-unicast
+    - remote-address: 1.1.1.3        # ASBR1 — iBGP labeled-unicast
       remote-as: 65501
       timers: {connect-retry-time: 3}
       update-source: 1.1.1.1

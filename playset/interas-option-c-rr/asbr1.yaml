@@ -1,8 +1,8 @@
-# ASBR1 — autonomous system border router of AS 65501. Identical role
-# to the direct-PE Option C playset — labeled loopbacks only, no VPN
-# state — with one addition: RR1 is a second iBGP labeled-unicast
-# neighbor (also next-hop-self), because the RRs' loopbacks must cross
-# the boundary too for the inter-RR multihop session to establish.
+# ASBR1 — autonomous system border router of AS 65501. Labeled
+# loopbacks only, zero VPN state: iBGP labeled-unicast to PE1, PE2, and
+# RR1 (each with next-hop-self — THE Option C knob on this leg), eBGP
+# labeled-unicast to ASBR2. The RR loopbacks cross the boundary too, so
+# the inter-RR multihop session can establish.
 interface:
 - if-name: lo
   ipv4:
@@ -43,6 +43,15 @@ router:
         ebgp: 1
     neighbor:
     - remote-address: 1.1.1.1        # PE1 — iBGP labeled-unicast
+      remote-as: 65501
+      timers: {connect-retry-time: 3}
+      update-source: 1.1.1.3
+      enabled: true
+      afi-safi:
+      - name: label-v4
+        enabled: true
+        next-hop-self: true
+    - remote-address: 1.1.1.4        # PE2 — iBGP labeled-unicast
       remote-as: 65501
       timers: {connect-retry-time: 3}
       update-source: 1.1.1.3

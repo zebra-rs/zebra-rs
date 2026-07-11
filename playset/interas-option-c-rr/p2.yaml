@@ -1,5 +1,5 @@
 # P2 — provider core transit LSR of AS 65502 (runs no BGP, knows no
-# VPN). Pure IS-IS L2 + SR-MPLS between ASBR2, RR2, and PE2.
+# VPN). Pure IS-IS L2 + SR-MPLS between ASBR2, RR2, and PE3.
 interface:
 - if-name: lo
   ipv4:
@@ -7,12 +7,12 @@ interface:
 - if-name: p2-asbr2
   ipv4:
     address: 10.2.0.2/30
-- if-name: p2-pe2
-  ipv4:
-    address: 10.2.0.5/30
 - if-name: p2-rr2
   ipv4:
     address: 10.2.0.9/30
+- if-name: p2-pe3
+  ipv4:
+    address: 10.2.0.5/30
 system:
   hostname: p2
 router:
@@ -33,12 +33,12 @@ router:
       metric: 10
       ipv4:
         enabled: true
-    - if-name: p2-pe2
+    - if-name: p2-rr2
       network-type: point-to-point
       metric: 10
       ipv4:
         enabled: true
-    - if-name: p2-rr2
+    - if-name: p2-pe3
       network-type: point-to-point
       metric: 10
       ipv4:

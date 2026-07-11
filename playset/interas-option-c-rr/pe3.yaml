@@ -1,0 +1,118 @@
+# PE3 — the provider edge of AS 65502, serving all three customers
+# (CE4/CE5/CE6). VPNv4 only to the local RR2; loopback into label-v4;
+# RTs matching AS 65501's (65501:100/200/300); RDs stay AS-local.
+vrf:
+- name: cust1
+  ipv4:
+    route-target:
+      import:
+      - 65501:100
+      export:
+      - 65501:100
+- name: cust2
+  ipv4:
+    route-target:
+      import:
+      - 65501:200
+      export:
+      - 65501:200
+- name: cust3
+  ipv4:
+    route-target:
+      import:
+      - 65501:300
+      export:
+      - 65501:300
+interface:
+- if-name: lo
+  ipv4:
+    address: 2.2.2.3/32
+- if-name: pe3-p2
+  ipv4:
+    address: 10.2.0.6/30
+- if-name: pe3-ce4
+  vrf: cust1
+  ipv4:
+    address: 10.14.0.2/30
+- if-name: pe3-ce5
+  vrf: cust2
+  ipv4:
+    address: 10.15.0.2/30
+- if-name: pe3-ce6
+  vrf: cust3
+  ipv4:
+    address: 10.16.0.2/30
+system:
+  hostname: pe3
+router:
+  isis:
+    net: 49.0002.0000.0000.0003.00
+    hostname: pe3
+    is-type: level-2-only
+    segment-routing: mpls
+    te-router-id: 2.2.2.3
+    interface:
+    - if-name: lo
+      ipv4:
+        enabled: true
+        prefix-sid:
+          index: 23
+    - if-name: pe3-p2
+      network-type: point-to-point
+      metric: 10
+      ipv4:
+        enabled: true
+  bgp:
+    global:
+      as: 65502
+      router-id: 2.2.2.3
+    timer:
+      adv-interval:
+        ibgp: 1
+        ebgp: 3
+    neighbor:
+    - remote-address: 2.2.2.1        # ASBR2 — iBGP labeled-unicast
+      remote-as: 65502
+      timers: {connect-retry-time: 3}
+      update-source: 2.2.2.3
+      enabled: true
+      afi-safi:
+      - name: label-v4
+        enabled: true
+    - remote-address: 2.2.2.9        # RR2 — iBGP VPNv4
+      remote-as: 65502
+      timers: {connect-retry-time: 3}
+      update-source: 2.2.2.3
+      enabled: true
+      afi-safi:
+      - name: vpnv4
+        enabled: true
+    afi-safi:
+    - name: label-v4
+      network:
+      - prefix: 2.2.2.3/32
+    vrf:
+    - name: cust1
+      rd: 65502:1
+      neighbor:
+      - remote-address: 10.14.0.1
+        remote-as: 65514
+        afi-safi:
+        - name: ipv4
+          enabled: true
+    - name: cust2
+      rd: 65502:2
+      neighbor:
+      - remote-address: 10.15.0.1
+        remote-as: 65515
+        afi-safi:
+        - name: ipv4
+          enabled: true
+    - name: cust3
+      rd: 65502:3
+      neighbor:
+      - remote-address: 10.16.0.1
+        remote-as: 65516
+        afi-safi:
+        - name: ipv4
+          enabled: true

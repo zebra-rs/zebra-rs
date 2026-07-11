@@ -1,7 +1,9 @@
 # RR1 — the route reflector of AS 65501 (Cisco's RR-based Option C).
 # Holds every VPN route but forwards NO customer traffic:
-#  - iBGP VPNv4 with PE1, PE1 marked `route-reflector client` — the RR
-#    reflects between its clients and relays to/from the far AS.
+#  - iBGP VPNv4 with PE1 and PE2, both marked `route-reflector client`
+#    — with two clients, RFC 4456 client-to-client reflection actually
+#    runs here (each PE receives the other's routes and ignores them by
+#    RT, since they share no customer).
 #  - Multihop eBGP VPNv4 to RR2 (2.2.2.9, two IGPs away) with
 #    `next-hop-unchanged`: the reflected routes must keep the
 #    originating PE — the true LSP endpoint — as next-hop (and keep the
@@ -16,7 +18,7 @@ interface:
     address: 1.1.1.9/32
 - if-name: rr1-p1
   ipv4:
-    address: 10.1.0.10/30
+    address: 10.1.0.14/30
 system:
   hostname: rr1
 router:
@@ -47,6 +49,16 @@ router:
         ebgp: 1
     neighbor:
     - remote-address: 1.1.1.1        # PE1 — VPNv4 route-reflector client
+      remote-as: 65501
+      timers: {connect-retry-time: 3}
+      update-source: 1.1.1.9
+      enabled: true
+      route-reflector:
+        client: true
+      afi-safi:
+      - name: vpnv4
+        enabled: true
+    - remote-address: 1.1.1.4        # PE2 — VPNv4 route-reflector client
       remote-as: 65501
       timers: {connect-retry-time: 3}
       update-source: 1.1.1.9
