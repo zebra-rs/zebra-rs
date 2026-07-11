@@ -1,6 +1,6 @@
 # ASBR2 — autonomous system border router of AS 65502. Mirror of ASBR1:
 # per-customer transit VRFs (no interfaces, no per-VRF sessions) marked
-# inter-as-hybrid, one eBGP VPNv4 session to ASBR1, iBGP VPNv4 to PE2.
+# inter-as-hybrid, one eBGP VPNv4 session to ASBR1, iBGP VPNv4 to PE3.
 vrf:
 - name: cust1
   ipv4:
@@ -16,6 +16,13 @@ vrf:
       - 65501:200
       export:
       - 65501:200
+- name: cust3
+  ipv4:
+    route-target:
+      import:
+      - 65501:300
+      export:
+      - 65501:300
 interface:
 - if-name: lo
   ipv4:
@@ -55,7 +62,7 @@ router:
         ibgp: 1
         ebgp: 1
     neighbor:
-    - remote-address: 2.2.2.3        # PE2 — iBGP VPNv4 (no next-hop-self needed)
+    - remote-address: 2.2.2.3        # PE3 — iBGP VPNv4 (no next-hop-self!)
       remote-as: 65502
       timers: {connect-retry-time: 3}
       update-source: 2.2.2.1
@@ -63,7 +70,7 @@ router:
       afi-safi:
       - name: vpnv4
         enabled: true
-    - remote-address: 192.168.100.1  # ASBR1 — single eBGP VPNv4, ALL customers
+    - remote-address: 192.168.100.1  # ASBR1 — ONE eBGP VPNv4, all customers
       remote-as: 65501
       timers: {connect-retry-time: 3}
       enabled: true
@@ -76,4 +83,7 @@ router:
       inter-as-hybrid: true
     - name: cust2
       rd: 65502:12
+      inter-as-hybrid: true
+    - name: cust3
+      rd: 65502:13
       inter-as-hybrid: true
