@@ -274,10 +274,14 @@ impl CradleFib {
 
     /// Attach `name` as a data-plane port (`SetPort`): cradle resolves the
     /// ifindex, attaches the TC/XDP programs, and derives the port's
-    /// local + connected routes. Scope for now: a routed port in the
-    /// global VRF (`l3`, vlan 0, vrf 0) — VRF/bridge binding follows with
-    /// the dynamic L2/L3 assignment work. Idempotent on cradle's side.
-    pub async fn set_port(&self, name: &str) -> anyhow::Result<()> {
+    /// local + connected routes — into VRF table `vrf_id` (0 = global)
+    /// when the interface is VRF-enslaved, so ingress lookups use the
+    /// per-VRF FIB. Routed ports only (`l3`, vlan 0) — bridge/L2 domain
+    /// binding follows with the dynamic L2/L3 assignment work. A repeat
+    /// `SetPort` on a live port is an in-place update on cradle's side
+    /// (the attach is idempotent; the port entry and derived routes are
+    /// re-reconciled under the new VRF).
+    pub async fn set_port(&self, name: &str, vrf_id: u32) -> anyhow::Result<()> {
         self.client()
             .await?
             .set_port(pb::Port {
@@ -285,7 +289,7 @@ impl CradleFib {
                 mac: String::new(),
                 l3: true,
                 vlan: 0,
-                vrf_id: 0,
+                vrf_id,
             })
             .await?;
         Ok(())

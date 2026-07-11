@@ -497,6 +497,9 @@ pub enum Message {
         /// `Subscriber` row so the inbound dispatcher can pick the
         /// right per-VRF table without a name-based lookup.
         vrf_id: u32,
+        /// Receive link lifecycle events for every VRF, not just
+        /// `vrf_id` (see `Subscriber::global_links`).
+        global_links: bool,
     },
 
     // ---- redistribute subscription messages ----------------------
@@ -1836,6 +1839,7 @@ impl Rib {
         tx: UnboundedSender<RibRx>,
         proto: String,
         vrf_id: u32,
+        global_links: bool,
     ) {
         // A subscriber may have dropped its receiver before this
         // handler ran (e.g. its constructor failed after the
@@ -1960,7 +1964,7 @@ impl Rib {
             return;
         }
         self.client_registry
-            .register_with_id(proto_id, &proto, tx, vrf_id);
+            .register_with_id(proto_id, &proto, tx, vrf_id, global_links);
         // Redistribute registrations ride the inbound channel while this
         // Subscribe rides the message channel, and `event_loop`'s
         // `select!` gives the two no relative order. A RedistAdd /
@@ -3247,8 +3251,9 @@ impl Rib {
                 tx,
                 proto,
                 vrf_id,
+                global_links,
             } => {
-                self.subscribe(proto_id, tx, proto, vrf_id);
+                self.subscribe(proto_id, tx, proto, vrf_id, global_links);
             }
             Message::ProtoCleanup { proto } => {
                 self.proto_cleanup(proto).await;

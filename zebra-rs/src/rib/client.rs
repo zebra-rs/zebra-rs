@@ -169,6 +169,13 @@ pub struct Subscriber {
     pub proto: String,
     pub rib_rx_tx: UnboundedSender<RibRx>,
     pub vrf_id: u32,
+    /// Receive link lifecycle events (`LinkAdd`/`LinkDel`/`LinkUp`/
+    /// `LinkDown`/`LinkMtu`) for **every** VRF, not just `vrf_id`.
+    /// For consumers whose scope spans VRFs — the cradle eBPF port
+    /// reconcile follows interfaces wherever they are enslaved (the
+    /// port's `vrf_id` is derived from the link's master). Address
+    /// and route events stay VRF-scoped.
+    pub global_links: bool,
 }
 
 /// In-memory subscriber registry owned by `Rib`.
@@ -203,6 +210,7 @@ impl ClientRegistry {
         proto: &str,
         rib_rx_tx: UnboundedSender<RibRx>,
         vrf_id: u32,
+        global_links: bool,
     ) {
         self.subscribers.insert(
             id,
@@ -210,6 +218,7 @@ impl ClientRegistry {
                 proto: proto.to_string(),
                 rib_rx_tx,
                 vrf_id,
+                global_links,
             },
         );
         if id.0 >= self.next_proto_id {
@@ -263,6 +272,17 @@ impl ClientRegistry {
             .map(|(id, s)| (*id, s))
     }
 
+    /// Walk the subscribers that should see a **link** event from
+    /// `vrf_id`: the VRF's own subscribers plus every `global_links`
+    /// subscriber (each yielded once — a global subscriber bound to
+    /// the same VRF is not duplicated).
+    pub fn iter_link_subs(&self, vrf_id: u32) -> impl Iterator<Item = (ProtoId, &Subscriber)> {
+        self.subscribers
+            .iter()
+            .filter(move |(_, s)| s.vrf_id == vrf_id || s.global_links)
+            .map(|(id, s)| (*id, s))
+    }
+
     /// Remove a subscriber. Returns the removed entry so callers can
     /// clean up parallel maps keyed by the protocol name (e.g.
     /// `Rib::redist_filters`).
@@ -290,7 +310,7 @@ mod tests {
     fn register_with_id_records_subscriber_and_advances_next_id() {
         let mut reg = ClientRegistry::new();
         let (tx, _rx) = unbounded_channel();
-        reg.register_with_id(ProtoId::from_raw(5), "bgp", tx, 0);
+        reg.register_with_id(ProtoId::from_raw(5), "bgp", tx, 0, false);
         assert!(reg.contains(ProtoId::from_raw(5)));
         assert_eq!(reg.len(), 1);
         // next_proto_id is private but is exercised indirectly by the
@@ -303,7 +323,7 @@ mod tests {
         let (tx, _rx) = unbounded_channel();
         let id = ProtoId::from_raw(3);
 
-        reg.register_with_id(id, "bgp", tx, 0);
+        reg.register_with_id(id, "bgp", tx, 0, false);
         assert!(reg.contains(id));
 
         let sub = reg.unregister(id).expect("subscriber present");
@@ -316,7 +336,7 @@ mod tests {
         let mut reg = ClientRegistry::new();
         let (tx, _rx) = unbounded_channel();
         let real = ProtoId::from_raw(0);
-        reg.register_with_id(real, "bgp", tx, 0);
+        reg.register_with_id(real, "bgp", tx, 0, false);
         assert!(reg.unregister(ProtoId::from_raw(999)).is_none());
         assert!(reg.contains(real));
     }
@@ -326,8 +346,8 @@ mod tests {
         let mut reg = ClientRegistry::new();
         let (tx_a, _rx_a) = unbounded_channel();
         let (tx_b, _rx_b) = unbounded_channel();
-        reg.register_with_id(ProtoId::from_raw(0), "bgp", tx_a, 0);
-        reg.register_with_id(ProtoId::from_raw(1), "ospf", tx_b, 0);
+        reg.register_with_id(ProtoId::from_raw(0), "bgp", tx_a, 0, false);
+        reg.register_with_id(ProtoId::from_raw(1), "ospf", tx_b, 0, false);
 
         assert_eq!(reg.find_by_proto("bgp"), Some(ProtoId::from_raw(0)));
         assert_eq!(reg.find_by_proto("ospf"), Some(ProtoId::from_raw(1)));
@@ -349,8 +369,8 @@ mod tests {
         let mut reg = ClientRegistry::new();
         let (tx_a, _rx_a) = unbounded_channel();
         let (tx_b, _rx_b) = unbounded_channel();
-        reg.register_with_id(ProtoId::from_raw(0), "bgp", tx_a, 0);
-        reg.register_with_id(ProtoId::from_raw(1), "bgp:vrf:v1", tx_b, 10);
+        reg.register_with_id(ProtoId::from_raw(0), "bgp", tx_a, 0, false);
+        reg.register_with_id(ProtoId::from_raw(1), "bgp:vrf:v1", tx_b, 10, false);
 
         assert_eq!(reg.vrf_id_for(ProtoId::from_raw(0)), 0);
         assert_eq!(reg.vrf_id_for(ProtoId::from_raw(1)), 10);
@@ -365,9 +385,9 @@ mod tests {
         let (tx_default, _rx_a) = unbounded_channel();
         let (tx_vrf10, _rx_b) = unbounded_channel();
         let (tx_vrf20, _rx_c) = unbounded_channel();
-        reg.register_with_id(ProtoId::from_raw(0), "bgp", tx_default, 0);
-        reg.register_with_id(ProtoId::from_raw(1), "bgp:vrf:v1", tx_vrf10, 10);
-        reg.register_with_id(ProtoId::from_raw(2), "bgp:vrf:v2", tx_vrf20, 20);
+        reg.register_with_id(ProtoId::from_raw(0), "bgp", tx_default, 0, false);
+        reg.register_with_id(ProtoId::from_raw(1), "bgp:vrf:v1", tx_vrf10, 10, false);
+        reg.register_with_id(ProtoId::from_raw(2), "bgp:vrf:v2", tx_vrf20, 20, false);
 
         let default: Vec<_> = reg.iter_vrf(0).map(|(id, _)| id).collect();
         let v10: Vec<_> = reg.iter_vrf(10).map(|(id, _)| id).collect();
@@ -387,8 +407,8 @@ mod tests {
         let mut reg = ClientRegistry::new();
         let (tx_default, _rx_a) = unbounded_channel();
         let (tx_vrf10, _rx_b) = unbounded_channel();
-        reg.register_with_id(ProtoId::from_raw(0), "bgp", tx_default, 0);
-        reg.register_with_id(ProtoId::from_raw(1), "bgp:vrf:v1", tx_vrf10, 10);
+        reg.register_with_id(ProtoId::from_raw(0), "bgp", tx_default, 0, false);
+        reg.register_with_id(ProtoId::from_raw(1), "bgp:vrf:v1", tx_vrf10, 10, false);
 
         let ids: Vec<_> = reg.iter().map(|(id, _)| id).collect();
         assert_eq!(ids, vec![ProtoId::from_raw(0), ProtoId::from_raw(1)]);
@@ -402,8 +422,8 @@ mod tests {
         let mut reg = ClientRegistry::new();
         let (tx_a, _rx_a) = unbounded_channel();
         let (tx_b, _rx_b) = unbounded_channel();
-        reg.register_with_id(ProtoId::from_raw(0), "bgp", tx_a, 0);
-        reg.register_with_id(ProtoId::from_raw(1), "ospf", tx_b, 5);
+        reg.register_with_id(ProtoId::from_raw(0), "bgp", tx_a, 0, false);
+        reg.register_with_id(ProtoId::from_raw(1), "ospf", tx_b, 5, false);
 
         assert!(reg.subscriber_for_proto("bgp").is_some());
         assert_eq!(reg.subscriber_for_proto("ospf").map(|s| s.vrf_id), Some(5));

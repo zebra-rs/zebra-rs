@@ -45,6 +45,12 @@ pub struct FibLink {
     /// per RFC 8365 §5.1.3 (egress PE = local VTEP). None on
     /// non-VXLAN links and on VXLANs configured without a local IP.
     pub vxlan_local: Option<std::net::IpAddr>,
+    /// Kernel routing table from `IFLA_VRF_TABLE`
+    /// (`LinkInfo::Data(InfoData::Vrf(InfoVrf::TableId(_)))`) on VRF
+    /// master devices. None for every other link type. Lets an
+    /// all-VRF consumer (the cradle port reconcile) resolve a slave's
+    /// `master` to its VRF table without the RIB's registry.
+    pub vrf_table: Option<u32>,
 }
 
 impl FibLink {

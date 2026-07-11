@@ -154,6 +154,7 @@ mod tests {
             addr6: Vec::new(),
             master,
             vni: None,
+            vrf_table: None,
             vxlan_local: None,
             mtu_error: None,
         }

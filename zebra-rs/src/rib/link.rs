@@ -58,6 +58,12 @@ pub struct Link {
     /// on VXLAN links. Used as the BGP MP_REACH nexthop for EVPN
     /// advertisements per RFC 8365 §5.1.3.
     pub vxlan_local: Option<std::net::IpAddr>,
+    /// Kernel routing table from `IFLA_VRF_TABLE` on VRF master
+    /// devices; `None` for every other link type. Lets an all-VRF
+    /// consumer (the cradle port reconcile) resolve a slave's
+    /// `master` to its VRF table straight from link state.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub vrf_table: Option<u32>,
     /// Last failure reason from applying the operator-configured MTU
     /// (`mtu_config` keyed by name on `Rib`). `None` once a set
     /// succeeds. Rendered by `show interface` so a kernel rejection
@@ -85,6 +91,7 @@ impl Link {
             master: link.master,
             vni: link.vni,
             vxlan_local: link.vxlan_local,
+            vrf_table: link.vrf_table,
             mtu_error: None,
         }
     }
@@ -1326,6 +1333,7 @@ mod tests {
             addr6: Vec::new(),
             master: None,
             vni: None,
+            vrf_table: None,
             vxlan_local: None,
             mtu_error: None,
         }
