@@ -17,6 +17,10 @@ mod bgp;
 mod config;
 mod context;
 use config::{Cli, ConfigManager};
+// The cradle eBPF-engine supervisor rides on the Linux-only gRPC tee
+// (`fib::cradle`) and Linux process semantics (PR_SET_PDEATHSIG).
+#[cfg(target_os = "linux")]
+mod cradle;
 mod fib;
 mod flex_algo;
 mod fmt;

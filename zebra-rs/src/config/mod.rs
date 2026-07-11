@@ -39,6 +39,7 @@ pub use api::{ConfigChannel, ConfigOp, ConfigRequest, DisplayRequest, Message, S
 mod bfd;
 mod bgp;
 mod commands;
+mod cradle;
 mod files;
 mod ip;
 mod isis;
