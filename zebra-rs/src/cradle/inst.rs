@@ -433,7 +433,7 @@ impl Cradle {
                 .collect();
             return serde_json::json!({
                 "systemEbpfEnabled": self.ebpf_enabled,
-                "teeEnabled": self.cradle_enabled,
+                "teeEnabled": self.cradle_enabled || self.ebpf_enabled,
                 "endpoint": endpoint,
                 "engine": engine,
                 "engineUpSeconds": up_secs,
@@ -446,7 +446,7 @@ impl Cradle {
         }
 
         let mut out = String::new();
-        writeln!(out, "eBPF data plane (cradle engine)").unwrap();
+        writeln!(out, "eBPF data plane").unwrap();
         writeln!(
             out,
             "  System ebpf:     {}",
@@ -460,14 +460,17 @@ impl Cradle {
         writeln!(
             out,
             "  FIB tee:         {}",
-            if self.cradle_enabled {
-                "enabled (system cradle)"
+            if self.ebpf_enabled {
+                "enabled"
+            } else if self.cradle_enabled {
+                "enabled (system cradle, external engine)"
             } else {
                 "disabled"
             }
         )
         .unwrap();
-        writeln!(out, "  Endpoint:        {endpoint}").unwrap();
+        // The gRPC endpoint is plumbing, not operator surface — json keeps
+        // the field for debugging; the text form omits it.
         match up_secs {
             Some(secs) => writeln!(out, "  Engine:          {engine}, up {secs}s").unwrap(),
             None => writeln!(out, "  Engine:          {engine}").unwrap(),
