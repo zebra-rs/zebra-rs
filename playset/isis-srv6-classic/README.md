@@ -194,7 +194,9 @@ Two layers share the same locator:
   core links — and `encapsulation-type: srv6` on the neighbor attaches the
   SRv6 SID to the advertisements. Note there is no static route anywhere:
   the edge reachability is a BGP service riding the SRv6 transport, the
-  IPv6 analog of the recursive statics in the SR-MPLS playsets.
+  IPv6 analog of the recursive statics in the SR-MPLS playsets. (The
+  static-route walkthrough below adds some — and shows why a *plain*
+  recursive static could not have done this job.)
 
 The edge hosts `e1`/`e2` still carry only a plain IPv6 default route toward
 their first-hop router.
@@ -240,6 +242,152 @@ The host's packet rides *inside* a fresh IPv6 header addressed to
 `fcbb:bbbb:8:40::` (H.Encaps). The core routers forward it by the locator
 route `fcbb:bbbb:8::/48` — they know nothing about the edge prefixes. At
 `d`, the End.DT6 SID decapsulates and delivers the inner packet to `e2`.
+
+## Static routes over the SRv6 core
+
+Three short experiments, best run before the TI-LFA sections below
+(each one cleans up after itself). Together they tell one story: what
+a static route does — and doesn't — get from an SRv6 underlay. They
+are the live companion to the *SRv6 Static Routes* chapter of the
+book; the [uSID lab](../isis-srv6-usid/README.md) has the same
+walkthrough on compressed SIDs.
+
+### Recursion alone is not enough
+
+Suppose we tried to reach `e2`'s subnet with a plain recursive static
+instead of the BGP service, using `d`'s loopback as the gateway:
+
+``` shell
+$ sudo ip netns exec s vty
+s>configure
+s#set router static ipv6 route 2001:db8:200::/64 nexthop 2001:db8::8
+s#commit
+s#exit
+s>show ipv6 route
+...
+B     2001:db8:200::/64 [200/0] via seg6 [fcbb:bbbb:8:40::], s-n1, 00:00:25
+S  *> 2001:db8:200::/64 [1/0] via 2001:db8::8 (recursive), 00:00:03
+                              via fe80::50eb:dcff:fe9a:fb82, s-n1
+```
+
+The static (distance 1) displaces the BGP service route (200) and
+resolves recursively just fine — but the covering route to
+`2001:db8::8` is a *plain* IS-IS route (SRv6 encapsulates only where a
+SID says so), so there is no transport to inherit. The kernel gets a
+bare `via fe80::… proto static`, the packet leaves `s` unencapsulated,
+and it dies one hop in — the core routes only links, loopbacks, and
+locators:
+
+``` shell
+$ sudo ip netns exec e1 ping 2001:db8:200::100
+3 packets transmitted, 0 received, 100% packet loss
+
+n1>ip -6 route get 2001:db8:200::100
+RTNETLINK answers: Network is unreachable
+```
+
+Delete it before moving on
+(`delete router static ipv6 route 2001:db8:200::/64`, then `commit`) —
+the BGP route takes the prefix back.
+
+### An all-static SRv6 service
+
+The BGP service layer can be rebuilt out of nothing but static
+configuration. Egress side: pin a decap SID on `d` at an
+operator-reserved function value (the `E064`+ range is exactly for
+this):
+
+``` shell
+d#set router static ipv6 route fcbb:bbbb:8:e064::/128 action End.DT6
+d#commit
+d>show ipv6 route
+...
+S  *> fcbb:bbbb:8:e064::/128 [1/0] is directly connected, sr0, seg6local End.DT6, 00:00:03
+
+d>ip -6 route show fcbb:bbbb:8:e064::/128
+fcbb:bbbb:8:e064::  encap seg6local action End.DT6 table main dev sr0 proto static metric 1024 pref medium
+```
+
+Ingress side: steer the prefix into that SID with an explicit segment
+list:
+
+``` shell
+s#set router static ipv6 route 2001:db8:200::/64 segments fcbb:bbbb:8:e064::
+s#commit
+s>show ipv6 route
+...
+S  *> 2001:db8:200::/64 [1/0] via seg6 [fcbb:bbbb:8:e064::], s-n1, 00:00:03
+
+s>ip -6 route show 2001:db8:200::/64
+2001:db8:200::/64 nhid 11  encap seg6 mode encap segs 1 [ fcbb:bbbb:8:e064:: ] via fcbb:bbbb:8:e064:: dev s-n1 proto static metric 1024 onlink pref medium
+```
+
+The edge-to-edge ping now works over the purely static path, and a
+capture on `n1` shows both directions of the split-brain service —
+the request tunneled to the pinned static SID, the reply still riding
+`d`'s BGP-allocated one:
+
+``` shell
+$ sudo ip netns exec e1 ping 2001:db8:200::100
+3 packets transmitted, 3 received, 0% packet loss
+
+n1>tcpdump -nli n1-s ip6 proto 43
+13:09:58.293323 IP6 2001:db8:0:1::1 > fcbb:bbbb:8:e064::: RT6 (len=2, type=4, segleft=0, last-entry=0, tag=0, [0]fcbb:bbbb:8:e064::) IP6 2001:db8:100::100 > 2001:db8:200::100: ICMP6, echo request, id 1368, seq 1, length 64
+13:09:58.293356 IP6 2001:db8:0:10::2 > fcbb:bbbb:1:40::: RT6 (len=2, type=4, segleft=0, last-entry=0, tag=0, [0]fcbb:bbbb:1:40::) IP6 2001:db8:200::100 > 2001:db8:100::100: ICMP6, echo reply, id 1368, seq 1, length 64
+```
+
+Clean up: delete `s`'s `2001:db8:200::/64` static and `d`'s
+`fcbb:bbbb:8:e064::/128` SID.
+
+### Inheriting the encapsulation
+
+When a static route's gateway is covered by a route that *already*
+carries SRv6 encapsulation — like the BGP End.DT6 service route —
+recursive resolution inherits the segment list, the same way SR-MPLS
+statics inherit label stacks in the [isis-srmpls](../isis-srmpls/README.md)
+lab. Give `e2` a second loopback and reach it through a gateway inside
+the BGP-served subnet:
+
+``` shell
+$ sudo ip netns exec e2 ip addr add 3001:db8::2/128 dev lo
+
+d#set router static ipv6 route 3001:db8::2/128 nexthop 2001:db8:200::100
+s#set router static ipv6 route 3001:db8::2/128 nexthop 2001:db8:200::100
+```
+
+The same command means different things on the two routers. On `d` the
+gateway is on a connected subnet — a plain static. On `s` it is
+covered only by the BGP SRv6 route, so the static inherits its
+encapsulation:
+
+``` shell
+s>show ipv6 route
+...
+S  *> 3001:db8::2/128 [1/0] via 2001:db8:200::100 (recursive), 00:00:03
+                            via seg6 [fcbb:bbbb:8:40::], s-n1
+
+s>ip -6 route show 3001:db8::2
+3001:db8::2 nhid 10  encap seg6 mode encap segs 1 [ fcbb:bbbb:8:40:: ] via fcbb:bbbb:8:: dev s-n1 proto static metric 1024 onlink pref medium
+
+s>ip -6 route show 2001:db8:200::/64
+2001:db8:200::/64 nhid 10  encap seg6 mode encap segs 1 [ fcbb:bbbb:8:40:: ] via fcbb:bbbb:8:: dev s-n1 proto bgp metric 1024 onlink pref medium
+```
+
+Note the two routes share `nhid 10`: the inherited entry is
+byte-identical to the covering route's nexthop, so the kernel nexthop
+group is reused. The resolution is tracked — if the BGP route moves or
+disappears, the static follows or is withdrawn. And it forwards:
+
+``` shell
+$ sudo ip netns exec e1 ping 3001:db8::2
+3 packets transmitted, 3 received, 0% packet loss
+```
+
+(BGP routes inherit the same way — a BGP next-hop covered by an SRv6
+service route produces `proto bgp … encap seg6` entries; see the
+`bgp_srv6_nht` BDD feature for that variant.) Clean up: delete the
+`3001:db8::2/128` statics on `s` and `d`, and drop the address from
+`e2`'s loopback.
 
 ## Enable TI-LFA
 
