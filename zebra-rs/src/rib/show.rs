@@ -1727,20 +1727,17 @@ fn write_ilm_entry(
             vrf_ifindex: _,
         } => format!("Mirror Ctx (tbl {:<3})", table_id),
         super::inst::IlmType::Swap => "LU Swap".to_string(),
-        super::inst::IlmType::None => {
-            // Try to find a matching route for this nexthop
-            if let Some((prefix, _)) = find_route_for_nexthop(rib, uni) {
-                prefix.to_string()
-            } else {
-                "Unknown".to_string()
-            }
-        }
+        // A static ILM (`router static mpls label ...`) is keyed by its
+        // incoming label and has no prefix or SID identity to show.
+        // (Guessing one from the RIB — any route sharing the gateway —
+        // rendered arbitrary unrelated prefixes here.)
+        super::inst::IlmType::None => "-".to_string(),
     };
 
     let interface = if uni.addr.is_unspecified() && uni.ifindex().is_none() {
         "default".to_string()
     } else {
-        rib.link_name(uni.ifindex().unwrap_or(0))
+        ilm_interface(rib, uni)
     };
 
     let next_hop = if uni.addr.is_unspecified() {
@@ -1786,19 +1783,14 @@ fn ilm_to_json(
             vrf_ifindex: _,
         } => format!("Mirror Ctx (tbl {})", table_id),
         super::inst::IlmType::Swap => "LU Swap".to_string(),
-        super::inst::IlmType::None => {
-            if let Some((prefix, _)) = find_route_for_nexthop(rib, uni) {
-                prefix.to_string()
-            } else {
-                "Unknown".to_string()
-            }
-        }
+        // See `write_ilm_entry`: no prefix/SID identity to show.
+        super::inst::IlmType::None => "-".to_string(),
     };
 
     let outgoing_interface = if uni.addr.is_unspecified() && uni.ifindex().is_none() {
         "default".to_string()
     } else {
-        rib.link_name(uni.ifindex().unwrap_or(0))
+        ilm_interface(rib, uni)
     };
 
     let next_hop = if uni.addr.is_unspecified() {
@@ -1819,29 +1811,24 @@ fn ilm_to_json(
     }
 }
 
-// Helper function to find a route that uses this nexthop
-fn find_route_for_nexthop<'a>(
-    rib: &'a Rib,
-    target_uni: &super::NexthopUni,
-) -> Option<(Ipv4Net, &'a RibEntry)> {
-    for (prefix, entries) in rib.table.iter() {
-        for entry in entries.iter() {
-            match &entry.nexthop {
-                Nexthop::Uni(uni) if uni.addr == target_uni.addr => {
-                    return Some((prefix, entry));
-                }
-                Nexthop::Multi(multi) => {
-                    for uni in &multi.nexthops {
-                        if uni.addr == target_uni.addr {
-                            return Some((prefix, entry));
-                        }
-                    }
-                }
-                _ => {}
-            }
+// Outgoing-interface name for an ILM nexthop. Most producers stamp an
+// ifindex; a static ILM (`router static mpls label ... nexthop <addr>`)
+// carries only the gateway address — the kernel resolves the `via` on
+// install — so resolve it against the RIB the same way for display
+// instead of rendering "unknown".
+fn ilm_interface(rib: &Rib, uni: &super::NexthopUni) -> String {
+    if let Some(ifindex) = uni.ifindex() {
+        return rib.link_name(ifindex);
+    }
+    if let std::net::IpAddr::V4(addr) = uni.addr {
+        let resolved =
+            super::resolve::rib_resolve(&rib.table, addr, &super::resolve::ResolveOpt::default())
+                .is_valid();
+        if resolved != 0 {
+            return rib.link_name(resolved);
         }
     }
-    None
+    rib.link_name(0)
 }
 
 #[derive(Serialize)]
