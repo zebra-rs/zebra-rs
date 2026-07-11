@@ -453,9 +453,35 @@ module config {
         // installs to (e.g. `unix:/run/cradle.sock` or `127.0.0.1:50151`).
         // Optional override for the default `unix:cradle/grpc`; it only takes
         // effect while the tee is enabled — on its own it does not enable it.
+        // Shared with `system ebpf`: a spawned engine serves its gRPC API on
+        // this same endpoint.
         leaf grpc-endpoint {
           ext:help "cradle eBPF data-plane gRPC endpoint";
           type string;
+        }
+      }
+      // The engine-lifecycle half of the eBPF data-plane integration:
+      // when enabled, zebra-rs spawns the cradle daemon as a managed,
+      // supervised child process (adopting an instance already listening
+      // on the endpoint instead of spawning a second one). This knob
+      // only manages the process — the FIB tee stays under
+      // `system cradle enabled`, and interfaces join the data plane via
+      // `interface <if-name> ebpf enabled` — so `system ebpf` alone
+      // yields a pure eBPF L2 switch with no routes teed.
+      container ebpf {
+        ext:help "eBPF data-plane engine (managed cradle process)";
+        leaf enabled {
+          ext:help "Spawn and supervise the cradle eBPF data-plane engine";
+          type boolean;
+          description
+            "When true, zebra-rs launches the cradle eBPF data plane as a
+             managed child process and restarts it on failure. The child
+             serves its gRPC API on `system cradle grpc-endpoint` if set,
+             otherwise on the default `unix:cradle/grpc` abstract socket;
+             a cradle instance already listening there is adopted rather
+             than duplicated. When false or unset no process is managed —
+             an externally-run cradle can still be teed to through
+             `system cradle enabled`.";
         }
       }
       container dhcp {
@@ -4166,6 +4192,25 @@ module config {
            observed value. The IPv6 minimum is 1280, so setting a smaller
            MTU on an interface with IPv6 enabled is rejected by the
            kernel and reported by `show interface`.";
+      }
+      // Data-plane port membership for the cradle/eBPF integration:
+      // attaches this interface to the eBPF forwarding plane (the XDP
+      // and TC programs) once an engine is reachable — spawned via
+      // `system ebpf enabled` or external via `system cradle`. The
+      // port's VRF binding follows this interface's `vrf` leaf.
+      container ebpf {
+        ext:help "eBPF data-plane attachment";
+        leaf enabled {
+          ext:help "Attach this interface to the eBPF data plane";
+          type boolean;
+          description
+            "When true, this interface is programmed as a cradle data-plane
+             port: the XDP and TC forwarding programs attach to it and it
+             participates in eBPF forwarding. When false or unset the
+             interface is detached. Inert unless a cradle engine is
+             managed (`system ebpf enabled`) or reachable
+             (`system cradle enabled`).";
+        }
       }
       container ipv4 {
         ext:help "IPv4 configuration";

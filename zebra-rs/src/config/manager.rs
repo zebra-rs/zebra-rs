@@ -2887,6 +2887,39 @@ mod yang_load_tests {
         }
     }
 
+    /// The managed-cradle integration adds two `ebpf` containers: the
+    /// `system ebpf enabled <bool>` spawn/supervise switch and the
+    /// per-interface `interface <if-name> ebpf enabled <bool>` port
+    /// attachment (both dispatched by the cradle supervisor task at the
+    /// literal `/system/ebpf/enabled` and `/interface/ebpf/enabled`
+    /// paths). Pin both at the grammar level so a typo in the
+    /// container/leaf naming (which `load_mode` would not catch) fails
+    /// loudly.
+    #[test]
+    fn ebpf_knobs_are_settable() {
+        use crate::config::ExecCode;
+        use crate::config::parse::{State, parse};
+        use libyang::to_entry;
+
+        let mut yang = YangStore::new();
+        yang.add_path(concat!(env!("CARGO_MANIFEST_DIR"), "/yang"));
+        yang.read_with_resolve("configure")
+            .expect("configure mode loads");
+        yang.identity_resolve();
+        let module = yang
+            .find_module("configure")
+            .expect("configure module present");
+        let entry = to_entry(&yang, module);
+
+        for cmd in [
+            "set system ebpf enabled true",
+            "set interface enp0s6 ebpf enabled true",
+        ] {
+            let (code, _comps, _state) = parse(cmd, entry.clone(), None, State::new());
+            assert_eq!(code, ExecCode::Success, "must be a settable path: {cmd}");
+        }
+    }
+
     /// A new BGP-neighbor YANG knob must be a *settable* path, not just a
     /// loadable module. Naming it the same as a leaf already present via
     /// `uses ietf-bgp:bgp` makes the augment silently dropped (RFC 7950
