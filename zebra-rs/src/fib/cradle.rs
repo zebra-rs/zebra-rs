@@ -8,7 +8,7 @@
 //! in addition to the kernel. This is the zebra-rs side of the cradle-rs
 //! integration.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU32, Ordering};
@@ -47,6 +47,41 @@ type Member = (
     u32,
     Option<Leaf>,
 );
+
+/// Desired-state mirror of every teed object class, keyed exactly like the
+/// corresponding `*_del` signature. Recorded as ops flow through the tee
+/// and replayed wholesale into a fresh engine by [`CradleFib::replay`] — a
+/// supervised respawn (or adopted takeover) starts with empty maps, and
+/// without a replay the datapath would stay empty until natural route
+/// churn. Ports are deliberately absent: the `system ebpf` supervisor task
+/// owns port desired-state and re-applies it on the same engine-up edge.
+#[derive(Default, Clone)]
+struct CradleMirror {
+    /// (prefix, kernel table) → route members.
+    routes4: HashMap<(Ipv4Net, u32), Vec<Member>>,
+    routes6: HashMap<(Ipv6Net, u32), Vec<Member>>,
+    /// in-label → (action, vrf_table_id, gw, oif, out-labels).
+    ilm: HashMap<u32, (u32, u32, Option<IpAddr>, u32, Vec<u32>)>,
+    /// SID prefix → (behavior, DX adjacency, oif) — config-static seg6local.
+    static_sids: HashMap<Ipv6Net, (crate::rib::SidBehavior, Option<IpAddr>, u32)>,
+    /// (SID address, prefix len) → (registry Sid, ifindex).
+    local_sids: HashMap<(Ipv6Addr, u8), (crate::rib::Sid, u32)>,
+    /// (outer dst, teid) → decap table (original kernel table id).
+    gtp_pdrs: HashMap<(Ipv4Addr, u32), u32>,
+    /// (UE prefix, kernel table) → (gtp_src, gtp_dst, teid, underlay gw, oif).
+    gtp_encaps: HashMap<(Ipv4Net, u32), (Ipv4Addr, Ipv4Addr, u32, Option<Ipv4Addr>, u32)>,
+    /// (bridge domain, mac) → remote End.DT2U/DT2M service SID.
+    fdb: HashMap<(u32, [u8; 6]), Ipv6Addr>,
+    /// (bridge domain, remote End.DT2M SID) flood-set memberships.
+    repl_slots: HashSet<(u32, Ipv6Addr)>,
+    /// (AC port, vid, dx2v table) → (remote SID, local decap SID).
+    xconnects: HashMap<(String, u16, u32), (Ipv6Addr, Option<Ipv6Addr>)>,
+    /// (mirror context, protected prefix) → reproduction VRF table.
+    mirror_routes: HashMap<(u32, Ipv6Net), u32>,
+    /// (neighbor ip, oif) → mac. Grow-only, like the upstream tee (no
+    /// neighbor delete exists).
+    neighbors: HashMap<(IpAddr, u32), [u8; 6]>,
+}
 
 /// Map zebra's `SidBehavior` to cradle's `SRV6_BH_*` (data-plane ABI). The
 /// cradle datapath executes every behavior below; End.B6.Encaps additionally
@@ -121,6 +156,8 @@ pub struct CradleFib {
     next_id: Arc<AtomicU32>,
     /// The SRv6 H.Encaps source is pushed once (best-effort).
     encap_src_set: Arc<std::sync::atomic::AtomicBool>,
+    /// Everything this tee has programmed, for [`Self::replay`].
+    mirror: Arc<Mutex<CradleMirror>>,
 }
 
 /// Connect a cradle gRPC client. `unix:/path` (filesystem UDS) and
@@ -202,6 +239,7 @@ impl CradleFib {
             nh_ids_gtp: Arc::new(Mutex::new(HashMap::new())),
             next_id: Arc::new(AtomicU32::new(1)),
             encap_src_set: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            mirror: Arc::new(Mutex::new(CradleMirror::default())),
         }
     }
 
@@ -252,6 +290,84 @@ impl CradleFib {
             })
             .await?;
         Ok(())
+    }
+
+    /// Replay the entire mirrored tee state into a fresh engine. Called
+    /// (via `FibHandle::cradle_replay` ← `Message::CradleEngineUp`) when
+    /// the `system ebpf` supervisor reports the engine ready after a
+    /// respawn or adopted-instance takeover: the new instance's maps are
+    /// empty, and — just as important — every cached nexthop id below
+    /// refers to a `NEXTHOPS` entry only the dead instance knew, so the
+    /// dedup caches must reset or even *new* routes would reference
+    /// missing nexthops.
+    pub async fn replay(&self) {
+        self.nh_ids.lock().await.clear();
+        self.nh_ids6.lock().await.clear();
+        self.nh_ids_srv6.lock().await.clear();
+        self.nh_ids_gtp.lock().await.clear();
+        self.encap_src_set.store(false, Ordering::Relaxed);
+        // Snapshot, then replay without holding the lock — the methods
+        // below re-record into the mirror as they run (same values).
+        let m = self.mirror.lock().await.clone();
+        // Neighbors and local SIDs first (SIDs also re-push the H.Encaps
+        // source), then the label/route classes (each re-creates its
+        // nexthops on demand), then the overlays that resolve through them.
+        for ((ip, oif), mac) in &m.neighbors {
+            self.neighbor_add(*ip, *oif, *mac).await;
+        }
+        for ((_, plen), (sid, ifindex)) in &m.local_sids {
+            self.local_sid_install(sid, *plen, *ifindex).await;
+        }
+        for (prefix, (behavior, adj, oif)) in &m.static_sids {
+            self.static_sid_install(*prefix, *behavior, *adj, *oif)
+                .await;
+        }
+        for (label, (action, vrf, gw, oif, labels)) in &m.ilm {
+            self.ilm_install(*label, *action, *vrf, *gw, *oif, labels)
+                .await;
+        }
+        for ((prefix, table), members) in &m.routes4 {
+            self.route_install(*prefix, *table, members.clone()).await;
+        }
+        for ((prefix, table), members) in &m.routes6 {
+            self.route_install6(*prefix, *table, members.clone()).await;
+        }
+        for ((vni, mac), sid) in &m.fdb {
+            self.fdb_add(*vni, *mac, *sid).await;
+        }
+        for (vni, sid) in &m.repl_slots {
+            self.repl_slot_add(*vni, *sid).await;
+        }
+        for ((port, vid, table), (remote, local)) in &m.xconnects {
+            self.xconnect_add(port, *remote, *local, *vid, *table).await;
+        }
+        for ((dst, teid), table) in &m.gtp_pdrs {
+            self.gtp_pdr_add(*dst, *teid, *table).await;
+        }
+        for ((prefix, table), (src, dst, teid, gw, oif)) in &m.gtp_encaps {
+            self.gtp_encap_install(*prefix, *table, *src, *dst, *teid, *gw, *oif)
+                .await;
+        }
+        for ((ctx, prefix), vrf) in &m.mirror_routes {
+            self.mirror_route_add(*ctx, *prefix, *vrf).await;
+        }
+        tracing::info!(
+            "fib: cradle replay: {} v4 + {} v6 routes, {} ILM, {} SIDs (+{} static), \
+             {} FDB, {} repl slots, {} xconnects, {} GTP PDRs + {} encaps, \
+             {} mirror routes, {} neighbors re-applied",
+            m.routes4.len(),
+            m.routes6.len(),
+            m.ilm.len(),
+            m.local_sids.len(),
+            m.static_sids.len(),
+            m.fdb.len(),
+            m.repl_slots.len(),
+            m.xconnects.len(),
+            m.gtp_pdrs.len(),
+            m.gtp_encaps.len(),
+            m.mirror_routes.len(),
+            m.neighbors.len(),
+        );
     }
 
     /// Lazily connect (and cache) the gRPC client.
@@ -411,6 +527,11 @@ impl CradleFib {
     /// a plain route; multiple members become an ECMP nexthop group. `table_id`
     /// is the kernel routing table; VRF tables map to cradle's per-VRF FIB.
     pub async fn route_install(&self, prefix: Ipv4Net, table_id: u32, members: Vec<Member>) {
+        self.mirror
+            .lock()
+            .await
+            .routes4
+            .insert((prefix, table_id), members.clone());
         if let Err(e) = self.try_route_install(prefix, table_id, members).await {
             tracing::warn!("fib: cradle route_install {prefix} failed: {e}");
         }
@@ -468,6 +589,7 @@ impl CradleFib {
     }
 
     pub async fn route_del(&self, prefix: Ipv4Net, table_id: u32) {
+        self.mirror.lock().await.routes4.remove(&(prefix, table_id));
         let result = async {
             self.client()
                 .await?
@@ -529,6 +651,11 @@ impl CradleFib {
     /// multiple = ECMP nexthop group). VRF tables map to cradle's per-VRF v6
     /// FIB (`FIB6_VRF`).
     pub async fn route_install6(&self, prefix: Ipv6Net, table_id: u32, members: Vec<Member>) {
+        self.mirror
+            .lock()
+            .await
+            .routes6
+            .insert((prefix, table_id), members.clone());
         if let Err(e) = self.try_route_install6(prefix, table_id, members).await {
             tracing::warn!("fib: cradle route_install6 {prefix} failed: {e}");
         }
@@ -581,6 +708,7 @@ impl CradleFib {
     }
 
     pub async fn route_del6(&self, prefix: Ipv6Net, table_id: u32) {
+        self.mirror.lock().await.routes6.remove(&(prefix, table_id));
         let result = async {
             self.client()
                 .await?
@@ -610,6 +738,10 @@ impl CradleFib {
         oif: u32,
         out_labels: &[u32],
     ) {
+        self.mirror.lock().await.ilm.insert(
+            in_label,
+            (action, vrf_table_id, gw, oif, out_labels.to_vec()),
+        );
         let result = async {
             let nexthop_id = match gw {
                 Some(IpAddr::V6(v6)) => self.nexthop_id6(Some(v6), oif, out_labels, 0).await?,
@@ -634,6 +766,7 @@ impl CradleFib {
     }
 
     pub async fn ilm_uninstall(&self, in_label: u32) {
+        self.mirror.lock().await.ilm.remove(&in_label);
         let result = async {
             self.client()
                 .await?
@@ -665,6 +798,11 @@ impl CradleFib {
         adj: Option<IpAddr>,
         oif: u32,
     ) {
+        self.mirror
+            .lock()
+            .await
+            .static_sids
+            .insert(prefix, (behavior, adj, oif));
         let result = async {
             let nexthop_id = match adj {
                 Some(IpAddr::V6(a)) if !a.is_unspecified() => {
@@ -702,6 +840,7 @@ impl CradleFib {
 
     /// Withdraw a static seg6local action SID teed by `static_sid_install`.
     pub async fn static_sid_uninstall(&self, prefix: Ipv6Net) {
+        self.mirror.lock().await.static_sids.remove(&prefix);
         let result = async {
             self.client()
                 .await?
@@ -719,6 +858,11 @@ impl CradleFib {
     }
 
     pub async fn local_sid_install(&self, sid: &crate::rib::Sid, prefix_len: u8, ifindex: u32) {
+        self.mirror
+            .lock()
+            .await
+            .local_sids
+            .insert((sid.addr, prefix_len), (sid.clone(), ifindex));
         let result = async {
             let nexthop_id =
                 if sid.behavior == crate::rib::SidBehavior::EndB6Encap && !sid.segs.is_empty() {
@@ -785,6 +929,11 @@ impl CradleFib {
     }
 
     pub async fn local_sid_uninstall(&self, sid: &crate::rib::Sid, prefix_len: u8) {
+        self.mirror
+            .lock()
+            .await
+            .local_sids
+            .remove(&(sid.addr, prefix_len));
         let result = async {
             self.client()
                 .await?
@@ -806,6 +955,11 @@ impl CradleFib {
     /// table `table_id` (0 = global). Cradle-only — the mainline kernel has no
     /// GTP action, so this is never a kernel route.
     pub async fn gtp_pdr_add(&self, dst: Ipv4Addr, teid: u32, table_id: u32) {
+        self.mirror
+            .lock()
+            .await
+            .gtp_pdrs
+            .insert((dst, teid), table_id);
         if let Err(e) = async {
             self.client()
                 .await?
@@ -825,6 +979,7 @@ impl CradleFib {
 
     /// Remove a GTP-U decap PDR.
     pub async fn gtp_pdr_del(&self, dst: Ipv4Addr, teid: u32) {
+        self.mirror.lock().await.gtp_pdrs.remove(&(dst, teid));
         if let Err(e) = async {
             self.client()
                 .await?
@@ -901,6 +1056,11 @@ impl CradleFib {
         gw: Option<Ipv4Addr>,
         oif: u32,
     ) {
+        self.mirror
+            .lock()
+            .await
+            .gtp_encaps
+            .insert((prefix, table_id), (gtp_src, gtp_dst, teid, gw, oif));
         if let Err(e) = async {
             let id = self.gtp_nexthop_id(gtp_src, gtp_dst, teid, gw, oif).await?;
             self.client()
@@ -924,6 +1084,11 @@ impl CradleFib {
 
     /// Remove a GTP-U encap route (the nexthop is kept for dedup reuse).
     pub async fn gtp_encap_del(&self, prefix: Ipv4Net, table_id: u32) {
+        self.mirror
+            .lock()
+            .await
+            .gtp_encaps
+            .remove(&(prefix, table_id));
         if let Err(e) = async {
             self.client()
                 .await?
@@ -946,6 +1111,7 @@ impl CradleFib {
     /// — cradle resolves the underlay adjacency with a FIB6 lookup on the
     /// SID (the IGP's locator route, already teed).
     pub async fn fdb_add(&self, vni: u32, mac: [u8; 6], sid: std::net::Ipv6Addr) {
+        self.mirror.lock().await.fdb.insert((vni, mac), sid);
         let mac_str = format!(
             "{:02x}:{:02x}:{:02x}:{:02x}:{:02x}:{:02x}",
             mac[0], mac[1], mac[2], mac[3], mac[4], mac[5]
@@ -970,6 +1136,7 @@ impl CradleFib {
 
     /// Remove an overlay FDB entry.
     pub async fn fdb_del(&self, vni: u32, mac: [u8; 6]) {
+        self.mirror.lock().await.fdb.remove(&(vni, mac));
         let mac_str = format!(
             "{:02x}:{:02x}:{:02x}:{:02x}:{:02x}:{:02x}",
             mac[0], mac[1], mac[2], mac[3], mac[4], mac[5]
@@ -1008,6 +1175,7 @@ impl CradleFib {
     /// slot plumbing (veth pair + flood membership + per-copy encap);
     /// idempotent per `(vni, sid)`.
     pub async fn repl_slot_add(&self, vni: u32, sid: std::net::Ipv6Addr) {
+        self.mirror.lock().await.repl_slots.insert((vni, sid));
         let result = async {
             self.client()
                 .await?
@@ -1038,6 +1206,11 @@ impl CradleFib {
         vid: u16,
         table: u32,
     ) {
+        self.mirror
+            .lock()
+            .await
+            .xconnects
+            .insert((port.to_string(), vid, table), (remote_sid, local_sid));
         let result = async {
             self.client()
                 .await?
@@ -1067,6 +1240,11 @@ impl CradleFib {
         vid: u16,
         table: u32,
     ) {
+        self.mirror
+            .lock()
+            .await
+            .xconnects
+            .remove(&(port.to_string(), vid, table));
         let result = async {
             self.client()
                 .await?
@@ -1088,6 +1266,7 @@ impl CradleFib {
 
     /// Remove a `(vni, sid)` replication slot.
     pub async fn repl_slot_del(&self, vni: u32, sid: std::net::Ipv6Addr) {
+        self.mirror.lock().await.repl_slots.remove(&(vni, sid));
         let result = async {
             self.client()
                 .await?
@@ -1109,6 +1288,11 @@ impl CradleFib {
     /// `End.DT46` decap into `vrf_table` — the cradle twin of the kernel's
     /// mirror-context-table route.
     pub async fn mirror_route_add(&self, ctx: u32, prefix: ipnet::Ipv6Net, vrf_table: u32) {
+        self.mirror
+            .lock()
+            .await
+            .mirror_routes
+            .insert((ctx, prefix), vrf_table);
         let result = async {
             self.client()
                 .await?
@@ -1130,6 +1314,11 @@ impl CradleFib {
 
     /// Remove a mirror route.
     pub async fn mirror_route_del(&self, ctx: u32, prefix: ipnet::Ipv6Net) {
+        self.mirror
+            .lock()
+            .await
+            .mirror_routes
+            .remove(&(ctx, prefix));
         let result = async {
             self.client()
                 .await?
@@ -1151,6 +1340,11 @@ impl CradleFib {
     /// MPLS egress rewrite (`mpls_l2_xmit`) resolves destination MACs from
     /// this state rather than the kernel neighbor table.
     pub async fn neighbor_add(&self, ip: IpAddr, oif_index: u32, mac: [u8; 6]) {
+        self.mirror
+            .lock()
+            .await
+            .neighbors
+            .insert((ip, oif_index), mac);
         let mac = format!(
             "{:02x}:{:02x}:{:02x}:{:02x}:{:02x}:{:02x}",
             mac[0], mac[1], mac[2], mac[3], mac[4], mac[5]

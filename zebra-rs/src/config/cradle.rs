@@ -23,8 +23,8 @@ pub fn spawn_cradle(config: &ConfigManager) {
         if config.protocol_tasks.borrow().contains_key("cradle") {
             return;
         }
-        let (_rib_client, rib_rx) = config.subscribe_to_rib("cradle");
-        let cradle = crate::cradle::Cradle::new(rib_rx);
+        let (rib_client, rib_rx) = config.subscribe_to_rib("cradle");
+        let cradle = crate::cradle::Cradle::new(rib_client, rib_rx);
         config.subscribe("cradle", cradle.cm.tx.clone());
         let task = crate::cradle::serve(cradle);
         config
