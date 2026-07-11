@@ -22,7 +22,12 @@ use tracing::{info, warn};
 pub enum EngineEvent {
     /// The engine answers its gRPC API (spawned child became ready, or a
     /// running instance was adopted).
-    Up,
+    Up {
+        /// The child's pid when we spawned it; `None` for an adopted
+        /// instance (not ours — we only probe it).
+        pid: Option<u32>,
+        adopted: bool,
+    },
     /// The engine is gone (child exited, adopted instance stopped
     /// answering, or the supervisor is stopping).
     Down,
@@ -137,7 +142,10 @@ pub(crate) async fn run(
         // bind the endpoint). If it dies later, fall through and spawn.
         if probe(&endpoint).await {
             info!("cradle: adopting already-running engine at {endpoint}");
-            let _ = events.send(EngineEvent::Up);
+            let _ = events.send(EngineEvent::Up {
+                pid: None,
+                adopted: true,
+            });
             loop {
                 tokio::select! {
                     _ = shutdown.changed() => {
@@ -180,7 +188,10 @@ pub(crate) async fn run(
                             if probe(&endpoint).await {
                                 ready = true;
                                 info!("cradle: engine ready at {endpoint}");
-                                let _ = events.send(EngineEvent::Up);
+                                let _ = events.send(EngineEvent::Up {
+                                    pid: child.id(),
+                                    adopted: false,
+                                });
                             }
                         }
                     }

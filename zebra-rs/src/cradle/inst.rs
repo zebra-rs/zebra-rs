@@ -11,7 +11,9 @@ use tokio::sync::mpsc::{self, UnboundedReceiver, UnboundedSender};
 use tokio::sync::watch;
 use tracing::{info, warn};
 
-use crate::config::{ConfigChannel, ConfigOp, ConfigRequest, path_from_command};
+use crate::config::{
+    ConfigChannel, ConfigOp, ConfigRequest, DisplayRequest, ShowChannel, path_from_command,
+};
 use crate::context::Task;
 use crate::fib::cradle::CradleFib;
 use crate::rib::api::RibRx;
@@ -37,11 +39,27 @@ struct Engine {
     task: Task<()>,
 }
 
+/// Last observed engine availability, tracked from [`EngineEvent`]s for
+/// `show ebpf`.
+#[derive(Default)]
+struct EngineStatus {
+    up: bool,
+    /// Spawned child's pid; `None` when adopted (or down).
+    pid: Option<u32>,
+    adopted: bool,
+    /// When the current up-edge happened.
+    since: Option<tokio::time::Instant>,
+    /// Up-edges seen; `ups - 1` = restarts/takeovers since the first start.
+    ups: u32,
+}
+
 /// Top-level supervisor instance, registered like the other modules
 /// (`spawn_cradle` in `config/cradle.rs`).
 pub struct Cradle {
     /// Config-manager subscription endpoints; drained by [`Self::event_loop`].
     pub cm: ConfigChannel,
+    /// `show ebpf` subscription endpoints; drained by [`Self::event_loop`].
+    pub show: ShowChannel,
     /// Sender half of the RIB subscription — carries
     /// `Message::CradleEngineUp` so the tee replays its mirrored FIB
     /// state into a fresh engine (`CradleFib::replay`).
@@ -64,8 +82,8 @@ pub struct Cradle {
     /// the link dump at subscribe time).
     links: HashMap<u32, String>,
     engine: Option<Engine>,
-    /// Is a managed engine currently answering (last [`EngineEvent`])?
-    engine_up: bool,
+    /// Last observed engine availability (from [`EngineEvent`]s).
+    status: EngineStatus,
     /// Ports applied to the current engine: if-name → the ifindex used.
     applied: HashMap<String, u32>,
     /// Port-programming client for [`Self::client_endpoint`].
@@ -78,6 +96,7 @@ impl Cradle {
         let (events_tx, events_rx) = mpsc::unbounded_channel();
         Self {
             cm: ConfigChannel::new(),
+            show: ShowChannel::new(),
             rib,
             rib_rx,
             events_tx,
@@ -88,7 +107,7 @@ impl Cradle {
             if_ebpf: BTreeMap::new(),
             links: HashMap::new(),
             engine: None,
-            engine_up: false,
+            status: EngineStatus::default(),
             applied: HashMap::new(),
             ports_client: None,
             client_endpoint: None,
@@ -111,6 +130,9 @@ impl Cradle {
                 Some(ev) = self.events_rx.recv() => {
                     self.process_engine_event(ev);
                     self.reconcile_ports().await;
+                }
+                Some(dmsg) = self.show.rx.recv() => {
+                    self.process_show_msg(dmsg).await;
                 }
                 _ = tick.tick() => self.reconcile_ports().await,
             }
@@ -165,13 +187,24 @@ impl Cradle {
     fn process_engine_event(&mut self, ev: EngineEvent) {
         // Both edges reset the applied set: a fresh (or vanished) engine
         // has no ports, so everything must be re-applied on the next Up.
-        self.engine_up = ev == EngineEvent::Up;
         self.applied.clear();
-        // Ports re-apply here (reconcile_ports); the FIB half — routes,
-        // ILM, SIDs, EVPN, GTP — is mirrored by the tee in the RIB task,
-        // so ask it to replay into the fresh engine.
-        if self.engine_up {
-            let _ = self.rib.send(crate::rib::Message::CradleEngineUp);
+        match ev {
+            EngineEvent::Up { pid, adopted } => {
+                self.status.up = true;
+                self.status.pid = pid;
+                self.status.adopted = adopted;
+                self.status.since = Some(tokio::time::Instant::now());
+                self.status.ups = self.status.ups.saturating_add(1);
+                // Ports re-apply here (reconcile_ports); the FIB half —
+                // routes, ILM, SIDs, EVPN, GTP — is mirrored by the tee in
+                // the RIB task, so ask it to replay into the fresh engine.
+                let _ = self.rib.send(crate::rib::Message::CradleEngineUp);
+            }
+            EngineEvent::Down => {
+                self.status.up = false;
+                self.status.pid = None;
+                self.status.since = None;
+            }
         }
     }
 
@@ -195,12 +228,150 @@ impl Cradle {
     /// enabled tee (`system cradle enabled`) dials. `None` = clear state.
     fn usable_endpoint(&self) -> Option<String> {
         if self.ebpf_enabled {
-            self.engine_up.then(|| self.endpoint())
+            self.status.up.then(|| self.endpoint())
         } else if self.cradle_enabled {
             Some(self.endpoint())
         } else {
             None
         }
+    }
+
+    /// `show ebpf` — supervisor and port status, plus the engine's FIB
+    /// summary when it answers. `json` renders the machine-readable form.
+    async fn process_show_msg(&self, msg: DisplayRequest) {
+        let (path, _args) = path_from_command(&msg.paths);
+        if path.as_str() != "/show/ebpf" {
+            return;
+        }
+        let _ = msg.resp.send(self.render_show(msg.json).await).await;
+    }
+
+    async fn render_show(&self, json: bool) -> String {
+        use std::fmt::Write;
+
+        let endpoint = self.endpoint();
+        let engine = if !self.ebpf_enabled {
+            "off (system ebpf disabled)".to_string()
+        } else if !self.status.up {
+            "down (supervisor retrying)".to_string()
+        } else if self.status.adopted {
+            "adopted (externally started; probed for liveness)".to_string()
+        } else {
+            match self.status.pid {
+                Some(pid) => format!("managed (pid {pid})"),
+                None => "managed".to_string(),
+            }
+        };
+        let up_secs = self.status.since.map(|t| t.elapsed().as_secs());
+        let restarts = self.status.ups.saturating_sub(1);
+        // The engine's own IPv4 FIB summary, when someone answers the
+        // endpoint (managed-and-up, or an external instance).
+        let fib = if self.status.up || self.cradle_enabled {
+            crate::fib::cradle::fib_summary(&endpoint).await
+        } else {
+            None
+        };
+
+        if json {
+            let ports: Vec<serde_json::Value> = self
+                .if_ebpf
+                .iter()
+                .filter(|(_, en)| **en)
+                .map(|(name, _)| {
+                    let ifindex = self.ifindex_of(name);
+                    serde_json::json!({
+                        "name": name,
+                        "ifindex": ifindex,
+                        "attached": ifindex.is_some()
+                            && self.applied.get(name) == ifindex.as_ref(),
+                    })
+                })
+                .collect();
+            return serde_json::json!({
+                "systemEbpfEnabled": self.ebpf_enabled,
+                "teeEnabled": self.cradle_enabled,
+                "endpoint": endpoint,
+                "engine": engine,
+                "engineUpSeconds": up_secs,
+                "engineRestarts": restarts,
+                "ports": ports,
+                "fib4Mode": fib.as_ref().map(|f| f.fib4_mode.clone()),
+                "fib4Routes": fib.as_ref().map(|f| f.routes4),
+            })
+            .to_string();
+        }
+
+        let mut out = String::new();
+        writeln!(out, "eBPF data plane (cradle engine)").unwrap();
+        writeln!(
+            out,
+            "  System ebpf:     {}",
+            if self.ebpf_enabled {
+                "enabled"
+            } else {
+                "disabled"
+            }
+        )
+        .unwrap();
+        writeln!(
+            out,
+            "  FIB tee:         {}",
+            if self.cradle_enabled {
+                "enabled (system cradle)"
+            } else {
+                "disabled"
+            }
+        )
+        .unwrap();
+        writeln!(out, "  Endpoint:        {endpoint}").unwrap();
+        match up_secs {
+            Some(secs) => writeln!(out, "  Engine:          {engine}, up {secs}s").unwrap(),
+            None => writeln!(out, "  Engine:          {engine}").unwrap(),
+        }
+        writeln!(out, "  Engine restarts: {restarts}").unwrap();
+        if let Some(f) = fib {
+            // `routes4` is the dir24 engine's shadow count; the lpm engine
+            // does not track one (always 0) — show it only when meaningful.
+            if f.fib4_mode == "dir24" {
+                writeln!(
+                    out,
+                    "  Engine v4 FIB:   mode dir24, {} routes (tbl8 {}/{})",
+                    f.routes4,
+                    f.tbl8_used,
+                    f.tbl8_used + f.tbl8_free
+                )
+                .unwrap();
+            } else {
+                writeln!(out, "  Engine v4 FIB:   mode {}", f.fib4_mode).unwrap();
+            }
+        }
+        let enabled: Vec<&String> = self
+            .if_ebpf
+            .iter()
+            .filter(|(_, en)| **en)
+            .map(|(name, _)| name)
+            .collect();
+        writeln!(
+            out,
+            "  Ports:           {} configured, {} attached",
+            enabled.len(),
+            self.applied.len()
+        )
+        .unwrap();
+        for name in enabled {
+            match (self.ifindex_of(name), self.applied.get(name)) {
+                (Some(ifindex), Some(applied)) if *applied == ifindex => {
+                    writeln!(out, "    {name:<16} ifindex {ifindex:<6} attached").unwrap();
+                }
+                (Some(ifindex), _) => {
+                    writeln!(out, "    {name:<16} ifindex {ifindex:<6} pending").unwrap();
+                }
+                (None, _) => {
+                    writeln!(out, "    {name:<16} {:<14} link absent", "-").unwrap();
+                }
+            }
+        }
+        out
     }
 
     /// Converge the running supervisor loop on the committed state. An
