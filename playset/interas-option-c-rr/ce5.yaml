@@ -1,26 +1,25 @@
-# CE4 — customer "cust1", site B (AS 65514), attached to PE3. The far
-# end of cust1: ce1 pings this router's loopback 172.16.2.1/32 across
-# both ASes. CE5 and CE6 answer to the same address for their own
-# customers.
+# CE5 — customer "cust2", site B (AS 65515), attached to PE3. Same
+# loopback address as CE4 and CE6 (172.16.2.1/32): ce2 pinging
+# 172.16.2.1 must land here and nowhere else.
 interface:
 - if-name: lo
   ipv4:
     address: 172.16.2.1/32
-- if-name: ce4-pe3
+- if-name: ce5-pe3
   ipv4:
-    address: 10.14.0.1/30
+    address: 10.15.0.1/30
 system:
-  hostname: ce4
+  hostname: ce5
 router:
   bgp:
     global:
-      as: 65514
-      router-id: 10.14.0.1
+      as: 65515
+      router-id: 10.15.0.1
     timer:
       adv-interval:
         ebgp: 3
     neighbor:
-    - remote-address: 10.14.0.2
+    - remote-address: 10.15.0.2
       remote-as: 65502
       timers: {connect-retry-time: 3}
       enabled: true

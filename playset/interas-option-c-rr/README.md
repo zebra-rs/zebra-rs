@@ -12,7 +12,9 @@ design. Cisco's reference topology puts a **route reflector in each AS**:
 > PE routers results in improved scalability compared with configurations
 > where the ASBR holds all of the VPN-IPv4 routes.
 
-This playset builds exactly that: the PEs peer VPNv4 **only with their
+This playset builds exactly that, on the full reference topology of the
+Option A and B labs — three customers, two PEs in AS 65501, one PE
+serving all three in AS 65502. The PEs peer VPNv4 **only with their
 local RR**; the RRs peer **multihop eBGP VPNv4 with each other** across
 the ASes; and — the design's load-bearing detail — the inter-RR session
 runs with **`next-hop-unchanged`**, because the RRs sit *outside* the
@@ -24,13 +26,11 @@ labeled loopbacks (BGP-LU) only, zero VPN state.
 
 <img src="../images/InterASOptionCRR.svg" alt="Inter-AS Option C (RR-based) topology">
 
-```
-           rr1 ══ multihop eBGP VPNv4, next-hop-unchanged ══ rr2
-            │                                                 │
-  ce1 ─┐   iBGP VPNv4 (client)                (client) iBGP  │   ┌─ ce3   cust1
-       pe1 ─┴─ p1 ── asbr1 ═══ eBGP BGP-LU ═══ asbr2 ── p2 ──┴─ pe2
-  ce2 ─┘         AS 65501    (PE + RR loopbacks)  AS 65502       └─ ce4   cust2
-```
+With two PEs behind RR1, this lab also exercises what the direct-PE
+design never can: **real RFC 4456 client-to-client reflection** — RR1
+reflects PE1's routes to PE2 and vice versa (each ignores the other's by
+route-target, since they share no customer), on top of relaying both
+PEs' routes to and from the far AS.
 
 The data plane is **byte-for-byte the one from the direct-PE lab** — a
 three-label stack at ingress, two labels crossing the border, the ASBRs
@@ -43,13 +43,13 @@ walkthrough proves both halves.
 $ ./up.sh
 bring up
 ...
-apply config: ce3
+apply config: ce5
 applied
-apply config: ce4
+apply config: ce6
 applied
 ```
 
-Twelve namespaces — the ten from the Option A/B/C labs plus `rr1` and
+Fifteen namespaces — the thirteen from the Option A/B labs plus `rr1` and
 `rr2` (one per AS, attached to the P router, loopbacks `1.1.1.9` /
 `2.2.2.9`). Bring up only one Inter-AS lab at a time. Convergence is
 layered: IGP → BGP-LU → the inter-RR session (its TCP rides the LU
@@ -66,6 +66,14 @@ routes) → VPNv4 — allow a minute.
       router-id: 1.1.1.9
     neighbor:
     - remote-address: 1.1.1.1        # PE1 — VPNv4 route-reflector client
+      remote-as: 65501
+      update-source: 1.1.1.9
+      route-reflector:
+        client: true
+      afi-safi:
+      - name: vpnv4
+        enabled: true
+    - remote-address: 1.1.1.4        # PE2 — VPNv4 route-reflector client
       remote-as: 65501
       update-source: 1.1.1.9
       route-reflector:
@@ -95,10 +103,9 @@ routes) → VPNv4 — allow a minute.
 
 Three things to read out of it:
 
-* **`route-reflector: client: true`** on the PE session — the RR reflects
-  between its iBGP clients (with one PE per AS this lab never needs an
-  actual iBGP-to-iBGP reflection, but the marking is the Cisco design,
-  and adding a second PE would need nothing else).
+* **`route-reflector: client: true`** on both PE sessions — the RR
+  reflects between its iBGP clients (RFC 4456), and adding a third PE
+  to this AS would need nothing but one more client stanza here.
 * **`next-hop-unchanged: true`** on the inter-RR eBGP session. Without
   it, eBGP rewrites the next hop to the advertising RR — a router with
   no VRFs, no customer FIB, and no intention of forwarding. With it, the
@@ -108,29 +115,32 @@ Three things to read out of it:
   loopback: RR2 can only establish (and route the TCP of) the multihop
   session if `1.1.1.9/32` is reachable — as a labeled route — from
   inside AS 65502. The ASBRs relay it with the same next-hop-self +
-  swap-label machinery as the PE loopbacks; their state grows from two
-  loopbacks to four, still zero VPN routes.
+  swap-label machinery as the PE loopbacks; their state grows to five
+  loopbacks (two PEs + one RR inward, one PE + one RR outward), still
+  zero VPN routes.
 
 In classic Cisco IOS terms:
 
 ```
 router bgp 65501
  neighbor 1.1.1.1 remote-as 65501           ! PE1
+ neighbor 1.1.1.4 remote-as 65501           ! PE2
  neighbor 2.2.2.9 remote-as 65502           ! RR2, two IGPs away
  neighbor 2.2.2.9 ebgp-multihop 10
  neighbor 2.2.2.9 update-source Loopback0
  address-family vpnv4
   neighbor 1.1.1.1 activate
   neighbor 1.1.1.1 route-reflector-client
+  neighbor 1.1.1.4 activate
+  neighbor 1.1.1.4 route-reflector-client
   neighbor 2.2.2.9 activate
   neighbor 2.2.2.9 next-hop-unchanged       ! the knob
 ```
 
-The PEs shrink accordingly — `pe1.yaml`'s VPNv4 session now points at
-`1.1.1.9` (iBGP, local RR) instead of the far PE; it never learns the
-other provider exists. The CEs, P routers, and ASBRs are byte-identical
-in role to the direct-PE lab (the ASBRs gain one more iBGP-LU neighbor —
-the RR).
+The PEs peer VPNv4 only with `1.1.1.9` (their local RR) — they never
+learn the other provider exists. The CEs and P routers are as in the
+Option A/B labs; the ASBRs are the direct-PE Option C nodes with the
+extra iBGP-LU neighbors (PE2 and the RR).
 
 ## Control plane: the RR holds everything, forwards nothing
 
@@ -138,16 +148,23 @@ the RR).
 $ sudo ip netns exec rr1 vty
 rr1>show bgp summary
 ...
-IPv4 Labeled Unicast Summary:
-Neighbor        V         AS   MsgRcvd   MsgSent   TblVer  InQ OutQ  Up/Down State       PfxRcd/Snt Hostname
-1.1.1.3         4      65501         5         3        0    0    0 00:00:57 Established        2/1 s
-
 VPNv4 Unicast Summary:
-Neighbor        V         AS   MsgRcvd   MsgSent   TblVer  InQ OutQ  Up/Down State       PfxRcd/Snt Hostname
-1.1.1.1         4      65501         6         2        0    0    0 00:00:57 Established        4/4 s
-2.2.2.9         4      65502         6         2        0    0    0 00:00:54 Established        4/4 s
+BGP router identifier 1.1.1.9, local AS number 65501 VRF default vrf-id 0
+RIB entries 12
+Peers 3
 
-rr1>show bgp vpnv4
+Neighbor        V         AS   MsgRcvd   MsgSent   TblVer  InQ OutQ  Up/Down State       PfxRcd/Snt Hostname
+1.1.1.1         4      65501         6         2        0    0    0 00:00:54 Established        4/8 s
+1.1.1.4         4      65501         5         2        0    0    0 00:00:52 Established       2/10 s
+2.2.2.9         4      65502         7         2        0    0    0 00:00:51 Established        6/6 s
+```
+
+Read the Sent column: PE2 received **10** routes — RR2's six far routes
+*plus PE1's four, reflected client-to-client*. The proof sits in PE2's
+own table, which holds routes for customers it does not serve:
+
+``` shell
+pe2>show bgp vpnv4
      Network          Next Hop            Metric LocPrf Weight Path
 Route Distinguisher: 65501:1
  *>i [1] 10.11.0.0/30       1.1.1.1                  0    100      0 65511 i
@@ -157,60 +174,61 @@ Route Distinguisher: 65501:1
 Route Distinguisher: 65501:2
  *>i [1] 10.12.0.0/30       1.1.1.1                  0    100      0 65512 i
      rt:65501:200 label=17,
- *>i [1] 172.16.1.1/32      1.1.1.1                  0    100      0 65512 i
-     rt:65501:200 label=17,
-Route Distinguisher: 65502:1
- *>  [1] 10.13.0.0/30       2.2.2.3                  0             0 65502 65513 i
-     rt:65501:100 label=16,
- *>  [1] 172.16.2.1/32      2.2.2.3                  0             0 65502 65513 i
-     rt:65501:100 label=16,
-Route Distinguisher: 65502:2
- *>  [1] 10.14.0.0/30       2.2.2.3                  0             0 65502 65514 i
-     rt:65501:200 label=17,
- *>  [1] 172.16.2.1/32      2.2.2.3                  0             0 65502 65514 i
-     rt:65501:200 label=17,
+...
 ```
 
-The RR holds all eight VPN routes — that is Cisco's point, the VPN state
-lives here instead of on the border — but look at the **Next Hop
-column: the RR's own address appears nowhere.** The local rows carry PE1
-(`1.1.1.1`, iBGP from the client); the far rows arrived over the *eBGP*
-session from RR2, yet still carry PE2 (`2.2.2.3`) — that is
-`next-hop-unchanged` doing its one job. The labels (`16`/`17`) are the
-PEs' per-VRF labels, relayed untouched; nobody along the reflection path
-allocated a transit label.
+PE1's cust1/cust2 routes, next hop `1.1.1.1`, arrived at PE2 via RR1's
+reflection — present, valid, and ignored (PE2 imports only `65501:300`).
+That is RFC 4456 doing quietly what a full iBGP mesh would need three
+sessions to do, and what scales to N PEs with one client stanza each.
 
-PE1 receives the reflection with nothing rewritten, and resolves the far
-PE over BGP-LU exactly as in the direct-PE lab:
+RR1's own table holds all twelve routes — and **its address appears in
+no next-hop column**. The far rows arrived over the *eBGP* session from
+RR2, yet still carry PE3 (`2.2.2.3`) with PE3's per-VRF labels
+untouched — `next-hop-unchanged` doing its one job:
 
 ``` shell
-pe1>show bgp vpnv4
-Route Distinguisher: 65502:1
- *>i [1] 10.13.0.0/30       2.2.2.3                  0    100      0 65502 65513 i
-     rt:65501:100 label=16,
- *>i [1] 172.16.2.1/32      2.2.2.3                  0    100      0 65502 65513 i
-     rt:65501:100 label=16,
-
-pe1>show ip route vrf cust1
+rr1>show bgp vpnv4
 ...
-B  *> 172.16.2.1/32 [200/0] via 10.1.0.2, pe1-p1, label 16013 19 16, 00:01:12
+Route Distinguisher: 65502:1
+ *>  [1] 10.14.0.0/30       2.2.2.3                  0             0 65502 65514 i
+     rt:65501:100 label=16,
+ *>  [1] 172.16.2.1/32      2.2.2.3                  0             0 65502 65514 i
+     rt:65501:100 label=16,
+Route Distinguisher: 65502:2
+ *>  [1] 172.16.2.1/32      2.2.2.3                  0             0 65502 65515 i
+     rt:65501:200 label=17,
+Route Distinguisher: 65502:3
+ *>  [1] 172.16.2.1/32      2.2.2.3                  0             0 65502 65516 i
+     rt:65501:300 label=18,
 ```
 
-The same three-label program — SR transport to ASBR1 (`16013`), ASBR1's
-BGP-LU label for PE2's loopback (`19`), PE2's VPN label (`16`). And the
-ASBR's whole service footprint is still a handful of loopback swaps, now
-four instead of two because the RR loopbacks joined the exchange:
+Both PEs resolve `2.2.2.3` over BGP-LU and compose the same three-label
+program as the direct-PE lab — sharing ASBR1's LU label `19` for PE3's
+loopback, with their own customers' VPN labels inside:
+
+``` shell
+pe1>show ip route vrf cust1
+B  *> 172.16.2.1/32 [200/0] via 10.1.0.2, pe1-p1, label 16013 19 16, 00:01:09
+
+pe2>show ip route vrf cust3
+B  *> 172.16.2.1/32 [200/0] via 10.1.0.10, pe2-p1, label 16013 19 18, 00:01:09
+```
+
+And the ASBR's whole service footprint is five loopback swaps — two PEs
+and the RR inward, PE3 and RR2 outward — with an **empty VPNv4 table**:
 
 ``` shell
 asbr1>ip -f mpls route | grep bgp
 16 as to 16011 via inet 10.1.0.5 dev asbr1-p1 proto bgp
 17 as to 16019 via inet 10.1.0.5 dev asbr1-p1 proto bgp
-18 as to 16 via inet 192.168.100.2 dev asbr1-asbr2 proto bgp
+20 as to 16014 via inet 10.1.0.5 dev asbr1-p1 proto bgp
+18 as to 17 via inet 192.168.100.2 dev asbr1-asbr2 proto bgp
 19 as to 19 via inet 192.168.100.2 dev asbr1-asbr2 proto bgp
 ```
 
-(`16`/`17` → the SR labels of PE1 and RR1 inward; `18`/`19` → ASBR2's
-labels for PE2 and RR2 outward. Still O(routers), still zero VPN.)
+(Still O(routers), still zero VPN — three customers changed nothing at
+the border.)
 
 ## Data plane: unchanged — and the RRs prove it by silence
 
@@ -218,13 +236,12 @@ labels for PE2 and RR2 outward. Still O(routers), still zero VPN.)
 $ sudo ip netns exec ce1 vty
 ce1>ping 172.16.2.1
 PING 172.16.2.1 (172.16.2.1) 56(84) bytes of data.
-64 bytes from 172.16.2.1: icmp_seq=1 ttl=62 time=0.061 ms
-64 bytes from 172.16.2.1: icmp_seq=2 ttl=62 time=0.211 ms
+64 bytes from 172.16.2.1: icmp_seq=1 ttl=62 time=0.031 ms
+64 bytes from 172.16.2.1: icmp_seq=2 ttl=62 time=0.155 ms
 ```
 
-Same `ttl=62` as the direct-PE lab. On the border, the same two-label
-crossing (ASBR1's `19 as to 19` swap feeding ASBR2, PE2's VPN label
-inside):
+Same `ttl=62` as the direct-PE lab (ce3's ping through pe2 shows it
+too). On the border, the same two-label crossing:
 
 ``` shell
 asbr1>tcpdump -nli asbr1-asbr2 mpls
@@ -242,16 +259,22 @@ rr1>tcpdump -nli rr1-p1 icmp
 
 Not one customer packet. The routers that hold every VPN route forward
 none of the VPN traffic; the routers that forward all of it hold none of
-the routes. That separation of control and forwarding is what
-`next-hop-unchanged` preserves, and why the knob is mandatory here.
+the routes. The overlap proof runs three customers deep, each ping to
+the shared `172.16.2.1` landing only on its own site-B router:
+
+|                  | arrives at ce4 | arrives at ce5 | arrives at ce6 |
+|:-----------------|:---------------|:---------------|:---------------|
+| ce1 (cust1) pings | **yes**       | —              | —              |
+| ce2 (cust2) pings | —             | **yes**        | —              |
+| ce3 (cust3) pings | —             | —              | **yes**        |
 
 ## Why Cisco draws it this way
 
 * **The full-mesh problem.** Direct PE-to-PE multihop VPNv4 means every
-  PE pair across both providers must peer — N×M sessions crossing the
-  boundary, each one inter-provider coordination. With RRs it is
-  *exactly one* inter-provider VPNv4 session, total, regardless of PE
-  count; new PEs touch only their own AS's RR.
+  PE pair across both providers must peer — with this lab's two-and-one
+  PEs that is already two inter-provider sessions, and N×M in general.
+  With RRs it is *exactly one* inter-provider VPNv4 session, total,
+  regardless of PE count; new PEs touch only their own AS's RR.
 * **VPN state concentrates on two boxes** whose only job is BGP — the
   ASBRs stay lean (Cisco: "improved scalability compared with
   configurations where the ASBR holds all of the VPN-IPv4 routes" —
@@ -274,21 +297,25 @@ $ ./down.sh
 
 ## Appendix: Addressing & sessions
 
-As the [direct-PE Option C lab](../interas-option-c/README.md#appendix-addressing--sessions),
-plus one RR per AS:
+The base is the Option A/B reference topology (see
+[interas-option-a](../interas-option-a/README.md#appendix-addressing--sessions)
+for the thirteen shared nodes and links; the border is Option B/C's one
+global-table link `asbr1-asbr2` = `192.168.100.0/30`), plus one RR per
+AS:
 
 | node | role | AS | loopback | SR SID (label) |
 |:-----|:-----|:---|:---------|:---------------|
 | rr1  | route reflector | 65501 | 1.1.1.9/32 | 19 (16019) |
 | rr2  | route reflector | 65502 | 2.2.2.9/32 | 29 (16029) |
 
-New links: p1–rr1 `10.1.0.8/30`, p2–rr2 `10.2.0.8/30`.
+New links: p1–rr1 `10.1.0.12/30`, p2–rr2 `10.2.0.8/30`.
 
-BGP sessions: 4× PE-CE eBGP IPv4 (in VRF), 4× iBGP labeled-unicast over
-loopbacks (asbr1–{pe1,rr1}, asbr2–{pe2,rr2}; ASBR side `next-hop-self`),
-1× ASBR-ASBR eBGP labeled-unicast, 2× iBGP VPNv4 PE–RR (PE as
-`route-reflector client`), and 1× **multihop eBGP VPNv4 RR1–RR2 with
-`next-hop-unchanged`** — the Cisco-style Option C control plane.
+BGP sessions: 6× PE-CE eBGP IPv4 (in VRF), 5× iBGP labeled-unicast over
+loopbacks (asbr1–{pe1,pe2,rr1}, asbr2–{pe3,rr2}; ASBR side
+`next-hop-self`), 1× ASBR-ASBR eBGP labeled-unicast, 3× iBGP VPNv4
+PE–RR (rr1–{pe1,pe2} and rr2–pe3, PEs as `route-reflector client`), and
+1× **multihop eBGP VPNv4 RR1–RR2 with `next-hop-unchanged`** — the
+Cisco-style Option C control plane.
 
 ## Sources
 

@@ -1,4 +1,4 @@
-# RR2 — the route reflector of AS 65502. Mirror of RR1: PE2 as a VPNv4
+# RR2 — the route reflector of AS 65502. Mirror of RR1: PE3 as a VPNv4
 # route-reflector client, multihop eBGP VPNv4 to RR1 with
 # `next-hop-unchanged`, labeled-unicast to ASBR2 for loopback exchange.
 interface:
@@ -37,7 +37,7 @@ router:
         ibgp: 1
         ebgp: 1
     neighbor:
-    - remote-address: 2.2.2.3        # PE2 — VPNv4 route-reflector client
+    - remote-address: 2.2.2.3        # PE3 — VPNv4 route-reflector client
       remote-as: 65502
       timers: {connect-retry-time: 3}
       update-source: 2.2.2.9

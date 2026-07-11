@@ -1,93 +1,97 @@
 <?xml version="1.0" encoding="UTF-8"?>
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 830 350" font-family="Helvetica, Arial, sans-serif">
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 830 410" font-family="Helvetica, Arial, sans-serif">
   <!-- Inter-AS Option C, RR-based (Cisco reference design)
-       — matches playset/interas-option-c-rr.
+       — matches playset/interas-option-c-rr: three customers, two PEs in
+       AS 65501, a route reflector per AS, BGP-LU at the border.
        Editable source: InterASOptionCRR.drawio (re-export from draw.io replaces this file). -->
-  <rect width="830" height="350" fill="#ffffff"/>
+  <rect width="830" height="410" fill="#ffffff"/>
 
   <!-- inter-RR multihop eBGP VPNv4 session with next-hop-unchanged -->
-  <path d="M 245,85 Q 415,-45 585,85" fill="none" stroke="#B8860B" stroke-width="1.5" stroke-dasharray="6,4"/>
-  <text x="415" y="16" text-anchor="middle" font-size="9" fill="#B8860B">multihop eBGP VPNv4, next-hop-unchanged</text>
+  <path d="M 300,70 Q 422,-30 545,70" fill="none" stroke="#B8860B" stroke-width="1.5" stroke-dasharray="6,4"/>
+  <text x="422" y="16" text-anchor="middle" font-size="9" fill="#B8860B">multihop eBGP VPNv4, next-hop-unchanged</text>
 
   <!-- AS boxes -->
-  <rect x="90" y="55" width="270" height="235" rx="8" fill="none" stroke="#999999" stroke-dasharray="6,4"/>
-  <rect x="480" y="55" width="270" height="235" rx="8" fill="none" stroke="#999999" stroke-dasharray="6,4"/>
-  <text x="180" y="73" text-anchor="middle" font-size="12" fill="#333333">AS 65501</text>
-  <text x="660" y="73" text-anchor="middle" font-size="12" fill="#333333">AS 65502</text>
+  <rect x="75" y="30" width="300" height="290" rx="8" fill="none" stroke="#999999" stroke-dasharray="6,4"/>
+  <rect x="480" y="30" width="280" height="290" rx="8" fill="none" stroke="#999999" stroke-dasharray="6,4"/>
+  <text x="160" y="50" text-anchor="middle" font-size="12" fill="#333333">AS 65501</text>
+  <text x="690" y="50" text-anchor="middle" font-size="12" fill="#333333">AS 65502</text>
 
-  <!-- PE-RR iBGP VPNv4 client sessions -->
-  <line x1="172" y1="186" x2="238" y2="112" stroke="#B8860B" stroke-width="1.2" stroke-dasharray="3,3"/>
-  <line x1="658" y1="186" x2="592" y2="112" stroke="#B8860B" stroke-width="1.2" stroke-dasharray="3,3"/>
-  <text x="166" y="140" text-anchor="middle" font-size="8" fill="#B8860B">iBGP VPNv4</text>
-  <text x="164" y="150" text-anchor="middle" font-size="8" fill="#B8860B">(RR client)</text>
-  <text x="664" y="140" text-anchor="middle" font-size="8" fill="#B8860B">iBGP VPNv4</text>
-  <text x="666" y="150" text-anchor="middle" font-size="8" fill="#B8860B">(RR client)</text>
+  <!-- provider clouds -->
+  <path d="M 170,185 C 140,190 120,165 135,140 C 115,115 135,85 165,95 C 175,70 215,65 235,85 C 260,70 295,85 295,110 C 320,120 315,155 290,165 C 285,185 250,195 230,182 C 215,195 185,195 170,185 Z"
+        fill="none" stroke="#bbbbbb" stroke-width="0.7" transform="matrix(1.24,0,0,1.69,-32,-24)"/>
+  <path d="M 170,185 C 140,190 120,165 135,140 C 115,115 135,85 165,95 C 175,70 215,65 235,85 C 260,70 295,85 295,110 C 320,120 315,155 290,165 C 285,185 250,195 230,182 C 215,195 185,195 170,185 Z"
+        fill="none" stroke="#bbbbbb" stroke-width="0.8" transform="matrix(1.10,0,0,1.46,362,3)"/>
 
   <!-- RR attachment links -->
-  <line x1="245" y1="100" x2="245" y2="200" stroke="#A02C93" stroke-width="1.5"/>
-  <line x1="585" y1="100" x2="585" y2="200" stroke="#A02C93" stroke-width="1.5"/>
+  <line x1="300" y1="85" x2="255" y2="190" stroke="#A02C93" stroke-width="1.5"/>
+  <line x1="545" y1="85" x2="585" y2="190" stroke="#A02C93" stroke-width="1.5"/>
 
   <!-- CE-PE links -->
-  <line x1="60" y1="162" x2="165" y2="200" stroke="#0499D4" stroke-width="1.5"/>
-  <line x1="60" y1="238" x2="165" y2="200" stroke="#4DA72E" stroke-width="1.5"/>
-  <line x1="665" y1="200" x2="770" y2="162" stroke="#0499D4" stroke-width="1.5"/>
-  <line x1="665" y1="200" x2="770" y2="238" stroke="#4DA72E" stroke-width="1.5"/>
+  <line x1="55" y1="92.5" x2="170" y2="130" stroke="#0499D4" stroke-width="1.5"/>
+  <line x1="55" y1="162.5" x2="170" y2="130" stroke="#4DA72E" stroke-width="1.5"/>
+  <line x1="55" y1="267.5" x2="170" y2="250" stroke="#E97131" stroke-width="1.5"/>
+  <line x1="665" y1="190" x2="770" y2="92.5" stroke="#0499D4" stroke-width="1.5"/>
+  <line x1="665" y1="190" x2="770" y2="190" stroke="#4DA72E" stroke-width="1.5"/>
+  <line x1="665" y1="190" x2="770" y2="267.5" stroke="#E97131" stroke-width="1.5"/>
 
   <!-- intra-AS core links -->
-  <line x1="165" y1="200" x2="245" y2="200" stroke="#A02C93" stroke-width="1.5"/>
-  <line x1="245" y1="200" x2="325" y2="200" stroke="#A02C93" stroke-width="1.5"/>
-  <line x1="505" y1="200" x2="585" y2="200" stroke="#A02C93" stroke-width="1.5"/>
-  <line x1="585" y1="200" x2="665" y2="200" stroke="#A02C93" stroke-width="1.5"/>
+  <line x1="170" y1="130" x2="255" y2="190" stroke="#A02C93" stroke-width="1.5"/>
+  <line x1="170" y1="250" x2="255" y2="190" stroke="#A02C93" stroke-width="1.5"/>
+  <line x1="255" y1="190" x2="340" y2="190" stroke="#A02C93" stroke-width="1.5"/>
+  <line x1="505" y1="190" x2="585" y2="190" stroke="#A02C93" stroke-width="1.5"/>
+  <line x1="585" y1="190" x2="665" y2="190" stroke="#A02C93" stroke-width="1.5"/>
 
   <!-- inter-AS link: BGP-LU only, PE + RR loopbacks with labels -->
-  <line x1="340" y1="200" x2="490" y2="200" stroke="#E97131" stroke-width="2.5"/>
-  <text x="415" y="190" text-anchor="middle" font-size="9" fill="#E97131">eBGP labeled-unicast (BGP-LU)</text>
+  <line x1="355" y1="190" x2="490" y2="190" stroke="#9673A6" stroke-width="2" stroke-dasharray="6,4"/>
+  <text x="422" y="210" text-anchor="middle" font-size="10" fill="#333333">BGP LU</text>
 
   <!-- routers -->
   <g stroke="#0E9ED5" stroke-width="1.5" fill="#ffffff">
-    <circle cx="245" cy="90" r="15"/>
-    <circle cx="585" cy="90" r="15"/>
-    <circle cx="165" cy="200" r="15"/>
-    <circle cx="245" cy="200" r="15"/>
-    <circle cx="325" cy="200" r="15"/>
-    <circle cx="505" cy="200" r="15"/>
-    <circle cx="585" cy="200" r="15"/>
-    <circle cx="665" cy="200" r="15"/>
+    <circle cx="300" cy="85" r="15"/>
+    <circle cx="545" cy="85" r="15"/>
+    <circle cx="170" cy="130" r="15"/>
+    <circle cx="170" cy="250" r="15"/>
+    <circle cx="255" cy="190" r="15"/>
+    <circle cx="340" cy="190" r="15"/>
+    <circle cx="505" cy="190" r="15"/>
+    <circle cx="585" cy="190" r="15"/>
+    <circle cx="665" cy="190" r="15"/>
   </g>
   <g text-anchor="middle" font-size="8" fill="#333333">
-    <text x="245" y="93">rr1</text>
-    <text x="585" y="93">rr2</text>
-    <text x="165" y="203">pe1</text>
-    <text x="245" y="203">p1</text>
-    <text x="325" y="203">asbr1</text>
-    <text x="505" y="203">asbr2</text>
-    <text x="585" y="203">p2</text>
-    <text x="665" y="203">pe2</text>
+    <text x="300" y="88">rr1</text>
+    <text x="545" y="88">rr2</text>
+    <text x="170" y="133">pe1</text>
+    <text x="170" y="253">pe2</text>
+    <text x="255" y="193">p1</text>
+    <text x="340" y="193">asbr1</text>
+    <text x="505" y="193">asbr2</text>
+    <text x="585" y="193">p2</text>
+    <text x="665" y="193">pe3</text>
   </g>
 
   <!-- customer edges -->
   <g font-size="9" text-anchor="middle" fill="#ffffff">
-    <rect x="20" y="150" width="40" height="25" rx="5" fill="#0499D4"/>
-    <text x="40" y="166">ce1</text>
-    <rect x="20" y="225" width="40" height="25" rx="5" fill="#4DA72E"/>
-    <text x="40" y="241">ce2</text>
-    <rect x="770" y="150" width="40" height="25" rx="5" fill="#0499D4"/>
-    <text x="790" y="166">ce3</text>
-    <rect x="770" y="225" width="40" height="25" rx="5" fill="#4DA72E"/>
-    <text x="790" y="241">ce4</text>
+    <rect x="15" y="80" width="40" height="25" rx="5" fill="#0499D4"/>
+    <text x="35" y="96">ce1</text>
+    <rect x="15" y="150" width="40" height="25" rx="5" fill="#4DA72E"/>
+    <text x="35" y="166">ce2</text>
+    <rect x="15" y="255" width="40" height="25" rx="5" fill="#E97131"/>
+    <text x="35" y="271">ce3</text>
+    <rect x="770" y="80" width="40" height="25" rx="5" fill="#0499D4"/>
+    <text x="790" y="96">ce4</text>
+    <rect x="770" y="177.5" width="40" height="25" rx="5" fill="#4DA72E"/>
+    <text x="790" y="193.5">ce5</text>
+    <rect x="770" y="255" width="40" height="25" rx="5" fill="#E97131"/>
+    <text x="790" y="271">ce6</text>
   </g>
 
-  <!-- data plane bands: identical to the direct-PE Option C lab -->
+  <!-- data plane bands: one labeled path end to end -->
   <g font-size="11" text-anchor="middle">
-    <rect x="25" y="313" width="110" height="20" fill="none" stroke="#999999"/>
-    <text x="80" y="327" fill="#333333">IP</text>
-    <rect x="150" y="313" width="190" height="20" rx="10" fill="#99CCFF" stroke="#808080"/>
-    <text x="245" y="327" fill="#000000">MPLS</text>
-    <rect x="352" y="313" width="135" height="20" rx="10" fill="#FBE5D6" stroke="#808080"/>
-    <text x="419" y="327" fill="#000000">MPLS</text>
-    <rect x="500" y="313" width="190" height="20" rx="10" fill="#A5E798" stroke="#808080"/>
-    <text x="595" y="327" fill="#000000">MPLS</text>
-    <rect x="702" y="313" width="110" height="20" fill="none" stroke="#999999"/>
-    <text x="757" y="327" fill="#333333">IP</text>
+    <rect x="25" y="363" width="110" height="20" fill="none" stroke="#999999"/>
+    <text x="80" y="377" fill="#333333">IP</text>
+    <rect x="150" y="363" width="540" height="20" rx="10" fill="#99CCFF" stroke="#808080"/>
+    <text x="420" y="377" fill="#000000">MPLS</text>
+    <rect x="702" y="363" width="110" height="20" fill="none" stroke="#999999"/>
+    <text x="757" y="377" fill="#333333">IP</text>
   </g>
 </svg>
