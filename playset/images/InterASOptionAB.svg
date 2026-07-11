@@ -68,29 +68,29 @@
     <circle cx="665" cy="190" r="15"/>
   </g>
   <g text-anchor="middle" font-size="8" fill="#333333">
-    <text x="170" y="133">pe1</text>
-    <text x="170" y="253">pe2</text>
-    <text x="255" y="193">p1</text>
-    <text x="340" y="193">asbr1</text>
-    <text x="505" y="193">asbr2</text>
-    <text x="585" y="193">p2</text>
-    <text x="665" y="193">pe3</text>
+    <text x="170" y="133">PE1</text>
+    <text x="170" y="253">PE2</text>
+    <text x="255" y="193">P1</text>
+    <text x="340" y="193" font-size="7">ASBR1</text>
+    <text x="505" y="193" font-size="7">ASBR2</text>
+    <text x="585" y="193">P2</text>
+    <text x="665" y="193">PE3</text>
   </g>
 
   <!-- customer edges -->
   <g font-size="9" text-anchor="middle" fill="#ffffff">
     <rect x="15" y="80" width="40" height="25" rx="5" fill="#0499D4"/>
-    <text x="35" y="96">ce1</text>
+    <text x="35" y="96">CE1</text>
     <rect x="15" y="150" width="40" height="25" rx="5" fill="#4DA72E"/>
-    <text x="35" y="166">ce2</text>
+    <text x="35" y="166">CE2</text>
     <rect x="15" y="255" width="40" height="25" rx="5" fill="#E97131"/>
-    <text x="35" y="271">ce3</text>
+    <text x="35" y="271">CE3</text>
     <rect x="770" y="80" width="40" height="25" rx="5" fill="#0499D4"/>
-    <text x="790" y="96">ce4</text>
+    <text x="790" y="96">CE4</text>
     <rect x="770" y="177.5" width="40" height="25" rx="5" fill="#4DA72E"/>
-    <text x="790" y="193.5">ce5</text>
+    <text x="790" y="193.5">CE5</text>
     <rect x="770" y="255" width="40" height="25" rx="5" fill="#E97131"/>
-    <text x="790" y="271">ce6</text>
+    <text x="790" y="271">CE6</text>
   </g>
 
   <!-- data plane bands: labeled across the border -->
