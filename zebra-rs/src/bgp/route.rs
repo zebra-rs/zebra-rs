@@ -13,6 +13,7 @@ use crate::rib::tracing::fib_l2_fdb;
 use crate::rib::{self, MacAddr, api::FdbEntry};
 use crate::{bgp_adj_in_trace, bgp_adj_out_trace};
 
+use super::adj_rib::{AdjRib, Out};
 use super::cap::CapAfiMap;
 use super::peer::{AllowAsIn, BgpTop, Event, Peer, PeerType};
 use super::peer_map::PeerMap;
@@ -8261,6 +8262,22 @@ fn mup_send_one(peer: &mut Peer, afi: Afi, route: MupRoute, attr: &Arc<BgpAttr>,
     peer.send_packet(update.into());
 }
 
+/// Build the Adj-RIB-Out entry recording one advertised MUP route. MUP
+/// AddPath TX is not implemented, so the Adj-RIB-Out holds at most one
+/// entry per (RD, prefix), keyed by the plain-member sentinel path-id 0 —
+/// NOT the Loc-RIB `local_id` (always ≥ 1). Keeping the Loc-RIB id here
+/// broke the withdraw: `mup_withdraw_one` removes with id 0, which the
+/// MUP table only matches against a `local_id == 0` entry, so the
+/// MP_UNREACH was silently suppressed (and a best-path change that
+/// re-advertised the prefix under a different Loc-RIB id would have
+/// leaked a second entry instead of replacing the first).
+fn mup_adj_out_entry(rib: &BgpRib, attr: &Arc<BgpAttr>) -> BgpRib {
+    let mut adj = rib.clone();
+    adj.attr = attr.clone();
+    adj.local_id = 0;
+    adj
+}
+
 /// Advertise one selected MUP path to a single peer: apply egress
 /// transforms, record the Adj-RIB-Out entry, and emit the UPDATE.
 fn mup_advertise_one(
@@ -8281,9 +8298,8 @@ fn mup_advertise_one(
     // egress passes through unfiltered (parity with EVPN when no Output
     // policy is configured).
     let attr = bgp.attr_store.intern(attrs);
-    let mut adj = rib.clone();
-    adj.attr = attr.clone();
-    peer.adj_out.add_mup(rd, prefix.clone(), adj);
+    peer.adj_out
+        .add_mup(rd, prefix.clone(), mup_adj_out_entry(rib, &attr));
     mup_send_one(peer, prefix.afi(), route, &attr, nhop);
     true
 }
@@ -8309,6 +8325,24 @@ pub fn route_advertise_mup_to_peers(
     }
 }
 
+/// Remove one (rd, prefix) from an Adj-RIB-Out and rebuild the withdraw
+/// NLRI from the entry that was actually advertised, or `None` when the
+/// peer never held the route (or already had it withdrawn). Overlaying the
+/// removed entry's `mup_st1` makes an ST1 withdraw byte-identical to the
+/// advertisement (real TEID/QFI/endpoint/source instead of the key-only
+/// zero placeholders `MupPrefix::to_route` fills in): the draft keys the
+/// withdraw on RD+Prefix alone, so zeros suffice for a compliant receiver
+/// (GoBGP included), but a receiver that matches withdraws on the full
+/// NLRI bytes would otherwise keep the route forever.
+fn mup_withdraw_route(
+    adj_out: &mut AdjRib<Out>,
+    rd: RouteDistinguisher,
+    prefix: &MupPrefix,
+) -> Option<MupRoute> {
+    let adj = adj_out.remove_mup(rd, prefix, 0)?;
+    Some(prefix.to_route_with(rd, adj.mup_st1.as_ref()))
+}
+
 /// Send one id-less MUP MP_UNREACH to a peer — but only if the peer actually
 /// holds the route in its Adj-RIB-Out. Sending an MP_UNREACH for a route we
 /// never advertised (or already withdrew) is a no-op the peer echoes straight
@@ -8316,13 +8350,13 @@ pub fn route_advertise_mup_to_peers(
 /// into a MUP withdraw storm (TCP ZeroWindow). Gating on Adj-RIB-Out makes
 /// every MUP withdraw idempotent, mirroring the adj_out-gated v4/v6 withdraw.
 fn mup_withdraw_one(peer: &mut Peer, rd: RouteDistinguisher, prefix: &MupPrefix) {
-    if peer.adj_out.remove_mup(rd, prefix, 0).is_none() {
+    let Some(route) = mup_withdraw_route(&mut peer.adj_out, rd, prefix) else {
         return;
-    }
+    };
     let mut update = UpdatePacket::with_max_packet_size(peer.max_packet_size());
     update.mp_withdraw = Some(MpUnreachAttr::Mup {
         afi: prefix.afi(),
-        withdraws: vec![prefix.to_route(rd)],
+        withdraws: vec![route],
     });
     peer.send_packet(update.into());
 }
@@ -8489,9 +8523,8 @@ pub fn route_sync_mup(peer: &mut Peer, bgp: &mut BgpTop) {
             continue;
         };
         let attr = bgp.attr_store.intern(attrs);
-        let mut adj = rib.clone();
-        adj.attr = attr.clone();
-        peer.adj_out.add_mup(rd, prefix.clone(), adj);
+        peer.adj_out
+            .add_mup(rd, prefix.clone(), mup_adj_out_entry(&rib, &attr));
         mup_send_one(peer, afi, route, &attr, nhop);
     }
     // RFC 4724 / RFC 7606 §3 EoR: empty MP_UNREACH per negotiated MUP AFI.
@@ -18525,6 +18558,119 @@ mod tests {
         SetCommunityConfig, SetCommunityMode, SetExtCommunityConfig, SetLargeCommunityConfig,
         SetNextHop,
     };
+
+    #[test]
+    fn mup_adj_out_withdraw_roundtrip() {
+        use bgp_packet::{MupPrefix, MupSt1Fields, RouteDistinguisher};
+
+        let rd: RouteDistinguisher = "65000:1".parse().unwrap();
+        let attr = BgpAttr::default();
+        let mut rib = super::BgpRib::new(
+            1,
+            Ipv4Addr::UNSPECIFIED,
+            super::BgpRibType::EBGP,
+            0,
+            0,
+            &attr,
+            None,
+            None,
+            false,
+        );
+        let st1 = MupSt1Fields {
+            teid: 0x1234_5678,
+            qfi: 9,
+            endpoint: "10.0.12.1".parse().unwrap(),
+            source: Some("10.0.12.2".parse().unwrap()),
+        };
+        rib.mup_st1 = Some(st1);
+        let prefix = MupPrefix::T1st {
+            prefix: "10.60.1.0/24".parse().unwrap(),
+        };
+
+        // The Loc-RIB allocates local_id >= 1 for the stored candidate, and
+        // the selected clone (what mup_advertise_one receives) carries it.
+        let mut locrib = super::LocalRibMupTable::default();
+        let (_, selected, _) = locrib.update(prefix.clone(), rib);
+        let best = selected.last().expect("path selected");
+        assert!(best.local_id >= 1);
+
+        // Advertise: the Adj-RIB-Out entry must be re-keyed to the
+        // plain-member sentinel 0, or the withdraw below never matches it
+        // (regression: every MUP MP_UNREACH was silently suppressed).
+        let shared = std::sync::Arc::new(attr);
+        let mut adj_out: super::AdjRib<super::Out> = super::AdjRib::new();
+        adj_out.add_mup(rd, prefix.clone(), super::mup_adj_out_entry(best, &shared));
+
+        // Withdraw: the NLRI is rebuilt from the advertised entry, so the
+        // ST1 off-key fields match the advertisement byte-for-byte.
+        let route = super::mup_withdraw_route(&mut adj_out, rd, &prefix)
+            .expect("advertised route must produce a withdraw");
+        assert_eq!(route.st1_fields(), Some(st1));
+        assert_eq!(MupPrefix::from_route(&route), (rd, prefix.clone()));
+
+        // Idempotent: a second withdraw for the same key is gated off, as is
+        // a key that was never advertised (the reflection-storm guard).
+        assert!(super::mup_withdraw_route(&mut adj_out, rd, &prefix).is_none());
+        let other = MupPrefix::T2st {
+            endpoint: "10.9.0.1".parse().unwrap(),
+            teid: 7,
+        };
+        assert!(super::mup_withdraw_route(&mut adj_out, rd, &other).is_none());
+    }
+
+    #[test]
+    fn mup_adj_out_readvertise_replaces_entry() {
+        use bgp_packet::{MupPrefix, MupSt1Fields, RouteDistinguisher};
+
+        // An in-place ST1 re-advertise (handover: same key, new session
+        // fields) must replace the single Adj-RIB-Out entry — under Loc-RIB
+        // local_ids a re-advertise from a different candidate would have
+        // pushed a second entry instead.
+        let rd: RouteDistinguisher = "65000:1".parse().unwrap();
+        let attr = std::sync::Arc::new(BgpAttr::default());
+        let prefix = MupPrefix::T1st {
+            prefix: "10.60.1.5/32".parse().unwrap(),
+        };
+        let mk = |local_id: u32, teid: u32| {
+            let mut rib = super::BgpRib::new(
+                1,
+                Ipv4Addr::UNSPECIFIED,
+                super::BgpRibType::EBGP,
+                0,
+                0,
+                &BgpAttr::default(),
+                None,
+                None,
+                false,
+            );
+            rib.local_id = local_id;
+            rib.mup_st1 = Some(MupSt1Fields {
+                teid,
+                qfi: 1,
+                endpoint: "10.0.12.1".parse().unwrap(),
+                source: None,
+            });
+            rib
+        };
+
+        let mut adj_out: super::AdjRib<super::Out> = super::AdjRib::new();
+        adj_out.add_mup(
+            rd,
+            prefix.clone(),
+            super::mup_adj_out_entry(&mk(1, 0x100), &attr),
+        );
+        adj_out.add_mup(
+            rd,
+            prefix.clone(),
+            super::mup_adj_out_entry(&mk(2, 0x200), &attr),
+        );
+
+        // One entry, carrying the latest session transform.
+        let route = super::mup_withdraw_route(&mut adj_out, rd, &prefix)
+            .expect("advertised route must produce a withdraw");
+        assert_eq!(route.st1_fields().map(|f| f.teid), Some(0x200));
+        assert!(super::mup_withdraw_route(&mut adj_out, rd, &prefix).is_none());
+    }
 
     #[test]
     fn smet_advertisable_group_filters_link_local() {
