@@ -548,9 +548,9 @@ fn is_vpn_fib_winner(best: &BgpRib, transport: Option<&[rib::nht::ResolvedNextho
 /// route (typically another BGP-over-SRv6 service route). Plain and
 /// MPLS-labelled resolutions return `None` (labels are the LU/VPN
 /// paths' business; a plain unicast route doesn't consume them).
-fn inherited_seg6_egress<'a>(
-    nht_transport: Option<&'a [rib::nht::ResolvedNexthop]>,
-) -> Option<&'a rib::nht::ResolvedNexthop> {
+fn inherited_seg6_egress(
+    nht_transport: Option<&[rib::nht::ResolvedNexthop]>,
+) -> Option<&rib::nht::ResolvedNexthop> {
     nht_transport
         .and_then(|t| t.first())
         .filter(|egress| !egress.segs.is_empty())
