@@ -1,0 +1,54 @@
+# z1 — SRv6 egress (AS 65000). Advertises locator LOC1 and enables
+# `segment-routing srv6 ipv6-unicast`, so redistributed connected
+# prefixes are originated into BGP with an End.DT6 SID carved from
+# LOC1 — deterministically fcbb:bbbb:1:40:: (first carve). Behind i2
+# sits the plain host h1 (3001:db8::1); its subnet rides BGP like any
+# other connected route. The cust0 dummy added by the feature provides
+# the gateway-anchor prefix 2001:db8:cafe::/64 for the static route
+# under test on z3. The static route reaches z3's link subnet through
+# the z2 core for iBGP peering and ping replies.
+interface:
+- if-name: i1
+  ipv6:
+    address: 2001:db8:12::1/64
+- if-name: i2
+  ipv6:
+    address: 3001:db8::2/64
+segment-routing:
+  locator:
+  - name: LOC1
+    prefix: fcbb:bbbb:1::/48
+    behavior: usid
+router:
+  static:
+    ipv6:
+      route:
+      - prefix: 2001:db8:23::/64
+        nexthop:
+        - address: 2001:db8:12::2
+  bgp:
+    global:
+      as: 65000
+      router-id: 10.0.0.1
+    timer:
+      adv-interval:
+        ibgp: 1
+        ebgp: 1
+    segment-routing:
+      srv6:
+        locator: LOC1
+        ipv6-unicast: {}
+    neighbor:
+    - remote-address: 2001:db8:23::3
+      # 3s connect retry: a colliding initial connect under host load
+      # otherwise backs off the default 120s, past the assert budget.
+      timers: {connect-retry-time: 3}
+      remote-as: 65000
+      enabled: true
+      afi-safi:
+      - name: ipv6
+        enabled: true
+    afi-safi:
+    - name: ipv6
+      redistribute:
+        connected: {}

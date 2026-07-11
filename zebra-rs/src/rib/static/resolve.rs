@@ -1,13 +1,16 @@
 //! Recursive nexthop resolution for static routes (NHT).
 //!
 //! A static route configured as `via 10.0.0.1` must forward through the
-//! underlay's SR-MPLS transport label stack, not as a plain IP nexthop to
-//! the remote loopback. BGP already solves this via `rib::nht`; static
+//! underlay's transport — the SR-MPLS label stack, or the SRv6 H.Encap
+//! segment list when the covering route is SRv6-encapsulated (e.g. a
+//! BGP-over-SRv6 service route) — not as a plain IP nexthop to the
+//! remote address. BGP already solves this via `rib::nht`; static
 //! applies the same resolver at FIB-install time.
 
 use std::net::IpAddr;
 
 use ipnet::{Ipv4Net, Ipv6Net};
+use isis_packet::srv6::EncapType;
 use prefix_trie::PrefixMap;
 
 use crate::rib::entry::RibEntries;
@@ -61,6 +64,14 @@ fn apply_resolved(uni: &mut NexthopUni, egresses: &[ResolvedNexthop]) -> bool {
     uni.addr = egress.addr;
     uni.mpls_label = egress.labels.clone();
     uni.mpls = egress.labels.iter().copied().map(Label::Explicit).collect();
+    // SRv6 transport inherited from the covering route (a BGP-over-SRv6
+    // service route, an SRv6 TI-LFA promoted repair, ...). Mirrors the
+    // explicit `route <prefix> segments ...` shape — the nexthop group
+    // installs the same seg6 H.Encap — with the H.Encap default applied
+    // here the same way `StaticRoute::to_entry` applies it.
+    uni.segs = egress.segs.clone();
+    uni.encap_type =
+        (!egress.segs.is_empty()).then(|| egress.seg_encap.unwrap_or(EncapType::HEncap));
     uni.ifindex_origin = (egress.ifindex != 0).then_some(egress.ifindex);
     uni.ifindex_resolved = None;
     true
@@ -118,5 +129,43 @@ mod tests {
             ..Default::default()
         };
         assert!(!apply_nht_v4(&mut uni, &table));
+    }
+
+    #[test]
+    fn static_gateway_inherits_srv6_segs() {
+        use std::net::Ipv6Addr;
+
+        // The gateway is covered by a BGP-over-SRv6 service route; the
+        // static nexthop must come out shaped like an explicit
+        // `segments` route — SID address, inherited segment list, and
+        // the H.Encap default.
+        let sid: Ipv6Addr = "fcbb:bbbb:3:40::".parse().unwrap();
+        let mut e = RibEntry::new(RibType::Bgp);
+        e.valid = true;
+        e.nexthop = Nexthop::Uni(NexthopUni {
+            addr: IpAddr::V6(sid),
+            segs: vec![sid],
+            encap_type: Some(EncapType::HEncap),
+            ifindex_origin: Some(2),
+            valid: true,
+            ..Default::default()
+        });
+        let mut table: PrefixMap<Ipv6Net, RibEntries> = PrefixMap::new();
+        table.insert("2001:db8:200::/64".parse().unwrap(), vec![e]);
+
+        let gw: IpAddr = "2001:db8:200::1".parse().unwrap();
+        let mut uni = NexthopUni {
+            addr: gw,
+            addr_origin: Some(gw),
+            ..Default::default()
+        };
+        assert!(apply_nht_v6(&mut uni, &table));
+        assert_eq!(uni.addr, IpAddr::V6(sid));
+        assert_eq!(uni.segs, vec![sid]);
+        assert_eq!(uni.encap_type, Some(EncapType::HEncap));
+        assert_eq!(uni.ifindex_origin, Some(2));
+        assert!(uni.mpls_label.is_empty());
+        // The configured gateway is preserved for display.
+        assert_eq!(uni.display_addr(), gw);
     }
 }

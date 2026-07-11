@@ -92,17 +92,23 @@ fn via_addr(uni: &NexthopUni) -> String {
 // A recursively-resolved nexthop: NHT rewrote the configured gateway
 // (`addr_origin`, e.g. a static route's `via 10.0.0.8`) to an on-link
 // egress that differs from it. Only static routes populate
-// `addr_origin`, so this is exactly the recursive-static case.
+// `addr_origin`, so this is exactly the recursive-static case. A
+// non-empty `segs` on such a nexthop is SRv6 transport *inherited*
+// from the covering route (explicit `segments` routes never set
+// `addr_origin`, so they keep the single-line seg6 rendering).
 fn uni_is_recursive(uni: &NexthopUni) -> bool {
-    uni.segs.is_empty() && uni.addr_origin.is_some_and(|origin| origin != uni.addr)
+    uni.addr_origin.is_some_and(|origin| origin != uni.addr)
 }
 
 // Render a recursive nexthop as two lines, FRR-style: the configured
 // gateway tagged `(recursive)`, then the resolved egress with its
-// inherited transport label stack underneath:
+// inherited transport (MPLS label stack or SRv6 segment list)
+// underneath:
 //
 //   S  *> 172.168.1.0/24 [1/0] via 10.0.0.8 (recursive), 00:00:12
 //                        via 192.168.10.2, s-n1, label 16800
+//   S  *> 3001:db8::1/128 [1/0] via 2001:db8:200::1 (recursive), 00:00:12
+//                         via seg6 [fcbb:bbbb:3:40::], z1-z2
 fn write_uni_recursive(
     buf: &mut String,
     uni: &NexthopUni,
@@ -112,8 +118,13 @@ fn write_uni_recursive(
 ) {
     writeln!(buf, " via {} (recursive), {}", uni.display_addr(), uptime).unwrap();
     buf.push_str(&" ".repeat(offset));
-    write!(buf, " via {}, {}", uni.addr, ifname).unwrap();
-    write_mpls_labels(buf, uni);
+    if uni.segs.is_empty() {
+        write!(buf, " via {}, {}", uni.addr, ifname).unwrap();
+        write_mpls_labels(buf, uni);
+    } else {
+        let parts: Vec<String> = uni.segs.iter().map(|s| s.to_string()).collect();
+        write!(buf, " via seg6 [{}], {}", parts.join(", "), ifname).unwrap();
+    }
     buf.push('\n');
 }
 

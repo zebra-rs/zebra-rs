@@ -19681,6 +19681,8 @@ mod tests {
             addr: "172.16.0.2".parse().unwrap(),
             ifindex: 5,
             labels: vec![16800],
+            segs: vec![],
+            seg_encap: None,
         }];
         let entry = super::select_fib_entry_v4(&rib, Some(&transport)).expect("labelled");
         match entry.nexthop {
@@ -19707,6 +19709,8 @@ mod tests {
             addr: "172.16.0.2".parse().unwrap(),
             ifindex: 5,
             labels: vec![16800],
+            segs: vec![],
+            seg_encap: None,
         }];
         let entry = super::select_fib_entry_v4(&rib, Some(&transport)).expect("plain");
         match entry.nexthop {
@@ -19768,6 +19772,8 @@ mod tests {
             addr: "fe80::1".parse().unwrap(),
             ifindex: 7,
             labels: vec![],
+            segs: vec![],
+            seg_encap: None,
         }];
         let entry = super::build_srv6_vpn_fib_entry(sid, &transport).expect("srv6 entry");
         match entry.nexthop {
@@ -19812,6 +19818,8 @@ mod tests {
             addr: "fe80::1".parse().unwrap(),
             ifindex: 7,
             labels: vec![],
+            segs: vec![],
+            seg_encap: None,
         }];
         let entry = super::select_fib_entry_v4(&rib, Some(&transport)).expect("srv6 entry");
         match entry.nexthop {
@@ -19832,6 +19840,8 @@ mod tests {
             addr: "172.16.0.2".parse().unwrap(),
             ifindex: 5,
             labels: vec![16800],
+            segs: vec![],
+            seg_encap: None,
         }];
         let entry = super::build_vpn_fib_entry(24001, &transport).expect("installable");
         assert_eq!(entry.distance, 200, "imported VPN routes arrive via iBGP");
@@ -19853,6 +19863,8 @@ mod tests {
             addr: "172.16.0.2".parse().unwrap(),
             ifindex: 5,
             labels: vec![],
+            segs: vec![],
+            seg_encap: None,
         }];
         let entry = super::build_vpn_fib_entry(24001, &transport).expect("installable");
         match entry.nexthop {
@@ -19870,11 +19882,15 @@ mod tests {
                 addr: "172.16.0.2".parse().unwrap(),
                 ifindex: 5,
                 labels: vec![16800],
+                segs: vec![],
+                seg_encap: None,
             },
             ResolvedNexthop {
                 addr: "172.16.1.2".parse().unwrap(),
                 ifindex: 6,
                 labels: vec![16801],
+                segs: vec![],
+                seg_encap: None,
             },
         ];
         let entry = super::build_vpn_fib_entry(24001, &transport).expect("installable");
@@ -19895,6 +19911,8 @@ mod tests {
             addr: "2001:db8::2".parse().unwrap(),
             ifindex: 7,
             labels: vec![16900],
+            segs: vec![],
+            seg_encap: None,
         }];
         let entry = super::build_vpn_fib_entry(24002, &transport).expect("installable");
         match entry.nexthop {
@@ -20095,6 +20113,8 @@ mod tests {
             addr: "fe80::1".parse().unwrap(),
             ifindex: 7,
             labels: vec![],
+            segs: vec![],
+            seg_encap: None,
         }];
         let entry = super::build_srv6_vpn_fib_entry(sid, &transport).expect("installable");
         assert_eq!(entry.distance, 200, "imported VPN routes arrive via iBGP");

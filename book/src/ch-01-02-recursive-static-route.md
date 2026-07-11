@@ -101,14 +101,21 @@ onto the full repair label stack with no configuration change.
 
 ## Recursive resolution and SRv6
 
-The label inheritance above is an SR-MPLS behavior. Over an **SRv6**
-underlay, recursive resolution still works — the gateway is resolved
-and the route installs with the flattened plain-IPv6 nexthop — but the
-resolution does **not** inherit any SRv6 encapsulation from the
-covering route. When the destination prefix is unknown to the core
-(the usual reason for tunneling), a recursive static route alone will
-not deliver the traffic; steer it into an SRv6 encapsulation
-explicitly with the `segments` leaf instead — see
+Resolution inherits SRv6 transport the same way: when the covering
+route carries an H.Encap segment list — a BGP-over-SRv6 service route
+(`encapsulation-type srv6`) — the static route inherits the segment
+list and installs as a seg6-encapsulated kernel route:
+
+```
+S  *> 3001:db8::1/128 [1/0] via 2001:db8:cafe::1 (recursive), 00:00:03
+                            via seg6 [fcbb:bbbb:1:40::], i1
+```
+
+One difference from SR-MPLS is worth knowing: an IGP-SRv6 route to a
+remote loopback is a *plain* IPv6 route (SRv6 encapsulates only where
+a policy or a service SID says so), so resolving through it inherits
+nothing — reaching a destination the core cannot route still needs
+explicit `segments` steering. Both patterns are covered in
 [SRv6 Static Routes](ch-01-04-srv6-static-route.md).
 
 ## Tracking topology changes
