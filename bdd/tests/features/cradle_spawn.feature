@@ -27,6 +27,13 @@ Feature: system ebpf spawns and supervises the cradle eBPF engine
     And show command "show ebpf" in namespace "crs1" should eventually contain "attached"
     And daemon log in namespace "crs1" should eventually contain "cradle: engine ready"
 
+  Scenario: The engine's tables and counters render through show ebpf
+    Given the test topology exists
+    Then show command "show ebpf ipv4" in namespace "crs1" should eventually contain "10.210.99.0/24"
+    And show command "show ebpf nexthop" in namespace "crs1" should eventually contain "10.210.1.2"
+    And show command "show ebpf stats" in namespace "crs1" should eventually contain "l3v4_forward"
+    And show command "show ebpf mpls" in namespace "crs1" should eventually contain "(empty)"
+
   Scenario: A crashed engine respawns, re-attaches the port, and replays the FIB
     Given the test topology exists
     When I execute "pkill -9 -x cradle" in namespace "crs1"

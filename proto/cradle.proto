@@ -297,6 +297,102 @@ message GtpPdrDel {
   uint32 teid = 2;
 }
 
+// ---- Forwarding-table dump (`show ebpf <table>` / `cradle dump`) ----
+// Mirrors the cradle server's definitions verbatim.
+
+// Which datapath table to dump.
+enum DumpTable {
+  DUMP_L2 = 0;      // FDB (L2 bridge MAC table)
+  DUMP_IPV4 = 1;    // IPv4 FIB (LPM or DIR-24-8)
+  DUMP_IPV6 = 2;    // IPv6 FIB
+  DUMP_MPLS = 3;    // MPLS ILM (incoming-label map)
+  DUMP_SRV6 = 4;    // SRv6 local SIDs (My-SID) + transit encaps
+  DUMP_NEXTHOP = 5; // NEXTHOPS + ECMP group membership
+}
+
+message DumpRequest {
+  DumpTable table = 1;
+  // Per-VRF FIB filter for IPv4/IPv6 (0 = global table). Ignored otherwise.
+  uint32 vrf = 2;
+  // Resolve nexthop_id -> gateway/oif/labels (fills NexthopInfo).
+  bool resolve = 3;
+}
+
+// Resolved nexthop detail; only populated when DumpRequest.resolve is set and
+// the id names a single nexthop (empty for ECMP group ids).
+message NexthopInfo {
+  uint32 id = 1;
+  string gateway = 2; // gateway IP ("" = on-link / unresolved)
+  uint32 oif = 3;
+  repeated uint32 labels = 4; // MPLS out-label stack, [0] = outermost
+  uint32 flags = 5;           // NH_F_*
+}
+
+message FdbDumpEntry {
+  string mac = 1;
+  uint32 vlan = 2;
+  uint32 oif = 3;        // local egress ifindex, or underlay nh id if remote
+  uint32 flags = 4;      // FDB_F_*
+  string remote_sid = 5; // End.DT2U SID for remote entries ("" otherwise)
+  uint64 age_ms = 6;     // ms since last local learn (0 = control-plane/never)
+}
+
+message FibDumpEntry {
+  string prefix = 1; // e.g. "10.0.0.0/24"
+  uint32 vrf = 2;
+  uint32 nexthop_id = 3;
+  uint32 flags = 4;   // FIB_F_*
+  NexthopInfo nh = 5; // populated iff resolve
+}
+
+message MplsDumpEntry {
+  uint32 label = 1;
+  string op = 2; // "swap" | "pop_l3" | "pop"
+  uint32 nexthop_id = 3;
+  uint32 vrf = 4; // POP_L3 disposition table
+  NexthopInfo nh = 5;
+}
+
+message Srv6LocalSidEntry {
+  string sid = 1; // e.g. "fc00:0:1::"
+  uint32 prefix_len = 2;
+  string behavior = 3; // "End", "End.DT4", "uN", ...
+  uint32 flavors = 4;  // SRV6_FLAVOR_* bitmask
+  uint32 vrf = 5;
+  uint32 nexthop_id = 6;
+  NexthopInfo nh = 7;
+}
+
+message Srv6EncapEntry {
+  uint32 nexthop_id = 1; // key into SRV6_ENCAP (the imposing nexthop)
+  string mode = 2;       // "encaps" | "insert"
+  repeated string segs = 3; // segment list, [0] = outer destination
+}
+
+// One NEXTHOPS entry, or — when `group` is non-empty — one ECMP group
+// (`NHGROUP`/`NHGROUP_MEMBER`): the group's member nexthop ids, with the
+// per-nexthop fields zeroed.
+message NexthopDumpEntry {
+  uint32 id = 1;
+  string gateway = 2;         // "" = on-link / unresolved
+  uint32 oif = 3;
+  uint32 flags = 4;           // NH_F_*
+  repeated uint32 labels = 5; // MPLS out-label stack, [0] = outermost
+  uint32 backup_id = 6;       // fast-reroute backup nexthop (0 = unprotected)
+  repeated uint32 group = 7;  // ECMP member ids (group rows only)
+}
+
+message DumpEntry {
+  oneof entry {
+    FdbDumpEntry fdb = 1;
+    FibDumpEntry fib = 2;
+    MplsDumpEntry mpls = 3;
+    Srv6LocalSidEntry srv6_localsid = 4;
+    Srv6EncapEntry srv6_encap = 5;
+    NexthopDumpEntry nexthop = 6;
+  }
+}
+
 service Cradle {
   rpc SetPort(Port) returns (Empty);
   // Inverse of SetPort: detach the datapath programs, drop the PORTS entry
@@ -336,5 +432,6 @@ service Cradle {
   rpc DelMirrorRoute(MirrorRouteDel) returns (Empty);
   rpc AddService(Service) returns (Empty);
   rpc GetStats(StatsRequest) returns (StatsReply);
+  rpc Dump(DumpRequest) returns (stream DumpEntry);
   rpc AddL7Service(L7Service) returns (Empty);
 }

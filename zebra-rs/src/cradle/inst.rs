@@ -265,14 +265,82 @@ impl Cradle {
         }
     }
 
-    /// `show ebpf` — supervisor and port status, plus the engine's FIB
-    /// summary when it answers. `json` renders the machine-readable form.
+    /// `show ebpf …` dispatch. The bare command renders supervisor/port
+    /// status; the table subcommands proxy the engine's structured
+    /// `Dump`/`GetStats` responses (see `super::show` — text mirrors
+    /// cradle's own CLI, `json` renders the same data as JSON).
     async fn process_show_msg(&self, msg: DisplayRequest) {
+        use crate::fib::cradle::pb::DumpTable;
         let (path, _args) = path_from_command(&msg.paths);
-        if path.as_str() != "/show/ebpf" {
-            return;
+        let out = match path.as_str() {
+            "/show/ebpf" => self.render_show(msg.json).await,
+            "/show/ebpf/stats" => self.render_engine_stats(msg.json).await,
+            "/show/ebpf/l2" => self.render_engine_dump(DumpTable::DumpL2, msg.json).await,
+            "/show/ebpf/ipv4" => self.render_engine_dump(DumpTable::DumpIpv4, msg.json).await,
+            "/show/ebpf/ipv6" => self.render_engine_dump(DumpTable::DumpIpv6, msg.json).await,
+            "/show/ebpf/mpls" => self.render_engine_dump(DumpTable::DumpMpls, msg.json).await,
+            "/show/ebpf/srv6" => self.render_engine_dump(DumpTable::DumpSrv6, msg.json).await,
+            "/show/ebpf/nexthop" => {
+                self.render_engine_dump(DumpTable::DumpNexthop, msg.json)
+                    .await
+            }
+            _ => return,
+        };
+        let _ = msg.resp.send(out).await;
+    }
+
+    /// The endpoint a `show ebpf <table>` query may reach: same predicate
+    /// as the FIB-summary line (managed engine up, or an enabled external
+    /// tee).
+    fn reachable_endpoint(&self) -> Option<String> {
+        (self.status.up || self.cradle_enabled).then(|| self.endpoint())
+    }
+
+    fn unreachable_msg(json: bool) -> String {
+        if json {
+            serde_json::json!({
+                "error": "eBPF engine not reachable (enable system ebpf or system cradle)"
+            })
+            .to_string()
+        } else {
+            "%% eBPF engine not reachable (enable system ebpf or system cradle)\n".to_string()
         }
-        let _ = msg.resp.send(self.render_show(msg.json).await).await;
+    }
+
+    async fn render_engine_dump(
+        &self,
+        table: crate::fib::cradle::pb::DumpTable,
+        json: bool,
+    ) -> String {
+        let Some(endpoint) = self.reachable_endpoint() else {
+            return Self::unreachable_msg(json);
+        };
+        match crate::fib::cradle::dump_table(&endpoint, table, 0).await {
+            Ok(entries) => super::show::render_dump(&entries, json),
+            Err(e) => {
+                if json {
+                    serde_json::json!({ "error": e.to_string() }).to_string()
+                } else {
+                    format!("%% engine dump failed: {e}\n")
+                }
+            }
+        }
+    }
+
+    async fn render_engine_stats(&self, json: bool) -> String {
+        let Some(endpoint) = self.reachable_endpoint() else {
+            return Self::unreachable_msg(json);
+        };
+        match crate::fib::cradle::engine_stats(&endpoint).await {
+            Ok(entries) => super::show::render_stats(&entries, json),
+            Err(e) => {
+                if json {
+                    serde_json::json!({ "error": e.to_string() }).to_string()
+                } else {
+                    format!("%% engine stats failed: {e}\n")
+                }
+            }
+        }
     }
 
     async fn render_show(&self, json: bool) -> String {

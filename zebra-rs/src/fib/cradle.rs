@@ -204,6 +204,48 @@ async fn connect_abstract_cradle(name: &str) -> anyhow::Result<CradleClient<Chan
     Ok(CradleClient::new(channel))
 }
 
+/// Stream one forwarding-table dump (`Dump`, resolve on) from `endpoint`,
+/// collected with a 5 s budget. Used by `show ebpf <table>`.
+pub(crate) async fn dump_table(
+    endpoint: &str,
+    table: pb::DumpTable,
+    vrf: u32,
+) -> anyhow::Result<Vec<pb::DumpEntry>> {
+    let attempt = async {
+        let mut client = connect_cradle(endpoint).await?;
+        let mut stream = client
+            .dump(pb::DumpRequest {
+                table: table as i32,
+                vrf,
+                resolve: true,
+            })
+            .await?
+            .into_inner();
+        let mut entries = Vec::new();
+        while let Some(entry) = stream.message().await? {
+            entries.push(entry);
+        }
+        anyhow::Ok(entries)
+    };
+    tokio::time::timeout(std::time::Duration::from_secs(5), attempt).await?
+}
+
+/// Fetch the engine's datapath packet counters (`GetStats`) from `endpoint`
+/// with a 2 s budget. Used by `show ebpf stats`.
+pub(crate) async fn engine_stats(endpoint: &str) -> anyhow::Result<Vec<pb::StatEntry>> {
+    let attempt = async {
+        let mut client = connect_cradle(endpoint).await?;
+        anyhow::Ok(
+            client
+                .get_stats(pb::StatsRequest {})
+                .await?
+                .into_inner()
+                .entries,
+        )
+    };
+    tokio::time::timeout(std::time::Duration::from_secs(2), attempt).await?
+}
+
 /// Fetch the engine's IPv4 FIB summary (`GetFibSummary`) from `endpoint`
 /// with a 2 s budget — `None` when nothing answers. Used by `show ebpf`.
 pub(crate) async fn fib_summary(endpoint: &str) -> Option<pb::FibSummary> {
