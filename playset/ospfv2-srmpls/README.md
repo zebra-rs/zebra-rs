@@ -220,10 +220,23 @@ delivers it as connected traffic:
 n1#set router static mpls label 200 nexthop 192.168.2.2
 n1#commit
 n1#exit
+n1>show mpls ilm
+   P Dist Local  Outgoing    Prefix             Outgoing     Next Hop
+          Label  Label       or ID              Interface
+-- - ---- ------ ----------- ------------------ ------------ ---------------
+*> S 1    200    Pop         -                  n1-d         192.168.2.2
+*> O 110  15000  Pop         SR Adj (idx 0  )   n1-s         192.168.0.1
+...
+
 n1>ip -f mpls route show
 200 via inet 192.168.2.2 dev n1-d proto static
 ...
 ```
+
+The static entry sits at distance 1 next to the OSPF SR ones. Its
+Prefix-or-ID column is `-` — an ILM is keyed by its incoming label and
+has no prefix or SID identity (add `outgoing-label <label>` to the
+same command and the entry becomes a swap instead of a pop).
 
 The edge-to-edge ping works over the hand-built LSP, and a capture on
 each side of `n1` shows the push and the pop:
