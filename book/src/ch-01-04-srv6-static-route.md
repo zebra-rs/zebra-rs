@@ -215,11 +215,24 @@ Two boundaries of the inheritance are worth knowing:
   nexthop carries at most one encapsulation, so the route is withheld
   rather than installed half-encapsulated.
 
-The BDD feature `static_srv6_nht` runs this end to end: a three-router
-line where only the ingress and egress speak BGP, the middle router
-knows nothing but locators, and the ping to a host behind the egress
-succeeds only because the inherited encapsulation tunnels the packet
-across the core.
+The inheritance is not limited to static routes: a **BGP route** whose
+next-hop is covered by an SRv6-encapsulated route inherits the segment
+list the same way — the SRv6 analog of Inter-AS Option C, where
+service routes ride a BGP-learned transport tunnel. A service node
+behind the egress PE can peer iBGP with the ingress *through the
+tunnel itself* and advertise service prefixes with its own address as
+the next-hop; the ingress resolves that next-hop through the SRv6
+transport route and installs the service routes as
+`proto bgp … encap seg6` entries. (An MPLS-labelled route — LU or
+VPN — refuses SRv6 transport instead: a label stack cannot ride a
+seg6 encapsulation, so such a resolution withholds the route rather
+than installing it half-encapsulated.)
+
+The BDD features `static_srv6_nht` and `bgp_srv6_nht` run both
+variants end to end: a three-router line where only the ingress and
+egress speak BGP, the middle router knows nothing but locators, and
+the ping to a node behind the egress succeeds only because the
+inherited encapsulation tunnels the packet across the core.
 
 ## Notes
 
