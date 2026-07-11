@@ -5,8 +5,9 @@ use serde_json::Value;
 use crate::{
     config::{Args, Builder},
     rib::{
-        Label, Nexthop,
+        Label, Nexthop, RibEntries,
         nexthop::{NexthopList, NexthopMember, NexthopProtect, NexthopUni},
+        util::IpAddrExt,
     },
 };
 
@@ -15,7 +16,7 @@ use super::{
     types::RibSubType, types::RibType, vrf::Vrf,
 };
 use std::fmt::Write;
-use std::net::IpAddr;
+use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 use std::time::Duration;
 
 // Two-char tag column used in `show ip route` lines. When the route has
@@ -1150,31 +1151,63 @@ pub fn rib_show_detail(rib: &Rib, args: Args, json: bool) -> String {
     buf
 }
 
-/// `show ip route prefix A.B.C.D/N` — single-prefix filter, one-line
-/// layout.
+/// `show ip route {A.B.C.D | A.B.C.D/M}` — an address shows the
+/// longest match (the route that contains it); a prefix shows that
+/// exact entry. One-line layout.
 pub fn rib_show_prefix(rib: &Rib, mut args: Args, json: bool) -> String {
-    let Some(prefix) = args.v4net() else {
-        return "% Invalid IPv4 prefix\n".to_string();
-    };
-    rib_show_one(rib, &prefix, json, false)
+    rib_show_one(rib, args.string(), json, false)
 }
 
-/// `show ip route prefix A.B.C.D/N detail` — single-prefix block.
+/// `show ip route {A.B.C.D | A.B.C.D/M} detail` — the same route
+/// selection in detail-block format.
 pub fn rib_show_prefix_detail(rib: &Rib, mut args: Args, json: bool) -> String {
-    let Some(prefix) = args.v4net() else {
-        return "% Invalid IPv4 prefix\n".to_string();
-    };
-    rib_show_one(rib, &prefix, json, true)
+    rib_show_one(rib, args.string(), json, true)
 }
 
-fn rib_show_one(rib: &Rib, prefix: &Ipv4Net, json: bool, detail: bool) -> String {
-    let Some(entries) = rib.table.get(prefix) else {
-        return if json {
+/// Resolve the positional `show ip route` selector — a bare address
+/// does a longest-match lookup, a prefix matches exactly — to the
+/// entry it names. `Err` carries the already-formatted response for
+/// malformed input or a lookup miss.
+fn rib_lookup_one<'a>(
+    rib: &'a Rib,
+    tok: &Option<String>,
+    json: bool,
+) -> Result<(Ipv4Net, &'a RibEntries), String> {
+    let miss = |what: &dyn std::fmt::Display| {
+        if json {
             "{\"routes\": []}\n".to_string()
         } else {
-            format!("% No route for {prefix}\n")
-        };
+            format!("% No route for {what}\n")
+        }
     };
+    let Some(tok) = tok else {
+        return Err("% Specify an IPv4 address or prefix\n".to_string());
+    };
+    if tok.contains('/') {
+        let Ok(prefix) = tok.parse::<Ipv4Net>() else {
+            return Err(format!("% Malformed IPv4 prefix: {tok}\n"));
+        };
+        match rib.table.get(&prefix) {
+            Some(entries) => Ok((prefix, entries)),
+            None => Err(miss(&prefix)),
+        }
+    } else {
+        let Ok(addr) = tok.parse::<Ipv4Addr>() else {
+            return Err(format!("% Malformed IPv4 address: {tok}\n"));
+        };
+        match rib.table.get_lpm(&addr.to_host_prefix()) {
+            Some((prefix, entries)) => Ok((prefix, entries)),
+            None => Err(miss(&addr)),
+        }
+    }
+}
+
+fn rib_show_one(rib: &Rib, tok: Option<String>, json: bool, detail: bool) -> String {
+    let (prefix, entries) = match rib_lookup_one(rib, &tok, json) {
+        Ok(found) => found,
+        Err(out) => return out,
+    };
+    let prefix = &prefix;
 
     if json {
         let routes: Vec<RouteEntry> = entries
@@ -1400,30 +1433,60 @@ pub fn rib6_show_detail(rib: &Rib, args: Args, json: bool) -> String {
     buf
 }
 
-/// `show ipv6 route prefix X::Y/N` — single-prefix, one-line layout.
+/// `show ipv6 route {X:X::X:X | X:X::X:X/M}` — the v6 twin of
+/// [`rib_show_prefix`]: address does a longest-match lookup, prefix
+/// matches exactly. One-line layout.
 pub fn rib6_show_prefix(rib: &Rib, mut args: Args, json: bool) -> String {
-    let Some(prefix) = args.v6net() else {
-        return "% Invalid IPv6 prefix\n".to_string();
-    };
-    rib6_show_one(rib, &prefix, json, false)
+    rib6_show_one(rib, args.string(), json, false)
 }
 
-/// `show ipv6 route prefix X::Y/N detail` — single-prefix block.
+/// `show ipv6 route {X:X::X:X | X:X::X:X/M} detail` — the same route
+/// selection in detail-block format.
 pub fn rib6_show_prefix_detail(rib: &Rib, mut args: Args, json: bool) -> String {
-    let Some(prefix) = args.v6net() else {
-        return "% Invalid IPv6 prefix\n".to_string();
-    };
-    rib6_show_one(rib, &prefix, json, true)
+    rib6_show_one(rib, args.string(), json, true)
 }
 
-fn rib6_show_one(rib: &Rib, prefix: &Ipv6Net, json: bool, detail: bool) -> String {
-    let Some(entries) = rib.table_v6.get(prefix) else {
-        return if json {
+/// V6 twin of [`rib_lookup_one`].
+fn rib6_lookup_one<'a>(
+    rib: &'a Rib,
+    tok: &Option<String>,
+    json: bool,
+) -> Result<(Ipv6Net, &'a RibEntries), String> {
+    let miss = |what: &dyn std::fmt::Display| {
+        if json {
             "{\"routes\": []}\n".to_string()
         } else {
-            format!("% No route for {prefix}\n")
-        };
+            format!("% No route for {what}\n")
+        }
     };
+    let Some(tok) = tok else {
+        return Err("% Specify an IPv6 address or prefix\n".to_string());
+    };
+    if tok.contains('/') {
+        let Ok(prefix) = tok.parse::<Ipv6Net>() else {
+            return Err(format!("% Malformed IPv6 prefix: {tok}\n"));
+        };
+        match rib.table_v6.get(&prefix) {
+            Some(entries) => Ok((prefix, entries)),
+            None => Err(miss(&prefix)),
+        }
+    } else {
+        let Ok(addr) = tok.parse::<Ipv6Addr>() else {
+            return Err(format!("% Malformed IPv6 address: {tok}\n"));
+        };
+        match rib.table_v6.get_lpm(&addr.to_host_prefix()) {
+            Some((prefix, entries)) => Ok((prefix, entries)),
+            None => Err(miss(&addr)),
+        }
+    }
+}
+
+fn rib6_show_one(rib: &Rib, tok: Option<String>, json: bool, detail: bool) -> String {
+    let (prefix, entries) = match rib6_lookup_one(rib, &tok, json) {
+        Ok(found) => found,
+        Err(out) => return out,
+    };
+    let prefix = &prefix;
 
     if json {
         let routes: Vec<RouteEntry> = entries

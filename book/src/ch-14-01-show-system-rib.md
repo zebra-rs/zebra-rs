@@ -124,8 +124,9 @@ The full IPv4 (resp. IPv6) routing table.
 
 - `… detail` — IOS-XR-style routing-descriptor blocks: distance, metric,
   age, and per-nexthop detail (labels, weight, protection).
-- `… prefix <A.B.C.D/M>` (`<X::Y/M>` for v6) `[detail]` — just the one
-  prefix.
+- `… {<A.B.C.D>|<A.B.C.D/M>}` (`<X::X>`/`<X::Y/M>` for v6) `[detail]` —
+  just the one route: a bare address shows the longest match (the route
+  that contains it), a prefix matches exactly.
 - `… vrf [<name>] [detail]` — the table for one VRF, or every VRF when
   `<name>` is omitted.
 
@@ -138,7 +139,7 @@ Codes: K - kernel, C - connected, S - static, O - OSPF,
 O   *> 10.0.0.0/24 [110/100] via 10.1.1.1, eth0, 00:12:34
 C   *> 10.1.1.0/24 is directly connected, eth0, 00:05:43
 
-r1> show ip route prefix 10.0.0.0/24 detail
+r1> show ip route 10.0.0.0/24 detail
 Routing entry for 10.0.0.0/24
   Known via "ospf", distance 110, metric 100
   Last update 00:12:34 ago

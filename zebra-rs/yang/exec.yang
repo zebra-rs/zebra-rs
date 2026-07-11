@@ -540,20 +540,28 @@ module exec {
       container route {
         ext:help "IPv4 routing table";
         presence "Show IPv4 routes";
+        // A bare address or prefix typed straight after `route` lands
+        // in the positional-only `prefix` list below — the `show bgp
+        // A.B.C.D` UX. There is no keyword spelling: the old `show ip
+        // route prefix A.B.C.D/M` form was removed.
+        ext:default-child "prefix";
         leaf detail {
           ext:help "Show all routes in detail format (IOS-XR style)";
           type empty;
         }
         list prefix {
-          ext:help "Filter to a specific IPv4 prefix";
-          ext:presence "Show one IPv4 prefix";
+          ext:help "Filter to one route";
+          ext:positional "show ip route {<A.B.C.D>|<A.B.C.D/M>}";
           key value;
           leaf value {
-            ext:help "IPv4 prefix (A.B.C.D/M)";
-            type inet:ipv4-prefix;
+            ext:help "Address (longest match) or prefix (exact match)";
+            type union {
+              type inet:ipv4-address;
+              type inet:ipv4-prefix;
+            }
           }
           leaf detail {
-            ext:help "Show this prefix in detail format";
+            ext:help "Show this route in detail format";
             type empty;
           }
         }
@@ -859,20 +867,26 @@ module exec {
       container route {
         ext:help "IPv6 routing table";
         presence "Show IPv6 routes";
+        // Positional address/prefix filter — the v6 twin of `show ip
+        // route` above.
+        ext:default-child "prefix";
         leaf detail {
           ext:help "Show all routes in detail format (IOS-XR style)";
           type empty;
         }
         list prefix {
-          ext:help "Filter to a specific IPv6 prefix";
-          ext:presence "Show one IPv6 prefix";
+          ext:help "Filter to one route";
+          ext:positional "show ipv6 route {<X:X::X:X>|<X:X::X:X/M>}";
           key value;
           leaf value {
-            ext:help "IPv6 prefix (X:X::X:X/M)";
-            type inet:ipv6-prefix;
+            ext:help "Address (longest match) or prefix (exact match)";
+            type union {
+              type inet:ipv6-address;
+              type inet:ipv6-prefix;
+            }
           }
           leaf detail {
-            ext:help "Show this prefix in detail format";
+            ext:help "Show this route in detail format";
             type empty;
           }
         }
