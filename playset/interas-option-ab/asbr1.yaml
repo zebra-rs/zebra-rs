@@ -11,7 +11,8 @@
 #    hop, a freshly allocated per-VRF label, and the VRF's export RT
 #    replacing the received RTs — exactly Cisco's Option AB route
 #    distribution. The re-export is locally originated, so
-#    next-hop-self is automatic on both legs (no knob, unlike B).
+#    next-hop-self is automatic on both legs (no knob, unlike B) —
+#    including toward both PEs, each on its own iBGP session.
 vrf:
 - name: cust1
   ipv4:
@@ -27,6 +28,13 @@ vrf:
       - 65501:200
       export:
       - 65501:200
+- name: cust3
+  ipv4:
+    route-target:
+      import:
+      - 65501:300
+      export:
+      - 65501:300
 interface:
 - if-name: lo
   ipv4:
@@ -66,7 +74,7 @@ router:
         ibgp: 1
         ebgp: 1
     neighbor:
-    - remote-address: 1.1.1.1        # PE1 — iBGP VPNv4 (no next-hop-self needed)
+    - remote-address: 1.1.1.1        # PE1 — iBGP VPNv4 (no next-hop-self!)
       remote-as: 65501
       timers: {connect-retry-time: 3}
       update-source: 1.1.1.3
@@ -74,7 +82,15 @@ router:
       afi-safi:
       - name: vpnv4
         enabled: true
-    - remote-address: 192.168.100.2  # ASBR2 — single eBGP VPNv4, ALL customers
+    - remote-address: 1.1.1.4        # PE2 — iBGP VPNv4 (no next-hop-self!)
+      remote-as: 65501
+      timers: {connect-retry-time: 3}
+      update-source: 1.1.1.3
+      enabled: true
+      afi-safi:
+      - name: vpnv4
+        enabled: true
+    - remote-address: 192.168.100.2  # ASBR2 — ONE eBGP VPNv4, all customers
       remote-as: 65502
       timers: {connect-retry-time: 3}
       enabled: true
@@ -84,7 +100,10 @@ router:
     vrf:
     - name: cust1
       rd: 65501:11
-      inter-as-hybrid: true
+      inter-as-hybrid: true          # <- THE Option AB knob
     - name: cust2
       rd: 65501:12
+      inter-as-hybrid: true
+    - name: cust3
+      rd: 65501:13
       inter-as-hybrid: true

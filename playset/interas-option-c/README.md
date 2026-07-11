@@ -306,8 +306,7 @@ $ ./down.sh
 
 ## Appendix: Addressing & sessions
 
-This lab (and its AB and C-RR siblings) uses the pared ten-node variant
-of the reference topology:
+This lab uses the pared ten-node variant of the reference topology:
 
 | node  | role             | AS    | loopback     | SR SID (label)  |
 |:------|:-----------------|:------|:-------------|:----------------|

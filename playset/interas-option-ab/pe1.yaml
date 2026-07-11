@@ -1,6 +1,7 @@
-# PE1 — provider edge, AS 65501. Same shape as the Option A playset with
-# one crucial difference: the route-targets are COORDINATED with AS 65502
-# (both providers import/export 65501:100 / 65501:200) — in Option B the
+# PE1 — provider edge, AS 65501, serving cust1 (CE1) and cust2 (CE2).
+# Same shape as the Option A playset with one crucial difference: the
+# route-targets are COORDINATED with AS 65502 (both providers
+# import/export 65501:100 / 65501:200 / 65501:300) — in Option B the
 # VPNv4 routes cross the boundary with their attributes intact, so the
 # far PE imports by the same RT.
 vrf:
