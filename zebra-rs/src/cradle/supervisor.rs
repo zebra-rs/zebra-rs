@@ -1,5 +1,8 @@
 //! Child-process lifecycle for the managed cradle engine: adopt-or-spawn,
-//! restart with backoff, graceful stop, and log forwarding.
+//! restart with backoff, graceful stop, and log forwarding. Engine
+//! availability transitions are reported to the [`super::inst`] task as
+//! [`EngineEvent`]s, which drive the port reconcile (a fresh engine has
+//! empty maps, so every port must be re-applied).
 
 use std::path::PathBuf;
 use std::process::Stdio;
@@ -7,14 +10,31 @@ use std::time::Duration;
 
 use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::process::{Child, Command};
+use tokio::sync::mpsc::UnboundedSender;
 use tokio::sync::watch;
 use tokio::time::Instant;
 use tracing::{info, warn};
+
+/// Engine availability, as observed by the supervisor loop. Consumers must
+/// treat both as idempotent (`Down` may arrive for an engine that never
+/// went `Up`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EngineEvent {
+    /// The engine answers its gRPC API (spawned child became ready, or a
+    /// running instance was adopted).
+    Up,
+    /// The engine is gone (child exited, adopted instance stopped
+    /// answering, or the supervisor is stopping).
+    Down,
+}
 
 /// Binary resolution override (mirrors `ZEBRA_XDP_BFD_ECHO_BIN`).
 const BIN_ENV: &str = "ZEBRA_CRADLE_BIN";
 /// Liveness-probe cadence for an adopted (externally-started) engine.
 const PROBE_INTERVAL: Duration = Duration::from_secs(5);
+/// Readiness-probe cadence for a just-spawned child (it loads the eBPF
+/// object before serving gRPC).
+const READY_INTERVAL: Duration = Duration::from_millis(500);
 /// Respawn backoff bounds; reset after a run this long counts as healthy.
 const BACKOFF_MIN: Duration = Duration::from_secs(1);
 const BACKOFF_MAX: Duration = Duration::from_secs(30);
@@ -98,9 +118,15 @@ async fn graceful_stop(mut child: Child) {
 
 /// The supervisor loop for one endpoint. Adopt-or-spawn, then hold: an
 /// adopted engine is probed for liveness (and never killed — it isn't
-/// ours); a spawned child is waited on and respawned with backoff. Exits
-/// when `shutdown` flips, stopping only a child we spawned.
-pub(crate) async fn run(endpoint: String, mut shutdown: watch::Receiver<bool>) {
+/// ours); a spawned child is probed until ready, then waited on and
+/// respawned with backoff. Exits when `shutdown` flips, stopping only a
+/// child we spawned. Every path that leaves the engine unusable sends
+/// [`EngineEvent::Down`] (idempotently) so the port reconcile resets.
+pub(crate) async fn run(
+    endpoint: String,
+    mut shutdown: watch::Receiver<bool>,
+    events: UnboundedSender<EngineEvent>,
+) {
     let mut backoff = BACKOFF_MIN;
     loop {
         if *shutdown.borrow() {
@@ -111,12 +137,17 @@ pub(crate) async fn run(endpoint: String, mut shutdown: watch::Receiver<bool>) {
         // bind the endpoint). If it dies later, fall through and spawn.
         if probe(&endpoint).await {
             info!("cradle: adopting already-running engine at {endpoint}");
+            let _ = events.send(EngineEvent::Up);
             loop {
                 tokio::select! {
-                    _ = shutdown.changed() => return,
+                    _ = shutdown.changed() => {
+                        let _ = events.send(EngineEvent::Down);
+                        return;
+                    }
                     _ = tokio::time::sleep(PROBE_INTERVAL) => {
                         if !probe(&endpoint).await {
                             warn!("cradle: adopted engine at {endpoint} stopped answering");
+                            let _ = events.send(EngineEvent::Down);
                             break;
                         }
                     }
@@ -133,16 +164,29 @@ pub(crate) async fn run(endpoint: String, mut shutdown: watch::Receiver<bool>) {
                     bin.display(),
                     child.id()
                 );
-                tokio::select! {
-                    _ = shutdown.changed() => {
-                        graceful_stop(child).await;
-                        info!("cradle: engine stopped (system ebpf disabled)");
-                        return;
+                // Probe until the engine serves its API (readiness), then
+                // hold until it exits or we are asked to stop.
+                let mut ready = false;
+                let status = loop {
+                    tokio::select! {
+                        _ = shutdown.changed() => {
+                            graceful_stop(child).await;
+                            let _ = events.send(EngineEvent::Down);
+                            info!("cradle: engine stopped (system ebpf disabled)");
+                            return;
+                        }
+                        status = child.wait() => break status,
+                        _ = tokio::time::sleep(READY_INTERVAL), if !ready => {
+                            if probe(&endpoint).await {
+                                ready = true;
+                                info!("cradle: engine ready at {endpoint}");
+                                let _ = events.send(EngineEvent::Up);
+                            }
+                        }
                     }
-                    status = child.wait() => {
-                        warn!("cradle: engine exited ({status:?}); respawning in {backoff:?}");
-                    }
-                }
+                };
+                let _ = events.send(EngineEvent::Down);
+                warn!("cradle: engine exited ({status:?}); respawning in {backoff:?}");
                 if started.elapsed() >= HEALTHY_RESET {
                     backoff = BACKOFF_MIN;
                 }

@@ -1,15 +1,17 @@
 use super::ConfigManager;
 
 /// Spawn the cradle engine-supervisor task. Triggered by [`commit_config`]
-/// on the first config line under `system ebpf` or `system cradle`, so the
-/// task sees every relevant leaf of that same commit — including a
-/// `system cradle grpc-endpoint` committed before (or without) the
-/// `system ebpf enabled` switch itself.
+/// on the first config line under `system ebpf`, `system cradle`, or an
+/// `interface … ebpf` leaf, so the task sees every relevant leaf of that
+/// same commit — including a `system cradle grpc-endpoint` or a port
+/// membership committed before (or without) the `system ebpf enabled`
+/// switch itself.
 ///
-/// Mirrors `spawn_nd`: hosts that never touch either subtree don't run the
-/// task. The task is idle until `system ebpf enabled true` commits; the FIB
-/// tee (`system cradle enabled`) stays with the RIB task and needs no
-/// spawn here.
+/// Mirrors `spawn_nd`: hosts that never touch these subtrees don't run the
+/// task. The FIB tee (`system cradle enabled`) stays with the RIB task and
+/// needs no spawn here; this task manages the engine process and its port
+/// set (default-VRF links — the RIB subscription is bound to the default
+/// VRF, matching the `SetPort` vrf 0 scope).
 ///
 /// [`commit_config`]: crate::config::ConfigManager::commit_config
 pub fn spawn_cradle(config: &ConfigManager) {
@@ -21,7 +23,8 @@ pub fn spawn_cradle(config: &ConfigManager) {
         if config.protocol_tasks.borrow().contains_key("cradle") {
             return;
         }
-        let cradle = crate::cradle::Cradle::new();
+        let (_rib_client, rib_rx) = config.subscribe_to_rib("cradle");
+        let cradle = crate::cradle::Cradle::new(rib_rx);
         config.subscribe("cradle", cradle.cm.tx.clone());
         let task = crate::cradle::serve(cradle);
         config

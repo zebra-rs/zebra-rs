@@ -220,6 +220,40 @@ impl CradleFib {
         })
     }
 
+    /// Attach `name` as a data-plane port (`SetPort`): cradle resolves the
+    /// ifindex, attaches the TC/XDP programs, and derives the port's
+    /// local + connected routes. Scope for now: a routed port in the
+    /// global VRF (`l3`, vlan 0, vrf 0) — VRF/bridge binding follows with
+    /// the dynamic L2/L3 assignment work. Idempotent on cradle's side.
+    pub async fn set_port(&self, name: &str) -> anyhow::Result<()> {
+        self.client()
+            .await?
+            .set_port(pb::Port {
+                name: name.to_string(),
+                mac: String::new(),
+                l3: true,
+                vlan: 0,
+                vrf_id: 0,
+            })
+            .await?;
+        Ok(())
+    }
+
+    /// Inverse of [`Self::set_port`]: detach the programs and drop the
+    /// port's map entries, derived routes, and learned FDB entries.
+    /// cradle resolves by current ifindex with a fallback to the
+    /// attach-time name, so this also cleans up after the device itself
+    /// is gone. Idempotent (an unknown port is a no-op).
+    pub async fn del_port(&self, name: &str) -> anyhow::Result<()> {
+        self.client()
+            .await?
+            .del_port(pb::PortDel {
+                name: name.to_string(),
+            })
+            .await?;
+        Ok(())
+    }
+
     /// Lazily connect (and cache) the gRPC client.
     async fn client(&self) -> anyhow::Result<CradleClient<Channel>> {
         let mut guard = self.client.lock().await;
