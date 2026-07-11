@@ -471,6 +471,7 @@ mod tests {
             master: None,
             vni: None,
             vrf_table: None,
+            bridge: false,
             vxlan_local: None,
             mtu_error: None,
         }

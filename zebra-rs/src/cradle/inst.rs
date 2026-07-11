@@ -48,6 +48,22 @@ struct LinkState {
     master: Option<u32>,
     /// `IFLA_VRF_TABLE` when this link IS a VRF master device.
     vrf_table: Option<u32>,
+    /// This link IS a kernel bridge (`IFLA_INFO_KIND == "bridge"`).
+    bridge: bool,
+    /// `IFLA_VXLAN_ID` when this link is a VXLAN device — a bridge's
+    /// VXLAN slave names the EVPN bridge domain (VNI) the bridge carries.
+    vni: Option<u32>,
+}
+
+/// How an `interface … ebpf enabled` port binds into the data plane,
+/// derived from the interface's `master` in link state.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum PortRole {
+    /// Routed port: ingress lookups (and derived local/connected routes)
+    /// use VRF table `vrf` (0 = global).
+    L3 { vrf: u32 },
+    /// Switched port: L2 learn/forward/flood in bridge domain `bd`.
+    L2 { bd: u16 },
 }
 
 /// Last observed engine availability, tracked from [`EngineEvent`]s for
@@ -93,12 +109,23 @@ pub struct Cradle {
     /// by the link dump at subscribe time; `global_links`, so VRF
     /// enslavement never hides a link).
     links: HashMap<u32, LinkState>,
+    /// Bridge-domain id per bridge device (ifindex), recomputed from link
+    /// state on every link change: a VXLAN slave's VNI when the bridge
+    /// carries one (EVPN — ports must share the bd the FDB tee uses),
+    /// else an id auto-allocated per bridge name.
+    bd_by_ifindex: HashMap<u32, u16>,
+    /// Stable auto-allocated bd ids, keyed by bridge name so a bridge
+    /// keeps its id across ifindex churn.
+    bd_alloc: BTreeMap<String, u16>,
     engine: Option<Engine>,
     /// Last observed engine availability (from [`EngineEvent`]s).
     status: EngineStatus,
     /// Ports applied to the current engine:
-    /// if-name → (ifindex, VRF table) used in the `SetPort`.
-    applied: HashMap<String, (u32, u32)>,
+    /// if-name → (ifindex, role) used in the `SetPort`.
+    applied: HashMap<String, (u32, PortRole)>,
+    /// Flood-member lists last sent per bridge domain (`SetL2Domain` is
+    /// replace-style); re-derived from `applied` and re-sent on drift.
+    applied_domains: HashMap<u16, Vec<String>>,
     /// Port-programming client for [`Self::client_endpoint`].
     ports_client: Option<CradleFib>,
     client_endpoint: Option<String>,
@@ -119,9 +146,12 @@ impl Cradle {
             grpc_endpoint: None,
             if_ebpf: BTreeMap::new(),
             links: HashMap::new(),
+            bd_by_ifindex: HashMap::new(),
+            bd_alloc: BTreeMap::new(),
             engine: None,
             status: EngineStatus::default(),
             applied: HashMap::new(),
+            applied_domains: HashMap::new(),
             ports_client: None,
             client_endpoint: None,
         }
@@ -194,13 +224,67 @@ impl Cradle {
                         name: link.name,
                         master: link.master,
                         vrf_table: link.vrf_table,
+                        bridge: link.bridge,
+                        vni: link.vni,
                     },
                 );
+                self.recompute_bds();
             }
             RibRx::LinkDel(ifindex) => {
                 self.links.remove(&ifindex);
+                self.recompute_bds();
             }
             _ => {}
+        }
+    }
+
+    /// Re-derive every bridge's domain id from link state. Preference
+    /// order per bridge: the VNI of a VXLAN slave when it fits a u16
+    /// (EVPN — the ports must land in the same bd the EVPN FDB tee
+    /// programs), else a stable auto-allocated id (smallest unused,
+    /// per bridge name, skipping ids claimed by any known VNI).
+    fn recompute_bds(&mut self) {
+        self.bd_by_ifindex.clear();
+        let vni_claimed: std::collections::HashSet<u16> = self
+            .links
+            .values()
+            .filter_map(|l| l.vni)
+            .filter_map(|v| u16::try_from(v).ok())
+            .collect();
+        let bridges: Vec<(u32, String)> = self
+            .links
+            .iter()
+            .filter(|(_, l)| l.bridge)
+            .map(|(ifindex, l)| (*ifindex, l.name.clone()))
+            .collect();
+        for (ifindex, name) in bridges {
+            let vni_bd = self
+                .links
+                .values()
+                .find(|l| l.master == Some(ifindex) && l.vni.is_some())
+                .and_then(|l| l.vni)
+                .and_then(|v| u16::try_from(v).ok());
+            let bd = match vni_bd {
+                Some(bd) => bd,
+                None => match self.bd_alloc.get(&name) {
+                    Some(bd) => *bd,
+                    None => {
+                        let used: std::collections::HashSet<u16> = self
+                            .bd_alloc
+                            .values()
+                            .copied()
+                            .chain(vni_claimed.iter().copied())
+                            .collect();
+                        let Some(bd) = (1..=4094u16).find(|id| !used.contains(id)) else {
+                            warn!("cradle: no free bridge-domain id for {name}");
+                            continue;
+                        };
+                        self.bd_alloc.insert(name.clone(), bd);
+                        bd
+                    }
+                },
+            };
+            self.bd_by_ifindex.insert(ifindex, bd);
         }
     }
 
@@ -228,20 +312,26 @@ impl Cradle {
         }
     }
 
-    /// The `SetPort` binding for an interface: its ifindex plus the VRF
-    /// table it is enslaved to (0 = default). The table comes straight
-    /// from link state — the interface's `master` resolved to that
-    /// device's `IFLA_VRF_TABLE` — so config-driven (`interface X vrf`)
-    /// and externally-applied enslavement both bind the port. A bridge
-    /// master has no VRF table and yields 0.
-    fn port_binding(&self, name: &str) -> Option<(u32, u32)> {
+    /// The `SetPort` binding for an interface: its ifindex plus the role
+    /// its `master` implies, straight from link state — so config-driven
+    /// (`interface X vrf|bridge …`) and externally-applied enslavement
+    /// both bind the port:
+    /// - master is a bridge  ⇒ `L2` in the bridge's domain
+    ///   (`bd_by_ifindex`),
+    /// - master is a VRF     ⇒ `L3` in that kernel table,
+    /// - no master           ⇒ `L3` in the global table.
+    fn port_binding(&self, name: &str) -> Option<(u32, PortRole)> {
         let (ifindex, link) = self.links.iter().find(|(_, l)| l.name.as_str() == name)?;
-        let vrf = link
-            .master
-            .and_then(|m| self.links.get(&m))
-            .and_then(|m| m.vrf_table)
-            .unwrap_or(0);
-        Some((*ifindex, vrf))
+        let role = match link.master.and_then(|m| self.links.get(&m).map(|l| (m, l))) {
+            Some((m, master)) if master.bridge => PortRole::L2 {
+                bd: *self.bd_by_ifindex.get(&m)?,
+            },
+            Some((_, master)) => PortRole::L3 {
+                vrf: master.vrf_table.unwrap_or(0),
+            },
+            None => PortRole::L3 { vrf: 0 },
+        };
+        Some((*ifindex, role))
     }
 
     /// The configured endpoint (override or default), independent of
@@ -425,7 +515,14 @@ impl Cradle {
                     serde_json::json!({
                         "name": name,
                         "ifindex": binding.map(|(i, _)| i),
-                        "vrf": binding.map(|(_, v)| v),
+                        "vrf": binding.and_then(|(_, role)| match role {
+                            PortRole::L3 { vrf } => Some(vrf),
+                            PortRole::L2 { .. } => None,
+                        }),
+                        "bd": binding.and_then(|(_, role)| match role {
+                            PortRole::L2 { bd } => Some(bd),
+                            PortRole::L3 { .. } => None,
+                        }),
                         "attached": binding.is_some()
                             && self.applied.get(name) == binding.as_ref(),
                     })
@@ -507,18 +604,20 @@ impl Cradle {
         .unwrap();
         for name in enabled {
             match (self.port_binding(name), self.applied.get(name)) {
-                (Some(binding), Some(applied)) if *applied == binding => {
-                    let (ifindex, vrf) = binding;
+                (Some(binding), applied) => {
+                    let (ifindex, role) = binding;
+                    let role_col = match role {
+                        PortRole::L3 { vrf } => format!("vrf {vrf}"),
+                        PortRole::L2 { bd } => format!("bd {bd}"),
+                    };
+                    let state = if applied == Some(&binding) {
+                        "attached"
+                    } else {
+                        "pending"
+                    };
                     writeln!(
                         out,
-                        "    {name:<16} ifindex {ifindex:<6} vrf {vrf:<5} attached"
-                    )
-                    .unwrap();
-                }
-                (Some((ifindex, vrf)), _) => {
-                    writeln!(
-                        out,
-                        "    {name:<16} ifindex {ifindex:<6} vrf {vrf:<5} pending"
+                        "    {name:<16} ifindex {ifindex:<6} {role_col:<9} {state}"
                     )
                     .unwrap();
                 }
@@ -561,14 +660,63 @@ impl Cradle {
         }
     }
 
-    /// Diff-based port reconcile: make the engine's port set match the
-    /// `interface <name> ebpf enabled` config for the links that currently
-    /// exist. Failures stay pending and are retried on [`RETRY_TICK`].
+    /// Flood-member list for bridge domain `bd`, derived from the applied
+    /// ports (single source of truth — `SetL2Domain` is replace-style).
+    fn domain_members(&self, bd: u16) -> Vec<String> {
+        let mut members: Vec<String> = self
+            .applied
+            .iter()
+            .filter(|(_, (_, role))| *role == (PortRole::L2 { bd }))
+            .map(|(name, _)| name.clone())
+            .collect();
+        members.sort();
+        members
+    }
+
+    /// Re-send every bridge domain whose derived flood-member list drifted
+    /// from the last successful `SetL2Domain` (including down to empty).
+    async fn sync_domains(&mut self, client: &CradleFib) {
+        let bds: std::collections::BTreeSet<u16> = self
+            .applied_domains
+            .keys()
+            .copied()
+            .chain(self.applied.values().filter_map(|(_, role)| match role {
+                PortRole::L2 { bd } => Some(*bd),
+                PortRole::L3 { .. } => None,
+            }))
+            .collect();
+        for bd in bds {
+            let members = self.domain_members(bd);
+            if self.applied_domains.get(&bd).map(|m| m.as_slice()) == Some(members.as_slice()) {
+                continue;
+            }
+            match client.set_l2_domain(bd, members.clone()).await {
+                Ok(()) => {
+                    info!("cradle: bd {bd} flood members {members:?}");
+                    if members.is_empty() {
+                        self.applied_domains.remove(&bd);
+                    } else {
+                        self.applied_domains.insert(bd, members);
+                    }
+                }
+                Err(e) => warn!("cradle: SetL2Domain bd {bd} failed: {e} (will retry)"),
+            }
+        }
+    }
+
+    /// Diff-based port reconcile: make the engine's port set — and the L2
+    /// flood domains — match the `interface <name> ebpf enabled` config
+    /// for the links that currently exist. Three phases keep the design
+    /// invariant "a port is never reachable by the flood path while its
+    /// PORTS entry says L3": domain removals land before role flips, and
+    /// domain additions after. Failures stay pending and are retried on
+    /// [`RETRY_TICK`].
     async fn reconcile_ports(&mut self) {
         let Some(endpoint) = self.usable_endpoint() else {
             // No engine to program (disabled, or managed engine not up):
             // its state is gone or not ours — just reset ours.
             self.applied.clear();
+            self.applied_domains.clear();
             self.ports_client = None;
             self.client_endpoint = None;
             return;
@@ -579,36 +727,51 @@ impl Cradle {
             self.ports_client = Some(CradleFib::new(&endpoint));
             self.client_endpoint = Some(endpoint.clone());
             self.applied.clear();
+            self.applied_domains.clear();
         }
         let client = self.ports_client.as_ref().expect("set above").clone();
 
-        // 1) Detach ports that no longer match: disabled, link gone, or the
-        //    device was re-created under a new ifindex. cradle resolves by
-        //    attach-time name when the device is gone, so DelPort also
-        //    cleans up after deleted links. A VRF-binding change alone is
-        //    NOT a detach — step 2 re-SetPorts in place (cradle overwrites
-        //    the port entry and re-derives its routes under the new VRF).
-        for (name, (applied_ifindex, _)) in self.applied.clone() {
+        // Phase A — take leavers out of their flood domains first: ports
+        // being detached, and ports staying attached but leaving a bd
+        // (L2→L3 or a bridge move). Dropping them from `applied` makes
+        // `domain_members` exclude them; `sync_domains` pushes the
+        // shrunken lists. The ports re-enter `applied` in phase B with
+        // their new binding; those that left a bd but stay attached also
+        // get their learned MACs flushed at the end.
+        let mut flush_after: Vec<String> = Vec::new();
+        for (name, (applied_ifindex, applied_role)) in self.applied.clone() {
             let enabled = self.if_ebpf.get(&name).copied().unwrap_or(false);
-            if enabled
-                && self
-                    .port_binding(&name)
-                    .is_some_and(|(ifindex, _)| ifindex == applied_ifindex)
-            {
+            let binding = self.port_binding(&name);
+            let same_device =
+                enabled && binding.is_some_and(|(ifindex, _)| ifindex == applied_ifindex);
+            let same_binding = same_device && binding.is_some_and(|(_, role)| role == applied_role);
+            if same_binding {
                 continue;
             }
-            match client.del_port(&name).await {
-                Ok(()) => {
-                    info!("cradle: detached port {name}");
-                    self.applied.remove(&name);
+            if matches!(applied_role, PortRole::L2 { .. }) {
+                // Out of the flood list before anything else changes.
+                self.applied.remove(&name);
+                if same_device {
+                    flush_after.push(name.clone());
                 }
-                Err(e) => warn!("cradle: DelPort {name} failed: {e} (will retry)"),
+            }
+            if !same_device {
+                // Disabled, link gone, or re-created under a new ifindex:
+                // full detach (DelPort flushes the port's MACs engine-side
+                // and tolerates already-gone devices).
+                self.applied.remove(&name);
+                match client.del_port(&name).await {
+                    Ok(()) => info!("cradle: detached port {name}"),
+                    Err(e) => warn!("cradle: DelPort {name} failed: {e} (will retry)"),
+                }
             }
         }
+        self.sync_domains(&client).await;
 
-        // 2) Attach enabled ports whose link exists and isn't applied with
-        //    the current (ifindex, VRF) binding — covers first attach,
-        //    re-attach after step 1, and in-place VRF moves.
+        // Phase B — apply `SetPort` for every enabled port whose (ifindex,
+        // role) isn't current: first attach, re-attach after a detach, and
+        // in-place role/VRF/bd moves (cradle overwrites the port entry and
+        // re-reconciles its derived routes).
         let wanted: Vec<String> = self
             .if_ebpf
             .iter()
@@ -616,18 +779,42 @@ impl Cradle {
             .map(|(name, _)| name.clone())
             .collect();
         for name in wanted {
-            let Some((ifindex, vrf)) = self.port_binding(&name) else {
+            let Some((ifindex, role)) = self.port_binding(&name) else {
                 continue;
             };
-            if self.applied.get(&name) == Some(&(ifindex, vrf)) {
+            if self.applied.get(&name) == Some(&(ifindex, role)) {
                 continue;
             }
-            match client.set_port(&name, vrf).await {
+            let (l3, vlan, vrf) = match role {
+                PortRole::L3 { vrf } => (true, 0, vrf),
+                PortRole::L2 { bd } => (false, bd, 0),
+            };
+            match client.set_port(&name, l3, vlan, vrf).await {
                 Ok(()) => {
-                    info!("cradle: attached port {name} (ifindex {ifindex}, vrf {vrf})");
-                    self.applied.insert(name, (ifindex, vrf));
+                    match role {
+                        PortRole::L3 { vrf } => {
+                            info!("cradle: attached port {name} (ifindex {ifindex}, vrf {vrf})");
+                        }
+                        PortRole::L2 { bd } => {
+                            info!("cradle: attached port {name} (ifindex {ifindex}, bd {bd})");
+                        }
+                    }
+                    self.applied.insert(name, (ifindex, role));
                 }
                 Err(e) => warn!("cradle: SetPort {name} failed: {e} (will retry)"),
+            }
+        }
+
+        // Phase C — grow the flood domains to include the newly-applied L2
+        // ports (their mode is already switched), then flush the learned
+        // MACs of ports that left a bd but stayed attached.
+        self.sync_domains(&client).await;
+        for name in flush_after {
+            match client.flush_fdb_port(&name).await {
+                Ok(()) => {
+                    info!("cradle: flushed learned MACs on {name} (left its bridge domain)");
+                }
+                Err(e) => warn!("cradle: FlushFdb {name} failed: {e}"),
             }
         }
     }

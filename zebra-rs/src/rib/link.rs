@@ -64,6 +64,11 @@ pub struct Link {
     /// `master` to its VRF table straight from link state.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub vrf_table: Option<u32>,
+    /// This device is a kernel bridge (`IFLA_INFO_KIND == "bridge"`).
+    /// The cradle port reconcile classifies a slave's `master` with it:
+    /// bridge ⇒ L2 port in the bridge's flood domain, VRF ⇒ routed port.
+    #[serde(skip)]
+    pub bridge: bool,
     /// Last failure reason from applying the operator-configured MTU
     /// (`mtu_config` keyed by name on `Rib`). `None` once a set
     /// succeeds. Rendered by `show interface` so a kernel rejection
@@ -92,6 +97,7 @@ impl Link {
             vni: link.vni,
             vxlan_local: link.vxlan_local,
             vrf_table: link.vrf_table,
+            bridge: link.bridge,
             mtu_error: None,
         }
     }
@@ -692,6 +698,16 @@ impl Rib {
                 // pick, which excludes VRF members) may now derive a
                 // different Router-ID.
                 self.router_id_update();
+            } else if prev_master != now_master
+                && let Some(link) = self.links.get(&ifindex).cloned()
+            {
+                // A master change that stays within one VRF id — bridge
+                // enslave/release, or a move between bridges — migrates
+                // no subscriber set, but the link's `master` is
+                // load-bearing for `global_links` consumers (the cradle
+                // port reconcile classifies a port L2/L3 from it).
+                // Re-announce the updated link as an upsert.
+                self.api_link_add_vrf(&link, now_vrf_id);
             }
         }
 
@@ -1334,6 +1350,7 @@ mod tests {
             master: None,
             vni: None,
             vrf_table: None,
+            bridge: false,
             vxlan_local: None,
             mtu_error: None,
         }
