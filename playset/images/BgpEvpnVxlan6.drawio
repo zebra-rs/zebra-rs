@@ -1,0 +1,86 @@
+<mxfile host="Electron">
+  <diagram name="bgp-evpn-vxlan6" id="evpnVxlan6Base">
+    <mxGraphModel dx="820" dy="560" grid="1" gridSize="10" guides="1" tooltips="1" connect="1" arrows="1" fold="1" page="1" pageScale="1" pageWidth="860" pageHeight="360" background="#FFFFFF" math="0" shadow="0">
+      <root>
+        <mxCell id="0" />
+        <mxCell id="1" parent="0" />
+        <mxCell id="domain-box" parent="1" style="rounded=1;whiteSpace=wrap;html=1;fillColor=none;dashed=1;strokeColor=#999999;" value="" vertex="1">
+          <mxGeometry height="138" width="830" x="15" y="112" as="geometry" />
+        </mxCell>
+        <mxCell id="domain-title" parent="1" style="text;html=1;whiteSpace=wrap;strokeColor=none;fillColor=none;align=left;verticalAlign=middle;rounded=0;fontSize=12;fontColor=#333333;" value="VNI 10 — one stretched L2 segment (172.16.10.0/24)" vertex="1">
+          <mxGeometry height="20" width="420" x="26" y="120" as="geometry" />
+        </mxCell>
+        <mxCell id="cp-edge" edge="1" parent="1" source="vtep1-box" target="vtep2-box" style="endArrow=none;html=1;curved=1;dashed=1;strokeColor=#A02C93;exitX=0.5;exitY=0;exitDx=0;exitDy=0;entryX=0.5;entryY=0;entryDx=0;entryDy=0;fontSize=10;fontColor=#A02C93;" value="iBGP over IPv6 · AS 65001 · EVPN — Type-3 IMET + Type-2 MAC">
+          <mxGeometry height="50" relative="1" width="50" as="geometry">
+            <Array as="points">
+              <mxPoint x="430" y="60" />
+            </Array>
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="e-h1-br10" edge="1" parent="1" source="h1" target="br10-1" style="endArrow=none;html=1;rounded=0;strokeColor=#0499D4;" value="vtep1-h1">
+          <mxGeometry height="50" relative="1" width="50" as="geometry" />
+        </mxCell>
+        <mxCell id="e-inner1" edge="1" parent="1" source="br10-1" target="vxlan10-1" style="endArrow=none;html=1;rounded=0;strokeColor=#777777;" value="">
+          <mxGeometry height="50" relative="1" width="50" as="geometry" />
+        </mxCell>
+        <mxCell id="e-tunnel" edge="1" parent="1" source="vxlan10-1" target="vxlan10-2" style="endArrow=none;html=1;rounded=0;strokeColor=#E97131;strokeWidth=3;fontSize=9;fontColor=#E97131;" value="VXLAN tunnel · VNI 10 · UDP/IPv6 4789">
+          <mxGeometry height="50" relative="1" width="50" as="geometry" />
+        </mxCell>
+        <mxCell id="e-inner2" edge="1" parent="1" source="vxlan10-2" target="br10-2" style="endArrow=none;html=1;rounded=0;strokeColor=#777777;" value="">
+          <mxGeometry height="50" relative="1" width="50" as="geometry" />
+        </mxCell>
+        <mxCell id="e-br10-h2" edge="1" parent="1" source="br10-2" target="h2" style="endArrow=none;html=1;rounded=0;strokeColor=#0499D4;" value="vtep2-h2">
+          <mxGeometry height="50" relative="1" width="50" as="geometry" />
+        </mxCell>
+        <mxCell id="vtep1-box" parent="1" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#F7FBFE;strokeColor=#0E9ED5;verticalAlign=top;spacingTop=4;fontSize=11;fontColor=#333333;" value="vtep1" vertex="1">
+          <mxGeometry height="84" width="170" x="200" y="138" as="geometry" />
+        </mxCell>
+        <mxCell id="vtep2-box" parent="1" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#F7FBFE;strokeColor=#0E9ED5;verticalAlign=top;spacingTop=4;fontSize=11;fontColor=#333333;" value="vtep2" vertex="1">
+          <mxGeometry height="84" width="170" x="490" y="138" as="geometry" />
+        </mxCell>
+        <mxCell id="br10-1" parent="1" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#E1E1E1;strokeColor=#999999;fontSize=9;fontColor=#333333;" value="br10" vertex="1">
+          <mxGeometry height="38" width="64" x="214" y="166" as="geometry" />
+        </mxCell>
+        <mxCell id="vxlan10-1" parent="1" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#FFF2CC;strokeColor=#D6B656;fontSize=9;fontColor=#333333;" value="vxlan10" vertex="1">
+          <mxGeometry height="38" width="64" x="294" y="166" as="geometry" />
+        </mxCell>
+        <mxCell id="vxlan10-2" parent="1" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#FFF2CC;strokeColor=#D6B656;fontSize=9;fontColor=#333333;" value="vxlan10" vertex="1">
+          <mxGeometry height="38" width="64" x="502" y="166" as="geometry" />
+        </mxCell>
+        <mxCell id="br10-2" parent="1" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#E1E1E1;strokeColor=#999999;fontSize=9;fontColor=#333333;" value="br10" vertex="1">
+          <mxGeometry height="38" width="64" x="582" y="166" as="geometry" />
+        </mxCell>
+        <mxCell id="h1" parent="1" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#0499D4;strokeColor=none;fontSize=10;fontColor=#FFFFFF;" value="h1" vertex="1">
+          <mxGeometry height="36" width="52" x="30" y="167" as="geometry" />
+        </mxCell>
+        <mxCell id="h2" parent="1" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#0499D4;strokeColor=none;fontSize=10;fontColor=#FFFFFF;" value="h2" vertex="1">
+          <mxGeometry height="36" width="52" x="778" y="167" as="geometry" />
+        </mxCell>
+        <mxCell id="addr-h1" parent="1" style="text;html=1;whiteSpace=wrap;strokeColor=none;fillColor=none;align=center;verticalAlign=middle;fontSize=9;fontColor=#333333;" value="172.16.10.1" vertex="1">
+          <mxGeometry height="16" width="100" x="6" y="226" as="geometry" />
+        </mxCell>
+        <mxCell id="addr-h2" parent="1" style="text;html=1;whiteSpace=wrap;strokeColor=none;fillColor=none;align=center;verticalAlign=middle;fontSize=9;fontColor=#333333;" value="172.16.10.2" vertex="1">
+          <mxGeometry height="16" width="100" x="754" y="226" as="geometry" />
+        </mxCell>
+        <mxCell id="addr-v1" parent="1" style="text;html=1;whiteSpace=wrap;strokeColor=none;fillColor=none;align=center;verticalAlign=middle;fontSize=9;fontColor=#8A6D00;" value="2001:db8:ff::1" vertex="1">
+          <mxGeometry height="16" width="100" x="276" y="226" as="geometry" />
+        </mxCell>
+        <mxCell id="addr-v2" parent="1" style="text;html=1;whiteSpace=wrap;strokeColor=none;fillColor=none;align=center;verticalAlign=middle;fontSize=9;fontColor=#8A6D00;" value="2001:db8:ff::2" vertex="1">
+          <mxGeometry height="16" width="100" x="484" y="226" as="geometry" />
+        </mxCell>
+        <mxCell id="band-l" parent="1" style="rounded=0;whiteSpace=wrap;html=1;fillColor=none;strokeColor=#999999;fontSize=10;fontColor=#333333;" value="Ethernet frame (host L2)" vertex="1">
+          <mxGeometry height="24" width="333" x="25" y="292" as="geometry" />
+        </mxCell>
+        <mxCell id="band-m" parent="1" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#DAE8FC;strokeColor=#6C8EBF;fontSize=10;fontColor=#1A3A6B;" value="VXLAN over IPv6" vertex="1">
+          <mxGeometry height="24" width="144" x="358" y="292" as="geometry" />
+        </mxCell>
+        <mxCell id="band-r" parent="1" style="rounded=0;whiteSpace=wrap;html=1;fillColor=none;strokeColor=#999999;fontSize=10;fontColor=#333333;" value="Ethernet frame (host L2)" vertex="1">
+          <mxGeometry height="24" width="333" x="502" y="292" as="geometry" />
+        </mxCell>
+        <mxCell id="caption" parent="1" style="text;html=1;whiteSpace=wrap;strokeColor=none;fillColor=none;align=center;verticalAlign=middle;fontSize=9;fontColor=#777777;" value="Host L2 frames ride VXLAN across the IPv6 underlay (2001:db8:ff::/64); each VTEP encapsulates on egress and decapsulates on ingress." vertex="1">
+          <mxGeometry height="16" width="700" x="80" y="326" as="geometry" />
+        </mxCell>
+      </root>
+    </mxGraphModel>
+  </diagram>
+</mxfile>
