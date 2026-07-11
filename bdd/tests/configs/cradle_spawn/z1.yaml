@@ -1,0 +1,16 @@
+system:
+  ebpf:
+    enabled: true
+  cradle:
+    enabled: true
+interface:
+- if-name: eth0
+  ebpf:
+    enabled: true
+router:
+  static:
+    ipv4:
+      route:
+      - prefix: 10.210.99.0/24
+        nexthop:
+        - address: 10.210.1.2
