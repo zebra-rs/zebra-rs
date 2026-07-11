@@ -23,6 +23,17 @@ message L2Domain {
   repeated string members = 2;  // interface names flooded within the domain
 }
 
+message PortDel {
+  string name = 1;  // interface name (matched against the attach-time name
+                    // when the device is already gone)
+}
+
+message FdbFlush {
+  // Both filters optional and ANDed; no filter = every learned entry.
+  string port = 1;  // only entries learned on this port (empty = any)
+  uint32 vlan = 2;  // only entries in this bridge domain (0 = any)
+}
+
 message Nexthop {
   uint32 id = 1;
   string gateway = 2;     // empty => on-link / connected
@@ -288,7 +299,15 @@ message GtpPdrDel {
 
 service Cradle {
   rpc SetPort(Port) returns (Empty);
+  // Inverse of SetPort: detach the datapath programs, drop the PORTS entry
+  // and the port's derived routes, and flush the MACs learned on it. The
+  // caller updates any L2 domain membership itself (SetL2Domain replaces
+  // the full member list).
+  rpc DelPort(PortDel) returns (Empty);
   rpc SetL2Domain(L2Domain) returns (Empty);
+  // Flush locally-learned FDB entries (never control-plane-installed remote
+  // entries). WatchFdb subscribers observe the removals as age events.
+  rpc FlushFdb(FdbFlush) returns (Empty);
   rpc SetNexthop(Nexthop) returns (Empty);
   rpc SetNexthopGroup(NexthopGroup) returns (Empty);
   rpc AddRoute4(Route4) returns (Empty);

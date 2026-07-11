@@ -167,6 +167,21 @@ async fn connect_abstract_cradle(name: &str) -> anyhow::Result<CradleClient<Chan
     Ok(CradleClient::new(channel))
 }
 
+/// Probe whether a cradle gRPC server answers at `endpoint` (fresh connect +
+/// `GetStats`, 2 s budget). Used by the engine supervisor (`crate::cradle`)
+/// for the adopt-if-running check and adopted-instance liveness.
+pub(crate) async fn probe_endpoint(endpoint: &str) -> bool {
+    let attempt = async {
+        let mut client = connect_cradle(endpoint).await?;
+        client.get_stats(pb::StatsRequest::default()).await?;
+        anyhow::Ok(())
+    };
+    matches!(
+        tokio::time::timeout(std::time::Duration::from_secs(2), attempt).await,
+        Ok(Ok(()))
+    )
+}
+
 impl CradleFib {
     /// Build a tee to the cradle gRPC endpoint `ep`. `unix:/path` (filesystem
     /// UDS), `unix:NAME` (Linux abstract socket, e.g. the default

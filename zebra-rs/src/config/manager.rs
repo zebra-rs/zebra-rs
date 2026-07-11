@@ -6,6 +6,7 @@ use super::bgp::{despawn_bgp, spawn_bgp};
 use super::commands::Mode;
 use super::commands::{configure_mode_create, exec_mode_create};
 use super::configs::{carbon_copy, delete, set};
+use super::cradle::spawn_cradle;
 use super::files::load_config_file;
 use super::isis::{despawn_isis, spawn_isis};
 use super::json::json_read;
@@ -475,6 +476,7 @@ impl ConfigManager {
         let mut bfd = false;
         let mut stamp = false;
         let mut nd = false;
+        let mut cradle = false;
         for (proto, tx) in self.cm_clients.borrow().iter() {
             tx.send(ConfigRequest::new(Vec::new(), ConfigOp::CommitStart))
                 .unwrap();
@@ -495,6 +497,9 @@ impl ConfigManager {
             }
             if proto == "nd" {
                 nd = true;
+            }
+            if proto == "cradle" {
+                cradle = true;
             }
         }
         // Same by-value capture problem for the IS-IS→BGP BGP-LS producer
@@ -623,6 +628,17 @@ impl ConfigManager {
             if !nd && op == ConfigOp::Set && line.contains("ipv6 router-advertisements") {
                 nd = true;
                 spawn_nd(self);
+            }
+            // The cradle engine supervisor consumes `system ebpf` (its own
+            // knob) and `system cradle grpc-endpoint` (shared with the FIB
+            // tee, which stays in the RIB task) — spawn on the first line
+            // under either subtree so it sees this commit's leaves.
+            if !cradle
+                && op == ConfigOp::Set
+                && (line.starts_with("system ebpf") || line.starts_with("system cradle"))
+            {
+                cradle = true;
+                spawn_cradle(self);
             }
             // Handle logging configuration changes
             if op == ConfigOp::Set && line.starts_with("logging output") {
