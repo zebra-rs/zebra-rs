@@ -10,8 +10,9 @@ use super::ConfigManager;
 /// Mirrors `spawn_nd`: hosts that never touch these subtrees don't run the
 /// task. The FIB tee (`system cradle enabled`) stays with the RIB task and
 /// needs no spawn here; this task manages the engine process and its port
-/// set (default-VRF links — the RIB subscription is bound to the default
-/// VRF, matching the `SetPort` vrf 0 scope).
+/// set. The RIB subscription is `global_links` — the reconcile follows an
+/// `interface … ebpf enabled` interface across VRF enslavement and binds
+/// the port to the VRF's kernel table.
 ///
 /// [`commit_config`]: crate::config::ConfigManager::commit_config
 pub fn spawn_cradle(config: &ConfigManager) {
@@ -23,7 +24,7 @@ pub fn spawn_cradle(config: &ConfigManager) {
         if config.protocol_tasks.borrow().contains_key("cradle") {
             return;
         }
-        let (rib_client, rib_rx) = config.subscribe_to_rib("cradle");
+        let (rib_client, rib_rx) = config.subscribe_to_rib_global_links("cradle");
         let cradle = crate::cradle::Cradle::new(rib_client, rib_rx);
         config.subscribe("cradle", cradle.cm.tx.clone());
         config.subscribe_show("cradle", cradle.show.tx.clone());

@@ -322,22 +322,27 @@ impl Rib {
     /// Used when an interface is re-enslaved across a VRF boundary:
     /// the link's `master` already points at the *new* VRF, so the
     /// target VRF must be named rather than re-derived.
+    ///
+    /// Link events additionally reach every `global_links` subscriber
+    /// (`iter_link_subs`); a cross-VRF move therefore appears to them
+    /// as a `LinkDel` + `LinkAdd` bounce of the same ifindex, with the
+    /// `LinkAdd` carrying the new `master`.
     pub fn api_link_add_vrf(&self, link: &Link, vrf_id: u32) {
-        for (_, sub) in self.client_registry.iter_vrf(vrf_id) {
+        for (_, sub) in self.client_registry.iter_link_subs(vrf_id) {
             let _ = sub.rib_rx_tx.send(RibRx::LinkAdd(link.clone()));
         }
     }
 
     pub fn api_link_up(&self, ifindex: u32) {
         let vrf_id = self.ifindex_vrf_id(ifindex);
-        for (_, sub) in self.client_registry.iter_vrf(vrf_id) {
+        for (_, sub) in self.client_registry.iter_link_subs(vrf_id) {
             let _ = sub.rib_rx_tx.send(RibRx::LinkUp(ifindex));
         }
     }
 
     pub fn api_link_down(&self, ifindex: u32) {
         let vrf_id = self.ifindex_vrf_id(ifindex);
-        for (_, sub) in self.client_registry.iter_vrf(vrf_id) {
+        for (_, sub) in self.client_registry.iter_link_subs(vrf_id) {
             let _ = sub.rib_rx_tx.send(RibRx::LinkDown(ifindex));
         }
     }
@@ -345,7 +350,7 @@ impl Rib {
     /// Push an MTU change to subscribers bound to this link's VRF.
     pub fn api_link_mtu(&self, ifindex: u32, mtu: u32) {
         let vrf_id = self.ifindex_vrf_id(ifindex);
-        for (_, sub) in self.client_registry.iter_vrf(vrf_id) {
+        for (_, sub) in self.client_registry.iter_link_subs(vrf_id) {
             let _ = sub.rib_rx_tx.send(RibRx::LinkMtu { ifindex, mtu });
         }
     }
@@ -363,7 +368,7 @@ impl Rib {
     /// link's `master` already names the *new* VRF, so the *old* VRF
     /// id must be passed in.
     pub fn api_link_del_vrf(&self, ifindex: u32, vrf_id: u32) {
-        for (_, sub) in self.client_registry.iter_vrf(vrf_id) {
+        for (_, sub) in self.client_registry.iter_link_subs(vrf_id) {
             let _ = sub.rib_rx_tx.send(RibRx::LinkDel(ifindex));
         }
     }

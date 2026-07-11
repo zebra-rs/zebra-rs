@@ -39,6 +39,17 @@ struct Engine {
     task: Task<()>,
 }
 
+/// What the port reconcile needs to know about a kernel link, from
+/// `RibRx::LinkAdd` (the subscription is `global_links`, so links are
+/// visible wherever they are enslaved).
+struct LinkState {
+    name: String,
+    /// `IFLA_MASTER` — the bridge or VRF device this link is enslaved to.
+    master: Option<u32>,
+    /// `IFLA_VRF_TABLE` when this link IS a VRF master device.
+    vrf_table: Option<u32>,
+}
+
 /// Last observed engine availability, tracked from [`EngineEvent`]s for
 /// `show ebpf`.
 #[derive(Default)]
@@ -78,14 +89,16 @@ pub struct Cradle {
     grpc_endpoint: Option<String>,
     /// Staged `interface <name> ebpf enabled` leaves, keyed by if-name.
     if_ebpf: BTreeMap<String, bool>,
-    /// Kernel links, ifindex → name, from the RIB subscription (seeded by
-    /// the link dump at subscribe time).
-    links: HashMap<u32, String>,
+    /// Kernel links keyed by ifindex, from the RIB subscription (seeded
+    /// by the link dump at subscribe time; `global_links`, so VRF
+    /// enslavement never hides a link).
+    links: HashMap<u32, LinkState>,
     engine: Option<Engine>,
     /// Last observed engine availability (from [`EngineEvent`]s).
     status: EngineStatus,
-    /// Ports applied to the current engine: if-name → the ifindex used.
-    applied: HashMap<String, u32>,
+    /// Ports applied to the current engine:
+    /// if-name → (ifindex, VRF table) used in the `SetPort`.
+    applied: HashMap<String, (u32, u32)>,
     /// Port-programming client for [`Self::client_endpoint`].
     ports_client: Option<CradleFib>,
     client_endpoint: Option<String>,
@@ -175,7 +188,14 @@ impl Cradle {
     fn process_rib_msg(&mut self, msg: RibRx) {
         match msg {
             RibRx::LinkAdd(link) => {
-                self.links.insert(link.index, link.name);
+                self.links.insert(
+                    link.index,
+                    LinkState {
+                        name: link.name,
+                        master: link.master,
+                        vrf_table: link.vrf_table,
+                    },
+                );
             }
             RibRx::LinkDel(ifindex) => {
                 self.links.remove(&ifindex);
@@ -208,11 +228,20 @@ impl Cradle {
         }
     }
 
-    fn ifindex_of(&self, name: &str) -> Option<u32> {
-        self.links
-            .iter()
-            .find(|(_, n)| n.as_str() == name)
-            .map(|(ifindex, _)| *ifindex)
+    /// The `SetPort` binding for an interface: its ifindex plus the VRF
+    /// table it is enslaved to (0 = default). The table comes straight
+    /// from link state — the interface's `master` resolved to that
+    /// device's `IFLA_VRF_TABLE` — so config-driven (`interface X vrf`)
+    /// and externally-applied enslavement both bind the port. A bridge
+    /// master has no VRF table and yields 0.
+    fn port_binding(&self, name: &str) -> Option<(u32, u32)> {
+        let (ifindex, link) = self.links.iter().find(|(_, l)| l.name.as_str() == name)?;
+        let vrf = link
+            .master
+            .and_then(|m| self.links.get(&m))
+            .and_then(|m| m.vrf_table)
+            .unwrap_or(0);
+        Some((*ifindex, vrf))
     }
 
     /// The configured endpoint (override or default), independent of
@@ -278,12 +307,13 @@ impl Cradle {
                 .iter()
                 .filter(|(_, en)| **en)
                 .map(|(name, _)| {
-                    let ifindex = self.ifindex_of(name);
+                    let binding = self.port_binding(name);
                     serde_json::json!({
                         "name": name,
-                        "ifindex": ifindex,
-                        "attached": ifindex.is_some()
-                            && self.applied.get(name) == ifindex.as_ref(),
+                        "ifindex": binding.map(|(i, _)| i),
+                        "vrf": binding.map(|(_, v)| v),
+                        "attached": binding.is_some()
+                            && self.applied.get(name) == binding.as_ref(),
                     })
                 })
                 .collect();
@@ -359,15 +389,24 @@ impl Cradle {
         )
         .unwrap();
         for name in enabled {
-            match (self.ifindex_of(name), self.applied.get(name)) {
-                (Some(ifindex), Some(applied)) if *applied == ifindex => {
-                    writeln!(out, "    {name:<16} ifindex {ifindex:<6} attached").unwrap();
+            match (self.port_binding(name), self.applied.get(name)) {
+                (Some(binding), Some(applied)) if *applied == binding => {
+                    let (ifindex, vrf) = binding;
+                    writeln!(
+                        out,
+                        "    {name:<16} ifindex {ifindex:<6} vrf {vrf:<5} attached"
+                    )
+                    .unwrap();
                 }
-                (Some(ifindex), _) => {
-                    writeln!(out, "    {name:<16} ifindex {ifindex:<6} pending").unwrap();
+                (Some((ifindex, vrf)), _) => {
+                    writeln!(
+                        out,
+                        "    {name:<16} ifindex {ifindex:<6} vrf {vrf:<5} pending"
+                    )
+                    .unwrap();
                 }
                 (None, _) => {
-                    writeln!(out, "    {name:<16} {:<14} link absent", "-").unwrap();
+                    writeln!(out, "    {name:<16} {:<20} link absent", "-").unwrap();
                 }
             }
         }
@@ -429,10 +468,16 @@ impl Cradle {
         // 1) Detach ports that no longer match: disabled, link gone, or the
         //    device was re-created under a new ifindex. cradle resolves by
         //    attach-time name when the device is gone, so DelPort also
-        //    cleans up after deleted links.
-        for (name, applied_ifindex) in self.applied.clone() {
+        //    cleans up after deleted links. A VRF-binding change alone is
+        //    NOT a detach — step 2 re-SetPorts in place (cradle overwrites
+        //    the port entry and re-derives its routes under the new VRF).
+        for (name, (applied_ifindex, _)) in self.applied.clone() {
             let enabled = self.if_ebpf.get(&name).copied().unwrap_or(false);
-            if enabled && self.ifindex_of(&name) == Some(applied_ifindex) {
+            if enabled
+                && self
+                    .port_binding(&name)
+                    .is_some_and(|(ifindex, _)| ifindex == applied_ifindex)
+            {
                 continue;
             }
             match client.del_port(&name).await {
@@ -444,8 +489,9 @@ impl Cradle {
             }
         }
 
-        // 2) Attach enabled ports whose link exists and isn't applied yet
-        //    (or re-attach under a fresh ifindex after step 1 detached).
+        // 2) Attach enabled ports whose link exists and isn't applied with
+        //    the current (ifindex, VRF) binding — covers first attach,
+        //    re-attach after step 1, and in-place VRF moves.
         let wanted: Vec<String> = self
             .if_ebpf
             .iter()
@@ -453,16 +499,16 @@ impl Cradle {
             .map(|(name, _)| name.clone())
             .collect();
         for name in wanted {
-            let Some(ifindex) = self.ifindex_of(&name) else {
+            let Some((ifindex, vrf)) = self.port_binding(&name) else {
                 continue;
             };
-            if self.applied.get(&name) == Some(&ifindex) {
+            if self.applied.get(&name) == Some(&(ifindex, vrf)) {
                 continue;
             }
-            match client.set_port(&name).await {
+            match client.set_port(&name, vrf).await {
                 Ok(()) => {
-                    info!("cradle: attached port {name} (ifindex {ifindex})");
-                    self.applied.insert(name, ifindex);
+                    info!("cradle: attached port {name} (ifindex {ifindex}, vrf {vrf})");
+                    self.applied.insert(name, (ifindex, vrf));
                 }
                 Err(e) => warn!("cradle: SetPort {name} failed: {e} (will retry)"),
             }

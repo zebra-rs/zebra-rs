@@ -861,8 +861,8 @@ mod tests {
         let mut reg = ClientRegistry::new();
         let (tx_def, rx_def) = unbounded_channel();
         let (tx_vrf, rx_vrf) = unbounded_channel();
-        reg.register_with_id(ProtoId::from_raw(0), "bgp", tx_def, 0);
-        reg.register_with_id(ProtoId::from_raw(1), "bgp:vrf:N3", tx_vrf, 100);
+        reg.register_with_id(ProtoId::from_raw(0), "bgp", tx_def, 0, false);
+        reg.register_with_id(ProtoId::from_raw(1), "bgp:vrf:N3", tx_vrf, 100, false);
 
         let mut filters: HashMap<String, FilterMap> = HashMap::new();
         for proto in ["bgp", "bgp:vrf:N3"] {

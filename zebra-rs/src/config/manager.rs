@@ -109,6 +109,7 @@ impl RibSubscriber {
             proto: proto.to_string(),
             tx: chan.tx.clone(),
             vrf_id,
+            global_links: false,
         });
 
         let client = crate::rib::client::RibClient::new(self.rib_inbound_tx.clone(), proto_id);
@@ -391,6 +392,36 @@ impl ConfigManager {
             proto: proto.to_string(),
             tx: chan.tx.clone(),
             vrf_id,
+            global_links: false,
+        });
+
+        let client = crate::rib::client::RibClient::new(self.rib_inbound_tx.clone(), proto_id);
+        (client, chan.rx)
+    }
+
+    /// Like [`Self::subscribe_to_rib`] (default-VRF installs) but the
+    /// subscriber additionally receives **link** events for every VRF
+    /// (`Subscriber::global_links`). Used by the cradle port
+    /// reconcile, which follows `interface … ebpf enabled` interfaces
+    /// across VRF enslavement.
+    pub fn subscribe_to_rib_global_links(
+        &self,
+        proto: &str,
+    ) -> (
+        crate::rib::client::RibClient,
+        tokio::sync::mpsc::UnboundedReceiver<crate::rib::api::RibRx>,
+    ) {
+        use std::sync::atomic::Ordering;
+        let id_raw = self.next_proto_id.fetch_add(1, Ordering::Relaxed);
+        let proto_id = crate::rib::client::ProtoId::from_raw(id_raw);
+
+        let chan = crate::rib::api::RibRxChannel::new();
+        let _ = self.rib_tx.send(crate::rib::Message::Subscribe {
+            proto_id,
+            proto: proto.to_string(),
+            tx: chan.tx.clone(),
+            vrf_id: 0,
+            global_links: true,
         });
 
         let client = crate::rib::client::RibClient::new(self.rib_inbound_tx.clone(), proto_id);

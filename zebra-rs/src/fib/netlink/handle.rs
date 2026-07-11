@@ -3772,8 +3772,10 @@ pub fn link_from_msg(msg: LinkMessage) -> FibLink {
             LinkAttribute::LinkInfo(infos) => {
                 // VXLAN link data carries both the VNI (`IFLA_VXLAN_ID`)
                 // and the local VTEP source IP (`IFLA_VXLAN_LOCAL` or
-                // `IFLA_VXLAN_LOCAL6`). Walk every Vxlan sub-attr and
-                // capture them. Non-VXLAN links contribute nothing.
+                // `IFLA_VXLAN_LOCAL6`); VRF master devices carry their
+                // kernel routing table (`IFLA_VRF_TABLE`). Walk every
+                // sub-attr and capture them. Other link types
+                // contribute nothing.
                 for info in infos {
                     if let LinkInfo::Data(InfoData::Vxlan(vxlan_attrs)) = info {
                         for v in vxlan_attrs {
@@ -3791,6 +3793,12 @@ pub fn link_from_msg(msg: LinkMessage) -> FibLink {
                                         Some(IpAddr::V6(std::net::Ipv6Addr::from(octets)));
                                 }
                                 _ => {}
+                            }
+                        }
+                    } else if let LinkInfo::Data(InfoData::Vrf(vrf_attrs)) = info {
+                        for v in vrf_attrs {
+                            if let InfoVrf::TableId(t) = v {
+                                link.vrf_table = Some(t);
                             }
                         }
                     }

@@ -35,6 +35,16 @@ Feature: system ebpf spawns and supervises the cradle eBPF engine
     And show command "show ebpf" in namespace "crs1" should eventually contain "Engine restarts: 1"
     And show command "show ebpf" in namespace "crs1" should eventually contain "attached"
 
+  Scenario: A VRF-enslaved port binds to the VRF's kernel table
+    Given the test topology exists
+    When I apply command "set vrf red" in namespace "crs1"
+    And I apply command "set interface eth0 vrf red" in namespace "crs1"
+    Then show command "show ebpf" in namespace "crs1" should eventually contain "vrf 1"
+    And show command "show ebpf" in namespace "crs1" should eventually contain "attached"
+    When I apply command "delete interface eth0 vrf red" in namespace "crs1"
+    Then show command "show ebpf" in namespace "crs1" should eventually not contain "vrf 1"
+    And show command "show ebpf" in namespace "crs1" should eventually contain "attached"
+
   Scenario: Disabling system ebpf stops the engine
     Given the test topology exists
     When I apply command "delete system ebpf enabled true" in namespace "crs1"
