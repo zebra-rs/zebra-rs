@@ -336,9 +336,7 @@ pub(super) fn render_dump(entries: &[pb::DumpEntry], json: bool) -> String {
             }
         }
     }
-    if entries.is_empty() {
-        out.push_str("(empty)\n");
-    }
+    // An empty table renders nothing (the json form still returns `[]`).
     out
 }
 

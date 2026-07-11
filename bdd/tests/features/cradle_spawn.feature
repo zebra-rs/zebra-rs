@@ -32,7 +32,7 @@ Feature: system ebpf spawns and supervises the cradle eBPF engine
     Then show command "show ebpf ipv4" in namespace "crs1" should eventually contain "10.210.99.0/24"
     And show command "show ebpf nexthop" in namespace "crs1" should eventually contain "10.210.1.2"
     And show command "show ebpf stats" in namespace "crs1" should eventually contain "l3v4_forward"
-    And show command "show ebpf mpls" in namespace "crs1" should eventually contain "(empty)"
+    And show command "show ebpf mpls" in namespace "crs1" should not contain "label"
 
   Scenario: A crashed engine respawns, re-attaches the port, and replays the FIB
     Given the test topology exists
