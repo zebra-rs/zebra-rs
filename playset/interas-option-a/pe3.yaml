@@ -1,7 +1,7 @@
-# ASBR2 — autonomous system border router of AS 65502. Mirror of ASBR1:
-# per-VRF links + per-VRF eBGP toward AS 65501, iBGP VPNv4 toward PE3.
-# Note the RD/RT values differ from AS 65501's on purpose — no VPN
-# attribute crosses the Option A boundary, so the ASes need not agree.
+# PE3 — the provider edge of AS 65502, serving all three customers
+# (CE4/CE5/CE6). Three VRFs with their PE-CE eBGP sessions; customer
+# routes export to VPNv4 (RD 65502:1/2/3, RT 65502:100/200/300) and
+# ride the iBGP VPNv4 session to ASBR2 over the loopbacks.
 vrf:
 - name: cust1
   ipv4:
@@ -27,38 +27,38 @@ vrf:
 interface:
 - if-name: lo
   ipv4:
-    address: 2.2.2.1/32
-- if-name: asbr2-cust1
+    address: 2.2.2.3/32
+- if-name: pe3-p2
+  ipv4:
+    address: 10.2.0.6/30
+- if-name: pe3-ce4
   vrf: cust1
   ipv4:
-    address: 192.168.1.2/30
-- if-name: asbr2-cust2
+    address: 10.14.0.2/30
+- if-name: pe3-ce5
   vrf: cust2
   ipv4:
-    address: 192.168.2.2/30
-- if-name: asbr2-cust3
+    address: 10.15.0.2/30
+- if-name: pe3-ce6
   vrf: cust3
   ipv4:
-    address: 192.168.3.2/30
-- if-name: asbr2-p2
-  ipv4:
-    address: 10.2.0.1/30
+    address: 10.16.0.2/30
 system:
-  hostname: asbr2
+  hostname: pe3
 router:
   isis:
-    net: 49.0002.0000.0000.0001.00
-    hostname: asbr2
+    net: 49.0002.0000.0000.0003.00
+    hostname: pe3
     is-type: level-2-only
     segment-routing: mpls
-    te-router-id: 2.2.2.1
+    te-router-id: 2.2.2.3
     interface:
     - if-name: lo
       ipv4:
         enabled: true
         prefix-sid:
-          index: 21
-    - if-name: asbr2-p2
+          index: 23
+    - if-name: pe3-p2
       network-type: point-to-point
       metric: 10
       ipv4:
@@ -66,15 +66,15 @@ router:
   bgp:
     global:
       as: 65502
-      router-id: 2.2.2.1
+      router-id: 2.2.2.3
     timer:
       adv-interval:
         ebgp: 3
     neighbor:
-    - remote-address: 2.2.2.3
+    - remote-address: 2.2.2.1
       remote-as: 65502
       timers: {connect-retry-time: 3}
-      update-source: 2.2.2.1
+      update-source: 2.2.2.3
       enabled: true
       afi-safi:
       - name: vpnv4
@@ -83,24 +83,24 @@ router:
     - name: cust1
       rd: 65502:1
       neighbor:
-      - remote-address: 192.168.1.1
-        remote-as: 65501
+      - remote-address: 10.14.0.1
+        remote-as: 65514
         afi-safi:
         - name: ipv4
           enabled: true
     - name: cust2
       rd: 65502:2
       neighbor:
-      - remote-address: 192.168.2.1
-        remote-as: 65501
+      - remote-address: 10.15.0.1
+        remote-as: 65515
         afi-safi:
         - name: ipv4
           enabled: true
     - name: cust3
       rd: 65502:3
       neighbor:
-      - remote-address: 192.168.3.1
-        remote-as: 65501
+      - remote-address: 10.16.0.1
+        remote-as: 65516
         afi-safi:
         - name: ipv4
           enabled: true

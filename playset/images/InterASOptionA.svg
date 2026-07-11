@@ -1,80 +1,90 @@
 <?xml version="1.0" encoding="UTF-8"?>
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 830 310" font-family="Helvetica, Arial, sans-serif">
-  <!-- Inter-AS Option A (back-to-back VRF) — matches playset/interas-option-a.
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 830 400" font-family="Helvetica, Arial, sans-serif">
+  <!-- Inter-AS Option A (back-to-back VRF) — matches playset/interas-option-a:
+       three customers, two PEs in AS 65501, one inter-AS link per VRF.
        Editable source: InterASOptionA.drawio (re-export from draw.io replaces this file). -->
-  <rect width="830" height="310" fill="#ffffff"/>
+  <rect width="830" height="400" fill="#ffffff"/>
 
   <!-- AS boxes -->
-  <rect x="90" y="20" width="270" height="230" rx="8" fill="none" stroke="#999999" stroke-dasharray="6,4"/>
-  <rect x="480" y="20" width="270" height="230" rx="8" fill="none" stroke="#999999" stroke-dasharray="6,4"/>
-  <text x="225" y="38" text-anchor="middle" font-size="12" fill="#333333">AS 65501</text>
-  <text x="615" y="38" text-anchor="middle" font-size="12" fill="#333333">AS 65502</text>
+  <rect x="75" y="30" width="300" height="290" rx="8" fill="none" stroke="#999999" stroke-dasharray="6,4"/>
+  <rect x="480" y="30" width="280" height="290" rx="8" fill="none" stroke="#999999" stroke-dasharray="6,4"/>
+  <text x="225" y="50" text-anchor="middle" font-size="12" fill="#333333">AS 65501</text>
+  <text x="620" y="50" text-anchor="middle" font-size="12" fill="#333333">AS 65502</text>
 
   <!-- provider clouds -->
   <path d="M 170,185 C 140,190 120,165 135,140 C 115,115 135,85 165,95 C 175,70 215,65 235,85 C 260,70 295,85 295,110 C 320,120 315,155 290,165 C 285,185 250,195 230,182 C 215,195 185,195 170,185 Z"
-        fill="none" stroke="#bbbbbb"/>
-  <path d="M 510,185 C 480,190 460,165 475,140 C 455,115 475,85 505,95 C 515,70 555,65 575,85 C 600,70 635,85 635,110 C 660,120 655,155 630,165 C 625,185 590,195 570,182 C 555,195 525,195 510,185 Z"
-        fill="none" stroke="#bbbbbb"/>
+        fill="none" stroke="#bbbbbb" stroke-width="0.7" transform="matrix(1.24,0,0,1.69,-32,-24)"/>
+  <path d="M 170,185 C 140,190 120,165 135,140 C 115,115 135,85 165,95 C 175,70 215,65 235,85 C 260,70 295,85 295,110 C 320,120 315,155 290,165 C 285,185 250,195 230,182 C 215,195 185,195 170,185 Z"
+        fill="none" stroke="#bbbbbb" stroke-width="0.8" transform="matrix(1.10,0,0,1.46,362,3)"/>
 
   <!-- CE-PE links -->
-  <line x1="60" y1="97.5" x2="165" y2="135" stroke="#0499D4" stroke-width="1.5"/>
-  <line x1="60" y1="167.5" x2="165" y2="135" stroke="#4DA72E" stroke-width="1.5"/>
-  <line x1="665" y1="135" x2="770" y2="97.5" stroke="#0499D4" stroke-width="1.5"/>
-  <line x1="665" y1="135" x2="770" y2="167.5" stroke="#4DA72E" stroke-width="1.5"/>
+  <line x1="55" y1="92.5" x2="170" y2="130" stroke="#0499D4" stroke-width="1.5"/>
+  <line x1="55" y1="162.5" x2="170" y2="130" stroke="#4DA72E" stroke-width="1.5"/>
+  <line x1="55" y1="267.5" x2="170" y2="250" stroke="#E97131" stroke-width="1.5"/>
+  <line x1="665" y1="190" x2="770" y2="92.5" stroke="#0499D4" stroke-width="1.5"/>
+  <line x1="665" y1="190" x2="770" y2="190" stroke="#4DA72E" stroke-width="1.5"/>
+  <line x1="665" y1="190" x2="770" y2="267.5" stroke="#E97131" stroke-width="1.5"/>
 
   <!-- intra-AS core links -->
-  <line x1="165" y1="135" x2="245" y2="135" stroke="#A02C93" stroke-width="1.5"/>
-  <line x1="245" y1="135" x2="325" y2="135" stroke="#A02C93" stroke-width="1.5"/>
-  <line x1="505" y1="135" x2="585" y2="135" stroke="#A02C93" stroke-width="1.5"/>
-  <line x1="585" y1="135" x2="665" y2="135" stroke="#A02C93" stroke-width="1.5"/>
+  <line x1="170" y1="130" x2="255" y2="190" stroke="#A02C93" stroke-width="1.5"/>
+  <line x1="170" y1="250" x2="255" y2="190" stroke="#A02C93" stroke-width="1.5"/>
+  <line x1="255" y1="190" x2="340" y2="190" stroke="#A02C93" stroke-width="1.5"/>
+  <line x1="505" y1="190" x2="585" y2="190" stroke="#A02C93" stroke-width="1.5"/>
+  <line x1="585" y1="190" x2="665" y2="190" stroke="#A02C93" stroke-width="1.5"/>
 
   <!-- inter-AS links: one per customer VRF, plain IP -->
-  <line x1="340" y1="130.5" x2="490" y2="130.5" stroke="#0499D4" stroke-width="1.5" stroke-dasharray="5,4"/>
-  <line x1="340" y1="139.5" x2="490" y2="139.5" stroke="#4DA72E" stroke-width="1.5" stroke-dasharray="5,4"/>
-  <text x="415" y="123" text-anchor="middle" font-size="9" fill="#0499D4">cust1</text>
-  <text x="415" y="153" text-anchor="middle" font-size="9" fill="#4DA72E">cust2</text>
+  <line x1="355" y1="180" x2="490" y2="180" stroke="#0499D4" stroke-width="1.5" stroke-dasharray="5,4"/>
+  <line x1="355" y1="190" x2="490" y2="190" stroke="#4DA72E" stroke-width="1.5" stroke-dasharray="5,4"/>
+  <line x1="355" y1="200" x2="490" y2="200" stroke="#E97131" stroke-width="1.5" stroke-dasharray="5,4"/>
+  <text x="422" y="170" text-anchor="middle" font-size="9" fill="#666666">one IP link per customer</text>
 
   <!-- routers -->
   <g stroke="#0E9ED5" stroke-width="1.5" fill="#ffffff">
-    <circle cx="165" cy="135" r="15"/>
-    <circle cx="245" cy="135" r="15"/>
-    <circle cx="325" cy="135" r="15"/>
-    <circle cx="505" cy="135" r="15"/>
-    <circle cx="585" cy="135" r="15"/>
-    <circle cx="665" cy="135" r="15"/>
+    <circle cx="170" cy="130" r="15"/>
+    <circle cx="170" cy="250" r="15"/>
+    <circle cx="255" cy="190" r="15"/>
+    <circle cx="340" cy="190" r="15"/>
+    <circle cx="505" cy="190" r="15"/>
+    <circle cx="585" cy="190" r="15"/>
+    <circle cx="665" cy="190" r="15"/>
   </g>
   <g text-anchor="middle" font-size="8" fill="#333333">
-    <text x="165" y="138">pe1</text>
-    <text x="245" y="138">p1</text>
-    <text x="325" y="138">asbr1</text>
-    <text x="505" y="138">asbr2</text>
-    <text x="585" y="138">p2</text>
-    <text x="665" y="138">pe2</text>
+    <text x="170" y="133">pe1</text>
+    <text x="170" y="253">pe2</text>
+    <text x="255" y="193">p1</text>
+    <text x="340" y="193">asbr1</text>
+    <text x="505" y="193">asbr2</text>
+    <text x="585" y="193">p2</text>
+    <text x="665" y="193">pe3</text>
   </g>
 
   <!-- customer edges -->
   <g font-size="9" text-anchor="middle" fill="#ffffff">
-    <rect x="20" y="85" width="40" height="25" rx="5" fill="#0499D4"/>
-    <text x="40" y="101">ce1</text>
-    <rect x="20" y="155" width="40" height="25" rx="5" fill="#4DA72E"/>
-    <text x="40" y="171">ce2</text>
-    <rect x="770" y="85" width="40" height="25" rx="5" fill="#0499D4"/>
-    <text x="790" y="101">ce3</text>
-    <rect x="770" y="155" width="40" height="25" rx="5" fill="#4DA72E"/>
-    <text x="790" y="171">ce4</text>
+    <rect x="15" y="80" width="40" height="25" rx="5" fill="#0499D4"/>
+    <text x="35" y="96">ce1</text>
+    <rect x="15" y="150" width="40" height="25" rx="5" fill="#4DA72E"/>
+    <text x="35" y="166">ce2</text>
+    <rect x="15" y="255" width="40" height="25" rx="5" fill="#E97131"/>
+    <text x="35" y="271">ce3</text>
+    <rect x="770" y="80" width="40" height="25" rx="5" fill="#0499D4"/>
+    <text x="790" y="96">ce4</text>
+    <rect x="770" y="177.5" width="40" height="25" rx="5" fill="#4DA72E"/>
+    <text x="790" y="193.5">ce5</text>
+    <rect x="770" y="255" width="40" height="25" rx="5" fill="#E97131"/>
+    <text x="790" y="271">ce6</text>
   </g>
 
   <!-- data plane bands -->
   <g font-size="11" text-anchor="middle">
-    <rect x="25" y="273" width="110" height="20" fill="none" stroke="#999999"/>
-    <text x="80" y="287" fill="#333333">IP</text>
-    <rect x="150" y="273" width="190" height="20" rx="10" fill="#99CCFF" stroke="#808080"/>
-    <text x="245" y="287" fill="#000000">MPLS</text>
-    <rect x="352" y="273" width="135" height="20" fill="none" stroke="#999999"/>
-    <text x="419" y="287" fill="#333333">IP</text>
-    <rect x="500" y="273" width="190" height="20" rx="10" fill="#A5E798" stroke="#808080"/>
-    <text x="595" y="287" fill="#000000">MPLS</text>
-    <rect x="702" y="273" width="110" height="20" fill="none" stroke="#999999"/>
-    <text x="757" y="287" fill="#333333">IP</text>
+    <rect x="25" y="353" width="110" height="20" fill="none" stroke="#999999"/>
+    <text x="80" y="367" fill="#333333">IP</text>
+    <rect x="150" y="353" width="205" height="20" rx="10" fill="#99CCFF" stroke="#808080"/>
+    <text x="252" y="367" fill="#000000">MPLS</text>
+    <rect x="367" y="353" width="120" height="20" fill="none" stroke="#999999"/>
+    <text x="427" y="367" fill="#333333">IP</text>
+    <rect x="500" y="353" width="190" height="20" rx="10" fill="#A5E798" stroke="#808080"/>
+    <text x="595" y="367" fill="#000000">MPLS</text>
+    <rect x="702" y="353" width="110" height="20" fill="none" stroke="#999999"/>
+    <text x="757" y="367" fill="#333333">IP</text>
   </g>
 </svg>

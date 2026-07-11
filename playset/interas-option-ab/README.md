@@ -40,7 +40,7 @@ is, line for line, Cisco's Option AB route-distribution procedure:
 ```
 
 The lab is the same ten routers, two customers, and overlapping
-addressing as the A/B/C playsets — only the ASBRs change. One honest
+addressing as the B/C playsets — only the ASBRs change. One honest
 note: classic Cisco AB forwards the customer *data* unlabeled over
 per-VRF subinterfaces (that is where the per-customer QoS attaches),
 with only the control session shared. This lab implements the

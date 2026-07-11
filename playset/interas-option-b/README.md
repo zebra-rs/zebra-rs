@@ -3,9 +3,11 @@
 This playset builds the second of RFC 4364 §10's multi-AS methods —
 **Option B (§10b)**, *EBGP redistribution of labeled VPN-IPv4 routes from
 AS to neighboring AS*. It is the direct sequel to
-[interas-option-a](../interas-option-a/README.md): the same ten routers,
-the same two customers with the same deliberately overlapping addressing —
-only the AS boundary changes. Where Option A needed one dedicated link and
+[interas-option-a](../interas-option-a/README.md), paring that lab's
+reference topology down to one PE and two customers per side (enough to
+make this border's point) while keeping the same deliberately
+overlapping addressing — only the AS boundary changes in kind. Where
+Option A needed one dedicated link and
 one plain-IP eBGP session **per customer**, Option B collapses the border
 to **one link and one MP-eBGP VPNv4 session carrying every customer**, and
 the traffic that crosses it is **MPLS-labeled**.
@@ -53,7 +55,7 @@ namespace names.
 
 ## What changed since Option A: only the border
 
-The CEs are byte-identical to the Option A playset — a customer cannot
+The CEs are the same plain eBGP speakers as in Option A — a customer cannot
 tell which option carries it. The P routers are identical. The PEs differ
 in exactly one thing: `pe2`'s VRFs now import/export **AS 65501's**
 route-targets:
@@ -335,11 +337,24 @@ $ ./down.sh
 
 ## Appendix: Addressing & sessions
 
-Identical to the Option A playset except the border: nodes, AS numbers,
-loopbacks, SR SIDs, PE-CE links, and customer addressing are unchanged
-(see [interas-option-a](../interas-option-a/README.md#appendix-addressing--sessions));
-the two per-VRF inter-AS links are replaced by one global-table link,
-`asbr1-asbr2` = `192.168.100.0/30` (.1/.2).
+| node  | role             | AS    | loopback     | SR SID (label)  |
+|:------|:-----------------|:------|:-------------|:----------------|
+| ce1   | CE, cust1 site A | 65511 | 172.16.1.1/32 | —              |
+| ce2   | CE, cust2 site A | 65512 | 172.16.1.1/32 | —              |
+| pe1   | PE               | 65501 | 1.1.1.1/32   | 11 (16011)      |
+| p1    | P                | 65501 | 1.1.1.2/32   | 12 (16012)      |
+| asbr1 | ASBR             | 65501 | 1.1.1.3/32   | 13 (16013)      |
+| asbr2 | ASBR             | 65502 | 2.2.2.1/32   | 21 (16021)      |
+| p2    | P                | 65502 | 2.2.2.2/32   | 22 (16022)      |
+| pe2   | PE               | 65502 | 2.2.2.3/32   | 23 (16023)      |
+| ce3   | CE, cust1 site B | 65513 | 172.16.2.1/32 | —              |
+| ce4   | CE, cust2 site B | 65514 | 172.16.2.1/32 | —              |
+
+Links: ce1–pe1 `10.11.0.0/30`, ce2–pe1 `10.12.0.0/30`, pe1–p1
+`10.1.0.0/30`, p1–asbr1 `10.1.0.4/30`, asbr2–p2 `10.2.0.0/30`, p2–pe2
+`10.2.0.4/30`, pe2–ce3 `10.13.0.0/30`, pe2–ce4 `10.14.0.0/30`; the
+border is one global-table link, `asbr1-asbr2` = `192.168.100.0/30`
+(.1/.2).
 
 | VPN   | RT (coordinated)  | RD on pe1 | RD on pe2 |
 |:------|:------------------|:----------|:----------|

@@ -10,9 +10,10 @@ to egress PE — the border ASBRs just switch the middle label.
 
 This playset completes the arc begun by
 [interas-option-a](../interas-option-a/README.md) and
-[interas-option-b](../interas-option-b/README.md) — the same ten routers,
-two customers, and overlapping addressing, with only the border model
-changed a third time. The headline numbers to watch:
+[interas-option-b](../interas-option-b/README.md) — the same pared
+ten-router lab as Option B (one PE and two customers per side, with the
+same overlapping addressing), and only the border model changed a third
+time. The headline numbers to watch:
 
 |                                | Option A | Option B | Option C |
 |:-------------------------------|:---------|:---------|:---------|
@@ -307,9 +308,9 @@ $ ./down.sh
 
 Nodes, AS numbers, loopbacks, SR SIDs, PE-CE links, and customer
 addressing are identical to
-[interas-option-a](../interas-option-a/README.md#appendix-addressing--sessions);
-the border is one global-table link `asbr1-asbr2` = `192.168.100.0/30`
-(as in Option B).
+[interas-option-b](../interas-option-b/README.md#appendix-addressing--sessions),
+including the one global-table border link `asbr1-asbr2` =
+`192.168.100.0/30`.
 
 | VPN   | RT (coordinated)  | RD on pe1 | RD on pe2 |
 |:------|:------------------|:----------|:----------|
