@@ -567,3 +567,147 @@ pub fn parse_p2p_hello() {
     );
     parse_emit(PACKET);
 }
+
+/// Classic Cisco IOS sends the P2P three-way TLV (240) in the legacy
+/// 1-octet form: only the Adjacency Three-Way State, no Extended Local
+/// Circuit ID and no neighbor fields (all optional per RFC 5303 §3.2).
+/// This P2P IIH mirrors a real IOS capture, including the TLV order —
+/// Restart(211), P2p3Way(240), ProtSupported(129), AreaAddr(1),
+/// Ipv4IfAddr(132). Every TLV after 240 must survive: a parse failure
+/// on 240 used to make many0-based parse_tlvs stop there and silently
+/// drop the rest of the PDU's TLVs.
+#[test]
+pub fn parse_p2p_hello_cisco_state_only_three_way() {
+    const PACKET: &[u8] = &hex!(
+        "
+        83 14 01 00 11 01 00 00
+        02
+        00 00 00 00 00 01
+        00 1e
+        00 2b
+        00
+        d3 03 00 00 00
+        f0 01 00
+        81 01 cc
+        01 04 03 49 00 00
+        84 04 c0 a8 00 02
+        "
+    );
+    let (_, packet) = parse(PACKET).expect("Cisco IOS P2P IIH must parse");
+    let IsisPdu::P2pHello(hello) = &packet.pdu else {
+        panic!("expected P2P Hello, got {:?}", packet.pdu_type);
+    };
+
+    assert_eq!(
+        hello.tlvs.len(),
+        5,
+        "no TLV may be dropped: {:?}",
+        hello.tlvs
+    );
+
+    let three_way = hello
+        .tlvs
+        .iter()
+        .find_map(|tlv| match tlv {
+            IsisTlv::P2p3Way(v) => Some(v),
+            _ => None,
+        })
+        .expect("1-octet three-way TLV must parse as P2p3Way");
+    assert_eq!(three_way.state, 0); // Up
+    assert_eq!(three_way.circuit_id, None);
+    assert_eq!(three_way.neighbor_id, None);
+    assert_eq!(three_way.neighbor_circuit_id, None);
+
+    // TLVs after 240 must be present.
+    assert!(
+        hello.tlvs.iter().any(
+            |tlv| matches!(tlv, IsisTlv::Ipv4IfAddr(v) if v.addr.octets() == [192, 168, 0, 2])
+        )
+    );
+    assert!(
+        hello
+            .tlvs
+            .iter()
+            .any(|tlv| matches!(tlv, IsisTlv::ProtoSupported(_)))
+    );
+
+    // And the whole PDU still round-trips.
+    let mut buf = BytesMut::new();
+    packet.emit(&mut buf);
+    assert_eq!(&buf[..], PACKET);
+}
+
+/// RFC 5303 allows TLV 240 at value lengths 1 (state only), 5 (+ circuit
+/// id), 11 (+ neighbor sys-id) and 15 (+ neighbor circuit id). Each form
+/// must round-trip emit -> parse unchanged.
+#[test]
+pub fn three_way_tlv_round_trips_all_lengths() {
+    let sys_id = IsisSysId {
+        id: [0, 0, 0, 0, 0, 0x10],
+    };
+    let cases = [
+        (
+            IsisTlvP2p3Way {
+                state: 2,
+                circuit_id: None,
+                neighbor_id: None,
+                neighbor_circuit_id: None,
+            },
+            3usize, // TL header + 1
+        ),
+        (
+            IsisTlvP2p3Way {
+                state: 1,
+                circuit_id: Some(2),
+                neighbor_id: None,
+                neighbor_circuit_id: None,
+            },
+            7,
+        ),
+        (
+            IsisTlvP2p3Way {
+                state: 1,
+                circuit_id: Some(2),
+                neighbor_id: Some(sys_id),
+                neighbor_circuit_id: None,
+            },
+            13,
+        ),
+        (
+            IsisTlvP2p3Way {
+                state: 0,
+                circuit_id: Some(2),
+                neighbor_id: Some(sys_id),
+                neighbor_circuit_id: Some(3),
+            },
+            17,
+        ),
+    ];
+    for (original, wire_len) in cases {
+        let tlv: IsisTlv = original.clone().into();
+        let mut buf = BytesMut::new();
+        tlv.emit(&mut buf);
+        assert_eq!(buf.len(), wire_len);
+        let (rest, parsed) = IsisTlv::parse_tlvs(&buf).expect("round-trip parse");
+        assert!(rest.is_empty());
+        assert_eq!(parsed, vec![IsisTlv::P2p3Way(original)]);
+    }
+}
+
+/// A known TLV whose value fails its inner parser must degrade to
+/// IsisTlvUnknown (bytes preserved) instead of aborting the TLV stream:
+/// under many0 an inner error silently truncates every following TLV.
+#[test]
+pub fn malformed_known_tlv_degrades_to_unknown() {
+    // Ipv4IfAddr (132) with a 3-byte value: too short for an IPv4
+    // address, so the typed parser fails. Followed by ProtSupported.
+    const TLVS: &[u8] = &hex!("84 03 c0 a8 00  81 01 cc");
+    let (rest, tlvs) = IsisTlv::parse_tlvs(TLVS).expect("stream must parse");
+    assert!(rest.is_empty());
+    assert_eq!(tlvs.len(), 2);
+    let IsisTlv::Unknown(unknown) = &tlvs[0] else {
+        panic!("malformed TLV must become Unknown, got {:?}", tlvs[0]);
+    };
+    assert_eq!(unknown.values, vec![0xc0, 0xa8, 0x00]);
+    assert!(matches!(tlvs[1], IsisTlv::ProtoSupported(_)));
+}

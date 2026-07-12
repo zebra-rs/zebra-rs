@@ -468,7 +468,7 @@ impl Display for IsisTlvP2p3Way {
             f,
             "  Three-Way Handshake : State:{}, Local circuit ID:{}, Neighbor System ID:{}",
             self.state,
-            self.circuit_id,
+            self.circuit_id.map(|id| id.to_string()).unwrap_or_default(),
             if let Some(neighbor_id) = &self.neighbor_id {
                 neighbor_id.to_string()
             } else {

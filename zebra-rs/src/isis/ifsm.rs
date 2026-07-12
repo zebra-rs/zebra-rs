@@ -244,14 +244,14 @@ pub fn hello_p2p_generate(link: &LinkTop, level: Level) -> IsisP2pHello {
     let tlv = if let Some((_, nbr)) = nbr {
         IsisTlvP2p3Way {
             state: nbr.state.into(),
-            circuit_id: link.ifindex,
+            circuit_id: Some(link.ifindex),
             neighbor_id: Some(nbr.sys_id),
             neighbor_circuit_id: nbr.circuit_id,
         }
     } else {
         IsisTlvP2p3Way {
             state: NfsmState::Down.into(),
-            circuit_id: link.ifindex,
+            circuit_id: Some(link.ifindex),
             neighbor_id: None,
             neighbor_circuit_id: None,
         }
