@@ -142,7 +142,16 @@ Phases 1–2 (`cradle-common` grows the shared types); wrong as an end state.
 
 ## Status
 
-- 2026-07-12: strategy decided; this doc written. Phase 0a (cradle-rs import) in
-  progress on cradle-rs branch `import-offload-helpers`.
+- 2026-07-12: strategy decided; this doc written.
+- 2026-07-12: **Phase 0a merged** — cradle-rs PR #121 (`import-offload-helpers`,
+  merge `722ae5a`). Both offload trees are now cradle-rs workspace crates on the
+  pinned aya; CI (fmt/clippy/test) green. A stale-clippy-cache false pass hid a
+  `doc_lazy_continuation` lint locally — CI caught it; fixed before merge.
+- **Phase 0b is still gated**: it must not land until a cradle-rs *release* (deb)
+  shipping `/usr/sbin/{xdp-bfd-echo,tc-evpn-replicate}` is installed on the BDD
+  host. Merging 0a to cradle-rs `main` does not rebuild/reinstall the deb, and
+  the host still carries zebra-rs's own `/usr/sbin/xdp-bfd-echo`. Sequence:
+  cut a cradle-rs release → reinstall the deb on the host → then the zebra-rs
+  `offload/` removal PR.
 </content>
 </invoke>
