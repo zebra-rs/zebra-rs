@@ -1,0 +1,29 @@
+# z2 — the control node: stays on SR-MPLS (Prefix-SID index 200 ->
+# label 16200) for the whole feature while z1's dataplane is flipped.
+# Its view of z1's advertisements (label 16100 leaving/re-entering the
+# ILM, the SRv6 Locator LSA appearing/disappearing from the database)
+# pins the LSA-level effect of the switch.
+interface:
+- if-name: lo
+  ipv6:
+    address: 2001:db8::2/128
+- if-name: z2-z1
+  ipv6:
+    address: 2001:db8:12::2/64
+system:
+  hostname: z2
+router:
+  ospfv3:
+    router-id: 10.0.0.2
+    segment-routing:
+      mpls: {}
+    area:
+    - area-id: 0.0.0.0
+      interface:
+      - if-name: lo
+        enabled: true
+        prefix-sid:
+          index: 200
+      - if-name: z2-z1
+        enabled: true
+        network-type: point-to-point
