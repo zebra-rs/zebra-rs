@@ -2172,24 +2172,34 @@ module config {
           ext:help "Segment Routing (SR-MPLS / SRv6) configuration";
           // Mirrors `router isis / segment-routing` (config.yang L516).
           // OSPFv3 carries SR over both dataplanes: MPLS (RFC 8666 via
-          // E-LSAs) and SRv6 (RFC 9513). The `mpls` and `srv6` sibling
-          // containers match the IS-IS shape so operators see a uniform
-          // CLI surface across protocols.
-          container mpls {
-            ext:help "Segment Routing over MPLS dataplane";
-            presence "Enable Segment Routing over MPLS dataplane";
-          }
-          container srv6 {
-            ext:help "Segment Routing over IPv6 dataplane (SRv6)";
-            presence "Enable Segment Routing over IPv6 dataplane";
-            leaf locator {
-              ext:help "Global SRv6 locator name for this instance";
-              // Name of a locator defined under the global
-              // /segment-routing/locator list. Held as a string (not a
-              // leafref) so an OSPFv3 config can be staged before the
-              // global locator is committed — matches the IS-IS
-              // staging convention (config.yang L524).
-              type string;
+          // E-LSAs) and SRv6 (RFC 9513). As with IS-IS, the two are
+          // mutually exclusive — one instance advertises either SR-MPLS
+          // SIDs or an SRv6 locator, never both — so they form a
+          // `choice`: committing `srv6` implicitly deletes a configured
+          // `mpls` (and vice versa) per RFC 7950 §7.9.3, and the commit
+          // diff tears the old dataplane down exactly as an explicit
+          // delete would.
+          choice dataplane {
+            case mpls {
+              container mpls {
+                ext:help "Segment Routing over MPLS dataplane";
+                presence "Enable Segment Routing over MPLS dataplane";
+              }
+            }
+            case srv6 {
+              container srv6 {
+                ext:help "Segment Routing over IPv6 dataplane (SRv6)";
+                presence "Enable Segment Routing over IPv6 dataplane";
+                leaf locator {
+                  ext:help "Global SRv6 locator name for this instance";
+                  // Name of a locator defined under the global
+                  // /segment-routing/locator list. Held as a string (not a
+                  // leafref) so an OSPFv3 config can be staged before the
+                  // global locator is committed — matches the IS-IS
+                  // staging convention (config.yang L524).
+                  type string;
+                }
+              }
             }
           }
         }

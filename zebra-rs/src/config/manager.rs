@@ -2171,6 +2171,83 @@ mod yang_load_tests {
         );
     }
 
+    /// `router ospfv3 segment-routing {mpls|srv6}` is the same YANG
+    /// `choice` as the IS-IS one (RFC 8666 SR-MPLS vs RFC 9513 SRv6 —
+    /// one instance advertises one dataplane). Checks both switch
+    /// directions, and that the purge is scoped to the choice's own
+    /// parent: OSPFv2's `segment-routing mpls` (same node names, no
+    /// choice — OSPFv2 has no SRv6 sibling) must survive an OSPFv3 case
+    /// switch untouched.
+    #[test]
+    fn ospfv3_sr_dataplane_choice_is_exclusive() {
+        use crate::config::ExecCode;
+        use crate::config::configs::set;
+        use crate::config::parse::{State, parse};
+        use crate::config::{Config, paths::path_try_trim};
+        use libyang::to_entry;
+        use std::rc::Rc;
+
+        let mut yang = YangStore::new();
+        yang.add_path(concat!(env!("CARGO_MANIFEST_DIR"), "/yang"));
+        yang.read_with_resolve("configure")
+            .unwrap_or_else(|e| panic!("configure failed to load: {e:#}"));
+        yang.identity_resolve();
+        let module = yang.find_module("configure").unwrap();
+        let entry = to_entry(&yang, module);
+        let set_entry = entry
+            .dir
+            .borrow()
+            .iter()
+            .find(|e| e.name == "set")
+            .cloned()
+            .expect("configure mode has a `set` entry");
+
+        let root = Rc::new(Config::new("".to_string(), None));
+        let run = |cmd: &str| {
+            let (code, _comps, state) = parse(cmd, set_entry.clone(), None, State::new());
+            assert_eq!(code, ExecCode::Success, "should parse: {cmd}");
+            set(path_try_trim("set", state.paths), root.clone());
+        };
+        let listing = || {
+            let mut out = String::new();
+            root.list(&mut out);
+            out
+        };
+
+        // The OSPFv2 sibling shares the container/case node names but
+        // lives under a different parent — the v3 case switches below
+        // must never reach it.
+        run("router ospf segment-routing mpls");
+        run("router ospfv3 segment-routing mpls");
+        assert!(listing().contains("router ospfv3 segment-routing mpls"));
+
+        // mpls -> srv6: the v3 mpls case is purged; v2 is untouched.
+        run("router ospfv3 segment-routing srv6 locator LOC1");
+        let out = listing();
+        assert!(
+            out.contains("router ospfv3 segment-routing srv6 locator LOC1"),
+            "{out}"
+        );
+        assert!(
+            !out.contains("router ospfv3 segment-routing mpls"),
+            "v3 mpls case must be auto-cleared by setting srv6, got:\n{out}"
+        );
+        assert!(
+            out.contains("router ospf segment-routing mpls"),
+            "OSPFv2's segment-routing mpls must survive the v3 case switch, got:\n{out}"
+        );
+
+        // srv6 -> mpls: the whole srv6 subtree (locator child included)
+        // must go.
+        run("router ospfv3 segment-routing mpls");
+        let out = listing();
+        assert!(out.contains("router ospfv3 segment-routing mpls"), "{out}");
+        assert!(
+            !out.contains("srv6"),
+            "v3 srv6 case (and its locator child) must be auto-cleared by setting mpls, got:\n{out}"
+        );
+    }
+
     /// `router static ipv4 route <prefix>` carries no forwarding info on its
     /// own, so the route list is tagged `ext:non-empty "nexthop"`: a bare
     /// entry is rejected at commit, and deleting its last child prunes it.
