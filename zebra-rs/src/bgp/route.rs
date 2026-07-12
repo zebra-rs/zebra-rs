@@ -534,6 +534,74 @@ pub(crate) fn build_srv6_vpn_fib_entry(
     Some(entry)
 }
 
+/// Build the FIB entry for an imported EVPN symmetric-IRB Type-5: a VXLAN L3
+/// encap toward the remote PE's VTEP with the L3VNI, inner dst MAC = the
+/// remote PE's router MAC — routed in the tenant VRF. The `transport` (the
+/// resolved underlay egress toward the VTEP) supplies `addr`/`ifindex`; the
+/// VTEP/L3VNI/RMAC ride the `NexthopUni.vxlan` field. Structural twin of
+/// `build_srv6_vpn_fib_entry`.
+pub(crate) fn build_vxlan_vpn_fib_entry(
+    vtep: std::net::Ipv4Addr,
+    l3vni: u32,
+    rmac: [u8; 6],
+    transport: &[rib::nht::ResolvedNexthop],
+) -> Option<rib::entry::RibEntry> {
+    if transport.is_empty() {
+        return None;
+    }
+    let mk_uni = |egress: &rib::nht::ResolvedNexthop| {
+        let mut uni = rib::NexthopUni::new(egress.addr, 0, Vec::new());
+        uni.vxlan = Some(rib::VxlanL3Encap {
+            remote_vtep: vtep,
+            l3vni,
+            remote_rmac: rmac,
+        });
+        if egress.ifindex != 0 {
+            uni.ifindex_origin = Some(egress.ifindex);
+        }
+        uni.valid = true;
+        uni
+    };
+    let nexthop = if transport.len() == 1 {
+        rib::Nexthop::Uni(mk_uni(&transport[0]))
+    } else {
+        let mut multi = rib::NexthopMulti::default();
+        for egress in transport {
+            multi.nexthops.push(mk_uni(egress));
+        }
+        rib::Nexthop::Multi(multi)
+    };
+    let mut entry = rib::entry::RibEntry::new(rib::RibType::Bgp);
+    entry.distance = 200;
+    entry.metric = 0;
+    entry.valid = true;
+    entry.nexthop = nexthop;
+    Some(entry)
+}
+
+/// The VXLAN symmetric-IRB FIB entry for an imported Type-5, or `None` if
+/// this isn't one. Keyed entirely on `best`: an imported (`Originated`)
+/// route carrying a Router's-MAC EC and an EVPN (VTEP) next-hop — only
+/// symmetric-IRB routes carry the RMAC EC, so this is mutually exclusive
+/// with the SRv6-SID and MPLS-label paths. Family-agnostic (the inner may
+/// be v4 or v6; the outer VTEP is always IPv4).
+fn vxlan_vpn_entry(
+    best: &BgpRib,
+    transport: Option<&[rib::nht::ResolvedNexthop]>,
+) -> Option<rib::entry::RibEntry> {
+    if best.typ != BgpRibType::Originated {
+        return None;
+    }
+    let rmac = extract_router_mac_from_attr(&best.attr)?;
+    let IpAddr::V4(vtep) = extract_tunnel_endpoint(best)? else {
+        return None;
+    };
+    let l3vni = best.label.map(|l| l.label).unwrap_or(0);
+    transport
+        .filter(|t| !t.is_empty())
+        .and_then(|t| build_vxlan_vpn_fib_entry(vtep, l3vni, rmac, t))
+}
+
 /// Whether `best` should install as a labelled VPN tunnel entry: an
 /// imported route (`Originated`) for which the VRF holds a resolved
 /// `transport`. `transport` is `None` outside a VRF (global instance),
@@ -610,6 +678,11 @@ fn select_fib_entry_v4(
     transport: Option<&[rib::nht::ResolvedNexthop]>,
     nht_transport: Option<&[rib::nht::ResolvedNexthop]>,
 ) -> Option<rib::entry::RibEntry> {
+    // EVPN/VXLAN symmetric IRB: an imported Type-5 carrying a Router's-MAC EC
+    // installs a VXLAN L3 encap entry toward the remote VTEP with the L3VNI.
+    if let Some(entry) = vxlan_vpn_entry(best, transport) {
+        return Some(entry);
+    }
     // SRv6 L3VPN: an imported route carrying an SRv6 L3 Service SID
     // installs an H.Encap entry toward that SID instead of an MPLS
     // label stack — gated on the underlay next-hop resolving, like the
@@ -848,6 +921,10 @@ fn select_fib_entry_v6(
     transport: Option<&[rib::nht::ResolvedNexthop]>,
     nht_transport: Option<&[rib::nht::ResolvedNexthop]>,
 ) -> Option<rib::entry::RibEntry> {
+    // EVPN/VXLAN symmetric IRB (v6 inner over an IPv4 VXLAN underlay).
+    if let Some(entry) = vxlan_vpn_entry(best, transport) {
+        return Some(entry);
+    }
     // SRv6 L3VPN (VPNv6 over an SRv6 underlay) — see `select_fib_entry_v4`.
     if best.typ == BgpRibType::Originated
         && let Some((sid, _behavior)) = best.attr.srv6_l3_sid()
@@ -7044,6 +7121,15 @@ fn evpn_l2_attr_mtu(attr: &BgpAttr) -> u16 {
         .and_then(|ecom| ecom.0.iter().find_map(|v| v.as_l2_attr()))
         .map(|a| a.mtu)
         .unwrap_or(0)
+}
+
+/// The Router's MAC of a received EVPN route (RFC 9135 §6): the advertising
+/// PE's router MAC, used as the inner destination MAC when VXLAN-routing to
+/// it (symmetric IRB). `None` when the EC is absent.
+fn extract_router_mac_from_attr(attr: &BgpAttr) -> Option<[u8; 6]> {
+    attr.ecom
+        .as_ref()
+        .and_then(|ecom| ecom.0.iter().find_map(|v| v.as_router_mac()))
 }
 
 fn extract_tunnel_endpoint(rib: &BgpRib) -> Option<IpAddr> {
@@ -15143,14 +15229,22 @@ impl Bgp {
         mut attr: BgpAttr,
         label: u32,
         srv6_nexthop: Option<std::net::Ipv6Addr>,
+        vxlan: Option<(Ipv4Addr, [u8; 6])>,
     ) {
         let prefix = EvpnPrefix::IpPrefix {
             eth_tag: 0,
             prefix: net,
         };
-        let nexthop = match srv6_nexthop {
-            Some(v6) => IpAddr::V6(v6),
-            None => IpAddr::V4(self.router_id),
+        // EVPN symmetric IRB (RFC 9135): the nexthop is this PE's VTEP and a
+        // Router's-MAC EC carries its router MAC; the label (=L3VNI) rides the
+        // NLRI. Otherwise SRv6 (v6 SID nexthop) or MPLS/VXLAN-L2 (router-id).
+        let nexthop = match (vxlan, srv6_nexthop) {
+            (Some((vtep, rmac)), _) => {
+                attr_add_ecom(&mut attr, ExtCommunityValue::router_mac(rmac));
+                IpAddr::V4(vtep)
+            }
+            (None, Some(v6)) => IpAddr::V6(v6),
+            (None, None) => IpAddr::V4(self.router_id),
         };
         attr.nexthop = Some(BgpNexthop::Evpn(nexthop));
         // MPLS: the service label rides on the BgpRib (mirrored by the

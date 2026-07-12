@@ -4509,6 +4509,14 @@ impl Bgp {
             super::vrf_config::config_vrf_evpn_advertise_ipv6,
         );
         self.callback_add(
+            "/router/bgp/vrf/evpn/l3vni",
+            super::vrf_config::config_vrf_evpn_l3vni,
+        );
+        self.callback_add(
+            "/router/bgp/vrf/evpn/router-mac",
+            super::vrf_config::config_vrf_evpn_router_mac,
+        );
+        self.callback_add(
             "/router/bgp/vrf/afi-safi/mup/dataplane",
             super::vrf_config::config_vrf_mup_dataplane,
         );

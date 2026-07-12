@@ -69,6 +69,9 @@ pub enum BgpVrfEncapsulation {
     #[default]
     Mpls,
     Srv6,
+    /// EVPN symmetric IRB (RFC 9135): a Type-5 carries an L3VNI (the NLRI
+    /// label) + this PE's router MAC (a Router's-MAC EC), routed over VXLAN.
+    Vxlan,
 }
 
 impl BgpVrfEncapsulation {
@@ -76,6 +79,7 @@ impl BgpVrfEncapsulation {
         match s {
             "mpls" => Some(Self::Mpls),
             "srv6" => Some(Self::Srv6),
+            "vxlan" => Some(Self::Vxlan),
             _ => None,
         }
     }
@@ -253,6 +257,12 @@ pub struct BgpVrfConfig {
     pub evpn_advertise_v4: bool,
     /// Advertise this VRF's IPv6 routes as EVPN Type-5 (RFC 9136).
     pub evpn_advertise_v6: bool,
+    /// EVPN symmetric-IRB L3VNI for this VRF (RFC 9135): stamped as the
+    /// Type-5 NLRI label. Mirrors `evpn l3vni` in zebra-bgp-vrf.yang.
+    pub l3vni: Option<u32>,
+    /// This PE's router MAC for the L3VNI — attached to originated Type-5
+    /// routes as a Router's-MAC EC. Mirrors `evpn router-mac`.
+    pub router_mac: Option<[u8; 6]>,
     /// Inter-AS MPLS/VPN Option AB (RFC 4364 hybrid of §10a/§10b).
     /// Mirrors `inter-as-hybrid` in zebra-bgp-vrf.yang. When set, the
     /// VRF re-exports the VPNv4 routes it *imports* (not only `network`/
@@ -976,6 +986,33 @@ pub fn config_vrf_evpn_advertise_ipv6(bgp: &mut Bgp, mut args: Args, op: ConfigO
     match op {
         ConfigOp::Set => cfg.evpn_advertise_v6 = args.boolean()?,
         ConfigOp::Delete => cfg.evpn_advertise_v6 = false,
+        _ => {}
+    }
+    Some(())
+}
+
+/// `set router bgp vrf <NAME> evpn l3vni <VNI>`.
+pub fn config_vrf_evpn_l3vni(bgp: &mut Bgp, mut args: Args, op: ConfigOp) -> Option<()> {
+    let name = args.string()?;
+    let cfg = vrf_entry(bgp, name);
+    match op {
+        ConfigOp::Set => cfg.l3vni = Some(args.u32()?),
+        ConfigOp::Delete => cfg.l3vni = None,
+        _ => {}
+    }
+    Some(())
+}
+
+/// `set router bgp vrf <NAME> evpn router-mac <MAC>` (symmetric IRB).
+pub fn config_vrf_evpn_router_mac(bgp: &mut Bgp, mut args: Args, op: ConfigOp) -> Option<()> {
+    let name = args.string()?;
+    let cfg = vrf_entry(bgp, name);
+    match op {
+        ConfigOp::Set => {
+            let mac: crate::rib::MacAddr = args.string()?.parse().ok()?;
+            cfg.router_mac = Some(mac.octets());
+        }
+        ConfigOp::Delete => cfg.router_mac = None,
         _ => {}
     }
     Some(())

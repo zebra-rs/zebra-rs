@@ -8,6 +8,10 @@ module zebra-bgp-vrf {
     prefix inet;
   }
 
+  import ietf-yang-types {
+    prefix yang;
+  }
+
   import ietf-bgp {
     prefix bgp;
   }
@@ -537,6 +541,16 @@ module zebra-bgp-vrf {
                the PE decapsulates into the VRF table via seg6local.
                Requires a resolved global `srv6 locator`.";
           }
+          enum vxlan {
+            description
+              "VXLAN symmetric-IRB encapsulation (RFC 9135 / RFC 8365).
+               EVPN Type-5 routes carry the tenant L3VNI in the NLRI
+               label field and this PE's router-MAC in the Router's-MAC
+               extended community; the ingress PE VXLAN-encapsulates the
+               inner IP toward the egress VTEP and rewrites the inner
+               Ethernet with the remote router-MAC. Requires the VRF's
+               `evpn l3vni` and `evpn router-mac` to be set.";
+          }
         }
         default "mpls";
         description
@@ -588,6 +602,27 @@ module zebra-bgp-vrf {
           description
             "Advertise this VRF's IPv6 unicast routes as EVPN Type-5
              (IP Prefix) routes. Requires `rd` to be set.";
+        }
+        leaf l3vni {
+          ext:help "Tenant L3VNI for VXLAN symmetric-IRB Type-5";
+          type uint32 {
+            range "1..16777215";
+          }
+          description
+            "L3VNI carried in the EVPN Type-5 NLRI label field when
+             `encapsulation vxlan` is set. Identifies the tenant VRF
+             on the egress PE for symmetric IRB (RFC 8365). Must match
+             an `l3vni` on a local `vxlan` device bound to this VRF.";
+        }
+        leaf router-mac {
+          ext:help "Router-MAC advertised in EVPN Type-5 (VXLAN IRB)";
+          type yang:mac-address;
+          description
+            "This PE's router-MAC, advertised in the Router's-MAC
+             extended community (RFC 9135) on VXLAN Type-5 routes. The
+             ingress PE rewrites the inner Ethernet destination with the
+             egress PE's router-MAC before VXLAN encapsulation. Defaults
+             to the VRF master device MAC when unset.";
         }
       }
       uses bgp-vrf-neighbor;

@@ -5,7 +5,7 @@ use anyhow::{Context, Result};
 use tokio::sync::mpsc::UnboundedSender;
 
 use crate::config::{Args, ConfigOp};
-use crate::rib::{AddrGenMode, Message};
+use crate::rib::{AddrGenMode, MacAddr, Message};
 
 use super::VxlanConfig;
 
@@ -117,6 +117,8 @@ impl ConfigBuilder {
         const DPORT_ERR: &str = "destination port format error";
         const ADDR_ERR: &str = "local address format error";
         const ADDR_GEN_MODE_ERR: &str = "address gen mode format error";
+        const VRF_ERR: &str = "vrf name format error";
+        const RMAC_ERR: &str = "router-mac format error";
 
         ConfigBuilder::default()
             .path("")
@@ -191,6 +193,37 @@ impl ConfigBuilder {
             .del(|config, cache, name, _args| {
                 let s = cache_lookup(config, cache, name).context(CONFIG_ERR)?;
                 s.addr_gen_mode = None;
+                Ok(())
+            })
+            .path("/vrf")
+            .set(|config, cache, name, args| {
+                let vrf = args.string().context(VRF_ERR)?;
+
+                let s = cache_get(config, cache, name).context(CONFIG_ERR)?;
+                s.vrf = Some(vrf);
+                Ok(())
+            })
+            .del(|config, cache, name, _args| {
+                let s = cache_lookup(config, cache, name).context(CONFIG_ERR)?;
+                s.vrf = None;
+                Ok(())
+            })
+            .path("/router-mac")
+            .set(|config, cache, name, args| {
+                let mac: MacAddr = args
+                    .string()
+                    .context(RMAC_ERR)?
+                    .parse()
+                    .ok()
+                    .context(RMAC_ERR)?;
+
+                let s = cache_get(config, cache, name).context(CONFIG_ERR)?;
+                s.router_mac = Some(mac);
+                Ok(())
+            })
+            .del(|config, cache, name, _args| {
+                let s = cache_lookup(config, cache, name).context(CONFIG_ERR)?;
+                s.router_mac = None;
                 Ok(())
             })
     }

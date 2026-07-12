@@ -5147,6 +5147,23 @@ impl Bgp {
         Some(nexthop)
     }
 
+    /// The `(l3vni, vtep, rmac)` for an EVPN symmetric-IRB (`encapsulation
+    /// vxlan`) VRF export, or `None` for a non-VXLAN VRF or one missing its
+    /// L3VNI / router-MAC / VTEP. The VTEP is the L3VNI vxlan device's local
+    /// address, registered in `local_vxlans` by `api_vxlan_add`.
+    fn vxlan_type5(&self, vrf: &str) -> Option<(u32, std::net::Ipv4Addr, [u8; 6])> {
+        let cfg = self.vrfs.get(vrf)?;
+        if cfg.encapsulation != super::vrf_config::BgpVrfEncapsulation::Vxlan {
+            return None;
+        }
+        let l3vni = cfg.l3vni?;
+        let rmac = cfg.router_mac?;
+        let std::net::IpAddr::V4(vtep) = self.local_vxlans.get(&l3vni)? else {
+            return None;
+        };
+        Some((l3vni, *vtep, rmac))
+    }
+
     fn process_vrf_global_msg(&mut self, msg: super::vrf::BgpGlobalMsg) {
         match msg {
             super::vrf::BgpGlobalMsg::Export {
@@ -5337,12 +5354,17 @@ impl Bgp {
                 // service label and (SRv6) Prefix-SID. Peer-gated by the
                 // L2VPN/EVPN AFI/SAFI, so it composes with the VPNv4 above.
                 if let Some(attr) = evpn_attr {
+                    let (t5_label, vxlan) = match self.vxlan_type5(&vrf) {
+                        Some((l3vni, vtep, rmac)) => (l3vni, Some((vtep, rmac))),
+                        None => (label, None),
+                    };
                     self.evpn_originate_type5(
                         rd,
                         ipnet::IpNet::V4(prefix),
                         attr,
-                        label,
+                        t5_label,
                         srv6_nexthop,
+                        vxlan,
                     );
                 }
             }
@@ -5609,12 +5631,17 @@ impl Bgp {
 
                 // EVPN Type-5 (IPv6 prefix) — composes with VPNv6 above.
                 if let Some(attr) = evpn_attr {
+                    let (t5_label, vxlan) = match self.vxlan_type5(&vrf) {
+                        Some((l3vni, vtep, rmac)) => (l3vni, Some((vtep, rmac))),
+                        None => (label, None),
+                    };
                     self.evpn_originate_type5(
                         rd,
                         ipnet::IpNet::V6(prefix),
                         attr,
-                        label,
+                        t5_label,
                         srv6_nexthop,
+                        vxlan,
                     );
                 }
             }

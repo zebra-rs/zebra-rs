@@ -236,6 +236,29 @@ impl ExtCommunityValue {
         })
     }
 
+    /// Build a Router's MAC Extended Community (RFC 9135 §6): EVPN high-type
+    /// (0x06) + Router's MAC sub-type (0x03), value = the 6-octet router MAC.
+    /// Attached to symmetric-IRB Type-2/Type-5 routes so a receiver can use
+    /// this PE's router MAC as the inner destination MAC when VXLAN-routing.
+    pub fn router_mac(mac: [u8; 6]) -> Self {
+        ExtCommunityValue {
+            high_type: ExtCommunityType::Evpn as u8,
+            low_type: EVPN_ROUTER_MAC_SUB_TYPE,
+            val: mac,
+        }
+    }
+
+    /// True iff this entry is a Router's MAC EC (EVPN 0x06 / sub-type 0x03).
+    pub fn is_router_mac(&self) -> bool {
+        self.high_type == ExtCommunityType::Evpn as u8 && self.low_type == EVPN_ROUTER_MAC_SUB_TYPE
+    }
+
+    /// Decode the Router's MAC EC (RFC 9135 §6): the 6-octet router MAC.
+    /// `None` for any non-matching EC.
+    pub fn as_router_mac(&self) -> Option<[u8; 6]> {
+        self.is_router_mac().then_some(self.val)
+    }
+
     /// Build an EVPN Layer-2 Attributes Extended Community (RFC 8214 §3.1):
     /// EVPN high-type (0x06) + Layer-2 Attributes sub-type (0x04). Carried on
     /// the **per-EVI** Ethernet A-D (Type-1) route of a VPWS service. The
@@ -361,6 +384,11 @@ const EVPN_ES_IMPORT_RT_SUB_TYPE: u8 = 0x02;
 /// ESI Label Extended Community sub-type (RFC 7432 §7.5), carried under the
 /// EVPN high-type (0x06).
 const EVPN_ESI_LABEL_SUB_TYPE: u8 = 0x01;
+
+/// Router's MAC Extended Community sub-type (RFC 9135 §6), carried under the
+/// EVPN high-type (0x06): the 6-octet value is the advertising PE's router
+/// MAC, used as the inner destination MAC for symmetric-IRB VXLAN routing.
+const EVPN_ROUTER_MAC_SUB_TYPE: u8 = 0x03;
 
 /// Layer-2 Attributes Extended Community sub-type (RFC 8214 §3.1), carried
 /// under the EVPN high-type (0x06).
@@ -672,6 +700,13 @@ impl fmt::Display for ExtCommunityValue {
                 f,
                 "es-import:{:02x}:{:02x}:{:02x}:{:02x}:{:02x}:{:02x}",
                 es[0], es[1], es[2], es[3], es[4], es[5]
+            )
+        } else if let Some(mac) = self.as_router_mac() {
+            // Router's MAC EC (RFC 9135 §6): the advertising PE's router MAC.
+            write!(
+                f,
+                "rmac:{:02x}:{:02x}:{:02x}:{:02x}:{:02x}:{:02x}",
+                mac[0], mac[1], mac[2], mac[3], mac[4], mac[5]
             )
         } else if let Some(es) = self.as_esi_label() {
             // ESI Label EC (RFC 7432 §7.5): redundancy mode + ESI label.
@@ -1346,6 +1381,32 @@ mod tests {
             val: [0; 6],
         };
         assert!(ExtCommunityValue::evi_rt_from_rt(&soo).is_none());
+    }
+
+    #[test]
+    fn router_mac_ec_round_trips() {
+        let mac = [0x02, 0x00, 0x00, 0x00, 0x01, 0xff];
+        let ec = ExtCommunityValue::router_mac(mac);
+        assert_eq!(ec.high_type, ExtCommunityType::Evpn as u8);
+        assert_eq!(ec.low_type, 0x03);
+        assert_eq!(ec.val, mac, "the 6-octet value is the MAC, no flags/pad");
+        assert!(ec.is_router_mac());
+        assert_eq!(ec.as_router_mac(), Some(mac));
+        assert_eq!(ec.to_string(), "rmac:02:00:00:00:01:ff");
+        // Wire round-trip: [0x06, 0x03, mac0..mac5].
+        let mut buf = BytesMut::new();
+        ec.encode(&mut buf);
+        assert_eq!(&buf[..], &[0x06, 0x03, 0x02, 0x00, 0x00, 0x00, 0x01, 0xff]);
+        let (_, parsed) = ExtCommunityValue::parse_be(&buf).expect("parse");
+        assert_eq!(parsed, ec);
+        assert_eq!(parsed.as_router_mac(), Some(mac));
+        // A standard RT is not a Router's MAC EC.
+        let rt = ExtCommunityValue {
+            high_type: 0x00,
+            low_type: 0x02,
+            val: [0; 6],
+        };
+        assert!(!rt.is_router_mac());
     }
 
     #[test]

@@ -1,6 +1,6 @@
 use std::net::IpAddr;
 
-use crate::rib::AddrGenMode;
+use crate::rib::{AddrGenMode, MacAddr};
 
 #[derive(Default, Debug, Clone)]
 pub struct VxlanConfig {
@@ -18,4 +18,10 @@ pub struct VxlanConfig {
 
     // Address generation mode.
     pub addr_gen_mode: Option<AddrGenMode>,
+
+    // Tenant VRF (EVPN symmetric-IRB L3VNI). See `Vxlan::vrf`.
+    pub vrf: Option<String>,
+
+    // Router-MAC for this L3VNI. See `Vxlan::router_mac`.
+    pub router_mac: Option<MacAddr>,
 }

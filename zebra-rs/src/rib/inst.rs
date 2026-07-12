@@ -2641,6 +2641,8 @@ impl Rib {
                     local_addr: config.local_addr,
                     dport: config.dport,
                     addr_gen_mode: config.addr_gen_mode,
+                    vrf: config.vrf.clone(),
+                    router_mac: config.router_mac,
                 };
                 self.vxlan.insert(name.clone(), vxlan.clone());
                 self.fib_handle.vxlan_add(&vxlan).await;
