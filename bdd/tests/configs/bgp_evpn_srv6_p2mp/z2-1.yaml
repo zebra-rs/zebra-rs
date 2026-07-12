@@ -1,7 +1,11 @@
 # z2 — the peer SRv6 EVPN PE (root + leaf) for VNI 10. Mirror of z1: locator
 # LOC2 (fcbb:bbbb:2::/48), a static route to z1's locator, and the same
-# srv6-p2mp + sr-p2mp-dataplane offload config. z1 sources BUM; z2 is the leaf
-# that receives the replicated copy and floods it into br10.
+# srv6-p2mp config. `system ebpf enabled` runs the cradle engine + FIB tee so
+# the BGP control plane programs the replication datapath (local End.DT2M SID +
+# remote replication slots) into cradle.
+system:
+  ebpf:
+    enabled: true
 interface:
 - if-name: lo
   ipv6:
@@ -30,11 +34,6 @@ router:
     - name: evpn
       advertise-all-vni: true
       bum-tunnel-type: srv6-p2mp
-      sr-p2mp-dataplane:
-        overlay-interface: oport2
-        underlay-interface: z2z1
-        bridge-interface: iport2
-        next-hop-mac: "02:00:00:00:12:01"
     neighbor:
     - remote-address: 2001:db8:12::1
       enabled: true

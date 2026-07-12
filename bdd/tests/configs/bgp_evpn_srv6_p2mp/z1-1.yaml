@@ -1,9 +1,13 @@
 # z1 — an SRv6 EVPN PE (root + leaf) for VNI 10 over an SR P2MP (RFC 9524)
 # BUM-replication tree. Locator LOC1 (fcbb:bbbb:1::/48) carves its End.DT2M
 # SID; a static route reaches z2's locator (no IGP in this 2-node test).
-# bum-tunnel-type srv6-p2mp + sr-p2mp-dataplane drive the tc-evpn-replicate
-# offload: the encap child wraps bare BUM out z1z2; the leaf child decaps a
-# replicated copy addressed to z1's End.DT2M SID into br10.
+# `system ebpf enabled` spawns the cradle engine and enables the FIB tee, so
+# the BGP control plane programs the replication datapath into cradle: z1's
+# local End.DT2M SID (leaf decap) into the SRv6 table, and each remote PE's
+# End.DT2M SID as a VNI-10 replication slot (root fan-out).
+system:
+  ebpf:
+    enabled: true
 interface:
 - if-name: lo
   ipv6:
@@ -32,11 +36,6 @@ router:
     - name: evpn
       advertise-all-vni: true
       bum-tunnel-type: srv6-p2mp
-      sr-p2mp-dataplane:
-        overlay-interface: oport1
-        underlay-interface: z1z2
-        bridge-interface: iport1
-        next-hop-mac: "02:00:00:00:12:02"
     neighbor:
     - remote-address: 2001:db8:12::2
       enabled: true
