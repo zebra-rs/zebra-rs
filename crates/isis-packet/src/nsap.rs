@@ -192,4 +192,25 @@ mod tests {
         is_invalid_nsap("49.0102.0304.0506.0708.090a.0b0c.0d0e.0000.0000.0001.00");
         // 14 octet area id.
     }
+
+    /// The `area_id` field holds only the area octets; the `area_id()`
+    /// accessor prepends the AFI to form the full area address. IS-IS
+    /// Area Address TLVs (Hello type 1 and LSP anchor) carry the
+    /// AFI-prefixed form — emitting the bare field drops the AFI and
+    /// advertises e.g. `00.00` instead of `49.0000`. Guarding both here
+    /// keeps every Area TLV producer consistent.
+    #[test]
+    fn area_id_accessor_prepends_afi() {
+        let nsap: Nsap = "49.0000.0000.0000.0001.00".parse().unwrap();
+        assert_eq!(nsap.afi, 0x49);
+        // Field: area octets only, no AFI.
+        assert_eq!(nsap.area_id, vec![0x00, 0x00]);
+        // Accessor: AFI + area octets = the full area address.
+        assert_eq!(nsap.area_id(), vec![0x49, 0x00, 0x00]);
+
+        // A different AFI with a non-zero area exercises the same rule.
+        let nsap: Nsap = "47.0023.0000.0000.00b1.00".parse().unwrap();
+        assert_eq!(nsap.area_id, vec![0x00, 0x23]);
+        assert_eq!(nsap.area_id(), vec![0x47, 0x00, 0x23]);
+    }
 }
