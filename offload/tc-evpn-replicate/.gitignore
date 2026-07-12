@@ -1,2 +1,0 @@
-# The root .gitignore only anchors `/target`; ignore this nested build dir too.
-/target

@@ -1,4 +1,0 @@
-# Attaching/detaching an XDP program needs CAP_NET_ADMIN, so `cargo run` is
-# wrapped in sudo. `-E` preserves the environment (e.g. RUST_LOG) for the binary.
-[target."cfg(all())"]
-runner = "sudo -E"

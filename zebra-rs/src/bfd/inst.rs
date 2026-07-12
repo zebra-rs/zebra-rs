@@ -901,8 +901,8 @@ impl Bfd {
 
     /// Arm, retune, or disarm the in-kernel expiration watchdog for `key` —
     /// the XDP helper's `CONTROL_TIMERS` `bpf_timer`, re-armed by every
-    /// control packet arriving for our discriminator (see
-    /// `offload/xdp-bfd-echo`). Mirrors [`Self::echo_originate_reconcile`]:
+    /// control packet arriving for our discriminator (see cradle-rs
+    /// `crates/xdp-bfd-echo`). Mirrors [`Self::echo_originate_reconcile`]:
     /// the desired kernel detection time is compared to the armed one
     /// (`Session::kernel_detect_us`) and `detect-add`/`detect-del` are sent
     /// exactly on the edges; a changed value re-sends `detect-add`, which the

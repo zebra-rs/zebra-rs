@@ -10,15 +10,6 @@ all:
 console:
 	RUSTFLAGS="--cfg tokio_unstable" cargo run --bin zebra --release
 
-# Optional: build the XDP BFD Echo helper (offload/). Requires a nightly
-# bpfel toolchain + bpf-linker (see offload/xdp-bfd-echo/README.md), so it
-# is kept OUT of `all`/CI, which run on stable. zebra-rs spawns this binary to
-# honour a non-zero BFD `Required Min Echo RX Interval`.
-.PHONY: xdp-bfd-echo
-xdp-bfd-echo:
-	cd offload/xdp-bfd-echo && cargo build --release
-	@echo '[built offload/xdp-bfd-echo/target/release/xdp-bfd-echo]'
-
 install:
 	cargo build --release
 	sudo cp target/release/zebra-rs /usr/bin/zebra-rs
@@ -42,17 +33,6 @@ install-vtypam:
 	sudo setcap cap_dac_read_search,cap_audit_write=ep /usr/sbin/vtypam
 	@echo '[vtypam installed to /usr/sbin/vtypam with file caps]'
 	@echo '[Copy etc/pam.d/zebra-rs.example to /etc/pam.d/zebra-rs and adjust for your distro]'
-
-# System-wide installation of the BFD Echo helper to /usr/sbin with the caps it
-# needs: cap_bpf (kernel 5.8+) + cap_net_admin to load/attach XDP, and
-# cap_net_raw for the AF_PACKET Echo originator. zebra-rs spawns it from
-# /usr/sbin/xdp-bfd-echo (override with $ZEBRA_XDP_BFD_ECHO_BIN). Build
-# it first with `make xdp-bfd-echo`.
-.PHONY: install-xdp-bfd-echo
-install-xdp-bfd-echo:
-	sudo install -m 0755 -o root -g root offload/xdp-bfd-echo/target/release/xdp-bfd-echo /usr/sbin/xdp-bfd-echo
-	sudo setcap cap_net_admin,cap_bpf,cap_net_raw=ep /usr/sbin/xdp-bfd-echo
-	@echo '[xdp-bfd-echo installed to /usr/sbin with file caps]'
 
 doc:
 	rustdoc

@@ -1,5 +1,0 @@
-# Adding the clsact qdisc and attaching/detaching a TC BPF classifier needs
-# CAP_NET_ADMIN, so `cargo run` is wrapped in sudo. `-E` preserves the
-# environment (e.g. RUST_LOG) for the binary.
-[target."cfg(all())"]
-runner = "sudo -E"
