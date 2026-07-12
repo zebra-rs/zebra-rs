@@ -3287,6 +3287,17 @@ impl Bgp {
                     .collect()
             })
             .unwrap_or_default();
+        // The EVPN Type-5 origination reads the same export RTs at emit time
+        // and lands them in `local_rib.evpn`, NOT `shard.v4vpn` — so the VPNv4
+        // retag below misses it. Re-originate each row's Type-5 too when the
+        // VRF advertises it, or a peer that only negotiated L2VPN/EVPN keeps a
+        // stale RT-less Type-5 and never imports the prefix.
+        let advertise_type5 = self
+            .vrfs
+            .get(vrf)
+            .map(|c| c.evpn_advertise_v4)
+            .unwrap_or(false);
+        let mut type5_work: Vec<(ipnet::Ipv4Net, bgp_packet::BgpAttr, u32)> = Vec::new();
         for (prefix, mut rib) in rows {
             let mut attr = (*rib.attr).clone();
             // Strip existing Route-Target ecoms (RFC 4360 sub-type 0x02)
@@ -3299,6 +3310,13 @@ impl Bgp {
             }
             let tagged = tag_attr_with_export_rts(attr, &export_rts);
             rib.attr = self.shard.intern(tagged);
+            if advertise_type5 {
+                type5_work.push((
+                    prefix,
+                    (*rib.attr).clone(),
+                    rib.label.map(|l| l.label).unwrap_or(0),
+                ));
+            }
             let (_, selected, _) = self.shard.update(Some(rd), prefix, rib);
             let mut top = super::peer::BgpTop {
                 router_id: &self.router_id,
@@ -3328,6 +3346,22 @@ impl Bgp {
                 super::route::ORIGINATED_PEER,
                 &mut top,
                 &mut self.peers,
+            );
+        }
+        // Re-originate the Type-5 rows now that the VPNv4 borrow is released.
+        for (prefix, mut attr, label) in type5_work {
+            let srv6_nexthop = self.srv6_export_nexthop(vrf, &mut attr);
+            let (t5_label, vxlan) = match self.vxlan_type5(vrf) {
+                Some((l3vni, vtep, rmac)) => (l3vni, Some((vtep, rmac))),
+                None => (label, None),
+            };
+            self.evpn_originate_type5(
+                rd,
+                ipnet::IpNet::V4(prefix),
+                attr,
+                t5_label,
+                srv6_nexthop,
+                vxlan,
             );
         }
     }
@@ -3363,6 +3397,15 @@ impl Bgp {
                     .collect()
             })
             .unwrap_or_default();
+        // Re-originate each row's EVPN Type-5 (v6) too — the VPNv6 retag below
+        // misses the Type-5 rows in `local_rib.evpn` (same reason as the v4
+        // path in `retag_vrf_exports_v4`).
+        let advertise_type5 = self
+            .vrfs
+            .get(vrf)
+            .map(|c| c.evpn_advertise_v6)
+            .unwrap_or(false);
+        let mut type5_work: Vec<(ipnet::Ipv6Net, bgp_packet::BgpAttr, u32)> = Vec::new();
         for (prefix, mut rib) in rows {
             let mut attr = (*rib.attr).clone();
             // Strip existing Route-Target ecoms (RFC 4360 sub-type 0x02)
@@ -3375,6 +3418,13 @@ impl Bgp {
             }
             let tagged = tag_attr_with_export_rts(attr, &export_rts);
             rib.attr = self.shard.intern(tagged);
+            if advertise_type5 {
+                type5_work.push((
+                    prefix,
+                    (*rib.attr).clone(),
+                    rib.label.map(|l| l.label).unwrap_or(0),
+                ));
+            }
             let (_, selected, _) = self.shard.update_v6vpn(rd, prefix, rib);
             let mut top = super::peer::BgpTop {
                 router_id: &self.router_id,
@@ -3403,6 +3453,22 @@ impl Bgp {
                 &selected,
                 &mut top,
                 &mut self.peers,
+            );
+        }
+        // Re-originate the Type-5 (v6 inner) rows now that the borrow ended.
+        for (prefix, mut attr, label) in type5_work {
+            let srv6_nexthop = self.srv6_export_nexthop(vrf, &mut attr);
+            let (t5_label, vxlan) = match self.vxlan_type5(vrf) {
+                Some((l3vni, vtep, rmac)) => (l3vni, Some((vtep, rmac))),
+                None => (label, None),
+            };
+            self.evpn_originate_type5(
+                rd,
+                ipnet::IpNet::V6(prefix),
+                attr,
+                t5_label,
+                srv6_nexthop,
+                vxlan,
             );
         }
     }
@@ -3516,6 +3582,25 @@ impl Bgp {
                     .collect();
                 for entry in stale {
                     self.evpn_originate_macip(&entry);
+                }
+                // A VRF may use this VNI as its EVPN symmetric-IRB L3VNI.
+                // Its Type-5 routes were originated with a router-id (not
+                // VTEP) next-hop if they raced ahead of this device; re-
+                // originate them now that the VTEP resolves.
+                // `retag_vrf_exports_*` re-emits the Type-5 with the current
+                // `vxlan_type5` (VTEP + RMAC).
+                let vxlan_vrfs: Vec<String> = self
+                    .vrfs
+                    .iter()
+                    .filter(|(_, c)| {
+                        c.encapsulation == super::vrf_config::BgpVrfEncapsulation::Vxlan
+                            && c.l3vni == Some(vni)
+                    })
+                    .map(|(n, _)| n.clone())
+                    .collect();
+                for vrf in vxlan_vrfs {
+                    self.retag_vrf_exports_v4(&vrf);
+                    self.retag_vrf_exports_v6(&vrf);
                 }
             }
             RibRx::VxlanDel { vni } => {
@@ -5147,6 +5232,23 @@ impl Bgp {
         Some(nexthop)
     }
 
+    /// The `(l3vni, vtep, rmac)` for an EVPN symmetric-IRB (`encapsulation
+    /// vxlan`) VRF export, or `None` for a non-VXLAN VRF or one missing its
+    /// L3VNI / router-MAC / VTEP. The VTEP is the L3VNI vxlan device's local
+    /// address, registered in `local_vxlans` by `api_vxlan_add`.
+    fn vxlan_type5(&self, vrf: &str) -> Option<(u32, std::net::Ipv4Addr, [u8; 6])> {
+        let cfg = self.vrfs.get(vrf)?;
+        if cfg.encapsulation != super::vrf_config::BgpVrfEncapsulation::Vxlan {
+            return None;
+        }
+        let l3vni = cfg.l3vni?;
+        let rmac = cfg.router_mac?;
+        let std::net::IpAddr::V4(vtep) = self.local_vxlans.get(&l3vni)? else {
+            return None;
+        };
+        Some((l3vni, *vtep, rmac))
+    }
+
     fn process_vrf_global_msg(&mut self, msg: super::vrf::BgpGlobalMsg) {
         match msg {
             super::vrf::BgpGlobalMsg::Export {
@@ -5251,6 +5353,7 @@ impl Bgp {
                     igmp_max_resp_time: 0,
                     ingress_region: None,
                     mup_st1: None,
+                    vxlan_vtep: None,
                 };
 
                 let (_, selected, _gen) = self.shard.update(Some(rd), prefix, rib);
@@ -5337,12 +5440,17 @@ impl Bgp {
                 // service label and (SRv6) Prefix-SID. Peer-gated by the
                 // L2VPN/EVPN AFI/SAFI, so it composes with the VPNv4 above.
                 if let Some(attr) = evpn_attr {
+                    let (t5_label, vxlan) = match self.vxlan_type5(&vrf) {
+                        Some((l3vni, vtep, rmac)) => (l3vni, Some((vtep, rmac))),
+                        None => (label, None),
+                    };
                     self.evpn_originate_type5(
                         rd,
                         ipnet::IpNet::V4(prefix),
                         attr,
-                        label,
+                        t5_label,
                         srv6_nexthop,
+                        vxlan,
                     );
                 }
             }
@@ -5539,6 +5647,7 @@ impl Bgp {
                     igmp_max_resp_time: 0,
                     ingress_region: None,
                     mup_st1: None,
+                    vxlan_vtep: None,
                 };
 
                 let (_, selected, _gen) = self.shard.update_v6vpn(rd, prefix, rib);
@@ -5609,12 +5718,17 @@ impl Bgp {
 
                 // EVPN Type-5 (IPv6 prefix) — composes with VPNv6 above.
                 if let Some(attr) = evpn_attr {
+                    let (t5_label, vxlan) = match self.vxlan_type5(&vrf) {
+                        Some((l3vni, vtep, rmac)) => (l3vni, Some((vtep, rmac))),
+                        None => (label, None),
+                    };
                     self.evpn_originate_type5(
                         rd,
                         ipnet::IpNet::V6(prefix),
                         attr,
-                        label,
+                        t5_label,
                         srv6_nexthop,
+                        vxlan,
                     );
                 }
             }

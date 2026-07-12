@@ -2641,6 +2641,8 @@ impl Rib {
                     local_addr: config.local_addr,
                     dport: config.dport,
                     addr_gen_mode: config.addr_gen_mode,
+                    vrf: config.vrf.clone(),
+                    router_mac: config.router_mac,
                 };
                 self.vxlan.insert(name.clone(), vxlan.clone());
                 self.fib_handle.vxlan_add(&vxlan).await;
@@ -2812,6 +2814,32 @@ impl Rib {
                     .collect();
                 for (ifname, vrf) in to_replay {
                     let _ = self.tx.send(Message::LinkVrfBind { ifname, vrf });
+                }
+                // Re-tee any EVPN symmetric-IRB L3VNI vxlan device bound to
+                // this VRF. Its cradle SetVni-L3 was deferred (not registered
+                // as an L2VNI) when the device's link appeared before this
+                // VRF was known (config-order race); now that the VRF
+                // resolves, register the L3 binding.
+                let l3_devs: Vec<(String, u32, IpAddr)> = self
+                    .vxlan
+                    .values()
+                    .filter(|v| v.vrf.as_deref() == Some(name.as_str()))
+                    .filter_map(|v| {
+                        let vni = v.vni?;
+                        let local = self
+                            .links
+                            .values()
+                            .find(|l| l.name == v.name)
+                            .and_then(|l| l.vxlan_local)?;
+                        Some((v.name.clone(), vni, local))
+                    })
+                    .collect();
+                for (dev, vni, local) in l3_devs {
+                    if let Some((vrf_table_id, rmac)) = self.vxlan_l3_binding(&dev) {
+                        self.fib_handle
+                            .cradle_vni_register_l3(vni, local, vrf_table_id, rmac)
+                            .await;
+                    }
                 }
                 // Compute the new VRF's effective router-id (members
                 // may already be enslaved when adopting a pre-existing

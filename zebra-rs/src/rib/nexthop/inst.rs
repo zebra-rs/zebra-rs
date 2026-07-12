@@ -52,8 +52,23 @@ pub struct NexthopUni {
     // sr0 dummy and `addr` is unused.
     pub seg6local_action: Option<SidBehavior>,
 
+    // EVPN symmetric-IRB VXLAN L3 encap (RFC 9135) — `Some` marks this
+    // nexthop as VXLAN-encapsulated: the routed inner packet is wrapped with
+    // `l3vni` toward `remote_vtep`, inner dst MAC = `remote_rmac`. `addr` /
+    // `ifindex_origin` carry the underlay adjacency. Mutually exclusive with
+    // `segs`/`mpls` (one encapsulation per nexthop).
+    pub vxlan: Option<VxlanL3Encap>,
+
     // Action.
     pub gid: usize,
+}
+
+/// EVPN symmetric-IRB VXLAN L3 encapsulation carried on a [`NexthopUni`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+pub struct VxlanL3Encap {
+    pub remote_vtep: Ipv4Addr,
+    pub l3vni: u32,
+    pub remote_rmac: [u8; 6],
 }
 
 impl NexthopUni {
@@ -111,6 +126,7 @@ impl Default for NexthopUni {
             segs: vec![],
             encap_type: None,
             seg6local_action: None,
+            vxlan: None,
             gid: 0,
             valid: false,
         }

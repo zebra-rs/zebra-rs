@@ -29,11 +29,25 @@ const FIB_F_ECMP: u32 = 1 << 3;
 pub const MPLS_OP_SWAP: u32 = 0;
 pub const MPLS_OP_POP_L3: u32 = 1;
 
+/// An EVPN symmetric-IRB VXLAN L3 encap leg: `(remote VTEP, L3VNI, remote
+/// router MAC)`. `Some` on a member marks it a VXLAN-encapsulated nexthop
+/// (the underlay adjacency rides in the leg's `gateway`/`oif`); mutually
+/// exclusive with `segs`/`labels`.
+pub type VxlanLeg = (std::net::Ipv4Addr, u32, [u8; 6]);
+
 /// A teed nexthop leaf: `(link gateway, oif, MPLS out-labels, SRv6 segment
-/// list, SRv6 encap mode)`. A non-empty `segs` makes it an SRv6 (v6-underlay)
-/// nexthop regardless of the route's family; `labels` and `segs` are mutually
-/// exclusive.
-pub type Leaf = (Option<IpAddr>, u32, Vec<u32>, Vec<Ipv6Addr>, u32);
+/// list, SRv6 encap mode, VXLAN L3 encap)`. A non-empty `segs` makes it an
+/// SRv6 (v6-underlay) nexthop regardless of the route's family; a `Some`
+/// VXLAN leg makes it a symmetric-IRB VXLAN nexthop; `labels`/`segs`/`vxlan`
+/// are mutually exclusive.
+pub type Leaf = (
+    Option<IpAddr>,
+    u32,
+    Vec<u32>,
+    Vec<Ipv6Addr>,
+    u32,
+    Option<VxlanLeg>,
+);
 
 /// A teed route member: a leaf plus an optional fast-reroute backup leaf
 /// (`Nexthop::Protect` — the backup carries the TI-LFA repair: packed uSID
@@ -45,6 +59,7 @@ type Member = (
     Vec<u32>,
     Vec<Ipv6Addr>,
     u32,
+    Option<VxlanLeg>,
     Option<Leaf>,
 );
 
@@ -83,6 +98,8 @@ struct CradleMirror {
     /// L2VNI ↔ bridge-domain bindings (bd == vni today) for `SetVni` replay,
     /// and the fabric-wide local VTEP source for `SetVtepSource`.
     vnis: HashMap<u32, u32>,
+    /// L3VNI ↔ VRF bindings (symmetric IRB): vni → (vrf_table_id, rmac).
+    vnis_l3: HashMap<u32, (u32, [u8; 6])>,
     vtep_source: Option<Ipv4Addr>,
     /// (AC port, vid, dx2v table) → (remote SID, local decap SID).
     xconnects: HashMap<(String, u16, u32), (Ipv6Addr, Option<Ipv6Addr>)>,
@@ -163,6 +180,9 @@ pub struct CradleFib {
     /// GTP-U encap nexthop dedup:
     /// `(gtp_src, gtp_dst, teid, underlay gateway, oif) -> id`.
     nh_ids_gtp: Arc<Mutex<HashMap<([u8; 4], [u8; 4], u32, u32, u32), u32>>>,
+    /// EVPN symmetric-IRB VXLAN L3 nexthop dedup:
+    /// `(underlay gateway, oif, vtep, l3vni, rmac) -> id`.
+    nh_ids_vxlan: Arc<Mutex<HashMap<([u8; 4], u32, [u8; 4], u32, [u8; 6]), u32>>>,
     next_id: Arc<AtomicU32>,
     /// The SRv6 H.Encaps source is pushed once (best-effort).
     encap_src_set: Arc<std::sync::atomic::AtomicBool>,
@@ -303,6 +323,7 @@ impl CradleFib {
             nh_ids6: Arc::new(Mutex::new(HashMap::new())),
             nh_ids_srv6: Arc::new(Mutex::new(HashMap::new())),
             nh_ids_gtp: Arc::new(Mutex::new(HashMap::new())),
+            nh_ids_vxlan: Arc::new(Mutex::new(HashMap::new())),
             next_id: Arc::new(AtomicU32::new(1)),
             encap_src_set: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             mirror: Arc::new(Mutex::new(CradleMirror::default())),
@@ -408,6 +429,7 @@ impl CradleFib {
         self.nh_ids6.lock().await.clear();
         self.nh_ids_srv6.lock().await.clear();
         self.nh_ids_gtp.lock().await.clear();
+        self.nh_ids_vxlan.lock().await.clear();
         self.encap_src_set.store(false, Ordering::Relaxed);
         // Snapshot, then replay without holding the lock — the methods
         // below re-record into the mirror as they run (same values).
@@ -449,6 +471,9 @@ impl CradleFib {
         }
         for (vni, vlan) in &m.vnis {
             self.set_vni(*vni, *vlan).await;
+        }
+        for (vni, (vrf, rmac)) in &m.vnis_l3 {
+            self.set_vni_l3(*vni, *vrf, *rmac).await;
         }
         for ((vni, mac), vtep) in &m.fdb_vxlan {
             self.fdb_add_vxlan(*vni, *mac, *vtep).await;
@@ -540,6 +565,9 @@ impl CradleFib {
                 gtp_src: String::new(),
                 gtp_dst: String::new(),
                 gtp_teid: 0,
+                vxlan_vtep: String::new(),
+                vxlan_l3vni: 0,
+                vxlan_rmac: String::new(),
             })
             .await?;
         self.nh_ids.lock().await.insert(key, id);
@@ -582,9 +610,65 @@ impl CradleFib {
                 gtp_src: String::new(),
                 gtp_dst: String::new(),
                 gtp_teid: 0,
+                vxlan_vtep: String::new(),
+                vxlan_l3vni: 0,
+                vxlan_rmac: String::new(),
             })
             .await?;
         self.nh_ids_srv6.lock().await.insert(key, id);
+        Ok(id)
+    }
+
+    /// Resolve (creating if needed) an EVPN symmetric-IRB VXLAN L3 nexthop id:
+    /// a v4 underlay adjacency (`gw`/`oif`) that VXLAN-encapsulates the routed
+    /// packet with `l3vni` toward `vtep`, inner dst MAC = `rmac`.
+    async fn vxlan_nexthop_id(
+        &self,
+        gw: Option<Ipv4Addr>,
+        oif: u32,
+        vtep: Ipv4Addr,
+        l3vni: u32,
+        rmac: [u8; 6],
+    ) -> anyhow::Result<u32> {
+        let key = (
+            gw.map(|a| a.octets()).unwrap_or([0; 4]),
+            oif,
+            vtep.octets(),
+            l3vni,
+            rmac,
+        );
+        {
+            let ids = self.nh_ids_vxlan.lock().await;
+            if let Some(id) = ids.get(&key) {
+                return Ok(*id);
+            }
+        }
+        let id = self.next_id.fetch_add(1, Ordering::Relaxed);
+        let rmac_str = format!(
+            "{:02x}:{:02x}:{:02x}:{:02x}:{:02x}:{:02x}",
+            rmac[0], rmac[1], rmac[2], rmac[3], rmac[4], rmac[5]
+        );
+        self.client()
+            .await?
+            .set_nexthop(pb::Nexthop {
+                id,
+                gateway: gw.map(|a| a.to_string()).unwrap_or_default(),
+                oif: String::new(),
+                oif_index: oif,
+                v6: false,
+                labels: Vec::new(),
+                segs: Vec::new(),
+                encap_mode: 0,
+                backup_id: 0,
+                gtp_src: String::new(),
+                gtp_dst: String::new(),
+                gtp_teid: 0,
+                vxlan_vtep: vtep.to_string(),
+                vxlan_l3vni: l3vni,
+                vxlan_rmac: rmac_str,
+            })
+            .await?;
+        self.nh_ids_vxlan.lock().await.insert(key, id);
         Ok(id)
     }
 
@@ -592,18 +676,28 @@ impl CradleFib {
     /// `segs`) are always v6-underlay; otherwise the family follows the
     /// gateway, or `route_v6` for an on-link (gateway-less) member.
     async fn member_nexthop_id(&self, m: &Member, route_v6: bool) -> anyhow::Result<u32> {
-        let (gw, oif, labels, segs, encap_mode, backup) = m;
+        let (gw, oif, labels, segs, encap_mode, vxlan, backup) = m;
         // Fast-reroute: resolve the backup leaf first (the TI-LFA repair —
         // packed carriers + H.Insert for SRv6, the repair label stack for
         // SR-MPLS), then hang its id off the primary so the datapath fails
         // over on link-down.
         let backup_id = match backup {
-            Some((bgw, boif, blabels, bsegs, bmode)) => {
+            Some((bgw, boif, blabels, bsegs, bmode, _bvxlan)) => {
                 self.leaf_nexthop_id(bgw, *boif, blabels, bsegs, *bmode, route_v6)
                     .await?
             }
             None => 0,
         };
+        // EVPN symmetric-IRB VXLAN L3 nexthop: the underlay adjacency
+        // (`gw`/`oif`) carries the VXLAN-wrapped inner packet toward the
+        // remote VTEP with the L3VNI + remote router MAC.
+        if let Some((vtep, l3vni, rmac)) = vxlan {
+            let gw4 = match gw {
+                Some(IpAddr::V4(a)) => Some(*a),
+                _ => None,
+            };
+            return self.vxlan_nexthop_id(gw4, *oif, *vtep, *l3vni, *rmac).await;
+        }
         if !segs.is_empty() {
             let gw6 = match gw {
                 Some(IpAddr::V6(a)) => Some(*a),
@@ -762,6 +856,9 @@ impl CradleFib {
                 gtp_src: String::new(),
                 gtp_dst: String::new(),
                 gtp_teid: 0,
+                vxlan_vtep: String::new(),
+                vxlan_l3vni: 0,
+                vxlan_rmac: String::new(),
             })
             .await?;
         self.nh_ids6.lock().await.insert(key, id);
@@ -1157,6 +1254,9 @@ impl CradleFib {
                 gtp_src: gtp_src.to_string(),
                 gtp_dst: gtp_dst.to_string(),
                 gtp_teid: teid,
+                vxlan_vtep: String::new(),
+                vxlan_l3vni: 0,
+                vxlan_rmac: String::new(),
             })
             .await?;
         self.nh_ids_gtp.lock().await.insert(key, id);
@@ -1498,7 +1598,16 @@ impl CradleFib {
     pub async fn set_vni(&self, vni: u32, vlan: u32) {
         self.mirror.lock().await.vnis.insert(vni, vlan);
         let result = async {
-            self.client().await?.set_vni(pb::Vni { vni, vlan }).await?;
+            self.client()
+                .await?
+                .set_vni(pb::Vni {
+                    vni,
+                    vlan,
+                    l3: false,
+                    vrf: 0,
+                    rmac: String::new(),
+                })
+                .await?;
             anyhow::Ok(())
         }
         .await;
@@ -1507,10 +1616,41 @@ impl CradleFib {
         }
     }
 
+    /// Bind an L3VNI to a VRF with this PE's router MAC (EVPN symmetric IRB):
+    /// a received VXLAN frame with `vni` routes its inner IP in `vrf`.
+    pub async fn set_vni_l3(&self, vni: u32, vrf: u32, rmac: [u8; 6]) {
+        self.mirror.lock().await.vnis_l3.insert(vni, (vrf, rmac));
+        let rmac_str = format!(
+            "{:02x}:{:02x}:{:02x}:{:02x}:{:02x}:{:02x}",
+            rmac[0], rmac[1], rmac[2], rmac[3], rmac[4], rmac[5]
+        );
+        let result = async {
+            self.client()
+                .await?
+                .set_vni(pb::Vni {
+                    vni,
+                    vlan: 0,
+                    l3: true,
+                    vrf,
+                    rmac: rmac_str,
+                })
+                .await?;
+            anyhow::Ok(())
+        }
+        .await;
+        if let Err(e) = result {
+            tracing::warn!("fib: cradle set_vni_l3 {vni} vrf {vrf} failed: {e}");
+        }
+    }
+
     /// Remove an L2VNI binding (the VXLAN device is gone). The fabric VTEP
     /// source is left as-is — it is fabric-wide, not per-VNI.
     pub async fn del_vni(&self, vni: u32) {
-        self.mirror.lock().await.vnis.remove(&vni);
+        {
+            let mut m = self.mirror.lock().await;
+            m.vnis.remove(&vni);
+            m.vnis_l3.remove(&vni);
+        }
         let result = async {
             self.client().await?.del_vni(pb::VniDel { vni }).await?;
             anyhow::Ok(())

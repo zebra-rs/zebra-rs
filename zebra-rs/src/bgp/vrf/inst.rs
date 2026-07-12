@@ -1286,6 +1286,12 @@ impl BgpVrf {
         label: u32,
         transport: &[crate::rib::nht::ResolvedNexthop],
     ) {
+        // Capture an EVPN symmetric-IRB (VXLAN) route's remote VTEP from its
+        // EVPN next-hop BEFORE the rewrite below drops it — the FIB install
+        // (`vxlan_vpn_entry`) reads it back to build the VXLAN L3 encap. The
+        // next-hop itself is still rewritten to self so v4-unicast best-path
+        // and CE re-advertise see a plain reachable address.
+        let vxlan_vtep = super::super::route::attr_vxlan_vtep(&attr);
         // Rewrite the next-hop to "self" (the VRF's router-id)
         // so CE peers receive a reachable v4 address.
         attr.nexthop = Some(bgp_packet::BgpNexthop::Ipv4(self.router_id));
@@ -1339,6 +1345,7 @@ impl BgpVrf {
             igmp_max_resp_time: 0,
             ingress_region: None,
             mup_st1: None,
+            vxlan_vtep,
         };
 
         let (_, selected, _gen) = self.shard.update(None, prefix, rib);
@@ -1524,6 +1531,10 @@ impl BgpVrf {
         label: u32,
         transport: &[crate::rib::nht::ResolvedNexthop],
     ) {
+        // Capture an EVPN symmetric-IRB (VXLAN) route's remote VTEP (always
+        // IPv4, even for a v6 inner prefix) before clearing the next-hop; the
+        // FIB install reads it back to build the VXLAN L3 encap.
+        let vxlan_vtep = super::super::route::attr_vxlan_vtep(&attr);
         attr.nexthop = None;
         let interned = self.shard.intern(attr);
 
@@ -1572,6 +1583,7 @@ impl BgpVrf {
             igmp_max_resp_time: 0,
             ingress_region: None,
             mup_st1: None,
+            vxlan_vtep,
         };
 
         let (_, selected, _gen) = self.shard.update_v6(prefix, rib);
@@ -1992,6 +2004,7 @@ impl BgpVrf {
             igmp_max_resp_time: 0,
             ingress_region: None,
             mup_st1: None,
+            vxlan_vtep: None,
         }
     }
 

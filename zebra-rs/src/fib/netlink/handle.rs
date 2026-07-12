@@ -381,6 +381,7 @@ type CradleMember = (
     Vec<u32>,
     Vec<std::net::Ipv6Addr>,
     u32,
+    Option<crate::fib::cradle::VxlanLeg>,
     Option<crate::fib::cradle::Leaf>,
 );
 
@@ -396,11 +397,19 @@ fn cradle_members(nexthop: &Nexthop) -> Vec<CradleMember> {
             a => Some(a),
         };
         let encap_mode = crate::fib::cradle::srv6_encap_mode(u.encap_type);
-        (gw, oif, u.mpls_label.clone(), u.segs.clone(), encap_mode)
+        let vxlan = u.vxlan.map(|v| (v.remote_vtep, v.l3vni, v.remote_rmac));
+        (
+            gw,
+            oif,
+            u.mpls_label.clone(),
+            u.segs.clone(),
+            encap_mode,
+            vxlan,
+        )
     }
     fn member(u: &NexthopUni) -> CradleMember {
-        let (gw, oif, labels, segs, encap_mode) = leaf(u);
-        (gw, oif, labels, segs, encap_mode, None)
+        let (gw, oif, labels, segs, encap_mode, vxlan) = leaf(u);
+        (gw, oif, labels, segs, encap_mode, vxlan, None)
     }
     match nexthop {
         Nexthop::Uni(u) => vec![member(u)],
@@ -408,7 +417,7 @@ fn cradle_members(nexthop: &Nexthop) -> Vec<CradleMember> {
         // eBPF forward falls back to `bpf_redirect_neigh` on the
         // destination itself, which also drives kernel ND — so delivery
         // to directly-connected hosts needs no pinned neighbors.
-        Nexthop::Link(ifindex) => vec![(None, *ifindex, vec![], vec![], 0, None)],
+        Nexthop::Link(ifindex) => vec![(None, *ifindex, vec![], vec![], 0, None, None)],
         Nexthop::Multi(m) => m.nexthops.iter().map(member).collect(),
         Nexthop::List(l) => l
             .nexthops
@@ -430,7 +439,7 @@ fn cradle_members(nexthop: &Nexthop) -> Vec<CradleMember> {
             match &pro.primary {
                 NexthopMember::Uni(u) => {
                     let mut m = member(u);
-                    m.5 = backup;
+                    m.6 = backup;
                     vec![m]
                 }
                 NexthopMember::Multi(mm) => mm.nexthops.iter().map(member).collect(),
@@ -585,6 +594,27 @@ impl FibHandle {
             && let IpAddr::V4(v4) = local
         {
             cradle.set_vni(vni, vni).await;
+            cradle.set_vtep_source(v4).await;
+        }
+    }
+
+    /// Declare an EVPN/VXLAN L3VNI (symmetric IRB, RFC 9135) to the cradle
+    /// data plane: bind the VNI to a tenant `vrf_table_id` with this PE's
+    /// router-MAC so a received VXLAN frame on `vni` routes its inner IP in
+    /// that VRF, and set the fabric-wide local VTEP source. Only an IPv4
+    /// VTEP is a cradle datapath capability today; an IPv6-local device is a
+    /// no-op here. No-op when cradle is disabled.
+    pub async fn cradle_vni_register_l3(
+        &self,
+        vni: u32,
+        local: IpAddr,
+        vrf_table_id: u32,
+        rmac: [u8; 6],
+    ) {
+        if let Some(cradle) = &self.cradle
+            && let IpAddr::V4(v4) = local
+        {
+            cradle.set_vni_l3(vni, vrf_table_id, rmac).await;
             cradle.set_vtep_source(v4).await;
         }
     }

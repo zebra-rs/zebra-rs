@@ -401,6 +401,30 @@ module config {
            the VXLAN gains a master). Omitted means the VXLAN is not a
            bridge port.";
       }
+      leaf vrf {
+        ext:help "Tenant VRF this device is an L3VNI for (EVPN IRB)";
+        ext:dynamic "rib:vrf";
+        type leafref {
+          path "/vrf/name";
+        }
+        description
+          "Bind this VXLAN device to a tenant VRF as an EVPN symmetric-IRB
+           L3VNI (RFC 9135 / RFC 8365). A VXLAN frame received on this VNI
+           routes its inner IP in the VRF's FIB (instead of bridging into
+           an L2 domain), and the VRF's Type-5 routes are VXLAN-encapsulated
+           toward the remote VTEP. Requires `router bgp vrf <name> evpn
+           advertise-ipv4/ipv6` and matching `encapsulation vxlan`.";
+      }
+      leaf router-mac {
+        ext:help "Router-MAC for this L3VNI (EVPN IRB inner rewrite)";
+        type yang:mac-address;
+        description
+          "This PE's router-MAC for the L3VNI. On ingress the inner
+           Ethernet is rewritten with the remote PE's router-MAC before
+           encapsulation; on egress a frame whose inner destination matches
+           this MAC is routed in the bound VRF. Defaults to the VRF master
+           device MAC when unset.";
+      }
     }
 
     container system {
