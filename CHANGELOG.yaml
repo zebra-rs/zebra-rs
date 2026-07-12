@@ -5,6 +5,86 @@
 # Fields "distribution" and "urgency" are optional per-entry; if you omit
 # them, the defaults from .chglog.yml (or chglog config) are used.
 
+- semver: 26.7.4
+  date: 2026-07-12T18:00:00+09:00
+  distribution: unstable
+  urgency: medium
+  packager: Kunihiro Ishiguro <kunihiro@zebra.rs>
+  changes:
+    - note: |
+        ### eBPF data plane (cradle)
+        * A managed eBPF/XDP forwarding engine is supervised under a
+          single `system ebpf enabled` knob; enabling it spawns the
+          engine and tees the mirrored FIB into it
+        * `system ebpf` and `interface ebpf` YANG knobs; engine ports
+          reconcile from `interface <name> ebpf enabled` and bind to
+          the interface's VRF table
+        * The mirrored FIB tee replays into a restarted engine, and
+          resyncs already-installed routes when the tee is enabled
+          after convergence, so a late start converges to the RIB
+        * Bridge-enslaved interfaces are brought up as eBPF L2 ports
+        * `show ebpf {status,l2,ipv4,ipv6,mpls,srv6,nexthop,stats}`
+          with per-VRF `show ebpf {ipv4,ipv6} vrf <name>`; ANSI escapes
+          are stripped from relayed engine log lines
+
+    - note: |
+        ### EVPN
+        * BGP-EVPN over VXLAN is teed into the cradle eBPF data plane
+        * EVPN Type-5 symmetric-IRB routes are teed to the cradle, with
+          import/origination made to converge
+        * The cradle VNI binding is withdrawn when its VXLAN device is
+          removed
+
+    - note: |
+        ### IS-IS
+        * Interoperate with Cisco IOS legacy 1-octet P2P three-way TLV
+        * Join the IS-IS L2 multicast groups on the packet socket, so
+          adjacencies survive on real NICs (not just under promisc)
+        * Emit the AFI-prefixed area address in the self-LSP
+        * The SR data plane (SR-MPLS vs SRv6) is now a YANG choice,
+          with choice exclusivity enforced at commit
+
+    - note: |
+        ### OSPF
+        * OSPFv3 segment-routing mpls/srv6 is a YANG choice; the SID
+          owner protocol is stamped on uninstall
+
+    - note: |
+        ### BGP
+        * MUP: fix suppressed withdraws and withdraw the advertised ST1
+          NLRI; clear the MUP Adj-RIB-Out on peer-down; show every
+          ISD/DSD service SID and pick the SID by UE family; drop
+          identical re-exports so handover stops re-sending the ST2
+        * Recursive SRv6 segment inheritance in the nexthop resolver:
+          a route inherits SRv6 segments from its next-hop's covering
+          route
+        * Fast redial via idle-hold after a refused dial
+        * `show bgp neighbor` now prints the IPv6 MPLS VPN capability
+        * The unused GTP data plane enum is disabled
+
+    - note: |
+        ### RIB / VTY
+        * `show ip route` takes a positional address/prefix; the
+          `prefix` keyword is dropped, including `show ip route vrf
+          <name> <addr|prefix>`
+        * Honest static-ILM rows in `show mpls ilm`
+        * FIB unicast routes install with NLM_F_REPLACE for in-place
+          re-resolution; recursive static route prefix corrected
+
+    - note: |
+        ### Playset labs / docs
+        * SRv6 and SR-MPLS static-route walkthroughs added to the
+          isis-srv6-usid, srv6-classic, ospfv3-srv6, and ospfv2-srmpls
+          lab READMEs
+        * New single-knob eBPF data-plane book chapter; refreshed
+          static-route chapters to the current config model
+
+    - note: |
+        ### Infrastructure
+        * Per-namespace ZEBRA_OSPF_CHECKPOINT_DIR for each BDD daemon,
+          so a shared OSPF graceful-restart checkpoint no longer
+          poisons non-GR OSPF daemons at higher concurrency
+
 - semver: 26.7.3
   date: 2026-07-11T18:00:00+09:00
   distribution: unstable
