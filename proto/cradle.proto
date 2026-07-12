@@ -126,16 +126,31 @@ message LocalSidDel {
 
 message Srv6EncapSource { string addr = 1; }  // outer IPv6 SA for H.Encaps
 
+// EVPN/VXLAN L2VNI: bind VNI `vni` to bridge domain `vlan` (both datapath
+// directions — encap picks the VNI by bridge domain, decap picks the bridge
+// domain by VNI).
+message Vni {
+  uint32 vni  = 1;
+  uint32 vlan = 2;
+}
+
+message VniDel { uint32 vni = 1; }
+
+// Local VTEP source IPv4 — the VXLAN outer source address, and the decap
+// match for received VXLAN traffic.
+message VtepSource { string addr = 1; }
+
 // EVPN-over-SRv6 overlay FDB entry: MAC `mac` in bridge domain `bd` sits
 // behind the remote PE's End.DT2U/DT2M service SID. `nexthop_id` selects the
 // underlay adjacency; 0 = resolve by a FIB6 lookup on `remote_sid` in the
 // datapath (the control plane doesn't need to pre-resolve). The all-ones MAC
 // is the per-BD BUM sentinel (remote End.DT2M).
 message FdbRemote {
-  string mac        = 1;
-  uint32 bd         = 2;
-  string remote_sid = 3;
-  uint32 nexthop_id = 4;
+  string mac         = 1;
+  uint32 bd          = 2;
+  string remote_sid  = 3;   // SRv6: remote End.DT2U/DT2M service SID
+  uint32 nexthop_id  = 4;   // 0 = FIB lookup on the SID/VTEP in the datapath
+  string remote_vtep = 5;   // VXLAN: remote VTEP IPv4 (exactly one of sid/vtep)
 }
 
 message FdbRemoteDel {
@@ -177,8 +192,9 @@ message XconnectDel {
 // (bd, remote_sid). The EVPN Type-3 tee drives these; a bridge domain using
 // slots must not also program the all-ones-MAC sentinel.
 message ReplSlot {
-  uint32 bd         = 1;
-  string remote_sid = 2;
+  uint32 bd          = 1;
+  string remote_sid  = 2;   // SRv6: remote End.DT2M SID
+  string remote_vtep = 3;   // VXLAN: remote VTEP IPv4 (VNI from the bd's SetVni)
 }
 
 // An egress-protection mirror route (End.M context): traffic exposed by an
@@ -421,6 +437,9 @@ service Cradle {
   rpc AddGtpPdr(GtpPdr) returns (Empty);
   rpc DelGtpPdr(GtpPdrDel) returns (Empty);
   rpc SetSrv6EncapSource(Srv6EncapSource) returns (Empty);
+  rpc SetVni(Vni) returns (Empty);
+  rpc DelVni(VniDel) returns (Empty);
+  rpc SetVtepSource(VtepSource) returns (Empty);
   rpc AddFdbRemote(FdbRemote) returns (Empty);
   rpc DelFdbRemote(FdbRemoteDel) returns (Empty);
   rpc WatchFdb(WatchFdbRequest) returns (stream FdbEvent);

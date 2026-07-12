@@ -3501,6 +3501,22 @@ impl Bgp {
             RibRx::VxlanAdd { vni, vtep_local } => {
                 self.local_vxlans.insert(vni, vtep_local);
                 self.evpn_originate_imet(vni, vtep_local);
+                // Re-originate any MAC learned before this VXLAN device was
+                // observed: cradle's WatchFdb replays already-learned CE MACs
+                // the instant zebra subscribes, which can beat the device's
+                // RTM_NEWLINK, so their Type-2 was originated with a stale
+                // (router-id) nexthop. `evpn_originate_macip` now resolves the
+                // VTEP from `local_vxlans`, so re-running it fixes the nexthop.
+                // Idempotent (same prefix replaces).
+                let stale: Vec<FdbEntry> = self
+                    .local_fdb
+                    .values()
+                    .filter(|e| e.vni == vni)
+                    .cloned()
+                    .collect();
+                for entry in stale {
+                    self.evpn_originate_macip(&entry);
+                }
             }
             RibRx::VxlanDel { vni } => {
                 if let Some(vtep_local) = self.local_vxlans.remove(&vni) {

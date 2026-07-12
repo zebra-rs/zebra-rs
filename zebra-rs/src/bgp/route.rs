@@ -15016,8 +15016,18 @@ impl Bgp {
             ecom.0.insert(evpn_mac_mobility(seq));
         }
         attr.ecom = Some(ecom);
-        let nexthop = entry.vxlan_local.unwrap_or(IpAddr::V4(self.router_id));
-        if entry.vxlan_local.is_none() {
+        // Prefer the current VNI→VTEP binding over the entry's cached
+        // `vxlan_local`: a MAC learned before its VXLAN device was observed
+        // (a cradle WatchFdb replay racing device creation) cached `None`,
+        // and the `RibRx::VxlanAdd` handler re-originates it once the VTEP
+        // is known — this lookup is what makes that re-origination correct.
+        let nexthop = self
+            .local_vxlans
+            .get(&entry.vni)
+            .copied()
+            .or(entry.vxlan_local)
+            .unwrap_or(IpAddr::V4(self.router_id));
+        if !self.local_vxlans.contains_key(&entry.vni) && entry.vxlan_local.is_none() {
             tracing::warn!(
                 "evpn_originate_macip: VXLAN for VNI {} has no local IP; \
                  falling back to router-id {} as nexthop",

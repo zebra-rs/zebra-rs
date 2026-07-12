@@ -74,6 +74,16 @@ struct CradleMirror {
     fdb: HashMap<(u32, [u8; 6]), Ipv6Addr>,
     /// (bridge domain, remote End.DT2M SID) flood-set memberships.
     repl_slots: HashSet<(u32, Ipv6Addr)>,
+    /// EVPN/VXLAN counterparts of `fdb`/`repl_slots`: (bridge domain, mac) →
+    /// remote VTEP IPv4 (Type-2), and (bridge domain, remote VTEP) flood-set
+    /// memberships (Type-3). A `(vni, mac)` key is in exactly one of `fdb` /
+    /// `fdb_vxlan` depending on the received route's encap.
+    fdb_vxlan: HashMap<(u32, [u8; 6]), Ipv4Addr>,
+    repl_slots_vxlan: HashSet<(u32, Ipv4Addr)>,
+    /// L2VNI ↔ bridge-domain bindings (bd == vni today) for `SetVni` replay,
+    /// and the fabric-wide local VTEP source for `SetVtepSource`.
+    vnis: HashMap<u32, u32>,
+    vtep_source: Option<Ipv4Addr>,
     /// (AC port, vid, dx2v table) → (remote SID, local decap SID).
     xconnects: HashMap<(String, u16, u32), (Ipv6Addr, Option<Ipv6Addr>)>,
     /// (mirror context, protected prefix) → reproduction VRF table.
@@ -431,6 +441,21 @@ impl CradleFib {
         for (vni, sid) in &m.repl_slots {
             self.repl_slot_add(*vni, *sid).await;
         }
+        // VXLAN L2: the VTEP source and VNI bindings first (a VXLAN repl slot
+        // resolves its VNI from the SetVni binding), then the overlay FDB and
+        // flood slots.
+        if let Some(src) = m.vtep_source {
+            self.set_vtep_source(src).await;
+        }
+        for (vni, vlan) in &m.vnis {
+            self.set_vni(*vni, *vlan).await;
+        }
+        for ((vni, mac), vtep) in &m.fdb_vxlan {
+            self.fdb_add_vxlan(*vni, *mac, *vtep).await;
+        }
+        for (vni, vtep) in &m.repl_slots_vxlan {
+            self.repl_slot_add_vxlan(*vni, *vtep).await;
+        }
         for ((port, vid, table), (remote, local)) in &m.xconnects {
             self.xconnect_add(port, *remote, *local, *vid, *table).await;
         }
@@ -446,15 +471,18 @@ impl CradleFib {
         }
         tracing::info!(
             "fib: cradle replay: {} v4 + {} v6 routes, {} ILM, {} SIDs (+{} static), \
-             {} FDB, {} repl slots, {} xconnects, {} GTP PDRs + {} encaps, \
-             {} mirror routes, {} neighbors re-applied",
+             {} FDB (+{} vxlan), {} repl slots (+{} vxlan), {} vnis, {} xconnects, \
+             {} GTP PDRs + {} encaps, {} mirror routes, {} neighbors re-applied",
             m.routes4.len(),
             m.routes6.len(),
             m.ilm.len(),
             m.local_sids.len(),
             m.static_sids.len(),
             m.fdb.len(),
+            m.fdb_vxlan.len(),
             m.repl_slots.len(),
+            m.repl_slots_vxlan.len(),
+            m.vnis.len(),
             m.xconnects.len(),
             m.gtp_pdrs.len(),
             m.gtp_encaps.len(),
@@ -1217,6 +1245,7 @@ impl CradleFib {
                     bd: vni,
                     remote_sid: sid.to_string(),
                     nexthop_id: 0,
+                    remote_vtep: String::new(),
                 })
                 .await?;
             anyhow::Ok(())
@@ -1227,9 +1256,43 @@ impl CradleFib {
         }
     }
 
-    /// Remove an overlay FDB entry.
+    /// EVPN/VXLAN overlay FDB entry (Type-2): `mac` in bridge domain `vni`
+    /// sits behind the remote VTEP `vtep`. The VNI stamped on encap comes
+    /// from the bridge domain's `SetVni` binding; `nexthop_id: 0` — cradle
+    /// resolves the underlay adjacency with a FIB4 lookup on the VTEP.
+    pub async fn fdb_add_vxlan(&self, vni: u32, mac: [u8; 6], vtep: std::net::Ipv4Addr) {
+        self.mirror.lock().await.fdb_vxlan.insert((vni, mac), vtep);
+        let mac_str = format!(
+            "{:02x}:{:02x}:{:02x}:{:02x}:{:02x}:{:02x}",
+            mac[0], mac[1], mac[2], mac[3], mac[4], mac[5]
+        );
+        let result = async {
+            self.client()
+                .await?
+                .add_fdb_remote(pb::FdbRemote {
+                    mac: mac_str.clone(),
+                    bd: vni,
+                    remote_sid: String::new(),
+                    nexthop_id: 0,
+                    remote_vtep: vtep.to_string(),
+                })
+                .await?;
+            anyhow::Ok(())
+        }
+        .await;
+        if let Err(e) = result {
+            tracing::warn!("fib: cradle fdb_add_vxlan {mac_str} vni {vni} failed: {e}");
+        }
+    }
+
+    /// Remove an overlay FDB entry (works for either encap — the datapath
+    /// keys the delete by `(mac, bd)` regardless of flavor).
     pub async fn fdb_del(&self, vni: u32, mac: [u8; 6]) {
-        self.mirror.lock().await.fdb.remove(&(vni, mac));
+        {
+            let mut m = self.mirror.lock().await;
+            m.fdb.remove(&(vni, mac));
+            m.fdb_vxlan.remove(&(vni, mac));
+        }
         let mac_str = format!(
             "{:02x}:{:02x}:{:02x}:{:02x}:{:02x}:{:02x}",
             mac[0], mac[1], mac[2], mac[3], mac[4], mac[5]
@@ -1275,6 +1338,7 @@ impl CradleFib {
                 .add_repl_slot(pb::ReplSlot {
                     bd: vni,
                     remote_sid: sid.to_string(),
+                    remote_vtep: String::new(),
                 })
                 .await?;
             anyhow::Ok(())
@@ -1366,6 +1430,7 @@ impl CradleFib {
                 .del_repl_slot(pb::ReplSlot {
                     bd: vni,
                     remote_sid: sid.to_string(),
+                    remote_vtep: String::new(),
                 })
                 .await?;
             anyhow::Ok(())
@@ -1373,6 +1438,91 @@ impl CradleFib {
         .await;
         if let Err(e) = result {
             tracing::warn!("fib: cradle repl_slot_del vni {vni} {sid} failed: {e}");
+        }
+    }
+
+    /// EVPN/VXLAN BUM replication slot (Type-3 tee): the remote VTEP `vtep`
+    /// joins VNI `vni`'s flood set. The VNI resolves from the bridge
+    /// domain's `SetVni` binding, so a `cradle_vni_register` must have run
+    /// first (it does — the VXLAN device is declared before any Type-3).
+    pub async fn repl_slot_add_vxlan(&self, vni: u32, vtep: std::net::Ipv4Addr) {
+        self.mirror
+            .lock()
+            .await
+            .repl_slots_vxlan
+            .insert((vni, vtep));
+        let result = async {
+            self.client()
+                .await?
+                .add_repl_slot(pb::ReplSlot {
+                    bd: vni,
+                    remote_sid: String::new(),
+                    remote_vtep: vtep.to_string(),
+                })
+                .await?;
+            anyhow::Ok(())
+        }
+        .await;
+        if let Err(e) = result {
+            tracing::warn!("fib: cradle repl_slot_add_vxlan vni {vni} {vtep} failed: {e}");
+        }
+    }
+
+    /// Remove a `(vni, vtep)` VXLAN replication slot.
+    pub async fn repl_slot_del_vxlan(&self, vni: u32, vtep: std::net::Ipv4Addr) {
+        self.mirror
+            .lock()
+            .await
+            .repl_slots_vxlan
+            .remove(&(vni, vtep));
+        let result = async {
+            self.client()
+                .await?
+                .del_repl_slot(pb::ReplSlot {
+                    bd: vni,
+                    remote_sid: String::new(),
+                    remote_vtep: vtep.to_string(),
+                })
+                .await?;
+            anyhow::Ok(())
+        }
+        .await;
+        if let Err(e) = result {
+            tracing::warn!("fib: cradle repl_slot_del_vxlan vni {vni} {vtep} failed: {e}");
+        }
+    }
+
+    /// Bind an L2VNI to its bridge domain in the cradle datapath (both
+    /// directions). Today `bd == vni`, matching the `bd` field the Type-2/3
+    /// tees send.
+    pub async fn set_vni(&self, vni: u32, vlan: u32) {
+        self.mirror.lock().await.vnis.insert(vni, vlan);
+        let result = async {
+            self.client().await?.set_vni(pb::Vni { vni, vlan }).await?;
+            anyhow::Ok(())
+        }
+        .await;
+        if let Err(e) = result {
+            tracing::warn!("fib: cradle set_vni {vni} vlan {vlan} failed: {e}");
+        }
+    }
+
+    /// Set the fabric-wide local VTEP source (VXLAN outer source + decap
+    /// match). Idempotent; last write wins.
+    pub async fn set_vtep_source(&self, addr: std::net::Ipv4Addr) {
+        self.mirror.lock().await.vtep_source = Some(addr);
+        let result = async {
+            self.client()
+                .await?
+                .set_vtep_source(pb::VtepSource {
+                    addr: addr.to_string(),
+                })
+                .await?;
+            anyhow::Ok(())
+        }
+        .await;
+        if let Err(e) = result {
+            tracing::warn!("fib: cradle set_vtep_source {addr} failed: {e}");
         }
     }
 

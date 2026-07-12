@@ -467,14 +467,28 @@ impl Rib {
     pub async fn link_add(&mut self, fib_link: FibLink) {
         // `external vnifilter` VXLAN devices (the EVPN model) carry no
         // fixed kernel VNI — `IFLA_VXLAN_ID` is 0. Source the real VNI
-        // from our own config (keyed by device name) so the VNI→ifindex
-        // map, EVPN VTEP discovery and `vni_for_bridge` all observe the
-        // true L2VPN VNI instead of 0.
+        // (and the local VTEP address) from our own config, keyed by
+        // device name, whenever the kernel message doesn't carry them.
+        // A later partial RTM_NEWLINK — e.g. the one the kernel emits when
+        // the device is enslaved to a bridge — carries `IFLA_MASTER` but
+        // NOT the nested `IFLA_VXLAN_*` block, so `link_from_msg` rebuilds
+        // the link with `vni: None` / `vxlan_local: None`. Refilling from
+        // config here keeps both stable across such updates, which the EVPN
+        // Type-2 origination depends on for the VTEP nexthop (an SRv6 Type-2
+        // rides its End.DT2U SID and tolerated the loss; a VXLAN Type-2 has
+        // only the nexthop).
         let mut fib_link = fib_link;
-        if fib_link.vni == Some(0)
-            && let Some(cfg_vni) = self.vxlan.get(&fib_link.name).and_then(|v| v.vni)
-        {
-            fib_link.vni = Some(cfg_vni);
+        if let Some(cfg) = self.vxlan.get(&fib_link.name) {
+            if (fib_link.vni.is_none() || fib_link.vni == Some(0))
+                && let Some(cfg_vni) = cfg.vni
+            {
+                fib_link.vni = Some(cfg_vni);
+            }
+            if fib_link.vxlan_local.is_none()
+                && let Some(local) = cfg.local_addr
+            {
+                fib_link.vxlan_local = Some(local);
+            }
         }
 
         if rib_interface() {
@@ -732,6 +746,10 @@ impl Rib {
             self.fib_handle.register_vxlan_ifindex(new, ifindex);
             if let Some(local) = self.links.get(&ifindex).and_then(|l| l.vxlan_local) {
                 self.api_vxlan_add(new, local);
+                // Tee the VNI binding + local VTEP source to the cradle eBPF
+                // data plane (VXLAN only; an SRv6 device's IPv6-local is a
+                // no-op there).
+                self.fib_handle.cradle_vni_register(new, local).await;
             }
         }
 
