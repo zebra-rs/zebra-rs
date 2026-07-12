@@ -747,8 +747,13 @@ pub fn lsp_generate(top: &mut IsisTop, level: Level, seq_floor: Option<u32>) -> 
     let mut anchors: Vec<IsisTlv> = Vec::new();
     let mut distributable: Vec<IsisTlv> = Vec::new();
 
-    // Area address.
-    let area_addr = top.config.net.area_id.clone();
+    // Area address. Use `area_id()` (AFI-prefixed) rather than the raw
+    // `area_id` field: the field holds only the area bytes, so emitting it
+    // directly drops the AFI and advertises e.g. `00.00` instead of
+    // `49.0000` for NET `49.0000...`. The Hello (`ifsm::hello_generate`)
+    // already uses the AFI-prefixed form, so this keeps the LSP's Area
+    // Address TLV consistent with the Hello's.
+    let area_addr = top.config.net.area_id();
     anchors.push(IsisTlvAreaAddr { area_addr }.into());
 
     // Supported protocol.
