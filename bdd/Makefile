@@ -197,6 +197,14 @@ isis_srmpls:
 	mkdir -p allure-results
 	cargo test --test cucumber -- --concurrency=1 --tags "@isis_srmpls"
 
+# Live dataplane switchover: SR-MPLS -> SRv6 classic -> SRv6 uSID ->
+# SR-MPLS on the RFC 9855 playset topology, each phase applied as a
+# whole-config replace (vtyctl apply -f). ~10 namespaces, several
+# convergence waits — give it a few minutes.
+isis_sr_switchover:
+	mkdir -p allure-results
+	cargo test --test cucumber -- --concurrency=1 --tags "@isis_sr_switchover"
+
 system_hostname:
 	mkdir -p allure-results
 	cargo test --test cucumber -- --concurrency=1 --tags "@system_hostname"
@@ -444,4 +452,4 @@ docs/%.md: tests/features/%.feature docs/feature2md.sh FORCE
 
 FORCE:
 
-.PHONY: ecmp_bfd_evict ospfv2_bfd_frr ospfv3_bfd_frr tilfa_bfd all run ibgp ebgp rr rib_static_ipv6 static_srv6_nht bgp_srv6_nht isis_ipv6 isis_srv6_base isis_fragmentation_ipv6 isis_fragmentation_ipv4 isis_l1p2p isis_tilfa isis_srmpls system_hostname isis_l1l2 isis_redist isis_hello_auth_keychain isis_passive isis_afi_enable isis_endx_ipv6 isis_bfd_ipv6_p2p isis_bfd_ipv6_p2p_echo isis_bfd_ipv6_lan isis_bfd_ipv6_lan_echo isis_bfd_ipv4_p2p isis_bfd_ipv4_p2p_echo isis_bfd_ipv4_lan isis_bfd_ipv4_lan_echo ospf_clear_neighbor ospfv2_nssa_base ospfv2_stub_base ospfv2_tilfa ospfv3_nssa ospfv3_tilfa stamp_te_metric stamp_v6_te_metric bgp_peer_down_cleanup bgp_ipv6_over_v4_session bgp_evpn_capability bgp_vrf_evpn_type5 bgp_evpn_outpolicy_undef bgp_route_map_match bgp_policy_dynamic_update bgp_table_map bgp_v6_table_map bgp_community bgp_neighbor_group bgp_unnumbered_neighbor nd_show cradle_spawn bgp_interas_option_c bgp_interas_option_a bgp_interas_option_b bgp_interas_option_ab bgp_port bgp_ip_transparent bgp_local_as bgp_unknown_attr_transitive bgp_fast_external_failover generate open docs FORCE
+.PHONY: ecmp_bfd_evict ospfv2_bfd_frr ospfv3_bfd_frr tilfa_bfd all run ibgp ebgp rr rib_static_ipv6 static_srv6_nht bgp_srv6_nht isis_ipv6 isis_srv6_base isis_fragmentation_ipv6 isis_fragmentation_ipv4 isis_l1p2p isis_tilfa isis_srmpls isis_sr_switchover system_hostname isis_l1l2 isis_redist isis_hello_auth_keychain isis_passive isis_afi_enable isis_endx_ipv6 isis_bfd_ipv6_p2p isis_bfd_ipv6_p2p_echo isis_bfd_ipv6_lan isis_bfd_ipv6_lan_echo isis_bfd_ipv4_p2p isis_bfd_ipv4_p2p_echo isis_bfd_ipv4_lan isis_bfd_ipv4_lan_echo ospf_clear_neighbor ospfv2_nssa_base ospfv2_stub_base ospfv2_tilfa ospfv3_nssa ospfv3_tilfa stamp_te_metric stamp_v6_te_metric bgp_peer_down_cleanup bgp_ipv6_over_v4_session bgp_evpn_capability bgp_vrf_evpn_type5 bgp_evpn_outpolicy_undef bgp_route_map_match bgp_policy_dynamic_update bgp_table_map bgp_v6_table_map bgp_community bgp_neighbor_group bgp_unnumbered_neighbor nd_show cradle_spawn bgp_interas_option_c bgp_interas_option_a bgp_interas_option_b bgp_interas_option_ab bgp_port bgp_ip_transparent bgp_local_as bgp_unknown_attr_transitive bgp_fast_external_failover generate open docs FORCE
