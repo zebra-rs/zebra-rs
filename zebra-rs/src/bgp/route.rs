@@ -7146,9 +7146,7 @@ pub(crate) fn extract_router_mac_from_attr(attr: &BgpAttr) -> Option<[u8; 6]> {
 /// can build the VXLAN L3 encap toward the right outer destination. `None`
 /// for a plain VPN route (no VXLAN encap).
 pub(crate) fn attr_vxlan_vtep(attr: &BgpAttr) -> Option<Ipv4Addr> {
-    if extract_router_mac_from_attr(attr).is_none() {
-        return None;
-    }
+    extract_router_mac_from_attr(attr)?;
     match attr.nexthop {
         Some(BgpNexthop::Evpn(IpAddr::V4(vtep))) => Some(vtep),
         _ => None,
