@@ -2364,21 +2364,31 @@ pub fn fsm_keepalive_expires(peer: &mut Peer) -> State {
 /// can fail this way; a stale failure from a dial that an accept or a
 /// teardown already superseded must not disturb the current session.
 ///
-/// RFC 4271 Connect state, TcpConnectionFails (Event 18): restart the
-/// ConnectRetryTimer, keep listening for the remote's connect, and go
-/// to Active. The timer's Event::Start redials from there. Passive
-/// peers don't redial — they park in Active listening.
+/// RFC 4271's Connect-state TcpConnectionFails (Event 18) cell parks in
+/// Active on the ConnectRetryTimer, but that timer's default is 120s
+/// (RFC §10) — far too slow for the common bring-up race where two peers
+/// boot together, cross first SYNs before either listener is ready, and
+/// *both* land here. With both parked in Active neither redials until the
+/// 120s backstop fires, wedging the session for up to two minutes. Route
+/// through Idle instead so the IdleHoldTimer (default 5s) paces a prompt
+/// redial — the same fast-restart path OpenConfirm/Established failures
+/// already take in [`fsm_conn_fail`], and consistent with the
+/// connect-retry timer being only a backstop (the event-driven kicks in
+/// `refresh_connected` / `link_up_kick` likewise bypass it). Entering
+/// Idle re-arms the idle-hold timer and aborts the stale dial
+/// (`update_timers`). Passive peers never dial, so they reach here only
+/// defensively; keep them parked in Active listening for the remote to
+/// reconnect.
 pub fn fsm_dial_fail(peer: &mut Peer) -> State {
     if peer.state != State::Connect {
         return peer.state;
     }
     peer.task.connect = None;
-    peer.timer.connect_retry = if peer.is_passive() {
-        None
-    } else {
-        Some(timer::start_connect_retry_timer(peer))
-    };
-    State::Active
+    if peer.is_passive() {
+        peer.timer.connect_retry = None;
+        return State::Active;
+    }
+    State::Idle
 }
 
 pub fn fsm_conn_fail(peer: &mut Peer, conn: ConnTag) -> State {
@@ -3921,8 +3931,9 @@ mod fsm_idle_hold_tests {
 
     /// A dial failure is only meaningful while the dial is
     /// outstanding (Connect); arriving later it must not disturb the
-    /// session that superseded it. A current one follows the RFC 4271
-    /// Connect cell: restart the ConnectRetryTimer and go to Active.
+    /// session that superseded it. A current one routes through Idle so
+    /// the idle-hold timer paces a prompt redial (see `fsm_dial_fail`)
+    /// rather than parking on the 120s connect-retry backstop.
     #[tokio::test]
     async fn stale_dial_failure_does_not_touch_a_live_session() {
         let mut peer = test_peer(false);
@@ -3932,8 +3943,42 @@ mod fsm_idle_hold_tests {
 
         peer.state = State::Connect;
         let (next, _) = fsm_next_state(&mut peer, Event::DialFail);
-        assert_eq!(next, State::Active, "a current dial failure retries");
-        assert!(peer.timer.connect_retry.is_some());
+        assert_eq!(
+            next,
+            State::Idle,
+            "a current dial failure retries via idle-hold, not the 120s backstop"
+        );
+
+        // What `fsm()` does after a state change: re-arm timers.
+        peer.state = next;
+        timer::update_timers(&mut peer);
+        assert!(
+            peer.timer.idle_hold_timer.is_some(),
+            "the idle-hold timer must pace the fast redial"
+        );
+        assert!(
+            peer.timer.connect_retry.is_none(),
+            "the slow connect-retry backstop must not gate the redial"
+        );
+    }
+
+    /// A passive peer never initiates a dial, so it only reaches
+    /// `fsm_dial_fail` defensively — park it in Active listening with no
+    /// redial pacer, waiting for the remote router to reconnect.
+    #[tokio::test]
+    async fn dial_failure_passive_peer_parks_in_active() {
+        let mut peer = test_peer(true);
+        peer.state = State::Connect;
+        let (next, _) = fsm_next_state(&mut peer, Event::DialFail);
+        assert_eq!(next, State::Active);
+
+        peer.state = next;
+        timer::update_timers(&mut peer);
+        assert!(peer.timer.idle_hold_timer.is_none());
+        assert!(
+            peer.timer.connect_retry.is_none(),
+            "a passive peer must not arm the redial pacer"
+        );
     }
 
     /// Idle refuses connections: a stale dial completing after the
