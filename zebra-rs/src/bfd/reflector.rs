@@ -3,9 +3,10 @@
 //! BFD Echo (RFC 5880 §6.4 / RFC 5881 §4) is a single-hop, interface-scoped
 //! data-plane hairpin: a peer sends Echo frames to UDP/3785 and our forwarding
 //! plane loops them straight back. zebra-rs provides that loopback by running
-//! the standalone `xdp-bfd-echo` XDP loader (see
-//! `offload/xdp-bfd-echo/`) as a managed child process — one per
-//! interface that has at least one single-hop session advertising Echo.
+//! the standalone `xdp-bfd-echo` XDP loader (from cradle-rs
+//! `crates/xdp-bfd-echo/`, shipped in the cradle-rs .deb at
+//! `/usr/sbin/xdp-bfd-echo`) as a managed child process — one per interface
+//! that has at least one single-hop session advertising Echo.
 //!
 //! Advertising a non-zero `Required Min Echo RX Interval` is a *promise to loop
 //! Echo back* (RFC 5880 §6.8.1), so the advertise path must only do so once the

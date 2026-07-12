@@ -2,12 +2,10 @@ all: arm64
 
 arm64: ../vty/vty playset
 	cargo build --release
-	$(MAKE) -C .. xdp-bfd-echo
 	nfpm package --packager=deb --config=nfpm-arm64.yaml
 
 amd64: ../vty/vty playset
 	cargo build --release
-	$(MAKE) -C .. xdp-bfd-echo
 	nfpm package --packager=deb --config=nfpm-amd64.yaml
 
 # Stage a clean copy of the playset labs for packaging. nfpm has no exclude
@@ -19,10 +17,9 @@ playset:
 	mkdir -p out
 	rsync -a --delete --filter=':- .gitignore' --exclude='.gitignore' ../playset/ out/playset/
 
-# The XDP BFD Echo helper lives in the excluded offload/ workspace and needs
-# a nightly bpfel toolchain + bpf-linker (see offload/xdp-bfd-echo/README.md),
-# so building a package now requires that toolchain on the build host. The binary
-# ships to /usr/sbin/xdp-bfd-echo and is capped by scripts/postinstall.sh.
+# The XDP BFD Echo and TC EVPN replication helpers moved to cradle-rs and ship
+# in the cradle-rs .deb (zebra-rs Recommends: cradle-rs). This package no longer
+# builds or ships them, so it needs only the stable toolchain.
 
 ../vty/vty:
 	$(MAKE) -C ../vty

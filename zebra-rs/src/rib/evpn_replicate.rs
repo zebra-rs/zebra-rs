@@ -4,7 +4,8 @@
 //! `rib::Message::ReplSegAdd` / `ReplSegDel`. The stock Linux kernel cannot
 //! forward an SR replication tree (no `End.Replicate`, no MPLS P2MP, no
 //! `End.DT2M`), so forwarding is offloaded to the `tc-evpn-replicate` eBPF
-//! TC/clsact program (`offload/tc-evpn-replicate/`), run as a managed child
+//! TC/clsact program (from cradle-rs `crates/tc-evpn-replicate/`, shipped in
+//! the cradle-rs .deb at `/usr/sbin/tc-evpn-replicate`), run as a managed child
 //! process — this module is its supervisor, mirroring the BFD echo reflector
 //! (`bfd::reflector::EchoReflectors`).
 //!

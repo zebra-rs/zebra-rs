@@ -147,11 +147,20 @@ Phases 1–2 (`cradle-common` grows the shared types); wrong as an end state.
   merge `722ae5a`). Both offload trees are now cradle-rs workspace crates on the
   pinned aya; CI (fmt/clippy/test) green. A stale-clippy-cache false pass hid a
   `doc_lazy_continuation` lint locally — CI caught it; fixed before merge.
-- **Phase 0b is still gated**: it must not land until a cradle-rs *release* (deb)
-  shipping `/usr/sbin/{xdp-bfd-echo,tc-evpn-replicate}` is installed on the BDD
-  host. Merging 0a to cradle-rs `main` does not rebuild/reinstall the deb, and
-  the host still carries zebra-rs's own `/usr/sbin/xdp-bfd-echo`. Sequence:
-  cut a cradle-rs release → reinstall the deb on the host → then the zebra-rs
-  `offload/` removal PR.
+- 2026-07-12: **Phase 0b implemented** — deleted zebra-rs `offload/`, dropped
+  `exclude = ["offload/*"]`, stripped nightly/LLVM 18/bpf-linker from
+  `build-{amd64,arm64,debs}.yaml` + `packaging/Makefile` + the root `Makefile`
+  (`xdp-bfd-echo`/`install-xdp-bfd-echo` targets), removed the helper from both
+  `nfpm-*.yaml` and its setcap from `packaging/scripts/postinstall.sh`. Only
+  doc-comment path pointers changed in `bfd/reflector.rs`, `bfd/inst.rs`,
+  `rib/evpn_replicate.rs` (now point at cradle-rs) — no logic change; the
+  supervisors' binary resolution (`/usr/sbin/…` + `ZEBRA_*_BIN`) is untouched.
+  Verified: `cargo metadata` OK, workflow/nfpm YAML parse, Makefiles clean.
+- **Deployment gating (still true)**: this PR stops the *zebra-rs* deb from
+  shipping the helper. A host must get the binaries from the cradle-rs deb — so
+  do **not** cut a zebra-rs release that drops the helper until a cradle-rs
+  release (≥ the Phase-0a import) is published and installed. Local dev/BDD keep
+  working because `/usr/sbin/{xdp-bfd-echo,tc-evpn-replicate}` are already
+  installed on this host.
 </content>
 </invoke>

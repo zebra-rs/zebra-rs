@@ -39,12 +39,6 @@ contents:
     dst: /usr/sbin/vtypam
     file_info:
       mode: 0755
-  # XDP BFD Echo helper. zebra-rs spawns it from here (or via
-  # $ZEBRA_XDP_BFD_ECHO_BIN); postinstall.sh grants cap_net_admin,cap_bpf.
-  - src: ../offload/xdp-bfd-echo/target/release/xdp-bfd-echo
-    dst: /usr/sbin/xdp-bfd-echo
-    file_info:
-      mode: 0755
   - src: ../etc/pam.d/zebra-rs.example
     dst: /etc/pam.d/zebra-rs.example
     file_info:

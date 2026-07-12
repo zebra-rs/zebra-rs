@@ -20,14 +20,6 @@ members = [
   "tools/bgp-bench",
   "tools/pfcp-inject",
 ]
-# The offload/ tree holds XDP/eBPF PoCs built with aya. It is intentionally NOT
-# a member of this workspace: building it needs a nightly `bpfel` toolchain +
-# bpf-linker that the stable CI gate does not have. Keeping it excluded means
-# `cargo {build,clippy,test} --workspace` stays green on stable. Each PoC under
-# offload/ is its own self-contained workspace.
-exclude = [
-  "offload/*",
-]
 
 [workspace.package]
 version = "26.7.4"

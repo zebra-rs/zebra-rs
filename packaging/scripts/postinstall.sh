@@ -15,14 +15,9 @@ if [ -x /usr/sbin/vtypam ]; then
     setcap 'cap_dac_read_search,cap_audit_write=ep' /usr/sbin/vtypam
 fi
 
-# The per-interface BFD Echo helper (spawned by zebra-rs) attaches an XDP
-# program (reflect) — needs cap_bpf (kernel 5.8+) + cap_net_admin — and, when
-# zebra-rs also originates Echo, sends/receives raw frames on an AF_PACKET
-# socket — needs cap_net_raw. The deb ships it at /usr/sbin (built by the
-# packaging Makefile); the guard keeps this safe if it isn't.
-if [ -x /usr/sbin/xdp-bfd-echo ]; then
-    setcap 'cap_net_admin,cap_bpf,cap_net_raw=ep' /usr/sbin/xdp-bfd-echo
-fi
+# The XDP BFD Echo and TC EVPN replication helpers moved to cradle-rs; its .deb
+# ships them to /usr/sbin and applies the file caps (zebra-rs Recommends:
+# cradle-rs). zebra-rs no longer installs or caps them here.
 
 sudo systemctl daemon-reload
 sudo systemctl restart zebra-rs
