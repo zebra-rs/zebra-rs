@@ -470,7 +470,7 @@ impl Rib {
     /// is the explicit `router-mac` leaf, else the VRF master device's MAC.
     /// Returns `None` for a plain L2VNI device (no VRF binding), an
     /// unresolved VRF, or when no MAC is available yet.
-    fn vxlan_l3_binding(&self, name: &str) -> Option<(u32, [u8; 6])> {
+    pub(crate) fn vxlan_l3_binding(&self, name: &str) -> Option<(u32, [u8; 6])> {
         let dev = self.vxlan.get(name)?;
         let vrf_name = dev.vrf.as_ref()?;
         let vrf = self.vrfs.get(vrf_name)?;
@@ -777,9 +777,14 @@ impl Rib {
                     self.fib_handle
                         .cradle_vni_register_l3(new, local, vrf_table_id, rmac)
                         .await;
-                } else {
+                } else if self.vxlan.get(&name).is_none_or(|v| v.vrf.is_none()) {
+                    // Plain L2VNI: no tenant-VRF binding configured.
                     self.fib_handle.cradle_vni_register(new, local).await;
                 }
+                // else: configured as an L3VNI but the VRF isn't resolved
+                // yet (config-order race). Don't register it as an L2VNI;
+                // the VrfAdd handler re-tees the L3 binding when the VRF
+                // appears.
             }
         }
 

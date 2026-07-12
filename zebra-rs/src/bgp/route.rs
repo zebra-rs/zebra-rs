@@ -593,9 +593,9 @@ fn vxlan_vpn_entry(
         return None;
     }
     let rmac = extract_router_mac_from_attr(&best.attr)?;
-    let IpAddr::V4(vtep) = extract_tunnel_endpoint(best)? else {
-        return None;
-    };
+    // The VTEP was captured from the EVPN next-hop at import time
+    // (`handle_import_v4`/`…v6`) before the next-hop was rewritten to self.
+    let vtep = best.vxlan_vtep?;
     let l3vni = best.label.map(|l| l.label).unwrap_or(0);
     transport
         .filter(|t| !t.is_empty())
@@ -1437,6 +1437,12 @@ pub struct BgpRib {
     /// helpers (`to_route_with`) and the SRv6 ST1→ISD FIB reconcile re-read
     /// them from the selected path. `None` on every non-ST1 row.
     pub mup_st1: Option<MupSt1Fields>,
+    /// EVPN symmetric-IRB (VXLAN) Type-5: the remote PE's VTEP, captured by
+    /// the VRF import (`handle_import_v4`/`…v6`) from the route's EVPN
+    /// next-hop before that next-hop is rewritten to self. The VRF FIB
+    /// install (`vxlan_vpn_entry`) reads it to build the VXLAN L3 encap's
+    /// outer destination. `None` on every non-VXLAN-IRB row.
+    pub vxlan_vtep: Option<Ipv4Addr>,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -1538,6 +1544,7 @@ impl BgpRib {
             igmp_max_resp_time: 0,
             ingress_region: None,
             mup_st1: None,
+            vxlan_vtep: None,
         }
     }
 
@@ -7126,10 +7133,26 @@ fn evpn_l2_attr_mtu(attr: &BgpAttr) -> u16 {
 /// The Router's MAC of a received EVPN route (RFC 9135 §6): the advertising
 /// PE's router MAC, used as the inner destination MAC when VXLAN-routing to
 /// it (symmetric IRB). `None` when the EC is absent.
-fn extract_router_mac_from_attr(attr: &BgpAttr) -> Option<[u8; 6]> {
+pub(crate) fn extract_router_mac_from_attr(attr: &BgpAttr) -> Option<[u8; 6]> {
     attr.ecom
         .as_ref()
         .and_then(|ecom| ecom.0.iter().find_map(|v| v.as_router_mac()))
+}
+
+/// The remote VTEP of an EVPN symmetric-IRB (VXLAN) Type-5: present only
+/// when `attr` carries a Router's-MAC extended community AND an EVPN
+/// next-hop holding an IPv4 VTEP. The VRF import captures this before it
+/// rewrites the next-hop to self, so the FIB install (`vxlan_vpn_entry`)
+/// can build the VXLAN L3 encap toward the right outer destination. `None`
+/// for a plain VPN route (no VXLAN encap).
+pub(crate) fn attr_vxlan_vtep(attr: &BgpAttr) -> Option<Ipv4Addr> {
+    if extract_router_mac_from_attr(attr).is_none() {
+        return None;
+    }
+    match attr.nexthop {
+        Some(BgpNexthop::Evpn(IpAddr::V4(vtep))) => Some(vtep),
+        _ => None,
+    }
 }
 
 fn extract_tunnel_endpoint(rib: &BgpRib) -> Option<IpAddr> {
