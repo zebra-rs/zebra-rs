@@ -1088,6 +1088,38 @@ impl ConfigManager {
                     reply_static_show(req, v.format_version(), v.format_json());
                     return;
                 }
+                // `show running-config [formal|json|yaml]` is owned by the
+                // manager — the config store lives here, not in any
+                // protocol daemon, so the per-proto routing below could
+                // only produce the not-running fallback. Serving it here
+                // gives `vtyctl show` (and MCP) the same view the
+                // interactive vty shell gets from its exec-mode handler.
+                if req.paths.iter().any(|p| p.name == "running-config") {
+                    let running = || self.store.running.borrow();
+                    let render_json = || {
+                        let mut compact = String::new();
+                        running().json(&mut compact);
+                        super::commands::prettify_json(compact)
+                    };
+                    let text = if req.paths.iter().any(|p| p.name == "formal") {
+                        let mut out = String::new();
+                        running().list(&mut out);
+                        out
+                    } else if req.paths.iter().any(|p| p.name == "yaml") {
+                        let mut out = String::new();
+                        running().yaml(&mut out);
+                        out
+                    } else if req.paths.iter().any(|p| p.name == "json") {
+                        render_json()
+                    } else {
+                        let mut out = String::new();
+                        running().format(&mut out);
+                        out
+                    };
+                    let json = render_json();
+                    reply_static_show(req, text, json);
+                    return;
+                }
                 // Generic per-VRF instance redirect: `show <proto> vrf
                 // <name> …` is rewritten to `show <proto> …` and routed
                 // to the instance task's show channel when that instance
@@ -2070,6 +2102,72 @@ mod yang_load_tests {
         assert!(
             leftover.is_none(),
             "afi-safi node must be pruned after its last child is deleted"
+        );
+    }
+
+    /// `router isis segment-routing {mpls|srv6}` is a YANG `choice`:
+    /// setting one dataplane case must implicitly delete the other from
+    /// the candidate store (RFC 7950 §7.9.3). Drives the real schema end
+    /// to end — choice/case metadata flows YANG -> Entry ->
+    /// CommandPath.choice_exclude -> the `config_set_dir` purge — and
+    /// checks both switch directions, including a child-bearing case
+    /// (srv6 + locator) being fully removed.
+    #[test]
+    fn isis_sr_dataplane_choice_is_exclusive() {
+        use crate::config::ExecCode;
+        use crate::config::configs::set;
+        use crate::config::parse::{State, parse};
+        use crate::config::{Config, paths::path_try_trim};
+        use libyang::to_entry;
+        use std::rc::Rc;
+
+        let mut yang = YangStore::new();
+        yang.add_path(concat!(env!("CARGO_MANIFEST_DIR"), "/yang"));
+        yang.read_with_resolve("configure")
+            .unwrap_or_else(|e| panic!("configure failed to load: {e:#}"));
+        yang.identity_resolve();
+        let module = yang.find_module("configure").unwrap();
+        let entry = to_entry(&yang, module);
+        let set_entry = entry
+            .dir
+            .borrow()
+            .iter()
+            .find(|e| e.name == "set")
+            .cloned()
+            .expect("configure mode has a `set` entry");
+
+        let root = Rc::new(Config::new("".to_string(), None));
+        let run = |cmd: &str| {
+            let (code, _comps, state) = parse(cmd, set_entry.clone(), None, State::new());
+            assert_eq!(code, ExecCode::Success, "should parse: {cmd}");
+            set(path_try_trim("set", state.paths), root.clone());
+        };
+        let listing = || {
+            let mut out = String::new();
+            root.list(&mut out);
+            out
+        };
+
+        run("router isis segment-routing mpls");
+        assert!(listing().contains("segment-routing mpls"));
+
+        // mpls -> srv6: the mpls case must be purged by the set.
+        run("router isis segment-routing srv6 locator LOC1");
+        let out = listing();
+        assert!(out.contains("segment-routing srv6 locator LOC1"), "{out}");
+        assert!(
+            !out.contains("segment-routing mpls"),
+            "mpls case must be auto-cleared by setting srv6, got:\n{out}"
+        );
+
+        // srv6 -> mpls: the whole srv6 subtree (locator child included)
+        // must go, not just the container line.
+        run("router isis segment-routing mpls");
+        let out = listing();
+        assert!(out.contains("segment-routing mpls"), "{out}");
+        assert!(
+            !out.contains("srv6"),
+            "srv6 case (and its locator child) must be auto-cleared by setting mpls, got:\n{out}"
         );
     }
 

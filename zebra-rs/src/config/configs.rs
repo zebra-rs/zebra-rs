@@ -620,6 +620,15 @@ fn compare_configs(a: &Rc<Config>, b: &Rc<Config>) -> std::cmp::Ordering {
 
 // Config set.
 fn config_set_dir(config: &Rc<Config>, cpath: &CommandPath) -> Rc<Config> {
+    // Choice exclusivity (RFC 7950 §7.9.3): setting a node from one
+    // `case` implicitly deletes the sibling nodes contributed by the
+    // choice's other cases. The parser stamps those sibling names on the
+    // path element (`choice_exclude`), so purge them from this parent
+    // before creating/entering the node — the commit diff then emits the
+    // corresponding delete events to the protocol daemons.
+    for name in cpath.choice_exclude.iter() {
+        config_delete(config.clone(), name);
+    }
     let find = config.lookup(&cpath.name);
     match find {
         Some(find) => find,

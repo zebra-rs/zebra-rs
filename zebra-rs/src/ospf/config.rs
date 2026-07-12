@@ -2259,10 +2259,11 @@ fn apply_ospf_ti_lfa_compute_mode(ospf: &mut Ospf, mode: crate::spf::TilfaComput
 /// Body shared by the `serial` / `conservative` / `aggressive`
 /// `compute-mode` cases (each an empty leaf under the `mode` choice).
 /// Setting the case selects `mode`; deleting it reverts to the default
-/// mode — but only when *this* case is the active one, so a stale
-/// delete of a non-active case node (the candidate store does not
-/// auto-clear sibling choice cases) is a no-op rather than clobbering a
-/// newer selection.
+/// mode — but only when *this* case is the active one. A case switch
+/// commits as delete(old case) + set(new case) (the candidate store
+/// auto-clears sibling choice cases, RFC 7950 §7.9.3), and the guard
+/// makes the delete order-independent: arriving after the set, it is a
+/// no-op rather than clobbering the newer selection.
 fn config_ospf_ti_lfa_compute_mode_case(
     ospf: &mut Ospf,
     op: ConfigOp,

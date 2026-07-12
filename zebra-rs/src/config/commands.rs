@@ -229,7 +229,7 @@ fn show_running_yaml(config: &ConfigManager) -> (ExecCode, String) {
 /// enabled at the workspace level so key order survives the round-trip.
 /// Falls back to the compact form on parse/serialize failure (empty
 /// config, etc.).
-fn prettify_json(compact: String) -> String {
+pub(super) fn prettify_json(compact: String) -> String {
     serde_json::from_str::<serde_json::Value>(&compact)
         .and_then(|v| serde_json::to_string_pretty(&v))
         .map(|mut s| {

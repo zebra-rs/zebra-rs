@@ -1,0 +1,39 @@
+# z2 — the control node: stays on SR-MPLS (Prefix-SID index 200 ->
+# label 16200) for the whole feature while z1's dataplane is flipped.
+# Its view of z1's advertisements (label 16100 appearing/disappearing
+# from the ILM) pins the LSP-level effect of the switch.
+interface:
+- if-name: lo
+  ipv4:
+    address: 10.0.0.2/32
+  ipv6:
+    address: 2001:db8::2/128
+- if-name: z2-z1
+  ipv4:
+    address: 10.0.12.2/24
+  ipv6:
+    address: 2001:db8:0:12::2/64
+system:
+  hostname: z2
+router:
+  isis:
+    net: 49.0000.0000.0000.0002.00
+    hostname: z2
+    is-type: level-2-only
+    segment-routing:
+      mpls: {}
+    interface:
+    - if-name: lo
+      ipv4:
+        enabled: true
+        prefix-sid:
+          index: 200
+      ipv6:
+        enabled: true
+    - if-name: z2-z1
+      network-type: point-to-point
+      metric: 1
+      ipv4:
+        enabled: true
+      ipv6:
+        enabled: true

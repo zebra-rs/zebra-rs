@@ -220,6 +220,11 @@ message CommandPath {
   // readable requirement (e.g. "network or redistribute") surfaced in the
   // commit-time error. Driven by the `ext:non-empty` YANG extension.
   string non_empty = 6;
+  // When this node belongs to a `case` of a YANG `choice`, the names of
+  // the sibling nodes contributed by the choice's OTHER cases. Setting
+  // this node implicitly deletes them from the candidate store
+  // (RFC 7950 §7.9.3) — `config_set_dir` performs the purge.
+  repeated string choice_exclude = 7;
 }
 
 // Show service.

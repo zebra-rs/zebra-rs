@@ -2542,52 +2542,65 @@ module config {
 
         container segment-routing {
           ext:help "Segment Routing (SR-MPLS / SRv6) configuration";
-          container mpls {
-            ext:help "Segment Routing over MPLS dataplane";
-            presence "Enable Segment Routing over MPLS dataplane";
-            leaf no-local-prefix-sid {
-              ext:help "Skip the local Prefix-SID label";
-              type empty;
-              description
-                "Suppress installing the local (self-originated)
-                 Prefix-SID label into the MPLS forwarding table (LFIB).
-                 By default (leaf absent) the local node-SID is installed
-                 as a pop entry so traffic arriving with this node's own
-                 node-SID label is delivered locally, matching IOS-XR /
-                 SR-OS. When present, only remote prefix-SIDs and
-                 adjacency-SIDs are installed. Only effective while
-                 SR-MPLS is enabled.";
-            }
-          }
-          container srv6 {
-            ext:help "Segment Routing over IPv6 dataplane (SRv6)";
-            presence "Enable Segment Routing over IPv6 dataplane";
-            leaf locator {
-              ext:help "Global SRv6 locator name for this instance";
-              // Name of a locator defined under the global
-              // /segment-routing/locator list. Held as a string (not a
-              // leafref) so an IS-IS config can be staged before the
-              // global locator is committed.
-              type string;
-            }
-            list flex-algo-locator {
-              ext:help "Per-flex-algo SRv6 locator binding";
-              // Per-Flex-Algorithm SRv6 locator binding. The named
-              // locator is advertised in SRv6 Locator TLV 27 with the
-              // Algorithm field set to `algo` (RFC 9352 §7.1). The
-              // base `locator` leaf above carries algorithm 0 (regular
-              // SPF); flex-algos (128..255) bind here. As with the
-              // base leaf, the locator name is a plain string so the
-              // IS-IS config can be staged before the matching
-              // /segment-routing/locator entry is committed.
-              key "algo";
-              leaf algo {
-                ext:help "Flex-Algorithm identifier (128..255)";
-                type uint8 { range "128..255"; }
+          // The two dataplanes are mutually exclusive: one IS-IS
+          // instance advertises either SR-MPLS SIDs or an SRv6 locator,
+          // never both. Modelled as a `choice`, so committing
+          // `segment-routing srv6 ...` implicitly deletes a configured
+          // `segment-routing mpls` (and vice versa) per RFC 7950
+          // §7.9.3 — the commit diff then tears the old dataplane down
+          // exactly as an explicit delete would.
+          choice dataplane {
+            case mpls {
+              container mpls {
+                ext:help "Segment Routing over MPLS dataplane";
+                presence "Enable Segment Routing over MPLS dataplane";
+                leaf no-local-prefix-sid {
+                  ext:help "Skip the local Prefix-SID label";
+                  type empty;
+                  description
+                    "Suppress installing the local (self-originated)
+                     Prefix-SID label into the MPLS forwarding table (LFIB).
+                     By default (leaf absent) the local node-SID is installed
+                     as a pop entry so traffic arriving with this node's own
+                     node-SID label is delivered locally, matching IOS-XR /
+                     SR-OS. When present, only remote prefix-SIDs and
+                     adjacency-SIDs are installed. Only effective while
+                     SR-MPLS is enabled.";
+                }
               }
-              leaf locator {
-                ext:help "SRv6 locator name for this algorithm";
-                type string;
+            }
+            case srv6 {
+              container srv6 {
+                ext:help "Segment Routing over IPv6 dataplane (SRv6)";
+                presence "Enable Segment Routing over IPv6 dataplane";
+                leaf locator {
+                  ext:help "Global SRv6 locator name for this instance";
+                  // Name of a locator defined under the global
+                  // /segment-routing/locator list. Held as a string (not a
+                  // leafref) so an IS-IS config can be staged before the
+                  // global locator is committed.
+                  type string;
+                }
+                list flex-algo-locator {
+                  ext:help "Per-flex-algo SRv6 locator binding";
+                  // Per-Flex-Algorithm SRv6 locator binding. The named
+                  // locator is advertised in SRv6 Locator TLV 27 with the
+                  // Algorithm field set to `algo` (RFC 9352 §7.1). The
+                  // base `locator` leaf above carries algorithm 0 (regular
+                  // SPF); flex-algos (128..255) bind here. As with the
+                  // base leaf, the locator name is a plain string so the
+                  // IS-IS config can be staged before the matching
+                  // /segment-routing/locator entry is committed.
+                  key "algo";
+                  leaf algo {
+                    ext:help "Flex-Algorithm identifier (128..255)";
+                    type uint8 { range "128..255"; }
+                  }
+                  leaf locator {
+                    ext:help "SRv6 locator name for this algorithm";
+                    type string;
+                  }
+                }
               }
             }
           }
@@ -2739,12 +2752,12 @@ module config {
               //
               // Modelled as a `choice` of one keyword per mode (the
               // shard count nests under `sharding`, the only mode it
-              // applies to). The cases are mutually exclusive. The
-              // default mode (serial) is applied by the Rust handler —
-              // a choice/case carries no YANG default, and switching
-              // cases does not auto-clear the previous case node from
-              // the candidate store (same cosmetic as
-              // `allowas-in {count|origin}`).
+              // applies to). The cases are mutually exclusive: setting
+              // one case auto-clears its siblings from the candidate
+              // store (RFC 7950 §7.9.3), so a case switch commits as
+              // delete(old) + set(new). The default mode (serial) is
+              // applied by the Rust handler — a choice/case carries no
+              // YANG default.
               choice mode {
                 case serial {
                   leaf serial {

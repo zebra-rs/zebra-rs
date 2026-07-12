@@ -387,9 +387,10 @@ fn apply_ospfv3_ti_lfa_compute_mode(
 
 /// Body shared by the v3 `serial` / `conservative` / `aggressive`
 /// `compute-mode` cases. Setting selects `mode`; deleting reverts to
-/// the default mode only when *this* case is the active one (the
-/// candidate store does not auto-clear sibling choice cases, so a stale
-/// delete of an inactive case is a no-op).
+/// the default mode only when *this* case is the active one — a case
+/// switch commits as delete(old) + set(new) (the candidate store
+/// auto-clears sibling choice cases, RFC 7950 §7.9.3), and the guard
+/// makes the delete order-independent.
 fn config_ospfv3_ti_lfa_compute_mode_case(
     ospf: &mut Ospf<Ospfv3>,
     op: ConfigOp,
