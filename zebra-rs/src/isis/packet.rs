@@ -211,9 +211,25 @@ pub fn nbr_hello_interpret(
                 }
             }
             IsisTlv::P2p3Way(tlv) => {
-                nbr.circuit_id = Some(tlv.circuit_id);
-                if let Some(neighbor_id) = tlv.neighbor_id {
-                    has_my_sys_id = sys_id == neighbor_id;
+                nbr.circuit_id = tlv.circuit_id;
+                match tlv.neighbor_id {
+                    Some(neighbor_id) => has_my_sys_id = sys_id == neighbor_id,
+                    // RFC 5303 §3.2: the neighbor fields are "if known";
+                    // classic Cisco IOS always sends the legacy 1-octet
+                    // form (state only). Drive the handshake from the
+                    // received state instead: on a p2p circuit, the peer
+                    // reporting Initializing or Up means it has heard our
+                    // IIH — only we are on the link to be heard. Received
+                    // Up while we still have no adjacency record is not
+                    // trusted (mirror FRR): let the peer regress to
+                    // Initializing against our next IIH first.
+                    None => {
+                        has_my_sys_id = match tlv.state {
+                            s if s == NfsmState::Up as u8 => nbr.state != NfsmState::Down,
+                            s if s == NfsmState::Init as u8 => true,
+                            _ => false,
+                        };
+                    }
                 }
             }
             IsisTlv::Ipv4IfAddr(ifaddr) => {
@@ -1743,5 +1759,95 @@ mod poi_forward_tests {
         // (no auth configured), so we expect zero. The pre-existing
         // stale Auth must be gone.
         assert_eq!(auth_count, 0, "stale Auth TLV must be stripped");
+    }
+}
+
+#[cfg(test)]
+mod three_way_state_only_tests {
+    use super::*;
+
+    fn sys(b: u8) -> IsisSysId {
+        IsisSysId {
+            id: [0, 0, 0, 0, 0, b],
+        }
+    }
+
+    /// Our own system-id, as passed to nbr_hello_interpret.
+    fn my_sys_id() -> IsisSysId {
+        sys(0x10)
+    }
+
+    fn nbr_in(state: NfsmState) -> Neighbor {
+        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel::<Message>();
+        let mut nbr = Neighbor::new(tx, 2, NetworkType::P2p, sys(0x01), None);
+        nbr.state = state;
+        nbr
+    }
+
+    fn three_way(state: NfsmState, neighbor_id: Option<IsisSysId>) -> Vec<IsisTlv> {
+        vec![IsisTlv::P2p3Way(IsisTlvP2p3Way {
+            state: state.into(),
+            circuit_id: None,
+            neighbor_id,
+            neighbor_circuit_id: None,
+        })]
+    }
+
+    fn interpret(nbr: &mut Neighbor, tlvs: &[IsisTlv]) -> bool {
+        let mut pool = None;
+        let (_, has_my_sys_id, _) = nbr_hello_interpret(nbr, tlvs, None, my_sys_id(), &mut pool);
+        has_my_sys_id
+    }
+
+    /// Classic Cisco IOS sends TLV 240 with only the state octet. When
+    /// the peer reports Initializing it has heard our IIH (p2p circuit:
+    /// nobody else is on the link), so the handshake may complete.
+    #[test]
+    fn state_only_initializing_completes_handshake() {
+        let mut nbr = nbr_in(NfsmState::Init);
+        assert!(interpret(&mut nbr, &three_way(NfsmState::Init, None)));
+    }
+
+    /// Peer reporting Up state-only keeps an established adjacency up
+    /// (this is what IOS steady-state sends: TLV 240, length 1, Up).
+    #[test]
+    fn state_only_up_with_local_adjacency_completes_handshake() {
+        let mut nbr = nbr_in(NfsmState::Init);
+        assert!(interpret(&mut nbr, &three_way(NfsmState::Up, None)));
+        let mut nbr = nbr_in(NfsmState::Up);
+        assert!(interpret(&mut nbr, &three_way(NfsmState::Up, None)));
+    }
+
+    /// Received Up while we have no adjacency record yet is not trusted
+    /// (mirror FRR): stay one-way until the peer regresses against our
+    /// next IIH and walks up through Initializing.
+    #[test]
+    fn state_only_up_from_scratch_is_not_trusted() {
+        let mut nbr = nbr_in(NfsmState::Down);
+        assert!(!interpret(&mut nbr, &three_way(NfsmState::Up, None)));
+    }
+
+    /// Received Down means the peer has not heard us — one-way only.
+    /// From local Up this drives the RFC 5303 §6.1 Up -> Init regression.
+    #[test]
+    fn state_only_down_stays_one_way() {
+        let mut nbr = nbr_in(NfsmState::Up);
+        assert!(!interpret(&mut nbr, &three_way(NfsmState::Down, None)));
+    }
+
+    /// RFC 5303 form with the neighbor system-id present keeps the
+    /// existing semantics: ours listed -> complete, another system's
+    /// listed -> one-way, regardless of the reported state.
+    #[test]
+    fn neighbor_id_match_still_decides_when_present() {
+        let mut nbr = nbr_in(NfsmState::Init);
+        assert!(interpret(
+            &mut nbr,
+            &three_way(NfsmState::Init, Some(my_sys_id()))
+        ));
+        assert!(!interpret(
+            &mut nbr,
+            &three_way(NfsmState::Up, Some(sys(0x99)))
+        ));
     }
 }

@@ -1154,10 +1154,13 @@ impl From<IsisTlvIpv6GlobalIfAddr> for IsisTlv {
     }
 }
 
+// RFC 5303 §3.2: only the Adjacency Three-Way State octet is mandatory;
+// every following field is "if known". Classic Cisco IOS sends the legacy
+// 1-octet form (state only), so each field below the state is optional.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct IsisTlvP2p3Way {
     pub state: u8,
-    pub circuit_id: u32,
+    pub circuit_id: Option<u32>,
     pub neighbor_id: Option<IsisSysId>,
     pub neighbor_circuit_id: Option<u32>,
 }
@@ -1165,7 +1168,12 @@ pub struct IsisTlvP2p3Way {
 impl ParseBe<IsisTlvP2p3Way> for IsisTlvP2p3Way {
     fn parse_be(input: &[u8]) -> IResult<&[u8], Self> {
         let (input, state) = be_u8(input)?;
-        let (input, circuit_id) = be_u32(input)?;
+        let (input, circuit_id) = if input.len() >= 4 {
+            let (input, circuit_id) = be_u32(input)?;
+            (input, Some(circuit_id))
+        } else {
+            (input, None)
+        };
         let (input, neighbor_id) = if input.len() >= 6 {
             let (input, neighbor_id) = IsisSysId::parse_be(input)?;
             (input, Some(neighbor_id))
@@ -1194,7 +1202,10 @@ impl TlvEmitter for IsisTlvP2p3Way {
     }
 
     fn len(&self) -> u8 {
-        let mut len = 1 + 4;
+        let mut len = 1;
+        if self.circuit_id.is_some() {
+            len += 4;
+        }
         if self.neighbor_id.is_some() {
             len += 6;
         }
@@ -1206,7 +1217,9 @@ impl TlvEmitter for IsisTlvP2p3Way {
 
     fn emit(&self, buf: &mut BytesMut) {
         buf.put_u8(self.state);
-        buf.put_u32(self.circuit_id);
+        if let Some(circuit_id) = self.circuit_id {
+            buf.put_u32(circuit_id);
+        }
         if let Some(neighbor_id) = &self.neighbor_id {
             buf.put(&neighbor_id.id[..]);
         }
@@ -1344,12 +1357,16 @@ impl IsisTlv {
         let (input, tl) = IsisTypeLen::parse_be(input)?;
         let (input, tlv) = packet_utils::safe_split_at(input, tl.len as usize)?;
         if tl.typ.is_known() {
-            let (_, val) = Self::parse_be(tlv, tl.typ)?;
-            Ok((input, val))
-        } else {
-            let (_, val) = IsisTlvUnknown::parse_tlv(tlv, tl)?;
-            Ok((input, Self::Unknown(val)))
+            // A malformed value in a known TLV must not abort the PDU:
+            // parse_tlvs runs under many0, which would silently stop here
+            // and drop every TLV after this one. Degrade to Unknown so the
+            // bytes are preserved and the rest of the PDU still parses.
+            if let Ok((_, val)) = Self::parse_be(tlv, tl.typ) {
+                return Ok((input, val));
+            }
         }
+        let (_, val) = IsisTlvUnknown::parse_tlv(tlv, tl)?;
+        Ok((input, Self::Unknown(val)))
     }
 
     pub fn parse_tlvs(input: &[u8]) -> IResult<&[u8], Vec<Self>> {
