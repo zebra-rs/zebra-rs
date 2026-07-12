@@ -1771,7 +1771,9 @@ mod yang_load_tests {
 
         for cmd in [
             "set router bgp vrf N3 afi-safi mup dataplane end-dt46",
-            "set router bgp vrf N3 afi-safi mup dataplane gtp",
+            // `dataplane gtp` is commented out in zebra-bgp-vrf.yang (the
+            // real GTP-U path needs the cradle eBPF forwarder, not yet
+            // wired), so it is intentionally not a settable path here.
             "set router bgp vrf N3 afi-safi mup segment direct",
             "set router bgp vrf N3 afi-safi mup segment interwork",
             "set router bgp vrf N3 afi-safi mup segment direct mup-ext-comm 1:20",
