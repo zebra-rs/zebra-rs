@@ -3995,33 +3995,6 @@ mod yang_load_tests {
         }
     }
 
-    #[test]
-    fn bgp_evpn_sr_p2mp_dataplane_is_settable() {
-        use crate::config::ExecCode;
-        use crate::config::parse::{State, parse};
-        use libyang::to_entry;
-
-        let mut yang = YangStore::new();
-        yang.add_path(concat!(env!("CARGO_MANIFEST_DIR"), "/yang"));
-        yang.read_with_resolve("configure")
-            .expect("configure mode loads");
-        yang.identity_resolve();
-        let module = yang
-            .find_module("configure")
-            .expect("configure module present");
-        let entry = to_entry(&yang, module);
-
-        for path in [
-            "set router bgp afi-safi evpn sr-p2mp-dataplane overlay-interface br-evpn0",
-            "set router bgp afi-safi evpn sr-p2mp-dataplane underlay-interface eth1",
-            "set router bgp afi-safi evpn sr-p2mp-dataplane bridge-interface br-evpn0",
-            "set router bgp afi-safi evpn sr-p2mp-dataplane next-hop-mac aa:bb:cc:dd:ee:ff",
-        ] {
-            let (code, _comps, _state) = parse(path, entry.clone(), None, State::new());
-            assert_eq!(code, ExecCode::Success, "`{path}` must be a settable path");
-        }
-    }
-
     /// The three OSPF authentication modules (zebra-ospf-auth-simple /
     /// -md5 / -trailer) augment the per-interface subtree but were
     /// never imported by config.yang, so their leaves resolved as

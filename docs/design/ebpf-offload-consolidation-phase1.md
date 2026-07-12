@@ -87,5 +87,18 @@ compute. If S0 finds the SRv6-P2MP repl-slot path incomplete, stop and reassess
 
 ## Status
 
-- 2026-07-12: investigation done (3-subsystem map), Option A chosen, this doc
-  written. Starting S0 verification.
+- 2026-07-12: investigation done (3-subsystem map), Option A chosen, doc written.
+- 2026-07-12: **S0 verified** — the cradle tee (`CradleReplAdd`→`AddReplSlot` +
+  `AddLocalSid`→`srv6_dt2u`) forwards SR P2MP BUM, teed at IMET import
+  independent of PMSI mode, with mirror/replay. Safe to retire the supervisor.
+- 2026-07-12: **S1+S2 done** (branch `phase1-evpn-repl-converge`, commit
+  `622861ee`, −1072 lines): deleted `rib/evpn_replicate.rs`, the 5 RIB messages,
+  the `reconcile` ReplSeg emission, and the entire now-dead replication-segment
+  compute (`replication_action`/`replication_leaves`/`ReplAction`, the
+  `root`/`sr_remote_sids`/gateway-tree fields+methods+call sites+tests), plus the
+  `sr-p2mp-dataplane` YANG/config + guard test. Kept `update_sr_remote`/
+  `sr_remotes` (VXLAN-flood exclusion) and the cradle tee. Verified: check +
+  clippy `--all-targets` clean, fmt, 1560 unit tests pass.
+- **Next:** S3 (migrate `bgp_evpn_srv6_p2mp.feature` to cradle-engine mode — must
+  land before S4, or the BDD, which still drives the standalone offload, breaks),
+  then S4 (delete cradle-rs `crates/tc-evpn-replicate{,-ebpf}`). Each its own PR.

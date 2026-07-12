@@ -2385,51 +2385,9 @@ struct VniFlood {
     /// dataplane; deliberately kept *out* of `remotes` so they never get a
     /// VXLAN head-end FDB entry. Mutually exclusive with `remotes` per key.
     sr_remotes: BTreeMap<IpAddr, u32>,
-    /// The `End.DT2M` SID a remote SR P2MP PE advertised for this VNI (RFC
-    /// 9252 SRv6 L2 Service TLV on its Type-3 IMET), keyed by Originating
-    /// Router IP. This is the SID the dataplane sets as the outer DA when it
-    /// replicates a BUM copy toward that leaf. Absent when the remote
-    /// advertised no SID (e.g. its locator hadn't resolved); the producer
-    /// then falls back to the remote's VTEP address.
-    sr_remote_sids: BTreeMap<IpAddr, std::net::Ipv6Addr>,
     /// Flood targets (zero-MAC FDB `dst`s) currently programmed in the
     /// kernel, so `reconcile` can compute the MdbAdd/MdbDel delta.
     installed: BTreeSet<IpAddr>,
-    /// Local VTEP for this VNI — the SR P2MP tree Root — recorded when we
-    /// originate the Type-3 IMET. `Some` only for locally-originated VNIs.
-    /// The replication-segment producer needs it because `reconcile` is
-    /// reached from contexts (`BgpTop`) without `Bgp::local_vxlans`.
-    root: Option<IpAddr>,
-    /// Leaf set of the SR P2MP replication segment currently programmed to
-    /// the dataplane (the last `ReplSegAdd`), so `reconcile` emits only the
-    /// delta (and a `ReplSegDel` when it empties).
-    repl_installed: BTreeSet<IpAddr>,
-    /// RFC 9572 §6.3 segmentation-gateway SR replication tree: the leaf set
-    /// (cross-region VTEPs this gateway is the elected DF for) and root
-    /// (this gateway). Computed in the route pipeline (needs the RIB for the
-    /// DF election) and stashed here so `replication_action` can build the
-    /// gateway's `ReplSeg` even though this node has no local VXLAN root.
-    /// Empty / `None` on a non-gateway node.
-    gw_leaves: BTreeSet<IpAddr>,
-    gw_root: Option<IpAddr>,
-}
-
-/// What `reconcile` should do for a VNI's SR P2MP replication segment, decided
-/// purely from [`EvpnFloodState`] so it can be unit-tested without a RIB
-/// client.
-#[derive(Debug, PartialEq, Eq)]
-enum ReplAction {
-    /// No change since the last `ReplSegAdd`/`Del`.
-    None,
-    /// (Re)install the segment: local node is the `root`, replicate to
-    /// `leaves`. `srv6` selects SRv6 (vs SR-MPLS) encapsulation.
-    Add {
-        root: IpAddr,
-        srv6: bool,
-        leaves: BTreeSet<IpAddr>,
-    },
-    /// Withdraw the segment (left SR P2MP mode, lost the root, or no leaves).
-    Del,
 }
 
 impl EvpnFloodState {
@@ -2449,7 +2407,6 @@ impl EvpnFloodState {
     ) {
         let v = self.vnis.entry(vni).or_default();
         v.sr_remotes.remove(&orig);
-        v.sr_remote_sids.remove(&orig);
         v.remotes.insert(
             orig,
             RemoteImet {
@@ -2515,34 +2472,12 @@ impl EvpnFloodState {
         v.sr_remotes.insert(orig, tree_id);
     }
 
-    /// Record (or clear) the `End.DT2M` SID a remote SR P2MP PE advertised for
-    /// `vni` on its Type-3 IMET (RFC 9252 SRv6 L2 Service TLV). `sid` is `None`
-    /// when the route carried no L2 Service SID, which also evicts any stale
-    /// SID for that originator.
-    pub fn update_sr_remote_sid(
-        &mut self,
-        vni: u32,
-        orig: IpAddr,
-        sid: Option<std::net::Ipv6Addr>,
-    ) {
-        let v = self.vnis.entry(vni).or_default();
-        match sid {
-            Some(sid) => {
-                v.sr_remote_sids.insert(orig, sid);
-            }
-            None => {
-                v.sr_remote_sids.remove(&orig);
-            }
-        }
-    }
-
     /// Forget a remote's Type-3 IMET for `vni` (it was withdrawn). The
     /// originator may have been either tunnel kind, so clear both maps.
     pub fn remove_remote(&mut self, vni: u32, orig: IpAddr) {
         if let Some(v) = self.vnis.get_mut(&vni) {
             v.remotes.remove(&orig);
             v.sr_remotes.remove(&orig);
-            v.sr_remote_sids.remove(&orig);
         }
     }
 
@@ -2555,124 +2490,6 @@ impl EvpnFloodState {
             .get(&vni)
             .map(|v| v.sr_remotes.iter().map(|(orig, t)| (*orig, *t)).collect())
             .unwrap_or_default()
-    }
-
-    /// The leaf PEs of this node's SR P2MP replication tree for `vni` (RFC
-    /// 9524): every remote PE in the VNI's BUM domain — the union of the
-    /// Ingress/Assisted Replication remotes and the SR P2MP tree remotes.
-    /// The SR dataplane (a later slice) delivers a copy to each. Only
-    /// meaningful when this node's `bum_tunnel` is an SR P2MP mode; with
-    /// IR/AR the VXLAN head-end FDB ([`desired`](Self::desired)) is used.
-    pub fn replication_leaves(&self, vni: u32) -> BTreeSet<IpAddr> {
-        self.vnis
-            .get(&vni)
-            .map(|v| {
-                v.remotes
-                    .keys()
-                    .chain(v.sr_remotes.keys())
-                    .copied()
-                    .collect()
-            })
-            .unwrap_or_default()
-    }
-
-    /// Record the local VTEP for `vni` (the SR P2MP tree Root), learned when
-    /// we originate the Type-3 IMET. Needed by [`replication_action`] because
-    /// `reconcile` runs in contexts without `Bgp::local_vxlans`.
-    ///
-    /// [`replication_action`]: Self::replication_action
-    pub fn set_local_root(&mut self, vni: u32, root: IpAddr) {
-        self.vnis.entry(vni).or_default().root = Some(root);
-    }
-
-    /// Forget the local VTEP for `vni` (we stopped originating its IMET).
-    pub fn clear_local_root(&mut self, vni: u32) {
-        if let Some(v) = self.vnis.get_mut(&vni) {
-            v.root = None;
-        }
-    }
-
-    /// Stash the RFC 9572 segmentation-gateway SR replication tree for `vni`
-    /// (computed in the route pipeline from the RIB-derived DF election):
-    /// `root` is this gateway, `leaves` the cross-region VTEPs it owns delivery
-    /// to. Drives [`replication_action`](Self::replication_action)'s gateway
-    /// branch. An empty `leaves` clears it (this node isn't a DF gateway).
-    pub fn set_gateway_tree(&mut self, vni: u32, root: IpAddr, leaves: BTreeSet<IpAddr>) {
-        let v = self.vnis.entry(vni).or_default();
-        if leaves.is_empty() {
-            v.gw_leaves.clear();
-            v.gw_root = None;
-        } else {
-            v.gw_leaves = leaves;
-            v.gw_root = Some(root);
-        }
-    }
-
-    /// The remote VTEPs in `vni`'s flood set whose region is in `owned` — the
-    /// delivery set a segmentation gateway owns (is the elected DF for). The
-    /// SR replication tree's leaf set. Region-less (non-segmented) remotes are
-    /// excluded: they ride the ordinary VXLAN flood, not the segment tree.
-    pub fn owned_region_vteps(&self, vni: u32, owned: &BTreeSet<[u8; 8]>) -> BTreeSet<IpAddr> {
-        let Some(v) = self.vnis.get(&vni) else {
-            return BTreeSet::new();
-        };
-        v.remotes
-            .iter()
-            .filter(|(_, r)| r.region.is_some_and(|reg| owned.contains(&reg)))
-            .map(|(orig, _)| *orig)
-            .collect()
-    }
-
-    /// Decide the SR P2MP replication-segment action for `vni` against the
-    /// last-programmed leaf set, without sending anything. We program a
-    /// segment only when this node is configured for SR P2MP BUM *and* knows
-    /// its own root (it originates the VNI); the leaves are every remote PE in
-    /// the BUM domain ([`replication_leaves`](Self::replication_leaves)).
-    fn replication_action(&self, vni: u32) -> ReplAction {
-        let is_sr = matches!(
-            self.bum_tunnel,
-            EvpnBumTunnel::SrMplsP2mp | EvpnBumTunnel::SrV6P2mp
-        );
-        let Some(v) = self.vnis.get(&vni) else {
-            return ReplAction::None;
-        };
-        // A segmentation gateway (SR mode + a DF-owned cross-region leaf set)
-        // roots the tree at itself toward those leaves (RFC 9572 §6.3); a plain
-        // local-VXLAN SR PE roots it at its own VTEP toward every PE in the BUM
-        // domain (RFC 9524). The gateway leaf set takes precedence — a node with
-        // both is acting as the region's re-originator.
-        let (vtep_leaves, root): (BTreeSet<IpAddr>, Option<IpAddr>) =
-            if is_sr && !v.gw_leaves.is_empty() {
-                (v.gw_leaves.clone(), v.gw_root)
-            } else if is_sr && v.root.is_some() {
-                (self.replication_leaves(vni), v.root)
-            } else {
-                (BTreeSet::new(), None)
-            };
-        // Resolve each leaf VTEP to the End.DT2M SID it advertised (RFC 9252
-        // SRv6 L2 Service TLV) — that's the outer DA the dataplane replicates
-        // toward. Fall back to the VTEP address when the leaf signalled no SID
-        // (e.g. its locator hadn't resolved, or an SR-MPLS tree).
-        let want: BTreeSet<IpAddr> = vtep_leaves
-            .into_iter()
-            .map(|leaf| {
-                v.sr_remote_sids
-                    .get(&leaf)
-                    .map(|sid| IpAddr::V6(*sid))
-                    .unwrap_or(leaf)
-            })
-            .collect();
-        if want == v.repl_installed {
-            ReplAction::None
-        } else if want.is_empty() {
-            ReplAction::Del
-        } else {
-            ReplAction::Add {
-                root: root.expect("root is Some when want is non-empty"),
-                srv6: matches!(self.bum_tunnel, EvpnBumTunnel::SrV6P2mp),
-                leaves: want,
-            }
-        }
     }
 
     /// VNIs that currently have flood state (so a role/AR-IP change can
@@ -2739,10 +2556,11 @@ impl EvpnFloodState {
                 sr_trees.len()
             );
         }
-        // Local SR P2MP mode: BUM rides the replication tree, programmed via a
-        // `ReplSeg` to the SR dataplane (`desired` is empty above, so the delta
-        // below withdraws any VXLAN IR entries left from a prior mode).
-        let repl_action = self.replication_action(vni);
+        // Local SR P2MP mode: BUM rides the replication tree. Forwarding is the
+        // cradle engine's job — each remote leaf's End.DT2M SID is teed as a
+        // replication slot at Type-3 IMET import (`CradleReplAdd`), so `desired`
+        // stays empty above and the delta below withdraws any VXLAN IR entries
+        // left from a prior mode.
         let entry = self.vnis.entry(vni).or_default();
         for &group in desired.difference(&entry.installed) {
             let _ = rib.send(rib::Message::MdbAdd {
@@ -2762,23 +2580,6 @@ impl EvpnFloodState {
             });
         }
         entry.installed = desired;
-        match repl_action {
-            ReplAction::None => {}
-            ReplAction::Add { root, srv6, leaves } => {
-                let _ = rib.send(rib::Message::ReplSegAdd {
-                    vni,
-                    tree_id: vni,
-                    root,
-                    srv6,
-                    leaves: leaves.iter().copied().collect(),
-                });
-                self.vnis.entry(vni).or_default().repl_installed = leaves;
-            }
-            ReplAction::Del => {
-                let _ = rib.send(rib::Message::ReplSegDel { vni });
-                self.vnis.entry(vni).or_default().repl_installed.clear();
-            }
-        }
     }
 }
 
@@ -7216,7 +7017,6 @@ fn route_evpn_export_selected(
                             .send(rib::Message::CradleReplDel { vni, sid: dt2m });
                     }
                     bgp.local_rib.evpn_flood.remove_remote(vni, *orig);
-                    evpn_gateway_tree_set(bgp.local_rib, *bgp.router_id, vni);
                     bgp.local_rib.evpn_flood.reconcile(vni, bgp.rib_client);
                 } else {
                     eprintln!(
@@ -7364,24 +7164,14 @@ fn route_evpn_export_selected(
                 }
                 let pmsi = best.attr.pmsi_tunnel.as_ref();
                 if let Some(p) = pmsi.filter(|p| p.is_sr_p2mp()) {
-                    // SR P2MP tree (RFC 9574 -> RFC 9524): record the
-                    // remote's (Root, Tree-ID); BUM to it rides the
-                    // replication tree, not a VXLAN head-end FDB entry.
+                    // SR P2MP tree (RFC 9574 -> RFC 9524): record the remote's
+                    // (Root, Tree-ID) so it is kept out of the VXLAN head-end
+                    // flood set — BUM rides the replication tree, forwarded by
+                    // the cradle engine toward each leaf's End.DT2M SID (teed
+                    // as `CradleReplAdd` above).
                     bgp.local_rib
                         .evpn_flood
                         .update_sr_remote(vni, *orig, p.tree_id.unwrap_or(0));
-                    // RFC 9252: if the remote advertised an End.DT2M SID (SRv6
-                    // L2 Service TLV), record it — that's the outer DA the SR
-                    // dataplane replicates toward this leaf. A non-DT2M L2 SID
-                    // (or none) clears any stale entry.
-                    let dt2m = best
-                        .attr
-                        .srv6_l2_sid()
-                        .filter(|(_, behavior)| *behavior == bgp_packet::SRV6_BEHAVIOR_END_DT2M)
-                        .map(|(sid, _)| sid);
-                    bgp.local_rib
-                        .evpn_flood
-                        .update_sr_remote_sid(vni, *orig, dt2m);
                 } else {
                     let ar_ip = pmsi
                         .filter(|p| p.is_assisted_replication())
@@ -7401,7 +7191,6 @@ fn route_evpn_export_selected(
                         region,
                     );
                 }
-                evpn_gateway_tree_set(bgp.local_rib, *bgp.router_id, vni);
                 bgp.local_rib.evpn_flood.reconcile(vni, bgp.rib_client);
             } else {
                 eprintln!(
@@ -7605,21 +7394,6 @@ fn evpn_gateway_owned_regions(
             evpn_df_election(&evpn_per_region_asbrs(local_rib, region), 0) == Some(router_id)
         })
         .collect()
-}
-
-/// Recompute and stash this node's RFC 9572 §6.3 segmentation-gateway SR
-/// replication tree for `vni` (PR-B): the leaves are the VTEPs in every region
-/// this node is the elected DF for, rooted at the node itself. When `srv6-p2mp`
-/// is the BUM tunnel type, `replication_action` then signals a `ReplSeg` so the
-/// gateway re-floods cross-region BUM over the SR tree (the offload's root
-/// `H.Encaps` + `End.Replicate` datapath). Empties on a non-DF / non-gateway
-/// node, withdrawing any prior segment. Call before `reconcile`.
-fn evpn_gateway_tree_set(local_rib: &mut LocalRib, router_id: Ipv4Addr, vni: u32) {
-    let owned = evpn_gateway_owned_regions(local_rib, router_id, vni);
-    let leaves = local_rib.evpn_flood.owned_region_vteps(vni, &owned);
-    local_rib
-        .evpn_flood
-        .set_gateway_tree(vni, IpAddr::V4(router_id), leaves);
 }
 
 /// Render the RFC 9572 §5.3.1 inter-AS DF-election summary for one region's
@@ -15369,10 +15143,6 @@ impl Bgp {
             );
             return;
         };
-        // Record our VTEP as this VNI's SR P2MP tree Root, so the
-        // replication-segment producer in `reconcile` can emit a ReplSeg
-        // without `local_vxlans` (unreachable from the BgpTop import path).
-        self.local_rib.evpn_flood.set_local_root(vni, vtep_local);
         let prefix = EvpnPrefix::InclusiveMulticast {
             eth_tag: 0,
             orig: vtep_local,
@@ -15484,10 +15254,8 @@ impl Bgp {
         let _ = self.local_rib.remove_evpn(rd, &prefix, 0, ORIGINATED_PEER);
         let _ = self.local_rib.select_best_path_evpn(&rd, &prefix);
         route_withdraw_evpn_to_peers(rd, prefix, &mut self.peers);
-        // We no longer originate this VNI — drop its SR P2MP tree Root so a
-        // subsequent reconcile withdraws any replication segment, and release
-        // its End.DT2M / End.DT2U SIDs back to the pool.
-        self.local_rib.evpn_flood.clear_local_root(vni);
+        // We no longer originate this VNI — release its End.DT2M / End.DT2U
+        // SIDs back to the pool.
         self.free_vni_dt2m_sid(vni);
         self.free_vni_dt2u_sid(vni);
     }
@@ -16877,37 +16645,6 @@ mod evpn_flood_tests {
     /// A remote SR P2MP PE's End.DT2M SID is recorded per (VNI, originator),
     /// cleared when it re-advertises SID-less, when it flips to IR, and when
     /// it's withdrawn.
-    #[test]
-    fn sr_remote_dt2m_sid_recorded_and_cleared() {
-        let sid: std::net::Ipv6Addr = "2001:db8:1:2::".parse().unwrap();
-        let leaf = ip("10.0.0.7");
-        let read = |f: &EvpnFloodState| {
-            f.vnis
-                .get(&100)
-                .and_then(|v| v.sr_remote_sids.get(&leaf).copied())
-        };
-
-        let mut f = EvpnFloodState::default();
-        f.update_sr_remote(100, leaf, 4242);
-        f.update_sr_remote_sid(100, leaf, Some(sid));
-        assert_eq!(read(&f), Some(sid));
-
-        // Re-advertised SID-less (e.g. remote locator unresolved): evicted.
-        f.update_sr_remote_sid(100, leaf, None);
-        assert_eq!(read(&f), None);
-
-        // Flip to Ingress Replication clears any SR SID.
-        f.update_sr_remote_sid(100, leaf, Some(sid));
-        f.update_remote(100, leaf, None, false, false, None);
-        assert_eq!(read(&f), None);
-
-        // Withdrawal clears it too.
-        f.update_sr_remote(100, leaf, 4242);
-        f.update_sr_remote_sid(100, leaf, Some(sid));
-        f.remove_remote(100, leaf);
-        assert_eq!(read(&f), None);
-    }
-
     /// AR-LEAF with no replicator available falls back to full ingress
     /// replication (every remote IR-IP).
     #[test]
@@ -16969,8 +16706,9 @@ mod evpn_flood_tests {
         assert_eq!(f.sr_p2mp_remotes(100), vec![(ip("10.0.0.7"), 4242)]);
     }
 
-    /// In SR P2MP local mode the VXLAN head-end flood set is empty (BUM
-    /// rides the replication tree); the tree's leaf set is every remote PE.
+    /// In SR P2MP local mode the VXLAN head-end flood set is empty (BUM rides
+    /// the replication tree — the cradle engine replicates toward each leaf's
+    /// End.DT2M SID, teed at IMET import).
     #[test]
     fn sr_p2mp_local_mode_suppresses_vxlan_flood() {
         let mut f = EvpnFloodState {
@@ -16981,178 +16719,10 @@ mod evpn_flood_tests {
         f.update_sr_remote(100, ip("10.0.0.2"), 100);
         // No VXLAN head-end FDB targets in SR P2MP mode.
         assert!(f.desired(100).is_empty());
-        // Both remotes are leaves of our replication tree.
-        assert_eq!(
-            f.replication_leaves(100),
-            BTreeSet::from([ip("10.0.0.1"), ip("10.0.0.2")])
-        );
-    }
-
-    /// `replication_leaves` is the union of IR/AR and SR P2MP remotes,
-    /// independent of local mode; IR/AR `desired` is unaffected.
-    #[test]
-    fn replication_leaves_unions_ir_and_sr_remotes() {
-        let mut f = EvpnFloodState::default();
-        f.update_remote(100, ip("10.0.0.1"), None, false, false, None);
-        f.update_sr_remote(100, ip("10.0.0.7"), 9);
-        assert_eq!(
-            f.replication_leaves(100),
-            BTreeSet::from([ip("10.0.0.1"), ip("10.0.0.7")])
-        );
-        // Default (IR) mode still floods the IR remote via VXLAN.
-        assert_eq!(f.desired(100), BTreeSet::from([ip("10.0.0.1")]));
-    }
-
-    /// In SR P2MP mode with a known local root, the replication action adds a
-    /// segment rooted here to every remote PE (IR + SR), tagged SRv6/SR-MPLS.
-    #[test]
-    fn replication_action_adds_segment_in_sr_mode() {
-        let mut f = EvpnFloodState {
-            bum_tunnel: EvpnBumTunnel::SrV6P2mp,
-            ..Default::default()
-        };
-        f.set_local_root(100, ip("10.0.0.9"));
-        f.update_remote(100, ip("10.0.0.3"), None, false, false, None);
-        f.update_sr_remote(100, ip("10.0.0.2"), 100);
-        assert_eq!(
-            f.replication_action(100),
-            ReplAction::Add {
-                root: ip("10.0.0.9"),
-                srv6: true,
-                leaves: BTreeSet::from([ip("10.0.0.2"), ip("10.0.0.3")]),
-            }
-        );
-    }
-
-    /// A leaf that advertised an End.DT2M SID is replicated toward that SID;
-    /// a leaf with no advertised SID falls back to its VTEP address.
-    #[test]
-    fn replication_action_resolves_leaf_dt2m_sids() {
-        let mut f = EvpnFloodState {
-            bum_tunnel: EvpnBumTunnel::SrV6P2mp,
-            ..Default::default()
-        };
-        f.set_local_root(100, ip("10.0.0.9"));
-        // Leaf .2 advertised an End.DT2M SID; leaf .3 did not.
-        f.update_sr_remote(100, ip("10.0.0.2"), 100);
-        f.update_sr_remote_sid(
-            100,
-            ip("10.0.0.2"),
-            Some("2001:db8:2::100".parse().unwrap()),
-        );
-        f.update_sr_remote(100, ip("10.0.0.3"), 100);
-        assert_eq!(
-            f.replication_action(100),
-            ReplAction::Add {
-                root: ip("10.0.0.9"),
-                srv6: true,
-                // .2 → its SID, .3 → VTEP fallback.
-                leaves: BTreeSet::from([ip("2001:db8:2::100"), ip("10.0.0.3")]),
-            }
-        );
-    }
-
-    /// No segment without a local root (we aren't the tree root), nor in
-    /// Ingress Replication mode.
-    #[test]
-    fn replication_action_none_without_root_or_in_ir_mode() {
-        // SR mode but no local root → None.
-        let mut f = EvpnFloodState {
-            bum_tunnel: EvpnBumTunnel::SrMplsP2mp,
-            ..Default::default()
-        };
-        f.update_sr_remote(100, ip("10.0.0.2"), 100);
-        assert_eq!(f.replication_action(100), ReplAction::None);
-        // IR mode with a root → None.
-        let mut g = EvpnFloodState::default();
-        g.set_local_root(100, ip("10.0.0.9"));
-        g.update_remote(100, ip("10.0.0.3"), None, false, false, None);
-        assert_eq!(g.replication_action(100), ReplAction::None);
-    }
-
-    /// Delta: once the current leaf set is installed it reports None; leaving
-    /// SR P2MP mode reports Del (withdraw the segment).
-    #[test]
-    fn replication_action_delta_and_withdraw() {
-        let mut f = EvpnFloodState {
-            bum_tunnel: EvpnBumTunnel::SrMplsP2mp,
-            ..Default::default()
-        };
-        f.set_local_root(100, ip("10.0.0.9"));
-        f.update_sr_remote(100, ip("10.0.0.2"), 100);
-        let ReplAction::Add { leaves, .. } = f.replication_action(100) else {
-            panic!("expected Add");
-        };
-        // Simulate reconcile recording what it sent.
-        f.vnis.get_mut(&100).unwrap().repl_installed = leaves;
-        assert_eq!(f.replication_action(100), ReplAction::None);
-        // Switch to Ingress Replication → withdraw the segment.
-        f.bum_tunnel = EvpnBumTunnel::IngressReplication;
-        assert_eq!(f.replication_action(100), ReplAction::Del);
     }
 
     /// `owned_region_vteps` is the SR tree's leaf set: VTEPs in a region this
     /// gateway owns, excluding other regions and region-less PEs.
-    #[test]
-    fn owned_region_vteps_filters_to_owned_regions() {
-        let mut f = EvpnFloodState::default();
-        f.update_remote(100, ip("192.168.0.1"), None, false, true, Some(REGION_A));
-        f.update_remote(100, ip("192.168.0.3"), None, false, true, Some(REGION_B));
-        f.update_remote(100, ip("192.168.0.5"), None, false, true, Some(REGION_B));
-        f.update_remote(100, ip("192.168.0.9"), None, false, false, None); // region-less
-        // Owns only region B → just its two VTEPs.
-        assert_eq!(
-            f.owned_region_vteps(100, &BTreeSet::from([REGION_B])),
-            BTreeSet::from([ip("192.168.0.3"), ip("192.168.0.5")])
-        );
-        // Owns both regions → all segmented VTEPs (region-less still excluded).
-        assert_eq!(
-            f.owned_region_vteps(100, &BTreeSet::from([REGION_A, REGION_B])),
-            BTreeSet::from([ip("192.168.0.1"), ip("192.168.0.3"), ip("192.168.0.5")])
-        );
-    }
-
-    /// RFC 9572 §6.3: a segmentation gateway (SR mode + a DF-owned leaf set)
-    /// roots an SR replication tree at *itself* toward those leaves — even with
-    /// no local VXLAN root (it is a pure re-originator).
-    #[test]
-    fn replication_action_gateway_tree_without_local_root() {
-        let mut f = EvpnFloodState {
-            bum_tunnel: EvpnBumTunnel::SrV6P2mp,
-            ..Default::default()
-        };
-        f.update_remote(100, ip("192.168.0.3"), None, false, true, Some(REGION_B));
-        f.update_remote(100, ip("192.168.0.5"), None, false, true, Some(REGION_B));
-        let leaves = f.owned_region_vteps(100, &BTreeSet::from([REGION_B]));
-        f.set_gateway_tree(100, ip("192.168.0.2"), leaves.clone());
-        assert_eq!(
-            f.replication_action(100),
-            ReplAction::Add {
-                root: ip("192.168.0.2"), // the gateway itself, not a local VTEP
-                srv6: true,
-                leaves,
-            }
-        );
-    }
-
-    /// Losing DF ownership (the gateway tree empties) withdraws the segment.
-    #[test]
-    fn replication_action_gateway_tree_empty_withdraws() {
-        let mut f = EvpnFloodState {
-            bum_tunnel: EvpnBumTunnel::SrV6P2mp,
-            ..Default::default()
-        };
-        f.update_remote(100, ip("192.168.0.3"), None, false, true, Some(REGION_B));
-        f.set_gateway_tree(100, ip("192.168.0.2"), BTreeSet::from([ip("192.168.0.3")]));
-        let ReplAction::Add { leaves, .. } = f.replication_action(100) else {
-            panic!("expected Add");
-        };
-        f.vnis.get_mut(&100).unwrap().repl_installed = leaves;
-        // No longer the DF for any region → empty gateway tree → Del.
-        f.set_gateway_tree(100, ip("192.168.0.2"), BTreeSet::new());
-        assert_eq!(f.replication_action(100), ReplAction::Del);
-    }
-
     /// A remote that flips tunnel type moves between the two maps rather
     /// than lingering in both; a withdraw clears whichever map it was in.
     #[test]

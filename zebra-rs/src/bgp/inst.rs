@@ -627,17 +627,6 @@ pub enum EvpnBumTunnel {
     SrV6P2mp,
 }
 
-/// `router bgp afi-safi evpn sr-p2mp-dataplane` config: the interfaces +
-/// next hop the SRv6 P2MP BUM-replication eBPF dataplane attaches to. Pushed
-/// to the RIB replication supervisor via [`rib::Message::ReplDataplaneCfg`].
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
-pub struct EvpnSrDataplaneCfg {
-    pub overlay_iface: Option<String>,
-    pub underlay_iface: Option<String>,
-    pub bridge_iface: Option<String>,
-    pub next_hop_mac: Option<String>,
-}
-
 pub struct Bgp {
     pub asn: u32,
     /// Effective BGP Identifier — what OPENs, EVPN RDs and the show
@@ -989,9 +978,6 @@ pub struct Bgp {
     /// SRv6 L2 service SIDs (End.DT2U on Type-2, End.DT2M on Type-3) instead
     /// of VXLAN. The L2 data plane is the cradle eBPF tee.
     pub evpn_encap_srv6: bool,
-    /// `sr-p2mp-dataplane` config (interfaces + next hop for the SRv6 P2MP BUM
-    /// replication eBPF dataplane), pushed to the RIB supervisor on change.
-    pub evpn_sr_dataplane: EvpnSrDataplaneCfg,
     /// Precomputed advertise-time data derived from
     /// [`Self::srv6_ipv6_sid`] and the locator, borrowed into
     /// [`super::peer::BgpTop`] so the egress path stamps
@@ -1228,7 +1214,6 @@ impl Bgp {
             evpn_dt2m_sids: BTreeMap::new(),
             evpn_dt2u_sids: BTreeMap::new(),
             evpn_encap_srv6: false,
-            evpn_sr_dataplane: EvpnSrDataplaneCfg::default(),
             srv6_ipv6_export: None,
             networks_v6: std::collections::BTreeSet::new(),
             peer_index: BTreeMap::new(),
@@ -1460,13 +1445,9 @@ impl Bgp {
         match crate::isis::srv6::function_addr(prefix, function) {
             Some(addr) => {
                 self.evpn_dt2m_sids.insert(vni, (addr, function));
-                // Program the local End.DT2M leaf datapath: a replicated copy
-                // addressed to this SID is decapsulated + bridge-flooded.
-                let _ = self
-                    .ctx
-                    .rib
-                    .send(crate::rib::Message::ReplLeafAdd { vni, sid: addr });
-                // And the SID registry / cradle tee (decap + BD flood there).
+                // Program the local End.DT2M leaf datapath via the SID registry
+                // / cradle tee: a replicated copy addressed to this SID is
+                // decapsulated and BD-flooded by the cradle engine (srv6_dt2u).
                 self.send_vni_l2_sid_add(vni, addr, crate::rib::SidBehavior::EndDT2M);
                 Some(addr)
             }
@@ -1482,7 +1463,6 @@ impl Bgp {
     pub(super) fn free_vni_dt2m_sid(&mut self, vni: u32) {
         if let Some((addr, function)) = self.evpn_dt2m_sids.remove(&vni) {
             self.srv6_sid_pool.release(function);
-            let _ = self.ctx.rib.send(crate::rib::Message::ReplLeafDel { vni });
             let _ = self.ctx.rib.send(crate::rib::Message::SidDel { addr });
         }
     }
