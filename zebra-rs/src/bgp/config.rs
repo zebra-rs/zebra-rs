@@ -2342,93 +2342,6 @@ fn config_evpn_bum_tunnel_type(bgp: &mut Bgp, mut args: Args, op: ConfigOp) -> O
     Some(())
 }
 
-/// Push the current `sr-p2mp-dataplane` topology to the RIB replication
-/// supervisor (it stores it for use when the eBPF children are spawned).
-fn send_evpn_sr_dataplane(bgp: &Bgp) {
-    let c = &bgp.evpn_sr_dataplane;
-    let _ = bgp.ctx.rib.send(crate::rib::Message::ReplDataplaneCfg {
-        overlay: c.overlay_iface.clone(),
-        underlay: c.underlay_iface.clone(),
-        bridge: c.bridge_iface.clone(),
-        next_hop_mac: c.next_hop_mac.clone(),
-    });
-}
-
-/// `router bgp afi-safi evpn sr-p2mp-dataplane <leaf> <value>` — the SRv6 P2MP
-/// BUM-replication dataplane interfaces + outer next hop. Each leaf updates one
-/// field and re-pushes the whole topology to the RIB supervisor.
-fn config_evpn_sr_dp_overlay(bgp: &mut Bgp, mut args: Args, op: ConfigOp) -> Option<()> {
-    let afi_safi: AfiSafi = args.afi_safi()?;
-    if afi_safi.afi != Afi::L2vpn || afi_safi.safi != Safi::Evpn {
-        return None;
-    }
-    let val = if op.is_set() {
-        Some(args.string()?)
-    } else {
-        None
-    };
-    if bgp.evpn_sr_dataplane.overlay_iface == val {
-        return Some(());
-    }
-    bgp.evpn_sr_dataplane.overlay_iface = val;
-    send_evpn_sr_dataplane(bgp);
-    Some(())
-}
-
-fn config_evpn_sr_dp_underlay(bgp: &mut Bgp, mut args: Args, op: ConfigOp) -> Option<()> {
-    let afi_safi: AfiSafi = args.afi_safi()?;
-    if afi_safi.afi != Afi::L2vpn || afi_safi.safi != Safi::Evpn {
-        return None;
-    }
-    let val = if op.is_set() {
-        Some(args.string()?)
-    } else {
-        None
-    };
-    if bgp.evpn_sr_dataplane.underlay_iface == val {
-        return Some(());
-    }
-    bgp.evpn_sr_dataplane.underlay_iface = val;
-    send_evpn_sr_dataplane(bgp);
-    Some(())
-}
-
-fn config_evpn_sr_dp_bridge(bgp: &mut Bgp, mut args: Args, op: ConfigOp) -> Option<()> {
-    let afi_safi: AfiSafi = args.afi_safi()?;
-    if afi_safi.afi != Afi::L2vpn || afi_safi.safi != Safi::Evpn {
-        return None;
-    }
-    let val = if op.is_set() {
-        Some(args.string()?)
-    } else {
-        None
-    };
-    if bgp.evpn_sr_dataplane.bridge_iface == val {
-        return Some(());
-    }
-    bgp.evpn_sr_dataplane.bridge_iface = val;
-    send_evpn_sr_dataplane(bgp);
-    Some(())
-}
-
-fn config_evpn_sr_dp_nexthop_mac(bgp: &mut Bgp, mut args: Args, op: ConfigOp) -> Option<()> {
-    let afi_safi: AfiSafi = args.afi_safi()?;
-    if afi_safi.afi != Afi::L2vpn || afi_safi.safi != Safi::Evpn {
-        return None;
-    }
-    let val = if op.is_set() {
-        Some(args.string()?)
-    } else {
-        None
-    };
-    if bgp.evpn_sr_dataplane.next_hop_mac == val {
-        return Some(());
-    }
-    bgp.evpn_sr_dataplane.next_hop_mac = val;
-    send_evpn_sr_dataplane(bgp);
-    Some(())
-}
-
 // ---- redistribute -----------------------------------------------------
 //
 // Per-AFI redistribution sources (zebra-bgp-redistribute.yang). Each
@@ -4785,25 +4698,6 @@ impl Bgp {
         self.callback_add(
             "/router/bgp/afi-safi/bum-tunnel-type",
             config_evpn_bum_tunnel_type,
-        );
-        // EVPN SRv6 P2MP BUM-replication dataplane topology, under `router bgp
-        // afi-safi evpn sr-p2mp-dataplane`. Augmented in by zebra-bgp-evpn.yang;
-        // pushed to the RIB replication supervisor.
-        self.callback_add(
-            "/router/bgp/afi-safi/sr-p2mp-dataplane/overlay-interface",
-            config_evpn_sr_dp_overlay,
-        );
-        self.callback_add(
-            "/router/bgp/afi-safi/sr-p2mp-dataplane/underlay-interface",
-            config_evpn_sr_dp_underlay,
-        );
-        self.callback_add(
-            "/router/bgp/afi-safi/sr-p2mp-dataplane/bridge-interface",
-            config_evpn_sr_dp_bridge,
-        );
-        self.callback_add(
-            "/router/bgp/afi-safi/sr-p2mp-dataplane/next-hop-mac",
-            config_evpn_sr_dp_nexthop_mac,
         );
 
         // Per-AFI redistribution (zebra-bgp-redistribute.yang).
