@@ -822,7 +822,7 @@ impl Rib {
         }
     }
 
-    pub fn link_delete(&mut self, oslink: FibLink) {
+    pub async fn link_delete(&mut self, oslink: FibLink) {
         // Unregister via the VNI we resolved when the link was added
         // (config-sourced for `external vnifilter` devices, whose kernel
         // `IFLA_VXLAN_ID` is 0). Fall back to the netlink value for a
@@ -836,6 +836,9 @@ impl Rib {
         if let Some(vni) = del_vni {
             self.fib_handle.unregister_vxlan_ifindex(vni);
             self.api_vxlan_del(vni);
+            // Withdraw the VNI binding from the cradle eBPF data plane
+            // (no-op for an SRv6 device / when cradle is off).
+            self.fib_handle.cradle_vni_unregister(vni).await;
         }
         // Notify subscribers BEFORE removing the link entry, so the
         // VRF lookup in `api_link_del` still resolves to the right

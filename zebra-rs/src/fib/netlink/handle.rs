@@ -589,6 +589,15 @@ impl FibHandle {
         }
     }
 
+    /// Withdraw an L2VNI binding from cradle when its VXLAN device is
+    /// removed (the counterpart of `cradle_vni_register`). Harmless for an
+    /// SRv6 device, which never registered one. No-op when cradle is off.
+    pub async fn cradle_vni_unregister(&self, vni: u32) {
+        if let Some(cradle) = &self.cradle {
+            cradle.del_vni(vni).await;
+        }
+    }
+
     /// Install a GTP-U decap PDR (`H.M.GTP4.D`) into the cradle data plane: a
     /// G-PDU on (`dst`, `teid`) is stripped and its inner packet forwarded in
     /// VRF `table_id`. No kernel counterpart — the mainline kernel has no GTP

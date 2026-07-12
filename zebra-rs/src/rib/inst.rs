@@ -3628,7 +3628,7 @@ impl Rib {
                 self.link_add(link).await;
             }
             FibMessage::DelLink(link) => {
-                self.link_delete(link);
+                self.link_delete(link).await;
             }
             FibMessage::NewAddr(addr) => {
                 // Kernel netlink path: from_config=false. If a configured
