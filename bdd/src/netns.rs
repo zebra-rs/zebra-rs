@@ -360,8 +360,27 @@ pub async fn spawn_in_netns_env(
 ) -> Result<tokio::process::Child> {
     let mut c = Command::new("sudo");
     c.arg("ip").arg("netns").arg("exec").arg(netns);
-    if !env.is_empty() {
+
+    // Give each zebra-rs daemon a per-namespace OSPF graceful-restart
+    // checkpoint dir. The daemon otherwise reads/writes the fixed
+    // host-global /var/lib/zebra-rs/checkpoint/<proto>.cbor, but a netns
+    // isolates the network, NOT the filesystem — so under concurrency an
+    // OSPF daemon can restore a checkpoint written by a DIFFERENT
+    // namespace's daemon on startup (e.g. ospfv2_auth's node inheriting
+    // ospfv2_graceful_restart's node-b router-id 10.0.0.2 + LSDB), enter
+    // graceful-restart over a cold start, and mis-converge — the route to
+    // the peer's loopback never lands and a non-retrying ping fails.
+    // Keying the dir by the scoped namespace makes each daemon's
+    // checkpoint private while staying STABLE across a same-namespace
+    // restart, so graceful-restart resume still works; the daemon
+    // create_dir_all's it on write.
+    let ckpt = format!("ZEBRA_OSPF_CHECKPOINT_DIR=/tmp/zebra-rs-ckpt/{netns}");
+    let inject_ckpt = cmd == "zebra-rs";
+    if inject_ckpt || !env.is_empty() {
         c.arg("env");
+        if inject_ckpt {
+            c.arg(&ckpt);
+        }
         for (k, v) in env {
             c.arg(format!("{k}={v}"));
         }
