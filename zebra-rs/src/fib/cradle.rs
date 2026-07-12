@@ -1507,6 +1507,20 @@ impl CradleFib {
         }
     }
 
+    /// Remove an L2VNI binding (the VXLAN device is gone). The fabric VTEP
+    /// source is left as-is — it is fabric-wide, not per-VNI.
+    pub async fn del_vni(&self, vni: u32) {
+        self.mirror.lock().await.vnis.remove(&vni);
+        let result = async {
+            self.client().await?.del_vni(pb::VniDel { vni }).await?;
+            anyhow::Ok(())
+        }
+        .await;
+        if let Err(e) = result {
+            tracing::warn!("fib: cradle del_vni {vni} failed: {e}");
+        }
+    }
+
     /// Set the fabric-wide local VTEP source (VXLAN outer source + decap
     /// match). Idempotent; last write wins.
     pub async fn set_vtep_source(&self, addr: std::net::Ipv4Addr) {
