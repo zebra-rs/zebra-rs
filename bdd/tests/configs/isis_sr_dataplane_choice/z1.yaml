@@ -1,0 +1,46 @@
+# z1 — the node whose SR dataplane is flipped at runtime. Dual-stack
+# IS-IS L2 with SR-MPLS enabled (loopback Prefix-SID index 100 ->
+# label 16100). The SRv6 locator LOC1 is pre-provisioned in the global
+# segment-routing block but NOT bound to IS-IS: the feature binds it
+# with a single `set router isis segment-routing srv6 locator LOC1`,
+# which must implicitly delete `segment-routing mpls` (YANG choice,
+# RFC 7950 §7.9.3).
+interface:
+- if-name: lo
+  ipv4:
+    address: 10.0.0.1/32
+  ipv6:
+    address: 2001:db8::1/128
+- if-name: z1-z2
+  ipv4:
+    address: 10.0.12.1/24
+  ipv6:
+    address: 2001:db8:0:12::1/64
+system:
+  hostname: z1
+segment-routing:
+  locator:
+  - name: LOC1
+    prefix: fcbb:bbbb:1::/48
+router:
+  isis:
+    net: 49.0000.0000.0000.0001.00
+    hostname: z1
+    is-type: level-2-only
+    segment-routing:
+      mpls: {}
+    interface:
+    - if-name: lo
+      ipv4:
+        enabled: true
+        prefix-sid:
+          index: 100
+      ipv6:
+        enabled: true
+    - if-name: z1-z2
+      network-type: point-to-point
+      metric: 1
+      ipv4:
+        enabled: true
+      ipv6:
+        enabled: true

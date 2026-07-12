@@ -734,6 +734,29 @@ pub fn parse(
         .get("ext:non-empty")
         .cloned()
         .unwrap_or_default();
+    // Choice exclusivity (RFC 7950 §7.9.3): when the matched node was
+    // contributed by a `case`, carry the names of the siblings from the
+    // choice's other cases so `config_set_dir` deletes them when this
+    // node is set. Siblings live in `entry.dir` — libyang flattens every
+    // case's children into the choice's parent. In value states
+    // (Leaf/Key) `entry` is the leaf itself with an empty `dir`, so this
+    // resolves to no exclusions there; the exclusion was already stamped
+    // on the element that named the case member.
+    let choice_exclude: Vec<String> = match (
+        mx.matched_entry.choice.borrow().as_ref(),
+        mx.matched_entry.case.borrow().as_ref(),
+    ) {
+        (Some(choice), Some(case)) => entry
+            .dir
+            .borrow()
+            .iter()
+            .filter(|e| {
+                e.choice.borrow().as_ref() == Some(choice) && e.case.borrow().as_ref() != Some(case)
+            })
+            .map(|e| e.name.clone())
+            .collect(),
+        _ => Vec::new(),
+    };
 
     let path = if ymatch_complete(s.ymatch, mx.matched_entry.presence, s.delete) {
         // KeyMatched / LeafMatched / LeafListMatched carry the user-
@@ -756,6 +779,7 @@ pub fn parse(
             mandatory,
             sort_priority,
             non_empty,
+            choice_exclude,
         }
     } else {
         CommandPath {
@@ -765,6 +789,7 @@ pub fn parse(
             mandatory,
             sort_priority,
             non_empty,
+            choice_exclude,
         }
     };
 

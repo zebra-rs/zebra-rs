@@ -72,9 +72,7 @@ impl ZebraClient {
                 name: cmd.to_string(),
                 key: "".to_string(),
                 ymatch: ymatch.into(),
-                mandatory: vec![],
-                sort_priority: 0,
-                non_empty: String::new(),
+                ..Default::default()
             };
             paths.push(path);
         }
