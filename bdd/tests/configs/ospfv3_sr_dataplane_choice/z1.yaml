@@ -1,0 +1,35 @@
+# z1 — the node whose OSPFv3 SR dataplane is flipped at runtime.
+# OSPFv3 area 0 with SR-MPLS enabled (loopback Prefix-SID index 100 ->
+# label 16100, RFC 8666). The SRv6 locator LOC1 is pre-provisioned in
+# the global segment-routing block but NOT bound to OSPFv3: the
+# feature binds it with a single `set router ospfv3 segment-routing
+# srv6 locator LOC1`, which must implicitly delete `segment-routing
+# mpls` (YANG choice, RFC 7950 §7.9.3).
+interface:
+- if-name: lo
+  ipv6:
+    address: 2001:db8::1/128
+- if-name: z1-z2
+  ipv6:
+    address: 2001:db8:12::1/64
+system:
+  hostname: z1
+segment-routing:
+  locator:
+  - name: LOC1
+    prefix: fcbb:bbbb:1::/48
+router:
+  ospfv3:
+    router-id: 10.0.0.1
+    segment-routing:
+      mpls: {}
+    area:
+    - area-id: 0.0.0.0
+      interface:
+      - if-name: lo
+        enabled: true
+        prefix-sid:
+          index: 100
+      - if-name: z1-z2
+        enabled: true
+        network-type: point-to-point

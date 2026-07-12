@@ -239,6 +239,20 @@ fn set_route_table(msg: &mut RouteMessage, table_id: u32) {
     }
 }
 
+/// The `rtm_protocol` a SID host route carries — the SID's owning
+/// protocol. Shared by install and uninstall: the kernel matches
+/// RTM_DELROUTE on the protocol when it is set, so a delete built with
+/// a different protocol than the install returns ESRCH and the
+/// seg6local route leaks in the FIB (an OSPFv3 SID uninstall did
+/// exactly that while this was hard-coded to Isis on the delete side).
+fn sid_route_protocol(sid: &crate::rib::Sid) -> RouteProtocol {
+    match sid.owner.rib_type() {
+        crate::rib::RibType::Ospf => RouteProtocol::Ospf,
+        crate::rib::RibType::Bgp => RouteProtocol::Bgp,
+        _ => RouteProtocol::Isis,
+    }
+}
+
 fn sid_route_target(
     behavior: crate::rib::SidBehavior,
     addr: std::net::Ipv6Addr,
@@ -2037,11 +2051,7 @@ impl FibHandle {
         msg.header.destination_prefix_length = prefix_len;
         // Stamp the SID's owning protocol (an OSPFv3 SID used to land
         // as `proto isis` in the kernel regardless of owner).
-        msg.header.protocol = match sid.owner.rib_type() {
-            crate::rib::RibType::Ospf => RouteProtocol::Ospf,
-            crate::rib::RibType::Bgp => RouteProtocol::Bgp,
-            _ => RouteProtocol::Isis,
-        };
+        msg.header.protocol = sid_route_protocol(sid);
         msg.header.scope = RouteScope::Universe;
         msg.header.kind = kind;
 
@@ -2212,7 +2222,10 @@ impl FibHandle {
         }
         msg.header.table = table;
         msg.header.destination_prefix_length = prefix_len;
-        msg.header.protocol = RouteProtocol::Isis;
+        // Same owner-protocol stamp as the install: the kernel matches
+        // RTM_DELROUTE on rtm_protocol, so a hard-coded Isis here left
+        // OSPFv3/BGP-owned seg6local routes behind (ESRCH on delete).
+        msg.header.protocol = sid_route_protocol(sid);
         msg.header.scope = RouteScope::Universe;
         msg.header.kind = kind;
 
