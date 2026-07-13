@@ -1,324 +1,290 @@
-//! Per-interface XDP BFD Echo reflector supervisor.
+//! BFD Echo / detection-offload driver over the cradle gRPC control plane.
 //!
-//! BFD Echo (RFC 5880 §6.4 / RFC 5881 §4) is a single-hop, interface-scoped
-//! data-plane hairpin: a peer sends Echo frames to UDP/3785 and our forwarding
-//! plane loops them straight back. zebra-rs provides that loopback by running
-//! the standalone `xdp-bfd-echo` XDP loader (from cradle-rs
-//! `crates/xdp-bfd-echo/`, shipped in the cradle-rs .deb at
-//! `/usr/sbin/xdp-bfd-echo`) as a managed child process — one per interface
-//! that has at least one single-hop session advertising Echo.
+//! BFD Echo (RFC 5880 §6.4 / RFC 5881 §4) is a single-hop data-plane hairpin,
+//! and standard async detection (§6.8.4) can ride an in-kernel `bpf_timer`
+//! watchdog. Both datapaths now live inside the **cradle** engine's `cradle_xdp`
+//! (Phase 2 of the eBPF offload consolidation — see
+//! `cradle-rs/docs/design/bfd-echo-absorption.md`), which cradle attaches to
+//! every managed port. This module is the control-plane driver: it turns the
+//! BFD instance's per-session arm/disarm into cradle gRPC calls
+//! (`ArmBfdEcho`/`DisarmBfdEcho` for the Echo originator, `ArmBfdDetect`/
+//! `DisarmBfdDetect` for the control watchdog) and streams cradle's `WatchBfd`
+//! echo-down / detect-down events back into the BFD event loop.
 //!
 //! Advertising a non-zero `Required Min Echo RX Interval` is a *promise to loop
-//! Echo back* (RFC 5880 §6.8.1), so the advertise path must only do so once the
-//! child for that interface is confirmed running ([`EchoReflectors::is_ready`]).
+//! Echo back* (RFC 5880 §6.8.1), so the advertise path only does so once the
+//! cradle engine is reachable ([`EchoReflectors::is_ready`]). This couples BFD
+//! Echo to `system ebpf enabled` — the datapath that reflects/originates Echo
+//! is the cradle engine.
 //!
-//! Lifecycle is reference-counted by ifindex: [`EchoReflectors::acquire`] for
-//! each echo session created on an interface, [`EchoReflectors::release`] when
-//! one goes away. The child is spawned on the first reference and SIGTERM'd
-//! (graceful XDP detach) on the last.
+//! Reachability is soft: on a lost stream (engine restart) sessions revert to
+//! userspace detection (the stretched backstop timer), and re-arm on the next
+//! reconcile once the engine is back.
 
 use std::collections::HashMap;
-use std::path::PathBuf;
-use std::process::Stdio;
+use std::net::IpAddr;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::time::Duration;
 
-use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
-use tokio::process::{Child, ChildStdin, ChildStdout, Command};
 use tokio::sync::mpsc::{self, UnboundedReceiver, UnboundedSender};
 
 use crate::context::Task;
+use crate::fib::cradle::CradleFib;
 
 use super::inst::Message;
 use super::trace::{bfd_debug, bfd_info, bfd_warn};
 
-/// Env override for the reflector binary path (mirrors vtypam's
-/// `ZEBRA_VTYPAM_BIN`). Falls back to the install locations.
-const BIN_ENV: &str = "ZEBRA_XDP_BFD_ECHO_BIN";
-/// Env override for the XDP attach mode (`auto` | `native` | `skb`). Default
-/// `auto`; veth / virtual NICs need `skb` (native attaches but does not loop).
-const MODE_ENV: &str = "ZEBRA_XDP_BFD_ECHO_MODE";
+/// Env override for the cradle gRPC endpoint the BFD driver dials. Defaults to
+/// the same per-netns abstract socket the rest of zebra uses.
+const ENDPOINT_ENV: &str = "ZEBRA_CRADLE_BFD_ENDPOINT";
+const DEFAULT_ENDPOINT: &str = "unix:cradle/grpc";
 
-/// One supervised reflector child, keyed by ifindex in [`EchoReflectors`].
-struct Reflector {
-    /// Number of single-hop echo sessions currently on this interface.
-    refcount: u32,
-    /// The child process, if it spawned. `None` when the spawn failed (e.g.
-    /// the binary is missing or the ifindex has no name) — we then stay
-    /// not-ready and keep advertising 0, which is honest.
-    child: Option<Child>,
-    ifname: String,
-    /// Queue for stdin command lines (`echo-add`/`echo-del`) to the child's IPC
-    /// task; `None` if the child didn't spawn or wasn't piped.
-    cmd_tx: Option<UnboundedSender<String>>,
-    /// IPC task: writes commands to the child's stdin and forwards its
-    /// `echo-down` events into the BFD event loop. Aborts when dropped.
-    _io: Option<Task<()>>,
+/// One arm/disarm request to the cradle BFD driver task — the typed form of the
+/// line protocol the BFD instance still emits via [`EchoReflectors::send_command`].
+enum BfdCmd {
+    /// Arm the Echo originator + return detector (`ArmBfdEcho`).
+    ArmEcho {
+        discr: u32,
+        oif: String,
+        local: IpAddr,
+        peer: IpAddr,
+        tx_us: u32,
+        mult: u32,
+    },
+    /// Stop originating/detecting Echo (`DisarmBfdEcho`).
+    DisarmEcho { discr: u32 },
+    /// Arm the control-packet expiration watchdog (`ArmBfdDetect`).
+    ArmDetect { discr: u32, detect_us: u32 },
+    /// Disarm the control watchdog (`DisarmBfdDetect`).
+    DisarmDetect { discr: u32 },
 }
 
-impl Reflector {
-    /// SIGTERM the child so the loader detaches its XDP program cleanly. The
-    /// `kill_on_drop(true)` set at spawn reaps it (SIGKILL) if it ignores us.
-    fn stop(&mut self) {
-        if let Some(pid) = self.child.as_ref().and_then(Child::id) {
-            unsafe {
-                libc::kill(pid as libc::pid_t, libc::SIGTERM);
-            }
-            bfd_info!("bfd echo: stopping reflector on {}", self.ifname);
-        }
-    }
-
-    /// True while the child is still running. A child that has exited (crash,
-    /// killed externally) is not alive, so we must stop advertising Echo.
-    fn is_alive(&mut self) -> bool {
-        match &mut self.child {
-            // `try_wait` is non-blocking: `Ok(None)` => still running.
-            Some(child) => matches!(child.try_wait(), Ok(None)),
-            None => false,
-        }
-    }
-}
-
-/// Supervises the set of `xdp-bfd-echo` child processes, one per
-/// interface with active single-hop Echo sessions.
+/// Drives BFD Echo / detection offload into the cradle engine and streams its
+/// down events back. Keeps a per-ifindex session refcount purely so the BFD
+/// instance's acquire/release bookkeeping (and its tests) are unchanged; the
+/// datapath is no longer per-interface (cradle keys by discriminator).
 pub struct EchoReflectors {
-    by_ifindex: HashMap<u32, Reflector>,
-    bin: PathBuf,
-    mode: String,
-    /// Cloned into each child's IPC task to deliver `echo-down` /
-    /// `detect-down` / `HelperGone` into the BFD event loop.
-    main_tx: UnboundedSender<Message>,
-    /// Test-only readiness override: tests can't spawn a real helper child
-    /// (no interface, no binary), so the readiness-gated paths (Echo
-    /// advertisement, expiration-watchdog arming) would be untestable
-    /// without it.
+    /// Per-ifindex count of active Echo/detect sessions (bookkeeping only).
+    by_ifindex: HashMap<u32, u32>,
+    /// Queue to the gRPC driver task (the analogue of the old child's stdin).
+    cmd_tx: UnboundedSender<BfdCmd>,
+    /// Set by the driver task while cradle's `WatchBfd` stream is connected —
+    /// the honest-advertise / arm gate. Global (engine reachability), not
+    /// per-interface.
+    connected: Arc<AtomicBool>,
+    /// The driver task (arm/disarm + WatchBfd consumer). Aborts when dropped.
+    /// `None` when constructed outside a tokio runtime (sync unit tests).
+    _task: Option<Task<()>>,
+    /// Test-only readiness override: unit tests have no cradle engine, so the
+    /// readiness-gated paths would be untestable without it.
     #[cfg(test)]
     ready_override: std::collections::HashSet<u32>,
 }
 
 impl EchoReflectors {
     pub fn new(main_tx: UnboundedSender<Message>) -> Self {
+        let (cmd_tx, cmd_rx) = mpsc::unbounded_channel();
+        let connected = Arc::new(AtomicBool::new(false));
+        // Spawn the driver only when a runtime is present. Sync unit tests have
+        // none — and no engine to reach — so they exercise the bookkeeping with
+        // `connected == false` (plus the test-only readiness override).
+        let _task = if tokio::runtime::Handle::try_current().is_ok() {
+            Some(Task::spawn(bfd_driver(
+                resolve_endpoint(),
+                cmd_rx,
+                main_tx,
+                connected.clone(),
+            )))
+        } else {
+            None
+        };
         Self {
             by_ifindex: HashMap::new(),
-            bin: resolve_bin(),
-            mode: std::env::var(MODE_ENV).unwrap_or_else(|_| "auto".to_string()),
-            main_tx,
+            cmd_tx,
+            connected,
+            _task,
             #[cfg(test)]
             ready_override: std::collections::HashSet::new(),
         }
     }
 
-    /// Send a control line (`echo-add …` / `echo-del …`) to the helper on
-    /// `ifindex`. No-op if there's no running, piped child for it.
+    /// Route a control line (`echo-add …`/`echo-del …`/`detect-add …`/
+    /// `detect-del …`, the format the BFD instance emits) to the cradle driver.
+    /// `ifindex` supplies the egress interface for `echo-add`.
     pub fn send_command(&self, ifindex: u32, line: String) {
-        if let Some(r) = self.by_ifindex.get(&ifindex)
-            && let Some(tx) = &r.cmd_tx
-        {
-            let _ = tx.send(line);
+        if let Some(cmd) = parse_command(ifindex, &line) {
+            let _ = self.cmd_tx.send(cmd);
         }
     }
 
-    /// Note one more single-hop echo session on `ifindex`; spawn the reflector
-    /// child if this is the first.
+    /// Note one more single-hop Echo/detect session on `ifindex`.
     pub fn acquire(&mut self, ifindex: u32) {
-        if let Some(r) = self.by_ifindex.get_mut(&ifindex) {
-            r.refcount += 1;
-            return;
-        }
-        let reflector = self.spawn(ifindex);
-        self.by_ifindex.insert(ifindex, reflector);
+        *self.by_ifindex.entry(ifindex).or_insert(0) += 1;
     }
 
-    /// Drop one reference; stop the child when the last echo session on
-    /// `ifindex` goes away.
+    /// Drop one reference; forget the ifindex when its last session goes away.
     pub fn release(&mut self, ifindex: u32) {
-        let Some(r) = self.by_ifindex.get_mut(&ifindex) else {
-            return;
-        };
-        r.refcount = r.refcount.saturating_sub(1);
-        if r.refcount > 0 {
-            return;
-        }
-        // The `get_mut` borrow ended at the comparison above (NLL), so the
-        // last echo session is gone — remove the entry and stop the child.
-        if let Some(mut r) = self.by_ifindex.remove(&ifindex) {
-            r.stop();
+        if let Some(r) = self.by_ifindex.get_mut(&ifindex) {
+            *r = r.saturating_sub(1);
+            if *r == 0 {
+                self.by_ifindex.remove(&ifindex);
+            }
         }
     }
 
-    /// Whether the reflector for `ifindex` is confirmed running — the gate for
-    /// honestly advertising a non-zero echo-rx on sessions over this interface
-    /// and for arming the in-kernel expiration watchdog.
+    /// Whether the cradle engine is reachable — the gate for honestly
+    /// advertising a non-zero echo-rx and for arming the in-kernel watchdog.
     pub fn is_ready(&mut self, ifindex: u32) -> bool {
         #[cfg(test)]
         if self.ready_override.contains(&ifindex) {
             return true;
         }
-        self.by_ifindex
-            .get_mut(&ifindex)
-            .map(Reflector::is_alive)
-            .unwrap_or(false)
+        let _ = ifindex; // reachability is global, not per-interface
+        self.connected.load(Ordering::Relaxed)
     }
 
-    /// Number of echo sessions currently referencing `ifindex` (0 if none).
-    /// Test-only: lets the instance-level tests verify acquire/release wiring.
+    /// Number of sessions currently referencing `ifindex` (0 if none).
     #[cfg(test)]
     pub fn refcount(&self, ifindex: u32) -> u32 {
-        self.by_ifindex.get(&ifindex).map_or(0, |r| r.refcount)
+        self.by_ifindex.get(&ifindex).copied().unwrap_or(0)
     }
 
-    /// Test-only: pretend the helper on `ifindex` is up, so tests can drive
-    /// the readiness-gated paths without spawning a child.
+    /// Test-only: pretend the cradle engine is reachable for `ifindex`.
     #[cfg(test)]
     pub fn set_ready_for_test(&mut self, ifindex: u32) {
         self.ready_override.insert(ifindex);
     }
 
-    /// Test-only: undo [`Self::set_ready_for_test`] (simulates helper death).
+    /// Test-only: undo [`Self::set_ready_for_test`] (simulates engine loss).
     #[cfg(test)]
     pub fn clear_ready_for_test(&mut self, ifindex: u32) {
         self.ready_override.remove(&ifindex);
     }
+}
 
-    fn spawn(&self, ifindex: u32) -> Reflector {
-        let Some(ifname) = if_indextoname(ifindex) else {
-            bfd_warn!("bfd echo: no interface name for ifindex {ifindex}; reflector off");
-            return Reflector {
-                refcount: 1,
-                child: None,
-                ifname: String::new(),
-                cmd_tx: None,
-                _io: None,
-            };
-        };
-        match Command::new(&self.bin)
-            .arg("-i")
-            .arg(&ifname)
-            .arg("-m")
-            .arg(&self.mode)
-            .stdin(Stdio::piped())
-            .stdout(Stdio::piped())
-            .kill_on_drop(true)
-            .spawn()
-        {
-            Ok(mut child) => {
-                bfd_info!(
-                    "bfd echo: spawned reflector on {ifname} (ifindex {ifindex}, mode {})",
-                    self.mode
-                );
-                // Wire the originator IPC: a task drains command lines to the
-                // child's stdin and forwards its `echo-down` events to the loop.
-                let (cmd_tx, io) = match (child.stdin.take(), child.stdout.take()) {
-                    (Some(stdin), Some(stdout)) => {
-                        let (tx, rx) = mpsc::unbounded_channel::<String>();
-                        let task = Task::spawn(child_io(
-                            ifname.clone(),
-                            ifindex,
-                            stdin,
-                            stdout,
-                            rx,
-                            self.main_tx.clone(),
-                        ));
-                        (Some(tx), Some(task))
+/// The gRPC driver task: (re)connects to cradle, drains [`BfdCmd`]s into
+/// arm/disarm RPCs, and forwards `WatchBfd` events into the BFD event loop.
+/// Reconnects with a fixed backoff; commands issued while disconnected queue
+/// and drain on reconnect (BFD state is soft — a session lost to an engine
+/// restart re-arms on the next reconcile). Aborted when [`EchoReflectors`] drops.
+async fn bfd_driver(
+    endpoint: String,
+    mut cmd_rx: UnboundedReceiver<BfdCmd>,
+    main_tx: UnboundedSender<Message>,
+    connected: Arc<AtomicBool>,
+) {
+    loop {
+        let cradle = CradleFib::new(&endpoint);
+        match cradle.watch_bfd().await {
+            Ok(mut stream) => {
+                connected.store(true, Ordering::Relaxed);
+                bfd_info!("bfd: cradle BFD stream connected ({endpoint})");
+                loop {
+                    tokio::select! {
+                        cmd = cmd_rx.recv() => match cmd {
+                            Some(c) => apply_cmd(&cradle, c).await,
+                            None => return, // EchoReflectors dropped
+                        },
+                        ev = stream.message() => match ev {
+                            Ok(Some(e)) => {
+                                let msg = if e.kind == 0 {
+                                    Message::EchoDown { discr: e.discr }
+                                } else {
+                                    Message::DetectDown { discr: e.discr }
+                                };
+                                let _ = main_tx.send(msg);
+                            }
+                            // Stream ended or errored — engine gone; reconnect.
+                            _ => break,
+                        },
                     }
-                    _ => (None, None),
-                };
-                Reflector {
-                    refcount: 1,
-                    child: Some(child),
-                    ifname,
-                    cmd_tx,
-                    _io: io,
                 }
+                connected.store(false, Ordering::Relaxed);
+                bfd_warn!(
+                    "bfd: cradle BFD stream lost; sessions revert to userspace detection until it returns"
+                );
+                // Engine unreachable: tell the FSM so armed sessions revert to
+                // userspace detection promptly (they also self-heal on the next
+                // reconcile once a control packet arrives).
+                let _ = main_tx.send(Message::HelperGone);
             }
             Err(e) => {
-                bfd_warn!(
-                    "bfd echo: failed to spawn {} on {ifname}: {e}",
-                    self.bin.display()
-                );
-                Reflector {
-                    refcount: 1,
-                    child: None,
-                    ifname,
-                    cmd_tx: None,
-                    _io: None,
-                }
+                bfd_debug!("bfd: cradle BFD not reachable ({endpoint}): {e}");
             }
         }
+        // Backoff before reconnect. Commands queue meanwhile (unbounded). The
+        // task is aborted when `EchoReflectors` drops, so no shutdown check
+        // is needed here.
+        tokio::time::sleep(Duration::from_secs(2)).await;
     }
 }
 
-/// Per-child IPC task: forwards `echo-down` / `detect-down <discr>` events
-/// from the helper's stdout into the event loop, and writes queued command
-/// lines to its stdin. Ends when the child's stdout closes (child gone) or the
-/// command sender is dropped (reflector released) — either way it reports
-/// [`Message::HelperGone`] so sessions counting on the in-kernel expiration
-/// watchdog revert to userspace detection (a no-op after a normal release,
-/// which disarms sessions first).
-async fn child_io(
-    ifname: String,
-    ifindex: u32,
-    mut stdin: ChildStdin,
-    stdout: ChildStdout,
-    mut cmd_rx: UnboundedReceiver<String>,
-    main_tx: UnboundedSender<Message>,
-) {
-    let mut lines = BufReader::new(stdout).lines();
-    loop {
-        tokio::select! {
-            line = lines.next_line() => match line {
-                Ok(Some(l)) => {
-                    if let Some(event) = parse_helper_event(&l) {
-                        let _ = main_tx.send(event);
-                    }
-                }
-                _ => break,
-            },
-            cmd = cmd_rx.recv() => match cmd {
-                Some(c) => {
-                    if stdin.write_all(c.as_bytes()).await.is_err()
-                        || stdin.write_all(b"\n").await.is_err()
-                        || stdin.flush().await.is_err()
-                    {
-                        break;
-                    }
-                }
-                None => break,
-            },
+async fn apply_cmd(cradle: &CradleFib, cmd: BfdCmd) {
+    match cmd {
+        BfdCmd::ArmEcho {
+            discr,
+            oif,
+            local,
+            peer,
+            tx_us,
+            mult,
+        } => {
+            cradle
+                .bfd_echo_arm(discr, &oif, local, peer, tx_us, mult)
+                .await
         }
+        BfdCmd::DisarmEcho { discr } => cradle.bfd_echo_disarm(discr).await,
+        BfdCmd::ArmDetect { discr, detect_us } => cradle.bfd_detect_arm(discr, detect_us).await,
+        BfdCmd::DisarmDetect { discr } => cradle.bfd_detect_disarm(discr).await,
     }
-    let _ = main_tx.send(Message::HelperGone { ifindex });
-    bfd_debug!("bfd echo: IPC task for {ifname} ended");
 }
 
-/// Parse one event line from the helper: `echo-down <discr>` (its Echo
-/// detection fired) or `detect-down <discr>` (the in-kernel control-packet
-/// expiration watchdog fired).
-fn parse_helper_event(line: &str) -> Option<Message> {
+/// Parse a BFD instance control line into a [`BfdCmd`]. `echo-add` resolves the
+/// egress interface name from `ifindex` (cradle needs it — it is multi-port).
+fn parse_command(ifindex: u32, line: &str) -> Option<BfdCmd> {
     let mut it = line.split_whitespace();
-    let verb = it.next()?;
-    let discr: u32 = it.next()?.parse().ok()?;
-    match verb {
-        "echo-down" => Some(Message::EchoDown { discr }),
-        "detect-down" => Some(Message::DetectDown { discr }),
+    match it.next()? {
+        "echo-add" => {
+            let discr = it.next()?.parse().ok()?;
+            let local = it.next()?.parse().ok()?;
+            let peer = it.next()?.parse().ok()?;
+            let tx_us = it.next()?.parse().ok()?;
+            let mult = it.next()?.parse().ok()?;
+            let oif = if_indextoname(ifindex)?;
+            Some(BfdCmd::ArmEcho {
+                discr,
+                oif,
+                local,
+                peer,
+                tx_us,
+                mult,
+            })
+        }
+        "echo-del" => Some(BfdCmd::DisarmEcho {
+            discr: it.next()?.parse().ok()?,
+        }),
+        "detect-add" => {
+            let discr = it.next()?.parse().ok()?;
+            let detect_us = it.next()?.parse().ok()?;
+            Some(BfdCmd::ArmDetect { discr, detect_us })
+        }
+        "detect-del" => Some(BfdCmd::DisarmDetect {
+            discr: it.next()?.parse().ok()?,
+        }),
         _ => None,
     }
 }
 
-/// Resolve the reflector binary path: `$ZEBRA_XDP_BFD_ECHO_BIN`, else the dev
-/// install (`make install` → `~/.zebra/bin`), else the packaged location.
-fn resolve_bin() -> PathBuf {
-    if let Some(p) = std::env::var_os(BIN_ENV) {
-        return PathBuf::from(p);
-    }
-    if let Some(home) = std::env::var_os("HOME") {
-        let dev = PathBuf::from(home).join(".zebra/bin/xdp-bfd-echo");
-        if dev.exists() {
-            return dev;
-        }
-    }
-    PathBuf::from("/usr/sbin/xdp-bfd-echo")
+/// The cradle endpoint the BFD driver dials: `$ZEBRA_CRADLE_BFD_ENDPOINT`, else
+/// the default per-netns abstract socket. (Reacting live to a runtime
+/// `system cradle grpc-endpoint` change is a follow-up; the default covers the
+/// managed-engine deployment.)
+fn resolve_endpoint() -> String {
+    std::env::var(ENDPOINT_ENV).unwrap_or_else(|_| DEFAULT_ENDPOINT.to_string())
 }
 
-/// `if_indextoname(3)` — the reflector loader attaches by interface name.
+/// `if_indextoname(3)` — cradle's Echo originator transmits by interface name.
 fn if_indextoname(ifindex: u32) -> Option<String> {
     let mut buf = [0u8; libc::IF_NAMESIZE];
     let p = unsafe { libc::if_indextoname(ifindex, buf.as_mut_ptr() as *mut libc::c_char) };
@@ -333,30 +299,30 @@ fn if_indextoname(ifindex: u32) -> Option<String> {
 mod tests {
     use super::*;
 
-    // An ifindex with no interface name: `spawn` resolves no name, so no child
-    // process is launched, but the refcount bookkeeping still runs. Lets us
-    // exercise acquire/release without depending on a real interface or binary.
+    // An ifindex with no interface name: exercises acquire/release bookkeeping
+    // without depending on a real interface or the cradle engine.
     const NO_SUCH_IFINDEX: u32 = 0xFFFF_FFF0;
 
     #[test]
     fn acquire_release_refcounts_per_ifindex() {
         let (tx, _rx) = mpsc::unbounded_channel();
         let mut r = EchoReflectors::new(tx);
-        assert!(!r.by_ifindex.contains_key(&NO_SUCH_IFINDEX));
+        assert_eq!(r.refcount(NO_SUCH_IFINDEX), 0);
 
         r.acquire(NO_SUCH_IFINDEX);
         r.acquire(NO_SUCH_IFINDEX);
-        assert_eq!(r.by_ifindex.get(&NO_SUCH_IFINDEX).unwrap().refcount, 2);
+        assert_eq!(r.refcount(NO_SUCH_IFINDEX), 2);
 
         r.release(NO_SUCH_IFINDEX);
-        assert_eq!(r.by_ifindex.get(&NO_SUCH_IFINDEX).unwrap().refcount, 1);
+        assert_eq!(r.refcount(NO_SUCH_IFINDEX), 1);
 
         r.release(NO_SUCH_IFINDEX);
-        assert!(
-            !r.by_ifindex.contains_key(&NO_SUCH_IFINDEX),
-            "last release removes the entry"
+        assert_eq!(
+            r.refcount(NO_SUCH_IFINDEX),
+            0,
+            "last release forgets the ifindex"
         );
-        // Failed-to-spawn (no ifname) reflector is never 'ready'.
+        // With no engine reachable (and no test override), never 'ready'.
         assert!(!r.is_ready(NO_SUCH_IFINDEX));
     }
 
@@ -365,31 +331,30 @@ mod tests {
         let (tx, _rx) = mpsc::unbounded_channel();
         let mut r = EchoReflectors::new(tx);
         r.release(12345); // must not panic / underflow
-        assert!(r.by_ifindex.is_empty());
+        assert_eq!(r.refcount(12345), 0);
     }
 
     #[test]
-    fn helper_event_lines_parse() {
+    fn command_lines_parse_to_bfd_cmds() {
+        // echo-del / detect-add / detect-del don't need a real ifindex.
         assert!(matches!(
-            parse_helper_event("echo-down 42"),
-            Some(Message::EchoDown { discr: 42 })
+            parse_command(0, "echo-del 42"),
+            Some(BfdCmd::DisarmEcho { discr: 42 })
         ));
         assert!(matches!(
-            parse_helper_event("detect-down 7"),
-            Some(Message::DetectDown { discr: 7 })
+            parse_command(0, "detect-add 7 600000"),
+            Some(BfdCmd::ArmDetect {
+                discr: 7,
+                detect_us: 600000
+            })
         ));
-        assert!(parse_helper_event("detect-down").is_none());
-        assert!(parse_helper_event("detect-down nope").is_none());
-        assert!(parse_helper_event("bogus 1").is_none());
-    }
-
-    #[test]
-    fn bin_env_override_is_honoured() {
-        // SAFETY: single-threaded test; set then read immediately.
-        unsafe { std::env::set_var(BIN_ENV, "/opt/custom/xdp-bfd-echo") };
-        let (tx, _rx) = mpsc::unbounded_channel();
-        let r = EchoReflectors::new(tx);
-        unsafe { std::env::remove_var(BIN_ENV) };
-        assert_eq!(r.bin, PathBuf::from("/opt/custom/xdp-bfd-echo"));
+        assert!(matches!(
+            parse_command(0, "detect-del 7"),
+            Some(BfdCmd::DisarmDetect { discr: 7 })
+        ));
+        // Malformed / unknown verbs are dropped.
+        assert!(parse_command(0, "detect-del").is_none());
+        assert!(parse_command(0, "detect-del nope").is_none());
+        assert!(parse_command(0, "bogus 1").is_none());
     }
 }
