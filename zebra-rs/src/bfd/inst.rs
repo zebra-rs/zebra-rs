@@ -175,10 +175,10 @@ pub enum Message {
     /// evaluated in XDP/`bpf_timer`). Drives the same transition as the
     /// userspace detection timer.
     DetectDown { discr: u32 },
-    /// The IPC channel to the helper on `ifindex` closed (child died or was
-    /// released). Sessions still counting on its kernel watchdog revert to
+    /// The cradle BFD engine became unreachable (its `WatchBfd` stream
+    /// dropped). Sessions still counting on the in-kernel watchdog revert to
     /// userspace detection.
-    HelperGone { ifindex: u32 },
+    HelperGone,
 }
 
 /// Lifecycle events emitted by the instance for clients (tests today,
@@ -594,7 +594,7 @@ impl Bfd {
                     Message::DetectExpired { key } => self.on_detect_expired(key),
                     Message::EchoDown { discr } => self.on_echo_down(discr),
                     Message::DetectDown { discr } => self.on_detect_down(discr),
-                    Message::HelperGone { ifindex } => self.on_helper_gone(ifindex),
+                    Message::HelperGone => self.on_helper_gone(),
                 },
                 // BFD's only config is the top-level `bfd { tracing }` flag;
                 // every other commit broadcast is drained here (we register as
@@ -876,24 +876,24 @@ impl Bfd {
         self.detect_offload_reconcile(key);
     }
 
-    /// The helper's IPC channel on `ifindex` closed — the child died or was
-    /// released. Any session still counting on its kernel watchdog reverts to
-    /// userspace detection: the reconcile sees the helper not-ready, clears
-    /// the armed marker, and restores the unstretched detection timer. The
-    /// normal release paths disarm sessions *before* dropping the last
-    /// reference, so this only acts after an unexpected death.
-    fn on_helper_gone(&mut self, ifindex: u32) {
+    /// The cradle BFD engine became unreachable (its `WatchBfd` stream dropped).
+    /// Every session still counting on the in-kernel watchdog reverts to
+    /// userspace detection: the reconcile sees the engine not-ready, clears the
+    /// armed marker, and restores the unstretched detection timer. The normal
+    /// release paths disarm sessions *before* going away, so this only acts on
+    /// an unexpected engine loss. Engine-global now (the datapath is the shared
+    /// cradle engine, not a per-interface child).
+    fn on_helper_gone(&mut self) {
         let armed: Vec<SessionKey> = self
             .sessions
             .iter()
-            .filter(|(k, s)| k.ifindex == ifindex && s.kernel_detect_us > 0)
+            .filter(|(_, s)| s.kernel_detect_us > 0)
             .map(|(k, _)| *k)
             .collect();
         for key in armed {
             bfd_warn!(
                 ?key,
-                ifindex,
-                "bfd: xdp helper gone; session reverts to userspace detection",
+                "bfd: cradle engine gone; session reverts to userspace detection",
             );
             self.detect_offload_reconcile(key);
         }
@@ -1767,7 +1767,7 @@ mod tests {
         assert_eq!(s.kernel_detect_us, 0, "watchdog disarmed on Down");
     }
 
-    /// Helper death (`HelperGone`) reverts armed sessions to userspace
+    /// Engine loss (`HelperGone`) reverts armed sessions to userspace
     /// detection without touching their state.
     #[tokio::test]
     async fn helper_gone_reverts_to_userspace_detection() {
@@ -1781,7 +1781,7 @@ mod tests {
         assert!(bfd.sessions.get_by_key(&key).unwrap().kernel_detect_us > 0);
 
         bfd.reflectors.clear_ready_for_test(ECHO_TEST_IFINDEX);
-        bfd.on_helper_gone(ECHO_TEST_IFINDEX);
+        bfd.on_helper_gone();
 
         let s = bfd.sessions.get_by_key(&key).unwrap();
         assert_eq!(s.kernel_detect_us, 0, "reverted to userspace detection");

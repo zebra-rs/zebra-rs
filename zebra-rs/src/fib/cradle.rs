@@ -1426,6 +1426,98 @@ impl CradleFib {
         Ok(resp.into_inner())
     }
 
+    /// Arm cradle's Echo originator + return detector for `discr` (absorbed
+    /// xdp-bfd-echo). cradle transmits self-addressed Echo out `oif` toward
+    /// `peer` at `tx_us` and times the returns in-kernel; `WatchBfd` streams
+    /// echo-down when they stop. BFD state is soft — a lost session re-arms on
+    /// the next reconcile — so this is not mirrored/replayed.
+    pub async fn bfd_echo_arm(
+        &self,
+        discr: u32,
+        oif: &str,
+        local: std::net::IpAddr,
+        peer: std::net::IpAddr,
+        tx_us: u32,
+        mult: u32,
+    ) {
+        let result = async {
+            self.client()
+                .await?
+                .arm_bfd_echo(pb::BfdEcho {
+                    discr,
+                    local: local.to_string(),
+                    peer: peer.to_string(),
+                    tx_us,
+                    detect_mult: mult,
+                    oif: oif.to_string(),
+                })
+                .await?;
+            anyhow::Ok(())
+        }
+        .await;
+        if let Err(e) = result {
+            tracing::warn!("fib: cradle bfd_echo_arm discr {discr} failed: {e}");
+        }
+    }
+
+    /// Stop originating/detecting Echo for `discr`.
+    pub async fn bfd_echo_disarm(&self, discr: u32) {
+        let result = async {
+            self.client()
+                .await?
+                .disarm_bfd_echo(pb::BfdKey { discr })
+                .await?;
+            anyhow::Ok(())
+        }
+        .await;
+        if let Err(e) = result {
+            tracing::warn!("fib: cradle bfd_echo_disarm discr {discr} failed: {e}");
+        }
+    }
+
+    /// Arm cradle's control-packet expiration watchdog for `discr` (RFC 5880
+    /// §6.8.4): observe udp/3784 at GTSM TTL 255 and re-arm a bpf_timer; stream
+    /// detect-down if control stops for `detect_us`.
+    pub async fn bfd_detect_arm(&self, discr: u32, detect_us: u32) {
+        let result = async {
+            self.client()
+                .await?
+                .arm_bfd_detect(pb::BfdDetect { discr, detect_us })
+                .await?;
+            anyhow::Ok(())
+        }
+        .await;
+        if let Err(e) = result {
+            tracing::warn!("fib: cradle bfd_detect_arm discr {discr} failed: {e}");
+        }
+    }
+
+    /// Disarm the control-packet watchdog for `discr`.
+    pub async fn bfd_detect_disarm(&self, discr: u32) {
+        let result = async {
+            self.client()
+                .await?
+                .disarm_bfd_detect(pb::BfdKey { discr })
+                .await?;
+            anyhow::Ok(())
+        }
+        .await;
+        if let Err(e) = result {
+            tracing::warn!("fib: cradle bfd_detect_disarm discr {discr} failed: {e}");
+        }
+    }
+
+    /// Subscribe to cradle's BFD down events (echo-down / detect-down). The
+    /// stream template mirrors [`Self::watch_fdb`].
+    pub async fn watch_bfd(&self) -> anyhow::Result<tonic::Streaming<pb::BfdEvent>> {
+        let resp = self
+            .client()
+            .await?
+            .watch_bfd(pb::WatchBfdRequest {})
+            .await?;
+        Ok(resp.into_inner())
+    }
+
     /// Add a BUM replication slot (EVPN Type-3 tee): the remote PE behind
     /// `sid` (its `End.DT2M`) joins VNI `vni`'s flood set. cradle owns the
     /// slot plumbing (veth pair + flood membership + per-copy encap);

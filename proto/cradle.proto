@@ -245,6 +245,45 @@ message FdbEvent {
   uint32 event = 3;
 }
 
+// --- BFD Echo / detection offload (absorbed from the xdp-bfd-echo helper) ---
+// Arm the Echo *originator* + return detector for a single-hop session: cradle
+// transmits a self-addressed Echo (udp/3785) toward `peer` every `tx_us`
+// (jittered) and times the returns in-kernel (bpf_timer); if returns stop for
+// tx_us*detect_mult it streams an echo-down WatchBfd event. `discr` is our local
+// BFD discriminator (the map key); `local`/`peer` are the session address pair
+// (same family). Re-arming with changed timing updates it.
+message BfdEcho {
+  uint32 discr       = 1;
+  string local       = 2;
+  string peer        = 3;
+  uint32 tx_us       = 4;
+  uint32 detect_mult = 5;
+  // Egress interface for the transmitted Echo. cradle is multi-port (unlike the
+  // per-interface standalone helper), so the originator needs to be told which
+  // NIC the single-hop peer is on.
+  string oif         = 6;
+}
+
+// Arm the control-packet expiration watchdog (RFC 5880 §6.8.4) for an Up
+// session: cradle's XDP observes inbound BFD control (udp/3784, GTSM TTL 255)
+// keyed by Your Discriminator and re-arms a bpf_timer; if control stops for
+// `detect_us` it streams a detect-down event. Originates nothing.
+message BfdDetect {
+  uint32 discr     = 1;
+  uint32 detect_us = 2;
+}
+
+message BfdKey { uint32 discr = 1; }
+
+message WatchBfdRequest {}
+
+message BfdEvent {
+  uint32 discr = 1;
+  // 0 = echo-down (our originated Echo stopped returning); 1 = detect-down (the
+  // peer's control packets stopped). The daemon drives the session Down.
+  uint32 kind  = 2;
+}
+
 message Neighbor4 {
   string oif = 1;       // interface name (used when oif_index == 0)
   string ip = 2;
@@ -456,6 +495,13 @@ service Cradle {
   rpc AddFdbRemote(FdbRemote) returns (Empty);
   rpc DelFdbRemote(FdbRemoteDel) returns (Empty);
   rpc WatchFdb(WatchFdbRequest) returns (stream FdbEvent);
+  // BFD Echo / detection offload (absorbed xdp-bfd-echo). Arm/disarm are keyed
+  // by our local discriminator; WatchBfd streams echo-down / detect-down.
+  rpc ArmBfdEcho(BfdEcho) returns (Empty);
+  rpc DisarmBfdEcho(BfdKey) returns (Empty);
+  rpc ArmBfdDetect(BfdDetect) returns (Empty);
+  rpc DisarmBfdDetect(BfdKey) returns (Empty);
+  rpc WatchBfd(WatchBfdRequest) returns (stream BfdEvent);
   rpc AddXconnect(Xconnect) returns (Empty);
   rpc DelXconnect(XconnectDel) returns (Empty);
   rpc AddReplSlot(ReplSlot) returns (Empty);
