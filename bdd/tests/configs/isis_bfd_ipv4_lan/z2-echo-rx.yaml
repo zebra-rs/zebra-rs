@@ -1,3 +1,6 @@
+system:
+  ebpf:
+    enabled: true
 interface:
 - if-name: lo
   ipv4:
@@ -5,6 +8,8 @@ interface:
 - if-name: vz2ns
   ipv4:
     address: 10.0.1.2/24
+  ebpf:
+    enabled: true
 router:
   isis:
     net: 49.0001.0000.0000.0002.00

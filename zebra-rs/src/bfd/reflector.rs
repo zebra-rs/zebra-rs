@@ -73,8 +73,13 @@ pub struct EchoReflectors {
     /// the honest-advertise / arm gate. Global (engine reachability), not
     /// per-interface.
     connected: Arc<AtomicBool>,
+    /// Deferred driver-task inputs, taken by [`Self::ensure_driver`] at BFD
+    /// event-loop start. The instance is constructed on the *sync* config-commit
+    /// path (no tokio runtime), so spawning the driver in `new` would silently
+    /// no-op; the event loop runs on the runtime, so we spawn it there.
+    pending: Option<(UnboundedReceiver<BfdCmd>, UnboundedSender<Message>)>,
     /// The driver task (arm/disarm + WatchBfd consumer). Aborts when dropped.
-    /// `None` when constructed outside a tokio runtime (sync unit tests).
+    /// `None` until [`Self::ensure_driver`] runs (or outside a runtime).
     _task: Option<Task<()>>,
     /// Test-only readiness override: unit tests have no cradle engine, so the
     /// readiness-gated paths would be untestable without it.
@@ -86,26 +91,40 @@ impl EchoReflectors {
     pub fn new(main_tx: UnboundedSender<Message>) -> Self {
         let (cmd_tx, cmd_rx) = mpsc::unbounded_channel();
         let connected = Arc::new(AtomicBool::new(false));
-        // Spawn the driver only when a runtime is present. Sync unit tests have
-        // none — and no engine to reach — so they exercise the bookkeeping with
-        // `connected == false` (plus the test-only readiness override).
-        let _task = if tokio::runtime::Handle::try_current().is_ok() {
-            Some(Task::spawn(bfd_driver(
-                resolve_endpoint(),
-                cmd_rx,
-                main_tx,
-                connected.clone(),
-            )))
-        } else {
-            None
-        };
+        // Defer the driver spawn to [`Self::ensure_driver`]: `new` runs on the
+        // *sync* config-commit path (no tokio runtime), where `Task::spawn`
+        // would panic / no-op and the driver would never connect. The BFD event
+        // loop calls `ensure_driver` on the runtime. Sync unit tests never call
+        // it, so they exercise the bookkeeping with `connected == false` (plus
+        // the test-only readiness override).
         Self {
             by_ifindex: HashMap::new(),
             cmd_tx,
             connected,
-            _task,
+            pending: Some((cmd_rx, main_tx)),
+            _task: None,
             #[cfg(test)]
             ready_override: std::collections::HashSet::new(),
+        }
+    }
+
+    /// Spawn the cradle gRPC driver task if it has not started yet. Idempotent;
+    /// must be called from within a tokio runtime (the BFD event loop). A no-op
+    /// outside a runtime, so the deferred inputs survive for a later call.
+    pub fn ensure_driver(&mut self) {
+        if self._task.is_some() {
+            return;
+        }
+        if tokio::runtime::Handle::try_current().is_err() {
+            return;
+        }
+        if let Some((cmd_rx, main_tx)) = self.pending.take() {
+            self._task = Some(Task::spawn(bfd_driver(
+                resolve_endpoint(),
+                cmd_rx,
+                main_tx,
+                self.connected.clone(),
+            )));
         }
     }
 
@@ -180,6 +199,11 @@ async fn bfd_driver(
             Ok(mut stream) => {
                 connected.store(true, Ordering::Relaxed);
                 bfd_info!("bfd: cradle BFD stream connected ({endpoint})");
+                // The engine connects asynchronously after zebra starts, so
+                // sessions created before now captured `echo_ready = false` and
+                // left the watchdog unarmed. Nudge the FSM to re-evaluate them
+                // (refresh the honest echo-rx advertisement + arm detection).
+                let _ = main_tx.send(Message::HelperReady);
                 loop {
                     tokio::select! {
                         cmd = cmd_rx.recv() => match cmd {
