@@ -17,6 +17,17 @@
 //! Echo to `system ebpf enabled` — the datapath that reflects/originates Echo
 //! is the cradle engine.
 //!
+//! `cradle_xdp` only runs on interfaces cradle has attached (its port set), so
+//! a single-hop Echo/detect-offload session must make its egress interface a
+//! cradle port. Rather than force an explicit `interface … ebpf enabled` line,
+//! the per-ifindex refcount here doubles as an **auto-attach signal**: the 0→1
+//! edge sends [`crate::cradle::PortRequest::Acquire`] and the last release
+//! sends `Release` down the channel wired by `config::bfd::spawn_bfd`, and the
+//! cradle port supervisor folds those ifindexes into its attach set (a union
+//! with the config leaves). The datapath itself is still keyed by
+//! discriminator, not interface — this signal only governs *where cradle_xdp
+//! is attached*.
+//!
 //! Reachability is soft: on a lost stream (engine restart) sessions revert to
 //! userspace detection (the stretched backstop timer), and re-arm on the next
 //! reconcile once the engine is back.
@@ -30,6 +41,7 @@ use std::time::Duration;
 use tokio::sync::mpsc::{self, UnboundedReceiver, UnboundedSender};
 
 use crate::context::Task;
+use crate::cradle::PortRequest;
 use crate::fib::cradle::CradleFib;
 
 use super::inst::Message;
@@ -78,6 +90,13 @@ pub struct EchoReflectors {
     /// path (no tokio runtime), so spawning the driver in `new` would silently
     /// no-op; the event loop runs on the runtime, so we spawn it there.
     pending: Option<(UnboundedReceiver<BfdCmd>, UnboundedSender<Message>)>,
+    /// BFD → cradle auto-attach channel (from `ConfigManager`, wired at
+    /// spawn). On the first Echo/detect-offload session for an ifindex we send
+    /// [`PortRequest::Acquire`]; on the last we send `Release` — so the cradle
+    /// port supervisor attaches / detaches `cradle_xdp` on that interface
+    /// without an explicit `interface … ebpf enabled` line. `None` when no
+    /// cradle stream was wired (e.g. unit tests) — then it is pure bookkeeping.
+    cradle_port_tx: Option<UnboundedSender<PortRequest>>,
     /// The driver task (arm/disarm + WatchBfd consumer). Aborts when dropped.
     /// `None` until [`Self::ensure_driver`] runs (or outside a runtime).
     _task: Option<Task<()>>,
@@ -103,9 +122,16 @@ impl EchoReflectors {
             connected,
             pending: Some((cmd_rx, main_tx)),
             _task: None,
+            cradle_port_tx: None,
             #[cfg(test)]
             ready_override: std::collections::HashSet::new(),
         }
+    }
+
+    /// Wire the BFD → cradle auto-attach channel. Called once at spawn (see
+    /// `config::bfd::spawn_bfd`); tests leave it unset.
+    pub fn set_cradle_port_tx(&mut self, tx: UnboundedSender<PortRequest>) {
+        self.cradle_port_tx = Some(tx);
     }
 
     /// Spawn the cradle gRPC driver task if it has not started yet. Idempotent;
@@ -137,18 +163,35 @@ impl EchoReflectors {
         }
     }
 
-    /// Note one more single-hop Echo/detect session on `ifindex`.
+    /// Note one more single-hop Echo/detect session on `ifindex`. On the 0→1
+    /// edge, ask the cradle port supervisor to attach `cradle_xdp` there.
     pub fn acquire(&mut self, ifindex: u32) {
-        *self.by_ifindex.entry(ifindex).or_insert(0) += 1;
+        let count = self.by_ifindex.entry(ifindex).or_insert(0);
+        *count += 1;
+        if *count == 1 {
+            self.send_port_request(PortRequest::Acquire(ifindex));
+        }
     }
 
     /// Drop one reference; forget the ifindex when its last session goes away.
+    /// On the →0 edge, ask the cradle port supervisor to detach (unless the
+    /// operator also enabled the port via config — cradle keeps it while
+    /// either side wants it).
     pub fn release(&mut self, ifindex: u32) {
         if let Some(r) = self.by_ifindex.get_mut(&ifindex) {
             *r = r.saturating_sub(1);
             if *r == 0 {
                 self.by_ifindex.remove(&ifindex);
+                self.send_port_request(PortRequest::Release(ifindex));
             }
+        }
+    }
+
+    /// Forward a port request to the cradle supervisor when the channel is
+    /// wired (a no-op otherwise, e.g. in unit tests).
+    fn send_port_request(&self, req: PortRequest) {
+        if let Some(tx) = &self.cradle_port_tx {
+            let _ = tx.send(req);
         }
     }
 
@@ -179,6 +222,21 @@ impl EchoReflectors {
     #[cfg(test)]
     pub fn clear_ready_for_test(&mut self, ifindex: u32) {
         self.ready_override.remove(&ifindex);
+    }
+}
+
+impl Drop for EchoReflectors {
+    /// On teardown (BFD despawn / process exit) release every held ifindex, so
+    /// the cradle port supervisor detaches any port it auto-attached for BFD
+    /// rather than leaving `cradle_xdp` on it. A no-op when the channel was
+    /// never wired, or when cradle is already gone (the send just fails).
+    fn drop(&mut self) {
+        if self.cradle_port_tx.is_none() {
+            return;
+        }
+        for ifindex in self.by_ifindex.keys() {
+            self.send_port_request(PortRequest::Release(*ifindex));
+        }
     }
 }
 
@@ -356,6 +414,55 @@ mod tests {
         let mut r = EchoReflectors::new(tx);
         r.release(12345); // must not panic / underflow
         assert_eq!(r.refcount(12345), 0);
+    }
+
+    #[test]
+    fn acquire_release_emit_cradle_port_edges() {
+        let (tx, _rx) = mpsc::unbounded_channel();
+        let (port_tx, mut port_rx) = mpsc::unbounded_channel();
+        let mut r = EchoReflectors::new(tx);
+        r.set_cradle_port_tx(port_tx);
+
+        // First session on an ifindex asks cradle to attach it.
+        r.acquire(10);
+        assert!(matches!(port_rx.try_recv(), Ok(PortRequest::Acquire(10))));
+
+        // A second session on the same ifindex is a no-op edge.
+        r.acquire(10);
+        assert!(port_rx.try_recv().is_err());
+
+        // Dropping one of two references keeps the port attached (no edge).
+        r.release(10);
+        assert!(port_rx.try_recv().is_err());
+
+        // The last release asks cradle to detach.
+        r.release(10);
+        assert!(matches!(port_rx.try_recv(), Ok(PortRequest::Release(10))));
+    }
+
+    #[test]
+    fn drop_releases_held_ifindexes() {
+        let (tx, _rx) = mpsc::unbounded_channel();
+        let (port_tx, mut port_rx) = mpsc::unbounded_channel();
+        let mut r = EchoReflectors::new(tx);
+        r.set_cradle_port_tx(port_tx);
+        r.acquire(7);
+        assert!(matches!(port_rx.try_recv(), Ok(PortRequest::Acquire(7))));
+        // Teardown must detach anything still held (BFD despawn / exit).
+        drop(r);
+        assert!(matches!(port_rx.try_recv(), Ok(PortRequest::Release(7))));
+    }
+
+    #[test]
+    fn no_cradle_channel_is_pure_bookkeeping() {
+        // Without a wired channel, acquire/release must not panic and just
+        // maintain the refcount (the unit-test / no-cradle path).
+        let (tx, _rx) = mpsc::unbounded_channel();
+        let mut r = EchoReflectors::new(tx);
+        r.acquire(3);
+        assert_eq!(r.refcount(3), 1);
+        r.release(3);
+        assert_eq!(r.refcount(3), 0);
     }
 
     #[test]

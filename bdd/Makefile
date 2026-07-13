@@ -303,6 +303,10 @@ isis_bfd_ipv4_p2p_echo:
 	mkdir -p allure-results
 	cargo test --test cucumber -- --concurrency=1 --tags "@isis_bfd_ipv4_p2p and @bfd_echo"
 
+isis_bfd_ipv4_p2p_autoattach:
+	mkdir -p allure-results
+	cargo test --test cucumber -- --concurrency=1 --tags "@isis_bfd_ipv4_p2p and @bfd_autoattach"
+
 isis_bfd_ipv4_lan:
 	mkdir -p allure-results
 	cargo test --test cucumber -- --concurrency=1 --tags "@isis_bfd_ipv4_lan and not @bfd_echo"

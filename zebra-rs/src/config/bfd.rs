@@ -23,7 +23,13 @@ pub fn spawn_bfd(config: &ConfigManager) {
     // a `rib` field for uniformity with the other protocols.
     let _ = config; // borrow ConfigManager only when needed.
     match inst::Bfd::new(ProtoContext::default_table_no_rib()) {
-        Ok(bfd) => {
+        Ok(mut bfd) => {
+            // Let the BFD Echo/detect-offload driver auto-attach cradle_xdp on
+            // the interfaces its single-hop sessions run over, so those ports
+            // need no explicit `interface … ebpf enabled`. Created eagerly in
+            // `ConfigManager::new`, so it is valid whether or not cradle has
+            // spawned yet.
+            bfd.set_cradle_port_tx(config.cradle_port_tx.clone());
             config.subscribe("bfd", bfd.cm.tx.clone());
             config.subscribe_show("bfd", bfd.show.tx.clone());
             // Publish the inbound client-request handle on the

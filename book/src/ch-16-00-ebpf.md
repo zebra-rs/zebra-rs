@@ -50,6 +50,29 @@ link re-attaches under its new ifindex; moving the interface between VRFs
 re-binds the port in place; disabling detaches and flushes the MACs learned
 on the port.
 
+### Automatic port attach for BFD
+
+BFD's in-kernel datapaths — [Echo](ch-10-00-bfd.md) reflect/originate and the
+control-packet detection watchdog — run inside the same `cradle_xdp` program,
+so they only fire on interfaces the engine is attached to. To spare operators
+a redundant per-interface line, **a single-hop session that enables
+`echo-mode` or `detect-offload` auto-attaches its egress interface as a
+data-plane port** — no explicit `interface <name> ebpf enabled` is needed.
+
+The desired port set is the **union** of the config leaves and BFD's requests:
+a port stays attached while either side wants it, and BFD's auto-attach is
+released only when its last Echo/detect-offload session on that interface goes
+away *and* no `interface … ebpf enabled` leaf keeps it. Plain (control-packet)
+BFD needs no eBPF and does not trigger this. The engine itself must still be
+enabled with `system ebpf enabled true`. `show ebpf` labels each port's source
+(`config`, `bfd`, or `config,bfd`):
+
+```
+  Ports:           2 wanted (1 config, 1 bfd), 2 attached
+    enp0s6           ifindex 3      vrf 0     config      attached
+    enp0s7           ifindex 4      vrf 0     bfd         attached
+```
+
 ## Lifecycle
 
 The engine runs as a supervised child of zebra-rs:
