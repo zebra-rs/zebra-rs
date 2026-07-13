@@ -1788,6 +1788,42 @@ mod yang_load_tests {
         }
     }
 
+    /// Regression guard for the RFC 9524 SR-P2MP `replication-segment` grammar
+    /// (config.yang `segment-routing replication-segment`). Pins the segment
+    /// leaves and the nested `branch` list (key + `nexthop-id` leaf) so a
+    /// broken list key or a stale callback path fails in the unit suite, not
+    /// only in the `@cradle_srv6_replicate*` BDDs. Mirrors the tee wired in
+    /// `rib/segment_routing/repl_seg.rs`.
+    #[test]
+    fn srv6_replication_segment_paths_parse() {
+        use crate::config::ExecCode;
+        use crate::config::parse::{State, parse};
+        use libyang::to_entry;
+
+        let mut yang = YangStore::new();
+        yang.add_path(concat!(env!("CARGO_MANIFEST_DIR"), "/yang"));
+        yang.read_with_resolve("configure")
+            .unwrap_or_else(|e| panic!("configure failed to load: {e:#}"));
+        yang.identity_resolve();
+        let module = yang.find_module("configure").unwrap();
+        let entry = to_entry(&yang, module);
+
+        for cmd in [
+            "set segment-routing replication-segment TREE1",
+            "set segment-routing replication-segment TREE1 sid fd00:b::5",
+            "set segment-routing replication-segment TREE1 hop-limit-threshold 0",
+            "set segment-routing replication-segment TREE1 branch fd00:1::100",
+            "set segment-routing replication-segment TREE1 branch fd00:2::100 nexthop-id 7",
+        ] {
+            let (code, _comps, _state) = parse(cmd, entry.clone(), None, State::new());
+            assert_eq!(
+                code,
+                ExecCode::Success,
+                "should parse as a settable path: {cmd}"
+            );
+        }
+    }
+
     /// Regression guard for the per-VRF redistribute grammar
     /// (zebra-bgp-vrf.yang `afi-safi {ipv4,ipv6} redistribute
     /// {connected,static}`). Pins the new bare-presence paths so a

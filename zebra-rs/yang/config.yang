@@ -4062,6 +4062,57 @@ module config {
              at the ultimate segment, usd decapsulates there.";
         }
       }
+
+      list replication-segment {
+        ext:help "RFC 9524 SR-P2MP replication segment (End.Replicate)";
+        key "name";
+        description
+          "An SRv6 RFC 9524 replication-tree node. 'sid' is the local
+           End.Replicate SID; each 'branch' names a downstream
+           Replication-SID a received copy is cloned toward. Programmed
+           into the cradle eBPF data plane (REPL_SEG) — there is no kernel
+           seg6local action for replication.";
+        leaf name {
+          ext:help "Replication-segment name";
+          type string;
+        }
+        leaf sid {
+          ext:help "Local End.Replicate SID";
+          type inet:ipv6-address;
+          description
+            "The replication segment's SID — the arriving outer IPv6
+             destination of a copy. Registered as a local End.Replicate
+             SID so the data plane fans matching frames out to the
+             branches.";
+        }
+        leaf hop-limit-threshold {
+          ext:help "RFC 9524 Hop-Limit threshold (0 = disabled)";
+          type uint8;
+          description
+            "Discard a copy whose arriving IPv6 Hop Limit is below this
+             value (RFC 9524 5.2). 0 disables the check.";
+        }
+        list branch {
+          ext:help "Downstream replication branch";
+          key "sid";
+          description
+            "One downstream branch: a received copy is steered to 'sid'
+             (a remote leaf's End.DT2M SID, or the next tier's
+             End.Replicate SID).";
+          leaf sid {
+            ext:help "Downstream Replication-SID";
+            type inet:ipv6-address;
+          }
+          leaf nexthop-id {
+            ext:help "Explicit underlay nexthop id (0 = FIB6 on the SID)";
+            type uint32;
+            description
+              "Underlay adjacency for this branch. 0 (default) resolves
+               it by a FIB6 lookup on the branch SID (the IGP locator
+               route), like the EVPN End.DT2M encap.";
+          }
+        }
+      }
     }
 
     list community-set {

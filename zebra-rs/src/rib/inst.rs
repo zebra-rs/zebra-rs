@@ -5,8 +5,9 @@ use super::link::{LinkConfig, link_config_exec};
 use super::{
     Block, BlockBuilder, BlockConfig, BridgeBuilder, BridgeConfig, DEFAULT_BLOCK_NAME, GroupTrait,
     Link, Locator, LocatorBuilder, LocatorConfig, MacAddr, MplsConfig, Nexthop, NexthopMap,
-    NexthopUni, RibSrRx, RibType, Sid, SidBehavior, StaticConfig, V4, V6, Vrf, VrfBuilder,
-    VrfIdAllocator, VrfRibTables, VrfStaticConfig, Vxlan, VxlanBuilder, VxlanConfig,
+    NexthopUni, ReplSegBuilder, ReplSegConfig, RibSrRx, RibType, Sid, SidBehavior, SidContext,
+    SidOwner, StaticConfig, V4, V6, Vrf, VrfBuilder, VrfIdAllocator, VrfRibTables, VrfStaticConfig,
+    Vxlan, VxlanBuilder, VxlanConfig,
 };
 
 use crate::config::{Args, path_from_command};
@@ -130,6 +131,16 @@ pub enum Message {
         config: LocatorConfig,
     },
     LocatorDel {
+        name: String,
+    },
+    /// RFC 9524 Replication segment (operator `replication-segment` config):
+    /// register the local `End.Replicate` SID and tee its branch set to
+    /// cradle's `REPL_SEG`. `ReplSegAdd` replaces any prior segment of `name`.
+    ReplSegAdd {
+        name: String,
+        config: ReplSegConfig,
+    },
+    ReplSegDel {
         name: String,
     },
     /// One-time per-protocol registration of the SR return channel. The
@@ -839,11 +850,16 @@ pub struct Rib {
     pub vrf_config: VrfBuilder,
     pub block_config: BlockBuilder,
     pub locator_config: LocatorBuilder,
+    pub repl_seg_config: ReplSegBuilder,
     /// Applied snapshots, populated by Block/Locator Add/Del messages.
     /// Other modules read these by name to resolve their `mpls/block` or
     /// `srv6/locator` reference.
     pub blocks: BTreeMap<String, Block>,
     pub locators: BTreeMap<String, Locator>,
+    /// Applied RFC 9524 Replication segments by name → the local
+    /// `End.Replicate` SID installed for it, so a config change/delete can
+    /// uninstall the old SID and withdraw the cradle `REPL_SEG` entry.
+    pub repl_segs: BTreeMap<String, Ipv6Addr>,
     /// Allocated SRv6 SIDs across all owners. Keyed by SID address so
     /// inserts collide naturally on duplicate allocations; the show
     /// callback iterates this in address order.
@@ -999,6 +1015,7 @@ impl Rib {
             vrf_config: VrfBuilder::new(),
             block_config: BlockBuilder::new(),
             locator_config: LocatorBuilder::new(),
+            repl_seg_config: ReplSegBuilder::new(),
             blocks: {
                 // Seed the canonical default block at startup so protocols can
                 // subscribe to "default" without anyone having configured one.
@@ -1007,6 +1024,7 @@ impl Rib {
                 m
             },
             locators: BTreeMap::new(),
+            repl_segs: BTreeMap::new(),
             sids: BTreeMap::new(),
             egress_protect: BTreeMap::new(),
             redirected_sids: BTreeMap::new(),
@@ -1475,6 +1493,64 @@ impl Rib {
             if let Some(g) = self.nmap.get_mut(gid) {
                 g.set_installed(false);
             }
+        }
+    }
+
+    /// Apply an operator RFC 9524 Replication segment (`replication-segment`
+    /// config): register its local `End.Replicate` SID (which tees into
+    /// cradle's `SRV6_LOCALSID`, so the XDP stage hands matching frames to the
+    /// TC replication path) and tee its downstream branch set to cradle's
+    /// `REPL_SEG`. Replaces any prior segment of `name`; a missing `sid`
+    /// tears the segment down. Branches are all remote today — operator
+    /// Bud/local delivery is a follow-up.
+    async fn repl_seg_apply(&mut self, name: String, config: ReplSegConfig) {
+        let Some(sid_addr) = config.sid else {
+            self.repl_seg_remove(name).await;
+            return;
+        };
+        // A changed SID for the same segment name: retire the old one first.
+        if let Some(&old) = self.repl_segs.get(&name)
+            && old != sid_addr
+        {
+            self.fib_handle.cradle_repl_seg_del(old).await;
+            self.sid_uninstall(old).await;
+        }
+        let sid = Sid {
+            addr: sid_addr,
+            behavior: SidBehavior::EndReplicate,
+            context: SidContext::None,
+            owner: SidOwner::new("srv6", 0),
+            locator: String::new(),
+            allocation_type: crate::rib::SidAllocationType::Dynamic,
+            ifindex: 0,
+            nh6: None,
+            structure: None,
+            table_id: 0,
+            segs: Vec::new(),
+            flavors: 0,
+        };
+        self.sid_install(sid).await;
+        let branches: Vec<(Ipv6Addr, u32, bool)> = config
+            .branches
+            .iter()
+            .map(|(bsid, nh)| (*bsid, *nh, false))
+            .collect();
+        let n_branches = branches.len();
+        self.fib_handle
+            .cradle_repl_seg_set(sid_addr, config.hop_limit_threshold, branches)
+            .await;
+        tracing::info!(
+            "repl seg {name}: End.Replicate SID {sid_addr}, {n_branches} branch(es) teed to cradle"
+        );
+        self.repl_segs.insert(name, sid_addr);
+    }
+
+    /// Remove an operator Replication segment: withdraw its cradle `REPL_SEG`
+    /// entry and uninstall its `End.Replicate` SID.
+    async fn repl_seg_remove(&mut self, name: String) {
+        if let Some(sid_addr) = self.repl_segs.remove(&name) {
+            self.fib_handle.cradle_repl_seg_del(sid_addr).await;
+            self.sid_uninstall(sid_addr).await;
         }
     }
 
@@ -3073,6 +3149,12 @@ impl Rib {
                 self.locators.remove(&name);
                 self.notify_locator_watchers(&name);
             }
+            Message::ReplSegAdd { name, config } => {
+                self.repl_seg_apply(name, config).await;
+            }
+            Message::ReplSegDel { name } => {
+                self.repl_seg_remove(name).await;
+            }
             Message::SrSubscribe { proto, tx } => {
                 self.sr_clients.insert(proto, tx);
             }
@@ -4055,6 +4137,11 @@ impl Rib {
                     let _ = self.block_config.exec(path, args, msg.op);
                 } else if path.as_str().starts_with("/segment-routing/locator") {
                     let _ = self.locator_config.exec(path, args, msg.op);
+                } else if path
+                    .as_str()
+                    .starts_with("/segment-routing/replication-segment")
+                {
+                    let _ = self.repl_seg_config.exec(path, args, msg.op);
                 } else if path.as_str().starts_with("/system/tracing") {
                     crate::rib::tracing::config_dispatch(&path, args, msg.op);
                 }
@@ -4071,6 +4158,7 @@ impl Rib {
                 self.mpls_config.commit(self.tx.clone());
                 self.block_config.commit(self.tx.clone());
                 self.locator_config.commit(self.tx.clone());
+                self.repl_seg_config.commit(self.tx.clone());
             }
             ConfigOp::Completion => {
                 // `comps_dynamic` passes the dynamic handler name

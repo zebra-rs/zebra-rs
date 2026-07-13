@@ -1,0 +1,19 @@
+# crs1 — a single PE running zebra-rs with the managed cradle engine. An
+# operator RFC 9524 replication-segment declares a local End.Replicate SID
+# and two downstream branches; zebra registers the SID (teed into cradle's
+# SRV6_LOCALSID) and tees the branch set to cradle's REPL_SEG.
+system:
+  ebpf:
+    enabled: true
+interface:
+- if-name: eth0
+  ebpf:
+    enabled: true
+segment-routing:
+  replication-segment:
+  - name: TREE1
+    sid: fd00:b::5
+    hop-limit-threshold: 0
+    branch:
+    - sid: fd00:1::100
+    - sid: fd00:2::100

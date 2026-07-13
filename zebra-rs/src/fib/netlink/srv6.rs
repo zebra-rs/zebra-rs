@@ -134,7 +134,10 @@ fn seg6local_action(behavior: SidBehavior) -> Seg6LocalAction {
         SidBehavior::EndDT2U
         | SidBehavior::EndDT2M
         | SidBehavior::EndDX2
-        | SidBehavior::EndDX2V => Seg6LocalAction::End,
+        | SidBehavior::EndDX2V
+        // End.Replicate is cradle-tee-only (RFC 9524 SR-P2MP; no kernel
+        // seg6local action) — map to End so a stray call is a visible no-op.
+        | SidBehavior::EndReplicate => Seg6LocalAction::End,
         SidBehavior::EndX | SidBehavior::UA | SidBehavior::UALib => Seg6LocalAction::EndX,
         // REPLACE-C-SID never reaches the kernel (route_sid_install
         // returns after the cradle tee — no kernel flavor op exists);

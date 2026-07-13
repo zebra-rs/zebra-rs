@@ -95,6 +95,10 @@ struct CradleMirror {
     /// `fdb_vxlan` depending on the received route's encap.
     fdb_vxlan: HashMap<(u32, [u8; 6]), Ipv4Addr>,
     repl_slots_vxlan: HashSet<(u32, Ipv4Addr)>,
+    /// RFC 9524 Replication segments (operator `replication-segment` config):
+    /// local End.Replicate SID → (hop-limit threshold, downstream branches
+    /// `(sid, nexthop_id, local)`). Replayed as `SetReplSeg` on engine restart.
+    repl_segs: HashMap<Ipv6Addr, (u8, Vec<(Ipv6Addr, u32, bool)>)>,
     /// L2VNI ↔ bridge-domain bindings (bd == vni today) for `SetVni` replay,
     /// and the fabric-wide local VTEP source for `SetVtepSource`.
     vnis: HashMap<u32, u32>,
@@ -124,18 +128,19 @@ fn srv6_behavior(b: crate::rib::SidBehavior) -> u32 {
         EndDT46 => 4,
         EndB6Encap => 5,
         UN => 6,
-        UA => 7,       // classic End.X at /128 (no shift)
-        UALib => 8,    // compressed carrier: shift + adjacency
-        EndDT2U => 9,  // EVPN L2 unicast decap+bridge
-        EndDT2M => 10, // EVPN L2 BUM decap+flood
-        EndM => 11,    // egress-protection mirror (decap + mirror-context lookup)
-        EndRep => 12,  // RFC 9800 REPLACE-C-SID (C-SID rewrite from containers)
-        EndXRep => 13, // REPLACE-C-SID + adjacency cross-connect
-        EndT => 14,    // End walk + table-scoped egress lookup (vrf_table_id)
-        EndDX4 => 15,  // decap + IPv4 cross-connect (per-CE VPN egress)
-        EndDX6 => 16,  // decap + IPv6 cross-connect
-        EndDX2 => 17,  // decap + raw L2 emit on the AC (EVPN VPWS egress)
-        EndDX2V => 18, // decap + VLAN-table AC demux (VLAN-scoped VPWS egress)
+        UA => 7,            // classic End.X at /128 (no shift)
+        UALib => 8,         // compressed carrier: shift + adjacency
+        EndDT2U => 9,       // EVPN L2 unicast decap+bridge
+        EndDT2M => 10,      // EVPN L2 BUM decap+flood
+        EndM => 11,         // egress-protection mirror (decap + mirror-context lookup)
+        EndRep => 12,       // RFC 9800 REPLACE-C-SID (C-SID rewrite from containers)
+        EndXRep => 13,      // REPLACE-C-SID + adjacency cross-connect
+        EndT => 14,         // End walk + table-scoped egress lookup (vrf_table_id)
+        EndDX4 => 15,       // decap + IPv4 cross-connect (per-CE VPN egress)
+        EndDX6 => 16,       // decap + IPv6 cross-connect
+        EndDX2 => 17,       // decap + raw L2 emit on the AC (EVPN VPWS egress)
+        EndDX2V => 18,      // decap + VLAN-table AC demux (VLAN-scoped VPWS egress)
+        EndReplicate => 19, // RFC 9524 SR-P2MP replication segment (REPL_SEG)
         // uT = a uN whose end-of-carrier lookup is table-scoped: cradle
         // models it as UN with a non-zero vrf_id (vrf_table_id below).
         UT => 6,
@@ -463,6 +468,12 @@ impl CradleFib {
         for (vni, sid) in &m.repl_slots {
             self.repl_slot_add(*vni, *sid).await;
         }
+        // RFC 9524 Replication segments (the local End.Replicate SID is
+        // replayed above with the other local SIDs, so SRV6_LOCALSID is
+        // populated before its REPL_SEG fan-out state).
+        for (sid, (hlt, branches)) in &m.repl_segs {
+            self.repl_seg_set(*sid, *hlt, branches.clone()).await;
+        }
         // VXLAN L2: the VTEP source and VNI bindings first (a VXLAN repl slot
         // resolves its VNI from the SetVni binding), then the overlay FDB and
         // flood slots.
@@ -496,8 +507,8 @@ impl CradleFib {
         }
         tracing::info!(
             "fib: cradle replay: {} v4 + {} v6 routes, {} ILM, {} SIDs (+{} static), \
-             {} FDB (+{} vxlan), {} repl slots (+{} vxlan), {} vnis, {} xconnects, \
-             {} GTP PDRs + {} encaps, {} mirror routes, {} neighbors re-applied",
+             {} FDB (+{} vxlan), {} repl slots (+{} vxlan), {} repl segs, {} vnis, \
+             {} xconnects, {} GTP PDRs + {} encaps, {} mirror routes, {} neighbors re-applied",
             m.routes4.len(),
             m.routes6.len(),
             m.ilm.len(),
@@ -507,6 +518,7 @@ impl CradleFib {
             m.fdb_vxlan.len(),
             m.repl_slots.len(),
             m.repl_slots_vxlan.len(),
+            m.repl_segs.len(),
             m.vnis.len(),
             m.xconnects.len(),
             m.gtp_pdrs.len(),
@@ -1538,6 +1550,63 @@ impl CradleFib {
         .await;
         if let Err(e) = result {
             tracing::warn!("fib: cradle repl_slot_add vni {vni} {sid} failed: {e}");
+        }
+    }
+
+    /// Install / replace an RFC 9524 Replication segment (`SetReplSeg`): the
+    /// local End.Replicate SID `sid` fans a received copy out to `branches`
+    /// (each `(downstream Replication-SID, nexthop_id, local)`). Replaces any
+    /// prior segment for the SID; recorded for replay on engine restart.
+    pub async fn repl_seg_set(
+        &self,
+        sid: std::net::Ipv6Addr,
+        hop_limit_threshold: u8,
+        branches: Vec<(std::net::Ipv6Addr, u32, bool)>,
+    ) {
+        self.mirror
+            .lock()
+            .await
+            .repl_segs
+            .insert(sid, (hop_limit_threshold, branches.clone()));
+        let result = async {
+            self.client()
+                .await?
+                .set_repl_seg(pb::ReplSeg {
+                    sid: sid.to_string(),
+                    hop_limit_threshold: hop_limit_threshold as u32,
+                    branches: branches
+                        .iter()
+                        .map(|(bsid, nh, local)| pb::ReplSegBranch {
+                            sid: bsid.to_string(),
+                            nexthop_id: *nh,
+                            local: *local,
+                        })
+                        .collect(),
+                })
+                .await?;
+            anyhow::Ok(())
+        }
+        .await;
+        if let Err(e) = result {
+            tracing::warn!("fib: cradle repl_seg_set {sid} failed: {e}");
+        }
+    }
+
+    /// Remove a Replication segment (`DelReplSeg`).
+    pub async fn repl_seg_del(&self, sid: std::net::Ipv6Addr) {
+        self.mirror.lock().await.repl_segs.remove(&sid);
+        let result = async {
+            self.client()
+                .await?
+                .del_repl_seg(pb::ReplSegDel {
+                    sid: sid.to_string(),
+                })
+                .await?;
+            anyhow::Ok(())
+        }
+        .await;
+        if let Err(e) = result {
+            tracing::warn!("fib: cradle repl_seg_del {sid} failed: {e}");
         }
     }
 
