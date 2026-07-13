@@ -24,6 +24,21 @@ pub const DEFAULT_IDLE_TTL: Duration = Duration::from_secs(600);
 #[cfg(target_os = "linux")]
 pub const DEFAULT_GC_INTERVAL: Duration = Duration::from_secs(60);
 
+/// Maximum number of parent hops [`SessionTable::resolve`] walks when the
+/// immediate parent has no session, searching for the owning login-shell
+/// session.
+///
+/// A first-level command is a bash alias for the multi-statement
+/// `_cli_exec` function. Piping it (`show ... | wc -l`) makes bash run that
+/// function in a subshell, and its internal `$(vtyhelper ...)` capture forks
+/// `vtyhelper` one level deeper still — so `vtyhelper`'s parent is a
+/// transient subshell rather than the login vty bash, and the naive
+/// `(uid, ppid)` key misses the enabled session. Walking a few hops recovers
+/// it; the small bound keeps the /proc walk cheap and terminates on any
+/// pathological chain.
+#[cfg(target_os = "linux")]
+const MAX_ANCESTOR_WALK: usize = 8;
+
 /// Composite session identifier: `(peer_uid, parent_pid)`.
 pub type SessionKey = (u32, u32);
 
@@ -232,6 +247,38 @@ impl SessionTable {
         if let Some(mut entry) = self.sessions.get_mut(&key) {
             entry.last_active = Instant::now();
             return Ok((key, false));
+        }
+
+        // Subshell / grandchild path: the immediate parent has no session.
+        // This is the shape a piped first-level command produces — bash runs
+        // the `_cli_exec` alias in a subshell and its `$(vtyhelper ...)`
+        // capture forks one level deeper, so `vtyhelper`'s parent is a
+        // transient subshell rather than the login vty bash. Walk up the
+        // parent chain for an existing session owned by the *same* uid and
+        // attach to it, so the caller keeps the login shell's role and
+        // configure-mode context instead of landing in a fresh View session.
+        //
+        // Safety: every candidate key embeds `peer_uid`, so a match can only
+        // ever be the caller's own shell — a lower-privilege process cannot
+        // borrow another uid's enabled session. A stale key left by PID reuse
+        // is the same narrow window the immediate-parent fast path already
+        // accepts, and the pidfd death-watcher plus GC keep it tiny.
+        let mut ancestor = ppid;
+        for _ in 0..MAX_ANCESTOR_WALK {
+            let next = match reader.read_ppid(ancestor) {
+                Ok(next) => next,
+                Err(_) => break,
+            };
+            // Reached init / reparented: no owning shell above us.
+            if next <= 1 {
+                break;
+            }
+            let akey = (peer_uid, next as u32);
+            if let Some(mut entry) = self.sessions.get_mut(&akey) {
+                entry.last_active = Instant::now();
+                return Ok((akey, false));
+            }
+            ancestor = next;
         }
 
         // Slow path: validate parent exists, and (for non-root peers) that
@@ -1072,6 +1119,109 @@ mod tests {
         let (k2, _) = table.resolve(&reader, 1000, 1235).unwrap();
         assert_ne!(k1, k2);
         assert_eq!(table.len(), 2);
+    }
+
+    #[test]
+    fn grandchild_attaches_to_enabled_ancestor_session() {
+        // Regression: piping a first-level command in configure mode
+        // (`show ... | wc -l`) makes bash run the `_cli_exec` alias in a
+        // subshell (pid 2000, child of the login shell 1000) whose
+        // `$(vtyhelper)` capture spawns vtyhelper (pid 1234) as a grandchild
+        // of the login shell. The naive `(uid, ppid)` key is (1000, 2000),
+        // which misses the login shell's enabled session and used to land in
+        // a fresh View session — dropping the configure context and printing
+        // nothing. The ancestor walk must recover the (1000, 1000) session.
+        let table = SessionTable::new();
+        let reader = StubReader::default();
+        // Login shell 1000 owns an enabled Admin session.
+        table.insert_for_test((1000, 1000), Instant::now());
+        table.promote_to_admin(
+            &(1000, 1000),
+            Duration::from_secs(900),
+            Duration::from_secs(14400),
+        );
+        // vtyhelper 1234 -> subshell 2000 -> login shell 1000.
+        reader.set_ppid(1234, 2000);
+        reader.set_ppid(2000, 1000);
+        reader.set_ruid(2000, 1000);
+
+        let (key, is_new) = table.resolve(&reader, 1000, 1234).unwrap();
+        assert_eq!(
+            key,
+            (1000, 1000),
+            "should attach to the login-shell session"
+        );
+        assert!(!is_new);
+        assert_eq!(table.len(), 1, "no extra session created for the subshell");
+        let s = table.get(&key).unwrap();
+        assert_eq!(s.role, Role::Admin, "keeps the login shell's Admin role");
+        assert!(s.enabled);
+    }
+
+    #[test]
+    fn grandchild_without_ancestor_session_creates_new() {
+        // Same subshell shape, but no login-shell session exists yet: the
+        // walk finds nothing and we fall back to creating a session on the
+        // immediate parent, exactly as before the walk was added.
+        let table = SessionTable::new();
+        let reader = StubReader::default();
+        reader.set_ppid(1234, 2000);
+        reader.set_ppid(2000, 1000); // login shell present but has no session
+        reader.set_ruid(2000, 1000);
+
+        let (key, is_new) = table.resolve(&reader, 1000, 1234).unwrap();
+        assert_eq!(key, (1000, 2000));
+        assert!(is_new);
+        let s = table.get(&key).unwrap();
+        assert_eq!(s.role, Role::View);
+        assert!(!s.enabled);
+    }
+
+    #[test]
+    fn ancestor_walk_does_not_cross_uid_boundary() {
+        // An enabled session owned by uid 999 must never be borrowed by a
+        // uid-1000 grandchild that happens to share the subtree — every
+        // candidate key embeds the peer uid, so the walk can only match the
+        // caller's own shell.
+        let table = SessionTable::new();
+        let reader = StubReader::default();
+        table.insert_for_test((999, 1000), Instant::now());
+        table.promote_to_admin(
+            &(999, 1000),
+            Duration::from_secs(900),
+            Duration::from_secs(14400),
+        );
+        // uid-1000 vtyhelper 1234 -> subshell 2000 -> pid 1000 (uid 999's).
+        reader.set_ppid(1234, 2000);
+        reader.set_ppid(2000, 1000);
+        reader.set_ruid(2000, 1000);
+
+        let (key, is_new) = table.resolve(&reader, 1000, 1234).unwrap();
+        assert_eq!(key, (1000, 2000), "must not attach to uid 999's session");
+        assert!(is_new);
+        assert_eq!(
+            table.get(&(999, 1000)).unwrap().role,
+            Role::Admin,
+            "uid 999's session must be left untouched"
+        );
+    }
+
+    #[test]
+    fn ancestor_walk_terminates_on_long_chain() {
+        // A parent chain far longer than MAX_ANCESTOR_WALK with no session
+        // anywhere must terminate and fall back to session creation, never
+        // loop.
+        let table = SessionTable::new();
+        let reader = StubReader::default();
+        for pid in 1234..1234 + 40 {
+            reader.set_ppid(pid, pid + 1);
+        }
+        reader.set_ruid(1235, 1000); // immediate parent, for the create path
+
+        let (key, is_new) = table.resolve(&reader, 1000, 1234).unwrap();
+        assert_eq!(key, (1000, 1235));
+        assert!(is_new);
+        assert_eq!(table.len(), 1);
     }
 
     #[test]
