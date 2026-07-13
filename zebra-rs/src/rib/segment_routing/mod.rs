@@ -15,6 +15,9 @@ pub use locator::{
 pub mod sid;
 pub use sid::{Sid, SidAllocationType, SidBehavior, SidContext, SidOwner, SidStructure};
 
+pub mod repl_seg;
+pub use repl_seg::{ReplSegBuilder, ReplSegConfig};
+
 /// Subscription-channel return type from RIB to a protocol module.
 /// `block: None` / `locator: None` signals deletion (or "doesn't exist
 /// yet" if the protocol asked for a name that hasn't been configured).

@@ -87,6 +87,14 @@ pub enum SidBehavior {
     /// the SID's VLAN table ([`Sid::table_id`]). Cradle-tee-only, like
     /// End.DX2.
     EndDX2V,
+    /// End.Replicate — RFC 9524 §5.2 SR-P2MP replication segment. The SID is
+    /// a replication-tree node: an arriving copy is cloned to each downstream
+    /// branch (outer DA rewritten to the branch's downstream Replication-SID,
+    /// Hop Limit decremented), and a Bud also delivers a copy locally. The
+    /// kernel has no such seg6local action — the cradle eBPF tee is the data
+    /// plane (`REPL_SEG`), so the FIB skips the netlink install like the EVPN
+    /// L2 SIDs. Installed by an operator `replication-segment` config.
+    EndReplicate,
     /// End.M — Mirroring Context segment (IANA codepoint 74,
     /// draft-ietf-rtgwg-srv6-egress-protection). A variant of End.DT6:
     /// the protector decapsulates the outer IPv6/SRH and looks the inner
@@ -148,6 +156,7 @@ impl fmt::Display for SidBehavior {
             Self::EndDX6 => write!(f, "End.DX6"),
             Self::EndDX2 => write!(f, "End.DX2"),
             Self::EndDX2V => write!(f, "End.DX2V"),
+            Self::EndReplicate => write!(f, "End.Replicate"),
         }
     }
 }
@@ -347,7 +356,10 @@ impl Sid {
             | SidBehavior::EndDX4
             | SidBehavior::EndDX6
             | SidBehavior::EndDX2
-            | SidBehavior::EndDX2V => Ipv6Net::new(self.addr, 128).expect("/128 is always valid"),
+            | SidBehavior::EndDX2V
+            | SidBehavior::EndReplicate => {
+                Ipv6Net::new(self.addr, 128).expect("/128 is always valid")
+            }
             SidBehavior::UALib => {
                 let plen = self
                     .structure

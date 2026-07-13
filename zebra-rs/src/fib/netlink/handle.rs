@@ -326,7 +326,8 @@ fn sid_route_target(
         SidBehavior::EndDT2U
         | SidBehavior::EndDT2M
         | SidBehavior::EndDX2
-        | SidBehavior::EndDX2V => (RouteHeader::RT_TABLE_MAIN, RouteType::Unicast, 128, addr),
+        | SidBehavior::EndDX2V
+        | SidBehavior::EndReplicate => (RouteHeader::RT_TABLE_MAIN, RouteType::Unicast, 128, addr),
         // End.B6.Encaps (SR Policy Binding SID): a /128 host route in
         // table=main; the SRH it pushes rides inside the seg6local
         // encap, not in the route header.
@@ -581,6 +582,29 @@ impl FibHandle {
     pub async fn cradle_repl_del(&self, vni: u32, sid: std::net::Ipv6Addr) {
         if let Some(cradle) = &self.cradle {
             cradle.repl_slot_del(vni, sid).await;
+        }
+    }
+
+    /// Tee an RFC 9524 Replication segment (operator `replication-segment`
+    /// config) to cradle: the local End.Replicate SID and its downstream
+    /// branches. No kernel counterpart — cradle's `REPL_SEG` is the SR-P2MP
+    /// replication data plane.
+    pub async fn cradle_repl_seg_set(
+        &self,
+        sid: std::net::Ipv6Addr,
+        hop_limit_threshold: u8,
+        branches: Vec<(std::net::Ipv6Addr, u32, bool)>,
+    ) {
+        if let Some(cradle) = &self.cradle {
+            cradle
+                .repl_seg_set(sid, hop_limit_threshold, branches)
+                .await;
+        }
+    }
+
+    pub async fn cradle_repl_seg_del(&self, sid: std::net::Ipv6Addr) {
+        if let Some(cradle) = &self.cradle {
+            cradle.repl_seg_del(sid).await;
         }
     }
 
@@ -2096,6 +2120,7 @@ impl FibHandle {
                 | crate::rib::SidBehavior::EndDX2V
                 | crate::rib::SidBehavior::EndRep
                 | crate::rib::SidBehavior::EndXRep
+                | crate::rib::SidBehavior::EndReplicate
                 | crate::rib::SidBehavior::UT
         ) {
             return;
@@ -2269,6 +2294,7 @@ impl FibHandle {
                 | crate::rib::SidBehavior::EndDX2V
                 | crate::rib::SidBehavior::EndRep
                 | crate::rib::SidBehavior::EndXRep
+                | crate::rib::SidBehavior::EndReplicate
                 | crate::rib::SidBehavior::UT
         ) {
             return;
