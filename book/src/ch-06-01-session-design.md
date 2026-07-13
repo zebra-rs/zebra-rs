@@ -49,10 +49,23 @@ Each invocation is a fresh fork+exec — `vtyhelper` runs to
 completion, writes to stdout, and exits. A single user keystroke
 sequence may trigger 5-10 invocations.
 
-Critically, `$(...)` does **not** alter the parent-process chain:
-bash forks once, the child execs `vtyhelper` in place, and
-`vtyhelper`'s `PPid` is the original vty bash. This invariant is the
-foundation of the session-key design below.
+For a command substitution evaluated **directly by the login shell**,
+`$(...)` does not alter the parent-process chain: bash forks once, the
+child execs `vtyhelper` in place, and `vtyhelper`'s `PPid` is the
+original vty bash. This is the common case and the fast path below
+relies on it.
+
+The chain does grow, however, when a first-level command is **piped**.
+Each first-level command (`show`, `set`, …) is a bash alias for the
+multi-statement `_cli_exec` function, and `show ... | wc -l` makes bash
+run that function in a subshell (the first stage of any pipeline runs in
+a child shell). The `$(vtyhelper ...)` capture inside then forks one
+level deeper, so `vtyhelper`'s `PPid` is the transient subshell rather
+than the login bash. The resolver handles this by walking a bounded
+number of parent hops for an existing same-uid session (see
+[Session key derivation](#session-key-derivation)); without the walk a
+piped configure-mode `show` landed in a fresh View session and printed
+nothing.
 
 ## Architecture
 
@@ -131,9 +144,22 @@ Why this design:
   invocation spawned from the same vty bash, automatically grouping
   all RPCs from one shell into one session.
 
+When the immediate-parent key has no session, the resolver walks a
+bounded number of parent hops (`MAX_ANCESTOR_WALK`) looking for an
+existing session owned by the **same uid**, and attaches to the first
+one found. This recovers the login-shell session for `vtyhelper`
+processes that a piped first-level command leaves a level or two deeper
+in the process tree (see the piping note above). Every candidate key
+embeds `peer_uid`, so the walk can only ever match the caller's own
+shell — it never crosses a uid boundary. Only when no ancestor session
+is found does the resolver fall through to creating a new session on the
+immediate parent (with the parent-uid match still enforced).
+
 Performance: completion events fire frequently, so the resolver
 short-circuits to a single `/proc/{pid}/status` read for known
-sessions and only walks the parent chain on first-seen keys.
+sessions; the parent-chain walk runs only on first-seen keys and stops
+at the first existing session, at init (pid ≤ 1), or after
+`MAX_ANCESTOR_WALK` hops.
 
 ## Lifecycle
 
