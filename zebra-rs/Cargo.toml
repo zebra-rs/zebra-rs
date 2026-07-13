@@ -24,7 +24,8 @@ regex = "1.10"
 similar = "2"
 dirs = "6"
 async-trait = "0.1"
-prefix-trie = { git = "https://github.com/zebra-rs/prefix-trie" }
+#prefix-trie = { git = "https://github.com/zebra-rs/prefix-trie" }
+prefix-trie = "0.8.1"
 thiserror = "2"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["json", "env-filter"] }

@@ -300,7 +300,7 @@ module ietf-bgp {
              the 32-bit as-number type from the model in RFC 6991.";
         }
         leaf identifier {
-          type yang:dotted-quad;
+          type inet:ipv4-address;
           description
             "BGP Identifier of the router - an unsigned 32-bit,
              non-zero integer that should be unique within an AS.
