@@ -387,11 +387,20 @@ async fn start_zebra_rs(world: &mut World, namespace: String) {
     let log_file = format!("logs/{}.log", scoped);
     let pid_file = world.pid_file(&namespace);
 
+    // BFD Echo reflection off a bridge-enslaved veth needs generic (SKB) XDP:
+    // cradle's native `XDP_TX` only delivers to a peer that also has XDP, which
+    // the LAN topology's host bridge port does not. `CRADLE_XDP_MODE=skb` (read
+    // by the cradle child, which inherits this env) forces generic attach.
+    // Scoped to the BFD features so the SRv6/EVPN datapaths keep native XDP —
+    // generic mode skips the XDP pop/decap for TC-redirected skbs.
+    let env: &[(&str, &str)] = if world.feature_tag.starts_with("isis_bfd") {
+        &[("CRADLE_XDP_MODE", "skb")]
+    } else {
+        &[]
+    };
     let _child = netns::spawn_in_netns_env(
         &scoped,
-        // veth interfaces (used in all BDD topologies) need SKB mode: native
-        // XDP attaches without error on veth but does not loop packets back.
-        &[("ZEBRA_XDP_BFD_ECHO_MODE", "skb")],
+        env,
         "zebra-rs",
         &[
             // --daemon double-forks + setsid so the daemon leaves the cargo-test
@@ -426,13 +435,10 @@ async fn start_zebra_rs_sharded(world: &mut World, namespace: String, shards: us
 
     let _child = netns::spawn_in_netns_env(
         &scoped,
-        // Same SKB note as `start zebra-rs`; ZEBRA_BGP_SHARDS runs the BGP
-        // RIB sharded (N>1) so inbound policy flows through the shard
-        // workers + PolicyReplace rather than the synchronous N=1 path.
-        &[
-            ("ZEBRA_XDP_BFD_ECHO_MODE", "skb"),
-            ("ZEBRA_BGP_SHARDS", shards.as_str()),
-        ],
+        // ZEBRA_BGP_SHARDS runs the BGP RIB sharded (N>1) so inbound policy
+        // flows through the shard workers + PolicyReplace rather than the
+        // synchronous N=1 path.
+        &[("ZEBRA_BGP_SHARDS", shards.as_str())],
         "zebra-rs",
         &[
             "--daemon",
@@ -466,7 +472,6 @@ async fn start_zebra_rs_sharded_peer_task(world: &mut World, namespace: String, 
         // the main task. Combined with ZEBRA_BGP_SHARDS>1 this exercises
         // both axes — sharded ingest + per-peer egress.
         &[
-            ("ZEBRA_XDP_BFD_ECHO_MODE", "skb"),
             ("ZEBRA_BGP_SHARDS", shards.as_str()),
             ("ZEBRA_BGP_PEER_TASK", "1"),
         ],
@@ -501,10 +506,7 @@ async fn start_zebra_rs_egress_group_task(world: &mut World, namespace: String) 
         // egress task per update-group. Phase 0 is idle (it tracks members and
         // routes no egress yet), so this exercises the spawn/teardown lifecycle
         // without changing egress.
-        &[
-            ("ZEBRA_XDP_BFD_ECHO_MODE", "skb"),
-            ("ZEBRA_BGP_EGRESS_GROUP_TASK", "1"),
-        ],
+        &[("ZEBRA_BGP_EGRESS_GROUP_TASK", "1")],
         "zebra-rs",
         &[
             "--daemon",
@@ -542,7 +544,6 @@ async fn start_zebra_rs_sharded_egress_group_task(
         // (ZEBRA_BGP_EGRESS_GROUP_TASK), exercising the DumpV4 session-up
         // sync recording into the group adj_out (Phase 5b / N>1 DumpV4 ③).
         &[
-            ("ZEBRA_XDP_BFD_ECHO_MODE", "skb"),
             ("ZEBRA_BGP_SHARDS", shards.as_str()),
             ("ZEBRA_BGP_EGRESS_GROUP_TASK", "1"),
         ],
@@ -578,10 +579,7 @@ async fn start_zebra_rs_sync_chunk(world: &mut World, namespace: String, chunk: 
         // cursor: the session-up dump runs `chunk` prefixes per main-loop
         // tick instead of one uninterruptible pass. A small chunk forces
         // many ticks so the chunked path is actually exercised.
-        &[
-            ("ZEBRA_XDP_BFD_ECHO_MODE", "skb"),
-            ("ZEBRA_BGP_SYNC_CHUNK", chunk.as_str()),
-        ],
+        &[("ZEBRA_BGP_SYNC_CHUNK", chunk.as_str())],
         "zebra-rs",
         &[
             "--daemon",
@@ -625,7 +623,6 @@ async fn start_zebra_rs_sync_chunk_egress(
         // DELAY_MS slows the egress writer so the pending-UPDATE queue
         // backs up deterministically (no kernel-buffer / tc dependence).
         &[
-            ("ZEBRA_XDP_BFD_ECHO_MODE", "skb"),
             ("ZEBRA_BGP_SYNC_CHUNK", chunk.as_str()),
             ("ZEBRA_BGP_SYNC_EGRESS_HIGH", egress_high.as_str()),
             ("ZEBRA_BGP_WRITER_DELAY_MS", writer_delay.as_str()),

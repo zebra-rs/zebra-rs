@@ -175,6 +175,11 @@ pub enum Message {
     /// evaluated in XDP/`bpf_timer`). Drives the same transition as the
     /// userspace detection timer.
     DetectDown { discr: u32 },
+    /// The cradle BFD engine became reachable (its `WatchBfd` stream
+    /// connected). Sessions created before the async connection advertised
+    /// echo-rx 0 and left the watchdog unarmed (readiness was false at
+    /// creation); re-evaluate them now that the engine is confirmed up.
+    HelperReady,
     /// The cradle BFD engine became unreachable (its `WatchBfd` stream
     /// dropped). Sessions still counting on the in-kernel watchdog revert to
     /// userspace detection.
@@ -585,6 +590,11 @@ impl Bfd {
     }
 
     pub async fn event_loop(&mut self) {
+        // `Bfd::new` runs on the sync config-commit path, so the Echo/detect
+        // driver could not be spawned there. The event loop runs on the tokio
+        // runtime, so start it now — this is the point cradle's WatchBfd stream
+        // begins and readiness can flip on.
+        self.reflectors.ensure_driver();
         loop {
             tokio::select! {
                 Some(msg) = self.rx.recv() => match msg {
@@ -594,6 +604,7 @@ impl Bfd {
                     Message::DetectExpired { key } => self.on_detect_expired(key),
                     Message::EchoDown { discr } => self.on_echo_down(discr),
                     Message::DetectDown { discr } => self.on_detect_down(discr),
+                    Message::HelperReady => self.on_helper_ready(),
                     Message::HelperGone => self.on_helper_gone(),
                 },
                 // BFD's only config is the top-level `bfd { tracing }` flag;
@@ -874,6 +885,33 @@ impl Bfd {
         }
         self.echo_originate_reconcile(key);
         self.detect_offload_reconcile(key);
+    }
+
+    /// The cradle BFD engine became reachable (its `WatchBfd` stream connected).
+    /// Unlike the old per-interface child — which spawned synchronously in
+    /// `add_session`, so `is_ready` was already true when a session was created
+    /// — the gRPC engine connects *asynchronously* after zebra starts. Sessions
+    /// created in that window captured `echo_ready = false` and left the
+    /// watchdog unarmed. Re-evaluate every single-hop Echo/detect session now:
+    /// refresh `echo_ready` (so the honest non-zero echo-rx advertisement goes
+    /// out on the next control Tx and the peer starts looping Echo back) and
+    /// re-run the originate / detect reconciles (arming the watchdog). Runs on
+    /// every (re)connect; idempotent — a no-op once sessions are already ready.
+    fn on_helper_ready(&mut self) {
+        let active: Vec<SessionKey> = self
+            .sessions
+            .iter()
+            .filter(|(k, s)| (!s.echo_mode.is_off() || s.detect_offload) && !k.multihop)
+            .map(|(k, _)| *k)
+            .collect();
+        for key in active {
+            let ready = self.reflectors.is_ready(key.ifindex);
+            if let Some(s) = self.sessions.get_by_key_mut(&key) {
+                s.echo_ready = ready;
+            }
+            self.echo_originate_reconcile(key);
+            self.detect_offload_reconcile(key);
+        }
     }
 
     /// The cradle BFD engine became unreachable (its `WatchBfd` stream dropped).
