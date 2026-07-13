@@ -29,30 +29,6 @@ async fn run_cmd(args: &[&str], error_msg: &str) -> Result<()> {
     }
 }
 
-/// Remove the shared daemon startup config, best effort.
-///
-/// A BDD daemon is launched without `--config-file`, so it falls back to
-/// loading `<yang-path>/../zebra-rs.conf` at startup — and under `sudo ip
-/// netns exec` (HOME=/root) the yang path resolves to `/etc/zebra-rs/yang`,
-/// so that file is `/etc/zebra-rs/zebra-rs.conf`. This path is host-global
-/// and shared by every namespace's daemon. A stale copy left there (e.g. a
-/// manual `save`, or a hand-run debug session) is loaded by EVERY BDD daemon
-/// before the feature applies its own config — and because `vtyctl apply`
-/// is a diff, any element that overlaps the leftover (a neighbor address, a
-/// VRF, an `interface lo` address, a global `as`) keeps the leftover's stale
-/// attributes, silently breaking dozens of unrelated features. BDD daemons
-/// must always start from an empty config, so sweep it here like the host
-/// loopback addresses above — it is only ever a leftover, never anything a
-/// live feature needs.
-pub async fn remove_stale_startup_config() {
-    let _ = Command::new("sudo")
-        .args(["rm", "-f", "/etc/zebra-rs/zebra-rs.conf"])
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .status()
-        .await;
-}
-
 /// Execute a command in a network namespace
 pub async fn exec_in_netns(netns: &str, cmd: &str, args: &[&str]) -> Result<String> {
     let output = Command::new("sudo")
@@ -375,17 +351,33 @@ pub async fn spawn_in_netns_env(
     // restart, so graceful-restart resume still works; the daemon
     // create_dir_all's it on write.
     let ckpt = format!("ZEBRA_OSPF_CHECKPOINT_DIR=/tmp/zebra-rs-ckpt/{netns}");
-    let inject_ckpt = cmd == "zebra-rs";
-    if inject_ckpt || !env.is_empty() {
+    let is_zebra = cmd == "zebra-rs";
+    if is_zebra || !env.is_empty() {
         c.arg("env");
-        if inject_ckpt {
+        if is_zebra {
             c.arg(&ckpt);
         }
         for (k, v) in env {
             c.arg(format!("{k}={v}"));
         }
     }
-    c.arg(cmd).args(args);
+    c.arg(cmd);
+    // Force every BDD daemon to cold-start from an empty config. Without an
+    // explicit `--config-file`, zebra-rs falls back to loading
+    // `<yang-path>/../zebra-rs.conf`; under `sudo ip netns exec` (HOME=/root)
+    // that resolves to the host-global `/etc/zebra-rs/zebra-rs.conf`, which a
+    // netns does NOT isolate (it isolates the network, not the filesystem).
+    // A stale copy there (a manual `save`, a debug session) would be loaded by
+    // EVERY namespace's daemon before its feature config is applied, and since
+    // `vtyctl apply` is a diff, any overlapping element keeps the leftover's
+    // stale attributes — silently breaking dozens of unrelated features.
+    // Pointing `-c` at `/dev/null` reads as an empty document (skips the config
+    // parsers entirely) and leaves the operator's `/etc/zebra-rs/zebra-rs.conf`
+    // untouched, so we neither depend on nor delete it.
+    if is_zebra {
+        c.arg("-c").arg("/dev/null");
+    }
+    c.args(args);
     c.stdout(Stdio::null()).stderr(Stdio::null());
     c.spawn()
         .with_context(|| format!("Failed to spawn {} in netns {}", cmd, netns))

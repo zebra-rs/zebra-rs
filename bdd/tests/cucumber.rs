@@ -125,12 +125,11 @@ async fn clean_test_environment(world: &mut World) {
     // loopback-peered sessions (see `sweep_host_loopback_addrs`).
     let _ = netns::sweep_host_loopback_addrs().await;
 
-    // 6. Remove the shared daemon startup config. BDD daemons launch without
-    // `--config-file` and would otherwise load `/etc/zebra-rs/zebra-rs.conf`
-    // at startup; a stale copy (from a manual `save` or a debug session)
-    // poisons every namespace's daemon before its feature config is applied.
-    // See `netns::remove_stale_startup_config` for the full mechanism.
-    netns::remove_stale_startup_config().await;
+    // Note: the shared daemon startup config `/etc/zebra-rs/zebra-rs.conf` is
+    // deliberately NOT swept here. BDD daemons are launched with `-c /dev/null`
+    // (see `netns::spawn_in_netns_env`), so each cold-starts from an empty
+    // config and never reads that host-global file — leaving the operator's
+    // copy untouched instead of deleting it.
 
     println!(
         "✓ Test environment cleaned for feature {}",
