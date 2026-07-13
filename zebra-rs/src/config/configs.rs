@@ -406,8 +406,8 @@ impl Config {
             // emitted only a dangling `"name":` so far. A presence
             // container closes as `{}` (it is a container in the YANG
             // data tree); a `type empty` leaf closes as null. Both
-            // shapes round-trip: json_to_list() restores each as the
-            // bare `set <path>`.
+            // shapes round-trip: the config-document walk restores each
+            // as the bare `set <path>`.
             if !has_configs && self.value.borrow().is_empty() && self.list.borrow().is_empty() {
                 if self.presence {
                     out.push_str("{}");
@@ -1488,8 +1488,9 @@ mod tests {
     fn test_presence_container_json_empty_object() {
         // A childless presence container (e.g. `set router bgp
         // segment-routing srv6 ipv6-unicast`) marshals as `{}`, not
-        // null — null is reserved for `type empty` leaves. json_to_list()
-        // restores an empty object as the bare `set <path>` on re-apply.
+        // null — null is reserved for `type empty` leaves. The
+        // config-document walk restores an empty object as the bare
+        // `set <path>` on re-apply.
         let root = Rc::new(Config::new("".to_string(), None));
 
         let paths = vec![

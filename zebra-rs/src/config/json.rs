@@ -1,10 +1,105 @@
 use libyang::Entry;
 use serde_json::Value;
+use std::fmt;
 use std::rc::Rc;
 
-/// Translate a JSON (or YAML-converted-to-JSON) config document into
-/// flat `set …` command lines by walking it against the YANG `set`
-/// subtree.
+/// A single schema-rejection error found while walking a config
+/// document, carrying the 1-based source line it was found on when the
+/// front-end could preserve it (YAML does, JSON does not).
+#[derive(Debug, Clone)]
+pub struct DocError {
+    pub line: Option<usize>,
+    pub message: String,
+}
+
+impl DocError {
+    pub fn new(line: Option<usize>, message: String) -> Self {
+        Self { line, message }
+    }
+}
+
+impl fmt::Display for DocError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self.line {
+            Some(line) => write!(f, "line {}: {}", line, self.message),
+            None => write!(f, "{}", self.message),
+        }
+    }
+}
+
+/// A config-document value with source line information preserved.
+///
+/// Both the JSON and YAML front-ends lower into this so a single walk
+/// ([`spanned_to_list`]) turns any document into flat `set …` command
+/// lines and reports the parts the schema refuses. The YAML front-end
+/// additionally attaches the source line of each key so an error can
+/// point the operator at the exact line in their config file; the JSON
+/// front-end leaves every line `None`.
+pub enum SpannedValue {
+    /// YAML `null`/`~`/empty, or JSON `null`: a bare `set <path>` line
+    /// (the empty-leaf / `type empty` convention).
+    Null,
+    /// A scalar leaf value (string, number, or bool — all stringified).
+    Scalar(String),
+    /// A YANG list body: a sequence of entries walked against the same
+    /// schema node.
+    Sequence(Vec<SpannedValue>),
+    /// A container or list entry. `line` is the mapping's own source
+    /// line (used to locate a "missing key" error); each entry carries
+    /// the source line of its own key.
+    Mapping {
+        line: Option<usize>,
+        entries: Vec<MapEntry>,
+    },
+}
+
+/// One `key: value` pair of a [`SpannedValue::Mapping`], with the source
+/// line of the key.
+pub struct MapEntry {
+    pub key: String,
+    pub line: Option<usize>,
+    pub value: SpannedValue,
+}
+
+impl SpannedValue {
+    /// The value used when this node is a list entry's key field. List
+    /// keys are always scalars in practice; the other shapes are
+    /// defensive fallbacks matching the pre-`SpannedValue` behavior.
+    fn key_value(&self) -> String {
+        match self {
+            SpannedValue::Scalar(s) => s.clone(),
+            SpannedValue::Null => "null".to_string(),
+            _ => String::new(),
+        }
+    }
+}
+
+/// Lower a `serde_json` value into a [`SpannedValue`]. JSON carries no
+/// source markers, so every line is `None`. The `preserve_order`
+/// feature keeps the object key order, matching document order.
+fn from_json(v: &Value) -> SpannedValue {
+    match v {
+        Value::Null => SpannedValue::Null,
+        Value::Bool(b) => SpannedValue::Scalar(b.to_string()),
+        Value::Number(n) => SpannedValue::Scalar(n.to_string()),
+        Value::String(s) => SpannedValue::Scalar(s.clone()),
+        Value::Array(vec) => SpannedValue::Sequence(vec.iter().map(from_json).collect()),
+        Value::Object(map) => SpannedValue::Mapping {
+            line: None,
+            entries: map
+                .iter()
+                .map(|(k, v)| MapEntry {
+                    key: k.clone(),
+                    line: None,
+                    value: from_json(v),
+                })
+                .collect(),
+        },
+    }
+}
+
+/// Translate a JSON config document into flat `set …` command lines by
+/// walking it against the YANG `set` subtree.
 ///
 /// Returns the command lines plus a list of errors for every part of
 /// the document that does NOT correspond to the schema. Errors must
@@ -13,90 +108,94 @@ use std::rc::Rc;
 /// which let a misspelled key (e.g. `med-eq:` for the nested
 /// `med: { eq: … }`) produce a partial config that *applied* cleanly
 /// while testing nothing.
-pub fn json_read(e: Rc<Entry>, str: &str) -> (Vec<String>, Vec<String>) {
+pub fn json_read(e: Rc<Entry>, str: &str) -> (Vec<String>, Vec<DocError>) {
     let mut lines: Vec<String> = Vec::new();
-    let mut errors: Vec<String> = Vec::new();
+    let mut errors: Vec<DocError> = Vec::new();
     match serde_json::from_str::<Value>(str) {
         Ok(json) => {
-            json_to_list(e, Vec::new(), &json, &mut lines, &mut errors);
+            spanned_to_list(e, Vec::new(), &from_json(&json), &mut lines, &mut errors);
         }
         Err(err) => {
-            errors.push(format!("invalid document: {err}"));
+            errors.push(DocError::new(None, format!("invalid document: {err}")));
         }
     }
     (lines, errors)
 }
 
-pub fn json_to_list(
+/// Walk a [`SpannedValue`] against the YANG `set` subtree, emitting flat
+/// `set …` command lines and recording a [`DocError`] (with the source
+/// line, when known) for every node the schema refuses.
+pub fn spanned_to_list(
     entry: Rc<Entry>,
     p: Vec<String>,
-    v: &Value,
+    v: &SpannedValue,
     lines: &mut Vec<String>,
-    errors: &mut Vec<String>,
+    errors: &mut Vec<DocError>,
 ) {
     match v {
-        Value::Null => {
+        SpannedValue::Null => {
             lines.push(format!("set {}", p.join(" ")));
         }
-        Value::Bool(v) => {
-            lines.push(format!("set {} {}", p.join(" "), v));
+        SpannedValue::Scalar(s) => {
+            lines.push(format!("set {} {}", p.join(" "), s));
         }
-        Value::Number(v) => {
-            lines.push(format!("set {} {}", p.join(" "), v));
-        }
-        Value::String(v) => {
-            lines.push(format!("set {} {}", p.join(" "), v));
-        }
-        Value::Array(vec) => {
+        SpannedValue::Sequence(vec) => {
             for v in vec.iter() {
                 let p = p.clone();
-                json_to_list(entry.clone(), p, v, lines, errors);
+                spanned_to_list(entry.clone(), p, v, lines, errors);
             }
         }
-        Value::Object(map) => {
+        SpannedValue::Mapping { line, entries } => {
             // A childless presence container marshals as `{}`; restore
             // it as the bare `set <path>` (a presence container exists
             // on its own, unlike a plain container which only exists
             // through its children — an empty `{}` there is a no-op).
-            if map.is_empty() && entry.presence {
+            if entries.is_empty() && entry.presence {
                 lines.push(format!("set {}", p.join(" ")));
                 return;
             }
             let mut p = p.clone();
             if !entry.key.is_empty() {
-                if let Some(value) = map.get(&entry.key[0]) {
-                    p.push(value_without_quotes(value));
+                if let Some(me) = entries.iter().find(|e| e.key == entry.key[0]) {
+                    p.push(me.value.key_value());
                     lines.push(format!("set {}", p.join(" ")));
                 } else {
                     // A list entry without its key field can't be
                     // addressed at all — report it instead of silently
                     // dropping the whole object.
-                    errors.push(format!(
-                        "{}: list entry is missing its key `{}`",
-                        display_path(&p, &entry.name),
-                        entry.key[0]
+                    errors.push(DocError::new(
+                        *line,
+                        format!(
+                            "{}: list entry is missing its key `{}`",
+                            display_path(&p, &entry.name),
+                            entry.key[0]
+                        ),
                     ));
                     return;
                 }
             }
-            for (key, value) in map.iter() {
-                if !entry.key.is_empty() && key == &entry.key[0] {
+            for me in entries.iter() {
+                if !entry.key.is_empty() && me.key == entry.key[0] {
                     continue;
                 }
-                match entry_dir(entry.clone(), key) {
-                    Some(entry) => {
+                match entry_dir(entry.clone(), &me.key) {
+                    Some(child) => {
                         let mut p = p.clone();
-                        p.push(key.clone());
-                        json_to_list(entry.clone(), p, value, lines, errors);
+                        p.push(me.key.clone());
+                        spanned_to_list(child, p, &me.value, lines, errors);
                     }
                     None => {
-                        // Unknown key: record it and KEEP walking the
-                        // remaining siblings — aborting here used to
-                        // drop everything after the first typo.
-                        errors.push(format!(
-                            "{}: unknown key `{}`",
-                            display_path(&p, &entry.name),
-                            key
+                        // Unknown key: record it (with its source line)
+                        // and KEEP walking the remaining siblings —
+                        // aborting here used to drop everything after
+                        // the first typo.
+                        errors.push(DocError::new(
+                            me.line,
+                            format!(
+                                "{}: unknown key `{}`",
+                                display_path(&p, &entry.name),
+                                me.key
+                            ),
                         ));
                     }
                 }
@@ -115,14 +214,7 @@ fn display_path(p: &[String], entry_name: &str) -> String {
     }
 }
 
-fn value_without_quotes(value: &Value) -> String {
-    match value {
-        Value::String(s) => s.clone(),
-        _ => value.to_string(),
-    }
-}
-
-fn entry_dir(entry: Rc<Entry>, name: &String) -> Option<Rc<Entry>> {
+fn entry_dir(entry: Rc<Entry>, name: &str) -> Option<Rc<Entry>> {
     for e in entry.dir.borrow().iter() {
         if e.name == *name {
             return Some(e.clone());
@@ -180,11 +272,15 @@ mod tests {
         let doc = r#"{"policy":[{"name":"IN-MED","entry":[{"number":10,"a-bogus":1,"action":"permit","match":{"med-eq":999}}]}]}"#;
         let (lines, errors) = json_read(set_entry(), doc);
         assert!(
-            errors.iter().any(|e| e.contains("unknown key `med-eq`")),
+            errors
+                .iter()
+                .any(|e| e.message.contains("unknown key `med-eq`")),
             "errors: {errors:?}"
         );
         assert!(
-            errors.iter().any(|e| e.contains("unknown key `a-bogus`")),
+            errors
+                .iter()
+                .any(|e| e.message.contains("unknown key `a-bogus`")),
             "errors: {errors:?}"
         );
         assert!(
@@ -239,8 +335,24 @@ mod tests {
         let doc = r#"{"policy":[{"entry":[{"number":10}]}]}"#;
         let (_lines, errors) = json_read(set_entry(), doc);
         assert!(
-            errors.iter().any(|e| e.contains("missing its key `name`")),
+            errors
+                .iter()
+                .any(|e| e.message.contains("missing its key `name`")),
             "errors: {errors:?}"
+        );
+    }
+
+    /// `DocError` renders its source line when known, and omits the
+    /// `line N:` prefix when unknown (the JSON path).
+    #[test]
+    fn doc_error_display_includes_line() {
+        assert_eq!(
+            DocError::new(Some(42), "unknown key `foo`".to_string()).to_string(),
+            "line 42: unknown key `foo`"
+        );
+        assert_eq!(
+            DocError::new(None, "unknown key `foo`".to_string()).to_string(),
+            "unknown key `foo`"
         );
     }
 }
