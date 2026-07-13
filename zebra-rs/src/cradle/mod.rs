@@ -20,4 +20,4 @@ pub mod inst;
 mod show;
 pub mod supervisor;
 
-pub use inst::{Cradle, serve};
+pub use inst::{Cradle, PortRequest, serve};

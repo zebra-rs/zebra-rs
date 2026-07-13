@@ -55,6 +55,27 @@ struct LinkState {
     vni: Option<u32>,
 }
 
+/// A request from another subsystem for the cradle port supervisor to
+/// attach/detach `cradle_xdp` on an interface, *independent* of the
+/// operator's `interface … ebpf enabled` config. Today the only source is
+/// BFD: a single-hop Echo / detect-offload session needs its egress port to
+/// be a cradle port so the in-kernel `cradle_xdp` reflect / `bpf_timer`
+/// watchdog actually runs (otherwise the arm RPCs fire but nothing is
+/// attached). Keyed by ifindex — the [`Cradle`] instance resolves the name
+/// from its own link state, so it survives interface renames and needs no
+/// name plumbing on the BFD side.
+///
+/// The desired port set is the *union* of these requests and the config
+/// leaves: a port stays attached while either side wants it.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum PortRequest {
+    /// This ifindex now needs the eBPF datapath (first Echo/detect-offload
+    /// session on it appeared).
+    Acquire(u32),
+    /// This ifindex no longer needs it (its last such session went away).
+    Release(u32),
+}
+
 /// How an `interface … ebpf enabled` port binds into the data plane,
 /// derived from the interface's `master` in link state.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -105,6 +126,15 @@ pub struct Cradle {
     grpc_endpoint: Option<String>,
     /// Staged `interface <name> ebpf enabled` leaves, keyed by if-name.
     if_ebpf: BTreeMap<String, bool>,
+    /// Ifindexes another subsystem (BFD) has asked to attach automatically —
+    /// see [`PortRequest`]. Folded into the port reconcile as a union with
+    /// `if_ebpf`, so a BFD Echo/detect-offload interface becomes a cradle
+    /// port without an explicit `interface … ebpf enabled` line.
+    bfd_ports: std::collections::HashSet<u32>,
+    /// Inbound [`PortRequest`] stream (from BFD). Always present: when no
+    /// producer is wired the receiver is a dropped-sender channel that never
+    /// fires, so the event-loop branch stays uniform with the others.
+    port_rx: UnboundedReceiver<PortRequest>,
     /// Kernel links keyed by ifindex, from the RIB subscription (seeded
     /// by the link dump at subscribe time; `global_links`, so VRF
     /// enslavement never hides a link).
@@ -132,8 +162,16 @@ pub struct Cradle {
 }
 
 impl Cradle {
-    pub fn new(rib: RibClient, rib_rx: UnboundedReceiver<RibRx>) -> Self {
+    pub fn new(
+        rib: RibClient,
+        rib_rx: UnboundedReceiver<RibRx>,
+        port_rx: Option<UnboundedReceiver<PortRequest>>,
+    ) -> Self {
         let (events_tx, events_rx) = mpsc::unbounded_channel();
+        // No producer wired (e.g. a direct test construction): a channel whose
+        // sender is immediately dropped resolves `recv()` to `None` forever, so
+        // the select branch simply never fires.
+        let port_rx = port_rx.unwrap_or_else(|| mpsc::unbounded_channel().1);
         Self {
             cm: ConfigChannel::new(),
             show: ShowChannel::new(),
@@ -145,6 +183,8 @@ impl Cradle {
             cradle_enabled: false,
             grpc_endpoint: None,
             if_ebpf: BTreeMap::new(),
+            bfd_ports: std::collections::HashSet::new(),
+            port_rx,
             links: HashMap::new(),
             bd_by_ifindex: HashMap::new(),
             bd_alloc: BTreeMap::new(),
@@ -168,6 +208,10 @@ impl Cradle {
                 }
                 Some(msg) = self.rib_rx.recv() => {
                     self.process_rib_msg(msg);
+                    self.reconcile_ports().await;
+                }
+                Some(req) = self.port_rx.recv() => {
+                    self.process_port_request(req);
                     self.reconcile_ports().await;
                 }
                 Some(ev) = self.events_rx.recv() => {
@@ -236,6 +280,58 @@ impl Cradle {
             }
             _ => {}
         }
+    }
+
+    /// Record a BFD auto-attach request. The set drives the port reconcile
+    /// (union with `if_ebpf`); the caller re-reconciles right after. Edges are
+    /// idempotent — a duplicate Acquire/Release just leaves the set unchanged.
+    fn process_port_request(&mut self, req: PortRequest) {
+        match req {
+            PortRequest::Acquire(ifindex) => {
+                self.bfd_ports.insert(ifindex);
+            }
+            PortRequest::Release(ifindex) => {
+                self.bfd_ports.remove(&ifindex);
+            }
+        }
+    }
+
+    /// Whether `name` should carry the eBPF datapath: the operator enabled it
+    /// (`interface … ebpf enabled`) *or* a BFD session on its ifindex requested
+    /// it. Union semantics — a port stays wanted while either side wants it.
+    fn is_port_wanted(&self, name: &str) -> bool {
+        if self.if_ebpf.get(name).copied().unwrap_or(false) {
+            return true;
+        }
+        self.links
+            .iter()
+            .any(|(ifindex, l)| l.name == name && self.bfd_ports.contains(ifindex))
+    }
+
+    /// Whether a BFD auto-attach request currently covers `name` (used only to
+    /// label the source in `show ebpf`).
+    fn is_bfd_port(&self, name: &str) -> bool {
+        self.links
+            .iter()
+            .any(|(ifindex, l)| l.name == name && self.bfd_ports.contains(ifindex))
+    }
+
+    /// The full set of interface names that should be attached: the enabled
+    /// `if_ebpf` leaves plus every BFD-requested ifindex that resolves to a
+    /// known link. Sorted/deduped so the reconcile order is stable.
+    fn wanted_port_names(&self) -> Vec<String> {
+        let mut names: std::collections::BTreeSet<String> = self
+            .if_ebpf
+            .iter()
+            .filter(|(_, en)| **en)
+            .map(|(name, _)| name.clone())
+            .collect();
+        for ifindex in &self.bfd_ports {
+            if let Some(l) = self.links.get(ifindex) {
+                names.insert(l.name.clone());
+            }
+        }
+        names.into_iter().collect()
     }
 
     /// Re-derive every bridge's domain id from link state. Preference
@@ -507,14 +603,17 @@ impl Cradle {
 
         if json {
             let ports: Vec<serde_json::Value> = self
-                .if_ebpf
+                .wanted_port_names()
                 .iter()
-                .filter(|(_, en)| **en)
-                .map(|(name, _)| {
+                .map(|name| {
                     let binding = self.port_binding(name);
+                    let config = self.if_ebpf.get(name).copied().unwrap_or(false);
+                    let bfd = self.is_bfd_port(name);
                     serde_json::json!({
                         "name": name,
                         "ifindex": binding.map(|(i, _)| i),
+                        "config": config,
+                        "bfd": bfd,
                         "vrf": binding.and_then(|(_, role)| match role {
                             PortRole::L3 { vrf } => Some(vrf),
                             PortRole::L2 { .. } => None,
@@ -589,20 +688,28 @@ impl Cradle {
                 writeln!(out, "  Engine v4 FIB:   mode {}", f.fib4_mode).unwrap();
             }
         }
-        let enabled: Vec<&String> = self
-            .if_ebpf
-            .iter()
-            .filter(|(_, en)| **en)
-            .map(|(name, _)| name)
-            .collect();
+        let wanted = self.wanted_port_names();
+        let config_count = self.if_ebpf.values().filter(|en| **en).count();
+        let bfd_count = wanted.iter().filter(|n| self.is_bfd_port(n)).count();
         writeln!(
             out,
-            "  Ports:           {} configured, {} attached",
-            enabled.len(),
+            "  Ports:           {} wanted ({config_count} config, {bfd_count} bfd), {} attached",
+            wanted.len(),
             self.applied.len()
         )
         .unwrap();
-        for name in enabled {
+        for name in &wanted {
+            // How this port was requested: operator config, BFD auto-attach,
+            // or both.
+            let src = match (
+                self.if_ebpf.get(name).copied().unwrap_or(false),
+                self.is_bfd_port(name),
+            ) {
+                (true, true) => "config,bfd",
+                (true, false) => "config",
+                (false, true) => "bfd",
+                (false, false) => "-",
+            };
             match (self.port_binding(name), self.applied.get(name)) {
                 (Some(binding), applied) => {
                     let (ifindex, role) = binding;
@@ -617,12 +724,12 @@ impl Cradle {
                     };
                     writeln!(
                         out,
-                        "    {name:<16} ifindex {ifindex:<6} {role_col:<9} {state}"
+                        "    {name:<16} ifindex {ifindex:<6} {role_col:<9} {src:<11} {state}"
                     )
                     .unwrap();
                 }
                 (None, _) => {
-                    writeln!(out, "    {name:<16} {:<20} link absent", "-").unwrap();
+                    writeln!(out, "    {name:<16} {:<20} {src:<11} link absent", "-").unwrap();
                 }
             }
         }
@@ -740,7 +847,7 @@ impl Cradle {
         // get their learned MACs flushed at the end.
         let mut flush_after: Vec<String> = Vec::new();
         for (name, (applied_ifindex, applied_role)) in self.applied.clone() {
-            let enabled = self.if_ebpf.get(&name).copied().unwrap_or(false);
+            let enabled = self.is_port_wanted(&name);
             let binding = self.port_binding(&name);
             let same_device =
                 enabled && binding.is_some_and(|(ifindex, _)| ifindex == applied_ifindex);
@@ -768,16 +875,11 @@ impl Cradle {
         }
         self.sync_domains(&client).await;
 
-        // Phase B — apply `SetPort` for every enabled port whose (ifindex,
-        // role) isn't current: first attach, re-attach after a detach, and
-        // in-place role/VRF/bd moves (cradle overwrites the port entry and
-        // re-reconciles its derived routes).
-        let wanted: Vec<String> = self
-            .if_ebpf
-            .iter()
-            .filter(|(_, enabled)| **enabled)
-            .map(|(name, _)| name.clone())
-            .collect();
+        // Phase B — apply `SetPort` for every wanted port (config leaf or BFD
+        // auto-attach) whose (ifindex, role) isn't current: first attach,
+        // re-attach after a detach, and in-place role/VRF/bd moves (cradle
+        // overwrites the port entry and re-reconciles its derived routes).
+        let wanted = self.wanted_port_names();
         for name in wanted {
             let Some((ifindex, role)) = self.port_binding(&name) else {
                 continue;
@@ -824,4 +926,83 @@ pub fn serve(mut cradle: Cradle) -> Task<()> {
     Task::spawn(async move {
         cradle.event_loop().await;
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::rib::client::ProtoId;
+
+    /// A bare `Cradle` with dead RIB/port channels — enough to exercise the
+    /// pure port-selection helpers (`process_port_request`, `is_port_wanted`,
+    /// `wanted_port_names`) by poking `links`/`if_ebpf` directly.
+    fn test_cradle() -> Cradle {
+        let (rib_in_tx, _rib_in_rx) = mpsc::unbounded_channel();
+        let rib_client = RibClient::new(rib_in_tx, ProtoId::from_raw(0));
+        let (_rib_tx, rib_rx) = mpsc::unbounded_channel();
+        Cradle::new(rib_client, rib_rx, None)
+    }
+
+    fn add_link(c: &mut Cradle, ifindex: u32, name: &str) {
+        c.links.insert(
+            ifindex,
+            LinkState {
+                name: name.to_string(),
+                master: None,
+                vrf_table: None,
+                bridge: false,
+                vni: None,
+            },
+        );
+    }
+
+    #[test]
+    fn bfd_request_makes_port_wanted() {
+        let mut c = test_cradle();
+        add_link(&mut c, 5, "eth0");
+        assert!(!c.is_port_wanted("eth0"));
+
+        // A BFD Acquire on the ifindex enrolls the port, no config leaf.
+        c.process_port_request(PortRequest::Acquire(5));
+        assert!(c.is_port_wanted("eth0"));
+        assert!(c.is_bfd_port("eth0"));
+        assert_eq!(c.wanted_port_names(), vec!["eth0".to_string()]);
+
+        // Releasing the last session drops it (config never wanted it).
+        c.process_port_request(PortRequest::Release(5));
+        assert!(!c.is_port_wanted("eth0"));
+        assert!(c.wanted_port_names().is_empty());
+    }
+
+    #[test]
+    fn config_and_bfd_union() {
+        let mut c = test_cradle();
+        add_link(&mut c, 5, "eth0");
+
+        // Operator config alone wants it.
+        c.if_ebpf.insert("eth0".to_string(), true);
+        assert!(c.is_port_wanted("eth0"));
+        assert!(!c.is_bfd_port("eth0"));
+
+        // BFD also wants it — still one name, source is both.
+        c.process_port_request(PortRequest::Acquire(5));
+        assert!(c.is_bfd_port("eth0"));
+        assert_eq!(c.wanted_port_names(), vec!["eth0".to_string()]);
+
+        // BFD releasing does NOT detach while config still wants it.
+        c.process_port_request(PortRequest::Release(5));
+        assert!(c.is_port_wanted("eth0"));
+    }
+
+    #[test]
+    fn bfd_request_for_unknown_link_is_pending() {
+        let mut c = test_cradle();
+        // No link learned for ifindex 9 yet: recorded but not yet nameable, so
+        // it contributes nothing to the wanted set until the link appears.
+        c.process_port_request(PortRequest::Acquire(9));
+        assert!(c.wanted_port_names().is_empty());
+
+        add_link(&mut c, 9, "eth9");
+        assert_eq!(c.wanted_port_names(), vec!["eth9".to_string()]);
+    }
 }

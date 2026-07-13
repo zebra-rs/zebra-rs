@@ -162,5 +162,16 @@ Phases 1–2 (`cradle-common` grows the shared types); wrong as an end state.
   release (≥ the Phase-0a import) is published and installed. Local dev/BDD keep
   working because `/usr/sbin/{xdp-bfd-echo,tc-evpn-replicate}` are already
   installed on this host.
+- 2026-07-13: **BFD auto-attach implemented** (branch `bfd-ebpf-enable`) —
+  realises the Phase-2 "a port whose only role is BFD gets `SetPort`" unlock on
+  the *zebra* side. A single-hop `echo-mode`/`detect-offload` session now
+  auto-enrols its egress interface as a cradle port, so `interface … ebpf
+  enabled` is no longer required alongside `system ebpf enabled` for BFD
+  offload (which S4 called out as datapath gap #3). Mechanism: an eager
+  `ConfigManager` channel carries `cradle::PortRequest::{Acquire,Release}`
+  edges from `EchoReflectors`' per-ifindex refcount to the cradle port
+  supervisor, which folds them into `reconcile_ports` as a **union** with
+  `if_ebpf`. Engine still gated on `system ebpf enabled` (chosen scope).
+  `show ebpf` labels each port `config`/`bfd`/`config,bfd`.
 </content>
 </invoke>

@@ -118,6 +118,45 @@ Feature: IS-IS BFD over an IPv4 point-to-point link
     And I delete namespace "z2"
     Then the test environment should be clean
 
+  @bfd_echo @bfd_autoattach
+  Scenario: BFD Echo auto-attaches eBPF without an explicit interface ebpf line
+    # Same as "Echo in both directions" but the configs enable only
+    # `system ebpf enabled` — NOT `interface i1 ebpf enabled`. Echo reflection
+    # only works when cradle_xdp is attached to i1, so if the session comes up
+    # with echo both and survives a BFD-down/restore cycle, the interface was
+    # auto-attached purely because a single-hop echo session runs on it.
+    Given a clean test environment
+    When I create namespace "z1"
+    And I create namespace "z2"
+    And I connect namespace "z1" interface "i1" to namespace "z2" interface "i1"
+    And I start zebra-rs in namespace "z1"
+    And I start zebra-rs in namespace "z2"
+    And I apply config "z1-echo-both-autoattach.yaml" to namespace "z1"
+    And I apply config "z2-echo-both-autoattach.yaml" to namespace "z2"
+    And I wait 10 seconds
+    Then isis neighbor in namespace "z1" at level 2 on interface "i1" should be up
+    And bfd session in namespace "z1" on interface "i1" should be up
+    And bfd session in namespace "z1" on interface "i1" should have echo both
+    And bfd session in namespace "z2" on interface "i1" should have echo both
+    And ping from "z1" to "10.255.0.2" should succeed
+    # The port was attached with no `interface ebpf enabled` leaf: exactly one
+    # BFD-sourced port, zero config-sourced.
+    And show command "show ebpf" in namespace "z1" should eventually contain "0 config, 1 bfd"
+    And show command "show ebpf" in namespace "z2" should eventually contain "0 config, 1 bfd"
+    When I drop bfd control packets in namespace "z2"
+    Then bfd session in namespace "z1" on interface "i1" should be down
+    And isis neighbor in namespace "z1" at level 2 on interface "i1" should not be up
+    When I restore bfd control packets in namespace "z2"
+    And I wait 20 seconds
+    Then bfd session in namespace "z1" on interface "i1" should be up
+    And isis neighbor in namespace "z1" at level 2 on interface "i1" should be up
+    And ping from "z1" to "10.255.0.2" should succeed
+    When I stop zebra-rs in namespace "z1"
+    And I stop zebra-rs in namespace "z2"
+    And I delete namespace "z1"
+    And I delete namespace "z2"
+    Then the test environment should be clean
+
   @bfd_echo
   Scenario: BFD with Echo in both directions
     Given a clean test environment

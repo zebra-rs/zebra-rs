@@ -339,6 +339,14 @@ impl Bfd {
         self.client_req.tx.clone()
     }
 
+    /// Wire the BFD → cradle auto-attach channel (from `ConfigManager`). The
+    /// Echo/detect-offload refcount then drives `Acquire`/`Release` edges so
+    /// the cradle port supervisor attaches `cradle_xdp` on each single-hop
+    /// session's interface without an explicit `interface … ebpf enabled`.
+    pub fn set_cradle_port_tx(&mut self, tx: UnboundedSender<crate::cradle::PortRequest>) {
+        self.reflectors.set_cradle_port_tx(tx);
+    }
+
     /// Apply a [`ClientReq`]. Public so pre-`serve` callers (notably
     /// the integration test) can drive the API directly without going
     /// through the channel; production callers go through

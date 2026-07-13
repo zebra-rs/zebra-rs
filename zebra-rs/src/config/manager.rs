@@ -29,7 +29,7 @@ use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::rc::Rc;
-use tokio::sync::mpsc::{self, Receiver, Sender, UnboundedSender};
+use tokio::sync::mpsc::{self, Receiver, Sender, UnboundedReceiver, UnboundedSender};
 use tokio::sync::oneshot;
 
 pub struct ConfigStore {
@@ -271,6 +271,20 @@ pub struct ConfigManager {
     /// pre-spawns BGP before IS-IS when both appear in one commit (same
     /// by-value contract as `bfd_client_tx`).
     pub bgp_tx: RefCell<Option<mpsc::Sender<crate::bgp::inst::Message>>>,
+    /// Sender side of the BFD → cradle auto-attach stream. Unlike the
+    /// `*_client_tx` handles above this is created eagerly in [`Self::new`] and
+    /// never cleared, so it is valid regardless of BFD/cradle spawn order: BFD
+    /// clones it at spawn and emits [`crate::cradle::PortRequest`] edges as
+    /// single-hop Echo / detect-offload sessions come and go, and the cradle
+    /// port supervisor folds those ifindexes into its attach set (union with
+    /// `interface … ebpf enabled`). Unbounded so edges buffer harmlessly until
+    /// the cradle task (if any) takes the receiver.
+    pub cradle_port_tx: UnboundedSender<crate::cradle::PortRequest>,
+    /// Receiver half of [`Self::cradle_port_tx`], taken by
+    /// [`super::cradle::spawn_cradle`] the first time the cradle task starts.
+    /// `None` after it has been taken (or if cradle never spawns — the sender
+    /// then just buffers into a channel nobody drains, which is harmless).
+    pub(super) cradle_port_rx: RefCell<Option<UnboundedReceiver<crate::cradle::PortRequest>>>,
     pub protocol_tasks: RefCell<HashMap<String, Task<()>>>,
 }
 
@@ -297,6 +311,7 @@ impl ConfigManager {
         };
 
         let (tx, rx) = mpsc::channel(255);
+        let (cradle_port_tx, cradle_port_rx) = mpsc::unbounded_channel();
         let mut cm = Self {
             yang_path,
             config_path,
@@ -315,6 +330,8 @@ impl ConfigManager {
             bfd_client_tx: RefCell::new(None),
             stamp_client_tx: RefCell::new(None),
             nd_client_tx: RefCell::new(None),
+            cradle_port_tx,
+            cradle_port_rx: RefCell::new(Some(cradle_port_rx)),
             protocol_tasks: RefCell::new(HashMap::new()),
         };
         cm.init()?;

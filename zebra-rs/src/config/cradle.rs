@@ -25,7 +25,13 @@ pub fn spawn_cradle(config: &ConfigManager) {
             return;
         }
         let (rib_client, rib_rx) = config.subscribe_to_rib_global_links("cradle");
-        let cradle = crate::cradle::Cradle::new(rib_client, rib_rx);
+        // Take the BFD → cradle auto-attach stream (created eagerly in
+        // `ConfigManager::new`, so it exists regardless of spawn order). BFD
+        // may have already queued `Acquire` edges before this task started;
+        // the unbounded channel buffers them and the event loop drains them on
+        // the first poll.
+        let port_rx = config.cradle_port_rx.borrow_mut().take();
+        let cradle = crate::cradle::Cradle::new(rib_client, rib_rx, port_rx);
         config.subscribe("cradle", cradle.cm.tx.clone());
         config.subscribe_show("cradle", cradle.show.tx.clone());
         let task = crate::cradle::serve(cradle);
