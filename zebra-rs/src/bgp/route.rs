@@ -823,6 +823,21 @@ pub(super) fn fib_install_v4(bgp: &super::peer::BgpTop, prefix: Ipv4Net, selecte
                     uni.segs = vec![sid];
                     uni.encap_type = Some(isis_packet::srv6::EncapType::HEncap);
                 }
+                // The FIB install — both the kernel nexthop group
+                // (`GroupUni::new`) and the cradle tee (`cradle_members`) —
+                // reads `mpls_label`, not `mpls`, but the MPLS steer branches
+                // above push only into `mpls`. Re-derive `mpls_label` so a
+                // steered label reaches the data plane, not just `show`
+                // (mirrors the L3VPN path through `NexthopUni::new`). The SRv6
+                // steer branches leave `mpls` empty, so this is a no-op there.
+                uni.mpls_label = uni
+                    .mpls
+                    .iter()
+                    .filter_map(|label| match label {
+                        rib::Label::Explicit(v) => Some(*v),
+                        rib::Label::Implicit(_) => None,
+                    })
+                    .collect();
             }
             // SRv6 service-route steering: prepend the algo-N End SID
             // before an existing End.DT4 service SID. Mutually exclusive
