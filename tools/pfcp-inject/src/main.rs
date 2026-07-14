@@ -24,6 +24,7 @@ use rs_pfcp::ie::apply_action::ApplyAction;
 use rs_pfcp::ie::create_far::CreateFar;
 use rs_pfcp::ie::create_pdr::CreatePdrBuilder;
 use rs_pfcp::ie::destination_interface::{DestinationInterface, Interface};
+use rs_pfcp::ie::f_teid::FteidBuilder;
 use rs_pfcp::ie::far_id::FarId;
 use rs_pfcp::ie::forwarding_parameters::ForwardingParameters;
 use rs_pfcp::ie::fseid::Fseid;
@@ -86,6 +87,17 @@ struct Args {
     /// `--core-endpoint` is set.
     #[arg(long, default_value_t = 0x8765_4321, value_parser = parse_u32)]
     core_teid: u32,
+
+    /// The UPF's own uplink *receive* F-TEID address, CP-allocated
+    /// (TS 29.244 CH=0): sent in the Access PDR's PDI local F-TEID, the way
+    /// free5GC programs a UPF's N3 tunnel. Authoritative for the Type-2 ST
+    /// on the controller. Requires `--n3-teid`.
+    #[arg(long, requires = "n3_teid")]
+    n3_endpoint: Option<IpAddr>,
+
+    /// TEID paired with `--n3-endpoint` (decimal, or `0x`-prefixed hex).
+    #[arg(long, value_parser = parse_u32)]
+    n3_teid: Option<u32>,
 
     /// Network Instance (APN/DNN) — matched against a VRF `mup`
     /// config on the controller.
@@ -164,11 +176,20 @@ fn main() -> Result<()> {
     // Type-1 ST route, an optional core-facing tunnel for the Type-2 ST route.
     // This mirrors the real 5G model (the gNB F-TEID is programmed in the
     // downlink FAR, not the PDI), which the controller extracts from.
-    let pdi = PdiBuilder::new(SourceInterface::new(SourceInterfaceValue::Access))
+    let mut pdi_builder = PdiBuilder::new(SourceInterface::new(SourceInterfaceValue::Access))
         .ue_ip_address(UeIpAddress::new(args.ue_ipv4, args.ue_ipv6))
-        .network_instance(NetworkInstance::new(&args.network_instance))
-        .build()
-        .context("build PDI")?;
+        .network_instance(NetworkInstance::new(&args.network_instance));
+    // The CP-allocated local N3 F-TEID (free5GC style): the uplink tunnel
+    // the UPF must terminate, carried in the Access PDR's PDI.
+    if let (Some(ep), Some(teid)) = (args.n3_endpoint, args.n3_teid) {
+        let b = FteidBuilder::new().teid(teid);
+        let b = match ep {
+            IpAddr::V4(v4) => b.ipv4(v4),
+            IpAddr::V6(v6) => b.ipv6(v6),
+        };
+        pdi_builder = pdi_builder.f_teid(b.build().context("build PDI F-TEID")?);
+    }
+    let pdi = pdi_builder.build().context("build PDI")?;
     let pdr = CreatePdrBuilder::new(PdrId::new(1))
         .precedence(Precedence::new(100))
         .pdi(pdi)

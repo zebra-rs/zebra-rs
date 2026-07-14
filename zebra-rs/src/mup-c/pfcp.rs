@@ -26,6 +26,7 @@ use rs_pfcp::ie::fseid::Fseid;
 use rs_pfcp::ie::node_id::NodeId;
 use rs_pfcp::ie::outer_header_creation::OuterHeaderCreation;
 use rs_pfcp::ie::pdr_id::PdrId;
+use rs_pfcp::ie::source_interface::SourceInterfaceValue;
 use rs_pfcp::ie::update_far::UpdateFar;
 use rs_pfcp::message::association_release_response::AssociationReleaseResponseBuilder;
 use rs_pfcp::message::association_setup_response::AssociationSetupResponseBuilder;
@@ -272,47 +273,67 @@ impl MupC {
             network_instance: ex.network_instance,
             qfi: None,
         };
-        // Core (N9) tunnel for the ST2 (decapsulation / uplink) route. Its
-        // endpoint + TEID identify the *core* GTP-U tunnel uplink traffic is
-        // decapsulated toward; the access/gNB tunnel is never borrowed (wrong
-        // direction). Resolved in three tiers, most-specific first, endpoint
-        // and TEID independently:
+        // Core tunnel for the ST2 (decapsulation / uplink) route: the GTP-U
+        // tunnel the mobile system sends uplink into, i.e. the tunnel this
+        // UPF terminates (the datapath keys the uplink decap PDR on it). The
+        // access/gNB tunnel is never borrowed (wrong direction). Resolved in
+        // four tiers, most-specific first:
+        //   0. CP-allocated (TS 29.244 CH=0) — the Access PDR's PDI local
+        //      F-TEID. The SMF hands this same TEID to the gNB as the uplink
+        //      target (free5GC allocates every UPF N3 TEID this way and
+        //      ignores the Created PDR), so when present nothing else may
+        //      key the tunnel.
         //   1. learned over PFCP — a Dest = Core FAR Outer Header Creation, a
         //      real N9 tunnel to a downstream anchor. Already on the session.
         //   2. the statically configured anchor: `upf-address` + `upf-teid`.
         //   3. self-allocated — MUP-U *is* the anchor UPF, so it owns the core
-        //      receive F-TEID: its own address (`local_ip`) plus a fresh TEID
-        //      from the same pool as the N3 F-TEID. A real UPF allocates the
-        //      TEIDs of the tunnels it terminates; today (control-plane only)
-        //      this is a nominal value like the N3 one, and a real datapath
-        //      must install it. `local_ip` mirrors the N3 F-TEID's address; a
-        //      full deployment would use the interwork gateway's N9 endpoint
-        //      (a future config knob).
+        //      receive F-TEID: its own address (`local_ip`) plus a fresh
+        //      TEID. A real UPF allocates the TEIDs of the tunnels it
+        //      terminates.
         // teid 0 is the null TEID and never a valid tunnel, so a learned or
         // configured 0 self-allocates too — an ST2 always carries a non-zero
         // core TEID.
-        session.core_endpoint = session
-            .core_endpoint
-            .or(self.config.upf_address)
-            .or(Some(self.local_ip()));
-        if session.core_teid == 0 {
-            session.core_teid = match self.config.upf_teid {
-                Some(teid) if teid != 0 => teid,
-                _ => self.sessions.alloc_teid(),
-            };
+        let cp_allocated = ex.n3_local;
+        // Non-zero only when learned over PFCP (a Dest = Core FAR OHC).
+        let learned_core = session.core_teid != 0;
+        if let Some((teid, addr)) = cp_allocated {
+            session.core_teid = teid;
+            session.core_endpoint = Some(addr);
+        } else {
+            session.core_endpoint = session
+                .core_endpoint
+                .or(self.config.upf_address)
+                .or(Some(self.local_ip()));
+            if !learned_core {
+                session.core_teid = match self.config.upf_teid {
+                    Some(teid) if teid != 0 => teid,
+                    _ => self.sessions.alloc_teid(),
+                };
+            }
         }
         self.sessions.insert(session.clone());
 
         let local_ip = self.local_ip();
-        // UPF role: allocate our N3 F-TEID and return it in a Created PDR (PDR
-        // id 1). The SMF reads the UP-side N3 F-TEID from the establishment
-        // response's Created PDR (TS 29.244 §7.5.3) and hands it to the gNB as
-        // the uplink tunnel target — without it the CP cannot complete the PDU
-        // session. The address is the controller's own (`local_ip`); a full
-        // MUP deployment would advertise the interwork gateway's N3 endpoint
-        // here (a future config knob).
-        let n3_teid = self.sessions.alloc_teid();
-        let reply = build_establishment_response(cp_seid, seq, seid, local_ip, n3_teid);
+        // UPF role: return our N3 F-TEID in a Created PDR (PDR id 1). The SMF
+        // reads the UP-side N3 F-TEID from the establishment response's
+        // Created PDR (TS 29.244 §7.5.3) and hands it to the gNB as the
+        // uplink tunnel target — without it the CP cannot complete the PDU
+        // session. When the core F-TEID is ours (CP-allocated, configured
+        // anchor, or self-anchored — the UPF itself terminates the uplink
+        // tunnel), the N3 F-TEID must be the SAME tunnel the ST2 describes:
+        // the datapath keys the uplink decap PDR (`H.M.GTP4.D`) on the ST2's
+        // endpoint+TEID, so a gNB handed anything else sends uplink into a
+        // tunnel no PDR matches. Only a core F-TEID learned over PFCP (a
+        // downstream anchor's N9 tunnel, not a tunnel we terminate) keeps a
+        // separate nominal N3 allocation.
+        let (n3_ip, n3_teid) = if let Some((teid, addr)) = cp_allocated {
+            (addr, teid)
+        } else if learned_core {
+            (local_ip, self.sessions.alloc_teid())
+        } else {
+            (session.core_endpoint.unwrap_or(local_ip), session.core_teid)
+        };
+        let reply = build_establishment_response(cp_seid, seq, seid, local_ip, n3_ip, n3_teid);
         (reply, vec![MupCEvent::SessionUp(session)])
     }
 
@@ -376,7 +397,12 @@ impl MupC {
             session.teid = 0;
             session.endpoint = None;
         }
-        if let Some((t, e)) = ex.core {
+        if let Some((t, e)) = ex.n3_local {
+            // CP-(re)allocated uplink receive F-TEID — authoritative (see
+            // the establishment tiers).
+            session.core_teid = t;
+            session.core_endpoint = Some(e);
+        } else if let Some((t, e)) = ex.core {
             session.core_teid = t;
             session.core_endpoint = Some(e);
         }
@@ -421,21 +447,24 @@ impl MupC {
     }
 }
 
-/// Build an accepted Session Establishment Response carrying our allocated N3
-/// F-TEID in a Created PDR (PDR id 1). The SMF reads the UP-side N3 F-TEID
-/// from here to give the gNB an uplink target. The response header SEID = the
-/// CP's F-SEID (so the SMF correlates it); our own SEID rides only in the
-/// F-SEID IE. Returns `None` if the codec fails to build the message.
+/// Build an accepted Session Establishment Response carrying our N3 F-TEID
+/// (`n3_ip` + `n3_teid` — the uplink tunnel we terminate) in a Created PDR
+/// (PDR id 1). The SMF reads the UP-side N3 F-TEID from here to give the gNB
+/// an uplink target. `node_ip` is the N4 identity (Node ID + F-SEID address)
+/// and may differ from `n3_ip`. The response header SEID = the CP's F-SEID
+/// (so the SMF correlates it); our own SEID rides only in the F-SEID IE.
+/// Returns `None` if the codec fails to build the message.
 fn build_establishment_response(
     cp_seid: u64,
     seq: SequenceNumber,
     up_seid: u64,
     node_ip: IpAddr,
+    n3_ip: IpAddr,
     n3_teid: u32,
 ) -> Option<Vec<u8>> {
     let fteid = {
         let b = FteidBuilder::new().teid(n3_teid);
-        let b = match node_ip {
+        let b = match n3_ip {
             IpAddr::V4(v4) => b.ipv4(v4),
             IpAddr::V6(v6) => b.ipv6(v6),
         };
@@ -531,6 +560,14 @@ struct PfcpExtract {
     /// tunnel (e.g. an N9 to an anchor UPF). Drives the Type-2 ST route.
     /// Absent for a plain N6 breakout, which has no core-side GTP tunnel.
     core: Option<(u32, IpAddr)>,
+    /// The UPF's own uplink *receive* F-TEID when the CP allocated it
+    /// (TS 29.244 CH=0): the Access-side PDR's PDI local F-TEID. The SMF
+    /// hands this same TEID to the gNB as the uplink target (free5GC
+    /// allocates all UPF N3 TEIDs this way and ignores the Created PDR), so
+    /// when present it is authoritative for the Type-2 ST route / uplink
+    /// decap PDR. Absent when the CP asks the UP to choose (CH=1) or sends
+    /// no PDI F-TEID.
+    n3_local: Option<(u32, IpAddr)>,
     /// The message deactivated the downlink: an Update FAR switched to
     /// BUFF/DROP with no new Outer Header Creation (the AN-release / UE-idle
     /// flow). The gNB tunnel is torn down, so the Type-1 ST route must be
@@ -585,20 +622,22 @@ fn apply_far_ohc(
 /// Modification message.
 ///
 /// UE IP and Network Instance come from the Create PDRs (matched by UE
-/// address / carried per-PDI). The GTP-U tunnel endpoints come from the
-/// **FARs' Outer Header Creation**, *not* the PDI F-TEIDs — this is the key
-/// correctness point (draft-ietf-bess-mup-safi §3.2.1 / TS 29.244):
+/// address / carried per-PDI). The *remote* GTP-U tunnel endpoints come from
+/// the **FARs' Outer Header Creation** (draft-ietf-bess-mup-safi §3.2.1 /
+/// TS 29.244):
 ///
 ///   * The Type-1 ST route's endpoint is the **gNB** (the access-side tunnel
 ///     the PE encapsulates downlink traffic toward). In PFCP that gNB F-TEID
 ///     lives in the **downlink FAR's Outer Header Creation** (Destination
 ///     Interface = Access), which the SMF programs from the N2 setup — often
-///     only in a later Session Modification. The Access-side PDI F-TEID is the
-///     UPF's *own* N3 receive endpoint (where the gNB sends uplink), which is
-///     neither the gNB nor the core anchor, so it is deliberately ignored.
-///   * The Type-2 ST route's endpoint is the **core**-side GTP tunnel, from a
-///     FAR bound for the Core interface — present only when the UPF has a
-///     core-facing GTP tunnel (N9 / interworking), absent for N6 breakout.
+///     only in a later Session Modification. It never comes from a PDI
+///     F-TEID (that is the UPF's own side, not the gNB).
+///   * The Type-2 ST route's endpoint is the tunnel this UPF *terminates*
+///     for uplink. When the CP allocates the UPF's N3 F-TEID itself
+///     (TS 29.244 CH=0 — free5GC always does), it arrives in the
+///     **Access-side PDR's PDI local F-TEID** and is authoritative
+///     (`n3_local`). A FAR bound for the Core interface instead carries a
+///     core-facing tunnel (N9 / interworking) toward a downstream anchor.
 fn extract_pfcp(msg: &dyn PfcpMessage) -> PfcpExtract {
     let mut ex = PfcpExtract::default();
     // UE IP + Network Instance from the PDRs (source-interface-agnostic).
@@ -619,6 +658,21 @@ fn extract_pfcp(msg: &dyn PfcpMessage) -> PfcpExtract {
             && let Some(ni) = &pdi.network_instance
         {
             ex.network_instance = Some(ni.instance.clone());
+        }
+        // The Access PDR's PDI local F-TEID: the CP-allocated (CH=0) uplink
+        // receive tunnel. The remote tunnels stay FAR-OHC-only (below); this
+        // one is *ours* and keys the uplink decap.
+        if ex.n3_local.is_none()
+            && pdi.source_interface.value == SourceInterfaceValue::Access
+            && let Some(f) = &pdi.f_teid
+            && !f.ch
+            && f.teid.value() != 0
+            && let Some(addr) = f
+                .ipv4_address
+                .map(IpAddr::V4)
+                .or(f.ipv6_address.map(IpAddr::V6))
+        {
+            ex.n3_local = Some((f.teid.value(), addr));
         }
     }
     // GTP-U tunnel endpoints from the FARs' Outer Header Creation.
@@ -730,12 +784,12 @@ mod tests {
             .unwrap()
     }
 
-    /// A Session Establishment Request carrying UE IPv4 + Network Instance in a
-    /// PDR, the UPF's *own* N3 F-TEID in that PDR's PDI (a red herring the
-    /// controller must IGNORE — it is the UPF address, not the gNB), and the
-    /// gNB tunnel in a downlink FAR's Outer Header Creation (Destination
-    /// Interface = Access) — the endpoint the controller must pick for the
-    /// Type-1 ST route.
+    /// A Session Establishment Request carrying UE IPv4 + Network Instance in
+    /// a PDR, the UPF's *own* CP-allocated N3 receive F-TEID in that PDR's
+    /// PDI (TS 29.244 CH=0 — authoritative for the uplink tunnel: free5GC
+    /// hands this same TEID to the gNB), and the gNB tunnel in a downlink
+    /// FAR's Outer Header Creation (Destination Interface = Access) — the
+    /// endpoint the controller must pick for the Type-1 ST route.
     fn establishment_bytes() -> Vec<u8> {
         let upf_n3 = FteidBuilder::new()
             .teid(0xDEAD_BEEFu32)
@@ -744,6 +798,37 @@ mod tests {
             .unwrap();
         let pdi = PdiBuilder::new(SourceInterface::new(SourceInterfaceValue::Access))
             .f_teid(upf_n3)
+            .ue_ip_address(UeIpAddress::new(Some(Ipv4Addr::new(192, 0, 2, 5)), None))
+            .network_instance(NetworkInstance::new("internet.apn"))
+            .build()
+            .unwrap();
+        let pdr = CreatePdrBuilder::new(PdrId::new(1))
+            .precedence(Precedence::new(100))
+            .pdi(pdi)
+            .far_id(FarId::new(1))
+            .build()
+            .unwrap();
+        let far = gtpu_far(
+            1,
+            Interface::Access,
+            0x1234_5678,
+            Ipv4Addr::new(10, 0, 0, 1),
+        );
+        SessionEstablishmentRequestBuilder::new(0u64, 1u32)
+            .node_id(Ipv4Addr::new(10, 0, 0, 2))
+            .fseid(0x1111u64, Ipv4Addr::new(10, 0, 0, 2))
+            .create_pdrs(vec![pdr.to_ie()])
+            .create_fars(vec![far.to_ie()])
+            .build()
+            .unwrap()
+            .marshal()
+    }
+
+    /// Like [`establishment_bytes`] but with no PDI F-TEID: the CP left the
+    /// uplink F-TEID allocation to the UP (or omitted it), so the lower
+    /// resolution tiers (configured anchor / self-allocation) apply.
+    fn establishment_no_local_fteid_bytes() -> Vec<u8> {
+        let pdi = PdiBuilder::new(SourceInterface::new(SourceInterfaceValue::Access))
             .ue_ip_address(UeIpAddress::new(Some(Ipv4Addr::new(192, 0, 2, 5)), None))
             .network_instance(NetworkInstance::new("internet.apn"))
             .build()
@@ -808,7 +893,7 @@ mod tests {
         associate(&mut mupc);
         let bytes = establishment_two_endpoints_bytes();
         let msg = message::parse(&bytes).unwrap();
-        let (_reply, events) = mupc.handle_session_establishment(msg.as_ref(), peer());
+        let (reply, events) = mupc.handle_session_establishment(msg.as_ref(), peer());
         let MupCEvent::SessionUp(session) = &events[0] else {
             panic!("expected SessionUp, got {:?}", events[0]);
         };
@@ -823,6 +908,20 @@ mod tests {
         assert_eq!(
             session.core_endpoint,
             Some(IpAddr::V4(Ipv4Addr::new(10, 9, 0, 1)))
+        );
+        // A learned core F-TEID is a downstream anchor's N9 tunnel, not one
+        // we terminate — the N3 F-TEID stays a separate own allocation.
+        let resp = message::parse(&reply.expect("a response")).unwrap();
+        let created = resp
+            .ies(IeType::CreatedPdr)
+            .next()
+            .and_then(|ie| CreatedPdr::unmarshal(&ie.payload).ok())
+            .expect("establishment response must carry a Created PDR");
+        assert_ne!(created.f_teid.teid.value(), 0);
+        assert_ne!(
+            created.f_teid.teid.value(),
+            0x8765_4321,
+            "learned N9 core TEID must not be echoed as our N3 F-TEID"
         );
     }
 
@@ -1014,10 +1113,54 @@ mod tests {
             .and_then(|ie| CreatedPdr::unmarshal(&ie.payload).ok())
             .expect("establishment response must carry a Created PDR");
         assert_ne!(created.f_teid.teid.value(), 0, "N3 F-TEID must be non-zero");
+        // The CP allocated the uplink F-TEID (PDI local F-TEID, CH=0): it is
+        // authoritative — the SMF hands that same TEID to the gNB — so both
+        // the ST2 core tunnel and the echoed Created PDR must carry it.
+        assert_eq!(session.core_teid, 0xDEAD_BEEF);
+        assert_eq!(
+            session.core_endpoint,
+            Some(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 8)))
+        );
+        assert_eq!(created.f_teid.teid.value(), 0xDEAD_BEEF);
         assert_eq!(
             created.f_teid.ipv4_address,
-            Some(Ipv4Addr::LOCALHOST),
-            "N3 F-TEID address = controller local_ip (default 127.0.0.1)"
+            Some(Ipv4Addr::new(127, 0, 0, 8)),
+            "Created PDR echoes the CP-allocated N3 F-TEID"
+        );
+        // The N3 F-TEID handed to the SMF IS the tunnel the ST2 describes —
+        // the gNB sends uplink with this TEID, and the datapath keys the
+        // decap PDR on the ST2's endpoint+TEID. Anything else sends every
+        // uplink packet into an unmatched tunnel.
+        assert_eq!(
+            created.f_teid.teid.value(),
+            session.core_teid,
+            "Created PDR N3 TEID must equal the ST2 core TEID"
+        );
+    }
+
+    /// The self-anchored tiers (Created-PDR allocation) apply only when the
+    /// CP did not allocate the uplink F-TEID itself. When it did (PDI local
+    /// F-TEID, CH=0), that tunnel wins over a configured `upf-address` /
+    /// `upf-teid` too.
+    #[test]
+    fn cp_allocated_n3_fteid_beats_configured_anchor() {
+        let cfg = MupCConfig {
+            upf_address: Some(IpAddr::V4(Ipv4Addr::new(10, 100, 0, 1))),
+            upf_teid: Some(0x0102_0304),
+            ..Default::default()
+        };
+        let (mut mupc, _bgp_rx) = MupC::new_for_test(cfg);
+        associate(&mut mupc);
+        let est = message::parse(&establishment_bytes()).unwrap();
+        let (_reply, events) = mupc.handle_session_establishment(est.as_ref(), peer());
+        let MupCEvent::SessionUp(session) = &events[0] else {
+            panic!("expected SessionUp");
+        };
+        assert_eq!(session.core_teid, 0xDEAD_BEEF);
+        assert_eq!(
+            session.core_endpoint,
+            Some(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 8))),
+            "CP-allocated local F-TEID beats the configured anchor"
         );
     }
 
@@ -1033,10 +1176,10 @@ mod tests {
         };
         let (mut mupc, _bgp_rx) = MupC::new_for_test(cfg);
         associate(&mut mupc);
-        // establishment_bytes carries a gNB tunnel (Access FAR OHC) but no
-        // core-side tunnel.
-        let est = message::parse(&establishment_bytes()).unwrap();
-        let (_reply, events) = mupc.handle_session_establishment(est.as_ref(), peer());
+        // A gNB tunnel (Access FAR OHC) but no core-side tunnel and no
+        // CP-allocated local F-TEID.
+        let est = message::parse(&establishment_no_local_fteid_bytes()).unwrap();
+        let (reply, events) = mupc.handle_session_establishment(est.as_ref(), peer());
         let MupCEvent::SessionUp(session) = &events[0] else {
             panic!("expected SessionUp");
         };
@@ -1053,6 +1196,21 @@ mod tests {
         assert_eq!(
             session.endpoint,
             Some(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1)))
+        );
+        // The configured anchor is a tunnel WE terminate, so the N3 F-TEID
+        // handed to the SMF must be that same tunnel, not a fresh allocation
+        // at the N4 address.
+        let resp = message::parse(&reply.expect("a response")).unwrap();
+        let created = resp
+            .ies(IeType::CreatedPdr)
+            .next()
+            .and_then(|ie| CreatedPdr::unmarshal(&ie.payload).ok())
+            .expect("establishment response must carry a Created PDR");
+        assert_eq!(created.f_teid.teid.value(), 0x0102_0304);
+        assert_eq!(
+            created.f_teid.ipv4_address,
+            Some(Ipv4Addr::new(10, 100, 0, 1)),
+            "Created PDR F-TEID address = configured upf-address"
         );
     }
 
@@ -1087,9 +1245,9 @@ mod tests {
     fn anchor_upf_self_allocates_core_teid() {
         let (mut mupc, _bgp_rx) = MupC::new_for_test(MupCConfig::default());
         associate(&mut mupc);
-        // A gNB tunnel (access teid 0x1234_5678) but no core tunnel, and no
-        // upf-address / upf-teid configured.
-        let est = message::parse(&establishment_bytes()).unwrap();
+        // A gNB tunnel (access teid 0x1234_5678) but no core tunnel, no
+        // CP-allocated local F-TEID, and no upf-address / upf-teid configured.
+        let est = message::parse(&establishment_no_local_fteid_bytes()).unwrap();
         let (_reply, events) = mupc.handle_session_establishment(est.as_ref(), peer());
         let MupCEvent::SessionUp(session) = &events[0] else {
             panic!("expected SessionUp");

@@ -1,0 +1,40 @@
+gnb:
+  amfN2Ip: "10.0.1.1" # AMF N2 IP at core network
+  ranN2Ip: "10.0.1.2" # RAN N2 IP for connecting to AMF
+  upfN3Ip: "10.0.12.2" # UPF N3 IP at core network
+  ranN3Ip: "10.0.1.2" # RAN N3 IP for connecting to UPF
+
+  ranControlPlaneIp: "127.0.0.1"
+  ranDataPlaneIp: "127.0.0.1"
+
+  amfN2Port: 38412 # AMF N2 SCTP port at core network
+  ranN2Port: 38413 # RAN N2 SCTP port for connecting to AMF
+  upfN3Port: 2152 # UPF N3 GTP-U port at core network
+  ranN3Port: 2152 # RAN N3 GTP-U port for connecting to UPF
+
+  ranControlPlanePort: 31413 # RAN Control Plane port open for UE connection
+  ranDataPlanePort: 31414 # RAN Data Plane port open for UE connection
+
+  gnbId: "000314" # gNB ID
+  gnbName: "gNB" # gNB name
+
+  plmnId:
+    mcc: "208" # Mobile Country Code
+    mnc: "93" # Mobile Network Code
+
+  tai:
+    tac: "000001" # Tracking Area Code
+    broadcastPlmnId:
+      mcc: "208" # Mobile Country Code
+      mnc: "93" # Mobile Network Code
+
+  snssai:
+    sst: "1" # Slice/Service Type
+    sd: "010203" # Slice Differentiator
+
+  api:
+    ip: "10.0.1.2" # API for console usage
+    port: 40104 # API port for console usage
+
+logger:
+  level: "info" # error, warn, info, debug, trace, test
