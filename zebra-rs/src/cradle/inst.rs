@@ -666,7 +666,11 @@ impl Cradle {
         .unwrap();
         // Single-hook benchmark mode — shown only when set (unset = full pipeline).
         if let Some(mode) = &self.ebpf_mode {
-            writeln!(out, "  Mode:            {mode} (single-hook L3-only benchmark)").unwrap();
+            writeln!(
+                out,
+                "  Mode:            {mode} (single-hook L3-only benchmark)"
+            )
+            .unwrap();
         }
         writeln!(
             out,
