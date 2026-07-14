@@ -39,6 +39,11 @@ jobs:
       GH_TOKEN: ${{ secrets.APT_REPO_TOKEN }}
       GH_REPO: zebra-rs/zebra-rs.github.io
     steps:
+      # Checkout first (it cleans the workspace) so `cradle-version` is present
+      # before we stage any .debs. Uses the default token (own public repo).
+      - name: Checkout (for the cradle-version pin)
+        uses: actions/checkout@v5
+
       - name: Install apt tooling
         run: sudo apt-get update && sudo apt-get install -y dpkg-dev apt-utils gnupg
 
@@ -48,6 +53,36 @@ jobs:
           path: incoming
           pattern: deb-${{ matrix.codename }}-*
           merge-multiple: true
+
+      # Fold the pinned cradle-rs release's .debs into the same flat repo so
+      # `apt install zebra-rs` resolves `Recommends: cradle-rs (>= <pin>)` from
+      # here (zebra-rs does not host cradle; it ingests cradle's GitHub Release).
+      # cradle-rs/cradle-rs is a separate PUBLIC repo, so `--repo` + the default
+      # GITHUB_TOKEN suffice (the job-level GH_TOKEN/GH_REPO target the pages
+      # repo; `--repo` overrides GH_REPO for this command). Both the stable and
+      # nightly channels ingest the pinned STABLE cradle release.
+      - name: Ingest the pinned cradle-rs .debs for this codename
+        env:
+          GH_TOKEN: ${{ github.token }}
+          CODENAME: ${{ matrix.codename }}
+        run: |
+          set -euo pipefail
+          CRADLE_VER="$(cat cradle-version)"
+          echo "Pinned cradle-rs release: v${CRADLE_VER} (from ./cradle-version)"
+          if ! gh release download "v${CRADLE_VER}" \
+                --repo cradle-rs/cradle-rs \
+                --pattern "cradle-rs_*-${CODENAME}_*.deb" \
+                --dir incoming; then
+            echo "::error::cradle-rs release v${CRADLE_VER} (pinned in ./cradle-version) not found, or it has no ${CODENAME} .debs. Cut the cradle-rs v${CRADLE_VER} release before publishing the zebra-rs APT repo."
+            exit 1
+          fi
+          n=$(ls incoming/cradle-rs_*-"${CODENAME}"_*.deb 2>/dev/null | wc -l)
+          echo "Ingested ${n} cradle-rs .deb(s) for ${CODENAME}:"
+          ls -la incoming/cradle-rs_*-"${CODENAME}"_*.deb
+          if [ "${n}" -lt 1 ]; then
+            echo "::error::no cradle-rs .debs matched cradle-rs_*-${CODENAME}_*.deb in release v${CRADLE_VER}"
+            exit 1
+          fi
 
       - name: Import signing key
         run: echo "$APT_GPG_PRIVATE_KEY" | base64 -d | gpg --batch --import

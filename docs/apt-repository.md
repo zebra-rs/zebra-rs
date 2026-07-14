@@ -143,6 +143,29 @@ signed flat repo. Test from a clean Ubuntu box using the nightly instructions at
    `apt-<codename>` flat repos. A tag that doesn't match the `version` file fails
    fast in the `check` job.
 
+### Bundled cradle-rs engine
+
+`apt install zebra-rs` pulls the eBPF data-plane engine automatically via
+`Recommends: cradle-rs (>= <pin>)`. To make that resolvable, `publish-apt.yaml`
+ingests the pinned [cradle-rs](https://github.com/cradle-rs/cradle-rs) release's
+`.deb`s into the same flat `Packages` index (same signed `Release`), so both
+packages come from one repo. zebra-rs does **not** host cradle — it folds in
+cradle's own GitHub-Release `.deb`s (they need no re-signing; apt trusts the
+signed repo metadata).
+
+The pin lives in the top-level **`cradle-version`** file — the cradle release
+this zebra-rs targets (the `proto/cradle.proto` contract). `version-update.sh`
+keeps the `Recommends` floor in both nfpm configs equal to it. When bumping:
+
+1. Set `cradle-version` to the compatible cradle release and re-run
+   `packaging/version-update.sh`.
+2. **Cut the matching `cradle-rs` `v<pin>` release first** (its own
+   `release.yaml`). If that release is missing when zebra's `publish-apt` runs,
+   the `Ingest the pinned cradle-rs .debs` step fails fast with a clear error.
+
+Both channels (stable `apt-<codename>` and `nightly-<codename>`) ingest the
+pinned **stable** cradle release.
+
 ## Operational notes
 
 - The `apt-*` / `nightly-*` releases **are** the repository — don't delete them.
