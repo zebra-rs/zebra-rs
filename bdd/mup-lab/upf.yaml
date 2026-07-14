@@ -1,0 +1,54 @@
+system:
+  cradle:
+    enabled: true
+vrf:
+- name: mobile-dl
+- name: mobile-ul
+interface:
+- if-name: lo
+  ipv6:
+    address: 2001:db8::1/128
+- if-name: mun3
+  ipv4:
+    address: 10.0.12.2/24
+- if-name: mudl
+  vrf: mobile-dl
+  ipv4:
+    address: 10.0.61.1/24
+- if-name: muul
+  vrf: mobile-ul
+  ipv4:
+    address: 10.0.60.1/24
+router:
+  static:
+    ipv4:
+      route:
+      - prefix: 10.0.1.0/24
+        nexthop:
+        - address: 10.0.12.1
+  bgp:
+    global:
+      as: 65000
+      router-id: 1.1.1.1
+    vrf:
+    - name: mobile-dl
+      rd: "65000:1"
+      afi-safi:
+        mup:
+          dataplane: gtp
+          route:
+          - type: st1
+            network-instance: internet
+    - name: mobile-ul
+      rd: "65000:2"
+      afi-safi:
+        mup:
+          dataplane: gtp
+          route:
+          - type: st2
+            network-instance: internet
+    mup-c:
+      enabled: true
+      controller-address: 2001:db8::1
+      pfcp:
+        listen-address: 10.0.12.2

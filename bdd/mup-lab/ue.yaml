@@ -1,0 +1,45 @@
+ue:
+  ranControlPlaneIp: "127.0.0.1"
+  ranDataPlaneIp: "127.0.0.1"
+
+  ranControlPlanePort: 31413 # RAN Control Plane port open for UE connection
+  ranDataPlanePort: 31414 # RAN Data Plane port open for UE connection
+
+  plmnId:
+    mcc: "208" # Mobile Country Code
+    mnc: "93" # Mobile Network Code
+  msin: "0000000001" # MSIN
+
+  authenticationSubscription:
+    encPermanentKey: "8baf473f2f8fd09487cccbd7097c6862" # Encrypted Permanent Key
+    encOpcKey: "8e27b6af0e692e750f32667a3b14605d" # Encrypted OPC Key
+    authenticationManagementField: "8000" # Authentication Management Field
+    sequenceNumber: "000000000023" # Sequence Number
+
+  integrityAlgorithm:
+    nia0: false # Integrity Algorithm 0
+    nia1: false # Integrity Algorithm 1
+    nia2: true # Integrity Algorithm 2
+    nia3: false # Integrity Algorithm 3
+  cipheringAlgorithm:
+    nea0: true # Ciphering Algorithm 0
+    nea1: false # Ciphering Algorithm 1
+    nea2: false # Ciphering Algorithm 2
+    nea3: false # Ciphering Algorithm 3
+
+  pduSession:
+    dnn: "internet" # DNN
+    snssai:
+      sst: "1" # Slice/Service Type
+      sd: "010203" # Slice Differentiator
+
+  accessType: "3GPP_ACCESS" # 3GPP_ACCESS, NON_3GPP_ACCESS
+
+  nrdc:
+    enable: false # Enable NRDC
+
+  ueTunnelDevice: "ueTun" # UE Tunnel Device Name
+  ignoreSetupTunnel: false # Ignore Setup Tunnel
+
+logger:
+  level: "info" # error, warn, info, debug, trace
