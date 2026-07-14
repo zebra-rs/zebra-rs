@@ -43,6 +43,7 @@ syslog = "7"
 serde = { version = "1.0", features = ["derive"] }
 serde_json = { version = "1.0", features = ["preserve_order"] }
 serde_yaml = "0.9"
+marked-yaml = "0.7"
 ciborium = "0.2"
 clap = { version = "4", features = ["derive"] }
 alphanumeric-sort = "1.5.3"

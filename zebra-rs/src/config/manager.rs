@@ -9,7 +9,7 @@ use super::configs::{carbon_copy, delete, set};
 use super::cradle::spawn_cradle;
 use super::files::load_config_file;
 use super::isis::{despawn_isis, spawn_isis};
-use super::json::json_read;
+use super::json::{DocError, json_read};
 use super::nd::spawn_nd;
 use super::ospf::{despawn_ospf, despawn_ospfv3, spawn_ospf, spawn_ospfv3};
 use super::parse::State;
@@ -19,7 +19,7 @@ use super::stamp::{despawn_stamp, spawn_stamp};
 use super::util::trim_first_line;
 use super::vrf_redirect_split;
 use super::vty::CommandPath;
-use super::yaml::yaml_parse;
+use super::yaml::yaml_read;
 use super::{ApplyCode, Completion, Config, ConfigRequest, DisplayRequest, ExecCode};
 
 use crate::context::Task;
@@ -27,7 +27,7 @@ use libyang::{Entry, YangStore, to_entry};
 use similar::TextDiff;
 use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::rc::Rc;
 use tokio::sync::mpsc::{self, Receiver, Sender, UnboundedReceiver, UnboundedSender};
 use tokio::sync::oneshot;
@@ -798,7 +798,10 @@ impl ConfigManager {
     /// permit-all). Reject the document instead, returning the offending
     /// keys as `Err`, so the operator sees exactly which keys the schema
     /// refused.
-    fn config_to_commands(&self, config: &str) -> Result<(ConfigFormat, Vec<String>), Vec<String>> {
+    fn config_to_commands(
+        &self,
+        config: &str,
+    ) -> Result<(ConfigFormat, Vec<String>), Vec<DocError>> {
         let mode = self.modes.get("configure").unwrap();
         let mut entry: Option<Rc<Entry>> = None;
         for e in mode.entry.dir.borrow().iter() {
@@ -812,10 +815,7 @@ impl ConfigManager {
         let (cmds, doc_errors) = match format_type {
             ConfigFormat::Cli => (load_config_file(config.to_string()), Vec::new()),
             ConfigFormat::Json => json_read(entry, config),
-            ConfigFormat::Yaml => {
-                let json = yaml_parse(config);
-                json_read(entry, json.as_str())
-            }
+            ConfigFormat::Yaml => yaml_read(entry, config),
             ConfigFormat::SetDelete => (
                 config
                     .lines()
@@ -834,12 +834,11 @@ impl ConfigManager {
     pub fn load_config(&self) {
         if let Ok(output) = std::fs::read_to_string(&self.config_path) {
             // An empty (or comment/whitespace-only) config file carries no
-            // commands. Skip the format parsers entirely: the YAML default
-            // would otherwise `yaml_parse("")` → `null` → a bogus bare
-            // `set` line. (Done here, not in `config_to_commands`, so the
-            // `vtyctl apply` path keeps its existing empty-document
-            // behavior — an empty apply must not clear+commit the running
-            // config.)
+            // commands. Skip the format parsers entirely so the YAML
+            // default doesn't parse `""` into a spurious command. (Done
+            // here, not in `config_to_commands`, so the `vtyctl apply`
+            // path keeps its existing empty-document behavior — an empty
+            // apply must not clear+commit the running config.)
             if !output.trim().is_empty() {
                 match self.config_to_commands(&output) {
                     Ok((_format, cmds)) => {
@@ -850,11 +849,7 @@ impl ConfigManager {
                         }
                     }
                     Err(doc_errors) => {
-                        tracing::error!(
-                            "config file {}: rejected by schema: {}",
-                            self.config_path.display(),
-                            doc_errors.join("; ")
-                        );
+                        tracing::error!("{}", render_config_errors(&self.config_path, &doc_errors));
                     }
                 }
             }
@@ -1037,10 +1032,17 @@ impl ConfigManager {
                 let (format_type, cmds) = match self.config_to_commands(&req.config) {
                     Ok(parsed) => parsed,
                     Err(doc_errors) => {
+                        // No filename here (the config was streamed in via
+                        // `vtyctl apply`), so each error carries its own
+                        // `line N:` prefix when the format preserved it.
                         let resp = DeployResponse {
                             apply_code: ApplyCode::ParseError,
                             exec_code: ExecCode::Nomatch,
-                            cmd: doc_errors.join("; "),
+                            cmd: doc_errors
+                                .iter()
+                                .map(DocError::to_string)
+                                .collect::<Vec<_>>()
+                                .join("; "),
                         };
                         let _ = req.resp.send(resp);
                         return;
@@ -1440,6 +1442,26 @@ fn collect_dynamics(entry: &Entry, set: &mut HashSet<String>) {
     }
 }
 
+/// Render a startup config-load rejection into a single loggable
+/// message. Each schema error is prefixed with `<file>:<line>:` (a
+/// clickable location) when the format preserved a source line, or just
+/// `<file>:` otherwise (e.g. the JSON front-end, which carries none).
+fn render_config_errors(config_path: &Path, errors: &[DocError]) -> String {
+    let detail = errors
+        .iter()
+        .map(|e| match e.line {
+            Some(line) => format!("{}:{}: {}", config_path.display(), line, e.message),
+            None => format!("{}: {}", config_path.display(), e.message),
+        })
+        .collect::<Vec<_>>()
+        .join("\n  ");
+    format!(
+        "config file {} rejected by schema:\n  {}",
+        config_path.display(),
+        detail
+    )
+}
+
 #[derive(Debug, PartialEq)]
 pub enum ConfigFormat {
     Cli,
@@ -1569,6 +1591,63 @@ mod config_format_tests {
     fn yaml_mapping() {
         assert_eq!(config_format_type("vrf:\n- name: N3\n"), ConfigFormat::Yaml);
         assert_eq!(config_format_type("router:\n  bgp:\n"), ConfigFormat::Yaml);
+    }
+}
+
+#[cfg(test)]
+mod config_error_render_tests {
+    use super::*;
+    use libyang::{YangStore, to_entry};
+    use std::path::PathBuf;
+    use std::rc::Rc;
+
+    fn set_entry() -> Rc<Entry> {
+        let mut yang = YangStore::new();
+        yang.add_path(concat!(env!("CARGO_MANIFEST_DIR"), "/yang"));
+        yang.read_with_resolve("configure")
+            .expect("configure mode loads");
+        yang.identity_resolve();
+        let module = yang
+            .find_module("configure")
+            .expect("configure module present");
+        to_entry(&yang, module)
+            .dir
+            .borrow()
+            .iter()
+            .find(|e| e.name == "set")
+            .cloned()
+            .expect("set subtree")
+    }
+
+    /// End-to-end reproduction of the reported failure: a YAML config
+    /// with an unknown `community-set` leaf under a policy match is
+    /// rejected AND the logged message names the exact source line of
+    /// the offending key as a clickable `<file>:<line>:` location.
+    #[test]
+    fn yaml_unknown_key_renders_clickable_source_line() {
+        let config = "\
+policy:
+- name: 198.19.14.192/28
+  entry:
+  - number: 10
+    action: permit
+    match:
+      community-set: FOO
+";
+        assert_eq!(config_format_type(config), ConfigFormat::Yaml);
+
+        let (_lines, errors) = yaml_read(set_entry(), config);
+        let message = render_config_errors(&PathBuf::from("zebra.yaml"), &errors);
+
+        // `community-set:` sits on line 7 (1-based) of the document.
+        assert!(
+            message.contains("zebra.yaml:7:"),
+            "expected a clickable file:line location; message: {message}"
+        );
+        assert!(
+            message.contains("unknown key `community-set`"),
+            "message: {message}"
+        );
     }
 }
 
