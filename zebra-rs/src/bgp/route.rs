@@ -8795,7 +8795,7 @@ pub fn route_srpolicy_update(
         endpoint: nlri.endpoint,
     };
     let delta = bgp.local_rib.sr_policy.insert(key, cp);
-    apply_srpolicy_fib(delta, bgp);
+    apply_srpolicy_fib(delta, nlri.color, bgp);
     sr_policy_mpls_sync(bgp, nlri.color, nlri.endpoint);
 }
 
@@ -8819,7 +8819,7 @@ pub fn route_srpolicy_withdraw(
     if removed {
         srpolicy_reflect_withdraw(ident, nlri, peers);
     }
-    apply_srpolicy_fib(delta, bgp);
+    apply_srpolicy_fib(delta, nlri.color, bgp);
     sr_policy_mpls_sync(bgp, nlri.color, nlri.endpoint);
 }
 
@@ -9046,10 +9046,11 @@ pub fn route_bgpls_withdraw_originated(nlri: &BgpLsNlri, local_rib: &mut LocalRi
 /// segment list, plus tear down an SR-MPLS Binding-SID ILM when a whole
 /// policy is withdrawn. (The live SR-MPLS install/update is driven by
 /// `sr_policy_mpls_sync` / `sr_policy_reconcile_mpls`, gated on NHT.)
-fn apply_srpolicy_fib(delta: super::sr_policy::SrPolicyFibDelta, bgp: &mut BgpTop) {
+fn apply_srpolicy_fib(delta: super::sr_policy::SrPolicyFibDelta, color: u32, bgp: &mut BgpTop) {
     if let Some(addr) = delta.remove {
         let _ = bgp.rib_client.send(rib::Message::SidDel { addr });
     }
+    let activated = delta.activated;
     if let Some(install) = delta.install {
         let sid = rib::Sid {
             addr: install.bsid,
@@ -9069,6 +9070,13 @@ fn apply_srpolicy_fib(delta: super::sr_policy::SrPolicyFibDelta, bgp: &mut BgpTo
     }
     if let Some(label) = delta.mpls_remove {
         srpolicy_ilm_remove(bgp.rib_client, label);
+    }
+    // The End.B6 BSID just came up: re-install any colour-matched service
+    // route received before this policy so it re-derives its H.Encap steer
+    // onto the fresh BSID (the SRv6 twin of `sr_policy_reconcile_mpls`'s
+    // activation-edge resync).
+    if activated {
+        sr_policy_steer_resync(bgp, color);
     }
 }
 

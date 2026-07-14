@@ -124,6 +124,9 @@ impl SrPolicy {
             (prev, new) => {
                 delta.remove = prev.as_ref().map(|b| b.bsid);
                 delta.install = new.clone();
+                // A fresh or changed BSID address is the steer-activation
+                // edge; a teardown (new is None) is not.
+                delta.activated = new.is_some();
             }
         }
         self.installed = desired;
@@ -149,6 +152,14 @@ pub struct SrPolicyFibDelta {
     pub remove: Option<Ipv6Addr>,
     pub install: Option<Srv6Bsid>,
     pub mpls_remove: Option<u32>,
+    /// The SRv6 Binding-SID *address* just appeared or changed, so a
+    /// colour-matched service route received before the policy must
+    /// re-derive its H.Encap steer onto it. Unlike the SR-MPLS ILM (see
+    /// [`MplsIlmAction::activated`]) the End.B6 SID installs immediately,
+    /// but the same route-before-policy gap applies. A same-address install
+    /// (only the segment list changed) leaves this `false` — the steer
+    /// target is unchanged.
+    pub activated: bool,
 }
 
 /// An SR-MPLS Binding SID install: the incoming BSID label and the
@@ -317,6 +328,7 @@ impl SrPolicyDb {
                     remove,
                     install: None,
                     mpls_remove,
+                    activated: false,
                 },
             )
         } else {
