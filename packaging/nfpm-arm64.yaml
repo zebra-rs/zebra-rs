@@ -17,9 +17,13 @@ replaces:
 provides:
   - zebra-rs
 # The eBPF data-plane engine `system ebpf enabled` spawns (/usr/bin/cradle).
-# Optional: everything else works without it.
+# Optional: everything else works without it. The version floor is the cradle
+# release this zebra-rs targets (the `proto/cradle.proto` contract), kept in
+# sync with the top-level `cradle-version` file by version-update.sh; the
+# release/publish-apt pipeline ingests exactly that cradle release so
+# `apt install zebra-rs` pulls it.
 recommends:
-  - cradle-rs
+  - cradle-rs (>= 0.9.5)
 maintainer: "Kunihiro Ishiguro <kunihiro@zebra.rs>"
 description: |
   zebra-rs is reincarnation of GNU zebra in Rust.
