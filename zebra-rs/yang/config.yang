@@ -558,6 +558,24 @@ module config {
              an externally-run cradle can still be teed to through
              `system cradle enabled`.";
         }
+        leaf mode {
+          ext:help "Single-hook datapath benchmark mode (tc-only|xdp-only)";
+          type enumeration {
+            enum tc-only;
+            enum xdp-only;
+          }
+          description
+            "Performance-investigation knob (docs/design/xdp-tc-fast-path.md):
+             restrict the managed cradle engine to plain IPv4 L3 forwarding
+             through a SINGLE eBPF hook, so each hook's cost can be measured in
+             isolation. `tc-only` attaches only the TC classifier (cradle_tc,
+             which then runs an L3-only fast path); `xdp-only` attaches only a
+             dedicated XDP forwarder (cradle_xdp_l3). Also defaults the IPv4 FIB
+             engine to DIR-24-8. Passed to the engine as `--ebpf-mode` at spawn,
+             so a change restarts the managed child. Non-L3 features (NAT,
+             policy, overlay, L2) are unsupported while set — do not use in
+             production. When unset the full XDP+TC pipeline runs as normal.";
+        }
       }
       container dhcp {
         ext:help "DHCP configuration";

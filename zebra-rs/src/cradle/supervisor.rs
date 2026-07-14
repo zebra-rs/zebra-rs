@@ -114,10 +114,15 @@ fn strip_ansi(line: &str) -> std::borrow::Cow<'_, str> {
 /// `PR_SET_PDEATHSIG=SIGTERM` (the kernel signals the child even if zebra-rs
 /// is SIGKILLed), so no root engine process can leak past the daemon.
 /// stdout/stderr are piped into zebra-rs tracing under the `cradle` target.
-fn spawn_child(bin: &PathBuf, endpoint: &str) -> std::io::Result<Child> {
+fn spawn_child(bin: &PathBuf, endpoint: &str, ebpf_mode: Option<&str>) -> std::io::Result<Child> {
     let mut cmd = Command::new(bin);
-    cmd.args(["serve", "--grpc", endpoint])
-        .stdin(Stdio::null())
+    cmd.args(["serve", "--grpc", endpoint]);
+    // Single-hook benchmark mode: restrict the engine to plain IPv4 L3
+    // forwarding through one hook (docs/design/xdp-tc-fast-path.md).
+    if let Some(mode) = ebpf_mode {
+        cmd.args(["--ebpf-mode", mode]);
+    }
+    cmd.stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .kill_on_drop(true);
@@ -170,6 +175,7 @@ async fn graceful_stop(mut child: Child) {
 /// [`EngineEvent::Down`] (idempotently) so the port reconcile resets.
 pub(crate) async fn run(
     endpoint: String,
+    ebpf_mode: Option<String>,
     mut shutdown: watch::Receiver<bool>,
     events: UnboundedSender<EngineEvent>,
 ) {
@@ -206,7 +212,7 @@ pub(crate) async fn run(
         }
         let bin = resolve_bin();
         let started = Instant::now();
-        match spawn_child(&bin, &endpoint) {
+        match spawn_child(&bin, &endpoint, ebpf_mode.as_deref()) {
             Ok(mut child) => {
                 info!(
                     "cradle: spawned engine {} (pid {:?}) serving {endpoint}",
