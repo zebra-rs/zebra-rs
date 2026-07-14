@@ -561,6 +561,16 @@ impl FibHandle {
         }
     }
 
+    /// Push the RFC 3443 MPLS TTL model (`set mpls ttl propagate`) into the
+    /// live tee. `pipe` = true (default) hides the LSP; `false` = uniform.
+    /// A no-op when the tee is off; re-applied by `cradle_apply` after any tee
+    /// (re)creation since a fresh `CradleFib` starts at the pipe default.
+    pub fn set_cradle_mpls_pipe(&self, pipe: bool) {
+        if let Some(cradle) = &self.cradle {
+            cradle.set_mpls_pipe(pipe);
+        }
+    }
+
     /// Replay the tee's entire mirrored state into a freshly-(re)started
     /// cradle engine (see `CradleFib::replay`). Triggered by the
     /// `system ebpf` supervisor's `Message::CradleEngineUp`; a no-op when

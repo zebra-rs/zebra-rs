@@ -26,6 +26,11 @@
         * `show ebpf {status,l2,ipv4,ipv6,mpls,srv6,nexthop,stats}`
           with per-VRF `show ebpf {ipv4,ipv6} vrf <name>`; ANSI escapes
           are stripped from relayed engine log lines
+        * `mpls ttl propagate {pipe|uniform}` selects the RFC 3443 MPLS
+          label-TTL model teed to cradle (pipe hides the LSP, the
+          default; uniform exposes the hop count end to end) via
+          `Nexthop.mpls_pipe_ttl` at imposition and `Ilm.ttl_uniform`
+          at pop-to-IP disposition
 
     - note: |
         ### EVPN

@@ -427,6 +427,34 @@ module config {
       }
     }
 
+    container mpls {
+      ext:help "MPLS forwarding configuration";
+      description
+        "Global MPLS forwarding attributes.";
+      container ttl {
+        ext:help "MPLS label TTL processing";
+        // RFC 3443 label-stack TTL model. `pipe` (default) hides the LSP
+        // from the payload: imposition seeds the outer label TTL with 255
+        // and disposition discards it, leaving the inner IP TTL untouched.
+        // `uniform` exposes the LSP end to end: imposition seeds the label
+        // TTL from the inner IP TTL and disposition copies the (decremented)
+        // label TTL back into the inner IP header on pop-to-IP. Honored by
+        // the cradle eBPF data plane (Nexthop.mpls_pipe_ttl at imposition,
+        // Ilm.ttl_uniform at disposition); the kernel FIB is unaffected.
+        leaf propagate {
+          ext:help "MPLS TTL propagation model (pipe hides the LSP, uniform exposes it)";
+          type enumeration {
+            enum pipe;
+            enum uniform;
+          }
+          default "pipe";
+          description
+            "RFC 3443 label TTL model. `pipe` (default) hides the LSP hop
+             count from the payload; `uniform` propagates it end to end.";
+        }
+      }
+    }
+
     container system {
       ext:help "System configuration";
       description

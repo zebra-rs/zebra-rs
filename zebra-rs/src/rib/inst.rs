@@ -718,6 +718,34 @@ pub enum NeighborKey {
     },
 }
 
+/// RFC 3443 MPLS label-TTL processing model (`set mpls ttl propagate`).
+/// `Pipe` (the default) hides the LSP from the payload; `Uniform` exposes the
+/// LSP hop count end to end. Only the cradle eBPF data plane honors it today
+/// (via `Nexthop.mpls_pipe_ttl` / `Ilm.ttl_uniform`); the kernel FIB ignores
+/// it. Keep the `#[default]` in sync with the YANG `default "pipe"`.
+#[derive(Debug, Default, PartialEq, Clone, Copy)]
+pub enum TtlModel {
+    #[default]
+    Pipe,
+    Uniform,
+}
+
+impl TtlModel {
+    pub fn from_yang(s: &str) -> Option<Self> {
+        match s {
+            "pipe" => Some(Self::Pipe),
+            "uniform" => Some(Self::Uniform),
+            _ => None,
+        }
+    }
+
+    /// `true` for pipe (seed the label TTL 255, preserve the inner IP TTL);
+    /// `false` for uniform (seed from the inner TTL, write it back on pop).
+    pub fn is_pipe(self) -> bool {
+        matches!(self, Self::Pipe)
+    }
+}
+
 pub struct Rib {
     /// The cradle `WatchFdb` subscriber task (datapath MAC learning →
     /// EVPN Type-2 origination); aborted and respawned when the
@@ -734,6 +762,9 @@ pub struct Rib {
     /// `system cradle grpc-endpoint <endpoint>` override. When the tee is enabled
     /// but this is unset, the endpoint defaults to `unix:cradle/grpc`.
     pub cradle_grpc: Option<String>,
+    /// `mpls ttl propagate {pipe|uniform}` — the RFC 3443 label-TTL model teed
+    /// to cradle's MPLS imposition/disposition. Defaults to `Pipe`.
+    pub mpls_ttl_propagate: TtlModel,
     pub cm: ConfigChannel,
     pub show: ShowChannel,
     pub show_cb: HashMap<String, ShowCallback>,
@@ -974,6 +1005,7 @@ impl Rib {
             cradle_enabled: false,
             ebpf_enabled: false,
             cradle_grpc: None,
+            mpls_ttl_propagate: TtlModel::default(),
             cm: ConfigChannel::new(),
             show: ShowChannel::new(),
             show_cb: HashMap::new(),
@@ -3887,6 +3919,25 @@ impl Rib {
         Some(())
     }
 
+    /// `set mpls ttl propagate {pipe|uniform}` — the RFC 3443 label-TTL model.
+    /// Deleting it restores the `Pipe` default. Pushed straight into the live
+    /// cradle tee (no reconnect); a disabled tee simply ignores it.
+    #[cfg(target_os = "linux")]
+    pub(crate) fn mpls_ttl_propagate_config_exec(
+        &mut self,
+        mut args: crate::config::Args,
+        op: ConfigOp,
+    ) -> Option<()> {
+        self.mpls_ttl_propagate = if op.is_set() {
+            TtlModel::from_yang(&args.string()?)?
+        } else {
+            TtlModel::default()
+        };
+        self.fib_handle
+            .set_cradle_mpls_pipe(self.mpls_ttl_propagate.is_pipe());
+        Some(())
+    }
+
     /// Effective eBPF tee endpoint: `None` when neither switch is on, else
     /// the `system cradle grpc-endpoint` override or the
     /// `unix:cradle/grpc` default. `system ebpf enabled` (managed engine)
@@ -3979,6 +4030,10 @@ impl Rib {
             return;
         };
         self.fib_handle.set_cradle(Some(&endpoint));
+        // A fresh tee starts at the pipe default; re-apply the configured
+        // RFC 3443 model so `set mpls ttl propagate` survives tee (re)creation.
+        self.fib_handle
+            .set_cradle_mpls_pipe(self.mpls_ttl_propagate.is_pipe());
         // Enable-after-routes: a freshly-created tee has an empty mirror,
         // so routes installed BEFORE this enable would never reach the
         // engine until they churn. Queue a resync (mirror replay + RIB
@@ -4086,6 +4141,9 @@ impl Rib {
                 } else if path.as_str() == "/system/cradle/grpc-endpoint" {
                     #[cfg(target_os = "linux")]
                     let _ = self.cradle_grpc_config_exec(args, msg.op);
+                } else if path.as_str() == "/mpls/ttl/propagate" {
+                    #[cfg(target_os = "linux")]
+                    let _ = self.mpls_ttl_propagate_config_exec(args, msg.op);
                 } else if path.as_str().starts_with("/router/static/vrf/ipv4/route") {
                     let _ = self.static_vrf_v4.exec(path, args, msg.op);
                 } else if path.as_str().starts_with("/router/static/vrf/ipv6/route") {
@@ -4542,5 +4600,31 @@ mod cradle_endpoint_tests {
             cradle_effective_endpoint(false, Some("127.0.0.1:50151")),
             None
         );
+    }
+}
+
+#[cfg(test)]
+mod ttl_model_tests {
+    use super::TtlModel;
+
+    #[test]
+    fn from_yang_maps_both_models() {
+        assert_eq!(TtlModel::from_yang("pipe"), Some(TtlModel::Pipe));
+        assert_eq!(TtlModel::from_yang("uniform"), Some(TtlModel::Uniform));
+        assert_eq!(TtlModel::from_yang("bogus"), None);
+    }
+
+    #[test]
+    fn default_is_pipe() {
+        // Must mirror the YANG `default "pipe"` and preserve prior behavior.
+        assert_eq!(TtlModel::default(), TtlModel::Pipe);
+    }
+
+    #[test]
+    fn is_pipe_reflects_the_model() {
+        // pipe -> mpls_pipe_ttl=true / ttl_uniform=false at the tee;
+        // uniform -> the inverse.
+        assert!(TtlModel::Pipe.is_pipe());
+        assert!(!TtlModel::Uniform.is_pipe());
     }
 }

@@ -59,6 +59,11 @@ message Nexthop {
   string vxlan_vtep = 16;
   uint32 vxlan_l3vni = 17;
   string vxlan_rmac = 18;
+  // MPLS TTL propagation at imposition (RFC 3443). false (default) = uniform:
+  // seed the outer label TTL from the inner IP TTL. true = pipe: seed a fixed
+  // 255, hiding the LSP hop count. Only meaningful with labels. Field number
+  // must match cradle-rs's proto/cradle.proto.
+  bool mpls_pipe_ttl = 19;
 }
 
 // A nexthop group for ECMP: ordered member nexthop ids. A route whose flags
@@ -325,6 +330,11 @@ message Ilm {
   uint32 nexthop_id = 2;    // resolved nexthop; its labels are the swap stack
   uint32 action = 3;        // MPLS_OP_SWAP | POP_L3 | POP
   uint32 vrf_table_id = 4;  // for POP_L3 into a VRF (0 = global)
+  // MPLS TTL propagation at disposition (RFC 3443). false (default) = pipe:
+  // discard the label TTL, preserve the inner IP TTL. true = uniform: when this
+  // ILM pops the last label to IP, copy the popped label TTL into the inner IP
+  // header. Field number must match cradle-rs's proto/cradle.proto.
+  bool ttl_uniform = 5;
 }
 
 message IlmDel {

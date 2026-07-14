@@ -191,6 +191,11 @@ pub struct CradleFib {
     next_id: Arc<AtomicU32>,
     /// The SRv6 H.Encaps source is pushed once (best-effort).
     encap_src_set: Arc<std::sync::atomic::AtomicBool>,
+    /// RFC 3443 MPLS label-TTL model (`set mpls ttl propagate`). `true` = pipe
+    /// (the default): imposition seeds the label TTL 255 (`mpls_pipe_ttl`) and
+    /// disposition preserves the inner IP TTL. `false` = uniform: imposition
+    /// seeds from the inner TTL and pop-to-IP writes it back (`ttl_uniform`).
+    mpls_pipe: Arc<std::sync::atomic::AtomicBool>,
     /// Everything this tee has programmed, for [`Self::replay`].
     mirror: Arc<Mutex<CradleMirror>>,
 }
@@ -331,8 +336,26 @@ impl CradleFib {
             nh_ids_vxlan: Arc::new(Mutex::new(HashMap::new())),
             next_id: Arc::new(AtomicU32::new(1)),
             encap_src_set: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            // Default pipe (RFC 3443): preserves the payload TTL across the LSP,
+            // matching zebra-rs's prior behavior. `set mpls ttl propagate
+            // uniform` flips it via `set_mpls_pipe`.
+            mpls_pipe: Arc::new(std::sync::atomic::AtomicBool::new(true)),
             mirror: Arc::new(Mutex::new(CradleMirror::default())),
         }
+    }
+
+    /// Set the RFC 3443 MPLS TTL model for subsequently-programmed labeled
+    /// nexthops and pop-to-IP ILMs. `true` = pipe, `false` = uniform. Cheap
+    /// interior mutation (no reconnect); existing entries re-derive on the next
+    /// resync/replay.
+    pub fn set_mpls_pipe(&self, pipe: bool) {
+        self.mpls_pipe.store(pipe, Ordering::Relaxed);
+    }
+
+    /// The current RFC 3443 model: `true` = pipe (seed 255 / preserve inner),
+    /// `false` = uniform (seed from inner / write back on pop).
+    fn mpls_pipe(&self) -> bool {
+        self.mpls_pipe.load(Ordering::Relaxed)
     }
 
     /// The normalized gRPC endpoint this tee dials (as stored by `new`).
@@ -580,6 +603,7 @@ impl CradleFib {
                 vxlan_vtep: String::new(),
                 vxlan_l3vni: 0,
                 vxlan_rmac: String::new(),
+                mpls_pipe_ttl: self.mpls_pipe() && !labels.is_empty(),
             })
             .await?;
         self.nh_ids.lock().await.insert(key, id);
@@ -625,6 +649,7 @@ impl CradleFib {
                 vxlan_vtep: String::new(),
                 vxlan_l3vni: 0,
                 vxlan_rmac: String::new(),
+                mpls_pipe_ttl: false,
             })
             .await?;
         self.nh_ids_srv6.lock().await.insert(key, id);
@@ -678,6 +703,7 @@ impl CradleFib {
                 vxlan_vtep: vtep.to_string(),
                 vxlan_l3vni: l3vni,
                 vxlan_rmac: rmac_str,
+                mpls_pipe_ttl: false,
             })
             .await?;
         self.nh_ids_vxlan.lock().await.insert(key, id);
@@ -871,6 +897,7 @@ impl CradleFib {
                 vxlan_vtep: String::new(),
                 vxlan_l3vni: 0,
                 vxlan_rmac: String::new(),
+                mpls_pipe_ttl: self.mpls_pipe() && !labels.is_empty(),
             })
             .await?;
         self.nh_ids6.lock().await.insert(key, id);
@@ -985,6 +1012,9 @@ impl CradleFib {
                     nexthop_id,
                     action,
                     vrf_table_id,
+                    // Uniform disposition only bites at a pop-to-IP (POP_L3):
+                    // copy the popped label TTL into the exposed IP header.
+                    ttl_uniform: action == MPLS_OP_POP_L3 && !self.mpls_pipe(),
                 })
                 .await?;
             anyhow::Ok(())
@@ -1269,6 +1299,7 @@ impl CradleFib {
                 vxlan_vtep: String::new(),
                 vxlan_l3vni: 0,
                 vxlan_rmac: String::new(),
+                mpls_pipe_ttl: false,
             })
             .await?;
         self.nh_ids_gtp.lock().await.insert(key, id);
