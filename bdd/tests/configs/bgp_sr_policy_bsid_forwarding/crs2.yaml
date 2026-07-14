@@ -1,0 +1,54 @@
+# crs2 — SR-TE controller + service-route origin (iBGP AS 65000).
+# Originates:
+#  - an SR-MPLS SR Policy (SAFI 73) for <color 100, endpoint 192.168.12.2>
+#    with an MPLS Binding SID 16100 and a one-hop segment list {16002}, plus
+#    route-target 10.0.0.1 (crs1's router-id) so crs1 CONSUMES it locally
+#    (RFC 9830 §4.2 — an IPv4-address RT == the receiver's BGP Identifier);
+#  - the service prefix 10.99.0.0/24 (a blackhole static, redistributed),
+#    which crs1 colours on ingress and steers onto the policy.
+# The endpoint 192.168.12.2 is crs2's own peering address, which is exactly
+# the BGP next-hop crs1 sees for 10.99.0.0/24 — so the steer matches
+# <color 100, next-hop 192.168.12.2> with CO=00.
+interface:
+- if-name: i1
+  ipv4:
+    address: 192.168.12.2/24
+router:
+  static:
+    ipv4:
+      route:
+      - prefix: 10.99.0.0/24
+        nexthop:
+        - address: blackhole
+  bgp:
+    global:
+      as: 65000
+      router-id: 10.0.0.2
+    timer:
+      adv-interval:
+        ibgp: 1
+        ebgp: 1
+    sr-policy:
+      policy:
+      - name: P1
+        color: 100
+        endpoint: 192.168.12.2
+        binding-sid-label: 16100
+        route-target: 10.0.0.1
+        segment:
+        - index: 1
+          mpls-label: 16002
+    neighbor:
+    - remote-address: 192.168.12.1
+      timers: {connect-retry-time: 3}
+      remote-as: 65000
+      enabled: true
+      afi-safi:
+      - name: ipv4
+        enabled: true
+      - name: sr-policy-v4
+        enabled: true
+    afi-safi:
+    - name: ipv4
+      redistribute:
+        static: {}
