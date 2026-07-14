@@ -32,6 +32,11 @@ pub struct Vrf {
     /// `Message::VrfRouterId`. Wins over the derived values; `None`
     /// falls back.
     pub router_id_config: Option<std::net::Ipv4Addr>,
+    /// Per-VRF RFC 3443 MPLS TTL model (`vrf <name> mpls ttl propagate`),
+    /// delivered via [`Message::VrfMplsTtl`]. `None` = inherit the global
+    /// `mpls ttl propagate`. Teed to cradle so this VRF's LSP imposition and
+    /// pop-to-IP disposition use it.
+    pub mpls_ttl_propagate: Option<crate::rib::inst::TtlModel>,
     /// `true` when this process created the kernel VRF master device,
     /// `false` when it adopted a pre-existing one (operator-created, or
     /// a leftover from a prior run). The shutdown path only deletes the

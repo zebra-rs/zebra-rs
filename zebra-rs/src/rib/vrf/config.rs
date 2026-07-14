@@ -19,6 +19,10 @@ pub struct VrfConfig {
     /// `None` lets the RIB derive one from the VRF's member
     /// interfaces (falling back to the global effective value).
     pub router_id: Option<std::net::Ipv4Addr>,
+    /// Per-VRF RFC 3443 MPLS TTL model — `set vrf X mpls ttl propagate
+    /// {pipe|uniform}`. `None` = inherit the global `mpls ttl propagate`
+    /// (the YANG `inherit` value and leaf-absent both map here).
+    pub mpls_ttl_propagate: Option<crate::rib::inst::TtlModel>,
     /// IPv4-unicast RT import set —
     /// `set vrf X ipv4 route-target import …`.
     pub ipv4_import_rts: std::collections::BTreeSet<bgp_packet::RouteDistinguisher>,

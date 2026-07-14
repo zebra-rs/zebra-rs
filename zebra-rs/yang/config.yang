@@ -4380,6 +4380,23 @@ module config {
            RouterIdUpdate, like the global `system router-id`.";
         type inet:ipv4-address;
       }
+      leaf mpls-ttl-propagate {
+        ext:help "Per-VRF MPLS TTL model (overrides the global mpls ttl propagate)";
+        description
+          "Per-VRF RFC 3443 MPLS label-TTL model for this VRF's L3VPN
+           LSPs (imposition of the VPN label and pop-to-IP disposition).
+           `inherit` (default) uses the global `mpls ttl propagate`;
+           `pipe` hides the LSP; `uniform` exposes the hop count. Honored
+           by the cradle eBPF data plane; the kernel FIB is unaffected.
+           Configure the same model on the ingress and egress PEs of a
+           VRF, since the two ends of an LSP must agree.";
+        type enumeration {
+          enum inherit;
+          enum pipe;
+          enum uniform;
+        }
+        default "inherit";
+      }
       container ipv4 {
         ext:help "IPv4 unicast (VPNv4) route policy";
         description

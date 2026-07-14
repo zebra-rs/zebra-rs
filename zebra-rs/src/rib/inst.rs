@@ -298,6 +298,12 @@ pub enum Message {
         name: String,
         router_id: Option<Ipv4Addr>,
     },
+    /// Per-VRF RFC 3443 MPLS TTL model (`vrf <name> mpls ttl propagate`).
+    /// `None` = inherit the global model. Emitted after `VrfAdd`.
+    VrfMplsTtl {
+        name: String,
+        model: Option<TtlModel>,
+    },
     /// Bind / unbind an interface to a VRF master device.
     /// `vrf == Some(name)` enslaves; `vrf == None` clears the binding
     /// (sets IFLA_MASTER = 0). The handler tolerates the interface or
@@ -723,7 +729,7 @@ pub enum NeighborKey {
 /// LSP hop count end to end. Only the cradle eBPF data plane honors it today
 /// (via `Nexthop.mpls_pipe_ttl` / `Ilm.ttl_uniform`); the kernel FIB ignores
 /// it. Keep the `#[default]` in sync with the YANG `default "pipe"`.
-#[derive(Debug, Default, PartialEq, Clone, Copy)]
+#[derive(Debug, Default, PartialEq, Eq, Clone, Copy)]
 pub enum TtlModel {
     #[default]
     Pipe,
@@ -2777,6 +2783,9 @@ impl Rib {
                         // the row exists.
                         router_id: Ipv4Addr::UNSPECIFIED,
                         router_id_config: None,
+                        // Per-VRF MPLS TTL model arrives separately via
+                        // `Message::VrfMplsTtl`; `None` inherits the global.
+                        mpls_ttl_propagate: None,
                         owned,
                         // RT sets arrive separately via
                         // `Message::VrfRouteTargets` once the VRF
@@ -2991,6 +3000,27 @@ impl Rib {
                         vrf = %name,
                         "rib: VrfRouterId for unknown VRF; dropping",
                     );
+                }
+            }
+            Message::VrfMplsTtl { name, model } => {
+                // Same VrfAdd-first ordering contract as `VrfRouterId`.
+                let table_id = if let Some(vrf) = self.vrfs.get_mut(&name) {
+                    vrf.mpls_ttl_propagate = model;
+                    Some(vrf.table_id)
+                } else {
+                    tracing::debug!(
+                        vrf = %name,
+                        "rib: VrfMplsTtl for unknown VRF; dropping",
+                    );
+                    None
+                };
+                // Push the effective per-VRF model into the cradle tee (keyed
+                // by table id). `None` clears the override so the tee falls
+                // back to the global model.
+                #[cfg(target_os = "linux")]
+                if let Some(table_id) = table_id {
+                    self.fib_handle
+                        .set_cradle_vrf_mpls_pipe(table_id, model.map(|m| m.is_pipe()));
                 }
             }
             Message::LinkVrfBind { ifname, vrf } => {
@@ -4034,6 +4064,13 @@ impl Rib {
         // RFC 3443 model so `set mpls ttl propagate` survives tee (re)creation.
         self.fib_handle
             .set_cradle_mpls_pipe(self.mpls_ttl_propagate.is_pipe());
+        // Re-apply every per-VRF override too — the fresh tee's map is empty.
+        for vrf in self.vrfs.values() {
+            if let Some(model) = vrf.mpls_ttl_propagate {
+                self.fib_handle
+                    .set_cradle_vrf_mpls_pipe(vrf.table_id, Some(model.is_pipe()));
+            }
+        }
         // Enable-after-routes: a freshly-created tee has an empty mirror,
         // so routes installed BEFORE this enable would never reach the
         // engine until they churn. Queue a resync (mirror replay + RIB
