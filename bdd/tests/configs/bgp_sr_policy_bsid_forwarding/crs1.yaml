@@ -1,0 +1,44 @@
+# crs1 — headend PE (iBGP AS 65000) with binding-sid SR-Policy steering.
+# Receives from crs2 (a) the service route 10.99.0.0/24 and (b) the SR
+# Policy for <color 100, endpoint 192.168.12.2> over SAFI 73, and consumes
+# the policy (route-target == our router-id 10.0.0.1).
+#
+# The COLOR100 route-map (`set color 100`) is DEFINED here but NOT attached
+# to the neighbor in the initial config: `route_sync` dumps unicast before
+# SAFI-73, so the service route arrives before the policy, and consuming a
+# policy does not re-evaluate already-installed routes. The feature attaches
+# the inbound policy AFTER convergence — an inbound-policy change auto-
+# re-evaluates received routes — so the colour (and thus the steer) is
+# applied with the policy already present. Deterministic ordering.
+policy:
+- name: COLOR100
+  entry:
+  - number: 10
+    action: permit
+    set:
+      color: 100
+interface:
+- if-name: i1
+  ipv4:
+    address: 192.168.12.1/24
+router:
+  bgp:
+    global:
+      as: 65000
+      router-id: 10.0.0.1
+    timer:
+      adv-interval:
+        ibgp: 1
+        ebgp: 1
+    sr-policy:
+      steering-mode: binding-sid
+    neighbor:
+    - remote-address: 192.168.12.2
+      timers: {connect-retry-time: 3}
+      remote-as: 65000
+      enabled: true
+      afi-safi:
+      - name: ipv4
+        enabled: true
+      - name: sr-policy-v4
+        enabled: true
