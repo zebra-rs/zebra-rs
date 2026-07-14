@@ -452,6 +452,29 @@ module config {
             "RFC 3443 label TTL model. `pipe` (default) hides the LSP hop
              count from the payload; `uniform` propagates it end to end.";
         }
+        // The IOS forwarded/local split (`mpls ip propagate-ttl [forwarded |
+        // local]`). `propagate` above is the FORWARDED (transit) model, teed
+        // to the cradle data plane — cradle only ever imposes forwarded
+        // traffic. This leaf is the LOCAL model, for the router's own
+        // (locally-originated) MPLS traffic, which the host kernel imposes
+        // (the lwtunnel MPLS encap routes zebra installs), governed by the
+        // global `net.mpls.ip_ttl_propagate` sysctl. Split so an operator can
+        // hide the core from customer traceroutes (forwarded `pipe`) while
+        // still seeing the LSP from the PE itself (local `uniform`).
+        leaf propagate-local {
+          ext:help "MPLS TTL model for locally-originated traffic (kernel imposition)";
+          type enumeration {
+            enum pipe;
+            enum uniform;
+          }
+          default "uniform";
+          description
+            "RFC 3443 label TTL model for LOCALLY-ORIGINATED traffic, applied
+             to the host kernel's MPLS imposition via
+             `net.mpls.ip_ttl_propagate`. `uniform` (default, the kernel
+             default) exposes the LSP to the router's own traceroute; `pipe`
+             hides it. Global only — the kernel knob has no per-VRF form.";
+        }
       }
     }
 

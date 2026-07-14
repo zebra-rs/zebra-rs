@@ -769,8 +769,16 @@ pub struct Rib {
     /// but this is unset, the endpoint defaults to `unix:cradle/grpc`.
     pub cradle_grpc: Option<String>,
     /// `mpls ttl propagate {pipe|uniform}` — the RFC 3443 label-TTL model teed
-    /// to cradle's MPLS imposition/disposition. Defaults to `Pipe`.
+    /// to cradle's MPLS imposition/disposition. Defaults to `Pipe`. This is the
+    /// FORWARDED (transit) half — cradle only ever imposes forwarded traffic.
     pub mpls_ttl_propagate: TtlModel,
+    /// `mpls ttl propagate-local {pipe|uniform}` — the RFC 3443 label-TTL model
+    /// for LOCALLY-ORIGINATED traffic. Applied to the host kernel's own MPLS
+    /// imposition (the lwtunnel MPLS encap routes zebra tees for the router's
+    /// own packets) via the global `net.mpls.ip_ttl_propagate` sysctl; the
+    /// cradle data plane never imposes local-origin traffic. Defaults to
+    /// `Uniform` — the kernel default, so the PE's own traceroute sees the LSP.
+    pub mpls_ttl_propagate_local: TtlModel,
     pub cm: ConfigChannel,
     pub show: ShowChannel,
     pub show_cb: HashMap<String, ShowCallback>,
@@ -1012,6 +1020,7 @@ impl Rib {
             ebpf_enabled: false,
             cradle_grpc: None,
             mpls_ttl_propagate: TtlModel::default(),
+            mpls_ttl_propagate_local: TtlModel::Uniform,
             cm: ConfigChannel::new(),
             show: ShowChannel::new(),
             show_cb: HashMap::new(),
@@ -3968,6 +3977,32 @@ impl Rib {
         Some(())
     }
 
+    /// `set mpls ttl propagate-local {pipe|uniform}` — the RFC 3443 label-TTL
+    /// model for LOCALLY-ORIGINATED traffic (the IOS forwarded/local split).
+    /// Unlike the (forwarded) `propagate` leaf, which is teed to cradle, this
+    /// governs the HOST KERNEL's MPLS imposition — the lwtunnel MPLS encap
+    /// routes zebra installs for the router's own packets — via the global
+    /// `net.mpls.ip_ttl_propagate` sysctl. The cradle data plane never imposes
+    /// local-origin traffic, so there is nothing to tee here. Deleting the leaf
+    /// restores `Uniform` (the kernel default). Global only: the kernel knob
+    /// has no per-VRF form.
+    #[cfg(target_os = "linux")]
+    pub(crate) fn mpls_ttl_propagate_local_config_exec(
+        &mut self,
+        mut args: crate::config::Args,
+        op: ConfigOp,
+    ) -> Option<()> {
+        self.mpls_ttl_propagate_local = if op.is_set() {
+            TtlModel::from_yang(&args.string()?)?
+        } else {
+            TtlModel::Uniform
+        };
+        let _ = crate::fib::sysctl::sysctl_mpls_ip_ttl_propagate(
+            !self.mpls_ttl_propagate_local.is_pipe(),
+        );
+        Some(())
+    }
+
     /// Effective eBPF tee endpoint: `None` when neither switch is on, else
     /// the `system cradle grpc-endpoint` override or the
     /// `unix:cradle/grpc` default. `system ebpf enabled` (managed engine)
@@ -4181,6 +4216,9 @@ impl Rib {
                 } else if path.as_str() == "/mpls/ttl/propagate" {
                     #[cfg(target_os = "linux")]
                     let _ = self.mpls_ttl_propagate_config_exec(args, msg.op);
+                } else if path.as_str() == "/mpls/ttl/propagate-local" {
+                    #[cfg(target_os = "linux")]
+                    let _ = self.mpls_ttl_propagate_local_config_exec(args, msg.op);
                 } else if path.as_str().starts_with("/router/static/vrf/ipv4/route") {
                     let _ = self.static_vrf_v4.exec(path, args, msg.op);
                 } else if path.as_str().starts_with("/router/static/vrf/ipv6/route") {

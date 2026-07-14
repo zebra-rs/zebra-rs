@@ -1,0 +1,9 @@
+# r1 — the RFC 3443 forwarded/local TTL split, LOCAL half. `mpls ttl
+# propagate-local pipe` seeds the host kernel's own MPLS imposition
+# (net.mpls.ip_ttl_propagate = 0) so the LSP stays hidden from the router's
+# own traceroute. The forwarded (transit) half is teed to the cradle data
+# plane separately via `mpls ttl propagate`; cradle never imposes on
+# locally-originated traffic, so the local half lives in the kernel sysctl.
+mpls:
+  ttl:
+    propagate-local: pipe

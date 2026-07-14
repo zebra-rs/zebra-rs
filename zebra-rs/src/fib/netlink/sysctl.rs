@@ -45,6 +45,21 @@ pub fn sysctl_mpls_enable(ifname: &String) -> anyhow::Result<()> {
     Ok(())
 }
 
+/// Set the global kernel MPLS→IP TTL propagation for locally-originated
+/// traffic (`net.mpls.ip_ttl_propagate`): `true` = uniform (copy the inner IP
+/// TTL into the imposed label so the LSP is visible), `false` = pipe (seed the
+/// label TTL independently, hiding the LSP). This governs the host kernel's
+/// own MPLS imposition — the lwtunnel MPLS encap routes zebra installs for the
+/// router's own traffic — which is the `propagate-local` half of RFC 3443's
+/// forwarded/local split. The cradle data plane imposes only forwarded/transit
+/// traffic, so the forwarded half is teed there instead. The sysctl exists
+/// once the mpls_router module is loaded (`net.mpls.platform_labels`).
+pub fn sysctl_mpls_ip_ttl_propagate(propagate: bool) -> anyhow::Result<()> {
+    let ctl = sysctl::Ctl::new("net.mpls.ip_ttl_propagate")?;
+    let _ = ctl.set_value_string(if propagate { "1" } else { "0" })?;
+    Ok(())
+}
+
 pub fn sysctl_seg6_enable(ifname: &String) -> anyhow::Result<()> {
     let ctlname = format!("net.ipv6.conf.{}.seg6_enabled", ifname);
     let ctl = sysctl::Ctl::new(ctlname.as_str())?;
