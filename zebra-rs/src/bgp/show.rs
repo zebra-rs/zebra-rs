@@ -4922,6 +4922,11 @@ fn show_bgp_sr_policy(
     let family = if afi == Afi::Ip6 { "IPv6" } else { "IPv4" };
     let mut buf = String::new();
     writeln!(buf, "{family} SR Policy (SAFI 73):")?;
+    let mode = match bgp.local_rib.sr_policy.steer_mode {
+        super::sr_policy::SteerMode::BindingSid => "binding-sid",
+        super::sr_policy::SteerMode::SegmentList => "segment-list",
+    };
+    writeln!(buf, " Steering mode: {mode}")?;
 
     let mut shown = 0usize;
     for (key, policy) in bgp.local_rib.sr_policy.policies.iter() {

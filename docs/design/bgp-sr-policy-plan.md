@@ -545,3 +545,43 @@ before each; CI is source of truth (don't run bdd locally).
 - **Originator scope** — confirm whether a real controller/PCE is in the
   test topology, or whether the originator phase is purely for self-interop.
 ```
+
+## 14. Binding-SID steering mode (post-series follow-up)
+
+PR6 automated steering imposes the matched policy's **whole SID list**
+inline on every steered service route. A follow-up adds a headend
+`steering-mode` knob so an operator can instead steer to the policy's
+**Binding SID** (RFC 9256 §8.5): the route imposes only the BSID — one
+MPLS label, or one SRv6 SID to H.Encap toward — and the BSID's own
+forwarding entry (the SR-MPLS ILM from PR5, or the SRv6 End.B6.Encaps SID
+from PR4, both already installed) expands it into the real segment list.
+
+- **Why:** label-stack compression, and — the headline benefit —
+  decoupling. When a policy's candidate path or segment list changes, only
+  the single BSID entry reprograms; the (potentially many thousands of)
+  colour-steered routes never touch the FIB. Inline mode reprograms every
+  steered route on any path change.
+- **Config:** `router bgp … sr-policy steering-mode {segment-list |
+  binding-sid}` (default `segment-list`, preserving PR6). Global (consumed
+  policies have no local config), consumer-side; the SAFI-73 / Color
+  extcomm wire is unchanged, so IOS-XR interop is unaffected. Cisco IOS-XR
+  has no equivalent per-headend toggle — it uses the BSID structurally
+  (hierarchical / inter-domain recursion, BGP-CT), so this is a zebra-rs
+  simplification.
+- **Scope (one slice):** SR-MPLS (IPv4 unicast) + SRv6 (IPv4 **and** IPv6
+  unicast — SRv6 BSID encap covers both AFs; `fib_install_v6` had no SR-MPLS
+  hook). SR-MPLS BSID steering gates on the ILM actually being installed
+  (`installed_mpls`, NHT-gated) so a steered route never pushes a label
+  with no LFIB entry; a not-yet-installed BSID falls back to inline
+  steering (reachable, just uncompressed) until the next re-eval. SRv6 has
+  no such gate (End.B6.Encaps installs immediately).
+- **Deferred:** VPN service-route BSID steering; IPv6-unicast SR-MPLS;
+  CO=10 cross-endpoint reinstall (route NHT tracks a different address than
+  the policy endpoint); per-colour steering-map; weighted-ECMP across
+  seglists.
+- **Validation:** unit tests in `src/bgp/sr_policy.rs` cover the BSID
+  selection, the CO-bit fallback, and the ILM-installed gate for both
+  dataplanes; the `@bgp_sr_policy_bsid_steering` BDD proves the config
+  surface (YANG → callback → Loc-RIB → `show bgp sr-policy`) live. A
+  full 2-node received-policy forwarding BDD is the same gap the whole
+  series carries (unit-test-only dataplane) — a further follow-up.

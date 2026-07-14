@@ -1841,6 +1841,40 @@ mod yang_load_tests {
         }
     }
 
+    /// Regression guard for the BGP SR Policy `steering-mode` grammar
+    /// (zebra-bgp-sr-policy.yang). Pins the enum leaf so a broken
+    /// enumeration or a stale callback path is caught in the unit suite,
+    /// not only in the `@bgp_sr_policy_bsid_steering` BDD. Also re-pins a
+    /// couple of the existing policy leaves alongside it.
+    #[test]
+    fn bgp_sr_policy_steering_mode_paths_parse() {
+        use crate::config::ExecCode;
+        use crate::config::parse::{State, parse};
+        use libyang::to_entry;
+
+        let mut yang = YangStore::new();
+        yang.add_path(concat!(env!("CARGO_MANIFEST_DIR"), "/yang"));
+        yang.read_with_resolve("configure")
+            .unwrap_or_else(|e| panic!("configure failed to load: {e:#}"));
+        yang.identity_resolve();
+        let module = yang.find_module("configure").unwrap();
+        let entry = to_entry(&yang, module);
+
+        for cmd in [
+            "set router bgp sr-policy steering-mode segment-list",
+            "set router bgp sr-policy steering-mode binding-sid",
+            "set router bgp sr-policy policy GREEN color 100",
+            "set router bgp sr-policy policy GREEN binding-sid-label 16100",
+        ] {
+            let (code, _comps, _state) = parse(cmd, entry.clone(), None, State::new());
+            assert_eq!(
+                code,
+                ExecCode::Success,
+                "should parse as a settable path: {cmd}"
+            );
+        }
+    }
+
     /// Regression guard for the per-VRF redistribute grammar
     /// (zebra-bgp-vrf.yang `afi-safi {ipv4,ipv6} redistribute
     /// {connected,static}`). Pins the new bare-presence paths so a
