@@ -4090,13 +4090,19 @@ impl Bgp {
             // SR Policy: the endpoint's transport rerouted; re-install
             // the Binding-SID ILM toward the fresh next-hop.
             NhtDep::SrPolicy { color, endpoint } => {
-                super::route::sr_policy_reconcile_mpls(
+                let activated = super::route::sr_policy_reconcile_mpls(
                     &self.ctx.rib,
                     &self.nexthop_cache,
                     &mut self.local_rib.sr_policy,
                     color,
                     endpoint,
                 );
+                // BSID activation edge: re-install colour-matched service
+                // routes so they steer onto the now-installed BSID.
+                if activated {
+                    let top = self.nht_install_top();
+                    super::route::sr_policy_steer_resync(&top, color);
+                }
             }
             // MUP: a received segment route (DSD/ISD) next-hop rerouted →
             // re-dispatch it to importing VRFs with the fresh transport so
@@ -4523,7 +4529,7 @@ impl Bgp {
             // SR Policy reachability flip: (re)install or tear down the
             // Binding-SID ILM via the endpoint's NHT resolution.
             NhtDep::SrPolicy { color, endpoint } => {
-                super::route::sr_policy_reconcile_mpls(
+                let activated = super::route::sr_policy_reconcile_mpls(
                     top.rib_client,
                     top.nexthop_cache
                         .as_deref()
@@ -4532,6 +4538,11 @@ impl Bgp {
                     *color,
                     *endpoint,
                 );
+                // BSID activation edge: re-install colour-matched service
+                // routes so they steer onto the now-installed BSID.
+                if activated {
+                    super::route::sr_policy_steer_resync(&top, *color);
+                }
             }
             // MUP reachability flip: (re)dispatch the received DSD to
             // importing VRFs with its resolved transport (empty when

@@ -124,6 +124,9 @@ impl SrPolicy {
             (prev, new) => {
                 delta.remove = prev.as_ref().map(|b| b.bsid);
                 delta.install = new.clone();
+                // A fresh or changed BSID address is the steer-activation
+                // edge; a teardown (new is None) is not.
+                delta.activated = new.is_some();
             }
         }
         self.installed = desired;
@@ -149,6 +152,14 @@ pub struct SrPolicyFibDelta {
     pub remove: Option<Ipv6Addr>,
     pub install: Option<Srv6Bsid>,
     pub mpls_remove: Option<u32>,
+    /// The SRv6 Binding-SID *address* just appeared or changed, so a
+    /// colour-matched service route received before the policy must
+    /// re-derive its H.Encap steer onto it. Unlike the SR-MPLS ILM (see
+    /// [`MplsIlmAction::activated`]) the End.B6 SID installs immediately,
+    /// but the same route-before-policy gap applies. A same-address install
+    /// (only the segment list changed) leaves this `false` — the steer
+    /// target is unchanged.
+    pub activated: bool,
 }
 
 /// An SR-MPLS Binding SID install: the incoming BSID label and the
@@ -202,6 +213,12 @@ fn mpls_bsid(cp: &CandidatePath) -> Option<MplsBsid> {
 pub struct MplsIlmAction {
     pub remove: Option<u32>,
     pub install: Option<MplsBsid>,
+    /// The steering label just appeared or changed (`None`→`Some`, or a
+    /// candidate-path swap to a different BSID). Level-triggered install
+    /// alone can't tell a fresh activation from a steady-state re-eval, so
+    /// the caller re-installs colour-matched service routes only on this
+    /// edge — a route received before the policy re-derives its steer.
+    pub activated: bool,
 }
 
 /// The SRv6 Binding-SID install an active candidate path realizes, or
@@ -311,6 +328,7 @@ impl SrPolicyDb {
                     remove,
                     install: None,
                     mpls_remove,
+                    activated: false,
                 },
             )
         } else {
@@ -452,16 +470,19 @@ impl SrPolicyDb {
             Some(bsid) if reachable => {
                 // Replace whenever reachable (the resolved next-hop or the
                 // label stack may have changed); drop a stale label first.
-                let remove = policy.installed_mpls.filter(|old| *old != bsid.bsid);
+                let prev = policy.installed_mpls;
+                let remove = prev.filter(|old| *old != bsid.bsid);
                 policy.installed_mpls = Some(bsid.bsid);
                 MplsIlmAction {
                     remove,
+                    activated: prev != Some(bsid.bsid),
                     install: Some(bsid),
                 }
             }
             _ => MplsIlmAction {
                 remove: policy.installed_mpls.take(),
                 install: None,
+                activated: false,
             },
         }
     }
