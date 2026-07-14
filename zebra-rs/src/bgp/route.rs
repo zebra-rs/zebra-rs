@@ -788,7 +788,25 @@ pub(super) fn fib_install_v4(bgp: &super::peer::BgpTop, prefix: Ipv4Net, selecte
                 && let rib::Nexthop::Uni(ref mut uni) = rib_entry.nexthop
                 && uni.segs.is_empty()
             {
-                if let Some(stack) = sr_policy_steer_mpls(bgp, &best.attr, IpAddr::V4(*nh)) {
+                // `binding-sid` steering mode (RFC 9256 §8.5): impose only
+                // the matched policy's Binding SID — a single MPLS label
+                // the BSID ILM expands, or a single SRv6 SID to H.Encap
+                // toward the End.B6.Encaps BSID — instead of the whole SID
+                // list. Falls through to the inline SID list below when the
+                // matched policy advertises no BSID (or the ILM isn't yet
+                // installed), so steering is never lost.
+                let bsid_mode =
+                    bgp.local_rib.sr_policy.steer_mode == super::sr_policy::SteerMode::BindingSid;
+                if bsid_mode
+                    && let Some(bsid) = sr_policy_steer_mpls_bsid(bgp, &best.attr, IpAddr::V4(*nh))
+                {
+                    uni.mpls.push(rib::Label::Explicit(bsid));
+                } else if bsid_mode
+                    && let Some(sid) = sr_policy_steer_srv6_bsid(bgp, &best.attr, IpAddr::V4(*nh))
+                {
+                    uni.segs = vec![sid];
+                    uni.encap_type = Some(isis_packet::srv6::EncapType::HEncap);
+                } else if let Some(stack) = sr_policy_steer_mpls(bgp, &best.attr, IpAddr::V4(*nh)) {
                     for label in stack {
                         uni.mpls.push(rib::Label::Explicit(label));
                     }
@@ -984,10 +1002,24 @@ pub(super) fn fib_install_v6(bgp: &super::peer::BgpTop, prefix: Ipv6Net, selecte
                 && let Some(BgpNexthop::Ipv6(nh)) = best.attr.nexthop.as_ref()
                 && let rib::Nexthop::Uni(ref mut uni) = rib_entry.nexthop
                 && uni.segs.is_empty()
-                && let Some(sid) = resolve_flex_algo_srv6(bgp, &best.attr, IpAddr::V6(*nh))
             {
-                uni.segs = vec![sid];
-                uni.encap_type = Some(isis_packet::srv6::EncapType::HEncap);
+                // `binding-sid` steering mode (RFC 9256 §8.5): impose the
+                // matched SRv6 policy's Binding SID (H.Encap toward its
+                // End.B6.Encaps SID) instead of the flex-algo End SID.
+                // Falls through to Flex-Algo when no BSID policy matches.
+                // (SR-MPLS Binding-SID steering on IPv6 unicast is a
+                // follow-up — `fib_install_v6` has no MPLS-push hook.)
+                let bsid = (bgp.local_rib.sr_policy.steer_mode
+                    == super::sr_policy::SteerMode::BindingSid)
+                    .then(|| sr_policy_steer_srv6_bsid(bgp, &best.attr, IpAddr::V6(*nh)))
+                    .flatten();
+                if let Some(sid) = bsid {
+                    uni.segs = vec![sid];
+                    uni.encap_type = Some(isis_packet::srv6::EncapType::HEncap);
+                } else if let Some(sid) = resolve_flex_algo_srv6(bgp, &best.attr, IpAddr::V6(*nh)) {
+                    uni.segs = vec![sid];
+                    uni.encap_type = Some(isis_packet::srv6::EncapType::HEncap);
+                }
             }
             // SRv6 service-route steering: prepend the algo-N End SID
             // before an existing End.DT6 service SID. Effective today for
@@ -1221,6 +1253,46 @@ fn sr_policy_steer_mpls(bgp: &super::peer::BgpTop, attr: &BgpAttr, nh: IpAddr) -
             .steer_mpls(color.color, nh, color.co_bits())
         {
             return Some(stack);
+        }
+    }
+    None
+}
+
+/// SR Policy *Binding-SID* steering (RFC 9256 §8.5) for a plain unicast
+/// service route, used in the `binding-sid` steering mode: if one of the
+/// route's colours maps to an active SR-MPLS policy whose Binding-SID ILM
+/// is installed for `<color, next-hop>` (CO-bit fallback honoured), return
+/// that single BSID label to push (the ILM expands it into the real
+/// stack). Colours tried in ascending order.
+fn sr_policy_steer_mpls_bsid(bgp: &super::peer::BgpTop, attr: &BgpAttr, nh: IpAddr) -> Option<u32> {
+    for color in attr.colors() {
+        if let Some(bsid) =
+            bgp.local_rib
+                .sr_policy
+                .steer_mpls_bsid(color.color, nh, color.co_bits())
+        {
+            return Some(bsid);
+        }
+    }
+    None
+}
+
+/// SRv6 twin of [`sr_policy_steer_mpls_bsid`]: return the SRv6 Binding SID
+/// (the End.B6.Encaps local-SID address) to H.Encap toward, for a colour
+/// matching an active SRv6 policy. Covers both IPv4 and IPv6 service
+/// routes (v4-over-v6 H.Encap for the former).
+fn sr_policy_steer_srv6_bsid(
+    bgp: &super::peer::BgpTop,
+    attr: &BgpAttr,
+    nh: IpAddr,
+) -> Option<std::net::Ipv6Addr> {
+    for color in attr.colors() {
+        if let Some(bsid) =
+            bgp.local_rib
+                .sr_policy
+                .steer_srv6_bsid(color.color, nh, color.co_bits())
+        {
+            return Some(bsid);
         }
     }
     None

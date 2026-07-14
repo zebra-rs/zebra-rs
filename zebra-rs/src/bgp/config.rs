@@ -4275,6 +4275,11 @@ impl Bgp {
         // (zebra-bgp-sr-policy.yang). Locally-originated SR Policies,
         // advertised as SAFI 73; callbacks stage onto
         // `Bgp::local_rib.sr_policy_local` and re-advertise.
+        // Headend steering mode (consumer-side): whole SID list vs BSID.
+        self.callback_add(
+            "/router/bgp/sr-policy/steering-mode",
+            super::sr_policy::config_srp_steering_mode,
+        );
         self.callback_add(
             "/router/bgp/sr-policy/policy",
             super::sr_policy::config_srp_policy,

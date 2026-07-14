@@ -237,10 +237,31 @@ fn srv6_bsid(cp: &CandidatePath) -> Option<Srv6Bsid> {
     Some(Srv6Bsid { bsid, segments })
 }
 
+/// How the headend imposes an SR Policy on a colour-matched service
+/// route (the `steering-mode` knob, zebra-bgp-sr-policy.yang). The wire
+/// (SAFI 73 / Color extcomm) is unchanged either way; this only selects
+/// the local forwarding encoding.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum SteerMode {
+    /// Impose the policy's explicit SID list inline on every steered
+    /// route (RFC 9256 §8; the original behaviour, kept as the default).
+    #[default]
+    SegmentList,
+    /// Impose only the policy's Binding SID; its own forwarding entry
+    /// (the SR-MPLS ILM / SRv6 End.B6.Encaps SID) expands it into the
+    /// segment list (RFC 9256 §8.5). Compresses the label stack and
+    /// decouples steered routes from policy-path churn. Falls back to the
+    /// inline SID list for a matched policy that advertises no BSID.
+    BindingSid,
+}
+
 /// The SR Policy database (one per BGP instance, lives on the Loc-RIB).
 #[derive(Clone, Debug, Default)]
 pub struct SrPolicyDb {
     pub policies: BTreeMap<SrPolicyKey, SrPolicy>,
+    /// Headend steering mode (`steering-mode` config). Applies to all
+    /// colour steering; default keeps the inline SID-list behaviour.
+    pub steer_mode: SteerMode,
 }
 
 impl SrPolicyDb {
@@ -320,8 +341,58 @@ impl SrPolicyDb {
     /// treated as `00`. The same-AF / any-AF sub-ordering of §8.8.1 is
     /// simplified to "same-family null endpoint, then any endpoint".
     pub fn steer_mpls(&self, color: u32, endpoint: IpAddr, co_bits: u8) -> Option<Vec<u32>> {
-        if let Some(stack) = self.steer_at(color, endpoint) {
-            return Some(stack);
+        self.steer_lookup(color, endpoint, co_bits, |p| {
+            p.active_cp().and_then(mpls_segments)
+        })
+    }
+
+    /// Steer to an SR-MPLS policy's *Binding SID* (a single label) instead
+    /// of its expanded SID list — the `binding-sid` steering mode. The
+    /// BSID's ILM (installed, NHT-gated, by [`Self::mpls_reconcile`])
+    /// swaps the single label for the real stack. Returns the BSID label
+    /// only when that ILM is actually installed for the active path, so a
+    /// steered route never pushes a label with no LFIB entry (a not-yet-
+    /// installed BSID falls through to inline steering — reachable, just
+    /// uncompressed — until the next re-eval). Same CO-bit endpoint
+    /// fallback as [`Self::steer_mpls`].
+    pub fn steer_mpls_bsid(&self, color: u32, endpoint: IpAddr, co_bits: u8) -> Option<u32> {
+        self.steer_lookup(color, endpoint, co_bits, |p| {
+            let active = p.active_cp().and_then(mpls_bsid)?.bsid;
+            p.installed_mpls.filter(|inst| *inst == active)
+        })
+    }
+
+    /// Steer to an SRv6 policy's *Binding SID* (a single SID to H.Encap
+    /// toward) instead of its expanded segment list — the `binding-sid`
+    /// steering mode. The BSID's End.B6.Encaps local SID (installed
+    /// immediately by [`SrPolicy::reconcile_fib`]) expands it. Returns the
+    /// currently-installed BSID address, so it tracks the dataplane state.
+    /// Same CO-bit endpoint fallback as [`Self::steer_mpls`].
+    pub fn steer_srv6_bsid(&self, color: u32, endpoint: IpAddr, co_bits: u8) -> Option<Ipv6Addr> {
+        self.steer_lookup(color, endpoint, co_bits, |p| {
+            p.installed.as_ref().map(|b| b.bsid)
+        })
+    }
+
+    /// Shared CO-bit endpoint-fallback ladder (RFC 9256 §8.8.1 / RFC 9830
+    /// §3) for the steer helpers. Try the exact `<color, endpoint>`, then
+    /// (CO≥01) the same-family null-endpoint colour-only policy, then
+    /// (CO≥10) any endpoint of the colour; `11` is reserved and treated as
+    /// `00`. `f` extracts the steering target from a matched policy; the
+    /// first policy that yields `Some` wins.
+    fn steer_lookup<T>(
+        &self,
+        color: u32,
+        endpoint: IpAddr,
+        co_bits: u8,
+        f: impl Fn(&SrPolicy) -> Option<T>,
+    ) -> Option<T> {
+        if let Some(v) = self
+            .policies
+            .get(&SrPolicyKey { color, endpoint })
+            .and_then(&f)
+        {
+            return Some(v);
         }
         let co = if co_bits == 0b11 { 0 } else { co_bits };
         if co >= 0b01 {
@@ -329,8 +400,15 @@ impl SrPolicyDb {
                 IpAddr::V4(_) => IpAddr::V4(Ipv4Addr::UNSPECIFIED),
                 IpAddr::V6(_) => IpAddr::V6(Ipv6Addr::UNSPECIFIED),
             };
-            if let Some(stack) = self.steer_at(color, null) {
-                return Some(stack);
+            if let Some(v) = self
+                .policies
+                .get(&SrPolicyKey {
+                    color,
+                    endpoint: null,
+                })
+                .and_then(&f)
+            {
+                return Some(v);
             }
         }
         if co >= 0b10 {
@@ -344,19 +422,12 @@ impl SrPolicyDb {
                 if key.color != color {
                     break;
                 }
-                if let Some(stack) = policy.active_cp().and_then(mpls_segments) {
-                    return Some(stack);
+                if let Some(v) = f(policy) {
+                    return Some(v);
                 }
             }
         }
         None
-    }
-
-    fn steer_at(&self, color: u32, endpoint: IpAddr) -> Option<Vec<u32>> {
-        self.policies
-            .get(&SrPolicyKey { color, endpoint })
-            .and_then(|p| p.active_cp())
-            .and_then(mpls_segments)
     }
 
     /// Reconcile the SR-MPLS Binding-SID ILM for a *live* policy against
@@ -648,6 +719,25 @@ fn local_policy<'a>(bgp: &'a mut Bgp, name: &str) -> &'a mut LocalSrPolicy {
         .policies
         .entry(name.to_string())
         .or_default()
+}
+
+/// `set router bgp sr-policy steering-mode segment-list|binding-sid` —
+/// choose how colour-matched service routes are steered onto a policy:
+/// the whole SID list imposed inline (`segment-list`, the default), or
+/// just the policy's Binding SID (`binding-sid`, RFC 9256 §8.5). This is
+/// a consumer-side headend behaviour; it takes effect as steered routes
+/// are (re)installed. `delete` restores the default.
+pub fn config_srp_steering_mode(bgp: &mut Bgp, mut args: Args, op: ConfigOp) -> Option<()> {
+    let mode = match op {
+        ConfigOp::Set => match args.string()?.as_str() {
+            "binding-sid" => SteerMode::BindingSid,
+            _ => SteerMode::SegmentList,
+        },
+        ConfigOp::Delete => SteerMode::SegmentList,
+        _ => return Some(()),
+    };
+    bgp.local_rib.sr_policy.steer_mode = mode;
+    Some(())
 }
 
 /// `set router bgp sr-policy policy <NAME>` — ensure the entry exists;
@@ -1225,6 +1315,76 @@ mod tests {
         assert_eq!(db.steer_mpls(200, nh, 0b01), None);
         // CO=11 is reserved → treated as 00 (exact only) → no match.
         assert_eq!(db.steer_mpls(100, nh, 0b11), None);
+    }
+
+    #[test]
+    fn steer_mode_defaults_to_segment_list() {
+        assert_eq!(SrPolicyDb::default().steer_mode, SteerMode::SegmentList);
+    }
+
+    #[test]
+    fn steer_mpls_bsid_gated_on_installed_ilm() {
+        let mut db = SrPolicyDb::default();
+        let ep = endpoint("10.0.0.9");
+        db.insert(
+            SrPolicyKey {
+                color: 100,
+                endpoint: ep,
+            },
+            mpls_cp(1, 100, 1, 1000, 16001),
+        );
+        // The BSID ILM isn't installed yet (NHT-gated) → nothing to steer
+        // to; the caller falls back to inline SID-list steering.
+        assert_eq!(db.steer_mpls_bsid(100, ep, 0), None);
+        // Once the endpoint resolves and the ILM installs, steer to the
+        // single BSID label instead of the {16001} SID list.
+        assert!(db.mpls_reconcile(100, ep, true).install.is_some());
+        assert_eq!(db.steer_mpls_bsid(100, ep, 0), Some(1000));
+        // The inline steer still yields the full stack (mode is a caller
+        // choice; the DB exposes both).
+        assert_eq!(db.steer_mpls(100, ep, 0), Some(vec![16001]));
+        // Endpoint goes unreachable → ILM torn down → no BSID again.
+        db.mpls_reconcile(100, ep, false);
+        assert_eq!(db.steer_mpls_bsid(100, ep, 0), None);
+    }
+
+    #[test]
+    fn steer_mpls_bsid_co_bit_fallback() {
+        let mut db = SrPolicyDb::default();
+        let nh = endpoint("10.0.0.9");
+        let null = endpoint("0.0.0.0");
+        db.insert(
+            SrPolicyKey {
+                color: 100,
+                endpoint: null,
+            },
+            mpls_cp(1, 100, 1, 1000, 17001),
+        );
+        db.mpls_reconcile(100, null, true);
+        // No exact <100, nh>: CO=00 → none; CO=01 → the null-endpoint BSID.
+        assert_eq!(db.steer_mpls_bsid(100, nh, 0), None);
+        assert_eq!(db.steer_mpls_bsid(100, nh, 0b01), Some(1000));
+    }
+
+    #[test]
+    fn steer_srv6_bsid_returns_installed_bsid() {
+        let mut db = SrPolicyDb::default();
+        let ep = endpoint("10.0.0.9");
+        // A valid SRv6 policy installs its End.B6.Encaps BSID immediately
+        // (NHT-independent), so it is steerable at once — no reconcile.
+        db.insert(
+            SrPolicyKey {
+                color: 100,
+                endpoint: ep,
+            },
+            srv6_cp(1, 100, 1, "fc00:0:9::100", "fc00:0:2::"),
+        );
+        assert_eq!(db.steer_srv6_bsid(100, ep, 0), Some(v6("fc00:0:9::100")));
+        // Wrong colour with CO=00 → none.
+        assert_eq!(db.steer_srv6_bsid(200, ep, 0), None);
+        // Withdrawing the policy removes the BSID → no steer.
+        db.withdraw(100, ep, 1, 1);
+        assert_eq!(db.steer_srv6_bsid(100, ep, 0), None);
     }
 
     #[test]

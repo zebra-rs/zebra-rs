@@ -1,0 +1,21 @@
+# crs1 — a headend consumer with binding-sid SR-Policy steering enabled.
+# No peer: this feature validates the `steering-mode` config surface live
+# (YANG parse -> callback -> Loc-RIB SR Policy DB -> `show bgp sr-policy`).
+# A local (originator) policy is configured alongside the mode to prove
+# the two coexist under the same `sr-policy` container; the steering
+# *decision* logic is unit-tested in src/bgp/sr_policy.rs.
+router:
+  bgp:
+    global:
+      as: 65001
+      router-id: 10.0.0.1
+    sr-policy:
+      steering-mode: binding-sid
+      policy:
+      - name: GREEN
+        color: 100
+        endpoint: 10.0.0.9
+        binding-sid-label: 16100
+        segment:
+        - index: 1
+          mpls-label: 16002

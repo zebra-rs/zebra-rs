@@ -76,6 +76,27 @@ module zebra-bgp-sr-policy {
       ext:help "Locally-originated BGP SR Policies (SAFI 73)";
       presence "Configure local SR Policies";
 
+      leaf steering-mode {
+        ext:help "How a colour-matched route is steered onto a policy";
+        type enumeration {
+          enum segment-list {
+            description
+              "Impose the policy's explicit SID list inline on every
+               steered route (RFC 9256 §8). The default.";
+          }
+          enum binding-sid {
+            description
+              "Impose only the policy's Binding SID; its own forwarding
+               entry (the SR-MPLS ILM / SRv6 End.B6.Encaps SID) expands
+               it into the segment list (RFC 9256 §8.5). Compresses the
+               stack and decouples steered routes from policy-path churn.
+               Falls back to the inline SID list when the matched policy
+               advertises no Binding SID.";
+          }
+        }
+        default "segment-list";
+      }
+
       list policy {
         ext:help "A local SR Policy, advertised as SAFI 73";
         key name;
