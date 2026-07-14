@@ -33,6 +33,8 @@ const RETRY_TICK: std::time::Duration = std::time::Duration::from_secs(3);
 /// A running supervisor loop for one desired endpoint.
 struct Engine {
     endpoint: String,
+    /// The `--ebpf-mode` this engine was spawned with; a change restarts it.
+    mode: Option<String>,
     /// Flipping this to `true` asks the loop to stop: it SIGTERMs a child
     /// it spawned (never an adopted instance) and exits.
     shutdown: watch::Sender<bool>,
@@ -119,6 +121,10 @@ pub struct Cradle {
     events_rx: UnboundedReceiver<EngineEvent>,
     /// Staged `system ebpf enabled` (applied at `CommitEnd`).
     ebpf_enabled: bool,
+    /// Staged `system ebpf mode` — the single-hook benchmark mode
+    /// (`tc-only`/`xdp-only`) passed to the managed engine as `--ebpf-mode`.
+    /// `None` = full pipeline. A change restarts the engine (applied at spawn).
+    ebpf_mode: Option<String>,
     /// Staged `system cradle enabled` — in external mode (engine not
     /// managed) an enabled tee marks the endpoint usable for port pushes.
     cradle_enabled: bool,
@@ -180,6 +186,7 @@ impl Cradle {
             events_tx,
             events_rx,
             ebpf_enabled: false,
+            ebpf_mode: None,
             cradle_enabled: false,
             grpc_endpoint: None,
             if_ebpf: BTreeMap::new(),
@@ -233,6 +240,9 @@ impl Cradle {
                 match path.as_str() {
                     "/system/ebpf/enabled" => {
                         self.ebpf_enabled = msg.op.is_set() && args.boolean().unwrap_or(false);
+                    }
+                    "/system/ebpf/mode" => {
+                        self.ebpf_mode = if msg.op.is_set() { args.string() } else { None };
                     }
                     "/system/cradle/enabled" => {
                         self.cradle_enabled = msg.op.is_set() && args.boolean().unwrap_or(false);
@@ -629,6 +639,7 @@ impl Cradle {
                 .collect();
             return serde_json::json!({
                 "systemEbpfEnabled": self.ebpf_enabled,
+                "ebpfMode": self.ebpf_mode,
                 "teeEnabled": self.cradle_enabled || self.ebpf_enabled,
                 "endpoint": endpoint,
                 "engine": engine,
@@ -653,6 +664,10 @@ impl Cradle {
             }
         )
         .unwrap();
+        // Single-hook benchmark mode — shown only when set (unset = full pipeline).
+        if let Some(mode) = &self.ebpf_mode {
+            writeln!(out, "  Mode:            {mode} (single-hook L3-only benchmark)").unwrap();
+        }
         writeln!(
             out,
             "  FIB tee:         {}",
@@ -741,7 +756,14 @@ impl Cradle {
     /// disabling stops it gracefully.
     fn reconcile_engine(&mut self) {
         let desired = self.ebpf_enabled.then(|| self.endpoint());
-        if self.engine.as_ref().map(|e| e.endpoint.as_str()) == desired.as_deref() {
+        // Restart on endpoint OR mode change — the mode is applied to the child
+        // only at spawn (`--ebpf-mode`), so a live change must respawn it.
+        let unchanged = match (&self.engine, &desired) {
+            (Some(e), Some(ep)) => e.endpoint == *ep && e.mode == self.ebpf_mode,
+            (None, None) => true,
+            _ => false,
+        };
+        if unchanged {
             return;
         }
         if let Some(engine) = self.engine.take() {
@@ -752,15 +774,23 @@ impl Cradle {
             engine.task.detach();
         }
         if let Some(endpoint) = desired {
-            info!("cradle: starting engine supervisor for {endpoint}");
+            let mode = self.ebpf_mode.clone();
+            info!(
+                "cradle: starting engine supervisor for {endpoint}{}",
+                mode.as_deref()
+                    .map(|m| format!(" (ebpf-mode {m})"))
+                    .unwrap_or_default()
+            );
             let (shutdown, shutdown_rx) = watch::channel(false);
             let ep = endpoint.clone();
+            let spawn_mode = mode.clone();
             let events = self.events_tx.clone();
             let task = Task::spawn(async move {
-                supervisor::run(ep, shutdown_rx, events).await;
+                supervisor::run(ep, spawn_mode, shutdown_rx, events).await;
             });
             self.engine = Some(Engine {
                 endpoint,
+                mode,
                 shutdown,
                 task,
             });
