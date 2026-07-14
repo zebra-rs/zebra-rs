@@ -202,6 +202,12 @@ fn mpls_bsid(cp: &CandidatePath) -> Option<MplsBsid> {
 pub struct MplsIlmAction {
     pub remove: Option<u32>,
     pub install: Option<MplsBsid>,
+    /// The steering label just appeared or changed (`None`→`Some`, or a
+    /// candidate-path swap to a different BSID). Level-triggered install
+    /// alone can't tell a fresh activation from a steady-state re-eval, so
+    /// the caller re-installs colour-matched service routes only on this
+    /// edge — a route received before the policy re-derives its steer.
+    pub activated: bool,
 }
 
 /// The SRv6 Binding-SID install an active candidate path realizes, or
@@ -452,16 +458,19 @@ impl SrPolicyDb {
             Some(bsid) if reachable => {
                 // Replace whenever reachable (the resolved next-hop or the
                 // label stack may have changed); drop a stale label first.
-                let remove = policy.installed_mpls.filter(|old| *old != bsid.bsid);
+                let prev = policy.installed_mpls;
+                let remove = prev.filter(|old| *old != bsid.bsid);
                 policy.installed_mpls = Some(bsid.bsid);
                 MplsIlmAction {
                     remove,
+                    activated: prev != Some(bsid.bsid),
                     install: Some(bsid),
                 }
             }
             _ => MplsIlmAction {
                 remove: policy.installed_mpls.take(),
                 install: None,
+                activated: false,
             },
         }
     }

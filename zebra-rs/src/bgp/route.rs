@@ -9220,14 +9220,20 @@ fn sr_policy_mpls_sync(bgp: &mut BgpTop, color: u32, endpoint: IpAddr) {
         }
     }
 
+    let mut activated = false;
     if let Some(cache) = bgp.nexthop_cache.as_deref() {
-        sr_policy_reconcile_mpls(
+        activated = sr_policy_reconcile_mpls(
             bgp.rib_client,
             cache,
             &mut bgp.local_rib.sr_policy,
             color,
             endpoint,
         );
+    }
+    // The BSID just came up: re-install any colour-matched service route
+    // received before this policy so it steers onto the fresh BSID.
+    if activated {
+        sr_policy_steer_resync(bgp, color);
     }
 
     if !wants
@@ -9245,13 +9251,19 @@ fn sr_policy_mpls_sync(bgp: &mut BgpTop, color: u32, endpoint: IpAddr) {
 /// the active path and the endpoint's NHT resolution. Callable from the
 /// receive path and from the NHT re-eval in `inst.rs`, so it takes the
 /// RIB client + cache directly rather than a `BgpTop`.
+///
+/// Returns `true` on the activation edge (the Binding-SID label just
+/// appeared or swapped to a different value) so the caller can re-install
+/// colour-matched service routes onto the now-active BSID via
+/// [`sr_policy_steer_resync`]. A service route received before its SAFI-73
+/// policy would otherwise sit unsteered until an unrelated re-eval.
 pub(super) fn sr_policy_reconcile_mpls(
     rib_client: &crate::rib::client::RibClient,
     cache: &super::nht::NexthopCache,
     db: &mut super::sr_policy::SrPolicyDb,
     color: u32,
     endpoint: IpAddr,
-) {
+) -> bool {
     let reachable = !cache.transport_for(endpoint).is_empty();
     let action = db.mpls_reconcile(color, endpoint, reachable);
     if let Some(label) = action.remove {
@@ -9264,6 +9276,41 @@ pub(super) fn sr_policy_reconcile_mpls(
             &install.segments,
             cache.transport_for(endpoint),
         );
+    }
+    action.activated
+}
+
+/// Re-install every unicast Loc-RIB winner carrying `color` so a service
+/// route re-derives its SR-Policy steer now that the colour's Binding-SID
+/// ILM is installed (`steer_mpls_bsid` / `steer_srv6_bsid` only match an
+/// installed BSID). Install-only, mirroring `table_map_resync`: best-path
+/// selection and advertised attributes are untouched, so nothing is
+/// re-advertised. Colour-filtered — a strict subset of `table_map_resync`'s
+/// all-winners sweep — so it never re-installs uncoloured routes. Snapshot
+/// the winners first; `fib_install_v4/v6` borrows `bgp` immutably.
+pub(super) fn sr_policy_steer_resync(bgp: &super::peer::BgpTop, color: u32) {
+    let colored = |best: &BgpRib| best.attr.colors().any(|c| c.color == color);
+    let v4: Vec<(ipnet::Ipv4Net, BgpRib)> = bgp
+        .shard
+        .v4
+        .1
+        .iter()
+        .filter(|&(_, best)| colored(best))
+        .map(|(p, best)| (p, best.clone()))
+        .collect();
+    let v6: Vec<(ipnet::Ipv6Net, BgpRib)> = bgp
+        .shard
+        .v6
+        .1
+        .iter()
+        .filter(|&(_, best)| colored(best))
+        .map(|(p, best)| (p, best.clone()))
+        .collect();
+    for (prefix, best) in &v4 {
+        fib_install_v4(bgp, *prefix, std::slice::from_ref(best));
+    }
+    for (prefix, best) in &v6 {
+        fib_install_v6(bgp, *prefix, std::slice::from_ref(best));
     }
 }
 
