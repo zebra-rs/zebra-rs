@@ -571,6 +571,15 @@ impl FibHandle {
         }
     }
 
+    /// Set (or clear, with `None`) a per-VRF MPLS TTL-model override
+    /// (`vrf <name> mpls ttl propagate`) on the live tee, keyed by kernel
+    /// `table_id`. A no-op when the tee is off; re-applied by `cradle_apply`.
+    pub fn set_cradle_vrf_mpls_pipe(&self, table_id: u32, pipe: Option<bool>) {
+        if let Some(cradle) = &self.cradle {
+            cradle.set_vrf_mpls_pipe(table_id, pipe);
+        }
+    }
+
     /// Replay the tee's entire mirrored state into a freshly-(re)started
     /// cradle engine (see `CradleFib::replay`). Triggered by the
     /// `system ebpf` supervisor's `Message::CradleEngineUp`; a no-op when

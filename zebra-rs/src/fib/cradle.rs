@@ -176,10 +176,12 @@ fn cradle_vrf(table_id: u32) -> u32 {
 pub struct CradleFib {
     endpoint: String,
     client: Arc<Mutex<Option<CradleClient<Channel>>>>,
-    /// Dedup `(gateway, oif, out-label stack, backup id) -> nexthop id` so we
-    /// `SetNexthop` once per distinct nexthop.
-    nh_ids: Arc<Mutex<HashMap<(u32, u32, Vec<u32>, u32), u32>>>,
-    nh_ids6: Arc<Mutex<HashMap<([u8; 16], u32, Vec<u32>, u32), u32>>>,
+    /// Dedup `(gateway, oif, out-label stack, backup id, pipe) -> nexthop id`
+    /// so we `SetNexthop` once per distinct nexthop. `pipe` (the RFC 3443 TTL
+    /// model) is in the key so two VRFs with different models never alias the
+    /// same imposition nexthop.
+    nh_ids: Arc<Mutex<HashMap<(u32, u32, Vec<u32>, u32, bool), u32>>>,
+    nh_ids6: Arc<Mutex<HashMap<([u8; 16], u32, Vec<u32>, u32, bool), u32>>>,
     /// SRv6 nexthop dedup: `(underlay gateway, oif, segment list) -> id`.
     nh_ids_srv6: Arc<Mutex<HashMap<([u8; 16], u32, Vec<[u8; 16]>), u32>>>,
     /// GTP-U encap nexthop dedup:
@@ -196,6 +198,12 @@ pub struct CradleFib {
     /// disposition preserves the inner IP TTL. `false` = uniform: imposition
     /// seeds from the inner TTL and pop-to-IP writes it back (`ttl_uniform`).
     mpls_pipe: Arc<std::sync::atomic::AtomicBool>,
+    /// Per-VRF MPLS TTL-model overrides (`vrf <name> mpls ttl propagate`),
+    /// keyed by the cradle VRF table id (`cradle_vrf`). `true` = pipe, `false`
+    /// = uniform; an absent entry inherits the global `mpls_pipe`. Applied at
+    /// both ends of a VRF's LSPs (imposition seed and pop-to-IP writeback) so
+    /// they stay consistent.
+    mpls_pipe_vrf: Arc<std::sync::Mutex<HashMap<u32, bool>>>,
     /// Everything this tee has programmed, for [`Self::replay`].
     mirror: Arc<Mutex<CradleMirror>>,
 }
@@ -340,21 +348,46 @@ impl CradleFib {
             // matching zebra-rs's prior behavior. `set mpls ttl propagate
             // uniform` flips it via `set_mpls_pipe`.
             mpls_pipe: Arc::new(std::sync::atomic::AtomicBool::new(true)),
+            mpls_pipe_vrf: Arc::new(std::sync::Mutex::new(HashMap::new())),
             mirror: Arc::new(Mutex::new(CradleMirror::default())),
         }
     }
 
-    /// Set the RFC 3443 MPLS TTL model for subsequently-programmed labeled
-    /// nexthops and pop-to-IP ILMs. `true` = pipe, `false` = uniform. Cheap
-    /// interior mutation (no reconnect); existing entries re-derive on the next
-    /// resync/replay.
+    /// Set the global RFC 3443 MPLS TTL model for subsequently-programmed
+    /// labeled nexthops and pop-to-IP ILMs. `true` = pipe, `false` = uniform.
+    /// Cheap interior mutation (no reconnect); existing entries re-derive on
+    /// the next resync/replay.
     pub fn set_mpls_pipe(&self, pipe: bool) {
         self.mpls_pipe.store(pipe, Ordering::Relaxed);
     }
 
-    /// The current RFC 3443 model: `true` = pipe (seed 255 / preserve inner),
-    /// `false` = uniform (seed from inner / write back on pop).
-    fn mpls_pipe(&self) -> bool {
+    /// Set (or clear, with `None`) a per-VRF MPLS TTL-model override
+    /// (`vrf <name> mpls ttl propagate`). `table_id` is the kernel table id;
+    /// it is normalized to the cradle VRF convention.
+    pub fn set_vrf_mpls_pipe(&self, table_id: u32, pipe: Option<bool>) {
+        let t = cradle_vrf(table_id);
+        let mut map = self.mpls_pipe_vrf.lock().unwrap();
+        match pipe {
+            Some(p) => {
+                map.insert(t, p);
+            }
+            None => {
+                map.remove(&t);
+            }
+        }
+    }
+
+    /// The RFC 3443 model in effect for `table_id`: the per-VRF override if
+    /// set, else the global model. `true` = pipe (seed 255 / preserve inner),
+    /// `false` = uniform (seed from inner / write back on pop). The global
+    /// table (`0`/`254`) always takes the global model.
+    fn effective_pipe(&self, table_id: u32) -> bool {
+        let t = cradle_vrf(table_id);
+        if t != 0
+            && let Some(p) = self.mpls_pipe_vrf.lock().unwrap().get(&t)
+        {
+            return *p;
+        }
         self.mpls_pipe.load(Ordering::Relaxed)
     }
 
@@ -571,12 +604,14 @@ impl CradleFib {
         oif: u32,
         labels: &[u32],
         backup_id: u32,
+        pipe: bool,
     ) -> anyhow::Result<u32> {
         let key = (
             gw.map(u32::from).unwrap_or(0),
             oif,
             labels.to_vec(),
             backup_id,
+            pipe,
         );
         {
             let ids = self.nh_ids.lock().await;
@@ -603,7 +638,7 @@ impl CradleFib {
                 vxlan_vtep: String::new(),
                 vxlan_l3vni: 0,
                 vxlan_rmac: String::new(),
-                mpls_pipe_ttl: self.mpls_pipe() && !labels.is_empty(),
+                mpls_pipe_ttl: pipe && !labels.is_empty(),
             })
             .await?;
         self.nh_ids.lock().await.insert(key, id);
@@ -713,7 +748,12 @@ impl CradleFib {
     /// Resolve a teed member to a cradle nexthop id. SRv6 members (non-empty
     /// `segs`) are always v6-underlay; otherwise the family follows the
     /// gateway, or `route_v6` for an on-link (gateway-less) member.
-    async fn member_nexthop_id(&self, m: &Member, route_v6: bool) -> anyhow::Result<u32> {
+    async fn member_nexthop_id(
+        &self,
+        m: &Member,
+        route_v6: bool,
+        pipe: bool,
+    ) -> anyhow::Result<u32> {
         let (gw, oif, labels, segs, encap_mode, vxlan, backup) = m;
         // Fast-reroute: resolve the backup leaf first (the TI-LFA repair —
         // packed carriers + H.Insert for SRv6, the repair label stack for
@@ -721,7 +761,7 @@ impl CradleFib {
         // over on link-down.
         let backup_id = match backup {
             Some((bgw, boif, blabels, bsegs, bmode, _bvxlan)) => {
-                self.leaf_nexthop_id(bgw, *boif, blabels, bsegs, *bmode, route_v6)
+                self.leaf_nexthop_id(bgw, *boif, blabels, bsegs, *bmode, route_v6, pipe)
                     .await?
             }
             None => 0,
@@ -744,10 +784,16 @@ impl CradleFib {
             return self.srv6_nexthop_id(gw6, *oif, segs, *encap_mode).await;
         }
         match gw {
-            Some(IpAddr::V4(a)) => self.nexthop_id(Some(*a), *oif, labels, backup_id).await,
-            Some(IpAddr::V6(a)) => self.nexthop_id6(Some(*a), *oif, labels, backup_id).await,
-            None if route_v6 => self.nexthop_id6(None, *oif, labels, backup_id).await,
-            None => self.nexthop_id(None, *oif, labels, backup_id).await,
+            Some(IpAddr::V4(a)) => {
+                self.nexthop_id(Some(*a), *oif, labels, backup_id, pipe)
+                    .await
+            }
+            Some(IpAddr::V6(a)) => {
+                self.nexthop_id6(Some(*a), *oif, labels, backup_id, pipe)
+                    .await
+            }
+            None if route_v6 => self.nexthop_id6(None, *oif, labels, backup_id, pipe).await,
+            None => self.nexthop_id(None, *oif, labels, backup_id, pipe).await,
         }
     }
 
@@ -760,6 +806,7 @@ impl CradleFib {
         segs: &[Ipv6Addr],
         encap_mode: u32,
         route_v6: bool,
+        pipe: bool,
     ) -> anyhow::Result<u32> {
         if !segs.is_empty() {
             let gw6 = match gw {
@@ -769,10 +816,10 @@ impl CradleFib {
             return self.srv6_nexthop_id(gw6, oif, segs, encap_mode).await;
         }
         match gw {
-            Some(IpAddr::V4(a)) => self.nexthop_id(Some(*a), oif, labels, 0).await,
-            Some(IpAddr::V6(a)) => self.nexthop_id6(Some(*a), oif, labels, 0).await,
-            None if route_v6 => self.nexthop_id6(None, oif, labels, 0).await,
-            None => self.nexthop_id(None, oif, labels, 0).await,
+            Some(IpAddr::V4(a)) => self.nexthop_id(Some(*a), oif, labels, 0, pipe).await,
+            Some(IpAddr::V6(a)) => self.nexthop_id6(Some(*a), oif, labels, 0, pipe).await,
+            None if route_v6 => self.nexthop_id6(None, oif, labels, 0, pipe).await,
+            None => self.nexthop_id(None, oif, labels, 0, pipe).await,
         }
     }
 
@@ -800,8 +847,10 @@ impl CradleFib {
             return Ok(());
         }
         let vrf_table_id = cradle_vrf(table_id);
+        // RFC 3443 model for this route's VRF (per-VRF override or the global).
+        let pipe = self.effective_pipe(table_id);
         if members.len() == 1 {
-            let id = self.member_nexthop_id(&members[0], false).await?;
+            let id = self.member_nexthop_id(&members[0], false, pipe).await?;
             self.client()
                 .await?
                 .add_route4(pb::Route4 {
@@ -816,7 +865,7 @@ impl CradleFib {
         // ECMP: one nexthop per member, then a group the route points at.
         let mut ids = Vec::with_capacity(members.len());
         for m in &members {
-            ids.push(self.member_nexthop_id(m, false).await?);
+            ids.push(self.member_nexthop_id(m, false, pipe).await?);
         }
         let gid = self.next_id.fetch_add(1, Ordering::Relaxed);
         let mut client = self.client().await?;
@@ -865,12 +914,14 @@ impl CradleFib {
         oif: u32,
         labels: &[u32],
         backup_id: u32,
+        pipe: bool,
     ) -> anyhow::Result<u32> {
         let key = (
             gw.map(|a| a.octets()).unwrap_or([0; 16]),
             oif,
             labels.to_vec(),
             backup_id,
+            pipe,
         );
         {
             let ids = self.nh_ids6.lock().await;
@@ -897,7 +948,7 @@ impl CradleFib {
                 vxlan_vtep: String::new(),
                 vxlan_l3vni: 0,
                 vxlan_rmac: String::new(),
-                mpls_pipe_ttl: self.mpls_pipe() && !labels.is_empty(),
+                mpls_pipe_ttl: pipe && !labels.is_empty(),
             })
             .await?;
         self.nh_ids6.lock().await.insert(key, id);
@@ -928,8 +979,10 @@ impl CradleFib {
             return Ok(());
         }
         let vrf_table_id = cradle_vrf(table_id);
+        // RFC 3443 model for this route's VRF (per-VRF override or the global).
+        let pipe = self.effective_pipe(table_id);
         if members.len() == 1 {
-            let id = self.member_nexthop_id(&members[0], true).await?;
+            let id = self.member_nexthop_id(&members[0], true, pipe).await?;
             self.client()
                 .await?
                 .add_route6(pb::Route6 {
@@ -943,7 +996,7 @@ impl CradleFib {
         }
         let mut ids = Vec::with_capacity(members.len());
         for m in &members {
-            ids.push(self.member_nexthop_id(m, true).await?);
+            ids.push(self.member_nexthop_id(m, true, pipe).await?);
         }
         let gid = self.next_id.fetch_add(1, Ordering::Relaxed);
         let mut client = self.client().await?;
@@ -999,11 +1052,17 @@ impl CradleFib {
             in_label,
             (action, vrf_table_id, gw, oif, out_labels.to_vec()),
         );
+        // RFC 3443 model for this ILM's VRF (per-VRF override or the global).
+        // For POP_L3 the out stack is empty, so the imposition seed is moot;
+        // for a swap it governs the swapped stack's label TTL.
+        let pipe = self.effective_pipe(vrf_table_id);
         let result = async {
             let nexthop_id = match gw {
-                Some(IpAddr::V6(v6)) => self.nexthop_id6(Some(v6), oif, out_labels, 0).await?,
-                Some(IpAddr::V4(v4)) => self.nexthop_id(Some(v4), oif, out_labels, 0).await?,
-                None => self.nexthop_id(None, oif, out_labels, 0).await?,
+                Some(IpAddr::V6(v6)) => {
+                    self.nexthop_id6(Some(v6), oif, out_labels, 0, pipe).await?
+                }
+                Some(IpAddr::V4(v4)) => self.nexthop_id(Some(v4), oif, out_labels, 0, pipe).await?,
+                None => self.nexthop_id(None, oif, out_labels, 0, pipe).await?,
             };
             self.client()
                 .await?
@@ -1014,7 +1073,8 @@ impl CradleFib {
                     vrf_table_id,
                     // Uniform disposition only bites at a pop-to-IP (POP_L3):
                     // copy the popped label TTL into the exposed IP header.
-                    ttl_uniform: action == MPLS_OP_POP_L3 && !self.mpls_pipe(),
+                    // The per-VRF model must match this ILM's imposition end.
+                    ttl_uniform: action == MPLS_OP_POP_L3 && !pipe,
                 })
                 .await?;
             anyhow::Ok(())
@@ -1065,11 +1125,12 @@ impl CradleFib {
             .insert(prefix, (behavior, adj, oif));
         let result = async {
             let nexthop_id = match adj {
+                // Adjacency SID (no imposed labels) — the TTL model is moot.
                 Some(IpAddr::V6(a)) if !a.is_unspecified() => {
-                    self.nexthop_id6(Some(a), oif, &[], 0).await?
+                    self.nexthop_id6(Some(a), oif, &[], 0, false).await?
                 }
                 Some(IpAddr::V4(a)) if !a.is_unspecified() => {
-                    self.nexthop_id(Some(a), oif, &[], 0).await?
+                    self.nexthop_id(Some(a), oif, &[], 0, false).await?
                 }
                 _ => 0,
             };
@@ -1135,7 +1196,7 @@ impl CradleFib {
                     self.srv6_nexthop_id(None, ifindex, &sid.segs, 0).await?
                 } else {
                     match sid.nh6 {
-                        Some(nh6) => self.nexthop_id6(Some(nh6), ifindex, &[], 0).await?,
+                        Some(nh6) => self.nexthop_id6(Some(nh6), ifindex, &[], 0, false).await?,
                         None => 0,
                     }
                 };

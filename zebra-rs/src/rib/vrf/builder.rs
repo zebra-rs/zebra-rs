@@ -62,6 +62,7 @@ impl VrfBuilder {
                 let mup_import_rts = config.mup_import_rts.clone();
                 let mup_export_rts = config.mup_export_rts.clone();
                 let router_id = config.router_id;
+                let mpls_ttl_propagate = config.mpls_ttl_propagate;
                 self.config.insert(name.clone(), config);
                 let _ = tx.send(Message::VrfAdd { name: name.clone() });
                 let _ = tx.send(Message::VrfRouteTargets {
@@ -76,7 +77,16 @@ impl VrfBuilder {
                 // Router-id snapshot follows the same VrfAdd-first
                 // ordering contract as the RT message; `None` (leaf
                 // absent or deleted this commit) clears the override.
-                let _ = tx.send(Message::VrfRouterId { name, router_id });
+                let _ = tx.send(Message::VrfRouterId {
+                    name: name.clone(),
+                    router_id,
+                });
+                // Per-VRF MPLS TTL model, same VrfAdd-first ordering; `None`
+                // inherits the global model.
+                let _ = tx.send(Message::VrfMplsTtl {
+                    name,
+                    model: mpls_ttl_propagate,
+                });
             }
         }
     }
@@ -133,6 +143,7 @@ impl ConfigBuilder {
         const RT_PARSE_ERR: &str =
             "route-target must parse as ASN:value, IPv4:value, or 4byteASN:value";
         const ROUTER_ID_ERR: &str = "missing or invalid router-id argument";
+        const MPLS_TTL_ERR: &str = "mpls ttl propagate must be inherit, pipe, or uniform";
 
         ConfigBuilder::default()
             .path("")
@@ -165,6 +176,27 @@ impl ConfigBuilder {
                 cache_get(config, cache, name)
                     .context(CONFIG_ERR)?
                     .router_id = None;
+                Ok(())
+            })
+            // /vrf/<name>/mpls-ttl-propagate — per-VRF RFC 3443 model.
+            // `inherit` (and delete) clear the override, falling back to the
+            // global `mpls ttl propagate`.
+            .path("/mpls-ttl-propagate")
+            .set(|config, cache, name, args| {
+                let raw = args.string().context(MPLS_TTL_ERR)?;
+                let model = match raw.as_str() {
+                    "inherit" => None,
+                    s => Some(crate::rib::inst::TtlModel::from_yang(s).context(MPLS_TTL_ERR)?),
+                };
+                cache_get(config, cache, name)
+                    .context(CONFIG_ERR)?
+                    .mpls_ttl_propagate = model;
+                Ok(())
+            })
+            .del(|config, cache, name, _args| {
+                cache_get(config, cache, name)
+                    .context(CONFIG_ERR)?
+                    .mpls_ttl_propagate = None;
                 Ok(())
             })
             // /vrf/<name>/ipv4/route-target/import — leaf-list, one
@@ -401,7 +433,16 @@ mod tests {
         };
         assert_eq!(name, "v1");
         assert_eq!(router_id, None);
-        assert!(rx.try_recv().is_err(), "no fourth message expected");
+
+        // The per-VRF MPLS TTL snapshot trails router-id — `None` (inherit)
+        // here because the operator never set `vrf v1 mpls ttl propagate`.
+        let fourth = rx.try_recv().expect("VrfMplsTtl present");
+        let Message::VrfMplsTtl { name, model } = fourth else {
+            panic!("fourth message is not VrfMplsTtl");
+        };
+        assert_eq!(name, "v1");
+        assert_eq!(model, None);
+        assert!(rx.try_recv().is_err(), "no fifth message expected");
     }
 
     #[test]
@@ -449,6 +490,80 @@ mod tests {
             }
         }
         assert_eq!(router_ids, vec![None]);
+    }
+
+    #[test]
+    fn commit_carries_configured_mpls_ttl_and_inherit_clears_it() {
+        use crate::rib::inst::TtlModel;
+        let drain_model = |rx: &mut mpsc::UnboundedReceiver<Message>| {
+            let mut models = Vec::new();
+            while let Ok(msg) = rx.try_recv() {
+                if let Message::VrfMplsTtl { name, model } = msg {
+                    assert_eq!(name, "v1");
+                    models.push(model);
+                }
+            }
+            models
+        };
+
+        // set vrf v1 mpls ttl propagate uniform
+        let mut builder = VrfBuilder::new();
+        builder
+            .exec("/vrf".into(), args(&["v1"]), ConfigOp::Set)
+            .expect("create vrf");
+        builder
+            .exec(
+                "/vrf/mpls-ttl-propagate".into(),
+                args(&["v1", "uniform"]),
+                ConfigOp::Set,
+            )
+            .expect("set mpls ttl propagate");
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        builder.commit(tx);
+        assert_eq!(drain_model(&mut rx), vec![Some(TtlModel::Uniform)]);
+
+        // Overwrite with pipe.
+        builder
+            .exec(
+                "/vrf/mpls-ttl-propagate".into(),
+                args(&["v1", "pipe"]),
+                ConfigOp::Set,
+            )
+            .expect("set pipe");
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        builder.commit(tx);
+        assert_eq!(drain_model(&mut rx), vec![Some(TtlModel::Pipe)]);
+
+        // `inherit` clears the override back to None (use the global model).
+        builder
+            .exec(
+                "/vrf/mpls-ttl-propagate".into(),
+                args(&["v1", "inherit"]),
+                ConfigOp::Set,
+            )
+            .expect("set inherit");
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        builder.commit(tx);
+        assert_eq!(drain_model(&mut rx), vec![None]);
+    }
+
+    #[test]
+    fn invalid_mpls_ttl_value_returns_an_error() {
+        let mut builder = VrfBuilder::new();
+        builder
+            .exec("/vrf".into(), args(&["v1"]), ConfigOp::Set)
+            .expect("create vrf");
+        let err = builder
+            .exec(
+                "/vrf/mpls-ttl-propagate".into(),
+                args(&["v1", "bogus"]),
+                ConfigOp::Set,
+            )
+            .expect_err("garbage TTL model must be rejected");
+        assert!(
+            err.to_string().contains("mpls ttl propagate"),
+            "expected TTL-specific error, got: {err}",
+        );
     }
 
     #[test]

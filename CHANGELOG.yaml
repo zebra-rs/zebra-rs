@@ -30,7 +30,10 @@
           label-TTL model teed to cradle (pipe hides the LSP, the
           default; uniform exposes the hop count end to end) via
           `Nexthop.mpls_pipe_ttl` at imposition and `Ilm.ttl_uniform`
-          at pop-to-IP disposition
+          at pop-to-IP disposition; a per-VRF `vrf <name> mpls ttl
+          propagate {inherit|pipe|uniform}` override applies to that
+          VRF's L3VPN LSPs at both ends (e.g. uniform in the global
+          table, pipe per VPN)
 
     - note: |
         ### EVPN
