@@ -5,6 +5,67 @@
 # Fields "distribution" and "urgency" are optional per-entry; if you omit
 # them, the defaults from .chglog.yml (or chglog config) are used.
 
+- semver: 26.7.5
+  date: 2026-07-15T18:00:00+09:00
+  distribution: unstable
+  urgency: medium
+  packager: Kunihiro Ishiguro <kunihiro@zebra.rs>
+  changes:
+    - note: |
+        ### 5G mobile user plane (BGP MUP / GTP UPF)
+        * End-to-end UE ping proven through zebra-rs + cradle acting as
+          the UPF (`afi-safi mup dataplane gtp`) against a real 5G core
+          (free5GC v4.0.1) and RAN/UE simulator (free-ran-ue)
+        * The UPF honors the free5GC control-plane-allocated N3 F-TEID
+          carried in the Create-PDR PDI (TS 29.244 CH=0) as
+          authoritative, rather than allocating its own
+        * New `bdd/mup-lab` reproduces the full free5GC + free-ran-ue
+          single-box UPF by hand, and ships the free-ran-ue gNB N3
+          crash-fix patch with apply instructions
+
+    - note: |
+        ### SR Policy colour steering (RFC 9256)
+        * Colour-matched routes steer to an SR Policy Binding SID
+          (RFC 9256 §8.5)
+        * Binding-SID steering reaches the cradle data plane as a label
+          imposition, with an end-to-end BDD forwarding test
+
+    - note: |
+        ### MPLS label-TTL propagation (RFC 3443)
+        * `mpls ttl propagate {pipe|uniform}` producer teed to cradle,
+          with a per-VRF `vrf <name> mpls ttl propagate` override
+        * `mpls ttl propagate-local` splits the forwarded-transit and
+          locally-originated TTL models
+
+    - note: |
+        ### SRv6 / multicast
+        * Operator-configured `replication-segment` tees End.Replicate
+          (RFC 9524 SR-P2MP) into the cradle data plane
+
+    - note: |
+        ### eBPF data plane (cradle) & BFD offload
+        * `system ebpf mode {tc-only|xdp-only}` benchmark knob selects
+          the attach hook
+        * BFD Echo / detect-offload sessions are driven over the cradle
+          engine via gRPC, auto-attaching cradle_xdp on those interfaces
+
+    - note: |
+        ### Packaging & infrastructure
+        * The zebra-rs APT repo now bundles cradle-rs, so
+          `apt install zebra-rs` pulls a matching engine
+          (`Recommends: cradle-rs (>= 0.9.7)`)
+        * The XDP/eBPF build toolchain moved out of setup-build-env.sh
+          (it now lives with cradle-rs)
+
+    - note: |
+        ### Config & CLI
+        * Config files rejected by the YANG schema now report the
+          offending source line number
+        * Fixed piped `show …` in configure mode (vty subshell
+          session-key miss)
+        * BDD daemons start with `-c /dev/null` instead of deleting the
+          startup config
+
 - semver: 26.7.4
   date: 2026-07-12T18:00:00+09:00
   distribution: unstable

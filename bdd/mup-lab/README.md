@@ -42,11 +42,9 @@ Key design points
 ## Prerequisites
 
 ```sh
-# zebra-rs (install nightly)
-# URL: https://github.com/zebra-rs/zebra-rs/releases/tag/nightly
+# Install zebra-rs (version >= 26.7.5)
 
-# cradle (install nightly)
-# URL: https://github.com/cradle-rs/cradle-rs/releases/tag/nightly
+# Install cradle (version >= 0.9.7)
 
 # free5GC v4.0.1 CP NFs + webconsole backend (Go >= 1.21; no gtp5g needed — we ARE the UPF)
 cd ~/free5gc && make nrf smf udr udm ausf nssf pcf chf   # amf: use prebuilt bin/amf
