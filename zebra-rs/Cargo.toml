@@ -4,7 +4,7 @@ version.workspace = true
 edition.workspace = true
 authors.workspace = true
 license.workspace = true
-description = "zebra-rs is reincarnation of GNU zebra in Rust."
+description = "Reincarnation of GNU Zebra routing suite in Rust"
 homepage = "https://zebra.rs"
 
 [lints]
@@ -35,7 +35,11 @@ revision = ""
 # Debian-format changelog generated from the single-source CHANGELOG.yaml by
 # packaging/changelog-gen.sh (the packaging Makefile runs it before cargo deb).
 changelog = "../packaging/out/changelog"
-extended-description = "zebra-rs is reincarnation of GNU zebra in Rust."
+extended-description = """
+zebra-rs is a routing software suite reimplementing GNU Zebra in Rust. It
+provides BGP, OSPFv2/v3, and IS-IS routing daemons behind a unified YANG-based
+configuration model and a VTY-style command shell, and can drive an optional
+eBPF data plane (cradle-rs) for offloaded forwarding."""
 # Custom maintainer scripts (groupadd/setcap/groupdel). Each carries a
 # #DEBHELPER# token where cargo-deb injects the generated systemd fragments.
 maintainer-scripts = "../packaging/maintainer"
@@ -64,8 +68,25 @@ assets = [
   ["../packaging/zebra-rs.conf",                 "etc/zebra-rs/zebra-rs.conf",      "644"],
   # Playset lab topologies (netns example networks). Read-only data under
   # /usr/share; staged into packaging/out/playset by the Makefile to strip
-  # runtime artifacts (*.log, *.pid).
-  ["../packaging/out/playset/**/*",              "usr/share/zebra-rs/playset/",     "644"],
+  # runtime artifacts (*.log, *.pid). cargo-deb requires a mode per asset and
+  # can't exclude or preserve source modes, and overlapping globs duplicate
+  # entries — so the tree is packed as disjoint globs that mirror the source
+  # modes exactly: only the up.sh/down.sh lab entry points (run as `./up.sh`)
+  # are 0755; the sourced helper scripts and all data are 0644. The Makefile
+  # `playset` target fails the build if any file outside this set appears, so
+  # a new file/script can never silently go unpackaged.
+  ["../packaging/out/playset/**/up.sh",          "usr/share/zebra-rs/playset/",     "755"],
+  ["../packaging/out/playset/**/down.sh",        "usr/share/zebra-rs/playset/",     "755"],
+  ["../packaging/out/playset/**/topology.sh",    "usr/share/zebra-rs/playset/",     "644"],
+  ["../packaging/out/playset/**/common.sh",      "usr/share/zebra-rs/playset/",     "644"],
+  ["../packaging/out/playset/**/netns.sh",       "usr/share/zebra-rs/playset/",     "644"],
+  ["../packaging/out/playset/**/playset.sh",     "usr/share/zebra-rs/playset/",     "644"],
+  ["../packaging/out/playset/**/zebra-rs.sh",    "usr/share/zebra-rs/playset/",     "644"],
+  ["../packaging/out/playset/**/*.yaml",         "usr/share/zebra-rs/playset/",     "644"],
+  ["../packaging/out/playset/**/*.md",           "usr/share/zebra-rs/playset/",     "644"],
+  ["../packaging/out/playset/**/*.drawio",       "usr/share/zebra-rs/playset/",     "644"],
+  ["../packaging/out/playset/**/*.png",          "usr/share/zebra-rs/playset/",     "644"],
+  ["../packaging/out/playset/**/*.svg",          "usr/share/zebra-rs/playset/",     "644"],
   ["../packaging/modules-load.d/zebra-rs.conf",  "etc/modules-load.d/zebra-rs.conf", "644"],
 ]
 

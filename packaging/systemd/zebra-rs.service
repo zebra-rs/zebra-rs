@@ -6,8 +6,8 @@ After=network.target
 Type=simple
 User=root
 Group=root
-StandardOutput=syslog
-StandardError=syslog
+StandardOutput=journal
+StandardError=journal
 # --yang-path pins the package's schema tree under /usr/share (program data,
 # not a conffile). --config-file keeps the persisted running config at the
 # /etc conffile; without it the daemon would derive the config path from the
