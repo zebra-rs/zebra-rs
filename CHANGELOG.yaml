@@ -1,6 +1,11 @@
 # CHANGELOG.yaml – the single source of truth for the project changelog.
-# packaging/changelog-gen.sh converts this file into the Debian-format changelog
-# that cargo-deb ships (see zebra-rs/Cargo.toml [package.metadata.deb] changelog).
+# Two consumers render from this one file, so there is no second place to edit:
+#   * packaging/changelog-gen.sh -> the Debian-format changelog cargo-deb ships
+#     (see zebra-rs/Cargo.toml [package.metadata.deb] changelog)
+#   * packaging/release-notes.sh -> the GitHub release body (nightly.yaml uses
+#     the top entry; release.yaml uses the entry matching the v<X.Y.Z> tag)
+# The note bodies below are written in Markdown (### headings, * bullets) so
+# they render directly on the GitHub Releases page.
 # Keep newest entry first.
 # All timestamps must be in full ISO-8601 format.
 # Fields "distribution" and "urgency" are optional per-entry; if you omit them,

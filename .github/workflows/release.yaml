@@ -5,8 +5,11 @@ name: Stable Release
 # per-codename `apt-<codename>` flat APT repositories (when APT_PUBLISH_ENABLED).
 #
 # Release flow:
-#   1. Bump the `version` file, then `packaging/version-update.sh`
-#   2. Commit, then `git tag "v$(cat version)" && git push origin "v$(cat version)"`
+#   1. Add a newest-first CHANGELOG.yaml entry whose `semver` is the new version
+#      (it renders both the shipped .deb changelog and this GitHub release body;
+#      the `check` job below fails the release if it's missing or mismatched)
+#   2. Bump the `version` file, then `packaging/version-update.sh`
+#   3. Commit, then `git tag "v$(cat version)" && git push origin "v$(cat version)"`
 
 on:
   push:
@@ -32,6 +35,19 @@ jobs:
             echo "::error::Release ref '$GITHUB_REF_NAME' must be tag 'v$ver' (the version file). Bump the version file first, then tag."
             exit 1
           fi
+      - name: CHANGELOG.yaml top entry matches version
+        run: |
+          # The release body is rendered from CHANGELOG.yaml's newest entry
+          # (packaging/release-notes.sh). Fail loudly if the changelog wasn't
+          # updated for this release, so the Releases page never gets an empty
+          # or stale summary — and so the shipped .deb changelog matches too.
+          ver="$(cat version)"
+          top="$(sed -n 's/^- semver: //p' CHANGELOG.yaml | head -n1)"
+          echo "changelog-top=$top  version-file=$ver"
+          if [ "$top" != "$ver" ]; then
+            echo "::error::CHANGELOG.yaml top entry ('$top') must match the version file ('$ver'). Add the release entry to CHANGELOG.yaml (newest first)."
+            exit 1
+          fi
 
   build:
     needs: check
@@ -47,6 +63,11 @@ jobs:
     needs: build
     runs-on: ubuntu-latest
     steps:
+      # Needed for CHANGELOG.yaml + packaging/release-notes.sh (the release body
+      # is rendered from the curated changelog, not hand-written here).
+      - name: Checkout code
+        uses: actions/checkout@v5
+
       - name: Download all build artifacts
         uses: actions/download-artifact@v8
         with:
@@ -57,25 +78,39 @@ jobs:
       - name: List collected .deb files
         run: ls -la artifacts/
 
+      # Render the release body from CHANGELOG.yaml's entry for this tag (the
+      # `check` job already verified it matches the version file), then append
+      # the fixed downloads table. body_path below feeds this to the release.
+      - name: Build release notes
+        env:
+          TAG: ${{ github.ref_name }}
+        run: |
+          {
+            packaging/release-notes.sh "${TAG#v}"
+            cat <<'EOF'
+
+          ## Downloads
+
+          Choose the file matching your Ubuntu version and architecture:
+
+          | Ubuntu             | x86_64                   | ARM64                    |
+          |--------------------|--------------------------|--------------------------|
+          | 22.04 (jammy)      | `*-jammy_amd64.deb`      | `*-jammy_arm64.deb`      |
+          | 24.04 (noble)      | `*-noble_amd64.deb`      | `*-noble_arm64.deb`      |
+          | 26.04 (resolute)   | `*-resolute_amd64.deb`   | `*-resolute_arm64.deb`   |
+
+          Or install via apt: https://zebra.rs/apt/
+          EOF
+          } > release-notes.md
+          echo "----- rendered release-notes.md -----"
+          cat release-notes.md
+
       - name: Publish to GitHub Releases
         uses: softprops/action-gh-release@v3
         with:
           tag_name: ${{ github.ref_name }}
           name: ${{ github.ref_name }}
-          body: |
-            zebra-rs ${{ github.ref_name }}
-
-            ## Downloads
-
-            Choose the file matching your Ubuntu version and architecture:
-
-            | Ubuntu             | x86_64                   | ARM64                    |
-            |--------------------|--------------------------|--------------------------|
-            | 22.04 (jammy)      | `*-jammy_amd64.deb`      | `*-jammy_arm64.deb`      |
-            | 24.04 (noble)      | `*-noble_amd64.deb`      | `*-noble_arm64.deb`      |
-            | 26.04 (resolute)   | `*-resolute_amd64.deb`   | `*-resolute_arm64.deb`   |
-
-            Or install via apt: https://zebra.rs/apt/
+          body_path: release-notes.md
           files: artifacts/*.deb
 
   # =====================================================================

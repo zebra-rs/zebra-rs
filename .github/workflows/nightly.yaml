@@ -59,26 +59,44 @@ jobs:
                 gh release delete-asset nightly "$asset" --yes
               done || echo "No existing nightly release yet; nothing to clean."
 
+      # Render the body from CHANGELOG.yaml's newest (in-progress) entry, so the
+      # nightly Releases page previews the changes accumulating for the next
+      # version — the same prose the .deb changelog ships. No arg = top entry.
+      - name: Build nightly release notes
+        env:
+          SHA: ${{ github.sha }}
+        run: |
+          {
+            echo "Nightly build from commit ${SHA}"
+            echo
+            echo "## Changes accumulating for the next release"
+            echo
+            packaging/release-notes.sh
+            cat <<'EOF'
+
+          ## Downloads
+
+          Choose the file matching your Ubuntu version and architecture:
+
+          | Ubuntu             | x86_64                   | ARM64                    |
+          |--------------------|--------------------------|--------------------------|
+          | 22.04 (jammy)      | `*-jammy_amd64.deb`      | `*-jammy_arm64.deb`      |
+          | 24.04 (noble)      | `*-noble_amd64.deb`      | `*-noble_arm64.deb`      |
+          | 26.04 (resolute)   | `*-resolute_amd64.deb`   | `*-resolute_arm64.deb`   |
+
+          Or install via apt (nightly channel): https://zebra.rs/apt/
+          EOF
+          } > release-notes.md
+          echo "----- rendered release-notes.md -----"
+          cat release-notes.md
+
       - name: Publish to GitHub Releases
         uses: softprops/action-gh-release@v3
         with:
           tag_name: nightly
           name: "Nightly Build"
           prerelease: true
-          body: |
-            Nightly build from commit ${{ github.sha }}
-
-            ## Downloads
-
-            Choose the file matching your Ubuntu version and architecture:
-
-            | Ubuntu             | x86_64                   | ARM64                    |
-            |--------------------|--------------------------|--------------------------|
-            | 22.04 (jammy)      | `*-jammy_amd64.deb`      | `*-jammy_arm64.deb`      |
-            | 24.04 (noble)      | `*-noble_amd64.deb`      | `*-noble_arm64.deb`      |
-            | 26.04 (resolute)   | `*-resolute_amd64.deb`   | `*-resolute_arm64.deb`   |
-
-            Or install via apt (nightly channel): https://zebra.rs/apt/
+          body_path: release-notes.md
           files: artifacts/*.deb
 
   # =====================================================================
