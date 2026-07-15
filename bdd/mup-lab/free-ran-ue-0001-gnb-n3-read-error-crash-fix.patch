@@ -1,0 +1,43 @@
+From 4d9a793b2c7f779250e01d6c22018bbf345f51d8 Mon Sep 17 00:00:00 2001
+From: Kunihiro Ishiguro <kunihiro@zebra.rs>
+Date: Tue, 14 Jul 2026 16:01:59 -0700
+Subject: [PATCH] fix(gnb): don't crash on an N3 read error or short GTP packet
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+receiveGtpPacketFromN3Conn logged a read error but fell through with
+n=0, so parseGtpPacket sliced gtpPacket[:8] on an empty buffer and the
+gNB died with an index-out-of-range panic. A connected UDP socket
+surfaces ICMP port-unreachable as exactly such a read error — one
+unmatched uplink packet at the UPF (e.g. while its PDRs are still being
+installed) kills the whole gNB.
+
+Skip the iteration on a read error, and drop datagrams shorter than
+the 8-byte GTP-U header instead of parsing them.
+---
+ gnb/gtp.go | 7 +++++++
+ 1 file changed, 7 insertions(+)
+
+diff --git a/gnb/gtp.go b/gnb/gtp.go
+index 8783753..6e0efd1 100644
+--- a/gnb/gtp.go
++++ b/gnb/gtp.go
+@@ -103,7 +103,14 @@ func receiveGtpPacketFromN3Conn(ctx context.Context, n3Conn *net.UDPConn, ranDat
+ 			if errors.Is(err, net.ErrClosed) {
+ 				return
+ 			}
++			// e.g. an ICMP port-unreachable surfaced on the connected
++			// socket; there is no packet to process.
+ 			gnbLogger.GtpLog.Warnf("Error reading GTP packet from N3 connection: %v", err)
++			continue
++		}
++		if n < 8 {
++			gnbLogger.GtpLog.Warnf("Short GTP packet (%d bytes) from N3 connection, dropping", n)
++			continue
+ 		}
+ 		gnbLogger.GtpLog.Tracef("Received %d bytes of GTP packet from N3 connection: %+v", n, buffer[:n])
+ 		gnbLogger.GtpLog.Tracef("Received %d bytes of GTP packet from N3 connection", n)
+-- 
+2.43.0
+
