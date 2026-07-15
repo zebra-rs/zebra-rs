@@ -42,18 +42,24 @@ Key design points
 ## Prerequisites
 
 ```sh
-# zebra-rs (this repo, with the mup-c n3_local fix) + vtyctl
-cargo build -p zebra-rs -p vtyctl
+# zebra-rs (install nightly)
+# URL: https://github.com/zebra-rs/zebra-rs/releases/tag/nightly
 
-# cradle (branch with the GTP header-shape decap + address monitor, PR cradle-rs#147)
-cd ~/cradle-rs && cargo build
+# cradle (install nightly)
+# URL: https://github.com/cradle-rs/cradle-rs/releases/tag/nightly
 
 # free5GC v4.0.1 CP NFs + webconsole backend (Go >= 1.21; no gtp5g needed — we ARE the UPF)
 cd ~/free5gc && make nrf smf udr udm ausf nssf pcf chf   # amf: use prebuilt bin/amf
 cd webconsole && go build -o bin/webconsole server.go
 
-# free-ran-ue (Go 1.26 via auto-toolchain; includes the N3 crash fix, PR free-ran-ue#326)
-cd ~/free-ran-ue && make bin
+# free-ran-ue (Go 1.26 via auto-toolchain; needs the N3 crash fix, PR free-ran-ue#326)
+# Until #326 merges upstream, apply the bundled patch to a vanilla checkout.
+# PATCH points at this lab directory (bdd/mup-lab), which ships the .patch:
+PATCH=/path/to/zebra-rs/bdd/mup-lab/free-ran-ue-0001-gnb-n3-read-error-crash-fix.patch
+cd ~/free-ran-ue
+git am "$PATCH"                       # or: patch -p1 < "$PATCH" for a non-git tree
+# (already have the fix — e.g. commit 4d9a793 on your branch — skip the patch)
+make bin
 
 # MongoDB (Ubuntu's 3.6 package works)
 sudo mkdir -p /var/log/mongodb /var/lib/mongodb
