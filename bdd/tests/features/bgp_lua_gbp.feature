@@ -36,7 +36,7 @@ Feature: BGP EVPN Group-Based Policy via Lua scripting
   (-> tag 100) and stamps a Group-Policy-ID extended community. z2's
   import Lua hook recovers the tag and runs `nft add element` to put the
   MAC in set `tag_100`; the withdraw hook removes it. The scripts are the
-  shipped /etc/zebra-rs/lua/gbp-example.lua.
+  shipped /usr/share/zebra-rs/lua/gbp-example.lua.
 
   Scenario: Setup topology, EVPN iBGP, GBP scripts, and the enforcement table
     Given a clean test environment

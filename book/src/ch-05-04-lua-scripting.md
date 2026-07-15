@@ -82,8 +82,8 @@ Define named scripts (and optional lookup tables), then bind them:
 
 ```
 router bgp 65000 {
-  lua-script GBP { source-path /etc/zebra-rs/lua/gbp-example.lua; }
-  lua-map sgt    { source-path /etc/zebra-rs/lua/sgt.json; }      // MAC -> tag JSON
+  lua-script GBP { source-path /usr/share/zebra-rs/lua/gbp-example.lua; }
+  lua-map sgt    { source-path /usr/share/zebra-rs/lua/sgt.json; }      // MAC -> tag JSON
 
   loc-rib-hook {
     ipv4-unicast { import GBP; withdraw GBP; }
@@ -110,7 +110,7 @@ into a `map.get` namespace.
 ## Example: GBP over EVPN
 
 The package ships a complete example at
-`/etc/zebra-rs/lua/gbp-example.lua` implementing Group-Based Policy over
+`/usr/share/zebra-rs/lua/gbp-example.lua` implementing Group-Based Policy over
 EVPN: the `export` hook stamps the EVPN Type-2 (MAC) route with the
 endpoint's group tag (looked up MAC → tag via `map.get`) as a GPI
 extended community; the `import` hook recovers the tag and programs an
@@ -169,9 +169,9 @@ end
 The three scripts from the FRR-scripting talk are shipped as ports you can
 read and adapt:
 
-- `/etc/zebra-rs/lua/metric.lua` — the basic MED-rewrite example.
-- `/etc/zebra-rs/lua/gbp-export.lua` — the advertise side (above).
-- `/etc/zebra-rs/lua/gbp-import.lua` — the receive side, plus the withdraw
+- `/usr/share/zebra-rs/lua/metric.lua` — the basic MED-rewrite example.
+- `/usr/share/zebra-rs/lua/gbp-export.lua` — the advertise side (above).
+- `/usr/share/zebra-rs/lua/gbp-import.lua` — the receive side, plus the withdraw
   teardown FRR cannot express.
 
 Because zebra-rs is Lua 5.4, the raw FRR idioms (`string.pack`/`unpack` on

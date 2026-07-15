@@ -1168,7 +1168,7 @@ mod tests {
 
     #[test]
     fn shipped_gbp_example_loads_and_runs() {
-        // The example script packaged at /etc/zebra-rs/lua/gbp-example.lua
+        // The example script packaged at /usr/share/zebra-rs/lua/gbp-example.lua
         // must stay valid: `include_str!` pins the path at compile time,
         // and exercising the egress path (map.get → ecom.gpi →
         // MATCH_AND_CHANGE) proves it actually loaded and ran (a syntax
@@ -1219,7 +1219,7 @@ mod tests {
 
     #[test]
     fn packaged_lua_scripts_load() {
-        // The other example scripts shipped to /etc/zebra-rs/lua must stay
+        // The other example scripts shipped to /usr/share/zebra-rs/lua must stay
         // valid (they are packaged): `include_str!` pins each path at
         // compile time, and the positive transforms below prove each one
         // actually loaded and ran.

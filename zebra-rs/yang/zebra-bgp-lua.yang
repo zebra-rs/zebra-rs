@@ -35,7 +35,7 @@ module zebra-bgp-lua {
 
        router bgp {
          lua-script GBP {
-           source-path /etc/zebra-rs/lua/gbp.lua;
+           source-path /usr/share/zebra-rs/lua/gbp.lua;
          }
          loc-rib-hook {
            ipv4-unicast {
