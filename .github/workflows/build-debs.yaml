@@ -43,27 +43,23 @@ jobs:
           sudo apt-get update -y
           sudo apt-get install -y protobuf-compiler bison xxd libpam0g-dev
 
-      - name: Install nfpm
-        run: |
-          echo 'deb [trusted=yes] https://repo.goreleaser.com/apt/ /' | \
-            sudo tee /etc/apt/sources.list.d/goreleaser.list
-          sudo apt-get update
-          sudo apt-get install -y nfpm
+      - name: Install cargo-deb
+        run: cargo install cargo-deb --locked
 
       - name: Build vty
         run: make -C vty
 
       # Nightly packages need a monotonically increasing, pre-release-sorting
       # version or `apt upgrade` never advances. 26.6.2~nightlyYYYYMMDD sorts
-      # BELOW a future stable 26.6.2 (Debian '~'); version_schema:none keeps the
-      # '~' verbatim (nfpm's default semver schema would reject/mangle it).
-      # Skipped for stable releases, which use the clean version from the file.
-      - name: Stamp nightly package version
+      # BELOW a future stable 26.6.2 (Debian '~'). cargo-deb takes the version
+      # verbatim via --deb-version (the packaging Makefile forwards DEB_VERSION),
+      # so the '~' is preserved. Skipped for stable releases, which use the
+      # clean version from Cargo.toml.
+      - name: Compute nightly package version
         if: ${{ inputs.nightly }}
         run: |
           STAMP="$(cat version)~nightly$(date -u +%Y%m%d)"
-          sed -i -E "s|^version:.*|version: \"$STAMP\"\nversion_schema: none|" \
-            packaging/nfpm-amd64.yaml packaging/nfpm-arm64.yaml
+          echo "DEB_VERSION=$STAMP" >> "$GITHUB_ENV"
           echo "Nightly package version: $STAMP"
 
       - name: Build .deb
@@ -121,22 +117,17 @@ jobs:
           apt-get update -y
           apt-get install -y protobuf-compiler bison xxd libpam0g-dev
 
-      - name: Install nfpm
-        run: |
-          echo 'deb [trusted=yes] https://repo.goreleaser.com/apt/ /' \
-            > /etc/apt/sources.list.d/goreleaser.list
-          apt-get update
-          apt-get install -y nfpm
+      - name: Install cargo-deb
+        run: cargo install cargo-deb --locked
 
       - name: Build vty
         run: make -C vty
 
-      - name: Stamp nightly package version
+      - name: Compute nightly package version
         if: ${{ inputs.nightly }}
         run: |
           STAMP="$(cat version)~nightly$(date -u +%Y%m%d)"
-          sed -i -E "s|^version:.*|version: \"$STAMP\"\nversion_schema: none|" \
-            packaging/nfpm-amd64.yaml packaging/nfpm-arm64.yaml
+          echo "DEB_VERSION=$STAMP" >> "$GITHUB_ENV"
           echo "Nightly package version: $STAMP"
 
       - name: Build .deb

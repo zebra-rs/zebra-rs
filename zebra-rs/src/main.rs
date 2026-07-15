@@ -105,8 +105,11 @@ struct Arg {
 // YANG schema directory search order:
 //   1. `--yang-path` argument, if the path exists
 //   2. `~/.zebra-rs/yang`, if it exists
-//   3. `/etc/zebra-rs/yang`, if it exists
-// Returns `None` if none resolve, which causes startup to abort.
+//   3. `/usr/share/zebra-rs/yang`, if it exists (`make install` + .deb layout)
+// Returns `None` if none resolve, which causes startup to abort. The schemas
+// are program data (not operator config), so `make install` and the .deb both
+// place them under /usr/share; a bare `/usr/bin/zebra-rs` on a package host
+// resolves here without any flag.
 fn yang_path(arg: &Arg) -> Option<String> {
     if !arg.yang_path.is_empty() {
         let path = Path::new(&arg.yang_path);
@@ -121,7 +124,7 @@ fn yang_path(arg: &Arg) -> Option<String> {
             return Some(home_dir.to_string_lossy().to_string());
         }
     }
-    let path = Path::new("/etc/zebra-rs/yang");
+    let path = Path::new("/usr/share/zebra-rs/yang");
     if path.exists() {
         Some(path.to_string_lossy().to_string())
     } else {

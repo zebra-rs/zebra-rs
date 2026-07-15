@@ -363,10 +363,10 @@ pub async fn spawn_in_netns_env(
     }
     c.arg(cmd);
     // Force every BDD daemon to cold-start from an empty config. Without an
-    // explicit `--config-file`, zebra-rs falls back to loading
-    // `<yang-path>/../zebra-rs.conf`; under `sudo ip netns exec` (HOME=/root)
-    // that resolves to the host-global `/etc/zebra-rs/zebra-rs.conf`, which a
-    // netns does NOT isolate (it isolates the network, not the filesystem).
+    // explicit `--config-file`, zebra-rs loads its default config file; under
+    // `sudo ip netns exec` (HOME=/root, no `~/.zebra-rs/zebra-rs.conf`) that
+    // resolves to the host-global `/etc/zebra-rs/zebra-rs.conf`, which a netns
+    // does NOT isolate (it isolates the network, not the filesystem).
     // A stale copy there (a manual `save`, a debug session) would be loaded by
     // EVERY namespace's daemon before its feature config is applied, and since
     // `vtyctl apply` is a diff, any overlapping element keeps the leftover's

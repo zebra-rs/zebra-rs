@@ -1,0 +1,19 @@
+[Unit]
+Description=zebra
+After=network.target
+
+[Service]
+Type=simple
+User=root
+Group=root
+StandardOutput=journal
+StandardError=journal
+# No --yang-path/--config-file needed: the daemon's default search resolves
+# YANG to /usr/share/zebra-rs/yang and config to /etc/zebra-rs/zebra-rs.conf
+# (the shipped conffile) on a package install.
+ExecStart=/usr/bin/zebra-rs
+ExecStop=/bin/kill -INT ${MAINPID}
+Restart=always
+
+[Install]
+WantedBy=multi-user.target

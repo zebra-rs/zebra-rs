@@ -2,9 +2,104 @@
 name = "zebra-rs"
 version.workspace = true
 edition.workspace = true
+authors.workspace = true
+license.workspace = true
+description = "Reincarnation of GNU Zebra routing suite in Rust"
+homepage = "https://zebra.rs"
 
 [lints]
 workspace = true
+
+# Debian packaging (cargo-deb). Replaces the former packaging/nfpm-*.yaml.
+# `cargo deb -p zebra-rs` reads this table; the version comes straight from
+# the workspace `version` above (kept in sync with the top-level `version`
+# file by packaging/version-update.sh). Asset source paths are relative to
+# this crate directory (zebra-rs/), so out-of-crate files use `../`.
+[package.metadata.deb]
+maintainer = "Kunihiro Ishiguro <kunihiro@zebra.rs>"
+section = "net"
+priority = "optional"
+# Automatic shared-library Depends (libc6, libpam, ...) via dpkg-shlibdeps
+# over the built binaries.
+depends = "$auto"
+# The eBPF data-plane engine `system ebpf enabled` spawns (/usr/bin/cradle).
+# Optional: everything else works without it. The floor is the cradle release
+# this zebra-rs targets (the proto/cradle.proto contract), kept in step with
+# the top-level `cradle-version` file by version-update.sh; the release /
+# publish-apt pipeline ingests exactly that cradle release so
+# `apt install zebra-rs` pulls it.
+recommends = "cradle-rs (>= 0.9.7)"
+# Drop the default `-1` revision so the artifact stays zebra-rs_<ver>_<arch>.deb
+# (the CI dist-suffix rename in build-debs.yaml expects that shape).
+revision = ""
+# Debian-format changelog generated from the single-source CHANGELOG.yaml by
+# packaging/changelog-gen.sh (the packaging Makefile runs it before cargo deb).
+changelog = "../packaging/out/changelog"
+extended-description = """
+zebra-rs is a routing software suite reimplementing GNU Zebra in Rust. It
+provides BGP, OSPFv2/v3, and IS-IS routing daemons behind a unified YANG-based
+configuration model and a VTY-style command shell, and can drive an optional
+eBPF data plane (cradle-rs) for offloaded forwarding."""
+# Custom maintainer scripts (groupadd/setcap/groupdel). Each carries a
+# #DEBHELPER# token where cargo-deb injects the generated systemd fragments.
+maintainer-scripts = "../packaging/maintainer"
+# The daemon's load/save target (config/manager.rs). Shipped as a documented
+# empty default and tracked as a conffile: dpkg keeps the operator- or
+# daemon-written config across upgrades and removes it only on purge.
+conf-files = ["/etc/zebra-rs/zebra-rs.conf"]
+assets = [
+  ["target/release/zebra-rs",                    "usr/bin/",                        "755"],
+  ["target/release/vtyhelper",                   "usr/bin/",                        "755"],
+  ["target/release/vtyctl",                      "usr/bin/",                        "755"],
+  ["target/release/vtypam",                      "usr/sbin/",                       "755"],
+  ["../vty/vty",                                 "usr/bin/vty",                     "755"],
+  ["../etc/pam.d/zebra-rs.example",              "etc/pam.d/zebra-rs.example",      "644"],
+  # YANG schemas are program data that must stay in lockstep with the binary,
+  # not operator config, so they live under /usr/share (cargo-deb auto-marks
+  # everything under /etc as a conffile, which would wrongly persist stale
+  # schemas across remove/reinstall). The daemon's default YANG search resolves
+  # here on a package install (see main.rs), so the unit needs no --yang-path.
+  ["yang/*",                                     "usr/share/zebra-rs/yang/",        "644"],
+  # Example Lua policy scripts for the embedded scripting engine (on by
+  # default). Operators drop their own here and bind them from
+  # `router bgp { lua-script <name> { source-path ... } }`.
+  ["../etc/zebra-rs/lua/*",                      "etc/zebra-rs/lua/",               "644"],
+  # Documented empty default config (see conf-files above).
+  ["../packaging/zebra-rs.conf",                 "etc/zebra-rs/zebra-rs.conf",      "644"],
+  # Playset lab topologies (netns example networks). Read-only data under
+  # /usr/share; staged into packaging/out/playset by the Makefile to strip
+  # runtime artifacts (*.log, *.pid). cargo-deb requires a mode per asset and
+  # can't exclude or preserve source modes, and overlapping globs duplicate
+  # entries — so the tree is packed as disjoint globs that mirror the source
+  # modes exactly: only the up.sh/down.sh lab entry points (run as `./up.sh`)
+  # are 0755; the sourced helper scripts and all data are 0644. The Makefile
+  # `playset` target fails the build if any file outside this set appears, so
+  # a new file/script can never silently go unpackaged.
+  ["../packaging/out/playset/**/up.sh",          "usr/share/zebra-rs/playset/",     "755"],
+  ["../packaging/out/playset/**/down.sh",        "usr/share/zebra-rs/playset/",     "755"],
+  ["../packaging/out/playset/**/topology.sh",    "usr/share/zebra-rs/playset/",     "644"],
+  ["../packaging/out/playset/**/common.sh",      "usr/share/zebra-rs/playset/",     "644"],
+  ["../packaging/out/playset/**/netns.sh",       "usr/share/zebra-rs/playset/",     "644"],
+  ["../packaging/out/playset/**/playset.sh",     "usr/share/zebra-rs/playset/",     "644"],
+  ["../packaging/out/playset/**/zebra-rs.sh",    "usr/share/zebra-rs/playset/",     "644"],
+  ["../packaging/out/playset/**/*.yaml",         "usr/share/zebra-rs/playset/",     "644"],
+  ["../packaging/out/playset/**/*.md",           "usr/share/zebra-rs/playset/",     "644"],
+  ["../packaging/out/playset/**/*.drawio",       "usr/share/zebra-rs/playset/",     "644"],
+  ["../packaging/out/playset/**/*.png",          "usr/share/zebra-rs/playset/",     "644"],
+  ["../packaging/out/playset/**/*.svg",          "usr/share/zebra-rs/playset/",     "644"],
+  ["../packaging/modules-load.d/zebra-rs.conf",  "etc/modules-load.d/zebra-rs.conf", "644"],
+]
+
+# systemd unit install/enable/start with restart-after-upgrade. cargo-deb
+# adds packaging/systemd/zebra-rs.service as an asset and injects the
+# enable/start/restart/stop fragments at the #DEBHELPER# token in the
+# maintainer scripts (replaces the former hand-rolled systemctl calls). The
+# unit runs a bare `zebra-rs`; its default YANG (/usr/share) and config (/etc)
+# search paths resolve the package layout without flags.
+[package.metadata.deb.systemd-units]
+unit-name = "zebra-rs"
+unit-scripts = "../packaging/systemd"
+restart-after-upgrade = true
 
 #[profile.release]
 #debug = true

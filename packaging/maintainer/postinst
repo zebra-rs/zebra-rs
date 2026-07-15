@@ -1,0 +1,46 @@
+#!/bin/sh
+set -e
+
+case "$1" in
+    configure)
+        # Configuration operators belong to this group for passwordless enable.
+        if ! getent group zebra-rs >/dev/null 2>&1; then
+            groupadd -r zebra-rs
+        fi
+
+        setcap 'cap_net_bind_service=ep cap_net_admin=ep cap_net_broadcast=ep cap_net_raw=ep' /usr/bin/zebra-rs
+
+        # Grant vtypam the minimum capabilities it needs to authenticate users
+        # without running as setuid root (D15). cap_dac_read_search lets it
+        # read /etc/shadow for pam_unix; cap_audit_write lets it emit PAM
+        # audit records.
+        if [ -x /usr/sbin/vtypam ]; then
+            setcap 'cap_dac_read_search,cap_audit_write=ep' /usr/sbin/vtypam
+        fi
+
+        # The XDP BFD Echo and TC EVPN replication helpers moved to cradle-rs;
+        # its .deb ships them to /usr/sbin and applies the file caps (zebra-rs
+        # Recommends: cradle-rs). zebra-rs no longer installs or caps them here.
+
+        # Load the kernel modules the daemon needs (VRF, MPLS tunnel) now, so it
+        # works on the current boot without waiting for a reboot;
+        # /etc/modules-load.d/zebra-rs.conf handles every subsequent boot. Read
+        # the list from that file so it stays the single source of truth and
+        # honors operator edits. Runs before the systemd start fragment below.
+        # Tolerate failure — a minimal kernel or a container may lack these
+        # modules; the daemon degrades rather than the install aborting.
+        if command -v modprobe >/dev/null 2>&1 && [ -r /etc/modules-load.d/zebra-rs.conf ]; then
+            while read -r _mod || [ -n "$_mod" ]; do
+                case "$_mod" in ''|\#*|\;*) continue ;; esac
+                modprobe "$_mod" >/dev/null 2>&1 || true
+            done < /etc/modules-load.d/zebra-rs.conf
+        fi
+        ;;
+esac
+
+# cargo-deb injects the generated systemd fragments here: daemon-reload,
+# enable + start on install, restart-after-upgrade. Replaces the former
+# hand-rolled `systemctl daemon-reload && systemctl restart`.
+#DEBHELPER#
+
+exit 0
