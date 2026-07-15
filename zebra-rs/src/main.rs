@@ -105,15 +105,11 @@ struct Arg {
 // YANG schema directory search order:
 //   1. `--yang-path` argument, if the path exists
 //   2. `~/.zebra-rs/yang`, if it exists
-//   3. `/etc/zebra-rs/yang`, if it exists (legacy / `make install` dev layout)
-//   4. `/usr/share/zebra-rs/yang`, if it exists (Debian package layout)
-// Returns `None` if none resolve, which causes startup to abort.
-//
-// The .deb ships the schemas under /usr/share (program data, not a conffile)
-// and its systemd unit passes `--yang-path` explicitly, so it never relies on
-// this fallback order — but keeping /usr/share last lets a manual
-// `/usr/bin/zebra-rs` on a package host find the schemas without a flag. It is
-// ranked below /etc so a hand-maintained /etc/zebra-rs/yang still wins for dev.
+//   3. `/usr/share/zebra-rs/yang`, if it exists (`make install` + .deb layout)
+// Returns `None` if none resolve, which causes startup to abort. The schemas
+// are program data (not operator config), so `make install` and the .deb both
+// place them under /usr/share; a bare `/usr/bin/zebra-rs` on a package host
+// resolves here without any flag.
 fn yang_path(arg: &Arg) -> Option<String> {
     if !arg.yang_path.is_empty() {
         let path = Path::new(&arg.yang_path);
@@ -128,12 +124,12 @@ fn yang_path(arg: &Arg) -> Option<String> {
             return Some(home_dir.to_string_lossy().to_string());
         }
     }
-    for path in ["/etc/zebra-rs/yang", "/usr/share/zebra-rs/yang"] {
-        if Path::new(path).exists() {
-            return Some(path.to_string());
-        }
+    let path = Path::new("/usr/share/zebra-rs/yang");
+    if path.exists() {
+        Some(path.to_string_lossy().to_string())
+    } else {
+        None
     }
-    None
 }
 
 fn daemonize() -> anyhow::Result<()> {

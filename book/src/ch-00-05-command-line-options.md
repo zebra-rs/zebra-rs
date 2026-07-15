@@ -9,7 +9,7 @@ this chapter explains what each option does and how they interact.
 | Option | Short | Argument | Default | Purpose |
 |---|---|---|---|---|
 | `--yang-path` | `-y` | `PATH` | search order (below) | Directory the YANG schema is loaded from |
-| `--config-file` | `-c` | `FILENAME` | `zebra-rs.conf` next to the YANG tree | Configuration file loaded at startup |
+| `--config-file` | `-c` | `FILENAME` | search order (below) | Configuration file loaded at startup |
 | `--daemon` | `-d` | — | foreground | Detach and run in the background |
 | `--log-output` | | `stdout \| syslog \| file` | `stdout` | Where log records are written |
 | `--log-file` | | `PATH` | `./zebra-rs.log` | Log file path when `--log-output=file` |
@@ -21,9 +21,14 @@ this chapter explains what each option does and how they interact.
 ## `-c`, `--config-file FILENAME`
 
 Loads a configuration file at startup and commits it as the running
-configuration. When omitted, the daemon falls back to a file named
-`zebra-rs.conf` located next to the resolved YANG directory (that is,
-`<yang-path>/../zebra-rs.conf`). Passing `--config-file` overrides both
+configuration. When omitted, the daemon looks for `zebra-rs.conf` in the
+following locations, in order:
+
+1. `~/.zebra-rs/zebra-rs.conf`, if it exists
+2. `/etc/zebra-rs/zebra-rs.conf` (the default load/save target)
+
+This is the load *and* save target, so when neither exists the daemon
+still defaults to the system path. Passing `--config-file` overrides both
 the *load* and *save* target, so the `load` and `save` commands in the
 `configure` mode also operate on the file you named.
 
@@ -86,12 +91,11 @@ exist), the following locations are tried in order:
 
 1. `--yang-path` argument, if the path exists
 2. `~/.zebra-rs/yang`
-3. `/etc/zebra-rs/yang` (legacy / `make install` dev layout)
-4. `/usr/share/zebra-rs/yang` (Debian package layout)
+3. `/usr/share/zebra-rs/yang` (`make install` and Debian package layout)
 
-Startup aborts if none resolve. The `.deb` ships the schemas under
-`/usr/share` and its systemd unit passes `--yang-path` explicitly, so it
-never relies on the fallback order.
+Startup aborts if none resolve. The schemas are program data, so both
+`make install` and the `.deb` place them under `/usr/share`, and a bare
+`zebra-rs` on a package host resolves them without a flag.
 
 ## `-d`, `--daemon`
 

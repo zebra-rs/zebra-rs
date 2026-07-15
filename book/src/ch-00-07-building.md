@@ -109,7 +109,7 @@ make install
 
 installs `zebra-rs`, `vtyctl`, and `vtyhelper` into `/usr/bin` (via `sudo`,
 granting `zebra-rs` the necessary network capabilities with `setcap`) and
-copies the YANG schemas to `/etc/zebra-rs/yang`. Keep the schemas in lockstep
+copies the YANG schemas to `/usr/share/zebra-rs/yang`. Keep the schemas in lockstep
 with the binary: a stale schema directory silently rejects newly added
 configuration even when the binary supports it.
 

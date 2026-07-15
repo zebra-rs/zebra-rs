@@ -57,8 +57,8 @@ assets = [
   # YANG schemas are program data that must stay in lockstep with the binary,
   # not operator config, so they live under /usr/share (cargo-deb auto-marks
   # everything under /etc as a conffile, which would wrongly persist stale
-  # schemas across remove/reinstall). The systemd unit points the daemon here
-  # with --yang-path; the daemon also falls back to this path (see main.rs).
+  # schemas across remove/reinstall). The daemon's default YANG search resolves
+  # here on a package install (see main.rs), so the unit needs no --yang-path.
   ["yang/*",                                     "usr/share/zebra-rs/yang/",        "644"],
   # Example Lua policy scripts for the embedded scripting engine (on by
   # default). Operators drop their own here and bind them from
@@ -93,7 +93,9 @@ assets = [
 # systemd unit install/enable/start with restart-after-upgrade. cargo-deb
 # adds packaging/systemd/zebra-rs.service as an asset and injects the
 # enable/start/restart/stop fragments at the #DEBHELPER# token in the
-# maintainer scripts (replaces the former hand-rolled systemctl calls).
+# maintainer scripts (replaces the former hand-rolled systemctl calls). The
+# unit runs a bare `zebra-rs`; its default YANG (/usr/share) and config (/etc)
+# search paths resolve the package layout without flags.
 [package.metadata.deb.systemd-units]
 unit-name = "zebra-rs"
 unit-scripts = "../packaging/systemd"

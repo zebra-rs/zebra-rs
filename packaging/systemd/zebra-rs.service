@@ -8,11 +8,10 @@ User=root
 Group=root
 StandardOutput=journal
 StandardError=journal
-# --yang-path pins the package's schema tree under /usr/share (program data,
-# not a conffile). --config-file keeps the persisted running config at the
-# /etc conffile; without it the daemon would derive the config path from the
-# yang parent (/usr/share/zebra-rs/zebra-rs.conf), which is not a conffile.
-ExecStart=/usr/bin/zebra-rs --yang-path /usr/share/zebra-rs/yang --config-file /etc/zebra-rs/zebra-rs.conf
+# No --yang-path/--config-file needed: the daemon's default search resolves
+# YANG to /usr/share/zebra-rs/yang and config to /etc/zebra-rs/zebra-rs.conf
+# (the shipped conffile) on a package install.
+ExecStart=/usr/bin/zebra-rs
 ExecStop=/bin/kill -INT ${MAINPID}
 Restart=always
 

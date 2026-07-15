@@ -296,18 +296,26 @@ impl ConfigManager {
         rib_inbound_tx: UnboundedSender<crate::rib::client::RibInbound>,
         policy_tx: UnboundedSender<crate::policy::Message>,
     ) -> anyhow::Result<Self> {
-        // `--config-file FILENAME` overrides the load/save target; with no
-        // override fall back to `zebra-rs.conf` next to the YANG tree. The
-        // explicit file may be in any format `load_config` understands
-        // (CLI brace, JSON, YAML, set/delete) — see `config_to_commands`.
+        // Configuration file search order when `--config-file` is not given:
+        //   1. `~/.zebra-rs/zebra-rs.conf`, if it exists
+        //   2. `/etc/zebra-rs/zebra-rs.conf` (the default load/save target)
+        // This is the load AND save target, so when neither exists it still
+        // defaults to the system path (the daemon creates/saves there). This is
+        // decoupled from `yang_path`: the schemas now live under /usr/share, but
+        // the config stays under /etc (where the .deb ships it as a conffile).
+        // `--config-file FILENAME` overrides both load and save, and may be in
+        // any format `load_config` understands (CLI brace, JSON, YAML,
+        // set/delete) — see `config_to_commands`.
         let config_path = match config_file {
             Some(path) => PathBuf::from(path),
-            None => {
-                let mut p = PathBuf::from(yang_path.clone());
-                p.pop();
-                p.push("zebra-rs.conf");
-                p
-            }
+            None => dirs::home_dir()
+                .map(|mut p| {
+                    p.push(".zebra-rs");
+                    p.push("zebra-rs.conf");
+                    p
+                })
+                .filter(|p| p.exists())
+                .unwrap_or_else(|| PathBuf::from("/etc/zebra-rs/zebra-rs.conf")),
         };
 
         let (tx, rx) = mpsc::channel(255);
