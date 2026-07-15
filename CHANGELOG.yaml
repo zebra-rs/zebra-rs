@@ -11,6 +11,40 @@
 # Fields "distribution" and "urgency" are optional per-entry; if you omit them,
 # changelog-gen.sh defaults to distribution "unstable" and urgency "medium".
 
+- semver: 26.7.6
+  date: 2026-07-15T18:00:00+09:00
+  distribution: unstable
+  urgency: medium
+  packager: Kunihiro Ishiguro <kunihiro@zebra.rs>
+  changes:
+    - note: |
+        ### Debian packaging (cargo-deb)
+        * Migrated the Debian package build from nfpm to cargo-deb, so
+          the version and package metadata are read straight from
+          Cargo.toml — one place to set them
+        * Config and YANG search paths are decoupled; both resolve under
+          /usr/share, `~`, and /etc, so a package install needs no
+          `--config-file`/`--yang-path` flags
+        * Required kernel modules (`mpls_router`, `vrf`, …) are modprobed
+          at install time, Lua sample scripts ship under /usr/share (not
+          /etc), and lintian findings on the generated `.deb` are fixed
+        * The pinned cradle-rs engine is bumped to 0.9.8, so
+          `apt install zebra-rs` pulls a matching data plane
+          (`Recommends: cradle-rs (>= 0.9.8)`)
+
+    - note: |
+        ### FIB / data plane
+        * A baseline sysctl whose backing kernel module is absent
+          (`mpls_router`, `vrf`, …) is now warned about and skipped
+          rather than aborting sysctl setup, so a missing optional
+          feature no longer leaves later knobs unapplied
+
+    - note: |
+        ### Release infrastructure
+        * GitHub release notes now render from CHANGELOG.yaml — the same
+          source of truth as the shipped Debian changelog
+        * CI bumps softprops/action-gh-release v2 → v3 (Node 24)
+
 - semver: 26.7.5
   date: 2026-07-15T18:00:00+09:00
   distribution: unstable
