@@ -18,12 +18,9 @@ jobs:
       - name: Build vty
         run: |
           sudo apt update -y
-          sudo apt upgrade -y
-          sudo apt install -y protobuf-compiler bison libpam0g-dev
+          sudo apt install -y protobuf-compiler bison xxd libpam0g-dev
           make -C vty
-          echo 'deb [trusted=yes] https://repo.goreleaser.com/apt/ /' | sudo tee /etc/apt/sources.list.d/goreleaser.list
-          sudo apt update
-          sudo apt install nfpm
+          cargo install cargo-deb --locked
           make -C packaging arm64
 
       - name: Upload basefs artifact

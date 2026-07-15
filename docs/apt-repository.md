@@ -116,11 +116,11 @@ signed flat repo. Test from a clean Ubuntu box using the nightly instructions at
 | nightly | `nightly-<codename>` | `26.6.2~nightlyYYYYMMDD` *(see note)*  | nightly cron / dispatch            |
 | stable  | `apt-<codename>`     | `26.6.2`                              | push tag `v<X.Y.Z>` (`release.yaml`) |
 
-> **Nightly upgradability (wired up):** each build job stamps a monotonic,
-> pre-release-sorting version `26.6.2~nightlyYYYYMMDD` into the nfpm config before
-> packaging, with `version_schema: none` so the Debian `~` survives verbatim
-> (nfpm's default `semver` schema would mangle it). The `~` sorts *below* a future
-> stable `26.6.2`, and the date makes each night an upgrade over the last.
+> **Nightly upgradability (wired up):** each build job computes a monotonic,
+> pre-release-sorting version `26.6.2~nightlyYYYYMMDD` and passes it to cargo-deb
+> verbatim via `--deb-version` (the packaging Makefile forwards `DEB_VERSION`), so
+> the Debian `~` survives. The `~` sorts *below* a future stable `26.6.2`, and the
+> date makes each night an upgrade over the last.
 >
 > One subtlety the `publish-apt` job handles: GitHub rewrites release-asset names,
 > replacing any char outside `[A-Za-z0-9._-]` with `.` — so a `~` in the filename
@@ -131,8 +131,8 @@ signed flat repo. Test from a clean Ubuntu box using the nightly instructions at
 
 ### Cutting a stable release
 
-1. Bump the `version` file, then run `packaging/version-update.sh` (syncs
-   `Cargo.toml` + the nfpm configs).
+1. Bump the `version` file, then run `packaging/version-update.sh` (syncs the
+   workspace `Cargo.toml` version, which cargo-deb reads).
 2. Commit, then tag and push:
    ```bash
    git tag "v$(cat version)" && git push origin "v$(cat version)"
@@ -155,7 +155,8 @@ signed repo metadata).
 
 The pin lives in the top-level **`cradle-version`** file — the cradle release
 this zebra-rs targets (the `proto/cradle.proto` contract). `version-update.sh`
-keeps the `Recommends` floor in both nfpm configs equal to it. When bumping:
+keeps the `Recommends` floor in `zebra-rs/Cargo.toml` ([package.metadata.deb])
+equal to it. When bumping:
 
 1. Set `cradle-version` to the compatible cradle release and re-run
    `packaging/version-update.sh`.

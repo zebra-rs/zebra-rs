@@ -12,8 +12,8 @@ zebra-rs itself. The steps mirror the CI build scripts under
 The quickest way to get a build host ready is the `setup-build-env.sh` script
 under `packaging/`. It installs everything the rest of this chapter describes —
 the APT system packages, the stable Rust toolchain, the XDP/eBPF toolchain
-(nightly Rust with `rust-src`, LLVM, and `bpf-linker`), and the `nfpm` package
-builder — in a single, idempotent pass, mirroring the CI workflows:
+(nightly Rust with `rust-src`, LLVM, and `bpf-linker`), and the `cargo-deb`
+package builder — in a single, idempotent pass, mirroring the CI workflows:
 
 ``` shell
 packaging/setup-build-env.sh
@@ -25,7 +25,7 @@ down to what you actually need:
 | Flag | Effect |
 |---|---|
 | `--no-xdp` | Skip the XDP/eBPF toolchain (nightly `rust-src`, LLVM, `bpf-linker`). Use this if you only build with `make all` / `cargo test`. |
-| `--no-nfpm` | Skip `nfpm` (only needed to build the `.deb` package). |
+| `--no-cargo-deb` | Skip `cargo-deb` (only needed to build the `.deb` package). |
 | `--no-rust` | Do not install rustup/Rust (assume a toolchain is already present). |
 | `-h`, `--help` | Show the help and exit. |
 
@@ -115,15 +115,13 @@ configuration even when the binary supports it.
 
 ## Debian package
 
-Building the `.deb` package needs all of the build requirements above —
-including the XDP/eBPF toolchain (LLVM + bpf-linker), because the package
-bundles the `xdp-bfd-echo` helper — plus the
-[`nfpm`](https://github.com/goreleaser/nfpm) package builder:
+Building the `.deb` package needs the build requirements above plus the
+[`cargo-deb`](https://github.com/kornelski/cargo-deb) package builder (the
+XDP/eBPF data-plane helpers moved to cradle-rs, which ships its own `.deb`, so
+this package no longer bundles them):
 
 ``` shell
-echo 'deb [trusted=yes] https://repo.goreleaser.com/apt/ /' | sudo tee /etc/apt/sources.list.d/goreleaser.list
-sudo apt update
-sudo apt install nfpm
+cargo install cargo-deb --locked
 ```
 
 Then from the `packaging/` directory:

@@ -1,0 +1,10 @@
+#!/bin/sh
+set -e
+
+# The generated systemd fragment stops zebra-rs on remove (and, with
+# stop-on-upgrade, before an upgrade swaps the binary) — early enough that
+# systemd can still resolve the unit, which is why the stop lives in prerm
+# rather than postrm.
+#DEBHELPER#
+
+exit 0

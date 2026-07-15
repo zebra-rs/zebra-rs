@@ -15,13 +15,13 @@
 #   * APT system packages (build-essential, protobuf-compiler, libpam0g-dev,
 #     bison, xxd, ...) for the workspace and the `vty` build.
 #   * The stable Rust toolchain via rustup (if cargo is not already present).
-#   * nfpm from the goreleaser APT repo, the Debian package builder.
+#   * cargo-deb (via `cargo install`), the Debian package builder.
 #
 # Usage:
 #   packaging/setup-build-env.sh [options]
 #
 # Options:
-#   --no-nfpm    Skip nfpm (only needed to build the .deb package).
+#   --no-cargo-deb  Skip cargo-deb (only needed to build the .deb package).
 #   --no-rust    Do not install rustup/Rust (assume a toolchain is present).
 #   -h, --help   Show this help and exit.
 #
@@ -31,7 +31,7 @@ set -euo pipefail
 
 # ---- configuration -----------------------------------------------------------
 
-INSTALL_NFPM=1
+INSTALL_CARGO_DEB=1
 INSTALL_RUST=1
 
 # System packages. build-essential/pkg-config/curl drive the `vty` C build (GNU
@@ -74,7 +74,7 @@ need_cmd() { command -v "$1" >/dev/null 2>&1; }
 
 while [ $# -gt 0 ]; do
     case "$1" in
-        --no-nfpm)  INSTALL_NFPM=0 ;;
+        --no-cargo-deb) INSTALL_CARGO_DEB=0 ;;
         --no-rust)  INSTALL_RUST=0 ;;
         -h|--help)  usage; exit 0 ;;
         *)          die "unknown option: $1 (try --help)" ;;
@@ -125,20 +125,17 @@ fi
 
 need_cmd cargo || die "cargo not found on PATH. Install Rust (rustup) or drop --no-rust, then re-run."
 
-# ---- 3. nfpm (Debian package builder) ---------------------------------------
+# ---- 3. cargo-deb (Debian package builder) ----------------------------------
 
-if [ "$INSTALL_NFPM" -eq 1 ]; then
-    if need_cmd nfpm; then
-        log "nfpm already installed ($(nfpm --version 2>/dev/null | head -n1)); skipping"
+if [ "$INSTALL_CARGO_DEB" -eq 1 ]; then
+    if cargo deb --version >/dev/null 2>&1; then
+        log "cargo-deb already installed ($(cargo deb --version 2>/dev/null | head -n1)); skipping"
     else
-        log "Installing nfpm from the goreleaser APT repo"
-        echo 'deb [trusted=yes] https://repo.goreleaser.com/apt/ /' \
-            | $SUDO tee /etc/apt/sources.list.d/goreleaser.list >/dev/null
-        $SUDO apt-get update
-        $SUDO apt-get install -y nfpm
+        log "Installing cargo-deb via cargo install"
+        cargo install cargo-deb --locked
     fi
 else
-    info "Skipping nfpm (--no-nfpm). Only needed to build the .deb package."
+    info "Skipping cargo-deb (--no-cargo-deb). Only needed to build the .deb package."
 fi
 
 # ---- done --------------------------------------------------------------------
@@ -147,7 +144,7 @@ log "Build environment ready."
 echo
 info "Next steps:"
 info "  make all                 # build the workspace + vty shell"
-if [ "$INSTALL_NFPM" -eq 1 ]; then
+if [ "$INSTALL_CARGO_DEB" -eq 1 ]; then
     info "  cd packaging && make ${ARCH}   # build the .deb package"
 fi
 if [ "$INSTALL_RUST" -eq 1 ] && [ -f "$HOME/.cargo/env" ]; then

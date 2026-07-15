@@ -1,9 +1,10 @@
 # CHANGELOG.yaml – the single source of truth for the project changelog.
-# nfpm (packaging/nfpm-*.yaml) reads this file to build the Debian changelog.
+# packaging/changelog-gen.sh converts this file into the Debian-format changelog
+# that cargo-deb ships (see zebra-rs/Cargo.toml [package.metadata.deb] changelog).
 # Keep newest entry first.
 # All timestamps must be in full ISO-8601 format.
-# Fields "distribution" and "urgency" are optional per-entry; if you omit
-# them, the defaults from .chglog.yml (or chglog config) are used.
+# Fields "distribution" and "urgency" are optional per-entry; if you omit them,
+# changelog-gen.sh defaults to distribution "unstable" and urgency "medium".
 
 - semver: 26.7.5
   date: 2026-07-15T18:00:00+09:00

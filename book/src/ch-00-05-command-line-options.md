@@ -86,9 +86,12 @@ exist), the following locations are tried in order:
 
 1. `--yang-path` argument, if the path exists
 2. `~/.zebra-rs/yang`
-3. `/etc/zebra-rs/yang`
+3. `/etc/zebra-rs/yang` (legacy / `make install` dev layout)
+4. `/usr/share/zebra-rs/yang` (Debian package layout)
 
-Startup aborts if none resolve.
+Startup aborts if none resolve. The `.deb` ships the schemas under
+`/usr/share` and its systemd unit passes `--yang-path` explicitly, so it
+never relies on the fallback order.
 
 ## `-d`, `--daemon`
 
