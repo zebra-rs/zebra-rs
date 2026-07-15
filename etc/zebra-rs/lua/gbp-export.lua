@@ -7,8 +7,8 @@
 --
 -- Bind:
 --   router bgp 65000 {
---     lua-script gbp { source-path /etc/zebra-rs/lua/gbp-export.lua; }
---     lua-map sgt    { source-path /etc/zebra-rs/lua/sgt.json; }   // {"aa:bb:..":"100"}
+--     lua-script gbp { source-path /usr/share/zebra-rs/lua/gbp-export.lua; }
+--     lua-map sgt    { source-path /usr/share/zebra-rs/lua/sgt.json; }   // {"aa:bb:..":"100"}
 --     adj-rib-out-hook l2vpn-evpn { export gbp; }
 --   }
 --

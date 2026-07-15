@@ -8,7 +8,7 @@
 --
 -- Bind:
 --   router bgp 65000 {
---     lua-script gbp { source-path /etc/zebra-rs/lua/gbp-import.lua; }
+--     lua-script gbp { source-path /usr/share/zebra-rs/lua/gbp-import.lua; }
 --     loc-rib-hook l2vpn-evpn { import gbp; withdraw gbp; }
 --   }
 --

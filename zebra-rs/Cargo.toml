@@ -61,9 +61,11 @@ assets = [
   # here on a package install (see main.rs), so the unit needs no --yang-path.
   ["yang/*",                                     "usr/share/zebra-rs/yang/",        "644"],
   # Example Lua policy scripts for the embedded scripting engine (on by
-  # default). Operators drop their own here and bind them from
-  # `router bgp { lua-script <name> { source-path ... } }`.
-  ["../etc/zebra-rs/lua/*",                      "etc/zebra-rs/lua/",               "644"],
+  # default). Read-only reference examples (like the YANG tree), so they live
+  # under /usr/share rather than /etc — operators bind them from
+  # `router bgp { lua-script <name> { source-path /usr/share/zebra-rs/lua/... } }`,
+  # or point source-path at their own scripts elsewhere.
+  ["../etc/zebra-rs/lua/*",                      "usr/share/zebra-rs/lua/",         "644"],
   # Documented empty default config (see conf-files above).
   ["../packaging/zebra-rs.conf",                 "etc/zebra-rs/zebra-rs.conf",      "644"],
   # Playset lab topologies (netns example networks). Read-only data under

@@ -4,8 +4,8 @@
 -- a hook from BGP config, e.g.:
 --
 --   router bgp 65000 {
---     lua-script GBP { source-path /etc/zebra-rs/lua/gbp-example.lua; }
---     lua-map sgt   { source-path /etc/zebra-rs/lua/sgt.json; }   -- MAC -> tag
+--     lua-script GBP { source-path /usr/share/zebra-rs/lua/gbp-example.lua; }
+--     lua-map sgt   { source-path /usr/share/zebra-rs/lua/sgt.json; }   -- MAC -> tag
 --     loc-rib-hook l2vpn-evpn {
 --       import GBP;     -- on receive: program nftables from the GPI tag
 --       withdraw GBP;   -- on withdraw: tear the nftables element down
