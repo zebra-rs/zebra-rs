@@ -9,7 +9,7 @@
 name: "zebra-rs"
 arch: "arm64"
 platform: "linux"
-version: "26.7.4"
+version: "26.7.5"
 section: "default"
 priority: "extra"
 replaces:
@@ -23,7 +23,7 @@ provides:
 # release/publish-apt pipeline ingests exactly that cradle release so
 # `apt install zebra-rs` pulls it.
 recommends:
-  - cradle-rs (>= 0.9.5)
+  - cradle-rs (>= 0.9.7)
 maintainer: "Kunihiro Ishiguro <kunihiro@zebra.rs>"
 description: |
   zebra-rs is reincarnation of GNU zebra in Rust.
