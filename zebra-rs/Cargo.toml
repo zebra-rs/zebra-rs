@@ -28,7 +28,7 @@ depends = "$auto"
 # the top-level `cradle-version` file by version-update.sh; the release /
 # publish-apt pipeline ingests exactly that cradle release so
 # `apt install zebra-rs` pulls it.
-recommends = "cradle-rs (>= 0.9.7)"
+recommends = "cradle-rs (>= 0.9.8)"
 # Drop the default `-1` revision so the artifact stays zebra-rs_<ver>_<arch>.deb
 # (the CI dist-suffix rename in build-debs.yaml expects that shape).
 revision = ""
