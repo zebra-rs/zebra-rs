@@ -30,6 +30,14 @@ arm64 amd64: ../vty/vty playset changelog
 changelog:
 	./changelog-gen.sh
 
+# Preview the GitHub release body rendered from CHANGELOG.yaml's newest entry
+# (what nightly.yaml/release.yaml publish, minus the fixed downloads table).
+# Pass VERSION=<X.Y.Z> to preview a specific past entry instead of the top one.
+# Not part of the .deb build — this feeds the GitHub Releases page, not the package.
+.PHONY: release-notes
+release-notes:
+	./release-notes.sh $(VERSION)
+
 # Stage a clean copy of the playset labs for packaging. Copying ../playset
 # directly would sweep in runtime artifacts (*.log, *.pid) left over from local
 # lab runs; the rsync filter honors playset/.gitignore instead.
