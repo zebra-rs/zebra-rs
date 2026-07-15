@@ -30,19 +30,38 @@ const CTLNAMES: &[(&str, &str)] = &[
     ("net.mpls.platform_labels", "1048575"),
 ];
 
-pub fn sysctl_enable() -> anyhow::Result<()> {
-    for (ctlname, value) in CTLNAMES.iter() {
-        let ctl = sysctl::Ctl::new(ctlname)?;
-        let _ = ctl.set_value_string(value)?;
-    }
+/// Set a single sysctl node to `value`. Fails when the node is absent —
+/// the module backing it isn't loaded (e.g. `mpls_router` for the
+/// `net.mpls.*` tree, the `vrf` module for `net.vrf.*`) or the kernel
+/// lacks the feature entirely — or when the write is rejected.
+fn sysctl_set(ctlname: &str, value: &str) -> anyhow::Result<()> {
+    let ctl = sysctl::Ctl::new(ctlname)?;
+    let _ = ctl.set_value_string(value)?;
     Ok(())
 }
 
+/// Apply the router's baseline sysctls, returning one human-readable
+/// message per knob that could not be set.
+///
+/// Kernel features are optional: a sysctl node is missing when its module
+/// isn't loaded or the kernel was built without it. Bailing at the first
+/// failure would leave every later knob in `CTLNAMES` unset, so we try
+/// each independently and accumulate the failures instead of returning
+/// early. The caller surfaces the collected messages via `tracing::warn!`
+/// so the operator knows which feature isn't active — an empty vector
+/// means everything applied.
+pub fn sysctl_enable() -> Vec<String> {
+    let mut errors = Vec::new();
+    for (ctlname, value) in CTLNAMES.iter() {
+        if let Err(e) = sysctl_set(ctlname, value) {
+            errors.push(format!("sysctl {ctlname} = {value}: {e}"));
+        }
+    }
+    errors
+}
+
 pub fn sysctl_mpls_enable(ifname: &String) -> anyhow::Result<()> {
-    let ctlname = format!("net.mpls.conf.{}.input", ifname);
-    let ctl = sysctl::Ctl::new(ctlname.as_str())?;
-    let _ = ctl.set_value_string("1")?;
-    Ok(())
+    sysctl_set(&format!("net.mpls.conf.{}.input", ifname), "1")
 }
 
 /// Set the global kernel MPLS→IP TTL propagation for locally-originated
@@ -55,21 +74,16 @@ pub fn sysctl_mpls_enable(ifname: &String) -> anyhow::Result<()> {
 /// traffic, so the forwarded half is teed there instead. The sysctl exists
 /// once the mpls_router module is loaded (`net.mpls.platform_labels`).
 pub fn sysctl_mpls_ip_ttl_propagate(propagate: bool) -> anyhow::Result<()> {
-    let ctl = sysctl::Ctl::new("net.mpls.ip_ttl_propagate")?;
-    let _ = ctl.set_value_string(if propagate { "1" } else { "0" })?;
-    Ok(())
+    sysctl_set(
+        "net.mpls.ip_ttl_propagate",
+        if propagate { "1" } else { "0" },
+    )
 }
 
 pub fn sysctl_seg6_enable(ifname: &String) -> anyhow::Result<()> {
-    let ctlname = format!("net.ipv6.conf.{}.seg6_enabled", ifname);
-    let ctl = sysctl::Ctl::new(ctlname.as_str())?;
-    let _ = ctl.set_value_string("1")?;
-    Ok(())
+    sysctl_set(&format!("net.ipv6.conf.{}.seg6_enabled", ifname), "1")
 }
 
 pub fn sysctl_keep_addr_on_down(ifname: &String) -> anyhow::Result<()> {
-    let ctlname = format!("net.ipv6.conf.{}.keep_addr_on_down", ifname);
-    let ctl = sysctl::Ctl::new(ctlname.as_str())?;
-    let _ = ctl.set_value_string("1")?;
-    Ok(())
+    sysctl_set(&format!("net.ipv6.conf.{}.keep_addr_on_down", ifname), "1")
 }

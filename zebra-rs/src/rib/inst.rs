@@ -4422,8 +4422,20 @@ impl Rib {
     }
 
     pub async fn event_loop(&mut self) {
-        // Before get into FIB interaction, we enable sysctl.
-        let _ = sysctl_enable();
+        // Before FIB interaction, apply the baseline sysctls. A knob that
+        // can't be set (its backing module isn't loaded, or this kernel
+        // lacks the feature) is reported rather than fatal, so the operator
+        // knows which feature is inactive.
+        let errs = sysctl_enable();
+        if !errs.is_empty() {
+            tracing::warn!(
+                "some baseline sysctls could not be set; a required kernel \
+                 module may not be loaded (e.g. `vrf`, `mpls_router`)"
+            );
+            for err in errs {
+                tracing::warn!("{err}");
+            }
+        }
 
         if let Err(_err) = fib_dump(self).await {
             // warn!("FIB dump error {}", err);

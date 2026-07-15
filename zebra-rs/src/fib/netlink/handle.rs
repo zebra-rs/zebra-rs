@@ -33,7 +33,6 @@ use rtnetlink::{
 use tokio::sync::mpsc::UnboundedSender;
 
 use crate::fib::cradle::CradleFib;
-use crate::fib::sysctl::sysctl_enable;
 use crate::fib::{FibAddr, FibLink, FibMdbEntry, FibMessage, FibNeighbor, FibRoute};
 use crate::rib::entry::RibEntry;
 use crate::rib::inst::{IlmEntry, IlmType};
@@ -473,8 +472,10 @@ enum FdbOp {
 
 impl FibHandle {
     pub fn new(rib_tx: UnboundedSender<FibMessage>, no_nhid: bool) -> anyhow::Result<Self> {
-        let _ = sysctl_enable();
-
+        // Baseline sysctls are applied (and any per-knob failures warned
+        // about) by `Rib::event_loop`, which runs right after `Rib::new`
+        // constructs this handle and before any FIB interaction — so there
+        // is no need to enable them here too.
         let (mut connection, handle, mut messages) = new_connection()?;
 
         let mgroup_flags = RTMGRP_LINK
