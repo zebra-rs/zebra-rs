@@ -12,6 +12,18 @@ on:
         type: boolean
         default: false
 
+# cargo-deb decides where a glob asset lands from the shape of the pattern, and
+# the rule changed in 3.x: with a `/`-terminated dest it now copies by basename
+# unless the pattern's last segment is itself a glob. That silently flattened the
+# playset tree the day an unpinned `cargo install` first picked up 3.7.0 — the
+# built package changed with no commit behind it. Pin the version so packaging
+# output moves only when we choose to move it; a bump is a deliberate, reviewable
+# change. When bumping, expect the asset globs in zebra-rs/Cargo.toml (the `[u]p.sh`
+# spelling, explained there) to need revisiting, and let the layout check in
+# packaging/Makefile — verify-playset-layout.sh — be the judge.
+env:
+  CARGO_DEB_VERSION: "3.7.0"
+
 jobs:
   # =====================================================================
   # Native runners: Ubuntu 22.04 and 24.04
@@ -44,7 +56,7 @@ jobs:
           sudo apt-get install -y protobuf-compiler bison xxd libpam0g-dev
 
       - name: Install cargo-deb
-        run: cargo install cargo-deb --locked
+        run: cargo install cargo-deb --version "$CARGO_DEB_VERSION" --locked
 
       - name: Build vty
         run: make -C vty
@@ -118,7 +130,7 @@ jobs:
           apt-get install -y protobuf-compiler bison xxd libpam0g-dev
 
       - name: Install cargo-deb
-        run: cargo install cargo-deb --locked
+        run: cargo install cargo-deb --version "$CARGO_DEB_VERSION" --locked
 
       - name: Build vty
         run: make -C vty
