@@ -21,7 +21,13 @@ arm64 amd64: ../vty/vty playset changelog
 	# asset (GNU bash) it copies verbatim — strip it here so the .deb ships no
 	# debug symbols (smaller package; clears lintian unstripped-binary-or-object).
 	strip ../vty/vty
-	cargo deb --no-build -p zebra-rs --output . $(DEB_VERSION_ARG)
+	@# cargo-deb prints the built .deb path on stdout (its warnings go to stderr).
+	@# Capture it so the layout check targets exactly this build's artifact rather
+	@# than globbing zebra-rs_*.deb, which would also match stale debs left here by
+	@# an earlier version or arch.
+	deb=$$(cargo deb --no-build -p zebra-rs --output . $(DEB_VERSION_ARG)) || exit $$?; \
+	echo "$$deb"; \
+	./verify-playset-layout.sh "$$deb"
 
 # Regenerate the Debian-format changelog cargo-deb ships, from the
 # single-source CHANGELOG.yaml (see changelog-gen.sh). Written to out/changelog,
@@ -50,6 +56,8 @@ playset:
 	@# can be 0755 while the sourced helpers stay 0644. Fail the build if any file
 	@# falls outside that exact set, so nothing (a new extension OR a new .sh
 	@# basename) can silently go unpackaged.
+	@# This guard only checks that each staged file is *claimed* by a glob; where
+	@# cargo-deb then puts it is checked after the build by verify-playset-layout.sh.
 	@bad=`find out/playset -type f ! \( \
 		-name '*.yaml' -o -name '*.md' -o -name '*.drawio' -o -name '*.png' -o -name '*.svg' \
 		-o -name 'up.sh' -o -name 'down.sh' -o -name 'topology.sh' \
