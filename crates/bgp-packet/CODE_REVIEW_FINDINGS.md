@@ -53,9 +53,18 @@ source; **PLAUSIBLE** = mechanism is real, trigger depends on config/peer/timing
   capabilities. Every unknown capability with body < 2 octets triggers it; longer
   ones silently mis-store header/data.
 
-### 2. Type-2 (4-octet-AS) Route Distinguisher fails to parse — CONFIRMED
+### 2. Type-2 (4-octet-AS) Route Distinguisher fails to parse — CONFIRMED — ✅ FIXED
 - **File:** `src/attrs/rd.rs:8`
 - **Category:** correctness
+- **Status:** Fixed on branch `fix-bgp-cap-unknown-header`. Reproduced first: a
+  type-2 RD returned `Err(Error { code: Switch })` while types 0/1 parsed.
+  `RouteDistinguisherType` gained an `ASN4 = 2` variant; `Display` became an
+  exhaustive match (the old `if ASN {..} else {..}` would have rendered a type-2
+  RD as IPv4); `FromStr` now accepts the 4-byte-AS text form (type 0 still wins
+  when the AS fits in 16 bits); `From<RouteDistinguisher> for ExtCommunityValue`
+  maps ASN4 → high_type 0x02 (RFC 5668); and `inst.rs`'s reverse extcomm → RD
+  mapping now sends high_type 0x02 → ASN4 so a configured 4-byte-AS RT actually
+  intersects the same RT on the wire.
 - **Bug:** `RouteDistinguisherType` models only `ASN = 0` and `IP = 1` with no
   catch-all variant, so the derived `NomBE` parser errors on any other RD type.
 - **Failure scenario:** A peer advertises a VPNv4/VPNv6/EVPN/MUP route whose RD is
