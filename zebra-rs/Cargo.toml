@@ -77,13 +77,26 @@ assets = [
   # are 0755; the sourced helper scripts and all data are 0644. The Makefile
   # `playset` target fails the build if any file outside this set appears, so
   # a new file/script can never silently go unpackaged.
-  ["../packaging/out/playset/**/up.sh",          "usr/share/zebra-rs/playset/",     "755"],
-  ["../packaging/out/playset/**/down.sh",        "usr/share/zebra-rs/playset/",     "755"],
-  ["../packaging/out/playset/**/topology.sh",    "usr/share/zebra-rs/playset/",     "644"],
-  ["../packaging/out/playset/**/common.sh",      "usr/share/zebra-rs/playset/",     "644"],
-  ["../packaging/out/playset/**/netns.sh",       "usr/share/zebra-rs/playset/",     "644"],
-  ["../packaging/out/playset/**/playset.sh",     "usr/share/zebra-rs/playset/",     "644"],
-  ["../packaging/out/playset/**/zebra-rs.sh",    "usr/share/zebra-rs/playset/",     "644"],
+  #
+  # The `[u]p.sh` spelling is load-bearing, not a typo. For a `/`-terminated
+  # dest, cargo-deb keeps a match's path relative to the first globbed component
+  # only when the *last* segment of the source pattern is itself a glob; when it
+  # is a literal name it copies by basename alone (assets.rs `file_name_is_glob`,
+  # where is_glob_pattern means "contains one of * [ ] !"). So `**/up.sh` lands
+  # every scenario's script on the single path playset/up.sh — 12 files colliding
+  # into 1, and lib/ flattened away. Wrapping one character in a class makes the
+  # segment a glob that still matches exactly the one file. cargo-deb 2.x kept
+  # the subdirectories either way; 3.x is what made this bite (fixed for v26.7.6,
+  # first shipped broken by the cargo-deb 3.7.0 bump). packaging/Makefile runs
+  # verify-playset-layout.sh over the built .deb so this can't regress silently
+  # again — that check is what caught it.
+  ["../packaging/out/playset/**/[u]p.sh",        "usr/share/zebra-rs/playset/",     "755"],
+  ["../packaging/out/playset/**/[d]own.sh",      "usr/share/zebra-rs/playset/",     "755"],
+  ["../packaging/out/playset/**/[t]opology.sh",  "usr/share/zebra-rs/playset/",     "644"],
+  ["../packaging/out/playset/**/[c]ommon.sh",    "usr/share/zebra-rs/playset/",     "644"],
+  ["../packaging/out/playset/**/[n]etns.sh",     "usr/share/zebra-rs/playset/",     "644"],
+  ["../packaging/out/playset/**/[p]layset.sh",   "usr/share/zebra-rs/playset/",     "644"],
+  ["../packaging/out/playset/**/[z]ebra-rs.sh",  "usr/share/zebra-rs/playset/",     "644"],
   ["../packaging/out/playset/**/*.yaml",         "usr/share/zebra-rs/playset/",     "644"],
   ["../packaging/out/playset/**/*.md",           "usr/share/zebra-rs/playset/",     "644"],
   ["../packaging/out/playset/**/*.drawio",       "usr/share/zebra-rs/playset/",     "644"],
