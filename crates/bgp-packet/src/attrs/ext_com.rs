@@ -851,6 +851,12 @@ impl From<RouteDistinguisher> for ExtCommunityValue {
             RouteDistinguisherType::IP => {
                 to.high_type = 0x01;
             }
+            // Four-Octet AS Specific extended community (RFC 5668): the 6-octet
+            // value is a 4-octet AS followed by a 2-octet local administrator,
+            // the same layout as a type-2 RD.
+            RouteDistinguisherType::ASN4 => {
+                to.high_type = 0x02;
+            }
         }
         to
     }
@@ -859,6 +865,27 @@ impl From<RouteDistinguisher> for ExtCommunityValue {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Each RD type maps onto the extended-community high_type that carries the
+    /// same 6-octet value layout: 0x00 Two-Octet AS, 0x01 IPv4, 0x02 Four-Octet
+    /// AS (RFC 5668). The type-2 arm matters because `matching_import_vrfs`
+    /// compares configured RTs against RDs rebuilt from the wire, and
+    /// `RouteDistinguisher`'s Eq includes `typ`.
+    #[test]
+    fn rd_type_maps_to_ext_community_high_type() {
+        let cases = [
+            (RouteDistinguisherType::ASN, 0x00u8),
+            (RouteDistinguisherType::IP, 0x01),
+            (RouteDistinguisherType::ASN4, 0x02),
+        ];
+        for (typ, high_type) in cases {
+            let mut rd = RouteDistinguisher::new(typ);
+            rd.val = [0xfa, 0x56, 0xea, 0x00, 0x00, 0x01];
+            let ecom: ExtCommunityValue = rd.into();
+            assert_eq!(ecom.high_type, high_type, "RD type {typ:?}");
+            assert_eq!(ecom.val, rd.val, "value carried verbatim");
+        }
+    }
 
     #[test]
     fn parse() {
