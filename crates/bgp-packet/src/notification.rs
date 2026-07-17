@@ -18,14 +18,23 @@ pub struct NotificationPacket {
 
 impl Display for NotificationPacket {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        writeln!(f, "Notification").unwrap();
-        writeln!(f, " Code: {}", self.code).unwrap();
+        writeln!(f, "Notification")?;
+        writeln!(f, " Code: {}", self.code)?;
         writeln!(
             f,
             " Sub Code: {}",
             notify_sub_code_str(self.code, self.sub_code)
-        )
-        .unwrap();
+        )?;
+        if let Some(msg) = self.shutdown_communication() {
+            // The operator's own words for why the session went down
+            // (RFC 9003) — the whole reason the Data field is worth keeping.
+            writeln!(f, " Shutdown Communication: {msg}")?;
+        } else if !self.data.is_empty() {
+            // Everything else — RFC 4486 Maximum Prefixes' AFI/SAFI and count,
+            // or the offending octets of the attribute the peer objected to —
+            // has no decoder here, so show it raw rather than drop it again.
+            writeln!(f, " Data: {}", data_hex(&self.data))?;
+        }
         Ok(())
     }
 }
@@ -104,7 +113,8 @@ impl Display for NotifyCode {
     }
 }
 
-fn notify_sub_code_str(code: NotifyCode, sub_code: u8) -> String {
+/// Human-readable sub-code name for `code`, e.g. "Administrative Shutdown".
+pub fn notify_sub_code_str(code: NotifyCode, sub_code: u8) -> String {
     use NotifyCode::*;
     match code {
         MsgHeaderError => sub_header_error_str(sub_code.into()),
@@ -441,20 +451,149 @@ impl From<NotificationPacket> for BytesMut {
 
 impl NotificationPacket {
     pub fn parse_packet(input: &[u8]) -> IResult<&[u8], NotificationPacket> {
-        let (input, packet) = NotificationPacket::parse_be(input)?;
+        let (input, mut packet) = NotificationPacket::parse_be(input)?;
         let len = packet
             .header
             .length
             .saturating_sub(BGP_HEADER_LEN)
             .saturating_sub(2);
-        let (input, _data) = take(len as usize).parse(input)?;
+        let (input, data) = take(len as usize).parse(input)?;
+        // Keep the Data field. `data` is `#[nom(Ignore)]`, so the derived parse
+        // leaves it empty and these octets used to be read into a discarded
+        // binding — a peer's RFC 9003 shutdown message, or the offending bytes
+        // of the attribute it objected to, reached the process and were dropped
+        // before anyone could see them.
+        packet.data = data.to_vec();
         Ok((input, packet))
     }
+
+    /// The RFC 9003 Shutdown Communication, if this is one and it is well
+    /// formed.
+    ///
+    /// Only Cease subcodes 2 (Administrative Shutdown) and 4 (Administrative
+    /// Reset) may carry it. The Data field is a 1-octet length followed by that
+    /// many octets of UTF-8 — RFC 9003 raised the cap from RFC 8203's 128 to
+    /// 255, so any length fits the octet.
+    ///
+    /// RFC 9003 §4 says a receiver finding invalid UTF-8 SHOULD log the fact and
+    /// MUST NOT interpret the malformed sequence, but must not reject the
+    /// NOTIFICATION over it — so this renders lossily and only declines when the
+    /// length field disagrees with the octets present.
+    pub fn shutdown_communication(&self) -> Option<String> {
+        if self.code != NotifyCode::Cease {
+            return None;
+        }
+        if !matches!(
+            CeaseError::from(self.sub_code),
+            CeaseError::AdministrativeShutdown | CeaseError::AdministrativeReset
+        ) {
+            return None;
+        }
+        let (&len, rest) = self.data.split_first()?;
+        let len = len as usize;
+        if len == 0 || rest.len() < len {
+            return None;
+        }
+        Some(String::from_utf8_lossy(&rest[..len]).into_owned())
+    }
+}
+
+/// Render the NOTIFICATION Data octets for a human, used when no subcode-
+/// specific decoder applies.
+fn data_hex(data: &[u8]) -> String {
+    data.iter()
+        .map(|b| format!("{b:02x}"))
+        .collect::<Vec<_>>()
+        .join(" ")
 }
 
 #[cfg(test)]
 mod tests {
     use super::CeaseError;
+    use super::*;
+
+    /// Build the wire form of a NOTIFICATION with the given Data.
+    fn wire(code: u8, sub_code: u8, data: &[u8]) -> BytesMut {
+        let packet = NotificationPacket::new(NotifyCode::from(code), sub_code, data.to_vec());
+        packet.into()
+    }
+
+    /// The Data field must survive parsing. Regression: `data` is
+    /// `#[nom(Ignore)]`, so the derived parse left it empty and `parse_packet`
+    /// read the octets into a discarded binding — every NOTIFICATION arrived
+    /// with `data` empty, whatever the peer sent.
+    #[test]
+    fn notification_data_survives_round_trip() {
+        let buf = wire(6, 2, &[0x04, b'b', b'y', b'e', b'!']);
+        let (rest, parsed) = NotificationPacket::parse_packet(&buf).expect("must parse");
+        assert!(rest.is_empty());
+        assert_eq!(parsed.code, NotifyCode::Cease);
+        assert_eq!(parsed.sub_code, 2);
+        assert_eq!(
+            parsed.data,
+            vec![0x04, b'b', b'y', b'e', b'!'],
+            "Data must not be dropped"
+        );
+    }
+
+    /// RFC 9003: a Cease/Administrative Shutdown (2) or Administrative Reset (4)
+    /// carries a 1-octet length then that many octets of UTF-8.
+    #[test]
+    fn shutdown_communication_is_decoded() {
+        for sub in [2u8, 4] {
+            let msg = "maintenance window";
+            let mut data = vec![msg.len() as u8];
+            data.extend_from_slice(msg.as_bytes());
+            let buf = wire(6, sub, &data);
+            let (_, parsed) = NotificationPacket::parse_packet(&buf).expect("must parse");
+            assert_eq!(parsed.shutdown_communication().as_deref(), Some(msg));
+            assert!(parsed.to_string().contains(msg), "Display surfaces it");
+        }
+    }
+
+    /// The shutdown communication is only defined for those two Cease subcodes;
+    /// elsewhere the Data means something else and must not be read as text.
+    #[test]
+    fn shutdown_communication_only_for_its_subcodes() {
+        let data = [0x03, b'a', b'b', b'c'];
+        // Cease, but subcode 1 (Maximum Number of Prefixes Reached).
+        let buf = wire(6, 1, &data);
+        let (_, parsed) = NotificationPacket::parse_packet(&buf).unwrap();
+        assert_eq!(parsed.shutdown_communication(), None);
+        assert!(
+            parsed.to_string().contains("Data: 03 61 62 63"),
+            "shown raw"
+        );
+
+        // Not a Cease at all.
+        let buf = wire(3, 2, &data);
+        let (_, parsed) = NotificationPacket::parse_packet(&buf).unwrap();
+        assert_eq!(parsed.shutdown_communication(), None);
+    }
+
+    /// A length field disagreeing with the octets present is not interpreted.
+    /// RFC 9003 §4 still forbids rejecting the NOTIFICATION over it, so the
+    /// packet parses and the Data is shown raw.
+    #[test]
+    fn inconsistent_shutdown_length_is_not_interpreted() {
+        // Claims 9 octets, carries 3.
+        let buf = wire(6, 2, &[0x09, b'a', b'b', b'c']);
+        let (_, parsed) = NotificationPacket::parse_packet(&buf).expect("must still parse");
+        assert_eq!(parsed.shutdown_communication(), None);
+        assert_eq!(parsed.data, vec![0x09, b'a', b'b', b'c'], "kept verbatim");
+    }
+
+    /// Invalid UTF-8 is rendered lossily rather than rejected (RFC 9003 §4:
+    /// log it, do not interpret the malformed sequence, do not reject).
+    #[test]
+    fn invalid_utf8_shutdown_is_lossy_not_fatal() {
+        let buf = wire(6, 2, &[0x02, 0xff, 0xfe]);
+        let (_, parsed) = NotificationPacket::parse_packet(&buf).expect("must still parse");
+        assert!(
+            parsed.shutdown_communication().is_some(),
+            "rendered lossily, not dropped"
+        );
+    }
 
     /// Every Cease sub-code round-trips u8 → CeaseError → u8, including
     /// the Unknown passthrough.
