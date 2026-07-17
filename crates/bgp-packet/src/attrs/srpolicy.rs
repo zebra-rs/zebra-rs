@@ -54,12 +54,58 @@ pub struct SrPolicyTlvs {
     pub unknown: Vec<TunnelSubTlv>,
 }
 
-/// Binding SID (sub-TLV 13). The S/I flags are not modelled in v1; they
-/// are emitted as zero. An SRv6 SID may also arrive in the dedicated
-/// SRv6 Binding SID sub-TLV (20) — see [`Srv6BindingSid`].
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
-pub enum BindingSid {
+/// S-Flag (RFC 9830 §2.4.2, bit 0): the Specified-BSID-Only behaviour of
+/// RFC 9256 §6.2.3.
+pub const BSID_FLAG_S: u8 = 0x80;
+/// I-Flag (RFC 9830 §2.4.2, bit 1): the Drop-Upon-Invalid behaviour of
+/// RFC 9256 §8.2.
+pub const BSID_FLAG_I: u8 = 0x40;
+/// The flag bits RFC 9830 assigns. Everything else is unassigned and "MUST be
+/// set to zero upon transmission and MUST be ignored upon receipt", so it is
+/// masked off in both directions rather than carried.
+const BSID_FLAGS_DEFINED: u8 = BSID_FLAG_S | BSID_FLAG_I;
+
+/// Binding SID (sub-TLV 13): `Flags(1) RESERVED(1) BSID(0 | 4 SR-MPLS | 16 SRv6)`.
+///
+/// The flags change how the receiver treats the policy — S selects
+/// Specified-BSID-Only and I selects Drop-Upon-Invalid — so they have to survive
+/// a decode/re-encode. They previously were not modelled and were emitted as
+/// zero, which silently turned both behaviours off on anything this speaker
+/// re-advertised.
+///
+/// An SRv6 SID may also arrive in the dedicated SRv6 Binding SID sub-TLV (20) —
+/// see [`Srv6BindingSid`].
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Default)]
+pub struct BindingSid {
+    /// The assigned flag bits, as received. Unassigned bits are dropped on
+    /// receipt and never transmitted, per RFC 9830 §2.4.2.
+    pub flags: u8,
+    pub value: BindingSidValue,
+}
+
+impl BindingSid {
+    /// A Binding SID with no flags set.
+    pub fn new(value: BindingSidValue) -> Self {
+        Self { flags: 0, value }
+    }
+
+    /// RFC 9256 §6.2.3 Specified-BSID-Only.
+    pub fn specified_bsid_only(&self) -> bool {
+        self.flags & BSID_FLAG_S != 0
+    }
+
+    /// RFC 9256 §8.2 Drop-Upon-Invalid.
+    pub fn drop_upon_invalid(&self) -> bool {
+        self.flags & BSID_FLAG_I != 0
+    }
+}
+
+/// The BSID a [`BindingSid`] carries, if any. The length of the sub-TLV selects
+/// the variant: 2, 6, or 18 octets (RFC 9830 §2.4.2).
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Default)]
+pub enum BindingSidValue {
     /// Length 2: Flags+RESERVED only, no BSID value.
+    #[default]
     None,
     /// Length 6: a 20-bit SR-MPLS label.
     MplsLabel(u32),
@@ -260,19 +306,29 @@ fn parse_preference(v: &[u8]) -> Result<u32, SrPolicyError> {
 
 fn parse_binding_sid(v: &[u8]) -> Result<BindingSid, SrPolicyError> {
     // Flags(1) RESERVED(1) BSID(0 | 4 SR-MPLS | 16 SRv6).
-    match v.len() {
-        2 => Ok(BindingSid::None),
+    let value = match v.len() {
+        2 => BindingSidValue::None,
         6 => {
             let word = u32::from_be_bytes([v[2], v[3], v[4], v[5]]);
-            Ok(BindingSid::MplsLabel(word >> MPLS_LABEL_SHIFT))
+            BindingSidValue::MplsLabel(word >> MPLS_LABEL_SHIFT)
         }
-        18 => Ok(BindingSid::Srv6(read_v6(&v[2..18]))),
-        _ => Err(SrPolicyError::BadLength {
-            typ: BINDING_SID,
-            len: v.len(),
-            expected: "2, 6, or 18",
-        }),
-    }
+        18 => BindingSidValue::Srv6(read_v6(&v[2..18])),
+        _ => {
+            return Err(SrPolicyError::BadLength {
+                typ: BINDING_SID,
+                len: v.len(),
+                expected: "2, 6, or 18",
+            });
+        }
+    };
+    // The flags octet was read and thrown away here, so S and I were lost and
+    // re-emitted as zero. Keep the assigned bits; RFC 9830 §2.4.2 says the
+    // unassigned ones "MUST be ignored upon receipt", so drop them now rather
+    // than carry a value we would not be allowed to transmit.
+    Ok(BindingSid {
+        flags: v[0] & BSID_FLAGS_DEFINED,
+        value,
+    })
 }
 
 fn parse_srv6_binding_sid(v: &[u8]) -> Result<Srv6BindingSid, SrPolicyError> {
@@ -475,13 +531,15 @@ fn emit_preference(pref: u32) -> Vec<u8> {
 }
 
 fn emit_binding_sid(bsid: &BindingSid) -> Vec<u8> {
-    let mut v = vec![0u8, 0u8]; // Flags, RESERVED
-    match bsid {
-        BindingSid::None => {}
-        BindingSid::MplsLabel(label) => {
+    // Flags, RESERVED. The mask keeps a locally-built value from transmitting
+    // unassigned bits, which RFC 9830 §2.4.2 requires be zero on the wire.
+    let mut v = vec![bsid.flags & BSID_FLAGS_DEFINED, 0u8];
+    match &bsid.value {
+        BindingSidValue::None => {}
+        BindingSidValue::MplsLabel(label) => {
             v.extend_from_slice(&((label & MPLS_LABEL_MASK) << MPLS_LABEL_SHIFT).to_be_bytes());
         }
-        BindingSid::Srv6(sid) => v.extend_from_slice(&sid.octets()),
+        BindingSidValue::Srv6(sid) => v.extend_from_slice(&sid.octets()),
     }
     v
 }
@@ -587,7 +645,10 @@ mod tests {
         value.extend_from_slice(&word.to_be_bytes());
         let t = tlv(vec![sub(BINDING_SID, value.clone())]);
         let v = round_trip(t.clone(), &t);
-        assert_eq!(v.binding_sid, Some(BindingSid::MplsLabel(16001)));
+        assert_eq!(
+            v.binding_sid,
+            Some(BindingSid::new(BindingSidValue::MplsLabel(16001)))
+        );
         // Wire bytes: Flags=0, RESERVED=0, then the 4-octet label entry.
         assert_eq!(v.to_tunnel().sub_tlvs[0].value, value);
     }
@@ -597,7 +658,7 @@ mod tests {
         let none = tlv(vec![sub(BINDING_SID, vec![0, 0])]);
         assert_eq!(
             round_trip(none.clone(), &none).binding_sid,
-            Some(BindingSid::None)
+            Some(BindingSid::new(BindingSidValue::None))
         );
 
         let sid: Ipv6Addr = "fc00:0:9::100".parse().unwrap();
@@ -606,7 +667,54 @@ mod tests {
         let t = tlv(vec![sub(BINDING_SID, value)]);
         assert_eq!(
             round_trip(t.clone(), &t).binding_sid,
-            Some(BindingSid::Srv6(sid))
+            Some(BindingSid::new(BindingSidValue::Srv6(sid)))
+        );
+    }
+
+    /// The S and I flags must survive a decode/re-encode. Regression: the flags
+    /// octet was read and dropped, and re-emitted as zero — a reflector silently
+    /// turned Specified-BSID-Only and Drop-Upon-Invalid *off* on every policy it
+    /// passed on. Every pre-existing test used Flags=0, which is why the loss
+    /// went unseen.
+    #[test]
+    fn binding_sid_flags_round_trip() {
+        let word: u32 = 16001 << 12;
+        for flags in [0u8, BSID_FLAG_S, BSID_FLAG_I, BSID_FLAG_S | BSID_FLAG_I] {
+            let mut value = vec![flags, 0u8];
+            value.extend_from_slice(&word.to_be_bytes());
+            let t = tlv(vec![sub(BINDING_SID, value.clone())]);
+            let v = round_trip(t.clone(), &t);
+
+            let bsid = v.binding_sid.clone().expect("binding sid present");
+            assert_eq!(bsid.flags, flags, "flags survive the decode");
+            assert_eq!(bsid.specified_bsid_only(), flags & BSID_FLAG_S != 0);
+            assert_eq!(bsid.drop_upon_invalid(), flags & BSID_FLAG_I != 0);
+            // `round_trip` already asserts the re-emit equals the input, so the
+            // flags octet is back on the wire unchanged.
+            assert_eq!(v.to_tunnel().sub_tlvs[0].value[0], flags);
+        }
+    }
+
+    /// RFC 9830 §2.4.2: unassigned flag bits "MUST be set to zero upon
+    /// transmission and MUST be ignored upon receipt" — so they are dropped on
+    /// receipt rather than preserved, and never re-transmitted.
+    #[test]
+    fn binding_sid_unassigned_flag_bits_are_dropped() {
+        let mut value = vec![0xFFu8, 0u8]; // every bit set
+        value.extend_from_slice(&(16001u32 << 12).to_be_bytes());
+        let t = tlv(vec![sub(BINDING_SID, value)]);
+        let v = SrPolicyTlvs::from_tunnel(&t).expect("decode");
+
+        let bsid = v.binding_sid.clone().expect("binding sid present");
+        assert_eq!(
+            bsid.flags,
+            BSID_FLAG_S | BSID_FLAG_I,
+            "only the assigned bits are kept"
+        );
+        assert_eq!(
+            v.to_tunnel().sub_tlvs[0].value[0],
+            BSID_FLAG_S | BSID_FLAG_I,
+            "unassigned bits are not transmitted"
         );
     }
 
@@ -754,7 +862,7 @@ mod tests {
         // Emit order matches input order, so it round-trips byte-equal.
         let v = round_trip(input.clone(), &input);
         assert_eq!(v.preference, Some(200));
-        assert_eq!(v.binding_sid, Some(BindingSid::None));
+        assert_eq!(v.binding_sid, Some(BindingSid::new(BindingSidValue::None)));
         assert_eq!(v.segment_lists.len(), 2);
         assert_eq!(v.policy_name.as_deref(), Some("red"));
     }

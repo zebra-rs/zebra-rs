@@ -20,9 +20,9 @@ use std::collections::BTreeMap;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 
 use bgp_packet::{
-    BgpAttr, BindingSid, ClusterList, Community, CommunityValue, ExtCommunity, ExtCommunitySubType,
-    ExtCommunityValue, Origin, OriginatorId, Segment, SegmentList, SrPolicyNlri, SrPolicyTlvs,
-    Srv6BindingSid, TunnelEncap,
+    BgpAttr, BindingSid, BindingSidValue, ClusterList, Community, CommunityValue, ExtCommunity,
+    ExtCommunitySubType, ExtCommunityValue, Origin, OriginatorId, Segment, SegmentList,
+    SrPolicyNlri, SrPolicyTlvs, Srv6BindingSid, TunnelEncap,
 };
 
 use crate::config::{Args, ConfigOp};
@@ -198,8 +198,8 @@ fn mpls_segments(cp: &CandidatePath) -> Option<Vec<u32>> {
 /// `None` if it isn't an installable SR-MPLS policy (not valid, no MPLS
 /// Binding SID, or its first segment list isn't an all-Type-A list).
 fn mpls_bsid(cp: &CandidatePath) -> Option<MplsBsid> {
-    let bsid = match &cp.binding_sid {
-        Some(BindingSid::MplsLabel(label)) => *label,
+    let bsid = match cp.binding_sid.as_ref().map(|b| &b.value) {
+        Some(BindingSidValue::MplsLabel(label)) => *label,
         _ => return None,
     };
     let segments = mpls_segments(cp)?;
@@ -228,14 +228,12 @@ fn srv6_bsid(cp: &CandidatePath) -> Option<Srv6Bsid> {
     if !cp.valid {
         return None;
     }
-    let bsid = cp
-        .srv6_binding_sid
-        .as_ref()
-        .map(|s| s.sid)
-        .or(match &cp.binding_sid {
-            Some(BindingSid::Srv6(addr)) => Some(*addr),
+    let bsid = cp.srv6_binding_sid.as_ref().map(|s| s.sid).or(
+        match cp.binding_sid.as_ref().map(|b| &b.value) {
+            Some(BindingSidValue::Srv6(addr)) => Some(*addr),
             _ => None,
-        })?;
+        },
+    )?;
     let first = cp.segment_lists.first()?;
     let segments: Vec<Ipv6Addr> = first
         .segments
@@ -686,7 +684,9 @@ impl LocalSrPolicy {
 
         let tlvs = SrPolicyTlvs {
             preference: Some(self.preference.unwrap_or(DEFAULT_PREFERENCE)),
-            binding_sid: self.binding_sid_label.map(BindingSid::MplsLabel),
+            binding_sid: self
+                .binding_sid_label
+                .map(|l| BindingSid::new(BindingSidValue::MplsLabel(l))),
             srv6_binding_sid: self.binding_sid_sid.map(|sid| Srv6BindingSid {
                 flags: 0,
                 sid,
@@ -1220,7 +1220,7 @@ mod tests {
     fn mpls_cp(disc: u32, pref: u32, peer: usize, bsid: u32, label: u32) -> CandidatePath {
         let mut c = cp(20, "10.0.0.1", disc, pref, true);
         c.peer = peer;
-        c.binding_sid = Some(BindingSid::MplsLabel(bsid));
+        c.binding_sid = Some(BindingSid::new(BindingSidValue::MplsLabel(bsid)));
         c.segment_lists = vec![SegmentList {
             weight: None,
             segments: vec![Segment::TypeA { flags: 0, label }],
@@ -1453,7 +1453,10 @@ mod tests {
             .expect("type 15")
             .expect("decode");
         assert_eq!(tlvs.preference, Some(200));
-        assert_eq!(tlvs.binding_sid, Some(BindingSid::MplsLabel(16100)));
+        assert_eq!(
+            tlvs.binding_sid,
+            Some(BindingSid::new(BindingSidValue::MplsLabel(16100)))
+        );
         assert_eq!(tlvs.segment_lists.len(), 1);
         assert_eq!(
             tlvs.segment_lists[0].segments,

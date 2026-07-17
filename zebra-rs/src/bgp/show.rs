@@ -4991,10 +4991,10 @@ fn show_sr_binding_sid(cp: &super::sr_policy::CandidatePath) -> Option<String> {
     if let Some(s) = &cp.srv6_binding_sid {
         return Some(format!("SRv6 {}", s.sid));
     }
-    match &cp.binding_sid {
-        Some(BindingSid::MplsLabel(l)) => Some(format!("MPLS {l}")),
-        Some(BindingSid::Srv6(s)) => Some(format!("SRv6 {s}")),
-        Some(BindingSid::None) | None => None,
+    match cp.binding_sid.as_ref().map(|b| &b.value) {
+        Some(BindingSidValue::MplsLabel(l)) => Some(format!("MPLS {l}")),
+        Some(BindingSidValue::Srv6(s)) => Some(format!("SRv6 {s}")),
+        Some(BindingSidValue::None) | None => None,
     }
 }
 
