@@ -33,6 +33,47 @@ fn test2(buf: &[u8]) {
 }
 
 #[test]
+pub fn parse_open() {
+    // OPEN from a peer with a helper-only Graceful Restart capability
+    // (code 64, length 2: flags/time only, no AFI/SAFI tuples) followed
+    // by an LLGR capability — the RFC 4724 `2 + 4n` shape that a
+    // per-entry-flag-time model cannot parse.
+    const PACKET: &[u8] = &hex!(
+        "
+ff ff ff ff ff ff ff ff ff ff ff ff ff ff ff ff
+00 7b 01 04 ff dd 00 b4 0a 00 00 02 5e 02 06 01
+04 00 01 00 01 02 06 01 04 00 02 00 01 02 02 02
+00 02 02 46 00 02 06 41 04 00 00 ff dd 02 02 06
+00 02 0a 45 08 00 01 01 01 00 02 01 01 02 0c 4c
+0a 00 01 01 00 00 00 02 01 00 00 02 06 49 04 02
+6e 31 00 02 04 40 02 40 78 02 10 47 0e 00 01 01
+80 00 00 00 00 02 01 80 00 00 00
+"
+    );
+    let packet = BgpPacket::parse_packet(PACKET, true, None);
+    assert!(packet.is_ok());
+
+    let (_, packet) = packet.unwrap();
+    let BgpPacket::Open(open) = packet else {
+        panic!("Packet must be Open");
+    };
+    assert_eq!(open.asn, 65501);
+    assert_eq!(open.hold_time, 180);
+
+    let restart = open
+        .bgp_cap
+        .restart
+        .as_ref()
+        .expect("Graceful Restart capability must be present");
+    assert_eq!(restart.flag_time.restart_time(), 120);
+    assert!(restart.flag_time.n_flag());
+    assert!(!restart.flag_time.r_flag());
+    assert!(restart.entries.is_empty(), "helper-only form has no tuples");
+
+    assert_eq!(open.bgp_cap.llgr.len(), 2, "LLGR for two families");
+}
+
+#[test]
 pub fn parse_evpn_test_1() {
     const PACKET: &[u8] = &hex!(
         "

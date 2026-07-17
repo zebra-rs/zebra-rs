@@ -17,7 +17,7 @@ pub mod extended_nexthop;
 pub use extended_nexthop::{CapExtendedNextHop, ExtendedNextHopValue};
 
 pub mod graceful;
-pub use graceful::{CapRestart, RestartValue};
+pub use graceful::{CapRestart, RestartEntry, RestartFlagTime, RestartFlags};
 
 pub mod as4;
 pub use as4::CapAs4;
