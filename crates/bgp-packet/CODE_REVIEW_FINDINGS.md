@@ -429,9 +429,39 @@ silently resolves to the wrong function; use `.into()`.
   malformed attribute is accepted and the route installed instead of RFC 7606
   treat-as-withdraw.
 
-### 12. EVPN MAC/IP length fields validated leniently — PLAUSIBLE
+### 12. EVPN MAC/IP length fields validated leniently — CONFIRMED — ✅ FIXED
 - **File:** `src/attrs/nlri_evpn.rs:805` (also 810, 1076)
 - **Category:** correctness
+- **Status:** Fixed on branch `fix-bgp-cap-unknown-header`. Upgraded to
+  CONFIRMED — every out-of-spec value was accepted:
+
+  ```
+  before: mac_len=48 ACCEPTED  mac_len=41 ACCEPTED  mac_len=47 ACCEPTED
+          ip_len=0/32/128 ACCEPTED  ip_len=200 ACCEPTED  ip_len=25 ACCEPTED
+  after:  only 48, and only 0/32/128, are accepted
+  ```
+
+  RFC 7432 §7.2, quoted: "The MAC Address Length field is in bits, and it is set
+  to 48" and "the IP Address Length field is in bits, and it is set to 32 or 128
+  bits". Other values are explicitly "outside the scope of this document" — there
+  is no defined way to read them, so rejecting is the only defensible action.
+
+  The root cause is one idiom: rounding a bit-count to octets with `nlri_psize`
+  *before* comparing. That silently widens each legal value into a span of eight
+  — `nlri_psize(mac_len) == 6` accepts 41..=48, and `nlri_psize(len)` in
+  `parse_len_prefixed_ip` reads 25..=32 as IPv4 and 121..=128 as IPv6. All three
+  sites now match on the bit count itself, against named `MAC_LEN_BITS` /
+  `IP4_LEN_BITS` / `IP6_LEN_BITS` constants carrying the RFC quotes.
+  `nlri_psize` no longer appears in the file outside comments.
+- **The correct pattern already existed two arms away:** the `IncMulticast`
+  (Type-3) arm hard-checks its address length against 32/128 with an RFC 7432
+  §7.3 citation. Type-2 simply never matched it.
+- **`parse_len_prefixed_ip` had the same false-comment problem as finding 7:** its
+  doc always claimed "any other length fails the parse", which the `nlri_psize`
+  match made untrue. The code now does what the comment said.
+- **Note:** Type-2's IP address is still parsed and discarded — `EvpnMac` has no
+  `ip` field. That is a modelling gap, not a validation one, and is left alone;
+  the length is now validated and exactly that many octets are stepped over.
 - **Bug:** EVPN Type-2 MAC/IP length fields are validated via
   `nlri_psize()==6/4/16` (a `div_ceil` on the bit count) rather than an exact
   bit-count; SMET/IGMP-sync source/group lengths accept any `nlri_psize`-consistent
