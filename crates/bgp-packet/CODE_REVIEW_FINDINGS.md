@@ -416,10 +416,42 @@ silently resolves to the wrong function; use `.into()`.
   `take`), but malformed NLRI enters the RIB. (Type-3 at line 838 correctly
   hard-checks 32/128.)
 
-### 13. `many0_complete` silently truncates the NLRI list — PLAUSIBLE
+### 13. `many0_complete` silently truncates the NLRI list — CONFIRMED — ✅ FIXED
 - **File:** `src/attrs/mp_reach.rs:435` (pattern also at `nlri_evpn.rs:758`,
   `aspath.rs:233`, and `mp_unreach.rs`)
 - **Category:** robustness
+- **Status:** Fixed on branch `fix-bgp-cap-unknown-header`. Upgraded from
+  PLAUSIBLE to CONFIRMED: demonstrated by stashing the fix and re-running the
+  same probe against an MP_REACH whose NLRI block is
+  `[10.0.0.0/24, <prefix length 33>]`:
+
+  ```
+  before: ACCEPTED (routes silently dropped): 0:10.0.0.0/24 => 192.0.2.1
+  after:  REJECTED
+  well-formed block parses identically either way
+  ```
+
+  All **25** NLRI-block sites (13 in `mp_reach.rs`, 12 in `mp_unreach.rs`) read
+  their list with a bare `many0_complete` and discarded the leftover, so a
+  malformed NLRI yielded the routes *before* it and silently dropped it and
+  everything after — with no error raised anywhere. The peer believes it
+  advertised routes that were never installed.
+
+  Replaced all 25 with one shared `parse_nlri_block` in `src/parser.rs` (beside
+  `nlri_psize`), which parses to exhaustion and rejects a block that does not
+  consume exactly. Fixing it in a helper rather than 25 copies also removes the
+  duplication the cleanup pass flagged, and means a future SAFI cannot
+  reintroduce the bug by copy-paste.
+- **Why erroring is correct, not merely stricter:** RFC 7606 §3(j) permits
+  treat-as-withdraw only when the affected routes can be determined — "if this
+  is not possible ... the 'session reset' approach (or the 'AFI/SAFI disable'
+  approach) MUST be followed". Once an NLRI fails to parse, the remaining routes
+  cannot be located, so they are exactly what cannot be determined.
+  `attr_malformation_is_withdraw` already excludes MP_REACH/MP_UNREACH, so the
+  error reaches the session-reset path the RFC asks for. Silently keeping a
+  prefix of the list is the one outcome the RFC never permits.
+- **Note:** this also makes finding 7's strictness land correctly — a rejected
+  flow-spec NLRI now fails its block loudly instead of silently truncating it.
 - **Bug:** MP_REACH/MP_UNREACH NLRI lists are parsed with `many0_complete` and the
   caller discards the leftover, so an inner NLRI parse error — or an over-claimed
   length octet yielding `Err::Incomplete` — silently stops the list and drops the
