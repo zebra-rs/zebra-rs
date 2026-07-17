@@ -3497,16 +3497,17 @@ fn render(out: &mut String, neighbor: &Neighbor) -> std::fmt::Result {
             }
         }
 
-        if !neighbor.cap_send.restart.is_empty() || !neighbor.cap_recv.restart.is_empty() {
+        let send_restart = neighbor.cap_send.restart.as_ref();
+        let recv_restart = neighbor.cap_recv.restart.as_ref();
+        if send_restart.is_some() || recv_restart.is_some() {
             writeln!(out, "    Graceful Restart:")?;
 
             // Collect all AFI/SAFI pairs from both send and recv
             let mut all_afi_safis = std::collections::BTreeSet::new();
-            for key in neighbor.cap_send.restart.keys() {
-                all_afi_safis.insert(key);
-            }
-            for key in neighbor.cap_recv.restart.keys() {
-                all_afi_safis.insert(key);
+            for cap in send_restart.iter().chain(recv_restart.iter()) {
+                for entry in cap.entries.iter() {
+                    all_afi_safis.insert(AfiSafi::new(entry.afi, entry.safi));
+                }
             }
 
             // Display each AFI/SAFI pair
@@ -3522,8 +3523,15 @@ fn render(out: &mut String, neighbor: &Neighbor) -> std::fmt::Result {
                     _ => continue, // Skip unknown combinations
                 };
 
-                let send_val = neighbor.cap_send.restart.get(afi_safi);
-                let recv_val = neighbor.cap_recv.restart.get(afi_safi);
+                // The restart time is capability-level (RFC 4724), so each
+                // side's value applies to every family it listed.
+                let lists_family = |cap: &&CapRestart| {
+                    cap.entries
+                        .iter()
+                        .any(|e| e.afi == afi_safi.afi && e.safi == afi_safi.safi)
+                };
+                let send_val = send_restart.filter(lists_family);
+                let recv_val = recv_restart.filter(lists_family);
 
                 write!(out, "      {}: ", afi_safi_str)?;
 

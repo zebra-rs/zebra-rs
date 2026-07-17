@@ -7,7 +7,6 @@ use crate::{
     AddPathValue, AfiSafi, CapAddPath, CapAs4, CapDynamic, CapEmit, CapEnhancedRefresh,
     CapExtended, CapExtendedNextHop, CapFqdn, CapLlgr, CapMultiProtocol, CapPathLimit, CapRefresh,
     CapRefreshCisco, CapRestart, CapVersion, CapabilityPacket, LlgrValue, PathLimitValue,
-    RestartValue,
 };
 
 #[derive(Default, Debug, PartialEq, Clone)]
@@ -18,7 +17,7 @@ pub struct BgpCap {
     pub enhanced_refresh: Option<CapEnhancedRefresh>,
     pub extended: Option<CapExtended>,
     pub extended_nexthop: Option<CapExtendedNextHop>,
-    pub restart: BTreeMap<AfiSafi, RestartValue>,
+    pub restart: Option<CapRestart>,
     pub as4: Option<CapAs4>,
     pub dynamic: Option<CapDynamic>,
     pub addpath: BTreeMap<AfiSafi, AddPathValue>,
@@ -48,11 +47,7 @@ impl BgpCap {
         if let Some(v) = &self.extended_nexthop {
             v.emit(buf, false);
         }
-        if !self.restart.is_empty() {
-            let mut v = CapRestart::default();
-            for val in self.restart.values() {
-                v.values.push(val.clone());
-            }
+        if let Some(v) = &self.restart {
             v.emit(buf, false);
         }
         if let Some(v) = &self.as4 {
@@ -112,10 +107,7 @@ impl BgpCap {
                         bgp_cap.extended_nexthop = Some(v);
                     }
                     CapabilityPacket::GracefulRestart(v) => {
-                        for restart in v.values.into_iter() {
-                            let key = AfiSafi::new(restart.afi, restart.safi);
-                            bgp_cap.restart.insert(key, restart);
-                        }
+                        bgp_cap.restart = Some(v);
                     }
                     CapabilityPacket::DynamicCapability(v) => {
                         bgp_cap.dynamic = Some(v);
@@ -183,11 +175,7 @@ impl fmt::Display for BgpCap {
         if let Some(v) = &self.extended {
             writeln!(f, " {}", v)?;
         }
-        if !self.restart.is_empty() {
-            let mut v = CapRestart::default();
-            for val in self.restart.values() {
-                v.values.push(val.clone());
-            }
+        if let Some(v) = &self.restart {
             writeln!(f, " {}", v)?;
         }
         if let Some(v) = &self.as4 {

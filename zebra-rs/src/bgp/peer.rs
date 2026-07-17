@@ -532,7 +532,6 @@ pub struct PeerConfig {
     /// [`super::neighbor_group::resolve_knob`] whenever either side
     /// changes.
     pub knobs_explicit: super::neighbor_group::InheritableKnobs,
-    pub restart: AfiSafis<RestartValue>,
     pub llgr: AfiSafis<LlgrValue>,
     pub addpath: AfiSafis<AddPathValue>,
     pub route_refresh: bool,
@@ -619,7 +618,6 @@ impl Default for PeerConfig {
             mp_explicit: BTreeMap::new(),
             nhs_explicit: BTreeMap::new(),
             knobs_explicit: Default::default(),
-            restart: AfiSafis::new(),
             llgr: AfiSafis::new(),
             addpath: AfiSafis::new(),
             route_refresh: Default::default(),
@@ -2918,9 +2916,17 @@ fn build_open_packet(peer: &mut Peer) -> BytesMut {
         bgp_cap.addpath.insert(*key, value);
     }
     for (key, sub) in peer.config.sub.iter() {
-        if let Some(_restart_time) = sub.graceful_restart {
-            let restart = RestartValue::new(1, key.afi, key.safi);
-            bgp_cap.restart.insert(*key, restart);
+        if let Some(restart_time) = sub.graceful_restart {
+            // RFC 4724 carries a single Restart Time for the whole
+            // capability; advertise the largest configured per-family
+            // value (the config callback stores an enabled marker of 1
+            // today), clamped to the 12-bit field.
+            let time = restart_time.min(0xfff) as u16;
+            let cap = bgp_cap.restart.get_or_insert_with(CapRestart::default);
+            if time > cap.flag_time.restart_time() {
+                cap.set_restart_time(time);
+            }
+            cap.entries.push(RestartEntry::new(key.afi, key.safi));
         }
         if let Some(llgr_time) = sub.llgr {
             let llgr = LlgrValue::new(key.afi, key.safi, llgr_time);
