@@ -65,6 +65,16 @@ source; **PLAUSIBLE** = mechanism is real, trigger depends on config/peer/timing
   maps ASN4 → high_type 0x02 (RFC 5668); and `inst.rs`'s reverse extcomm → RD
   mapping now sends high_type 0x02 → ASN4 so a configured 4-byte-AS RT actually
   intersects the same RT on the wire.
+
+  Follow-up (same branch): 4-byte-AS text notation reconciled with RFC 5396.
+  `FromStr` now accepts **both** asplain (`4200000000:1`, IOS-XR's default and
+  RFC 5396's recommendation) and asdot (`64086.59904:1`, IOS-XR under
+  `as-format asdot`, and the only form GoBGP emits); a dotted AS selects type 2
+  explicitly, mirroring GoBGP's `ParseRouteDistinguisher`. `Display` renders
+  asdot via the existing `asn_to_string`, so a 4-byte AS is now spelled the same
+  way in RD/RT and AS_PATH show output — previously `asn_to_string` used asdot
+  while the RD `Display` used asplain. A shared `asn_from_string` in
+  `attrs/aspath.rs` pairs with `asn_to_string`.
 - **Bug:** `RouteDistinguisherType` models only `ASN = 0` and `IP = 1` with no
   catch-all variant, so the derived `NomBE` parser errors on any other RD type.
 - **Failure scenario:** A peer advertises a VPNv4/VPNv6/EVPN/MUP route whose RD is
