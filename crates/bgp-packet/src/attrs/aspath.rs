@@ -103,6 +103,32 @@ fn parse_bgp_attr_as2_segment(input: &[u8]) -> IResult<&[u8], As2Segment> {
     Ok((input, segment))
 }
 
+impl From<As2Path> for As4Path {
+    /// Widen a 2-octet AS_PATH into the 4-octet representation the rest of the
+    /// crate works in (RFC 6793 §4.2.2), zero-extending each AS number. Segment
+    /// types and order carry over unchanged, so the hop count is identical.
+    ///
+    /// This does not recover the 4-octet AS numbers that an OLD (non-AS4) peer
+    /// replaces with AS_TRANS (23456): those live in the AS4_PATH attribute
+    /// (type 17), which this crate does not implement, so an AS_TRANS widens to
+    /// a literal 23456.
+    fn from(from: As2Path) -> Self {
+        let mut path = As4Path {
+            segs: from
+                .segs
+                .iter()
+                .map(|seg| As4Segment {
+                    typ: seg.typ,
+                    asn: seg.asn.iter().map(|asn| u32::from(*asn)).collect(),
+                })
+                .collect(),
+            length: 0,
+        };
+        path.update_length();
+        path
+    }
+}
+
 fn parse_bgp_attr_as4_segment(input: &[u8]) -> IResult<&[u8], As4Segment> {
     let (input, header) = AsSegmentHeader::parse_be(input)?;
     let (input, asns) = count(be_u32, header.length as usize).parse(input)?;
@@ -659,6 +685,37 @@ impl Default for As4Path {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Widening a 2-octet AS_PATH preserves segment types, order, ASN values
+    /// and hop count. AS_TRANS stays literal: recovering the real 4-octet AS
+    /// behind it needs AS4_PATH (type 17), which this crate does not implement.
+    #[test]
+    fn as2_path_widens_to_as4_path() {
+        let p2 = As2Path {
+            segs: vec![
+                As2Segment {
+                    typ: AS_SEQ,
+                    asn: vec![65000, AS_TRANS],
+                },
+                As2Segment {
+                    typ: AS_SET,
+                    asn: vec![100, 200],
+                },
+            ],
+            length: 0,
+        };
+        // `.into()`, not `As4Path::from`: the inherent `As4Path::from(Vec<u32>)`
+        // shadows the `From` trait's method.
+        let p4: As4Path = p2.into();
+
+        assert_eq!(p4.segs.len(), 2);
+        assert_eq!(p4.segs[0].typ, AS_SEQ);
+        assert_eq!(p4.segs[0].asn, vec![65000u32, 23456]);
+        assert_eq!(p4.segs[1].typ, AS_SET);
+        assert_eq!(p4.segs[1].asn, vec![100u32, 200]);
+        // AS_SEQ contributes one hop per ASN, AS_SET one in total.
+        assert_eq!(p4.length, 3);
+    }
 
     /// Flatten an emitted AS_PATH back into its ASN sequence.
     fn emit_and_reparse(path: &As4Path) -> (usize, Vec<u32>) {

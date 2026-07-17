@@ -407,8 +407,22 @@ pub fn parse_bgp_update_attribute(
             Attr::Origin(v) => {
                 bgp_attr.origin = Some(v);
             }
-            Attr::As2Path(_v) => {
-                // TODO.
+            Attr::As2Path(v) => {
+                // Widen the 2-octet AS_PATH into the 4-octet form the rest of
+                // the crate uses (RFC 6793 §4.2.2). Discarding it left
+                // `bgp_attr.aspath` at None, so the route would be accepted with
+                // no AS_PATH at all — no loop detection, no path-length
+                // comparison — and re-advertised without a well-known mandatory
+                // attribute.
+                //
+                // Not reachable today: `peer_packet_parse` passes a hardcoded
+                // `as4 = true`, so AS_PATH always parses as `As4Path` and this
+                // arm runs only from tests. It is wired up so that sourcing
+                // `as4` from the negotiated capability cannot silently lose
+                // AS_PATHs. Doing that properly also needs AS4_PATH (type 17)
+                // to recover the 4-octet ASNs an OLD peer hides behind
+                // AS_TRANS; neither attribute is implemented here.
+                bgp_attr.aspath = Some(v.into());
             }
             Attr::As4Path(v) => {
                 bgp_attr.aspath = Some(v);
@@ -627,6 +641,39 @@ mod tests {
             }
             other => panic!("Flowspec MP_REACH must surface as mp_update, got {other:?}"),
         }
+    }
+
+    // ---- 2-octet AS_PATH (RFC 6793 OLD-speaker encoding) --------------
+
+    /// A 2-octet AS_PATH must reach `bgp_attr.aspath`, widened to the 4-octet
+    /// form. Regression: the `Attr::As2Path` arm was an empty `// TODO`, so the
+    /// well-known mandatory AS_PATH was parsed and then silently dropped,
+    /// leaving `aspath` at None.
+    ///
+    /// Only reachable with `as4 = false`; `peer_packet_parse` hardcodes `true`
+    /// today, so this guards the wiring rather than live behaviour.
+    #[test]
+    fn as2_path_reaches_bgp_attr_widened() {
+        // ORIGIN = IGP, then AS_PATH (type 2, len 6): AS_SEQ of 65000 65001.
+        let mut block = vec![0x40, 0x01, 0x01, 0x00];
+        block.extend_from_slice(&[0x40, 0x02, 0x06, 0x02, 0x02, 0xfd, 0xe8, 0xfd, 0xe9]);
+
+        let len = block.len() as u16;
+        let (_, bgp_attr, _, _, treat_as_withdraw) =
+            parse_bgp_update_attribute(&block, len, false, None).expect("attrs must parse");
+        assert!(!treat_as_withdraw);
+
+        let aspath = bgp_attr
+            .expect("bgp_attr present")
+            .aspath
+            .expect("2-octet AS_PATH must not be dropped");
+        let flat: Vec<u32> = aspath
+            .segs
+            .iter()
+            .flat_map(|s| s.asn.iter().copied())
+            .collect();
+        assert_eq!(flat, vec![65000u32, 65001], "ASNs widened to 4 octets");
+        assert_eq!(aspath.length, 2, "hop count preserved");
     }
 
     // ---- RFC 4271 §9 unrecognized attribute handling -----------------
