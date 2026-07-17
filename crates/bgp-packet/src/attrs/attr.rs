@@ -333,7 +333,17 @@ impl Attr {
 /// tear the session down). Other attributes keep their existing
 /// (session-reset) handling.
 fn attr_malformation_is_withdraw(attr_type: AttrType) -> bool {
-    matches!(attr_type, AttrType::PrefixSid)
+    matches!(
+        attr_type,
+        // RFC 7606 §7.8: a Community attribute whose length is not a non-zero
+        // multiple of 4 is malformed and "SHALL be handled using the approach of
+        // 'treat-as-withdraw'".
+        AttrType::Community
+            // RFC 8092 §3 says the same of a Large Communities attribute whose
+            // length is not a non-zero multiple of 12.
+            | AttrType::LargeCom
+            | AttrType::PrefixSid
+    )
 }
 
 type ParsedAttributes<'a> = Result<
@@ -658,6 +668,82 @@ mod tests {
     /// treat-as-withdraw attribute — propagated the error out as a session
     /// reset. Unnamed, it is `Unknown(25)`: optional+transitive, so retained
     /// with the Partial bit and propagated.
+    #[test]
+    #[test]
+    fn community_width_violations_are_treat_as_withdraw() {
+        // RFC 7606 §7.8: a Community attribute is malformed unless its length is
+        // a non-zero multiple of 4, and a malformed one "SHALL be handled using
+        // the approach of 'treat-as-withdraw'".
+        //
+        // Regression: the `Vec<u32>` decode stopped at the last whole value and
+        // the leftover was discarded, so a 6-octet payload parsed as one
+        // community, the two stray octets vanished, and the route installed.
+        for value in [
+            vec![0x00u8, 0x01, 0x00, 0x02, 0xAA, 0xBB], // 6: one value + 2 stray
+            vec![],                                     // 0: must be non-zero
+            vec![0x00, 0x01, 0x00],                     // 3: short of one value
+        ] {
+            let mut block = ORIGIN_IGP.to_vec();
+            block.extend_from_slice(&[0xC0, 8, value.len() as u8]);
+            block.extend_from_slice(&value);
+            let len = block.len() as u16;
+
+            let (_, bgp_attr, _, _, treat_as_withdraw) =
+                parse_bgp_update_attribute(&block, len, true, None)
+                    .expect("must not reset the session");
+            assert!(
+                treat_as_withdraw,
+                "COMMUNITIES length {} must be treat-as-withdraw",
+                value.len()
+            );
+            let bgp_attr = bgp_attr.expect("bgp_attr present");
+            assert!(
+                bgp_attr.com.is_none(),
+                "the malformed attribute is discarded"
+            );
+            assert!(bgp_attr.origin.is_some(), "other attributes still parse");
+        }
+    }
+
+    /// RFC 8092 §3: the same, for a Large Communities attribute whose length is
+    /// not a non-zero multiple of 12.
+    #[test]
+    fn large_community_width_violations_are_treat_as_withdraw() {
+        for n in [14usize, 0, 11] {
+            let mut block = ORIGIN_IGP.to_vec();
+            block.extend_from_slice(&[0xC0, 32, n as u8]);
+            block.extend(std::iter::repeat_n(0u8, n));
+            let len = block.len() as u16;
+
+            let (_, bgp_attr, _, _, treat_as_withdraw) =
+                parse_bgp_update_attribute(&block, len, true, None)
+                    .expect("must not reset the session");
+            assert!(
+                treat_as_withdraw,
+                "LARGE_COMMUNITY length {n} must be treat-as-withdraw"
+            );
+            assert!(bgp_attr.expect("bgp_attr").lcom.is_none());
+        }
+    }
+
+    /// Well-formed widths still parse, so the check rejects only real
+    /// violations.
+    #[test]
+    fn well_formed_community_widths_still_parse() {
+        let mut block = ORIGIN_IGP.to_vec();
+        block.extend_from_slice(&[0xC0, 8, 8, 0x00, 0x01, 0x00, 0x02, 0xFF, 0xFF, 0xFF, 0x01]);
+        let len = block.len() as u16;
+        let (_, bgp_attr, _, _, treat_as_withdraw) =
+            parse_bgp_update_attribute(&block, len, true, None).expect("must parse");
+        assert!(!treat_as_withdraw);
+        let com = bgp_attr
+            .expect("bgp_attr")
+            .com
+            .expect("communities present");
+        assert_eq!(com.0.len(), 2);
+        assert!(com.is_no_export());
+    }
+
     #[test]
     fn ipv6_ext_community_is_passed_through_not_session_reset() {
         let mut block = ORIGIN_IGP.to_vec();

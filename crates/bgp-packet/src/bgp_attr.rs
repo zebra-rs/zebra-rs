@@ -94,7 +94,12 @@ impl BgpAttr {
         if let Some(v) = &self.aggregator {
             v.attr_emit(buf);
         }
-        if let Some(v) = &self.com {
+        // An empty set would emit a zero-length attribute, which RFC 7606 §7.8
+        // makes malformed (the length must be a *non-zero* multiple of 4) and
+        // our own parser now rejects. An emptied set means "no attribute".
+        if let Some(v) = &self.com
+            && !v.0.is_empty()
+        {
             v.attr_emit(buf);
         }
         if let Some(v) = &self.originator_id {
@@ -112,7 +117,10 @@ impl BgpAttr {
         if let Some(v) = &self.aigp {
             v.attr_emit(buf);
         }
-        if let Some(v) = &self.lcom {
+        // Likewise RFC 8092 §3: a non-zero multiple of 12.
+        if let Some(v) = &self.lcom
+            && !v.0.is_empty()
+        {
             v.attr_emit(buf);
         }
         if let Some(v) = &self.prefix_sid {
