@@ -128,6 +128,8 @@ impl As4Segment {
     }
 }
 
+/// Render an AS number in asdot notation (RFC 5396): values below 65536 in
+/// plain decimal, values at or above it as `<high16>.<low16>`.
 pub fn asn_to_string(val: u32) -> String {
     if val > 65535 {
         let hval: u32 = (val & 0xFFFF0000) >> 16;
@@ -135,6 +137,22 @@ pub fn asn_to_string(val: u32) -> String {
         hval.to_string() + "." + &lval.to_string()
     } else {
         val.to_string()
+    }
+}
+
+/// Inverse of [`asn_to_string`]: accept an AS number written in either asplain
+/// (`"65546"`) or asdot/asdot+ (`"1.10"`, `"0.65526"`) notation (RFC 5396), so
+/// text copied from a peer running either convention parses. Both dotted halves
+/// are 16-bit, so `"169031.1"` and `"1.2.3"` are rejected rather than silently
+/// truncated. Returns `None` when the text is not a valid AS number.
+pub fn asn_from_string(s: &str) -> Option<u32> {
+    match s.split_once('.') {
+        Some((high, low)) => {
+            let high: u16 = high.parse().ok()?;
+            let low: u16 = low.parse().ok()?;
+            Some(((high as u32) << 16) | low as u32)
+        }
+        None => s.parse::<u32>().ok(),
     }
 }
 
@@ -603,6 +621,38 @@ impl Default for As4Path {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// `asn_from_string` accepts both RFC 5396 notations and round-trips
+    /// `asn_to_string` (which renders asdot).
+    #[test]
+    fn asn_string_notations_round_trip() {
+        // (asplain, asdot) for the same AS.
+        let cases = [
+            (65526u32, "65526", "65526"),
+            (65546, "65546", "1.10"),
+            (65536, "65536", "1.0"),
+            (4200000000, "4200000000", "64086.59904"),
+        ];
+        for (asn, asplain, asdot) in cases {
+            assert_eq!(asn_to_string(asn), asdot, "asn_to_string({asn})");
+            assert_eq!(asn_from_string(asplain), Some(asn), "asplain {asplain}");
+            assert_eq!(asn_from_string(asdot), Some(asn), "asdot {asdot}");
+        }
+        // asdot+ spells a 2-byte AS with an explicit zero high half.
+        assert_eq!(asn_from_string("0.65526"), Some(65526));
+    }
+
+    /// Both dotted halves are 16-bit; anything wider or malformed is rejected
+    /// rather than silently truncated.
+    #[test]
+    fn asn_from_string_rejects_malformed() {
+        for s in ["169031.1", "1.65536", "1.2.3", "", ".", "1.", ".1", "abc"] {
+            assert_eq!(asn_from_string(s), None, "must reject {s:?}");
+        }
+        // u32::MAX is the largest valid asplain AS.
+        assert_eq!(asn_from_string("4294967295"), Some(u32::MAX));
+        assert_eq!(asn_from_string("4294967296"), None);
+    }
 
     #[test]
     fn parse() {
