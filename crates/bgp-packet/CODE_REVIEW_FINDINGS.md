@@ -70,11 +70,20 @@ source; **PLAUSIBLE** = mechanism is real, trigger depends on config/peer/timing
   `FromStr` now accepts **both** asplain (`4200000000:1`, IOS-XR's default and
   RFC 5396's recommendation) and asdot (`64086.59904:1`, IOS-XR under
   `as-format asdot`, and the only form GoBGP emits); a dotted AS selects type 2
-  explicitly, mirroring GoBGP's `ParseRouteDistinguisher`. `Display` renders
-  asdot via the existing `asn_to_string`, so a 4-byte AS is now spelled the same
-  way in RD/RT and AS_PATH show output — previously `asn_to_string` used asdot
-  while the RD `Display` used asplain. A shared `asn_from_string` in
-  `attrs/aspath.rs` pairs with `asn_to_string`.
+  explicitly, mirroring GoBGP's `ParseRouteDistinguisher`. A 4-byte AS is now
+  spelled the same way in RD/RT and AS_PATH show output — previously
+  `asn_to_string` used asdot while the RD `Display` used asplain. A shared
+  `asn_from_string` in `attrs/aspath.rs` pairs with `asn_to_string`.
+
+  Type-2 `Display` uses **asdot+** (always dotted), not plain asdot. In the
+  overlap where both the AS and the assigned number fit in 16 bits, the dot is
+  the only thing distinguishing type 2 from type 0, so it has to survive
+  display: plain asdot drops it below 65536, which made `0.100:1` print as
+  `100:1` and read back as type 0 — the type silently flipped. asdot+ is
+  byte-identical to asdot for any AS >= 65536 (every real 4-byte AS), and
+  matches GoBGP's `RouteDistinguisherFourOctetAS.String()`.
+  `asn_to_asdot_plus` sits beside `asn_to_string`, and
+  `display_round_trips_preserving_type` pins every type against regression.
 - **Bug:** `RouteDistinguisherType` models only `ASN = 0` and `IP = 1` with no
   catch-all variant, so the derived `NomBE` parser errors on any other RD type.
 - **Failure scenario:** A peer advertises a VPNv4/VPNv6/EVPN/MUP route whose RD is
