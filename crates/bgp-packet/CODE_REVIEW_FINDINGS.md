@@ -437,9 +437,46 @@ silently resolves to the wrong function; use `.into()`.
   into `_data` and drops them → the operator/logs never see the diagnostic. A
   `NotificationPacket` built with data and re-parsed comes back with empty data.
 
-### 11. COMMUNITIES / LARGE_COMMUNITY width not enforced — PLAUSIBLE
+### 11. COMMUNITIES / LARGE_COMMUNITY width not enforced — CONFIRMED — ✅ FIXED
 - **File:** `src/attrs/com.rs:54` (and `src/attrs/large_com.rs:68`)
 - **Category:** robustness
+- **Status:** Fixed on branch `fix-bgp-cap-unknown-header`. Upgraded to
+  CONFIRMED:
+
+  ```
+  before: COMMUNITIES len=6  -> ACCEPTED  com=Some({65538})  treat_as_withdraw=false
+          COMMUNITIES len=0  -> ACCEPTED  com=Some({})
+          LARGE_COM   len=14 -> ACCEPTED                     treat_as_withdraw=false
+  after:  all three -> treat_as_withdraw=true, attribute discarded, session up
+  ```
+
+  Both RFCs are explicit, and both were quoted rather than assumed:
+  - **RFC 7606 §7.8**: "The Community attribute SHALL be considered malformed if
+    its length is not a non-zero multiple of 4. An UPDATE message with a
+    malformed Community attribute SHALL be handled using the approach of
+    'treat-as-withdraw'."
+  - **RFC 8092 §3**: the same for a Large Communities attribute whose length is
+    not a non-zero multiple of 12.
+
+  Note **non-zero**: a zero-length attribute is malformed too, and used to parse
+  into an empty set.
+- **Detection alone would have been a regression, which is the whole point of
+  this one.** `attr_malformation_is_withdraw` listed only `PrefixSid`, so making
+  the parsers reject would have turned a silently-accepted attribute into a
+  **session reset** — exactly what both RFCs forbid. `AttrType::Community` and
+  `AttrType::LargeCom` are now in that set, so the malformed attribute is
+  discarded, the UPDATE's NLRI is withdrawn, and the session stays up.
+- **Contrast with finding 13:** there, session reset was correct because a failed
+  NLRI parse leaves the affected routes undeterminable (RFC 7606 §3(j)). Here the
+  NLRI is intact and only an attribute is malformed, so treat-as-withdraw is both
+  possible and mandated. Same detection, opposite action — which is why each
+  needed its RFC checked rather than a blanket "be strict" rule.
+- **Emit guarded too:** `BgpAttr::attr_emit` emitted whatever was in `com`/`lcom`,
+  so an emptied set would have produced a zero-length attribute — malformed by
+  the same clause, and now rejected by our own parser. That is finding 4's
+  self-inconsistency, so both sites skip an empty set.
+- **The correct pattern already existed:** `ClusterList::parse_be` enforces its
+  4-octet width with an RFC 4456 citation. Only these two didn't.
 - **Bug:** Both decode the payload as a nom `many0` of fixed-width values with no
   multiple-of-width check, and the attribute path discards the parser's leftover,
   so a non-multiple-of-4 (resp. 12) payload is accepted with trailing bytes
