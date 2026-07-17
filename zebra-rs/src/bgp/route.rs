@@ -6816,17 +6816,41 @@ pub fn route_labelv6_withdraw(
     route_advertise_to_peers_labelv6(nlri.prefix, &selected, bgp, peers);
 }
 
+/// Record one RTC membership advertised by `peer_id`.
+///
+/// Only a fully specified 96-bit prefix names an exact Route Target, and only
+/// those go in the set. The RFC 4684 §3.2 default membership (prefix length 0)
+/// asks for *every* RT, and a partial prefix constrains a range that
+/// `rtc_match`'s exact-equality set cannot express. Adding nothing for either
+/// leaves `peer.rtcv4` empty, which every filter site reads as "this peer
+/// declared no RT constraint" and advertises everything — the behaviour the
+/// default membership asks for, and the safe direction for a partial one: RTC
+/// is an optimisation, so over-advertising only costs bandwidth while
+/// under-advertising blackholes VPN routes.
+///
+/// Known gap: a peer that mixes an exact RT with a default or partial
+/// membership is still filtered to just the exact one, because "wants
+/// everything" has no representation separate from "said nothing". No
+/// implementation sends that combination, and expressing it would need a
+/// distinct flag threaded through all seven filter sites.
 pub fn route_ipv4_rtc_update(peer_id: usize, rtcv4: &Rtcv4, peers: &mut PeerMap) {
     let Some(peer) = peers.get_mut_by_idx(peer_id) else {
         return;
     };
+    if !rtcv4.is_exact() {
+        return;
+    }
     peer.rtcv4.insert(rtcv4.rt.clone());
 }
 
+/// IPv6 counterpart of [`route_ipv4_rtc_update`]; same membership semantics.
 pub fn route_ipv6_rtc_update(peer_id: usize, rtcv6: &Rtcv6, peers: &mut PeerMap) {
     let Some(peer) = peers.get_mut_by_idx(peer_id) else {
         return;
     };
+    if !rtcv6.is_exact() {
+        return;
+    }
     peer.rtcv6.insert(rtcv6.rt.clone());
 }
 
@@ -13323,11 +13347,7 @@ fn send_rtcv4_membership(peer: &mut Peer, bgp: &BgpTop) {
             // mark it as a Route Target (RFC 4360 §4, sub-type 0x02).
             let mut val: ExtCommunityValue = rt.into();
             val.low_type = 0x02;
-            updates.push(Rtcv4 {
-                id: 0,
-                asn: peer.local_as,
-                rt: val,
-            });
+            updates.push(Rtcv4::new(peer.local_as, val));
         }
     }
 
@@ -13367,11 +13387,7 @@ fn send_rtcv6_membership(peer: &mut Peer, bgp: &BgpTop) {
         for rt in rts {
             let mut val: ExtCommunityValue = rt.into();
             val.low_type = 0x02;
-            updates.push(Rtcv6 {
-                id: 0,
-                asn: peer.local_as,
-                rt: val,
-            });
+            updates.push(Rtcv6::new(peer.local_as, val));
         }
     }
 
