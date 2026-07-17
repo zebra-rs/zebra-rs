@@ -472,10 +472,42 @@ silently resolves to the wrong function; use `.into()`.
   `FlowspecNlri` mis-sorts under the `Ord` used as the BTreeMap precedence key,
   letting a crafted route shadow or reorder higher-precedence dataplane rules.
 
-### 15. UPDATE / attribute length truncated by `as u16` on emit — PLAUSIBLE
+### 15. UPDATE / attribute length truncated by `as u16` on emit — CONFIRMED — ✅ FIXED (UPDATE-level)
 - **File:** `src/update.rs:518` (also 504; MP_REACH/MP_UNREACH and BGP-LS emit
   helpers)
 - **Category:** correctness
+- **Status:** Fixed on branch `fix-bgp-cap-unknown-header`. Upgraded from
+  PLAUSIBLE to CONFIRMED — the wrap is constructible through the public API:
+
+  ```
+  serialized bytes = 70023
+  declared length  = 4487    <-- header says this many
+  ```
+
+  A frame whose header contradicts its body desynchronises the peer's framing
+  for every message after it. `From<UpdatePacket> for BytesMut` is infallible by
+  contract yet has no correct output here: the header Length is a u16 and
+  RFC 8654 caps a message at 65535 octets, so an over-long UPDATE simply has no
+  encoding. Replaced it with `UpdatePacket::try_emit()` and
+  `TryFrom<UpdatePacket> for BytesMut`, returning `UpdateEmitError::TooLong`
+  and naming which of the three lengths overflowed (withdrawn-routes,
+  total-path-attribute, message).
+
+  All 27 call sites were converted; the compiler found every one. 24 were
+  `peer.send_packet(update.into())`, so `Peer::send_update` / `SyncCtx::send_update`
+  keep them one-liners while logging and dropping an unencodable UPDATE — a
+  local batching bug, so the log is the useful part. The other three
+  (`update_group.rs`, `group_egress.rs`, `peer_egress.rs`) handle it inline.
+- **Scope deliberately limited:** only the *encodable* limit is enforced, not the
+  session's `max_packet_size`. An UPDATE between the budget and 65535 octets is
+  emitted today, and rejecting it would be a behaviour change well beyond
+  removing the silent corruption — see the deferred item below.
+- **Still open (same class, not fixed):** the attribute-level `len as u16` casts
+  in the MP_REACH/MP_UNREACH and BGP-LS emit helpers. Fixing those means making
+  the `AttrEmitter` trait fallible, which cascades much further. They are bounded
+  in practice by the callers' chunking. `pop_ipv4`/`pop_ipv4_mp_reach` keep their
+  casts and are safe by construction: both bound `buf.len()` to
+  `max_packet_size`, which never exceeds 65535.
 - **Bug:** `From<UpdatePacket> for BytesMut` writes the header length and attr-len
   as `as u16` with no cap or pagination (unlike the paginating `pop_ipv4` path), so
   an UPDATE that serializes past 65535 bytes truncates the on-wire length. The same
