@@ -461,9 +461,43 @@ silently resolves to the wrong function; use `.into()`.
   prefixes and discards the rest and any trailing bytes, instead of RFC 7606
   treat-as-withdraw → route loss and smuggled hidden bytes with no error.
 
-### 14. Flow-spec components accepted out-of-order / duplicated — PLAUSIBLE
+### 14. Flow-spec components accepted out-of-order / duplicated — CONFIRMED — ✅ FIXED
 - **File:** `src/attrs/nlri_flowspec.rs:562`
 - **Category:** robustness
+- **Status:** Fixed on branch `fix-bgp-cap-unknown-header`. Upgraded to
+  CONFIRMED — the shadowing risk is concrete. The same rule in two encodings:
+
+  ```
+  canonical [3,4] -> ACCEPTED   a = proto =6,port =80
+  reversed  [4,3] -> ACCEPTED   b = port =80,proto =6
+    a == b ?  false     <-- one rule, two BTreeMap keys
+    a.cmp(b) = Less     <-- at different precedence
+  duplicate [3,3] -> ACCEPTED
+  ```
+
+  This is load-bearing because `flow_cmp` walks the two component lists
+  *positionally* to compute RFC 8955 §5.1 precedence, and `Ord` keys the
+  BTreeMap the dataplane iterates in apply order. So a crafted encoding of an
+  existing rule occupies a second key and can sit ahead of the rule it
+  duplicates.
+- **The two halves of RFC 8955 §4.2 want different answers**, and the fix
+  reflects that rather than applying one policy to both:
+  - **Order → canonicalise.** A spec is the *conjunction* of its components, so
+    `[port, proto]` matches exactly what `[proto, port]` matches — the intent is
+    unambiguous and nothing is lost by sorting. Rejecting would drop a
+    well-meant rule, and for a filter meant to shed attack traffic, failing to
+    install is the worse failure. Sorting also makes what we re-emit compliant.
+    GoBGP normalises identically, with the same stated reason: otherwise "the
+    unordered rules are determined different" (bgp.go:4590).
+  - **Duplicate type → reject.** Genuinely ambiguous (two operator lists
+    conjoined over one field, e.g. `proto =6` and `proto =17`, which no packet
+    satisfies), so there is nothing to recover. §4.2 allows each type "exactly
+    once".
+- **Note on the contrast with finding 7:** that one rejects rather than repairs,
+  because a missing end-of-list bit makes the *framing* a guess. Here the framing
+  is unambiguous and only the canonical form differs, so repairing is safe. The
+  distinction is "is the sender's intent recoverable", not a blanket
+  strict-vs-lenient stance.
 - **Bug:** The component loop accepts components in any order and with duplicate
   types; RFC 8955 §4.1 requires strictly ascending, non-repeating component types
   and mandates treating a violation as error/withdraw.
