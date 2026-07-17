@@ -118,9 +118,41 @@ source; **PLAUSIBLE** = mechanism is real, trigger depends on config/peer/timing
   receiving peer reads a 0-length AS_SEQ then reparses the 256 ASNs as bogus
   segment headers → malformed AS_PATH → NOTIFICATION / session reset.
 
-### 4. RTC parser rejects the `plen=0` default membership it emits — CONFIRMED
+### 4. RTC parser rejects the `plen=0` default membership it emits — CONFIRMED — ✅ FIXED
 - **File:** `src/attrs/nlri_rtcv4.rs:24` (and `src/attrs/nlri_rtcv6.rs:29`)
 - **Category:** correctness
+- **Status:** Fixed on branch `fix-bgp-cap-unknown-header`, together with
+  finding 8 (below), which is the same emit/parse asymmetry in the same file.
+  Reproduced first: `plen=0` and `plen=32` both returned `Err(LengthValue)`
+  while `plen=96` parsed, and a default membership ahead of an exact RT killed
+  the whole list.
+
+  **Severity correction:** the original failure scenario was wrong. Because the
+  parse error left `updates` empty and nothing was inserted into `peer.rtcv4`,
+  and every filter site is gated on `!peer.rtcv4.is_empty()`, a received default
+  membership actually resulted in advertising *everything* — accidentally the
+  correct outcome. The real defects were (a) a default membership ahead of other
+  NLRI discarded them via `many0_complete`, and (b) partial prefixes (32..95,
+  legal per RFC 4684 §4) were rejected outright, which over-advertises when the
+  partial comes first and under-advertises when it comes later.
+
+  `parse_nlri` now accepts `0` and `32..=96`, consuming exactly `ceil(plen/8)`
+  octets, and records `plen`; `rt` is only populated for a full 96-bit prefix
+  (mirroring GoBGP, which leaves `RouteTarget` nil below 96). v4 and v6 now
+  share one `parse_rtc_membership`/`emit_rtc_membership` pair, since the NLRI is
+  byte-identical across families.
+
+  Consumer guarded against regression: `route_ipv4_rtc_update` inserts only
+  fully specified (`is_exact()`) RTs. Naively inserting a default membership's
+  zero RT would have made the set non-empty and flipped us from advertising
+  everything to advertising **nothing**. Failing open is the safe direction —
+  RTC is an optimisation, so over-advertising costs bandwidth while
+  under-advertising blackholes VPN routes.
+- **Known gap (documented in code, not fixed):** a peer mixing an exact RT with
+  a default or partial membership is still filtered to the exact one, because
+  "wants everything" has no representation distinct from "said nothing".
+  Expressing it needs a flag threaded through all seven filter sites; no
+  implementation sends that combination.
 - **Bug:** `Rtcv4::parse_nlri` rejects any `plen != 96`, including the RFC 4684
   default membership `plen=0` that `Rtcv4Reach::emit` itself produces (line 69).
 - **Failure scenario:** `send_rtcv4_membership` / `send_rtcv6_membership` emit the
@@ -172,9 +204,14 @@ source; **PLAUSIBLE** = mechanism is real, trigger depends on config/peer/timing
   matches different traffic than intended (potential filter bypass). Bounded by
   the NLRI length so no over-read.
 
-### 8. RTC withdraw emitter omits prefix-length and origin-AS — CONFIRMED (latent)
+### 8. RTC withdraw emitter omits prefix-length and origin-AS — CONFIRMED (latent) — ✅ FIXED
 - **File:** `src/attrs/nlri_rtcv4.rs:116` (and `src/attrs/nlri_rtcv6.rs:121`)
 - **Category:** correctness
+- **Status:** Fixed alongside finding 4 (same file, same emit/parse asymmetry).
+  Both Unreach emitters now call the shared `emit_rtc_membership`, so a withdraw
+  is encoded exactly as the parser reads it. No behaviour change today — the
+  path stays dormant until a non-empty RTC withdraw is wired — but the hand-
+  rolled encoder could not be left beside the shared one.
 - **Bug:** `Rtcv4Unreach::emit` writes only the 8-byte Route Target per withdraw,
   omitting the `plen(96)` and 4-byte origin-AS that `Rtcv4::parse_nlri` requires;
   the comment even mislabels the RT as "RD".
