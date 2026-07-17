@@ -299,9 +299,42 @@ silently resolves to the wrong function; use `.into()`.
   inconsistent with the 20-octet layout `new()` writes, so the value renders as
   garbage.
 
-### 7. Flow-spec op-list overruns into the next component — PLAUSIBLE
+### 7. Flow-spec op-list overruns into the next component — PLAUSIBLE — ✅ FIXED (as far as the encoding allows)
 - **File:** `src/attrs/nlri_flowspec.rs:168`
 - **Category:** correctness
+- **Status:** Fixed on branch `fix-bgp-cap-unknown-header`. The comment was
+  indeed false: `FlowspecNlri::parse` hands `parse_component` (and so
+  `parse_op_list`) the **whole remaining NLRI value**, not a per-component
+  slice, so "the component slice is exhausted, so a missing end bit can't run
+  into the next component" claimed a guarantee that does not exist. There is no
+  per-component length anywhere in the flow-spec encoding — the end-of-list bit
+  is the only delimiter.
+
+  Split the problem in two. **Detectable:** a term list reaching the end of the
+  NLRI without ever setting the end bit. RFC 8955 §4.2 makes the bit mandatory
+  on the final term, and `parse_op_list` also terminated on exhaustion, so such
+  a list was silently accepted. Reproduced:
+
+  ```
+  [03 03 01 06]  (op 0x01, no end bit) -> ACCEPTED, parsed "proto =6"
+  re-emit        [03 03 81 06]          -> end bit silently added
+  ```
+
+  Because `emit_op_list` re-derives the bit from position, a route reflector
+  would propagate octets it never received. Now rejected, matching GoBGP, whose
+  `FlowSpecComponent` decoder only ever breaks on the end bit and errors when
+  the data runs out without it. **Undetectable:** a list missing the bit
+  mid-NLRI whose stolen octets happen to decode as further terms, one of which
+  sets the bit. No parser can tell — the components silently mis-frame. This is
+  inherent to the encoding and is now documented rather than wrongly claimed
+  impossible.
+- **Trade-off accepted:** strictness rejects an NLRI that the lenient path
+  recovered the correct meaning from (the end-of-NLRI case above), and finding
+  13's `many0_complete` then silently drops it *and every NLRI after it*. That
+  is the right layering — the parser reports malformed input; the caller's
+  RFC 7606 handling is separately broken — but it means finding 13 makes this
+  bite harder than it should. Accepting octets the RFC forbids is the wrong
+  default for a filter that decides which traffic gets dropped.
 - **Bug:** `parse_op_list` is given the entire remaining NLRI value with no
   per-component length delimiter, relying solely on the end-of-list bit. A
   component whose op-list omits that bit consumes the following components' bytes.
