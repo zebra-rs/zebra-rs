@@ -3,7 +3,7 @@ use std::fmt;
 use std::net::Ipv4Addr;
 use std::str::FromStr;
 
-use super::{asn_from_string, asn_to_string};
+use super::{asn_from_string, asn_to_asdot_plus};
 
 #[allow(clippy::upper_case_acronyms)]
 #[repr(u16)]
@@ -114,14 +114,18 @@ impl fmt::Display for RouteDistinguisher {
                 write!(f, "{ip}:{val}")
             }
             RouteDistinguisherType::ASN4 => {
-                // asdot, matching `asn_to_string`'s AS_PATH rendering so the
-                // same 4-byte AS is spelled identically everywhere in show
-                // output. A type-2 AS below 65536 therefore prints undotted and
-                // reads back as type 0 — the text form is inherently ambiguous,
-                // while the wire parse preserves `typ` exactly.
+                // asdot+ (always dotted), not asdot: in the overlap where both
+                // the AS and the assigned number fit in 16 bits, the dot is the
+                // only thing distinguishing this from a type-0 RD, so it has to
+                // survive display. Plain asdot drops it below 65536, which made
+                // `0.100:1` print as `100:1` and read back as type 0 — the type
+                // silently flipped. For any AS >= 65536 (every real 4-byte AS)
+                // this is byte-identical to asdot, so it stays consistent with
+                // `asn_to_string`'s AS_PATH rendering. Matches GoBGP's
+                // `RouteDistinguisherFourOctetAS.String()`.
                 let asn = u32::from_be_bytes([self.val[0], self.val[1], self.val[2], self.val[3]]);
                 let val = u16::from_be_bytes([self.val[4], self.val[5]]);
-                write!(f, "{}:{}", asn_to_string(asn), val)
+                write!(f, "{}:{}", asn_to_asdot_plus(asn), val)
             }
         }
     }
@@ -201,11 +205,37 @@ mod tests {
 
     /// The dot makes the 4-octet-AS form explicit, so asdot selects type 2 even
     /// when the AS would fit in 16 bits — the only way to spell such an RD.
+    /// Regression: `Display` used plain asdot, which dropped the dot below
+    /// 65536, so this printed as `100:1` and read back as type 0 — the type
+    /// silently flipped. Type 2 is now always dotted (asdot+).
     #[test]
     fn asdot_selects_type2_even_for_small_as() {
         let rd = RouteDistinguisher::from_str("0.100:1").unwrap();
         assert_eq!(rd.typ, RouteDistinguisherType::ASN4);
         assert_eq!(rd.val, [0x00, 0x00, 0x00, 0x64, 0x00, 0x01]);
+        assert_eq!(rd.to_string(), "0.100:1", "type 2 must stay dotted");
+    }
+
+    /// Every RD type survives a display → parse round-trip with its `typ`
+    /// intact: the dot is what tells type 2 from type 0 in the overlap where
+    /// both the AS and the assigned number fit in 16 bits.
+    #[test]
+    fn display_round_trips_preserving_type() {
+        let cases = [
+            "65000:3",        // type 0, ambiguous overlap
+            "65000:70000",    // type 0, forced by the 4-byte number
+            "1.4464:3",       // type 2, AS 70000
+            "64086.59904:1",  // type 2, AS 4200000000
+            "0.100:1",        // type 2, AS that would fit in 16 bits
+            "192.168.1.2:51", // type 1
+        ];
+        for s in cases {
+            let rd = RouteDistinguisher::from_str(s).unwrap();
+            assert_eq!(rd.to_string(), s, "display must reproduce {s}");
+            let again = RouteDistinguisher::from_str(&rd.to_string()).unwrap();
+            assert_eq!(again.typ, rd.typ, "typ must survive round-trip of {s}");
+            assert_eq!(again.val, rd.val, "val must survive round-trip of {s}");
+        }
     }
 
     /// An IPv4 RD must not be mistaken for asdot, and a malformed asdot half

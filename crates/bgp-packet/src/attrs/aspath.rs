@@ -140,6 +140,18 @@ pub fn asn_to_string(val: u32) -> String {
     }
 }
 
+/// Render an AS number in asdot+ notation (RFC 5396): always `<high16>.<low16>`,
+/// including below 65536, where it yields `0.65526` rather than `65526`.
+///
+/// Prefer [`asn_to_string`] (asdot) for display. This form exists for callers
+/// where the dot itself carries meaning rather than being cosmetic — a type-2
+/// Route Distinguisher, where the dot is what separates the 4-octet-AS encoding
+/// from the 2-octet one in the overlap where both the AS and the assigned number
+/// fit in 16 bits. Identical to asdot for any AS >= 65536.
+pub fn asn_to_asdot_plus(val: u32) -> String {
+    format!("{}.{}", val >> 16, val & 0xFFFF)
+}
+
 /// Inverse of [`asn_to_string`]: accept an AS number written in either asplain
 /// (`"65546"`) or asdot/asdot+ (`"1.10"`, `"0.65526"`) notation (RFC 5396), so
 /// text copied from a peer running either convention parses. Both dotted halves
@@ -640,6 +652,30 @@ mod tests {
         }
         // asdot+ spells a 2-byte AS with an explicit zero high half.
         assert_eq!(asn_from_string("0.65526"), Some(65526));
+    }
+
+    /// asdot+ always dots, including below 65536 where asdot does not, and
+    /// agrees with asdot everywhere at/above it. `asn_from_string` reads both.
+    #[test]
+    fn asdot_plus_always_dots_and_round_trips() {
+        let cases = [
+            (100u32, "0.100"),
+            (65526, "0.65526"),
+            (65536, "1.0"),
+            (65546, "1.10"),
+            (4200000000, "64086.59904"),
+        ];
+        for (asn, asdot_plus) in cases {
+            assert_eq!(asn_to_asdot_plus(asn), asdot_plus, "asdot+ of {asn}");
+            assert_eq!(asn_from_string(asdot_plus), Some(asn), "parse {asdot_plus}");
+        }
+        // At or above 65536 asdot+ and asdot are the same string.
+        for asn in [65536u32, 65546, 4200000000] {
+            assert_eq!(asn_to_asdot_plus(asn), asn_to_string(asn), "asn {asn}");
+        }
+        // Below 65536 they differ: that dot is what marks a type-2 RD.
+        assert_eq!(asn_to_string(100), "100");
+        assert_eq!(asn_to_asdot_plus(100), "0.100");
     }
 
     /// Both dotted halves are 16-bit; anything wider or malformed is rejected
