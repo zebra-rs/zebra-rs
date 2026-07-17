@@ -365,9 +365,30 @@ silently resolves to the wrong function; use `.into()`.
   loop does not execute yet — but it is wrong the moment a real RTC withdraw is
   wired.
 
-### 9. SR-MPLS Binding SID flags dropped on re-emit — PLAUSIBLE
+### 9. SR-MPLS Binding SID flags dropped on re-emit — CONFIRMED — ✅ FIXED
 - **File:** `src/attrs/srpolicy.rs:267` (emit at 478)
 - **Category:** correctness
+- **Status:** Fixed on branch `fix-bgp-cap-unknown-header`. Not an oversight but
+  a *documented* limitation — the type's own doc said "The S/I flags are not
+  modelled in v1; they are emitted as zero" — and `emit_binding_sid` opened with
+  `vec![0u8, 0u8] // Flags, RESERVED`. So a reflector silently turned
+  Specified-BSID-Only and Drop-Upon-Invalid **off** on every policy it passed on.
+  Every pre-existing test used Flags=0, which is why the `round_trip` helper
+  never caught it.
+- **The correct pattern was 15 lines away:** `parse_srv6_binding_sid` /
+  `emit_srv6_binding_sid` (sub-TLV 20) already keep `flags: v[0]` and re-emit
+  them. Only the plain Binding SID (sub-TLV 13) dropped them — the same
+  neighbouring-arm inconsistency as finding 12's Type-2 vs Type-3.
+- **`BindingSid` became `{ flags: u8, value: BindingSidValue }`**, mirroring
+  `Srv6BindingSid`'s shape, with `specified_bsid_only()` / `drop_upon_invalid()`
+  accessors and named `BSID_FLAG_S` / `BSID_FLAG_I` constants.
+- **Verbatim preservation would have been wrong**, which is why the RFC was worth
+  reading rather than assuming. RFC 9830 §2.4.2 defines S (bit 0,
+  Specified-BSID-Only, RFC 9256 §6.2.3) and I (bit 1, Drop-Upon-Invalid,
+  RFC 9256 §8.2), and says the unassigned bits "MUST be set to zero upon
+  transmission and MUST be ignored upon receipt". So unassigned bits are masked
+  off in **both** directions — carrying them through would violate the
+  transmission MUST — while the two assigned bits survive the round trip.
 - **Bug:** `parse_binding_sid` keeps only the 20-bit label from an SR-MPLS Binding
   SID and discards the flag octet (S/I flags); `emit_binding_sid` re-emits
   `Flags=0`.
