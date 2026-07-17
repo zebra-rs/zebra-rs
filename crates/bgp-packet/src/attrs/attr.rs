@@ -661,14 +661,9 @@ mod tests {
         }
     }
 
-    /// An RFC 5701 IPv6 Address Specific Extended Community (type 25) must not
-    /// tear the session down. Regression: `AttrType` named the code without an
-    /// `Attr` variant to select, so it skipped the RFC 4271 §9 handling, failed
-    /// the derived Switch in `parse_attr_value`, and — not being a
-    /// treat-as-withdraw attribute — propagated the error out as a session
-    /// reset. Unnamed, it is `Unknown(25)`: optional+transitive, so retained
-    /// with the Partial bit and propagated.
-    #[test]
+    /// A Community attribute whose length is not a non-zero multiple of 4 is
+    /// malformed, and RFC 7606 §7.8 requires treat-as-withdraw rather than a
+    /// session reset.
     #[test]
     fn community_width_violations_are_treat_as_withdraw() {
         // RFC 7606 §7.8: a Community attribute is malformed unless its length is
@@ -744,6 +739,13 @@ mod tests {
         assert!(com.is_no_export());
     }
 
+    /// An RFC 5701 IPv6 Address Specific Extended Community (type 25) must not
+    /// tear the session down. Regression: `AttrType` named the code without an
+    /// `Attr` variant to select, so it skipped the RFC 4271 §9 handling, failed
+    /// the derived Switch in `parse_attr_value`, and — not being a
+    /// treat-as-withdraw attribute — propagated the error out as a session
+    /// reset. Unnamed, it is `Unknown(25)`: optional+transitive, so retained
+    /// with the Partial bit and propagated.
     #[test]
     fn ipv6_ext_community_is_passed_through_not_session_reset() {
         let mut block = ORIGIN_IGP.to_vec();

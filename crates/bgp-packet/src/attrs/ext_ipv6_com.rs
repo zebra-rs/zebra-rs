@@ -90,6 +90,47 @@ impl fmt::Display for ExtIpv6Community {
     }
 }
 
+impl FromStr for ExtIpv6Community {
+    type Err = ();
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        let mut ecom = ExtIpv6Community::default();
+        // Return the declared `Err(())` rather than panicking: the tokenizer
+        // rejects an unknown keyword, an unexpected character or a malformed
+        // address, all of which are reachable from operator input. `ExtCommunity`
+        // already handles the same call this way.
+        let tokens = tokenizer(String::from(s)).map_err(|_| ())?;
+        let mut state = State::Unspec;
+
+        for token in tokens.into_iter() {
+            match token {
+                Token::Rd(rd, num) => {
+                    let mut val = ExtIpv6CommunityValue::new(rd, num);
+                    match state {
+                        State::Unspec => {
+                            return Err(());
+                        }
+                        State::Rt => {
+                            val.low_type = 0x02;
+                        }
+                        State::Soo => {
+                            val.low_type = 0x03;
+                        }
+                    }
+                    ecom.0.push(val);
+                }
+                Token::Rt => {
+                    state = State::Rt;
+                }
+                Token::Soo => {
+                    state = State::Soo;
+                }
+            }
+        }
+        Ok(ecom)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -165,46 +206,5 @@ mod tests {
         // distinction from the malformed cases above is deliberate.
         let ecom: ExtIpv6Community = "rt".parse().expect("bare keyword is not an error");
         assert!(ecom.0.is_empty());
-    }
-}
-
-impl FromStr for ExtIpv6Community {
-    type Err = ();
-
-    fn from_str(s: &str) -> Result<Self, Self::Err> {
-        let mut ecom = ExtIpv6Community::default();
-        // Return the declared `Err(())` rather than panicking: the tokenizer
-        // rejects an unknown keyword, an unexpected character or a malformed
-        // address, all of which are reachable from operator input. `ExtCommunity`
-        // already handles the same call this way.
-        let tokens = tokenizer(String::from(s)).map_err(|_| ())?;
-        let mut state = State::Unspec;
-
-        for token in tokens.into_iter() {
-            match token {
-                Token::Rd(rd, num) => {
-                    let mut val = ExtIpv6CommunityValue::new(rd, num);
-                    match state {
-                        State::Unspec => {
-                            return Err(());
-                        }
-                        State::Rt => {
-                            val.low_type = 0x02;
-                        }
-                        State::Soo => {
-                            val.low_type = 0x03;
-                        }
-                    }
-                    ecom.0.push(val);
-                }
-                Token::Rt => {
-                    state = State::Rt;
-                }
-                Token::Soo => {
-                    state = State::Soo;
-                }
-            }
-        }
-        Ok(ecom)
     }
 }
