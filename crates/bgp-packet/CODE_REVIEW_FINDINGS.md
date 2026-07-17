@@ -164,9 +164,35 @@ source; **PLAUSIBLE** = mechanism is real, trigger depends on config/peer/timing
   encoder produces packets our own parser rejects; partial-length (1..95) RTC
   prefixes are rejected too.
 
-### 5. Non-AS4 peer's AS_PATH silently discarded — CONFIRMED
+### 5. Non-AS4 peer's AS_PATH silently discarded — ⚠️ NOT REACHABLE (verdict corrected) — ✅ arm fixed anyway
 - **File:** `src/attrs/attr.rs:410`
 - **Category:** correctness
+- **Status / verdict correction:** The code defect is real — the arm was an empty
+  `// TODO` that dropped a parsed AS_PATH — but the **stated failure scenario
+  cannot happen**, and the CONFIRMED verdict was wrong. `peer_packet_parse`
+  (`zebra-rs/src/bgp/peer.rs:2459`) calls `BgpPacket::parse_packet(rx, true, ..)`
+  with `as4` **hardcoded to `true`**, never sourced from capability negotiation.
+  `peer.as4` exists but is set `true` at construction and never assigned. So
+  AS_PATH always parses as `As4Path`, `Attr::As2Path` is never constructed at
+  runtime (only tests pass `as4=false`), and `Attr::emit` has no `As2Path` arm
+  either. No route has ever lost its AS_PATH this way.
+
+  Fixed regardless, as trap removal: `Attr::As2Path` now widens into `As4Path`
+  via a new `From<As2Path> for As4Path` (RFC 6793 §4.2.2, zero-extending each
+  ASN, hop count preserved). Wiring `as4` to the negotiated capability would
+  otherwise have silently started dropping AS_PATHs. Zero runtime behaviour
+  change today.
+- **The real latent bug this exposed (NOT fixed, worth its own entry):** `as4` is
+  hardcoded `true`, so a genuine OLD (non-AS4) peer's 2-octet AS_PATH would be
+  misparsed as 4-octet — reading a segment count and then overrunning the
+  attribute. Fixing that properly is an RFC 6793 feature, not a bug fix: it needs
+  `as4` driven by the negotiated capability *plus* AS4_PATH (type 17) and
+  AS4_AGGREGATOR (type 18) to recover the 4-octet ASNs an OLD peer hides behind
+  AS_TRANS (23456). Neither attribute exists in `AttrType`. Until then the
+  widening keeps AS_TRANS literal.
+- **Also noted:** `As4Path` has an inherent `pub fn from(asn: Vec<u32>)`
+  (`aspath.rs:452`) that shadows `From::from`, so `As4Path::from(as2_path)`
+  silently resolves to the wrong function and callers must use `.into()`.
 - **Bug:** The `Attr::As2Path(_v) => { // TODO }` arm drops a parsed 2-octet
   AS_PATH, leaving `bgp_attr.aspath = None`.
 - **Failure scenario:** A legacy peer that did not negotiate the AS4 capability
