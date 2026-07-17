@@ -583,6 +583,41 @@ impl FlowspecNlri {
             components.push(comp);
             value = next;
         }
+
+        // RFC 8955 §4.2: "Components MUST follow strict type ordering by
+        // increasing numerical order. A given component type MAY (exactly once)
+        // be present ... If present, it MUST precede any component of higher
+        // numeric type value." The two halves of that rule want different
+        // answers.
+        //
+        // A repeated type is genuinely ambiguous — two operator lists conjoined
+        // over one field, e.g. `proto =6` and `proto =17`, which no packet
+        // satisfies — so there is nothing to recover and it is rejected.
+        let mut seen: Vec<u8> = Vec::with_capacity(components.len());
+        for c in components.iter() {
+            let typ = c.component_type();
+            if seen.contains(&typ) {
+                return Err(nom::Err::Error(make_error(value, ErrorKind::Verify)));
+            }
+            seen.push(typ);
+        }
+
+        // Order, by contrast, carries no meaning: a spec is the conjunction of
+        // its components, so [port, proto] matches exactly what [proto, port]
+        // matches. Canonicalise rather than reject — dropping a rule whose
+        // intent is unambiguous is the worse failure for a filter meant to shed
+        // attack traffic, and sorting makes what we re-emit RFC-compliant.
+        // GoBGP normalises here too, for the same stated reason: otherwise "the
+        // unordered rules are determined different".
+        //
+        // This is load-bearing, not cosmetic. `flow_cmp` walks the two lists
+        // positionally to compute §5.1 precedence, and `Ord` keys the BTreeMap
+        // the dataplane iterates in apply order. Left unsorted,
+        // [proto=6, port=80] and [port=80, proto=6] — one rule — compare unequal
+        // and occupy two keys at different precedence, so a crafted encoding can
+        // sit ahead of the rule it duplicates.
+        components.sort_by_key(|c| c.component_type());
+
         Ok((
             rest,
             FlowspecNlri {
@@ -804,6 +839,53 @@ mod tests {
         let (rest, parsed) = FlowspecNlri::parse(&buf, nlri.id != 0, nlri.afi).expect("must parse");
         assert!(rest.is_empty(), "trailing bytes after parse");
         assert_eq!(&parsed, nlri);
+    }
+
+    /// Component order carries no meaning — a spec is the conjunction of its
+    /// components — so a non-ascending encoding is canonicalised rather than
+    /// rejected, as GoBGP also does. Only the canonical form may reach `Ord`,
+    /// which keys the BTreeMap the dataplane iterates.
+    #[test]
+    fn component_order_is_canonicalised_not_trusted() {
+        // The same rule (IP protocol 6 AND port 80) in both encodings: the
+        // RFC 8955 §4.2 ascending order, and the reverse.
+        let canonical = [0x06u8, 0x03, 0x81, 0x06, 0x04, 0x81, 0x50];
+        let reversed = [0x06u8, 0x04, 0x81, 0x50, 0x03, 0x81, 0x06];
+
+        let (_, a) = FlowspecNlri::parse(&canonical, false, Afi::Ip).expect("must parse");
+        let (_, b) = FlowspecNlri::parse(&reversed, false, Afi::Ip).expect("must parse");
+
+        // Regression: parsed as given, these were unequal and compared `Less`,
+        // so one rule occupied two BTreeMap keys at different precedence and a
+        // crafted encoding could sit ahead of the rule it duplicates.
+        assert_eq!(a, b, "one rule must yield one key whatever the wire order");
+        assert_eq!(a.cmp(&b), Ordering::Equal, "and one precedence");
+        assert_eq!(
+            b.components
+                .iter()
+                .map(|c| c.component_type())
+                .collect::<Vec<_>>(),
+            vec![3, 4],
+            "components canonicalised into ascending type order"
+        );
+
+        // Re-emitting the normalised spec produces the RFC-compliant ordering.
+        let mut buf = BytesMut::new();
+        b.nlri_emit(&mut buf);
+        assert_eq!(&buf[..], &canonical[..]);
+    }
+
+    /// RFC 8955 §4.2 allows each component type "exactly once". A repeat is
+    /// ambiguous — two operator lists conjoined over one field — so unlike
+    /// ordering there is nothing to canonicalise.
+    #[test]
+    fn duplicate_component_type_is_rejected() {
+        // [type 3 proto =6][type 3 proto =17]
+        let dup = [0x06u8, 0x03, 0x81, 0x06, 0x03, 0x81, 0x11];
+        assert!(
+            FlowspecNlri::parse(&dup, false, Afi::Ip).is_err(),
+            "a repeated component type is malformed"
+        );
     }
 
     /// RFC 8955 §4.2 makes the end-of-list bit mandatory on the final term.
