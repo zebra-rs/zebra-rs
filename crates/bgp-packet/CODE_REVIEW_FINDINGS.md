@@ -30,6 +30,56 @@ source; **PLAUSIBLE** = mechanism is real, trigger depends on config/peer/timing
 
 ---
 
+## Deferred work
+
+### Drive `as4` from capability negotiation (RFC 6793) — AGREED, DEFERRED
+
+**Decision:** agreed to do this, deliberately not now. Recorded here so the
+context found while fixing finding 5 is not lost.
+
+**What is wrong today.** `peer_packet_parse`
+(`zebra-rs/src/bgp/peer.rs:2459`) calls
+`BgpPacket::parse_packet(rx, true, Some(opt.clone()))` — the `as4` argument is a
+hardcoded `true`, never sourced from what the peer actually negotiated.
+`Peer::as4` (`peer.rs:909`) exists but is set `true` at construction
+(`peer.rs:1120`) and never assigned anywhere. So zebra-rs always decodes AS_PATH
+as 4-octet, whatever the peer advertised.
+
+**Consequence.** A genuine OLD (non-AS4) speaker sends 2-octet AS_PATHs per
+RFC 6793. zebra-rs would read the segment header and then consume 4 octets per
+ASN, overrunning the attribute — a misparse, not a clean rejection. Rare in
+practice (AS4 is effectively universal), which is why this is deferred rather
+than urgent.
+
+**Why it is a feature, not a one-line change.** Setting `as4 = false` for such a
+peer is necessary but *not sufficient*, and on its own would lose information:
+
+1. `as4` must come from the negotiated capability, per peer/connection — the
+   value has to reach `peer_packet_parse`, which currently has no peer context
+   at that call site.
+2. **AS4_PATH (type 17)** and **AS4_AGGREGATOR (type 18)** must be implemented.
+   Neither exists in `AttrType` (`attrs/attr.rs:14`) today. An OLD peer puts
+   AS_TRANS (23456) in the 2-octet AS_PATH as a placeholder and carries the real
+   4-octet ASNs in AS4_PATH; without it the true AS numbers are unrecoverable.
+3. The RFC 6793 §4.2.3 **merge algorithm** (reconcile AS_PATH with AS4_PATH,
+   preferring AS_PATH's hop count) must be implemented.
+4. The **emit** side needs the mirror: `Attr::emit` has no `As2Path` arm, so
+   advertising a 2-octet AS_PATH (with AS_TRANS substitution) to an OLD peer is
+   also unimplemented.
+
+**Already in place.** `From<As2Path> for As4Path` (`attrs/aspath.rs`) and the
+`Attr::As2Path` arm (`attrs/attr.rs`) now widen a 2-octet AS_PATH into the
+4-octet form instead of dropping it, so step 1 above cannot silently lose
+AS_PATHs the moment `as4` starts varying. `AS_TRANS` is already defined
+(`aspath.rs:21`, currently `#[allow(dead_code)]`). Widening keeps AS_TRANS
+literal until AS4_PATH lands.
+
+**Trap to remember.** `As4Path` has an inherent `pub fn from(asn: Vec<u32>)`
+(`aspath.rs:452`) that shadows `From::from`, so `As4Path::from(as2_path)`
+silently resolves to the wrong function; use `.into()`.
+
+---
+
 ## Findings (ranked)
 
 ### 1. Unknown capability with a 0/1-octet body breaks session establishment — CONFIRMED — ✅ FIXED
@@ -182,14 +232,13 @@ source; **PLAUSIBLE** = mechanism is real, trigger depends on config/peer/timing
   ASN, hop count preserved). Wiring `as4` to the negotiated capability would
   otherwise have silently started dropping AS_PATHs. Zero runtime behaviour
   change today.
-- **The real latent bug this exposed (NOT fixed, worth its own entry):** `as4` is
-  hardcoded `true`, so a genuine OLD (non-AS4) peer's 2-octet AS_PATH would be
-  misparsed as 4-octet — reading a segment count and then overrunning the
-  attribute. Fixing that properly is an RFC 6793 feature, not a bug fix: it needs
-  `as4` driven by the negotiated capability *plus* AS4_PATH (type 17) and
-  AS4_AGGREGATOR (type 18) to recover the 4-octet ASNs an OLD peer hides behind
-  AS_TRANS (23456). Neither attribute exists in `AttrType`. Until then the
-  widening keeps AS_TRANS literal.
+- **The real latent bug this exposed — agreed and deferred:** `as4` is hardcoded
+  `true`, so a genuine OLD (non-AS4) peer's 2-octet AS_PATH would be misparsed as
+  4-octet. Driving `as4` from capability negotiation is agreed as future work;
+  see **[Deferred work → Drive `as4` from capability negotiation
+  (RFC 6793)](#drive-as4-from-capability-negotiation-rfc-6793--agreed-deferred)**
+  at the top of this document for the full scope (AS4_PATH type 17,
+  AS4_AGGREGATOR type 18, the §4.2.3 merge, and the emit side).
 - **Also noted:** `As4Path` has an inherent `pub fn from(asn: Vec<u32>)`
   (`aspath.rs:452`) that shadows `From::from`, so `As4Path::from(as2_path)`
   silently resolves to the wrong function and callers must use `.into()`.
