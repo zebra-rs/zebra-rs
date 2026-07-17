@@ -377,9 +377,36 @@ silently resolves to the wrong function; use `.into()`.
   Not part of the preserved-verbatim unknown-TLV passthrough, so the loss is
   uncaught.
 
-### 10. Received NOTIFICATION data is always discarded — CONFIRMED
+### 10. Received NOTIFICATION data is always discarded — CONFIRMED — ✅ FIXED
 - **File:** `src/notification.rs:450` (field at line 15)
 - **Category:** correctness
+- **Status:** Fixed on branch `fix-bgp-cap-unknown-header`. `parse_packet` now
+  assigns the octets it reads to `packet.data` instead of a discarded binding.
+
+  Populating the field alone would have been invisible, and the finding's point
+  is that the operator never learns *why* the peer tore the session down. Nothing
+  in zebra-rs read `.data`; `Display` rendered only Code and Sub Code; and the
+  one `tracing::info!("{p}")` on the receive path was **commented out**, with
+  `fsm_bgp_notification` logging only its Bad-Peer-AS special case. So the fix
+  spans three layers:
+  1. `parse_packet` keeps the Data field.
+  2. `NotificationPacket::shutdown_communication()` decodes the RFC 9003
+     Shutdown Communication and `Display` renders it, falling back to a hex dump
+     for Data with no subcode-specific decoder (RFC 4486 Maximum Prefixes'
+     AFI/SAFI and count, or the offending octets of a rejected attribute) rather
+     than dropping it again.
+  3. `fsm_bgp_notification` logs every received NOTIFICATION with its code,
+     sub-code name, and any shutdown communication.
+- **RFC 9003 conformance** (checked against the RFC, not assumed): the Data is a
+  1-octet length then that many octets of UTF-8, carried only by Cease subcodes
+  **2** (Administrative Shutdown) and **4** (Administrative Reset); RFC 9003
+  raised the cap from RFC 8203's 128 to 255, so any length fits the octet. §4
+  says a receiver finding invalid UTF-8 SHOULD log it and MUST NOT interpret the
+  malformed sequence, but must **not** reject the NOTIFICATION — so decoding is
+  lossy, a length disagreeing with the octets present is left uninterpreted, and
+  the packet still parses with its Data shown raw.
+- **Also fixed in passing:** `Display` used `writeln!(..).unwrap()`, which would
+  panic on a formatter error; now `?`.
 - **Bug:** `NotificationPacket.data` is `#[nom(Ignore)]`, so the derived parse
   leaves it empty, and `parse_packet` reads the data bytes into a discarded
   `_data`. `packet.data` is always empty after parse.
