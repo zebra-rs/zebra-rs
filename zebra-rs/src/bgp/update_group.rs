@@ -1307,7 +1307,14 @@ fn encode_ipv6_update(
             nhop,
             updates: nlri_chunk.to_vec(),
         });
-        out.push(update.into());
+        // The chunking above keeps each PDU inside the budget, so a length
+        // overflow here would mean the reserve no longer covers the attributes.
+        // Drop that chunk rather than emit a frame whose header contradicts its
+        // body.
+        match update.try_emit() {
+            Ok(bytes) => out.push(bytes),
+            Err(e) => tracing::warn!("dropping IPv6 UPDATE chunk: {}", e),
+        }
     }
     out
 }

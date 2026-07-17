@@ -7,9 +7,9 @@ use nom::number::complete::be_u16;
 use nom_derive::*;
 
 use crate::{
-    Afi, AttrFlags, AttrType, BGP_HEADER_LEN, BGP_PACKET_LEN, BgpAttr, BgpHeader, BgpParseError,
-    BgpType, Ipv4Nlri, MpReachAttr, MpUnreachAttr, ParseOption, Safi, nlri_psize,
-    parse_bgp_nlri_ipv4, parse_bgp_update_attribute,
+    Afi, AttrFlags, AttrType, BGP_EXTENDED_PACKET_LEN, BGP_HEADER_LEN, BGP_PACKET_LEN, BgpAttr,
+    BgpHeader, BgpParseError, BgpType, Ipv4Nlri, MpReachAttr, MpUnreachAttr, ParseOption, Safi,
+    nlri_psize, parse_bgp_nlri_ipv4, parse_bgp_update_attribute,
 };
 
 /// IPv6 next-hop that an RFC 8950 IPv4-over-IPv6 advertisement carries
@@ -460,17 +460,57 @@ impl UpdatePacket {
     }
 }
 
-impl From<UpdatePacket> for BytesMut {
-    fn from(update: UpdatePacket) -> Self {
+/// Why an [`UpdatePacket`] could not be serialised.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
+pub enum UpdateEmitError {
+    /// A length field could not hold the octet count it had to describe. Always
+    /// a local construction bug: the caller must chunk to the session's message
+    /// budget, as `pop_ipv4` and the update-group emitters do.
+    #[error(
+        "BGP UPDATE {field} is {len} octets, over the {} the 2-octet length field can describe",
+        BGP_EXTENDED_PACKET_LEN
+    )]
+    TooLong {
+        /// Which length field overflowed.
+        field: &'static str,
+        /// The octet count that could not be encoded.
+        len: usize,
+    },
+}
+
+/// Narrow an octet count to the u16 a BGP length field carries, refusing rather
+/// than wrapping.
+fn fit_len(field: &'static str, len: usize) -> Result<u16, UpdateEmitError> {
+    u16::try_from(len).map_err(|_| UpdateEmitError::TooLong { field, len })
+}
+
+impl UpdatePacket {
+    /// Serialise this UPDATE, refusing one whose length fields cannot describe
+    /// it.
+    ///
+    /// The BGP header's Length is a single u16 and RFC 8654 caps a message at
+    /// [`BGP_EXTENDED_PACKET_LEN`] octets, so an over-long UPDATE has no correct
+    /// encoding at all. Casting with `as u16` silently wrapped instead — a
+    /// 70023-octet UPDATE declared itself as 4487 — putting a frame on the wire
+    /// whose header disagreed with its body and desynchronising the peer's
+    /// framing for everything after it. The withdrawn-routes and
+    /// total-path-attribute lengths wrapped the same way.
+    ///
+    /// Only the encodable limit is enforced here, not the session's
+    /// `max_packet_size`: an UPDATE between that budget and 65535 octets is
+    /// already emitted today, and rejecting it would be a behaviour change
+    /// beyond removing the silent corruption. Callers that batch an unbounded
+    /// number of NLRI are still responsible for chunking to `max_packet_size`.
+    pub fn try_emit(self) -> Result<BytesMut, UpdateEmitError> {
         let mut buf = BytesMut::new();
-        let header: BytesMut = update.header.into();
+        let header: BytesMut = self.header.into();
         buf.put(&header[..]);
 
         // IPv4 unicast withdraw.
         let withdraw_len_pos = buf.len();
         buf.put_u16(0u16); // Placeholder.
         let withdraw_pos: std::ops::Range<usize> = withdraw_len_pos..withdraw_len_pos + 2;
-        for ip in update.ipv4_withdraw.iter() {
+        for ip in self.ipv4_withdraw.iter() {
             if ip.id != 0 {
                 buf.put_u32(ip.id);
             }
@@ -478,7 +518,7 @@ impl From<UpdatePacket> for BytesMut {
             let plen = nlri_psize(ip.prefix.prefix_len());
             buf.put(&ip.prefix.addr().octets()[0..plen]);
         }
-        let withdraw_len: u16 = (buf.len() - withdraw_len_pos - 2) as u16;
+        let withdraw_len = fit_len("withdrawn routes length", buf.len() - withdraw_len_pos - 2)?;
         buf[withdraw_pos].copy_from_slice(&withdraw_len.to_be_bytes());
 
         // Attributes length.
@@ -487,25 +527,25 @@ impl From<UpdatePacket> for BytesMut {
         let attr_pos: std::ops::Range<usize> = attr_len_pos..attr_len_pos + 2;
 
         // Attributes emit.
-        if let Some(bgp_attr) = update.bgp_attr {
+        if let Some(bgp_attr) = self.bgp_attr {
             bgp_attr.attr_emit(&mut buf);
         }
 
         // MP reach.
-        if let Some(mp_update) = update.mp_update {
+        if let Some(mp_update) = self.mp_update {
             mp_update.attr_emit(&mut buf);
         }
 
         // MP unreach.
-        if let Some(mp_withdraw) = update.mp_withdraw {
+        if let Some(mp_withdraw) = self.mp_withdraw {
             mp_withdraw.attr_emit(&mut buf);
         }
 
-        let attr_len: u16 = (buf.len() - attr_len_pos - 2) as u16;
+        let attr_len = fit_len("total path attribute length", buf.len() - attr_len_pos - 2)?;
         buf[attr_pos].copy_from_slice(&attr_len.to_be_bytes());
 
         // IPv4 unicast update.
-        for ip in update.ipv4_update.iter() {
+        for ip in self.ipv4_update.iter() {
             if ip.id != 0 {
                 buf.put_u32(ip.id);
             }
@@ -515,10 +555,18 @@ impl From<UpdatePacket> for BytesMut {
         }
 
         const LENGTH_POS: std::ops::Range<usize> = 16..18;
-        let length: u16 = buf.len() as u16;
+        let length = fit_len("message length", buf.len())?;
         buf[LENGTH_POS].copy_from_slice(&length.to_be_bytes());
 
-        buf
+        Ok(buf)
+    }
+}
+
+impl TryFrom<UpdatePacket> for BytesMut {
+    type Error = UpdateEmitError;
+
+    fn try_from(update: UpdatePacket) -> Result<Self, Self::Error> {
+        update.try_emit()
     }
 }
 
@@ -610,6 +658,51 @@ mod tests {
     use ipnet::Ipv4Net;
 
     use super::*;
+
+    /// An UPDATE too long for the 2-octet header Length must be refused, not
+    /// wrapped. Regression: `buf.len() as u16` silently truncated, so a
+    /// 70023-octet UPDATE went out declaring itself 4487 octets — the peer
+    /// framed 4487 bytes as one message and then mis-framed everything after.
+    #[test]
+    fn oversized_update_is_refused_not_wrapped() {
+        // Each inline NLRI is 1 (prefix length) + 4 (prefix) = 5 octets;
+        // 14000 * 5 = 70000, past what the Length field can describe.
+        let mut update = UpdatePacket::default();
+        for i in 0..14000u32 {
+            let addr = std::net::Ipv4Addr::from(0x0A00_0000u32 + i * 256);
+            update.ipv4_update.push(Ipv4Nlri {
+                id: 0,
+                prefix: Ipv4Net::new(addr, 32).unwrap(),
+            });
+        }
+        match update.try_emit() {
+            Err(UpdateEmitError::TooLong { field, len }) => {
+                assert_eq!(field, "message length");
+                assert!(len > u16::MAX as usize, "reported the real octet count");
+            }
+            Ok(buf) => panic!(
+                "oversized UPDATE must not encode (got {} octets)",
+                buf.len()
+            ),
+        }
+    }
+
+    /// An UPDATE that fits still encodes, and its header Length matches the
+    /// octets actually produced.
+    #[test]
+    fn encodable_update_reports_its_true_length() {
+        let mut update = UpdatePacket::default();
+        for i in 0..10u32 {
+            let addr = std::net::Ipv4Addr::from(0x0A00_0000u32 + i * 256);
+            update.ipv4_update.push(Ipv4Nlri {
+                id: 0,
+                prefix: Ipv4Net::new(addr, 32).unwrap(),
+            });
+        }
+        let buf = update.try_emit().expect("must encode");
+        let declared = u16::from_be_bytes([buf[16], buf[17]]) as usize;
+        assert_eq!(declared, buf.len(), "header Length matches the body");
+    }
 
     fn nlri(prefix: &str) -> Ipv4Nlri {
         Ipv4Nlri {
