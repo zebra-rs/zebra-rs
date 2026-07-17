@@ -26,7 +26,17 @@ pub enum AttrType {
     MpUnreachNlri = 15,
     ExtendedCom = 16,
     PmsiTunnel = 22,
-    ExtendedIpv6Com = 25,
+    // 25 — RFC 5701 IPv6 Address Specific Extended Community — is deliberately
+    // absent, and must only be re-added together with an
+    // `Attr::ExtendedIpv6Com` variant.
+    //
+    // Every code named here must have a matching `Attr` variant. Naming one
+    // without it is strictly worse than not recognising the code at all: the
+    // type stops matching `AttrType::Unknown`, so it skips the RFC 4271 §9
+    // handling below, reaches `parse_attr_value`, fails the derived Switch with
+    // no arm to select, and — not being a treat-as-withdraw attribute — resets
+    // the session. Left unnamed it decodes as `Unknown(25)` and takes the §9
+    // optional-transitive path: retained with the Partial bit and propagated.
     Aigp = 26,
     LargeCom = 32,
     PrefixSid = 40,
@@ -53,7 +63,6 @@ impl From<u8> for AttrType {
             15 => MpUnreachNlri,
             16 => ExtendedCom,
             22 => PmsiTunnel,
-            25 => ExtendedIpv6Com,
             26 => Aigp,
             32 => LargeCom,
             40 => PrefixSid,
@@ -82,7 +91,6 @@ impl From<AttrType> for u8 {
             MpUnreachNlri => 15,
             ExtendedCom => 16,
             PmsiTunnel => 22,
-            ExtendedIpv6Com => 25,
             Aigp => 26,
             LargeCom => 32,
             PrefixSid => 40,
@@ -641,6 +649,45 @@ mod tests {
             }
             other => panic!("Flowspec MP_REACH must surface as mp_update, got {other:?}"),
         }
+    }
+
+    /// An RFC 5701 IPv6 Address Specific Extended Community (type 25) must not
+    /// tear the session down. Regression: `AttrType` named the code without an
+    /// `Attr` variant to select, so it skipped the RFC 4271 §9 handling, failed
+    /// the derived Switch in `parse_attr_value`, and — not being a
+    /// treat-as-withdraw attribute — propagated the error out as a session
+    /// reset. Unnamed, it is `Unknown(25)`: optional+transitive, so retained
+    /// with the Partial bit and propagated.
+    #[test]
+    fn ipv6_ext_community_is_passed_through_not_session_reset() {
+        let mut block = ORIGIN_IGP.to_vec();
+        // flags 0xC0 (optional+transitive), type 25, length 20:
+        // type/sub-type 0x00/0x02 (RT), 2001:db8::1, local admin 100.
+        let mut v = vec![0xC0u8, 25, 20, 0x00, 0x02];
+        v.extend_from_slice(
+            &"2001:db8::1"
+                .parse::<std::net::Ipv6Addr>()
+                .unwrap()
+                .octets(),
+        );
+        v.extend_from_slice(&100u16.to_be_bytes());
+        block.extend_from_slice(&v);
+
+        let len = block.len() as u16;
+        let (_, bgp_attr, _, _, treat_as_withdraw) =
+            parse_bgp_update_attribute(&block, len, true, None)
+                .expect("an IPv6 ext-community must not reset the session");
+        assert!(!treat_as_withdraw);
+
+        let bgp_attr = bgp_attr.expect("bgp_attr present");
+        assert!(bgp_attr.origin.is_some(), "well-known attributes survive");
+        assert_eq!(bgp_attr.unknown.len(), 1, "retained for propagation");
+        let u = &bgp_attr.unknown[0];
+        assert_eq!(u.type_code, 25);
+        assert!(
+            AttributeFlags::from_bits_truncate(u.flags).contains(AttributeFlags::PARTIAL),
+            "RFC 4271 §9: Partial set on an unrecognized optional-transitive attribute"
+        );
     }
 
     // ---- 2-octet AS_PATH (RFC 6793 OLD-speaker encoding) --------------
