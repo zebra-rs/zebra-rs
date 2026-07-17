@@ -93,10 +93,20 @@ source; **PLAUSIBLE** = mechanism is real, trigger depends on config/peer/timing
   `many0_complete` silently drops that route. Type-2-RD VPN routes are never
   installed.
 
-### 3. AS_SEQ segment count truncated by `as u8` — CONFIRMED
+### 3. AS_SEQ segment count truncated by `as u8` — CONFIRMED — ✅ FIXED
 - **File:** `src/attrs/aspath.rs:126` (with `prepend_mut` at 447-462,
   `consolidate` at 579)
 - **Category:** correctness
+- **Status:** Fixed on branch `fix-bgp-cap-unknown-header`. Reproduced first: a
+  256-ASN AS_SEQ emitted `count = 0` followed by 1024 ASN bytes, and
+  `prepend_mut` on a 255-ASN path was confirmed to produce exactly that
+  (`1 segment, 256 ASNs -> count byte = 0`). `As4Segment::emit` now splits at
+  the new `AS_SEGMENT_MAX` (255) into consecutive segments of the same type,
+  mirroring FRR's `aspath_put`, so 256 ASNs emit as `255 + 1` and the peer
+  reconstructs the identical ASN sequence. The empty-segment encoding is
+  preserved explicitly (`chunks` yields nothing for an empty slice). Fixed in
+  the emitter rather than in `prepend_mut`/`consolidate` so every producer is
+  covered and the in-memory path stays one logical segment.
 - **Bug:** `As4Segment::emit` writes the ASN count as `self.asn.len() as u8`, and
   `prepend_mut`/`consolidate` merge AS_SEQ segments with **no 255-ASN split**, so
   a segment holding > 255 ASNs emits a count byte that wraps and no longer matches
