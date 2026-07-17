@@ -355,16 +355,19 @@ fn route_rts_from_ecom(
         .filter(|v| v.low_type == 0x02)
         .map(|v| {
             use bgp_packet::RouteDistinguisherType;
-            // high_type 0x00 = Two-Octet AS, 0x01 = IPv4. Anything
-            // else (0x02 = 4-byte AS, future types) maps onto ASN
-            // by default — `RouteDistinguisher::PartialEq` is per-
-            // byte so a 4-byte ASN extcomm just won't intersect
-            // any configured RT (the config builder rejects 4-byte
-            // ASN strings today).
-            let typ = if v.high_type == 0x01 {
-                RouteDistinguisherType::IP
-            } else {
-                RouteDistinguisherType::ASN
+            // high_type 0x00 = Two-Octet AS, 0x01 = IPv4, 0x02 =
+            // Four-Octet AS (RFC 5668). Each carries the same
+            // 6-octet value layout as the matching RD type, so map
+            // them across directly: `RouteDistinguisher`'s Eq/Ord
+            // include `typ`, and the configured RTs come from
+            // `RouteDistinguisher::from_str`, so a mismatched `typ`
+            // here would make a 4-byte-AS RT silently fail to
+            // intersect the identical configured RT. Future/unknown
+            // high_types keep the historical ASN default.
+            let typ = match v.high_type {
+                0x01 => RouteDistinguisherType::IP,
+                0x02 => RouteDistinguisherType::ASN4,
+                _ => RouteDistinguisherType::ASN,
             };
             let mut rd = bgp_packet::RouteDistinguisher::new(typ);
             rd.val = v.val;

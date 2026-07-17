@@ -147,14 +147,25 @@ fn parse_op(input: &[u8]) -> IResult<&[u8], FlowspecOp> {
     Ok((input, FlowspecOp { op, value }))
 }
 
-/// Parse a list of operator terms, stopping after the term whose
-/// end-of-list bit is set (or when the component slice is exhausted, so
-/// a missing end bit can't run into the next component).
+/// Parse a list of operator terms, stopping after the term whose end-of-list
+/// bit is set. RFC 8955 §4.2 makes that bit mandatory on the final term, so a
+/// list that runs out of input without it is malformed and rejected.
 ///
-/// The end bit is positional — it only ever marks the final term — so
-/// it is stripped from the stored ops to keep the in-memory form
-/// canonical (`emit_op_list` re-derives it from position). This makes
-/// equality independent of how the sender flagged the terminator.
+/// There is no per-component length anywhere in the flow-spec encoding: the
+/// end-of-list bit is the *only* delimiter, and `input` here runs to the end of
+/// the whole NLRI value rather than to the end of this component. So a term list
+/// missing the end bit reads straight on into the components that follow. Where
+/// that is detectable — the list reaching the end of the NLRI having never set
+/// the bit — reject it. Where it is not — the stolen octets happening to decode
+/// as further terms, one of which does set the bit — no parser can tell, and the
+/// components silently mis-frame. (An earlier version of this function claimed
+/// the opposite, that exhausting the slice meant a missing end bit "can't run
+/// into the next component"; the slice is not per-component, so it can.)
+///
+/// The end bit is positional — it only ever marks the final term — so it is
+/// stripped from the stored ops to keep the in-memory form canonical
+/// (`emit_op_list` re-derives it from position). This makes equality
+/// independent of how the sender flagged the terminator.
 fn parse_op_list(mut input: &[u8]) -> IResult<&[u8], Vec<FlowspecOp>> {
     let mut ops = Vec::new();
     loop {
@@ -165,8 +176,16 @@ fn parse_op_list(mut input: &[u8]) -> IResult<&[u8], Vec<FlowspecOp>> {
             value: op.value,
         });
         input = rest;
-        if end || input.is_empty() {
+        if end {
             break;
+        }
+        if input.is_empty() {
+            // Terminating here instead would accept a list the RFC forbids and
+            // then, because `emit_op_list` re-derives the bit from position,
+            // silently re-emit it in a repaired form that no longer matches the
+            // octets received. GoBGP's FlowSpecComponent decoder likewise only
+            // ever breaks on the end bit.
+            return Err(nom::Err::Error(make_error(input, ErrorKind::Eof)));
         }
     }
     Ok((input, ops))
@@ -564,6 +583,41 @@ impl FlowspecNlri {
             components.push(comp);
             value = next;
         }
+
+        // RFC 8955 §4.2: "Components MUST follow strict type ordering by
+        // increasing numerical order. A given component type MAY (exactly once)
+        // be present ... If present, it MUST precede any component of higher
+        // numeric type value." The two halves of that rule want different
+        // answers.
+        //
+        // A repeated type is genuinely ambiguous — two operator lists conjoined
+        // over one field, e.g. `proto =6` and `proto =17`, which no packet
+        // satisfies — so there is nothing to recover and it is rejected.
+        let mut seen: Vec<u8> = Vec::with_capacity(components.len());
+        for c in components.iter() {
+            let typ = c.component_type();
+            if seen.contains(&typ) {
+                return Err(nom::Err::Error(make_error(value, ErrorKind::Verify)));
+            }
+            seen.push(typ);
+        }
+
+        // Order, by contrast, carries no meaning: a spec is the conjunction of
+        // its components, so [port, proto] matches exactly what [proto, port]
+        // matches. Canonicalise rather than reject — dropping a rule whose
+        // intent is unambiguous is the worse failure for a filter meant to shed
+        // attack traffic, and sorting makes what we re-emit RFC-compliant.
+        // GoBGP normalises here too, for the same stated reason: otherwise "the
+        // unordered rules are determined different".
+        //
+        // This is load-bearing, not cosmetic. `flow_cmp` walks the two lists
+        // positionally to compute §5.1 precedence, and `Ord` keys the BTreeMap
+        // the dataplane iterates in apply order. Left unsorted,
+        // [proto=6, port=80] and [port=80, proto=6] — one rule — compare unequal
+        // and occupy two keys at different precedence, so a crafted encoding can
+        // sit ahead of the rule it duplicates.
+        components.sort_by_key(|c| c.component_type());
+
         Ok((
             rest,
             FlowspecNlri {
@@ -785,6 +839,89 @@ mod tests {
         let (rest, parsed) = FlowspecNlri::parse(&buf, nlri.id != 0, nlri.afi).expect("must parse");
         assert!(rest.is_empty(), "trailing bytes after parse");
         assert_eq!(&parsed, nlri);
+    }
+
+    /// Component order carries no meaning — a spec is the conjunction of its
+    /// components — so a non-ascending encoding is canonicalised rather than
+    /// rejected, as GoBGP also does. Only the canonical form may reach `Ord`,
+    /// which keys the BTreeMap the dataplane iterates.
+    #[test]
+    fn component_order_is_canonicalised_not_trusted() {
+        // The same rule (IP protocol 6 AND port 80) in both encodings: the
+        // RFC 8955 §4.2 ascending order, and the reverse.
+        let canonical = [0x06u8, 0x03, 0x81, 0x06, 0x04, 0x81, 0x50];
+        let reversed = [0x06u8, 0x04, 0x81, 0x50, 0x03, 0x81, 0x06];
+
+        let (_, a) = FlowspecNlri::parse(&canonical, false, Afi::Ip).expect("must parse");
+        let (_, b) = FlowspecNlri::parse(&reversed, false, Afi::Ip).expect("must parse");
+
+        // Regression: parsed as given, these were unequal and compared `Less`,
+        // so one rule occupied two BTreeMap keys at different precedence and a
+        // crafted encoding could sit ahead of the rule it duplicates.
+        assert_eq!(a, b, "one rule must yield one key whatever the wire order");
+        assert_eq!(a.cmp(&b), Ordering::Equal, "and one precedence");
+        assert_eq!(
+            b.components
+                .iter()
+                .map(|c| c.component_type())
+                .collect::<Vec<_>>(),
+            vec![3, 4],
+            "components canonicalised into ascending type order"
+        );
+
+        // Re-emitting the normalised spec produces the RFC-compliant ordering.
+        let mut buf = BytesMut::new();
+        b.nlri_emit(&mut buf);
+        assert_eq!(&buf[..], &canonical[..]);
+    }
+
+    /// RFC 8955 §4.2 allows each component type "exactly once". A repeat is
+    /// ambiguous — two operator lists conjoined over one field — so unlike
+    /// ordering there is nothing to canonicalise.
+    #[test]
+    fn duplicate_component_type_is_rejected() {
+        // [type 3 proto =6][type 3 proto =17]
+        let dup = [0x06u8, 0x03, 0x81, 0x06, 0x03, 0x81, 0x11];
+        assert!(
+            FlowspecNlri::parse(&dup, false, Afi::Ip).is_err(),
+            "a repeated component type is malformed"
+        );
+    }
+
+    /// RFC 8955 §4.2 makes the end-of-list bit mandatory on the final term.
+    /// Regression: `parse_op_list` also terminated when the input ran out, so a
+    /// list that never set the bit was accepted, and `emit_op_list` then added
+    /// the bit back — a reflector would propagate octets it never received.
+    /// GoBGP's decoder likewise only breaks on the end bit.
+    #[test]
+    fn op_list_without_end_of_list_bit_is_rejected() {
+        // len=3, value = [type 3 (IP protocol), op 0x01 (1-octet value, eq, NO
+        // end bit), value 0x06].
+        let missing_end = [0x03u8, 0x03, 0x01, 0x06];
+        assert!(
+            FlowspecNlri::parse(&missing_end, false, Afi::Ip).is_err(),
+            "a term list that never sets the end bit is malformed"
+        );
+
+        // The same component with the end bit (0x81) parses and round-trips.
+        let well_formed = [0x03u8, 0x03, 0x81, 0x06];
+        let (rest, nlri) = FlowspecNlri::parse(&well_formed, false, Afi::Ip).expect("must parse");
+        assert!(rest.is_empty());
+        let mut buf = BytesMut::new();
+        nlri.nlri_emit(&mut buf);
+        assert_eq!(&buf[..], &well_formed[..], "byte-identical round trip");
+    }
+
+    /// The end bit terminates the list even when octets follow, so a
+    /// well-formed multi-component NLRI is framed on the bit alone — there is
+    /// no per-component length to fall back on.
+    #[test]
+    fn end_of_list_bit_delimits_one_component_from_the_next() {
+        // len=6: [type 3, op 0x81 end, value 0x06][type 4, op 0x81 end, value 0x50]
+        let wire = [0x06u8, 0x03, 0x81, 0x06, 0x04, 0x81, 0x50];
+        let (rest, nlri) = FlowspecNlri::parse(&wire, false, Afi::Ip).expect("must parse");
+        assert!(rest.is_empty());
+        assert_eq!(nlri.components.len(), 2, "end bit split the two components");
     }
 
     #[test]

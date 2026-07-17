@@ -2178,6 +2178,21 @@ pub fn fsm_bgp_open(peer: &mut Peer, conn: ConnTag, packet: OpenPacket) -> State
 
 pub fn fsm_bgp_notification(peer: &mut Peer, conn: ConnTag, packet: NotificationPacket) -> State {
     peer.counter[BgpType::Notification as usize].rcvd += 1;
+    // A NOTIFICATION is the peer telling us why it is tearing the session down,
+    // and it was never surfaced anywhere: the only log here was the Bad Peer AS
+    // case below. Record it, including any RFC 9003 shutdown communication —
+    // an operator's "maintenance window, back at 03:00" is worth exactly as much
+    // as the numeric subcode next to it.
+    tracing::info!(
+        peer = %peer.display_name(),
+        "bgp: NOTIFICATION received: {} / {}{}",
+        packet.code,
+        bgp_packet::notify_sub_code_str(packet.code, packet.sub_code),
+        packet
+            .shutdown_communication()
+            .map(|m| format!(" — \"{m}\""))
+            .unwrap_or_default(),
+    );
     // `local-as … dual-as` (RFC 7705 migration aid): a Bad Peer AS
     // means the neighbor's `remote-as` expects the other one of our
     // two AS numbers — flip which one the next OPEN presents. FRR

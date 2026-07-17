@@ -17,6 +17,12 @@ pub const AS_SEQ: u8 = 2;
 pub const AS_CONFED_SEQ: u8 = 3;
 pub const AS_CONFED_SET: u8 = 4;
 
+/// Most AS numbers expressible in one AS_PATH segment: the segment header's
+/// Path Segment Length is a single octet (RFC 4271 §4.3). A longer run has to be
+/// emitted as consecutive segments of the same type. Mirrors FRR's
+/// `AS_SEGMENT_MAX`.
+pub const AS_SEGMENT_MAX: usize = 255;
+
 #[allow(dead_code)]
 pub const AS_TRANS: u16 = 23456;
 
@@ -97,6 +103,32 @@ fn parse_bgp_attr_as2_segment(input: &[u8]) -> IResult<&[u8], As2Segment> {
     Ok((input, segment))
 }
 
+impl From<As2Path> for As4Path {
+    /// Widen a 2-octet AS_PATH into the 4-octet representation the rest of the
+    /// crate works in (RFC 6793 §4.2.2), zero-extending each AS number. Segment
+    /// types and order carry over unchanged, so the hop count is identical.
+    ///
+    /// This does not recover the 4-octet AS numbers that an OLD (non-AS4) peer
+    /// replaces with AS_TRANS (23456): those live in the AS4_PATH attribute
+    /// (type 17), which this crate does not implement, so an AS_TRANS widens to
+    /// a literal 23456.
+    fn from(from: As2Path) -> Self {
+        let mut path = As4Path {
+            segs: from
+                .segs
+                .iter()
+                .map(|seg| As4Segment {
+                    typ: seg.typ,
+                    asn: seg.asn.iter().map(|asn| u32::from(*asn)).collect(),
+                })
+                .collect(),
+            length: 0,
+        };
+        path.update_length();
+        path
+    }
+}
+
 fn parse_bgp_attr_as4_segment(input: &[u8]) -> IResult<&[u8], As4Segment> {
     let (input, header) = AsSegmentHeader::parse_be(input)?;
     let (input, asns) = count(be_u32, header.length as usize).parse(input)?;
@@ -122,12 +154,34 @@ impl As4Segment {
     }
 
     pub fn emit(&self, buf: &mut BytesMut) {
-        buf.put_u8(self.typ);
-        buf.put_u8(self.asn.len() as u8);
-        self.asn.iter().for_each(|x| buf.put_u32(*x));
+        // Split at the 1-octet Path Segment Length limit rather than letting
+        // `len() as u8` wrap. `prepend_mut` and `consolidate` both merge into a
+        // single segment without bounding it, so an inbound path whose segment
+        // already held the maximum 255 reaches 256 after one prepend; the count
+        // octet then wrapped to 0 while 256 ASNs were still written, and the
+        // peer reparsed those ASN bytes as segment headers -> malformed AS_PATH
+        // -> NOTIFICATION. Consecutive segments of the same type are equivalent
+        // for AS_SEQUENCE (the hop counts add up); an AS_SET over 255 has no
+        // single-segment encoding at all, so splitting is the only option there
+        // too, at the cost of the receiver counting it as more than one hop.
+        // Matches FRR's `aspath_put`.
+        if self.asn.is_empty() {
+            // Preserve the empty-segment encoding: `chunks` yields nothing for
+            // an empty slice, which would emit no header at all.
+            buf.put_u8(self.typ);
+            buf.put_u8(0);
+            return;
+        }
+        for chunk in self.asn.chunks(AS_SEGMENT_MAX) {
+            buf.put_u8(self.typ);
+            buf.put_u8(chunk.len() as u8);
+            chunk.iter().for_each(|x| buf.put_u32(*x));
+        }
     }
 }
 
+/// Render an AS number in asdot notation (RFC 5396): values below 65536 in
+/// plain decimal, values at or above it as `<high16>.<low16>`.
 pub fn asn_to_string(val: u32) -> String {
     if val > 65535 {
         let hval: u32 = (val & 0xFFFF0000) >> 16;
@@ -135,6 +189,34 @@ pub fn asn_to_string(val: u32) -> String {
         hval.to_string() + "." + &lval.to_string()
     } else {
         val.to_string()
+    }
+}
+
+/// Render an AS number in asdot+ notation (RFC 5396): always `<high16>.<low16>`,
+/// including below 65536, where it yields `0.65526` rather than `65526`.
+///
+/// Prefer [`asn_to_string`] (asdot) for display. This form exists for callers
+/// where the dot itself carries meaning rather than being cosmetic — a type-2
+/// Route Distinguisher, where the dot is what separates the 4-octet-AS encoding
+/// from the 2-octet one in the overlap where both the AS and the assigned number
+/// fit in 16 bits. Identical to asdot for any AS >= 65536.
+pub fn asn_to_asdot_plus(val: u32) -> String {
+    format!("{}.{}", val >> 16, val & 0xFFFF)
+}
+
+/// Inverse of [`asn_to_string`]: accept an AS number written in either asplain
+/// (`"65546"`) or asdot/asdot+ (`"1.10"`, `"0.65526"`) notation (RFC 5396), so
+/// text copied from a peer running either convention parses. Both dotted halves
+/// are 16-bit, so `"169031.1"` and `"1.2.3"` are rejected rather than silently
+/// truncated. Returns `None` when the text is not a valid AS number.
+pub fn asn_from_string(s: &str) -> Option<u32> {
+    match s.split_once('.') {
+        Some((high, low)) => {
+            let high: u16 = high.parse().ok()?;
+            let low: u16 = low.parse().ok()?;
+            Some(((high as u32) << 16) | low as u32)
+        }
+        None => s.parse::<u32>().ok(),
     }
 }
 
@@ -603,6 +685,208 @@ impl Default for As4Path {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Widening a 2-octet AS_PATH preserves segment types, order, ASN values
+    /// and hop count. AS_TRANS stays literal: recovering the real 4-octet AS
+    /// behind it needs AS4_PATH (type 17), which this crate does not implement.
+    #[test]
+    fn as2_path_widens_to_as4_path() {
+        let p2 = As2Path {
+            segs: vec![
+                As2Segment {
+                    typ: AS_SEQ,
+                    asn: vec![65000, AS_TRANS],
+                },
+                As2Segment {
+                    typ: AS_SET,
+                    asn: vec![100, 200],
+                },
+            ],
+            length: 0,
+        };
+        // `.into()`, not `As4Path::from`: the inherent `As4Path::from(Vec<u32>)`
+        // shadows the `From` trait's method.
+        let p4: As4Path = p2.into();
+
+        assert_eq!(p4.segs.len(), 2);
+        assert_eq!(p4.segs[0].typ, AS_SEQ);
+        assert_eq!(p4.segs[0].asn, vec![65000u32, 23456]);
+        assert_eq!(p4.segs[1].typ, AS_SET);
+        assert_eq!(p4.segs[1].asn, vec![100u32, 200]);
+        // AS_SEQ contributes one hop per ASN, AS_SET one in total.
+        assert_eq!(p4.length, 3);
+    }
+
+    /// Flatten an emitted AS_PATH back into its ASN sequence.
+    fn emit_and_reparse(path: &As4Path) -> (usize, Vec<u32>) {
+        let mut buf = BytesMut::new();
+        path.segs.iter().for_each(|s| s.emit(&mut buf));
+        let (rest, parsed) = As4Path::parse_be(&buf).unwrap();
+        assert!(rest.is_empty(), "emitted AS_PATH must parse fully");
+        let flat = parsed
+            .segs
+            .iter()
+            .flat_map(|s| s.asn.iter().copied())
+            .collect();
+        (parsed.segs.len(), flat)
+    }
+
+    /// A segment longer than the 1-octet count splits into consecutive segments
+    /// of the same type instead of wrapping. Regression: 256 ASNs emitted
+    /// `count = 0` followed by 256 ASNs, so a peer read a 0-length AS_SEQ and
+    /// reparsed the ASN bytes as segment headers — a malformed AS_PATH.
+    #[test]
+    fn oversized_segment_splits_at_limit() {
+        let seg = As4Segment {
+            typ: AS_SEQ,
+            asn: (1..=256u32).collect(),
+        };
+        let mut buf = BytesMut::new();
+        seg.emit(&mut buf);
+
+        // Two headers, not one: 2 + 255*4 + 2 + 1*4.
+        assert_eq!(buf.len(), 2 + 255 * 4 + 2 + 4);
+        assert_eq!(
+            (buf[0], buf[1]),
+            (AS_SEQ, 255),
+            "first segment fills the limit"
+        );
+        let second = 2 + 255 * 4;
+        assert_eq!(
+            (buf[second], buf[second + 1]),
+            (AS_SEQ, 1),
+            "remainder carries the same segment type"
+        );
+
+        // The ASN sequence a peer reconstructs is unchanged.
+        let (_, parsed) = As4Path::parse_be(&buf).unwrap();
+        let flat: Vec<u32> = parsed
+            .segs
+            .iter()
+            .flat_map(|s| s.asn.iter().copied())
+            .collect();
+        assert_eq!(flat, (1..=256u32).collect::<Vec<u32>>());
+    }
+
+    /// Exactly at the limit still emits a single segment.
+    #[test]
+    fn segment_at_limit_emits_one_segment() {
+        let seg = As4Segment {
+            typ: AS_SEQ,
+            asn: (1..=255u32).collect(),
+        };
+        let mut buf = BytesMut::new();
+        seg.emit(&mut buf);
+        assert_eq!(buf.len(), 2 + 255 * 4);
+        assert_eq!((buf[0], buf[1]), (AS_SEQ, 255));
+    }
+
+    /// An empty segment keeps emitting its header (`chunks` yields nothing for
+    /// an empty slice, which would otherwise drop the segment entirely).
+    #[test]
+    fn empty_segment_still_emits_header() {
+        let seg = As4Segment::new(AS_SEQ);
+        let mut buf = BytesMut::new();
+        seg.emit(&mut buf);
+        assert_eq!(&buf[..], &[AS_SEQ, 0]);
+    }
+
+    /// The realistic trigger: an inbound path whose single AS_SEQ already holds
+    /// the maximum 255, re-advertised over eBGP so `prepend_mut` merges the
+    /// local AS in, reaching 256 in one segment.
+    #[test]
+    fn prepend_past_limit_round_trips() {
+        let mut path = As4Path::from((1..=255u32).collect::<Vec<u32>>());
+        path.prepend_mut(As4Path::from(vec![65000u32]));
+        assert_eq!(path.segs.len(), 1, "prepend_mut merges into one segment");
+        assert_eq!(
+            path.segs[0].asn.len(),
+            256,
+            "which now exceeds the wire limit"
+        );
+
+        let (segs, flat) = emit_and_reparse(&path);
+        assert_eq!(segs, 2, "emit splits it for the wire");
+        assert_eq!(flat.len(), 256, "no ASN lost or invented");
+        assert_eq!(flat[0], 65000, "prepended AS stays leftmost");
+        assert_eq!(flat[1..], (1..=255u32).collect::<Vec<u32>>()[..]);
+    }
+
+    /// An AS_SET over the limit also splits, keeping its type on every piece.
+    #[test]
+    fn oversized_as_set_splits_keeping_type() {
+        let seg = As4Segment {
+            typ: AS_SET,
+            asn: (1..=300u32).collect(),
+        };
+        let mut buf = BytesMut::new();
+        seg.emit(&mut buf);
+        let (_, parsed) = As4Path::parse_be(&buf).unwrap();
+        assert_eq!(parsed.segs.len(), 2);
+        assert!(parsed.segs.iter().all(|s| s.typ == AS_SET));
+        let flat: Vec<u32> = parsed
+            .segs
+            .iter()
+            .flat_map(|s| s.asn.iter().copied())
+            .collect();
+        assert_eq!(flat, (1..=300u32).collect::<Vec<u32>>());
+    }
+
+    /// `asn_from_string` accepts both RFC 5396 notations and round-trips
+    /// `asn_to_string` (which renders asdot).
+    #[test]
+    fn asn_string_notations_round_trip() {
+        // (asplain, asdot) for the same AS.
+        let cases = [
+            (65526u32, "65526", "65526"),
+            (65546, "65546", "1.10"),
+            (65536, "65536", "1.0"),
+            (4200000000, "4200000000", "64086.59904"),
+        ];
+        for (asn, asplain, asdot) in cases {
+            assert_eq!(asn_to_string(asn), asdot, "asn_to_string({asn})");
+            assert_eq!(asn_from_string(asplain), Some(asn), "asplain {asplain}");
+            assert_eq!(asn_from_string(asdot), Some(asn), "asdot {asdot}");
+        }
+        // asdot+ spells a 2-byte AS with an explicit zero high half.
+        assert_eq!(asn_from_string("0.65526"), Some(65526));
+    }
+
+    /// asdot+ always dots, including below 65536 where asdot does not, and
+    /// agrees with asdot everywhere at/above it. `asn_from_string` reads both.
+    #[test]
+    fn asdot_plus_always_dots_and_round_trips() {
+        let cases = [
+            (100u32, "0.100"),
+            (65526, "0.65526"),
+            (65536, "1.0"),
+            (65546, "1.10"),
+            (4200000000, "64086.59904"),
+        ];
+        for (asn, asdot_plus) in cases {
+            assert_eq!(asn_to_asdot_plus(asn), asdot_plus, "asdot+ of {asn}");
+            assert_eq!(asn_from_string(asdot_plus), Some(asn), "parse {asdot_plus}");
+        }
+        // At or above 65536 asdot+ and asdot are the same string.
+        for asn in [65536u32, 65546, 4200000000] {
+            assert_eq!(asn_to_asdot_plus(asn), asn_to_string(asn), "asn {asn}");
+        }
+        // Below 65536 they differ: that dot is what marks a type-2 RD.
+        assert_eq!(asn_to_string(100), "100");
+        assert_eq!(asn_to_asdot_plus(100), "0.100");
+    }
+
+    /// Both dotted halves are 16-bit; anything wider or malformed is rejected
+    /// rather than silently truncated.
+    #[test]
+    fn asn_from_string_rejects_malformed() {
+        for s in ["169031.1", "1.65536", "1.2.3", "", ".", "1.", ".1", "abc"] {
+            assert_eq!(asn_from_string(s), None, "must reject {s:?}");
+        }
+        // u32::MAX is the largest valid asplain AS.
+        assert_eq!(asn_from_string("4294967295"), Some(u32::MAX));
+        assert_eq!(asn_from_string("4294967296"), None);
+    }
 
     #[test]
     fn parse() {

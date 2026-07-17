@@ -9,7 +9,19 @@ use nom::error::{ErrorKind, make_error};
 use nom::number::complete::{be_u8, be_u24, be_u32};
 use nom_derive::*;
 
-use crate::{ParseNlri, RouteDistinguisher, nlri_psize};
+use crate::{ParseNlri, RouteDistinguisher};
+
+// EVPN address-length fields are counts of *bits*, and RFC 7432 fixes each to a
+// single legal value per family rather than a range. Match on these directly:
+// rounding a length to octets first (`nlri_psize`) silently widens each into a
+// span of eight bit-counts that all round the same way.
+//
+/// RFC 7432 §7.2: "The MAC Address Length field is in bits, and it is set to 48."
+const MAC_LEN_BITS: u8 = 48;
+/// RFC 7432 §7.2 / §7.3: an IPv4 address length "is set to 32 ... bits".
+const IP4_LEN_BITS: u8 = 32;
+/// RFC 7432 §7.2 / §7.3: an IPv6 address length "is set to ... 128 bits".
+const IP6_LEN_BITS: u8 = 128;
 
 #[derive(Debug, Clone)]
 pub enum EvpnRouteType {
@@ -801,18 +813,32 @@ impl ParseNlri<EvpnRoute> for EvpnRoute {
                 let (input, ether_tag) = be_u32(input)?;
 
                 let (input, mac_len) = be_u8(input)?;
-                let mac_size = nlri_psize(mac_len);
-                if mac_size != 6 {
+                // RFC 7432 §7.2: "The MAC Address Length field is in bits, and
+                // it is set to 48." Anything else is explicitly outside the
+                // RFC's scope, so there is no defined way to read it. Testing
+                // `nlri_psize(mac_len) == 6` instead accepted every length that
+                // happens to round up to six octets — 41 through 48 — and then
+                // read six octets regardless. The IncMulticast arm below already
+                // checks its address length exactly; this now matches it.
+                if mac_len != MAC_LEN_BITS {
                     return Err(nom::Err::Error(make_error(input, ErrorKind::LengthValue)));
                 }
                 let (input, mac) = take(6usize).parse(input)?;
+
                 let (input, ip_len) = be_u8(input)?;
-                let ip_size = nlri_psize(ip_len);
-                let (input, _) = if ip_size != 0 {
-                    take(ip_size).parse(input)?
-                } else {
-                    (input, &[] as &[u8])
+                // RFC 7432 §7.2: absent, or "set to 32 or 128 bits". Passing
+                // this through `nlri_psize` accepted any value at all: an
+                // ip_len of 200 read and discarded 25 octets and the route still
+                // parsed, MAC-only, as though no IP had been sent.
+                let ip_size = match ip_len {
+                    0 => 0usize,
+                    IP4_LEN_BITS => 4,
+                    IP6_LEN_BITS => 16,
+                    _ => return Err(nom::Err::Error(make_error(input, ErrorKind::LengthValue))),
                 };
+                // The address itself is not modelled by `EvpnMac` yet; validate
+                // its length and step over exactly that many octets.
+                let (input, _ip) = take(ip_size).parse(input)?;
                 let (input, vni) = be_u24(input)?;
 
                 let mut evpn = EvpnMac {
@@ -1071,17 +1097,21 @@ impl ParseNlri<EvpnRoute> for EvpnRoute {
 /// length-in-bits followed by the address. Length 0 yields `None`
 /// (the `(*,G)` wildcard source); 32 → IPv4, 128 → IPv6; any other
 /// length fails the parse (RFC 7606 treat-as-withdraw at the caller).
+///
+/// The match is on the bit count itself, not on `nlri_psize` of it. Rounding
+/// first made the sentence above untrue: 25..=32 all round up to four octets
+/// and were read as IPv4, 121..=128 as IPv6.
 fn parse_len_prefixed_ip(input: &[u8]) -> IResult<&[u8], Option<IpAddr>> {
     let (input, len) = be_u8(input)?;
-    match nlri_psize(len) {
+    match len {
         0 => Ok((input, None)),
-        4 => {
+        IP4_LEN_BITS => {
             let (input, v) = take(4usize).parse(input)?;
             let mut o = [0u8; 4];
             o.copy_from_slice(v);
             Ok((input, Some(IpAddr::V4(Ipv4Addr::from(o)))))
         }
-        16 => {
+        IP6_LEN_BITS => {
             let (input, v) = take(16usize).parse(input)?;
             let mut o = [0u8; 16];
             o.copy_from_slice(v);
@@ -1379,6 +1409,94 @@ fn emit_len_prefixed_ip(payload: &mut BytesMut, ip: Option<IpAddr>) {
         Some(IpAddr::V6(v6)) => {
             payload.put_u8(128);
             payload.put(&v6.octets()[..]);
+        }
+    }
+}
+
+#[cfg(test)]
+mod evpn_length_tests {
+    use super::*;
+
+    /// A Type-2 MAC/IP Advertisement NLRI with the given length fields.
+    fn type2(mac_len: u8, ip_len: u8, ip_octets: usize) -> Vec<u8> {
+        let mut body = Vec::new();
+        body.extend_from_slice(&[0x00, 0x00, 0x00, 0x00, 0xfd, 0xe8, 0x00, 0x01]); // RD
+        body.extend_from_slice(&[0u8; 10]); // ESI
+        body.extend_from_slice(&100u32.to_be_bytes()); // Ethernet tag
+        body.push(mac_len);
+        body.extend_from_slice(&[0x00, 0x11, 0x22, 0x33, 0x44, 0x55]); // MAC
+        body.push(ip_len);
+        body.extend(std::iter::repeat_n(0xAAu8, ip_octets));
+        body.extend_from_slice(&[0x00, 0x00, 0x0a]); // VNI
+        let mut nlri = vec![2u8, body.len() as u8];
+        nlri.extend_from_slice(&body);
+        nlri
+    }
+
+    /// RFC 7432 §7.2: the MAC Address Length "is set to 48"; other values are
+    /// outside the RFC's scope. Regression: the check was
+    /// `nlri_psize(mac_len) == 6`, so every bit-count rounding up to six octets
+    /// — 41 through 48 — was accepted and read as a 48-bit MAC.
+    #[test]
+    fn type2_mac_length_must_be_exactly_48_bits() {
+        assert!(
+            EvpnRoute::parse_nlri(&type2(48, 0, 0), false).is_ok(),
+            "the one legal MAC length must parse"
+        );
+        for mac_len in [0u8, 41, 47, 49, 255] {
+            assert!(
+                EvpnRoute::parse_nlri(&type2(mac_len, 0, 0), false).is_err(),
+                "MAC length {mac_len} bits must be rejected"
+            );
+        }
+    }
+
+    /// RFC 7432 §7.2: the IP Address Length is absent (0) or "set to 32 or 128
+    /// bits". Regression: it went through `nlri_psize`, which accepted anything
+    /// — an ip_len of 200 read and discarded 25 octets and the route still
+    /// parsed as MAC-only, as though no IP had been sent.
+    #[test]
+    fn type2_ip_length_must_be_0_32_or_128_bits() {
+        for (ip_len, octets) in [(0u8, 0usize), (32, 4), (128, 16)] {
+            assert!(
+                EvpnRoute::parse_nlri(&type2(48, ip_len, octets), false).is_ok(),
+                "IP length {ip_len} bits is legal"
+            );
+        }
+        // 25 rounds to 4 octets and 200 to 25; both used to pass.
+        for (ip_len, octets) in [(25u8, 4usize), (200, 25), (31, 4), (127, 16), (129, 17)] {
+            assert!(
+                EvpnRoute::parse_nlri(&type2(48, ip_len, octets), false).is_err(),
+                "IP length {ip_len} bits must be rejected"
+            );
+        }
+    }
+
+    /// `parse_len_prefixed_ip` backs the SMET / IGMP-sync source and group
+    /// addresses. Its doc always claimed "any other length fails the parse";
+    /// matching on `nlri_psize(len)` made that untrue for 25..=32 and 121..=128.
+    #[test]
+    fn len_prefixed_ip_matches_on_bits_not_rounded_octets() {
+        assert_eq!(parse_len_prefixed_ip(&[0]).unwrap().1, None);
+        assert!(
+            parse_len_prefixed_ip(&[32, 10, 0, 0, 1])
+                .unwrap()
+                .1
+                .is_some()
+        );
+        assert!(
+            parse_len_prefixed_ip(&[128, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1])
+                .unwrap()
+                .1
+                .is_some()
+        );
+        for len in [25u8, 31, 121, 127] {
+            let mut wire = vec![len];
+            wire.extend_from_slice(&[0u8; 16]);
+            assert!(
+                parse_len_prefixed_ip(&wire).is_err(),
+                "length {len} bits must be rejected, not rounded"
+            );
         }
     }
 }

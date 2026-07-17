@@ -252,7 +252,7 @@ impl Engine {
         if self.adj_out.0.remove(&prefix).is_some() {
             let mut update = UpdatePacket::with_max_packet_size(self.ctx.max_packet_size());
             update.ipv4_withdraw.push(Ipv4Nlri { id, prefix });
-            self.ctx.send_packet(update.into());
+            self.ctx.send_update(update);
         }
     }
 }

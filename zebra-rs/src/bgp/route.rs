@@ -215,6 +215,15 @@ impl SyncCtx {
         enqueue_update(&self.packet_tx, &self.egress_depth, self.ident, bytes);
     }
 
+    /// Serialise and enqueue one UPDATE, dropping it with a log if its length
+    /// fields cannot describe it. See [`Peer::send_update`].
+    pub fn send_update(&self, update: UpdatePacket) {
+        match update.try_emit() {
+            Ok(bytes) => self.send_packet(bytes),
+            Err(e) => tracing::warn!("dropping UPDATE to {}: {}", self.ident, e),
+        }
+    }
+
     /// Max on-wire UPDATE size for this session (RFC 8654 extended).
     pub fn max_packet_size(&self) -> usize {
         if self.extended_message {
@@ -5223,7 +5232,7 @@ pub fn route_update_evpn(
 fn route_withdraw_evpn(peer: &mut Peer, route: EvpnRoute) {
     let mut update = UpdatePacket::with_max_packet_size(peer.max_packet_size());
     update.mp_withdraw = Some(MpUnreachAttr::Evpn(vec![route]));
-    peer.send_packet(update.into());
+    peer.send_update(update);
 }
 
 /// Fan out a withdraw to every peer with `(L2vpn, Evpn)` Established.
@@ -5517,7 +5526,7 @@ pub(super) fn route_withdraw_ipv4(
         }
     }
 
-    peer.send_packet(update.into());
+    peer.send_update(update);
 }
 
 /// Send — or, while the peer's update-group has a flush job in
@@ -6816,17 +6825,41 @@ pub fn route_labelv6_withdraw(
     route_advertise_to_peers_labelv6(nlri.prefix, &selected, bgp, peers);
 }
 
+/// Record one RTC membership advertised by `peer_id`.
+///
+/// Only a fully specified 96-bit prefix names an exact Route Target, and only
+/// those go in the set. The RFC 4684 §3.2 default membership (prefix length 0)
+/// asks for *every* RT, and a partial prefix constrains a range that
+/// `rtc_match`'s exact-equality set cannot express. Adding nothing for either
+/// leaves `peer.rtcv4` empty, which every filter site reads as "this peer
+/// declared no RT constraint" and advertises everything — the behaviour the
+/// default membership asks for, and the safe direction for a partial one: RTC
+/// is an optimisation, so over-advertising only costs bandwidth while
+/// under-advertising blackholes VPN routes.
+///
+/// Known gap: a peer that mixes an exact RT with a default or partial
+/// membership is still filtered to just the exact one, because "wants
+/// everything" has no representation separate from "said nothing". No
+/// implementation sends that combination, and expressing it would need a
+/// distinct flag threaded through all seven filter sites.
 pub fn route_ipv4_rtc_update(peer_id: usize, rtcv4: &Rtcv4, peers: &mut PeerMap) {
     let Some(peer) = peers.get_mut_by_idx(peer_id) else {
         return;
     };
+    if !rtcv4.is_exact() {
+        return;
+    }
     peer.rtcv4.insert(rtcv4.rt.clone());
 }
 
+/// IPv6 counterpart of [`route_ipv4_rtc_update`]; same membership semantics.
 pub fn route_ipv6_rtc_update(peer_id: usize, rtcv6: &Rtcv6, peers: &mut PeerMap) {
     let Some(peer) = peers.get_mut_by_idx(peer_id) else {
         return;
     };
+    if !rtcv6.is_exact() {
+        return;
+    }
     peer.rtcv6.insert(rtcv6.rt.clone());
 }
 
@@ -8326,7 +8359,7 @@ fn mup_send_one(peer: &mut Peer, afi: Afi, route: MupRoute, attr: &Arc<BgpAttr>,
         updates: vec![route],
     });
     update.bgp_attr = Some(attr.as_ref().clone());
-    peer.send_packet(update.into());
+    peer.send_update(update);
 }
 
 /// Build the Adj-RIB-Out entry recording one advertised MUP route. MUP
@@ -8425,7 +8458,7 @@ fn mup_withdraw_one(peer: &mut Peer, rd: RouteDistinguisher, prefix: &MupPrefix)
         afi: prefix.afi(),
         withdraws: vec![route],
     });
-    peer.send_packet(update.into());
+    peer.send_update(update);
 }
 
 /// Withdraw a MUP prefix from every Established `(afi, Mup)` peer. The
@@ -8602,7 +8635,7 @@ pub fn route_sync_mup(peer: &mut Peer, bgp: &mut BgpTop) {
                 afi,
                 withdraws: vec![],
             });
-            peer.send_packet(update.into());
+            peer.send_update(update);
         }
     }
 }
@@ -9449,7 +9482,7 @@ fn send_flowspec_one(peer: &mut Peer, afi: Afi, nlri: FlowspecNlri, attr: Arc<Bg
         updates: vec![nlri],
     });
     update.bgp_attr = Some((*attr).clone());
-    peer.send_packet(update.into());
+    peer.send_update(update);
 }
 
 /// Advertise a flow spec's best path to every Established peer that has
@@ -9510,7 +9543,7 @@ pub fn route_withdraw_flowspec_to_peers(afi: Afi, nlri: &FlowspecNlri, peers: &m
             afi,
             withdraws: vec![nlri.clone()],
         });
-        peer.send_packet(update.into());
+        peer.send_update(update);
     }
 }
 
@@ -11372,7 +11405,7 @@ pub fn route_update_ipv6(
 pub(super) fn route_withdraw_ipv6(peer: &mut Peer, prefix: Ipv6Net, id: u32) {
     let mut update = UpdatePacket::with_max_packet_size(peer.max_packet_size());
     update.mp_withdraw = Some(MpUnreachAttr::Ipv6Nlri(vec![Ipv6Nlri { id, prefix }]));
-    peer.send_packet(update.into());
+    peer.send_update(update);
 }
 
 /// v6 twin of [`withdraw_ipv4_deferrable`] — defer the per-peer
@@ -11516,7 +11549,7 @@ fn route_withdraw_vpnv6(peer: &mut Peer, rd: RouteDistinguisher, prefix: Ipv6Net
         nlri: Ipv6Nlri { id, prefix },
     };
     update.mp_withdraw = Some(MpUnreachAttr::Vpnv6(vec![vpnv6_nlri]));
-    peer.send_packet(update.into());
+    peer.send_update(update);
 }
 
 /// VPNv6 advertise — the v6 counterpart of the `rd.is_some()` branch
@@ -11971,13 +12004,13 @@ fn route_advertise_labeled<A: LabeledAfi>(
                 let mut update = UpdatePacket::with_max_packet_size(peer.max_packet_size());
                 update.bgp_attr = Some(attr);
                 update.mp_update = Some(A::reach(nhop, label, nlri));
-                peer.send_packet(update.into());
+                peer.send_update(update);
             }
             None => {
                 if A::adj_out_contains(peer, &prefix) {
                     let mut update = UpdatePacket::with_max_packet_size(peer.max_packet_size());
                     update.mp_withdraw = Some(A::unreach(prefix, 0));
-                    peer.send_packet(update.into());
+                    peer.send_update(update);
                     A::adj_out_remove(peer, prefix, 0);
                 }
             }
@@ -12022,7 +12055,7 @@ fn route_advertise_labeled<A: LabeledAfi>(
             let mut update = UpdatePacket::with_max_packet_size(peer.max_packet_size());
             update.bgp_attr = Some(decision.attr);
             update.mp_update = Some(A::reach(nhop, label, nlri));
-            peer.send_packet(update.into());
+            peer.send_update(update);
             A::adj_out_add(peer, prefix, cand.clone());
             newly.insert(cand.local_id);
         }
@@ -12032,7 +12065,7 @@ fn route_advertise_labeled<A: LabeledAfi>(
             }
             let mut update = UpdatePacket::with_max_packet_size(peer.max_packet_size());
             update.mp_withdraw = Some(A::unreach(prefix, id));
-            peer.send_packet(update.into());
+            peer.send_update(update);
             A::adj_out_remove(peer, prefix, id);
         }
     }
@@ -12086,6 +12119,20 @@ fn enqueue_update(
 impl Peer {
     pub fn send_packet(&self, bytes: BytesMut) {
         enqueue_update(&self.packet_tx, &self.egress_depth, self.address, bytes);
+    }
+
+    /// Serialise and enqueue one UPDATE.
+    ///
+    /// An UPDATE whose length fields cannot describe it has no valid encoding,
+    /// so it is dropped and logged rather than put on the wire: emitting it
+    /// would wrap the header Length and desynchronise the peer's framing for
+    /// every message after it. Reaching this is a local batching bug — callers
+    /// must chunk to `max_packet_size` — so the log is the useful part.
+    pub fn send_update(&self, update: UpdatePacket) {
+        match update.try_emit() {
+            Ok(bytes) => self.send_packet(bytes),
+            Err(e) => tracing::warn!("dropping UPDATE to {}: {}", self.address, e),
+        }
     }
 
     pub fn send_vpnv4(&mut self, nlri: Vpnv4Nlri, attr: Arc<BgpAttr>, timer: bool) {
@@ -13278,13 +13325,13 @@ pub fn route_sync_vpnv6(peer: &mut Peer, bgp: &mut BgpTop) {
 fn send_eor_vpnv6_vpn(peer: &mut Peer) {
     let mut update = UpdatePacket::with_max_packet_size(peer.max_packet_size());
     update.mp_withdraw = Some(MpUnreachAttr::Vpnv6Eor);
-    peer.send_packet(update.into());
+    peer.send_update(update);
 }
 
 // Send End-of-RIB marker for IPv4 Unicast.
 pub(super) fn send_eor_ipv4_unicast(peer: &mut Peer) {
     let update = UpdatePacket::with_max_packet_size(peer.max_packet_size());
-    peer.send_packet(update.into());
+    peer.send_update(update);
 }
 
 // Send End-of-RIB marker for IPv6 Unicast: an empty MP_UNREACH(AFI=2,
@@ -13292,14 +13339,14 @@ pub(super) fn send_eor_ipv4_unicast(peer: &mut Peer) {
 fn send_eor_ipv6_unicast(peer: &mut Peer) {
     let mut update = UpdatePacket::with_max_packet_size(peer.max_packet_size());
     update.mp_withdraw = Some(MpUnreachAttr::Ipv6Eor);
-    peer.send_packet(update.into());
+    peer.send_update(update);
 }
 
 // Send End-of-RIB marker for VPNv4 Unicast.
 fn send_eor_vpnv4_unicast(peer: &mut Peer) {
     let mut update = UpdatePacket::with_max_packet_size(peer.max_packet_size());
     update.mp_withdraw = Some(MpUnreachAttr::Vpnv4Eor);
-    peer.send_packet(update.into());
+    peer.send_update(update);
 }
 
 // Advertise our Route Target Constraint membership (RFC 4684): one
@@ -13323,11 +13370,7 @@ fn send_rtcv4_membership(peer: &mut Peer, bgp: &BgpTop) {
             // mark it as a Route Target (RFC 4360 §4, sub-type 0x02).
             let mut val: ExtCommunityValue = rt.into();
             val.low_type = 0x02;
-            updates.push(Rtcv4 {
-                id: 0,
-                asn: peer.local_as,
-                rt: val,
-            });
+            updates.push(Rtcv4::new(peer.local_as, val));
         }
     }
 
@@ -13342,14 +13385,14 @@ fn send_rtcv4_membership(peer: &mut Peer, bgp: &BgpTop) {
         nhop: IpAddr::V4(Ipv4Addr::UNSPECIFIED),
         updates,
     }));
-    peer.send_packet(update.into());
+    peer.send_update(update);
 }
 
 // Send End-of-RIB marker for RTCv4.
 fn send_eor_rtcv4_unicast(peer: &mut Peer) {
     let mut update = UpdatePacket::with_max_packet_size(peer.max_packet_size());
     update.mp_withdraw = Some(MpUnreachAttr::Rtcv4Eor);
-    peer.send_packet(update.into());
+    peer.send_update(update);
 }
 
 // IPv6 counterpart of `send_rtcv4_membership`: advertise our Route
@@ -13367,11 +13410,7 @@ fn send_rtcv6_membership(peer: &mut Peer, bgp: &BgpTop) {
         for rt in rts {
             let mut val: ExtCommunityValue = rt.into();
             val.low_type = 0x02;
-            updates.push(Rtcv6 {
-                id: 0,
-                asn: peer.local_as,
-                rt: val,
-            });
+            updates.push(Rtcv6::new(peer.local_as, val));
         }
     }
 
@@ -13386,14 +13425,14 @@ fn send_rtcv6_membership(peer: &mut Peer, bgp: &BgpTop) {
         nhop: IpAddr::V6(std::net::Ipv6Addr::UNSPECIFIED),
         updates,
     }));
-    peer.send_packet(update.into());
+    peer.send_update(update);
 }
 
 // Send End-of-RIB marker for RTCv6.
 fn send_eor_rtcv6_unicast(peer: &mut Peer) {
     let mut update = UpdatePacket::with_max_packet_size(peer.max_packet_size());
     update.mp_withdraw = Some(MpUnreachAttr::Rtcv6Eor);
-    peer.send_packet(update.into());
+    peer.send_update(update);
 }
 
 // Send End-of-RIB marker for L2VPN/EVPN. RFC 4724 §2 represents EoR
@@ -13402,7 +13441,7 @@ fn send_eor_rtcv6_unicast(peer: &mut Peer) {
 fn send_eor_evpn(peer: &mut Peer) {
     let mut update = UpdatePacket::with_max_packet_size(peer.max_packet_size());
     update.mp_withdraw = Some(MpUnreachAttr::EvpnEor);
-    peer.send_packet(update.into());
+    peer.send_update(update);
 }
 
 /// Replay every selected EVPN route from the local-RIB to a peer
@@ -13516,7 +13555,7 @@ pub fn route_sync_labelv4(peer: &mut Peer, bgp: &mut BgpTop) {
             nhop,
             updates: vec![Labelv4Nlri { label, nlri }],
         });
-        peer.send_packet(update.into());
+        peer.send_update(update);
         // Register the dump in the per-peer LU Adj-RIB-Out so a later
         // withdraw reaches a peer that learned the prefix only via this
         // session-up dump (the event-driven LU withdraw gates on
@@ -13564,7 +13603,7 @@ pub fn route_sync_labelv6(peer: &mut Peer, bgp: &mut BgpTop) {
             nhop,
             updates: vec![Labelv6Nlri { label, nlri }],
         });
-        peer.send_packet(update.into());
+        peer.send_update(update);
         // See route_sync_labelv4: register so a later withdraw reaches a
         // peer that learned the prefix only via this session-up dump.
         peer.adj_out.v6lu.add(prefix, best);

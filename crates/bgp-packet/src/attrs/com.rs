@@ -1,5 +1,6 @@
 use bytes::{BufMut, BytesMut};
 use nom::IResult;
+use nom::error::{ErrorKind, make_error};
 use nom_derive::Parse;
 use std::collections::{BTreeSet, HashMap};
 use std::fmt;
@@ -52,6 +53,16 @@ impl<'a> Parse<&'a [u8]> for Community {
         Self::parse_be(input)
     }
     fn parse_be(input: &'a [u8]) -> IResult<&'a [u8], Self> {
+        // RFC 7606 §7.8: "The Community attribute SHALL be considered malformed
+        // if its length is not a non-zero multiple of 4." Without this the
+        // `Vec<u32>` decode simply stopped at the last whole value and the
+        // attribute path discarded the remainder, so a 6-octet payload yielded
+        // one community and silently dropped two octets — the route installed as
+        // though the sender had never written them. `ClusterList` already
+        // enforces its own width this way.
+        if input.is_empty() || !input.len().is_multiple_of(4) {
+            return Err(nom::Err::Error(make_error(input, ErrorKind::LengthValue)));
+        }
         let (input, values) = <Vec<u32>>::parse_be(input)?;
         Ok((input, values.into_iter().collect()))
     }

@@ -2,37 +2,65 @@ use std::net::{IpAddr, Ipv6Addr};
 
 use bytes::{BufMut, BytesMut};
 use nom::IResult;
-use nom::error::{ErrorKind, make_error};
-use nom::number::complete::{be_u8, be_u32};
-use nom_derive::*;
 
 use crate::{Afi, ExtCommunityValue, ParseNlri, Safi};
 
+use super::nlri_rtcv4::{RTC_PLEN_MAX, emit_rtc_membership, parse_rtc_membership};
 use super::{AttrEmitter, AttrFlags, AttrType};
 
 /// One IPv6 Route Target Constraint membership NLRI. The on-wire NLRI
 /// is identical to the IPv4 form ([`crate::Rtcv4`], RFC 4684 §4): a
-/// 96-bit prefix of 4-octet origin-AS + 8-octet Route Target. zebra-rs
+/// prefix of at most 96 bits over a 4-octet origin-AS + 8-octet Route
+/// Target, so both families share one reader and writer. zebra-rs
 /// models the v6 family as its own `(Ip6, Rtc)` capability so VPNv6
 /// import-RTs are advertised independently of VPNv4's.
 #[derive(Debug, Clone)]
 pub struct Rtcv6 {
     pub id: u32,
+    /// Prefix length in bits, `0..=96`; see [`Rtcv4::plen`](crate::Rtcv4).
+    pub plen: u8,
     pub asn: u32,
     pub rt: ExtCommunityValue,
 }
 
+impl Rtcv6 {
+    /// A fully specified membership naming one exact Route Target.
+    pub fn new(asn: u32, rt: ExtCommunityValue) -> Self {
+        Self {
+            id: 0,
+            plen: RTC_PLEN_MAX,
+            asn,
+            rt,
+        }
+    }
+
+    /// The RFC 4684 §3.2 default membership: a zero-length prefix asking for
+    /// every Route Target.
+    pub fn default_membership() -> Self {
+        Self {
+            id: 0,
+            plen: 0,
+            asn: 0,
+            rt: ExtCommunityValue::default(),
+        }
+    }
+
+    /// True only for a full 96-bit prefix, i.e. the one case where `rt` names an
+    /// exact Route Target.
+    pub fn is_exact(&self) -> bool {
+        self.plen == RTC_PLEN_MAX
+    }
+
+    /// True for the RFC 4684 §3.2 default membership ("send me everything").
+    pub fn is_default(&self) -> bool {
+        self.plen == 0
+    }
+}
+
 impl ParseNlri<Rtcv6> for Rtcv6 {
     fn parse_nlri(input: &[u8], addpath: bool) -> IResult<&[u8], Rtcv6> {
-        let (input, id) = if addpath { be_u32(input)? } else { (input, 0) };
-        let (input, plen) = be_u8(input)?;
-        if plen != 96 {
-            return Err(nom::Err::Error(make_error(input, ErrorKind::LengthValue)));
-        }
-        let (input, asn) = be_u32(input)?;
-        let (input, rt) = ExtCommunityValue::parse_be(input)?;
-        let nlri = Rtcv6 { id, asn, rt };
-        Ok((input, nlri))
+        let (input, (id, plen, asn, rt)) = parse_rtc_membership(input, addpath)?;
+        Ok((input, Rtcv6 { id, plen, asn, rt }))
     }
 }
 
@@ -71,20 +99,14 @@ impl AttrEmitter for Rtcv6Reach {
         if self.updates.is_empty() {
             // Zero prefix length: the default RT membership of
             // RFC 4684 §3.2 — "interested in all Route Targets".
-            buf.put_u8(0);
+            emit_rtc_membership(buf, 0, 0, 0, &ExtCommunityValue::default());
         } else {
-            // Each membership NLRI is a 96-bit prefix: the 4-octet
-            // origin-AS followed by the 8-octet Route Target extended
-            // community (RFC 4684 §4). Mirrors `Rtcv6::parse_nlri`,
-            // which reads the AddPath id (when negotiated), the
-            // prefix length, the AS, then the RT.
+            // Each membership NLRI is the AddPath id (when negotiated), the
+            // prefix length, and that many bits of 4-octet origin-AS followed
+            // by 8-octet Route Target (RFC 4684 §4). Shares its encoder with
+            // `Rtcv6::parse_nlri`'s reader so the two cannot drift.
             for update in self.updates.iter() {
-                if update.id != 0 {
-                    buf.put_u32(update.id);
-                }
-                buf.put_u8(96);
-                buf.put_u32(update.asn);
-                update.rt.encode(buf);
+                emit_rtc_membership(buf, update.id, update.plen, update.asn, &update.rt);
             }
         }
     }
@@ -111,14 +133,15 @@ impl AttrEmitter for Rtcv6Unreach {
         // AFI/SAFI.
         buf.put_u16(u16::from(Afi::Ip6));
         buf.put_u8(u8::from(Safi::Rtc));
-        // Prefix.
+        // A withdrawn membership uses the same NLRI encoding as MP_REACH
+        // (RFC 4684 §4), so it shares the encoder. The hand-rolled loop this
+        // replaces wrote only the 8-octet Route Target, omitting the prefix
+        // length and origin AS that `Rtcv6::parse_nlri` reads back — a receiver
+        // would have read the RT's first octet as the prefix length and
+        // rejected it. Dormant so far: `mp_unreach.rs` only ever builds this
+        // with an empty `withdraw` (the End-of-RIB marker).
         for withdraw in self.withdraw.iter() {
-            // AddPath
-            if withdraw.id != 0 {
-                buf.put_u32(withdraw.id);
-            }
-            // RD
-            withdraw.rt.encode(buf);
+            emit_rtc_membership(buf, withdraw.id, withdraw.plen, withdraw.asn, &withdraw.rt);
         }
     }
 }
@@ -142,11 +165,7 @@ mod tests {
         let reach = Rtcv6Reach {
             snpa: 0,
             nhop: IpAddr::V6(Ipv6Addr::UNSPECIFIED),
-            updates: vec![Rtcv6 {
-                id: 0,
-                asn: 65001,
-                rt: rt.clone(),
-            }],
+            updates: vec![Rtcv6::new(65001, rt.clone())],
         };
 
         let mut buf = BytesMut::new();
@@ -154,8 +173,28 @@ mod tests {
 
         let (rest, parsed) = Rtcv6::parse_nlri(&buf[HEADER_LEN..], false).unwrap();
         assert!(rest.is_empty());
+        assert_eq!(parsed.plen, RTC_PLEN_MAX);
         assert_eq!(parsed.asn, 65001);
         assert_eq!(parsed.rt, rt);
+        assert!(parsed.is_exact());
+    }
+
+    /// The IPv6 default membership round-trips too — the v6 NLRI shares the
+    /// v4 reader and writer, so this pins that the sharing holds.
+    #[test]
+    fn default_membership_round_trips() {
+        let reach = Rtcv6Reach {
+            snpa: 0,
+            nhop: IpAddr::V6(Ipv6Addr::UNSPECIFIED),
+            updates: vec![],
+        };
+        let mut buf = BytesMut::new();
+        reach.emit(&mut buf);
+
+        let (rest, parsed) = Rtcv6::parse_nlri(&buf[HEADER_LEN..], false).unwrap();
+        assert!(rest.is_empty());
+        assert!(parsed.is_default());
+        assert!(!parsed.is_exact());
     }
 
     #[test]

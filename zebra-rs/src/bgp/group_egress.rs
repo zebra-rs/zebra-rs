@@ -312,7 +312,13 @@ impl Engine {
                 .unwrap_or(4096);
             let mut update = UpdatePacket::with_max_packet_size(max);
             update.ipv4_withdraw.push(Ipv4Nlri { id, prefix });
-            self.fan(&[update.into()], source_ident);
+            // One withdrawn prefix cannot overflow a length field, but encode
+            // through the checked path anyway so no emit site can put a frame on
+            // the wire whose header contradicts its body.
+            match update.try_emit() {
+                Ok(bytes) => self.fan(&[bytes], source_ident),
+                Err(e) => tracing::warn!("dropping IPv4 withdraw for {}: {}", prefix, e),
+            }
         }
     }
 

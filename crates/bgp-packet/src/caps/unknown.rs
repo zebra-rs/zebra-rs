@@ -3,21 +3,20 @@ use std::fmt;
 use bytes::{BufMut, BytesMut};
 use nom_derive::*;
 
-use super::{CapCode, CapEmit, CapabilityHeader};
+use super::{CapCode, CapEmit};
 
-#[derive(Debug, PartialEq, NomBE, Clone)]
+#[derive(Debug, PartialEq, NomBE, Clone, Default)]
 pub struct CapUnknown {
-    pub header: CapabilityHeader,
+    /// Capability code, stamped in by `CapabilityPacket::parse_cap` after it has
+    /// stripped the code/length header. It is deliberately NOT parsed from the
+    /// value: the slice handed to this parser already has the 2-byte header
+    /// removed, so parsing a `CapabilityHeader` here would re-read two value
+    /// octets and fail on any capability (e.g. RFC 9234 Role, code 9 len 1)
+    /// whose value is shorter than two bytes — rejecting the whole OPEN instead
+    /// of ignoring the unknown capability as RFC 5492 requires.
+    #[nom(Ignore)]
+    pub code: u8,
     pub data: Vec<u8>,
-}
-
-impl Default for CapUnknown {
-    fn default() -> Self {
-        Self {
-            header: CapabilityHeader::new(CapCode::AddPath, 0),
-            data: Vec::new(),
-        }
-    }
 }
 
 impl CapUnknown {
@@ -38,7 +37,7 @@ impl CapUnknown {
 
 impl CapEmit for CapUnknown {
     fn code(&self) -> CapCode {
-        CapCode::Unknown(100)
+        CapCode::Unknown(self.code)
     }
 
     fn len(&self) -> u8 {
@@ -55,7 +54,7 @@ impl CapEmit for CapUnknown {
 
 impl fmt::Display for CapUnknown {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "Unknown: Code {}", self.header.code)
+        write!(f, "Unknown: Code {}", self.code)
     }
 }
 
@@ -65,7 +64,7 @@ mod tests {
 
     fn cap_with_data(n: usize) -> CapUnknown {
         CapUnknown {
-            header: CapabilityHeader::new(CapCode::Unknown(100), 0),
+            code: 100,
             data: vec![0xab; n],
         }
     }

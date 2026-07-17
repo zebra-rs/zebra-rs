@@ -26,7 +26,17 @@ pub enum AttrType {
     MpUnreachNlri = 15,
     ExtendedCom = 16,
     PmsiTunnel = 22,
-    ExtendedIpv6Com = 25,
+    // 25 — RFC 5701 IPv6 Address Specific Extended Community — is deliberately
+    // absent, and must only be re-added together with an
+    // `Attr::ExtendedIpv6Com` variant.
+    //
+    // Every code named here must have a matching `Attr` variant. Naming one
+    // without it is strictly worse than not recognising the code at all: the
+    // type stops matching `AttrType::Unknown`, so it skips the RFC 4271 §9
+    // handling below, reaches `parse_attr_value`, fails the derived Switch with
+    // no arm to select, and — not being a treat-as-withdraw attribute — resets
+    // the session. Left unnamed it decodes as `Unknown(25)` and takes the §9
+    // optional-transitive path: retained with the Partial bit and propagated.
     Aigp = 26,
     LargeCom = 32,
     PrefixSid = 40,
@@ -53,7 +63,6 @@ impl From<u8> for AttrType {
             15 => MpUnreachNlri,
             16 => ExtendedCom,
             22 => PmsiTunnel,
-            25 => ExtendedIpv6Com,
             26 => Aigp,
             32 => LargeCom,
             40 => PrefixSid,
@@ -82,7 +91,6 @@ impl From<AttrType> for u8 {
             MpUnreachNlri => 15,
             ExtendedCom => 16,
             PmsiTunnel => 22,
-            ExtendedIpv6Com => 25,
             Aigp => 26,
             LargeCom => 32,
             PrefixSid => 40,
@@ -325,7 +333,17 @@ impl Attr {
 /// tear the session down). Other attributes keep their existing
 /// (session-reset) handling.
 fn attr_malformation_is_withdraw(attr_type: AttrType) -> bool {
-    matches!(attr_type, AttrType::PrefixSid)
+    matches!(
+        attr_type,
+        // RFC 7606 §7.8: a Community attribute whose length is not a non-zero
+        // multiple of 4 is malformed and "SHALL be handled using the approach of
+        // 'treat-as-withdraw'".
+        AttrType::Community
+            // RFC 8092 §3 says the same of a Large Communities attribute whose
+            // length is not a non-zero multiple of 12.
+            | AttrType::LargeCom
+            | AttrType::PrefixSid
+    )
 }
 
 type ParsedAttributes<'a> = Result<
@@ -407,8 +425,22 @@ pub fn parse_bgp_update_attribute(
             Attr::Origin(v) => {
                 bgp_attr.origin = Some(v);
             }
-            Attr::As2Path(_v) => {
-                // TODO.
+            Attr::As2Path(v) => {
+                // Widen the 2-octet AS_PATH into the 4-octet form the rest of
+                // the crate uses (RFC 6793 §4.2.2). Discarding it left
+                // `bgp_attr.aspath` at None, so the route would be accepted with
+                // no AS_PATH at all — no loop detection, no path-length
+                // comparison — and re-advertised without a well-known mandatory
+                // attribute.
+                //
+                // Not reachable today: `peer_packet_parse` passes a hardcoded
+                // `as4 = true`, so AS_PATH always parses as `As4Path` and this
+                // arm runs only from tests. It is wired up so that sourcing
+                // `as4` from the negotiated capability cannot silently lose
+                // AS_PATHs. Doing that properly also needs AS4_PATH (type 17)
+                // to recover the 4-octet ASNs an OLD peer hides behind
+                // AS_TRANS; neither attribute is implemented here.
+                bgp_attr.aspath = Some(v.into());
             }
             Attr::As4Path(v) => {
                 bgp_attr.aspath = Some(v);
@@ -627,6 +659,156 @@ mod tests {
             }
             other => panic!("Flowspec MP_REACH must surface as mp_update, got {other:?}"),
         }
+    }
+
+    /// A Community attribute whose length is not a non-zero multiple of 4 is
+    /// malformed, and RFC 7606 §7.8 requires treat-as-withdraw rather than a
+    /// session reset.
+    #[test]
+    fn community_width_violations_are_treat_as_withdraw() {
+        // RFC 7606 §7.8: a Community attribute is malformed unless its length is
+        // a non-zero multiple of 4, and a malformed one "SHALL be handled using
+        // the approach of 'treat-as-withdraw'".
+        //
+        // Regression: the `Vec<u32>` decode stopped at the last whole value and
+        // the leftover was discarded, so a 6-octet payload parsed as one
+        // community, the two stray octets vanished, and the route installed.
+        for value in [
+            vec![0x00u8, 0x01, 0x00, 0x02, 0xAA, 0xBB], // 6: one value + 2 stray
+            vec![],                                     // 0: must be non-zero
+            vec![0x00, 0x01, 0x00],                     // 3: short of one value
+        ] {
+            let mut block = ORIGIN_IGP.to_vec();
+            block.extend_from_slice(&[0xC0, 8, value.len() as u8]);
+            block.extend_from_slice(&value);
+            let len = block.len() as u16;
+
+            let (_, bgp_attr, _, _, treat_as_withdraw) =
+                parse_bgp_update_attribute(&block, len, true, None)
+                    .expect("must not reset the session");
+            assert!(
+                treat_as_withdraw,
+                "COMMUNITIES length {} must be treat-as-withdraw",
+                value.len()
+            );
+            let bgp_attr = bgp_attr.expect("bgp_attr present");
+            assert!(
+                bgp_attr.com.is_none(),
+                "the malformed attribute is discarded"
+            );
+            assert!(bgp_attr.origin.is_some(), "other attributes still parse");
+        }
+    }
+
+    /// RFC 8092 §3: the same, for a Large Communities attribute whose length is
+    /// not a non-zero multiple of 12.
+    #[test]
+    fn large_community_width_violations_are_treat_as_withdraw() {
+        for n in [14usize, 0, 11] {
+            let mut block = ORIGIN_IGP.to_vec();
+            block.extend_from_slice(&[0xC0, 32, n as u8]);
+            block.extend(std::iter::repeat_n(0u8, n));
+            let len = block.len() as u16;
+
+            let (_, bgp_attr, _, _, treat_as_withdraw) =
+                parse_bgp_update_attribute(&block, len, true, None)
+                    .expect("must not reset the session");
+            assert!(
+                treat_as_withdraw,
+                "LARGE_COMMUNITY length {n} must be treat-as-withdraw"
+            );
+            assert!(bgp_attr.expect("bgp_attr").lcom.is_none());
+        }
+    }
+
+    /// Well-formed widths still parse, so the check rejects only real
+    /// violations.
+    #[test]
+    fn well_formed_community_widths_still_parse() {
+        let mut block = ORIGIN_IGP.to_vec();
+        block.extend_from_slice(&[0xC0, 8, 8, 0x00, 0x01, 0x00, 0x02, 0xFF, 0xFF, 0xFF, 0x01]);
+        let len = block.len() as u16;
+        let (_, bgp_attr, _, _, treat_as_withdraw) =
+            parse_bgp_update_attribute(&block, len, true, None).expect("must parse");
+        assert!(!treat_as_withdraw);
+        let com = bgp_attr
+            .expect("bgp_attr")
+            .com
+            .expect("communities present");
+        assert_eq!(com.0.len(), 2);
+        assert!(com.is_no_export());
+    }
+
+    /// An RFC 5701 IPv6 Address Specific Extended Community (type 25) must not
+    /// tear the session down. Regression: `AttrType` named the code without an
+    /// `Attr` variant to select, so it skipped the RFC 4271 §9 handling, failed
+    /// the derived Switch in `parse_attr_value`, and — not being a
+    /// treat-as-withdraw attribute — propagated the error out as a session
+    /// reset. Unnamed, it is `Unknown(25)`: optional+transitive, so retained
+    /// with the Partial bit and propagated.
+    #[test]
+    fn ipv6_ext_community_is_passed_through_not_session_reset() {
+        let mut block = ORIGIN_IGP.to_vec();
+        // flags 0xC0 (optional+transitive), type 25, length 20:
+        // type/sub-type 0x00/0x02 (RT), 2001:db8::1, local admin 100.
+        let mut v = vec![0xC0u8, 25, 20, 0x00, 0x02];
+        v.extend_from_slice(
+            &"2001:db8::1"
+                .parse::<std::net::Ipv6Addr>()
+                .unwrap()
+                .octets(),
+        );
+        v.extend_from_slice(&100u16.to_be_bytes());
+        block.extend_from_slice(&v);
+
+        let len = block.len() as u16;
+        let (_, bgp_attr, _, _, treat_as_withdraw) =
+            parse_bgp_update_attribute(&block, len, true, None)
+                .expect("an IPv6 ext-community must not reset the session");
+        assert!(!treat_as_withdraw);
+
+        let bgp_attr = bgp_attr.expect("bgp_attr present");
+        assert!(bgp_attr.origin.is_some(), "well-known attributes survive");
+        assert_eq!(bgp_attr.unknown.len(), 1, "retained for propagation");
+        let u = &bgp_attr.unknown[0];
+        assert_eq!(u.type_code, 25);
+        assert!(
+            AttributeFlags::from_bits_truncate(u.flags).contains(AttributeFlags::PARTIAL),
+            "RFC 4271 §9: Partial set on an unrecognized optional-transitive attribute"
+        );
+    }
+
+    // ---- 2-octet AS_PATH (RFC 6793 OLD-speaker encoding) --------------
+
+    /// A 2-octet AS_PATH must reach `bgp_attr.aspath`, widened to the 4-octet
+    /// form. Regression: the `Attr::As2Path` arm was an empty `// TODO`, so the
+    /// well-known mandatory AS_PATH was parsed and then silently dropped,
+    /// leaving `aspath` at None.
+    ///
+    /// Only reachable with `as4 = false`; `peer_packet_parse` hardcodes `true`
+    /// today, so this guards the wiring rather than live behaviour.
+    #[test]
+    fn as2_path_reaches_bgp_attr_widened() {
+        // ORIGIN = IGP, then AS_PATH (type 2, len 6): AS_SEQ of 65000 65001.
+        let mut block = vec![0x40, 0x01, 0x01, 0x00];
+        block.extend_from_slice(&[0x40, 0x02, 0x06, 0x02, 0x02, 0xfd, 0xe8, 0xfd, 0xe9]);
+
+        let len = block.len() as u16;
+        let (_, bgp_attr, _, _, treat_as_withdraw) =
+            parse_bgp_update_attribute(&block, len, false, None).expect("attrs must parse");
+        assert!(!treat_as_withdraw);
+
+        let aspath = bgp_attr
+            .expect("bgp_attr present")
+            .aspath
+            .expect("2-octet AS_PATH must not be dropped");
+        let flat: Vec<u32> = aspath
+            .segs
+            .iter()
+            .flat_map(|s| s.asn.iter().copied())
+            .collect();
+        assert_eq!(flat, vec![65000u32, 65001], "ASNs widened to 4 octets");
+        assert_eq!(aspath.length, 2, "hop count preserved");
     }
 
     // ---- RFC 4271 §9 unrecognized attribute handling -----------------

@@ -1,5 +1,6 @@
 use bytes::{BufMut, BytesMut};
 use nom::IResult;
+use nom::error::{ErrorKind, make_error};
 use nom_derive::{NomBE, Parse};
 use std::collections::BTreeSet;
 use std::fmt;
@@ -66,6 +67,15 @@ impl<'a> Parse<&'a [u8]> for LargeCommunity {
         Self::parse_be(input)
     }
     fn parse_be(input: &'a [u8]) -> IResult<&'a [u8], Self> {
+        // RFC 8092 §3: "A BGP Large Communities attribute SHALL be considered
+        // malformed if the length of the BGP Large Communities Attribute value,
+        // expressed in octets, is not a non-zero multiple of 12." Without this
+        // the `Vec<LargeCommunityValue>` decode stopped at the last whole value
+        // and the attribute path dropped the remainder, so a 14-octet payload
+        // yielded one value and discarded two octets.
+        if input.is_empty() || !input.len().is_multiple_of(12) {
+            return Err(nom::Err::Error(make_error(input, ErrorKind::LengthValue)));
+        }
         let (input, values) = <Vec<LargeCommunityValue>>::parse_be(input)?;
         Ok((input, values.into_iter().collect()))
     }
