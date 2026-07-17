@@ -12,7 +12,7 @@ use bytes::BufMut;
 use crate::{
     Afi, AttrFlags, AttrType, BgpLsNlri, EvpnRoute, FlowspecNlri, Ipv4Nlri, Ipv6Nlri, Labelv4Nlri,
     Labelv6Nlri, MupRoute, ParseBe, ParseNlri, ParseOption, Rtcv4, Rtcv6, Safi, SrPolicyNlri,
-    Vpnv4Nexthop, Vpnv4Nlri, Vpnv6Nexthop, Vpnv6Nlri, esi_display, many0_complete,
+    Vpnv4Nexthop, Vpnv4Nlri, Vpnv6Nexthop, Vpnv6Nlri, esi_display, parse_nlri_block,
 };
 
 use super::{AttrEmitter, RouteDistinguisher, Rtcv4Reach, Rtcv6Reach, Vpnv4Reach, Vpnv6Reach};
@@ -236,8 +236,7 @@ impl MpReachAttr {
                 _ => return Err(nom::Err::Error(make_error(input, ErrorKind::LengthValue))),
             };
             let (input, snpa) = be_u8(input)?;
-            let (_, updates) =
-                many0_complete(|i| Vpnv4Nlri::parse_nlri(i, add_path)).parse(input)?;
+            let (_, updates) = parse_nlri_block(input, |i| Vpnv4Nlri::parse_nlri(i, add_path))?;
             let nlri = Vpnv4Reach {
                 snpa,
                 nhop,
@@ -279,8 +278,7 @@ impl MpReachAttr {
                 _ => return Err(nom::Err::Error(make_error(input, ErrorKind::LengthValue))),
             };
             let (input, snpa) = be_u8(input)?;
-            let (_, updates) =
-                many0_complete(|i| Vpnv6Nlri::parse_nlri(i, add_path)).parse(input)?;
+            let (_, updates) = parse_nlri_block(input, |i| Vpnv6Nlri::parse_nlri(i, add_path))?;
             let nlri = Vpnv6Reach {
                 snpa,
                 nhop,
@@ -318,8 +316,7 @@ impl MpReachAttr {
                 _ => return Err(nom::Err::Error(make_error(input, ErrorKind::LengthValue))),
             };
             let (input, snpa) = be_u8(input)?;
-            let (_, updates) =
-                many0_complete(|i| Ipv4Nlri::parse_nlri(i, add_path)).parse(input)?;
+            let (_, updates) = parse_nlri_block(input, |i| Ipv4Nlri::parse_nlri(i, add_path))?;
             let mp_nlri = MpReachAttr::Ipv4 {
                 snpa,
                 nhop,
@@ -348,8 +345,7 @@ impl MpReachAttr {
             };
             let nhop = IpAddr::V6(nhop);
             let (input, snpa) = be_u8(input)?;
-            let (_, updates) =
-                many0_complete(|i| Ipv6Nlri::parse_nlri(i, add_path)).parse(input)?;
+            let (_, updates) = parse_nlri_block(input, |i| Ipv6Nlri::parse_nlri(i, add_path))?;
             let mp_nlri = MpReachAttr::Ipv6 {
                 snpa,
                 nhop,
@@ -379,8 +375,7 @@ impl MpReachAttr {
                 _ => return Err(nom::Err::Error(make_error(input, ErrorKind::LengthValue))),
             };
             let (input, snpa) = be_u8(input)?;
-            let (_, updates) =
-                many0_complete(|i| Labelv4Nlri::parse_nlri(i, add_path)).parse(input)?;
+            let (_, updates) = parse_nlri_block(input, |i| Labelv4Nlri::parse_nlri(i, add_path))?;
             let mp_nlri = MpReachAttr::Labelv4 {
                 snpa,
                 nhop,
@@ -405,8 +400,7 @@ impl MpReachAttr {
                 _ => return Err(nom::Err::Error(make_error(input, ErrorKind::LengthValue))),
             };
             let (input, snpa) = be_u8(input)?;
-            let (_, updates) =
-                many0_complete(|i| Labelv6Nlri::parse_nlri(i, add_path)).parse(input)?;
+            let (_, updates) = parse_nlri_block(input, |i| Labelv6Nlri::parse_nlri(i, add_path))?;
             let mp_nlri = MpReachAttr::Labelv6 {
                 snpa,
                 nhop,
@@ -431,8 +425,7 @@ impl MpReachAttr {
             let (input, snpa) = be_u8(input)?;
 
             // EVPN
-            let (input, updates) =
-                many0_complete(|i| EvpnRoute::parse_nlri(i, add_path)).parse(input)?;
+            let (input, updates) = parse_nlri_block(input, |i| EvpnRoute::parse_nlri(i, add_path))?;
 
             let mp_nlri = MpReachAttr::Evpn {
                 snpa,
@@ -464,7 +457,7 @@ impl MpReachAttr {
             };
             let (input, snpa) = be_u8(input)?;
             let (input, updates) =
-                many0_complete(|i| MupRoute::parse(i, add_path, header.afi)).parse(input)?;
+                parse_nlri_block(input, |i| MupRoute::parse(i, add_path, header.afi))?;
             let mp_nlri = MpReachAttr::Mup {
                 afi: header.afi,
                 snpa,
@@ -488,8 +481,7 @@ impl MpReachAttr {
                 (input, nhop)
             };
             let (input, snpa) = be_u8(input)?;
-            let (input, updates) =
-                many0_complete(|i| Rtcv4::parse_nlri(i, add_path)).parse(input)?;
+            let (input, updates) = parse_nlri_block(input, |i| Rtcv4::parse_nlri(i, add_path))?;
             let nlri = Rtcv4Reach {
                 snpa,
                 nhop,
@@ -508,7 +500,7 @@ impl MpReachAttr {
             let (input, _nhop) = take(header.nhop_len as usize).parse(input)?;
             let (input, _snpa) = be_u8(input)?;
             let (input, updates) =
-                many0_complete(|i| FlowspecNlri::parse(i, add_path, header.afi)).parse(input)?;
+                parse_nlri_block(input, |i| FlowspecNlri::parse(i, add_path, header.afi))?;
             let mp_nlri = MpReachAttr::Flowspec {
                 afi: header.afi,
                 updates,
@@ -530,8 +522,7 @@ impl MpReachAttr {
                 (input, nhop)
             };
             let (input, snpa) = be_u8(input)?;
-            let (input, updates) =
-                many0_complete(|i| Rtcv6::parse_nlri(i, add_path)).parse(input)?;
+            let (input, updates) = parse_nlri_block(input, |i| Rtcv6::parse_nlri(i, add_path))?;
             let nlri = Rtcv6Reach {
                 snpa,
                 nhop,
@@ -563,7 +554,7 @@ impl MpReachAttr {
             };
             let (input, snpa) = be_u8(input)?;
             let (input, updates) =
-                many0_complete(|i| SrPolicyNlri::parse(i, add_path, header.afi)).parse(input)?;
+                parse_nlri_block(input, |i| SrPolicyNlri::parse(i, add_path, header.afi))?;
             let mp_nlri = MpReachAttr::SrPolicy {
                 afi: header.afi,
                 snpa,
@@ -585,8 +576,7 @@ impl MpReachAttr {
                 (input, IpAddr::V6(Ipv6Addr::from(addr)))
             };
             let (input, _snpa) = be_u8(input)?;
-            let (input, updates) =
-                many0_complete(|i| BgpLsNlri::parse(i, add_path)).parse(input)?;
+            let (input, updates) = parse_nlri_block(input, |i| BgpLsNlri::parse(i, add_path))?;
             return Ok((input, MpReachAttr::LinkState { nhop, updates }));
         }
         Err(nom::Err::Error(make_error(input, ErrorKind::NoneOf)))
@@ -1202,6 +1192,40 @@ pub(crate) fn linkstate_attr_emit(nhop: &IpAddr, updates: &[BgpLsNlri], buf: &mu
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A malformed NLRI must fail the whole block rather than silently
+    /// truncating it. Regression: every arm read its NLRI with a bare
+    /// `many0_complete` and discarded the leftover, so `[valid, malformed]`
+    /// parsed as `Ok([valid])` — the peer believed it advertised routes we
+    /// never installed, and nothing anywhere raised an error. RFC 7606 §3(j)
+    /// requires the session-reset approach when the affected routes cannot be
+    /// determined, which is exactly the case once an NLRI fails to parse.
+    #[test]
+    fn malformed_nlri_fails_the_block_instead_of_truncating_it() {
+        // afi=1 safi=1, nhop_len=4, nhop 192.0.2.1, snpa=0, then the NLRI:
+        //   [24, 10,0,0]    -> 10.0.0.0/24, valid
+        //   [33, 1,2,3,4,5] -> prefix length 33 exceeds 32, malformed
+        let payload = [
+            0x00u8, 0x01, 0x01, 0x04, 0xC0, 0x00, 0x02, 0x01, 0x00, //
+            24, 10, 0, 0, //
+            33, 1, 2, 3, 4, 5,
+        ];
+        assert!(
+            MpReachAttr::parse_nlri_opt(&payload, None).is_err(),
+            "a malformed NLRI must not be swallowed with the rest of the block"
+        );
+
+        // The same block without the malformed entry still parses, so the check
+        // rejects only genuinely short-stopping blocks.
+        let ok = [
+            0x00u8, 0x01, 0x01, 0x04, 0xC0, 0x00, 0x02, 0x01, 0x00, 24, 10, 0, 0,
+        ];
+        let (_, attr) = MpReachAttr::parse_nlri_opt(&ok, None).expect("well-formed must parse");
+        match attr {
+            MpReachAttr::Ipv4 { updates, .. } => assert_eq!(updates.len(), 1),
+            other => panic!("expected Ipv4, got {other:?}"),
+        }
+    }
 
     /// Hand-rolled MP_REACH value (no attr header — `parse_nlri_opt`
     /// reads just the inner value): AFI + SAFI + nhop_len + nhop +

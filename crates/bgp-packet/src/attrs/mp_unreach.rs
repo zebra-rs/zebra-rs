@@ -7,7 +7,7 @@ use nom_derive::*;
 use crate::{
     Afi, AttrFlags, AttrType, BgpLsNlri, EvpnRoute, FlowspecNlri, Ipv6Nlri, Labelv4Nlri,
     Labelv6Nlri, MupRoute, ParseBe, ParseNlri, ParseOption, Rtcv4, Rtcv4Unreach, Rtcv6,
-    Rtcv6Unreach, Safi, SrPolicyNlri, Vpnv4Nlri, Vpnv6Nlri, many0_complete,
+    Rtcv6Unreach, Safi, SrPolicyNlri, Vpnv4Nlri, Vpnv6Nlri, parse_nlri_block,
 };
 
 use super::{AttrEmitter, Vpnv4Unreach, Vpnv6Unreach};
@@ -425,7 +425,7 @@ impl MpUnreachAttr {
                 return Ok((input, mp_nlri));
             }
             let (input, withdrawal) =
-                many0_complete(|i| Vpnv4Nlri::parse_nlri(i, add_path)).parse(input)?;
+                parse_nlri_block(input, |i| Vpnv4Nlri::parse_nlri(i, add_path))?;
             let mp_nlri = MpUnreachAttr::Vpnv4(withdrawal);
             return Ok((input, mp_nlri));
         }
@@ -435,7 +435,7 @@ impl MpUnreachAttr {
                 return Ok((input, mp_nlri));
             }
             let (input, withdrawal) =
-                many0_complete(|i| Vpnv6Nlri::parse_nlri(i, add_path)).parse(input)?;
+                parse_nlri_block(input, |i| Vpnv6Nlri::parse_nlri(i, add_path))?;
             let mp_nlri = MpUnreachAttr::Vpnv6(withdrawal);
             return Ok((input, mp_nlri));
         }
@@ -445,7 +445,7 @@ impl MpUnreachAttr {
                 return Ok((input, mp_nlri));
             }
             let (input, withdrawal) =
-                many0_complete(|i| Ipv6Nlri::parse_nlri(i, add_path)).parse(input)?;
+                parse_nlri_block(input, |i| Ipv6Nlri::parse_nlri(i, add_path))?;
             let mp_nlri = MpUnreachAttr::Ipv6Nlri(withdrawal);
             return Ok((input, mp_nlri));
         }
@@ -454,7 +454,7 @@ impl MpUnreachAttr {
                 return Ok((input, MpUnreachAttr::Labelv4Eor));
             }
             let (input, withdrawal) =
-                many0_complete(|i| Labelv4Nlri::parse_nlri(i, add_path)).parse(input)?;
+                parse_nlri_block(input, |i| Labelv4Nlri::parse_nlri(i, add_path))?;
             return Ok((input, MpUnreachAttr::Labelv4(withdrawal)));
         }
         if header.afi == Afi::Ip6 && header.safi == Safi::MplsLabel {
@@ -462,7 +462,7 @@ impl MpUnreachAttr {
                 return Ok((input, MpUnreachAttr::Labelv6Eor));
             }
             let (input, withdrawal) =
-                many0_complete(|i| Labelv6Nlri::parse_nlri(i, add_path)).parse(input)?;
+                parse_nlri_block(input, |i| Labelv6Nlri::parse_nlri(i, add_path))?;
             return Ok((input, MpUnreachAttr::Labelv6(withdrawal)));
         }
         if header.afi == Afi::L2vpn && header.safi == Safi::Evpn {
@@ -470,8 +470,7 @@ impl MpUnreachAttr {
                 let mp_nlri = MpUnreachAttr::EvpnEor;
                 return Ok((input, mp_nlri));
             }
-            let (input, evpns) =
-                many0_complete(|i| EvpnRoute::parse_nlri(i, add_path)).parse(input)?;
+            let (input, evpns) = parse_nlri_block(input, |i| EvpnRoute::parse_nlri(i, add_path))?;
             let mp_nlri = MpUnreachAttr::Evpn(evpns);
             return Ok((input, mp_nlri));
         }
@@ -486,7 +485,7 @@ impl MpUnreachAttr {
                 ));
             }
             let (input, withdraws) =
-                many0_complete(|i| MupRoute::parse(i, add_path, header.afi)).parse(input)?;
+                parse_nlri_block(input, |i| MupRoute::parse(i, add_path, header.afi))?;
             return Ok((
                 input,
                 MpUnreachAttr::Mup {
@@ -500,7 +499,7 @@ impl MpUnreachAttr {
                 let mp_nlri = MpUnreachAttr::Rtcv4Eor;
                 return Ok((input, mp_nlri));
             }
-            let (input, rtcv4) = many0_complete(|i| Rtcv4::parse_nlri(i, add_path)).parse(input)?;
+            let (input, rtcv4) = parse_nlri_block(input, |i| Rtcv4::parse_nlri(i, add_path))?;
             let mp_nlri = MpUnreachAttr::Rtcv4(rtcv4);
             return Ok((input, mp_nlri));
         }
@@ -515,7 +514,7 @@ impl MpUnreachAttr {
                 ));
             }
             let (input, withdraws) =
-                many0_complete(|i| FlowspecNlri::parse(i, add_path, header.afi)).parse(input)?;
+                parse_nlri_block(input, |i| FlowspecNlri::parse(i, add_path, header.afi))?;
             return Ok((
                 input,
                 MpUnreachAttr::Flowspec {
@@ -529,7 +528,7 @@ impl MpUnreachAttr {
                 let mp_nlri = MpUnreachAttr::Rtcv6Eor;
                 return Ok((input, mp_nlri));
             }
-            let (input, rtcv6) = many0_complete(|i| Rtcv6::parse_nlri(i, add_path)).parse(input)?;
+            let (input, rtcv6) = parse_nlri_block(input, |i| Rtcv6::parse_nlri(i, add_path))?;
             let mp_nlri = MpUnreachAttr::Rtcv6(rtcv6);
             return Ok((input, mp_nlri));
         }
@@ -544,7 +543,7 @@ impl MpUnreachAttr {
                 ));
             }
             let (input, withdraws) =
-                many0_complete(|i| SrPolicyNlri::parse(i, add_path, header.afi)).parse(input)?;
+                parse_nlri_block(input, |i| SrPolicyNlri::parse(i, add_path, header.afi))?;
             return Ok((
                 input,
                 MpUnreachAttr::SrPolicy {
@@ -557,8 +556,7 @@ impl MpUnreachAttr {
             if input.is_empty() {
                 return Ok((input, MpUnreachAttr::LinkState { withdraws: vec![] }));
             }
-            let (input, withdraws) =
-                many0_complete(|i| BgpLsNlri::parse(i, add_path)).parse(input)?;
+            let (input, withdraws) = parse_nlri_block(input, |i| BgpLsNlri::parse(i, add_path))?;
             return Ok((input, MpUnreachAttr::LinkState { withdraws }));
         }
         Err(nom::Err::Error(make_error(input, ErrorKind::NoneOf)))

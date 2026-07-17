@@ -58,6 +58,40 @@ pub fn nlri_psize(plen: u8) -> usize {
     plen.div_ceil(8).into()
 }
 
+/// Parse an MP_REACH / MP_UNREACH NLRI block to exhaustion, rejecting a block
+/// that does not consume exactly.
+///
+/// `many0_complete` alone stops at the first element that fails to parse and
+/// hands back whatever it accumulated, so a malformed NLRI silently yields "the
+/// routes before it, and nothing after" — the peer believes it advertised routes
+/// we never installed, and no error is raised anywhere. That is the one outcome
+/// RFC 7606 never permits.
+///
+/// Erroring here is the correct action, not merely a stricter one: §3(j)
+/// requires that treat-as-withdraw be used only when the affected routes can be
+/// determined, and "if this is not possible ... the 'session reset' approach (or
+/// the 'AFI/SAFI disable' approach) MUST be followed". Once an NLRI fails to
+/// parse, the rest of the block cannot be located, so the affected routes are
+/// exactly what cannot be determined. `attr_malformation_is_withdraw` already
+/// leaves MP_REACH/MP_UNREACH out of the treat-as-withdraw set, so this error
+/// reaches the session-reset path the RFC asks for.
+pub fn parse_nlri_block<'a, O, F>(input: &'a [u8], parser: F) -> nom::IResult<&'a [u8], Vec<O>>
+where
+    F: nom::Parser<&'a [u8], Output = O, Error = nom::error::Error<&'a [u8]>>,
+{
+    use nom::Parser as _;
+    let (rest, items) = crate::many0_complete(parser).parse(input)?;
+    if !rest.is_empty() {
+        // Unconsumed octets mean an element stopped the list early: the block is
+        // malformed, not merely finished.
+        return Err(nom::Err::Error(nom::error::make_error(
+            rest,
+            nom::error::ErrorKind::LengthValue,
+        )));
+    }
+    Ok((rest, items))
+}
+
 pub fn peek_bgp_length(input: &[u8]) -> Option<usize> {
     if input.len() < BGP_HEADER_LEN.into() {
         return None;
