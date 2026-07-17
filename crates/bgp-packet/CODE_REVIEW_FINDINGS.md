@@ -251,9 +251,43 @@ silently resolves to the wrong function; use `.into()`.
   re-advertised without one, instead of being converted to 4-byte form or rejected
   as a missing well-known-mandatory attribute.
 
-### 6. IPv6 extended community local-admin emitted native-endian — CONFIRMED
+### 6. IPv6 extended community local-admin emitted native-endian — CONFIRMED (code) / NOT REACHABLE (scenario) — ✅ FIXED
 - **File:** `src/attrs/ext_ipv6_com.rs:68`
 - **Category:** correctness
+- **Status / verdict correction:** The coding defects are all real and are fixed,
+  but the stated failure scenario **cannot happen**: `ExtIpv6Community` has no
+  references outside its own module, so nothing ever calls `from_str`, `new()` or
+  `encode()`. The whole module is unwired. Fixed as trap removal, exactly as
+  finding 5 was: `to_ne_bytes` → `to_be_bytes`; `Display` rewritten to the
+  RFC 5701 §2 layout `new()` actually writes (16-octet IPv6 Global Administrator
+  + 2-octet Local Administrator) instead of the 8-octet AS/IPv4 layouts it was
+  reading; and `from_str`'s `tokenizer(..).unwrap()` → `map_err(|_| ())?` so it
+  honours its declared `Err(())` instead of panicking.
+- **The live bug this investigation exposed — ✅ FIXED, and far more severe:**
+  `AttrType` named `ExtendedIpv6Com = 25` with **no matching `Attr` variant** —
+  the only such code in the enum. A recognized-but-unhandled type does not match
+  `AttrType::Unknown`, so it skipped the RFC 4271 §9 handling, reached
+  `parse_attr_value`, failed the derived Switch with no arm to select, and — not
+  being a treat-as-withdraw attribute — propagated the error out as a **session
+  reset**. Any peer sending an RFC 5701 IPv6 extended community tore the session
+  down. Proven before the fix:
+
+  ```
+  type 25  (IPv6 ext-community, optional+transitive) -> ERR (session reset)
+  type 200 (unallocated,        optional+transitive) -> OK, unknown_attrs=1
+  ```
+
+  An attribute zebra-rs half-recognized was strictly worse than one it did not
+  recognize at all. Code 25 is now unnamed, so it decodes as `Unknown(25)` and
+  takes the §9 optional-transitive path: retained with the Partial bit and
+  propagated. A comment where the variant used to sit records the invariant —
+  every code named in `AttrType` must have a matching `Attr` variant — so it is
+  not naively re-added.
+- **Deferred:** real RFC 5701 support (an `Attr::ExtendedIpv6Com` variant, a
+  `BgpAttr` field, an `AttrEmitter`, and RT matching against IPv6 route-targets)
+  is a feature, not a bug fix. The `ext_ipv6_com` module is the skeleton for it
+  and is now correct; passing the attribute through per §9 is the right
+  behaviour until then.
 - **Bug:** `ExtIpv6CommunityValue::new` writes the 2-octet local-admin value with
   `to_ne_bytes()` (native endian) instead of `to_be_bytes()`; every other field in
   the file uses big-endian.
