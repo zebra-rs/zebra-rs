@@ -6,7 +6,7 @@ candidate was checked by an independent adversarial verifier that had to name a
 concrete trigger and quote the decisive lines, then a fresh gap sweep added more.
 
 **Result: 34 confirmed correctness bugs + 15 confirmed cleanup items.**
-**Status 2026-07-18: top-11 fixed and merged** (PRs #1962, #1972, #1981,
+**Status 2026-07-18: top-12 fixed and merged** (PRs #1962, #1972, #1981,
 #1984, #1987, #1991, #1997, and the finding-#9 branch); fixes below the
 cap remain open. Three
 candidates were refuted (two vty-disconnect "panics" are guarded by detached
@@ -187,7 +187,7 @@ while the Loc-RIB keeps both paths.** Amplifier: peer-down cleanup
 rows survive even session teardown, stuck in the FIB. Trigger is a
 nonconformant/malicious (attacker-controlled) peer.
 
-### 12. Deleting an out-policy leaves the stale snapshot denying everything — `config.rs:713`
+### 12. Deleting an out-policy leaves the stale snapshot denying everything — `config.rs:713` — FIXED (Unregister now emits a clearing PolicyRx)
 
 `config_afi_safi_policy_out` on Delete only sends `Unregister`, and the policy
 actor emits no `PolicyRx` on `Unregister` (`policy/inst.rs:379`), so neither
