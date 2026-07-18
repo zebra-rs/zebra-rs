@@ -5,20 +5,16 @@
 use std::collections::BTreeMap;
 use std::net::Ipv4Addr;
 
-use ipnet::Ipv4Net;
-
 use super::af::PimAf;
 use super::inst::Pim;
 use super::ipv4::Ipv4;
 use super::tib::SgKey;
 
 /// Default SSM range (RFC 4607): no RP, no register, (S,G) only.
-fn ssm_range() -> Ipv4Net {
-    Ipv4Net::new(Ipv4Addr::new(232, 0, 0, 0), 8).unwrap()
-}
-
+/// Concrete-IPv4 wrapper over [`Ipv4::is_ssm`] kept for the existing
+/// call sites in `register.rs`/`igmp`.
 pub fn is_ssm(grp: Ipv4Addr) -> bool {
-    ssm_range().contains(&grp)
+    Ipv4::is_ssm(grp)
 }
 
 /// Static RP table: RP address → served group range.
@@ -41,14 +37,14 @@ impl Pim {
     /// BSR-learned set (static beats BSR). SSM groups never map to
     /// an RP.
     pub(crate) fn rp_lookup(&self, grp: Ipv4Addr) -> Option<Ipv4Addr> {
-        if is_ssm(grp) || !grp.is_multicast() {
+        if Ipv4::is_ssm(grp) || !Ipv4::is_multicast(grp) {
             return None;
         }
         self.rp_set
             .statics
             .iter()
-            .filter(|(_, range)| range.contains(&grp))
-            .max_by_key(|(_, range)| range.prefix_len())
+            .filter(|(_, range)| Ipv4::prefix_contains(range, &grp))
+            .max_by_key(|(_, range)| Ipv4::prefix_len(range))
             .map(|(rp, _)| *rp)
             .or_else(|| self.bsr_rp_lookup(grp))
     }

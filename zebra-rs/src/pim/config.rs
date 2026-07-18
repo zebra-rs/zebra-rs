@@ -5,7 +5,9 @@
 
 use crate::config::{Args, ConfigOp};
 
+use super::af::PimAf;
 use super::inst::Pim;
+use super::ipv4::Ipv4;
 
 pub type Callback = fn(&mut Pim, Args, ConfigOp) -> Option<()>;
 
@@ -162,7 +164,7 @@ fn config_rp_static(pim: &mut Pim, mut args: Args, op: ConfigOp) -> Option<()> {
         pim.rp_set
             .statics
             .entry(address)
-            .or_insert_with(|| "224.0.0.0/4".parse().unwrap());
+            .or_insert(Ipv4::DEFAULT_RP_RANGE);
     } else {
         pim.rp_set.statics.remove(&address);
     }
@@ -176,7 +178,7 @@ fn config_rp_static_group(pim: &mut Pim, mut args: Args, op: ConfigOp) -> Option
         let range = args.string()?.parse().ok()?;
         pim.rp_set.statics.insert(address, range);
     } else if let Some(range) = pim.rp_set.statics.get_mut(&address) {
-        *range = "224.0.0.0/4".parse().unwrap();
+        *range = Ipv4::DEFAULT_RP_RANGE;
     }
     pim.rp_reevaluate();
     Some(())
