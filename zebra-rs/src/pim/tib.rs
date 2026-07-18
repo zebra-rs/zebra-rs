@@ -367,47 +367,65 @@ impl Pim {
 
     // ---- neighbor hooks ----
 
-    /// A new PIM neighbor appeared: entries parked for lack of an
-    /// upstream neighbor on that (interface, address) can join now.
-    pub(crate) fn tib_neighbor_up(&mut self, ifindex: u32, addr: Ipv4Addr) {
-        let keys: Vec<SgKey> = self
-            .tib
+    /// Every gateway entry whose RPF interface is `ifindex`. A
+    /// neighbor change may make or break coverage of a gateway
+    /// nexthop (which can be the neighbor's hello source *or* a
+    /// secondary address), so re-evaluate the whole set and let
+    /// `tib_update`'s coverage check decide join/prune.
+    fn gateway_keys_on(&self, ifindex: u32) -> Vec<SgKey> {
+        self.tib
             .iter()
-            .filter(|(_, e)| {
-                e.join_state == JoinState::NotJoined
-                    && e.rpf
-                        == RpfState::Gateway {
-                            ifindex,
-                            nexthop: addr,
-                        }
-            })
+            .filter(|(_, e)| matches!(e.rpf, RpfState::Gateway { ifindex: i, .. } if i == ifindex))
             .map(|(key, _)| *key)
-            .collect();
-        for key in keys {
+            .collect()
+    }
+
+    /// A new PIM neighbor appeared: entries parked for lack of an
+    /// upstream neighbor on this interface may now join.
+    pub(crate) fn tib_neighbor_up(&mut self, ifindex: u32, _addr: Ipv4Addr) {
+        for key in self.gateway_keys_on(ifindex) {
             self.tib_update(key);
         }
     }
 
-    /// A PIM neighbor vanished: entries joined through it fall back
-    /// to NotJoined (no prune TX — the peer is gone).
-    pub(crate) fn tib_neighbor_down(&mut self, ifindex: u32, addr: Ipv4Addr) {
-        let keys: Vec<SgKey> = self
+    /// A PIM neighbor vanished (already removed from the link's
+    /// table): entries joined through it lose coverage in
+    /// `tib_update` and fall back to NotJoined with no prune TX.
+    pub(crate) fn tib_neighbor_down(&mut self, ifindex: u32, _addr: Ipv4Addr) {
+        for key in self.gateway_keys_on(ifindex) {
+            self.tib_update(key);
+        }
+    }
+
+    /// RFC 7761 §4.3.1: a neighbor's Generation-ID changed, so it
+    /// restarted and lost its downstream Join state. Re-send a Join
+    /// (toward the entry's actual RPF nexthop, which the restarted
+    /// neighbor owns) for every entry joined through that neighbor,
+    /// so its tree is rebuilt without waiting a full refresh period.
+    pub(crate) fn tib_genid_resync(&mut self, ifindex: u32, addr: Ipv4Addr) {
+        let targets: Vec<(SgKey, Ipv4Addr)> = self
             .tib
             .iter()
-            .filter(|(_, e)| {
-                e.rpf
-                    == RpfState::Gateway {
-                        ifindex,
-                        nexthop: addr,
-                    }
+            .filter_map(|(key, e)| match e.rpf {
+                RpfState::Gateway {
+                    ifindex: i,
+                    nexthop,
+                } if i == ifindex
+                    && e.join_state == JoinState::Joined
+                    && (nexthop == addr
+                        || self
+                            .links
+                            .get(&ifindex)
+                            .map(|l| l.neighbor_covers(&nexthop))
+                            .unwrap_or(false)) =>
+                {
+                    Some((*key, nexthop))
+                }
+                _ => None,
             })
-            .map(|(key, _)| *key)
             .collect();
-        for key in keys {
-            if let Some(entry) = self.tib.get_mut(&key) {
-                entry.join_state = JoinState::NotJoined;
-            }
-            self.tib_update(key);
+        for (key, nexthop) in targets {
+            self.jp_send_entry(ifindex, nexthop, key, true);
         }
     }
 
@@ -497,7 +515,7 @@ impl Pim {
             RpfState::Gateway { ifindex, nexthop } => self
                 .links
                 .get(&ifindex)
-                .filter(|l| l.enabled && l.nbrs.contains_key(&nexthop))
+                .filter(|l| l.enabled && l.neighbor_covers(&nexthop))
                 .map(|_| (ifindex, nexthop)),
             _ => None,
         };

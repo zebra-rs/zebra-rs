@@ -1,0 +1,24 @@
+interface:
+- if-name: eth1
+  ipv4:
+    address: 10.6.2.1/24
+- if-name: eth2
+  ipv4:
+    address: 10.6.3.1/24
+router:
+  static:
+    ipv4:
+      route:
+      # RPF toward the source is pinned at r1 (10.6.2.2), so r3's
+      # (S,G) Join goes to r1 and makes r1 forward onto swB — the
+      # non-DR forwarder the assert election needs.
+      - prefix: 10.6.0.0/24
+        nexthop:
+        - address: 10.6.2.2
+  pim:
+    interface:
+    - if-name: eth1
+      dr-priority: 1
+    - if-name: eth2
+      igmp:
+        enabled: true

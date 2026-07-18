@@ -443,19 +443,30 @@ impl Pim {
     }
 
     fn hello_packet(&self, link: &PimLink, config: &LinkConfig, holdtime: u16) -> PimPacket {
-        let hello = PimHello {
-            tlvs: vec![
-                HelloTlv::Holdtime(holdtime),
-                HelloTlv::LanPruneDelay {
-                    t_bit: false,
-                    propagation_delay: PIM_PROPAGATION_DELAY_MSEC,
-                    override_interval: PIM_OVERRIDE_INTERVAL_MSEC,
-                },
-                HelloTlv::DrPriority(config.dr_priority()),
-                HelloTlv::GenerationId(link.gen_id),
-            ],
-        };
-        PimPacket::new(PimPayload::Hello(hello))
+        let mut tlvs = vec![
+            HelloTlv::Holdtime(holdtime),
+            HelloTlv::LanPruneDelay {
+                t_bit: false,
+                propagation_delay: PIM_PROPAGATION_DELAY_MSEC,
+                override_interval: PIM_OVERRIDE_INTERVAL_MSEC,
+            },
+            HelloTlv::DrPriority(config.dr_priority()),
+            HelloTlv::GenerationId(link.gen_id),
+        ];
+        // Address List (RFC 7761 §4.3.4): advertise our non-primary
+        // addresses on the link so a neighbor can match an RPF
+        // nexthop that resolves to one of them. The primary (hello
+        // source) is implicit and omitted.
+        let secondary: Vec<pim_packet::EncodedUnicast> = link
+            .addrs
+            .iter()
+            .skip(1)
+            .map(|p| pim_packet::EncodedUnicast::new(std::net::IpAddr::V4(p.addr())))
+            .collect();
+        if !secondary.is_empty() {
+            tlvs.push(HelloTlv::AddressList(secondary));
+        }
+        PimPacket::new(PimPayload::Hello(PimHello { tlvs }))
     }
 
     pub(crate) fn hello_send(&mut self, ifindex: u32) {

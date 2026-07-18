@@ -299,3 +299,73 @@ impl ForwardingPlane {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // Layout of the hand-declared `linux/mroute.h` structs. If the
+    // kernel ABI or our declaration drifts, `MRT_ADD_VIF`/`MRT_ADD_MFC`
+    // would silently corrupt kernel state — assert the wire layout
+    // instead. `vifi_t` is u16 and `MAXVIFS` is 32 on Linux.
+    #[test]
+    fn vifctl_layout() {
+        assert_eq!(std::mem::size_of::<Vifctl>(), 16);
+        assert_eq!(std::mem::offset_of!(Vifctl, vifc_vifi), 0);
+        assert_eq!(std::mem::offset_of!(Vifctl, vifc_flags), 2);
+        assert_eq!(std::mem::offset_of!(Vifctl, vifc_threshold), 3);
+        assert_eq!(std::mem::offset_of!(Vifctl, vifc_rate_limit), 4);
+        assert_eq!(std::mem::offset_of!(Vifctl, vifc_lcl), 8);
+        assert_eq!(std::mem::offset_of!(Vifctl, vifc_rmt_addr), 12);
+    }
+
+    #[test]
+    fn mfcctl_layout() {
+        assert_eq!(std::mem::size_of::<Mfcctl>(), 60);
+        assert_eq!(std::mem::offset_of!(Mfcctl, mfcc_origin), 0);
+        assert_eq!(std::mem::offset_of!(Mfcctl, mfcc_mcastgrp), 4);
+        assert_eq!(std::mem::offset_of!(Mfcctl, mfcc_parent), 8);
+        assert_eq!(std::mem::offset_of!(Mfcctl, mfcc_ttls), 10);
+        // The counters follow the 32-byte TTL array with u32 padding.
+        assert_eq!(std::mem::offset_of!(Mfcctl, mfcc_pkt_cnt), 44);
+        assert_eq!(std::mem::offset_of!(Mfcctl, mfcc_expire), 56);
+        assert_eq!(MAXVIFS, 32);
+    }
+
+    fn upcall_buf(kind: u8, mbz: u8, vif: u16, src: [u8; 4], grp: [u8; 4]) -> [u8; 20] {
+        let mut b = [0u8; 20];
+        b[8] = kind;
+        b[9] = mbz; // im_mbz alias of ip->protocol
+        b[10] = vif as u8;
+        b[11] = (vif >> 8) as u8;
+        b[12..16].copy_from_slice(&src);
+        b[16..20].copy_from_slice(&grp);
+        b
+    }
+
+    #[test]
+    fn parse_upcall_accepts_igmpmsg() {
+        let b = upcall_buf(IGMPMSG_NOCACHE, 0, 3, [10, 0, 0, 2], [232, 1, 1, 1]);
+        let u = parse_upcall(&b).expect("nocache upcall");
+        assert!(matches!(u.kind, UpcallKind::Nocache));
+        assert_eq!(u.vif, 3);
+        assert_eq!(u.src, Ipv4Addr::new(10, 0, 0, 2));
+        assert_eq!(u.grp, Ipv4Addr::new(232, 1, 1, 1));
+    }
+
+    #[test]
+    fn parse_upcall_rejects_real_igmp() {
+        // A genuine IGMP packet has a nonzero protocol byte at [9].
+        let b = upcall_buf(0x16, 2, 0, [0; 4], [0; 4]);
+        assert!(parse_upcall(&b).is_none());
+    }
+
+    #[test]
+    fn parse_upcall_carries_wholepkt_payload() {
+        let mut v = upcall_buf(IGMPMSG_WHOLEPKT, 0, 0, [10, 0, 0, 2], [239, 1, 1, 1]).to_vec();
+        v.extend_from_slice(&[0xde, 0xad, 0xbe, 0xef]);
+        let u = parse_upcall(&v).expect("wholepkt upcall");
+        assert!(matches!(u.kind, UpcallKind::WholePkt));
+        assert_eq!(u.payload, vec![0xde, 0xad, 0xbe, 0xef]);
+    }
+}

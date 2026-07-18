@@ -103,6 +103,15 @@ impl PimLink {
     pub fn is_my_addr(&self, addr: &Ipv4Addr) -> bool {
         self.addrs.iter().any(|p| p.addr() == *addr)
     }
+
+    /// Is `addr` a live PIM neighbor on this link — matching either a
+    /// neighbor's hello source or one of its advertised secondary
+    /// addresses (RFC 7761 §4.3.4)? The RIB's resolved RPF nexthop
+    /// may be any address the neighbor owns, not just its hello
+    /// source.
+    pub fn neighbor_covers(&self, addr: &Ipv4Addr) -> bool {
+        self.nbrs.contains_key(addr) || self.nbrs.values().any(|n| n.secondary.contains(addr))
+    }
 }
 
 fn hello_timer(tx: &tokio::sync::mpsc::UnboundedSender<Message>, ifindex: u32, sec: u16) -> Timer {
@@ -311,6 +320,24 @@ impl Pim {
                 dr
             );
             link.dr = dr;
+            // Only the DR turns local (IGMP) membership into upstream
+            // PIM/OIF state, so a DR change must re-evaluate every
+            // group on this interface (RFC 7761 §4.3.2).
+            self.dr_membership_reeval(ifindex);
+        }
+    }
+
+    /// Push (as DR) or withdraw (as non-DR) the TIB reflection of
+    /// every group learned on this interface, after a DR transition.
+    /// Membership tracking in `IgmpIf` is kept warm regardless, so
+    /// failover is immediate.
+    pub(crate) fn dr_membership_reeval(&mut self, ifindex: u32) {
+        let groups: Vec<Ipv4Addr> = match self.links.get(&ifindex).and_then(|l| l.igmp.as_ref()) {
+            Some(igmp) => igmp.groups.keys().copied().collect(),
+            None => return,
+        };
+        for grp in groups {
+            self.igmp_tib_sync(ifindex, grp);
         }
     }
 
