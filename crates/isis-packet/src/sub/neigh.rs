@@ -817,16 +817,24 @@ impl ParseBe<IsisSubAsla> for IsisSubAsla {
         let (input, udabm_len) = be_u8(input)?;
         let udabm_len = udabm_len as usize;
 
-        // RFC 9479 §4: When L-flag is set, SABM and UDABM are each 1 byte
-        // (legacy format) regardless of the length fields.
-        let (eff_sabm_len, eff_udabm_len) = if l_flag {
-            (sabm_len.max(1), udabm_len.max(1))
-        } else {
-            (sabm_len, udabm_len)
-        };
+        // RFC 9479 §4.2: each mask length is the actual octet count of
+        // the mask that follows (0-8); zero means the mask is absent,
+        // L-flag or not. The parser used to force L=1 masks to >= 1
+        // byte "regardless of the length fields", which consumed the
+        // first bytes of the nested sub-TLVs as fabricated masks when a
+        // peer sent L=1 with zero-length masks — and made our own emit
+        // (which writes the actual lengths) unreadable to ourselves.
+        // Honor the advertised lengths; reject out-of-range ones so the
+        // sub-TLV degrades to Unknown instead of desyncing.
+        if sabm_len > 8 || udabm_len > 8 {
+            return Err(nom::Err::Error(nom::error::make_error(
+                input,
+                nom::error::ErrorKind::Verify,
+            )));
+        }
 
-        let (input, sabm) = take(eff_sabm_len)(input)?;
-        let (input, udabm) = take(eff_udabm_len)(input)?;
+        let (input, sabm) = take(sabm_len)(input)?;
+        let (input, udabm) = take(udabm_len)(input)?;
         let (input, subs) = many0_complete(IsisSubTlv::parse_subs).parse(input)?;
 
         Ok((
@@ -1110,6 +1118,46 @@ impl TlvEmitter for IsisSubSrv6LanEndXSid {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Finding #14: RFC 9479 §4.2 mask lengths are actual octet counts
+    /// (0-8), L-flag or not. The parser used to force L=1 masks to
+    /// ≥ 1 byte, consuming the first two bytes of the nested sub-TLVs
+    /// as fabricated masks — and making our own emitted L=1/empty-mask
+    /// ASLA unreadable to ourselves.
+    #[test]
+    fn asla_l_flag_with_zero_length_masks_round_trips() {
+        let asla = IsisSubAsla {
+            l_flag: true,
+            sabm: vec![],
+            udabm: vec![],
+            subs: vec![IsisSubTlv::TeMetric(IsisSubTeMetric { metric: 100 })],
+        };
+        let mut buf = BytesMut::new();
+        asla.tlv_emit(&mut buf);
+        // code 16, len 7: first byte 0x80 (L set, SABM len 0), UDABM
+        // len 0, then the nested TE metric <18, 3, 0, 0, 100>.
+        assert_eq!(&buf[..], &[16, 7, 0x80, 0, 18, 3, 0, 0, 100]);
+        let (rest, parsed) = IsisSubTlv::parse_subs(&buf).expect("parse");
+        assert!(rest.is_empty());
+        let IsisSubTlv::Asla(a) = parsed else {
+            panic!("expected Asla");
+        };
+        assert_eq!(a, asla);
+    }
+
+    /// RFC 9479 §4.2 bounds each mask at 8 octets; a longer claim is
+    /// rejected so the registry degrades the sub-TLV to Unknown and the
+    /// sub-TLVs after it survive.
+    #[test]
+    fn asla_oversized_mask_length_degrades_to_unknown() {
+        // ASLA (code 16) claiming SABM Length 9, then a valid TE metric.
+        let raw = [16u8, 2, 0x09, 0, 18, 3, 0, 0, 100];
+        let (rest, first) = IsisSubTlv::parse_subs(&raw).expect("first");
+        assert!(matches!(first, IsisSubTlv::Unknown(_)));
+        let (rest, second) = IsisSubTlv::parse_subs(rest).expect("second");
+        assert!(matches!(second, IsisSubTlv::TeMetric(_)));
+        assert!(rest.is_empty());
+    }
 
     /// Finding #13: the classic RFC 5305 §3.1 Administrative Group
     /// (sub-TLV 3) had no dispatch arm, so a standards-compliant link
