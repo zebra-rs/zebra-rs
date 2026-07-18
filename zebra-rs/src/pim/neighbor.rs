@@ -106,6 +106,9 @@ impl Pim {
             // Triggered hello so a newly-heard neighbor learns us
             // without waiting out our hello period (RFC 7761 §4.3.1).
             self.hello_send(ifindex);
+            // Entries parked for lack of this upstream neighbor can
+            // join now.
+            self.tib_neighbor_up(ifindex, src);
         } else if bounced {
             tracing::info!(
                 "pim: neighbor {} on {} restarted (GenID change)",
@@ -127,6 +130,7 @@ impl Pim {
         if link.nbrs.remove(&addr).is_some() {
             tracing::info!("pim: neighbor {} down on {} ({})", addr, link.name, reason);
             self.dr_election(ifindex);
+            self.tib_neighbor_down(ifindex, addr);
         }
     }
 }

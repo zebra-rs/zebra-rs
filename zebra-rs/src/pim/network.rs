@@ -17,6 +17,7 @@ use tokio::io::unix::AsyncFd;
 use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender};
 
 use super::inst::{IgmpSend, Message, PimSend};
+use super::mroute::parse_upcall;
 
 pub async fn read_packet(sock: Arc<AsyncFd<Socket>>, tx: UnboundedSender<Message>) {
     let mut buf = [0u8; 1024 * 16];
@@ -150,6 +151,38 @@ pub async fn igmp_read_packet(sock: Arc<AsyncFd<Socket>>, tx: UnboundedSender<Me
                     ifindex,
                 });
 
+                Ok(())
+            })
+            .await;
+        if tx.is_closed() {
+            return;
+        }
+    }
+}
+
+/// Drain the mroute socket: kernel upcalls (protocol field zero)
+/// become [`Message::Upcall`]; genuine IGMP packets that the kernel
+/// also delivers here are dropped — the IGMP socket is their RX path.
+pub async fn mroute_read(sock: Arc<AsyncFd<Socket>>, tx: UnboundedSender<Message>) {
+    let mut buf = [0u8; 1024 * 16];
+
+    loop {
+        let _ = sock
+            .async_io(Interest::READABLE, |sock| {
+                let n = unsafe {
+                    libc::recv(
+                        sock.as_raw_fd(),
+                        buf.as_mut_ptr() as *mut libc::c_void,
+                        buf.len(),
+                        0,
+                    )
+                };
+                if n < 0 {
+                    return Err(std::io::Error::last_os_error());
+                }
+                if let Some(upcall) = parse_upcall(&buf[..n as usize]) {
+                    let _ = tx.send(Message::Upcall(upcall));
+                }
                 Ok(())
             })
             .await;

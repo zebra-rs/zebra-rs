@@ -11,6 +11,9 @@ use crate::config::{Args, Builder};
 
 use super::igmp::{FilterMode, QuerierState};
 use super::inst::{Pim, ShowCallback};
+use super::macros::mfc_oifs;
+use super::rpf::RpfState;
+use super::tib::JoinState;
 
 impl Pim {
     pub fn show_build(&mut self) {
@@ -25,7 +28,18 @@ impl Pim {
             .set(show_igmp_interface)
             .path("/show/igmp/groups")
             .set(show_igmp_groups)
+            .path("/show/pim/upstream")
+            .set(show_pim_upstream)
+            .path("/show/mroute")
+            .set(show_mroute)
             .map();
+    }
+
+    pub(crate) fn ifname(&self, ifindex: u32) -> String {
+        self.links
+            .get(&ifindex)
+            .map(|l| l.name.clone())
+            .unwrap_or_else(|| format!("if{}", ifindex))
     }
 }
 
@@ -277,6 +291,126 @@ fn show_igmp_groups(pim: &Pim, _args: Args, json: bool) -> Result<String, std::f
             row.expires,
             row.uptime,
             row.last_reporter,
+        )?;
+    }
+    Ok(buf)
+}
+
+#[derive(Serialize)]
+struct UpstreamBrief {
+    sg: String,
+    iif: String,
+    rpf_neighbor: String,
+    state: String,
+    uptime: String,
+}
+
+fn show_pim_upstream(pim: &Pim, _args: Args, json: bool) -> Result<String, std::fmt::Error> {
+    let mut rows: Vec<UpstreamBrief> = vec![];
+
+    for (sg, entry) in pim.tib.iter() {
+        let (iif, rpf_neighbor) = match entry.rpf {
+            RpfState::Unresolved => ("-".to_string(), "-".to_string()),
+            RpfState::Connected { ifindex } => (pim.ifname(ifindex), "connected".to_string()),
+            RpfState::Gateway { ifindex, nexthop } => (pim.ifname(ifindex), nexthop.to_string()),
+        };
+        rows.push(UpstreamBrief {
+            sg: sg.to_string(),
+            iif,
+            rpf_neighbor,
+            state: match entry.join_state {
+                JoinState::Joined => "Joined".to_string(),
+                JoinState::NotJoined => "NotJoined".to_string(),
+            },
+            uptime: uptime_string(entry.uptime.elapsed().as_secs()),
+        });
+    }
+
+    if json {
+        return Ok(serde_json::to_string(&rows).unwrap());
+    }
+
+    let mut buf = String::new();
+    buf.push_str(
+        "Source           Group            Iif          RPF Nbr          State      Uptime\n",
+    );
+    for (sg, row) in pim.tib.keys().zip(rows.iter()) {
+        writeln!(
+            buf,
+            "{:<17}{:<17}{:<13}{:<17}{:<11}{}",
+            sg.src, sg.grp, row.iif, row.rpf_neighbor, row.state, row.uptime,
+        )?;
+    }
+    Ok(buf)
+}
+
+#[derive(Serialize)]
+struct MrouteBrief {
+    sg: String,
+    iif: String,
+    oifs: Vec<String>,
+    flags: String,
+    installed: bool,
+    uptime: String,
+}
+
+fn show_mroute(pim: &Pim, _args: Args, json: bool) -> Result<String, std::fmt::Error> {
+    let mut rows: Vec<MrouteBrief> = vec![];
+
+    for (sg, entry) in pim.tib.iter() {
+        let iif = entry
+            .rpf
+            .ifindex()
+            .map_or_else(|| "-".to_string(), |i| pim.ifname(i));
+        let oifs: Vec<String> = mfc_oifs(entry, entry.rpf.ifindex())
+            .iter()
+            .map(|i| pim.ifname(*i))
+            .collect();
+        let mut flags = String::new();
+        if entry.join_state == JoinState::Joined {
+            flags.push('J');
+        }
+        if !entry.local.is_empty() {
+            flags.push('L');
+        }
+        if entry.stream_expires.is_some() {
+            flags.push('S');
+        }
+        if entry.installed.is_some() {
+            flags.push('I');
+        }
+        rows.push(MrouteBrief {
+            sg: sg.to_string(),
+            iif,
+            oifs,
+            flags,
+            installed: entry.installed.is_some(),
+            uptime: uptime_string(entry.uptime.elapsed().as_secs()),
+        });
+    }
+
+    if json {
+        return Ok(serde_json::to_string(&rows).unwrap());
+    }
+
+    let mut buf = String::new();
+    buf.push_str("IP Multicast Routing Table\n");
+    buf.push_str(
+        "Flags: J - Joined upstream, L - Local members, S - Stream (KAT), I - Installed\n\n",
+    );
+    for row in &rows {
+        writeln!(
+            buf,
+            "{}  Iif: {}  Oifs: {}  Flags: {}  Uptime: {}",
+            row.sg,
+            row.iif,
+            if row.oifs.is_empty() {
+                "-".to_string()
+            } else {
+                row.oifs.join(" ")
+            },
+            row.flags,
+            row.uptime,
         )?;
     }
     Ok(buf)

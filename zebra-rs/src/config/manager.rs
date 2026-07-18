@@ -1372,10 +1372,13 @@ fn is_ebpf(paths: &[CommandPath]) -> bool {
     paths.iter().any(|x| x.name == "ebpf")
 }
 
-/// `show pim ...` and `show igmp ...` — both served by the PIM task
-/// (IGMP membership tracking lives inside the PIM module).
+/// `show pim ...`, `show igmp ...` and `show mroute` — all served by
+/// the PIM task (IGMP membership tracking and the multicast routing
+/// table live inside the PIM module).
 fn is_pim(paths: &[CommandPath]) -> bool {
-    paths.iter().any(|x| x.name == "pim" || x.name == "igmp")
+    paths
+        .iter()
+        .any(|x| x.name == "pim" || x.name == "igmp" || x.name == "mroute")
 }
 
 fn is_policy(paths: &[CommandPath]) -> bool {
