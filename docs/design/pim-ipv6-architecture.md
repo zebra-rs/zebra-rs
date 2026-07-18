@@ -537,7 +537,7 @@ Each phase is one reviewable PR leaving the tree tested and useful.
 |---|---|---|
 | 0 | **DONE** — IPv4 correctness floor: DR gating **with `pim_assert` rework**, GenID re-sync, neighbor secondary-address storage/matching, ABI layout tests for existing structs | all seven IPv4 features green (assert feature redesigned, not deleted) |
 | 1 | **DONE** — Codec groundwork: checksum context API (all emit sites), MLD wire types, exponent encodings, mixed-family rejection, ICMPv6 checksum helper lifted to `packet-utils` | fixture + negative tests; IPv4 fixtures byte-identical |
-| 2 | Supervisor extraction + `Pim<A>`/`Gm<A>`/FP-trait genericization; **IPv4 runtime only** | all IPv4 unit + live BDD unchanged |
+| 2 | `Pim<A>`/`Gm<A>`/FP-trait genericization; **IPv4 runtime only**. Landed in compiling slices (see note). | all IPv4 unit + live BDD unchanged |
 | 3 | `Ipv6` transports: PIMv6 socket, Hello/neighbor/DR over LL | two-router adjacency BDD; invalid-transport negatives |
 | 4 | MLDv1/v2 engine via `Gm<Ipv6>` + TIB bridge | querier/compat/source-filter BDD |
 | 5 | `Mrt6` plane + generic RPF + SSM end-to-end | UDPv6 delivery + kernel MIF/MFC asserts (MVP gate) |
@@ -545,6 +545,29 @@ Each phase is one reviewable PR leaving the tree tested and useful.
 | 7 | IPv6 assert + per-VRF `Pim<Ipv6>` | LAN election + VRF isolation BDD |
 | 8 | IPv6 BSR (hash + fragmentation as acceptance criteria) | election/discovery BDD + FRR interop |
 | 9 | Embedded-RP | precedence tests + ASM datapath proof |
+
+### Phase 2 slicing note
+
+Genericizing `Pim` to `Pim<A>` is a big-bang at the module level (every method hangs off
+the god-object), so Phase 2 lands as compiler-verified slices, each keeping IPv4 green,
+consistent with the arc's smallest-safe-slice rule:
+
+- **Slice 2a — data model (DONE).** Introduce `PimAf` (associated `Addr`/`Prefix` only,
+  no methods yet, so nothing is dead) + the `Ipv4` marker impl, and parameterize every
+  state type over `A` with `A = Ipv4` defaults: `SgKey<A>`, `TibEntry<A>`, `RpfState<A>`,
+  `Neighbor<A>`, `AssertMetric/State<A>`, `RpSet<A>`, `BsrConfig/Run<A>`, `IgmpIf/Group<A>`,
+  `PimLink<A>`. All logic stays concrete-IPv4 (methods on `impl Pim` / `impl PimLink<Ipv4>`),
+  byte-identical. Verified: unit tests, `@pim_ssm`/`@pim_asm` live, identical binary md5.
+- **Slice 2b — logic + trait methods.** Add the behavioural methods to `PimAf`
+  (classification, prefix ops, checksum ctx, transports, membership codec) *together with*
+  the generic logic that calls them, flip `Pim` → `Pim<A>` and the `impl` blocks to
+  `impl<A: PimAf>`, extract the `Gm<A>` event engine + `Ipv4` codec, and put the forwarding
+  plane behind `PimForwardingPlane<A>`. Still IPv4-runtime-only.
+
+**Supervisor deferral.** The standalone `PimSupervisor` (§4.1) moves to the start of
+Phase 3: extracting it now — with only IPv4 at runtime and no `Pim<Ipv6>` to route to — is
+ownership churn with no payoff, and it belongs where the AF-split routing first matters.
+The config-manager integration keeps working unchanged through `Pim<Ipv4>` meanwhile.
 
 ### MVP gate — after Phase 5
 

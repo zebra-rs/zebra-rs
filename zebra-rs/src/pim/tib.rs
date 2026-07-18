@@ -18,8 +18,10 @@ use std::fmt;
 use std::net::Ipv4Addr;
 use std::time::{Duration, Instant};
 
+use super::af::PimAf;
 use super::assert_fsm::AssertState;
 use super::inst::Pim;
+use super::ipv4::Ipv4;
 use super::macros::{inherited_effective, inherited_olist, join_desired_effective, mfc_oifs};
 use super::mroute::{REG_VIF, Upcall, UpcallKind};
 use super::rpf::RpfState;
@@ -36,25 +38,25 @@ pub const KEEPALIVE_PERIOD: Duration = Duration::from_secs(210);
 pub const PRUNE_PENDING_DELAY: Duration = Duration::from_millis(3000);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
-pub enum SgKey {
+pub enum SgKey<A: PimAf = Ipv4> {
     /// Shared-tree state rooted at RP(G).
-    StarG { grp: Ipv4Addr },
+    StarG { grp: A::Addr },
     /// Source-tree state.
-    Sg { src: Ipv4Addr, grp: Ipv4Addr },
+    Sg { src: A::Addr, grp: A::Addr },
     /// Source pruned off the shared tree (downstream prune records;
     /// the upstream side rides the (*,G) refresh).
-    SgRpt { src: Ipv4Addr, grp: Ipv4Addr },
+    SgRpt { src: A::Addr, grp: A::Addr },
 }
 
-impl SgKey {
-    pub fn grp(&self) -> Ipv4Addr {
+impl<A: PimAf> SgKey<A> {
+    pub fn grp(&self) -> A::Addr {
         match self {
             SgKey::StarG { grp } | SgKey::Sg { grp, .. } | SgKey::SgRpt { grp, .. } => *grp,
         }
     }
 }
 
-impl fmt::Display for SgKey {
+impl<A: PimAf> fmt::Display for SgKey<A> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             SgKey::StarG { grp } => write!(f, "(*, {})", grp),
@@ -108,15 +110,15 @@ pub struct InstalledMfc {
     pub oifs: Vec<u16>,
 }
 
-pub struct TibEntry {
+pub struct TibEntry<A: PimAf = Ipv4> {
     pub join_state: JoinState,
     /// RPF snapshot this entry currently operates on; refreshed by
     /// `tib_rpf_change` so a change can prune the old upstream first.
-    pub rpf: RpfState,
+    pub rpf: RpfState<A>,
     /// Address the RPF tracking follows: the source for (S,G), RP(G)
     /// for (*,G). `None` for (S,G,rpt) (no upstream of its own) and
     /// for (*,G) without a known RP.
-    pub rpf_target: Option<Ipv4Addr>,
+    pub rpf_target: Option<A::Addr>,
     /// Interfaces with local IGMP membership ((S,G) INCLUDE sources
     /// on Sg entries; EXCLUDE/any-source membership on StarG).
     pub local: BTreeSet<u32>,
@@ -124,7 +126,7 @@ pub struct TibEntry {
     /// entries presence means "rpt-pruned on this interface".
     pub downstream: BTreeMap<u32, Downstream>,
     /// Assert election state per contested interface (Sg entries).
-    pub asserts: BTreeMap<u32, AssertState>,
+    pub asserts: BTreeMap<u32, AssertState<A>>,
     /// Kernel MFC shadow — `Some` while installed (Sg entries only).
     pub installed: Option<InstalledMfc>,
     /// Keepalive deadline for traffic-created state (NOCACHE at any
@@ -138,7 +140,7 @@ pub struct TibEntry {
     pub uptime: Instant,
 }
 
-impl TibEntry {
+impl<A: PimAf> TibEntry<A> {
     pub fn new() -> Self {
         Self {
             join_state: JoinState::NotJoined,
@@ -156,7 +158,7 @@ impl TibEntry {
     }
 }
 
-impl Default for TibEntry {
+impl<A: PimAf> Default for TibEntry<A> {
     fn default() -> Self {
         Self::new()
     }

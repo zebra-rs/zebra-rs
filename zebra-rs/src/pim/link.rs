@@ -4,15 +4,17 @@
 use std::collections::BTreeMap;
 use std::net::Ipv4Addr;
 
-use ipnet::{IpNet, Ipv4Net};
+use ipnet::IpNet;
 use rand::RngExt;
 
 use crate::context::Timer;
 use crate::rib::Link;
 use crate::rib::link::LinkAddr;
 
+use super::af::PimAf;
 use super::igmp::{IgmpConfig, IgmpIf};
 use super::inst::{Message, Pim};
+use super::ipv4::Ipv4;
 use super::neighbor::Neighbor;
 use super::socket::{igmp_join_if, igmp_leave_if, pim_join_if, pim_leave_if};
 
@@ -54,25 +56,25 @@ impl LinkConfig {
 }
 
 /// Runtime per-interface state, keyed by ifindex in [`Pim::links`].
-pub struct PimLink {
+pub struct PimLink<A: PimAf = Ipv4> {
     pub ifindex: u32,
     pub name: String,
     pub link_up: bool,
-    /// IPv4 addresses on the link; the first is the primary address
+    /// Family addresses on the link; the first is the primary address
     /// used as our Hello source identity and DR candidate.
-    pub addrs: Vec<Ipv4Net>,
+    pub addrs: Vec<A::Prefix>,
     /// PIM is running on this interface (group joined, hello timer
     /// armed). Derived state — see [`Pim::reconcile`].
     pub enabled: bool,
     pub gen_id: u32,
-    pub dr: Option<Ipv4Addr>,
-    pub nbrs: BTreeMap<Ipv4Addr, Neighbor>,
+    pub dr: Option<A::Addr>,
+    pub nbrs: BTreeMap<A::Addr, Neighbor<A>>,
     pub hello_timer: Option<Timer>,
     /// IGMP runtime state — `Some` while IGMP runs on this interface.
-    pub igmp: Option<IgmpIf>,
+    pub igmp: Option<IgmpIf<A>>,
 }
 
-impl PimLink {
+impl PimLink<Ipv4> {
     pub fn from_link(link: &Link) -> Self {
         let addrs = link
             .addr4
