@@ -50,6 +50,13 @@ pub struct UpdatePacket {
     pub treat_as_withdraw: bool,
     #[nom(Ignore)]
     max_packet_size: usize,
+    /// Whether the session this UPDATE is bound for negotiated 4-octet
+    /// AS support (RFC 6793). Egress only: `true` (the default) emits
+    /// AS_PATH / AGGREGATOR with 4-octet ASNs; `false` narrows them to
+    /// the 2-octet forms with AS_TRANS substitution plus AS4_PATH /
+    /// AS4_AGGREGATOR when needed. Not a wire field.
+    #[nom(Ignore)]
+    pub as4: bool,
 }
 
 impl UpdatePacket {
@@ -76,6 +83,7 @@ impl Default for UpdatePacket {
             mp_withdraw: None,
             treat_as_withdraw: false,
             max_packet_size: BGP_PACKET_LEN,
+            as4: true,
         }
     }
 }
@@ -99,7 +107,7 @@ impl UpdatePacket {
 
         // Attributes emit.
         if let Some(bgp_attr) = &self.bgp_attr {
-            bgp_attr.attr_emit(&mut buf);
+            bgp_attr.attr_emit_opt(&mut buf, self.as4);
         }
 
         // No MP reach/unreach emit at this moment.
@@ -184,7 +192,7 @@ impl UpdatePacket {
         let attr_pos: std::ops::Range<usize> = attr_len_pos..attr_len_pos + 2;
 
         if let Some(bgp_attr) = &self.bgp_attr {
-            bgp_attr.attr_emit(&mut buf);
+            bgp_attr.attr_emit_opt(&mut buf, self.as4);
         }
 
         // MP_REACH attribute header — Optional + Extended Length.
@@ -295,7 +303,7 @@ impl UpdatePacket {
         let _ = buf.put_u16(0u16); // placeholder
 
         if let Some(bgp_attr) = &self.bgp_attr {
-            bgp_attr.attr_emit(buf.get_mut());
+            bgp_attr.attr_emit_opt(buf.get_mut(), self.as4);
         }
 
         super::attrs::mp_reach::evpn_attr_emit(snpa, &nhop, &updates, buf.get_mut());
@@ -341,7 +349,7 @@ impl UpdatePacket {
         let _ = buf.put_u16(0u16); // placeholder
 
         if let Some(bgp_attr) = &self.bgp_attr {
-            bgp_attr.attr_emit(buf.get_mut());
+            bgp_attr.attr_emit_opt(buf.get_mut(), self.as4);
         }
         super::attrs::mp_reach::srpolicy_attr_emit(afi, snpa, &nhop, &updates, buf.get_mut());
 
@@ -406,7 +414,7 @@ impl UpdatePacket {
         let _ = buf.put_u16(0u16);
 
         if let Some(bgp_attr) = &self.bgp_attr {
-            bgp_attr.attr_emit(buf.get_mut());
+            bgp_attr.attr_emit_opt(buf.get_mut(), self.as4);
         }
 
         // MP reach (dispatches to Vpnv6Reach::attr_emit_mut, which
@@ -442,7 +450,7 @@ impl UpdatePacket {
 
         // Attributes emit.
         if let Some(bgp_attr) = &self.bgp_attr {
-            bgp_attr.attr_emit(buf.get_mut());
+            bgp_attr.attr_emit_opt(buf.get_mut(), self.as4);
         }
 
         // MP reach.
@@ -528,7 +536,7 @@ impl UpdatePacket {
 
         // Attributes emit.
         if let Some(bgp_attr) = self.bgp_attr {
-            bgp_attr.attr_emit(&mut buf);
+            bgp_attr.attr_emit_opt(&mut buf, self.as4);
         }
 
         // MP reach.

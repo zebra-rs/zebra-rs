@@ -3,9 +3,10 @@ use std::fmt;
 use bytes::BytesMut;
 
 use crate::{
-    Aggregator, Aigp, As4Path, AtomicAggregate, AttrEmitter, BgpLsAttr, BgpNexthop, ClusterList,
-    Color, Community, ExtCommunity, LargeCommunity, LocalPref, Med, NexthopAttr, Origin,
-    OriginatorId, PmsiTunnel, PrefixSid, PrefixSidTlv, TunnelEncap, UnknownAttr,
+    Aggregator, Aggregator2, Aigp, As2Path, As4Aggregator, As4Path, As4PathAttr, AtomicAggregate,
+    AttrEmitter, BgpLsAttr, BgpNexthop, ClusterList, Color, Community, ExtCommunity,
+    LargeCommunity, LocalPref, Med, NexthopAttr, Origin, OriginatorId, PmsiTunnel, PrefixSid,
+    PrefixSidTlv, TunnelEncap, UnknownAttr,
 };
 
 // BGP Attribute for quick access to each attribute. This would be used for
@@ -70,11 +71,29 @@ impl BgpAttr {
     }
 
     pub fn attr_emit(&self, buf: &mut BytesMut) {
+        self.attr_emit_opt(buf, true);
+    }
+
+    /// Emit the path attributes for a session whose 4-octet-AS support
+    /// is `as4` (RFC 6793). An AS4 session carries AS_PATH / AGGREGATOR
+    /// with 4-octet ASNs. Toward an OLD (non-AS4) peer they narrow to
+    /// the 2-octet forms with AS_TRANS substituted, and whenever that
+    /// substitution loses an ASN the real path / aggregator rides
+    /// alongside in AS4_PATH / AS4_AGGREGATOR.
+    pub fn attr_emit_opt(&self, buf: &mut BytesMut, as4: bool) {
         if let Some(v) = &self.origin {
             v.attr_emit(buf);
         }
         if let Some(v) = &self.aspath {
-            v.attr_emit(buf);
+            if as4 {
+                v.attr_emit(buf);
+            } else {
+                let as2: As2Path = v.into();
+                as2.attr_emit(buf);
+                if v.has_four_octet_asn() {
+                    As4PathAttr::from_path(v).attr_emit(buf);
+                }
+            }
         }
         if let Some(v) = &self.nexthop
             && let BgpNexthop::Ipv4(addr) = v
@@ -92,7 +111,15 @@ impl BgpAttr {
             v.attr_emit(buf);
         }
         if let Some(v) = &self.aggregator {
-            v.attr_emit(buf);
+            if as4 {
+                v.attr_emit(buf);
+            } else {
+                let as2: Aggregator2 = v.clone().into();
+                as2.attr_emit(buf);
+                if v.asn > u16::MAX as u32 {
+                    As4Aggregator::from(v).attr_emit(buf);
+                }
+            }
         }
         // An empty set would emit a zero-length attribute, which RFC 7606 §7.8
         // makes malformed (the length must be a *non-zero* multiple of 4) and

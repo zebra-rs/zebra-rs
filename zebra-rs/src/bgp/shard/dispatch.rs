@@ -228,9 +228,13 @@ impl BgpShard {
             while ctx.egress_depth.load(Ordering::Relaxed) > params.egress_high_water {
                 std::thread::sleep(std::time::Duration::from_millis(DUMP_PARK_MS));
             }
-            for buf in
-                super::super::update_group::encode_ipv4_update(&attr, &nlris, max, params.enhe_v6)
-            {
+            for buf in super::super::update_group::encode_ipv4_update(
+                &attr,
+                &nlris,
+                max,
+                ctx.as4,
+                params.enhe_v6,
+            ) {
                 ctx.send_packet(buf);
                 sent += 1;
             }

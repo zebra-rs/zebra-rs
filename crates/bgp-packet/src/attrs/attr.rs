@@ -25,6 +25,11 @@ pub enum AttrType {
     MpReachNlri = 14,
     MpUnreachNlri = 15,
     ExtendedCom = 16,
+    // RFC 6793: the 4-octet AS path / aggregator an OLD (non-AS4)
+    // speaker tunnels alongside its AS_TRANS-substituted AS_PATH /
+    // AGGREGATOR.
+    As4Path = 17,
+    As4Aggregator = 18,
     PmsiTunnel = 22,
     // 25 — RFC 5701 IPv6 Address Specific Extended Community — is deliberately
     // absent, and must only be re-added together with an
@@ -62,6 +67,8 @@ impl From<u8> for AttrType {
             14 => MpReachNlri,
             15 => MpUnreachNlri,
             16 => ExtendedCom,
+            17 => As4Path,
+            18 => As4Aggregator,
             22 => PmsiTunnel,
             26 => Aigp,
             32 => LargeCom,
@@ -90,6 +97,8 @@ impl From<AttrType> for u8 {
             MpReachNlri => 14,
             MpUnreachNlri => 15,
             ExtendedCom => 16,
+            As4Path => 17,
+            As4Aggregator => 18,
             PmsiTunnel => 22,
             Aigp => 26,
             LargeCom => 32,
@@ -136,6 +145,10 @@ pub enum Attr {
     MpUnreachNlri(MpUnreachAttr),
     #[nom(Selector = "AttrSelector(AttrType::ExtendedCom, None)")]
     ExtendedCom(ExtCommunity),
+    #[nom(Selector = "AttrSelector(AttrType::As4Path, None)")]
+    As4PathTrans(As4PathAttr),
+    #[nom(Selector = "AttrSelector(AttrType::As4Aggregator, None)")]
+    As4Aggregator(As4Aggregator),
     #[nom(Selector = "AttrSelector(AttrType::PmsiTunnel, None)")]
     PmsiTunnel(PmsiTunnel),
     #[nom(Selector = "AttrSelector(AttrType::Aigp, None)")]
@@ -161,6 +174,8 @@ impl Attr {
             Attr::AtomicAggregate(v) => v.attr_emit(buf),
             Attr::Aggregator(v) => v.attr_emit(buf),
             Attr::Aggregator2(v) => v.attr_emit(buf),
+            Attr::As4PathTrans(v) => v.attr_emit(buf),
+            Attr::As4Aggregator(v) => v.attr_emit(buf),
             Attr::OriginatorId(v) => v.attr_emit(buf),
             Attr::ClusterList(v) => v.attr_emit(buf),
             // Attr::MpReachNlri(v) => v.attr_emit(buf),
@@ -190,6 +205,8 @@ impl fmt::Display for Attr {
             Attr::AtomicAggregate(v) => write!(f, "{}", v),
             Attr::Aggregator(v) => write!(f, "{}", v),
             Attr::Aggregator2(v) => write!(f, "{}", v),
+            Attr::As4PathTrans(v) => write!(f, "{}", v),
+            Attr::As4Aggregator(v) => write!(f, "{}", v),
             Attr::OriginatorId(v) => write!(f, "{}", v),
             Attr::ClusterList(v) => write!(f, "{}", v),
             Attr::MpReachNlri(v) => write!(f, "{}", v),
@@ -218,6 +235,8 @@ impl fmt::Debug for Attr {
             Attr::AtomicAggregate(v) => write!(f, "{:?}", v),
             Attr::Aggregator(v) => write!(f, "{:?}", v),
             Attr::Aggregator2(v) => write!(f, "{:?}", v),
+            Attr::As4PathTrans(v) => write!(f, "{:?}", v),
+            Attr::As4Aggregator(v) => write!(f, "{:?}", v),
             Attr::OriginatorId(v) => write!(f, "{:?}", v),
             Attr::ClusterList(v) => write!(f, "{:?}", v),
             Attr::MpReachNlri(v) => write!(f, "{:?}", v),
@@ -343,7 +362,24 @@ fn attr_malformation_is_withdraw(attr_type: AttrType) -> bool {
             // length is not a non-zero multiple of 12.
             | AttrType::LargeCom
             | AttrType::PrefixSid
+            // RFC 7606 §7.4: a malformed AS_PATH "SHALL be handled using the
+            // approach of 'treat-as-withdraw'". The width mismatch a
+            // mis-negotiated AS4 session produces lands here rather than
+            // resetting the session.
+            | AttrType::AsPath
+            // RFC 7606 §7.5: same for AGGREGATOR (wrong length for the
+            // session's negotiated ASN width).
+            | AttrType::Aggregator
     )
+}
+
+/// Whether a malformed instance of `attr_type` is handled by the RFC 7606
+/// "attribute discard" action: drop just the attribute and keep the UPDATE.
+/// AS4_PATH and AS4_AGGREGATOR use it per RFC 7606 §7.10 / §7.11 — they
+/// only refine AS_PATH / AGGREGATOR, so losing one degrades to the
+/// AS_TRANS view rather than losing the route.
+fn attr_malformation_is_discard(attr_type: AttrType) -> bool {
+    matches!(attr_type, AttrType::As4Path | AttrType::As4Aggregator)
 }
 
 type ParsedAttributes<'a> = Result<
@@ -373,6 +409,10 @@ pub fn parse_bgp_update_attribute(
     let mut mp_update: Option<MpReachAttr> = None;
     let mut mp_withdraw: Option<MpUnreachAttr> = None;
     let mut treat_as_withdraw = false;
+    // RFC 6793 transitional attributes, parked until every attribute is
+    // in (wire order is arbitrary) and reconciled after the loop.
+    let mut as4_path: Option<As4Path> = None;
+    let mut as4_aggregator: Option<Aggregator> = None;
 
     while !remaining.is_empty() {
         // Parse the framing first so a Value-parse error stays recoverable:
@@ -418,6 +458,11 @@ pub fn parse_bgp_update_attribute(
                     remaining = new_remaining;
                     continue;
                 }
+                if attr_malformation_is_discard(attr_type) {
+                    // RFC 7606 §7.10 / §7.11: drop just the attribute.
+                    remaining = new_remaining;
+                    continue;
+                }
                 return Err(e);
             }
         };
@@ -427,19 +472,9 @@ pub fn parse_bgp_update_attribute(
             }
             Attr::As2Path(v) => {
                 // Widen the 2-octet AS_PATH into the 4-octet form the rest of
-                // the crate uses (RFC 6793 §4.2.2). Discarding it left
-                // `bgp_attr.aspath` at None, so the route would be accepted with
-                // no AS_PATH at all — no loop detection, no path-length
-                // comparison — and re-advertised without a well-known mandatory
-                // attribute.
-                //
-                // Not reachable today: `peer_packet_parse` passes a hardcoded
-                // `as4 = true`, so AS_PATH always parses as `As4Path` and this
-                // arm runs only from tests. It is wired up so that sourcing
-                // `as4` from the negotiated capability cannot silently lose
-                // AS_PATHs. Doing that properly also needs AS4_PATH (type 17)
-                // to recover the 4-octet ASNs an OLD peer hides behind
-                // AS_TRANS; neither attribute is implemented here.
+                // the crate uses (RFC 6793 §4.2.2). The AS_TRANS placeholders
+                // it may carry are substituted with the real ASNs from
+                // AS4_PATH by the reconciliation after this loop.
                 bgp_attr.aspath = Some(v.into());
             }
             Attr::As4Path(v) => {
@@ -460,8 +495,17 @@ pub fn parse_bgp_update_attribute(
             Attr::Aggregator(v) => {
                 bgp_attr.aggregator = Some(v);
             }
-            Attr::Aggregator2(_v) => {
-                // TODO
+            Attr::Aggregator2(v) => {
+                // 2-octet AGGREGATOR from an OLD (non-AS4) peer: widen.
+                // An AS_TRANS placeholder is substituted from
+                // AS4_AGGREGATOR by the reconciliation after this loop.
+                bgp_attr.aggregator = Some(v.into());
+            }
+            Attr::As4PathTrans(v) => {
+                as4_path = Some(v.0);
+            }
+            Attr::As4Aggregator(v) => {
+                as4_aggregator = Some(v.into());
             }
             Attr::Community(v) => {
                 bgp_attr.com = Some(v);
@@ -558,6 +602,29 @@ pub fn parse_bgp_update_attribute(
             }
         }
         remaining = new_remaining;
+    }
+
+    // RFC 6793 §4.2.3 reconciliation. Only an OLD (non-AS4) session
+    // carries information in AS4_PATH / AS4_AGGREGATOR; on an AS4
+    // session the AS_PATH is already 4-octet and a stray AS4_PATH from
+    // a NEW peer is discarded.
+    if !as4 {
+        // AGGREGATOR gate first: an AGGREGATOR whose AS is NOT AS_TRANS
+        // was attached by an OLD speaker *after* the AS4 attributes, so
+        // everything they say about the path is stale — ignore both.
+        if let (Some(aggregator), Some(_)) = (&bgp_attr.aggregator, &as4_aggregator) {
+            if aggregator.asn == u32::from(AS_TRANS) {
+                bgp_attr.aggregator = as4_aggregator;
+            } else {
+                as4_path = None;
+            }
+        }
+        if let (Some(aspath), Some(as4p)) = (&bgp_attr.aspath, &as4_path) {
+            // §6: confederation segments must not appear in AS4_PATH;
+            // discard just those segments and continue.
+            let as4p = as4p.strip_confed_segments();
+            bgp_attr.aspath = Some(As4Path::merge_as4_path(aspath, &as4p));
+        }
     }
 
     Ok((
@@ -809,6 +876,191 @@ mod tests {
             .collect();
         assert_eq!(flat, vec![65000u32, 65001], "ASNs widened to 4 octets");
         assert_eq!(aspath.length, 2, "hop count preserved");
+    }
+
+    // ---- RFC 6793 AS4_PATH / AS4_AGGREGATOR reconciliation ------------
+
+    use crate::attrs::aspath::AS_TRANS;
+
+    fn flat_asns(path: &crate::As4Path) -> Vec<u32> {
+        path.segs
+            .iter()
+            .flat_map(|s| s.asn.iter().copied())
+            .collect()
+    }
+
+    /// The OLD-speaker tunnel: a 2-octet AS_PATH carrying AS_TRANS plus
+    /// an AS4_PATH with the real 4-octet path. The merged `aspath` must
+    /// recover the real ASNs (RFC 6793 §4.2.3).
+    #[test]
+    fn as4_path_merges_into_aspath_on_old_session() {
+        // ORIGIN, then AS_PATH (2-octet): AS_SEQ [65001, AS_TRANS] —
+        // the OLD middle speaker 65001 prepended itself after AS 70000
+        // (behind AS_TRANS) originated.
+        let mut block = vec![0x40, 0x01, 0x01, 0x00];
+        block.extend_from_slice(&[0x40, 0x02, 0x06, 0x02, 0x02, 0xfd, 0xe9, 0x5b, 0xa0]);
+        // AS4_PATH (type 17, optional transitive): AS_SEQ [70000].
+        block.extend_from_slice(&[0xC0, 17, 0x06, 0x02, 0x01, 0x00, 0x01, 0x11, 0x70]);
+
+        let len = block.len() as u16;
+        let (_, bgp_attr, _, _, taw) =
+            parse_bgp_update_attribute(&block, len, false, None).expect("must parse");
+        assert!(!taw);
+        let aspath = bgp_attr.expect("attrs").aspath.expect("aspath present");
+        assert_eq!(flat_asns(&aspath), vec![65001, 70000]);
+        assert_eq!(aspath.length, 2);
+    }
+
+    /// On an AS4 session a stray AS4_PATH from a NEW peer is discarded:
+    /// the wire AS_PATH stands.
+    #[test]
+    fn as4_path_from_new_peer_is_ignored() {
+        let mut block = vec![0x40, 0x01, 0x01, 0x00];
+        // AS_PATH (4-octet): AS_SEQ [65001].
+        block.extend_from_slice(&[0x40, 0x02, 0x06, 0x02, 0x01, 0x00, 0x00, 0xfd, 0xe9]);
+        // AS4_PATH claiming something else entirely.
+        block.extend_from_slice(&[0xC0, 17, 0x06, 0x02, 0x01, 0x00, 0x01, 0x11, 0x70]);
+
+        let len = block.len() as u16;
+        let (_, bgp_attr, _, _, _) =
+            parse_bgp_update_attribute(&block, len, true, None).expect("must parse");
+        let aspath = bgp_attr.expect("attrs").aspath.expect("aspath present");
+        assert_eq!(flat_asns(&aspath), vec![65001]);
+    }
+
+    /// A 2-octet AGGREGATOR of AS_TRANS is replaced by AS4_AGGREGATOR
+    /// (RFC 6793 §4.2.3); the 6-octet AGGREGATOR itself must widen
+    /// rather than vanish (the old arm was an empty TODO).
+    #[test]
+    fn aggregator2_widens_and_as4_aggregator_substitutes() {
+        let mut block = vec![0x40, 0x01, 0x01, 0x00];
+        // AGGREGATOR (2-octet, 6 bytes): AS_TRANS, 10.0.0.1.
+        block.extend_from_slice(&[0xC0, 7, 0x06, 0x5b, 0xa0, 10, 0, 0, 1]);
+        // AS4_AGGREGATOR (type 18, 8 bytes): 4200000000, 10.0.0.1.
+        let mut v = vec![0xC0u8, 18, 0x08];
+        v.extend_from_slice(&4200000000u32.to_be_bytes());
+        v.extend_from_slice(&[10, 0, 0, 1]);
+        block.extend_from_slice(&v);
+
+        let len = block.len() as u16;
+        let (_, bgp_attr, _, _, _) =
+            parse_bgp_update_attribute(&block, len, false, None).expect("must parse");
+        let agg = bgp_attr.expect("attrs").aggregator.expect("widened");
+        assert_eq!(agg.asn, 4200000000);
+        assert_eq!(agg.ip, std::net::Ipv4Addr::new(10, 0, 0, 1));
+    }
+
+    /// An AGGREGATOR whose AS is NOT AS_TRANS was attached by an OLD
+    /// speaker after the AS4 attributes: both AS4_AGGREGATOR and
+    /// AS4_PATH are stale and must be ignored (RFC 6793 §4.2.3).
+    #[test]
+    fn non_trans_aggregator_invalidates_as4_attrs() {
+        let mut block = vec![0x40, 0x01, 0x01, 0x00];
+        // AS_PATH (2-octet): AS_SEQ [65001, AS_TRANS].
+        block.extend_from_slice(&[0x40, 0x02, 0x06, 0x02, 0x02, 0xfd, 0xe9, 0x5b, 0xa0]);
+        // AGGREGATOR (2-octet): 65001 (a real AS, not AS_TRANS).
+        block.extend_from_slice(&[0xC0, 7, 0x06, 0xfd, 0xe9, 10, 0, 0, 2]);
+        // AS4_PATH + AS4_AGGREGATOR, both now stale.
+        block.extend_from_slice(&[0xC0, 17, 0x06, 0x02, 0x01, 0x00, 0x01, 0x11, 0x70]);
+        let mut v = vec![0xC0u8, 18, 0x08];
+        v.extend_from_slice(&4200000000u32.to_be_bytes());
+        v.extend_from_slice(&[10, 0, 0, 1]);
+        block.extend_from_slice(&v);
+
+        let len = block.len() as u16;
+        let (_, bgp_attr, _, _, _) =
+            parse_bgp_update_attribute(&block, len, false, None).expect("must parse");
+        let bgp_attr = bgp_attr.expect("attrs");
+        let agg = bgp_attr.aggregator.expect("aggregator");
+        assert_eq!(agg.asn, 65001, "AGGREGATOR wins over stale AS4_AGGREGATOR");
+        let aspath = bgp_attr.aspath.expect("aspath");
+        assert_eq!(
+            flat_asns(&aspath),
+            vec![65001, u32::from(AS_TRANS)],
+            "stale AS4_PATH must not merge"
+        );
+    }
+
+    /// RFC 7606 §7.10: a malformed AS4_PATH is discarded — the UPDATE
+    /// survives with the placeholder path, no withdraw, no reset.
+    #[test]
+    fn malformed_as4_path_is_attribute_discard() {
+        let mut block = vec![0x40, 0x01, 0x01, 0x00];
+        block.extend_from_slice(&[0x40, 0x02, 0x06, 0x02, 0x02, 0xfd, 0xe9, 0x5b, 0xa0]);
+        // AS4_PATH declaring 2 ASNs but carrying only 1 octet of data.
+        block.extend_from_slice(&[0xC0, 17, 0x03, 0x02, 0x02, 0x00]);
+
+        let len = block.len() as u16;
+        let (_, bgp_attr, _, _, taw) =
+            parse_bgp_update_attribute(&block, len, false, None).expect("must not reset");
+        assert!(!taw, "attribute discard, not treat-as-withdraw");
+        let aspath = bgp_attr.expect("attrs").aspath.expect("aspath survives");
+        assert_eq!(flat_asns(&aspath), vec![65001, u32::from(AS_TRANS)]);
+    }
+
+    /// RFC 7606 §7.4: a malformed AS_PATH is treat-as-withdraw, not a
+    /// session reset. (The width mismatch of a mis-negotiated AS4
+    /// session lands exactly here.)
+    #[test]
+    fn malformed_as_path_is_treat_as_withdraw() {
+        let mut block = vec![0x40, 0x01, 0x01, 0x00];
+        // AS_PATH: segment declares 2 ASNs, carries 1 octet.
+        block.extend_from_slice(&[0x40, 0x02, 0x03, 0x02, 0x02, 0xfd]);
+
+        let len = block.len() as u16;
+        let (_, bgp_attr, _, _, taw) =
+            parse_bgp_update_attribute(&block, len, true, None).expect("must not reset");
+        assert!(taw, "malformed AS_PATH must treat-as-withdraw");
+        assert!(bgp_attr.expect("attrs").aspath.is_none());
+    }
+
+    /// End-to-end NEW→OLD→NEW tunnel: attributes emitted for an OLD
+    /// peer (2-octet AS_PATH + AS4_PATH, AGGREGATOR + AS4_AGGREGATOR)
+    /// parse back on the OLD side into the original 4-octet values.
+    #[test]
+    fn old_peer_emit_round_trips_real_asns() {
+        use std::str::FromStr;
+        let mut attr = crate::BgpAttr::new();
+        attr.aspath = Some(crate::As4Path::from_str("70000 65001").unwrap());
+        attr.aggregator = Some(crate::Aggregator::new(
+            4200000000,
+            std::net::Ipv4Addr::new(10, 0, 0, 1),
+        ));
+
+        let mut buf = BytesMut::new();
+        attr.attr_emit_opt(&mut buf, false);
+        // The wire AS_PATH is the 2-octet form: flags 0x40, type 2,
+        // then AS_TRANS where 70000 was.
+        assert_eq!(&buf[4..7], &[0x40, 0x02, 0x06]);
+        assert_eq!(&buf[7..13], &[0x02, 0x02, 0x5b, 0xa0, 0xfd, 0xe9]);
+
+        let len = buf.len() as u16;
+        let (_, parsed, _, _, taw) =
+            parse_bgp_update_attribute(&buf, len, false, None).expect("must parse");
+        assert!(!taw);
+        let parsed = parsed.expect("attrs");
+        let aspath = parsed.aspath.expect("aspath");
+        assert_eq!(flat_asns(&aspath), vec![70000, 65001]);
+        let agg = parsed.aggregator.expect("aggregator");
+        assert_eq!(agg.asn, 4200000000);
+    }
+
+    /// The same attributes on an AS4 session stay 4-octet with no
+    /// transitional attributes at all.
+    #[test]
+    fn as4_session_emits_no_transitional_attrs() {
+        use std::str::FromStr;
+        let mut attr = crate::BgpAttr::new();
+        attr.aspath = Some(crate::As4Path::from_str("70000 65001").unwrap());
+
+        let mut buf = BytesMut::new();
+        attr.attr_emit_opt(&mut buf, true);
+        // No type-17 attribute anywhere in the block.
+        let len = buf.len() as u16;
+        let (_, parsed, _, _, _) =
+            parse_bgp_update_attribute(&buf, len, true, None).expect("must parse");
+        let aspath = parsed.expect("attrs").aspath.expect("aspath");
+        assert_eq!(flat_asns(&aspath), vec![70000, 65001]);
     }
 
     // ---- RFC 4271 §9 unrecognized attribute handling -----------------
