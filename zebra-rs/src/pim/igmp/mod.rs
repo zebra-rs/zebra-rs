@@ -433,7 +433,7 @@ impl Pim {
         cfg: &LinkConfig,
         now: Instant,
     ) {
-        if !group_addr.is_multicast() {
+        if !Ipv4::is_multicast(group_addr) {
             return;
         }
         let Some(igmp) = self.link_igmp_mut(ifindex) else {
@@ -486,7 +486,7 @@ impl Pim {
         cfg: &LinkConfig,
         now: Instant,
     ) {
-        if !record.group.is_multicast() {
+        if !Ipv4::is_multicast(record.group) {
             return;
         }
         let gmi = cfg.igmp.gmi();

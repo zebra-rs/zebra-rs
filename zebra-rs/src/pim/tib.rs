@@ -267,7 +267,7 @@ impl Pim {
     pub(crate) fn process_upcall(&mut self, upcall: Upcall) {
         match upcall.kind {
             UpcallKind::Nocache => {
-                if !upcall.grp.is_multicast() || upcall.grp.octets()[..3] == [224, 0, 0] {
+                if !Ipv4::is_multicast(upcall.grp) || Ipv4::is_reserved_group(upcall.grp) {
                     return;
                 }
                 let key = SgKey::Sg {

@@ -558,11 +558,25 @@ consistent with the arc's smallest-safe-slice rule:
   `Neighbor<A>`, `AssertMetric/State<A>`, `RpSet<A>`, `BsrConfig/Run<A>`, `IgmpIf/Group<A>`,
   `PimLink<A>`. All logic stays concrete-IPv4 (methods on `impl Pim` / `impl PimLink<Ipv4>`),
   byte-identical. Verified: unit tests, `@pim_ssm`/`@pim_asm` live, identical binary md5.
-- **Slice 2b — logic + trait methods.** Add the behavioural methods to `PimAf`
-  (classification, prefix ops, checksum ctx, transports, membership codec) *together with*
-  the generic logic that calls them, flip `Pim` → `Pim<A>` and the `impl` blocks to
-  `impl<A: PimAf>`, extract the `Gm<A>` event engine + `Ipv4` codec, and put the forwarding
-  plane behind `PimForwardingPlane<A>`. Still IPv4-runtime-only.
+- **Slice 2b — logic + trait methods.** Measured, this is a ~5,600-LOC change (~15
+  `impl Pim` blocks flipping to `impl<A: PimAf> Pim<A>`, ~130 concrete `Ipv4Addr`/`Ipv4Net`
+  touchpoints) that cannot compile mid-way, so it lands as three compiler-verified,
+  byte-identical sub-slices, each its own PR:
+  - **2b.1 — pure semantics on `PimAf`.** Classification (`is_multicast`/`is_ssm`/
+    `is_reserved_group`), prefix ops (`prefix_new`/`prefix_contains`/`prefix_len`/
+    `prefix_addr`) and the `DEFAULT_SSM_RANGE`/`DEFAULT_RP_RANGE` consts, with every
+    existing concrete call site (`rp.rs`, `register.rs`, `igmp`, `tib.rs`, `bsr.rs`,
+    `config.rs`) routed through `Ipv4::…`. `Pim` stays concrete; unit-tested; byte-identical.
+    (`NAME`, `host_prefix`, wire conversion, etc. are deferred to the slice that first
+    needs them, so no trait method is ever dead under `-D warnings`.)
+  - **2b.2 — seam traits for the impure edges.** `PimForwardingPlane<A>` (rename
+    `ForwardingPlane`→`Mrt4`, `Upcall`→`Upcall<A>`) and the `Gm<A>` membership engine +
+    `GmCodec` (`Ipv4`/IGMP) adapter (rename `igmp/`→`gm/`). `Pim` still concrete, holding
+    `Mrt4` and `Gm<Ipv4>`.
+  - **2b.3 — the actor flip.** `Pim` → `Pim<A>`, `Message<A>`, `PimSend<A>`, all `impl`
+    blocks to `impl<A: PimAf>`, callbacks/show typed over `A`; add wire-conversion
+    (`from_ip`/`to_ip`) + transport-spawn methods to `PimAf` and route the `IpAddr::V4`
+    sites through them. Spawn `Pim::<Ipv4>::new` only — still IPv4-runtime-only.
 
 **Supervisor deferral.** The standalone `PimSupervisor` (§4.1) moves to the start of
 Phase 3: extracting it now — with only IPv4 at runtime and no `Pim<Ipv6>` to route to — is

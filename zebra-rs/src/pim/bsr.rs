@@ -77,8 +77,7 @@ impl BsrConfig {
         }
         Some((
             self.crp_addr?,
-            self.crp_group
-                .unwrap_or_else(|| "224.0.0.0/4".parse().unwrap()),
+            self.crp_group.unwrap_or(Ipv4::DEFAULT_RP_RANGE),
             self.crp_priority.unwrap_or(192),
         ))
     }
@@ -158,8 +157,10 @@ impl Pim {
         self.bsr
             .rp_set
             .iter()
-            .filter(|((range, _), e)| range.contains(&grp) && e.expires > now)
-            .max_by_key(|((range, rp), e)| (range.prefix_len(), std::cmp::Reverse(e.priority), *rp))
+            .filter(|((range, _), e)| Ipv4::prefix_contains(range, &grp) && e.expires > now)
+            .max_by_key(|((range, rp), e)| {
+                (Ipv4::prefix_len(range), std::cmp::Reverse(e.priority), *rp)
+            })
             .map(|((_, rp), _)| *rp)
     }
 
@@ -283,7 +284,7 @@ impl Pim {
             let IpAddr::V4(range_addr) = group.group.addr else {
                 continue;
             };
-            let Ok(range) = Ipv4Net::new(range_addr, group.group.masklen) else {
+            let Some(range) = Ipv4::prefix_new(range_addr, group.group.masklen) else {
                 continue;
             };
             self.bsr.rp_set.retain(|(r, _), _| *r != range);
@@ -349,7 +350,7 @@ impl Pim {
             let IpAddr::V4(range_addr) = group.addr else {
                 continue;
             };
-            let Ok(range) = Ipv4Net::new(range_addr, group.masklen) else {
+            let Some(range) = Ipv4::prefix_new(range_addr, group.masklen) else {
                 continue;
             };
             if adv.holdtime == 0 {
@@ -400,8 +401,8 @@ impl Pim {
                 group: EncodedGroup {
                     bidir: false,
                     zone: false,
-                    masklen: range.prefix_len(),
-                    addr: IpAddr::V4(range.addr()),
+                    masklen: Ipv4::prefix_len(&range),
+                    addr: IpAddr::V4(Ipv4::prefix_addr(&range)),
                 },
                 rp_count: rps.len() as u8,
                 rps,
@@ -459,8 +460,8 @@ impl Pim {
             groups: vec![EncodedGroup {
                 bidir: false,
                 zone: false,
-                masklen: range.prefix_len(),
-                addr: IpAddr::V4(range.addr()),
+                masklen: Ipv4::prefix_len(&range),
+                addr: IpAddr::V4(Ipv4::prefix_addr(&range)),
             }],
         };
         let packet = PimPacket::new(PimPayload::CandRpAdv(adv));

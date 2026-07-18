@@ -17,7 +17,9 @@ use pim_packet::{
     EncodedGroup, EncodedUnicast, PimPacket, PimPayload, PimRegister, PimRegisterStop,
 };
 
+use super::af::PimAf;
 use super::inst::{Pim, PimSend};
+use super::ipv4::Ipv4;
 use super::mroute::Upcall;
 use super::rp::is_ssm;
 use super::tib::{JoinState, KEEPALIVE_PERIOD, RegState, SgKey};
@@ -120,7 +122,7 @@ impl Pim {
         }
         let src = Ipv4Addr::new(data[12], data[13], data[14], data[15]);
         let grp = Ipv4Addr::new(data[16], data[17], data[18], data[19]);
-        if !grp.is_multicast() || is_ssm(grp) {
+        if !Ipv4::is_multicast(grp) || is_ssm(grp) {
             return;
         }
         if !self.i_am_rp(grp) {
