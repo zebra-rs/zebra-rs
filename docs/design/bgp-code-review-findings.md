@@ -5,13 +5,26 @@ effort. Ten independent finder angles produced 68 candidates; each surviving
 candidate was checked by an independent adversarial verifier that had to name a
 concrete trigger and quote the decisive lines, then a fresh gap sweep added more.
 
-**Result: 34 confirmed correctness bugs + 15 confirmed cleanup items.**
-**Status 2026-07-18: ALL 15 top-ranked findings fixed and merged** (PRs #1962,
-#1972, #1981, #1984, #1987, #1991, #1997, #1999, #2001, #2002, #2006, #2007,
-#2008, and the finding-#15 branch); the "Also confirmed" and cleanup items
-below the cap remain open. Three
+**Result: 34 confirmed correctness bugs + 15 confirmed cleanup items.** Three
 candidates were refuted (two vty-disconnect "panics" are guarded by detached
 forwarding tasks; the N>1 BSID resync is covered by a mirrored winners replica).
+
+**Status — 2026-07-18: all 15 top-ranked findings are fixed and merged**, each
+as its own PR with a regression test verified to fail on the pre-fix code and
+pass after (unit and/or live BDD):
+
+| # | PR | # | PR | # | PR |
+|---|----|---|----|---|----|
+| 1 | #1962 |  6 | #1991 | 11 | #2002 |
+| 2 | #1972 |  7 | #1997 | 12 | #2006 |
+| 3 | #1981 |  8 | #1997 | 13 | #2007 |
+| 4 | #1984 |  9 | #1999 | 14 | #2008 |
+| 5 | #1987 | 10 | #2001 | 15 | #2012 |
+
+Findings #7 and #8 shared one PR (#1997) — same root cause (a per-peer egress
+knob missing from `UpdateGroupSig`). **Still open:** the "Also confirmed —
+correctness" items below the top-15 cap, and the entire Cleanup / Efficiency
+sections. Each fixed finding's own heading below is annotated `— FIXED (…)`.
 
 Line numbers are as of the review (branch `bgp`, tip `77efd00c`). All findings
 were confirmed against the current tree, not old commits.
