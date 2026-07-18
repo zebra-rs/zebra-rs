@@ -5,16 +5,15 @@
 //! riding the (*,G) refresh toward the RP (RFC 7761 §4.5.7).
 
 use std::collections::BTreeMap;
-use std::net::{IpAddr, Ipv4Addr};
 use std::time::{Duration, Instant};
 
 use pim_packet::{
     EncodedGroup, EncodedSource, EncodedUnicast, JpGroup, PimJoinPrune, PimPacket, PimPayload,
 };
 
+use super::af::PimAf;
 use super::inst::{Pim, PimSend};
 use super::rpf::RpfState;
-use super::socket::ALL_PIM_ROUTERS;
 use super::tib::{JP_HOLDTIME, JoinState, SgKey};
 
 /// Periodic J/P refresh interval (t_periodic, RFC 7761 §4.11).
@@ -25,10 +24,10 @@ pub const JP_PERIOD: Duration = Duration::from_secs(60);
 /// 1.1–1.4 randomization band).
 pub const JP_SUPPRESS: Duration = Duration::from_secs(75);
 
-impl Pim {
+impl<A: PimAf> Pim<A> {
     // ---- RX ----
 
-    pub(crate) fn jp_recv(&mut self, ifindex: u32, src: Ipv4Addr, jp: &PimJoinPrune) {
+    pub(crate) fn jp_recv(&mut self, ifindex: u32, src: A::Addr, jp: &PimJoinPrune) {
         let Some(link) = self.links.get(&ifindex) else {
             return;
         };
@@ -38,7 +37,7 @@ impl Pim {
         // Process J/P entries addressed to one of our addresses on
         // this interface; messages targeting another upstream router
         // only matter for suppression/override (later phase).
-        let IpAddr::V4(upstream) = jp.upstream_neighbor.addr else {
+        let Some(upstream) = A::from_ip(jp.upstream_neighbor.addr) else {
             return;
         };
         if !link.is_my_addr(&upstream) {
@@ -49,11 +48,11 @@ impl Pim {
         }
         let holdtime = jp.holdtime;
         for group in &jp.groups {
-            let IpAddr::V4(grp) = group.group.addr else {
+            let Some(grp) = A::from_ip(group.group.addr) else {
                 continue;
             };
             for join in &group.joins {
-                let IpAddr::V4(addr) = join.addr else {
+                let Some(addr) = A::from_ip(join.addr) else {
                     continue;
                 };
                 match (join.wildcard, join.rpt) {
@@ -73,7 +72,7 @@ impl Pim {
                 }
             }
             for prune in &group.prunes {
-                let IpAddr::V4(addr) = prune.addr else {
+                let Some(addr) = A::from_ip(prune.addr) else {
                     continue;
                 };
                 match (prune.wildcard, prune.rpt) {
@@ -102,27 +101,19 @@ impl Pim {
     ///     our next periodic refresh;
     ///   * another router's Prune for state we still want triggers an
     ///     override Join so the upstream keeps forwarding.
-    fn jp_overhear(
-        &mut self,
-        ifindex: u32,
-        sender: Ipv4Addr,
-        upstream: Ipv4Addr,
-        jp: &PimJoinPrune,
-    ) {
+    fn jp_overhear(&mut self, ifindex: u32, sender: A::Addr, upstream: A::Addr, jp: &PimJoinPrune) {
         let bucket = RpfState::Gateway {
             ifindex,
             nexthop: upstream,
         };
-        let mut overrides: Vec<SgKey> = vec![];
+        let mut overrides: Vec<SgKey<A>> = vec![];
         let mut suppress = false;
         for group in &jp.groups {
-            let IpAddr::V4(grp) = group.group.addr else {
+            let Some(grp) = A::from_ip(group.group.addr) else {
                 continue;
             };
-            let key_of = |source: &EncodedSource| -> Option<SgKey> {
-                let IpAddr::V4(addr) = source.addr else {
-                    return None;
-                };
+            let key_of = |source: &EncodedSource| -> Option<SgKey<A>> {
+                let addr = A::from_ip(source.addr)?;
                 match (source.wildcard, source.rpt) {
                     (true, true) => Some(SgKey::StarG { grp }),
                     (false, false) => Some(SgKey::Sg { src: addr, grp }),
@@ -171,10 +162,10 @@ impl Pim {
 
     // ---- TX ----
 
-    fn encode_key(&self, key: SgKey) -> Option<EncodedSource> {
+    fn encode_key(&self, key: SgKey<A>) -> Option<EncodedSource> {
         match key {
-            SgKey::Sg { src, .. } => Some(EncodedSource::sg(IpAddr::V4(src))),
-            SgKey::SgRpt { src, .. } => Some(EncodedSource::sg_rpt(IpAddr::V4(src))),
+            SgKey::Sg { src, .. } => Some(EncodedSource::sg(A::to_ip(src))),
+            SgKey::SgRpt { src, .. } => Some(EncodedSource::sg_rpt(A::to_ip(src))),
             SgKey::StarG { grp } => {
                 // The (*,G) "source" is RP(G).
                 let rp = self
@@ -182,39 +173,39 @@ impl Pim {
                     .get(&key)
                     .and_then(|e| e.rpf_target)
                     .or_else(|| self.rp_lookup(grp))?;
-                Some(EncodedSource::star_g(IpAddr::V4(rp)))
+                Some(EncodedSource::star_g(A::to_ip(rp)))
             }
         }
     }
 
     /// Triggered single-entry Join (`join == true`) or Prune toward
     /// `nbr` out `ifindex`.
-    pub(crate) fn jp_send_entry(&self, ifindex: u32, nbr: Ipv4Addr, key: SgKey, join: bool) {
+    pub(crate) fn jp_send_entry(&self, ifindex: u32, nbr: A::Addr, key: SgKey<A>, join: bool) {
         let Some(source) = self.encode_key(key) else {
             return;
         };
         let group = JpGroup {
-            group: EncodedGroup::new(IpAddr::V4(key.grp())),
+            group: EncodedGroup::new(A::to_ip(key.grp())),
             joins: if join { vec![source] } else { vec![] },
             prunes: if join { vec![] } else { vec![source] },
         };
         self.jp_send(ifindex, nbr, vec![group]);
     }
 
-    fn jp_send(&self, ifindex: u32, nbr: Ipv4Addr, groups: Vec<JpGroup>) {
-        let mut jp = PimJoinPrune::new(EncodedUnicast::new(IpAddr::V4(nbr)), JP_HOLDTIME);
+    fn jp_send(&self, ifindex: u32, nbr: A::Addr, groups: Vec<JpGroup>) {
+        let mut jp = PimJoinPrune::new(EncodedUnicast::new(A::to_ip(nbr)), JP_HOLDTIME);
         jp.groups = groups;
         let packet = PimPacket::new(PimPayload::JoinPrune(jp));
         let _ = self.send_tx.send(PimSend {
             packet,
             ifindex,
-            dst: ALL_PIM_ROUTERS,
+            dst: A::ALL_PIM_ROUTERS,
         });
     }
 
     /// Make sure a periodic refresh is scheduled for this upstream
     /// neighbor.
-    pub(crate) fn jp_refresh_arm(&mut self, ifindex: u32, nbr: Ipv4Addr) {
+    pub(crate) fn jp_refresh_arm(&mut self, ifindex: u32, nbr: A::Addr) {
         self.jp_refresh
             .entry((ifindex, nbr))
             .or_insert_with(|| Instant::now() + JP_PERIOD);
@@ -226,7 +217,7 @@ impl Pim {
     /// sources switched to a diverging SPT; drop the bucket when
     /// nothing uses that neighbor anymore.
     pub(crate) fn jp_tick(&mut self, now: Instant) {
-        let due: Vec<(u32, Ipv4Addr)> = self
+        let due: Vec<(u32, A::Addr)> = self
             .jp_refresh
             .iter()
             .filter(|(_, t)| **t <= now)
@@ -237,9 +228,9 @@ impl Pim {
                 ifindex,
                 nexthop: nbr,
             };
-            let mut by_group: BTreeMap<Ipv4Addr, (Vec<EncodedSource>, Vec<EncodedSource>)> =
+            let mut by_group: BTreeMap<A::Addr, (Vec<EncodedSource>, Vec<EncodedSource>)> =
                 BTreeMap::new();
-            let mut star_groups: Vec<Ipv4Addr> = vec![];
+            let mut star_groups: Vec<A::Addr> = vec![];
             for (key, entry) in self.tib.iter() {
                 if entry.join_state != JoinState::Joined || entry.rpf != bucket {
                     continue;
@@ -265,7 +256,7 @@ impl Pim {
                                 && e.join_state == JoinState::Joined
                                 && e.rpf != bucket =>
                         {
-                            Some(EncodedSource::sg_rpt(IpAddr::V4(*src)))
+                            Some(EncodedSource::sg_rpt(A::to_ip(*src)))
                         }
                         _ => None,
                     })
@@ -281,7 +272,7 @@ impl Pim {
             let groups: Vec<JpGroup> = by_group
                 .into_iter()
                 .map(|(grp, (joins, prunes))| JpGroup {
-                    group: EncodedGroup::new(IpAddr::V4(grp)),
+                    group: EncodedGroup::new(A::to_ip(grp)),
                     joins,
                     prunes,
                 })

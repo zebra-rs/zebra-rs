@@ -573,11 +573,17 @@ consistent with the arc's smallest-safe-slice rule:
     `ForwardingPlane`→`Mrt4`, `Upcall`→`Upcall<A>`), with `Mrt4: PimForwardingPlane<Ipv4>`.
     This is the one seam the flip *requires* — the `Pim.fp` field type must be trait-bound
     before `Pim` can be generic. `Pim` stays concrete, holding `Mrt4`.
-  - **2b.3 — the actor flip.** `Pim` → `Pim<A>`, `Message<A>`, `PimSend<A>`, all `impl`
-    blocks to `impl<A: PimAf>` (the membership FSM in `igmp/` flips generically *in place* —
-    it becomes `A`-generic without being extracted); callbacks/show typed over `A`; add
-    wire-conversion (`from_ip`/`to_ip`) + transport-spawn methods to `PimAf` and route the
-    `IpAddr::V4` sites through them. Spawn `Pim::<Ipv4>::new` only — still IPv4-runtime-only.
+  - **2b.3 — the actor flip (DONE).** `Pim` → `Pim<A>`, `Message<A>`, `PimSend<A>`,
+    `IgmpSend<A>`, `Upcall<A>`, `ShowCallback<A>`, `Callback<A>`, and every `impl Pim` →
+    `impl<A: PimAf> Pim<A>` (the membership FSM in `igmp/` flipped generically *in place* —
+    `A`-generic, not extracted; IGMP wire fields convert at the boundary via `from_ip`).
+    Only the leaf constructors stay concrete: `Pim<Ipv4>::new` (wires the IPv4 sockets +
+    `Mrt4`), `callback_build`/`show_build` (parse/render IPv4 CLI). The `PimAf` surface grew
+    to match §4.2: `type Fp`, `ALL_PIM_ROUTERS`/`GENERAL_QUERY_DST` consts, `from_ip`/`to_ip`,
+    `prefix_from_ipnet`/`link_prefixes`, `is_unspecified`, `null_register_payload`/
+    `register_inner_sg` — each landed with its caller. Only `Pim::<Ipv4>` is spawned; still
+    IPv4-runtime-only. Verified: unit + workspace tests, forced-clean clippy, full pim BDD
+    suite live with identical binary md5.
 
   **`Gm<A>` engine extraction deferred to Phase 4.** §6's standalone `Gm<A>` engine +
   `GmCodec` adapter (rename `igmp/`→`gm/`) is *not* done in Phase 2. Extracting the shared

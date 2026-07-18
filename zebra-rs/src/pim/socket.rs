@@ -21,9 +21,6 @@ pub const PIM_IP_PROTO: i32 = 103;
 /// IGMP is IP protocol 2.
 pub const IGMP_IP_PROTO: i32 = 2;
 
-/// All-hosts group — general queries go here.
-pub const IGMP_ALL_HOSTS: Ipv4Addr = Ipv4Addr::new(224, 0, 0, 1);
-
 /// All-routers group — IGMPv2 Leaves are sent here.
 pub const IGMP_ALL_ROUTERS: Ipv4Addr = Ipv4Addr::new(224, 0, 0, 2);
 

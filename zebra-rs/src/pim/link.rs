@@ -2,9 +2,7 @@
 //! enable/disable reconciliation and DR election (RFC 7761 §4.3.2).
 
 use std::collections::BTreeMap;
-use std::net::Ipv4Addr;
 
-use ipnet::IpNet;
 use rand::RngExt;
 
 use crate::context::Timer;
@@ -75,16 +73,9 @@ pub struct PimLink<A: PimAf = Ipv4> {
     pub igmp: Option<IgmpIf<A>>,
 }
 
-impl PimLink<Ipv4> {
+impl<A: PimAf> PimLink<A> {
     pub fn from_link(link: &Link) -> Self {
-        let addrs = link
-            .addr4
-            .iter()
-            .filter_map(|a| match a.addr {
-                IpNet::V4(v4) => Some(v4),
-                IpNet::V6(_) => None,
-            })
-            .collect();
+        let addrs = A::link_prefixes(link);
         Self {
             ifindex: link.index,
             name: link.name.clone(),
@@ -99,12 +90,12 @@ impl PimLink<Ipv4> {
         }
     }
 
-    pub fn primary_addr(&self) -> Option<Ipv4Addr> {
-        self.addrs.first().map(|p| p.addr())
+    pub fn primary_addr(&self) -> Option<A::Addr> {
+        self.addrs.first().map(|p| A::prefix_addr(p))
     }
 
-    pub fn is_my_addr(&self, addr: &Ipv4Addr) -> bool {
-        self.addrs.iter().any(|p| p.addr() == *addr)
+    pub fn is_my_addr(&self, addr: &A::Addr) -> bool {
+        self.addrs.iter().any(|p| A::prefix_addr(p) == *addr)
     }
 
     /// Is `addr` a live PIM neighbor on this link — matching either a
@@ -112,12 +103,16 @@ impl PimLink<Ipv4> {
     /// addresses (RFC 7761 §4.3.4)? The RIB's resolved RPF nexthop
     /// may be any address the neighbor owns, not just its hello
     /// source.
-    pub fn neighbor_covers(&self, addr: &Ipv4Addr) -> bool {
+    pub fn neighbor_covers(&self, addr: &A::Addr) -> bool {
         self.nbrs.contains_key(addr) || self.nbrs.values().any(|n| n.secondary.contains(addr))
     }
 }
 
-fn hello_timer(tx: &tokio::sync::mpsc::UnboundedSender<Message>, ifindex: u32, sec: u16) -> Timer {
+fn hello_timer<A: PimAf>(
+    tx: &tokio::sync::mpsc::UnboundedSender<Message<A>>,
+    ifindex: u32,
+    sec: u16,
+) -> Timer {
     let tx = tx.clone();
     Timer::repeat(sec as u64, move || {
         let tx = tx.clone();
@@ -127,7 +122,7 @@ fn hello_timer(tx: &tokio::sync::mpsc::UnboundedSender<Message>, ifindex: u32, s
     })
 }
 
-impl Pim {
+impl<A: PimAf> Pim<A> {
     /// Converge one interface's running state onto its desired state.
     /// Called from every input that can change either side: config
     /// set/delete, LinkAdd/Up/Down/Del, AddrAdd/AddrDel. PIM runs on
@@ -179,7 +174,7 @@ impl Pim {
         };
         // Withdraw every local membership this interface fed into
         // the TIB before dropping the state.
-        let mut prune: Vec<super::tib::SgKey> = vec![];
+        let mut prune: Vec<super::tib::SgKey<A>> = vec![];
         if let Some(igmp) = link.igmp.take() {
             for (grp, group) in igmp.groups {
                 for src in group.synced {
@@ -335,7 +330,7 @@ impl Pim {
     /// Membership tracking in `IgmpIf` is kept warm regardless, so
     /// failover is immediate.
     pub(crate) fn dr_membership_reeval(&mut self, ifindex: u32) {
-        let groups: Vec<Ipv4Addr> = match self.links.get(&ifindex).and_then(|l| l.igmp.as_ref()) {
+        let groups: Vec<A::Addr> = match self.links.get(&ifindex).and_then(|l| l.igmp.as_ref()) {
             Some(igmp) => igmp.groups.keys().copied().collect(),
             None => return,
         };
@@ -380,7 +375,7 @@ impl Pim {
         let Some(link) = self.links.get_mut(&addr.ifindex) else {
             return;
         };
-        let IpNet::V4(prefix) = addr.addr else {
+        let Some(prefix) = A::prefix_from_ipnet(addr.addr) else {
             return;
         };
         if !link.addrs.contains(&prefix) {
@@ -393,7 +388,7 @@ impl Pim {
         let Some(link) = self.links.get_mut(&addr.ifindex) else {
             return;
         };
-        let IpNet::V4(prefix) = addr.addr else {
+        let Some(prefix) = A::prefix_from_ipnet(addr.addr) else {
             return;
         };
         link.addrs.retain(|p| *p != prefix);

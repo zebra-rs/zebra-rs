@@ -9,7 +9,6 @@
 //! phases (see docs/design/pim-sm-ssm-architecture.md).
 
 use std::collections::{BTreeMap, HashMap};
-use std::net::Ipv4Addr;
 use std::sync::Arc;
 use std::time::Instant;
 
@@ -26,86 +25,87 @@ use crate::config::{
 use crate::context::{ProtoContext, Task};
 use crate::rib::api::RibRx;
 
+use super::af::PimAf;
 use super::bsr::{BsrConfig, BsrRun};
 use super::config::Callback;
+use super::ipv4::Ipv4;
 use super::link::{LinkConfig, PIM_OVERRIDE_INTERVAL_MSEC, PIM_PROPAGATION_DELAY_MSEC, PimLink};
 use super::mroute::{Mrt4, Upcall};
 use super::network::{igmp_read_packet, igmp_write_packet, mroute_read, read_packet, write_packet};
 use super::rp::RpSet;
 use super::rpf::RpfEntry;
-use super::socket::ALL_PIM_ROUTERS;
 use super::tib::{SgKey, TibEntry};
 
 /// `show pim ...` dispatch handler, mirroring
 /// [`crate::nd::inst::ShowCallback`].
-pub type ShowCallback = fn(&Pim, Args, bool) -> Result<String, std::fmt::Error>;
+pub type ShowCallback<A = Ipv4> = fn(&Pim<A>, Args, bool) -> Result<String, std::fmt::Error>;
 
 /// Internal events: parsed packets from the read task and timer
 /// expirations. Every FSM timer is a [`crate::context::Timer`] whose
 /// callback sends one of these.
 #[derive(Debug)]
-pub enum Message {
+pub enum Message<A: PimAf = Ipv4> {
     Recv {
         packet: PimPacket,
-        src: Ipv4Addr,
+        src: A::Addr,
         ifindex: u32,
     },
     Igmp {
         packet: IgmpPacket,
-        src: Ipv4Addr,
+        src: A::Addr,
         ifindex: u32,
     },
-    Upcall(Upcall),
+    Upcall(Upcall<A>),
     HelloTimer(u32),
-    NeighborExpiry(u32, Ipv4Addr),
+    NeighborExpiry(u32, A::Addr),
 }
 
 /// Outbound message for the write task: `packet` to `dst`, egress
 /// pinned to `ifindex` via `IP_PKTINFO`.
 #[derive(Debug)]
-pub struct PimSend {
+pub struct PimSend<A: PimAf = Ipv4> {
     pub packet: PimPacket,
     pub ifindex: u32,
-    pub dst: Ipv4Addr,
+    pub dst: A::Addr,
 }
 
 /// Outbound IGMP message (queries) for the IGMP write task.
 #[derive(Debug)]
-pub struct IgmpSend {
+pub struct IgmpSend<A: PimAf = Ipv4> {
     pub packet: IgmpPacket,
     pub ifindex: u32,
-    pub dst: Ipv4Addr,
+    pub dst: A::Addr,
 }
 
-pub struct Pim {
-    pub tx: UnboundedSender<Message>,
-    rx: UnboundedReceiver<Message>,
+pub struct Pim<A: PimAf = Ipv4> {
+    pub tx: UnboundedSender<Message<A>>,
+    rx: UnboundedReceiver<Message<A>>,
     /// Runtime interface table, keyed by ifindex, built from RibRx
     /// link / address events.
-    pub links: BTreeMap<u32, PimLink>,
+    pub links: BTreeMap<u32, PimLink<A>>,
     /// Desired per-interface config keyed by interface name — the
     /// source of truth the reconciler compares runtime state against.
     pub if_config: BTreeMap<String, LinkConfig>,
     /// The Tree Information Base: (*,G) / (S,G) / (S,G,rpt) state.
-    pub tib: BTreeMap<SgKey, TibEntry>,
+    pub tib: BTreeMap<SgKey<A>, TibEntry<A>>,
     /// RPF cache keyed by tracked address (sources and RPs).
-    pub rpf: BTreeMap<Ipv4Addr, RpfEntry>,
+    pub rpf: BTreeMap<A::Addr, RpfEntry<A>>,
     /// Static RP mappings.
-    pub rp_set: RpSet,
+    pub rp_set: RpSet<A>,
     /// Bootstrap-router config + runtime (RFC 5059).
-    pub bsr_config: BsrConfig,
-    pub bsr: BsrRun,
+    pub bsr_config: BsrConfig<A>,
+    pub bsr: BsrRun<A>,
     /// Kernel dataplane: mroute socket, VIFs, MFC.
-    pub(crate) fp: Mrt4,
+    pub(crate) fp: A::Fp,
     /// Periodic J/P refresh deadlines per (ifindex, upstream nbr).
-    pub(crate) jp_refresh: BTreeMap<(u32, Ipv4Addr), std::time::Instant>,
-    pub(crate) send_tx: UnboundedSender<PimSend>,
-    pub(crate) igmp_send_tx: UnboundedSender<IgmpSend>,
+    pub(crate) jp_refresh: BTreeMap<(u32, A::Addr), std::time::Instant>,
+    pub(crate) send_tx: UnboundedSender<PimSend<A>>,
+    pub(crate) igmp_send_tx: UnboundedSender<IgmpSend<A>>,
     rib_rx: UnboundedReceiver<RibRx>,
     pub cm: ConfigChannel,
     pub show: ShowChannel,
-    pub show_cb: HashMap<String, ShowCallback>,
-    pub callbacks: HashMap<String, Callback>,
+    pub show_cb: HashMap<String, ShowCallback<A>>,
+    pub callbacks: HashMap<String, Callback<A>>,
     pub(crate) sock: Arc<AsyncFd<Socket>>,
     pub(crate) igmp_sock: Arc<AsyncFd<Socket>>,
     /// RIB client context — carries the NHT registrations for RPF.
@@ -135,7 +135,10 @@ pub struct Pim {
     _mroute_read_task: Task<()>,
 }
 
-impl Pim {
+/// The concrete IPv4 constructor: it wires the IPv4 raw sockets and
+/// the `Mrt4` plane and spawns the read/write tasks, so it lives on
+/// `Pim<Ipv4>`. Everything else is generic over the address family.
+impl Pim<Ipv4> {
     #[allow(clippy::too_many_arguments)]
     pub fn new(
         ctx: ProtoContext,
@@ -215,7 +218,9 @@ impl Pim {
         pim.show_build();
         pim
     }
+}
 
+impl<A: PimAf> Pim<A> {
     async fn event_loop(&mut self) {
         // Drain RIB's initial link / address replay up to EoR before
         // serving the other channels, so config callbacks always see
@@ -258,7 +263,7 @@ impl Pim {
         }
     }
 
-    fn process_msg(&mut self, msg: Message) {
+    fn process_msg(&mut self, msg: Message<A>) {
         match msg {
             Message::Recv {
                 packet,
@@ -421,7 +426,7 @@ impl Pim {
         }
     }
 
-    fn packet_recv(&mut self, packet: PimPacket, src: Ipv4Addr, ifindex: u32) {
+    fn packet_recv(&mut self, packet: PimPacket, src: A::Addr, ifindex: u32) {
         match &packet.payload {
             PimPayload::Hello(hello) => self.hello_recv(ifindex, src, hello),
             PimPayload::JoinPrune(jp) => self.jp_recv(ifindex, src, jp),
@@ -442,7 +447,7 @@ impl Pim {
         }
     }
 
-    fn hello_packet(&self, link: &PimLink, config: &LinkConfig, holdtime: u16) -> PimPacket {
+    fn hello_packet(&self, link: &PimLink<A>, config: &LinkConfig, holdtime: u16) -> PimPacket {
         let mut tlvs = vec![
             HelloTlv::Holdtime(holdtime),
             HelloTlv::LanPruneDelay {
@@ -461,7 +466,7 @@ impl Pim {
             .addrs
             .iter()
             .skip(1)
-            .map(|p| pim_packet::EncodedUnicast::new(std::net::IpAddr::V4(p.addr())))
+            .map(|p| pim_packet::EncodedUnicast::new(A::to_ip(A::prefix_addr(p))))
             .collect();
         if !secondary.is_empty() {
             tlvs.push(HelloTlv::AddressList(secondary));
@@ -484,7 +489,7 @@ impl Pim {
         let _ = self.send_tx.send(PimSend {
             packet,
             ifindex,
-            dst: ALL_PIM_ROUTERS,
+            dst: A::ALL_PIM_ROUTERS,
         });
     }
 
@@ -505,12 +510,12 @@ impl Pim {
         let _ = self.send_tx.send(PimSend {
             packet,
             ifindex,
-            dst: ALL_PIM_ROUTERS,
+            dst: A::ALL_PIM_ROUTERS,
         });
     }
 }
 
-pub fn serve(mut pim: Pim) -> Task<()> {
+pub fn serve<A: PimAf>(mut pim: Pim<A>) -> Task<()> {
     Task::spawn(async move {
         pim.event_loop().await;
     })

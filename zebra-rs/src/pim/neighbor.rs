@@ -2,7 +2,6 @@
 //! option tracking (holdtime, DR priority, Generation ID, LAN Prune
 //! Delay), holdtime expiry and Generation-ID bounce detection.
 
-use std::net::Ipv4Addr;
 use std::time::Instant;
 
 use pim_packet::PimHello;
@@ -37,10 +36,10 @@ pub struct Neighbor<A: PimAf = Ipv4> {
     pub expiry: Option<Timer>,
 }
 
-fn expiry_timer(
-    tx: &tokio::sync::mpsc::UnboundedSender<Message>,
+fn expiry_timer<A: PimAf>(
+    tx: &tokio::sync::mpsc::UnboundedSender<Message<A>>,
     ifindex: u32,
-    addr: Ipv4Addr,
+    addr: A::Addr,
     holdtime: u16,
 ) -> Option<Timer> {
     if holdtime == HOLDTIME_INFINITE {
@@ -55,8 +54,8 @@ fn expiry_timer(
     }))
 }
 
-impl Pim {
-    pub(crate) fn hello_recv(&mut self, ifindex: u32, src: Ipv4Addr, hello: &PimHello) {
+impl<A: PimAf> Pim<A> {
+    pub(crate) fn hello_recv(&mut self, ifindex: u32, src: A::Addr, hello: &PimHello) {
         let Some(link) = self.links.get(&ifindex) else {
             return;
         };
@@ -76,14 +75,11 @@ impl Pim {
         }
 
         let gen_id = hello.generation_id();
-        let secondary: Vec<Ipv4Addr> = hello
+        let secondary: Vec<A::Addr> = hello
             .address_list()
             .unwrap_or(&[])
             .iter()
-            .filter_map(|a| match a.addr {
-                std::net::IpAddr::V4(v4) => Some(v4),
-                std::net::IpAddr::V6(_) => None,
-            })
+            .filter_map(|a| A::from_ip(a.addr))
             .collect();
         let timer = expiry_timer(&self.tx, ifindex, src, holdtime);
         let link = self.links.get_mut(&ifindex).unwrap();
@@ -143,11 +139,11 @@ impl Pim {
         self.dr_election(ifindex);
     }
 
-    pub(crate) fn neighbor_expiry(&mut self, ifindex: u32, addr: Ipv4Addr) {
+    pub(crate) fn neighbor_expiry(&mut self, ifindex: u32, addr: A::Addr) {
         self.neighbor_delete(ifindex, addr, "holdtime expired");
     }
 
-    fn neighbor_delete(&mut self, ifindex: u32, addr: Ipv4Addr, reason: &str) {
+    fn neighbor_delete(&mut self, ifindex: u32, addr: A::Addr, reason: &str) {
         let Some(link) = self.links.get_mut(&ifindex) else {
             return;
         };
