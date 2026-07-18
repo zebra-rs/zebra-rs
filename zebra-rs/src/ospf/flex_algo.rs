@@ -8,10 +8,9 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use ospf_packet::{
-    ExtLinkSubTlv, OSPF_SABM_FLEX_ALGO, OSPFV3_SABM_FLEX_ALGO, OspfAslaSubSubTlv, OspfAslaSubTlv,
-    OspfFadExcludeSrlg, OspfFadFlags, OspfFadSubTlv, Ospfv3AslaSubSubTlv, Ospfv3AslaSubTlv,
-    Ospfv3FadExcludeSrlg, Ospfv3FadFlags, Ospfv3FadSubTlv, Ospfv3FadTlv, Ospfv3SubTlv,
-    RouterInfoTlvFad,
+    ExtLinkSubTlv, FadFlags, FadSrlg, OSPF_SABM_FLEX_ALGO, OSPFV3_SABM_FLEX_ALGO,
+    OspfAslaSubSubTlv, OspfAslaSubTlv, OspfFadSubTlv, Ospfv3AslaSubSubTlv, Ospfv3AslaSubTlv,
+    Ospfv3FadSubTlv, Ospfv3FadTlv, Ospfv3SubTlv, RouterInfoTlvFad,
 };
 
 use crate::flex_algo::{
@@ -63,7 +62,7 @@ pub fn build_fad(
             }
         }
         if entry.prefix_metric == Some(true) {
-            subs.push(OspfFadSubTlv::Flags(OspfFadFlags {
+            subs.push(OspfFadSubTlv::Flags(FadFlags {
                 m_flag: true,
                 trailing: Vec::new(),
             }));
@@ -77,9 +76,7 @@ pub fn build_fad(
             ids.sort();
             ids.dedup();
             if !ids.is_empty() {
-                subs.push(OspfFadSubTlv::ExcludeSrlg(OspfFadExcludeSrlg {
-                    srlgs: ids,
-                }));
+                subs.push(OspfFadSubTlv::ExcludeSrlg(FadSrlg { srlgs: ids }));
             }
         }
 
@@ -132,7 +129,7 @@ pub fn build_fad_v3(
             }
         }
         if entry.prefix_metric == Some(true) {
-            subs.push(Ospfv3FadSubTlv::Flags(Ospfv3FadFlags {
+            subs.push(Ospfv3FadSubTlv::Flags(FadFlags {
                 m_flag: true,
                 trailing: Vec::new(),
             }));
@@ -146,9 +143,7 @@ pub fn build_fad_v3(
             ids.sort();
             ids.dedup();
             if !ids.is_empty() {
-                subs.push(Ospfv3FadSubTlv::ExcludeSrlg(Ospfv3FadExcludeSrlg {
-                    srlgs: ids,
-                }));
+                subs.push(Ospfv3FadSubTlv::ExcludeSrlg(FadSrlg { srlgs: ids }));
             }
         }
 

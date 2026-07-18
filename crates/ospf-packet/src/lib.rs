@@ -9,6 +9,7 @@ pub use ls_type::OspfLsType;
 pub use packet_utils::Algo;
 pub use packet_utils::ExtAdminGroup;
 pub use packet_utils::SidLabelTlv;
+pub use packet_utils::{FadFlags, FadSrlg};
 pub use parser::*;
 pub use typ::OspfType;
 pub use v3::{
@@ -26,16 +27,15 @@ pub use v3::{
     OSPFV3_ROUTER_LSA_TYPE, OSPFV3_SABM_FLEX_ALGO, OSPFV3_SUB_TLV_ADJ_SID, OSPFV3_SUB_TLV_ASLA,
     OSPFV3_SUB_TLV_LAN_ADJ_SID, OSPFV3_SUB_TLV_PREFIX_SID, OSPFV3_SUB_TLV_SID_LABEL,
     OSPFV3_VERSION, Ospfv3AdjSidSubTlv, Ospfv3AsExternalLsa, Ospfv3AslaSubSubTlv, Ospfv3AslaSubTlv,
-    Ospfv3AuthTrailer, Ospfv3DbDesc, Ospfv3ELsaBody, Ospfv3ExtTlv, Ospfv3FadExcludeSrlg,
-    Ospfv3FadFlags, Ospfv3FadSubTlv, Ospfv3FadTlv, Ospfv3Hello, Ospfv3InterAreaPrefixLsa,
-    Ospfv3InterAreaRouterLsa, Ospfv3IntraAreaPrefix, Ospfv3IntraAreaPrefixLsa,
-    Ospfv3IntraAreaPrefixTlv, Ospfv3LanAdjSidSubTlv, Ospfv3LinkLsa, Ospfv3LinkLsaPrefix,
-    Ospfv3LsAck, Ospfv3LsBody, Ospfv3LsRequest, Ospfv3LsRequestEntry, Ospfv3LsUpdate, Ospfv3Lsa,
-    Ospfv3LsaHeader, Ospfv3NetworkLsa, Ospfv3Options, Ospfv3Packet, Ospfv3Payload,
-    Ospfv3PrefixOptions, Ospfv3PrefixSidSubTlv, Ospfv3RouterLinkTlv, Ospfv3RouterLinkType,
-    Ospfv3RouterLsa, Ospfv3RouterLsaLink, Ospfv3SidLabelRangeTlv, Ospfv3SrAlgorithmTlv,
-    Ospfv3SrLocalBlockTlv, Ospfv3SubTlv, ospfv3_compute_checksum, ospfv3_prefix_wire_len,
-    ospfv3_verify_checksum, parse_v3,
+    Ospfv3AuthTrailer, Ospfv3DbDesc, Ospfv3ELsaBody, Ospfv3ExtTlv, Ospfv3FadSubTlv, Ospfv3FadTlv,
+    Ospfv3Hello, Ospfv3InterAreaPrefixLsa, Ospfv3InterAreaRouterLsa, Ospfv3IntraAreaPrefix,
+    Ospfv3IntraAreaPrefixLsa, Ospfv3IntraAreaPrefixTlv, Ospfv3LanAdjSidSubTlv, Ospfv3LinkLsa,
+    Ospfv3LinkLsaPrefix, Ospfv3LsAck, Ospfv3LsBody, Ospfv3LsRequest, Ospfv3LsRequestEntry,
+    Ospfv3LsUpdate, Ospfv3Lsa, Ospfv3LsaHeader, Ospfv3NetworkLsa, Ospfv3Options, Ospfv3Packet,
+    Ospfv3Payload, Ospfv3PrefixOptions, Ospfv3PrefixSidSubTlv, Ospfv3RouterLinkTlv,
+    Ospfv3RouterLinkType, Ospfv3RouterLsa, Ospfv3RouterLsaLink, Ospfv3SidLabelRangeTlv,
+    Ospfv3SrAlgorithmTlv, Ospfv3SrLocalBlockTlv, Ospfv3SubTlv, ospfv3_compute_checksum,
+    ospfv3_prefix_wire_len, ospfv3_verify_checksum, parse_v3,
 };
 pub use v3::{
     OSPFV3_EXT_TLV_SRV6_CAPABILITIES, OSPFV3_SRV6_CAP_FLAG_O, OSPFV3_SRV6_LOCATOR_LSA_TYPE,

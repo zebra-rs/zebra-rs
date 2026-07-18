@@ -49,7 +49,7 @@ use crate::parser::GraceLsa;
 
 use super::parser::{AdjSidFlags, PrefixSidFlags};
 use super::{DbDescFlags, OspfType};
-use packet_utils::{Algo, ExtAdminGroup, SidLabelTlv};
+use packet_utils::{Algo, ExtAdminGroup, FadFlags, FadSrlg, SidLabelTlv};
 
 /// OSPFv3 protocol version (header octet 0).
 pub const OSPFV3_VERSION: u8 = 3;
@@ -2151,28 +2151,14 @@ impl Ospfv3SrLocalBlockTlv {
 // is the same 2-byte type + 2-byte length + 32-bit-aligned value as
 // every other v3 TLV.
 
-/// FAD Flags sub-TLV (RFC 9350 §7.4). M-flag (Prefix Metric) is the MSB
-/// of byte 0; trailing bytes round-trip flags defined later.
-#[derive(Debug, Default, Clone, PartialEq)]
-pub struct Ospfv3FadFlags {
-    pub m_flag: bool,
-    pub trailing: Vec<u8>,
-}
-
-/// FAD Exclude SRLG sub-TLV (RFC 9350 §7.5): a list of 32-bit SRLGs.
-#[derive(Debug, Default, Clone, PartialEq)]
-pub struct Ospfv3FadExcludeSrlg {
-    pub srlgs: Vec<u32>,
-}
-
 /// One nested sub-TLV under the OSPFv3 FAD TLV.
 #[derive(Debug, Clone, PartialEq)]
 pub enum Ospfv3FadSubTlv {
     ExcludeAg(ExtAdminGroup),
     IncludeAnyAg(ExtAdminGroup),
     IncludeAllAg(ExtAdminGroup),
-    Flags(Ospfv3FadFlags),
-    ExcludeSrlg(Ospfv3FadExcludeSrlg),
+    Flags(FadFlags),
+    ExcludeSrlg(FadSrlg),
     Unknown { typ: u16, value: Vec<u8> },
 }
 
@@ -2182,8 +2168,8 @@ impl Ospfv3FadSubTlv {
             Ospfv3FadSubTlv::ExcludeAg(g)
             | Ospfv3FadSubTlv::IncludeAnyAg(g)
             | Ospfv3FadSubTlv::IncludeAllAg(g) => g.byte_len(),
-            Ospfv3FadSubTlv::Flags(f) => 1 + f.trailing.len(),
-            Ospfv3FadSubTlv::ExcludeSrlg(s) => s.srlgs.len() * 4,
+            Ospfv3FadSubTlv::Flags(f) => f.value_len(),
+            Ospfv3FadSubTlv::ExcludeSrlg(s) => s.value_len(),
             Ospfv3FadSubTlv::Unknown { value, .. } => value.len(),
         }
     }
@@ -2211,15 +2197,8 @@ impl Ospfv3FadSubTlv {
             Ospfv3FadSubTlv::ExcludeAg(g)
             | Ospfv3FadSubTlv::IncludeAnyAg(g)
             | Ospfv3FadSubTlv::IncludeAllAg(g) => g.emit(buf),
-            Ospfv3FadSubTlv::Flags(f) => {
-                buf.put_u8(if f.m_flag { 0x80 } else { 0 });
-                buf.put_slice(&f.trailing);
-            }
-            Ospfv3FadSubTlv::ExcludeSrlg(s) => {
-                for v in &s.srlgs {
-                    buf.put_u32(*v);
-                }
-            }
+            Ospfv3FadSubTlv::Flags(f) => f.emit_value(buf),
+            Ospfv3FadSubTlv::ExcludeSrlg(s) => s.emit_value(buf),
             Ospfv3FadSubTlv::Unknown { value, .. } => buf.put_slice(value),
         }
         let pad = ((value_len + 3) & !3) - value_len;
@@ -2246,21 +2225,8 @@ impl Ospfv3FadSubTlv {
                 let (_, g) = ExtAdminGroup::parse_be(value)?;
                 Ospfv3FadSubTlv::IncludeAllAg(g)
             }
-            4 => {
-                let m_flag = value.first().is_some_and(|b| b & 0x80 != 0);
-                let trailing = value.get(1..).unwrap_or(&[]).to_vec();
-                Ospfv3FadSubTlv::Flags(Ospfv3FadFlags { m_flag, trailing })
-            }
-            5 => {
-                let mut srlgs = Vec::new();
-                let mut rest = value;
-                while rest.len() >= 4 {
-                    let (r, v) = be_u32(rest)?;
-                    srlgs.push(v);
-                    rest = r;
-                }
-                Ospfv3FadSubTlv::ExcludeSrlg(Ospfv3FadExcludeSrlg { srlgs })
-            }
+            4 => Ospfv3FadSubTlv::Flags(FadFlags::parse_value(value)),
+            5 => Ospfv3FadSubTlv::ExcludeSrlg(FadSrlg::parse_value(value)),
             _ => Ospfv3FadSubTlv::Unknown {
                 typ,
                 value: value.to_vec(),
@@ -5218,11 +5184,11 @@ mod tests {
                 Ospfv3FadSubTlv::ExcludeAg(admin_group(&[4])),
                 Ospfv3FadSubTlv::IncludeAnyAg(admin_group(&[0, 33])),
                 Ospfv3FadSubTlv::IncludeAllAg(admin_group(&[200])),
-                Ospfv3FadSubTlv::Flags(Ospfv3FadFlags {
+                Ospfv3FadSubTlv::Flags(FadFlags {
                     m_flag: true,
                     trailing: Vec::new(),
                 }),
-                Ospfv3FadSubTlv::ExcludeSrlg(Ospfv3FadExcludeSrlg {
+                Ospfv3FadSubTlv::ExcludeSrlg(FadSrlg {
                     srlgs: vec![100, 4_000_000_000],
                 }),
             ],
