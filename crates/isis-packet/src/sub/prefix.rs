@@ -1087,13 +1087,20 @@ impl ParseBe<IsisTlvIpv6ReachEntry> for IsisTlvIpv6ReachEntry {
     }
 }
 
+// RFC 9352 §7.1: the SRv6 Locator TLV (type 27) opens with the same
+// 2-octet MT header as RFC 5120 — 4 reserved bits in the MSBs, then a
+// 12-bit MT ID. `bitfield(u16)` is LSB-first (see `MultiTopologyId`
+// above): declare `mtid` first to land at bits 0-11 and `resvd` second
+// at bits 12-15. The previous order (`resvd` first, MT ID misnamed
+// `v_flag`) read the MT ID out of the reserved bits, so an MT-2 locator
+// parsed as MT-0 and a locally-built MTID=2 emitted 0x0020.
 #[bitfield(u16, debug = true)]
 #[derive(PartialEq)]
 pub struct Srv6TlvFlags {
+    #[bits(12)]
+    pub mtid: u16,
     #[bits(4)]
     pub resvd: u8,
-    #[bits(12)]
-    pub v_flag: u16,
 }
 
 impl ParseBe<Srv6TlvFlags> for Srv6TlvFlags {
@@ -1197,5 +1204,39 @@ impl TlvEmitter for IsisTlvSrv6 {
         for locator in &self.locators {
             locator.emit(buf);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn srv6_tlv_mtid_bit_positions() {
+        // RFC 9352 §7.1 / RFC 5120 §7.2: 4 reserved MSBs, 12-bit MT ID
+        // in the LSBs — wire 0x0002 is MT 2, and MT 2 emits 0x0002.
+        let flags = Srv6TlvFlags::from(0x0002u16);
+        assert_eq!(flags.mtid(), 2);
+        assert_eq!(flags.resvd(), 0);
+
+        let emitted: u16 = Srv6TlvFlags::new().with_mtid(2).into();
+        assert_eq!(emitted, 0x0002);
+
+        // Reserved bits stay in the top nibble.
+        let flags = Srv6TlvFlags::from(0xF002u16);
+        assert_eq!(flags.mtid(), 2);
+        assert_eq!(flags.resvd(), 0xF);
+
+        // Full TLV round-trip keeps the MT ID.
+        let tlv = IsisTlvSrv6 {
+            flags: Srv6TlvFlags::new().with_mtid(2),
+            locators: vec![],
+        };
+        let mut buf = BytesMut::new();
+        tlv.emit(&mut buf);
+        assert_eq!(&buf[..], &[0x00, 0x02]);
+        let (rest, parsed) = IsisTlvSrv6::parse_be(&buf).expect("parse");
+        assert!(rest.is_empty());
+        assert_eq!(parsed.flags.mtid(), 2);
     }
 }

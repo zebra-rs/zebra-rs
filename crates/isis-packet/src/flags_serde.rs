@@ -98,7 +98,7 @@ bitfield_serde!(Ipv6ControlInfo {
     dist_up: bool,
 } reserved { resvd: usize });
 
-bitfield_serde!(Srv6TlvFlags { v_flag: u16 } reserved { resvd: u8 });
+bitfield_serde!(Srv6TlvFlags { mtid: u16 } reserved { resvd: u8 });
 
 bitfield_serde!(IsisLspTypes {
     is_bits: u8,
