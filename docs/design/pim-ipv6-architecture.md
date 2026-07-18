@@ -538,8 +538,9 @@ Each phase is one reviewable PR leaving the tree tested and useful.
 | 0 | **DONE** — IPv4 correctness floor: DR gating **with `pim_assert` rework**, GenID re-sync, neighbor secondary-address storage/matching, ABI layout tests for existing structs | all seven IPv4 features green (assert feature redesigned, not deleted) |
 | 1 | **DONE** — Codec groundwork: checksum context API (all emit sites), MLD wire types, exponent encodings, mixed-family rejection, ICMPv6 checksum helper lifted to `packet-utils` | fixture + negative tests; IPv4 fixtures byte-identical |
 | 2 | `Pim<A>`/`Gm<A>`/FP-trait genericization; **IPv4 runtime only**. Landed in compiling slices (see note). | all IPv4 unit + live BDD unchanged |
-| 3 | `Ipv6` transports: PIMv6 socket, Hello/neighbor/DR over LL | two-router adjacency BDD; invalid-transport negatives |
-| 4 | Extract the shared `Gm<A>` engine + `GmCodec` (rename `igmp/`→`gm/`), then MLDv1/v2 via `Gm<Ipv6>` + TIB bridge (the second codec that validates the seam) | querier/compat/source-filter BDD |
+| 3.0 | Extract the shared `Gm<A>` engine + `GmCodec` (rename `igmp/`→`gm/`); the membership transport moves off `Pim<A>` into the engine so `Pim<Ipv6>` needs no IGMP fields. IPv4-only runtime | IPv4 membership BDD unchanged (`pim_igmp`) |
+| 3.1 | `Ipv6` marker + `Mrt6` stub + PIMv6 socket, Hello/neighbor/DR over LL, AF-split spawn of a default-table `Pim<Ipv6>` | two-router adjacency BDD; invalid-transport negatives |
+| 4 | MLDv1/v2 codec via `Gm<Ipv6>` + TIB bridge (the second `GmCodec`, now plugging into the engine from 3.0) | querier/compat/source-filter BDD |
 | 5 | `Mrt6` plane + generic RPF + SSM end-to-end | UDPv6 delivery + kernel MIF/MFC asserts (MVP gate) |
 | 6 | Static-RP ASM, IPv6 Register path, SPT | three-router ASM traffic proof |
 | 7 | IPv6 assert + per-VRF `Pim<Ipv6>` | LAN election + VRF isolation BDD |
@@ -592,10 +593,14 @@ consistent with the arc's smallest-safe-slice rule:
   alongside `Gm<Ipv6>`/MLD. Through Phase 2/3 the membership FSM stays as `impl<A> Pim<A>`
   methods (already `A`-generic after 2b.3), which is all the flip needs.
 
-**Supervisor deferral.** The standalone `PimSupervisor` (§4.1) moves to the start of
-Phase 3: extracting it now — with only IPv4 at runtime and no `Pim<Ipv6>` to route to — is
-ownership churn with no payoff, and it belongs where the AF-split routing first matters.
-The config-manager integration keeps working unchanged through `Pim<Ipv4>` meanwhile.
+**Supervisor deferral.** The standalone `PimSupervisor` (§4.1) is deferred to **Phase 7**,
+where per-VRF × AF becomes the flat matrix that actually needs a non-generic parent.
+Through Phases 3–6 the default `Pim<Ipv4>` instance keeps acting as the parent (it already
+owns the manager's `cm`/`show` channels and spawns/routes per-VRF children): Phase 3 adds an
+**AF-split** mirroring `vrf_config_split`, so `/router/pim/ipv6/…` spawns and routes a
+default-table `Pim<Ipv6>` child exactly like a VRF child. This reuses proven machinery and
+reaches live PIMv6 adjacency with the least churn; the supervisor refactor lands once the
+`(vrf, af)` product makes the parent-instance tree awkward (Phase 7).
 
 ### MVP gate — after Phase 5
 

@@ -11,7 +11,7 @@ use crate::config::{Args, Builder};
 
 use super::af::PimAf;
 use super::assert_fsm::AssertRole;
-use super::igmp::{FilterMode, QuerierState};
+use super::gm::{FilterMode, QuerierState};
 use super::inst::{Pim, ShowCallback};
 use super::ipv4::Ipv4;
 use super::macros::mfc_oifs;
@@ -192,7 +192,8 @@ fn show_igmp_interface(pim: &Pim, _args: Args, json: bool) -> Result<String, std
         let address = link
             .and_then(|l| l.primary_addr())
             .map_or_else(|| "-".to_string(), |a| a.to_string());
-        let (state, querier, groups) = match link.and_then(|l| l.igmp.as_ref()) {
+        let gmif = link.and_then(|l| pim.gm.as_ref().and_then(|g| g.get_if(l.ifindex)));
+        let (state, querier, groups) = match gmif {
             Some(igmp) => match igmp.querier {
                 QuerierState::Querier => {
                     ("Querier".to_string(), address.clone(), igmp.groups.len())
@@ -256,7 +257,7 @@ fn show_igmp_groups(pim: &Pim, _args: Args, json: bool) -> Result<String, std::f
     let mut rows: Vec<IgmpGroupBrief> = vec![];
 
     for link in pim.links.values() {
-        let Some(igmp) = link.igmp.as_ref() else {
+        let Some(igmp) = pim.gm.as_ref().and_then(|g| g.get_if(link.ifindex)) else {
             continue;
         };
         for (group_addr, group) in igmp.groups.iter() {

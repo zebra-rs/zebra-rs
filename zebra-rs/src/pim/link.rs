@@ -10,12 +10,12 @@ use crate::rib::Link;
 use crate::rib::link::LinkAddr;
 
 use super::af::PimAf;
-use super::igmp::{IgmpConfig, IgmpIf};
+use super::gm::IgmpConfig;
 use super::inst::{Message, Pim};
 use super::ipv4::Ipv4;
 use super::mroute::PimForwardingPlane;
 use super::neighbor::Neighbor;
-use super::socket::{igmp_join_if, igmp_leave_if, pim_join_if, pim_leave_if};
+use super::socket::{pim_join_if, pim_leave_if};
 
 pub const PIM_HELLO_PERIOD: u16 = 30;
 pub const PIM_DEFAULT_DR_PRIORITY: u32 = 1;
@@ -69,8 +69,6 @@ pub struct PimLink<A: PimAf = Ipv4> {
     pub dr: Option<A::Addr>,
     pub nbrs: BTreeMap<A::Addr, Neighbor<A>>,
     pub hello_timer: Option<Timer>,
-    /// IGMP runtime state — `Some` while IGMP runs on this interface.
-    pub igmp: Option<IgmpIf<A>>,
 }
 
 impl<A: PimAf> PimLink<A> {
@@ -86,7 +84,6 @@ impl<A: PimAf> PimLink<A> {
             dr: None,
             nbrs: BTreeMap::new(),
             hello_timer: None,
-            igmp: None,
         }
     }
 
@@ -136,7 +133,7 @@ impl<A: PimAf> Pim<A> {
         let entry = self.if_config.get(&link.name);
         let desired = entry.is_some() && usable;
         let igmp_desired = entry.map(|c| c.igmp.enabled()).unwrap_or(false) && usable;
-        let igmp_running = link.igmp.is_some();
+        let igmp_running = self.gm.as_ref().is_some_and(|g| g.has_if(ifindex));
         match (desired, link.enabled) {
             (true, false) => self.link_enable(ifindex),
             (false, true) => self.link_disable(ifindex),
@@ -157,38 +154,27 @@ impl<A: PimAf> Pim<A> {
     }
 
     fn igmp_enable(&mut self, ifindex: u32) {
-        igmp_join_if(&self.igmp_sock, ifindex);
-        let Some(link) = self.links.get_mut(&ifindex) else {
-            return;
-        };
-        link.igmp = Some(IgmpIf::new(std::time::Instant::now()));
-        tracing::info!("igmp: interface {} enabled", link.name);
-        // The startup general query goes out on the next event-loop
-        // pass — IgmpIf::new schedules it at `now`.
+        // The engine joins the report-destination groups and schedules
+        // the startup general query for the next event-loop pass.
+        if let Some(gm) = self.gm.as_mut() {
+            gm.enable_if(ifindex, std::time::Instant::now());
+        }
+        if let Some(link) = self.links.get(&ifindex) {
+            tracing::info!("igmp: interface {} enabled", link.name);
+        }
     }
 
     fn igmp_disable(&mut self, ifindex: u32) {
-        igmp_leave_if(&self.igmp_sock, ifindex);
-        let Some(link) = self.links.get_mut(&ifindex) else {
-            return;
+        // Withdraw every local membership this interface fed into the
+        // TIB, then drop the state and leave the groups.
+        let events = match self.gm.as_mut() {
+            Some(gm) => gm.disable_if(ifindex),
+            None => vec![],
         };
-        // Withdraw every local membership this interface fed into
-        // the TIB before dropping the state.
-        let mut prune: Vec<super::tib::SgKey<A>> = vec![];
-        if let Some(igmp) = link.igmp.take() {
-            for (grp, group) in igmp.groups {
-                for src in group.synced {
-                    prune.push(super::tib::SgKey::Sg { src, grp });
-                }
-                if group.asm_synced {
-                    prune.push(super::tib::SgKey::StarG { grp });
-                }
-            }
+        if let Some(link) = self.links.get(&ifindex) {
+            tracing::info!("igmp: interface {} disabled", link.name);
         }
-        tracing::info!("igmp: interface {} disabled", link.name);
-        for key in prune {
-            self.tib_local_prune(key, ifindex);
-        }
+        self.apply_gm_events(events);
     }
 
     /// Are we the Designated Router on this interface? (RFC 7761
@@ -325,18 +311,19 @@ impl<A: PimAf> Pim<A> {
         }
     }
 
-    /// Push (as DR) or withdraw (as non-DR) the TIB reflection of
-    /// every group learned on this interface, after a DR transition.
-    /// Membership tracking in `IgmpIf` is kept warm regardless, so
-    /// failover is immediate.
+    /// Push (as DR) or withdraw (as non-DR) the TIB reflection of every
+    /// group learned on this interface, after a DR transition. The
+    /// engine keeps membership tracking warm regardless, so failover is
+    /// immediate.
     pub(crate) fn dr_membership_reeval(&mut self, ifindex: u32) {
-        let groups: Vec<A::Addr> = match self.links.get(&ifindex).and_then(|l| l.igmp.as_ref()) {
-            Some(igmp) => igmp.groups.keys().copied().collect(),
+        let Some(ctx) = self.gm_if_ctx(ifindex) else {
+            return;
+        };
+        let events = match self.gm.as_mut() {
+            Some(gm) => gm.resync_if(ifindex, &ctx),
             None => return,
         };
-        for grp in groups {
-            self.igmp_tib_sync(ifindex, grp);
-        }
+        self.apply_gm_events(events);
     }
 
     // ---- RibRx handlers ----
