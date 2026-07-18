@@ -60,6 +60,12 @@ fn host_masklen(addr: &IpAddr) -> u8 {
     }
 }
 
+/// The PIM address-family value (`PIM_AF_IPV4`/`PIM_AF_IPV6`) of an
+/// address — used to reject family mixing within a message.
+pub fn addr_family(addr: &IpAddr) -> u8 {
+    family_of(addr)
+}
+
 /// Encoded-Unicast address: family, encoding type, native address.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct EncodedUnicast {

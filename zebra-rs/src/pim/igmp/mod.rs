@@ -150,10 +150,14 @@ fn send_query(
     ifindex: u32,
     group: Option<Ipv4Addr>,
 ) {
-    // Max Resp is in units of 1/10 s in both v2 and v3; group-specific
-    // queries use the Last Member Query Interval (1 s).
+    // Max Resp is in units of 1/10 s; group-specific queries use the
+    // Last Member Query Interval (1 s). The exponent-coded form
+    // (pim_packet::value_to_code) represents values past 8 bits
+    // instead of clamping.
     let max_resp = match group {
-        None => (cfg.igmp.query_max_resp() as u32 * 10).min(250) as u8,
+        None => pim_packet::value_to_code(
+            (cfg.igmp.query_max_resp() as u32 * 10).min(u16::MAX as u32) as u16,
+        ),
         Some(_) => 10,
     };
     let dst = group.unwrap_or(IGMP_ALL_HOSTS);
@@ -168,9 +172,8 @@ fn send_query(
             group: group.unwrap_or(Ipv4Addr::UNSPECIFIED),
             suppress: false,
             qrv: IGMP_ROBUSTNESS as u8,
-            // QQIC values >= 128 use exponential encoding; clamp
-            // instead until large intervals are needed.
-            qqic: cfg.igmp.query_interval().min(127) as u8,
+            // QQIC in seconds, exponent-coded above 127.
+            qqic: pim_packet::value_to_code(cfg.igmp.query_interval()),
             sources: vec![],
         })
     };

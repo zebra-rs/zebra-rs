@@ -5,9 +5,9 @@ use nom::error::{ErrorKind, make_error};
 use nom::number::complete::{be_u8, be_u16, be_u32};
 use nom::{Err, IResult};
 
-use crate::addr::{EncodedGroup, EncodedUnicast};
+use crate::addr::{EncodedGroup, EncodedUnicast, addr_family};
 use crate::bsr::{PimBootstrap, PimCandRpAdv};
-use crate::checksum::pim_fill_checksum;
+use crate::checksum::{PimChecksumContext, pim_fill_checksum};
 use crate::hello::PimHello;
 use crate::joinprune::PimJoinPrune;
 use crate::typ::PimType;
@@ -147,6 +147,53 @@ impl PimPayload {
         }
     }
 
+    /// Every encoded address in the payload has family `family`. The
+    /// Register inner packet's IP version (first nibble) is also
+    /// checked against `family`, so an IPv6 Register carrying an
+    /// IPv4 packet is rejected. Hello (which may legitimately carry a
+    /// mix in its Address List only if a router is dual-stacked on a
+    /// link — out of scope) and Unknown are not constrained here.
+    fn family_consistent(&self, family: u8) -> bool {
+        use PimPayload::*;
+        let ip_ver = |data: &[u8]| data.first().map(|b| b >> 4);
+        match self {
+            RegisterStop(m) => {
+                addr_family(&m.group.addr) == family && addr_family(&m.source.addr) == family
+            }
+            JoinPrune(m) => {
+                addr_family(&m.upstream_neighbor.addr) == family
+                    && m.groups.iter().all(|g| {
+                        addr_family(&g.group.addr) == family
+                            && g.joins.iter().all(|s| addr_family(&s.addr) == family)
+                            && g.prunes.iter().all(|s| addr_family(&s.addr) == family)
+                    })
+            }
+            Assert(m) => {
+                addr_family(&m.group.addr) == family && addr_family(&m.source.addr) == family
+            }
+            Register(m) => match ip_ver(&m.data) {
+                // Null-Registers may be empty; a data-carrying
+                // Register's inner IP version must match the family.
+                None => true,
+                Some(4) => family == crate::PIM_AF_IPV4,
+                Some(6) => family == crate::PIM_AF_IPV6,
+                Some(_) => false,
+            },
+            Bootstrap(m) => {
+                addr_family(&m.bsr_addr.addr) == family
+                    && m.groups.iter().all(|g| {
+                        addr_family(&g.group.addr) == family
+                            && g.rps.iter().all(|rp| addr_family(&rp.addr.addr) == family)
+                    })
+            }
+            CandRpAdv(m) => {
+                addr_family(&m.rp_addr.addr) == family
+                    && m.groups.iter().all(|g| addr_family(&g.addr) == family)
+            }
+            Hello(_) | Unknown { .. } => true,
+        }
+    }
+
     fn parse_be(input: &[u8], typ: PimType) -> IResult<&[u8], Self> {
         match typ {
             PimType::Hello => {
@@ -245,34 +292,55 @@ impl PimPacket {
         ))
     }
 
-    /// Emit the message into an empty buffer and fill in the
-    /// checksum. The message must start at offset 0 of `buf`.
-    pub fn emit(&self, buf: &mut BytesMut) {
+    /// Emit the message into an empty buffer and fill in the checksum
+    /// in its address-family context. The message must start at
+    /// offset 0 of `buf`. For IPv4 the context is
+    /// [`PimChecksumContext::Ipv4`]; IPv6 supplies the outer
+    /// (src, dst) for the pseudo-header, so the caller must have
+    /// selected the on-wire source before calling.
+    pub fn emit(&self, buf: &mut BytesMut, ctx: PimChecksumContext) {
         buf.put_u8((self.version << 4) | u8::from(self.typ));
         buf.put_u8(0);
         buf.put_u16(0);
         self.payload.emit(buf);
-        pim_fill_checksum(self.typ, buf);
+        pim_fill_checksum(buf, ctx);
+    }
+
+    /// Every encoded address carried by the message resolves to
+    /// `family` (`PIM_AF_IPV4` / `PIM_AF_IPV6`). A message must not
+    /// mix families: an IPv6 Register may not carry an IPv4 inner
+    /// packet, a BSM may not mix RP families, etc. Callers reject
+    /// a message whose encoded family disagrees with the outer
+    /// transport before applying it to protocol state.
+    pub fn family_consistent(&self, family: u8) -> bool {
+        self.payload.family_consistent(family)
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use std::net::{IpAddr, Ipv4Addr};
+    use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 
     use hex_literal::hex;
 
     use super::*;
+    use crate::PIM_AF_IPV4;
     use crate::addr::EncodedSource;
     use crate::checksum::pim_verify_checksum;
     use crate::hello::HelloTlv;
 
+    const V4: PimChecksumContext = PimChecksumContext::Ipv4;
+
     fn round_trip(wire: &[u8]) -> PimPacket {
-        assert!(pim_verify_checksum(wire), "fixture checksum invalid");
+        assert!(pim_verify_checksum(wire, V4), "fixture checksum invalid");
         let (rest, packet) = PimPacket::parse_be(wire).expect("parse");
         assert!(rest.is_empty(), "trailing bytes after parse");
+        assert!(
+            packet.family_consistent(PIM_AF_IPV4),
+            "encoded family mismatch"
+        );
         let mut buf = BytesMut::new();
-        packet.emit(&mut buf);
+        packet.emit(&mut buf, V4);
         assert_eq!(&buf[..], wire, "emit does not round-trip");
         packet
     }
@@ -313,8 +381,8 @@ mod tests {
         };
         let packet = PimPacket::new(PimPayload::Hello(hello));
         let mut buf = BytesMut::new();
-        packet.emit(&mut buf);
-        assert!(pim_verify_checksum(&buf));
+        packet.emit(&mut buf, V4);
+        assert!(pim_verify_checksum(&buf, V4));
         let (_, reparsed) = PimPacket::parse_be(&buf).expect("parse");
         assert_eq!(reparsed.payload, packet.payload);
     }
@@ -356,12 +424,13 @@ mod tests {
 
     #[test]
     fn register_checksum_covers_first_8_bytes_only() {
-        // Null bit set, 4 bytes of encapsulated data excluded from
-        // the checksum.
+        // Null bit set; the encapsulated data (a minimal IPv4 inner
+        // header, version nibble 4) is excluded from the checksum,
+        // which therefore stays 0x9eff regardless of the inner bytes.
         let wire = hex!(
             "21 00 9e ff"  // v2 Register, checksum over first 8 bytes
             "40 00 00 00"  // B=0 N=1
-            "de ad be ef"  // encapsulated data (not checksummed)
+            "45 00 00 14"  // inner IPv4 header start (not checksummed)
         );
         let packet = round_trip(&wire);
         let PimPayload::Register(register) = &packet.payload else {
@@ -369,7 +438,7 @@ mod tests {
         };
         assert!(!register.border);
         assert!(register.null_register);
-        assert_eq!(register.data, vec![0xde, 0xad, 0xbe, 0xef]);
+        assert_eq!(register.data, vec![0x45, 0x00, 0x00, 0x14]);
     }
 
     #[test]
@@ -468,6 +537,62 @@ mod tests {
         )
         .to_vec();
         wire[5] ^= 0x01;
-        assert!(!pim_verify_checksum(&wire));
+        assert!(!pim_verify_checksum(&wire, V4));
+    }
+
+    #[test]
+    fn ipv6_checksum_round_trip() {
+        // A PIMv6 Hello: emit with the IPv6 context, verify with the
+        // same (src, dst), and confirm a different dst fails.
+        let src: Ipv6Addr = "fe80::1".parse().unwrap();
+        let dst: Ipv6Addr = "ff02::d".parse().unwrap();
+        let ctx = PimChecksumContext::Ipv6 { src, dst };
+        let hello = PimHello {
+            tlvs: vec![HelloTlv::Holdtime(105), HelloTlv::DrPriority(1)],
+        };
+        let packet = PimPacket::new(PimPayload::Hello(hello));
+        let mut buf = BytesMut::new();
+        packet.emit(&mut buf, ctx);
+        assert!(pim_verify_checksum(&buf, ctx));
+        let bad = PimChecksumContext::Ipv6 {
+            src,
+            dst: "ff02::16".parse().unwrap(),
+        };
+        assert!(!pim_verify_checksum(&buf, bad));
+    }
+
+    #[test]
+    fn mixed_family_rejected() {
+        // An IPv6 Register carrying an IPv4 inner packet must be
+        // rejected against the IPv6 family.
+        use crate::PIM_AF_IPV6;
+        let register = PimRegister {
+            border: false,
+            null_register: false,
+            data: vec![0x45, 0, 0, 20], // IPv4 header (version nibble 4)
+        };
+        let packet = PimPacket::new(PimPayload::Register(register));
+        assert!(!packet.family_consistent(PIM_AF_IPV6));
+        assert!(packet.family_consistent(PIM_AF_IPV4));
+
+        // A Join/Prune whose group is IPv6 but source IPv4 is
+        // internally inconsistent against either family.
+        use crate::JpGroup;
+        use crate::addr::{EncodedGroup, EncodedSource, EncodedUnicast};
+        let jp = {
+            let mut jp = PimJoinPrune::new(
+                EncodedUnicast::new(IpAddr::V6("fe80::1".parse().unwrap())),
+                210,
+            );
+            jp.groups = vec![JpGroup {
+                group: EncodedGroup::new(IpAddr::V6("ff3e::1".parse().unwrap())),
+                joins: vec![EncodedSource::sg(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2)))],
+                prunes: vec![],
+            }];
+            jp
+        };
+        let packet = PimPacket::new(PimPayload::JoinPrune(jp));
+        assert!(!packet.family_consistent(PIM_AF_IPV6));
+        assert!(!packet.family_consistent(PIM_AF_IPV4));
     }
 }
