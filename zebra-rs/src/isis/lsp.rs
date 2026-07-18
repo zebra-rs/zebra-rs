@@ -1646,7 +1646,12 @@ pub fn csnp_generate(link: &LinkTop, level: Level) -> Vec<IsisCsnp> {
     };
     // tracing::info!("[CSNP:Gen] available_len {}", available_len);
 
-    let entry_size_max = available_len / 16;
+    // A single LspEntries TLV (type 9) holds at most MAX_ENTRIES (15)
+    // entries — the one-octet Length field caps it at 255 bytes and each
+    // entry is 16 bytes. Cap the MTU-derived budget at that limit so we
+    // never build a TLV whose length byte wraps; larger LSDBs simply span
+    // more CSNPs.
+    let entry_size_max = (available_len / 16).min(IsisTlvLspEntries::MAX_ENTRIES);
 
     // tracing::info!("[CSNP:Gen] entry_len {}", entry_size_max);
 

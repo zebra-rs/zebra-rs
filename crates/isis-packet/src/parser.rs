@@ -745,6 +745,23 @@ pub struct IsisTlvLspEntries {
     pub entries: Vec<IsisLspEntry>,
 }
 
+impl IsisTlvLspEntries {
+    /// Maximum number of LSP entries that fit in a single TLV. The TLV's
+    /// one-octet Length field caps the value at 255 bytes and each
+    /// `IsisLspEntry` is exactly 16 bytes on the wire (hold_time(2) +
+    /// lsp_id(8) + seq_number(4) + checksum(2)), so 255 / 16 = 15.
+    ///
+    /// CSNP/PSNP builders MUST split larger entry sets across multiple
+    /// TLVs (or PDUs) and keep each `IsisTlvLspEntries` at or below this
+    /// count: an over-full TLV wraps the length byte in [`len`] mod-256
+    /// while [`emit`] still writes every entry, so the emitted length
+    /// disagrees with the value bytes and desyncs the receiver's TLV walk.
+    ///
+    /// [`len`]: IsisTlvLspEntries::len
+    /// [`emit`]: IsisTlvLspEntries::emit
+    pub const MAX_ENTRIES: usize = 15;
+}
+
 impl TlvEmitter for IsisTlvLspEntries {
     fn typ(&self) -> u8 {
         IsisTlvType::LspEntries.into()
@@ -752,6 +769,8 @@ impl TlvEmitter for IsisTlvLspEntries {
 
     fn len(&self) -> u8 {
         // Wire format: hold_time(2) + lsp_id(8) + seq_number(4) + checksum(2) = 16.
+        // Callers must keep entries <= MAX_ENTRIES; beyond that this u8 wraps
+        // while emit() still writes every entry (see MAX_ENTRIES).
         (self.entries.len() * 16) as u8
     }
 
@@ -1677,6 +1696,63 @@ mod tests {
         assert_eq!(buf[1], 1 + ISIS_AUTH_HMAC_MD5_LEN as u8);
         assert_eq!(buf[2], ISIS_AUTH_TYPE_HMAC_MD5);
         assert!(buf[3..].iter().all(|b| *b == 0));
+    }
+
+    /// At exactly `MAX_ENTRIES` the LspEntries TLV is the largest whose
+    /// one-octet Length field is still exact: emit + re-parse must
+    /// round-trip and the length byte must equal 15*16 = 240, not a
+    /// wrapped value. Guards the cap the CSNP/PSNP builders rely on.
+    #[test]
+    fn lsp_entries_at_max_round_trips_with_exact_length() {
+        let mut tlv = IsisTlvLspEntries::default();
+        for i in 0..IsisTlvLspEntries::MAX_ENTRIES {
+            tlv.entries.push(IsisLspEntry {
+                hold_time: 1200,
+                lsp_id: IsisLspId::new(
+                    IsisSysId {
+                        id: [0, 0, 0, 0, 0, i as u8],
+                    },
+                    0,
+                    0,
+                ),
+                seq_number: 1,
+                checksum: 0,
+            });
+        }
+        assert_eq!(tlv.len() as usize, IsisTlvLspEntries::MAX_ENTRIES * 16);
+
+        let mut buf = BytesMut::new();
+        tlv.tlv_emit(&mut buf);
+        // T(1) + L(1) + 15 * 16 value bytes.
+        assert_eq!(buf.len(), 2 + IsisTlvLspEntries::MAX_ENTRIES * 16);
+        assert_eq!(buf[1] as usize, IsisTlvLspEntries::MAX_ENTRIES * 16);
+
+        let (rest, tlvs) = IsisTlv::parse_tlvs(&buf).expect("parse must succeed");
+        assert!(rest.is_empty());
+        match &tlvs[0] {
+            IsisTlv::LspEntries(v) => {
+                assert_eq!(v.entries.len(), IsisTlvLspEntries::MAX_ENTRIES)
+            }
+            other => panic!("expected LspEntries, got {:?}", other),
+        }
+    }
+
+    /// Documents *why* callers must cap at `MAX_ENTRIES`: one entry past
+    /// the limit makes the one-octet length byte disagree with the value
+    /// bytes emit() writes (16 entries = 256 bytes, len() wraps to 0),
+    /// which is exactly the CSNP/PSNP wire-corruption this cap prevents.
+    #[test]
+    fn lsp_entries_over_max_wraps_length_byte() {
+        let mut tlv = IsisTlvLspEntries::default();
+        for _ in 0..(IsisTlvLspEntries::MAX_ENTRIES + 1) {
+            tlv.entries.push(IsisLspEntry::default());
+        }
+        // 16 * 16 = 256 -> wraps to 0 in the u8 length, while emit() still
+        // writes all 256 value bytes.
+        assert_eq!(tlv.len(), 0);
+        let mut buf = BytesMut::new();
+        tlv.emit(&mut buf);
+        assert_eq!(buf.len(), (IsisTlvLspEntries::MAX_ENTRIES + 1) * 16);
     }
 
     /// An auth-type value that this crate does not recognize must
