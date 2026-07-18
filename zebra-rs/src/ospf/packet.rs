@@ -854,10 +854,7 @@ pub fn ospf_ls_upd_send(oi: &OspfInterface, nbr: &Neighbor, lsas: Vec<OspfLsa>) 
         nbr.ident.prefix.addr(),
         lsas.len()
     );
-    let ls_upd = OspfLsUpdate {
-        num_adv: lsas.len() as u32,
-        lsas,
-    };
+    let ls_upd = OspfLsUpdate { lsas };
     let mut packet = Ospfv2Packet::new(&oi.ident.router_id, &area, Ospfv2Payload::LsUpdate(ls_upd));
     apply_link_auth(&mut packet, &oi.auth_send_ctx());
     nbr.ptx

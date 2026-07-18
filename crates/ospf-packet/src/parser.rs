@@ -378,11 +378,19 @@ impl OspfLsRequestEntry {
     }
 }
 
-#[derive(Debug, NomBE)]
+#[derive(Debug)]
 pub struct OspfLsUpdate {
-    pub num_adv: u32,
-    #[nom(Parse = "{ |x| parse_lsas_with_raw(x, num_adv as usize) }")]
     pub lsas: Vec<OspfLsa>,
+}
+
+impl ParseBe<OspfLsUpdate> for OspfLsUpdate {
+    fn parse_be(input: &[u8]) -> IResult<&[u8], OspfLsUpdate> {
+        // The wire `# advertisements` count only drives the parse loop; the
+        // authoritative count on emit is `lsas.len()`, so it is not stored.
+        let (input, num_adv) = be_u32(input)?;
+        let (input, lsas) = parse_lsas_with_raw(input, num_adv as usize)?;
+        Ok((input, OspfLsUpdate { lsas }))
+    }
 }
 
 /// Parse `n` LSAs, stamping each one's `raw` field with the slice of
@@ -419,7 +427,7 @@ fn parse_lsas_with_raw(input: &[u8], n: usize) -> IResult<&[u8], Vec<OspfLsa>> {
 
 impl OspfLsUpdate {
     pub fn emit(&self, buf: &mut BytesMut) {
-        buf.put_u32(self.num_adv);
+        buf.put_u32(self.lsas.len().min(u32::MAX as usize) as u32);
         for lsa in self.lsas.iter() {
             lsa.emit(buf);
         }
@@ -797,23 +805,33 @@ impl OspfRouterTOS {
     }
 }
 
-#[derive(Debug, Clone, NomBE, Default)]
+#[derive(Debug, Clone, Default)]
 pub struct RouterLsa {
     pub flags: u16,
-    pub num_links: u16,
-    #[nom(Parse = "parse_router_links")]
     pub links: Vec<RouterLsaLink>,
+}
+
+impl ParseBe<RouterLsa> for RouterLsa {
+    fn parse_be(input: &[u8]) -> IResult<&[u8], RouterLsa> {
+        // The wire `# links` count is informational; the link records are
+        // parsed by consuming the rest of the LSA, and the authoritative count
+        // on emit is `links.len()`, so it is not stored.
+        let (input, flags) = be_u16(input)?;
+        let (input, _num_links) = be_u16(input)?;
+        let (input, links) = parse_router_links(input)?;
+        Ok((input, RouterLsa { flags, links }))
+    }
 }
 
 impl RouterLsa {
     pub fn lsa_len(&self) -> u16 {
-        // flags (2) + num_links (2) + sum of link lengths
+        // flags (2) + # links (2) + sum of link lengths
         4 + self.links.iter().map(|l| l.lsa_len()).sum::<u16>()
     }
 
     pub fn emit(&self, buf: &mut BytesMut) {
         buf.put_u16(self.flags);
-        buf.put_u16(self.num_links);
+        buf.put_u16(self.links.len().min(u16::MAX as usize) as u16);
         for link in &self.links {
             link.emit(buf);
         }
@@ -2950,6 +2968,29 @@ mod tests {
         let mut buf = BytesMut::new();
         tlv.emit(&mut buf);
         assert_eq!(&buf[..], &bytes[..]);
+    }
+
+    #[test]
+    fn router_lsa_num_links_derived_from_contents_on_emit() {
+        // Router-LSA body with a LYING "# links" (99) but a single link record.
+        // Parse ignores the wire count; emit writes the real count (1).
+        let bytes = [
+            0x00, 0x00, // flags
+            0x00, 0x63, // # links = 99 (bogus)
+            0x01, 0x01, 0x01, 0x01, // link id
+            0x0a, 0x00, 0x00, 0x00, // link data
+            0x03, 0x00, 0x00, 0x0a, // type=stub, #tos=0, metric=10
+        ];
+        let (rest, lsa) = RouterLsa::parse_be(&bytes).expect("parse");
+        assert!(rest.is_empty());
+        assert_eq!(lsa.links.len(), 1);
+        let mut buf = BytesMut::new();
+        lsa.emit(&mut buf);
+        // Emitted "# links" is the actual count (1), not the wire's bogus 99.
+        assert_eq!(&buf[2..4], &[0x00, 0x01]);
+        // Flags and the link record round-trip byte-for-byte.
+        assert_eq!(&buf[0..2], &[0x00, 0x00]);
+        assert_eq!(&buf[4..], &bytes[4..]);
     }
 
     /// RFC 2328 §D.4.1-D.4.2: the checksum excludes the 64-bit
