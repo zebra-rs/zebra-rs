@@ -7,16 +7,18 @@ use nom::IResult;
 use nom::bytes::complete::take;
 use nom::number::complete::{be_u8, be_u16, be_u24, be_u32};
 use nom_derive::*;
-use packet_utils::{Algo, safe_split_at};
+use packet_utils::Algo;
 use serde::{Deserialize, Serialize};
 
-use crate::util::{ParseBe, TlvEmitter, emit_sub_tlvs, u32_u8_3};
+use crate::util::{ParseBe, TlvEmitter, emit_sub_tlvs, parse_sub_block, u32_u8_3};
+
+impl_parse_subs!(IsisSubTlv);
 use crate::{
     IPV4_ADDR_LEN, IPV6_ADDR_LEN, IsisNeighborId, IsisSysId, IsisTlv, IsisTlvType, SidLabelValue,
     many0_complete,
 };
 
-use super::{Behavior, IsisCodeLen, IsisNeighCode, IsisSub2Tlv, IsisSubTlvUnknown};
+use super::{Behavior, IsisNeighCode, IsisSub2Tlv, IsisSubTlvUnknown};
 
 #[derive(Debug, Default, Clone, Serialize, Deserialize, PartialEq)]
 pub struct IsisTlvExtIsReach {
@@ -221,9 +223,7 @@ impl ParseBe<IsisTlvExtIsReachEntry> for IsisTlvExtIsReachEntry {
     fn parse_be(input: &[u8]) -> IResult<&[u8], Self> {
         let (input, neighbor_id) = take(7usize)(input)?;
         let (input, metric) = be_u24(input)?;
-        let (input, sublen) = be_u8(input)?;
-        let (input, sub) = safe_split_at(input, sublen as usize)?;
-        let (_, subs) = many0_complete(IsisSubTlv::parse_subs).parse(sub)?;
+        let (input, subs) = parse_sub_block(input, IsisSubTlv::parse_subs)?;
 
         let mut tlv = Self::default();
         tlv.neighbor_id.id.copy_from_slice(neighbor_id);
@@ -281,27 +281,6 @@ pub enum IsisSubTlv {
 }
 
 impl IsisSubTlv {
-    pub fn parse_subs(input: &[u8]) -> IResult<&[u8], Self> {
-        let (input, cl) = IsisCodeLen::parse_be(input)?;
-        let (input, sub) = safe_split_at(input, cl.len as usize)?;
-        // A malformed *known* sub-TLV must not truncate the list —
-        // degrade it to Unknown with its bytes preserved (mirroring the
-        // top-level TLV loop) so the sub-TLVs after it still parse.
-        let mut val = match Self::parse_be(sub, cl.code.into()) {
-            Ok((_, val)) => val,
-            Err(_) => IsisSubTlv::Unknown(IsisSubTlvUnknown {
-                code: cl.code,
-                len: cl.len,
-                data: sub.to_vec(),
-            }),
-        };
-        if let IsisSubTlv::Unknown(ref mut v) = val {
-            v.code = cl.code;
-            v.len = cl.len;
-        }
-        Ok((input, val))
-    }
-
     pub fn len(&self) -> u8 {
         use IsisSubTlv::*;
         match self {
@@ -1061,22 +1040,18 @@ impl ParseBe<IsisSubSrv6EndXSid> for IsisSubSrv6EndXSid {
         let (input, weight) = be_u8(input)?;
         let (input, behavior) = be_u16(input)?;
         let (input, sid) = Ipv6Addr::parse_be(input)?;
-        let (input, sub2_len) = be_u8(input)?;
-        let mut sub = Self {
-            flags,
-            algo: algo.into(),
-            weight,
-            behavior: behavior.into(),
-            sid,
-            sub2s: vec![],
-        };
-        if sub2_len == 0 {
-            return Ok((input, sub));
-        }
-        let (input, sub2_data) = safe_split_at(input, sub2_len as usize)?;
-        let (_, sub2s) = many0_complete(IsisSub2Tlv::parse_subs).parse(sub2_data)?;
-        sub.sub2s = sub2s;
-        Ok((input, sub))
+        let (input, sub2s) = parse_sub_block(input, IsisSub2Tlv::parse_subs)?;
+        Ok((
+            input,
+            Self {
+                flags,
+                algo: algo.into(),
+                weight,
+                behavior: behavior.into(),
+                sid,
+                sub2s,
+            },
+        ))
     }
 }
 
@@ -1125,23 +1100,19 @@ impl ParseBe<IsisSubSrv6LanEndXSid> for IsisSubSrv6LanEndXSid {
         let (input, weight) = be_u8(input)?;
         let (input, behavior) = be_u16(input)?;
         let (input, sid) = Ipv6Addr::parse_be(input)?;
-        let (input, sub2_len) = be_u8(input)?;
-        let mut sub = Self {
-            system_id,
-            flags,
-            algo: algo.into(),
-            weight,
-            behavior: behavior.into(),
-            sid,
-            sub2s: vec![],
-        };
-        if sub2_len == 0 {
-            return Ok((input, sub));
-        }
-        let (input, sub2_data) = safe_split_at(input, sub2_len as usize)?;
-        let (_, sub2s) = many0_complete(IsisSub2Tlv::parse_subs).parse(sub2_data)?;
-        sub.sub2s = sub2s;
-        Ok((input, sub))
+        let (input, sub2s) = parse_sub_block(input, IsisSub2Tlv::parse_subs)?;
+        Ok((
+            input,
+            Self {
+                system_id,
+                flags,
+                algo: algo.into(),
+                weight,
+                behavior: behavior.into(),
+                sid,
+                sub2s,
+            },
+        ))
     }
 }
 

@@ -498,10 +498,13 @@ backlog, ordered by risk and value.
    TLV via the `SplittableTlv` trait with no clone and no serialization. A
    unit test pins `wire_len == emitted bytes` across variants including an
    over-full TLV 135.
-5. **Dedup the six sub-TLV dispatch registries** — the #10 fix made each copy
-   bigger (the degrade-to-Unknown match is pasted six times); one generic
-   helper removes ~250 lines and the risk that a seventh registry forgets the
-   Unknown patch or the degrade.
+5. ~~**Dedup the six sub-TLV dispatch registries**~~ — **done**: a single
+   `impl_parse_subs!` macro in `sub/mod.rs` generates all six `parse_subs`
+   registries (dispatch + degrade-to-Unknown + code/len patch), and a shared
+   `util::parse_sub_block` helper replaces the eight hand-rolled
+   length-prefixed sub-block parses. A seventh registry now gets the degrade
+   machinery for free. Behavior pinned by the existing degrade/round-trip
+   tests, which were written against the hand-rolled copies.
 6. **BGP-LS Extended Admin Group (TLV 1173) producer** — enabled by #13:
    `ext_admin_group()` exists, but there is no `BGPLS_ATTR_EXT_ADMIN_GROUP`
    constant, so links advertising only the RFC 7308 group export no color at

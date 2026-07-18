@@ -11,7 +11,9 @@ use serde::{Deserialize, Serialize};
 use crate::util::{ParseBe, TlvEmitter, u32_u8_3};
 use crate::{IsisTlv, IsisTlvType, many0_complete};
 
-use super::{IsisCapCode, IsisCodeLen, IsisSubTlvUnknown};
+use super::{IsisCapCode, IsisSubTlvUnknown};
+
+impl_parse_subs!(IsisSubTlv, FadSubTlv);
 
 #[derive(Debug, NomBE, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "kebab-case")]
@@ -34,27 +36,6 @@ pub enum IsisSubTlv {
 }
 
 impl IsisSubTlv {
-    pub fn parse_subs(input: &[u8]) -> IResult<&[u8], Self> {
-        let (input, cl) = IsisCodeLen::parse_be(input)?;
-        let (input, sub) = packet_utils::safe_split_at(input, cl.len as usize)?;
-        // A malformed *known* sub-TLV must not truncate the list —
-        // degrade it to Unknown with its bytes preserved (mirroring the
-        // top-level TLV loop) so the sub-TLVs after it still parse.
-        let mut val = match Self::parse_be(sub, cl.code.into()) {
-            Ok((_, val)) => val,
-            Err(_) => IsisSubTlv::Unknown(IsisSubTlvUnknown {
-                code: cl.code,
-                len: cl.len,
-                data: sub.to_vec(),
-            }),
-        };
-        if let IsisSubTlv::Unknown(ref mut v) = val {
-            v.code = cl.code;
-            v.len = cl.len;
-        }
-        Ok((input, val))
-    }
-
     pub fn len(&self) -> u8 {
         use IsisSubTlv::*;
         match self {
@@ -567,25 +548,6 @@ pub enum FadSubTlv {
 }
 
 impl FadSubTlv {
-    pub fn parse_subs(input: &[u8]) -> IResult<&[u8], Self> {
-        let (input, cl) = IsisCodeLen::parse_be(input)?;
-        let (input, sub) = packet_utils::safe_split_at(input, cl.len as usize)?;
-        // Malformed known sub-TLV → Unknown, so followers still parse.
-        let mut val = match Self::parse_be(sub, cl.code.into()) {
-            Ok((_, val)) => val,
-            Err(_) => FadSubTlv::Unknown(IsisSubTlvUnknown {
-                code: cl.code,
-                len: cl.len,
-                data: sub.to_vec(),
-            }),
-        };
-        if let FadSubTlv::Unknown(ref mut v) = val {
-            v.code = cl.code;
-            v.len = cl.len;
-        }
-        Ok((input, val))
-    }
-
     pub fn len(&self) -> u8 {
         use FadSubTlv::*;
         match self {
