@@ -7961,6 +7961,25 @@ pub fn route_evpn_withdraw(ident: usize, route: &EvpnRoute, bgp: &mut BgpTop, pe
 
     route_evpn_export_selected(&rd, &prefix, &selected, removed.first(), bgp);
 
+    // Propagate the Loc-RIB change to peers — the withdraw twin of the
+    // announce path's `route_advertise_evpn_to_peers` fan-out, and the
+    // same shape as `route_mup_locrib_withdraw`. Without it a received
+    // EVPN withdraw (or a peer-down sweep) removed the route locally
+    // but every other peer — a route-reflector client, an eBGP transit
+    // neighbor — kept forwarding to the departed host's stale VTEP
+    // until its own session bounced. Only propagate when the Loc-RIB
+    // actually changed: re-flooding a withdraw for an already-absent
+    // route makes peers echo it back.
+    if selected.is_empty() {
+        if !removed.is_empty() {
+            route_withdraw_evpn_to_peers(rd, prefix.clone(), peers);
+        }
+    } else {
+        // Another path remains best for this key — re-advertise it so
+        // peers that held the withdrawn path converge on the survivor.
+        route_advertise_evpn_to_peers(rd, prefix.clone(), &selected, bgp, peers);
+    }
+
     // RFC 9574 selective AR: a withdrawn Replicator-AR route pulls the Leaf
     // A-D we may have originated toward it (no-op if we originated none).
     if bgp.local_rib.evpn_flood.role == AssistedReplicationRole::Leaf
