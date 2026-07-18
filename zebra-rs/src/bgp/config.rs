@@ -812,6 +812,20 @@ fn config_soft_reconfig_in(bgp: &mut Bgp, mut args: Args, op: ConfigOp) -> Optio
     Some(())
 }
 
+/// `set router bgp neighbor X capability four-octet <bool>`
+/// (zebra-bgp-capability.yang) — whether the OPEN we send advertises
+/// the RFC 6793 4-octet AS capability. Default true; false presents an
+/// OLD (2-octet) speaker for interop testing. A local AS above 65535
+/// overrides false at OPEN-build time (the real AS has no other
+/// encoding). Takes effect at the next session establishment.
+fn config_capability_four_octet(bgp: &mut Bgp, mut args: Args, op: ConfigOp) -> Option<()> {
+    let addr = args.addr()?;
+    let flag = args.boolean()?;
+    let peer = bgp.peers.get_mut(&addr)?;
+    peer.config.four_octet = !op.is_set() || flag;
+    Some(())
+}
+
 /// `/router/bgp/neighbor/<addr>/pic-retention` — presence container, so
 /// presence means "on". Opt-in NHT-gated route retention on session-down.
 fn config_pic_retention(bgp: &mut Bgp, mut args: Args, op: ConfigOp) -> Option<()> {
@@ -4839,6 +4853,11 @@ impl Bgp {
         // (eBGP only).
         self.callback_peer("/enforce-first-as", config_enforce_first_as);
         self.callback_peer("/pic-retention", config_pic_retention);
+
+        // Per-neighbor capability advertisement (zebra-bgp-capability.yang):
+        // `capability four-octet false` withholds the RFC 6793 4-octet AS
+        // capability from the OPEN, presenting an OLD (2-octet) speaker.
+        self.callback_peer("/capability/four-octet", config_capability_four_octet);
 
         // Debug/test knob (zebra-bgp-unknown-attr.yang): attach a synthetic
         // unrecognized path attribute to routes advertised to this

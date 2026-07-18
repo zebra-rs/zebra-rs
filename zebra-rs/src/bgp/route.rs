@@ -199,6 +199,10 @@ pub struct SyncCtx {
     pub packet_tx: Option<tokio::sync::mpsc::UnboundedSender<BytesMut>>,
     pub egress_depth: Arc<std::sync::atomic::AtomicUsize>,
     pub extended_message: bool,
+    /// The session negotiated 4-octet AS encoding (RFC 6793) — drives
+    /// the AS_PATH / AGGREGATOR width of every UPDATE built through
+    /// this ctx.
+    pub as4: bool,
     /// Debug/test knob: a synthetic unrecognized path attribute to attach
     /// to every IPv4-unicast route advertised on this session (RFC 4271
     /// §9 origination test). `None` = off. See
@@ -305,6 +309,7 @@ impl SyncCtx {
             packet_tx: None,
             egress_depth: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
             extended_message: false,
+            as4: true,
             attach_unknown_attr: None,
             as_sets_withdraw: true,
         }
@@ -5230,7 +5235,7 @@ pub fn route_update_evpn(
 /// peer triggers `route_evpn_export_selected` which sends
 /// `Message::MacDel` / `MdbDel` and the kernel FDB row goes away.
 fn route_withdraw_evpn(peer: &mut Peer, route: EvpnRoute) {
-    let mut update = UpdatePacket::with_max_packet_size(peer.max_packet_size());
+    let mut update = peer.update_packet();
     update.mp_withdraw = Some(MpUnreachAttr::Evpn(vec![route]));
     peer.send_update(update);
 }
@@ -5508,7 +5513,7 @@ pub(super) fn route_withdraw_ipv4(
     prefix: Ipv4Net,
     id: u32,
 ) {
-    let mut update = UpdatePacket::with_max_packet_size(peer.max_packet_size());
+    let mut update = peer.update_packet();
 
     match rd {
         Some(rd) => {
@@ -8351,7 +8356,7 @@ fn route_update_mup(
 
 /// Emit one MUP route to a peer as a single-NLRI MP_REACH UPDATE.
 fn mup_send_one(peer: &mut Peer, afi: Afi, route: MupRoute, attr: &Arc<BgpAttr>, nhop: IpAddr) {
-    let mut update = UpdatePacket::with_max_packet_size(peer.max_packet_size());
+    let mut update = peer.update_packet();
     update.mp_update = Some(MpReachAttr::Mup {
         afi,
         snpa: 0,
@@ -8453,7 +8458,7 @@ fn mup_withdraw_one(peer: &mut Peer, rd: RouteDistinguisher, prefix: &MupPrefix)
     let Some(route) = mup_withdraw_route(&mut peer.adj_out, rd, prefix) else {
         return;
     };
-    let mut update = UpdatePacket::with_max_packet_size(peer.max_packet_size());
+    let mut update = peer.update_packet();
     update.mp_withdraw = Some(MpUnreachAttr::Mup {
         afi: prefix.afi(),
         withdraws: vec![route],
@@ -8630,7 +8635,7 @@ pub fn route_sync_mup(peer: &mut Peer, bgp: &mut BgpTop) {
     // RFC 4724 / RFC 7606 §3 EoR: empty MP_UNREACH per negotiated MUP AFI.
     for afi in [Afi::Ip, Afi::Ip6] {
         if peer.is_afi_safi(afi, Safi::Mup) {
-            let mut update = UpdatePacket::with_max_packet_size(peer.max_packet_size());
+            let mut update = peer.update_packet();
             update.mp_withdraw = Some(MpUnreachAttr::Mup {
                 afi,
                 withdraws: vec![],
@@ -8890,7 +8895,7 @@ fn srpolicy_reflect(
         ) else {
             continue;
         };
-        let mut update = UpdatePacket::with_max_packet_size(peer.max_packet_size());
+        let mut update = peer.update_packet();
         update.mp_update = Some(MpReachAttr::SrPolicy {
             afi,
             snpa: 0,
@@ -8926,7 +8931,7 @@ fn srpolicy_reflect_withdraw(source_ident: usize, nlri: &SrPolicyNlri, peers: &m
         ) {
             continue;
         }
-        let mut update = UpdatePacket::with_max_packet_size(peer.max_packet_size());
+        let mut update = peer.update_packet();
         update.mp_withdraw = Some(MpUnreachAttr::SrPolicy {
             afi,
             withdraws: vec![nlri.clone()],
@@ -9167,7 +9172,7 @@ pub(super) fn srpolicy_origin_reach(bgp: &mut Bgp, nlri: SrPolicyNlri, attr: Bgp
         let Some(peer) = bgp.peers.get_mut_by_idx(ident) else {
             continue;
         };
-        let mut update = UpdatePacket::with_max_packet_size(peer.max_packet_size());
+        let mut update = peer.update_packet();
         update.mp_update = Some(MpReachAttr::SrPolicy {
             afi,
             snpa: 0,
@@ -9190,7 +9195,7 @@ pub(super) fn srpolicy_origin_withdraw(bgp: &mut Bgp, nlri: SrPolicyNlri) {
         let Some(peer) = bgp.peers.get_mut_by_idx(ident) else {
             continue;
         };
-        let mut update = UpdatePacket::with_max_packet_size(peer.max_packet_size());
+        let mut update = peer.update_packet();
         update.mp_withdraw = Some(MpUnreachAttr::SrPolicy {
             afi,
             withdraws: vec![nlri.clone()],
@@ -9207,7 +9212,6 @@ pub(super) fn srpolicy_origin_withdraw(bgp: &mut Bgp, nlri: SrPolicyNlri) {
 /// the new peer (the SAFI-73 analogue of `route_sync_evpn`).
 pub fn route_sync_srpolicy(peer: &mut Peer, bgp: &BgpTop) {
     let router_id = *bgp.router_id;
-    let max = peer.max_packet_size();
     let adverts: Vec<(Afi, SrPolicyNlri, BgpAttr)> = bgp
         .local_rib
         .sr_policy_local
@@ -9222,7 +9226,7 @@ pub fn route_sync_srpolicy(peer: &mut Peer, bgp: &BgpTop) {
         if !peer.is_afi_safi(afi, Safi::SrTePolicy) {
             continue;
         }
-        let mut update = UpdatePacket::with_max_packet_size(max);
+        let mut update = peer.update_packet();
         update.mp_update = Some(MpReachAttr::SrPolicy {
             afi,
             snpa: 0,
@@ -9476,7 +9480,7 @@ pub fn route_update_flowspec(
 }
 
 fn send_flowspec_one(peer: &mut Peer, afi: Afi, nlri: FlowspecNlri, attr: Arc<BgpAttr>) {
-    let mut update = UpdatePacket::with_max_packet_size(peer.max_packet_size());
+    let mut update = peer.update_packet();
     update.mp_update = Some(MpReachAttr::Flowspec {
         afi,
         updates: vec![nlri],
@@ -9538,7 +9542,7 @@ pub fn route_withdraw_flowspec_to_peers(afi: Afi, nlri: &FlowspecNlri, peers: &m
         }
         peer.adj_out.remove_flowspec(afi, nlri, 0);
 
-        let mut update = UpdatePacket::with_max_packet_size(peer.max_packet_size());
+        let mut update = peer.update_packet();
         update.mp_withdraw = Some(MpUnreachAttr::Flowspec {
             afi,
             withdraws: vec![nlri.clone()],
@@ -11403,7 +11407,7 @@ pub fn route_update_ipv6(
 /// for `prefix`. The v6 counterpart of [`route_withdraw_ipv4`]'s
 /// unicast arm; v6 has no legacy withdraw field.
 pub(super) fn route_withdraw_ipv6(peer: &mut Peer, prefix: Ipv6Net, id: u32) {
-    let mut update = UpdatePacket::with_max_packet_size(peer.max_packet_size());
+    let mut update = peer.update_packet();
     update.mp_withdraw = Some(MpUnreachAttr::Ipv6Nlri(vec![Ipv6Nlri { id, prefix }]));
     peer.send_update(update);
 }
@@ -11542,7 +11546,7 @@ pub(super) fn route_advertise_to_peers_v6(
 /// `(rd, prefix)`. The v6 counterpart of the VPNv4 withdraw arm of
 /// [`route_withdraw_ipv4`].
 fn route_withdraw_vpnv6(peer: &mut Peer, rd: RouteDistinguisher, prefix: Ipv6Net, id: u32) {
-    let mut update = UpdatePacket::with_max_packet_size(peer.max_packet_size());
+    let mut update = peer.update_packet();
     let vpnv6_nlri = Vpnv6Nlri {
         label: Label::default(),
         rd,
@@ -12001,14 +12005,14 @@ fn route_advertise_labeled<A: LabeledAfi>(
         match to_advertise {
             Some((nlri, attr, nhop, label, best)) => {
                 A::adj_out_add(peer, prefix, best);
-                let mut update = UpdatePacket::with_max_packet_size(peer.max_packet_size());
+                let mut update = peer.update_packet();
                 update.bgp_attr = Some(attr);
                 update.mp_update = Some(A::reach(nhop, label, nlri));
                 peer.send_update(update);
             }
             None => {
                 if A::adj_out_contains(peer, &prefix) {
-                    let mut update = UpdatePacket::with_max_packet_size(peer.max_packet_size());
+                    let mut update = peer.update_packet();
                     update.mp_withdraw = Some(A::unreach(prefix, 0));
                     peer.send_update(update);
                     A::adj_out_remove(peer, prefix, 0);
@@ -12052,7 +12056,7 @@ fn route_advertise_labeled<A: LabeledAfi>(
             let Some(decision) = A::apply_policy_out(peer, &nlri, attr, cand.weight) else {
                 continue;
             };
-            let mut update = UpdatePacket::with_max_packet_size(peer.max_packet_size());
+            let mut update = peer.update_packet();
             update.bgp_attr = Some(decision.attr);
             update.mp_update = Some(A::reach(nhop, label, nlri));
             peer.send_update(update);
@@ -12063,7 +12067,7 @@ fn route_advertise_labeled<A: LabeledAfi>(
             if newly.contains(&id) {
                 continue;
             }
-            let mut update = UpdatePacket::with_max_packet_size(peer.max_packet_size());
+            let mut update = peer.update_packet();
             update.mp_withdraw = Some(A::unreach(prefix, id));
             peer.send_update(update);
             A::adj_out_remove(peer, prefix, id);
@@ -12184,8 +12188,10 @@ impl Peer {
     pub fn flush_evpn(&mut self) {
         let packet_tx = self.packet_tx.clone();
         let max_size = self.max_packet_size();
+        let as4 = self.as4;
         for (attr, routes) in self.cache_evpn.drain() {
             let mut update = UpdatePacket::with_max_packet_size(max_size);
+            update.as4 = as4;
 
             // Nexthop comes from the cached attribute. EVPN allows
             // either an IPv4 or IPv6 nexthop; if neither was set on
@@ -12218,6 +12224,7 @@ impl Peer {
         let max_size = self.max_packet_size();
         for (attr, nlris) in self.cache_vpnv4.drain() {
             let mut update = UpdatePacket::with_max_packet_size(max_size);
+            update.as4 = self.as4;
 
             if let Some(BgpNexthop::Vpnv4(nhop)) = attr.nexthop.as_ref() {
                 let vpnv4reach = Vpnv4Reach {
@@ -12272,6 +12279,7 @@ impl Peer {
         let max_size = self.max_packet_size();
         for (attr, nlris) in self.cache_vpnv6.drain() {
             let mut update = UpdatePacket::with_max_packet_size(max_size);
+            update.as4 = self.as4;
 
             if let Some(BgpNexthop::Vpnv6(nhop)) = attr.nexthop.as_ref() {
                 let vpnv6reach = Vpnv6Reach {
@@ -13323,28 +13331,28 @@ pub fn route_sync_vpnv6(peer: &mut Peer, bgp: &mut BgpTop) {
 
 // Send End-of-RIB marker for IPv6 VPN.
 fn send_eor_vpnv6_vpn(peer: &mut Peer) {
-    let mut update = UpdatePacket::with_max_packet_size(peer.max_packet_size());
+    let mut update = peer.update_packet();
     update.mp_withdraw = Some(MpUnreachAttr::Vpnv6Eor);
     peer.send_update(update);
 }
 
 // Send End-of-RIB marker for IPv4 Unicast.
 pub(super) fn send_eor_ipv4_unicast(peer: &mut Peer) {
-    let update = UpdatePacket::with_max_packet_size(peer.max_packet_size());
+    let update = peer.update_packet();
     peer.send_update(update);
 }
 
 // Send End-of-RIB marker for IPv6 Unicast: an empty MP_UNREACH(AFI=2,
 // SAFI=1), per RFC 4724 §2 (only IPv4 unicast uses the bare empty UPDATE).
 fn send_eor_ipv6_unicast(peer: &mut Peer) {
-    let mut update = UpdatePacket::with_max_packet_size(peer.max_packet_size());
+    let mut update = peer.update_packet();
     update.mp_withdraw = Some(MpUnreachAttr::Ipv6Eor);
     peer.send_update(update);
 }
 
 // Send End-of-RIB marker for VPNv4 Unicast.
 fn send_eor_vpnv4_unicast(peer: &mut Peer) {
-    let mut update = UpdatePacket::with_max_packet_size(peer.max_packet_size());
+    let mut update = peer.update_packet();
     update.mp_withdraw = Some(MpUnreachAttr::Vpnv4Eor);
     peer.send_update(update);
 }
@@ -13374,7 +13382,7 @@ fn send_rtcv4_membership(peer: &mut Peer, bgp: &BgpTop) {
         }
     }
 
-    let mut update = UpdatePacket::with_max_packet_size(peer.max_packet_size());
+    let mut update = peer.update_packet();
     let mut attrs = BgpAttr::new();
     if peer.is_ibgp() {
         attrs.local_pref = Some(LocalPref::default());
@@ -13390,7 +13398,7 @@ fn send_rtcv4_membership(peer: &mut Peer, bgp: &BgpTop) {
 
 // Send End-of-RIB marker for RTCv4.
 fn send_eor_rtcv4_unicast(peer: &mut Peer) {
-    let mut update = UpdatePacket::with_max_packet_size(peer.max_packet_size());
+    let mut update = peer.update_packet();
     update.mp_withdraw = Some(MpUnreachAttr::Rtcv4Eor);
     peer.send_update(update);
 }
@@ -13414,7 +13422,7 @@ fn send_rtcv6_membership(peer: &mut Peer, bgp: &BgpTop) {
         }
     }
 
-    let mut update = UpdatePacket::with_max_packet_size(peer.max_packet_size());
+    let mut update = peer.update_packet();
     let mut attrs = BgpAttr::new();
     if peer.is_ibgp() {
         attrs.local_pref = Some(LocalPref::default());
@@ -13430,7 +13438,7 @@ fn send_rtcv6_membership(peer: &mut Peer, bgp: &BgpTop) {
 
 // Send End-of-RIB marker for RTCv6.
 fn send_eor_rtcv6_unicast(peer: &mut Peer) {
-    let mut update = UpdatePacket::with_max_packet_size(peer.max_packet_size());
+    let mut update = peer.update_packet();
     update.mp_withdraw = Some(MpUnreachAttr::Rtcv6Eor);
     peer.send_update(update);
 }
@@ -13439,7 +13447,7 @@ fn send_eor_rtcv6_unicast(peer: &mut Peer) {
 // as an empty UPDATE; the multiprotocol form (RFC 7606 §3) carries
 // it as an MP_UNREACH with empty NLRI for the AFI/SAFI in question.
 fn send_eor_evpn(peer: &mut Peer) {
-    let mut update = UpdatePacket::with_max_packet_size(peer.max_packet_size());
+    let mut update = peer.update_packet();
     update.mp_withdraw = Some(MpUnreachAttr::EvpnEor);
     peer.send_update(update);
 }
@@ -13548,7 +13556,7 @@ pub fn route_sync_labelv4(peer: &mut Peer, bgp: &mut BgpTop) {
         ) else {
             continue;
         };
-        let mut update = UpdatePacket::with_max_packet_size(peer.max_packet_size());
+        let mut update = peer.update_packet();
         update.bgp_attr = Some(decision.attr);
         update.mp_update = Some(MpReachAttr::Labelv4 {
             snpa: 0,
@@ -13596,7 +13604,7 @@ pub fn route_sync_labelv6(peer: &mut Peer, bgp: &mut BgpTop) {
         ) else {
             continue;
         };
-        let mut update = UpdatePacket::with_max_packet_size(peer.max_packet_size());
+        let mut update = peer.update_packet();
         update.bgp_attr = Some(decision.attr);
         update.mp_update = Some(MpReachAttr::Labelv6 {
             snpa: 0,
@@ -20763,6 +20771,7 @@ mod as_sets_withdraw_tests {
             packet_tx: None,
             egress_depth: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
             extended_message: false,
+            as4: true,
             attach_unknown_attr: None,
             as_sets_withdraw: true,
         };
@@ -20817,6 +20826,7 @@ mod as_sets_withdraw_tests {
             packet_tx: None,
             egress_depth: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
             extended_message: false,
+            as4: true,
             attach_unknown_attr: None,
             as_sets_withdraw: false,
         };

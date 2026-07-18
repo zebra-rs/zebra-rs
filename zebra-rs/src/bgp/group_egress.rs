@@ -277,7 +277,8 @@ impl Engine {
         let prev = self.adj_out.add(prefix, rib);
         let already_sent = prev.is_some_and(|p| Arc::ptr_eq(&p.attr, &arc));
         if !already_sent {
-            let bytes_list = encode_ipv4_update(&arc, &[nlri], ctx.max_packet_size(), None);
+            let bytes_list =
+                encode_ipv4_update(&arc, &[nlri], ctx.max_packet_size(), ctx.as4, None);
             self.fan(&bytes_list, source);
         }
     }

@@ -685,6 +685,7 @@ pub(super) trait FlushNlri: Clone {
         attr: &Arc<BgpAttr>,
         nlris: &[Self],
         max_packet_size: usize,
+        as4: bool,
         enhe_v6: Option<Ipv4MpReachNextHop>,
     ) -> Vec<bytes::BytesMut>;
 }
@@ -694,9 +695,10 @@ impl FlushNlri for Ipv4Nlri {
         attr: &Arc<BgpAttr>,
         nlris: &[Self],
         max_packet_size: usize,
+        as4: bool,
         enhe_v6: Option<Ipv4MpReachNextHop>,
     ) -> Vec<bytes::BytesMut> {
-        encode_ipv4_update(attr, nlris, max_packet_size, enhe_v6)
+        encode_ipv4_update(attr, nlris, max_packet_size, as4, enhe_v6)
     }
 }
 
@@ -705,9 +707,10 @@ impl FlushNlri for Ipv6Nlri {
         attr: &Arc<BgpAttr>,
         nlris: &[Self],
         max_packet_size: usize,
+        as4: bool,
         _enhe_v6: Option<Ipv4MpReachNextHop>,
     ) -> Vec<bytes::BytesMut> {
-        encode_ipv6_update(attr, nlris, max_packet_size)
+        encode_ipv6_update(attr, nlris, max_packet_size, as4)
     }
 }
 
@@ -722,6 +725,9 @@ pub(super) struct FlushJob<N> {
     pub buckets: Vec<(Arc<BgpAttr>, Vec<(N, usize)>)>,
     pub members: Vec<FlushMember>,
     pub max_packet_size: usize,
+    /// Group negotiated 4-octet AS encoding (RFC 6793) — sig field, so
+    /// it is uniform across members by construction.
+    pub as4: bool,
     /// Group negotiated RFC 8950 ENHE (IPv4 unicast only): every
     /// bucket is encoded per-member with that member's v6 next-hop.
     pub enhe: bool,
@@ -796,7 +802,8 @@ impl<N: FlushNlri> FlushJob<N> {
                         }
                         continue;
                     }
-                    let bytes_list = N::encode(&attr, &nlris, self.max_packet_size, Some(nh));
+                    let bytes_list =
+                        N::encode(&attr, &nlris, self.max_packet_size, self.as4, Some(nh));
                     let byte_total: usize = bytes_list.iter().map(|b| b.len()).sum();
                     for bytes in &bytes_list {
                         let _ = tx.send(bytes.clone());
@@ -813,7 +820,8 @@ impl<N: FlushNlri> FlushJob<N> {
 
             // Canonical UPDATE: every NLRI in the bucket.
             let canonical: Vec<N> = entries.iter().map(|(n, _)| n.clone()).collect();
-            let canonical_bytes = N::encode(&attr, &canonical, self.max_packet_size, None);
+            let canonical_bytes =
+                N::encode(&attr, &canonical, self.max_packet_size, self.as4, None);
             let canonical_byte_total: usize = canonical_bytes.iter().map(|b| b.len()).sum();
 
             // Bump per-attr-bucket counters: one formatted variant
@@ -860,7 +868,7 @@ impl<N: FlushNlri> FlushJob<N> {
                     counters.split_horizon_excluded += 1;
                     continue;
                 }
-                let pruned_bytes = N::encode(&attr, &nlris, self.max_packet_size, None);
+                let pruned_bytes = N::encode(&attr, &nlris, self.max_packet_size, self.as4, None);
                 let pruned_byte_total: usize = pruned_bytes.iter().map(|b| b.len()).sum();
                 counters.messages_formatted += pruned_bytes.len() as u64;
                 counters.bytes_formatted += pruned_byte_total as u64;
@@ -931,6 +939,7 @@ pub(super) fn build_flush_job_ipv4(
         buckets,
         members,
         max_packet_size,
+        as4: group.sig.as4_negotiated,
         enhe,
     })
 }
@@ -1063,7 +1072,13 @@ pub(super) fn send_ipv4_direct(
     }
     let max_packet_size = ctx.max_packet_size();
     for (attr, nlris) in buckets {
-        let bytes_list = encode_ipv4_update(&attr, &nlris, max_packet_size, extended_next_hop_v6);
+        let bytes_list = encode_ipv4_update(
+            &attr,
+            &nlris,
+            max_packet_size,
+            ctx.as4,
+            extended_next_hop_v6,
+        );
         for buf in bytes_list {
             ctx.send_packet(buf);
         }
@@ -1082,9 +1097,11 @@ pub(super) fn encode_ipv4_update(
     attr: &Arc<BgpAttr>,
     nlris: &[Ipv4Nlri],
     max_packet_size: usize,
+    as4: bool,
     extended_next_hop_v6: Option<Ipv4MpReachNextHop>,
 ) -> Vec<bytes::BytesMut> {
     let mut update = UpdatePacket::with_max_packet_size(max_packet_size);
+    update.as4 = as4;
     update.bgp_attr = Some((**attr).clone());
     update.ipv4_update = nlris.to_vec();
     let mut out = Vec::new();
@@ -1198,6 +1215,7 @@ pub(super) fn build_flush_job_ipv6(
         buckets,
         members,
         max_packet_size,
+        as4: group.sig.as4_negotiated,
         enhe: false,
     })
 }
@@ -1280,6 +1298,7 @@ fn encode_ipv6_update(
     attr: &Arc<BgpAttr>,
     nlris: &[Ipv6Nlri],
     max_packet_size: usize,
+    as4: bool,
 ) -> Vec<bytes::BytesMut> {
     if nlris.is_empty() {
         return Vec::new();
@@ -1301,6 +1320,7 @@ fn encode_ipv6_update(
     let mut out = Vec::new();
     for nlri_chunk in nlris.chunks(chunk) {
         let mut update = UpdatePacket::with_max_packet_size(max_packet_size);
+        update.as4 = as4;
         update.bgp_attr = Some((**attr).clone());
         update.mp_update = Some(MpReachAttr::Ipv6 {
             snpa: 0,
@@ -1340,7 +1360,7 @@ pub(super) fn send_ipv6_direct(peer: &Peer, entries: Vec<(Arc<BgpAttr>, Ipv6Nlri
         bgp_packet::BGP_PACKET_LEN
     };
     for (attr, nlris) in buckets {
-        let bytes_list = encode_ipv6_update(&attr, &nlris, max_packet_size);
+        let bytes_list = encode_ipv6_update(&attr, &nlris, max_packet_size, peer.as4);
         for buf in bytes_list {
             peer.send_packet(buf);
         }
@@ -1867,13 +1887,14 @@ mod tests {
         let job = FlushJob {
             buckets: vec![(attr.clone(), entries.clone())],
             members: vec![m1, m2],
+            as4: true,
             max_packet_size: bgp_packet::BGP_PACKET_LEN,
             enhe: false,
         };
         let counters = job.run();
 
         let nlris: Vec<Ipv4Nlri> = entries.iter().map(|(n, _)| n.clone()).collect();
-        let golden = encode_ipv4_update(&attr, &nlris, bgp_packet::BGP_PACKET_LEN, None);
+        let golden = encode_ipv4_update(&attr, &nlris, bgp_packet::BGP_PACKET_LEN, true, None);
         assert!(!golden.is_empty());
         assert_eq!(recv_all(&mut rx1), golden);
         assert_eq!(recv_all(&mut rx2), golden);
@@ -1900,6 +1921,7 @@ mod tests {
         let job = FlushJob {
             buckets: vec![(attr.clone(), entries)],
             members: vec![m1, m2],
+            as4: true,
             max_packet_size: bgp_packet::BGP_PACKET_LEN,
             enhe: false,
         };
@@ -1909,12 +1931,14 @@ mod tests {
             &attr,
             &[nlri("10.0.0.1/32"), nlri("10.0.0.2/32")],
             bgp_packet::BGP_PACKET_LEN,
+            true,
             None,
         );
         let pruned = encode_ipv4_update(
             &attr,
             &[nlri("10.0.0.2/32")],
             bgp_packet::BGP_PACKET_LEN,
+            true,
             None,
         );
         assert_eq!(recv_all(&mut rx1), pruned);
@@ -1947,6 +1971,7 @@ mod tests {
         let job = FlushJob {
             buckets: vec![(attr.clone(), vec![(nlri("10.0.0.1/32"), 99)])],
             members: vec![capable, incapable],
+            as4: true,
             max_packet_size: bgp_packet::BGP_PACKET_LEN,
             enhe: false,
         };
@@ -1979,14 +2004,17 @@ mod tests {
         let job = FlushJob {
             buckets: vec![(attr.clone(), entries.clone())],
             members: vec![m1, m2, m3],
+            as4: true,
             max_packet_size: bgp_packet::BGP_PACKET_LEN,
             enhe: true,
         };
         let counters = job.run();
 
         let nlris: Vec<Ipv4Nlri> = entries.iter().map(|(n, _)| n.clone()).collect();
-        let golden1 = encode_ipv4_update(&attr, &nlris, bgp_packet::BGP_PACKET_LEN, Some(nh1));
-        let golden2 = encode_ipv4_update(&attr, &nlris, bgp_packet::BGP_PACKET_LEN, Some(nh2));
+        let golden1 =
+            encode_ipv4_update(&attr, &nlris, bgp_packet::BGP_PACKET_LEN, true, Some(nh1));
+        let golden2 =
+            encode_ipv4_update(&attr, &nlris, bgp_packet::BGP_PACKET_LEN, true, Some(nh2));
         assert_ne!(golden1, golden2);
         assert_eq!(recv_all(&mut rx1), golden1);
         assert_eq!(recv_all(&mut rx2), golden2);
@@ -2018,12 +2046,13 @@ mod tests {
         let job = FlushJob {
             buckets: vec![(attr.clone(), entries.clone())],
             members: vec![m1],
+            as4: true,
             max_packet_size: bgp_packet::BGP_PACKET_LEN,
             enhe: false,
         };
         let counters = job.run();
         let nlris: Vec<Ipv6Nlri> = entries.iter().map(|(n, _)| n.clone()).collect();
-        let golden = encode_ipv6_update(&attr, &nlris, bgp_packet::BGP_PACKET_LEN);
+        let golden = encode_ipv6_update(&attr, &nlris, bgp_packet::BGP_PACKET_LEN, true);
         assert_eq!(recv_all(&mut rx1), golden);
         assert_eq!(counters.messages_formatted, golden.len() as u64);
     }

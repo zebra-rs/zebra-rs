@@ -1843,6 +1843,38 @@ mod yang_load_tests {
         }
     }
 
+    /// Grammar-rot guard for the per-neighbor `capability four-octet`
+    /// knob (zebra-bgp-capability.yang). The augment reaches the schema
+    /// only through config.yang's import list — dropping the import
+    /// makes the YAML apply fail with `unknown key \`capability\``
+    /// while everything else still compiles, so pin it here.
+    #[test]
+    fn bgp_neighbor_capability_four_octet_parses() {
+        use crate::config::ExecCode;
+        use crate::config::parse::{State, parse};
+        use libyang::to_entry;
+
+        let mut yang = YangStore::new();
+        yang.add_path(concat!(env!("CARGO_MANIFEST_DIR"), "/yang"));
+        yang.read_with_resolve("configure")
+            .unwrap_or_else(|e| panic!("configure failed to load: {e:#}"));
+        yang.identity_resolve();
+        let module = yang.find_module("configure").unwrap();
+        let entry = to_entry(&yang, module);
+
+        for cmd in [
+            "set router bgp neighbor 192.168.1.3 capability four-octet false",
+            "set router bgp neighbor 192.168.1.3 capability four-octet true",
+        ] {
+            let (code, _comps, _state) = parse(cmd, entry.clone(), None, State::new());
+            assert_eq!(
+                code,
+                ExecCode::Success,
+                "should parse as a settable path: {cmd}"
+            );
+        }
+    }
+
     /// Regression guard for the per-neighbor `attach-unknown-attribute`
     /// debug knob (zebra-bgp-unknown-attr.yang). The string-valued leaf —
     /// whose `<type>:<flags>:<value-hex>` value contains colons — must

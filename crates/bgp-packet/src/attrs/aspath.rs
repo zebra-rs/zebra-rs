@@ -7,7 +7,7 @@ use std::collections::VecDeque;
 use std::fmt;
 use std::str::FromStr;
 
-use crate::{AttrType, ParseBe, many0_complete};
+use crate::{AttrType, ParseBe, parse_nlri_block};
 
 use super::aspath_token::{Token, tokenizer};
 use super::{AttrEmitter, AttrFlags};
@@ -23,7 +23,9 @@ pub const AS_CONFED_SET: u8 = 4;
 /// `AS_SEGMENT_MAX`.
 pub const AS_SEGMENT_MAX: usize = 255;
 
-#[allow(dead_code)]
+/// RFC 6793: the 2-octet placeholder an ASN above 65535 becomes in a
+/// message bound for an OLD (non-AS4) speaker. The real ASNs travel in
+/// AS4_PATH / AS4_AGGREGATOR alongside.
 pub const AS_TRANS: u16 = 23456;
 
 /// Inclusive bounds of the 16-bit private AS range (RFC 6996).
@@ -86,7 +88,11 @@ impl As2Path {
 
 impl ParseBe<As2Path> for As2Path {
     fn parse_be(input: &[u8]) -> IResult<&[u8], As2Path> {
-        let (input, segs) = many0_complete(parse_bgp_attr_as2_segment).parse(input)?;
+        // Exact consumption: a segment list that stops short of the
+        // attribute value leaves trailing octets, which means a segment
+        // failed to parse — a malformed AS_PATH (RFC 7606 §7.4), not a
+        // shorter one.
+        let (input, segs) = parse_nlri_block(input, parse_bgp_attr_as2_segment)?;
         let mut path = As2Path { segs, length: 0 };
         path.update_length();
         Ok((input, path))
@@ -108,10 +114,11 @@ impl From<As2Path> for As4Path {
     /// crate works in (RFC 6793 §4.2.2), zero-extending each AS number. Segment
     /// types and order carry over unchanged, so the hop count is identical.
     ///
-    /// This does not recover the 4-octet AS numbers that an OLD (non-AS4) peer
-    /// replaces with AS_TRANS (23456): those live in the AS4_PATH attribute
-    /// (type 17), which this crate does not implement, so an AS_TRANS widens to
-    /// a literal 23456.
+    /// This alone does not recover the 4-octet AS numbers an OLD (non-AS4)
+    /// peer replaces with AS_TRANS (23456): those live in the AS4_PATH
+    /// attribute (type 17), reconciled by [`As4Path::merge_as4_path`] in
+    /// `parse_bgp_update_attribute`. An AS_TRANS therefore widens to a
+    /// literal 23456 here, to be substituted by the merge.
     fn from(from: As2Path) -> Self {
         let mut path = As4Path {
             segs: from
@@ -126,6 +133,117 @@ impl From<As2Path> for As4Path {
         };
         path.update_length();
         path
+    }
+}
+
+impl As2Segment {
+    pub fn emit(&self, buf: &mut BytesMut) {
+        // Same 1-octet Path Segment Length handling as
+        // [`As4Segment::emit`]: preserve empty segments, split runs
+        // longer than 255 into consecutive segments of the same type.
+        if self.asn.is_empty() {
+            buf.put_u8(self.typ);
+            buf.put_u8(0);
+            return;
+        }
+        for chunk in self.asn.chunks(AS_SEGMENT_MAX) {
+            buf.put_u8(self.typ);
+            buf.put_u8(chunk.len() as u8);
+            chunk.iter().for_each(|x| buf.put_u16(*x));
+        }
+    }
+}
+
+impl AttrEmitter for As2Path {
+    fn attr_flags(&self) -> AttrFlags {
+        AttrFlags::new().with_transitive(true)
+    }
+
+    fn attr_type(&self) -> AttrType {
+        AttrType::AsPath
+    }
+
+    fn len(&self) -> Option<usize> {
+        None
+    }
+
+    fn emit(&self, buf: &mut BytesMut) {
+        self.segs.iter().for_each(|x| x.emit(buf));
+    }
+}
+
+impl From<&As4Path> for As2Path {
+    /// Narrow to the 2-octet wire form for an OLD (non-AS4) peer
+    /// (RFC 6793 §4.2.1): each ASN that fits in two octets carries
+    /// over, anything larger becomes AS_TRANS. The real ASNs must
+    /// travel alongside in AS4_PATH ([`As4PathAttr`]) whenever this
+    /// substitution fired ([`As4Path::has_four_octet_asn`]).
+    fn from(from: &As4Path) -> Self {
+        let mut path = As2Path {
+            segs: from
+                .segs
+                .iter()
+                .map(|seg| As2Segment {
+                    typ: seg.typ,
+                    asn: seg
+                        .asn
+                        .iter()
+                        .map(|&asn| u16::try_from(asn).unwrap_or(AS_TRANS))
+                        .collect(),
+                })
+                .collect(),
+            length: 0,
+        };
+        path.update_length();
+        path
+    }
+}
+
+/// The AS4_PATH attribute (type 17, RFC 6793 §3): the 4-octet AS path an
+/// OLD (non-AS4) speaker tunnels transparently while its AS_PATH carries
+/// AS_TRANS placeholders. Same wire encoding as a 4-octet AS_PATH, but a
+/// distinct attribute type and optional-transitive flags — hence the
+/// wrapper rather than reusing [`As4Path`]'s [`AttrEmitter`].
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+pub struct As4PathAttr(pub As4Path);
+
+impl As4PathAttr {
+    /// AS4_PATH content for `path` (RFC 6793 §4.2.2): the full 4-octet
+    /// path minus confederation segments, which MUST NOT be carried in
+    /// AS4_PATH (§6).
+    pub fn from_path(path: &As4Path) -> Self {
+        Self(path.strip_confed_segments())
+    }
+}
+
+impl ParseBe<As4PathAttr> for As4PathAttr {
+    fn parse_be(input: &[u8]) -> IResult<&[u8], As4PathAttr> {
+        let (input, path) = As4Path::parse_be(input)?;
+        Ok((input, As4PathAttr(path)))
+    }
+}
+
+impl AttrEmitter for As4PathAttr {
+    fn attr_flags(&self) -> AttrFlags {
+        AttrFlags::new().with_optional(true).with_transitive(true)
+    }
+
+    fn attr_type(&self) -> AttrType {
+        AttrType::As4Path
+    }
+
+    fn len(&self) -> Option<usize> {
+        None
+    }
+
+    fn emit(&self, buf: &mut BytesMut) {
+        self.0.segs.iter().for_each(|x| x.emit(buf));
+    }
+}
+
+impl fmt::Display for As4PathAttr {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}", self.0)
     }
 }
 
@@ -312,7 +430,8 @@ impl AttrEmitter for As4Path {
 
 impl ParseBe<As4Path> for As4Path {
     fn parse_be(input: &[u8]) -> IResult<&[u8], As4Path> {
-        let (input, segs) = many0_complete(parse_bgp_attr_as4_segment).parse(input)?;
+        // Exact consumption — see the As2Path parse for why.
+        let (input, segs) = parse_nlri_block(input, parse_bgp_attr_as4_segment)?;
         let mut path = As4Path {
             segs: segs.into(),
             length: 0,
@@ -477,6 +596,85 @@ impl As4Path {
         self.segs
             .iter()
             .any(|seg| seg.typ == AS_SET || seg.typ == AS_CONFED_SET)
+    }
+
+    /// True when any ASN needs more than two octets — the condition
+    /// under which a message to an OLD (non-AS4) peer loses information
+    /// to AS_TRANS substitution and must carry AS4_PATH alongside
+    /// (RFC 6793 §4.2.2).
+    pub fn has_four_octet_asn(&self) -> bool {
+        self.segs
+            .iter()
+            .any(|seg| seg.asn.iter().any(|&asn| asn > u16::MAX as u32))
+    }
+
+    /// This path minus AS_CONFED_SEQUENCE / AS_CONFED_SET segments.
+    /// AS4_PATH MUST NOT carry confederation segments (RFC 6793 §6):
+    /// applied when building one to emit, and to a received AS4_PATH
+    /// before the §4.2.3 merge (the RFC says to discard such segments
+    /// and continue).
+    pub fn strip_confed_segments(&self) -> As4Path {
+        let mut path = As4Path {
+            segs: self
+                .segs
+                .iter()
+                .filter(|seg| seg.typ != AS_CONFED_SEQ && seg.typ != AS_CONFED_SET)
+                .cloned()
+                .collect(),
+            length: 0,
+        };
+        path.update_length();
+        path
+    }
+
+    /// RFC 6793 §4.2.3: reconcile the AS_PATH received from an OLD
+    /// (non-AS4) peer (`as_path`, already widened, AS_TRANS in place of
+    /// every 4-octet ASN) with the AS4_PATH it tunneled (`as4_path`,
+    /// confederation segments already stripped).
+    ///
+    /// AS numbers are counted with the RFC 4271 §9.1.2.2 / RFC 5065
+    /// hop-count rules (each AS_SEQUENCE member counts 1, a whole
+    /// AS_SET counts 1, confederation segments count 0) — the counts
+    /// [`Self::length`] maintains. If AS_PATH counts fewer hops than
+    /// AS4_PATH, the AS4_PATH is ignored (an OLD speaker shortened the
+    /// path — e.g. by aggregation — after the AS4_PATH was attached).
+    /// Otherwise the merged path is the leading `AS_PATH − AS4_PATH`
+    /// hops of AS_PATH followed by the whole AS4_PATH.
+    pub fn merge_as4_path(as_path: &As4Path, as4_path: &As4Path) -> As4Path {
+        let n_as = as_path.length;
+        let n_as4 = as4_path.length;
+        if n_as < n_as4 {
+            return as_path.clone();
+        }
+
+        let mut need = n_as - n_as4;
+        let mut merged = As4Path::new();
+        for seg in &as_path.segs {
+            if need == 0 {
+                break;
+            }
+            match seg.typ {
+                AS_SEQ => {
+                    let take = (need as usize).min(seg.asn.len());
+                    merged.segs.push_back(As4Segment {
+                        typ: AS_SEQ,
+                        asn: seg.asn[..take].to_vec(),
+                    });
+                    need -= take as u32;
+                }
+                AS_SET => {
+                    merged.segs.push_back(seg.clone());
+                    need -= 1;
+                }
+                // Hop count 0: ride along with the leading part they
+                // are attached to (a confederation boundary prepends
+                // them ahead of the plain sequence).
+                _ => merged.segs.push_back(seg.clone()),
+            }
+        }
+        merged.segs.extend(as4_path.segs.iter().cloned());
+        merged.update_length();
+        merged
     }
 
     /// Returns the count of distinct ASes across all segments
@@ -1309,6 +1507,133 @@ mod tests {
         let mut aspath: As4Path = As4Path::from_str("65001 65002").unwrap();
         aspath.replace_private_as_mut(500, 65002);
         assert_eq!(aspath.to_string(), "500 65002");
+    }
+
+    // ---- RFC 6793 narrowing / AS4_PATH / merge ------------------------
+
+    /// Narrowing to the 2-octet form substitutes AS_TRANS for every ASN
+    /// above 65535, preserving segment types, order and hop count.
+    #[test]
+    fn as4_path_narrows_to_as2_with_as_trans() {
+        let p4 = As4Path::from_str("70000 65001 {4200000000 100}").unwrap();
+        assert!(p4.has_four_octet_asn());
+        let p2: As2Path = (&p4).into();
+        assert_eq!(p2.segs.len(), 2);
+        assert_eq!(p2.segs[0].typ, AS_SEQ);
+        assert_eq!(p2.segs[0].asn, vec![AS_TRANS, 65001]);
+        assert_eq!(p2.segs[1].typ, AS_SET);
+        assert_eq!(p2.segs[1].asn, vec![AS_TRANS, 100]);
+        assert_eq!(p2.length, 3, "hop count preserved");
+
+        let mappable = As4Path::from_str("65001 65002").unwrap();
+        assert!(!mappable.has_four_octet_asn());
+    }
+
+    /// The 2-octet emit round-trips through the 2-octet parser,
+    /// including the >255 segment split.
+    #[test]
+    fn as2_path_emit_round_trips() {
+        let p4 = As4Path::from((1..=300u32).collect::<Vec<u32>>());
+        let p2: As2Path = (&p4).into();
+        let mut buf = BytesMut::new();
+        p2.segs.iter().for_each(|s| s.emit(&mut buf));
+        let (rest, parsed) = As2Path::parse_be(&buf).unwrap();
+        assert!(rest.is_empty());
+        assert_eq!(parsed.segs.len(), 2, "split at the 255 limit");
+        let flat: Vec<u16> = parsed
+            .segs
+            .iter()
+            .flat_map(|s| s.asn.iter().copied())
+            .collect();
+        assert_eq!(flat, (1..=300u32).map(|v| v as u16).collect::<Vec<u16>>());
+    }
+
+    /// Flatten a path into its ASN sequence for value comparison
+    /// (display renders asdot for 4-octet ASNs).
+    fn flat_asns(path: &As4Path) -> Vec<u32> {
+        path.segs
+            .iter()
+            .flat_map(|s| s.asn.iter().copied())
+            .collect()
+    }
+
+    /// AS4_PATH content excludes confederation segments (RFC 6793 §6).
+    #[test]
+    fn as4_path_attr_strips_confed_segments() {
+        let p4 = As4Path::from_str("(65100 65101) 70000 65001 [65102]").unwrap();
+        let attr = As4PathAttr::from_path(&p4);
+        assert_eq!(flat_asns(&attr.0), vec![70000, 65001]);
+        assert_eq!(attr.0.length, 2);
+    }
+
+    /// The attribute framing of AS4_PATH: optional + transitive, type 17.
+    #[test]
+    fn as4_path_attr_framing() {
+        let attr = As4PathAttr::from_path(&As4Path::from_str("70000").unwrap());
+        let mut buf = BytesMut::new();
+        attr.attr_emit(&mut buf);
+        assert_eq!(buf[0], 0xC0, "optional + transitive");
+        assert_eq!(buf[1], 17, "AS4_PATH type code");
+        let (_, reparsed) = As4PathAttr::parse_be(&buf[3..]).unwrap();
+        assert_eq!(reparsed.0, attr.0);
+    }
+
+    /// RFC 6793 §4.2.3: an OLD speaker prepended its 2-octet AS after
+    /// the AS4_PATH was attached, so AS_PATH counts one more hop; the
+    /// merge takes that leading hop and appends the whole AS4_PATH.
+    #[test]
+    fn merge_takes_leading_hops_then_as4_path() {
+        let as_path = As4Path::from_str(&format!("65001 {AS_TRANS}")).unwrap();
+        let as4_path = As4Path::from_str("70000").unwrap();
+        let merged = As4Path::merge_as4_path(&as_path, &as4_path);
+        assert_eq!(flat_asns(&merged), vec![65001, 70000]);
+        assert_eq!(merged.length, 2);
+    }
+
+    /// Equal hop counts: the AS4_PATH wholly replaces the placeholder
+    /// path.
+    #[test]
+    fn merge_equal_counts_takes_as4_path() {
+        let as_path = As4Path::from_str(&format!("{AS_TRANS} 65001")).unwrap();
+        let as4_path = As4Path::from_str("70000 65001").unwrap();
+        let merged = As4Path::merge_as4_path(&as_path, &as4_path);
+        assert_eq!(flat_asns(&merged), vec![70000, 65001]);
+    }
+
+    /// AS_PATH shorter than AS4_PATH (an OLD speaker shortened the path,
+    /// e.g. by aggregation): the AS4_PATH is stale — ignore it.
+    #[test]
+    fn merge_ignores_longer_as4_path() {
+        let as_path = As4Path::from_str("65001").unwrap();
+        let as4_path = As4Path::from_str("70000 70001").unwrap();
+        let merged = As4Path::merge_as4_path(&as_path, &as4_path);
+        assert_eq!(flat_asns(&merged), vec![65001]);
+    }
+
+    /// Hop counting follows RFC 4271 §9.1.2.2: a whole AS_SET is one
+    /// hop, so a leading AS_SET is carried over as a unit.
+    #[test]
+    fn merge_counts_as_set_as_one_hop() {
+        // AS_PATH: {65001 65002} AS_TRANS → 2 hops. AS4_PATH: 70000 → 1.
+        let as_path = As4Path::from_str(&format!("{{65001 65002}} {AS_TRANS}")).unwrap();
+        let as4_path = As4Path::from_str("70000").unwrap();
+        let merged = As4Path::merge_as4_path(&as_path, &as4_path);
+        assert_eq!(merged.segs.len(), 2);
+        assert_eq!(merged.segs[0].typ, AS_SET);
+        assert_eq!(merged.segs[0].asn, vec![65001, 65002]);
+        assert_eq!(merged.segs[1].asn, vec![70000]);
+        assert_eq!(merged.length, 2);
+    }
+
+    /// A leading AS_SEQUENCE longer than the needed hops is split
+    /// mid-segment: only the leading ASNs carry over.
+    #[test]
+    fn merge_splits_leading_sequence() {
+        let as_path = As4Path::from_str(&format!("65003 65002 {AS_TRANS} {AS_TRANS}")).unwrap();
+        let as4_path = As4Path::from_str("70000 70001").unwrap();
+        let merged = As4Path::merge_as4_path(&as_path, &as4_path);
+        assert_eq!(flat_asns(&merged), vec![65003, 65002, 70000, 70001]);
+        assert_eq!(merged.length, 4);
     }
 
     #[test]

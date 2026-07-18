@@ -19,7 +19,6 @@ use super::peer_map::PeerMap;
 
 use caps::CapAs4;
 use caps::CapRefresh;
-use caps::CapabilityPacket;
 
 use crate::bfd::session::{EchoMode, SessionKey, SessionParams};
 use crate::bgp::cap::cap_register_recv;
@@ -1235,6 +1234,17 @@ impl Peer {
         }
     }
 
+    /// An egress [`UpdatePacket`] sized and encoded for this session:
+    /// the negotiated max message length and the RFC 6793 ASN width.
+    /// Every per-peer UPDATE build must come through here (or copy the
+    /// `as4` stamp) — a site that forgets sends 4-octet AS_PATHs to an
+    /// OLD (non-AS4) peer, which misparses them.
+    pub fn update_packet(&self) -> UpdatePacket {
+        let mut update = UpdatePacket::with_max_packet_size(self.max_packet_size());
+        update.as4 = self.as4;
+        update
+    }
+
     pub fn start(&mut self) {
         if self.remote_as != 0 && !self.address.is_unspecified() && !self.active {
             timer::update_timers(self);
@@ -1481,6 +1491,7 @@ impl Peer {
             packet_tx: self.packet_tx.clone(),
             egress_depth: self.egress_depth.clone(),
             extended_message: self.opt.extended_message,
+            as4: self.as4,
             attach_unknown_attr: self.config.attach_unknown_attr.clone(),
             as_sets_withdraw,
         }
@@ -1972,15 +1983,6 @@ pub fn fsm_stop(_peer: &mut Peer) -> State {
     State::Idle
 }
 
-pub fn capability_as4(caps: &[CapabilityPacket]) -> Option<u32> {
-    for cap in caps.iter() {
-        if let CapabilityPacket::As4(m) = cap {
-            return Some(m.asn);
-        }
-    }
-    None
-}
-
 pub fn open_asn(packet: &OpenPacket) -> u32 {
     if let Some(as4) = &packet.bgp_cap.as4 {
         as4.asn
@@ -2061,11 +2063,28 @@ fn promote_collision_to_primary(peer: &mut Peer, collision: CollisionConn) {
 pub fn fsm_bgp_open(peer: &mut Peer, conn: ConnTag, packet: OpenPacket) -> State {
     peer.counter[BgpType::Open as usize].rcvd += 1;
 
-    // Peer ASN.
+    // Peer ASN — from the 4-octet AS capability when present, else the
+    // 2-octet My-AS field (RFC 6793 §4.1).
     let asn = open_asn(&packet);
 
+    // RFC 6793 §4.2 internal consistency of the peer's OPEN: the
+    // capability must not name the AS_TRANS placeholder as a real AS,
+    // and the My-AS field must be either AS_TRANS or the capability
+    // value itself. (A 4-octet ASN has no 2-octet form, so AS_TRANS in
+    // My-AS with the real ASN in the capability is the one legal way to
+    // announce it — the check the old code failed: it re-compared the
+    // raw 2-octet field against `remote_as` and sent every 4-byte-ASN
+    // peer back to Idle.)
+    let open_consistent = match &packet.bgp_cap.as4 {
+        Some(cap) => {
+            cap.asn != u32::from(AS_TRANS)
+                && (packet.asn == AS_TRANS || u32::from(packet.asn) == cap.asn)
+        }
+        None => true,
+    };
+
     // Compare with configured asn.
-    if peer.remote_as != asn {
+    if peer.remote_as != asn || !open_consistent {
         // The OPEN that fails this check came on `conn`. For Primary
         // this matches today's behaviour. For Collision we just tear
         // the collision conn down and stay in our current state — the
@@ -2092,10 +2111,6 @@ pub fn fsm_bgp_open(peer: &mut Peer, conn: ConnTag, packet: OpenPacket) -> State
     if peer.state != State::OpenSent && peer.state != State::OpenConfirm {
         // OPEN in an unexpected state — discard.
         return peer.state;
-    }
-    if packet.asn as u32 != peer.remote_as {
-        // Send notification.
-        return State::Idle;
     }
     if packet.hold_time > 0 && packet.hold_time < 3 {
         return State::Idle;
@@ -2167,6 +2182,14 @@ pub fn fsm_bgp_open(peer: &mut Peer, conn: ConnTag, packet: OpenPacket) -> State
 
     // Register add path caps.
     cap_addpath_recv(&packet.bgp_cap, &mut peer.opt, &peer.config.addpath);
+
+    // RFC 6793: the session runs 4-octet AS encoding iff both sides
+    // advertised the capability. `peer.as4` feeds the update-group
+    // signature and the egress encode; `peer.opt.as4` mirrors it for
+    // the parse option. (Our half was recorded when the OPEN we sent
+    // was built.)
+    peer.opt.as4.recv = packet.bgp_cap.as4.is_some();
+    peer.as4 = peer.opt.is_as4();
 
     // Extended message negotiation (RFC 8654).
     if peer.cap_send.extended.is_some() && packet.bgp_cap.extended.is_some() {
@@ -2479,7 +2502,7 @@ pub async fn peer_packet_parse(
     config: &mut PeerConfig,
     opt: &mut ParseOption,
 ) -> Result<(), String> {
-    match BgpPacket::parse_packet(rx, true, Some(opt.clone())) {
+    match BgpPacket::parse_packet(rx, opt.is_as4(), Some(opt.clone())) {
         Ok((_, p)) => {
             match p {
                 BgpPacket::Open(p) => {
@@ -2487,6 +2510,12 @@ pub async fn peer_packet_parse(
                     if config.extended_message && p.bgp_cap.extended.is_some() {
                         opt.extended_message = true;
                     }
+                    // RFC 6793: every UPDATE after this OPEN decodes
+                    // AS_PATH / AGGREGATOR at the negotiated width —
+                    // 4-octet iff both sides advertised the capability.
+                    // (Our own half was stamped on `opt` when this
+                    // reader was spawned, in `peer_start_reader`.)
+                    opt.as4.recv = p.bgp_cap.as4.is_some();
                     let _ = tx
                         .send(Message::Event(ident, Event::BGPOpen(conn, *p)))
                         .await;
@@ -2592,7 +2621,13 @@ pub fn peer_start_reader(peer: &Peer, conn: ConnId, read_half: OwnedReadHalf) ->
     let ident = peer.ident;
     let tx = peer.tx.clone();
     let config = peer.config.clone();
-    let opt = peer.opt.clone();
+    let mut opt = peer.opt.clone();
+    // Our half of the RFC 6793 negotiation is fixed before the OPEN
+    // exchange: it is what `build_open_packet` advertises (the knob, or
+    // forced by a local AS with no 2-octet form). Stamp it here rather
+    // than inherit whatever the previous session negotiated.
+    opt.as4.send = peer.config.four_octet || peer.open_local_as() > u16::MAX as u32;
+    opt.as4.recv = false;
     Task::spawn(async move {
         peer_read(ident, conn, tx.clone(), read_half, config, opt).await;
     })
@@ -2852,7 +2887,11 @@ fn build_open_packet(peer: &mut Peer) -> BytesMut {
         let cap = CapMultiProtocol::new(&afi_safi.afi, &afi_safi.safi);
         bgp_cap.mp.insert(*afi_safi, cap);
     }
-    if peer.config.four_octet {
+    // A local AS above 65535 is only expressible through the 4-octet AS
+    // capability (the My-AS field carries AS_TRANS), so it overrides a
+    // disabled `capability four-octet` knob — without the capability the
+    // peer could never learn our real AS (RFC 6793 §4.1).
+    if peer.config.four_octet || peer.open_local_as() > u16::MAX as u32 {
         let cap = CapAs4::new(peer.open_local_as());
         bgp_cap.as4 = Some(cap);
     }
@@ -2945,6 +2984,7 @@ fn build_open_packet(peer: &mut Peer) -> BytesMut {
     }
 
     cap_register_send(&bgp_cap, &mut peer.cap_map);
+    peer.opt.as4.send = bgp_cap.as4.is_some();
     peer.cap_send = bgp_cap.clone();
 
     // Remember sent hold time.
@@ -2952,13 +2992,13 @@ fn build_open_packet(peer: &mut Peer) -> BytesMut {
     peer.param_tx.hold_time = hold_time;
     peer.param_tx.keepalive = hold_time / 3;
 
-    let open = OpenPacket::new(
-        header,
-        peer.open_local_as() as u16,
-        hold_time,
-        &router_id,
-        bgp_cap,
-    );
+    // RFC 6793 §4.1: a local AS above 65535 has no 2-octet encoding —
+    // the My Autonomous System field carries AS_TRANS and the real ASN
+    // travels in the 4-octet AS capability set above. Truncating with
+    // `as u16` sent a garbage AS the peer rejected with Bad Peer AS.
+    let local_as = peer.open_local_as();
+    let my_as = u16::try_from(local_as).unwrap_or(AS_TRANS);
+    let open = OpenPacket::new(header, my_as, hold_time, &router_id, bgp_cap);
     let bytes: BytesMut = open.into();
     bytes
 }
@@ -4102,5 +4142,131 @@ mod fsm_removed_slot_tests {
         );
         fsm(&mut top, &mut peers, ident, Event::Stop, None);
         assert!(peers.get_by_idx(ident).is_none());
+    }
+}
+
+#[cfg(test)]
+mod as4_negotiation_tests {
+    use super::*;
+
+    /// Peer in OpenSent with a parked event channel, ready to receive
+    /// an OPEN. `remote_as` is what the operator configured.
+    fn opensent_peer(remote_as: u32) -> Peer {
+        let (tx, rx) = mpsc::channel::<Message>(64);
+        Box::leak(Box::new(rx));
+        let mut peer = Peer::new(
+            1,
+            65001,
+            Ipv4Addr::new(10, 0, 0, 1),
+            remote_as,
+            "10.0.0.2".parse().unwrap(),
+            None,
+            tx,
+            crate::context::ProtoContext::default_table_no_rib(),
+        );
+        peer.state = State::OpenSent;
+        peer
+    }
+
+    fn open_packet(my_as: u16, as4_cap: Option<u32>) -> OpenPacket {
+        let header = BgpHeader::new(BgpType::Open, BGP_HEADER_LEN + 10);
+        let mut bgp_cap = BgpCap::default();
+        if let Some(asn) = as4_cap {
+            bgp_cap.as4 = Some(CapAs4::new(asn));
+        }
+        OpenPacket::new(header, my_as, 180, &Ipv4Addr::new(2, 2, 2, 2), bgp_cap)
+    }
+
+    /// Review finding #2 regression: a 4-byte-ASN neighbor announces
+    /// itself with AS_TRANS in My-AS and the real ASN in the 4-octet AS
+    /// capability (RFC 6793 §4.1). The old code re-compared the raw
+    /// 2-octet field against `remote_as` and sent the session to Idle
+    /// on every attempt — such a peer could never establish.
+    #[tokio::test]
+    async fn four_byte_asn_peer_establishes_via_as_trans() {
+        let mut peer = opensent_peer(4_200_000_000);
+        // Build (and discard) our own OPEN so cap_send / opt.as4.send
+        // record what we advertised, as they would on a live session.
+        let _ = build_open_packet(&mut peer);
+
+        let next = fsm_bgp_open(
+            &mut peer,
+            ConnTag::Primary,
+            open_packet(AS_TRANS, Some(4_200_000_000)),
+        );
+        assert_eq!(next, State::OpenConfirm);
+        assert!(peer.as4, "both sides advertised the capability");
+        assert!(peer.opt.is_as4());
+    }
+
+    /// RFC 6793 §4.2 consistency: a My-AS field that is neither
+    /// AS_TRANS nor the capability value is a Bad Peer AS.
+    #[tokio::test]
+    async fn my_as_disagreeing_with_as4_cap_is_rejected() {
+        let mut peer = opensent_peer(4_200_000_000);
+        let _ = build_open_packet(&mut peer);
+
+        let next = fsm_bgp_open(
+            &mut peer,
+            ConnTag::Primary,
+            open_packet(65009, Some(4_200_000_000)),
+        );
+        assert_eq!(next, State::Idle);
+    }
+
+    /// AS_TRANS itself is not a real AS: a capability naming it leaves
+    /// the peer's AS unknowable and must be rejected.
+    #[tokio::test]
+    async fn as_trans_in_capability_is_rejected() {
+        let mut peer = opensent_peer(u32::from(AS_TRANS));
+        let _ = build_open_packet(&mut peer);
+
+        let next = fsm_bgp_open(
+            &mut peer,
+            ConnTag::Primary,
+            open_packet(AS_TRANS, Some(u32::from(AS_TRANS))),
+        );
+        assert_eq!(next, State::Idle);
+    }
+
+    /// A 2-byte peer that advertised no 4-octet AS capability leaves
+    /// the session OLD: it still establishes, with `as4` off, so every
+    /// UPDATE both ways uses the 2-octet encoding.
+    #[tokio::test]
+    async fn peer_without_as4_cap_negotiates_old_session() {
+        let mut peer = opensent_peer(65002);
+        let _ = build_open_packet(&mut peer);
+
+        let next = fsm_bgp_open(&mut peer, ConnTag::Primary, open_packet(65002, None));
+        assert_eq!(next, State::OpenConfirm);
+        assert!(!peer.as4, "one-sided capability is not a negotiation");
+        assert!(peer.opt.as4.send && !peer.opt.as4.recv);
+    }
+
+    /// The OPEN we send for a >65535 local AS: AS_TRANS in My-AS (the
+    /// old code truncated with `as u16`) and the real ASN in the
+    /// capability — forced even when `capability four-octet` is off.
+    #[tokio::test]
+    async fn open_for_four_byte_local_as_carries_as_trans() {
+        let (tx, rx) = mpsc::channel::<Message>(64);
+        Box::leak(Box::new(rx));
+        let mut peer = Peer::new(
+            1,
+            4_200_000_001,
+            Ipv4Addr::new(10, 0, 0, 1),
+            65002,
+            "10.0.0.2".parse().unwrap(),
+            None,
+            tx,
+            crate::context::ProtoContext::default_table_no_rib(),
+        );
+        peer.config.four_octet = false;
+
+        let bytes = build_open_packet(&mut peer);
+        let (_, open) = OpenPacket::parse_packet(&bytes).expect("our OPEN must parse");
+        assert_eq!(open.asn, AS_TRANS, "My-AS carries the placeholder");
+        let cap = open.bgp_cap.as4.expect("capability forced by 4-byte AS");
+        assert_eq!(cap.asn, 4_200_000_001);
+        assert!(peer.opt.as4.send);
     }
 }

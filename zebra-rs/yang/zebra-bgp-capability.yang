@@ -1,0 +1,101 @@
+module zebra-bgp-capability {
+  yang-version "1";
+
+  namespace "urn:ietf:params:xml:ns:yang:zebra-bgp-capability";
+  prefix "zbcap";
+
+  import ietf-bgp {
+    prefix bgp;
+  }
+
+  import config {
+    prefix config;
+  }
+
+  import configure {
+    prefix configure;
+  }
+
+  import extension {
+    prefix ext;
+  }
+
+  organization
+    "zebra-rs";
+
+  contact
+    "https://github.com/zebra-rs";
+
+  description
+    "Per-neighbor capability-advertisement knobs.
+
+     `capability four-octet <bool>` controls whether the OPEN sent to
+     this neighbor advertises the 4-octet AS capability (RFC 6793).
+     It defaults to true; setting false makes zebra-rs present itself
+     as an OLD (2-octet) speaker on this session, so the negotiated
+     encoding falls back to 2-octet AS_PATH / AGGREGATOR with AS_TRANS
+     substitution and the AS4_PATH / AS4_AGGREGATOR transitional
+     attributes:
+
+       router bgp {
+         neighbor 10.0.0.5 {
+           remote-as 65501;
+           capability {
+             four-octet false;   // present as an OLD (2-octet) speaker
+           }
+         }
+       }
+
+     Mirrors JunOS `disable-4byte-as`; mostly useful for interop
+     testing against RFC 6793 transition code paths. Ignored (the
+     capability is always advertised) when the local AS itself is above
+     65535 — without the capability the real AS would be unrecoverable.
+     Takes effect at the next session establishment.";
+
+  revision 2026-07-17 {
+    description "Initial revision.";
+    reference "RFC 6793: BGP Support for Four-Octet AS Number Space.";
+  }
+
+  grouping bgp-neighbor-capability-extension {
+    description
+      "Capability-advertisement knobs on a BGP neighbor.";
+
+    container capability {
+      ext:help "Capability advertisement knobs";
+      description
+        "Which optional capabilities the OPEN sent to this neighbor
+         advertises.";
+
+      leaf four-octet {
+        ext:help "Advertise the 4-octet AS capability (RFC 6793)";
+        type boolean;
+        description
+          "Advertise the 4-octet AS capability. Default true; false
+           presents zebra-rs as an OLD (2-octet) speaker on this
+           session. Forced on when the local AS is above 65535.";
+      }
+    }
+  }
+
+  /* =========================================================
+   * Augments into the zebra-rs configure tree
+   * ========================================================= */
+
+  augment "/configure:set/config:router"
+        + "/bgp:bgp/bgp:neighbor" {
+    description
+      "Attach the capability knobs to BGP neighbors in the
+       candidate-set subtree.";
+    uses bgp-neighbor-capability-extension;
+  }
+
+  augment "/configure:delete/config:router"
+        + "/bgp:bgp/bgp:neighbor" {
+    description
+      "Same attachment for the delete subtree so
+       `delete router bgp neighbor X capability four-octet` is
+       path-valid.";
+    uses bgp-neighbor-capability-extension;
+  }
+}
