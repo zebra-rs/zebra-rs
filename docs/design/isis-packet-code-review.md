@@ -357,7 +357,7 @@ instead of desyncing. Emit is unchanged; the daemon only builds `l_flag:
 false` 1-byte-SABM ASLAs, so no local wire output changes. Unit tests pin the
 L=1/empty-mask round-trip (nested sub-TLV intact) and the >8 length degrade.
 
-### 15. 🟡 `IsisPacket::emit` drops Unknown PDU payload; `IsisTlvUnknown` emit doubles the header — CONFIRMED
+### 15. 🟡 `IsisPacket::emit` drops Unknown PDU payload; `IsisTlvUnknown` emit doubles the header — CONFIRMED — ✅ FIXED
 `crates/isis-packet/src/parser.rs:98` and `:1271`
 
 `IsisPacket::emit` maps `Unknown(_) => {}`, dropping the stored
@@ -374,9 +374,12 @@ tooling, future forwarding of an unrecognized PDU type) silently produces an
 empty-bodied PDU instead of the original bytes; and a future generic path using
 `tlv_emit()` on `IsisTlvUnknown` emits a malformed doubled header.
 
-**Fix:** emit `IsisUnknown.payload` in `IsisPacket::emit`; make
-`IsisTlvUnknown::emit` write value-only so it obeys the `TlvEmitter` contract like
-`IsisSubTlvUnknown`.
+**Fixed:** `IsisPacket::emit` re-emits `IsisUnknown.payload` verbatim;
+`IsisTlvUnknown::emit` is value-only per the `TlvEmitter` contract (matching
+`IsisSubTlvUnknown`), its `len()` derives from `values` instead of the stored
+parse-metadata byte, and the `IsisTlv` dispatcher uses `tlv_emit` like every
+other variant. Unit tests pin the unknown-PDU byte-exact round-trip and the
+single-header TLV emit via both `tlv_emit` and the dispatcher.
 
 ---
 

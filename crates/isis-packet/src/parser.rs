@@ -5,7 +5,7 @@ use byteorder::{BigEndian, ByteOrder};
 use bytes::{BufMut, BytesMut};
 use nom::bytes::complete::take;
 use nom::number::complete::{be_u8, be_u24, be_u32};
-use nom::{AsBytes, Err, IResult};
+use nom::{Err, IResult};
 use nom_derive::*;
 use serde::{Deserialize, Serialize, Serializer};
 use strum_macros::Display;
@@ -95,7 +95,11 @@ impl IsisPacket {
             L2Csnp(v) => v.emit(buf),
             L1Psnp(v) => v.emit(buf),
             L2Psnp(v) => v.emit(buf),
-            Unknown(_) => {}
+            // The payload is preserved on parse — re-emit it verbatim
+            // so a parsed-then-emitted unknown PDU keeps its body
+            // (padding probes, mirror/replay tooling) instead of
+            // silently becoming an empty-bodied header.
+            Unknown(v) => v.emit(buf),
         }
         if self.pdu_type.is_lsp() && buf.len() >= 26 {
             let checksum = checksum_calc(&buf[12..]);
@@ -619,7 +623,7 @@ impl IsisTlv {
             P2p3Way(v) => v.tlv_emit(buf),
             RouterCap(v) => v.tlv_emit(buf),
             Restart(v) => v.tlv_emit(buf),
-            Unknown(v) => v.emit(buf),
+            Unknown(v) => v.tlv_emit(buf),
         }
     }
 }
@@ -1331,13 +1335,18 @@ impl TlvEmitter for IsisTlvUnknown {
     }
 
     fn len(&self) -> u8 {
-        self.len
+        // Derive from the bytes actually emitted — the stored `len` is
+        // parse metadata and could disagree on a hand-built value.
+        self.values.len().min(255) as u8
     }
 
+    // `TlvEmitter::emit` is value-only by contract — `tlv_emit` writes
+    // the type/length header. This used to write the header itself
+    // (unlike every other TLV and unlike `IsisSubTlvUnknown`), so a
+    // caller using `tlv_emit()` produced a doubled [typ, len, ...]
+    // header.
     fn emit(&self, buf: &mut BytesMut) {
-        buf.put_u8(self.typ());
-        buf.put_u8(self.len);
-        buf.put(self.values.as_bytes());
+        buf.put(&self.values[..]);
     }
 }
 
@@ -1355,6 +1364,12 @@ pub struct IsisUnknown {
     #[nom(Ignore)]
     pub typ: IsisType,
     pub payload: Vec<u8>,
+}
+
+impl IsisUnknown {
+    pub fn emit(&self, buf: &mut BytesMut) {
+        buf.put(&self.payload[..]);
+    }
 }
 
 #[derive(NomBE)]
@@ -1458,6 +1473,45 @@ pub fn parse(input: &[u8]) -> IsisIResult<&[u8], IsisPacket> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Finding #15: an unknown PDU's payload is preserved on parse and
+    /// must be re-emitted verbatim — `IsisPacket::emit` used to map
+    /// `Unknown(_) => {}`, producing an empty-bodied 8-byte header.
+    #[test]
+    fn unknown_pdu_payload_round_trips() {
+        let mut raw = vec![0x83u8, 27, 1, 0, 0x05, 1, 0, 0];
+        raw.extend([0xDE, 0xAD, 0xBE, 0xEF]);
+        let (rest, pkt) = IsisPacket::parse_be(&raw).expect("parse");
+        assert!(rest.is_empty());
+        let IsisPdu::Unknown(u) = &pkt.pdu else {
+            panic!("expected Unknown PDU, got {:?}", pkt.pdu);
+        };
+        assert_eq!(u.payload, [0xDE, 0xAD, 0xBE, 0xEF]);
+        let mut buf = BytesMut::new();
+        pkt.emit(&mut buf);
+        assert_eq!(&buf[..], &raw[..]);
+    }
+
+    /// Finding #15: `TlvEmitter::emit` is value-only by contract —
+    /// `IsisTlvUnknown` used to write its own type/length, so
+    /// `tlv_emit()` produced a doubled [typ, len, typ, len, ...]
+    /// header. Both `tlv_emit` and the `IsisTlv` dispatcher must now
+    /// produce the single-header form.
+    #[test]
+    fn unknown_tlv_emits_single_header() {
+        let tlv = IsisTlvUnknown {
+            typ: 200.into(),
+            len: 3,
+            values: vec![1, 2, 3],
+        };
+        let mut buf = BytesMut::new();
+        tlv.tlv_emit(&mut buf);
+        assert_eq!(&buf[..], &[200, 3, 1, 2, 3]);
+
+        let mut via_dispatch = BytesMut::new();
+        IsisTlv::Unknown(tlv).emit(&mut via_dispatch);
+        assert_eq!(&via_dispatch[..], &buf[..]);
+    }
 
     /// Finding #12: TLV 240's wire format is positional (state, then
     /// circuit id, then neighbor id, then neighbor circuit id), so emit
