@@ -5,8 +5,11 @@ use std::fmt::Write;
 
 use serde::Serialize;
 
+use std::time::Instant;
+
 use crate::config::{Args, Builder};
 
+use super::igmp::{FilterMode, QuerierState};
 use super::inst::{Pim, ShowCallback};
 
 impl Pim {
@@ -18,6 +21,10 @@ impl Pim {
             .set(show_pim_interface)
             .path("/show/pim/neighbor")
             .set(show_pim_neighbor)
+            .path("/show/igmp/interface")
+            .set(show_igmp_interface)
+            .path("/show/igmp/groups")
+            .set(show_igmp_groups)
             .map();
     }
 }
@@ -134,6 +141,145 @@ struct NeighborBrief {
     generation_id: Option<u32>,
     uptime: String,
     holdtime: u64,
+}
+
+#[derive(Serialize)]
+struct IgmpInterfaceBrief {
+    interface: String,
+    state: String,
+    querier: String,
+    address: String,
+    version: u8,
+    query_interval: u16,
+    groups: usize,
+}
+
+fn show_igmp_interface(pim: &Pim, _args: Args, json: bool) -> Result<String, std::fmt::Error> {
+    let mut rows: Vec<IgmpInterfaceBrief> = vec![];
+
+    for (name, config) in pim.if_config.iter() {
+        if !config.igmp.enabled() {
+            continue;
+        }
+        let link = pim.links.values().find(|l| l.name == *name);
+        let address = link
+            .and_then(|l| l.primary_addr())
+            .map_or_else(|| "-".to_string(), |a| a.to_string());
+        let (state, querier, groups) = match link.and_then(|l| l.igmp.as_ref()) {
+            Some(igmp) => match igmp.querier {
+                QuerierState::Querier => {
+                    ("Querier".to_string(), address.clone(), igmp.groups.len())
+                }
+                QuerierState::NonQuerier { querier, .. } => (
+                    "Non-Querier".to_string(),
+                    querier.to_string(),
+                    igmp.groups.len(),
+                ),
+            },
+            None => ("Down".to_string(), "-".to_string(), 0),
+        };
+        rows.push(IgmpInterfaceBrief {
+            interface: name.clone(),
+            state,
+            querier,
+            address,
+            version: config.igmp.version(),
+            query_interval: config.igmp.query_interval(),
+            groups,
+        });
+    }
+
+    if json {
+        return Ok(serde_json::to_string(&rows).unwrap());
+    }
+
+    let mut buf = String::new();
+    buf.push_str(
+        "Interface    State        Querier          Address          Ver  Query  Groups\n",
+    );
+    for row in &rows {
+        writeln!(
+            buf,
+            "{:<13}{:<13}{:<17}{:<17}{:<5}{:<7}{}",
+            row.interface,
+            row.state,
+            row.querier,
+            row.address,
+            row.version,
+            row.query_interval,
+            row.groups,
+        )?;
+    }
+    Ok(buf)
+}
+
+#[derive(Serialize)]
+struct IgmpGroupBrief {
+    interface: String,
+    group: String,
+    mode: String,
+    sources: usize,
+    expires: String,
+    last_reporter: String,
+    uptime: String,
+}
+
+fn show_igmp_groups(pim: &Pim, _args: Args, json: bool) -> Result<String, std::fmt::Error> {
+    let now = Instant::now();
+    let mut rows: Vec<IgmpGroupBrief> = vec![];
+
+    for link in pim.links.values() {
+        let Some(igmp) = link.igmp.as_ref() else {
+            continue;
+        };
+        for (group_addr, group) in igmp.groups.iter() {
+            let expires = match group.filter_mode {
+                FilterMode::Exclude => group.expires.map_or_else(
+                    || "never".to_string(),
+                    |t| t.saturating_duration_since(now).as_secs().to_string(),
+                ),
+                FilterMode::Include => group.sources.values().max().map_or_else(
+                    || "never".to_string(),
+                    |t| t.saturating_duration_since(now).as_secs().to_string(),
+                ),
+            };
+            rows.push(IgmpGroupBrief {
+                interface: link.name.clone(),
+                group: group_addr.to_string(),
+                mode: match group.filter_mode {
+                    FilterMode::Exclude => "EXCLUDE".to_string(),
+                    FilterMode::Include => "INCLUDE".to_string(),
+                },
+                sources: group.sources.len(),
+                expires,
+                last_reporter: group
+                    .last_reporter
+                    .map_or_else(|| "-".to_string(), |a| a.to_string()),
+                uptime: uptime_string(group.uptime.elapsed().as_secs()),
+            });
+        }
+    }
+
+    if json {
+        return Ok(serde_json::to_string(&rows).unwrap());
+    }
+
+    let mut buf = String::new();
+    buf.push_str("Interface    Group            Mode     Sources  Expires  Uptime    Reporter\n");
+    for row in &rows {
+        writeln!(
+            buf,
+            "{:<13}{:<17}{:<9}{:<9}{:<9}{:<10}{}",
+            row.interface,
+            row.group,
+            row.mode,
+            row.sources,
+            row.expires,
+            row.uptime,
+            row.last_reporter,
+        )?;
+    }
+    Ok(buf)
 }
 
 fn show_pim_neighbor(pim: &Pim, _args: Args, json: bool) -> Result<String, std::fmt::Error> {

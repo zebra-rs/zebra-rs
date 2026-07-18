@@ -11,11 +11,13 @@
 use std::collections::{BTreeMap, HashMap};
 use std::net::Ipv4Addr;
 use std::sync::Arc;
+use std::time::Instant;
 
-use pim_packet::{HelloTlv, PimHello, PimPacket, PimPayload};
+use pim_packet::{HelloTlv, IgmpPacket, PimHello, PimPacket, PimPayload};
 use socket2::Socket;
 use tokio::io::unix::AsyncFd;
 use tokio::sync::mpsc::{self, UnboundedReceiver, UnboundedSender};
+use tokio::time::sleep_until;
 
 use crate::config::{
     Args, ConfigChannel, ConfigRequest, DisplayRequest, ShowChannel, path_from_command,
@@ -25,7 +27,7 @@ use crate::rib::api::RibRx;
 
 use super::config::Callback;
 use super::link::{LinkConfig, PIM_OVERRIDE_INTERVAL_MSEC, PIM_PROPAGATION_DELAY_MSEC, PimLink};
-use super::network::{read_packet, write_packet};
+use super::network::{igmp_read_packet, igmp_write_packet, read_packet, write_packet};
 use super::socket::ALL_PIM_ROUTERS;
 
 /// `show pim ...` dispatch handler, mirroring
@@ -42,6 +44,11 @@ pub enum Message {
         src: Ipv4Addr,
         ifindex: u32,
     },
+    Igmp {
+        packet: IgmpPacket,
+        src: Ipv4Addr,
+        ifindex: u32,
+    },
     HelloTimer(u32),
     NeighborExpiry(u32, Ipv4Addr),
 }
@@ -51,6 +58,14 @@ pub enum Message {
 #[derive(Debug)]
 pub struct PimSend {
     pub packet: PimPacket,
+    pub ifindex: u32,
+    pub dst: Ipv4Addr,
+}
+
+/// Outbound IGMP message (queries) for the IGMP write task.
+#[derive(Debug)]
+pub struct IgmpSend {
+    pub packet: IgmpPacket,
     pub ifindex: u32,
     pub dst: Ipv4Addr,
 }
@@ -65,25 +80,36 @@ pub struct Pim {
     /// source of truth the reconciler compares runtime state against.
     pub if_config: BTreeMap<String, LinkConfig>,
     pub(crate) send_tx: UnboundedSender<PimSend>,
+    pub(crate) igmp_send_tx: UnboundedSender<IgmpSend>,
     rib_rx: UnboundedReceiver<RibRx>,
     pub cm: ConfigChannel,
     pub show: ShowChannel,
     pub show_cb: HashMap<String, ShowCallback>,
     pub callbacks: HashMap<String, Callback>,
     pub(crate) sock: Arc<AsyncFd<Socket>>,
+    pub(crate) igmp_sock: Arc<AsyncFd<Socket>>,
     /// RIB client context — unused until the RPF/NHT phase, kept so
     /// the spawn contract already matches the other protocols.
     #[allow(dead_code)]
     ctx: ProtoContext,
     _read_task: Task<()>,
     _write_task: Task<()>,
+    _igmp_read_task: Task<()>,
+    _igmp_write_task: Task<()>,
 }
 
 impl Pim {
-    pub fn new(ctx: ProtoContext, sock: AsyncFd<Socket>, rib_rx: UnboundedReceiver<RibRx>) -> Self {
+    pub fn new(
+        ctx: ProtoContext,
+        sock: AsyncFd<Socket>,
+        igmp_sock: AsyncFd<Socket>,
+        rib_rx: UnboundedReceiver<RibRx>,
+    ) -> Self {
         let sock = Arc::new(sock);
+        let igmp_sock = Arc::new(igmp_sock);
         let (tx, rx) = mpsc::unbounded_channel();
         let (send_tx, send_rx) = mpsc::unbounded_channel();
+        let (igmp_send_tx, igmp_send_rx) = mpsc::unbounded_channel();
 
         let read_sock = sock.clone();
         let read_tx = tx.clone();
@@ -94,6 +120,15 @@ impl Pim {
         let write_task = Task::spawn(async move {
             write_packet(write_sock, send_rx).await;
         });
+        let igmp_read_sock = igmp_sock.clone();
+        let igmp_read_tx = tx.clone();
+        let igmp_read_task = Task::spawn(async move {
+            igmp_read_packet(igmp_read_sock, igmp_read_tx).await;
+        });
+        let igmp_write_sock = igmp_sock.clone();
+        let igmp_write_task = Task::spawn(async move {
+            igmp_write_packet(igmp_write_sock, igmp_send_rx).await;
+        });
 
         let mut pim = Self {
             tx,
@@ -101,15 +136,19 @@ impl Pim {
             links: BTreeMap::new(),
             if_config: BTreeMap::new(),
             send_tx,
+            igmp_send_tx,
             rib_rx,
             cm: ConfigChannel::new(),
             show: ShowChannel::new(),
             show_cb: HashMap::new(),
             callbacks: HashMap::new(),
             sock,
+            igmp_sock,
             ctx,
             _read_task: read_task,
             _write_task: write_task,
+            _igmp_read_task: igmp_read_task,
+            _igmp_write_task: igmp_write_task,
         };
         pim.callback_build();
         pim.show_build();
@@ -127,6 +166,7 @@ impl Pim {
             self.process_rib_msg(msg);
         }
         loop {
+            let wakeup = self.igmp_next_wakeup();
             tokio::select! {
                 Some(msg) = self.rx.recv() => {
                     self.process_msg(msg);
@@ -140,6 +180,9 @@ impl Pim {
                 Some(msg) = self.show.rx.recv() => {
                     self.process_show_msg(msg).await;
                 }
+                _ = sleep_until_opt(wakeup) => {
+                    self.igmp_tick(Instant::now());
+                }
             }
         }
     }
@@ -151,6 +194,11 @@ impl Pim {
                 src,
                 ifindex,
             } => self.packet_recv(packet, src, ifindex),
+            Message::Igmp {
+                packet,
+                src,
+                ifindex,
+            } => self.igmp_recv(ifindex, src, packet),
             Message::HelloTimer(ifindex) => self.hello_send(ifindex),
             Message::NeighborExpiry(ifindex, addr) => self.neighbor_expiry(ifindex, addr),
         }
@@ -264,4 +312,13 @@ pub fn serve(mut pim: Pim) -> Task<()> {
     Task::spawn(async move {
         pim.event_loop().await;
     })
+}
+
+/// Sleep until `when`, or forever when there is no deadline — parks
+/// the select arm without waking (same helper as `crate::nd::inst`).
+async fn sleep_until_opt(when: Option<Instant>) {
+    match when {
+        Some(t) => sleep_until(t.into()).await,
+        None => std::future::pending::<()>().await,
+    }
 }

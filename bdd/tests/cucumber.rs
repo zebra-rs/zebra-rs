@@ -811,6 +811,26 @@ async fn run_exec_command(world: &mut World, command: String, namespace: String)
 /// the vtyctl `clear` surface), this reaches the real `ip`/`bridge`
 /// tools — used to build the EVPN snooping bridge and inject IGMP/MLD
 /// membership for the SMET tests.
+/// Spawn a long-running command inside a namespace WITHOUT waiting for
+/// it (whitespace argv, no shell) — background traffic sources and
+/// receivers for multicast tests (e.g. a socat IGMP joiner). The child
+/// is detached and namespace deletion does not kill it, so wrap it in
+/// `timeout N` sized to the scenario. A short pause lets the process
+/// start (and e.g. emit its IGMP join) before the next step asserts.
+#[when(expr = "I spawn {string} in namespace {string}")]
+async fn spawn_background_command(world: &mut World, command: String, namespace: String) {
+    let scoped = world.ns(&namespace);
+    let parts: Vec<&str> = command.split_whitespace().collect();
+    let (cmd, args) = parts
+        .split_first()
+        .unwrap_or_else(|| panic!("empty command in 'I spawn' for {}", scoped));
+    let _child = netns::spawn_in_netns(&scoped, cmd, args)
+        .await
+        .unwrap_or_else(|e| panic!("Failed to spawn '{}' in {}: {}", command, scoped, e));
+    tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
+    println!("✓ Spawned '{}' in namespace {}", command, scoped);
+}
+
 #[when(expr = "I execute {string} in namespace {string}")]
 async fn execute_command(world: &mut World, command: String, namespace: String) {
     let scoped = world.ns(&namespace);

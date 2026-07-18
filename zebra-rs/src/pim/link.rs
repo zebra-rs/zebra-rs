@@ -11,9 +11,10 @@ use crate::context::Timer;
 use crate::rib::Link;
 use crate::rib::link::LinkAddr;
 
+use super::igmp::{IgmpConfig, IgmpIf};
 use super::inst::{Message, Pim};
 use super::neighbor::Neighbor;
-use super::socket::{pim_join_if, pim_leave_if};
+use super::socket::{igmp_join_if, igmp_leave_if, pim_join_if, pim_leave_if};
 
 pub const PIM_HELLO_PERIOD: u16 = 30;
 pub const PIM_DEFAULT_DR_PRIORITY: u32 = 1;
@@ -29,6 +30,7 @@ pub struct LinkConfig {
     pub hello_interval: Option<u16>,
     pub holdtime: Option<u16>,
     pub passive: Option<bool>,
+    pub igmp: IgmpConfig,
 }
 
 impl LinkConfig {
@@ -66,6 +68,8 @@ pub struct PimLink {
     pub dr: Option<Ipv4Addr>,
     pub nbrs: BTreeMap<Ipv4Addr, Neighbor>,
     pub hello_timer: Option<Timer>,
+    /// IGMP runtime state — `Some` while IGMP runs on this interface.
+    pub igmp: Option<IgmpIf>,
 }
 
 impl PimLink {
@@ -88,6 +92,7 @@ impl PimLink {
             dr: None,
             nbrs: BTreeMap::new(),
             hello_timer: None,
+            igmp: None,
         }
     }
 
@@ -120,8 +125,11 @@ impl Pim {
         let Some(link) = self.links.get(&ifindex) else {
             return;
         };
-        let desired =
-            self.if_config.contains_key(&link.name) && link.link_up && !link.addrs.is_empty();
+        let usable = link.link_up && !link.addrs.is_empty();
+        let entry = self.if_config.get(&link.name);
+        let desired = entry.is_some() && usable;
+        let igmp_desired = entry.map(|c| c.igmp.enabled()).unwrap_or(false) && usable;
+        let igmp_running = link.igmp.is_some();
         match (desired, link.enabled) {
             (true, false) => self.link_enable(ifindex),
             (false, true) => self.link_disable(ifindex),
@@ -134,6 +142,31 @@ impl Pim {
             }
             (false, false) => {}
         }
+        match (igmp_desired, igmp_running) {
+            (true, false) => self.igmp_enable(ifindex),
+            (false, true) => self.igmp_disable(ifindex),
+            _ => {}
+        }
+    }
+
+    fn igmp_enable(&mut self, ifindex: u32) {
+        igmp_join_if(&self.igmp_sock, ifindex);
+        let Some(link) = self.links.get_mut(&ifindex) else {
+            return;
+        };
+        link.igmp = Some(IgmpIf::new(std::time::Instant::now()));
+        tracing::info!("igmp: interface {} enabled", link.name);
+        // The startup general query goes out on the next event-loop
+        // pass — IgmpIf::new schedules it at `now`.
+    }
+
+    fn igmp_disable(&mut self, ifindex: u32) {
+        igmp_leave_if(&self.igmp_sock, ifindex);
+        let Some(link) = self.links.get_mut(&ifindex) else {
+            return;
+        };
+        link.igmp = None;
+        tracing::info!("igmp: interface {} disabled", link.name);
     }
 
     /// Re-arm a running interface's hello timer after a hello-interval

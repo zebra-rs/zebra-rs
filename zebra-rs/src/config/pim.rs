@@ -1,6 +1,6 @@
 use crate::context::ProtoContext;
 use crate::pim::inst;
-use crate::pim::socket::pim_socket;
+use crate::pim::socket::{igmp_socket, pim_socket};
 use crate::rib;
 
 use super::ConfigManager;
@@ -14,20 +14,29 @@ pub fn spawn_pim(config: &ConfigManager) {
     if config.protocol_tasks.borrow().contains_key("pim") {
         return;
     }
-    // Open the raw protocol-103 socket before `subscribe_to_rib` so a
-    // socket failure (missing CAP_NET_RAW) doesn't leave a dead RibRx
-    // receiver queued in RIB's inbox — see `spawn_nd`. The probe
-    // context is default-table, so no VRF binding is involved.
-    let sock = match pim_socket(&ProtoContext::default_table_no_rib()) {
+    // Open both raw sockets (protocol 103 + IGMP) before
+    // `subscribe_to_rib` so a socket failure (missing CAP_NET_RAW)
+    // doesn't leave a dead RibRx receiver queued in RIB's inbox — see
+    // `spawn_nd`. The probe context is default-table, so no VRF
+    // binding is involved.
+    let probe = ProtoContext::default_table_no_rib();
+    let sock = match pim_socket(&probe) {
         Ok(sock) => sock,
         Err(e) => {
             tracing::warn!("pim: not started ({e}); PIM disabled");
             return;
         }
     };
+    let igmp_sock = match igmp_socket(&probe) {
+        Ok(sock) => sock,
+        Err(e) => {
+            tracing::warn!("pim: not started (igmp socket: {e}); PIM disabled");
+            return;
+        }
+    };
     let (rib_client, rib_rx) = config.subscribe_to_rib("pim");
     let ctx = ProtoContext::default_table(rib_client);
-    let pim = inst::Pim::new(ctx, sock, rib_rx);
+    let pim = inst::Pim::new(ctx, sock, igmp_sock, rib_rx);
     config.subscribe("pim", pim.cm.tx.clone());
     config.subscribe_show("pim", pim.show.tx.clone());
     let task = inst::serve(pim);

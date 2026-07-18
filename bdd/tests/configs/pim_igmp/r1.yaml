@@ -1,0 +1,16 @@
+interface:
+- if-name: eth1
+  ipv4:
+    address: 10.1.13.1/24
+- if-name: eth3
+  ipv4:
+    address: 10.1.14.1/24
+router:
+  pim:
+    interface:
+    - if-name: eth1
+      igmp:
+        enabled: true
+    - if-name: eth3
+      igmp:
+        enabled: true
