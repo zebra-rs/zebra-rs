@@ -2586,23 +2586,6 @@ pub enum Ospfv3ExtTlv {
 }
 
 impl Ospfv3ExtTlv {
-    /// Wire length including the 4-byte TLV header, padded to the
-    /// next 4-byte boundary per RFC 8362 §3.
-    #[allow(dead_code)] // consumed by typed TLV decoders (PR-D2+).
-    fn wire_len(&self) -> usize {
-        let value_len = match self {
-            Ospfv3ExtTlv::RouterLink(t) => t.value_len(),
-            Ospfv3ExtTlv::IntraAreaPrefix(t) => t.value_len(),
-            Ospfv3ExtTlv::SrAlgorithm(t) => t.value_len(),
-            Ospfv3ExtTlv::SidLabelRange(t) => t.value_len(),
-            Ospfv3ExtTlv::SrLocalBlock(t) => t.value_len(),
-            Ospfv3ExtTlv::Fad(t) => t.value_len(),
-            Ospfv3ExtTlv::Srv6Capabilities(t) => t.value_len() as usize,
-            Ospfv3ExtTlv::Unknown { value, .. } => value.len(),
-        };
-        4 + ((value_len + 3) & !3)
-    }
-
     fn emit(&self, buf: &mut BytesMut) {
         let (typ, value_len) = match self {
             Ospfv3ExtTlv::RouterLink(t) => (OSPFV3_EXT_TLV_ROUTER_LINK, t.value_len()),

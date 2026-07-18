@@ -1098,13 +1098,6 @@ impl From<u16> for RouterInfoTlvType {
     }
 }
 
-impl RouterInfoTlvType {
-    pub fn is_known(&self) -> bool {
-        use RouterInfoTlvType::*;
-        matches!(self, Algo | Fad)
-    }
-}
-
 #[derive(Debug, NomBE, Clone, PartialEq)]
 #[nom(Selector = "RouterInfoTlvType")]
 pub enum RouterInfoTlv {
