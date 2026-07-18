@@ -22,6 +22,16 @@ impl Pim {
             config_hello_holdtime,
         );
         self.callback_add("/router/pim/interface/passive", config_passive);
+        self.callback_add("/router/pim/interface/igmp/enabled", config_igmp_enabled);
+        self.callback_add("/router/pim/interface/igmp/version", config_igmp_version);
+        self.callback_add(
+            "/router/pim/interface/igmp/query-interval",
+            config_igmp_query_interval,
+        );
+        self.callback_add(
+            "/router/pim/interface/igmp/query-max-response-time",
+            config_igmp_query_max_resp,
+        );
     }
 
     fn callback_add(&mut self, path: &str, cb: Callback) {
@@ -89,6 +99,62 @@ fn config_passive(pim: &mut Pim, mut args: Args, op: ConfigOp) -> Option<()> {
         pim.if_config.entry(name.clone()).or_default().passive = Some(passive);
     } else if let Some(config) = pim.if_config.get_mut(&name) {
         config.passive = None;
+    }
+    pim.reconcile_by_name(&name);
+    Some(())
+}
+
+fn config_igmp_enabled(pim: &mut Pim, mut args: Args, op: ConfigOp) -> Option<()> {
+    let name = args.string()?;
+    if op.is_set() {
+        let enabled = args.boolean()?;
+        pim.if_config.entry(name.clone()).or_default().igmp.enabled = Some(enabled);
+    } else if let Some(config) = pim.if_config.get_mut(&name) {
+        config.igmp.enabled = None;
+    }
+    pim.reconcile_by_name(&name);
+    Some(())
+}
+
+fn config_igmp_version(pim: &mut Pim, mut args: Args, op: ConfigOp) -> Option<()> {
+    let name = args.string()?;
+    if op.is_set() {
+        let version = args.u8()?;
+        pim.if_config.entry(name.clone()).or_default().igmp.version = Some(version);
+    } else if let Some(config) = pim.if_config.get_mut(&name) {
+        config.igmp.version = None;
+    }
+    pim.reconcile_by_name(&name);
+    Some(())
+}
+
+fn config_igmp_query_interval(pim: &mut Pim, mut args: Args, op: ConfigOp) -> Option<()> {
+    let name = args.string()?;
+    if op.is_set() {
+        let interval = args.u16()?;
+        pim.if_config
+            .entry(name.clone())
+            .or_default()
+            .igmp
+            .query_interval = Some(interval);
+    } else if let Some(config) = pim.if_config.get_mut(&name) {
+        config.igmp.query_interval = None;
+    }
+    pim.reconcile_by_name(&name);
+    Some(())
+}
+
+fn config_igmp_query_max_resp(pim: &mut Pim, mut args: Args, op: ConfigOp) -> Option<()> {
+    let name = args.string()?;
+    if op.is_set() {
+        let max_resp = args.u16()?;
+        pim.if_config
+            .entry(name.clone())
+            .or_default()
+            .igmp
+            .query_max_resp = Some(max_resp);
+    } else if let Some(config) = pim.if_config.get_mut(&name) {
+        config.igmp.query_max_resp = None;
     }
     pim.reconcile_by_name(&name);
     Some(())

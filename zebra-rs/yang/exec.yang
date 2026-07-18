@@ -985,6 +985,19 @@ module exec {
       }
     }
 
+    container igmp {
+      ext:help "IGMP commands";
+      presence "IGMP status";
+      container interface {
+        ext:help "IGMP interface and querier state";
+        presence "IGMP interface";
+      }
+      container groups {
+        ext:help "IGMP group membership";
+        presence "IGMP groups";
+      }
+    }
+
     container pim {
       ext:help "PIM commands";
       presence "PIM instance";
