@@ -66,7 +66,6 @@ pub struct InstalledMfc {
 }
 
 pub struct TibEntry {
-    pub sg: Sg,
     pub join_state: JoinState,
     /// RPF snapshot this entry currently operates on; refreshed by
     /// `tib_rpf_change` so a change can prune the old upstream first.
@@ -84,9 +83,8 @@ pub struct TibEntry {
 }
 
 impl TibEntry {
-    pub fn new(sg: Sg) -> Self {
+    pub fn new() -> Self {
         Self {
-            sg,
             join_state: JoinState::NotJoined,
             rpf: RpfState::Unresolved,
             local: BTreeSet::new(),
@@ -102,7 +100,7 @@ impl Pim {
     fn tib_get_or_create(&mut self, sg: Sg) -> &mut TibEntry {
         if !self.tib.contains_key(&sg) {
             let rpf = self.rpf_acquire(sg.src);
-            let mut entry = TibEntry::new(sg);
+            let mut entry = TibEntry::new();
             entry.rpf = rpf;
             self.tib.insert(sg, entry);
             tracing::info!("pim: {} created", sg);
@@ -189,11 +187,15 @@ impl Pim {
             }
             UpcallKind::WrongVif | UpcallKind::WrVifWhole => {
                 // Assert machinery arrives in a later phase.
+                let iface = self
+                    .fp
+                    .ifindex_of(upcall.vif)
+                    .map_or_else(|| format!("vif {}", upcall.vif), |i| self.ifname(i));
                 tracing::debug!(
-                    "pim: wrong-vif upcall for ({}, {}) on vif {} (assert not yet implemented)",
+                    "pim: wrong-vif upcall for ({}, {}) on {} (assert not yet implemented)",
                     upcall.src,
                     upcall.grp,
-                    upcall.vif
+                    iface
                 );
             }
             UpcallKind::WholePkt => {

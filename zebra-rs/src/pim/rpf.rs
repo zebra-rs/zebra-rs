@@ -127,13 +127,6 @@ impl Pim {
             self.tib_rpf_change(sg, state);
         }
     }
-
-    pub(crate) fn rpf_state(&self, src: Ipv4Addr) -> RpfState {
-        self.rpf
-            .get(&src)
-            .map(|e| e.state)
-            .unwrap_or(RpfState::Unresolved)
-    }
 }
 
 fn compute_rpf(

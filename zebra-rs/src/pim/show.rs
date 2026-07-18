@@ -35,7 +35,7 @@ impl Pim {
             .map();
     }
 
-    fn ifname(&self, ifindex: u32) -> String {
+    pub(crate) fn ifname(&self, ifindex: u32) -> String {
         self.links
             .get(&ifindex)
             .map(|l| l.name.clone())

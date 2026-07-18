@@ -43,18 +43,14 @@ pub fn mfc_oifs(entry: &TibEntry, rpf_ifindex: Option<u32>) -> BTreeSet<u32> {
 
 #[cfg(test)]
 mod tests {
-    use std::net::Ipv4Addr;
     use std::time::{Duration, Instant};
 
     use super::*;
     use crate::pim::rpf::RpfState;
-    use crate::pim::tib::{Downstream, Sg, TibEntry};
+    use crate::pim::tib::{Downstream, TibEntry};
 
     fn entry() -> TibEntry {
-        TibEntry::new(Sg {
-            src: Ipv4Addr::new(10, 0, 0, 2),
-            grp: Ipv4Addr::new(232, 1, 1, 1),
-        })
+        TibEntry::new()
     }
 
     #[test]
