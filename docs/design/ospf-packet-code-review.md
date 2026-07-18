@@ -27,7 +27,7 @@ most-severe first.
 | 8 | **Round-trip** | `parser.rs:1214` | Unknown RouterInfo TLV reads type/len from value bytes | ✅ #1982 |
 | 9 | **Security** | `zebra-rs/.../network_v6.rs:124` | v3 checksum skipped when any trailing bytes present | ✅ #1979 |
 | 10 | **Correctness** | `parser.rs:557` | `verify_checksum` re-emits typed form, ignores `raw` | ⬜ open |
-| 11 | **Robustness** | `parser.rs:693` | `parse_lsa_with_length` swallows all errors into `Unknown` | ⬜ open |
+| 11 | **Robustness** | `parser.rs:693` | `parse_lsa_with_length` swallows all errors into `Unknown` | ✅ #1990 |
 | 12 | **Correctness** | `parser.rs:422` (+`816`) | v2 emit writes stored `num_adv`/`num_links`, not derived | ✅ #1986 |
 | 13 | **Correctness** | `parser.rs:82` (+`227`) | Unknown v2 payload emit drops body; `typ()` → Hello | ⬜ open |
 | 14 | **Cleanup (reuse)** | `parser.rs:618` | Fletcher checksum + FAD/SID codecs duplicated | ⬜ open |
@@ -39,8 +39,8 @@ most-severe first.
 
 All seven top findings — the three remote-DoS parse bugs and all four silent
 interop wire-format bugs — plus the security finding #9, the round-trip finding
-#8, and the correctness finding #12 are fixed and merged to `main`. The review
-document itself landed in #1955.
+#8, the correctness finding #12, and the robustness finding #11 are fixed and
+merged to `main`. The review document itself landed in #1955.
 
 | PR | Findings | Summary |
 |----|----------|---------|
@@ -52,6 +52,7 @@ document itself landed in #1955.
 | [#1979](https://github.com/zebra-rs/zebra-rs/pull/1979) | 9 | v3 receive checksum verified over `input[..pkt_len]` unconditionally, closing the trailing-bytes bypass; **validated by `ospfv3_auth` BDD** |
 | [#1982](https://github.com/zebra-rs/zebra-rs/pull/1982) | 8 (part of 15) | Unknown Router-Information TLV built from the header, not the value bytes; dead `RouterInfoTlvUnknown::parse_tlv` removed |
 | [#1986](https://github.com/zebra-rs/zebra-rs/pull/1986) | 12 | `num_adv`/`num_links` derived from `.len()` at emit (fields removed, custom `ParseBe`); **validated by `ospfv2_multi_area` BDD** |
+| [#1990](https://github.com/zebra-rs/zebra-rs/pull/1990) | 11 | `parse_lsa_with_length` propagates a known-type body-parse error instead of masking it as `Unknown`; unknown types stay tolerant; **validated by `ospfv2_tilfa` BDD** |
 
 Each fix carries a regression test: byte-offset unit tests where a `show`-based
 check could not discriminate the bug, plus live BDD features for the Prefix-SID
@@ -67,28 +68,25 @@ meaningful lock.
 The remaining findings are all lower-severity than the merged set (no DoS, no
 silent interop break in a shipped datapath). Suggested order:
 
-> Findings 8, 9, and 12 — the previous Tier-1 items — are fixed: #9 (v3
-> checksum-skip bypass) in [#1979](https://github.com/zebra-rs/zebra-rs/pull/1979),
+> Findings 8, 9, 11, and 12 — the previous Tier-1 items — are fixed: #9
+> (checksum-skip bypass) in [#1979](https://github.com/zebra-rs/zebra-rs/pull/1979),
 > #8 (Unknown RouterInfo TLV round-trip) in [#1982](https://github.com/zebra-rs/zebra-rs/pull/1982),
-> #12 (derive LSA counts at emit) in [#1986](https://github.com/zebra-rs/zebra-rs/pull/1986).
+> #12 (derive LSA counts at emit) in [#1986](https://github.com/zebra-rs/zebra-rs/pull/1986),
+> #11 (reject malformed known-type LSAs) in [#1990](https://github.com/zebra-rs/zebra-rs/pull/1990).
 
 **Tier 1 — correctness / robustness, moderate effort**
-1. **Finding 11 — `parse_lsa_with_length` should not swallow parse failures.**
-   Distinguish "unknown LS type" (→ `Unknown`, keep tolerant flooding) from
-   "known type, body failed to parse" (→ propagate `Err`). Needs care to avoid
-   regressing the intentional unmodeled-sub-TLV tolerance.
-2. **Finding 10 — `verify_checksum` should use `self.raw`.** Low effort; latent
+1. **Finding 10 — `verify_checksum` should use `self.raw`.** Low effort; latent
    today (only the crate's tests call it), so low urgency until it is wired into
    an ingress path. Pairs with the non-bijective `From<u8>` note below.
 
 **Tier 2 — low-severity / cleanup**
-4. **Finding 13 — Unknown v2 payload emit drops body / `typ()` → Hello.** Latent
+2. **Finding 13 — Unknown v2 payload emit drops body / `typ()` → Hello.** Latent
    (daemon never re-emits unknown-type packets); fix the public-API trap when
    convenient.
-5. **Finding 15 (remainder) — delete dead `pub` items** (`is_known`,
+3. **Finding 15 (remainder) — delete dead `pub` items** (`is_known`,
    `Ospfv3ExtTlv::wire_len`; `RouterInfoTlvUnknown::parse_tlv` was already removed
    with finding 8). Trivial deletions.
-6. **Finding 14 — hoist duplicated codecs into `packet-utils`** (Fletcher
+4. **Finding 14 — hoist duplicated codecs into `packet-utils`** (Fletcher
    checksum shared with `isis-packet`; FAD and SID/Label dispatch shared v2/v3).
    Larger refactor; best done the next time those codecs are touched.
 
@@ -341,6 +339,8 @@ bytes; fall back to the typed re-emit only when `raw` is `None`.
 ---
 
 ### 11. `parse_lsa_with_length` swallows all parse errors into `Unknown`
+> ✅ **Fixed in [#1990](https://github.com/zebra-rs/zebra-rs/pull/1990)** — propagate known-type body errors; unknown types stay tolerant; validated by `ospfv2_tilfa` BDD.
+
 **`crates/ospf-packet/src/parser.rs:704`**
 
 ```rust
