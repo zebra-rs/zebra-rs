@@ -6333,9 +6333,16 @@ pub fn route_ipv6_update(
                         super::vrf::vrf_emit_withdraw_v6(exporter, prefix.prefix);
                     }
                 }
-                if !selected.is_empty() {
-                    route_advertise_to_peers_v6(prefix.prefix, &selected, bgp, peers);
-                }
+                // Unconditional, like `route_ipv6_withdraw`: an UPDATE whose
+                // best-path delta EMPTIES the selection (inbound-policy deny
+                // replacing the last candidate, or the NHT reachability gate
+                // suppressing it) must fan MP_UNREACH — the helper's
+                // Adj-RIB-Out pruning withdraws only from peers that actually
+                // hold the prefix, so an empty selection cannot flood or
+                // ping-pong. Gating on `!selected.is_empty()` dropped exactly
+                // that withdraw, leaving other peers forwarding on the stale
+                // route indefinitely (review finding #6).
+                route_advertise_to_peers_v6(prefix.prefix, &selected, bgp, peers);
             }
             // VPNv6 → per-VRF import + PE-peer advertisement (no kernel FIB).
             Some(rd) => {
@@ -6361,9 +6368,8 @@ pub fn route_ipv6_update(
                         );
                     }
                 }
-                if !selected.is_empty() {
-                    route_advertise_to_peers_vpnv6(rd, prefix.prefix, &selected, bgp, peers);
-                }
+                // Unconditional — see the unicast arm above (finding #6).
+                route_advertise_to_peers_vpnv6(rd, prefix.prefix, &selected, bgp, peers);
                 // VPNv6 AddPath: advertise the just-updated candidate path
                 // itself (with its shard-allocated local_id), independent of
                 // whether it won best-path.
@@ -20957,5 +20963,190 @@ mod as_sets_withdraw_tests {
         let (better, reason) = LocalRibTable::<Ipv4Net>::is_better(&local, &ce_row());
         assert!(better, "genuine local origination must still win");
         assert!(matches!(reason, Reason::Originated));
+    }
+}
+
+#[cfg(test)]
+mod v6_empty_selection_tests {
+    use super::*;
+    use crate::bgp::peer::{Peer, State};
+    use crate::bgp::peer_map::PeerMap;
+    use bgp_packet::{Afi, BgpPacket, CapMultiProtocol, Safi};
+    use std::net::IpAddr;
+
+    /// Established peer with `(Ip6, Unicast)` negotiated and a captured
+    /// egress channel; `local_as` 65001, eBGP toward `remote_as`.
+    fn v6_peer(
+        addr: &str,
+        remote_as: u32,
+    ) -> (Peer, tokio::sync::mpsc::UnboundedReceiver<bytes::BytesMut>) {
+        let (tx, rx) = tokio::sync::mpsc::channel(64);
+        Box::leak(Box::new(rx));
+        let mut peer = Peer::new(
+            0,
+            65001,
+            Ipv4Addr::new(10, 0, 0, 9),
+            remote_as,
+            addr.parse::<IpAddr>().unwrap(),
+            None,
+            tx,
+            crate::context::ProtoContext::default_table_no_rib(),
+        );
+        peer.state = State::Established;
+        // `Peer::new` defaults `peer_type` to IBGP; these sessions are
+        // eBGP (remote_as != local_as), and the iBGP-to-iBGP reflection
+        // gate would otherwise suppress the fan-out entirely.
+        peer.peer_type = crate::bgp::peer::PeerType::EBGP;
+        // Negotiate IPv6 unicast (both directions) so membership
+        // enrolment classifies the peer into the v6 fan-out audience.
+        let key = CapMultiProtocol::new(&Afi::Ip6, &Safi::Unicast);
+        let entry = peer
+            .cap_map
+            .entries
+            .get_mut(&key)
+            .expect("v6 unicast pre-seeded in CapAfiMap");
+        entry.send = true;
+        entry.recv = true;
+        // The v6 egress builder needs the session-local address for
+        // next-hop-self.
+        peer.param.local_addr = Some("[2001:db8::99]:179".parse().unwrap());
+        let (ptx, prx) = tokio::sync::mpsc::unbounded_channel();
+        peer.packet_tx = Some(ptx);
+        (peer, prx)
+    }
+
+    fn drain(
+        rx: &mut tokio::sync::mpsc::UnboundedReceiver<bytes::BytesMut>,
+    ) -> Vec<bytes::BytesMut> {
+        let mut out = Vec::new();
+        while let Ok(b) = rx.try_recv() {
+            out.push(b);
+        }
+        out
+    }
+
+    /// Review finding #6 regression: an UPDATE whose best-path delta
+    /// EMPTIES the selection (here: the source peer's inbound policy
+    /// now denies the prefix, replacing the last candidate) must fan
+    /// MP_UNREACH to the peers that hold the route. The old code gated
+    /// the fan-out on `!selected.is_empty()`, so peer B kept the stale
+    /// route forever.
+    #[tokio::test]
+    async fn v6_update_emptying_selection_withdraws_from_peers() {
+        let mut peers = PeerMap::new();
+        let (peer_a, _rx_a) = v6_peer("2001:db8::1", 65002);
+        let (peer_b, mut rx_b) = v6_peer("2001:db8::2", 65003);
+        peers.insert("2001:db8::1".parse().unwrap(), peer_a);
+        peers.insert("2001:db8::2".parse().unwrap(), peer_b);
+        let a = peers.get(&"2001:db8::1".parse().unwrap()).unwrap().ident;
+        let b = peers.get(&"2001:db8::2".parse().unwrap()).unwrap().ident;
+        peers.membership_enroll(a);
+        peers.membership_enroll(b);
+
+        let router_id = Ipv4Addr::new(10, 0, 0, 9);
+        let ctx = crate::context::ProtoContext::default_table_no_rib();
+        let mut local_rib = LocalRib::default();
+        let mut shard = crate::bgp::shard::BgpShard::default();
+        let mut attr_store = crate::bgp::BgpAttrStore::default();
+        let mut update_groups = crate::bgp::update_group::empty_map();
+        let interface_addrs = crate::bgp::interface_addrs::InterfaceAddrs::default();
+        let (tx, rx) = tokio::sync::mpsc::channel(8);
+        Box::leak(Box::new(rx));
+        let mut top = crate::bgp::peer::BgpTop {
+            router_id: &router_id,
+            srv6_ipv6_export: None,
+            local_rib: &mut local_rib,
+            shard: &mut shard,
+            tx: &tx,
+            rib_client: &ctx.rib,
+            attr_store: &mut attr_store,
+            update_groups: &mut update_groups,
+            interface_addrs: &interface_addrs,
+            vrf_export: None,
+            color_policy: None,
+            flex_algo_routes: None,
+            flex_algo_srv6_routes: None,
+            vrf_import: None,
+            nexthop_cache: None,
+            vrf_transport_v4: None,
+            vrf_transport_v6: None,
+            central_label_alloc: None,
+            as_sets_withdraw: false,
+        };
+
+        let nlri = Ipv6Nlri {
+            id: 0,
+            prefix: "2001:db8:beef::/64".parse().unwrap(),
+        };
+        let mut attr = BgpAttr::new();
+        attr.aspath = Some(bgp_packet::As4Path::from(vec![65002]));
+        attr.nexthop = Some(BgpNexthop::Ipv6("2001:db8::1".parse().unwrap()));
+
+        // Route from A is accepted and advertised to B. The v6-unicast
+        // announce bytes ride the async update-group flush (absent in
+        // this test), but the per-peer Adj-RIB-Out records the
+        // advertisement synchronously — which is also the record the
+        // withdraw branch prunes against.
+        route_ipv6_update(
+            a, &nlri, None, None, &attr, None, &mut top, &mut peers, false,
+        );
+        assert!(
+            peers
+                .get(&"2001:db8::2".parse().unwrap())
+                .unwrap()
+                .adj_out
+                .v6
+                .0
+                .contains_key(&nlri.prefix),
+            "peer B's Adj-RIB-Out must record the initial advertisement"
+        );
+        drain(&mut rx_b);
+
+        // Bind an inbound deny on A: a name-bound but unresolved
+        // prefix-set denies everything (the resolve-then-gate rule).
+        peers
+            .get_mut(&"2001:db8::1".parse().unwrap())
+            .unwrap()
+            .prefix_set_slot(
+                AfiSafi::new(Afi::Ip6, Safi::Unicast),
+                super::super::policy::InOut::Input,
+            )
+            .name = Some("DENY".to_string());
+
+        // A re-advertises the same prefix; the deny replaces the last
+        // candidate and the selection comes out empty.
+        route_ipv6_update(
+            a, &nlri, None, None, &attr, None, &mut top, &mut peers, false,
+        );
+
+        let packets = drain(&mut rx_b);
+        assert!(
+            !packets.is_empty(),
+            "peer B must be sent a withdraw when the selection empties"
+        );
+        let withdrawn: Vec<String> = packets
+            .iter()
+            .filter_map(|buf| {
+                let (_, pkt) = BgpPacket::parse_packet(buf, true, None).ok()?;
+                match pkt {
+                    BgpPacket::Update(u) => u.mp_withdraw.as_ref().map(|w| format!("{w}")),
+                    _ => None,
+                }
+            })
+            .collect();
+        assert!(
+            withdrawn.iter().any(|w| w.contains("2001:db8:beef::/64")),
+            "MP_UNREACH must carry the emptied prefix, got: {withdrawn:?}"
+        );
+        assert!(
+            !peers
+                .get(&"2001:db8::2".parse().unwrap())
+                .unwrap()
+                .adj_out
+                .v6
+                .0
+                .contains_key(&nlri.prefix),
+            "peer B's Adj-RIB-Out must be pruned by the withdraw"
+        );
     }
 }
