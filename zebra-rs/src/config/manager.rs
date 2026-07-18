@@ -15,6 +15,7 @@ use super::ospf::{despawn_ospf, despawn_ospfv3, spawn_ospf, spawn_ospfv3};
 use super::parse::State;
 use super::parse::parse;
 use super::paths::{path_try_trim, paths_str};
+use super::pim::{despawn_pim, spawn_pim};
 use super::stamp::{despawn_stamp, spawn_stamp};
 use super::util::trim_first_line;
 use super::vrf_redirect_split;
@@ -533,6 +534,7 @@ impl ConfigManager {
         let mut stamp = false;
         let mut nd = false;
         let mut cradle = false;
+        let mut pim = false;
         for (proto, tx) in self.cm_clients.borrow().iter() {
             tx.send(ConfigRequest::new(Vec::new(), ConfigOp::CommitStart))
                 .unwrap();
@@ -556,6 +558,9 @@ impl ConfigManager {
             }
             if proto == "cradle" {
                 cradle = true;
+            }
+            if proto == "pim" {
+                pim = true;
             }
         }
         // Same by-value capture problem for the IS-IS→BGP BGP-LS producer
@@ -674,6 +679,10 @@ impl ConfigManager {
                 }
                 spawn_bgp(self);
             }
+            if !pim && op == ConfigOp::Set && line.starts_with("router pim") {
+                pim = true;
+                spawn_pim(self);
+            }
             // BFD has no top-level `bfd { … }` block: it is spawned eagerly by
             // the OSPF / IS-IS / BGP arms above (those protocols capture
             // `bfd_client_tx` by value, so BFD must be up before them).
@@ -755,6 +764,9 @@ impl ConfigManager {
         }
         if self.protocol_tasks.borrow().contains_key("isis") && !proto_in_candidate("isis") {
             despawn_isis(self);
+        }
+        if self.protocol_tasks.borrow().contains_key("pim") && !proto_in_candidate("pim") {
+            despawn_pim(self);
         }
         // BFD has no top-level block of its own; it is spawned eagerly by its
         // consumers (BGP / IS-IS / OSPF) and must outlive any individual one as
@@ -1360,6 +1372,10 @@ fn is_ebpf(paths: &[CommandPath]) -> bool {
     paths.iter().any(|x| x.name == "ebpf")
 }
 
+fn is_pim(paths: &[CommandPath]) -> bool {
+    paths.iter().any(|x| x.name == "pim")
+}
+
 fn is_policy(paths: &[CommandPath]) -> bool {
     // Every policy-object root the policy module registers a show
     // handler for. Missing roots fall through to the `"rib"` fallback
@@ -1397,6 +1413,8 @@ fn show_proto(paths: &[CommandPath]) -> &'static str {
         "bfd"
     } else if is_stamp(paths) {
         "stamp"
+    } else if is_pim(paths) {
+        "pim"
     } else if is_nd(paths) {
         "nd"
     } else if is_ebpf(paths) {

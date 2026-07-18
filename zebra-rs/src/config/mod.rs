@@ -49,6 +49,7 @@ mod nd;
 mod nsap;
 mod ospf;
 mod parse;
+mod pim;
 mod stamp;
 mod token;
 mod util;

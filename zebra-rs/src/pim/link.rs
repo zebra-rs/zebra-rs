@@ -1,0 +1,309 @@
+//! Per-interface PIM state: desired configuration, runtime state,
+//! enable/disable reconciliation and DR election (RFC 7761 §4.3.2).
+
+use std::collections::BTreeMap;
+use std::net::Ipv4Addr;
+
+use ipnet::{IpNet, Ipv4Net};
+use rand::RngExt;
+
+use crate::context::Timer;
+use crate::rib::Link;
+use crate::rib::link::LinkAddr;
+
+use super::inst::{Message, Pim};
+use super::neighbor::Neighbor;
+use super::socket::{pim_join_if, pim_leave_if};
+
+pub const PIM_HELLO_PERIOD: u16 = 30;
+pub const PIM_DEFAULT_DR_PRIORITY: u32 = 1;
+pub const PIM_PROPAGATION_DELAY_MSEC: u16 = 500;
+pub const PIM_OVERRIDE_INTERVAL_MSEC: u16 = 2500;
+
+/// Desired per-interface configuration, keyed by interface name in
+/// [`Pim::if_config`]. Presence of an entry (the interface is listed
+/// under `router pim`) is what enables PIM on the interface.
+#[derive(Debug, Clone, Default)]
+pub struct LinkConfig {
+    pub dr_priority: Option<u32>,
+    pub hello_interval: Option<u16>,
+    pub holdtime: Option<u16>,
+    pub passive: Option<bool>,
+}
+
+impl LinkConfig {
+    pub fn hello_interval(&self) -> u16 {
+        self.hello_interval.unwrap_or(PIM_HELLO_PERIOD)
+    }
+
+    /// Advertised holdtime: explicit config, else 3.5 × hello.
+    pub fn holdtime(&self) -> u16 {
+        self.holdtime
+            .unwrap_or_else(|| self.hello_interval().saturating_mul(7) / 2)
+    }
+
+    pub fn dr_priority(&self) -> u32 {
+        self.dr_priority.unwrap_or(PIM_DEFAULT_DR_PRIORITY)
+    }
+
+    pub fn passive(&self) -> bool {
+        self.passive.unwrap_or(false)
+    }
+}
+
+/// Runtime per-interface state, keyed by ifindex in [`Pim::links`].
+pub struct PimLink {
+    pub ifindex: u32,
+    pub name: String,
+    pub link_up: bool,
+    /// IPv4 addresses on the link; the first is the primary address
+    /// used as our Hello source identity and DR candidate.
+    pub addrs: Vec<Ipv4Net>,
+    /// PIM is running on this interface (group joined, hello timer
+    /// armed). Derived state — see [`Pim::reconcile`].
+    pub enabled: bool,
+    pub gen_id: u32,
+    pub dr: Option<Ipv4Addr>,
+    pub nbrs: BTreeMap<Ipv4Addr, Neighbor>,
+    pub hello_timer: Option<Timer>,
+}
+
+impl PimLink {
+    pub fn from_link(link: &Link) -> Self {
+        let addrs = link
+            .addr4
+            .iter()
+            .filter_map(|a| match a.addr {
+                IpNet::V4(v4) => Some(v4),
+                IpNet::V6(_) => None,
+            })
+            .collect();
+        Self {
+            ifindex: link.index,
+            name: link.name.clone(),
+            link_up: link.is_up(),
+            addrs,
+            enabled: false,
+            gen_id: 0,
+            dr: None,
+            nbrs: BTreeMap::new(),
+            hello_timer: None,
+        }
+    }
+
+    pub fn primary_addr(&self) -> Option<Ipv4Addr> {
+        self.addrs.first().map(|p| p.addr())
+    }
+
+    pub fn is_my_addr(&self, addr: &Ipv4Addr) -> bool {
+        self.addrs.iter().any(|p| p.addr() == *addr)
+    }
+}
+
+fn hello_timer(tx: &tokio::sync::mpsc::UnboundedSender<Message>, ifindex: u32, sec: u16) -> Timer {
+    let tx = tx.clone();
+    Timer::repeat(sec as u64, move || {
+        let tx = tx.clone();
+        async move {
+            let _ = tx.send(Message::HelloTimer(ifindex));
+        }
+    })
+}
+
+impl Pim {
+    /// Converge one interface's running state onto its desired state.
+    /// Called from every input that can change either side: config
+    /// set/delete, LinkAdd/Up/Down/Del, AddrAdd/AddrDel. PIM runs on
+    /// an interface iff it is listed under `router pim`, the link is
+    /// up, and it has an IPv4 address.
+    pub(crate) fn reconcile(&mut self, ifindex: u32) {
+        let Some(link) = self.links.get(&ifindex) else {
+            return;
+        };
+        let desired =
+            self.if_config.contains_key(&link.name) && link.link_up && !link.addrs.is_empty();
+        match (desired, link.enabled) {
+            (true, false) => self.link_enable(ifindex),
+            (false, true) => self.link_disable(ifindex),
+            (true, true) => {
+                // Config knobs changed on a running interface: re-run
+                // the election with the new DR priority and advertise
+                // the new values right away.
+                self.dr_election(ifindex);
+                self.hello_send(ifindex);
+            }
+            (false, false) => {}
+        }
+    }
+
+    /// Re-arm a running interface's hello timer after a hello-interval
+    /// change; no-op when the interface is not enabled.
+    pub(crate) fn rearm_hello_timer(&mut self, name: &str) {
+        let Some((ifindex, enabled)) = self
+            .links
+            .values()
+            .find(|l| l.name == name)
+            .map(|l| (l.ifindex, l.enabled))
+        else {
+            return;
+        };
+        if !enabled {
+            return;
+        }
+        let interval = self.link_config(name).hello_interval();
+        let timer = hello_timer(&self.tx, ifindex, interval);
+        if let Some(link) = self.links.get_mut(&ifindex) {
+            link.hello_timer = Some(timer);
+        }
+    }
+
+    pub(crate) fn reconcile_by_name(&mut self, name: &str) {
+        let ifindex = self
+            .links
+            .values()
+            .find(|l| l.name == name)
+            .map(|l| l.ifindex);
+        if let Some(ifindex) = ifindex {
+            self.reconcile(ifindex);
+        }
+    }
+
+    fn link_enable(&mut self, ifindex: u32) {
+        let interval = {
+            let Some(link) = self.links.get(&ifindex) else {
+                return;
+            };
+            self.link_config(&link.name).hello_interval()
+        };
+        pim_join_if(&self.sock, ifindex);
+        let timer = hello_timer(&self.tx, ifindex, interval);
+        let link = self.links.get_mut(&ifindex).unwrap();
+        link.enabled = true;
+        link.gen_id = rand::rng().random();
+        link.hello_timer = Some(timer);
+        tracing::info!("pim: interface {} enabled", link.name);
+        // Triggered hello so neighbors learn us without waiting a
+        // full hello period, then elect (initially ourselves).
+        self.hello_send(ifindex);
+        self.dr_election(ifindex);
+    }
+
+    fn link_disable(&mut self, ifindex: u32) {
+        // Goodbye hello (holdtime 0) so neighbors expire us at once.
+        self.hello_send_holdtime_zero(ifindex);
+        pim_leave_if(&self.sock, ifindex);
+        let Some(link) = self.links.get_mut(&ifindex) else {
+            return;
+        };
+        link.enabled = false;
+        link.hello_timer = None;
+        link.nbrs.clear();
+        link.dr = None;
+        tracing::info!("pim: interface {} disabled", link.name);
+    }
+
+    /// Effective config for an interface: the configured entry, or
+    /// defaults when only runtime state needs values (goodbye path).
+    pub(crate) fn link_config(&self, name: &str) -> LinkConfig {
+        self.if_config.get(name).cloned().unwrap_or_default()
+    }
+
+    /// DR election per RFC 7761 §4.3.2: if every neighbor advertised
+    /// the DR-Priority option, elect by (priority, address); as soon
+    /// as one neighbor omitted it, fall back to highest address.
+    pub(crate) fn dr_election(&mut self, ifindex: u32) {
+        let Some(link) = self.links.get_mut(&ifindex) else {
+            return;
+        };
+        let Some(my_addr) = link.primary_addr() else {
+            return;
+        };
+        let my_pri = self
+            .if_config
+            .get(&link.name)
+            .map(|c| c.dr_priority())
+            .unwrap_or(PIM_DEFAULT_DR_PRIORITY);
+
+        let use_priority = link.nbrs.values().all(|n| n.dr_priority.is_some());
+        let mut best = (my_pri, my_addr);
+        for nbr in link.nbrs.values() {
+            let cand = (nbr.dr_priority.unwrap_or(0), nbr.addr);
+            let better = if use_priority {
+                cand > best
+            } else {
+                cand.1 > best.1
+            };
+            if better {
+                best = cand;
+            }
+        }
+        let dr = Some(best.1);
+        if link.dr != dr {
+            tracing::info!(
+                "pim: interface {} DR changed {:?} -> {:?}",
+                link.name,
+                link.dr,
+                dr
+            );
+            link.dr = dr;
+        }
+    }
+
+    // ---- RibRx handlers ----
+
+    pub(crate) fn link_add(&mut self, link: Link) {
+        let ifindex = link.index;
+        match self.links.get_mut(&ifindex) {
+            Some(existing) => {
+                existing.name = link.name.clone();
+                existing.link_up = link.is_up();
+            }
+            None => {
+                self.links.insert(ifindex, PimLink::from_link(&link));
+            }
+        }
+        self.reconcile(ifindex);
+    }
+
+    pub(crate) fn link_up_down(&mut self, ifindex: u32, up: bool) {
+        if let Some(link) = self.links.get_mut(&ifindex) {
+            link.link_up = up;
+            self.reconcile(ifindex);
+        }
+    }
+
+    pub(crate) fn link_del(&mut self, ifindex: u32) {
+        if let Some(link) = self.links.get(&ifindex)
+            && link.enabled
+        {
+            self.link_disable(ifindex);
+        }
+        self.links.remove(&ifindex);
+    }
+
+    pub(crate) fn addr_add(&mut self, addr: LinkAddr) {
+        let Some(link) = self.links.get_mut(&addr.ifindex) else {
+            return;
+        };
+        let IpNet::V4(prefix) = addr.addr else {
+            return;
+        };
+        if !link.addrs.contains(&prefix) {
+            link.addrs.push(prefix);
+        }
+        self.reconcile(addr.ifindex);
+    }
+
+    pub(crate) fn addr_del(&mut self, addr: LinkAddr) {
+        let Some(link) = self.links.get_mut(&addr.ifindex) else {
+            return;
+        };
+        let IpNet::V4(prefix) = addr.addr else {
+            return;
+        };
+        link.addrs.retain(|p| *p != prefix);
+        self.reconcile(addr.ifindex);
+        // Losing the primary address changes our DR candidate.
+        self.dr_election(addr.ifindex);
+    }
+}
