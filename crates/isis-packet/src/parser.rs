@@ -1255,30 +1255,43 @@ impl TlvEmitter for IsisTlvP2p3Way {
     }
 
     fn len(&self) -> u8 {
+        // Positional wire format: the parser assigns trailing bytes in
+        // this fixed order, so a field can only be present when every
+        // field before it is. Stop at the first None — matching emit()
+        // — so a gapped struct (e.g. neighbor_id set with circuit_id
+        // None) can never emit a byte layout the parser would
+        // misassign (the system-id's first 4 bytes read as circuit id).
         let mut len = 1;
-        if self.circuit_id.is_some() {
-            len += 4;
+        if self.circuit_id.is_none() {
+            return len;
         }
-        if self.neighbor_id.is_some() {
-            len += 6;
+        len += 4;
+        if self.neighbor_id.is_none() {
+            return len;
         }
-        if self.neighbor_circuit_id.is_some() {
-            len += 4;
+        len += 6;
+        if self.neighbor_circuit_id.is_none() {
+            return len;
         }
-        len
+        len + 4
     }
 
     fn emit(&self, buf: &mut BytesMut) {
         buf.put_u8(self.state);
-        if let Some(circuit_id) = self.circuit_id {
-            buf.put_u32(circuit_id);
-        }
-        if let Some(neighbor_id) = &self.neighbor_id {
-            buf.put(&neighbor_id.id[..]);
-        }
-        if let Some(neighbor_circuit_id) = self.neighbor_circuit_id {
-            buf.put_u32(neighbor_circuit_id);
-        }
+        // See len(): stop at the first None to keep the positional
+        // layout parseable.
+        let Some(circuit_id) = self.circuit_id else {
+            return;
+        };
+        buf.put_u32(circuit_id);
+        let Some(neighbor_id) = &self.neighbor_id else {
+            return;
+        };
+        buf.put(&neighbor_id.id[..]);
+        let Some(neighbor_circuit_id) = self.neighbor_circuit_id else {
+            return;
+        };
+        buf.put_u32(neighbor_circuit_id);
     }
 }
 
@@ -1445,6 +1458,68 @@ pub fn parse(input: &[u8]) -> IsisIResult<&[u8], IsisPacket> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Finding #12: TLV 240's wire format is positional (state, then
+    /// circuit id, then neighbor id, then neighbor circuit id), so emit
+    /// must stop at the first None. A gapped struct (neighbor_id set,
+    /// circuit_id None) used to emit state + 6 bytes, which re-parsed
+    /// with the system-id's first 4 bytes as the circuit id — the
+    /// three-way handshake would compare the wrong neighbor identity.
+    #[test]
+    fn p2p3way_gapped_optionals_emit_prefix_closed() {
+        let gapped = IsisTlvP2p3Way {
+            state: 1,
+            circuit_id: None,
+            neighbor_id: Some(IsisSysId {
+                id: [1, 2, 3, 4, 5, 6],
+            }),
+            neighbor_circuit_id: Some(7),
+        };
+        assert_eq!(gapped.len(), 1);
+        let mut buf = BytesMut::new();
+        gapped.emit(&mut buf);
+        assert_eq!(&buf[..], &[1]);
+
+        // Every prefix-closed form round-trips exactly.
+        let forms = [
+            IsisTlvP2p3Way {
+                state: 2,
+                circuit_id: None,
+                neighbor_id: None,
+                neighbor_circuit_id: None,
+            },
+            IsisTlvP2p3Way {
+                state: 2,
+                circuit_id: Some(9),
+                neighbor_id: None,
+                neighbor_circuit_id: None,
+            },
+            IsisTlvP2p3Way {
+                state: 2,
+                circuit_id: Some(9),
+                neighbor_id: Some(IsisSysId {
+                    id: [1, 2, 3, 4, 5, 6],
+                }),
+                neighbor_circuit_id: None,
+            },
+            IsisTlvP2p3Way {
+                state: 2,
+                circuit_id: Some(9),
+                neighbor_id: Some(IsisSysId {
+                    id: [1, 2, 3, 4, 5, 6],
+                }),
+                neighbor_circuit_id: Some(7),
+            },
+        ];
+        for form in forms {
+            let mut buf = BytesMut::new();
+            form.emit(&mut buf);
+            assert_eq!(buf.len() as u8, form.len());
+            let (rest, parsed) = IsisTlvP2p3Way::parse_be(&buf).expect("parse");
+            assert!(rest.is_empty());
+            assert_eq!(parsed, form);
+        }
+    }
 
     /// RFC 8667: the 3-octet SID/Label form carries the MPLS label in
     /// the 20 rightmost bits; the top 4 are reserved and must be masked

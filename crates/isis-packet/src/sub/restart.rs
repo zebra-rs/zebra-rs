@@ -116,24 +116,35 @@ impl TlvEmitter for IsisTlvRestart {
     }
 
     fn len(&self) -> u8 {
+        // Positional wire format: the parser assigns trailing bytes in
+        // fixed order (remaining time, then neighbor id), so the
+        // neighbor can only be present when the time is. Stop at the
+        // first None — matching emit() — so a gapped struct can never
+        // emit a layout the parser would misassign (the system-id's
+        // first 2 bytes read as a bogus hold time during GR).
         let mut len: u8 = 1;
-        if self.remaining_time.is_some() {
-            len += 2;
+        if self.remaining_time.is_none() {
+            return len;
         }
-        if self.restarting_neighbor.is_some() {
-            len += 6;
+        len += 2;
+        if self.restarting_neighbor.is_none() {
+            return len;
         }
-        len
+        len + 6
     }
 
     fn emit(&self, buf: &mut BytesMut) {
         buf.put_u8(self.flags);
-        if let Some(t) = self.remaining_time {
-            buf.put_u16(t);
-        }
-        if let Some(id) = &self.restarting_neighbor {
-            buf.put(&id.id[..]);
-        }
+        // See len(): stop at the first None to keep the positional
+        // layout parseable.
+        let Some(t) = self.remaining_time else {
+            return;
+        };
+        buf.put_u16(t);
+        let Some(id) = &self.restarting_neighbor else {
+            return;
+        };
+        buf.put(&id.id[..]);
     }
 }
 
@@ -217,6 +228,29 @@ mod tests {
         let (rest, decoded) = IsisTlvRestart::parse_be(&buf[2..]).unwrap();
         assert!(rest.is_empty());
         assert_eq!(decoded, tlv);
+    }
+
+    /// Finding #12: the wire format is positional, so a gapped struct
+    /// (neighbor set, time None) must not emit the neighbor — the
+    /// parser would read the system-id's first 2 bytes as a bogus
+    /// remaining time during graceful restart.
+    #[test]
+    fn gapped_optionals_emit_prefix_closed() {
+        let tlv = IsisTlvRestart {
+            flags: ISIS_RESTART_FLAG_RA,
+            remaining_time: None,
+            restarting_neighbor: Some(IsisSysId {
+                id: [0x10, 0x20, 0x30, 0x40, 0x50, 0x60],
+            }),
+        };
+        let mut buf = BytesMut::new();
+        tlv.tlv_emit(&mut buf);
+        // Only the flags byte is emitted and the length agrees.
+        assert_eq!(&buf[..], &[211, 1, 0x02]);
+        let (rest, decoded) = IsisTlvRestart::parse_be(&buf[2..]).unwrap();
+        assert!(rest.is_empty());
+        assert_eq!(decoded.remaining_time, None);
+        assert_eq!(decoded.restarting_neighbor, None);
     }
 
     /// Starting router (fresh boot, RFC 5306 §3.4): SA=1, RR=0. The
