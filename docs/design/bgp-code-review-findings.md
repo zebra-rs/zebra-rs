@@ -6,7 +6,7 @@ candidate was checked by an independent adversarial verifier that had to name a
 concrete trigger and quote the decisive lines, then a fresh gap sweep added more.
 
 **Result: 34 confirmed correctness bugs + 15 confirmed cleanup items.**
-**Status 2026-07-18: top-13 fixed and merged** (PRs #1962, #1972, #1981,
+**Status 2026-07-18: top-14 fixed and merged** (PRs #1962, #1972, #1981,
 #1984, #1987, #1991, #1997, and the finding-#9 branch); fixes below the
 cap remain open. Three
 candidates were refuted (two vty-disconnect "panics" are guarded by detached
@@ -213,7 +213,7 @@ every path as `BgpRib.router_id` but never read in `is_better`. RFC 4271
 slot index; a runtime-added neighbor always loses this tie. **Best-path becomes
 order-dependent** and can disagree with RFC-conformant routers.
 
-### 14. NO_ADVERTISE / NO_EXPORT ignored on labeled-unicast — `route.rs:11637`
+### 14. NO_ADVERTISE / NO_EXPORT ignored on labeled-unicast — `route.rs:11637` — FIXED (route_update_labelv4/v6 now filter)
 
 `community_suppresses_advertisement` is called only for v4/v6 unicast, EVPN, and
 MUP (grep confirms sites `5032`, `8309`, `11067`, `11237`). `route_update_labelv4`
