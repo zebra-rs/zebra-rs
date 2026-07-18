@@ -58,6 +58,24 @@ Feature: BGP per-VRF VPNv4 export to a remote PE
     Then show command "show bgp vpnv4 10.1.0.1" in namespace "z2" should contain "BGP routing table entry for 10.1.0.0/24"
     And show command "show bgp vpnv4 10.1.0.0/24" in namespace "z2" should contain "Route Distinguisher: 65001:100"
 
+  Scenario: Deleting the VRF withdraws its VPNv4 exports from the remote PE
+    Given the test topology exists
+    # z1-2.yaml is z1-1.yaml minus `router bgp vrf vrf-blue` — the BGP
+    # VRF despawn path. The exported row must leave both the local
+    # VPNv4 Loc-RIB and the remote PE; a stale advertisement here plus
+    # the immediately-reused service label would decap remote traffic
+    # into the wrong VRF.
+    When I apply config "z1-2.yaml" to namespace "z1"
+    And I wait 5 seconds for BGP to operate
+    Then show command "show bgp vpnv4" in namespace "z1" should not contain "10.1.0.0/24"
+    And show command "show bgp vpnv4" in namespace "z2" should not contain "10.1.0.0/24"
+
+  Scenario: Re-adding the VRF re-exports the network
+    Given the test topology exists
+    When I apply config "z1-1.yaml" to namespace "z1"
+    And I wait 10 seconds for BGP to operate
+    Then show command "show bgp vpnv4" in namespace "z2" should contain "10.1.0.0/24"
+
   Scenario: Teardown topology
     Given the test topology exists
     When I stop zebra-rs in namespace "z1"

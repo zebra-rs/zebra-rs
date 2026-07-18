@@ -275,11 +275,21 @@ pub struct BgpVrfConfig {
     pub mobile_uplane: BgpVrfMobileUplane,
 }
 
-/// Borrow-or-create the per-VRF entry on `Bgp::vrfs`. Used by every
-/// leaf callback; promotes the "set leaf before set list-key" race
-/// to a no-op rather than a `None` return.
-fn vrf_entry(bgp: &mut Bgp, name: String) -> &mut BgpVrfConfig {
-    bgp.vrfs.entry(name).or_default()
+/// Borrow the per-VRF entry on `Bgp::vrfs`, creating it for Set (the
+/// "set leaf before set list-key" firing order makes lazy creation
+/// necessary) but NEVER for Delete. A whole-subtree delete fires the
+/// list-entry callback — which removes the map entry — before the
+/// child-leaf delete callbacks, so a lazily re-created entry here
+/// resurrected the VRF as a default config: `compute_vrf_diff` then
+/// saw the name as still desired and the despawn (task teardown,
+/// export purge, ILM withdraw, label reclaim) never ran. `None` on a
+/// Delete for a gone VRF means "nothing left to mutate" — callbacks
+/// early-return.
+fn vrf_entry(bgp: &mut Bgp, name: String, op: ConfigOp) -> Option<&mut BgpVrfConfig> {
+    match op {
+        ConfigOp::Delete => bgp.vrfs.get_mut(&name),
+        _ => Some(bgp.vrfs.entry(name).or_default()),
+    }
 }
 
 /// `set router bgp vrf <NAME>` — list-key handler.
@@ -300,7 +310,7 @@ pub fn config_vrf(bgp: &mut Bgp, mut args: Args, op: ConfigOp) -> Option<()> {
 /// `set router bgp vrf <NAME> rd <RD>`.
 pub fn config_vrf_rd(bgp: &mut Bgp, mut args: Args, op: ConfigOp) -> Option<()> {
     let name = args.string()?;
-    let cfg = vrf_entry(bgp, name);
+    let cfg = vrf_entry(bgp, name, op)?;
     match op {
         ConfigOp::Set => {
             let rd_str = args.string()?;
@@ -315,7 +325,7 @@ pub fn config_vrf_rd(bgp: &mut Bgp, mut args: Args, op: ConfigOp) -> Option<()> 
 /// `set router bgp vrf <NAME> router-id <IPv4>`.
 pub fn config_vrf_router_id(bgp: &mut Bgp, mut args: Args, op: ConfigOp) -> Option<()> {
     let name = args.string()?;
-    let cfg = vrf_entry(bgp, name);
+    let cfg = vrf_entry(bgp, name, op)?;
     match op {
         ConfigOp::Set => cfg.router_id = Some(args.v4addr()?),
         ConfigOp::Delete => cfg.router_id = None,
@@ -327,7 +337,7 @@ pub fn config_vrf_router_id(bgp: &mut Bgp, mut args: Args, op: ConfigOp) -> Opti
 /// `set router bgp vrf <NAME> label-mode {per-vrf|per-route|per-nexthop}`.
 pub fn config_vrf_label_mode(bgp: &mut Bgp, mut args: Args, op: ConfigOp) -> Option<()> {
     let name = args.string()?;
-    let cfg = vrf_entry(bgp, name);
+    let cfg = vrf_entry(bgp, name, op)?;
     match op {
         ConfigOp::Set => {
             let raw = args.string()?;
@@ -342,7 +352,7 @@ pub fn config_vrf_label_mode(bgp: &mut Bgp, mut args: Args, op: ConfigOp) -> Opt
 /// `set router bgp vrf <NAME> encapsulation {mpls|srv6}`.
 pub fn config_vrf_encapsulation(bgp: &mut Bgp, mut args: Args, op: ConfigOp) -> Option<()> {
     let name = args.string()?;
-    let cfg = vrf_entry(bgp, name);
+    let cfg = vrf_entry(bgp, name, op)?;
     match op {
         ConfigOp::Set => {
             let raw = args.string()?;
@@ -359,7 +369,7 @@ pub fn config_vrf_encapsulation(bgp: &mut Bgp, mut args: Args, op: ConfigOp) -> 
 /// this VRF (see [`BgpVrfConfig::inter_as_hybrid`]).
 pub fn config_vrf_inter_as_hybrid(bgp: &mut Bgp, mut args: Args, op: ConfigOp) -> Option<()> {
     let name = args.string()?;
-    let cfg = vrf_entry(bgp, name);
+    let cfg = vrf_entry(bgp, name, op)?;
     match op {
         ConfigOp::Set => cfg.inter_as_hybrid = args.boolean()?,
         ConfigOp::Delete => cfg.inter_as_hybrid = false,
@@ -401,7 +411,7 @@ fn mup_route_binding(cfg: &mut BgpVrfConfig, direction: MupSrv6Direction) -> &mu
 pub fn config_vrf_mup_route(bgp: &mut Bgp, mut args: Args, op: ConfigOp) -> Option<()> {
     let name = args.string()?;
     let direction = mup_route_direction(&args.string()?)?;
-    let cfg = vrf_entry(bgp, name);
+    let cfg = vrf_entry(bgp, name, op)?;
     match op {
         ConfigOp::Set => {
             mup_route_binding(cfg, direction);
@@ -433,7 +443,7 @@ pub fn config_vrf_mup_route_network_instance(
 ) -> Option<()> {
     let name = args.string()?;
     let direction = mup_route_direction(&args.string()?)?;
-    let cfg = vrf_entry(bgp, name);
+    let cfg = vrf_entry(bgp, name, op)?;
     match op {
         ConfigOp::Set => {
             let ni = args.string()?;
@@ -462,7 +472,7 @@ pub fn config_vrf_mup_route_mup_ext_comm(
 ) -> Option<()> {
     let name = args.string()?;
     let direction = mup_route_direction(&args.string()?)?;
-    let cfg = vrf_entry(bgp, name);
+    let cfg = vrf_entry(bgp, name, op)?;
     match op {
         ConfigOp::Set => {
             let raw = args.string()?;
@@ -492,7 +502,7 @@ pub fn config_vrf_mup_route_mup_ext_comm(
 pub fn config_vrf_mup_segment(bgp: &mut Bgp, mut args: Args, op: ConfigOp) -> Option<()> {
     let name = args.string()?;
     let mode = MupSegmentMode::parse(&args.string()?)?;
-    let cfg = vrf_entry(bgp, name);
+    let cfg = vrf_entry(bgp, name, op)?;
     match op {
         ConfigOp::Set => cfg.mobile_uplane.segment = Some(mode),
         ConfigOp::Delete if cfg.mobile_uplane.segment == Some(mode) => {
@@ -509,7 +519,7 @@ pub fn config_vrf_mup_segment(bgp: &mut Bgp, mut args: Args, op: ConfigOp) -> Op
 pub fn config_vrf_mup_dataplane(bgp: &mut Bgp, mut args: Args, op: ConfigOp) -> Option<()> {
     let name = args.string()?;
     let mode = MupDataplane::parse(&args.string()?)?;
-    let cfg = vrf_entry(bgp, name);
+    let cfg = vrf_entry(bgp, name, op)?;
     match op {
         ConfigOp::Set => cfg.mobile_uplane.dataplane = mode,
         ConfigOp::Delete => cfg.mobile_uplane.dataplane = MupDataplane::default(),
@@ -528,7 +538,7 @@ pub fn config_vrf_mup_dataplane(bgp: &mut Bgp, mut args: Args, op: ConfigOp) -> 
 pub fn config_vrf_mup_ext_comm(bgp: &mut Bgp, mut args: Args, op: ConfigOp) -> Option<()> {
     let name = args.string()?;
     let _segment = args.string()?; // segment list key (direct|interwork)
-    let cfg = vrf_entry(bgp, name);
+    let cfg = vrf_entry(bgp, name, op)?;
     match op {
         ConfigOp::Set => {
             let raw = args.string()?;
@@ -550,7 +560,7 @@ pub fn config_vrf_mup_ext_comm(bgp: &mut Bgp, mut args: Args, op: ConfigOp) -> O
 pub fn config_vrf_mup_segment_prefix(bgp: &mut Bgp, mut args: Args, op: ConfigOp) -> Option<()> {
     let name = args.string()?;
     let _segment = args.string()?; // segment list key (direct|interwork)
-    let cfg = vrf_entry(bgp, name);
+    let cfg = vrf_entry(bgp, name, op)?;
     match op {
         ConfigOp::Set => {
             let raw = args.string()?;
@@ -566,7 +576,7 @@ pub fn config_vrf_mup_segment_prefix(bgp: &mut Bgp, mut args: Args, op: ConfigOp
 pub fn config_vrf_neighbor(bgp: &mut Bgp, mut args: Args, op: ConfigOp) -> Option<()> {
     let name = args.string()?;
     let addr = args.addr()?;
-    let cfg = vrf_entry(bgp, name);
+    let cfg = vrf_entry(bgp, name, op)?;
     match op {
         ConfigOp::Set => {
             cfg.neighbors.entry(addr).or_default();
@@ -583,7 +593,7 @@ pub fn config_vrf_neighbor(bgp: &mut Bgp, mut args: Args, op: ConfigOp) -> Optio
 pub fn config_vrf_neighbor_remote_as(bgp: &mut Bgp, mut args: Args, op: ConfigOp) -> Option<()> {
     let name = args.string()?;
     let addr = args.addr()?;
-    let cfg = vrf_entry(bgp, name);
+    let cfg = vrf_entry(bgp, name, op)?;
     let nbr = cfg.neighbors.entry(addr).or_default();
     match op {
         ConfigOp::Set => nbr.remote_as = Some(args.u32()?),
@@ -597,7 +607,7 @@ pub fn config_vrf_neighbor_remote_as(bgp: &mut Bgp, mut args: Args, op: ConfigOp
 pub fn config_vrf_neighbor_peer_group(bgp: &mut Bgp, mut args: Args, op: ConfigOp) -> Option<()> {
     let name = args.string()?;
     let addr = args.addr()?;
-    let cfg = vrf_entry(bgp, name);
+    let cfg = vrf_entry(bgp, name, op)?;
     let nbr = cfg.neighbors.entry(addr).or_default();
     match op {
         ConfigOp::Set => nbr.peer_group = Some(args.string()?),
@@ -611,7 +621,7 @@ pub fn config_vrf_neighbor_peer_group(bgp: &mut Bgp, mut args: Args, op: ConfigO
 pub fn config_vrf_neighbor_description(bgp: &mut Bgp, mut args: Args, op: ConfigOp) -> Option<()> {
     let name = args.string()?;
     let addr = args.addr()?;
-    let cfg = vrf_entry(bgp, name);
+    let cfg = vrf_entry(bgp, name, op)?;
     let nbr = cfg.neighbors.entry(addr).or_default();
     match op {
         ConfigOp::Set => nbr.description = Some(args.string()?),
@@ -637,7 +647,7 @@ pub fn config_vrf_neighbor_afi_safi_enabled(
     let name = args.string()?;
     let addr = args.addr()?;
     let afi_safi: AfiSafi = args.afi_safi()?;
-    let cfg = vrf_entry(bgp, name);
+    let cfg = vrf_entry(bgp, name, op)?;
     let nbr = cfg.neighbors.entry(addr).or_default();
     match op {
         ConfigOp::Set => {
@@ -657,7 +667,7 @@ pub fn config_vrf_afi_ipv4(bgp: &mut Bgp, mut args: Args, op: ConfigOp) -> Optio
     let name = args.string()?;
     match op {
         ConfigOp::Set => {
-            vrf_entry(bgp, name)
+            vrf_entry(bgp, name, op)?
                 .ipv4_unicast
                 .get_or_insert_with(Default::default);
         }
@@ -680,7 +690,9 @@ pub fn config_vrf_afi_ipv4(bgp: &mut Bgp, mut args: Args, op: ConfigOp) -> Optio
                     let _ = handle.inbox.send(BgpVrfMsg::WithdrawNetwork { prefix });
                 }
             }
-            vrf_entry(bgp, name).ipv4_unicast = None;
+            if let Some(cfg) = vrf_entry(bgp, name, op) {
+                cfg.ipv4_unicast = None;
+            }
         }
         _ => {}
     }
@@ -697,7 +709,7 @@ pub fn config_vrf_afi_ipv4_network(bgp: &mut Bgp, mut args: Args, op: ConfigOp) 
         _ => return Some(()),
     };
     {
-        let af = vrf_entry(bgp, name.clone())
+        let af = vrf_entry(bgp, name.clone(), op)?
             .ipv4_unicast
             .get_or_insert_with(Default::default);
         if set {
@@ -728,7 +740,7 @@ pub fn config_vrf_afi_ipv6(bgp: &mut Bgp, mut args: Args, op: ConfigOp) -> Optio
     let name = args.string()?;
     match op {
         ConfigOp::Set => {
-            vrf_entry(bgp, name)
+            vrf_entry(bgp, name, op)?
                 .ipv6_unicast
                 .get_or_insert_with(Default::default);
         }
@@ -748,7 +760,9 @@ pub fn config_vrf_afi_ipv6(bgp: &mut Bgp, mut args: Args, op: ConfigOp) -> Optio
                     let _ = handle.inbox.send(BgpVrfMsg::WithdrawNetworkV6 { prefix });
                 }
             }
-            vrf_entry(bgp, name).ipv6_unicast = None;
+            if let Some(cfg) = vrf_entry(bgp, name, op) {
+                cfg.ipv6_unicast = None;
+            }
         }
         _ => {}
     }
@@ -765,7 +779,7 @@ pub fn config_vrf_afi_ipv6_network(bgp: &mut Bgp, mut args: Args, op: ConfigOp) 
         _ => return Some(()),
     };
     {
-        let af = vrf_entry(bgp, name.clone())
+        let af = vrf_entry(bgp, name.clone(), op)?
             .ipv6_unicast
             .get_or_insert_with(Default::default);
         if set {
@@ -808,7 +822,9 @@ fn vrf_redist_set(
         _ => return Some(()),
     };
     {
-        let cfg = vrf_entry(bgp, name.clone());
+        let Some(cfg) = vrf_entry(bgp, name.clone(), op) else {
+            return Some(());
+        };
         let redist = match afi {
             RedistAfi::Ipv4 => {
                 &mut cfg
@@ -846,7 +862,10 @@ fn vrf_redist_set(
 /// rationale as `config_vrf_afi_ipv4`'s network sweep).
 fn vrf_redist_clear(bgp: &mut Bgp, name: String, afi: RedistAfi) {
     let sources: Vec<BgpRedistSource> = {
-        let cfg = vrf_entry(bgp, name.clone());
+        // Delete-only path: never create the entry (see `vrf_entry`).
+        let Some(cfg) = bgp.vrfs.get_mut(&name) else {
+            return;
+        };
         let redist = match afi {
             RedistAfi::Ipv4 => cfg.ipv4_unicast.as_mut().map(|af| &mut af.redistribute),
             RedistAfi::Ipv6 => cfg.ipv6_unicast.as_mut().map(|af| &mut af.redistribute),
@@ -970,7 +989,7 @@ pub fn config_vrf_afi_ipv6_redistribute_isis(
 /// `set router bgp vrf <NAME> evpn advertise-ipv4 <bool>`.
 pub fn config_vrf_evpn_advertise_ipv4(bgp: &mut Bgp, mut args: Args, op: ConfigOp) -> Option<()> {
     let name = args.string()?;
-    let cfg = vrf_entry(bgp, name);
+    let cfg = vrf_entry(bgp, name, op)?;
     match op {
         ConfigOp::Set => cfg.evpn_advertise_v4 = args.boolean()?,
         ConfigOp::Delete => cfg.evpn_advertise_v4 = false,
@@ -982,7 +1001,7 @@ pub fn config_vrf_evpn_advertise_ipv4(bgp: &mut Bgp, mut args: Args, op: ConfigO
 /// `set router bgp vrf <NAME> evpn advertise-ipv6 <bool>`.
 pub fn config_vrf_evpn_advertise_ipv6(bgp: &mut Bgp, mut args: Args, op: ConfigOp) -> Option<()> {
     let name = args.string()?;
-    let cfg = vrf_entry(bgp, name);
+    let cfg = vrf_entry(bgp, name, op)?;
     match op {
         ConfigOp::Set => cfg.evpn_advertise_v6 = args.boolean()?,
         ConfigOp::Delete => cfg.evpn_advertise_v6 = false,
@@ -994,7 +1013,7 @@ pub fn config_vrf_evpn_advertise_ipv6(bgp: &mut Bgp, mut args: Args, op: ConfigO
 /// `set router bgp vrf <NAME> evpn l3vni <VNI>`.
 pub fn config_vrf_evpn_l3vni(bgp: &mut Bgp, mut args: Args, op: ConfigOp) -> Option<()> {
     let name = args.string()?;
-    let cfg = vrf_entry(bgp, name);
+    let cfg = vrf_entry(bgp, name, op)?;
     match op {
         ConfigOp::Set => cfg.l3vni = Some(args.u32()?),
         ConfigOp::Delete => cfg.l3vni = None,
@@ -1006,7 +1025,7 @@ pub fn config_vrf_evpn_l3vni(bgp: &mut Bgp, mut args: Args, op: ConfigOp) -> Opt
 /// `set router bgp vrf <NAME> evpn router-mac <MAC>` (symmetric IRB).
 pub fn config_vrf_evpn_router_mac(bgp: &mut Bgp, mut args: Args, op: ConfigOp) -> Option<()> {
     let name = args.string()?;
-    let cfg = vrf_entry(bgp, name);
+    let cfg = vrf_entry(bgp, name, op)?;
     match op {
         ConfigOp::Set => {
             let mac: crate::rib::MacAddr = args.string()?.parse().ok()?;

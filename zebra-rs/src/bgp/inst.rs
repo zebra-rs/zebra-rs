@@ -2441,6 +2441,12 @@ impl Bgp {
             if let Some(handle) = self.vrf_registry.remove(&name) {
                 super::vrf::despawn_bgp_vrf(&name, &handle, &self.rib_subscriber);
                 self.unregister_vrf_show(&name);
+                // Withdraw everything this VRF exported into the
+                // VPNv4/v6 Loc-RIBs from PE peers and sibling VRFs —
+                // BEFORE the ILM delete and label free below, whose
+                // reuse of the label is what turns a stale
+                // advertisement into a cross-VRF decap.
+                self.purge_vrf_exports(&name, &handle);
                 // Withdraw the AF_MPLS DecapVrf ILM ahead of
                 // returning the label. The netlink delete keys off
                 // the label alone so the IlmEntry contents are
@@ -2528,6 +2534,258 @@ impl Bgp {
         // Originate / withdraw config-driven MUP DSD segment routes now the
         // VRF set (and its SIDs / kernel context) may have changed.
         self.reconcile_mup_segment();
+    }
+
+    /// Withdraw every export a despawning VRF left in the VPNv4/v6
+    /// Loc-RIBs (its `ORIGINATED_PEER` rows under its RD) and fan the
+    /// withdrawals to PE peers and sibling VRFs.
+    ///
+    /// Without this, deleting a VRF left its exported rows advertised
+    /// forever: the per-VRF task's `Shutdown` is a bare loop-break, and
+    /// any `WithdrawExport` still in flight is dropped because the
+    /// VRF's cfg — and with it the RD lookup — is gone by the time the
+    /// message is handled. The despawn arm then frees the VRF's
+    /// service label for immediate reuse, so a remote PE still
+    /// forwarding on the stale advertisement would decap into whichever
+    /// VRF picked the label up next — a cross-VRF traffic leak. Must
+    /// run before the label goes back to the pool.
+    ///
+    /// `rd` / the Type-5 flags come from the handle's spawn-time
+    /// snapshot, not `self.vrfs` (see above). Two VRFs configured with
+    /// the same RD alias in these tables — the purge removes the
+    /// shared rows exactly like a live `WithdrawExport` would.
+    fn purge_vrf_exports(&mut self, name: &str, handle: &super::vrf::BgpVrfHandle) {
+        let Some(rd) = handle.rd else {
+            return;
+        };
+        let v4: Vec<ipnet::Ipv4Net> = self
+            .shard
+            .v4vpn
+            .get(&rd)
+            .map(|t| {
+                t.0.iter()
+                    .filter(|(_, ribs)| {
+                        ribs.iter()
+                            .any(|r| r.ident == super::route::ORIGINATED_PEER)
+                    })
+                    .map(|(p, _)| p)
+                    .collect()
+            })
+            .unwrap_or_default();
+        for prefix in v4 {
+            self.withdraw_vrf_export_v4(name, rd, prefix, handle.evpn_advertise_v4);
+        }
+        let v6: Vec<ipnet::Ipv6Net> = self
+            .shard
+            .v6vpn
+            .get(&rd)
+            .map(|t| {
+                t.0.iter()
+                    .filter(|(_, ribs)| {
+                        ribs.iter()
+                            .any(|r| r.ident == super::route::ORIGINATED_PEER)
+                    })
+                    .map(|(p, _)| p)
+                    .collect()
+            })
+            .unwrap_or_default();
+        for prefix in v6 {
+            self.withdraw_vrf_export_v6(name, rd, prefix, handle.evpn_advertise_v6);
+        }
+    }
+
+    /// Remove one VRF-originated row from the VPNv4 Loc-RIB and
+    /// propagate everywhere the matching `Export` went: re-run
+    /// best-path, re-import (or withdraw-import) into sibling VRFs,
+    /// advertise/withdraw to PE peers, and mirror the EVPN Type-5
+    /// withdrawal. Shared by the `WithdrawExport` message arm and the
+    /// despawn-time [`Self::purge_vrf_exports`], whose caller supplies
+    /// `rd` / `advertise_type5` from its own snapshot (the cfg is gone
+    /// by then).
+    fn withdraw_vrf_export_v4(
+        &mut self,
+        vrf: &str,
+        rd: bgp_packet::RouteDistinguisher,
+        prefix: ipnet::Ipv4Net,
+        advertise_type5: bool,
+    ) {
+        // VRF-originated routes always carry `ident == ORIGINATED_PEER`
+        // and `local_id == 0` (the values used in the matching Export);
+        // the remove path uses that tuple to identify the row.
+        let removed = self
+            .shard
+            .remove(Some(rd), prefix, 0, super::route::ORIGINATED_PEER);
+
+        // Re-run best-path so any remaining candidate at (rd, prefix)
+        // becomes the new selected winner. Pass that result to
+        // `route_advertise_to_peers` — empty `selected` triggers the
+        // Withdraw branch there (`peer.adj_out` cleanup, MP_UNREACH
+        // emit).
+        let selected = self.shard.select_best_path_vpn(&rd, prefix);
+
+        // Local intra-router leak, symmetric with the Export handler.
+        // If a replacement candidate survives at (rd, prefix),
+        // re-import it into sibling VRFs with the new attr; otherwise
+        // flood a withdraw using the removed row's attr to resolve the
+        // matching-VRF set. Skip the originating VRF (self-import
+        // guard).
+        {
+            let dispatcher = super::vrf::VrfImportDispatcher {
+                rib_known_vrfs: &self.rib_known_vrfs,
+                vrf_registry: &self.vrf_registry,
+            };
+            if let Some(winner) = selected.first() {
+                super::vrf::dispatch_import_v4(
+                    &dispatcher,
+                    rd,
+                    prefix,
+                    &winner.attr,
+                    0,
+                    &[],
+                    Some(vrf),
+                );
+            } else if let Some(gone) = removed.first() {
+                super::vrf::dispatch_withdraw_import_v4(
+                    &dispatcher,
+                    rd,
+                    prefix,
+                    &gone.attr,
+                    Some(vrf),
+                );
+            }
+        }
+
+        let mut top = super::peer::BgpTop {
+            router_id: &self.router_id,
+            srv6_ipv6_export: self.srv6_ipv6_export.as_ref(),
+            local_rib: &mut self.local_rib,
+            shard: &mut self.shard,
+            tx: &self.tx,
+            rib_client: &self.ctx.rib,
+            attr_store: &mut self.attr_store,
+            update_groups: &mut self.update_groups,
+            interface_addrs: &self.interface_addrs,
+            color_policy: Some(&self.color_policy),
+            flex_algo_routes: Some(&self.flex_algo_routes),
+            flex_algo_srv6_routes: Some(&self.flex_algo_srv6_routes),
+            vrf_export: None,
+            vrf_import: None,
+            nexthop_cache: None,
+            vrf_transport_v4: None,
+            vrf_transport_v6: None,
+            central_label_alloc: None,
+            as_sets_withdraw: self.as_sets_withdraw,
+        };
+        super::route::route_advertise_to_peers(
+            Some(rd),
+            prefix,
+            &selected,
+            /* source peer */ 0,
+            &mut top,
+            &mut self.peers,
+        );
+
+        bgp_vpn_trace!(
+            self.tracing,
+            vrf = %vrf,
+            %prefix,
+            rd = %rd,
+            removed = removed.len(),
+            winners = selected.len(),
+            "bgp: export withdrawn from LocalRib.v4vpn and PE peers",
+        );
+
+        // Mirror the EVPN Type-5 withdrawal.
+        if advertise_type5 {
+            self.evpn_withdraw_type5(rd, ipnet::IpNet::V4(prefix));
+        }
+    }
+
+    /// VPNv6 twin of [`Self::withdraw_vrf_export_v4`].
+    fn withdraw_vrf_export_v6(
+        &mut self,
+        vrf: &str,
+        rd: bgp_packet::RouteDistinguisher,
+        prefix: ipnet::Ipv6Net,
+        advertise_type5: bool,
+    ) {
+        let removed = self
+            .shard
+            .remove_v6vpn(rd, prefix, 0, super::route::ORIGINATED_PEER);
+        let selected = self.shard.select_best_path_vpn_v6(&rd, prefix);
+
+        // Local intra-router leak, symmetric with the ExportV6 handler:
+        // a surviving winner re-imports into sibling VRFs; otherwise
+        // flood a withdraw from the removed row's RTs. Skip the
+        // originating VRF.
+        {
+            let dispatcher = super::vrf::VrfImportDispatcher {
+                rib_known_vrfs: &self.rib_known_vrfs,
+                vrf_registry: &self.vrf_registry,
+            };
+            if let Some(winner) = selected.first() {
+                super::vrf::dispatch_import_v6(
+                    &dispatcher,
+                    rd,
+                    prefix,
+                    &winner.attr,
+                    0,
+                    &[],
+                    Some(vrf),
+                );
+            } else if let Some(gone) = removed.first() {
+                super::vrf::dispatch_withdraw_import_v6(
+                    &dispatcher,
+                    rd,
+                    prefix,
+                    &gone.attr,
+                    Some(vrf),
+                );
+            }
+        }
+
+        let mut top = super::peer::BgpTop {
+            router_id: &self.router_id,
+            srv6_ipv6_export: self.srv6_ipv6_export.as_ref(),
+            local_rib: &mut self.local_rib,
+            shard: &mut self.shard,
+            tx: &self.tx,
+            rib_client: &self.ctx.rib,
+            attr_store: &mut self.attr_store,
+            update_groups: &mut self.update_groups,
+            interface_addrs: &self.interface_addrs,
+            color_policy: Some(&self.color_policy),
+            flex_algo_routes: Some(&self.flex_algo_routes),
+            flex_algo_srv6_routes: Some(&self.flex_algo_srv6_routes),
+            vrf_export: None,
+            vrf_import: None,
+            nexthop_cache: None,
+            vrf_transport_v4: None,
+            vrf_transport_v6: None,
+            central_label_alloc: None,
+            as_sets_withdraw: self.as_sets_withdraw,
+        };
+        super::route::route_advertise_to_peers_vpnv6(
+            rd,
+            prefix,
+            &selected,
+            &mut top,
+            &mut self.peers,
+        );
+
+        bgp_vpn_trace!(
+            self.tracing,
+            vrf = %vrf,
+            %prefix,
+            rd = %rd,
+            winners = selected.len(),
+            "bgp: v6 export withdrawn from LocalRib.v6vpn and PE peers",
+        );
+
+        // Mirror the EVPN Type-5 (IPv6) withdrawal.
+        if advertise_type5 {
+            self.evpn_withdraw_type5(rd, ipnet::IpNet::V6(prefix));
+        }
     }
 
     /// Reconcile the MUP controller against `mup_c_config` at every
@@ -5458,102 +5716,12 @@ impl Bgp {
                     );
                     return;
                 };
-                // VRF-originated routes always carry `ident ==
-                // ORIGINATED_PEER` and `local_id == 0` (the values used in
-                // the matching Export); the remove path uses that tuple to
-                // identify the row.
-                let removed = self
-                    .shard
-                    .remove(Some(rd), prefix, 0, super::route::ORIGINATED_PEER);
-
-                // Re-run best-path so any remaining candidate at
-                // (rd, prefix) becomes the new selected winner.
-                // Pass that result to `route_advertise_to_peers` —
-                // empty `selected` triggers the Withdraw branch
-                // there (`peer.adj_out` cleanup, MP_UNREACH emit).
-                let selected = self.shard.select_best_path_vpn(&rd, prefix);
-
-                // Local intra-router leak, symmetric with the Export
-                // handler. If a replacement candidate survives at
-                // (rd, prefix), re-import it into sibling VRFs with
-                // the new attr; otherwise flood a withdraw using the
-                // removed row's attr to resolve the matching-VRF set.
-                // Skip the originating VRF (self-import guard).
-                {
-                    let dispatcher = super::vrf::VrfImportDispatcher {
-                        rib_known_vrfs: &self.rib_known_vrfs,
-                        vrf_registry: &self.vrf_registry,
-                    };
-                    if let Some(winner) = selected.first() {
-                        super::vrf::dispatch_import_v4(
-                            &dispatcher,
-                            rd,
-                            prefix,
-                            &winner.attr,
-                            0,
-                            &[],
-                            Some(vrf.as_str()),
-                        );
-                    } else if let Some(gone) = removed.first() {
-                        super::vrf::dispatch_withdraw_import_v4(
-                            &dispatcher,
-                            rd,
-                            prefix,
-                            &gone.attr,
-                            Some(vrf.as_str()),
-                        );
-                    }
-                }
-
-                let mut top = super::peer::BgpTop {
-                    router_id: &self.router_id,
-                    srv6_ipv6_export: self.srv6_ipv6_export.as_ref(),
-                    local_rib: &mut self.local_rib,
-                    shard: &mut self.shard,
-                    tx: &self.tx,
-                    rib_client: &self.ctx.rib,
-                    attr_store: &mut self.attr_store,
-                    update_groups: &mut self.update_groups,
-                    interface_addrs: &self.interface_addrs,
-                    color_policy: Some(&self.color_policy),
-                    flex_algo_routes: Some(&self.flex_algo_routes),
-                    flex_algo_srv6_routes: Some(&self.flex_algo_srv6_routes),
-                    vrf_export: None,
-                    vrf_import: None,
-                    nexthop_cache: None,
-                    vrf_transport_v4: None,
-                    vrf_transport_v6: None,
-                    central_label_alloc: None,
-                    as_sets_withdraw: self.as_sets_withdraw,
-                };
-                super::route::route_advertise_to_peers(
-                    Some(rd),
-                    prefix,
-                    &selected,
-                    /* source peer */ 0,
-                    &mut top,
-                    &mut self.peers,
-                );
-
-                bgp_vpn_trace!(
-                    self.tracing,
-                    vrf = %vrf,
-                    %prefix,
-                    rd = %rd,
-                    removed = removed.len(),
-                    winners = selected.len(),
-                    "bgp: export withdrawn from LocalRib.v4vpn and PE peers",
-                );
-
-                // Mirror the EVPN Type-5 withdrawal.
                 let advertise_type5 = self
                     .vrfs
                     .get(&vrf)
                     .map(|c| c.evpn_advertise_v4)
                     .unwrap_or(false);
-                if advertise_type5 {
-                    self.evpn_withdraw_type5(rd, ipnet::IpNet::V4(prefix));
-                }
+                self.withdraw_vrf_export_v4(&vrf, rd, prefix, advertise_type5);
             }
             super::vrf::BgpGlobalMsg::ExportV6 {
                 vrf,
@@ -5730,88 +5898,12 @@ impl Bgp {
                 let Some(rd) = self.vrfs.get(&vrf).and_then(|cfg| cfg.rd) else {
                     return;
                 };
-                let removed = self
-                    .shard
-                    .remove_v6vpn(rd, prefix, 0, super::route::ORIGINATED_PEER);
-                let selected = self.shard.select_best_path_vpn_v6(&rd, prefix);
-
-                // Local intra-router leak, symmetric with the ExportV6
-                // handler: a surviving winner re-imports into sibling
-                // VRFs; otherwise flood a withdraw from the removed
-                // row's RTs. Skip the originating VRF.
-                {
-                    let dispatcher = super::vrf::VrfImportDispatcher {
-                        rib_known_vrfs: &self.rib_known_vrfs,
-                        vrf_registry: &self.vrf_registry,
-                    };
-                    if let Some(winner) = selected.first() {
-                        super::vrf::dispatch_import_v6(
-                            &dispatcher,
-                            rd,
-                            prefix,
-                            &winner.attr,
-                            0,
-                            &[],
-                            Some(vrf.as_str()),
-                        );
-                    } else if let Some(gone) = removed.first() {
-                        super::vrf::dispatch_withdraw_import_v6(
-                            &dispatcher,
-                            rd,
-                            prefix,
-                            &gone.attr,
-                            Some(vrf.as_str()),
-                        );
-                    }
-                }
-
-                let mut top = super::peer::BgpTop {
-                    router_id: &self.router_id,
-                    srv6_ipv6_export: self.srv6_ipv6_export.as_ref(),
-                    local_rib: &mut self.local_rib,
-                    shard: &mut self.shard,
-                    tx: &self.tx,
-                    rib_client: &self.ctx.rib,
-                    attr_store: &mut self.attr_store,
-                    update_groups: &mut self.update_groups,
-                    interface_addrs: &self.interface_addrs,
-                    color_policy: Some(&self.color_policy),
-                    flex_algo_routes: Some(&self.flex_algo_routes),
-                    flex_algo_srv6_routes: Some(&self.flex_algo_srv6_routes),
-                    vrf_export: None,
-                    vrf_import: None,
-                    nexthop_cache: None,
-                    vrf_transport_v4: None,
-                    vrf_transport_v6: None,
-                    central_label_alloc: None,
-                    as_sets_withdraw: self.as_sets_withdraw,
-                };
-                super::route::route_advertise_to_peers_vpnv6(
-                    rd,
-                    prefix,
-                    &selected,
-                    &mut top,
-                    &mut self.peers,
-                );
-
-                bgp_vpn_trace!(
-                    self.tracing,
-                    vrf = %vrf,
-                    %prefix,
-                    rd = %rd,
-                    winners = selected.len(),
-                    "bgp: v6 export withdrawn from LocalRib.v6vpn and PE peers",
-                );
-
-                // Mirror the EVPN Type-5 (IPv6) withdrawal.
                 let advertise_type5 = self
                     .vrfs
                     .get(&vrf)
                     .map(|c| c.evpn_advertise_v6)
                     .unwrap_or(false);
-                if advertise_type5 {
-                    self.evpn_withdraw_type5(rd, ipnet::IpNet::V6(prefix));
-                }
+                self.withdraw_vrf_export_v6(&vrf, rd, prefix, advertise_type5);
             }
             super::vrf::BgpGlobalMsg::RegisterPeer { vrf, addr } => {
                 peer_index_register(&mut self.peer_index, vrf, addr);

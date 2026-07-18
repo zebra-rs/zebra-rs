@@ -33,6 +33,22 @@ Feature: BGP per-VRF VPNv6 origination (network) + receive on a remote PE
     And show command "show bgp vpnv6" in namespace "z2" should contain "2001:db8:b::/64"
     And show command "show bgp vpnv6" in namespace "z2" should contain "65001:100"
 
+  Scenario: Deleting the VRF withdraws its VPNv6 exports from the remote PE
+    Given the test topology exists
+    # z1-novrf.yaml is z1.yaml minus `router bgp vrf vrf-blue` — the
+    # BGP VRF despawn path must withdraw the exported rows from the
+    # local VPNv6 Loc-RIB and the remote PE (finding #3: they used to
+    # stay advertised while the freed service label was reused).
+    When I apply config "z1-novrf.yaml" to namespace "z1"
+    And I wait 5 seconds for BGP to operate
+    Then show command "show bgp vpnv6" in namespace "z1" should not contain "2001:db8:a::/64"
+    And show command "show bgp vpnv6" in namespace "z2" should not contain "2001:db8:a::/64"
+    And show command "show bgp vpnv6" in namespace "z2" should not contain "2001:db8:b::/64"
+    # Restore for the following scenarios.
+    When I apply config "z1.yaml" to namespace "z1"
+    And I wait 10 seconds for BGP to operate
+    Then show command "show bgp vpnv6" in namespace "z2" should contain "2001:db8:a::/64"
+
   Scenario: z1 dies; z2 withdraws the VPNv6 routes it learned from it
     Given the test topology exists
     Then show command "show bgp vpnv6" in namespace "z2" should contain "2001:db8:a::/64"
