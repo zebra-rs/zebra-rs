@@ -172,6 +172,21 @@ pub fn parse_ls_upd_multi() {
     assert_eq!(rem.len(), 0);
     println!("{}", packet);
     println!("rem len: {:?}", rem.len());
+
+    // The `# advertisements` count is derived from the LSA vector on emit, so
+    // it survives a parse -> emit -> parse round-trip.
+    let n = match &packet.payload {
+        Ospfv2Payload::LsUpdate(u) => u.lsas.len(),
+        _ => panic!("expected LsUpdate"),
+    };
+    assert_eq!(n, 7);
+    let mut buf = BytesMut::new();
+    packet.emit(&mut buf);
+    let (_, packet2) = parse(&buf).unwrap();
+    match &packet2.payload {
+        Ospfv2Payload::LsUpdate(u) => assert_eq!(u.lsas.len(), n),
+        _ => panic!("expected LsUpdate"),
+    }
 }
 
 #[test]

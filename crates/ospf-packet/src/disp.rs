@@ -188,7 +188,7 @@ impl Display for OspfLsUpdate {
             f,
             r#"== Link State Update ==
  Num advertisement: {}"#,
-            self.num_adv
+            self.lsas.len()
         )?;
         for req in self.lsas.iter() {
             write!(f, "\n{}", req)?;
@@ -218,7 +218,8 @@ impl Display for RouterLsa {
             r#"== Router LSA ==
   Flags: {}
   Num links: {}"#,
-            self.flags, self.num_links
+            self.flags,
+            self.links.len()
         )?;
         for link in self.links.iter() {
             write!(f, "\n{}", link)?;
