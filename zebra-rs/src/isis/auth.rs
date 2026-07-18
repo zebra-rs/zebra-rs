@@ -527,7 +527,7 @@ mod tests {
             lan_id: IsisNeighborId::default(),
             tlvs: vec![
                 IsisTlv::AreaAddr(IsisTlvAreaAddr {
-                    area_addr: vec![0x49, 0x00, 0x01],
+                    area_addrs: vec![vec![0x49, 0x00, 0x01]],
                 }),
                 IsisTlv::Auth(IsisTlvAuth::placeholder(
                     ISIS_AUTH_TYPE_HMAC_MD5,
@@ -814,7 +814,7 @@ mod tests {
             types: Default::default(),
             tlvs: vec![
                 IsisTlv::AreaAddr(IsisTlvAreaAddr {
-                    area_addr: vec![0x49, 0x00, 0x01],
+                    area_addrs: vec![vec![0x49, 0x00, 0x01]],
                 }),
                 IsisTlv::Auth(IsisTlvAuth::placeholder(
                     ISIS_AUTH_TYPE_HMAC_MD5,
@@ -1023,7 +1023,7 @@ mod tests {
             key_chain: None,
         };
         let mut tlvs = vec![IsisTlv::AreaAddr(IsisTlvAreaAddr {
-            area_addr: vec![0x49, 0x00, 0x01],
+            area_addrs: vec![vec![0x49, 0x00, 0x01]],
         })];
         let chains = std::collections::BTreeMap::new();
         let resolved = resolve_send(&cfg, &chains, chrono::Utc::now());
@@ -1098,7 +1098,7 @@ mod tests {
             key_chain: None,
         };
         let mut tlvs = vec![IsisTlv::AreaAddr(IsisTlvAreaAddr {
-            area_addr: vec![0x49, 0x00, 0x01],
+            area_addrs: vec![vec![0x49, 0x00, 0x01]],
         })];
         let chains = std::collections::BTreeMap::new();
         let resolved = resolve_send(&cfg, &chains, chrono::Utc::now());

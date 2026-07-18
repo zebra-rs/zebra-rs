@@ -754,7 +754,12 @@ pub fn lsp_generate(top: &mut IsisTop, level: Level, seq_floor: Option<u32>) -> 
     // already uses the AFI-prefixed form, so this keeps the LSP's Area
     // Address TLV consistent with the Hello's.
     let area_addr = top.config.net.area_id();
-    anchors.push(IsisTlvAreaAddr { area_addr }.into());
+    anchors.push(
+        IsisTlvAreaAddr {
+            area_addrs: vec![area_addr],
+        }
+        .into(),
+    );
 
     // Supported protocol.
     let mut nlpids = vec![];
@@ -2065,7 +2070,7 @@ mod tests {
     #[test]
     fn pack_keeps_anchors_in_fragment_zero() {
         let area = IsisTlv::AreaAddr(IsisTlvAreaAddr {
-            area_addr: vec![0x49, 0x00, 0x01],
+            area_addrs: vec![vec![0x49, 0x00, 0x01]],
         });
         let hostname = IsisTlv::Hostname(IsisTlvHostname {
             hostname: "r1".to_string(),
@@ -2098,7 +2103,7 @@ mod tests {
     #[test]
     fn pack_spills_into_fragment_one_when_budget_tight() {
         let area = IsisTlv::AreaAddr(IsisTlvAreaAddr {
-            area_addr: vec![0x49, 0x00, 0x01],
+            area_addrs: vec![vec![0x49, 0x00, 0x01]],
         });
         // ~30 entries × ~9 bytes ≈ 270B value — already exceeds
         // 255, so the splitter will produce two TLV 135 instances.
@@ -2173,7 +2178,7 @@ mod tests {
     #[test]
     fn placement_memory_preserves_survivors_after_removal() {
         let area = IsisTlv::AreaAddr(IsisTlvAreaAddr {
-            area_addr: vec![0x49, 0x00, 0x01],
+            area_addrs: vec![vec![0x49, 0x00, 0x01]],
         });
         let tlvs: Vec<IsisTlv> = (1..=5).map(ext_is_reach_for).collect();
         let base = IsisNeighborId::from_sys_id(&IsisSysId::default(), 0);

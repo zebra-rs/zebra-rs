@@ -155,7 +155,9 @@ pub fn hello_generate(link: &LinkTop, level: Level) -> IsisHello {
     hello.tlvs.push(tlv.into());
 
     let area_addr = link.up_config.net.area_id();
-    let tlv = IsisTlvAreaAddr { area_addr };
+    let tlv = IsisTlvAreaAddr {
+        area_addrs: vec![area_addr],
+    };
     hello.tlvs.push(tlv.into());
 
     push_if_addr_tlvs(&mut hello.tlvs, link);
@@ -231,7 +233,9 @@ pub fn hello_p2p_generate(link: &LinkTop, level: Level) -> IsisP2pHello {
 
     // Add area address TLV
     let area_addr = link.up_config.net.area_id();
-    let tlv = IsisTlvAreaAddr { area_addr };
+    let tlv = IsisTlvAreaAddr {
+        area_addrs: vec![area_addr],
+    };
     hello.tlvs.push(tlv.into());
 
     push_if_addr_tlvs(&mut hello.tlvs, link);

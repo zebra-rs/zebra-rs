@@ -624,9 +624,13 @@ impl IsisTlv {
     }
 }
 
+/// Area Addresses TLV (type 1). The value is a *sequence* of
+/// {length, area-address} pairs — ISO 10589 allows up to
+/// maxAreaAddresses (3) per IS — so the field is a list; a received
+/// TLV packing several areas keeps every one, not just the first.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct IsisTlvAreaAddr {
-    pub area_addr: Vec<u8>,
+    pub area_addrs: Vec<Vec<u8>>,
 }
 
 impl TlvEmitter for IsisTlvAreaAddr {
@@ -635,25 +639,44 @@ impl TlvEmitter for IsisTlvAreaAddr {
     }
 
     fn len(&self) -> u8 {
-        // Length(1) + Area Address, capped to 255.
-        (self.area_addr.len() + 1).min(255) as u8
+        // Mirror emit(): each pair is 1 length byte + up to 254 area
+        // octets; stop before the pair that would overflow the TLV's
+        // one-octet length budget.
+        let mut total = 0usize;
+        for addr in &self.area_addrs {
+            let pair = 1 + addr.len().min(254);
+            if total + pair > 255 {
+                break;
+            }
+            total += pair;
+        }
+        total as u8
     }
 
     fn emit(&self, buf: &mut BytesMut) {
-        let max_addr_len = self.area_addr.len().min(254);
-        buf.put_u8(max_addr_len as u8);
-        buf.put(&self.area_addr[..max_addr_len]);
+        let mut total = 0usize;
+        for addr in &self.area_addrs {
+            let alen = addr.len().min(254);
+            if total + 1 + alen > 255 {
+                break;
+            }
+            total += 1 + alen;
+            buf.put_u8(alen as u8);
+            buf.put(&addr[..alen]);
+        }
     }
 }
 
 impl ParseBe<IsisTlvAreaAddr> for IsisTlvAreaAddr {
     fn parse_be(input: &[u8]) -> IResult<&[u8], Self> {
-        let (input, len) = be_u8(input)?;
-        let (input, addr) = take(len)(input)?;
-        let area_addr = Self {
-            area_addr: addr.to_vec(),
-        };
-        Ok((input, area_addr))
+        let (input, area_addrs) = many0_complete(|i| {
+            let (i, len) = be_u8(i)?;
+            let (i, addr) = take(len)(i)?;
+            let addr: &[u8] = addr;
+            Ok((i, addr.to_vec()))
+        })
+        .parse(input)?;
+        Ok((input, Self { area_addrs }))
     }
 }
 
@@ -1334,6 +1357,13 @@ pub enum SidLabelValue {
 }
 
 impl SidLabelValue {
+    /// RFC 8667 §2.1.1.1: in the 3-octet form the 20 rightmost bits are
+    /// the MPLS label; the top 4 are reserved. Mask on both parse and
+    /// emit (FRR: `sid &= MPLS_LABEL_VALUE_MASK`) so a peer setting a
+    /// reserved bit — or a mis-scaled local value — can't yield an
+    /// illegal label ≥ 2^20 that gets re-advertised or programmed.
+    pub const LABEL_MASK: u32 = 0x000F_FFFF;
+
     pub fn len(&self) -> u8 {
         use SidLabelValue::*;
         match self {
@@ -1349,7 +1379,7 @@ impl SidLabelValue {
     pub fn emit(&self, buf: &mut BytesMut) {
         use SidLabelValue::*;
         match self {
-            Label(v) => buf.put(&u32_u8_3(*v)[..]),
+            Label(v) => buf.put(&u32_u8_3(*v & Self::LABEL_MASK)[..]),
             Index(v) => buf.put_u32(*v),
         }
     }
@@ -1368,7 +1398,10 @@ impl ParseBe<SidLabelValue> for SidLabelValue {
         match input.len() {
             3 => {
                 let (input, label) = be_u24(input)?;
-                Ok((input, SidLabelValue::Label(label)))
+                Ok((
+                    input,
+                    SidLabelValue::Label(label & SidLabelValue::LABEL_MASK),
+                ))
             }
             4 => {
                 let (input, index) = be_u32(input)?;
@@ -1412,6 +1445,27 @@ pub fn parse(input: &[u8]) -> IsisIResult<&[u8], IsisPacket> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// RFC 8667: the 3-octet SID/Label form carries the MPLS label in
+    /// the 20 rightmost bits; the top 4 are reserved and must be masked
+    /// on parse (a peer setting them) and on emit (a mis-scaled local
+    /// value) so an illegal label ≥ 2^20 never propagates.
+    #[test]
+    fn sid_label_value_masks_label_to_20_bits() {
+        let raw = [0xFFu8, 0xFF, 0xFF];
+        let (rest, v) = SidLabelValue::parse_be(&raw).expect("parse");
+        assert!(rest.is_empty());
+        assert_eq!(v, SidLabelValue::Label(0x000F_FFFF));
+
+        let mut buf = BytesMut::new();
+        SidLabelValue::Label(0xFFFF_FFFF).emit(&mut buf);
+        assert_eq!(&buf[..], &[0x0F, 0xFF, 0xFF]);
+
+        // A 4-octet index is not a label and passes through unmasked.
+        let raw = [0x00u8, 0x20, 0x00, 0x00];
+        let (_, v) = SidLabelValue::parse_be(&raw).expect("parse");
+        assert_eq!(v, SidLabelValue::Index(0x0020_0000));
+    }
 
     /// TLV 6 (IS Neighbors) — `len` and `emit` truncate consistently at
     /// MAX_NEIGHBORS. 43 neighbors used to wrap the length byte to 2
@@ -1554,34 +1608,58 @@ mod tests {
     #[test]
     fn area_addr_len_truncates_at_255() {
         let short = IsisTlvAreaAddr {
-            area_addr: vec![0x49, 0x00, 0x01],
+            area_addrs: vec![vec![0x49, 0x00, 0x01]],
         };
         // 1 (length byte) + 3 (address) = 4.
         assert_eq!(short.len(), 4);
 
         let exact = IsisTlvAreaAddr {
-            area_addr: vec![0xAA; 254],
+            area_addrs: vec![vec![0xAA; 254]],
         };
         // 1 + 254 = 255.
         assert_eq!(exact.len(), 255);
 
+        // A single over-long address is capped at 254 octets, and a
+        // second address that no longer fits the 255-byte TLV budget
+        // is dropped from the length — mirroring emit().
         let long = IsisTlvAreaAddr {
-            area_addr: vec![0xAA; 300],
+            area_addrs: vec![vec![0xAA; 300], vec![0x49, 0x00, 0x01]],
         };
-        // Capped to 255.
         assert_eq!(long.len(), 255);
     }
 
     #[test]
     fn area_addr_emit_truncates_at_255() {
         let long = IsisTlvAreaAddr {
-            area_addr: vec![0xAA; 300],
+            area_addrs: vec![vec![0xAA; 300], vec![0x49, 0x00, 0x01]],
         };
         let mut buf = BytesMut::new();
         long.emit(&mut buf);
-        // 1 (length byte) + 254 (address data) = 255.
+        // 1 (length byte) + 254 (address data) = 255; the second
+        // address doesn't fit and is dropped, matching len().
         assert_eq!(buf.len(), 255);
         assert_eq!(buf[0], 254);
+    }
+
+    /// Finding #6: the TLV 1 value is a sequence of {len, area} pairs
+    /// (maxAreaAddresses = 3); the parser used to keep only the first
+    /// pair, so a neighbor packing two areas into one TLV lost its
+    /// second area and L1 area matching failed.
+    #[test]
+    fn area_addr_parses_all_areas() {
+        let raw = [3u8, 0x49, 0x00, 0x01, 3, 0x49, 0x00, 0x02];
+        let (rest, tlv) = IsisTlvAreaAddr::parse_be(&raw).expect("parse");
+        assert!(rest.is_empty());
+        assert_eq!(
+            tlv.area_addrs,
+            vec![vec![0x49, 0x00, 0x01], vec![0x49, 0x00, 0x02]]
+        );
+
+        // Round-trip: emit reproduces both pairs and len() agrees.
+        let mut buf = BytesMut::new();
+        tlv.emit(&mut buf);
+        assert_eq!(&buf[..], &raw[..]);
+        assert_eq!(tlv.len() as usize, raw.len());
     }
 
     #[test]

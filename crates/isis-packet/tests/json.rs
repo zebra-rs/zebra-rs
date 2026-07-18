@@ -91,7 +91,7 @@ pub fn json_round_trip_test() {
 
     // Test complex structure: IsisTlvAreaAddr
     let area_addr = IsisTlvAreaAddr {
-        area_addr: vec![0x49, 0x00, 0x01],
+        area_addrs: vec![vec![0x49, 0x00, 0x01]],
     };
     let serialized = serde_json::to_string(&area_addr).unwrap();
     let deserialized: IsisTlvAreaAddr = serde_json::from_str(&serialized).unwrap();
