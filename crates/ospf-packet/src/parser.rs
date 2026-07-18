@@ -1697,17 +1697,21 @@ impl ExtPrefixSubTlv {
     }
 }
 
-// RFC 8665 §4 Prefix SID Sub-TLV flags.
+// RFC 8665 §6 (OSPFv2) / RFC 8666 §7.1 (OSPFv3) Prefix-SID Sub-TLV flags.
+// Wire bit values (matching FRR EXT_SUBTLV_PREFIX_SID_*FLG): NP = 0x40,
+// M = 0x20, E = 0x10, V = 0x08, L = 0x04; the MSB and the low two bits are
+// reserved. Fields are declared LSB-first for the bitfield macro.
 #[bitfield(u8, debug = true)]
 #[derive(PartialEq)]
 pub struct PrefixSidFlags {
-    #[bits(3)]
-    pub resvd: u8,
+    #[bits(2)]
+    pub resvd_lo: u8,
     pub l_flag: bool,
     pub v_flag: bool,
     pub e_flag: bool,
     pub m_flag: bool,
     pub np_flag: bool,
+    pub resvd_hi: bool,
 }
 
 impl ParseBe<PrefixSidFlags> for PrefixSidFlags {
@@ -2907,6 +2911,19 @@ mod tests {
         // gracefully rather than pre-allocate ~gigabytes (regression for the
         // Vec::with_capacity DoS).
         assert!(parse_lsas_with_raw(&[], 0xFFFF_FFFF).is_err());
+    }
+
+    #[test]
+    fn prefix_sid_flags_rfc8665_bit_positions() {
+        // RFC 8665 §6 / RFC 8666 §7.1 (and FRR EXT_SUBTLV_PREFIX_SID_*FLG).
+        assert_eq!(PrefixSidFlags::new().with_np_flag(true).into_bits(), 0x40);
+        assert_eq!(PrefixSidFlags::new().with_m_flag(true).into_bits(), 0x20);
+        assert_eq!(PrefixSidFlags::new().with_e_flag(true).into_bits(), 0x10);
+        assert_eq!(PrefixSidFlags::new().with_v_flag(true).into_bits(), 0x08);
+        assert_eq!(PrefixSidFlags::new().with_l_flag(true).into_bits(), 0x04);
+        // A received NP flag (0x40) decodes as NP, not M.
+        let f = PrefixSidFlags::from_bits(0x40);
+        assert!(f.np_flag() && !f.m_flag());
     }
 
     /// RFC 2328 §D.4.1-D.4.2: the checksum excludes the 64-bit

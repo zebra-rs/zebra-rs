@@ -1101,7 +1101,7 @@ fn format_adj_sid_flags(flags: &ospf_packet::AdjSidFlags) -> String {
     format!("0x{:02x} : {}", u8::from(*flags), joined)
 }
 
-/// Hex byte plus decoded letters, e.g. "0x20 : NP" (RFC 8666 §5).
+/// Hex byte plus decoded letters, e.g. "0x40 : NP" (RFC 8666 §7.1).
 fn format_prefix_sid_flags(flags: &ospf_packet::PrefixSidFlags) -> String {
     let mut names = Vec::new();
     if flags.np_flag() {
@@ -2446,9 +2446,9 @@ mod tests {
             "{out}"
         );
         assert!(out.contains("Prefix-SID Sub-TLV:"), "{out}");
-        // Index form carries NP (no-PHP) per the v3 origination
-        // path; NP is the top bit of the flags octet.
-        assert!(out.contains("Flags: 0x80 : NP"), "{out}");
+        // Index form carries NP (no-PHP) per the v3 origination path;
+        // NP is bit 1 of the flags octet (0x40) per RFC 8666 §7.1.
+        assert!(out.contains("Flags: 0x40 : NP"), "{out}");
         assert!(out.contains("Algorithm: 0 (SPF)"), "{out}");
         assert!(out.contains("SID/Label: Index: 100"), "{out}");
     }

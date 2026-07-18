@@ -1,0 +1,28 @@
+# o2 — the peer that parses o1's advertisements. Runs OSPFv3 area 0 with
+# SR-MPLS and its own loopback Prefix-SID (index 200 -> label 16200). Its
+# `show ospfv3 database detail` renders the Prefix-SID sub-TLV it decoded
+# from o1's flooded E-Intra-Area-Prefix LSA, proving the on-wire flag byte.
+interface:
+- if-name: lo
+  ipv6:
+    address: 2001:db8::2/128
+- if-name: o2-o1
+  ipv6:
+    address: 2001:db8:12::2/64
+system:
+  hostname: o2
+router:
+  ospfv3:
+    router-id: 10.0.0.2
+    segment-routing:
+      mpls: {}
+    area:
+    - area-id: 0.0.0.0
+      interface:
+      - if-name: lo
+        enabled: true
+        prefix-sid:
+          index: 200
+      - if-name: o2-o1
+        enabled: true
+        network-type: point-to-point
