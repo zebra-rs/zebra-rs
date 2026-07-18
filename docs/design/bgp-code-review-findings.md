@@ -6,7 +6,7 @@ candidate was checked by an independent adversarial verifier that had to name a
 concrete trigger and quote the decisive lines, then a fresh gap sweep added more.
 
 **Result: 34 confirmed correctness bugs + 15 confirmed cleanup items.**
-**Status 2026-07-18: top-12 fixed and merged** (PRs #1962, #1972, #1981,
+**Status 2026-07-18: top-13 fixed and merged** (PRs #1962, #1972, #1981,
 #1984, #1987, #1991, #1997, and the finding-#9 branch); fixes below the
 cap remain open. Three
 candidates were refuted (two vty-disconnect "panics" are guarded by detached
@@ -201,7 +201,7 @@ policy no longer notifies this peer — the neighbor stays route-less until a ne
 out-policy name is bound. (v6/VPN families: the name-gate stops the *content* but
 the missing re-advertise leaves suppressed routes suppressed.)
 
-### 13. Missing lowest-BGP-Identifier tie-breaker — `route.rs:1908`
+### 13. Missing lowest-BGP-Identifier tie-breaker — `route.rs:1908` — FIXED (is_better compares BGP Identifier / ORIGINATOR_ID; slot index and path-id are final deterministic fallbacks)
 
 The final best-path tie-break compares the internal peer slot index `ident`
 (assigned in registration order, `peer_map.rs:68`) then `remote_id` (which is the

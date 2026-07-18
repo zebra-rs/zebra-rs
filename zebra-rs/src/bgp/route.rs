@@ -1570,6 +1570,8 @@ pub enum Reason {
     LocalPref,
     Med,
     RouterId,
+    PeerAddress,
+    PathId,
     NotSelected,
 }
 
@@ -1585,7 +1587,9 @@ impl std::fmt::Display for Reason {
             Reason::AsPath => write!(f, "AS Path length"),
             Reason::LocalPref => write!(f, "Local preference"),
             Reason::Med => write!(f, "MED attribute"),
-            Reason::RouterId => write!(f, "Router ID"),
+            Reason::RouterId => write!(f, "lowest BGP Identifier"),
+            Reason::PeerAddress => write!(f, "lowest peer"),
+            Reason::PathId => write!(f, "lowest path-id"),
             Reason::NotSelected => write!(f, "Not selected"),
         }
     }
@@ -1922,15 +1926,51 @@ impl<P: Prefix + Copy> LocalRibTable<P> {
             return (cand_type_rank < incb_type_rank, Reason::Origin);
         }
 
-        if cand.ident != incb.ident {
-            return (cand.ident < incb.ident, Reason::RouterId);
+        // RFC 4271 §9.1.2.2 (f): lowest BGP Identifier. Per RFC 4456 §9
+        // a reflected route is compared on its ORIGINATOR_ID (the true
+        // originator's Identifier) rather than the reflecting peer's;
+        // `bgp_identifier` folds that in. `router_id` is the peer's
+        // OPEN-learned BGP Identifier — the previous code compared
+        // `cand.ident` (the internal peer slot index, assigned in
+        // registration order) here instead, so best-path was
+        // order-dependent and could disagree with an RFC-conformant
+        // router (a runtime-added neighbor always lost this tie).
+        let cand_id = Self::bgp_identifier(cand);
+        let incb_id = Self::bgp_identifier(incb);
+        if cand_id != incb_id {
+            return (cand_id < incb_id, Reason::RouterId);
         }
 
+        // RFC 4271 §9.1.2.2 (g): lowest peer address. The rib carries no
+        // peer address, so the slot index stands in — only reached when
+        // two peers share a BGP Identifier (a misconfig), where any
+        // deterministic order suffices.
+        if cand.ident != incb.ident {
+            return (cand.ident < incb.ident, Reason::PeerAddress);
+        }
+
+        // Same peer, same Identifier: two AddPath candidates for one
+        // prefix. Disambiguate by path-id so selection among them is
+        // deterministic (not an RFC tie-break — `remote_id` is the
+        // AddPath path-id, not a router-id, which the old `Reason`
+        // label wrongly implied).
         if cand.remote_id != incb.remote_id {
-            return (cand.remote_id < incb.remote_id, Reason::RouterId);
+            return (cand.remote_id < incb.remote_id, Reason::PathId);
         }
 
         (false, Reason::NotSelected)
+    }
+
+    /// The BGP Identifier a path is compared on for the RFC 4271
+    /// §9.1.2.2(f) tie-break: the route's ORIGINATOR_ID when it was
+    /// reflected (RFC 4456 §9), else the advertising peer's OPEN-learned
+    /// Identifier carried on `router_id`.
+    fn bgp_identifier(rib: &BgpRib) -> Ipv4Addr {
+        rib.attr
+            .originator_id
+            .as_ref()
+            .map(|o| o.id)
+            .unwrap_or(rib.router_id)
     }
 
     fn effective_local_pref(rib: &BgpRib) -> u32 {
@@ -21273,5 +21313,93 @@ mod srv6_sid_family_tests {
         );
         let v6 = select_fib_entry_v6(&rib, Some(&t), None).expect("v6 entry");
         assert_eq!(entry_segs(&v6), vec![dt6]);
+    }
+}
+
+#[cfg(test)]
+mod bestpath_router_id_tests {
+    use super::*;
+    use bgp_packet::{LocalPref, OriginatorId};
+    use ipnet::Ipv4Net;
+    use std::net::Ipv4Addr;
+    use std::str::FromStr;
+
+    /// Two otherwise-equal iBGP paths (same LOCAL_PREF, AS_PATH, …) that
+    /// differ only in the peer's BGP Identifier and slot index. `ident`
+    /// (slot index) and `router_id` (BGP Identifier) are set INVERSELY,
+    /// so a decision based on `ident` disagrees with the RFC one.
+    fn ibgp_row(ident: usize, router_id: [u8; 4]) -> BgpRib {
+        let mut attr = BgpAttr {
+            aspath: Some(As4Path::from_str("65001").unwrap()),
+            local_pref: Some(LocalPref::default()),
+            ..Default::default()
+        };
+        attr.origin = Some(bgp_packet::Origin::Igp);
+        BgpRib::new(
+            ident,
+            Ipv4Addr::from(router_id),
+            BgpRibType::IBGP,
+            0,
+            0,
+            &attr,
+            None,
+            None,
+            false,
+        )
+    }
+
+    /// Review finding #13: the tie-break must be the lowest BGP
+    /// Identifier (RFC 4271 §9.1.2.2 f), not the internal peer slot
+    /// index. Here the lower-Identifier path has the HIGHER slot index,
+    /// so the old `ident` comparison picked the wrong winner — and it
+    /// was order-dependent (a runtime-added neighbor always lost).
+    #[test]
+    fn tie_break_prefers_lowest_bgp_identifier_not_slot_index() {
+        // ident 1 has the higher Identifier 3.3.3.3; ident 5 the lower
+        // 1.1.1.1 — the RFC winner.
+        let high_id_low_slot = ibgp_row(1, [3, 3, 3, 3]);
+        let low_id_high_slot = ibgp_row(5, [1, 1, 1, 1]);
+
+        let (better, reason) =
+            LocalRibTable::<Ipv4Net>::is_better(&low_id_high_slot, &high_id_low_slot);
+        assert!(better, "lowest BGP Identifier wins regardless of slot");
+        assert!(matches!(reason, Reason::RouterId));
+
+        // Symmetric — and order-independent.
+        let (better, _) = LocalRibTable::<Ipv4Net>::is_better(&high_id_low_slot, &low_id_high_slot);
+        assert!(!better, "the higher Identifier must not win");
+    }
+
+    /// RFC 4456 §9: a reflected route is compared on its ORIGINATOR_ID,
+    /// not the reflecting peer's Identifier.
+    #[test]
+    fn tie_break_uses_originator_id_when_present() {
+        let mut a = ibgp_row(1, [9, 9, 9, 9]); // high peer Identifier…
+        a.attr = {
+            let mut attr = (*a.attr).clone();
+            attr.originator_id = Some(OriginatorId {
+                id: Ipv4Addr::new(1, 1, 1, 1), // …but low ORIGINATOR_ID
+            });
+            std::sync::Arc::new(attr)
+        };
+        let b = ibgp_row(2, [2, 2, 2, 2]); // no ORIGINATOR_ID → its router_id
+
+        let (better, reason) = LocalRibTable::<Ipv4Net>::is_better(&a, &b);
+        assert!(better, "1.1.1.1 originator beats 2.2.2.2 peer id");
+        assert!(matches!(reason, Reason::RouterId));
+    }
+
+    /// Same peer / same Identifier, two AddPath candidates: the path-id
+    /// disambiguates, reported as `PathId` (not the old `RouterId`
+    /// misnomer).
+    #[test]
+    fn addpath_candidates_disambiguate_by_path_id() {
+        let mut p1 = ibgp_row(3, [4, 4, 4, 4]);
+        p1.remote_id = 1;
+        let mut p2 = ibgp_row(3, [4, 4, 4, 4]);
+        p2.remote_id = 2;
+        let (better, reason) = LocalRibTable::<Ipv4Net>::is_better(&p1, &p2);
+        assert!(better, "lower path-id wins the final tie");
+        assert!(matches!(reason, Reason::PathId));
     }
 }
