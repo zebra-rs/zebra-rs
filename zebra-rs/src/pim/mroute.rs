@@ -29,6 +29,7 @@ const MRT_DEL_VIF: c_int = 203;
 const MRT_ADD_MFC: c_int = 204;
 const MRT_DEL_MFC: c_int = 205;
 const MRT_PIM: c_int = 208;
+const MRT_TABLE: c_int = 209;
 
 const VIFF_USE_IFINDEX: u8 = 0x8;
 const VIFF_REGISTER: u8 = 0x4;
@@ -155,7 +156,10 @@ pub struct ForwardingPlane {
 }
 
 impl ForwardingPlane {
-    pub fn new(ctx: &ProtoContext) -> std::io::Result<Self> {
+    /// `table_id != 0` selects a non-default kernel multicast routing
+    /// table (`MRT_TABLE`, must precede `MRT_INIT`) — the per-VRF
+    /// instance path. Requires `CONFIG_IP_MROUTE_MULTIPLE_TABLES`.
+    pub fn new(ctx: &ProtoContext, table_id: u32) -> std::io::Result<Self> {
         // The mroute socket must be a raw IGMP socket. MRT_INIT
         // claims the (per-table) multicast-routing instance — EADDRINUSE
         // means another daemon owns it.
@@ -163,6 +167,9 @@ impl ForwardingPlane {
         sock.set_nonblocking(true)?;
         // Upcalls burst with traffic; keep a deep receive buffer.
         let _ = sock.set_recv_buffer_size(1024 * 1024);
+        if table_id != 0 {
+            mrt_setsockopt(&sock, MRT_TABLE, &table_id)?;
+        }
         let one: c_int = 1;
         mrt_setsockopt(&sock, MRT_INIT, &one)?;
         // PIM mode: enables register decapsulation and the

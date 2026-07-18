@@ -170,13 +170,15 @@ pub enum Message {
         name: String,
     },
     /// Next-Hop Tracking: register interest in resolving `nh` against
-    /// the global table. Triggers an immediate `RibRx::NexthopUpdate`
-    /// back to `proto` and subsequent updates whenever the covering
-    /// route changes. Registrations are deduplicated + refcounted per
-    /// nexthop in `Rib::nht`.
+    /// the table selected by `vrf_id` (0 = the global table, else a
+    /// VRF's kernel table id). Triggers an immediate
+    /// `RibRx::NexthopUpdate` back to `proto` and subsequent updates
+    /// whenever the covering route changes. Registrations are
+    /// deduplicated + refcounted per (vrf, nexthop) in `Rib::nht`.
     NexthopRegister {
         proto: String,
         nh: std::net::IpAddr,
+        vrf_id: u32,
     },
     /// Fast-reroute switchover trigger (see
     /// `docs/design/nexthop-protect-kernel-failover.md`): the sender
@@ -197,6 +199,7 @@ pub enum Message {
     NexthopUnregister {
         proto: String,
         nh: std::net::IpAddr,
+        vrf_id: u32,
     },
     /// Reserve a dynamic MPLS label block of `size` labels for `proto`
     /// from the central [`super::label_manager::LabelManager`]. The RIB
@@ -1115,11 +1118,22 @@ impl Rib {
 
     /// Push the current value of `blocks[name]` (Some / None) to every
     /// protocol that has registered a watch on this name.
-    /// Resolve `nh` against the appropriate global (default-VRF) table.
-    fn nht_resolve(&self, nh: IpAddr) -> super::nht::NexthopResolution {
+    /// Resolve `nh` against the table selected by `vrf_id` (0 = the
+    /// global table). A VRF whose table doesn't exist yet resolves as
+    /// unreachable — the next VRF route event re-resolves.
+    fn nht_resolve(&self, vrf_id: u32, nh: IpAddr) -> super::nht::NexthopResolution {
+        if vrf_id == 0 {
+            return match nh {
+                IpAddr::V4(a) => super::nht::resolve_v4(&self.table, a),
+                IpAddr::V6(a) => super::nht::resolve_v6(&self.table_v6, a),
+            };
+        }
+        let Some(tables) = self.vrf_tables.get(&vrf_id) else {
+            return super::nht::NexthopResolution::default();
+        };
         match nh {
-            IpAddr::V4(a) => super::nht::resolve_v4(&self.table, a),
-            IpAddr::V6(a) => super::nht::resolve_v6(&self.table_v6, a),
+            IpAddr::V4(a) => super::nht::resolve_v4(&tables.table, a),
+            IpAddr::V6(a) => super::nht::resolve_v6(&tables.table_v6, a),
         }
     }
 
@@ -1127,10 +1141,10 @@ impl Rib {
     /// cache, and push the current resolution to the registering
     /// client immediately (the "synchronous-first" reply — even on a
     /// non-fresh register, so a late joiner gets the state).
-    fn nht_register(&mut self, proto: String, nh: IpAddr) {
-        self.nht.register(proto.clone(), nh);
-        let resolution = self.nht_resolve(nh);
-        if let Some(entry) = self.nht.entries.get_mut(&nh) {
+    fn nht_register(&mut self, proto: String, vrf_id: u32, nh: IpAddr) {
+        self.nht.register(proto.clone(), vrf_id, nh);
+        let resolution = self.nht_resolve(vrf_id, nh);
+        if let Some(entry) = self.nht.entries.get_mut(&(vrf_id, nh)) {
             entry.resolution = resolution.clone();
         }
         if let Some(sub) = self.client_registry.subscriber_for_proto(&proto) {
@@ -1160,14 +1174,14 @@ impl Rib {
     /// global-table route change. (Recompute-all for now; narrowing to
     /// only the affected nexthops is a follow-up, as is firing on
     /// link/addr changes.)
-    fn nht_recompute_and_notify(&mut self) {
+    pub(crate) fn nht_recompute_and_notify(&mut self) {
         if self.nht.entries.is_empty() {
             return;
         }
         let mut updates: Vec<(IpAddr, super::nht::NexthopResolution, Vec<String>)> = Vec::new();
-        for nh in self.nht.tracked() {
-            let resolution = self.nht_resolve(nh);
-            if let Some(entry) = self.nht.entries.get_mut(&nh)
+        for (vrf_id, nh) in self.nht.tracked() {
+            let resolution = self.nht_resolve(vrf_id, nh);
+            if let Some(entry) = self.nht.entries.get_mut(&(vrf_id, nh))
                 && entry.resolution != resolution
             {
                 entry.resolution = resolution.clone();
@@ -2622,8 +2636,8 @@ impl Rib {
                     self.ipv6_route_del_vrf(table_id, &prefix, rib).await;
                 }
             }
-            Message::NexthopRegister { proto, nh } => {
-                self.nht_register(proto, nh);
+            Message::NexthopRegister { proto, nh, vrf_id } => {
+                self.nht_register(proto, vrf_id, nh);
             }
             Message::ProtectSwitch { addr } => {
                 let (rewired, evicted) =
@@ -2646,8 +2660,8 @@ impl Rib {
                     tracing::debug!("ProtectSwitch {addr} table {table_id}: no eligible groups");
                 }
             }
-            Message::NexthopUnregister { proto, nh } => {
-                self.nht.unregister(&proto, nh);
+            Message::NexthopUnregister { proto, nh, vrf_id } => {
+                self.nht.unregister(&proto, vrf_id, nh);
             }
             Message::LabelBlockRequest { proto, size } => {
                 self.label_block_request(proto, size);

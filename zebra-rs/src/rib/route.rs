@@ -597,6 +597,9 @@ impl Rib {
             after.as_ref(),
             table_id,
         );
+        // VRF-aware NHT: a VRF route change can move tracked
+        // resolutions (PIM RPF in a VRF etc.).
+        self.nht_recompute_and_notify();
     }
 
     pub async fn ipv4_route_del_vrf(&mut self, table_id: u32, prefix: &Ipv4Net, entry: RibEntry) {
@@ -630,6 +633,9 @@ impl Rib {
             after.as_ref(),
             table_id,
         );
+        // VRF-aware NHT: a VRF route change can move tracked
+        // resolutions (PIM RPF in a VRF etc.).
+        self.nht_recompute_and_notify();
     }
 
     pub async fn ipv6_route_add_vrf(
@@ -677,6 +683,9 @@ impl Rib {
             after.as_ref(),
             table_id,
         );
+        // VRF-aware NHT: a VRF route change can move tracked
+        // resolutions (PIM RPF in a VRF etc.).
+        self.nht_recompute_and_notify();
     }
 
     pub async fn ipv6_route_del_vrf(&mut self, table_id: u32, prefix: &Ipv6Net, entry: RibEntry) {
@@ -710,6 +719,9 @@ impl Rib {
             after.as_ref(),
             table_id,
         );
+        // VRF-aware NHT: a VRF route change can move tracked
+        // resolutions (PIM RPF in a VRF etc.).
+        self.nht_recompute_and_notify();
     }
 
     /// Best-path selection + FIB reconcile for one VRF prefix. Mirrors

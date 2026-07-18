@@ -1,0 +1,29 @@
+vrf:
+- name: mvrf
+interface:
+- if-name: eth2
+  vrf: mvrf
+  ipv4:
+    address: 10.8.13.2/24
+- if-name: eth5
+  vrf: mvrf
+  ipv4:
+    address: 10.8.15.1/24
+router:
+  static:
+    vrf:
+    - name: mvrf
+      ipv4:
+        route:
+        - prefix: 10.8.14.0/24
+          nexthop:
+          - address: 10.8.13.1
+  pim:
+    vrf:
+    - name: mvrf
+      interface:
+      - if-name: eth2
+        dr-priority: 1
+      - if-name: eth5
+        igmp:
+          enabled: true

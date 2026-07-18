@@ -309,39 +309,41 @@ pub struct NhtEntry {
     pub watchers: BTreeSet<String>,
 }
 
-/// Registry of tracked nexthops, keyed by address. One entry per
-/// distinct nexthop regardless of how many clients/routes depend on
-/// it; an entry is dropped when its last watcher unregisters.
+/// Registry of tracked nexthops, keyed by (vrf table id, address) —
+/// `vrf_id == 0` is the global table. One entry per distinct key
+/// regardless of how many clients/routes depend on it; an entry is
+/// dropped when its last watcher unregisters.
 #[derive(Debug, Default)]
 pub struct NhtRegistry {
-    pub entries: HashMap<IpAddr, NhtEntry>,
+    pub entries: HashMap<(u32, IpAddr), NhtEntry>,
 }
 
 impl NhtRegistry {
-    /// Add `client` as a watcher of `nh`. Returns `true` when this is
-    /// the first registration for `nh` (the caller should resolve it).
-    pub fn register(&mut self, client: String, nh: IpAddr) -> bool {
-        let entry = self.entries.entry(nh).or_default();
+    /// Add `client` as a watcher of `nh` in `vrf_id`. Returns `true`
+    /// when this is the first registration (the caller should resolve
+    /// it).
+    pub fn register(&mut self, client: String, vrf_id: u32, nh: IpAddr) -> bool {
+        let entry = self.entries.entry((vrf_id, nh)).or_default();
         let fresh = entry.watchers.is_empty();
         entry.watchers.insert(client);
         fresh
     }
 
-    /// Remove `client` from `nh`'s watchers. Returns `true` when the
+    /// Remove `client` from the watchers. Returns `true` when the
     /// entry has no watchers left and was dropped.
-    pub fn unregister(&mut self, client: &str, nh: IpAddr) -> bool {
-        if let Some(entry) = self.entries.get_mut(&nh) {
+    pub fn unregister(&mut self, client: &str, vrf_id: u32, nh: IpAddr) -> bool {
+        if let Some(entry) = self.entries.get_mut(&(vrf_id, nh)) {
             entry.watchers.remove(client);
             if entry.watchers.is_empty() {
-                self.entries.remove(&nh);
+                self.entries.remove(&(vrf_id, nh));
                 return true;
             }
         }
         false
     }
 
-    /// Tracked nexthop addresses (for re-resolution on a RIB change).
-    pub fn tracked(&self) -> Vec<IpAddr> {
+    /// Tracked (vrf, nexthop) pairs (for re-resolution on a RIB change).
+    pub fn tracked(&self) -> Vec<(u32, IpAddr)> {
         self.entries.keys().copied().collect()
     }
 }
@@ -718,10 +720,13 @@ mod tests {
     fn registry_dedup_and_refcount() {
         let mut reg = NhtRegistry::default();
         let nh: IpAddr = "10.0.0.8".parse().unwrap();
-        assert!(reg.register("bgp".into(), nh)); // first → fresh
-        assert!(!reg.register("static".into(), nh)); // second watcher → not fresh
-        assert!(!reg.unregister("bgp", nh)); // still has "static"
-        assert!(reg.unregister("static", nh)); // last watcher → dropped
+        assert!(reg.register("bgp".into(), 0, nh)); // first → fresh
+        assert!(!reg.register("static".into(), 0, nh)); // second watcher → not fresh
+        // Same address in a VRF is a distinct entry.
+        assert!(reg.register("pim:vrf:red".into(), 7, nh));
+        assert!(!reg.unregister("bgp", 0, nh)); // still has "static"
+        assert!(reg.unregister("static", 0, nh)); // last global watcher → dropped
+        assert!(reg.unregister("pim:vrf:red", 7, nh));
         assert!(reg.entries.is_empty());
     }
 }
