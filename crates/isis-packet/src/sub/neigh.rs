@@ -307,10 +307,6 @@ impl IsisSubTlv {
         }
     }
 
-    pub fn is_empty(&self) -> bool {
-        self.len() == 0
-    }
-
     pub fn emit(&self, buf: &mut BytesMut) {
         use IsisSubTlv::*;
         match self {
@@ -698,101 +694,63 @@ impl IsisSubBandwidthMetric {
     }
 }
 
-/// RFC 8570 §4.5 — Unidirectional Residual Bandwidth (sub-TLV 37).
-/// Maximum bandwidth minus bandwidth currently reserved by RSVP-TE.
-#[derive(Debug, Default, Clone, Serialize, Deserialize, PartialEq)]
-pub struct IsisSubResidualBw {
-    pub bw: IsisSubBandwidthMetric,
+/// Generates one RFC 8570 bandwidth wrapper: a newtype over
+/// [`IsisSubBandwidthMetric`] whose codec differs only by sub-TLV
+/// code (the shared ident names both the `IsisNeighCode` and the
+/// `IsisSubTlv` variant). The three were previously identical
+/// hand-written copies.
+macro_rules! bandwidth_sub_tlv {
+    ($(#[$doc:meta])* $ty:ident => $variant:ident) => {
+        $(#[$doc])*
+        #[derive(Debug, Default, Clone, Serialize, Deserialize, PartialEq)]
+        pub struct $ty {
+            pub bw: IsisSubBandwidthMetric,
+        }
+
+        impl ParseBe<$ty> for $ty {
+            fn parse_be(input: &[u8]) -> IResult<&[u8], Self> {
+                let (input, bw) = IsisSubBandwidthMetric::parse(input)?;
+                Ok((input, Self { bw }))
+            }
+        }
+
+        impl TlvEmitter for $ty {
+            fn typ(&self) -> u8 {
+                IsisNeighCode::$variant.into()
+            }
+            fn len(&self) -> u8 {
+                4
+            }
+            fn emit(&self, buf: &mut BytesMut) {
+                self.bw.emit(buf);
+            }
+        }
+
+        impl From<$ty> for IsisSubTlv {
+            fn from(v: $ty) -> Self {
+                IsisSubTlv::$variant(v)
+            }
+        }
+    };
 }
 
-impl ParseBe<IsisSubResidualBw> for IsisSubResidualBw {
-    fn parse_be(input: &[u8]) -> IResult<&[u8], Self> {
-        let (input, bw) = IsisSubBandwidthMetric::parse(input)?;
-        Ok((input, Self { bw }))
-    }
-}
+bandwidth_sub_tlv!(
+    /// RFC 8570 §4.5 — Unidirectional Residual Bandwidth (sub-TLV 37).
+    /// Maximum bandwidth minus bandwidth currently reserved by RSVP-TE.
+    IsisSubResidualBw => ResidualBw
+);
 
-impl TlvEmitter for IsisSubResidualBw {
-    fn typ(&self) -> u8 {
-        IsisNeighCode::ResidualBw.into()
-    }
-    fn len(&self) -> u8 {
-        4
-    }
-    fn emit(&self, buf: &mut BytesMut) {
-        self.bw.emit(buf);
-    }
-}
+bandwidth_sub_tlv!(
+    /// RFC 8570 §4.6 — Unidirectional Available Bandwidth (sub-TLV 38).
+    /// Residual minus the measured non-RSVP-TE forwarding load.
+    IsisSubAvailableBw => AvailableBw
+);
 
-impl From<IsisSubResidualBw> for IsisSubTlv {
-    fn from(v: IsisSubResidualBw) -> Self {
-        IsisSubTlv::ResidualBw(v)
-    }
-}
-
-/// RFC 8570 §4.6 — Unidirectional Available Bandwidth (sub-TLV 38).
-/// Residual minus the measured non-RSVP-TE forwarding load.
-#[derive(Debug, Default, Clone, Serialize, Deserialize, PartialEq)]
-pub struct IsisSubAvailableBw {
-    pub bw: IsisSubBandwidthMetric,
-}
-
-impl ParseBe<IsisSubAvailableBw> for IsisSubAvailableBw {
-    fn parse_be(input: &[u8]) -> IResult<&[u8], Self> {
-        let (input, bw) = IsisSubBandwidthMetric::parse(input)?;
-        Ok((input, Self { bw }))
-    }
-}
-
-impl TlvEmitter for IsisSubAvailableBw {
-    fn typ(&self) -> u8 {
-        IsisNeighCode::AvailableBw.into()
-    }
-    fn len(&self) -> u8 {
-        4
-    }
-    fn emit(&self, buf: &mut BytesMut) {
-        self.bw.emit(buf);
-    }
-}
-
-impl From<IsisSubAvailableBw> for IsisSubTlv {
-    fn from(v: IsisSubAvailableBw) -> Self {
-        IsisSubTlv::AvailableBw(v)
-    }
-}
-
-/// RFC 8570 §4.7 — Unidirectional Utilized Bandwidth (sub-TLV 39).
-/// Actual link utilization as measured by the advertising node.
-#[derive(Debug, Default, Clone, Serialize, Deserialize, PartialEq)]
-pub struct IsisSubUtilizedBw {
-    pub bw: IsisSubBandwidthMetric,
-}
-
-impl ParseBe<IsisSubUtilizedBw> for IsisSubUtilizedBw {
-    fn parse_be(input: &[u8]) -> IResult<&[u8], Self> {
-        let (input, bw) = IsisSubBandwidthMetric::parse(input)?;
-        Ok((input, Self { bw }))
-    }
-}
-
-impl TlvEmitter for IsisSubUtilizedBw {
-    fn typ(&self) -> u8 {
-        IsisNeighCode::UtilizedBw.into()
-    }
-    fn len(&self) -> u8 {
-        4
-    }
-    fn emit(&self, buf: &mut BytesMut) {
-        self.bw.emit(buf);
-    }
-}
-
-impl From<IsisSubUtilizedBw> for IsisSubTlv {
-    fn from(v: IsisSubUtilizedBw) -> Self {
-        IsisSubTlv::UtilizedBw(v)
-    }
-}
+bandwidth_sub_tlv!(
+    /// RFC 8570 §4.7 — Unidirectional Utilized Bandwidth (sub-TLV 39).
+    /// Actual link utilization as measured by the advertising node.
+    IsisSubUtilizedBw => UtilizedBw
+);
 
 // RFC 9479 IS-IS Application-Specific Link Attributes
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]

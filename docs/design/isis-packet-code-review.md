@@ -509,9 +509,12 @@ backlog, ordered by risk and value.
    `BGPLS_ATTR_EXT_ADMIN_GROUP` is defined by `bgp-packet`, and the IS-IS
    producer serializes every RFC 7308 group word in network byte order while
    keeping it distinct from the classic Administrative Group TLV 1088.
-7. **Small-cleanup sweep (one PR)** — the duplicated ~55-line padding function
-   (`IsisHello`/`IsisP2pHello`), the three identical RFC 8570 bandwidth
-   wrappers, and the seven dead `is_empty()` methods.
+7. ~~**Small-cleanup sweep (one PR)**~~ — **done**: the two Hello padding
+   functions share one `pad_to_mtu`; a `bandwidth_sub_tlv!` macro generates the
+   three RFC 8570 wrappers; the seven no-op `is_empty()` methods are removed
+   (with `clippy::len_without_is_empty` allowed workspace-wide — TLV `len()` is
+   a wire length field, not a container length). The meaningful all-zero
+   `IsisSysId`/`IsisNeighborId::is_empty` checks are untouched.
 8. **Optional: live interop validation** — the flag/bit fixes (#2, #5, #13,
    #14) are unit-tested against FRR's *source*; a BDD or lab run against a
    real FRR/IOS neighbor exercising RouterCap S-flag, multi-area TLV 1, and
