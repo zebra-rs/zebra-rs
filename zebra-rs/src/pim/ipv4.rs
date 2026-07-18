@@ -1,10 +1,13 @@
 //! The IPv4 [`PimAf`] marker and its pure address-family semantics.
 
-use std::net::Ipv4Addr;
+use std::net::{IpAddr, Ipv4Addr};
 
-use ipnet::Ipv4Net;
+use ipnet::{IpNet, Ipv4Net};
+
+use crate::rib::Link;
 
 use super::af::PimAf;
+use super::mroute::Mrt4;
 
 /// IPv4 address-family marker. The ordering / hash / default derives
 /// are what let `#[derive(Ord, Hash, Default)]` on the generic data
@@ -15,6 +18,39 @@ pub struct Ipv4;
 impl PimAf for Ipv4 {
     type Addr = Ipv4Addr;
     type Prefix = Ipv4Net;
+    type Fp = Mrt4;
+
+    const ALL_PIM_ROUTERS: Ipv4Addr = Ipv4Addr::new(224, 0, 0, 13);
+    const GENERAL_QUERY_DST: Ipv4Addr = Ipv4Addr::new(224, 0, 0, 1);
+
+    fn is_unspecified(a: Ipv4Addr) -> bool {
+        a.is_unspecified()
+    }
+
+    fn from_ip(ip: IpAddr) -> Option<Ipv4Addr> {
+        match ip {
+            IpAddr::V4(a) => Some(a),
+            IpAddr::V6(_) => None,
+        }
+    }
+
+    fn to_ip(a: Ipv4Addr) -> IpAddr {
+        IpAddr::V4(a)
+    }
+
+    fn prefix_from_ipnet(net: IpNet) -> Option<Ipv4Net> {
+        match net {
+            IpNet::V4(p) => Some(p),
+            IpNet::V6(_) => None,
+        }
+    }
+
+    fn link_prefixes(link: &Link) -> Vec<Ipv4Net> {
+        link.addr4
+            .iter()
+            .filter_map(|a| Self::prefix_from_ipnet(a.addr))
+            .collect()
+    }
 
     // `Ipv4Net::new_assert` is a const fn, so the canonical ranges are
     // true associated consts. `232.0.0.0/8` is the RFC 4607 SSM range;
@@ -49,6 +85,28 @@ impl PimAf for Ipv4 {
 
     fn prefix_addr(p: &Ipv4Net) -> Ipv4Addr {
         p.addr()
+    }
+
+    fn null_register_payload(src: Ipv4Addr, grp: Ipv4Addr) -> Vec<u8> {
+        // A minimal inner IPv4 header naming (S,G).
+        let mut header = vec![0u8; 20];
+        header[0] = 0x45;
+        header[3] = 20; // total length
+        header[8] = 64; // ttl
+        header[12..16].copy_from_slice(&src.octets());
+        header[16..20].copy_from_slice(&grp.octets());
+        header
+    }
+
+    fn register_inner_sg(data: &[u8]) -> Option<(Ipv4Addr, Ipv4Addr)> {
+        // The inner packet (or Null-Register dummy) is an IPv4 header:
+        // version nibble 4, (S,G) at the source/destination fields.
+        if data.len() < 20 || data[0] >> 4 != 4 {
+            return None;
+        }
+        let src = Ipv4Addr::new(data[12], data[13], data[14], data[15]);
+        let grp = Ipv4Addr::new(data[16], data[17], data[18], data[19]);
+        Some((src, grp))
     }
 }
 

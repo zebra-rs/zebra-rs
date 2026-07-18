@@ -11,7 +11,6 @@
 //! out; a loser whose state expires simply resumes forwarding and
 //! the next duplicate re-runs the election.
 
-use std::net::{IpAddr, Ipv4Addr};
 use std::time::{Duration, Instant};
 
 use pim_packet::{EncodedGroup, EncodedUnicast, PimAssert, PimPacket, PimPayload};
@@ -20,7 +19,6 @@ use super::af::PimAf;
 use super::inst::{Pim, PimSend};
 use super::ipv4::Ipv4;
 use super::macros::inherited_olist;
-use super::socket::ALL_PIM_ROUTERS;
 use super::tib::SgKey;
 
 /// Assert Time (RFC 7761 §4.11): loser state lifetime.
@@ -69,10 +67,10 @@ pub struct AssertState<A: PimAf = Ipv4> {
     pub expires: Instant,
 }
 
-impl Pim {
+impl<A: PimAf> Pim<A> {
     /// Our assert metric for `key` on `ifindex`: RPF cost toward the
     /// source, our address on the contested interface as tiebreak.
-    fn assert_my_metric(&self, key: SgKey, ifindex: u32) -> Option<AssertMetric> {
+    fn assert_my_metric(&self, key: SgKey<A>, ifindex: u32) -> Option<AssertMetric<A>> {
         let addr = self.links.get(&ifindex)?.primary_addr()?;
         let entry = self.tib.get(&key)?;
         let (pref, metric) = match entry.rpf_target {
@@ -87,13 +85,13 @@ impl Pim {
         })
     }
 
-    fn assert_send(&self, key: SgKey, ifindex: u32, metric: &AssertMetric) {
+    fn assert_send(&self, key: SgKey<A>, ifindex: u32, metric: &AssertMetric<A>) {
         let SgKey::Sg { src, grp } = key else {
             return;
         };
         let packet = PimPacket::new(PimPayload::Assert(PimAssert {
-            group: EncodedGroup::new(IpAddr::V4(grp)),
-            source: EncodedUnicast::new(IpAddr::V4(src)),
+            group: EncodedGroup::new(A::to_ip(grp)),
+            source: EncodedUnicast::new(A::to_ip(src)),
             rpt_bit: metric.rpt_bit,
             metric_preference: metric.pref,
             metric: metric.metric,
@@ -101,13 +99,13 @@ impl Pim {
         let _ = self.send_tx.send(PimSend {
             packet,
             ifindex,
-            dst: ALL_PIM_ROUTERS,
+            dst: A::ALL_PIM_ROUTERS,
         });
     }
 
     /// Duplicate data seen on an interface we forward to (WRONGVIF on
     /// an OIL member): assert ourselves.
-    pub(crate) fn assert_data_trigger(&mut self, key: SgKey, ifindex: u32) {
+    pub(crate) fn assert_data_trigger(&mut self, key: SgKey<A>, ifindex: u32) {
         let Some(mine) = self.assert_my_metric(key, ifindex) else {
             return;
         };
@@ -157,7 +155,7 @@ impl Pim {
     }
 
     /// Assert packet RX: run the election on the receiving interface.
-    pub(crate) fn assert_recv(&mut self, ifindex: u32, sender: Ipv4Addr, assert: &PimAssert) {
+    pub(crate) fn assert_recv(&mut self, ifindex: u32, sender: A::Addr, assert: &PimAssert) {
         let Some(link) = self.links.get(&ifindex) else {
             return;
         };
@@ -171,7 +169,10 @@ impl Pim {
             );
             return;
         }
-        let (IpAddr::V4(grp), IpAddr::V4(src)) = (assert.group.addr, assert.source.addr) else {
+        let (Some(grp), Some(src)) = (
+            A::from_ip(assert.group.addr),
+            A::from_ip(assert.source.addr),
+        ) else {
             return;
         };
         let key = SgKey::Sg { src, grp };
@@ -273,7 +274,7 @@ impl Pim {
     /// Assert deadlines: winners refresh, expired losers resume
     /// forwarding.
     pub(crate) fn assert_tick(&mut self, now: Instant) {
-        let due: Vec<(SgKey, u32, AssertRole)> = self
+        let due: Vec<(SgKey<A>, u32, AssertRole<A>)> = self
             .tib
             .iter()
             .flat_map(|(key, e)| {

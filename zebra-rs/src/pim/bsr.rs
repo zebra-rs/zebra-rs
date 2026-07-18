@@ -10,10 +10,8 @@
 //! range.
 
 use std::collections::BTreeMap;
-use std::net::{IpAddr, Ipv4Addr};
 use std::time::{Duration, Instant};
 
-use ipnet::Ipv4Net;
 use pim_packet::{
     BsmGroup, BsmRp, EncodedGroup, EncodedUnicast, PimBootstrap, PimCandRpAdv, PimPacket,
     PimPayload,
@@ -22,7 +20,6 @@ use pim_packet::{
 use super::af::PimAf;
 use super::inst::{Pim, PimSend};
 use super::ipv4::Ipv4;
-use super::socket::ALL_PIM_ROUTERS;
 
 /// BSM origination period at the elected BSR (RFC 5059 §5).
 const BS_PERIOD: Duration = Duration::from_secs(60);
@@ -63,21 +60,21 @@ impl<A: PimAf> Default for BsrConfig<A> {
     }
 }
 
-impl BsrConfig {
-    fn cbsr(&self) -> Option<(Ipv4Addr, u8)> {
+impl<A: PimAf> BsrConfig<A> {
+    fn cbsr(&self) -> Option<(A::Addr, u8)> {
         if !self.cbsr_enabled {
             return None;
         }
         Some((self.cbsr_addr?, self.cbsr_priority.unwrap_or(64)))
     }
 
-    fn crp(&self) -> Option<(Ipv4Addr, Ipv4Net, u8)> {
+    fn crp(&self) -> Option<(A::Addr, A::Prefix, u8)> {
         if !self.crp_enabled {
             return None;
         }
         Some((
             self.crp_addr?,
-            self.crp_group.unwrap_or(Ipv4::DEFAULT_RP_RANGE),
+            self.crp_group.unwrap_or(A::DEFAULT_RP_RANGE),
             self.crp_priority.unwrap_or(192),
         ))
     }
@@ -137,29 +134,29 @@ impl<A: PimAf> Default for BsrRun<A> {
     }
 }
 
-impl BsrRun {
+impl<A: PimAf> BsrRun<A> {
     fn role(&self) -> BsrRole {
         self.role.unwrap_or(BsrRole::None)
     }
 }
 
 /// Higher (priority, address) wins the BSR election (RFC 5059 §3.1).
-fn preferred(a: (u8, Ipv4Addr), b: (u8, Ipv4Addr)) -> bool {
+fn preferred<T: Ord>(a: (u8, T), b: (u8, T)) -> bool {
     a > b
 }
 
-impl Pim {
+impl<A: PimAf> Pim<A> {
     /// The BSR-learned RP for `grp`: longest matching range, then
     /// lowest priority, then highest address; expired entries are
     /// skipped (swept by the tick).
-    pub(crate) fn bsr_rp_lookup(&self, grp: Ipv4Addr) -> Option<Ipv4Addr> {
+    pub(crate) fn bsr_rp_lookup(&self, grp: A::Addr) -> Option<A::Addr> {
         let now = Instant::now();
         self.bsr
             .rp_set
             .iter()
-            .filter(|((range, _), e)| Ipv4::prefix_contains(range, &grp) && e.expires > now)
+            .filter(|((range, _), e)| A::prefix_contains(range, &grp) && e.expires > now)
             .max_by_key(|((range, rp), e)| {
-                (Ipv4::prefix_len(range), std::cmp::Reverse(e.priority), *rp)
+                (A::prefix_len(range), std::cmp::Reverse(e.priority), *rp)
             })
             .map(|((_, rp), _)| *rp)
     }
@@ -203,7 +200,7 @@ impl Pim {
 
     /// Track the RPF toward the adopted BSR so the flooding check
     /// has a reverse path to compare against.
-    fn bsr_track(&mut self, bsr: Ipv4Addr) {
+    fn bsr_track(&mut self, bsr: A::Addr) {
         if self.bsr.rpf_target == Some(bsr) {
             return;
         }
@@ -216,14 +213,14 @@ impl Pim {
 
     /// BSM RX (RFC 5059 §3.1): adopt preferred BSRs, absorb the
     /// RP-set, re-flood hop-by-hop on the other PIM interfaces.
-    pub(crate) fn bootstrap_recv(&mut self, ifindex: u32, src: Ipv4Addr, bsm: &PimBootstrap) {
+    pub(crate) fn bootstrap_recv(&mut self, ifindex: u32, src: A::Addr, bsm: &PimBootstrap) {
         let Some(link) = self.links.get(&ifindex) else {
             return;
         };
         if !link.enabled || link.is_my_addr(&src) {
             return;
         }
-        let Some(bsr) = bsm.bsr_v4() else {
+        let Some(bsr) = A::from_ip(bsm.bsr_addr.addr) else {
             return;
         };
         // Our own BSM flooded back: ignore.
@@ -281,15 +278,15 @@ impl Pim {
         let now = Instant::now();
         let mut changed = false;
         for group in &bsm.groups {
-            let IpAddr::V4(range_addr) = group.group.addr else {
+            let Some(range_addr) = A::from_ip(group.group.addr) else {
                 continue;
             };
-            let Some(range) = Ipv4::prefix_new(range_addr, group.group.masklen) else {
+            let Some(range) = A::prefix_new(range_addr, group.group.masklen) else {
                 continue;
             };
             self.bsr.rp_set.retain(|(r, _), _| *r != range);
             for rp in &group.rps {
-                let IpAddr::V4(rp_addr) = rp.addr.addr else {
+                let Some(rp_addr) = A::from_ip(rp.addr.addr) else {
                     continue;
                 };
                 if rp.holdtime == 0 {
@@ -322,7 +319,7 @@ impl Pim {
             let _ = self.send_tx.send(PimSend {
                 packet: packet.clone(),
                 ifindex: oif,
-                dst: ALL_PIM_ROUTERS,
+                dst: A::ALL_PIM_ROUTERS,
             });
         }
 
@@ -332,25 +329,25 @@ impl Pim {
         }
     }
 
-    fn rpf_state_ifindex(&self, addr: Ipv4Addr) -> Option<u32> {
+    fn rpf_state_ifindex(&self, addr: A::Addr) -> Option<u32> {
         self.rpf.get(&addr).and_then(|e| e.state.ifindex())
     }
 
     /// C-RP advertisement RX — meaningful at the elected BSR only.
-    pub(crate) fn cand_rp_adv_recv(&mut self, src: Ipv4Addr, adv: &PimCandRpAdv) {
+    pub(crate) fn cand_rp_adv_recv(&mut self, src: A::Addr, adv: &PimCandRpAdv) {
         if self.bsr.role() != BsrRole::Elected {
             return;
         }
-        let IpAddr::V4(rp) = adv.rp_addr.addr else {
+        let Some(rp) = A::from_ip(adv.rp_addr.addr) else {
             return;
         };
         let now = Instant::now();
         let mut changed = false;
         for group in &adv.groups {
-            let IpAddr::V4(range_addr) = group.addr else {
+            let Some(range_addr) = A::from_ip(group.addr) else {
                 continue;
             };
-            let Some(range) = Ipv4::prefix_new(range_addr, group.masklen) else {
+            let Some(range) = A::prefix_new(range_addr, group.masklen) else {
                 continue;
             };
             if adv.holdtime == 0 {
@@ -384,13 +381,13 @@ impl Pim {
         };
         self.bsr.fragment_tag = self.bsr.fragment_tag.wrapping_add(1);
         let now = Instant::now();
-        let mut by_range: BTreeMap<Ipv4Net, Vec<BsmRp>> = BTreeMap::new();
+        let mut by_range: BTreeMap<A::Prefix, Vec<BsmRp>> = BTreeMap::new();
         for ((range, rp), entry) in self.bsr.rp_set.iter() {
             if entry.expires <= now {
                 continue;
             }
             by_range.entry(*range).or_default().push(BsmRp {
-                addr: EncodedUnicast::new(IpAddr::V4(*rp)),
+                addr: EncodedUnicast::new(A::to_ip(*rp)),
                 holdtime: entry.holdtime,
                 priority: entry.priority,
             });
@@ -401,8 +398,8 @@ impl Pim {
                 group: EncodedGroup {
                     bidir: false,
                     zone: false,
-                    masklen: Ipv4::prefix_len(&range),
-                    addr: IpAddr::V4(Ipv4::prefix_addr(&range)),
+                    masklen: A::prefix_len(&range),
+                    addr: A::to_ip(A::prefix_addr(&range)),
                 },
                 rp_count: rps.len() as u8,
                 rps,
@@ -412,7 +409,7 @@ impl Pim {
             fragment_tag: self.bsr.fragment_tag,
             hash_mask_len: HASH_MASK_LEN,
             bsr_priority: priority,
-            bsr_addr: EncodedUnicast::new(IpAddr::V4(addr)),
+            bsr_addr: EncodedUnicast::new(A::to_ip(addr)),
             groups,
         };
         let packet = PimPacket::new(PimPayload::Bootstrap(bsm));
@@ -426,7 +423,7 @@ impl Pim {
             let _ = self.send_tx.send(PimSend {
                 packet: packet.clone(),
                 ifindex: oif,
-                dst: ALL_PIM_ROUTERS,
+                dst: A::ALL_PIM_ROUTERS,
             });
         }
     }
@@ -456,12 +453,12 @@ impl Pim {
         let adv = PimCandRpAdv {
             priority,
             holdtime: CRP_HOLDTIME,
-            rp_addr: EncodedUnicast::new(IpAddr::V4(rp)),
+            rp_addr: EncodedUnicast::new(A::to_ip(rp)),
             groups: vec![EncodedGroup {
                 bidir: false,
                 zone: false,
-                masklen: Ipv4::prefix_len(&range),
-                addr: IpAddr::V4(Ipv4::prefix_addr(&range)),
+                masklen: A::prefix_len(&range),
+                addr: A::to_ip(A::prefix_addr(&range)),
             }],
         };
         let packet = PimPacket::new(PimPayload::CandRpAdv(adv));

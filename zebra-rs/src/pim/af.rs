@@ -17,8 +17,14 @@
 
 use std::fmt::{Debug, Display};
 use std::hash::Hash;
+use std::net::IpAddr;
 
+use ipnet::IpNet;
 use serde::Serialize;
+
+use crate::rib::Link;
+
+use super::mroute::PimForwardingPlane;
 
 /// Marker, associated types and pure address-family semantics for one
 /// PIM address family.
@@ -27,6 +33,40 @@ pub trait PimAf: Copy + Eq + Ord + Hash + Debug + Send + Sync + Sized + 'static 
     type Addr: Copy + Ord + Eq + Hash + Display + Debug + Send + Sync + Serialize + 'static;
     /// A multicast / RP group range.
     type Prefix: Copy + Eq + Ord + Display + Debug + Send + Sync + 'static;
+    /// The kernel forwarding plane for this family (`Mrt4` / `Mrt6`).
+    /// `Send + Sync + 'static` because it lives inside the `Pim<A>`
+    /// actor that is spawned onto the tokio runtime and borrowed across
+    /// awaits.
+    type Fp: PimForwardingPlane<Self> + Send + Sync + 'static;
+
+    /// The ALL-PIM-ROUTERS multicast address (RFC 7761 §4.3.1):
+    /// `224.0.0.13` / `ff02::d`.
+    const ALL_PIM_ROUTERS: Self::Addr;
+
+    /// General-query destination for the membership protocol:
+    /// `224.0.0.1` (IGMP all-hosts) / `ff02::1` (MLD).
+    const GENERAL_QUERY_DST: Self::Addr;
+
+    /// Whether `a` is the unspecified address (`0.0.0.0` / `::`) — a
+    /// membership report sourced from it carries no reporter identity.
+    fn is_unspecified(a: Self::Addr) -> bool;
+
+    /// Convert a wire `IpAddr` (from a `pim-packet` encoded address)
+    /// into this family's address, rejecting the other family. This is
+    /// the single ingress conversion point — cross-family addresses are
+    /// dropped here.
+    fn from_ip(ip: IpAddr) -> Option<Self::Addr>;
+    /// Convert back to a wire `IpAddr` for emission.
+    fn to_ip(a: Self::Addr) -> IpAddr;
+
+    /// Narrow a RIB `IpNet` to this family's prefix (`None` for the
+    /// other family) — the per-address ingress from `AddrAdd`/`AddrDel`.
+    fn prefix_from_ipnet(net: IpNet) -> Option<Self::Prefix>;
+
+    /// This family's on-link prefixes for a RIB link, in order; the
+    /// first is the Hello-source / DR-candidate identity. IPv4 reads
+    /// `addr4`; IPv6 will read the link-local(s) then `addr6`.
+    fn link_prefixes(link: &Link) -> Vec<Self::Prefix>;
 
     /// Default SSM range: `232.0.0.0/8` (RFC 4607) / `ff3x::/32`.
     const DEFAULT_SSM_RANGE: Self::Prefix;
@@ -59,4 +99,13 @@ pub trait PimAf: Copy + Eq + Ord + Hash + Debug + Send + Sync + Sized + 'static 
 
     /// The prefix's network address.
     fn prefix_addr(p: &Self::Prefix) -> Self::Addr;
+
+    /// A minimal inner header naming `(src, grp)` for a Null-Register
+    /// (RFC 7761 §4.4.1): a 20-byte IPv4 header / a 40-byte IPv6 header.
+    fn null_register_payload(src: Self::Addr, grp: Self::Addr) -> Vec<u8>;
+
+    /// Extract `(src, grp)` from a Register's inner packet (or
+    /// Null-Register dummy header). `None` if the inner family does not
+    /// match this AF or the header is malformed.
+    fn register_inner_sg(data: &[u8]) -> Option<(Self::Addr, Self::Addr)>;
 }

@@ -7,7 +7,7 @@
 //! SSM phase on.
 
 use std::collections::{BTreeMap, BTreeSet};
-use std::net::Ipv4Addr;
+use std::net::{IpAddr, Ipv4Addr};
 use std::time::{Duration, Instant};
 
 use pim_packet::{IgmpGroupMessage, IgmpGroupRecord, IgmpPacket, IgmpRecordType, IgmpV3Query};
@@ -17,7 +17,6 @@ use super::af::PimAf;
 use super::inst::{IgmpSend, Pim};
 use super::ipv4::Ipv4;
 use super::link::LinkConfig;
-use super::socket::IGMP_ALL_HOSTS;
 use super::tib::SgKey;
 
 /// Robustness Variable (RFC 3376 §8.1). Fixed at the protocol
@@ -146,11 +145,11 @@ impl<A: PimAf> IgmpIf<A> {
 }
 
 /// Build and queue a general (group `None`) or group-specific query.
-fn send_query(
-    tx: &UnboundedSender<IgmpSend>,
+fn send_query<A: PimAf>(
+    tx: &UnboundedSender<IgmpSend<A>>,
     cfg: &LinkConfig,
     ifindex: u32,
-    group: Option<Ipv4Addr>,
+    group: Option<A::Addr>,
 ) {
     // Max Resp is in units of 1/10 s; group-specific queries use the
     // Last Member Query Interval (1 s). The exponent-coded form
@@ -162,16 +161,21 @@ fn send_query(
         ),
         Some(_) => 10,
     };
-    let dst = group.unwrap_or(IGMP_ALL_HOSTS);
+    let dst = group.unwrap_or(A::GENERAL_QUERY_DST);
+    // The IGMP wire form is IPv4; a general query carries 0.0.0.0.
+    let wire_group = match group.map(A::to_ip) {
+        Some(IpAddr::V4(v4)) => v4,
+        _ => Ipv4Addr::UNSPECIFIED,
+    };
     let packet = if cfg.igmp.version() == 2 {
         IgmpPacket::QueryV2(IgmpGroupMessage {
             max_resp,
-            group: group.unwrap_or(Ipv4Addr::UNSPECIFIED),
+            group: wire_group,
         })
     } else {
         IgmpPacket::QueryV3(IgmpV3Query {
             max_resp_code: max_resp,
-            group: group.unwrap_or(Ipv4Addr::UNSPECIFIED),
+            group: wire_group,
             suppress: false,
             qrv: IGMP_ROBUSTNESS as u8,
             // QQIC in seconds, exponent-coded above 127.
@@ -186,7 +190,7 @@ fn send_query(
     });
 }
 
-impl Pim {
+impl<A: PimAf> Pim<A> {
     /// Earliest IGMP deadline across all interfaces — the event
     /// loop's sleep target. `None` parks the arm forever.
     pub(crate) fn igmp_next_wakeup(&self) -> Option<Instant> {
@@ -254,8 +258,8 @@ impl Pim {
                 igmp.next_query = now + interval;
             }
 
-            let mut expired: Vec<Ipv4Addr> = vec![];
-            let mut sync: Vec<Ipv4Addr> = vec![];
+            let mut expired: Vec<A::Addr> = vec![];
+            let mut sync: Vec<A::Addr> = vec![];
             for (group_addr, group) in igmp.groups.iter_mut() {
                 if let Some(t) = group.v2_host_until
                     && t <= now
@@ -287,7 +291,7 @@ impl Pim {
                     sync.push(*group_addr);
                 }
             }
-            let mut prune: Vec<SgKey> = vec![];
+            let mut prune: Vec<SgKey<A>> = vec![];
             for group_addr in expired {
                 if let Some(group) = igmp.groups.remove(&group_addr) {
                     for src in group.synced {
@@ -321,7 +325,7 @@ impl Pim {
     /// immediate, but presents an empty view here — so a DR→non-DR
     /// transition withdraws everything and non-DR→DR re-adds it, both
     /// through the same diff.
-    pub(crate) fn igmp_tib_sync(&mut self, ifindex: u32, grp: Ipv4Addr) {
+    pub(crate) fn igmp_tib_sync(&mut self, ifindex: u32, grp: A::Addr) {
         let is_dr = self.i_am_dr(ifindex);
         let Some(link) = self.links.get_mut(&ifindex) else {
             return;
@@ -332,16 +336,15 @@ impl Pim {
         let Some(group) = igmp.groups.get_mut(&grp) else {
             return;
         };
-        let current: BTreeSet<Ipv4Addr> = if is_dr && group.filter_mode == FilterMode::Include {
+        let current: BTreeSet<A::Addr> = if is_dr && group.filter_mode == FilterMode::Include {
             group.sources.keys().copied().collect()
         } else {
             BTreeSet::new()
         };
-        let added: Vec<Ipv4Addr> = current.difference(&group.synced).copied().collect();
-        let removed: Vec<Ipv4Addr> = group.synced.difference(&current).copied().collect();
+        let added: Vec<A::Addr> = current.difference(&group.synced).copied().collect();
+        let removed: Vec<A::Addr> = group.synced.difference(&current).copied().collect();
         group.synced = current;
-        let asm_desired =
-            is_dr && group.filter_mode == FilterMode::Exclude && !super::rp::is_ssm(grp);
+        let asm_desired = is_dr && group.filter_mode == FilterMode::Exclude && !A::is_ssm(grp);
         let asm_was = group.asm_synced;
         group.asm_synced = asm_desired;
         for src in added {
@@ -357,7 +360,7 @@ impl Pim {
         }
     }
 
-    pub(crate) fn igmp_recv(&mut self, ifindex: u32, src: Ipv4Addr, packet: IgmpPacket) {
+    pub(crate) fn igmp_recv(&mut self, ifindex: u32, src: A::Addr, packet: IgmpPacket) {
         let Some(link) = self.links.get(&ifindex) else {
             return;
         };
@@ -372,18 +375,27 @@ impl Pim {
                 self.igmp_other_querier(ifindex, &name, src, &cfg, now);
             }
             IgmpPacket::ReportV1(msg) | IgmpPacket::ReportV2(msg) => {
-                self.igmp_v2_report(ifindex, src, msg.group, &cfg, now);
+                let Some(grp) = A::from_ip(IpAddr::V4(msg.group)) else {
+                    return;
+                };
+                self.igmp_v2_report(ifindex, src, grp, &cfg, now);
                 // A v2 report flips the group to EXCLUDE — any
                 // previously synced INCLUDE sources leave the TIB.
-                self.igmp_tib_sync(ifindex, msg.group);
+                self.igmp_tib_sync(ifindex, grp);
             }
             IgmpPacket::LeaveV2(msg) => {
-                self.igmp_leave(ifindex, msg.group, &cfg, now);
+                let Some(grp) = A::from_ip(IpAddr::V4(msg.group)) else {
+                    return;
+                };
+                self.igmp_leave(ifindex, grp, &cfg, now);
             }
             IgmpPacket::ReportV3(report) => {
                 for record in report.records {
-                    self.igmp_apply_record(ifindex, src, &record, &cfg, now);
-                    self.igmp_tib_sync(ifindex, record.group);
+                    let Some(grp) = A::from_ip(IpAddr::V4(record.group)) else {
+                        continue;
+                    };
+                    self.igmp_apply_record(ifindex, src, grp, &record, &cfg, now);
+                    self.igmp_tib_sync(ifindex, grp);
                 }
             }
             IgmpPacket::Unknown { typ, .. } => {
@@ -398,7 +410,7 @@ impl Pim {
         &mut self,
         ifindex: u32,
         name: &str,
-        src: Ipv4Addr,
+        src: A::Addr,
         cfg: &LinkConfig,
         now: Instant,
     ) {
@@ -408,7 +420,7 @@ impl Pim {
         let Some(my_addr) = link.primary_addr() else {
             return;
         };
-        if src.is_unspecified() || src >= my_addr {
+        if A::is_unspecified(src) || src >= my_addr {
             return;
         }
         let Some(igmp) = link.igmp.as_mut() else {
@@ -428,12 +440,12 @@ impl Pim {
     fn igmp_v2_report(
         &mut self,
         ifindex: u32,
-        src: Ipv4Addr,
-        group_addr: Ipv4Addr,
+        src: A::Addr,
+        group_addr: A::Addr,
         cfg: &LinkConfig,
         now: Instant,
     ) {
-        if !Ipv4::is_multicast(group_addr) {
+        if !A::is_multicast(group_addr) {
             return;
         }
         let Some(igmp) = self.link_igmp_mut(ifindex) else {
@@ -446,14 +458,14 @@ impl Pim {
         group.filter_mode = FilterMode::Exclude;
         group.expires = Some(now + cfg.igmp.gmi());
         group.v2_host_until = Some(now + cfg.igmp.gmi());
-        if !src.is_unspecified() {
+        if !A::is_unspecified(src) {
             group.last_reporter = Some(src);
         }
     }
 
     /// v2 Leave (RFC 2236 §4): as querier, lower the group timer to
     /// LMQT and send a group-specific query.
-    fn igmp_leave(&mut self, ifindex: u32, group_addr: Ipv4Addr, cfg: &LinkConfig, now: Instant) {
+    fn igmp_leave(&mut self, ifindex: u32, group_addr: A::Addr, cfg: &LinkConfig, now: Instant) {
         let mut query = false;
         {
             let Some(igmp) = self.link_igmp_mut(ifindex) else {
@@ -481,14 +493,22 @@ impl Pim {
     fn igmp_apply_record(
         &mut self,
         ifindex: u32,
-        src: Ipv4Addr,
+        src: A::Addr,
+        grp: A::Addr,
         record: &IgmpGroupRecord,
         cfg: &LinkConfig,
         now: Instant,
     ) {
-        if !Ipv4::is_multicast(record.group) {
+        if !A::is_multicast(grp) {
             return;
         }
+        // The record's source list is IPv4 wire; keep only this
+        // family's addresses.
+        let rec_sources: Vec<A::Addr> = record
+            .sources
+            .iter()
+            .filter_map(|s| A::from_ip(IpAddr::V4(*s)))
+            .collect();
         let gmi = cfg.igmp.gmi();
         let lmqt = now + LAST_MEMBER_QUERY_TIME;
         let mut query = false;
@@ -502,41 +522,41 @@ impl Pim {
                 ModeIsExclude | ChangeToExclude => {
                     let group = igmp
                         .groups
-                        .entry(record.group)
+                        .entry(grp)
                         .or_insert_with(|| IgmpGroup::new(now, FilterMode::Exclude));
                     group.filter_mode = FilterMode::Exclude;
                     group.expires = Some(now + gmi);
-                    if !src.is_unspecified() {
+                    if !A::is_unspecified(src) {
                         group.last_reporter = Some(src);
                     }
                 }
                 ModeIsInclude | AllowNewSources => {
-                    if record.sources.is_empty() {
+                    if rec_sources.is_empty() {
                         return;
                     }
                     let group = igmp
                         .groups
-                        .entry(record.group)
+                        .entry(grp)
                         .or_insert_with(|| IgmpGroup::new(now, FilterMode::Include));
-                    for source in &record.sources {
+                    for source in &rec_sources {
                         group.sources.insert(*source, now + gmi);
                     }
-                    if !src.is_unspecified() {
+                    if !A::is_unspecified(src) {
                         group.last_reporter = Some(src);
                     }
                 }
                 ChangeToInclude => {
                     let group = igmp
                         .groups
-                        .entry(record.group)
+                        .entry(grp)
                         .or_insert_with(|| IgmpGroup::new(now, FilterMode::Include));
-                    for source in &record.sources {
+                    for source in &rec_sources {
                         group.sources.insert(*source, now + gmi);
                     }
-                    if !src.is_unspecified() {
+                    if !A::is_unspecified(src) {
                         group.last_reporter = Some(src);
                     }
-                    if record.sources.is_empty() {
+                    if rec_sources.is_empty() {
                         // TO_IN {} is the v3 leave. In EXCLUDE mode
                         // lower the group timer; in INCLUDE mode age
                         // the remaining sources out at LMQT.
@@ -554,11 +574,11 @@ impl Pim {
                     }
                 }
                 BlockOldSources => {
-                    let Some(group) = igmp.groups.get_mut(&record.group) else {
+                    let Some(group) = igmp.groups.get_mut(&grp) else {
                         return;
                     };
                     if group.filter_mode == FilterMode::Include {
-                        for source in &record.sources {
+                        for source in &rec_sources {
                             if let Some(exp) = group.sources.get_mut(source) {
                                 *exp = (*exp).min(lmqt);
                             }
@@ -572,11 +592,11 @@ impl Pim {
             }
         }
         if query {
-            send_query(&self.igmp_send_tx, cfg, ifindex, Some(record.group));
+            send_query(&self.igmp_send_tx, cfg, ifindex, Some(grp));
         }
     }
 
-    fn link_igmp_mut(&mut self, ifindex: u32) -> Option<&mut IgmpIf> {
+    fn link_igmp_mut(&mut self, ifindex: u32) -> Option<&mut IgmpIf<A>> {
         self.links.get_mut(&ifindex)?.igmp.as_mut()
     }
 }

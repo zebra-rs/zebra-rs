@@ -4,7 +4,7 @@
 //! first; everything else follows the tracked RIB resolution.
 
 use std::collections::BTreeMap;
-use std::net::{IpAddr, Ipv4Addr};
+use std::net::IpAddr;
 
 use crate::rib;
 use crate::rib::nht::NexthopResolution;
@@ -44,11 +44,11 @@ pub struct RpfEntry<A: PimAf = Ipv4> {
     resolution: Option<NexthopResolution>,
 }
 
-impl Pim {
+impl<A: PimAf> Pim<A> {
     /// Take a reference on the RPF state for `src`, registering NHT
     /// interest on first use. The immediate `NexthopUpdate` echo from
     /// RIB refines the state asynchronously.
-    pub(crate) fn rpf_acquire(&mut self, src: Ipv4Addr) -> RpfState {
+    pub(crate) fn rpf_acquire(&mut self, src: A::Addr) -> RpfState<A> {
         if let Some(entry) = self.rpf.get_mut(&src) {
             entry.refs += 1;
             return entry.state;
@@ -56,7 +56,7 @@ impl Pim {
         let state = compute_rpf(&self.links, src, None);
         let _ = self.ctx.rib.send(rib::Message::NexthopRegister {
             proto: self.proto_label.clone(),
-            nh: IpAddr::V4(src),
+            nh: A::to_ip(src),
             vrf_id: self.ctx.vrf_id(),
         });
         self.rpf.insert(
@@ -70,7 +70,7 @@ impl Pim {
         state
     }
 
-    pub(crate) fn rpf_release(&mut self, src: Ipv4Addr) {
+    pub(crate) fn rpf_release(&mut self, src: A::Addr) {
         let Some(entry) = self.rpf.get_mut(&src) else {
             return;
         };
@@ -79,7 +79,7 @@ impl Pim {
             self.rpf.remove(&src);
             let _ = self.ctx.rib.send(rib::Message::NexthopUnregister {
                 proto: self.proto_label.clone(),
-                nh: IpAddr::V4(src),
+                nh: A::to_ip(src),
                 vrf_id: self.ctx.vrf_id(),
             });
         }
@@ -87,7 +87,7 @@ impl Pim {
 
     /// RIB pushed a new resolution for a tracked address.
     pub(crate) fn rpf_nexthop_update(&mut self, nh: IpAddr, resolution: NexthopResolution) {
-        let IpAddr::V4(src) = nh else {
+        let Some(src) = A::from_ip(nh) else {
             return;
         };
         let Some(entry) = self.rpf.get_mut(&src) else {
@@ -105,7 +105,7 @@ impl Pim {
     /// source (connected-ness may have flipped even without a RIB
     /// resolution change).
     pub(crate) fn rpf_recompute_all(&mut self) {
-        let sources: Vec<Ipv4Addr> = self.rpf.keys().copied().collect();
+        let sources: Vec<A::Addr> = self.rpf.keys().copied().collect();
         for src in sources {
             let Some(entry) = self.rpf.get_mut(&src) else {
                 continue;
@@ -121,7 +121,7 @@ impl Pim {
     /// Assert-metric inputs for a tracked address: (preference,
     /// metric). Connected beats any gateway route; unresolved is
     /// infinitely bad.
-    pub(crate) fn rpf_pref_metric(&self, addr: Ipv4Addr) -> (u32, u32) {
+    pub(crate) fn rpf_pref_metric(&self, addr: A::Addr) -> (u32, u32) {
         match self.rpf.get(&addr).map(|e| e.state) {
             Some(RpfState::Connected { .. }) => (0, 0),
             Some(RpfState::Gateway { .. }) => {
@@ -140,8 +140,8 @@ impl Pim {
     /// Propagate an RPF change into every TIB entry tracking that
     /// address ((S,G) sources and (*,G) RPs alike): prune off the old
     /// upstream, adopt the new state, re-evaluate.
-    fn rpf_changed(&mut self, addr: Ipv4Addr, state: RpfState) {
-        let keys: Vec<SgKey> = self
+    fn rpf_changed(&mut self, addr: A::Addr, state: RpfState<A>) {
+        let keys: Vec<SgKey<A>> = self
             .tib
             .iter()
             .filter(|(_, e)| e.rpf_target == Some(addr))
@@ -153,15 +153,15 @@ impl Pim {
     }
 }
 
-fn compute_rpf(
-    links: &BTreeMap<u32, super::link::PimLink>,
-    src: Ipv4Addr,
+fn compute_rpf<A: PimAf>(
+    links: &BTreeMap<u32, super::link::PimLink<A>>,
+    src: A::Addr,
     resolution: Option<&NexthopResolution>,
-) -> RpfState {
+) -> RpfState<A> {
     // On-link check first: a directly-connected source needs no
     // upstream neighbor regardless of what the RIB says.
     for link in links.values() {
-        if link.link_up && link.addrs.iter().any(|p| p.contains(&src)) {
+        if link.link_up && link.addrs.iter().any(|p| A::prefix_contains(p, &src)) {
             return RpfState::Connected {
                 ifindex: link.ifindex,
             };
@@ -178,7 +178,7 @@ fn compute_rpf(
     let Some(nexthop) = resolution.nexthops.first() else {
         return RpfState::Unresolved;
     };
-    let IpAddr::V4(gw) = nexthop.addr else {
+    let Some(gw) = A::from_ip(nexthop.addr) else {
         return RpfState::Unresolved;
     };
     if gw == src {

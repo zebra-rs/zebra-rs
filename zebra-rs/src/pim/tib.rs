@@ -15,7 +15,6 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
-use std::net::Ipv4Addr;
 use std::time::{Duration, Instant};
 
 use super::af::PimAf;
@@ -164,8 +163,8 @@ impl<A: PimAf> Default for TibEntry<A> {
     }
 }
 
-impl Pim {
-    pub(crate) fn tib_get_or_create(&mut self, key: SgKey) -> &mut TibEntry {
+impl<A: PimAf> Pim<A> {
+    pub(crate) fn tib_get_or_create(&mut self, key: SgKey<A>) -> &mut TibEntry<A> {
         if !self.tib.contains_key(&key) {
             let target = match key {
                 SgKey::Sg { src, .. } => Some(src),
@@ -185,12 +184,12 @@ impl Pim {
 
     // ---- TIB bridge (IGMP membership → PIM state) ----
 
-    pub(crate) fn tib_local_join(&mut self, key: SgKey, ifindex: u32) {
+    pub(crate) fn tib_local_join(&mut self, key: SgKey<A>, ifindex: u32) {
         self.tib_get_or_create(key).local.insert(ifindex);
         self.tib_update(key);
     }
 
-    pub(crate) fn tib_local_prune(&mut self, key: SgKey, ifindex: u32) {
+    pub(crate) fn tib_local_prune(&mut self, key: SgKey<A>, ifindex: u32) {
         if let Some(entry) = self.tib.get_mut(&key) {
             entry.local.remove(&ifindex);
             self.tib_update(key);
@@ -199,7 +198,7 @@ impl Pim {
 
     // ---- downstream Join/Prune RX (per-interface FSM) ----
 
-    pub(crate) fn downstream_join(&mut self, ifindex: u32, key: SgKey, holdtime: u16) {
+    pub(crate) fn downstream_join(&mut self, ifindex: u32, key: SgKey<A>, holdtime: u16) {
         let now = Instant::now();
         let entry = self.tib_get_or_create(key);
         entry.downstream.insert(
@@ -212,7 +211,7 @@ impl Pim {
         self.tib_update(key);
     }
 
-    pub(crate) fn downstream_prune(&mut self, ifindex: u32, key: SgKey) {
+    pub(crate) fn downstream_prune(&mut self, ifindex: u32, key: SgKey<A>) {
         let Some(entry) = self.tib.get_mut(&key) else {
             return;
         };
@@ -241,7 +240,7 @@ impl Pim {
 
     /// (S,G,rpt) prune RX: record the pruned interface on the SgRpt
     /// entry — it drops out of the (S,G) inherited olist.
-    pub(crate) fn downstream_rpt_prune(&mut self, ifindex: u32, key: SgKey, holdtime: u16) {
+    pub(crate) fn downstream_rpt_prune(&mut self, ifindex: u32, key: SgKey<A>, holdtime: u16) {
         let now = Instant::now();
         let entry = self.tib_get_or_create(key);
         entry.downstream.insert(
@@ -255,7 +254,7 @@ impl Pim {
     }
 
     /// (S,G,rpt) join RX cancels a recorded prune.
-    pub(crate) fn downstream_rpt_join(&mut self, ifindex: u32, key: SgKey) {
+    pub(crate) fn downstream_rpt_join(&mut self, ifindex: u32, key: SgKey<A>) {
         if let Some(entry) = self.tib.get_mut(&key) {
             entry.downstream.remove(&ifindex);
             self.tib_update(key);
@@ -264,10 +263,10 @@ impl Pim {
 
     // ---- upcalls from the kernel dataplane ----
 
-    pub(crate) fn process_upcall(&mut self, upcall: Upcall) {
+    pub(crate) fn process_upcall(&mut self, upcall: Upcall<A>) {
         match upcall.kind {
             UpcallKind::Nocache => {
-                if !Ipv4::is_multicast(upcall.grp) || Ipv4::is_reserved_group(upcall.grp) {
+                if !A::is_multicast(upcall.grp) || A::is_reserved_group(upcall.grp) {
                     return;
                 }
                 let key = SgKey::Sg {
@@ -314,7 +313,7 @@ impl Pim {
 
     // ---- RPF change propagation ----
 
-    pub(crate) fn tib_rpf_change(&mut self, key: SgKey, state: RpfState) {
+    pub(crate) fn tib_rpf_change(&mut self, key: SgKey<A>, state: RpfState<A>) {
         let Some(entry) = self.tib.get_mut(&key) else {
             return;
         };
@@ -338,7 +337,7 @@ impl Pim {
 
     /// Re-point an entry at a different RPF target (RP mapping
     /// changed for a (*,G)).
-    pub(crate) fn tib_retarget(&mut self, key: SgKey, target: Option<Ipv4Addr>) {
+    pub(crate) fn tib_retarget(&mut self, key: SgKey<A>, target: Option<A::Addr>) {
         let Some(entry) = self.tib.get(&key) else {
             return;
         };
@@ -374,7 +373,7 @@ impl Pim {
     /// nexthop (which can be the neighbor's hello source *or* a
     /// secondary address), so re-evaluate the whole set and let
     /// `tib_update`'s coverage check decide join/prune.
-    fn gateway_keys_on(&self, ifindex: u32) -> Vec<SgKey> {
+    fn gateway_keys_on(&self, ifindex: u32) -> Vec<SgKey<A>> {
         self.tib
             .iter()
             .filter(|(_, e)| matches!(e.rpf, RpfState::Gateway { ifindex: i, .. } if i == ifindex))
@@ -384,7 +383,7 @@ impl Pim {
 
     /// A new PIM neighbor appeared: entries parked for lack of an
     /// upstream neighbor on this interface may now join.
-    pub(crate) fn tib_neighbor_up(&mut self, ifindex: u32, _addr: Ipv4Addr) {
+    pub(crate) fn tib_neighbor_up(&mut self, ifindex: u32, _addr: A::Addr) {
         for key in self.gateway_keys_on(ifindex) {
             self.tib_update(key);
         }
@@ -393,7 +392,7 @@ impl Pim {
     /// A PIM neighbor vanished (already removed from the link's
     /// table): entries joined through it lose coverage in
     /// `tib_update` and fall back to NotJoined with no prune TX.
-    pub(crate) fn tib_neighbor_down(&mut self, ifindex: u32, _addr: Ipv4Addr) {
+    pub(crate) fn tib_neighbor_down(&mut self, ifindex: u32, _addr: A::Addr) {
         for key in self.gateway_keys_on(ifindex) {
             self.tib_update(key);
         }
@@ -404,8 +403,8 @@ impl Pim {
     /// (toward the entry's actual RPF nexthop, which the restarted
     /// neighbor owns) for every entry joined through that neighbor,
     /// so its tree is rebuilt without waiting a full refresh period.
-    pub(crate) fn tib_genid_resync(&mut self, ifindex: u32, addr: Ipv4Addr) {
-        let targets: Vec<(SgKey, Ipv4Addr)> = self
+    pub(crate) fn tib_genid_resync(&mut self, ifindex: u32, addr: A::Addr) {
+        let targets: Vec<(SgKey<A>, A::Addr)> = self
             .tib
             .iter()
             .filter_map(|(key, e)| match e.rpf {
@@ -434,7 +433,7 @@ impl Pim {
     /// PIM stopped on an interface: drop every per-interface facet
     /// that references it.
     pub(crate) fn tib_iface_purge(&mut self, ifindex: u32) {
-        let keys: Vec<SgKey> = self.tib.keys().copied().collect();
+        let keys: Vec<SgKey<A>> = self.tib.keys().copied().collect();
         for key in keys {
             if let Some(entry) = self.tib.get_mut(&key) {
                 let touched = entry.local.remove(&ifindex)
@@ -454,7 +453,7 @@ impl Pim {
     /// Join/Prune state, kernel MFC. (*,G)/(S,G,rpt) changes cascade
     /// into the same-group (S,G) entries whose inherited olist they
     /// feed.
-    pub(crate) fn tib_update(&mut self, key: SgKey) {
+    pub(crate) fn tib_update(&mut self, key: SgKey<A>) {
         let Some(entry) = self.tib.get(&key) else {
             return;
         };
@@ -576,12 +575,12 @@ impl Pim {
 
     /// A (*,G) or (S,G,rpt) change feeds the inherited olists of the
     /// same-group (S,G) entries — re-evaluate them.
-    fn tib_cascade(&mut self, key: SgKey) {
+    fn tib_cascade(&mut self, key: SgKey<A>) {
         if matches!(key, SgKey::Sg { .. }) {
             return;
         }
         let grp = key.grp();
-        let sgs: Vec<SgKey> = self
+        let sgs: Vec<SgKey<A>> = self
             .tib
             .keys()
             .filter(|k| matches!(k, SgKey::Sg { .. }) && k.grp() == grp)
@@ -595,7 +594,7 @@ impl Pim {
     /// Native source-tree traffic confirmed for a joined (S,G): mark
     /// the SPT bit and send the triggered (S,G,rpt) prune toward the
     /// shared tree when the paths diverge.
-    fn spt_bit_set(&mut self, key: SgKey) {
+    fn spt_bit_set(&mut self, key: SgKey<A>) {
         let SgKey::Sg { src, grp } = key else {
             return;
         };
@@ -659,7 +658,7 @@ impl Pim {
     }
 
     pub(crate) fn tib_tick(&mut self, now: Instant) {
-        let mut touched: Vec<SgKey> = vec![];
+        let mut touched: Vec<SgKey<A>> = vec![];
         for (key, entry) in self.tib.iter_mut() {
             let before = entry.downstream.len();
             entry.downstream.retain(|_, ds| {

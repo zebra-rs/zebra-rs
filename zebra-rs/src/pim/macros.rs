@@ -5,13 +5,17 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
+use super::af::PimAf;
 use super::assert_fsm::AssertRole;
 use super::tib::{DsState, SgKey, TibEntry};
 
 /// `immediate_olist(key)`: interfaces with local (IGMP) membership
 /// or downstream Join state on this entry. A PrunePending interface
 /// still forwards until its timer fires (RFC 7761 §4.5.2).
-pub fn immediate_olist(tib: &BTreeMap<SgKey, TibEntry>, key: SgKey) -> BTreeSet<u32> {
+pub fn immediate_olist<A: PimAf>(
+    tib: &BTreeMap<SgKey<A>, TibEntry<A>>,
+    key: SgKey<A>,
+) -> BTreeSet<u32> {
     let Some(entry) = tib.get(&key) else {
         return BTreeSet::new();
     };
@@ -30,7 +34,10 @@ pub fn immediate_olist(tib: &BTreeMap<SgKey, TibEntry>, key: SgKey) -> BTreeSet<
 /// set — immediate (S,G) state plus the shared tree's olist minus
 /// interfaces holding an (S,G,rpt) prune. For non-(S,G) keys it is
 /// the immediate olist.
-pub fn inherited_olist(tib: &BTreeMap<SgKey, TibEntry>, key: SgKey) -> BTreeSet<u32> {
+pub fn inherited_olist<A: PimAf>(
+    tib: &BTreeMap<SgKey<A>, TibEntry<A>>,
+    key: SgKey<A>,
+) -> BTreeSet<u32> {
     let SgKey::Sg { src, grp } = key else {
         return immediate_olist(tib, key);
     };
@@ -48,7 +55,10 @@ pub fn inherited_olist(tib: &BTreeMap<SgKey, TibEntry>, key: SgKey) -> BTreeSet<
 /// Interfaces where this entry lost an assert election — excluded
 /// from forwarding and from JoinDesired while the winner is alive
 /// (RFC 7761 `lost_assert(S,G,I)`).
-pub fn assert_losers(tib: &BTreeMap<SgKey, TibEntry>, key: SgKey) -> BTreeSet<u32> {
+pub fn assert_losers<A: PimAf>(
+    tib: &BTreeMap<SgKey<A>, TibEntry<A>>,
+    key: SgKey<A>,
+) -> BTreeSet<u32> {
     let Some(entry) = tib.get(&key) else {
         return BTreeSet::new();
     };
@@ -62,7 +72,10 @@ pub fn assert_losers(tib: &BTreeMap<SgKey, TibEntry>, key: SgKey) -> BTreeSet<u3
 
 /// The inherited olist minus assert-lost interfaces — what actually
 /// counts for JoinDesired's traffic-driven clause and the MFC.
-pub fn inherited_effective(tib: &BTreeMap<SgKey, TibEntry>, key: SgKey) -> BTreeSet<u32> {
+pub fn inherited_effective<A: PimAf>(
+    tib: &BTreeMap<SgKey<A>, TibEntry<A>>,
+    key: SgKey<A>,
+) -> BTreeSet<u32> {
     let mut olist = inherited_olist(tib, key);
     for ifindex in assert_losers(tib, key) {
         olist.remove(&ifindex);
@@ -72,7 +85,10 @@ pub fn inherited_effective(tib: &BTreeMap<SgKey, TibEntry>, key: SgKey) -> BTree
 
 /// `JoinDesired` restricted to interfaces we would actually forward
 /// to (immediate olist minus assert losses).
-pub fn join_desired_effective(tib: &BTreeMap<SgKey, TibEntry>, key: SgKey) -> bool {
+pub fn join_desired_effective<A: PimAf>(
+    tib: &BTreeMap<SgKey<A>, TibEntry<A>>,
+    key: SgKey<A>,
+) -> bool {
     let mut olist = immediate_olist(tib, key);
     for ifindex in assert_losers(tib, key) {
         olist.remove(&ifindex);
@@ -82,7 +98,7 @@ pub fn join_desired_effective(tib: &BTreeMap<SgKey, TibEntry>, key: SgKey) -> bo
 
 /// The (S,G) MFC outgoing set: the effective inherited olist minus
 /// the incoming interface (loop-free guard — never emit OIF == IIF).
-pub fn mfc_oifs(tib: &BTreeMap<SgKey, TibEntry>, key: SgKey) -> BTreeSet<u32> {
+pub fn mfc_oifs<A: PimAf>(tib: &BTreeMap<SgKey<A>, TibEntry<A>>, key: SgKey<A>) -> BTreeSet<u32> {
     let mut oifs = inherited_effective(tib, key);
     if let Some(iif) = tib.get(&key).and_then(|e| e.rpf.ifindex()) {
         oifs.remove(&iif);

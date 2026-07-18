@@ -10,7 +10,6 @@
 //! matching the "switch to SPT immediately" policy. Native traffic
 //! takes over as soon as the (S,G) join propagates.
 
-use std::net::{IpAddr, Ipv4Addr};
 use std::time::{Duration, Instant};
 
 use pim_packet::{
@@ -19,9 +18,7 @@ use pim_packet::{
 
 use super::af::PimAf;
 use super::inst::{Pim, PimSend};
-use super::ipv4::Ipv4;
 use super::mroute::{PimForwardingPlane, Upcall};
-use super::rp::is_ssm;
 use super::tib::{JoinState, KEEPALIVE_PERIOD, RegState, SgKey};
 
 /// Register suppression: how long a Register-Stop silences the DR.
@@ -31,15 +28,15 @@ const REGISTER_SUPPRESS: Duration = Duration::from_secs(55);
 /// suppression would lapse.
 const REGISTER_PROBE: Duration = Duration::from_secs(5);
 
-impl Pim {
+impl<A: PimAf> Pim<A> {
     /// First-hop-router check on NOCACHE: start registering when we
     /// are the DR on the directly-connected source's interface, the
     /// group is ASM with a known RP, and we are not the RP ourselves.
-    pub(crate) fn register_check_fhr(&mut self, key: SgKey, vif: u16) {
+    pub(crate) fn register_check_fhr(&mut self, key: SgKey<A>, vif: u16) {
         let SgKey::Sg { src, grp } = key else {
             return;
         };
-        if is_ssm(grp) || self.i_am_rp(grp) || self.rp_lookup(grp).is_none() {
+        if A::is_ssm(grp) || self.i_am_rp(grp) || self.rp_lookup(grp).is_none() {
             return;
         }
         let Some(ifindex) = self.fp.ifindex_of(vif) else {
@@ -48,7 +45,7 @@ impl Pim {
         let directly_connected = self
             .links
             .get(&ifindex)
-            .map(|l| l.enabled && l.addrs.iter().any(|p| p.contains(&src)))
+            .map(|l| l.enabled && l.addrs.iter().any(|p| A::prefix_contains(p, &src)))
             .unwrap_or(false);
         if !directly_connected || !self.i_am_dr(ifindex) {
             return;
@@ -62,7 +59,7 @@ impl Pim {
 
     /// WHOLEPKT upcall: the kernel punted a full packet through the
     /// register VIF — encapsulate and unicast it to RP(G).
-    pub(crate) fn register_wholepkt(&mut self, upcall: Upcall) {
+    pub(crate) fn register_wholepkt(&mut self, upcall: Upcall<A>) {
         let key = SgKey::Sg {
             src: upcall.src,
             grp: upcall.grp,
@@ -81,7 +78,7 @@ impl Pim {
         self.register_send(rp, upcall.payload, false);
     }
 
-    fn register_send(&self, rp: Ipv4Addr, data: Vec<u8>, null: bool) {
+    fn register_send(&self, rp: A::Addr, data: Vec<u8>, null: bool) {
         let packet = PimPacket::new(PimPayload::Register(PimRegister {
             border: false,
             null_register: null,
@@ -95,34 +92,19 @@ impl Pim {
         });
     }
 
-    /// A minimal inner IPv4 header naming (S,G) — the Null-Register
-    /// payload (RFC 7761 §4.4.1).
-    fn null_register_payload(src: Ipv4Addr, grp: Ipv4Addr) -> Vec<u8> {
-        let mut header = vec![0u8; 20];
-        header[0] = 0x45;
-        header[3] = 20; // total length
-        header[8] = 64; // ttl
-        header[12..16].copy_from_slice(&src.octets());
-        header[16..20].copy_from_slice(&grp.octets());
-        header
-    }
-
     // ---- RP side ----
 
     /// Register RX at the RP: (re)create the (S,G), keep it alive,
     /// let `tib_update` fire the SPT join (KAT + inherited olist),
     /// and answer Register-Stop once the source tree is joined — or
     /// immediately when nobody is listening.
-    pub(crate) fn register_recv(&mut self, outer_src: Ipv4Addr, register: &PimRegister) {
+    pub(crate) fn register_recv(&mut self, outer_src: A::Addr, register: &PimRegister) {
         // The inner packet (or Null-Register dummy header) names (S,G).
-        let data = &register.data;
-        if data.len() < 20 || data[0] >> 4 != 4 {
+        let Some((src, grp)) = A::register_inner_sg(&register.data) else {
             tracing::debug!("pim: malformed register from {}", outer_src);
             return;
-        }
-        let src = Ipv4Addr::new(data[12], data[13], data[14], data[15]);
-        let grp = Ipv4Addr::new(data[16], data[17], data[18], data[19]);
-        if !Ipv4::is_multicast(grp) || is_ssm(grp) {
+        };
+        if !A::is_multicast(grp) || A::is_ssm(grp) {
             return;
         }
         if !self.i_am_rp(grp) {
@@ -148,10 +130,10 @@ impl Pim {
         }
     }
 
-    fn register_stop_send(&self, dr: Ipv4Addr, src: Ipv4Addr, grp: Ipv4Addr) {
+    fn register_stop_send(&self, dr: A::Addr, src: A::Addr, grp: A::Addr) {
         let packet = PimPacket::new(PimPayload::RegisterStop(PimRegisterStop {
-            group: EncodedGroup::new(IpAddr::V4(grp)),
-            source: EncodedUnicast::new(IpAddr::V4(src)),
+            group: EncodedGroup::new(A::to_ip(grp)),
+            source: EncodedUnicast::new(A::to_ip(src)),
         }));
         let _ = self.send_tx.send(PimSend {
             packet,
@@ -162,7 +144,8 @@ impl Pim {
 
     /// Register-Stop RX at the DR: suppress.
     pub(crate) fn register_stop_recv(&mut self, stop: &PimRegisterStop) {
-        let (IpAddr::V4(grp), IpAddr::V4(src)) = (stop.group.addr, stop.source.addr) else {
+        let (Some(grp), Some(src)) = (A::from_ip(stop.group.addr), A::from_ip(stop.source.addr))
+        else {
             return;
         };
         let key = SgKey::Sg { src, grp };
@@ -189,7 +172,7 @@ impl Pim {
     /// Register FSM deadlines: suppression lapse → Null-Register
     /// probe; probe unanswered → resume registering.
     pub(crate) fn register_tick(&mut self, now: Instant) {
-        let due: Vec<(SgKey, RegState)> = self
+        let due: Vec<(SgKey<A>, RegState)> = self
             .tib
             .iter()
             .filter_map(|(key, e)| match e.reg_state {
@@ -207,7 +190,7 @@ impl Pim {
                     // Probe: Null-Register; a live RP answers with
                     // another Stop before the window closes.
                     if let Some(rp) = self.rp_lookup(grp) {
-                        self.register_send(rp, Self::null_register_payload(src, grp), true);
+                        self.register_send(rp, A::null_register_payload(src, grp), true);
                     }
                     if let Some(entry) = self.tib.get_mut(&key) {
                         entry.reg_state = RegState::JoinPending {

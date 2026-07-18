@@ -9,9 +9,11 @@ use super::af::PimAf;
 use super::inst::Pim;
 use super::ipv4::Ipv4;
 
-pub type Callback = fn(&mut Pim, Args, ConfigOp) -> Option<()>;
+pub type Callback<A = Ipv4> = fn(&mut Pim<A>, Args, ConfigOp) -> Option<()>;
 
-impl Pim {
+/// The `router pim` callbacks parse IPv4 CLI addresses/prefixes, so
+/// they are the concrete-IPv4 configuration surface.
+impl Pim<Ipv4> {
     pub fn callback_build(&mut self) {
         self.callback_add("/router/pim/interface", config_interface);
         self.callback_add("/router/pim/interface/dr-priority", config_dr_priority);

@@ -9,14 +9,18 @@ use std::time::Instant;
 
 use crate::config::{Args, Builder};
 
+use super::af::PimAf;
 use super::assert_fsm::AssertRole;
 use super::igmp::{FilterMode, QuerierState};
 use super::inst::{Pim, ShowCallback};
+use super::ipv4::Ipv4;
 use super::macros::mfc_oifs;
 use super::rpf::RpfState;
 use super::tib::{JoinState, RegState};
 
-impl Pim {
+/// `show pim …` handlers render the concrete-IPv4 state, so their
+/// registration lives on `Pim<Ipv4>`.
+impl Pim<Ipv4> {
     pub fn show_build(&mut self) {
         self.show_cb = Builder::<ShowCallback>::default()
             .path("/show/pim")
@@ -41,7 +45,9 @@ impl Pim {
             .set(show_mroute)
             .map();
     }
+}
 
+impl<A: PimAf> Pim<A> {
     pub(crate) fn ifname(&self, ifindex: u32) -> String {
         self.links
             .get(&ifindex)
