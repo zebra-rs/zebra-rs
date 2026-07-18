@@ -10,6 +10,8 @@ pub mod macros;
 pub mod mroute;
 pub mod neighbor;
 pub mod network;
+pub mod register;
+pub mod rp;
 pub mod rpf;
 pub mod show;
 pub mod socket;

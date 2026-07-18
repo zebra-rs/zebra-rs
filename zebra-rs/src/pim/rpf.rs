@@ -10,7 +10,7 @@ use crate::rib;
 use crate::rib::nht::NexthopResolution;
 
 use super::inst::Pim;
-use super::tib::Sg;
+use super::tib::SgKey;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RpfState {
@@ -114,17 +114,18 @@ impl Pim {
         }
     }
 
-    /// Propagate an RPF change into every TIB entry for that source:
-    /// prune off the old upstream, adopt the new state, re-evaluate.
-    fn rpf_changed(&mut self, src: Ipv4Addr, state: RpfState) {
-        let sgs: Vec<Sg> = self
+    /// Propagate an RPF change into every TIB entry tracking that
+    /// address ((S,G) sources and (*,G) RPs alike): prune off the old
+    /// upstream, adopt the new state, re-evaluate.
+    fn rpf_changed(&mut self, addr: Ipv4Addr, state: RpfState) {
+        let keys: Vec<SgKey> = self
             .tib
-            .keys()
-            .filter(|sg| sg.src == src)
-            .copied()
+            .iter()
+            .filter(|(_, e)| e.rpf_target == Some(addr))
+            .map(|(key, _)| *key)
             .collect();
-        for sg in sgs {
-            self.tib_rpf_change(sg, state);
+        for key in keys {
+            self.tib_rpf_change(key, state);
         }
     }
 }

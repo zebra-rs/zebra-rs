@@ -29,9 +29,10 @@ use super::config::Callback;
 use super::link::{LinkConfig, PIM_OVERRIDE_INTERVAL_MSEC, PIM_PROPAGATION_DELAY_MSEC, PimLink};
 use super::mroute::{ForwardingPlane, Upcall};
 use super::network::{igmp_read_packet, igmp_write_packet, mroute_read, read_packet, write_packet};
+use super::rp::RpSet;
 use super::rpf::RpfEntry;
 use super::socket::ALL_PIM_ROUTERS;
-use super::tib::{Sg, TibEntry};
+use super::tib::{SgKey, TibEntry};
 
 /// `show pim ...` dispatch handler, mirroring
 /// [`crate::nd::inst::ShowCallback`].
@@ -83,10 +84,12 @@ pub struct Pim {
     /// Desired per-interface config keyed by interface name — the
     /// source of truth the reconciler compares runtime state against.
     pub if_config: BTreeMap<String, LinkConfig>,
-    /// The Tree Information Base: (S,G) forwarding state.
-    pub tib: BTreeMap<Sg, TibEntry>,
-    /// RPF cache keyed by source address (NHT-backed).
+    /// The Tree Information Base: (*,G) / (S,G) / (S,G,rpt) state.
+    pub tib: BTreeMap<SgKey, TibEntry>,
+    /// RPF cache keyed by tracked address (sources and RPs).
     pub rpf: BTreeMap<Ipv4Addr, RpfEntry>,
+    /// Static RP mappings.
+    pub rp_set: RpSet,
     /// Kernel dataplane: mroute socket, VIFs, MFC.
     pub(crate) fp: ForwardingPlane,
     /// Periodic J/P refresh deadlines per (ifindex, upstream nbr).
@@ -154,6 +157,7 @@ impl Pim {
             if_config: BTreeMap::new(),
             tib: BTreeMap::new(),
             rpf: BTreeMap::new(),
+            rp_set: RpSet::default(),
             fp,
             jp_refresh: BTreeMap::new(),
             send_tx,
@@ -273,8 +277,10 @@ impl Pim {
         match &packet.payload {
             PimPayload::Hello(hello) => self.hello_recv(ifindex, src, hello),
             PimPayload::JoinPrune(jp) => self.jp_recv(ifindex, src, jp),
+            PimPayload::Register(register) => self.register_recv(src, register),
+            PimPayload::RegisterStop(stop) => self.register_stop_recv(stop),
             other => {
-                // Assert / Register handling arrives with later
+                // Assert / Bootstrap handling arrives with later
                 // phases.
                 tracing::debug!(
                     "pim: ignoring {} from {} on ifindex {} (not yet implemented)",

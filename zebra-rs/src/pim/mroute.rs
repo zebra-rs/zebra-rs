@@ -31,8 +31,15 @@ const MRT_DEL_MFC: c_int = 205;
 const MRT_PIM: c_int = 208;
 
 const VIFF_USE_IFINDEX: u8 = 0x8;
+const VIFF_REGISTER: u8 = 0x4;
 
 pub const MAXVIFS: usize = 32;
+
+/// The register VIF: slot 0, created at init. The kernel materializes
+/// it as the `pimreg` device; putting it in an (S,G) OIL makes the
+/// kernel punt full packets (WHOLEPKT) for Register encapsulation at
+/// the DR.
+pub const REG_VIF: u16 = 0;
 
 const IGMPMSG_NOCACHE: u8 = 1;
 const IGMPMSG_WRONGVIF: u8 = 2;
@@ -78,12 +85,15 @@ pub enum UpcallKind {
     WrVifWhole,
 }
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone)]
 pub struct Upcall {
     pub kind: UpcallKind,
     pub vif: u16,
     pub src: Ipv4Addr,
     pub grp: Ipv4Addr,
+    /// The punted original IP packet — populated for WHOLEPKT (the
+    /// Register encapsulation payload), empty otherwise.
+    pub payload: Vec<u8>,
 }
 
 /// Parse one datagram read from the mroute socket. `None` for
@@ -104,11 +114,17 @@ pub fn parse_upcall(buf: &[u8]) -> Option<Upcall> {
             return None;
         }
     };
+    let payload = if matches!(kind, UpcallKind::WholePkt | UpcallKind::WrVifWhole) {
+        buf[20..].to_vec()
+    } else {
+        Vec::new()
+    };
     Some(Upcall {
         kind,
         vif: buf[10] as u16 | ((buf[11] as u16) << 8),
         src: Ipv4Addr::new(buf[12], buf[13], buf[14], buf[15]),
         grp: Ipv4Addr::new(buf[16], buf[17], buf[18], buf[19]),
+        payload,
     })
 }
 
@@ -153,6 +169,19 @@ impl ForwardingPlane {
         // WRVIFWHOLE upcall used by the ASM phase.
         if let Err(e) = mrt_setsockopt(&sock, MRT_PIM, &one) {
             tracing::warn!("mroute: MRT_PIM failed ({e}); register handling degraded");
+        }
+        // The register VIF (slot 0) — kernel creates `pimreg`. Needed
+        // in an (S,G) OIL for WHOLEPKT punts at the DR.
+        let vc = Vifctl {
+            vifc_vifi: REG_VIF,
+            vifc_flags: VIFF_REGISTER,
+            vifc_threshold: 1,
+            vifc_rate_limit: 0,
+            vifc_lcl: 0,
+            vifc_rmt_addr: 0,
+        };
+        if let Err(e) = mrt_setsockopt(&sock, MRT_ADD_VIF, &vc) {
+            tracing::warn!("mroute: register VIF add failed ({e}); registers degraded");
         }
         Ok(Self {
             sock: Arc::new(AsyncFd::new(sock)?),

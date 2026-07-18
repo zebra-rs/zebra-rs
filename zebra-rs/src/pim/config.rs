@@ -32,6 +32,8 @@ impl Pim {
             "/router/pim/interface/igmp/query-max-response-time",
             config_igmp_query_max_resp,
         );
+        self.callback_add("/router/pim/rp/static", config_rp_static);
+        self.callback_add("/router/pim/rp/static/group", config_rp_static_group);
     }
 
     fn callback_add(&mut self, path: &str, cb: Callback) {
@@ -141,6 +143,32 @@ fn config_igmp_query_interval(pim: &mut Pim, mut args: Args, op: ConfigOp) -> Op
         config.igmp.query_interval = None;
     }
     pim.reconcile_by_name(&name);
+    Some(())
+}
+
+fn config_rp_static(pim: &mut Pim, mut args: Args, op: ConfigOp) -> Option<()> {
+    let address = args.v4addr()?;
+    if op.is_set() {
+        pim.rp_set
+            .statics
+            .entry(address)
+            .or_insert_with(|| "224.0.0.0/4".parse().unwrap());
+    } else {
+        pim.rp_set.statics.remove(&address);
+    }
+    pim.rp_reevaluate();
+    Some(())
+}
+
+fn config_rp_static_group(pim: &mut Pim, mut args: Args, op: ConfigOp) -> Option<()> {
+    let address = args.v4addr()?;
+    if op.is_set() {
+        let range = args.string()?.parse().ok()?;
+        pim.rp_set.statics.insert(address, range);
+    } else if let Some(range) = pim.rp_set.statics.get_mut(&address) {
+        *range = "224.0.0.0/4".parse().unwrap();
+    }
+    pim.rp_reevaluate();
     Some(())
 }
 
