@@ -5,6 +5,10 @@ use nom_derive::*;
 #[repr(u8)]
 #[derive(Debug, Default, PartialEq, Eq, Clone, Copy)]
 pub enum IsisNeighCode {
+    /// RFC 5305 §3.1 — classic Administrative Group / link color
+    /// (fixed 4 octets). Distinct from the RFC 7308 Extended
+    /// Administrative Groups at code 14.
+    AdminGroup = 3,
     #[default]
     Ipv4IfAddr = 6,
     Ipv4NeighAddr = 8,
@@ -39,6 +43,7 @@ impl From<IsisNeighCode> for u8 {
     fn from(typ: IsisNeighCode) -> Self {
         use IsisNeighCode::*;
         match typ {
+            AdminGroup => 3,
             Ipv4IfAddr => 6,
             Ipv4NeighAddr => 8,
             Ipv6IfAddr => 12,
@@ -66,6 +71,7 @@ impl From<u8> for IsisNeighCode {
     fn from(typ: u8) -> Self {
         use IsisNeighCode::*;
         match typ {
+            3 => AdminGroup,
             6 => Ipv4IfAddr,
             8 => Ipv4NeighAddr,
             12 => Ipv6IfAddr,

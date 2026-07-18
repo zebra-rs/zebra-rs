@@ -310,7 +310,7 @@ misassign. All daemon builders were already prefix-closed, so no wire output
 changes. Unit tests pin the gapped-struct emit (only the leading fields) and
 every prefix-closed `P2p3Way` form round-tripping exactly.
 
-### 13. 🟡 `admin_group()` doc claims sub-TLV 3 but reads sub-TLV 14; sub-TLV 3 undispatched — PLAUSIBLE
+### 13. 🟡 `admin_group()` doc claims sub-TLV 3 but reads sub-TLV 14; sub-TLV 3 undispatched — PLAUSIBLE — ✅ FIXED
 `crates/isis-packet/src/sub/neigh.rs:154`
 
 The accessor is documented as returning the sub-TLV 3 Administrative Group but
@@ -324,8 +324,12 @@ color is lost. BGP-LS also distinguishes Administrative Group (TLV 1088) from
 Extended Administrative Group (TLV 1173), so mapping one to the other is
 semantically wrong.
 
-**Fix:** add a dispatch arm for sub-TLV 3 and fix the accessor doc (or fold both
-into one accessor with the correct BGP-LS mapping).
+**Fixed:** sub-TLV 3 now has a dedicated `IsisSubAdminGroup` codec (fixed
+4-octet mask) and dispatch arm; `admin_group()` reads it (BGP-LS TLV 1088),
+and a new `ext_admin_group()` exposes the RFC 7308 sub-TLV 14 list (BGP-LS
+TLV 1173 when the producer grows support for it). Display labels the two
+flavors distinctly. Unit test pins the dispatch, round-trip, and both
+accessors on an entry carrying both flavors.
 
 ### 14. 🟡 ASLA parse forces SABM/UDABM to ≥1 byte when L-flag set — PLAUSIBLE
 `crates/isis-packet/src/sub/neigh.rs:764`
