@@ -54,7 +54,7 @@ are fixed and merged to `main`. The review document itself landed in #1955.
 | [#1986](https://github.com/zebra-rs/zebra-rs/pull/1986) | 12 | `num_adv`/`num_links` derived from `.len()` at emit (fields removed, custom `ParseBe`); **validated by `ospfv2_multi_area` BDD** |
 | [#1990](https://github.com/zebra-rs/zebra-rs/pull/1990) | 11 | `parse_lsa_with_length` propagates a known-type body-parse error instead of masking it as `Unknown`; unknown types stay tolerant; **validated by `ospfv2_tilfa` BDD** |
 | [#1993](https://github.com/zebra-rs/zebra-rs/pull/1993) | 10 | `verify_checksum` checks received LSAs against their cached wire bytes (`raw`); typed re-emit kept only as the self-originated fallback |
-| [#1996](https://github.com/zebra-rs/zebra-rs/pull/1998) | 13 | `Ospfv2Packet::emit` writes the Unknown payload body; `Ospfv2Payload::typ()` returns the stored type (emit match now exhaustive) |
+| [#1998](https://github.com/zebra-rs/zebra-rs/pull/1998) | 13 | `Ospfv2Packet::emit` writes the Unknown payload body; `Ospfv2Payload::typ()` returns the stored type (emit match now exhaustive) |
 
 Each fix carries a regression test: byte-offset unit tests where a `show`-based
 check could not discriminate the bug, plus live BDD features for the Prefix-SID
@@ -79,7 +79,7 @@ silent interop break in a shipped datapath). Suggested order:
 > Only low-severity cleanup remains.
 
 > Finding 13 (Unknown v2 payload emit) was fixed in
-> [#1996](https://github.com/zebra-rs/zebra-rs/pull/1998).
+> [#1998](https://github.com/zebra-rs/zebra-rs/pull/1998).
 
 **Cleanup — low-severity, opportunistic**
 1. **Finding 15 (remainder) — delete dead `pub` items** (`is_known`,
@@ -381,7 +381,7 @@ the manual sync lines.
 ---
 
 ### 13. Unknown v2 payload emit drops the body; `typ()` maps Unknown → Hello
-> ✅ **Fixed in [#1996](https://github.com/zebra-rs/zebra-rs/pull/1998)** — emit writes the stored payload; `typ()` returns the stored type; emit match now exhaustive.
+> ✅ **Fixed in [#1998](https://github.com/zebra-rs/zebra-rs/pull/1998)** — emit writes the stored payload; `typ()` returns the stored type; emit match now exhaustive.
 
 **`crates/ospf-packet/src/parser.rs:82`** (and `parser.rs:227`)
 
