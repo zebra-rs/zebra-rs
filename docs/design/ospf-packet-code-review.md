@@ -28,7 +28,7 @@ most-severe first.
 | 9 | **Security** | `zebra-rs/.../network_v6.rs:124` | v3 checksum skipped when any trailing bytes present | ✅ #1979 |
 | 10 | **Correctness** | `parser.rs:557` | `verify_checksum` re-emits typed form, ignores `raw` | ⬜ open |
 | 11 | **Robustness** | `parser.rs:693` | `parse_lsa_with_length` swallows all errors into `Unknown` | ⬜ open |
-| 12 | **Correctness** | `parser.rs:422` (+`816`) | v2 emit writes stored `num_adv`/`num_links`, not derived | ⬜ open |
+| 12 | **Correctness** | `parser.rs:422` (+`816`) | v2 emit writes stored `num_adv`/`num_links`, not derived | ✅ #1986 |
 | 13 | **Correctness** | `parser.rs:82` (+`227`) | Unknown v2 payload emit drops body; `typ()` → Hello | ⬜ open |
 | 14 | **Cleanup (reuse)** | `parser.rs:618` | Fletcher checksum + FAD/SID codecs duplicated | ⬜ open |
 | 15 | **Cleanup (dead code)** | `parser.rs:1197` (+`1077`, `v3.rs`) | Dead `pub` items add confusing API surface | ⬜ open |
@@ -38,9 +38,9 @@ most-severe first.
 ## Status (2026-07-18)
 
 All seven top findings — the three remote-DoS parse bugs and all four silent
-interop wire-format bugs — plus the security finding #9 and the round-trip
-finding #8 are fixed and merged to `main`. The review document itself landed in
-#1955.
+interop wire-format bugs — plus the security finding #9, the round-trip finding
+#8, and the correctness finding #12 are fixed and merged to `main`. The review
+document itself landed in #1955.
 
 | PR | Findings | Summary |
 |----|----------|---------|
@@ -51,6 +51,7 @@ finding #8 are fixed and merged to `main`. The review document itself landed in
 | [#1974](https://github.com/zebra-rs/zebra-rs/pull/1974) | 7 | End.X / LAN-End.X SID head → 6 bytes (RFC 9513 §9.1/§9.2) |
 | [#1979](https://github.com/zebra-rs/zebra-rs/pull/1979) | 9 | v3 receive checksum verified over `input[..pkt_len]` unconditionally, closing the trailing-bytes bypass; **validated by `ospfv3_auth` BDD** |
 | [#1982](https://github.com/zebra-rs/zebra-rs/pull/1982) | 8 (part of 15) | Unknown Router-Information TLV built from the header, not the value bytes; dead `RouterInfoTlvUnknown::parse_tlv` removed |
+| [#1986](https://github.com/zebra-rs/zebra-rs/pull/1986) | 12 | `num_adv`/`num_links` derived from `.len()` at emit (fields removed, custom `ParseBe`); **validated by `ospfv2_multi_area` BDD** |
 
 Each fix carries a regression test: byte-offset unit tests where a `show`-based
 check could not discriminate the bug, plus live BDD features for the Prefix-SID
@@ -66,19 +67,17 @@ meaningful lock.
 The remaining findings are all lower-severity than the merged set (no DoS, no
 silent interop break in a shipped datapath). Suggested order:
 
-> Findings 8 and 9 — the previous Tier-1 items — are fixed: #9 (v3 checksum-skip
-> bypass) in [#1979](https://github.com/zebra-rs/zebra-rs/pull/1979), #8 (Unknown
-> RouterInfo TLV round-trip) in [#1982](https://github.com/zebra-rs/zebra-rs/pull/1982).
+> Findings 8, 9, and 12 — the previous Tier-1 items — are fixed: #9 (v3
+> checksum-skip bypass) in [#1979](https://github.com/zebra-rs/zebra-rs/pull/1979),
+> #8 (Unknown RouterInfo TLV round-trip) in [#1982](https://github.com/zebra-rs/zebra-rs/pull/1982),
+> #12 (derive LSA counts at emit) in [#1986](https://github.com/zebra-rs/zebra-rs/pull/1986).
 
 **Tier 1 — correctness / robustness, moderate effort**
-1. **Finding 12 — derive `num_adv` / `num_links` at emit.** Mirror the v3 codec
-   (`Ospfv3LsUpdate::emit`), then delete the manual sync lines in the daemon
-   (`inst.rs:1983`, `inst.rs:5404/5502/5571`). Touches daemon call sites.
-2. **Finding 11 — `parse_lsa_with_length` should not swallow parse failures.**
+1. **Finding 11 — `parse_lsa_with_length` should not swallow parse failures.**
    Distinguish "unknown LS type" (→ `Unknown`, keep tolerant flooding) from
    "known type, body failed to parse" (→ propagate `Err`). Needs care to avoid
    regressing the intentional unmodeled-sub-TLV tolerance.
-3. **Finding 10 — `verify_checksum` should use `self.raw`.** Low effort; latent
+2. **Finding 10 — `verify_checksum` should use `self.raw`.** Low effort; latent
    today (only the crate's tests call it), so low urgency until it is wired into
    an ingress path. Pairs with the non-bijective `From<u8>` note below.
 
@@ -363,6 +362,8 @@ failed to parse" (→ propagate `Err`).
 ---
 
 ### 12. v2 emit writes stored `num_adv` / `num_links` instead of deriving them
+> ✅ **Fixed in [#1986](https://github.com/zebra-rs/zebra-rs/pull/1986)** — fields removed; counts derived from `.len()` at emit; validated by `ospfv2_multi_area` BDD.
+
 **`crates/ospf-packet/src/parser.rs:416`** (and `RouterLsa::emit`, `parser.rs:810`)
 
 `OspfLsUpdate::emit` writes `self.num_adv` verbatim; `RouterLsa::emit` writes
