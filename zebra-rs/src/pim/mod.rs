@@ -11,7 +11,7 @@ pub mod af;
 pub mod assert_fsm;
 pub mod bsr;
 pub mod config;
-pub mod igmp;
+pub mod gm;
 pub mod inst;
 pub mod ipv4;
 pub mod jp;

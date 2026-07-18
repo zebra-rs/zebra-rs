@@ -12,7 +12,7 @@ use std::collections::{BTreeMap, HashMap};
 use std::sync::Arc;
 use std::time::Instant;
 
-use pim_packet::{HelloTlv, IgmpPacket, PimHello, PimPacket, PimPayload};
+use pim_packet::{HelloTlv, PimHello, PimPacket, PimPayload};
 use socket2::Socket;
 use tokio::io::unix::AsyncFd;
 use tokio::sync::mpsc::{self, UnboundedReceiver, UnboundedSender};
@@ -28,10 +28,12 @@ use crate::rib::api::RibRx;
 use super::af::PimAf;
 use super::bsr::{BsrConfig, BsrRun};
 use super::config::Callback;
+use super::gm::igmp::IgmpCodec;
+use super::gm::{Gm, GmEvent, GmIfCtx, GmInput};
 use super::ipv4::Ipv4;
 use super::link::{LinkConfig, PIM_OVERRIDE_INTERVAL_MSEC, PIM_PROPAGATION_DELAY_MSEC, PimLink};
 use super::mroute::{Mrt4, Upcall};
-use super::network::{igmp_read_packet, igmp_write_packet, mroute_read, read_packet, write_packet};
+use super::network::{mroute_read, read_packet, write_packet};
 use super::rp::RpSet;
 use super::rpf::RpfEntry;
 use super::tib::{SgKey, TibEntry};
@@ -50,10 +52,12 @@ pub enum Message<A: PimAf = Ipv4> {
         src: A::Addr,
         ifindex: u32,
     },
-    Igmp {
-        packet: IgmpPacket,
-        src: A::Addr,
+    /// Normalized group-membership input from the [`Gm`] codec's read
+    /// task (IGMP today; MLD in Phase 4).
+    Membership {
         ifindex: u32,
+        src: A::Addr,
+        input: GmInput<A>,
     },
     Upcall(Upcall<A>),
     HelloTimer(u32),
@@ -65,14 +69,6 @@ pub enum Message<A: PimAf = Ipv4> {
 #[derive(Debug)]
 pub struct PimSend<A: PimAf = Ipv4> {
     pub packet: PimPacket,
-    pub ifindex: u32,
-    pub dst: A::Addr,
-}
-
-/// Outbound IGMP message (queries) for the IGMP write task.
-#[derive(Debug)]
-pub struct IgmpSend<A: PimAf = Ipv4> {
-    pub packet: IgmpPacket,
     pub ifindex: u32,
     pub dst: A::Addr,
 }
@@ -100,14 +96,16 @@ pub struct Pim<A: PimAf = Ipv4> {
     /// Periodic J/P refresh deadlines per (ifindex, upstream nbr).
     pub(crate) jp_refresh: BTreeMap<(u32, A::Addr), std::time::Instant>,
     pub(crate) send_tx: UnboundedSender<PimSend<A>>,
-    pub(crate) igmp_send_tx: UnboundedSender<IgmpSend<A>>,
+    /// Group-membership engine (IGMP / MLD) with its own transport.
+    /// `None` for a family with no membership protocol yet (an IPv6
+    /// instance before Phase 4).
+    pub(crate) gm: Option<Gm<A>>,
     rib_rx: UnboundedReceiver<RibRx>,
     pub cm: ConfigChannel,
     pub show: ShowChannel,
     pub show_cb: HashMap<String, ShowCallback<A>>,
     pub callbacks: HashMap<String, Callback<A>>,
     pub(crate) sock: Arc<AsyncFd<Socket>>,
-    pub(crate) igmp_sock: Arc<AsyncFd<Socket>>,
     /// RIB client context — carries the NHT registrations for RPF.
     pub(crate) ctx: ProtoContext,
     /// `"pim"` for the default instance, `"pim:vrf:<name>"` for a
@@ -130,8 +128,6 @@ pub struct Pim<A: PimAf = Ipv4> {
     pub(crate) rib_known_vrfs: BTreeMap<String, (u32, u32)>,
     _read_task: Task<()>,
     _write_task: Task<()>,
-    _igmp_read_task: Task<()>,
-    _igmp_write_task: Task<()>,
     _mroute_read_task: Task<()>,
 }
 
@@ -151,10 +147,8 @@ impl Pim<Ipv4> {
         config_tx: mpsc::Sender<crate::config::Message>,
     ) -> Self {
         let sock = Arc::new(sock);
-        let igmp_sock = Arc::new(igmp_sock);
         let (tx, rx) = mpsc::unbounded_channel();
         let (send_tx, send_rx) = mpsc::unbounded_channel();
-        let (igmp_send_tx, igmp_send_rx) = mpsc::unbounded_channel();
 
         let read_sock = sock.clone();
         let read_tx = tx.clone();
@@ -165,15 +159,9 @@ impl Pim<Ipv4> {
         let write_task = Task::spawn(async move {
             write_packet(write_sock, send_rx).await;
         });
-        let igmp_read_sock = igmp_sock.clone();
-        let igmp_read_tx = tx.clone();
-        let igmp_read_task = Task::spawn(async move {
-            igmp_read_packet(igmp_read_sock, igmp_read_tx).await;
-        });
-        let igmp_write_sock = igmp_sock.clone();
-        let igmp_write_task = Task::spawn(async move {
-            igmp_write_packet(igmp_write_sock, igmp_send_rx).await;
-        });
+        // The IGMP membership engine owns its socket, read/write tasks
+        // and wire codec; the engine's read task feeds `Message::Membership`.
+        let gm = Gm::new(Box::new(IgmpCodec::new(igmp_sock, tx.clone())));
         let mroute_sock = fp.sock.clone();
         let mroute_tx = tx.clone();
         let mroute_read_task = Task::spawn(async move {
@@ -193,14 +181,13 @@ impl Pim<Ipv4> {
             fp,
             jp_refresh: BTreeMap::new(),
             send_tx,
-            igmp_send_tx,
+            gm: Some(gm),
             rib_rx,
             cm: ConfigChannel::new(),
             show: ShowChannel::new(),
             show_cb: HashMap::new(),
             callbacks: HashMap::new(),
             sock,
-            igmp_sock,
             ctx,
             proto_label,
             rib_subscriber,
@@ -210,8 +197,6 @@ impl Pim<Ipv4> {
             rib_known_vrfs: BTreeMap::new(),
             _read_task: read_task,
             _write_task: write_task,
-            _igmp_read_task: igmp_read_task,
-            _igmp_write_task: igmp_write_task,
             _mroute_read_task: mroute_read_task,
         };
         pim.callback_build();
@@ -233,7 +218,7 @@ impl<A: PimAf> Pim<A> {
         }
         loop {
             let wakeup = [
-                self.igmp_next_wakeup(),
+                self.gm.as_ref().and_then(|g| g.next_wakeup()),
                 self.tib_next_wakeup(),
                 self.bsr_next_wakeup(),
             ]
@@ -255,7 +240,7 @@ impl<A: PimAf> Pim<A> {
                 }
                 _ = sleep_until_opt(wakeup) => {
                     let now = Instant::now();
-                    self.igmp_tick(now);
+                    self.gm_tick(now);
                     self.tib_tick(now);
                     self.bsr_tick(now);
                 }
@@ -270,15 +255,71 @@ impl<A: PimAf> Pim<A> {
                 src,
                 ifindex,
             } => self.packet_recv(packet, src, ifindex),
-            Message::Igmp {
-                packet,
-                src,
+            Message::Membership {
                 ifindex,
-            } => self.igmp_recv(ifindex, src, packet),
+                src,
+                input,
+            } => self.membership_recv(ifindex, src, input),
             Message::Upcall(upcall) => self.process_upcall(upcall),
             Message::HelloTimer(ifindex) => self.hello_send(ifindex),
             Message::NeighborExpiry(ifindex, addr) => self.neighbor_expiry(ifindex, addr),
         }
+    }
+
+    // ---- group-membership (Gm) engine bridge ----
+
+    /// Per-interface context the membership engine needs from the actor.
+    pub(crate) fn gm_if_ctx(&self, ifindex: u32) -> Option<GmIfCtx<A>> {
+        let link = self.links.get(&ifindex)?;
+        Some(GmIfCtx {
+            name: link.name.clone(),
+            config: self.link_config(&link.name).igmp,
+            is_dr: self.i_am_dr(ifindex),
+            my_addr: link.primary_addr(),
+        })
+    }
+
+    /// Apply the engine's TIB-bridge events (only the DR emits any).
+    pub(crate) fn apply_gm_events(&mut self, events: Vec<GmEvent<A>>) {
+        for ev in events {
+            match ev {
+                GmEvent::Join { ifindex, key } => self.tib_local_join(key, ifindex),
+                GmEvent::Prune { ifindex, key } => self.tib_local_prune(key, ifindex),
+            }
+        }
+    }
+
+    /// Drive the membership engine's timers.
+    fn gm_tick(&mut self, now: Instant) {
+        let Some(gm) = self.gm.as_ref() else {
+            return;
+        };
+        let ctx: BTreeMap<u32, GmIfCtx<A>> = gm
+            .ifindexes()
+            .into_iter()
+            .filter_map(|i| self.gm_if_ctx(i).map(|c| (i, c)))
+            .collect();
+        let events = self.gm.as_mut().unwrap().tick(now, &ctx);
+        self.apply_gm_events(events);
+    }
+
+    /// Feed a received membership message to the engine, ignoring our
+    /// own reports and interfaces where membership is not running.
+    fn membership_recv(&mut self, ifindex: u32, src: A::Addr, input: GmInput<A>) {
+        let Some(link) = self.links.get(&ifindex) else {
+            return;
+        };
+        if !link.enabled || link.is_my_addr(&src) {
+            return;
+        }
+        let Some(ctx) = self.gm_if_ctx(ifindex) else {
+            return;
+        };
+        let Some(gm) = self.gm.as_mut() else {
+            return;
+        };
+        let events = gm.recv(ifindex, src, input, &ctx);
+        self.apply_gm_events(events);
     }
 
     fn process_rib_msg(&mut self, msg: RibRx) {
