@@ -576,20 +576,57 @@ pub enum IsisTlv {
 
 impl IsisTlv {
     /// On-wire byte cost of this TLV: 2 bytes of TL header plus the
-    /// serialized value. Used by the send-side fragmentation packer
-    /// to decide whether a TLV instance fits in the current
-    /// fragment's remaining budget.
+    /// value. Used by the send-side fragmentation packer to decide
+    /// whether a TLV instance fits in the current fragment's
+    /// remaining budget, and to detect oversize instances that must
+    /// be split at an entry boundary before they reach `tlv_emit`.
     ///
-    /// `TlvEmitter::len()` returns the same byte count as a `u8`,
-    /// which silently wraps for malformed TLVs whose value exceeds
-    /// 255 bytes. This helper emits into a scratch buffer and
-    /// reports the true length so the packer can detect oversize
-    /// instances and split them at the entry boundary before they
-    /// reach `tlv_emit`.
+    /// Computed arithmetically — no allocation, no serialization.
+    /// (The previous implementation emitted into a scratch buffer;
+    /// the packer probes a growing TLV after every entry pushed, so
+    /// LSP regeneration paid O(n²) alloc+serialize.) The
+    /// entry-bearing variants use their unsaturated
+    /// `value_wire_len()` — their u8 `len()` saturates at 255 by
+    /// design — so a not-yet-split TLV probes at its true size; the
+    /// remaining variants' `len()` is exact (bounded ≤ 255 by
+    /// construction or truncating consistently with `emit`).
     pub fn wire_len(&self) -> usize {
-        let mut buf = BytesMut::new();
-        self.emit(&mut buf);
-        buf.len()
+        use IsisTlv::*;
+        let value = match self {
+            // Entry-bearing: unsaturated usize sums from the codec.
+            ExtIsReach(v) => v.value_wire_len(),
+            MtIsReach(v) => v.value_wire_len(),
+            ExtIpReach(v) => v.value_wire_len(),
+            MtIpReach(v) => v.value_wire_len(),
+            Ipv6Reach(v) => v.value_wire_len(),
+            MtIpv6Reach(v) => v.value_wire_len(),
+            Srv6(v) => v.value_wire_len(),
+            RouterCap(v) => v.value_wire_len(),
+            // Fixed-stride lists whose u8 `len()` would wrap.
+            LspEntries(v) => v.entries.len() * 16,
+            MultiTopology(v) => v.entries.len() * 2,
+            Unknown(v) => v.values.len(),
+            // Everything else: `len()` is exact.
+            AreaAddr(v) => v.len() as usize,
+            IsNeighbor(v) => v.len() as usize,
+            Padding(v) => v.len() as usize,
+            Auth(v) => v.len() as usize,
+            PurgeOrigId(v) => v.len() as usize,
+            LspBufferSize(v) => v.len() as usize,
+            ProtoSupported(v) => v.len() as usize,
+            Ipv4IfAddr(v) => v.len() as usize,
+            TeRouterId(v) => v.len() as usize,
+            SidLabelBinding(v) => v.len() as usize,
+            Hostname(v) => v.len() as usize,
+            Srlg(v) => v.len() as usize,
+            Ipv6Srlg(v) => v.len() as usize,
+            Ipv6TeRouterId(v) => v.len() as usize,
+            Ipv6IfAddr(v) => v.len() as usize,
+            Ipv6GlobalIfAddr(v) => v.len() as usize,
+            P2p3Way(v) => v.len() as usize,
+            Restart(v) => v.len() as usize,
+        };
+        2 + value
     }
 
     pub fn emit(&self, buf: &mut BytesMut) {
@@ -1652,6 +1689,71 @@ mod tests {
         let mut buf = BytesMut::new();
         full.emit(&mut buf);
         assert_eq!(buf.len(), 252);
+    }
+
+    /// Follow-up #4: `wire_len` is computed arithmetically (the old
+    /// implementation serialized into a scratch buffer, which the
+    /// packer invoked per entry pushed — O(n²) per LSP regeneration).
+    /// It must equal the actual emitted byte count for within-budget
+    /// TLVs, and report the true unsaturated size of an over-full
+    /// entry-bearing TLV so the packer still detects what to split.
+    #[test]
+    fn wire_len_matches_emitted_bytes() {
+        use crate::sub::prefix::{IsisTlvExtIpReach, IsisTlvExtIpReachEntry};
+
+        fn emitted(tlv: &IsisTlv) -> usize {
+            let mut buf = BytesMut::new();
+            tlv.emit(&mut buf);
+            buf.len()
+        }
+
+        let samples: Vec<IsisTlv> = vec![
+            IsisTlvAreaAddr {
+                area_addrs: vec![vec![0x49, 0, 1]],
+            }
+            .into(),
+            IsisTlvHostname {
+                hostname: "r1".into(),
+            }
+            .into(),
+            IsisTlvLspBufferSize { size: 1492 }.into(),
+            IsisTlvP2p3Way {
+                state: 2,
+                circuit_id: Some(9),
+                neighbor_id: None,
+                neighbor_circuit_id: None,
+            }
+            .into(),
+            IsisTlv::Unknown(IsisTlvUnknown {
+                typ: 200.into(),
+                len: 3,
+                values: vec![1, 2, 3],
+            }),
+        ];
+        for tlv in &samples {
+            assert_eq!(
+                tlv.wire_len(),
+                emitted(tlv),
+                "wire_len mismatch for {tlv:?}"
+            );
+        }
+
+        // Over-full TLV 135: 33 entries × 8 bytes = 264 value bytes.
+        // wire_len must report the unsaturated size (and still match
+        // the bytes emit actually writes) so the splitter triggers.
+        let over: IsisTlv = IsisTlvExtIpReach {
+            entries: (0..33u8)
+                .map(|i| IsisTlvExtIpReachEntry {
+                    metric: 10,
+                    flags: 0.into(),
+                    prefix: format!("10.0.{i}.0/24").parse().unwrap(),
+                    subs: vec![],
+                })
+                .collect(),
+        }
+        .into();
+        assert_eq!(over.wire_len(), 2 + 33 * 8);
+        assert_eq!(over.wire_len(), emitted(&over));
     }
 
     /// Sanity-check `IsisTlv::wire_len` for a small fixed-size TLV.

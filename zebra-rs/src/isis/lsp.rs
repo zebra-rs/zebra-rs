@@ -126,6 +126,9 @@ trait SplittableTlv: Clone + Into<IsisTlv> {
     fn fresh(&self) -> Self;
     fn entries_mut(&mut self) -> &mut Vec<Self::Entry>;
     fn into_entries(self) -> Vec<Self::Entry>;
+    /// True (unsaturated) value length of the growing instance —
+    /// delegates to the codec so sizing has one source of truth.
+    fn value_wire_len(&self) -> usize;
 }
 
 impl SplittableTlv for IsisTlvExtIpReach {
@@ -139,6 +142,9 @@ impl SplittableTlv for IsisTlvExtIpReach {
     fn into_entries(self) -> Vec<Self::Entry> {
         self.entries
     }
+    fn value_wire_len(&self) -> usize {
+        IsisTlvExtIpReach::value_wire_len(self)
+    }
 }
 
 impl SplittableTlv for IsisTlvIpv6Reach {
@@ -151,6 +157,9 @@ impl SplittableTlv for IsisTlvIpv6Reach {
     }
     fn into_entries(self) -> Vec<Self::Entry> {
         self.entries
+    }
+    fn value_wire_len(&self) -> usize {
+        IsisTlvIpv6Reach::value_wire_len(self)
     }
 }
 
@@ -168,6 +177,9 @@ impl SplittableTlv for IsisTlvMtIsReach {
     fn into_entries(self) -> Vec<Self::Entry> {
         self.entries
     }
+    fn value_wire_len(&self) -> usize {
+        IsisTlvMtIsReach::value_wire_len(self)
+    }
 }
 
 impl SplittableTlv for IsisTlvMtIpv6Reach {
@@ -184,6 +196,9 @@ impl SplittableTlv for IsisTlvMtIpv6Reach {
     fn into_entries(self) -> Vec<Self::Entry> {
         self.entries
     }
+    fn value_wire_len(&self) -> usize {
+        IsisTlvMtIpv6Reach::value_wire_len(self)
+    }
 }
 
 /// Split a TLV whose serialized value would overflow the 8-bit
@@ -199,8 +214,11 @@ fn split_tlv_entries<T: SplittableTlv>(t: T) -> Vec<IsisTlv> {
     let mut current = template.clone();
     for entry in t.into_entries() {
         current.entries_mut().push(entry);
-        let probe: IsisTlv = current.clone().into();
-        if probe.wire_len() > TLV_WIRE_MAX {
+        // Arithmetic probe (2-byte TL header + unsaturated value
+        // length). The old probe cloned the growing TLV and fully
+        // serialized it after every entry pushed — O(n²)
+        // alloc+serialize per LSP regeneration.
+        if 2 + current.value_wire_len() > TLV_WIRE_MAX {
             let latest = current.entries_mut().pop().expect("just pushed");
             if !current.entries_mut().is_empty() {
                 out.push(current.into());

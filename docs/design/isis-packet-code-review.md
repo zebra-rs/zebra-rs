@@ -492,13 +492,12 @@ backlog, ordered by risk and value.
 3. ~~**Parse-hardening pair**~~ — **done**: `IsisSub2SidStructure` rejects
    >128-bit sums (degrades to `Unknown`); SRGB/SRLB emit saturates the 24-bit
    range instead of wrapping.
-4. **O(n²) `wire_len()` packer probe** — the LSP packer measures a growing TLV
-   by cloning and fully serializing it after every entry pushed, so LSP
-   regeneration is quadratic in entries — exactly the production-sized-LSDB
-   regime where #1 used to hide. Fix: a `usize`-returning value-length summing
-   the per-entry math (already `usize` since #7), making it
-   `2 + value_len()` with zero allocation; the unsaturated sum must stay the
-   packer's source of truth.
+4. ~~**O(n²) `wire_len()` packer probe**~~ — **done**: the entry-bearing TLVs
+   (and RouterCap) expose an unsaturated `value_wire_len()`, `IsisTlv::wire_len`
+   is `2 + value` computed arithmetically, and the splitter probes the growing
+   TLV via the `SplittableTlv` trait with no clone and no serialization. A
+   unit test pins `wire_len == emitted bytes` across variants including an
+   over-full TLV 135.
 5. **Dedup the six sub-TLV dispatch registries** — the #10 fix made each copy
    bigger (the degrade-to-Unknown match is pasted six times); one generic
    helper removes ~250 lines and the risk that a seventh registry forgets the

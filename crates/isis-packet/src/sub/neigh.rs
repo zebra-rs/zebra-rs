@@ -36,6 +36,15 @@ impl ParseBe<IsisTlvExtIsReach> for IsisTlvExtIsReach {
     }
 }
 
+impl IsisTlvExtIsReach {
+    /// True value length in bytes, unsaturated. The u8 `len()`
+    /// saturates at 255 by design; this is the packer's source of
+    /// truth for probing a not-yet-split TLV without serializing it.
+    pub fn value_wire_len(&self) -> usize {
+        self.entries.iter().map(|e| e.len() as usize).sum()
+    }
+}
+
 impl TlvEmitter for IsisTlvExtIsReach {
     fn typ(&self) -> u8 {
         IsisTlvType::ExtIsReach.into()
@@ -76,6 +85,13 @@ impl ParseBe<IsisTlvMtIsReach> for IsisTlvMtIsReach {
                 entries,
             },
         ))
+    }
+}
+
+impl IsisTlvMtIsReach {
+    /// See `IsisTlvExtIsReach::value_wire_len` — plus the 2-byte MT ID.
+    pub fn value_wire_len(&self) -> usize {
+        2 + self.entries.iter().map(|e| e.len() as usize).sum::<usize>()
     }
 }
 
