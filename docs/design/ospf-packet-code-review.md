@@ -25,7 +25,7 @@ most-severe first.
 | 6 | **Interop** | `v3.rs:1708` (+`1769`) | OSPFv3 Adj-SID Weight is 16-bit at the wrong offset | ✅ #1970 |
 | 7 | **Interop** | `v3.rs:3149` (+`3210`) | SRv6 End.X SID header is 8 bytes; RFC 9513 is 6 | ✅ #1974 |
 | 8 | **Round-trip** | `parser.rs:1214` | Unknown RouterInfo TLV reads type/len from value bytes | ⬜ open |
-| 9 | **Security** | `zebra-rs/.../network_v6.rs:124` | v3 checksum skipped when any trailing bytes present | ⬜ open |
+| 9 | **Security** | `zebra-rs/.../network_v6.rs:124` | v3 checksum skipped when any trailing bytes present | ✅ #1979 |
 | 10 | **Correctness** | `parser.rs:557` | `verify_checksum` re-emits typed form, ignores `raw` | ⬜ open |
 | 11 | **Robustness** | `parser.rs:693` | `parse_lsa_with_length` swallows all errors into `Unknown` | ⬜ open |
 | 12 | **Correctness** | `parser.rs:422` (+`816`) | v2 emit writes stored `num_adv`/`num_links`, not derived | ⬜ open |
@@ -38,8 +38,8 @@ most-severe first.
 ## Status (2026-07-18)
 
 All seven top findings — the three remote-DoS parse bugs and all four silent
-interop wire-format bugs — are fixed and merged to `main`. The review document
-itself landed in #1955.
+interop wire-format bugs — plus the security finding #9 are fixed and merged to
+`main`. The review document itself landed in #1955.
 
 | PR | Findings | Summary |
 |----|----------|---------|
@@ -48,12 +48,14 @@ itself landed in #1955.
 | [#1966](https://github.com/zebra-rs/zebra-rs/pull/1966) | 5 | `PrefixSidFlags` shifted to RFC 8665/8666 positions; **+ BDD `ospfv3_prefix_sid_flags`** |
 | [#1970](https://github.com/zebra-rs/zebra-rs/pull/1970) | 6 | Adj-SID / LAN-Adj-SID `weight` → `u8` at offset 1 (RFC 8666 §6.1/§6.2) |
 | [#1974](https://github.com/zebra-rs/zebra-rs/pull/1974) | 7 | End.X / LAN-End.X SID head → 6 bytes (RFC 9513 §9.1/§9.2) |
+| [#1979](https://github.com/zebra-rs/zebra-rs/pull/1979) | 9 | v3 receive checksum verified over `input[..pkt_len]` unconditionally, closing the trailing-bytes bypass; **validated by `ospfv3_auth` BDD** |
 
 Each fix carries a regression test: byte-offset unit tests where a `show`-based
-check could not discriminate the bug, plus a live BDD feature for the Prefix-SID
-flags. Findings 6, 7 have no BDD because the daemon originates those fields as
-zero, so a zebra-to-zebra `show` renders identically under either layout — the
-unit tests are the meaningful lock.
+check could not discriminate the bug, plus live BDD features for the Prefix-SID
+flags (#1966) and the auth-trailer receive path (#1979). Findings 6, 7 have no
+BDD because the daemon originates those fields as zero, so a zebra-to-zebra
+`show` renders identically under either layout — the unit tests are the
+meaningful lock.
 
 ---
 
@@ -62,39 +64,36 @@ unit tests are the meaningful lock.
 The remaining findings are all lower-severity than the merged set (no DoS, no
 silent interop break in a shipped datapath). Suggested order:
 
+> Finding 9 (v3 checksum-skip integrity bypass) — the previous Tier-1 item —
+> was fixed in [#1979](https://github.com/zebra-rs/zebra-rs/pull/1979).
+
 **Tier 1 — highest remaining value**
-1. **Finding 9 — v3 checksum-skip integrity bypass** (security, consumer-side).
-   The real integrity hole among the leftovers. First confirm `parse_v3`
-   actually accepts the trailing bytes (one read), then gate the checksum skip on
-   *authentication configured for the interface*, not on the mere presence of
-   trailing bytes. Fix lives in `zebra-rs/src/ospf/network_v6.rs`, optionally with
-   an explicit "trailer present + valid" signal from the crate.
-2. **Finding 8 (+ part of 15) — Unknown RouterInfo TLV round-trip corruption.**
+1. **Finding 8 (+ part of 15) — Unknown RouterInfo TLV round-trip corruption.**
    Self-contained and testable: wire the already-present (but dead)
    `RouterInfoTlvUnknown::parse_tlv` into the `Unknown` arm so `typ`/`len` come
    from the header, not the value bytes. This also removes one of finding 15's
    dead items. Add a round-trip unit test over an unknown RI TLV.
 
 **Tier 2 — correctness / robustness, moderate effort**
-3. **Finding 12 — derive `num_adv` / `num_links` at emit.** Mirror the v3 codec
+2. **Finding 12 — derive `num_adv` / `num_links` at emit.** Mirror the v3 codec
    (`Ospfv3LsUpdate::emit`), then delete the manual sync lines in the daemon
    (`inst.rs:1983`, `inst.rs:5404/5502/5571`). Touches daemon call sites.
-4. **Finding 11 — `parse_lsa_with_length` should not swallow parse failures.**
+3. **Finding 11 — `parse_lsa_with_length` should not swallow parse failures.**
    Distinguish "unknown LS type" (→ `Unknown`, keep tolerant flooding) from
    "known type, body failed to parse" (→ propagate `Err`). Needs care to avoid
    regressing the intentional unmodeled-sub-TLV tolerance.
-5. **Finding 10 — `verify_checksum` should use `self.raw`.** Low effort; latent
+4. **Finding 10 — `verify_checksum` should use `self.raw`.** Low effort; latent
    today (only the crate's tests call it), so low urgency until it is wired into
    an ingress path. Pairs with the non-bijective `From<u8>` note below.
 
 **Tier 3 — low-severity / cleanup**
-6. **Finding 13 — Unknown v2 payload emit drops body / `typ()` → Hello.** Latent
+5. **Finding 13 — Unknown v2 payload emit drops body / `typ()` → Hello.** Latent
    (daemon never re-emits unknown-type packets); fix the public-API trap when
    convenient.
-7. **Finding 15 (remainder) — delete dead `pub` items** (`is_known`,
+6. **Finding 15 (remainder) — delete dead `pub` items** (`is_known`,
    `Ospfv3ExtTlv::wire_len`; `RouterInfoTlvUnknown::parse_tlv` gets consumed by
    finding 8). Trivial deletions.
-8. **Finding 14 — hoist duplicated codecs into `packet-utils`** (Fletcher
+7. **Finding 14 — hoist duplicated codecs into `packet-utils`** (Fletcher
    checksum shared with `isis-packet`; FAD and SID/Label dispatch shared v2/v3).
    Larger refactor; best done the next time those codecs are touched.
 
@@ -297,6 +296,8 @@ value slice) into the `Unknown` arm.
 ---
 
 ### 9. OSPFv3 checksum verification skipped when any trailing bytes present — integrity bypass
+> ✅ **Fixed in [#1979](https://github.com/zebra-rs/zebra-rs/pull/1979)** — verify over `input[..pkt_len]` unconditionally; validated by `ospfv3_auth` BDD.
+
 **`zebra-rs/src/ospf/network_v6.rs:124`** *(consumer-side, driven by the crate's positional auth-trailer design)*
 
 ```rust
