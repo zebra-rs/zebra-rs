@@ -79,7 +79,7 @@ impl Ospfv2Packet {
             LsRequest(v) => v.emit(buf),
             LsUpdate(v) => v.emit(buf),
             LsAck(v) => v.emit(buf),
-            _ => {}
+            Unknown(v) => buf.put(&v.payload[..]),
         }
         // OSPF packet length — header + body, RFC 2328 §A.3.1.
         // RFC 2328 §D.4: the cryptographic-auth digest follows the
@@ -224,7 +224,7 @@ impl Ospfv2Payload {
             LsRequest(_) => OspfType::LsRequest,
             LsUpdate(_) => OspfType::LsUpdate,
             LsAck(_) => OspfType::LsAck,
-            Unknown(_v) => OspfType::Hello,
+            Unknown(v) => v.typ,
         }
     }
 }
@@ -3061,6 +3061,38 @@ mod tests {
         assert!(rest.is_empty());
         match lsp {
             OspfLsp::Unknown(u) => assert_eq!(u.data, vec![0xDE, 0xAD, 0xBE, 0xEF]),
+            other => panic!("expected Unknown, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn unknown_v2_payload_roundtrips() {
+        // A packet of an unrecognized OSPF type reports its real type and
+        // carries its body verbatim through emit — not a header-only Hello.
+        let payload = Ospfv2Payload::Unknown(OspfUnknown {
+            typ: OspfType::Unknown(6),
+            payload: vec![0xDE, 0xAD, 0xBE, 0xEF],
+        });
+        assert_eq!(payload.typ(), OspfType::Unknown(6));
+
+        let pkt = Ospfv2Packet::new(
+            &Ipv4Addr::new(1, 1, 1, 1),
+            &Ipv4Addr::new(0, 0, 0, 0),
+            payload,
+        );
+        let mut buf = BytesMut::new();
+        pkt.emit(&mut buf);
+        // Header type byte is the unknown type (6), not Hello (1).
+        assert_eq!(buf[1], 6);
+        // Length covers the 24-byte header + 4-byte body (not header-only 24).
+        assert_eq!(u16::from_be_bytes([buf[2], buf[3]]), 28);
+        assert_eq!(&buf[24..28], &[0xDE, 0xAD, 0xBE, 0xEF]);
+
+        // Re-parses to the same Unknown payload and type.
+        let (_, parsed) = parse(&buf).expect("re-parse");
+        assert_eq!(parsed.typ, OspfType::Unknown(6));
+        match parsed.payload {
+            Ospfv2Payload::Unknown(u) => assert_eq!(u.payload, vec![0xDE, 0xAD, 0xBE, 0xEF]),
             other => panic!("expected Unknown, got {other:?}"),
         }
     }
