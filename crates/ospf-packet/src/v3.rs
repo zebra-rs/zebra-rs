@@ -1651,40 +1651,21 @@ pub struct Ospfv3PrefixSidSubTlv {
 impl Ospfv3PrefixSidSubTlv {
     fn value_len(&self) -> u16 {
         // flags(1) + algo(1) + reserved(2) + sid(3 or 4)
-        4 + match &self.sid {
-            SidLabelTlv::Label(_) => 3,
-            SidLabelTlv::Index(_) => 4,
-        }
+        4 + self.sid.len() as u16
     }
 
     fn emit(&self, buf: &mut BytesMut) {
         buf.put_u8(self.flags.into());
         buf.put_u8(self.algo.into());
         buf.put_u16(0); // reserved
-        match &self.sid {
-            SidLabelTlv::Label(v) => buf.put(&packet_utils::u32_u8_3(*v)[..]),
-            SidLabelTlv::Index(v) => buf.put_u32(*v),
-        }
+        self.sid.emit_value(buf);
     }
 
     fn parse_be(input: &[u8]) -> IResult<&[u8], Self> {
         let (input, flags) = be_u8(input)?;
         let (input, algo) = be_u8(input)?;
         let (input, _reserved) = be_u16(input)?;
-        let sid_len = input.len();
-        let (input, sid) = match sid_len {
-            3 => {
-                let (input, label) = be_u24(input)?;
-                (input, SidLabelTlv::Label(label))
-            }
-            4 => {
-                let (input, index) = be_u32(input)?;
-                (input, SidLabelTlv::Index(index))
-            }
-            _ => {
-                return Err(nom::Err::Incomplete(nom::Needed::new(sid_len)));
-            }
-        };
+        let (input, sid) = SidLabelTlv::parse_by_len(input, input.len())?;
         Ok((
             input,
             Self {
@@ -1713,40 +1694,21 @@ pub struct Ospfv3AdjSidSubTlv {
 impl Ospfv3AdjSidSubTlv {
     fn value_len(&self) -> u16 {
         // flags(1) + weight(1) + reserved(2) + sid(3 or 4)
-        4 + match &self.sid {
-            SidLabelTlv::Label(_) => 3,
-            SidLabelTlv::Index(_) => 4,
-        }
+        4 + self.sid.len() as u16
     }
 
     fn emit(&self, buf: &mut BytesMut) {
         buf.put_u8(self.flags.into());
         buf.put_u8(self.weight);
         buf.put_u16(0); // reserved
-        match &self.sid {
-            SidLabelTlv::Label(v) => buf.put(&packet_utils::u32_u8_3(*v)[..]),
-            SidLabelTlv::Index(v) => buf.put_u32(*v),
-        }
+        self.sid.emit_value(buf);
     }
 
     fn parse_be(input: &[u8]) -> IResult<&[u8], Self> {
         let (input, flags) = be_u8(input)?;
         let (input, weight) = be_u8(input)?;
         let (input, _reserved) = be_u16(input)?;
-        let sid_len = input.len();
-        let (input, sid) = match sid_len {
-            3 => {
-                let (input, label) = be_u24(input)?;
-                (input, SidLabelTlv::Label(label))
-            }
-            4 => {
-                let (input, index) = be_u32(input)?;
-                (input, SidLabelTlv::Index(index))
-            }
-            _ => {
-                return Err(nom::Err::Incomplete(nom::Needed::new(sid_len)));
-            }
-        };
+        let (input, sid) = SidLabelTlv::parse_by_len(input, input.len())?;
         Ok((
             input,
             Self {
@@ -1774,10 +1736,7 @@ pub struct Ospfv3LanAdjSidSubTlv {
 impl Ospfv3LanAdjSidSubTlv {
     fn value_len(&self) -> u16 {
         // flags(1) + weight(1) + reserved(2) + neighbor_router_id(4) + sid(3 or 4)
-        8 + match &self.sid {
-            SidLabelTlv::Label(_) => 3,
-            SidLabelTlv::Index(_) => 4,
-        }
+        8 + self.sid.len() as u16
     }
 
     fn emit(&self, buf: &mut BytesMut) {
@@ -1785,10 +1744,7 @@ impl Ospfv3LanAdjSidSubTlv {
         buf.put_u8(self.weight);
         buf.put_u16(0); // reserved
         buf.put(&self.neighbor_router_id.octets()[..]);
-        match &self.sid {
-            SidLabelTlv::Label(v) => buf.put(&packet_utils::u32_u8_3(*v)[..]),
-            SidLabelTlv::Index(v) => buf.put_u32(*v),
-        }
+        self.sid.emit_value(buf);
     }
 
     fn parse_be(input: &[u8]) -> IResult<&[u8], Self> {
@@ -1796,20 +1752,7 @@ impl Ospfv3LanAdjSidSubTlv {
         let (input, weight) = be_u8(input)?;
         let (input, _reserved) = be_u16(input)?;
         let (input, neighbor_router_id) = Ipv4Addr::parse_be(input)?;
-        let sid_len = input.len();
-        let (input, sid) = match sid_len {
-            3 => {
-                let (input, label) = be_u24(input)?;
-                (input, SidLabelTlv::Label(label))
-            }
-            4 => {
-                let (input, index) = be_u32(input)?;
-                (input, SidLabelTlv::Index(index))
-            }
-            _ => {
-                return Err(nom::Err::Incomplete(nom::Needed::new(sid_len)));
-            }
-        };
+        let (input, sid) = SidLabelTlv::parse_by_len(input, input.len())?;
         Ok((
             input,
             Self {
@@ -2145,26 +2088,15 @@ impl Ospfv3SidLabelRangeTlv {
         // range(3) + reserved(1) + sub-TLV header(4) + sub-TLV value
         // (3 or 4 octets, no padding -- callers parse Label vs Index
         // by the sub-TLV's length field exactly).
-        8 + match &self.sid_label {
-            SidLabelTlv::Label(_) => 3,
-            SidLabelTlv::Index(_) => 4,
-        }
+        8 + self.sid_label.len() as usize
     }
 
     fn emit(&self, buf: &mut BytesMut) {
         buf.put(&packet_utils::u32_u8_3(self.range)[..]);
         buf.put_u8(0); // reserved
         buf.put_u16(OSPFV3_SUB_TLV_SID_LABEL);
-        match &self.sid_label {
-            SidLabelTlv::Label(v) => {
-                buf.put_u16(3);
-                buf.put(&packet_utils::u32_u8_3(*v)[..]);
-            }
-            SidLabelTlv::Index(v) => {
-                buf.put_u16(4);
-                buf.put_u32(*v);
-            }
-        }
+        buf.put_u16(self.sid_label.len() as u16);
+        self.sid_label.emit_value(buf);
     }
 
     fn parse_be(input: &[u8]) -> IResult<&[u8], Self> {
@@ -2172,19 +2104,7 @@ impl Ospfv3SidLabelRangeTlv {
         let (input, _reserved) = be_u8(input)?;
         let (input, _sub_typ) = be_u16(input)?;
         let (input, sub_len) = be_u16(input)?;
-        let (input, sid_label) = match sub_len {
-            3 => {
-                let (input, label) = be_u24(input)?;
-                (input, SidLabelTlv::Label(label))
-            }
-            4 => {
-                let (input, index) = be_u32(input)?;
-                (input, SidLabelTlv::Index(index))
-            }
-            _ => {
-                return Err(nom::Err::Incomplete(nom::Needed::new(sub_len as usize)));
-            }
-        };
+        let (input, sid_label) = SidLabelTlv::parse_by_len(input, sub_len as usize)?;
         Ok((input, Self { range, sid_label }))
     }
 }
@@ -2201,26 +2121,15 @@ pub struct Ospfv3SrLocalBlockTlv {
 
 impl Ospfv3SrLocalBlockTlv {
     fn value_len(&self) -> usize {
-        8 + match &self.sid_label {
-            SidLabelTlv::Label(_) => 3,
-            SidLabelTlv::Index(_) => 4,
-        }
+        8 + self.sid_label.len() as usize
     }
 
     fn emit(&self, buf: &mut BytesMut) {
         buf.put(&packet_utils::u32_u8_3(self.range)[..]);
         buf.put_u8(0);
         buf.put_u16(OSPFV3_SUB_TLV_SID_LABEL);
-        match &self.sid_label {
-            SidLabelTlv::Label(v) => {
-                buf.put_u16(3);
-                buf.put(&packet_utils::u32_u8_3(*v)[..]);
-            }
-            SidLabelTlv::Index(v) => {
-                buf.put_u16(4);
-                buf.put_u32(*v);
-            }
-        }
+        buf.put_u16(self.sid_label.len() as u16);
+        self.sid_label.emit_value(buf);
     }
 
     fn parse_be(input: &[u8]) -> IResult<&[u8], Self> {
@@ -2228,19 +2137,7 @@ impl Ospfv3SrLocalBlockTlv {
         let (input, _reserved) = be_u8(input)?;
         let (input, _sub_typ) = be_u16(input)?;
         let (input, sub_len) = be_u16(input)?;
-        let (input, sid_label) = match sub_len {
-            3 => {
-                let (input, label) = be_u24(input)?;
-                (input, SidLabelTlv::Label(label))
-            }
-            4 => {
-                let (input, index) = be_u32(input)?;
-                (input, SidLabelTlv::Index(index))
-            }
-            _ => {
-                return Err(nom::Err::Incomplete(nom::Needed::new(sub_len as usize)));
-            }
-        };
+        let (input, sid_label) = SidLabelTlv::parse_by_len(input, sub_len as usize)?;
         Ok((input, Self { range, sid_label }))
     }
 }
@@ -2586,23 +2483,6 @@ pub enum Ospfv3ExtTlv {
 }
 
 impl Ospfv3ExtTlv {
-    /// Wire length including the 4-byte TLV header, padded to the
-    /// next 4-byte boundary per RFC 8362 §3.
-    #[allow(dead_code)] // consumed by typed TLV decoders (PR-D2+).
-    fn wire_len(&self) -> usize {
-        let value_len = match self {
-            Ospfv3ExtTlv::RouterLink(t) => t.value_len(),
-            Ospfv3ExtTlv::IntraAreaPrefix(t) => t.value_len(),
-            Ospfv3ExtTlv::SrAlgorithm(t) => t.value_len(),
-            Ospfv3ExtTlv::SidLabelRange(t) => t.value_len(),
-            Ospfv3ExtTlv::SrLocalBlock(t) => t.value_len(),
-            Ospfv3ExtTlv::Fad(t) => t.value_len(),
-            Ospfv3ExtTlv::Srv6Capabilities(t) => t.value_len() as usize,
-            Ospfv3ExtTlv::Unknown { value, .. } => value.len(),
-        };
-        4 + ((value_len + 3) & !3)
-    }
-
     fn emit(&self, buf: &mut BytesMut) {
         let (typ, value_len) = match self {
             Ospfv3ExtTlv::RouterLink(t) => (OSPFV3_EXT_TLV_ROUTER_LINK, t.value_len()),
