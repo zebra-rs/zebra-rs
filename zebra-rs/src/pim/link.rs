@@ -165,8 +165,20 @@ impl Pim {
         let Some(link) = self.links.get_mut(&ifindex) else {
             return;
         };
-        link.igmp = None;
+        // Withdraw every local membership this interface fed into
+        // the TIB before dropping the state.
+        let mut prune: Vec<(Ipv4Addr, Ipv4Addr)> = vec![];
+        if let Some(igmp) = link.igmp.take() {
+            for (grp, group) in igmp.groups {
+                for src in group.synced {
+                    prune.push((grp, src));
+                }
+            }
+        }
         tracing::info!("igmp: interface {} disabled", link.name);
+        for (grp, src) in prune {
+            self.tib_local_prune(super::tib::Sg { src, grp }, ifindex);
+        }
     }
 
     /// Re-arm a running interface's hello timer after a hello-interval
@@ -209,6 +221,7 @@ impl Pim {
             self.link_config(&link.name).hello_interval()
         };
         pim_join_if(&self.sock, ifindex);
+        self.fp.vif_add(ifindex);
         let timer = hello_timer(&self.tx, ifindex, interval);
         let link = self.links.get_mut(&ifindex).unwrap();
         link.enabled = true;
@@ -233,6 +246,10 @@ impl Pim {
         link.nbrs.clear();
         link.dr = None;
         tracing::info!("pim: interface {} disabled", link.name);
+        // Drop every TIB facet on this interface, then the VIF (MFC
+        // entries referencing it were just rewritten).
+        self.tib_iface_purge(ifindex);
+        self.fp.vif_del(ifindex);
     }
 
     /// Effective config for an interface: the configured entry, or

@@ -6,7 +6,7 @@
 //! per-source timer tasks. Membership feeds the TIB bridge from the
 //! SSM phase on.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::net::Ipv4Addr;
 use std::time::{Duration, Instant};
 
@@ -16,6 +16,7 @@ use tokio::sync::mpsc::UnboundedSender;
 use super::inst::{IgmpSend, Pim};
 use super::link::LinkConfig;
 use super::socket::IGMP_ALL_HOSTS;
+use super::tib::Sg;
 
 /// Robustness Variable (RFC 3376 §8.1). Fixed at the protocol
 /// default; a config knob can arrive later.
@@ -91,6 +92,9 @@ pub struct IgmpGroup {
     pub v2_host_until: Option<Instant>,
     pub last_reporter: Option<Ipv4Addr>,
     pub uptime: Instant,
+    /// Sources currently reflected into the TIB as local (S,G)
+    /// membership — the diff base for [`Pim::igmp_tib_sync`].
+    pub synced: BTreeSet<Ipv4Addr>,
 }
 
 impl IgmpGroup {
@@ -102,6 +106,7 @@ impl IgmpGroup {
             v2_host_until: None,
             last_reporter: None,
             uptime: now,
+            synced: BTreeSet::new(),
         }
     }
 }
@@ -241,13 +246,16 @@ impl Pim {
             }
 
             let mut expired: Vec<Ipv4Addr> = vec![];
+            let mut sync: Vec<Ipv4Addr> = vec![];
             for (group_addr, group) in igmp.groups.iter_mut() {
                 if let Some(t) = group.v2_host_until
                     && t <= now
                 {
                     group.v2_host_until = None;
                 }
+                let sources_before = group.sources.len();
                 group.sources.retain(|_, exp| *exp > now);
+                let mut changed = group.sources.len() != sources_before;
                 if group.filter_mode == FilterMode::Exclude
                     && let Some(exp) = group.expires
                     && exp <= now
@@ -260,15 +268,61 @@ impl Pim {
                     // sources reverts the group to INCLUDE.
                     group.filter_mode = FilterMode::Include;
                     group.expires = None;
+                    changed = true;
                 }
                 if group.filter_mode == FilterMode::Include && group.sources.is_empty() {
                     expired.push(*group_addr);
+                    continue;
+                }
+                if changed {
+                    sync.push(*group_addr);
                 }
             }
+            let mut prune: Vec<(Ipv4Addr, Ipv4Addr)> = vec![];
             for group_addr in expired {
-                igmp.groups.remove(&group_addr);
+                if let Some(group) = igmp.groups.remove(&group_addr) {
+                    for source in group.synced {
+                        prune.push((group_addr, source));
+                    }
+                }
                 tracing::info!("igmp: group {} expired on {}", group_addr, name);
             }
+            for group_addr in sync {
+                self.igmp_tib_sync(ifindex, group_addr);
+            }
+            for (grp, src) in prune {
+                self.tib_local_prune(Sg { src, grp }, ifindex);
+            }
+        }
+    }
+
+    /// Reflect a group's INCLUDE source set into the TIB as local
+    /// (S,G) membership, diffing against what was previously synced.
+    /// EXCLUDE (any-source) membership stays out of the TIB until the
+    /// ASM phase brings (*,G) state.
+    pub(crate) fn igmp_tib_sync(&mut self, ifindex: u32, grp: Ipv4Addr) {
+        let Some(link) = self.links.get_mut(&ifindex) else {
+            return;
+        };
+        let Some(igmp) = link.igmp.as_mut() else {
+            return;
+        };
+        let Some(group) = igmp.groups.get_mut(&grp) else {
+            return;
+        };
+        let current: BTreeSet<Ipv4Addr> = if group.filter_mode == FilterMode::Include {
+            group.sources.keys().copied().collect()
+        } else {
+            BTreeSet::new()
+        };
+        let added: Vec<Ipv4Addr> = current.difference(&group.synced).copied().collect();
+        let removed: Vec<Ipv4Addr> = group.synced.difference(&current).copied().collect();
+        group.synced = current;
+        for src in added {
+            self.tib_local_join(Sg { src, grp }, ifindex);
+        }
+        for src in removed {
+            self.tib_local_prune(Sg { src, grp }, ifindex);
         }
     }
 
@@ -288,6 +342,9 @@ impl Pim {
             }
             IgmpPacket::ReportV1(msg) | IgmpPacket::ReportV2(msg) => {
                 self.igmp_v2_report(ifindex, src, msg.group, &cfg, now);
+                // A v2 report flips the group to EXCLUDE — any
+                // previously synced INCLUDE sources leave the TIB.
+                self.igmp_tib_sync(ifindex, msg.group);
             }
             IgmpPacket::LeaveV2(msg) => {
                 self.igmp_leave(ifindex, msg.group, &cfg, now);
@@ -295,6 +352,7 @@ impl Pim {
             IgmpPacket::ReportV3(report) => {
                 for record in report.records {
                     self.igmp_apply_record(ifindex, src, &record, &cfg, now);
+                    self.igmp_tib_sync(ifindex, record.group);
                 }
             }
             IgmpPacket::Unknown { typ, .. } => {

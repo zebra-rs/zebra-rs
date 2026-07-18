@@ -27,8 +27,11 @@ use crate::rib::api::RibRx;
 
 use super::config::Callback;
 use super::link::{LinkConfig, PIM_OVERRIDE_INTERVAL_MSEC, PIM_PROPAGATION_DELAY_MSEC, PimLink};
-use super::network::{igmp_read_packet, igmp_write_packet, read_packet, write_packet};
+use super::mroute::{ForwardingPlane, Upcall};
+use super::network::{igmp_read_packet, igmp_write_packet, mroute_read, read_packet, write_packet};
+use super::rpf::RpfEntry;
 use super::socket::ALL_PIM_ROUTERS;
+use super::tib::{Sg, TibEntry};
 
 /// `show pim ...` dispatch handler, mirroring
 /// [`crate::nd::inst::ShowCallback`].
@@ -49,6 +52,7 @@ pub enum Message {
         src: Ipv4Addr,
         ifindex: u32,
     },
+    Upcall(Upcall),
     HelloTimer(u32),
     NeighborExpiry(u32, Ipv4Addr),
 }
@@ -79,6 +83,14 @@ pub struct Pim {
     /// Desired per-interface config keyed by interface name — the
     /// source of truth the reconciler compares runtime state against.
     pub if_config: BTreeMap<String, LinkConfig>,
+    /// The Tree Information Base: (S,G) forwarding state.
+    pub tib: BTreeMap<Sg, TibEntry>,
+    /// RPF cache keyed by source address (NHT-backed).
+    pub rpf: BTreeMap<Ipv4Addr, RpfEntry>,
+    /// Kernel dataplane: mroute socket, VIFs, MFC.
+    pub(crate) fp: ForwardingPlane,
+    /// Periodic J/P refresh deadlines per (ifindex, upstream nbr).
+    pub(crate) jp_refresh: BTreeMap<(u32, Ipv4Addr), std::time::Instant>,
     pub(crate) send_tx: UnboundedSender<PimSend>,
     pub(crate) igmp_send_tx: UnboundedSender<IgmpSend>,
     rib_rx: UnboundedReceiver<RibRx>,
@@ -88,14 +100,13 @@ pub struct Pim {
     pub callbacks: HashMap<String, Callback>,
     pub(crate) sock: Arc<AsyncFd<Socket>>,
     pub(crate) igmp_sock: Arc<AsyncFd<Socket>>,
-    /// RIB client context — unused until the RPF/NHT phase, kept so
-    /// the spawn contract already matches the other protocols.
-    #[allow(dead_code)]
-    ctx: ProtoContext,
+    /// RIB client context — carries the NHT registrations for RPF.
+    pub(crate) ctx: ProtoContext,
     _read_task: Task<()>,
     _write_task: Task<()>,
     _igmp_read_task: Task<()>,
     _igmp_write_task: Task<()>,
+    _mroute_read_task: Task<()>,
 }
 
 impl Pim {
@@ -103,6 +114,7 @@ impl Pim {
         ctx: ProtoContext,
         sock: AsyncFd<Socket>,
         igmp_sock: AsyncFd<Socket>,
+        fp: ForwardingPlane,
         rib_rx: UnboundedReceiver<RibRx>,
     ) -> Self {
         let sock = Arc::new(sock);
@@ -129,12 +141,21 @@ impl Pim {
         let igmp_write_task = Task::spawn(async move {
             igmp_write_packet(igmp_write_sock, igmp_send_rx).await;
         });
+        let mroute_sock = fp.sock.clone();
+        let mroute_tx = tx.clone();
+        let mroute_read_task = Task::spawn(async move {
+            mroute_read(mroute_sock, mroute_tx).await;
+        });
 
         let mut pim = Self {
             tx,
             rx,
             links: BTreeMap::new(),
             if_config: BTreeMap::new(),
+            tib: BTreeMap::new(),
+            rpf: BTreeMap::new(),
+            fp,
+            jp_refresh: BTreeMap::new(),
             send_tx,
             igmp_send_tx,
             rib_rx,
@@ -149,6 +170,7 @@ impl Pim {
             _write_task: write_task,
             _igmp_read_task: igmp_read_task,
             _igmp_write_task: igmp_write_task,
+            _mroute_read_task: mroute_read_task,
         };
         pim.callback_build();
         pim.show_build();
@@ -166,7 +188,10 @@ impl Pim {
             self.process_rib_msg(msg);
         }
         loop {
-            let wakeup = self.igmp_next_wakeup();
+            let wakeup = match (self.igmp_next_wakeup(), self.tib_next_wakeup()) {
+                (Some(a), Some(b)) => Some(a.min(b)),
+                (a, b) => a.or(b),
+            };
             tokio::select! {
                 Some(msg) = self.rx.recv() => {
                     self.process_msg(msg);
@@ -181,7 +206,9 @@ impl Pim {
                     self.process_show_msg(msg).await;
                 }
                 _ = sleep_until_opt(wakeup) => {
-                    self.igmp_tick(Instant::now());
+                    let now = Instant::now();
+                    self.igmp_tick(now);
+                    self.tib_tick(now);
                 }
             }
         }
@@ -199,6 +226,7 @@ impl Pim {
                 src,
                 ifindex,
             } => self.igmp_recv(ifindex, src, packet),
+            Message::Upcall(upcall) => self.process_upcall(upcall),
             Message::HelloTimer(ifindex) => self.hello_send(ifindex),
             Message::NeighborExpiry(ifindex, addr) => self.neighbor_expiry(ifindex, addr),
         }
@@ -212,8 +240,15 @@ impl Pim {
             RibRx::LinkDel(ifindex) => self.link_del(ifindex),
             RibRx::AddrAdd(addr) => self.addr_add(addr),
             RibRx::AddrDel(addr) => self.addr_del(addr),
-            _ => {}
+            RibRx::NexthopUpdate { nh, resolution } => {
+                self.rpf_nexthop_update(nh, resolution);
+                return;
+            }
+            _ => return,
         }
+        // Any link/address change can flip on-link-ness of tracked
+        // sources; re-derive the RPF states.
+        self.rpf_recompute_all();
     }
 
     fn process_cm_msg(&mut self, msg: ConfigRequest) {
@@ -237,9 +272,10 @@ impl Pim {
     fn packet_recv(&mut self, packet: PimPacket, src: Ipv4Addr, ifindex: u32) {
         match &packet.payload {
             PimPayload::Hello(hello) => self.hello_recv(ifindex, src, hello),
+            PimPayload::JoinPrune(jp) => self.jp_recv(ifindex, src, jp),
             other => {
-                // Join/Prune, Assert, Register handling arrives with
-                // the TIB phases.
+                // Assert / Register handling arrives with later
+                // phases.
                 tracing::debug!(
                     "pim: ignoring {} from {} on ifindex {} (not yet implemented)",
                     packet.typ,

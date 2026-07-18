@@ -1009,6 +1009,15 @@ module exec {
         ext:help "PIM neighbor";
         presence "PIM neighbor";
       }
+      container upstream {
+        ext:help "PIM upstream (S,G) join state";
+        presence "PIM upstream";
+      }
+    }
+
+    container mroute {
+      ext:help "IP multicast routing table";
+      presence "Multicast routes";
     }
 
     container ospfv3 {

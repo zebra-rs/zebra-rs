@@ -1,0 +1,176 @@
+//! RPF cache: per-source resolution backed by the RIB's next-hop
+//! tracking (register-then-gate — state parks while unresolved).
+//! Directly-connected sources resolve against the interface table
+//! first; everything else follows the tracked RIB resolution.
+
+use std::collections::BTreeMap;
+use std::net::{IpAddr, Ipv4Addr};
+
+use crate::rib;
+use crate::rib::nht::NexthopResolution;
+
+use super::inst::Pim;
+use super::tib::Sg;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RpfState {
+    Unresolved,
+    /// The source is on-link: no upstream neighbor, no Join to send.
+    Connected {
+        ifindex: u32,
+    },
+    /// Remote source: Joins go to `nexthop` out `ifindex` — if that
+    /// address is a live PIM neighbor there.
+    Gateway {
+        ifindex: u32,
+        nexthop: Ipv4Addr,
+    },
+}
+
+impl RpfState {
+    pub fn ifindex(&self) -> Option<u32> {
+        match self {
+            RpfState::Unresolved => None,
+            RpfState::Connected { ifindex } | RpfState::Gateway { ifindex, .. } => Some(*ifindex),
+        }
+    }
+}
+
+pub struct RpfEntry {
+    pub state: RpfState,
+    refs: usize,
+    resolution: Option<NexthopResolution>,
+}
+
+impl Pim {
+    /// Take a reference on the RPF state for `src`, registering NHT
+    /// interest on first use. The immediate `NexthopUpdate` echo from
+    /// RIB refines the state asynchronously.
+    pub(crate) fn rpf_acquire(&mut self, src: Ipv4Addr) -> RpfState {
+        if let Some(entry) = self.rpf.get_mut(&src) {
+            entry.refs += 1;
+            return entry.state;
+        }
+        let state = compute_rpf(&self.links, src, None);
+        let _ = self.ctx.rib.send(rib::Message::NexthopRegister {
+            proto: "pim".to_string(),
+            nh: IpAddr::V4(src),
+        });
+        self.rpf.insert(
+            src,
+            RpfEntry {
+                state,
+                refs: 1,
+                resolution: None,
+            },
+        );
+        state
+    }
+
+    pub(crate) fn rpf_release(&mut self, src: Ipv4Addr) {
+        let Some(entry) = self.rpf.get_mut(&src) else {
+            return;
+        };
+        entry.refs -= 1;
+        if entry.refs == 0 {
+            self.rpf.remove(&src);
+            let _ = self.ctx.rib.send(rib::Message::NexthopUnregister {
+                proto: "pim".to_string(),
+                nh: IpAddr::V4(src),
+            });
+        }
+    }
+
+    /// RIB pushed a new resolution for a tracked address.
+    pub(crate) fn rpf_nexthop_update(&mut self, nh: IpAddr, resolution: NexthopResolution) {
+        let IpAddr::V4(src) = nh else {
+            return;
+        };
+        let Some(entry) = self.rpf.get_mut(&src) else {
+            return;
+        };
+        entry.resolution = Some(resolution);
+        let state = compute_rpf(&self.links, src, entry.resolution.as_ref());
+        if entry.state != state {
+            entry.state = state;
+            self.rpf_changed(src, state);
+        }
+    }
+
+    /// Interface/address topology changed: recompute every tracked
+    /// source (connected-ness may have flipped even without a RIB
+    /// resolution change).
+    pub(crate) fn rpf_recompute_all(&mut self) {
+        let sources: Vec<Ipv4Addr> = self.rpf.keys().copied().collect();
+        for src in sources {
+            let Some(entry) = self.rpf.get_mut(&src) else {
+                continue;
+            };
+            let state = compute_rpf(&self.links, src, entry.resolution.as_ref());
+            if entry.state != state {
+                entry.state = state;
+                self.rpf_changed(src, state);
+            }
+        }
+    }
+
+    /// Propagate an RPF change into every TIB entry for that source:
+    /// prune off the old upstream, adopt the new state, re-evaluate.
+    fn rpf_changed(&mut self, src: Ipv4Addr, state: RpfState) {
+        let sgs: Vec<Sg> = self
+            .tib
+            .keys()
+            .filter(|sg| sg.src == src)
+            .copied()
+            .collect();
+        for sg in sgs {
+            self.tib_rpf_change(sg, state);
+        }
+    }
+
+    pub(crate) fn rpf_state(&self, src: Ipv4Addr) -> RpfState {
+        self.rpf
+            .get(&src)
+            .map(|e| e.state)
+            .unwrap_or(RpfState::Unresolved)
+    }
+}
+
+fn compute_rpf(
+    links: &BTreeMap<u32, super::link::PimLink>,
+    src: Ipv4Addr,
+    resolution: Option<&NexthopResolution>,
+) -> RpfState {
+    // On-link check first: a directly-connected source needs no
+    // upstream neighbor regardless of what the RIB says.
+    for link in links.values() {
+        if link.link_up && link.addrs.iter().any(|p| p.contains(&src)) {
+            return RpfState::Connected {
+                ifindex: link.ifindex,
+            };
+        }
+    }
+    let Some(resolution) = resolution else {
+        return RpfState::Unresolved;
+    };
+    if !resolution.reachable {
+        return RpfState::Unresolved;
+    }
+    // ECMP: take the RIB's first resolved nexthop as-is (no PIM-side
+    // hashing in this phase).
+    let Some(nexthop) = resolution.nexthops.first() else {
+        return RpfState::Unresolved;
+    };
+    let IpAddr::V4(gw) = nexthop.addr else {
+        return RpfState::Unresolved;
+    };
+    if gw == src {
+        return RpfState::Connected {
+            ifindex: nexthop.ifindex,
+        };
+    }
+    RpfState::Gateway {
+        ifindex: nexthop.ifindex,
+        nexthop: gw,
+    }
+}
