@@ -169,20 +169,24 @@ impl IsisTlvExtIsReachEntry {
     }
 
     fn len(&self) -> u8 {
-        11 + self.sub_len() // 11 is TLV length without sub TLVs.
+        // 11 is the entry length without sub-TLVs. usize + min keeps the
+        // packer's wire_len() probe of an over-full entry debug-safe
+        // (see `IsisTlvExtIsReach::len`).
+        (11 + self.sub_len()).min(255) as u8
     }
 
-    fn sub_len(&self) -> u8 {
-        self.subs.iter().map(|sub| sub.len() + 2).sum()
+    fn sub_len(&self) -> usize {
+        self.subs.iter().map(|sub| sub.len() as usize + 2).sum()
     }
 
     fn emit(&self, buf: &mut BytesMut) {
         buf.put(&self.neighbor_id.id[..]);
         buf.put(&u32_u8_3(self.metric)[..]);
-        buf.put_u8(self.sub_len());
-        for sub in self.subs.iter() {
-            sub.emit(buf);
-        }
+        emit_sub_tlvs(buf, |buf| {
+            for sub in self.subs.iter() {
+                sub.emit(buf);
+            }
+        });
     }
 }
 
@@ -789,8 +793,8 @@ impl TlvEmitter for IsisSubAsla {
     }
 
     fn len(&self) -> u8 {
-        let sub_len: u8 = self.subs.iter().map(|sub| sub.len() + 2).sum();
-        2 + self.sabm.len() as u8 + self.udabm.len() as u8 + sub_len
+        let sub_len: usize = self.subs.iter().map(|sub| sub.len() as usize + 2).sum();
+        (2 + self.sabm.len() + self.udabm.len() + sub_len).min(255) as u8
     }
 
     fn emit(&self, buf: &mut BytesMut) {
@@ -965,8 +969,8 @@ impl TlvEmitter for IsisSubSrv6EndXSid {
 
     fn len(&self) -> u8 {
         // Flags(1)+Algo(1)+Weight(1)+Behavior(2)+Sid(16)+Sub2Len(1)+Sub2
-        let len: u8 = self.sub2s.iter().map(|sub| sub.len() + 2).sum();
-        1 + 1 + 1 + 2 + 16 + 1 + len
+        let len: usize = self.sub2s.iter().map(|sub| sub.len() as usize + 2).sum();
+        (1 + 1 + 1 + 2 + 16 + 1 + len).min(255) as u8
     }
 
     fn emit(&self, buf: &mut BytesMut) {
@@ -1030,8 +1034,8 @@ impl TlvEmitter for IsisSubSrv6LanEndXSid {
 
     fn len(&self) -> u8 {
         // SystemID(6)+Flags(1)+Algo(1)+Weight(1)+Behavior(2)+Sid(16)+Sub2Len(1)+Sub2
-        let len: u8 = self.sub2s.iter().map(|sub| sub.len() + 2).sum();
-        6 + 1 + 1 + 1 + 2 + 16 + 1 + len
+        let len: usize = self.sub2s.iter().map(|sub| sub.len() as usize + 2).sum();
+        (6 + 1 + 1 + 1 + 2 + 16 + 1 + len).min(255) as u8
     }
 
     fn emit(&self, buf: &mut BytesMut) {
@@ -1052,6 +1056,64 @@ impl TlvEmitter for IsisSubSrv6LanEndXSid {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn oversized_entry() -> IsisTlvExtIsReachEntry {
+        // 50 IPv4 interface-address sub-TLVs = 50 * (4+2) = 300 bytes,
+        // more than the one-octet sub-TLV-length field can express.
+        IsisTlvExtIsReachEntry {
+            subs: (0..50)
+                .map(|_| {
+                    IsisSubTlv::Ipv4IfAddr(IsisSubIpv4IfAddr {
+                        addr: Ipv4Addr::UNSPECIFIED,
+                    })
+                })
+                .collect(),
+            ..Default::default()
+        }
+    }
+
+    /// The old `sum::<u8>()` in `sub_len` panicked in debug builds
+    /// ("attempt to add with overflow") when the packer's wire_len()
+    /// probe measured an over-full entry, and wrapped the length in
+    /// release; `len()` now saturates at 255.
+    #[test]
+    fn ext_is_reach_entry_oversized_subs_saturate() {
+        assert_eq!(oversized_entry().len(), 255);
+    }
+
+    /// Emitting an over-full sub-TLV block is a builder bug — the
+    /// emit_sub_tlvs debug assert trips instead of a length byte being
+    /// written that disagrees with the bytes emitted.
+    #[cfg(debug_assertions)]
+    #[test]
+    #[should_panic(expected = "sub-TLV block overflows")]
+    fn ext_is_reach_entry_oversized_subs_emit_asserts() {
+        let mut buf = BytesMut::new();
+        oversized_entry().emit(&mut buf);
+    }
+
+    /// The back-patched sub-TLV length byte must equal the bytes
+    /// actually emitted, and the entry must round-trip.
+    #[test]
+    fn ext_is_reach_entry_sub_block_backpatch_round_trip() {
+        let entry = IsisTlvExtIsReachEntry {
+            metric: 10,
+            subs: vec![
+                IsisSubTlv::Ipv4IfAddr(IsisSubIpv4IfAddr {
+                    addr: "10.0.0.1".parse().unwrap(),
+                }),
+                IsisSubTlv::TeMetric(IsisSubTeMetric { metric: 100 }),
+            ],
+            ..Default::default()
+        };
+        let mut buf = BytesMut::new();
+        entry.emit(&mut buf);
+        // neighbor_id(7) + metric(3) + sublen(1) + subs.
+        assert_eq!(buf[10] as usize, buf.len() - 11);
+        let (rest, parsed) = IsisTlvExtIsReachEntry::parse_be(&buf).expect("parse");
+        assert!(rest.is_empty());
+        assert_eq!(parsed, entry);
+    }
 
     #[test]
     fn admin_grp_len_truncates_at_63_groups() {

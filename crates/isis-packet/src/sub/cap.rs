@@ -258,8 +258,8 @@ impl ParseBe<IsisTlvRouterCap> for IsisTlvRouterCap {
 }
 
 impl IsisTlvRouterCap {
-    fn sub_len(&self) -> u8 {
-        self.subs.iter().map(|sub| sub.len() + 2).sum()
+    fn sub_len(&self) -> usize {
+        self.subs.iter().map(|sub| sub.len() as usize + 2).sum()
     }
 }
 
@@ -269,7 +269,7 @@ impl TlvEmitter for IsisTlvRouterCap {
     }
 
     fn len(&self) -> u8 {
-        5 + self.sub_len()
+        (5 + self.sub_len()).min(255) as u8
     }
 
     fn emit(&self, buf: &mut bytes::BytesMut) {

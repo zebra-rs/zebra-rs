@@ -117,8 +117,8 @@ impl TlvEmitter for IsisSubSrv6EndSid {
 
     fn len(&self) -> u8 {
         // Flags(1)+Behavior(2)+Sid(16)+Sub2Len(1)+Sub2
-        let len: u8 = self.sub2s.iter().map(|sub| sub.len() + 2).sum();
-        1 + 2 + 16 + 1 + len
+        let len: usize = self.sub2s.iter().map(|sub| sub.len() as usize + 2).sum();
+        (1 + 2 + 16 + 1 + len).min(255) as u8
     }
 
     fn emit(&self, buf: &mut BytesMut) {
@@ -177,8 +177,8 @@ impl TlvEmitter for IsisSubSrv6MirrorSid {
 
     fn len(&self) -> u8 {
         // Flags(1)+Behavior(2)+Sid(16)+Sub2Len(1)+Sub2
-        let len: u8 = self.sub2s.iter().map(|sub| sub.len() + 2).sum();
-        1 + 2 + 16 + 1 + len
+        let len: usize = self.sub2s.iter().map(|sub| sub.len() as usize + 2).sum();
+        (1 + 2 + 16 + 1 + len).min(255) as u8
     }
 
     fn emit(&self, buf: &mut BytesMut) {
@@ -545,15 +545,17 @@ impl IsisTlvExtIpReachEntry {
     fn len(&self) -> u8 {
         if self.subs.is_empty() {
             // Metric:4 + Flags:1 + Prefix.
-            4 + 1 + (psize(self.prefix.prefix_len()) as u8)
+            (4 + 1 + psize(self.prefix.prefix_len())) as u8
         } else {
             // Metric:4 + Flags:1 + Prefix + Sub TLV length + Sub TLV.
-            4 + 1 + (psize(self.prefix.prefix_len()) as u8) + 1 + self.sub_len()
+            // usize + min keeps the packer's wire_len() probe of an
+            // over-full entry debug-safe (see `IsisTlvExtIsReach::len`).
+            (4 + 1 + psize(self.prefix.prefix_len()) + 1 + self.sub_len()).min(255) as u8
         }
     }
 
-    fn sub_len(&self) -> u8 {
-        self.subs.iter().map(|sub| sub.len() + 2).sum()
+    fn sub_len(&self) -> usize {
+        self.subs.iter().map(|sub| sub.len() as usize + 2).sum()
     }
 
     fn emit(&self, buf: &mut BytesMut) {
@@ -566,10 +568,11 @@ impl IsisTlvExtIpReachEntry {
         if self.subs.is_empty() {
             return;
         }
-        buf.put_u8(self.sub_len());
-        for sub in self.subs.iter() {
-            sub.emit(buf);
-        }
+        emit_sub_tlvs(buf, |buf| {
+            for sub in self.subs.iter() {
+                sub.emit(buf);
+            }
+        });
     }
 
     pub fn prefix_sid(&self) -> Option<IsisSubPrefixSid> {
@@ -746,15 +749,17 @@ impl IsisTlvIpv6ReachEntry {
     fn len(&self) -> u8 {
         if self.subs.is_empty() {
             // Metric:4 + Flags:1 + Prefixlen:1.
-            4 + 1 + 1 + (psize(self.prefix.prefix_len()) as u8)
+            (4 + 1 + 1 + psize(self.prefix.prefix_len())) as u8
         } else {
             // Metric:4 + Flags:1 + Prefix len:1 + Sub TLV length + Sub TLV.
-            4 + 1 + 1 + (psize(self.prefix.prefix_len()) as u8) + 1 + self.sub_len()
+            // usize + min keeps the packer's wire_len() probe of an
+            // over-full entry debug-safe (see `IsisTlvExtIsReach::len`).
+            (4 + 1 + 1 + psize(self.prefix.prefix_len()) + 1 + self.sub_len()).min(255) as u8
         }
     }
 
-    fn sub_len(&self) -> u8 {
-        self.subs.iter().map(|sub| sub.len() + 2).sum()
+    fn sub_len(&self) -> usize {
+        self.subs.iter().map(|sub| sub.len() as usize + 2).sum()
     }
 
     fn emit(&self, buf: &mut BytesMut) {
@@ -768,10 +773,11 @@ impl IsisTlvIpv6ReachEntry {
         if self.subs.is_empty() {
             return;
         }
-        buf.put_u8(self.sub_len());
-        for sub in &self.subs {
-            sub.emit(buf);
-        }
+        emit_sub_tlvs(buf, |buf| {
+            for sub in &self.subs {
+                sub.emit(buf);
+            }
+        });
     }
 }
 
@@ -1122,9 +1128,9 @@ pub struct Srv6Locator {
 
 impl Srv6Locator {
     fn len(&self) -> u8 {
-        // Metric(4)+Flags(1)+Algo(1)+Locator(16)+SubLen(1)+Subs
-        let sub_len: u8 = self.subs.iter().map(|sub| sub.len() + 2).sum();
-        4 + 1 + 1 + 1 + (psize(self.locator.prefix_len()) as u8) + 1 + sub_len
+        // Metric(4)+Flags(1)+Algo(1)+PrefixLen(1)+Locator+SubLen(1)+Subs
+        let sub_len: usize = self.subs.iter().map(|sub| sub.len() as usize + 2).sum();
+        (4 + 1 + 1 + 1 + psize(self.locator.prefix_len()) + 1 + sub_len).min(255) as u8
     }
 
     fn emit(&self, buf: &mut BytesMut) {
@@ -1195,8 +1201,14 @@ impl TlvEmitter for IsisTlvSrv6 {
     }
 
     fn len(&self) -> u8 {
-        let len: u8 = self.locators.iter().map(|locator| locator.len()).sum();
-        len + 2
+        // See note on `IsisTlvExtIsReach::len` — saturate so the packer's
+        // wire_len() probe of a not-yet-split TLV stays debug-safe.
+        let len: usize = self
+            .locators
+            .iter()
+            .map(|locator| locator.len() as usize)
+            .sum();
+        (len + 2).min(255) as u8
     }
 
     fn emit(&self, buf: &mut BytesMut) {

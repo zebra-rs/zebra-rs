@@ -170,7 +170,22 @@ pub fn hello_generate(link: &LinkTop, level: Level) -> IsisHello {
             })
         }
     }
-    hello.tlvs.push(IsisTlvIsNeighbor { neighbors }.into());
+    // TLV 6 holds at most MAX_NEIGHBORS (42) 6-octet SNPAs; shard a
+    // larger adjacency set across multiple instances so no neighbor is
+    // silently dropped. An empty set still emits one empty TLV so the
+    // wire stays identical to the pre-shard form.
+    if neighbors.is_empty() {
+        hello.tlvs.push(IsisTlvIsNeighbor { neighbors }.into());
+    } else {
+        for chunk in neighbors.chunks(IsisTlvIsNeighbor::MAX_NEIGHBORS) {
+            hello.tlvs.push(
+                IsisTlvIsNeighbor {
+                    neighbors: chunk.to_vec(),
+                }
+                .into(),
+            );
+        }
+    }
 
     // RFC 5306 §3.1 RR for this instance, if we're the staged
     // restarter. Empty for normal operation.
