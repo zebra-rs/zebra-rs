@@ -3,37 +3,120 @@
 **Scope:** the whole `ospf-packet` crate (OSPFv2/v3 packet parse & emit for zebra-rs)
 **Effort:** extra-high recall (10 finder angles × 8 candidates + verification pass + gap sweep)
 **Date:** 2026-07-17
+**Updated:** 2026-07-18 — findings 1–7 (all three DoS bugs + all four interop
+wire-format bugs) fixed and merged. See **Status** and **Next fix candidates**
+below. Detail-section line numbers are as of the original 2026-07-17 review; the
+summary table's `File:line` for open items (8–15) is refreshed to the current tree.
 
-Every finding below was verified by reading the actual code. Line numbers are
-1-indexed against the current working tree. Findings are ranked most-severe first.
+Every finding below was verified by reading the actual code. Findings are ranked
+most-severe first.
 
 ---
 
 ## Summary table
 
-| # | Severity | File:line | Bug |
-|---|----------|-----------|-----|
-| 1 | **DoS (panic)** | `parser.rs:1613` | Extended-Prefix TLV writes past `[u8;4]` when `prefix_len > 32` |
-| 2 | **DoS (panic)** | `v3.rs:3418` | SRv6 Locator TLV copies up to 32 bytes into `[u8;16]` |
-| 3 | **DoS (alloc)** | `parser.rs:401` (+`v3.rs:2987/1517/1077`) | `Vec::with_capacity` from unvalidated wire count |
-| 4 | **Interop** | `v3.rs:498` | OSPFv3 Options AT-bit at bit 13, not RFC 7166 bit 10 |
-| 5 | **Interop** | `parser.rs:1691` | `PrefixSidFlags` every flag one bit too high |
-| 6 | **Interop** | `v3.rs:1708` (+`1769`) | OSPFv3 Adj-SID Weight is 16-bit at the wrong offset |
-| 7 | **Interop** | `v3.rs:3149` (+`3210`) | SRv6 End.X SID header is 8 bytes; RFC 9513 is 6 |
-| 8 | **Round-trip** | `parser.rs:1208` | Unknown RouterInfo TLV reads type/len from value bytes |
-| 9 | **Security** | `zebra-rs/.../network_v6.rs:124` | v3 checksum skipped when any trailing bytes present |
-| 10 | **Correctness** | `parser.rs:551` | `verify_checksum` re-emits typed form, ignores `raw` |
-| 11 | **Robustness** | `parser.rs:704` | `parse_lsa_with_length` swallows all errors into `Unknown` |
-| 12 | **Correctness** | `parser.rs:416` (+`810`) | v2 emit writes stored `num_adv`/`num_links`, not derived |
-| 13 | **Correctness** | `parser.rs:82` (+`227`) | Unknown v2 payload emit drops body; `typ()` → Hello |
-| 14 | **Cleanup (reuse)** | `parser.rs:612` | Fletcher checksum + FAD/SID codecs duplicated |
-| 15 | **Cleanup (dead code)** | `parser.rs:1190` (+`1070`, `v3.rs:2577`) | Dead `pub` items add confusing API surface |
+| # | Severity | File:line | Bug | Status |
+|---|----------|-----------|-----|--------|
+| 1 | **DoS (panic)** | `parser.rs:1613` | Extended-Prefix TLV writes past `[u8;4]` when `prefix_len > 32` | ✅ #1959 |
+| 2 | **DoS (panic)** | `v3.rs:3418` | SRv6 Locator TLV copies up to 32 bytes into `[u8;16]` | ✅ #1959 |
+| 3 | **DoS (alloc)** | `parser.rs:401` (+`v3.rs:2987/1517/1077`) | `Vec::with_capacity` from unvalidated wire count | ✅ #1959 |
+| 4 | **Interop** | `v3.rs:498` | OSPFv3 Options AT-bit at bit 13, not RFC 7166 bit 10 | ✅ #1963 |
+| 5 | **Interop** | `parser.rs:1691` | `PrefixSidFlags` every flag one bit too high | ✅ #1966 |
+| 6 | **Interop** | `v3.rs:1708` (+`1769`) | OSPFv3 Adj-SID Weight is 16-bit at the wrong offset | ✅ #1970 |
+| 7 | **Interop** | `v3.rs:3149` (+`3210`) | SRv6 End.X SID header is 8 bytes; RFC 9513 is 6 | ✅ #1974 |
+| 8 | **Round-trip** | `parser.rs:1214` | Unknown RouterInfo TLV reads type/len from value bytes | ⬜ open |
+| 9 | **Security** | `zebra-rs/.../network_v6.rs:124` | v3 checksum skipped when any trailing bytes present | ⬜ open |
+| 10 | **Correctness** | `parser.rs:557` | `verify_checksum` re-emits typed form, ignores `raw` | ⬜ open |
+| 11 | **Robustness** | `parser.rs:693` | `parse_lsa_with_length` swallows all errors into `Unknown` | ⬜ open |
+| 12 | **Correctness** | `parser.rs:422` (+`816`) | v2 emit writes stored `num_adv`/`num_links`, not derived | ⬜ open |
+| 13 | **Correctness** | `parser.rs:82` (+`227`) | Unknown v2 payload emit drops body; `typ()` → Hello | ⬜ open |
+| 14 | **Cleanup (reuse)** | `parser.rs:618` | Fletcher checksum + FAD/SID codecs duplicated | ⬜ open |
+| 15 | **Cleanup (dead code)** | `parser.rs:1197` (+`1077`, `v3.rs`) | Dead `pub` items add confusing API surface | ⬜ open |
+
+---
+
+## Status (2026-07-18)
+
+All seven top findings — the three remote-DoS parse bugs and all four silent
+interop wire-format bugs — are fixed and merged to `main`. The review document
+itself landed in #1955.
+
+| PR | Findings | Summary |
+|----|----------|---------|
+| [#1959](https://github.com/zebra-rs/zebra-rs/pull/1959) | 1, 2, 3 | Reject oversized `prefix_len`/`locator_length`; `packet_utils::bounded_capacity` caps wire-count pre-allocation (4 sites) |
+| [#1963](https://github.com/zebra-rs/zebra-rs/pull/1963) | 4 | AT Options bit moved to RFC 7166 bit 10 (`0x400`) |
+| [#1966](https://github.com/zebra-rs/zebra-rs/pull/1966) | 5 | `PrefixSidFlags` shifted to RFC 8665/8666 positions; **+ BDD `ospfv3_prefix_sid_flags`** |
+| [#1970](https://github.com/zebra-rs/zebra-rs/pull/1970) | 6 | Adj-SID / LAN-Adj-SID `weight` → `u8` at offset 1 (RFC 8666 §6.1/§6.2) |
+| [#1974](https://github.com/zebra-rs/zebra-rs/pull/1974) | 7 | End.X / LAN-End.X SID head → 6 bytes (RFC 9513 §9.1/§9.2) |
+
+Each fix carries a regression test: byte-offset unit tests where a `show`-based
+check could not discriminate the bug, plus a live BDD feature for the Prefix-SID
+flags. Findings 6, 7 have no BDD because the daemon originates those fields as
+zero, so a zebra-to-zebra `show` renders identically under either layout — the
+unit tests are the meaningful lock.
+
+---
+
+## Next fix candidates (prioritized)
+
+The remaining findings are all lower-severity than the merged set (no DoS, no
+silent interop break in a shipped datapath). Suggested order:
+
+**Tier 1 — highest remaining value**
+1. **Finding 9 — v3 checksum-skip integrity bypass** (security, consumer-side).
+   The real integrity hole among the leftovers. First confirm `parse_v3`
+   actually accepts the trailing bytes (one read), then gate the checksum skip on
+   *authentication configured for the interface*, not on the mere presence of
+   trailing bytes. Fix lives in `zebra-rs/src/ospf/network_v6.rs`, optionally with
+   an explicit "trailer present + valid" signal from the crate.
+2. **Finding 8 (+ part of 15) — Unknown RouterInfo TLV round-trip corruption.**
+   Self-contained and testable: wire the already-present (but dead)
+   `RouterInfoTlvUnknown::parse_tlv` into the `Unknown` arm so `typ`/`len` come
+   from the header, not the value bytes. This also removes one of finding 15's
+   dead items. Add a round-trip unit test over an unknown RI TLV.
+
+**Tier 2 — correctness / robustness, moderate effort**
+3. **Finding 12 — derive `num_adv` / `num_links` at emit.** Mirror the v3 codec
+   (`Ospfv3LsUpdate::emit`), then delete the manual sync lines in the daemon
+   (`inst.rs:1983`, `inst.rs:5404/5502/5571`). Touches daemon call sites.
+4. **Finding 11 — `parse_lsa_with_length` should not swallow parse failures.**
+   Distinguish "unknown LS type" (→ `Unknown`, keep tolerant flooding) from
+   "known type, body failed to parse" (→ propagate `Err`). Needs care to avoid
+   regressing the intentional unmodeled-sub-TLV tolerance.
+5. **Finding 10 — `verify_checksum` should use `self.raw`.** Low effort; latent
+   today (only the crate's tests call it), so low urgency until it is wired into
+   an ingress path. Pairs with the non-bijective `From<u8>` note below.
+
+**Tier 3 — low-severity / cleanup**
+6. **Finding 13 — Unknown v2 payload emit drops body / `typ()` → Hello.** Latent
+   (daemon never re-emits unknown-type packets); fix the public-API trap when
+   convenient.
+7. **Finding 15 (remainder) — delete dead `pub` items** (`is_known`,
+   `Ospfv3ExtTlv::wire_len`; `RouterInfoTlvUnknown::parse_tlv` gets consumed by
+   finding 8). Trivial deletions.
+8. **Finding 14 — hoist duplicated codecs into `packet-utils`** (Fletcher
+   checksum shared with `isis-packet`; FAD and SID/Label dispatch shared v2/v3).
+   Larger refactor; best done the next time those codecs are touched.
+
+**Additional notes (below the top 15)** — opportunistic:
+- `parser.rs` / `v3.rs` emit: stamp packet length via `try_into`/`checked` so a
+  >64 KB serialization fails loudly instead of silently wrapping the `u16`.
+- Non-bijective `From<u8>` for link types (unknown → `Stub`/`PointToPoint`) —
+  fold into finding 10's fix, since it contributes to the `verify_checksum`
+  false-reject.
+- Efficiency: `raw_body` eager copy on every received packet; `Ospfv3Lsa::update`
+  serializes the body twice. Per-packet hot paths.
+- `Ospfv3IntraAreaPrefixTlv` (RFC 8362 E-Intra-Area-Prefix TLV) — verify the
+  16-bit-metric + referenced-LSA-triple layout against RFC 8362 §3.9; internal
+  round-trips pass (zebra-to-zebra) but it was never interop-validated.
 
 ---
 
 ## Correctness / security findings
 
 ### 1. Extended-Prefix TLV panics on `prefix_len > 32` — remote DoS
+> ✅ **Fixed in [#1959](https://github.com/zebra-rs/zebra-rs/pull/1959).**
+
 **`crates/ospf-packet/src/parser.rs:1613`**
 
 `ExtPrefixTlv::parse_tlv` copies prefix octets into a fixed `[u8; 4]` indexed by a
@@ -60,6 +143,8 @@ parser.
 ---
 
 ### 2. SRv6 Locator TLV panics on `locator_length > 128` — remote DoS
+> ✅ **Fixed in [#1959](https://github.com/zebra-rs/zebra-rs/pull/1959).**
+
 **`crates/ospf-packet/src/v3.rs:3418`** (emit twin at `v3.rs:3403`)
 
 ```rust
@@ -78,6 +163,8 @@ has the same defect for any constructed value.
 ---
 
 ### 3. Unbounded `Vec::with_capacity` from wire count — remote DoS
+> ✅ **Fixed in [#1959](https://github.com/zebra-rs/zebra-rs/pull/1959)** — via `packet_utils::bounded_capacity`.
+
 **`crates/ospf-packet/src/parser.rs:401`**, plus **`v3.rs:2987`**, **`v3.rs:1517`** (u32), **`v3.rs:1077`** (u16)
 
 ```rust
@@ -97,6 +184,8 @@ Intra-Area-Prefix-LSA parsers.
 ---
 
 ### 4. OSPFv3 Options AT-bit at bit 13 instead of RFC 7166 bit 10 — interop
+> ✅ **Fixed in [#1963](https://github.com/zebra-rs/zebra-rs/pull/1963).**
+
 **`crates/ospf-packet/src/v3.rs:498`**
 
 ```rust
@@ -117,6 +206,8 @@ reserved accordingly).
 ---
 
 ### 5. `PrefixSidFlags` every flag one bit too high — interop
+> ✅ **Fixed in [#1966](https://github.com/zebra-rs/zebra-rs/pull/1966)** — with BDD `ospfv3_prefix_sid_flags`.
+
 **`crates/ospf-packet/src/parser.rs:1691`**
 
 ```rust
@@ -136,6 +227,8 @@ local-vs-global handling → wrong MPLS label programming across implementations
 ---
 
 ### 6. OSPFv3 Adj-SID / LAN-Adj-SID Weight is 16-bit at the wrong offset — interop
+> ✅ **Fixed in [#1970](https://github.com/zebra-rs/zebra-rs/pull/1970).**
+
 **`crates/ospf-packet/src/v3.rs:1708`** and **`v3.rs:1769`**
 
 ```rust
@@ -156,6 +249,8 @@ the round-trip test uses `weight=0`, so unit tests never catch it.
 ---
 
 ### 7. SRv6 End.X / LAN-End.X SID header is 8 bytes; RFC 9513 is 6 — interop
+> ✅ **Fixed in [#1974](https://github.com/zebra-rs/zebra-rs/pull/1974).**
+
 **`crates/ospf-packet/src/v3.rs:3149`** and **`v3.rs:3210`**
 
 ```rust
