@@ -339,6 +339,13 @@ impl MupRoute {
                     }
                     _ => unreachable!(),
                 };
+                // The declared per-route length must be fully consumed — a
+                // padded length is malformed, the same rule the EVPN per-route
+                // body enforces.
+                let rest = &rest[psize..];
+                if !rest.is_empty() {
+                    return Err(nom::Err::Error(make_error(input, ErrorKind::LengthValue)));
+                }
                 MupRoute::Isd {
                     id,
                     arch,
@@ -348,14 +355,14 @@ impl MupRoute {
             }
             MupRouteType::Dsd => {
                 let (rest, rd) = RouteDistinguisher::parse_be(body_slice)?;
-                let address = match afi {
+                let (address, rest) = match afi {
                     Afi::Ip => {
                         if rest.len() < 4 {
                             return Err(nom::Err::Error(make_error(input, ErrorKind::Eof)));
                         }
                         let mut octets = [0u8; 4];
                         octets.copy_from_slice(&rest[..4]);
-                        IpAddr::V4(Ipv4Addr::from(octets))
+                        (IpAddr::V4(Ipv4Addr::from(octets)), &rest[4..])
                     }
                     Afi::Ip6 => {
                         if rest.len() < 16 {
@@ -363,10 +370,13 @@ impl MupRoute {
                         }
                         let mut octets = [0u8; 16];
                         octets.copy_from_slice(&rest[..16]);
-                        IpAddr::V6(Ipv6Addr::from(octets))
+                        (IpAddr::V6(Ipv6Addr::from(octets)), &rest[16..])
                     }
                     _ => return Err(nom::Err::Error(make_error(input, ErrorKind::Verify))),
                 };
+                if !rest.is_empty() {
+                    return Err(nom::Err::Error(make_error(input, ErrorKind::LengthValue)));
+                }
                 MupRoute::Dsd {
                     id,
                     arch,
@@ -436,15 +446,15 @@ impl MupRoute {
                 // else 32 (IPv4) or 128 (IPv6) — also family-by-length,
                 // independent of the outer AFI.
                 let (rest, src_len) = be_u8(rest)?;
-                let source = match src_len {
-                    0 => None,
+                let (source, rest) = match src_len {
+                    0 => (None, rest),
                     32 => {
                         if rest.len() < 4 {
                             return Err(nom::Err::Error(make_error(input, ErrorKind::Eof)));
                         }
                         let mut octets = [0u8; 4];
                         octets.copy_from_slice(&rest[..4]);
-                        Some(IpAddr::V4(Ipv4Addr::from(octets)))
+                        (Some(IpAddr::V4(Ipv4Addr::from(octets))), &rest[4..])
                     }
                     128 => {
                         if rest.len() < 16 {
@@ -452,10 +462,13 @@ impl MupRoute {
                         }
                         let mut octets = [0u8; 16];
                         octets.copy_from_slice(&rest[..16]);
-                        Some(IpAddr::V6(Ipv6Addr::from(octets)))
+                        (Some(IpAddr::V6(Ipv6Addr::from(octets))), &rest[16..])
                     }
                     _ => return Err(nom::Err::Error(make_error(input, ErrorKind::Verify))),
                 };
+                if !rest.is_empty() {
+                    return Err(nom::Err::Error(make_error(input, ErrorKind::LengthValue)));
+                }
                 MupRoute::T1st {
                     id,
                     arch,
@@ -499,17 +512,20 @@ impl MupRoute {
                 // trailing TEID bits; the TEID is high-aligned in 32 bits
                 // (GoBGP-compatible).
                 let teid_bits = endpoint_len.saturating_sub(addr_bits);
-                let teid = if teid_bits > 0 {
+                let (teid, rest) = if teid_bits > 0 {
                     let tsize = nlri_psize(teid_bits);
                     if rest.len() < tsize {
                         return Err(nom::Err::Error(make_error(input, ErrorKind::Eof)));
                     }
                     let mut octets = [0u8; 4];
                     octets[..tsize].copy_from_slice(&rest[..tsize]);
-                    u32::from_be_bytes(octets)
+                    (u32::from_be_bytes(octets), &rest[tsize..])
                 } else {
-                    0
+                    (0, rest)
                 };
+                if !rest.is_empty() {
+                    return Err(nom::Err::Error(make_error(input, ErrorKind::LengthValue)));
+                }
                 MupRoute::T2st {
                     id,
                     arch,
@@ -916,6 +932,92 @@ mod tests {
             MupRoute::parse(&buf[..], addpath, afi).expect("nlri_emit must round-trip");
         assert!(rest.is_empty(), "trailing bytes after parse: {rest:?}");
         assert_eq!(parsed, route);
+    }
+
+    /// Emit `route`, then pad the declared per-route length by one octet:
+    /// the parser must reject the leftover byte inside the bounded body
+    /// instead of silently dropping it.
+    fn rejects_padded_length(route: MupRoute, afi: Afi) {
+        let mut buf = BytesMut::new();
+        route.nlri_emit(&mut buf);
+        let mut v = buf.to_vec();
+        v[3] += 1; // length octet follows arch(1) + route-type(2)
+        v.push(0);
+        assert!(
+            MupRoute::parse(&v, false, afi).is_err(),
+            "padded per-route length must fail the parse"
+        );
+    }
+
+    #[test]
+    fn isd_rejects_padded_length() {
+        rejects_padded_length(
+            MupRoute::Isd {
+                id: 0,
+                arch: MupArchitectureType::Gpp5g,
+                rd: sample_rd(),
+                prefix: "10.0.0.0/24".parse().unwrap(),
+            },
+            Afi::Ip,
+        );
+    }
+
+    #[test]
+    fn dsd_rejects_padded_length() {
+        rejects_padded_length(
+            MupRoute::Dsd {
+                id: 0,
+                arch: MupArchitectureType::Gpp5g,
+                rd: sample_rd(),
+                address: "192.0.2.99".parse().unwrap(),
+            },
+            Afi::Ip,
+        );
+    }
+
+    #[test]
+    fn t1st_rejects_padded_length() {
+        rejects_padded_length(
+            MupRoute::T1st {
+                id: 0,
+                arch: MupArchitectureType::Gpp5g,
+                rd: sample_rd(),
+                prefix: "10.0.0.0/24".parse().unwrap(),
+                teid: 1,
+                qfi: 2,
+                endpoint: "192.0.2.1".parse().unwrap(),
+                source: Some("203.0.113.1".parse().unwrap()),
+            },
+            Afi::Ip,
+        );
+    }
+
+    #[test]
+    fn t2st_rejects_padded_length() {
+        // Both the partial-TEID and the no-TEID (endpoint_len == address
+        // bits) shapes must reject padding.
+        rejects_padded_length(
+            MupRoute::T2st {
+                id: 0,
+                arch: MupArchitectureType::Gpp5g,
+                rd: sample_rd(),
+                endpoint: "10.0.0.1".parse().unwrap(),
+                endpoint_len: 48,
+                teid: 0x0258_0000,
+            },
+            Afi::Ip,
+        );
+        rejects_padded_length(
+            MupRoute::T2st {
+                id: 0,
+                arch: MupArchitectureType::Gpp5g,
+                rd: sample_rd(),
+                endpoint: "10.0.0.1".parse().unwrap(),
+                endpoint_len: 32,
+                teid: 0,
+            },
+            Afi::Ip,
+        );
     }
 
     #[test]

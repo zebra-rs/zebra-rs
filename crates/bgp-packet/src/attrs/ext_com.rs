@@ -5,6 +5,7 @@ use std::str::FromStr;
 
 use bytes::{BufMut, BytesMut};
 use nom::IResult;
+use nom::error::{ErrorKind, make_error};
 use nom_derive::{NomBE, Parse};
 
 use crate::{
@@ -42,6 +43,15 @@ impl<'a> Parse<&'a [u8]> for ExtCommunity {
         Self::parse_be(input)
     }
     fn parse_be(input: &'a [u8]) -> IResult<&'a [u8], Self> {
+        // RFC 7606 §7.14: "An Extended Community attribute SHALL be considered
+        // malformed if its length is not a non-zero multiple of 8." Without
+        // this the `Vec` decode simply stopped at the last whole 8-octet value
+        // and the attribute path discarded the remainder — a trailing partial
+        // value vanished instead of failing the parse. `Community` and
+        // `LargeCommunity` already enforce their widths this way.
+        if input.is_empty() || !input.len().is_multiple_of(8) {
+            return Err(nom::Err::Error(make_error(input, ErrorKind::LengthValue)));
+        }
         let (input, values) = <Vec<ExtCommunityValue>>::parse_be(input)?;
         Ok((input, values.into_iter().collect()))
     }
@@ -865,6 +875,29 @@ impl From<RouteDistinguisher> for ExtCommunityValue {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// RFC 7606 §7.14: a payload that is empty or not a multiple of 8 is
+    /// malformed — a trailing partial value must fail the parse instead of
+    /// being silently dropped by the Vec decode.
+    #[test]
+    fn parse_be_rejects_partial_trailing_value() {
+        let bytes = [0u8; 12]; // one whole 8-octet value + 4 stray octets
+        assert!(ExtCommunity::parse_be(&bytes).is_err());
+    }
+
+    #[test]
+    fn parse_be_rejects_empty_payload() {
+        assert!(ExtCommunity::parse_be(&[]).is_err());
+    }
+
+    #[test]
+    fn parse_be_accepts_whole_values() {
+        let mut bytes = vec![0x00, 0x02, 0x00, 0x64, 0x00, 0x00, 0x00, 0xC8]; // rt:100:200
+        bytes.extend_from_slice(&[0x00, 0x03, 0x00, 0x64, 0x00, 0x00, 0x00, 0xC8]); // soo:100:200
+        let (rest, ecom) = ExtCommunity::parse_be(&bytes).unwrap();
+        assert!(rest.is_empty());
+        assert_eq!(ecom.0.len(), 2);
+    }
 
     /// Each RD type maps onto the extended-community high_type that carries the
     /// same 6-octet value layout: 0x00 Two-Octet AS, 0x01 IPv4, 0x02 Four-Octet
