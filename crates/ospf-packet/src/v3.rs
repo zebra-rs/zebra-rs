@@ -3148,8 +3148,8 @@ impl Ospfv3Srv6SidStructure {
 /// raw IANA "SRv6 Endpoint Behaviors" codepoint (protocol-neutral;
 /// the daemon maps it through `isis_packet::Behavior`).
 ///
-/// Wire: `Behavior (2) | Flags (1) | Rsv (1) | Algo (1) | Weight (1) |
-/// Rsv (2) | SID (16)` + nested sub-TLVs (SID Structure, type 30).
+/// Wire: `Behavior (2) | Flags (1) | Algo (1) | Weight (1) | Rsv (1) |
+/// SID (16)` + nested sub-TLVs (SID Structure, type 30).
 #[derive(Debug, Clone, PartialEq)]
 pub struct Ospfv3Srv6EndXSidSubTlv {
     pub behavior: u16,
@@ -3163,16 +3163,15 @@ pub struct Ospfv3Srv6EndXSidSubTlv {
 impl Ospfv3Srv6EndXSidSubTlv {
     pub fn value_len(&self) -> u16 {
         let subs: usize = self.subs.iter().map(|s| s.wire_len()).sum();
-        24 + subs as u16
+        22 + subs as u16
     }
 
     fn emit(&self, buf: &mut BytesMut) {
         buf.put_u16(self.behavior);
         buf.put_u8(self.flags);
-        buf.put_u8(0); // reserved1
         buf.put_u8(self.algo);
         buf.put_u8(self.weight);
-        buf.put_u16(0); // reserved2
+        buf.put_u8(0); // reserved
         buf.put_slice(&self.sid.octets());
         for sub in &self.subs {
             sub.emit(buf);
@@ -3182,10 +3181,9 @@ impl Ospfv3Srv6EndXSidSubTlv {
     fn parse_be(input: &[u8]) -> IResult<&[u8], Self> {
         let (input, behavior) = be_u16(input)?;
         let (input, flags) = be_u8(input)?;
-        let (input, _rsv1) = be_u8(input)?;
         let (input, algo) = be_u8(input)?;
         let (input, weight) = be_u8(input)?;
-        let (input, _rsv2) = be_u16(input)?;
+        let (input, _rsv) = be_u8(input)?;
         let (mut input, sid) = parse_ipv6_sid(input)?;
         let mut subs = Vec::new();
         while !input.is_empty() {
@@ -3224,16 +3222,15 @@ pub struct Ospfv3Srv6LanEndXSidSubTlv {
 impl Ospfv3Srv6LanEndXSidSubTlv {
     pub fn value_len(&self) -> u16 {
         let subs: usize = self.subs.iter().map(|s| s.wire_len()).sum();
-        28 + subs as u16
+        26 + subs as u16
     }
 
     fn emit(&self, buf: &mut BytesMut) {
         buf.put_u16(self.behavior);
         buf.put_u8(self.flags);
-        buf.put_u8(0); // reserved1
         buf.put_u8(self.algo);
         buf.put_u8(self.weight);
-        buf.put_u16(0); // reserved2
+        buf.put_u8(0); // reserved
         buf.put_slice(&self.neighbor_router_id.octets());
         buf.put_slice(&self.sid.octets());
         for sub in &self.subs {
@@ -3244,10 +3241,9 @@ impl Ospfv3Srv6LanEndXSidSubTlv {
     fn parse_be(input: &[u8]) -> IResult<&[u8], Self> {
         let (input, behavior) = be_u16(input)?;
         let (input, flags) = be_u8(input)?;
-        let (input, _rsv1) = be_u8(input)?;
         let (input, algo) = be_u8(input)?;
         let (input, weight) = be_u8(input)?;
-        let (input, _rsv2) = be_u16(input)?;
+        let (input, _rsv) = be_u8(input)?;
         let (input, neighbor_router_id) = Ipv4Addr::parse_be(input)?;
         let (mut input, sid) = parse_ipv6_sid(input)?;
         let mut subs = Vec::new();
@@ -3591,6 +3587,57 @@ mod tests {
         assert!(o.at());
         // A compliant peer's AT bit parses back to at() == true.
         assert!(Ospfv3Options::from_bits(0x0000_0400).at());
+    }
+
+    #[test]
+    fn srv6_endx_sid_header_rfc9513_layout() {
+        // RFC 9513 §9.1: Behavior(2) | Flags(1) | Algorithm(1) | Weight(1) |
+        // Reserved(1) | SID(16) — a 6-byte head with no reserved octet before
+        // Algorithm, so the 128-bit SID starts at offset 6, not 8.
+        let tlv = Ospfv3Srv6EndXSidSubTlv {
+            behavior: 0x001B,
+            flags: 0,
+            algo: 1,
+            weight: 200,
+            sid: "fcbb:bbbb:1::".parse().unwrap(),
+            subs: Vec::new(),
+        };
+        let mut buf = BytesMut::new();
+        tlv.emit(&mut buf);
+        assert_eq!(tlv.value_len(), 22);
+        assert_eq!(buf.len(), 22);
+        assert_eq!(&buf[0..2], &[0x00, 0x1B], "behavior");
+        assert_eq!(buf[3], 1, "algorithm at offset 3");
+        assert_eq!(buf[4], 200, "weight at offset 4");
+        assert_eq!(buf[5], 0, "reserved at offset 5");
+        assert_eq!(&buf[6..22], &tlv.sid.octets()[..], "SID at offset 6");
+        let (_, back) = Ospfv3Srv6EndXSidSubTlv::parse_be(&buf[..]).unwrap();
+        assert_eq!(back, tlv);
+    }
+
+    #[test]
+    fn srv6_lan_endx_sid_header_rfc9513_layout() {
+        // RFC 9513 §9.2: same 6-byte head, then Neighbor ID(4) then SID(16).
+        let tlv = Ospfv3Srv6LanEndXSidSubTlv {
+            behavior: 0x001B,
+            flags: 0,
+            algo: 1,
+            weight: 200,
+            neighbor_router_id: "10.0.0.2".parse().unwrap(),
+            sid: "fcbb:bbbb:1::".parse().unwrap(),
+            subs: Vec::new(),
+        };
+        let mut buf = BytesMut::new();
+        tlv.emit(&mut buf);
+        assert_eq!(tlv.value_len(), 26);
+        assert_eq!(buf.len(), 26);
+        assert_eq!(buf[3], 1, "algorithm at offset 3");
+        assert_eq!(buf[4], 200, "weight at offset 4");
+        assert_eq!(buf[5], 0, "reserved at offset 5");
+        assert_eq!(&buf[6..10], &[10, 0, 0, 2], "neighbor id at offset 6");
+        assert_eq!(&buf[10..26], &tlv.sid.octets()[..], "SID at offset 10");
+        let (_, back) = Ospfv3Srv6LanEndXSidSubTlv::parse_be(&buf[..]).unwrap();
+        assert_eq!(back, tlv);
     }
 
     #[test]
