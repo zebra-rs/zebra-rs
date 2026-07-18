@@ -387,20 +387,22 @@ single-header TLV emit via both `tlv_emit` and the dispatcher.
 
 From the SRv6 deep-dive, worth tracking but below the bar for the ranked list:
 
-- **SID width from byte-count, not flags** (`parser.rs:1338`): `SidLabelValue`
-  decides Label(3) vs Index(4) from the remaining byte count, ignoring the
-  RFC 8667 V/L flags that are authoritative; a flag/width mismatch is silently
-  reinterpreted rather than rejected.
-- **SRGB/SRLB `range` truncation** (`cap.rs:116`, `:182`): the `range: u32` is
-  emitted via `u32_u8_3`, silently discarding bits above 24; origination-only, but
-  no overflow check.
-- **SID Structure bounds** (`prefix.rs:274`): `IsisSub2SidStructure` accepts
-  LB/LN/Fun/Arg lengths with no validation that they sum to ≤ 128 bits or are
-  consistent with the 16-byte SID.
-- **`End.M = 74`** (`srv6.rs:334`): a draft
-  (`draft-ietf-rtgwg-srv6-egress-protection`) codepoint the finder could not
-  corroborate against a stable IANA assignment — double-check against the current
-  registry.
+- **SID width from byte-count, not flags** (`parser.rs:1338`) — ✅ FIXED:
+  `SidLabelValue::parse_be_flags` makes the RFC 8667 V/L flags authoritative at
+  the Prefix-/Adj-/LAN-Adj-SID sites (V=L=1 label, V=L=0 index; any other
+  combination or a flag/width mismatch degrades the sub-TLV to `Unknown`), and
+  the three emitters derive V/L from the SID variant (the finding-#11 policy).
+  The width-by-length `parse_be` remains only for Binding TLV 149's SID/Label
+  sub-TLV, where RFC 8667 §2.3 keys the form on the length.
+- **SRGB/SRLB `range` truncation** (`cap.rs:116`, `:182`) — ✅ FIXED: emit
+  saturates the range at `0x00FF_FFFF` instead of letting `u32_u8_3` wrap it.
+- **SID Structure bounds** (`prefix.rs:274`) — ✅ FIXED: `IsisSub2SidStructure`
+  rejects LB+LN+Fun+Arg sums over 128 bits; the registry degrades the claim to
+  `Unknown`.
+- **`End.M = 74`** (`srv6.rs:334`) — ✅ VERIFIED (2026-07-18): the IANA "SRv6
+  Endpoint Behaviors" registry assigns value 74 (0x004A) to "End.M (Mirror
+  SID)" with reference `draft-ietf-rtgwg-srv6-egress-protection-02`; the
+  crate's codepoint is correct.
 
 ---
 
@@ -457,6 +459,11 @@ Correctness outranks these for the ranked list, but they're worth scheduling:
 
 ## Suggested priority
 
+**All 15 ranked findings are fixed** — PRs #1952 (#1), #1957 (#2), #1961
+(#3/#5), #1964 (#4/#7/#8), #1967 (#6/#9/#10), #1969 (#11), #1971 (#12),
+#1975 (#13), #1977 (#14), #1978 (#15). The original triage order is kept
+below for the record:
+
 1. ~~Fix #1 (LspEntries wrap) first~~ — **done** (PR #1952): builders capped at
    15 entries per TLV; unit + BDD regression coverage in place.
 2. ~~Fix #2 (RouterCap S/D) and #5 (Srv6TlvFlags MTID)~~ — **done**: both
@@ -467,3 +474,44 @@ Correctness outranks these for the ranked list, but they're worth scheduling:
    TLV 6 capped + sharded, all per-entry length sums are `usize`-with-`min(255)`,
    and `emit_sub_tlvs` asserts/truncates instead of mislabeling an over-full
    block.
+
+---
+
+## Follow-up work (priority order)
+
+What remains after the ranked findings: the SRv6-note tail and the cleanup
+backlog, ordered by risk and value.
+
+1. ~~**`SidLabelValue` width from the V/L flags, not byte count**~~ — **done**:
+   `parse_be_flags` (flags-authoritative, mismatch → `Unknown`) wired into the
+   Prefix-/Adj-/LAN-Adj-SID parsers; emit derives V/L from the variant. The
+   byte-count parse remains only for Binding TLV 149 per RFC 8667 §2.3.
+2. ~~**Verify `End.M = 74` against IANA**~~ — **done**: IANA assigns 74 to
+   "End.M (Mirror SID)" (`draft-ietf-rtgwg-srv6-egress-protection-02`); the
+   crate is correct, no code change.
+3. ~~**Parse-hardening pair**~~ — **done**: `IsisSub2SidStructure` rejects
+   >128-bit sums (degrades to `Unknown`); SRGB/SRLB emit saturates the 24-bit
+   range instead of wrapping.
+4. **O(n²) `wire_len()` packer probe** — the LSP packer measures a growing TLV
+   by cloning and fully serializing it after every entry pushed, so LSP
+   regeneration is quadratic in entries — exactly the production-sized-LSDB
+   regime where #1 used to hide. Fix: a `usize`-returning value-length summing
+   the per-entry math (already `usize` since #7), making it
+   `2 + value_len()` with zero allocation; the unsaturated sum must stay the
+   packer's source of truth.
+5. **Dedup the six sub-TLV dispatch registries** — the #10 fix made each copy
+   bigger (the degrade-to-Unknown match is pasted six times); one generic
+   helper removes ~250 lines and the risk that a seventh registry forgets the
+   Unknown patch or the degrade.
+6. **BGP-LS Extended Admin Group (TLV 1173) producer** — enabled by #13:
+   `ext_admin_group()` exists, but there is no `BGPLS_ATTR_EXT_ADMIN_GROUP`
+   constant, so links advertising only the RFC 7308 group export no color at
+   all (the old, wrong 1088 mapping was removed deliberately).
+7. **Small-cleanup sweep (one PR)** — the duplicated ~55-line padding function
+   (`IsisHello`/`IsisP2pHello`), the three identical RFC 8570 bandwidth
+   wrappers, and the seven dead `is_empty()` methods.
+8. **Optional: live interop validation** — the flag/bit fixes (#2, #5, #13,
+   #14) are unit-tested against FRR's *source*; a BDD or lab run against a
+   real FRR/IOS neighbor exercising RouterCap S-flag, multi-area TLV 1, and
+   MT SRv6 would close the loop the way the Cisco interop work did for TLV
+   parsing.

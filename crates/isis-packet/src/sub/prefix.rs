@@ -56,11 +56,22 @@ impl ParseBe<PrefixSidFlags> for PrefixSidFlags {
     }
 }
 
-#[derive(Debug, NomBE, Clone, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct IsisSubPrefixSid {
     pub flags: PrefixSidFlags,
     pub algo: Algo,
     pub sid: SidLabelValue,
+}
+
+impl ParseBe<IsisSubPrefixSid> for IsisSubPrefixSid {
+    fn parse_be(input: &[u8]) -> IResult<&[u8], Self> {
+        let (input, flags) = PrefixSidFlags::parse_be(input)?;
+        let (input, algo) = Algo::parse_be(input)?;
+        // RFC 8667 §2.1.1.1: the V/L flags decide the SID form — see
+        // `SidLabelValue::parse_be_flags`.
+        let (input, sid) = SidLabelValue::parse_be_flags(input, flags.v_flag(), flags.l_flag())?;
+        Ok((input, Self { flags, algo, sid }))
+    }
 }
 
 impl TlvEmitter for IsisSubPrefixSid {
@@ -73,7 +84,14 @@ impl TlvEmitter for IsisSubPrefixSid {
     }
 
     fn emit(&self, buf: &mut BytesMut) {
-        buf.put_u8(self.flags.into());
+        // Derive V/L from the SID form (RFC 8667: V=L=1 label, V=L=0
+        // index) so the emitted flags can never disagree with the
+        // width that follows.
+        let flags = match self.sid {
+            SidLabelValue::Label(_) => self.flags.with_v_flag(true).with_l_flag(true),
+            SidLabelValue::Index(_) => self.flags.with_v_flag(false).with_l_flag(false),
+        };
+        buf.put_u8(flags.into());
         buf.put_u8(self.algo.into());
         self.sid.emit(buf);
     }
@@ -279,12 +297,40 @@ impl IsisMirrorSub2Tlv {
     }
 }
 
-#[derive(Debug, NomBE, Clone, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct IsisSub2SidStructure {
     pub lb_len: u8,
     pub ln_len: u8,
     pub fun_len: u8,
     pub arg_len: u8,
+}
+
+impl ParseBe<IsisSub2SidStructure> for IsisSub2SidStructure {
+    fn parse_be(input: &[u8]) -> IResult<&[u8], Self> {
+        let (input, lb_len) = be_u8(input)?;
+        let (input, ln_len) = be_u8(input)?;
+        let (input, fun_len) = be_u8(input)?;
+        let (input, arg_len) = be_u8(input)?;
+        // The four parts describe one 128-bit SID (RFC 9352 §9 /
+        // RFC 8986 §3.1); a sum over 128 bits is malformed — reject so
+        // the registry degrades it to Unknown rather than handing
+        // consumers an impossible layout.
+        if lb_len as usize + ln_len as usize + fun_len as usize + arg_len as usize > 128 {
+            return Err(nom::Err::Error(nom::error::make_error(
+                input,
+                nom::error::ErrorKind::Verify,
+            )));
+        }
+        Ok((
+            input,
+            Self {
+                lb_len,
+                ln_len,
+                fun_len,
+                arg_len,
+            },
+        ))
+    }
 }
 
 impl TlvEmitter for IsisSub2SidStructure {
@@ -1376,6 +1422,82 @@ mod tests {
         assert!(rest.is_empty());
         assert_eq!(tlv.entries.len(), 1);
         assert_eq!(tlv.entries[0].prefix, "2001:db8::/64".parse().unwrap());
+    }
+
+    /// Follow-up #1: RFC 8667 §2.1.1.1 — the V/L flags are
+    /// authoritative for the SID form. A flag/width mismatch or an
+    /// invalid combination is rejected (degrading to Unknown) instead
+    /// of silently reinterpreted.
+    #[test]
+    fn prefix_sid_width_follows_v_l_flags() {
+        // V=L=1 (0x0C) + 3-octet label 16001.
+        let raw = [3u8, 5, 0x0C, 0, 0x00, 0x3E, 0x81];
+        let (rest, sub) = IsisSubTlv::parse_subs(&raw).expect("label parse");
+        assert!(rest.is_empty());
+        let IsisSubTlv::PrefixSid(p) = &sub else {
+            panic!("expected PrefixSid, got {sub:?}");
+        };
+        assert_eq!(p.sid, SidLabelValue::Label(16001));
+
+        // V=L=0 (here with N=0x40) + 4-octet index.
+        let raw = [3u8, 6, 0x40, 0, 0, 0, 0, 100];
+        let (rest, sub) = IsisSubTlv::parse_subs(&raw).expect("index parse");
+        assert!(rest.is_empty());
+        let IsisSubTlv::PrefixSid(p) = &sub else {
+            panic!("expected PrefixSid, got {sub:?}");
+        };
+        assert_eq!(p.sid, SidLabelValue::Index(100));
+
+        // Flag/width mismatch: V=L=1 claiming a label but carrying 4
+        // SID octets → Unknown; the following sub-TLV still parses.
+        let raw = [3u8, 6, 0x0C, 0, 0, 0, 0, 100, 11, 4, 10, 0, 0, 1];
+        let (rest, first) = IsisSubTlv::parse_subs(&raw).expect("first");
+        assert!(matches!(first, IsisSubTlv::Unknown(_)));
+        let (rest, second) = IsisSubTlv::parse_subs(rest).expect("second");
+        assert!(matches!(second, IsisSubTlv::Ipv4SourceRouterId(_)));
+        assert!(rest.is_empty());
+
+        // Invalid combination V=1/L=0 (0x08) → Unknown.
+        let raw = [3u8, 5, 0x08, 0, 0x00, 0x3E, 0x81];
+        let (_, sub) = IsisSubTlv::parse_subs(&raw).expect("parse");
+        assert!(matches!(sub, IsisSubTlv::Unknown(_)));
+    }
+
+    /// Emit derives V/L from the SID variant, so a hand-built entry
+    /// with blank flags still round-trips.
+    #[test]
+    fn prefix_sid_emit_derives_v_l_flags() {
+        let sid = IsisSubPrefixSid {
+            flags: 0.into(),
+            algo: Algo::Spf,
+            sid: SidLabelValue::Label(16001),
+        };
+        let mut buf = BytesMut::new();
+        IsisSubTlv::PrefixSid(sid).emit(&mut buf);
+        // V|L = 0x0C set in the emitted flags byte.
+        assert_eq!(buf[2] & 0x0C, 0x0C);
+        let (rest, parsed) = IsisSubTlv::parse_subs(&buf).expect("re-parse");
+        assert!(rest.is_empty());
+        let IsisSubTlv::PrefixSid(p) = parsed else {
+            panic!("expected PrefixSid");
+        };
+        assert_eq!(p.sid, SidLabelValue::Label(16001));
+    }
+
+    /// Follow-up #3: the SID Structure's four parts must fit one
+    /// 128-bit SID; an over-128 claim degrades to Unknown.
+    #[test]
+    fn sid_structure_over_128_bits_degrades_to_unknown() {
+        // Valid: 32+16+16+0 = 64 bits.
+        let raw = [1u8, 4, 32, 16, 16, 0];
+        let (rest, sub2) = IsisSub2Tlv::parse_subs(&raw).expect("parse");
+        assert!(rest.is_empty());
+        assert!(matches!(sub2, IsisSub2Tlv::SidStructure(_)));
+
+        // Malformed: 64+64+8+0 = 136 bits.
+        let raw = [1u8, 4, 64, 64, 8, 0];
+        let (_, sub2) = IsisSub2Tlv::parse_subs(&raw).expect("parse");
+        assert!(matches!(sub2, IsisSub2Tlv::Unknown(_)));
     }
 
     /// Finding #11: the receiver keys the sub-TLV block on the S bit,
