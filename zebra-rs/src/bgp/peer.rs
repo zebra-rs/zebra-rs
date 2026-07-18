@@ -1798,7 +1798,17 @@ pub fn fsm(
 
     // Compute new state (single match, only &mut Peer).
     let (prev_state, effect) = {
-        let peer = peer_map.get_mut_by_idx(id).unwrap();
+        // Events carry a bare slot index and sit queued in the event
+        // channel: a config delete (`peers.remove`), interface-neighbor
+        // delete, or the dynamic-peer reaper can empty `peers[id]`
+        // before a queued event for it is dispatched. A tombstoned slot
+        // is therefore a normal race, not a bug — drop the event. (No
+        // path inside the FSM call graph removes slots, so this single
+        // entry guard covers the later lookups in this function.)
+        let Some(peer) = peer_map.get_mut_by_idx(id) else {
+            tracing::debug!(ident = id, "bgp: dropping FSM event for a removed peer");
+            return;
+        };
         let prev_state = peer.state;
         let (new_state, effect) = fsm_next_state(peer, event);
         peer.state = new_state;
@@ -4019,5 +4029,78 @@ mod fsm_idle_hold_tests {
         assert!(peer.packet_tx.is_none());
         assert!(peer.task.reader.is_none());
         assert!(peer.task.writer.is_none());
+    }
+}
+
+#[cfg(test)]
+mod fsm_removed_slot_tests {
+    use super::*;
+    use std::net::IpAddr;
+
+    /// A queued event whose peer slot was emptied in the meantime
+    /// (config delete of the neighbor, interface-neighbor delete, or
+    /// the dynamic-peer reaper) must be dropped by `fsm()`, not
+    /// dispatched into the tombstone — the old `unwrap` panicked and
+    /// took the whole daemon down with it.
+    #[tokio::test]
+    async fn event_on_removed_peer_slot_is_dropped() {
+        let (tx, rx) = mpsc::channel::<Message>(64);
+        Box::leak(Box::new(rx));
+        let addr: IpAddr = "10.0.0.2".parse().unwrap();
+        let peer = Peer::new(
+            1,
+            65001,
+            Ipv4Addr::new(10, 0, 0, 1),
+            65002,
+            addr,
+            None,
+            tx.clone(),
+            crate::context::ProtoContext::default_table_no_rib(),
+        );
+        let mut peers = PeerMap::new();
+        peers.insert(addr, peer);
+        let ident = peers.get(&addr).unwrap().ident;
+        peers.remove(&addr);
+
+        let router_id = Ipv4Addr::new(10, 0, 0, 1);
+        let ctx = crate::context::ProtoContext::default_table_no_rib();
+        let mut local_rib = LocalRib::default();
+        let mut shard = crate::bgp::shard::BgpShard::default();
+        let mut attr_store = BgpAttrStore::default();
+        let mut update_groups = crate::bgp::update_group::empty_map();
+        let interface_addrs = crate::bgp::interface_addrs::InterfaceAddrs::default();
+        let mut top = BgpTop {
+            router_id: &router_id,
+            srv6_ipv6_export: None,
+            local_rib: &mut local_rib,
+            shard: &mut shard,
+            tx: &tx,
+            rib_client: &ctx.rib,
+            attr_store: &mut attr_store,
+            update_groups: &mut update_groups,
+            interface_addrs: &interface_addrs,
+            vrf_export: None,
+            color_policy: None,
+            flex_algo_routes: None,
+            flex_algo_srv6_routes: None,
+            vrf_import: None,
+            nexthop_cache: None,
+            vrf_transport_v4: None,
+            vrf_transport_v6: None,
+            central_label_alloc: None,
+            as_sets_withdraw: false,
+        };
+
+        // Timer and teardown events are exactly what stays queued
+        // across a neighbor delete. Each must be a silent no-op.
+        fsm(
+            &mut top,
+            &mut peers,
+            ident,
+            Event::ConnRetryTimerExpires,
+            None,
+        );
+        fsm(&mut top, &mut peers, ident, Event::Stop, None);
+        assert!(peers.get_by_idx(ident).is_none());
     }
 }
