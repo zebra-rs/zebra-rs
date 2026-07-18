@@ -40,7 +40,7 @@ use crate::context::Timer;
 
 /// Bumped whenever a new field is added to `UpdateGroupSig`. Surfaced
 /// in `show bgp update-group` so a stale view is detectable.
-pub const SIGNATURE_VERSION: u32 = 5;
+pub const SIGNATURE_VERSION: u32 = 6;
 
 /// Address families the grouping logic considers — every family whose
 /// advertise pipeline consults `peer.update_group_id`. IPv6 unicast
@@ -154,6 +154,25 @@ pub struct UpdateGroupSig {
     pub addpath_send: bool,
     pub extended_next_hop: bool,
     pub multiple_labels: bool,
+    /// Per-peer `afi-safi ipv6 encapsulation-type`, stamped only for
+    /// the IPv6-unicast group (`None` elsewhere — sigs are compared
+    /// within one AFI/SAFI map, so the collapse is harmless). The v6
+    /// egress transform strips the SRv6 Prefix-SID for `srv6-relax`
+    /// members and suppresses SID-less routes for `srv6` (strict)
+    /// members, so peers with different modes must not share the
+    /// memoized canonical outcome: a plain CE handed an SRv6 PE's
+    /// canonical bytes would keep the provider service SID — the CE
+    /// then tracks an unresolvable provider locator and blackholes.
+    pub ipv6_encap_type: Option<super::peer::AfiSafiEncapType>,
+    /// Per-peer `afi-safi vpnv4 next-hop-self` / `next-hop-unchanged`,
+    /// stamped only for the `(Ip, MplsVpn)` group. They select the
+    /// egress NEXT_HOP of VPNv4 advertisements (via the per-peer
+    /// `sync_ctx`), so an Inter-AS Option-B ASBR with `next-hop-self`
+    /// toward one PE but not another must not let the two share
+    /// canonical bytes — one of them would be sent the wrong NEXT_HOP
+    /// and blackhole VPN traffic.
+    pub vpnv4_next_hop_self: bool,
+    pub vpnv4_next_hop_unchanged: bool,
     /// Bound egress (Adj-RIB-Out) Lua script identity for this family, or
     /// `None`. A bound egress script is an arbitrary black-box attribute
     /// transform, so it cannot ride the canonical-member "encode once,
@@ -401,6 +420,20 @@ pub fn signature_of(peer: &Peer, afi: Afi, safi: Safi) -> Option<UpdateGroupSig>
         // RFC 8277 multiple-labels is still not negotiated by zebra-rs;
         // the field is forward-compatible for the day it lands.
         multiple_labels: false,
+        // Family-gated per-peer egress knobs — see the field docs. Only
+        // the family they transform stamps the real value, so a knob
+        // difference cannot shard an unrelated family's group.
+        ipv6_encap_type: if afi == Afi::Ip6 && safi == Safi::Unicast {
+            peer.ipv6_srv6_encap()
+        } else {
+            None
+        },
+        vpnv4_next_hop_self: afi == Afi::Ip
+            && safi == Safi::MplsVpn
+            && peer.next_hop_self(Afi::Ip, Safi::MplsVpn),
+        vpnv4_next_hop_unchanged: afi == Afi::Ip
+            && safi == Safi::MplsVpn
+            && peer.next_hop_unchanged(Afi::Ip, Safi::MplsVpn),
         egress_script: egress_script_key(peer, afi, safi),
         // The egress attach knob (debug/test) stamps an extra attribute
         // onto every advertised route, so peers with different attach
@@ -1405,6 +1438,9 @@ mod tests {
             addpath_send: false,
             extended_next_hop: false,
             multiple_labels: false,
+            ipv6_encap_type: None,
+            vpnv4_next_hop_self: false,
+            vpnv4_next_hop_unchanged: false,
             egress_script: None,
             attach_unknown_attr: None,
             signature_version: SIGNATURE_VERSION,
@@ -1444,6 +1480,81 @@ mod tests {
 
         // Binding vs unbound also differ.
         assert_ne!(a, p1, "binding an egress script changes the sig");
+    }
+
+    /// Established-ish peer with `(Ip6, Unicast)` and `(Ip, MplsVpn)`
+    /// negotiated, for driving `signature_of` end-to-end.
+    fn sig_peer(addr: &str) -> super::super::peer::Peer {
+        use bgp_packet::CapMultiProtocol;
+        let (tx, rx) = tokio::sync::mpsc::channel(8);
+        Box::leak(Box::new(rx));
+        let mut peer = super::super::peer::Peer::new(
+            0,
+            65001,
+            std::net::Ipv4Addr::new(10, 0, 0, 9),
+            65002,
+            addr.parse().unwrap(),
+            None,
+            tx,
+            crate::context::ProtoContext::default_table_no_rib(),
+        );
+        for (afi, safi) in [(Afi::Ip6, Safi::Unicast), (Afi::Ip, Safi::MplsVpn)] {
+            let key = CapMultiProtocol::new(&afi, &safi);
+            let entry = peer.cap_map.entries.get_mut(&key).expect("pre-seeded");
+            entry.send = true;
+            entry.recv = true;
+        }
+        peer
+    }
+
+    /// Review findings #7/#8 regression, at the `signature_of` level:
+    /// the per-peer egress knobs must shard exactly the family they
+    /// transform. Pre-fix, two peers differing only in
+    /// `afi-safi ipv6 encapsulation-type` (or vpnv4 next-hop-self /
+    /// next-hop-unchanged) produced IDENTICAL signatures, so they
+    /// shared one update-group and the first-iterated member's
+    /// memoized canonical bytes leaked to the other.
+    #[test]
+    fn egress_knobs_shard_only_their_family() {
+        use super::super::peer::AfiSafiEncapType;
+
+        let plain = sig_peer("10.0.0.1");
+        let mut srv6 = sig_peer("10.0.0.2");
+        srv6.config
+            .sub
+            .entry(AfiSafi::new(Afi::Ip6, Safi::Unicast))
+            .or_default()
+            .encapsulation_type = Some(AfiSafiEncapType::Srv6);
+
+        let a = signature_of(&plain, Afi::Ip6, Safi::Unicast).unwrap();
+        let b = signature_of(&srv6, Afi::Ip6, Safi::Unicast).unwrap();
+        assert_ne!(a, b, "encap-type must shard the ipv6-unicast group");
+        let a = signature_of(&plain, Afi::Ip, Safi::MplsVpn).unwrap();
+        let b = signature_of(&srv6, Afi::Ip, Safi::MplsVpn).unwrap();
+        assert_eq!(a, b, "an ipv6 knob must not shard the vpnv4 group");
+
+        let mut nhs = sig_peer("10.0.0.3");
+        nhs.config
+            .sub
+            .entry(AfiSafi::new(Afi::Ip, Safi::MplsVpn))
+            .or_default()
+            .next_hop_self = true;
+        let a = signature_of(&plain, Afi::Ip, Safi::MplsVpn).unwrap();
+        let b = signature_of(&nhs, Afi::Ip, Safi::MplsVpn).unwrap();
+        assert_ne!(a, b, "vpnv4 next-hop-self must shard the vpnv4 group");
+        let a = signature_of(&plain, Afi::Ip6, Safi::Unicast).unwrap();
+        let b = signature_of(&nhs, Afi::Ip6, Safi::Unicast).unwrap();
+        assert_eq!(a, b, "a vpnv4 knob must not shard the ipv6 group");
+
+        let mut nhu = sig_peer("10.0.0.4");
+        nhu.config
+            .sub
+            .entry(AfiSafi::new(Afi::Ip, Safi::MplsVpn))
+            .or_default()
+            .next_hop_unchanged = true;
+        let a = signature_of(&nhs, Afi::Ip, Safi::MplsVpn).unwrap();
+        let b = signature_of(&nhu, Afi::Ip, Safi::MplsVpn).unwrap();
+        assert_ne!(a, b, "next-hop-self and next-hop-unchanged differ");
     }
 
     /// Two structurally identical signatures must hash and compare equal.
@@ -1543,6 +1654,23 @@ mod tests {
 
         let mut a = base.clone();
         a.multiple_labels = true;
+        assert_ne!(base, a);
+
+        // The two per-peer egress knobs of review findings #7/#8: each
+        // must shard the group for its family.
+        let mut a = base.clone();
+        a.ipv6_encap_type = Some(super::super::peer::AfiSafiEncapType::Srv6);
+        assert_ne!(base, a);
+        let mut b = a.clone();
+        b.ipv6_encap_type = Some(super::super::peer::AfiSafiEncapType::Srv6Relax);
+        assert_ne!(a, b, "strict and relax encode differently");
+
+        let mut a = base.clone();
+        a.vpnv4_next_hop_self = true;
+        assert_ne!(base, a);
+
+        let mut a = base.clone();
+        a.vpnv4_next_hop_unchanged = true;
         assert_ne!(base, a);
 
         // The egress attach knob (debug/test) appends an attribute to the
