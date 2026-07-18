@@ -6,6 +6,37 @@ pub struct IsisCodeLen {
     pub len: u8,
 }
 
+/// Implements the shared sub-TLV registry walk for a `#[nom(Selector)]`
+/// enum with an `Unknown(IsisSubTlvUnknown)` variant: read {code, len},
+/// slice the value, dispatch on the code, and degrade a malformed
+/// *known* sub-TLV to Unknown with its bytes preserved — mirroring the
+/// top-level TLV loop — so the sub-TLVs after it still parse. One
+/// definition instead of six hand-kept copies; a new registry gets the
+/// degrade and the Unknown code/len patch for free.
+macro_rules! impl_parse_subs {
+    ($($ty:ty),+ $(,)?) => {$(
+        impl $ty {
+            pub fn parse_subs(input: &[u8]) -> nom::IResult<&[u8], Self> {
+                let (input, cl) = crate::sub::IsisCodeLen::parse_be(input)?;
+                let (input, sub) = packet_utils::safe_split_at(input, cl.len as usize)?;
+                let mut val = match Self::parse_be(sub, cl.code.into()) {
+                    Ok((_, val)) => val,
+                    Err(_) => Self::Unknown(crate::sub::IsisSubTlvUnknown {
+                        code: cl.code,
+                        len: cl.len,
+                        data: sub.to_vec(),
+                    }),
+                };
+                if let Self::Unknown(ref mut v) = val {
+                    v.code = cl.code;
+                    v.len = cl.len;
+                }
+                Ok((input, val))
+            }
+        }
+    )+};
+}
+
 pub mod cap;
 pub use cap::{
     ExtAdminGroup, FadSubCode, FadSubTlv, IsisSubFadExcludeAg, IsisSubFadExcludeSrlg,

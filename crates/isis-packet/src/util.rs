@@ -1,6 +1,26 @@
 use bytes::{BufMut, BytesMut};
+use nom::{IResult, Parser};
+use packet_utils::{many0_complete, safe_split_at};
 
 pub use packet_utils::{ParseBe, TlvEmitter, u32_u8_3, write_hold_time};
+
+/// Parse a length-prefixed sub-TLV block: read the one-octet block
+/// length, slice exactly that many bytes, and run `parse_one` to
+/// exhaustion inside the slice. This is the shared shape behind every
+/// reach-entry and SRv6-SID sub-TLV block (previously re-implemented
+/// verbatim at eight sites).
+pub fn parse_sub_block<T>(
+    input: &[u8],
+    parse_one: impl Fn(&[u8]) -> IResult<&[u8], T>,
+) -> IResult<&[u8], Vec<T>> {
+    let (input, sublen) = nom::number::complete::be_u8(input)?;
+    if sublen == 0 {
+        return Ok((input, Vec::new()));
+    }
+    let (input, sub) = safe_split_at(input, sublen as usize)?;
+    let (_, subs) = many0_complete(parse_one).parse(sub)?;
+    Ok((input, subs))
+}
 
 /// Emit sub-TLVs with a back-patched length byte.
 ///
