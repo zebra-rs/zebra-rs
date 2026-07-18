@@ -5,6 +5,7 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
+use super::assert_fsm::AssertRole;
 use super::tib::{DsState, SgKey, TibEntry};
 
 /// `immediate_olist(key)`: interfaces with local (IGMP) membership
@@ -44,18 +45,45 @@ pub fn inherited_olist(tib: &BTreeMap<SgKey, TibEntry>, key: SgKey) -> BTreeSet<
     olist
 }
 
-/// `JoinDesired(key)` — someone wants the traffic on this tree.
-/// Whether a Join can actually be *sent* additionally requires an
-/// upstream PIM neighbor (and, for (*,G), a known RP) — those gates
-/// live in the upstream FSM, not here.
-pub fn join_desired(tib: &BTreeMap<SgKey, TibEntry>, key: SgKey) -> bool {
-    !immediate_olist(tib, key).is_empty()
+/// Interfaces where this entry lost an assert election — excluded
+/// from forwarding and from JoinDesired while the winner is alive
+/// (RFC 7761 `lost_assert(S,G,I)`).
+pub fn assert_losers(tib: &BTreeMap<SgKey, TibEntry>, key: SgKey) -> BTreeSet<u32> {
+    let Some(entry) = tib.get(&key) else {
+        return BTreeSet::new();
+    };
+    entry
+        .asserts
+        .iter()
+        .filter(|(_, a)| matches!(a.role, AssertRole::Loser { .. }))
+        .map(|(ifindex, _)| *ifindex)
+        .collect()
 }
 
-/// The (S,G) MFC outgoing set: the inherited olist minus the
-/// incoming interface (loop-free guard — never emit OIF == IIF).
+/// The inherited olist minus assert-lost interfaces — what actually
+/// counts for JoinDesired's traffic-driven clause and the MFC.
+pub fn inherited_effective(tib: &BTreeMap<SgKey, TibEntry>, key: SgKey) -> BTreeSet<u32> {
+    let mut olist = inherited_olist(tib, key);
+    for ifindex in assert_losers(tib, key) {
+        olist.remove(&ifindex);
+    }
+    olist
+}
+
+/// `JoinDesired` restricted to interfaces we would actually forward
+/// to (immediate olist minus assert losses).
+pub fn join_desired_effective(tib: &BTreeMap<SgKey, TibEntry>, key: SgKey) -> bool {
+    let mut olist = immediate_olist(tib, key);
+    for ifindex in assert_losers(tib, key) {
+        olist.remove(&ifindex);
+    }
+    !olist.is_empty()
+}
+
+/// The (S,G) MFC outgoing set: the effective inherited olist minus
+/// the incoming interface (loop-free guard — never emit OIF == IIF).
 pub fn mfc_oifs(tib: &BTreeMap<SgKey, TibEntry>, key: SgKey) -> BTreeSet<u32> {
-    let mut oifs = inherited_olist(tib, key);
+    let mut oifs = inherited_effective(tib, key);
     if let Some(iif) = tib.get(&key).and_then(|e| e.rpf.ifindex()) {
         oifs.remove(&iif);
     }
@@ -109,8 +137,8 @@ mod tests {
             immediate_olist(&tib, sg()).into_iter().collect::<Vec<_>>(),
             vec![3, 5]
         );
-        assert!(join_desired(&tib, sg()));
-        assert!(!join_desired(&tib, star()));
+        assert!(join_desired_effective(&tib, sg()));
+        assert!(!join_desired_effective(&tib, star()));
     }
 
     #[test]
@@ -127,7 +155,7 @@ mod tests {
             },
         );
         tib.insert(sg(), e);
-        assert!(join_desired(&tib, sg()));
+        assert!(join_desired_effective(&tib, sg()));
     }
 
     #[test]
@@ -151,6 +179,64 @@ mod tests {
         assert!(inherited.contains(&5));
         assert!(inherited.contains(&6));
         assert!(!inherited.contains(&7));
+    }
+
+    #[test]
+    fn lost_assert_excluded_from_forwarding_and_jd() {
+        use crate::pim::assert_fsm::{AssertMetric, AssertRole, AssertState};
+        let mut tib = BTreeMap::new();
+        let mut e = TibEntry::new();
+        e.local.insert(5);
+        e.asserts.insert(
+            5,
+            AssertState {
+                role: AssertRole::Loser {
+                    winner: Ipv4Addr::new(10, 0, 2, 3),
+                },
+                winner_metric: AssertMetric {
+                    rpt_bit: false,
+                    pref: 0,
+                    metric: 0,
+                    addr: Ipv4Addr::new(10, 0, 2, 3),
+                },
+                expires: Instant::now() + Duration::from_secs(180),
+            },
+        );
+        tib.insert(sg(), e);
+        // Membership remains visible raw, but neither forwarding nor
+        // JoinDesired count the lost interface.
+        assert!(immediate_olist(&tib, sg()).contains(&5));
+        assert!(!inherited_effective(&tib, sg()).contains(&5));
+        assert!(!join_desired_effective(&tib, sg()));
+        assert!(!mfc_oifs(&tib, sg()).contains(&5));
+    }
+
+    #[test]
+    fn assert_metric_ordering() {
+        use crate::pim::assert_fsm::AssertMetric;
+        let base = AssertMetric {
+            rpt_bit: false,
+            pref: 100,
+            metric: 10,
+            addr: Ipv4Addr::new(10, 0, 2, 2),
+        };
+        // Lower preference wins.
+        let better_pref = AssertMetric { pref: 0, ..base };
+        assert!(better_pref.better_than(&base));
+        // Equal metrics: higher address wins.
+        let higher_addr = AssertMetric {
+            addr: Ipv4Addr::new(10, 0, 2, 3),
+            ..base
+        };
+        assert!(higher_addr.better_than(&base));
+        assert!(!base.better_than(&higher_addr));
+        // rpt loses to spt.
+        let rpt = AssertMetric {
+            rpt_bit: true,
+            pref: 0,
+            ..base
+        };
+        assert!(base.better_than(&rpt));
     }
 
     #[test]

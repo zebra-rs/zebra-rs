@@ -279,6 +279,7 @@ impl Pim {
             PimPayload::JoinPrune(jp) => self.jp_recv(ifindex, src, jp),
             PimPayload::Register(register) => self.register_recv(src, register),
             PimPayload::RegisterStop(stop) => self.register_stop_recv(stop),
+            PimPayload::Assert(assert) => self.assert_recv(ifindex, src, assert),
             other => {
                 // Assert / Bootstrap handling arrives with later
                 // phases.

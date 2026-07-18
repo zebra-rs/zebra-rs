@@ -1,6 +1,7 @@
 //! PIM-SM (RFC 7761). Phase 2: instance skeleton — Hello, neighbors,
 //! DR election. Architecture: docs/design/pim-sm-ssm-architecture.md.
 
+pub mod assert_fsm;
 pub mod config;
 pub mod igmp;
 pub mod inst;

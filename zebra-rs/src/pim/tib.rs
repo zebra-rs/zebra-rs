@@ -18,8 +18,9 @@ use std::fmt;
 use std::net::Ipv4Addr;
 use std::time::{Duration, Instant};
 
+use super::assert_fsm::AssertState;
 use super::inst::Pim;
-use super::macros::{inherited_olist, join_desired, mfc_oifs};
+use super::macros::{inherited_effective, inherited_olist, join_desired_effective, mfc_oifs};
 use super::mroute::{REG_VIF, Upcall, UpcallKind};
 use super::rpf::RpfState;
 
@@ -122,6 +123,8 @@ pub struct TibEntry {
     /// Downstream per-interface state, keyed by ifindex. On SgRpt
     /// entries presence means "rpt-pruned on this interface".
     pub downstream: BTreeMap<u32, Downstream>,
+    /// Assert election state per contested interface (Sg entries).
+    pub asserts: BTreeMap<u32, AssertState>,
     /// Kernel MFC shadow — `Some` while installed (Sg entries only).
     pub installed: Option<InstalledMfc>,
     /// Keepalive deadline for traffic-created state (NOCACHE at any
@@ -143,6 +146,7 @@ impl TibEntry {
             rpf_target: None,
             local: BTreeSet::new(),
             downstream: BTreeMap::new(),
+            asserts: BTreeMap::new(),
             installed: None,
             stream_expires: None,
             reg_state: RegState::NoInfo,
@@ -280,16 +284,25 @@ impl Pim {
                 self.tib_update(key);
             }
             UpcallKind::WrongVif | UpcallKind::WrVifWhole => {
-                // Data on a non-IIF interface. Full assert machinery
-                // is a later phase; here it serves as the SPT-bit
-                // signal at routers that joined the source tree: the
-                // shared-tree copy still arriving proves the SPT is
-                // live, so the (S,G,rpt) prune can go out.
+                // Data on a non-IIF interface. On an interface we
+                // forward to, another forwarder exists on that LAN —
+                // run the assert election. Anywhere else it is the
+                // SPT-bit signal: the shared-tree copy still arriving
+                // proves the source tree is live, so the (S,G,rpt)
+                // prune can go out.
                 let key = SgKey::Sg {
                     src: upcall.src,
                     grp: upcall.grp,
                 };
-                self.spt_bit_set(key);
+                let arrival = self.fp.ifindex_of(upcall.vif);
+                let contested = arrival
+                    .map(|ifindex| mfc_oifs(&self.tib, key).contains(&ifindex))
+                    .unwrap_or(false);
+                if contested {
+                    self.assert_data_trigger(key, arrival.unwrap());
+                } else {
+                    self.spt_bit_set(key);
+                }
             }
             UpcallKind::WholePkt => {
                 self.register_wholepkt(upcall);
@@ -406,6 +419,7 @@ impl Pim {
             if let Some(entry) = self.tib.get_mut(&key) {
                 let touched = entry.local.remove(&ifindex)
                     | entry.downstream.remove(&ifindex).is_some()
+                    | entry.asserts.remove(&ifindex).is_some()
                     | (entry.rpf.ifindex() == Some(ifindex));
                 if touched {
                     self.tib_update(key);
@@ -462,11 +476,19 @@ impl Pim {
         //          non-empty inherited olist (the RP / LHR SPT-join
         //          clause).
         // Sending additionally requires a live PIM gateway neighbor.
+        // Interfaces that fell out of the raw olist no longer host a
+        // contest (CouldAssert false) — drop their assert state.
+        {
+            let raw = inherited_olist(&self.tib, key);
+            let entry = self.tib.get_mut(&key).unwrap();
+            entry.asserts.retain(|ifindex, _| raw.contains(ifindex));
+        }
+
         let jd = match key {
-            SgKey::StarG { grp } => join_desired(&self.tib, key) && !self.i_am_rp(grp),
+            SgKey::StarG { grp } => join_desired_effective(&self.tib, key) && !self.i_am_rp(grp),
             SgKey::Sg { .. } => {
-                join_desired(&self.tib, key)
-                    || (stream_alive && !inherited_olist(&self.tib, key).is_empty())
+                join_desired_effective(&self.tib, key)
+                    || (stream_alive && !inherited_effective(&self.tib, key).is_empty())
             }
             SgKey::SgRpt { .. } => false,
         };
@@ -606,6 +628,9 @@ impl Pim {
                     consider(until);
                 }
             }
+            for a in entry.asserts.values() {
+                consider(a.expires);
+            }
         }
         for t in self.jp_refresh.values() {
             consider(*t);
@@ -637,6 +662,7 @@ impl Pim {
         for key in touched {
             self.tib_update(key);
         }
+        self.assert_tick(now);
         self.register_tick(now);
         self.jp_tick(now);
     }

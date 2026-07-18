@@ -9,6 +9,7 @@ use std::time::Instant;
 
 use crate::config::{Args, Builder};
 
+use super::assert_fsm::AssertRole;
 use super::igmp::{FilterMode, QuerierState};
 use super::inst::{Pim, ShowCallback};
 use super::macros::mfc_oifs;
@@ -32,6 +33,8 @@ impl Pim {
             .set(show_pim_upstream)
             .path("/show/pim/rp-info")
             .set(show_pim_rp_info)
+            .path("/show/pim/assert")
+            .set(show_pim_assert)
             .path("/show/mroute")
             .set(show_mroute)
             .map();
@@ -348,6 +351,52 @@ fn show_pim_upstream(pim: &Pim, _args: Args, json: bool) -> Result<String, std::
             buf,
             "{:<35}{:<13}{:<17}{:<11}{:<11}{}",
             row.sg, row.iif, row.rpf_neighbor, row.state, row.reg, row.uptime,
+        )?;
+    }
+    Ok(buf)
+}
+
+#[derive(Serialize)]
+struct AssertBrief {
+    entry: String,
+    interface: String,
+    role: String,
+    winner: String,
+    expires: u64,
+}
+
+fn show_pim_assert(pim: &Pim, _args: Args, json: bool) -> Result<String, std::fmt::Error> {
+    let now = Instant::now();
+    let mut rows: Vec<AssertBrief> = vec![];
+    for (key, entry) in pim.tib.iter() {
+        for (ifindex, assert) in entry.asserts.iter() {
+            let (role, winner) = match assert.role {
+                AssertRole::Winner => ("Winner".to_string(), assert.winner_metric.addr.to_string()),
+                AssertRole::Loser { winner } => ("Loser".to_string(), winner.to_string()),
+            };
+            rows.push(AssertBrief {
+                entry: key.to_string(),
+                interface: pim.ifname(*ifindex),
+                role,
+                winner,
+                expires: assert.expires.saturating_duration_since(now).as_secs(),
+            });
+        }
+    }
+
+    if json {
+        return Ok(serde_json::to_string(&rows).unwrap());
+    }
+
+    let mut buf = String::new();
+    buf.push_str(
+        "Entry                              Interface    Role     Winner           Expires\n",
+    );
+    for row in &rows {
+        writeln!(
+            buf,
+            "{:<35}{:<13}{:<9}{:<17}{}",
+            row.entry, row.interface, row.role, row.winner, row.expires,
         )?;
     }
     Ok(buf)
