@@ -23,9 +23,10 @@
 use std::collections::BTreeMap;
 
 use bgp_packet::{
-    BGPLS_ATTR_ADMIN_GROUP, BGPLS_ATTR_IGP_METRIC, BGPLS_ATTR_PREFIX_METRIC,
-    BGPLS_ATTR_TE_DEFAULT_METRIC, BgpLsAttr, BgpLsNlri, LsLinkDescriptor, LsLinkNlri,
-    LsNodeDescSub, LsNodeDescriptor, LsNodeNlri, LsPrefixDescriptor, LsPrefixNlri, LsProtocolId,
+    BGPLS_ATTR_ADMIN_GROUP, BGPLS_ATTR_EXT_ADMIN_GROUP, BGPLS_ATTR_IGP_METRIC,
+    BGPLS_ATTR_PREFIX_METRIC, BGPLS_ATTR_TE_DEFAULT_METRIC, BgpLsAttr, BgpLsNlri, LsLinkDescriptor,
+    LsLinkNlri, LsNodeDescSub, LsNodeDescriptor, LsNodeNlri, LsPrefixDescriptor, LsPrefixNlri,
+    LsProtocolId,
 };
 use ipnet::IpNet;
 use isis_packet::{IsisLsp, IsisSysId, IsisTlv, IsisTlvExtIsReachEntry};
@@ -67,10 +68,10 @@ type Object = (BgpLsNlri, BgpLsAttr);
 
 /// Build the Link Attribute TLVs (RFC 9552 §4.2) for one IS-IS adjacency:
 /// IGP metric (1095, the base TLV-22 metric), and — when the entry carries
-/// the corresponding sub-TLVs — admin-group (1088) and TE default metric
-/// (1092). Max-link-bandwidth (1089) is omitted: the IS-IS link sub-TLV set
-/// parsed here has no max-bandwidth variant (only residual/available/
-/// utilized), so there is nothing to translate yet.
+/// the corresponding sub-TLVs — admin-group (1088), extended admin-group
+/// (1173), and TE default metric (1092). Max-link-bandwidth (1089) is omitted:
+/// the IS-IS link sub-TLV set parsed here has no max-bandwidth variant (only
+/// residual/available/utilized), so there is nothing to translate yet.
 fn link_attr(e: &IsisTlvExtIsReachEntry) -> BgpLsAttr {
     let mut attr = BgpLsAttr::new();
     // IGP metric is a 3-octet value in BGP-LS (RFC 9552 §4.2; 1, 2, or 3
@@ -78,6 +79,10 @@ fn link_attr(e: &IsisTlvExtIsReachEntry) -> BgpLsAttr {
     attr.push(BGPLS_ATTR_IGP_METRIC, e.metric.to_be_bytes()[1..].to_vec());
     if let Some(ag) = e.admin_group() {
         attr.push(BGPLS_ATTR_ADMIN_GROUP, ag.to_be_bytes().to_vec());
+    }
+    if let Some(ag) = e.ext_admin_group() {
+        let value = ag.iter().flat_map(|word| word.to_be_bytes()).collect();
+        attr.push(BGPLS_ATTR_EXT_ADMIN_GROUP, value);
     }
     if let Some(te) = e.te_metric() {
         attr.push(BGPLS_ATTR_TE_DEFAULT_METRIC, te.to_be_bytes().to_vec());
@@ -378,8 +383,8 @@ mod tests {
         assert!(advertised.is_empty());
     }
     use isis_packet::{
-        IsisLspId, IsisNeighborId, IsisTlvExtIpReach, IsisTlvExtIpReachEntry, IsisTlvExtIsReach,
-        IsisTlvExtIsReachEntry,
+        IsisLspId, IsisNeighborId, IsisSubAdminGrp, IsisTlvExtIpReach, IsisTlvExtIpReachEntry,
+        IsisTlvExtIsReach, IsisTlvExtIsReachEntry,
     };
 
     fn sysid(last: u8) -> IsisSysId {
@@ -449,6 +454,27 @@ mod tests {
             link.remote_node.subs,
             vec![LsNodeDescSub::IgpRouterId(vec![0, 0, 0, 0, 0, 2])]
         );
+    }
+
+    #[test]
+    fn link_attr_maps_extended_admin_group_to_1173() {
+        let entry = IsisTlvExtIsReachEntry {
+            neighbor_id: IsisNeighborId::from_sys_id(&sysid(2), 0),
+            metric: 10,
+            subs: vec![
+                IsisSubAdminGrp {
+                    groups: vec![0x0102_0304, 0xaabb_ccdd],
+                }
+                .into(),
+            ],
+        };
+
+        let attr = link_attr(&entry);
+        assert_eq!(
+            attr.get(BGPLS_ATTR_EXT_ADMIN_GROUP),
+            Some(&[0x01, 0x02, 0x03, 0x04, 0xaa, 0xbb, 0xcc, 0xdd][..])
+        );
+        assert_eq!(attr.get(BGPLS_ATTR_ADMIN_GROUP), None);
     }
 
     #[test]

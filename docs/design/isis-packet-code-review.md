@@ -505,10 +505,10 @@ backlog, ordered by risk and value.
    length-prefixed sub-block parses. A seventh registry now gets the degrade
    machinery for free. Behavior pinned by the existing degrade/round-trip
    tests, which were written against the hand-rolled copies.
-6. **BGP-LS Extended Admin Group (TLV 1173) producer** — enabled by #13:
-   `ext_admin_group()` exists, but there is no `BGPLS_ATTR_EXT_ADMIN_GROUP`
-   constant, so links advertising only the RFC 7308 group export no color at
-   all (the old, wrong 1088 mapping was removed deliberately).
+6. ~~**BGP-LS Extended Admin Group (TLV 1173) producer**~~ — **done**:
+   `BGPLS_ATTR_EXT_ADMIN_GROUP` is defined by `bgp-packet`, and the IS-IS
+   producer serializes every RFC 7308 group word in network byte order while
+   keeping it distinct from the classic Administrative Group TLV 1088.
 7. **Small-cleanup sweep (one PR)** — the duplicated ~55-line padding function
    (`IsisHello`/`IsisP2pHello`), the three identical RFC 8570 bandwidth
    wrappers, and the seven dead `is_empty()` methods.
