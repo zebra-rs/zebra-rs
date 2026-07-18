@@ -16,18 +16,39 @@ pub struct Out;
 // Trait to specify which ID field to use based on direction
 pub trait RibDirection {
     fn get_id(rib: &BgpRib) -> u32;
+
+    /// Whether a `remove(prefix, 0)` that finds no exact-id match falls
+    /// back to clearing every candidate for the prefix.
+    ///
+    /// `Out` needs it: a non-AddPath advertisement stores its
+    /// Adj-RIB-Out row under the Loc-RIB `local_id` (always ≥ 1) but is
+    /// withdrawn with the on-wire id 0, so the fallback is the only way
+    /// to reach it.
+    ///
+    /// `In` must NOT have it (review finding #11): the wire path-id is
+    /// parsed unvalidated, and a non-AddPath peer's row already carries
+    /// `remote_id == 0` (matched exactly), so the fallback is dead
+    /// weight in the honest case and a wildcard wipe in the hostile
+    /// one — an AddPath peer that announced ids 1 and 2 then sends a
+    /// withdraw with the never-announced id 0 would clear BOTH
+    /// candidates, desyncing the Adj-RIB-In from the Loc-RIB (which
+    /// matches `remote_id == id` exactly). Exact-match here keeps the
+    /// two in lockstep.
+    const ZERO_ID_WILDCARD: bool;
 }
 
 impl RibDirection for In {
     fn get_id(rib: &BgpRib) -> u32 {
         rib.remote_id
     }
+    const ZERO_ID_WILDCARD: bool = false;
 }
 
 impl RibDirection for Out {
     fn get_id(rib: &BgpRib) -> u32 {
         rib.local_id
     }
+    const ZERO_ID_WILDCARD: bool = true;
 }
 
 /// Per-AFI Adj-RIB table, generic over the prefix type `P` (defaults
@@ -74,7 +95,7 @@ impl<D: RibDirection, P: Ord> AdjRibTable<D, P> {
             }
 
             Some(removed_route)
-        } else if id == 0 {
+        } else if id == 0 && D::ZERO_ID_WILDCARD {
             self.0.remove(&prefix);
             None
         } else {
@@ -121,7 +142,7 @@ impl<D: RibDirection> AdjRibEvpnTable<D> {
             }
 
             Some(removed_route)
-        } else if id == 0 {
+        } else if id == 0 && D::ZERO_ID_WILDCARD {
             self.0.remove(prefix);
             None
         } else {
@@ -174,7 +195,7 @@ impl<D: RibDirection> AdjRibMupTable<D> {
             }
 
             Some(removed_route)
-        } else if id == 0 {
+        } else if id == 0 && D::ZERO_ID_WILDCARD {
             self.0.remove(prefix);
             None
         } else {
@@ -229,7 +250,7 @@ impl<D: RibDirection> AdjRibFlowspecTable<D> {
             }
 
             Some(removed_route)
-        } else if id == 0 {
+        } else if id == 0 && D::ZERO_ID_WILDCARD {
             self.0.remove(nlri);
             None
         } else {
@@ -282,7 +303,7 @@ impl<D: RibDirection> AdjRibBgpLsTable<D> {
             }
 
             Some(removed_route)
-        } else if id == 0 {
+        } else if id == 0 && D::ZERO_ID_WILDCARD {
             self.0.remove(nlri);
             None
         } else {
@@ -667,5 +688,99 @@ impl AdjRib<Out> {
             Afi::Ip6 => self.flowspec_v6.remove(nlri, id),
             _ => self.flowspec_v4.remove(nlri, id),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::bgp::route::{BgpRib, BgpRibType};
+    use std::net::Ipv4Addr;
+
+    /// AddPath-In candidate carrying `remote_id`.
+    fn in_rib(remote_id: u32) -> BgpRib {
+        BgpRib::new(
+            0,
+            Ipv4Addr::new(10, 0, 0, 1),
+            BgpRibType::EBGP,
+            remote_id,
+            0,
+            &bgp_packet::BgpAttr::default(),
+            None,
+            None,
+            false,
+        )
+    }
+
+    /// Adj-RIB-Out row carrying `local_id` (set on the row after
+    /// construction, as the advertise path does).
+    fn out_rib(local_id: u32) -> BgpRib {
+        let mut r = in_rib(0);
+        r.local_id = local_id;
+        r
+    }
+
+    fn prefix() -> Ipv4Net {
+        "10.9.0.0/24".parse().unwrap()
+    }
+
+    /// Review finding #11: an AddPath-In peer announced path-ids 1 and 2;
+    /// a withdraw with the never-announced id 0 (wire-legal, parsed
+    /// unvalidated) must remove NOTHING — not wildcard-wipe both
+    /// candidates, which would desync the Adj-RIB-In from the Loc-RIB.
+    #[test]
+    fn adj_in_pathid0_withdraw_does_not_wildcard_wipe() {
+        let mut t: AdjRibTable<In> = AdjRibTable::new();
+        t.add(prefix(), in_rib(1));
+        t.add(prefix(), in_rib(2));
+
+        assert!(t.remove(prefix(), 0).is_none(), "id 0 matches no candidate");
+        let remaining: Vec<u32> =
+            t.0.get(&prefix())
+                .unwrap()
+                .iter()
+                .map(|r| r.remote_id)
+                .collect();
+        assert_eq!(remaining, vec![1, 2], "both announced paths survive");
+    }
+
+    /// A non-AddPath-In peer's row carries `remote_id == 0`, so an id-0
+    /// withdraw still removes it by exact match — the honest case is
+    /// unaffected by dropping the wildcard.
+    #[test]
+    fn adj_in_non_addpath_withdraw_removes_exact() {
+        let mut t: AdjRibTable<In> = AdjRibTable::new();
+        t.add(prefix(), in_rib(0));
+        assert!(t.remove(prefix(), 0).is_some(), "the id-0 row is removed");
+        assert!(!t.0.contains_key(&prefix()), "prefix is now empty");
+    }
+
+    /// An exact AddPath-In withdraw still removes just its own path.
+    #[test]
+    fn adj_in_addpath_exact_withdraw_removes_one() {
+        let mut t: AdjRibTable<In> = AdjRibTable::new();
+        t.add(prefix(), in_rib(1));
+        t.add(prefix(), in_rib(2));
+        assert!(t.remove(prefix(), 1).is_some());
+        let remaining: Vec<u32> =
+            t.0.get(&prefix())
+                .unwrap()
+                .iter()
+                .map(|r| r.remote_id)
+                .collect();
+        assert_eq!(remaining, vec![2], "only path-id 1 left");
+    }
+
+    /// The Out direction keeps the id-0 wildcard: a non-AddPath
+    /// advertisement stores its row under the Loc-RIB `local_id` (≥ 1)
+    /// but is withdrawn with the on-wire id 0, so the fallback is the
+    /// only way to reach it. Regression guard so the finding-#11 change
+    /// didn't break the withdraw path it shares code with.
+    #[test]
+    fn adj_out_pathid0_withdraw_clears_the_row() {
+        let mut t: AdjRibTable<Out> = AdjRibTable::new();
+        t.add(prefix(), out_rib(5));
+        assert!(t.remove(prefix(), 0).is_none(), "no exact id-0 match…");
+        assert!(!t.0.contains_key(&prefix()), "…but the wildcard cleared it");
     }
 }
