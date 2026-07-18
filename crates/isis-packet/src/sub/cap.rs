@@ -274,6 +274,12 @@ impl IsisTlvRouterCap {
     fn sub_len(&self) -> usize {
         self.subs.iter().map(|sub| sub.len() as usize + 2).sum()
     }
+
+    /// True value length in bytes, unsaturated (the u8 `len()`
+    /// saturates at 255) — used by `IsisTlv::wire_len`.
+    pub fn value_wire_len(&self) -> usize {
+        5 + self.sub_len()
+    }
 }
 
 impl TlvEmitter for IsisTlvRouterCap {

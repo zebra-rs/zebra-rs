@@ -541,6 +541,15 @@ impl ParseBe<IsisTlvExtIpReach> for IsisTlvExtIpReach {
     }
 }
 
+impl IsisTlvExtIpReach {
+    /// True value length in bytes, unsaturated. The u8 `len()`
+    /// saturates at 255 by design; this is the packer's source of
+    /// truth for probing a not-yet-split TLV without serializing it.
+    pub fn value_wire_len(&self) -> usize {
+        self.entries.iter().map(|e| e.len() as usize).sum()
+    }
+}
+
 impl TlvEmitter for IsisTlvExtIpReach {
     fn typ(&self) -> u8 {
         IsisTlvType::ExtIpReach.into()
@@ -588,6 +597,13 @@ impl ParseBe<IsisTlvMtIpReach> for IsisTlvMtIpReach {
                 entries,
             },
         ))
+    }
+}
+
+impl IsisTlvMtIpReach {
+    /// See `IsisTlvExtIpReach::value_wire_len` — plus the 2-byte MT ID.
+    pub fn value_wire_len(&self) -> usize {
+        2 + self.entries.iter().map(|e| e.len() as usize).sum::<usize>()
     }
 }
 
@@ -689,6 +705,13 @@ impl ParseBe<IsisTlvIpv6Reach> for IsisTlvIpv6Reach {
             ipv6_reach_entry_span,
         )?;
         Ok((input, Self { entries }))
+    }
+}
+
+impl IsisTlvIpv6Reach {
+    /// See `IsisTlvExtIpReach::value_wire_len`.
+    pub fn value_wire_len(&self) -> usize {
+        self.entries.iter().map(|e| e.len() as usize).sum()
     }
 }
 
@@ -795,6 +818,13 @@ impl ParseBe<IsisTlvMtIpv6Reach> for IsisTlvMtIpv6Reach {
                 entries,
             },
         ))
+    }
+}
+
+impl IsisTlvMtIpv6Reach {
+    /// See `IsisTlvExtIpReach::value_wire_len` — plus the 2-byte MT ID.
+    pub fn value_wire_len(&self) -> usize {
+        2 + self.entries.iter().map(|e| e.len() as usize).sum::<usize>()
     }
 }
 
@@ -1359,6 +1389,18 @@ impl ParseBe<IsisTlvSrv6> for IsisTlvSrv6 {
                 locators,
             },
         ))
+    }
+}
+
+impl IsisTlvSrv6 {
+    /// See `IsisTlvExtIpReach::value_wire_len` — plus the 2-byte MT
+    /// header.
+    pub fn value_wire_len(&self) -> usize {
+        2 + self
+            .locators
+            .iter()
+            .map(|l| l.len() as usize)
+            .sum::<usize>()
     }
 }
 
