@@ -206,8 +206,11 @@ pub fn nbr_hello_interpret(
     for tlv in tlvs.iter() {
         match tlv {
             IsisTlv::IsNeighbor(neigh) => {
+                // |= : an IIH may carry several TLV 6 instances (the
+                // sender shards at MAX_NEIGHBORS); our SNPA counts as
+                // heard if ANY instance lists it.
                 if let Some(mac) = mac {
-                    has_mac = neigh.neighbors.iter().any(|n| mac.octets() == n.octets);
+                    has_mac |= neigh.neighbors.iter().any(|n| mac.octets() == n.octets);
                 }
             }
             IsisTlv::P2p3Way(tlv) => {

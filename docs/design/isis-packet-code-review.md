@@ -109,7 +109,7 @@ daemon**.
 `try_into`s it to `[u8; 2]`, returning `NsapParseError` on any other length; a
 unit test covers a 2-char group in each of the three system-id positions.
 
-### 4. 🟠 `IsisTlvIsNeighbor::len()` wraps at ≥43 neighbors — CONFIRMED
+### 4. 🟠 `IsisTlvIsNeighbor::len()` wraps at ≥43 neighbors — CONFIRMED — ✅ FIXED
 `crates/isis-packet/src/parser.rs:682`
 
 `len()` is `(self.neighbors.len() * 6) as u8` with no cap; `emit()` writes every
@@ -120,8 +120,11 @@ neighbor. TLV 6 is built from all adjacencies in `zebra-rs/src/isis/ifsm.rs:173`
 256 bytes early, reading neighbor MAC bytes as TLV headers; the Hello's following
 TLVs (Auth, Protocols Supported) are lost and adjacencies flap on a large LAN.
 
-**Fix:** cap consistently with `emit()` (`.min(255)` / `.min(252)` for a
-multiple of 6), or shard TLV 6 across instances.
+**Fixed:** both — `IsisTlvIsNeighbor::MAX_NEIGHBORS` (42) caps `len()` and
+`emit()` consistently, and the Hello builder shards larger adjacency sets
+across multiple TLV 6 instances so no neighbor is dropped. The receive path's
+`has_mac` now ORs across instances (it previously let a later instance clobber
+a match from an earlier one). Unit test pins the 43-neighbor truncation.
 
 ### 5. 🟠 `Srv6TlvFlags` MTID bitfield declared in inverted order — CONFIRMED — ✅ FIXED
 `crates/isis-packet/src/sub/prefix.rs:1090`
@@ -161,7 +164,7 @@ round-trips hide it — only *received* multi-area TLVs lose data.
 **Fix:** model `area_addr` as a `Vec<Vec<u8>>` (or loop until the value slice is
 exhausted) and emit each length-prefixed address.
 
-### 7. 🟠 Per-entry sub-TLV length uses panicking/wrapping `u8` arithmetic — CONFIRMED
+### 7. 🟠 Per-entry sub-TLV length uses panicking/wrapping `u8` arithmetic — CONFIRMED — ✅ FIXED
 `crates/isis-packet/src/sub/neigh.rs:176` (and siblings)
 
 `IsisTlvExtIsReachEntry::sub_len()` is `.map(|s| s.len()+2).sum::<u8>()` and
@@ -183,10 +186,17 @@ reads the remaining 256 as phantom neighbor entries. A single oversized entry
 can't be sharded by the packer (which shards at entry boundaries), so it hits this
 per-entry length directly.
 
-**Fix:** use `usize` internally and `saturating`/checked conversion to `u8` at the
-boundary, matching the reach-TLV-level `len()` policy.
+**Fixed:** every listed site (plus the same pattern in `IsisSubSrv6EndSid`,
+`IsisSubSrv6MirrorSid`, `IsisSubSrv6EndXSid`, `IsisSubSrv6LanEndXSid`) now
+computes in `usize` and saturates once at the `u8` boundary with `.min(255)`,
+mirroring the pre-existing `IsisSubFlexAlgoDef` idiom, so the packer's
+`wire_len()` probe of an over-full entry is debug-safe. The three reach entries
+additionally emit their sub-TLV block through `emit_sub_tlvs`, so the sub-length
+byte is back-patched from the bytes actually written instead of computed twice.
+Unit tests pin a 300-byte sub block saturating to 255 and the back-patch
+round-trip.
 
-### 8. 🟠 `emit_sub_tlvs` silently caps the sub-TLV block length at 255 — CONFIRMED
+### 8. 🟠 `emit_sub_tlvs` silently caps the sub-TLV block length at 255 — CONFIRMED — ✅ FIXED
 `crates/isis-packet/src/util.rs:13`
 
 `buf[pp - 1] = (buf.len() - pp).min(255) as u8` — a sub-TLV block larger than 255
@@ -201,9 +211,11 @@ byte is clamped to 255 but 276 bytes follow. `Srv6Locator::parse_be` does
 `Unknown` and the leftover ~21 bytes are consumed as the metric/flags of a
 phantom second locator, injecting a bogus SRv6 route at every receiver.
 
-**Fix:** return an error (or assert) when the block exceeds 255 instead of
-clamping, so an over-full block is caught at emit time rather than corrupting the
-wire.
+**Fixed:** an over-full block now trips a `debug_assert` at emit time (a
+builder bug is caught in dev/test); in release the block is truncated to 255
+bytes so the length byte always matches the bytes present — the truncated tail
+parses as one malformed sub-TLV instead of desyncing the rest of the PDU into
+phantom entries. A `should_panic` unit test pins the assert.
 
 ### 9. 🟠 3-octet SID/Label value is never masked to 20 bits — CONFIRMED
 `crates/isis-packet/src/parser.rs:1336` (`SidLabelValue::parse_be` / `emit`)
@@ -416,6 +428,7 @@ Correctness outranks these for the ranked list, but they're worth scheduling:
    bitfields declared LSB-first with the bit positions pinned by unit tests.
 3. ~~Fix #3 (nsap panic)~~ — **done**: system-id groups are length-checked
    before indexing; malformed `net` config now returns `NsapParseError`.
-4. Work through the emit-side length cluster (#4, #7, #8) with a shared
-   `usize`-based length policy; that also naturally addresses several of the
-   cleanup items.
+4. ~~Work through the emit-side length cluster (#4, #7, #8)~~ — **done**:
+   TLV 6 capped + sharded, all per-entry length sums are `usize`-with-`min(255)`,
+   and `emit_sub_tlvs` asserts/truncates instead of mislabeling an over-full
+   block.

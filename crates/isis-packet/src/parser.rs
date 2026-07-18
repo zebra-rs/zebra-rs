@@ -673,17 +673,28 @@ pub struct IsisTlvIsNeighbor {
     pub neighbors: Vec<NeighborAddr>,
 }
 
+impl IsisTlvIsNeighbor {
+    /// Maximum number of neighbors that fit in a single TLV 6: the
+    /// one-octet Length field spans 255 bytes and each neighbor SNPA
+    /// is 6 bytes, so 255 / 6 = 42. `len`/`emit` truncate consistently
+    /// at this bound (a 43rd neighbor used to wrap the length byte
+    /// mod-256 while every neighbor was still emitted); Hello builders
+    /// shard larger adjacency sets across multiple TLV 6 instances so
+    /// no neighbor is silently dropped.
+    pub const MAX_NEIGHBORS: usize = 42;
+}
+
 impl TlvEmitter for IsisTlvIsNeighbor {
     fn typ(&self) -> u8 {
         IsisTlvType::IsNeighbor.into()
     }
 
     fn len(&self) -> u8 {
-        (self.neighbors.len() * 6) as u8
+        (self.neighbors.len().min(Self::MAX_NEIGHBORS) * 6) as u8
     }
 
     fn emit(&self, buf: &mut BytesMut) {
-        for neighbor in self.neighbors.iter() {
+        for neighbor in self.neighbors.iter().take(Self::MAX_NEIGHBORS) {
             buf.put(&neighbor.octets[..]);
         }
     }
@@ -1401,6 +1412,35 @@ pub fn parse(input: &[u8]) -> IsisIResult<&[u8], IsisPacket> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// TLV 6 (IS Neighbors) — `len` and `emit` truncate consistently at
+    /// MAX_NEIGHBORS. 43 neighbors used to wrap the length byte to 2
+    /// (43*6 = 258 mod 256) while emit still wrote all 258 bytes,
+    /// desyncing the receiver's TLV walk; Hello builders shard larger
+    /// sets across multiple TLV 6 instances instead.
+    #[test]
+    fn is_neighbor_len_and_emit_truncate_at_max() {
+        let over = IsisTlvIsNeighbor {
+            neighbors: vec![NeighborAddr { octets: [0xAA; 6] }; 43],
+        };
+        assert_eq!(over.len() as usize, IsisTlvIsNeighbor::MAX_NEIGHBORS * 6);
+        let mut buf = BytesMut::new();
+        over.emit(&mut buf);
+        assert_eq!(buf.len(), IsisTlvIsNeighbor::MAX_NEIGHBORS * 6);
+
+        // At the bound everything fits and len/emit agree exactly.
+        let full = IsisTlvIsNeighbor {
+            neighbors: (0..IsisTlvIsNeighbor::MAX_NEIGHBORS)
+                .map(|i| NeighborAddr {
+                    octets: [i as u8; 6],
+                })
+                .collect(),
+        };
+        assert_eq!(full.len(), 252);
+        let mut buf = BytesMut::new();
+        full.emit(&mut buf);
+        assert_eq!(buf.len(), 252);
+    }
 
     /// Sanity-check `IsisTlv::wire_len` for a small fixed-size TLV.
     /// The packer relies on this returning a stable 4 bytes (2-byte
