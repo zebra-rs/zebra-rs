@@ -169,6 +169,7 @@ ospf-macros = { path = "../crates/ospf-macros" }
 isis-packet = { path = "../crates/isis-packet" }
 isis-macros = { path = "../crates/isis-macros" }
 packet-utils = { path = "../crates/packet-utils" }
+pim-packet = { path = "../crates/pim-packet" }
 bfd-packet = { path = "../crates/bfd-packet" }
 nd-packet = { path = "../crates/nd-packet" }
 stamp-packet = { path = "../crates/stamp-packet" }

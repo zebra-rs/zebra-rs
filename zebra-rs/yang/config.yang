@@ -3982,6 +3982,47 @@ module config {
           }
         }
       }
+      container pim {
+        ext:help "PIM-SM routing protocol configuration";
+        presence "Enables configuration of PIM-SM";
+        list interface {
+          ext:help "Per-interface PIM configuration";
+          key "if-name";
+          leaf if-name {
+            ext:help "Interface name";
+            ext:dynamic "rib:interface";
+            type string;
+          }
+          leaf dr-priority {
+            ext:help "Designated Router election priority";
+            type uint32;
+            default 1;
+          }
+          container hello {
+            ext:help "PIM Hello parameters";
+            leaf interval {
+              ext:help "Hello transmit interval (seconds)";
+              type uint16 {
+                range "1..18000";
+              }
+              units "seconds";
+              default 30;
+            }
+            leaf holdtime {
+              ext:help "Neighbor holdtime advertised in Hellos (seconds)";
+              type uint16 {
+                range "1..65535";
+              }
+              units "seconds";
+            }
+          }
+          leaf passive {
+            ext:help "Do not send or process PIM packets on this interface";
+            type boolean;
+            default false;
+          }
+        }
+      }
       container static {
         ext:help "Static route configuration";
 

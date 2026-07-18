@@ -985,6 +985,19 @@ module exec {
       }
     }
 
+    container pim {
+      ext:help "PIM commands";
+      presence "PIM instance";
+      container interface {
+        ext:help "PIM interface";
+        presence "PIM interface";
+      }
+      container neighbor {
+        ext:help "PIM neighbor";
+        presence "PIM neighbor";
+      }
+    }
+
     container ospfv3 {
       ext:help "OSPFv3 commands";
       presence "OSPFv3 instance";

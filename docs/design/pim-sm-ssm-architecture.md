@@ -511,10 +511,10 @@ under the interface node, matching how IS-IS/OSPF hang per-interface config.)
 - **Spawn wiring:** `config/manager.rs` gets the `spawn_pim` arm; `show_proto()` gets an
   `is_pim` matcher; `exec.yang` gets `container pim` under show.
 - **Show commands** (text + `json` flag threaded per house convention):
-  `show ip pim interface`, `show ip pim neighbor`, `show ip pim rp-info`,
-  `show ip pim upstream`, `show ip pim join` (downstream state), `show ip pim state`,
-  `show ip mroute` (TIB + kernel MFC counters via `MRT` stats / `/proc`),
-  `show ip igmp interface`, `show ip igmp groups [detail]`.
+  `show pim interface`, `show pim neighbor`, `show pim rp-info`,
+  `show pim upstream`, `show pim join` (downstream state), `show pim state`,
+  `show mroute` (TIB + kernel MFC counters via `MRT` stats / `/proc`),
+  `show igmp interface`, `show igmp groups [detail]`.
 - **Tracing:** `zebra-pim-tracing.yang` + `pim/tracing.rs` with the house presence-
   container pattern: categories `hello`, `join-prune`, `register`, `assert`, `igmp`,
   `mroute` (upcalls/MFC), `rp`, each with direction/level, plus `all`.
@@ -573,10 +573,10 @@ PruneDesired → SGrpt prune rides the next (\*,G) J/P toward the RP.
 | Phase | Deliverable | Proof |
 |---|---|---|
 | 1 | `crates/pim-packet`: header, Hello TLVs, Join/Prune, Assert, Register/Register-Stop, IGMP v2/v3 formats; checksums | unit tests with wire fixtures (FRR pcap-derived) |
-| 2 | Module skeleton: spawn arm, YANG (`router pim` + interface `pim enable`), actor, PIM socket, Hello TX/RX, neighbor table, DR election, `show ip pim interface/neighbor`, tracing | BDD: 2-ns neighbor-up, DR election, holdtime expiry, GenID bounce |
-| 3 | IGMP v2/v3: querier election, group/source state, `show ip igmp ...` (no PIM coupling yet) | BDD: ns receiver joins group (socat/python), `show ip igmp groups` asserts |
+| 2 | Module skeleton: spawn arm, YANG (`router pim` + interface `pim enable`), actor, PIM socket, Hello TX/RX, neighbor table, DR election, `show pim interface/neighbor`, tracing | BDD: 2-ns neighbor-up, DR election, holdtime expiry, GenID bounce |
+| 3 | IGMP v2/v3: querier election, group/source state, `show igmp ...` (no PIM coupling yet) | BDD: ns receiver joins group (socat/python), `show igmp groups` asserts |
 | 4 | Dataplane + SSM slice: mroute socket, VIF/MFC, upcalls, TIB + macros, upstream/downstream J/P FSMs, RPF via NHT, J/P aggregation. SSM (S,G) end-to-end | BDD: 3-ns chain, IGMPv3 (S,G) join at LHR, sender pings 232.x — receiver sees traffic; `ip mroute` shows (S,G) on transit |
-| 5 | ASM with static RP: RP LPM, (\*,G), register FSM both sides, Register-Stop, KAT, SPT switchover + SGrpt prune | BDD: 4-ns (src—FHR—RP—LHR—rcv): register path, native path after switchover, `show ip pim upstream` SPT-bit |
+| 5 | ASM with static RP: RP LPM, (\*,G), register FSM both sides, Register-Stop, KAT, SPT switchover + SGrpt prune | BDD: 4-ns (src—FHR—RP—LHR—rcv): register path, native path after switchover, `show pim upstream` SPT-bit |
 | 6 | Assert FSM + WRONGVIF; LAN behaviors: join suppression, prune override (LAN Prune Delay) | BDD: LAN topology (bridge ns) with two upstream routers, assert winner/loser converges |
 | 7 | VRF: per-VRF instance (`MRT_TABLE`), `vrf.rs` mirroring `isis/vrf.rs`, `show ... vrf` | BDD: VRF-scoped SSM forwarding |
 | 8 | BSR (RFC 5059): C-BSR election, BSM flood/RPF check, C-RP advertisement, RP-set merge under static-beats-dynamic | BDD: BSR-elected RP serves ASM joins |
@@ -612,7 +612,7 @@ clippy, full test suite before push.
 1. **Interface config spelling** — `interface e0 { pim { enable } igmp { enable } }` vs
    `ip pim`/`ip igmp` prefixes: match whichever per-interface protocol convention
    `config.yang` uses at the time of the skeleton PR.
-2. **`show ip mroute` counters** — poll `MRT` stats via `SIOCGETSGCNT`/`/proc` on demand
+2. **`show mroute` counters** — poll `MRT` stats via `SIOCGETSGCNT`/`/proc` on demand
    (show-time) vs periodic stat timer updating the TIB. Proposal: on-demand at show
    time; add a poller only if KAT accuracy needs it (FRR polls via its timer wheel —
    revisit when implementing KAT: KAT refresh needs *some* traffic signal, either
