@@ -1844,7 +1844,10 @@ fn write_bgp_entry_detail<V: BgpShowView>(
         if let Some(li) = rib.attr.prefix_sid_label_index() {
             writeln!(out, "    Prefix-SID Label-Index: {}", li)?;
         }
-        if let Some((sid, behavior)) = rib.attr.srv6_l3_sid() {
+        // Every SRv6 L3 service SID, not just the first: an originator
+        // may advertise a split End.DT4 + End.DT6 pair, and the FIB
+        // picks per destination family — show what is actually carried.
+        for (sid, behavior) in rib.attr.srv6_l3_sids() {
             let kind = if rib.is_originated() {
                 "Local SID"
             } else {

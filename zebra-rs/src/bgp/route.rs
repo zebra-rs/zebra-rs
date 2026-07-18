@@ -701,13 +701,18 @@ fn select_fib_entry_v4(
     // installs an H.Encap entry toward that SID instead of an MPLS
     // label stack — gated on the underlay next-hop resolving, like the
     // MPLS path. CE-learned routes carry no Prefix-SID, so this never
-    // fires for them.
-    if best.typ == BgpRibType::Originated
-        && let Some((sid, _behavior)) = best.attr.srv6_l3_sid()
-    {
-        return transport
-            .filter(|t| !t.is_empty())
-            .and_then(|t| build_srv6_vpn_fib_entry(sid, t));
+    // fires for them. The SID is picked family-aware: an originator may
+    // advertise a split End.DT4 + End.DT6 pair, and steering v4 traffic
+    // at the End.DT6 SID blackholes it at the egress decap (review
+    // finding #9). No family-compatible decap SID ⇒ install nothing
+    // rather than a wrong-family H.Encap.
+    if best.typ == BgpRibType::Originated && best.attr.srv6_l3_sid().is_some() {
+        let sids: Vec<_> = best.attr.srv6_l3_sids().collect();
+        return bgp_packet::srv6_l3_sid_for_dest(&sids, true).and_then(|(sid, _behavior)| {
+            transport
+                .filter(|t| !t.is_empty())
+                .and_then(|t| build_srv6_vpn_fib_entry(sid, t))
+        });
     }
     if is_vpn_fib_winner(best, transport) {
         build_vpn_fib_entry(best.label.map(|l| l.label).unwrap_or(0), transport.unwrap())
@@ -972,17 +977,24 @@ fn select_fib_entry_v6(
     if let Some(entry) = vxlan_vpn_entry(best, transport) {
         return Some(entry);
     }
-    // SRv6 L3VPN (VPNv6 over an SRv6 underlay) — see `select_fib_entry_v4`.
-    if best.typ == BgpRibType::Originated
-        && let Some((sid, _behavior)) = best.attr.srv6_l3_sid()
-    {
-        return transport
-            .filter(|t| !t.is_empty())
-            .and_then(|t| build_srv6_vpn_fib_entry(sid, t));
+    // SRv6 L3VPN (VPNv6 over an SRv6 underlay) — see `select_fib_entry_v4`,
+    // including the family-aware SID pick (a v6 destination must not be
+    // steered at an End.DT4 SID).
+    if best.typ == BgpRibType::Originated && best.attr.srv6_l3_sid().is_some() {
+        let sids: Vec<_> = best.attr.srv6_l3_sids().collect();
+        return bgp_packet::srv6_l3_sid_for_dest(&sids, false).and_then(|(sid, _behavior)| {
+            transport
+                .filter(|t| !t.is_empty())
+                .and_then(|t| build_srv6_vpn_fib_entry(sid, t))
+        });
     }
+    let received_sid = {
+        let sids: Vec<_> = best.attr.srv6_l3_sids().collect();
+        bgp_packet::srv6_l3_sid_for_dest(&sids, false)
+    };
     if is_vpn_fib_winner(best, transport) {
         build_vpn_fib_entry(best.label.map(|l| l.label).unwrap_or(0), transport.unwrap())
-    } else if let Some((sid, _behavior)) = best.attr.srv6_l3_sid() {
+    } else if let Some((sid, _behavior)) = received_sid {
         // A *received* plain IPv6 unicast route carrying an SRv6 L3
         // service SID installs an H.Encaps entry toward the SID instead
         // of a plain next-hop entry, so matched traffic is SRv6-
@@ -21157,5 +21169,96 @@ mod v6_empty_selection_tests {
                 .contains_key(&nlri.prefix),
             "peer B's Adj-RIB-Out must be pruned by the withdraw"
         );
+    }
+}
+
+#[cfg(test)]
+mod srv6_sid_family_tests {
+    use super::*;
+    use bgp_packet::{
+        PrefixSid, PrefixSidTlv, SRV6_BEHAVIOR_END_DT4, SRV6_BEHAVIOR_END_DT6, Srv6ServiceTlv,
+        Srv6SidInfo,
+    };
+
+    /// An imported (Originated) row whose attr carries the given SRv6 L3
+    /// service SIDs — the shape a split-pair VPN route takes.
+    fn split_pair_rib(sids: Vec<(std::net::Ipv6Addr, u16)>) -> BgpRib {
+        let attr = BgpAttr {
+            prefix_sid: Some(PrefixSid {
+                tlvs: vec![PrefixSidTlv::Srv6L3Service(Srv6ServiceTlv {
+                    sids: sids
+                        .into_iter()
+                        .map(|(sid, behavior)| Srv6SidInfo::new(sid, 0, behavior, None))
+                        .collect(),
+                    ..Default::default()
+                })],
+            }),
+            ..Default::default()
+        };
+        BgpRib::new_arc(
+            ORIGINATED_PEER,
+            Ipv4Addr::new(10, 0, 0, 9),
+            BgpRibType::Originated,
+            0,
+            0,
+            Arc::new(attr),
+            None,
+            None,
+            false,
+        )
+    }
+
+    fn transport() -> Vec<rib::nht::ResolvedNexthop> {
+        vec![rib::nht::ResolvedNexthop {
+            addr: "2001:db8::fe".parse().unwrap(),
+            ifindex: 1,
+            labels: Vec::new(),
+            segs: Vec::new(),
+            seg_encap: None,
+        }]
+    }
+
+    fn entry_segs(entry: &rib::entry::RibEntry) -> Vec<std::net::Ipv6Addr> {
+        match &entry.nexthop {
+            rib::Nexthop::Uni(uni) => uni.segs.clone(),
+            other => panic!("expected Uni nexthop, got {other:?}"),
+        }
+    }
+
+    /// Review finding #9 regression: a split `[End.DT6, End.DT4]` pair
+    /// (DT6 first — the order that broke) must steer v4 traffic at the
+    /// End.DT4 SID and v6 traffic at the End.DT6 SID. The old code took
+    /// the first SID for both, H.Encapping v4 toward a decap that only
+    /// serves IPv6 — a blackhole.
+    #[test]
+    fn split_pair_steers_each_family_at_its_own_sid() {
+        let dt6: std::net::Ipv6Addr = "fcbb:1::6".parse().unwrap();
+        let dt4: std::net::Ipv6Addr = "fcbb:1::4".parse().unwrap();
+        let rib = split_pair_rib(vec![
+            (dt6, SRV6_BEHAVIOR_END_DT6),
+            (dt4, SRV6_BEHAVIOR_END_DT4),
+        ]);
+        let t = transport();
+
+        let v4 = select_fib_entry_v4(&rib, Some(&t), None).expect("v4 entry");
+        assert_eq!(entry_segs(&v4), vec![dt4], "v4 must pick the End.DT4 SID");
+
+        let v6 = select_fib_entry_v6(&rib, Some(&t), None).expect("v6 entry");
+        assert_eq!(entry_segs(&v6), vec![dt6], "v6 must pick the End.DT6 SID");
+    }
+
+    /// No family-compatible decap SID ⇒ install nothing, not a
+    /// wrong-family H.Encap.
+    #[test]
+    fn family_incompatible_sid_installs_nothing() {
+        let dt6: std::net::Ipv6Addr = "fcbb:1::6".parse().unwrap();
+        let rib = split_pair_rib(vec![(dt6, SRV6_BEHAVIOR_END_DT6)]);
+        let t = transport();
+        assert!(
+            select_fib_entry_v4(&rib, Some(&t), None).is_none(),
+            "a v4 destination cannot be served by an End.DT6-only route"
+        );
+        let v6 = select_fib_entry_v6(&rib, Some(&t), None).expect("v6 entry");
+        assert_eq!(entry_segs(&v6), vec![dt6]);
     }
 }

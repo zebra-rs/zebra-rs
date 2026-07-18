@@ -5,7 +5,10 @@ effort. Ten independent finder angles produced 68 candidates; each surviving
 candidate was checked by an independent adversarial verifier that had to name a
 concrete trigger and quote the decisive lines, then a fresh gap sweep added more.
 
-**Result: 34 confirmed correctness bugs + 15 confirmed cleanup items.** Three
+**Result: 34 confirmed correctness bugs + 15 confirmed cleanup items.**
+**Status 2026-07-18: top-9 fixed and merged** (PRs #1962, #1972, #1981,
+#1984, #1987, #1991, #1997, and the finding-#9 branch); fixes below the
+cap remain open. Three
 candidates were refuted (two vty-disconnect "panics" are guarded by detached
 forwarding tasks; the N>1 BSID resync is covered by a mirrored winners replica).
 
@@ -30,7 +33,7 @@ deepest fix.
 
 ## Top 15 (ranked most severe first)
 
-### 1. Daemon crash: `fsm()` unwrap on a removed peer slot — `peer.rs:1801`
+### 1. Daemon crash: `fsm()` unwrap on a removed peer slot — `peer.rs:1801` — FIXED (PR #1962)
 
 `fsm()` does `peer_map.get_mut_by_idx(id).unwrap()` with no guard, and
 `process_msg` (`inst.rs:2148`) dispatches `Message::Event(ident, event)` to it
@@ -45,7 +48,7 @@ the next dispatch hits `get_mut_by_idx(ident).unwrap()` on `None` → **panic
 crashes the whole daemon, killing every session.** Second path: dynamic-peer reap
 (`inst.rs:2385`) plus a queued timer/dial event.
 
-### 2. 4-byte-ASN peers can never establish — `peer.rs:2086`
+### 2. 4-byte-ASN peers can never establish — `peer.rs:2086` — FIXED (PR #1972, full RFC 6793)
 
 After the AS4-aware ASN check passes (`2055-2058`, folds the AS4 capability), the
 code re-compares the raw 2-octet field `packet.asn as u32 != peer.remote_as` and
@@ -57,7 +60,7 @@ attempt, no NOTIFICATION. **Any 4-byte-ASN peer is permanently rejected.**
 Outbound is also broken: `peer.rs:2947` truncates local-as to `u16` instead of
 sending AS_TRANS. Fix: delete the redundant `2086` comparison.
 
-### 3. VRF delete → cross-VRF traffic leak — `inst.rs:2440`
+### 3. VRF delete → cross-VRF traffic leak — `inst.rs:2440` — FIXED (PR #1981)
 
 `apply_vrf_commit_diff`'s despawn arm frees and immediately reclaims the VRF's
 MPLS label (`2464-2468`) but never purges the VRF's exported rows
@@ -72,7 +75,7 @@ advertised to remote PEs; the freed label is handed to the next VRF, whose
 `DecapVrf` ILM binds it → **remote PEs still forwarding to the old advertisement
 decap into the wrong VRF.**
 
-### 4. Dual-homed L3VPN withdraw blackholes the survivor — `vrf/inst.rs:1444`
+### 4. Dual-homed L3VPN withdraw blackholes the survivor — `vrf/inst.rs:1444` — FIXED (PR #1984)
 
 `handle_import_v4` stores every import under `(prefix, id 0, ORIGINATED_PEER)`
 ignoring the origin RD (`1310-1351`), and `handle_withdraw_import` also ignores
@@ -86,7 +89,7 @@ second replaces the first row; PE1 withdraws → the VRF removes the row now hol
 **PE2's still-valid route → CE-side blackhole**, and nothing re-imports RD 2:2's
 winner until an unrelated event.
 
-### 5. EVPN received-withdraw never propagated to peers — `route.rs:7955`
+### 5. EVPN received-withdraw never propagated to peers — `route.rs:7955` — FIXED (PR #1987)
 
 `route_evpn_withdraw` (handler for received EVPN MP_UNREACH, also used by
 peer-down cleanup) recomputes best-path but its only peer-facing action is
@@ -101,7 +104,7 @@ reflects to B; A withdraws it → RR removes it locally but **B never receives t
 withdraw and keeps forwarding to the departed host's stale VTEP** until the B
 session bounces. Also affects eBGP EVPN transit and both peer-down cleanup arms.
 
-### 6. IPv6 empty-selection never withdraws from peers — `route.rs:6331`
+### 6. IPv6 empty-selection never withdraws from peers — `route.rs:6331` — FIXED (PR #1991)
 
 `route_ipv6_update` gates the peer fan-out on `if !selected.is_empty()`
 (also VPNv6 at `6359`), so an UPDATE whose best-path delta empties the selection
@@ -114,7 +117,7 @@ deny of the last candidate (`dispatch.rs:627-634`) or the NHT reachability gate
 FIB entry deleted but **no MP_UNREACH sent → other peers hold and forward on the
 stale v6/VPNv6 route indefinitely.**
 
-### 7. ipv6 encapsulation-type missing from UpdateGroupSig — `update_group.rs:350`
+### 7. ipv6 encapsulation-type missing from UpdateGroupSig — `update_group.rs:350` — FIXED (PR #1997)
 
 `signature_of` omits per-peer `afi-safi ipv6 encapsulation-type`
 (`ipv6_srv6_encap`/`ipv6_srv6_strict`), but `route_update_ipv6` uses it to strip
@@ -129,7 +132,7 @@ own comment (`11313`) calls this fatal: the CE tracks an unresolvable provider
 locator and blackholes.** Order-dependent; incremental (post-sync) advertisements
 only.
 
-### 8. vpnv4 next-hop-self/unchanged shared through the group memo — `route.rs:11110`
+### 8. vpnv4 next-hop-self/unchanged shared through the group memo — `route.rs:11110` — FIXED (PR #1997)
 
 Per-peer `afi-safi vpnv4 next-hop-self`/`next-hop-unchanged` select the egress
 NEXT_HOP (`11110-11115`, via per-peer `sync_ctx`) but are not `UpdateGroupSig`
@@ -140,7 +143,7 @@ warns explicitly against adding per-peer state to the memoized path.
 **Trigger:** an Inter-AS Option-B ASBR with `next-hop-self` toward PE1 but not PE2
 (both same group) → one PE is sent the **wrong NEXT_HOP → VPN traffic blackholes.**
 
-### 9. Family-blind SRv6 service-SID selection at FIB install — `route.rs:701`
+### 9. Family-blind SRv6 service-SID selection at FIB install — `route.rs:701` — FIXED (fib-install + show sites; nht_target keeps first-SID by design, see its doc)
 
 `select_fib_entry_v4` (`701`) and `select_fib_entry_v6` (`972`, `980`) use
 first-SID `srv6_l3_sid()`, whose own doc (`bgp_attr.rs:166`) warns consumers to
