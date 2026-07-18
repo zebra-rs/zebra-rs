@@ -398,7 +398,13 @@ pub struct OspfLsUpdate {
 /// checksum to match — so they don't need the cache.
 fn parse_lsas_with_raw(input: &[u8], n: usize) -> IResult<&[u8], Vec<OspfLsa>> {
     use nom_derive::Parse;
-    let mut out = Vec::with_capacity(n);
+    // `n` is a wire-supplied count; cap the pre-allocation so a forged count
+    // cannot force a huge eager allocation (each LSA is at least a header).
+    let mut out = Vec::with_capacity(packet_utils::bounded_capacity(
+        n,
+        input.len(),
+        LSA_HEADER_LEN as usize,
+    ));
     let mut rest = input;
     for _ in 0..n {
         let start = rest;
@@ -1602,6 +1608,12 @@ impl ExtPrefixTlv {
         let (tlv_data, prefix_len) = be_u8(tlv_data)?;
         let (tlv_data, af) = be_u8(tlv_data)?;
         let (tlv_data, flags) = be_u8(tlv_data)?;
+
+        // An IPv4 prefix length cannot exceed 32 bits; reject a malformed
+        // length before it overruns the 4-byte address buffer below.
+        if prefix_len > 32 {
+            return Err(Err::Error(make_error(tlv_data, ErrorKind::Verify)));
+        }
 
         // Prefix is padded to 4-byte boundary.
         let prefix_bytes = (prefix_len as usize).div_ceil(8);
@@ -2871,6 +2883,30 @@ mod tests {
         assert_eq!(parsed.auth_type, 0);
         assert!(matches!(parsed.auth, Ospfv2Auth::Null(_)));
         assert!(parsed.auth_trailer.is_empty());
+    }
+
+    #[test]
+    fn ext_prefix_tlv_valid_prefix_len_parses() {
+        // type=1, len=8; route_type=1, prefix_len=24, af=0, flags=0, 10.1.1.0.
+        let bytes = [0x00, 0x01, 0x00, 0x08, 0x01, 24, 0x00, 0x00, 10, 1, 1, 0];
+        let (_, tlv) = ExtPrefixTlv::parse_tlv(&bytes).expect("valid TLV must parse");
+        assert_eq!(tlv.prefix, "10.1.1.0/24".parse().unwrap());
+    }
+
+    #[test]
+    fn ext_prefix_tlv_rejects_oversized_prefix_len() {
+        // prefix_len = 255 would need 32 address bytes; must be rejected, not
+        // overrun the 4-byte buffer (regression for the parse panic).
+        let bytes = [0x00, 0x01, 0x00, 0x08, 0x01, 0xFF, 0x00, 0x00, 0, 0, 0, 0];
+        assert!(ExtPrefixTlv::parse_tlv(&bytes).is_err());
+    }
+
+    #[test]
+    fn parse_lsas_with_raw_clamps_hostile_count() {
+        // A 4-billion advertisement count with an empty body must error out
+        // gracefully rather than pre-allocate ~gigabytes (regression for the
+        // Vec::with_capacity DoS).
+        assert!(parse_lsas_with_raw(&[], 0xFFFF_FFFF).is_err());
     }
 
     /// RFC 2328 §D.4.1-D.4.2: the checksum excludes the 64-bit

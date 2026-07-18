@@ -1074,7 +1074,13 @@ impl ParseBe<Ospfv3IntraAreaPrefixLsa> for Ospfv3IntraAreaPrefixLsa {
         let (input, referenced_ls_type) = be_u16(input)?;
         let (input, referenced_link_state_id) = be_u32(input)?;
         let (mut input, referenced_advertising_router) = Ipv4Addr::parse_be(input)?;
-        let mut prefixes = Vec::with_capacity(num_prefixes as usize);
+        // Cap the pre-allocation against a forged prefix count (each prefix
+        // entry is at least 4 octets on the wire).
+        let mut prefixes = Vec::with_capacity(packet_utils::bounded_capacity(
+            num_prefixes as usize,
+            input.len(),
+            4,
+        ));
         for _ in 0..num_prefixes {
             let (rest, p) = Ospfv3IntraAreaPrefix::parse_be(input)?;
             prefixes.push(p);
@@ -1514,7 +1520,13 @@ impl ParseBe<Ospfv3LinkLsa> for Ospfv3LinkLsa {
         let mut ll_arr = [0u8; 16];
         ll_arr.copy_from_slice(ll_bytes);
         let (mut input, num_prefixes) = be_u32(input)?;
-        let mut prefixes = Vec::with_capacity(num_prefixes as usize);
+        // Cap the pre-allocation against a forged prefix count (each prefix
+        // entry is at least 4 octets on the wire).
+        let mut prefixes = Vec::with_capacity(packet_utils::bounded_capacity(
+            num_prefixes as usize,
+            input.len(),
+            4,
+        ));
         for _ in 0..num_prefixes {
             let (rest, p) = Ospfv3LinkLsaPrefix::parse_be(input)?;
             prefixes.push(p);
@@ -2984,7 +2996,13 @@ impl Ospfv3LsUpdate {
 impl ParseBe<Ospfv3LsUpdate> for Ospfv3LsUpdate {
     fn parse_be(input: &[u8]) -> IResult<&[u8], Ospfv3LsUpdate> {
         let (mut input, num) = be_u32(input)?;
-        let mut lsas = Vec::with_capacity(num as usize);
+        // Cap the pre-allocation: `num` is wire-supplied and each LSA is at
+        // least a header, so a forged count cannot force a huge allocation.
+        let mut lsas = Vec::with_capacity(packet_utils::bounded_capacity(
+            num as usize,
+            input.len(),
+            OSPFV3_LSA_HEADER_LEN as usize,
+        ));
         for _ in 0..num {
             // Capture the slice this LSA consumes so transit floods
             // can re-emit it byte-for-byte — same rationale as the
@@ -3399,7 +3417,9 @@ impl Ospfv3Srv6LocatorTlv {
         buf.put_u8(self.locator_length);
         buf.put_u8(self.prefix_options);
         buf.put_u32(self.metric);
-        let wire = ospfv3_prefix_wire_len(self.locator_length);
+        // Clamp to the 16-byte IPv6 octet buffer; a well-formed locator_length
+        // (<= 128) never exceeds this, but guard a mis-constructed value.
+        let wire = ospfv3_prefix_wire_len(self.locator_length).min(16);
         buf.put_slice(&self.locator.octets()[..wire]);
         for sub in &self.subs {
             sub.emit(buf);
@@ -3412,6 +3432,14 @@ impl Ospfv3Srv6LocatorTlv {
         let (input, locator_length) = be_u8(input)?;
         let (input, prefix_options) = be_u8(input)?;
         let (input, metric) = be_u32(input)?;
+        // A locator is an IPv6 value; a length beyond 128 bits would overrun
+        // the 16-byte buffer below, so reject it as malformed.
+        if locator_length > 128 {
+            return Err(nom::Err::Error(nom::error::make_error(
+                input,
+                nom::error::ErrorKind::Verify,
+            )));
+        }
         let wire = ospfv3_prefix_wire_len(locator_length);
         let (mut input, raw) = take(wire)(input)?;
         let mut octets = [0u8; 16];
@@ -3523,6 +3551,33 @@ fn parse_ipv6_sid(input: &[u8]) -> IResult<&[u8], Ipv6Addr> {
 mod tests {
     use super::*;
     use crate::OspfType;
+
+    #[test]
+    fn srv6_locator_tlv_rejects_oversized_locator_length() {
+        // locator_length = 200 (> 128) would overrun the 16-byte IPv6 buffer;
+        // it must be rejected, not panic (regression for the parse panic).
+        let mut bytes = vec![0u8, 0u8, 200u8, 0u8]; // route_type, algo, loc_len, prefix_opts
+        bytes.extend_from_slice(&[0, 0, 0, 0]); // metric
+        bytes.extend_from_slice(&[0u8; 20]); // would-be locator bytes
+        assert!(Ospfv3Srv6LocatorTlv::parse_be(&bytes).is_err());
+    }
+
+    #[test]
+    fn ls_update_clamps_hostile_advertisement_count() {
+        // # Advertisements = 0xFFFFFFFF with an empty body must error out
+        // gracefully, not pre-allocate ~gigabytes (Vec::with_capacity DoS).
+        let bytes = [0xFFu8, 0xFF, 0xFF, 0xFF];
+        assert!(Ospfv3LsUpdate::parse_be(&bytes).is_err());
+    }
+
+    #[test]
+    fn link_lsa_clamps_hostile_prefix_count() {
+        // 20 header octets (priority + options + link-local) then a forged
+        // 4-billion prefix count and no prefixes: must error, not pre-allocate.
+        let mut bytes = vec![0u8; 20];
+        bytes.extend_from_slice(&[0xFF, 0xFF, 0xFF, 0xFF]);
+        assert!(Ospfv3LinkLsa::parse_be(&bytes).is_err());
+    }
 
     fn make_hello() -> Ospfv3Hello {
         let mut options = Ospfv3Options::new();
