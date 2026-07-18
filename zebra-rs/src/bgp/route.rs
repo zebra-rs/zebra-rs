@@ -3142,6 +3142,7 @@ fn nht_track_received(bgp: &mut BgpTop, rib: &mut BgpRib, dep: super::nht::NhtDe
         let _ = bgp.rib_client.send(rib::Message::NexthopRegister {
             proto: "bgp".to_string(),
             nh,
+            vrf_id: 0,
         });
     }
 }
@@ -3165,6 +3166,7 @@ fn nht_track_received_attr(bgp: &mut BgpTop, attr: &BgpAttr, dep: super::nht::Nh
         let _ = bgp.rib_client.send(rib::Message::NexthopRegister {
             proto: "bgp".to_string(),
             nh,
+            vrf_id: 0,
         });
     }
     reachable
@@ -3200,6 +3202,7 @@ fn mup_segment_track(
         let _ = bgp.rib_client.send(rib::Message::NexthopRegister {
             proto: "bgp".to_string(),
             nh,
+            vrf_id: 0,
         });
     }
     cache.transport_for(nh).to_vec()
@@ -3217,6 +3220,7 @@ fn mup_segment_untrack(bgp: &mut BgpTop, rd: RouteDistinguisher, prefix: &MupPre
         let _ = bgp.rib_client.send(rib::Message::NexthopUnregister {
             proto: "bgp".to_string(),
             nh,
+            vrf_id: 0,
         });
     }
 }
@@ -3263,6 +3267,7 @@ pub(super) fn mup_endpoint_track_cache(
         let _ = rib_client.send(rib::Message::NexthopRegister {
             proto: "bgp".to_string(),
             nh: endpoint,
+            vrf_id: 0,
         });
     }
     cache.transport_for(endpoint).to_vec()
@@ -3302,6 +3307,7 @@ pub(super) fn mup_endpoint_untrack_cache(
         let _ = rib_client.send(rib::Message::NexthopUnregister {
             proto: "bgp".to_string(),
             nh: endpoint,
+            vrf_id: 0,
         });
     }
 }
@@ -3348,6 +3354,7 @@ fn nht_untrack_withdrawn(
         let _ = bgp.rib_client.send(rib::Message::NexthopUnregister {
             proto: "bgp".to_string(),
             nh,
+            vrf_id: 0,
         });
     }
 }
@@ -9280,6 +9287,7 @@ fn sr_policy_mpls_sync(bgp: &mut BgpTop, color: u32, endpoint: IpAddr) {
             let _ = bgp.rib_client.send(rib::Message::NexthopRegister {
                 proto: "bgp".to_string(),
                 nh: endpoint,
+                vrf_id: 0,
             });
         }
     }
@@ -9307,6 +9315,7 @@ fn sr_policy_mpls_sync(bgp: &mut BgpTop, color: u32, endpoint: IpAddr) {
         let _ = bgp.rib_client.send(rib::Message::NexthopUnregister {
             proto: "bgp".to_string(),
             nh: endpoint,
+            vrf_id: 0,
         });
     }
 }

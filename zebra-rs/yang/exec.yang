@@ -996,6 +996,23 @@ module exec {
         ext:help "IGMP group membership";
         presence "IGMP groups";
       }
+      list vrf {
+        ext:help "Per-VRF IGMP state";
+        key name;
+        leaf name {
+          ext:help "VRF name";
+          ext:dynamic "rib:vrf";
+          type string;
+        }
+        leaf interface {
+          ext:help "IGMP interfaces in this VRF";
+          type empty;
+        }
+        leaf groups {
+          ext:help "IGMP groups in this VRF";
+          type empty;
+        }
+      }
     }
 
     container pim {
@@ -1021,11 +1038,52 @@ module exec {
         ext:help "PIM assert election state";
         presence "PIM assert";
       }
+      list vrf {
+        // Per-VRF PIM show: the manager strips the `vrf <name>`
+        // selector (vrf_redirect_split) and redirects into the child
+        // registered as "pim:vrf:<name>".
+        ext:help "Per-VRF PIM instance";
+        key name;
+        leaf name {
+          ext:help "VRF name";
+          ext:dynamic "rib:vrf";
+          type string;
+        }
+        leaf interface {
+          ext:help "PIM interfaces in this VRF";
+          type empty;
+        }
+        leaf neighbor {
+          ext:help "PIM neighbors in this VRF";
+          type empty;
+        }
+        leaf upstream {
+          ext:help "PIM upstream state in this VRF";
+          type empty;
+        }
+        leaf rp-info {
+          ext:help "Group-to-RP mappings in this VRF";
+          type empty;
+        }
+        leaf assert {
+          ext:help "Assert state in this VRF";
+          type empty;
+        }
+      }
     }
 
     container mroute {
       ext:help "IP multicast routing table";
       presence "Multicast routes";
+      list vrf {
+        ext:help "Multicast routes in a VRF";
+        key name;
+        leaf name {
+          ext:help "VRF name";
+          ext:dynamic "rib:vrf";
+          type string;
+        }
+      }
     }
 
     container ospfv3 {

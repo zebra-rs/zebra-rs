@@ -324,9 +324,11 @@ fn show_pim_upstream(pim: &Pim, _args: Args, json: bool) -> Result<String, std::
             sg: key.to_string(),
             iif,
             rpf_neighbor,
+            // "None", not "NotJoined": BDD substring assertions on
+            // "Joined" must not match the negative state.
             state: match entry.join_state {
                 JoinState::Joined => "Joined".to_string(),
-                JoinState::NotJoined => "NotJoined".to_string(),
+                JoinState::NotJoined => "None".to_string(),
             },
             reg: match entry.reg_state {
                 RegState::NoInfo => "-".to_string(),

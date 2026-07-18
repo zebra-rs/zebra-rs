@@ -82,6 +82,23 @@ impl ProtoContext {
         }
     }
 
+    /// Same as [`Self::for_vrf`] but with a parked `RibClient` — for
+    /// probe contexts whose only job is opening VRF-bound sockets
+    /// before the real RIB subscription exists (PIM's per-VRF spawn
+    /// opens its sockets first so a failure doesn't leave a dead
+    /// `RibRx` receiver queued in RIB's inbox). Same leak rationale
+    /// as [`Self::default_table_no_rib`].
+    pub fn for_vrf_no_rib(vrf_id: u32, vrf_ifname: String) -> Self {
+        let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+        Box::leak(Box::new(rx));
+        let rib = RibClient::new(tx, crate::rib::client::ProtoId::from_raw(u32::MAX));
+        Self {
+            vrf_id,
+            vrf_ifname: Some(vrf_ifname),
+            rib,
+        }
+    }
+
     /// Context for a protocol instance attached to a non-default
     /// VRF. The socket factories will `SO_BINDTODEVICE` to
     /// `vrf_ifname` so the resulting socket lands in the matching

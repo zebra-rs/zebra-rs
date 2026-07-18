@@ -53,8 +53,9 @@ impl Pim {
         }
         let state = compute_rpf(&self.links, src, None);
         let _ = self.ctx.rib.send(rib::Message::NexthopRegister {
-            proto: "pim".to_string(),
+            proto: self.proto_label.clone(),
             nh: IpAddr::V4(src),
+            vrf_id: self.ctx.vrf_id(),
         });
         self.rpf.insert(
             src,
@@ -75,8 +76,9 @@ impl Pim {
         if entry.refs == 0 {
             self.rpf.remove(&src);
             let _ = self.ctx.rib.send(rib::Message::NexthopUnregister {
-                proto: "pim".to_string(),
+                proto: self.proto_label.clone(),
                 nh: IpAddr::V4(src),
+                vrf_id: self.ctx.vrf_id(),
             });
         }
     }

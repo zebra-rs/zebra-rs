@@ -38,7 +38,7 @@ pub fn spawn_pim(config: &ConfigManager) {
     // The mroute socket claims the kernel's multicast-routing
     // instance (MRT_INIT) — EADDRINUSE means another multicast
     // daemon owns it on this host.
-    let fp = match ForwardingPlane::new(&probe) {
+    let fp = match ForwardingPlane::new(&probe, 0) {
         Ok(fp) => fp,
         Err(e) => {
             tracing::warn!("pim: not started (mroute socket: {e}); PIM disabled");
@@ -47,7 +47,20 @@ pub fn spawn_pim(config: &ConfigManager) {
     };
     let (rib_client, rib_rx) = config.subscribe_to_rib("pim");
     let ctx = ProtoContext::default_table(rib_client);
-    let pim = inst::Pim::new(ctx, sock, igmp_sock, fp, rib_rx);
+    // `"pim"` is the default-instance proto label; per-VRF children
+    // get `"pim:vrf:<name>"`. The subscriber + config.tx let the
+    // default task mint per-VRF RIB subscriptions and (de)register
+    // `show pim vrf <name>` channels.
+    let pim = inst::Pim::new(
+        ctx,
+        sock,
+        igmp_sock,
+        fp,
+        rib_rx,
+        "pim".to_string(),
+        config.rib_subscriber(),
+        config.tx.clone(),
+    );
     config.subscribe("pim", pim.cm.tx.clone());
     config.subscribe_show("pim", pim.show.tx.clone());
     let task = inst::serve(pim);

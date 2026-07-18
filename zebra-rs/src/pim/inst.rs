@@ -20,7 +20,8 @@ use tokio::sync::mpsc::{self, UnboundedReceiver, UnboundedSender};
 use tokio::time::sleep_until;
 
 use crate::config::{
-    Args, ConfigChannel, ConfigRequest, DisplayRequest, ShowChannel, path_from_command,
+    Args, CommandPath, ConfigChannel, ConfigOp, ConfigRequest, DisplayRequest, RibSubscriber,
+    ShowChannel, path_from_command, vrf_config_split,
 };
 use crate::context::{ProtoContext, Task};
 use crate::rib::api::RibRx;
@@ -105,6 +106,24 @@ pub struct Pim {
     pub(crate) igmp_sock: Arc<AsyncFd<Socket>>,
     /// RIB client context — carries the NHT registrations for RPF.
     pub(crate) ctx: ProtoContext,
+    /// `"pim"` for the default instance, `"pim:vrf:<name>"` for a
+    /// per-VRF child — namespaces name-keyed RIB registrations.
+    pub proto_label: String,
+    /// RIB-subscription factory, used by the parent to mint per-VRF
+    /// clients; cloned into children.
+    pub(crate) rib_subscriber: RibSubscriber,
+    /// Sender into the config manager, for (de)registering a child's
+    /// `show pim vrf <name>` channel.
+    pub(crate) config_tx: mpsc::Sender<crate::config::Message>,
+    /// Per-VRF buffered config (parent only), rewritten with the
+    /// `vrf <name>` selector stripped; replayed into a child at spawn
+    /// and kept so a VrfDel→VrfAdd flap respawns from intent.
+    pub(crate) vrf_log: BTreeMap<String, Vec<(Vec<CommandPath>, ConfigOp)>>,
+    /// Running per-VRF children (parent only), keyed by VRF name.
+    pub(crate) vrf_registry: BTreeMap<String, super::vrf::PimVrfHandle>,
+    /// Kernel VRF masters from `RibRx::VrfAdd` (parent only):
+    /// name → (table_id, ifindex).
+    pub(crate) rib_known_vrfs: BTreeMap<String, (u32, u32)>,
     _read_task: Task<()>,
     _write_task: Task<()>,
     _igmp_read_task: Task<()>,
@@ -113,12 +132,16 @@ pub struct Pim {
 }
 
 impl Pim {
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         ctx: ProtoContext,
         sock: AsyncFd<Socket>,
         igmp_sock: AsyncFd<Socket>,
         fp: ForwardingPlane,
         rib_rx: UnboundedReceiver<RibRx>,
+        proto_label: String,
+        rib_subscriber: RibSubscriber,
+        config_tx: mpsc::Sender<crate::config::Message>,
     ) -> Self {
         let sock = Arc::new(sock);
         let igmp_sock = Arc::new(igmp_sock);
@@ -170,6 +193,12 @@ impl Pim {
             sock,
             igmp_sock,
             ctx,
+            proto_label,
+            rib_subscriber,
+            config_tx,
+            vrf_log: BTreeMap::new(),
+            vrf_registry: BTreeMap::new(),
+            rib_known_vrfs: BTreeMap::new(),
             _read_task: read_task,
             _write_task: write_task,
             _igmp_read_task: igmp_read_task,
@@ -248,6 +277,18 @@ impl Pim {
                 self.rpf_nexthop_update(nh, resolution);
                 return;
             }
+            RibRx::VrfAdd {
+                name,
+                table_id,
+                ifindex,
+            } => {
+                self.vrf_add(name, table_id, ifindex);
+                return;
+            }
+            RibRx::VrfDel { name } => {
+                self.vrf_del(name);
+                return;
+            }
             _ => return,
         }
         // Any link/address change can flip on-link-ness of tracked
@@ -256,9 +297,105 @@ impl Pim {
     }
 
     fn process_cm_msg(&mut self, msg: ConfigRequest) {
+        if msg.op == ConfigOp::CommitEnd {
+            self.vrf_commit_end();
+            return;
+        }
+        if msg.op == ConfigOp::CommitStart {
+            return;
+        }
+        // `/router/pim/vrf/<name>/…` belongs to a per-VRF child, not
+        // this instance: strip the selector, buffer for replay,
+        // forward live when the child runs. A child's paths never
+        // carry a `vrf` segment, so this is a no-op there.
+        if let Some((name, rewritten)) = vrf_config_split("pim", &msg.paths) {
+            self.vrf_config_record(name, rewritten, msg.op);
+            return;
+        }
         let (path, args) = path_from_command(&msg.paths);
         if let Some(f) = self.callbacks.get(&path).copied() {
             f(self, args, msg.op);
+        }
+    }
+
+    // ---- per-VRF child management (default instance only) ----
+
+    fn vrf_config_record(&mut self, name: String, rewritten: Vec<CommandPath>, op: ConfigOp) {
+        if let Some(handle) = self.vrf_registry.get(&name) {
+            let _ = handle.cm_tx.send(ConfigRequest::new(rewritten.clone(), op));
+        }
+        self.vrf_log
+            .entry(name.clone())
+            .or_default()
+            .push((rewritten, op));
+        // The kernel VrfAdd may already have arrived before this
+        // intent line — spawn from whichever half lands second.
+        self.vrf_spawn_if_ready(&name);
+    }
+
+    fn vrf_spawn_if_ready(&mut self, name: &str) {
+        if self.vrf_registry.contains_key(name) {
+            return;
+        }
+        let Some(&(table_id, _)) = self.rib_known_vrfs.get(name) else {
+            return;
+        };
+        let has_intent = self
+            .vrf_log
+            .get(name)
+            .is_some_and(|log| super::vrf::vrf_log_active(log));
+        if !has_intent {
+            return;
+        }
+        let log = self.vrf_log.get(name).cloned().unwrap_or_default();
+        if let Some(handle) =
+            super::vrf::spawn_pim_vrf(name, table_id, &self.rib_subscriber, &self.config_tx, &log)
+        {
+            self.vrf_registry.insert(name.to_string(), handle);
+        }
+    }
+
+    fn vrf_add(&mut self, name: String, table_id: u32, ifindex: u32) {
+        if self.proto_label != "pim" {
+            return;
+        }
+        self.rib_known_vrfs
+            .insert(name.clone(), (table_id, ifindex));
+        self.vrf_spawn_if_ready(&name);
+    }
+
+    /// Kernel VRF master removed: despawn the child but KEEP its
+    /// config log so a later VrfAdd respawns from intent.
+    fn vrf_del(&mut self, name: String) {
+        if self.proto_label != "pim" {
+            return;
+        }
+        self.rib_known_vrfs.remove(&name);
+        if self.vrf_registry.remove(&name).is_some() {
+            super::vrf::despawn_pim_vrf(&name, &self.config_tx, &self.rib_subscriber);
+        }
+    }
+
+    /// CommitEnd fan-out: tear down children whose `router pim vrf
+    /// <name>` block was fully deleted this commit, then forward
+    /// CommitEnd to the survivors.
+    fn vrf_commit_end(&mut self) {
+        let emptied: Vec<String> = self
+            .vrf_log
+            .iter()
+            .filter(|(_, log)| !super::vrf::vrf_log_active(log))
+            .map(|(name, _)| name.clone())
+            .collect();
+        for name in emptied {
+            self.vrf_log.remove(&name);
+            if self.vrf_registry.remove(&name).is_some() {
+                super::vrf::despawn_pim_vrf(&name, &self.config_tx, &self.rib_subscriber);
+            }
+        }
+        for handle in self.vrf_registry.values() {
+            let _ = handle
+                .cm_tx
+                .send(ConfigRequest::new(Vec::new(), ConfigOp::CommitEnd));
         }
     }
 
