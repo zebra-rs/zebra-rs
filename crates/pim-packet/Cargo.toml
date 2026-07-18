@@ -1,0 +1,20 @@
+[package]
+name = "pim-packet"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+description = "Parser and encoder for PIM-SM (RFC 7761) and IGMP (RFC 2236/3376) packets"
+
+[dependencies]
+packet-utils = { path = "../packet-utils" }
+byteorder = "1.5"
+bytes = "1.9"
+internet-checksum = "0.2.1"
+nom = "8"
+
+[dev-dependencies]
+hex-literal = "1.0"
+
+[lints]
+workspace = true
