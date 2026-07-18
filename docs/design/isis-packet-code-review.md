@@ -287,7 +287,7 @@ bookkeeping remains valid but is no longer load-bearing. Unit tests pin the
 parsed S=1/sublen=0 re-emit and the hand-built subs-without-flag round-trip
 for both TLV 135 and TLV 236.
 
-### 12. 🟡 `P2p3Way` / `Restart` parse optionals by remaining length but emit by `Option` — PLAUSIBLE
+### 12. 🟡 `P2p3Way` / `Restart` parse optionals by remaining length but emit by `Option` — PLAUSIBLE — ✅ FIXED
 `crates/isis-packet/src/parser.rs:1168`; `crates/isis-packet/src/sub/restart.rs:83`/`:129`
 
 `IsisTlvP2p3Way::parse_be` assigns optional trailing fields purely by remaining
@@ -303,8 +303,12 @@ parser reads the first 2 as `remaining_time` and honors a bogus hold-time during
 graceful restart. Currently latent because callers set the fields together, but
 nothing enforces it.
 
-**Fix:** make emit/parse agree on an explicit presence rule (e.g. all-or-nothing
-tied to a flag), or encode the optional group as a single `Option<struct>`.
+**Fixed:** both `len()`/`emit()` now enforce prefix-closure — fields are
+emitted in wire order and emission stops at the first `None`, so a gapped
+struct can never produce a byte layout the length-driven parser would
+misassign. All daemon builders were already prefix-closed, so no wire output
+changes. Unit tests pin the gapped-struct emit (only the leading fields) and
+every prefix-closed `P2p3Way` form round-tripping exactly.
 
 ### 13. 🟡 `admin_group()` doc claims sub-TLV 3 but reads sub-TLV 14; sub-TLV 3 undispatched — PLAUSIBLE
 `crates/isis-packet/src/sub/neigh.rs:154`
