@@ -1698,20 +1698,21 @@ impl Ospfv3PrefixSidSubTlv {
 
 /// Adj-SID Sub-TLV (RFC 8666 §6.1).
 ///
-/// Wire layout: flags(1) + reserved(1) + weight(2) + SID(3 or 4).
+/// Wire layout: flags(1) + weight(1) + reserved(2) + SID(3 or 4) — the
+/// Weight is a single octet at offset 1 (Flags | Weight | Reserved).
 /// `AdjSidFlags` reused verbatim — the same B / V / L / G / P bit
 /// assignments as the OSPFv2 Adj-SID Sub-TLV (RFC 8665 §5); only the
-/// surrounding wire layout (16-bit Weight, no MT-ID) differs.
+/// surrounding wire layout (no MT-ID) differs.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Ospfv3AdjSidSubTlv {
     pub flags: AdjSidFlags,
-    pub weight: u16,
+    pub weight: u8,
     pub sid: SidLabelTlv,
 }
 
 impl Ospfv3AdjSidSubTlv {
     fn value_len(&self) -> u16 {
-        // flags(1) + reserved(1) + weight(2) + sid(3 or 4)
+        // flags(1) + weight(1) + reserved(2) + sid(3 or 4)
         4 + match &self.sid {
             SidLabelTlv::Label(_) => 3,
             SidLabelTlv::Index(_) => 4,
@@ -1720,8 +1721,8 @@ impl Ospfv3AdjSidSubTlv {
 
     fn emit(&self, buf: &mut BytesMut) {
         buf.put_u8(self.flags.into());
-        buf.put_u8(0); // reserved
-        buf.put_u16(self.weight);
+        buf.put_u8(self.weight);
+        buf.put_u16(0); // reserved
         match &self.sid {
             SidLabelTlv::Label(v) => buf.put(&packet_utils::u32_u8_3(*v)[..]),
             SidLabelTlv::Index(v) => buf.put_u32(*v),
@@ -1730,8 +1731,8 @@ impl Ospfv3AdjSidSubTlv {
 
     fn parse_be(input: &[u8]) -> IResult<&[u8], Self> {
         let (input, flags) = be_u8(input)?;
-        let (input, _reserved) = be_u8(input)?;
-        let (input, weight) = be_u16(input)?;
+        let (input, weight) = be_u8(input)?;
+        let (input, _reserved) = be_u16(input)?;
         let sid_len = input.len();
         let (input, sid) = match sid_len {
             3 => {
@@ -1765,14 +1766,14 @@ impl Ospfv3AdjSidSubTlv {
 #[derive(Debug, Clone, PartialEq)]
 pub struct Ospfv3LanAdjSidSubTlv {
     pub flags: AdjSidFlags,
-    pub weight: u16,
+    pub weight: u8,
     pub neighbor_router_id: Ipv4Addr,
     pub sid: SidLabelTlv,
 }
 
 impl Ospfv3LanAdjSidSubTlv {
     fn value_len(&self) -> u16 {
-        // flags(1) + reserved(1) + weight(2) + neighbor_router_id(4) + sid(3 or 4)
+        // flags(1) + weight(1) + reserved(2) + neighbor_router_id(4) + sid(3 or 4)
         8 + match &self.sid {
             SidLabelTlv::Label(_) => 3,
             SidLabelTlv::Index(_) => 4,
@@ -1781,8 +1782,8 @@ impl Ospfv3LanAdjSidSubTlv {
 
     fn emit(&self, buf: &mut BytesMut) {
         buf.put_u8(self.flags.into());
-        buf.put_u8(0); // reserved
-        buf.put_u16(self.weight);
+        buf.put_u8(self.weight);
+        buf.put_u16(0); // reserved
         buf.put(&self.neighbor_router_id.octets()[..]);
         match &self.sid {
             SidLabelTlv::Label(v) => buf.put(&packet_utils::u32_u8_3(*v)[..]),
@@ -1792,8 +1793,8 @@ impl Ospfv3LanAdjSidSubTlv {
 
     fn parse_be(input: &[u8]) -> IResult<&[u8], Self> {
         let (input, flags) = be_u8(input)?;
-        let (input, _reserved) = be_u8(input)?;
-        let (input, weight) = be_u16(input)?;
+        let (input, weight) = be_u8(input)?;
+        let (input, _reserved) = be_u16(input)?;
         let (input, neighbor_router_id) = Ipv4Addr::parse_be(input)?;
         let sid_len = input.len();
         let (input, sid) = match sid_len {
@@ -3590,6 +3591,41 @@ mod tests {
         assert!(o.at());
         // A compliant peer's AT bit parses back to at() == true.
         assert!(Ospfv3Options::from_bits(0x0000_0400).at());
+    }
+
+    #[test]
+    fn adj_sid_weight_at_rfc8666_offset() {
+        // RFC 8666 §6.1: Flags(8) | Weight(8) | Reserved(16) | SID. Weight is
+        // a single octet at offset 1, not a u16 at offsets 2-3.
+        let tlv = Ospfv3AdjSidSubTlv {
+            flags: AdjSidFlags::new().with_v_flag(true).with_l_flag(true),
+            weight: 200,
+            sid: SidLabelTlv::Label(15003),
+        };
+        let mut buf = BytesMut::new();
+        tlv.emit(&mut buf);
+        assert_eq!(buf[1], 200, "weight octet at offset 1");
+        assert_eq!(&buf[2..4], &[0, 0], "reserved 16 bits at offsets 2-3");
+        let (_, back) = Ospfv3AdjSidSubTlv::parse_be(&buf[..]).unwrap();
+        assert_eq!(back, tlv);
+    }
+
+    #[test]
+    fn lan_adj_sid_weight_at_rfc8666_offset() {
+        // RFC 8666 §6.2: same Flags | Weight | Reserved head before the
+        // Neighbor Router ID.
+        let tlv = Ospfv3LanAdjSidSubTlv {
+            flags: AdjSidFlags::new().with_v_flag(true).with_l_flag(true),
+            weight: 100,
+            neighbor_router_id: "10.0.0.2".parse().unwrap(),
+            sid: SidLabelTlv::Label(15100),
+        };
+        let mut buf = BytesMut::new();
+        tlv.emit(&mut buf);
+        assert_eq!(buf[1], 100, "weight octet at offset 1");
+        assert_eq!(&buf[2..4], &[0, 0], "reserved 16 bits at offsets 2-3");
+        let (_, back) = Ospfv3LanAdjSidSubTlv::parse_be(&buf[..]).unwrap();
+        assert_eq!(back, tlv);
     }
 
     fn make_hello() -> Ospfv3Hello {
