@@ -6,7 +6,7 @@ candidate was checked by an independent adversarial verifier that had to name a
 concrete trigger and quote the decisive lines, then a fresh gap sweep added more.
 
 **Result: 34 confirmed correctness bugs + 15 confirmed cleanup items.**
-**Status 2026-07-18: top-9 fixed and merged** (PRs #1962, #1972, #1981,
+**Status 2026-07-18: top-10 fixed and merged** (PRs #1962, #1972, #1981,
 #1984, #1987, #1991, #1997, and the finding-#9 branch); fixes below the
 cap remain open. Three
 candidates were refuted (two vty-disconnect "panics" are guarded by detached
@@ -155,7 +155,7 @@ L3VPN/unicast install siblings still take the first SID regardless of family.
 traffic toward the **End.DT6 SID, whose decap only serves IPv6 → blackhole.**
 Mirror-image for v6. Same family-blind pattern at `nht.rs:203`, `show.rs:1847`.
 
-### 10. Phantom `Established` state from an un-cancelled advertise timer — `route.rs:10063`
+### 10. Phantom `Established` state from an un-cancelled advertise timer — `route.rs:10063` — FIXED (timers cancelled in route_clean + handlers no longer force Established)
 
 `route_clean` (peer teardown) clears the `cache_vpnv4`/`cache_vpnv6` forward maps
 but not their debounce timers (the EVPN teardown at `10582-10584` clears

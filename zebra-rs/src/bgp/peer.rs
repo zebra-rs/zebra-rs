@@ -1923,22 +1923,36 @@ pub fn fsm(
     }
 }
 
+// The three advertise-debounce expiries below return `peer.state`, not
+// a hardcoded `State::Established`: a timer that outlives its session
+// (`route_clean` now cancels them, but any future re-arm path must not
+// resurrect the bug) would otherwise forge an Idle peer into
+// Established with no session behind it. The flush is likewise gated —
+// a stale timer firing after a fast reconnect must not push the dead
+// session's cached routes onto the new session's writer.
+
 pub fn fsm_adv_timer_vpnv4_expires(peer: &mut Peer) -> State {
     peer.cache_vpnv4_timer = None;
-    peer.flush_vpnv4();
-    State::Established
+    if peer.state.is_established() {
+        peer.flush_vpnv4();
+    }
+    peer.state
 }
 
 pub fn fsm_adv_timer_vpnv6_expires(peer: &mut Peer) -> State {
     peer.cache_vpnv6_timer = None;
-    peer.flush_vpnv6();
-    State::Established
+    if peer.state.is_established() {
+        peer.flush_vpnv6();
+    }
+    peer.state
 }
 
 pub fn fsm_adv_timer_evpn_expires(peer: &mut Peer) -> State {
     peer.cache_evpn_timer = None;
-    peer.flush_evpn();
-    State::Established
+    if peer.state.is_established() {
+        peer.flush_evpn();
+    }
+    peer.state
 }
 
 /// `fe80::/10` test (RFC 4291 §2.5.6). `Ipv6Addr::is_unicast_link_local`
@@ -4268,5 +4282,160 @@ mod as4_negotiation_tests {
         let cap = open.bgp_cap.as4.expect("capability forced by 4-byte AS");
         assert_eq!(cap.asn, 4_200_000_001);
         assert!(peer.opt.as4.send);
+    }
+}
+
+#[cfg(test)]
+mod adv_timer_phantom_tests {
+    use super::*;
+
+    fn idle_peer() -> Peer {
+        let (tx, rx) = mpsc::channel::<Message>(64);
+        Box::leak(Box::new(rx));
+        let mut peer = Peer::new(
+            1,
+            65001,
+            Ipv4Addr::new(10, 0, 0, 1),
+            65001,
+            "10.0.0.2".parse().unwrap(),
+            None,
+            tx,
+            crate::context::ProtoContext::default_table_no_rib(),
+        );
+        peer.state = State::Idle;
+        peer
+    }
+
+    /// Review finding #10 regression (defense layer): a VPN / EVPN
+    /// advertise-debounce timer that fires while the session is down
+    /// must not forge the peer into `Established`. The old handlers
+    /// returned `State::Established` unconditionally, so a timer armed
+    /// before a bounce promoted the Idle peer — membership enroll,
+    /// route-sync into a null `packet_tx`, update-group attach — with
+    /// no session behind it.
+    #[tokio::test]
+    async fn adv_timer_on_idle_peer_does_not_forge_established() {
+        let mut peer = idle_peer();
+        assert_eq!(fsm_adv_timer_vpnv4_expires(&mut peer), State::Idle);
+        assert_eq!(fsm_adv_timer_vpnv6_expires(&mut peer), State::Idle);
+        assert_eq!(fsm_adv_timer_evpn_expires(&mut peer), State::Idle);
+
+        // And an Established peer keeps behaving exactly as before.
+        peer.state = State::Established;
+        assert_eq!(fsm_adv_timer_vpnv4_expires(&mut peer), State::Established);
+        assert_eq!(fsm_adv_timer_vpnv6_expires(&mut peer), State::Established);
+        assert_eq!(fsm_adv_timer_evpn_expires(&mut peer), State::Established);
+    }
+
+    /// The same forgery through the full FSM dispatch: the events carry
+    /// no state gate and `fsm()` applies the returned state blindly, so
+    /// this is the exact path the stale timer took.
+    #[tokio::test]
+    async fn adv_timer_event_through_fsm_keeps_idle_peer_idle() {
+        let (tx, rx) = mpsc::channel::<Message>(64);
+        Box::leak(Box::new(rx));
+        let mut peers = PeerMap::new();
+        peers.insert("10.0.0.2".parse().unwrap(), idle_peer());
+        let ident = peers.get(&"10.0.0.2".parse().unwrap()).unwrap().ident;
+
+        let router_id = Ipv4Addr::new(10, 0, 0, 1);
+        let ctx = crate::context::ProtoContext::default_table_no_rib();
+        let mut local_rib = LocalRib::default();
+        let mut shard = crate::bgp::shard::BgpShard::default();
+        let mut attr_store = BgpAttrStore::default();
+        let mut update_groups = crate::bgp::update_group::empty_map();
+        let interface_addrs = crate::bgp::interface_addrs::InterfaceAddrs::default();
+        let mut top = BgpTop {
+            router_id: &router_id,
+            srv6_ipv6_export: None,
+            local_rib: &mut local_rib,
+            shard: &mut shard,
+            tx: &tx,
+            rib_client: &ctx.rib,
+            attr_store: &mut attr_store,
+            update_groups: &mut update_groups,
+            interface_addrs: &interface_addrs,
+            vrf_export: None,
+            color_policy: None,
+            flex_algo_routes: None,
+            flex_algo_srv6_routes: None,
+            vrf_import: None,
+            nexthop_cache: None,
+            vrf_transport_v4: None,
+            vrf_transport_v6: None,
+            central_label_alloc: None,
+            as_sets_withdraw: false,
+        };
+
+        fsm(
+            &mut top,
+            &mut peers,
+            ident,
+            Event::AdvTimerVpnv4Expires,
+            None,
+        );
+        let peer = peers.get_by_idx(ident).unwrap();
+        assert_eq!(
+            peer.state,
+            State::Idle,
+            "a stale advertise timer must not promote an Idle peer"
+        );
+    }
+
+    /// Root-cause layer: peer teardown must cancel the VPN advertise
+    /// debounce timers (and drop the reverse maps) exactly like the
+    /// EVPN teardown always did — an armed timer outliving the session
+    /// is what delivered the forged event.
+    #[tokio::test]
+    async fn route_clean_cancels_vpn_advertise_timers() {
+        let (tx, rx) = mpsc::channel::<Message>(64);
+        Box::leak(Box::new(rx));
+        let mut peers = PeerMap::new();
+        let mut peer = idle_peer();
+        peer.cache_vpnv4_timer = Some(timer::start_adv_timer_vpnv4(&peer));
+        peer.cache_vpnv6_timer = Some(timer::start_adv_timer_vpnv6(&peer));
+        peers.insert("10.0.0.2".parse().unwrap(), peer);
+        let ident = peers.get(&"10.0.0.2".parse().unwrap()).unwrap().ident;
+
+        let router_id = Ipv4Addr::new(10, 0, 0, 1);
+        let ctx = crate::context::ProtoContext::default_table_no_rib();
+        let mut local_rib = LocalRib::default();
+        let mut shard = crate::bgp::shard::BgpShard::default();
+        let mut attr_store = BgpAttrStore::default();
+        let mut update_groups = crate::bgp::update_group::empty_map();
+        let interface_addrs = crate::bgp::interface_addrs::InterfaceAddrs::default();
+        let mut top = BgpTop {
+            router_id: &router_id,
+            srv6_ipv6_export: None,
+            local_rib: &mut local_rib,
+            shard: &mut shard,
+            tx: &tx,
+            rib_client: &ctx.rib,
+            attr_store: &mut attr_store,
+            update_groups: &mut update_groups,
+            interface_addrs: &interface_addrs,
+            vrf_export: None,
+            color_policy: None,
+            flex_algo_routes: None,
+            flex_algo_srv6_routes: None,
+            vrf_import: None,
+            nexthop_cache: None,
+            vrf_transport_v4: None,
+            vrf_transport_v6: None,
+            central_label_alloc: None,
+            as_sets_withdraw: false,
+        };
+
+        route_clean(ident, &mut top, &mut peers, None);
+
+        let peer = peers.get_by_idx(ident).unwrap();
+        assert!(
+            peer.cache_vpnv4_timer.is_none(),
+            "route_clean must cancel the VPNv4 advertise timer"
+        );
+        assert!(
+            peer.cache_vpnv6_timer.is_none(),
+            "route_clean must cancel the VPNv6 advertise timer"
+        );
     }
 }
