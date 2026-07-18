@@ -35,7 +35,7 @@ source, not left as guesses.
 Severity legend: 🔴 high · 🟠 medium · 🟡 low. Verdict: **CONFIRMED** (inputs +
 wrong output identified) · **PLAUSIBLE** (mechanism real, trigger conditional).
 
-### 1. 🔴 `IsisTlvLspEntries::len()` wraps at ≥16 entries → corrupt CSNP/PSNP — CONFIRMED
+### 1. 🔴 `IsisTlvLspEntries::len()` wraps at ≥16 entries → corrupt CSNP/PSNP — CONFIRMED — ✅ FIXED (PR #1952)
 `crates/isis-packet/src/parser.rs:755`
 
 `len()` is `(self.entries.len() * 16) as u8`, which wraps mod-256, but `emit()`
@@ -55,10 +55,11 @@ TLV header — the whole CSNP/PSNP desyncs and **LSDB synchronization breaks on 
 network with more than 15 LSPs per level**. Small BDD topologies stay under 16
 LSPs, which is why it has not surfaced in testing.
 
-**Fix:** cap the builders at 15 entries per TLV (`available_len/16` → `min(15)`),
-or add `LspEntries` to the packer's `split_distributable_at_255` set, or make the
-codec's `len()`/`emit()` consistent (both truncate at 15) so an over-full TLV
-can't be silently mis-framed.
+**Fixed in PR #1952:** added `IsisTlvLspEntries::MAX_ENTRIES` (15) and capped
+`entry_size_max` in both `csnp_generate` and the PSNP builder, so larger LSDBs
+span more SNP PDUs. Unit tests pin the exact-length round-trip at 15 entries and
+the mod-256 wrap beyond it; BDD scenario `isis_csnp_large_lsdb` drives a >15-LSP
+LSDB through DIS CSNP sync.
 
 ### 2. 🔴 `RouterCapFlags` S/D flags at the wrong bit positions — CONFIRMED
 `crates/isis-packet/src/sub/cap.rs:214`
@@ -405,8 +406,8 @@ Correctness outranks these for the ranked list, but they're worth scheduling:
 
 ## Suggested priority
 
-1. **Fix #1 (LspEntries wrap)** first — it silently breaks LSDB sync on any
-   production-sized network and is entirely invisible in small test topologies.
+1. ~~Fix #1 (LspEntries wrap) first~~ — **done** (PR #1952): builders capped at
+   15 entries per TLV; unit + BDD regression coverage in place.
 2. **Fix #2 (RouterCap S/D) and #5 (Srv6TlvFlags MTID)** next — both are
    RFC/FRR-confirmed interop breaks with trivial one-line fixes.
 3. **Fix #3 (nsap panic)** — a one-line guard that removes a config-input crash.
