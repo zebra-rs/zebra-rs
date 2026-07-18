@@ -2,6 +2,7 @@
 //! DR election. Architecture: docs/design/pim-sm-ssm-architecture.md.
 
 pub mod assert_fsm;
+pub mod bsr;
 pub mod config;
 pub mod igmp;
 pub mod inst;

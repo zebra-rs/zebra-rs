@@ -1,0 +1,14 @@
+interface:
+- if-name: eth1
+  ipv4:
+    address: 10.9.21.1/24
+- if-name: eth2
+  ipv4:
+    address: 10.9.22.1/24
+router:
+  pim:
+    interface:
+    - if-name: eth1
+      dr-priority: 1
+    - if-name: eth2
+      dr-priority: 1
