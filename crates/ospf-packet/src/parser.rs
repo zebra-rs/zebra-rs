@@ -560,12 +560,20 @@ impl OspfLsa {
         }
     }
 
-    /// Verify the Fletcher checksum of a received LSA (RFC 2328).
-    /// Returns true if the checksum is valid.
+    /// Verify the Fletcher checksum of an LSA (RFC 2328).
+    ///
+    /// Received LSAs are checked against their cached wire bytes because the
+    /// typed representation may not preserve unknown fields byte-for-byte.
+    /// Self-originated LSAs have no cache and are checked via typed re-emit.
     pub fn verify_checksum(&self) -> bool {
-        let mut buf = BytesMut::with_capacity(self.h.length as usize);
-        self.h.emit(&mut buf);
-        self.emit_lsp(&mut buf);
+        let mut buf = if let Some(raw) = self.raw.as_ref() {
+            BytesMut::from(raw.as_ref())
+        } else {
+            let mut buf = BytesMut::with_capacity(self.h.length as usize);
+            self.h.emit(&mut buf);
+            self.emit_lsp(&mut buf);
+            buf
+        };
         if buf.len() < 18 {
             return false;
         }
@@ -2929,6 +2937,44 @@ mod tests {
         // gracefully rather than pre-allocate ~gigabytes (regression for the
         // Vec::with_capacity DoS).
         assert!(parse_lsas_with_raw(&[], 0xFFFF_FFFF).is_err());
+    }
+
+    #[test]
+    fn verify_checksum_uses_raw_lsa_bytes() {
+        // Router-LSA with one link whose unknown wire type (255) is decoded as
+        // Stub (3). Re-emitting the typed representation therefore changes a
+        // checksummed byte, while the cached receive bytes remain valid.
+        let mut bytes = vec![
+            0x00, 0x01, // LS age
+            0x02, 0x01, // options, Router-LSA
+            10, 0, 0, 1, // link-state ID
+            10, 0, 0, 2, // advertising router
+            0x80, 0x00, 0x00, 0x01, // sequence number
+            0x00, 0x00, // checksum (filled below)
+            0x00, 0x24, // length: 36 octets
+            0x00, 0x00, 0x00, 0x01, // flags, number of links
+            10, 0, 0, 3, // link ID
+            255, 255, 255, 0, // link data
+            0xFF, 0x00, 0x00, 0x0A, // unknown type, no TOS, metric 10
+        ];
+        let checksum = lsa_checksum_calc(&bytes[2..], 14).to_be_bytes();
+        bytes[16..18].copy_from_slice(&checksum);
+
+        let (rest, mut lsas) = parse_lsas_with_raw(&bytes, 1).expect("parse");
+        assert!(rest.is_empty());
+        let mut lsa = lsas.pop().expect("one LSA");
+        assert!(
+            lsa.verify_checksum(),
+            "cached wire bytes have a valid checksum"
+        );
+
+        // Without the receive cache, verification falls back to the lossy
+        // typed re-emit and correctly demonstrates why raw must take priority.
+        lsa.raw = None;
+        assert!(
+            !lsa.verify_checksum(),
+            "typed re-emit changes link type 255 to 3"
+        );
     }
 
     #[test]
