@@ -114,6 +114,25 @@ impl Pim {
         }
     }
 
+    /// Assert-metric inputs for a tracked address: (preference,
+    /// metric). Connected beats any gateway route; unresolved is
+    /// infinitely bad.
+    pub(crate) fn rpf_pref_metric(&self, addr: Ipv4Addr) -> (u32, u32) {
+        match self.rpf.get(&addr).map(|e| e.state) {
+            Some(RpfState::Connected { .. }) => (0, 0),
+            Some(RpfState::Gateway { .. }) => {
+                let metric = self
+                    .rpf
+                    .get(&addr)
+                    .and_then(|e| e.resolution.as_ref())
+                    .map(|r| r.metric)
+                    .unwrap_or(0);
+                (100, metric)
+            }
+            _ => (u32::MAX, u32::MAX),
+        }
+    }
+
     /// Propagate an RPF change into every TIB entry tracking that
     /// address ((S,G) sources and (*,G) RPs alike): prune off the old
     /// upstream, adopt the new state, re-evaluate.

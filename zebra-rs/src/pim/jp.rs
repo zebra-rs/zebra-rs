@@ -20,6 +20,11 @@ use super::tib::{JP_HOLDTIME, JoinState, SgKey};
 /// Periodic J/P refresh interval (t_periodic, RFC 7761 §4.11).
 pub const JP_PERIOD: Duration = Duration::from_secs(60);
 
+/// Suppressed refresh interval after overhearing another router's
+/// Join to our upstream (≈ 1.25 × t_periodic, inside the RFC's
+/// 1.1–1.4 randomization band).
+pub const JP_SUPPRESS: Duration = Duration::from_secs(75);
+
 impl Pim {
     // ---- RX ----
 
@@ -37,12 +42,9 @@ impl Pim {
             return;
         };
         if !link.is_my_addr(&upstream) {
-            tracing::debug!(
-                "pim: J/P from {} on {} targets {} (not us) — ignored",
-                src,
-                link.name,
-                upstream
-            );
+            // Overheard LAN traffic toward another upstream router:
+            // feeds join suppression and prune override.
+            self.jp_overhear(ifindex, src, upstream, jp);
             return;
         }
         let holdtime = jp.holdtime;
@@ -91,6 +93,79 @@ impl Pim {
                     (true, false) => {}
                 }
             }
+        }
+    }
+
+    /// A J/P on a shared LAN addressed to a router that is our own
+    /// RPF neighbor for matching state (RFC 7761 §4.5.2):
+    ///   * another router's Join for state we also joined suppresses
+    ///     our next periodic refresh;
+    ///   * another router's Prune for state we still want triggers an
+    ///     override Join so the upstream keeps forwarding.
+    fn jp_overhear(
+        &mut self,
+        ifindex: u32,
+        sender: Ipv4Addr,
+        upstream: Ipv4Addr,
+        jp: &PimJoinPrune,
+    ) {
+        let bucket = RpfState::Gateway {
+            ifindex,
+            nexthop: upstream,
+        };
+        let mut overrides: Vec<SgKey> = vec![];
+        let mut suppress = false;
+        for group in &jp.groups {
+            let IpAddr::V4(grp) = group.group.addr else {
+                continue;
+            };
+            let key_of = |source: &EncodedSource| -> Option<SgKey> {
+                let IpAddr::V4(addr) = source.addr else {
+                    return None;
+                };
+                match (source.wildcard, source.rpt) {
+                    (true, true) => Some(SgKey::StarG { grp }),
+                    (false, false) => Some(SgKey::Sg { src: addr, grp }),
+                    _ => None,
+                }
+            };
+            for join in &group.joins {
+                let Some(key) = key_of(join) else { continue };
+                if let Some(entry) = self.tib.get(&key)
+                    && entry.join_state == JoinState::Joined
+                    && entry.rpf == bucket
+                {
+                    suppress = true;
+                    tracing::info!(
+                        "pim: {} join suppressed by {} toward {}",
+                        key,
+                        sender,
+                        upstream
+                    );
+                }
+            }
+            for prune in &group.prunes {
+                let Some(key) = key_of(prune) else { continue };
+                if let Some(entry) = self.tib.get(&key)
+                    && entry.join_state == JoinState::Joined
+                    && entry.rpf == bucket
+                {
+                    overrides.push(key);
+                }
+            }
+        }
+        if suppress {
+            // RFC t_suppressed ≈ 1.1–1.4 × t_periodic; one fixed
+            // bump per overheard refresh keeps one joiner per LAN.
+            let deadline = Instant::now() + JP_SUPPRESS;
+            self.jp_refresh
+                .entry((ifindex, upstream))
+                .and_modify(|t| *t = (*t).max(deadline))
+                .or_insert(deadline);
+        }
+        for key in overrides {
+            tracing::info!("pim: {} prune override join toward {}", key, upstream);
+            self.jp_send_entry(ifindex, upstream, key, true);
         }
     }
 

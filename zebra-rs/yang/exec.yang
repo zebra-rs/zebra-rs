@@ -1017,6 +1017,10 @@ module exec {
         ext:help "PIM group-to-RP mappings";
         presence "PIM RP info";
       }
+      container assert {
+        ext:help "PIM assert election state";
+        presence "PIM assert";
+      }
     }
 
     container mroute {
