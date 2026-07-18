@@ -30,7 +30,7 @@ most-severe first.
 | 11 | **Robustness** | `parser.rs:693` | `parse_lsa_with_length` swallows all errors into `Unknown` | ✅ #1990 |
 | 12 | **Correctness** | `parser.rs:422` (+`816`) | v2 emit writes stored `num_adv`/`num_links`, not derived | ✅ #1986 |
 | 13 | **Correctness** | `parser.rs:82` (+`227`) | Unknown v2 payload emit drops body; `typ()` → Hello | ✅ #1998 |
-| 14 | **Cleanup (reuse)** | `parser.rs:618` | Fletcher checksum + FAD/SID codecs duplicated | 🟡 #2005 (SID) |
+| 14 | **Cleanup (reuse)** | `parser.rs:618` | Fletcher checksum + FAD/SID codecs duplicated | ✅ #2005 + #2010 |
 | 15 | **Cleanup (dead code)** | `parser.rs:1197` (+`1077`, `v3.rs`) | Dead `pub` items add confusing API surface | ✅ #2005 |
 
 ---
@@ -55,7 +55,8 @@ are fixed and merged to `main`. The review document itself landed in #1955.
 | [#1990](https://github.com/zebra-rs/zebra-rs/pull/1990) | 11 | `parse_lsa_with_length` propagates a known-type body-parse error instead of masking it as `Unknown`; unknown types stay tolerant; **validated by `ospfv2_tilfa` BDD** |
 | [#1993](https://github.com/zebra-rs/zebra-rs/pull/1993) | 10 | `verify_checksum` checks received LSAs against their cached wire bytes (`raw`); typed re-emit kept only as the self-originated fallback |
 | [#1998](https://github.com/zebra-rs/zebra-rs/pull/1998) | 13 | `Ospfv2Packet::emit` writes the Unknown payload body; `Ospfv2Payload::typ()` returns the stored type (emit match now exhaustive) |
-| [#2005](https://github.com/zebra-rs/zebra-rs/pull/2005) | 15, 14 (SID) | Removed dead `is_known` / `Ospfv3ExtTlv::wire_len`; deduped ~25 SID/Label dispatch sites onto `packet_utils::SidLabelTlv`; **validated by `ospfv2_tilfa` + `ospfv3_tilfa` BDDs**. Fletcher/FAD hoists deferred. |
+| [#2005](https://github.com/zebra-rs/zebra-rs/pull/2005) | 15, 14 (SID) | Removed dead `is_known` / `Ospfv3ExtTlv::wire_len`; deduped ~25 SID/Label dispatch sites onto `packet_utils::SidLabelTlv`; **validated by `ospfv2_tilfa` + `ospfv3_tilfa` BDDs** |
+| [#2010](https://github.com/zebra-rs/zebra-rs/pull/2010) | 14 (Fletcher, FAD) | Hoisted the RFC 1008 Fletcher checksum to `packet_utils::fletcher_lsa_checksum` (shared by OSPF offset-14 and IS-IS offset-12) and the FAD Flags/Srlg payloads to `packet_utils::FadFlags`/`FadSrlg`; **validated by `ospfv2_tilfa` + `ospfv3_tilfa` + `isis_tilfa` BDDs** |
 
 Each fix carries a regression test: byte-offset unit tests where a `show`-based
 check could not discriminate the bug, plus live BDD features for the Prefix-SID
@@ -66,10 +67,10 @@ meaningful lock.
 
 ---
 
-## Next fix candidates (prioritized)
+## Fix history
 
-The remaining findings are all lower-severity than the merged set (no DoS, no
-silent interop break in a shipped datapath). Suggested order:
+Every finding is fixed and merged. The trail below records which PR closed
+each, newest last.
 
 > All correctness / robustness findings are fixed. The previous Tier-1 items
 > landed in: #9 (checksum-skip bypass) [#1979](https://github.com/zebra-rs/zebra-rs/pull/1979),
@@ -83,17 +84,12 @@ silent interop break in a shipped datapath). Suggested order:
 > [#1998](https://github.com/zebra-rs/zebra-rs/pull/1998).
 
 > Finding 15 and the SID/Label-dispatch part of finding 14 were done in
-> [#2005](https://github.com/zebra-rs/zebra-rs/pull/2005).
+> [#2005](https://github.com/zebra-rs/zebra-rs/pull/2005); the Fletcher-checksum
+> and FAD-codec hoists (finding 14 remainder) in
+> [#2010](https://github.com/zebra-rs/zebra-rs/pull/2010).
 
-**Remaining — deferred, opportunistic**
-1. **Finding 14 (remainder) — hoist the Fletcher checksum and FAD codec into
-   `packet-utils`.** The Fletcher `lsa_checksum_calc` is provably the offset-14
-   generalization of `isis-packet`'s offset-12 `checksum_calc`; the FAD Flags /
-   ExcludeSrlg payload codecs are duplicated v2/v3 (admin-group is already
-   shared). Both are cross-crate and touch on-wire checksums / codecs used by
-   OSPFv2, OSPFv3, and IS-IS — best done the next time those codecs are touched,
-   with known-answer tests at both checksum offsets. The SID/Label dispatch part
-   is already done (#2005).
+**All 15 findings are resolved.** Nothing remains open. The notes below are
+opportunistic ideas surfaced during the review, not review findings.
 
 **Additional notes (below the top 15)** — opportunistic:
 - `parser.rs` / `v3.rs` emit: stamp packet length via `try_into`/`checked` so a
@@ -405,7 +401,7 @@ from `typ()`.
 ## Cleanup findings
 
 ### 14. Fletcher checksum + FAD/SID codecs duplicated
-> 🟡 **Partly fixed in [#2005](https://github.com/zebra-rs/zebra-rs/pull/2005)** — the SID/Label dispatch (~25 sites) is deduped onto `packet_utils::SidLabelTlv`. The Fletcher-checksum and FAD-codec hoists remain deferred (cross-crate, checksum-touching).
+> ✅ **Fixed** — SID/Label dispatch in [#2005](https://github.com/zebra-rs/zebra-rs/pull/2005); Fletcher checksum (shared by OSPF + IS-IS) and FAD Flags/Srlg payloads in [#2010](https://github.com/zebra-rs/zebra-rs/pull/2010).
 
 **`crates/ospf-packet/src/parser.rs:612`**
 
