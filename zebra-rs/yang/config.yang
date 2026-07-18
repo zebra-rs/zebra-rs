@@ -3985,6 +3985,22 @@ module config {
       container pim {
         ext:help "PIM-SM routing protocol configuration";
         presence "Enables configuration of PIM-SM";
+        container rp {
+          ext:help "Rendezvous Point configuration";
+          list static {
+            ext:help "Static RP address for a group range";
+            key "address";
+            leaf address {
+              ext:help "RP address";
+              type inet:ipv4-address;
+            }
+            leaf group {
+              ext:help "Multicast group prefix served by this RP";
+              type inet:ipv4-prefix;
+              default "224.0.0.0/4";
+            }
+          }
+        }
         list interface {
           ext:help "Per-interface PIM configuration";
           key "if-name";

@@ -1013,6 +1013,10 @@ module exec {
         ext:help "PIM upstream (S,G) join state";
         presence "PIM upstream";
       }
+      container rp-info {
+        ext:help "PIM group-to-RP mappings";
+        presence "PIM RP info";
+      }
     }
 
     container mroute {

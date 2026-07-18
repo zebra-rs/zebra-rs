@@ -167,17 +167,32 @@ impl Pim {
         };
         // Withdraw every local membership this interface fed into
         // the TIB before dropping the state.
-        let mut prune: Vec<(Ipv4Addr, Ipv4Addr)> = vec![];
+        let mut prune: Vec<super::tib::SgKey> = vec![];
         if let Some(igmp) = link.igmp.take() {
             for (grp, group) in igmp.groups {
                 for src in group.synced {
-                    prune.push((grp, src));
+                    prune.push(super::tib::SgKey::Sg { src, grp });
+                }
+                if group.asm_synced {
+                    prune.push(super::tib::SgKey::StarG { grp });
                 }
             }
         }
         tracing::info!("igmp: interface {} disabled", link.name);
-        for (grp, src) in prune {
-            self.tib_local_prune(super::tib::Sg { src, grp }, ifindex);
+        for key in prune {
+            self.tib_local_prune(key, ifindex);
+        }
+    }
+
+    /// Are we the Designated Router on this interface? (RFC 7761
+    /// §4.3.2 — gates first-hop register duty.)
+    pub(crate) fn i_am_dr(&self, ifindex: u32) -> bool {
+        let Some(link) = self.links.get(&ifindex) else {
+            return false;
+        };
+        match (link.dr, link.primary_addr()) {
+            (Some(dr), Some(me)) => dr == me,
+            _ => false,
         }
     }
 

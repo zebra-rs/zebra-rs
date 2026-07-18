@@ -16,7 +16,7 @@ use tokio::sync::mpsc::UnboundedSender;
 use super::inst::{IgmpSend, Pim};
 use super::link::LinkConfig;
 use super::socket::IGMP_ALL_HOSTS;
-use super::tib::Sg;
+use super::tib::SgKey;
 
 /// Robustness Variable (RFC 3376 §8.1). Fixed at the protocol
 /// default; a config knob can arrive later.
@@ -95,6 +95,9 @@ pub struct IgmpGroup {
     /// Sources currently reflected into the TIB as local (S,G)
     /// membership — the diff base for [`Pim::igmp_tib_sync`].
     pub synced: BTreeSet<Ipv4Addr>,
+    /// Any-source (EXCLUDE) membership currently reflected into the
+    /// TIB as local (*,G) state.
+    pub asm_synced: bool,
 }
 
 impl IgmpGroup {
@@ -107,6 +110,7 @@ impl IgmpGroup {
             last_reporter: None,
             uptime: now,
             synced: BTreeSet::new(),
+            asm_synced: false,
         }
     }
 }
@@ -278,11 +282,17 @@ impl Pim {
                     sync.push(*group_addr);
                 }
             }
-            let mut prune: Vec<(Ipv4Addr, Ipv4Addr)> = vec![];
+            let mut prune: Vec<SgKey> = vec![];
             for group_addr in expired {
                 if let Some(group) = igmp.groups.remove(&group_addr) {
-                    for source in group.synced {
-                        prune.push((group_addr, source));
+                    for src in group.synced {
+                        prune.push(SgKey::Sg {
+                            src,
+                            grp: group_addr,
+                        });
+                    }
+                    if group.asm_synced {
+                        prune.push(SgKey::StarG { grp: group_addr });
                     }
                 }
                 tracing::info!("igmp: group {} expired on {}", group_addr, name);
@@ -290,16 +300,16 @@ impl Pim {
             for group_addr in sync {
                 self.igmp_tib_sync(ifindex, group_addr);
             }
-            for (grp, src) in prune {
-                self.tib_local_prune(Sg { src, grp }, ifindex);
+            for key in prune {
+                self.tib_local_prune(key, ifindex);
             }
         }
     }
 
-    /// Reflect a group's INCLUDE source set into the TIB as local
-    /// (S,G) membership, diffing against what was previously synced.
-    /// EXCLUDE (any-source) membership stays out of the TIB until the
-    /// ASM phase brings (*,G) state.
+    /// Reflect a group's membership into the TIB, diffing against
+    /// what was previously synced: INCLUDE source sets become local
+    /// (S,G) state; EXCLUDE (any-source) membership becomes local
+    /// (*,G) state (SSM-range groups never get (*,G)).
     pub(crate) fn igmp_tib_sync(&mut self, ifindex: u32, grp: Ipv4Addr) {
         let Some(link) = self.links.get_mut(&ifindex) else {
             return;
@@ -318,11 +328,19 @@ impl Pim {
         let added: Vec<Ipv4Addr> = current.difference(&group.synced).copied().collect();
         let removed: Vec<Ipv4Addr> = group.synced.difference(&current).copied().collect();
         group.synced = current;
+        let asm_desired = group.filter_mode == FilterMode::Exclude && !super::rp::is_ssm(grp);
+        let asm_was = group.asm_synced;
+        group.asm_synced = asm_desired;
         for src in added {
-            self.tib_local_join(Sg { src, grp }, ifindex);
+            self.tib_local_join(SgKey::Sg { src, grp }, ifindex);
         }
         for src in removed {
-            self.tib_local_prune(Sg { src, grp }, ifindex);
+            self.tib_local_prune(SgKey::Sg { src, grp }, ifindex);
+        }
+        match (asm_desired, asm_was) {
+            (true, false) => self.tib_local_join(SgKey::StarG { grp }, ifindex),
+            (false, true) => self.tib_local_prune(SgKey::StarG { grp }, ifindex),
+            _ => {}
         }
     }
 

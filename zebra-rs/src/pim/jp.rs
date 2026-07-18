@@ -1,7 +1,8 @@
 //! Join/Prune message handling: the receive walk feeding the
-//! downstream FSM, triggered single-entry sends, and the periodic
-//! per-RPF-neighbor refresh that re-advertises every Joined entry
-//! (RFC 7761 §4.5 — the aggregation unit is the upstream neighbor).
+//! downstream FSMs ((*,G), (S,G) and (S,G,rpt)), triggered
+//! single-entry sends, and the periodic per-RPF-neighbor refresh
+//! that re-advertises every Joined entry — with the (S,G,rpt) prunes
+//! riding the (*,G) refresh toward the RP (RFC 7761 §4.5.7).
 
 use std::collections::BTreeMap;
 use std::net::{IpAddr, Ipv4Addr};
@@ -14,7 +15,7 @@ use pim_packet::{
 use super::inst::{Pim, PimSend};
 use super::rpf::RpfState;
 use super::socket::ALL_PIM_ROUTERS;
-use super::tib::{JP_HOLDTIME, JoinState, Sg};
+use super::tib::{JP_HOLDTIME, JoinState, SgKey};
 
 /// Periodic J/P refresh interval (t_periodic, RFC 7761 §4.11).
 pub const JP_PERIOD: Duration = Duration::from_secs(60);
@@ -50,36 +51,75 @@ impl Pim {
                 continue;
             };
             for join in &group.joins {
-                if join.wildcard || join.rpt {
-                    // (*,G) / (S,G,rpt) arrive with the ASM phase.
-                    tracing::debug!("pim: (*,G)/rpt join for {} ignored (ASM phase)", grp);
-                    continue;
-                }
-                let IpAddr::V4(src_addr) = join.addr else {
+                let IpAddr::V4(addr) = join.addr else {
                     continue;
                 };
-                self.downstream_join(ifindex, Sg { src: src_addr, grp }, holdtime);
+                match (join.wildcard, join.rpt) {
+                    // (*,G): the encoded address names the sender's
+                    // RP(G) — validated only by our own mapping.
+                    (true, true) => {
+                        self.downstream_join(ifindex, SgKey::StarG { grp }, holdtime);
+                    }
+                    (false, false) => {
+                        self.downstream_join(ifindex, SgKey::Sg { src: addr, grp }, holdtime);
+                    }
+                    // (S,G,rpt) join: cancels a recorded rpt prune.
+                    (false, true) => {
+                        self.downstream_rpt_join(ifindex, SgKey::SgRpt { src: addr, grp });
+                    }
+                    (true, false) => {}
+                }
             }
             for prune in &group.prunes {
-                if prune.wildcard || prune.rpt {
-                    continue;
-                }
-                let IpAddr::V4(src_addr) = prune.addr else {
+                let IpAddr::V4(addr) = prune.addr else {
                     continue;
                 };
-                self.downstream_prune(ifindex, Sg { src: src_addr, grp });
+                match (prune.wildcard, prune.rpt) {
+                    (true, true) => {
+                        self.downstream_prune(ifindex, SgKey::StarG { grp });
+                    }
+                    (false, false) => {
+                        self.downstream_prune(ifindex, SgKey::Sg { src: addr, grp });
+                    }
+                    (false, true) => {
+                        self.downstream_rpt_prune(
+                            ifindex,
+                            SgKey::SgRpt { src: addr, grp },
+                            holdtime,
+                        );
+                    }
+                    (true, false) => {}
+                }
             }
         }
     }
 
     // ---- TX ----
 
+    fn encode_key(&self, key: SgKey) -> Option<EncodedSource> {
+        match key {
+            SgKey::Sg { src, .. } => Some(EncodedSource::sg(IpAddr::V4(src))),
+            SgKey::SgRpt { src, .. } => Some(EncodedSource::sg_rpt(IpAddr::V4(src))),
+            SgKey::StarG { grp } => {
+                // The (*,G) "source" is RP(G).
+                let rp = self
+                    .tib
+                    .get(&key)
+                    .and_then(|e| e.rpf_target)
+                    .or_else(|| self.rp_lookup(grp))?;
+                Some(EncodedSource::star_g(IpAddr::V4(rp)))
+            }
+        }
+    }
+
     /// Triggered single-entry Join (`join == true`) or Prune toward
     /// `nbr` out `ifindex`.
-    pub(crate) fn jp_send_single(&self, ifindex: u32, nbr: Ipv4Addr, sg: Sg, join: bool) {
-        let source = EncodedSource::sg(IpAddr::V4(sg.src));
+    pub(crate) fn jp_send_entry(&self, ifindex: u32, nbr: Ipv4Addr, key: SgKey, join: bool) {
+        let Some(source) = self.encode_key(key) else {
+            return;
+        };
         let group = JpGroup {
-            group: EncodedGroup::new(IpAddr::V4(sg.grp)),
+            group: EncodedGroup::new(IpAddr::V4(key.grp())),
             joins: if join { vec![source] } else { vec![] },
             prunes: if join { vec![] } else { vec![source] },
         };
@@ -106,8 +146,10 @@ impl Pim {
     }
 
     /// Periodic refresh: for each due (interface, neighbor) bucket,
-    /// re-send a Join for every entry currently joined through it;
-    /// drop the bucket when nothing uses that neighbor anymore.
+    /// re-send a Join for every entry currently joined through it,
+    /// with (S,G,rpt) prunes attached to the (*,G) records whose
+    /// sources switched to a diverging SPT; drop the bucket when
+    /// nothing uses that neighbor anymore.
     pub(crate) fn jp_tick(&mut self, now: Instant) {
         let due: Vec<(u32, Ipv4Addr)> = self
             .jp_refresh
@@ -116,21 +158,45 @@ impl Pim {
             .map(|(k, _)| *k)
             .collect();
         for (ifindex, nbr) in due {
-            // Aggregate all joined entries for this neighbor into one
-            // message, group records keyed by group address.
-            let mut by_group: BTreeMap<Ipv4Addr, Vec<EncodedSource>> = BTreeMap::new();
-            for (sg, entry) in self.tib.iter() {
-                if entry.join_state == JoinState::Joined
-                    && entry.rpf
-                        == (RpfState::Gateway {
-                            ifindex,
-                            nexthop: nbr,
-                        })
-                {
-                    by_group
-                        .entry(sg.grp)
-                        .or_default()
-                        .push(EncodedSource::sg(IpAddr::V4(sg.src)));
+            let bucket = RpfState::Gateway {
+                ifindex,
+                nexthop: nbr,
+            };
+            let mut by_group: BTreeMap<Ipv4Addr, (Vec<EncodedSource>, Vec<EncodedSource>)> =
+                BTreeMap::new();
+            let mut star_groups: Vec<Ipv4Addr> = vec![];
+            for (key, entry) in self.tib.iter() {
+                if entry.join_state != JoinState::Joined || entry.rpf != bucket {
+                    continue;
+                }
+                let Some(source) = self.encode_key(*key) else {
+                    continue;
+                };
+                by_group.entry(key.grp()).or_default().0.push(source);
+                if matches!(key, SgKey::StarG { .. }) {
+                    star_groups.push(key.grp());
+                }
+            }
+            // The (*,G) refresh carries the rpt prunes for sources
+            // whose SPT diverged from this shared-tree neighbor.
+            for grp in star_groups {
+                let prunes: Vec<EncodedSource> = self
+                    .tib
+                    .iter()
+                    .filter_map(|(k, e)| match k {
+                        SgKey::Sg { src, grp: g }
+                            if *g == grp
+                                && e.spt_bit
+                                && e.join_state == JoinState::Joined
+                                && e.rpf != bucket =>
+                        {
+                            Some(EncodedSource::sg_rpt(IpAddr::V4(*src)))
+                        }
+                        _ => None,
+                    })
+                    .collect();
+                if !prunes.is_empty() {
+                    by_group.entry(grp).or_default().1.extend(prunes);
                 }
             }
             if by_group.is_empty() {
@@ -139,10 +205,10 @@ impl Pim {
             }
             let groups: Vec<JpGroup> = by_group
                 .into_iter()
-                .map(|(grp, joins)| JpGroup {
+                .map(|(grp, (joins, prunes))| JpGroup {
                     group: EncodedGroup::new(IpAddr::V4(grp)),
                     joins,
-                    prunes: vec![],
+                    prunes,
                 })
                 .collect();
             self.jp_send(ifindex, nbr, groups);

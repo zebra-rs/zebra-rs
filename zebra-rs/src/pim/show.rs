@@ -13,7 +13,7 @@ use super::igmp::{FilterMode, QuerierState};
 use super::inst::{Pim, ShowCallback};
 use super::macros::mfc_oifs;
 use super::rpf::RpfState;
-use super::tib::JoinState;
+use super::tib::{JoinState, RegState};
 
 impl Pim {
     pub fn show_build(&mut self) {
@@ -30,6 +30,8 @@ impl Pim {
             .set(show_igmp_groups)
             .path("/show/pim/upstream")
             .set(show_pim_upstream)
+            .path("/show/pim/rp-info")
+            .set(show_pim_rp_info)
             .path("/show/mroute")
             .set(show_mroute)
             .map();
@@ -302,25 +304,32 @@ struct UpstreamBrief {
     iif: String,
     rpf_neighbor: String,
     state: String,
+    reg: String,
     uptime: String,
 }
 
 fn show_pim_upstream(pim: &Pim, _args: Args, json: bool) -> Result<String, std::fmt::Error> {
     let mut rows: Vec<UpstreamBrief> = vec![];
 
-    for (sg, entry) in pim.tib.iter() {
+    for (key, entry) in pim.tib.iter() {
         let (iif, rpf_neighbor) = match entry.rpf {
             RpfState::Unresolved => ("-".to_string(), "-".to_string()),
             RpfState::Connected { ifindex } => (pim.ifname(ifindex), "connected".to_string()),
             RpfState::Gateway { ifindex, nexthop } => (pim.ifname(ifindex), nexthop.to_string()),
         };
         rows.push(UpstreamBrief {
-            sg: sg.to_string(),
+            sg: key.to_string(),
             iif,
             rpf_neighbor,
             state: match entry.join_state {
                 JoinState::Joined => "Joined".to_string(),
                 JoinState::NotJoined => "NotJoined".to_string(),
+            },
+            reg: match entry.reg_state {
+                RegState::NoInfo => "-".to_string(),
+                RegState::Join => "RegJoin".to_string(),
+                RegState::Prune { .. } => "RegPrune".to_string(),
+                RegState::JoinPending { .. } => "RegProbe".to_string(),
             },
             uptime: uptime_string(entry.uptime.elapsed().as_secs()),
         });
@@ -332,13 +341,51 @@ fn show_pim_upstream(pim: &Pim, _args: Args, json: bool) -> Result<String, std::
 
     let mut buf = String::new();
     buf.push_str(
-        "Source           Group            Iif          RPF Nbr          State      Uptime\n",
+        "Entry                              Iif          RPF Nbr          State      Reg        Uptime\n",
     );
-    for (sg, row) in pim.tib.keys().zip(rows.iter()) {
+    for row in rows.iter() {
         writeln!(
             buf,
-            "{:<17}{:<17}{:<13}{:<17}{:<11}{}",
-            sg.src, sg.grp, row.iif, row.rpf_neighbor, row.state, row.uptime,
+            "{:<35}{:<13}{:<17}{:<11}{:<11}{}",
+            row.sg, row.iif, row.rpf_neighbor, row.state, row.reg, row.uptime,
+        )?;
+    }
+    Ok(buf)
+}
+
+#[derive(Serialize)]
+struct RpInfoBrief {
+    rp: String,
+    group_range: String,
+    source: String,
+    is_self: bool,
+}
+
+fn show_pim_rp_info(pim: &Pim, _args: Args, json: bool) -> Result<String, std::fmt::Error> {
+    let mut rows: Vec<RpInfoBrief> = vec![];
+    for (rp, range) in pim.rp_set.statics.iter() {
+        rows.push(RpInfoBrief {
+            rp: rp.to_string(),
+            group_range: range.to_string(),
+            source: "static".to_string(),
+            is_self: pim.links.values().any(|l| l.is_my_addr(rp)),
+        });
+    }
+
+    if json {
+        return Ok(serde_json::to_string(&rows).unwrap());
+    }
+
+    let mut buf = String::new();
+    buf.push_str("RP address       Group range        Source   Self\n");
+    for row in &rows {
+        writeln!(
+            buf,
+            "{:<17}{:<19}{:<9}{}",
+            row.rp,
+            row.group_range,
+            row.source,
+            if row.is_self { "yes" } else { "no" },
         )?;
     }
     Ok(buf)
@@ -357,12 +404,12 @@ struct MrouteBrief {
 fn show_mroute(pim: &Pim, _args: Args, json: bool) -> Result<String, std::fmt::Error> {
     let mut rows: Vec<MrouteBrief> = vec![];
 
-    for (sg, entry) in pim.tib.iter() {
+    for (key, entry) in pim.tib.iter() {
         let iif = entry
             .rpf
             .ifindex()
             .map_or_else(|| "-".to_string(), |i| pim.ifname(i));
-        let oifs: Vec<String> = mfc_oifs(entry, entry.rpf.ifindex())
+        let oifs: Vec<String> = mfc_oifs(&pim.tib, *key)
             .iter()
             .map(|i| pim.ifname(*i))
             .collect();
@@ -376,11 +423,14 @@ fn show_mroute(pim: &Pim, _args: Args, json: bool) -> Result<String, std::fmt::E
         if entry.stream_expires.is_some() {
             flags.push('S');
         }
+        if entry.spt_bit {
+            flags.push('T');
+        }
         if entry.installed.is_some() {
             flags.push('I');
         }
         rows.push(MrouteBrief {
-            sg: sg.to_string(),
+            sg: key.to_string(),
             iif,
             oifs,
             flags,

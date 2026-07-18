@@ -1,0 +1,23 @@
+interface:
+- if-name: eth3
+  ipv4:
+    address: 10.1.22.2/24
+- if-name: eth4
+  ipv4:
+    address: 10.1.23.1/24
+router:
+  static:
+    ipv4:
+      route:
+      - prefix: 10.1.21.0/24
+        nexthop:
+        - address: 10.1.22.1
+  pim:
+    rp:
+      static:
+      - address: 10.1.22.2
+    interface:
+    - if-name: eth3
+      dr-priority: 1
+    - if-name: eth4
+      dr-priority: 1

@@ -1,0 +1,27 @@
+interface:
+- if-name: eth5
+  ipv4:
+    address: 10.1.23.2/24
+- if-name: eth6
+  ipv4:
+    address: 10.1.24.1/24
+router:
+  static:
+    ipv4:
+      route:
+      - prefix: 10.1.22.0/24
+        nexthop:
+        - address: 10.1.23.1
+      - prefix: 10.1.21.0/24
+        nexthop:
+        - address: 10.1.23.1
+  pim:
+    rp:
+      static:
+      - address: 10.1.22.2
+    interface:
+    - if-name: eth5
+      dr-priority: 1
+    - if-name: eth6
+      igmp:
+        enabled: true
