@@ -135,16 +135,39 @@ pub struct BgpVrf {
     /// Threaded through `BgpTop` so the FSM driver compiles even
     /// though no path here populates it today.
     pub interface_addrs: InterfaceAddrs,
-    /// Resolved transport for currently-imported VPN prefixes, keyed by
-    /// prefix. Populated by `handle_import_v4`/`v6` (and cleared on
-    /// withdraw); read by `fib_install_v4`/`v6` (via `BgpTop`) so an
-    /// imported VPN winner installs its `{transport,service}` labelled
-    /// tunnel entry while CE routes install plain entries — one FIB
-    /// install path arbitrating both.
+    /// Resolved transport for the current best-path *winner* of each
+    /// imported VPN prefix. Refreshed from [`Self::import_transport_v4`]
+    /// (the per-origin-RD store) whenever an import or withdraw-import
+    /// re-runs best-path; read by `fib_install_v4`/`v6` (via `BgpTop`)
+    /// so an imported VPN winner installs its `{transport,service}`
+    /// labelled tunnel entry while CE routes install plain entries —
+    /// one FIB install path arbitrating both.
     pub transport_v4:
         std::collections::BTreeMap<ipnet::Ipv4Net, Vec<crate::rib::nht::ResolvedNexthop>>,
     pub transport_v6:
         std::collections::BTreeMap<ipnet::Ipv6Net, Vec<crate::rib::nht::ResolvedNexthop>>,
+    /// Synthetic Loc-RIB candidate ids for imported rows, one per
+    /// origin RD. A dual-homed prefix arrives from two PEs under two
+    /// RDs; storing every import under one `(remote_id 0,
+    /// ORIGINATED_PEER)` identity aliased them to a single row, so the
+    /// first PE's withdraw removed the row that by then held the
+    /// *surviving* PE's route — a CE-side blackhole (review finding
+    /// #4). Ids start at [`IMPORT_ID_BASE`] to stay clear of the
+    /// redistribute identities (`redist_remote_id`, 1..=5) and the
+    /// legacy 0. Never recycled; bounded by the number of distinct
+    /// origin RDs this VRF ever imported from.
+    pub import_ids: std::collections::BTreeMap<bgp_packet::RouteDistinguisher, u32>,
+    /// Resolved transport per `(prefix, origin RD)` — the full store
+    /// behind the winner-only `transport_v4`/`v6` maps, so a withdraw
+    /// of one RD's import can restore the surviving RD's transport.
+    pub import_transport_v4: std::collections::BTreeMap<
+        (ipnet::Ipv4Net, bgp_packet::RouteDistinguisher),
+        Vec<crate::rib::nht::ResolvedNexthop>,
+    >,
+    pub import_transport_v6: std::collections::BTreeMap<
+        (ipnet::Ipv6Net, bgp_packet::RouteDistinguisher),
+        Vec<crate::rib::nht::ResolvedNexthop>,
+    >,
     /// Colour-steering state mirrored from the global task via
     /// `BgpVrfMsg::ColourSteering`: the Color→Flex-Algo bindings and the
     /// per-algo SRv6 End-SID shadow. Read by `fib_install_v4`/`v6` (via
@@ -615,6 +638,13 @@ pub fn withdraw_mup_segment(
 /// rows (matches the global `Bgp::redist_remote_id`), so connected /
 /// static / IGP sources — and a `network` row at id 0 — coexist for
 /// one prefix in the per-VRF shard without overwriting one another.
+/// First synthetic `remote_id` for imported rows ([`BgpVrf::import_ids`]).
+/// Everything below is reserved: 0 is the legacy shared-import id (and the
+/// unknown-rtype redistribute fallback), 1..=5 are the per-rtype
+/// redistribute identities of [`redist_remote_id`] — all under the same
+/// `ORIGINATED_PEER` ident.
+const IMPORT_ID_BASE: u32 = 16;
+
 fn redist_remote_id(rtype: crate::rib::RibType) -> u32 {
     match rtype {
         crate::rib::RibType::Connected => 1,
@@ -681,6 +711,9 @@ impl BgpVrf {
             interface_addrs: InterfaceAddrs::new(),
             transport_v4: std::collections::BTreeMap::new(),
             transport_v6: std::collections::BTreeMap::new(),
+            import_ids: std::collections::BTreeMap::new(),
+            import_transport_v4: std::collections::BTreeMap::new(),
+            import_transport_v6: std::collections::BTreeMap::new(),
             color_policy: Default::default(),
             flex_algo_srv6_routes: Default::default(),
             mup_originated: std::collections::BTreeMap::new(),
@@ -1278,6 +1311,81 @@ impl BgpVrf {
     /// `route_ipv4_update` doesn't re-emit the imported route
     /// back to the global instance — VPNv4 round-trip would be
     /// a loop.
+    /// The synthetic candidate id for imports from `rd`, allocating on
+    /// first sight (see [`Self::import_ids`]).
+    fn import_id(&mut self, rd: bgp_packet::RouteDistinguisher) -> u32 {
+        if let Some(&id) = self.import_ids.get(&rd) {
+            return id;
+        }
+        let id = self
+            .import_ids
+            .values()
+            .copied()
+            .max()
+            .map(|m| m + 1)
+            .unwrap_or(IMPORT_ID_BASE);
+        self.import_ids.insert(rd, id);
+        id
+    }
+
+    /// Reverse of [`Self::import_id`]: which origin RD a winning
+    /// imported row's `remote_id` belongs to. Linear scan — the map is
+    /// bounded by the distinct origin RDs seen.
+    fn import_rd_of(&self, id: u32) -> Option<bgp_packet::RouteDistinguisher> {
+        self.import_ids
+            .iter()
+            .find(|&(_, &v)| v == id)
+            .map(|(rd, _)| *rd)
+    }
+
+    /// Point `transport_v4[prefix]` at the current best-path winner's
+    /// transport (from the per-RD store), or clear it when the winner
+    /// is not an imported row / has no resolved transport. Keeps the
+    /// single-key map `fib_install_v4` reads coherent when imports
+    /// from several RDs coexist and the winner changes.
+    fn refresh_import_transport_v4(
+        &mut self,
+        prefix: ipnet::Ipv4Net,
+        selected: &[super::super::route::BgpRib],
+    ) {
+        let winner_transport = selected
+            .first()
+            .filter(|w| w.vrf_imported)
+            .and_then(|w| self.import_rd_of(w.remote_id))
+            .and_then(|rd| self.import_transport_v4.get(&(prefix, rd)))
+            .cloned();
+        match winner_transport {
+            Some(t) if !t.is_empty() => {
+                self.transport_v4.insert(prefix, t);
+            }
+            _ => {
+                self.transport_v4.remove(&prefix);
+            }
+        }
+    }
+
+    /// IPv6 twin of [`Self::refresh_import_transport_v4`].
+    fn refresh_import_transport_v6(
+        &mut self,
+        prefix: ipnet::Ipv6Net,
+        selected: &[super::super::route::BgpRib],
+    ) {
+        let winner_transport = selected
+            .first()
+            .filter(|w| w.vrf_imported)
+            .and_then(|w| self.import_rd_of(w.remote_id))
+            .and_then(|rd| self.import_transport_v6.get(&(prefix, rd)))
+            .cloned();
+        match winner_transport {
+            Some(t) if !t.is_empty() => {
+                self.transport_v6.insert(prefix, t);
+            }
+            _ => {
+                self.transport_v6.remove(&prefix);
+            }
+        }
+    }
+
     fn handle_import_v4(
         &mut self,
         rd: bgp_packet::RouteDistinguisher,
@@ -1296,6 +1404,10 @@ impl BgpVrf {
         // so CE peers receive a reachable v4 address.
         attr.nexthop = Some(bgp_packet::BgpNexthop::Ipv4(self.router_id));
         let interned = self.shard.intern(attr);
+        // Per-origin-RD candidate identity: a dual-homed prefix
+        // imported from two PEs (two RDs) must keep two rows, so one
+        // PE's withdraw leaves the survivor selected (finding #4).
+        let import_id = self.import_id(rd);
 
         let label_obj = if label != 0 {
             Some(bgp_packet::Label {
@@ -1308,7 +1420,7 @@ impl BgpVrf {
         };
 
         let rib = super::super::route::BgpRib {
-            remote_id: 0,
+            remote_id: import_id,
             local_id: 0,
             attr: interned,
             // Originated/imported VRF rows carry the ORIGINATED_PEER
@@ -1351,15 +1463,17 @@ impl BgpVrf {
         let (_, selected, _gen) = self.shard.update(None, prefix, rib);
         let winners = selected.len();
 
-        // Persist the resolved transport for this prefix so `fib_install`
-        // builds the labelled tunnel entry whenever the imported route
-        // wins best-path — now, or after a competing CE route later
-        // withdraws. An empty transport (unresolved) clears it.
+        // Persist this RD's resolved transport, then point the
+        // winner-only map `fib_install` reads at the *current* best
+        // path's transport — which may belong to another RD's import.
+        // An empty transport (unresolved) clears this RD's entry.
         if transport.is_empty() {
-            self.transport_v4.remove(&prefix);
+            self.import_transport_v4.remove(&(prefix, rd));
         } else {
-            self.transport_v4.insert(prefix, transport.to_vec());
+            self.import_transport_v4
+                .insert((prefix, rd), transport.to_vec());
         }
+        self.refresh_import_transport_v4(prefix, &selected);
 
         let mut top = super::super::peer::BgpTop {
             router_id: &self.router_id,
@@ -1441,15 +1555,33 @@ impl BgpVrf {
         rd: bgp_packet::RouteDistinguisher,
         prefix: ipnet::Ipv4Net,
     ) {
-        let removed = self
-            .shard
-            .remove(None, prefix, 0, super::super::route::ORIGINATED_PEER);
+        // Remove exactly the withdrawing RD's row. An RD this VRF never
+        // imported from has nothing to remove — and must not touch a
+        // sibling RD's row (the aliasing this fixes).
+        let Some(&import_id) = self.import_ids.get(&rd) else {
+            tracing::info!(
+                vrf = %self.name,
+                %prefix,
+                rd = %rd,
+                "bgp vrf: WithdrawImport for an RD with no imports — no-op",
+            );
+            return;
+        };
+        let removed = self.shard.remove(
+            None,
+            prefix,
+            import_id,
+            super::super::route::ORIGINATED_PEER,
+        );
         let selected = self.shard.select_best_path(prefix);
         let removed_n = removed.len();
         let winners = selected.len();
 
-        // The imported route is gone, so drop its stored transport.
-        self.transport_v4.remove(&prefix);
+        // Drop the withdrawing RD's transport, then restore the
+        // surviving winner's (a dual-homed prefix keeps forwarding on
+        // the other PE's tunnel).
+        self.import_transport_v4.remove(&(prefix, rd));
+        self.refresh_import_transport_v4(prefix, &selected);
 
         let mut top = super::super::peer::BgpTop {
             router_id: &self.router_id,
@@ -1537,6 +1669,8 @@ impl BgpVrf {
         let vxlan_vtep = super::super::route::attr_vxlan_vtep(&attr);
         attr.nexthop = None;
         let interned = self.shard.intern(attr);
+        // Per-origin-RD candidate identity — see `handle_import_v4`.
+        let import_id = self.import_id(rd);
 
         let label_obj = if label != 0 {
             Some(bgp_packet::Label {
@@ -1549,7 +1683,7 @@ impl BgpVrf {
         };
 
         let rib = super::super::route::BgpRib {
-            remote_id: 0,
+            remote_id: import_id,
             local_id: 0,
             attr: interned,
             // Originated/imported VRF rows carry the ORIGINATED_PEER
@@ -1589,12 +1723,14 @@ impl BgpVrf {
         let (_, selected, _gen) = self.shard.update_v6(prefix, rib);
         let winners = selected.len();
 
-        // Persist the resolved transport (see `handle_import_v4`).
+        // Per-RD transport + winner refresh (see `handle_import_v4`).
         if transport.is_empty() {
-            self.transport_v6.remove(&prefix);
+            self.import_transport_v6.remove(&(prefix, rd));
         } else {
-            self.transport_v6.insert(prefix, transport.to_vec());
+            self.import_transport_v6
+                .insert((prefix, rd), transport.to_vec());
         }
+        self.refresh_import_transport_v6(prefix, &selected);
 
         let mut top = super::super::peer::BgpTop {
             router_id: &self.router_id,
@@ -1659,14 +1795,25 @@ impl BgpVrf {
         rd: bgp_packet::RouteDistinguisher,
         prefix: ipnet::Ipv6Net,
     ) {
+        // See `handle_withdraw_import`: only the withdrawing RD's row.
+        let Some(&import_id) = self.import_ids.get(&rd) else {
+            tracing::info!(
+                vrf = %self.name,
+                %prefix,
+                rd = %rd,
+                "bgp vrf: WithdrawImportV6 for an RD with no imports — no-op",
+            );
+            return;
+        };
         let removed = self
             .shard
-            .remove_v6(prefix, 0, super::super::route::ORIGINATED_PEER);
+            .remove_v6(prefix, import_id, super::super::route::ORIGINATED_PEER);
         let selected = self.shard.select_best_path_v6(prefix);
         let removed_n = removed.len();
         let winners = selected.len();
 
-        self.transport_v6.remove(&prefix);
+        self.import_transport_v6.remove(&(prefix, rd));
+        self.refresh_import_transport_v6(prefix, &selected);
 
         let mut top = super::super::peer::BgpTop {
             router_id: &self.router_id,
