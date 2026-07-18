@@ -29,7 +29,7 @@ use crate::rib::api::RibRx;
 use super::bsr::{BsrConfig, BsrRun};
 use super::config::Callback;
 use super::link::{LinkConfig, PIM_OVERRIDE_INTERVAL_MSEC, PIM_PROPAGATION_DELAY_MSEC, PimLink};
-use super::mroute::{ForwardingPlane, Upcall};
+use super::mroute::{Mrt4, Upcall};
 use super::network::{igmp_read_packet, igmp_write_packet, mroute_read, read_packet, write_packet};
 use super::rp::RpSet;
 use super::rpf::RpfEntry;
@@ -96,7 +96,7 @@ pub struct Pim {
     pub bsr_config: BsrConfig,
     pub bsr: BsrRun,
     /// Kernel dataplane: mroute socket, VIFs, MFC.
-    pub(crate) fp: ForwardingPlane,
+    pub(crate) fp: Mrt4,
     /// Periodic J/P refresh deadlines per (ifindex, upstream nbr).
     pub(crate) jp_refresh: BTreeMap<(u32, Ipv4Addr), std::time::Instant>,
     pub(crate) send_tx: UnboundedSender<PimSend>,
@@ -141,7 +141,7 @@ impl Pim {
         ctx: ProtoContext,
         sock: AsyncFd<Socket>,
         igmp_sock: AsyncFd<Socket>,
-        fp: ForwardingPlane,
+        fp: Mrt4,
         rib_rx: UnboundedReceiver<RibRx>,
         proto_label: String,
         rib_subscriber: RibSubscriber,

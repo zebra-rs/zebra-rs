@@ -25,7 +25,7 @@ use crate::config::{CommandPath, ConfigOp, ConfigRequest, Message, RibSubscriber
 use crate::context::{ProtoContext, Task};
 
 use super::inst::{self, Pim};
-use super::mroute::ForwardingPlane;
+use super::mroute::{Mrt4, PimForwardingPlane};
 use super::socket::{igmp_socket, pim_socket};
 
 /// Handle to one running per-VRF PIM task, stashed on the parent's
@@ -102,7 +102,7 @@ pub fn spawn_pim_vrf(
             return None;
         }
     };
-    let fp = match ForwardingPlane::new(&probe, table_id) {
+    let fp = match Mrt4::new(&probe, table_id) {
         Ok(fp) => fp,
         Err(e) => {
             tracing::warn!(vrf = %name, "pim: vrf instance not started (mroute socket: {e})");

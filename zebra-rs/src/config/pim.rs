@@ -1,6 +1,6 @@
 use crate::context::ProtoContext;
 use crate::pim::inst;
-use crate::pim::mroute::ForwardingPlane;
+use crate::pim::mroute::{Mrt4, PimForwardingPlane};
 use crate::pim::socket::{igmp_socket, pim_socket};
 use crate::rib;
 
@@ -38,7 +38,7 @@ pub fn spawn_pim(config: &ConfigManager) {
     // The mroute socket claims the kernel's multicast-routing
     // instance (MRT_INIT) — EADDRINUSE means another multicast
     // daemon owns it on this host.
-    let fp = match ForwardingPlane::new(&probe, 0) {
+    let fp = match Mrt4::new(&probe, 0) {
         Ok(fp) => fp,
         Err(e) => {
             tracing::warn!("pim: not started (mroute socket: {e}); PIM disabled");

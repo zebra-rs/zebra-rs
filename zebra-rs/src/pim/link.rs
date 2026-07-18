@@ -15,6 +15,7 @@ use super::af::PimAf;
 use super::igmp::{IgmpConfig, IgmpIf};
 use super::inst::{Message, Pim};
 use super::ipv4::Ipv4;
+use super::mroute::PimForwardingPlane;
 use super::neighbor::Neighbor;
 use super::socket::{igmp_join_if, igmp_leave_if, pim_join_if, pim_leave_if};
 
