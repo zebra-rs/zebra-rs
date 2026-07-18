@@ -262,7 +262,7 @@ it alone; an unframeable tail errors so the whole TLV degrades to `Unknown`
 instead of silently discarding bytes. Unit tests pin the v4 (prefixlen 33) and
 v6 (prefixlen 200) skip cases and the sub-TLV degrade.
 
-### 11. 🟡 Reach-entry emit keys the sub-TLV block on `subs.is_empty()` but writes the stored S-flag — PLAUSIBLE
+### 11. 🟡 Reach-entry emit keys the sub-TLV block on `subs.is_empty()` but writes the stored S-flag — PLAUSIBLE — ✅ FIXED
 `crates/isis-packet/src/sub/prefix.rs:559` (and `:760` for IPv6)
 
 `emit()` gates the optional sub-TLV-length byte on `self.subs.is_empty()` while
@@ -276,8 +276,16 @@ byte, so a receiver reads the next entry's metric MSB as a sub-TLV length and th
 TLV desyncs. Symmetrically, a locally-built entry with non-empty `subs` but a
 flags value whose `sub_tlv` bit is false emits a block the parser never reads.
 
-**Fix:** derive the `sub_tlv`/S bit from `!subs.is_empty()` at emit time (or
-normalize it on parse) instead of trusting the stored flag.
+**Fixed:** both entry emitters derive the S bit with
+`flags.with_sub_tlv(!subs.is_empty())` at emit time, and the TLV 135 emitter
+also derives the control byte's 6-bit prefixlen from `prefix.prefix_len()` —
+writing the fix surfaced that the prefixlen field had the same two-sources-of-
+truth problem (emit counts prefix octets from `prefix` while the receiver
+counts from the stored flags). The stored flags are kept verbatim for display
+of received packets; the daemon's manual `with_sub_tlv`/`with_prefixlen`
+bookkeeping remains valid but is no longer load-bearing. Unit tests pin the
+parsed S=1/sublen=0 re-emit and the hand-built subs-without-flag round-trip
+for both TLV 135 and TLV 236.
 
 ### 12. 🟡 `P2p3Way` / `Restart` parse optionals by remaining length but emit by `Option` — PLAUSIBLE
 `crates/isis-packet/src/parser.rs:1168`; `crates/isis-packet/src/sub/restart.rs:83`/`:129`

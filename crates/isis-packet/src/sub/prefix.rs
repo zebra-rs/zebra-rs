@@ -594,7 +594,18 @@ impl IsisTlvExtIpReachEntry {
 
     fn emit(&self, buf: &mut BytesMut) {
         buf.put_u32(self.metric);
-        buf.put_u8(self.flags.into());
+        // The receiver keys the sub-TLV block's presence on the S bit
+        // and the prefix octet count on the control byte's 6-bit
+        // prefixlen, while this emit gates the block on `subs` and
+        // writes `psize(prefix.prefix_len())` octets — derive both
+        // fields from the actual data so the stored flags (from a
+        // parsed packet or a hand-built entry) can never disagree with
+        // the bytes that follow and desync the receiver.
+        let flags = self
+            .flags
+            .with_prefixlen(self.prefix.prefix_len() as usize)
+            .with_sub_tlv(!self.subs.is_empty());
+        buf.put_u8(flags.into());
         let plen = psize(self.prefix.prefix_len());
         if plen != 0 {
             buf.put(&self.prefix.addr().octets()[..plen]);
@@ -806,7 +817,9 @@ impl IsisTlvIpv6ReachEntry {
 
     fn emit(&self, buf: &mut BytesMut) {
         buf.put_u32(self.metric);
-        buf.put_u8(self.flags.into());
+        // See `IsisTlvExtIpReachEntry::emit` — derive the S bit from
+        // `subs` so the flag and the block's presence always agree.
+        buf.put_u8(self.flags.with_sub_tlv(!self.subs.is_empty()).into());
         buf.put_u8(self.prefix.prefix_len());
         let plen = psize(self.prefix.prefix_len());
         if plen != 0 {
@@ -1363,6 +1376,65 @@ mod tests {
         assert!(rest.is_empty());
         assert_eq!(tlv.entries.len(), 1);
         assert_eq!(tlv.entries[0].prefix, "2001:db8::/64".parse().unwrap());
+    }
+
+    /// Finding #11: the receiver keys the sub-TLV block on the S bit,
+    /// emit gates it on `subs` — the emitted S bit must be derived from
+    /// `subs`, not copied from the stored flags.
+    #[test]
+    fn v4_reach_entry_emit_derives_s_flag_from_subs() {
+        // Parsed form: S=1 (control 0x58 = sub_tlv | /24) with an empty
+        // sub block. Re-emitting the stored S=1 without a sublen byte
+        // would make the receiver read the next entry's metric MSB as a
+        // sub-TLV length.
+        let raw = [0u8, 0, 0, 10, 0x58, 10, 1, 1, 0];
+        let (rest, e) = IsisTlvExtIpReachEntry::parse_be(&raw).expect("parse");
+        assert!(rest.is_empty());
+        assert!(e.flags.sub_tlv());
+        assert!(e.subs.is_empty());
+        let mut buf = BytesMut::new();
+        e.emit(&mut buf);
+        // S cleared, no sublen byte — self-consistent wire form.
+        assert_eq!(&buf[..], &[0, 0, 0, 10, 0x18, 10, 1, 1]);
+
+        // Hand-built form: subs present but stored flags never had S
+        // set — emit must set S and write the block so the entry
+        // round-trips instead of the block being read as a next entry.
+        let entry = IsisTlvExtIpReachEntry {
+            metric: 10,
+            flags: 0.into(),
+            prefix: "10.1.1.0/24".parse().unwrap(),
+            subs: vec![IsisSubTlv::Ipv4SourceRouterId(IsisSubIpv4SourceRouterId {
+                router_id: "10.0.0.1".parse().unwrap(),
+            })],
+        };
+        let mut buf = BytesMut::new();
+        entry.emit(&mut buf);
+        let (rest, parsed) = IsisTlvExtIpReachEntry::parse_be(&buf).expect("re-parse");
+        assert!(rest.is_empty());
+        assert!(parsed.flags.sub_tlv());
+        assert_eq!(parsed.subs, entry.subs);
+    }
+
+    /// Finding #11, TLV 236 sibling (S bit = 0x20 in the v6 flags).
+    #[test]
+    fn v6_reach_entry_emit_derives_s_flag_from_subs() {
+        #[rustfmt::skip]
+        let raw = [
+            0u8, 0, 0, 10, 0x20, 64,
+            0x20, 0x01, 0x0d, 0xb8, 0, 0, 0, 0, // 2001:db8::/64
+            0,                                  // S=1 but empty sub block
+        ];
+        let (rest, e) = IsisTlvIpv6ReachEntry::parse_be(&raw).expect("parse");
+        assert!(rest.is_empty());
+        assert!(e.flags.sub_tlv());
+        assert!(e.subs.is_empty());
+        let mut buf = BytesMut::new();
+        e.emit(&mut buf);
+        assert_eq!(
+            &buf[..],
+            &[0, 0, 0, 10, 0x00, 64, 0x20, 0x01, 0x0d, 0xb8, 0, 0, 0, 0]
+        );
     }
 
     /// Finding #10 (sub-TLVs): a malformed *known* sub-TLV degrades to
