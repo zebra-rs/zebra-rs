@@ -91,7 +91,7 @@ copied the MSB-aligned convention when it needed the LSB-aligned one.
 each direction. `flags_serde.rs` and `cap_disp.rs` go through the accessors, so
 they were corrected by the same change.
 
-### 3. 🔴 `Nsap::from_str` panics (index OOB) on a malformed `net` — CONFIRMED
+### 3. 🔴 `Nsap::from_str` panics (index OOB) on a malformed `net` — CONFIRMED — ✅ FIXED
 `crates/isis-packet/src/nsap.rs:116` (also `:122`, `:127`)
 
 The three system-id groups are decoded assuming each is 4 hex chars (2 bytes) and
@@ -105,9 +105,9 @@ is 1`). Reached from operator config via `.parse::<Nsap>()` in
 `zebra-rs/src/isis/config.rs` — a malformed `net` value **crashes the IS-IS
 daemon**.
 
-**Fix:** after `hex::decode`, verify the decoded group is exactly 2 bytes (return
-`NsapParseError`) before indexing; or restrict the sys-id-position parts to
-length 4 in the validation loop.
+**Fixed:** a `sys_id_pair` helper `hex::decode`s each system-id group and
+`try_into`s it to `[u8; 2]`, returning `NsapParseError` on any other length; a
+unit test covers a 2-char group in each of the three system-id positions.
 
 ### 4. 🟠 `IsisTlvIsNeighbor::len()` wraps at ≥43 neighbors — CONFIRMED
 `crates/isis-packet/src/parser.rs:682`
@@ -123,7 +123,7 @@ TLVs (Auth, Protocols Supported) are lost and adjacencies flap on a large LAN.
 **Fix:** cap consistently with `emit()` (`.min(255)` / `.min(252)` for a
 multiple of 6), or shard TLV 6 across instances.
 
-### 5. 🟠 `Srv6TlvFlags` MTID bitfield declared in inverted order — CONFIRMED
+### 5. 🟠 `Srv6TlvFlags` MTID bitfield declared in inverted order — CONFIRMED — ✅ FIXED
 `crates/isis-packet/src/sub/prefix.rs:1090`
 
 The 2-octet header of the SRv6 Locator TLV (type 27) is **4 reserved MSBs +
@@ -139,8 +139,10 @@ from MT-0, and a locally-built MTID=2 emits `0x0020`, which a peer reads as MTID
 32. MTID=0 (single-topology SRv6) round-trips by luck, so this only breaks
 multi-topology SRv6. FRR carries an explicit `uint16_t mtid` for this TLV.
 
-**Fix:** mirror the `MultiTopologyId` layout — declare the 12-bit MTID first,
-`resvd(4)` second — and rename the field `mtid`.
+**Fixed:** the layout now mirrors `MultiTopologyId` — the 12-bit `mtid` is
+declared first, `resvd(4)` second — and the field is named `mtid` (also in the
+serde helper). A unit test pins wire `0x0002` ⇄ MT 2 and the reserved top
+nibble, plus a full `IsisTlvSrv6` round-trip.
 
 ### 6. 🟠 `IsisTlvAreaAddr::parse_be` drops all but the first area address — CONFIRMED
 `crates/isis-packet/src/parser.rs:649`
@@ -410,10 +412,10 @@ Correctness outranks these for the ranked list, but they're worth scheduling:
 
 1. ~~Fix #1 (LspEntries wrap) first~~ — **done** (PR #1952): builders capped at
    15 entries per TLV; unit + BDD regression coverage in place.
-2. ~~Fix #2 (RouterCap S/D)~~ — **done**: flags declared LSB-first, S=`0x01` /
-   D=`0x02` pinned by unit test. **#5 (Srv6TlvFlags MTID)** remains — an
-   RFC/FRR-confirmed interop break with a trivial one-line fix.
-3. **Fix #3 (nsap panic)** — a one-line guard that removes a config-input crash.
+2. ~~Fix #2 (RouterCap S/D) and #5 (Srv6TlvFlags MTID)~~ — **done**: both
+   bitfields declared LSB-first with the bit positions pinned by unit tests.
+3. ~~Fix #3 (nsap panic)~~ — **done**: system-id groups are length-checked
+   before indexing; malformed `net` config now returns `NsapParseError`.
 4. Work through the emit-side length cluster (#4, #7, #8) with a shared
    `usize`-based length policy; that also naturally addresses several of the
    cleanup items.

@@ -107,22 +107,27 @@ impl FromStr for Nsap {
         let afi = u8::from_str_radix(parts[0], 16)?;
         parts.remove(0);
 
-        // Parse SysId (6 octets).
+        // Parse SysId (6 octets). The leading validation accepts 2- or
+        // 4-char groups (area parts may be either), but the three
+        // system-id groups must each decode to exactly 2 octets — a
+        // 2-char group here would index out of bounds below.
+        fn sys_id_pair(part: &str) -> Result<[u8; 2], NsapParseError> {
+            let val = hex::decode(part).map_err(|_| NsapParseError(()))?;
+            val.try_into().map_err(|_| NsapParseError(()))
+        }
+
         let mut sys_id = IsisSysId::default();
         let parts_len = parts.len();
 
-        let sys_id_str = parts[parts_len - 4];
-        let sys_id_val = hex::decode(sys_id_str).map_err(|_| NsapParseError(()))?;
+        let sys_id_val = sys_id_pair(parts[parts_len - 4])?;
         sys_id.id[0] = sys_id_val[0];
         sys_id.id[1] = sys_id_val[1];
 
-        let sys_id_str = parts[parts_len - 3];
-        let sys_id_val = hex::decode(sys_id_str).map_err(|_| NsapParseError(()))?;
+        let sys_id_val = sys_id_pair(parts[parts_len - 3])?;
         sys_id.id[2] = sys_id_val[0];
         sys_id.id[3] = sys_id_val[1];
 
-        let sys_id_str = parts[parts_len - 2];
-        let sys_id_val = hex::decode(sys_id_str).map_err(|_| NsapParseError(()))?;
+        let sys_id_val = sys_id_pair(parts[parts_len - 2])?;
         sys_id.id[4] = sys_id_val[0];
         sys_id.id[5] = sys_id_val[1];
 
@@ -181,6 +186,17 @@ mod tests {
         is_valid_nsap("49.5678.0123.4567.0002.01");
         is_valid_nsap("49.5678.01.0123.4567.0002.01");
         is_valid_nsap("49.0102.0304.0506.0708.090a.0b0c.0d.0000.0000.0001.00");
+    }
+
+    #[test]
+    fn two_char_sys_id_group_is_error_not_panic() {
+        // A 2-char group in any of the three system-id positions passes
+        // the leading 2-or-4-char validation but decodes to a single
+        // octet; indexing it at [1] used to panic. Reached from operator
+        // config via `net`, so it must be a parse error, not a crash.
+        is_invalid_nsap("49.0000.0000.00.0000.00");
+        is_invalid_nsap("49.0000.00.0000.0000.00");
+        is_invalid_nsap("49.0000.0000.0000.00.00");
     }
 
     #[test]
