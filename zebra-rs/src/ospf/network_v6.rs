@@ -103,16 +103,6 @@ pub async fn read_packet_v6(sock: Arc<AsyncFd<Socket>>, tx: UnboundedSender<Ospf
                     return Err(ErrorKind::UnexpectedEof.into());
                 };
 
-                // RFC 5340 §4.4: drop packets whose pseudo-header
-                // checksum is wrong before any further processing.
-                // RFC 7166 §2.3/§4.1: an Authentication Trailer rides
-                // after the OSPF packet, excluded from the header
-                // length field and from the checksum — when one is
-                // present (datagram longer than the length field),
-                // checksum verification is omitted entirely and
-                // integrity comes from the digest in the auth gate.
-                // Verifying over the full datagram here corrupted the
-                // sum on every AT ingress.
                 if input.len() < 16 {
                     return Err(ErrorKind::UnexpectedEof.into());
                 }
@@ -120,8 +110,20 @@ pub async fn read_packet_v6(sock: Arc<AsyncFd<Socket>>, tx: UnboundedSender<Ospf
                 if pkt_len < 16 || input.len() < pkt_len {
                     return Err(ErrorKind::InvalidData.into());
                 }
-                let has_trailer = input.len() > pkt_len;
-                if !has_trailer && !ospfv3_verify_checksum(&src, &dst, input) {
+                // RFC 5340 §4.4: drop packets whose pseudo-header checksum is
+                // wrong before any further processing. RFC 7166 §2.3: both the
+                // OSPFv3 header length field and the checksum cover only the OSPF
+                // packet, NOT a trailing Authentication Trailer — so verify over
+                // `input[..pkt_len]`. (The earlier code verified the full
+                // datagram, which corrupted the sum on every AT ingress.)
+                //
+                // This runs unconditionally. Skipping it whenever trailing bytes
+                // are present let an attacker disable the only integrity check on
+                // an unauthenticated interface by appending a byte; on an
+                // authenticated interface the packet checksum is still valid over
+                // input[..pkt_len] and the AT digest is verified downstream in the
+                // auth gate.
+                if !ospfv3_verify_checksum(&src, &dst, &input[..pkt_len]) {
                     return Err(ErrorKind::InvalidData.into());
                 }
 
