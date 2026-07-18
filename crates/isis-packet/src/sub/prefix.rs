@@ -258,10 +258,6 @@ impl IsisMirrorSub2Tlv {
         }
     }
 
-    pub fn is_empty(&self) -> bool {
-        self.len() == 0
-    }
-
     pub fn emit(&self, buf: &mut BytesMut) {
         use IsisMirrorSub2Tlv::*;
         match self {
@@ -343,10 +339,6 @@ impl IsisSub2Tlv {
         }
     }
 
-    pub fn is_empty(&self) -> bool {
-        self.len() == 0
-    }
-
     pub fn emit(&self, buf: &mut BytesMut) {
         use IsisSub2Tlv::*;
         match self {
@@ -367,10 +359,6 @@ impl IsisSubTlv {
             Ipv6SourceRouterId(v) => v.len(),
             Unknown(v) => v.len,
         }
-    }
-
-    pub fn is_empty(&self) -> bool {
-        self.len() == 0
     }
 
     pub fn emit(&self, buf: &mut BytesMut) {

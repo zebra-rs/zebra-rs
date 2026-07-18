@@ -59,3 +59,9 @@ result_large_err = "allow"
 large_enum_variant = "allow"
 too_many_arguments = "allow"
 type_complexity = "allow"
+
+# Wire codecs — TLV `len()` is the protocol's one-octet length-field
+# value, not a container length; an `is_empty()` companion is
+# meaningless there (and for fixed-width SID values impossible), so
+# the no-op methods were removed rather than kept to satisfy the lint.
+len_without_is_empty = "allow"

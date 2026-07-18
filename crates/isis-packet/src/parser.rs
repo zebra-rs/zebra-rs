@@ -1437,10 +1437,6 @@ impl SidLabelValue {
         }
     }
 
-    pub fn is_empty(&self) -> bool {
-        self.len() == 0
-    }
-
     pub fn emit(&self, buf: &mut BytesMut) {
         use SidLabelValue::*;
         match self {

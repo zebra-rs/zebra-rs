@@ -49,10 +49,6 @@ impl IsisSubTlv {
         }
     }
 
-    pub fn is_empty(&self) -> bool {
-        self.len() == 0
-    }
-
     pub fn emit(&self, buf: &mut BytesMut) {
         use IsisSubTlv::*;
         match self {
@@ -558,10 +554,6 @@ impl FadSubTlv {
             ExcludeSrlg(v) => v.len(),
             Unknown(v) => v.len,
         }
-    }
-
-    pub fn is_empty(&self) -> bool {
-        self.len() == 0
     }
 
     pub fn emit(&self, buf: &mut BytesMut) {
