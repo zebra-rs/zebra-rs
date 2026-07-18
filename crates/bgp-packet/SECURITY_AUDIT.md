@@ -1,310 +1,114 @@
 # bgp-packet Security Audit
 
-**Original audit date:** 2026-04-09
-**Re-verified:** 2026-06-26 against the current workspace tree
-**Re-audited:** 2026-06-27 (full parse + emit sweep; see the re-audit section)
-**Crate version:** 26.6.2 (workspace versioning)
-**nom version:** 7.1.3
-**Scope:** current workspace tree under `crates/bgp-packet/`
+**Original audit:** 2026-04-09 · **Re-audits:** 2026-06-26, 2026-06-27 (full
+parse + emit sweep), 2026-07-17 (independent re-verification + fresh sweep)
+**Scope:** `crates/bgp-packet/` · nom 7.1.3
 
-## Summary
+## Status: no open findings
 
-This revision re-verifies the four findings from the previous audit against the
-current source. All four are now fully fixed and covered by regression tests:
-both High-severity panic paths, the Medium-severity trailing-garbage class, and
-the Medium-severity substructure-length cases (MP_REACH `nhop_len`, EVPN
-per-route `length`, and EVPN multicast `addr_len`). The residual encoder-side
-`u8` truncation issues are now resolved as well: all seven capability encoders
-(`CapFqdn`, `CapVersion`, `CapUnknown`, `CapAddPath`, `CapRestart`, `CapLlgr`,
-`CapPathLimit`) clamp to their wire budgets, and the shared `CapEmit::emit()`
-`len() + 2` optional-parameter framing now `saturating_add`s. Every item in this
-audit is fixed.
+Every finding from every audit pass is fixed and pinned by a regression test.
+The 2026-07-17 pass independently re-verified all prior fixes against the tree,
+found no panic / DoS / memory-safety issue, and closed the last two
+trailing-garbage gaps (ExtCommunities, MUP — see below). Verify with
+`cargo test -p bgp-packet`.
 
-Status of the four previously reported issues:
+## Fixed findings (condensed history)
 
-1. **High — FIXED:** UPDATE attribute-block parsing now bounds the slice with
-   `packet_utils::safe_split_at()` instead of a raw `split_at()`.
-2. **High — FIXED:** IPv4 and IPv6 NLRI parsers now reject overlong prefix
-   lengths before computing the prefix byte size.
-3. **Medium — FIXED:** the length-bounded BGP subparsers now enforce full
-   consumption of their bounded slice and reject trailing garbage.
-4. **Medium — FIXED:** MP_REACH validates `nhop_len`, and the EVPN parser now
-   bounds each route body to its declared `length` and validates the multicast
-   `addr_len`.
+**High — UPDATE attribute-block bounds.** `parse_bgp_update_attribute()` and
+the per-attribute framing in `parse_attr_header` bound their slices with
+`packet_utils::safe_split_at()` (`attrs/attr.rs:370`, `:271`); no raw
+`split_at()` on untrusted input anywhere in the crate. Test:
+`parse_bgp_update_attribute_rejects_oversized_length`.
 
-The residual encoder-side `u8` truncation issues for oversized capabilities are
-local packet-construction problems rather than network-triggered parser bugs.
-All seven capability encoders (`CapFqdn`, `CapVersion`, `CapUnknown`,
-`CapAddPath`, `CapRestart`, `CapLlgr`, `CapPathLimit`) clamp their wire lengths
-via a single helper each, and the shared `CapEmit::emit()` `len() + 2` framing
-`saturating_add`s — all fixed.
+**High — NLRI prefix-length validation.** IPv4/IPv6 NLRI (and the
+`ParseBe<Ipv6Net>` helper) reject `plen > 32/128` before `nlri_psize()` and
+check the buffer holds `psize` bytes. Same pattern in vpnv4/vpnv6
+(`plen >= 88`), labeled-unicast (`plen >= 24`), MUP ISD/T1ST. Tests:
+`parse_nlri_rejects_prefixlen_over_{32,128}`,
+`parse_ipv6net_rejects_prefixlen_over_128`.
 
-Earlier hardening that remains in place (carried over from the prior revision):
-the OPEN optional-parameter, capability, and IPv4 NLRI block parsers use
-`packet_utils::safe_split_at()`; UPDATE/NOTIFICATION length-underflow paths use
-`saturating_sub()`; attribute flags use `AttributeFlags::from_bits_truncate()`;
-the 2-octet aggregator conversion clamps at `u16::MAX`; VPNv4 NLRI validates
-`plen >= 88`; and `peek_bgp_length()` no longer uses `unwrap()`.
+**Medium — length-bounded payloads must be fully consumed (RFC 7606 class).**
+A bounded slice whose inner parse leaves a remainder is rejected
+(`ErrorKind::LengthValue`), never silently dropped:
 
-## Findings
+- `Community` (non-zero multiple of 4), `LargeCommunity` (×12), `ClusterList`
+  (×4), and — since 2026-07-17 — `ExtCommunity` (non-zero multiple of 8, RFC
+  7606 §7.14, `attrs/ext_com.rs`).
+- `parse_bgp_nlri_ipv4()` drains its block in an explicit loop; OPEN
+  optional-parameter / capability blocks and `CapabilityPacket::parse_cap()`
+  reject non-empty remainders (`open.rs`, `caps/packet.rs`).
+- EVPN: per-route body bounded to its declared `length` octet and any
+  remainder rejected (`nlri_evpn.rs:770,1084`); Type-3 `addr_len` must be
+  32/128. Since 2026-07-17 MUP enforces the same rule: every route-type arm
+  (ISD/DSD/T1ST/T2ST) rejects leftover bytes inside its `take(length)` body
+  (`nlri_mup.rs`). Tests: `*_rejects_padded_length` (MUP ×4),
+  `parse_nlri_rejects_trailing_body_bytes`,
+  `inclusive_multicast_rejects_bad_addr_len`,
+  `parse_be_rejects_partial_trailing_value` (extcomm).
 
-### 1. UPDATE attribute-block parsing — FIXED
+**Medium — MP_REACH `nhop_len`.** VPNv4 accepts only 12/24/48, VPNv6 only
+24/48; EVPN/RTC/Link-State require 4 or 16 (`mp_reach.rs`). Note: the Flowspec
+arm intentionally `take()`s whatever `nhop_len` says — length-safe (bounded by
+the buffer), just not value-restricted.
 
-- **Severity:** High
-- **Files:**
-  - `src/attrs/attr.rs`
-  - `src/update.rs`
+**Low — encoder-side `u8` clamps.** All seven capability encoders derive
+`len()` and `emit_value()` from one shared clamp helper so the `as u8` length
+casts cannot truncate: `CapFqdn` (251-octet hostname+domain budget, hostname
+priority), `CapVersion`/`CapUnknown` (253), `CapAddPath` (63×4),
+`CapRestart` (62×4 + 2-octet header), `CapLlgr` (36×7), `CapPathLimit` (50×5).
+`CapEmit::emit()` writes the optional-parameter length as
+`len().saturating_add(2)` (`caps/emit.rs:29`). MUP T2ST emit clamps the TEID
+width to 4 via `t2st_teid_size()` (former slice panic on a locally-built
+route with out-of-range `endpoint_len`).
 
-`parse_bgp_update_attribute()` (`src/attrs/attr.rs:345`) now bounds the
-attribute block with `packet_utils::safe_split_at()` before iterating:
+## Reviewed and intentionally left as-is
 
-```rust
-let length = length as usize;
-let (input, attr) = packet_utils::safe_split_at(input, length).map_err(BgpParseError::from)?;
-```
+`payload.len() as u8` sites where a clamp would desync length from body:
 
-An oversized `attr_len` returns a parse error instead of panicking. A regression
-test, `parse_bgp_update_attribute_rejects_oversized_length` (`attr.rs:517`),
-pins this behavior. The sibling call site at `attr.rs:263` also uses
-`safe_split_at()`.
+- **Fixed-size EVPN bodies** (11 emitters in `nlri_evpn.rs`): worst case
+  ≈79 octets (IgmpLeaveSync with IPv6 addresses) — far below 256, cast can't
+  truncate.
+- **Variable opaque bodies** (EVPN LeafAd `route_key`, MUP `Unknown` body,
+  `tunnel_encap`/`srpolicy` TLV values with type < 128): bounded ≤255 on the
+  parse path by the enclosing 1-octet length, so parse-then-re-emit never
+  truncates; an oversized locally-built object is simply unencodable.
+- **AS_PATH segment count** (`aspath.rs:177`): segments split at 255 via
+  `chunks(AS_SEGMENT_MAX)`.
 
-### 2. IPv4 and IPv6 NLRI overlong prefix lengths — FIXED
+All other production `len as u8` sites sit behind an extended-length / u16
+fallback (attribute emitter, vpnv4/v6, flowspec <240 rule, mp_reach/unreach,
+RFC 9072 OPEN extension).
 
-- **Severity:** High
-- **Files:**
-  - `src/attrs/nlri_ipv4.rs`
-  - `src/attrs/nlri_ipv6.rs`
+## 2026-07-17 re-verification notes
 
-Both parsers now validate the address-family prefix bound before computing
-`nlri_psize()`, and additionally check that the buffer holds `psize` bytes:
+Three independent passes (findings re-check, encoder re-check, fresh
+adversarial sweep of every parse module) confirmed:
 
-```rust
-let (input, plen) = be_u8(input)?;
-if plen > 32 {                       // 128 for IPv6
-    return Err(nom::Err::Error(make_error(input, ErrorKind::Verify)));
-}
-let psize = nlri_psize(plen);
-if input.len() < psize {
-    return Err(nom::Err::Error(make_error(input, ErrorKind::Eof)));
-}
-```
+- All prior fixes present; only prose drift in older revisions of this
+  document (attr.rs line numbers, CapRestart wrongly described as "42×6",
+  EVPN fixed-body bound understated as "≲60") — corrected above.
+- Parse side clean: every slice index / length subtraction guarded
+  (`saturating_sub` or explicit bound), all TLV loops make ≥1-byte progress
+  (no infinite loops), no attacker-sized allocations, no
+  `unwrap`/`expect`/`unreachable!` reachable from wire bytes (remaining ones
+  are post-validation infallible or config-text `FromStr` paths).
+- Two new low-severity trailing-garbage gaps found and fixed the same day
+  (ExtCommunity ×8 guard, MUP padded per-route length — folded into the
+  Medium finding above).
+- IPv6 Address-Specific ExtCommunity (type 25, `ext_ipv6_com.rs`) is
+  deliberately not wired into the `Attr` parser and is unreachable from the
+  wire.
 
-This covers all reachable paths the prior audit listed, including the
-`ParseBe<Ipv6Net>` helper (`nlri_ipv6.rs:61`), which carries the same guard.
-Regression tests: `parse_nlri_rejects_prefixlen_over_32` (IPv4),
-`parse_nlri_rejects_prefixlen_over_128` and
-`parse_ipv6net_rejects_prefixlen_over_128` (IPv6).
+## Invariants to preserve (checklist for new parsers/emitters)
 
-### 3. Length-bounded payloads accepted trailing garbage — FIXED
-
-- **Severity:** Medium
-- **Files:**
-  - `src/attrs/cluster_list.rs`
-  - `src/attrs/nlri_ipv4.rs`
-  - `src/caps/packet.rs`
-  - `src/open.rs`
-
-The outer parsers bounded their slice with `safe_split_at()` but then ignored
-the inner parser's remainder, so a non-empty leftover was silently discarded.
-Each bounded slice now enforces full consumption:
-
-- `ClusterList::parse_be()` (`cluster_list.rs:25`) rejects a payload whose
-  length is not a multiple of 4 up front
-  (`if !input.len().is_multiple_of(4)`), so a stray trailing octet can no longer
-  be swallowed by `many0_complete(be_u32)`.
-- `parse_bgp_nlri_ipv4()` (`nlri_ipv4.rs:38`) drains the bounded slice in an
-  explicit loop (`while !nlri.is_empty()`), so a malformed or truncated trailing
-  NLRI surfaces the real parse error from `Ipv4Nlri::parse_nlri()` instead of
-  being dropped by `many0_complete()`.
-- `CapabilityPacket::parse_cap()` (`caps/packet.rs:63`) now binds the inner
-  remainder and returns `Err(ErrorKind::LengthValue)` when it is non-empty,
-  rather than discarding it with `let (_, cap) = …`.
-- `OpenPacket::parse_packet()` and the `parse_caps()` helper (`open.rs:65,79`)
-  apply the same non-empty-remainder rejection to the OPEN optional-parameter
-  and capability-block slices.
-
-- **Impact (historical):** Malformed wire data was normalized into a different
-  in-memory object and the dropped bytes vanished on re-emit, creating
-  parser-differential and canonicalization problems.
-- **Regression tests:** `parse_cluster_list_rejects_non_multiple_of_four`
-  (`cluster_list.rs`), `parse_bgp_nlri_ipv4_rejects_trailing_garbage` and
-  `parse_bgp_nlri_ipv4_consumes_whole_block` (`nlri_ipv4.rs`).
-
-### 4. Substructure length fields not enforced — FIXED
-
-- **Severity:** Medium
-- **Files:**
-  - `src/attrs/mp_reach.rs`
-  - `src/attrs/nlri_evpn.rs`
-
-**Fixed — MP_REACH `nhop_len`.** `parse_nlri_opt()` now matches on
-`header.nhop_len` for every AFI/SAFI and rejects unexpected lengths instead of
-assuming a fixed nexthop width. VPNv4 accepts only 12/24/48 (`mp_reach.rs:200`),
-VPNv6 only 24/48 (`mp_reach.rs:254`), and any other value returns
-`Err(ErrorKind::LengthValue)`.
-
-**Fixed — EVPN per-route `length`.** `EvpnRoute::parse_nlri()`
-(`nlri_evpn.rs:748`) now bounds the route body to its declared `length` octet
-with `packet_utils::safe_split_at()` (`nlri_evpn.rs:758`) before dispatching on
-the route type, so no field can read past the NLRI into the next one. After the
-per-type parse it rejects any non-empty remainder inside the bounded body
-(`nlri_evpn.rs:1057`) with `Err(ErrorKind::LengthValue)`, so a field shorter
-than the declared length — or a padded length — fails the parse instead of
-silently dropping the extra octets.
-
-**Fixed — EVPN multicast `addr_len`.** The Inclusive Multicast (Type-3) arm
-now matches `addr_len` against `32` (IPv4) and `128` (IPv6) explicitly
-(`nlri_evpn.rs:834`); any other value returns `Err(ErrorKind::LengthValue)`
-rather than being read as a 16-octet IPv6 address.
-
-Regression tests: `inclusive_multicast_rejects_bad_addr_len` and
-`parse_nlri_rejects_trailing_body_bytes` (`nlri_evpn.rs`).
-
-## Residual Hardening Issues — all fixed
-
-These are lower severity because they affect local packet construction rather
-than parsing untrusted network data.
-
-**Fixed — `CapFqdn`.** `CapFqdn::len()` and `emit_value()` now derive both the
-declared length and the emitted bytes from a single `wire_lengths()` helper
-(`caps/fqdn.rs`). The hostname and domain share a 251-octet budget (the
-capability value is at most 253 octets — the optional-parameter length octet is
-`len() + 2` — minus the two name-length octets); the hostname is given priority
-and the domain takes the remainder. Both length octets are always emitted, the
-clamped counts are `<= 251` so the `as u8` casts can no longer truncate, and the
-length octets always match the bytes written. Regression tests cover the normal,
-both-empty, oversized-hostname, oversized-domain, and hostname-priority cases.
-
-**Fixed — `CapVersion`.** The version string is the whole capability value (no
-internal length octet), so `len()` and `emit_value()` now derive from a single
-`wire_len()` helper (`caps/version.rs`) that clamps the version to the 253-octet
-capability-value budget. The `as u8` length cast can no longer truncate, the
-length octet always matches the bytes written, and `len() + 2` stays within a
-u8. Regression tests cover the normal, empty, and oversized cases.
-
-**Fixed — `CapUnknown`.** Same shape as `CapVersion`: the opaque `data` blob is
-the whole capability value, so `len()` and `emit_value()` derive from a
-`wire_len()` helper (`caps/unknown.rs`) that clamps `data` to the 253-octet
-budget. Regression tests cover the normal, empty, and oversized cases.
-
-**Fixed — `CapAddPath`.** Each AddPath entry is a fixed 4 octets, so `len()`
-(`values.len() * 4`) and `emit_value()` now derive from a `wire_count()` helper
-(`caps/addpath.rs`) that clamps the emitted entry count to 63 (252 octets) — the
-most that fits the 253-octet capability-value budget. The `as u8` cast can no
-longer wrap (entries beyond the budget are dropped, not silently truncated into
-a bogus length octet). Regression tests cover the normal, empty, and
-too-many-entries cases.
-
-**Fixed — `CapRestart`.** Same shape as `CapAddPath`: each Graceful-Restart
-entry is a fixed 6 octets, so `len()` (`values.len() * 6`) and `emit_value()`
-now derive from a `wire_count()` helper (`caps/graceful.rs`) that clamps the
-emitted entry count to 42 (252 octets). The `as u8` cast can no longer wrap.
-Regression tests cover the normal, empty, and too-many-entries cases.
-
-**Fixed — `CapLlgr`.** Same shape: each LLGR entry is a fixed 7 octets (AFI +
-SAFI + Flags + Stale Time u24), so `len()` (`values.len() * 7`) and
-`emit_value()` now derive from a `wire_count()` helper (`caps/llgr.rs`) that
-clamps the emitted entry count to 36 (252 octets). The `as u8` cast can no
-longer wrap. Regression tests cover the normal, empty, and too-many-entries
-cases.
-
-**Fixed — `CapPathLimit`.** Same shape: each Path-Limit entry is a fixed 5
-octets (AFI + SAFI + Path Limit u16), so `len()` (`values.len() * 5`) and
-`emit_value()` now derive from a `wire_count()` helper (`caps/path_limit.rs`)
-that clamps the emitted entry count to 50 (250 octets). The `as u8` cast can no
-longer wrap. Regression tests cover the normal, empty, and too-many-entries
-cases.
-
-**Fixed — the shared optional-parameter framing.** `CapEmit::emit()`
-(`caps/emit.rs`) wrote the optional-parameter length as `put_u8(self.len() + 2)`,
-which overflowed a `u8` if any capability's `len()` reached 254–255. It now uses
-`self.len().saturating_add(2)`, so the length octet can never overflow
-regardless of a capability's `len()`. All seven per-capability encoders already
-bound their values at 253/252, so the add is exact in practice; the saturating
-guard is a final backstop against a future capability that forgets to clamp.
-Regression tests in `caps/emit.rs` cover the max-value boundary (`len() = 253` →
-parameter length 255), the oversized saturating case, and the grouped
-(`opt = true`) path that skips the parameter framing.
-
-With this, every residual encoder-side hardening item is resolved.
-
-## Recommended Priority
-
-### Priority 1 — DONE
-
-1. ~~Replace the raw `split_at()` in `parse_bgp_update_attribute()`.~~ Fixed.
-2. ~~Add explicit IPv4/IPv6 prefix-length validation before `nlri_psize()`.~~
-   Fixed.
-
-### Priority 2 — DONE
-
-3. ~~Enforce full consumption for all length-bounded attribute, capability, and
-   NLRI slices (Finding 3).~~ Fixed.
-4. ~~Enforce the EVPN per-route `length` and multicast `addr_len` (the remaining
-   half of Finding 4).~~ Fixed. MP_REACH `nhop_len` was already done.
-
-### Priority 3 — DONE
-
-5. ~~Convert the encoder-side `u8` length arithmetic for each capability to
-   clamped/checked arithmetic, and bound the shared `CapEmit::emit()`
-   optional-parameter length.~~ Done — all seven capability encoders (`CapFqdn`,
-   `CapVersion`, `CapUnknown`, `CapAddPath`, `CapRestart`, `CapLlgr`,
-   `CapPathLimit`) clamp to their wire budgets, and `CapEmit::emit()` now
-   `saturating_add`s the `len() + 2` parameter length.
-
-## Encoder-side & parse-side re-audit (2026-06-27)
-
-A fresh sweep of the whole crate for panic-on-malformed-input and
-silent-truncation bugs, beyond the four findings above.
-
-**Parse side (untrusted input): clean.** Every NLRI and attribute parser that
-reads attacker-controlled bytes guards its slice accesses and prefix-length
-bounds before use — verified for ipv4/ipv6, vpnv4/vpnv6, labeled-unicast v4/v6,
-EVPN, MUP (all four route types), flowspec, SR-Policy, and BGP-LS, plus
-`prefix_sid` and `pmsi_tunnel`. All length subtractions are guarded
-(`plen -= 88` behind `plen >= 88`, `plen -= 24` behind `plen < 24`,
-`length - offset` behind `offset > length`); there is no raw `split_at()` on
-untrusted input (the lone use is `split_at_checked`); and `take_inner_tlv`'s
-`input[0]` is only reached inside `while !rest.is_empty()`. No new remote
-panic/DoS was found.
-
-**Encoder side — one panic fixed.** `nlri_mup.rs` T2ST emit wrote the
-high-aligned TEID as `teid.to_be_bytes()[..tsize]`, where `tsize` could exceed
-the 4-octet `u32` for an out-of-range `endpoint_len`, panicking on a
-locally-constructed route. Fixed by clamping the TEID width to 4 (`emit` and
-`body_len` share a `t2st_teid_size()` helper); the clamp is a no-op for every
-parsed route. (Not remotely reachable — the parser bounds `endpoint_len`.)
-
-**Encoder side — remaining `len() as u8` casts, reviewed and left as-is.** The
-NLRI/attribute emitters write a 1-octet length as `payload.len() as u8`
-(EVPN ×11, MUP body, `aspath` segment count, `tunnel_encap` / `srpolicy` TLV
-value). Unlike the capability values, these length octets precede a fixed or
-opaque **structure**, so the capability-style clamp does not apply: clamping the
-length would desync it from the body, and clamping the body would corrupt the
-route. Each was classified rather than mechanically changed:
-
-- *Fixed-size bodies* (EVPN EthernetAd / Mac / Multicast / EthernetSeg /
-  IpPrefix / Smet / IgmpJoin / IgmpLeave / PerRegionImet / SPmsi): the body is a
-  small fixed structure (≲ 60 octets), so `payload.len()` cannot reach 256. The
-  cast is unreachable.
-- *Variable opaque bodies* (EVPN LeafAd `route_key`, MUP `Unknown` body,
-  `tunnel_encap` / `srpolicy` TLV value): bounded ≤ 255 on the parse path by the
-  enclosing length octet, so a parsed-then-re-emitted object never truncates.
-  Only a locally-constructed object exceeding 255 octets would, and such an
-  object is simply unencodable in a 1-octet length field — there is no correct
-  clamp.
-- *AS_PATH segment count* (`aspath.rs`): a segment over 255 ASes must be split
-  into multiple segments (RFC 4271 §5.1.2). Unreachable in practice (no AS path
-  approaches 255 hops); left unchanged.
-
-These are local packet-construction concerns, not network-triggered bugs, and
-carry the same low severity as the (now-fixed) capability casts. They are
-documented here and intentionally left as-is.
-
-## Verification
-
-The current tree was validated with:
-
-```sh
-cargo test -p bgp-packet
-```
+1. Bound every length-prefixed slice with `packet_utils::safe_split_at()`;
+   never raw `split_at()` / direct indexing on wire input.
+2. After parsing inside a bounded slice, reject a non-empty remainder
+   (`ErrorKind::LengthValue`) — treat-as-withdraw semantics, no silent drops.
+3. Validate prefix/address length octets against their family maximum before
+   `nlri_psize()`; check buffer length before every fixed-width copy.
+4. Fixed-width repeating attributes: reject payloads that are empty or not a
+   multiple of the element size.
+5. Emitters: derive `len()` and the emitted bytes from one shared
+   clamp/count helper; a 1-octet length field needs either a proof the body
+   can't reach 256 or a clamp that keeps length and body in sync.
