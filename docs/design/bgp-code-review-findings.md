@@ -6,9 +6,10 @@ candidate was checked by an independent adversarial verifier that had to name a
 concrete trigger and quote the decisive lines, then a fresh gap sweep added more.
 
 **Result: 34 confirmed correctness bugs + 15 confirmed cleanup items.**
-**Status 2026-07-18: top-14 fixed and merged** (PRs #1962, #1972, #1981,
-#1984, #1987, #1991, #1997, and the finding-#9 branch); fixes below the
-cap remain open. Three
+**Status 2026-07-18: ALL 15 top-ranked findings fixed and merged** (PRs #1962,
+#1972, #1981, #1984, #1987, #1991, #1997, #1999, #2001, #2002, #2006, #2007,
+#2008, and the finding-#15 branch); the "Also confirmed" and cleanup items
+below the cap remain open. Three
 candidates were refuted (two vty-disconnect "panics" are guarded by detached
 forwarding tasks; the N>1 BSID resync is covered by a mirrored winners replica).
 
@@ -223,7 +224,7 @@ compensating filter exists in `route_advertise_labeled` or the sync dumps.
 **Trigger:** a SAFI-4 route carrying NO_ADVERTISE or NO_EXPORT is **still
 advertised on the labeled family — an RFC 1997 violation / route leak.**
 
-### 15. Graceful Restart advertises a 1-second Restart Time — `peer.rs:2924`
+### 15. Graceful Restart advertises a 1-second Restart Time — `peer.rs:2924` — FIXED (default 120 s; enabled-false honored)
 
 The GR OPEN emitter advertises Restart Time = the stored config value, but
 `config_restart` (`config.rs:2933`) stores only an enable marker of `1` (there is

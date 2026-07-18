@@ -680,8 +680,22 @@ impl AfiSafiEncapType {
     }
 }
 
+/// Default RFC 4724 Restart Time (seconds) advertised for a
+/// graceful-restart-enabled family when no explicit value is
+/// configured — matches FRR's `bgp graceful-restart restart-time`
+/// default. The neighbor YANG has no per-family restart-time leaf, so
+/// this is the effective value. Clamped to the 12-bit field (≤ 4095) at
+/// emit time.
+pub const GR_RESTART_TIME_DEFAULT: u32 = 120;
+
 #[derive(Debug, Default, Clone)]
 pub struct PeerSubConfig {
+    /// `afi-safi <name> graceful-restart enabled`: the RFC 4724 Restart
+    /// Time in **seconds** to advertise for this family, or `None` when
+    /// GR is off. Set to [`GR_RESTART_TIME_DEFAULT`] on enable (there is
+    /// no per-family restart-time leaf in the YANG). Previously stored a
+    /// bare `1`, which the OPEN emitted verbatim — a helper then flushed
+    /// retained routes after ~1 s, defeating the whole feature.
     pub graceful_restart: Option<u32>,
     pub llgr: Option<u32>,
     /// `afi-safi <name> encapsulation-type` (ietf-bgp-neighbor). Only
@@ -2982,8 +2996,8 @@ fn build_open_packet(peer: &mut Peer) -> BytesMut {
         if let Some(restart_time) = sub.graceful_restart {
             // RFC 4724 carries a single Restart Time for the whole
             // capability; advertise the largest configured per-family
-            // value (the config callback stores an enabled marker of 1
-            // today), clamped to the 12-bit field.
+            // value (each enabled family stores GR_RESTART_TIME_DEFAULT),
+            // clamped to the 12-bit field.
             let time = restart_time.min(0xfff) as u16;
             let cap = bgp_cap.restart.get_or_insert_with(CapRestart::default);
             if time > cap.flag_time.restart_time() {
@@ -4436,6 +4450,72 @@ mod adv_timer_phantom_tests {
         assert!(
             peer.cache_vpnv6_timer.is_none(),
             "route_clean must cancel the VPNv6 advertise timer"
+        );
+    }
+}
+
+#[cfg(test)]
+mod gr_restart_time_tests {
+    use super::*;
+    use bgp_packet::{Afi, AfiSafi, Safi};
+
+    fn gr_peer() -> Peer {
+        let (tx, rx) = mpsc::channel::<Message>(8);
+        Box::leak(Box::new(rx));
+        let mut peer = Peer::new(
+            1,
+            65001,
+            Ipv4Addr::new(10, 0, 0, 1),
+            65002,
+            "10.0.0.2".parse().unwrap(),
+            None,
+            tx,
+            crate::context::ProtoContext::default_table_no_rib(),
+        );
+        // A router-id so the OPEN builds without the unspecified warning.
+        peer.router_id = Ipv4Addr::new(10, 0, 0, 1);
+        peer
+    }
+
+    /// Review finding #15: a GR-enabled family must advertise a usable
+    /// Restart Time, not the bare `1` the enable marker used to store —
+    /// which made a helper flush retained routes after ~1 s.
+    #[tokio::test]
+    async fn gr_open_advertises_default_restart_time() {
+        let mut peer = gr_peer();
+        peer.config.sub.insert(
+            AfiSafi::new(Afi::Ip, Safi::Unicast),
+            PeerSubConfig {
+                graceful_restart: Some(GR_RESTART_TIME_DEFAULT),
+                ..Default::default()
+            },
+        );
+
+        let bytes = build_open_packet(&mut peer);
+        let (_, open) = OpenPacket::parse_packet(&bytes).expect("OPEN parses");
+        let restart = open.bgp_cap.restart.expect("GR capability advertised");
+        assert_eq!(
+            restart.flag_time.restart_time(),
+            GR_RESTART_TIME_DEFAULT as u16,
+            "Restart Time must be the sane default, not 1 second"
+        );
+        assert!(
+            restart.flag_time.restart_time() >= 3,
+            "a sub-hold-time Restart Time defeats graceful restart"
+        );
+    }
+
+    /// `graceful-restart enabled false` must NOT enable GR (the old
+    /// callback keyed on op.is_set() and ignored the boolean).
+    #[test]
+    fn gr_enabled_false_does_not_advertise() {
+        let mut peer = gr_peer();
+        // No GR family configured → no restart capability in the OPEN.
+        let bytes = build_open_packet(&mut peer);
+        let (_, open) = OpenPacket::parse_packet(&bytes).expect("OPEN parses");
+        assert!(
+            open.bgp_cap.restart.is_none(),
+            "GR must be off when no family enabled it"
         );
     }
 }
