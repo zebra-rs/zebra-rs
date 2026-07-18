@@ -199,6 +199,14 @@ pub fn bgp_nexthop_ip(attr: &BgpAttr) -> Option<IpAddr> {
 /// retains. Everything else (SR-MPLS VPN, plain unicast) keeps tracking
 /// the BGP next-hop. All of a route's NHT sites — register, transport
 /// lookup, re-eval, untrack — must agree, so they all call this.
+///
+/// Known limitation: for a split End.DT4 + End.DT6 pair this tracks the
+/// FIRST SID regardless of the destination family the FIB steers into
+/// (`srv6_l3_sid_for_dest` there). Both SIDs of one route come from the
+/// same PE's locator in practice, so reachability is equivalent; making
+/// this family-aware would require threading the family through every
+/// register/untrack site in lockstep (a mismatch desyncs the NHT
+/// refcounts), which is not worth it for a same-locator distinction.
 pub fn nht_target(attr: &BgpAttr) -> Option<IpAddr> {
     if let Some((sid, _behavior)) = attr.srv6_l3_sid() {
         return Some(IpAddr::V6(sid));
