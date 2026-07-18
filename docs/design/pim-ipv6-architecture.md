@@ -535,7 +535,7 @@ Each phase is one reviewable PR leaving the tree tested and useful.
 
 | Phase | Deliverable | Required proof |
 |---|---|---|
-| 0 | IPv4 correctness floor: DR gating **with `pim_assert` rework**, GenID re-sync, neighbor secondary-address storage/matching, ABI layout tests for existing structs | all seven IPv4 features green (assert feature redesigned, not deleted) |
+| 0 | **DONE** — IPv4 correctness floor: DR gating **with `pim_assert` rework**, GenID re-sync, neighbor secondary-address storage/matching, ABI layout tests for existing structs | all seven IPv4 features green (assert feature redesigned, not deleted) |
 | 1 | Codec groundwork: checksum context API (all emit sites), MLD wire types, exponent encodings, mixed-family rejection, ICMPv6 checksum helper lifted to `packet-utils` | fixture + negative tests; IPv4 fixtures byte-identical |
 | 2 | Supervisor extraction + `Pim<A>`/`Gm<A>`/FP-trait genericization; **IPv4 runtime only** | all IPv4 unit + live BDD unchanged |
 | 3 | `Ipv6` transports: PIMv6 socket, Hello/neighbor/DR over LL | two-router adjacency BDD; invalid-transport negatives |

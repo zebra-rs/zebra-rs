@@ -25,6 +25,12 @@ pub struct Neighbor {
     pub gen_id: Option<u32>,
     /// (T bit, propagation delay ms, override interval ms).
     pub lan_prune_delay: Option<(bool, u16, u16)>,
+    /// Secondary addresses from the Hello Address List option
+    /// (RFC 7761 §4.3.4). RPF′ matching must consult these: the RIB's
+    /// resolved nexthop may be any of the neighbor's addresses, not
+    /// just the hello source (mandatory for IPv6, where hellos come
+    /// from link-locals but routes may carry globals).
+    pub secondary: Vec<Ipv4Addr>,
     pub uptime: Instant,
     pub expiry: Option<Timer>,
 }
@@ -68,6 +74,15 @@ impl Pim {
         }
 
         let gen_id = hello.generation_id();
+        let secondary: Vec<Ipv4Addr> = hello
+            .address_list()
+            .unwrap_or(&[])
+            .iter()
+            .filter_map(|a| match a.addr {
+                std::net::IpAddr::V4(v4) => Some(v4),
+                std::net::IpAddr::V6(_) => None,
+            })
+            .collect();
         let timer = expiry_timer(&self.tx, ifindex, src, holdtime);
         let link = self.links.get_mut(&ifindex).unwrap();
         let mut is_new = false;
@@ -78,7 +93,7 @@ impl Pim {
                 if nbr.gen_id != gen_id {
                     // Generation-ID change without an expiry: the
                     // neighbor restarted. Treat as a bounce so its
-                    // uptime and (in later phases) tree state reset.
+                    // uptime resets and the joined state re-syncs.
                     bounced = true;
                     nbr.uptime = Instant::now();
                 }
@@ -86,6 +101,7 @@ impl Pim {
                 nbr.dr_priority = hello.dr_priority();
                 nbr.gen_id = gen_id;
                 nbr.lan_prune_delay = hello.lan_prune_delay();
+                nbr.secondary = secondary.clone();
             })
             .or_insert_with(|| {
                 is_new = true;
@@ -95,6 +111,7 @@ impl Pim {
                     dr_priority: hello.dr_priority(),
                     gen_id,
                     lan_prune_delay: hello.lan_prune_delay(),
+                    secondary,
                     uptime: Instant::now(),
                     expiry: None,
                 }
@@ -115,6 +132,11 @@ impl Pim {
                 src,
                 link.name
             );
+            // RFC 7761 §4.3.1: a GenID change means the neighbor lost
+            // its state — re-introduce ourselves and re-send every
+            // Join that runs through it.
+            self.hello_send(ifindex);
+            self.tib_genid_resync(ifindex, src);
         }
         self.dr_election(ifindex);
     }

@@ -310,7 +310,14 @@ impl Pim {
     /// what was previously synced: INCLUDE source sets become local
     /// (S,G) state; EXCLUDE (any-source) membership becomes local
     /// (*,G) state (SSM-range groups never get (*,G)).
+    ///
+    /// Only the elected DR reflects membership into the TIB (RFC 7761
+    /// §4.3.2). A non-DR keeps full `IgmpIf` state so failover is
+    /// immediate, but presents an empty view here — so a DR→non-DR
+    /// transition withdraws everything and non-DR→DR re-adds it, both
+    /// through the same diff.
     pub(crate) fn igmp_tib_sync(&mut self, ifindex: u32, grp: Ipv4Addr) {
+        let is_dr = self.i_am_dr(ifindex);
         let Some(link) = self.links.get_mut(&ifindex) else {
             return;
         };
@@ -320,7 +327,7 @@ impl Pim {
         let Some(group) = igmp.groups.get_mut(&grp) else {
             return;
         };
-        let current: BTreeSet<Ipv4Addr> = if group.filter_mode == FilterMode::Include {
+        let current: BTreeSet<Ipv4Addr> = if is_dr && group.filter_mode == FilterMode::Include {
             group.sources.keys().copied().collect()
         } else {
             BTreeSet::new()
@@ -328,7 +335,8 @@ impl Pim {
         let added: Vec<Ipv4Addr> = current.difference(&group.synced).copied().collect();
         let removed: Vec<Ipv4Addr> = group.synced.difference(&current).copied().collect();
         group.synced = current;
-        let asm_desired = group.filter_mode == FilterMode::Exclude && !super::rp::is_ssm(grp);
+        let asm_desired =
+            is_dr && group.filter_mode == FilterMode::Exclude && !super::rp::is_ssm(grp);
         let asm_was = group.asm_synced;
         group.asm_synced = asm_desired;
         for src in added {
