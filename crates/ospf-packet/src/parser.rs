@@ -715,15 +715,14 @@ impl OspfLsp {
             };
         let selector = LspSelector(typ, opaque_type);
 
-        match OspfLsp::parse_be(payload_input, selector) {
-            Ok((_, parsed_payload)) => Ok((remaining_input, parsed_payload)),
-            Err(_) => Ok((
-                remaining_input,
-                OspfLsp::Unknown(UnknownLsa {
-                    data: payload_input.to_vec(),
-                }),
-            )),
-        }
+        // A genuinely unknown LS type is absorbed inside `OspfLsp::parse_be` by
+        // the `_ => Unknown(UnknownLsa)` arm — `UnknownLsa` captures the raw
+        // bytes and never fails. So an error here means a *known* LS type whose
+        // body could not be decoded (truncated / corrupt): propagate it so the
+        // daemon rejects the LSA at ingress instead of silently accepting and
+        // re-flooding a malformed one.
+        let (_, parsed_payload) = OspfLsp::parse_be(payload_input, selector)?;
+        Ok((remaining_input, parsed_payload))
     }
 }
 
@@ -2991,6 +2990,33 @@ mod tests {
         // Flags and the link record round-trip byte-for-byte.
         assert_eq!(&buf[0..2], &[0x00, 0x00]);
         assert_eq!(&buf[4..], &bytes[4..]);
+    }
+
+    #[test]
+    fn lsa_truncated_known_type_is_rejected() {
+        // A Router LSA (known type) whose declared length leaves only a 2-byte
+        // body — too short for the fixed flags(2)+#links(2) header — must be
+        // rejected, not silently accepted as Unknown and re-flooded.
+        let ls_id = Ipv4Addr::new(0, 0, 0, 0);
+        let body = [0x00, 0x00];
+        let r = OspfLsp::parse_lsa_with_length(&body, OspfLsType::Router, 22, ls_id);
+        assert!(r.is_err());
+    }
+
+    #[test]
+    fn lsa_unknown_type_is_tolerated() {
+        // A genuinely unknown LS type is captured as Unknown (raw bytes) and
+        // never rejected, preserving tolerant flooding.
+        let ls_id = Ipv4Addr::new(0, 0, 0, 0);
+        let body = [0xDE, 0xAD, 0xBE, 0xEF];
+        let (rest, lsp) =
+            OspfLsp::parse_lsa_with_length(&body, OspfLsType::Unknown(200), 24, ls_id)
+                .expect("unknown type tolerated");
+        assert!(rest.is_empty());
+        match lsp {
+            OspfLsp::Unknown(u) => assert_eq!(u.data, vec![0xDE, 0xAD, 0xBE, 0xEF]),
+            other => panic!("expected Unknown, got {other:?}"),
+        }
     }
 
     /// RFC 2328 §D.4.1-D.4.2: the checksum excludes the 64-bit
