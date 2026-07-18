@@ -11753,6 +11753,15 @@ fn route_update_labelv4(
     {
         return None;
     }
+    // RFC 1997 well-known communities apply to labeled-unicast (SAFI 4)
+    // exactly as to plain unicast: NO_ADVERTISE suppresses to every peer,
+    // NO_EXPORT to eBGP peers. The other advertise paths (v4/v6 unicast,
+    // EVPN, MUP) all filter here; the labeled path omitted it, leaking a
+    // route the operator marked no-advertise/no-export (review finding
+    // #14).
+    if community_suppresses_advertisement(&rib.attr, peer.peer_type) {
+        return None;
+    }
 
     let nlri = Ipv4Nlri {
         id: if add_path { rib.local_id } else { 0 },
@@ -11833,6 +11842,10 @@ fn route_update_labelv6(
         && rib.typ == BgpRibType::IBGP
         && !peer.is_reflector_client()
     {
+        return None;
+    }
+    // RFC 1997 NO_ADVERTISE / NO_EXPORT — see `route_update_labelv4`.
+    if community_suppresses_advertisement(&rib.attr, peer.peer_type) {
         return None;
     }
 
@@ -21401,5 +21414,142 @@ mod bestpath_router_id_tests {
         let (better, reason) = LocalRibTable::<Ipv4Net>::is_better(&p1, &p2);
         assert!(better, "lower path-id wins the final tie");
         assert!(matches!(reason, Reason::PathId));
+    }
+}
+
+#[cfg(test)]
+mod labeled_community_suppress_tests {
+    use super::*;
+    use crate::bgp::peer::{Peer, PeerType, State};
+    use bgp_packet::CommunityValue;
+    use std::net::IpAddr;
+
+    /// eBGP peer with a v4 session-local address (needed for the
+    /// next-hop-self path once a route is NOT suppressed).
+    fn ebgp_peer() -> Peer {
+        let (tx, rx) = tokio::sync::mpsc::channel(8);
+        Box::leak(Box::new(rx));
+        let mut peer = Peer::new(
+            1,
+            65001,
+            Ipv4Addr::new(10, 0, 0, 9),
+            65002,
+            "10.0.0.2".parse::<IpAddr>().unwrap(),
+            None,
+            tx,
+            crate::context::ProtoContext::default_table_no_rib(),
+        );
+        peer.state = State::Established;
+        peer.peer_type = PeerType::EBGP;
+        peer.param.local_addr = Some("10.0.0.9:179".parse().unwrap());
+        peer
+    }
+
+    fn labelv4_rib(coms: &[u32]) -> BgpRib {
+        let mut attr = BgpAttr::new();
+        attr.aspath = Some(As4Path::from(vec![65003]));
+        attr.nexthop = Some(BgpNexthop::Ipv4("10.0.0.3".parse().unwrap()));
+        if !coms.is_empty() {
+            attr.com = Some(coms.iter().copied().collect());
+        }
+        // ident 2 ≠ peer.ident 1 (no split-horizon); eBGP-learned.
+        BgpRib::new(
+            2,
+            Ipv4Addr::new(3, 3, 3, 3),
+            BgpRibType::EBGP,
+            0,
+            0,
+            &attr,
+            Some(Label::new(100, 0, true)),
+            None,
+            false,
+        )
+    }
+
+    fn empty_top<'a>(
+        router_id: &'a Ipv4Addr,
+        local_rib: &'a mut LocalRib,
+        shard: &'a mut crate::bgp::shard::BgpShard,
+        attr_store: &'a mut crate::bgp::BgpAttrStore,
+        update_groups: &'a mut crate::bgp::update_group::UpdateGroupMap,
+        interface_addrs: &'a crate::bgp::interface_addrs::InterfaceAddrs,
+        rib_client: &'a crate::rib::client::RibClient,
+        tx: &'a tokio::sync::mpsc::Sender<crate::bgp::inst::Message>,
+    ) -> BgpTop<'a> {
+        BgpTop {
+            router_id,
+            srv6_ipv6_export: None,
+            local_rib,
+            shard,
+            tx,
+            rib_client,
+            attr_store,
+            update_groups,
+            interface_addrs,
+            vrf_export: None,
+            color_policy: None,
+            flex_algo_routes: None,
+            flex_algo_srv6_routes: None,
+            vrf_import: None,
+            nexthop_cache: None,
+            vrf_transport_v4: None,
+            vrf_transport_v6: None,
+            central_label_alloc: None,
+            as_sets_withdraw: false,
+        }
+    }
+
+    /// Review finding #14: a labeled-unicast (SAFI 4) route carrying
+    /// NO_ADVERTISE must not be advertised to any peer — the labeled
+    /// update path used to skip the RFC 1997 filter entirely, leaking
+    /// it. NO_EXPORT does the same toward this eBGP peer. A plain route
+    /// still advertises.
+    #[tokio::test]
+    async fn labelv4_honors_no_advertise_and_no_export() {
+        let router_id = Ipv4Addr::new(10, 0, 0, 9);
+        let ctx = crate::context::ProtoContext::default_table_no_rib();
+        let mut local_rib = LocalRib::default();
+        let mut shard = crate::bgp::shard::BgpShard::default();
+        let mut attr_store = crate::bgp::BgpAttrStore::default();
+        let mut update_groups = crate::bgp::update_group::empty_map();
+        let interface_addrs = crate::bgp::interface_addrs::InterfaceAddrs::default();
+        let (tx, rx) = tokio::sync::mpsc::channel(8);
+        Box::leak(Box::new(rx));
+
+        let prefix: Ipv4Net = "10.9.0.0/24".parse().unwrap();
+        let mut peer = ebgp_peer();
+
+        // NO_ADVERTISE → suppressed.
+        {
+            let mut top = empty_top(
+                &router_id,
+                &mut local_rib,
+                &mut shard,
+                &mut attr_store,
+                &mut update_groups,
+                &interface_addrs,
+                &ctx.rib,
+                &tx,
+            );
+            let rib = labelv4_rib(&[CommunityValue::NO_ADVERTISE.value()]);
+            assert!(
+                route_update_labelv4(&mut peer, &prefix, &rib, &mut top, false).is_none(),
+                "NO_ADVERTISE must suppress the labeled advertisement"
+            );
+
+            // NO_EXPORT → suppressed toward this eBGP peer.
+            let rib = labelv4_rib(&[CommunityValue::NO_EXPORT.value()]);
+            assert!(
+                route_update_labelv4(&mut peer, &prefix, &rib, &mut top, false).is_none(),
+                "NO_EXPORT must suppress toward an eBGP peer"
+            );
+
+            // No suppressing community → advertised.
+            let rib = labelv4_rib(&[]);
+            assert!(
+                route_update_labelv4(&mut peer, &prefix, &rib, &mut top, false).is_some(),
+                "a plain labeled route is still advertised"
+            );
+        }
     }
 }
