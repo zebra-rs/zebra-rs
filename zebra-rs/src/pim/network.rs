@@ -10,7 +10,9 @@ use std::sync::Arc;
 
 use bytes::BytesMut;
 use nix::sys::socket::{self, ControlMessageOwned, SockaddrIn};
-use pim_packet::{IgmpPacket, PimPacket, igmp_verify_checksum, pim_verify_checksum};
+use pim_packet::{
+    IgmpPacket, PimChecksumContext, PimPacket, igmp_verify_checksum, pim_verify_checksum,
+};
 use socket2::Socket;
 use tokio::io::Interest;
 use tokio::io::unix::AsyncFd;
@@ -62,7 +64,9 @@ pub async fn read_packet(sock: Arc<AsyncFd<Socket>>, tx: UnboundedSender<Message
                 }
                 let pim_input = &input[ihl..];
 
-                if !pim_verify_checksum(pim_input) {
+                // This instance is IPv4; the IPv6 read task will pass
+                // the pseudo-header context (Phase 3).
+                if !pim_verify_checksum(pim_input, PimChecksumContext::Ipv4) {
                     tracing::debug!("pim: bad checksum from {} on ifindex {ifindex}", src.ip());
                     return Err(ErrorKind::InvalidData.into());
                 }
@@ -225,7 +229,7 @@ pub async fn igmp_write_packet(sock: Arc<AsyncFd<Socket>>, mut rx: UnboundedRece
 pub async fn write_packet(sock: Arc<AsyncFd<Socket>>, mut rx: UnboundedReceiver<PimSend>) {
     while let Some(send) = rx.recv().await {
         let mut buf = BytesMut::new();
-        send.packet.emit(&mut buf);
+        send.packet.emit(&mut buf, PimChecksumContext::Ipv4);
 
         let iov = [IoSlice::new(&buf)];
         let sockaddr: SockaddrIn = SocketAddrV4::new(send.dst, 0).into();
