@@ -632,27 +632,7 @@ impl OspfLsa {
 /// same checksum-field placement at LSA-offset 16 / data-offset 14,
 /// so the algorithm and offset are identical.
 pub(crate) fn lsa_checksum_calc(data: &[u8], cksum_offset: usize) -> u16 {
-    if data.len() <= cksum_offset {
-        return 0;
-    }
-    let checksum = fletcher::calc_fletcher16(data);
-    let mut c0 = (checksum & 0x00FF) as i32;
-    let mut c1 = ((checksum >> 8) & 0x00FF) as i32;
-
-    // Calculate the adjustment values based on checksum position.
-    // sop = length - checksum_offset - 1 (position from end)
-    let sop = (data.len() - cksum_offset - 1) as i32;
-    let mut x = (sop * c0 - c1) % 255;
-    if x <= 0 {
-        x += 255;
-    }
-    c1 = 510 - c0 - x;
-    if c1 > 255 {
-        c1 -= 255;
-    }
-    c0 = x;
-
-    ((c0 as u16) << 8) | (c1 as u16)
+    packet_utils::fletcher_lsa_checksum(data, cksum_offset)
 }
 
 /// Selector for OspfLsp parsing that carries both the LS type and opaque type.

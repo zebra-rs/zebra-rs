@@ -6,22 +6,7 @@ pub fn is_valid_checksum(input: &[u8]) -> bool {
 }
 
 pub fn checksum_calc(data: &[u8]) -> [u8; 2] {
-    if data.len() < 13 {
-        return [0, 0];
-    }
-    let checksum = fletcher::calc_fletcher16(data);
-    let mut c0 = (checksum & 0x00FF) as i32;
-    let mut c1 = ((checksum >> 8) & 0x00FF) as i32;
-
-    let sop = data.len() as u16 - 13;
-    let mut x = (sop as i32 * c0 - c1) % 255;
-    if x <= 0 {
-        x += 255;
-    }
-    c1 = 510 - c0 - x;
-    if c1 > 255 {
-        c1 -= 255;
-    }
-    c0 = x;
-    [c0 as u8, c1 as u8]
+    // The IS-IS LSP checksum is the offset-12 specialization of the shared
+    // Fletcher helper (checksum field at bytes 12-13 of the checksummed span).
+    packet_utils::fletcher_lsa_checksum(data, 12).to_be_bytes()
 }
