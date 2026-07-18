@@ -1,0 +1,415 @@
+# `crates/isis-packet/` — Code Review
+
+**Scope:** the entire `crates/isis-packet/` crate (~10k lines of IS-IS wire-format
+parser/serializer).
+**Method:** 10 independent finder angles (line-by-line, parse↔emit round-trip,
+length/bounds, Rust pitfalls, sub-TLV dispatch, reuse/simplification/efficiency,
+altitude, conventions, SRv6 deep-dive) plus a full manual read, with the top
+findings verified against the actual daemon callers in `zebra-rs/src/isis/` and
+against the FRR reference implementation (`../frr/isisd`).
+
+## Overall assessment
+
+The **parse path is genuinely well-defended**: every length-driven slice goes
+through `packet_utils::safe_split_at`, `ptake`/`ptakev6` bound-check prefix
+lengths before slicing, the `be_uNN` combinators are range-safe, and the
+top-level TLV loop (`parser.rs:1356-1370`) degrades a malformed *known* TLV to
+`Unknown` so one bad TLV can't abort the whole PDU. As a result there are
+essentially **no wire-triggered panics** in the TLV/sub-TLV parsers.
+
+The real defects cluster in two places:
+
+1. **Emit-side length fields that disagree with the bytes written** — `len()`
+   returns a `u8` computed with truncating `as u8` casts or panicking `.sum()`,
+   while `emit()` writes the untruncated data. On the wire this desyncs the
+   receiver's TLV loop; in debug builds it can panic.
+2. **A few flag bit-layouts and codepoints** that don't match the RFC / FRR.
+
+All flag-position and codepoint questions below were resolved against the FRR
+source, not left as guesses.
+
+---
+
+## Findings (ranked, most severe first)
+
+Severity legend: 🔴 high · 🟠 medium · 🟡 low. Verdict: **CONFIRMED** (inputs +
+wrong output identified) · **PLAUSIBLE** (mechanism real, trigger conditional).
+
+### 1. 🔴 `IsisTlvLspEntries::len()` wraps at ≥16 entries → corrupt CSNP/PSNP — CONFIRMED
+`crates/isis-packet/src/parser.rs:755`
+
+`len()` is `(self.entries.len() * 16) as u8`, which wraps mod-256, but `emit()`
+writes every entry. The daemon's SNP builders size a single `LspEntries` TLV by
+the **MTU budget**, not the 255-byte TLV limit:
+
+- `csnp_generate` — `zebra-rs/src/isis/lsp.rs:1649`: `entry_size_max = available_len / 16`
+- PSNP builder — `zebra-rs/src/isis/flood.rs:260`: same `available_len / 16`
+
+For a 1500-byte MTU that is ~92 entries per TLV, but the one-byte length field
+can only express 15 entries (`15 * 16 = 240 ≤ 255`).
+
+**Failure:** an LSDB with 16 LSPs emits length byte `0` (`16*16 = 256`) followed
+by 256 bytes of entries. A conformant receiver (including this crate's own
+parser) reads 0 value bytes, then interprets the first entry's bytes as the next
+TLV header — the whole CSNP/PSNP desyncs and **LSDB synchronization breaks on any
+network with more than 15 LSPs per level**. Small BDD topologies stay under 16
+LSPs, which is why it has not surfaced in testing.
+
+**Fix:** cap the builders at 15 entries per TLV (`available_len/16` → `min(15)`),
+or add `LspEntries` to the packer's `split_distributable_at_255` set, or make the
+codec's `len()`/`emit()` consistent (both truncate at 15) so an over-full TLV
+can't be silently mis-framed.
+
+### 2. 🔴 `RouterCapFlags` S/D flags at the wrong bit positions — CONFIRMED
+`crates/isis-packet/src/sub/cap.rs:214`
+
+```rust
+#[bitfield(u8, debug = true)]
+pub struct RouterCapFlags {
+    #[bits(6)] pub resvd: u8,   // bits 0-5
+    pub d_flag: bool,           // bit 6 → 0x40
+    pub s_flag: bool,           // bit 7 → 0x80
+}
+```
+
+RFC 4971/7981 put **S at `0x01`, D at `0x02`** with the reserved bits in the MSBs.
+Confirmed against FRR: `../frr/isisd/isis_tlvs.h:188` `ISIS_ROUTER_CAP_FLAG_S 0x01`,
+`:189` `ISIS_ROUTER_CAP_FLAG_D 0x02`.
+
+**Failure:** a TLV 242 from FRR/Cisco with `S=0x01` (flood across the entire
+domain) parses as `s_flag()=false`; zebra setting `s_flag` emits `0x80`, which a
+conformant receiver reads as reserved and treats a domain-wide capability as
+area-local. `flags_serde.rs` and `cap_disp.rs` expose the same wrong bits.
+
+Note the sibling `SegmentRoutingCapFlags` (I=`0x80`/V=`0x40`) *is* correct and
+matches FRR (`ISIS_SUBTLV_SRGB_FLAG_I 0x80` / `_V 0x40`) — RouterCap simply
+copied the MSB-aligned convention when it needed the LSB-aligned one.
+
+**Fix:** declare `s_flag` and `d_flag` first (LSB) and `resvd(6)` last, so
+S=`0x01`, D=`0x02`.
+
+### 3. 🔴 `Nsap::from_str` panics (index OOB) on a malformed `net` — CONFIRMED
+`crates/isis-packet/src/nsap.rs:116` (also `:122`, `:127`)
+
+The three system-id groups are decoded assuming each is 4 hex chars (2 bytes) and
+then indexed at `[0]` and `[1]`, but the earlier validation
+(`nsap.rs:100-104`) accepts *any* group of length 2 **or** 4.
+
+**Failure:** `Nsap::from_str("49.0000.0000.00.0000.00")` passes the length check;
+a system-id-position part `"00"` `hex::decode`s to a single byte, and
+`sys_id.id[..] = sys_id_val[1]` panics (`index out of bounds: len is 1 but index
+is 1`). Reached from operator config via `.parse::<Nsap>()` in
+`zebra-rs/src/isis/config.rs` — a malformed `net` value **crashes the IS-IS
+daemon**.
+
+**Fix:** after `hex::decode`, verify the decoded group is exactly 2 bytes (return
+`NsapParseError`) before indexing; or restrict the sys-id-position parts to
+length 4 in the validation loop.
+
+### 4. 🟠 `IsisTlvIsNeighbor::len()` wraps at ≥43 neighbors — CONFIRMED
+`crates/isis-packet/src/parser.rs:682`
+
+`len()` is `(self.neighbors.len() * 6) as u8` with no cap; `emit()` writes every
+neighbor. TLV 6 is built from all adjacencies in `zebra-rs/src/isis/ifsm.rs:173`.
+
+**Failure:** a LAN IIH advertising 43 neighbors: `len()` = `43*6 = 258 as u8 = 2`,
+`emit()` writes 258 bytes. The receiver reads 2 bytes and re-enters TLV parsing
+256 bytes early, reading neighbor MAC bytes as TLV headers; the Hello's following
+TLVs (Auth, Protocols Supported) are lost and adjacencies flap on a large LAN.
+
+**Fix:** cap consistently with `emit()` (`.min(255)` / `.min(252)` for a
+multiple of 6), or shard TLV 6 across instances.
+
+### 5. 🟠 `Srv6TlvFlags` MTID bitfield declared in inverted order — CONFIRMED
+`crates/isis-packet/src/sub/prefix.rs:1090`
+
+The 2-octet header of the SRv6 Locator TLV (type 27) is **4 reserved MSBs +
+12-bit MTID** (RFC 9352 §7.1). The struct declares `resvd(4)` first, so it lands
+at LSB bits 0-3 and the 12-bit field at bits 4-15 — the *exact* inverted-order
+bug already found and fixed for `MultiTopologyId` (see the explanatory comment at
+`prefix.rs:621-631`), left unfixed here. It also models the MTID as an unnamed
+`v_flag` and never surfaces the topology id.
+
+**Failure:** an SRv6 Locator TLV under MT 2 arrives as `0x0002`; `v_flag()`
+(bits 4-15) reads 0 and `resvd` reads 2, so MT-2 locators can't be distinguished
+from MT-0, and a locally-built MTID=2 emits `0x0020`, which a peer reads as MTID
+32. MTID=0 (single-topology SRv6) round-trips by luck, so this only breaks
+multi-topology SRv6. FRR carries an explicit `uint16_t mtid` for this TLV.
+
+**Fix:** mirror the `MultiTopologyId` layout — declare the 12-bit MTID first,
+`resvd(4)` second — and rename the field `mtid`.
+
+### 6. 🟠 `IsisTlvAreaAddr::parse_be` drops all but the first area address — CONFIRMED
+`crates/isis-packet/src/parser.rs:649`
+
+The Area Address TLV (type 1) value is a sequence of `{length, area}` pairs, but
+`parse_be` reads exactly one pair and returns; `parse_tlv`'s
+`if let Ok((_, val))` discards the unconsumed remainder. `maxAreaAddresses` is up
+to 3.
+
+**Failure:** a router packing two areas into one TLV 1
+(`[03,49,00,01, 03,49,00,02]`) has its second area silently dropped, so L1 area
+matching against a multi-area neighbor fails and adjacencies that should form on
+the secondary area are rejected. `emit()` is symmetric-single, so zebra→zebra
+round-trips hide it — only *received* multi-area TLVs lose data.
+
+**Fix:** model `area_addr` as a `Vec<Vec<u8>>` (or loop until the value slice is
+exhausted) and emit each length-prefixed address.
+
+### 7. 🟠 Per-entry sub-TLV length uses panicking/wrapping `u8` arithmetic — CONFIRMED
+`crates/isis-packet/src/sub/neigh.rs:176` (and siblings)
+
+`IsisTlvExtIsReachEntry::sub_len()` is `.map(|s| s.len()+2).sum::<u8>()` and
+`len()` is `11 + sub_len()`, defeating the `saturating_add` guard the *enclosing*
+TLV-level `len()` deliberately added. Same raw pattern at:
+
+- `prefix.rs:556` — `IsisTlvExtIpReachEntry::sub_len`
+- `prefix.rs:757` — `IsisTlvIpv6ReachEntry::sub_len`
+- `prefix.rs:1119` — `Srv6Locator::len`
+- `prefix.rs:1191` — `IsisTlvSrv6::len` (`.sum()` then `+ 2`)
+- `cap.rs:254` — `IsisTlvRouterCap::sub_len`
+- `neigh.rs:792` — `IsisSubAsla::len`
+
+**Failure:** one Extended IS Reachability entry with ~11 `Srv6EndXSid` sub-TLVs
+(24 bytes each, ~264 total): `sum::<u8>()` overflows → **debug builds panic**
+(`attempt to add with overflow`) while generating an LSP; release builds wrap the
+length byte to 8 and emit all 264 bytes, so a receiver parses 8 bytes of subs and
+reads the remaining 256 as phantom neighbor entries. A single oversized entry
+can't be sharded by the packer (which shards at entry boundaries), so it hits this
+per-entry length directly.
+
+**Fix:** use `usize` internally and `saturating`/checked conversion to `u8` at the
+boundary, matching the reach-TLV-level `len()` policy.
+
+### 8. 🟠 `emit_sub_tlvs` silently caps the sub-TLV block length at 255 — CONFIRMED
+`crates/isis-packet/src/util.rs:13`
+
+`buf[pp - 1] = (buf.len() - pp).min(255) as u8` — a sub-TLV block larger than 255
+bytes is labeled 255 while all bytes remain in the stream. Affects
+`Srv6Locator::emit` (`prefix.rs:1132`), `IsisSubSrv6EndSid` (`prefix.rs:128`),
+`IsisSubSrv6MirrorSid` (`prefix.rs:188`), `IsisSubSrv6EndXSid` (`neigh.rs:978`),
+`IsisSubSrv6LanEndXSid` (`neigh.rs:1044`).
+
+**Failure:** an SRv6 Locator whose sub-TLVs serialize to ~276 bytes: the length
+byte is clamped to 255 but 276 bytes follow. `Srv6Locator::parse_be` does
+`safe_split_at(input, 255)`, slicing mid-sub-TLV; the truncated tail parses as
+`Unknown` and the leftover ~21 bytes are consumed as the metric/flags of a
+phantom second locator, injecting a bogus SRv6 route at every receiver.
+
+**Fix:** return an error (or assert) when the block exceeds 255 instead of
+clamping, so an over-full block is caught at emit time rather than corrupting the
+wire.
+
+### 9. 🟠 3-octet SID/Label value is never masked to 20 bits — CONFIRMED
+`crates/isis-packet/src/parser.rs:1336` (`SidLabelValue::parse_be` / `emit`)
+
+A 3-byte label field is read with `be_u24` into the full 24-bit value. RFC 8667
+says only the low 20 bits are the label and the top 4 are reserved. FRR masks this
+on unpack (`sid &= MPLS_LABEL_VALUE_MASK`, `../frr/isisd/isis_tlvs.c:1813,1857`);
+zebra masks on neither parse nor emit.
+
+**Failure:** a peer that sets any reserved high bit — or an origination path with
+a mis-scaled value — yields an illegal MPLS label (≥ 2²⁰) that zebra accepts,
+re-advertises verbatim, and can program into the FIB.
+
+**Fix:** mask `Label` values to the low 20 bits (`& 0x000F_FFFF`) on parse and on
+emit.
+
+### 10. 🟠 One malformed reach entry / sub-TLV silently truncates all that follow — CONFIRMED
+`crates/isis-packet/src/sub/prefix.rs:1048` (v4) and `:1072` (v6); sub-TLV `parse_subs` sites
+
+Unlike the top-level TLV loop (which degrades a malformed known TLV to `Unknown`),
+a sub-parser error propagates `?` out and the enclosing `many0_complete`
+interprets it as end-of-list, silently dropping every following valid
+entry/sub-TLV. Reach entries pass a wire prefixlen straight to `ptake`/`ptakev6`
+(v4 accepts the 6-bit field 0..63, v6 accepts a u8 0..255).
+
+**Failure:** a TLV 135 whose first entry has control-byte prefixlen 33 (invalid
+for v4) followed by a valid /24 entry: `ptake` returns `ErrorKind::Verify`,
+`many0_complete` stops, and the second entry is dropped with no error and no
+`Unknown` record — silent route loss from a single malformed/malicious peer entry.
+Same for TLV 236 (v6 prefixlen > 128) and for a malformed known sub-TLV in any
+sub-TLV block.
+
+**Fix:** apply the top-level degrade-to-Unknown policy inside the shared sub-TLV /
+entry loop so a bad element is preserved-or-skipped without truncating its
+followers.
+
+### 11. 🟡 Reach-entry emit keys the sub-TLV block on `subs.is_empty()` but writes the stored S-flag — PLAUSIBLE
+`crates/isis-packet/src/sub/prefix.rs:559` (and `:760` for IPv6)
+
+`emit()` gates the optional sub-TLV-length byte on `self.subs.is_empty()` while
+writing the stored `flags` byte verbatim, but the receiver keys the block's
+presence on `flags.sub_tlv()`. The codec never reconciles the two sources of
+truth.
+
+**Failure:** an entry parsed with `S=1` and `sublen=0` comes back with
+`flags.sub_tlv()=true`, `subs=[]`; re-emitting writes `S=1` but omits the sublen
+byte, so a receiver reads the next entry's metric MSB as a sub-TLV length and the
+TLV desyncs. Symmetrically, a locally-built entry with non-empty `subs` but a
+flags value whose `sub_tlv` bit is false emits a block the parser never reads.
+
+**Fix:** derive the `sub_tlv`/S bit from `!subs.is_empty()` at emit time (or
+normalize it on parse) instead of trusting the stored flag.
+
+### 12. 🟡 `P2p3Way` / `Restart` parse optionals by remaining length but emit by `Option` — PLAUSIBLE
+`crates/isis-packet/src/parser.rs:1168`; `crates/isis-packet/src/sub/restart.rs:83`/`:129`
+
+`IsisTlvP2p3Way::parse_be` assigns optional trailing fields purely by remaining
+length in fixed order (circuit_id if ≥4, then neighbor_id if ≥6, then
+neighbor_circuit_id if ≥4), while `emit` writes whichever `Option`s are `Some`.
+`IsisTlvRestart` has the identical asymmetry.
+
+**Failure:** a `P2p3Way` built with `circuit_id=None, neighbor_id=Some(sysid)`
+emits `state + 6 bytes`; the parser takes the first 4 as `circuit_id`, so the
+three-way handshake compares the wrong neighbor identity. A `Restart` with
+`remaining_time=None` but `restarting_neighbor=Some` emits `flags + 6 bytes`; the
+parser reads the first 2 as `remaining_time` and honors a bogus hold-time during
+graceful restart. Currently latent because callers set the fields together, but
+nothing enforces it.
+
+**Fix:** make emit/parse agree on an explicit presence rule (e.g. all-or-nothing
+tied to a flag), or encode the optional group as a single `Option<struct>`.
+
+### 13. 🟡 `admin_group()` doc claims sub-TLV 3 but reads sub-TLV 14; sub-TLV 3 undispatched — PLAUSIBLE
+`crates/isis-packet/src/sub/neigh.rs:154`
+
+The accessor is documented as returning the sub-TLV 3 Administrative Group but
+reads `IsisSubTlv::AdminGrp`, which is the RFC 7308 **Extended** Admin Group
+(sub-TLV 14). The classic RFC 5305 Administrative Group (sub-TLV 3) has **no
+dispatch arm** in `IsisNeighCode`.
+
+**Failure:** a router advertising link color via the standard sub-TLV 3 lands in
+`Unknown`, so the BGP-LS producer calling `admin_group()` gets `None` and the
+color is lost. BGP-LS also distinguishes Administrative Group (TLV 1088) from
+Extended Administrative Group (TLV 1173), so mapping one to the other is
+semantically wrong.
+
+**Fix:** add a dispatch arm for sub-TLV 3 and fix the accessor doc (or fold both
+into one accessor with the correct BGP-LS mapping).
+
+### 14. 🟡 ASLA parse forces SABM/UDABM to ≥1 byte when L-flag set — PLAUSIBLE
+`crates/isis-packet/src/sub/neigh.rs:764`
+
+`parse_be` forces `eff_sabm_len`/`eff_udabm_len` to `max(1)` when the L-flag is
+set, while `emit` writes exactly `sabm.len()`/`udabm.len()`. An emitted `L=1`
+ASLA with empty masks cannot be read back.
+
+> Note: FRR uses 1-byte app-identifier masks (`ASLA_APP_IDENTIFIER_BIT_LENGTH 1`),
+> so the `max(1)` may be defensive rather than clearly wrong. The **asymmetry**,
+> not the min itself, is the concern — hence PLAUSIBLE, not CONFIRMED.
+
+**Failure:** a peer (or local build) emits `L=1` with `SABM Length=0,
+UDABM Length=0` followed by nested sub-TLVs; the parser applies `max(1)` and
+consumes the first two bytes of the first nested sub-TLV (its type and length) as
+fabricated masks, then parses the rest at a shifted offset — nested TE attributes
+are garbled and re-emission differs from the wire.
+
+**Fix:** make emit enforce the same L-flag ⇒ ≥1-byte-mask invariant the parser
+assumes, or make the parser honor the advertised lengths.
+
+### 15. 🟡 `IsisPacket::emit` drops Unknown PDU payload; `IsisTlvUnknown` emit doubles the header — CONFIRMED
+`crates/isis-packet/src/parser.rs:98` and `:1271`
+
+`IsisPacket::emit` maps `Unknown(_) => {}`, dropping the stored
+`IsisUnknown.payload` and emitting an 8-byte header with no body — despite the
+payload being preserved on parse. Separately, `IsisTlvUnknown::emit` writes
+`typ+len+value` while every other `TlvEmitter::emit` writes value-only, so a
+caller using `tlv_emit()` on it (rather than the `emit()` that `IsisTlv::emit`
+deliberately calls) produces a doubled `[typ,len,typ,len,...]` header.
+`IsisSubTlvUnknown` is modeled correctly, so the two Unknown types disagree on the
+contract.
+
+**Failure:** any path that re-emits a parsed packet (padding probe, mirror/replay
+tooling, future forwarding of an unrecognized PDU type) silently produces an
+empty-bodied PDU instead of the original bytes; and a future generic path using
+`tlv_emit()` on `IsisTlvUnknown` emits a malformed doubled header.
+
+**Fix:** emit `IsisUnknown.payload` in `IsisPacket::emit`; make
+`IsisTlvUnknown::emit` write value-only so it obeys the `TlvEmitter` contract like
+`IsisSubTlvUnknown`.
+
+---
+
+## Lower-severity SRv6 notes (not ranked)
+
+From the SRv6 deep-dive, worth tracking but below the bar for the ranked list:
+
+- **SID width from byte-count, not flags** (`parser.rs:1338`): `SidLabelValue`
+  decides Label(3) vs Index(4) from the remaining byte count, ignoring the
+  RFC 8667 V/L flags that are authoritative; a flag/width mismatch is silently
+  reinterpreted rather than rejected.
+- **SRGB/SRLB `range` truncation** (`cap.rs:116`, `:182`): the `range: u32` is
+  emitted via `u32_u8_3`, silently discarding bits above 24; origination-only, but
+  no overflow check.
+- **SID Structure bounds** (`prefix.rs:274`): `IsisSub2SidStructure` accepts
+  LB/LN/Fun/Arg lengths with no validation that they sum to ≤ 128 bits or are
+  consistent with the 16-byte SID.
+- **`End.M = 74`** (`srv6.rs:334`): a draft
+  (`draft-ietf-rtgwg-srv6-egress-protection`) codepoint the finder could not
+  corroborate against a stable IANA assignment — double-check against the current
+  registry.
+
+---
+
+## Verified clean (so they are not re-flagged)
+
+- **All type-code tables** — TLV codes, cap/neigh/prefix sub-TLV codes, FAD
+  sub-codes, and the SRv6 endpoint-behavior codepoints (End/End.X/End.T/DT*/B6/
+  USD/NEXT-CSID/REPLACE-CSID) — match IANA/RFC and FRR; the `Behavior` table is
+  pinned by a bidirectional test.
+- **Flag bit positions that are correct** (checked vs FRR): `AdjSidFlags`
+  (F/B/V/L/S/P), `PrefixSidFlags` (R/N/P/E/V/L), `BindingFlags` (F/M/S/D/A),
+  `SegmentRoutingCapFlags` (I=0x80/V=0x40), the SRv6-Capabilities `Srv6Flags`
+  O-flag (`0x4000`), the `MultiTopologyId` LSB-first fix, and `Restart` RR/RA/SA.
+- **All `From<u8>`/`From<u16>` conversions** fall through to `Unknown`/`Resv` — no
+  panics on unknown values.
+- **Endianness** is uniformly big-endian (`be_*`, `to_be_bytes`,
+  `BigEndian::write_u16`).
+- **Bounds safety**: `ptake`/`ptakev6` validate prefix length and buffer length
+  before slicing; `safe_split_at` guards every length-driven split on the parse
+  path; `many0_complete` sub-parsers all consume ≥1 byte (no infinite loops).
+- The SRLG, Auth (cleartext/HMAC-MD5/generic), Restart, FAD, and RFC 8570
+  delay/bandwidth codecs round-trip correctly and are well-tested.
+- No CLAUDE.md rule is violated by the crate source (the only governing file
+  holds git/test/BDD-workflow rules that don't constrain static codec source).
+
+---
+
+## Non-blocking cleanups (quality, not correctness)
+
+Correctness outranks these for the ranked list, but they're worth scheduling:
+
+- **Sub-TLV dispatch boilerplate** is copy-pasted verbatim across 6 registries
+  (`neigh.rs:251`, `prefix.rs:242`/`:310`/`:343`, `cap.rs:37`/`:543`) — read
+  code+len → `safe_split_at` → dispatch → hand-patch the `Unknown` code/len. The
+  length-prefixed sub-block parse (`read u8 len → safe_split_at →
+  many0_complete`) is re-implemented at 7 more sites. Both have precedent helpers
+  in the crate (`util::emit_sub_tlvs`, `safe_split_at`, `many0_complete`); a
+  single generic helper per shape would remove ~250 lines and the risk of a
+  seventh copy dropping the `Unknown` patch.
+- **`IsisTlv::wire_len()`** (`parser.rs:585`) measures a TLV by allocating a fresh
+  `BytesMut` and fully serializing it; the LSP packer (`lsp.rs:203`) calls it on a
+  clone of the growing TLV after every entry pushed → O(n²) alloc+serialize per
+  LSP regeneration. A `usize`-returning value-length (summing the existing
+  per-entry math) makes it `2 + value_wire_len()` with zero allocation.
+- **`padding.rs`** duplicates a ~55-line function verbatim for `IsisHello` and
+  `IsisP2pHello` (including a nested `fn padding_tlv` defined twice).
+- The three RFC 8570 bandwidth sub-TLVs (`IsisSubResidualBw`/`AvailableBw`/
+  `UtilizedBw`, `neigh.rs:651`/`:683`/`:715`) are identical one-field wrappers
+  differing only by code point.
+- Seven `is_empty()` methods (`SidLabelValue` and the sub-TLV enums) can never
+  return `true` and have no callers.
+
+---
+
+## Suggested priority
+
+1. **Fix #1 (LspEntries wrap)** first — it silently breaks LSDB sync on any
+   production-sized network and is entirely invisible in small test topologies.
+2. **Fix #2 (RouterCap S/D) and #5 (Srv6TlvFlags MTID)** next — both are
+   RFC/FRR-confirmed interop breaks with trivial one-line fixes.
+3. **Fix #3 (nsap panic)** — a one-line guard that removes a config-input crash.
+4. Work through the emit-side length cluster (#4, #7, #8) with a shared
+   `usize`-based length policy; that also naturally addresses several of the
+   cleanup items.
