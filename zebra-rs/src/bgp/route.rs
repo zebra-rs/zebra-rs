@@ -10110,8 +10110,21 @@ pub fn route_clean(
     let peer = peers.get_mut_by_idx(peer_id).expect("peer must exist");
     peer.adj_out.v4.0.clear();
 
+    // Clear the whole VPN advertise-cache state — forward map, reverse
+    // map, AND the debounce timer — exactly like the EVPN teardown
+    // below. The timers were left armed: one armed before the bounce
+    // fired after teardown, and its handler returned
+    // `State::Established` unconditionally, forging the Idle peer into
+    // Established with no session (membership enroll, route-sync into a
+    // null packet_tx, update-group attach) and corrupting the real
+    // reconnect until the phantom's hold timer tore it down (review
+    // finding #10).
     peer.cache_vpnv4.clear();
+    peer.cache_vpnv4_rev.clear();
+    peer.cache_vpnv4_timer = None;
     peer.cache_vpnv6.clear();
+    peer.cache_vpnv6_rev.clear();
+    peer.cache_vpnv6_timer = None;
 
     // IPv6 unicast. Same shape as the IPv4 block above — withdraw
     // every prefix the peer gave us from the Loc-RIB (which fans out
