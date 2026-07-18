@@ -61,7 +61,7 @@ span more SNP PDUs. Unit tests pin the exact-length round-trip at 15 entries and
 the mod-256 wrap beyond it; BDD scenario `isis_csnp_large_lsdb` drives a >15-LSP
 LSDB through DIS CSNP sync.
 
-### 2. 🔴 `RouterCapFlags` S/D flags at the wrong bit positions — CONFIRMED
+### 2. 🔴 `RouterCapFlags` S/D flags at the wrong bit positions — CONFIRMED — ✅ FIXED
 `crates/isis-packet/src/sub/cap.rs:214`
 
 ```rust
@@ -86,8 +86,10 @@ Note the sibling `SegmentRoutingCapFlags` (I=`0x80`/V=`0x40`) *is* correct and
 matches FRR (`ISIS_SUBTLV_SRGB_FLAG_I 0x80` / `_V 0x40`) — RouterCap simply
 copied the MSB-aligned convention when it needed the LSB-aligned one.
 
-**Fix:** declare `s_flag` and `d_flag` first (LSB) and `resvd(6)` last, so
-S=`0x01`, D=`0x02`.
+**Fixed:** `s_flag` and `d_flag` are now declared first (LSB-first) with
+`resvd(6)` last, so S=`0x01`, D=`0x02`; a unit test pins both bit positions in
+each direction. `flags_serde.rs` and `cap_disp.rs` go through the accessors, so
+they were corrected by the same change.
 
 ### 3. 🔴 `Nsap::from_str` panics (index OOB) on a malformed `net` — CONFIRMED
 `crates/isis-packet/src/nsap.rs:116` (also `:122`, `:127`)
@@ -408,8 +410,9 @@ Correctness outranks these for the ranked list, but they're worth scheduling:
 
 1. ~~Fix #1 (LspEntries wrap) first~~ — **done** (PR #1952): builders capped at
    15 entries per TLV; unit + BDD regression coverage in place.
-2. **Fix #2 (RouterCap S/D) and #5 (Srv6TlvFlags MTID)** next — both are
-   RFC/FRR-confirmed interop breaks with trivial one-line fixes.
+2. ~~Fix #2 (RouterCap S/D)~~ — **done**: flags declared LSB-first, S=`0x01` /
+   D=`0x02` pinned by unit test. **#5 (Srv6TlvFlags MTID)** remains — an
+   RFC/FRR-confirmed interop break with a trivial one-line fix.
 3. **Fix #3 (nsap panic)** — a one-line guard that removes a config-input crash.
 4. Work through the emit-side length cluster (#4, #7, #8) with a shared
    `usize`-based length policy; that also naturally addresses several of the

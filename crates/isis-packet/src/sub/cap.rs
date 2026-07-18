@@ -211,13 +211,21 @@ impl TlvEmitter for IsisSubNodeMaxSidDepth {
     }
 }
 
+// RFC 7981 §2 flags octet:
+//   0 1 2 3 4 5 6 7
+//  +-+-+-+-+-+-+-+-+
+//  | Reserved  |D|S|
+//  +-+-+-+-+-+-+-+-+
+// IETF bit 7 is the least-significant bit, so S = 0x01 and D = 0x02
+// (FRR: ISIS_ROUTER_CAP_FLAG_S/_D). `bitfield(u8)` is LSB-first —
+// declare S first to land at bit 0, then D, then the 6 reserved MSBs.
 #[bitfield(u8, debug = true)]
 #[derive(PartialEq)]
 pub struct RouterCapFlags {
+    pub s_flag: bool,
+    pub d_flag: bool,
     #[bits(6)]
     pub resvd: u8,
-    pub d_flag: bool,
-    pub s_flag: bool,
 }
 
 impl ParseBe<RouterCapFlags> for RouterCapFlags {
@@ -666,6 +674,26 @@ impl From<IsisSubFlexAlgoDef> for IsisSubTlv {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn router_cap_flags_s_and_d_bit_positions() {
+        // RFC 7981 §2: S (flood entire domain) = 0x01, D (down) = 0x02,
+        // reserved bits in the six MSBs.
+        let s_only = RouterCapFlags::from(0x01);
+        assert!(s_only.s_flag());
+        assert!(!s_only.d_flag());
+        assert_eq!(s_only.resvd(), 0);
+
+        let d_only = RouterCapFlags::from(0x02);
+        assert!(d_only.d_flag());
+        assert!(!d_only.s_flag());
+        assert_eq!(d_only.resvd(), 0);
+
+        let emitted: u8 = RouterCapFlags::new().with_s_flag(true).into();
+        assert_eq!(emitted, 0x01);
+        let emitted: u8 = RouterCapFlags::new().with_d_flag(true).into();
+        assert_eq!(emitted, 0x02);
+    }
 
     #[test]
     fn sr_algo_len_truncates_at_255() {
