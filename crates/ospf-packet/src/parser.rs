@@ -1193,17 +1193,6 @@ pub struct RouterInfoTlvUnknown {
     pub values: Vec<u8>,
 }
 
-impl RouterInfoTlvUnknown {
-    pub fn parse_tlv(input: &[u8], tl: TlvTypeLen) -> IResult<&[u8], Self> {
-        let tlv = Self {
-            typ: tl.typ,
-            len: tl.len,
-            values: Vec::new(),
-        };
-        Ok((input, tlv))
-    }
-}
-
 // TLV
 impl RouterInfoTlv {
     pub fn parse_tlv(input: &[u8]) -> IResult<&[u8], Self> {
@@ -1211,7 +1200,19 @@ impl RouterInfoTlv {
         let typ: RouterInfoTlvType = tl.typ.into();
         let len = tl.len as usize;
         let (input, tlv) = packet_utils::safe_split_at(input, len)?;
-        let (_, val) = Self::parse_be(tlv, typ)?;
+        // Unknown top-level TLVs keep their header type/length verbatim and
+        // carry the whole value slice, so re-emit reproduces the wire bytes.
+        // The derived `Self::parse_be` would instead misread type/len from the
+        // first four value octets — mirror the ExtPrefix / ExtLink / ASLA
+        // sub-TLV Unknown arms, which already build it correctly.
+        let val = match typ {
+            RouterInfoTlvType::Unknown(_) => RouterInfoTlv::Unknown(RouterInfoTlvUnknown {
+                typ: tl.typ,
+                len: tl.len,
+                values: tlv.to_vec(),
+            }),
+            _ => Self::parse_be(tlv, typ)?.1,
+        };
         // Skip padding to 4-byte alignment.
         let padded = (len + 3) & !3;
         let (input, _) = take(padded - len)(input)?;
@@ -2924,6 +2925,31 @@ mod tests {
         // A received NP flag (0x40) decodes as NP, not M.
         let f = PrefixSidFlags::from_bits(0x40);
         assert!(f.np_flag() && !f.m_flag());
+    }
+
+    #[test]
+    fn router_info_unknown_tlv_roundtrips() {
+        // Unknown top-level RI TLV: type=100, len=6, value AA..FF, padded to 8.
+        let bytes = [
+            0x00, 100, 0x00, 6, // header: typ=100, len=6
+            0xAA, 0xBB, 0xCC, 0xDD, 0xEE, 0xFF, // 6-byte value
+            0x00, 0x00, // pad 6 -> 8
+        ];
+        let (rest, tlv) = RouterInfoTlv::parse_tlv(&bytes).expect("parse");
+        assert!(rest.is_empty());
+        match &tlv {
+            RouterInfoTlv::Unknown(u) => {
+                // type/len come from the header, not the value bytes.
+                assert_eq!(u.typ, 100);
+                assert_eq!(u.len, 6);
+                assert_eq!(u.values, vec![0xAA, 0xBB, 0xCC, 0xDD, 0xEE, 0xFF]);
+            }
+            other => panic!("expected Unknown, got {other:?}"),
+        }
+        // Re-emit reproduces the exact wire bytes (type, length, value, pad).
+        let mut buf = BytesMut::new();
+        tlv.emit(&mut buf);
+        assert_eq!(&buf[..], &bytes[..]);
     }
 
     /// RFC 2328 §D.4.1-D.4.2: the checksum excludes the 64-bit

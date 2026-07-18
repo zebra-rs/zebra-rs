@@ -24,7 +24,7 @@ most-severe first.
 | 5 | **Interop** | `parser.rs:1691` | `PrefixSidFlags` every flag one bit too high | ✅ #1966 |
 | 6 | **Interop** | `v3.rs:1708` (+`1769`) | OSPFv3 Adj-SID Weight is 16-bit at the wrong offset | ✅ #1970 |
 | 7 | **Interop** | `v3.rs:3149` (+`3210`) | SRv6 End.X SID header is 8 bytes; RFC 9513 is 6 | ✅ #1974 |
-| 8 | **Round-trip** | `parser.rs:1214` | Unknown RouterInfo TLV reads type/len from value bytes | ⬜ open |
+| 8 | **Round-trip** | `parser.rs:1214` | Unknown RouterInfo TLV reads type/len from value bytes | ✅ #1982 |
 | 9 | **Security** | `zebra-rs/.../network_v6.rs:124` | v3 checksum skipped when any trailing bytes present | ✅ #1979 |
 | 10 | **Correctness** | `parser.rs:557` | `verify_checksum` re-emits typed form, ignores `raw` | ⬜ open |
 | 11 | **Robustness** | `parser.rs:693` | `parse_lsa_with_length` swallows all errors into `Unknown` | ⬜ open |
@@ -38,8 +38,9 @@ most-severe first.
 ## Status (2026-07-18)
 
 All seven top findings — the three remote-DoS parse bugs and all four silent
-interop wire-format bugs — plus the security finding #9 are fixed and merged to
-`main`. The review document itself landed in #1955.
+interop wire-format bugs — plus the security finding #9 and the round-trip
+finding #8 are fixed and merged to `main`. The review document itself landed in
+#1955.
 
 | PR | Findings | Summary |
 |----|----------|---------|
@@ -49,6 +50,7 @@ interop wire-format bugs — plus the security finding #9 are fixed and merged t
 | [#1970](https://github.com/zebra-rs/zebra-rs/pull/1970) | 6 | Adj-SID / LAN-Adj-SID `weight` → `u8` at offset 1 (RFC 8666 §6.1/§6.2) |
 | [#1974](https://github.com/zebra-rs/zebra-rs/pull/1974) | 7 | End.X / LAN-End.X SID head → 6 bytes (RFC 9513 §9.1/§9.2) |
 | [#1979](https://github.com/zebra-rs/zebra-rs/pull/1979) | 9 | v3 receive checksum verified over `input[..pkt_len]` unconditionally, closing the trailing-bytes bypass; **validated by `ospfv3_auth` BDD** |
+| [#1982](https://github.com/zebra-rs/zebra-rs/pull/1982) | 8 (part of 15) | Unknown Router-Information TLV built from the header, not the value bytes; dead `RouterInfoTlvUnknown::parse_tlv` removed |
 
 Each fix carries a regression test: byte-offset unit tests where a `show`-based
 check could not discriminate the bug, plus live BDD features for the Prefix-SID
@@ -64,36 +66,30 @@ meaningful lock.
 The remaining findings are all lower-severity than the merged set (no DoS, no
 silent interop break in a shipped datapath). Suggested order:
 
-> Finding 9 (v3 checksum-skip integrity bypass) — the previous Tier-1 item —
-> was fixed in [#1979](https://github.com/zebra-rs/zebra-rs/pull/1979).
+> Findings 8 and 9 — the previous Tier-1 items — are fixed: #9 (v3 checksum-skip
+> bypass) in [#1979](https://github.com/zebra-rs/zebra-rs/pull/1979), #8 (Unknown
+> RouterInfo TLV round-trip) in [#1982](https://github.com/zebra-rs/zebra-rs/pull/1982).
 
-**Tier 1 — highest remaining value**
-1. **Finding 8 (+ part of 15) — Unknown RouterInfo TLV round-trip corruption.**
-   Self-contained and testable: wire the already-present (but dead)
-   `RouterInfoTlvUnknown::parse_tlv` into the `Unknown` arm so `typ`/`len` come
-   from the header, not the value bytes. This also removes one of finding 15's
-   dead items. Add a round-trip unit test over an unknown RI TLV.
-
-**Tier 2 — correctness / robustness, moderate effort**
-2. **Finding 12 — derive `num_adv` / `num_links` at emit.** Mirror the v3 codec
+**Tier 1 — correctness / robustness, moderate effort**
+1. **Finding 12 — derive `num_adv` / `num_links` at emit.** Mirror the v3 codec
    (`Ospfv3LsUpdate::emit`), then delete the manual sync lines in the daemon
    (`inst.rs:1983`, `inst.rs:5404/5502/5571`). Touches daemon call sites.
-3. **Finding 11 — `parse_lsa_with_length` should not swallow parse failures.**
+2. **Finding 11 — `parse_lsa_with_length` should not swallow parse failures.**
    Distinguish "unknown LS type" (→ `Unknown`, keep tolerant flooding) from
    "known type, body failed to parse" (→ propagate `Err`). Needs care to avoid
    regressing the intentional unmodeled-sub-TLV tolerance.
-4. **Finding 10 — `verify_checksum` should use `self.raw`.** Low effort; latent
+3. **Finding 10 — `verify_checksum` should use `self.raw`.** Low effort; latent
    today (only the crate's tests call it), so low urgency until it is wired into
    an ingress path. Pairs with the non-bijective `From<u8>` note below.
 
-**Tier 3 — low-severity / cleanup**
-5. **Finding 13 — Unknown v2 payload emit drops body / `typ()` → Hello.** Latent
+**Tier 2 — low-severity / cleanup**
+4. **Finding 13 — Unknown v2 payload emit drops body / `typ()` → Hello.** Latent
    (daemon never re-emits unknown-type packets); fix the public-API trap when
    convenient.
-6. **Finding 15 (remainder) — delete dead `pub` items** (`is_known`,
-   `Ospfv3ExtTlv::wire_len`; `RouterInfoTlvUnknown::parse_tlv` gets consumed by
-   finding 8). Trivial deletions.
-7. **Finding 14 — hoist duplicated codecs into `packet-utils`** (Fletcher
+5. **Finding 15 (remainder) — delete dead `pub` items** (`is_known`,
+   `Ospfv3ExtTlv::wire_len`; `RouterInfoTlvUnknown::parse_tlv` was already removed
+   with finding 8). Trivial deletions.
+6. **Finding 14 — hoist duplicated codecs into `packet-utils`** (Fletcher
    checksum shared with `isis-packet`; FAD and SID/Label dispatch shared v2/v3).
    Larger refactor; best done the next time those codecs are touched.
 
@@ -274,6 +270,8 @@ because emit/parse agree and tests use `weight=0`.
 ---
 
 ### 8. Unknown RouterInfo TLV reads type/len from the value bytes — round-trip corruption
+> ✅ **Fixed in [#1982](https://github.com/zebra-rs/zebra-rs/pull/1982)** — build the Unknown variant from the header; dead `parse_tlv` deleted.
+
 **`crates/ospf-packet/src/parser.rs:1208`**
 
 ```rust
