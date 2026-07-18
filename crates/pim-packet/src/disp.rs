@@ -107,8 +107,25 @@ impl Display for PimPacket {
                     assert.metric
                 )?;
             }
-            PimPayload::Bootstrap(data) | PimPayload::CandRpAdv(data) => {
-                writeln!(f, " {} bytes", data.len())?;
+            PimPayload::Bootstrap(bsm) => {
+                writeln!(
+                    f,
+                    " BSR: {} priority {} tag {} ({} group range(s))",
+                    bsm.bsr_addr,
+                    bsm.bsr_priority,
+                    bsm.fragment_tag,
+                    bsm.groups.len()
+                )?;
+            }
+            PimPayload::CandRpAdv(adv) => {
+                writeln!(
+                    f,
+                    " C-RP: {} priority {} holdtime {} ({} group range(s))",
+                    adv.rp_addr,
+                    adv.priority,
+                    adv.holdtime,
+                    adv.groups.len()
+                )?;
             }
             PimPayload::Unknown { data, .. } => {
                 writeln!(f, " {} bytes", data.len())?;

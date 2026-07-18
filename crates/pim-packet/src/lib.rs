@@ -1,4 +1,5 @@
 mod addr;
+mod bsr;
 mod checksum;
 mod disp;
 mod hello;
@@ -8,6 +9,7 @@ mod parser;
 mod typ;
 
 pub use addr::{EncodedGroup, EncodedSource, EncodedUnicast, PIM_AF_IPV4, PIM_AF_IPV6};
+pub use bsr::{BsmGroup, BsmRp, PimBootstrap, PimCandRpAdv};
 pub use checksum::{igmp_verify_checksum, in_checksum, pim_verify_checksum};
 pub use hello::{
     HelloTlv, PIM_HELLO_TLV_ADDRESS_LIST, PIM_HELLO_TLV_DR_PRIORITY, PIM_HELLO_TLV_GENERATION_ID,

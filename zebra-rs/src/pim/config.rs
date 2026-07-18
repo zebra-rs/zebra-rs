@@ -34,6 +34,16 @@ impl Pim {
         );
         self.callback_add("/router/pim/rp/static", config_rp_static);
         self.callback_add("/router/pim/rp/static/group", config_rp_static_group);
+        self.callback_add("/router/pim/bsr/candidate-bsr", config_cbsr);
+        self.callback_add("/router/pim/bsr/candidate-bsr/address", config_cbsr_address);
+        self.callback_add(
+            "/router/pim/bsr/candidate-bsr/priority",
+            config_cbsr_priority,
+        );
+        self.callback_add("/router/pim/bsr/candidate-rp", config_crp);
+        self.callback_add("/router/pim/bsr/candidate-rp/address", config_crp_address);
+        self.callback_add("/router/pim/bsr/candidate-rp/group", config_crp_group);
+        self.callback_add("/router/pim/bsr/candidate-rp/priority", config_crp_priority);
     }
 
     fn callback_add(&mut self, path: &str, cb: Callback) {
@@ -169,6 +179,60 @@ fn config_rp_static_group(pim: &mut Pim, mut args: Args, op: ConfigOp) -> Option
         *range = "224.0.0.0/4".parse().unwrap();
     }
     pim.rp_reevaluate();
+    Some(())
+}
+
+fn config_cbsr(pim: &mut Pim, _args: Args, op: ConfigOp) -> Option<()> {
+    pim.bsr_config.cbsr_enabled = op.is_set();
+    pim.bsr_config_changed();
+    Some(())
+}
+
+fn config_cbsr_address(pim: &mut Pim, mut args: Args, op: ConfigOp) -> Option<()> {
+    pim.bsr_config.cbsr_addr = if op.is_set() {
+        Some(args.v4addr()?)
+    } else {
+        None
+    };
+    pim.bsr_config_changed();
+    Some(())
+}
+
+fn config_cbsr_priority(pim: &mut Pim, mut args: Args, op: ConfigOp) -> Option<()> {
+    pim.bsr_config.cbsr_priority = if op.is_set() { Some(args.u8()?) } else { None };
+    pim.bsr_config_changed();
+    Some(())
+}
+
+fn config_crp(pim: &mut Pim, _args: Args, op: ConfigOp) -> Option<()> {
+    pim.bsr_config.crp_enabled = op.is_set();
+    pim.bsr_config_changed();
+    Some(())
+}
+
+fn config_crp_address(pim: &mut Pim, mut args: Args, op: ConfigOp) -> Option<()> {
+    pim.bsr_config.crp_addr = if op.is_set() {
+        Some(args.v4addr()?)
+    } else {
+        None
+    };
+    pim.bsr_config_changed();
+    Some(())
+}
+
+fn config_crp_group(pim: &mut Pim, mut args: Args, op: ConfigOp) -> Option<()> {
+    pim.bsr_config.crp_group = if op.is_set() {
+        Some(args.string()?.parse().ok()?)
+    } else {
+        None
+    };
+    pim.bsr_config_changed();
+    Some(())
+}
+
+fn config_crp_priority(pim: &mut Pim, mut args: Args, op: ConfigOp) -> Option<()> {
+    pim.bsr_config.crp_priority = if op.is_set() { Some(args.u8()?) } else { None };
+    pim.bsr_config_changed();
     Some(())
 }
 

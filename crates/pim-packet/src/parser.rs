@@ -6,6 +6,7 @@ use nom::number::complete::{be_u8, be_u16, be_u32};
 use nom::{Err, IResult};
 
 use crate::addr::{EncodedGroup, EncodedUnicast};
+use crate::bsr::{PimBootstrap, PimCandRpAdv};
 use crate::checksum::pim_fill_checksum;
 use crate::hello::PimHello;
 use crate::joinprune::PimJoinPrune;
@@ -126,14 +127,9 @@ pub enum PimPayload {
     RegisterStop(PimRegisterStop),
     JoinPrune(PimJoinPrune),
     Assert(PimAssert),
-    /// Kept as raw bytes until the BSR phase adds structured parsing.
-    Bootstrap(Vec<u8>),
-    /// Kept as raw bytes until the BSR phase adds structured parsing.
-    CandRpAdv(Vec<u8>),
-    Unknown {
-        typ: PimType,
-        data: Vec<u8>,
-    },
+    Bootstrap(PimBootstrap),
+    CandRpAdv(PimCandRpAdv),
+    Unknown { typ: PimType, data: Vec<u8> },
 }
 
 impl PimPayload {
@@ -173,8 +169,14 @@ impl PimPayload {
                 let (input, assert) = PimAssert::parse_be(input)?;
                 Ok((input, Self::Assert(assert)))
             }
-            PimType::Bootstrap => Ok((&input[input.len()..], Self::Bootstrap(input.to_vec()))),
-            PimType::CandRpAdv => Ok((&input[input.len()..], Self::CandRpAdv(input.to_vec()))),
+            PimType::Bootstrap => {
+                let (input, bsm) = PimBootstrap::parse_be(input)?;
+                Ok((input, Self::Bootstrap(bsm)))
+            }
+            PimType::CandRpAdv => {
+                let (input, adv) = PimCandRpAdv::parse_be(input)?;
+                Ok((input, Self::CandRpAdv(adv)))
+            }
             typ => Ok((
                 &input[input.len()..],
                 Self::Unknown {
@@ -193,7 +195,9 @@ impl PimPayload {
             RegisterStop(v) => v.emit(buf),
             JoinPrune(v) => v.emit(buf),
             Assert(v) => v.emit(buf),
-            Bootstrap(data) | CandRpAdv(data) | Unknown { data, .. } => buf.put(&data[..]),
+            Bootstrap(v) => v.emit(buf),
+            CandRpAdv(v) => v.emit(buf),
+            Unknown { data, .. } => buf.put(&data[..]),
         }
     }
 }
@@ -399,6 +403,51 @@ mod tests {
         assert!(!assert_msg.rpt_bit);
         assert_eq!(assert_msg.metric_preference, 100);
         assert_eq!(assert_msg.metric, 20);
+    }
+
+    #[test]
+    fn bootstrap_round_trip() {
+        // BSR 10.1.22.2 prio 100, tag 1, hash-mask 10; one range
+        // 224.0.0.0/4 with one C-RP (10.1.22.2, holdtime 150).
+        let wire = hex!(
+            "24 00 ac f8"             // v2 Bootstrap, checksum
+            "00 01 0a 64"             // tag 1, hash 10, prio 100
+            "01 00 0a 01 16 02"       // BSR 10.1.22.2
+            "01 00 00 04 e0 00 00 00" // group 224.0.0.0/4
+            "01 01 00 00"             // rp count 1, frag rp count 1
+            "01 00 0a 01 16 02"       // RP 10.1.22.2
+            "00 96 00 00"             // holdtime 150, prio 0
+        );
+        let packet = round_trip(&wire);
+        let PimPayload::Bootstrap(bsm) = &packet.payload else {
+            panic!("not a bootstrap");
+        };
+        assert_eq!(bsm.fragment_tag, 1);
+        assert_eq!(bsm.hash_mask_len, 10);
+        assert_eq!(bsm.bsr_priority, 100);
+        assert_eq!(bsm.bsr_v4(), Some(Ipv4Addr::new(10, 1, 22, 2)));
+        assert_eq!(bsm.groups.len(), 1);
+        assert_eq!(bsm.groups[0].group.masklen, 4);
+        assert_eq!(bsm.groups[0].rps.len(), 1);
+        assert_eq!(bsm.groups[0].rps[0].holdtime, 150);
+    }
+
+    #[test]
+    fn cand_rp_adv_round_trip() {
+        let wire = hex!(
+            "28 00 d4 61"             // v2 Candidate-RP-Adv, checksum
+            "01 00 00 96"             // 1 prefix, prio 0, holdtime 150
+            "01 00 0a 01 16 02"       // RP 10.1.22.2
+            "01 00 00 04 e0 00 00 00" // group 224.0.0.0/4
+        );
+        let packet = round_trip(&wire);
+        let PimPayload::CandRpAdv(adv) = &packet.payload else {
+            panic!("not a cand-rp-adv");
+        };
+        assert_eq!(adv.priority, 0);
+        assert_eq!(adv.holdtime, 150);
+        assert_eq!(adv.rp_addr.addr, IpAddr::V4(Ipv4Addr::new(10, 1, 22, 2)));
+        assert_eq!(adv.groups.len(), 1);
     }
 
     #[test]

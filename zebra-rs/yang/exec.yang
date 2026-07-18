@@ -1034,6 +1034,10 @@ module exec {
         ext:help "PIM group-to-RP mappings";
         presence "PIM RP info";
       }
+      container bsr {
+        ext:help "Bootstrap Router state";
+        presence "PIM BSR";
+      }
       container assert {
         ext:help "PIM assert election state";
         presence "PIM assert";

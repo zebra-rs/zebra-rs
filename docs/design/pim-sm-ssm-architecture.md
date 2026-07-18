@@ -1,9 +1,14 @@
 # PIM-SM/SSM — Overall Architecture & Phasing Plan
 
-Status: **proposal — no code yet** (branch `pim`). This document defines the architecture for
-a new PIM-SM/SSM protocol module in zebra-rs, based on a survey of two prior-art
-implementations (FRR `pimd`, ZebOS `pimd`/`mribd`) and of zebra-rs's own protocol-module
-conventions. It is written so a contributor can resume without the conversation history.
+Status: **implemented — all 8 phases merged** (PRs #1951 codec, #1956 skeleton, #1960 IGMP,
+#1965 dataplane+SSM, #1973 ASM/static-RP, #1980 assert+LAN, #1988 VRF, and the BSR phase).
+Each phase is proven by a live BDD feature (`bdd/tests/features/pim_*.feature`). This
+document defines the architecture, based on a survey of two prior-art implementations
+(FRR `pimd`, ZebOS `pimd`/`mribd`) and of zebra-rs's own protocol-module conventions.
+Notable deltas from the original plan, decided during implementation: show commands are
+top-level (`show pim`, not `show ip pim`); no kernel (\*,G) MFC (per-source NOCACHE entries
+with inherited OILs); no kernel register decap at the RP (switch-to-SPT-immediately); the
+tracing subtree is still a pending follow-up; deferred items in §15 remain deferred.
 
 PIM is genuinely greenfield in this tree: there is no mroute socket, no VIF/MFC handling,
 no IGMP host-side code, and no `RouteType::Multicast` path anywhere today. The only

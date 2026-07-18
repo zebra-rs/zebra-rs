@@ -26,8 +26,10 @@ pub struct RpSet {
 }
 
 impl Pim {
-    /// RP(G): longest-prefix match across the static entries. SSM
-    /// groups never map to an RP.
+    /// RP(G): longest-prefix match across the static entries; when
+    /// no static range covers the group, fall back to the
+    /// BSR-learned set (static beats BSR). SSM groups never map to
+    /// an RP.
     pub(crate) fn rp_lookup(&self, grp: Ipv4Addr) -> Option<Ipv4Addr> {
         if is_ssm(grp) || !grp.is_multicast() {
             return None;
@@ -38,6 +40,7 @@ impl Pim {
             .filter(|(_, range)| range.contains(&grp))
             .max_by_key(|(_, range)| range.prefix_len())
             .map(|(rp, _)| *rp)
+            .or_else(|| self.bsr_rp_lookup(grp))
     }
 
     /// I_am_RP(G): the mapped RP address is one of our interface

@@ -26,6 +26,7 @@ use crate::config::{
 use crate::context::{ProtoContext, Task};
 use crate::rib::api::RibRx;
 
+use super::bsr::{BsrConfig, BsrRun};
 use super::config::Callback;
 use super::link::{LinkConfig, PIM_OVERRIDE_INTERVAL_MSEC, PIM_PROPAGATION_DELAY_MSEC, PimLink};
 use super::mroute::{ForwardingPlane, Upcall};
@@ -91,6 +92,9 @@ pub struct Pim {
     pub rpf: BTreeMap<Ipv4Addr, RpfEntry>,
     /// Static RP mappings.
     pub rp_set: RpSet,
+    /// Bootstrap-router config + runtime (RFC 5059).
+    pub bsr_config: BsrConfig,
+    pub bsr: BsrRun,
     /// Kernel dataplane: mroute socket, VIFs, MFC.
     pub(crate) fp: ForwardingPlane,
     /// Periodic J/P refresh deadlines per (ifindex, upstream nbr).
@@ -181,6 +185,8 @@ impl Pim {
             tib: BTreeMap::new(),
             rpf: BTreeMap::new(),
             rp_set: RpSet::default(),
+            bsr_config: BsrConfig::default(),
+            bsr: BsrRun::default(),
             fp,
             jp_refresh: BTreeMap::new(),
             send_tx,
@@ -221,10 +227,14 @@ impl Pim {
             self.process_rib_msg(msg);
         }
         loop {
-            let wakeup = match (self.igmp_next_wakeup(), self.tib_next_wakeup()) {
-                (Some(a), Some(b)) => Some(a.min(b)),
-                (a, b) => a.or(b),
-            };
+            let wakeup = [
+                self.igmp_next_wakeup(),
+                self.tib_next_wakeup(),
+                self.bsr_next_wakeup(),
+            ]
+            .into_iter()
+            .flatten()
+            .min();
             tokio::select! {
                 Some(msg) = self.rx.recv() => {
                     self.process_msg(msg);
@@ -242,6 +252,7 @@ impl Pim {
                     let now = Instant::now();
                     self.igmp_tick(now);
                     self.tib_tick(now);
+                    self.bsr_tick(now);
                 }
             }
         }
@@ -417,11 +428,11 @@ impl Pim {
             PimPayload::Register(register) => self.register_recv(src, register),
             PimPayload::RegisterStop(stop) => self.register_stop_recv(stop),
             PimPayload::Assert(assert) => self.assert_recv(ifindex, src, assert),
+            PimPayload::Bootstrap(bsm) => self.bootstrap_recv(ifindex, src, bsm),
+            PimPayload::CandRpAdv(adv) => self.cand_rp_adv_recv(src, adv),
             other => {
-                // Assert / Bootstrap handling arrives with later
-                // phases.
                 tracing::debug!(
-                    "pim: ignoring {} from {} on ifindex {} (not yet implemented)",
+                    "pim: ignoring {} from {} on ifindex {} (not implemented)",
                     packet.typ,
                     src,
                     ifindex

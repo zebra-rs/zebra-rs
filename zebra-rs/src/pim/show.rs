@@ -33,6 +33,8 @@ impl Pim {
             .set(show_pim_upstream)
             .path("/show/pim/rp-info")
             .set(show_pim_rp_info)
+            .path("/show/pim/bsr")
+            .set(show_pim_bsr)
             .path("/show/pim/assert")
             .set(show_pim_assert)
             .path("/show/mroute")
@@ -359,6 +361,47 @@ fn show_pim_upstream(pim: &Pim, _args: Args, json: bool) -> Result<String, std::
 }
 
 #[derive(Serialize)]
+struct BsrBrief {
+    role: String,
+    bsr: String,
+    priority: Option<u8>,
+    candidate_rps: usize,
+}
+
+fn show_pim_bsr(pim: &Pim, _args: Args, json: bool) -> Result<String, std::fmt::Error> {
+    use super::bsr::BsrRole;
+    let role = match pim.bsr.role.unwrap_or(BsrRole::None) {
+        BsrRole::None => "Non-candidate",
+        BsrRole::Pending { .. } => "Pending",
+        BsrRole::Candidate => "Candidate",
+        BsrRole::Elected => "Elected",
+    };
+    let brief = BsrBrief {
+        role: role.to_string(),
+        bsr: pim
+            .bsr
+            .elected
+            .map_or_else(|| "none".to_string(), |(_, a)| a.to_string()),
+        priority: pim.bsr.elected.map(|(p, _)| p),
+        candidate_rps: pim.bsr.rp_set.len(),
+    };
+
+    if json {
+        return Ok(serde_json::to_string(&brief).unwrap());
+    }
+
+    let mut buf = String::new();
+    writeln!(buf, "PIM Bootstrap Router")?;
+    writeln!(buf, " Role:          {}", brief.role)?;
+    writeln!(buf, " Elected BSR:   {}", brief.bsr)?;
+    if let Some(priority) = brief.priority {
+        writeln!(buf, " BSR priority:  {}", priority)?;
+    }
+    writeln!(buf, " Candidate RPs: {}", brief.candidate_rps)?;
+    Ok(buf)
+}
+
+#[derive(Serialize)]
 struct AssertBrief {
     entry: String,
     interface: String,
@@ -413,12 +456,24 @@ struct RpInfoBrief {
 }
 
 fn show_pim_rp_info(pim: &Pim, _args: Args, json: bool) -> Result<String, std::fmt::Error> {
+    let now = Instant::now();
     let mut rows: Vec<RpInfoBrief> = vec![];
     for (rp, range) in pim.rp_set.statics.iter() {
         rows.push(RpInfoBrief {
             rp: rp.to_string(),
             group_range: range.to_string(),
             source: "static".to_string(),
+            is_self: pim.links.values().any(|l| l.is_my_addr(rp)),
+        });
+    }
+    for ((range, rp), entry) in pim.bsr.rp_set.iter() {
+        if entry.expires <= now {
+            continue;
+        }
+        rows.push(RpInfoBrief {
+            rp: rp.to_string(),
+            group_range: range.to_string(),
+            source: "bsr".to_string(),
             is_self: pim.links.values().any(|l| l.is_my_addr(rp)),
         });
     }
