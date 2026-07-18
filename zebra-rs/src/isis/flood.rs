@@ -256,8 +256,11 @@ pub fn ssn_advertise(link: &mut LinkTop, level: Level) {
         mtu - total_base_len
     };
 
-    // 16 is IsisLspEntry's length.
-    let entry_size_max = available_len / 16;
+    // 16 is IsisLspEntry's length. Cap at MAX_ENTRIES (15): a single
+    // LspEntries TLV's one-octet Length field only spans 255 bytes, so a
+    // larger batch would wrap the length byte while emit() writes every
+    // entry. Larger ack sets span more PSNPs.
+    let entry_size_max = (available_len / 16).min(IsisTlvLspEntries::MAX_ENTRIES);
 
     let mut psnps: Vec<IsisPsnp> = vec![];
     let mut tlvs = IsisTlvLspEntries::default();

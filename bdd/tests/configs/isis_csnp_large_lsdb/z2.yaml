@@ -1,0 +1,21 @@
+interface:
+- if-name: lo
+  ipv4:
+    address: 10.255.0.2/32
+- if-name: vz2ns
+  ipv4:
+    address: 10.0.1.2/24
+router:
+  isis:
+    net: 49.0001.0000.0000.0002.00
+    is-type: level-2-only
+    hostname: z2
+    interface:
+    - if-name: lo
+      circuit-type: level-2-only
+      ipv4:
+        enabled: true
+    - if-name: vz2ns
+      circuit-type: level-2-only
+      ipv4:
+        enabled: true
