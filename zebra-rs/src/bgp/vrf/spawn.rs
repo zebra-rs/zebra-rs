@@ -69,6 +69,17 @@ pub struct BgpVrfHandle {
     /// `Message::SidDel` withdrawal. `None` for MPLS-mode VRFs and for
     /// srv6 VRFs spawned before their locator resolved.
     pub srv6_sid: Option<(Ipv6Addr, u16)>,
+    /// Snapshot of the VRF's RD at spawn. The despawn-time export
+    /// purge needs it, and by then the cfg (`Bgp::vrfs[name]`) is
+    /// already gone — despawn is exactly the "removed from intent"
+    /// case.
+    pub rd: Option<bgp_packet::RouteDistinguisher>,
+    /// Snapshots of `evpn advertise-ipv4` / `advertise-ipv6` for the
+    /// same reason: the despawn purge mirrors each withdrawn export's
+    /// EVPN Type-5 withdrawal exactly when the live withdraw would
+    /// have.
+    pub evpn_advertise_v4: bool,
+    pub evpn_advertise_v6: bool,
 }
 
 /// Pure diff: which VRF names need to be spawned (in `desired`
@@ -305,6 +316,9 @@ pub fn spawn_bgp_vrf(
         label,
         ilm_decap_ifindex,
         srv6_sid,
+        rd: cfg.rd,
+        evpn_advertise_v4: cfg.evpn_advertise_v4,
+        evpn_advertise_v6: cfg.evpn_advertise_v6,
     }
 }
 
