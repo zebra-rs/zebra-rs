@@ -53,6 +53,8 @@ pub const BGPLS_ATTR_OPAQUE_LINK: u16 = 1097;
 pub const BGPLS_ATTR_LINK_NAME: u16 = 1098;
 pub const BGPLS_ATTR_ADJACENCY_SID: u16 = 1099;
 pub const BGPLS_ATTR_LAN_ADJACENCY_SID: u16 = 1100;
+/// RFC 9104 — Extended Administrative Group (link attribute), distinct
+/// from the classic Administrative Group (1088).
 pub const BGPLS_ATTR_EXT_ADMIN_GROUP: u16 = 1173;
 
 // ===== Prefix Attribute TLVs (RFC 9552 Section 4.3, RFC 9085) =====
@@ -227,8 +229,6 @@ mod tests {
 
     #[test]
     fn link_attrs_round_trip() {
-        assert_eq!(BGPLS_ATTR_EXT_ADMIN_GROUP, 1173);
-
         let mut attr = BgpLsAttr::new();
         attr.push(BGPLS_ATTR_ADMIN_GROUP, vec![0, 0, 0, 0x0f]);
         attr.push(

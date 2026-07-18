@@ -80,7 +80,12 @@ fn link_attr(e: &IsisTlvExtIsReachEntry) -> BgpLsAttr {
     if let Some(ag) = e.admin_group() {
         attr.push(BGPLS_ATTR_ADMIN_GROUP, ag.to_be_bytes().to_vec());
     }
-    if let Some(ag) = e.ext_admin_group() {
+    // A peer's zero-length EAG sub-TLV parses to an empty word list;
+    // RFC 9104's value mirrors the IGP's 32-bit blocks, so an empty
+    // TLV 1173 is meaningless — skip it rather than emit it.
+    if let Some(ag) = e.ext_admin_group()
+        && !ag.is_empty()
+    {
         let value = ag.iter().flat_map(|word| word.to_be_bytes()).collect();
         attr.push(BGPLS_ATTR_EXT_ADMIN_GROUP, value);
     }
@@ -475,6 +480,20 @@ mod tests {
             Some(&[0x01, 0x02, 0x03, 0x04, 0xaa, 0xbb, 0xcc, 0xdd][..])
         );
         assert_eq!(attr.get(BGPLS_ATTR_ADMIN_GROUP), None);
+    }
+
+    /// A peer's zero-length EAG sub-TLV (parseable from the wire) must
+    /// not become a zero-length TLV 1173.
+    #[test]
+    fn link_attr_skips_empty_extended_admin_group() {
+        let entry = IsisTlvExtIsReachEntry {
+            neighbor_id: IsisNeighborId::from_sys_id(&sysid(2), 0),
+            metric: 10,
+            subs: vec![IsisSubAdminGrp { groups: vec![] }.into()],
+        };
+
+        let attr = link_attr(&entry);
+        assert_eq!(attr.get(BGPLS_ATTR_EXT_ADMIN_GROUP), None);
     }
 
     #[test]
