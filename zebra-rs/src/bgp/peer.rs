@@ -653,7 +653,7 @@ impl Default for PeerConfig {
 /// Enforced symmetrically in `route_ipv6_update` (accept: drop a SID-less
 /// route from a `Srv6` peer) and `route_update_ipv6` (advertise: withhold
 /// a SID-less route from a `Srv6` peer). See [`Peer::ipv6_srv6_strict`].
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum AfiSafiEncapType {
     Srv6,
