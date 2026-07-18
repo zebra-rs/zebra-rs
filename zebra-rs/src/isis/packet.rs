@@ -306,8 +306,10 @@ pub fn nbr_hello_interpret(
 /// never call this. Returns false when the neighbour advertises no area we
 /// hold — the caller then refuses the L1 adjacency.
 fn l1_area_compatible(our_area: &[u8], tlvs: &[IsisTlv]) -> bool {
-    tlvs.iter()
-        .any(|tlv| matches!(tlv, IsisTlv::AreaAddr(a) if a.area_addr.as_slice() == our_area))
+    tlvs.iter().any(|tlv| {
+        matches!(tlv, IsisTlv::AreaAddr(a)
+            if a.area_addrs.iter().any(|addr| addr.as_slice() == our_area))
+    })
 }
 
 #[isis_pdu_handler(Hello, Recv)]

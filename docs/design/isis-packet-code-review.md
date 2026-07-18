@@ -147,7 +147,7 @@ declared first, `resvd(4)` second — and the field is named `mtid` (also in the
 serde helper). A unit test pins wire `0x0002` ⇄ MT 2 and the reserved top
 nibble, plus a full `IsisTlvSrv6` round-trip.
 
-### 6. 🟠 `IsisTlvAreaAddr::parse_be` drops all but the first area address — CONFIRMED
+### 6. 🟠 `IsisTlvAreaAddr::parse_be` drops all but the first area address — CONFIRMED — ✅ FIXED
 `crates/isis-packet/src/parser.rs:649`
 
 The Area Address TLV (type 1) value is a sequence of `{length, area}` pairs, but
@@ -161,8 +161,11 @@ matching against a multi-area neighbor fails and adjacencies that should form on
 the secondary area are rejected. `emit()` is symmetric-single, so zebra→zebra
 round-trips hide it — only *received* multi-area TLVs lose data.
 
-**Fix:** model `area_addr` as a `Vec<Vec<u8>>` (or loop until the value slice is
-exhausted) and emit each length-prefixed address.
+**Fixed:** the field is now `area_addrs: Vec<Vec<u8>>`; parse loops over every
+`{length, area}` pair and emit writes each one back (len/emit truncate
+consistently at the 255-byte TLV budget). The daemon's L1 area gate
+(`l1_area_compatible`) matches against *any* advertised area. Unit test pins
+the two-area round-trip.
 
 ### 7. 🟠 Per-entry sub-TLV length uses panicking/wrapping `u8` arithmetic — CONFIRMED — ✅ FIXED
 `crates/isis-packet/src/sub/neigh.rs:176` (and siblings)
@@ -217,7 +220,7 @@ bytes so the length byte always matches the bytes present — the truncated tail
 parses as one malformed sub-TLV instead of desyncing the rest of the PDU into
 phantom entries. A `should_panic` unit test pins the assert.
 
-### 9. 🟠 3-octet SID/Label value is never masked to 20 bits — CONFIRMED
+### 9. 🟠 3-octet SID/Label value is never masked to 20 bits — CONFIRMED — ✅ FIXED
 `crates/isis-packet/src/parser.rs:1336` (`SidLabelValue::parse_be` / `emit`)
 
 A 3-byte label field is read with `be_u24` into the full 24-bit value. RFC 8667
@@ -229,10 +232,11 @@ zebra masks on neither parse nor emit.
 a mis-scaled value — yields an illegal MPLS label (≥ 2²⁰) that zebra accepts,
 re-advertises verbatim, and can program into the FIB.
 
-**Fix:** mask `Label` values to the low 20 bits (`& 0x000F_FFFF`) on parse and on
-emit.
+**Fixed:** `SidLabelValue::LABEL_MASK` (`0x000F_FFFF`) is applied on both parse
+and emit of the 3-octet `Label` form, matching FRR; the 4-octet `Index` form is
+untouched. Unit test pins both directions.
 
-### 10. 🟠 One malformed reach entry / sub-TLV silently truncates all that follow — CONFIRMED
+### 10. 🟠 One malformed reach entry / sub-TLV silently truncates all that follow — CONFIRMED — ✅ FIXED
 `crates/isis-packet/src/sub/prefix.rs:1048` (v4) and `:1072` (v6); sub-TLV `parse_subs` sites
 
 Unlike the top-level TLV loop (which degrades a malformed known TLV to `Unknown`),
@@ -248,9 +252,15 @@ for v4) followed by a valid /24 entry: `ptake` returns `ErrorKind::Verify`,
 Same for TLV 236 (v6 prefixlen > 128) and for a malformed known sub-TLV in any
 sub-TLV block.
 
-**Fix:** apply the top-level degrade-to-Unknown policy inside the shared sub-TLV /
-entry loop so a bad element is preserved-or-skipped without truncating its
-followers.
+**Fixed:** two mechanisms. (1) All six sub-TLV registries (`parse_subs` in
+`neigh`, `prefix` ×3, `cap` ×2) now degrade a malformed *known* sub-TLV to
+`Unknown` with its bytes preserved, mirroring the top-level TLV loop, so
+followers still parse. (2) TLV 135/235/236/237 entry lists go through
+`parse_reach_entries`, which frames a semantically invalid entry from its
+header fields (`ext_ip_reach_entry_span` / `ipv6_reach_entry_span`) and skips
+it alone; an unframeable tail errors so the whole TLV degrades to `Unknown`
+instead of silently discarding bytes. Unit tests pin the v4 (prefixlen 33) and
+v6 (prefixlen 200) skip cases and the sub-TLV degrade.
 
 ### 11. 🟡 Reach-entry emit keys the sub-TLV block on `subs.is_empty()` but writes the stored S-flag — PLAUSIBLE
 `crates/isis-packet/src/sub/prefix.rs:559` (and `:760` for IPv6)

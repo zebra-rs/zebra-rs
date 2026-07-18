@@ -287,10 +287,12 @@ impl Display for IsisLspId {
 impl Display for IsisTlvAreaAddr {
     fn fmt(&self, f: &mut Formatter<'_>) -> Result {
         write!(f, "  Area address:")?;
-        if !self.area_addr.is_empty() {
-            write!(f, " {:02x}", self.area_addr[0])?;
-
-            for (index, id) in self.area_addr.iter().enumerate() {
+        for addr in &self.area_addrs {
+            if addr.is_empty() {
+                continue;
+            }
+            write!(f, " {:02x}", addr[0])?;
+            for (index, id) in addr.iter().enumerate() {
                 if index == 0 {
                     continue;
                 }

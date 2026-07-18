@@ -242,7 +242,15 @@ impl IsisMirrorSub2Tlv {
     pub fn parse_subs(input: &[u8]) -> IResult<&[u8], Self> {
         let (input, cl) = IsisCodeLen::parse_be(input)?;
         let (input, sub) = safe_split_at(input, cl.len as usize)?;
-        let (_, mut val) = Self::parse_be(sub, cl.code.into())?;
+        // Malformed known sub-TLV → Unknown, so followers still parse.
+        let mut val = match Self::parse_be(sub, cl.code.into()) {
+            Ok((_, val)) => val,
+            Err(_) => IsisMirrorSub2Tlv::Unknown(IsisSubTlvUnknown {
+                code: cl.code,
+                len: cl.len,
+                data: sub.to_vec(),
+            }),
+        };
         if let IsisMirrorSub2Tlv::Unknown(ref mut v) = val {
             v.code = cl.code;
             v.len = cl.len;
@@ -310,7 +318,15 @@ impl IsisSub2Tlv {
     pub fn parse_subs(input: &[u8]) -> IResult<&[u8], Self> {
         let (input, cl) = IsisCodeLen::parse_be(input)?;
         let (input, sub) = safe_split_at(input, cl.len as usize)?;
-        let (_, mut val) = Self::parse_be(sub, cl.code.into())?;
+        // Malformed known sub-TLV → Unknown, so followers still parse.
+        let mut val = match Self::parse_be(sub, cl.code.into()) {
+            Ok((_, val)) => val,
+            Err(_) => IsisSub2Tlv::Unknown(IsisSubTlvUnknown {
+                code: cl.code,
+                len: cl.len,
+                data: sub.to_vec(),
+            }),
+        };
         if let IsisSub2Tlv::Unknown(ref mut v) = val {
             v.code = cl.code;
             v.len = cl.len;
@@ -343,7 +359,17 @@ impl IsisSubTlv {
     pub fn parse_subs(input: &[u8]) -> IResult<&[u8], Self> {
         let (input, cl) = IsisCodeLen::parse_be(input)?;
         let (input, sub) = safe_split_at(input, cl.len as usize)?;
-        let (_, mut val) = Self::parse_be(sub, cl.code.into())?;
+        // A malformed *known* sub-TLV must not truncate the list —
+        // degrade it to Unknown with its bytes preserved (mirroring the
+        // top-level TLV loop) so the sub-TLVs after it still parse.
+        let mut val = match Self::parse_be(sub, cl.code.into()) {
+            Ok((_, val)) => val,
+            Err(_) => IsisSubTlv::Unknown(IsisSubTlvUnknown {
+                code: cl.code,
+                len: cl.len,
+                data: sub.to_vec(),
+            }),
+        };
         if let IsisSubTlv::Unknown(ref mut v) = val {
             v.code = cl.code;
             v.len = cl.len;
@@ -460,7 +486,11 @@ pub struct IsisTlvExtIpReach {
 
 impl ParseBe<IsisTlvExtIpReach> for IsisTlvExtIpReach {
     fn parse_be(input: &[u8]) -> IResult<&[u8], Self> {
-        let (input, entries) = many0_complete(IsisTlvExtIpReachEntry::parse_be).parse(input)?;
+        let (input, entries) = parse_reach_entries(
+            input,
+            IsisTlvExtIpReachEntry::parse_be,
+            ext_ip_reach_entry_span,
+        )?;
         Ok((input, Self { entries }))
     }
 }
@@ -500,7 +530,11 @@ pub struct IsisTlvMtIpReach {
 impl ParseBe<IsisTlvMtIpReach> for IsisTlvMtIpReach {
     fn parse_be(input: &[u8]) -> IResult<&[u8], Self> {
         let (input, mt) = be_u16(input)?;
-        let (input, entries) = many0_complete(IsisTlvExtIpReachEntry::parse_be).parse(input)?;
+        let (input, entries) = parse_reach_entries(
+            input,
+            IsisTlvExtIpReachEntry::parse_be,
+            ext_ip_reach_entry_span,
+        )?;
         Ok((
             input,
             Self {
@@ -592,7 +626,11 @@ pub struct IsisTlvIpv6Reach {
 
 impl ParseBe<IsisTlvIpv6Reach> for IsisTlvIpv6Reach {
     fn parse_be(input: &[u8]) -> IResult<&[u8], Self> {
-        let (input, entries) = many0_complete(IsisTlvIpv6ReachEntry::parse_be).parse(input)?;
+        let (input, entries) = parse_reach_entries(
+            input,
+            IsisTlvIpv6ReachEntry::parse_be,
+            ipv6_reach_entry_span,
+        )?;
         Ok((input, Self { entries }))
     }
 }
@@ -688,7 +726,11 @@ pub struct IsisTlvMtIpv6Reach {
 impl ParseBe<IsisTlvMtIpv6Reach> for IsisTlvMtIpv6Reach {
     fn parse_be(input: &[u8]) -> IResult<&[u8], Self> {
         let (input, mt) = be_u16(input)?;
-        let (input, entries) = many0_complete(IsisTlvIpv6ReachEntry::parse_be).parse(input)?;
+        let (input, entries) = parse_reach_entries(
+            input,
+            IsisTlvIpv6ReachEntry::parse_be,
+            ipv6_reach_entry_span,
+        )?;
         Ok((
             input,
             Self {
@@ -1046,6 +1088,72 @@ pub fn ptakev6(input: &[u8], prefixlen: u8) -> IResult<&[u8], Ipv6Net> {
     Ok((input, prefix))
 }
 
+/// Byte span of one TLV 135 entry computed from its header fields
+/// alone, so a semantically invalid entry (e.g. control-byte prefixlen
+/// 33..63) can be skipped without desyncing the entries that follow.
+/// Returns `None` when the claimed span overruns `input` — that tail is
+/// unframeable garbage.
+fn ext_ip_reach_entry_span(input: &[u8]) -> Option<usize> {
+    // Metric(4) + Control(1).
+    if input.len() < 5 {
+        return None;
+    }
+    let flags: Ipv4ControlInfo = input[4].into();
+    let mut span = 5 + psize(flags.prefixlen() as u8);
+    if flags.sub_tlv() {
+        span += 1 + *input.get(span)? as usize;
+    }
+    (input.len() >= span).then_some(span)
+}
+
+/// TLV 236 sibling of [`ext_ip_reach_entry_span`] (prefixlen is an
+/// explicit octet, invalid when > 128).
+fn ipv6_reach_entry_span(input: &[u8]) -> Option<usize> {
+    // Metric(4) + Flags(1) + PrefixLen(1).
+    if input.len() < 6 {
+        return None;
+    }
+    let flags: Ipv6ControlInfo = input[4].into();
+    let mut span = 6 + psize(input[5]);
+    if flags.sub_tlv() {
+        span += 1 + *input.get(span)? as usize;
+    }
+    (input.len() >= span).then_some(span)
+}
+
+/// Parse a reach-entry list, *skipping* a malformed entry instead of
+/// truncating the list at it (`many0` treats an entry error as
+/// end-of-list, which silently dropped every valid entry after a bad
+/// one). `parse` reads one entry; `span` frames one entry from raw
+/// bytes. An unframeable tail returns an error so the enclosing TLV
+/// degrades to Unknown at the top-level loop rather than silently
+/// discarding bytes.
+fn parse_reach_entries<T>(
+    mut input: &[u8],
+    parse: impl Fn(&[u8]) -> IResult<&[u8], T>,
+    span: impl Fn(&[u8]) -> Option<usize>,
+) -> IResult<&[u8], Vec<T>> {
+    let mut entries = Vec::new();
+    while !input.is_empty() {
+        match parse(input) {
+            Ok((rest, entry)) => {
+                entries.push(entry);
+                input = rest;
+            }
+            Err(_) => match span(input) {
+                Some(n) => input = &input[n..],
+                None => {
+                    return Err(nom::Err::Error(nom::error::make_error(
+                        input,
+                        nom::error::ErrorKind::Verify,
+                    )));
+                }
+            },
+        }
+    }
+    Ok((input, entries))
+}
+
 impl ParseBe<IsisTlvExtIpReachEntry> for IsisTlvExtIpReachEntry {
     fn parse_be(input: &[u8]) -> IResult<&[u8], Self> {
         let (input, metric) = be_u32(input)?;
@@ -1222,6 +1330,59 @@ impl TlvEmitter for IsisTlvSrv6 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Finding #10 (v4): a semantically invalid entry (control-byte
+    /// prefixlen 33, illegal for IPv4) used to stop `many0` and
+    /// silently drop every valid entry after it. It is now framed from
+    /// its header and skipped alone.
+    #[test]
+    fn malformed_v4_reach_entry_is_skipped_not_truncating() {
+        #[rustfmt::skip]
+        let raw = [
+            // Entry 1 (malformed): metric 10, control 0x21 = prefixlen
+            // 33 (no subs), ceil(33/8) = 5 prefix octets.
+            0, 0, 0, 10, 0x21, 1, 2, 3, 4, 5,
+            // Entry 2 (valid): metric 20, control 0x18 = /24, 10.1.1/24.
+            0, 0, 0, 20, 0x18, 10, 1, 1,
+        ];
+        let (rest, tlv) = IsisTlvExtIpReach::parse_be(&raw).expect("parse");
+        assert!(rest.is_empty());
+        assert_eq!(tlv.entries.len(), 1);
+        assert_eq!(tlv.entries[0].prefix, "10.1.1.0/24".parse().unwrap());
+    }
+
+    /// Finding #10 (v6): prefixlen 200 (> 128) in the first entry must
+    /// not swallow the valid /64 entry after it.
+    #[test]
+    fn malformed_v6_reach_entry_is_skipped_not_truncating() {
+        let mut raw = vec![0u8, 0, 0, 10, 0x00, 200];
+        raw.extend(vec![0xEE; psize(200)]); // ceil(200/8) = 25
+        // Valid entry: metric 20, flags 0, 2001:db8::/64.
+        raw.extend([0, 0, 0, 20, 0x00, 64, 0x20, 0x01, 0x0d, 0xb8, 0, 0, 0, 0]);
+        let (rest, tlv) = IsisTlvIpv6Reach::parse_be(&raw).expect("parse");
+        assert!(rest.is_empty());
+        assert_eq!(tlv.entries.len(), 1);
+        assert_eq!(tlv.entries[0].prefix, "2001:db8::/64".parse().unwrap());
+    }
+
+    /// Finding #10 (sub-TLVs): a malformed *known* sub-TLV degrades to
+    /// Unknown with its bytes preserved instead of truncating the list.
+    #[test]
+    fn malformed_known_sub_tlv_degrades_to_unknown() {
+        #[rustfmt::skip]
+        let raw = [
+            3u8, 1, 0xFF,        // PrefixSid (code 3) with a 1-byte body: malformed.
+            11, 4, 10, 0, 0, 1,  // Ipv4SourceRouterId (code 11): valid.
+        ];
+        let (rest, first) = IsisSubTlv::parse_subs(&raw).expect("first");
+        let IsisSubTlv::Unknown(u) = &first else {
+            panic!("expected Unknown, got {first:?}");
+        };
+        assert_eq!((u.code, u.len, u.data.as_slice()), (3, 1, &[0xFF][..]));
+        let (rest, second) = IsisSubTlv::parse_subs(rest).expect("second");
+        assert!(matches!(second, IsisSubTlv::Ipv4SourceRouterId(_)));
+        assert!(rest.is_empty());
+    }
 
     #[test]
     fn srv6_tlv_mtid_bit_positions() {

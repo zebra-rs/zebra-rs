@@ -255,7 +255,17 @@ impl IsisSubTlv {
     pub fn parse_subs(input: &[u8]) -> IResult<&[u8], Self> {
         let (input, cl) = IsisCodeLen::parse_be(input)?;
         let (input, sub) = safe_split_at(input, cl.len as usize)?;
-        let (_, mut val) = Self::parse_be(sub, cl.code.into())?;
+        // A malformed *known* sub-TLV must not truncate the list —
+        // degrade it to Unknown with its bytes preserved (mirroring the
+        // top-level TLV loop) so the sub-TLVs after it still parse.
+        let mut val = match Self::parse_be(sub, cl.code.into()) {
+            Ok((_, val)) => val,
+            Err(_) => IsisSubTlv::Unknown(IsisSubTlvUnknown {
+                code: cl.code,
+                len: cl.len,
+                data: sub.to_vec(),
+            }),
+        };
         if let IsisSubTlv::Unknown(ref mut v) = val {
             v.code = cl.code;
             v.len = cl.len;
