@@ -16,7 +16,9 @@ use std::time::{Duration, Instant};
 
 use pim_packet::{EncodedGroup, EncodedUnicast, PimAssert, PimPacket, PimPayload};
 
+use super::af::PimAf;
 use super::inst::{Pim, PimSend};
+use super::ipv4::Ipv4;
 use super::macros::inherited_olist;
 use super::socket::ALL_PIM_ROUTERS;
 use super::tib::SgKey;
@@ -29,17 +31,17 @@ pub const ASSERT_TIME: Duration = Duration::from_secs(180);
 pub const ASSERT_REFRESH: Duration = Duration::from_secs(177);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct AssertMetric {
+pub struct AssertMetric<A: PimAf = Ipv4> {
     pub rpt_bit: bool,
     pub pref: u32,
     pub metric: u32,
-    pub addr: Ipv4Addr,
+    pub addr: A::Addr,
 }
 
-impl AssertMetric {
+impl<A: PimAf> AssertMetric<A> {
     /// RFC 7761 §4.6.3: lower (rpt, pref, metric) wins; the higher
     /// address breaks ties.
-    pub fn better_than(&self, other: &AssertMetric) -> bool {
+    pub fn better_than(&self, other: &AssertMetric<A>) -> bool {
         if self.rpt_bit != other.rpt_bit {
             return !self.rpt_bit;
         }
@@ -54,16 +56,16 @@ impl AssertMetric {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum AssertRole {
+pub enum AssertRole<A: PimAf = Ipv4> {
     Winner,
-    Loser { winner: Ipv4Addr },
+    Loser { winner: A::Addr },
 }
 
 #[derive(Debug, Clone, Copy)]
-pub struct AssertState {
-    pub role: AssertRole,
+pub struct AssertState<A: PimAf = Ipv4> {
+    pub role: AssertRole<A>,
     /// The winning metric (ours as winner, the winner's as loser).
-    pub winner_metric: AssertMetric,
+    pub winner_metric: AssertMetric<A>,
     pub expires: Instant,
 }
 

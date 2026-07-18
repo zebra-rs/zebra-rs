@@ -128,7 +128,7 @@ mod tests {
 
     #[test]
     fn olist_combines_local_and_downstream() {
-        let mut tib = BTreeMap::new();
+        let mut tib: BTreeMap<SgKey, TibEntry> = BTreeMap::new();
         let mut e = TibEntry::new();
         e.local.insert(3);
         e.downstream.insert(5, ds_join());
@@ -143,7 +143,7 @@ mod tests {
 
     #[test]
     fn prune_pending_still_forwards() {
-        let mut tib = BTreeMap::new();
+        let mut tib: BTreeMap<SgKey, TibEntry> = BTreeMap::new();
         let mut e = TibEntry::new();
         e.downstream.insert(
             5,
@@ -160,7 +160,7 @@ mod tests {
 
     #[test]
     fn inherited_folds_shared_tree_minus_rpt_prunes() {
-        let mut tib = BTreeMap::new();
+        let mut tib: BTreeMap<SgKey, TibEntry> = BTreeMap::new();
         // (S,G): downstream on 5.
         let mut e = TibEntry::new();
         e.downstream.insert(5, ds_join());
@@ -184,7 +184,7 @@ mod tests {
     #[test]
     fn lost_assert_excluded_from_forwarding_and_jd() {
         use crate::pim::assert_fsm::{AssertMetric, AssertRole, AssertState};
-        let mut tib = BTreeMap::new();
+        let mut tib: BTreeMap<SgKey, TibEntry> = BTreeMap::new();
         let mut e = TibEntry::new();
         e.local.insert(5);
         e.asserts.insert(
@@ -214,7 +214,8 @@ mod tests {
     #[test]
     fn assert_metric_ordering() {
         use crate::pim::assert_fsm::AssertMetric;
-        let base = AssertMetric {
+        use crate::pim::ipv4::Ipv4;
+        let base = AssertMetric::<Ipv4> {
             rpt_bit: false,
             pref: 100,
             metric: 10,
@@ -241,7 +242,7 @@ mod tests {
 
     #[test]
     fn mfc_excludes_iif() {
-        let mut tib = BTreeMap::new();
+        let mut tib: BTreeMap<SgKey, TibEntry> = BTreeMap::new();
         let mut e = TibEntry::new();
         e.local.insert(3);
         e.local.insert(7);

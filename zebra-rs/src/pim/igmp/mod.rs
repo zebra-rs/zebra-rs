@@ -13,7 +13,9 @@ use std::time::{Duration, Instant};
 use pim_packet::{IgmpGroupMessage, IgmpGroupRecord, IgmpPacket, IgmpRecordType, IgmpV3Query};
 use tokio::sync::mpsc::UnboundedSender;
 
+use super::af::PimAf;
 use super::inst::{IgmpSend, Pim};
+use super::ipv4::Ipv4;
 use super::link::LinkConfig;
 use super::socket::IGMP_ALL_HOSTS;
 use super::tib::SgKey;
@@ -81,26 +83,26 @@ pub enum FilterMode {
     Exclude,
 }
 
-pub struct IgmpGroup {
+pub struct IgmpGroup<A: PimAf = Ipv4> {
     pub filter_mode: FilterMode,
     /// Group timer — EXCLUDE mode only (RFC 3376 §6.5).
     pub expires: Option<Instant>,
     /// INCLUDE sources with their source timers.
-    pub sources: BTreeMap<Ipv4Addr, Instant>,
+    pub sources: BTreeMap<A::Addr, Instant>,
     /// Older-version-host-present: a v1/v2 report was heard; while
     /// running, v3 source semantics are suspended for the group.
     pub v2_host_until: Option<Instant>,
-    pub last_reporter: Option<Ipv4Addr>,
+    pub last_reporter: Option<A::Addr>,
     pub uptime: Instant,
     /// Sources currently reflected into the TIB as local (S,G)
     /// membership — the diff base for [`Pim::igmp_tib_sync`].
-    pub synced: BTreeSet<Ipv4Addr>,
+    pub synced: BTreeSet<A::Addr>,
     /// Any-source (EXCLUDE) membership currently reflected into the
     /// TIB as local (*,G) state.
     pub asm_synced: bool,
 }
 
-impl IgmpGroup {
+impl<A: PimAf> IgmpGroup<A> {
     fn new(now: Instant, filter_mode: FilterMode) -> Self {
         Self {
             filter_mode,
@@ -116,23 +118,23 @@ impl IgmpGroup {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum QuerierState {
+pub enum QuerierState<A: PimAf = Ipv4> {
     Querier,
-    NonQuerier { querier: Ipv4Addr, until: Instant },
+    NonQuerier { querier: A::Addr, until: Instant },
 }
 
 /// Runtime IGMP state for one interface, present while IGMP is
 /// enabled and the interface is usable.
-pub struct IgmpIf {
-    pub querier: QuerierState,
+pub struct IgmpIf<A: PimAf = Ipv4> {
+    pub querier: QuerierState<A>,
     /// Startup general queries left to send at the startup interval.
     startup_remaining: u8,
     /// Next general-query transmission (meaningful as Querier only).
     next_query: Instant,
-    pub groups: BTreeMap<Ipv4Addr, IgmpGroup>,
+    pub groups: BTreeMap<A::Addr, IgmpGroup<A>>,
 }
 
-impl IgmpIf {
+impl<A: PimAf> IgmpIf<A> {
     pub fn new(now: Instant) -> Self {
         Self {
             querier: QuerierState::Querier,

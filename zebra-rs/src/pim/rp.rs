@@ -7,7 +7,9 @@ use std::net::Ipv4Addr;
 
 use ipnet::Ipv4Net;
 
+use super::af::PimAf;
 use super::inst::Pim;
+use super::ipv4::Ipv4;
 use super::tib::SgKey;
 
 /// Default SSM range (RFC 4607): no RP, no register, (S,G) only.
@@ -20,9 +22,17 @@ pub fn is_ssm(grp: Ipv4Addr) -> bool {
 }
 
 /// Static RP table: RP address → served group range.
-#[derive(Debug, Clone, Default)]
-pub struct RpSet {
-    pub statics: BTreeMap<Ipv4Addr, Ipv4Net>,
+#[derive(Debug, Clone)]
+pub struct RpSet<A: PimAf = Ipv4> {
+    pub statics: BTreeMap<A::Addr, A::Prefix>,
+}
+
+impl<A: PimAf> Default for RpSet<A> {
+    fn default() -> Self {
+        Self {
+            statics: BTreeMap::new(),
+        }
+    }
 }
 
 impl Pim {

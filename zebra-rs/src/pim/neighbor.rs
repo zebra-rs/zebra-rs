@@ -9,7 +9,9 @@ use pim_packet::PimHello;
 
 use crate::context::Timer;
 
+use super::af::PimAf;
 use super::inst::{Message, Pim};
+use super::ipv4::Ipv4;
 
 /// RFC 7761: a holdtime of 0xffff means "never time out".
 const HOLDTIME_INFINITE: u16 = 0xffff;
@@ -18,8 +20,8 @@ const HOLDTIME_INFINITE: u16 = 0xffff;
 /// 3.5 × the default 30 s hello period.
 const HOLDTIME_DEFAULT: u16 = 105;
 
-pub struct Neighbor {
-    pub addr: Ipv4Addr,
+pub struct Neighbor<A: PimAf = Ipv4> {
+    pub addr: A::Addr,
     pub holdtime: u16,
     pub dr_priority: Option<u32>,
     pub gen_id: Option<u32>,
@@ -30,7 +32,7 @@ pub struct Neighbor {
     /// resolved nexthop may be any of the neighbor's addresses, not
     /// just the hello source (mandatory for IPv6, where hellos come
     /// from link-locals but routes may carry globals).
-    pub secondary: Vec<Ipv4Addr>,
+    pub secondary: Vec<A::Addr>,
     pub uptime: Instant,
     pub expiry: Option<Timer>,
 }

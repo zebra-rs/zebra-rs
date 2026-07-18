@@ -9,11 +9,13 @@ use std::net::{IpAddr, Ipv4Addr};
 use crate::rib;
 use crate::rib::nht::NexthopResolution;
 
+use super::af::PimAf;
 use super::inst::Pim;
+use super::ipv4::Ipv4;
 use super::tib::SgKey;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum RpfState {
+pub enum RpfState<A: PimAf = Ipv4> {
     Unresolved,
     /// The source is on-link: no upstream neighbor, no Join to send.
     Connected {
@@ -23,11 +25,11 @@ pub enum RpfState {
     /// address is a live PIM neighbor there.
     Gateway {
         ifindex: u32,
-        nexthop: Ipv4Addr,
+        nexthop: A::Addr,
     },
 }
 
-impl RpfState {
+impl<A: PimAf> RpfState<A> {
     pub fn ifindex(&self) -> Option<u32> {
         match self {
             RpfState::Unresolved => None,
@@ -36,8 +38,8 @@ impl RpfState {
     }
 }
 
-pub struct RpfEntry {
-    pub state: RpfState,
+pub struct RpfEntry<A: PimAf = Ipv4> {
+    pub state: RpfState<A>,
     refs: usize,
     resolution: Option<NexthopResolution>,
 }

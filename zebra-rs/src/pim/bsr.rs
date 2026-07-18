@@ -19,7 +19,9 @@ use pim_packet::{
     PimPayload,
 };
 
+use super::af::PimAf;
 use super::inst::{Pim, PimSend};
+use super::ipv4::Ipv4;
 use super::socket::ALL_PIM_ROUTERS;
 
 /// BSM origination period at the elected BSR (RFC 5059 §5).
@@ -34,17 +36,31 @@ const CRP_HOLDTIME: u16 = 150;
 
 const HASH_MASK_LEN: u8 = 10;
 
-#[derive(Debug, Clone, Default)]
-pub struct BsrConfig {
+#[derive(Debug, Clone)]
+pub struct BsrConfig<A: PimAf = Ipv4> {
     /// Candidate-BSR: (advertised address, priority).
-    pub cbsr_addr: Option<Ipv4Addr>,
+    pub cbsr_addr: Option<A::Addr>,
     pub cbsr_priority: Option<u8>,
     pub cbsr_enabled: bool,
     /// Candidate-RP: advertised address + served range + priority.
-    pub crp_addr: Option<Ipv4Addr>,
-    pub crp_group: Option<Ipv4Net>,
+    pub crp_addr: Option<A::Addr>,
+    pub crp_group: Option<A::Prefix>,
     pub crp_priority: Option<u8>,
     pub crp_enabled: bool,
+}
+
+impl<A: PimAf> Default for BsrConfig<A> {
+    fn default() -> Self {
+        Self {
+            cbsr_addr: None,
+            cbsr_priority: None,
+            cbsr_enabled: false,
+            crp_addr: None,
+            crp_group: None,
+            crp_priority: None,
+            crp_enabled: false,
+        }
+    }
 }
 
 impl BsrConfig {
@@ -88,11 +104,11 @@ pub struct BsrRpEntry {
     pub expires: Instant,
 }
 
-#[derive(Debug, Default)]
-pub struct BsrRun {
+#[derive(Debug)]
+pub struct BsrRun<A: PimAf = Ipv4> {
     pub role: Option<BsrRole>,
     /// The domain's current BSR: (priority, address).
-    pub elected: Option<(u8, Ipv4Addr)>,
+    pub elected: Option<(u8, A::Addr)>,
     /// Non-elected: discard the BSR + learned set when this passes.
     pub bsm_expires: Option<Instant>,
     /// Elected only: next scheduled BSM.
@@ -102,9 +118,24 @@ pub struct BsrRun {
     pub fragment_tag: u16,
     /// Learned candidate RPs: (group range, RP address) → entry.
     /// Fed by C-RP advs at the BSR and by BSMs everywhere else.
-    pub rp_set: BTreeMap<(Ipv4Net, Ipv4Addr), BsrRpEntry>,
+    pub rp_set: BTreeMap<(A::Prefix, A::Addr), BsrRpEntry>,
     /// RPF-tracked BSR address (released on BSR change/loss).
-    pub rpf_target: Option<Ipv4Addr>,
+    pub rpf_target: Option<A::Addr>,
+}
+
+impl<A: PimAf> Default for BsrRun<A> {
+    fn default() -> Self {
+        Self {
+            role: None,
+            elected: None,
+            bsm_expires: None,
+            originate_next: None,
+            crp_next: None,
+            fragment_tag: 0,
+            rp_set: BTreeMap::new(),
+            rpf_target: None,
+        }
+    }
 }
 
 impl BsrRun {
