@@ -485,21 +485,22 @@ pub struct Ospfv3Options {
     pub r: bool,
     /// DC — Demand Circuit support.
     pub dc: bool,
-    /// Bits 6 and 7 (per RFC 5340 §A.2). Reserved between DC and
-    /// AT; held as a named gap to keep the next field at the right
-    /// bit position.
-    #[bits(7)]
-    pub _reserved_6_12: u32,
-    /// AT — Authentication Trailer present (RFC 7166 §2.2,
-    /// bit position 13 in the 24-bit Options field, counting from
-    /// the LSB). Sender signals that an OSPFv3 Authentication
-    /// Trailer follows the packet body; receivers configured with
+    /// Bits 6-9: reserved gap between DC and AT. Bit 8 is AF
+    /// (RFC 5838) and bit 9 is L (RFC 5613); neither is modelled here,
+    /// but the 4-bit gap keeps AT at its assigned bit-10 position.
+    #[bits(4)]
+    pub _reserved_6_9: u32,
+    /// AT — Authentication Trailer present (RFC 7166 §2.2). Bit
+    /// position 10 in the 24-bit Options field, counting from the LSB
+    /// (IANA "OSPFv3 Options", 0x000400; matches FRR OSPF6_OPT_AT =
+    /// 1 << 10). Sender signals that an OSPFv3 Authentication Trailer
+    /// follows the packet body; receivers configured with
     /// authentication require this bit on every accepted packet.
     pub at: bool,
     /// Remaining reserved bits, including the high 8 bits that are
     /// the priority octet on the wire (which is owned by a separate
     /// `priority: u8` field on `Ospfv3Hello`).
-    #[bits(18)]
+    #[bits(21)]
     pub reserved: u32,
 }
 
@@ -3577,6 +3578,18 @@ mod tests {
         let mut bytes = vec![0u8; 20];
         bytes.extend_from_slice(&[0xFF, 0xFF, 0xFF, 0xFF]);
         assert!(Ospfv3LinkLsa::parse_be(&bytes).is_err());
+    }
+
+    #[test]
+    fn options_at_bit_is_rfc7166_bit_10() {
+        let mut o = Ospfv3Options::new();
+        o.set_at(true);
+        // RFC 7166 / IANA "OSPFv3 Options": AT is bit 10 of the 24-bit field
+        // (0x000400), matching FRR OSPF6_OPT_AT = 1 << 10.
+        assert_eq!(o.into_bits() & 0x00FF_FFFF, 0x0000_0400);
+        assert!(o.at());
+        // A compliant peer's AT bit parses back to at() == true.
+        assert!(Ospfv3Options::from_bits(0x0000_0400).at());
     }
 
     fn make_hello() -> Ospfv3Hello {
