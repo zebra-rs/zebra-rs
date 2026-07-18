@@ -30,8 +30,8 @@ most-severe first.
 | 11 | **Robustness** | `parser.rs:693` | `parse_lsa_with_length` swallows all errors into `Unknown` | ✅ #1990 |
 | 12 | **Correctness** | `parser.rs:422` (+`816`) | v2 emit writes stored `num_adv`/`num_links`, not derived | ✅ #1986 |
 | 13 | **Correctness** | `parser.rs:82` (+`227`) | Unknown v2 payload emit drops body; `typ()` → Hello | ✅ #1998 |
-| 14 | **Cleanup (reuse)** | `parser.rs:618` | Fletcher checksum + FAD/SID codecs duplicated | ⬜ open |
-| 15 | **Cleanup (dead code)** | `parser.rs:1197` (+`1077`, `v3.rs`) | Dead `pub` items add confusing API surface | ⬜ open |
+| 14 | **Cleanup (reuse)** | `parser.rs:618` | Fletcher checksum + FAD/SID codecs duplicated | 🟡 #2003 (SID) |
+| 15 | **Cleanup (dead code)** | `parser.rs:1197` (+`1077`, `v3.rs`) | Dead `pub` items add confusing API surface | ✅ #2003 |
 
 ---
 
@@ -55,6 +55,7 @@ are fixed and merged to `main`. The review document itself landed in #1955.
 | [#1990](https://github.com/zebra-rs/zebra-rs/pull/1990) | 11 | `parse_lsa_with_length` propagates a known-type body-parse error instead of masking it as `Unknown`; unknown types stay tolerant; **validated by `ospfv2_tilfa` BDD** |
 | [#1993](https://github.com/zebra-rs/zebra-rs/pull/1993) | 10 | `verify_checksum` checks received LSAs against their cached wire bytes (`raw`); typed re-emit kept only as the self-originated fallback |
 | [#1998](https://github.com/zebra-rs/zebra-rs/pull/1998) | 13 | `Ospfv2Packet::emit` writes the Unknown payload body; `Ospfv2Payload::typ()` returns the stored type (emit match now exhaustive) |
+| [#2003](https://github.com/zebra-rs/zebra-rs/pull/2003) | 15, 14 (SID) | Removed dead `is_known` / `Ospfv3ExtTlv::wire_len`; deduped ~25 SID/Label dispatch sites onto `packet_utils::SidLabelTlv`; **validated by `ospfv2_tilfa` + `ospfv3_tilfa` BDDs**. Fletcher/FAD hoists deferred. |
 
 Each fix carries a regression test: byte-offset unit tests where a `show`-based
 check could not discriminate the bug, plus live BDD features for the Prefix-SID
@@ -81,13 +82,18 @@ silent interop break in a shipped datapath). Suggested order:
 > Finding 13 (Unknown v2 payload emit) was fixed in
 > [#1998](https://github.com/zebra-rs/zebra-rs/pull/1998).
 
-**Cleanup — low-severity, opportunistic**
-1. **Finding 15 (remainder) — delete dead `pub` items** (`is_known`,
-   `Ospfv3ExtTlv::wire_len`; `RouterInfoTlvUnknown::parse_tlv` was already removed
-   with finding 8). Trivial deletions.
-2. **Finding 14 — hoist duplicated codecs into `packet-utils`** (Fletcher
-   checksum shared with `isis-packet`; FAD and SID/Label dispatch shared v2/v3).
-   Larger refactor; best done the next time those codecs are touched.
+> Finding 15 and the SID/Label-dispatch part of finding 14 were done in
+> [#2003](https://github.com/zebra-rs/zebra-rs/pull/2003).
+
+**Remaining — deferred, opportunistic**
+1. **Finding 14 (remainder) — hoist the Fletcher checksum and FAD codec into
+   `packet-utils`.** The Fletcher `lsa_checksum_calc` is provably the offset-14
+   generalization of `isis-packet`'s offset-12 `checksum_calc`; the FAD Flags /
+   ExcludeSrlg payload codecs are duplicated v2/v3 (admin-group is already
+   shared). Both are cross-crate and touch on-wire checksums / codecs used by
+   OSPFv2, OSPFv3, and IS-IS — best done the next time those codecs are touched,
+   with known-answer tests at both checksum offsets. The SID/Label dispatch part
+   is already done (#2003).
 
 **Additional notes (below the top 15)** — opportunistic:
 - `parser.rs` / `v3.rs` emit: stamp packet length via `try_into`/`checked` so a
@@ -399,6 +405,8 @@ from `typ()`.
 ## Cleanup findings
 
 ### 14. Fletcher checksum + FAD/SID codecs duplicated
+> 🟡 **Partly fixed in [#2003](https://github.com/zebra-rs/zebra-rs/pull/2003)** — the SID/Label dispatch (~25 sites) is deduped onto `packet_utils::SidLabelTlv`. The Fletcher-checksum and FAD-codec hoists remain deferred (cross-crate, checksum-touching).
+
 **`crates/ospf-packet/src/parser.rs:612`**
 
 - `lsa_checksum_calc` re-implements the RFC 1008 Fletcher-with-offset math that
@@ -419,6 +427,8 @@ A fix or hardening applied to one copy silently misses the others, letting v2/v3
 ---
 
 ### 15. Dead `pub` items add confusing API surface
+> ✅ **Fixed in [#2003](https://github.com/zebra-rs/zebra-rs/pull/2003)** — `is_known` and `Ospfv3ExtTlv::wire_len` removed (`parse_tlv` was cleared with #8).
+
 **`crates/ospf-packet/src/parser.rs:1190`** (and `parser.rs:1070`, `v3.rs:2577`)
 
 - `RouterInfoTlvUnknown::parse_tlv` — never wired in (it's the correct fix for
