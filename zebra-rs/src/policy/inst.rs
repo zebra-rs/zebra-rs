@@ -397,6 +397,42 @@ impl Policy {
                         map.remove(&name);
                     }
                 }
+                // Tell the subscriber it is no longer bound to `name`:
+                // push a resolve reply carrying `None` so it clears any
+                // stale resolved object and soft-reconfigures, exactly
+                // like a `Register` to an undefined name (which already
+                // "always answers, even with None" above). Previously
+                // `Unregister` only dropped the watch, so an out-policy
+                // *delete* left the peer's cached snapshot denying every
+                // prefix and never re-advertised the routes the removed
+                // policy had suppressed (review finding #12). Key-chain
+                // unbinds ride `apply_ao_refresh_all`, not this path, and
+                // the chain is shared config — a `None` here would wrongly
+                // evict it — so they are skipped.
+                let reply = match policy_type {
+                    PolicyType::PrefixSetIn | PolicyType::PrefixSetOut => {
+                        Some(PolicyRx::PrefixSet {
+                            name,
+                            ident,
+                            policy_type,
+                            prefix_set: None,
+                        })
+                    }
+                    PolicyType::PolicyListIn | PolicyType::PolicyListOut | PolicyType::TableMap => {
+                        Some(PolicyRx::PolicyList {
+                            name,
+                            ident,
+                            policy_type,
+                            policy_list: None,
+                        })
+                    }
+                    PolicyType::KeyChain(_) => None,
+                };
+                if let Some(reply) = reply
+                    && let Some(tx) = self.clients.get(&proto)
+                {
+                    let _ = tx.send(reply);
+                }
             }
         }
     }
@@ -633,4 +669,106 @@ pub fn serve(mut policy: Policy) {
     tokio::spawn(async move {
         policy.event_loop().await;
     });
+}
+
+#[cfg(test)]
+mod unregister_reply_tests {
+    use super::*;
+
+    /// Review finding #12: an out-policy *delete* must push a resolve
+    /// reply carrying `None` so the subscriber clears its cached
+    /// snapshot and re-advertises the routes the removed policy had
+    /// suppressed. Previously `Unregister` only dropped the watch, so
+    /// the peer kept denying every prefix forever.
+    #[tokio::test]
+    async fn unregister_policy_list_emits_clearing_reply() {
+        let mut policy = Policy::new();
+        let (tx, mut rx) = mpsc::unbounded_channel::<PolicyRx>();
+        policy
+            .process_msg(Message::Subscribe {
+                proto: "bgp".to_string(),
+                tx,
+            })
+            .await;
+
+        policy
+            .process_msg(Message::Unregister {
+                proto: "bgp".to_string(),
+                name: "DENY-ALL".to_string(),
+                ident: 42,
+                policy_type: PolicyType::PolicyListOut,
+            })
+            .await;
+
+        match rx.try_recv() {
+            Ok(PolicyRx::PolicyList {
+                name,
+                ident,
+                policy_type,
+                policy_list,
+            }) => {
+                assert_eq!(name, "DENY-ALL");
+                assert_eq!(ident, 42);
+                assert_eq!(policy_type, PolicyType::PolicyListOut);
+                assert!(policy_list.is_none(), "unbind resolves to no policy");
+            }
+            other => panic!("expected a clearing PolicyList reply, got {other:?}"),
+        }
+    }
+
+    /// The prefix-set unbind pushes the same clearing reply.
+    #[tokio::test]
+    async fn unregister_prefix_set_emits_clearing_reply() {
+        let mut policy = Policy::new();
+        let (tx, mut rx) = mpsc::unbounded_channel::<PolicyRx>();
+        policy
+            .process_msg(Message::Subscribe {
+                proto: "bgp".to_string(),
+                tx,
+            })
+            .await;
+        policy
+            .process_msg(Message::Unregister {
+                proto: "bgp".to_string(),
+                name: "PS-OUT".to_string(),
+                ident: 7,
+                policy_type: PolicyType::PrefixSetOut,
+            })
+            .await;
+        assert!(
+            matches!(
+                rx.try_recv(),
+                Ok(PolicyRx::PrefixSet {
+                    prefix_set: None,
+                    ..
+                })
+            ),
+            "prefix-set unbind must push a None reply"
+        );
+    }
+
+    /// A key-chain unbind must NOT push a reply — the chain is shared
+    /// config; a `None` here would wrongly evict it, and key-chain
+    /// unbinds ride `apply_ao_refresh_all` instead.
+    #[tokio::test]
+    async fn unregister_key_chain_emits_no_reply() {
+        use crate::policy::KeyChainScope;
+        let mut policy = Policy::new();
+        let (tx, mut rx) = mpsc::unbounded_channel::<PolicyRx>();
+        policy
+            .process_msg(Message::Subscribe {
+                proto: "bgp".to_string(),
+                tx,
+            })
+            .await;
+        policy
+            .process_msg(Message::Unregister {
+                proto: "bgp".to_string(),
+                name: "KC".to_string(),
+                ident: 1,
+                policy_type: PolicyType::KeyChain(KeyChainScope::BgpNeighbor),
+            })
+            .await;
+        assert!(rx.try_recv().is_err(), "key-chain unbind pushes nothing");
+    }
 }
