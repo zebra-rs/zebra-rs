@@ -331,7 +331,7 @@ TLV 1173 when the producer grows support for it). Display labels the two
 flavors distinctly. Unit test pins the dispatch, round-trip, and both
 accessors on an entry carrying both flavors.
 
-### 14. 🟡 ASLA parse forces SABM/UDABM to ≥1 byte when L-flag set — PLAUSIBLE
+### 14. 🟡 ASLA parse forces SABM/UDABM to ≥1 byte when L-flag set — PLAUSIBLE — ✅ FIXED
 `crates/isis-packet/src/sub/neigh.rs:764`
 
 `parse_be` forces `eff_sabm_len`/`eff_udabm_len` to `max(1)` when the L-flag is
@@ -348,8 +348,14 @@ consumes the first two bytes of the first nested sub-TLV (its type and length) a
 fabricated masks, then parses the rest at a shifted offset — nested TE attributes
 are garbled and re-emission differs from the wire.
 
-**Fix:** make emit enforce the same L-flag ⇒ ≥1-byte-mask invariant the parser
-assumes, or make the parser honor the advertised lengths.
+**Fixed:** the parser now honors the advertised lengths (the RFC 9479 §4.2
+mask lengths are actual octet counts 0–8 with no L⇒1-byte rule — the `max(1)`
+comment's claim doesn't match the RFC text, and FRR's 1-byte constant is its
+*send*-side choice, not a parse rule), and rejects lengths > 8 so a
+non-conformant claim degrades the sub-TLV to `Unknown` (finding #10 machinery)
+instead of desyncing. Emit is unchanged; the daemon only builds `l_flag:
+false` 1-byte-SABM ASLAs, so no local wire output changes. Unit tests pin the
+L=1/empty-mask round-trip (nested sub-TLV intact) and the >8 length degrade.
 
 ### 15. 🟡 `IsisPacket::emit` drops Unknown PDU payload; `IsisTlvUnknown` emit doubles the header — CONFIRMED
 `crates/isis-packet/src/parser.rs:98` and `:1271`
