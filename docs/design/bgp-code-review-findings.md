@@ -6,7 +6,7 @@ candidate was checked by an independent adversarial verifier that had to name a
 concrete trigger and quote the decisive lines, then a fresh gap sweep added more.
 
 **Result: 34 confirmed correctness bugs + 15 confirmed cleanup items.**
-**Status 2026-07-18: top-10 fixed and merged** (PRs #1962, #1972, #1981,
+**Status 2026-07-18: top-11 fixed and merged** (PRs #1962, #1972, #1981,
 #1984, #1987, #1991, #1997, and the finding-#9 branch); fixes below the
 cap remain open. Three
 candidates were refuted (two vty-disconnect "panics" are guarded by detached
@@ -173,7 +173,7 @@ phantom's hold timer tears it down.
 *(The originally-suspected reverse-map mis-cancel is refuted — `flush_vpnv4` clears
 the reverse map at reconnect. The un-cancelled timer is the real, worse payload.)*
 
-### 11. path-id-0 withdraw wildcard desyncs Adj-RIB-In vs Loc-RIB — `adj_rib.rs:77`
+### 11. path-id-0 withdraw wildcard desyncs Adj-RIB-In vs Loc-RIB — `adj_rib.rs:77` — FIXED (In direction is exact-match; Out keeps the wildcard)
 
 `AdjRibTable::remove` treats `id == 0` as a whole-prefix wildcard
 (`self.0.remove(&prefix)`) when no candidate's ID matches. The wire path-id is
