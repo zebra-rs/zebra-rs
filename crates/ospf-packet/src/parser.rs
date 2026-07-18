@@ -11,7 +11,7 @@ use nom::error::{ErrorKind, make_error};
 use nom::number::complete::{be_u8, be_u16, be_u24, be_u32};
 use nom::{Err, IResult};
 use nom_derive::*;
-use packet_utils::{Algo, ExtAdminGroup, SidLabelTlv};
+use packet_utils::{Algo, ExtAdminGroup, FadFlags, FadSrlg, SidLabelTlv};
 
 use super::util::{Emit, ParseBe};
 use super::{OspfLsType, OspfType, many0_complete};
@@ -1337,31 +1337,14 @@ impl From<u16> for OspfFadSubTlvType {
     }
 }
 
-/// FAD Flags sub-TLV (RFC 9350 §6.4). Only the M-flag (Prefix Metric,
-/// MSB of byte 0) is defined; trailing bytes are preserved so flags
-/// added after this codec round-trip cleanly.
-#[derive(Debug, Default, Clone, PartialEq)]
-pub struct OspfFadFlags {
-    pub m_flag: bool,
-    pub trailing: Vec<u8>,
-}
-
-/// FAD Exclude SRLG sub-TLV (RFC 9350 §6.5): an ordered list of 32-bit
-/// SRLG identifiers; any link whose advertised SRLG set intersects
-/// this list is excluded from the algorithm's SPF.
-#[derive(Debug, Default, Clone, PartialEq)]
-pub struct OspfFadExcludeSrlg {
-    pub srlgs: Vec<u32>,
-}
-
 /// One nested sub-TLV under the OSPF FAD TLV.
 #[derive(Debug, Clone, PartialEq)]
 pub enum OspfFadSubTlv {
     ExcludeAg(ExtAdminGroup),
     IncludeAnyAg(ExtAdminGroup),
     IncludeAllAg(ExtAdminGroup),
-    Flags(OspfFadFlags),
-    ExcludeSrlg(OspfFadExcludeSrlg),
+    Flags(FadFlags),
+    ExcludeSrlg(FadSrlg),
     Unknown(RouterInfoTlvUnknown),
 }
 
@@ -1385,15 +1368,9 @@ impl OspfFadSubTlv {
                 let (_, g) = ExtAdminGroup::parse_be(sub_data)?;
                 OspfFadSubTlv::IncludeAllAg(g)
             }
-            OspfFadSubTlvType::Flags => {
-                // M-flag = MSB of byte 0; keep any trailing bytes.
-                let m_flag = sub_data.first().is_some_and(|b| b & 0x80 != 0);
-                let trailing = sub_data.get(1..).unwrap_or(&[]).to_vec();
-                OspfFadSubTlv::Flags(OspfFadFlags { m_flag, trailing })
-            }
+            OspfFadSubTlvType::Flags => OspfFadSubTlv::Flags(FadFlags::parse_value(sub_data)),
             OspfFadSubTlvType::ExcludeSrlg => {
-                let (_, srlgs) = many0_complete(be_u32).parse(sub_data)?;
-                OspfFadSubTlv::ExcludeSrlg(OspfFadExcludeSrlg { srlgs })
+                OspfFadSubTlv::ExcludeSrlg(FadSrlg::parse_value(sub_data))
             }
             OspfFadSubTlvType::Unknown(_) => OspfFadSubTlv::Unknown(RouterInfoTlvUnknown {
                 typ: tl.typ,
@@ -1415,8 +1392,8 @@ impl OspfFadSubTlv {
             OspfFadSubTlv::ExcludeAg(g)
             | OspfFadSubTlv::IncludeAnyAg(g)
             | OspfFadSubTlv::IncludeAllAg(g) => g.byte_len() as u16,
-            OspfFadSubTlv::Flags(f) => 1 + f.trailing.len() as u16,
-            OspfFadSubTlv::ExcludeSrlg(s) => (s.srlgs.len() * 4) as u16,
+            OspfFadSubTlv::Flags(f) => f.value_len() as u16,
+            OspfFadSubTlv::ExcludeSrlg(s) => s.value_len() as u16,
             OspfFadSubTlv::Unknown(u) => u.len,
         }
     }
@@ -1446,15 +1423,8 @@ impl OspfFadSubTlv {
             OspfFadSubTlv::ExcludeAg(g)
             | OspfFadSubTlv::IncludeAnyAg(g)
             | OspfFadSubTlv::IncludeAllAg(g) => g.emit(buf),
-            OspfFadSubTlv::Flags(f) => {
-                buf.put_u8(if f.m_flag { 0x80 } else { 0x00 });
-                buf.put_slice(&f.trailing);
-            }
-            OspfFadSubTlv::ExcludeSrlg(s) => {
-                for v in &s.srlgs {
-                    buf.put_u32(*v);
-                }
-            }
+            OspfFadSubTlv::Flags(f) => f.emit_value(buf),
+            OspfFadSubTlv::ExcludeSrlg(s) => s.emit_value(buf),
             OspfFadSubTlv::Unknown(u) => buf.put(&u.values[..]),
         }
         // Pad to 4-byte alignment.
@@ -3111,11 +3081,11 @@ mod tests {
                 OspfFadSubTlv::ExcludeAg(admin_group(&[4])),
                 OspfFadSubTlv::IncludeAnyAg(admin_group(&[0, 33])),
                 OspfFadSubTlv::IncludeAllAg(admin_group(&[200])),
-                OspfFadSubTlv::Flags(OspfFadFlags {
+                OspfFadSubTlv::Flags(FadFlags {
                     m_flag: true,
                     trailing: Vec::new(),
                 }),
-                OspfFadSubTlv::ExcludeSrlg(OspfFadExcludeSrlg {
+                OspfFadSubTlv::ExcludeSrlg(FadSrlg {
                     srlgs: vec![100, 4_000_000_000],
                 }),
             ],
