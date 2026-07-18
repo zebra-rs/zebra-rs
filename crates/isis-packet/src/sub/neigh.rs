@@ -151,11 +151,22 @@ impl IsisTlvExtIsReachEntry {
         })
     }
 
-    /// Administrative group / link-color bitmask (sub-TLV 3), if present.
-    /// IS-IS carries it as a single 32-bit mask; the first word is returned.
+    /// Administrative group / link-color bitmask (sub-TLV 3,
+    /// RFC 5305 §3.1) — the classic fixed 32-bit mask. Maps to BGP-LS
+    /// Administrative Group (TLV 1088).
     pub fn admin_group(&self) -> Option<u32> {
         self.subs.iter().find_map(|s| match s {
-            IsisSubTlv::AdminGrp(a) => a.groups.first().copied(),
+            IsisSubTlv::AdminGroup(a) => Some(a.group),
+            _ => None,
+        })
+    }
+
+    /// Extended Administrative Groups (sub-TLV 14, RFC 7308), if
+    /// present — a variable-length list of 32-bit words. Maps to
+    /// BGP-LS Extended Administrative Group (TLV 1173), not TLV 1088.
+    pub fn ext_admin_group(&self) -> Option<&[u32]> {
+        self.subs.iter().find_map(|s| match s {
+            IsisSubTlv::AdminGrp(a) => Some(a.groups.as_slice()),
             _ => None,
         })
     }
@@ -219,6 +230,8 @@ pub enum IsisSubTlv {
     Ipv6IfAddr(IsisSubIpv6IfAddr),
     #[nom(Selector = "IsisNeighCode::Ipv6NeighAddr")]
     Ipv6NeighAddr(IsisSubIpv6NeighAddr),
+    #[nom(Selector = "IsisNeighCode::AdminGroup")]
+    AdminGroup(IsisSubAdminGroup),
     #[nom(Selector = "IsisNeighCode::AdminGrp")]
     AdminGrp(IsisSubAdminGrp),
     #[nom(Selector = "IsisNeighCode::Asla")]
@@ -280,6 +293,7 @@ impl IsisSubTlv {
             Ipv4NeighAddr(v) => v.len(),
             Ipv6IfAddr(v) => v.len(),
             Ipv6NeighAddr(v) => v.len(),
+            AdminGroup(v) => v.len(),
             AdminGrp(v) => v.len(),
             Asla(v) => v.len(),
             TeMetric(v) => v.len(),
@@ -309,6 +323,7 @@ impl IsisSubTlv {
             Ipv4NeighAddr(v) => v.tlv_emit(buf),
             Ipv6IfAddr(v) => v.tlv_emit(buf),
             Ipv6NeighAddr(v) => v.tlv_emit(buf),
+            AdminGroup(v) => v.tlv_emit(buf),
             AdminGrp(v) => v.tlv_emit(buf),
             Asla(v) => v.tlv_emit(buf),
             TeMetric(v) => v.tlv_emit(buf),
@@ -401,6 +416,35 @@ impl TlvEmitter for IsisSubIpv6NeighAddr {
 
     fn emit(&self, buf: &mut BytesMut) {
         buf.put(&self.addr.octets()[..]);
+    }
+}
+
+/// RFC 5305 §3.1 Administrative Group / link color (sub-TLV 3) — the
+/// classic fixed 4-octet mask, distinct from the RFC 7308 Extended
+/// Administrative Groups (sub-TLV 14, [`IsisSubAdminGrp`]). BGP-LS
+/// keeps them distinct too (TLV 1088 vs TLV 1173).
+#[derive(Debug, NomBE, Clone, Serialize, Deserialize, PartialEq)]
+pub struct IsisSubAdminGroup {
+    pub group: u32,
+}
+
+impl TlvEmitter for IsisSubAdminGroup {
+    fn typ(&self) -> u8 {
+        IsisNeighCode::AdminGroup.into()
+    }
+
+    fn len(&self) -> u8 {
+        4
+    }
+
+    fn emit(&self, buf: &mut BytesMut) {
+        buf.put_u32(self.group);
+    }
+}
+
+impl From<IsisSubAdminGroup> for IsisSubTlv {
+    fn from(value: IsisSubAdminGroup) -> Self {
+        IsisSubTlv::AdminGroup(value)
     }
 }
 
@@ -1066,6 +1110,39 @@ impl TlvEmitter for IsisSubSrv6LanEndXSid {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Finding #13: the classic RFC 5305 §3.1 Administrative Group
+    /// (sub-TLV 3) had no dispatch arm, so a standards-compliant link
+    /// color landed in Unknown and `admin_group()` returned None —
+    /// while the accessor actually read the RFC 7308 *Extended* Admin
+    /// Group (sub-TLV 14), which BGP-LS maps to a different TLV.
+    #[test]
+    fn classic_admin_group_subtlv3_dispatches() {
+        let raw = [3u8, 4, 0x00, 0x00, 0x00, 0x14];
+        let (rest, sub) = IsisSubTlv::parse_subs(&raw).expect("parse");
+        assert!(rest.is_empty());
+        let IsisSubTlv::AdminGroup(g) = &sub else {
+            panic!("expected AdminGroup, got {sub:?}");
+        };
+        assert_eq!(g.group, 0x14);
+
+        let mut buf = BytesMut::new();
+        sub.emit(&mut buf);
+        assert_eq!(&buf[..], &raw[..]);
+
+        // The accessors keep the two group flavors distinct.
+        let entry = IsisTlvExtIsReachEntry {
+            subs: vec![
+                IsisSubTlv::AdminGroup(IsisSubAdminGroup { group: 0x14 }),
+                IsisSubTlv::AdminGrp(IsisSubAdminGrp {
+                    groups: vec![0xAA, 0xBB],
+                }),
+            ],
+            ..Default::default()
+        };
+        assert_eq!(entry.admin_group(), Some(0x14));
+        assert_eq!(entry.ext_admin_group(), Some(&[0xAA, 0xBB][..]));
+    }
 
     fn oversized_entry() -> IsisTlvExtIsReachEntry {
         // 50 IPv4 interface-address sub-TLVs = 50 * (4+2) = 300 bytes,

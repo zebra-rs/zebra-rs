@@ -20,12 +20,12 @@ pub mod cap_disp;
 
 pub mod neigh;
 pub use neigh::{
-    AdjSidFlags, IsisSubAdminGrp, IsisSubAsla, IsisSubAvailableBw, IsisSubBandwidthMetric,
-    IsisSubDelayVariation, IsisSubIpv4IfAddr, IsisSubIpv4NeighAddr, IsisSubIpv6IfAddr,
-    IsisSubIpv6NeighAddr, IsisSubLanAdjSid, IsisSubLinkLoss, IsisSubMinMaxLinkDelay,
-    IsisSubResidualBw, IsisSubSrv6EndXSid, IsisSubSrv6LanEndXSid, IsisSubTeMetric,
-    IsisSubUniLinkDelay, IsisSubUtilizedBw, IsisTlvExtIsReach, IsisTlvExtIsReachEntry,
-    IsisTlvMtIsReach,
+    AdjSidFlags, IsisSubAdminGroup, IsisSubAdminGrp, IsisSubAsla, IsisSubAvailableBw,
+    IsisSubBandwidthMetric, IsisSubDelayVariation, IsisSubIpv4IfAddr, IsisSubIpv4NeighAddr,
+    IsisSubIpv6IfAddr, IsisSubIpv6NeighAddr, IsisSubLanAdjSid, IsisSubLinkLoss,
+    IsisSubMinMaxLinkDelay, IsisSubResidualBw, IsisSubSrv6EndXSid, IsisSubSrv6LanEndXSid,
+    IsisSubTeMetric, IsisSubUniLinkDelay, IsisSubUtilizedBw, IsisTlvExtIsReach,
+    IsisTlvExtIsReachEntry, IsisTlvMtIsReach,
 };
 pub mod neigh_code;
 pub use neigh_code::IsisNeighCode;
