@@ -2,8 +2,13 @@
 //! (`MRT_INIT`/`MRT_PIM`), VIF allocation and MFC programming, and
 //! upcall parsing. All `MRT_*` interaction is confined here — the
 //! protocol engine only sees typed [`Upcall`] messages and the
-//! [`ForwardingPlane`] methods, mirroring the ZebOS pimd/mribd
+//! [`PimForwardingPlane`] methods, mirroring the ZebOS pimd/mribd
 //! boundary inside one process.
+//!
+//! The plane is abstracted behind the [`PimForwardingPlane<A>`] trait
+//! so an IPv6 `Mrt6` (MRT6/MIF/MFC over `linux/mroute6.h`) can slot in
+//! per address family; [`Mrt4`] is the IPv4 implementor. Only the
+//! trait seam exists yet — the engine still runs IPv4-only.
 //!
 //! Linux delivers upcalls on the mroute socket disguised as IP
 //! packets whose protocol field is zero (`struct igmpmsg` overlays
@@ -21,6 +26,9 @@ use std::sync::Arc;
 use tokio::io::unix::AsyncFd;
 
 use crate::context::ProtoContext;
+
+use super::af::PimAf;
+use super::ipv4::Ipv4;
 
 // linux/mroute.h — not exposed by the libc crate.
 const MRT_INIT: c_int = 200;
@@ -87,19 +95,20 @@ pub enum UpcallKind {
 }
 
 #[derive(Debug, Clone)]
-pub struct Upcall {
+pub struct Upcall<A: PimAf = Ipv4> {
     pub kind: UpcallKind,
     pub vif: u16,
-    pub src: Ipv4Addr,
-    pub grp: Ipv4Addr,
+    pub src: A::Addr,
+    pub grp: A::Addr,
     /// The punted original IP packet — populated for WHOLEPKT (the
     /// Register encapsulation payload), empty otherwise.
     pub payload: Vec<u8>,
 }
 
-/// Parse one datagram read from the mroute socket. `None` for
-/// anything that is not an upcall (real IGMP traffic, runts).
-pub fn parse_upcall(buf: &[u8]) -> Option<Upcall> {
+/// Parse one datagram read from the IPv4 mroute socket. `None` for
+/// anything that is not an upcall (real IGMP traffic, runts). The
+/// IPv6 read task will produce an `Upcall<Ipv6>` from `mrt6msg`.
+pub fn parse_upcall(buf: &[u8]) -> Option<Upcall<Ipv4>> {
     if buf.len() < 20 || buf[9] != 0 {
         // buf[9] is ip->protocol alias im_mbz: nonzero ⇒ a genuine
         // IGMP packet, handled on the IGMP socket.
@@ -145,21 +154,45 @@ fn mrt_setsockopt<T>(sock: &Socket, opt: c_int, val: &T) -> std::io::Result<()> 
     Ok(())
 }
 
-/// Owner of the mroute socket, the VIF table and the kernel MFC.
+/// The kernel multicast-forwarding plane, abstracted over the address
+/// family. All per-AF UAPI (`MRT_*`/`MRT6_*`, `Vifctl`/`mif6ctl`,
+/// `Mfcctl`/`mf6cctl`) lives behind a concrete implementor; upcall
+/// parsing stays in the concrete read task and produces the shared
+/// typed [`Upcall<A>`]. [`Mrt4`] is the IPv4 implementor.
+pub trait PimForwardingPlane<A: PimAf>: Sized {
+    /// Claim the (per-table) kernel multicast-routing instance.
+    /// `table_id != 0` selects a non-default table (must precede the
+    /// init sockopt) — the per-VRF path.
+    fn new(ctx: &ProtoContext, table_id: u32) -> std::io::Result<Self>;
+    /// Allocate and program a VIF/MIF for `ifindex` (idempotent).
+    fn vif_add(&mut self, ifindex: u32);
+    /// Remove the VIF/MIF for `ifindex`.
+    fn vif_del(&mut self, ifindex: u32);
+    /// The VIF/MIF index currently mapped to `ifindex`.
+    fn vif(&self, ifindex: u32) -> Option<u16>;
+    /// The ifindex mapped to a VIF/MIF index (upcall arrival lookup).
+    fn ifindex_of(&self, vif: u16) -> Option<u32>;
+    /// Install or replace the (S,G) MFC entry.
+    fn mfc_add(&self, src: A::Addr, grp: A::Addr, iif: u16, oifs: &[u16]);
+    /// Remove the (S,G) MFC entry.
+    fn mfc_del(&self, src: A::Addr, grp: A::Addr);
+}
+
+/// Owner of the IPv4 mroute socket, the VIF table and the kernel MFC.
 /// Dropping it closes the socket, which makes the kernel run the
 /// implicit `MRT_DONE` cleanup (VIFs and MFC entries flushed).
-pub struct ForwardingPlane {
+pub struct Mrt4 {
     pub sock: Arc<AsyncFd<Socket>>,
     /// ifindex → VIF. Index 0 stays reserved for the register VIF
     /// (ASM phase).
     vifs: BTreeMap<u32, u16>,
 }
 
-impl ForwardingPlane {
+impl PimForwardingPlane<Ipv4> for Mrt4 {
     /// `table_id != 0` selects a non-default kernel multicast routing
     /// table (`MRT_TABLE`, must precede `MRT_INIT`) — the per-VRF
     /// instance path. Requires `CONFIG_IP_MROUTE_MULTIPLE_TABLES`.
-    pub fn new(ctx: &ProtoContext, table_id: u32) -> std::io::Result<Self> {
+    fn new(ctx: &ProtoContext, table_id: u32) -> std::io::Result<Self> {
         // The mroute socket must be a raw IGMP socket. MRT_INIT
         // claims the (per-table) multicast-routing instance — EADDRINUSE
         // means another daemon owns it.
@@ -196,18 +229,18 @@ impl ForwardingPlane {
         })
     }
 
-    pub fn vif(&self, ifindex: u32) -> Option<u16> {
+    fn vif(&self, ifindex: u32) -> Option<u16> {
         self.vifs.get(&ifindex).copied()
     }
 
-    pub fn ifindex_of(&self, vif: u16) -> Option<u32> {
+    fn ifindex_of(&self, vif: u16) -> Option<u32> {
         self.vifs
             .iter()
             .find(|(_, v)| **v == vif)
             .map(|(ifindex, _)| *ifindex)
     }
 
-    pub fn vif_add(&mut self, ifindex: u32) {
+    fn vif_add(&mut self, ifindex: u32) {
         if self.vifs.contains_key(&ifindex) {
             return;
         }
@@ -237,7 +270,7 @@ impl ForwardingPlane {
         }
     }
 
-    pub fn vif_del(&mut self, ifindex: u32) {
+    fn vif_del(&mut self, ifindex: u32) {
         let Some(vif) = self.vifs.remove(&ifindex) else {
             return;
         };
@@ -258,7 +291,7 @@ impl ForwardingPlane {
 
     /// Install or replace the (S,G) MFC entry. `MRT_ADD_MFC` on an
     /// existing (origin, group) updates it in place.
-    pub fn mfc_add(&self, src: Ipv4Addr, grp: Ipv4Addr, iif: u16, oifs: &[u16]) {
+    fn mfc_add(&self, src: Ipv4Addr, grp: Ipv4Addr, iif: u16, oifs: &[u16]) {
         let mut mc = Mfcctl {
             mfcc_origin: u32::from_ne_bytes(src.octets()),
             mfcc_mcastgrp: u32::from_ne_bytes(grp.octets()),
@@ -281,7 +314,7 @@ impl ForwardingPlane {
         }
     }
 
-    pub fn mfc_del(&self, src: Ipv4Addr, grp: Ipv4Addr) {
+    fn mfc_del(&self, src: Ipv4Addr, grp: Ipv4Addr) {
         let mc = Mfcctl {
             mfcc_origin: u32::from_ne_bytes(src.octets()),
             mfcc_mcastgrp: u32::from_ne_bytes(grp.octets()),

@@ -20,7 +20,7 @@ use pim_packet::{
 use super::af::PimAf;
 use super::inst::{Pim, PimSend};
 use super::ipv4::Ipv4;
-use super::mroute::Upcall;
+use super::mroute::{PimForwardingPlane, Upcall};
 use super::rp::is_ssm;
 use super::tib::{JoinState, KEEPALIVE_PERIOD, RegState, SgKey};
 

@@ -23,7 +23,7 @@ use super::assert_fsm::AssertState;
 use super::inst::Pim;
 use super::ipv4::Ipv4;
 use super::macros::{inherited_effective, inherited_olist, join_desired_effective, mfc_oifs};
-use super::mroute::{REG_VIF, Upcall, UpcallKind};
+use super::mroute::{PimForwardingPlane, REG_VIF, Upcall, UpcallKind};
 use super::rpf::RpfState;
 
 /// Join/Prune holdtime we advertise and the downstream expiry we run

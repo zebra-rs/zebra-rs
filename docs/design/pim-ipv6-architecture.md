@@ -539,7 +539,7 @@ Each phase is one reviewable PR leaving the tree tested and useful.
 | 1 | **DONE** — Codec groundwork: checksum context API (all emit sites), MLD wire types, exponent encodings, mixed-family rejection, ICMPv6 checksum helper lifted to `packet-utils` | fixture + negative tests; IPv4 fixtures byte-identical |
 | 2 | `Pim<A>`/`Gm<A>`/FP-trait genericization; **IPv4 runtime only**. Landed in compiling slices (see note). | all IPv4 unit + live BDD unchanged |
 | 3 | `Ipv6` transports: PIMv6 socket, Hello/neighbor/DR over LL | two-router adjacency BDD; invalid-transport negatives |
-| 4 | MLDv1/v2 engine via `Gm<Ipv6>` + TIB bridge | querier/compat/source-filter BDD |
+| 4 | Extract the shared `Gm<A>` engine + `GmCodec` (rename `igmp/`→`gm/`), then MLDv1/v2 via `Gm<Ipv6>` + TIB bridge (the second codec that validates the seam) | querier/compat/source-filter BDD |
 | 5 | `Mrt6` plane + generic RPF + SSM end-to-end | UDPv6 delivery + kernel MIF/MFC asserts (MVP gate) |
 | 6 | Static-RP ASM, IPv6 Register path, SPT | three-router ASM traffic proof |
 | 7 | IPv6 assert + per-VRF `Pim<Ipv6>` | LAN election + VRF isolation BDD |
@@ -569,14 +569,22 @@ consistent with the arc's smallest-safe-slice rule:
     `config.rs`) routed through `Ipv4::…`. `Pim` stays concrete; unit-tested; byte-identical.
     (`NAME`, `host_prefix`, wire conversion, etc. are deferred to the slice that first
     needs them, so no trait method is ever dead under `-D warnings`.)
-  - **2b.2 — seam traits for the impure edges.** `PimForwardingPlane<A>` (rename
-    `ForwardingPlane`→`Mrt4`, `Upcall`→`Upcall<A>`) and the `Gm<A>` membership engine +
-    `GmCodec` (`Ipv4`/IGMP) adapter (rename `igmp/`→`gm/`). `Pim` still concrete, holding
-    `Mrt4` and `Gm<Ipv4>`.
+  - **2b.2 — the forwarding-plane seam.** `PimForwardingPlane<A>` (rename
+    `ForwardingPlane`→`Mrt4`, `Upcall`→`Upcall<A>`), with `Mrt4: PimForwardingPlane<Ipv4>`.
+    This is the one seam the flip *requires* — the `Pim.fp` field type must be trait-bound
+    before `Pim` can be generic. `Pim` stays concrete, holding `Mrt4`.
   - **2b.3 — the actor flip.** `Pim` → `Pim<A>`, `Message<A>`, `PimSend<A>`, all `impl`
-    blocks to `impl<A: PimAf>`, callbacks/show typed over `A`; add wire-conversion
-    (`from_ip`/`to_ip`) + transport-spawn methods to `PimAf` and route the `IpAddr::V4`
-    sites through them. Spawn `Pim::<Ipv4>::new` only — still IPv4-runtime-only.
+    blocks to `impl<A: PimAf>` (the membership FSM in `igmp/` flips generically *in place* —
+    it becomes `A`-generic without being extracted); callbacks/show typed over `A`; add
+    wire-conversion (`from_ip`/`to_ip`) + transport-spawn methods to `PimAf` and route the
+    `IpAddr::V4` sites through them. Spawn `Pim::<Ipv4>::new` only — still IPv4-runtime-only.
+
+  **`Gm<A>` engine extraction deferred to Phase 4.** §6's standalone `Gm<A>` engine +
+  `GmCodec` adapter (rename `igmp/`→`gm/`) is *not* done in Phase 2. Extracting the shared
+  membership engine with only the IGMP codec present designs the engine/codec seam blind;
+  MLD is the second implementor that validates it, so the extraction lands in Phase 4
+  alongside `Gm<Ipv6>`/MLD. Through Phase 2/3 the membership FSM stays as `impl<A> Pim<A>`
+  methods (already `A`-generic after 2b.3), which is all the flip needs.
 
 **Supervisor deferral.** The standalone `PimSupervisor` (§4.1) moves to the start of
 Phase 3: extracting it now — with only IPv4 at runtime and no `Pim<Ipv6>` to route to — is
