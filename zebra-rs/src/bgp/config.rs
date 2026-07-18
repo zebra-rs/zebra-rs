@@ -2937,18 +2937,21 @@ fn config_add_path(bgp: &mut Bgp, mut args: Args, op: ConfigOp) -> Option<()> {
     Some(())
 }
 
+/// `set/delete router bgp neighbor <addr> afi-safi <name>
+/// graceful-restart enabled <bool>` (RFC 4724). `enabled` is a boolean
+/// leaf, so honor the value — `enabled false` must NOT enable GR, which
+/// the old `op.is_set()`-only check got wrong. On enable, store the
+/// default Restart Time in seconds ([`GR_RESTART_TIME_DEFAULT`]); the
+/// old code stored a bare `1`, which the OPEN advertised verbatim, so
+/// the peer's helper flushed retained routes after ~1 s and graceful
+/// restart provided no forwarding continuity (review finding #15).
 fn config_restart(bgp: &mut Bgp, mut args: Args, op: ConfigOp) -> Option<()> {
     let addr = args.addr()?;
     let afi_safi: AfiSafi = args.afi_safi()?;
+    let enable = op.is_set() && args.boolean()?;
     let peer = bgp.peers.get_mut(&addr)?;
-
-    if op.is_set() {
-        let config = peer.config.sub.entry(afi_safi).or_default();
-        config.graceful_restart = Some(1);
-    } else {
-        let config = peer.config.sub.entry(afi_safi).or_default();
-        config.graceful_restart = None;
-    }
+    let config = peer.config.sub.entry(afi_safi).or_default();
+    config.graceful_restart = enable.then_some(super::peer::GR_RESTART_TIME_DEFAULT);
     Some(())
 }
 
