@@ -1419,6 +1419,35 @@ impl SidLabelValue {
             Index(v) => *v,
         }
     }
+
+    /// RFC 8667 §2.1.1.1 / §2.2.1: in the Prefix-/Adj-/LAN-Adj-SID
+    /// sub-TLVs the V/L flags are authoritative for the SID form —
+    /// V=L=1 is a 3-octet label, V=L=0 a 4-octet index, and any other
+    /// combination is invalid. A flag/width mismatch is an error (the
+    /// registry degrades the sub-TLV to Unknown) rather than a silent
+    /// reinterpretation of an index as a label or vice versa. The
+    /// width-by-length `parse_be` remains for the SID/Label sub-TLV of
+    /// Binding TLV 149, where RFC 8667 §2.3 keys the form on the
+    /// length alone.
+    pub fn parse_be_flags(input: &[u8], v_flag: bool, l_flag: bool) -> IResult<&[u8], Self> {
+        match (v_flag, l_flag) {
+            (true, true) if input.len() == 3 => {
+                let (input, label) = be_u24(input)?;
+                Ok((
+                    input,
+                    SidLabelValue::Label(label & SidLabelValue::LABEL_MASK),
+                ))
+            }
+            (false, false) if input.len() == 4 => {
+                let (input, index) = be_u32(input)?;
+                Ok((input, SidLabelValue::Index(index)))
+            }
+            _ => Err(Err::Error(nom::error::make_error(
+                input,
+                nom::error::ErrorKind::Verify,
+            ))),
+        }
+    }
 }
 
 impl ParseBe<SidLabelValue> for SidLabelValue {

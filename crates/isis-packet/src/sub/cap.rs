@@ -123,7 +123,9 @@ impl TlvEmitter for IsisSubSegmentRoutingCap {
 
     fn emit(&self, buf: &mut BytesMut) {
         buf.put_u8(self.flags.into());
-        buf.put(&u32_u8_3(self.range)[..]);
+        // Range is a 24-bit wire field: saturate instead of letting
+        // u32_u8_3 silently drop the high bits of an over-large range.
+        buf.put(&u32_u8_3(self.range.min(0x00FF_FFFF))[..]);
         self.sid_label.emit(buf);
     }
 }
@@ -189,7 +191,8 @@ impl TlvEmitter for IsisSubSegmentRoutingLB {
 
     fn emit(&self, buf: &mut BytesMut) {
         buf.put_u8(self.flags);
-        buf.put(&u32_u8_3(self.range)[..]);
+        // See IsisSubSegmentRoutingCap — saturate the 24-bit range.
+        buf.put(&u32_u8_3(self.range.min(0x00FF_FFFF))[..]);
         self.sid_label.emit(buf);
     }
 }
@@ -711,6 +714,21 @@ mod tests {
         assert_eq!(emitted, 0x01);
         let emitted: u8 = RouterCapFlags::new().with_d_flag(true).into();
         assert_eq!(emitted, 0x02);
+    }
+
+    /// Follow-up #3: the SRGB/SRLB range is a 24-bit wire field — an
+    /// over-large u32 saturates instead of wrapping to garbage.
+    #[test]
+    fn srgb_range_saturates_at_24_bits() {
+        let cap = IsisSubSegmentRoutingCap {
+            flags: SegmentRoutingCapFlags::from(0),
+            range: 0x0100_0001, // 2^24 + 1 would wrap to 1
+            sid_label: SidLabelTlv::Label(16000),
+        };
+        let mut buf = BytesMut::new();
+        cap.emit(&mut buf);
+        // Flags(1), then the saturated 24-bit range.
+        assert_eq!(&buf[1..4], &[0xFF, 0xFF, 0xFF]);
     }
 
     #[test]

@@ -939,11 +939,22 @@ impl AdjSidFlags {
     }
 }
 
-#[derive(Debug, NomBE, Clone, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct IsisSubAdjSid {
     pub flags: AdjSidFlags,
     pub weight: u8,
     pub sid: SidLabelValue,
+}
+
+impl ParseBe<IsisSubAdjSid> for IsisSubAdjSid {
+    fn parse_be(input: &[u8]) -> IResult<&[u8], Self> {
+        let (input, flags) = AdjSidFlags::parse_be(input)?;
+        let (input, weight) = be_u8(input)?;
+        // RFC 8667 §2.2.1: the V/L flags decide the SID form — see
+        // `SidLabelValue::parse_be_flags`.
+        let (input, sid) = SidLabelValue::parse_be_flags(input, flags.v_flag(), flags.l_flag())?;
+        Ok((input, Self { flags, weight, sid }))
+    }
 }
 
 impl TlvEmitter for IsisSubAdjSid {
@@ -956,18 +967,42 @@ impl TlvEmitter for IsisSubAdjSid {
     }
 
     fn emit(&self, buf: &mut BytesMut) {
-        buf.put_u8(self.flags.into());
+        // Derive V/L from the SID form so the emitted flags can never
+        // disagree with the width that follows (see IsisSubPrefixSid).
+        let flags = match self.sid {
+            SidLabelValue::Label(_) => self.flags.with_v_flag(true).with_l_flag(true),
+            SidLabelValue::Index(_) => self.flags.with_v_flag(false).with_l_flag(false),
+        };
+        buf.put_u8(flags.into());
         buf.put_u8(self.weight);
         self.sid.emit(buf);
     }
 }
 
-#[derive(Debug, NomBE, Clone, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct IsisSubLanAdjSid {
     pub flags: AdjSidFlags,
     pub weight: u8,
     pub system_id: IsisSysId,
     pub sid: SidLabelValue,
+}
+
+impl ParseBe<IsisSubLanAdjSid> for IsisSubLanAdjSid {
+    fn parse_be(input: &[u8]) -> IResult<&[u8], Self> {
+        let (input, flags) = AdjSidFlags::parse_be(input)?;
+        let (input, weight) = be_u8(input)?;
+        let (input, system_id) = IsisSysId::parse_be(input)?;
+        let (input, sid) = SidLabelValue::parse_be_flags(input, flags.v_flag(), flags.l_flag())?;
+        Ok((
+            input,
+            Self {
+                flags,
+                weight,
+                system_id,
+                sid,
+            },
+        ))
+    }
 }
 
 impl TlvEmitter for IsisSubLanAdjSid {
@@ -980,7 +1015,12 @@ impl TlvEmitter for IsisSubLanAdjSid {
     }
 
     fn emit(&self, buf: &mut BytesMut) {
-        buf.put_u8(self.flags.into());
+        // Derive V/L from the SID form (see IsisSubAdjSid).
+        let flags = match self.sid {
+            SidLabelValue::Label(_) => self.flags.with_v_flag(true).with_l_flag(true),
+            SidLabelValue::Index(_) => self.flags.with_v_flag(false).with_l_flag(false),
+        };
+        buf.put_u8(flags.into());
         buf.put_u8(self.weight);
         buf.put(&self.system_id.id[..]);
         self.sid.emit(buf);
@@ -1118,6 +1158,29 @@ impl TlvEmitter for IsisSubSrv6LanEndXSid {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Follow-up #1 (Adj-SID flavor): the V/L flags are authoritative
+    /// for the SID form — a flag/width mismatch degrades to Unknown
+    /// instead of misreading an index as a label.
+    #[test]
+    fn adj_sid_width_follows_v_l_flags() {
+        // V|L (0x30) claiming a label but carrying 4 SID octets.
+        let raw = [31u8, 6, 0x30, 0, 0, 0, 0, 100];
+        let (_, sub) = IsisSubTlv::parse_subs(&raw).expect("parse");
+        assert!(matches!(sub, IsisSubTlv::Unknown(_)));
+
+        // The conformant label form round-trips.
+        let label = IsisSubAdjSid {
+            flags: AdjSidFlags::from(0x30),
+            weight: 1,
+            sid: SidLabelValue::Label(16001),
+        };
+        let mut buf = BytesMut::new();
+        IsisSubTlv::AdjSid(label.clone()).emit(&mut buf);
+        let (rest, parsed) = IsisSubTlv::parse_subs(&buf).expect("re-parse");
+        assert!(rest.is_empty());
+        assert_eq!(parsed, IsisSubTlv::AdjSid(label));
+    }
 
     /// Finding #14: RFC 9479 §4.2 mask lengths are actual octet counts
     /// (0-8), L-flag or not. The parser used to force L=1 masks to
