@@ -59,8 +59,16 @@ impl Pim<Ipv6> {
             .set(show_pim_interface)
             .path("/show/pim/neighbor")
             .set(show_pim_neighbor)
+            .path("/show/pim/upstream")
+            .set(show_pim_upstream)
             .path("/show/pim/mld/groups")
             .set(show_igmp_groups)
+            // `show pim ipv6 mroute`: the parent strips the `ipv6`
+            // segment (`/show/pim/ipv6/mroute` → `/show/pim/mroute`), so
+            // unlike the v4 top-level `show mroute` the v6 form is under
+            // the `pim` container.
+            .path("/show/pim/mroute")
+            .set(show_mroute)
             .map();
     }
 }
@@ -346,7 +354,11 @@ struct UpstreamBrief {
     uptime: String,
 }
 
-fn show_pim_upstream(pim: &Pim, _args: Args, json: bool) -> Result<String, std::fmt::Error> {
+fn show_pim_upstream<A: PimAf>(
+    pim: &Pim<A>,
+    _args: Args,
+    json: bool,
+) -> Result<String, std::fmt::Error> {
     let mut rows: Vec<UpstreamBrief> = vec![];
 
     for (key, entry) in pim.tib.iter() {
@@ -540,7 +552,7 @@ struct MrouteBrief {
     uptime: String,
 }
 
-fn show_mroute(pim: &Pim, _args: Args, json: bool) -> Result<String, std::fmt::Error> {
+fn show_mroute<A: PimAf>(pim: &Pim<A>, _args: Args, json: bool) -> Result<String, std::fmt::Error> {
     let mut rows: Vec<MrouteBrief> = vec![];
 
     for (key, entry) in pim.tib.iter() {
