@@ -20,6 +20,7 @@ use pim_packet::{
 use super::af::PimAf;
 use super::inst::{Pim, PimSend};
 use super::ipv4::Ipv4;
+use crate::pim_trace;
 
 /// BSM origination period at the elected BSR (RFC 5059 §5).
 const BS_PERIOD: Duration = Duration::from_secs(60);
@@ -170,7 +171,7 @@ impl<A: PimAf> Pim<A> {
                 // claims first when several start together.
                 let delay = Duration::from_millis(3000 + (255 - priority) as u64 * 20);
                 self.bsr.role = Some(BsrRole::Pending { until: now + delay });
-                tracing::info!("pim: candidate-BSR pending election");
+                pim_trace!(self.tracing, Bsr, "pim: candidate-BSR pending election");
             }
             (None, role) if role != BsrRole::None => {
                 if role == BsrRole::Elected {
@@ -179,7 +180,7 @@ impl<A: PimAf> Pim<A> {
                     self.bsr_rp_set_flush();
                 }
                 self.bsr.role = Some(BsrRole::None);
-                tracing::info!("pim: candidate-BSR disabled");
+                pim_trace!(self.tracing, Bsr, "pim: candidate-BSR disabled");
             }
             _ => {}
         }
@@ -258,7 +259,9 @@ impl<A: PimAf> Pim<A> {
         // Preferred (or refreshing) BSR: adopt.
         let new_bsr = self.bsr.elected != Some(candidate);
         if new_bsr {
-            tracing::info!(
+            pim_trace!(
+                self.tracing,
+                Bsr,
                 "pim: elected BSR is {} (priority {})",
                 bsr,
                 bsm.bsr_priority
@@ -366,7 +369,13 @@ impl<A: PimAf> Pim<A> {
             changed = true;
         }
         if changed {
-            tracing::info!("pim: C-RP {} registered by {} at the BSR", rp, src);
+            pim_trace!(
+                self.tracing,
+                Bsr,
+                "pim: C-RP {} registered by {} at the BSR",
+                rp,
+                src
+            );
             self.rp_reevaluate();
             // Push the updated RP-set out promptly instead of waiting
             // for the periodic BSM.
@@ -504,7 +513,13 @@ impl<A: PimAf> Pim<A> {
             self.bsr.role = Some(BsrRole::Elected);
             self.bsr.elected = Some((priority, addr));
             self.bsr.bsm_expires = None;
-            tracing::info!("pim: elected BSR (self, {} priority {})", addr, priority);
+            pim_trace!(
+                self.tracing,
+                Bsr,
+                "pim: elected BSR (self, {} priority {})",
+                addr,
+                priority
+            );
             // Absorb our own candidate-RP first so the very first BSM
             // already carries it.
             if self.bsr_config.crp().is_some() {
@@ -526,7 +541,7 @@ impl<A: PimAf> Pim<A> {
         if let Some(t) = self.bsr.bsm_expires
             && t <= now
         {
-            tracing::info!("pim: elected BSR timed out");
+            pim_trace!(self.tracing, Bsr, "pim: elected BSR timed out");
             self.bsr.bsm_expires = None;
             self.bsr.elected = None;
             if let Some(old) = self.bsr.rpf_target.take() {

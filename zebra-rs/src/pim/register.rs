@@ -20,6 +20,7 @@ use super::af::PimAf;
 use super::inst::{Pim, PimSend};
 use super::mroute::{PimForwardingPlane, Upcall};
 use super::tib::{JoinState, KEEPALIVE_PERIOD, RegState, SgKey};
+use crate::pim_trace;
 
 /// Register suppression: how long a Register-Stop silences the DR.
 const REGISTER_SUPPRESS: Duration = Duration::from_secs(55);
@@ -53,7 +54,12 @@ impl<A: PimAf> Pim<A> {
         let entry = self.tib.get_mut(&key).unwrap();
         if entry.reg_state == RegState::NoInfo {
             entry.reg_state = RegState::Join;
-            tracing::info!("pim: {} registering toward the RP (FHR)", key);
+            pim_trace!(
+                self.tracing,
+                Register,
+                "pim: {} registering toward the RP (FHR)",
+                key
+            );
         }
     }
 
@@ -159,7 +165,12 @@ impl<A: PimAf> Pim<A> {
                 entry.reg_state = RegState::Prune {
                     until: Instant::now() + REGISTER_SUPPRESS,
                 };
-                tracing::info!("pim: {} register suppressed (Register-Stop)", key);
+                pim_trace!(
+                    self.tracing,
+                    Register,
+                    "pim: {} register suppressed (Register-Stop)",
+                    key
+                );
                 self.tib_update(key);
             }
             RegState::Prune { .. } => {
@@ -203,7 +214,12 @@ impl<A: PimAf> Pim<A> {
                 RegState::JoinPending { .. } => {
                     if let Some(entry) = self.tib.get_mut(&key) {
                         entry.reg_state = RegState::Join;
-                        tracing::info!("pim: {} register probe unanswered — registering", key);
+                        pim_trace!(
+                            self.tracing,
+                            Register,
+                            "pim: {} register probe unanswered — registering",
+                            key
+                        );
                     }
                     self.tib_update(key);
                 }

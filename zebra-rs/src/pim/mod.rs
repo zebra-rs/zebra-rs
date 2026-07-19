@@ -29,4 +29,5 @@ pub mod rpf;
 pub mod show;
 pub mod socket;
 pub mod tib;
+pub mod tracing;
 pub mod vrf;

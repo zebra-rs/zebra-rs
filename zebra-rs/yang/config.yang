@@ -109,6 +109,10 @@ module config {
     prefix zitr;
   }
 
+  import zebra-pim-tracing {
+    prefix zptr;
+  }
+
   import zebra-bgp-color-policy {
     prefix zbcp;
   }

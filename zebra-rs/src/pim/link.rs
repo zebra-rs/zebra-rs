@@ -6,6 +6,7 @@ use std::collections::BTreeMap;
 use rand::RngExt;
 
 use crate::context::Timer;
+use crate::pim_trace;
 use crate::rib::Link;
 use crate::rib::link::LinkAddr;
 
@@ -15,6 +16,7 @@ use super::inst::{Message, Pim};
 use super::ipv4::Ipv4;
 use super::mroute::PimForwardingPlane;
 use super::neighbor::Neighbor;
+use super::tracing::TraceCategory;
 
 pub const PIM_HELLO_PERIOD: u16 = 30;
 pub const PIM_DEFAULT_DR_PRIORITY: u32 = 1;
@@ -159,7 +161,12 @@ impl<A: PimAf> Pim<A> {
             gm.enable_if(ifindex, std::time::Instant::now());
         }
         if let Some(link) = self.links.get(&ifindex) {
-            tracing::info!("igmp: interface {} enabled", link.name);
+            pim_trace!(
+                self.tracing,
+                Interface,
+                "igmp: interface {} enabled",
+                link.name
+            );
         }
     }
 
@@ -171,7 +178,12 @@ impl<A: PimAf> Pim<A> {
             None => vec![],
         };
         if let Some(link) = self.links.get(&ifindex) {
-            tracing::info!("igmp: interface {} disabled", link.name);
+            pim_trace!(
+                self.tracing,
+                Interface,
+                "igmp: interface {} disabled",
+                link.name
+            );
         }
         self.apply_gm_events(events);
     }
@@ -228,13 +240,19 @@ impl<A: PimAf> Pim<A> {
             self.link_config(&link.name).hello_interval()
         };
         A::join_pim_if(&self.sock, ifindex);
-        self.fp.vif_add(ifindex);
+        self.fp
+            .vif_add(ifindex, self.tracing.should_trace(TraceCategory::Mroute));
         let timer = hello_timer(&self.tx, ifindex, interval);
         let link = self.links.get_mut(&ifindex).unwrap();
         link.enabled = true;
         link.gen_id = rand::rng().random();
         link.hello_timer = Some(timer);
-        tracing::info!("pim: interface {} enabled", link.name);
+        pim_trace!(
+            self.tracing,
+            Interface,
+            "pim: interface {} enabled",
+            link.name
+        );
         // Triggered hello so neighbors learn us without waiting a
         // full hello period, then elect (initially ourselves).
         self.hello_send(ifindex);
@@ -252,11 +270,17 @@ impl<A: PimAf> Pim<A> {
         link.hello_timer = None;
         link.nbrs.clear();
         link.dr = None;
-        tracing::info!("pim: interface {} disabled", link.name);
+        pim_trace!(
+            self.tracing,
+            Interface,
+            "pim: interface {} disabled",
+            link.name
+        );
         // Drop every TIB facet on this interface, then the VIF (MFC
         // entries referencing it were just rewritten).
         self.tib_iface_purge(ifindex);
-        self.fp.vif_del(ifindex);
+        self.fp
+            .vif_del(ifindex, self.tracing.should_trace(TraceCategory::Mroute));
     }
 
     /// Effective config for an interface: the configured entry, or
@@ -296,7 +320,9 @@ impl<A: PimAf> Pim<A> {
         }
         let dr = Some(best.1);
         if link.dr != dr {
-            tracing::info!(
+            pim_trace!(
+                self.tracing,
+                Interface,
                 "pim: interface {} DR changed {:?} -> {:?}",
                 link.name,
                 link.dr,

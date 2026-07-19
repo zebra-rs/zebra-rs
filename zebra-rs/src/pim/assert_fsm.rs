@@ -20,6 +20,7 @@ use super::inst::{Pim, PimSend};
 use super::ipv4::Ipv4;
 use super::macros::inherited_olist;
 use super::tib::SgKey;
+use crate::pim_trace;
 
 /// Assert Time (RFC 7761 §4.11): loser state lifetime.
 pub const ASSERT_TIME: Duration = Duration::from_secs(180);
@@ -145,7 +146,9 @@ impl<A: PimAf> Pim<A> {
                         expires: now + ASSERT_REFRESH,
                     },
                 );
-                tracing::info!(
+                pim_trace!(
+                    self.tracing,
+                    Assert,
                     "pim: {} assert winner on {} (data trigger)",
                     key,
                     self.ifname(ifindex)
@@ -214,7 +217,9 @@ impl<A: PimAf> Pim<A> {
                             expires: now + ASSERT_TIME,
                         },
                     );
-                    tracing::info!(
+                    pim_trace!(
+                        self.tracing,
+                        Assert,
                         "pim: {} assert loser on {} (winner {})",
                         key,
                         self.ifname(ifindex),
@@ -232,7 +237,13 @@ impl<A: PimAf> Pim<A> {
                         },
                     );
                     if current.is_none() {
-                        tracing::info!("pim: {} assert winner on {}", key, self.ifname(ifindex));
+                        pim_trace!(
+                            self.tracing,
+                            Assert,
+                            "pim: {} assert winner on {}",
+                            key,
+                            self.ifname(ifindex)
+                        );
                     }
                     self.assert_send(key, ifindex, &mine);
                 }
@@ -259,7 +270,9 @@ impl<A: PimAf> Pim<A> {
                             expires: now + ASSERT_REFRESH,
                         },
                     );
-                    tracing::info!(
+                    pim_trace!(
+                        self.tracing,
+                        Assert,
                         "pim: {} re-asserting on {} against {}",
                         key,
                         self.ifname(ifindex),
@@ -311,7 +324,9 @@ impl<A: PimAf> Pim<A> {
                     if let Some(entry) = self.tib.get_mut(&key) {
                         entry.asserts.remove(&ifindex);
                     }
-                    tracing::info!(
+                    pim_trace!(
+                        self.tracing,
+                        Assert,
                         "pim: {} assert expired on {} — resuming forwarding",
                         key,
                         self.ifname(ifindex)
