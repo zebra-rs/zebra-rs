@@ -3,6 +3,10 @@
 //! the interface through [`Pim::reconcile_by_name`], so enable /
 //! disable is independent of config-line and link-event ordering.
 
+use std::net::IpAddr;
+
+use ipnet::IpNet;
+
 use crate::config::{Args, ConfigOp};
 
 use super::af::PimAf;
@@ -81,6 +85,10 @@ impl Pim<Ipv6> {
             "/router/pim/interface/mld/query-max-response-time",
             config_igmp_query_max_resp,
         );
+        // Static RP (ASM) — the same generic handlers the IPv4 surface
+        // uses; the parent strips the `ipv6` segment before forwarding.
+        self.callback_add("/router/pim/rp/static", config_rp_static);
+        self.callback_add("/router/pim/rp/static/group", config_rp_static_group);
     }
 }
 
@@ -193,13 +201,13 @@ fn config_igmp_query_interval<A: PimAf>(
     Some(())
 }
 
-fn config_rp_static(pim: &mut Pim, mut args: Args, op: ConfigOp) -> Option<()> {
-    let address = args.v4addr()?;
+fn config_rp_static<A: PimAf>(pim: &mut Pim<A>, mut args: Args, op: ConfigOp) -> Option<()> {
+    let address = A::from_ip(args.string()?.parse::<IpAddr>().ok()?)?;
     if op.is_set() {
         pim.rp_set
             .statics
             .entry(address)
-            .or_insert(Ipv4::DEFAULT_RP_RANGE);
+            .or_insert(A::DEFAULT_RP_RANGE);
     } else {
         pim.rp_set.statics.remove(&address);
     }
@@ -207,13 +215,13 @@ fn config_rp_static(pim: &mut Pim, mut args: Args, op: ConfigOp) -> Option<()> {
     Some(())
 }
 
-fn config_rp_static_group(pim: &mut Pim, mut args: Args, op: ConfigOp) -> Option<()> {
-    let address = args.v4addr()?;
+fn config_rp_static_group<A: PimAf>(pim: &mut Pim<A>, mut args: Args, op: ConfigOp) -> Option<()> {
+    let address = A::from_ip(args.string()?.parse::<IpAddr>().ok()?)?;
     if op.is_set() {
-        let range = args.string()?.parse().ok()?;
+        let range = A::prefix_from_ipnet(args.string()?.parse::<IpNet>().ok()?)?;
         pim.rp_set.statics.insert(address, range);
     } else if let Some(range) = pim.rp_set.statics.get_mut(&address) {
-        *range = Ipv4::DEFAULT_RP_RANGE;
+        *range = A::DEFAULT_RP_RANGE;
     }
     pim.rp_reevaluate();
     Some(())

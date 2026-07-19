@@ -105,6 +105,12 @@ impl PimAf for Ipv6 {
         o[0] == 0xff && (o[1] & 0x0f) <= 0x02
     }
 
+    fn is_link_local(a: Ipv6Addr) -> bool {
+        // fe80::/10 — the unicast link-local scope.
+        let o = a.octets();
+        o[0] == 0xfe && (o[1] & 0xc0) == 0x80
+    }
+
     fn prefix_new(addr: Ipv6Addr, len: u8) -> Option<Ipv6Net> {
         Ipv6Net::new(addr, len).ok()
     }

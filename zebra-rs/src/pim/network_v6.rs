@@ -62,9 +62,13 @@ pub async fn read_packet_v6(sock: Arc<AsyncFd<Socket>>, tx: UnboundedSender<Mess
                 let dst: Ipv6Addr = Ipv6Addr::from(pktinfo.ipi6_addr.s6_addr);
                 let ifindex = pktinfo.ipi6_ifindex;
 
-                // RFC 7761 §4.3.1: PIMv6 control is link-local sourced.
-                if !is_link_local(&src) {
-                    tracing::debug!("pim6: non-link-local source {src} dropped");
+                // RFC 7761 §4.3.1: link-local *multicast* PIM control
+                // (Hello / Join-Prune / Assert to ff02::d) must be
+                // link-local sourced. Unicast Register / Register-Stop
+                // arrive from a routable (global) source — exempt them by
+                // gating the check on a multicast destination.
+                if dst.is_multicast() && !is_link_local(&src) {
+                    tracing::debug!("pim6: non-link-local multicast source {src} dropped");
                     return Err(ErrorKind::InvalidData.into());
                 }
 

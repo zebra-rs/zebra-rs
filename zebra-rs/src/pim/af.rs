@@ -94,6 +94,12 @@ pub trait PimAf: Copy + Eq + Ord + Hash + Debug + Send + Sync + Sized + 'static 
     /// scopes for IPv6).
     fn is_reserved_group(a: Self::Addr) -> bool;
 
+    /// Whether `a` is a link-local unicast address (`169.254.0.0/16` /
+    /// `fe80::/10`). A unicast PIM message (Register / Register-Stop) must
+    /// not be sourced from one — it has to be domain-routable so the RP
+    /// can reply. See [`Pim::unicast_source`](super::inst::Pim).
+    fn is_link_local(a: Self::Addr) -> bool;
+
     /// Build a prefix from a network address and length; `None` if the
     /// length is invalid for the family.
     fn prefix_new(addr: Self::Addr, len: u8) -> Option<Self::Prefix>;

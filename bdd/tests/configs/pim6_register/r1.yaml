@@ -1,0 +1,18 @@
+interface:
+- if-name: eth1
+  ipv6:
+    address: 2001:db8:1::1/64
+- if-name: eth2
+  ipv6:
+    address: 2001:db8:12::1/64
+router:
+  pim:
+    ipv6:
+      rp:
+        static:
+        - address: 2001:db8:12::2
+      interface:
+      - if-name: eth1
+        dr-priority: 1
+      - if-name: eth2
+        dr-priority: 1
