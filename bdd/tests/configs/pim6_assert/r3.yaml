@@ -1,0 +1,25 @@
+interface:
+- if-name: eth1
+  ipv6:
+    address: 2001:db8:62::1/64
+- if-name: eth2
+  ipv6:
+    address: 2001:db8:63::1/64
+router:
+  static:
+    ipv6:
+      route:
+      # RPF toward the source is pinned at r1 (2001:db8:62::2, matched via
+      # r1's Hello secondary address), so r3's (S,G) Join goes to r1 and
+      # makes r1 forward onto swB — the non-DR forwarder the assert needs.
+      - prefix: 2001:db8:60::/64
+        nexthop:
+        - address: 2001:db8:62::2
+  pim:
+    ipv6:
+      interface:
+      - if-name: eth1
+        dr-priority: 1
+      - if-name: eth2
+        mld:
+          enabled: true

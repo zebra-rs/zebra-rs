@@ -61,6 +61,8 @@ impl Pim<Ipv6> {
             .set(show_pim_neighbor)
             .path("/show/pim/upstream")
             .set(show_pim_upstream)
+            .path("/show/pim/assert")
+            .set(show_pim_assert)
             .path("/show/pim/mld/groups")
             .set(show_igmp_groups)
             // `show pim ipv6 mroute`: the parent strips the `ipv6`
@@ -455,7 +457,11 @@ struct AssertBrief {
     expires: u64,
 }
 
-fn show_pim_assert(pim: &Pim, _args: Args, json: bool) -> Result<String, std::fmt::Error> {
+fn show_pim_assert<A: PimAf>(
+    pim: &Pim<A>,
+    _args: Args,
+    json: bool,
+) -> Result<String, std::fmt::Error> {
     let now = Instant::now();
     let mut rows: Vec<AssertBrief> = vec![];
     for (key, entry) in pim.tib.iter() {
