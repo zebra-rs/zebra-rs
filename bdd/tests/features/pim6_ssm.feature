@@ -50,6 +50,12 @@ Feature: PIMv6 SSM (S,G) forwarding end to end across two routers
     When I spawn "timeout 150 python3 tests/scripts/ssm_recv6.py ff3e::1 2001:db8:14::2 eth6 5001 /tmp/pim6_ssm_rx" in namespace "h2"
     Then show command "show pim ipv6 mld groups" in namespace "r2" should eventually contain "ff3e::1"
 
+    # PIMv6 control-plane view of the (S,G) tree: r2 (LHR) Joined the SPT
+    # upstream, and both routers show the (S,G) in the PIMv6 mroute table.
+    And show command "show pim ipv6 upstream" in namespace "r2" should eventually contain "Joined"
+    And show command "show pim ipv6 mroute" in namespace "r2" should eventually contain "ff3e::1"
+    And show command "show pim ipv6 mroute" in namespace "r1" should eventually contain "ff3e::1"
+
     # Kernel MRT6 MFC on both routers, with the expected IIF/OIF split.
     # r1 learned the (S,G) from r2's PIMv6 Join — no MLD on that path.
     And command "ip -6 mroute show" in namespace "r1" should eventually contain "Iif: eth3"

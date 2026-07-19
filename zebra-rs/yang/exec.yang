@@ -1055,6 +1055,14 @@ module exec {
           ext:help "PIMv6 neighbor";
           presence "PIMv6 neighbor";
         }
+        container upstream {
+          ext:help "PIMv6 upstream (S,G) join state";
+          presence "PIMv6 upstream";
+        }
+        container mroute {
+          ext:help "PIMv6 multicast routing table (MRT6 MFC)";
+          presence "PIMv6 mroute";
+        }
         container mld {
           ext:help "MLD membership state";
           container groups {
