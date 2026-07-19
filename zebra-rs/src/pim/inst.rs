@@ -36,7 +36,7 @@ use super::ipv6::Ipv6;
 use super::link::{LinkConfig, PIM_OVERRIDE_INTERVAL_MSEC, PIM_PROPAGATION_DELAY_MSEC, PimLink};
 use super::mroute::{Mrt4, Mrt6, Upcall};
 use super::network::{mroute_read, read_packet, write_packet};
-use super::network_v6::{read_packet_v6, write_packet_v6};
+use super::network_v6::{mroute_read_v6, read_packet_v6, write_packet_v6};
 use super::rp::RpSet;
 use super::rpf::RpfEntry;
 use super::tib::{SgKey, TibEntry};
@@ -259,6 +259,12 @@ impl Pim<Ipv6> {
         });
         // MLD membership engine over its own ICMPv6 socket.
         let gm = Gm::new(Box::new(MldCodec::new(mld_sock, tx.clone())));
+        // MRT6 upcalls (NOCACHE / WHOLEPKT / …) drive the same typed FSM.
+        let mroute_sock = fp.sock.clone();
+        let mroute_tx = tx.clone();
+        let mroute_read_task = Task::spawn(async move {
+            mroute_read_v6(mroute_sock, mroute_tx).await;
+        });
 
         let mut pim = Self {
             tx,
@@ -292,8 +298,7 @@ impl Pim<Ipv6> {
             tracing: PimTracing::default(),
             _read_task: read_task,
             _write_task: write_task,
-            // No kernel mroute read task in Phase 3 (Mrt6 is a stub).
-            _mroute_read_task: Task::spawn(async {}),
+            _mroute_read_task: mroute_read_task,
         };
         pim.callback_build();
         pim.show_build();

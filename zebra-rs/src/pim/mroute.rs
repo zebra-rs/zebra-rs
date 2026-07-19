@@ -346,25 +346,264 @@ impl PimForwardingPlane<Ipv4> for Mrt4 {
     }
 }
 
-/// The IPv6 multicast-forwarding plane. Phase 3 (PIMv6 adjacency) uses
-/// a no-op stub so `Pim<Ipv6>` can run without forwarding; the real
-/// MRT6 / MIF / MFC datapath over `linux/mroute6.h` lands in Phase 5.
-pub struct Mrt6;
+// linux/mroute6.h — MRT6_* sockopts at level IPPROTO_IPV6 (same
+// numeric base as MRT_*, but a distinct option namespace).
+const MRT6_INIT: c_int = 200;
+const MRT6_ADD_MIF: c_int = 202;
+const MRT6_DEL_MIF: c_int = 203;
+const MRT6_ADD_MFC: c_int = 204;
+const MRT6_DEL_MFC: c_int = 205;
+const MRT6_PIM: c_int = 208;
+const MRT6_TABLE: c_int = 209;
+
+const MIFF_REGISTER: u8 = 0x1;
+/// MLD/MRT6 supports 32 MIFs.
+const MAXMIFS: usize = 32;
+/// The register MIF: slot 0, kernel materializes `pim6reg`.
+const REG_MIF: u16 = 0;
+
+const MRT6MSG_NOCACHE: u8 = 1;
+const MRT6MSG_WRONGMIF: u8 = 2;
+const MRT6MSG_WHOLEPKT: u8 = 3;
+const MRT6MSG_WRMIFWHOLE: u8 = 4;
+
+#[repr(C)]
+struct Mif6ctl {
+    mif6c_mifi: u16,
+    mif6c_flags: u8,
+    vifc_threshold: u8,
+    mif6c_pifi: u16,
+    vifc_rate_limit: u32,
+}
+
+/// `struct if_set` — a MIF bitmap (`IF_SETSIZE` = 256 bits / `if_mask`
+/// = u32 ⇒ 8 words).
+#[repr(C)]
+struct IfSet {
+    ifs_bits: [u32; 8],
+}
+
+#[repr(C)]
+struct Mf6cctl {
+    mf6cc_origin: libc::sockaddr_in6,
+    mf6cc_mcastgrp: libc::sockaddr_in6,
+    mf6cc_parent: u16,
+    mf6cc_ifset: IfSet,
+}
+
+fn mrt6_setsockopt<T>(sock: &Socket, opt: c_int, val: &T) -> std::io::Result<()> {
+    let ret = unsafe {
+        libc::setsockopt(
+            sock.as_raw_fd(),
+            libc::IPPROTO_IPV6,
+            opt,
+            val as *const T as *const libc::c_void,
+            std::mem::size_of::<T>() as libc::socklen_t,
+        )
+    };
+    if ret != 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+    Ok(())
+}
+
+/// Build a `sockaddr_in6` naming `addr` (family only; port/scope zero).
+fn sockaddr_in6(addr: Ipv6Addr) -> libc::sockaddr_in6 {
+    let mut sa: libc::sockaddr_in6 = unsafe { std::mem::zeroed() };
+    sa.sin6_family = libc::AF_INET6 as u16;
+    sa.sin6_addr = libc::in6_addr {
+        s6_addr: addr.octets(),
+    };
+    sa
+}
+
+/// The IPv6 multicast-forwarding plane (`linux/mroute6.h`): the ICMPv6
+/// mroute socket, the MIF table and the kernel MFC. Dropping it closes
+/// the socket, running the implicit `MRT6_DONE` cleanup.
+pub struct Mrt6 {
+    pub sock: Arc<AsyncFd<Socket>>,
+    /// ifindex → MIF. Slot 0 stays reserved for the register MIF.
+    mifs: BTreeMap<u32, u16>,
+}
 
 impl PimForwardingPlane<Ipv6> for Mrt6 {
-    fn new(_ctx: &ProtoContext, _table_id: u32) -> std::io::Result<Self> {
-        Ok(Mrt6)
+    fn new(ctx: &ProtoContext, table_id: u32) -> std::io::Result<Self> {
+        // The MRT6 socket is a raw ICMPv6 socket; MRT6_INIT claims the
+        // (per-table) v6 multicast-routing instance.
+        let sock = ctx.raw_socket(Domain::IPV6, Protocol::from(super::socket::IPPROTO_ICMPV6))?;
+        sock.set_nonblocking(true)?;
+        let _ = sock.set_recv_buffer_size(1024 * 1024);
+        if table_id != 0 {
+            mrt6_setsockopt(&sock, MRT6_TABLE, &table_id)?;
+        }
+        let one: c_int = 1;
+        mrt6_setsockopt(&sock, MRT6_INIT, &one)?;
+        if let Err(e) = mrt6_setsockopt(&sock, MRT6_PIM, &one) {
+            tracing::warn!("mroute6: MRT6_PIM failed ({e}); register handling degraded");
+        }
+        // The register MIF (slot 0) — kernel creates `pim6reg`.
+        let mc = Mif6ctl {
+            mif6c_mifi: REG_MIF,
+            mif6c_flags: MIFF_REGISTER,
+            vifc_threshold: 1,
+            mif6c_pifi: 0,
+            vifc_rate_limit: 0,
+        };
+        if let Err(e) = mrt6_setsockopt(&sock, MRT6_ADD_MIF, &mc) {
+            tracing::warn!("mroute6: register MIF add failed ({e}); registers degraded");
+        }
+        Ok(Self {
+            sock: Arc::new(AsyncFd::new(sock)?),
+            mifs: BTreeMap::new(),
+        })
     }
-    fn vif_add(&mut self, _ifindex: u32, _trace: bool) {}
-    fn vif_del(&mut self, _ifindex: u32, _trace: bool) {}
-    fn vif(&self, _ifindex: u32) -> Option<u16> {
-        None
+    fn vif(&self, ifindex: u32) -> Option<u16> {
+        self.mifs.get(&ifindex).copied()
     }
-    fn ifindex_of(&self, _vif: u16) -> Option<u32> {
-        None
+
+    fn ifindex_of(&self, vif: u16) -> Option<u32> {
+        self.mifs
+            .iter()
+            .find(|(_, v)| **v == vif)
+            .map(|(ifindex, _)| *ifindex)
     }
-    fn mfc_add(&self, _src: Ipv6Addr, _grp: Ipv6Addr, _iif: u16, _oifs: &[u16]) {}
-    fn mfc_del(&self, _src: Ipv6Addr, _grp: Ipv6Addr) {}
+
+    fn vif_add(&mut self, ifindex: u32, trace: bool) {
+        if self.mifs.contains_key(&ifindex) {
+            return;
+        }
+        // `mif6c_pifi` is 16-bit; refuse an unrepresentable ifindex
+        // rather than truncate it.
+        if u16::try_from(ifindex).is_err() {
+            tracing::warn!("mroute6: ifindex {ifindex} exceeds 16-bit MIF pifi");
+            return;
+        }
+        let mut mif: u16 = 1;
+        while self.mifs.values().any(|v| *v == mif) {
+            mif += 1;
+        }
+        if mif as usize >= MAXMIFS {
+            tracing::warn!("mroute6: out of MIFs for ifindex {ifindex}");
+            return;
+        }
+        let mc = Mif6ctl {
+            mif6c_mifi: mif,
+            mif6c_flags: 0,
+            vifc_threshold: 1,
+            mif6c_pifi: ifindex as u16,
+            vifc_rate_limit: 0,
+        };
+        match mrt6_setsockopt(self.sock.get_ref(), MRT6_ADD_MIF, &mc) {
+            Ok(()) => {
+                self.mifs.insert(ifindex, mif);
+                if trace {
+                    tracing::info!(
+                        proto = "pim",
+                        category = "mroute",
+                        "mroute6: MIF {mif} added for ifindex {ifindex}"
+                    );
+                }
+            }
+            Err(e) => tracing::warn!("mroute6: MRT6_ADD_MIF ifindex {ifindex} failed: {e}"),
+        }
+    }
+
+    fn vif_del(&mut self, ifindex: u32, trace: bool) {
+        let Some(mif) = self.mifs.remove(&ifindex) else {
+            return;
+        };
+        let mc = Mif6ctl {
+            mif6c_mifi: mif,
+            mif6c_flags: 0,
+            vifc_threshold: 1,
+            mif6c_pifi: ifindex as u16,
+            vifc_rate_limit: 0,
+        };
+        if let Err(e) = mrt6_setsockopt(self.sock.get_ref(), MRT6_DEL_MIF, &mc) {
+            tracing::debug!("mroute6: MRT6_DEL_MIF ifindex {ifindex} failed: {e}");
+        } else if trace {
+            tracing::info!(
+                proto = "pim",
+                category = "mroute",
+                "mroute6: MIF {mif} deleted for ifindex {ifindex}"
+            );
+        }
+    }
+
+    fn mfc_add(&self, src: Ipv6Addr, grp: Ipv6Addr, iif: u16, oifs: &[u16]) {
+        let mut ifset = IfSet {
+            ifs_bits: [0u32; 8],
+        };
+        for oif in oifs {
+            if (*oif as usize) < MAXMIFS && *oif != iif {
+                ifset.ifs_bits[(*oif as usize) >> 5] |= 1u32 << (*oif % 32);
+            }
+        }
+        let mc = Mf6cctl {
+            mf6cc_origin: sockaddr_in6(src),
+            mf6cc_mcastgrp: sockaddr_in6(grp),
+            mf6cc_parent: iif,
+            mf6cc_ifset: ifset,
+        };
+        if let Err(e) = mrt6_setsockopt(self.sock.get_ref(), MRT6_ADD_MFC, &mc) {
+            tracing::warn!("mroute6: MRT6_ADD_MFC ({src},{grp}) failed: {e}");
+        } else {
+            tracing::debug!("mroute6: MFC ({src},{grp}) iif {iif} oifs {oifs:?}");
+        }
+    }
+
+    fn mfc_del(&self, src: Ipv6Addr, grp: Ipv6Addr) {
+        let mc = Mf6cctl {
+            mf6cc_origin: sockaddr_in6(src),
+            mf6cc_mcastgrp: sockaddr_in6(grp),
+            mf6cc_parent: 0,
+            mf6cc_ifset: IfSet {
+                ifs_bits: [0u32; 8],
+            },
+        };
+        if let Err(e) = mrt6_setsockopt(self.sock.get_ref(), MRT6_DEL_MFC, &mc) {
+            tracing::debug!("mroute6: MRT6_DEL_MFC ({src},{grp}) failed: {e}");
+        } else {
+            tracing::debug!("mroute6: MFC ({src},{grp}) deleted");
+        }
+    }
+}
+
+/// Parse one datagram read from the MRT6 socket. `None` for anything
+/// that is not an upcall: `im6_mbz` (the first byte) is zero for a
+/// kernel upcall and a nonzero ICMPv6 type for genuine traffic — there
+/// is no outer header to inspect, so the discriminator differs from the
+/// IPv4 protocol-field trick.
+pub fn parse_upcall_v6(buf: &[u8]) -> Option<Upcall<Ipv6>> {
+    if buf.len() < 40 || buf[0] != 0 {
+        return None;
+    }
+    let kind = match buf[1] {
+        MRT6MSG_NOCACHE => UpcallKind::Nocache,
+        MRT6MSG_WRONGMIF => UpcallKind::WrongVif,
+        MRT6MSG_WHOLEPKT => UpcallKind::WholePkt,
+        MRT6MSG_WRMIFWHOLE => UpcallKind::WrVifWhole,
+        other => {
+            tracing::debug!("mroute6: unknown upcall type {other}");
+            return None;
+        }
+    };
+    let payload = if matches!(kind, UpcallKind::WholePkt | UpcallKind::WrVifWhole) {
+        buf[40..].to_vec()
+    } else {
+        Vec::new()
+    };
+    let mut src = [0u8; 16];
+    let mut grp = [0u8; 16];
+    src.copy_from_slice(&buf[8..24]);
+    grp.copy_from_slice(&buf[24..40]);
+    Some(Upcall {
+        kind,
+        vif: buf[2] as u16 | ((buf[3] as u16) << 8),
+        src: Ipv6Addr::from(src),
+        grp: Ipv6Addr::from(grp),
+        payload,
+    })
 }
 
 #[cfg(test)]
@@ -397,6 +636,48 @@ mod tests {
         assert_eq!(std::mem::offset_of!(Mfcctl, mfcc_pkt_cnt), 44);
         assert_eq!(std::mem::offset_of!(Mfcctl, mfcc_expire), 56);
         assert_eq!(MAXVIFS, 32);
+    }
+
+    // Layout of the hand-declared `linux/mroute6.h` structs.
+    #[test]
+    fn mif6ctl_layout() {
+        assert_eq!(std::mem::size_of::<Mif6ctl>(), 12);
+        assert_eq!(std::mem::offset_of!(Mif6ctl, mif6c_mifi), 0);
+        assert_eq!(std::mem::offset_of!(Mif6ctl, mif6c_flags), 2);
+        assert_eq!(std::mem::offset_of!(Mif6ctl, vifc_threshold), 3);
+        assert_eq!(std::mem::offset_of!(Mif6ctl, mif6c_pifi), 4);
+        assert_eq!(std::mem::offset_of!(Mif6ctl, vifc_rate_limit), 8);
+    }
+
+    #[test]
+    fn mf6cctl_layout() {
+        // `if_set` is 256 bits / 32-bit words = 8 words = 32 bytes.
+        assert_eq!(std::mem::size_of::<IfSet>(), 32);
+        // sockaddr_in6 is 28 bytes; parent follows the two of them, then
+        // the MIF bitmap (4-byte aligned).
+        assert_eq!(std::mem::offset_of!(Mf6cctl, mf6cc_origin), 0);
+        assert_eq!(std::mem::offset_of!(Mf6cctl, mf6cc_mcastgrp), 28);
+        assert_eq!(std::mem::offset_of!(Mf6cctl, mf6cc_parent), 56);
+        assert_eq!(std::mem::offset_of!(Mf6cctl, mf6cc_ifset), 60);
+        assert_eq!(MAXMIFS, 32);
+    }
+
+    #[test]
+    fn parse_upcall_v6_discriminates_and_extracts() {
+        let mut b = [0u8; 40];
+        b[0] = 0; // im6_mbz — zero marks an upcall
+        b[1] = MRT6MSG_NOCACHE;
+        b[2] = 5; // mif
+        b[8..24].copy_from_slice(&"2001:db8::2".parse::<Ipv6Addr>().unwrap().octets());
+        b[24..40].copy_from_slice(&"ff3e::1".parse::<Ipv6Addr>().unwrap().octets());
+        let u = parse_upcall_v6(&b).expect("nocache upcall");
+        assert!(matches!(u.kind, UpcallKind::Nocache));
+        assert_eq!(u.vif, 5);
+        assert_eq!(u.src, "2001:db8::2".parse::<Ipv6Addr>().unwrap());
+        assert_eq!(u.grp, "ff3e::1".parse::<Ipv6Addr>().unwrap());
+        // A genuine ICMPv6 packet has a nonzero type in the first byte.
+        b[0] = 130;
+        assert!(parse_upcall_v6(&b).is_none());
     }
 
     fn upcall_buf(kind: u8, mbz: u8, vif: u16, src: [u8; 4], grp: [u8; 4]) -> [u8; 20] {

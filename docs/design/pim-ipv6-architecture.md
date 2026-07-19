@@ -541,7 +541,7 @@ Each phase is one reviewable PR leaving the tree tested and useful.
 | 3.0 | Extract the shared `Gm<A>` engine + `GmCodec` (rename `igmp/`→`gm/`); the membership transport moves off `Pim<A>` into the engine so `Pim<Ipv6>` needs no IGMP fields. IPv4-only runtime | IPv4 membership BDD unchanged (`pim_igmp`) |
 | 3.1 | **DONE** — `Ipv6` marker + `Mrt6` stub + PIMv6 socket, Hello/neighbor/DR over LL, AF-split spawn of a default-table `Pim<Ipv6>` (`af6_split` forwards config + show; `PimSend.src` for the v6 checksum; generic interface knobs) | `@pim6_adjacency` two-router link-local neighborship passes; IPv4 pim features green |
 | 4 | **DONE** — MLDv1/v2 codec via `Gm<Ipv6>` + TIB bridge (the second `GmCodec`, plugged into the engine from 3.0; `send_query` gained a `src` param for the pinned LL source) | `@pim6_mld` (host MLD join → router learns the group) passes; IPv4 membership green |
-| 5 | `Mrt6` plane + generic RPF + SSM end-to-end | UDPv6 delivery + kernel MIF/MFC asserts (MVP gate) |
+| 5 | **DONE** — real `Mrt6` MRT6/MIF/MFC plane (`mroute_read_v6` upcalls, `parse_upcall_v6`, ABI layout tests) + `jp_send` pins the egress link-local so the v6 (S,G) Join transmits (RPF nexthop = FHR global, matched via the Hello secondary address list) | `@pim6_ssm` two-router MLDv2 → (S,G) → kernel MRT6 MFC → UDPv6 delivery passes live (33 steps); IPv4 pim features green |
 | 6 | Static-RP ASM, IPv6 Register path, SPT | three-router ASM traffic proof |
 | 7 | IPv6 assert + per-VRF `Pim<Ipv6>` | LAN election + VRF isolation BDD |
 | 8 | IPv6 BSR (hash + fragmentation as acceptance criteria) | election/discovery BDD + FRR interop |
@@ -602,7 +602,7 @@ default-table `Pim<Ipv6>` child exactly like a VRF child. This reuses proven mac
 reaches live PIMv6 adjacency with the least churn; the supervisor refactor lands once the
 `(vrf, af)` product makes the parent-instance tree awkward (Phase 7).
 
-### MVP gate — after Phase 5
+### MVP gate — after Phase 5 — **ACHIEVED** (`@pim6_ssm` live)
 
 - MLDv2 INCLUDE report creates IPv6 `(S,G)` state on the DR only.
 - PIMv6 J/P converges across two routers with LL transport and secondary matching.
