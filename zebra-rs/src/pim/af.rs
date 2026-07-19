@@ -121,4 +121,90 @@ pub trait PimAf: Copy + Eq + Ord + Hash + Debug + Send + Sync + Sized + 'static 
     /// Null-Register dummy header). `None` if the inner family does not
     /// match this AF or the header is malformed.
     fn register_inner_sg(data: &[u8]) -> Option<(Self::Addr, Self::Addr)>;
+
+    /// The RFC 2362 §3.7 group-to-RP hash `Value(G, M, C)`, used to break
+    /// ties between candidate RPs of equal longest-match range and equal
+    /// (lowest) priority so every router in the domain converges on the
+    /// same RP for a group. `mask_len` masks the group with the BSR's
+    /// advertised hash-mask length; the highest value wins. IPv4 uses the
+    /// standard 32-bit arithmetic; IPv6 applies the same recurrence over
+    /// the 128-bit masked group / RP XOR-folded to 32 bits (deterministic
+    /// and domain-agreed within zebra-rs).
+    fn bsr_hash(group: Self::Addr, rp: Self::Addr, mask_len: u8) -> u32;
+}
+
+/// The RFC 2362 §3.7 hash recurrence on 32-bit words:
+/// `Value = (1103515245 · ((1103515245·gm + 12345) XOR c) + 12345) mod 2^31`.
+/// `gm` is the masked group (or an XOR-fold of it for IPv6); `c` is the
+/// candidate RP (likewise). Shared by both `PimAf::bsr_hash` impls.
+pub(crate) fn bsr_hash_value(gm: u32, c: u32) -> u32 {
+    1103515245u32
+        .wrapping_mul(1103515245u32.wrapping_mul(gm).wrapping_add(12345) ^ c)
+        .wrapping_add(12345)
+        & 0x7fff_ffff
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::pim::ipv4::Ipv4;
+    use crate::pim::ipv6::Ipv6;
+    use std::net::{Ipv4Addr, Ipv6Addr};
+
+    // Reference values from the RFC 2362 §3.7 recurrence (verified against
+    // an independent Python computation of the formula); pin the exact
+    // arithmetic so a refactor of `bsr_hash_value` is caught.
+    #[test]
+    fn hash_recurrence_known_vectors() {
+        assert_eq!(bsr_hash_value(1, 1), 1_480_916_820);
+        assert_eq!(
+            Ipv4::bsr_hash(
+                "239.1.2.3".parse().unwrap(),
+                "10.0.0.5".parse().unwrap(),
+                30
+            ),
+            1_036_833_733
+        );
+        assert_eq!(
+            Ipv6::bsr_hash(
+                "ff0e::10".parse().unwrap(),
+                "2001:db8::5".parse().unwrap(),
+                32
+            ),
+            572_234_093
+        );
+    }
+
+    #[test]
+    fn hash_masks_group_to_a_block() {
+        // Groups sharing the top `mask_len` bits hash identically (the
+        // RFC 2362 load-splitting granularity); a different block differs.
+        let rp4: Ipv4Addr = "10.0.0.5".parse().unwrap();
+        let g_a: Ipv4Addr = "239.1.2.10".parse().unwrap();
+        let g_b: Ipv4Addr = "239.1.2.200".parse().unwrap(); // same /24
+        let g_c: Ipv4Addr = "239.1.3.10".parse().unwrap(); // different /24
+        assert_eq!(Ipv4::bsr_hash(g_a, rp4, 24), Ipv4::bsr_hash(g_b, rp4, 24));
+        assert_ne!(Ipv4::bsr_hash(g_a, rp4, 24), Ipv4::bsr_hash(g_c, rp4, 24));
+
+        let rp6: Ipv6Addr = "2001:db8::5".parse().unwrap();
+        let h_a: Ipv6Addr = "ff0e::1:10".parse().unwrap();
+        let h_b: Ipv6Addr = "ff0e::1:99".parse().unwrap(); // same /96
+        assert_eq!(Ipv6::bsr_hash(h_a, rp6, 96), Ipv6::bsr_hash(h_b, rp6, 96));
+    }
+
+    #[test]
+    fn hash_is_rp_sensitive() {
+        // Different candidate RPs (generally) hash to different values, so
+        // the hash actually breaks a same-priority, same-range tie.
+        let g4: Ipv4Addr = "239.1.2.3".parse().unwrap();
+        assert_ne!(
+            Ipv4::bsr_hash(g4, "10.0.0.1".parse().unwrap(), 30),
+            Ipv4::bsr_hash(g4, "10.0.0.2".parse().unwrap(), 30)
+        );
+        let g6: Ipv6Addr = "ff0e::3".parse().unwrap();
+        assert_ne!(
+            Ipv6::bsr_hash(g6, "2001:db8::1".parse().unwrap(), 32),
+            Ipv6::bsr_hash(g6, "2001:db8::2".parse().unwrap(), 32)
+        );
+    }
 }

@@ -3,11 +3,11 @@
 //! and the BSR-learned RP-set that `rp_lookup` falls back to when no
 //! static mapping covers a group.
 //!
-//! Simplifications, documented: RP selection inside the learned set
-//! is longest-prefix → lowest priority → highest address (the RFC
-//! 2362 hash for same-priority load-splitting is not implemented),
-//! and BSM fragments are treated as whole-set replacements per group
-//! range.
+//! RP selection inside the learned set is longest-prefix → lowest
+//! priority → RFC 2362 §3.7 group-to-RP hash → highest address (see
+//! [`PimAf::bsr_hash`](super::af::PimAf::bsr_hash)), so the whole domain
+//! converges on the same RP for a group. Simplification, documented: BSM
+//! fragments are treated as whole-set replacements per group range.
 
 use std::collections::BTreeMap;
 use std::time::{Duration, Instant};
@@ -157,7 +157,16 @@ impl<A: PimAf> Pim<A> {
             .iter()
             .filter(|((range, _), e)| A::prefix_contains(range, &grp) && e.expires > now)
             .max_by_key(|((range, rp), e)| {
-                (A::prefix_len(range), std::cmp::Reverse(e.priority), *rp)
+                // RFC 2362 §3.7: longest match, then lowest priority, then
+                // the group-to-RP hash (highest value wins) so the whole
+                // domain converges on the same RP, with the RP address as
+                // the final deterministic tiebreak.
+                (
+                    A::prefix_len(range),
+                    std::cmp::Reverse(e.priority),
+                    A::bsr_hash(grp, *rp, HASH_MASK_LEN),
+                    *rp,
+                )
             })
             .map(|((_, rp), _)| *rp)
     }
