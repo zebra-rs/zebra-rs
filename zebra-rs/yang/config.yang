@@ -4115,8 +4115,23 @@ module config {
           // The default `router pim` task forwards every `ipv6 ...`
           // line — with the `ipv6` container stripped — to a
           // default-table Pim<Ipv6> instance whose PIMv6 socket runs
-          // over link-local transport. Adjacency-only subset (MLD and
-          // IPv6 RP/BSR arrive in later phases).
+          // over link-local transport.
+          container rp {
+            ext:help "Rendezvous Point configuration";
+            list static {
+              ext:help "Static RP address for a group range";
+              key "address";
+              leaf address {
+                ext:help "RP address";
+                type inet:ipv6-address;
+              }
+              leaf group {
+                ext:help "Multicast group prefix served by this RP";
+                type inet:ipv6-prefix;
+                default "ff00::/8";
+              }
+            }
+          }
           list interface {
             ext:help "Per-interface PIMv6 configuration";
             key "if-name";

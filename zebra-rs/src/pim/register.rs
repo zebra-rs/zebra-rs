@@ -84,6 +84,23 @@ impl<A: PimAf> Pim<A> {
         self.register_send(rp, upcall.payload, false);
     }
 
+    /// Pick a domain-routable source for a unicast PIM message
+    /// (Register / Register-Stop): the highest non-link-local interface
+    /// address (RFC 7761 §4.4.1 / the IPv6 plan §5.2). IPv6 hellos are
+    /// link-local-sourced, but `write_packet_v6` needs a routable source
+    /// pinned for the pseudo-header checksum and for the RP to reply to;
+    /// the IPv4 write task ignores `src` (no pseudo-header), so this is
+    /// byte-identical there. `None` if the router has only link-local
+    /// addresses.
+    pub(crate) fn unicast_source(&self) -> Option<A::Addr> {
+        self.links
+            .values()
+            .flat_map(|l| l.addrs.iter())
+            .map(|p| A::prefix_addr(p))
+            .filter(|a| !A::is_link_local(*a) && !A::is_unspecified(*a))
+            .max()
+    }
+
     fn register_send(&self, rp: A::Addr, data: Vec<u8>, null: bool) {
         let packet = PimPacket::new(PimPayload::Register(PimRegister {
             border: false,
@@ -95,7 +112,7 @@ impl<A: PimAf> Pim<A> {
             packet,
             ifindex: 0,
             dst: rp,
-            src: None,
+            src: self.unicast_source(),
         });
     }
 
@@ -146,7 +163,9 @@ impl<A: PimAf> Pim<A> {
             packet,
             ifindex: 0,
             dst: dr,
-            src: None,
+            // Transport source (distinct from the inner `src` above): a
+            // routable address so the DR can validate the reply.
+            src: self.unicast_source(),
         });
     }
 

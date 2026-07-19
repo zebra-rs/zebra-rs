@@ -81,6 +81,11 @@ impl PimAf for Ipv4 {
         a.octets()[..3] == [224, 0, 0]
     }
 
+    fn is_link_local(a: Ipv4Addr) -> bool {
+        // 169.254.0.0/16 (RFC 3927).
+        a.is_link_local()
+    }
+
     fn prefix_new(addr: Ipv4Addr, len: u8) -> Option<Ipv4Net> {
         Ipv4Net::new(addr, len).ok()
     }
