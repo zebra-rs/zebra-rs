@@ -70,8 +70,8 @@ impl Pim<Ipv4> {
 
 /// The IPv6 configuration surface: the shared interface knobs plus MLD
 /// membership (the same AF-agnostic callbacks the IGMP paths use, since
-/// `LinkConfig.igmp` is shared). IPv6 RP and IPv6 BSR arrive in later
-/// phases.
+/// `LinkConfig.igmp` is shared), and the generic static-RP / BSR
+/// callbacks (the parent strips the `ipv6` segment before forwarding).
 impl Pim<Ipv6> {
     pub fn callback_build(&mut self) {
         self.callback_add_interface();
@@ -89,6 +89,17 @@ impl Pim<Ipv6> {
         // uses; the parent strips the `ipv6` segment before forwarding.
         self.callback_add("/router/pim/rp/static", config_rp_static);
         self.callback_add("/router/pim/rp/static/group", config_rp_static_group);
+        // Bootstrap Router (RFC 5059) — same generic handlers.
+        self.callback_add("/router/pim/bsr/candidate-bsr", config_cbsr);
+        self.callback_add("/router/pim/bsr/candidate-bsr/address", config_cbsr_address);
+        self.callback_add(
+            "/router/pim/bsr/candidate-bsr/priority",
+            config_cbsr_priority,
+        );
+        self.callback_add("/router/pim/bsr/candidate-rp", config_crp);
+        self.callback_add("/router/pim/bsr/candidate-rp/address", config_crp_address);
+        self.callback_add("/router/pim/bsr/candidate-rp/group", config_crp_group);
+        self.callback_add("/router/pim/bsr/candidate-rp/priority", config_crp_priority);
     }
 }
 
@@ -227,15 +238,15 @@ fn config_rp_static_group<A: PimAf>(pim: &mut Pim<A>, mut args: Args, op: Config
     Some(())
 }
 
-fn config_cbsr(pim: &mut Pim, _args: Args, op: ConfigOp) -> Option<()> {
+fn config_cbsr<A: PimAf>(pim: &mut Pim<A>, _args: Args, op: ConfigOp) -> Option<()> {
     pim.bsr_config.cbsr_enabled = op.is_set();
     pim.bsr_config_changed();
     Some(())
 }
 
-fn config_cbsr_address(pim: &mut Pim, mut args: Args, op: ConfigOp) -> Option<()> {
+fn config_cbsr_address<A: PimAf>(pim: &mut Pim<A>, mut args: Args, op: ConfigOp) -> Option<()> {
     pim.bsr_config.cbsr_addr = if op.is_set() {
-        Some(args.v4addr()?)
+        Some(A::from_ip(args.string()?.parse::<IpAddr>().ok()?)?)
     } else {
         None
     };
@@ -243,21 +254,21 @@ fn config_cbsr_address(pim: &mut Pim, mut args: Args, op: ConfigOp) -> Option<()
     Some(())
 }
 
-fn config_cbsr_priority(pim: &mut Pim, mut args: Args, op: ConfigOp) -> Option<()> {
+fn config_cbsr_priority<A: PimAf>(pim: &mut Pim<A>, mut args: Args, op: ConfigOp) -> Option<()> {
     pim.bsr_config.cbsr_priority = if op.is_set() { Some(args.u8()?) } else { None };
     pim.bsr_config_changed();
     Some(())
 }
 
-fn config_crp(pim: &mut Pim, _args: Args, op: ConfigOp) -> Option<()> {
+fn config_crp<A: PimAf>(pim: &mut Pim<A>, _args: Args, op: ConfigOp) -> Option<()> {
     pim.bsr_config.crp_enabled = op.is_set();
     pim.bsr_config_changed();
     Some(())
 }
 
-fn config_crp_address(pim: &mut Pim, mut args: Args, op: ConfigOp) -> Option<()> {
+fn config_crp_address<A: PimAf>(pim: &mut Pim<A>, mut args: Args, op: ConfigOp) -> Option<()> {
     pim.bsr_config.crp_addr = if op.is_set() {
-        Some(args.v4addr()?)
+        Some(A::from_ip(args.string()?.parse::<IpAddr>().ok()?)?)
     } else {
         None
     };
@@ -265,9 +276,9 @@ fn config_crp_address(pim: &mut Pim, mut args: Args, op: ConfigOp) -> Option<()>
     Some(())
 }
 
-fn config_crp_group(pim: &mut Pim, mut args: Args, op: ConfigOp) -> Option<()> {
+fn config_crp_group<A: PimAf>(pim: &mut Pim<A>, mut args: Args, op: ConfigOp) -> Option<()> {
     pim.bsr_config.crp_group = if op.is_set() {
-        Some(args.string()?.parse().ok()?)
+        Some(A::prefix_from_ipnet(args.string()?.parse::<IpNet>().ok()?)?)
     } else {
         None
     };
@@ -275,7 +286,7 @@ fn config_crp_group(pim: &mut Pim, mut args: Args, op: ConfigOp) -> Option<()> {
     Some(())
 }
 
-fn config_crp_priority(pim: &mut Pim, mut args: Args, op: ConfigOp) -> Option<()> {
+fn config_crp_priority<A: PimAf>(pim: &mut Pim<A>, mut args: Args, op: ConfigOp) -> Option<()> {
     pim.bsr_config.crp_priority = if op.is_set() { Some(args.u8()?) } else { None };
     pim.bsr_config_changed();
     Some(())

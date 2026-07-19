@@ -63,6 +63,10 @@ impl Pim<Ipv6> {
             .set(show_pim_upstream)
             .path("/show/pim/assert")
             .set(show_pim_assert)
+            .path("/show/pim/bsr")
+            .set(show_pim_bsr)
+            .path("/show/pim/rp-info")
+            .set(show_pim_rp_info)
             .path("/show/pim/mld/groups")
             .set(show_igmp_groups)
             // `show pim ipv6 mroute`: the parent strips the `ipv6`
@@ -415,7 +419,11 @@ struct BsrBrief {
     candidate_rps: usize,
 }
 
-fn show_pim_bsr(pim: &Pim, _args: Args, json: bool) -> Result<String, std::fmt::Error> {
+fn show_pim_bsr<A: PimAf>(
+    pim: &Pim<A>,
+    _args: Args,
+    json: bool,
+) -> Result<String, std::fmt::Error> {
     use super::bsr::BsrRole;
     let role = match pim.bsr.role.unwrap_or(BsrRole::None) {
         BsrRole::None => "Non-candidate",
@@ -506,7 +514,11 @@ struct RpInfoBrief {
     is_self: bool,
 }
 
-fn show_pim_rp_info(pim: &Pim, _args: Args, json: bool) -> Result<String, std::fmt::Error> {
+fn show_pim_rp_info<A: PimAf>(
+    pim: &Pim<A>,
+    _args: Args,
+    json: bool,
+) -> Result<String, std::fmt::Error> {
     let now = Instant::now();
     let mut rows: Vec<RpInfoBrief> = vec![];
     for (rp, range) in pim.rp_set.statics.iter() {

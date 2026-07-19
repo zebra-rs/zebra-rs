@@ -323,7 +323,9 @@ impl<A: PimAf> Pim<A> {
                 packet: packet.clone(),
                 ifindex: oif,
                 dst: A::ALL_PIM_ROUTERS,
-                src: None,
+                // Link-local multicast control: pin the egress link-local
+                // (write_packet_v6 drops a send with no source; v4 ignores).
+                src: self.links.get(&oif).and_then(|l| l.primary_addr()),
             });
         }
 
@@ -434,7 +436,8 @@ impl<A: PimAf> Pim<A> {
                 packet: packet.clone(),
                 ifindex: oif,
                 dst: A::ALL_PIM_ROUTERS,
-                src: None,
+                // Link-local multicast control: pin the egress link-local.
+                src: self.links.get(&oif).and_then(|l| l.primary_addr()),
             });
         }
     }
@@ -477,7 +480,8 @@ impl<A: PimAf> Pim<A> {
             packet,
             ifindex: 0,
             dst: bsr,
-            src: None,
+            // Unicast to the BSR: a routable source (as for Register).
+            src: self.unicast_source(),
         });
     }
 
