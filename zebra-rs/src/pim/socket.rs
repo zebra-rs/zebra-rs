@@ -78,6 +78,97 @@ fn set_ipv6_pktinfo(socket: &Socket) {
     };
 }
 
+/// MLDv2 report destination (`ff02::16`): the querier joins it per
+/// interface to receive membership reports (RFC 3810 §5.2.14).
+pub const MLD_V2_REPORT_GROUP: Ipv6Addr = Ipv6Addr::new(0xff02, 0, 0, 0, 0, 0, 0, 0x0016);
+
+/// ICMPv6 protocol number.
+const IPPROTO_ICMPV6: i32 = 58;
+/// `ICMP6_FILTER` sockopt name (kernel ABI value 1 on Linux; not in
+/// libc as a constant on all targets).
+const ICMP6_FILTER_OPT: c_int = 1;
+
+/// The raw ICMPv6 socket for MLD (RFC 2710 / RFC 3810). `ICMP6_FILTER`
+/// passes only the four MLD types (130/131/132/143); multicast hop
+/// limit 1 (MLD is link-local); `IPV6_ROUTER_ALERT` adds the hop-by-hop
+/// Router Alert option to every send (mandatory for MLD); and
+/// `IPV6_RECVPKTINFO` / `IPV6_RECVHOPLIMIT` recover the destination,
+/// ingress ifindex and hop limit the receive path validates.
+pub fn mld_socket(ctx: &ProtoContext) -> Result<AsyncFd<Socket>, std::io::Error> {
+    let socket = ctx.raw_socket(Domain::IPV6, Protocol::from(IPPROTO_ICMPV6))?;
+
+    socket.set_nonblocking(true)?;
+    socket.set_reuse_address(true)?;
+    socket.set_multicast_loop_v6(false)?;
+    socket.set_multicast_hops_v6(1)?;
+    set_ipv6_pktinfo(&socket);
+    set_int_sockopt(&socket, libc::IPPROTO_IPV6, libc::IPV6_RECVHOPLIMIT, 1);
+    // Router Alert value 0 = MLD (RFC 2711); adds the hop-by-hop option
+    // to every outgoing MLD message so on-path routers snoop it.
+    set_int_sockopt(&socket, libc::IPPROTO_IPV6, libc::IPV6_ROUTER_ALERT, 0);
+    apply_mld_icmp6_filter(&socket)?;
+
+    AsyncFd::new(socket)
+}
+
+fn set_int_sockopt(socket: &Socket, level: c_int, name: c_int, value: c_int) {
+    unsafe {
+        libc::setsockopt(
+            socket.as_raw_fd(),
+            level,
+            name,
+            &value as *const c_int as *const libc::c_void,
+            std::mem::size_of::<c_int>() as libc::socklen_t,
+        );
+    };
+}
+
+/// `struct icmp6_filter` (8 × u32, one bit per type; a set bit blocks).
+/// Start all-block, then clear the four MLD types to pass only them.
+fn apply_mld_icmp6_filter(socket: &Socket) -> Result<(), std::io::Error> {
+    let mut filt: [u32; 8] = [0xffff_ffff; 8];
+    for t in [130u8, 131, 132, 143] {
+        let word = (t as usize) >> 5;
+        let bit = (t as usize) & 0x1f;
+        filt[word] &= !(1u32 << bit);
+    }
+    let ret = unsafe {
+        libc::setsockopt(
+            socket.as_raw_fd(),
+            IPPROTO_ICMPV6,
+            ICMP6_FILTER_OPT,
+            filt.as_ptr() as *const libc::c_void,
+            std::mem::size_of::<[u32; 8]>() as libc::socklen_t,
+        )
+    };
+    if ret < 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+    Ok(())
+}
+
+/// Join `ff02::16` (MLDv2 report destination) on the given interface.
+pub fn mld_join_if(socket: &AsyncFd<Socket>, ifindex: u32) {
+    if let Err(e) = socket
+        .get_ref()
+        .join_multicast_v6(&MLD_V2_REPORT_GROUP, ifindex)
+        && !is_eaddrinuse(&e)
+    {
+        tracing::warn!("mld: join ff02::16 on ifindex {ifindex} failed: {e}");
+    }
+}
+
+/// Leave `ff02::16` on the given interface.
+pub fn mld_leave_if(socket: &AsyncFd<Socket>, ifindex: u32) {
+    if let Err(e) = socket
+        .get_ref()
+        .leave_multicast_v6(&MLD_V2_REPORT_GROUP, ifindex)
+        && !is_not_member(&e)
+    {
+        tracing::warn!("mld: leave ff02::16 on ifindex {ifindex} failed: {e}");
+    }
+}
+
 /// Join `ff02::d` (AllPIMRouters, v6) on the given interface.
 pub fn pim_join_if_v6(socket: &AsyncFd<Socket>, ifindex: u32) {
     if let Err(e) = socket

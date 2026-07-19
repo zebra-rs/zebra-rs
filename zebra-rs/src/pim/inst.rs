@@ -29,6 +29,7 @@ use super::af::PimAf;
 use super::bsr::{BsrConfig, BsrRun};
 use super::config::Callback;
 use super::gm::igmp::IgmpCodec;
+use super::gm::mld::MldCodec;
 use super::gm::{Gm, GmEvent, GmIfCtx, GmInput};
 use super::ipv4::Ipv4;
 use super::ipv6::Ipv6;
@@ -220,15 +221,16 @@ impl Pim<Ipv4> {
     }
 }
 
-/// The concrete IPv6 constructor (Phase 3: adjacency). Wires the PIMv6
-/// raw socket + the `Mrt6` stub and the v6 read/write tasks. There is
-/// no membership engine yet (`gm: None`; MLD is Phase 4) and no mroute
-/// read task (the `Mrt6` datapath is Phase 5).
+/// The concrete IPv6 constructor. Wires the PIMv6 raw socket + the
+/// `Mrt6` stub, the v6 read/write tasks, and the MLD membership engine
+/// (`Gm<Ipv6>` driven by the `MldCodec`). No mroute read task yet (the
+/// `Mrt6` datapath is Phase 5).
 impl Pim<Ipv6> {
     #[allow(clippy::too_many_arguments)]
     pub fn new(
         ctx: ProtoContext,
         sock: AsyncFd<Socket>,
+        mld_sock: AsyncFd<Socket>,
         fp: Mrt6,
         rib_rx: UnboundedReceiver<RibRx>,
         proto_label: String,
@@ -248,6 +250,8 @@ impl Pim<Ipv6> {
         let write_task = Task::spawn(async move {
             write_packet_v6(write_sock, send_rx).await;
         });
+        // MLD membership engine over its own ICMPv6 socket.
+        let gm = Gm::new(Box::new(MldCodec::new(mld_sock, tx.clone())));
 
         let mut pim = Self {
             tx,
@@ -262,7 +266,7 @@ impl Pim<Ipv6> {
             fp,
             jp_refresh: BTreeMap::new(),
             send_tx,
-            gm: None,
+            gm: Some(gm),
             rib_rx,
             cm: ConfigChannel::new(),
             show: ShowChannel::new(),
