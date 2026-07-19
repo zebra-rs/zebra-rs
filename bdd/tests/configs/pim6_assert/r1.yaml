@@ -1,0 +1,27 @@
+interface:
+- if-name: eth1
+  ipv6:
+    address: 2001:db8:61::2/64
+- if-name: eth2
+  ipv6:
+    address: 2001:db8:62::2/64
+router:
+  static:
+    ipv6:
+      route:
+      # Higher metric than r2, so r1 loses the assert on swB by RPF
+      # cost — the winner is deterministic (link-local tiebreak is never
+      # reached).
+      - prefix: 2001:db8:60::/64
+        metric: 20
+        nexthop:
+        - address: 2001:db8:61::1
+  pim:
+    ipv6:
+      interface:
+      - if-name: eth1
+        dr-priority: 1
+      - if-name: eth2
+        dr-priority: 1
+        mld:
+          enabled: true

@@ -1,0 +1,27 @@
+interface:
+- if-name: eth1
+  ipv6:
+    address: 2001:db8:61::3/64
+- if-name: eth2
+  ipv6:
+    address: 2001:db8:62::3/64
+router:
+  static:
+    ipv6:
+      route:
+      # Lower metric than r1, so r2 wins the assert on swB by RPF cost.
+      - prefix: 2001:db8:60::/64
+        metric: 10
+        nexthop:
+        - address: 2001:db8:61::1
+  pim:
+    ipv6:
+      interface:
+      - if-name: eth1
+        dr-priority: 1
+      # Highest DR priority on swB, so r2 is the DR deterministically and
+      # serves h2 directly (the other forwarder is r1 via r3's Join).
+      - if-name: eth2
+        dr-priority: 100
+        mld:
+          enabled: true

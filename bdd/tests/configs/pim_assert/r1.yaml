@@ -13,6 +13,8 @@ router:
         nexthop:
         - address: 10.6.1.1
   pim:
+    tracing:
+      all: null
     interface:
     - if-name: eth1
       dr-priority: 1
