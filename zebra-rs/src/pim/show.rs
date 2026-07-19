@@ -14,6 +14,7 @@ use super::assert_fsm::AssertRole;
 use super::gm::{FilterMode, QuerierState};
 use super::inst::{Pim, ShowCallback};
 use super::ipv4::Ipv4;
+use super::ipv6::Ipv6;
 use super::macros::mfc_oifs;
 use super::rpf::RpfState;
 use super::tib::{JoinState, RegState};
@@ -43,6 +44,21 @@ impl Pim<Ipv4> {
             .set(show_pim_assert)
             .path("/show/mroute")
             .set(show_mroute)
+            .map();
+    }
+}
+
+/// The IPv6 show surface (Phase 3: adjacency — interface and neighbor
+/// tables, which are address-family-agnostic). The parent strips the
+/// `ipv6` path segment before forwarding, so the paths match the v4
+/// registrations.
+impl Pim<Ipv6> {
+    pub fn show_build(&mut self) {
+        self.show_cb = Builder::<ShowCallback<Ipv6>>::default()
+            .path("/show/pim/interface")
+            .set(show_pim_interface)
+            .path("/show/pim/neighbor")
+            .set(show_pim_neighbor)
             .map();
     }
 }
@@ -104,7 +120,11 @@ struct InterfaceBrief {
     neighbor_count: usize,
 }
 
-fn show_pim_interface(pim: &Pim, _args: Args, json: bool) -> Result<String, std::fmt::Error> {
+fn show_pim_interface<A: PimAf>(
+    pim: &Pim<A>,
+    _args: Args,
+    json: bool,
+) -> Result<String, std::fmt::Error> {
     let mut rows: Vec<InterfaceBrief> = vec![];
 
     for name in pim.if_config.keys() {
@@ -579,7 +599,11 @@ fn show_mroute(pim: &Pim, _args: Args, json: bool) -> Result<String, std::fmt::E
     Ok(buf)
 }
 
-fn show_pim_neighbor(pim: &Pim, _args: Args, json: bool) -> Result<String, std::fmt::Error> {
+fn show_pim_neighbor<A: PimAf>(
+    pim: &Pim<A>,
+    _args: Args,
+    json: bool,
+) -> Result<String, std::fmt::Error> {
     let mut rows: Vec<NeighborBrief> = vec![];
 
     for link in pim.links.values() {

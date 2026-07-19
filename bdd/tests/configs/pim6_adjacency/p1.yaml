@@ -1,0 +1,10 @@
+interface:
+- if-name: eth1
+  ipv6:
+    address: 2001:db8:12::1/64
+router:
+  pim:
+    ipv6:
+      interface:
+      - if-name: eth1
+        dr-priority: 200

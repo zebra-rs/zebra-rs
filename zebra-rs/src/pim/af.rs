@@ -21,6 +21,8 @@ use std::net::IpAddr;
 
 use ipnet::IpNet;
 use serde::Serialize;
+use socket2::Socket;
+use tokio::io::unix::AsyncFd;
 
 use crate::rib::Link;
 
@@ -67,6 +69,11 @@ pub trait PimAf: Copy + Eq + Ord + Hash + Debug + Send + Sync + Sized + 'static 
     /// first is the Hello-source / DR-candidate identity. IPv4 reads
     /// `addr4`; IPv6 will read the link-local(s) then `addr6`.
     fn link_prefixes(link: &Link) -> Vec<Self::Prefix>;
+
+    /// Join / leave the ALL-PIM-ROUTERS control group on an interface
+    /// (`224.0.0.13` / `ff02::d`) on the instance's PIM socket.
+    fn join_pim_if(sock: &AsyncFd<Socket>, ifindex: u32);
+    fn leave_pim_if(sock: &AsyncFd<Socket>, ifindex: u32);
 
     /// Default SSM range: `232.0.0.0/8` (RFC 4607) / `ff3x::/32`.
     const DEFAULT_SSM_RANGE: Self::Prefix;

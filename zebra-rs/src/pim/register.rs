@@ -89,6 +89,7 @@ impl<A: PimAf> Pim<A> {
             packet,
             ifindex: 0,
             dst: rp,
+            src: None,
         });
     }
 
@@ -139,6 +140,7 @@ impl<A: PimAf> Pim<A> {
             packet,
             ifindex: 0,
             dst: dr,
+            src: None,
         });
     }
 

@@ -3,7 +3,7 @@
 //! ALL-PIM-ROUTERS (224.0.0.13) group joins. Mirrors
 //! `crate::ospf::socket`.
 
-use std::net::Ipv4Addr;
+use std::net::{Ipv4Addr, Ipv6Addr};
 use std::os::fd::AsRawFd;
 
 use libc::c_int;
@@ -14,6 +14,9 @@ use crate::context::ProtoContext;
 
 /// ALL-PIM-ROUTERS group (RFC 7761 §4.3.1).
 pub const ALL_PIM_ROUTERS: Ipv4Addr = Ipv4Addr::new(224, 0, 0, 13);
+
+/// ALL-PIM-ROUTERS for IPv6: `ff02::d` (RFC 7761 §4.3.1).
+pub const ALL_PIM_ROUTERS_V6: Ipv6Addr = Ipv6Addr::new(0xff02, 0, 0, 0, 0, 0, 0, 0x000d);
 
 /// PIM is IP protocol 103.
 pub const PIM_IP_PROTO: i32 = 103;
@@ -41,6 +44,66 @@ pub fn pim_socket(ctx: &ProtoContext) -> Result<AsyncFd<Socket>, std::io::Error>
     set_ipv4_pktinfo(&socket)?;
 
     AsyncFd::new(socket)
+}
+
+/// The raw IPv6 socket for PIMv6 (protocol 103), mirroring
+/// `ospf_socket_ipv6`: multicast loopback off, hop limit pinned to 1
+/// (PIM control is link-local), and `IPV6_RECVPKTINFO` so the read
+/// task recovers the ingress ifindex and the destination address the
+/// pseudo-header checksum needs. `IPV6_V6ONLY` is not set — it is
+/// invalid on a raw v6 socket and redundant (raw v6 never surfaces
+/// v4-mapped sources).
+pub fn pim_socket_v6(ctx: &ProtoContext) -> Result<AsyncFd<Socket>, std::io::Error> {
+    let socket = ctx.raw_socket(Domain::IPV6, Protocol::from(PIM_IP_PROTO))?;
+
+    socket.set_nonblocking(true)?;
+    socket.set_reuse_address(true)?;
+    socket.set_multicast_loop_v6(false)?;
+    socket.set_multicast_hops_v6(1)?;
+    set_ipv6_pktinfo(&socket);
+
+    AsyncFd::new(socket)
+}
+
+fn set_ipv6_pktinfo(socket: &Socket) {
+    let optval = true as c_int;
+    unsafe {
+        libc::setsockopt(
+            socket.as_raw_fd(),
+            libc::IPPROTO_IPV6,
+            libc::IPV6_RECVPKTINFO,
+            &optval as *const _ as *const libc::c_void,
+            std::mem::size_of::<i32>() as libc::socklen_t,
+        );
+    };
+}
+
+/// Join `ff02::d` (AllPIMRouters, v6) on the given interface.
+pub fn pim_join_if_v6(socket: &AsyncFd<Socket>, ifindex: u32) {
+    if let Err(e) = socket
+        .get_ref()
+        .join_multicast_v6(&ALL_PIM_ROUTERS_V6, ifindex)
+    {
+        if is_eaddrinuse(&e) {
+            tracing::debug!("pim: AllPIMRouters (v6) already joined on ifindex {ifindex}");
+        } else {
+            tracing::warn!("pim: join AllPIMRouters (v6) on ifindex {ifindex} failed: {e}");
+        }
+    }
+}
+
+/// Leave `ff02::d` on the given interface.
+pub fn pim_leave_if_v6(socket: &AsyncFd<Socket>, ifindex: u32) {
+    if let Err(e) = socket
+        .get_ref()
+        .leave_multicast_v6(&ALL_PIM_ROUTERS_V6, ifindex)
+    {
+        if is_not_member(&e) {
+            tracing::debug!("pim: AllPIMRouters (v6) not joined on ifindex {ifindex}");
+        } else {
+            tracing::warn!("pim: leave AllPIMRouters (v6) on ifindex {ifindex} failed: {e}");
+        }
+    }
 }
 
 fn set_ipv4_pktinfo(socket: &Socket) -> Result<(), std::io::Error> {

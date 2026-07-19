@@ -8,18 +8,21 @@
 //! monomorphizes a second instance.
 
 pub mod af;
+pub mod af6;
 pub mod assert_fsm;
 pub mod bsr;
 pub mod config;
 pub mod gm;
 pub mod inst;
 pub mod ipv4;
+pub mod ipv6;
 pub mod jp;
 pub mod link;
 pub mod macros;
 pub mod mroute;
 pub mod neighbor;
 pub mod network;
+pub mod network_v6;
 pub mod register;
 pub mod rp;
 pub mod rpf;

@@ -31,9 +31,11 @@ use super::config::Callback;
 use super::gm::igmp::IgmpCodec;
 use super::gm::{Gm, GmEvent, GmIfCtx, GmInput};
 use super::ipv4::Ipv4;
+use super::ipv6::Ipv6;
 use super::link::{LinkConfig, PIM_OVERRIDE_INTERVAL_MSEC, PIM_PROPAGATION_DELAY_MSEC, PimLink};
-use super::mroute::{Mrt4, Upcall};
+use super::mroute::{Mrt4, Mrt6, Upcall};
 use super::network::{mroute_read, read_packet, write_packet};
+use super::network_v6::{read_packet_v6, write_packet_v6};
 use super::rp::RpSet;
 use super::rpf::RpfEntry;
 use super::tib::{SgKey, TibEntry};
@@ -65,12 +67,16 @@ pub enum Message<A: PimAf = Ipv4> {
 }
 
 /// Outbound message for the write task: `packet` to `dst`, egress
-/// pinned to `ifindex` via `IP_PKTINFO`.
+/// pinned to `ifindex` via `IP_PKTINFO` (v4) / `in6_pktinfo` (v6).
+/// `src` is the pinned source, required by the IPv6 pseudo-header
+/// checksum; the IPv4 write task ignores it (the kernel selects the
+/// source and the v4 checksum has no pseudo-header).
 #[derive(Debug)]
 pub struct PimSend<A: PimAf = Ipv4> {
     pub packet: PimPacket,
     pub ifindex: u32,
     pub dst: A::Addr,
+    pub src: Option<A::Addr>,
 }
 
 pub struct Pim<A: PimAf = Ipv4> {
@@ -126,6 +132,13 @@ pub struct Pim<A: PimAf = Ipv4> {
     /// Kernel VRF masters from `RibRx::VrfAdd` (parent only):
     /// name → (table_id, ifindex).
     pub(crate) rib_known_vrfs: BTreeMap<String, (u32, u32)>,
+    /// The default-table IPv6 child (parent only): spawned on the first
+    /// `router pim ipv6 …` line, fed the `ipv6`-stripped config, and the
+    /// forwarding target for `show pim ipv6 …`.
+    pub(crate) af6: Option<super::af6::PimAf6Handle>,
+    /// Buffered `router pim ipv6 …` intent, so the child can be despawned
+    /// when its block is fully deleted (mirrors `vrf_log`).
+    pub(crate) af6_log: Vec<(Vec<CommandPath>, ConfigOp)>,
     _read_task: Task<()>,
     _write_task: Task<()>,
     _mroute_read_task: Task<()>,
@@ -195,9 +208,80 @@ impl Pim<Ipv4> {
             vrf_log: BTreeMap::new(),
             vrf_registry: BTreeMap::new(),
             rib_known_vrfs: BTreeMap::new(),
+            af6: None,
+            af6_log: Vec::new(),
             _read_task: read_task,
             _write_task: write_task,
             _mroute_read_task: mroute_read_task,
+        };
+        pim.callback_build();
+        pim.show_build();
+        pim
+    }
+}
+
+/// The concrete IPv6 constructor (Phase 3: adjacency). Wires the PIMv6
+/// raw socket + the `Mrt6` stub and the v6 read/write tasks. There is
+/// no membership engine yet (`gm: None`; MLD is Phase 4) and no mroute
+/// read task (the `Mrt6` datapath is Phase 5).
+impl Pim<Ipv6> {
+    #[allow(clippy::too_many_arguments)]
+    pub fn new(
+        ctx: ProtoContext,
+        sock: AsyncFd<Socket>,
+        fp: Mrt6,
+        rib_rx: UnboundedReceiver<RibRx>,
+        proto_label: String,
+        rib_subscriber: RibSubscriber,
+        config_tx: mpsc::Sender<crate::config::Message>,
+    ) -> Self {
+        let sock = Arc::new(sock);
+        let (tx, rx) = mpsc::unbounded_channel();
+        let (send_tx, send_rx) = mpsc::unbounded_channel();
+
+        let read_sock = sock.clone();
+        let read_tx = tx.clone();
+        let read_task = Task::spawn(async move {
+            read_packet_v6(read_sock, read_tx).await;
+        });
+        let write_sock = sock.clone();
+        let write_task = Task::spawn(async move {
+            write_packet_v6(write_sock, send_rx).await;
+        });
+
+        let mut pim = Self {
+            tx,
+            rx,
+            links: BTreeMap::new(),
+            if_config: BTreeMap::new(),
+            tib: BTreeMap::new(),
+            rpf: BTreeMap::new(),
+            rp_set: RpSet::default(),
+            bsr_config: BsrConfig::default(),
+            bsr: BsrRun::default(),
+            fp,
+            jp_refresh: BTreeMap::new(),
+            send_tx,
+            gm: None,
+            rib_rx,
+            cm: ConfigChannel::new(),
+            show: ShowChannel::new(),
+            show_cb: HashMap::new(),
+            callbacks: HashMap::new(),
+            sock,
+            ctx,
+            proto_label,
+            rib_subscriber,
+            config_tx,
+            vrf_log: BTreeMap::new(),
+            vrf_registry: BTreeMap::new(),
+            rib_known_vrfs: BTreeMap::new(),
+            af6: None,
+            af6_log: Vec::new(),
+            _read_task: read_task,
+            _write_task: write_task,
+            // No kernel mroute read task in Phase 3 (Mrt6 is a stub).
+            _mroute_read_task: Task::spawn(async {}),
         };
         pim.callback_build();
         pim.show_build();
@@ -356,9 +440,18 @@ impl<A: PimAf> Pim<A> {
     fn process_cm_msg(&mut self, msg: ConfigRequest) {
         if msg.op == ConfigOp::CommitEnd {
             self.vrf_commit_end();
+            self.af6_commit_end();
             return;
         }
         if msg.op == ConfigOp::CommitStart {
+            return;
+        }
+        // `/router/pim/ipv6/…` belongs to the default-table IPv6 child:
+        // strip the `ipv6` container and forward. A child's paths never
+        // carry an `ipv6` segment (already stripped), so this is a no-op
+        // there.
+        if let Some(rewritten) = af6_split(&msg.paths) {
+            self.af6_config_record(rewritten, msg.op);
             return;
         }
         // `/router/pim/vrf/<name>/…` belongs to a per-VRF child, not
@@ -372,6 +465,49 @@ impl<A: PimAf> Pim<A> {
         let (path, args) = path_from_command(&msg.paths);
         if let Some(f) = self.callbacks.get(&path).copied() {
             f(self, args, msg.op);
+        }
+    }
+
+    // ---- default-table IPv6 child management (default instance only) ----
+
+    fn af6_config_record(&mut self, rewritten: Vec<CommandPath>, op: ConfigOp) {
+        self.af6_spawn_if_ready();
+        if let Some(handle) = &self.af6 {
+            let _ = handle.cm_tx.send(ConfigRequest::new(rewritten.clone(), op));
+        }
+        self.af6_log.push((rewritten, op));
+    }
+
+    /// Spawn the IPv6 child on first intent. The default multicast table
+    /// always exists, so — unlike a VRF child — there is no kernel-event
+    /// gating.
+    fn af6_spawn_if_ready(&mut self) {
+        if self.proto_label != "pim" || self.af6.is_some() {
+            return;
+        }
+        self.af6 = super::af6::spawn_pim_v6(&self.rib_subscriber, &self.config_tx);
+    }
+
+    /// CommitEnd: despawn the IPv6 child if its `router pim ipv6` block
+    /// was fully deleted this commit, else forward CommitEnd so it
+    /// reconciles.
+    fn af6_commit_end(&mut self) {
+        if self.proto_label != "pim" {
+            return;
+        }
+        if !super::vrf::vrf_log_active(&self.af6_log) {
+            self.af6_log.clear();
+            if self.af6.take().is_some() {
+                self.rib_subscriber
+                    .send_proto_cleanup(&super::af6::af6_proto_label());
+                tracing::info!("pim6: default-table IPv6 instance despawned");
+            }
+            return;
+        }
+        if let Some(handle) = &self.af6 {
+            let _ = handle
+                .cm_tx
+                .send(ConfigRequest::new(Vec::new(), ConfigOp::CommitEnd));
         }
     }
 
@@ -457,6 +593,19 @@ impl<A: PimAf> Pim<A> {
     }
 
     async fn process_show_msg(&self, msg: DisplayRequest) {
+        // `show pim ipv6 …` → forward to the default-table IPv6 child
+        // with the `ipv6` container stripped and the response sender
+        // passed through, so the child answers the caller directly.
+        if let Some(rewritten) = af6_split(&msg.paths) {
+            if let Some(handle) = &self.af6 {
+                let _ = handle.show_tx.send(DisplayRequest {
+                    paths: rewritten,
+                    json: msg.json,
+                    resp: msg.resp,
+                });
+            }
+            return;
+        }
         let (path, args) = path_from_command(&msg.paths);
         if let Some(f) = self.show_cb.get(&path) {
             let output = match f(self, args, msg.json) {
@@ -531,6 +680,7 @@ impl<A: PimAf> Pim<A> {
             packet,
             ifindex,
             dst: A::ALL_PIM_ROUTERS,
+            src: link.primary_addr(),
         });
     }
 
@@ -552,8 +702,24 @@ impl<A: PimAf> Pim<A> {
             packet,
             ifindex,
             dst: A::ALL_PIM_ROUTERS,
+            src: link.primary_addr(),
         });
     }
+}
+
+/// Split a `router pim ipv6 …` / `show pim ipv6 …` path into the line
+/// with the `ipv6` container removed, so the default-table IPv6 child
+/// sees a plain `…/pim/…` line. `None` when the path is not under
+/// `pim ipv6`. Anchored to `pim` (position 1) so another protocol's
+/// `ipv6` subtree is never captured.
+fn af6_split(paths: &[CommandPath]) -> Option<Vec<CommandPath>> {
+    if paths.len() < 3 || paths[1].name != "pim" || paths[2].name != "ipv6" {
+        return None;
+    }
+    let mut rewritten = Vec::with_capacity(paths.len() - 1);
+    rewritten.extend_from_slice(&paths[..2]);
+    rewritten.extend_from_slice(&paths[3..]);
+    Some(rewritten)
 }
 
 pub fn serve<A: PimAf>(mut pim: Pim<A>) -> Task<()> {

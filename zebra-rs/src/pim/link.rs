@@ -15,7 +15,6 @@ use super::inst::{Message, Pim};
 use super::ipv4::Ipv4;
 use super::mroute::PimForwardingPlane;
 use super::neighbor::Neighbor;
-use super::socket::{pim_join_if, pim_leave_if};
 
 pub const PIM_HELLO_PERIOD: u16 = 30;
 pub const PIM_DEFAULT_DR_PRIORITY: u32 = 1;
@@ -228,7 +227,7 @@ impl<A: PimAf> Pim<A> {
             };
             self.link_config(&link.name).hello_interval()
         };
-        pim_join_if(&self.sock, ifindex);
+        A::join_pim_if(&self.sock, ifindex);
         self.fp.vif_add(ifindex);
         let timer = hello_timer(&self.tx, ifindex, interval);
         let link = self.links.get_mut(&ifindex).unwrap();
@@ -245,7 +244,7 @@ impl<A: PimAf> Pim<A> {
     fn link_disable(&mut self, ifindex: u32) {
         // Goodbye hello (holdtime 0) so neighbors expire us at once.
         self.hello_send_holdtime_zero(ifindex);
-        pim_leave_if(&self.sock, ifindex);
+        A::leave_pim_if(&self.sock, ifindex);
         let Some(link) = self.links.get_mut(&ifindex) else {
             return;
         };

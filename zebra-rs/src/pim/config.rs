@@ -8,13 +8,18 @@ use crate::config::{Args, ConfigOp};
 use super::af::PimAf;
 use super::inst::Pim;
 use super::ipv4::Ipv4;
+use super::ipv6::Ipv6;
 
 pub type Callback<A = Ipv4> = fn(&mut Pim<A>, Args, ConfigOp) -> Option<()>;
 
-/// The `router pim` callbacks parse IPv4 CLI addresses/prefixes, so
-/// they are the concrete-IPv4 configuration surface.
-impl Pim<Ipv4> {
-    pub fn callback_build(&mut self) {
+impl<A: PimAf> Pim<A> {
+    fn callback_add(&mut self, path: &str, cb: Callback<A>) {
+        self.callbacks.insert(path.to_string(), cb);
+    }
+
+    /// The address-family-agnostic per-interface knobs (they touch only
+    /// `if_config`), shared by the IPv4 and IPv6 configuration surfaces.
+    pub(crate) fn callback_add_interface(&mut self) {
         self.callback_add("/router/pim/interface", config_interface);
         self.callback_add("/router/pim/interface/dr-priority", config_dr_priority);
         self.callback_add(
@@ -26,6 +31,14 @@ impl Pim<Ipv4> {
             config_hello_holdtime,
         );
         self.callback_add("/router/pim/interface/passive", config_passive);
+    }
+}
+
+/// The IPv4 configuration surface: the shared interface knobs plus IGMP
+/// membership and the IPv4-address RP / BSR callbacks.
+impl Pim<Ipv4> {
+    pub fn callback_build(&mut self) {
+        self.callback_add_interface();
         self.callback_add("/router/pim/interface/igmp/enabled", config_igmp_enabled);
         self.callback_add("/router/pim/interface/igmp/version", config_igmp_version);
         self.callback_add(
@@ -49,13 +62,17 @@ impl Pim<Ipv4> {
         self.callback_add("/router/pim/bsr/candidate-rp/group", config_crp_group);
         self.callback_add("/router/pim/bsr/candidate-rp/priority", config_crp_priority);
     }
+}
 
-    fn callback_add(&mut self, path: &str, cb: Callback) {
-        self.callbacks.insert(path.to_string(), cb);
+/// The IPv6 configuration surface (Phase 3: adjacency only — the shared
+/// interface knobs). MLD, IPv6 RP and IPv6 BSR arrive in later phases.
+impl Pim<Ipv6> {
+    pub fn callback_build(&mut self) {
+        self.callback_add_interface();
     }
 }
 
-fn config_interface(pim: &mut Pim, mut args: Args, op: ConfigOp) -> Option<()> {
+fn config_interface<A: PimAf>(pim: &mut Pim<A>, mut args: Args, op: ConfigOp) -> Option<()> {
     let name = args.string()?;
     if op.is_set() {
         pim.if_config.entry(name.clone()).or_default();
@@ -66,7 +83,7 @@ fn config_interface(pim: &mut Pim, mut args: Args, op: ConfigOp) -> Option<()> {
     Some(())
 }
 
-fn config_dr_priority(pim: &mut Pim, mut args: Args, op: ConfigOp) -> Option<()> {
+fn config_dr_priority<A: PimAf>(pim: &mut Pim<A>, mut args: Args, op: ConfigOp) -> Option<()> {
     let name = args.string()?;
     if op.is_set() {
         let priority = args.u32()?;
@@ -78,7 +95,7 @@ fn config_dr_priority(pim: &mut Pim, mut args: Args, op: ConfigOp) -> Option<()>
     Some(())
 }
 
-fn config_hello_interval(pim: &mut Pim, mut args: Args, op: ConfigOp) -> Option<()> {
+fn config_hello_interval<A: PimAf>(pim: &mut Pim<A>, mut args: Args, op: ConfigOp) -> Option<()> {
     let name = args.string()?;
     if op.is_set() {
         let interval = args.u16()?;
@@ -96,7 +113,7 @@ fn config_hello_interval(pim: &mut Pim, mut args: Args, op: ConfigOp) -> Option<
     Some(())
 }
 
-fn config_hello_holdtime(pim: &mut Pim, mut args: Args, op: ConfigOp) -> Option<()> {
+fn config_hello_holdtime<A: PimAf>(pim: &mut Pim<A>, mut args: Args, op: ConfigOp) -> Option<()> {
     let name = args.string()?;
     if op.is_set() {
         let holdtime = args.u16()?;
@@ -108,7 +125,7 @@ fn config_hello_holdtime(pim: &mut Pim, mut args: Args, op: ConfigOp) -> Option<
     Some(())
 }
 
-fn config_passive(pim: &mut Pim, mut args: Args, op: ConfigOp) -> Option<()> {
+fn config_passive<A: PimAf>(pim: &mut Pim<A>, mut args: Args, op: ConfigOp) -> Option<()> {
     let name = args.string()?;
     if op.is_set() {
         let passive = args.boolean()?;
