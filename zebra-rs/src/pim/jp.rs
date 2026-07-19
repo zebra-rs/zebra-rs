@@ -15,6 +15,7 @@ use super::af::PimAf;
 use super::inst::{Pim, PimSend};
 use super::rpf::RpfState;
 use super::tib::{JP_HOLDTIME, JoinState, SgKey};
+use crate::pim_trace;
 
 /// Periodic J/P refresh interval (t_periodic, RFC 7761 §4.11).
 pub const JP_PERIOD: Duration = Duration::from_secs(60);
@@ -127,7 +128,9 @@ impl<A: PimAf> Pim<A> {
                     && entry.rpf == bucket
                 {
                     suppress = true;
-                    tracing::info!(
+                    pim_trace!(
+                        self.tracing,
+                        JoinPrune,
                         "pim: {} join suppressed by {} toward {}",
                         key,
                         sender,
@@ -155,7 +158,13 @@ impl<A: PimAf> Pim<A> {
                 .or_insert(deadline);
         }
         for key in overrides {
-            tracing::info!("pim: {} prune override join toward {}", key, upstream);
+            pim_trace!(
+                self.tracing,
+                JoinPrune,
+                "pim: {} prune override join toward {}",
+                key,
+                upstream
+            );
             self.jp_send_entry(ifindex, upstream, key, true);
         }
     }

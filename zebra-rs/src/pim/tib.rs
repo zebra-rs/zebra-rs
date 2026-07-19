@@ -24,6 +24,7 @@ use super::ipv4::Ipv4;
 use super::macros::{inherited_effective, inherited_olist, join_desired_effective, mfc_oifs};
 use super::mroute::{PimForwardingPlane, REG_VIF, Upcall, UpcallKind};
 use super::rpf::RpfState;
+use crate::pim_trace;
 
 /// Join/Prune holdtime we advertise and the downstream expiry we run
 /// (3.5 × the 60 s J/P period).
@@ -177,7 +178,7 @@ impl<A: PimAf> Pim<A> {
                 entry.rpf = self.rpf_acquire(addr);
             }
             self.tib.insert(key, entry);
-            tracing::info!("pim: {} created", key);
+            pim_trace!(self.tracing, Tib, "pim: {} created", key);
         }
         self.tib.get_mut(&key).unwrap()
     }
@@ -331,7 +332,14 @@ impl<A: PimAf> Pim<A> {
         if let Some(entry) = self.tib.get_mut(&key) {
             entry.rpf = state;
         }
-        tracing::info!("pim: {} RPF change {:?} -> {:?}", key, old, state);
+        pim_trace!(
+            self.tracing,
+            Tib,
+            "pim: {} RPF change {:?} -> {:?}",
+            key,
+            old,
+            state
+        );
         self.tib_update(key);
     }
 
@@ -362,7 +370,13 @@ impl<A: PimAf> Pim<A> {
         entry.join_state = JoinState::NotJoined;
         entry.rpf_target = target;
         entry.rpf = new_rpf;
-        tracing::info!("pim: {} re-targeted to {:?}", key, target);
+        pim_trace!(
+            self.tracing,
+            Tib,
+            "pim: {} re-targeted to {:?}",
+            key,
+            target
+        );
         self.tib_update(key);
     }
 
@@ -484,7 +498,7 @@ impl<A: PimAf> Pim<A> {
             if let Some(addr) = target {
                 self.rpf_release(addr);
             }
-            tracing::info!("pim: {} deleted", key);
+            pim_trace!(self.tracing, Tib, "pim: {} deleted", key);
             self.tib_cascade(key);
             return;
         }
@@ -527,12 +541,12 @@ impl<A: PimAf> Pim<A> {
             self.tib.get_mut(&key).unwrap().join_state = JoinState::Joined;
             self.jp_send_entry(ifindex, nexthop, key, true);
             self.jp_refresh_arm(ifindex, nexthop);
-            tracing::info!("pim: {} joined toward {}", key, nexthop);
+            pim_trace!(self.tracing, Tib, "pim: {} joined toward {}", key, nexthop);
         } else if !want_joined && is_joined {
             self.tib.get_mut(&key).unwrap().join_state = JoinState::NotJoined;
             if let Some((ifindex, nexthop)) = upstream_nbr {
                 self.jp_send_entry(ifindex, nexthop, key, false);
-                tracing::info!("pim: {} pruned toward {}", key, nexthop);
+                pim_trace!(self.tracing, Tib, "pim: {} pruned toward {}", key, nexthop);
             }
         }
 
@@ -616,7 +630,9 @@ impl<A: PimAf> Pim<A> {
             return;
         }
         if let RpfState::Gateway { ifindex, nexthop } = star_entry.rpf {
-            tracing::info!(
+            pim_trace!(
+                self.tracing,
+                Tib,
                 "pim: {} SPT bit set — pruning ({}, {}) off the RPT",
                 key,
                 src,

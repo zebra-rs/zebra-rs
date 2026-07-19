@@ -1,0 +1,144 @@
+module zebra-pim-tracing {
+  yang-version "1";
+
+  namespace "urn:ietf:params:xml:ns:yang:zebra-pim-tracing";
+  prefix "zptr";
+
+  import config {
+    prefix config;
+  }
+
+  import configure {
+    prefix configure;
+  }
+
+  import extension {
+    prefix ext;
+  }
+
+  organization
+    "zebra-rs";
+
+  contact
+    "https://github.com/zebra-rs";
+
+  description
+    "Conditional PIM tracing, attachable at the `router pim` instance:
+
+       * `router pim tracing { ... }`
+
+     This mirrors the IS-IS / OSPF / BGP `tracing` model (a typed config
+     block consulted by a gated log macro, so categories can be turned on
+     at runtime without a rebuild). Unlike those protocols the PIM
+     `info!` sites are protocol *events* rather than per-PDU send/receive
+     points, so each category is a bare presence toggle with no direction
+     or level refinement. One `router pim tracing` block drives every PIM
+     instance — the default IPv4 table, the default-table IPv6 child, and
+     each per-VRF child.
+
+     Example:
+
+       router pim {
+         tracing {
+           neighbor;
+           tib;
+           register;
+         }
+       }
+
+     Each category is a `type empty` leaf — name it to enable, delete it
+     to disable; absence means the category is silent. Enabling by
+     presence (rather than a `true` value) matches IS-IS / OSPF / BGP
+     `tracing`: the config dispatch keys off set vs delete and never reads
+     a value, so `type empty` is the honest type here. With no `tracing`
+     block every category is silent (PIM emits no info-level logs).";
+
+  revision 2026-07-18 {
+    description
+      "Initial revision — `router pim tracing` on the IS-IS / OSPF / BGP
+       presence-toggle model. Categories: an `all` master switch plus the
+       per-subsystem toggles neighbor, interface, membership (IGMP/MLD),
+       tib ((S,G)/(*,G) tree state), join-prune, assert, register, bsr
+       (Bootstrap Router / RP-set), mroute (kernel MRT/MIF/MFC datapath),
+       and event (instance lifecycle). No direction / level refinement:
+       the PIM trace sites are events, not per-PDU points, and PIM has no
+       IS-IS-style levels.";
+  }
+
+  grouping pim-tracing-extension {
+    description
+      "The `tracing` block attached to the `router pim` instance.";
+
+    container tracing {
+      ext:help "PIM conditional tracing";
+      description
+        "Per-category PIM log toggles, applied to every PIM instance
+         (default IPv4, default-table IPv6, and per-VRF).";
+
+      leaf all {
+        ext:help "Enable every tracing category";
+        type empty;
+        description
+          "Master switch — when present, every category below is traced
+           regardless of its individual toggle.";
+      }
+      leaf neighbor {
+        ext:help "Trace PIM neighbor (adjacency) up / down / restart";
+        type empty;
+      }
+      leaf interface {
+        ext:help "Trace PIM / IGMP / MLD interface enable / disable and DR change";
+        type empty;
+      }
+      leaf membership {
+        ext:help "Trace IGMP / MLD group membership (querier election, group expiry)";
+        type empty;
+      }
+      leaf tib {
+        ext:help "Trace (S,G) / (*,G) tree state (create, delete, RPF, join, prune, SPT)";
+        type empty;
+      }
+      leaf join-prune {
+        ext:help "Trace Join/Prune message processing";
+        type empty;
+      }
+      leaf assert {
+        ext:help "Trace the PIM assert state machine";
+        type empty;
+      }
+      leaf register {
+        ext:help "Trace PIM Register / Register-Stop (FHR encapsulation)";
+        type empty;
+      }
+      leaf bsr {
+        ext:help "Trace Bootstrap Router election and Candidate-RP (RFC 5059)";
+        type empty;
+      }
+      leaf mroute {
+        ext:help "Trace the kernel multicast-routing datapath (VIF/MIF add/delete)";
+        type empty;
+      }
+      leaf event {
+        ext:help "Trace instance lifecycle (per-VRF / IPv6 child spawn / despawn)";
+        type empty;
+      }
+    }
+  }
+
+  /* =========================================================
+   * Augments into the zebra-rs configure tree
+   * ========================================================= */
+
+  augment "/configure:set/config:router/config:pim" {
+    description
+      "`router pim tracing` in the candidate-set subtree.";
+    uses pim-tracing-extension;
+  }
+
+  augment "/configure:delete/config:router/config:pim" {
+    description
+      "Same attachment for the delete subtree so
+       `delete router pim tracing ...` is path-valid.";
+    uses pim-tracing-extension;
+  }
+}

@@ -166,9 +166,11 @@ pub trait PimForwardingPlane<A: PimAf>: Sized {
     /// init sockopt) — the per-VRF path.
     fn new(ctx: &ProtoContext, table_id: u32) -> std::io::Result<Self>;
     /// Allocate and program a VIF/MIF for `ifindex` (idempotent).
-    fn vif_add(&mut self, ifindex: u32);
-    /// Remove the VIF/MIF for `ifindex`.
-    fn vif_del(&mut self, ifindex: u32);
+    /// `trace` gates the `mroute`-category info log (the plane has no
+    /// handle to the instance's `PimTracing`).
+    fn vif_add(&mut self, ifindex: u32, trace: bool);
+    /// Remove the VIF/MIF for `ifindex`. `trace` gates the info log.
+    fn vif_del(&mut self, ifindex: u32, trace: bool);
     /// The VIF/MIF index currently mapped to `ifindex`.
     fn vif(&self, ifindex: u32) -> Option<u16>;
     /// The ifindex mapped to a VIF/MIF index (upcall arrival lookup).
@@ -241,7 +243,7 @@ impl PimForwardingPlane<Ipv4> for Mrt4 {
             .map(|(ifindex, _)| *ifindex)
     }
 
-    fn vif_add(&mut self, ifindex: u32) {
+    fn vif_add(&mut self, ifindex: u32, trace: bool) {
         if self.vifs.contains_key(&ifindex) {
             return;
         }
@@ -265,13 +267,19 @@ impl PimForwardingPlane<Ipv4> for Mrt4 {
         match mrt_setsockopt(self.sock.get_ref(), MRT_ADD_VIF, &vc) {
             Ok(()) => {
                 self.vifs.insert(ifindex, vif);
-                tracing::info!("mroute: VIF {vif} added for ifindex {ifindex}");
+                if trace {
+                    tracing::info!(
+                        proto = "pim",
+                        category = "mroute",
+                        "mroute: VIF {vif} added for ifindex {ifindex}"
+                    );
+                }
             }
             Err(e) => tracing::warn!("mroute: MRT_ADD_VIF ifindex {ifindex} failed: {e}"),
         }
     }
 
-    fn vif_del(&mut self, ifindex: u32) {
+    fn vif_del(&mut self, ifindex: u32, trace: bool) {
         let Some(vif) = self.vifs.remove(&ifindex) else {
             return;
         };
@@ -285,8 +293,12 @@ impl PimForwardingPlane<Ipv4> for Mrt4 {
         };
         if let Err(e) = mrt_setsockopt(self.sock.get_ref(), MRT_DEL_VIF, &vc) {
             tracing::debug!("mroute: MRT_DEL_VIF ifindex {ifindex} failed: {e}");
-        } else {
-            tracing::info!("mroute: VIF {vif} deleted for ifindex {ifindex}");
+        } else if trace {
+            tracing::info!(
+                proto = "pim",
+                category = "mroute",
+                "mroute: VIF {vif} deleted for ifindex {ifindex}"
+            );
         }
     }
 
@@ -343,8 +355,8 @@ impl PimForwardingPlane<Ipv6> for Mrt6 {
     fn new(_ctx: &ProtoContext, _table_id: u32) -> std::io::Result<Self> {
         Ok(Mrt6)
     }
-    fn vif_add(&mut self, _ifindex: u32) {}
-    fn vif_del(&mut self, _ifindex: u32) {}
+    fn vif_add(&mut self, _ifindex: u32, _trace: bool) {}
+    fn vif_del(&mut self, _ifindex: u32, _trace: bool) {}
     fn vif(&self, _ifindex: u32) -> Option<u16> {
         None
     }

@@ -37,6 +37,7 @@ pub fn af6_proto_label() -> String {
 pub fn spawn_pim_v6(
     rib_subscriber: &RibSubscriber,
     config_tx: &Sender<Message>,
+    trace: bool,
 ) -> Option<PimAf6Handle> {
     let proto = af6_proto_label();
 
@@ -82,7 +83,13 @@ pub fn spawn_pim_v6(
     let cm_tx = pim.cm.tx.clone();
     let show_tx = pim.show.tx.clone();
     let task = inst::serve(pim);
-    tracing::info!("pim6: spawned default-table IPv6 instance");
+    if trace {
+        tracing::info!(
+            proto = "pim",
+            category = "event",
+            "pim6: spawned default-table IPv6 instance"
+        );
+    }
 
     Some(PimAf6Handle {
         cm_tx,

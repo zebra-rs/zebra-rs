@@ -81,6 +81,7 @@ pub fn spawn_pim_vrf(
     rib_subscriber: &RibSubscriber,
     config_tx: &Sender<Message>,
     buffered: &[(Vec<CommandPath>, ConfigOp)],
+    trace: bool,
 ) -> Option<PimVrfHandle> {
     let proto = vrf_proto_label(name);
 
@@ -138,7 +139,15 @@ pub fn spawn_pim_vrf(
     let _ = cm_tx.send(ConfigRequest::new(Vec::new(), ConfigOp::CommitEnd));
 
     let task = inst::serve(pim);
-    tracing::info!(vrf = %name, table_id, "pim: spawned per-VRF instance");
+    if trace {
+        tracing::info!(
+            proto = "pim",
+            category = "event",
+            vrf = %name,
+            table_id,
+            "pim: spawned per-VRF instance"
+        );
+    }
 
     Some(PimVrfHandle { cm_tx, task })
 }
@@ -147,10 +156,22 @@ pub fn spawn_pim_vrf(
 /// caller removes the handle from `vrf_registry`, which drops the
 /// `Task` and aborts the event loop — closing the sockets runs the
 /// kernel's implicit MRT_DONE cleanup for the VRF table.
-pub fn despawn_pim_vrf(name: &str, config_tx: &Sender<Message>, rib_subscriber: &RibSubscriber) {
+pub fn despawn_pim_vrf(
+    name: &str,
+    config_tx: &Sender<Message>,
+    rib_subscriber: &RibSubscriber,
+    trace: bool,
+) {
     let _ = config_tx.try_send(Message::UnsubscribeShowVrf {
         key: vrf_show_key(name),
     });
     rib_subscriber.send_proto_cleanup(&vrf_proto_label(name));
-    tracing::info!(vrf = %name, "pim: despawned per-VRF instance");
+    if trace {
+        tracing::info!(
+            proto = "pim",
+            category = "event",
+            vrf = %name,
+            "pim: despawned per-VRF instance"
+        );
+    }
 }

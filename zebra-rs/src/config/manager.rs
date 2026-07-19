@@ -1803,6 +1803,47 @@ mod yang_load_tests {
         }
     }
 
+    /// Pin the `zebra-pim-tracing` augment: every `router pim tracing`
+    /// category must resolve as a settable path. A new augment module that
+    /// forgets to `import` into `config.yang` (or a renamed leaf) fails
+    /// here in the unit suite instead of only at live apply as an "unknown
+    /// key". Mirrors `enabled_activation_leaf_paths_parse`.
+    #[test]
+    fn pim_tracing_paths_parse() {
+        use crate::config::ExecCode;
+        use crate::config::parse::{State, parse};
+        use libyang::to_entry;
+
+        let mut yang = YangStore::new();
+        yang.add_path(concat!(env!("CARGO_MANIFEST_DIR"), "/yang"));
+        yang.read_with_resolve("configure")
+            .unwrap_or_else(|e| panic!("configure failed to load: {e:#}"));
+        yang.identity_resolve();
+        let module = yang.find_module("configure").unwrap();
+        let entry = to_entry(&yang, module);
+
+        for cmd in [
+            "set router pim tracing all",
+            "set router pim tracing neighbor",
+            "set router pim tracing interface",
+            "set router pim tracing membership",
+            "set router pim tracing tib",
+            "set router pim tracing join-prune",
+            "set router pim tracing assert",
+            "set router pim tracing register",
+            "set router pim tracing bsr",
+            "set router pim tracing mroute",
+            "set router pim tracing event",
+        ] {
+            let (code, _comps, _state) = parse(cmd, entry.clone(), None, State::new());
+            assert_eq!(
+                code,
+                ExecCode::Success,
+                "should parse as a settable path: {cmd}"
+            );
+        }
+    }
+
     /// Regression guard for `remove-private-as`. The IETF model
     /// (`ietf-bgp`) shipped a `remove-private-as` identityref leaf on the
     /// neighbor whose IANA base this libyang can't resolve to a value

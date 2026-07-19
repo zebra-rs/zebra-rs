@@ -40,6 +40,8 @@ use super::network_v6::{read_packet_v6, write_packet_v6};
 use super::rp::RpSet;
 use super::rpf::RpfEntry;
 use super::tib::{SgKey, TibEntry};
+use super::tracing::{PimTracing, TraceCategory};
+use crate::pim_trace;
 
 /// `show pim ...` dispatch handler, mirroring
 /// [`crate::nd::inst::ShowCallback`].
@@ -140,6 +142,10 @@ pub struct Pim<A: PimAf = Ipv4> {
     /// Buffered `router pim ipv6 …` intent, so the child can be despawned
     /// when its block is fully deleted (mirrors `vrf_log`).
     pub(crate) af6_log: Vec<(Vec<CommandPath>, ConfigOp)>,
+    /// Conditional-tracing toggles (`router pim tracing`). The default
+    /// instance's block is written by config and the same lines are
+    /// forwarded live to any running IPv6 / per-VRF child.
+    pub(crate) tracing: PimTracing,
     _read_task: Task<()>,
     _write_task: Task<()>,
     _mroute_read_task: Task<()>,
@@ -211,6 +217,7 @@ impl Pim<Ipv4> {
             rib_known_vrfs: BTreeMap::new(),
             af6: None,
             af6_log: Vec::new(),
+            tracing: PimTracing::default(),
             _read_task: read_task,
             _write_task: write_task,
             _mroute_read_task: mroute_read_task,
@@ -282,6 +289,7 @@ impl Pim<Ipv6> {
             rib_known_vrfs: BTreeMap::new(),
             af6: None,
             af6_log: Vec::new(),
+            tracing: PimTracing::default(),
             _read_task: read_task,
             _write_task: write_task,
             // No kernel mroute read task in Phase 3 (Mrt6 is a stub).
@@ -364,6 +372,7 @@ impl<A: PimAf> Pim<A> {
             config: self.link_config(&link.name).igmp,
             is_dr: self.i_am_dr(ifindex),
             my_addr: link.primary_addr(),
+            trace: self.tracing.should_trace(TraceCategory::Membership),
         })
     }
 
@@ -469,6 +478,29 @@ impl<A: PimAf> Pim<A> {
         let (path, args) = path_from_command(&msg.paths);
         if let Some(f) = self.callbacks.get(&path).copied() {
             f(self, args, msg.op);
+        } else if path.starts_with("/router/pim/tracing") {
+            // Not in the callback table — the category names are YANG
+            // presence leaves, so a single subtree dispatcher parses the
+            // path tail (mirrors IS-IS's `config_tracing_dispatch`).
+            super::tracing::config_tracing_dispatch(self, &path, msg.op);
+            // Forward the same line to any running IPv6 / per-VRF child so
+            // `router pim tracing` covers every PIM instance, not just the
+            // default table. (Children have no children of their own, so
+            // this does not recurse.)
+            self.tracing_forward_children(&msg.paths, msg.op);
+        }
+    }
+
+    /// Forward a `/router/pim/tracing/…` line to every running child
+    /// (default-table IPv6 and per-VRF), so a single `router pim tracing`
+    /// block drives all PIM instances. Live only — a child spawned after
+    /// the line was applied starts with tracing off until the next change.
+    fn tracing_forward_children(&self, paths: &[CommandPath], op: ConfigOp) {
+        if let Some(handle) = &self.af6 {
+            let _ = handle.cm_tx.send(ConfigRequest::new(paths.to_vec(), op));
+        }
+        for handle in self.vrf_registry.values() {
+            let _ = handle.cm_tx.send(ConfigRequest::new(paths.to_vec(), op));
         }
     }
 
@@ -489,7 +521,11 @@ impl<A: PimAf> Pim<A> {
         if self.proto_label != "pim" || self.af6.is_some() {
             return;
         }
-        self.af6 = super::af6::spawn_pim_v6(&self.rib_subscriber, &self.config_tx);
+        self.af6 = super::af6::spawn_pim_v6(
+            &self.rib_subscriber,
+            &self.config_tx,
+            self.tracing.should_trace(TraceCategory::Event),
+        );
     }
 
     /// CommitEnd: despawn the IPv6 child if its `router pim ipv6` block
@@ -504,7 +540,11 @@ impl<A: PimAf> Pim<A> {
             if self.af6.take().is_some() {
                 self.rib_subscriber
                     .send_proto_cleanup(&super::af6::af6_proto_label());
-                tracing::info!("pim6: default-table IPv6 instance despawned");
+                pim_trace!(
+                    self.tracing,
+                    Event,
+                    "pim6: default-table IPv6 instance despawned"
+                );
             }
             return;
         }
@@ -545,9 +585,14 @@ impl<A: PimAf> Pim<A> {
             return;
         }
         let log = self.vrf_log.get(name).cloned().unwrap_or_default();
-        if let Some(handle) =
-            super::vrf::spawn_pim_vrf(name, table_id, &self.rib_subscriber, &self.config_tx, &log)
-        {
+        if let Some(handle) = super::vrf::spawn_pim_vrf(
+            name,
+            table_id,
+            &self.rib_subscriber,
+            &self.config_tx,
+            &log,
+            self.tracing.should_trace(TraceCategory::Event),
+        ) {
             self.vrf_registry.insert(name.to_string(), handle);
         }
     }
@@ -569,7 +614,12 @@ impl<A: PimAf> Pim<A> {
         }
         self.rib_known_vrfs.remove(&name);
         if self.vrf_registry.remove(&name).is_some() {
-            super::vrf::despawn_pim_vrf(&name, &self.config_tx, &self.rib_subscriber);
+            super::vrf::despawn_pim_vrf(
+                &name,
+                &self.config_tx,
+                &self.rib_subscriber,
+                self.tracing.should_trace(TraceCategory::Event),
+            );
         }
     }
 
@@ -586,7 +636,12 @@ impl<A: PimAf> Pim<A> {
         for name in emptied {
             self.vrf_log.remove(&name);
             if self.vrf_registry.remove(&name).is_some() {
-                super::vrf::despawn_pim_vrf(&name, &self.config_tx, &self.rib_subscriber);
+                super::vrf::despawn_pim_vrf(
+                    &name,
+                    &self.config_tx,
+                    &self.rib_subscriber,
+                    self.tracing.should_trace(TraceCategory::Event),
+                );
             }
         }
         for handle in self.vrf_registry.values() {

@@ -187,6 +187,10 @@ pub struct GmIfCtx<A: PimAf> {
     pub config: IgmpConfig,
     pub is_dr: bool,
     pub my_addr: Option<A::Addr>,
+    /// Whether the `membership` tracing category is enabled on the owning
+    /// instance — the engine gates its info logs on it (it has no direct
+    /// handle to the instance's `PimTracing`).
+    pub trace: bool,
 }
 
 /// The transport + wire seam. One implementor per address family
@@ -332,7 +336,14 @@ impl<A: PimAf> Gm<A> {
             if let QuerierState::NonQuerier { until, .. } = gmif.querier
                 && until <= now
             {
-                tracing::info!("gm: {} other querier expired, taking over", ifctx.name);
+                if ifctx.trace {
+                    tracing::info!(
+                        proto = "pim",
+                        category = "membership",
+                        "gm: {} other querier expired, taking over",
+                        ifctx.name
+                    );
+                }
                 gmif.querier = QuerierState::Querier;
                 gmif.next_query = now;
             }
@@ -399,7 +410,15 @@ impl<A: PimAf> Gm<A> {
                         });
                     }
                 }
-                tracing::info!("gm: group {} expired on {}", group_addr, ifctx.name);
+                if ifctx.trace {
+                    tracing::info!(
+                        proto = "pim",
+                        category = "membership",
+                        "gm: group {} expired on {}",
+                        group_addr,
+                        ifctx.name
+                    );
+                }
             }
             for group_addr in sync {
                 events.extend(self.sync(ifindex, group_addr, ifctx));
@@ -511,8 +530,14 @@ impl<A: PimAf> Gm<A> {
         let Some(gmif) = self.ifs.get_mut(&ifindex) else {
             return;
         };
-        if gmif.querier == QuerierState::Querier {
-            tracing::info!("gm: {} lost querier election to {}", ctx.name, src);
+        if gmif.querier == QuerierState::Querier && ctx.trace {
+            tracing::info!(
+                proto = "pim",
+                category = "membership",
+                "gm: {} lost querier election to {}",
+                ctx.name,
+                src
+            );
         }
         gmif.querier = QuerierState::NonQuerier {
             querier: src,

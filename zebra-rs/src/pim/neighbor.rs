@@ -7,6 +7,7 @@ use std::time::Instant;
 use pim_packet::PimHello;
 
 use crate::context::Timer;
+use crate::pim_trace;
 
 use super::af::PimAf;
 use super::inst::{Message, Pim};
@@ -117,7 +118,13 @@ impl<A: PimAf> Pim<A> {
         link.nbrs.get_mut(&src).unwrap().expiry = timer;
 
         if is_new {
-            tracing::info!("pim: neighbor {} up on {}", src, link.name);
+            pim_trace!(
+                self.tracing,
+                Neighbor,
+                "pim: neighbor {} up on {}",
+                src,
+                link.name
+            );
             // Triggered hello so a newly-heard neighbor learns us
             // without waiting out our hello period (RFC 7761 §4.3.1).
             self.hello_send(ifindex);
@@ -125,7 +132,9 @@ impl<A: PimAf> Pim<A> {
             // join now.
             self.tib_neighbor_up(ifindex, src);
         } else if bounced {
-            tracing::info!(
+            pim_trace!(
+                self.tracing,
+                Neighbor,
                 "pim: neighbor {} on {} restarted (GenID change)",
                 src,
                 link.name
@@ -148,7 +157,14 @@ impl<A: PimAf> Pim<A> {
             return;
         };
         if link.nbrs.remove(&addr).is_some() {
-            tracing::info!("pim: neighbor {} down on {} ({})", addr, link.name, reason);
+            pim_trace!(
+                self.tracing,
+                Neighbor,
+                "pim: neighbor {} down on {} ({})",
+                addr,
+                link.name,
+                reason
+            );
             self.dr_election(ifindex);
             self.tib_neighbor_down(ifindex, addr);
         }
