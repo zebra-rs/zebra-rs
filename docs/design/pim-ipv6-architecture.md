@@ -539,7 +539,7 @@ Each phase is one reviewable PR leaving the tree tested and useful.
 | 1 | **DONE** — Codec groundwork: checksum context API (all emit sites), MLD wire types, exponent encodings, mixed-family rejection, ICMPv6 checksum helper lifted to `packet-utils` | fixture + negative tests; IPv4 fixtures byte-identical |
 | 2 | `Pim<A>`/`Gm<A>`/FP-trait genericization; **IPv4 runtime only**. Landed in compiling slices (see note). | all IPv4 unit + live BDD unchanged |
 | 3.0 | Extract the shared `Gm<A>` engine + `GmCodec` (rename `igmp/`→`gm/`); the membership transport moves off `Pim<A>` into the engine so `Pim<Ipv6>` needs no IGMP fields. IPv4-only runtime | IPv4 membership BDD unchanged (`pim_igmp`) |
-| 3.1 | `Ipv6` marker + `Mrt6` stub + PIMv6 socket, Hello/neighbor/DR over LL, AF-split spawn of a default-table `Pim<Ipv6>` | two-router adjacency BDD; invalid-transport negatives |
+| 3.1 | **DONE** — `Ipv6` marker + `Mrt6` stub + PIMv6 socket, Hello/neighbor/DR over LL, AF-split spawn of a default-table `Pim<Ipv6>` (`af6_split` forwards config + show; `PimSend.src` for the v6 checksum; generic interface knobs) | `@pim6_adjacency` two-router link-local neighborship passes; IPv4 pim features green |
 | 4 | MLDv1/v2 codec via `Gm<Ipv6>` + TIB bridge (the second `GmCodec`, now plugging into the engine from 3.0) | querier/compat/source-filter BDD |
 | 5 | `Mrt6` plane + generic RPF + SSM end-to-end | UDPv6 delivery + kernel MIF/MFC asserts (MVP gate) |
 | 6 | Static-RP ASM, IPv6 Register path, SPT | three-router ASM traffic proof |

@@ -200,6 +200,7 @@ impl<A: PimAf> Pim<A> {
             packet,
             ifindex,
             dst: A::ALL_PIM_ROUTERS,
+            src: None,
         });
     }
 

@@ -17,7 +17,7 @@
 //! socket (`super::socket::igmp_socket`) is the IGMP RX path.
 
 use std::collections::BTreeMap;
-use std::net::Ipv4Addr;
+use std::net::{Ipv4Addr, Ipv6Addr};
 use std::os::fd::AsRawFd;
 
 use libc::c_int;
@@ -29,6 +29,7 @@ use crate::context::ProtoContext;
 
 use super::af::PimAf;
 use super::ipv4::Ipv4;
+use super::ipv6::Ipv6;
 
 // linux/mroute.h — not exposed by the libc crate.
 const MRT_INIT: c_int = 200;
@@ -331,6 +332,27 @@ impl PimForwardingPlane<Ipv4> for Mrt4 {
             tracing::debug!("mroute: MFC ({src},{grp}) deleted");
         }
     }
+}
+
+/// The IPv6 multicast-forwarding plane. Phase 3 (PIMv6 adjacency) uses
+/// a no-op stub so `Pim<Ipv6>` can run without forwarding; the real
+/// MRT6 / MIF / MFC datapath over `linux/mroute6.h` lands in Phase 5.
+pub struct Mrt6;
+
+impl PimForwardingPlane<Ipv6> for Mrt6 {
+    fn new(_ctx: &ProtoContext, _table_id: u32) -> std::io::Result<Self> {
+        Ok(Mrt6)
+    }
+    fn vif_add(&mut self, _ifindex: u32) {}
+    fn vif_del(&mut self, _ifindex: u32) {}
+    fn vif(&self, _ifindex: u32) -> Option<u16> {
+        None
+    }
+    fn ifindex_of(&self, _vif: u16) -> Option<u32> {
+        None
+    }
+    fn mfc_add(&self, _src: Ipv6Addr, _grp: Ipv6Addr, _iif: u16, _oifs: &[u16]) {}
+    fn mfc_del(&self, _src: Ipv6Addr, _grp: Ipv6Addr) {}
 }
 
 #[cfg(test)]

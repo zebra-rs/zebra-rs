@@ -113,7 +113,7 @@ pub fn spawn_pim_vrf(
     let (rib_client, rib_rx) = rib_subscriber.subscribe_for_vrf(&proto, table_id);
     let ctx = ProtoContext::for_vrf(rib_client, table_id, name.to_string());
 
-    let pim = Pim::new(
+    let pim = Pim::<super::ipv4::Ipv4>::new(
         ctx,
         sock,
         igmp_sock,

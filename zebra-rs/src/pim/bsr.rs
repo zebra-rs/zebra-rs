@@ -320,6 +320,7 @@ impl<A: PimAf> Pim<A> {
                 packet: packet.clone(),
                 ifindex: oif,
                 dst: A::ALL_PIM_ROUTERS,
+                src: None,
             });
         }
 
@@ -424,6 +425,7 @@ impl<A: PimAf> Pim<A> {
                 packet: packet.clone(),
                 ifindex: oif,
                 dst: A::ALL_PIM_ROUTERS,
+                src: None,
             });
         }
     }
@@ -466,6 +468,7 @@ impl<A: PimAf> Pim<A> {
             packet,
             ifindex: 0,
             dst: bsr,
+            src: None,
         });
     }
 

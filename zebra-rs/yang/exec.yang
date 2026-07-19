@@ -1042,6 +1042,20 @@ module exec {
         ext:help "PIM assert election state";
         presence "PIM assert";
       }
+      container ipv6 {
+        // PIMv6 show: the default `router pim` task strips the `ipv6`
+        // container and forwards to the default-table Pim<Ipv6> child.
+        ext:help "PIMv6 (IPv6) state";
+        presence "PIMv6";
+        container interface {
+          ext:help "PIMv6 interface";
+          presence "PIMv6 interface";
+        }
+        container neighbor {
+          ext:help "PIMv6 neighbor";
+          presence "PIMv6 neighbor";
+        }
+      }
       list vrf {
         // Per-VRF PIM show: the manager strips the `vrf <name>`
         // selector (vrf_redirect_split) and redirects into the child

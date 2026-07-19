@@ -3,6 +3,8 @@
 use std::net::{IpAddr, Ipv4Addr};
 
 use ipnet::{IpNet, Ipv4Net};
+use socket2::Socket;
+use tokio::io::unix::AsyncFd;
 
 use crate::rib::Link;
 
@@ -50,6 +52,14 @@ impl PimAf for Ipv4 {
             .iter()
             .filter_map(|a| Self::prefix_from_ipnet(a.addr))
             .collect()
+    }
+
+    fn join_pim_if(sock: &AsyncFd<Socket>, ifindex: u32) {
+        super::socket::pim_join_if(sock, ifindex);
+    }
+
+    fn leave_pim_if(sock: &AsyncFd<Socket>, ifindex: u32) {
+        super::socket::pim_leave_if(sock, ifindex);
     }
 
     // `Ipv4Net::new_assert` is a const fn, so the canonical ranges are

@@ -51,7 +51,7 @@ pub fn spawn_pim(config: &ConfigManager) {
     // get `"pim:vrf:<name>"`. The subscriber + config.tx let the
     // default task mint per-VRF RIB subscriptions and (de)register
     // `show pim vrf <name>` channels.
-    let pim = inst::Pim::new(
+    let pim = inst::Pim::<crate::pim::ipv4::Ipv4>::new(
         ctx,
         sock,
         igmp_sock,
