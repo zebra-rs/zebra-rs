@@ -209,7 +209,11 @@ impl<A: PimAf> Pim<A> {
             packet,
             ifindex,
             dst: A::ALL_PIM_ROUTERS,
-            src: None,
+            // PIMv6 control must be sourced from the egress link-local
+            // (`write_packet_v6` drops a send with no pinned source);
+            // the IPv4 write task ignores `src`, so this is byte-identical
+            // there.
+            src: self.links.get(&ifindex).and_then(|l| l.primary_addr()),
         });
     }
 

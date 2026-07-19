@@ -21,6 +21,7 @@ use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender};
 
 use super::inst::{Message, PimSend};
 use super::ipv6::Ipv6;
+use super::mroute::parse_upcall_v6;
 
 /// Whether `a` is a unicast link-local (`fe80::/10`). PIMv6 control
 /// messages MUST be sourced from a link-local (RFC 7761 §4.3.1); a
@@ -86,6 +87,38 @@ pub async fn read_packet_v6(sock: Arc<AsyncFd<Socket>>, tx: UnboundedSender<Mess
                     ifindex,
                 });
 
+                Ok(())
+            })
+            .await;
+        if tx.is_closed() {
+            return;
+        }
+    }
+}
+
+/// Drain the MRT6 socket: kernel `mrt6msg` upcalls (first byte zero)
+/// become [`Message::Upcall`]; genuine ICMPv6 the kernel also delivers
+/// here is dropped by [`parse_upcall_v6`].
+pub async fn mroute_read_v6(sock: Arc<AsyncFd<Socket>>, tx: UnboundedSender<Message<Ipv6>>) {
+    let mut buf = [0u8; 1024 * 16];
+
+    loop {
+        let _ = sock
+            .async_io(Interest::READABLE, |sock| {
+                let n = unsafe {
+                    libc::recv(
+                        sock.as_raw_fd(),
+                        buf.as_mut_ptr() as *mut libc::c_void,
+                        buf.len(),
+                        0,
+                    )
+                };
+                if n < 0 {
+                    return Err(std::io::Error::last_os_error());
+                }
+                if let Some(upcall) = parse_upcall_v6(&buf[..n as usize]) {
+                    let _ = tx.send(Message::Upcall(upcall));
+                }
                 Ok(())
             })
             .await;

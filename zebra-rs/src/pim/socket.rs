@@ -83,7 +83,7 @@ fn set_ipv6_pktinfo(socket: &Socket) {
 pub const MLD_V2_REPORT_GROUP: Ipv6Addr = Ipv6Addr::new(0xff02, 0, 0, 0, 0, 0, 0, 0x0016);
 
 /// ICMPv6 protocol number.
-const IPPROTO_ICMPV6: i32 = 58;
+pub const IPPROTO_ICMPV6: i32 = 58;
 /// `ICMP6_FILTER` sockopt name (kernel ABI value 1 on Linux; not in
 /// libc as a constant on all targets).
 const ICMP6_FILTER_OPT: c_int = 1;

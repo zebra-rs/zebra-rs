@@ -1,0 +1,22 @@
+interface:
+- if-name: eth2
+  ipv6:
+    address: 2001:db8:13::2/64
+- if-name: eth5
+  ipv6:
+    address: 2001:db8:15::1/64
+router:
+  static:
+    ipv6:
+      route:
+      - prefix: 2001:db8:14::/64
+        nexthop:
+        - address: 2001:db8:13::1
+  pim:
+    ipv6:
+      interface:
+      - if-name: eth2
+        dr-priority: 1
+      - if-name: eth5
+        mld:
+          enabled: true
