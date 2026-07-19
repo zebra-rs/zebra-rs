@@ -68,7 +68,15 @@ impl IgmpCodec {
 
 impl GmCodec<Ipv4> for IgmpCodec {
     /// Build and queue a general (group `None`) or group-specific query.
-    fn send_query(&self, cfg: &IgmpConfig, ifindex: u32, group: Option<Ipv4Addr>) {
+    /// `_src` is unused: the kernel selects the IPv4 source and the IGMP
+    /// checksum has no pseudo-header.
+    fn send_query(
+        &self,
+        cfg: &IgmpConfig,
+        ifindex: u32,
+        group: Option<Ipv4Addr>,
+        _src: Option<Ipv4Addr>,
+    ) {
         // Max Resp is in units of 1/10 s; group-specific queries use the
         // Last Member Query Interval (1 s). The exponent-coded form
         // represents values past 8 bits instead of clamping.

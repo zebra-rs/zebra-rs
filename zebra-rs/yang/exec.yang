@@ -1055,6 +1055,13 @@ module exec {
           ext:help "PIMv6 neighbor";
           presence "PIMv6 neighbor";
         }
+        container mld {
+          ext:help "MLD membership state";
+          container groups {
+            ext:help "MLD group memberships";
+            presence "MLD groups";
+          }
+        }
       }
       list vrf {
         // Per-VRF PIM show: the manager strips the `vrf <name>`

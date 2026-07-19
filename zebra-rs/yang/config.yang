@@ -4149,6 +4149,37 @@ module config {
               type boolean;
               default false;
             }
+            container mld {
+              ext:help "MLD on this interface";
+              leaf enabled {
+                ext:help "Enable MLD membership tracking";
+                type boolean;
+                default false;
+              }
+              leaf version {
+                ext:help "MLD version to run";
+                type uint8 {
+                  range "1..2";
+                }
+                default 2;
+              }
+              leaf query-interval {
+                ext:help "General query transmit interval (seconds)";
+                type uint16 {
+                  range "1..1800";
+                }
+                units "seconds";
+                default 125;
+              }
+              leaf query-max-response-time {
+                ext:help "Max response time advertised in queries (seconds)";
+                type uint16 {
+                  range "1..25";
+                }
+                units "seconds";
+                default 10;
+              }
+            }
           }
         }
         list vrf {

@@ -19,6 +19,7 @@ use super::af::PimAf;
 use super::tib::SgKey;
 
 pub mod igmp;
+pub mod mld;
 
 pub use pim_packet::IgmpRecordType as GmRecordType;
 
@@ -194,7 +195,17 @@ pub struct GmIfCtx<A: PimAf> {
 /// [`GmInput`] and feeds the actor, and [`send_query`](GmCodec::send_query)
 /// builds and queues the family's query PDU.
 pub trait GmCodec<A: PimAf>: Send + Sync + 'static {
-    fn send_query(&self, cfg: &IgmpConfig, ifindex: u32, group: Option<A::Addr>);
+    /// Build and queue a general (group `None`) or group-specific query.
+    /// `src` is the interface's primary address — the IPv6 (MLD) codec
+    /// pins it as the link-local source the pseudo-header checksum needs;
+    /// the IPv4 (IGMP) codec ignores it (the kernel selects the source).
+    fn send_query(
+        &self,
+        cfg: &IgmpConfig,
+        ifindex: u32,
+        group: Option<A::Addr>,
+        src: Option<A::Addr>,
+    );
     fn join_if(&self, ifindex: u32);
     fn leave_if(&self, ifindex: u32);
 }
@@ -327,7 +338,7 @@ impl<A: PimAf> Gm<A> {
             }
 
             if gmif.querier == QuerierState::Querier && gmif.next_query <= now {
-                self.codec.send_query(cfg, ifindex, None);
+                self.codec.send_query(cfg, ifindex, None, ifctx.my_addr);
                 let interval = if gmif.startup_remaining > 0 {
                     gmif.startup_remaining -= 1;
                     cfg.startup_interval()
@@ -552,7 +563,8 @@ impl<A: PimAf> Gm<A> {
             }
         }
         if query {
-            self.codec.send_query(&ctx.config, ifindex, Some(grp));
+            self.codec
+                .send_query(&ctx.config, ifindex, Some(grp), ctx.my_addr);
         }
     }
 
@@ -652,7 +664,8 @@ impl<A: PimAf> Gm<A> {
             }
         }
         if query {
-            self.codec.send_query(&ctx.config, ifindex, Some(grp));
+            self.codec
+                .send_query(&ctx.config, ifindex, Some(grp), ctx.my_addr);
         }
     }
 }

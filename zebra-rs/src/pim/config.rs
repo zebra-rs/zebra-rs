@@ -64,11 +64,23 @@ impl Pim<Ipv4> {
     }
 }
 
-/// The IPv6 configuration surface (Phase 3: adjacency only — the shared
-/// interface knobs). MLD, IPv6 RP and IPv6 BSR arrive in later phases.
+/// The IPv6 configuration surface: the shared interface knobs plus MLD
+/// membership (the same AF-agnostic callbacks the IGMP paths use, since
+/// `LinkConfig.igmp` is shared). IPv6 RP and IPv6 BSR arrive in later
+/// phases.
 impl Pim<Ipv6> {
     pub fn callback_build(&mut self) {
         self.callback_add_interface();
+        self.callback_add("/router/pim/interface/mld/enabled", config_igmp_enabled);
+        self.callback_add("/router/pim/interface/mld/version", config_igmp_version);
+        self.callback_add(
+            "/router/pim/interface/mld/query-interval",
+            config_igmp_query_interval,
+        );
+        self.callback_add(
+            "/router/pim/interface/mld/query-max-response-time",
+            config_igmp_query_max_resp,
+        );
     }
 }
 
@@ -137,7 +149,7 @@ fn config_passive<A: PimAf>(pim: &mut Pim<A>, mut args: Args, op: ConfigOp) -> O
     Some(())
 }
 
-fn config_igmp_enabled(pim: &mut Pim, mut args: Args, op: ConfigOp) -> Option<()> {
+fn config_igmp_enabled<A: PimAf>(pim: &mut Pim<A>, mut args: Args, op: ConfigOp) -> Option<()> {
     let name = args.string()?;
     if op.is_set() {
         let enabled = args.boolean()?;
@@ -149,7 +161,7 @@ fn config_igmp_enabled(pim: &mut Pim, mut args: Args, op: ConfigOp) -> Option<()
     Some(())
 }
 
-fn config_igmp_version(pim: &mut Pim, mut args: Args, op: ConfigOp) -> Option<()> {
+fn config_igmp_version<A: PimAf>(pim: &mut Pim<A>, mut args: Args, op: ConfigOp) -> Option<()> {
     let name = args.string()?;
     if op.is_set() {
         let version = args.u8()?;
@@ -161,7 +173,11 @@ fn config_igmp_version(pim: &mut Pim, mut args: Args, op: ConfigOp) -> Option<()
     Some(())
 }
 
-fn config_igmp_query_interval(pim: &mut Pim, mut args: Args, op: ConfigOp) -> Option<()> {
+fn config_igmp_query_interval<A: PimAf>(
+    pim: &mut Pim<A>,
+    mut args: Args,
+    op: ConfigOp,
+) -> Option<()> {
     let name = args.string()?;
     if op.is_set() {
         let interval = args.u16()?;
@@ -257,7 +273,11 @@ fn config_crp_priority(pim: &mut Pim, mut args: Args, op: ConfigOp) -> Option<()
     Some(())
 }
 
-fn config_igmp_query_max_resp(pim: &mut Pim, mut args: Args, op: ConfigOp) -> Option<()> {
+fn config_igmp_query_max_resp<A: PimAf>(
+    pim: &mut Pim<A>,
+    mut args: Args,
+    op: ConfigOp,
+) -> Option<()> {
     let name = args.string()?;
     if op.is_set() {
         let max_resp = args.u16()?;

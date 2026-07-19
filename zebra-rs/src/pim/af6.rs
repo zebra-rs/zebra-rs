@@ -14,7 +14,7 @@ use crate::context::{ProtoContext, Task};
 use super::inst::{self, Pim};
 use super::ipv6::Ipv6;
 use super::mroute::{Mrt6, PimForwardingPlane};
-use super::socket::pim_socket_v6;
+use super::socket::{mld_socket, pim_socket_v6};
 
 /// Handle to the running default-table `Pim<Ipv6>` task, stashed on the
 /// parent. Dropping it aborts the child's event loop.
@@ -51,6 +51,13 @@ pub fn spawn_pim_v6(
             return None;
         }
     };
+    let mld_sock = match mld_socket(&probe) {
+        Ok(sock) => sock,
+        Err(e) => {
+            tracing::warn!("pim6: default-table instance not started (mld socket: {e})");
+            return None;
+        }
+    };
     let fp = match Mrt6::new(&probe, 0) {
         Ok(fp) => fp,
         Err(e) => {
@@ -65,6 +72,7 @@ pub fn spawn_pim_v6(
     let pim = Pim::<Ipv6>::new(
         ctx,
         sock,
+        mld_sock,
         fp,
         rib_rx,
         proto,

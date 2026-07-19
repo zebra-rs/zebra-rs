@@ -540,7 +540,7 @@ Each phase is one reviewable PR leaving the tree tested and useful.
 | 2 | `Pim<A>`/`Gm<A>`/FP-trait genericization; **IPv4 runtime only**. Landed in compiling slices (see note). | all IPv4 unit + live BDD unchanged |
 | 3.0 | Extract the shared `Gm<A>` engine + `GmCodec` (rename `igmp/`→`gm/`); the membership transport moves off `Pim<A>` into the engine so `Pim<Ipv6>` needs no IGMP fields. IPv4-only runtime | IPv4 membership BDD unchanged (`pim_igmp`) |
 | 3.1 | **DONE** — `Ipv6` marker + `Mrt6` stub + PIMv6 socket, Hello/neighbor/DR over LL, AF-split spawn of a default-table `Pim<Ipv6>` (`af6_split` forwards config + show; `PimSend.src` for the v6 checksum; generic interface knobs) | `@pim6_adjacency` two-router link-local neighborship passes; IPv4 pim features green |
-| 4 | MLDv1/v2 codec via `Gm<Ipv6>` + TIB bridge (the second `GmCodec`, now plugging into the engine from 3.0) | querier/compat/source-filter BDD |
+| 4 | **DONE** — MLDv1/v2 codec via `Gm<Ipv6>` + TIB bridge (the second `GmCodec`, plugged into the engine from 3.0; `send_query` gained a `src` param for the pinned LL source) | `@pim6_mld` (host MLD join → router learns the group) passes; IPv4 membership green |
 | 5 | `Mrt6` plane + generic RPF + SSM end-to-end | UDPv6 delivery + kernel MIF/MFC asserts (MVP gate) |
 | 6 | Static-RP ASM, IPv6 Register path, SPT | three-router ASM traffic proof |
 | 7 | IPv6 assert + per-VRF `Pim<Ipv6>` | LAN election + VRF isolation BDD |
