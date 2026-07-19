@@ -1,0 +1,21 @@
+vrf:
+- name: mvrf
+interface:
+- if-name: eth1
+  vrf: mvrf
+  ipv6:
+    address: 2001:db8:13::1/64
+- if-name: eth3
+  vrf: mvrf
+  ipv6:
+    address: 2001:db8:14::1/64
+router:
+  pim:
+    vrf:
+    - name: mvrf
+      ipv6:
+        interface:
+        - if-name: eth1
+          dr-priority: 1
+        - if-name: eth3
+          dr-priority: 1

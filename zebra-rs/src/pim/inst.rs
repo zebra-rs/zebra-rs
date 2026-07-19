@@ -135,9 +135,11 @@ pub struct Pim<A: PimAf = Ipv4> {
     /// Kernel VRF masters from `RibRx::VrfAdd` (parent only):
     /// name → (table_id, ifindex).
     pub(crate) rib_known_vrfs: BTreeMap<String, (u32, u32)>,
-    /// The default-table IPv6 child (parent only): spawned on the first
-    /// `router pim ipv6 …` line, fed the `ipv6`-stripped config, and the
-    /// forwarding target for `show pim ipv6 …`.
+    /// This instance's IPv6 child: the default parent's default-table
+    /// `Pim<Ipv6>`, or a per-VRF `Pim<Ipv4>` child's per-VRF `Pim<Ipv6>`
+    /// grandchild. Spawned on the first `ipv6 …` line, fed the
+    /// `ipv6`-stripped config, and the forwarding target for
+    /// `show … ipv6 …`.
     pub(crate) af6: Option<super::af6::PimAf6Handle>,
     /// Buffered `router pim ipv6 …` intent, so the child can be despawned
     /// when its block is fully deleted (mirrors `vrf_log`).
@@ -519,16 +521,27 @@ impl<A: PimAf> Pim<A> {
         self.af6_log.push((rewritten, op));
     }
 
-    /// Spawn the IPv6 child on first intent. The default multicast table
-    /// always exists, so — unlike a VRF child — there is no kernel-event
-    /// gating.
+    /// Spawn the IPv6 child on first intent. Every IPv4 instance — the
+    /// default `pim` table and each per-VRF `pim:vrf:<name>` child —
+    /// parents an IPv6 instance scoped to its own table; an IPv6 instance
+    /// (label ending `:ipv6`) never does, so the recursion stops. The
+    /// multicast table already exists (the parent VRF instance only
+    /// spawned once its kernel VRF appeared), so there is no extra
+    /// kernel-event gating here.
     fn af6_spawn_if_ready(&mut self) {
-        if self.proto_label != "pim" || self.af6.is_some() {
+        if self.af6.is_some() || self.proto_label.ends_with(":ipv6") {
             return;
         }
+        let vrf_id = self.ctx.vrf_id();
+        let vrf_ifname = self
+            .proto_label
+            .strip_prefix("pim:vrf:")
+            .map(str::to_string);
         self.af6 = super::af6::spawn_pim_v6(
             &self.rib_subscriber,
             &self.config_tx,
+            vrf_id,
+            vrf_ifname,
             self.tracing.should_trace(TraceCategory::Event),
         );
     }
@@ -537,19 +550,18 @@ impl<A: PimAf> Pim<A> {
     /// was fully deleted this commit, else forward CommitEnd so it
     /// reconciles.
     fn af6_commit_end(&mut self) {
-        if self.proto_label != "pim" {
+        // IPv4 instances (default + per-VRF) own an IPv6 child; an IPv6
+        // instance (label `…:ipv6`) does not.
+        if self.proto_label.ends_with(":ipv6") {
             return;
         }
         if !super::vrf::vrf_log_active(&self.af6_log) {
             self.af6_log.clear();
             if self.af6.take().is_some() {
+                let vrf_ifname = self.proto_label.strip_prefix("pim:vrf:");
                 self.rib_subscriber
-                    .send_proto_cleanup(&super::af6::af6_proto_label());
-                pim_trace!(
-                    self.tracing,
-                    Event,
-                    "pim6: default-table IPv6 instance despawned"
-                );
+                    .send_proto_cleanup(&super::af6::af6_proto_label(vrf_ifname));
+                pim_trace!(self.tracing, Event, "pim6: IPv6 instance despawned");
             }
             return;
         }
@@ -667,6 +679,10 @@ impl<A: PimAf> Pim<A> {
                     json: msg.json,
                     resp: msg.resp,
                 });
+            } else {
+                // No IPv6 instance configured here — answer empty rather
+                // than leaving the caller waiting on a dropped `resp`.
+                let _ = msg.resp.send(String::new()).await;
             }
             return;
         }

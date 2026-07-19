@@ -1844,6 +1844,39 @@ mod yang_load_tests {
         }
     }
 
+    /// Pin the per-VRF PIMv6 config subtree (`router pim vrf <name> ipv6
+    /// …`), which the default `Pim<Ipv4>` strips to `router pim ipv6 …`
+    /// and forwards to a per-VRF `Pim<Ipv6>` grandchild. A malformed
+    /// duplication of the `ipv6` container fails here, not only at apply.
+    #[test]
+    fn pim_vrf_ipv6_paths_parse() {
+        use crate::config::ExecCode;
+        use crate::config::parse::{State, parse};
+        use libyang::to_entry;
+
+        let mut yang = YangStore::new();
+        yang.add_path(concat!(env!("CARGO_MANIFEST_DIR"), "/yang"));
+        yang.read_with_resolve("configure")
+            .unwrap_or_else(|e| panic!("configure failed to load: {e:#}"));
+        yang.identity_resolve();
+        let module = yang.find_module("configure").unwrap();
+        let entry = to_entry(&yang, module);
+
+        for cmd in [
+            "set router pim vrf blue ipv6 interface eth0 dr-priority 20",
+            "set router pim vrf blue ipv6 interface eth0 mld enabled true",
+            "set router pim vrf blue ipv6 rp static 2001:db8::1",
+            "set router pim vrf blue ipv6 rp static 2001:db8::1 group ff3e::/32",
+        ] {
+            let (code, _comps, _state) = parse(cmd, entry.clone(), None, State::new());
+            assert_eq!(
+                code,
+                ExecCode::Success,
+                "should parse as a settable path: {cmd}"
+            );
+        }
+    }
+
     /// Regression guard for `remove-private-as`. The IETF model
     /// (`ietf-bgp`) shipped a `remove-private-as` identityref leaf on the
     /// neighbor whose IANA base this libyang can't resolve to a value
