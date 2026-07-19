@@ -123,6 +123,15 @@ impl PimAf for Ipv4 {
         let grp = Ipv4Addr::new(data[16], data[17], data[18], data[19]);
         Some((src, grp))
     }
+
+    fn bsr_hash(group: Ipv4Addr, rp: Ipv4Addr, mask_len: u8) -> u32 {
+        let mask = if mask_len == 0 {
+            0
+        } else {
+            u32::MAX << (32 - mask_len.min(32))
+        };
+        super::af::bsr_hash_value(u32::from(group) & mask, u32::from(rp))
+    }
 }
 
 #[cfg(test)]

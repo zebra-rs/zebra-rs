@@ -149,6 +149,22 @@ impl PimAf for Ipv6 {
         g.copy_from_slice(&data[24..40]);
         Some((Ipv6Addr::from(s), Ipv6Addr::from(g)))
     }
+
+    fn bsr_hash(group: Ipv6Addr, rp: Ipv6Addr, mask_len: u8) -> u32 {
+        // Mask the 128-bit group, then XOR-fold both the masked group and
+        // the RP to 32 bits before the RFC 2362 recurrence — a defined,
+        // deterministic extension so every zebra-rs router agrees.
+        let mask = if mask_len == 0 {
+            0
+        } else {
+            u128::MAX << (128 - mask_len.min(128))
+        };
+        let fold =
+            |x: u128| -> u32 { (x >> 96) as u32 ^ (x >> 64) as u32 ^ (x >> 32) as u32 ^ x as u32 };
+        let gm = u128::from_be_bytes(group.octets()) & mask;
+        let c = u128::from_be_bytes(rp.octets());
+        super::af::bsr_hash_value(fold(gm), fold(c))
+    }
 }
 
 #[cfg(test)]
