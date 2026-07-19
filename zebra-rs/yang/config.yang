@@ -4299,6 +4299,96 @@ module config {
               }
             }
           }
+          container ipv6 {
+            ext:help "PIMv6 (IPv6) configuration in this VRF";
+            // The per-VRF `Pim<Ipv4>` child strips the `ipv6` container
+            // and forwards to a per-VRF `Pim<Ipv6>` grandchild scoped to
+            // the same table.
+            container rp {
+              ext:help "Rendezvous Point configuration";
+              list static {
+                ext:help "Static RP address for a group range";
+                key "address";
+                leaf address {
+                  ext:help "RP address";
+                  type inet:ipv6-address;
+                }
+                leaf group {
+                  ext:help "Multicast group prefix served by this RP";
+                  type inet:ipv6-prefix;
+                  default "ff00::/8";
+                }
+              }
+            }
+            list interface {
+              ext:help "Per-interface PIMv6 configuration";
+              key "if-name";
+              leaf if-name {
+                ext:help "Interface name";
+                ext:dynamic "rib:interface";
+                type string;
+              }
+              leaf dr-priority {
+                ext:help "Designated Router election priority";
+                type uint32;
+                default 1;
+              }
+              container hello {
+                ext:help "PIM Hello parameters";
+                leaf interval {
+                  ext:help "Hello transmit interval (seconds)";
+                  type uint16 {
+                    range "1..18000";
+                  }
+                  units "seconds";
+                  default 30;
+                }
+                leaf holdtime {
+                  ext:help "Neighbor holdtime advertised in Hellos (seconds)";
+                  type uint16 {
+                    range "1..65535";
+                  }
+                  units "seconds";
+                }
+              }
+              leaf passive {
+                ext:help "Do not send or process PIM packets on this interface";
+                type boolean;
+                default false;
+              }
+              container mld {
+                ext:help "MLD on this interface";
+                leaf enabled {
+                  ext:help "Enable MLD membership tracking";
+                  type boolean;
+                  default false;
+                }
+                leaf version {
+                  ext:help "MLD version to run";
+                  type uint8 {
+                    range "1..2";
+                  }
+                  default 2;
+                }
+                leaf query-interval {
+                  ext:help "General query transmit interval (seconds)";
+                  type uint16 {
+                    range "1..1800";
+                  }
+                  units "seconds";
+                  default 125;
+                }
+                leaf query-max-response-time {
+                  ext:help "Max response time advertised in queries (seconds)";
+                  type uint16 {
+                    range "1..25";
+                  }
+                  units "seconds";
+                  default 10;
+                }
+              }
+            }
+          }
         }
       }
       container static {

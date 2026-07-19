@@ -1106,6 +1106,37 @@ module exec {
           ext:help "Assert state in this VRF";
           type empty;
         }
+        container ipv6 {
+          ext:help "PIMv6 (IPv6) state in this VRF";
+          presence "PIMv6 in this VRF";
+          container interface {
+            ext:help "PIMv6 interface";
+            presence "PIMv6 interface";
+          }
+          container neighbor {
+            ext:help "PIMv6 neighbor";
+            presence "PIMv6 neighbor";
+          }
+          container upstream {
+            ext:help "PIMv6 upstream (S,G) join state";
+            presence "PIMv6 upstream";
+          }
+          container mroute {
+            ext:help "PIMv6 multicast routing table (MRT6 MFC)";
+            presence "PIMv6 mroute";
+          }
+          container assert {
+            ext:help "PIMv6 assert election state";
+            presence "PIMv6 assert";
+          }
+          container mld {
+            ext:help "MLD membership state";
+            container groups {
+              ext:help "MLD group memberships";
+              presence "MLD groups";
+            }
+          }
+        }
       }
     }
 

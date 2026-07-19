@@ -392,6 +392,15 @@ impl<A: PimAf> Pim<A> {
         };
         if !link.addrs.contains(&prefix) {
             link.addrs.push(prefix);
+            // Keep link-locals first — the same order `link_prefixes`
+            // seeds at LinkAdd, so `primary_addr` stays the Hello / DR
+            // identity even when the interface link-local arrives as a
+            // *live* AddrAdd after the LinkAdd dump (VRF enslavement
+            // flushes then re-adds the fe80:: address late). Stable sort
+            // preserves the within-group order. For IPv4 no address is
+            // link-local, so the order is unchanged (byte-identical).
+            link.addrs
+                .sort_by_key(|p| !A::is_link_local(A::prefix_addr(p)));
         }
         self.reconcile(addr.ifindex);
     }
