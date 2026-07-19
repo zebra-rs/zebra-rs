@@ -4132,6 +4132,40 @@ module config {
               }
             }
           }
+          container bsr {
+            ext:help "Bootstrap Router (RFC 5059)";
+            container candidate-bsr {
+              ext:help "Run as a candidate Bootstrap Router";
+              presence "Candidate BSR";
+              leaf address {
+                ext:help "Advertised BSR address (one of this router's addresses)";
+                type inet:ipv6-address;
+              }
+              leaf priority {
+                ext:help "BSR election priority (higher wins)";
+                type uint8;
+                default 64;
+              }
+            }
+            container candidate-rp {
+              ext:help "Advertise this router as a candidate RP";
+              presence "Candidate RP";
+              leaf address {
+                ext:help "Advertised RP address (one of this router's addresses)";
+                type inet:ipv6-address;
+              }
+              leaf group {
+                ext:help "Group prefix this RP serves";
+                type inet:ipv6-prefix;
+                default "ff00::/8";
+              }
+              leaf priority {
+                ext:help "Candidate RP priority (lower preferred)";
+                type uint8;
+                default 192;
+              }
+            }
+          }
           list interface {
             ext:help "Per-interface PIMv6 configuration";
             key "if-name";

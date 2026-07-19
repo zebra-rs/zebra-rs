@@ -1067,6 +1067,14 @@ module exec {
           ext:help "PIMv6 assert election state";
           presence "PIMv6 assert";
         }
+        container bsr {
+          ext:help "PIMv6 Bootstrap Router state";
+          presence "PIMv6 BSR";
+        }
+        container rp-info {
+          ext:help "PIMv6 group-to-RP mappings";
+          presence "PIMv6 RP info";
+        }
         container mld {
           ext:help "MLD membership state";
           container groups {
