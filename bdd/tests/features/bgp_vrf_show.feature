@@ -55,16 +55,22 @@ Feature: BGP per-VRF show command
     And show command "show bgp vrf vrf-blue ipv4" in namespace "z1" should contain "Network"
     And show command "show bgp vrf vrf-blue ipv6" in namespace "z1" should contain "Network"
 
-  Scenario: Remove the BGP VRF block and observe the RD clear
+  Scenario: Remove the BGP VRF block and observe the VRF despawn
     # vtyctl apply replaces the subtrees present in the file: z1-1.yaml
-    # carries `router bgp` without the vrf block, so the per-VRF RD is
-    # deleted — but the top-level vrf (absent from the file) persists,
-    # so the row and its running task remain with an empty RD.
+    # carries `router bgp` without the vrf block, so the whole
+    # `router bgp vrf vrf-blue` subtree is deleted. Since the despawn
+    # fix (review finding #3) that delete despawns the
+    # per-VRF task and row outright (PR #1981) — the exports are
+    # withdrawn and the service label returns to the pool — so the
+    # table reports no VRFs
+    # (the top-level system vrf, absent from the file, still exists but
+    # carries no BGP instance).
     Given the test topology exists
     When I apply config "z1-1.yaml" to namespace "z1"
     And I wait 2 seconds for BGP to operate
     Then show command "show bgp vrf" in namespace "z1" should not contain "65001:100"
-    And show command "show bgp vrf" in namespace "z1" should contain "vrf-blue"
+    And show command "show bgp vrf" in namespace "z1" should not contain "vrf-blue"
+    And show command "show bgp vrf" in namespace "z1" should contain "no VRFs configured"
 
   Scenario: Teardown topology
     Given the test topology exists

@@ -3,8 +3,9 @@
 Feature: PIM assert election and LAN Join/Prune behaviors
   As a network operator
   I want duplicate forwarders on a shared LAN to elect a single
-  assert winner, routers sharing an upstream LAN to suppress each
-  other's periodic Joins, and a Prune overheard on a LAN to be
+  assert winner, a router's overheard Join on a shared upstream LAN
+  to suppress the other joined router's periodic refresh (leaving
+  one refresher per LAN), and a Prune overheard on a LAN to be
   overridden by routers that still want the traffic — the RFC 7761
   multi-access behaviors that keep exactly one copy of each packet
   on every LAN.
@@ -84,12 +85,17 @@ Feature: PIM assert election and LAN Join/Prune behaviors
 
     # Both receivers join. r2 (DR on swB) serves h2 directly; r3 turns
     # h3's membership into an (S,G) Join toward r1, so r1 forwards onto
-    # swB too. Each router overhears the other's Join on swA.
+    # swB too. On swA, r2 joins first (h2's report reaches the DR
+    # directly) and r1 joins ~0.5s later (h3's membership rides the
+    # extra r3 hop); r1's immediate initial Join is overheard by the
+    # already-joined r2, which suppresses its own refresh
+    # (RFC 7761 §4.5.7) and therefore never sends a Join for r1 to
+    # overhear in turn — suppression keeps exactly one periodic
+    # refresher per LAN, so only r2 logs it.
     When I spawn "timeout 220 python3 tests/scripts/ssm_recv.py 232.6.6.6 10.6.0.10 10.6.2.10 5001 /tmp/pim_assert_h2" in namespace "h2"
     And I spawn "timeout 220 python3 tests/scripts/ssm_recv.py 232.6.6.6 10.6.0.10 10.6.3.10 5001 /tmp/pim_assert_h3" in namespace "h3"
     Then show command "show pim upstream" in namespace "r1" should eventually contain "Joined"
     And show command "show pim upstream" in namespace "r2" should eventually contain "Joined"
-    And daemon log in namespace "r1" should eventually contain "join suppressed"
     And daemon log in namespace "r2" should eventually contain "join suppressed"
 
     # The sender starts: both forward onto swB, the duplicates trigger

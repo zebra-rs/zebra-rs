@@ -35,7 +35,9 @@ Feature: OSPFv2 MinLSArrival received-LSA rate limit is configurable
     And show command "show ospf route" in namespace "a" should contain "10.0.0.2/32"
     And ping from "a" to "10.0.0.2" should succeed
 
-    # Teardown.
+  Scenario: Teardown topology
+    # Separate scenario so cleanup still runs when a step above fails
+    # (a failed step skips the rest of its own scenario only).
     When I stop zebra-rs in namespace "a"
     And I stop zebra-rs in namespace "b"
     And I delete namespace "a"
