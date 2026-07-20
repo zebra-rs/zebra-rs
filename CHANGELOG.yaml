@@ -11,6 +11,83 @@
 # Fields "distribution" and "urgency" are optional per-entry; if you omit them,
 # changelog-gen.sh defaults to distribution "unstable" and urgency "medium".
 
+- semver: 26.7.7
+  date: 2026-07-19T18:00:00+09:00
+  distribution: unstable
+  urgency: medium
+  packager: Kunihiro Ishiguro <kunihiro@zebra.rs>
+  changes:
+    - note: |
+        ### PIM-SM / SSM and IGMP/MLD (new protocol)
+        * zebra-rs now speaks PIM Sparse-Mode and Source-Specific
+          Multicast for both IPv4 and IPv6 from one generic engine
+          (`Pim<A>`, monomorphized per VRF and address family)
+        * Hello / neighbor / DR election, Join/Prune, Assert with LAN
+          join-suppression and prune-override, Register / Register-Stop,
+          SPT switchover and `(S,G,rpt)` prune
+        * Local membership via an IGMPv2/v3 (IPv4) and MLDv1/v2 (IPv6)
+          querier feeding a shared `Gm<A>` membership engine
+        * RP discovery: static mappings, the Bootstrap Router (RFC 5059)
+          with the RFC 2362 group-to-RP hash, and — for IPv6 —
+          Embedded-RP (RFC 3956)
+        * Kernel data plane over the IPv4 mroute and IPv6 MRT6 sockets
+          (MIF/MFC programming, NOCACHE / WHOLEPKT / WRONGVIF upcalls),
+          with RPF through the VRF-aware RIB nexthop tracker
+        * Per-VRF PIM instances for both families, isolated in their own
+          multicast forwarding tables
+        * Runtime-toggled per-category `router pim tracing`, and an
+          explicit per-interface `enabled` flag matching OSPF/IS-IS
+        * 16 live BDD features (IPv4 + IPv6) and a new PIM book chapter
+          cover the whole surface
+
+    - note: |
+        ### OSPFv2 / OSPFv3 packet hardening
+        * A code-review sweep of ospf-packet fixed a cluster of
+          malformed-packet panics (denial of service), an OSPFv3 AT-bit
+          position bug, the SRv6 End.X sub-TLV header, an LSA
+          checksum-over-raw-bytes bug and a trailer bypass in the
+          OSPFv3 checksum path
+        * LSA parse errors now propagate instead of being swallowed;
+          derived LSA counts, unknown-payload handling and the OSPFv3
+          Adj-SID weight are corrected
+
+    - note: |
+        ### IS-IS packet correctness
+        * The isis-packet crate review landed its fix tail: an
+          LSP-entries TLV length overflow, an SRv6 MT-ID / NSAP parse
+          panic, router-capability and prefix-SID flag handling, the
+          admin-group sub-TLV encoding, an ASLA mask asymmetry and the
+          unknown-TLV emit contract
+        * Parse-robustness and positional-optional fixes, no-alloc wire
+          length, deduplicated sub-TLV registries, and BGP-LS extended
+          administrative-group support
+
+    - note: |
+        ### BGP fixes
+        * Graceful Restart capability modeled per RFC 4724, the GR
+          restart-time default corrected, RFC 6793 four-octet AS
+          handling, and unknown-capability header parsing
+        * Correctness: bestpath router-id tiebreak, IPv6
+          empty-selection withdraw, Adj-RIB-In path-id 0 wildcard, a
+          removed-peer FSM guard, a phantom Established advertise timer,
+          a stale out-policy snapshot on delete, and labeled-unicast
+          community suppression
+        * VRF import/export: RD-alias import, export purge on VRF delete,
+          EVPN withdraw propagation; SRv6 SID family selection and
+          update-group signature knobs
+
+    - note: |
+        ### Shared routing / packet infrastructure
+        * The Fletcher LSA/LSP checksum and the Flex-Algo FAD Flags /
+          SRLG codecs are hoisted into packet-utils and shared between
+          OSPF and IS-IS
+
+    - note: |
+        ### Packaging and documentation
+        * The cargo-deb build pins its toolchain, and the completed
+          code-review status for the BGP, OSPF and IS-IS packet crates
+          is recorded in-tree
+
 - semver: 26.7.6
   date: 2026-07-15T18:00:00+09:00
   distribution: unstable

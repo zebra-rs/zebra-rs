@@ -23,7 +23,7 @@ members = [
 ]
 
 [workspace.package]
-version = "26.7.6"
+version = "26.7.7"
 edition = "2024"
 authors = ["Kunihiro Ishiguro <kunihiro@zebra.rs>"]
 license = "AGPL-3.0-or-later"
