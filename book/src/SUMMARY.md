@@ -107,6 +107,7 @@
   - [Gaps Relative to FRR ospf6d](ch-15-15-ospfv3-frr-gaps.md)
   - [BFD](ch-15-17-ospfv3-bfd.md)
   - [Clearing OSPFv3 State](ch-15-16-ospfv3-clear.md)
+- [PIM (Multicast)](ch-17-00-pim.md)
 
 ## SRv6
 
