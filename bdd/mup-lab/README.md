@@ -3,9 +3,14 @@
 The manual lab that first proved end-to-end UE ping through zebra-rs +
 cradle acting as the UPF (`afi-safi mup dataplane gtp`), against a real
 5G core (free5GC v4.0.1) and a real RAN/UE simulator (free-ran-ue), on
-2026-07-14 (issue #1930). The distilled, self-contained regression lives
-in cradle-rs as the `@cradle_mup_gtp_roundtrip` BDD feature; this lab is
-for reproducing the full free5GC stack by hand.
+2026-07-14 (issue #1930). Since issue #1947 the lab uses the
+telco-normal **single-N6** shape: ONE VRF binds both `route st1` and
+`route st2`, so the UPF has one N6-facing interface — uplink and
+downlink are directions of the same N6 network. The distilled,
+self-contained regression lives in cradle-rs as the
+`@cradle_mup_gtp_single_n6` BDD feature (the two-leg original remains
+as `@cradle_mup_gtp_roundtrip`); this lab is for reproducing the full
+free5GC stack by hand.
 
 ```
  host (root netns): free5GC CP on 127.0.0.x SBI, mongodb, webconsole
@@ -15,23 +20,25 @@ for reproducing the full free5GC stack by hand.
 
  mupran: free-ran-ue gNB (N2/N3 on 10.0.1.2; UE link on 127.0.0.1) + UE (ueTun0)
  mupupf: zebra-rs + cradle
-          VRF mobile-dl (table 1): mudl 10.0.61.1/24 ── mupdn: dnd 10.0.61.2  (DL ingress)
-          VRF mobile-ul (table 2): muul 10.0.60.1/24 ── mupdn: dnu 10.0.60.2  (UL egress, ping target)
- mupdn:  route 10.60.0.0/16 (the free5GC UE pool) via 10.0.61.1
+          VRF mobile (table 1, st1+st2): mun6 10.0.60.1/24 ── mupdn: mdn6 10.0.60.2
+ mupdn:  route 10.60.0.0/16 (the free5GC UE pool) via 10.0.60.1
 ```
 
 Key design points
 
-- **N3 lives in the global table**; the MUP VRFs only anchor the st1/st2
-  routes. One VRF binds one direction, hence the two N6 legs: uplink
-  egresses the mobile-ul leg, the DN routes the UE pool back through the
-  mobile-dl leg.
+- **N3 lives in the global table**; the MUP VRF only anchors the
+  st1/st2 routes. **One VRF binds BOTH directions** (zebra-rs PR #2038,
+  issue #1947): its single cradle table holds the uplink decap PDR, the
+  downlink UE-prefix encap route and the N6 connected route together,
+  so one N6 leg carries downlink ingress and uplink egress. (The older
+  one-direction-per-VRF split still works — two VRFs, two legs — but is
+  no longer required.)
 - **PFCP `listen-address` = the N3 address** (10.0.12.2): the
   controller's N4 identity doubles as the F-TEID address fallback, so
   one address keeps the tunnel endpoint consistent.
 - **`network-instance` = the DNN** free5GC puts in the PDI Network
-  Instance (`internet`); the same NI on both VRFs makes one PFCP session
-  fan out to both ST routes.
+  Instance (`internet`); the same NI on both `route` bindings makes one
+  PFCP session fan out to both ST routes.
 - free5GC allocates the UPF's N3 TEID itself (Create PDR → PDI local
   F-TEID, TS 29.244 CH=0) and ignores the Created-PDR F-TEID; mup-c
   honors it as authoritative (commit `eb576cf9`).
@@ -42,7 +49,7 @@ Key design points
 ## Prerequisites
 
 ```sh
-# Install zebra-rs (version >= 26.7.5)
+# Install zebra-rs (needs the dual-direction `afi-safi mup route` binding, PR #2038)
 
 # Install cradle (version >= 0.9.7)
 
@@ -125,13 +132,13 @@ the UE process and start it again — the second attach goes through.
 V=$(git rev-parse --show-toplevel)/target/debug/vtyctl
 sudo ip netns exec mupupf $V show 'show bgp mup-c association'   # SMF peer
 sudo ip netns exec mupupf $V show 'show bgp mup-c session'       # UE addr, Access + Core F-TEIDs
-sudo ip netns exec mupupf $V show 'show bgp vrf mobile-dl mup'   # [ST1] ue=<UE>/32 -> gNB
-sudo ip netns exec mupupf $V show 'show bgp vrf mobile-ul mup'   # [ST2] ep=10.0.12.2, CP-allocated teid
+sudo ip netns exec mupupf $V show 'show bgp vrf mobile mup'      # BOTH: [ST1] ue=<UE>/32 -> gNB
+                                                                 #  and  [ST2] ep=10.0.12.2, CP TEID
 sudo ip netns exec mupupf bpftool map dump name GTP_PDR           # uplink decap key
 sudo ip netns exec mupupf ~/cradle-rs/target/debug/cradle dump ipv4 --grpc unix:cradle/grpc --vrf 1
+# ^ table 1 now holds the UE /32 GTP encap route AND the 10.0.60.0/24 connected route
 
-# seed ARP once, then the end-to-end ping
-sudo ip netns exec mupdn  ping -c1 -W1 10.0.61.1 >/dev/null
+# seed ARP once, then the end-to-end ping through the single N6 leg
 sudo ip netns exec mupdn  ping -c1 -W1 10.0.60.1 >/dev/null
 sudo ip netns exec mupupf ping -c1 -W1 10.0.12.1 >/dev/null
 sudo ip netns exec mupran ping -I ueTun0 -c 5 10.0.60.2
@@ -140,6 +147,38 @@ sudo ip netns exec mupupf ~/cradle-rs/target/debug/cradle stats --grpc unix:crad
 ```
 
 Expected: 0% loss, and `gtp_encap` / `gtp_decap` both counting.
+
+## iperf3 (issue #1947's single-NIC throughput check)
+
+Two things `ping -I ueTun0` silently papered over:
+
+- the UE netns has **no route to the DN via the TUN** (free-ran-ue only
+  assigns the address) — a TCP connect follows the default route out
+  mrVeth and dies. Add the route explicitly.
+- the DN veth's **TX checksum offload** leaves TCP checksums
+  uncomputed; cradle's GTP encap forwards the raw bytes and the UE TUN
+  validates (and drops) them. `setup-topo.sh` turns it off (`ethtool -K
+  mdn6 tx off`); hardware NICs don't have this problem.
+
+```sh
+# server on the N6 side, client on the UE TUN. The UE address comes from
+# the free5GC pool (10.60.0.0/16), so bind the client to it explicitly.
+UEADDR=$(sudo ip netns exec mupran ip -o -4 addr show ueTun0 | awk '{print $4}' | cut -d/ -f1)
+sudo ip netns exec mupran ip route add 10.0.60.0/24 dev ueTun0 src $UEADDR
+# GTP adds 36 bytes on N3; keep TCP MSS inside the 1500-byte links:
+sudo ip netns exec mupran ip link set ueTun0 mtu 1400
+
+sudo ip netns exec mupdn iperf3 -s -D -1
+sudo ip netns exec mupran iperf3 -c 10.0.60.2 -B $UEADDR -t 5 -f m       # uplink
+sudo ip netns exec mupdn iperf3 -s -D -1
+sudo ip netns exec mupran iperf3 -c 10.0.60.2 -B $UEADDR -t 5 -f m -R    # downlink
+sudo ip netns exec mupupf ~/cradle-rs/target/debug/cradle stats --grpc unix:cradle/grpc | grep gtp
+```
+
+Measured on the 2026-07-20 validation run (single box, debug builds,
+free-ran-ue's userspace gNB in the path): **uplink ~1.86 Gbit/s,
+downlink ~2.65 Gbit/s**, `gtp_encap`/`gtp_decap` in the hundreds of
+thousands.
 
 Known gap: if you restart *cradle* under a live zebra-rs, the tee does
 not replay its mirror (tonic reconnects transparently) — restart

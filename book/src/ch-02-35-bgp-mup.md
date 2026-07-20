@@ -151,8 +151,11 @@ vrf mobile-up {
   as the anchor UPF self-allocates its own core receive F-TEID, so an ST2
   still originates. A learned core F-TEID always wins over both.
 
-A VRF binds one ST direction to a PFCP Network Instance under `afi-safi
-mup route {st1|st2}`; the two read identically:
+A VRF binds an ST direction to a PFCP Network Instance under `afi-safi
+mup route {st1|st2}` — one entry per direction, and a VRF may carry
+**either or both** (see
+[the single-N6 UPF](#one-vrf-both-directions--the-single-n6-upf) below
+for the both-directions form). The two read identically:
 
 * **Downlink (Type-1 ST).** `afi-safi mup route st1 { network-instance
   <ni>; }` — the N6 VRF originates a **Type-1 ST** route carrying the UE
@@ -178,9 +181,11 @@ session's Network Instance. The export route-targets the ST route carries
 come from the top-level `vrf <name> mup route-target export` — the same
 `route-target` framework as `ipv4` / `ipv6`.
 
-A single PFCP session originates **every** matching ST route: if both an
-st1 VRF and an st2 VRF bind the same Network Instance, one session
-originates both the Type-1 and the Type-2 ST.
+A single PFCP session originates **every** matching ST route: each
+`route {st1|st2}` entry whose Network Instance matches contributes one —
+whether the two directions live on two VRFs (one entry each) or on one
+dual-direction VRF (both entries), one session originates both the
+Type-1 and the Type-2 ST.
 
 For example, an uplink VRF that also originates the Direct segment it
 resolves to:
@@ -238,6 +243,123 @@ whether the FIB install targets the kernel `seg6local` or the eBPF GTP maps.
 forwarding planes — Plan A (End.DT46, mainline kernel) and Plan B (real GTP-U
 on the eBPF data plane) — are scoped in
 [`docs/design/bgp-mup-dataplane-plan.md`](https://github.com/zebra-rs/zebra-rs/blob/main/docs/design/bgp-mup-dataplane-plan.md).
+
+### One VRF, both directions — the single-N6 UPF
+
+zebra-rs also supports a single-N6 UPF: uplink and downlink are directions of the
+same N6-facing interface, not two separate legs. Because a kernel interface
+belongs to exactly one VRF, the older one-direction-per-VRF model forced a
+bidirectional GTP UPF into two VRFs — and with them two N6 interfaces.
+
+Since the `route` list holds one entry **per direction**, a single VRF
+binds both, and the whole UPF collapses onto one N6 interface. This is
+the recommended shape. The complete, validated configuration (the
+`bdd/mup-lab` free5GC lab):
+
+```
+# The kernel VRF and its single N6 interface. N3 (mun3) stays in the
+# GLOBAL table — it carries PFCP/N4 and the outer GTP-U packets, which
+# are terminated by the UPF itself, never routed in the service VRF.
+vrf mobile {
+}
+interface mun3 {
+  ipv4 {
+    address 10.0.12.2/24;      # N3 + N4 (also the PFCP listen address)
+  }
+}
+interface mun6 {
+  vrf mobile;
+  ipv4 {
+    address 10.0.60.1/24;      # the ONE N6 leg, in the service VRF
+  }
+}
+
+router bgp {
+  global {
+    as 65000;
+    router-id 1.1.1.1;
+  }
+  vrf mobile {
+    rd 65000:1;
+    afi-safi mup {
+      dataplane gtp;           # real GTP-U on the eBPF data plane
+      route st1 {
+        network-instance internet;   # downlink: UE prefix -> GTP4.E encap
+      }
+      route st2 {
+        network-instance internet;   # uplink: CP-allocated F-TEID -> decap PDR
+      }
+    }
+  }
+  mup-c {
+    enabled true;
+    controller-address 2001:db8::1;
+    pfcp {
+      listen-address 10.0.12.2;
+    }
+  }
+}
+```
+
+Both `route` entries are independent list entries: each carries its own
+`network-instance` (here the same DNN, `internet`, so one PFCP session
+matches both) and, on the `st2` entry only, an optional `mup-ext-comm`.
+Deleting one entry removes only that direction — the sibling binding,
+and its originated routes, stay up. A handover (PFCP Modification) that
+moves the access tunnel re-exports the affected ST in place without
+ever withdrawing the other direction.
+
+One PFCP session then originates **both** Session-Transformed routes
+from the one VRF, under its single RD (the two NLRI types have disjoint
+keys, so sharing the RD is safe). From the live free5GC validation run:
+
+```
+# show bgp mup
+MUP VRFs:
+  mobile: rd=65000:1 encap/ST1 ni=internet decap/ST2 ni=internet dataplane=gtp route-targets=0
+
+   Network (MUP NLRI)                                   Next Hop
+ *> [ST1][65000:1][ue=10.60.0.1/32][teid=1][qfi=0][ep=10.0.1.2:src=10.0.12.2]
+       next-hop 2001:db8::1  weight 32768
+ *> [ST2][65000:1][ep=10.0.12.2][teid=2]
+       next-hop 2001:db8::1  weight 32768
+```
+
+With `dataplane gtp`, the VRF's one table now holds the whole
+subscriber datapath together:
+
+* the **uplink decap PDR** (`H.M.GTP4.D`, from the ST2's CP-allocated
+  `(endpoint, TEID)`) — a matching G-PDU arriving on N3 is stripped and
+  its inner packet looked up **in this table**;
+* the **downlink encap route** (the ST1's UE `/32` → `GTP4.E` toward
+  the gNB, egressing N3);
+* the **N6 connected route** (from `mun6`'s address).
+
+So an uplink packet decaps and leaves through the N6 connected route,
+and a downlink packet arriving on N6 hits the UE route and tunnels out
+N3 — one leg, both directions. (A side effect: UE↔UE traffic hairpins —
+a decapped uplink packet whose destination is another UE prefix
+re-encapsulates toward that UE's gNB in the same lookup.)
+
+Deployment notes — the Kubernetes/Multus question that motivated this
+shape:
+
+* The **N6 interface needs no XDP at all**: downlink ingress is handled
+  on the eBPF data plane's TC path, and uplink egress is a plain
+  redirect. A macvlan child on a shared host device is fine for N6.
+* The **N3 interface performs the XDP GTP decap**, so it should be a
+  device with **native XDP** (a host-device or SR-IOV VF). On drivers
+  without native XDP the data plane falls back to generic (SKB) mode,
+  where the decap stage is skipped for frames redirected by an upstream
+  TC hop — keep N3 off macvlan.
+
+The single-N6 datapath is regression-tested by the cradle
+`@cradle_mup_gtp_single_n6` BDD (round-trip ICMP plus an iperf3 TCP
+scenario) and was validated against real free5GC v4.0.1 +
+free-ran-ue (`bdd/mup-lab`): UE ping at 0% loss and iperf3 at
+~1.9 Gbit/s uplink / ~2.6 Gbit/s downlink on a single box with debug
+builds. The classic two-VRF split (one direction per VRF, two N6 legs)
+remains fully supported.
 
 ### Segment Discovery routes (`segment direct` / `segment interwork`)
 
@@ -312,9 +434,12 @@ When an SMF establishes a session, the controller:
    endpoint), and the Network Instance from the PFCP Session
    Establishment Request;
 2. correlates the Network Instance against the per-VRF `mup` config to
-   find the matching VRF(s) and the ST route type (`st1` / `st2`), and
-   dispatches the session to each matching VRF task (one session can map
-   to several VRFs — see the dual-ST note above);
+   find every matching `route {st1|st2}` binding, and dispatches the
+   session to each matching VRF task with its matched direction set —
+   one session can map to several VRFs, or to both directions of one
+   dual-direction VRF (see the dual-ST note and
+   [the single-N6 UPF](#one-vrf-both-directions--the-single-n6-upf)
+   above);
 3. each VRF task builds the **RD-free** Session-Transformed NLRI and exports
    it to the global instance, which stamps the VRF's RD, its export
    route-targets and the controller-address next hop **at the export
@@ -419,7 +544,7 @@ MUP Loc-RIB:
 ```
 # show bgp mup
 MUP VRFs:
-  mobile-up: rd=65000:100 encap/ST1 ni=access route-targets=1
+  mobile-up: rd=65000:100 encap/ST1 ni=access dataplane=end-dt46 route-targets=1
 
    Network (MUP NLRI)                                   Next Hop
  *> [ST1][65000:100][ue=192.0.2.5/32][teid=305419896][qfi=0][ep=10.0.0.1]
