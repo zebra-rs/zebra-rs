@@ -44,6 +44,10 @@ Feature: PIMv6 SSM (S,G) forwarding end to end across two routers
     Then show command "show pim ipv6 interface" in namespace "r1" should eventually contain "Up"
     And show command "show pim ipv6 interface" in namespace "r2" should eventually contain "Up"
     And show command "show pim ipv6 neighbor" in namespace "r2" should eventually contain "fe80"
+    # The IPv6 instance summary and the MLD interface (querier) table —
+    # the v6 equivalents of `show pim` and `show igmp interface`.
+    And show command "show pim ipv6" in namespace "r1" should eventually contain "PIM-SM"
+    And show command "show pim ipv6 mld interface" in namespace "r2" should eventually contain "Querier"
 
     # h2 source-specifically joins (2001:db8:14::2, ff3e::1): r2 turns the
     # MLDv2 membership into an (S,G) Join toward r1.
