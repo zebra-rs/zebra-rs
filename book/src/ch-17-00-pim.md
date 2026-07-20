@@ -37,12 +37,20 @@ note the IPv6 form where it differs.
 
 ## Enabling PIM on an interface
 
-PIM runs only on interfaces you enable it on. Naming an interface under
-`router pim interface` is enough to start Hellos and DR election there:
+PIM runs only on interfaces you explicitly enable it on — the same
+model as OSPF and IS-IS. Naming an interface alone is not enough; set
+the `enabled` flag:
 
 ```
-set router pim interface eth0
+set router pim interface eth0 enabled true
 ```
+
+PIM then starts (Hellos, DR election, forwarding) once the flag is set
+and the link is up with an address. An interface may carry other knobs —
+notably IGMP/MLD membership — without PIM being enabled; a receiver-
+facing interface therefore needs **both** `enabled true` and
+`igmp enabled true` (see below). Set `enabled false` (or delete it) to
+stop PIM on the interface while keeping any other configuration.
 
 Per-interface knobs:
 
@@ -192,9 +200,11 @@ multicast table selected per VRF, and membership / tree state scoped to
 it. Prefix the path with `vrf <name>`:
 
 ```
-set router pim vrf blue interface eth1 dr-priority 1
+set router pim vrf blue interface eth1 enabled true
+set router pim vrf blue interface eth2 enabled true
 set router pim vrf blue interface eth2 igmp enabled true
 set router pim vrf blue rp static 10.0.0.1
+set router pim vrf blue ipv6 interface eth1 enabled true
 set router pim vrf blue ipv6 interface eth1 mld enabled true
 set router pim vrf blue ipv6 rp static 2001:db8::1
 ```

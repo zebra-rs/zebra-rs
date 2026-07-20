@@ -18,10 +18,12 @@ router:
     ipv6:
       interface:
       - if-name: eth1
+        enabled: true
         dr-priority: 1
       # Highest DR priority on swB, so r2 is the DR deterministically and
       # serves h2 directly (the other forwarder is r1 via r3's Join).
       - if-name: eth2
+        enabled: true
         dr-priority: 100
         mld:
           enabled: true

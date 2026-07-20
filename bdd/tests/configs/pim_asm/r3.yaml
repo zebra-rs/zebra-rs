@@ -21,7 +21,9 @@ router:
       - address: 10.1.22.2
     interface:
     - if-name: eth5
+      enabled: true
       dr-priority: 1
     - if-name: eth6
+      enabled: true
       igmp:
         enabled: true

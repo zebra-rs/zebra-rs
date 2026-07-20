@@ -4050,6 +4050,11 @@ module config {
             ext:dynamic "rib:interface";
             type string;
           }
+          leaf enabled {
+            ext:help "Enable PIM on this interface";
+            type boolean;
+            default false;
+          }
           leaf dr-priority {
             ext:help "Designated Router election priority";
             type uint32;
@@ -4174,6 +4179,11 @@ module config {
               ext:dynamic "rib:interface";
               type string;
             }
+            leaf enabled {
+              ext:help "Enable PIM on this interface";
+              type boolean;
+              default false;
+            }
             leaf dr-priority {
               ext:help "Designated Router election priority";
               type uint32;
@@ -4273,6 +4283,11 @@ module config {
               ext:dynamic "rib:interface";
               type string;
             }
+            leaf enabled {
+              ext:help "Enable PIM on this interface";
+              type boolean;
+              default false;
+            }
             leaf dr-priority {
               ext:help "Designated Router election priority";
               type uint32;
@@ -4361,6 +4376,11 @@ module config {
                 ext:help "Interface name";
                 ext:dynamic "rib:interface";
                 type string;
+              }
+              leaf enabled {
+                ext:help "Enable PIM on this interface";
+                type boolean;
+                default false;
               }
               leaf dr-priority {
                 ext:help "Designated Router election priority";

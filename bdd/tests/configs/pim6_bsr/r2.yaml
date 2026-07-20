@@ -22,6 +22,8 @@ router:
           address: 2001:db8:22::2
       interface:
       - if-name: eth3
+        enabled: true
         dr-priority: 1
       - if-name: eth4
+        enabled: true
         dr-priority: 1

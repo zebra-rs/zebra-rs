@@ -7,5 +7,6 @@ router:
     ipv6:
       interface:
       - if-name: eth1
+        enabled: true
         mld:
           enabled: true

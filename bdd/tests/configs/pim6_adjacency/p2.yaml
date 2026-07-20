@@ -7,4 +7,5 @@ router:
     ipv6:
       interface:
       - if-name: eth2
+        enabled: true
         dr-priority: 1
