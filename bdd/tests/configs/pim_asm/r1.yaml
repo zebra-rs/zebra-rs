@@ -12,6 +12,8 @@ router:
       - address: 10.1.22.2
     interface:
     - if-name: eth1
+      enabled: true
       dr-priority: 1
     - if-name: eth2
+      enabled: true
       dr-priority: 1

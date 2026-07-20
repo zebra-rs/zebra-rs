@@ -28,6 +28,10 @@ pub const PIM_OVERRIDE_INTERVAL_MSEC: u16 = 2500;
 /// under `router pim`) is what enables PIM on the interface.
 #[derive(Debug, Clone, Default)]
 pub struct LinkConfig {
+    /// Whether PIM is activated on this interface (`interface <if>
+    /// enabled`). Presence of the config entry no longer implies PIM is
+    /// running — it must be explicitly enabled, matching OSPF / IS-IS.
+    pub enabled: Option<bool>,
     pub dr_priority: Option<u32>,
     pub hello_interval: Option<u16>,
     pub holdtime: Option<u16>,
@@ -52,6 +56,12 @@ impl LinkConfig {
 
     pub fn passive(&self) -> bool {
         self.passive.unwrap_or(false)
+    }
+
+    /// Whether PIM is enabled on this interface (default `false` — PIM
+    /// must be explicitly activated with `interface <if> enabled`).
+    pub fn enabled(&self) -> bool {
+        self.enabled.unwrap_or(false)
     }
 }
 
@@ -132,7 +142,10 @@ impl<A: PimAf> Pim<A> {
         };
         let usable = link.link_up && !link.addrs.is_empty();
         let entry = self.if_config.get(&link.name);
-        let desired = entry.is_some() && usable;
+        // PIM runs only where explicitly enabled (`interface <if>
+        // enabled`), not merely where a config entry exists — an
+        // interface may carry only IGMP/MLD or other knobs.
+        let desired = entry.map(|c| c.enabled()).unwrap_or(false) && usable;
         let igmp_desired = entry.map(|c| c.igmp.enabled()).unwrap_or(false) && usable;
         let igmp_running = self.gm.as_ref().is_some_and(|g| g.has_if(ifindex));
         match (desired, link.enabled) {

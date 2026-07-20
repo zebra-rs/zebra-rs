@@ -16,7 +16,9 @@ router:
     ipv6:
       interface:
       - if-name: eth2
+        enabled: true
         dr-priority: 1
       - if-name: eth5
+        enabled: true
         mld:
           enabled: true

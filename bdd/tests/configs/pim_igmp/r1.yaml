@@ -9,8 +9,10 @@ router:
   pim:
     interface:
     - if-name: eth1
+      enabled: true
       igmp:
         enabled: true
     - if-name: eth3
+      enabled: true
       igmp:
         enabled: true

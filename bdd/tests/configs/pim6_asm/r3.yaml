@@ -22,7 +22,9 @@ router:
         - address: 2001:db8:12::2
       interface:
       - if-name: eth5
+        enabled: true
         dr-priority: 1
       - if-name: eth6
+        enabled: true
         mld:
           enabled: true

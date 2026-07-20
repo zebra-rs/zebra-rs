@@ -18,7 +18,9 @@ router:
   pim:
     interface:
     - if-name: eth1
+      enabled: true
       dr-priority: 1
     - if-name: eth2
+      enabled: true
       igmp:
         enabled: true

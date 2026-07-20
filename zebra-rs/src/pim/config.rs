@@ -25,6 +25,7 @@ impl<A: PimAf> Pim<A> {
     /// `if_config`), shared by the IPv4 and IPv6 configuration surfaces.
     pub(crate) fn callback_add_interface(&mut self) {
         self.callback_add("/router/pim/interface", config_interface);
+        self.callback_add("/router/pim/interface/enabled", config_interface_enabled);
         self.callback_add("/router/pim/interface/dr-priority", config_dr_priority);
         self.callback_add(
             "/router/pim/interface/hello/interval",
@@ -109,6 +110,22 @@ fn config_interface<A: PimAf>(pim: &mut Pim<A>, mut args: Args, op: ConfigOp) ->
         pim.if_config.entry(name.clone()).or_default();
     } else {
         pim.if_config.remove(&name);
+    }
+    pim.reconcile_by_name(&name);
+    Some(())
+}
+
+fn config_interface_enabled<A: PimAf>(
+    pim: &mut Pim<A>,
+    mut args: Args,
+    op: ConfigOp,
+) -> Option<()> {
+    let name = args.string()?;
+    if op.is_set() {
+        let enabled = args.boolean()?;
+        pim.if_config.entry(name.clone()).or_default().enabled = Some(enabled);
+    } else if let Some(config) = pim.if_config.get_mut(&name) {
+        config.enabled = None;
     }
     pim.reconcile_by_name(&name);
     Some(())

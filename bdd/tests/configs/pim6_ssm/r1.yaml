@@ -10,6 +10,8 @@ router:
     ipv6:
       interface:
       - if-name: eth1
+        enabled: true
         dr-priority: 1
       - if-name: eth3
+        enabled: true
         dr-priority: 1

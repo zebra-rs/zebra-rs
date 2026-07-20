@@ -6,5 +6,6 @@ router:
   pim:
     interface:
     - if-name: eth2
+      enabled: true
       igmp:
         enabled: true
