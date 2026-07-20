@@ -4714,7 +4714,7 @@ fn render_mup_vrfs(
             .get(name)
             .map(|k| k.mup_export_rts.len())
             .unwrap_or(0);
-        if mup.srv6_mobile.is_none() && rts == 0 {
+        if mup.routes.is_empty() && rts == 0 {
             continue;
         }
         if !any {
@@ -4730,20 +4730,28 @@ fn render_mup_vrfs(
             MupDataplane::EndDt46 => "end-dt46",
             MupDataplane::Gtp => "gtp",
         };
-        match &mup.srv6_mobile {
-            Some(sm) => {
-                let (dir, st) = match sm.direction {
-                    MupSrv6Direction::Decapsulation => ("decap", "ST2"),
-                    MupSrv6Direction::Encapsulation => ("encap", "ST1"),
-                };
-                let ni = sm.network_instance.as_deref().unwrap_or("-");
-                writeln!(
-                    buf,
-                    "  {name}: rd={rd} {dir}/{st} ni={ni} dataplane={dp} route-targets={rts}"
-                )?;
-            }
-            None => writeln!(buf, "  {name}: rd={rd} dataplane={dp} route-targets={rts}")?,
+        // One `{dir}/{st} ni={ni}` chunk per bound direction, st1 before
+        // st2 — a dual-direction VRF (single-N6 UPF, issue #1947) renders
+        // both on its line; a single-direction VRF keeps the classic form.
+        let mut svc = String::new();
+        for direction in [
+            MupSrv6Direction::Encapsulation,
+            MupSrv6Direction::Decapsulation,
+        ] {
+            let Some(binding) = mup.routes.get(&direction) else {
+                continue;
+            };
+            let (dir, st) = match direction {
+                MupSrv6Direction::Decapsulation => ("decap", "ST2"),
+                MupSrv6Direction::Encapsulation => ("encap", "ST1"),
+            };
+            let ni = binding.network_instance.as_deref().unwrap_or("-");
+            write!(svc, " {dir}/{st} ni={ni}")?;
         }
+        writeln!(
+            buf,
+            "  {name}: rd={rd}{svc} dataplane={dp} route-targets={rts}"
+        )?;
     }
     Ok(buf)
 }
@@ -5924,17 +5932,19 @@ mod detail_tests {
     fn render_mup_vrfs_lists_configured_services() {
         use super::super::inst::RibKnownVrf;
         use super::super::vrf_config::{
-            BgpVrfConfig, BgpVrfMobileUplane, MupSrv6Direction, MupSrv6Mobile,
+            BgpVrfConfig, BgpVrfMobileUplane, MupRouteBinding, MupSrv6Direction,
         };
         use std::collections::BTreeMap;
+        let mup_binding = |ni: &str| MupRouteBinding {
+            network_instance: Some(ni.to_string()),
+            mup_ext_comm: None,
+        };
         let n3 = BgpVrfConfig {
             rd: Some("65000:1".parse().unwrap()),
             mobile_uplane: BgpVrfMobileUplane {
-                srv6_mobile: Some(MupSrv6Mobile {
-                    direction: MupSrv6Direction::Decapsulation,
-                    network_instance: Some("core-ni".to_string()),
-                    mup_ext_comm: None,
-                }),
+                routes: [(MupSrv6Direction::Decapsulation, mup_binding("core-ni"))]
+                    .into_iter()
+                    .collect(),
                 segment: None,
                 mup_ext_comm: None,
                 interwork_prefix: None,
@@ -5945,11 +5955,27 @@ mod detail_tests {
         let n6 = BgpVrfConfig {
             rd: Some("65000:2".parse().unwrap()),
             mobile_uplane: BgpVrfMobileUplane {
-                srv6_mobile: Some(MupSrv6Mobile {
-                    direction: MupSrv6Direction::Encapsulation,
-                    network_instance: Some("access-ni".to_string()),
-                    mup_ext_comm: None,
-                }),
+                routes: [(MupSrv6Direction::Encapsulation, mup_binding("access-ni"))]
+                    .into_iter()
+                    .collect(),
+                segment: None,
+                mup_ext_comm: None,
+                interwork_prefix: None,
+                dataplane: Default::default(),
+            },
+            ..Default::default()
+        };
+        // A dual-direction VRF (single-N6 UPF, issue #1947) renders both
+        // bindings on one line, st1 before st2.
+        let mobile = BgpVrfConfig {
+            rd: Some("65000:3".parse().unwrap()),
+            mobile_uplane: BgpVrfMobileUplane {
+                routes: [
+                    (MupSrv6Direction::Encapsulation, mup_binding("internet")),
+                    (MupSrv6Direction::Decapsulation, mup_binding("internet")),
+                ]
+                .into_iter()
+                .collect(),
                 segment: None,
                 mup_ext_comm: None,
                 interwork_prefix: None,
@@ -5960,6 +5986,7 @@ mod detail_tests {
         let mut vrfs: BTreeMap<String, BgpVrfConfig> = BTreeMap::new();
         vrfs.insert("N3".to_string(), n3);
         vrfs.insert("N6".to_string(), n6);
+        vrfs.insert("mobile".to_string(), mobile);
 
         // The export RTs now come from `rib_known_vrfs` (the top-level
         // `vrf <name> mup route-target export`).
@@ -5988,6 +6015,13 @@ mod detail_tests {
             out.contains(
                 "N6: rd=65000:2 encap/ST1 ni=access-ni dataplane=end-dt46 route-targets=1"
             )
+        );
+        assert!(
+            out.contains(
+                "mobile: rd=65000:3 encap/ST1 ni=internet decap/ST2 ni=internet \
+                 dataplane=end-dt46 route-targets=0"
+            ),
+            "dual-direction VRF renders both bindings: {out}"
         );
 
         // No mup config anywhere → empty section.

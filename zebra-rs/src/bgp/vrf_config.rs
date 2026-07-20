@@ -130,9 +130,10 @@ impl<N: Ord> Default for BgpVrfAfConfig<N> {
 
 /// SRv6 mobile user-plane direction for a per-VRF MUP service
 /// (zebra-bgp-vrf.yang `afi-safi mup route {st1|st2}`). `Decapsulation`
-/// is the `st2` egress/uplink (Type-2 ST, the N3 VRF); `Encapsulation`
-/// is the `st1` ingress/downlink (Type-1 ST, the N6 VRF).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// is the `st2` egress/uplink (Type-2 ST, the N3 side); `Encapsulation`
+/// is the `st1` ingress/downlink (Type-1 ST, the N6 side). Ordered so it
+/// can key the per-direction `routes` map on [`BgpVrfMobileUplane`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub enum MupSrv6Direction {
     Decapsulation,
     Encapsulation,
@@ -142,7 +143,7 @@ pub enum MupSrv6Direction {
 /// (zebra-bgp-vrf.yang `afi-safi mup segment {direct|interwork}`).
 /// `Direct` originates a Direct Segment Discovery (DSD, type 2) route
 /// carrying the VRF's End.DT46 SID; `Interwork` an Interwork Segment
-/// Discovery (ISD, type 1) route. Independent of [`MupSrv6Mobile`], which
+/// Discovery (ISD, type 1) route. Independent of [`MupRouteBinding`], which
 /// is the controller-side Session-Transformed origination binding.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum MupSegmentMode {
@@ -183,23 +184,25 @@ impl MupDataplane {
     }
 }
 
-/// `afi-safi mup route {st1|st2} { network-instance <ni>; [mup-ext-comm
-/// <2:4>;] }` for one VRF: the ST route type (as a direction) plus the
-/// session network-instance matched, and (st2 only) the Direct-segment
-/// MUP Extended Community the originated ST2 routes resolve to. Surfaced
-/// in `show bgp mup` (the `MUP VRFs:` block) and consumed by the
-/// P5 MUP controller when it originates ST routes (st2/Decapsulation →
-/// Type-2 ST, the N3 VRF; st1/Encapsulation → Type-1 ST, the N6 VRF).
-#[derive(Debug, Clone)]
-pub struct MupSrv6Mobile {
-    pub direction: MupSrv6Direction,
+/// One `afi-safi mup route {st1|st2} { network-instance <ni>;
+/// [mup-ext-comm <2:4>;] }` list entry for one VRF: the session
+/// network-instance matched, and (st2 only) the Direct-segment MUP
+/// Extended Community the originated ST2 routes resolve to. Keyed by
+/// its [`MupSrv6Direction`] in [`BgpVrfMobileUplane::routes`], so one
+/// VRF may bind BOTH directions and serve a bidirectional UPF behind a
+/// single N6 interface (issue #1947). Surfaced in `show bgp mup` (the
+/// `MUP VRFs:` block) and consumed by the P5 MUP controller when it
+/// originates ST routes (st2/Decapsulation → Type-2 ST;
+/// st1/Encapsulation → Type-1 ST).
+#[derive(Default, Debug, Clone)]
+pub struct MupRouteBinding {
     pub network_instance: Option<String>,
     /// `afi-safi mup route st2 mup-ext-comm <2:4>` — the BGP MUP Extended
     /// Community (Direct-Type Segment Identifier, draft-mpmz-bess-mup-safi
     /// §3.2 / §3.3.10) attached to the Type-2 ST routes this VRF
     /// originates, so a receiving PE resolves the (endpoint, TEID) tunnel
-    /// onto the matching End.DT46 Direct segment. Set only for the
-    /// Decapsulation (st2) direction; `None` for st1.
+    /// onto the matching End.DT46 Direct segment. Meaningful only on the
+    /// Decapsulation (st2) binding; `None` for st1.
     pub mup_ext_comm: Option<RouteDistinguisher>,
 }
 
@@ -211,12 +214,16 @@ pub struct MupSrv6Mobile {
 /// `rib_known_vrfs`), the same framework as ipv4 / ipv6.
 #[derive(Default, Debug, Clone)]
 pub struct BgpVrfMobileUplane {
-    pub srv6_mobile: Option<MupSrv6Mobile>,
+    /// `afi-safi mup route {st1|st2}` — the controller-side ST origination
+    /// bindings, keyed by direction. One VRF may carry both an `st1` and an
+    /// `st2` entry (a bidirectional UPF behind a single N6 interface/VRF,
+    /// issue #1947); the two-VRF split (one direction each) remains valid.
+    pub routes: BTreeMap<MupSrv6Direction, MupRouteBinding>,
     /// `afi-safi mup segment {direct|interwork}` — PE-side Segment
     /// Discovery origination for this VRF. `Direct` → DSD (type 2, NLRI =
     /// RD + router-id); `Interwork` → ISD (type 1, NLRI = RD +
     /// [`Self::interwork_prefix`]). Both carry the VRF's End.DT46 SID.
-    /// Independent of `srv6_mobile`.
+    /// Independent of `routes`.
     pub segment: Option<MupSegmentMode>,
     /// `afi-safi mup segment direct mup-ext-comm <2:4>` — the BGP MUP
     /// Extended Community (transitive type 0x0c, sub-type 0x00 =
@@ -389,25 +396,21 @@ fn mup_route_direction(key: &str) -> Option<MupSrv6Direction> {
     }
 }
 
-/// Borrow-or-create the per-VRF `srv6_mobile` binding for the given ST
-/// direction, forcing the direction (the single binding flips st1↔st2 if
-/// the VRF is reconfigured). Lets the `network-instance` / `mup-ext-comm`
-/// child-leaf handlers accumulate into the same binding regardless of the
-/// order their callbacks fire.
-fn mup_route_binding(cfg: &mut BgpVrfConfig, direction: MupSrv6Direction) -> &mut MupSrv6Mobile {
-    let sm = cfg.mobile_uplane.srv6_mobile.get_or_insert(MupSrv6Mobile {
-        direction,
-        network_instance: None,
-        mup_ext_comm: None,
-    });
-    sm.direction = direction;
-    sm
+/// Borrow-or-create the per-VRF `route {st1|st2}` binding for the given
+/// ST direction. Each direction is its own map entry, so one VRF may
+/// bind both st1 and st2 (issue #1947); the `network-instance` /
+/// `mup-ext-comm` child-leaf handlers accumulate into their direction's
+/// binding regardless of the order their callbacks fire.
+fn mup_route_binding(cfg: &mut BgpVrfConfig, direction: MupSrv6Direction) -> &mut MupRouteBinding {
+    cfg.mobile_uplane.routes.entry(direction).or_default()
 }
 
 /// `set router bgp vrf <NAME> afi-safi mup route {st1|st2}` — list-key
 /// handler. Establishes the ST direction binding (st1 = Encapsulation /
 /// downlink, st2 = Decapsulation / uplink); the session network-instance
 /// and (st2) the Direct-segment `mup-ext-comm` hang off child leaves.
+/// The delete removes only that direction's entry, leaving a sibling
+/// direction's binding intact.
 pub fn config_vrf_mup_route(bgp: &mut Bgp, mut args: Args, op: ConfigOp) -> Option<()> {
     let name = args.string()?;
     let direction = mup_route_direction(&args.string()?)?;
@@ -416,15 +419,8 @@ pub fn config_vrf_mup_route(bgp: &mut Bgp, mut args: Args, op: ConfigOp) -> Opti
         ConfigOp::Set => {
             mup_route_binding(cfg, direction);
         }
-        ConfigOp::Delete
-            if cfg
-                .mobile_uplane
-                .srv6_mobile
-                .as_ref()
-                .map(|sm| sm.direction)
-                == Some(direction) =>
-        {
-            cfg.mobile_uplane.srv6_mobile = None;
+        ConfigOp::Delete => {
+            cfg.mobile_uplane.routes.remove(&direction);
         }
         _ => {}
     }
@@ -450,10 +446,8 @@ pub fn config_vrf_mup_route_network_instance(
             mup_route_binding(cfg, direction).network_instance = Some(ni);
         }
         ConfigOp::Delete => {
-            if let Some(sm) = cfg.mobile_uplane.srv6_mobile.as_mut()
-                && sm.direction == direction
-            {
-                sm.network_instance = None;
+            if let Some(binding) = cfg.mobile_uplane.routes.get_mut(&direction) {
+                binding.network_instance = None;
             }
         }
         _ => {}
@@ -464,7 +458,7 @@ pub fn config_vrf_mup_route_network_instance(
 /// `set router bgp vrf <NAME> afi-safi mup route st2 mup-ext-comm <2:4>` —
 /// the BGP MUP Extended Community (Direct-Type Segment Identifier) the
 /// originated Type-2 ST routes resolve to (draft §3.3.10). Meaningful only
-/// under `route st2` (Decapsulation); stored on the `srv6_mobile` binding.
+/// under `route st2` (Decapsulation); stored on that direction's binding.
 pub fn config_vrf_mup_route_mup_ext_comm(
     bgp: &mut Bgp,
     mut args: Args,
@@ -480,10 +474,8 @@ pub fn config_vrf_mup_route_mup_ext_comm(
                 Some(RouteDistinguisher::from_str(&raw).ok()?);
         }
         ConfigOp::Delete => {
-            if let Some(sm) = cfg.mobile_uplane.srv6_mobile.as_mut()
-                && sm.direction == direction
-            {
-                sm.mup_ext_comm = None;
+            if let Some(binding) = cfg.mobile_uplane.routes.get_mut(&direction) {
+                binding.mup_ext_comm = None;
             }
         }
         _ => {}
@@ -1119,34 +1111,43 @@ mod tests {
     #[test]
     fn mobile_uplane_default_is_empty() {
         let mup = BgpVrfConfig::default().mobile_uplane;
-        assert!(mup.srv6_mobile.is_none());
+        assert!(mup.routes.is_empty());
     }
 
     #[test]
-    fn mobile_uplane_srv6_decap_and_encap() {
+    fn mobile_uplane_binds_both_directions() {
+        // One VRF may bind both st1 and st2 (single-N6 UPF, issue #1947):
+        // each direction is an independent map entry, and removing one
+        // leaves the other intact.
         let mut cfg = BgpVrfConfig::default();
-        cfg.mobile_uplane.srv6_mobile = Some(MupSrv6Mobile {
-            direction: MupSrv6Direction::Decapsulation,
-            network_instance: Some("core-ni".to_string()),
-            mup_ext_comm: Some("1:2".parse().unwrap()),
-        });
-        let sm = cfg.mobile_uplane.srv6_mobile.as_ref().unwrap();
-        assert_eq!(sm.direction, MupSrv6Direction::Decapsulation);
-        assert_eq!(sm.network_instance.as_deref(), Some("core-ni"));
-        assert_eq!(sm.mup_ext_comm, Some("1:2".parse().unwrap()));
-
-        cfg.mobile_uplane.srv6_mobile = Some(MupSrv6Mobile {
-            direction: MupSrv6Direction::Encapsulation,
-            network_instance: Some("access-ni".to_string()),
-            mup_ext_comm: None,
-        });
-        assert_eq!(
-            cfg.mobile_uplane.srv6_mobile.as_ref().unwrap().direction,
-            MupSrv6Direction::Encapsulation
+        cfg.mobile_uplane.routes.insert(
+            MupSrv6Direction::Decapsulation,
+            MupRouteBinding {
+                network_instance: Some("internet".to_string()),
+                mup_ext_comm: Some("1:2".parse().unwrap()),
+            },
         );
+        cfg.mobile_uplane.routes.insert(
+            MupSrv6Direction::Encapsulation,
+            MupRouteBinding {
+                network_instance: Some("internet".to_string()),
+                mup_ext_comm: None,
+            },
+        );
+        assert_eq!(cfg.mobile_uplane.routes.len(), 2);
+        let st2 = &cfg.mobile_uplane.routes[&MupSrv6Direction::Decapsulation];
+        assert_eq!(st2.network_instance.as_deref(), Some("internet"));
+        assert_eq!(st2.mup_ext_comm, Some("1:2".parse().unwrap()));
 
-        cfg.mobile_uplane.srv6_mobile = None;
-        assert!(cfg.mobile_uplane.srv6_mobile.is_none());
+        cfg.mobile_uplane
+            .routes
+            .remove(&MupSrv6Direction::Decapsulation);
+        assert!(
+            cfg.mobile_uplane
+                .routes
+                .contains_key(&MupSrv6Direction::Encapsulation),
+            "removing st2 leaves the st1 binding intact"
+        );
     }
 
     #[test]

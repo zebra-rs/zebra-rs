@@ -8276,10 +8276,12 @@ mod mup_dual_origination_tests {
     //! VRF-first MUP origination splits into a pure NI→VRF correlation
     //! (`mup_session_targets`) and per-direction NLRI building
     //! (`build_mup_st_route`). `mup_session_targets` fans one PFCP session out
-    //! to *every* VRF whose `afi-safi mup route {st1|st2}` binding matches the
-    //! session's Network Instance — so a single session under `internet`
-    //! targets both the downlink (st1 / N6) and uplink (st2 / N3) VRF —
-    //! and `build_mup_st_route` builds the RD-free T1ST / T2ST NLRI.
+    //! to *every* `afi-safi mup route {st1|st2}` binding matching the
+    //! session's Network Instance — a single session under `internet`
+    //! targets both the downlink (st1) and uplink (st2) binding, whether
+    //! those live on two VRFs (the classic split) or on ONE dual-direction
+    //! VRF (single-N6 UPF, issue #1947) — and `build_mup_st_route` builds
+    //! the RD-free T1ST / T2ST NLRI.
 
     use std::collections::BTreeMap;
     use std::str::FromStr;
@@ -8290,7 +8292,7 @@ mod mup_dual_origination_tests {
     use super::super::inst::Bgp;
     use super::super::route::build_mup_st_route;
     use super::super::vrf::inst::mup_session_targets;
-    use super::super::vrf_config::{BgpVrfConfig, MupSrv6Direction, MupSrv6Mobile};
+    use super::super::vrf_config::{BgpVrfConfig, MupRouteBinding, MupSrv6Direction};
 
     fn fresh_bgp() -> Bgp {
         let (inbound_tx, _inbound_rx) = mpsc::unbounded_channel();
@@ -8409,11 +8411,13 @@ mod mup_dual_origination_tests {
             rd: Some(RouteDistinguisher::from_str(rd).unwrap()),
             ..BgpVrfConfig::default()
         };
-        cfg.mobile_uplane.srv6_mobile = Some(MupSrv6Mobile {
+        cfg.mobile_uplane.routes.insert(
             direction,
-            network_instance: Some(ni.to_string()),
-            mup_ext_comm: ext.map(|e| RouteDistinguisher::from_str(e).unwrap()),
-        });
+            MupRouteBinding {
+                network_instance: Some(ni.to_string()),
+                mup_ext_comm: ext.map(|e| RouteDistinguisher::from_str(e).unwrap()),
+            },
+        );
         cfg
     }
 
@@ -8467,6 +8471,39 @@ mod mup_dual_origination_tests {
                 .any(|(_, d, _)| matches!(d, MupSrv6Direction::Decapsulation)),
             "uplink st2 (N3) is a target",
         );
+    }
+
+    /// ONE VRF binding both st1 and st2 to the same NI (single-N6 UPF,
+    /// issue #1947) yields two targets under the same VRF name — the
+    /// session's T1ST and T2ST both originate from that VRF, under one RD.
+    #[test]
+    fn one_session_targets_both_directions_of_one_vrf() {
+        let mut vrfs = BTreeMap::new();
+        let mut cfg = mup_vrf("65000:1", MupSrv6Direction::Encapsulation, "internet", None);
+        cfg.mobile_uplane.routes.insert(
+            MupSrv6Direction::Decapsulation,
+            MupRouteBinding {
+                network_instance: Some("internet".to_string()),
+                mup_ext_comm: Some(RouteDistinguisher::from_str("100:1").unwrap()),
+            },
+        );
+        vrfs.insert("mobile".to_string(), cfg);
+
+        let mut targets = mup_session_targets(&vrfs, &session("internet"));
+        targets.sort_by_key(|(_, d, _)| *d);
+        assert_eq!(targets.len(), 2, "one dual-direction VRF → two targets");
+        assert!(
+            targets.iter().all(|(name, _, _)| name == "mobile"),
+            "both targets name the same VRF"
+        );
+        assert!(matches!(
+            targets[0],
+            (_, MupSrv6Direction::Decapsulation, Some(_))
+        ));
+        assert!(matches!(
+            targets[1],
+            (_, MupSrv6Direction::Encapsulation, None)
+        ));
     }
 
     /// A session whose NI matches no VRF binding targets nothing.
