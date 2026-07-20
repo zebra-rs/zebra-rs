@@ -246,7 +246,7 @@ on the eBPF data plane) — are scoped in
 
 ### One VRF, both directions — the single-N6 UPF
 
-zebra-rs also support single-N6 UPF: uplink and downlink are directions of the
+zebra-rs also supports a single-N6 UPF: uplink and downlink are directions of the
 same N6-facing interface, not two separate legs. Because a kernel interface
 belongs to exactly one VRF, the older one-direction-per-VRF model forced a
 bidirectional GTP UPF into two VRFs — and with them two N6 interfaces.
