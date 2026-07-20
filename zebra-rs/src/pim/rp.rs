@@ -38,6 +38,9 @@ impl<A: PimAf> Pim<A> {
             .filter(|(_, range)| A::prefix_contains(range, &grp))
             .max_by_key(|(_, range)| A::prefix_len(range))
             .map(|(rp, _)| *rp)
+            // Embedded-RP (RFC 3956): the group carries its own RP —
+            // precedence above BSR, below an explicit static mapping.
+            .or_else(|| A::embedded_rp(grp))
             .or_else(|| self.bsr_rp_lookup(grp))
     }
 

@@ -131,6 +131,13 @@ pub trait PimAf: Copy + Eq + Ord + Hash + Debug + Send + Sync + Sized + 'static 
     /// the 128-bit masked group / RP XOR-folded to 32 bits (deterministic
     /// and domain-agreed within zebra-rs).
     fn bsr_hash(group: Self::Addr, rp: Self::Addr, mask_len: u8) -> u32;
+
+    /// The Embedded-RP address a group carries in its own bits (RFC 3956),
+    /// or `None` when the group is not an Embedded-RP group. IPv4 has no
+    /// Embedded-RP, so it is always `None`; IPv6 decodes an `ff70::/12`
+    /// (R=P=T=1) address — validating the reserved field, RIID and prefix
+    /// length — into `network-prefix(plen) :: RIID`.
+    fn embedded_rp(group: Self::Addr) -> Option<Self::Addr>;
 }
 
 /// The RFC 2362 §3.7 hash recurrence on 32-bit words:

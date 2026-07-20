@@ -132,6 +132,11 @@ impl PimAf for Ipv4 {
         };
         super::af::bsr_hash_value(u32::from(group) & mask, u32::from(rp))
     }
+
+    fn embedded_rp(_group: Ipv4Addr) -> Option<Ipv4Addr> {
+        // No Embedded-RP for IPv4 (RFC 3956 is IPv6-only).
+        None
+    }
 }
 
 #[cfg(test)]

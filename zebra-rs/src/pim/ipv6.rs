@@ -165,6 +165,40 @@ impl PimAf for Ipv6 {
         let c = u128::from_be_bytes(rp.octets());
         super::af::bsr_hash_value(fold(gm), fold(c))
     }
+
+    fn embedded_rp(group: Ipv6Addr) -> Option<Ipv6Addr> {
+        // RFC 3956 §2 group layout:
+        //   FF | flgs(4) | scop(4) | rsvd(4) | RIID(4) | plen(8)
+        //      | network prefix(64) | group ID(32)
+        let o = group.octets();
+        // ff70::/12 — R-bit set (RFC 3956 also mandates P=1, T=1, so the
+        // flags nibble is 0x7).
+        if o[0] != 0xff || (o[1] & 0xf0) != 0x70 {
+            return None;
+        }
+        let rsvd = o[2] >> 4;
+        let riid = o[2] & 0x0f;
+        let plen = o[3];
+        // Reserved must be zero, RIID non-zero, and the prefix must fit in
+        // the 64-bit network-prefix field.
+        if rsvd != 0 || riid == 0 || plen == 0 || plen > 64 {
+            return None;
+        }
+        // RP = the top `plen` bits of the network prefix (bytes 4..12),
+        // zero-filled, with the RIID in the last 4 bits.
+        let mut rp = [0u8; 16];
+        rp[..8].copy_from_slice(&o[4..12]);
+        let full = (plen / 8) as usize;
+        let rem = plen % 8;
+        if rem != 0 {
+            rp[full] &= 0xffu8 << (8 - rem);
+            rp[full + 1..8].fill(0);
+        } else {
+            rp[full..8].fill(0);
+        }
+        rp[15] = riid;
+        Some(Ipv6Addr::from(rp))
+    }
 }
 
 #[cfg(test)]
@@ -228,5 +262,30 @@ mod tests {
         );
         // An IPv4 inner header is rejected by the IPv6 codec.
         assert_eq!(Ipv6::register_inner_sg(&[0x45; 40]), None);
+    }
+
+    #[test]
+    fn embedded_rp_decodes_and_validates() {
+        // RFC 3956 §5 example: FF7E:0140:2001:DB8::1234 embeds 2001:db8::1
+        // (scope E, RIID 1, plen 64, network prefix 2001:db8::).
+        assert_eq!(
+            Ipv6::embedded_rp(a("ff7e:140:2001:db8::1234")),
+            Some(a("2001:db8::1"))
+        );
+        // A shorter prefix keeps only `plen` bits and still carries RIID.
+        assert_eq!(
+            Ipv6::embedded_rp(a("ff7e:240:2001:db8:22::9")),
+            Some(a("2001:db8:22::2"))
+        );
+
+        // Not an Embedded-RP group (R-bit clear): plain ASM / SSM.
+        assert_eq!(Ipv6::embedded_rp(a("ff0e::1")), None);
+        assert_eq!(Ipv6::embedded_rp(a("ff3e::1")), None);
+        // RIID 0 is invalid.
+        assert_eq!(Ipv6::embedded_rp(a("ff7e:040:2001:db8::1")), None);
+        // A non-zero reserved nibble is invalid.
+        assert_eq!(Ipv6::embedded_rp(a("ff7e:1140:2001:db8::1")), None);
+        // plen > 64 (does not fit the network-prefix field) is invalid.
+        assert_eq!(Ipv6::embedded_rp(a("ff7e:0180:2001:db8::1")), None);
     }
 }
