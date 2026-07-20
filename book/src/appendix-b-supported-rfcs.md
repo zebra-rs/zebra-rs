@@ -104,6 +104,18 @@ implementation; the corresponding features track the referenced draft revision.
 | RFC 9350 | IGP Flexible Algorithm (Flex-Algo) constraint-based SPF. |
 | RFC 9855 | Topology-Independent Loop-Free Alternate (TI-LFA) fast reroute using Segment Routing. |
 
+## PIM (Multicast)
+
+| RFC / Internet-Draft | Description |
+| --- | --- |
+| RFC 7761 | Protocol Independent Multicast — Sparse Mode (PIM-SM), the base ASM protocol (shared tree, Register, SPT switch, Assert, DR election) for both IPv4 and IPv6. |
+| RFC 4607 | Source-Specific Multicast (SSM) for IP — the `232.0.0.0/8` and `FF3x::/32` ranges and source-specific joins. |
+| RFC 3376 | Internet Group Management Protocol, Version 3 (IGMPv3) — IPv4 local membership, including source lists. |
+| RFC 3810 | Multicast Listener Discovery Version 2 (MLDv2) for IPv6 — the IPv6 local-membership counterpart. |
+| RFC 5059 | Bootstrap Router (BSR) Mechanism for PIM — Candidate-BSR election and RP-set flooding. |
+| RFC 2362 | PIM-SM (historic) — the group-to-RP hash used to break same-priority RP-set ties consistently across the domain. |
+| RFC 3956 | Embedding the Rendezvous Point (RP) Address in an IPv6 Multicast Address (Embedded-RP). |
+
 ## BFD
 
 | RFC / Internet-Draft | Description |
