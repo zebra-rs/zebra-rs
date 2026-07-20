@@ -179,8 +179,9 @@ pub struct BgpVrf {
     /// VRF-first MUP origination tracking: per PFCP SEID, the RD-free ST
     /// prefixes this VRF exported to the global SAFI-85 RIB. Lets a Session
     /// Deletion / Modification (`MupWithdrawOriginate`) withdraw exactly the
-    /// routes that session created. A VRF binds one direction, so this is
-    /// normally one prefix per SEID.
+    /// routes that session created. Up to one prefix per bound direction —
+    /// a single-direction VRF holds one, a dual-direction VRF (single-N6
+    /// UPF, issue #1947) holds the session's T1ST and T2ST together.
     pub mup_originated: std::collections::BTreeMap<u64, Vec<bgp_packet::MupPrefix>>,
     /// VRF-first MUP segment tracking: the RD-free DSD/ISD prefix this VRF
     /// currently has exported (`MupSegmentOriginate`), or `None`. A VRF has at
@@ -517,13 +518,15 @@ pub fn dispatch_mup(
     }
 }
 
-/// The VRFs a PFCP session should originate ST routes in: every VRF whose
-/// `afi-safi mup route {st1|st2}` binding (`srv6_mobile.network_instance`)
-/// matches the session's Network Instance, paired with its resolved direction
+/// The (VRF, direction) pairs a PFCP session should originate ST routes in:
+/// every `afi-safi mup route {st1|st2}` binding whose `network-instance`
+/// matches the session's Network Instance, paired with its direction
 /// (st1 = Encapsulation / st2 = Decapsulation) and st2 Direct-segment
-/// ext-comm. This is the dual-ST fan-out: one NI bound by both an st1 and an
-/// st2 VRF yields two targets. Pure (no I/O) so the correlation is unit
-/// testable; [`dispatch_mup_session`] turns each target into a `MupOriginate`.
+/// ext-comm. This is the dual-ST fan-out, in either topology: one NI bound
+/// by an st1 and an st2 VRF yields one target each, and one VRF binding
+/// BOTH directions (single-N6 UPF, issue #1947) yields two targets under
+/// the same VRF name. Pure (no I/O) so the correlation is unit testable;
+/// [`dispatch_mup_session`] groups the targets per VRF into `MupOriginate`.
 pub fn mup_session_targets(
     vrfs: &std::collections::BTreeMap<String, super::super::vrf_config::BgpVrfConfig>,
     session: &crate::mup_c::session::MupSession,
@@ -536,12 +539,12 @@ pub fn mup_session_targets(
         return Vec::new();
     };
     vrfs.iter()
-        .filter_map(|(name, cfg)| {
-            let sm = cfg.mobile_uplane.srv6_mobile.as_ref()?;
-            if sm.network_instance.as_deref() != Some(ni) {
-                return None;
-            }
-            Some((name.clone(), sm.direction, sm.mup_ext_comm))
+        .flat_map(|(name, cfg)| {
+            cfg.mobile_uplane
+                .routes
+                .iter()
+                .filter(|(_, binding)| binding.network_instance.as_deref() == Some(ni))
+                .map(|(direction, binding)| (name.clone(), *direction, binding.mup_ext_comm))
         })
         .collect()
 }
@@ -578,14 +581,28 @@ pub fn dispatch_mup_session(
     vrf_registry: &std::collections::BTreeMap<String, super::spawn::BgpVrfHandle>,
     session: &crate::mup_c::session::MupSession,
 ) {
+    // Group the per-direction targets by VRF so each matched VRF receives
+    // ONE `MupOriginate` carrying its full desired direction set — the
+    // per-VRF handler reconciles prior exports against exactly that set, so
+    // a dual-direction VRF (issue #1947) must not see its directions as two
+    // competing messages.
+    let mut grouped: std::collections::BTreeMap<
+        String,
+        Vec<(
+            super::super::vrf_config::MupSrv6Direction,
+            Option<bgp_packet::RouteDistinguisher>,
+        )>,
+    > = std::collections::BTreeMap::new();
     for (name, direction, ext_comm) in mup_session_targets(vrfs, session) {
+        grouped.entry(name).or_default().push((direction, ext_comm));
+    }
+    for (name, bindings) in grouped {
         let Some(handle) = vrf_registry.get(&name) else {
             continue;
         };
         let _ = handle.inbox.send(BgpVrfMsg::MupOriginate {
             session: session.clone(),
-            direction,
-            ext_comm,
+            bindings,
         });
     }
 }
@@ -2335,39 +2352,44 @@ impl BgpVrf {
                     }
                 }
             }
-            // VRF-first MUP origination: build the RD-free ST NLRI from the
-            // dispatched session + resolved direction, and export it to the
-            // global SAFI-85 RIB. The global export handler applies the RD,
-            // export route-targets and controller next-hop; the resulting
-            // route is mirrored back here (RT/RD-origin) so this VRF's own
-            // `show bgp vrf <name> mup` reflects it. A Modification replaces —
-            // but the ST keys exclude the session-transform fields (an ST1
-            // keys on RD+Prefix alone, §3.2.1), so a handover that only moves
-            // the tunnel (new TEID/QFI/endpoint) rebuilds the *same* NLRI key:
-            // re-export it and let the Loc-RIB replace in place (an implicit
-            // withdraw on the wire). Only a prior export whose key actually
-            // changed (UE prefix / ST2 core tunnel) — or one the modified
-            // session no longer builds — gets an explicit withdraw, so peers
-            // and the dataplane never see the route flap mid-handover.
-            BgpVrfMsg::MupOriginate {
-                session,
-                direction,
-                ext_comm,
-            } => {
-                let built = super::super::route::build_mup_st_route(&session, direction, ext_comm);
+            // VRF-first MUP origination: build the RD-free ST NLRI for every
+            // dispatched direction binding — a dual-direction VRF (single-N6
+            // UPF, issue #1947) builds the session's T1ST AND T2ST here — and
+            // export each to the global SAFI-85 RIB. The global export
+            // handler applies the RD, export route-targets and controller
+            // next-hop; the resulting routes are mirrored back here
+            // (RT/RD-origin) so this VRF's own `show bgp vrf <name> mup`
+            // reflects them. A Modification reconciles against the prior
+            // exports as a set — the ST keys exclude the session-transform
+            // fields (an ST1 keys on RD+Prefix alone, §3.2.1), so a handover
+            // that only moves the tunnel (new TEID/QFI/endpoint) rebuilds the
+            // *same* NLRI key: re-export it and let the Loc-RIB replace in
+            // place (an implicit withdraw on the wire). Only a prior export
+            // no longer among the built keys — a changed UE prefix / ST2 core
+            // tunnel, an ST the modified session no longer builds, or a
+            // direction unbound since — gets an explicit withdraw, so peers
+            // and the dataplane never see the surviving routes flap
+            // mid-handover.
+            BgpVrfMsg::MupOriginate { session, bindings } => {
+                let built: Vec<_> = bindings
+                    .into_iter()
+                    .filter_map(|(direction, ext_comm)| {
+                        super::super::route::build_mup_st_route(&session, direction, ext_comm)
+                    })
+                    .collect();
                 let prior = self
                     .mup_originated
                     .remove(&session.seid)
                     .unwrap_or_default();
                 for old in prior {
-                    if built.as_ref().map(|(p, _, _)| p) != Some(&old) {
+                    if !built.iter().any(|(p, _, _)| p == &old) {
                         let _ = self.global_tx.send(BgpGlobalMsg::WithdrawMupExport {
                             vrf: self.name.clone(),
                             prefix: old,
                         });
                     }
                 }
-                if let Some((prefix, st1, attr)) = built {
+                for (prefix, st1, attr) in built {
                     self.mup_originated
                         .entry(session.seid)
                         .or_default()
@@ -2939,8 +2961,7 @@ mod tests {
         // Establishment: one export, nothing withdrawn.
         vrf.process_global_msg(BgpVrfMsg::MupOriginate {
             session: session(Some("10.0.1.1"), 0x100),
-            direction: MupSrv6Direction::Encapsulation,
-            ext_comm: None,
+            bindings: vec![(MupSrv6Direction::Encapsulation, None)],
         });
         let first = global_rx.try_recv().expect("establishment exports");
         let BgpGlobalMsg::MupExport {
@@ -2960,8 +2981,7 @@ mod tests {
         // Handover: same seid + UE prefix, new endpoint/TEID.
         vrf.process_global_msg(BgpVrfMsg::MupOriginate {
             session: session(Some("10.0.2.1"), 0x200),
-            direction: MupSrv6Direction::Encapsulation,
-            ext_comm: None,
+            bindings: vec![(MupSrv6Direction::Encapsulation, None)],
         });
         let second = global_rx.try_recv().expect("handover re-exports");
         let BgpGlobalMsg::MupExport {
@@ -2984,8 +3004,7 @@ mod tests {
         // builds → the prior export is withdrawn explicitly.
         vrf.process_global_msg(BgpVrfMsg::MupOriginate {
             session: session(None, 0),
-            direction: MupSrv6Direction::Encapsulation,
-            ext_comm: None,
+            bindings: vec![(MupSrv6Direction::Encapsulation, None)],
         });
         let third = global_rx.try_recv().expect("unbuildable ST withdraws");
         let BgpGlobalMsg::WithdrawMupExport { prefix: gone, .. } = third else {
@@ -2996,6 +3015,131 @@ mod tests {
         assert!(
             vrf.mup_originated.is_empty(),
             "nothing is tracked once the session exports no ST"
+        );
+    }
+
+    /// A VRF binding BOTH directions (single-N6 UPF, issue #1947) receives
+    /// one `MupOriginate` carrying both bindings and exports the session's
+    /// T1ST and T2ST together under its own RD. A handover that only moves
+    /// the access tunnel withdraws nothing (both keys unchanged), and
+    /// unbinding one direction (the next dispatch carries only the other)
+    /// withdraws exactly that direction's export while the survivor
+    /// re-exports.
+    #[tokio::test]
+    async fn mup_dual_direction_vrf_originates_and_reconciles_both_sts() {
+        use crate::bgp::vrf_config::MupSrv6Direction;
+        use crate::mup_c::session::MupSession;
+
+        fn session(endpoint: &str, teid: u32) -> MupSession {
+            MupSession {
+                seid: 9,
+                cp_seid: 0x2222,
+                peer: "10.0.0.2:8805".parse().unwrap(),
+                ue_ipv4: Some("192.0.2.5".parse().unwrap()),
+                ue_ipv6: None,
+                teid,
+                endpoint: Some(endpoint.parse().unwrap()),
+                core_teid: 0x9000,
+                core_endpoint: Some("10.0.12.2".parse().unwrap()),
+                network_instance: Some("internet".to_string()),
+                qfi: Some(9),
+            }
+        }
+        let both = || {
+            vec![
+                (MupSrv6Direction::Encapsulation, None),
+                (MupSrv6Direction::Decapsulation, None),
+            ]
+        };
+        fn recv_exports(
+            rx: &mut tokio::sync::mpsc::UnboundedReceiver<BgpGlobalMsg>,
+            n: usize,
+        ) -> Vec<bgp_packet::MupPrefix> {
+            let mut prefixes = Vec::new();
+            for _ in 0..n {
+                match rx.try_recv().expect("expected another MupExport") {
+                    BgpGlobalMsg::MupExport { prefix, .. } => prefixes.push(prefix),
+                    other => panic!("expected MupExport, got {other:?}"),
+                }
+            }
+            assert!(rx.try_recv().is_err(), "no extra messages");
+            prefixes
+        }
+
+        let (global_tx, mut global_rx) = unbounded_channel::<BgpGlobalMsg>();
+        let ctx = test_ctx_for_vrf(13, "vrf-dual");
+        let (_rib_tx, rib_rx) = mpsc::unbounded_channel();
+        let (mut vrf, _inbox) = BgpVrf::new(
+            "vrf-dual".to_string(),
+            ctx,
+            Ipv4Addr::UNSPECIFIED,
+            65000,
+            /* label */ 16,
+            global_tx,
+            rib_rx,
+        );
+
+        // Establishment: BOTH the T1ST and the T2ST export, nothing withdrawn.
+        vrf.process_global_msg(BgpVrfMsg::MupOriginate {
+            session: session("10.0.1.1", 0x100),
+            bindings: both(),
+        });
+        let first = recv_exports(&mut global_rx, 2);
+        assert!(
+            first
+                .iter()
+                .any(|p| matches!(p, bgp_packet::MupPrefix::T1st { .. })),
+            "dual-direction VRF exports the downlink T1ST"
+        );
+        assert!(
+            first
+                .iter()
+                .any(|p| matches!(p, bgp_packet::MupPrefix::T2st { .. })),
+            "dual-direction VRF exports the uplink T2ST"
+        );
+        assert_eq!(
+            vrf.mup_originated.get(&9).map(Vec::len),
+            Some(2),
+            "both STs tracked under the one seid"
+        );
+
+        // Handover: the access tunnel moves, the core tunnel stays. Both
+        // NLRI keys are unchanged (an ST1 keys on RD+Prefix alone), so both
+        // re-export in place with NO withdraw — the old single-direction
+        // bookkeeping would have withdrawn the sibling ST here.
+        vrf.process_global_msg(BgpVrfMsg::MupOriginate {
+            session: session("10.0.2.1", 0x200),
+            bindings: both(),
+        });
+        recv_exports(&mut global_rx, 2);
+
+        // Unbind st1 (the next dispatch carries only the st2 binding): the
+        // T1ST is withdrawn explicitly, the T2ST re-exports.
+        vrf.process_global_msg(BgpVrfMsg::MupOriginate {
+            session: session("10.0.2.1", 0x200),
+            bindings: vec![(MupSrv6Direction::Decapsulation, None)],
+        });
+        let mut saw_withdraw_t1 = false;
+        let mut saw_export_t2 = false;
+        while let Ok(msg) = global_rx.try_recv() {
+            match msg {
+                BgpGlobalMsg::WithdrawMupExport { prefix, .. } => {
+                    assert!(matches!(prefix, bgp_packet::MupPrefix::T1st { .. }));
+                    saw_withdraw_t1 = true;
+                }
+                BgpGlobalMsg::MupExport { prefix, .. } => {
+                    assert!(matches!(prefix, bgp_packet::MupPrefix::T2st { .. }));
+                    saw_export_t2 = true;
+                }
+                other => panic!("unexpected message {other:?}"),
+            }
+        }
+        assert!(saw_withdraw_t1, "unbound st1's T1ST withdrawn");
+        assert!(saw_export_t2, "surviving st2's T2ST re-exported");
+        assert_eq!(
+            vrf.mup_originated.get(&9).map(Vec::len),
+            Some(1),
+            "only the surviving direction stays tracked"
         );
     }
 }

@@ -94,24 +94,29 @@ pub enum BgpVrfMsg {
         prefix: bgp_packet::MupPrefix,
     },
 
-    /// Originate a controller Session-Transformed (ST1/ST2) route in this
+    /// Originate the controller Session-Transformed (ST1/ST2) routes in this
     /// VRF (VRF-first MUP origination). The global task correlates a PFCP
     /// session's Network Instance to the matching VRF(s) and forwards the
-    /// session here with the resolved `direction` (st1=Encapsulation /
-    /// st2=Decapsulation) and the optional st2 Direct-segment ext-comm. The
-    /// per-VRF task builds the **RD-free** ST NLRI and emits
-    /// [`BgpGlobalMsg::MupExport`]; the global export handler applies the RD,
-    /// export route-targets and controller next-hop. One session can fan out
-    /// to several VRFs (an st1 and an st2 VRF sharing the NI) — each gets its
-    /// own `MupOriginate` for its direction. A repeat for a known seid (PFCP
-    /// Modification) re-exports in place when the rebuilt NLRI key is
-    /// unchanged — an ST1 keys on RD+Prefix alone, so a handover's new
-    /// TEID/QFI/endpoint replaces without a withdraw — and explicitly
-    /// withdraws only a prior export whose key changed.
+    /// session here with every matched direction binding (st1=Encapsulation /
+    /// st2=Decapsulation, each with its optional st2 Direct-segment
+    /// ext-comm) — one message per (VRF, session) carrying the VRF's full
+    /// desired direction set. A VRF binding both directions (single-N6 UPF,
+    /// issue #1947) builds both the T1ST and the T2ST here; the classic
+    /// two-VRF split gets one binding each. The per-VRF task builds the
+    /// **RD-free** ST NLRIs and emits [`BgpGlobalMsg::MupExport`]; the global
+    /// export handler applies the RD, export route-targets and controller
+    /// next-hop. A repeat for a known seid (PFCP Modification) reconciles
+    /// against the prior exports: an unchanged NLRI key re-exports in place —
+    /// an ST1 keys on RD+Prefix alone, so a handover's new TEID/QFI/endpoint
+    /// replaces without a withdraw — and only a prior export whose key is no
+    /// longer built (changed key, or its direction unbound since) is
+    /// withdrawn explicitly.
     MupOriginate {
         session: crate::mup_c::session::MupSession,
-        direction: crate::bgp::vrf_config::MupSrv6Direction,
-        ext_comm: Option<RouteDistinguisher>,
+        bindings: Vec<(
+            crate::bgp::vrf_config::MupSrv6Direction,
+            Option<RouteDistinguisher>,
+        )>,
     },
 
     /// Withdraw every ST route this VRF originated for `seid` (PFCP Session

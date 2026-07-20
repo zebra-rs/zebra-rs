@@ -1,0 +1,67 @@
+# z1 — MUP Controller (MUP-C) with a SINGLE dual-direction VRF (issue
+# #1947: one N6 interface / one VRF for a bidirectional UPF). AS 65001,
+# iBGP to z2 (192.168.0.2) with the mup afi-safi negotiated; PFCP/N4
+# listener on 192.168.0.1:8805.
+#
+# ONE VRF `mobile` (rd 65000:1) binds BOTH directions to the same Network
+# Instance `internet`:
+#   * `afi-safi mup route st1` (downlink) — a session originates a Type-1
+#     ST (UE prefix + access tunnel).
+#   * `afi-safi mup route st2` (uplink, Direct segment id `1:2`) — the
+#     same session also originates a Type-2 ST (core endpoint + GTP TEID).
+#
+# When pfcp-inject programs one session whose Network Instance is
+# `internet`, z1 originates BOTH STs from this one VRF — both under rd
+# 65000:1 — and advertises them to z2. (Previously each direction needed
+# its own VRF; configuring both on one VRF was last-wins.)
+segment-routing:
+  locator:
+  - name: LOC1
+    prefix: fcbb:bb01::/48
+    behavior: usid
+router:
+  bgp:
+    global:
+      as: 65001
+      router-id: 192.168.0.1
+    segment-routing:
+      srv6:
+        locator: LOC1
+        ipv6-unicast: {}
+    neighbor:
+    - remote-address: 192.168.0.2
+      remote-as: 65001
+      enabled: true
+      afi-safi:
+      - name: ipv4
+        enabled: true
+      - name: mup
+        enabled: true
+    vrf:
+    - name: mobile
+      rd: "65000:1"
+      afi-safi:
+        mup:
+          route:
+          - type: st1
+            network-instance: internet
+          - type: st2
+            network-instance: internet
+            mup-ext-comm: "1:2"
+    mup-c:
+      enabled: true
+      controller-address: fcbb:bb01::1
+      pfcp:
+        listen-address: 192.168.0.1
+        port: 8805
+      srv6:
+        locator: LOC1
+# Top-level VRF: the MUP export route-target lives here (same
+# `route-target {import|export}` framework as ipv4 / ipv6). One VRF, so
+# both STs carry the same export RT.
+vrf:
+- name: mobile
+  mup:
+    route-target:
+      export:
+      - "65000:200"
