@@ -1,7 +1,6 @@
 {
   "ports": [
     { "name": "mun3", "l3": true },
-    { "name": "mudl", "l3": true, "vrf": 1 },
-    { "name": "muul", "l3": true, "vrf": 2 }
+    { "name": "mun6", "l3": true, "vrf": 1 }
   ]
 }

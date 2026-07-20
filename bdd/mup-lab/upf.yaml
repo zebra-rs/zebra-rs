@@ -2,8 +2,7 @@ system:
   cradle:
     enabled: true
 vrf:
-- name: mobile-dl
-- name: mobile-ul
+- name: mobile
 interface:
 - if-name: lo
   ipv6:
@@ -11,12 +10,8 @@ interface:
 - if-name: mun3
   ipv4:
     address: 10.0.12.2/24
-- if-name: mudl
-  vrf: mobile-dl
-  ipv4:
-    address: 10.0.61.1/24
-- if-name: muul
-  vrf: mobile-ul
+- if-name: mun6
+  vrf: mobile
   ipv4:
     address: 10.0.60.1/24
 router:
@@ -31,7 +26,7 @@ router:
       as: 65000
       router-id: 1.1.1.1
     vrf:
-    - name: mobile-dl
+    - name: mobile
       rd: "65000:1"
       afi-safi:
         mup:
@@ -39,12 +34,6 @@ router:
           route:
           - type: st1
             network-instance: internet
-    - name: mobile-ul
-      rd: "65000:2"
-      afi-safi:
-        mup:
-          dataplane: gtp
-          route:
           - type: st2
             network-instance: internet
     mup-c:
