@@ -7,8 +7,11 @@ document defines the architecture, based on a survey of two prior-art implementa
 (FRR `pimd`, ZebOS `pimd`/`mribd`) and of zebra-rs's own protocol-module conventions.
 Notable deltas from the original plan, decided during implementation: show commands are
 top-level (`show pim`, not `show ip pim`); no kernel (\*,G) MFC (per-source NOCACHE entries
-with inherited OILs); no kernel register decap at the RP (switch-to-SPT-immediately); the
-tracing subtree is still a pending follow-up; deferred items in §15 remain deferred.
+with inherited OILs); no kernel register decap at the RP (switch-to-SPT-immediately);
+interface activation is an explicit `enabled` boolean (OSPF/IS-IS style), not presence
+(PR #2031, see §11); the tracing subtree landed in PR #2019; deferred items in §15 remain
+deferred. The IPv6/MLD arc (out of scope in the original plan) was subsequently delivered
+in full — see `pim-ipv6-architecture.md`.
 
 PIM is genuinely greenfield in this tree: there is no mroute socket, no VIF/MFC handling,
 no IGMP host-side code, and no `RouteType::Multicast` path anywhere today. The only
@@ -491,23 +494,31 @@ snooping for VXLAN BUM) and stay untouched.
 **YANG (config.yang + `zebra-pim.yang` feature module):**
 
 ```
-routing:                                interface <name>:
-  router pim {                            pim {
-    rp {                                    enable;            # presence
-      static { address A.B.C.D               dr-priority <u32>;
-               group <prefix>; ... }          hello-interval <sec>;
-    }                                         passive;
-    ssm { range <prefix>; }                 }
-    join-prune-interval <sec>;              igmp {
-    keep-alive-timer <sec>;                   enable;
-    register-suppress-time <sec>;             version <2|3>;
-    spt-switchover { immediate | never; }     query-interval <sec>;
-  }                                         }
+routing:                                router pim interface <name>:
+  router pim {                            enabled <bool>;    # explicit activation
+    rp {                                  dr-priority <u32>;
+      static { address A.B.C.D            hello-interval <sec>;
+               group <prefix>; ... }      passive;
+    }                                     igmp {
+    ssm { range <prefix>; }                 enabled <bool>;
+    join-prune-interval <sec>;              version <2|3>;
+    keep-alive-timer <sec>;                 query-interval <sec>;
+    register-suppress-time <sec>;         }
+    spt-switchover { immediate | never; }
+  }
 ```
 
-(Exact shape to be finalized against `config.yang` conventions in the skeleton PR —
-the split is the decided part: global knobs under `router pim`, interface enablement
-under the interface node, matching how IS-IS/OSPF hang per-interface config.)
+The split is the decided part: global knobs under `router pim`, interface enablement
+under `router pim interface <name>`, matching how IS-IS/OSPF hang per-interface config.
+
+**Interface activation is an explicit `enabled` boolean, not presence** (PR #2031):
+PIM runs on an interface only when `enabled true` is set *and* the link is usable
+(up with an address) — the reconciler's PIM-desired gate is
+`if_config[name].enabled() && usable`. This mirrors the OSPF/IS-IS `enabled` leaf
+rather than treating "the interface is named under `router pim`" as consent. IGMP/MLD
+membership sits on its own independent `igmp.enabled()` / `mld.enabled()` gate, so a
+router can run the querier on an interface that does not run PIM; conversely a
+receiver-facing interface needs *both* `enabled true` and `igmp/mld enabled true`.
 
 - **Callbacks:** `config.rs` `callback_build()` registering `"/routing/pim/..."` and the
   interface-subtree paths, dispatched from `process_cm_msg` exactly like

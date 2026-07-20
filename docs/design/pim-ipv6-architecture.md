@@ -444,7 +444,7 @@ Every existing IPv4 command and its JSON shape is preserved; unqualified `router
 `show pim`, `show igmp`, `show mroute` continue to mean IPv4.
 
 ```text
-router pim ipv6 interface <if-name> [dr-priority|hello|passive]
+router pim ipv6 interface <if-name> enabled <bool> | [dr-priority|hello|passive]
 router pim ipv6 interface <if-name> mld enabled <bool> | version <1|2> | ...
 router pim ipv6 rp static <ipv6-address> group <ipv6-prefix>
 router pim ipv6 bsr candidate-bsr|candidate-rp ...
@@ -467,7 +467,10 @@ Mechanics, stated concretely because they are where plans die:
   (§4.1); JSON output carries an `"af"` field and never pads IPv6 addresses to
   IPv4 column widths.
 - IPv6 PIM/MLD activate only on explicit config; an IPv6 address on an interface must
-  not start multicast routing.
+  not start multicast routing. Interface activation uses the same explicit `enabled`
+  boolean as IPv4 (PR #2031) — the shared `LinkConfig.enabled()` gate, so PIMv6 runs
+  only with `router pim ipv6 interface <if> enabled true`; MLD keeps its independent
+  `mld enabled` gate.
 
 ---
 
