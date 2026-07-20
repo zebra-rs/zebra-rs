@@ -59,19 +59,16 @@ jobs:
                 gh release delete-asset nightly "$asset" --yes
               done || echo "No existing nightly release yet; nothing to clean."
 
-      # Render the body from CHANGELOG.yaml's newest (in-progress) entry, so the
-      # nightly Releases page previews the changes accumulating for the next
-      # version — the same prose the .deb changelog ships. No arg = top entry.
+      # The nightly body carries only the source commit and the download table.
+      # The changes summary rendered from CHANGELOG.yaml is reserved for
+      # versioned releases (release.yaml); the in-progress entry is not
+      # previewed here.
       - name: Build nightly release notes
         env:
           SHA: ${{ github.sha }}
         run: |
           {
             echo "Nightly build from commit ${SHA}"
-            echo
-            echo "## Changes accumulating for the next release"
-            echo
-            packaging/release-notes.sh
             cat <<'EOF'
 
           ## Downloads
