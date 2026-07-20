@@ -55,10 +55,16 @@ impl Pim<Ipv4> {
 impl Pim<Ipv6> {
     pub fn show_build(&mut self) {
         self.show_cb = Builder::<ShowCallback<Ipv6>>::default()
+            .path("/show/pim")
+            .set(show_pim)
             .path("/show/pim/interface")
             .set(show_pim_interface)
             .path("/show/pim/neighbor")
             .set(show_pim_neighbor)
+            // `show pim ipv6 mld interface` (mirrors v4 `show igmp
+            // interface`); the shared IgmpConfig/Gm state renders it.
+            .path("/show/pim/mld/interface")
+            .set(show_igmp_interface)
             .path("/show/pim/upstream")
             .set(show_pim_upstream)
             .path("/show/pim/assert")
@@ -104,7 +110,7 @@ struct PimSummary {
     neighbors: usize,
 }
 
-fn show_pim(pim: &Pim, _args: Args, json: bool) -> Result<String, std::fmt::Error> {
+fn show_pim<A: PimAf>(pim: &Pim<A>, _args: Args, json: bool) -> Result<String, std::fmt::Error> {
     let summary = PimSummary {
         interfaces: pim.if_config.len(),
         enabled_interfaces: pim.links.values().filter(|l| l.enabled).count(),
@@ -217,7 +223,11 @@ struct IgmpInterfaceBrief {
     groups: usize,
 }
 
-fn show_igmp_interface(pim: &Pim, _args: Args, json: bool) -> Result<String, std::fmt::Error> {
+fn show_igmp_interface<A: PimAf>(
+    pim: &Pim<A>,
+    _args: Args,
+    json: bool,
+) -> Result<String, std::fmt::Error> {
     let mut rows: Vec<IgmpInterfaceBrief> = vec![];
 
     for (name, config) in pim.if_config.iter() {
