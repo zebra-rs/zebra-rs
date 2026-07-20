@@ -1,8 +1,9 @@
+use std::collections::HashSet;
 use std::fs;
 use std::io::Write;
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex, OnceLock};
 
 use bdd::netns;
 use cucumber::tag::Ext as _;
@@ -69,9 +70,21 @@ async fn clean_test_environment(world: &mut World) {
     // /tmp matching this feature points to a live process, abort. The
     // operator should wait for the other run to finish (or use a
     // different feature for parallelism).
+    //
+    // Only the feature's FIRST clean in this process refuses: a feature's
+    // scenarios run sequentially in one worker, so once we've cleaned for
+    // it a live pid file can only be our own leftover from an earlier
+    // scenario whose step failure skipped its remaining teardown steps —
+    // sweep it instead of wedging every later scenario of the feature.
+    static FEATURES_CLEANED: OnceLock<Mutex<HashSet<String>>> = OnceLock::new();
+    let first_clean_in_process = FEATURES_CLEANED
+        .get_or_init(|| Mutex::new(HashSet::new()))
+        .lock()
+        .unwrap()
+        .insert(world.feature_tag.clone());
     if let Ok(pidfiles) = netns::list_pidfiles(Path::new("/tmp"), &pid_prefix).await {
         for path in &pidfiles {
-            if netns::pidfile_alive(path).await {
+            if first_clean_in_process && netns::pidfile_alive(path).await {
                 panic!(
                     "another run of feature {} is in progress (live pid file {:?}); refusing to clobber its resources",
                     world.feature_tag, path

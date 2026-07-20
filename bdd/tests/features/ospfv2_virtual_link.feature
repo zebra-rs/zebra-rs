@@ -53,15 +53,9 @@ Feature: OSPFv2 virtual links connect a remote ABR to the backbone
     And show command "show ospf route" in namespace "r3" should contain "10.0.0.1/32"
     And ping from "r3" to "10.0.0.1" should succeed
     And ping from "r1" to "10.0.0.3" should succeed
-
-    # Teardown.
-    When I stop zebra-rs in namespace "r1"
-    And I stop zebra-rs in namespace "r2"
-    And I stop zebra-rs in namespace "r3"
-    And I delete namespace "r1"
-    And I delete namespace "r2"
-    And I delete namespace "r3"
-    Then the test environment should be clean
+    # No inline teardown: the next scenario's clean-environment sweep
+    # reclaims this topology even if a step above failed, and the final
+    # Teardown scenario cleans up after the last one.
 
   Scenario: Multi-hop transit — the ABRs are two hops apart through the transit area
     # r1 -- rm -- r2 inside area 1: the VL endpoints are NOT
@@ -105,17 +99,6 @@ Feature: OSPFv2 virtual links connect a remote ABR to the backbone
     And ping from "r3" to "10.0.0.1" should succeed
     And ping from "r1" to "10.0.0.3" should succeed
 
-    # Teardown.
-    When I stop zebra-rs in namespace "r1"
-    And I stop zebra-rs in namespace "rm"
-    And I stop zebra-rs in namespace "r2"
-    And I stop zebra-rs in namespace "r3"
-    And I delete namespace "r1"
-    And I delete namespace "rm"
-    And I delete namespace "r2"
-    And I delete namespace "r3"
-    Then the test environment should be clean
-
   Scenario: Virtual link with MD5 authentication forms and carries routes
     # RFC 2328 §15: the VL has its own authentication (message-digest
     # key VLSECRET on both ends), independent of the unauthenticated
@@ -142,7 +125,10 @@ Feature: OSPFv2 virtual links connect a remote ABR to the backbone
     And show command "show ospf route" in namespace "r3" should contain "10.0.0.1/32"
     And ping from "r3" to "10.0.0.1" should succeed
 
-    # Teardown.
+  Scenario: Teardown topology
+    # Cleans the MD5 scenario's topology (r1/r2/r3 — rm was swept by
+    # that scenario's clean-environment step). Separate scenario so
+    # cleanup still runs when a step above fails.
     When I stop zebra-rs in namespace "r1"
     And I stop zebra-rs in namespace "r2"
     And I stop zebra-rs in namespace "r3"
