@@ -65,6 +65,11 @@ pub struct InheritableKnobs {
     pub ebgp_multihop: Option<u8>,
     pub tcp_mss: Option<u16>,
     pub password: Option<String>,
+    /// TCP-AO (RFC 5925) key-chain reference inherited by members —
+    /// and, when the group is bound to a `dynamic-neighbors`
+    /// listen-range, installed on the listener as a prefix-scoped MKT
+    /// for the whole range.
+    pub ao_config: Option<super::auth::AoConfig>,
     pub disable_connected_check: Option<bool>,
     pub ip_transparent: Option<bool>,
     pub policy_in: Option<String>,
@@ -125,6 +130,28 @@ pub fn config_neighbor_group(bgp: &mut Bgp, mut args: Args, op: ConfigOp) -> Opt
             // second pass finds peers with `remote_as_inherited =
             // false` and returns `SweepAction::Ignore`.
             sweep_peers_for_group(bgp, &name, None);
+            // Drop the group's key-chain watch with the group itself —
+            // the per-leaf delete may never fire on a whole-group
+            // delete, and a leaked watch keeps the policy actor pushing
+            // updates for a binding that no longer exists.
+            if let Some(chain) = bgp
+                .neighbor_groups
+                .get(&name)
+                .and_then(|g| g.knobs.ao_config.as_ref())
+                .map(|ao| ao.key_chain.clone())
+                .filter(|s| !s.is_empty())
+            {
+                let ident = group_keychain_ident(bgp, &name);
+                super::config::policy_attach_msgs(
+                    &bgp.policy_tx,
+                    ident,
+                    crate::policy::PolicyType::KeyChain(
+                        crate::policy::KeyChainScope::BgpNeighborGroup,
+                    ),
+                    Some(chain),
+                    None,
+                );
+            }
             bgp.neighbor_groups.remove(&name);
             // With the group gone every opinion it carried is gone
             // too: members fall back to defaults + their own explicit
@@ -134,10 +161,11 @@ pub fn config_neighbor_group(bgp: &mut Bgp, mut args: Args, op: ConfigOp) -> Opt
         }
         _ => {}
     }
-    // The group's password is the source of any listen-range prefix key
-    // bound to it — creating or deleting the group changes what the
-    // listener should be authenticating.
+    // The group's password / tcp-ao are the source of any listen-range
+    // prefix key bound to it — creating or deleting the group changes
+    // what the listener should be authenticating.
     super::dynamic_neighbors::reconcile_listener_md5(bgp);
+    super::dynamic_neighbors::reconcile_listener_ao(bgp);
     Some(())
 }
 
@@ -750,6 +778,111 @@ pub fn config_neighbor_group_tcp_mss(bgp: &mut Bgp, mut args: Args, op: ConfigOp
     Some(())
 }
 
+/// `set router bgp neighbor-group <name> tcp-ao key-chain <name>`.
+///
+/// Deleting the leaf clears the whole `tcp-ao` opinion: `key-chain` is
+/// mandatory inside the presence container, so a group with no chain
+/// has no AO to inherit.
+pub fn config_neighbor_group_tcp_ao_key_chain(
+    bgp: &mut Bgp,
+    mut args: Args,
+    op: ConfigOp,
+) -> Option<()> {
+    let name = args.string()?;
+    let knobs = &mut bgp.neighbor_groups.entry(name.clone()).or_default().knobs;
+    let prior = knobs
+        .ao_config
+        .as_ref()
+        .map(|ao| ao.key_chain.clone())
+        .filter(|s| !s.is_empty());
+    let new = match op {
+        ConfigOp::Set => {
+            let key_chain = args.string()?;
+            // Preserve an `include-tcp-options` that arrived first —
+            // leaf callback order within one commit is not guaranteed.
+            let include_tcp_options = knobs
+                .ao_config
+                .as_ref()
+                .map(|ao| ao.include_tcp_options)
+                .unwrap_or(true);
+            knobs.ao_config = Some(super::auth::AoConfig {
+                key_chain: key_chain.clone(),
+                include_tcp_options,
+            });
+            Some(key_chain)
+        }
+        ConfigOp::Delete => {
+            knobs.ao_config = None;
+            None
+        }
+        _ => return Some(()),
+    };
+    // Subscribe the group's interest in the chain. Without this the
+    // policy actor never pushes the chain's content to BGP, so
+    // `resolve()` finds nothing and the listener's prefix MKT is never
+    // installed — the kernel then drops every AO-signed SYN from the
+    // range with TCPAOKeyNotFound. A group is not a peer, so it needs a
+    // watch ident of its own (see `group_keychain_watch`).
+    let ident = group_keychain_ident(bgp, &name);
+    super::config::policy_attach_msgs(
+        &bgp.policy_tx,
+        ident,
+        crate::policy::PolicyType::KeyChain(crate::policy::KeyChainScope::BgpNeighborGroup),
+        prior,
+        new,
+    );
+    sweep_members_inherit(bgp, &name);
+    super::dynamic_neighbors::reconcile_listener_ao(bgp);
+    Some(())
+}
+
+/// Stable per-group watch ident for key-chain subscriptions, minted on
+/// first use and kept for the lifetime of the process. Deliberately
+/// never recycled: a recycled ident could unregister a watch belonging
+/// to a since-deleted group that shared the chain.
+fn group_keychain_ident(bgp: &mut Bgp, name: &str) -> usize {
+    if let Some(ident) = bgp.group_keychain_watch.get(name) {
+        return *ident;
+    }
+    let ident = bgp.group_keychain_watch_next;
+    bgp.group_keychain_watch_next += 1;
+    bgp.group_keychain_watch.insert(name.to_string(), ident);
+    ident
+}
+
+/// `set router bgp neighbor-group <name> tcp-ao include-tcp-options <bool>`.
+///
+/// A no-op when the group has no `key-chain` yet: without one there is
+/// no MKT to qualify, and the value is re-derived (defaulting to true)
+/// when the chain does arrive.
+pub fn config_neighbor_group_tcp_ao_include_tcp_options(
+    bgp: &mut Bgp,
+    mut args: Args,
+    op: ConfigOp,
+) -> Option<()> {
+    let name = args.string()?;
+    let want = match op {
+        ConfigOp::Set => args.boolean()?,
+        // RFC 5925 §3.1 default, matching the YANG `default "true"`.
+        ConfigOp::Delete => true,
+        _ => return Some(()),
+    };
+    let knobs = &mut bgp.neighbor_groups.entry(name.clone()).or_default().knobs;
+    if let Some(ao) = knobs.ao_config.as_mut() {
+        ao.include_tcp_options = want;
+    } else {
+        // Chain not configured yet: stash the opinion so a later
+        // `key-chain` in the same commit adopts it.
+        knobs.ao_config = Some(super::auth::AoConfig {
+            key_chain: String::new(),
+            include_tcp_options: want,
+        });
+    }
+    sweep_members_inherit(bgp, &name);
+    super::dynamic_neighbors::reconcile_listener_ao(bgp);
+    Some(())
+}
+
 /// `set router bgp neighbor-group <name> password <string>`.
 ///
 /// Like the per-neighbor knob: no bounce (a live session keeps its
@@ -1005,6 +1138,11 @@ pub(super) struct InheritOutcome {
     /// The MD5 password changed — run `apply_md5_refresh_for` with
     /// this peer's address to re-key the listener.
     pub md5_refresh: bool,
+    /// The inherited TCP-AO config changed — run
+    /// `apply_ao_refresh_all` so the listener MKT follows. Unlike
+    /// MD5 there is no per-peer variant: AO resolution reads the
+    /// key-chain table, which the whole-instance sweep already has.
+    pub ao_refresh: bool,
     /// `update-source` changed — run `bfd_apply` so an attached BFD
     /// session re-keys to the new local address.
     pub bfd_reapply: bool,
@@ -1030,6 +1168,7 @@ pub(super) fn apply_inherited(
         ebgp_multihop: resolve_knob(groups, &peer.config, |k| k.ebgp_multihop),
         tcp_mss: resolve_knob(groups, &peer.config, |k| k.tcp_mss),
         password: resolve_knob(groups, &peer.config, |k| k.password.clone()),
+        ao_config: resolve_knob(groups, &peer.config, |k| k.ao_config.clone()),
         disable_connected_check: resolve_knob(groups, &peer.config, |k| k.disable_connected_check),
         ip_transparent: resolve_knob(groups, &peer.config, |k| k.ip_transparent),
         policy_in: resolve_knob(groups, &peer.config, |k| k.policy_in.clone()),
@@ -1055,6 +1194,7 @@ pub(super) fn apply_inherited(
         ebgp_multihop,
         tcp_mss,
         password,
+        ao_config,
         disable_connected_check,
         ip_transparent,
         policy_in,
@@ -1103,6 +1243,11 @@ pub(super) fn apply_inherited(
     outcome.bfd_reapply = super::config::apply_update_source(peer, update_source);
     outcome.mss_refresh = super::config::apply_tcp_mss(peer, tcp_mss);
     outcome.md5_refresh = super::config::apply_md5_password(peer, password);
+    outcome.ao_refresh = super::config::apply_ao_config(peer, ao_config);
+    // Same reasoning as the password: the MKT is consulted at
+    // handshake time, so a live session under the old key must bounce
+    // to pick up the new one.
+    bounce |= outcome.ao_refresh;
     // A password change must reset the session, like the per-neighbor
     // path: the listener / connect-socket key only takes effect on a
     // fresh connection, so a live session under the old key must bounce.
@@ -1146,6 +1291,7 @@ pub(super) fn sweep_members_inherit(bgp: &mut Bgp, name: &str) {
     let policy_tx = bgp.policy_tx.clone();
     let mut stops: Vec<usize> = Vec::new();
     let mut mss_refresh = false;
+    let mut ao_refresh = false;
     // Collect idents, not addresses: the MD5 / BFD reconcilers must be
     // able to reach an interface-keyed (unnumbered) member, whose
     // link-local is not a map key (`get(&peer.address)` would miss it).
@@ -1160,6 +1306,7 @@ pub(super) fn sweep_members_inherit(bgp: &mut Bgp, name: &str) {
             stops.push(peer.ident);
         }
         mss_refresh |= outcome.mss_refresh;
+        ao_refresh |= outcome.ao_refresh;
         if outcome.md5_refresh {
             md5_idents.push(peer.ident);
         }
@@ -1172,6 +1319,9 @@ pub(super) fn sweep_members_inherit(bgp: &mut Bgp, name: &str) {
     }
     if mss_refresh {
         super::config::apply_tcp_mss_refresh_all(bgp);
+    }
+    if ao_refresh {
+        super::config::apply_ao_refresh_all(bgp);
     }
     // Unconditional (cheap, idempotent): this sweep also serves the
     // group-delete cascade, where a deleted `ip-transparent` opinion

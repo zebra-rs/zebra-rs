@@ -227,6 +227,65 @@ pub fn set_tcp_ao_key(
     recv_id: u8,
     include_tcp_options: bool,
 ) -> io::Result<()> {
+    set_ao(
+        fd,
+        peer_ip,
+        None,
+        alg_name,
+        key,
+        send_id,
+        recv_id,
+        include_tcp_options,
+    )
+}
+
+/// Prefix-scoped variant: one MKT authenticates every source inside
+/// `prefix`. The dynamic-neighbors counterpart of
+/// [`set_tcp_md5_key_prefix`] — a listen-range peer is materialized
+/// only after its SYN is accepted, but the kernel verifies the AO MAC
+/// during the handshake, so a per-address MKT can never be installed
+/// in time.
+#[cfg(target_os = "linux")]
+#[allow(clippy::too_many_arguments)]
+pub fn set_tcp_ao_key_prefix(
+    fd: RawFd,
+    prefix: ipnet::IpNet,
+    alg_name: &str,
+    key: &[u8],
+    send_id: u8,
+    recv_id: u8,
+    include_tcp_options: bool,
+) -> io::Result<()> {
+    // Masked, for the same reason as MD5: the kernel matches the
+    // inbound source against the masked network.
+    set_ao(
+        fd,
+        prefix.network(),
+        Some(prefix.prefix_len()),
+        alg_name,
+        key,
+        send_id,
+        recv_id,
+        include_tcp_options,
+    )
+}
+
+/// Shared core. `prefixlen` of `None` keys the MKT on the exact
+/// address (host prefix, the static-peer case); `Some(len)` scopes it
+/// to a whole prefix.
+#[cfg(target_os = "linux")]
+#[allow(clippy::too_many_arguments)]
+fn set_ao(
+    fd: RawFd,
+    addr: IpAddr,
+    prefixlen: Option<u8>,
+    alg_name: &str,
+    key: &[u8],
+    send_id: u8,
+    recv_id: u8,
+    include_tcp_options: bool,
+) -> io::Result<()> {
+    let peer_ip = addr;
     if key.len() > TCP_AO_MAXKEYLEN {
         return Err(io::Error::new(
             io::ErrorKind::InvalidInput,
@@ -247,7 +306,7 @@ pub fn set_tcp_ao_key(
     let mut add: TcpAoAdd = unsafe { mem::zeroed() };
     fill_sockaddr(&mut add.addr, peer_ip);
     add.alg_name[..alg_name.len()].copy_from_slice(alg_name.as_bytes());
-    add.prefix = if peer_ip.is_ipv4() { 32 } else { 128 };
+    add.prefix = prefixlen.unwrap_or(if peer_ip.is_ipv4() { 32 } else { 128 });
     add.sndid = send_id;
     add.rcvid = recv_id;
     add.maclen = 12; // RFC 5926 default 96-bit MAC
@@ -275,9 +334,40 @@ pub fn set_tcp_ao_key(
 /// Remove the TCP-AO MKT for `peer_ip` from `fd`.
 #[cfg(target_os = "linux")]
 pub fn del_tcp_ao_key(fd: RawFd, peer_ip: IpAddr, send_id: u8, recv_id: u8) -> io::Result<()> {
+    del_ao(fd, peer_ip, None, send_id, recv_id)
+}
+
+/// Remove a prefix-scoped MKT. The kernel keys MKTs by
+/// (address, prefixlen, send_id, recv_id), so a prefix entry must be
+/// deleted with the same prefix length it was added under — deleting
+/// it as a host route silently leaves it installed.
+#[cfg(target_os = "linux")]
+pub fn del_tcp_ao_key_prefix(
+    fd: RawFd,
+    prefix: ipnet::IpNet,
+    send_id: u8,
+    recv_id: u8,
+) -> io::Result<()> {
+    del_ao(
+        fd,
+        prefix.network(),
+        Some(prefix.prefix_len()),
+        send_id,
+        recv_id,
+    )
+}
+
+#[cfg(target_os = "linux")]
+fn del_ao(
+    fd: RawFd,
+    peer_ip: IpAddr,
+    prefixlen: Option<u8>,
+    send_id: u8,
+    recv_id: u8,
+) -> io::Result<()> {
     let mut del: TcpAoDel = unsafe { mem::zeroed() };
     fill_sockaddr(&mut del.addr, peer_ip);
-    del.prefix = if peer_ip.is_ipv4() { 32 } else { 128 };
+    del.prefix = prefixlen.unwrap_or(if peer_ip.is_ipv4() { 32 } else { 128 });
     del.sndid = send_id;
     del.rcvid = recv_id;
 
@@ -315,6 +405,31 @@ pub fn del_tcp_ao_key(_fd: i32, _peer_ip: IpAddr, _send_id: u8, _recv_id: u8) ->
     Ok(())
 }
 
+#[cfg(not(target_os = "linux"))]
+#[allow(clippy::too_many_arguments)]
+pub fn set_tcp_ao_key_prefix(
+    _fd: i32,
+    _prefix: ipnet::IpNet,
+    _alg_name: &str,
+    _key: &[u8],
+    _send_id: u8,
+    _recv_id: u8,
+    _include_tcp_options: bool,
+) -> io::Result<()> {
+    tracing::warn!("TCP-AO authentication not supported on this platform; no-op");
+    Ok(())
+}
+
+#[cfg(not(target_os = "linux"))]
+pub fn del_tcp_ao_key_prefix(
+    _fd: i32,
+    _prefix: ipnet::IpNet,
+    _send_id: u8,
+    _recv_id: u8,
+) -> io::Result<()> {
+    Ok(())
+}
+
 // =========================================================
 // TCP-AO key-chain resolution.
 //
@@ -344,7 +459,7 @@ pub fn tcp_ao_alg_from_policy(a: crate::policy::CryptoAlgorithm) -> Option<&'sta
 
 /// Per-neighbor TCP-AO configuration (zebra-bgp-auth.yang `tcp-ao`
 /// presence container).
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AoConfig {
     /// Name of a configured key chain under `/key-chains`.
     pub key_chain: String,

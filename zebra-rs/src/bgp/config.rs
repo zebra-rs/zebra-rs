@@ -544,6 +544,9 @@ fn config_peer_neighbor_group(bgp: &mut Bgp, mut args: Args, op: ConfigOp) -> Op
     if outcome.md5_refresh {
         apply_md5_refresh_for(bgp, addr);
     }
+    if outcome.ao_refresh {
+        apply_ao_refresh_all(bgp);
+    }
     if outcome.bfd_reapply {
         let _ = bfd_apply(bgp, addr);
     }
@@ -600,7 +603,7 @@ fn config_remote_as(bgp: &mut Bgp, mut args: Args, op: ConfigOp) -> Option<()> {
 /// previously occurred when the operator switched a peer from
 /// `policy in hoge` to `policy in fuga` — the "hoge"
 /// watcher would otherwise stay registered forever.
-fn policy_attach_msgs(
+pub(super) fn policy_attach_msgs(
     policy_tx: &tokio::sync::mpsc::UnboundedSender<policy::Message>,
     ident: usize,
     policy_type: policy::PolicyType,
@@ -3741,6 +3744,19 @@ pub(super) fn apply_md5_password(peer: &mut Peer, want: Option<String>) -> bool 
     true
 }
 
+/// Adopt an inherited TCP-AO config onto a peer. An explicit
+/// per-neighbor `tcp-ao` always wins: `resolve_knob` has already
+/// preferred the peer's own statement, so `want` is what should be in
+/// effect. Returns whether anything changed, so the caller can
+/// re-run the listener sweep and bounce a live session.
+pub(super) fn apply_ao_config(peer: &mut Peer, want: Option<super::auth::AoConfig>) -> bool {
+    if peer.config.transport.ao_config == want {
+        return false;
+    }
+    peer.config.transport.ao_config = want;
+    true
+}
+
 /// Reconcile the listener TCP MD5 key for a single peer. Reads
 /// `peer.config.transport.md5_password` and installs (or removes,
 /// with an empty key) on the appropriate listening socket. Silent
@@ -4259,6 +4275,14 @@ impl Bgp {
         self.callback_add(
             "/router/bgp/neighbor-group/password",
             super::neighbor_group::config_neighbor_group_password,
+        );
+        self.callback_add(
+            "/router/bgp/neighbor-group/tcp-ao/key-chain",
+            super::neighbor_group::config_neighbor_group_tcp_ao_key_chain,
+        );
+        self.callback_add(
+            "/router/bgp/neighbor-group/tcp-ao/include-tcp-options",
+            super::neighbor_group::config_neighbor_group_tcp_ao_include_tcp_options,
         );
         self.callback_add(
             "/router/bgp/neighbor-group/policy/in",

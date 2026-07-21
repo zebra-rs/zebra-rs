@@ -28,6 +28,13 @@ pub enum KeyChainScope {
     OspfInterface,
     /// BGP per-neighbor `tcp-ao/key-chain <name>` leaf.
     BgpNeighbor,
+    /// BGP `neighbor-group <g> tcp-ao/key-chain <name>` leaf. Distinct
+    /// from [`Self::BgpNeighbor`] because the actor's unregister
+    /// matches on `(proto, ident, policy_type)`: a group's watch ident
+    /// comes from its own registry, not from `PeerMap`, so the two
+    /// spaces would otherwise collide and one unbind could drop the
+    /// other's watch.
+    BgpNeighborGroup,
     /// IS-IS per-interface `hello-authentication/key-chain <name>`.
     IsisIih,
     /// IS-IS `/router/isis/area-password/key-chain <name>`.

@@ -883,6 +883,15 @@ pub struct Bgp {
     /// group unbind.
     pub dynamic_neighbors: super::dynamic_neighbors::DynamicNeighbors,
     pub dynamic_peer_count: u32,
+    /// Watch idents handed to the policy actor for `neighbor-group`
+    /// TCP-AO key-chain subscriptions, allocated per group name and
+    /// never reused. A group has no `PeerMap` ident of its own, and
+    /// the actor's unregister matches on `(proto, ident,
+    /// policy_type)`, so two groups sharing one chain must not share
+    /// an ident — otherwise unbinding either would silently drop the
+    /// other's watch and stop key updates reaching the listener.
+    pub group_keychain_watch: BTreeMap<String, usize>,
+    pub group_keychain_watch_next: usize,
     /// `interface-neighbor` config — operator types
     /// `set router bgp interface-neighbor <name>`. Lookup key is the
     /// interface name; the runtime resolves to ifindex via
@@ -1203,6 +1212,8 @@ impl Bgp {
             flex_algo_srv6_routes: Default::default(),
             dynamic_neighbors: super::dynamic_neighbors::DynamicNeighbors::default(),
             dynamic_peer_count: 0,
+            group_keychain_watch: BTreeMap::new(),
+            group_keychain_watch_next: 0,
             interface_neighbors: super::interface_neighbor::empty_map(),
             vrfs: BTreeMap::new(),
             vrf_registry: BTreeMap::new(),
@@ -3367,7 +3378,9 @@ impl Bgp {
         // has none, and a diff against stale state would install
         // nothing.
         self.dynamic_neighbors.forget_installed_md5();
+        self.dynamic_neighbors.forget_installed_ao();
         super::dynamic_neighbors::reconcile_listener_md5(self);
+        super::dynamic_neighbors::reconcile_listener_ao(self);
         // Reconcile the listener TCP MSS too: a `tcp-mss` callback that
         // ran before the bind observed `listen_fd_v4/v6 = None` and could
         // not clamp the listener, so a passively-accepted peer would
@@ -5161,6 +5174,10 @@ impl Bgp {
                     self.key_chains.remove(&name);
                 }
                 super::config::apply_ao_refresh_all(self);
+                // A listen-range's MKT is resolved from the same chain
+                // but keyed on the prefix, so it needs its own
+                // reconcile — no peer exists yet to carry it.
+                super::dynamic_neighbors::reconcile_listener_ao(self);
             }
         }
     }

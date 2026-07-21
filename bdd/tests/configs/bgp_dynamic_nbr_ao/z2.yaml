@@ -1,0 +1,43 @@
+# z2 — client with the matching TCP-AO key-chain. From z2's side this
+# is an ordinary static, AO-protected eBGP session; only z1's side is
+# dynamic. `connect-retry-time: 3` keeps the redial prompt — a dropped
+# SYN leaves the FSM in Active, where the retry is paced by the
+# ConnectRetryTimer (120s default), not the 5s idle-hold.
+key-chains:
+  key-chain:
+  - name: BGP-AO
+    key:
+    - key-id: 100
+      crypto-algorithm: hmac-sha-1
+      send-id: 100
+      recv-id: 100
+      key-string:
+        keystring: "dyn-ao-secret"
+interface:
+- if-name: i1
+  ipv4:
+    address: 192.168.0.2/24
+router:
+  bgp:
+    global:
+      as: 65002
+      router-id: 192.168.0.2
+    timer:
+      adv-interval:
+        ibgp: 1
+        ebgp: 1
+    neighbor:
+    - remote-address: 192.168.0.1
+      enabled: true
+      remote-as: 65001
+      timers: {connect-retry-time: 3}
+      tcp-ao:
+        key-chain: BGP-AO
+        include-tcp-options: true
+      afi-safi:
+      - name: ipv4
+        enabled: true
+    afi-safi:
+    - name: ipv4
+      network:
+      - prefix: 10.0.2.2/32

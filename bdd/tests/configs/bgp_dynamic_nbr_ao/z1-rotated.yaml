@@ -1,0 +1,46 @@
+# Identical to z1.yaml except the BGP-AO chain's key-string is rotated
+# while key-id / send-id / recv-id stay put. The kernel identifies an
+# MKT by (address, prefixlen, send-id, recv-id) and answers EEXIST on a
+# duplicate add, so the reconciler must DELETE the old prefix MKT
+# before adding the rotated one — otherwise the listener keeps serving
+# the stale key and the now-mismatched client still gets in.
+key-chains:
+  key-chain:
+  - name: BGP-AO
+    key:
+    - key-id: 100
+      crypto-algorithm: hmac-sha-1
+      send-id: 100
+      recv-id: 100
+      key-string:
+        keystring: "rotated-ao-secret"
+interface:
+- if-name: i1
+  ipv4:
+    address: 192.168.0.1/24
+router:
+  bgp:
+    global:
+      as: 65001
+      router-id: 192.168.0.1
+    timer:
+      adv-interval:
+        ibgp: 1
+        ebgp: 1
+    neighbor-group:
+    - name: SENDERS
+      remote-as: 65002
+      tcp-ao:
+        key-chain: BGP-AO
+        include-tcp-options: true
+      afi-safi:
+      - name: ipv4
+        enabled: true
+    dynamic-neighbors:
+      listen-range:
+      - prefix: 192.168.0.0/24
+        neighbor-group: SENDERS
+    afi-safi:
+    - name: ipv4
+      network:
+      - prefix: 10.0.1.1/32

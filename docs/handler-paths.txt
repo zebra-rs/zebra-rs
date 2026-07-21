@@ -105,6 +105,8 @@
 /router/bgp/neighbor-group/remove-private-as/all
 /router/bgp/neighbor-group/remove-private-as/replace-as
 /router/bgp/neighbor-group/route-reflector/client
+/router/bgp/neighbor-group/tcp-ao/include-tcp-options
+/router/bgp/neighbor-group/tcp-ao/key-chain
 /router/bgp/neighbor-group/tcp-mss
 /router/bgp/neighbor-group/ttl-security
 /router/bgp/neighbor-group/update-source
