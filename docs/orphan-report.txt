@@ -36,6 +36,9 @@ subtree is handled by config_tracing_dispatch in src/bgp/tracing.rs, so
 they count as handled above.
 
 == Handler paths with no schema node (stale/other) ==
+  /community-list
+  /community-list/seq
+  /community-list/seq/action
   /router/bgp/adj-rib-out-hook/ipv4-unicast/export
   /router/bgp/adj-rib-out-hook/l2vpn-evpn/export
   /router/bgp/loc-rib-hook/ipv4-unicast/import
@@ -55,4 +58,8 @@ remain registered while the Lua scripting YANG surface is commented out
 flowspec/validation has a handler but zebra-bgp-flowspec.yang is not
 imported by config.yang, so its schema nodes are never loaded.
 soft-reconfiguration/inbound's schema node was removed; the handler was
-kept.
+kept. The community-list handlers (config_com_list* in
+src/bgp/config.rs) are registered but no loaded YANG module defines a
+community-list node anywhere in the configure tree — the surface was
+never wired; wire it or drop the handlers (see
+docs/design/bgp-config-audit-followups.md).
