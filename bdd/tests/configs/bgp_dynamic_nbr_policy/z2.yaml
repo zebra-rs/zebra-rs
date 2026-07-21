@@ -1,0 +1,27 @@
+# z2 — in-range client. Ordinary static eBGP session toward the DUT;
+# originates 10.0.2.2/32, the route the DUT's inherited DENY-ALL must
+# stop (and the policy-less rebind must readmit).
+interface:
+- if-name: i1
+  ipv4:
+    address: 192.168.0.2/24
+router:
+  bgp:
+    global:
+      as: 65002
+      router-id: 192.168.0.2
+    timer:
+      adv-interval:
+        ibgp: 1
+        ebgp: 1
+    neighbor:
+    - remote-address: 192.168.0.1
+      enabled: true
+      remote-as: 65001
+      afi-safi:
+      - name: ipv4
+        enabled: true
+    afi-safi:
+    - name: ipv4
+      network:
+      - prefix: 10.0.2.2/32

@@ -1,0 +1,29 @@
+# z3 — out-of-range client (192.168.1.3, matched by NO listen-range).
+# Identical client shape to z2; the only difference is the source
+# subnet, so any session it ever establishes means the listen-range
+# authorization leaked. Originates 10.0.3.3/32 — that prefix showing
+# up on z1 is the failure signal.
+interface:
+- if-name: i1
+  ipv4:
+    address: 192.168.1.3/24
+router:
+  bgp:
+    global:
+      as: 65002
+      router-id: 192.168.1.3
+    timer:
+      adv-interval:
+        ibgp: 1
+        ebgp: 1
+    neighbor:
+    - remote-address: 192.168.1.1
+      enabled: true
+      remote-as: 65001
+      afi-safi:
+      - name: ipv4
+        enabled: true
+    afi-safi:
+    - name: ipv4
+      network:
+      - prefix: 10.0.3.3/32

@@ -1,0 +1,38 @@
+# z1 — DUT whose listen-range group SENDERS binds an inbound DENY-ALL
+# route policy. A peer materialized from 192.168.0.0/24 must inherit
+# it: the session establishes, z1 still advertises 10.0.1.1/32, but
+# nothing the client sends may enter z1's Loc-RIB.
+policy:
+- name: DENY-ALL
+  entry:
+  - number: 10
+    action: deny
+interface:
+- if-name: i1
+  ipv4:
+    address: 192.168.0.1/24
+router:
+  bgp:
+    global:
+      as: 65001
+      router-id: 192.168.0.1
+    timer:
+      adv-interval:
+        ibgp: 1
+        ebgp: 1
+    neighbor-group:
+    - name: SENDERS
+      remote-as: 65002
+      policy:
+        in: DENY-ALL
+      afi-safi:
+      - name: ipv4
+        enabled: true
+    dynamic-neighbors:
+      listen-range:
+      - prefix: 192.168.0.0/24
+        neighbor-group: SENDERS
+    afi-safi:
+    - name: ipv4
+      network:
+      - prefix: 10.0.1.1/32

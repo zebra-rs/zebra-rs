@@ -1,0 +1,37 @@
+# z1 — the DUT. No static neighbors: every session must arrive via the
+# dynamic-neighbors listen-range 192.168.0.0/24, which materializes a
+# passive peer inheriting SENDERS (remote-as 65002, ipv4 enabled).
+# z3 connects from 192.168.1.3 — outside the range — and must be
+# refused at accept time. Originates 10.0.1.1/32 so the dynamic
+# session carries a route in the DUT->client direction too.
+interface:
+- if-name: i1
+  ipv4:
+    address: 192.168.0.1/24
+- if-name: i2
+  ipv4:
+    address: 192.168.1.1/24
+router:
+  bgp:
+    global:
+      as: 65001
+      router-id: 192.168.0.1
+    timer:
+      adv-interval:
+        ibgp: 1
+        ebgp: 1
+    neighbor-group:
+    - name: SENDERS
+      remote-as: 65002
+      afi-safi:
+      - name: ipv4
+        enabled: true
+    dynamic-neighbors:
+      listen-limit: 10
+      listen-range:
+      - prefix: 192.168.0.0/24
+        neighbor-group: SENDERS
+    afi-safi:
+    - name: ipv4
+      network:
+      - prefix: 10.0.1.1/32
