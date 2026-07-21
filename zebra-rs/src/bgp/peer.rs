@@ -2437,19 +2437,22 @@ pub fn fsm_keepalive_expires(peer: &mut Peer) -> State {
 /// can fail this way; a stale failure from a dial that an accept or a
 /// teardown already superseded must not disturb the current session.
 ///
-/// RFC 4271's Connect-state TcpConnectionFails (Event 18) cell parks in
-/// Active on the ConnectRetryTimer, but that timer's default is 120s
-/// (RFC §10) — far too slow for the common bring-up race where two peers
-/// boot together, cross first SYNs before either listener is ready, and
-/// *both* land here. With both parked in Active neither redials until the
-/// 120s backstop fires, wedging the session for up to two minutes. Route
-/// through Idle instead so the IdleHoldTimer (default 5s) paces a prompt
-/// redial — the same fast-restart path OpenConfirm/Established failures
-/// already take in [`fsm_conn_fail`], and consistent with the
-/// connect-retry timer being only a backstop (the event-driven kicks in
-/// `refresh_connected` / `link_up_kick` likewise bypass it). Entering
-/// Idle re-arms the idle-hold timer and aborts the stale dial
-/// (`update_timers`). Passive peers never dial, so they reach here only
+/// Park in Active per RFC 4271's Connect-state TcpConnectionFails
+/// (Event 18) cell: the peer keeps accepting inbound connections while
+/// it waits to redial. Routing through Idle here (as this function once
+/// did for a fast idle-hold-paced redial) made a connect-only peer —
+/// one that never listens, so our dial is refused instantly — spend
+/// essentially the whole retry cycle in Idle, where
+/// `handle_peer_connection` drops every inbound connect before its OPEN
+/// is read; the session could never establish without passive-mode.
+///
+/// The RFC's ConnectRetryTimer default of 120s (RFC §10) is far too
+/// slow a pacer for the common bring-up race where two peers boot
+/// together, cross first SYNs before either listener is ready, and
+/// *both* land here — so arm the connect-retry slot with an
+/// idle-hold-paced (default 5s) timer instead; `update_timers` leaves
+/// that slot running in Active, and its Event::Start redials via
+/// [`fsm_start`]. Passive peers never dial, so they reach here only
 /// defensively; keep them parked in Active listening for the remote to
 /// reconnect.
 pub fn fsm_dial_fail(peer: &mut Peer) -> State {
@@ -2461,7 +2464,8 @@ pub fn fsm_dial_fail(peer: &mut Peer) -> State {
         peer.timer.connect_retry = None;
         return State::Active;
     }
-    State::Idle
+    peer.timer.connect_retry = Some(timer::start_dial_retry_timer(peer));
+    State::Active
 }
 
 pub fn fsm_conn_fail(peer: &mut Peer, conn: ConnTag) -> State {
@@ -4038,9 +4042,10 @@ mod fsm_idle_hold_tests {
 
     /// A dial failure is only meaningful while the dial is
     /// outstanding (Connect); arriving later it must not disturb the
-    /// session that superseded it. A current one routes through Idle so
-    /// the idle-hold timer paces a prompt redial (see `fsm_dial_fail`)
-    /// rather than parking on the 120s connect-retry backstop.
+    /// session that superseded it. A current one parks in Active — not
+    /// Idle, which drops inbound connections — with an idle-hold-paced
+    /// redial timer on the connect-retry slot (see `fsm_dial_fail`)
+    /// rather than the 120s connect-retry backstop.
     #[tokio::test]
     async fn stale_dial_failure_does_not_touch_a_live_session() {
         let mut peer = test_peer(false);
@@ -4052,20 +4057,24 @@ mod fsm_idle_hold_tests {
         let (next, _) = fsm_next_state(&mut peer, Event::DialFail);
         assert_eq!(
             next,
-            State::Idle,
-            "a current dial failure retries via idle-hold, not the 120s backstop"
+            State::Active,
+            "a current dial failure parks in Active so inbound connects are accepted"
+        );
+        assert!(
+            peer.task.connect.is_none(),
+            "the failed dial must be released"
         );
 
         // What `fsm()` does after a state change: re-arm timers.
         peer.state = next;
         timer::update_timers(&mut peer);
         assert!(
-            peer.timer.idle_hold_timer.is_some(),
-            "the idle-hold timer must pace the fast redial"
+            peer.timer.connect_retry.is_some(),
+            "the fast redial pacer must survive update_timers in Active"
         );
         assert!(
-            peer.timer.connect_retry.is_none(),
-            "the slow connect-retry backstop must not gate the redial"
+            peer.timer.idle_hold_timer.is_none(),
+            "Active must not run the idle-hold timer"
         );
     }
 
@@ -4105,6 +4114,73 @@ mod fsm_idle_hold_tests {
         assert!(peer.packet_tx.is_none());
         assert!(peer.task.reader.is_none());
         assert!(peer.task.writer.is_none());
+    }
+
+    /// The connect-only-peer scenario: our dial toward a peer that
+    /// never listens just failed with RST, and the peer then connects
+    /// in. The inbound must be promoted to a session. Before the fix
+    /// the failed dial parked the peer in Idle between redials, so
+    /// every inbound connect was dropped before its OPEN was read and
+    /// the session could never establish without passive-mode.
+    #[tokio::test]
+    async fn inbound_connection_after_dial_failure_is_promoted() {
+        let mut peer = test_peer(false);
+        peer.state = State::Connect;
+        let (next, _) = fsm_next_state(&mut peer, Event::DialFail);
+        peer.state = next;
+        timer::update_timers(&mut peer);
+
+        let addr: IpAddr = "10.0.0.2".parse().unwrap();
+        let mut peers = PeerMap::new();
+        peers.insert(addr, peer);
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let stream = TcpStream::connect(listener.local_addr().unwrap())
+            .await
+            .unwrap();
+
+        let leftover = handle_peer_connection(&mut peers, addr, None, stream);
+        assert!(leftover.is_none(), "the inbound stream must be consumed");
+        let peer = peers.get(&addr).unwrap();
+        assert_eq!(
+            peer.state,
+            State::OpenSent,
+            "the inbound connect must be promoted, not dropped"
+        );
+        assert_eq!(peer.primary_role, Some(Role::Passive));
+        assert!(
+            peer.packet_tx.is_some(),
+            "our OPEN must be queued on the inbound conn"
+        );
+    }
+
+    /// While the dial is still in flight (Connect), an inbound connect
+    /// wins immediately: the pending dial is cancelled and the inbound
+    /// carries the session.
+    #[tokio::test]
+    async fn inbound_connection_while_dialing_is_promoted() {
+        let mut peer = test_peer(false);
+        peer.state = State::Connect;
+        peer.task.connect = Some(Task::spawn(async {}));
+
+        let addr: IpAddr = "10.0.0.2".parse().unwrap();
+        let mut peers = PeerMap::new();
+        peers.insert(addr, peer);
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let stream = TcpStream::connect(listener.local_addr().unwrap())
+            .await
+            .unwrap();
+
+        let leftover = handle_peer_connection(&mut peers, addr, None, stream);
+        assert!(leftover.is_none());
+        let peer = peers.get(&addr).unwrap();
+        assert_eq!(peer.state, State::OpenSent);
+        assert!(
+            peer.task.connect.is_none(),
+            "the pending dial must be cancelled"
+        );
+        assert_eq!(peer.primary_role, Some(Role::Passive));
     }
 }
 

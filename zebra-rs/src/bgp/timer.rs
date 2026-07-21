@@ -133,6 +133,15 @@ pub fn start_connect_retry_timer(peer: &Peer) -> Timer {
     start_timer!(peer, peer.config.timer.connect_retry_time(), Event::Start)
 }
 
+/// Fast redial pacer for a failed dial parked in Active (RFC 4271
+/// Connect-state TcpConnectionFails → Active). Runs at the idle-hold
+/// cadence (default 5s) instead of the 120s connect-retry default so a
+/// refused dial retries promptly while the peer keeps accepting
+/// inbound connections.
+pub fn start_dial_retry_timer(peer: &Peer) -> Timer {
+    start_timer!(peer, peer.config.timer.idle_hold_time(), Event::Start)
+}
+
 fn start_hold_timer(peer: &Peer) -> Timer {
     start_timer!(peer, peer.param.hold_time as u64, Event::HoldTimerExpires)
 }
