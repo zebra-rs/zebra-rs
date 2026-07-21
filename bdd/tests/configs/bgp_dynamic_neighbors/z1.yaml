@@ -4,6 +4,13 @@
 # z3 connects from 192.168.1.3 — outside the range — and must be
 # refused at accept time. Originates 10.0.1.1/32 so the dynamic
 # session carries a route in the DUT->client direction too.
+#
+# `listen-limit: 1` is deliberate, not arbitrary: with exactly one
+# in-range client the cap is saturated the moment z2 is materialized,
+# so every re-establishment in this feature only succeeds if the slot
+# was actually released. A leaked `dynamic_peer_count` (missing GC on
+# session end, or a range-delete sweep that forgot to decrement) shows
+# up as a session that never comes back.
 interface:
 - if-name: i1
   ipv4:
@@ -27,7 +34,7 @@ router:
       - name: ipv4
         enabled: true
     dynamic-neighbors:
-      listen-limit: 10
+      listen-limit: 1
       listen-range:
       - prefix: 192.168.0.0/24
         neighbor-group: SENDERS

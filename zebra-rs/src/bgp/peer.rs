@@ -3291,8 +3291,10 @@ pub fn accept(bgp: &mut Bgp, stream: TcpStream, sockaddr: SocketAddr) {
 fn try_dynamic_accept(bgp: &mut Bgp, peer_addr: IpAddr, stream: TcpStream) -> Option<TcpStream> {
     // Soft cap. The listen-limit guards against an attacker spamming
     // SYNs from many sources in a wide listen-range — once we hit
-    // the limit, additional matches drop silently until existing
-    // dynamic peers are GC'd (session-close GC lands in a follow-up).
+    // the limit, additional matches drop silently until a slot frees
+    // up: `gc_dynamic_peer_if_session_ended` reclaims a peer whose
+    // session ended, and `dynamic_neighbors::sweep_range_peers`
+    // reclaims every peer of a deleted (or group-unbound) range.
     if bgp.dynamic_peer_count >= bgp.dynamic_neighbors.listen_limit {
         return Some(stream);
     }

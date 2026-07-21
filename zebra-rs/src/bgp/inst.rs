@@ -876,9 +876,11 @@ pub struct Bgp {
     /// `dynamic-neighbors` runtime (zebra-bgp-dynamic-neighbors.yang).
     /// Holds the configured listen-ranges and the soft cap on
     /// materialized passive peers. `dynamic_peer_count` is bumped on
-    /// successful accept-time materialization in `peer::accept`; it
-    /// is never decremented yet — session-close GC is deferred to a
-    /// follow-up so this PR stays focused on the accept path.
+    /// accept-time materialization (`peer::try_dynamic_accept`) and
+    /// decremented when a slot frees:
+    /// [`Self::gc_dynamic_peer_if_session_ended`] on session end,
+    /// `dynamic_neighbors::sweep_range_peers` on range delete /
+    /// group unbind.
     pub dynamic_neighbors: super::dynamic_neighbors::DynamicNeighbors,
     pub dynamic_peer_count: u32,
     /// `interface-neighbor` config — operator types

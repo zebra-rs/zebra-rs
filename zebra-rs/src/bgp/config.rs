@@ -335,46 +335,59 @@ fn config_peer(bgp: &mut Bgp, mut args: Args, op: ConfigOp) -> Option<()> {
         // dialing yet, so no kick fires here.
         bgp.refresh_connected();
     } else {
-        let peer_idx = {
-            let peer = bgp.peers.get(&addr)?;
-            peer.ident
-        };
-
-        // Defensively clear any listener auth entries associated with
-        // this peer before removing it, in case the per-leaf delete
-        // callbacks didn't fire (e.g., whole-neighbor delete without
-        // explicit tcp-md5 / tcp-ao deletions first).
-        clear_peer_listener_auth(bgp, &addr);
-
-        let mut bgp_ref = BgpTop {
-            router_id: &bgp.router_id,
-            srv6_ipv6_export: bgp.srv6_ipv6_export.as_ref(),
-            local_rib: &mut bgp.local_rib,
-            shard: &mut bgp.shard,
-            tx: &bgp.tx,
-            rib_client: &bgp.ctx.rib,
-            attr_store: &mut bgp.attr_store,
-            update_groups: &mut bgp.update_groups,
-            interface_addrs: &bgp.interface_addrs,
-            vrf_export: None,
-            color_policy: Some(&bgp.color_policy),
-            flex_algo_routes: Some(&bgp.flex_algo_routes),
-            flex_algo_srv6_routes: Some(&bgp.flex_algo_srv6_routes),
-            vrf_import: None,
-            nexthop_cache: None,
-            vrf_transport_v4: None,
-            vrf_transport_v6: None,
-            central_label_alloc: None,
-            as_sets_withdraw: bgp.as_sets_withdraw,
-        };
-        route_clean(peer_idx, &mut bgp_ref, &mut bgp.peers, bgp.shards.as_ref());
-        // Update-groups live outside `PeerMap`: removal below purges
-        // the membership index by construction, but the group member
-        // sets must be detached explicitly or the freed ident lingers
-        // and a future slot reuse inherits the group.
-        super::update_group::detach(&mut bgp.update_groups, &mut bgp.peers, peer_idx);
-        bgp.peers.remove(&addr);
+        remove_peer_full(bgp, addr)?;
     }
+    Some(())
+}
+
+/// The full peer-removal ritual: listener auth cleanup, Loc-RIB route
+/// withdrawal, update-group detach, map removal, and the listener-wide
+/// TCP-MSS / IP_TRANSPARENT reconciliations. Shared by the static
+/// `delete router bgp neighbor <addr>` path above and the
+/// dynamic-neighbors range sweep
+/// (`super::dynamic_neighbors::sweep_range_peers`); the sweep owns the
+/// `dynamic_peer_count` decrement, since only it knows the peer was
+/// slot-counted.
+pub(super) fn remove_peer_full(bgp: &mut Bgp, addr: IpAddr) -> Option<()> {
+    let peer_idx = {
+        let peer = bgp.peers.get(&addr)?;
+        peer.ident
+    };
+
+    // Defensively clear any listener auth entries associated with
+    // this peer before removing it, in case the per-leaf delete
+    // callbacks didn't fire (e.g., whole-neighbor delete without
+    // explicit tcp-md5 / tcp-ao deletions first).
+    clear_peer_listener_auth(bgp, &addr);
+
+    let mut bgp_ref = BgpTop {
+        router_id: &bgp.router_id,
+        srv6_ipv6_export: bgp.srv6_ipv6_export.as_ref(),
+        local_rib: &mut bgp.local_rib,
+        shard: &mut bgp.shard,
+        tx: &bgp.tx,
+        rib_client: &bgp.ctx.rib,
+        attr_store: &mut bgp.attr_store,
+        update_groups: &mut bgp.update_groups,
+        interface_addrs: &bgp.interface_addrs,
+        vrf_export: None,
+        color_policy: Some(&bgp.color_policy),
+        flex_algo_routes: Some(&bgp.flex_algo_routes),
+        flex_algo_srv6_routes: Some(&bgp.flex_algo_srv6_routes),
+        vrf_import: None,
+        nexthop_cache: None,
+        vrf_transport_v4: None,
+        vrf_transport_v6: None,
+        central_label_alloc: None,
+        as_sets_withdraw: bgp.as_sets_withdraw,
+    };
+    route_clean(peer_idx, &mut bgp_ref, &mut bgp.peers, bgp.shards.as_ref());
+    // Update-groups live outside `PeerMap`: removal below purges
+    // the membership index by construction, but the group member
+    // sets must be detached explicitly or the freed ident lingers
+    // and a future slot reuse inherits the group.
+    super::update_group::detach(&mut bgp.update_groups, &mut bgp.peers, peer_idx);
+    bgp.peers.remove(&addr);
     // Keep the shared listener's TCP MSS minimum in step with the peer
     // set: a whole-neighbor delete may drop the peer that owned the
     // current minimum without the per-leaf `/tcp-mss` delete firing (the
