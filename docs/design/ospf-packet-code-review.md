@@ -101,16 +101,18 @@ opportunistic ideas surfaced during the review, not review findings.
 
 **Additional notes (below the top 15)** — opportunistic; state re-checked
 2026-07-21:
-- ⏳ `parser.rs:88` / `v3.rs:324` emit: stamp packet length via
-  `try_into`/`checked` so a >64 KB serialization fails loudly instead of
-  silently wrapping the `u16`. Still open.
+- ✅ `parser.rs:88` / `v3.rs:324` emit length stamp — **fixed in
+  [#2042](https://github.com/zebra-rs/zebra-rs/pull/2042)**: `debug_assert` +
+  release-mode clamp instead of the silently wrapping `as u16`, with
+  `#[should_panic]` overflow tests for v2 and v3.
 - ⏳ Non-bijective `From<u8>` for link types (`parser.rs:747`, `v3.rs:695`;
   unknown → `Stub`/`PointToPoint`). Its `verify_checksum` consequence is gone
   since #1993 verifies received LSAs over `raw`; what remains is cosmetic.
-- ⏳/✅ Efficiency: `raw_body` eager copy on every received packet
-  (`parser.rs:2730`, `v3.rs:133`) still open; the `Ospfv3Lsa::update` double
-  serialization is **already fixed** — it now emits the body once and reuses
-  the buffer (also invalidating `raw` on mutation).
+- ✅ Efficiency — **fixed**: the `raw_body` eager copy is now gated on
+  digest verification actually consuming it (v2: Crypto auth; v3: trailer
+  present) in [#2042](https://github.com/zebra-rs/zebra-rs/pull/2042); the
+  `Ospfv3Lsa::update` double serialization had already been fixed (single
+  emit, buffer reused, `raw` invalidated on mutation).
 - ⏳ `Ospfv3IntraAreaPrefixTlv` (`v3.rs:1941`, RFC 8362 E-Intra-Area-Prefix
   TLV) — verify the 16-bit-metric + referenced-LSA-triple layout against
   RFC 8362 §3.9; internal round-trips pass (zebra-to-zebra) but it was never
@@ -456,21 +458,27 @@ real `parse_tlv` into finding 8's fix first).
 
 State re-checked against the tree on 2026-07-21; line numbers refreshed.
 
-- ⏳ **`parser.rs:88` / `v3.rs:324`** — packet length stamped via
-  `buf.len() as u16` truncates for a serialized packet > 64 KB. Latent: OSPF
-  packet length is a 16-bit field and the daemon keeps LSUs under MTU, but a
-  `checked`/`try_into` would fail loudly instead of silently wrapping.
+- ✅ **`parser.rs:88` / `v3.rs:324`** — packet length stamped via
+  `buf.len() as u16` truncated silently for a serialized packet > 64 KB.
+  **Fixed in [#2042](https://github.com/zebra-rs/zebra-rs/pull/2042)**:
+  `debug_assert` + release-mode clamp to `u16::MAX`, mirroring the
+  isis-packet sub-TLV overflow guard, with `#[should_panic]` emit tests for
+  both versions.
 - ⏳ **`parser.rs:747` / `v3.rs:695`** — `From<u8>` for link types maps every
   unknown value to `Stub` / `PointToPoint` (non-bijective). Originally listed
   as contributing to the finding-10 `verify_checksum` false-reject; since
   #1993 verifies received LSAs over `raw`, that consequence is gone and only
   the cosmetic non-bijectivity remains.
-- ⏳ **Efficiency** — `raw_body` is eagerly copied for every received packet
-  even when no cryptographic auth is configured (`parser.rs:2730`,
-  `v3.rs:133`); prefer zero-copy `Bytes::slice`. Still open. The second half
-  of this note — `Ospfv3Lsa::update` serializing the body twice — is ✅
-  **already fixed** (`v3.rs:2784` now emits the body once into `body_buf` and
-  reuses it for the checksum pass, and sets `raw = None` on mutation).
+- ✅ **Efficiency** — `raw_body` was eagerly copied for every received packet
+  even when no cryptographic auth is configured. **Fixed in
+  [#2042](https://github.com/zebra-rs/zebra-rs/pull/2042)**: the copy is
+  gated on digest verification being able to consume it — v2 populates it
+  only under `Ospfv2Auth::Crypto`, v3 only when an RFC 7166 trailer is
+  captured — so the unauthenticated receive hot path makes no copy at all.
+  The second half of this note — `Ospfv3Lsa::update` serializing the body
+  twice — was already fixed earlier (`v3.rs:2784` emits the body once into
+  `body_buf` and reuses it for the checksum pass, and sets `raw = None` on
+  mutation).
 - ⏳ **`v3.rs:1941`** — `Ospfv3IntraAreaPrefixTlv` (RFC 8362
   E-Intra-Area-Prefix TLV) uses a 16-bit metric and an embedded referenced-LSA
   triple. Worth double-checking the field layout against RFC 8362 §3.9;
