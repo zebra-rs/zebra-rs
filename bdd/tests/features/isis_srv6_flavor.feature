@@ -31,7 +31,11 @@ Feature: IS-IS advertises PSP-flavored SRv6 endpoint behaviors
     And I apply config "z1.yaml" to namespace "z1"
     And I apply config "z2.yaml" to namespace "z2"
     Then show command "show isis database detail" in namespace "z2" should eventually contain "uN (PSP)"
-    And show command "show isis database detail" in namespace "z2" should contain "uA (PSP)"
+    # uN rides z1's very first LSP, but uA is the End.X *adjacency* SID —
+    # it only exists once the adjacency reaches Up and z1 re-originates.
+    # So this must poll too; a bare `should contain` here raced the
+    # re-origination and read the seq-1 LSP (see the c=8 failure 2026-07-21).
+    And show command "show isis database detail" in namespace "z2" should eventually contain "uA (PSP)"
     # The flavorless peer's own SIDs are unchanged — z1 sees plain uN.
     And show command "show isis database detail" in namespace "z1" should eventually contain "Behavior: uN,"
     # Reachability across the adjacency proves the flavored codepoints
