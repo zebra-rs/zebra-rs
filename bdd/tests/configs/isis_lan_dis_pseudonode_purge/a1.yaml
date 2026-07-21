@@ -1,0 +1,23 @@
+# a1: L2 IS-IS router on broadcast LAN br0 (iface va1ns, IP
+# 192.168.100.1/24 assigned by the topology step). Loopback 10.0.0.1/32.
+# LAN priority 200 makes a1 the DIS deterministically (a2/a3 sit at the
+# default 64), so a1 is the node whose pseudonode LSP must be purged when
+# its circuit goes down.
+interface:
+- if-name: lo
+  ipv4:
+    address: 10.0.0.1/32
+router:
+  isis:
+    net: 49.0000.0000.0000.0001.00
+    is-type: level-2-only
+    hostname: a1
+    interface:
+    - if-name: lo
+      ipv4:
+        enabled: true
+    - if-name: va1ns
+      metric: 10
+      priority: 200
+      ipv4:
+        enabled: true

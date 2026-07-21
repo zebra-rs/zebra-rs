@@ -1,0 +1,21 @@
+# a2: L2 IS-IS router on broadcast LAN br0 (iface va2ns, IP
+# 192.168.100.2/24 assigned by the topology step). Loopback 10.0.0.2/32.
+# Default LAN priority (64) so a1 (200) wins DIS; a2 is a plain LAN member
+# and is used to confirm which pseudonode the LAN points at.
+interface:
+- if-name: lo
+  ipv4:
+    address: 10.0.0.2/32
+router:
+  isis:
+    net: 49.0000.0000.0000.0002.00
+    is-type: level-2-only
+    hostname: a2
+    interface:
+    - if-name: lo
+      ipv4:
+        enabled: true
+    - if-name: va2ns
+      metric: 10
+      ipv4:
+        enabled: true
