@@ -22,10 +22,15 @@ Feature: BGP dynamic neighbors materialize passive peers from a listen-range
   dropped). z3 runs the same client config from 192.168.1.3 — outside
   the range — and must be refused at accept time with no peer state.
 
+  `listen-limit` is 1 on the DUT, so every re-establishment below also
+  proves the freed slot was actually returned — a leaked slot saturates
+  the cap and the client can never reconnect.
+
   Config files:
-  - z1.yaml: DUT — group SENDERS + listen-range 192.168.0.0/24, originates 10.0.1.1/32
-  - z2.yaml: in-range client, static neighbor to .0.1, originates 10.0.2.2/32
-  - z3.yaml: out-of-range client, static neighbor to .1.1, originates 10.0.3.3/32
+  - z1.yaml:         DUT — group SENDERS + listen-range 192.168.0.0/24, originates 10.0.1.1/32
+  - z1-norange.yaml: same DUT with the listen-range deleted (group kept)
+  - z2.yaml:         in-range client, static neighbor to .0.1, originates 10.0.2.2/32
+  - z3.yaml:         out-of-range client, static neighbor to .1.1, originates 10.0.3.3/32
 
   Scenario: Setup topology and establish the dynamic session
     Given a clean test environment
@@ -81,6 +86,30 @@ Feature: BGP dynamic neighbors materialize passive peers from a listen-range
     And I wait 20 seconds for BGP to operate
     Then BGP session in "z2" to "192.168.0.1" should be "Established"
     And BGP session in "z1" to "192.168.0.2" should be "Established"
+    And BGP route in "z1" has "10.0.2.2/32"
+    And BGP route in "z2" has "10.0.1.1/32"
+
+  Scenario: Deleting the listen-range revokes the peers it materialized
+    Given the test topology exists
+    # Revoking the authorization must not leave the session it
+    # authorized running: the sweep tears the dynamic peer down and
+    # returns its listen-limit slot.
+    When I wait 10 seconds
+    And I apply config "z1-norange.yaml" to namespace "z1"
+    And I wait 20 seconds for BGP to operate
+    Then BGP session in "z1" to "192.168.0.2" should not be "Established"
+    And show command "show bgp summary" in namespace "z1" should not contain "192.168.0.2"
+    And BGP route in "z1" does not have "10.0.2.2/32"
+
+  Scenario: Restoring the listen-range re-materializes the peer in the freed slot
+    Given the test topology exists
+    # `listen-limit` is 1, so this only succeeds if the sweep decremented
+    # `dynamic_peer_count` — a leaked slot leaves the cap saturated and
+    # the client's connect is refused forever.
+    When I apply config "z1.yaml" to namespace "z1"
+    And I wait 30 seconds for BGP to operate
+    Then BGP session in "z1" to "192.168.0.2" should eventually be "Established"
+    And BGP session in "z2" to "192.168.0.1" should be "Established"
     And BGP route in "z1" has "10.0.2.2/32"
     And BGP route in "z2" has "10.0.1.1/32"
 

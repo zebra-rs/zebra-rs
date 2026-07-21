@@ -1,0 +1,35 @@
+# Identical to z1.yaml except the whole `dynamic-neighbors` block is
+# gone. `vtyctl apply -f` is a declarative whole-config replace, so the
+# commit diff against z1.yaml is exactly the listen-range deletion —
+# which must revoke the peer that range materialized (session down,
+# peer removed, listen-limit slot returned).
+#
+# SENDERS is kept: the group outliving the range is the realistic
+# operator shape, and it proves the sweep keys off the range binding
+# rather than off group existence.
+interface:
+- if-name: i1
+  ipv4:
+    address: 192.168.0.1/24
+- if-name: i2
+  ipv4:
+    address: 192.168.1.1/24
+router:
+  bgp:
+    global:
+      as: 65001
+      router-id: 192.168.0.1
+    timer:
+      adv-interval:
+        ibgp: 1
+        ebgp: 1
+    neighbor-group:
+    - name: SENDERS
+      remote-as: 65002
+      afi-safi:
+      - name: ipv4
+        enabled: true
+    afi-safi:
+    - name: ipv4
+      network:
+      - prefix: 10.0.1.1/32

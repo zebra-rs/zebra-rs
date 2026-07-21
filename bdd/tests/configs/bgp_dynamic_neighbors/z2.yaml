@@ -1,6 +1,14 @@
 # z2 — in-range client (192.168.0.2 ∈ 192.168.0.0/24). From z2's point
 # of view this is an ordinary static eBGP session toward the DUT; only
 # z1's side is dynamic. Originates 10.0.2.2/32.
+#
+# `connect-retry-time: 3` is required, not cosmetic. When the DUT
+# revokes a dynamic peer (listen-range delete) or refuses a connect,
+# the TCP dies after the handshake — z2's FSM lands in Active, where
+# the redial is paced by the ConnectRetryTimer and NOT by the 5s
+# idle-hold. At the 120s default the client would not redial within
+# any sane scenario timeout, and "session never came back" would look
+# like a slot leak instead of a sleeping timer.
 interface:
 - if-name: i1
   ipv4:
@@ -18,6 +26,7 @@ router:
     - remote-address: 192.168.0.1
       enabled: true
       remote-as: 65001
+      timers: {connect-retry-time: 3}
       afi-safi:
       - name: ipv4
         enabled: true
