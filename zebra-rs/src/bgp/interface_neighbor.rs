@@ -149,6 +149,7 @@ fn materialize(
         bgp.ctx.clone(),
     );
     peer.tracing_instance = bgp.tracing.clone();
+    peer.ptx = bgp.ptx.clone();
     // `Peer::new` defaults to IBGP; derive the session type from the
     // resolved remote-as like the addressed-neighbor and group-sweep
     // paths do — it drives admin distance (20 vs 200), the eBGP
