@@ -158,6 +158,13 @@ isis_lan_dis_reelection:
 	mkdir -p allure-results
 	cargo test --test cucumber -- --concurrency=1 --tags "@isis_lan_dis_reelection"
 
+# A DIS that loses its circuit must purge the pseudonode LSP it originated
+# rather than leave it to age out over MaxAge (~20 min). Slow by nature:
+# the purged copy has to outlive ZeroAgeLifetime (60s) before eviction.
+isis_lan_dis_pseudonode_purge:
+	mkdir -p allure-results
+	cargo test --test cucumber -- --concurrency=1 --tags "@isis_lan_dis_pseudonode_purge"
+
 isis_topology_output:
 	mkdir -p allure-results
 	cargo test --test cucumber -- --concurrency=1 --tags "@isis_topology_output"

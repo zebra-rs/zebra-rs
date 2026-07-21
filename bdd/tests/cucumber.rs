@@ -1514,6 +1514,93 @@ async fn show_command_eventually_contains(
     );
 }
 
+/// Does this `show isis database` line hold a *pseudonode* LSP originated
+/// by `host`? LSP IDs render as `<host>.<pseudo-id>-<fragment>`; the
+/// pseudo-id byte is zero for a router's own LSP and non-zero for a
+/// pseudonode.
+///
+/// Matching on the pseudo-id rather than a literal is deliberate: it is
+/// derived from the circuit's ifindex, so it is whatever the host handed
+/// out — 0x02 in a fresh hand-built namespace, but routinely 0xa6 under
+/// the BDD harness, which has created many veths by then. A test that
+/// hardcodes it passes vacuously on any run where the number moves.
+fn is_pseudonode_lsp_line(line: &str, host: &str) -> bool {
+    let Some(id) = line.split_whitespace().next() else {
+        return false;
+    };
+    let Some(rest) = id.strip_prefix(host).and_then(|r| r.strip_prefix('.')) else {
+        return false;
+    };
+    let Some((pseudo, _fragment)) = rest.split_once('-') else {
+        return false;
+    };
+    pseudo.len() == 2 && pseudo != "00" && pseudo.chars().all(|c| c.is_ascii_hexdigit())
+}
+
+async fn pseudonode_lsp_present(scoped: &str, host: &str) -> (bool, String) {
+    let out = netns::exec_in_netns(scoped, "vtyctl", &["show", "show isis database"])
+        .await
+        .expect("Failed to run show isis database");
+    let present = out.lines().any(|l| is_pseudonode_lsp_line(l, host));
+    (present, out)
+}
+
+/// Precondition sibling of the "no pseudonode" assertion below: the named
+/// host must actually have originated a pseudonode LSP (i.e. it really is
+/// the DIS) before a later purge assertion means anything.
+#[then(expr = "namespace {string} should eventually have a pseudonode LSP from {string}")]
+async fn pseudonode_lsp_eventually_present(world: &mut World, namespace: String, host: String) {
+    let scoped = world.ns(&namespace);
+    const ATTEMPTS: u32 = 60;
+    let mut last = String::new();
+    for i in 0..ATTEMPTS {
+        let (present, out) = pseudonode_lsp_present(&scoped, &host).await;
+        last = out;
+        if present {
+            println!("✓ namespace {} has a pseudonode LSP from {}", scoped, host);
+            return;
+        }
+        if i + 1 < ATTEMPTS {
+            tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
+        }
+    }
+    panic!(
+        "namespace {} never showed a pseudonode LSP from {} after {} attempts\nlast LSDB:\n{}",
+        scoped, host, ATTEMPTS, last
+    );
+}
+
+/// A router that stops being DIS must purge the pseudonode LSP it
+/// originated (ISO 10589 §7.3.4.6). The purged copy lingers for
+/// ZeroAgeLifetime (60s) before eviction, so the budget here has to
+/// outlast that; a router that never purged keeps the LSP for MaxAge
+/// (~20 min) and fails.
+#[then(expr = "namespace {string} should eventually have no pseudonode LSP from {string}")]
+async fn pseudonode_lsp_eventually_absent(world: &mut World, namespace: String, host: String) {
+    let scoped = world.ns(&namespace);
+    const ATTEMPTS: u32 = 90;
+    let mut last = String::new();
+    for i in 0..ATTEMPTS {
+        let (present, out) = pseudonode_lsp_present(&scoped, &host).await;
+        last = out;
+        if !present {
+            println!(
+                "✓ namespace {} has no pseudonode LSP from {} (purged)",
+                scoped, host
+            );
+            return;
+        }
+        if i + 1 < ATTEMPTS {
+            tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
+        }
+    }
+    panic!(
+        "namespace {} still holds a pseudonode LSP from {} after {} attempts \
+         (it was left to age out instead of being purged)\nlast LSDB:\n{}",
+        scoped, host, ATTEMPTS, last
+    );
+}
+
 #[then(expr = "show command {string} in namespace {string} should not contain {string}")]
 async fn show_command_not_contains(
     world: &mut World,

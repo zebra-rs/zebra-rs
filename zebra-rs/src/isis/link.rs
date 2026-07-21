@@ -907,6 +907,32 @@ impl Isis {
                 link.state.nbrs.get_mut(&level).remove(&sys_id);
             }
 
+            // If we were the elected DIS on this circuit, purge the
+            // pseudonode LSP we originated rather than leaving it to
+            // age out over MaxAge (~20 min). ISO 10589 §7.3.4.6: a
+            // router that ceases to be DIS purges its pseudonode LSP.
+            // `dis_selection` does this via `ifsm::dis_dropping`, but a
+            // link bounce never reaches that path — it resets the DIS
+            // state directly below — so without this the LSP lingers
+            // in every LSDB in the area. `dis_selection`'s
+            // Other -> Other handling already *assumes* an ex-DIS has
+            // purged, so leaving it is an invariant violation, not
+            // just cosmetic.
+            //
+            // Guard on `DisStatus::Myself`, NOT on `adj.is_some()`:
+            // `adj` also carries the *other* node's LAN-ID while we are
+            // a plain LAN member (`DisStatus::Other`), and purging then
+            // would destroy a different router's pseudonode LSP.
+            //
+            // Must run before `adj` is cleared just below — the LAN-ID
+            // it holds is what identifies the pseudonode.
+            if *link.state.dis_status.get(&level) == DisStatus::Myself
+                && let Some((adj, _)) = link.state.adj.get(&level)
+            {
+                let lsp_id = IsisLspId::from_neighbor_id(*adj, 0);
+                let _ = self.tx.send(Message::LspPurge(level, lsp_id));
+            }
+
             // Reset per-level Up-neighbor counter and adjacency
             // bookkeeping.
             *link.state.nbrs_up.get_mut(&level) = 0;
