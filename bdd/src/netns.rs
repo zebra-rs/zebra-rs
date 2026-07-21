@@ -79,6 +79,25 @@ pub async fn create_netns(netns: &str) -> Result<()> {
 
     // Bring up loopback
     exec_in_netns(netns, "ip", &["link", "set", "lo", "up"]).await?;
+
+    // Neutralize host-inherited IPv4 reverse-path filtering. A new
+    // namespace inherits the host's conf/{all,default} IPv4 devconf
+    // (devconf_inherit_init_net=0), so a hardened host's rp_filter=2
+    // leaks in and silently drops test traffic whose source has no
+    // return route — e.g. multicast payloads at a PIM receiver host
+    // that only has its own subnet. Both all and default must be 0:
+    // the effective value is max(all, iface) and later-created
+    // interfaces start from default.
+    exec_in_netns(
+        netns,
+        "sysctl",
+        &[
+            "-qw",
+            "net.ipv4.conf.all.rp_filter=0",
+            "net.ipv4.conf.default.rp_filter=0",
+        ],
+    )
+    .await?;
     Ok(())
 }
 
