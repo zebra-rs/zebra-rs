@@ -136,7 +136,7 @@ tonic-prost.workspace = true
 tower = { version = "0.5", default-features = false, features = ["util"] }
 hyper-util = { version = "0.1", features = ["tokio"] }
 console-subscriber = "0.5"
-libyang = "1"
+libyang = "2"
 #libyang = { git = "https://github.com/zebra-rs/libyang", rev = "103b60c2d560a91d37fa26502eb3d495db1cdb99" }
 #libyang = { path = "../../libyang" }
 regex = "1.10"
