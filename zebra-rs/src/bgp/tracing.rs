@@ -471,12 +471,17 @@ pub fn config_tracing_dispatch(
 }
 
 /// Copy the instance tracing config onto every peer's snapshot, so each
-/// peer's effective (additive) config picks up an instance-level change.
+/// peer's effective (additive) config picks up an instance-level change,
+/// and mirror it to every per-VRF task. Both are copies rather than
+/// shared reads: the trace sites see only a `Peer` (global) or a
+/// `BgpVrf` (per-VRF task, a different `!Send` runtime), never the
+/// instance.
 pub fn propagate_instance_tracing(bgp: &mut Bgp) {
     let snapshot = bgp.tracing.clone();
     for (_, peer) in bgp.peers.iter_mut_all() {
         peer.tracing_instance = snapshot.clone();
     }
+    bgp.broadcast_tracing();
 }
 
 #[cfg(test)]

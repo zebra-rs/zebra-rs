@@ -433,7 +433,10 @@ pub(super) fn sweep_range_peers(bgp: &mut Bgp, prefix: &IpNet) {
     for addr in victims {
         if super::config::remove_peer_full(bgp, addr).is_some() {
             bgp.dynamic_peer_count = bgp.dynamic_peer_count.saturating_sub(1);
-            tracing::info!(
+            // Debug, matching the rest of this module's lifecycle
+            // logging: the peer is already gone, so there is no `Peer`
+            // left to read a tracing gate from.
+            tracing::debug!(
                 peer = %addr,
                 range = %prefix,
                 "bgp: dynamic peer removed by listen-range sweep",

@@ -511,7 +511,9 @@ pub fn init_shard_count(config_shards: Option<usize>) -> usize {
         "default"
     };
     if n > 1 {
-        tracing::info!("BGP RIB sharding: {n} shards (from {source})");
+        // Debug, not info: this runs inside `spawn_bgp`, before any
+        // `BgpTracing` exists to gate it against.
+        tracing::debug!("BGP RIB sharding: {n} shards (from {source})");
     } else {
         // Disable default logging.
         // tracing::info!("BGP RIB sharding: 1 shard, synchronous (from {source})");
@@ -1833,6 +1835,7 @@ impl Bgp {
             kernel,
             &self.rib_subscriber,
             srv6,
+            self.tracing.clone(),
             self.vrf_global_tx.clone(),
         );
         self.register_vrf_show(name, &new_handle);
@@ -2019,13 +2022,32 @@ impl Bgp {
             }
             let depth = peer.egress_depth.load(std::sync::atomic::Ordering::Relaxed);
             let over = depth >= sync_egress_high_water();
+            // Read the gate and the peer address before taking the
+            // `&mut` on the cursor — `bgp_adj_out_trace!` needs `&peer`,
+            // which `sync_v4.as_mut()` would conflict with.
+            let trace = peer.trace_adj_out();
+            let address = peer.address;
             if let Some(cursor) = peer.sync_v4.as_mut() {
-                if over && !cursor.parked {
+                let transition = if over && !cursor.parked {
                     cursor.parked = true;
-                    tracing::info!(ident, depth, "bgp: v4 sync parked (egress backpressure)");
+                    Some("bgp: v4 sync parked (egress backpressure)")
                 } else if !over && cursor.parked {
                     cursor.parked = false;
-                    tracing::info!(ident, depth, "bgp: v4 sync resumed");
+                    Some("bgp: v4 sync resumed")
+                } else {
+                    None
+                };
+                if let Some(msg) = transition
+                    && trace
+                {
+                    tracing::info!(
+                        proto = "bgp",
+                        category = "adj-out",
+                        peer = %address,
+                        ident,
+                        depth,
+                        "{msg}"
+                    );
                 }
             }
             over
@@ -2535,6 +2557,7 @@ impl Bgp {
                 kernel,
                 &self.rib_subscriber,
                 srv6,
+                self.tracing.clone(),
                 self.vrf_global_tx.clone(),
             );
             self.register_vrf_show(&name, &handle);
@@ -2889,6 +2912,7 @@ impl Bgp {
             Some(kernel),
             &self.rib_subscriber,
             srv6,
+            self.tracing.clone(),
             self.vrf_global_tx.clone(),
         );
         self.register_vrf_show(name, &new_handle);
@@ -3411,11 +3435,14 @@ impl Bgp {
         self.listen_fd_v4 = None;
         self.listen_fd_v6 = None;
         self.listen_err = None;
+        // Debug, not info: listener churn is operator-driven (a `listen
+        // port` edit) and has no tracing category of its own. A failure
+        // to reopen still surfaces through `self.listen_err`.
         if self.port == 0 {
-            tracing::info!("bgp: listen port set to 0 — BGP listener disabled");
+            tracing::debug!("bgp: listen port set to 0 — BGP listener disabled");
             return;
         }
-        tracing::info!(port = self.port, "bgp: reopening BGP listener");
+        tracing::debug!(port = self.port, "bgp: reopening BGP listener");
         if let Err(err) = self.listen().await {
             self.listen_err = Some(err);
         }
@@ -3763,6 +3790,21 @@ impl Bgp {
                     color_policy: self.color_policy.clone(),
                     srv6_shadow: self.flex_algo_srv6_routes.clone(),
                 });
+        }
+    }
+
+    /// Push the instance-wide `router bgp tracing { … }` config to every
+    /// per-VRF task. A per-VRF `ConfigChannel` only receives
+    /// `/router/bgp/vrf/<name>/…`, so the instance-scoped tracing path
+    /// can't reach those tasks by config dispatch — same reason
+    /// [`Self::broadcast_colour_steering`] exists. Called from
+    /// `propagate_instance_tracing`, which already re-snapshots the
+    /// global peers; spawn-time seeding goes through `spawn_bgp_vrf`.
+    pub fn broadcast_tracing(&self) {
+        for handle in self.vrf_registry.values() {
+            let _ = handle
+                .inbox
+                .send(super::vrf::msg::BgpVrfMsg::Tracing(self.tracing.clone()));
         }
     }
 
@@ -4178,6 +4220,7 @@ impl Bgp {
             kernel,
             &self.rib_subscriber,
             srv6,
+            self.tracing.clone(),
             self.vrf_global_tx.clone(),
         );
         self.register_vrf_show(name, &new_handle);

@@ -13,6 +13,7 @@ use tokio::sync::mpsc::{self, UnboundedReceiver, UnboundedSender};
 
 use crate::config::{ConfigChannel, ShowChannel};
 use crate::context::{ProtoContext, Task};
+use crate::{bgp_vpn_trace, bgp_vrf_trace};
 
 use super::super::Message;
 use super::super::config::BgpRedistSource;
@@ -48,6 +49,15 @@ pub struct BgpVrf {
     /// Shard-scope Loc-RIB tables (unicast/LU/VPN) — the per-VRF
     /// twin of [`crate::bgp::shard::BgpShard`] on the global task.
     pub shard: BgpShard,
+    /// Mirror of the instance-wide `router bgp tracing { … }` config,
+    /// seeded at spawn by `spawn_bgp_vrf` and refreshed on every edit
+    /// via [`BgpVrfMsg::Tracing`] (the per-VRF `ConfigChannel` never
+    /// sees the instance-scoped path). Read by this task's gated trace
+    /// sites — `bgp_vpn_trace!` for the import/withdraw pipeline,
+    /// `bgp_vrf_trace!` for task lifecycle. There is no per-neighbor
+    /// overlay here: the CE peers in a VRF are traced through the
+    /// instance config only.
+    pub tracing: super::super::tracing::BgpTracing,
     /// Per-VRF BGP router-id. Defaults to the global router-id at
     /// spawn time; the operator may override via
     /// `set router bgp vrf <name> router-id <addr>`, in which case
@@ -707,6 +717,9 @@ impl BgpVrf {
             peers: PeerMap::new(),
             local_rib: LocalRib::default(),
             shard: BgpShard::default(),
+            // Default all-off; `spawn_bgp_vrf` seeds it from the
+            // instance config and `BgpVrfMsg::Tracing` refreshes it.
+            tracing: Default::default(),
             router_id,
             // Default unset; `spawn_bgp_vrf` sets it from the VRF config.
             rd: None,
@@ -1151,14 +1164,15 @@ impl BgpVrf {
                 msg = self.global_rx.recv() => {
                     match msg {
                         Some(BgpVrfMsg::Shutdown) => {
-                            tracing::info!(vrf = %self.name, "bgp vrf: shutdown");
+                            bgp_vrf_trace!(&self.tracing, vrf = %self.name, "bgp vrf: shutdown");
                             break;
                         }
                         Some(other) => self.process_global_msg(other),
                         None => {
                             // All senders dropped — the global task
                             // exited without sending Shutdown.
-                            tracing::info!(
+                            bgp_vrf_trace!(
+                                &self.tracing,
                                 vrf = %self.name,
                                 "bgp vrf: inbound channel closed; exiting",
                             );
@@ -1554,7 +1568,8 @@ impl BgpVrf {
             }
         }
 
-        tracing::info!(
+        bgp_vpn_trace!(
+            &self.tracing,
             vrf = %self.name,
             %prefix,
             rd = %rd,
@@ -1576,7 +1591,8 @@ impl BgpVrf {
         // imported from has nothing to remove — and must not touch a
         // sibling RD's row (the aliasing this fixes).
         let Some(&import_id) = self.import_ids.get(&rd) else {
-            tracing::info!(
+            bgp_vpn_trace!(
+                &self.tracing,
                 vrf = %self.name,
                 %prefix,
                 rd = %rd,
@@ -1653,7 +1669,8 @@ impl BgpVrf {
             }
         }
 
-        tracing::info!(
+        bgp_vpn_trace!(
+            &self.tracing,
             vrf = %self.name,
             %prefix,
             rd = %rd,
@@ -1796,7 +1813,8 @@ impl BgpVrf {
             }
         }
 
-        tracing::info!(
+        bgp_vpn_trace!(
+            &self.tracing,
             vrf = %self.name,
             %prefix,
             rd = %rd,
@@ -1814,7 +1832,8 @@ impl BgpVrf {
     ) {
         // See `handle_withdraw_import`: only the withdrawing RD's row.
         let Some(&import_id) = self.import_ids.get(&rd) else {
-            tracing::info!(
+            bgp_vpn_trace!(
+                &self.tracing,
                 vrf = %self.name,
                 %prefix,
                 rd = %rd,
@@ -1879,7 +1898,8 @@ impl BgpVrf {
             }
         }
 
-        tracing::info!(
+        bgp_vpn_trace!(
+            &self.tracing,
             vrf = %self.name,
             %prefix,
             rd = %rd,
@@ -2187,6 +2207,11 @@ impl BgpVrf {
                 // routes refresh on the SPF that changed the shadow.
                 self.color_policy = color_policy;
                 self.flex_algo_srv6_routes = srv6_shadow;
+            }
+            BgpVrfMsg::Tracing(tracing) => {
+                // Instance-wide tracing config changed. Purely a
+                // logging switch — nothing to re-run.
+                self.tracing = tracing;
             }
             BgpVrfMsg::Accept(stream, sockaddr) => {
                 // Passive accept for the per-VRF PE-CE session. The global

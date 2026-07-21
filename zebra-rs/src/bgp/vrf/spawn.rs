@@ -134,6 +134,7 @@ pub fn spawn_bgp_vrf(
     kernel: Option<RibKnownVrf>,
     rib_subscriber: &RibSubscriber,
     srv6: Option<Srv6VrfSid>,
+    tracing_cfg: crate::bgp::tracing::BgpTracing,
     global_tx: UnboundedSender<BgpGlobalMsg>,
 ) -> BgpVrfHandle {
     // Snapshot for logging + ILM install so we can move
@@ -192,6 +193,11 @@ pub fn spawn_bgp_vrf(
     // The MUP forwarding-plane mode (End.DT46 stand-in vs cradle GTP-U).
     // Spawn-time capture like `rd`; a live `dataplane` edit respawns the VRF.
     vrf.dataplane = cfg.mobile_uplane.dataplane;
+    // Seed the instance-wide tracing snapshot so the task's gated trace
+    // sites are live from its first event. Unlike `rd`/`dataplane` this
+    // is *not* a spawn-time capture — `Bgp::broadcast_tracing` refreshes
+    // it via `BgpVrfMsg::Tracing` on every edit, no respawn needed.
+    vrf.tracing = tracing_cfg;
 
     // Materialise per-VRF peers from the BgpVrfConfig snapshot.
     // `peer.start()`'s timer events get logged at debug and
@@ -607,6 +613,7 @@ mod tests {
             None,
             &subscriber,
             /* srv6 */ None,
+            /* tracing */ Default::default(),
             global_tx,
         )
     }

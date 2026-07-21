@@ -124,7 +124,10 @@ impl GroupEgressTask {
     /// (the group emptied).
     pub fn spawn(id: UpdateGroupId) -> Self {
         let (delta_tx, mut delta_rx) = mpsc::unbounded_channel::<GroupEgressDeltaV4>();
-        tracing::info!("BGP egress group task: spawned (group {id:?})");
+        // Debug, matching the "exited" line below: `spawn` is a plain
+        // constructor with no `BgpTracing` in reach, and it fires once
+        // per update-group.
+        tracing::debug!("BGP egress group task: spawned (group {id:?})");
         let task = Task::spawn(async move {
             let mut engine = Engine::default();
             while let Some(delta) = delta_rx.recv().await {

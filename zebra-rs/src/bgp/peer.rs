@@ -26,9 +26,9 @@ use crate::bgp::route::{route_clean, route_sync};
 use crate::bgp::tracing::{Direction, PacketKind};
 use crate::bgp::{AdjRib, MainAdjIn, Out};
 use crate::bgp::{stale_route_withdraw, timer};
-use crate::bgp_packet_trace;
 use crate::config::Args;
 use crate::context::task::*;
+use crate::{bgp_fsm_trace, bgp_packet_trace};
 
 use super::cap::{CapAfiMap, cap_addpath_recv, cap_register_send};
 use super::inst::Message;
@@ -1727,13 +1727,11 @@ fn resolve_conn(peer: &Peer, id: ConnId) -> Option<ConnTag> {
     } else if peer.collision.as_ref().map(|c| c.conn_id) == Some(id) {
         Some(ConnTag::Collision)
     } else {
-        if peer.trace_fsm() {
-            tracing::info!(
-                peer = %peer.address,
-                conn_id = id,
-                "bgp: ignoring event from a superseded connection",
-            );
-        }
+        bgp_fsm_trace!(
+            peer,
+            conn_id = id,
+            "bgp: ignoring event from a superseded connection",
+        );
         None
     }
 }
@@ -1989,12 +1987,10 @@ pub fn fsm_start(peer: &mut Peer) -> State {
     // peer through its callback — so the connect-retry tick is only a
     // backstop.
     if !peer.connected_check_ok() {
-        if peer.trace_fsm() {
-            tracing::info!(
-                peer = %peer.address,
-                "bgp: holding eBGP session — neighbor is not on a connected network and disable-connected-check is off",
-            );
-        }
+        bgp_fsm_trace!(
+            peer,
+            "bgp: holding eBGP session — neighbor is not on a connected network and disable-connected-check is off",
+        );
         peer.timer.connect_retry = Some(timer::start_connect_retry_timer(peer));
         return State::Active;
     }
@@ -2237,13 +2233,16 @@ pub fn fsm_bgp_open(peer: &mut Peer, conn: ConnTag, packet: OpenPacket) -> State
 
 pub fn fsm_bgp_notification(peer: &mut Peer, conn: ConnTag, packet: NotificationPacket) -> State {
     peer.counter[BgpType::Notification as usize].rcvd += 1;
-    // A NOTIFICATION is the peer telling us why it is tearing the session down,
-    // and it was never surfaced anywhere: the only log here was the Bad Peer AS
-    // case below. Record it, including any RFC 9003 shutdown communication —
-    // an operator's "maintenance window, back at 03:00" is worth exactly as much
-    // as the numeric subcode next to it.
-    tracing::info!(
-        peer = %peer.display_name(),
+    // A NOTIFICATION is the peer telling us why it is tearing the session down.
+    // The dispatch-level `recv NOTIFICATION` in `Bgp::process_msg` only records
+    // that one arrived; this is the decoded reason, including any RFC 9003
+    // shutdown communication — an operator's "maintenance window, back at 03:00"
+    // is worth exactly as much as the numeric subcode next to it. Same
+    // `tracing packet notification` gate as its sibling.
+    bgp_packet_trace!(
+        peer,
+        PacketKind::Notification,
+        Direction::Recv,
         "bgp: NOTIFICATION received: {} / {}{}",
         packet.code,
         bgp_packet::notify_sub_code_str(packet.code, packet.sub_code),
@@ -2261,8 +2260,8 @@ pub fn fsm_bgp_notification(peer: &mut Peer, conn: ConnTag, packet: Notification
         && peer.config.local_as.is_some_and(|la| la.dual_as)
     {
         peer.local_as_dual_fallback = !peer.local_as_dual_fallback;
-        tracing::info!(
-            peer = %peer.display_name(),
+        bgp_fsm_trace!(
+            peer,
             "bgp: Bad Peer AS with local-as dual-as — next OPEN presents AS {}",
             peer.open_local_as(),
         );
