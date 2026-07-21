@@ -113,10 +113,10 @@ pub fn ospfv3_verify_checksum(src: &Ipv6Addr, dst: &Ipv6Addr, packet_bytes: &[u8
 ///
 /// Slices to the header `len` before parsing so a RFC 7166 trailer
 /// (when present) is read out separately into `auth_trailer`
-/// rather than feeding into the payload parser. `raw_body` is
-/// populated with the exact slice covered by the cryptographic
-/// digest so receive-side verification can re-hash without
-/// re-emitting.
+/// rather than feeding into the payload parser. When a trailer is
+/// captured, `raw_body` is populated with the exact slice covered
+/// by the cryptographic digest so receive-side verification can
+/// re-hash without re-emitting; without a trailer it stays empty.
 pub fn parse_v3(input: &[u8]) -> IResult<&[u8], Ospfv3Packet> {
     use nom::Err;
     use nom::error::{ErrorKind, make_error};
@@ -130,7 +130,6 @@ pub fn parse_v3(input: &[u8]) -> IResult<&[u8], Ospfv3Packet> {
         return Err(Err::Error(make_error(input, ErrorKind::Verify)));
     }
     let (_, mut packet) = Ospfv3Packet::parse_be(&input[..pkt_len])?;
-    packet.raw_body = input[..pkt_len].to_vec();
 
     // RFC 7166: once the AT-bit is negotiated (advertised in the
     // Hello/DBD Options), EVERY subsequent OSPF packet carries the
@@ -151,6 +150,11 @@ pub fn parse_v3(input: &[u8]) -> IResult<&[u8], Ospfv3Packet> {
         // obviously-bogus lengths so we don't allocate gigabytes.
         if (16..=1024).contains(&trailer_len) && input.len() >= pkt_len + trailer_len {
             packet.auth_trailer = input[pkt_len..pkt_len + trailer_len].to_vec();
+            // Cache the digest-covered bytes only when a trailer is
+            // actually present — trailer verification is raw_body's
+            // sole consumer, so the unauthenticated hot path skips
+            // the per-packet copy.
+            packet.raw_body = input[..pkt_len].to_vec();
             consumed = pkt_len + trailer_len;
         }
     }
@@ -258,10 +262,11 @@ pub struct Ospfv3Packet {
     pub auth_trailer: Vec<u8>,
     /// On-wire bytes covered by the cryptographic-auth digest —
     /// the OSPF header (with AT-bit set) + body, i.e.
-    /// `input[..pkt_len]`. Populated by `parse_v3()` for every
-    /// packet so receive-side verification can re-hash exactly
-    /// what the sender hashed. Empty for packets built via
-    /// `new()`.
+    /// `input[..pkt_len]`. Populated by `parse_v3()` only when an
+    /// authentication trailer is present — trailer verification is
+    /// its sole consumer — so receive-side verification can re-hash
+    /// exactly what the sender hashed. Empty for unauthenticated
+    /// packets and for packets built via `new()`.
     #[nom(Ignore)]
     pub raw_body: Vec<u8>,
 }
@@ -321,7 +326,12 @@ impl Ospfv3Packet {
         buf.put_u8(self.instance_id);
         buf.put_u8(self.reserved);
         self.payload.emit(buf);
-        let len = buf.len() as u16;
+        debug_assert!(
+            buf.len() <= u16::MAX as usize,
+            "OSPFv3 packet overflows its 16-bit length field: {} bytes",
+            buf.len()
+        );
+        let len = buf.len().min(u16::MAX as usize) as u16;
         BigEndian::write_u16(&mut buf[2..4], len);
     }
 }
@@ -3395,6 +3405,67 @@ fn parse_ipv6_sid(input: &[u8]) -> IResult<&[u8], Ipv6Addr> {
 mod tests {
     use super::*;
     use crate::OspfType;
+
+    /// Emitting a >64 KB packet is a local packing bug — the debug
+    /// assert trips instead of the 16-bit length field silently
+    /// wrapping on the wire.
+    #[cfg(debug_assertions)]
+    #[test]
+    #[should_panic(expected = "OSPFv3 packet overflows its 16-bit length field")]
+    fn v3_packet_length_overflow_asserts() {
+        let packet = Ospfv3Packet::new(
+            &Ipv4Addr::new(1, 1, 1, 1),
+            &Ipv4Addr::new(0, 0, 0, 0),
+            0,
+            Ospfv3Payload::Unknown(vec![0; (u16::MAX as usize) + 1]),
+        );
+        let mut buf = BytesMut::new();
+        packet.emit(&mut buf);
+    }
+
+    /// Without an RFC 7166 trailer, `raw_body` stays empty — the
+    /// digest-covered byte cache exists only for trailer
+    /// verification.
+    #[test]
+    fn v3_parse_without_trailer_skips_raw_body() {
+        let packet = Ospfv3Packet::new(
+            &Ipv4Addr::new(1, 1, 1, 1),
+            &Ipv4Addr::new(0, 0, 0, 0),
+            0,
+            Ospfv3Payload::Unknown(vec![0xAB; 8]),
+        );
+        let mut buf = BytesMut::new();
+        packet.emit(&mut buf);
+        let (rest, parsed) = parse_v3(&buf).expect("parse must succeed");
+        assert!(rest.is_empty());
+        assert!(parsed.auth_trailer.is_empty());
+        assert!(parsed.raw_body.is_empty());
+    }
+
+    /// With a trailer appended, `raw_body` caches exactly the
+    /// digest-covered packet bytes alongside the captured trailer.
+    #[test]
+    fn v3_parse_with_trailer_populates_raw_body() {
+        let packet = Ospfv3Packet::new(
+            &Ipv4Addr::new(1, 1, 1, 1),
+            &Ipv4Addr::new(0, 0, 0, 0),
+            0,
+            Ospfv3Payload::Unknown(vec![0xAB; 8]),
+        );
+        let mut buf = BytesMut::new();
+        packet.emit(&mut buf);
+        let pkt_len = buf.len();
+        let trailer = Ospfv3AuthTrailer {
+            auth_type: Ospfv3AuthTrailer::AUTH_TYPE_HMAC,
+            auth_data_len: Ospfv3AuthTrailer::PREFIX_LEN as u16,
+            ..Default::default()
+        };
+        trailer.emit(&mut buf);
+        let (rest, parsed) = parse_v3(&buf).expect("parse must succeed");
+        assert!(rest.is_empty());
+        assert_eq!(parsed.auth_trailer, buf[pkt_len..].to_vec());
+        assert_eq!(parsed.raw_body, buf[..pkt_len].to_vec());
+    }
 
     #[test]
     fn srv6_locator_tlv_rejects_oversized_locator_length() {

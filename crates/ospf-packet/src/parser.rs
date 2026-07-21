@@ -39,9 +39,11 @@ pub struct Ospfv2Packet {
     pub auth_trailer: Vec<u8>,
     /// On-wire bytes covered by the cryptographic-auth digest:
     /// header (with the Crypto auth overlay) + body, i.e.
-    /// `input[..pkt_len]`. Populated by `parse()` for every packet
-    /// so receive-side verification can re-hash exactly what the
-    /// sender hashed. Empty for packets built via `new()`.
+    /// `input[..pkt_len]`. Populated by `parse()` only for
+    /// cryptographic auth (type 2) — digest verification is its
+    /// sole consumer — so receive-side verification can re-hash
+    /// exactly what the sender hashed. Empty for Null/Simple auth
+    /// and for packets built via `new()`.
     #[nom(Ignore)]
     pub raw_body: Vec<u8>,
 }
@@ -85,7 +87,12 @@ impl Ospfv2Packet {
         // RFC 2328 §D.4: the cryptographic-auth digest follows the
         // body but is not counted in this length, so finalize the
         // length and checksum before appending the trailer.
-        let len = buf.len() as u16;
+        debug_assert!(
+            buf.len() <= u16::MAX as usize,
+            "OSPFv2 packet overflows its 16-bit length field: {} bytes",
+            buf.len()
+        );
+        let len = buf.len().min(u16::MAX as usize) as u16;
         BigEndian::write_u16(&mut buf[2..4], len);
 
         // Update checksum. RFC 2328 §D.4.1-D.4.3: the checksum is
@@ -2724,16 +2731,17 @@ pub fn parse(input: &[u8]) -> IResult<&[u8], Ospfv2Packet> {
         return Err(Err::Error(make_error(input, ErrorKind::Verify)));
     }
     let (_, mut packet) = Ospfv2Packet::parse_be(&input[..pkt_len])?;
-    // Cache the on-wire bytes covered by the cryptographic-auth
-    // digest — receive-side verification recomputes MD5 over this
-    // exact slice + the padded key (RFC 2328 §D.4.3).
-    packet.raw_body = input[..pkt_len].to_vec();
 
     // RFC 2328 §D.4: a cryptographic-auth (type 2) packet carries
     // the digest as a trailer after the OSPF body; `auth_data_len`
     // in the header overlay says how many bytes to consume.
     let mut consumed = pkt_len;
     if let Ospfv2Auth::Crypto(ref c) = packet.auth {
+        // Cache the on-wire bytes covered by the digest —
+        // receive-side verification recomputes MD5 over this exact
+        // slice + the padded key (RFC 2328 §D.4.3). Null/Simple
+        // auth never re-hashes, so skip the per-packet copy there.
+        packet.raw_body = input[..pkt_len].to_vec();
         let trailer_len = c.auth_data_len as usize;
         let trailer_end = pkt_len + trailer_len;
         if input.len() < trailer_end {
@@ -2767,6 +2775,25 @@ mod tests {
         )
     }
 
+    /// Emitting a >64 KB packet is a local packing bug — the debug
+    /// assert trips instead of the 16-bit length field silently
+    /// wrapping on the wire.
+    #[cfg(debug_assertions)]
+    #[test]
+    #[should_panic(expected = "OSPFv2 packet overflows its 16-bit length field")]
+    fn v2_packet_length_overflow_asserts() {
+        let packet = Ospfv2Packet::new(
+            &Ipv4Addr::new(1, 1, 1, 1),
+            &Ipv4Addr::new(0, 0, 0, 0),
+            Ospfv2Payload::Unknown(OspfUnknown {
+                typ: OspfType::Unknown(9),
+                payload: vec![0; (u16::MAX as usize) + 1],
+            }),
+        );
+        let mut buf = BytesMut::new();
+        packet.emit(&mut buf);
+    }
+
     #[test]
     fn null_auth_roundtrip() {
         let pkt = null_hello_packet();
@@ -2778,6 +2805,8 @@ mod tests {
         assert_eq!(parsed.auth_type, 0);
         assert!(matches!(parsed.auth, Ospfv2Auth::Null(_)));
         assert!(parsed.auth_trailer.is_empty());
+        // Non-crypto packets skip the digest-covered byte cache.
+        assert!(parsed.raw_body.is_empty());
     }
 
     #[test]
