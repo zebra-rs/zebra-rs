@@ -107,6 +107,9 @@
 /router/bgp/neighbor-group/remove-private-as/replace-as	leaf
 /router/bgp/neighbor-group/route-reflector	container
 /router/bgp/neighbor-group/route-reflector/client	leaf
+/router/bgp/neighbor-group/tcp-ao	p-container
+/router/bgp/neighbor-group/tcp-ao/include-tcp-options	leaf
+/router/bgp/neighbor-group/tcp-ao/key-chain	leaf
 /router/bgp/neighbor-group/tcp-mss	leaf
 /router/bgp/neighbor-group/ttl-security	p-container
 /router/bgp/neighbor-group/update-source	leaf

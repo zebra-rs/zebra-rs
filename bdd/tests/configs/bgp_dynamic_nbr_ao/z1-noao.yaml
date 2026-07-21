@@ -1,0 +1,44 @@
+# Identical to z1.yaml except SENDERS carries no tcp-ao. The commit
+# diff is exactly the deletion of the group's tcp-ao container, which
+# must retract the prefix MKT from the listening socket.
+#
+# The chain definition itself stays: an unreferenced key-chain
+# authenticates nothing. The client keeps signing, so with the MKT gone
+# the handshake cannot complete.
+key-chains:
+  key-chain:
+  - name: BGP-AO
+    key:
+    - key-id: 100
+      crypto-algorithm: hmac-sha-1
+      send-id: 100
+      recv-id: 100
+      key-string:
+        keystring: "dyn-ao-secret"
+interface:
+- if-name: i1
+  ipv4:
+    address: 192.168.0.1/24
+router:
+  bgp:
+    global:
+      as: 65001
+      router-id: 192.168.0.1
+    timer:
+      adv-interval:
+        ibgp: 1
+        ebgp: 1
+    neighbor-group:
+    - name: SENDERS
+      remote-as: 65002
+      afi-safi:
+      - name: ipv4
+        enabled: true
+    dynamic-neighbors:
+      listen-range:
+      - prefix: 192.168.0.0/24
+        neighbor-group: SENDERS
+    afi-safi:
+    - name: ipv4
+      network:
+      - prefix: 10.0.1.1/32

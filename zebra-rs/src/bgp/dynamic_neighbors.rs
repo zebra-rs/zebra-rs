@@ -34,6 +34,13 @@ pub struct DynamicNeighbors {
     /// put there: the desired set is recomputed from config, but the
     /// *removal* set can only be known from what was installed before.
     installed_md5: BTreeMap<IpNet, String>,
+    /// Same shadow for prefix-scoped TCP-AO MKTs. The stored value is
+    /// the full resolved key, because the kernel identifies an MKT by
+    /// `(address, prefixlen, send_id, recv_id)` — a rotation that
+    /// keeps both IDs but changes the material still has to be
+    /// deleted before it can be re-added (`TCP_AO_ADD_KEY` answers
+    /// EEXIST otherwise), so the IDs alone are not enough state.
+    installed_ao: BTreeMap<IpNet, super::auth::ResolvedAoKey>,
 }
 
 /// RFC-style operator default — IOS-XR ships 100, FRR ships 100,
@@ -47,6 +54,7 @@ impl Default for DynamicNeighbors {
             listen_limit: DEFAULT_LISTEN_LIMIT,
             ranges: BTreeMap::new(),
             installed_md5: BTreeMap::new(),
+            installed_ao: BTreeMap::new(),
         }
     }
 }
@@ -60,6 +68,12 @@ impl DynamicNeighbors {
     /// installed" and skips every key on the new fd.
     pub fn forget_installed_md5(&mut self) {
         self.installed_md5.clear();
+    }
+
+    /// TCP-AO twin of [`Self::forget_installed_md5`], for the same
+    /// fd-replacement reason.
+    pub fn forget_installed_ao(&mut self) {
+        self.installed_ao.clear();
     }
 
     /// Longest-prefix match against the configured ranges. Returns
@@ -123,6 +137,7 @@ pub fn config_listen_range(bgp: &mut Bgp, mut args: Args, op: ConfigOp) -> Optio
         _ => {}
     }
     reconcile_listener_md5(bgp);
+    reconcile_listener_ao(bgp);
     Some(())
 }
 
@@ -157,6 +172,7 @@ pub fn config_listen_range_neighbor_group(
         _ => {}
     }
     reconcile_listener_md5(bgp);
+    reconcile_listener_ao(bgp);
     Some(())
 }
 
@@ -263,6 +279,125 @@ fn md5_prefix_apply(bgp: &Bgp, prefix: &IpNet, key: &[u8]) -> bool {
                 error = %e,
                 "TCP MD5 prefix setsockopt on listener failed; \
                  authenticated SYNs from this range will be dropped"
+            );
+            false
+        }
+    }
+}
+
+/// TCP-AO twin of [`reconcile_listener_md5`]: keep the listener's
+/// prefix-scoped MKTs in step with `listen-range × neighbor-group
+/// tcp-ao`, resolved against the current key-chain table.
+///
+/// Same rationale — a listen-range peer is materialized only after its
+/// SYN is accepted, but the kernel verifies the AO MAC during the
+/// handshake — and the same diff-gating. The extra wrinkle is that the
+/// kernel identifies an MKT by `(address, prefixlen, send_id,
+/// recv_id)` and refuses a duplicate with EEXIST, so any change to a
+/// range's key must delete the *previously installed* IDs before
+/// adding, including a rotation that keeps both IDs.
+pub(super) fn reconcile_listener_ao(bgp: &mut Bgp) {
+    let desired = desired_listener_ao(bgp);
+
+    if desired == bgp.dynamic_neighbors.installed_ao {
+        return;
+    }
+
+    let stale: Vec<(IpNet, super::auth::ResolvedAoKey)> = bgp
+        .dynamic_neighbors
+        .installed_ao
+        .iter()
+        .filter(|(prefix, installed)| desired.get(*prefix) != Some(*installed))
+        .map(|(prefix, installed)| (*prefix, installed.clone()))
+        .collect();
+    for (prefix, installed) in stale {
+        if ao_prefix_del(bgp, &prefix, installed.send_id, installed.recv_id) {
+            bgp.dynamic_neighbors.installed_ao.remove(&prefix);
+        }
+    }
+
+    for (prefix, key) in desired {
+        if bgp.dynamic_neighbors.installed_ao.get(&prefix) == Some(&key) {
+            continue;
+        }
+        if ao_prefix_add(bgp, &prefix, &key) {
+            bgp.dynamic_neighbors.installed_ao.insert(prefix, key);
+        }
+    }
+}
+
+/// The MKTs the listener *should* be carrying: every listen-range
+/// bound to a group whose `tcp-ao` resolves against the current
+/// key-chain table. An unresolvable chain (missing, no usable key)
+/// contributes nothing, exactly as for a static peer.
+fn desired_listener_ao(bgp: &Bgp) -> BTreeMap<IpNet, super::auth::ResolvedAoKey> {
+    bgp.dynamic_neighbors
+        .ranges
+        .iter()
+        .filter_map(|(prefix, range)| {
+            let group = range.neighbor_group.as_ref()?;
+            let ao = bgp.neighbor_groups.get(group)?.knobs.ao_config.as_ref()?;
+            Some((*prefix, ao.resolve(&bgp.key_chains)?))
+        })
+        .collect()
+}
+
+fn listen_fd_for(bgp: &Bgp, prefix: &IpNet) -> Option<std::os::fd::RawFd> {
+    match prefix {
+        IpNet::V4(_) => bgp.listen_fd_v4,
+        IpNet::V6(_) => bgp.listen_fd_v6,
+    }
+}
+
+fn ao_prefix_add(bgp: &Bgp, prefix: &IpNet, key: &super::auth::ResolvedAoKey) -> bool {
+    let Some(fd) = listen_fd_for(bgp, prefix) else {
+        return false;
+    };
+    match super::auth::set_tcp_ao_key_prefix(
+        fd,
+        *prefix,
+        key.alg_name,
+        &key.key_material,
+        key.send_id,
+        key.recv_id,
+        key.include_tcp_options,
+    ) {
+        Ok(()) => {
+            tracing::debug!(
+                range = %prefix,
+                send_id = key.send_id,
+                recv_id = key.recv_id,
+                "bgp: TCP-AO prefix MKT installed on listener for listen-range",
+            );
+            true
+        }
+        Err(e) => {
+            tracing::warn!(
+                range = %prefix,
+                error = %e,
+                "TCP-AO prefix setsockopt on listener failed; \
+                 authenticated SYNs from this range will be dropped"
+            );
+            false
+        }
+    }
+}
+
+fn ao_prefix_del(bgp: &Bgp, prefix: &IpNet, send_id: u8, recv_id: u8) -> bool {
+    let Some(fd) = listen_fd_for(bgp, prefix) else {
+        return false;
+    };
+    match super::auth::del_tcp_ao_key_prefix(fd, *prefix, send_id, recv_id) {
+        Ok(()) => true,
+        // Already absent is the desired end state, not a failure.
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => true,
+        Err(e) => {
+            tracing::warn!(
+                range = %prefix,
+                send_id,
+                recv_id,
+                error = %e,
+                "TCP-AO prefix del on listener failed; MKT may be stale",
             );
             false
         }
@@ -750,5 +885,145 @@ mod sweep_tests {
         // And it really is on the new socket, not just in the shadow.
         crate::bgp::auth::set_tcp_md5_key_prefix(second.as_raw_fd(), net("10.1.0.0/24"), &[])
             .expect("key must be present on the new listener");
+    }
+    // ===================================================
+    // Listener prefix-TCP-AO reconciliation
+    // ===================================================
+
+    fn seed_key_chain(bgp: &mut Bgp, name: &str, material: &str) {
+        use crate::policy::keychain::set::{Key, KeyChain};
+        let mut keys = std::collections::BTreeMap::new();
+        keys.insert(
+            100u64,
+            Key {
+                algo: Some(crate::policy::keychain::CryptoAlgorithm::HmacSha1),
+                key_material: material.as_bytes().to_vec(),
+                send_id: Some(100),
+                recv_id: Some(100),
+                ..Default::default()
+            },
+        );
+        bgp.key_chains.insert(
+            name.to_string(),
+            KeyChain {
+                description: None,
+                keys,
+                delete: false,
+            },
+        );
+    }
+
+    fn set_group_ao(bgp: &mut Bgp, group: &str, chain: &str) {
+        crate::bgp::neighbor_group::config_neighbor_group_tcp_ao_key_chain(
+            bgp,
+            arg_words(&[group, chain]),
+            ConfigOp::Set,
+        )
+        .unwrap();
+    }
+
+    /// The whole wiring, end to end: chain + group tcp-ao + range must
+    /// put a prefix MKT on the listener.
+    #[tokio::test]
+    async fn range_group_tcp_ao_installs_a_prefix_mkt() {
+        use std::os::fd::AsRawFd;
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let mut bgp = fresh_bgp();
+        bgp.listen_fd_v4 = Some(listener.as_raw_fd());
+        seed_key_chain(&mut bgp, "BGP-AO", "dyn-ao-secret");
+
+        configure_range(&mut bgp, "10.1.0.0/24", "SECURE");
+        set_group_ao(&mut bgp, "SECURE", "BGP-AO");
+
+        let installed = bgp.dynamic_neighbors.installed_ao.get(&net("10.1.0.0/24"));
+        assert!(
+            installed.is_some(),
+            "a range whose group carries tcp-ao must get a prefix MKT"
+        );
+        assert_eq!(installed.unwrap().key_material, b"dyn-ao-secret".to_vec());
+    }
+
+    /// The key-chain usually arrives from the policy actor *after* the
+    /// BGP config that references it, so the group callback resolves
+    /// nothing. The reconcile driven from the KeyChain message is what
+    /// installs the MKT — without it the listener stays unauthenticated
+    /// and every SYN from the range is dropped.
+    #[tokio::test]
+    async fn late_key_chain_arrival_still_installs_the_mkt() {
+        use std::os::fd::AsRawFd;
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let mut bgp = fresh_bgp();
+        bgp.listen_fd_v4 = Some(listener.as_raw_fd());
+
+        // Config first, chain still unknown.
+        configure_range(&mut bgp, "10.1.0.0/24", "SECURE");
+        set_group_ao(&mut bgp, "SECURE", "BGP-AO");
+        assert!(
+            bgp.dynamic_neighbors.installed_ao.is_empty(),
+            "precondition: nothing resolvable yet"
+        );
+
+        // Chain lands later; this is what `PolicyRx::KeyChain` does.
+        seed_key_chain(&mut bgp, "BGP-AO", "dyn-ao-secret");
+        reconcile_listener_ao(&mut bgp);
+
+        assert!(
+            bgp.dynamic_neighbors
+                .installed_ao
+                .contains_key(&net("10.1.0.0/24")),
+            "a late key-chain must still reach the listener"
+        );
+    }
+
+    /// A rotation that keeps send-id/recv-id must delete before adding:
+    /// the kernel keys MKTs by (addr, prefixlen, send_id, recv_id) and
+    /// answers EEXIST on a duplicate, so a naive add would leave the
+    /// stale key serving the range.
+    #[tokio::test]
+    async fn same_id_rotation_replaces_the_prefix_mkt() {
+        use std::os::fd::AsRawFd;
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let mut bgp = fresh_bgp();
+        bgp.listen_fd_v4 = Some(listener.as_raw_fd());
+        seed_key_chain(&mut bgp, "BGP-AO", "dyn-ao-secret");
+        configure_range(&mut bgp, "10.1.0.0/24", "SECURE");
+        set_group_ao(&mut bgp, "SECURE", "BGP-AO");
+
+        seed_key_chain(&mut bgp, "BGP-AO", "rotated-ao-secret");
+        reconcile_listener_ao(&mut bgp);
+
+        assert_eq!(
+            bgp.dynamic_neighbors
+                .installed_ao
+                .get(&net("10.1.0.0/24"))
+                .map(|k| k.key_material.clone()),
+            Some(b"rotated-ao-secret".to_vec()),
+            "the rotated material must replace the old MKT"
+        );
+    }
+
+    /// Clearing the group's tcp-ao retracts the MKT from the socket.
+    #[tokio::test]
+    async fn clearing_group_ao_retracts_the_prefix_mkt() {
+        use std::os::fd::AsRawFd;
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let mut bgp = fresh_bgp();
+        bgp.listen_fd_v4 = Some(listener.as_raw_fd());
+        seed_key_chain(&mut bgp, "BGP-AO", "dyn-ao-secret");
+        configure_range(&mut bgp, "10.1.0.0/24", "SECURE");
+        set_group_ao(&mut bgp, "SECURE", "BGP-AO");
+        assert_eq!(bgp.dynamic_neighbors.installed_ao.len(), 1);
+
+        crate::bgp::neighbor_group::config_neighbor_group_tcp_ao_key_chain(
+            &mut bgp,
+            arg_words(&["SECURE", "BGP-AO"]),
+            ConfigOp::Delete,
+        )
+        .unwrap();
+
+        assert!(
+            bgp.dynamic_neighbors.installed_ao.is_empty(),
+            "deleting the group's tcp-ao must remove the MKT"
+        );
     }
 }

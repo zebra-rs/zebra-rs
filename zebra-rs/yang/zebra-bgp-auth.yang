@@ -249,6 +249,21 @@ module zebra-bgp-auth {
       }
     }
 
+    uses bgp-tcp-ao-extension;
+  }
+
+  /* =========================================================
+   * TCP-AO container, split out so it can be attached to a
+   * `neighbor-group` as well as to a neighbor. A listen-range
+   * binds its group's TCP-AO to the whole prefix.
+   * ========================================================= */
+
+  grouping bgp-tcp-ao-extension {
+    description
+      "Presence container carrying a TCP-AO key-chain reference and
+       the option-coverage knob. Shared by `neighbor` and
+       `neighbor-group`.";
+
     container tcp-ao {
       ext:help "TCP Authentication Option (RFC 5925)";
       presence "Enable TCP-AO on this neighbor";

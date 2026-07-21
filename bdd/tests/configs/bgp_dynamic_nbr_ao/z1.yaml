@@ -1,0 +1,45 @@
+# z1 — DUT. The listen-range's group carries the TCP-AO key-chain, so
+# the whole 192.168.0.0/24 prefix is authenticated by one prefix-scoped
+# MKT on the listening socket (TCP_AO_ADD_KEY with a non-host prefix).
+# A per-address MKT cannot work: the peer is materialized only after
+# accept(), while the kernel verifies the AO MAC during the handshake.
+key-chains:
+  key-chain:
+  - name: BGP-AO
+    key:
+    - key-id: 100
+      crypto-algorithm: hmac-sha-1
+      send-id: 100
+      recv-id: 100
+      key-string:
+        keystring: "dyn-ao-secret"
+interface:
+- if-name: i1
+  ipv4:
+    address: 192.168.0.1/24
+router:
+  bgp:
+    global:
+      as: 65001
+      router-id: 192.168.0.1
+    timer:
+      adv-interval:
+        ibgp: 1
+        ebgp: 1
+    neighbor-group:
+    - name: SENDERS
+      remote-as: 65002
+      tcp-ao:
+        key-chain: BGP-AO
+        include-tcp-options: true
+      afi-safi:
+      - name: ipv4
+        enabled: true
+    dynamic-neighbors:
+      listen-range:
+      - prefix: 192.168.0.0/24
+        neighbor-group: SENDERS
+    afi-safi:
+    - name: ipv4
+      network:
+      - prefix: 10.0.1.1/32

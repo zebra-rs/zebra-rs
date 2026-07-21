@@ -1,0 +1,42 @@
+# Identical to z2.yaml except the key-string does not match the DUT's
+# chain. Same chain name and same send-id/recv-id, so the mismatch is
+# purely in the MAC — the DUT's kernel drops the signed SYN during the
+# handshake and no peer is ever materialized.
+key-chains:
+  key-chain:
+  - name: BGP-AO
+    key:
+    - key-id: 100
+      crypto-algorithm: hmac-sha-1
+      send-id: 100
+      recv-id: 100
+      key-string:
+        keystring: "WRONG-ao-secret"
+interface:
+- if-name: i1
+  ipv4:
+    address: 192.168.0.2/24
+router:
+  bgp:
+    global:
+      as: 65002
+      router-id: 192.168.0.2
+    timer:
+      adv-interval:
+        ibgp: 1
+        ebgp: 1
+    neighbor:
+    - remote-address: 192.168.0.1
+      enabled: true
+      remote-as: 65001
+      timers: {connect-retry-time: 3}
+      tcp-ao:
+        key-chain: BGP-AO
+        include-tcp-options: true
+      afi-safi:
+      - name: ipv4
+        enabled: true
+    afi-safi:
+    - name: ipv4
+      network:
+      - prefix: 10.0.2.2/32
