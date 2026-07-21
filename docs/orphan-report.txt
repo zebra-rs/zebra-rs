@@ -4,18 +4,19 @@ ORPHAN leaf         /router/bgp/sharding/rib-sharding
 ORPHAN leaf         /router/bgp/sharding/peer-sharding
 
 == Bare list/presence-container path unhandled (children handled) ==
-  /router/bgp/global  [p-container]
   /router/bgp/afi-safi  [list]
   /router/bgp/afi-safi/redistribute  [p-container]
+  /router/bgp/global  [p-container]
+  /router/bgp/neighbor  [list]
   /router/bgp/neighbor/afi-safi  [list]
   /router/bgp/neighbor/tcp-md5  [p-container]
   /router/bgp/neighbor/tcp-ao  [p-container]
-  /router/bgp/sr-policy  [p-container]
   /router/bgp/color-policy  [p-container]
+  /router/bgp/sr-policy  [p-container]
   /router/bgp/vrf/neighbor/afi-safi  [list]
 
-Total settable schema nodes: 284
-Handled: 272
+Total settable schema nodes: 275
+Handled: 262
 Orphans: 3
 
 Note: these orphans have no config callback but are kept intentionally.
@@ -29,8 +30,29 @@ remote-as) and the schema must accept it so those configs load. The other
 ietf leftovers / duplicates of handled zebra knobs); of those,
 neighbor/description has since been restored WITH a config handler
 (stored on the peer, echoed by `show bgp neighbors`), so it counts as
-handled above.
+handled above. The tracing subtrees (/router/bgp/tracing and
+/router/bgp/neighbor/tracing) have no per-node callbacks; the whole
+subtree is handled by config_tracing_dispatch in src/bgp/tracing.rs, so
+they count as handled above.
 
 == Handler paths with no schema node (stale/other) ==
+  /router/bgp/adj-rib-out-hook/ipv4-unicast/export
+  /router/bgp/adj-rib-out-hook/l2vpn-evpn/export
+  /router/bgp/loc-rib-hook/ipv4-unicast/import
+  /router/bgp/loc-rib-hook/ipv4-unicast/withdraw
+  /router/bgp/loc-rib-hook/l2vpn-evpn/import
+  /router/bgp/loc-rib-hook/l2vpn-evpn/withdraw
+  /router/bgp/lua-map
+  /router/bgp/lua-map/source-path
+  /router/bgp/lua-script
+  /router/bgp/lua-script/source-path
   /router/bgp/neighbor/flowspec/validation
   /router/bgp/neighbor/soft-reconfiguration/inbound
+
+Note: the lua-script / lua-map / loc-rib-hook / adj-rib-out-hook handlers
+remain registered while the Lua scripting YANG surface is commented out
+(zebra-bgp-lua.yang), so those paths currently have no schema node.
+flowspec/validation has a handler but zebra-bgp-flowspec.yang is not
+imported by config.yang, so its schema nodes are never loaded.
+soft-reconfiguration/inbound's schema node was removed; the handler was
+kept.

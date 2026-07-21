@@ -36,10 +36,6 @@
 /router/bgp/afi-safi/redistribute/static/multipath
 /router/bgp/afi-safi/redistribute/static/policy
 /router/bgp/afi-safi/segmentation
-/router/bgp/afi-safi/sr-p2mp-dataplane/bridge-interface
-/router/bgp/afi-safi/sr-p2mp-dataplane/next-hop-mac
-/router/bgp/afi-safi/sr-p2mp-dataplane/overlay-interface
-/router/bgp/afi-safi/sr-p2mp-dataplane/underlay-interface
 /router/bgp/afi-safi/table-map
 /router/bgp/afi-safi/vpws
 /router/bgp/afi-safi/vpws/evi
@@ -48,6 +44,7 @@
 /router/bgp/afi-safi/vpws/mtu
 /router/bgp/afi-safi/vpws/remote-service-id
 /router/bgp/afi-safi/vpws/vlan
+/router/bgp/as-sets-withdraw
 /router/bgp/bfd/detect-offload
 /router/bgp/bfd/echo-mode
 /router/bgp/bfd/echo-receive-interval
@@ -58,11 +55,10 @@
 /router/bgp/dynamic-neighbors/listen-limit
 /router/bgp/dynamic-neighbors/listen-range
 /router/bgp/dynamic-neighbors/listen-range/neighbor-group
+/router/bgp/fast-external-failover
 /router/bgp/global/as
-/router/bgp/global/fast-external-failover
-/router/bgp/global/hostname
-/router/bgp/global/no-fib-install
 /router/bgp/global/router-id
+/router/bgp/hostname
 /router/bgp/interface-neighbor
 /router/bgp/interface-neighbor/neighbor-group
 /router/bgp/interface-neighbor/remote-as
@@ -83,7 +79,6 @@
 /router/bgp/mup-c/srv6/locator
 /router/bgp/mup-c/upf-address
 /router/bgp/mup-c/upf-teid
-/router/bgp/neighbor
 /router/bgp/neighbor/afi-safi/add-path
 /router/bgp/neighbor/afi-safi/enabled
 /router/bgp/neighbor/afi-safi/encapsulation-type
@@ -91,6 +86,7 @@
 /router/bgp/neighbor/afi-safi/long-lived-graceful-restart/enabled
 /router/bgp/neighbor/afi-safi/long-lived-graceful-restart/restart-time
 /router/bgp/neighbor/afi-safi/next-hop-self
+/router/bgp/neighbor/afi-safi/next-hop-unchanged
 /router/bgp/neighbor/afi-safi/policy/in
 /router/bgp/neighbor/afi-safi/policy/out
 /router/bgp/neighbor/afi-safi/prefix-set/in
@@ -107,6 +103,8 @@
 /router/bgp/neighbor/bfd/enabled
 /router/bgp/neighbor/bfd/minimum-ttl
 /router/bgp/neighbor/bfd/multihop
+/router/bgp/neighbor/capability/four-octet
+/router/bgp/neighbor/description
 /router/bgp/neighbor/disable-connected-check
 /router/bgp/neighbor/ebgp-multihop
 /router/bgp/neighbor/enforce-first-as
@@ -170,6 +168,7 @@
 /router/bgp/neighbor/transport/passive-mode
 /router/bgp/neighbor/ttl-security
 /router/bgp/neighbor/update-source
+/router/bgp/no-fib-install
 /router/bgp/port
 /router/bgp/segment-routing/srv6/ipv6-unicast
 /router/bgp/segment-routing/srv6/locator
@@ -183,6 +182,7 @@
 /router/bgp/sr-policy/policy/segment
 /router/bgp/sr-policy/policy/segment/mpls-label
 /router/bgp/sr-policy/policy/segment/srv6-sid
+/router/bgp/sr-policy/steering-mode
 /router/bgp/timer/adv-interval/ebgp
 /router/bgp/timer/adv-interval/ibgp
 /router/bgp/vrf
@@ -210,6 +210,8 @@
 /router/bgp/vrf/encapsulation
 /router/bgp/vrf/evpn/advertise-ipv4
 /router/bgp/vrf/evpn/advertise-ipv6
+/router/bgp/vrf/evpn/l3vni
+/router/bgp/vrf/evpn/router-mac
 /router/bgp/vrf/inter-as-hybrid
 /router/bgp/vrf/label-mode
 /router/bgp/vrf/neighbor
