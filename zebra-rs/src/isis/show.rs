@@ -77,6 +77,16 @@ impl Isis {
             .set(show_isis_flex_algo_route)
             .path("/show/isis/flex-algo/route/algorithm")
             .set(show_isis_flex_algo_route_algo)
+            .path("/show/isis/flex-algo/algorithm")
+            .set(show_isis_flex_algo_one)
+            .path("/show/isis/flex-algo/algorithm/topology")
+            .set(show_isis_flex_algo_topology)
+            .path("/show/isis/flex-algo/algorithm/route")
+            .set(show_isis_flex_algo_one_route)
+            .path("/show/isis/flex-algo/algorithm/spf")
+            .set(show_isis_flex_algo_spf)
+            .path("/show/isis/flex-algo/algorithm/graph")
+            .set(show_isis_flex_algo_graph)
             .map();
     }
 }
@@ -764,27 +774,7 @@ fn show_isis_graph(
     } else {
         // Return text formatted output
         let mut buf = String::new();
-
-        for graph_data in graphs {
-            writeln!(buf, "\n{} IS-IS Graph:", graph_data.level)?;
-            writeln!(buf, "\nNodes:")?;
-            for node in &graph_data.nodes {
-                if node.name != node.sys_id {
-                    writeln!(buf, "  {} [{}] (id: {})", node.name, node.sys_id, node.id)?;
-                } else {
-                    writeln!(buf, "  {} (id: {})", node.sys_id, node.id)?;
-                }
-                if !node.olinks.is_empty() || !node.ilinks.is_empty() {
-                    writeln!(buf, "    Links:")?;
-                    for link in &node.olinks {
-                        writeln!(buf, "      -> {} (cost: {})", link.name, link.cost)?;
-                    }
-                    for link in &node.ilinks {
-                        writeln!(buf, "      <- {} (cost: {})", link.name, link.cost)?;
-                    }
-                }
-            }
-        }
+        write_graphs_text(&mut buf, &graphs)?;
 
         if buf.is_empty() {
             Ok(String::from("No IS-IS graph data available"))
@@ -792,6 +782,36 @@ fn show_isis_graph(
             Ok(buf)
         }
     }
+}
+
+/// Render already-formatted graphs as text. Shared by `show isis graph`
+/// (unpruned LSDB graph) and `show isis flex-algo <n> graph` (the
+/// algorithm's pruned graph) so the two render identically.
+fn write_graphs_text(
+    buf: &mut String,
+    graphs: &[GraphJson],
+) -> std::result::Result<(), std::fmt::Error> {
+    for graph_data in graphs {
+        writeln!(buf, "\n{} IS-IS Graph:", graph_data.level)?;
+        writeln!(buf, "\nNodes:")?;
+        for node in &graph_data.nodes {
+            if node.name != node.sys_id {
+                writeln!(buf, "  {} [{}] (id: {})", node.name, node.sys_id, node.id)?;
+            } else {
+                writeln!(buf, "  {} (id: {})", node.sys_id, node.id)?;
+            }
+            if !node.olinks.is_empty() || !node.ilinks.is_empty() {
+                writeln!(buf, "    Links:")?;
+                for link in &node.olinks {
+                    writeln!(buf, "      -> {} (cost: {})", link.name, link.cost)?;
+                }
+                for link in &node.ilinks {
+                    writeln!(buf, "      <- {} (cost: {})", link.name, link.cost)?;
+                }
+            }
+        }
+    }
+    Ok(())
 }
 
 // Helper function to format a graph into the JSON structure
@@ -2874,8 +2894,24 @@ fn render_spf(
     detail: bool,
     json: bool,
 ) -> std::result::Result<String, std::fmt::Error> {
-    let topos = spf_topologies(isis);
+    render_spf_topos(isis, spf_topologies(isis), detail, json)
+}
 
+/// One rendered SPF topology: display label, its graph, and its result.
+/// Labels are owned so per-algorithm callers can build
+/// `"L2 (algorithm 128)"` rather than being limited to `&'static str`.
+type SpfTopology<'a> = (
+    String,
+    &'a Option<spf::Graph>,
+    &'a Option<BTreeMap<usize, spf::Path>>,
+);
+
+fn render_spf_topos(
+    isis: &Isis,
+    topos: Vec<SpfTopology<'_>>,
+    detail: bool,
+    json: bool,
+) -> std::result::Result<String, std::fmt::Error> {
     if json {
         let view = SpfResultJson {
             ti_lfa_enabled: isis.config.ti_lfa_enabled,
@@ -2941,31 +2977,25 @@ fn render_spf(
 /// Ordered list of (display name, graph, spf result) per topology
 /// rendered by `show isis spf` — legacy single-topology (drives IPv4
 /// RIB always, plus IPv6 when MT 2 is off) then MT 2 (IPv6 unicast).
-fn spf_topologies(
-    isis: &Isis,
-) -> Vec<(
-    &'static str,
-    &Option<spf::Graph>,
-    &Option<BTreeMap<usize, spf::Path>>,
-)> {
+fn spf_topologies(isis: &Isis) -> Vec<SpfTopology<'_>> {
     vec![
         (
-            "L1 (single-topology / MT 0)",
+            "L1 (single-topology / MT 0)".to_string(),
             isis.graph.get(&Level::L1),
             isis.spf_result.get(&Level::L1),
         ),
         (
-            "L2 (single-topology / MT 0)",
+            "L2 (single-topology / MT 0)".to_string(),
             isis.graph.get(&Level::L2),
             isis.spf_result.get(&Level::L2),
         ),
         (
-            "L1 (MT 2 / IPv6 unicast)",
+            "L1 (MT 2 / IPv6 unicast)".to_string(),
             isis.mt2_graph.get(&Level::L1),
             isis.mt2_spf_result.get(&Level::L1),
         ),
         (
-            "L2 (MT 2 / IPv6 unicast)",
+            "L2 (MT 2 / IPv6 unicast)".to_string(),
             isis.mt2_graph.get(&Level::L2),
             isis.mt2_spf_result.get(&Level::L2),
         ),
@@ -3652,96 +3682,7 @@ fn show_isis_flex_algo(
             "Algo", "Metric", "Priority", "Adv", "FRR"
         )?;
         for (algo, entry) in &isis.flex_algo.config {
-            let metric = match entry.metric_type {
-                Some(t) => format!("{:?}", t).to_lowercase(),
-                None => "igp".to_string(),
-            };
-            let prio = entry
-                .priority
-                .map(|p| p.to_string())
-                .unwrap_or_else(|| "-".to_string());
-            let adv = if entry.advertise_definition == Some(true) {
-                "yes"
-            } else {
-                "no"
-            };
-            // Effective fast-reroute state for this algorithm. Worth
-            // showing explicitly: the algorithm inherits the
-            // instance-level TI-LFA toggle, so without this an operator
-            // cannot tell an inherited-on algorithm from one that is
-            // silently unprotected because its dataplane has no per-algo
-            // repair yet.
-            let frr = if entry.fast_reroute_disable {
-                "disabled" // explicit per-algo opt-out
-            } else if !isis.config.ti_lfa_enabled {
-                "off" // instance-level TI-LFA is off; nothing to inherit
-            } else if entry.dataplane_srv6 == Some(true) {
-                "on" // inherited and computed
-            } else {
-                "n/a" // inherited, but no algo-aware SR-MPLS repair yet
-            };
-            let mut constraints = String::new();
-            if !entry.include_any.is_empty() {
-                let _ = write!(
-                    constraints,
-                    "include-any={} ",
-                    entry
-                        .include_any
-                        .iter()
-                        .cloned()
-                        .collect::<Vec<_>>()
-                        .join(",")
-                );
-            }
-            if !entry.include_all.is_empty() {
-                let _ = write!(
-                    constraints,
-                    "include-all={} ",
-                    entry
-                        .include_all
-                        .iter()
-                        .cloned()
-                        .collect::<Vec<_>>()
-                        .join(",")
-                );
-            }
-            if !entry.exclude_any.is_empty() {
-                let _ = write!(
-                    constraints,
-                    "exclude-any={} ",
-                    entry
-                        .exclude_any
-                        .iter()
-                        .cloned()
-                        .collect::<Vec<_>>()
-                        .join(",")
-                );
-            }
-            if !entry.srlg_exclude.is_empty() {
-                let _ = write!(
-                    constraints,
-                    "srlg-exclude={} ",
-                    entry
-                        .srlg_exclude
-                        .iter()
-                        .cloned()
-                        .collect::<Vec<_>>()
-                        .join(",")
-                );
-            }
-            if constraints.is_empty() {
-                constraints.push('-');
-            }
-            writeln!(
-                buf,
-                "  {:<5} {:<22} {:<8} {:<3} {:<9} {}",
-                algo,
-                metric,
-                prio,
-                adv,
-                frr,
-                constraints.trim_end()
-            )?;
+            write_flex_algo_row(&mut buf, isis, *algo, entry)?;
         }
     }
 
@@ -3988,6 +3929,289 @@ fn show_isis_flex_algo_route_algo(
         return Ok(flex_algo_routes_json(isis, Some(algo)));
     }
     write_flex_algo_routes(isis, Some(algo))
+}
+
+/// Effective fast-reroute state for one algorithm. Shown explicitly
+/// because an algorithm *inherits* the instance-level TI-LFA toggle:
+/// without this an operator cannot tell an inherited-on algorithm from
+/// one that is silently unprotected because its dataplane has no
+/// per-algo repair yet.
+fn flex_algo_frr_state(isis: &Isis, entry: &crate::flex_algo::FlexAlgoEntry) -> &'static str {
+    if entry.fast_reroute_disable {
+        "disabled" // explicit per-algo opt-out
+    } else if !isis.config.ti_lfa_enabled {
+        "off" // instance-level TI-LFA is off; nothing to inherit
+    } else if entry.dataplane_srv6 == Some(true) {
+        "on" // inherited and computed
+    } else {
+        "n/a" // inherited, but no algo-aware SR-MPLS repair yet
+    }
+}
+
+/// The FAD constraint set rendered for a table cell, or `-` when the
+/// algorithm is unconstrained.
+fn flex_algo_constraints(entry: &crate::flex_algo::FlexAlgoEntry) -> String {
+    let mut s = String::new();
+    for (label, set) in [
+        ("include-any", &entry.include_any),
+        ("include-all", &entry.include_all),
+        ("exclude-any", &entry.exclude_any),
+        ("srlg-exclude", &entry.srlg_exclude),
+    ] {
+        if !set.is_empty() {
+            let _ = write!(
+                s,
+                "{}={} ",
+                label,
+                set.iter().cloned().collect::<Vec<_>>().join(",")
+            );
+        }
+    }
+    if s.is_empty() {
+        s.push('-');
+    }
+    s.trim_end().to_string()
+}
+
+/// One row of the `Local Flex-Algorithms` table. Shared by the
+/// all-algorithms summary and the single-algorithm view so the two
+/// cannot drift.
+fn write_flex_algo_row(
+    buf: &mut String,
+    isis: &Isis,
+    algo: u8,
+    entry: &crate::flex_algo::FlexAlgoEntry,
+) -> std::result::Result<(), std::fmt::Error> {
+    let metric = match entry.metric_type {
+        Some(t) => format!("{:?}", t).to_lowercase(),
+        None => "igp".to_string(),
+    };
+    let prio = entry
+        .priority
+        .map(|p| p.to_string())
+        .unwrap_or_else(|| "-".to_string());
+    let adv = if entry.advertise_definition == Some(true) {
+        "yes"
+    } else {
+        "no"
+    };
+    writeln!(
+        buf,
+        "  {:<5} {:<22} {:<8} {:<3} {:<9} {}",
+        algo,
+        metric,
+        prio,
+        adv,
+        flex_algo_frr_state(isis, entry),
+        flex_algo_constraints(entry)
+    )
+}
+
+/// Pull the algorithm id out of a positional `show isis flex-algo <n>`
+/// argument, rendering the shared error text when it is missing.
+fn flex_algo_arg(args: &mut Args, json: bool) -> std::result::Result<u8, String> {
+    match args.u8() {
+        Some(algo) => Ok(algo),
+        None if json => Err("{\"error\": \"missing or invalid algorithm id\"}".to_string()),
+        None => Err("% Missing or invalid algorithm id\n".to_string()),
+    }
+}
+
+/// `show isis flex-algo <n>` — the FAD row for one algorithm plus which
+/// peers participate in it.
+fn show_isis_flex_algo_one(
+    isis: &Isis,
+    mut args: Args,
+    json: bool,
+) -> std::result::Result<String, std::fmt::Error> {
+    let algo = match flex_algo_arg(&mut args, json) {
+        Ok(a) => a,
+        Err(msg) => return Ok(msg),
+    };
+    if json {
+        // Reuse the whole-view JSON rather than maintain a second
+        // serializer shape; `show_isis_flex_algo` ignores its args.
+        return show_isis_flex_algo(isis, args, true);
+    }
+    let mut buf = String::new();
+    writeln!(buf, "Area {}:", format_area_id(&isis.config.net))?;
+    writeln!(buf)?;
+    match isis.flex_algo.config.get(&algo) {
+        Some(entry) => {
+            writeln!(buf, "Local Flex-Algorithm {}:", algo)?;
+            writeln!(
+                buf,
+                "  {:<5} {:<22} {:<8} {:<3} {:<9} Constraints",
+                "Algo", "Metric", "Priority", "Adv", "FRR"
+            )?;
+            write_flex_algo_row(&mut buf, isis, algo, entry)?;
+        }
+        None => {
+            writeln!(
+                buf,
+                "Local Flex-Algorithm {}: (not configured locally)",
+                algo
+            )?;
+        }
+    }
+    for level in &[Level::L1, Level::L2] {
+        let participants: Vec<String> = isis
+            .peer_algos
+            .get(level)
+            .iter()
+            .filter(|(_, algos)| algos.iter().any(|a| *a == algo))
+            .map(|(sys_id, _)| format!("{} ({})", hostname_for(isis, level, sys_id), sys_id))
+            .collect();
+        if participants.is_empty() {
+            continue;
+        }
+        writeln!(buf)?;
+        writeln!(
+            buf,
+            "{:?} peers participating in algorithm {}:",
+            level, algo
+        )?;
+        for p in participants {
+            writeln!(buf, "  {}", p)?;
+        }
+    }
+    Ok(buf)
+}
+
+/// `show isis flex-algo <n> route` — the supported spelling for the
+/// per-algorithm RIB (`flex-algo route algorithm <n>` is the deprecated
+/// one).
+fn show_isis_flex_algo_one_route(
+    isis: &Isis,
+    mut args: Args,
+    json: bool,
+) -> std::result::Result<String, std::fmt::Error> {
+    let algo = match flex_algo_arg(&mut args, json) {
+        Ok(a) => a,
+        Err(msg) => return Ok(msg),
+    };
+    if json {
+        return Ok(flex_algo_routes_json(isis, Some(algo)));
+    }
+    write_flex_algo_routes(isis, Some(algo))
+}
+
+/// `show isis flex-algo <n> topology` — the SPF tree computed in this
+/// algorithm's constrained topology. The un-suffixed `show isis
+/// topology` is the algorithm-0 view.
+fn show_isis_flex_algo_topology(
+    isis: &Isis,
+    mut args: Args,
+    json: bool,
+) -> std::result::Result<String, std::fmt::Error> {
+    let algo = match flex_algo_arg(&mut args, json) {
+        Ok(a) => a,
+        Err(msg) => return Ok(msg),
+    };
+    if json {
+        return Ok(show_isis_topology_json(isis));
+    }
+    let mut buf = String::new();
+    let local_sys_id = isis.config.net.sys_id();
+    writeln!(buf, "Area {}:", format_area_id(&isis.config.net))?;
+
+    let mut wrote_any = false;
+    for level in &[Level::L1, Level::L2] {
+        let Some(Some(spf_result)) = isis.spf_flex_algo.get(level).get(&algo) else {
+            continue;
+        };
+        if spf_result.is_empty() {
+            continue;
+        }
+        wrote_any = true;
+        let level_long = match level {
+            Level::L1 => "level-1",
+            Level::L2 => "level-2",
+        };
+        writeln!(
+            buf,
+            "IS-IS paths to {} routers that speak IP (algorithm {})",
+            level_long, algo
+        )?;
+        write_spf_tree::<V4>(&mut buf, isis, level, &local_sys_id, spf_result, false)?;
+        writeln!(buf)?;
+        writeln!(
+            buf,
+            "IS-IS paths to {} routers that speak IPv6 (algorithm {})",
+            level_long, algo
+        )?;
+        write_spf_tree::<V6>(&mut buf, isis, level, &local_sys_id, spf_result, false)?;
+        writeln!(buf)?;
+    }
+    if !wrote_any {
+        writeln!(buf, "(no SPF result for algorithm {} yet)", algo)?;
+    }
+    Ok(buf)
+}
+
+/// `show isis flex-algo <n> spf` — per-destination SPF detail computed
+/// in this algorithm's constrained topology.
+fn show_isis_flex_algo_spf(
+    isis: &Isis,
+    mut args: Args,
+    json: bool,
+) -> std::result::Result<String, std::fmt::Error> {
+    let algo = match flex_algo_arg(&mut args, json) {
+        Ok(a) => a,
+        Err(msg) => return Ok(msg),
+    };
+    render_spf_topos(isis, flex_algo_spf_topologies(isis, algo), false, json)
+}
+
+/// `show isis flex-algo <n> graph` — the algorithm's *pruned* topology
+/// graph. The un-suffixed `show isis graph` is the unpruned LSDB graph,
+/// which is exactly what makes it useless for debugging a constrained
+/// path.
+fn show_isis_flex_algo_graph(
+    isis: &Isis,
+    mut args: Args,
+    json: bool,
+) -> std::result::Result<String, std::fmt::Error> {
+    let algo = match flex_algo_arg(&mut args, json) {
+        Ok(a) => a,
+        Err(msg) => return Ok(msg),
+    };
+    let mut graphs = Vec::new();
+    for (level, label) in [(Level::L1, "L1"), (Level::L2, "L2")] {
+        if let Some(Some(graph)) = isis.graph_flex_algo.get(&level).get(&algo)
+            && let Some(g) = format_graph(graph, &format!("{} algo {}", label, algo))
+        {
+            graphs.push(g);
+        }
+    }
+    if json {
+        return Ok(serde_json::to_string_pretty(&graphs)
+            .unwrap_or_else(|e| format!("{{\"error\": \"{e}\"}}")));
+    }
+    let mut buf = String::new();
+    if graphs.is_empty() {
+        writeln!(buf, "(no graph for algorithm {})", algo)?;
+        return Ok(buf);
+    }
+    write_graphs_text(&mut buf, &graphs)?;
+    Ok(buf)
+}
+
+/// Per-algorithm equivalent of [`spf_topologies`]: the (label, graph,
+/// spf result) triples for one algorithm, at each level where it has
+/// been computed.
+fn flex_algo_spf_topologies(isis: &Isis, algo: u8) -> Vec<SpfTopology<'_>> {
+    let mut out = Vec::new();
+    for (level, label) in [(Level::L1, "L1"), (Level::L2, "L2")] {
+        let (Some(graph), Some(spf)) = (
+            isis.graph_flex_algo.get(&level).get(&algo),
+            isis.spf_flex_algo.get(&level).get(&algo),
+        ) else {
+            continue;
+        };
+        out.push((format!("{} (algorithm {})", label, algo), graph, spf));
+    }
+    out
 }
 
 fn write_flex_algo_routes(
