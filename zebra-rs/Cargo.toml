@@ -98,6 +98,7 @@ assets = [
   ["../packaging/out/playset/**/[p]layset.sh",   "usr/share/zebra-rs/playset/",     "644"],
   ["../packaging/out/playset/**/[z]ebra-rs.sh",  "usr/share/zebra-rs/playset/",     "644"],
   ["../packaging/out/playset/**/*.yaml",         "usr/share/zebra-rs/playset/",     "644"],
+  ["../packaging/out/playset/**/*.json",         "usr/share/zebra-rs/playset/",     "644"],
   ["../packaging/out/playset/**/*.md",           "usr/share/zebra-rs/playset/",     "644"],
   ["../packaging/out/playset/**/*.drawio",       "usr/share/zebra-rs/playset/",     "644"],
   ["../packaging/out/playset/**/*.png",          "usr/share/zebra-rs/playset/",     "644"],

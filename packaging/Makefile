@@ -59,7 +59,8 @@ playset:
 	@# This guard only checks that each staged file is *claimed* by a glob; where
 	@# cargo-deb then puts it is checked after the build by verify-playset-layout.sh.
 	@bad=`find out/playset -type f ! \( \
-		-name '*.yaml' -o -name '*.md' -o -name '*.drawio' -o -name '*.png' -o -name '*.svg' \
+		-name '*.yaml' -o -name '*.json' -o -name '*.md' -o -name '*.drawio' \
+		-o -name '*.png' -o -name '*.svg' \
 		-o -name 'up.sh' -o -name 'down.sh' -o -name 'topology.sh' \
 		-o -name 'common.sh' -o -name 'netns.sh' -o -name 'playset.sh' -o -name 'zebra-rs.sh' \)`; \
 	if [ -n "$$bad" ]; then \
