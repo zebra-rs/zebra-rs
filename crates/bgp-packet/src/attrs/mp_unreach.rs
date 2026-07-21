@@ -5,7 +5,7 @@ use nom::error::{ErrorKind, make_error};
 use nom_derive::*;
 
 use crate::{
-    Afi, AttrFlags, AttrType, BgpLsNlri, EvpnRoute, FlowspecNlri, Ipv6Nlri, Labelv4Nlri,
+    Afi, AttrFlags, AttrType, BgpLsNlri, EvpnRoute, FlowspecNlri, Ipv4Nlri, Ipv6Nlri, Labelv4Nlri,
     Labelv6Nlri, MupRoute, ParseBe, ParseNlri, ParseOption, Rtcv4, Rtcv4Unreach, Rtcv6,
     Rtcv6Unreach, Safi, SrPolicyNlri, Vpnv4Nlri, Vpnv6Nlri, parse_nlri_block,
 };
@@ -20,7 +20,12 @@ pub struct MpUnreachHeader {
 
 #[derive(Clone)]
 pub enum MpUnreachAttr {
-    // Ipv4Nlri(Vec<>),
+    /// IPv4 unicast withdrawals carried in MP_UNREACH (RFC 4760 §4,
+    /// AFI=1/SAFI=1). IPv4 unicast normally uses the UPDATE's legacy
+    /// Withdrawn Routes field, but a sender that announces through
+    /// MP_REACH typically withdraws through MP_UNREACH too, and
+    /// RFC 4760 permits it whenever capability 1/1 is negotiated.
+    Ipv4Nlri(Vec<Ipv4Nlri>),
     Ipv4Eor,
     Ipv6Nlri(Vec<Ipv6Nlri>),
     Ipv6Eor,
@@ -91,6 +96,12 @@ impl MpUnreachAttr {
                 let attr = Vpnv6Unreach { withdraw: vec![] };
                 attr.attr_emit(buf);
             }
+            MpUnreachAttr::Ipv4Nlri(withdraws) => {
+                ipv4_unreach_attr_emit(withdraws, buf);
+            }
+            MpUnreachAttr::Ipv4Eor => {
+                ipv4_unreach_attr_emit(&[], buf);
+            }
             MpUnreachAttr::Ipv6Nlri(withdraws) => {
                 ipv6_unreach_attr_emit(withdraws, buf);
             }
@@ -142,21 +153,38 @@ impl MpUnreachAttr {
     }
 }
 
-/// Serialize an `MpUnreachAttr::Evpn(updates)` (or `EvpnEor` when
-/// `updates` is empty) as a complete `MP_UNREACH_NLRI` path attribute
-/// (header + value).
+/// Serialize an `MpUnreachAttr::Ipv4Nlri(withdraws)` (or `Ipv4Eor` when
+/// `withdraws` is empty) as a complete MP_UNREACH_NLRI path attribute.
 ///
-/// Wire format (RFC 4760 §4):
-/// ```text
-///   AFI  (2 octets) = 25 (L2VPN)
-///   SAFI (1 octet)  = 70 (EVPN)
-///   Withdrawn Routes (one or more EvpnRoute encodings; empty for EoR)
-/// ```
-///
-/// MP_UNREACH carries neither nexthop nor SNPA — only the AFI/SAFI
-/// header and the NLRI list. The NLRI body bytes are produced by
-/// `EvpnRoute::nlri_emit`, the same encoder used by the
-/// MP_REACH advertise path.
+/// Wire format (RFC 4760 §4): AFI=1, SAFI=1, then the NLRI list (empty
+/// for end-of-RIB). zebra-rs itself withdraws IPv4 unicast through the
+/// UPDATE's legacy Withdrawn Routes field, so this is the decode-side
+/// inverse rather than something the advertise path emits.
+fn ipv4_unreach_attr_emit(withdraws: &[Ipv4Nlri], buf: &mut BytesMut) {
+    let mut value = BytesMut::new();
+    value.put_u16(u16::from(Afi::Ip));
+    value.put_u8(u8::from(Safi::Unicast));
+    for nlri in withdraws {
+        nlri.nlri_emit(&mut value);
+    }
+
+    let len = value.len();
+    let extended = len > 255;
+    let flags = if extended {
+        AttrFlags::new().with_optional(true).with_extended(true)
+    } else {
+        AttrFlags::new().with_optional(true)
+    };
+    buf.put_u8(flags.into());
+    buf.put_u8(AttrType::MpUnreachNlri.into());
+    if extended {
+        buf.put_u16(len as u16);
+    } else {
+        buf.put_u8(len as u8);
+    }
+    buf.put(&value[..]);
+}
+
 /// Serialize an `MpUnreachAttr::Ipv6Nlri(withdraws)` (or `Ipv6Eor`
 /// when `withdraws` is empty) as a complete MP_UNREACH_NLRI path
 /// attribute. IPv6 unicast withdrawals have no legacy field, so this
@@ -189,6 +217,21 @@ fn ipv6_unreach_attr_emit(withdraws: &[Ipv6Nlri], buf: &mut BytesMut) {
     buf.put(&value[..]);
 }
 
+/// Serialize an `MpUnreachAttr::Evpn(updates)` (or `EvpnEor` when
+/// `updates` is empty) as a complete `MP_UNREACH_NLRI` path attribute
+/// (header + value).
+///
+/// Wire format (RFC 4760 §4):
+/// ```text
+///   AFI  (2 octets) = 25 (L2VPN)
+///   SAFI (1 octet)  = 70 (EVPN)
+///   Withdrawn Routes (one or more EvpnRoute encodings; empty for EoR)
+/// ```
+///
+/// MP_UNREACH carries neither nexthop nor SNPA — only the AFI/SAFI
+/// header and the NLRI list. The NLRI body bytes are produced by
+/// `EvpnRoute::nlri_emit`, the same encoder used by the
+/// MP_REACH advertise path.
 fn evpn_unreach_attr_emit(withdraw: &[EvpnRoute], buf: &mut BytesMut) {
     let mut value = BytesMut::new();
     value.put_u16(u16::from(Afi::L2vpn));
@@ -439,6 +482,19 @@ impl MpUnreachAttr {
             let mp_nlri = MpUnreachAttr::Vpnv6(withdrawal);
             return Ok((input, mp_nlri));
         }
+        if header.afi == Afi::Ip && header.safi == Safi::Unicast {
+            // RFC 4724 §2 makes the bare empty UPDATE the IPv4-unicast
+            // end-of-RIB, so an empty MP_UNREACH(1/1) is unusual — but
+            // some stacks send it, and every other family here treats an
+            // empty withdraw list as EoR. Mirror that rather than
+            // failing the parse (a parse error here resets the session).
+            if input.is_empty() {
+                return Ok((input, MpUnreachAttr::Ipv4Eor));
+            }
+            let (input, withdrawal) =
+                parse_nlri_block(input, |i| Ipv4Nlri::parse_nlri(i, add_path))?;
+            return Ok((input, MpUnreachAttr::Ipv4Nlri(withdrawal)));
+        }
         if header.afi == Afi::Ip6 && header.safi == Safi::Unicast {
             if input.is_empty() {
                 let mp_nlri = MpUnreachAttr::Ipv6Eor;
@@ -573,6 +629,12 @@ impl fmt::Display for MpUnreachAttr {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         use MpUnreachAttr::*;
         match self {
+            Ipv4Nlri(ipv4_nlris) => {
+                for ipv4 in ipv4_nlris.iter() {
+                    writeln!(f, " {}:{}", ipv4.id, ipv4.prefix)?;
+                }
+                Ok(())
+            }
             Ipv4Eor => {
                 writeln!(f, " EoR: {}/{}", Afi::Ip, Safi::Unicast)
             }
@@ -1029,5 +1091,80 @@ mod tests {
             }
             other => panic!("expected SrPolicy, got {other:?}"),
         }
+    }
+
+    /// Regression: AFI=1/SAFI=1 had no arm here at all, so an IPv4-unicast
+    /// MP_UNREACH fell through to the trailing `Err`. That error is not on
+    /// the RFC 7606 treat-as-withdraw or attribute-discard lists, so the
+    /// whole UPDATE failed to parse and the session was reset — the
+    /// withdraw-side counterpart of the MP_REACH gap fixed in #2045.
+    #[test]
+    fn ipv4_unicast_unreach_parses_instead_of_erroring() {
+        // AFI=1, SAFI=1, then 10.0.0.0/24 (3 prefix octets) and
+        // 192.0.2.0/25 (4 — a /25 still spans the fourth octet).
+        let value = [0x00u8, 0x01, 0x01, 24, 10, 0, 0, 25, 192, 0, 2, 0];
+        let (rest, mp) = MpUnreachAttr::parse_nlri_opt(&value, None)
+            .expect("IPv4-unicast MP_UNREACH must parse");
+        assert!(rest.is_empty());
+        match mp {
+            MpUnreachAttr::Ipv4Nlri(withdraws) => {
+                assert_eq!(withdraws.len(), 2);
+                assert_eq!(withdraws[0].prefix.to_string(), "10.0.0.0/24");
+                assert_eq!(withdraws[1].prefix.to_string(), "192.0.2.0/25");
+            }
+            other => panic!("expected Ipv4Nlri, got {other:?}"),
+        }
+    }
+
+    /// An empty IPv4-unicast MP_UNREACH is end-of-RIB. RFC 4724 §2 makes
+    /// the bare empty UPDATE the canonical v4 EoR, but some stacks send
+    /// this form and every other family here treats an empty withdraw
+    /// list the same way.
+    #[test]
+    fn ipv4_unicast_unreach_empty_is_eor() {
+        let value = [0x00u8, 0x01, 0x01];
+        let (_rest, mp) = MpUnreachAttr::parse_nlri_opt(&value, None).expect("EoR must parse");
+        assert!(matches!(mp, MpUnreachAttr::Ipv4Eor));
+    }
+
+    #[test]
+    fn ipv4_unreach_emit_round_trips() {
+        let withdraws = vec![
+            Ipv4Nlri {
+                id: 0,
+                prefix: "10.0.0.0/24".parse().unwrap(),
+            },
+            Ipv4Nlri {
+                id: 0,
+                prefix: "0.0.0.0/0".parse().unwrap(),
+            },
+        ];
+        let mut buf = BytesMut::new();
+        ipv4_unreach_attr_emit(&withdraws, &mut buf);
+        // Skip the attribute header (flags, type, 1-octet length).
+        let (_rest, mp) =
+            MpUnreachAttr::parse_nlri_opt(&buf[3..], None).expect("emitter must round-trip");
+        match mp {
+            MpUnreachAttr::Ipv4Nlri(parsed) => assert_eq!(parsed, withdraws),
+            other => panic!("expected Ipv4Nlri, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn ipv4_unreach_emit_eor_round_trips() {
+        let mut buf = BytesMut::new();
+        ipv4_unreach_attr_emit(&[], &mut buf);
+        let (_rest, mp) =
+            MpUnreachAttr::parse_nlri_opt(&buf[3..], None).expect("EoR must round-trip");
+        assert!(matches!(mp, MpUnreachAttr::Ipv4Eor));
+    }
+
+    /// A malformed NLRI must fail the whole block rather than silently
+    /// truncating it, matching every other family (`parse_nlri_block`).
+    #[test]
+    fn ipv4_unicast_unreach_rejects_malformed_nlri() {
+        // 10.0.0.0/24 followed by prefix length 33, which exceeds 32.
+        let value = [0x00u8, 0x01, 0x01, 24, 10, 0, 0, 33, 1, 2, 3, 4, 5];
+        assert!(MpUnreachAttr::parse_nlri_opt(&value, None).is_err());
     }
 }

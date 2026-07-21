@@ -1,32 +1,37 @@
 #!/usr/bin/env python3
-"""Minimal scripted BGP speaker announcing IPv4 unicast inside MP_REACH_NLRI.
+"""Minimal scripted BGP speaker for the RFC 4760 MP-encoded IPv4 unicast forms.
 
-zebra-rs, FRR and GoBGP all emit plain IPv4 unicast in the traditional
-NLRI field, so a router-to-router topology can never produce the RFC 4760
-S3 encoding (AFI=1/SAFI=1 reachability inside the MP_REACH_NLRI attribute
-with the next-hop carried in the attribute). This script plays that
-sender -- the shape xk6-bgp and other MP-first stacks emit -- against a
-zebra-rs DUT (issue fixed by PR #2045).
+zebra-rs, FRR and GoBGP all put plain IPv4 unicast in the traditional
+NLRI / Withdrawn Routes fields, so a router-to-router topology can never
+produce the RFC 4760 encodings for AFI=1/SAFI=1 -- reachability inside
+MP_REACH_NLRI (S3) and withdrawals inside MP_UNREACH_NLRI (S4). This
+script plays that sender, the shape xk6-bgp and other MP-first stacks
+emit. Both encodings were broken in zebra-rs: MP_REACH was accepted and
+silently dropped (fixed by PR #2045), MP_UNREACH failed to parse and
+reset the session.
 
 Flow:
   1. TCP-connect to the DUT, send OPEN with capabilities MP(1/1) and
      4-octet AS, answer its OPEN with a KEEPALIVE, wait for its KEEPALIVE.
-  2. Send ONE UPDATE whose only reachability is an MP_REACH_NLRI
-     attribute (v4 next-hop inside the attribute, no traditional NLRI).
-     A decoy NEXT_HOP attribute rides along; per RFC 4760 the MP_REACH
-     next-hop must win, so the DUT installing the decoy is a bug the
-     feature would catch.
-  3. Keep the session alive with keepalives. When TRIGGER_FILE appears
-     (touched by a later scenario), send a traditional withdrawn-routes
-     UPDATE for the same prefix -- withdraws are prefix-keyed, so mixing
-     encodings is legal and proves the MP_REACH-announced route went into
-     the ordinary Loc-RIB.
+  2. Announce PREFIX in an MP_REACH_NLRI attribute (v4 next-hop inside
+     the attribute, no traditional NLRI). A decoy NEXT_HOP attribute
+     rides along; per RFC 4760 the MP_REACH next-hop must win, so a DUT
+     installing the decoy is a bug the feature would catch.
+  3. Keep the session alive with keepalives and act on trigger files,
+     each consumed (unlinked) when it fires so re-touching re-triggers:
+       <TRIGGER_BASE>.announce               re-announce via MP_REACH
+       <TRIGGER_BASE>.withdraw_traditional   withdraw via the legacy
+                                             Withdrawn Routes field
+       <TRIGGER_BASE>.withdraw_mp            withdraw via MP_UNREACH
+     Mixing encodings is deliberate: a traditional withdraw of an
+     MP_REACH-announced prefix only works if the route went into the
+     ordinary Loc-RIB rather than a side path.
   4. Exit when the peer closes the connection (feature teardown stops the
      DUT). The feature wraps the script in `timeout N` as a backstop.
 
 Usage:
   bgp_mp_reach_send.py DUT_IP LOCAL_AS ROUTER_ID PREFIX MP_NEXTHOP \
-      DECOY_NEXTHOP TRIGGER_FILE
+      DECOY_NEXTHOP TRIGGER_BASE
 """
 
 import ipaddress
@@ -39,7 +44,10 @@ import time
 MARKER = b"\xff" * 16
 MSG_OPEN, MSG_UPDATE, MSG_NOTIFICATION, MSG_KEEPALIVE = 1, 2, 3, 4
 CAP_MP, CAP_AS4 = 1, 65
+ATTR_MP_REACH, ATTR_MP_UNREACH = 14, 15
+AFI_IP, SAFI_UNICAST = 1, 1
 HOLDTIME = 90
+TRIGGERS = ("announce", "withdraw_traditional", "withdraw_mp")
 
 
 def bgp_msg(msg_type, body):
@@ -47,7 +55,7 @@ def bgp_msg(msg_type, body):
 
 
 def open_msg(local_as, router_id):
-    caps = bytes([CAP_MP, 4]) + struct.pack("!HBB", 1, 0, 1)  # AFI=1/SAFI=1
+    caps = bytes([CAP_MP, 4]) + struct.pack("!HBB", AFI_IP, 0, SAFI_UNICAST)
     caps += bytes([CAP_AS4, 4]) + struct.pack("!I", local_as)
     opt = bytes([2, len(caps)]) + caps  # one Capabilities optional parameter
     my_as2 = local_as if local_as < 65536 else 23456  # AS_TRANS
@@ -74,27 +82,46 @@ def peer_open_has_as4(body):
 
 
 def nlri_bytes(prefix):
+    """Prefix length octet + the ceil(plen/8) significant prefix octets."""
     net = ipaddress.ip_network(prefix)
     nbytes = (net.prefixlen + 7) // 8
     return bytes([net.prefixlen]) + net.network_address.packed[:nbytes]
 
 
-def update_announce(local_as, prefix, mp_nexthop, decoy_nexthop, as4):
-    attrs = b"\x40\x01\x01\x00"  # ORIGIN = IGP
-    fmt = "!BBI" if as4 else "!BBH"
-    seg = struct.pack(fmt, 2, 1, local_as)  # one AS_SEQUENCE of local AS
-    attrs += bytes([0x40, 2, len(seg)]) + seg  # AS_PATH
-    attrs += b"\x40\x03\x04" + socket.inet_aton(decoy_nexthop)  # NEXT_HOP
-    val = (struct.pack("!HBB", 1, 1, 4) + socket.inet_aton(mp_nexthop)
-           + b"\x00" + nlri_bytes(prefix))  # AFI/SAFI/nhlen/nh/SNPA=0/NLRI
-    attrs += bytes([0x80, 14, len(val)]) + val  # MP_REACH_NLRI
-    body = struct.pack("!H", 0) + struct.pack("!H", len(attrs)) + attrs
+def attr(flags, type_code, value):
+    return bytes([flags, type_code, len(value)]) + value
+
+
+def update_msg(withdrawn, attrs, nlri=b""):
+    body = (struct.pack("!H", len(withdrawn)) + withdrawn
+            + struct.pack("!H", len(attrs)) + attrs + nlri)
     return bgp_msg(MSG_UPDATE, body)
 
 
-def update_withdraw(prefix):
-    w = nlri_bytes(prefix)
-    return bgp_msg(MSG_UPDATE, struct.pack("!H", len(w)) + w + b"\x00\x00")
+def update_announce(local_as, prefix, mp_nexthop, decoy_nexthop, as4):
+    attrs = attr(0x40, 1, b"\x00")  # ORIGIN = IGP
+    fmt = "!BBI" if as4 else "!BBH"
+    attrs += attr(0x40, 2, struct.pack(fmt, 2, 1, local_as))  # AS_PATH
+    attrs += attr(0x40, 3, socket.inet_aton(decoy_nexthop))  # NEXT_HOP
+    # MP_REACH: AFI/SAFI, next-hop length + address, SNPA=0, NLRI.
+    value = (struct.pack("!HBB", AFI_IP, SAFI_UNICAST, 4)
+             + socket.inet_aton(mp_nexthop) + b"\x00" + nlri_bytes(prefix))
+    attrs += attr(0x80, ATTR_MP_REACH, value)
+    return update_msg(b"", attrs)
+
+
+def update_withdraw_traditional(prefix):
+    return update_msg(nlri_bytes(prefix), b"")
+
+
+def update_withdraw_mp(prefix):
+    """RFC 4760 §4 withdrawal: MP_UNREACH is the UPDATE's only attribute.
+
+    A withdraw-only UPDATE carries no mandatory path attributes, so this
+    is exactly what an MP-first sender puts on the wire.
+    """
+    value = struct.pack("!HB", AFI_IP, SAFI_UNICAST) + nlri_bytes(prefix)
+    return update_msg(b"", attr(0x80, ATTR_MP_UNREACH, value))
 
 
 def recv_exact(sock, n):
@@ -118,7 +145,29 @@ def read_msg(sock):
     return msg_type, body
 
 
-def session(dut_ip, local_as, router_id, prefix, mp_nexthop, decoy, trigger):
+def clear_triggers(base):
+    """Drop stale trigger files so a crashed prior run cannot fire one."""
+    for name in TRIGGERS:
+        try:
+            os.unlink(f"{base}.{name}")
+        except FileNotFoundError:
+            pass
+
+
+def take_trigger(base):
+    """Return the name of one fired trigger, consuming it, else None."""
+    for name in TRIGGERS:
+        path = f"{base}.{name}"
+        if os.path.exists(path):
+            try:
+                os.unlink(path)
+            except FileNotFoundError:
+                pass
+            return name
+    return None
+
+
+def session(dut_ip, local_as, router_id, prefix, mp_nexthop, decoy, base):
     sock = socket.create_connection((dut_ip, 179), timeout=10)
     sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
     sock.settimeout(30)
@@ -138,13 +187,13 @@ def session(dut_ip, local_as, router_id, prefix, mp_nexthop, decoy, trigger):
             break  # Established
         elif msg_type == MSG_NOTIFICATION:
             raise ConnectionError(f"NOTIFICATION in handshake: {body.hex()}")
+    announce = update_announce(local_as, prefix, mp_nexthop, decoy, peer_as4)
     print(f"established (peer as4={peer_as4}); announcing {prefix} "
           f"via MP_REACH next-hop {mp_nexthop}", flush=True)
-    sock.sendall(update_announce(local_as, prefix, mp_nexthop, decoy, peer_as4))
+    sock.sendall(announce)
 
     sock.settimeout(1)
     last_keepalive = time.time()
-    withdrawn = False
     while True:
         try:
             m = read_msg(sock)
@@ -159,29 +208,31 @@ def session(dut_ip, local_as, router_id, prefix, mp_nexthop, decoy, trigger):
         if time.time() - last_keepalive > 20:
             sock.sendall(bgp_msg(MSG_KEEPALIVE, b""))
             last_keepalive = time.time()
-        if not withdrawn and os.path.exists(trigger):
-            print(f"trigger file seen; withdrawing {prefix} via the "
-                  "traditional withdrawn-routes field", flush=True)
-            sock.sendall(update_withdraw(prefix))
-            withdrawn = True
+        fired = take_trigger(base)
+        if fired == "announce":
+            print(f"re-announcing {prefix} via MP_REACH", flush=True)
+            sock.sendall(announce)
+        elif fired == "withdraw_traditional":
+            print(f"withdrawing {prefix} via the traditional "
+                  "withdrawn-routes field", flush=True)
+            sock.sendall(update_withdraw_traditional(prefix))
+        elif fired == "withdraw_mp":
+            print(f"withdrawing {prefix} via MP_UNREACH", flush=True)
+            sock.sendall(update_withdraw_mp(prefix))
 
 
 def main():
-    dut_ip, local_as, router_id, prefix, mp_nexthop, decoy, trigger = (
+    dut_ip, local_as, router_id, prefix, mp_nexthop, decoy, base = (
         sys.argv[1], int(sys.argv[2]), sys.argv[3], sys.argv[4],
         sys.argv[5], sys.argv[6], sys.argv[7])
-    # A stale trigger from a crashed prior run would withdraw immediately.
-    try:
-        os.unlink(trigger)
-    except FileNotFoundError:
-        pass
+    clear_triggers(base)
     # The DUT's neighbor config may not be applied yet when we are spawned
     # (it closes/refuses until then) -- retry the whole handshake.
     deadline = time.time() + 120
     while True:
         try:
             session(dut_ip, local_as, router_id, prefix, mp_nexthop, decoy,
-                    trigger)
+                    base)
             return
         except (ConnectionError, OSError) as e:
             if time.time() > deadline:
