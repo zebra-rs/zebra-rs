@@ -1152,6 +1152,36 @@ impl ConfigManager {
                     reply_static_show(req, text, json);
                     return;
                 }
+                // `show candidate-config [formal|json|yaml]` — same story as
+                // running-config above: the candidate store lives here, and
+                // without this arm the request would fall through to the rib
+                // task, which has no handler for it.
+                if req.paths.iter().any(|p| p.name == "candidate-config") {
+                    let candidate = || self.store.candidate.borrow();
+                    let render_json = || {
+                        let mut compact = String::new();
+                        candidate().json(&mut compact);
+                        super::commands::prettify_json(compact)
+                    };
+                    let text = if req.paths.iter().any(|p| p.name == "formal") {
+                        let mut out = String::new();
+                        candidate().list(&mut out);
+                        out
+                    } else if req.paths.iter().any(|p| p.name == "yaml") {
+                        let mut out = String::new();
+                        candidate().yaml(&mut out);
+                        out
+                    } else if req.paths.iter().any(|p| p.name == "json") {
+                        render_json()
+                    } else {
+                        let mut out = String::new();
+                        candidate().format(&mut out);
+                        out
+                    };
+                    let json = render_json();
+                    reply_static_show(req, text, json);
+                    return;
+                }
                 // Generic per-VRF instance redirect: `show <proto> vrf
                 // <name> …` is rewritten to `show <proto> …` and routed
                 // to the instance task's show channel when that instance
