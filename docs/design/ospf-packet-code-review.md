@@ -3,10 +3,12 @@
 **Scope:** the whole `ospf-packet` crate (OSPFv2/v3 packet parse & emit for zebra-rs)
 **Effort:** extra-high recall (10 finder angles × 8 candidates + verification pass + gap sweep)
 **Date:** 2026-07-17
-**Updated:** 2026-07-18 — findings 1–7 (all three DoS bugs + all four interop
-wire-format bugs) fixed and merged. See **Status** and **Next fix candidates**
-below. Detail-section line numbers are as of the original 2026-07-17 review; the
-summary table's `File:line` for open items (8–15) is refreshed to the current tree.
+**Updated:** 2026-07-21 — **review complete.** All 15 findings fixed and merged
+(#1959–#2010); re-verified against `main` (through #2040): no `ospf-packet`
+changes since #2010, doc matches the tree. See **Status** and **Fix history**
+below. Only the opportunistic **Additional notes** remain; their current state
+is annotated in place. Detail-section line numbers are as of the original
+2026-07-17 review.
 
 Every finding below was verified by reading the actual code. Findings are ranked
 most-severe first.
@@ -35,7 +37,13 @@ most-severe first.
 
 ---
 
-## Status (2026-07-18)
+## Status (2026-07-21)
+
+Re-verified 2026-07-21: `ospf-packet` is unchanged on `main` since #2010, so
+the table above still matches the tree. The remaining opportunistic notes were
+re-checked against current code — see the annotations in **Additional notes**
+(one item, the `Ospfv3Lsa::update` double serialization, turned out to be
+already fixed).
 
 All seven top findings — the three remote-DoS parse bugs and all four silent
 interop wire-format bugs — plus the security finding #9, the round-trip finding
@@ -91,17 +99,22 @@ each, newest last.
 **All 15 findings are resolved.** Nothing remains open. The notes below are
 opportunistic ideas surfaced during the review, not review findings.
 
-**Additional notes (below the top 15)** — opportunistic:
-- `parser.rs` / `v3.rs` emit: stamp packet length via `try_into`/`checked` so a
-  >64 KB serialization fails loudly instead of silently wrapping the `u16`.
-- Non-bijective `From<u8>` for link types (unknown → `Stub`/`PointToPoint`) —
-  fold into finding 10's fix, since it contributes to the `verify_checksum`
-  false-reject.
-- Efficiency: `raw_body` eager copy on every received packet; `Ospfv3Lsa::update`
-  serializes the body twice. Per-packet hot paths.
-- `Ospfv3IntraAreaPrefixTlv` (RFC 8362 E-Intra-Area-Prefix TLV) — verify the
-  16-bit-metric + referenced-LSA-triple layout against RFC 8362 §3.9; internal
-  round-trips pass (zebra-to-zebra) but it was never interop-validated.
+**Additional notes (below the top 15)** — opportunistic; state re-checked
+2026-07-21:
+- ⏳ `parser.rs:88` / `v3.rs:324` emit: stamp packet length via
+  `try_into`/`checked` so a >64 KB serialization fails loudly instead of
+  silently wrapping the `u16`. Still open.
+- ⏳ Non-bijective `From<u8>` for link types (`parser.rs:747`, `v3.rs:695`;
+  unknown → `Stub`/`PointToPoint`). Its `verify_checksum` consequence is gone
+  since #1993 verifies received LSAs over `raw`; what remains is cosmetic.
+- ⏳/✅ Efficiency: `raw_body` eager copy on every received packet
+  (`parser.rs:2730`, `v3.rs:133`) still open; the `Ospfv3Lsa::update` double
+  serialization is **already fixed** — it now emits the body once and reuses
+  the buffer (also invalidating `raw` on mutation).
+- ⏳ `Ospfv3IntraAreaPrefixTlv` (`v3.rs:1941`, RFC 8362 E-Intra-Area-Prefix
+  TLV) — verify the 16-bit-metric + referenced-LSA-triple layout against
+  RFC 8362 §3.9; internal round-trips pass (zebra-to-zebra) but it was never
+  interop-validated.
 
 ---
 
@@ -441,20 +454,26 @@ real `parse_tlv` into finding 8's fix first).
 
 ## Additional notes (surfaced but below the top 15)
 
-- **`parser.rs:88` / `v3.rs:324`** — packet length stamped via `buf.len() as u16`
-  truncates for a serialized packet > 64 KB. Latent: OSPF packet length is a
-  16-bit field and the daemon keeps LSUs under MTU, but a `checked`/`try_into`
-  would fail loudly instead of silently wrapping.
-- **`parser.rs:754` / `v3.rs:701`** — `From<u8>` for link types maps every
-  unknown value to `Stub` / `PointToPoint` (non-bijective). Harmless for
-  re-flood (uses `raw`) but contributes to the `verify_checksum` false-reject in
-  finding 10.
-- **Efficiency** — `raw_body` is eagerly copied for every received packet even
-  when no cryptographic auth is configured (`parser.rs:2823`, `v3.rs:133`);
-  `Ospfv3Lsa::update` serializes the body twice (`v3.rs:2928`). Per-packet hot
-  paths; prefer zero-copy `Bytes::slice` and single-pass emit.
-- **`v3.rs:2009`** — `Ospfv3IntraAreaPrefixTlv` (RFC 8362 E-Intra-Area-Prefix
-  TLV) uses a 16-bit metric and an embedded referenced-LSA triple. Worth
-  double-checking the field layout against RFC 8362 §3.9; internal round-trips
-  pass so zebra-to-zebra works, but it was not interop-validated (FRR does not
-  implement the OSPFv3 Extended-LSA / SRv6 SR sub-TLVs).
+State re-checked against the tree on 2026-07-21; line numbers refreshed.
+
+- ⏳ **`parser.rs:88` / `v3.rs:324`** — packet length stamped via
+  `buf.len() as u16` truncates for a serialized packet > 64 KB. Latent: OSPF
+  packet length is a 16-bit field and the daemon keeps LSUs under MTU, but a
+  `checked`/`try_into` would fail loudly instead of silently wrapping.
+- ⏳ **`parser.rs:747` / `v3.rs:695`** — `From<u8>` for link types maps every
+  unknown value to `Stub` / `PointToPoint` (non-bijective). Originally listed
+  as contributing to the finding-10 `verify_checksum` false-reject; since
+  #1993 verifies received LSAs over `raw`, that consequence is gone and only
+  the cosmetic non-bijectivity remains.
+- ⏳ **Efficiency** — `raw_body` is eagerly copied for every received packet
+  even when no cryptographic auth is configured (`parser.rs:2730`,
+  `v3.rs:133`); prefer zero-copy `Bytes::slice`. Still open. The second half
+  of this note — `Ospfv3Lsa::update` serializing the body twice — is ✅
+  **already fixed** (`v3.rs:2784` now emits the body once into `body_buf` and
+  reuses it for the checksum pass, and sets `raw = None` on mutation).
+- ⏳ **`v3.rs:1941`** — `Ospfv3IntraAreaPrefixTlv` (RFC 8362
+  E-Intra-Area-Prefix TLV) uses a 16-bit metric and an embedded referenced-LSA
+  triple. Worth double-checking the field layout against RFC 8362 §3.9;
+  internal round-trips pass so zebra-to-zebra works, but it was not
+  interop-validated (FRR does not implement the OSPFv3 Extended-LSA / SRv6 SR
+  sub-TLVs).
