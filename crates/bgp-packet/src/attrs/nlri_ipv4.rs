@@ -1,5 +1,6 @@
 use std::net::Ipv4Addr;
 
+use bytes::{BufMut, BytesMut};
 use ipnet::Ipv4Net;
 use nom::IResult;
 use nom::bytes::complete::take;
@@ -13,6 +14,22 @@ use crate::{ParseNlri, nlri_psize};
 pub struct Ipv4Nlri {
     pub id: u32,
     pub prefix: Ipv4Net,
+}
+
+impl Ipv4Nlri {
+    /// Encode this NLRI into an MP_REACH / MP_UNREACH NLRI list:
+    /// an optional 4-octet AddPath ID (only when `id != 0`), the
+    /// 1-octet prefix length, then the `ceil(plen / 8)` significant
+    /// prefix octets. Inverse of [`Ipv4Nlri::parse_nlri`].
+    pub fn nlri_emit(&self, buf: &mut BytesMut) {
+        if self.id != 0 {
+            buf.put_u32(self.id);
+        }
+        let plen = self.prefix.prefix_len();
+        buf.put_u8(plen);
+        let psize = nlri_psize(plen);
+        buf.put(&self.prefix.addr().octets()[0..psize]);
+    }
 }
 
 impl ParseNlri<Ipv4Nlri> for Ipv4Nlri {

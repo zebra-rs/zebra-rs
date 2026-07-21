@@ -837,6 +837,41 @@ mod tests {
         }
     }
 
+    /// The withdraw-side counterpart: a full UPDATE whose only content is
+    /// an IPv4-unicast MP_UNREACH (RFC 4760 §4). Before AFI=1/SAFI=1 was
+    /// handled there, this failed to parse, and because MP_UNREACH is not
+    /// on the RFC 7606 recoverable lists the peer reader tore the session
+    /// down — so a sender that announced via MP_REACH reset the session on
+    /// its first withdrawal.
+    #[test]
+    fn ipv4_unicast_mp_unreach_full_packet_decodes() {
+        // MP_UNREACH: AFI=1/SAFI=1, NLRI 10.0.0.0/24.
+        let value = [0x00u8, 0x01, 0x01, 24, 10, 0, 0];
+        let mut attrs = vec![0x80u8, 15, value.len() as u8];
+        attrs.extend_from_slice(&value);
+
+        let mut buf = vec![0xffu8; 16];
+        let total = BGP_HEADER_LEN as usize + 2 + 2 + attrs.len();
+        buf.extend_from_slice(&(total as u16).to_be_bytes());
+        buf.push(2); // type = UPDATE
+        buf.extend_from_slice(&0u16.to_be_bytes()); // withdrawn routes length
+        buf.extend_from_slice(&(attrs.len() as u16).to_be_bytes());
+        buf.extend_from_slice(&attrs);
+
+        let (_, parsed) = UpdatePacket::parse_packet(&buf, true, None).expect("must decode");
+        assert!(
+            parsed.ipv4_withdraw.is_empty(),
+            "no legacy withdrawn routes"
+        );
+        match parsed.mp_withdraw {
+            Some(MpUnreachAttr::Ipv4Nlri(withdraws)) => {
+                assert_eq!(withdraws.len(), 1);
+                assert_eq!(withdraws[0].prefix.to_string(), "10.0.0.0/24");
+            }
+            other => panic!("expected MpUnreachAttr::Ipv4Nlri, got {other:?}"),
+        }
+    }
+
     #[test]
     fn many_prefixes_round_trip_into_one_packet() {
         let ll: Ipv6Addr = "fe80::abcd".parse().unwrap();

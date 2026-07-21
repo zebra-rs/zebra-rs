@@ -10039,6 +10039,21 @@ pub fn route_from_peer(
                     route_mup_withdraw(peer_id, route, bgp, peers);
                 }
             }
+            MpUnreachAttr::Ipv4Nlri(withdrawals) => {
+                // RFC 4760 §4 IPv4-unicast withdrawals. A peer that
+                // announces through MP_REACH normally withdraws this
+                // way, so this must reach the same Loc-RIB the legacy
+                // Withdrawn Routes field does.
+                for withdraw in withdrawals.iter() {
+                    route_ipv4_withdraw(peer_id, withdraw, None, None, bgp, peers, shards, true);
+                }
+            }
+            MpUnreachAttr::Ipv4Eor => {
+                let afi_safi = AfiSafi::new(Afi::Ip, Safi::Unicast);
+                let _ = bgp
+                    .tx
+                    .send(Message::Event(peer_id, Event::StaleTimerExipires(afi_safi)));
+            }
             MpUnreachAttr::Ipv6Nlri(withdrawals) => {
                 for withdraw in withdrawals.iter() {
                     route_ipv6_withdraw(peer_id, withdraw, None, bgp, peers, true);
