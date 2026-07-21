@@ -1,0 +1,59 @@
+interface:
+- if-name: lo
+  ipv4:
+    address: 10.0.0.5/32
+- if-name: va-ch
+  ipv4:
+    address: 192.168.8.2/24
+- if-name: va-at
+  ipv4:
+    address: 192.168.11.1/24
+- if-name: va-fr
+  ipv4:
+    address: 192.168.12.1/24
+system:
+  hostname: va
+affinity-map:
+  affinity:
+  - name: trans-pacific
+    bit-position: 0
+router:
+  isis:
+    net: 49.0000.0000.0000.0005.00
+    hostname: va
+    is-type: level-2-only
+    segment-routing:
+      mpls: {}
+    te-router-id: 10.0.0.5
+    flex-algo:
+    - algo: 128
+      metric-type: igp
+      dataplane:
+        sr-mpls: true
+      affinity:
+        exclude-any:
+        - trans-pacific
+    interface:
+    - if-name: lo
+      ipv4:
+        enabled: true
+        prefix-sid:
+          index: 500
+        flex-algo-prefix-sid:
+        - algo: 128
+          index: 2500
+    - if-name: va-ch
+      network-type: point-to-point
+      ipv4:
+        enabled: true
+      metric: 10
+    - if-name: va-at
+      network-type: point-to-point
+      ipv4:
+        enabled: true
+      metric: 10
+    - if-name: va-fr
+      network-type: point-to-point
+      ipv4:
+        enabled: true
+      metric: 10

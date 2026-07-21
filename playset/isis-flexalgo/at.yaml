@@ -1,0 +1,51 @@
+interface:
+- if-name: lo
+  ipv4:
+    address: 10.0.0.6/32
+- if-name: at-da
+  ipv4:
+    address: 192.168.10.2/24
+- if-name: at-va
+  ipv4:
+    address: 192.168.11.2/24
+system:
+  hostname: at
+affinity-map:
+  affinity:
+  - name: trans-pacific
+    bit-position: 0
+router:
+  isis:
+    net: 49.0000.0000.0000.0006.00
+    hostname: at
+    is-type: level-2-only
+    segment-routing:
+      mpls: {}
+    te-router-id: 10.0.0.6
+    flex-algo:
+    - algo: 128
+      metric-type: igp
+      dataplane:
+        sr-mpls: true
+      affinity:
+        exclude-any:
+        - trans-pacific
+    interface:
+    - if-name: lo
+      ipv4:
+        enabled: true
+        prefix-sid:
+          index: 600
+        flex-algo-prefix-sid:
+        - algo: 128
+          index: 2600
+    - if-name: at-da
+      network-type: point-to-point
+      ipv4:
+        enabled: true
+      metric: 10
+    - if-name: at-va
+      network-type: point-to-point
+      ipv4:
+        enabled: true
+      metric: 10
