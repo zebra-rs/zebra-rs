@@ -845,26 +845,73 @@ impl ConfigManager {
     }
 
     pub fn load_config(&self) {
-        if let Ok(output) = std::fs::read_to_string(&self.config_path) {
+        // The startup load used to be completely silent: an unreadable
+        // file, a shadowed path (`~/.zebra-rs/zebra-rs.conf` wins over
+        // /etc when both exist), and per-command rejections were all
+        // swallowed, so a daemon that came up unconfigured gave the
+        // operator nothing to go on. Log every outcome — including
+        // success — with the resolved path.
+        match std::fs::read_to_string(&self.config_path) {
             // An empty (or comment/whitespace-only) config file carries no
             // commands. Skip the format parsers entirely so the YAML
             // default doesn't parse `""` into a spurious command. (Done
             // here, not in `config_to_commands`, so the `vtyctl apply`
             // path keeps its existing empty-document behavior — an empty
             // apply must not clear+commit the running config.)
-            if !output.trim().is_empty() {
-                match self.config_to_commands(&output) {
-                    Ok((_format, cmds)) => {
-                        if let Some(mode) = self.modes.get("configure") {
-                            for cmd in cmds.iter() {
-                                let _ = self.execute(mode, cmd);
+            Ok(output) if output.trim().is_empty() => {
+                tracing::info!(
+                    "startup config {} is empty; starting unconfigured",
+                    self.config_path.display()
+                );
+            }
+            Ok(output) => match self.config_to_commands(&output) {
+                Ok((format, cmds)) => {
+                    let mut rejected = Vec::new();
+                    if let Some(mode) = self.modes.get("configure") {
+                        for cmd in cmds.iter() {
+                            // `execute` answers a successful set/delete
+                            // with `Show` (same contract the Deploy
+                            // handler checks); anything else means the
+                            // command was refused.
+                            let (code, _output, _paths) = self.execute(mode, cmd);
+                            if code != ExecCode::Show {
+                                rejected.push(cmd.clone());
                             }
                         }
                     }
-                    Err(doc_errors) => {
-                        tracing::error!("{}", render_config_errors(&self.config_path, &doc_errors));
+                    if !rejected.is_empty() {
+                        tracing::error!(
+                            "{}",
+                            render_rejected_commands(&self.config_path, &rejected)
+                        );
                     }
+                    tracing::info!(
+                        "startup config {} ({:?} format): applied {} of {} commands",
+                        self.config_path.display(),
+                        format,
+                        cmds.len() - rejected.len(),
+                        cmds.len()
+                    );
                 }
+                Err(doc_errors) => {
+                    tracing::error!("{}", render_config_errors(&self.config_path, &doc_errors));
+                }
+            },
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                // A missing file is the normal first boot — worth a
+                // note (it also exposes which path was resolved), not
+                // an error.
+                tracing::info!(
+                    "no startup config at {}; starting unconfigured",
+                    self.config_path.display()
+                );
+            }
+            Err(e) => {
+                tracing::error!(
+                    "startup config {} unreadable: {}",
+                    self.config_path.display(),
+                    e
+                );
             }
         }
         // A schema-validation failure (mandatory / `ext:non-empty`) rejects
@@ -1516,6 +1563,21 @@ fn render_config_errors(config_path: &Path, errors: &[DocError]) -> String {
     )
 }
 
+/// Render startup commands the parser refused into a single loggable
+/// message. The Deploy path reports a rejected command back to
+/// `vtyctl apply`; the startup path has no client to answer, so this
+/// is its counterpart — without it a refused line simply vanished and
+/// the daemon came up with a silently partial config. Free function so
+/// the rendering is unit-testable without a full `ConfigManager`.
+fn render_rejected_commands(config_path: &Path, cmds: &[String]) -> String {
+    format!(
+        "startup config {}: {} command(s) rejected:\n  {}",
+        config_path.display(),
+        cmds.len(),
+        cmds.join("\n  ")
+    )
+}
+
 #[derive(Debug, PartialEq)]
 pub enum ConfigFormat {
     Cli,
@@ -1734,6 +1796,87 @@ policy:
         assert!(
             message.contains("unknown key `community-set`"),
             "message: {message}"
+        );
+    }
+}
+
+#[cfg(test)]
+mod startup_load_tests {
+    use super::*;
+
+    /// Build a `ConfigManager` on the shipped `yang/` tree with
+    /// `config_file` pointing at a temp file holding `content`, run the
+    /// startup load, and return the flattened running config. The
+    /// channel receivers are dropped with the manager at return — the
+    /// config used here must not touch any protocol subtree, so no
+    /// `ConfigRequest` is ever sent (and no protocol task is spawned,
+    /// keeping this a plain non-tokio test).
+    fn running_after_load(name: &str, content: &str) -> String {
+        let path = std::env::temp_dir().join(format!("zebra-rs-{}-{}", name, std::process::id()));
+        std::fs::write(&path, content).expect("temp config written");
+
+        let (rib_tx, _rib_rx) = mpsc::unbounded_channel();
+        let (rib_inbound_tx, _rib_inbound_rx) = mpsc::unbounded_channel();
+        let (policy_tx, _policy_rx) = mpsc::unbounded_channel();
+        let cm = ConfigManager::new(
+            concat!(env!("CARGO_MANIFEST_DIR"), "/yang").to_string(),
+            Some(path.to_string_lossy().into_owned()),
+            rib_tx,
+            rib_inbound_tx,
+            policy_tx,
+        )
+        .expect("manager builds");
+
+        cm.load_config();
+        let _ = std::fs::remove_file(&path);
+
+        let mut running = String::new();
+        cm.store.running.borrow().list(&mut running);
+        running
+    }
+
+    /// Regression for the reported "set/delete startup config is not
+    /// loaded" issue: a `-c` file in set/delete format must land in the
+    /// running config at startup, exactly like `vtyctl apply -f` of the
+    /// same document.
+    #[test]
+    fn set_delete_startup_file_is_loaded() {
+        let running = running_after_load(
+            "setdelete",
+            "set system hostname r1\nset system router-id 10.99.0.10\n",
+        );
+        assert!(
+            running.lines().any(|l| l == "system hostname r1"),
+            "running config: {running:?}"
+        );
+        assert!(
+            running.lines().any(|l| l == "system router-id 10.99.0.10"),
+            "running config: {running:?}"
+        );
+    }
+
+    /// A rejected line must not take down the rest of the document: the
+    /// startup load reports it (see `render_rejected_commands`) and
+    /// still commits the valid remainder.
+    #[test]
+    fn rejected_line_does_not_block_the_rest() {
+        let running =
+            running_after_load("partial", "set no such command\nset system hostname r1\n");
+        assert!(
+            running.lines().any(|l| l == "system hostname r1"),
+            "running config: {running:?}"
+        );
+    }
+
+    #[test]
+    fn rejected_commands_render_path_and_lines() {
+        let message = render_rejected_commands(
+            &PathBuf::from("/etc/zebra-rs/zebra-rs.conf"),
+            &["set no such command".to_string()],
+        );
+        assert_eq!(
+            message,
+            "startup config /etc/zebra-rs/zebra-rs.conf: 1 command(s) rejected:\n  set no such command"
         );
     }
 }
