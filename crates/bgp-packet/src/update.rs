@@ -795,6 +795,48 @@ mod tests {
         }
     }
 
+    /// Issue repro: a full UPDATE that carries IPv4 unicast only inside
+    /// MP_REACH (RFC 4760 §3) with a v4 next-hop — no traditional NLRI —
+    /// alongside the usual ORIGIN / AS_PATH / NEXT_HOP attributes. It
+    /// must decode to an `MpReachAttr::Ipv4` mp_update carrying the v4
+    /// next-hop so ingestion can treat it like traditional NLRI.
+    #[test]
+    fn ipv4_unicast_mp_reach_with_v4_nexthop_full_packet_decodes() {
+        let mut attrs = vec![0x40u8, 0x01, 0x01, 0x00]; // ORIGIN = IGP
+        // AS_PATH: one AS_SEQUENCE of AS 65001 (4-octet, as4 session).
+        attrs.extend_from_slice(&[0x40, 0x02, 0x06, 0x02, 0x01, 0x00, 0x00, 0xfd, 0xe9]);
+        // A NEXT_HOP attribute rides along too (the issue's sender set
+        // both); MP_REACH's next-hop must win at ingestion.
+        attrs.extend_from_slice(&[0x40, 0x03, 0x04, 192, 0, 2, 254]);
+        // MP_REACH: AFI=1/SAFI=1, nhop_len=4, 192.0.2.1, SNPA=0,
+        // NLRI 10.0.0.0/24.
+        let value = [0x00u8, 0x01, 0x01, 0x04, 192, 0, 2, 1, 0x00, 24, 10, 0, 0];
+        attrs.push(0x80); // optional
+        attrs.push(14); // type = MP_REACH_NLRI
+        attrs.push(value.len() as u8);
+        attrs.extend_from_slice(&value);
+
+        let mut buf = vec![0xffu8; 16];
+        let total = BGP_HEADER_LEN as usize + 2 + 2 + attrs.len();
+        buf.extend_from_slice(&(total as u16).to_be_bytes());
+        buf.push(2); // type = UPDATE
+        buf.extend_from_slice(&0u16.to_be_bytes()); // withdrawn routes length
+        buf.extend_from_slice(&(attrs.len() as u16).to_be_bytes());
+        buf.extend_from_slice(&attrs);
+
+        let (_, parsed) = UpdatePacket::parse_packet(&buf, true, None).expect("must decode");
+        assert!(parsed.ipv4_update.is_empty(), "no traditional NLRI");
+        assert!(!parsed.treat_as_withdraw);
+        match parsed.mp_update {
+            Some(MpReachAttr::Ipv4 { nhop, updates, .. }) => {
+                assert_eq!(nhop, IpAddr::V4("192.0.2.1".parse().unwrap()));
+                assert_eq!(updates.len(), 1);
+                assert_eq!(updates[0].prefix.to_string(), "10.0.0.0/24");
+            }
+            other => panic!("expected MpReachAttr::Ipv4 with v4 next-hop, got {other:?}"),
+        }
+    }
+
     #[test]
     fn many_prefixes_round_trip_into_one_packet() {
         let ll: Ipv6Addr = "fe80::abcd".parse().unwrap();
