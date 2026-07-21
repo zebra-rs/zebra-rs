@@ -1,0 +1,37 @@
+# Identical to z1-deny.yaml except SENDERS carries no policy binding.
+# `vtyctl apply -f` is a declarative whole-config replace, so the file
+# restates the full config — the commit diff against z1-deny.yaml is
+# exactly the deletion of the group's `policy in` leaf. The DENY-ALL
+# definition itself stays: an unreferenced policy filters nothing.
+policy:
+- name: DENY-ALL
+  entry:
+  - number: 10
+    action: deny
+interface:
+- if-name: i1
+  ipv4:
+    address: 192.168.0.1/24
+router:
+  bgp:
+    global:
+      as: 65001
+      router-id: 192.168.0.1
+    timer:
+      adv-interval:
+        ibgp: 1
+        ebgp: 1
+    neighbor-group:
+    - name: SENDERS
+      remote-as: 65002
+      afi-safi:
+      - name: ipv4
+        enabled: true
+    dynamic-neighbors:
+      listen-range:
+      - prefix: 192.168.0.0/24
+        neighbor-group: SENDERS
+    afi-safi:
+    - name: ipv4
+      network:
+      - prefix: 10.0.1.1/32
