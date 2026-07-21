@@ -1,0 +1,24 @@
+router:
+  bgp:
+    global:
+      as: 65030
+      router-id: 192.168.30.1
+    neighbor:
+    # The scripted RFC 4760 speaker on h1 never listens on 179, so
+    # dialing it just cycles this peer Idle -> Connect -> Idle, and Idle
+    # refuses the inbound connection. Passive parks the peer in Active
+    # listening so the script's connect is always accepted.
+    - remote-address: 192.168.30.2
+      afi-safi:
+      - name: ipv4
+        enabled: true
+      enabled: true
+      remote-as: 65031
+      transport:
+        passive-mode: true
+    - remote-address: 192.168.30.3
+      afi-safi:
+      - name: ipv4
+        enabled: true
+      enabled: true
+      remote-as: 65032
