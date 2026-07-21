@@ -28,6 +28,12 @@ pub struct ListenRange {
 pub struct DynamicNeighbors {
     pub listen_limit: u32,
     pub ranges: BTreeMap<IpNet, ListenRange>,
+    /// Prefix-scoped TCP MD5 keys currently installed on the listening
+    /// socket, keyed by range. Mirrors kernel state so
+    /// [`reconcile_listener_md5`] can remove or re-key exactly what it
+    /// put there: the desired set is recomputed from config, but the
+    /// *removal* set can only be known from what was installed before.
+    installed_md5: BTreeMap<IpNet, String>,
 }
 
 /// RFC-style operator default — IOS-XR ships 100, FRR ships 100,
@@ -40,11 +46,22 @@ impl Default for DynamicNeighbors {
         Self {
             listen_limit: DEFAULT_LISTEN_LIMIT,
             ranges: BTreeMap::new(),
+            installed_md5: BTreeMap::new(),
         }
     }
 }
 
 impl DynamicNeighbors {
+    /// Drop the record of which prefix MD5 keys are installed, without
+    /// touching the socket. Called when the listener fd is replaced (a
+    /// fresh bind or a `relisten`): the keys were attached to the old
+    /// socket and died with it, so the shadow must be cleared before
+    /// [`reconcile_listener_md5`] diffs — otherwise it sees "already
+    /// installed" and skips every key on the new fd.
+    pub fn forget_installed_md5(&mut self) {
+        self.installed_md5.clear();
+    }
+
     /// Longest-prefix match against the configured ranges. Returns
     /// the matched `(prefix, range)` so the caller can record the
     /// prefix on the synthesized peer's `PeerOrigin::Dynamic`.
@@ -105,6 +122,7 @@ pub fn config_listen_range(bgp: &mut Bgp, mut args: Args, op: ConfigOp) -> Optio
         }
         _ => {}
     }
+    reconcile_listener_md5(bgp);
     Some(())
 }
 
@@ -138,7 +156,117 @@ pub fn config_listen_range_neighbor_group(
         }
         _ => {}
     }
+    reconcile_listener_md5(bgp);
     Some(())
+}
+
+/// Reconcile the listener's prefix-scoped TCP MD5 keys against the
+/// configured listen-ranges.
+///
+/// A dynamic peer does not exist until its SYN has been accepted, but
+/// the kernel validates the MD5 option *during* the handshake — so a
+/// per-address key (the static-peer mechanism) can never be installed
+/// in time, and an authenticated inbound connection is dropped before
+/// `accept()` ever sees it. The fix is a key scoped to the whole
+/// listen-range, installed as soon as the range and its group's
+/// password are both known.
+///
+/// Idempotent and diff-gated: the desired set is recomputed from
+/// config on every call, compared against what this function last
+/// installed, and only genuine adds / re-keys / removals reach the
+/// kernel. Safe to call from any config callback that could change the
+/// mapping, and from `listen()` once the fd exists.
+pub(super) fn reconcile_listener_md5(bgp: &mut Bgp) {
+    let desired = desired_listener_md5(bgp);
+
+    if desired == bgp.dynamic_neighbors.installed_md5 {
+        return;
+    }
+
+    // Ranges that lost their key (range deleted, group unbound or
+    // deleted, password cleared) must be removed from the socket
+    // first, so a re-key of the same prefix can never race its own
+    // removal.
+    let stale: Vec<IpNet> = bgp
+        .dynamic_neighbors
+        .installed_md5
+        .keys()
+        .filter(|prefix| !desired.contains_key(*prefix))
+        .copied()
+        .collect();
+    for prefix in stale {
+        if md5_prefix_apply(bgp, &prefix, &[]) {
+            bgp.dynamic_neighbors.installed_md5.remove(&prefix);
+        }
+    }
+
+    for (prefix, password) in desired {
+        if bgp.dynamic_neighbors.installed_md5.get(&prefix) == Some(&password) {
+            continue;
+        }
+        if md5_prefix_apply(bgp, &prefix, password.as_bytes()) {
+            bgp.dynamic_neighbors.installed_md5.insert(prefix, password);
+        }
+    }
+}
+
+/// The prefix keys the listener *should* be carrying: every
+/// listen-range bound to a group that defines a password. A range with
+/// no group, a group that does not exist, or a group with no password
+/// contributes nothing — an unauthenticated range still accepts plain
+/// connections, exactly as before.
+fn desired_listener_md5(bgp: &Bgp) -> BTreeMap<IpNet, String> {
+    bgp.dynamic_neighbors
+        .ranges
+        .iter()
+        .filter_map(|(prefix, range)| {
+            let group = range.neighbor_group.as_ref()?;
+            let password = bgp.neighbor_groups.get(group)?.knobs.password.clone()?;
+            Some((*prefix, password))
+        })
+        .collect()
+}
+
+/// Install (empty `key` ⇒ remove) one prefix key on the listener of
+/// the matching address family. Returns whether the shadow state
+/// should be updated: `false` when there is no listener yet, so the
+/// post-bind sweep in `listen()` retries rather than believing a key
+/// is installed that never was.
+fn md5_prefix_apply(bgp: &Bgp, prefix: &IpNet, key: &[u8]) -> bool {
+    let listen_fd = match prefix {
+        IpNet::V4(_) => bgp.listen_fd_v4,
+        IpNet::V6(_) => bgp.listen_fd_v6,
+    };
+    let Some(fd) = listen_fd else {
+        return false;
+    };
+    match super::auth::set_tcp_md5_key_prefix(fd, *prefix, key) {
+        Ok(()) => {
+            if !key.is_empty() {
+                tracing::debug!(
+                    range = %prefix,
+                    keylen = key.len(),
+                    "bgp: TCP MD5 prefix key installed on listener for listen-range",
+                );
+            }
+            true
+        }
+        Err(e) => {
+            // Removing a key the kernel does not have is a no-op, not a
+            // failure — it answers ENOENT. Treat it as success so the
+            // shadow state still clears.
+            if key.is_empty() && e.kind() == std::io::ErrorKind::NotFound {
+                return true;
+            }
+            tracing::warn!(
+                range = %prefix,
+                error = %e,
+                "TCP MD5 prefix setsockopt on listener failed; \
+                 authenticated SYNs from this range will be dropped"
+            );
+            false
+        }
+    }
 }
 
 /// Tear down and remove every `PeerOrigin::Dynamic` peer materialized
@@ -466,5 +594,161 @@ mod sweep_tests {
             "trailing leaf delete must not re-create the range entry"
         );
         assert!(bgp.dynamic_neighbors.lpm_match(&addr("10.1.0.7")).is_none());
+    }
+
+    // ===================================================
+    // Listener prefix-MD5 reconciliation
+    // ===================================================
+
+    fn set_group_password(bgp: &mut Bgp, group: &str, password: &str) {
+        crate::bgp::neighbor_group::config_neighbor_group_password(
+            bgp,
+            arg_words(&[group, password]),
+            ConfigOp::Set,
+        )
+        .unwrap();
+    }
+
+    /// A range bound to a password-carrying group wants a prefix key;
+    /// one whose group has no password wants none.
+    #[tokio::test]
+    async fn desired_keys_follow_range_group_password() {
+        let mut bgp = fresh_bgp();
+        configure_range(&mut bgp, "10.1.0.0/24", "SECURE");
+        configure_range(&mut bgp, "10.2.0.0/24", "PLAIN");
+        set_group_password(&mut bgp, "SECURE", "s3cret");
+
+        let desired = desired_listener_md5(&bgp);
+
+        assert_eq!(
+            desired.get(&net("10.1.0.0/24")).map(String::as_str),
+            Some("s3cret")
+        );
+        assert!(
+            !desired.contains_key(&net("10.2.0.0/24")),
+            "a group without a password must not install a key"
+        );
+    }
+
+    /// Unbinding the group, deleting the range, or clearing the
+    /// password each retract the key.
+    #[tokio::test]
+    async fn desired_keys_retract_on_every_unbind_path() {
+        let mut bgp = fresh_bgp();
+        configure_range(&mut bgp, "10.1.0.0/24", "SECURE");
+        set_group_password(&mut bgp, "SECURE", "s3cret");
+        assert_eq!(desired_listener_md5(&bgp).len(), 1);
+
+        crate::bgp::neighbor_group::config_neighbor_group_password(
+            &mut bgp,
+            arg_words(&["SECURE"]),
+            ConfigOp::Delete,
+        )
+        .unwrap();
+        assert!(
+            desired_listener_md5(&bgp).is_empty(),
+            "clearing the group password must retract the prefix key"
+        );
+
+        set_group_password(&mut bgp, "SECURE", "s3cret");
+        config_listen_range(&mut bgp, arg_words(&["10.1.0.0/24"]), ConfigOp::Delete).unwrap();
+        assert!(
+            desired_listener_md5(&bgp).is_empty(),
+            "deleting the range must retract the prefix key"
+        );
+    }
+
+    /// Bind a real listening socket and drive the reconciler through
+    /// install → re-key → retract, so the `TCP_MD5SIG_EXT` request
+    /// shape is exercised against the kernel rather than mocked. The
+    /// shadow map is the observable: it only advances when setsockopt
+    /// actually succeeded.
+    #[tokio::test]
+    async fn reconcile_installs_rekeys_and_retracts_on_a_real_socket() {
+        use std::os::fd::AsRawFd;
+
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let mut bgp = fresh_bgp();
+        bgp.listen_fd_v4 = Some(listener.as_raw_fd());
+
+        configure_range(&mut bgp, "10.1.0.0/24", "SECURE");
+        set_group_password(&mut bgp, "SECURE", "s3cret");
+        assert_eq!(
+            bgp.dynamic_neighbors.installed_md5.get(&net("10.1.0.0/24")),
+            Some(&"s3cret".to_string()),
+            "install must reach the kernel and be recorded"
+        );
+
+        set_group_password(&mut bgp, "SECURE", "rotated");
+        assert_eq!(
+            bgp.dynamic_neighbors.installed_md5.get(&net("10.1.0.0/24")),
+            Some(&"rotated".to_string()),
+            "a password change must re-key the same prefix"
+        );
+
+        config_listen_range(&mut bgp, arg_words(&["10.1.0.0/24"]), ConfigOp::Delete).unwrap();
+        assert!(
+            bgp.dynamic_neighbors.installed_md5.is_empty(),
+            "range delete must retract the key from the socket"
+        );
+    }
+
+    /// The key must be installed under the masked network address: the
+    /// kernel matches an inbound SYN against the masked value, so a key
+    /// stored under an unmasked one silently never matches.
+    #[tokio::test]
+    async fn prefix_key_is_installed_on_the_masked_network() {
+        use std::os::fd::AsRawFd;
+
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let fd = listener.as_raw_fd();
+        // 10.1.2.3/24 masks to 10.1.2.0/24. If `set_tcp_md5_key_prefix`
+        // forgot `network()`, the kernel would reject or misfile it.
+        let sloppy: IpNet = "10.1.2.3/24".parse().unwrap();
+        crate::bgp::auth::set_tcp_md5_key_prefix(fd, sloppy, b"s3cret")
+            .expect("prefix key install must succeed");
+        // Removing it under the canonical spelling proves that is where
+        // it actually landed.
+        crate::bgp::auth::set_tcp_md5_key_prefix(fd, net("10.1.2.0/24"), &[])
+            .expect("key must be removable under its masked network");
+    }
+
+    /// A relisten hands BGP a brand-new fd that carries none of the old
+    /// socket's keys. Without forgetting the shadow first, the diff
+    /// would conclude everything was already installed and leave the
+    /// new listener unauthenticated.
+    #[tokio::test]
+    async fn forgetting_the_shadow_forces_reinstall_after_relisten() {
+        use std::os::fd::AsRawFd;
+
+        let first = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let mut bgp = fresh_bgp();
+        bgp.listen_fd_v4 = Some(first.as_raw_fd());
+        configure_range(&mut bgp, "10.1.0.0/24", "SECURE");
+        set_group_password(&mut bgp, "SECURE", "s3cret");
+        assert_eq!(bgp.dynamic_neighbors.installed_md5.len(), 1);
+
+        // Rebind: new socket, no keys on it.
+        let second = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        bgp.listen_fd_v4 = Some(second.as_raw_fd());
+
+        // Without the forget, this is a no-op diff.
+        reconcile_listener_md5(&mut bgp);
+        assert_eq!(
+            bgp.dynamic_neighbors.installed_md5.len(),
+            1,
+            "precondition: the stale shadow still claims the key is present"
+        );
+
+        bgp.dynamic_neighbors.forget_installed_md5();
+        reconcile_listener_md5(&mut bgp);
+        assert_eq!(
+            bgp.dynamic_neighbors.installed_md5.get(&net("10.1.0.0/24")),
+            Some(&"s3cret".to_string()),
+            "after forgetting, the key must be re-installed on the new fd"
+        );
+        // And it really is on the new socket, not just in the shadow.
+        crate::bgp::auth::set_tcp_md5_key_prefix(second.as_raw_fd(), net("10.1.0.0/24"), &[])
+            .expect("key must be present on the new listener");
     }
 }

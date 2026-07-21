@@ -3358,6 +3358,16 @@ impl Bgp {
         // because the kernel drops the incoming SYN.
         super::config::apply_md5_refresh_all(self);
         super::config::apply_ao_refresh_all(self);
+        // Same gap for dynamic-neighbors: a listen-range whose group
+        // carries a password needs its prefix key on the fresh fd, or
+        // every authenticated SYN from that range is dropped by the
+        // kernel before `accept()` can materialize the peer. The
+        // shadow state is cleared first because the keys it records
+        // lived on the *previous* fd — after a relisten the new socket
+        // has none, and a diff against stale state would install
+        // nothing.
+        self.dynamic_neighbors.forget_installed_md5();
+        super::dynamic_neighbors::reconcile_listener_md5(self);
         // Reconcile the listener TCP MSS too: a `tcp-mss` callback that
         // ran before the bind observed `listen_fd_v4/v6 = None` and could
         // not clamp the listener, so a passively-accepted peer would

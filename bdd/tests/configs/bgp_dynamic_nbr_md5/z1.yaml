@@ -1,0 +1,34 @@
+# z1 — DUT. The listen-range's group carries the TCP MD5 password, so
+# the whole 192.168.0.0/24 prefix is authenticated by one key installed
+# on the listening socket (TCP_MD5SIG_EXT + TCP_MD5SIG_FLAG_PREFIX).
+# A per-address key cannot work here: the peer is only materialized
+# after accept(), while the kernel checks the MD5 option during the
+# handshake.
+interface:
+- if-name: i1
+  ipv4:
+    address: 192.168.0.1/24
+router:
+  bgp:
+    global:
+      as: 65001
+      router-id: 192.168.0.1
+    timer:
+      adv-interval:
+        ibgp: 1
+        ebgp: 1
+    neighbor-group:
+    - name: SENDERS
+      remote-as: 65002
+      password: "dyn-md5-secret"
+      afi-safi:
+      - name: ipv4
+        enabled: true
+    dynamic-neighbors:
+      listen-range:
+      - prefix: 192.168.0.0/24
+        neighbor-group: SENDERS
+    afi-safi:
+    - name: ipv4
+      network:
+      - prefix: 10.0.1.1/32
