@@ -3332,6 +3332,13 @@ fn try_dynamic_accept(bgp: &mut Bgp, peer_addr: IpAddr, stream: TcpStream) -> Op
     // above); the bounce flag is irrelevant for a fresh Idle peer.
     if let Some(peer) = bgp.peers.get_mut(&peer_addr) {
         let _ = super::neighbor_group::apply_inherited(&bgp.neighbor_groups, &bgp.policy_tx, peer);
+        // Start the FSM the way a config commit does for a static
+        // passive peer: `update_timers` flips a passive Idle peer to
+        // Active, so the re-run of `handle_peer_connection` below
+        // promotes this very stream instead of dropping it in Idle
+        // (where the peer would otherwise be stuck forever — nothing
+        // else ever starts a dynamic peer).
+        peer.start();
     }
 
     // Dynamic (listen-range) peers are always address-keyed, so no
@@ -4517,5 +4524,99 @@ mod gr_restart_time_tests {
             open.bgp_cap.restart.is_none(),
             "GR must be off when no family enabled it"
         );
+    }
+}
+
+#[cfg(test)]
+mod dynamic_accept_tests {
+    use super::*;
+
+    /// Peer shaped exactly like `try_dynamic_accept` materializes it:
+    /// Dynamic origin, forced passive, wired to a parked event channel.
+    fn dynamic_peer(addr: IpAddr) -> Peer {
+        let (tx, rx) = mpsc::channel::<Message>(64);
+        Box::leak(Box::new(rx));
+        let mut peer = Peer::new(
+            0,
+            65000,
+            Ipv4Addr::new(10, 99, 0, 10),
+            65001,
+            addr,
+            None,
+            tx,
+            crate::context::ProtoContext::default_table_no_rib(),
+        );
+        peer.origin = PeerOrigin::Dynamic {
+            range_prefix: "127.0.0.0/8".parse().unwrap(),
+        };
+        peer.config.transport.passive = true;
+        peer
+    }
+
+    /// A loopback TCP pair standing in for the accepted inbound socket.
+    async fn tcp_pair() -> (TcpStream, TcpStream) {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let client = TcpStream::connect(addr).await.unwrap();
+        let (server, _) = listener.accept().await.unwrap();
+        (server, client)
+    }
+
+    /// The materialization ritual must start the FSM: `start()` on a
+    /// passive peer flips Idle→Active via `update_timers`. Without it
+    /// (the original bug) a dynamic peer stayed Idle forever and every
+    /// inbound connection — including the one that materialized it —
+    /// was dropped.
+    #[tokio::test]
+    async fn materialized_dynamic_peer_start_leaves_idle() {
+        let mut peer = dynamic_peer("198.18.1.7".parse().unwrap());
+        assert_eq!(peer.state, State::Idle);
+
+        peer.start();
+
+        assert!(peer.active);
+        assert_eq!(
+            peer.state,
+            State::Active,
+            "a started passive peer must listen in Active, not sit in Idle"
+        );
+        assert!(peer.timer.idle_hold_timer.is_none());
+        assert!(peer.timer.connect_retry.is_none());
+    }
+
+    /// With the peer started (Active), the re-run of
+    /// `handle_peer_connection` must promote the very stream that
+    /// materialized the peer into a session (OpenSent), not return it
+    /// to the caller for dropping.
+    #[tokio::test]
+    async fn active_dynamic_peer_promotes_inbound_stream() {
+        let addr: IpAddr = "127.0.0.1".parse().unwrap();
+        let mut peer = dynamic_peer(addr);
+        peer.start();
+        let mut peers = PeerMap::new();
+        peers.insert(addr, peer);
+
+        let (server, _client) = tcp_pair().await;
+        let remaining = handle_peer_connection(&mut peers, addr, None, server);
+
+        assert!(remaining.is_none(), "the stream must be consumed");
+        assert_eq!(peers.get(&addr).unwrap().state, State::OpenSent);
+    }
+
+    /// The Idle branch of `handle_peer_connection` consumes and drops
+    /// the stream — which is why an unstarted dynamic peer could never
+    /// establish: the fix is to not be in Idle, not to change this
+    /// RFC 4271 behavior.
+    #[tokio::test]
+    async fn idle_dynamic_peer_drops_inbound_stream() {
+        let addr: IpAddr = "127.0.0.1".parse().unwrap();
+        let mut peers = PeerMap::new();
+        peers.insert(addr, dynamic_peer(addr));
+
+        let (server, _client) = tcp_pair().await;
+        let remaining = handle_peer_connection(&mut peers, addr, None, server);
+
+        assert!(remaining.is_none());
+        assert_eq!(peers.get(&addr).unwrap().state, State::Idle);
     }
 }
