@@ -81,3 +81,19 @@ jobs:
           components: clippy
       - name: Clippy (lua feature)
         run: cargo clippy -p zebra-rs --features lua --all-targets -- -D warnings
+
+  playset-assets:
+    name: playset packaging assets
+    runs-on: ubuntu-22.04
+    # The .deb is built only by nightly.yaml / release.yaml (and the
+    # push-to-main build jobs) — never on a pull request. So a playset file
+    # with an extension no cargo-deb asset glob claims used to reach main
+    # unnoticed and break the packaging build there, which is exactly how
+    # `playset/isis-flexalgo/ontology.json` got in. This lane runs just the
+    # staging guard from `packaging/Makefile` — rsync + find, no Rust build —
+    # so an unpackaged file fails on the PR instead.
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v5
+      - name: Playset asset coverage
+        run: make -C packaging playset
