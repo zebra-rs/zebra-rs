@@ -836,14 +836,7 @@ impl ConfigManager {
             ConfigFormat::Cli => (load_config_file(config.to_string()), Vec::new()),
             ConfigFormat::Json => json_read(entry, config),
             ConfigFormat::Yaml => yaml_read(entry, config),
-            ConfigFormat::SetDelete => (
-                config
-                    .lines()
-                    .filter(|l| !l.trim().is_empty())
-                    .map(str::to_string)
-                    .collect(),
-                Vec::new(),
-            ),
+            ConfigFormat::SetDelete => (set_delete_commands(config), Vec::new()),
         };
         if !doc_errors.is_empty() {
             return Err(doc_errors);
@@ -1528,6 +1521,23 @@ pub fn config_format_type(config_str: &str) -> ConfigFormat {
     }
 }
 
+/// Split a set/delete document into one command per line, dropping
+/// blank lines and `#` comments. The book documents comment-only
+/// files as loading an empty configuration, and the format sniffer
+/// already skips comments — without this filter a `#` line reached
+/// the parser and the whole document was rejected. Free function so
+/// the filtering is unit-testable without a full `ConfigManager`.
+fn set_delete_commands(config: &str) -> Vec<String> {
+    config
+        .lines()
+        .filter(|l| {
+            let line = l.trim();
+            !line.is_empty() && !line.starts_with('#')
+        })
+        .map(str::to_string)
+        .collect()
+}
+
 /// Extract the `system hostname` leaf value from a config tree, or
 /// `None` when the leaf is absent or empty. Free function so the
 /// lookup is unit-testable without a full `ConfigManager`.
@@ -1616,6 +1626,22 @@ mod config_format_tests {
             config_format_type("delete vrf N3\n"),
             ConfigFormat::SetDelete
         );
+    }
+
+    /// Regression: a `#` comment line in a set/delete document used to
+    /// be passed to the parser as a command, rejecting the whole
+    /// document (`vtyctl apply -f` echoed the comment as the error).
+    #[test]
+    fn set_delete_skips_comments() {
+        assert_eq!(
+            set_delete_commands("# base\nset router bgp global as 65000\n"),
+            vec!["set router bgp global as 65000"]
+        );
+        assert_eq!(
+            set_delete_commands("  # indented comment\n\n   \ndelete vrf N3\n"),
+            vec!["delete vrf N3"]
+        );
+        assert!(set_delete_commands("# only\n# comments\n").is_empty());
     }
 
     #[test]
