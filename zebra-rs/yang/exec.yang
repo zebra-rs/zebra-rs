@@ -859,11 +859,59 @@ module exec {
       container flex-algo {
         ext:help "IS-IS Flexible Algorithm (RFC 9350)";
         presence "Show flex-algo state";
+        // A bare algorithm id typed straight after `flex-algo` lands in
+        // the positional-only `algorithm` list below, so every per-algo
+        // view hangs off one namespace:
+        //
+        //   show isis flex-algo 128            <- FAD + participation
+        //   show isis flex-algo 128 topology   <- algo-N SPF tree
+        //   show isis flex-algo 128 route      <- algo-N RIB
+        //   show isis flex-algo 128 spf        <- algo-N SPF result
+        //   show isis flex-algo 128 graph      <- algo-N pruned graph
+        //
+        // The un-suffixed `show isis spf|graph|topology` stay algorithm-0
+        // views. Keeping the algorithm id adjacent to `flex-algo` (rather
+        // than bolting an `algorithm N` modifier onto five unrelated
+        // commands) is a deliberate house choice; IOS-XR/Juniper/FRR all
+        // spell it as a trailing modifier instead.
+        ext:default-child "algorithm";
+
+        list algorithm {
+          ext:help "Filter to one Flex-Algorithm";
+          ext:positional "show isis flex-algo <128-255>";
+          key value;
+          leaf value {
+            ext:help "Algorithm ID (128-255)";
+            type uint8 {
+              range "128..255";
+            }
+          }
+          leaf topology {
+            ext:help "SPF tree computed for this algorithm";
+            type empty;
+          }
+          leaf route {
+            ext:help "IPv4 RIB computed for this algorithm";
+            type empty;
+          }
+          leaf spf {
+            ext:help "SPF result (per-destination paths) for this algorithm";
+            type empty;
+          }
+          leaf graph {
+            ext:help "Constrained topology graph for this algorithm";
+            type empty;
+          }
+        }
+
         container route {
-          ext:help "Per-algorithm IPv4 RIB";
+          ext:help "Per-algorithm IPv4 RIB (all algorithms)";
           presence "Show flex-algo per-algo routes";
           list algorithm {
-            ext:help "Filter to a specific algorithm id";
+            // Deprecated spelling. `show isis flex-algo 128 route` is the
+            // supported form; this one predates the per-algo namespace and
+            // is kept so existing scripts keep parsing.
+            ext:help "Filter to a specific algorithm id (deprecated)";
             ext:presence "Show flex-algo routes for one algorithm";
             key value;
             leaf value {
