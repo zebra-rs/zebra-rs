@@ -56,17 +56,31 @@ and stale-handler section. Canonical file order is a plain byte sort
 for itself immediately: it caught the `callback_peer("")`
 bare-neighbor miss in #2047 (and in the review that confirmed it).
 
-### 2. libyang: deterministic `to_entry` child order
+### 2. libyang: deterministic `to_entry` child order — root-caused
 
-`to_entry` child order is **nondeterministic between runs** — two
-consecutive dumps of the same tree differ (augment injection order
-varies, presumably HashMap iteration in the store). Consequences: no
-schema dump is byte-reproducible, `schema-paths.txt` ordering is
-arbitrary, and PR #2047's diff was inflated by purely-moved blocks.
-Fix upstream in libyang (zebra-rs/libyang): stabilize augment
-injection order (sort by module name, or preserve import-closure
-order). Benefits every consumer; would also let the audits keep
-declaration order instead of item 1's byte sort.
+`to_entry` child order is **nondeterministic between runs**: dumping
+the whole `configure` tree (3050 nodes) five times with libyang 1.1.0
+from crates.io gives **five different orderings** — same node set every
+time, order only. Consequences: no schema dump is byte-reproducible,
+`schema-paths.txt` ordering is arbitrary, and PR #2047's diff was
+inflated by purely-moved blocks.
+
+Root cause, confirmed: `YangStore::modules` is a
+`HashMap<String, ModuleNode>` (`src/store/reader.rs:12`), and
+`to_entry` walks it to apply each loaded module's augments
+(`for (name, m) in store.modules.iter()`, `src/store/entry.rs:202`).
+Rust randomizes `HashMap` iteration per process, so augment injection
+order — and therefore the order augmented children land in `dir` —
+changes every run. Only two sites iterate the field
+(`entry.rs:202`, `reader.rs:51`).
+
+Fix (verified locally against a patched copy): change the field to
+`BTreeMap<String, ModuleNode>`, which makes both sites deterministic.
+With that one-line change the same five-run test produces a **single**
+ordering. Upstream in zebra-rs/libyang, so it needs a release + a
+version bump here before it takes effect; `zebra-rs/Cargo.toml` pins
+`libyang = "1"`. Benefits every consumer; would also let the audits
+keep declaration order instead of item 1's byte sort.
 
 ### 3. Orphan report: stale section under-counted (DONE, this branch)
 
