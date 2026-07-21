@@ -23,6 +23,13 @@ struct TcpMd5Sig {
     tcpm_key: [u8; libc::TCP_MD5SIG_MAXKEYLEN],
 }
 
+/// `TCP_MD5SIG_FLAG_PREFIX` from `<linux/tcp.h>`: interpret
+/// `tcpm_prefixlen` so the key covers a whole prefix instead of the
+/// single address in `tcpm_addr`. Not exposed by the `libc` crate for
+/// linux targets (only for hurd), so it is spelled out here.
+#[cfg(target_os = "linux")]
+const TCP_MD5SIG_FLAG_PREFIX: u8 = 0x1;
+
 /// Install a TCP MD5 shared secret on `fd` keyed by `peer_ip`.
 ///
 /// Must be called:
@@ -34,6 +41,31 @@ struct TcpMd5Sig {
 /// An empty `key` removes the entry for that peer on the socket.
 #[cfg(target_os = "linux")]
 pub fn set_tcp_md5_key(fd: RawFd, peer_ip: IpAddr, key: &[u8]) -> io::Result<()> {
+    set_md5(fd, peer_ip, None, key)
+}
+
+/// Prefix-scoped variant: one key authenticates every source inside
+/// `prefix`. This is what makes TCP MD5 usable with
+/// `dynamic-neighbors` — the listener must validate the MD5 option on
+/// a SYN whose source has no peer entry yet (the peer is only
+/// materialized *after* the handshake completes), so a per-address key
+/// can never be installed in time.
+///
+/// Requires `TCP_MD5SIG_EXT` (Linux 4.13+). An empty `key` removes the
+/// prefix entry.
+#[cfg(target_os = "linux")]
+pub fn set_tcp_md5_key_prefix(fd: RawFd, prefix: ipnet::IpNet, key: &[u8]) -> io::Result<()> {
+    // `network()` truncates host bits: the kernel matches on the
+    // masked address, and a key installed under an unmasked one would
+    // silently never match an inbound SYN.
+    set_md5(fd, prefix.network(), Some(prefix.prefix_len()), key)
+}
+
+/// Shared core for both scopes. `prefixlen` of `None` keys the entry
+/// on the exact address (classic `TCP_MD5SIG`); `Some(len)` switches
+/// to the extended request that carries the prefix length.
+#[cfg(target_os = "linux")]
+fn set_md5(fd: RawFd, addr: IpAddr, prefixlen: Option<u8>, key: &[u8]) -> io::Result<()> {
     if key.len() > libc::TCP_MD5SIG_MAXKEYLEN {
         return Err(io::Error::new(
             io::ErrorKind::InvalidInput,
@@ -46,7 +78,7 @@ pub fn set_tcp_md5_key(fd: RawFd, peer_ip: IpAddr, key: &[u8]) -> io::Result<()>
     }
 
     let mut sig: TcpMd5Sig = unsafe { mem::zeroed() };
-    match peer_ip {
+    match addr {
         IpAddr::V4(a) => {
             let sa = unsafe {
                 &mut *(&mut sig.tcpm_addr as *mut libc::sockaddr_storage as *mut libc::sockaddr_in)
@@ -67,11 +99,20 @@ pub fn set_tcp_md5_key(fd: RawFd, peer_ip: IpAddr, key: &[u8]) -> io::Result<()>
     sig.tcpm_keylen = key.len() as u16;
     sig.tcpm_key[..key.len()].copy_from_slice(key);
 
+    let optname = match prefixlen {
+        Some(len) => {
+            sig.tcpm_flags = TCP_MD5SIG_FLAG_PREFIX;
+            sig.tcpm_prefixlen = len;
+            libc::TCP_MD5SIG_EXT
+        }
+        None => libc::TCP_MD5SIG,
+    };
+
     let ret = unsafe {
         libc::setsockopt(
             fd,
             libc::IPPROTO_TCP,
-            libc::TCP_MD5SIG,
+            optname,
             &sig as *const TcpMd5Sig as *const libc::c_void,
             mem::size_of::<TcpMd5Sig>() as libc::socklen_t,
         )
@@ -84,6 +125,12 @@ pub fn set_tcp_md5_key(fd: RawFd, peer_ip: IpAddr, key: &[u8]) -> io::Result<()>
 
 #[cfg(not(target_os = "linux"))]
 pub fn set_tcp_md5_key(_fd: i32, _peer_ip: IpAddr, _key: &[u8]) -> io::Result<()> {
+    tracing::warn!("TCP MD5 authentication not supported on this platform; no-op");
+    Ok(())
+}
+
+#[cfg(not(target_os = "linux"))]
+pub fn set_tcp_md5_key_prefix(_fd: i32, _prefix: ipnet::IpNet, _key: &[u8]) -> io::Result<()> {
     tracing::warn!("TCP MD5 authentication not supported on this platform; no-op");
     Ok(())
 }

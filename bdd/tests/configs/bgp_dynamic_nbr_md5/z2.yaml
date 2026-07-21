@@ -1,0 +1,33 @@
+# z2 — client with the matching TCP MD5 secret. From z2's side this is
+# an ordinary static, MD5-protected eBGP session; only z1's side is
+# dynamic. `connect-retry-time: 3` keeps the redial prompt — a dropped
+# SYN leaves the FSM in Active, where the retry is paced by the
+# ConnectRetryTimer (120s default), not the 5s idle-hold.
+interface:
+- if-name: i1
+  ipv4:
+    address: 192.168.0.2/24
+router:
+  bgp:
+    global:
+      as: 65002
+      router-id: 192.168.0.2
+    timer:
+      adv-interval:
+        ibgp: 1
+        ebgp: 1
+    neighbor:
+    - remote-address: 192.168.0.1
+      enabled: true
+      remote-as: 65001
+      timers: {connect-retry-time: 3}
+      tcp-md5:
+        encoding: clear
+        password: "dyn-md5-secret"
+      afi-safi:
+      - name: ipv4
+        enabled: true
+    afi-safi:
+    - name: ipv4
+      network:
+      - prefix: 10.0.2.2/32

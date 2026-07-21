@@ -134,6 +134,10 @@ pub fn config_neighbor_group(bgp: &mut Bgp, mut args: Args, op: ConfigOp) -> Opt
         }
         _ => {}
     }
+    // The group's password is the source of any listen-range prefix key
+    // bound to it — creating or deleting the group changes what the
+    // listener should be authenticating.
+    super::dynamic_neighbors::reconcile_listener_md5(bgp);
     Some(())
 }
 
@@ -765,6 +769,10 @@ pub fn config_neighbor_group_password(bgp: &mut Bgp, mut args: Args, op: ConfigO
         .knobs
         .password = value;
     sweep_members_inherit(bgp, &name);
+    // A listen-range bound to this group authenticates its whole
+    // prefix with the group password, so the listener's prefix key
+    // has to follow the knob.
+    super::dynamic_neighbors::reconcile_listener_md5(bgp);
     Some(())
 }
 
