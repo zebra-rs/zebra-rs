@@ -16,10 +16,12 @@ and diffed against the docs:
   `callback_peer` / `timer` registration across `zebra-rs/src/bgp/`
   (multi-line calls included; `callback_peer` prepends
   `/router/bgp/neighbor`, `timer` prepends
-  `/router/bgp/neighbor/timers`). Result: 223 unique paths,
-  set-identical to `handler-paths.txt`. The file is sorted with
-  **locale collation** (`LC_ALL=en_US.UTF-8 sort`), not byte order —
-  that is why `neighbor-group` sorts after the `neighbor/*` block.
+  `/router/bgp/neighbor/timers`). Result: 224 unique paths. **Trap**:
+  the extraction pattern must accept the **empty** string literal —
+  `callback_peer("", config_peer)` registers the bare
+  `/router/bgp/neighbor` path. Both #2047 and its review used a
+  one-or-more-chars pattern, missed it, and agreed with each other;
+  the drift-gate test caught it (see item 1).
 - **Schema paths**: load mode `configure` from `zebra-rs/yang/` with
   `YangStore::read_with_resolve` + `identity_resolve` + `to_entry`
   (exactly the `ConfigManager::init` path, see
@@ -33,22 +35,26 @@ and diffed against the docs:
   `container` (275). Handled = has a handler at the exact path, or
   lies under `/router/bgp/tracing` or `/router/bgp/neighbor/tracing`
   (whole-subtree dispatch via `config_tracing_dispatch`,
-  `zebra-rs/src/bgp/tracing.rs`). Reproduces 275 / 262 / 3 and the
-  10-entry bare-node list exactly.
+  `zebra-rs/src/bgp/tracing.rs`). Correct figures: 275 / 263 / 3
+  (#2047 said 262 — it missed the bare-neighbor handler above and
+  listed `/router/bgp/neighbor` as an unhandled bare node).
 
 ## Follow-ups
 
-### 1. Drift gate: regenerate-and-compare in `cargo test`
+### 1. Drift gate: regenerate-and-compare in `cargo test` (DONE, this branch)
 
-The audits drifted for months because nothing regenerates them. The
-cheapest robust gate is a `yang_load_tests`-style unit test
-(`zebra-rs/src/config/manager.rs`) that rebuilds both lists in-memory —
-schema via `YangStore`/`to_entry` as above, handler paths from
-`Bgp::callback_build` — and diffs them against `docs/*.txt`. That runs
-inside the existing `cargo test` CI job; no new workflow. Precondition:
-item 2, or the test must compare **as sorted sets** (recommended
-anyway: switch both files to a deterministic sort when the gate lands,
-one-time churn).
+The audits drifted for months because nothing regenerates them. Done:
+`bgp_config_audit_tests` in `zebra-rs/src/config/manager.rs` rebuilds
+both lists in-memory — schema via `YangStore`/`to_entry` as above,
+handler paths by scanning the registration call sites under
+`src/bgp/` — and compares them **byte-exact** against `docs/*.txt`;
+a third test re-derives the orphan-report counts, bare-node section
+and stale-handler section. Canonical file order is a plain byte sort
+(one-time churn in this branch); regenerate the two path files with
+`ZEBRA_UPDATE_AUDIT_DOCS=1 cargo test -p zebra-rs bgp_config_audit`
+(the orphan report is prose and stays hand-maintained). The gate paid
+for itself immediately: it caught the `callback_peer("")`
+bare-neighbor miss in #2047 (and in the review that confirmed it).
 
 ### 2. libyang: deterministic `to_entry` child order
 
@@ -59,7 +65,8 @@ schema dump is byte-reproducible, `schema-paths.txt` ordering is
 arbitrary, and PR #2047's diff was inflated by purely-moved blocks.
 Fix upstream in libyang (zebra-rs/libyang): stabilize augment
 injection order (sort by module name, or preserve import-closure
-order). Benefits every consumer, and makes item 1 byte-exact.
+order). Benefits every consumer; would also let the audits keep
+declaration order instead of item 1's byte sort.
 
 ### 3. Orphan report: stale section under-counted (DONE, this branch)
 

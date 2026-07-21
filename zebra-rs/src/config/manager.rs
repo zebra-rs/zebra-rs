@@ -4637,3 +4637,301 @@ mod yang_load_tests {
         }
     }
 }
+
+/// Drift gate for the BGP config audit files in `docs/` (see
+/// `docs/design/bgp-config-audit-followups.md`). The audits went stale
+/// for months because nothing regenerated them (fixed once in #2047);
+/// these tests rebuild both lists in-memory — the schema side from the
+/// same `YangStore`/`to_entry` pipeline `ConfigManager::init` uses, the
+/// handler side from the registration call sites in `src/bgp/` — and
+/// compare them byte-exact against the docs, so any YANG or
+/// `callback_build` change that lands without touching the audits fails
+/// `cargo test`. `to_entry` child order is nondeterministic between
+/// runs (augment injection order), so the canonical file order is a
+/// plain byte sort; regenerate with
+/// `ZEBRA_UPDATE_AUDIT_DOCS=1 cargo test -p zebra-rs bgp_config_audit`.
+#[cfg(test)]
+mod bgp_config_audit_tests {
+    use libyang::{Entry, YangStore, to_entry};
+    use std::collections::{BTreeMap, BTreeSet};
+    use std::path::{Path, PathBuf};
+    use std::rc::Rc;
+
+    const UPDATE_ENV: &str = "ZEBRA_UPDATE_AUDIT_DOCS";
+
+    fn docs_path(name: &str) -> PathBuf {
+        Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../docs")
+            .join(name)
+    }
+
+    fn configure_entry() -> Rc<Entry> {
+        let mut yang = YangStore::new();
+        yang.add_path(concat!(env!("CARGO_MANIFEST_DIR"), "/yang"));
+        yang.read_with_resolve("configure")
+            .expect("configure mode loads");
+        yang.identity_resolve();
+        let module = yang
+            .find_module("configure")
+            .expect("configure module present");
+        to_entry(&yang, module)
+    }
+
+    fn child(e: &Rc<Entry>, name: &str) -> Rc<Entry> {
+        e.dir
+            .borrow()
+            .iter()
+            .find(|c| c.name == name)
+            .unwrap_or_else(|| panic!("schema node `{name}` missing"))
+            .clone()
+    }
+
+    /// Kind tag as used by `docs/schema-paths.txt`.
+    fn kind(e: &Entry) -> String {
+        if e.is_list() {
+            format!("list keys={}", e.key.join(","))
+        } else if e.is_container() {
+            if e.presence {
+                "p-container"
+            } else {
+                "container"
+            }
+            .into()
+        } else if e.is_leaflist() {
+            "leaf-list".into()
+        } else {
+            "leaf".into()
+        }
+    }
+
+    /// Collect `path → kind` for every descendant of `e`. With
+    /// `skip_key_leaves`, list-key leaves are omitted — the docs
+    /// convention (a list's keys are implied by its `keys=` tag).
+    fn schema_walk(
+        e: &Rc<Entry>,
+        path: &str,
+        skip_key_leaves: bool,
+        out: &mut BTreeMap<String, String>,
+    ) {
+        for c in e.dir.borrow().iter() {
+            if skip_key_leaves && c.is_leaf() && e.is_list() && e.key.contains(&c.name) {
+                continue;
+            }
+            let p = format!("{}/{}", path, c.name);
+            out.insert(p.clone(), kind(c));
+            schema_walk(c, &p, skip_key_leaves, out);
+        }
+    }
+
+    /// Every config-handler registration in `src/bgp/`: a
+    /// `.callback_add(` / `.pcallback_add(` / `.callback_peer(` /
+    /// `.timer(` call whose first argument is a string literal
+    /// (possibly on the next line). `callback_peer` prepends
+    /// `/router/bgp/neighbor` and `timer` prepends
+    /// `/router/bgp/neighbor/timers`, mirroring the helpers in
+    /// `src/bgp/config.rs` / `src/bgp/inst.rs`.
+    fn registered_handler_paths() -> BTreeSet<String> {
+        let mut out = BTreeSet::new();
+        let mut stack = vec![Path::new(env!("CARGO_MANIFEST_DIR")).join("src/bgp")];
+        while let Some(dir) = stack.pop() {
+            for entry in std::fs::read_dir(&dir).expect("src/bgp readable") {
+                let path = entry.expect("dir entry").path();
+                if path.is_dir() {
+                    stack.push(path);
+                    continue;
+                }
+                if path.extension().and_then(|e| e.to_str()) != Some("rs") {
+                    continue;
+                }
+                let text = std::fs::read_to_string(&path).expect("source readable");
+                scan_registrations(&text, &mut out);
+            }
+        }
+        out
+    }
+
+    fn scan_registrations(text: &str, out: &mut BTreeSet<String>) {
+        for (needle, prefix) in [
+            (".callback_add(", ""),
+            (".pcallback_add(", ""),
+            (".callback_peer(", "/router/bgp/neighbor"),
+            (".timer(", "/router/bgp/neighbor/timers"),
+        ] {
+            let mut from = 0;
+            while let Some(pos) = text[from..].find(needle) {
+                from += pos + needle.len();
+                // Only calls whose first argument is a string literal
+                // register a path (`.timer(expr)` etc. are unrelated).
+                // The literal may be empty: `callback_peer("")` is the
+                // bare /router/bgp/neighbor registration.
+                if let Some(lit) = text[from..].trim_start().strip_prefix('"')
+                    && let Some(end) = lit.find('"')
+                {
+                    out.insert(format!("{prefix}{}", &lit[..end]));
+                }
+            }
+        }
+    }
+
+    /// Byte-exact compare against `docs/<name>`, or rewrite it when
+    /// `ZEBRA_UPDATE_AUDIT_DOCS` is set. On mismatch the panic lists
+    /// the set difference so the failing entry is visible without
+    /// regenerating.
+    fn assert_doc_matches(name: &str, want_lines: &[String]) {
+        let path = docs_path(name);
+        let want = want_lines.join("\n") + "\n";
+        if std::env::var_os(UPDATE_ENV).is_some() {
+            std::fs::write(&path, &want).expect("audit doc writable");
+            return;
+        }
+        let got = std::fs::read_to_string(&path).expect("audit doc readable");
+        if got == want {
+            return;
+        }
+        let got_set: BTreeSet<&str> = got.lines().collect();
+        let want_set: BTreeSet<&str> = want_lines.iter().map(String::as_str).collect();
+        let missing: Vec<&&str> = want_set.difference(&got_set).collect();
+        let stale: Vec<&&str> = got_set.difference(&want_set).collect();
+        panic!(
+            "docs/{name} does not match the current tree.\n\
+             in code but missing from doc: {missing:#?}\n\
+             in doc but gone from code: {stale:#?}\n\
+             (byte-sorted order is canonical; regenerate with \
+             `{UPDATE_ENV}=1 cargo test -p zebra-rs bgp_config_audit`)"
+        );
+    }
+
+    #[test]
+    fn schema_paths_doc_is_current() {
+        let top = configure_entry();
+        let bgp = child(&child(&child(&top, "set"), "router"), "bgp");
+        let mut map = BTreeMap::new();
+        schema_walk(&bgp, "/router/bgp", true, &mut map);
+        let lines: Vec<String> = map.iter().map(|(p, k)| format!("{p}\t{k}")).collect();
+        assert_doc_matches("schema-paths.txt", &lines);
+    }
+
+    #[test]
+    fn handler_paths_doc_is_current() {
+        let lines: Vec<String> = registered_handler_paths().into_iter().collect();
+        assert_doc_matches("handler-paths.txt", &lines);
+    }
+
+    /// The whole `/router/bgp/tracing` and `/router/bgp/neighbor/tracing`
+    /// subtrees are handled by `config_tracing_dispatch`
+    /// (`src/bgp/tracing.rs`) rather than per-node callbacks.
+    fn traced(p: &str) -> bool {
+        ["/router/bgp/tracing", "/router/bgp/neighbor/tracing"]
+            .iter()
+            .any(|t| {
+                p.strip_prefix(t)
+                    .is_some_and(|rest| rest.is_empty() || rest.starts_with('/'))
+            })
+    }
+
+    /// Recompute the orphan-report figures — settable / handled /
+    /// orphan counts, the bare-node section, and the stale-handler
+    /// section — and pin them against the numbers and path lists in
+    /// `docs/orphan-report.txt`. The prose is hand-maintained, so this
+    /// test never rewrites the file; on failure, update the report by
+    /// hand (and its notes, which explain every entry).
+    #[test]
+    fn orphan_report_is_current() {
+        let top = configure_entry();
+        let set = child(&top, "set");
+        // Full tree (key leaves included) — the stale-handler check
+        // must see nodes outside /router/bgp (e.g. /community-list).
+        let mut full = BTreeMap::new();
+        schema_walk(&set, "", false, &mut full);
+        let bgp = child(&child(&set, "router"), "bgp");
+        let mut bgp_map = BTreeMap::new();
+        schema_walk(&bgp, "/router/bgp", true, &mut bgp_map);
+        let handlers = registered_handler_paths();
+
+        let settable: BTreeMap<&str, &str> = bgp_map
+            .iter()
+            .filter(|(_, k)| k.as_str() != "container")
+            .map(|(p, k)| (p.as_str(), k.as_str()))
+            .collect();
+        let handled: BTreeSet<&str> = settable
+            .keys()
+            .copied()
+            .filter(|p| handlers.contains(*p) || traced(p))
+            .collect();
+        let mut bare = BTreeSet::new();
+        let mut orphans = BTreeSet::new();
+        for (&p, &k) in &settable {
+            if handled.contains(p) {
+                continue;
+            }
+            let dir_kind = k.starts_with("list") || k == "p-container";
+            let prefix = format!("{p}/");
+            if dir_kind && handled.iter().any(|h| h.starts_with(&prefix)) {
+                bare.insert(p);
+            } else {
+                orphans.insert(p);
+            }
+        }
+        let stale: BTreeSet<&str> = handlers
+            .iter()
+            .map(String::as_str)
+            .filter(|p| !full.contains_key(*p))
+            .collect();
+
+        // Parse the report's machine-checkable parts.
+        let report =
+            std::fs::read_to_string(docs_path("orphan-report.txt")).expect("report readable");
+        let mut doc_orphans = BTreeSet::new();
+        let mut doc_bare = BTreeSet::new();
+        let mut doc_stale = BTreeSet::new();
+        let mut doc_counts = BTreeMap::new();
+        let mut section = "";
+        for line in report.lines() {
+            if line.starts_with("== Bare") {
+                section = "bare";
+            } else if line.starts_with("== Handler paths") {
+                section = "stale";
+            } else if line.starts_with("==") {
+                section = "";
+            } else if let Some(rest) = line.strip_prefix("ORPHAN ") {
+                doc_orphans.insert(rest.split_whitespace().last().expect("orphan path"));
+            } else if let Some((label, n)) = line.split_once(':') {
+                if let Ok(n) = n.trim().parse::<usize>() {
+                    doc_counts.insert(label.to_string(), n);
+                }
+            } else if let Some(entry) = line.strip_prefix("  /") {
+                let path = entry.split_whitespace().next().expect("section path");
+                match section {
+                    "bare" => {
+                        doc_bare.insert(format!("/{path}"));
+                    }
+                    "stale" => {
+                        doc_stale.insert(format!("/{path}"));
+                    }
+                    _ => {}
+                }
+            }
+        }
+        let doc_bare: BTreeSet<&str> = doc_bare.iter().map(String::as_str).collect();
+        let doc_stale: BTreeSet<&str> = doc_stale.iter().map(String::as_str).collect();
+
+        assert_eq!(
+            doc_counts.get("Total settable schema nodes").copied(),
+            Some(settable.len()),
+            "settable-node count drifted"
+        );
+        assert_eq!(
+            doc_counts.get("Handled").copied(),
+            Some(handled.len()),
+            "handled-node count drifted"
+        );
+        assert_eq!(
+            doc_counts.get("Orphans").copied(),
+            Some(orphans.len()),
+            "orphan count drifted"
+        );
+        assert_eq!(doc_orphans, orphans, "ORPHAN entries drifted");
+        assert_eq!(doc_bare, bare, "bare list/p-container section drifted");
+        assert_eq!(doc_stale, stale, "stale-handler section drifted");
+    }
+}

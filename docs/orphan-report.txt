@@ -7,7 +7,6 @@ ORPHAN leaf         /router/bgp/sharding/peer-sharding
   /router/bgp/afi-safi  [list]
   /router/bgp/afi-safi/redistribute  [p-container]
   /router/bgp/global  [p-container]
-  /router/bgp/neighbor  [list]
   /router/bgp/neighbor/afi-safi  [list]
   /router/bgp/neighbor/tcp-md5  [p-container]
   /router/bgp/neighbor/tcp-ao  [p-container]
@@ -15,8 +14,14 @@ ORPHAN leaf         /router/bgp/sharding/peer-sharding
   /router/bgp/sr-policy  [p-container]
   /router/bgp/vrf/neighbor/afi-safi  [list]
 
+Note: the bare /router/bgp/neighbor list path is deliberately absent
+here — it IS handled, registered as `callback_peer("", config_peer)`
+in src/bgp/config.rs (an empty relative path, easy to miss when
+grepping for registrations), and it creates/tears down the peer when
+the list entry itself is set/deleted.
+
 Total settable schema nodes: 275
-Handled: 262
+Handled: 263
 Orphans: 3
 
 Note: these orphans have no config callback but are kept intentionally.
