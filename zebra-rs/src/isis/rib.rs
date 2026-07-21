@@ -1160,9 +1160,11 @@ struct FlexAlgoInput {
     algo: u8,
     graph: spf::Graph,
     source: Option<usize>,
-    /// Run per-algo TI-LFA in this algo's constrained graph. Set only
-    /// for SRv6-dataplane algos with the per-algo `fast-reroute ti-lfa`
-    /// toggle — Flex-Algo TI-LFA is an SRv6 feature here.
+    /// Run per-algo TI-LFA in this algo's constrained graph. Set for
+    /// SRv6-dataplane algos that inherit the instance-level TI-LFA
+    /// toggle and have not opted out with `fast-reroute disable`.
+    /// SR-MPLS algos are excluded until the repair-label resolver is
+    /// algorithm-aware — see the gate in [`build_spf_input`].
     ti_lfa: bool,
 }
 
@@ -1273,11 +1275,22 @@ pub(super) fn build_spf_input(top: &mut IsisTop, level: Level) -> Option<SpfInpu
             algo: *algo,
             graph: algo_graph,
             source: algo_source,
-            // Per-algo TI-LFA is an SRv6 feature here: compute it only
-            // for SRv6-dataplane algos whose per-algo `fast-reroute
-            // ti-lfa` toggle is set, so we don't pay the cost for algos
-            // whose repair we'd never install.
-            ti_lfa: entry.ti_lfa && entry.dataplane_srv6 == Some(true),
+            // Per-algorithm TI-LFA now *inherits* the instance-level
+            // toggle (IOS-XR / Juniper / FRR all protect every algorithm
+            // once TI-LFA is on); `fast-reroute disable` opts one
+            // algorithm out.
+            //
+            // Still SRv6-only. An SR-MPLS repair list is resolved by
+            // `tilfa::repair_segments_to_mpls_labels`, which takes no
+            // algorithm and returns the first Prefix-SID it finds — the
+            // algorithm-0 one. Computing SR-MPLS repairs here would
+            // therefore emit segment lists that can traverse a link the
+            // FAD excluded, which is worse than leaving the algorithm
+            // unprotected. Lift this gate only together with an
+            // algorithm-aware label resolver.
+            ti_lfa: top.config.ti_lfa_enabled
+                && !entry.fast_reroute_disable
+                && entry.dataplane_srv6 == Some(true),
         });
     }
 

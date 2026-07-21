@@ -302,15 +302,15 @@ fn config_builder(prefix: &str) -> ConfigBuilder {
             }
             Ok(())
         })
-        .path(&format!("{prefix}/fast-reroute/ti-lfa"))
+        .path(&format!("{prefix}/fast-reroute/disable"))
         .set(|config, cache, algo, _args| {
             let e = cache_get(config, cache, algo).context(CONFIG_ERR)?;
-            e.ti_lfa = true;
+            e.fast_reroute_disable = true;
             Ok(())
         })
         .del(|config, cache, algo, _args| {
             let e = cache_lookup(config, cache, algo).context(CONFIG_ERR)?;
-            e.ti_lfa = false;
+            e.fast_reroute_disable = false;
             Ok(())
         })
 }

@@ -3648,8 +3648,8 @@ fn show_isis_flex_algo(
         writeln!(buf, "Local Flex-Algorithms:")?;
         writeln!(
             buf,
-            "  {:<5} {:<22} {:<8} {:<3} Constraints",
-            "Algo", "Metric", "Priority", "Adv"
+            "  {:<5} {:<22} {:<8} {:<3} {:<9} Constraints",
+            "Algo", "Metric", "Priority", "Adv", "FRR"
         )?;
         for (algo, entry) in &isis.flex_algo.config {
             let metric = match entry.metric_type {
@@ -3664,6 +3664,21 @@ fn show_isis_flex_algo(
                 "yes"
             } else {
                 "no"
+            };
+            // Effective fast-reroute state for this algorithm. Worth
+            // showing explicitly: the algorithm inherits the
+            // instance-level TI-LFA toggle, so without this an operator
+            // cannot tell an inherited-on algorithm from one that is
+            // silently unprotected because its dataplane has no per-algo
+            // repair yet.
+            let frr = if entry.fast_reroute_disable {
+                "disabled" // explicit per-algo opt-out
+            } else if !isis.config.ti_lfa_enabled {
+                "off" // instance-level TI-LFA is off; nothing to inherit
+            } else if entry.dataplane_srv6 == Some(true) {
+                "on" // inherited and computed
+            } else {
+                "n/a" // inherited, but no algo-aware SR-MPLS repair yet
             };
             let mut constraints = String::new();
             if !entry.include_any.is_empty() {
@@ -3719,11 +3734,12 @@ fn show_isis_flex_algo(
             }
             writeln!(
                 buf,
-                "  {:<5} {:<22} {:<8} {:<3} {}",
+                "  {:<5} {:<22} {:<8} {:<3} {:<9} {}",
                 algo,
                 metric,
                 prio,
                 adv,
+                frr,
                 constraints.trim_end()
             )?;
         }

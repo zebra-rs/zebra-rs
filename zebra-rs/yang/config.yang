@@ -1380,13 +1380,23 @@ module config {
           }
 
           container fast-reroute {
-            ext:help "Per-algo fast-reroute (TI-LFA)";
-            // Per-algo TI-LFA toggle. Empty container is a no-op; the
-            // child presence container turns the per-algo TI-LFA
-            // computation on (deferred — no OSPF per-algo TI-LFA yet).
-            container ti-lfa {
-              ext:help "Topology-Independent LFA for this flex-algo";
-              presence "Enable Topology-Independent LFA for this flex-algo";
+            ext:help "Per-algo fast-reroute";
+            // Per-algorithm fast-reroute OPT-OUT; same model and rationale
+            // as `router isis / flex-algo / fast-reroute`. TI-LFA
+            // enablement is instance-level
+            // (/router/ospf/fast-reroute/ti-lfa) and every algorithm this
+            // router participates in inherits it. The per-algorithm
+            // computation itself is still deferred for OSPFv2 — the leaf
+            // is accepted and stored so the schema stays uniform across
+            // IS-IS / OSPFv2 / OSPFv3, but nothing consumes it yet.
+            leaf disable {
+              ext:help "Disable fast-reroute for this flex-algo";
+              type empty;
+              description
+                "Suppress TI-LFA repair computation and installation for
+                 this Flex-Algorithm only; algorithm 0 and every other
+                 algorithm keep whatever /router/ospf/fast-reroute/ti-lfa
+                 configures.";
             }
           }
         }
@@ -2399,13 +2409,23 @@ module config {
           }
 
           container fast-reroute {
-            ext:help "Per-flex-algo fast-reroute (TI-LFA)";
-            // Per-algo TI-LFA toggle. Empty container is a no-op; the
-            // child presence container turns the per-algo TI-LFA
-            // computation on (deferred — no OSPF per-algo TI-LFA yet).
-            container ti-lfa {
-              ext:help "Topology-Independent LFA for this flex-algo";
-              presence "Enable Topology-Independent LFA for this flex-algo";
+            ext:help "Per-flex-algo fast-reroute";
+            // Per-algorithm fast-reroute OPT-OUT; same model and rationale
+            // as `router isis / flex-algo / fast-reroute`. TI-LFA
+            // enablement is instance-level
+            // (/router/ospfv3/fast-reroute/ti-lfa) and every algorithm
+            // this router participates in inherits it. The per-algorithm
+            // computation itself is still deferred for OSPFv3 — the leaf
+            // is accepted and stored so the schema stays uniform across
+            // IS-IS / OSPFv2 / OSPFv3, but nothing consumes it yet.
+            leaf disable {
+              ext:help "Disable fast-reroute for this flex-algo";
+              type empty;
+              description
+                "Suppress TI-LFA repair computation and installation for
+                 this Flex-Algorithm only; algorithm 0 and every other
+                 algorithm keep whatever /router/ospfv3/fast-reroute/ti-lfa
+                 configures.";
             }
           }
         }
@@ -2824,14 +2844,34 @@ module config {
           }
 
           container fast-reroute {
-            ext:help "Per-flex-algo fast-reroute (TI-LFA)";
-            // Per-algo override of the instance-level
-            // /router/isis/fast-reroute/ti-lfa toggle. Empty
-            // container is a no-op; the child presence container
-            // turns the per-algo TI-LFA computation on.
-            container ti-lfa {
-              ext:help "Topology-Independent LFA for this flex-algo";
-              presence "Enable Topology-Independent LFA for this flex-algo";
+            ext:help "Per-flex-algo fast-reroute";
+            // Per-algorithm fast-reroute OPT-OUT. TI-LFA enablement is an
+            // instance-level property (/router/isis/fast-reroute/ti-lfa):
+            // once on, every algorithm this router participates in is
+            // protected, with each algorithm's repair computed inside its
+            // own constrained topology and expressed with that
+            // algorithm's SIDs. That inheritance is what RFC 9350 §12
+            // requires — a repair built from algorithm-0 segments can
+            // traverse a link the FAD excluded, defeating the constraint
+            // the algorithm exists to enforce.
+            //
+            // Matches the industry model: IOS-XR enables TI-LFA per
+            // interface and offers only `flex-algo <n> fast-reroute
+            // disable`; Juniper and FRR have no per-algorithm knob at all
+            // and simply protect every slice. An opt-IN toggle here would
+            // leave an operator who configured `fast-reroute ti-lfa` with
+            // silently unprotected flex-algo traffic.
+            leaf disable {
+              ext:help "Disable fast-reroute for this flex-algo";
+              type empty;
+              description
+                "Suppress TI-LFA repair computation and installation for
+                 this Flex-Algorithm only; algorithm 0 and every other
+                 algorithm keep whatever /router/isis/fast-reroute/ti-lfa
+                 configures. Use where a repair is worse than a drop — a
+                 low-latency slice whose post-convergence repair still
+                 satisfies the FAD constraints but blows the latency
+                 budget the slice exists to guarantee.";
             }
           }
         }
