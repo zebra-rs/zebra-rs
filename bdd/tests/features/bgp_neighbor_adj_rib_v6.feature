@@ -27,13 +27,12 @@ Feature: show bgp neighbor <X> advertised-routes / received-routes ipv6
     And I start zebra-rs in namespace "z2"
     And I apply config "z1.yaml" to namespace "z1"
     And I apply config "z2.yaml" to namespace "z2"
-    And I wait 10 seconds
-    Then show command "show bgp summary" in namespace "z1" should contain "Established"
+    Then show command "show bgp summary" in namespace "z1" should eventually contain "Established"
     # Sanity: the v6 routes converged across the session.
-    And show command "show bgp ipv6" in namespace "z2" should contain "2001:db8::1/128"
+    And show command "show bgp ipv6" in namespace "z2" should eventually contain "2001:db8::1/128"
     # Adj-RIB-Out, z1 -> z2 (the IPv4-transport peer): z1's own loopback
     # was advertised to z2 over the v6 AFI.
-    And show command "show bgp neighbor 192.168.0.2 advertised-routes ipv6" in namespace "z1" should contain "2001:db8::1/128"
+    And show command "show bgp neighbor 192.168.0.2 advertised-routes ipv6" in namespace "z1" should eventually contain "2001:db8::1/128"
     # The Adj-RIB-Out is per-peer, not a whole-table dump: z2's own
     # loopback (learned FROM z2) is never advertised back to z2. The
     # positive assertion above on the same command guards this negative
@@ -42,28 +41,26 @@ Feature: show bgp neighbor <X> advertised-routes / received-routes ipv6
     # Adj-RIB-In, z2 <- z1: z2 received z1's loopback and the shared link
     # prefix from neighbor 192.168.0.1. Both present => the v6 Adj-RIB-In
     # read is complete, and the negative below is non-vacuous.
-    And show command "show bgp neighbor 192.168.0.1 received-routes ipv6" in namespace "z2" should contain "2001:db8::1/128"
-    And show command "show bgp neighbor 192.168.0.1 received-routes ipv6" in namespace "z2" should contain "2001:db8:12::/64"
+    And show command "show bgp neighbor 192.168.0.1 received-routes ipv6" in namespace "z2" should eventually contain "2001:db8::1/128"
+    And show command "show bgp neighbor 192.168.0.1 received-routes ipv6" in namespace "z2" should eventually contain "2001:db8:12::/64"
 
   Scenario: A post-establishment v6 prefix appears, then withdraws, from the Adj-RIBs
     Given the test topology exists
     # Inject a fresh connected v6 prefix on z1 with the session already
     # up, so it can only reach z2 through the incremental advertise path.
     When I create dummy interface "cust0" with address "2001:db8:cafe::1/64" in namespace "z1"
-    And I wait 8 seconds
     # It is recorded in z1's v6 Adj-RIB-Out toward z2 and z2's v6
     # Adj-RIB-In from z1.
-    Then show command "show bgp neighbor 192.168.0.2 advertised-routes ipv6" in namespace "z1" should contain "2001:db8:cafe::/64"
-    And show command "show bgp neighbor 192.168.0.1 received-routes ipv6" in namespace "z2" should contain "2001:db8:cafe::/64"
+    Then show command "show bgp neighbor 192.168.0.2 advertised-routes ipv6" in namespace "z1" should eventually contain "2001:db8:cafe::/64"
+    And show command "show bgp neighbor 192.168.0.1 received-routes ipv6" in namespace "z2" should eventually contain "2001:db8:cafe::/64"
     # Downing the dummy flushes its v6 address (kernel semantics), so z1
     # withdraws the origination. The MP_UNREACH must clear it from both
     # Adj-RIBs. The link prefix stays as the positive control so neither
     # negative assertion passes vacuously.
     When I make namespace "z1" interface "cust0" down
-    And I wait 8 seconds
-    Then show command "show bgp neighbor 192.168.0.2 advertised-routes ipv6" in namespace "z1" should not contain "2001:db8:cafe::/64"
+    Then show command "show bgp neighbor 192.168.0.2 advertised-routes ipv6" in namespace "z1" should eventually not contain "2001:db8:cafe::/64"
     And show command "show bgp neighbor 192.168.0.2 advertised-routes ipv6" in namespace "z1" should contain "2001:db8:12::/64"
-    And show command "show bgp neighbor 192.168.0.1 received-routes ipv6" in namespace "z2" should not contain "2001:db8:cafe::/64"
+    And show command "show bgp neighbor 192.168.0.1 received-routes ipv6" in namespace "z2" should eventually not contain "2001:db8:cafe::/64"
     And show command "show bgp neighbor 192.168.0.1 received-routes ipv6" in namespace "z2" should contain "2001:db8:12::/64"
 
   Scenario: Teardown topology
