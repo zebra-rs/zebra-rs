@@ -9849,40 +9849,55 @@ pub fn route_from_peer(
                     snpa: _,
                     nhop,
                     updates,
-                } => {
+                } => match nhop {
+                    // Plain IPv4 unicast in MP_REACH (RFC 4760 §3): valid
+                    // whenever capability 1/1 was negotiated, and must be
+                    // treated identically to the traditional NLRI field.
+                    // The next-hop inside MP_REACH supersedes any NEXT_HOP
+                    // attribute; stamp it and go through the same batch
+                    // path as traditional NLRI.
+                    IpAddr::V4(nh4) => {
+                        let mut attr_v4 = bgp_attr.clone();
+                        attr_v4.nexthop = Some(BgpNexthop::Ipv4(nh4));
+                        route_ipv4_update_batch(
+                            peer_id, &updates, &attr_v4, bgp, peers, shards, false,
+                        );
+                    }
                     // RFC 8950 IPv4-over-IPv6: install the prefix into
                     // Loc-RIB and the FIB with the v6 next-hop from
                     // MP_REACH (the remote's link-local) as the gateway,
                     // pinned to the egress ifindex of the peer that
                     // delivered the UPDATE (a link-local needs its
-                    // interface). ENHE on a non-interface peer or with a
-                    // v4-shaped next-hop is unexpected — ENHE is currently
-                    // only negotiated by unnumbered peers; log and drop in
-                    // that case rather than fall back to a bogus install.
-                    let egress_ifindex = peers.get_by_idx(peer_id).and_then(|p| p.scope_id);
-                    if let (IpAddr::V6(nh6), Some(ifindex)) = (nhop, egress_ifindex) {
-                        for update in updates.iter() {
-                            route_ipv4_update(
+                    // interface). ENHE on a non-interface peer is
+                    // unexpected — ENHE is currently only negotiated by
+                    // unnumbered peers; log and drop in that case rather
+                    // than fall back to a bogus install.
+                    IpAddr::V6(nh6) => {
+                        let egress_ifindex = peers.get_by_idx(peer_id).and_then(|p| p.scope_id);
+                        if let Some(ifindex) = egress_ifindex {
+                            for update in updates.iter() {
+                                route_ipv4_update(
+                                    peer_id,
+                                    update,
+                                    None,
+                                    None,
+                                    bgp_attr,
+                                    None,
+                                    Some((nh6, ifindex)),
+                                    bgp,
+                                    peers,
+                                    false,
+                                );
+                            }
+                        } else {
+                            tracing::warn!(
+                                "RFC 8950: dropping IPv4 routes from peer {} via next-hop {} — need an egress ifindex",
                                 peer_id,
-                                update,
-                                None,
-                                None,
-                                bgp_attr,
-                                None,
-                                Some((nh6, ifindex)),
-                                bgp,
-                                peers,
-                                false,
+                                nhop,
                             );
                         }
-                    } else {
-                        tracing::warn!(
-                            "RFC 8950: dropping IPv4 routes from peer {} via next-hop {} — need a v6 next-hop and an egress ifindex",
-                            peer_id,
-                            nhop,
-                        );
                     }
-                }
+                },
                 MpReachAttr::Ipv6 {
                     snpa: _,
                     nhop,

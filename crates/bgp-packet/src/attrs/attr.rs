@@ -539,11 +539,11 @@ pub fn parse_bgp_update_attribute(
                         nhop,
                         updates,
                     } => {
-                        // RFC 8950 IPv4-over-IPv6: the next-hop is an
-                        // IPv6 address that `BgpNexthop` has no variant
-                        // for, so leave `bgp_attr.nexthop` unset — the
-                        // consumer in `bgp/route.rs` reads `nhop` off
-                        // the mp_update variant directly.
+                        // IPv4 unicast over MP_REACH carries either a v4
+                        // next-hop (plain RFC 4760) or a v6 one (RFC 8950
+                        // IPv4-over-IPv6), so leave `bgp_attr.nexthop`
+                        // unset — the consumer in `bgp/route.rs` reads
+                        // `nhop` off the mp_update variant directly.
                         mp_update = Some(MpReachAttr::Ipv4 {
                             snpa,
                             nhop,
@@ -725,6 +725,45 @@ mod tests {
                 assert_eq!(parsed, updates);
             }
             other => panic!("Flowspec MP_REACH must surface as mp_update, got {other:?}"),
+        }
+    }
+
+    /// Regression: plain IPv4 unicast carried in MP_REACH (RFC 4760 §3,
+    /// AFI=1/SAFI=1 with a v4 next-hop) used to be dropped at ingestion —
+    /// the `bgp/route.rs` consumer only matched the RFC 8950 v6-next-hop
+    /// shape. The attribute layer must surface it as `mp_update` with the
+    /// v4 next-hop intact and `bgp_attr.nexthop` left for the consumer to
+    /// stamp from the variant.
+    #[test]
+    fn mp_reach_ipv4_unicast_v4_nexthop_surfaces_as_mp_update() {
+        use crate::MpReachAttr;
+        use std::net::IpAddr;
+
+        let mut block = vec![0x40, 0x01, 0x01, 0x00]; // ORIGIN = IGP
+        // MP_REACH: AFI=1, SAFI=1, nhop_len=4, 192.0.2.1, SNPA=0,
+        // NLRI 10.0.0.0/24.
+        let value = [0x00u8, 0x01, 0x01, 0x04, 192, 0, 2, 1, 0x00, 24, 10, 0, 0];
+        block.push(0x80); // optional
+        block.push(14); // type = MP_REACH_NLRI
+        block.push(value.len() as u8);
+        block.extend_from_slice(&value);
+
+        let len = block.len() as u16;
+        let (_, bgp_attr, mp_update, _mp_withdraw, treat_as_withdraw) =
+            parse_bgp_update_attribute(&block, len, false, None).expect("attrs must parse");
+        assert!(!treat_as_withdraw);
+        let bgp_attr = bgp_attr.expect("attrs parsed");
+        assert!(
+            bgp_attr.nexthop.is_none(),
+            "the consumer stamps the next-hop from the mp_update variant"
+        );
+        match mp_update {
+            Some(MpReachAttr::Ipv4 { nhop, updates, .. }) => {
+                assert_eq!(nhop, IpAddr::V4("192.0.2.1".parse().unwrap()));
+                assert_eq!(updates.len(), 1);
+                assert_eq!(updates[0].prefix.to_string(), "10.0.0.0/24");
+            }
+            other => panic!("IPv4-unicast MP_REACH must surface as mp_update, got {other:?}"),
         }
     }
 
