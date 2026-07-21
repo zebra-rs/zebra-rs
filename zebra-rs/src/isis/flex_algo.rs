@@ -306,7 +306,10 @@ flex_algo_cb!(
     "/router/isis/flex-algo/affinity/exclude-any"
 );
 flex_algo_cb!(cb_srlg_exclude, "/router/isis/flex-algo/srlg-exclude");
-flex_algo_cb!(cb_ti_lfa, "/router/isis/flex-algo/fast-reroute/ti-lfa");
+flex_algo_cb!(
+    cb_frr_disable,
+    "/router/isis/flex-algo/fast-reroute/disable"
+);
 
 pub fn callback_register(isis: &mut Isis) {
     isis.callback_add("/router/isis/flex-algo", cb_entry);
@@ -333,7 +336,10 @@ pub fn callback_register(isis: &mut Isis) {
         cb_affinity_exclude_any,
     );
     isis.callback_add("/router/isis/flex-algo/srlg-exclude", cb_srlg_exclude);
-    isis.callback_add("/router/isis/flex-algo/fast-reroute/ti-lfa", cb_ti_lfa);
+    isis.callback_add(
+        "/router/isis/flex-algo/fast-reroute/disable",
+        cb_frr_disable,
+    );
 }
 
 #[cfg(test)]

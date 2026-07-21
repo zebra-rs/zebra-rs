@@ -57,5 +57,10 @@ pub struct FlexAlgoEntry {
     pub include_all: BTreeSet<String>,
     pub exclude_any: BTreeSet<String>,
     pub srlg_exclude: BTreeSet<String>,
-    pub ti_lfa: bool,
+    /// Per-algorithm fast-reroute OPT-OUT (`flex-algo <n> fast-reroute
+    /// disable`). Default `false` means this algorithm inherits the
+    /// instance-level TI-LFA setting, matching IOS-XR / Juniper / FRR,
+    /// where enabling TI-LFA protects every algorithm the router
+    /// participates in rather than algorithm 0 alone.
+    pub fast_reroute_disable: bool,
 }

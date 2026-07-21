@@ -474,19 +474,43 @@ $ sudo ip netns exec se ip route flush table 100
 
 ## A note on TI-LFA
 
-The instance-level `fast-reroute ti-lfa` knob protects algorithm 0 and works
-here; the YANG also exposes a per-algorithm
-`router isis flex-algo <n> fast-reroute ti-lfa`. As of this writing that
-per-algorithm knob does **not** produce repair paths on the SR-MPLS
-dataplane: enabling it yields no backup entries in the algorithm-128 RIB,
-and `show isis ti-lfa` reports no per-algorithm section. The repair-label
-resolver (`repair_segments_to_mpls_labels` in `zebra-rs/src/isis/tilfa.rs`)
-takes no algorithm argument and resolves the algorithm-0 Prefix-SID, so a
-repair list computed for algorithm 128 would in any case be built from
-algorithm-0 segments and could steer traffic back onto an excluded link.
-The SRv6 segment resolvers in the same file *are* algorithm-aware.
+TI-LFA is enabled once, at the instance level, with `fast-reroute ti-lfa`.
+Every algorithm the router participates in inherits it — there is no
+per-algorithm *enable* — and each algorithm's repair is computed inside its
+own constrained topology. This matches IOS-XR, Juniper and FRR. To exclude
+one algorithm, opt it out:
 
-Treat per-algorithm TI-LFA over SR-MPLS as not yet implemented.
+``` yaml
+    flex-algo:
+    - algo: 128
+      fast-reroute:
+        disable: null
+```
+
+The effective state per algorithm is visible in `show isis flex-algo`:
+
+``` shell
+tk>show isis flex-algo
+Local Flex-Algorithms:
+  Algo  Metric                 Priority Adv FRR       Constraints
+  128   igp                    -        no  n/a       exclude-any=trans-pacific
+```
+
+| FRR | meaning |
+|:---|:---|
+| `on` | inherited from the instance and computed |
+| `off` | instance-level TI-LFA is not enabled |
+| `disabled` | this algorithm opted out with `fast-reroute disable` |
+| `n/a` | inherited, but this dataplane has no per-algorithm repair yet |
+
+**This lab reads `n/a`, because per-algorithm TI-LFA is implemented for
+SRv6 only.** SR-MPLS is deliberately gated off: the repair-label resolver
+(`repair_segments_to_mpls_labels` in `zebra-rs/src/isis/tilfa.rs`) takes no
+algorithm argument and returns the first Prefix-SID it finds — the
+algorithm-0 one. A repair list built that way could steer traffic back over
+a link the FAD excluded, which is worse than leaving the algorithm
+unprotected, so it is not computed at all until the resolver is made
+algorithm-aware. The SRv6 segment resolvers in the same file already are.
 
 ## Appendix: Loopbacks and Prefix-SIDs
 
