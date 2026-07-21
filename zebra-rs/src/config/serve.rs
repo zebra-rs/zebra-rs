@@ -448,7 +448,7 @@ impl Show for ShowService {
         };
         self.tx.send(Message::DisplayTx(query)).await.unwrap();
         let serve = rx.await.unwrap();
-        let (bus_tx, mut bus_rx) = mpsc::channel::<String>(4);
+        let (bus_tx, bus_rx) = mpsc::channel::<String>(4);
         // The manager may rewrite the command (e.g. stripping a
         // `vrf <name>` selector to redirect into an instance task); use
         // its rewritten paths when present.
@@ -460,17 +460,36 @@ impl Show for ShowService {
         serve.tx.send(req).unwrap();
 
         let (tx, rx) = mpsc::channel(4);
-        tokio::spawn(async move {
-            while let Some(item) = bus_rx.recv().await {
-                match tx.send(Ok(ShowReply { str: item })).await {
-                    Ok(_) => {}
-                    Err(_) => {
-                        break;
-                    }
-                }
-            }
-        });
+        tokio::spawn(forward_show_stream(bus_rx, tx, request.line.clone()));
         Ok(Response::new(ReceiverStream::new(rx)))
+    }
+}
+
+/// Forward protocol-task show output to the gRPC response stream.
+///
+/// Show handlers that answer always send at least one item (an empty
+/// string for legitimately-empty output), so a bus that closes without
+/// a single item means no handler picked the command up. Surface that
+/// as a NotFound status instead of a clean empty stream, which clients
+/// would otherwise render as empty-output-and-success.
+async fn forward_show_stream(
+    mut bus_rx: mpsc::Receiver<String>,
+    tx: mpsc::Sender<Result<ShowReply, tonic::Status>>,
+    line: String,
+) {
+    let mut sent_any = false;
+    while let Some(item) = bus_rx.recv().await {
+        sent_any = true;
+        if tx.send(Ok(ShowReply { str: item })).await.is_err() {
+            return;
+        }
+    }
+    if !sent_any {
+        let _ = tx
+            .send(Err(tonic::Status::not_found(format!(
+                "no show handler produced output for '{line}'"
+            ))))
+            .await;
     }
 }
 
@@ -814,4 +833,38 @@ fn bind_abstract_uds(name: &str) -> anyhow::Result<tokio_stream::wrappers::UnixL
     let listener = UnixListener::from_std(std_listener)
         .map_err(|e| anyhow::anyhow!("register abstract VTY socket '@{name}' with tokio: {e}"))?;
     Ok(UnixListenerStream::new(listener))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn forward_show_stream_passes_items_through() {
+        let (bus_tx, bus_rx) = mpsc::channel::<String>(4);
+        let (tx, mut rx) = mpsc::channel(4);
+        bus_tx.send("line one\n".to_string()).await.unwrap();
+        bus_tx.send(String::new()).await.unwrap();
+        drop(bus_tx);
+
+        forward_show_stream(bus_rx, tx, "show version".to_string()).await;
+
+        assert_eq!(rx.recv().await.unwrap().unwrap().str, "line one\n");
+        assert_eq!(rx.recv().await.unwrap().unwrap().str, "");
+        assert!(rx.recv().await.is_none());
+    }
+
+    #[tokio::test]
+    async fn forward_show_stream_reports_unanswered_command() {
+        let (bus_tx, bus_rx) = mpsc::channel::<String>(4);
+        let (tx, mut rx) = mpsc::channel(4);
+        drop(bus_tx);
+
+        forward_show_stream(bus_rx, tx, "show nosuch".to_string()).await;
+
+        let status = rx.recv().await.unwrap().unwrap_err();
+        assert_eq!(status.code(), tonic::Code::NotFound);
+        assert!(status.message().contains("show nosuch"));
+        assert!(rx.recv().await.is_none());
+    }
 }
