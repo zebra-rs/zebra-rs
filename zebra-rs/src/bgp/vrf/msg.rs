@@ -216,6 +216,17 @@ pub enum BgpVrfMsg {
         srv6_shadow: crate::bgp::color_policy::FlexAlgoSrv6Shadow,
     },
 
+    /// Snapshot of the instance-wide `router bgp tracing { … }` config,
+    /// so the per-VRF task's gated trace sites (`bgp_vpn_trace!`,
+    /// `bgp_vrf_trace!`) can read it. The per-VRF `ConfigChannel` only
+    /// receives `/router/bgp/vrf/<name>/…` paths, so an instance-scoped
+    /// `/router/bgp/tracing/…` edit can't reach the task by config
+    /// dispatch — the global task mirrors it here on every change, the
+    /// same way `ColourSteering` mirrors the colour shadow. Spawn-time
+    /// initialisation goes through `spawn_bgp_vrf` instead, so a VRF
+    /// task never runs a single event with a stale snapshot.
+    Tracing(crate::bgp::tracing::BgpTracing),
+
     /// Tear the VRF task down cleanly. The event loop exits on the
     /// next select iteration after receiving this. Used by
     /// `despawn_bgp_vrf` and during daemon shutdown.
