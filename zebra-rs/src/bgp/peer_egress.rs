@@ -226,7 +226,7 @@ impl Engine {
         // Record in adj_out and dedup against the prior interned attr
         // (pointer identity) exactly as the cursor / event-driven path does:
         // a re-advertise of the same attr records but does not re-send.
-        let prev = self.adj_out.add(prefix, rib);
+        let prev = self.adj_out.record_out(prefix, rib, self.add_path);
         let already_sent = prev.is_some_and(|p| Arc::ptr_eq(&p.attr, &arc));
         if !already_sent {
             super::update_group::send_ipv4_direct(&self.ctx, vec![(arc, nlri)], None);
