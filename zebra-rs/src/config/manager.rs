@@ -867,13 +867,6 @@ impl ConfigManager {
             Ok(output) => match self.config_to_commands(&output) {
                 Ok((format, cmds)) => {
                     let mut rejected = Vec::new();
-                    // Bail loudly rather than skipping the loop: with the
-                    // mode missing every command would go unapplied while
-                    // `rejected` stayed empty, so the summary below would
-                    // report "applied N of N" having applied none — the
-                    // exact silent-success this logging exists to kill.
-                    // (Unreachable today: `init` installs the mode and
-                    // `config_to_commands` above already unwrapped it.)
                     let Some(mode) = self.modes.get("configure") else {
                         tracing::error!(
                             "startup config {}: configure mode unavailable; nothing applied",
