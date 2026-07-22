@@ -310,6 +310,7 @@
 /router/bgp/vrf/neighbor/afi-safi/long-lived-graceful-restart	container
 /router/bgp/vrf/neighbor/afi-safi/long-lived-graceful-restart/enabled	leaf
 /router/bgp/vrf/neighbor/afi-safi/long-lived-graceful-restart/restart-time	leaf
+/router/bgp/vrf/neighbor/afi-safi/next-hop-self	leaf
 /router/bgp/vrf/neighbor/afi-safi/next-hop-unchanged	leaf
 /router/bgp/vrf/neighbor/description	leaf
 /router/bgp/vrf/neighbor/peer-group	leaf

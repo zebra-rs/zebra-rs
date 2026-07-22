@@ -41,7 +41,7 @@ module zebra-bgp-afi-knobs {
      is the only thing standing between a typo and a silently ignored
      commit.
 
-     Two knobs are deliberately NOT here:
+     One knob is deliberately NOT here:
 
        * `graceful-restart` — the global container takes
          `mp-afi-safi-graceful-restart-config`, whose `enabled` leaf
@@ -50,12 +50,8 @@ module zebra-bgp-afi-knobs {
          tree and would be wrong under `vrf/neighbor`. The global
          container also carries `if-feature` and three `config false`
          state leaves the per-VRF one has no use for.
-       * `next-hop-self` — not yet imported into the per-VRF subtree at
-         all (it needs neighbor-group precedence resolution). It belongs
-         in this grouping the moment it is, and moving it here should be
-         part of that change.
 
-     Both exclusions are also recorded, with reasons, in
+     That exclusion is also recorded, with its reason, in
      VRF_AFI_KNOB_EXCLUSIONS / docs/orphan-report.txt.";
 
   grouping bgp-neighbor-afi-knobs {
@@ -115,6 +111,40 @@ module zebra-bgp-afi-knobs {
          filtered), `srv6-relax` SRv6-relaxed (SID-less routes still
          exchanged). Absent = no SRv6 encapsulation filtering for the
          family.";
+    }
+
+    leaf next-hop-self {
+      ext:help "Advertise self as next hop to this neighbor";
+      ext:sort "30";
+      type boolean;
+      description
+        "Advertise our own address as the BGP next-hop for routes sent
+         to this neighbor in this address family, even when the route
+         was learned from another peer. Equivalent to `neighbor X
+         next-hop-self` (per address-family) in FRR / Cisco IOS.
+
+         By default the next-hop is rewritten to self only for eBGP and
+         locally-originated routes; a route learned from one iBGP/eBGP
+         peer and reflected/forwarded to another keeps its received
+         next-hop. Setting this forces next-hop-self on those forwarded
+         routes too.
+
+         Required on the iBGP IPv4/IPv6 Labeled-Unicast session an
+         Inter-AS MPLS/VPN Option C ASBR runs toward its PE, and on the
+         iBGP VPNv4 session an Inter-AS Option B ASBR runs toward its PE:
+         the PE must resolve the ASBR's loopback (reachable via the IGP)
+         and push the ASBR's swap label, not the unreachable foreign-AS
+         next-hop carried across the inter-AS eBGP link. Honored on the
+         Labeled-Unicast (SAFI 4) and VPNv4 (SAFI 128) advertise paths.
+
+         Unlike the other knobs here this one is not simply stored: the
+         statement is recorded verbatim and the EFFECTIVE value is then
+         resolved through neighbor-group precedence
+         (`neighbor_group::resolve_next_hop_self`) — explicit statement
+         first, else the referenced group's per-family opinion, else
+         off. Both subtrees do that resolution, the global neighbor in
+         its config callback and the per-VRF neighbor in
+         `materialize_peers`.";
     }
 
     leaf next-hop-unchanged {

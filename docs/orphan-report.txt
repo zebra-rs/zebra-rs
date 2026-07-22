@@ -21,8 +21,8 @@ in src/bgp/config.rs (an empty relative path, easy to miss when
 grepping for registrations), and it creates/tears down the peer when
 the list entry itself is set/deleted.
 
-Total settable schema nodes: 287
-Handled: 274
+Total settable schema nodes: 288
+Handled: 275
 Orphans: 3
 
 Note: these orphans have no config callback but are kept intentionally.
@@ -47,11 +47,24 @@ next-hop-unchanged, encapsulation-type), sharing one setter per knob from
 src/bgp/afi_knob.rs so the two subtrees cannot diverge in meaning. The
 `vrf_afi_knob_parity` test pins the knob *set*: importing a knob to the
 global neighbor without a per-VRF counterpart fails unless it is listed in
-VRF_AFI_KNOB_EXCLUSIONS with a reason. Currently excluded there:
-next-hop-self (needs neighbor-group precedence resolution) and
-policy/prefix-set in+out (need a policy-actor Register, which BgpVrf has no
-channel for). Unlike the global neighbor these are staged and applied by
+VRF_AFI_KNOB_EXCLUSIONS with a reason. Currently excluded there: only
+policy/prefix-set in+out, which need a policy-actor Register that BgpVrf has
+no channel for (and peer_policy_ident encodes an index into the GLOBAL
+PeerMap, so a per-VRF peer would cross-wire onto whichever global peer sits
+at that index). Unlike the global neighbor these are staged and applied by
 materialize_peers, so an edit takes effect on the next VRF respawn.
+
+next-hop-self is imported as of this change. It is the one knob that is not
+merely stored: the staged value is the verbatim statement, and the effective
+value is resolved through neighbor-group precedence
+(neighbor_group::resolve_next_hop_self) -- by the config callback on the
+global neighbor, and by materialize_peers for a per-VRF peer, using the same
+helper so the precedence rule has a single implementation.
+
+The shared leaves themselves live in zebra-bgp-afi-knobs.yang and are `uses`d
+by both subtrees, so they cannot diverge in TYPE either; graceful-restart is
+the sole knob still defined per-subtree, because the global container's
+`must` path is anchored to the global neighbor's depth in the tree.
 
 Note: /router/bgp/vrf/neighbor/timers exposes only connect-retry-time,
 hold-time and idle-hold-time — the three leaves crate::bgp::timer::Config

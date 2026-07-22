@@ -790,6 +790,15 @@ vrf_afi_knob! {
     /// `… afi-safi <af> encapsulation-type <srv6|srv6-relax>`.
     config_vrf_neighbor_afi_safi_encapsulation_type => set_encapsulation_type
 }
+vrf_afi_knob! {
+    /// `… afi-safi <af> next-hop-self <bool>`.
+    ///
+    /// Records the verbatim statement only. The effective value is
+    /// resolved through neighbor-group precedence by `materialize_peers`,
+    /// which already holds the group map — the global neighbor does the
+    /// same resolution in its own callback against `Bgp::neighbor_groups`.
+    config_vrf_neighbor_afi_safi_next_hop_self => set_next_hop_self_explicit
+}
 
 /// `… afi-safi <af> long-lived-graceful-restart enabled` — the odd one
 /// out: [`super::afi_knob::set_llgr`] keys off presence alone and takes
