@@ -1,0 +1,53 @@
+# PE1 — the router under test (AS 65000). A single VRF (vrf-cust) holds
+# *two* eBGP PE-CE sessions, one per CE. This is the shape issue #2077
+# found to have zero coverage: every other BDD config puts at most one
+# neighbor under a `router bgp vrf` block, so nothing exercised the
+# ident assignment that `materialize_peers` performs per peer.
+#
+# There is no VPNv4 core here on purpose — the second CE *is* the far
+# end. PE1 puts both CE-learned prefixes in vrf-cust's Loc-RIB and
+# re-advertises each to the other CE, so a CE-to-CE ping proves both
+# sessions carry routes rather than merely reaching Established.
+vrf:
+- name: vrf-cust
+  ipv4:
+    route-target:
+      import:
+      - 65000:100
+      export:
+      - 65000:100
+interface:
+- if-name: lo
+  ipv4:
+    address: 1.1.1.1/32
+- if-name: ce1
+  vrf: vrf-cust
+  ipv4:
+    address: 10.1.0.1/30
+- if-name: ce2
+  vrf: vrf-cust
+  ipv4:
+    address: 10.2.0.1/30
+router:
+  bgp:
+    global:
+      as: 65000
+      router-id: 1.1.1.1
+    vrf:
+    - name: vrf-cust
+      rd: 65000:1
+      neighbor:
+      # Both CE peers live under the one VRF. Peer ordering matters to
+      # the bug this guards: `materialize_peers` walks `cfg.neighbors`
+      # (a BTreeMap, so ascending address order) and every peer past the
+      # first is the one that used to be mis-identified.
+      - remote-address: 10.1.0.2
+        remote-as: 65001
+        afi-safi:
+        - name: ipv4
+          enabled: true
+      - remote-address: 10.2.0.2
+        remote-as: 65002
+        afi-safi:
+        - name: ipv4
+          enabled: true
