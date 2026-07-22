@@ -21,8 +21,8 @@ in src/bgp/config.rs (an empty relative path, easy to miss when
 grepping for registrations), and it creates/tears down the peer when
 the list entry itself is set/deleted.
 
-Total settable schema nodes: 278
-Handled: 265
+Total settable schema nodes: 281
+Handled: 268
 Orphans: 3
 
 Note: these orphans have no config callback but are kept intentionally.
@@ -40,6 +40,21 @@ handled above. The tracing subtrees (/router/bgp/tracing and
 /router/bgp/neighbor/tracing) have no per-node callbacks; the whole
 subtree is handled by config_tracing_dispatch in src/bgp/tracing.rs, so
 they count as handled above.
+
+Note: /router/bgp/vrf/neighbor/timers exposes only connect-retry-time,
+hold-time and idle-hold-time — the three leaves crate::bgp::timer::Config
+is actually read for. It deliberately does NOT `uses neighbor-group-timers`
+the way the global neighbor's timers container does, because three leaves
+of that grouping (advertisement-interval, originate-interval,
+delay-open-time) are staged onto PeerConfig::timer and never consumed by
+any timer-arming path. They are counted as handled orphans-by-another-name
+on the global neighbor (they have callbacks, they just do nothing); adding
+them under the VRF neighbor would have shipped three more knobs that
+silently no-op. Note also that the advertisement interval (MRAI) is NOT in
+this container on either neighbor: it comes from the AdvInterval snapshot
+configured under /router/bgp/timer/adv-interval, which has no per-VRF
+plumbing, so a per-VRF session always runs the stock 30s eBGP / 5s iBGP
+cadence.
 
 == Handler paths with no schema node (stale/other) ==
   /community-list

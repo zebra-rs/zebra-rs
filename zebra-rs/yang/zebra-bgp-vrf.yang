@@ -186,6 +186,68 @@ module zebra-bgp-vrf {
            neighbors` output. May contain spaces: the value is the
            rest of the line.";
       }
+      container timers {
+        ext:help "Per-neighbor BGP timers";
+        description
+          "Session timers for this CE peer. Deliberately NOT `uses
+           neighbor-group-timers` (the grouping the global neighbor
+           takes): three of that grouping's leaves
+           (advertisement-interval, originate-interval,
+           delay-open-time) are staged onto `PeerConfig::timer` and
+           never read by any timer-arming path, so mirroring it here
+           would expose knobs that silently do nothing. Only the three
+           leaves `crate::bgp::timer::Config` actually consumes are
+           modelled.
+
+           These are applied by `materialize_peers` when the peer is
+           built, so an edit takes effect on the next VRF respawn or
+           `clear bgp` rather than on the live session.
+
+           Note this container does NOT cover the advertisement
+           interval (MRAI): that is paced by the `AdvInterval`
+           snapshot on the peer, configured under the instance-level
+           `router bgp timer adv-interval`, which does not reach
+           per-VRF tasks. A per-VRF session therefore still runs the
+           stock 30s eBGP / 5s iBGP MRAI.";
+        leaf connect-retry-time {
+          ext:help "ConnectRetry timer (seconds)";
+          type uint16 {
+            range "1..max";
+          }
+          units "seconds";
+          description
+            "Time interval for the ConnectRetryTimer, pacing the
+             Connect/Active redial loop. Defaults to 120s (RFC 4271
+             §8.2.2) when unset.";
+          reference
+            "RFC 4271: A Border Gateway Protocol 4 (BGP-4),
+             Section 8.2.2.";
+        }
+        leaf hold-time {
+          ext:help "Hold timer negotiated with the peer (seconds)";
+          type uint16 {
+            range "0 | 3..65535";
+          }
+          units "seconds";
+          description
+            "Hold Time proposed in this session's OPEN; the session
+             uses the smaller of this and the peer's. Must be 0 or at
+             least 3. Defaults to 180s when unset.";
+          reference
+            "RFC 4271: A Border Gateway Protocol 4 (BGP-4),
+             Section 4.2.";
+        }
+        leaf idle-hold-time {
+          ext:help "IdleHold timer before reconnect (seconds)";
+          type uint16 {
+            range "0..max";
+          }
+          units "seconds";
+          description
+            "Time the FSM dwells in Idle before the automatic restart
+             re-arms the connect. Defaults to 5s when unset.";
+        }
+      }
       list afi-safi {
         ext:help "Per-address-family activation for this CE peer";
         key "name";
