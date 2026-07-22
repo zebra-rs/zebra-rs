@@ -451,8 +451,16 @@ fn materialize_peers(
         peer.config.mp = mp;
         peer.config.mp_explicit = nbr_cfg.mp_explicit.clone();
 
-        peer.start();
         vrf.peers.insert_with_key(PeerKey::Addr(*addr), peer);
+        // `PeerMap::insert_with_key` assigns the stable ident used in every
+        // timer/FSM message. Starting before insertion leaves every peer at
+        // Peer::new's ident 0, so a second neighbor's Start events are
+        // delivered to the first neighbor and the second session never
+        // leaves Idle/Active.
+        vrf.peers
+            .get_mut(addr)
+            .expect("peer was just inserted")
+            .start();
         count += 1;
     }
     count
