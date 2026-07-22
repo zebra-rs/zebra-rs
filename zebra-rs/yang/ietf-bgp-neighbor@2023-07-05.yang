@@ -179,33 +179,9 @@ submodule ietf-bgp-neighbor {
       // Shared verbatim with the per-VRF neighbor
       // (/router/bgp/vrf/neighbor/afi-safi) so the two subtrees are the
       // same definition rather than two copies. See
-      // zebra-bgp-afi-knobs.yang for why graceful-restart and
-      // next-hop-self stay defined per-subtree.
+      // zebra-bgp-afi-knobs.yang for why graceful-restart stays defined
+      // per-subtree.
       uses zbak:bgp-neighbor-afi-knobs;
-      leaf next-hop-self {
-        ext:help "Advertise self as next hop to this neighbor";
-        ext:sort "30";
-        type boolean;
-        description
-          "Advertise our own address as the BGP next-hop for routes sent
-           to this neighbor in this address family, even when the route
-           was learned from another peer. Equivalent to `neighbor X
-           next-hop-self` (per address-family) in FRR / Cisco IOS.
-
-           By default the next-hop is rewritten to self only for eBGP and
-           locally-originated routes; a route learned from one iBGP/eBGP
-           peer and reflected/forwarded to another keeps its received
-           next-hop. Setting this forces next-hop-self on those forwarded
-           routes too.
-
-           Required on the iBGP IPv4/IPv6 Labeled-Unicast session an
-           Inter-AS MPLS/VPN Option C ASBR runs toward its PE, and on the
-           iBGP VPNv4 session an Inter-AS Option B ASBR runs toward its PE:
-           the PE must resolve the ASBR's loopback (reachable via the IGP)
-           and push the ASBR's swap label, not the unreachable foreign-AS
-           next-hop carried across the inter-AS eBGP link. Honored on the
-           Labeled-Unicast (SAFI 4) and VPNv4 (SAFI 128) advertise paths.";
-      }
       container policy {
         ext:sort "40";
         ext:help "Per-family route-policy references";

@@ -4973,13 +4973,6 @@ mod bgp_config_audit_tests {
     /// below `afi-safi`.
     const VRF_AFI_KNOB_EXCLUSIONS: &[(&str, &str)] = &[
         (
-            "next-hop-self",
-            "Tier 2: needs neighbor-group precedence resolution \
-             (neighbor_group::resolve_next_hop_self) on top of the verbatim \
-             statement. materialize_peers already receives the groups map, so \
-             this is a small follow-up rather than a structural gap.",
-        ),
-        (
             "policy/in",
             "Needs a policy-actor Register to resolve the name; BgpVrf holds \
              no policy_tx, and peer_policy_ident encodes an index into the \

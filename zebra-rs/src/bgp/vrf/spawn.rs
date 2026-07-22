@@ -470,6 +470,33 @@ fn materialize_peers(
         // from) already arrived with the config adoption above.
         peer.config.mp = mp;
 
+        // `next-hop-self` is the one imported knob that is not simply
+        // stored: like `mp`, the staged value is the *verbatim* statement
+        // and the effective value has to be resolved through
+        // neighbor-group precedence (explicit wins, else the group's
+        // per-family opinion, else off). The global neighbor does this in
+        // its config callback against `Bgp::neighbor_groups`; here the
+        // same helper runs against the `groups` map this function is
+        // already handed, so the precedence rule has one implementation.
+        //
+        // Resolve over the negotiated families plus any family carrying an
+        // explicit statement: a statement for a family that never
+        // negotiates is inert, but resolving it costs nothing and keeps
+        // the stored state honest if the family is enabled later.
+        let nhs_families: std::collections::BTreeSet<AfiSafi> = peer
+            .config
+            .mp
+            .0
+            .keys()
+            .copied()
+            .chain(peer.config.nhs_explicit.keys().copied())
+            .collect();
+        for fam in nhs_families {
+            let value =
+                super::super::neighbor_group::resolve_next_hop_self(groups, &peer.config, fam);
+            peer.config.sub.entry(fam).or_default().next_hop_self = value;
+        }
+
         vrf.peers.insert_with_key(PeerKey::Addr(*addr), peer);
         // `PeerMap::insert_with_key` assigns the stable ident used in every
         // timer/FSM message. Starting before insertion leaves every peer at
@@ -953,6 +980,106 @@ mod tests {
             pd.config.mp.has(&ipv6u) && pd.config.mp.has(&ipv4u),
             "explicit afi-safi ipv4 enabled adds v4 over a v6 session"
         );
+    }
+
+    /// `next-hop-self` is the only imported knob whose staged value is
+    /// the *verbatim* statement rather than the effective one, so it is
+    /// the only one where the wholesale config adoption is not the whole
+    /// story: `materialize_peers` must additionally resolve
+    /// explicit-wins-else-group-else-off, the same precedence the global
+    /// neighbor's callback applies. All three arms are pinned here.
+    #[tokio::test]
+    async fn materialize_peers_resolves_next_hop_self_through_group_precedence() {
+        use super::super::super::neighbor_group::{GroupAfiSafi, NeighborGroup};
+        use super::super::super::vrf_config::{BgpVrfConfig, BgpVrfNeighborConfig};
+        use super::super::inst::BgpVrf;
+        use crate::context::ProtoContext;
+        use bgp_packet::{Afi, AfiSafi, Safi};
+
+        let (global_tx, _global_rx) = unbounded_channel::<BgpGlobalMsg>();
+        let ctx = ProtoContext::default_table_no_rib();
+        let (_rib_tx, rib_rx) = unbounded_channel();
+        let (mut vrf, _inbox) = BgpVrf::new(
+            "v1".to_string(),
+            ctx,
+            Ipv4Addr::UNSPECIFIED,
+            65000,
+            /* label */ 16,
+            global_tx,
+            rib_rx,
+        );
+
+        let ipv4u = AfiSafi::new(Afi::Ip, Safi::Unicast);
+
+        // Group turns next-hop-self ON for IPv4 unicast.
+        let mut g1 = NeighborGroup::default();
+        g1.afi_safi.insert(
+            ipv4u,
+            GroupAfiSafi {
+                enabled: true,
+                next_hop_self: Some(true),
+            },
+        );
+        let mut groups = BTreeMap::new();
+        groups.insert("g1".to_string(), g1);
+
+        let inherits: std::net::IpAddr = "192.0.2.1".parse().unwrap();
+        let overrides: std::net::IpAddr = "192.0.2.2".parse().unwrap();
+        let bare: std::net::IpAddr = "192.0.2.3".parse().unwrap();
+
+        let mut cfg = BgpVrfConfig::default();
+
+        // 1. No own statement, references the group → inherits `true`.
+        cfg.neighbors.insert(inherits, {
+            let mut n = BgpVrfNeighborConfig {
+                remote_as: Some(65001),
+                ..Default::default()
+            };
+            n.config.neighbor_group = Some("g1".to_string());
+            n
+        });
+
+        // 2. Explicit `false` against the group's `true` → explicit wins.
+        //    This is the arm that would silently pass if the resolution
+        //    were skipped and the group consulted directly.
+        cfg.neighbors.insert(overrides, {
+            let mut n = BgpVrfNeighborConfig {
+                remote_as: Some(65002),
+                ..Default::default()
+            };
+            n.config.neighbor_group = Some("g1".to_string());
+            n.config.nhs_explicit.insert(ipv4u, false);
+            n
+        });
+
+        // 3. Neither → off.
+        cfg.neighbors.insert(
+            bare,
+            BgpVrfNeighborConfig {
+                remote_as: Some(65003),
+                ..Default::default()
+            },
+        );
+
+        materialize_peers(&mut vrf, &cfg, &groups);
+
+        let nhs = |addr: &std::net::IpAddr| -> bool {
+            vrf.peers
+                .get(addr)
+                .expect("peer inserted")
+                .config
+                .sub
+                .get(&ipv4u)
+                .map(|s| s.next_hop_self)
+                .unwrap_or(false)
+        };
+
+        assert!(nhs(&inherits), "group's next-hop-self must be inherited");
+        assert!(
+            !nhs(&overrides),
+            "an explicit `false` must beat the group's `true`"
+        );
+        assert!(!nhs(&bare), "no statement and no group → off");
     }
 
     /// A CE neighbor that references a `neighbor-group` inherits the

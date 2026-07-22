@@ -4401,6 +4401,10 @@ impl Bgp {
             super::vrf_config::config_vrf_neighbor_afi_safi_encapsulation_type,
         );
         self.callback_add(
+            "/router/bgp/vrf/neighbor/afi-safi/next-hop-self",
+            super::vrf_config::config_vrf_neighbor_afi_safi_next_hop_self,
+        );
+        self.callback_add(
             "/router/bgp/vrf/afi-safi/ipv4",
             super::vrf_config::config_vrf_afi_ipv4,
         );
