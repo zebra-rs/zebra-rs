@@ -581,12 +581,28 @@ pub fn config_vrf_neighbor(bgp: &mut Bgp, mut args: Args, op: ConfigOp) -> Optio
     Some(())
 }
 
+/// Borrow a staged neighbor without allowing trailing Delete callbacks to
+/// resurrect a list entry already removed by [`config_vrf_neighbor`]. Set
+/// callbacks may still arrive before the list-key callback, so they retain
+/// lazy creation.
+fn neighbor_entry(
+    cfg: &mut BgpVrfConfig,
+    address: IpAddr,
+    op: ConfigOp,
+) -> Option<&mut BgpVrfNeighborConfig> {
+    match op {
+        ConfigOp::Set => Some(cfg.neighbors.entry(address).or_default()),
+        ConfigOp::Delete => cfg.neighbors.get_mut(&address),
+        _ => None,
+    }
+}
+
 /// `set router bgp vrf <NAME> neighbor <addr> remote-as <ASN>`.
 pub fn config_vrf_neighbor_remote_as(bgp: &mut Bgp, mut args: Args, op: ConfigOp) -> Option<()> {
     let name = args.string()?;
     let addr = args.addr()?;
     let cfg = vrf_entry(bgp, name, op)?;
-    let nbr = cfg.neighbors.entry(addr).or_default();
+    let nbr = neighbor_entry(cfg, addr, op)?;
     match op {
         ConfigOp::Set => nbr.remote_as = Some(args.u32()?),
         ConfigOp::Delete => nbr.remote_as = None,
@@ -600,7 +616,7 @@ pub fn config_vrf_neighbor_peer_group(bgp: &mut Bgp, mut args: Args, op: ConfigO
     let name = args.string()?;
     let addr = args.addr()?;
     let cfg = vrf_entry(bgp, name, op)?;
-    let nbr = cfg.neighbors.entry(addr).or_default();
+    let nbr = neighbor_entry(cfg, addr, op)?;
     match op {
         ConfigOp::Set => nbr.peer_group = Some(args.string()?),
         ConfigOp::Delete => nbr.peer_group = None,
@@ -614,7 +630,7 @@ pub fn config_vrf_neighbor_description(bgp: &mut Bgp, mut args: Args, op: Config
     let name = args.string()?;
     let addr = args.addr()?;
     let cfg = vrf_entry(bgp, name, op)?;
-    let nbr = cfg.neighbors.entry(addr).or_default();
+    let nbr = neighbor_entry(cfg, addr, op)?;
     match op {
         ConfigOp::Set => nbr.description = Some(args.string()?),
         ConfigOp::Delete => nbr.description = None,
@@ -640,7 +656,7 @@ pub fn config_vrf_neighbor_afi_safi_enabled(
     let addr = args.addr()?;
     let afi_safi: AfiSafi = args.afi_safi()?;
     let cfg = vrf_entry(bgp, name, op)?;
-    let nbr = cfg.neighbors.entry(addr).or_default();
+    let nbr = neighbor_entry(cfg, addr, op)?;
     match op {
         ConfigOp::Set => {
             let enabled = args.boolean()?;
@@ -1161,6 +1177,33 @@ mod tests {
         assert!(nbr.peer_group.is_none());
         assert!(nbr.description.is_none());
         assert!(nbr.mp_explicit.is_empty());
+    }
+
+    #[test]
+    fn neighbor_child_deletes_do_not_recreate_a_removed_neighbor() {
+        let address: IpAddr = "192.0.2.1".parse().unwrap();
+        let mut cfg = BgpVrfConfig::default();
+        cfg.neighbors.entry(address).or_default().remote_as = Some(65001);
+
+        // The list callback runs first when the whole neighbor is deleted.
+        // Trailing child callbacks must traverse existing state only.
+        cfg.neighbors.remove(&address);
+        for _ in 0..4 {
+            assert!(neighbor_entry(&mut cfg, address, ConfigOp::Delete).is_none());
+        }
+        assert!(cfg.neighbors.is_empty());
+    }
+
+    #[test]
+    fn neighbor_child_set_can_create_before_the_list_key_callback() {
+        let address: IpAddr = "192.0.2.1".parse().unwrap();
+        let mut cfg = BgpVrfConfig::default();
+
+        neighbor_entry(&mut cfg, address, ConfigOp::Set)
+            .unwrap()
+            .remote_as = Some(65001);
+
+        assert_eq!(cfg.neighbors[&address].remote_as, Some(65001));
     }
 
     #[test]
