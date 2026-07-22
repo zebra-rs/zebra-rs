@@ -867,16 +867,28 @@ impl ConfigManager {
             Ok(output) => match self.config_to_commands(&output) {
                 Ok((format, cmds)) => {
                     let mut rejected = Vec::new();
-                    if let Some(mode) = self.modes.get("configure") {
-                        for cmd in cmds.iter() {
-                            // `execute` answers a successful set/delete
-                            // with `Show` (same contract the Deploy
-                            // handler checks); anything else means the
-                            // command was refused.
-                            let (code, _output, _paths) = self.execute(mode, cmd);
-                            if code != ExecCode::Show {
-                                rejected.push(cmd.clone());
-                            }
+                    // Bail loudly rather than skipping the loop: with the
+                    // mode missing every command would go unapplied while
+                    // `rejected` stayed empty, so the summary below would
+                    // report "applied N of N" having applied none — the
+                    // exact silent-success this logging exists to kill.
+                    // (Unreachable today: `init` installs the mode and
+                    // `config_to_commands` above already unwrapped it.)
+                    let Some(mode) = self.modes.get("configure") else {
+                        tracing::error!(
+                            "startup config {}: configure mode unavailable; nothing applied",
+                            self.config_path.display()
+                        );
+                        return;
+                    };
+                    for cmd in cmds.iter() {
+                        // `execute` answers a successful set/delete
+                        // with `Show` (same contract the Deploy
+                        // handler checks); anything else means the
+                        // command was refused.
+                        let (code, _output, _paths) = self.execute(mode, cmd);
+                        if code != ExecCode::Show {
+                            rejected.push(cmd.clone());
                         }
                     }
                     if !rejected.is_empty() {
