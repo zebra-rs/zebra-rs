@@ -270,6 +270,11 @@ tk.00-00                  *      178  0x00000001  0xb581      1190  0/0/0
   any local configuration.
 * The loopback advertises **two** Prefix-SIDs, one per algorithm.
 
+The two Adjacency SID labels (`15000`, `15001`) are handed out of the SRLB in
+the order the adjacencies come up, so which link gets which label varies from
+one `./up.sh` to the next. Only the *algorithm* they belong to is fixed —
+Adj-SIDs are shared by every algorithm.
+
 ## Examine the Flex-Algorithm state
 
 ``` shell
@@ -277,8 +282,8 @@ tk>show isis flex-algo
 Area 49.0000:
 
 Local Flex-Algorithms:
-  Algo  Metric                 Priority Adv Constraints
-  128   igp                    -        no  exclude-any=trans-pacific
+  Algo  Metric                 Priority Adv FRR       Constraints
+  128   igp                    -        no  off       exclude-any=trans-pacific
 
 Level-2:
   Peer FADs:
@@ -300,15 +305,45 @@ Level-2:
 `Adv no` on the local entry means `tk` is not a FAD originator; it uses the
 definition learned from `ch` and `sg`, both of which appear under
 `Peer FADs`. Every one of the ten peers reports `[0, 128]`, so the whole
-domain participates.
+domain participates. `FRR off` is the TI-LFA state, explained at the end of
+this document.
 
 Right after `./up.sh` a node may briefly show `[0]` for a peer whose updated
 LSP is still flooding. It settles within a few seconds.
 
+Add an algorithm id to narrow the same view to one algorithm — the
+participation list drops the peers that do not run it, and the FAD table
+keeps only that row:
+
+``` shell
+tk>show isis flex-algo 128
+Area 49.0000:
+
+Local Flex-Algorithm 128:
+  Algo  Metric                 Priority Adv FRR       Constraints
+  128   igp                    -        no  off       exclude-any=trans-pacific
+
+L2 peers participating in algorithm 128:
+  se (0000.0000.0001)
+  sj (0000.0000.0002)
+  ch (0000.0000.0003)
+  da (0000.0000.0004)
+  va (0000.0000.0005)
+  at (0000.0000.0006)
+  ln (0000.0000.0007)
+  fr (0000.0000.0008)
+  sg (0000.0000.0009)
+  sy (0000.0000.0010)
+```
+
+That algorithm id is the entry point to every per-algorithm view:
+`show isis flex-algo <128-255> {route | topology | spf | graph | repair-list}`.
+The un-suffixed `show isis route|topology|spf|graph` stay algorithm-0 views.
+
 ## Algorithm 128: the constrained paths
 
 ``` shell
-tk>show isis flex-algo route algorithm 128
+tk>show isis flex-algo 128 route
 Area 49.0000:
 
 Level-2 Algorithm 128:
@@ -334,7 +369,7 @@ The reverse direction behaves the same way. On `se` (Seattle), which has a
 trans-Pacific link `se-sg` of its own:
 
 ``` shell
-se>show isis flex-algo route algorithm 128
+se>show isis flex-algo 128 route
 Area 49.0000:
 
 Level-2 Algorithm 128:
@@ -357,6 +392,96 @@ Seattle reaches Tokyo (`10.0.0.11`) eastwards via `se-ch` at a cost of 60,
 even though Singapore is a single directly-connected hop away on `se-sg`.
 Prefixes with two rows (`10.0.0.4`, `10.0.0.6`) are ECMP within
 algorithm 128.
+
+The older spelling `show isis flex-algo route algorithm 128` still parses and
+prints the same table, but it is a deprecated alias kept for existing
+scripts; `show isis flex-algo 128 route` is the supported form. Dropping the
+algorithm id — `show isis flex-algo route` — dumps every algorithm's RIB at
+once.
+
+## Look at the pruned topology itself
+
+The route table is the *result*. Three more per-algorithm views show the
+input and the intermediate steps, and each one has an algorithm-0 twin to
+compare against.
+
+`graph` is the raw link-state graph after the FAD has pruned it. On `se`,
+compare the two — the trans-Pacific neighbour is simply not there in
+algorithm 128:
+
+``` shell
+se>show isis graph
+
+L2 IS-IS Graph:
+
+Nodes:
+  se [0000.0000.0001] (id: 0)
+    Links:
+      -> sg (cost: 10)
+      -> sj (cost: 10)
+      -> ch (cost: 10)
+      <- sj (cost: 10)
+      <- ch (cost: 10)
+      <- sg (cost: 10)
+...
+
+se>show isis flex-algo 128 graph
+
+L2 algo 128 IS-IS Graph:
+
+Nodes:
+  se [0000.0000.0001] (id: 0)
+    Links:
+      -> sj (cost: 10)
+      -> ch (cost: 10)
+      <- sj (cost: 10)
+      <- ch (cost: 10)
+...
+```
+
+`sg` is gone from `se`'s adjacency list in algorithm 128 — and further down
+the same dump, `sj` has lost `sy` and `tk` for the same reason.
+
+`spf` is the tree computed over that graph, with the full path list per
+destination. Tokyo is the clearest case:
+
+``` shell
+se>show isis spf
+...
+  Destination tk, cost 20
+    [0] nexthop sj (se-sj)
+    [1] nexthop sg (se-sg)
+    paths:
+      [0] sj -> tk
+      [1] sg -> tk
+
+se>show isis flex-algo 128 spf
+...
+  Destination tk, cost 50
+    [0] nexthop ch (se-ch)
+    paths:
+      [0] ch -> ln -> fr -> sg -> tk
+      [1] ch -> va -> fr -> sg -> tk
+```
+
+`topology` is the same tree in the FRR-style table, prefixes included. The
+tail of `se`'s algorithm-128 table shows the AP nodes arriving late, parented
+by `sg` — that is the Europe-to-Asia entry point:
+
+``` shell
+se>show isis flex-algo 128 topology
+Area 49.0000:
+IS-IS paths to level-2 routers that speak IP (algorithm 128)
+ Vertex                 Type          Metric  Next-Hop  Interface  Parent
+ -------------------------------------------------------------------------
+ se
+ ...
+ sg                     TE-IS         40      ch        se-ch      fr
+ sy                     TE-IS         50      ch        se-ch      sg
+ tk                     TE-IS         50      ch        se-ch      sg
+ 10.0.0.10/32           IP TE         60      ch        se-ch      sy
+ 10.0.0.11/32           IP TE         60      ch        se-ch      tk
+```
 
 ## `show mpls ilm` — two label ranges, one table
 
@@ -509,15 +634,22 @@ in `se.yaml`, then compare:
 
 ``` shell
 se>show isis repair-list
-Level AFI   Prefix          Primary via    Repair via     Segments
-L2    ipv4  10.0.0.5/32     192.168.2.2    192.168.0.2    [16800, 15001, 16500]
+Level AFI   Prefix                 Primary via            Repair via             Segments
+L2    ipv4  10.0.0.5/32            192.168.2.2            192.168.0.2            [16800, 15000, 16500]
+L2    ipv4  10.0.0.7/32            192.168.2.2            192.168.0.2            [16800, 15001, 16700]
+L2    ipv4  10.0.0.8/32            192.168.0.2            192.168.2.2            [16700, 15001, 16800]
+L2    ipv4  192.168.11.0/24        192.168.2.2            192.168.0.2            [16800, 15000]
 
 se>show isis flex-algo 128 repair-list
-Level AFI   Prefix          Primary via    Repair via     Segments
-L2    ipv4  10.0.0.5/32     192.168.2.2    192.168.1.2    [18600, 15000, 18500]
+Level AFI   Prefix                 Primary via            Repair via             Segments
+L2    ipv4  10.0.0.5/32            192.168.2.2            192.168.1.2            [18600, 15001, 18500]
+L2    ipv4  10.0.0.7/32            192.168.2.2            192.168.1.2            [18600, 18700]
 ```
 
-Both protect the same prefix, but the algorithm-0 repair leaves over
+The two lists are computed independently, so they need not cover the same
+prefixes — each holds only what its own topology could produce a repair for.
+
+Take `10.0.0.5/32`, which both protect. The algorithm-0 repair leaves over
 `192.168.0.2` — that is `se-sg`, **the trans-Pacific link algorithm 128
 exists to avoid** — carrying algorithm-0 labels (`16xxx`). The
 algorithm-128 repair leaves over `192.168.1.2` (`se-sj`) with
@@ -528,7 +660,10 @@ algorithm's own topology *and* expressed with its own SIDs, or the backup
 path silently violates the constraint the algorithm was created to
 enforce. Adjacency segments (`15xxx`) are shared — an Adj-SID means "pop
 and forward over this link" regardless of algorithm, and the link is
-already known to be in the algorithm's topology.
+already known to be in the algorithm's topology. Which Adj-SID lands in a
+given segment list, and which of two equal-cost repairs wins, both depend on
+adjacency-formation order, so these exact values move between runs; the
+`16xxx` / `18xxx` split does not.
 
 When a node on the repair path advertises no Prefix-SID for this
 algorithm, the whole repair is dropped rather than approximated with an
