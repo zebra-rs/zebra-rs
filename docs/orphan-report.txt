@@ -21,8 +21,8 @@ in src/bgp/config.rs (an empty relative path, easy to miss when
 grepping for registrations), and it creates/tears down the peer when
 the list entry itself is set/deleted.
 
-Total settable schema nodes: 292
-Handled: 279
+Total settable schema nodes: 299
+Handled: 286
 Orphans: 3
 
 Note: these orphans have no config callback but are kept intentionally.
@@ -40,6 +40,19 @@ handled above. The tracing subtrees (/router/bgp/tracing and
 /router/bgp/neighbor/tracing) have no per-node callbacks; the whole
 subtree is handled by config_tracing_dispatch in src/bgp/tracing.rs, so
 they count as handled above.
+
+Note: /router/bgp/vrf/neighbor now also carries the transport / session
+knobs (transport/passive-mode, update-source, ebgp-multihop, ttl-security,
+port, ip-transparent, disable-connected-check). Each stages onto the peer's
+knobs_explicit and is resolved (explicit-else-neighbor-group-else-default)
+and applied by materialize_peers via apply_inherited_session_knobs, which
+reuses the same apply_* functions the global neighbor's live callbacks call.
+The remaining inheritable knobs (allowas-in, as-override, enforce-first-as,
+remove-private-as, route-reflector) are still inherited from a referenced
+neighbor-group but not yet exposed as per-neighbor leaves; auth (password,
+tcp-ao) and BFD are separate follow-ups. The `neighbor-group` leaf was
+renamed from `peer-group` to match the global neighbor and the list it
+resolves against.
 
 Note: /router/bgp/vrf/neighbor/afi-safi now mirrors the global neighbor's
 per-AFI knob set in full -- VRF_AFI_KNOB_EXCLUSIONS is empty and the

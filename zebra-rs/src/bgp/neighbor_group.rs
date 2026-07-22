@@ -1148,6 +1148,65 @@ pub(super) struct InheritOutcome {
     pub bfd_reapply: bool,
 }
 
+/// Resolve and apply the inheritable *session* knobs onto a freshly
+/// materialized peer, for a caller that does its own `mp` / next-hop-self
+/// resolution and has no live session to reconcile.
+///
+/// This is the per-VRF counterpart to [`apply_inherited`]. It cannot use
+/// that function directly for two reasons:
+///
+///   * [`apply_inherited`] calls [`recompute_peer_mp`], whose base family
+///     is a *forced* IPv4 unicast ([`effective_mp`]). A per-VRF CE peer
+///     derives its base from its own address instead — a bare IPv6 CE
+///     must negotiate IPv6 unicast only — so `materialize_peers` resolves
+///     `mp` itself and this helper leaves `config.mp` alone.
+///   * The auth / MSS / BFD knobs return cross-borrow *refresh* outcomes
+///     that a live global neighbor reconciles against its shared listener
+///     and BFD client. A CE peer is built before it dials and (today) has
+///     no such shared state, so those knobs are handled in their own
+///     phases; this helper covers only the knobs that are a pure mutation
+///     of peer state.
+///
+/// Returns nothing: every knob here applies at (re)spawn, and a bounce is
+/// meaningless for a peer that has not started. The knobs it does NOT yet
+/// cover (`password`, `ao_config`, `tcp_mss`, `update_source`'s BFD
+/// re-arm) are the auth / BFD follow-ups.
+pub(super) fn apply_inherited_session_knobs(
+    groups: &BTreeMap<String, NeighborGroup>,
+    peer: &mut Peer,
+) {
+    // ebgp-multihop before ttl-security: the two are mutually exclusive
+    // and each guard observes the other, so the order must match
+    // `apply_inherited`.
+    let ebgp_multihop = resolve_knob(groups, &peer.config, |k| k.ebgp_multihop);
+    super::config::apply_ebgp_multihop(peer, ebgp_multihop);
+    let ttl_security = resolve_knob(groups, &peer.config, |k| k.ttl_security).unwrap_or(false);
+    super::config::apply_ttl_security(peer, ttl_security);
+    let port = resolve_knob(groups, &peer.config, |k| k.port);
+    super::config::apply_port(peer, port);
+    let dcc = resolve_knob(groups, &peer.config, |k| k.disable_connected_check).unwrap_or(false);
+    super::config::apply_disable_connected_check(peer, dcc);
+    let ipt = resolve_knob(groups, &peer.config, |k| k.ip_transparent).unwrap_or(false);
+    super::config::apply_ip_transparent(peer, ipt);
+    let passive = resolve_knob(groups, &peer.config, |k| k.passive).unwrap_or(false);
+    super::config::apply_passive(peer, passive);
+    let allowas_in = resolve_knob(groups, &peer.config, |k| k.allowas_in);
+    super::config::apply_allowas_in(peer, allowas_in);
+    let as_override = resolve_knob(groups, &peer.config, |k| k.as_override).unwrap_or(false);
+    super::config::apply_as_override(peer, as_override);
+    let remove_private_as = resolve_knob(groups, &peer.config, |k| k.remove_private_as);
+    super::config::apply_remove_private_as(peer, remove_private_as);
+    let enforce_first_as =
+        resolve_knob(groups, &peer.config, |k| k.enforce_first_as).unwrap_or(false);
+    super::config::apply_enforce_first_as(peer, enforce_first_as);
+    let rr_client =
+        resolve_knob(groups, &peer.config, |k| k.route_reflector_client).unwrap_or(false);
+    super::config::apply_route_reflector_client(peer, rr_client);
+    let update_source = resolve_knob(groups, &peer.config, |k| k.update_source);
+    // The BFD re-arm this returns is only meaningful for a live session.
+    let _ = super::config::apply_update_source(peer, update_source);
+}
+
 pub(super) fn apply_inherited(
     groups: &BTreeMap<String, NeighborGroup>,
     policy_tx: &tokio::sync::mpsc::UnboundedSender<crate::policy::Message>,

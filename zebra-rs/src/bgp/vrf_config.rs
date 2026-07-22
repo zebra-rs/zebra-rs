@@ -661,8 +661,12 @@ pub fn config_vrf_neighbor_remote_as(bgp: &mut Bgp, mut args: Args, op: ConfigOp
     Some(())
 }
 
-/// `set router bgp vrf <NAME> neighbor <addr> peer-group <GROUP>`.
-pub fn config_vrf_neighbor_peer_group(bgp: &mut Bgp, mut args: Args, op: ConfigOp) -> Option<()> {
+/// `set router bgp vrf <NAME> neighbor <addr> neighbor-group <GROUP>`.
+pub fn config_vrf_neighbor_neighbor_group(
+    bgp: &mut Bgp,
+    mut args: Args,
+    op: ConfigOp,
+) -> Option<()> {
     let name = args.string()?;
     let addr = args.addr()?;
     let cfg = vrf_entry(bgp, name, op)?;
@@ -795,6 +799,110 @@ vrf_policy_ref! {
 vrf_policy_ref! {
     /// `… afi-safi <af> prefix-set out <name>`.
     config_vrf_neighbor_afi_safi_prefix_set_out => VrfPolicyRef::PrefixSetOut
+}
+
+/// Transport / session knobs, staged onto the neighbor's
+/// `config.knobs_explicit`. `materialize_peers` resolves each through
+/// neighbor-group precedence and applies it via the shared `apply_*`
+/// function — the same one the global neighbor's callback calls — so the
+/// two paths cannot disagree on a knob's meaning. Unlike the global
+/// callback these do not touch a live peer; a change lands on the next
+/// VRF respawn.
+pub fn config_vrf_neighbor_passive(bgp: &mut Bgp, mut args: Args, op: ConfigOp) -> Option<()> {
+    let vrf = args.string()?;
+    let addr = args.addr()?;
+    let cfg = vrf_entry(bgp, vrf, op)?;
+    let nbr = neighbor_entry(cfg, addr, op)?;
+    nbr.config.knobs_explicit.passive = match op {
+        ConfigOp::Set => Some(args.boolean()?),
+        ConfigOp::Delete => None,
+        _ => return Some(()),
+    };
+    Some(())
+}
+
+pub fn config_vrf_neighbor_update_source(
+    bgp: &mut Bgp,
+    mut args: Args,
+    op: ConfigOp,
+) -> Option<()> {
+    let vrf = args.string()?;
+    let addr = args.addr()?;
+    let cfg = vrf_entry(bgp, vrf, op)?;
+    let nbr = neighbor_entry(cfg, addr, op)?;
+    nbr.config.knobs_explicit.update_source = match op {
+        ConfigOp::Set => Some(args.addr()?),
+        ConfigOp::Delete => None,
+        _ => return Some(()),
+    };
+    Some(())
+}
+
+pub fn config_vrf_neighbor_ebgp_multihop(
+    bgp: &mut Bgp,
+    mut args: Args,
+    op: ConfigOp,
+) -> Option<()> {
+    let vrf = args.string()?;
+    let addr = args.addr()?;
+    let cfg = vrf_entry(bgp, vrf, op)?;
+    let nbr = neighbor_entry(cfg, addr, op)?;
+    nbr.config.knobs_explicit.ebgp_multihop = match op {
+        ConfigOp::Set => Some(args.u8()?),
+        ConfigOp::Delete => None,
+        _ => return Some(()),
+    };
+    Some(())
+}
+
+pub fn config_vrf_neighbor_ttl_security(bgp: &mut Bgp, mut args: Args, op: ConfigOp) -> Option<()> {
+    let vrf = args.string()?;
+    let addr = args.addr()?;
+    let cfg = vrf_entry(bgp, vrf, op)?;
+    let nbr = neighbor_entry(cfg, addr, op)?;
+    // Presence container: Set means enabled, Delete means forget the
+    // statement (fall back to the group / off).
+    nbr.config.knobs_explicit.ttl_security = op.is_set().then_some(true);
+    Some(())
+}
+
+pub fn config_vrf_neighbor_port(bgp: &mut Bgp, mut args: Args, op: ConfigOp) -> Option<()> {
+    let vrf = args.string()?;
+    let addr = args.addr()?;
+    let cfg = vrf_entry(bgp, vrf, op)?;
+    let nbr = neighbor_entry(cfg, addr, op)?;
+    nbr.config.knobs_explicit.port = match op {
+        ConfigOp::Set => Some(args.u16()?),
+        ConfigOp::Delete => None,
+        _ => return Some(()),
+    };
+    Some(())
+}
+
+pub fn config_vrf_neighbor_ip_transparent(
+    bgp: &mut Bgp,
+    mut args: Args,
+    op: ConfigOp,
+) -> Option<()> {
+    let vrf = args.string()?;
+    let addr = args.addr()?;
+    let cfg = vrf_entry(bgp, vrf, op)?;
+    let nbr = neighbor_entry(cfg, addr, op)?;
+    nbr.config.knobs_explicit.ip_transparent = op.is_set().then_some(true);
+    Some(())
+}
+
+pub fn config_vrf_neighbor_disable_connected_check(
+    bgp: &mut Bgp,
+    mut args: Args,
+    op: ConfigOp,
+) -> Option<()> {
+    let vrf = args.string()?;
+    let addr = args.addr()?;
+    let cfg = vrf_entry(bgp, vrf, op)?;
+    let nbr = neighbor_entry(cfg, addr, op)?;
+    nbr.config.knobs_explicit.disable_connected_check = op.is_set().then_some(true);
+    Some(())
 }
 
 /// `set router bgp vrf <NAME> neighbor <addr> afi-safi {ipv4|ipv6} enabled

@@ -167,14 +167,17 @@ module zebra-bgp-vrf {
         type inet:as-number;
         description
           "AS number of the remote peer. When unset, the value
-           inherited from the referenced `peer-group` applies.";
+           inherited from the referenced `neighbor-group` applies.";
       }
-      leaf peer-group {
-        ext:help "Peer-group to inherit attributes from";
+      leaf neighbor-group {
+        ext:help "Neighbor-group to inherit attributes from";
         type string;
         description
-          "Name of a `peer-group` whose attributes this neighbor
-           inherits. Plain string (not leafref) for staging.";
+          "Name of a `neighbor-group` whose attributes this neighbor
+           inherits. Same spelling as the global neighbor's
+           `neighbor-group` leaf, and resolves against the same
+           `router bgp neighbor-group <name>` list. Plain string (not
+           leafref) for staging.";
       }
       leaf description {
         ext:help "Free-form neighbor description";
@@ -251,6 +254,79 @@ module zebra-bgp-vrf {
             "Time the FSM dwells in Idle before the automatic restart
              re-arms the connect. Defaults to 5s when unset.";
         }
+      }
+
+      // Transport / session knobs, same names and types as the global
+      // neighbor. Each stages onto the peer's `knobs_explicit` and is
+      // resolved (explicit-wins-else-neighbor-group-else-default) and
+      // applied by `materialize_peers` via the shared `apply_*`
+      // functions, so a change takes effect on the next VRF respawn.
+      // The remaining inheritable knobs the global neighbor carries
+      // (allowas-in, as-override, enforce-first-as, remove-private-as,
+      // route-reflector) are still inherited from a referenced
+      // neighbor-group; exposing them as per-neighbor leaves is a
+      // follow-up.
+      container transport {
+        ext:help "Transport (TCP) session parameters";
+        leaf passive-mode {
+          ext:help "Do not actively connect; wait for the peer to dial";
+          type boolean;
+          description
+            "When true, this router never opens the connection to the
+             CE; it only accepts an inbound one. Same as the global
+             neighbor's transport/passive-mode.";
+        }
+      }
+      leaf update-source {
+        ext:help "Source address to bind for the outbound TCP connect";
+        type inet:ip-address;
+        description
+          "Local IP address to bind before the outbound connect to this
+           CE. Same as the global neighbor's update-source.";
+      }
+      leaf ebgp-multihop {
+        ext:help "Allow an eBGP CE up to N hops away (TTL 1-255)";
+        type uint8 {
+          range "1..255";
+        }
+        description
+          "Egress TTL for a multihop eBGP CE session. Ignored for iBGP.
+           Mutually exclusive with ttl-security — the resolver applies
+           ebgp-multihop first so the ttl-security guard sees it, matching
+           the global neighbor.";
+      }
+      container ttl-security {
+        ext:help "Enable GTSM: require a directly-connected CE (TTL 255)";
+        presence "Enable GTSM for this CE neighbor";
+        description
+          "GTSM (RFC 5082): send at TTL 255 and accept only TTL-255
+           inbound. Presence flag, mutually exclusive with
+           ebgp-multihop. Same as the global neighbor.";
+      }
+      leaf port {
+        ext:help "TCP port to dial this CE (default 179)";
+        type uint16 {
+          range "1..65535";
+        }
+        description
+          "Destination port for the active connect toward this CE.
+           Default 179. Same as the global neighbor's port.";
+      }
+      container ip-transparent {
+        ext:help "Bind a local address the host does not own";
+        presence "Set IP_TRANSPARENT on this CE's TCP socket";
+        description
+          "Set IP_TRANSPARENT / IPV6_TRANSPARENT so the session can bind
+           a non-local `update-source` address. Same as the global
+           neighbor; applied on connect only when update-source is set.";
+      }
+      container disable-connected-check {
+        ext:help "Allow a single-hop eBGP CE off-subnet";
+        presence "Skip the directly-connected-network check for this CE";
+        description
+          "Skip the directly-connected-network check for a single-hop
+           eBGP CE (e.g. a CE loopback reachable via a static route),
+           leaving the egress TTL at 1. Same as the global neighbor.";
       }
       list afi-safi {
         ext:help "Per-address-family activation for this CE peer";

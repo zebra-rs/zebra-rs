@@ -513,6 +513,15 @@ fn materialize_peers(
             peer.config.sub.entry(fam).or_default().next_hop_self = value;
         }
 
+        // Resolve + apply the inheritable session knobs (passive,
+        // ebgp-multihop, ttl-security, …) the same way the global
+        // neighbor does, layering the referenced neighbor-group under the
+        // peer's own explicit statements. `mp` and next-hop-self are done
+        // above (the VRF's base-family rule differs from the global one),
+        // so this covers everything else that is a pure peer mutation;
+        // auth and BFD knobs land in their own follow-ups.
+        super::super::neighbor_group::apply_inherited_session_knobs(groups, &mut peer);
+
         vrf.peers.insert_with_key(PeerKey::Addr(*addr), peer);
 
         // Bind the staged policy / prefix-set names and register a watch
@@ -838,6 +847,89 @@ mod tests {
         assert!(
             vrf.peers.get(&no_as).is_none(),
             "neighbor without remote-as skipped"
+        );
+    }
+
+    /// The transport / session knobs must be resolved through
+    /// neighbor-group precedence and applied to the built peer — the
+    /// per-VRF equivalent of the global neighbor's live callbacks.
+    /// Covers all three precedence arms in one peer plus the
+    /// ebgp-multihop↔ttl-security ordering.
+    #[tokio::test]
+    async fn materialize_peers_applies_session_knobs() {
+        use super::super::super::neighbor_group::{InheritableKnobs, NeighborGroup};
+        use super::super::super::vrf_config::{BgpVrfConfig, BgpVrfNeighborConfig};
+        use super::super::inst::BgpVrf;
+        use crate::context::ProtoContext;
+
+        let (global_tx, _global_rx) = unbounded_channel::<BgpGlobalMsg>();
+        let ctx = ProtoContext::default_table_no_rib();
+        let (_rib_tx, rib_rx) = unbounded_channel();
+        let (mut vrf, _inbox) = BgpVrf::new(
+            "v1".to_string(),
+            ctx,
+            Ipv4Addr::UNSPECIFIED,
+            65000,
+            16,
+            global_tx,
+            rib_rx,
+        );
+
+        // Group turns passive on and sets ebgp-multihop 5.
+        let mut g = NeighborGroup::default();
+        g.knobs = InheritableKnobs {
+            passive: Some(true),
+            ebgp_multihop: Some(5),
+            ..Default::default()
+        };
+        let mut groups = BTreeMap::new();
+        groups.insert("g1".to_string(), g);
+
+        let inherits: std::net::IpAddr = "192.0.2.1".parse().unwrap();
+        let overrides: std::net::IpAddr = "192.0.2.2".parse().unwrap();
+
+        let mut cfg = BgpVrfConfig::default();
+        // Inherits passive + ebgp-multihop from the group.
+        cfg.neighbors.insert(inherits, {
+            let mut n = BgpVrfNeighborConfig {
+                remote_as: Some(65001),
+                ..Default::default()
+            };
+            n.config.neighbor_group = Some("g1".to_string());
+            n
+        });
+        // Explicitly overrides ebgp-multihop; also sets ttl-security,
+        // which is mutually exclusive — ebgp-multihop is applied first,
+        // so the ttl-security guard must refuse and leave multihop win.
+        cfg.neighbors.insert(overrides, {
+            let mut n = BgpVrfNeighborConfig {
+                remote_as: Some(65002),
+                ..Default::default()
+            };
+            n.config.knobs_explicit.ebgp_multihop = Some(9);
+            n.config.knobs_explicit.ttl_security = Some(true);
+            n
+        });
+
+        materialize_peers(&mut vrf, &cfg, &groups);
+
+        let a = vrf.peers.get(&inherits).expect("peer a");
+        assert!(a.is_passive(), "passive must be inherited from the group");
+        assert_eq!(
+            a.config.transport.ebgp_multihop,
+            Some(5),
+            "ebgp-multihop must be inherited from the group"
+        );
+
+        let b = vrf.peers.get(&overrides).expect("peer b");
+        assert_eq!(
+            b.config.transport.ebgp_multihop,
+            Some(9),
+            "explicit ebgp-multihop must beat the group's"
+        );
+        assert!(
+            !b.config.transport.ttl_security,
+            "ttl-security must be refused when ebgp-multihop is set (mutual exclusion)"
         );
     }
 
