@@ -867,16 +867,21 @@ impl ConfigManager {
             Ok(output) => match self.config_to_commands(&output) {
                 Ok((format, cmds)) => {
                     let mut rejected = Vec::new();
-                    if let Some(mode) = self.modes.get("configure") {
-                        for cmd in cmds.iter() {
-                            // `execute` answers a successful set/delete
-                            // with `Show` (same contract the Deploy
-                            // handler checks); anything else means the
-                            // command was refused.
-                            let (code, _output, _paths) = self.execute(mode, cmd);
-                            if code != ExecCode::Show {
-                                rejected.push(cmd.clone());
-                            }
+                    let Some(mode) = self.modes.get("configure") else {
+                        tracing::error!(
+                            "startup config {}: configure mode unavailable; nothing applied",
+                            self.config_path.display()
+                        );
+                        return;
+                    };
+                    for cmd in cmds.iter() {
+                        // `execute` answers a successful set/delete
+                        // with `Show` (same contract the Deploy
+                        // handler checks); anything else means the
+                        // command was refused.
+                        let (code, _output, _paths) = self.execute(mode, cmd);
+                        if code != ExecCode::Show {
+                            rejected.push(cmd.clone());
                         }
                     }
                     if !rejected.is_empty() {
