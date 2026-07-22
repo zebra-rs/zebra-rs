@@ -312,6 +312,12 @@
 /router/bgp/vrf/neighbor/afi-safi/long-lived-graceful-restart/restart-time	leaf
 /router/bgp/vrf/neighbor/afi-safi/next-hop-self	leaf
 /router/bgp/vrf/neighbor/afi-safi/next-hop-unchanged	leaf
+/router/bgp/vrf/neighbor/afi-safi/policy	container
+/router/bgp/vrf/neighbor/afi-safi/policy/in	leaf
+/router/bgp/vrf/neighbor/afi-safi/policy/out	leaf
+/router/bgp/vrf/neighbor/afi-safi/prefix-set	container
+/router/bgp/vrf/neighbor/afi-safi/prefix-set/in	leaf
+/router/bgp/vrf/neighbor/afi-safi/prefix-set/out	leaf
 /router/bgp/vrf/neighbor/description	leaf
 /router/bgp/vrf/neighbor/peer-group	leaf
 /router/bgp/vrf/neighbor/remote-as	leaf

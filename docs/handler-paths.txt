@@ -226,6 +226,10 @@
 /router/bgp/vrf/neighbor/afi-safi/long-lived-graceful-restart/restart-time
 /router/bgp/vrf/neighbor/afi-safi/next-hop-self
 /router/bgp/vrf/neighbor/afi-safi/next-hop-unchanged
+/router/bgp/vrf/neighbor/afi-safi/policy/in
+/router/bgp/vrf/neighbor/afi-safi/policy/out
+/router/bgp/vrf/neighbor/afi-safi/prefix-set/in
+/router/bgp/vrf/neighbor/afi-safi/prefix-set/out
 /router/bgp/vrf/neighbor/description
 /router/bgp/vrf/neighbor/peer-group
 /router/bgp/vrf/neighbor/remote-as
