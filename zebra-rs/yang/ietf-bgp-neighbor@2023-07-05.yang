@@ -180,42 +180,10 @@ submodule ietf-bgp-neighbor {
       // (/router/bgp/vrf/neighbor/afi-safi) so the two subtrees are the
       // same definition rather than two copies. See
       // zebra-bgp-afi-knobs.yang for why graceful-restart stays defined
-      // per-subtree.
+      // per-subtree. policy / prefix-set are in the grouping too: they
+      // are bound by name and resolved by the policy actor, which the
+      // per-VRF task now subscribes to under its own proto.
       uses zbak:bgp-neighbor-afi-knobs;
-      container policy {
-        ext:sort "40";
-        ext:help "Per-family route-policy references";
-        description
-          "Per-direction route-policy references applied to routes of
-           THIS address family. This is the only per-neighbor
-           route-policy binding; when a family has no per-family binding
-           it falls back to a route-policy inherited from a
-           neighbor-group (if any).";
-        leaf in {
-          ext:help "Inbound route-policy for this family";
-          type string;
-        }
-        leaf out {
-          ext:help "Outbound route-policy for this family";
-          type string;
-        }
-      }
-      container prefix-set {
-        ext:sort "50";
-        ext:help "Per-family prefix-set references";
-        description
-          "Per-direction prefix-set references applied to routes of THIS
-           address family. The per-family successor of the (removed)
-           peer-wide `neighbor X prefix-set {in,out}`.";
-        leaf in {
-          ext:help "Inbound prefix-set filter for this family";
-          type string;
-        }
-        leaf out {
-          ext:help "Outbound prefix-set filter for this family";
-          type string;
-        }
-      }
     }
   }
 }

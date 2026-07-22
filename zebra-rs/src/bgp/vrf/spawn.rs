@@ -80,6 +80,13 @@ pub struct BgpVrfHandle {
     /// have.
     pub evpn_advertise_v4: bool,
     pub evpn_advertise_v6: bool,
+    /// Policy / prefix-set watches this VRF's peers registered, as
+    /// `(name, ident, policy_type)`. Kept on the handle so
+    /// [`despawn_bgp_vrf`] can withdraw them synchronously *before* a
+    /// respawn re-registers — see [`BgpVrf::policy_watch_list`] for why
+    /// doing it from the task's own shutdown path would delete the
+    /// incoming incarnation's watches instead of the outgoing one's.
+    pub policy_watches: Vec<(String, usize, crate::policy::PolicyType)>,
 }
 
 /// Pure diff: which VRF names need to be spawned (in `desired`
@@ -136,6 +143,7 @@ pub fn spawn_bgp_vrf(
     srv6: Option<Srv6VrfSid>,
     tracing_cfg: crate::bgp::tracing::BgpTracing,
     global_tx: UnboundedSender<BgpGlobalMsg>,
+    policy_tx: UnboundedSender<crate::policy::Message>,
 ) -> BgpVrfHandle {
     // Snapshot for logging + ILM install so we can move
     // `kernel` into the ctx-building arm without re-borrowing
@@ -182,6 +190,11 @@ pub fn spawn_bgp_vrf(
         global_tx,
         rib_rx,
     );
+    // Subscribe before `materialize_peers` runs: peers register their
+    // policy bindings during materialisation, and a Register sent before
+    // the Subscribe would be answered into a channel the actor does not
+    // have yet.
+    vrf.subscribe_policy(policy_tx);
     // Inter-AS Option AB: re-export imported VPNv4 routes (see the field
     // doc on `BgpVrf`). Carried from the staged VRF config.
     vrf.inter_as_hybrid = cfg.inter_as_hybrid;
@@ -299,6 +312,8 @@ pub fn spawn_bgp_vrf(
     // the global instance can register it with the config manager for
     // `show bgp vrf <name> …` redirection.
     let show_tx = vrf.show.tx.clone();
+    // Snapshot before `vrf` moves into the task.
+    let policy_watches = vrf.policy_watch_list();
     let task = serve_vrf(vrf);
     if crate::rib::tracing::task() {
         tracing::info!(
@@ -317,6 +332,7 @@ pub fn spawn_bgp_vrf(
     }
     BgpVrfHandle {
         inbox,
+        policy_watches,
         show_tx,
         task,
         label,
@@ -498,6 +514,59 @@ fn materialize_peers(
         }
 
         vrf.peers.insert_with_key(PeerKey::Addr(*addr), peer);
+
+        // Bind the staged policy / prefix-set names and register a watch
+        // for each, so the actor resolves them and keeps them current.
+        //
+        // This MUST run after the insert, for the same reason `start()`
+        // does: `peer_policy_ident` encodes `peer.ident`, which
+        // `insert_with_key` is what assigns. Registering beforehand would
+        // key every peer's watch under ident 0, and the resolution would
+        // come back addressed to the first peer in the map — the exact
+        // shape of the bug fixed in #2071, but silent, because a
+        // mis-delivered policy just filters the wrong session's routes.
+        //
+        // The names go straight onto the peer's slots; the resolved set
+        // arrives later on `policy_rx` (see
+        // `BgpVrf::process_policy_msg`). Until it does the binding is
+        // deny-all, which is the same fail-closed posture the global
+        // neighbor has.
+        let ident = {
+            let peer = vrf.peers.get_mut(addr).expect("peer was just inserted");
+            for ((fam, kind), name) in &nbr_cfg.policy_refs {
+                use super::super::policy::InOut;
+                use super::super::vrf_config::VrfPolicyRef;
+                match kind {
+                    VrfPolicyRef::PolicyIn => {
+                        peer.policy_list_slot(*fam, InOut::Input).name = Some(name.clone())
+                    }
+                    VrfPolicyRef::PolicyOut => {
+                        peer.policy_list_slot(*fam, InOut::Output).name = Some(name.clone())
+                    }
+                    VrfPolicyRef::PrefixSetIn => {
+                        peer.prefix_set_slot(*fam, InOut::Input).name = Some(name.clone())
+                    }
+                    VrfPolicyRef::PrefixSetOut => {
+                        peer.prefix_set_slot(*fam, InOut::Output).name = Some(name.clone())
+                    }
+                }
+            }
+            peer.ident
+        };
+        if !nbr_cfg.policy_refs.is_empty()
+            && let Some(policy_tx) = vrf.policy_tx.clone()
+        {
+            let proto = vrf.policy_proto();
+            for ((fam, kind), name) in &nbr_cfg.policy_refs {
+                let _ = policy_tx.send(crate::policy::Message::Register {
+                    proto: proto.clone(),
+                    name: name.clone(),
+                    ident: super::super::config::peer_policy_ident(ident, Some(*fam)),
+                    policy_type: kind.policy_type(),
+                });
+            }
+        }
+
         // `PeerMap::insert_with_key` assigns the stable ident used in every
         // timer/FSM message. Starting before insertion leaves every peer at
         // Peer::new's ident 0, so a second neighbor's Start events are
@@ -612,7 +681,28 @@ fn materialize_vrf_redistribute(
 /// `BgpVrfMsg` send window — the FSM might miss state it needs to
 /// flush. The handle's `Task` aborts on drop regardless, so a
 /// failure path here doesn't strand the runtime.
-pub fn despawn_bgp_vrf(name: &str, handle: &BgpVrfHandle, rib_subscriber: &RibSubscriber) {
+pub fn despawn_bgp_vrf(
+    name: &str,
+    handle: &BgpVrfHandle,
+    rib_subscriber: &RibSubscriber,
+    policy_tx: &UnboundedSender<crate::policy::Message>,
+) {
+    // Withdraw this incarnation's policy watches first, on this thread,
+    // so they are ordered ahead of the Registers a respawn's
+    // `materialize_peers` is about to send on the same channel. The
+    // actor matches watches on `(proto, ident, policy_type)`, all of
+    // which a respawned VRF reuses, so a later withdraw would take out
+    // the new task's watch and its `None` reply would clear the freshly
+    // resolved policy. Same ordering argument as the RIB cleanup below.
+    let proto = format!("bgp-vrf:{name}");
+    for (watch_name, ident, policy_type) in &handle.policy_watches {
+        let _ = policy_tx.send(crate::policy::Message::Unregister {
+            proto: proto.clone(),
+            name: watch_name.clone(),
+            ident: *ident,
+            policy_type: *policy_type,
+        });
+    }
     // Drop this VRF's RIB redistribute subscription (client-registry +
     // redist-filter rows) so a respawn under the same `bgp:vrf:<name>`
     // proto doesn't leave a stale subscriber shadowing the live one —
@@ -657,6 +747,9 @@ mod tests {
         // placeholder context is enough for lifecycle testing.
         let subscriber = test_rib_subscriber();
         let groups = BTreeMap::new();
+        // The policy actor isn't running in these lifecycle tests; the
+        // Subscribe just lands in a channel nobody drains.
+        let (policy_tx, _policy_rx) = unbounded_channel();
         spawn_bgp_vrf(
             name.to_string(),
             &cfg,
@@ -669,6 +762,7 @@ mod tests {
             /* srv6 */ None,
             /* tracing */ Default::default(),
             global_tx,
+            policy_tx,
         )
     }
 

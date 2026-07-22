@@ -4405,6 +4405,22 @@ impl Bgp {
             super::vrf_config::config_vrf_neighbor_afi_safi_next_hop_self,
         );
         self.callback_add(
+            "/router/bgp/vrf/neighbor/afi-safi/policy/in",
+            super::vrf_config::config_vrf_neighbor_afi_safi_policy_in,
+        );
+        self.callback_add(
+            "/router/bgp/vrf/neighbor/afi-safi/policy/out",
+            super::vrf_config::config_vrf_neighbor_afi_safi_policy_out,
+        );
+        self.callback_add(
+            "/router/bgp/vrf/neighbor/afi-safi/prefix-set/in",
+            super::vrf_config::config_vrf_neighbor_afi_safi_prefix_set_in,
+        );
+        self.callback_add(
+            "/router/bgp/vrf/neighbor/afi-safi/prefix-set/out",
+            super::vrf_config::config_vrf_neighbor_afi_safi_prefix_set_out,
+        );
+        self.callback_add(
             "/router/bgp/vrf/afi-safi/ipv4",
             super::vrf_config::config_vrf_afi_ipv4,
         );

@@ -1812,7 +1812,7 @@ impl Bgp {
             return;
         };
         let preserved_label = if let Some(handle) = self.vrf_registry.remove(name) {
-            super::vrf::despawn_bgp_vrf(name, &handle, &self.rib_subscriber);
+            super::vrf::despawn_bgp_vrf(name, &handle, &self.rib_subscriber, &self.policy_tx);
             self.unregister_vrf_show(name);
             self.peer_index.retain(|_, owner| owner != name);
             // Withdraw the stale SID by its (old-prefix) address.
@@ -1837,6 +1837,7 @@ impl Bgp {
             srv6,
             self.tracing.clone(),
             self.vrf_global_tx.clone(),
+            self.policy_tx.clone(),
         );
         self.register_vrf_show(name, &new_handle);
         self.vrf_registry.insert(name.to_string(), new_handle);
@@ -2474,7 +2475,7 @@ impl Bgp {
 
         for name in to_despawn {
             if let Some(handle) = self.vrf_registry.remove(&name) {
-                super::vrf::despawn_bgp_vrf(&name, &handle, &self.rib_subscriber);
+                super::vrf::despawn_bgp_vrf(&name, &handle, &self.rib_subscriber, &self.policy_tx);
                 self.unregister_vrf_show(&name);
                 // Withdraw everything this VRF exported into the
                 // VPNv4/v6 Loc-RIBs from PE peers and sibling VRFs —
@@ -2559,6 +2560,7 @@ impl Bgp {
                 srv6,
                 self.tracing.clone(),
                 self.vrf_global_tx.clone(),
+                self.policy_tx.clone(),
             );
             self.register_vrf_show(&name, &handle);
             self.vrf_registry.insert(name, handle);
@@ -2888,7 +2890,7 @@ impl Bgp {
         // new handle.
         let (preserved_label, preserved_sid) = if let Some(handle) = self.vrf_registry.remove(name)
         {
-            super::vrf::despawn_bgp_vrf(name, &handle, &self.rib_subscriber);
+            super::vrf::despawn_bgp_vrf(name, &handle, &self.rib_subscriber, &self.policy_tx);
             self.unregister_vrf_show(name);
             // Clear stale `peer_index` entries — the spawned task
             // is about to push fresh RegisterPeer messages.
@@ -2914,6 +2916,7 @@ impl Bgp {
             srv6,
             self.tracing.clone(),
             self.vrf_global_tx.clone(),
+            self.policy_tx.clone(),
         );
         self.register_vrf_show(name, &new_handle);
         self.vrf_registry.insert(name.to_string(), new_handle);
@@ -4200,7 +4203,7 @@ impl Bgp {
         };
         let kernel = self.rib_known_vrfs.get(name).cloned();
         let preserved_sid = if let Some(handle) = self.vrf_registry.remove(name) {
-            super::vrf::despawn_bgp_vrf(name, &handle, &self.rib_subscriber);
+            super::vrf::despawn_bgp_vrf(name, &handle, &self.rib_subscriber, &self.policy_tx);
             self.unregister_vrf_show(name);
             self.peer_index.retain(|_, owner| owner != name);
             handle.srv6_sid
@@ -4222,6 +4225,7 @@ impl Bgp {
             srv6,
             self.tracing.clone(),
             self.vrf_global_tx.clone(),
+            self.policy_tx.clone(),
         );
         self.register_vrf_show(name, &new_handle);
         self.vrf_registry.insert(name.to_string(), new_handle);

@@ -186,6 +186,24 @@ pub struct BgpVrf {
     /// SID. Empty until the first snapshot arrives.
     pub color_policy: super::super::color_policy::ColorPolicy,
     pub flex_algo_srv6_routes: super::super::color_policy::FlexAlgoSrv6Shadow,
+    /// Sender toward the policy actor, set by
+    /// [`Self::subscribe_policy`] at spawn. `None` in unit tests that
+    /// build a `BgpVrf` directly, which simply means their peers never
+    /// register a policy watch.
+    pub policy_tx: Option<UnboundedSender<crate::policy::Message>>,
+    /// Replies from the policy actor for THIS VRF's registrations.
+    ///
+    /// The actor keys its client channels by `proto`, so the per-VRF
+    /// subscription uses `bgp-vrf:<name>` rather than the global
+    /// `"bgp"`. That is not cosmetic: `peer_policy_ident` encodes an
+    /// index into the *owning task's* `PeerMap`, and a per-VRF peer's
+    /// index means nothing in the global map. Sharing the `"bgp"` proto
+    /// would deliver this VRF's resolutions to whichever global peer
+    /// happened to sit at that index.
+    pub policy_rx: UnboundedReceiver<crate::policy::PolicyRx>,
+    /// Our half of the reply channel, kept so `subscribe_policy` can
+    /// hand a clone to the actor (and a respawn can re-subscribe).
+    policy_reply_tx: UnboundedSender<crate::policy::PolicyRx>,
     /// VRF-first MUP origination tracking: per PFCP SEID, the RD-free ST
     /// prefixes this VRF exported to the global SAFI-85 RIB. Lets a Session
     /// Deletion / Modification (`MupWithdrawOriginate`) withdraw exactly the
@@ -711,6 +729,7 @@ impl BgpVrf {
     ) -> (Self, BgpVrfInbox) {
         let (inbox_tx, global_rx) = mpsc::unbounded_channel();
         let (tx, rx) = mpsc::channel(8192);
+        let policy_chan = crate::policy::PolicyRxChannel::new();
         let vrf = Self {
             name,
             ctx,
@@ -746,6 +765,9 @@ impl BgpVrf {
             import_transport_v6: std::collections::BTreeMap::new(),
             color_policy: Default::default(),
             flex_algo_srv6_routes: Default::default(),
+            policy_tx: None,
+            policy_rx: policy_chan.rx,
+            policy_reply_tx: policy_chan.tx,
             mup_originated: std::collections::BTreeMap::new(),
             mup_segment_prefix: None,
             mup_st1_isd_installed: std::collections::BTreeMap::new(),
@@ -1155,6 +1177,173 @@ impl BgpVrf {
     }
 
     /// Drive the per-VRF task. The loop exits cleanly when the
+    /// Apply a resolution the policy actor pushed back for one of this
+    /// VRF's peers.
+    ///
+    /// The mirror of `Bgp::process_policy_msg`, minus two things the
+    /// global task does:
+    ///
+    ///   * `shard_replace_in_policy` — per-VRF tasks don't drive the
+    ///     shard pool; their ingest is synchronous.
+    ///   * the soft-in / soft-out replay. `apply_soft_in_peer` /
+    ///     `apply_soft_out_peer` take `&mut Bgp` and reach global state,
+    ///     so replaying a per-VRF peer needs its own implementation.
+    ///     Until that lands, a resolution updates the binding but does
+    ///     NOT re-evaluate routes already in Adj-RIB-In / Adj-RIB-Out.
+    ///
+    /// That gap is invisible for the common case — bindings are
+    /// registered by `materialize_peers` at spawn, so the resolution
+    /// arrives long before the CE session establishes and any route
+    /// exists to re-evaluate. It bites only when an operator edits a
+    /// policy definition while a VRF session is up, which is the
+    /// follow-up.
+    ///
+    /// An unresolved name is *not* special-cased here: the actor always
+    /// answers, sending `None` when the name is undefined, and a
+    /// bound-but-unresolved set is deny-all by construction in the
+    /// filter path. Clearing the slot on `None` is what makes a rebind
+    /// to an undefined name fail closed rather than silently keep the
+    /// previous set.
+    pub fn process_policy_msg(&mut self, msg: crate::policy::PolicyRx) {
+        use super::super::policy::InOut;
+        use crate::policy::{PolicyRx, PolicyType};
+        match msg {
+            PolicyRx::PrefixSet {
+                name: _,
+                ident,
+                policy_type,
+                prefix_set,
+            } => {
+                let (peer_idx, afi_opt) = super::super::config::peer_policy_ident_decode(ident);
+                let Some(afi) = afi_opt else {
+                    // The peer-wide slot is only populated by a
+                    // neighbor-group, which per-VRF peers resolve
+                    // eagerly rather than registering for.
+                    return;
+                };
+                let Some(peer) = self.peers.get_mut_by_idx(peer_idx) else {
+                    return;
+                };
+                let direction = match policy_type {
+                    PolicyType::PrefixSetIn => InOut::Input,
+                    PolicyType::PrefixSetOut => InOut::Output,
+                    _ => return,
+                };
+                peer.prefix_set_slot(afi, direction).prefix_set = prefix_set;
+                if direction == InOut::Output {
+                    peer.rebuild_out_policy();
+                }
+            }
+            PolicyRx::PolicyList {
+                name: _,
+                ident,
+                policy_type,
+                policy_list,
+            } => {
+                let (peer_idx, afi_opt) = super::super::config::peer_policy_ident_decode(ident);
+                let Some(afi) = afi_opt else {
+                    return;
+                };
+                let Some(peer) = self.peers.get_mut_by_idx(peer_idx) else {
+                    return;
+                };
+                let direction = match policy_type {
+                    PolicyType::PolicyListIn => InOut::Input,
+                    PolicyType::PolicyListOut => InOut::Output,
+                    _ => return,
+                };
+                peer.policy_list_slot(afi, direction).policy_list = policy_list;
+                if direction == InOut::Output {
+                    peer.rebuild_out_policy();
+                }
+            }
+            // Key-chains and table-maps are not bound by per-VRF peers.
+            _ => {}
+        }
+    }
+
+    /// The `proto` string this VRF uses with the policy actor.
+    ///
+    /// Per-VRF rather than the global `"bgp"` because the actor routes
+    /// replies by proto and `peer_policy_ident` encodes an index into
+    /// the owning task's `PeerMap` — see [`Self::policy_rx`].
+    pub fn policy_proto(&self) -> String {
+        format!("bgp-vrf:{}", self.name)
+    }
+
+    /// Subscribe this VRF's reply channel with the policy actor and
+    /// remember the sender so peers can register their bindings.
+    ///
+    /// Called by `spawn_bgp_vrf`. A respawn re-subscribes under the same
+    /// proto key, which the actor treats as a replace — the stale
+    /// channel from the previous incarnation is simply overwritten.
+    pub fn subscribe_policy(&mut self, policy_tx: UnboundedSender<crate::policy::Message>) {
+        let _ = policy_tx.send(crate::policy::Message::Subscribe {
+            proto: self.policy_proto(),
+            tx: self.policy_reply_tx.clone(),
+        });
+        self.policy_tx = Some(policy_tx);
+    }
+
+    /// Every policy watch this VRF's peers registered, as
+    /// `(name, ident, policy_type)`.
+    ///
+    /// Handed to `BgpVrfHandle` so `despawn_bgp_vrf` can withdraw them
+    /// **synchronously**, on the global task, before a respawn registers
+    /// the replacements. Doing it from this task's shutdown path instead
+    /// would be a use-after-free in slow motion: the actor's `retain`
+    /// matches on `(proto, ident, policy_type)`, and a respawned VRF
+    /// reuses both the proto and its peers' idents, so a late Unregister
+    /// from the outgoing incarnation deletes the incoming one's watch —
+    /// and the `None` reply it triggers clears the freshly resolved
+    /// policy, leaving the session fail-closed for good.
+    ///
+    /// Both messages ride the same `policy_tx`, so FIFO ordering is what
+    /// guarantees the withdraw is processed before the re-register.
+    pub fn policy_watch_list(&self) -> Vec<(String, usize, crate::policy::PolicyType)> {
+        use crate::policy::PolicyType;
+        let mut out = Vec::new();
+        for idx in self.peers.idents() {
+            let Some(peer) = self.peers.get_by_idx(idx) else {
+                continue;
+            };
+            let mut push = |name: Option<&String>, policy_type: PolicyType, fam| {
+                if let Some(name) = name {
+                    out.push((
+                        name.clone(),
+                        super::super::config::peer_policy_ident(idx, Some(fam)),
+                        policy_type,
+                    ));
+                }
+            };
+            for (fam, io) in &peer.policy_list {
+                push(
+                    io.get(&super::super::policy::InOut::Input).name.as_ref(),
+                    PolicyType::PolicyListIn,
+                    *fam,
+                );
+                push(
+                    io.get(&super::super::policy::InOut::Output).name.as_ref(),
+                    PolicyType::PolicyListOut,
+                    *fam,
+                );
+            }
+            for (fam, io) in &peer.prefix_set {
+                push(
+                    io.get(&super::super::policy::InOut::Input).name.as_ref(),
+                    PolicyType::PrefixSetIn,
+                    *fam,
+                );
+                push(
+                    io.get(&super::super::policy::InOut::Output).name.as_ref(),
+                    PolicyType::PrefixSetOut,
+                    *fam,
+                );
+            }
+        }
+        out
+    }
+
     /// global task sends [`BgpVrfMsg::Shutdown`] or when the
     /// inbound channel is closed (i.e. every sender — the global
     /// task plus any per-peer holds — has dropped).
@@ -1201,6 +1390,13 @@ impl BgpVrf {
                     // `vrf <name>` selector and redirected the plain
                     // command here; render against this VRF's RIB/peers.
                     crate::bgp::show::process_vrf_show(self, msg).await;
+                }
+                Some(msg) = self.policy_rx.recv() => {
+                    // Resolution (or clearing) of a policy / prefix-set
+                    // this VRF's peers bound. Routed here rather than to
+                    // the global task because we subscribed under our own
+                    // proto — see `policy_rx`.
+                    self.process_policy_msg(msg);
                 }
                 Some(msg) = self.rx.recv() => {
                     self.process_msg(msg);

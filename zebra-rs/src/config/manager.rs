@@ -4971,19 +4971,17 @@ mod bgp_config_audit_tests {
     /// Anything listed here is a decision; anything *not* listed is
     /// expected to exist in both subtrees. Entries are the path suffix
     /// below `afi-safi`.
-    const VRF_AFI_KNOB_EXCLUSIONS: &[(&str, &str)] = &[
-        (
-            "policy/in",
-            "Needs a policy-actor Register to resolve the name; BgpVrf holds \
-             no policy_tx, and peer_policy_ident encodes an index into the \
-             GLOBAL PeerMap, so a per-VRF peer would cross-wire onto whichever \
-             global peer sits at that index. Blocked on namespacing the \
-             registration (proto \"bgp-vrf:<name>\").",
-        ),
-        ("policy/out", "See policy/in."),
-        ("prefix-set/in", "See policy/in."),
-        ("prefix-set/out", "See policy/in."),
-    ];
+    /// Per-AFI neighbor knobs the per-VRF neighbor deliberately does NOT
+    /// mirror from the global neighbor, each with the reason it is out.
+    ///
+    /// Anything listed here is a decision; anything *not* listed is
+    /// expected to exist in both subtrees. Entries are the path suffix
+    /// below `afi-safi`.
+    ///
+    /// Empty: every per-AFI knob the global neighbor exposes is now
+    /// mirrored. Keep the list (and this test) — it is what makes the
+    /// next divergence fail CI instead of going unnoticed for a release.
+    const VRF_AFI_KNOB_EXCLUSIONS: &[(&str, &str)] = &[];
 
     /// The per-VRF neighbor's `afi-safi` knob set must equal the global
     /// neighbor's, modulo [`VRF_AFI_KNOB_EXCLUSIONS`].

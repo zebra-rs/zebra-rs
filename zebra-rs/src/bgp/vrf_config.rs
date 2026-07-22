@@ -109,6 +109,41 @@ impl BgpVrfEncapsulation {
 pub struct BgpVrfNeighborConfig {
     pub remote_as: Option<u32>,
     pub config: PeerConfig,
+    /// Staged `afi-safi <af> {policy,prefix-set} {in,out} <name>`
+    /// references.
+    ///
+    /// These are the one per-AFI knob that cannot ride `config` like
+    /// every other: the resolved slots live on [`super::peer::Peer`]
+    /// (`policy_list` / `prefix_set`), not on `PeerConfig`, because each
+    /// holds the *resolved* set the policy actor hands back alongside
+    /// the operator's name. `materialize_peers` therefore copies these
+    /// onto the built peer separately, and — unlike every other knob —
+    /// must also register a watch so the name resolves at all.
+    pub policy_refs: BTreeMap<(AfiSafi, VrfPolicyRef), String>,
+}
+
+/// Which of a CE peer's four per-family policy bindings a staged name
+/// refers to. Maps 1:1 onto [`crate::policy::PolicyType`]; kept separate
+/// so the staging map has a total order and carries no variants (key
+/// chains, table maps) a per-VRF neighbor cannot bind.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub enum VrfPolicyRef {
+    PolicyIn,
+    PolicyOut,
+    PrefixSetIn,
+    PrefixSetOut,
+}
+
+impl VrfPolicyRef {
+    pub fn policy_type(self) -> crate::policy::PolicyType {
+        use crate::policy::PolicyType;
+        match self {
+            Self::PolicyIn => PolicyType::PolicyListIn,
+            Self::PolicyOut => PolicyType::PolicyListOut,
+            Self::PrefixSetIn => PolicyType::PrefixSetIn,
+            Self::PrefixSetOut => PolicyType::PrefixSetOut,
+        }
+    }
 }
 
 impl BgpVrfNeighborConfig {
@@ -713,6 +748,53 @@ pub fn config_vrf_neighbor_idle_hold_time(
         _ => {}
     }
     Some(())
+}
+
+/// Generate a `… afi-safi <af> {policy,prefix-set} {in,out} <name>`
+/// callback. Unlike the `vrf_afi_knob!` family these do not go through a
+/// shared `afi_knob` setter: the value is not a `PeerConfig` field but a
+/// name that has to be resolved by the policy actor, so it is staged in
+/// [`BgpVrfNeighborConfig::policy_refs`] and bound (with a `Register`)
+/// by `materialize_peers` once the peer has its ident.
+macro_rules! vrf_policy_ref {
+    ($(#[$m:meta])* $name:ident => $kind:expr) => {
+        $(#[$m])*
+        pub fn $name(bgp: &mut Bgp, mut args: Args, op: ConfigOp) -> Option<()> {
+            let vrf = args.string()?;
+            let addr = args.addr()?;
+            let afi_safi: AfiSafi = args.afi_safi()?;
+            let cfg = vrf_entry(bgp, vrf, op)?;
+            let nbr = neighbor_entry(cfg, addr, op)?;
+            match op {
+                ConfigOp::Set => {
+                    let name = args.string()?;
+                    nbr.policy_refs.insert((afi_safi, $kind), name);
+                }
+                ConfigOp::Delete => {
+                    nbr.policy_refs.remove(&(afi_safi, $kind));
+                }
+                _ => {}
+            }
+            Some(())
+        }
+    };
+}
+
+vrf_policy_ref! {
+    /// `… afi-safi <af> policy in <name>`.
+    config_vrf_neighbor_afi_safi_policy_in => VrfPolicyRef::PolicyIn
+}
+vrf_policy_ref! {
+    /// `… afi-safi <af> policy out <name>`.
+    config_vrf_neighbor_afi_safi_policy_out => VrfPolicyRef::PolicyOut
+}
+vrf_policy_ref! {
+    /// `… afi-safi <af> prefix-set in <name>`.
+    config_vrf_neighbor_afi_safi_prefix_set_in => VrfPolicyRef::PrefixSetIn
+}
+vrf_policy_ref! {
+    /// `… afi-safi <af> prefix-set out <name>`.
+    config_vrf_neighbor_afi_safi_prefix_set_out => VrfPolicyRef::PrefixSetOut
 }
 
 /// `set router bgp vrf <NAME> neighbor <addr> afi-safi {ipv4|ipv6} enabled
