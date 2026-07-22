@@ -517,8 +517,15 @@ mod tests {
         // Exactly one advertised path remains — the new best. The old `add`
         // (keyed by local-id) left the superseded local-id 1 row behind.
         let rows = &engine.adj_out.0[&prefix];
-        assert_eq!(rows.len(), 1, "non-AddPath keeps exactly one advertised path");
-        assert_eq!(rows[0].local_id, 2, "the surviving row is the new best path");
+        assert_eq!(
+            rows.len(),
+            1,
+            "non-AddPath keeps exactly one advertised path"
+        );
+        assert_eq!(
+            rows[0].local_id, 2,
+            "the surviving row is the new best path"
+        );
     }
 
     #[test]
