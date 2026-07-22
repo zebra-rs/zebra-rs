@@ -4965,6 +4965,105 @@ mod bgp_config_audit_tests {
         assert_doc_matches("handler-paths.txt", &lines);
     }
 
+    /// Per-AFI neighbor knobs the per-VRF neighbor deliberately does NOT
+    /// mirror from the global neighbor, each with the reason it is out.
+    ///
+    /// Anything listed here is a decision; anything *not* listed is
+    /// expected to exist in both subtrees. Entries are the path suffix
+    /// below `afi-safi`.
+    const VRF_AFI_KNOB_EXCLUSIONS: &[(&str, &str)] = &[
+        (
+            "next-hop-self",
+            "Tier 2: needs neighbor-group precedence resolution \
+             (neighbor_group::resolve_next_hop_self) on top of the verbatim \
+             statement. materialize_peers already receives the groups map, so \
+             this is a small follow-up rather than a structural gap.",
+        ),
+        (
+            "policy/in",
+            "Needs a policy-actor Register to resolve the name; BgpVrf holds \
+             no policy_tx, and peer_policy_ident encodes an index into the \
+             GLOBAL PeerMap, so a per-VRF peer would cross-wire onto whichever \
+             global peer sits at that index. Blocked on namespacing the \
+             registration (proto \"bgp-vrf:<name>\").",
+        ),
+        ("policy/out", "See policy/in."),
+        ("prefix-set/in", "See policy/in."),
+        ("prefix-set/out", "See policy/in."),
+    ];
+
+    /// The per-VRF neighbor's `afi-safi` knob set must equal the global
+    /// neighbor's, modulo [`VRF_AFI_KNOB_EXCLUSIONS`].
+    ///
+    /// This is the drift guard for the import effort: adding a knob to
+    /// `/router/bgp/neighbor/afi-safi` without either adding the per-VRF
+    /// counterpart or recording *why* it is excluded fails here. Without
+    /// it the two subtrees silently diverge, which is precisely how the
+    /// VRF neighbor ended up with one knob against the global
+    /// neighbor's twelve.
+    ///
+    /// Compares schema shape, not handlers — a leaf present in both
+    /// subtrees but wired in only one is caught by the orphan report.
+    #[test]
+    fn vrf_afi_knob_parity() {
+        let top = configure_entry();
+        let bgp = child(&child(&child(&top, "set"), "router"), "bgp");
+        let mut map = BTreeMap::new();
+        schema_walk(&bgp, "/router/bgp", true, &mut map);
+
+        let suffixes = |prefix: &str| -> BTreeSet<String> {
+            map.keys()
+                .filter_map(|p| p.strip_prefix(prefix))
+                .filter_map(|rest| rest.strip_prefix('/'))
+                .map(str::to_string)
+                .collect()
+        };
+
+        let global = suffixes("/router/bgp/neighbor/afi-safi");
+        let vrf = suffixes("/router/bgp/vrf/neighbor/afi-safi");
+
+        let excluded: BTreeSet<&str> = VRF_AFI_KNOB_EXCLUSIONS.iter().map(|(k, _)| *k).collect();
+
+        // In the global subtree, absent from the VRF one, and not an
+        // acknowledged exclusion.
+        let unimported: Vec<&String> = global
+            .difference(&vrf)
+            .filter(|p| !excluded.contains(p.as_str()))
+            // A container whose children are all excluded is itself
+            // legitimately absent (e.g. `policy` once policy/{in,out} are).
+            .filter(|p| !excluded.iter().any(|e| e.starts_with(&format!("{p}/"))))
+            .collect();
+        assert!(
+            unimported.is_empty(),
+            "per-AFI knobs exist on the global neighbor but not on the per-VRF \
+             neighbor: {unimported:#?}\n\
+             Either mirror them under /router/bgp/vrf/neighbor/afi-safi (sharing \
+             a setter from src/bgp/afi_knob.rs) or add them to \
+             VRF_AFI_KNOB_EXCLUSIONS with the reason."
+        );
+
+        // The reverse: a VRF-only knob means the global neighbor is
+        // missing something, which is equally a divergence.
+        let vrf_only: Vec<&String> = vrf.difference(&global).collect();
+        assert!(
+            vrf_only.is_empty(),
+            "per-AFI knobs exist on the per-VRF neighbor but not on the global \
+             neighbor: {vrf_only:#?}"
+        );
+
+        // A stale exclusion (knob since imported, or renamed) is dead
+        // documentation that will mislead the next reader.
+        let stale: Vec<&&str> = excluded
+            .iter()
+            .filter(|e| vrf.contains(**e) || !global.contains(**e))
+            .collect();
+        assert!(
+            stale.is_empty(),
+            "VRF_AFI_KNOB_EXCLUSIONS entries no longer apply (imported, or gone \
+             from the global neighbor): {stale:#?}"
+        );
+    }
+
     /// The whole `/router/bgp/tracing` and `/router/bgp/neighbor/tracing`
     /// subtrees are handled by `config_tracing_dispatch`
     /// (`src/bgp/tracing.rs`) rather than per-node callbacks.

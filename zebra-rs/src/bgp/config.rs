@@ -13,7 +13,7 @@ use crate::policy::com_list::*;
 use crate::rib::api::FdbEntry;
 
 use super::auth::AoConfig;
-use super::peer::{AfiSafiEncapType, BgpTop};
+use super::peer::BgpTop;
 use super::route_clean;
 use super::{
     AssistedReplicationRole, BGP_PORT, Bgp, EvpnBumTunnel,
@@ -2937,20 +2937,7 @@ fn config_add_path(bgp: &mut Bgp, mut args: Args, op: ConfigOp) -> Option<()> {
     let addr = args.addr()?;
     let afi_safi: AfiSafi = args.afi_safi()?;
     let peer = bgp.peers.get_mut(&addr)?;
-    let add_path_str: String = args.string()?;
-    let send_receive: AddPathSendReceive = add_path_str.parse().ok()?;
-
-    if op.is_set() {
-        let add_path = AddPathValue {
-            afi: afi_safi.afi,
-            safi: afi_safi.safi,
-            send_receive,
-        };
-        peer.config.addpath.insert(afi_safi, add_path);
-    } else {
-        peer.config.addpath.remove(&afi_safi);
-    }
-    Some(())
+    super::afi_knob::set_add_path(&mut peer.config, afi_safi, op, &mut args)
 }
 
 /// `set/delete router bgp neighbor <addr> afi-safi <name>
@@ -2964,11 +2951,8 @@ fn config_add_path(bgp: &mut Bgp, mut args: Args, op: ConfigOp) -> Option<()> {
 fn config_restart(bgp: &mut Bgp, mut args: Args, op: ConfigOp) -> Option<()> {
     let addr = args.addr()?;
     let afi_safi: AfiSafi = args.afi_safi()?;
-    let enable = op.is_set() && args.boolean()?;
     let peer = bgp.peers.get_mut(&addr)?;
-    let config = peer.config.sub.entry(afi_safi).or_default();
-    config.graceful_restart = enable.then_some(super::peer::GR_RESTART_TIME_DEFAULT);
-    Some(())
+    super::afi_knob::set_graceful_restart(&mut peer.config, afi_safi, op, &mut args)
 }
 
 /// `set/delete router bgp neighbor <addr> afi-safi <name> encapsulation-type
@@ -2981,16 +2965,7 @@ fn config_encapsulation_type(bgp: &mut Bgp, mut args: Args, op: ConfigOp) -> Opt
     let addr = args.addr()?;
     let afi_safi: AfiSafi = args.afi_safi()?;
     let peer = bgp.peers.get_mut(&addr)?;
-
-    if op.is_set() {
-        let encap = AfiSafiEncapType::parse(&args.string()?)?;
-        let config = peer.config.sub.entry(afi_safi).or_default();
-        config.encapsulation_type = Some(encap);
-    } else {
-        let config = peer.config.sub.entry(afi_safi).or_default();
-        config.encapsulation_type = None;
-    }
-    Some(())
+    super::afi_knob::set_encapsulation_type(&mut peer.config, afi_safi, op, &mut args)
 }
 
 /// `set/delete router bgp neighbor <addr> afi-safi <name> next-hop-self
@@ -3011,12 +2986,7 @@ fn config_next_hop_self(bgp: &mut Bgp, mut args: Args, op: ConfigOp) -> Option<(
     // Record the verbatim statement, then resolve through the
     // neighbor-group precedence — a Delete falls back to the group's
     // per-family opinion (or the off default).
-    if op.is_set() {
-        let value = args.boolean()?;
-        peer.config.nhs_explicit.insert(afi_safi, value);
-    } else {
-        peer.config.nhs_explicit.remove(&afi_safi);
-    }
+    super::afi_knob::set_next_hop_self_explicit(&mut peer.config, afi_safi, op, &mut args)?;
     let value =
         super::neighbor_group::resolve_next_hop_self(&bgp.neighbor_groups, &peer.config, afi_safi);
     peer.config.sub.entry(afi_safi).or_default().next_hop_self = value;
@@ -3027,46 +2997,21 @@ fn config_next_hop_unchanged(bgp: &mut Bgp, mut args: Args, op: ConfigOp) -> Opt
     let addr = args.addr()?;
     let afi_safi: AfiSafi = args.afi_safi()?;
     let peer = bgp.peers.get_mut(&addr)?;
-
-    let value = op.is_set() && args.boolean()?;
-    peer.config
-        .sub
-        .entry(afi_safi)
-        .or_default()
-        .next_hop_unchanged = value;
-    Some(())
+    super::afi_knob::set_next_hop_unchanged(&mut peer.config, afi_safi, op, &mut args)
 }
 
 fn config_llgr(bgp: &mut Bgp, mut args: Args, op: ConfigOp) -> Option<()> {
     let addr = args.addr()?;
     let afi_safi: AfiSafi = args.afi_safi()?;
     let peer = bgp.peers.get_mut(&addr)?;
-
-    if op.is_set() {
-        let config = peer.config.sub.entry(afi_safi).or_default();
-        config.llgr = Some(1);
-    } else {
-        let config = peer.config.sub.entry(afi_safi).or_default();
-        config.llgr = None;
-    }
-    Some(())
+    super::afi_knob::set_llgr(&mut peer.config, afi_safi, op)
 }
 
 fn config_llgr_restart_time(bgp: &mut Bgp, mut args: Args, op: ConfigOp) -> Option<()> {
     let addr = args.addr()?;
     let afi_safi: AfiSafi = args.afi_safi()?;
     let peer = bgp.peers.get_mut(&addr)?;
-    let time = args.u32()?;
-
-    if op.is_set() {
-        let config = peer.config.sub.entry(afi_safi).or_default();
-        config.llgr = Some(time);
-    } else {
-        let config = peer.config.sub.entry(afi_safi).or_default();
-        config.llgr = Some(1);
-    }
-
-    Some(())
+    super::afi_knob::set_llgr_restart_time(&mut peer.config, afi_safi, op, &mut args)
 }
 
 fn config_local_identifier(bgp: &mut Bgp, mut args: Args, op: ConfigOp) -> Option<()> {
@@ -4427,6 +4372,33 @@ impl Bgp {
         self.callback_add(
             "/router/bgp/vrf/neighbor/afi-safi/enabled",
             super::vrf_config::config_vrf_neighbor_afi_safi_enabled,
+        );
+        // Per-AFI knobs imported from the global neighbor. Each shares
+        // its setter with the `/router/bgp/neighbor/afi-safi/…`
+        // registration above; `vrf_afi_knob_parity` pins the set.
+        self.callback_add(
+            "/router/bgp/vrf/neighbor/afi-safi/add-path",
+            super::vrf_config::config_vrf_neighbor_afi_safi_add_path,
+        );
+        self.callback_add(
+            "/router/bgp/vrf/neighbor/afi-safi/graceful-restart/enabled",
+            super::vrf_config::config_vrf_neighbor_afi_safi_graceful_restart,
+        );
+        self.callback_add(
+            "/router/bgp/vrf/neighbor/afi-safi/long-lived-graceful-restart/enabled",
+            super::vrf_config::config_vrf_neighbor_afi_safi_llgr,
+        );
+        self.callback_add(
+            "/router/bgp/vrf/neighbor/afi-safi/long-lived-graceful-restart/restart-time",
+            super::vrf_config::config_vrf_neighbor_afi_safi_llgr_restart_time,
+        );
+        self.callback_add(
+            "/router/bgp/vrf/neighbor/afi-safi/next-hop-unchanged",
+            super::vrf_config::config_vrf_neighbor_afi_safi_next_hop_unchanged,
+        );
+        self.callback_add(
+            "/router/bgp/vrf/neighbor/afi-safi/encapsulation-type",
+            super::vrf_config::config_vrf_neighbor_afi_safi_encapsulation_type,
         );
         self.callback_add(
             "/router/bgp/vrf/afi-safi/ipv4",

@@ -349,10 +349,7 @@ fn materialize_peers(
         // group is resolved here at materialization (and re-resolved on the
         // next respawn) rather than swept live, because the group lives on
         // the global `Bgp` and these peers run in a separate per-VRF task.
-        let group = nbr_cfg
-            .peer_group
-            .as_ref()
-            .and_then(|name| groups.get(name));
+        let group = nbr_cfg.peer_group().and_then(|name| groups.get(name));
 
         // `Peer::start()` gates on `remote_as != 0` already, but
         // skipping the insert entirely keeps the per-VRF peer map
@@ -399,26 +396,32 @@ fn materialize_peers(
         } else {
             PeerType::EBGP
         };
-        // Record the group binding so `show bgp vrf` reflects it. The
-        // inheritance below is resolved eagerly (the global group sweep
-        // doesn't reach per-VRF tasks); a later edit to the group's
-        // opinions takes effect when the VRF task next respawns or the
-        // session is cleared.
-        peer.config.neighbor_group = nbr_cfg.peer_group.clone();
-
-        // Session timers (`neighbor <addr> timers { … }`). Copied before
-        // `start()` below so the very first idle-hold timer this peer
-        // arms already honours a configured `idle-hold-time` — arming it
-        // from the default and fixing it up afterwards would leave the
-        // first dial on the wrong cadence. Unset leaves stay `None` and
-        // fall through to `timer::Config`'s defaults, so a VRF neighbor
-        // with no `timers` block behaves exactly as before.
+        // Adopt the staged config wholesale. `BgpVrfNeighborConfig::config`
+        // IS a `PeerConfig`, so every knob the per-VRF schema stages —
+        // description, peer-group binding, `timers`, and the per-family
+        // `afi-safi` knobs — lands here in one move, and importing another
+        // knob from the global neighbor needs no line of its own.
         //
-        // This does NOT cover MRAI: advertisement pacing comes from the
-        // `AdvInterval` snapshot on the peer, which per-VRF tasks have no
-        // plumbing for — a CE session still advertises on the stock 30s
-        // eBGP / 5s iBGP cadence regardless of what is set here.
-        peer.config.timer = nbr_cfg.timer.clone();
+        // Anything the schema doesn't expose keeps its
+        // `PeerConfig::default()` value, which is exactly what `Peer::new`
+        // had just installed, so this is behaviour-preserving for
+        // unconfigured fields.
+        //
+        // Done before `start()` below so the first idle-hold timer a peer
+        // arms already honours a configured `idle-hold-time`; arming from
+        // the default and fixing up afterwards would leave the first dial
+        // on the wrong cadence.
+        //
+        // Two things this deliberately does NOT carry:
+        //   - MRAI. Advertisement pacing comes from the `AdvInterval`
+        //     snapshot on the peer, which per-VRF tasks have no plumbing
+        //     for, so a CE session still runs the stock 30s eBGP / 5s iBGP
+        //     cadence.
+        //   - Policy / prefix-set names. Those need a policy-actor
+        //     Register to resolve, and `BgpVrf` holds no `policy_tx`; a
+        //     staged name would sit inert. They stay out of the schema
+        //     until that plumbing exists.
+        peer.config = nbr_cfg.config.clone();
 
         // Derive the negotiated address-family set for this CE peer.
         // `Peer::new` defaults to IPv4 unicast only, which is wrong for
@@ -455,15 +458,17 @@ fn materialize_peers(
                 }
             }
         }
-        for (fam, enabled) in &nbr_cfg.mp_explicit {
+        for (fam, enabled) in &nbr_cfg.config.mp_explicit {
             if *enabled {
                 mp.insert(*fam, true);
             } else {
                 mp.remove(fam);
             }
         }
+        // `mp` is the *resolved* set, so it is computed here rather than
+        // staged; `mp_explicit` (the verbatim statements it was resolved
+        // from) already arrived with the config adoption above.
         peer.config.mp = mp;
-        peer.config.mp_explicit = nbr_cfg.mp_explicit.clone();
 
         vrf.peers.insert_with_key(PeerKey::Addr(*addr), peer);
         // `PeerMap::insert_with_key` assigns the stable ident used in every
@@ -749,9 +754,9 @@ mod tests {
             remote_as: Some(65001),
             ..Default::default()
         };
-        nbr.timer.connect_retry_time = Some(3);
-        nbr.timer.hold_time = Some(9);
-        nbr.timer.idle_hold_time = Some(1);
+        nbr.config.timer.connect_retry_time = Some(3);
+        nbr.config.timer.hold_time = Some(9);
+        nbr.config.timer.idle_hold_time = Some(1);
         cfg.neighbors.insert(tuned, nbr);
 
         cfg.neighbors.insert(
@@ -782,6 +787,89 @@ mod tests {
         assert_eq!(peer.config.timer.connect_retry_time(), 120);
         assert_eq!(peer.config.timer.hold_time(), 180);
         assert_eq!(peer.config.timer.idle_hold_time(), 5);
+    }
+
+    /// Per-AFI knobs imported from the global neighbor must survive the
+    /// staging round-trip onto the built peer. This is the payoff of
+    /// staging a real `PeerConfig`: `materialize_peers` adopts it
+    /// wholesale, so this test covers every knob at once rather than one
+    /// assertion per import.
+    #[tokio::test]
+    async fn materialize_peers_applies_per_afi_knobs() {
+        use super::super::super::vrf_config::{BgpVrfConfig, BgpVrfNeighborConfig};
+        use super::super::inst::BgpVrf;
+        use crate::context::ProtoContext;
+        use bgp_packet::{AddPathSendReceive, AddPathValue, Afi, AfiSafi, Safi};
+
+        let (global_tx, _global_rx) = unbounded_channel::<BgpGlobalMsg>();
+        let ctx = ProtoContext::default_table_no_rib();
+        let (_rib_tx, rib_rx) = unbounded_channel();
+        let (mut vrf, _inbox) = BgpVrf::new(
+            "v1".to_string(),
+            ctx,
+            Ipv4Addr::UNSPECIFIED,
+            65000,
+            /* label */ 16,
+            global_tx,
+            rib_rx,
+        );
+
+        let v4u = AfiSafi::new(Afi::Ip, Safi::Unicast);
+        let tuned: std::net::IpAddr = "192.0.2.1".parse().unwrap();
+        let bare: std::net::IpAddr = "192.0.2.2".parse().unwrap();
+
+        let mut nbr = BgpVrfNeighborConfig {
+            remote_as: Some(65001),
+            ..Default::default()
+        };
+        nbr.config.addpath.insert(
+            v4u,
+            AddPathValue {
+                afi: v4u.afi,
+                safi: v4u.safi,
+                send_receive: AddPathSendReceive::SendReceive,
+            },
+        );
+        {
+            let sub = nbr.config.sub.entry(v4u).or_default();
+            sub.graceful_restart = Some(120);
+            sub.llgr = Some(300);
+            sub.next_hop_unchanged = true;
+        }
+
+        let mut cfg = BgpVrfConfig::default();
+        cfg.neighbors.insert(tuned, nbr);
+        cfg.neighbors.insert(
+            bare,
+            BgpVrfNeighborConfig {
+                remote_as: Some(65002),
+                ..Default::default()
+            },
+        );
+
+        materialize_peers(&mut vrf, &cfg, &BTreeMap::new());
+
+        let peer = vrf.peers.get(&tuned).expect("tuned peer inserted");
+        assert_eq!(
+            peer.config.addpath.get(&v4u).map(|v| v.send_receive),
+            Some(AddPathSendReceive::SendReceive),
+            "add-path must ride the staged config onto the peer"
+        );
+        let sub = peer.config.sub.get(&v4u).expect("per-AFI sub-config");
+        assert_eq!(sub.graceful_restart, Some(120));
+        assert_eq!(sub.llgr, Some(300));
+        assert!(sub.next_hop_unchanged);
+
+        // A neighbor that configured none of them is untouched — the
+        // wholesale adoption must not invent per-AFI state.
+        let peer = vrf.peers.get(&bare).expect("bare peer inserted");
+        assert!(peer.config.addpath.get(&v4u).is_none());
+        assert!(
+            peer.config.sub.get(&v4u).is_none_or(|s| {
+                s.graceful_restart.is_none() && s.llgr.is_none() && !s.next_hop_unchanged
+            }),
+            "an unconfigured neighbor must keep PeerConfig defaults"
+        );
     }
 
     /// A CE peer's negotiated MP family set is derived from its own
@@ -841,7 +929,7 @@ mod tests {
             remote_as: Some(65001),
             ..Default::default()
         };
-        dual.mp_explicit.insert(ipv4u, true);
+        dual.config.mp_explicit.insert(ipv4u, true);
         cfg.neighbors.insert(v6_dual, dual);
 
         materialize_peers(&mut vrf, &cfg, &BTreeMap::new());
@@ -919,19 +1007,17 @@ mod tests {
         let override_peer: std::net::IpAddr = "192.0.2.6".parse().unwrap();
 
         let mut cfg = BgpVrfConfig::default();
-        cfg.neighbors.insert(
-            inherit,
-            BgpVrfNeighborConfig {
-                peer_group: Some("g1".to_string()),
-                ..Default::default()
-            },
-        );
+        cfg.neighbors.insert(inherit, {
+            let mut n = BgpVrfNeighborConfig::default();
+            n.config.neighbor_group = Some("g1".to_string());
+            n
+        });
         let mut over = BgpVrfNeighborConfig {
             remote_as: Some(65020),
-            peer_group: Some("g1".to_string()),
             ..Default::default()
         };
-        over.mp_explicit.insert(ipv6u, false);
+        over.config.neighbor_group = Some("g1".to_string());
+        over.config.mp_explicit.insert(ipv6u, false);
         cfg.neighbors.insert(override_peer, over);
 
         let count = materialize_peers(&mut vrf, &cfg, &groups);
