@@ -87,6 +87,8 @@ impl Isis {
             .set(show_isis_flex_algo_spf)
             .path("/show/isis/flex-algo/algorithm/graph")
             .set(show_isis_flex_algo_graph)
+            .path("/show/isis/flex-algo/algorithm/repair-list")
+            .set(show_isis_flex_algo_repair_list)
             .map();
     }
 }
@@ -3147,7 +3149,21 @@ where
     F::Prefix: std::fmt::Display,
     F::Addr: std::fmt::Display,
 {
-    for (prefix, route) in F::rib(isis, level).iter() {
+    collect_repair_rows_from::<F>(F::rib(isis, level), level, rows)
+}
+
+/// Row collector parameterized by RIB source, so the algorithm-0 view
+/// and the per-Flex-Algorithm view share one implementation.
+fn collect_repair_rows_from<F>(
+    rib: &PrefixMap<F::Prefix, SpfRoute<F>>,
+    level: &Level,
+    rows: &mut Vec<RepairRowJson>,
+) where
+    F: IsisRibFamilyShow,
+    F::Prefix: std::fmt::Display,
+    F::Addr: std::fmt::Display,
+{
+    for (prefix, route) in rib.iter() {
         for (addr, nhop) in route.nhops.iter() {
             let Some(backup) = nhop.backup.as_ref() else {
                 continue;
@@ -3166,6 +3182,70 @@ where
             });
         }
     }
+}
+
+/// Repair rows for one Flex-Algorithm, from the per-algo RIBs.
+fn collect_repair_rows_flex_algo(isis: &Isis, algo: u8) -> Vec<RepairRowJson> {
+    let mut rows = Vec::new();
+    for level in [Level::L1, Level::L2] {
+        if let Some(rib) = isis.rib_flex_algo.get(&level).get(&algo) {
+            collect_repair_rows_from::<V4>(rib, &level, &mut rows);
+        }
+        if let Some(rib6) = isis.rib6_flex_algo.get(&level).get(&algo) {
+            collect_repair_rows_from::<V6>(rib6, &level, &mut rows);
+        }
+    }
+    rows
+}
+
+/// `show isis flex-algo <n> repair-list` — TI-LFA repairs computed in
+/// this algorithm's constrained topology. Node segments are this
+/// algorithm's Prefix-SIDs / End SIDs, so a repair listed here cannot
+/// traverse a link the FAD excluded.
+fn show_isis_flex_algo_repair_list(
+    isis: &Isis,
+    mut args: Args,
+    json: bool,
+) -> std::result::Result<String, std::fmt::Error> {
+    let algo = match flex_algo_arg(&mut args, json) {
+        Ok(a) => a,
+        Err(msg) => return Ok(msg),
+    };
+    let rows = collect_repair_rows_flex_algo(isis, algo);
+    if json {
+        return Ok(
+            serde_json::to_string_pretty(&RepairListJson { routes: rows })
+                .unwrap_or_else(|e| format!("{{\"error\": \"{e}\"}}")),
+        );
+    }
+    let mut buf = String::new();
+    if rows.is_empty() {
+        writeln!(
+            buf,
+            "(no TI-LFA repair-list entries for algorithm {})",
+            algo
+        )?;
+        return Ok(buf);
+    }
+    writeln!(
+        buf,
+        "{:<5} {:<5} {:<22} {:<22} {:<22} Segments",
+        "Level", "AFI", "Prefix", "Primary via", "Repair via",
+    )?;
+    for row in &rows {
+        let segs: Vec<String> = row.segments.iter().map(|s| s.value.clone()).collect();
+        writeln!(
+            buf,
+            "{:<5} {:<5} {:<22} {:<22} {:<22} [{}]",
+            row.level,
+            row.family,
+            row.prefix,
+            row.primary_nexthop,
+            row.repair_nexthop,
+            segs.join(", "),
+        )?;
+    }
+    Ok(buf)
 }
 
 fn collect_repair_rows(isis: &Isis) -> Vec<RepairRowJson> {
@@ -3941,10 +4021,13 @@ fn flex_algo_frr_state(isis: &Isis, entry: &crate::flex_algo::FlexAlgoEntry) -> 
         "disabled" // explicit per-algo opt-out
     } else if !isis.config.ti_lfa_enabled {
         "off" // instance-level TI-LFA is off; nothing to inherit
-    } else if entry.dataplane_srv6 == Some(true) {
-        "on" // inherited and computed
     } else {
-        "n/a" // inherited, but no algo-aware SR-MPLS repair yet
+        // Inherited and computed. Both dataplanes are algorithm-aware:
+        // node segments resolve to this algorithm's Prefix-SID (SR-MPLS)
+        // or End SID (SRv6). An algorithm with no dataplane flag at all
+        // still gets the historical SR-MPLS build, so it is protected
+        // too — mirroring `mpls_on` in `rib.rs`.
+        "on"
     }
 }
 

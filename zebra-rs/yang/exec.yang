@@ -902,6 +902,10 @@ module exec {
             ext:help "Constrained topology graph for this algorithm";
             type empty;
           }
+          leaf repair-list {
+            ext:help "TI-LFA repair paths computed for this algorithm";
+            type empty;
+          }
         }
 
         container route {

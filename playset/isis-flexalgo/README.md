@@ -493,7 +493,7 @@ The effective state per algorithm is visible in `show isis flex-algo`:
 tk>show isis flex-algo
 Local Flex-Algorithms:
   Algo  Metric                 Priority Adv FRR       Constraints
-  128   igp                    -        no  n/a       exclude-any=trans-pacific
+  128   igp                    -        no  off       exclude-any=trans-pacific
 ```
 
 | FRR | meaning |
@@ -501,16 +501,39 @@ Local Flex-Algorithms:
 | `on` | inherited from the instance and computed |
 | `off` | instance-level TI-LFA is not enabled |
 | `disabled` | this algorithm opted out with `fast-reroute disable` |
-| `n/a` | inherited, but this dataplane has no per-algorithm repair yet |
 
-**This lab reads `n/a`, because per-algorithm TI-LFA is implemented for
-SRv6 only.** SR-MPLS is deliberately gated off: the repair-label resolver
-(`repair_segments_to_mpls_labels` in `zebra-rs/src/isis/tilfa.rs`) takes no
-algorithm argument and returns the first Prefix-SID it finds — the
-algorithm-0 one. A repair list built that way could steer traffic back over
-a link the FAD excluded, which is worse than leaving the algorithm
-unprotected, so it is not computed at all until the resolver is made
-algorithm-aware. The SRv6 segment resolvers in the same file already are.
+This lab reads `off` because no node enables `fast-reroute ti-lfa` by
+default. Enable it and the repairs show up per algorithm — and they are *not* the
+algorithm-0 repairs. Add `fast-reroute: {ti-lfa: {}}` under `router isis`
+in `se.yaml`, then compare:
+
+``` shell
+se>show isis repair-list
+Level AFI   Prefix          Primary via    Repair via     Segments
+L2    ipv4  10.0.0.5/32     192.168.2.2    192.168.0.2    [16800, 15001, 16500]
+
+se>show isis flex-algo 128 repair-list
+Level AFI   Prefix          Primary via    Repair via     Segments
+L2    ipv4  10.0.0.5/32     192.168.2.2    192.168.1.2    [18600, 15000, 18500]
+```
+
+Both protect the same prefix, but the algorithm-0 repair leaves over
+`192.168.0.2` — that is `se-sg`, **the trans-Pacific link algorithm 128
+exists to avoid** — carrying algorithm-0 labels (`16xxx`). The
+algorithm-128 repair leaves over `192.168.1.2` (`se-sj`) with
+algorithm-128 labels (`18xxx`).
+
+That difference is the whole point: a repair must be computed in the
+algorithm's own topology *and* expressed with its own SIDs, or the backup
+path silently violates the constraint the algorithm was created to
+enforce. Adjacency segments (`15xxx`) are shared — an Adj-SID means "pop
+and forward over this link" regardless of algorithm, and the link is
+already known to be in the algorithm's topology.
+
+When a node on the repair path advertises no Prefix-SID for this
+algorithm, the whole repair is dropped rather than approximated with an
+algorithm-0 label, so the destination is simply unprotected under that
+algorithm.
 
 ## Appendix: Loopbacks and Prefix-SIDs
 
