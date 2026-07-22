@@ -1,0 +1,161 @@
+module zebra-bgp-afi-knobs {
+  yang-version "1";
+
+  namespace "urn:ietf:params:xml:ns:yang:zebra-bgp-afi-knobs";
+  prefix "zbak";
+
+  import extension {
+    prefix ext;
+  }
+
+  organization
+    "zebra-rs";
+
+  contact
+    "https://github.com/zebra-rs";
+
+  description
+    "Per-AFI BGP neighbor knobs shared verbatim by the two neighbor
+     subtrees:
+
+       * the global neighbor, /router/bgp/neighbor/afi-safi
+         (ietf-bgp-neighbor)
+       * the per-VRF CE neighbor, /router/bgp/vrf/neighbor/afi-safi
+         (zebra-bgp-vrf)
+
+     A single `grouping` used from both is what makes the two
+     definitions the same definition, rather than two copies that agree
+     today. The behaviour side is already unified — each knob has one
+     setter in src/bgp/afi_knob.rs, called by the global callback (live
+     peer) and the per-VRF callback (staged) — and this closes the
+     schema side.
+
+     That gap was not theoretical. When these knobs were first imported
+     into the per-VRF subtree the leaves were hand-copied, and both
+     enum-valued ones came out as `type string`. Nothing caught it in
+     review or in CI: `vrf_afi_knob_parity` compares the *set* of knob
+     paths, not their types. It surfaced only from a live differential
+     probe against the global neighbor, and it mattered because
+     `Bgp::process_cm_msg` discards a config callback's return value —
+     a setter that rejects a value cannot report it, so the schema type
+     is the only thing standing between a typo and a silently ignored
+     commit.
+
+     Two knobs are deliberately NOT here:
+
+       * `graceful-restart` — the global container takes
+         `mp-afi-safi-graceful-restart-config`, whose `enabled` leaf
+         carries `must \". = ../../../../graceful-restart/enabled\"`.
+         That path is anchored to the global neighbor's depth in the
+         tree and would be wrong under `vrf/neighbor`. The global
+         container also carries `if-feature` and three `config false`
+         state leaves the per-VRF one has no use for.
+       * `next-hop-self` — not yet imported into the per-VRF subtree at
+         all (it needs neighbor-group precedence resolution). It belongs
+         in this grouping the moment it is, and moving it here should be
+         part of that change.
+
+     Both exclusions are also recorded, with reasons, in
+     VRF_AFI_KNOB_EXCLUSIONS / docs/orphan-report.txt.";
+
+  grouping bgp-neighbor-afi-knobs {
+    description
+      "Per-address-family knobs common to the global and per-VRF BGP
+       neighbor. Semantics are identical on both; what differs is only
+       when they take effect — the global neighbor applies them to a
+       live peer, while a per-VRF CE peer lives in a separate task, so
+       its values are staged and applied when the VRF task next
+       respawns (or on `clear bgp`).";
+
+    leaf add-path {
+      ext:help "Additional-Paths send/receive mode (RFC 7911)";
+      ext:sort "10";
+      type enumeration {
+        enum send;
+        enum receive;
+        enum send-receive;
+      }
+      description
+        "Additional-Paths mode for this family. Negotiated in the OPEN,
+         so a change takes effect when the session next renegotiates
+         capabilities.";
+    }
+
+    leaf encapsulation-type {
+      ext:help "Encapsulation for advertised routes (srv6)";
+      when "../name = 'ipv6'" {
+        description
+          "SRv6 encapsulation only applies to the IPv6 unicast
+           family.
+
+           NOTE: this `when` is documentation, not enforcement — the
+           config engine does not evaluate it. `afi-safi ipv4
+           encapsulation-type srv6` commits successfully on both the
+           global and the per-VRF neighbor. Consumers must therefore
+           key the value by family and must not assume IPv6.";
+      }
+      ext:sort "20";
+      type enumeration {
+        enum srv6 {
+          description
+            "SRv6-only peer. Only routes carrying an SRv6 service SID
+             (BGP Prefix-SID attribute, RFC 9252) are advertised to /
+             accepted from this neighbor; routes without a SID are
+             filtered out on the session.";
+        }
+        enum srv6-relax {
+          description
+            "Mixed session. Routes with or without an SRv6 service SID
+             may be advertised to / accepted from this neighbor.";
+        }
+      }
+      description
+        "Per-neighbor SRv6 encapsulation mode for the IPv6 unicast
+         family. `srv6` makes the session SRv6-strict (SID-less routes
+         filtered), `srv6-relax` SRv6-relaxed (SID-less routes still
+         exchanged). Absent = no SRv6 encapsulation filtering for the
+         family.";
+    }
+
+    leaf next-hop-unchanged {
+      ext:help "Keep the received next hop on eBGP advertisement";
+      ext:sort "31";
+      type boolean;
+      description
+        "Advertise routes of this address family to this eBGP neighbor
+         with their received next-hop preserved, instead of the default
+         eBGP rewrite to self. Equivalent to `neighbor X
+         next-hop-unchanged` (per address-family) in FRR / Cisco IOS.
+
+         Required on the multihop eBGP VPNv4 session between the route
+         reflectors of an RR-based Inter-AS MPLS/VPN Option C (RFC 4364
+         §10c): the RRs sit outside the forwarding path, so the
+         reflected route must keep the originating PE — the true LSP
+         endpoint — as its next-hop (and its original VPN label). The
+         receiving PE resolves that PE loopback over BGP-LU.
+
+         Honored for VPN routes on the VPNv4 (SAFI 128) advertise path;
+         locally-originated routes still advertise with self as the
+         next-hop.";
+    }
+
+    container long-lived-graceful-restart {
+      ext:help "Per-family long-lived GR settings (RFC 9494)";
+      description
+        "Long-Lived Graceful Restart parameters for this family.";
+      leaf enabled {
+        ext:help "Enable long-lived graceful-restart (RFC 9494)";
+        type boolean;
+      }
+      leaf restart-time {
+        ext:help "LLGR stale-retention time (seconds)";
+        type uint32;
+        units "seconds";
+        description
+          "Stale-route retention time advertised for this family.
+           Deleting only this leaf leaves LLGR enabled with the bare
+           marker value — it does not turn the feature off.";
+      }
+    }
+  }
+}

@@ -19,6 +19,10 @@ submodule ietf-bgp-neighbor {
   import extension {
     prefix ext;
   }
+
+  import zebra-bgp-afi-knobs {
+    prefix zbak;
+  }
   // Include the common submodule
 
   include ietf-bgp-common;
@@ -110,17 +114,6 @@ submodule ietf-bgp-neighbor {
              Loc-RIB";
         }
       }
-      container long-lived-graceful-restart {
-        ext:help "Per-family long-lived GR settings (RFC 9494)";
-        leaf enabled {
-          ext:help "Enable long-lived graceful-restart (RFC 9494)";
-          type boolean;
-        }
-        leaf restart-time {
-          ext:help "LLGR stale-retention time (seconds)";
-          type uint32;
-        }
-      }
       container graceful-restart {
         ext:help "Per-family graceful-restart settings";
         if-feature "bt:graceful-restart";
@@ -183,44 +176,12 @@ submodule ietf-bgp-neighbor {
         }
       }
       // uses mp-all-afi-safi-list-contents;
-      leaf add-path {
-        ext:help "Additional-Paths send/receive mode (RFC 7911)";
-        ext:sort "10";
-        type enumeration {
-          enum send;
-          enum receive;
-          enum send-receive;
-        }
-      }
-      leaf encapsulation-type {
-        ext:help "Encapsulation for advertised routes (srv6)";
-        when "../name = 'ipv6'" {
-          description
-            "SRv6 encapsulation only applies to the IPv6 unicast
-             family.";
-        }
-        ext:sort "20";
-        type enumeration {
-          enum srv6 {
-            description
-              "SRv6-only peer. Only routes carrying an SRv6 service SID
-               (BGP Prefix-SID attribute, RFC 9252) are advertised to /
-               accepted from this neighbor; routes without a SID are
-               filtered out on the session.";
-          }
-          enum srv6-relax {
-            description
-              "Mixed session. Routes with or without an SRv6 service SID
-               may be advertised to / accepted from this neighbor.";
-          }
-        }
-        description
-          "Per-neighbor SRv6 encapsulation mode for the IPv6 unicast
-           family. `srv6` makes the session SRv6-strict (SID-less routes
-           filtered), `srv6-relax` SRv6-relaxed (SID-less routes still
-           exchanged). Absent = no SRv6 encapsulation filtering for the
-           family.";
-      }
+      // Shared verbatim with the per-VRF neighbor
+      // (/router/bgp/vrf/neighbor/afi-safi) so the two subtrees are the
+      // same definition rather than two copies. See
+      // zebra-bgp-afi-knobs.yang for why graceful-restart and
+      // next-hop-self stay defined per-subtree.
+      uses zbak:bgp-neighbor-afi-knobs;
       leaf next-hop-self {
         ext:help "Advertise self as next hop to this neighbor";
         ext:sort "30";
@@ -244,27 +205,6 @@ submodule ietf-bgp-neighbor {
            and push the ASBR's swap label, not the unreachable foreign-AS
            next-hop carried across the inter-AS eBGP link. Honored on the
            Labeled-Unicast (SAFI 4) and VPNv4 (SAFI 128) advertise paths.";
-      }
-      leaf next-hop-unchanged {
-        ext:help "Keep the received next hop on eBGP advertisement";
-        ext:sort "31";
-        type boolean;
-        description
-          "Advertise routes of this address family to this eBGP neighbor
-           with their received next-hop preserved, instead of the default
-           eBGP rewrite to self. Equivalent to `neighbor X
-           next-hop-unchanged` (per address-family) in FRR / Cisco IOS.
-
-           Required on the multihop eBGP VPNv4 session between the route
-           reflectors of an RR-based Inter-AS MPLS/VPN Option C (RFC 4364
-           §10c): the RRs sit outside the forwarding path, so the
-           reflected route must keep the originating PE — the true LSP
-           endpoint — as its next-hop (and its original VPN label). The
-           receiving PE resolves that PE loopback over BGP-LU.
-
-           Honored for VPN routes on the VPNv4 (SAFI 128) advertise path;
-           locally-originated routes still advertise with self as the
-           next-hop.";
       }
       container policy {
         ext:sort "40";
