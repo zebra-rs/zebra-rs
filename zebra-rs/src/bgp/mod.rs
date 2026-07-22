@@ -4,6 +4,7 @@ pub use inst::{AssistedReplicationRole, Bgp, EvpnBumTunnel, Message};
 pub mod constant;
 pub use constant::*;
 
+pub mod afi_knob;
 pub mod auth;
 pub mod config;
 pub mod connected;

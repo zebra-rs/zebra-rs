@@ -277,6 +277,89 @@ module zebra-bgp-vrf {
           description
             "Whether this AFI,SAFI is enabled for the CE peer.";
         }
+
+        // The knobs below mirror the global neighbor's
+        // /router/bgp/neighbor/afi-safi subtree leaf for leaf, and share
+        // its setters (src/bgp/afi_knob.rs) so the two can never diverge
+        // in meaning. `vrf_afi_knob_parity` in src/config/manager.rs
+        // pins the *set* of knobs: adding one to the global neighbor
+        // without adding it here (or listing it as a deliberate
+        // exclusion) fails that test.
+        //
+        // Unlike the global neighbor these are staged, not applied to a
+        // live peer — a CE peer runs in the per-VRF task, out of reach
+        // of a config callback — so an edit takes effect on the next VRF
+        // respawn or `clear bgp`.
+        leaf add-path {
+          ext:help "Additional-Paths send/receive mode (RFC 7911)";
+          // Must stay an enumeration, matching the global neighbor's
+          // leaf. A callback's `None` return is DISCARDED by the config
+          // dispatcher (`Bgp::process_cm_msg` calls `f(self, args, op)`
+          // and ignores the result), so an unparseable value is never
+          // reported: with a loose `type string` the commit reports
+          // "applied" while the setter silently rejects it. The schema
+          // type is the only thing that rejects bad input here.
+          type enumeration {
+            enum send;
+            enum receive;
+            enum send-receive;
+          }
+          description
+            "Negotiated in the OPEN, so a change needs the session to
+             renegotiate.";
+        }
+        container graceful-restart {
+          ext:help "Per-family Graceful Restart (RFC 4724)";
+          leaf enabled {
+            ext:help "Advertise GR forwarding-state preservation";
+            type boolean;
+          }
+        }
+        container long-lived-graceful-restart {
+          ext:help "Per-family Long-Lived Graceful Restart";
+          leaf enabled {
+            ext:help "Advertise LLGR for this family";
+            type boolean;
+          }
+          leaf restart-time {
+            ext:help "LLGR stale-route retention time (seconds)";
+            type uint32;
+            units "seconds";
+            description
+              "Deleting only this leaf leaves LLGR enabled with the
+               bare marker value — it does not turn the feature off.";
+          }
+        }
+        leaf next-hop-unchanged {
+          ext:help "Keep the received next-hop toward this CE peer";
+          type boolean;
+          description
+            "When true, routes re-advertised to this eBGP CE keep their
+             received next-hop instead of the default rewrite to self.";
+        }
+        leaf encapsulation-type {
+          ext:help "Encapsulation for advertised routes (srv6)";
+          when "../name = 'ipv6'" {
+            description
+              "SRv6 encapsulation only applies to the IPv6 unicast
+               family.";
+          }
+          // Enumeration, not string — see the note on `add-path`.
+          type enumeration {
+            enum srv6;
+            enum srv6-relax;
+          }
+          description
+            "`srv6` advertises/accepts only routes carrying an SRv6
+             service SID; `srv6-relax` allows a mixed session. Same
+             values and same `when` as the global neighbor's leaf.
+
+             Note the `when` is documentation rather than enforcement:
+             the config engine does not evaluate it, so this leaf can in
+             fact be committed under `afi-safi ipv4`. That matches the
+             global neighbor's behaviour exactly — it is not a per-VRF
+             quirk — and the setter keys the value by family regardless.";
+        }
       }
     }
   }

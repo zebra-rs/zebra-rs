@@ -21,8 +21,8 @@ in src/bgp/config.rs (an empty relative path, easy to miss when
 grepping for registrations), and it creates/tears down the peer when
 the list entry itself is set/deleted.
 
-Total settable schema nodes: 281
-Handled: 268
+Total settable schema nodes: 287
+Handled: 274
 Orphans: 3
 
 Note: these orphans have no config callback but are kept intentionally.
@@ -40,6 +40,18 @@ handled above. The tracing subtrees (/router/bgp/tracing and
 /router/bgp/neighbor/tracing) have no per-node callbacks; the whole
 subtree is handled by config_tracing_dispatch in src/bgp/tracing.rs, so
 they count as handled above.
+
+Note: /router/bgp/vrf/neighbor/afi-safi mirrors the global neighbor's
+per-AFI knob set (add-path, graceful-restart, long-lived-graceful-restart,
+next-hop-unchanged, encapsulation-type), sharing one setter per knob from
+src/bgp/afi_knob.rs so the two subtrees cannot diverge in meaning. The
+`vrf_afi_knob_parity` test pins the knob *set*: importing a knob to the
+global neighbor without a per-VRF counterpart fails unless it is listed in
+VRF_AFI_KNOB_EXCLUSIONS with a reason. Currently excluded there:
+next-hop-self (needs neighbor-group precedence resolution) and
+policy/prefix-set in+out (need a policy-actor Register, which BgpVrf has no
+channel for). Unlike the global neighbor these are staged and applied by
+materialize_peers, so an edit takes effect on the next VRF respawn.
 
 Note: /router/bgp/vrf/neighbor/timers exposes only connect-retry-time,
 hold-time and idle-hold-time — the three leaves crate::bgp::timer::Config

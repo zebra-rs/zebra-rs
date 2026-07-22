@@ -32,6 +32,7 @@ use crate::config::{Args, ConfigOp};
 
 use super::Bgp;
 use super::config::BgpRedistSource;
+use super::peer::PeerConfig;
 use super::vrf::msg::BgpVrfMsg;
 use crate::rib::RedistAfi;
 
@@ -88,32 +89,35 @@ impl BgpVrfEncapsulation {
 /// Per-peer attribute set for a CE peer configured under
 /// `router bgp vrf X neighbor <addr>`. Mirrors `bgp-vrf-neighbor` in
 /// zebra-bgp-vrf.yang.
+/// Staging is the peer's *own* [`PeerConfig`] type rather than a
+/// parallel struct that mirrors fragments of it. Every knob imported
+/// from the global neighbor then costs a YANG leaf and one shared
+/// setter — no new field here, no new line in `materialize_peers`, and
+/// no opportunity for the two representations to drift.
+///
+/// `remote_as` stays outside because it lands on [`super::peer::Peer`]
+/// itself, not on its config. Everything else the schema exposes
+/// (`description`, `peer-group`, `timers`, per-family `afi-safi`
+/// knobs) is a `PeerConfig` field already.
+///
+/// Fields the per-VRF schema does not expose simply keep their
+/// `PeerConfig::default()` values, which is exactly what a peer built
+/// by `Peer::new` would have had — so staging the whole struct is
+/// behaviour-preserving for anything unconfigured, and wiring a new
+/// knob later is a schema + setter change with no plumbing.
 #[derive(Debug, Clone, Default)]
 pub struct BgpVrfNeighborConfig {
     pub remote_as: Option<u32>,
-    pub peer_group: Option<String>,
-    pub description: Option<String>,
-    /// Verbatim per-family `afi-safi <name> enabled <bool>` statements
-    /// for this CE peer — the per-VRF equivalent of
-    /// [`super::peer::PeerConfig::mp_explicit`]. Only the IPv4 / IPv6
-    /// unicast families are reachable from the schema. Empty means "no
-    /// explicit override": the negotiated family is then derived from
-    /// the peer's own address family in `materialize_peers`. There is
-    /// no neighbor-group afi-safi inheritance for CE peers yet (the
-    /// stored `peer_group` is not resolved at materialization), so this
-    /// map is the only override layer.
-    pub mp_explicit: BTreeMap<AfiSafi, bool>,
-    /// Staged `timers { … }` for this CE peer, copied verbatim onto
-    /// [`super::peer::PeerConfig::timer`] by `materialize_peers`.
-    ///
-    /// Deliberately the *same* type the peer holds rather than a
-    /// narrower struct: the schema only exposes the three leaves the
-    /// timer code actually consumes (connect-retry-time, hold-time,
-    /// idle-hold-time), so the rest stay `None` — which is what they
-    /// would be anyway, since nothing reads them even on the global
-    /// neighbor. Sharing the type means wiring one of those up later
-    /// is a schema-only change here.
-    pub timer: super::timer::Config,
+    pub config: PeerConfig,
+}
+
+impl BgpVrfNeighborConfig {
+    /// The referenced `neighbor-group` name, if any. `materialize_peers`
+    /// resolves the group's opinions eagerly at build time (the global
+    /// group sweep doesn't reach per-VRF tasks).
+    pub fn peer_group(&self) -> Option<&String> {
+        self.config.neighbor_group.as_ref()
+    }
 }
 
 /// Per-AFI knobs under `router bgp vrf X afi-safi {ipv4,ipv6}-unicast`.
@@ -629,8 +633,8 @@ pub fn config_vrf_neighbor_peer_group(bgp: &mut Bgp, mut args: Args, op: ConfigO
     let cfg = vrf_entry(bgp, name, op)?;
     let nbr = neighbor_entry(cfg, addr, op)?;
     match op {
-        ConfigOp::Set => nbr.peer_group = Some(args.string()?),
-        ConfigOp::Delete => nbr.peer_group = None,
+        ConfigOp::Set => nbr.config.neighbor_group = Some(args.string()?),
+        ConfigOp::Delete => nbr.config.neighbor_group = None,
         _ => {}
     }
     Some(())
@@ -643,8 +647,8 @@ pub fn config_vrf_neighbor_description(bgp: &mut Bgp, mut args: Args, op: Config
     let cfg = vrf_entry(bgp, name, op)?;
     let nbr = neighbor_entry(cfg, addr, op)?;
     match op {
-        ConfigOp::Set => nbr.description = Some(args.string()?),
-        ConfigOp::Delete => nbr.description = None,
+        ConfigOp::Set => nbr.config.description = Some(args.string()?),
+        ConfigOp::Delete => nbr.config.description = None,
         _ => {}
     }
     Some(())
@@ -671,8 +675,8 @@ pub fn config_vrf_neighbor_connect_retry_time(
     let cfg = vrf_entry(bgp, name, op)?;
     let nbr = neighbor_entry(cfg, addr, op)?;
     match op {
-        ConfigOp::Set => nbr.timer.connect_retry_time = Some(args.u16()?),
-        ConfigOp::Delete => nbr.timer.connect_retry_time = None,
+        ConfigOp::Set => nbr.config.timer.connect_retry_time = Some(args.u16()?),
+        ConfigOp::Delete => nbr.config.timer.connect_retry_time = None,
         _ => {}
     }
     Some(())
@@ -685,8 +689,8 @@ pub fn config_vrf_neighbor_hold_time(bgp: &mut Bgp, mut args: Args, op: ConfigOp
     let cfg = vrf_entry(bgp, name, op)?;
     let nbr = neighbor_entry(cfg, addr, op)?;
     match op {
-        ConfigOp::Set => nbr.timer.hold_time = Some(args.u16()?),
-        ConfigOp::Delete => nbr.timer.hold_time = None,
+        ConfigOp::Set => nbr.config.timer.hold_time = Some(args.u16()?),
+        ConfigOp::Delete => nbr.config.timer.hold_time = None,
         _ => {}
     }
     Some(())
@@ -704,8 +708,8 @@ pub fn config_vrf_neighbor_idle_hold_time(
     let cfg = vrf_entry(bgp, name, op)?;
     let nbr = neighbor_entry(cfg, addr, op)?;
     match op {
-        ConfigOp::Set => nbr.timer.idle_hold_time = Some(args.u16()?),
-        ConfigOp::Delete => nbr.timer.idle_hold_time = None,
+        ConfigOp::Set => nbr.config.timer.idle_hold_time = Some(args.u16()?),
+        ConfigOp::Delete => nbr.config.timer.idle_hold_time = None,
         _ => {}
     }
     Some(())
@@ -732,14 +736,75 @@ pub fn config_vrf_neighbor_afi_safi_enabled(
     match op {
         ConfigOp::Set => {
             let enabled = args.boolean()?;
-            nbr.mp_explicit.insert(afi_safi, enabled);
+            nbr.config.mp_explicit.insert(afi_safi, enabled);
         }
         ConfigOp::Delete => {
-            nbr.mp_explicit.remove(&afi_safi);
+            nbr.config.mp_explicit.remove(&afi_safi);
         }
         _ => {}
     }
     Some(())
+}
+
+/// Generate a `router bgp vrf <NAME> neighbor <addr> afi-safi <af>
+/// <knob>` callback that stages through one of the shared
+/// [`super::afi_knob`] setters.
+///
+/// Every one of these is the same four lines — resolve the VRF, resolve
+/// the neighbor, hand the staged `PeerConfig` to the setter — which is
+/// the whole point of staging a real `PeerConfig`: importing a knob from
+/// the global neighbor is a YANG leaf plus one line here, with the
+/// knob's *meaning* defined once in `afi_knob` and shared with the
+/// global callback.
+macro_rules! vrf_afi_knob {
+    ($(#[$m:meta])* $name:ident => $setter:ident) => {
+        $(#[$m])*
+        pub fn $name(bgp: &mut Bgp, mut args: Args, op: ConfigOp) -> Option<()> {
+            let vrf = args.string()?;
+            let addr = args.addr()?;
+            let afi_safi: AfiSafi = args.afi_safi()?;
+            let cfg = vrf_entry(bgp, vrf, op)?;
+            let nbr = neighbor_entry(cfg, addr, op)?;
+            super::afi_knob::$setter(&mut nbr.config, afi_safi, op, &mut args)
+        }
+    };
+}
+
+vrf_afi_knob! {
+    /// `… afi-safi <af> add-path <send|receive|send-receive>` (RFC 7911).
+    config_vrf_neighbor_afi_safi_add_path => set_add_path
+}
+vrf_afi_knob! {
+    /// `… afi-safi <af> graceful-restart enabled <bool>` (RFC 4724).
+    config_vrf_neighbor_afi_safi_graceful_restart => set_graceful_restart
+}
+vrf_afi_knob! {
+    /// `… afi-safi <af> long-lived-graceful-restart restart-time <secs>`.
+    config_vrf_neighbor_afi_safi_llgr_restart_time => set_llgr_restart_time
+}
+vrf_afi_knob! {
+    /// `… afi-safi <af> next-hop-unchanged <bool>`.
+    config_vrf_neighbor_afi_safi_next_hop_unchanged => set_next_hop_unchanged
+}
+vrf_afi_knob! {
+    /// `… afi-safi <af> encapsulation-type <srv6|srv6-relax>`.
+    config_vrf_neighbor_afi_safi_encapsulation_type => set_encapsulation_type
+}
+
+/// `… afi-safi <af> long-lived-graceful-restart enabled` — the odd one
+/// out: [`super::afi_knob::set_llgr`] keys off presence alone and takes
+/// no value, so it doesn't fit the macro's `args`-consuming shape.
+pub fn config_vrf_neighbor_afi_safi_llgr(
+    bgp: &mut Bgp,
+    mut args: Args,
+    op: ConfigOp,
+) -> Option<()> {
+    let vrf = args.string()?;
+    let addr = args.addr()?;
+    let afi_safi: AfiSafi = args.afi_safi()?;
+    let cfg = vrf_entry(bgp, vrf, op)?;
+    let nbr = neighbor_entry(cfg, addr, op)?;
+    super::afi_knob::set_llgr(&mut nbr.config, afi_safi, op)
 }
 
 /// `set router bgp vrf <NAME> afi-safi ipv4` — presence container.
@@ -1246,15 +1311,15 @@ mod tests {
         // a remote-as (own or group-inherited) is known.
         let nbr = BgpVrfNeighborConfig::default();
         assert!(nbr.remote_as.is_none());
-        assert!(nbr.peer_group.is_none());
-        assert!(nbr.description.is_none());
-        assert!(nbr.mp_explicit.is_empty());
+        assert!(nbr.peer_group().is_none());
+        assert!(nbr.config.description.is_none());
+        assert!(nbr.config.mp_explicit.is_empty());
         // Every timer leaf unset — `materialize_peers` copies this
         // wholesale onto the peer, so an all-`None` default is what keeps
         // a `timers`-less VRF neighbor on the stock cadence.
-        assert!(nbr.timer.connect_retry_time.is_none());
-        assert!(nbr.timer.hold_time.is_none());
-        assert!(nbr.timer.idle_hold_time.is_none());
+        assert!(nbr.config.timer.connect_retry_time.is_none());
+        assert!(nbr.config.timer.hold_time.is_none());
+        assert!(nbr.config.timer.idle_hold_time.is_none());
     }
 
     #[test]
@@ -1263,23 +1328,28 @@ mod tests {
         let mut cfg = BgpVrfConfig::default();
 
         let nbr = neighbor_entry(&mut cfg, address, ConfigOp::Set).unwrap();
-        nbr.timer.connect_retry_time = Some(3);
-        nbr.timer.hold_time = Some(9);
-        nbr.timer.idle_hold_time = Some(1);
+        nbr.config.timer.connect_retry_time = Some(3);
+        nbr.config.timer.hold_time = Some(9);
+        nbr.config.timer.idle_hold_time = Some(1);
 
         let nbr = &cfg.neighbors[&address];
-        assert_eq!(nbr.timer.connect_retry_time, Some(3));
-        assert_eq!(nbr.timer.hold_time, Some(9));
-        assert_eq!(nbr.timer.idle_hold_time, Some(1));
+        assert_eq!(nbr.config.timer.connect_retry_time, Some(3));
+        assert_eq!(nbr.config.timer.hold_time, Some(9));
+        assert_eq!(nbr.config.timer.idle_hold_time, Some(1));
 
         // Clearing one leaf must leave the siblings alone: the three
         // callbacks share one staged `timer::Config`, so a careless
         // implementation could reset the struct instead of the field.
-        cfg.neighbors.get_mut(&address).unwrap().timer.hold_time = None;
+        cfg.neighbors
+            .get_mut(&address)
+            .unwrap()
+            .config
+            .timer
+            .hold_time = None;
         let nbr = &cfg.neighbors[&address];
-        assert!(nbr.timer.hold_time.is_none());
-        assert_eq!(nbr.timer.connect_retry_time, Some(3));
-        assert_eq!(nbr.timer.idle_hold_time, Some(1));
+        assert!(nbr.config.timer.hold_time.is_none());
+        assert_eq!(nbr.config.timer.connect_retry_time, Some(3));
+        assert_eq!(nbr.config.timer.idle_hold_time, Some(1));
     }
 
     #[test]
@@ -1294,11 +1364,11 @@ mod tests {
         let address: IpAddr = "192.0.2.1".parse().unwrap();
         let mut cfg = BgpVrfConfig::default();
         let nbr = neighbor_entry(&mut cfg, address, ConfigOp::Set).unwrap();
-        nbr.timer.connect_retry_time = Some(3);
+        nbr.config.timer.connect_retry_time = Some(3);
 
-        assert!(nbr.timer.min_adv_interval.is_none());
-        assert!(nbr.timer.orig_interval.is_none());
-        assert!(nbr.timer.delay_open_time.is_none());
+        assert!(nbr.config.timer.min_adv_interval.is_none());
+        assert!(nbr.config.timer.orig_interval.is_none());
+        assert!(nbr.config.timer.delay_open_time.is_none());
     }
 
     #[test]
