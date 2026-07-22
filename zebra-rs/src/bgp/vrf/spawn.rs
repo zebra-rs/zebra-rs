@@ -406,6 +406,20 @@ fn materialize_peers(
         // session is cleared.
         peer.config.neighbor_group = nbr_cfg.peer_group.clone();
 
+        // Session timers (`neighbor <addr> timers { … }`). Copied before
+        // `start()` below so the very first idle-hold timer this peer
+        // arms already honours a configured `idle-hold-time` — arming it
+        // from the default and fixing it up afterwards would leave the
+        // first dial on the wrong cadence. Unset leaves stay `None` and
+        // fall through to `timer::Config`'s defaults, so a VRF neighbor
+        // with no `timers` block behaves exactly as before.
+        //
+        // This does NOT cover MRAI: advertisement pacing comes from the
+        // `AdvInterval` snapshot on the peer, which per-VRF tasks have no
+        // plumbing for — a CE session still advertises on the stock 30s
+        // eBGP / 5s iBGP cadence regardless of what is set here.
+        peer.config.timer = nbr_cfg.timer.clone();
+
         // Derive the negotiated address-family set for this CE peer.
         // `Peer::new` defaults to IPv4 unicast only, which is wrong for
         // an IPv6 CE peer — so resolve the family set in three layers,
@@ -699,6 +713,75 @@ mod tests {
             vrf.peers.get(&no_as).is_none(),
             "neighbor without remote-as skipped"
         );
+    }
+
+    /// `neighbor <addr> timers { … }` must reach the peer that
+    /// `materialize_peers` builds — the per-VRF equivalent of the global
+    /// neighbor's `timer::config::*` callbacks, which mutate a live peer
+    /// directly. Here the staged config is the only carrier: nothing
+    /// re-applies it after the peer exists, so if the copy is dropped the
+    /// session silently runs the stock cadence and the operator's
+    /// `timers` block does nothing at all.
+    #[tokio::test]
+    async fn materialize_peers_applies_configured_timers() {
+        use super::super::super::vrf_config::{BgpVrfConfig, BgpVrfNeighborConfig};
+        use super::super::inst::BgpVrf;
+        use crate::context::ProtoContext;
+
+        let (global_tx, _global_rx) = unbounded_channel::<BgpGlobalMsg>();
+        let ctx = ProtoContext::default_table_no_rib();
+        let (_rib_tx, rib_rx) = unbounded_channel();
+        let (mut vrf, _inbox) = BgpVrf::new(
+            "v1".to_string(),
+            ctx,
+            Ipv4Addr::UNSPECIFIED,
+            65000,
+            /* label */ 16,
+            global_tx,
+            rib_rx,
+        );
+
+        let mut cfg = BgpVrfConfig::default();
+        let tuned: std::net::IpAddr = "192.0.2.1".parse().unwrap();
+        let bare: std::net::IpAddr = "192.0.2.2".parse().unwrap();
+
+        let mut nbr = BgpVrfNeighborConfig {
+            remote_as: Some(65001),
+            ..Default::default()
+        };
+        nbr.timer.connect_retry_time = Some(3);
+        nbr.timer.hold_time = Some(9);
+        nbr.timer.idle_hold_time = Some(1);
+        cfg.neighbors.insert(tuned, nbr);
+
+        cfg.neighbors.insert(
+            bare,
+            BgpVrfNeighborConfig {
+                remote_as: Some(65002),
+                ..Default::default()
+            },
+        );
+
+        materialize_peers(&mut vrf, &cfg, &BTreeMap::new());
+
+        let peer = vrf.peers.get(&tuned).expect("tuned peer inserted");
+        assert_eq!(peer.config.timer.connect_retry_time, Some(3));
+        assert_eq!(peer.config.timer.hold_time, Some(9));
+        assert_eq!(peer.config.timer.idle_hold_time, Some(1));
+        // Read back through the accessors the timer code actually calls,
+        // so the test pins the effective value and not just the field.
+        assert_eq!(peer.config.timer.connect_retry_time(), 3);
+        assert_eq!(peer.config.timer.hold_time(), 9);
+        assert_eq!(peer.config.timer.idle_hold_time(), 1);
+
+        // A neighbor with no `timers` block is untouched: all three fall
+        // through to the documented defaults (RFC 4271 §10 suggests 120s
+        // ConnectRetry; hold-time 180s; idle-hold 5s).
+        let peer = vrf.peers.get(&bare).expect("bare peer inserted");
+        assert!(peer.config.timer.connect_retry_time.is_none());
+        assert_eq!(peer.config.timer.connect_retry_time(), 120);
+        assert_eq!(peer.config.timer.hold_time(), 180);
+        assert_eq!(peer.config.timer.idle_hold_time(), 5);
     }
 
     /// A CE peer's negotiated MP family set is derived from its own

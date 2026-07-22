@@ -4413,6 +4413,18 @@ impl Bgp {
             super::vrf_config::config_vrf_neighbor_description,
         );
         self.callback_add(
+            "/router/bgp/vrf/neighbor/timers/connect-retry-time",
+            super::vrf_config::config_vrf_neighbor_connect_retry_time,
+        );
+        self.callback_add(
+            "/router/bgp/vrf/neighbor/timers/hold-time",
+            super::vrf_config::config_vrf_neighbor_hold_time,
+        );
+        self.callback_add(
+            "/router/bgp/vrf/neighbor/timers/idle-hold-time",
+            super::vrf_config::config_vrf_neighbor_idle_hold_time,
+        );
+        self.callback_add(
             "/router/bgp/vrf/neighbor/afi-safi/enabled",
             super::vrf_config::config_vrf_neighbor_afi_safi_enabled,
         );

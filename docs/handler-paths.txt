@@ -222,5 +222,8 @@
 /router/bgp/vrf/neighbor/description
 /router/bgp/vrf/neighbor/peer-group
 /router/bgp/vrf/neighbor/remote-as
+/router/bgp/vrf/neighbor/timers/connect-retry-time
+/router/bgp/vrf/neighbor/timers/hold-time
+/router/bgp/vrf/neighbor/timers/idle-hold-time
 /router/bgp/vrf/rd
 /router/bgp/vrf/router-id
