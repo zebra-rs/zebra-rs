@@ -190,7 +190,10 @@ impl IsisRibFamily for V4 {
         level: Level,
         repair: &spf::RepairPath,
     ) -> Option<RepairPathMpls> {
-        build_repair_path_mpls(top, level, repair)
+        // Algo-0 (legacy) repair: node segments resolve to base
+        // Prefix-SIDs. Per-algo repairs go through
+        // `build_rib_from_flex_algo`, which passes `Some(algo)`.
+        build_repair_path_mpls(top, level, None, repair)
     }
 
     fn trunc_prefix(p: Ipv4Net) -> Ipv4Net {
@@ -1161,10 +1164,10 @@ struct FlexAlgoInput {
     graph: spf::Graph,
     source: Option<usize>,
     /// Run per-algo TI-LFA in this algo's constrained graph. Set for
-    /// SRv6-dataplane algos that inherit the instance-level TI-LFA
-    /// toggle and have not opted out with `fast-reroute disable`.
-    /// SR-MPLS algos are excluded until the repair-label resolver is
-    /// algorithm-aware — see the gate in [`build_spf_input`].
+    /// any algo that inherits the instance-level TI-LFA toggle and has
+    /// not opted out with `fast-reroute disable`. Both dataplanes are
+    /// algorithm-aware: node segments resolve to this algorithm's
+    /// Prefix-SID (SR-MPLS) or End SID (SRv6).
     ti_lfa: bool,
 }
 
@@ -1275,22 +1278,17 @@ pub(super) fn build_spf_input(top: &mut IsisTop, level: Level) -> Option<SpfInpu
             algo: *algo,
             graph: algo_graph,
             source: algo_source,
-            // Per-algorithm TI-LFA now *inherits* the instance-level
-            // toggle (IOS-XR / Juniper / FRR all protect every algorithm
-            // once TI-LFA is on); `fast-reroute disable` opts one
-            // algorithm out.
+            // Per-algorithm TI-LFA inherits the instance-level toggle
+            // (IOS-XR / Juniper / FRR all protect every algorithm once
+            // TI-LFA is on); `fast-reroute disable` opts one algorithm
+            // out. Both dataplanes are algorithm-aware now: node
+            // segments resolve to this algorithm's Prefix-SID (SR-MPLS)
+            // or End SID (SRv6), so a repair cannot silently fall back
+            // to algorithm-0 segments and cross a link the FAD excluded.
             //
-            // Still SRv6-only. An SR-MPLS repair list is resolved by
-            // `tilfa::repair_segments_to_mpls_labels`, which takes no
-            // algorithm and returns the first Prefix-SID it finds — the
-            // algorithm-0 one. Computing SR-MPLS repairs here would
-            // therefore emit segment lists that can traverse a link the
-            // FAD excluded, which is worse than leaving the algorithm
-            // unprotected. Lift this gate only together with an
-            // algorithm-aware label resolver.
-            ti_lfa: top.config.ti_lfa_enabled
-                && !entry.fast_reroute_disable
-                && entry.dataplane_srv6 == Some(true),
+            // An algorithm with no dataplane flag at all keeps the
+            // historical SR-MPLS default, matching the RIB build below.
+            ti_lfa: top.config.ti_lfa_enabled && !entry.fast_reroute_disable,
         });
     }
 
@@ -1937,7 +1935,7 @@ pub(super) fn apply_spf_result(top: &mut IsisTop, output: SpfOutput) {
         // (if empty) snapshot.
         let algo_rib = match (mpls_on, algo_source, algo_spf.as_ref()) {
             (true, Some(src), Some(spf_res)) => {
-                let r = build_rib_from_flex_algo(top, level, algo, src, spf_res);
+                let r = build_rib_from_flex_algo(top, level, algo, src, spf_res, &algo_tilfa);
                 mpls_route(&r, &mut ilm, srgb);
                 r
             }
@@ -2239,6 +2237,7 @@ fn build_rib_from_flex_algo(
     algo: u8,
     source: usize,
     spf_result: &BTreeMap<usize, spf::Path>,
+    tilfa: &BTreeMap<usize, Vec<spf::RepairPath>>,
 ) -> PrefixMap<Ipv4Net, SpfRoute<V4>> {
     let mut rib = PrefixMap::<Ipv4Net, SpfRoute<V4>>::new();
 
@@ -2311,9 +2310,35 @@ fn build_rib_from_flex_algo(
             };
             let prefix_sid = label_block.as_ref().map(|b| (algo_sid.clone(), b.clone()));
 
+            let mut nhops_for_route = spf_nhops.clone();
+
+            // Per-algo TI-LFA backup, mirroring the SRv6 sibling. Single
+            // nexthop only — an ECMP route's surviving legs already
+            // protect it. `Some(algo)` makes every node segment resolve
+            // to an algorithm-`algo` Prefix-SID, so the repair stays
+            // inside this algorithm's topology; a repair whose segments
+            // cannot all resolve is dropped rather than approximated
+            // with algorithm-0 labels.
+            if nhops_for_route.len() == 1
+                && let Some(repair) = tilfa.get(node).and_then(|paths| paths.first())
+                && let Some(mut backup) = build_repair_path_mpls(top, level, Some(algo), repair)
+            {
+                // Close the repair into a full SR path to the
+                // destination: the segment list only steers as far as
+                // its release point, and traffic tunneled through this
+                // route carries an inner destination that point may not
+                // know. Uses this algorithm's SID, not algo-0's.
+                if let Some(sid) = sid {
+                    V4::backup_append_prefix_sid(&mut backup, sid);
+                }
+                if let Some(nhop) = nhops_for_route.values_mut().next() {
+                    nhop.backup = Some(backup);
+                }
+            }
+
             let route = SpfRoute {
                 metric: nhops.cost + entry.metric,
-                nhops: spf_nhops.clone(),
+                nhops: nhops_for_route,
                 sid,
                 prefix_sid,
                 // `peer_algo_sid` stores only the SID value, not the

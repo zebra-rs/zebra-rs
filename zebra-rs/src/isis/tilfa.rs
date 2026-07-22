@@ -72,9 +72,10 @@ pub(super) fn first_router_hop_id(lsp_map: &LspMap, path: &[usize]) -> Option<us
 pub(super) fn build_repair_path_mpls(
     top: &IsisTop,
     level: Level,
+    algo: Option<u8>,
     rp: &spf::RepairPath,
 ) -> Option<RepairPathMpls> {
-    let labels = repair_segments_to_mpls_labels(top, level, &rp.segs)?;
+    let labels = repair_segments_to_mpls_labels(top, level, algo, &rp.segs)?;
 
     let ifindex = (rp.first_hop_link_id != 0).then_some(rp.first_hop_link_id)?;
     let link = top.links.get(&ifindex)?;
@@ -365,10 +366,27 @@ fn resolve_sid_to_label(
 }
 
 /// Look up `vertex`'s prefix-SID (NodeSID) as an absolute MPLS label.
-/// Walks the vertex's IPv4 reach entries (typically the loopback)
-/// for the first prefix-SID sub-TLV, then resolves Index against the
-/// originator's SRGB.
-fn node_sid_label_for_vertex(top: &IsisTop, level: Level, vertex: usize) -> Option<u32> {
+/// Walks the vertex's IPv4 reach entries (typically the loopback) and
+/// resolves the SID Index against the originator's SRGB.
+///
+/// `algo` selects which Prefix-SID: `None` takes the algo-0 sub-TLV off
+/// the reach entry; `Some(n)` takes the Algorithm-`n` SID from
+/// `peer_algo_sid`, keyed on the same (untruncated) prefix so the entry
+/// chosen is identical either way — only the SID differs.
+///
+/// There is deliberately **no fallback to the algo-0 SID** when a peer
+/// advertises no Algorithm-`n` Prefix-SID. Algorithm-0 segments steer
+/// along algorithm-0 paths, which may cross a link the FAD excluded —
+/// exactly the constraint the algorithm exists to enforce. Returning
+/// `None` drops the whole repair stack (see
+/// `repair_segments_to_mpls_labels`), leaving the destination
+/// unprotected under algorithm `n`, which is the safe failure.
+fn node_sid_label_for_vertex(
+    top: &IsisTop,
+    level: Level,
+    vertex: usize,
+    algo: Option<u8>,
+) -> Option<u32> {
     let Some(sys_id) = top.lsp_map.get(&level).resolve(vertex).copied() else {
         tracing::debug!(
             "[tilfa] node_sid {level:?} vertex={vertex}: no sys_id in lsp_map (vertex not in LSDB?)"
@@ -384,28 +402,35 @@ fn node_sid_label_for_vertex(top: &IsisTop, level: Level, vertex: usize) -> Opti
     };
     let mut saw_prefix_sid = false;
     for entry in entries.iter() {
-        let Some(prefix_sid) = entry.prefix_sid() else {
+        let sid = match algo {
+            None => entry.prefix_sid().map(|ps| ps.sid.clone()),
+            Some(n) => top
+                .peer_algo_sid
+                .get(&level)
+                .get(&sys_id)
+                .and_then(|m| m.get(&(n, entry.prefix)))
+                .cloned(),
+        };
+        let Some(sid) = sid else {
             continue;
         };
         saw_prefix_sid = true;
-        if let Some(label) =
-            resolve_sid_to_label(top, level, &sys_id, &prefix_sid.sid, SrBlockKind::Global)
-        {
+        if let Some(label) = resolve_sid_to_label(top, level, &sys_id, &sid, SrBlockKind::Global) {
             return Some(label);
         }
         tracing::debug!(
-            "[tilfa] node_sid {level:?} vertex={vertex} sys_id={sys_id}: \
+            "[tilfa] node_sid {level:?} vertex={vertex} sys_id={sys_id} algo={algo:?}: \
              prefix={:?} prefix_sid={:?} could not resolve against SRGB \
              (peer's label_map block missing or index out of range)",
             entry.prefix,
-            prefix_sid.sid,
+            sid,
         );
     }
     if !saw_prefix_sid {
         tracing::debug!(
-            "[tilfa] node_sid {level:?} vertex={vertex} sys_id={sys_id}: \
-             {} IPv4 reach entries scanned, none carry a Prefix-SID sub-TLV \
-             (peer not advertising prefix-SID for any loopback?)",
+            "[tilfa] node_sid {level:?} vertex={vertex} sys_id={sys_id} algo={algo:?}: \
+             {} IPv4 reach entries scanned, none carry a Prefix-SID for this algorithm \
+             (peer not participating, or advertising no per-algo SID for its loopback?)",
             entries.len(),
         );
     }
@@ -495,15 +520,23 @@ fn adj_sid_label_for_link(
 /// — we refuse to install a partial stack since the resulting label
 /// path would diverge from the post-convergence path the algorithm
 /// computed.
+/// `algo` is threaded to the NodeSid resolver so an algorithm-N repair
+/// is expressed with algorithm-N node segments. Adjacency segments are
+/// algorithm-agnostic by definition (RFC 9350 §6.2: an Adj-SID means
+/// "pop and forward over this link" regardless of algorithm), and the
+/// link is already known to be in algorithm N's topology because the
+/// repair was computed on that algorithm's pruned graph — so they need
+/// no per-algo lookup.
 fn repair_segments_to_mpls_labels(
     top: &IsisTop,
     level: Level,
+    algo: Option<u8>,
     segments: &[spf::SrSegment],
 ) -> Option<Vec<rib::Label>> {
     let mut labels = Vec::with_capacity(segments.len());
     for (idx, seg) in segments.iter().enumerate() {
         let resolved = match seg {
-            spf::SrSegment::NodeSid(v) => node_sid_label_for_vertex(top, level, *v),
+            spf::SrSegment::NodeSid(v) => node_sid_label_for_vertex(top, level, *v, algo),
             spf::SrSegment::AdjSid(from, to, via) => {
                 adj_sid_label_for_link(top, level, *from, *to, *via)
             }
