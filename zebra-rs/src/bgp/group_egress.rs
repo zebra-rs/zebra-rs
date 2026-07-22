@@ -258,11 +258,9 @@ impl Engine {
             .find(|(id, _)| **id != source)
             .map(|(_, c)| c.clone())
         else {
-            // No non-source member to advertise to — still record the group's
-            // RIB state so a future member is caught up; nothing to send.
-            let arc = self.attr_store.intern((*rib.attr).clone());
-            rib.attr = arc;
-            self.adj_out.add(prefix, rib);
+            // Nobody is eligible to receive this route. Do not create a
+            // phantom Adj-RIB-Out row: a later session join receives the
+            // current Loc-RIB through its direct initial dump.
             return;
         };
         let built = super::route::route_update_ipv4(&ctx, &prefix, &rib, self.add_path).and_then(
@@ -272,12 +270,12 @@ impl Engine {
             },
         );
         let Some((nlri, decision)) = built else {
-            self.withdraw(prefix, rib.remote_id, source);
+            self.withdraw(prefix, if self.add_path { rib.local_id } else { 0 }, source);
             return;
         };
         let arc = self.attr_store.intern(decision.attr);
         rib.attr = arc.clone();
-        let prev = self.adj_out.add(prefix, rib);
+        let prev = self.adj_out.record_out(prefix, rib, self.add_path);
         let already_sent = prev.is_some_and(|p| Arc::ptr_eq(&p.attr, &arc));
         if !already_sent {
             let bytes_list =
@@ -413,6 +411,25 @@ mod tests {
     }
 
     #[test]
+    fn sole_source_without_recipient_never_becomes_phantom_wire_state() {
+        let source = 7;
+        let prefix: Ipv4Net = "10.77.0.0/24".parse().unwrap();
+        let mut engine = Engine::default();
+        let mut source_rx = member(&mut engine, source);
+
+        engine.handle(GroupEgressDeltaV4::Advertise {
+            prefix,
+            rib: rib(source, "192.0.2.7"),
+        });
+
+        assert!(source_rx.try_recv().is_err(), "split horizon sends nothing");
+        assert!(
+            !engine.adj_out.0.contains_key(&prefix),
+            "a route received by no member is not actual Adj-RIB-Out"
+        );
+    }
+
+    #[test]
     fn re_advertise_same_attr_dedups() {
         let mut engine = Engine::default();
         let mut rx1 = member(&mut engine, 1);
@@ -448,6 +465,60 @@ mod tests {
         });
         assert!(rx1.try_recv().is_ok(), "member 1 receives the withdraw");
         assert!(rx2.try_recv().is_ok(), "member 2 receives the withdraw");
+    }
+
+    #[test]
+    fn addpath_filter_withdraws_only_the_local_path_id() {
+        let mut engine = Engine::default();
+        let mut rx = member(&mut engine, 1);
+        engine.add_path = true;
+        let prefix: Ipv4Net = "10.10.10.0/24".parse().unwrap();
+        let mut path1 = rib(99, "192.0.2.1");
+        path1.local_id = 11;
+        let mut path2 = rib(98, "192.0.2.2");
+        path2.local_id = 12;
+        engine.advertise(prefix, path1.clone());
+        engine.advertise(prefix, path2);
+        let _ = std::iter::from_fn(|| rx.try_recv().ok()).count();
+
+        // Every test SyncCtx has ident 0. Changing only the source makes
+        // route_update_ipv4 filter path 1; remote-id is still zero, so this
+        // exercises the local-id used by Add-Path Adj-RIB-Out and withdraw.
+        path1.ident = 0;
+        engine.advertise(prefix, path1);
+
+        let packet = rx.try_recv().expect("filtered Add-Path row is withdrawn");
+        assert_eq!(engine.adj_out.0[&prefix].len(), 1);
+        assert_eq!(engine.adj_out.0[&prefix][0].local_id, 12);
+        assert!(packet.windows(4).any(|bytes| bytes == 11_u32.to_be_bytes()));
+    }
+
+    /// Non-AddPath: a best-path change to a route under a different Loc-RIB
+    /// local-id must replace the advertised row, not append. `add` keys Out
+    /// rows by local-id, so before `record_out` the superseded local-id 1 row
+    /// lingered as a phantom Adj-RIB-Out entry (two rows for one non-AddPath
+    /// prefix).
+    #[test]
+    fn non_addpath_best_change_replaces_stale_adj_out_row() {
+        let mut engine = Engine::default();
+        let mut rx = member(&mut engine, 1);
+        let prefix: Ipv4Net = "10.20.0.0/24".parse().unwrap();
+
+        let mut first = rib(9, "192.0.2.1");
+        first.local_id = 1;
+        engine.advertise(prefix, first);
+        let _ = std::iter::from_fn(|| rx.try_recv().ok()).count();
+
+        // The best path changes to a route carrying a fresh Loc-RIB local-id.
+        let mut second = rib(9, "192.0.2.2");
+        second.local_id = 2;
+        engine.advertise(prefix, second);
+
+        // Exactly one advertised path remains — the new best. The old `add`
+        // (keyed by local-id) left the superseded local-id 1 row behind.
+        let rows = &engine.adj_out.0[&prefix];
+        assert_eq!(rows.len(), 1, "non-AddPath keeps exactly one advertised path");
+        assert_eq!(rows[0].local_id, 2, "the surviving row is the new best path");
     }
 
     #[test]

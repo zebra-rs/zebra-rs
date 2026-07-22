@@ -104,6 +104,25 @@ impl<D: RibDirection, P: Ord> AdjRibTable<D, P> {
     }
 }
 
+impl<P: Ord> AdjRibTable<Out, P> {
+    /// Record an outbound best path, returning the prior best (for the
+    /// caller's re-send dedup). In non-AddPath mode a prefix carries exactly
+    /// one advertised path, so replace the whole entry: `add` keys Out rows by
+    /// the Loc-RIB local-id, so a best-path change to a route with a different
+    /// local-id would otherwise append a second row and leave the superseded
+    /// path as a phantom Adj-RIB-Out entry. Under Add-Path every path-id is a
+    /// distinct row that coexists, so defer to `add`.
+    pub fn record_out(&mut self, prefix: P, route: BgpRib, add_path: bool) -> Option<BgpRib> {
+        if add_path {
+            self.add(prefix, route)
+        } else {
+            let previous = self.0.get(&prefix).and_then(|rows| rows.first()).cloned();
+            self.0.insert(prefix, vec![route]);
+            previous
+        }
+    }
+}
+
 /// Per-RD Adj-RIB-In/Out table for EVPN routes.
 ///
 /// Mirrors `AdjRibTable<D>` but keyed on `EvpnPrefix` (exact match) instead
