@@ -233,7 +233,11 @@ pub fn spawn_bgp_vrf(
     // Register each materialised peer with the global accept
     // dispatcher so an inbound `:179` from that IP lands on this
     // VRF task via `BgpVrfMsg::Accept` instead of the global
-    // instance.
+    // instance. This is the pre-respawn fallback: once this task's
+    // own VRF-bound listener is open (kernel-ctx spawn) the CE's
+    // inbound lands there directly and this forward is unused. It
+    // still matters for a placeholder-ctx spawn, whose listener does
+    // not exist yet — see `Bgp::process_msg`'s `Message::Accept`.
     for addr in vrf.peers.keys().copied().collect::<Vec<_>>() {
         let _ = vrf.global_tx.send(BgpGlobalMsg::RegisterPeer {
             vrf: name.clone(),

@@ -1013,6 +1013,12 @@ pub struct Bgp {
     /// forwarded via `BgpVrfMsg::Accept` to that VRF's task; every
     /// other connection falls through to the existing
     /// global-instance accept path.
+    ///
+    /// This is the PRE-RESPAWN fallback for per-VRF passive accept —
+    /// a per-VRF task's own VRF-bound listener wins for its
+    /// interfaces once it is open, so this map only routes inbound
+    /// during the placeholder-ctx window before the listener exists.
+    /// See the `Message::Accept` handler for why it is retained.
     pub peer_index: BTreeMap<std::net::IpAddr, String>,
     /// Outbound sender every per-VRF task uses to push messages
     /// back to the global runtime — peer registration, exports,
@@ -2261,6 +2267,24 @@ impl Bgp {
                 // through to the existing global-instance accept
                 // path — that's how default-VRF peers and the
                 // dynamic-neighbor fallback still work.
+                //
+                // NOTE: this per-VRF forward is the PRE-RESPAWN
+                // FALLBACK, not the primary path. Each per-VRF task
+                // now opens its own VRF-bound (`SO_BINDTODEVICE`)
+                // listener (`BgpVrf::open_listeners`), and the kernel
+                // routes a SYN arriving on a VRF-enslaved interface to
+                // that device-bound socket in preference to this
+                // (device-unbound) global listener. So in steady state
+                // a VRF CE's inbound never reaches here. It only does
+                // during the window between a placeholder-ctx spawn
+                // (kernel VRF not yet known → no ifname → no listener)
+                // and the kernel-ctx respawn that opens the listener —
+                // `net.ipv4.tcp_l3mdev_accept = 1` lets this global
+                // socket catch the l3mdev SYN in the meantime. The
+                // detour is therefore intentionally retained, not dead
+                // code: deleting it would silently regress passive
+                // accept for a VRF whose BGP config commits before RIB
+                // learns its kernel device, if the PE side is passive.
                 let src_ip = sockaddr.ip();
                 if let Some(vrf_name) = self.peer_index.get(&src_ip).cloned()
                     && let Some(handle) = self.vrf_registry.get(&vrf_name)

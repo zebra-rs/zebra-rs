@@ -1741,7 +1741,9 @@ impl BgpVrf {
     /// connection against this VRF's own `peers` — the same path
     /// `peer::accept` runs for the global instance. Fed by both this
     /// VRF's own listener (`accept_rx`) and the global dispatcher's
-    /// `BgpVrfMsg::Accept` forward (the pre-listener fallback).
+    /// `BgpVrfMsg::Accept` forward (the pre-respawn fallback: it only
+    /// carries inbound during the placeholder-ctx window, before this
+    /// task's own listener opens on the kernel-ctx respawn).
     fn handle_accept(&mut self, stream: tokio::net::TcpStream, sockaddr: std::net::SocketAddr) {
         tracing::debug!(vrf = %self.name, peer = %sockaddr.ip(), "bgp vrf: inbound Accept");
         let peer_addr = sockaddr.ip();
@@ -2831,8 +2833,9 @@ impl BgpVrf {
             }
             BgpVrfMsg::Accept(stream, sockaddr) => {
                 // Passive accept forwarded by the global dispatcher (the
-                // pre-listener fallback). Same handling as a connection
-                // this VRF's own listener accepts.
+                // pre-respawn fallback, before this task's own listener
+                // opens). Same handling as a connection our own listener
+                // accepts.
                 self.handle_accept(stream, sockaddr);
             }
             BgpVrfMsg::ImportV4 {
