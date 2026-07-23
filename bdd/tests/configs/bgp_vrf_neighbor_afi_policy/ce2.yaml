@@ -1,0 +1,30 @@
+# CE2 (AS 65002) — the receiver used to observe PE1's OUTBOUND per-AFI
+# filters. It accepts whatever PE1 re-advertises from the VRF Loc-RIB;
+# the outbound scenarios assert on CE2's `show bgp` table.
+interface:
+- if-name: lo
+  ipv4:
+    address: 10.0.2.1/32
+- if-name: pe1
+  ipv4:
+    address: 10.2.0.2/30
+router:
+  bgp:
+    global:
+      as: 65002
+      router-id: 10.0.2.1
+    timer:
+      adv-interval:
+        ebgp: 3
+    neighbor:
+    - remote-address: 10.2.0.1
+      remote-as: 65000
+      timers: {connect-retry-time: 3}
+      enabled: true
+      afi-safi:
+      - name: ipv4
+        enabled: true
+    afi-safi:
+    - name: ipv4
+      network:
+      - prefix: 10.0.2.1/32

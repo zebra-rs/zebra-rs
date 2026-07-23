@@ -1396,6 +1396,16 @@ impl BgpVrf {
         {
             peer.rebuild_out_policy();
         }
+        // Push the resolved INBOUND policy to the shard UNCONDITIONALLY (even
+        // pre-establishment). The live ingest path
+        // (`route_ipv4_update_batch` with `shards: None`) filters received v4
+        // unicast THROUGH the shard's `in_policy` and consults nothing else,
+        // so a route arriving right after the OPEN must already see the
+        // snapshot — the established-gated replay below only fixes up routes
+        // already in Adj-RIB-In.
+        if direction == InOut::Input {
+            self.refresh_shard_in_policy(peer_idx);
+        }
         // The replay itself is established-only, mirroring the global wrappers:
         // a peer that never came up has nothing stored to re-evaluate.
         let Some(peer) = self.peers.get_by_idx(peer_idx) else {
@@ -1446,6 +1456,31 @@ impl BgpVrf {
                 super::super::route::route_soft_out_peer(peer_idx, &mut top, &mut self.peers);
             }
         }
+    }
+
+    /// Push peer `ident`'s effective IPv4-unicast inbound policy snapshot to
+    /// this VRF's shard. The per-VRF twin of `Bgp::shard_replace_in_policy`'s
+    /// N=1 (synchronous shard) branch: the live ingest path
+    /// (`route_ipv4_update_batch` with `shards: None`) filters received v4
+    /// unicast THROUGH the shard's `in_policy`, so without this a per-VRF
+    /// neighbor's inbound `prefix-set` / `policy` binding is silently ignored
+    /// on receive. (Soft-reconfig replays off the retained Adj-RIB-In
+    /// directly, so it needs no shard snapshot — but the first receive does.)
+    /// The shard only policy-filters IPv4 unicast ingress, so only that
+    /// family's effective binding (per-AFI, else the legacy fallback) is
+    /// snapshotted.
+    pub(super) fn refresh_shard_in_policy(&mut self, ident: usize) {
+        use super::super::policy::InOut;
+        use bgp_packet::{Afi, AfiSafi, Safi};
+        let Some(peer) = self.peers.get_by_idx(ident) else {
+            return;
+        };
+        let v4u = AfiSafi::new(Afi::Ip, Safi::Unicast);
+        let snap = std::sync::Arc::new(super::super::shard::InPolicy {
+            prefix_set: peer.prefix_set_at(v4u, InOut::Input).clone(),
+            policy_list: peer.policy_list_at(v4u, InOut::Input).clone(),
+        });
+        self.shard.set_in_policy(ident, Some(snap));
     }
 
     /// The `proto` string this VRF uses with the policy actor.
@@ -3007,6 +3042,9 @@ impl BgpVrf {
         // detached explicitly or the freed ident lingers and a future
         // slot reuse inherits the group.
         super::super::update_group::detach(&mut self.update_groups, &mut self.peers, peer_idx);
+        // Drop this peer's inbound-policy snapshot from the shard so a future
+        // ident reuse can't inherit it (the add path re-seeds it anyway).
+        self.shard.set_in_policy(peer_idx, None);
         // Drop this peer's key from the VRF listener before it leaves the
         // map. `refresh_listener_*` only (re)installs for peers still
         // present, so it can't clear a departed peer's key; a lingering MD5
@@ -4002,6 +4040,92 @@ mod tests {
         assert!(
             unsubscribed,
             "removing the peer unsubscribes its BFD session",
+        );
+    }
+
+    /// Regression: a per-VRF neighbor's inbound prefix-set must be pushed to
+    /// the shard's `in_policy`. The live IPv4-unicast ingest path
+    /// (`route_ipv4_update_batch` with `shards: None`) filters received
+    /// routes THROUGH the shard snapshot and consults nothing else, so if the
+    /// resolved binding never reaches the shard the inbound filter is
+    /// silently ignored on receive (the bug this guards). Seeding at bind
+    /// time snapshots deny-all (fail-closed); the resolve reply refreshes it.
+    #[tokio::test]
+    async fn inbound_policy_populates_shard_in_policy() {
+        use crate::bgp::config::peer_policy_ident;
+        use crate::bgp::peer::Peer;
+        use crate::bgp::policy::InOut;
+        use crate::policy::prefix::set::{PrefixSet, PrefixSetEntry};
+        use crate::policy::{PolicyRx, PolicyType};
+        use bgp_packet::{Afi, AfiSafi, Safi};
+        use std::net::IpAddr;
+
+        let (global_tx, _global_rx) = unbounded_channel::<BgpGlobalMsg>();
+        let ctx = test_ctx_for_vrf(60, "vrf-inpol");
+        let (_rib_tx, rib_rx) = mpsc::unbounded_channel();
+        let (mut vrf, _inbox) = BgpVrf::new(
+            "vrf-inpol".to_string(),
+            ctx,
+            Ipv4Addr::UNSPECIFIED,
+            65000,
+            /* label */ 16,
+            global_tx,
+            rib_rx,
+        );
+
+        let addr: IpAddr = Ipv4Addr::new(10, 0, 0, 2).into();
+        let v4u = AfiSafi::new(Afi::Ip, Safi::Unicast);
+        let (peer_tx, _peer_rx) = mpsc::channel::<Message>(4);
+        let peer_ctx = test_ctx_for_vrf(60, "vrf-inpol");
+        // Deliberately NOT Established: the shard snapshot refresh must be
+        // unconditional (a route can arrive right after OPEN).
+        let mut peer = Peer::new(
+            0,
+            65000,
+            Ipv4Addr::new(1, 1, 1, 1),
+            65001,
+            addr,
+            None,
+            peer_tx,
+            peer_ctx,
+        );
+        peer.prefix_set_slot(v4u, InOut::Input).name = Some("ps-in".to_string());
+        vrf.peers.insert(addr, peer);
+        let ident = vrf.peers.get(&addr).expect("peer inserted").ident;
+
+        // Bind-time seed (what `insert_started_peer` does): bound-but-
+        // unresolved ⇒ snapshot present, prefix-set still None (deny-all).
+        vrf.refresh_shard_in_policy(ident);
+        let snap = vrf
+            .shard
+            .in_policy
+            .get(&ident)
+            .expect("shard in_policy seeded at bind");
+        assert_eq!(snap.prefix_set.name.as_deref(), Some("ps-in"));
+        assert!(
+            snap.prefix_set.prefix_set.is_none(),
+            "unresolved binding snapshots as deny-all"
+        );
+
+        // The actor resolves the set — `process_policy_msg` must refresh the
+        // shard snapshot with the resolved data (via `soft_reapply_peer`).
+        let prefix: ipnet::Ipv4Net = "10.9.0.0/24".parse().unwrap();
+        let mut set = PrefixSet::default();
+        set.insert(prefix.into(), PrefixSetEntry::default());
+        vrf.process_policy_msg(PolicyRx::PrefixSet {
+            name: "ps-in".to_string(),
+            ident: peer_policy_ident(ident, Some(v4u)),
+            policy_type: PolicyType::PrefixSetIn,
+            prefix_set: Some(set),
+        });
+        let snap = vrf
+            .shard
+            .in_policy
+            .get(&ident)
+            .expect("shard in_policy present");
+        assert!(
+            snap.prefix_set.prefix_set.is_some(),
+            "resolved inbound prefix-set was pushed to the shard in_policy",
         );
     }
 

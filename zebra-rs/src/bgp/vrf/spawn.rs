@@ -777,6 +777,15 @@ pub(super) fn insert_started_peer(
         .get_mut(addr)
         .expect("peer was just inserted")
         .start();
+    // Seed the shard's inbound-policy snapshot from the freshly-bound (but
+    // not-yet-resolved) slots so the live ingest path filters from the first
+    // receive. A bound-but-unresolved binding snapshots as deny-all
+    // (fail-closed); the actor's resolve reply refreshes it via
+    // `soft_reapply_peer`. Without this seed, routes arriving before the
+    // resolve reply would slip into the Loc-RIB unfiltered.
+    if let Some(ident) = vrf.peers.get(addr).map(|p| p.ident) {
+        vrf.refresh_shard_in_policy(ident);
+    }
     // Bring up BFD for this CE if configured — after the ident is assigned
     // and after start(), matching the global neighbor's order. Shared by the
     // spawn-time materialize and the runtime `AddPeer`: teardown is
