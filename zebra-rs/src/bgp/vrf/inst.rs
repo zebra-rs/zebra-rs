@@ -1566,19 +1566,6 @@ impl BgpVrf {
         }
     }
 
-    /// Every BFD key this VRF's peers currently subscribe, for the
-    /// synchronous unsubscribe on despawn — same ordering hazard as the
-    /// policy watches (a respawn reuses the client id + keys, so a late
-    /// unsubscribe from the outgoing incarnation would tear down the
-    /// incoming one's session).
-    pub fn bfd_session_list(&self) -> Vec<crate::bfd::session::SessionKey> {
-        self.peers
-            .idents()
-            .into_iter()
-            .filter_map(|idx| self.peers.get_by_idx(idx).and_then(|p| p.bfd_session_key))
-            .collect()
-    }
-
     /// Handle a BFD state change for one of this VRF's CE sessions.
     /// Mirrors the global `Bgp::process_bfd_event`: on a transition to
     /// Down, tear the BGP session down (RFC 5882 §5).
@@ -3052,6 +3039,20 @@ impl BgpVrf {
         if let Some(chain) = &ao_chain {
             self.ao_keychain_watch(chain, peer_idx, false);
         }
+        // Tear down this peer's BFD session (if any) before it leaves the map.
+        // `bfd_reconcile` can't do it — it reads `peer.config.bfd` (still
+        // "enabled") and would re-subscribe — so unsubscribe the tracked key
+        // directly. Whole-VRF despawn would clear it via `UnsubscribeClient`,
+        // but a per-peer remove must drop it now.
+        if let (Some(key), Some(bfd_client_tx)) = (
+            self.peers.get(&addr).and_then(|p| p.bfd_session_key),
+            self.bfd_client_tx.clone(),
+        ) {
+            let _ = bfd_client_tx.send(crate::bfd::inst::ClientReq::Unsubscribe {
+                client: self.bfd_client(),
+                key,
+            });
+        }
         self.peers.remove(&addr);
         self.unregister_policy_watches(&watches);
         // Notify the global accept dispatcher this VRF no longer claims the
@@ -3192,6 +3193,11 @@ impl BgpVrf {
             }
             self.resolve_ao_keys();
         }
+        // Reconcile BFD against the new config: `bfd_reconcile` subscribes /
+        // unsubscribes / re-parametrizes the session to match `peer.config.bfd`
+        // (a no-op when unchanged). Covers a runtime `bfd enabled` toggle or an
+        // echo-param edit on a live CE session.
+        self.bfd_reconcile(ident);
         bgp_vrf_trace!(
             &self.tracing,
             vrf = %self.name,
@@ -3934,6 +3940,69 @@ mod tests {
         );
         assert_eq!(resolved.recv_id, 40);
         assert_eq!(resolved.key_material, b"two");
+    }
+
+    /// A CE neighbor added at runtime with `bfd enabled` subscribes a BFD
+    /// session immediately — BFD is now live on the runtime path, not just at
+    /// spawn — and removing it unsubscribes. The client-scoped teardown
+    /// (`UnsubscribeClient`) is what makes tracking a runtime-added session
+    /// safe without a spawn-time snapshot.
+    #[tokio::test]
+    async fn runtime_add_and_remove_peer_drives_bfd() {
+        use crate::bfd::inst::ClientReq;
+
+        let (global_tx, _global_rx) = unbounded_channel::<BgpGlobalMsg>();
+        let ctx = test_ctx_for_vrf(12, "vrf-bfd");
+        let (_rib_tx, rib_rx) = mpsc::unbounded_channel();
+        let (mut vrf, _inbox) = BgpVrf::new(
+            "vrf-bfd".to_string(),
+            ctx,
+            Ipv4Addr::UNSPECIFIED,
+            65000,
+            /* label */ 16,
+            global_tx,
+            rib_rx,
+        );
+
+        // Wire a BFD client channel so the Subscribe / Unsubscribe are
+        // observable.
+        let (bfd_tx, mut bfd_rx) = mpsc::unbounded_channel::<ClientReq>();
+        vrf.set_bfd_client(Some(bfd_tx));
+
+        let a: std::net::IpAddr = "192.0.2.1".parse().unwrap();
+        let mut n = crate::bgp::vrf_config::BgpVrfNeighborConfig {
+            remote_as: Some(65001),
+            ..Default::default()
+        };
+        n.config.bfd.enable = Some(true);
+        let (ra, cfg, knobs) = super::super::spawn::resolve_vrf_peer_config(
+            &a,
+            &n,
+            &std::collections::BTreeMap::new(),
+        )
+        .unwrap();
+
+        vrf.process_global_msg(BgpVrfMsg::AddPeer {
+            addr: a,
+            remote_as: ra,
+            config: Box::new(cfg),
+            knobs: Box::new(knobs),
+            policy_refs: std::collections::BTreeMap::new(),
+        });
+        let subscribed = std::iter::from_fn(|| bfd_rx.try_recv().ok())
+            .any(|r| matches!(r, ClientReq::Subscribe { key, .. } if key.remote == a));
+        assert!(
+            subscribed,
+            "runtime AddPeer with bfd enabled subscribes a session",
+        );
+
+        vrf.process_global_msg(BgpVrfMsg::RemovePeer { addr: a });
+        let unsubscribed = std::iter::from_fn(|| bfd_rx.try_recv().ok())
+            .any(|r| matches!(r, ClientReq::Unsubscribe { key, .. } if key.remote == a));
+        assert!(
+            unsubscribed,
+            "removing the peer unsubscribes its BFD session",
+        );
     }
 
     #[tokio::test]

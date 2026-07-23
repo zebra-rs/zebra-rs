@@ -123,6 +123,12 @@ pub enum ClientReq {
     /// Drop `client`'s interest in `key`. When the last subscriber
     /// unsubscribes, BFD tears the session down.
     Unsubscribe { client: ClientId, key: SessionKey },
+    /// Drop every subscription `client` holds, in one shot, tearing down
+    /// any session left with no subscribers. Used at task teardown when a
+    /// client (e.g. a per-VRF BGP task) can't enumerate its own live keys —
+    /// a runtime-added session may not be in any spawn-time snapshot. The
+    /// BFD analog of the policy actor's `UnregisterProto`.
+    UnsubscribeClient { client: ClientId },
 }
 
 /// While the in-kernel expiration watchdog owns detection for a session, its
@@ -360,6 +366,7 @@ impl Bfd {
                 notifier,
             } => self.subscribe(client, key, params, notifier),
             ClientReq::Unsubscribe { client, key } => self.unsubscribe(&client, &key),
+            ClientReq::UnsubscribeClient { client } => self.unsubscribe_client(&client),
         }
     }
 
@@ -419,6 +426,26 @@ impl Bfd {
         if now_empty {
             self.subscribers.remove(key);
             self.remove_session(key);
+        }
+    }
+
+    /// Drop every subscription held by `client`, tearing down each session
+    /// left with no remaining subscribers. Lets a client clear all its
+    /// interest at teardown without enumerating its own keys — the per-key
+    /// [`Self::unsubscribe`] applied client-wide. See
+    /// [`ClientReq::UnsubscribeClient`].
+    pub fn unsubscribe_client(&mut self, client: &str) {
+        // Collect the keys that lose their last subscriber first — can't
+        // remove a session while iterating `subscribers`.
+        let mut orphaned: Vec<SessionKey> = Vec::new();
+        for (key, subs) in self.subscribers.iter_mut() {
+            if subs.remove(client).is_some() && subs.is_empty() {
+                orphaned.push(*key);
+            }
+        }
+        for key in orphaned {
+            self.subscribers.remove(&key);
+            self.remove_session(&key);
         }
     }
 
@@ -1420,6 +1447,42 @@ mod tests {
         bfd.unsubscribe("solo", &key);
         assert!(bfd.sessions.get_by_key(&key).is_none());
         assert!(!bfd.subscribers.contains_key(&key));
+    }
+
+    /// `unsubscribe_client` drops every session a client holds in one shot —
+    /// tearing down those with no other subscriber, keeping a session another
+    /// client still holds, and leaving that other client's own sessions
+    /// intact. This is the teardown a per-VRF task uses at despawn without
+    /// enumerating its own (possibly runtime-added) keys.
+    #[tokio::test]
+    async fn unsubscribe_client_drops_all_of_one_clients_sessions() {
+        let mut bfd = fresh_bfd();
+        let k1 = loopback_key(11);
+        let k2 = loopback_key(12);
+        let shared = loopback_key(13);
+        let k_other = loopback_key(14);
+
+        let (tx, _rx) = mpsc::unbounded_channel();
+        // "vrf" holds k1, k2, and shares `shared` with "other".
+        bfd.subscribe("vrf".into(), k1, SessionParams::default(), tx.clone());
+        bfd.subscribe("vrf".into(), k2, SessionParams::default(), tx.clone());
+        bfd.subscribe("vrf".into(), shared, SessionParams::default(), tx.clone());
+        bfd.subscribe("other".into(), shared, SessionParams::default(), tx.clone());
+        // "other" also has its own exclusive session.
+        bfd.subscribe("other".into(), k_other, SessionParams::default(), tx);
+
+        bfd.unsubscribe_client("vrf");
+
+        // vrf's exclusive sessions are torn down.
+        assert!(bfd.sessions.get_by_key(&k1).is_none());
+        assert!(bfd.sessions.get_by_key(&k2).is_none());
+        assert!(!bfd.subscribers.contains_key(&k1));
+        assert!(!bfd.subscribers.contains_key(&k2));
+        // The shared session survives — "other" still subscribes it, alone now.
+        assert!(bfd.sessions.get_by_key(&shared).is_some());
+        assert_eq!(bfd.subscribers.get(&shared).map(BTreeMap::len), Some(1));
+        // "other"'s own session is untouched.
+        assert!(bfd.sessions.get_by_key(&k_other).is_some());
     }
 
     /// process_client_req dispatches Subscribe / Unsubscribe so
