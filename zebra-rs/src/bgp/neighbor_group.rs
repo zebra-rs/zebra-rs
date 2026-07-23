@@ -1286,6 +1286,16 @@ pub(super) fn apply_inherited_session_knobs(
     let update_source = resolve_knob(groups, &peer.config, |k| k.update_source);
     // The BFD re-arm this returns is only meaningful for a live session.
     let _ = super::config::apply_update_source(peer, update_source);
+    // TCP-MD5 password: resolve the verbatim statement over the group
+    // and write the effective value onto `config.transport.md5_password`.
+    // The shared FSM connect path (`peer_start_connection`) reads it and
+    // applies it to this peer's VRF-bound *connect* socket, so the PE's
+    // outbound dial to the CE is authenticated. The listener (passive)
+    // side is not keyed here — per-VRF passive-side auth needs a
+    // per-VRF listener (see the FRR model); the `_refresh` outcome is
+    // therefore discarded.
+    let password = resolve_knob(groups, &peer.config, |k| k.password.clone());
+    let _ = super::config::apply_md5_password(peer, password);
 }
 
 pub(super) fn apply_inherited(

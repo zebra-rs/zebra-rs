@@ -971,6 +971,88 @@ mod tests {
         );
     }
 
+    /// The TCP-MD5 `password` must resolve (explicit over group) onto
+    /// `config.transport.md5_password`, which the shared connect path
+    /// reads — that is what authenticates the PE's outbound dial.
+    #[tokio::test]
+    async fn materialize_peers_resolves_md5_password() {
+        use super::super::super::neighbor_group::{InheritableKnobs, NeighborGroup};
+        use super::super::super::vrf_config::{BgpVrfConfig, BgpVrfNeighborConfig};
+        use super::super::inst::BgpVrf;
+        use crate::context::ProtoContext;
+
+        let (global_tx, _global_rx) = unbounded_channel::<BgpGlobalMsg>();
+        let ctx = ProtoContext::default_table_no_rib();
+        let (_rib_tx, rib_rx) = unbounded_channel();
+        let (mut vrf, _inbox) = BgpVrf::new(
+            "v1".to_string(),
+            ctx,
+            Ipv4Addr::UNSPECIFIED,
+            65000,
+            16,
+            global_tx,
+            rib_rx,
+        );
+
+        // Group carries a password; one peer inherits it, one overrides.
+        let g = NeighborGroup {
+            knobs: InheritableKnobs {
+                password: Some("group-secret".to_string()),
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let mut groups = BTreeMap::new();
+        groups.insert("g1".to_string(), g);
+
+        let inherits: std::net::IpAddr = "192.0.2.1".parse().unwrap();
+        let overrides: std::net::IpAddr = "192.0.2.2".parse().unwrap();
+
+        let mut cfg = BgpVrfConfig::default();
+        cfg.neighbors.insert(inherits, {
+            let mut n = BgpVrfNeighborConfig {
+                remote_as: Some(65001),
+                ..Default::default()
+            };
+            n.config.neighbor_group = Some("g1".to_string());
+            n
+        });
+        cfg.neighbors.insert(overrides, {
+            let mut n = BgpVrfNeighborConfig {
+                remote_as: Some(65002),
+                ..Default::default()
+            };
+            n.config.neighbor_group = Some("g1".to_string());
+            n.config.knobs_explicit.password = Some("peer-secret".to_string());
+            n
+        });
+
+        materialize_peers(&mut vrf, &cfg, &groups);
+
+        assert_eq!(
+            vrf.peers
+                .get(&inherits)
+                .unwrap()
+                .config
+                .transport
+                .md5_password
+                .as_deref(),
+            Some("group-secret"),
+            "password inherited from the group"
+        );
+        assert_eq!(
+            vrf.peers
+                .get(&overrides)
+                .unwrap()
+                .config
+                .transport
+                .md5_password
+                .as_deref(),
+            Some("peer-secret"),
+            "explicit password beats the group's"
+        );
+    }
+
     /// The remaining inheritable knobs (as-override, allowas-in,
     /// remove-private-as, …) must reach the built peer with group
     /// precedence, exercising the structured staging state machines. The

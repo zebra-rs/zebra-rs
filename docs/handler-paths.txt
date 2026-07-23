@@ -245,6 +245,7 @@
 /router/bgp/vrf/neighbor/enforce-first-as
 /router/bgp/vrf/neighbor/ip-transparent
 /router/bgp/vrf/neighbor/neighbor-group
+/router/bgp/vrf/neighbor/password
 /router/bgp/vrf/neighbor/port
 /router/bgp/vrf/neighbor/remote-as
 /router/bgp/vrf/neighbor/remove-private-as

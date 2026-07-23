@@ -1038,6 +1038,26 @@ pub fn config_vrf_neighbor_remove_private_as_replace_as(
     Some(())
 }
 
+/// `set router bgp vrf <NAME> neighbor <addr> password <SECRET>` —
+/// TCP-MD5 for the CE session. Stages the verbatim secret onto
+/// `knobs_explicit.password`; `materialize_peers` resolves it over the
+/// neighbor-group and writes the effective value onto
+/// `config.transport.md5_password`, which the shared connect path applies
+/// to the VRF-bound outbound socket. Active/outbound only — see the YANG
+/// leaf and the FRR per-VRF-listener note.
+pub fn config_vrf_neighbor_password(bgp: &mut Bgp, mut args: Args, op: ConfigOp) -> Option<()> {
+    let vrf = args.string()?;
+    let addr = args.addr()?;
+    let cfg = vrf_entry(bgp, vrf, op)?;
+    let nbr = neighbor_entry(cfg, addr, op)?;
+    nbr.config.knobs_explicit.password = match op {
+        ConfigOp::Set => Some(args.string()?),
+        ConfigOp::Delete => None,
+        _ => return Some(()),
+    };
+    Some(())
+}
+
 // BFD, single-hop only. The values stage onto the peer's `config.bfd`
 // (a PeerConfig field, so they ride the wholesale config adoption); the
 // session is brought up by `materialize_peers` via `BgpVrf::bfd_reconcile`.

@@ -4339,6 +4339,10 @@ impl Bgp {
             super::vrf_config::config_vrf_neighbor_disable_connected_check,
         );
         self.callback_add(
+            "/router/bgp/vrf/neighbor/password",
+            super::vrf_config::config_vrf_neighbor_password,
+        );
+        self.callback_add(
             "/router/bgp/vrf/neighbor/as-override",
             super::vrf_config::config_vrf_neighbor_as_override,
         );

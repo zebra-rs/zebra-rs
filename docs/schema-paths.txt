@@ -334,6 +334,7 @@
 /router/bgp/vrf/neighbor/enforce-first-as	p-container
 /router/bgp/vrf/neighbor/ip-transparent	p-container
 /router/bgp/vrf/neighbor/neighbor-group	leaf
+/router/bgp/vrf/neighbor/password	leaf
 /router/bgp/vrf/neighbor/port	leaf
 /router/bgp/vrf/neighbor/remote-as	leaf
 /router/bgp/vrf/neighbor/remove-private-as	p-container
