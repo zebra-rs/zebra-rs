@@ -90,6 +90,87 @@ pub struct InheritableKnobs {
     pub region_id: Option<[u8; 8]>,
 }
 
+impl InheritableKnobs {
+    /// Staging state machines for the two structured knobs, factored so
+    /// the per-neighbor callbacks (`config.rs`) and the per-VRF-neighbor
+    /// callbacks (`vrf_config.rs`) share one definition rather than each
+    /// re-deriving the get-or-insert / revert-to-default dance. They
+    /// mutate only the *verbatim* record; resolving the effective value
+    /// (explicit-wins over the group) and applying it stays with each
+    /// caller, which differ in whether a live peer exists.
+    ///
+    /// `allowas-in` presence: the bare container enables the default
+    /// count budget; a modifier that landed first is preserved.
+    pub fn stage_allowas_in_presence(&mut self, set: bool) {
+        if set {
+            self.allowas_in
+                .get_or_insert(AllowAsIn::Count(ALLOWAS_IN_DEFAULT_COUNT));
+        } else {
+            self.allowas_in = None;
+        }
+    }
+
+    /// `allowas-in count`: `Some(n)` sets the budget; `None` (leaf
+    /// delete) reverts to the default budget only if a count is what is
+    /// currently held, leaving an `origin` selection untouched.
+    pub fn stage_allowas_in_count(&mut self, count: Option<u8>) {
+        match count {
+            Some(n) => self.allowas_in = Some(AllowAsIn::Count(n)),
+            None if matches!(self.allowas_in, Some(AllowAsIn::Count(_))) => {
+                self.allowas_in = Some(AllowAsIn::Count(ALLOWAS_IN_DEFAULT_COUNT));
+            }
+            None => {}
+        }
+    }
+
+    /// `allowas-in origin`: select origin-only; a leaf delete reverts to
+    /// the default count budget only if origin is what is held.
+    pub fn stage_allowas_in_origin(&mut self, set: bool) {
+        if set {
+            self.allowas_in = Some(AllowAsIn::Origin);
+        } else if matches!(self.allowas_in, Some(AllowAsIn::Origin)) {
+            self.allowas_in = Some(AllowAsIn::Count(ALLOWAS_IN_DEFAULT_COUNT));
+        }
+    }
+
+    /// `remove-private-as` presence: enable with the conditional
+    /// (all-private-only) default, preserving a modifier that arrived
+    /// first.
+    pub fn stage_remove_private_as_presence(&mut self, set: bool) {
+        if set {
+            self.remove_private_as
+                .get_or_insert_with(RemovePrivateAs::default);
+        } else {
+            self.remove_private_as = None;
+        }
+    }
+
+    /// `remove-private-as all`: act on a mixed path. A leaf delete clears
+    /// the flag while the container stays enabled.
+    pub fn stage_remove_private_as_all(&mut self, set: bool) {
+        if set {
+            self.remove_private_as
+                .get_or_insert_with(RemovePrivateAs::default)
+                .all = true;
+        } else if let Some(rpa) = self.remove_private_as.as_mut() {
+            rpa.all = false;
+        }
+    }
+
+    /// `remove-private-as replace-as`: rewrite stripped ASNs to the local
+    /// AS. A leaf delete clears the flag while the container stays
+    /// enabled.
+    pub fn stage_remove_private_as_replace_as(&mut self, set: bool) {
+        if set {
+            self.remove_private_as
+                .get_or_insert_with(RemovePrivateAs::default)
+                .replace_as = true;
+        } else if let Some(rpa) = self.remove_private_as.as_mut() {
+            rpa.replace_as = false;
+        }
+    }
+}
+
 /// One group `afi-safi <family>` entry: the mandatory `enabled`
 /// toggle plus optional per-family opinions.
 #[derive(Debug, Default, Clone, PartialEq)]

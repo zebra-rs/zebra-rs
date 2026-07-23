@@ -905,6 +905,139 @@ pub fn config_vrf_neighbor_disable_connected_check(
     Some(())
 }
 
+// Remaining inheritable knobs. The presence/bool ones stage a single
+// flag; the two structured ones (allowas-in, remove-private-as) go
+// through the shared `InheritableKnobs::stage_*` state machines the
+// global neighbor's callbacks now also use, so the get-or-insert /
+// revert-to-default behaviour has one definition. `materialize_peers`
+// resolves and applies all of them via `apply_inherited_session_knobs`.
+
+pub fn config_vrf_neighbor_as_override(bgp: &mut Bgp, mut args: Args, op: ConfigOp) -> Option<()> {
+    let vrf = args.string()?;
+    let addr = args.addr()?;
+    let cfg = vrf_entry(bgp, vrf, op)?;
+    let nbr = neighbor_entry(cfg, addr, op)?;
+    nbr.config.knobs_explicit.as_override = op.is_set().then_some(true);
+    Some(())
+}
+
+pub fn config_vrf_neighbor_enforce_first_as(
+    bgp: &mut Bgp,
+    mut args: Args,
+    op: ConfigOp,
+) -> Option<()> {
+    let vrf = args.string()?;
+    let addr = args.addr()?;
+    let cfg = vrf_entry(bgp, vrf, op)?;
+    let nbr = neighbor_entry(cfg, addr, op)?;
+    nbr.config.knobs_explicit.enforce_first_as = op.is_set().then_some(true);
+    Some(())
+}
+
+pub fn config_vrf_neighbor_route_reflector_client(
+    bgp: &mut Bgp,
+    mut args: Args,
+    op: ConfigOp,
+) -> Option<()> {
+    let vrf = args.string()?;
+    let addr = args.addr()?;
+    let cfg = vrf_entry(bgp, vrf, op)?;
+    let nbr = neighbor_entry(cfg, addr, op)?;
+    // `route-reflector/client` is a boolean leaf, not a presence
+    // container: honour the value so `client false` is not treated as on.
+    nbr.config.knobs_explicit.route_reflector_client = match op {
+        ConfigOp::Set => Some(args.boolean()?),
+        ConfigOp::Delete => None,
+        _ => return Some(()),
+    };
+    Some(())
+}
+
+pub fn config_vrf_neighbor_allowas_in(bgp: &mut Bgp, mut args: Args, op: ConfigOp) -> Option<()> {
+    let vrf = args.string()?;
+    let addr = args.addr()?;
+    let cfg = vrf_entry(bgp, vrf, op)?;
+    let nbr = neighbor_entry(cfg, addr, op)?;
+    nbr.config
+        .knobs_explicit
+        .stage_allowas_in_presence(op.is_set());
+    Some(())
+}
+
+pub fn config_vrf_neighbor_allowas_in_count(
+    bgp: &mut Bgp,
+    mut args: Args,
+    op: ConfigOp,
+) -> Option<()> {
+    let vrf = args.string()?;
+    let addr = args.addr()?;
+    let count = if op.is_set() { Some(args.u8()?) } else { None };
+    let cfg = vrf_entry(bgp, vrf, op)?;
+    let nbr = neighbor_entry(cfg, addr, op)?;
+    nbr.config.knobs_explicit.stage_allowas_in_count(count);
+    Some(())
+}
+
+pub fn config_vrf_neighbor_allowas_in_origin(
+    bgp: &mut Bgp,
+    mut args: Args,
+    op: ConfigOp,
+) -> Option<()> {
+    let vrf = args.string()?;
+    let addr = args.addr()?;
+    let cfg = vrf_entry(bgp, vrf, op)?;
+    let nbr = neighbor_entry(cfg, addr, op)?;
+    nbr.config
+        .knobs_explicit
+        .stage_allowas_in_origin(op.is_set());
+    Some(())
+}
+
+pub fn config_vrf_neighbor_remove_private_as(
+    bgp: &mut Bgp,
+    mut args: Args,
+    op: ConfigOp,
+) -> Option<()> {
+    let vrf = args.string()?;
+    let addr = args.addr()?;
+    let cfg = vrf_entry(bgp, vrf, op)?;
+    let nbr = neighbor_entry(cfg, addr, op)?;
+    nbr.config
+        .knobs_explicit
+        .stage_remove_private_as_presence(op.is_set());
+    Some(())
+}
+
+pub fn config_vrf_neighbor_remove_private_as_all(
+    bgp: &mut Bgp,
+    mut args: Args,
+    op: ConfigOp,
+) -> Option<()> {
+    let vrf = args.string()?;
+    let addr = args.addr()?;
+    let cfg = vrf_entry(bgp, vrf, op)?;
+    let nbr = neighbor_entry(cfg, addr, op)?;
+    nbr.config
+        .knobs_explicit
+        .stage_remove_private_as_all(op.is_set());
+    Some(())
+}
+
+pub fn config_vrf_neighbor_remove_private_as_replace_as(
+    bgp: &mut Bgp,
+    mut args: Args,
+    op: ConfigOp,
+) -> Option<()> {
+    let vrf = args.string()?;
+    let addr = args.addr()?;
+    let cfg = vrf_entry(bgp, vrf, op)?;
+    let nbr = neighbor_entry(cfg, addr, op)?;
+    nbr.config
+        .knobs_explicit
+        .stage_remove_private_as_replace_as(op.is_set());
+    Some(())
+}
+
 /// `set router bgp vrf <NAME> neighbor <addr> afi-safi {ipv4|ipv6} enabled
 /// <BOOL>` — per-family activation for a CE peer, mirroring the global
 /// neighbor's `config_afi_safi`. Records the verbatim statement into the

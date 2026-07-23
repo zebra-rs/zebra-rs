@@ -328,6 +328,88 @@ module zebra-bgp-vrf {
            eBGP CE (e.g. a CE loopback reachable via a static route),
            leaving the egress TTL at 1. Same as the global neighbor.";
       }
+
+      // The remaining inheritable knobs, same names / types / shapes as
+      // the global neighbor. Each stages onto knobs_explicit and is
+      // resolved (explicit-else-neighbor-group-else-default) and applied
+      // by materialize_peers via apply_inherited_session_knobs; the two
+      // structured ones share the global neighbor's staging state
+      // machine (InheritableKnobs::stage_*). A change takes effect on the
+      // next VRF respawn.
+      container as-override {
+        ext:help "Replace the CE's AS in the outbound AS_PATH";
+        presence "Enable as-override toward this CE";
+        description
+          "Replace every occurrence of this CE's AS in the outbound
+           AS_PATH with the local AS (before the local-AS prepend). No-op
+           for iBGP. Same as the global neighbor.";
+      }
+      container enforce-first-as {
+        ext:help "Require inbound AS_PATH to start with the CE's AS";
+        presence "Enable the first-AS check on inbound updates from this CE";
+        description
+          "Drop an inbound eBGP UPDATE unless the left-most AS_PATH
+           segment begins with the CE's own AS. No-op for iBGP. Same as
+           the global neighbor.";
+      }
+      container route-reflector {
+        ext:help "Route-reflector settings for this CE";
+        leaf client {
+          ext:help "Treat this CE as a route-reflector client";
+          type boolean;
+          default "false";
+          description
+            "Configure the CE as a route-reflector client (RFC 4456).
+             Same as the global neighbor's route-reflector/client.";
+        }
+      }
+      container allowas-in {
+        ext:help "Accept routes containing our own AS in the AS_PATH";
+        presence "Enable allowas-in (default occurrence count 3)";
+        description
+          "Relax the inbound AS_PATH loop check for this CE. Bare form
+           accepts up to 3 occurrences of the local AS. Same choice
+           shape as the global neighbor.";
+        choice mode {
+          description "Occurrence budget, or origin-only. Mutually exclusive.";
+          case count {
+            leaf count {
+              ext:help "Max times our AS may appear in AS_PATH (default 3)";
+              type uint8 {
+                range "1..10";
+              }
+              default "3";
+              description "Accept while the local AS appears at most this many times.";
+            }
+          }
+          case origin {
+            leaf origin {
+              ext:help "Accept the local AS only at the route origin";
+              type empty;
+              description
+                "Accept only when the local AS is solely the originating AS.";
+            }
+          }
+        }
+      }
+      container remove-private-as {
+        ext:help "Remove private ASNs from the outbound AS_PATH";
+        presence "Enable remove-private-as toward this CE";
+        description
+          "Strip private ASNs from the outbound AS_PATH toward this CE
+           (bare form acts only on an all-private path). Same modifier
+           leaves as the global neighbor.";
+        leaf all {
+          ext:help "Remove private ASNs from a mixed AS_PATH";
+          type empty;
+          description "Act on any AS_PATH containing a private AS, not only an all-private one.";
+        }
+        leaf replace-as {
+          ext:help "Replace private ASNs with the local AS";
+          type empty;
+          description "Rewrite each stripped private AS to the local AS, keeping path length.";
+        }
+      }
       list afi-safi {
         ext:help "Per-address-family activation for this CE peer";
         key "name";
