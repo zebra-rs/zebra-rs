@@ -152,6 +152,12 @@ impl ProtoContext {
             SocketAddr::V6(_) => self.tcp_socket_v6()?,
         };
         sock.set_reuseaddr(true)?;
+        // SO_REUSEPORT so a VRF-bound listener can share the BGP port
+        // with the (device-unbound) global listener. The kernel routes a
+        // SYN arriving on a VRF-enslaved interface to the SO_BINDTODEVICE
+        // socket and the rest to the global one (verified: device-bound
+        // wins, no tcp_l3mdev_accept dependency).
+        sock.set_reuseport(true)?;
         sock.bind(addr)?;
         sock.listen(128)
     }
@@ -175,6 +181,9 @@ impl ProtoContext {
         let sock = Socket::new(Domain::IPV6, Type::STREAM, Some(Protocol::TCP))?;
         sock.set_only_v6(true)?;
         sock.set_reuse_address(true)?;
+        // See `tcp_listen`: shared port between the global and per-VRF
+        // listeners.
+        sock.set_reuse_port(true)?;
         self.maybe_bind_device(&sock)?;
         sock.bind(&addr.into())?;
         sock.listen(128)?;
@@ -203,6 +212,15 @@ impl ProtoContext {
         let sock = Socket::new(domain, Type::RAW, Some(protocol))?;
         self.maybe_bind_device(&sock)?;
         Ok(sock)
+    }
+
+    /// Whether this context is bound to a VRF device — i.e. sockets it
+    /// creates carry `SO_BINDTODEVICE`. A per-VRF BGP task only opens its
+    /// own listener when this is true; a device-unbound listener on the
+    /// BGP port would otherwise join the global listener's REUSEPORT group
+    /// and steal default-VRF connections.
+    pub fn is_vrf_bound(&self) -> bool {
+        self.vrf_ifname.is_some()
     }
 
     /// Apply `SO_BINDTODEVICE` if this context is attached to a
