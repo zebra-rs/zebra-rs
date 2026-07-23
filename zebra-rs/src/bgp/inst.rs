@@ -907,6 +907,16 @@ pub struct Bgp {
     /// [`super::vrf::spawn_bgp_vrf`] and
     /// [`super::vrf::despawn_bgp_vrf`].
     pub vrfs: BTreeMap<String, super::vrf_config::BgpVrfConfig>,
+    /// Candidate snapshot captured at `CommitStart`. At `CommitEnd`, an
+    /// existing VRF whose spawn-time structure differs is safely despawned
+    /// and spawned again.
+    pub(crate) vrf_commit_baseline: BTreeMap<String, super::vrf_config::BgpVrfConfig>,
+    /// Neighbor-group snapshot paired with `vrf_commit_baseline`. Per-VRF
+    /// peers resolve group remote-AS and AFI/SAFI opinions at spawn time, so
+    /// the structural diff must compare effective values from both sides of
+    /// the transaction.
+    pub(crate) vrf_neighbor_group_commit_baseline:
+        BTreeMap<String, super::neighbor_group::NeighborGroup>,
     /// Per-VRF tasks currently running. The diff against
     /// [`Self::vrfs`] at `CommitEnd` spawns the names that show up
     /// in the desired set but not here, and despawns names that
@@ -1224,6 +1234,8 @@ impl Bgp {
             group_keychain_watch_next: 0,
             interface_neighbors: super::interface_neighbor::empty_map(),
             vrfs: BTreeMap::new(),
+            vrf_commit_baseline: BTreeMap::new(),
+            vrf_neighbor_group_commit_baseline: BTreeMap::new(),
             vrf_registry: BTreeMap::new(),
             rib_known_vrfs: BTreeMap::new(),
             rib_subscriber,
@@ -2496,7 +2508,22 @@ impl Bgp {
     }
 
     fn apply_vrf_commit_diff(&mut self) {
-        let (to_spawn, to_despawn) = super::vrf::compute_vrf_diff(&self.vrfs, &self.vrf_registry);
+        let (mut to_spawn, mut to_despawn) =
+            super::vrf::compute_vrf_diff(&self.vrfs, &self.vrf_registry);
+        let to_respawn = super::vrf::compute_vrf_respawn(
+            &self.vrf_commit_baseline,
+            &self.vrf_neighbor_group_commit_baseline,
+            &self.vrfs,
+            &self.neighbor_groups,
+            &self.vrf_registry,
+            self.router_id,
+            self.asn,
+        );
+        // Reuse the full teardown/spawn path: it unregisters the old show
+        // client, purges exports before label reuse, clears peer_index, then
+        // registers fresh peers/show routing from final config.
+        to_despawn.extend(to_respawn.iter().cloned());
+        to_spawn.extend(to_respawn);
 
         for name in to_despawn {
             if let Some(handle) = self.vrf_registry.remove(&name) {
@@ -2961,7 +2988,9 @@ impl Bgp {
     pub fn process_cm_msg(&mut self, msg: ConfigRequest) {
         match msg.op {
             ConfigOp::CommitStart => {
-                //
+                self.vrf_commit_baseline.clone_from(&self.vrfs);
+                self.vrf_neighbor_group_commit_baseline
+                    .clone_from(&self.neighbor_groups);
             }
             ConfigOp::Set | ConfigOp::Delete => {
                 let (path, args) = path_from_command(&msg.paths);
@@ -2980,11 +3009,12 @@ impl Bgp {
                 // Log the per-VRF intent at debug, then diff
                 // `self.vrfs` (desired) against `self.vrf_registry`
                 // (running), spawn the additions, despawn the
-                // removals. Edits to an already-spawned VRF are
-                // not detected here — a follow-up will layer
-                // cfg-hash comparison on top.
+                // removals. Spawn-time structural edits to an existing VRF
+                // use the same full teardown/spawn path.
                 super::vrf_config::log_commit_diff(self);
                 self.apply_vrf_commit_diff();
+                self.vrf_commit_baseline.clear();
+                self.vrf_neighbor_group_commit_baseline.clear();
                 self.apply_mup_c_commit_diff();
             }
             ConfigOp::Completion => {

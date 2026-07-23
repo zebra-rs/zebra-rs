@@ -332,6 +332,39 @@ pub struct BgpVrfConfig {
     pub mobile_uplane: BgpVrfMobileUplane,
 }
 
+/// Whether two candidate configs materialize the same long-lived VRF task.
+///
+/// "Task-global" inputs only — the things a per-VRF [`super::vrf::BgpVrf`]
+/// task captures at spawn and cannot change without a rebuild (rd,
+/// router-id, label-mode, encapsulation, the EVPN knobs, l3vni, router-mac,
+/// inter-as-hybrid, MUP dataplane). A difference in any of these forces a
+/// respawn via [`super::vrf::compute_vrf_respawn`].
+///
+/// Neighbor add / remove / edit is deliberately NOT part of this
+/// signature: those are applied incrementally to the running task by
+/// `Bgp::apply_vrf_neighbor_diffs` (`AddPeer`/`RemovePeer`/
+/// `ReconfigurePeer`), the per-VRF twin of the global neighbor path, so a
+/// CE-peer change no longer resets every other session in the VRF. The
+/// neighbor-group snapshots are still accepted (a future task-global input
+/// might need them) but no longer read here.
+pub(crate) fn runtime_structure_eq(
+    before: &BgpVrfConfig,
+    _before_groups: &BTreeMap<String, super::neighbor_group::NeighborGroup>,
+    after: &BgpVrfConfig,
+    _after_groups: &BTreeMap<String, super::neighbor_group::NeighborGroup>,
+) -> bool {
+    before.rd == after.rd
+        && before.router_id == after.router_id
+        && before.label_mode == after.label_mode
+        && before.encapsulation == after.encapsulation
+        && before.evpn_advertise_v4 == after.evpn_advertise_v4
+        && before.evpn_advertise_v6 == after.evpn_advertise_v6
+        && before.l3vni == after.l3vni
+        && before.router_mac == after.router_mac
+        && before.inter_as_hybrid == after.inter_as_hybrid
+        && before.mobile_uplane.dataplane == after.mobile_uplane.dataplane
+}
+
 /// Borrow the per-VRF entry on `Bgp::vrfs`, creating it for Set (the
 /// "set leaf before set list-key" firing order makes lazy creation
 /// necessary) but NEVER for Delete. A whole-subtree delete fires the
@@ -1957,5 +1990,74 @@ mod tests {
         );
         cfg.ipv6_unicast.as_mut().unwrap().networks.remove(&prefix);
         assert!(cfg.ipv6_unicast.as_ref().unwrap().networks.is_empty());
+    }
+
+    fn vrf_with_neighbor(addr: &str, remote_as: Option<u32>) -> BgpVrfConfig {
+        let mut cfg = BgpVrfConfig::default();
+        cfg.neighbors.insert(
+            addr.parse().unwrap(),
+            BgpVrfNeighborConfig {
+                remote_as,
+                ..Default::default()
+            },
+        );
+        cfg
+    }
+
+    #[test]
+    fn runtime_structure_eq_identical_config_is_stable() {
+        let groups = BTreeMap::new();
+        let cfg = vrf_with_neighbor("192.0.2.1", Some(65001));
+        assert!(runtime_structure_eq(&cfg, &groups, &cfg.clone(), &groups));
+    }
+
+    /// A neighbor's `remote-as` change is applied incrementally
+    /// (`ReconfigurePeer`), NOT by respawning the task, so it must not
+    /// read as a structural change — otherwise every other CE session in
+    /// the VRF would reset.
+    #[test]
+    fn runtime_structure_eq_ignores_remote_as_change() {
+        let groups = BTreeMap::new();
+        let before = vrf_with_neighbor("192.0.2.1", Some(65001));
+        let after = vrf_with_neighbor("192.0.2.1", Some(65002));
+        assert!(runtime_structure_eq(&before, &groups, &after, &groups));
+    }
+
+    /// Adding a neighbor is handled by `AddPeer` on the live task, not a
+    /// respawn, so it is no longer structural.
+    #[test]
+    fn runtime_structure_eq_ignores_neighbor_add() {
+        let groups = BTreeMap::new();
+        let before = vrf_with_neighbor("192.0.2.1", Some(65001));
+        let mut after = before.clone();
+        after.neighbors.insert(
+            "192.0.2.2".parse().unwrap(),
+            BgpVrfNeighborConfig {
+                remote_as: Some(65002),
+                ..Default::default()
+            },
+        );
+        assert!(runtime_structure_eq(&before, &groups, &after, &groups));
+    }
+
+    /// Router-id is a task-global input captured at spawn — a change still
+    /// forces a respawn.
+    #[test]
+    fn runtime_structure_eq_detects_router_id_change() {
+        let groups = BTreeMap::new();
+        let before = vrf_with_neighbor("192.0.2.1", Some(65001));
+        let mut after = before.clone();
+        after.router_id = Some("10.0.0.1".parse().unwrap());
+        assert!(!runtime_structure_eq(&before, &groups, &after, &groups));
+    }
+
+    /// RD is a task-global input — a change still forces a respawn.
+    #[test]
+    fn runtime_structure_eq_detects_rd_change() {
+        let groups = BTreeMap::new();
+        let before = vrf_with_neighbor("192.0.2.1", Some(65001));
+        let mut after = before.clone();
+        after.rd = Some(RouteDistinguisher::from_str("65000:1").unwrap());
+        assert!(!runtime_structure_eq(&before, &groups, &after, &groups));
     }
 }

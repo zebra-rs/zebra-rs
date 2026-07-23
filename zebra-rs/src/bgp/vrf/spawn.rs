@@ -17,7 +17,7 @@
 //! [`crate::rib::client::ClientRegistry`].
 
 use std::collections::BTreeMap;
-use std::net::Ipv6Addr;
+use std::net::{Ipv4Addr, Ipv6Addr};
 
 use tokio::sync::mpsc::UnboundedSender;
 
@@ -38,6 +38,11 @@ use crate::config::RibSubscriber;
 /// [`Task`] so dropping the handle aborts the runtime cleanly.
 pub struct BgpVrfHandle {
     pub inbox: BgpVrfInbox,
+    /// Effective router ID captured by the running VRF task at spawn time.
+    /// Used to detect changes to the inherited global router ID.
+    pub router_id: Ipv4Addr,
+    /// Global ASN captured by the running VRF task at spawn time.
+    pub asn: u32,
     /// Clone of the per-VRF task's show channel sender. Registered with
     /// the config manager (`SubscribeShowVrf`) so `show bgp vrf <name>
     /// …` is redirected into this task; deregistered on despawn.
@@ -118,6 +123,37 @@ pub fn compute_vrf_diff(
         .cloned()
         .collect();
     (to_spawn, to_despawn)
+}
+
+/// Existing VRF tasks whose spawn-time structure changed during this config
+/// transaction. Additions and removals are handled by [`compute_vrf_diff`];
+/// only names present before, after, and in the running registry can respawn.
+pub fn compute_vrf_respawn(
+    before: &BTreeMap<String, BgpVrfConfig>,
+    before_groups: &BTreeMap<String, NeighborGroup>,
+    desired: &BTreeMap<String, BgpVrfConfig>,
+    desired_groups: &BTreeMap<String, NeighborGroup>,
+    running: &BTreeMap<String, BgpVrfHandle>,
+    router_id: Ipv4Addr,
+    asn: u32,
+) -> Vec<String> {
+    desired
+        .iter()
+        .filter(|(name, after)| {
+            running.get(*name).is_some_and(|handle| {
+                before.get(*name).is_some_and(|before| {
+                    !super::super::vrf_config::runtime_structure_eq(
+                        before,
+                        before_groups,
+                        after,
+                        desired_groups,
+                    ) || handle.router_id != after.router_id.unwrap_or(router_id)
+                        || handle.asn != asn
+                })
+            })
+        })
+        .map(|(name, _)| name.clone())
+        .collect()
 }
 
 /// Build + spawn a per-VRF task. Returns the handle the caller
@@ -350,6 +386,8 @@ pub fn spawn_bgp_vrf(
     }
     BgpVrfHandle {
         inbox,
+        router_id: effective_router_id,
+        asn,
         policy_watches,
         bfd_sessions,
         bfd_client_tx: bfd_client_handle,
@@ -1821,5 +1859,120 @@ mod tests {
         let (to_spawn, to_despawn) = compute_vrf_diff(&desired, &running);
         assert!(to_spawn.is_empty());
         assert!(to_despawn.is_empty());
+    }
+
+    /// A new VRF (desired, not yet running) and a removed VRF (running, no
+    /// longer desired) are spawn/despawn work for `compute_vrf_diff` — never
+    /// respawns. Only a name present before, after, AND running can respawn.
+    #[tokio::test]
+    async fn respawn_ignores_initial_load_and_whole_vrf_delete() {
+        let groups = BTreeMap::new();
+
+        // Initial load: desired but not running.
+        let mut desired = BTreeMap::new();
+        desired.insert("v1".to_string(), BgpVrfConfig::default());
+        let running: BTreeMap<String, BgpVrfHandle> = BTreeMap::new();
+        assert!(
+            compute_vrf_respawn(
+                &BTreeMap::new(),
+                &groups,
+                &desired,
+                &groups,
+                &running,
+                Ipv4Addr::UNSPECIFIED,
+                65000,
+            )
+            .is_empty()
+        );
+
+        // Whole-VRF delete: running + before but absent from desired.
+        let mut before = BTreeMap::new();
+        before.insert("v1".to_string(), BgpVrfConfig::default());
+        let mut running = BTreeMap::new();
+        running.insert("v1".to_string(), handle("v1"));
+        assert!(
+            compute_vrf_respawn(
+                &before,
+                &groups,
+                &BTreeMap::new(),
+                &groups,
+                &running,
+                Ipv4Addr::UNSPECIFIED,
+                65000,
+            )
+            .is_empty()
+        );
+    }
+
+    /// A spawn-time structural (task-global) edit — here the VRF's RD — to
+    /// an already-running VRF is routed through the respawn path. Neighbor
+    /// edits are no longer structural (they apply incrementally), so the
+    /// edit under test must be a task-global input.
+    #[tokio::test]
+    async fn respawn_detects_structural_edit_to_running_vrf() {
+        use std::str::FromStr;
+        let groups = BTreeMap::new();
+        let vrf_with_rd = |rd: &str| BgpVrfConfig {
+            rd: Some(bgp_packet::RouteDistinguisher::from_str(rd).unwrap()),
+            ..Default::default()
+        };
+        let mut before = BTreeMap::new();
+        before.insert("v1".to_string(), vrf_with_rd("65000:1"));
+        let mut after = BTreeMap::new();
+        after.insert("v1".to_string(), vrf_with_rd("65000:2"));
+        let mut running = BTreeMap::new();
+        running.insert("v1".to_string(), handle("v1"));
+
+        assert_eq!(
+            compute_vrf_respawn(
+                &before,
+                &groups,
+                &after,
+                &groups,
+                &running,
+                Ipv4Addr::UNSPECIFIED,
+                65000,
+            ),
+            vec!["v1".to_string()]
+        );
+    }
+
+    /// A neighbor-only edit to a running VRF must NOT respawn the task —
+    /// the incremental `AddPeer`/`RemovePeer`/`ReconfigurePeer` path owns
+    /// it now.
+    #[tokio::test]
+    async fn respawn_ignores_neighbor_only_edit() {
+        use super::super::super::vrf_config::BgpVrfNeighborConfig;
+        let groups = BTreeMap::new();
+        let vrf_with_as = |asn: u32| {
+            let mut cfg = BgpVrfConfig::default();
+            cfg.neighbors.insert(
+                "192.0.2.1".parse().unwrap(),
+                BgpVrfNeighborConfig {
+                    remote_as: Some(asn),
+                    ..Default::default()
+                },
+            );
+            cfg
+        };
+        let mut before = BTreeMap::new();
+        before.insert("v1".to_string(), vrf_with_as(65001));
+        let mut after = BTreeMap::new();
+        after.insert("v1".to_string(), vrf_with_as(65002));
+        let mut running = BTreeMap::new();
+        running.insert("v1".to_string(), handle("v1"));
+
+        assert!(
+            compute_vrf_respawn(
+                &before,
+                &groups,
+                &after,
+                &groups,
+                &running,
+                Ipv4Addr::UNSPECIFIED,
+                65000,
+            )
+            .is_empty()
+        );
     }
 }
