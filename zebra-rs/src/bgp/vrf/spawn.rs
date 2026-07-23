@@ -85,16 +85,10 @@ pub struct BgpVrfHandle {
     /// have.
     pub evpn_advertise_v4: bool,
     pub evpn_advertise_v6: bool,
-    /// Policy / prefix-set watches this VRF's peers registered, as
-    /// `(name, ident, policy_type)`. Kept on the handle so
-    /// [`despawn_bgp_vrf`] can withdraw them synchronously *before* a
-    /// respawn re-registers — see [`BgpVrf::policy_watch_list`] for why
-    /// doing it from the task's own shutdown path would delete the
-    /// incoming incarnation's watches instead of the outgoing one's.
-    pub policy_watches: Vec<(String, usize, crate::policy::PolicyType)>,
     /// BFD session keys this VRF's peers subscribed, withdrawn
-    /// synchronously by `despawn_bgp_vrf` before a respawn re-subscribes
-    /// — same ordering hazard as `policy_watches`.
+    /// synchronously by `despawn_bgp_vrf` before a respawn re-subscribes —
+    /// same ordering hazard the policy watches have (now cleared in one shot
+    /// via `policy::Message::UnregisterProto`).
     pub bfd_sessions: Vec<crate::bfd::session::SessionKey>,
     /// Kept so `despawn_bgp_vrf` can address the BFD unsubscribes.
     pub bfd_client_tx: Option<UnboundedSender<crate::bfd::inst::ClientReq>>,
@@ -474,7 +468,6 @@ pub fn spawn_bgp_vrf(
     // `show bgp vrf <name> …` redirection.
     let show_tx = vrf.show.tx.clone();
     // Snapshot before `vrf` moves into the task.
-    let policy_watches = vrf.policy_watch_list();
     let bfd_sessions = vrf.bfd_session_list();
     let bfd_client_handle = vrf.bfd_client_tx.clone();
     let bfd_client_id = vrf.bfd_client();
@@ -499,7 +492,6 @@ pub fn spawn_bgp_vrf(
         inbox,
         router_id: effective_router_id,
         asn,
-        policy_watches,
         bfd_sessions,
         bfd_client_tx: bfd_client_handle,
         bfd_client: bfd_client_id,
@@ -790,12 +782,12 @@ pub(super) fn insert_started_peer(
         .get_mut(addr)
         .expect("peer was just inserted")
         .start();
-
-    // Bring up BFD for this CE if configured — after the ident is assigned
-    // and after start(), matching the global neighbor's order and the
-    // spawn-time materialize this was factored out of. A no-op when `bfd
-    // enabled` is unset or no BFD client is wired (placeholder spawn / tests).
-    vrf.bfd_reconcile(ident);
+    // NOTE: BFD reconcile is deliberately NOT done here. It is spawn-only
+    // (`materialize_peers`), because the despawn-time teardown enumerates a
+    // spawn-captured `handle.bfd_sessions` snapshot — a session created by a
+    // runtime `AddPeer` would not be in it and would leak. Runtime-added CE
+    // peers therefore don't get BFD live (a documented follow-up), the same
+    // scope the PR states.
 }
 
 /// Build `Peer` objects from `cfg.neighbors` and insert them into
@@ -822,6 +814,15 @@ fn materialize_peers(
             continue;
         };
         insert_started_peer(vrf, addr, remote_as, config, &knobs, &nbr_cfg.policy_refs);
+        // Bring up BFD for this CE if configured — after the ident is
+        // assigned and after start(), matching the global neighbor's order.
+        // Spawn-only: the despawn teardown reads a spawn-captured
+        // `bfd_sessions` snapshot, so a runtime-add's session isn't tracked
+        // there (see the note in `insert_started_peer`). A no-op when `bfd
+        // enabled` is unset or no BFD client is wired (placeholder / tests).
+        if let Some(ident) = vrf.peers.get(addr).map(|p| p.ident) {
+            vrf.bfd_reconcile(ident);
+        }
         count += 1;
     }
     count
@@ -933,22 +934,18 @@ pub fn despawn_bgp_vrf(
     rib_subscriber: &RibSubscriber,
     policy_tx: &UnboundedSender<crate::policy::Message>,
 ) {
-    // Withdraw this incarnation's policy watches first, on this thread,
-    // so they are ordered ahead of the Registers a respawn's
-    // `materialize_peers` is about to send on the same channel. The
-    // actor matches watches on `(proto, ident, policy_type)`, all of
-    // which a respawned VRF reuses, so a later withdraw would take out
-    // the new task's watch and its `None` reply would clear the freshly
-    // resolved policy. Same ordering argument as the RIB cleanup below.
-    let proto = format!("bgp-vrf:{name}");
-    for (watch_name, ident, policy_type) in &handle.policy_watches {
-        let _ = policy_tx.send(crate::policy::Message::Unregister {
-            proto: proto.clone(),
-            name: watch_name.clone(),
-            ident: *ident,
-            policy_type: *policy_type,
-        });
-    }
+    // Withdraw every policy watch this VRF holds, on this thread, so they
+    // are ordered ahead of the Registers a respawn's `materialize_peers` is
+    // about to send on the same channel (a later withdraw would take out the
+    // new task's watch). Proto-scoped (`bgp-vrf:<name>`) in one shot rather
+    // than enumerating a snapshot: peers added at runtime (`AddPeer`)
+    // register watches the spawn-time list never captured, so an enumeration
+    // would leak them. `UnregisterProto` sends no `None` replies, so it also
+    // can't clear the respawn's freshly-resolved policy. Same ordering
+    // argument as the RIB cleanup below.
+    let _ = policy_tx.send(crate::policy::Message::UnregisterProto {
+        proto: format!("bgp-vrf:{name}"),
+    });
     // Withdraw this incarnation's BFD sessions, on this thread, ahead of
     // any Subscribe a respawn's `materialize_peers` sends on the same
     // client channel — the same ordering hazard as the policy watches:

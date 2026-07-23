@@ -1611,78 +1611,6 @@ impl BgpVrf {
         self.policy_tx = Some(policy_tx);
     }
 
-    /// Every policy watch this VRF's peers registered, as
-    /// `(name, ident, policy_type)`.
-    ///
-    /// Handed to `BgpVrfHandle` so `despawn_bgp_vrf` can withdraw them
-    /// **synchronously**, on the global task, before a respawn registers
-    /// the replacements. Doing it from this task's shutdown path instead
-    /// would be a use-after-free in slow motion: the actor's `retain`
-    /// matches on `(proto, ident, policy_type)`, and a respawned VRF
-    /// reuses both the proto and its peers' idents, so a late Unregister
-    /// from the outgoing incarnation deletes the incoming one's watch —
-    /// and the `None` reply it triggers clears the freshly resolved
-    /// policy, leaving the session fail-closed for good.
-    ///
-    /// Both messages ride the same `policy_tx`, so FIFO ordering is what
-    /// guarantees the withdraw is processed before the re-register.
-    pub fn policy_watch_list(&self) -> Vec<(String, usize, crate::policy::PolicyType)> {
-        use crate::policy::PolicyType;
-        let mut out = Vec::new();
-        for idx in self.peers.idents() {
-            let Some(peer) = self.peers.get_by_idx(idx) else {
-                continue;
-            };
-            let mut push = |name: Option<&String>, policy_type: PolicyType, fam| {
-                if let Some(name) = name {
-                    out.push((
-                        name.clone(),
-                        super::super::config::peer_policy_ident(idx, Some(fam)),
-                        policy_type,
-                    ));
-                }
-            };
-            for (fam, io) in &peer.policy_list {
-                push(
-                    io.get(&super::super::policy::InOut::Input).name.as_ref(),
-                    PolicyType::PolicyListIn,
-                    *fam,
-                );
-                push(
-                    io.get(&super::super::policy::InOut::Output).name.as_ref(),
-                    PolicyType::PolicyListOut,
-                    *fam,
-                );
-            }
-            for (fam, io) in &peer.prefix_set {
-                push(
-                    io.get(&super::super::policy::InOut::Input).name.as_ref(),
-                    PolicyType::PrefixSetIn,
-                    *fam,
-                );
-                push(
-                    io.get(&super::super::policy::InOut::Output).name.as_ref(),
-                    PolicyType::PrefixSetOut,
-                    *fam,
-                );
-            }
-            // TCP-AO key-chain watch. Keyed by the raw peer ident (not
-            // `peer_policy_ident`) matching the global neighbor, and by a
-            // distinct `KeyChain` policy_type, so it never collides with a
-            // policy/prefix-set watch even if the idents coincide.
-            if let Some(ao) = &peer.config.transport.ao_config
-                && !ao.key_chain.is_empty()
-            {
-                out.push((
-                    ao.key_chain.clone(),
-                    idx,
-                    PolicyType::KeyChain(crate::policy::KeyChainScope::BgpNeighbor),
-                ));
-            }
-        }
-        out
-    }
-
     /// global task sends [`BgpVrfMsg::Shutdown`] or when the
     /// inbound channel is closed (i.e. every sender — the global
     /// task plus any per-peer holds — has dropped).
@@ -2912,6 +2840,14 @@ impl BgpVrf {
         >,
     ) {
         super::spawn::insert_started_peer(self, &addr, remote_as, config, knobs, policy_refs);
+        // Install this peer's MD5 key on the VRF listener so a CE-initiated
+        // (passive) authenticated session comes up without waiting for a
+        // respawn. The active/dial side is keyed from `peer.config` directly;
+        // the listener needs an explicit per-address install. TCP-AO rides
+        // the key-chain watch `insert_started_peer` just registered — its
+        // resolve reply runs `resolve_ao_keys`, which keys the listener — so
+        // it needs no call here (the resolved key isn't known yet anyway).
+        self.refresh_listener_md5();
         bgp_vrf_trace!(
             &self.tracing,
             vrf = %self.name,
@@ -2922,9 +2858,10 @@ impl BgpVrf {
     }
 
     /// Enumerate one peer's registered policy / prefix-set watches, as
-    /// `(name, ident, policy_type)` — the per-peer slice of
-    /// [`Self::policy_watch_list`], captured before a peer leaves the map
-    /// so the runtime remove path can Unregister them.
+    /// `(name, ident, policy_type)`, captured before a peer leaves the map
+    /// so the runtime remove / rebind path can Unregister them. (Whole-VRF
+    /// teardown instead clears every watch in one shot via
+    /// `policy::Message::UnregisterProto` in `despawn_bgp_vrf`.)
     fn peer_policy_watches(
         &self,
         addr: &std::net::IpAddr,
@@ -3051,6 +2988,25 @@ impl BgpVrf {
         // detached explicitly or the freed ident lingers and a future
         // slot reuse inherits the group.
         super::super::update_group::detach(&mut self.update_groups, &mut self.peers, peer_idx);
+        // Drop this peer's key from the VRF listener before it leaves the
+        // map. `refresh_listener_*` only (re)installs for peers still
+        // present, so it can't clear a departed peer's key; a lingering MD5
+        // key would make the kernel demand MD5 on future SYNs from this
+        // address, breaking a later no-auth peer re-added at the same IP.
+        // `last_ao_installed` is maintained by `refresh_listener_ao`.
+        if let Some(peer) = self.peers.get(&addr) {
+            let ao_ids = peer.last_ao_installed;
+            let fd = match addr {
+                std::net::IpAddr::V4(_) => self.listen_fd_v4,
+                std::net::IpAddr::V6(_) => self.listen_fd_v6,
+            };
+            if let Some(fd) = fd {
+                let _ = super::super::auth::set_tcp_md5_key(fd, addr, b"");
+                if let Some((s, r)) = ao_ids {
+                    let _ = super::super::auth::del_tcp_ao_key(fd, addr, s, r);
+                }
+            }
+        }
         self.peers.remove(&addr);
         self.unregister_policy_watches(&watches);
         // Notify the global accept dispatcher this VRF no longer claims the
@@ -3154,6 +3110,12 @@ impl BgpVrf {
             // the new family set / session parameters.
             let _ = self.tx.try_send(Message::Event(ident, Event::Stop));
         }
+        // Push a changed/removed MD5 password to the VRF listener (passive
+        // side); the active dial already picked it up from `peer.config`.
+        // TCP-AO on reconfigure is not refreshed here: `resolved_ao_key`
+        // only updates when the key-chain re-resolves, which a reconfigure
+        // doesn't re-subscribe — that remains the documented auth follow-up.
+        self.refresh_listener_md5();
         bgp_vrf_trace!(
             &self.tracing,
             vrf = %self.name,
