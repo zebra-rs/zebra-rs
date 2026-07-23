@@ -1,0 +1,41 @@
+# PE1 (AS 65000) — config-echo of the per-VRF neighbor session/per-AFI knobs
+# via `show bgp vrf vrf-cust neighbor <addr>`. Two CE neighbors so the
+# mutually-exclusive ttl-security / ebgp-multihop live on different peers:
+#   * CE1 — description, timers, update-source, ebgp-multihop, and the
+#           per-AFI add-path / graceful-restart / long-lived-GR knobs.
+#   * CE2 — ttl-security (GTSM), needs the peer in GTSM too to establish.
+vrf:
+- name: vrf-cust
+  ipv4:
+    route-target:
+      import: [65000:100]
+      export: [65000:100]
+interface:
+- {if-name: lo, ipv4: {address: 1.1.1.1/32}}
+- {if-name: ce1, vrf: vrf-cust, ipv4: {address: 10.1.0.1/30}}
+- {if-name: ce2, vrf: vrf-cust, ipv4: {address: 10.2.0.1/30}}
+router:
+  bgp:
+    global: {as: 65000, router-id: 1.1.1.1}
+    vrf:
+    - name: vrf-cust
+      rd: 65000:1
+      neighbor:
+      - remote-address: 10.1.0.2
+        remote-as: 65001
+        description: "ce1-peer-note"
+        timers: {connect-retry-time: 7, hold-time: 90, idle-hold-time: 4}
+        update-source: 10.1.0.1
+        ebgp-multihop: 5
+        afi-safi:
+        - name: ipv4
+          enabled: true
+          add-path: send-receive
+          graceful-restart: {enabled: true}
+          long-lived-graceful-restart: {enabled: true, restart-time: 120}
+      - remote-address: 10.2.0.2
+        remote-as: 65002
+        ttl-security: {}
+        afi-safi:
+        - name: ipv4
+          enabled: true
