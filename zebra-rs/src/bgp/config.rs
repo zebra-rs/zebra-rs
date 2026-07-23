@@ -4350,8 +4350,36 @@ impl Bgp {
             super::vrf_config::config_vrf_neighbor_remote_as,
         );
         self.callback_add(
-            "/router/bgp/vrf/neighbor/peer-group",
-            super::vrf_config::config_vrf_neighbor_peer_group,
+            "/router/bgp/vrf/neighbor/neighbor-group",
+            super::vrf_config::config_vrf_neighbor_neighbor_group,
+        );
+        self.callback_add(
+            "/router/bgp/vrf/neighbor/transport/passive-mode",
+            super::vrf_config::config_vrf_neighbor_passive,
+        );
+        self.callback_add(
+            "/router/bgp/vrf/neighbor/update-source",
+            super::vrf_config::config_vrf_neighbor_update_source,
+        );
+        self.callback_add(
+            "/router/bgp/vrf/neighbor/ebgp-multihop",
+            super::vrf_config::config_vrf_neighbor_ebgp_multihop,
+        );
+        self.callback_add(
+            "/router/bgp/vrf/neighbor/ttl-security",
+            super::vrf_config::config_vrf_neighbor_ttl_security,
+        );
+        self.callback_add(
+            "/router/bgp/vrf/neighbor/port",
+            super::vrf_config::config_vrf_neighbor_port,
+        );
+        self.callback_add(
+            "/router/bgp/vrf/neighbor/ip-transparent",
+            super::vrf_config::config_vrf_neighbor_ip_transparent,
+        );
+        self.callback_add(
+            "/router/bgp/vrf/neighbor/disable-connected-check",
+            super::vrf_config::config_vrf_neighbor_disable_connected_check,
         );
         self.callback_add(
             "/router/bgp/vrf/neighbor/description",
