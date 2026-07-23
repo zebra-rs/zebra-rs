@@ -1,0 +1,31 @@
+# CE1 — customer edge 1 (AS 65001). The control neighbor: configured at
+# start and never touched at runtime, so it is the "must stay Established
+# while CE2 is added/removed" witness that the incremental path does not
+# respawn the VRF task.
+interface:
+- if-name: lo
+  ipv4:
+    address: 10.0.1.1/32
+- if-name: pe1
+  ipv4:
+    address: 10.1.0.2/30
+router:
+  bgp:
+    global:
+      as: 65001
+      router-id: 10.0.1.1
+    timer:
+      adv-interval:
+        ebgp: 3
+    neighbor:
+    - remote-address: 10.1.0.1
+      remote-as: 65000
+      timers: {connect-retry-time: 3}
+      enabled: true
+      afi-safi:
+      - name: ipv4
+        enabled: true
+    afi-safi:
+    - name: ipv4
+      redistribute:
+        connected: {}

@@ -1,0 +1,32 @@
+# CE2 — customer edge 2 (AS 65002). Fully configured from the start on
+# its own side; PE1 has NO neighbor for it until the runtime `set` adds
+# one. `connect-retry-time 3` makes CE2 re-dial quickly so the session
+# comes up soon after PE1's neighbor is added, without waiting a full
+# 30 s connect-retry.
+interface:
+- if-name: lo
+  ipv4:
+    address: 10.0.2.1/32
+- if-name: pe1
+  ipv4:
+    address: 10.2.0.2/30
+router:
+  bgp:
+    global:
+      as: 65002
+      router-id: 10.0.2.1
+    timer:
+      adv-interval:
+        ebgp: 3
+    neighbor:
+    - remote-address: 10.2.0.1
+      remote-as: 65000
+      timers: {connect-retry-time: 3}
+      enabled: true
+      afi-safi:
+      - name: ipv4
+        enabled: true
+    afi-safi:
+    - name: ipv4
+      redistribute:
+        connected: {}
