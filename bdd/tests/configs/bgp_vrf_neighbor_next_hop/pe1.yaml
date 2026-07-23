@@ -1,0 +1,39 @@
+# PE1 (AS 65000) — exercises the per-VRF neighbor per-AFI next-hop knobs on
+# the PLAIN IPv4-unicast advertise path (previously ignored — only VPNv4/LU
+# honored them). CE1 advertises 10.0.1.1/32 (next-hop 10.1.0.2). PE1
+# re-advertises the VRF Loc-RIB to the other CEs:
+#   * CE2 — afi-safi ipv4 next-hop-unchanged  → keeps CE1's 10.1.0.2
+#   * CE3 — default eBGP                        → rewrites to self 10.3.0.1
+#   * CE4 — iBGP + afi-safi ipv4 next-hop-self  → forces self 10.4.0.1
+#           (default iBGP would preserve 10.1.0.2)
+vrf:
+- name: vrf-cust
+  ipv4:
+    route-target:
+      import: [65000:100]
+      export: [65000:100]
+interface:
+- {if-name: lo, ipv4: {address: 1.1.1.1/32}}
+- {if-name: ce1, vrf: vrf-cust, ipv4: {address: 10.1.0.1/30}}
+- {if-name: ce2, vrf: vrf-cust, ipv4: {address: 10.2.0.1/30}}
+- {if-name: ce3, vrf: vrf-cust, ipv4: {address: 10.3.0.1/30}}
+- {if-name: ce4, vrf: vrf-cust, ipv4: {address: 10.4.0.1/30}}
+router:
+  bgp:
+    global: {as: 65000, router-id: 1.1.1.1}
+    vrf:
+    - name: vrf-cust
+      rd: 65000:1
+      neighbor:
+      - remote-address: 10.1.0.2
+        remote-as: 65001
+        afi-safi: [{name: ipv4, enabled: true}]
+      - remote-address: 10.2.0.2
+        remote-as: 65002
+        afi-safi: [{name: ipv4, enabled: true, next-hop-unchanged: true}]
+      - remote-address: 10.3.0.2
+        remote-as: 65003
+        afi-safi: [{name: ipv4, enabled: true}]
+      - remote-address: 10.4.0.2
+        remote-as: 65000
+        afi-safi: [{name: ipv4, enabled: true, next-hop-self: true}]

@@ -189,6 +189,16 @@ pub struct SyncCtx {
     /// (and VPN label) when advertising forwarded VPN routes to this
     /// eBGP peer. The inter-RR session of an RR-based Inter-AS Option C.
     pub vpnv4_next_hop_unchanged: bool,
+    /// `afi-safi ipv4 next-hop-self` — advertise self as the next-hop for
+    /// plain IPv4-unicast rows even when the route was learned from another
+    /// peer (force semantics, like FRR's `FORCE_NEXTHOP_SELF`). Forces the
+    /// rewrite even iBGP→iBGP, which the eBGP-default rule below would not.
+    pub unicast_next_hop_self: bool,
+    /// `afi-safi ipv4 next-hop-unchanged` — preserve the received next-hop
+    /// on advertise (both eBGP and iBGP) for forwarded (non-originated)
+    /// plain IPv4-unicast rows. Takes precedence over next-hop-self and over
+    /// the eBGP-default rewrite, matching FRR's `PEER_FLAG_NEXTHOP_UNCHANGED`.
+    pub unicast_next_hop_unchanged: bool,
     pub egress_as: EgressAs,
     pub out_policy: Arc<super::policy::OutPolicy>,
     /// Egress sink (Tier 1b): the peer's writer channel, the shared
@@ -296,6 +306,8 @@ impl SyncCtx {
             remote_address: IpAddr::V4(Ipv4Addr::UNSPECIFIED),
             vpnv4_next_hop_self: false,
             vpnv4_next_hop_unchanged: false,
+            unicast_next_hop_self: false,
+            unicast_next_hop_unchanged: false,
             egress_as: EgressAs {
                 is_ebgp: true,
                 local_as: 65000,
@@ -11242,10 +11254,21 @@ pub fn route_update_ipv4(
     // the correct next-hop).
     let vpn_nh_unchanged =
         rib.nexthop.is_some() && !rib.is_originated() && ctx.vpnv4_next_hop_unchanged;
-    let needs_v4_rewrite = (ctx.peer_type.is_ebgp() && !vpn_nh_unchanged)
+    // Plain v4-unicast rows (`rib.nexthop == None`) honor the per-neighbor
+    // `afi-safi ipv4 {next-hop-self|next-hop-unchanged}` knobs, matching the
+    // VPN / labeled-unicast paths and FRR's per-AFI/SAFI flags:
+    //   * next-hop-unchanged — preserve the received next-hop on advertise
+    //     (both eBGP and iBGP), for FORWARDED rows only; highest precedence.
+    //   * next-hop-self — force self even iBGP→iBGP (force semantics), which
+    //     the eBGP-default rewrite below would not do.
+    let unicast_nh_unchanged =
+        rib.nexthop.is_none() && !rib.is_originated() && ctx.unicast_next_hop_unchanged;
+    let unicast_nh_self = rib.nexthop.is_none() && ctx.unicast_next_hop_self;
+    let needs_v4_rewrite = (ctx.peer_type.is_ebgp() && !vpn_nh_unchanged && !unicast_nh_unchanged)
         || rib.is_originated()
         || rib.enhe_egress.is_some()
-        || (rib.nexthop.is_some() && ctx.vpnv4_next_hop_self);
+        || (rib.nexthop.is_some() && ctx.vpnv4_next_hop_self)
+        || (unicast_nh_self && !unicast_nh_unchanged);
     if needs_v4_rewrite {
         let nexthop = ctx.local_addr_v4.unwrap_or(ctx.router_id);
         // VPNv4 rows carry the `Vpnv4Nexthop` slot (it holds the
@@ -11402,7 +11425,16 @@ pub fn route_update_ipv6(
     //     route (whose stored next-hop is empty) went on the wire as
     //     `::` — the peer kept it best-path-selected but could never
     //     resolve or install it.
-    let needs_self = peer.is_ebgp() || rib.is_originated();
+    // Honor the per-neighbor `afi-safi ipv6 {next-hop-self|next-hop-unchanged}`
+    // knobs (v6-unicast rows carry no VPN next-hop, so this is the plain case):
+    // next-hop-unchanged preserves the received next-hop for FORWARDED rows
+    // (both eBGP and iBGP) and wins over next-hop-self; next-hop-self forces
+    // self even iBGP→iBGP. Originated rows always rewrite (RFC 2545 §2 — the
+    // originator is the only valid next-hop).
+    let nh_unchanged = !rib.is_originated() && peer.next_hop_unchanged(Afi::Ip6, Safi::Unicast);
+    let needs_self = rib.is_originated()
+        || (peer.is_ebgp() && !nh_unchanged)
+        || (peer.next_hop_self(Afi::Ip6, Safi::Unicast) && !nh_unchanged);
     if needs_self {
         let self_v6: Option<Ipv6Addr> = match peer.param.local_addr.as_ref().map(|a| a.ip()) {
             Some(IpAddr::V6(v6)) => Some(v6),
@@ -20900,6 +20932,8 @@ mod as_sets_withdraw_tests {
             remote_address: "10.0.0.2".parse().unwrap(),
             vpnv4_next_hop_self: false,
             vpnv4_next_hop_unchanged: false,
+            unicast_next_hop_self: false,
+            unicast_next_hop_unchanged: false,
             egress_as: EgressAs {
                 is_ebgp: true,
                 local_as: 65000,
@@ -20955,6 +20989,8 @@ mod as_sets_withdraw_tests {
             remote_address: "9.9.9.2".parse().unwrap(),
             vpnv4_next_hop_self: false,
             vpnv4_next_hop_unchanged: unchanged,
+            unicast_next_hop_self: false,
+            unicast_next_hop_unchanged: false,
             egress_as: EgressAs {
                 is_ebgp: true,
                 local_as: 65501,
@@ -21022,6 +21058,143 @@ mod as_sets_withdraw_tests {
             }
             ref other => panic!("expected rewritten VPNv4 next-hop, got {other:?}"),
         }
+    }
+
+    /// `afi-safi ipv4 next-hop-self` on an iBGP neighbor forces the
+    /// advertised next-hop to self even for a forwarded route (force
+    /// semantics); without it, iBGP preserves the received next-hop.
+    /// Regression for the plain v4-unicast path, which previously ignored
+    /// the knob (only VPNv4 / LU honored it).
+    #[test]
+    fn unicast_next_hop_self_forces_self_on_ibgp() {
+        use bgp_packet::BgpNexthop;
+
+        let ctx = |nhs: bool| SyncCtx {
+            ident: 1,
+            peer_type: PeerType::IBGP,
+            reflector_client: false,
+            local_addr_v4: Some(Ipv4Addr::new(9, 9, 9, 1)),
+            router_id: Ipv4Addr::new(9, 9, 9, 1),
+            remote_id: Ipv4Addr::new(9, 9, 9, 2),
+            remote_address: "9.9.9.2".parse().unwrap(),
+            vpnv4_next_hop_self: false,
+            vpnv4_next_hop_unchanged: false,
+            unicast_next_hop_self: nhs,
+            unicast_next_hop_unchanged: false,
+            egress_as: EgressAs {
+                is_ebgp: false,
+                local_as: 65000,
+                remote_as: 65000,
+                as_override: false,
+                remove_private_as: None,
+                local_as_substitute: None,
+                local_as_replace: false,
+            },
+            out_policy: Arc::new(crate::bgp::policy::OutPolicy::default()),
+            packet_tx: None,
+            egress_depth: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+            extended_message: false,
+            as4: true,
+            attach_unknown_attr: None,
+            as_sets_withdraw: false,
+        };
+        // A plain v4-unicast row learned from eBGP (so the iBGP→iBGP
+        // suppression doesn't apply), received next-hop 3.3.3.3.
+        let recv = Ipv4Addr::new(3, 3, 3, 3);
+        let mut attr = attr_with_path("65001");
+        attr.nexthop = Some(BgpNexthop::Ipv4(recv));
+        let rib = BgpRib::new(
+            2,
+            Ipv4Addr::new(2, 2, 2, 2),
+            BgpRibType::EBGP,
+            0,
+            0,
+            &attr,
+            None,
+            None,
+            false,
+        );
+        let prefix = "10.0.0.0/24".parse().unwrap();
+
+        let (_, attrs) = route_update_ipv4(&ctx(true), &prefix, &rib, false).expect("advertise");
+        assert_eq!(
+            attrs.nexthop,
+            Some(BgpNexthop::Ipv4(Ipv4Addr::new(9, 9, 9, 1))),
+            "next-hop-self forces self on iBGP",
+        );
+
+        let (_, attrs) = route_update_ipv4(&ctx(false), &prefix, &rib, false).expect("advertise");
+        assert_eq!(
+            attrs.nexthop,
+            Some(BgpNexthop::Ipv4(recv)),
+            "without the knob iBGP preserves the received next-hop",
+        );
+    }
+
+    /// `afi-safi ipv4 next-hop-unchanged` on an eBGP neighbor preserves the
+    /// received next-hop instead of the default eBGP rewrite to self.
+    #[test]
+    fn unicast_next_hop_unchanged_preserves_on_ebgp() {
+        use bgp_packet::BgpNexthop;
+
+        let ctx = |unchanged: bool| SyncCtx {
+            ident: 1,
+            peer_type: PeerType::EBGP,
+            reflector_client: false,
+            local_addr_v4: Some(Ipv4Addr::new(9, 9, 9, 1)),
+            router_id: Ipv4Addr::new(9, 9, 9, 1),
+            remote_id: Ipv4Addr::new(9, 9, 9, 2),
+            remote_address: "9.9.9.2".parse().unwrap(),
+            vpnv4_next_hop_self: false,
+            vpnv4_next_hop_unchanged: false,
+            unicast_next_hop_self: false,
+            unicast_next_hop_unchanged: unchanged,
+            egress_as: EgressAs {
+                is_ebgp: true,
+                local_as: 65000,
+                remote_as: 65001,
+                as_override: false,
+                remove_private_as: None,
+                local_as_substitute: None,
+                local_as_replace: false,
+            },
+            out_policy: Arc::new(crate::bgp::policy::OutPolicy::default()),
+            packet_tx: None,
+            egress_depth: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+            extended_message: false,
+            as4: true,
+            attach_unknown_attr: None,
+            as_sets_withdraw: false,
+        };
+        let recv = Ipv4Addr::new(3, 3, 3, 3);
+        let mut attr = attr_with_path("65001");
+        attr.nexthop = Some(BgpNexthop::Ipv4(recv));
+        let rib = BgpRib::new(
+            2,
+            Ipv4Addr::new(2, 2, 2, 2),
+            BgpRibType::EBGP,
+            0,
+            0,
+            &attr,
+            None,
+            None,
+            false,
+        );
+        let prefix = "10.0.0.0/24".parse().unwrap();
+
+        let (_, attrs) = route_update_ipv4(&ctx(true), &prefix, &rib, false).expect("advertise");
+        assert_eq!(
+            attrs.nexthop,
+            Some(BgpNexthop::Ipv4(recv)),
+            "next-hop-unchanged preserves the received next-hop on eBGP",
+        );
+
+        let (_, attrs) = route_update_ipv4(&ctx(false), &prefix, &rib, false).expect("advertise");
+        assert_eq!(
+            attrs.nexthop,
+            Some(BgpNexthop::Ipv4(Ipv4Addr::new(9, 9, 9, 1))),
+            "without the knob eBGP rewrites the next-hop to self",
+        );
     }
 
     /// A VRF row imported from the VPN table keeps `typ: Originated` (the
