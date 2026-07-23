@@ -18,10 +18,7 @@ use super::route_clean;
 use super::{
     AssistedReplicationRole, BGP_PORT, Bgp, EvpnBumTunnel,
     inst::Callback,
-    peer::{
-        ALLOWAS_IN_DEFAULT_COUNT, AllowAsIn, LocalAs, PasswordEncoding, Peer, PeerType,
-        RemovePrivateAs,
-    },
+    peer::{AllowAsIn, LocalAs, PasswordEncoding, Peer, PeerType, RemovePrivateAs},
     timer,
 };
 
@@ -893,14 +890,9 @@ fn config_allowas_in(bgp: &mut Bgp, mut args: Args, op: ConfigOp) -> Option<()> 
 
     // The verbatim statement now rides `knobs_explicit`; the effective
     // value (explicit-wins over the group opinion) is written below.
-    if op.is_set() {
-        peer.config
-            .knobs_explicit
-            .allowas_in
-            .get_or_insert(AllowAsIn::Count(ALLOWAS_IN_DEFAULT_COUNT));
-    } else {
-        peer.config.knobs_explicit.allowas_in = None;
-    }
+    peer.config
+        .knobs_explicit
+        .stage_allowas_in_presence(op.is_set());
     let want =
         super::neighbor_group::resolve_knob(&bgp.neighbor_groups, &peer.config, |k| k.allowas_in);
     apply_allowas_in(peer, want);
@@ -922,21 +914,9 @@ pub(super) fn apply_allowas_in(peer: &mut Peer, want: Option<AllowAsIn>) -> bool
 fn config_allowas_in_count(bgp: &mut Bgp, mut args: Args, op: ConfigOp) -> Option<()> {
     let addr = args.addr()?;
 
-    if op.is_set() {
-        let count = args.u8()?;
-        let peer = bgp.peers.get_mut(&addr)?;
-        peer.config.knobs_explicit.allowas_in = Some(AllowAsIn::Count(count));
-    } else {
-        let peer = bgp.peers.get_mut(&addr)?;
-        if matches!(
-            peer.config.knobs_explicit.allowas_in,
-            Some(AllowAsIn::Count(_))
-        ) {
-            peer.config.knobs_explicit.allowas_in =
-                Some(AllowAsIn::Count(ALLOWAS_IN_DEFAULT_COUNT));
-        }
-    }
+    let count = if op.is_set() { Some(args.u8()?) } else { None };
     let peer = bgp.peers.get_mut(&addr)?;
+    peer.config.knobs_explicit.stage_allowas_in_count(count);
     let want =
         super::neighbor_group::resolve_knob(&bgp.neighbor_groups, &peer.config, |k| k.allowas_in);
     apply_allowas_in(peer, want);
@@ -949,15 +929,9 @@ fn config_allowas_in_count(bgp: &mut Bgp, mut args: Args, op: ConfigOp) -> Optio
 fn config_allowas_in_origin(bgp: &mut Bgp, mut args: Args, op: ConfigOp) -> Option<()> {
     let addr = args.addr()?;
     let peer = bgp.peers.get_mut(&addr)?;
-
-    if op.is_set() {
-        peer.config.knobs_explicit.allowas_in = Some(AllowAsIn::Origin);
-    } else if matches!(
-        peer.config.knobs_explicit.allowas_in,
-        Some(AllowAsIn::Origin)
-    ) {
-        peer.config.knobs_explicit.allowas_in = Some(AllowAsIn::Count(ALLOWAS_IN_DEFAULT_COUNT));
-    }
+    peer.config
+        .knobs_explicit
+        .stage_allowas_in_origin(op.is_set());
     let want =
         super::neighbor_group::resolve_knob(&bgp.neighbor_groups, &peer.config, |k| k.allowas_in);
     apply_allowas_in(peer, want);
@@ -1010,14 +984,9 @@ fn config_remove_private_as(bgp: &mut Bgp, mut args: Args, op: ConfigOp) -> Opti
 
     // The verbatim statement now rides `knobs_explicit`; the effective
     // value (explicit-wins over the group opinion) is written below.
-    if op.is_set() {
-        peer.config
-            .knobs_explicit
-            .remove_private_as
-            .get_or_insert_with(RemovePrivateAs::default);
-    } else {
-        peer.config.knobs_explicit.remove_private_as = None;
-    }
+    peer.config
+        .knobs_explicit
+        .stage_remove_private_as_presence(op.is_set());
     let want = super::neighbor_group::resolve_knob(&bgp.neighbor_groups, &peer.config, |k| {
         k.remove_private_as
     });
@@ -1043,15 +1012,9 @@ fn config_remove_private_as_all(bgp: &mut Bgp, mut args: Args, op: ConfigOp) -> 
     let addr = args.addr()?;
     let peer = bgp.peers.get_mut(&addr)?;
 
-    if op.is_set() {
-        peer.config
-            .knobs_explicit
-            .remove_private_as
-            .get_or_insert_with(RemovePrivateAs::default)
-            .all = true;
-    } else if let Some(rpa) = peer.config.knobs_explicit.remove_private_as.as_mut() {
-        rpa.all = false;
-    }
+    peer.config
+        .knobs_explicit
+        .stage_remove_private_as_all(op.is_set());
     let want = super::neighbor_group::resolve_knob(&bgp.neighbor_groups, &peer.config, |k| {
         k.remove_private_as
     });
@@ -1067,15 +1030,9 @@ fn config_remove_private_as_replace_as(bgp: &mut Bgp, mut args: Args, op: Config
     let addr = args.addr()?;
     let peer = bgp.peers.get_mut(&addr)?;
 
-    if op.is_set() {
-        peer.config
-            .knobs_explicit
-            .remove_private_as
-            .get_or_insert_with(RemovePrivateAs::default)
-            .replace_as = true;
-    } else if let Some(rpa) = peer.config.knobs_explicit.remove_private_as.as_mut() {
-        rpa.replace_as = false;
-    }
+    peer.config
+        .knobs_explicit
+        .stage_remove_private_as_replace_as(op.is_set());
     let want = super::neighbor_group::resolve_knob(&bgp.neighbor_groups, &peer.config, |k| {
         k.remove_private_as
     });
@@ -4380,6 +4337,42 @@ impl Bgp {
         self.callback_add(
             "/router/bgp/vrf/neighbor/disable-connected-check",
             super::vrf_config::config_vrf_neighbor_disable_connected_check,
+        );
+        self.callback_add(
+            "/router/bgp/vrf/neighbor/as-override",
+            super::vrf_config::config_vrf_neighbor_as_override,
+        );
+        self.callback_add(
+            "/router/bgp/vrf/neighbor/enforce-first-as",
+            super::vrf_config::config_vrf_neighbor_enforce_first_as,
+        );
+        self.callback_add(
+            "/router/bgp/vrf/neighbor/route-reflector/client",
+            super::vrf_config::config_vrf_neighbor_route_reflector_client,
+        );
+        self.callback_add(
+            "/router/bgp/vrf/neighbor/allowas-in",
+            super::vrf_config::config_vrf_neighbor_allowas_in,
+        );
+        self.callback_add(
+            "/router/bgp/vrf/neighbor/allowas-in/count",
+            super::vrf_config::config_vrf_neighbor_allowas_in_count,
+        );
+        self.callback_add(
+            "/router/bgp/vrf/neighbor/allowas-in/origin",
+            super::vrf_config::config_vrf_neighbor_allowas_in_origin,
+        );
+        self.callback_add(
+            "/router/bgp/vrf/neighbor/remove-private-as",
+            super::vrf_config::config_vrf_neighbor_remove_private_as,
+        );
+        self.callback_add(
+            "/router/bgp/vrf/neighbor/remove-private-as/all",
+            super::vrf_config::config_vrf_neighbor_remove_private_as_all,
+        );
+        self.callback_add(
+            "/router/bgp/vrf/neighbor/remove-private-as/replace-as",
+            super::vrf_config::config_vrf_neighbor_remove_private_as_replace_as,
         );
         self.callback_add(
             "/router/bgp/vrf/neighbor/description",

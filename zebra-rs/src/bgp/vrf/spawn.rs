@@ -935,6 +935,98 @@ mod tests {
         );
     }
 
+    /// The remaining inheritable knobs (as-override, allowas-in,
+    /// remove-private-as, …) must reach the built peer with group
+    /// precedence, exercising the structured staging state machines. The
+    /// override arm — explicit allowas-in origin beating the group's
+    /// count — is the one that would pass trivially if resolution were
+    /// skipped.
+    #[tokio::test]
+    async fn materialize_peers_applies_inherit_knobs() {
+        use super::super::super::neighbor_group::{InheritableKnobs, NeighborGroup};
+        use super::super::super::peer::{AllowAsIn, RemovePrivateAs};
+        use super::super::super::vrf_config::{BgpVrfConfig, BgpVrfNeighborConfig};
+        use super::super::inst::BgpVrf;
+        use crate::context::ProtoContext;
+
+        let (global_tx, _global_rx) = unbounded_channel::<BgpGlobalMsg>();
+        let ctx = ProtoContext::default_table_no_rib();
+        let (_rib_tx, rib_rx) = unbounded_channel();
+        let (mut vrf, _inbox) = BgpVrf::new(
+            "v1".to_string(),
+            ctx,
+            Ipv4Addr::UNSPECIFIED,
+            65000,
+            16,
+            global_tx,
+            rib_rx,
+        );
+
+        // Group: as-override on, allowas-in count 4.
+        let g = NeighborGroup {
+            knobs: InheritableKnobs {
+                as_override: Some(true),
+                allowas_in: Some(AllowAsIn::Count(4)),
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let mut groups = BTreeMap::new();
+        groups.insert("g1".to_string(), g);
+
+        let inherits: std::net::IpAddr = "192.0.2.1".parse().unwrap();
+        let overrides: std::net::IpAddr = "192.0.2.2".parse().unwrap();
+
+        let mut cfg = BgpVrfConfig::default();
+        cfg.neighbors.insert(inherits, {
+            let mut n = BgpVrfNeighborConfig {
+                remote_as: Some(65001),
+                ..Default::default()
+            };
+            n.config.neighbor_group = Some("g1".to_string());
+            n
+        });
+        // Overrides allowas-in to origin (beats the group's count) and
+        // adds remove-private-as with replace-as via the staging helpers.
+        cfg.neighbors.insert(overrides, {
+            let mut n = BgpVrfNeighborConfig {
+                remote_as: Some(65002),
+                ..Default::default()
+            };
+            n.config.neighbor_group = Some("g1".to_string());
+            n.config.knobs_explicit.stage_allowas_in_origin(true);
+            n.config
+                .knobs_explicit
+                .stage_remove_private_as_replace_as(true);
+            n
+        });
+
+        materialize_peers(&mut vrf, &cfg, &groups);
+
+        let a = vrf.peers.get(&inherits).expect("peer a");
+        assert!(a.config.as_override, "as-override inherited from the group");
+        assert_eq!(
+            a.config.allowas_in,
+            Some(AllowAsIn::Count(4)),
+            "allowas-in count inherited from the group"
+        );
+
+        let b = vrf.peers.get(&overrides).expect("peer b");
+        assert_eq!(
+            b.config.allowas_in,
+            Some(AllowAsIn::Origin),
+            "explicit allowas-in origin must beat the group's count"
+        );
+        assert_eq!(
+            b.config.remove_private_as,
+            Some(RemovePrivateAs {
+                all: false,
+                replace_as: true,
+            }),
+            "remove-private-as replace-as must be staged and applied"
+        );
+    }
+
     /// `neighbor <addr> timers { … }` must reach the peer that
     /// `materialize_peers` builds — the per-VRF equivalent of the global
     /// neighbor's `timer::config::*` callbacks, which mutate a live peer
