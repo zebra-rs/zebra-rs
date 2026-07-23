@@ -95,12 +95,6 @@ pub struct BgpVrfHandle {
     pub bfd_client_tx: Option<UnboundedSender<crate::bfd::inst::ClientReq>>,
     /// The BFD client id (`bfd-vrf:<name>`) the unsubscribes must use.
     pub bfd_client: String,
-    /// Accept-loop tasks for this VRF's own listener sockets (v4/v6).
-    /// Held so they abort when the handle is dropped at despawn, closing
-    /// the listeners; a respawn opens fresh ones. Empty for a
-    /// placeholder-ctx spawn (no VRF-bound socket yet).
-    #[allow(dead_code)]
-    pub listen_tasks: Vec<Task<()>>,
 }
 
 /// Pure diff: which VRF names need to be spawned (in `desired`
@@ -145,70 +139,6 @@ pub fn compute_vrf_diff(
 /// `global_tx` is the shared sender every VRF task uses to push
 /// back to the global runtime (one channel, fanned in from every
 /// VRF).
-/// Open this VRF's own passive listener sockets (v4 + v6) on the BGP
-/// port and spawn an accept loop per family that hands each connection to
-/// the VRF task via [`BgpVrfMsg::Accept`] — the same message the global
-/// accept dispatcher forwards, so both feed one `handle_peer_connection`.
-///
-/// Returns the accept-loop [`Task`]s; the caller stashes them on the
-/// handle so they abort (and the listeners close) at despawn. Empty when
-/// `ctx` is not VRF-bound: a device-unbound listener on the shared BGP
-/// port would join the global listener's REUSEPORT group and steal
-/// default-VRF connections, so the listener waits for the kernel-ctx
-/// respawn.
-fn spawn_vrf_listeners(ctx: &ProtoContext, inbox: &BgpVrfInbox, name: &str) -> Vec<Task<()>> {
-    use std::net::SocketAddr;
-    if !ctx.is_vrf_bound() {
-        return Vec::new();
-    }
-    let mut tasks = Vec::new();
-    let v4: SocketAddr = "0.0.0.0:179".parse().unwrap();
-    let v6: SocketAddr = "[::]:179".parse().unwrap();
-    for (addr, is_v6) in [(v4, false), (v6, true)] {
-        let ctx = ctx.clone();
-        let inbox = inbox.clone();
-        let name = name.to_string();
-        tasks.push(Task::spawn(async move {
-            let listener = if is_v6 {
-                ctx.tcp_listen_v6_only(addr).await
-            } else {
-                ctx.tcp_listen(addr).await
-            };
-            let listener = match listener {
-                Ok(l) => l,
-                Err(e) => {
-                    tracing::warn!(
-                        vrf = %name,
-                        %addr,
-                        error = %e,
-                        "bgp vrf: failed to open per-VRF listener; passive \
-                         accept for this family falls back to the global \
-                         dispatcher",
-                    );
-                    return;
-                }
-            };
-            loop {
-                match listener.accept().await {
-                    Ok((stream, sockaddr)) => {
-                        // Unbounded send; the VRF task's inbox never
-                        // backpressures. If the task is gone the send
-                        // errors and we exit the loop.
-                        if inbox.send(BgpVrfMsg::Accept(stream, sockaddr)).is_err() {
-                            return;
-                        }
-                    }
-                    Err(e) => {
-                        tracing::warn!(vrf = %name, error = %e, "bgp vrf: accept error");
-                        tokio::time::sleep(std::time::Duration::from_secs(1)).await;
-                    }
-                }
-            }
-        }));
-    }
-    tasks
-}
-
 pub fn spawn_bgp_vrf(
     name: String,
     cfg: &BgpVrfConfig,
@@ -398,20 +328,6 @@ pub fn spawn_bgp_vrf(
     let bfd_client_handle = vrf.bfd_client_tx.clone();
     let bfd_client_id = vrf.bfd_client();
 
-    // Per-VRF passive listener. Only when the ctx is VRF-bound (the
-    // kernel-ctx spawn) so the socket carries `SO_BINDTODEVICE`: a
-    // device-unbound listener on the BGP port would join the global
-    // listener's REUSEPORT group and steal default-VRF connections.
-    // A placeholder spawn (no kernel info yet) skips this; the
-    // kernel-ctx respawn opens it, like the ILM/SID installs.
-    //
-    // Behaviour is equivalent to today's global-dispatch detour
-    // (`peer_index` → `BgpVrfMsg::Accept`): the CE's inbound now lands on
-    // this VRF-bound socket directly (which wins over the global listener
-    // for the VRF's interfaces) and feeds the same `handle_peer_connection`
-    // path. The detour stays as a fallback for the pre-respawn window.
-    let listen_tasks = spawn_vrf_listeners(&vrf.ctx, &inbox, &name);
-
     let task = serve_vrf(vrf);
     if crate::rib::tracing::task() {
         tracing::info!(
@@ -434,7 +350,6 @@ pub fn spawn_bgp_vrf(
         bfd_sessions,
         bfd_client_tx: bfd_client_handle,
         bfd_client: bfd_client_id,
-        listen_tasks,
         show_tx,
         task,
         label,

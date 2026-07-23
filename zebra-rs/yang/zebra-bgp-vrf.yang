@@ -472,18 +472,12 @@ module zebra-bgp-vrf {
         }
         description
           "TCP-MD5 secret for the PE-CE session, same shape as the global
-           neighbor's `password`. Staged onto the peer and applied to the
-           VRF-bound *connect* socket, so the PE's OUTBOUND dial to the CE
-           is authenticated.
-
-           Per-VRF BFD-style caveat: only the active/outbound direction is
-           keyed. zebra-rs uses one shared BGP listener with per-source-IP
-           dispatch, so the passive/inbound side has no per-VRF socket to
-           carry the CE's MD5 key — a CE-initiated SYN is dropped by the
-           kernel at the global listener. The session therefore comes up
-           only when the PE initiates (the default; keep the PE side
-           non-passive). Per-VRF passive-side auth needs a per-VRF listener
-           socket (the FRR model) — a separate change.";
+           neighbor's `password`. Applied to BOTH directions: the
+           VRF-bound connect socket (PE-initiated dial) and this VRF's own
+           VRF-bound listener socket (CE-initiated inbound), so the session
+           authenticates whichever side connects. Overlapping-address VRFs
+           do not collide — each VRF has its own listener socket with its
+           own per-address key.";
       }
 
       container tcp-ao {
@@ -491,14 +485,14 @@ module zebra-bgp-vrf {
         presence "Enable TCP-AO on this CE";
         description
           "TCP-AO for the PE-CE session, same shape as the global
-           neighbor. Active/outbound only, with the same shared-listener
-           caveat as `password`: the key is applied to the PE's connect
-           socket, not the passive listener, so the session comes up on
-           the PE-initiated connection.
+           neighbor. Applied to both directions — the VRF-bound connect
+           socket and this VRF's own VRF-bound listener MKT — so the
+           session authenticates whichever side initiates.
 
            The key-chain is resolved through the policy actor (the CE
            peer's per-VRF task subscribes under `bgp-vrf:<name>`), so an
-           in-chain key rotation propagates without a reconfig.";
+           in-chain key rotation propagates without a reconfig, and a
+           resolved key is re-installed on the listener as it changes.";
         reference "RFC 5925, RFC 5926";
         leaf key-chain {
           ext:help "Key chain name";
