@@ -1,0 +1,26 @@
+# PE1 (AS 65000) — CE1 neighbor has `enforce-first-as`. CE1 prepends a
+# FOREIGN AS (65099) in front of its own on 10.0.1.1/32, so that route
+# arrives with a left-most AS that is NOT the peer's remote-as (65001) and
+# must be dropped; 10.0.1.2/32 arrives normally (left-most 65001) and is
+# accepted. Regression target: enforce-first-as is an INBOUND eBGP check —
+# it must run on the per-VRF CE receive path, not only the global one.
+vrf:
+- name: vrf-cust
+  ipv4:
+    route-target:
+      import: [65000:100]
+      export: [65000:100]
+interface:
+- {if-name: lo, ipv4: {address: 1.1.1.1/32}}
+- {if-name: ce1, vrf: vrf-cust, ipv4: {address: 10.1.0.1/30}}
+router:
+  bgp:
+    global: {as: 65000, router-id: 1.1.1.1}
+    vrf:
+    - name: vrf-cust
+      rd: 65000:1
+      neighbor:
+      - remote-address: 10.1.0.2
+        remote-as: 65001
+        enforce-first-as: {}
+        afi-safi: [{name: ipv4, enabled: true}]
