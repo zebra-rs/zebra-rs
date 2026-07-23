@@ -1,0 +1,97 @@
+# PE1 (AS 65000) — exercises the four per-VRF neighbor per-AFI policy
+# bindings under `router bgp vrf vrf-cust neighbor X afi-safi ipv4 …`:
+#   * prefix-set in   — on the CE1 neighbor, permit-list that omits .2
+#   * policy      in   — on the CE1 neighbor, denies .3
+#   * prefix-set out  — on the CE2 neighbor, permit-list that omits .4
+#   * policy      out  — on the CE2 neighbor, denies .5
+#
+# CE1 advertises 10.0.1.1..5/32. Inbound filtering leaves the VRF
+# Loc-RIB with {.1, .4, .5} (.2 dropped by prefix-set-in, .3 by
+# policy-in). PE1 re-advertises the VRF Loc-RIB to CE2, where outbound
+# filtering leaves {.1} (.4 dropped by prefix-set-out, .5 by policy-out).
+# .1 is the control that survives every filter.
+vrf:
+- name: vrf-cust
+  ipv4:
+    route-target:
+      import:
+      - 65000:100
+      export:
+      - 65000:100
+# A prefix-set bound as a filter is a permit-list: a route passes iff it
+# is a member, so the inbound/outbound sets LIST the survivors and omit
+# the one prefix each is meant to drop. MATCH3 / MATCH5 are match-only
+# sets the policy-lists reference to deny a single prefix.
+prefix-set:
+- name: PS-IN
+  prefixes:
+  - prefix: 10.0.1.1/32
+  - prefix: 10.0.1.3/32
+  - prefix: 10.0.1.4/32
+  - prefix: 10.0.1.5/32
+- name: PS-OUT
+  prefixes:
+  - prefix: 10.0.1.1/32
+  - prefix: 10.0.1.5/32
+- name: MATCH3
+  prefixes:
+  - prefix: 10.0.1.3/32
+- name: MATCH5
+  prefixes:
+  - prefix: 10.0.1.5/32
+policy:
+- name: PL-IN
+  entry:
+  - number: 10
+    action: deny
+    match:
+      prefix-set: MATCH3
+  - number: 20
+    action: permit
+- name: PL-OUT
+  entry:
+  - number: 10
+    action: deny
+    match:
+      prefix-set: MATCH5
+  - number: 20
+    action: permit
+interface:
+- if-name: lo
+  ipv4:
+    address: 1.1.1.1/32
+- if-name: ce1
+  vrf: vrf-cust
+  ipv4:
+    address: 10.1.0.1/30
+- if-name: ce2
+  vrf: vrf-cust
+  ipv4:
+    address: 10.2.0.1/30
+router:
+  bgp:
+    global:
+      as: 65000
+      router-id: 1.1.1.1
+    vrf:
+    - name: vrf-cust
+      rd: 65000:1
+      neighbor:
+      - remote-address: 10.1.0.2
+        remote-as: 65001
+        afi-safi:
+        - name: ipv4
+          enabled: true
+          prefix-set:
+            in: PS-IN
+          policy:
+            in: PL-IN
+      - remote-address: 10.2.0.2
+        remote-as: 65002
+        afi-safi:
+        - name: ipv4
+          enabled: true
+          prefix-set:
+            out: PS-OUT
+          policy:
+            out: PL-OUT
