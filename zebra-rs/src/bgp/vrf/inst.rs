@@ -2930,6 +2930,38 @@ impl BgpVrf {
         }
     }
 
+    /// Register or Unregister a peer's TCP-AO key-chain watch on this VRF's
+    /// policy channel. Keyed by the RAW `ident` (not `peer_policy_ident`)
+    /// and the `KeyChain` policy type — matching the spawn-time
+    /// `insert_started_peer` registration, and distinct from the policy /
+    /// prefix-set watches [`Self::peer_policy_watches`] tracks, so it must be
+    /// (un)registered on its own by the runtime add / reconfigure / remove
+    /// paths.
+    fn ao_keychain_watch(&self, name: &str, ident: usize, register: bool) {
+        let Some(policy_tx) = &self.policy_tx else {
+            return;
+        };
+        let policy_type =
+            crate::policy::PolicyType::KeyChain(crate::policy::KeyChainScope::BgpNeighbor);
+        let proto = self.policy_proto();
+        let msg = if register {
+            crate::policy::Message::Register {
+                proto,
+                name: name.to_string(),
+                ident,
+                policy_type,
+            }
+        } else {
+            crate::policy::Message::Unregister {
+                proto,
+                name: name.to_string(),
+                ident,
+                policy_type,
+            }
+        };
+        let _ = policy_tx.send(msg);
+    }
+
     /// Remove a CE peer from this running VRF task. Mirrors the global
     /// `remove_peer_full` (`config.rs`): `route_clean` withdraws the
     /// peer's routes (Adj-RIB-In sweep + best-path re-run + CE
@@ -3007,6 +3039,19 @@ impl BgpVrf {
                 }
             }
         }
+        // Unregister the peer's TCP-AO key-chain watch. It's a raw-ident
+        // `KeyChain` watch, separate from the policy / prefix-set watches
+        // above, so it needs its own Unregister — otherwise it lingers in the
+        // actor until the whole VRF despawns (`UnregisterProto`).
+        let ao_chain = self
+            .peers
+            .get(&addr)
+            .and_then(|p| p.config.transport.ao_config.as_ref())
+            .map(|ao| ao.key_chain.clone())
+            .filter(|c| !c.is_empty());
+        if let Some(chain) = &ao_chain {
+            self.ao_keychain_watch(chain, peer_idx, false);
+        }
         self.peers.remove(&addr);
         self.unregister_policy_watches(&watches);
         // Notify the global accept dispatcher this VRF no longer claims the
@@ -3070,6 +3115,15 @@ impl BgpVrf {
 
         let peer = self.peers.get_mut(&addr).expect("peer present");
         let ident = peer.ident;
+        // The TCP-AO key-chain binding before the config swap, so a change
+        // can be detected after and the watch re-subscribed.
+        let old_ao_chain = peer
+            .config
+            .transport
+            .ao_config
+            .as_ref()
+            .map(|ao| ao.key_chain.clone())
+            .filter(|c| !c.is_empty());
         // `AfiSafis` is not `PartialEq`; compare its inner
         // `BTreeMap<AfiSafi, bool>` key set directly for the family-set
         // change.
@@ -3090,6 +3144,15 @@ impl BgpVrf {
         let after_mp: std::collections::BTreeSet<bgp_packet::AfiSafi> =
             peer.config.mp.0.keys().copied().collect();
         bounce |= before_mp != after_mp && peer.state.is_established();
+        // The TCP-AO key-chain binding after the config swap (set by
+        // `apply_resolved_session_knobs`'s `apply_ao_config`).
+        let new_ao_chain = peer
+            .config
+            .transport
+            .ao_config
+            .as_ref()
+            .map(|ao| ao.key_chain.clone())
+            .filter(|c| !c.is_empty());
         // A peer that was never started (added while it lacked a
         // remote-as) needs arming now that one resolved. `start()` is
         // idempotent and self-gating, so calling it unconditionally is
@@ -3112,10 +3175,23 @@ impl BgpVrf {
         }
         // Push a changed/removed MD5 password to the VRF listener (passive
         // side); the active dial already picked it up from `peer.config`.
-        // TCP-AO on reconfigure is not refreshed here: `resolved_ao_key`
-        // only updates when the key-chain re-resolves, which a reconfigure
-        // doesn't re-subscribe — that remains the documented auth follow-up.
         self.refresh_listener_md5();
+        // TCP-AO: if the key-chain binding changed, re-subscribe the watch
+        // (Unregister the old chain, Register the new) and re-resolve the
+        // key. `resolve_ao_keys` recomputes `resolved_ao_key` from the
+        // current key-chain snapshot NOW — clearing a removed / undefined
+        // chain and adopting an already-known one, refreshing the listener,
+        // and bouncing a live session whose key changed. A not-yet-known
+        // chain's Register reply calls `resolve_ao_keys` again on arrival.
+        if old_ao_chain != new_ao_chain {
+            if let Some(old) = &old_ao_chain {
+                self.ao_keychain_watch(old, ident, false);
+            }
+            if let Some(new) = &new_ao_chain {
+                self.ao_keychain_watch(new, ident, true);
+            }
+            self.resolve_ao_keys();
+        }
         bgp_vrf_trace!(
             &self.tracing,
             vrf = %self.name,
@@ -3729,6 +3805,135 @@ mod tests {
             vrf.peers.get(&a).is_some(),
             "reconfigure of an absent peer adds it"
         );
+    }
+
+    /// A `ReconfigurePeer` that changes a peer's TCP-AO key-chain re-resolves
+    /// `resolved_ao_key` against the new chain. Previously reconfigure did
+    /// not re-subscribe the key-chain watch, so the session stayed pinned to
+    /// the old key until an unrelated key-chain edit. The new chain is
+    /// already in the key-chain snapshot here (standing in for the Register
+    /// reply the re-subscribe triggers), so the re-resolve is immediate.
+    #[tokio::test]
+    async fn reconfigure_switches_tcp_ao_key_chain() {
+        use crate::bgp::auth::AoConfig;
+        use crate::policy::{CryptoAlgorithm, Key, KeyChain, KeyChainScope, PolicyRx, PolicyType};
+
+        let (global_tx, _global_rx) = unbounded_channel::<BgpGlobalMsg>();
+        let ctx = test_ctx_for_vrf(11, "vrf-ao-recfg");
+        let (_rib_tx, rib_rx) = mpsc::unbounded_channel();
+        let (mut vrf, _inbox) = BgpVrf::new(
+            "vrf-ao-recfg".to_string(),
+            ctx,
+            Ipv4Addr::UNSPECIFIED,
+            65000,
+            /* label */ 16,
+            global_tx,
+            rib_rx,
+        );
+
+        let a: std::net::IpAddr = "192.0.2.1".parse().unwrap();
+        // Resolve a neighbor config carrying an AO key-chain name.
+        let resolve_ao = |chain: &str| {
+            let mut n = crate::bgp::vrf_config::BgpVrfNeighborConfig {
+                remote_as: Some(65001),
+                ..Default::default()
+            };
+            n.config.knobs_explicit.ao_config = Some(AoConfig {
+                key_chain: chain.to_string(),
+                include_tcp_options: true,
+            });
+            super::super::spawn::resolve_vrf_peer_config(&a, &n, &std::collections::BTreeMap::new())
+                .unwrap()
+        };
+        let key_chain = |send: u8, recv: u8, mat: &[u8]| {
+            let mut kc = KeyChain::default();
+            kc.keys.insert(
+                1,
+                Key {
+                    algo: Some(CryptoAlgorithm::HmacSha256),
+                    key_material: mat.to_vec(),
+                    send_id: Some(send),
+                    recv_id: Some(recv),
+                    ..Default::default()
+                },
+            );
+            kc
+        };
+        let reply = |vrf: &mut BgpVrf, ident: usize, name: &str, kc: KeyChain| {
+            vrf.process_policy_msg(PolicyRx::KeyChain {
+                name: name.to_string(),
+                ident,
+                policy_type: PolicyType::KeyChain(KeyChainScope::BgpNeighbor),
+                key_chain: Some(kc),
+            });
+        };
+
+        // Add the peer bound to KC1 and resolve it → keyed to key1.
+        let (ra, cfg, knobs) = resolve_ao("KC1");
+        vrf.process_global_msg(BgpVrfMsg::AddPeer {
+            addr: a,
+            remote_as: ra,
+            config: Box::new(cfg),
+            knobs: Box::new(knobs),
+            policy_refs: std::collections::BTreeMap::new(),
+        });
+        let ident = vrf.peers.get(&a).unwrap().ident;
+        reply(&mut vrf, ident, "KC1", key_chain(10, 20, b"one"));
+        assert_eq!(
+            vrf.peers
+                .get(&a)
+                .unwrap()
+                .config
+                .transport
+                .resolved_ao_key
+                .as_ref()
+                .unwrap()
+                .send_id,
+            10,
+        );
+
+        // Make KC2's material known (stands in for the reply the re-subscribe
+        // will trigger). The peer is still bound to KC1, so its key is
+        // unchanged.
+        reply(&mut vrf, ident, "KC2", key_chain(30, 40, b"two"));
+        assert_eq!(
+            vrf.peers
+                .get(&a)
+                .unwrap()
+                .config
+                .transport
+                .resolved_ao_key
+                .as_ref()
+                .unwrap()
+                .send_id,
+            10,
+            "still keyed to KC1 until the reconfigure rebinds",
+        );
+
+        // Reconfigure to KC2 → resolved re-resolves to key2 immediately.
+        let (ra, cfg, knobs) = resolve_ao("KC2");
+        vrf.process_global_msg(BgpVrfMsg::ReconfigurePeer {
+            addr: a,
+            remote_as: ra,
+            config: Box::new(cfg),
+            knobs: Box::new(knobs),
+            policy_refs: std::collections::BTreeMap::new(),
+        });
+        let resolved = vrf
+            .peers
+            .get(&a)
+            .unwrap()
+            .config
+            .transport
+            .resolved_ao_key
+            .as_ref()
+            .expect("still keyed after the reconfigure");
+        assert_eq!(
+            resolved.send_id, 30,
+            "reconfigure switched the AO key to the new chain",
+        );
+        assert_eq!(resolved.recv_id, 40);
+        assert_eq!(resolved.key_material, b"two");
     }
 
     #[tokio::test]
