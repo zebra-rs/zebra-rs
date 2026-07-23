@@ -1,0 +1,32 @@
+# CE3 (AS 65003) — TCP-AO key-chain MATCHING PE1's AO-C3 (same key-id/ids/
+# algorithm and key-string), so the AO MAC verifies and the session
+# establishes.
+key-chains:
+  key-chain:
+  - name: AO-C3
+    key:
+    - key-id: 100
+      crypto-algorithm: hmac-sha-1
+      send-id: 100
+      recv-id: 100
+      key-string:
+        keystring: "ao-secret-c3"
+interface:
+- if-name: lo
+  ipv4: {address: 10.0.3.1/32}
+- if-name: pe1
+  ipv4: {address: 10.3.0.2/30}
+router:
+  bgp:
+    global: {as: 65003, router-id: 10.0.3.1}
+    timer: {adv-interval: {ebgp: 3}}
+    neighbor:
+    - remote-address: 10.3.0.1
+      remote-as: 65000
+      timers: {connect-retry-time: 3}
+      enabled: true
+      tcp-ao:
+        key-chain: AO-C3
+        include-tcp-options: true
+      afi-safi:
+      - {name: ipv4, enabled: true}

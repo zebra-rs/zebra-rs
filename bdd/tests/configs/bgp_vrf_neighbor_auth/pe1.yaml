@@ -1,0 +1,96 @@
+# PE1 (AS 65000) — exercises the two per-VRF neighbor auth knobs under
+# `router bgp vrf vrf-cust neighbor X`, one matching + one mismatching CE
+# per knob so both "matching key establishes" and "wrong key is actually
+# enforced" are proven:
+#   * CE1 (10.1.0.2) — `password` (TCP-MD5) matching  → Established
+#   * CE2 (10.2.0.2) — `password` mismatched          → never Established
+#   * CE3 (10.3.0.2) — `tcp-ao key-chain` matching     → Established
+#   * CE4 (10.4.0.2) — `tcp-ao key-chain` mismatched    → never Established
+#
+# The per-VRF `password` is a bare string leaf (implicitly clear); the CE
+# side uses the global `tcp-md5: {encoding: clear, password}` form with the
+# same secret. TCP-AO key-chains carry the same key-id / ids / algorithm on
+# both ends; only the mismatched pair's key-string differs.
+key-chains:
+  key-chain:
+  - name: AO-C3
+    key:
+    - key-id: 100
+      crypto-algorithm: hmac-sha-1
+      send-id: 100
+      recv-id: 100
+      key-string:
+        keystring: "ao-secret-c3"
+  - name: AO-C4
+    key:
+    - key-id: 100
+      crypto-algorithm: hmac-sha-1
+      send-id: 100
+      recv-id: 100
+      key-string:
+        keystring: "ao-secret-c4-pe"
+vrf:
+- name: vrf-cust
+  ipv4:
+    route-target:
+      import:
+      - 65000:100
+      export:
+      - 65000:100
+interface:
+- if-name: lo
+  ipv4:
+    address: 1.1.1.1/32
+- if-name: ce1
+  vrf: vrf-cust
+  ipv4:
+    address: 10.1.0.1/30
+- if-name: ce2
+  vrf: vrf-cust
+  ipv4:
+    address: 10.2.0.1/30
+- if-name: ce3
+  vrf: vrf-cust
+  ipv4:
+    address: 10.3.0.1/30
+- if-name: ce4
+  vrf: vrf-cust
+  ipv4:
+    address: 10.4.0.1/30
+router:
+  bgp:
+    global:
+      as: 65000
+      router-id: 1.1.1.1
+    vrf:
+    - name: vrf-cust
+      rd: 65000:1
+      neighbor:
+      - remote-address: 10.1.0.2
+        remote-as: 65001
+        password: "md5-c1-shared"
+        afi-safi:
+        - name: ipv4
+          enabled: true
+      - remote-address: 10.2.0.2
+        remote-as: 65002
+        password: "md5-c2-pe-side"
+        afi-safi:
+        - name: ipv4
+          enabled: true
+      - remote-address: 10.3.0.2
+        remote-as: 65003
+        tcp-ao:
+          key-chain: AO-C3
+          include-tcp-options: true
+        afi-safi:
+        - name: ipv4
+          enabled: true
+      - remote-address: 10.4.0.2
+        remote-as: 65004
+        tcp-ao:
+          key-chain: AO-C4
+          include-tcp-options: true
+        afi-safi:
+        - name: ipv4
+          enabled: true
