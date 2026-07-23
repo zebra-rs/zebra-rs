@@ -2,22 +2,28 @@
 //! `Bgp` task and a per-VRF [`BgpVrf`] task.
 //!
 //! - [`BgpVrfMsg`] travels global → VRF. It carries handoffs from
-//!   the global passive-accept dispatcher, VPNv4/v6 import
-//!   deliveries from the global Loc-RIB, and the `Shutdown` signal
-//!   that ends the VRF task's event loop.
+//!   the global passive-accept dispatcher, incremental CE-peer
+//!   add/remove/reconfigure (the neighbor edits the global side
+//!   resolves and ships rather than respawning the task), VPNv4/v6
+//!   import deliveries from the global Loc-RIB, and the `Shutdown`
+//!   signal that ends the VRF task's event loop.
 //! - [`BgpGlobalMsg`] travels VRF → global. It carries the
 //!   inverse: best-path exports the global task should re-emit as
 //!   VPNv4/v6, peer registration so the global accept dispatcher
 //!   knows which VRF to forward a given source IP to, and the
 //!   matching withdraw/unregister events.
 
-use std::net::SocketAddr;
+use std::collections::BTreeMap;
+use std::net::{IpAddr, SocketAddr};
 
 use ipnet::{Ipv4Net, Ipv6Net};
 use tokio::net::TcpStream;
 
-use bgp_packet::{BgpAttr, RouteDistinguisher};
+use bgp_packet::{AfiSafi, BgpAttr, RouteDistinguisher};
 
+use crate::bgp::neighbor_group::InheritableKnobs;
+use crate::bgp::peer::PeerConfig;
+use crate::bgp::vrf_config::VrfPolicyRef;
 use crate::rib::nht::ResolvedNexthop;
 
 /// Message from the global `Bgp` task to a per-VRF [`BgpVrf`]
@@ -30,6 +36,54 @@ pub enum BgpVrfMsg {
     /// drives it through the per-VRF passive-accept FSM path
     /// (`peer::handle_peer_connection` against the VRF's own peers).
     Accept(TcpStream, SocketAddr),
+
+    /// Add a CE peer to a running VRF task (`router bgp vrf <name>
+    /// neighbor <addr>` created *after* the VRF task spawned). The
+    /// global side computes the neighbor add/remove diff at `CommitEnd`
+    /// (`compute_vrf_neighbor_diff`) and resolves the peer's config
+    /// against `Bgp::neighbor_groups` there (the VRF task holds no group
+    /// map), shipping already-resolved values: `remote_as`, the fully
+    /// resolved [`PeerConfig`] (its `mp` family set and per-family
+    /// `next_hop_self` filled), the resolved [`InheritableKnobs`], and the
+    /// staged policy / prefix-set references. The handler builds the peer
+    /// with `insert_started_peer`, mirroring the spawn-time materialize —
+    /// the same primitive, so a peer added at runtime is built identically
+    /// to one present at spawn. `config` / `knobs` are boxed to keep the
+    /// enum small. The global side also emits
+    /// [`BgpGlobalMsg::RegisterPeer`] so the accept dispatcher routes
+    /// inbound connects from this IP here.
+    AddPeer {
+        addr: IpAddr,
+        remote_as: u32,
+        config: Box<PeerConfig>,
+        knobs: Box<InheritableKnobs>,
+        policy_refs: BTreeMap<(AfiSafi, VrfPolicyRef), String>,
+    },
+
+    /// Remove a CE peer from a running VRF task (`neighbor <addr>`
+    /// deleted). Mirrors the global `remove_peer_full`: `route_clean`
+    /// withdraws the peer's routes, `update_group::detach` drops its
+    /// update-group membership, then the peer leaves `peers`. The global
+    /// side pairs this with [`BgpGlobalMsg::UnregisterPeer`] so the
+    /// accept dispatcher stops routing this IP here.
+    RemovePeer { addr: IpAddr },
+
+    /// Reconfigure an existing CE peer on a running VRF task (a leaf under
+    /// `neighbor <addr>` changed). Carries the same already-resolved
+    /// values as [`Self::AddPeer`]. The handler applies the new config to
+    /// the running peer and bounces it (`Event::Stop`) only when the
+    /// change requires re-OPEN (the negotiated family set changed via the
+    /// resolved session knobs) and the session is Established; otherwise
+    /// it swaps the config live (timers / description / next-hop-self take
+    /// effect on the next advertisement). `config` / `knobs` are boxed to
+    /// keep the enum small.
+    ReconfigurePeer {
+        addr: IpAddr,
+        remote_as: u32,
+        config: Box<PeerConfig>,
+        knobs: Box<InheritableKnobs>,
+        policy_refs: BTreeMap<(AfiSafi, VrfPolicyRef), String>,
+    },
 
     /// VPNv4 best-path import. The global Loc-RIB resolved a route
     /// whose RT list intersects this VRF's `import_rts_v4`; the
@@ -303,4 +357,11 @@ pub enum BgpGlobalMsg {
     /// via [`BgpVrfMsg::Accept`]. Emitted by the per-VRF spawn
     /// site for every materialised peer.
     RegisterPeer { vrf: String, addr: std::net::IpAddr },
+
+    /// Inverse of [`Self::RegisterPeer`]: drop the `Bgp::peer_index`
+    /// entry claiming `addr` for `vrf` so an inbound `:179` connect from
+    /// that IP is no longer handed to this VRF. Emitted by the global
+    /// runtime-diff dispatch when a CE peer is removed from a running VRF
+    /// (paired with [`BgpVrfMsg::RemovePeer`]).
+    UnregisterPeer { vrf: String, addr: std::net::IpAddr },
 }

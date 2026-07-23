@@ -61,6 +61,12 @@ pub enum Message {
         ident: usize,
         policy_type: PolicyType,
     },
+    /// Drop every watch a protocol registered under `proto`, in one shot.
+    /// Used at per-VRF task teardown (`despawn_bgp_vrf`): the VRF's proto is
+    /// `bgp-vrf:<name>`, and its peers' watches accumulate at runtime
+    /// (incremental `AddPeer`), so no caller can enumerate them by ident.
+    /// No `None` reply is sent — the subscriber is being torn down.
+    UnregisterProto { proto: String },
 }
 
 // Message from rib to protocol module.
@@ -434,6 +440,18 @@ impl Policy {
                     let _ = tx.send(reply);
                 }
             }
+            Message::UnregisterProto { proto } => {
+                for map in [
+                    &mut self.watch_prefix,
+                    &mut self.watch_policy,
+                    &mut self.watch_keychain,
+                ] {
+                    map.retain(|_name, watches| {
+                        watches.retain(|w| w.proto != proto);
+                        !watches.is_empty()
+                    });
+                }
+            }
         }
     }
 
@@ -770,5 +788,64 @@ mod unregister_reply_tests {
             })
             .await;
         assert!(rx.try_recv().is_err(), "key-chain unbind pushes nothing");
+    }
+
+    /// `UnregisterProto` drops every watch a proto registered — across the
+    /// prefix-set / policy-list / key-chain maps — in one shot, and leaves
+    /// other protos' watches untouched. This is what lets a per-VRF task
+    /// teardown clear runtime-added peers' watches that no ident-enumerated
+    /// spawn snapshot ever captured (else they leak / mis-deliver on the
+    /// next respawn).
+    #[tokio::test]
+    async fn unregister_proto_drops_only_that_protos_watches() {
+        use crate::policy::KeyChainScope;
+        let mut policy = Policy::new();
+        let reg = |proto: &str, name: &str, ident: usize, ty: PolicyType| Message::Register {
+            proto: proto.to_string(),
+            name: name.to_string(),
+            ident,
+            policy_type: ty,
+        };
+        // Two VRF protos + one global, spread across all three watch maps.
+        policy
+            .process_msg(reg("bgp-vrf:v1", "PS", 1, PolicyType::PrefixSetIn))
+            .await;
+        policy
+            .process_msg(reg("bgp-vrf:v1", "PL", 1, PolicyType::PolicyListOut))
+            .await;
+        policy
+            .process_msg(reg(
+                "bgp-vrf:v1",
+                "KC",
+                1,
+                PolicyType::KeyChain(KeyChainScope::BgpNeighbor),
+            ))
+            .await;
+        policy
+            .process_msg(reg("bgp-vrf:v2", "PS", 9, PolicyType::PrefixSetIn))
+            .await;
+        policy
+            .process_msg(reg("bgp", "PS", 3, PolicyType::PrefixSetIn))
+            .await;
+
+        policy
+            .process_msg(Message::UnregisterProto {
+                proto: "bgp-vrf:v1".to_string(),
+            })
+            .await;
+
+        let has = |m: &BTreeMap<String, Vec<PolicyWatch>>, proto: &str| {
+            m.values().flatten().any(|w| w.proto == proto)
+        };
+        // Every v1 watch is gone, from all three maps.
+        assert!(!has(&policy.watch_prefix, "bgp-vrf:v1"));
+        assert!(!has(&policy.watch_policy, "bgp-vrf:v1"));
+        assert!(!has(&policy.watch_keychain, "bgp-vrf:v1"));
+        // The other protos survive.
+        assert!(has(&policy.watch_prefix, "bgp-vrf:v2"));
+        assert!(has(&policy.watch_prefix, "bgp"));
+        // The shared "PS" name entry is kept (v2 + bgp still reference it),
+        // not pruned away with v1's watch.
+        assert!(policy.watch_prefix.contains_key("PS"));
     }
 }
