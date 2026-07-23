@@ -1233,23 +1233,22 @@ impl BgpVrf {
     /// Apply a resolution the policy actor pushed back for one of this
     /// VRF's peers.
     ///
-    /// The mirror of `Bgp::process_policy_msg`, minus two things the
+    /// The mirror of `Bgp::process_policy_msg`, minus one thing the
     /// global task does:
     ///
     ///   * `shard_replace_in_policy` — per-VRF tasks don't drive the
-    ///     shard pool; their ingest is synchronous.
-    ///   * the soft-in / soft-out replay. `apply_soft_in_peer` /
-    ///     `apply_soft_out_peer` take `&mut Bgp` and reach global state,
-    ///     so replaying a per-VRF peer needs its own implementation.
-    ///     Until that lands, a resolution updates the binding but does
-    ///     NOT re-evaluate routes already in Adj-RIB-In / Adj-RIB-Out.
+    ///     shard pool; their ingest is synchronous, so the soft-in
+    ///     replay reads the retained Adj-RIB-In directly.
     ///
-    /// That gap is invisible for the common case — bindings are
-    /// registered by `materialize_peers` at spawn, so the resolution
-    /// arrives long before the CE session establishes and any route
-    /// exists to re-evaluate. It bites only when an operator edits a
-    /// policy definition while a VRF session is up, which is the
-    /// follow-up.
+    /// The soft-in / soft-out replay is applied via
+    /// [`Self::soft_reapply_peer`], which reuses the global replay
+    /// engines (`route_soft_in_peer` / `route_soft_out_peer`) so an
+    /// operator editing a per-VRF neighbor's inbound/outbound policy or
+    /// prefix-set on an already-established CE session sees it take
+    /// effect without bouncing the session. For the common case —
+    /// bindings registered by `materialize_peers` at spawn — the
+    /// resolution still arrives before the session establishes, so the
+    /// replay is a cheap no-op (nothing stored to re-evaluate yet).
     ///
     /// An unresolved name is *not* special-cased here: the actor always
     /// answers, sending `None` when the name is undefined, and a
@@ -1283,9 +1282,7 @@ impl BgpVrf {
                     _ => return,
                 };
                 peer.prefix_set_slot(afi, direction).prefix_set = prefix_set;
-                if direction == InOut::Output {
-                    peer.rebuild_out_policy();
-                }
+                self.soft_reapply_peer(peer_idx, direction);
             }
             PolicyRx::PolicyList {
                 name: _,
@@ -1306,9 +1303,7 @@ impl BgpVrf {
                     _ => return,
                 };
                 peer.policy_list_slot(afi, direction).policy_list = policy_list;
-                if direction == InOut::Output {
-                    peer.rebuild_out_policy();
-                }
+                self.soft_reapply_peer(peer_idx, direction);
             }
             PolicyRx::KeyChain {
                 name, key_chain, ..
@@ -1364,6 +1359,78 @@ impl BgpVrf {
         // Push the newly-resolved keys onto the VRF listener so a
         // CE-initiated SYN authenticates passively too.
         self.refresh_listener_ao();
+    }
+
+    /// Re-apply the current inbound/outbound filter to an already-
+    /// established per-VRF peer without bouncing the session, reusing
+    /// the global replay engines. This is the per-VRF counterpart of
+    /// `Bgp::process_policy_msg`'s soft-in / soft-out dispatch
+    /// (`apply_soft_in_peer` / `apply_soft_out_peer`).
+    ///
+    /// The engines (`route_soft_in_peer` / `route_soft_out_peer`) take
+    /// `&mut BgpTop` + `&mut PeerMap` rather than `&mut Bgp`, so the
+    /// only work here is assembling the VRF's `BgpTop` — mirroring the
+    /// import fan-out builder (`vrf_export: None`) — and threading
+    /// `self.peers` separately to keep the borrow split legal.
+    ///
+    /// Per-VRF ingest is synchronous, so `route_soft_in_peer` gets
+    /// `None` for the shard pool and drives its synchronous branch off
+    /// the retained `self.shard.adj_in(ident)`. `shard_replace_in_policy`
+    /// is intentionally not needed here.
+    ///
+    /// The engines internally re-evaluate each negotiated family
+    /// (v4 unicast / MPLS-VPN, etc.) off the peer's `mp`, so a single
+    /// call per direction suffices.
+    fn soft_reapply_peer(&mut self, peer_idx: usize, direction: super::super::policy::InOut) {
+        use super::super::policy::InOut;
+        // Gate on an established session, mirroring the established-only
+        // guard the global wrappers apply: a peer that never came up has
+        // nothing stored to re-evaluate.
+        let Some(peer) = self.peers.get_by_idx(peer_idx) else {
+            return;
+        };
+        if !peer.state.is_established() {
+            return;
+        }
+        // Refresh the cached outbound-policy snapshot before the soft-out
+        // re-advertise reads it. Inbound needs no equivalent — the engine
+        // reads the resolved slot directly.
+        if direction == InOut::Output
+            && let Some(peer) = self.peers.get_mut_by_idx(peer_idx)
+        {
+            peer.rebuild_out_policy();
+        }
+        let mut top = super::super::peer::BgpTop {
+            router_id: &self.router_id,
+            srv6_ipv6_export: None,
+            local_rib: &mut self.local_rib,
+            shard: &mut self.shard,
+            tx: &self.tx,
+            rib_client: &self.ctx.rib,
+            attr_store: &mut self.attr_store,
+            update_groups: &mut self.update_groups,
+            interface_addrs: &self.interface_addrs,
+            vrf_export: None,
+            color_policy: Some(&self.color_policy),
+            flex_algo_routes: None,
+            flex_algo_srv6_routes: Some(&self.flex_algo_srv6_routes),
+            vrf_import: None,
+            nexthop_cache: None,
+            vrf_transport_v4: Some(&self.transport_v4),
+            vrf_transport_v6: Some(&self.transport_v6),
+            central_label_alloc: None,
+            as_sets_withdraw: true,
+        };
+        match direction {
+            InOut::Input => {
+                // No shard pool: `None` drives the synchronous replay
+                // that reads the retained per-VRF Adj-RIB-In.
+                super::super::route::route_soft_in_peer(peer_idx, &mut top, &mut self.peers, None);
+            }
+            InOut::Output => {
+                super::super::route::route_soft_out_peer(peer_idx, &mut top, &mut self.peers);
+            }
+        }
     }
 
     /// The `proto` string this VRF uses with the policy actor.
@@ -3785,6 +3852,139 @@ mod tests {
             vrf.mup_originated.get(&9).map(Vec::len),
             Some(1),
             "only the surviving direction stays tracked"
+        );
+    }
+
+    /// Editing a per-VRF neighbor's inbound prefix-set on an already-
+    /// established CE session must re-apply it to routes already stored
+    /// in Adj-RIB-In (soft-in) without bouncing the session.
+    ///
+    /// Setup: a peer Established with IPv4 unicast negotiated and a v4
+    /// route stored in Adj-RIB-In that the current inbound prefix-set
+    /// (bound-but-unresolved ⇒ deny-all) rejects, so Loc-RIB is empty. A
+    /// `PolicyRx::PrefixSet` then resolves the set to one that permits the
+    /// route; `process_policy_msg` must replay Adj-RIB-In through the new
+    /// policy so the route lands in the VRF Loc-RIB while the peer stays
+    /// Established.
+    #[tokio::test]
+    async fn process_policy_msg_soft_in_reapplies_without_bouncing_session() {
+        use crate::bgp::config::peer_policy_ident;
+        use crate::bgp::peer::{Peer, State};
+        use crate::bgp::policy::InOut;
+        use crate::bgp::route::BgpRibType;
+        use crate::bgp::shard::msg::{ShardMsg, ShardUpdateV4};
+        use crate::policy::prefix::set::{PrefixSet, PrefixSetEntry};
+        use crate::policy::{PolicyRx, PolicyType};
+        use bgp_packet::{Afi, AfiSafi, BgpAttr, BgpNexthop, CapMultiProtocol, Ipv4Nlri, Safi};
+        use std::net::IpAddr;
+
+        let (global_tx, _global_rx) = unbounded_channel::<BgpGlobalMsg>();
+        let ctx = test_ctx_for_vrf(50, "vrf-softin");
+        let (_rib_tx, rib_rx) = mpsc::unbounded_channel();
+        let (mut vrf, _inbox) = BgpVrf::new(
+            "vrf-softin".to_string(),
+            ctx,
+            Ipv4Addr::UNSPECIFIED,
+            65000,
+            /* label */ 16,
+            global_tx,
+            rib_rx,
+        );
+
+        // An Established CE peer with IPv4 unicast negotiated.
+        let addr: IpAddr = Ipv4Addr::new(10, 0, 0, 2).into();
+        let v4u = AfiSafi::new(Afi::Ip, Safi::Unicast);
+        let (peer_tx, _peer_rx) = mpsc::channel::<Message>(4);
+        let peer_ctx = test_ctx_for_vrf(50, "vrf-softin");
+        let mut peer = Peer::new(
+            0,
+            65000,
+            Ipv4Addr::new(1, 1, 1, 1),
+            65001,
+            addr,
+            None,
+            peer_tx,
+            peer_ctx,
+        );
+        peer.state = State::Established;
+        {
+            let key = CapMultiProtocol::new(&Afi::Ip, &Safi::Unicast);
+            let entry = peer
+                .cap_map
+                .entries
+                .get_mut(&key)
+                .expect("v4 unicast family pre-seeded in CapAfiMap");
+            entry.send = true;
+            entry.recv = true;
+        }
+        // Inbound prefix-set bound by name but not yet resolved ⇒ the
+        // filter path treats it as deny-all.
+        peer.prefix_set_slot(v4u, InOut::Input).name = Some("ce-in".to_string());
+        vrf.peers.insert(addr, peer);
+        let peer_idx = vrf.peers.get(&addr).expect("peer inserted").ident;
+
+        // Seed Adj-RIB-In with a v4 route the deny-all currently rejects
+        // (decision = None ⇒ stored in Adj-RIB-In, kept out of Loc-RIB).
+        let prefix: ipnet::Ipv4Net = "10.9.0.0/24".parse().unwrap();
+        let attr = BgpAttr {
+            nexthop: Some(BgpNexthop::Ipv4("10.0.0.2".parse().unwrap())),
+            ..Default::default()
+        };
+        vrf.shard.handle(
+            ShardMsg::UpdateV4(ShardUpdateV4 {
+                ident: peer_idx,
+                rd: None,
+                nlri: Ipv4Nlri { id: 0, prefix },
+                peer_router_id: Ipv4Addr::new(10, 0, 0, 2),
+                typ: BgpRibType::EBGP,
+                attr,
+                label: None,
+                nexthop: None,
+                enhe_egress: None,
+                stale: false,
+                nexthop_reachable: true,
+                vrf_transit_only: false,
+                decision: None,
+                compute_policy: false,
+            }),
+            None,
+        );
+        assert_eq!(
+            vrf.shard.adj_in(peer_idx).unwrap().v4.0.len(),
+            1,
+            "route stored in Adj-RIB-In"
+        );
+        assert!(
+            vrf.shard.v4.0.is_empty(),
+            "deny-all keeps the route out of Loc-RIB"
+        );
+
+        // The policy actor resolves the inbound prefix-set to one that
+        // permits the stored route — the edit an operator makes on a live
+        // session. `process_policy_msg` writes the slot and replays.
+        let mut permit = PrefixSet::default();
+        permit.insert(prefix.into(), PrefixSetEntry::default());
+        vrf.process_policy_msg(PolicyRx::PrefixSet {
+            name: "ce-in".to_string(),
+            ident: peer_policy_ident(peer_idx, Some(v4u)),
+            policy_type: PolicyType::PrefixSetIn,
+            prefix_set: Some(permit),
+        });
+
+        // Soft-in replayed the stored route through the new policy: it now
+        // wins in Loc-RIB, and the session was never bounced.
+        assert_eq!(
+            vrf.shard.v4.0.len(),
+            1,
+            "soft-in landed the previously-denied route in Loc-RIB"
+        );
+        assert!(
+            vrf.peers
+                .get(&addr)
+                .expect("peer still present")
+                .state
+                .is_established(),
+            "the CE session stayed Established across the policy edit"
         );
     }
 }
