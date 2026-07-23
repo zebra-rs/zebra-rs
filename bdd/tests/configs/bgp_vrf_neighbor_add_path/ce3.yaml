@@ -1,0 +1,14 @@
+# CE3 (AS 65003) — AddPath receiver; should see BOTH paths for 10.10.10.0/24.
+interface:
+- {if-name: lo, ipv4: {address: 10.0.3.1/32}}
+- {if-name: pe1, ipv4: {address: 10.3.0.2/30}}
+router:
+  bgp:
+    global: {as: 65003, router-id: 10.0.3.1}
+    timer: {adv-interval: {ebgp: 1}}
+    neighbor:
+    - remote-address: 10.3.0.1
+      remote-as: 65000
+      timers: {connect-retry-time: 3}
+      enabled: true
+      afi-safi: [{name: ipv4, enabled: true, add-path: send-receive}]

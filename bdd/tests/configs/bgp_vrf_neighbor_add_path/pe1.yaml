@@ -1,0 +1,32 @@
+# PE1 (AS 65000) — learns 10.10.10.0/24 from BOTH CE1 (65001) and CE2
+# (65002) into vrf-cust, so its VRF Loc-RIB holds two candidate paths.
+# With add-path send-receive toward CE3, it advertises BOTH (each with its
+# own path-id), so CE3 sees two paths — the per-VRF exercise of the AddPath
+# send / path-id stamping (`route_advertise_to_addpath`).
+vrf:
+- name: vrf-cust
+  ipv4:
+    route-target:
+      import: [65000:100]
+      export: [65000:100]
+interface:
+- {if-name: lo, ipv4: {address: 1.1.1.1/32}}
+- {if-name: ce1, vrf: vrf-cust, ipv4: {address: 10.1.0.1/30}}
+- {if-name: ce2, vrf: vrf-cust, ipv4: {address: 10.2.0.1/30}}
+- {if-name: ce3, vrf: vrf-cust, ipv4: {address: 10.3.0.1/30}}
+router:
+  bgp:
+    global: {as: 65000, router-id: 1.1.1.1}
+    vrf:
+    - name: vrf-cust
+      rd: 65000:1
+      neighbor:
+      - remote-address: 10.1.0.2
+        remote-as: 65001
+        afi-safi: [{name: ipv4, enabled: true}]
+      - remote-address: 10.2.0.2
+        remote-as: 65002
+        afi-safi: [{name: ipv4, enabled: true}]
+      - remote-address: 10.3.0.2
+        remote-as: 65003
+        afi-safi: [{name: ipv4, enabled: true, add-path: send-receive}]
