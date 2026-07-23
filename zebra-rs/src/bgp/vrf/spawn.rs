@@ -85,12 +85,9 @@ pub struct BgpVrfHandle {
     /// have.
     pub evpn_advertise_v4: bool,
     pub evpn_advertise_v6: bool,
-    /// BFD session keys this VRF's peers subscribed, withdrawn
-    /// synchronously by `despawn_bgp_vrf` before a respawn re-subscribes —
-    /// same ordering hazard the policy watches have (now cleared in one shot
-    /// via `policy::Message::UnregisterProto`).
-    pub bfd_sessions: Vec<crate::bfd::session::SessionKey>,
-    /// Kept so `despawn_bgp_vrf` can address the BFD unsubscribes.
+    /// Kept so `despawn_bgp_vrf` can address the BFD unsubscribes
+    /// (`ClientReq::UnsubscribeClient`, client-scoped so runtime-added
+    /// sessions are cleared too).
     pub bfd_client_tx: Option<UnboundedSender<crate::bfd::inst::ClientReq>>,
     /// The BFD client id (`bfd-vrf:<name>`) the unsubscribes must use.
     pub bfd_client: String,
@@ -468,7 +465,6 @@ pub fn spawn_bgp_vrf(
     // `show bgp vrf <name> …` redirection.
     let show_tx = vrf.show.tx.clone();
     // Snapshot before `vrf` moves into the task.
-    let bfd_sessions = vrf.bfd_session_list();
     let bfd_client_handle = vrf.bfd_client_tx.clone();
     let bfd_client_id = vrf.bfd_client();
 
@@ -492,7 +488,6 @@ pub fn spawn_bgp_vrf(
         inbox,
         router_id: effective_router_id,
         asn,
-        bfd_sessions,
         bfd_client_tx: bfd_client_handle,
         bfd_client: bfd_client_id,
         show_tx,
@@ -782,12 +777,14 @@ pub(super) fn insert_started_peer(
         .get_mut(addr)
         .expect("peer was just inserted")
         .start();
-    // NOTE: BFD reconcile is deliberately NOT done here. It is spawn-only
-    // (`materialize_peers`), because the despawn-time teardown enumerates a
-    // spawn-captured `handle.bfd_sessions` snapshot — a session created by a
-    // runtime `AddPeer` would not be in it and would leak. Runtime-added CE
-    // peers therefore don't get BFD live (a documented follow-up), the same
-    // scope the PR states.
+    // Bring up BFD for this CE if configured — after the ident is assigned
+    // and after start(), matching the global neighbor's order. Shared by the
+    // spawn-time materialize and the runtime `AddPeer`: teardown is
+    // client-scoped (`ClientReq::UnsubscribeClient`), so a runtime-added
+    // session is torn down at despawn without needing a spawn-time snapshot.
+    // A no-op when `bfd enabled` is unset or no BFD client is wired
+    // (placeholder spawn / tests).
+    vrf.bfd_reconcile(ident);
 }
 
 /// Build `Peer` objects from `cfg.neighbors` and insert them into
@@ -814,15 +811,6 @@ fn materialize_peers(
             continue;
         };
         insert_started_peer(vrf, addr, remote_as, config, &knobs, &nbr_cfg.policy_refs);
-        // Bring up BFD for this CE if configured — after the ident is
-        // assigned and after start(), matching the global neighbor's order.
-        // Spawn-only: the despawn teardown reads a spawn-captured
-        // `bfd_sessions` snapshot, so a runtime-add's session isn't tracked
-        // there (see the note in `insert_started_peer`). A no-op when `bfd
-        // enabled` is unset or no BFD client is wired (placeholder / tests).
-        if let Some(ident) = vrf.peers.get(addr).map(|p| p.ident) {
-            vrf.bfd_reconcile(ident);
-        }
         count += 1;
     }
     count
@@ -946,17 +934,16 @@ pub fn despawn_bgp_vrf(
     let _ = policy_tx.send(crate::policy::Message::UnregisterProto {
         proto: format!("bgp-vrf:{name}"),
     });
-    // Withdraw this incarnation's BFD sessions, on this thread, ahead of
-    // any Subscribe a respawn's `materialize_peers` sends on the same
-    // client channel — the same ordering hazard as the policy watches:
-    // BFD matches on `(client, key)`, both of which a respawn reuses.
+    // Withdraw every BFD session this VRF holds, on this thread, ahead of
+    // any Subscribe a respawn's `materialize_peers` sends on the same client
+    // channel. Client-scoped (`UnsubscribeClient`) in one shot rather than
+    // enumerating a snapshot: peers added at runtime (`AddPeer`) subscribe
+    // sessions the spawn-time list never captured, so an enumeration would
+    // leak them — the same hazard the policy watches had (now `UnregisterProto`).
     if let Some(bfd_client_tx) = &handle.bfd_client_tx {
-        for key in &handle.bfd_sessions {
-            let _ = bfd_client_tx.send(crate::bfd::inst::ClientReq::Unsubscribe {
-                client: handle.bfd_client.clone(),
-                key: *key,
-            });
-        }
+        let _ = bfd_client_tx.send(crate::bfd::inst::ClientReq::UnsubscribeClient {
+            client: handle.bfd_client.clone(),
+        });
     }
     // Drop this VRF's RIB redistribute subscription (client-registry +
     // redist-filter rows) so a respawn under the same `bgp:vrf:<name>`
