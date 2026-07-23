@@ -876,10 +876,12 @@ mod tests {
         );
 
         // Group turns passive on and sets ebgp-multihop 5.
-        let mut g = NeighborGroup::default();
-        g.knobs = InheritableKnobs {
-            passive: Some(true),
-            ebgp_multihop: Some(5),
+        let g = NeighborGroup {
+            knobs: InheritableKnobs {
+                passive: Some(true),
+                ebgp_multihop: Some(5),
+                ..Default::default()
+            },
             ..Default::default()
         };
         let mut groups = BTreeMap::new();
