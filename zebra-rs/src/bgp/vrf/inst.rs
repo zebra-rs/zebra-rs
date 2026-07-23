@@ -1383,23 +1383,36 @@ impl BgpVrf {
     /// call per direction suffices.
     fn soft_reapply_peer(&mut self, peer_idx: usize, direction: super::super::policy::InOut) {
         use super::super::policy::InOut;
-        // Gate on an established session, mirroring the established-only
-        // guard the global wrappers apply: a peer that never came up has
-        // nothing stored to re-evaluate.
+        // Refresh the cached outbound-policy snapshot UNCONDITIONALLY for the
+        // output direction — even before the session establishes. `sync_ctx()`
+        // reads this snapshot at first advertise and nothing rebuilds it at
+        // establishment, so a resolution that lands pre-establishment must
+        // still update it. Mirrors the global `process_policy_msg`, which calls
+        // `rebuild_out_policy` before the established-gated replay.
+        if direction == InOut::Output
+            && let Some(peer) = self.peers.get_mut_by_idx(peer_idx)
+        {
+            peer.rebuild_out_policy();
+        }
+        // The replay itself is established-only, mirroring the global wrappers:
+        // a peer that never came up has nothing stored to re-evaluate.
         let Some(peer) = self.peers.get_by_idx(peer_idx) else {
             return;
         };
         if !peer.state.is_established() {
             return;
         }
-        // Refresh the cached outbound-policy snapshot before the soft-out
-        // re-advertise reads it. Inbound needs no equivalent — the engine
-        // reads the resolved slot directly.
-        if direction == InOut::Output
-            && let Some(peer) = self.peers.get_mut_by_idx(peer_idx)
-        {
-            peer.rebuild_out_policy();
-        }
+        // Soft-in replays CE-learned routes, which must re-export to VPNv4:
+        // `route_soft_in_peer_table`'s deny branch calls `route_ipv4_withdraw`,
+        // whose `vrf_emit_withdraw` fires only when `vrf_export` is `Some`.
+        // Mirror the FSM `process_msg` path (a real `VrfExporter`) rather than
+        // the import fan-out's `None`. Soft-out only re-advertises to CE peers
+        // (never touches the Loc-RIB / VPNv4 export), so it keeps `None`.
+        let exporter = self.exporter();
+        let vrf_export = match direction {
+            InOut::Input => Some(&exporter),
+            InOut::Output => None,
+        };
         let mut top = super::super::peer::BgpTop {
             router_id: &self.router_id,
             srv6_ipv6_export: None,
@@ -1410,7 +1423,7 @@ impl BgpVrf {
             attr_store: &mut self.attr_store,
             update_groups: &mut self.update_groups,
             interface_addrs: &self.interface_addrs,
-            vrf_export: None,
+            vrf_export,
             color_policy: Some(&self.color_policy),
             flex_algo_routes: None,
             flex_algo_srv6_routes: Some(&self.flex_algo_srv6_routes),
@@ -3985,6 +3998,318 @@ mod tests {
                 .state
                 .is_established(),
             "the CE session stayed Established across the policy edit"
+        );
+    }
+
+    /// Editing an inbound prefix-set to **deny** a CE route that was
+    /// previously accepted and exported to VPNv4 must withdraw the stale
+    /// VPNv4 advertisement, not just drop it from the VRF Loc-RIB.
+    ///
+    /// The soft-in replay carries `vrf_export: Some(..)` (a real
+    /// `VrfExporter`, matching the FSM `process_msg` path) so the deny
+    /// branch's `route_ipv4_withdraw` fires `vrf_emit_withdraw`. With
+    /// `None` the withdraw is suppressed and the remote PE keeps forwarding
+    /// to a route the ingress PE no longer has.
+    #[tokio::test]
+    async fn soft_in_deny_edit_withdraws_vpnv4_export() {
+        use crate::bgp::config::peer_policy_ident;
+        use crate::bgp::peer::{Peer, State};
+        use crate::bgp::policy::InOut;
+        use crate::bgp::route::BgpRibType;
+        use crate::bgp::shard::msg::{ShardMsg, ShardUpdateV4};
+        use crate::policy::prefix::set::{PrefixSet, PrefixSetEntry};
+        use crate::policy::{PolicyRx, PolicyType};
+        use bgp_packet::{Afi, AfiSafi, BgpAttr, BgpNexthop, CapMultiProtocol, Ipv4Nlri, Safi};
+        use std::net::IpAddr;
+
+        let (global_tx, mut global_rx) = unbounded_channel::<BgpGlobalMsg>();
+        let ctx = test_ctx_for_vrf(52, "vrf-deny");
+        let (_rib_tx, rib_rx) = mpsc::unbounded_channel();
+        let (mut vrf, _inbox) = BgpVrf::new(
+            "vrf-deny".to_string(),
+            ctx,
+            Ipv4Addr::UNSPECIFIED,
+            65000,
+            /* label */ 18,
+            global_tx,
+            rib_rx,
+        );
+
+        let addr: IpAddr = Ipv4Addr::new(10, 0, 0, 2).into();
+        let v4u = AfiSafi::new(Afi::Ip, Safi::Unicast);
+        let (peer_tx, _peer_rx) = mpsc::channel::<Message>(4);
+        let peer_ctx = test_ctx_for_vrf(52, "vrf-deny");
+        let mut peer = Peer::new(
+            0,
+            65000,
+            Ipv4Addr::new(1, 1, 1, 1),
+            65001,
+            addr,
+            None,
+            peer_tx,
+            peer_ctx,
+        );
+        peer.state = State::Established;
+        {
+            let key = CapMultiProtocol::new(&Afi::Ip, &Safi::Unicast);
+            let entry = peer
+                .cap_map
+                .entries
+                .get_mut(&key)
+                .expect("v4 unicast family pre-seeded in CapAfiMap");
+            entry.send = true;
+            entry.recv = true;
+        }
+        peer.prefix_set_slot(v4u, InOut::Input).name = Some("ce-in".to_string());
+        vrf.peers.insert(addr, peer);
+        let peer_idx = vrf.peers.get(&addr).expect("peer inserted").ident;
+
+        let prefix: ipnet::Ipv4Net = "10.9.0.0/24".parse().unwrap();
+        let attr = BgpAttr {
+            nexthop: Some(BgpNexthop::Ipv4("10.0.0.2".parse().unwrap())),
+            ..Default::default()
+        };
+        vrf.shard.handle(
+            ShardMsg::UpdateV4(ShardUpdateV4 {
+                ident: peer_idx,
+                rd: None,
+                nlri: Ipv4Nlri { id: 0, prefix },
+                peer_router_id: Ipv4Addr::new(10, 0, 0, 2),
+                typ: BgpRibType::EBGP,
+                attr,
+                label: None,
+                nexthop: None,
+                enhe_egress: None,
+                stale: false,
+                nexthop_reachable: true,
+                vrf_transit_only: false,
+                decision: None,
+                compute_policy: false,
+            }),
+            None,
+        );
+
+        // Resolve the inbound set to PERMIT so the route lands in Loc-RIB
+        // (the accepted-and-exported starting state).
+        let mut permit = PrefixSet::default();
+        permit.insert(prefix.into(), PrefixSetEntry::default());
+        vrf.process_policy_msg(PolicyRx::PrefixSet {
+            name: "ce-in".to_string(),
+            ident: peer_policy_ident(peer_idx, Some(v4u)),
+            policy_type: PolicyType::PrefixSetIn,
+            prefix_set: Some(permit),
+        });
+        assert_eq!(
+            vrf.shard.v4.0.len(),
+            1,
+            "permit landed the route in Loc-RIB"
+        );
+        // Drain anything the accept replay emitted; we assert only on the
+        // deny edit below.
+        while global_rx.try_recv().is_ok() {}
+
+        // Now the operator edits the set to DENY the route (resolved but
+        // empty ⇒ nothing permitted).
+        vrf.process_policy_msg(PolicyRx::PrefixSet {
+            name: "ce-in".to_string(),
+            ident: peer_policy_ident(peer_idx, Some(v4u)),
+            policy_type: PolicyType::PrefixSetIn,
+            prefix_set: Some(PrefixSet::default()),
+        });
+        assert!(
+            vrf.shard.v4.0.is_empty(),
+            "deny-on-edit removed the route from the VRF Loc-RIB"
+        );
+
+        // The soft-in deny must also withdraw the stale VPNv4 export.
+        let mut saw_withdraw = false;
+        while let Ok(msg) = global_rx.try_recv() {
+            if let BgpGlobalMsg::WithdrawExport { prefix: p, .. } = msg
+                && p == prefix
+            {
+                saw_withdraw = true;
+            }
+        }
+        assert!(
+            saw_withdraw,
+            "deny-on-edit emitted a VPNv4 WithdrawExport for the dropped route"
+        );
+        assert!(
+            vrf.peers
+                .get(&addr)
+                .expect("peer still present")
+                .state
+                .is_established(),
+            "the CE session stayed Established across the deny edit"
+        );
+    }
+
+    /// An outbound prefix-set that resolves **before** the session
+    /// establishes must still rebuild the cached `out_policy` snapshot.
+    /// `sync_ctx()` reads the snapshot at first advertise and nothing
+    /// rebuilds it at establishment, so a pre-establishment resolution
+    /// that returns early would silently advertise without the filter.
+    #[tokio::test]
+    async fn out_policy_resolves_before_establishment() {
+        use crate::bgp::config::peer_policy_ident;
+        use crate::bgp::peer::Peer;
+        use crate::bgp::policy::InOut;
+        use crate::policy::prefix::set::{PrefixSet, PrefixSetEntry};
+        use crate::policy::{PolicyRx, PolicyType};
+        use bgp_packet::{Afi, AfiSafi, Safi};
+        use std::net::IpAddr;
+
+        let (global_tx, _global_rx) = unbounded_channel::<BgpGlobalMsg>();
+        let ctx = test_ctx_for_vrf(53, "vrf-outpre");
+        let (_rib_tx, rib_rx) = mpsc::unbounded_channel();
+        let (mut vrf, _inbox) = BgpVrf::new(
+            "vrf-outpre".to_string(),
+            ctx,
+            Ipv4Addr::UNSPECIFIED,
+            65000,
+            /* label */ 19,
+            global_tx,
+            rib_rx,
+        );
+
+        // Peer NOT established.
+        let addr: IpAddr = Ipv4Addr::new(10, 0, 0, 3).into();
+        let v4u = AfiSafi::new(Afi::Ip, Safi::Unicast);
+        let (peer_tx, _peer_rx) = mpsc::channel::<Message>(4);
+        let peer_ctx = test_ctx_for_vrf(53, "vrf-outpre");
+        let mut peer = Peer::new(
+            0,
+            65000,
+            Ipv4Addr::new(1, 1, 1, 1),
+            65001,
+            addr,
+            None,
+            peer_tx,
+            peer_ctx,
+        );
+        assert!(
+            !peer.state.is_established(),
+            "precondition: peer has not established yet"
+        );
+        peer.prefix_set_slot(v4u, InOut::Output).name = Some("ce-out".to_string());
+        vrf.peers.insert(addr, peer);
+        let peer_idx = vrf.peers.get(&addr).expect("peer inserted").ident;
+
+        assert!(
+            vrf.peers
+                .get(&addr)
+                .unwrap()
+                .out_policy
+                .prefix_set
+                .prefix_set
+                .is_none(),
+            "precondition: cached out_policy has no resolved prefix-set yet"
+        );
+
+        // The outbound prefix-set resolves while the peer is still down.
+        let mut permit = PrefixSet::default();
+        let prefix: ipnet::Ipv4Net = "10.9.0.0/24".parse().unwrap();
+        permit.insert(prefix.into(), PrefixSetEntry::default());
+        vrf.process_policy_msg(PolicyRx::PrefixSet {
+            name: "ce-out".to_string(),
+            ident: peer_policy_ident(peer_idx, Some(v4u)),
+            policy_type: PolicyType::PrefixSetOut,
+            prefix_set: Some(permit),
+        });
+
+        // The cached snapshot was rebuilt even though the peer never came
+        // up (finding 1) — otherwise egress ignores the filter.
+        let peer = vrf.peers.get(&addr).expect("peer still present");
+        assert_eq!(
+            peer.out_policy.prefix_set.name.as_deref(),
+            Some("ce-out"),
+            "out_policy resolved the bound outbound prefix-set name"
+        );
+        assert!(
+            peer.out_policy.prefix_set.prefix_set.is_some(),
+            "out_policy snapshot rebuilt from the resolved set pre-establishment"
+        );
+    }
+
+    /// Editing an outbound prefix-set on an established CE session must
+    /// re-advertise (soft-out) without bouncing the session and without
+    /// touching the VPNv4 export — soft-out only re-advertises to CE
+    /// peers, so its `BgpTop` keeps `vrf_export: None`.
+    #[tokio::test]
+    async fn soft_out_reapply_keeps_session_without_vpnv4_export() {
+        use crate::bgp::config::peer_policy_ident;
+        use crate::bgp::peer::{Peer, State};
+        use crate::bgp::policy::InOut;
+        use crate::policy::prefix::set::{PrefixSet, PrefixSetEntry};
+        use crate::policy::{PolicyRx, PolicyType};
+        use bgp_packet::{Afi, AfiSafi, CapMultiProtocol, Safi};
+        use std::net::IpAddr;
+
+        let (global_tx, mut global_rx) = unbounded_channel::<BgpGlobalMsg>();
+        let ctx = test_ctx_for_vrf(54, "vrf-softout");
+        let (_rib_tx, rib_rx) = mpsc::unbounded_channel();
+        let (mut vrf, _inbox) = BgpVrf::new(
+            "vrf-softout".to_string(),
+            ctx,
+            Ipv4Addr::UNSPECIFIED,
+            65000,
+            /* label */ 20,
+            global_tx,
+            rib_rx,
+        );
+
+        let addr: IpAddr = Ipv4Addr::new(10, 0, 0, 4).into();
+        let v4u = AfiSafi::new(Afi::Ip, Safi::Unicast);
+        let (peer_tx, _peer_rx) = mpsc::channel::<Message>(4);
+        let peer_ctx = test_ctx_for_vrf(54, "vrf-softout");
+        let mut peer = Peer::new(
+            0,
+            65000,
+            Ipv4Addr::new(1, 1, 1, 1),
+            65001,
+            addr,
+            None,
+            peer_tx,
+            peer_ctx,
+        );
+        peer.state = State::Established;
+        {
+            let key = CapMultiProtocol::new(&Afi::Ip, &Safi::Unicast);
+            let entry = peer
+                .cap_map
+                .entries
+                .get_mut(&key)
+                .expect("v4 unicast family pre-seeded in CapAfiMap");
+            entry.send = true;
+            entry.recv = true;
+        }
+        peer.prefix_set_slot(v4u, InOut::Output).name = Some("ce-out".to_string());
+        vrf.peers.insert(addr, peer);
+        let peer_idx = vrf.peers.get(&addr).expect("peer inserted").ident;
+
+        // Resolve the outbound prefix-set → soft-out on the live session.
+        let mut permit = PrefixSet::default();
+        let prefix: ipnet::Ipv4Net = "10.9.0.0/24".parse().unwrap();
+        permit.insert(prefix.into(), PrefixSetEntry::default());
+        vrf.process_policy_msg(PolicyRx::PrefixSet {
+            name: "ce-out".to_string(),
+            ident: peer_policy_ident(peer_idx, Some(v4u)),
+            policy_type: PolicyType::PrefixSetOut,
+            prefix_set: Some(permit),
+        });
+
+        let peer = vrf.peers.get(&addr).expect("peer still present");
+        assert!(
+            peer.out_policy.prefix_set.prefix_set.is_some(),
+            "soft-out rebuilt the cached outbound snapshot"
+        );
+        assert!(
+            peer.state.is_established(),
+            "the CE session stayed Established across the outbound edit"
+        );
+        assert!(
+            global_rx.try_recv().is_err(),
+            "soft-out must not touch the VPNv4 export (vrf_export stays None)"
         );
     }
 }
