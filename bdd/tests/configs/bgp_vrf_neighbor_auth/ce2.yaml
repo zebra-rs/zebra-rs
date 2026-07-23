@@ -1,0 +1,22 @@
+# CE2 (AS 65002) — TCP-MD5 password DIFFERENT from PE1's ("md5-c2-ce-side" vs
+# "md5-c2-pe-side"), so the kernel MD5 check fails and the session never
+# establishes. Proves the per-VRF password is actually enforced.
+interface:
+- if-name: lo
+  ipv4: {address: 10.0.2.1/32}
+- if-name: pe1
+  ipv4: {address: 10.2.0.2/30}
+router:
+  bgp:
+    global: {as: 65002, router-id: 10.0.2.1}
+    timer: {adv-interval: {ebgp: 3}}
+    neighbor:
+    - remote-address: 10.2.0.1
+      remote-as: 65000
+      timers: {connect-retry-time: 3}
+      enabled: true
+      tcp-md5:
+        encoding: clear
+        password: "md5-c2-ce-side"
+      afi-safi:
+      - {name: ipv4, enabled: true}
