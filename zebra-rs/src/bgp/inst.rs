@@ -1838,6 +1838,7 @@ impl Bgp {
             self.tracing.clone(),
             self.vrf_global_tx.clone(),
             self.policy_tx.clone(),
+            self.bfd_client_tx.clone(),
         );
         self.register_vrf_show(name, &new_handle);
         self.vrf_registry.insert(name.to_string(), new_handle);
@@ -2561,6 +2562,7 @@ impl Bgp {
                 self.tracing.clone(),
                 self.vrf_global_tx.clone(),
                 self.policy_tx.clone(),
+                self.bfd_client_tx.clone(),
             );
             self.register_vrf_show(&name, &handle);
             self.vrf_registry.insert(name, handle);
@@ -2917,6 +2919,7 @@ impl Bgp {
             self.tracing.clone(),
             self.vrf_global_tx.clone(),
             self.policy_tx.clone(),
+            self.bfd_client_tx.clone(),
         );
         self.register_vrf_show(name, &new_handle);
         self.vrf_registry.insert(name.to_string(), new_handle);
@@ -4226,6 +4229,7 @@ impl Bgp {
             self.tracing.clone(),
             self.vrf_global_tx.clone(),
             self.policy_tx.clone(),
+            self.bfd_client_tx.clone(),
         );
         self.register_vrf_show(name, &new_handle);
         self.vrf_registry.insert(name.to_string(), new_handle);

@@ -234,6 +234,11 @@
 /router/bgp/vrf/neighbor/allowas-in/count
 /router/bgp/vrf/neighbor/allowas-in/origin
 /router/bgp/vrf/neighbor/as-override
+/router/bgp/vrf/neighbor/bfd/detect-offload
+/router/bgp/vrf/neighbor/bfd/echo-mode
+/router/bgp/vrf/neighbor/bfd/echo-receive-interval
+/router/bgp/vrf/neighbor/bfd/echo-transmit-interval
+/router/bgp/vrf/neighbor/bfd/enabled
 /router/bgp/vrf/neighbor/description
 /router/bgp/vrf/neighbor/disable-connected-check
 /router/bgp/vrf/neighbor/ebgp-multihop

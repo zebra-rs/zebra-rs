@@ -87,6 +87,14 @@ pub struct BgpVrfHandle {
     /// doing it from the task's own shutdown path would delete the
     /// incoming incarnation's watches instead of the outgoing one's.
     pub policy_watches: Vec<(String, usize, crate::policy::PolicyType)>,
+    /// BFD session keys this VRF's peers subscribed, withdrawn
+    /// synchronously by `despawn_bgp_vrf` before a respawn re-subscribes
+    /// — same ordering hazard as `policy_watches`.
+    pub bfd_sessions: Vec<crate::bfd::session::SessionKey>,
+    /// Kept so `despawn_bgp_vrf` can address the BFD unsubscribes.
+    pub bfd_client_tx: Option<UnboundedSender<crate::bfd::inst::ClientReq>>,
+    /// The BFD client id (`bfd-vrf:<name>`) the unsubscribes must use.
+    pub bfd_client: String,
 }
 
 /// Pure diff: which VRF names need to be spawned (in `desired`
@@ -144,6 +152,7 @@ pub fn spawn_bgp_vrf(
     tracing_cfg: crate::bgp::tracing::BgpTracing,
     global_tx: UnboundedSender<BgpGlobalMsg>,
     policy_tx: UnboundedSender<crate::policy::Message>,
+    bfd_client_tx: Option<UnboundedSender<crate::bfd::inst::ClientReq>>,
 ) -> BgpVrfHandle {
     // Snapshot for logging + ILM install so we can move
     // `kernel` into the ctx-building arm without re-borrowing
@@ -195,6 +204,7 @@ pub fn spawn_bgp_vrf(
     // the Subscribe would be answered into a channel the actor does not
     // have yet.
     vrf.subscribe_policy(policy_tx);
+    vrf.set_bfd_client(bfd_client_tx);
     // Inter-AS Option AB: re-export imported VPNv4 routes (see the field
     // doc on `BgpVrf`). Carried from the staged VRF config.
     vrf.inter_as_hybrid = cfg.inter_as_hybrid;
@@ -314,6 +324,9 @@ pub fn spawn_bgp_vrf(
     let show_tx = vrf.show.tx.clone();
     // Snapshot before `vrf` moves into the task.
     let policy_watches = vrf.policy_watch_list();
+    let bfd_sessions = vrf.bfd_session_list();
+    let bfd_client_handle = vrf.bfd_client_tx.clone();
+    let bfd_client_id = vrf.bfd_client();
     let task = serve_vrf(vrf);
     if crate::rib::tracing::task() {
         tracing::info!(
@@ -333,6 +346,9 @@ pub fn spawn_bgp_vrf(
     BgpVrfHandle {
         inbox,
         policy_watches,
+        bfd_sessions,
+        bfd_client_tx: bfd_client_handle,
+        bfd_client: bfd_client_id,
         show_tx,
         task,
         label,
@@ -585,6 +601,13 @@ fn materialize_peers(
             .get_mut(addr)
             .expect("peer was just inserted")
             .start();
+
+        // Bring up BFD for this CE if configured. After the ident is
+        // assigned (the session key derives from `peer.address`, but the
+        // subscription is tracked by ident) and after start(), matching
+        // the global neighbor's order. A no-op when `bfd enabled` is
+        // unset or no BFD client is wired (placeholder spawn / tests).
+        vrf.bfd_reconcile(ident);
         count += 1;
     }
     count
@@ -712,6 +735,18 @@ pub fn despawn_bgp_vrf(
             policy_type: *policy_type,
         });
     }
+    // Withdraw this incarnation's BFD sessions, on this thread, ahead of
+    // any Subscribe a respawn's `materialize_peers` sends on the same
+    // client channel — the same ordering hazard as the policy watches:
+    // BFD matches on `(client, key)`, both of which a respawn reuses.
+    if let Some(bfd_client_tx) = &handle.bfd_client_tx {
+        for key in &handle.bfd_sessions {
+            let _ = bfd_client_tx.send(crate::bfd::inst::ClientReq::Unsubscribe {
+                client: handle.bfd_client.clone(),
+                key: *key,
+            });
+        }
+    }
     // Drop this VRF's RIB redistribute subscription (client-registry +
     // redist-filter rows) so a respawn under the same `bgp:vrf:<name>`
     // proto doesn't leave a stale subscriber shadowing the live one —
@@ -772,6 +807,7 @@ mod tests {
             /* tracing */ Default::default(),
             global_tx,
             policy_tx,
+            /* bfd */ None,
         )
     }
 
@@ -1025,6 +1061,70 @@ mod tests {
             }),
             "remove-private-as replace-as must be staged and applied"
         );
+    }
+
+    /// A CE with `bfd enabled true` must have `materialize_peers` fire a
+    /// single-hop BFD Subscribe (multihop false, GTSM min-ttl 255, the
+    /// single-hop port); a CE without it must fire nothing. Proves the
+    /// reconcile is wired and that the single-hop invariant holds even
+    /// though the config path never sets multihop.
+    #[tokio::test]
+    async fn materialize_peers_brings_up_single_hop_bfd() {
+        use super::super::super::vrf_config::{BgpVrfConfig, BgpVrfNeighborConfig};
+        use super::super::inst::BgpVrf;
+        use crate::bfd::inst::ClientReq;
+        use crate::context::ProtoContext;
+
+        let (global_tx, _global_rx) = unbounded_channel::<BgpGlobalMsg>();
+        let ctx = ProtoContext::default_table_no_rib();
+        let (_rib_tx, rib_rx) = unbounded_channel();
+        let (mut vrf, _inbox) = BgpVrf::new(
+            "v1".to_string(),
+            ctx,
+            Ipv4Addr::UNSPECIFIED,
+            65000,
+            16,
+            global_tx,
+            rib_rx,
+        );
+        let (bfd_tx, mut bfd_rx) = unbounded_channel::<ClientReq>();
+        vrf.set_bfd_client(Some(bfd_tx));
+
+        let on: std::net::IpAddr = "192.0.2.1".parse().unwrap();
+        let off: std::net::IpAddr = "192.0.2.2".parse().unwrap();
+
+        let mut cfg = BgpVrfConfig::default();
+        cfg.neighbors.insert(on, {
+            let mut n = BgpVrfNeighborConfig {
+                remote_as: Some(65001),
+                ..Default::default()
+            };
+            n.config.bfd.enable = Some(true);
+            n
+        });
+        cfg.neighbors.insert(
+            off,
+            BgpVrfNeighborConfig {
+                remote_as: Some(65002),
+                ..Default::default()
+            },
+        );
+
+        materialize_peers(&mut vrf, &cfg, &BTreeMap::new());
+
+        // Exactly one Subscribe, for the enabled CE, single-hop.
+        let mut subscribes = Vec::new();
+        while let Ok(req) = bfd_rx.try_recv() {
+            if let ClientReq::Subscribe { key, params, .. } = req {
+                subscribes.push((key, params));
+            }
+        }
+        assert_eq!(subscribes.len(), 1, "only the bfd-enabled CE subscribes");
+        let (key, params) = &subscribes[0];
+        assert_eq!(key.remote, on);
+        assert!(!key.multihop, "per-VRF BFD must be single-hop");
+        assert_eq!(params.min_ttl, 255, "single-hop GTSM min-ttl");
+        assert_eq!(params.dst_port, crate::bfd::socket::BFD_SINGLE_HOP_PORT);
     }
 
     /// `neighbor <addr> timers { … }` must reach the peer that

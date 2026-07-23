@@ -1443,7 +1443,7 @@ fn config_peer_bfd_min_ttl(bgp: &mut Bgp, mut args: Args, op: ConfigOp) -> Optio
 
 /// Parse the `{transmit|receive|both}` echo-mode enum (set) → `Some(mode)`, or
 /// `None` on delete. `None`/parse-failure on a malformed value.
-fn parse_bfd_echo_mode(value: &str, op: ConfigOp) -> Option<Option<EchoMode>> {
+pub(super) fn parse_bfd_echo_mode(value: &str, op: ConfigOp) -> Option<Option<EchoMode>> {
     if !op.is_set() {
         return Some(None);
     }
@@ -4373,6 +4373,26 @@ impl Bgp {
         self.callback_add(
             "/router/bgp/vrf/neighbor/remove-private-as/replace-as",
             super::vrf_config::config_vrf_neighbor_remove_private_as_replace_as,
+        );
+        self.callback_add(
+            "/router/bgp/vrf/neighbor/bfd/enabled",
+            super::vrf_config::config_vrf_neighbor_bfd_enabled,
+        );
+        self.callback_add(
+            "/router/bgp/vrf/neighbor/bfd/echo-mode",
+            super::vrf_config::config_vrf_neighbor_bfd_echo_mode,
+        );
+        self.callback_add(
+            "/router/bgp/vrf/neighbor/bfd/echo-transmit-interval",
+            super::vrf_config::config_vrf_neighbor_bfd_echo_tx,
+        );
+        self.callback_add(
+            "/router/bgp/vrf/neighbor/bfd/echo-receive-interval",
+            super::vrf_config::config_vrf_neighbor_bfd_echo_rx,
+        );
+        self.callback_add(
+            "/router/bgp/vrf/neighbor/bfd/detect-offload",
+            super::vrf_config::config_vrf_neighbor_bfd_detect_offload,
         );
         self.callback_add(
             "/router/bgp/vrf/neighbor/description",

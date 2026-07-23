@@ -322,6 +322,12 @@
 /router/bgp/vrf/neighbor/allowas-in/count	leaf
 /router/bgp/vrf/neighbor/allowas-in/origin	leaf
 /router/bgp/vrf/neighbor/as-override	p-container
+/router/bgp/vrf/neighbor/bfd	container
+/router/bgp/vrf/neighbor/bfd/detect-offload	leaf
+/router/bgp/vrf/neighbor/bfd/echo-mode	leaf
+/router/bgp/vrf/neighbor/bfd/echo-receive-interval	leaf
+/router/bgp/vrf/neighbor/bfd/echo-transmit-interval	leaf
+/router/bgp/vrf/neighbor/bfd/enabled	leaf
 /router/bgp/vrf/neighbor/description	leaf
 /router/bgp/vrf/neighbor/disable-connected-check	p-container
 /router/bgp/vrf/neighbor/ebgp-multihop	leaf

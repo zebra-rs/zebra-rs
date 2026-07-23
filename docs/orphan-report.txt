@@ -21,8 +21,8 @@ in src/bgp/config.rs (an empty relative path, easy to miss when
 grepping for registrations), and it creates/tears down the peer when
 the list entry itself is set/deleted.
 
-Total settable schema nodes: 308
-Handled: 295
+Total settable schema nodes: 313
+Handled: 300
 Orphans: 3
 
 Note: these orphans have no config callback but are kept intentionally.
@@ -51,7 +51,14 @@ The remaining inheritable knobs (allowas-in, as-override, enforce-first-as,
 remove-private-as, route-reflector) are now exposed as per-neighbor leaves
 too; the two structured ones (allowas-in, remove-private-as) share the
 global neighbor's staging state machine via InheritableKnobs::stage_*.
-Auth (password, tcp-ao) and BFD are separate follow-ups. The `neighbor-group` leaf was
+BFD is now wired too (single-hop only): the CE session is disambiguated
+and reached by its directly-connected egress ifindex, since the BFD
+SessionKey has no VRF dimension and the daemon socket is not VRF-bound.
+`bfd multihop` is not offered (omitted from the schema, so the attempt fails YANG validation rather than reporting a misleading success). BgpVrf holds its own BFD
+client + event channels (client id `bfd-vrf:<name>`), and despawn
+withdraws the sessions synchronously ahead of a respawn's re-subscribe,
+the same ordering the policy watches use. Auth (password, tcp-ao) remains
+the last follow-up. The `neighbor-group` leaf was
 renamed from `peer-group` to match the global neighbor and the list it
 resolves against.
 

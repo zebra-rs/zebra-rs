@@ -410,6 +410,60 @@ module zebra-bgp-vrf {
           description "Rewrite each stripped private AS to the local AS, keeping path length.";
         }
       }
+
+      container bfd {
+        ext:help "BFD attachment for this CE (single-hop only)";
+        description
+          "Per-VRF BFD is SINGLE-HOP ONLY. The BFD SessionKey carries no
+           VRF/table dimension and the daemon's socket is not VRF-bound,
+           so a session is disambiguated and made reachable purely by the
+           directly-connected CE's egress ifindex. Multihop (ifindex 0)
+           would conflate overlapping-address VRFs and cannot egress a
+           VRF-only route, so the `multihop` leaf is refused at commit.
+           `minimum-ttl` (multihop only) is deliberately absent.
+
+           On a BFD-down the CE's BGP session is torn down (RFC 5882 §5).
+           There is no per-VRF instance-level `bfd {}` default, so each
+           leaf resolves over the built-in default (BFD off unless
+           `enabled true`).";
+        leaf enabled {
+          ext:help "Activate BFD for this CE";
+          type boolean;
+          description "Bring up a single-hop BFD session to this CE. Absent ⇒ off.";
+        }
+        // NB: no `multihop` / `minimum-ttl` leaves. Per-VRF BFD is
+        // single-hop only, and a config callback cannot fail a commit
+        // (`Bgp::process_cm_msg` discards the callback's return), so an
+        // accept-then-warn leaf would report "applied" while silently
+        // ignoring the value. Omitting the leaf makes `bfd multihop …`
+        // fail YANG validation instead — a real rejection.
+        leaf echo-mode {
+          ext:help "BFD Echo role (transmit | receive | both)";
+          type enumeration {
+            enum transmit { description "Originate Echo only."; }
+            enum receive { description "Advertise + reflect only."; }
+            enum both { description "Both."; }
+          }
+          description "BFD Echo function (RFC 5880 §6.4). Same values as the global neighbor.";
+        }
+        leaf echo-transmit-interval {
+          ext:help "Echo transmit interval (ms)";
+          type uint32;
+          units "milliseconds";
+          description "Rate we originate Echo at. Default 50ms when unset.";
+        }
+        leaf echo-receive-interval {
+          ext:help "Advertised Required Min Echo RX Interval (ms)";
+          type uint32;
+          units "milliseconds";
+          description "Advertised Required Min Echo RX. Default 50ms when unset.";
+        }
+        leaf detect-offload {
+          ext:help "Offload expiration detection to the XDP helper";
+          type boolean;
+          description "Detect missing control packets in the kernel XDP helper. Absent ⇒ userspace.";
+        }
+      }
       list afi-safi {
         ext:help "Per-address-family activation for this CE peer";
         key "name";
