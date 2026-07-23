@@ -1229,81 +1229,98 @@ pub(super) struct InheritOutcome {
     pub bfd_reapply: bool,
 }
 
-/// Resolve and apply the inheritable *session* knobs onto a freshly
-/// materialized peer, for a caller that does its own `mp` / next-hop-self
-/// resolution and has no live session to reconcile.
-///
-/// This is the per-VRF counterpart to [`apply_inherited`]. It cannot use
-/// that function directly for two reasons:
-///
-///   * [`apply_inherited`] calls [`recompute_peer_mp`], whose base family
-///     is a *forced* IPv4 unicast ([`effective_mp`]). A per-VRF CE peer
-///     derives its base from its own address instead — a bare IPv6 CE
-///     must negotiate IPv6 unicast only — so `materialize_peers` resolves
-///     `mp` itself and this helper leaves `config.mp` alone.
-///   * The auth / MSS / BFD knobs return cross-borrow *refresh* outcomes
-///     that a live global neighbor reconciles against its shared listener
-///     and BFD client. A CE peer is built before it dials and (today) has
-///     no such shared state, so those knobs are handled in their own
-///     phases; this helper covers only the knobs that are a pure mutation
-///     of peer state.
-///
-/// Returns nothing: every knob here applies at (re)spawn, and a bounce is
-/// meaningless for a peer that has not started. The knobs it does NOT yet
-/// cover (`password`, `ao_config`, `tcp_mss`, `update_source`'s BFD
-/// re-arm) are the auth / BFD follow-ups.
-pub(super) fn apply_inherited_session_knobs(
+/// Resolve the full inheritable-knob record for `config` against `groups`,
+/// field-wise `explicit.or(group)` via [`resolve_knob`]. Factored out of
+/// [`apply_inherited`] so the resolution has one implementation, shared by
+/// the live global sweep and the per-VRF spawn / runtime path
+/// ([`super::vrf::spawn::resolve_vrf_peer_config`]) — the latter resolves on
+/// the global side and ships the record to the VRF task, which then applies
+/// it with [`apply_resolved_session_knobs`].
+pub(super) fn resolve_inherited_knobs(
     groups: &BTreeMap<String, NeighborGroup>,
-    peer: &mut Peer,
-) {
+    config: &PeerConfig,
+) -> InheritableKnobs {
+    // The struct literal names each field, so adding a knob to
+    // `InheritableKnobs` refuses to compile until this site decides how to
+    // resolve it.
+    InheritableKnobs {
+        passive: resolve_knob(groups, config, |k| k.passive),
+        update_source: resolve_knob(groups, config, |k| k.update_source),
+        port: resolve_knob(groups, config, |k| k.port),
+        ttl_security: resolve_knob(groups, config, |k| k.ttl_security),
+        ebgp_multihop: resolve_knob(groups, config, |k| k.ebgp_multihop),
+        tcp_mss: resolve_knob(groups, config, |k| k.tcp_mss),
+        password: resolve_knob(groups, config, |k| k.password.clone()),
+        ao_config: resolve_knob(groups, config, |k| k.ao_config.clone()),
+        disable_connected_check: resolve_knob(groups, config, |k| k.disable_connected_check),
+        ip_transparent: resolve_knob(groups, config, |k| k.ip_transparent),
+        policy_in: resolve_knob(groups, config, |k| k.policy_in.clone()),
+        policy_out: resolve_knob(groups, config, |k| k.policy_out.clone()),
+        prefix_set_in: resolve_knob(groups, config, |k| k.prefix_set_in.clone()),
+        prefix_set_out: resolve_knob(groups, config, |k| k.prefix_set_out.clone()),
+        allowas_in: resolve_knob(groups, config, |k| k.allowas_in),
+        as_override: resolve_knob(groups, config, |k| k.as_override),
+        remove_private_as: resolve_knob(groups, config, |k| k.remove_private_as),
+        enforce_first_as: resolve_knob(groups, config, |k| k.enforce_first_as),
+        route_reflector_client: resolve_knob(groups, config, |k| k.route_reflector_client),
+        region_id: resolve_knob(groups, config, |k| k.region_id),
+    }
+}
+
+/// Apply the already-resolved inheritable *session* knobs onto a peer and
+/// return whether the change requires a re-OPEN (bounce). The apply half
+/// of the knob machinery, paired with [`resolve_inherited_knobs`], so a
+/// caller that resolved the knobs elsewhere (the per-VRF runtime path,
+/// which resolves global-side and ships the record) can apply them
+/// directly to a live peer. The per-VRF spawn / add path resolves via
+/// [`resolve_inherited_knobs`] then applies here; the reconfigure path
+/// reuses the returned bounce.
+///
+/// Covers the knobs that are a pure mutation of peer session state and
+/// accumulates the bounce bool exactly as [`apply_inherited`] does. The
+/// active/connect-side auth knobs (`password`, `ao_config`) ARE applied
+/// here — they write `config.transport` fields the shared FSM connect path
+/// reads when the PE dials the CE; their `_refresh` outcomes (which key a
+/// shared listener) are discarded, since the per-VRF listener is keyed
+/// separately by `refresh_listener_md5` / `refresh_listener_ao`. The
+/// remaining refresh-only knobs (`tcp_mss`, `update_source`'s BFD re-arm)
+/// still need a live-session reconcile a freshly-materialized peer has no
+/// state for, so they are not applied here.
+pub(super) fn apply_resolved_session_knobs(peer: &mut Peer, want: &InheritableKnobs) -> bool {
+    let mut bounce = false;
     // ebgp-multihop before ttl-security: the two are mutually exclusive
     // and each guard observes the other, so the order must match
     // `apply_inherited`.
-    let ebgp_multihop = resolve_knob(groups, &peer.config, |k| k.ebgp_multihop);
-    super::config::apply_ebgp_multihop(peer, ebgp_multihop);
-    let ttl_security = resolve_knob(groups, &peer.config, |k| k.ttl_security).unwrap_or(false);
-    super::config::apply_ttl_security(peer, ttl_security);
-    let port = resolve_knob(groups, &peer.config, |k| k.port);
-    super::config::apply_port(peer, port);
-    let dcc = resolve_knob(groups, &peer.config, |k| k.disable_connected_check).unwrap_or(false);
-    super::config::apply_disable_connected_check(peer, dcc);
-    let ipt = resolve_knob(groups, &peer.config, |k| k.ip_transparent).unwrap_or(false);
-    super::config::apply_ip_transparent(peer, ipt);
-    let passive = resolve_knob(groups, &peer.config, |k| k.passive).unwrap_or(false);
-    super::config::apply_passive(peer, passive);
-    let allowas_in = resolve_knob(groups, &peer.config, |k| k.allowas_in);
-    super::config::apply_allowas_in(peer, allowas_in);
-    let as_override = resolve_knob(groups, &peer.config, |k| k.as_override).unwrap_or(false);
-    super::config::apply_as_override(peer, as_override);
-    let remove_private_as = resolve_knob(groups, &peer.config, |k| k.remove_private_as);
-    super::config::apply_remove_private_as(peer, remove_private_as);
-    let enforce_first_as =
-        resolve_knob(groups, &peer.config, |k| k.enforce_first_as).unwrap_or(false);
-    super::config::apply_enforce_first_as(peer, enforce_first_as);
-    let rr_client =
-        resolve_knob(groups, &peer.config, |k| k.route_reflector_client).unwrap_or(false);
-    super::config::apply_route_reflector_client(peer, rr_client);
-    let update_source = resolve_knob(groups, &peer.config, |k| k.update_source);
+    bounce |= super::config::apply_ebgp_multihop(peer, want.ebgp_multihop);
+    bounce |= super::config::apply_ttl_security(peer, want.ttl_security.unwrap_or(false));
+    bounce |= super::config::apply_port(peer, want.port);
+    bounce |= super::config::apply_disable_connected_check(
+        peer,
+        want.disable_connected_check.unwrap_or(false),
+    );
+    bounce |= super::config::apply_ip_transparent(peer, want.ip_transparent.unwrap_or(false));
+    super::config::apply_passive(peer, want.passive.unwrap_or(false));
+    super::config::apply_allowas_in(peer, want.allowas_in);
+    super::config::apply_as_override(peer, want.as_override.unwrap_or(false));
+    super::config::apply_remove_private_as(peer, want.remove_private_as);
+    super::config::apply_enforce_first_as(peer, want.enforce_first_as.unwrap_or(false));
+    super::config::apply_route_reflector_client(peer, want.route_reflector_client.unwrap_or(false));
     // The BFD re-arm this returns is only meaningful for a live session.
-    let _ = super::config::apply_update_source(peer, update_source);
-    // TCP-MD5 password: resolve the verbatim statement over the group
-    // and write the effective value onto `config.transport.md5_password`.
-    // The shared FSM connect path (`peer_start_connection`) reads it and
-    // applies it to this peer's VRF-bound *connect* socket, so the PE's
-    // outbound dial to the CE is authenticated. The listener (passive)
-    // side is not keyed here — per-VRF passive-side auth needs a
-    // per-VRF listener (see the FRR model); the `_refresh` outcome is
-    // therefore discarded.
-    let password = resolve_knob(groups, &peer.config, |k| k.password.clone());
-    let _ = super::config::apply_md5_password(peer, password);
-    // TCP-AO: resolve the referenced key-chain *binding* onto
+    let _ = super::config::apply_update_source(peer, want.update_source);
+    // TCP-MD5 password (active/connect side): apply the already-resolved
+    // knob onto `config.transport.md5_password`. The shared FSM connect path
+    // (`peer_start_connection`) reads it and keys this peer's VRF-bound
+    // *connect* socket, so the PE's outbound dial to the CE is authenticated.
+    // The listener (passive) side is keyed separately by
+    // `BgpVrf::refresh_listener_md5`; the `_refresh` outcome here is discarded.
+    let _ = super::config::apply_md5_password(peer, want.password.clone());
+    // TCP-AO (active/connect side): apply the resolved key-chain binding onto
     // `config.transport.ao_config`. The resolved key material
-    // (`resolved_ao_key`) is filled in later, when the policy actor
-    // answers the per-VRF key-chain Register — see
-    // `BgpVrf::process_policy_msg`'s KeyChain arm. Active/outbound only,
-    // same listener limitation as the MD5 password.
-    let ao_config = resolve_knob(groups, &peer.config, |k| k.ao_config.clone());
-    let _ = super::config::apply_ao_config(peer, ao_config);
+    // (`resolved_ao_key`) is filled in later, when the policy actor answers
+    // the per-VRF key-chain Register — see `BgpVrf::process_policy_msg`'s
+    // KeyChain arm. The listener side is keyed by `refresh_listener_ao`.
+    let _ = super::config::apply_ao_config(peer, want.ao_config.clone());
+    bounce
 }
 
 pub(super) fn apply_inherited(
@@ -1314,32 +1331,10 @@ pub(super) fn apply_inherited(
     recompute_peer_mp(groups, &mut peer.config);
     recompute_peer_nhs(groups, peer);
 
-    // Resolve every knob up front by constructing the full record —
-    // the struct literal names each field, so adding a knob to
-    // `InheritableKnobs` refuses to compile until this site decides
-    // how to apply it.
-    let resolved = InheritableKnobs {
-        passive: resolve_knob(groups, &peer.config, |k| k.passive),
-        update_source: resolve_knob(groups, &peer.config, |k| k.update_source),
-        port: resolve_knob(groups, &peer.config, |k| k.port),
-        ttl_security: resolve_knob(groups, &peer.config, |k| k.ttl_security),
-        ebgp_multihop: resolve_knob(groups, &peer.config, |k| k.ebgp_multihop),
-        tcp_mss: resolve_knob(groups, &peer.config, |k| k.tcp_mss),
-        password: resolve_knob(groups, &peer.config, |k| k.password.clone()),
-        ao_config: resolve_knob(groups, &peer.config, |k| k.ao_config.clone()),
-        disable_connected_check: resolve_knob(groups, &peer.config, |k| k.disable_connected_check),
-        ip_transparent: resolve_knob(groups, &peer.config, |k| k.ip_transparent),
-        policy_in: resolve_knob(groups, &peer.config, |k| k.policy_in.clone()),
-        policy_out: resolve_knob(groups, &peer.config, |k| k.policy_out.clone()),
-        prefix_set_in: resolve_knob(groups, &peer.config, |k| k.prefix_set_in.clone()),
-        prefix_set_out: resolve_knob(groups, &peer.config, |k| k.prefix_set_out.clone()),
-        allowas_in: resolve_knob(groups, &peer.config, |k| k.allowas_in),
-        as_override: resolve_knob(groups, &peer.config, |k| k.as_override),
-        remove_private_as: resolve_knob(groups, &peer.config, |k| k.remove_private_as),
-        enforce_first_as: resolve_knob(groups, &peer.config, |k| k.enforce_first_as),
-        route_reflector_client: resolve_knob(groups, &peer.config, |k| k.route_reflector_client),
-        region_id: resolve_knob(groups, &peer.config, |k| k.region_id),
-    };
+    // Resolve every knob up front by constructing the full record. Shared
+    // with the per-VRF path via `resolve_inherited_knobs`; the destructure
+    // below still makes an unapplied field a compile error here.
+    let resolved = resolve_inherited_knobs(groups, &peer.config);
     // Destructure so an unapplied field is a compile error, not a
     // silently-ignored knob. Fields whose apply lands in a follow-up
     // batch are discarded explicitly below — remove the discard when

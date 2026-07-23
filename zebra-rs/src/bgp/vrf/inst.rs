@@ -18,6 +18,8 @@ use crate::{bgp_vpn_trace, bgp_vrf_trace};
 use super::super::Message;
 use super::super::config::BgpRedistSource;
 use super::super::interface_addrs::InterfaceAddrs;
+use super::super::neighbor_group::InheritableKnobs;
+use super::super::peer::PeerConfig;
 use super::super::peer_map::PeerMap;
 use super::super::route::{LocalRib, ORIGINATED_PEER};
 use super::super::shard::BgpShard;
@@ -2890,6 +2892,363 @@ impl BgpVrf {
         }
     }
 
+    /// Add a CE peer to this running VRF task. Task-side half of the
+    /// incremental neighbor-add path: the global side already resolved
+    /// `remote_as`, `config` (family set + next-hop-self) and `knobs`
+    /// against `Bgp::neighbor_groups`, so this simply builds and starts
+    /// the peer with the SAME `insert_started_peer` the spawn-time
+    /// materialize uses — a peer added at runtime is built identically to
+    /// one present at spawn. Idempotent on the running FSM: `insert_with_key`
+    /// reuses the slot ident on a re-add.
+    fn add_peer(
+        &mut self,
+        addr: std::net::IpAddr,
+        remote_as: u32,
+        config: PeerConfig,
+        knobs: &InheritableKnobs,
+        policy_refs: &std::collections::BTreeMap<
+            (bgp_packet::AfiSafi, super::super::vrf_config::VrfPolicyRef),
+            String,
+        >,
+    ) {
+        super::spawn::insert_started_peer(self, &addr, remote_as, config, knobs, policy_refs);
+        bgp_vrf_trace!(
+            &self.tracing,
+            vrf = %self.name,
+            peer = %addr,
+            remote_as,
+            "bgp vrf: added CE peer at runtime",
+        );
+    }
+
+    /// Enumerate one peer's registered policy / prefix-set watches, as
+    /// `(name, ident, policy_type)` — the per-peer slice of
+    /// [`Self::policy_watch_list`], captured before a peer leaves the map
+    /// so the runtime remove path can Unregister them.
+    fn peer_policy_watches(
+        &self,
+        addr: &std::net::IpAddr,
+    ) -> Vec<(String, usize, crate::policy::PolicyType)> {
+        use crate::policy::PolicyType;
+        let mut out = Vec::new();
+        let Some(peer) = self.peers.get(addr) else {
+            return out;
+        };
+        let idx = peer.ident;
+        let mut push = |name: Option<&String>, policy_type: PolicyType, fam| {
+            if let Some(name) = name {
+                out.push((
+                    name.clone(),
+                    super::super::config::peer_policy_ident(idx, Some(fam)),
+                    policy_type,
+                ));
+            }
+        };
+        for (fam, io) in &peer.policy_list {
+            push(
+                io.get(&super::super::policy::InOut::Input).name.as_ref(),
+                PolicyType::PolicyListIn,
+                *fam,
+            );
+            push(
+                io.get(&super::super::policy::InOut::Output).name.as_ref(),
+                PolicyType::PolicyListOut,
+                *fam,
+            );
+        }
+        for (fam, io) in &peer.prefix_set {
+            push(
+                io.get(&super::super::policy::InOut::Input).name.as_ref(),
+                PolicyType::PrefixSetIn,
+                *fam,
+            );
+            push(
+                io.get(&super::super::policy::InOut::Output).name.as_ref(),
+                PolicyType::PrefixSetOut,
+                *fam,
+            );
+        }
+        out
+    }
+
+    /// Unregister a set of `(name, ident, policy_type)` policy watches on
+    /// this VRF's policy channel — the per-peer analog of the despawn-time
+    /// cleanup, so a removed / rebound CE peer's watches don't linger in
+    /// the actor (and a stale `None` reply can't clear a live binding).
+    fn unregister_policy_watches(&self, watches: &[(String, usize, crate::policy::PolicyType)]) {
+        if watches.is_empty() {
+            return;
+        }
+        let Some(policy_tx) = &self.policy_tx else {
+            return;
+        };
+        let proto = self.policy_proto();
+        for (name, ident, policy_type) in watches {
+            let _ = policy_tx.send(crate::policy::Message::Unregister {
+                proto: proto.clone(),
+                name: name.clone(),
+                ident: *ident,
+                policy_type: *policy_type,
+            });
+        }
+    }
+
+    /// Remove a CE peer from this running VRF task. Mirrors the global
+    /// `remove_peer_full` (`config.rs`): `route_clean` withdraws the
+    /// peer's routes (Adj-RIB-In sweep + best-path re-run + CE
+    /// re-advertise), `update_group::detach` drops its update-group
+    /// membership so a future slot reuse can't inherit it, then the peer
+    /// leaves `peers`. The listener auth / TCP-MSS / IP_TRANSPARENT
+    /// reconciliations the global path also runs have no per-VRF analog
+    /// (the VRF task owns no shared listener — passive connects arrive
+    /// via `BgpVrfMsg::Accept`), so they are deliberately omitted. The
+    /// peer's policy watches are Unregistered, the per-peer analog of the
+    /// despawn cleanup.
+    fn remove_peer(&mut self, addr: std::net::IpAddr) {
+        let Some(peer_idx) = self.peers.get(&addr).map(|p| p.ident) else {
+            // Nothing to remove — the peer was never materialized (e.g.
+            // it had no remote-as, so `resolve_vrf_peer_config` skipped
+            // it and the global diff still emitted a RemovePeer).
+            return;
+        };
+        // Capture the peer's policy watches before it leaves the map.
+        let watches = self.peer_policy_watches(&addr);
+        // Withdraw exports (`vrf_export: Some`), NOT `None` as the global
+        // `remove_peer_full` uses. The global instance has no VPNv4 export
+        // concept, but a per-VRF CE peer's learned routes WERE exported to
+        // the global VPNv4 table (the normal session-down path runs
+        // `route_clean` inside `fsm` with this same `Some(&exporter)`), so
+        // deleting the neighbor must withdraw them the same way — else a
+        // stale VPNv4 advertisement outlives the CE route that fed it.
+        let exporter = self.exporter();
+        let mut top = super::super::peer::BgpTop {
+            router_id: &self.router_id,
+            srv6_ipv6_export: None,
+            local_rib: &mut self.local_rib,
+            shard: &mut self.shard,
+            tx: &self.tx,
+            rib_client: &self.ctx.rib,
+            attr_store: &mut self.attr_store,
+            update_groups: &mut self.update_groups,
+            interface_addrs: &self.interface_addrs,
+            vrf_export: Some(&exporter),
+            color_policy: Some(&self.color_policy),
+            flex_algo_routes: None,
+            flex_algo_srv6_routes: Some(&self.flex_algo_srv6_routes),
+            vrf_import: None,
+            nexthop_cache: None,
+            vrf_transport_v4: Some(&self.transport_v4),
+            vrf_transport_v6: Some(&self.transport_v6),
+            central_label_alloc: None,
+            as_sets_withdraw: true,
+        };
+        // Per-VRF tasks don't drive the global shard pool (their RIB is
+        // the VRF's own), so pass `None` for shards — same as every other
+        // per-VRF route op.
+        super::super::route::route_clean(peer_idx, &mut top, &mut self.peers, None);
+        // Update-groups live outside `PeerMap`: the removal below purges
+        // the membership index, but the group member sets must be
+        // detached explicitly or the freed ident lingers and a future
+        // slot reuse inherits the group.
+        super::super::update_group::detach(&mut self.update_groups, &mut self.peers, peer_idx);
+        self.peers.remove(&addr);
+        self.unregister_policy_watches(&watches);
+        // Notify the global accept dispatcher this VRF no longer claims the
+        // address — the symmetric counterpart to the spawn-site
+        // `RegisterPeer` emission. The global runtime-diff dispatch also
+        // clears `peer_index` directly for immediacy; this message is the
+        // owner-guarded async backstop (a stale unregister can't clobber a
+        // fresh claim another VRF made on the same address).
+        let _ = self.global_tx.send(BgpGlobalMsg::UnregisterPeer {
+            vrf: self.name.clone(),
+            addr,
+        });
+        bgp_vrf_trace!(
+            &self.tracing,
+            vrf = %self.name,
+            peer = %addr,
+            "bgp vrf: removed CE peer at runtime",
+        );
+    }
+
+    /// Reconfigure an existing CE peer on this running VRF task. The
+    /// global side resolved the new `remote_as`, `config` and `knobs`
+    /// against the group map; this applies them to the live peer and
+    /// bounces only when re-OPEN is required.
+    ///
+    /// Bounce criteria — a faithful subset of the global neighbor rules.
+    /// The session knobs are applied through the SHARED
+    /// `apply_resolved_session_knobs` (the same `apply_*` primitives the
+    /// global path uses), which returns whether any of them needs a fresh
+    /// OPEN; a change to the negotiated address-family set (`config.mp`)
+    /// on an Established session adds to that. Everything else (timers,
+    /// description, next-hop-self, per-AFI knobs) takes effect on the next
+    /// advertisement without dropping the session.
+    ///
+    /// remote-as: a bare remote-as change does NOT bounce, mirroring the
+    /// global `config_remote_as` (`config.rs`), which only sets
+    /// remote_as / peer_type / start() with no `Event::Stop`. Only the
+    /// mp / session-knob change bounces.
+    fn reconfigure_peer(
+        &mut self,
+        addr: std::net::IpAddr,
+        remote_as: u32,
+        config: PeerConfig,
+        knobs: &InheritableKnobs,
+        policy_refs: &std::collections::BTreeMap<
+            (bgp_packet::AfiSafi, super::super::vrf_config::VrfPolicyRef),
+            String,
+        >,
+    ) {
+        use super::super::peer::{Event, PeerType};
+        if self.peers.get(&addr).is_none() {
+            // Not present (e.g. it never had a remote-as). Treat a
+            // reconfigure of an absent peer as an add so a peer that
+            // gains a remote-as via edit still comes up.
+            self.add_peer(addr, remote_as, config, knobs, policy_refs);
+            return;
+        }
+        // Capture the currently-registered policy watches so we can diff
+        // them against the new refs after applying the config.
+        let old_watches = self.peer_policy_watches(&addr);
+
+        let peer = self.peers.get_mut(&addr).expect("peer present");
+        let ident = peer.ident;
+        // `AfiSafis` is not `PartialEq`; compare its inner
+        // `BTreeMap<AfiSafi, bool>` key set directly for the family-set
+        // change.
+        let before_mp: std::collections::BTreeSet<bgp_packet::AfiSafi> =
+            peer.config.mp.0.keys().copied().collect();
+        peer.remote_as = remote_as;
+        peer.peer_type = if remote_as == self.asn {
+            PeerType::IBGP
+        } else {
+            PeerType::EBGP
+        };
+        // Apply the config blob first, then the resolved session knobs on
+        // top: knob-applied `Peer` fields (e.g. `reflector_client`, a
+        // `Peer` field NOT in `PeerConfig`) must win over a blob-swap that
+        // would otherwise drop them.
+        peer.config = config;
+        let mut bounce = super::super::neighbor_group::apply_resolved_session_knobs(peer, knobs);
+        let after_mp: std::collections::BTreeSet<bgp_packet::AfiSafi> =
+            peer.config.mp.0.keys().copied().collect();
+        bounce |= before_mp != after_mp && peer.state.is_established();
+        // A peer that was never started (added while it lacked a
+        // remote-as) needs arming now that one resolved. `start()` is
+        // idempotent and self-gating, so calling it unconditionally is
+        // safe.
+        peer.start();
+
+        // Re-bind the policy / prefix-set slots and reconcile watches:
+        // Unregister the ones that were dropped or changed, Register the
+        // new set. Done after the config swap (which does NOT touch the
+        // resolved slots — those live on `Peer`, not `PeerConfig`).
+        self.rebind_policy_refs(&addr, policy_refs, &old_watches);
+
+        if bounce {
+            // Bounce through the FSM event channel, exactly like the
+            // global `clear bgp <peer>` / config-change path
+            // (`Message::Event(idx, Event::Stop)`). `fsm_stop` returns
+            // Idle with no NOTIFICATION; the peer re-dials and OPENs with
+            // the new family set / session parameters.
+            let _ = self.tx.try_send(Message::Event(ident, Event::Stop));
+        }
+        bgp_vrf_trace!(
+            &self.tracing,
+            vrf = %self.name,
+            peer = %addr,
+            remote_as,
+            bounced = bounce,
+            "bgp vrf: reconfigured CE peer at runtime",
+        );
+    }
+
+    /// Set a peer's policy / prefix-set slots to `policy_refs` and
+    /// reconcile the actor watches: Unregister any of `old_watches` whose
+    /// `(name, ident, policy_type)` is no longer wanted, and Register the
+    /// wanted set (a Register for an unchanged watch is a harmless
+    /// refresh). Used by [`Self::reconfigure_peer`].
+    fn rebind_policy_refs(
+        &mut self,
+        addr: &std::net::IpAddr,
+        policy_refs: &std::collections::BTreeMap<
+            (bgp_packet::AfiSafi, super::super::vrf_config::VrfPolicyRef),
+            String,
+        >,
+        old_watches: &[(String, usize, crate::policy::PolicyType)],
+    ) {
+        use super::super::policy::InOut;
+        use super::super::vrf_config::VrfPolicyRef;
+
+        // First clear every currently-bound slot, then set the wanted
+        // ones, so a dropped ref leaves an empty slot (fail-closed) rather
+        // than a stale name.
+        let Some(peer) = self.peers.get_mut(addr) else {
+            return;
+        };
+        let ident = peer.ident;
+        for io in peer.policy_list.values_mut() {
+            io.get_mut(&InOut::Input).name = None;
+            io.get_mut(&InOut::Output).name = None;
+        }
+        for io in peer.prefix_set.values_mut() {
+            io.get_mut(&InOut::Input).name = None;
+            io.get_mut(&InOut::Output).name = None;
+        }
+        for ((fam, kind), name) in policy_refs {
+            match kind {
+                VrfPolicyRef::PolicyIn => {
+                    peer.policy_list_slot(*fam, InOut::Input).name = Some(name.clone())
+                }
+                VrfPolicyRef::PolicyOut => {
+                    peer.policy_list_slot(*fam, InOut::Output).name = Some(name.clone())
+                }
+                VrfPolicyRef::PrefixSetIn => {
+                    peer.prefix_set_slot(*fam, InOut::Input).name = Some(name.clone())
+                }
+                VrfPolicyRef::PrefixSetOut => {
+                    peer.prefix_set_slot(*fam, InOut::Output).name = Some(name.clone())
+                }
+            }
+        }
+
+        // The wanted watch set, computed from the resolved refs.
+        let wanted: Vec<(String, usize, crate::policy::PolicyType)> = policy_refs
+            .iter()
+            .map(|((fam, kind), name)| {
+                (
+                    name.clone(),
+                    super::super::config::peer_policy_ident(ident, Some(*fam)),
+                    kind.policy_type(),
+                )
+            })
+            .collect();
+
+        // Unregister the old watches that are no longer wanted.
+        let dropped: Vec<(String, usize, crate::policy::PolicyType)> = old_watches
+            .iter()
+            .filter(|w| !wanted.contains(w))
+            .cloned()
+            .collect();
+        self.unregister_policy_watches(&dropped);
+
+        // Register the wanted set (idempotent refresh for unchanged ones).
+        if !wanted.is_empty()
+            && let Some(policy_tx) = self.policy_tx.clone()
+        {
+            let proto = self.policy_proto();
+            for ((fam, kind), name) in policy_refs {
+                let _ = policy_tx.send(crate::policy::Message::Register {
+                    proto: proto.clone(),
+                    name: name.clone(),
+                    ident: super::super::config::peer_policy_ident(ident, Some(*fam)),
+                    policy_type: kind.policy_type(),
+                });
+            }
+        }
+    }
+
     /// Per-task handling of cross-task messages that aren't
     /// `Shutdown`.
     fn process_global_msg(&mut self, msg: BgpVrfMsg) {
@@ -2917,6 +3276,27 @@ impl BgpVrf {
                 // opens). Same handling as a connection our own listener
                 // accepts.
                 self.handle_accept(stream, sockaddr);
+            }
+            BgpVrfMsg::AddPeer {
+                addr,
+                remote_as,
+                config,
+                knobs,
+                policy_refs,
+            } => {
+                self.add_peer(addr, remote_as, *config, &knobs, &policy_refs);
+            }
+            BgpVrfMsg::RemovePeer { addr } => {
+                self.remove_peer(addr);
+            }
+            BgpVrfMsg::ReconfigurePeer {
+                addr,
+                remote_as,
+                config,
+                knobs,
+                policy_refs,
+            } => {
+                self.reconfigure_peer(addr, remote_as, *config, &knobs, &policy_refs);
             }
             BgpVrfMsg::ImportV4 {
                 rd,
@@ -3230,6 +3610,163 @@ mod tests {
         tokio::time::timeout(Duration::from_secs(2), vrf.event_loop())
             .await
             .expect("event_loop returns after Shutdown");
+    }
+
+    /// The runtime `AddPeer` / `RemovePeer` handlers insert and remove a CE
+    /// peer on a live task without touching any other session — the core of
+    /// the incremental-neighbor path. `AddPeer` builds the peer via the same
+    /// `insert_started_peer` the spawn-time materialize uses, so its
+    /// peer-type derives from the AS comparison; `RemovePeer` mirrors the
+    /// global `remove_peer_full` (route_clean + detach + remove).
+    #[tokio::test]
+    async fn add_and_remove_peer_at_runtime() {
+        use crate::bgp::peer::PeerType;
+
+        let (global_tx, _global_rx) = unbounded_channel::<BgpGlobalMsg>();
+        let ctx = test_ctx_for_vrf(7, "vrf-nbr");
+        let (_rib_tx, rib_rx) = mpsc::unbounded_channel();
+        let (mut vrf, _inbox) = BgpVrf::new(
+            "vrf-nbr".to_string(),
+            ctx,
+            Ipv4Addr::UNSPECIFIED,
+            65000,
+            /* label */ 16,
+            global_tx,
+            rib_rx,
+        );
+
+        let a: std::net::IpAddr = "192.0.2.1".parse().unwrap();
+        // Resolve exactly as the global side would, so the test drives the
+        // real message payload.
+        let (remote_as, config, knobs) = super::super::spawn::resolve_vrf_peer_config(
+            &a,
+            &crate::bgp::vrf_config::BgpVrfNeighborConfig {
+                remote_as: Some(65001),
+                ..Default::default()
+            },
+            &std::collections::BTreeMap::new(),
+        )
+        .expect("neighbor with remote-as resolves");
+
+        vrf.process_global_msg(BgpVrfMsg::AddPeer {
+            addr: a,
+            remote_as,
+            config: Box::new(config),
+            knobs: Box::new(knobs),
+            policy_refs: std::collections::BTreeMap::new(),
+        });
+
+        let peer = vrf.peers.get(&a).expect("peer added at runtime");
+        assert_eq!(peer.remote_as, 65001);
+        // remote-as 65001 != VRF AS 65000 → eBGP, derived from the AS
+        // comparison in `insert_started_peer`.
+        assert_eq!(peer.peer_type, PeerType::EBGP);
+
+        vrf.process_global_msg(BgpVrfMsg::RemovePeer { addr: a });
+        assert!(
+            vrf.peers.get(&a).is_none(),
+            "peer removed from the map at runtime"
+        );
+    }
+
+    /// A runtime `ReconfigurePeer` swaps the resolved config on the running
+    /// peer. Not Established here (no session), so no bounce fires; the new
+    /// remote-as (and derived peer-type) simply take effect.
+    #[tokio::test]
+    async fn reconfigure_peer_at_runtime() {
+        use crate::bgp::peer::PeerType;
+
+        let (global_tx, _global_rx) = unbounded_channel::<BgpGlobalMsg>();
+        let ctx = test_ctx_for_vrf(8, "vrf-recfg");
+        let (_rib_tx, rib_rx) = mpsc::unbounded_channel();
+        let (mut vrf, _inbox) = BgpVrf::new(
+            "vrf-recfg".to_string(),
+            ctx,
+            Ipv4Addr::UNSPECIFIED,
+            65000,
+            /* label */ 16,
+            global_tx,
+            rib_rx,
+        );
+
+        let a: std::net::IpAddr = "192.0.2.1".parse().unwrap();
+        let resolve = |asn: u32| {
+            super::super::spawn::resolve_vrf_peer_config(
+                &a,
+                &crate::bgp::vrf_config::BgpVrfNeighborConfig {
+                    remote_as: Some(asn),
+                    ..Default::default()
+                },
+                &std::collections::BTreeMap::new(),
+            )
+            .unwrap()
+        };
+
+        let (ra, cfg, knobs) = resolve(65001);
+        vrf.process_global_msg(BgpVrfMsg::AddPeer {
+            addr: a,
+            remote_as: ra,
+            config: Box::new(cfg),
+            knobs: Box::new(knobs),
+            policy_refs: std::collections::BTreeMap::new(),
+        });
+        assert_eq!(vrf.peers.get(&a).unwrap().peer_type, PeerType::EBGP);
+
+        // Reconfigure to the VRF's own AS → now iBGP.
+        let (ra, cfg, knobs) = resolve(65000);
+        vrf.process_global_msg(BgpVrfMsg::ReconfigurePeer {
+            addr: a,
+            remote_as: ra,
+            config: Box::new(cfg),
+            knobs: Box::new(knobs),
+            policy_refs: std::collections::BTreeMap::new(),
+        });
+        let peer = vrf
+            .peers
+            .get(&a)
+            .expect("peer still present after reconfigure");
+        assert_eq!(peer.remote_as, 65000);
+        assert_eq!(peer.peer_type, PeerType::IBGP);
+    }
+
+    /// A `ReconfigurePeer` for a peer that is not present is treated as an
+    /// add — a neighbor that gains a remote-as via edit still comes up.
+    #[tokio::test]
+    async fn reconfigure_absent_peer_is_treated_as_add() {
+        let (global_tx, _global_rx) = unbounded_channel::<BgpGlobalMsg>();
+        let ctx = test_ctx_for_vrf(9, "vrf-recfg-add");
+        let (_rib_tx, rib_rx) = mpsc::unbounded_channel();
+        let (mut vrf, _inbox) = BgpVrf::new(
+            "vrf-recfg-add".to_string(),
+            ctx,
+            Ipv4Addr::UNSPECIFIED,
+            65000,
+            /* label */ 16,
+            global_tx,
+            rib_rx,
+        );
+
+        let a: std::net::IpAddr = "192.0.2.1".parse().unwrap();
+        let (ra, cfg, knobs) = super::super::spawn::resolve_vrf_peer_config(
+            &a,
+            &crate::bgp::vrf_config::BgpVrfNeighborConfig {
+                remote_as: Some(65001),
+                ..Default::default()
+            },
+            &std::collections::BTreeMap::new(),
+        )
+        .unwrap();
+        vrf.process_global_msg(BgpVrfMsg::ReconfigurePeer {
+            addr: a,
+            remote_as: ra,
+            config: Box::new(cfg),
+            knobs: Box::new(knobs),
+            policy_refs: std::collections::BTreeMap::new(),
+        });
+        assert!(
+            vrf.peers.get(&a).is_some(),
+            "reconfigure of an absent peer adds it"
+        );
     }
 
     #[tokio::test]

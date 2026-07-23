@@ -156,6 +156,117 @@ pub fn compute_vrf_respawn(
         .collect()
 }
 
+/// One resolved neighbor the incremental apply must add / reconfigure on
+/// a running VRF task: the peer address plus the already-resolved
+/// `(remote_as, PeerConfig, InheritableKnobs, policy_refs)`. Shipped
+/// straight into a [`BgpVrfMsg::AddPeer`] / [`BgpVrfMsg::ReconfigurePeer`].
+pub struct ResolvedVrfPeer {
+    pub addr: std::net::IpAddr,
+    pub remote_as: u32,
+    pub config: super::super::peer::PeerConfig,
+    pub knobs: super::super::neighbor_group::InheritableKnobs,
+    pub policy_refs:
+        BTreeMap<(bgp_packet::AfiSafi, super::super::vrf_config::VrfPolicyRef), String>,
+}
+
+/// The per-neighbor delta between a VRF's baseline and desired config,
+/// resolved GLOBAL-side against the two neighbor-group snapshots. Only
+/// neighbors that resolve to a live peer (a `remote-as` exists) count:
+///   * `adds` — resolve to a peer in `after` but not in `before`.
+///   * `removes` — resolved to a peer in `before` but no longer do.
+///   * `reconfigures` — resolve to a peer in both, but the resolved
+///     `(remote_as, PeerConfig, knobs, policy_refs)` differs.
+///
+/// A neighbor with no `remote-as` in either config is absent from all
+/// three sets (it was never materialized). A neighbor that gains a
+/// `remote-as` is an add; one that loses it is a remove.
+#[derive(Default)]
+pub struct VrfNeighborDiff {
+    pub adds: Vec<ResolvedVrfPeer>,
+    pub removes: Vec<std::net::IpAddr>,
+    pub reconfigures: Vec<ResolvedVrfPeer>,
+}
+
+/// Compute the per-neighbor add/remove/reconfigure diff for one running
+/// VRF, resolving each side against its own neighbor-group snapshot
+/// (baseline groups for `before`, committed groups for `after`) so a
+/// neighbor-group edit that changes a member's resolved config surfaces as
+/// a reconfigure. Pure (no I/O) so the classification is unit-testable;
+/// the caller ([`super::inst`]'s `apply_vrf_neighbor_diffs`) ships each
+/// entry as the matching [`BgpVrfMsg`]. Group resolution lives here, on the
+/// global side, because the VRF task holds no neighbor-group map.
+pub fn compute_vrf_neighbor_diff(
+    before: &BTreeMap<std::net::IpAddr, super::super::vrf_config::BgpVrfNeighborConfig>,
+    before_groups: &BTreeMap<String, NeighborGroup>,
+    after: &BTreeMap<std::net::IpAddr, super::super::vrf_config::BgpVrfNeighborConfig>,
+    after_groups: &BTreeMap<String, NeighborGroup>,
+) -> VrfNeighborDiff {
+    // Two resolved configs are "the same peer" when their remote-as and
+    // the Debug form of the resolved PeerConfig + knobs match (neither is
+    // `Eq`), plus the policy-ref map (which IS `Eq`). This is the same
+    // comparison `runtime_structure_eq` used before the neighbor term
+    // moved from respawn to incremental — extended to cover the knobs and
+    // policy refs the current model stages.
+    let sig = |peer: &ResolvedVrfPeer| {
+        (
+            peer.remote_as,
+            format!("{:?}", peer.config),
+            format!("{:?}", peer.knobs),
+            peer.policy_refs.clone(),
+        )
+    };
+    let resolve = |addr: &std::net::IpAddr,
+                   nbr: &super::super::vrf_config::BgpVrfNeighborConfig,
+                   groups: &BTreeMap<String, NeighborGroup>|
+     -> Option<ResolvedVrfPeer> {
+        let (remote_as, config, knobs) = resolve_vrf_peer_config(addr, nbr, groups)?;
+        Some(ResolvedVrfPeer {
+            addr: *addr,
+            remote_as,
+            config,
+            knobs,
+            policy_refs: nbr.policy_refs.clone(),
+        })
+    };
+
+    let mut diff = VrfNeighborDiff::default();
+
+    // Adds + reconfigures: walk `after`.
+    for (addr, nbr) in after {
+        let Some(resolved) = resolve(addr, nbr, after_groups) else {
+            continue;
+        };
+        let before_resolved = before
+            .get(addr)
+            .and_then(|b| resolve(addr, b, before_groups));
+        match before_resolved {
+            Some(old) => {
+                if sig(&old) != sig(&resolved) {
+                    diff.reconfigures.push(resolved);
+                }
+            }
+            None => diff.adds.push(resolved),
+        }
+    }
+
+    // Removes: a neighbor that resolved to a peer in `before` but does
+    // not in `after` (deleted, or lost its remote-as).
+    for (addr, nbr) in before {
+        if resolve(addr, nbr, before_groups).is_none() {
+            continue;
+        }
+        let still_present = after
+            .get(addr)
+            .and_then(|a| resolve(addr, a, after_groups))
+            .is_some();
+        if !still_present {
+            diff.removes.push(*addr);
+        }
+    }
+
+    diff
+}
+
 /// Build + spawn a per-VRF task. Returns the handle the caller
 /// stashes on `vrf_registry`. `kernel` carries the matching
 /// kernel VRF master info if RIB has already told us about it;
@@ -403,41 +514,305 @@ pub fn spawn_bgp_vrf(
     }
 }
 
+/// Resolve one staged VRF neighbor into `(remote_as, PeerConfig,
+/// InheritableKnobs)` — the group-dependent part of building a per-VRF
+/// peer, factored out of [`materialize_peers`] so the spawn-time
+/// materialize and the runtime add/reconfigure handlers share ONE
+/// resolution. Returns `None` when no `remote-as` resolves (own leaf, else
+/// the group's): `Peer::start` gates on `remote_as != 0`, so a peer without
+/// one would sit permanently Idle and only clutter the show path.
+///
+/// The returned `PeerConfig` is the FULLY-resolved config the peer runs
+/// with: the staged `nbr_cfg.config` cloned wholesale, plus the two knobs
+/// whose staged value is the *verbatim* statement rather than the effective
+/// one — `config.mp` (the negotiated address-family set) and each family's
+/// `config.sub[fam].next_hop_self`. The [`InheritableKnobs`] record is the
+/// resolved session knobs (passive, ebgp-multihop, …) the task-side apply
+/// consumes. Group resolution happens here, on the caller's side (the
+/// global task or the spawn site), because the group map lives on the
+/// global `Bgp` and never reaches the per-VRF task — the task only ever
+/// receives already-resolved values. This function neither applies the
+/// knobs nor registers policy watches; that is the task-side
+/// [`insert_started_peer`]'s job.
+pub(super) fn resolve_vrf_peer_config(
+    addr: &std::net::IpAddr,
+    nbr_cfg: &super::super::vrf_config::BgpVrfNeighborConfig,
+    groups: &BTreeMap<String, NeighborGroup>,
+) -> Option<(
+    u32,
+    super::super::peer::PeerConfig,
+    super::super::neighbor_group::InheritableKnobs,
+)> {
+    use bgp_packet::{Afi, AfiSafi, AfiSafis, Safi};
+
+    // Resolve the optionally-referenced neighbor-group once. Its
+    // attributes act as a fallback layer beneath the neighbor's own —
+    // the same precedence the global neighbor uses.
+    let group = nbr_cfg.peer_group().and_then(|name| groups.get(name));
+
+    // The neighbor's own `remote-as` wins; otherwise inherit the group's
+    // (so a peer-group carrying `remote-as` makes its members live without
+    // a per-neighbor leaf). No `remote-as` at all ⇒ skip the peer.
+    let remote_as = nbr_cfg
+        .remote_as
+        .or_else(|| group.and_then(|g| g.remote_as))?;
+
+    // Adopt the staged config wholesale. `BgpVrfNeighborConfig::config`
+    // IS a `PeerConfig`, so every knob the per-VRF schema stages —
+    // description, peer-group binding, `timers`, and the per-family
+    // `afi-safi` knobs — lands here in one move. Anything the schema
+    // doesn't expose keeps its `PeerConfig::default()` value, which is
+    // exactly what `Peer::new` installs, so this is behaviour-preserving
+    // for unconfigured fields.
+    let mut config = nbr_cfg.config.clone();
+
+    // Derive the negotiated address-family set for this CE peer.
+    // `Peer::new` defaults to IPv4 unicast only, which is wrong for
+    // an IPv6 CE peer — so resolve the family set in three layers,
+    // lowest precedence first (mirroring `neighbor_group::effective_mp`
+    // for the global neighbor, but with an address-derived base):
+    //
+    //   1. base = the peer's own address family (an IPv6 peer →
+    //      IPv6 unicast, an IPv4 peer → IPv4 unicast). Unlike the
+    //      global neighbor we deliberately do NOT force IPv4 unicast
+    //      on for a v6 peer.
+    //   2. the referenced neighbor-group's `afi-safi` opinions
+    //      (`enabled true` adds a family, `false` removes it).
+    //   3. the per-neighbor explicit `afi-safi <fam> enabled`
+    //      statements — "any field set on the neighbor itself wins".
+    //
+    // The family set is a Multiprotocol capability fixed at OPEN
+    // time; peers are (re)materialized before the session
+    // establishes, so the resolved set rides the first OPEN with no
+    // bounce needed.
+    let base = if addr.is_ipv6() {
+        AfiSafi::new(Afi::Ip6, Safi::Unicast)
+    } else {
+        AfiSafi::new(Afi::Ip, Safi::Unicast)
+    };
+    let mut mp = AfiSafis::new();
+    mp.insert(base, true);
+    if let Some(g) = group {
+        for (fam, entry) in &g.afi_safi {
+            if entry.enabled {
+                mp.insert(*fam, true);
+            } else {
+                mp.remove(fam);
+            }
+        }
+    }
+    for (fam, enabled) in &nbr_cfg.config.mp_explicit {
+        if *enabled {
+            mp.insert(*fam, true);
+        } else {
+            mp.remove(fam);
+        }
+    }
+    // `mp` is the *resolved* set, so it is computed here rather than
+    // staged; `mp_explicit` (the verbatim statements it was resolved
+    // from) already arrived with the config adoption above.
+    config.mp = mp;
+
+    // `next-hop-self` is the one imported knob that is not simply
+    // stored: like `mp`, the staged value is the *verbatim* statement
+    // and the effective value has to be resolved through
+    // neighbor-group precedence (explicit wins, else the group's
+    // per-family opinion, else off). The global neighbor does this in
+    // its config callback against `Bgp::neighbor_groups`; here the
+    // same helper runs against the `groups` map, so the precedence rule
+    // has one implementation.
+    //
+    // Resolve over the negotiated families plus any family carrying an
+    // explicit statement: a statement for a family that never
+    // negotiates is inert, but resolving it costs nothing and keeps
+    // the stored state honest if the family is enabled later.
+    let nhs_families: std::collections::BTreeSet<AfiSafi> = config
+        .mp
+        .0
+        .keys()
+        .copied()
+        .chain(config.nhs_explicit.keys().copied())
+        .collect();
+    for fam in nhs_families {
+        let value = super::super::neighbor_group::resolve_next_hop_self(groups, &config, fam);
+        config.sub.entry(fam).or_default().next_hop_self = value;
+    }
+
+    // Resolve the inheritable session knobs (passive, ebgp-multihop,
+    // ttl-security, …) the same way the global neighbor does, layering
+    // the referenced neighbor-group under the peer's own explicit
+    // statements. Resolved here (group-side) and applied task-side by
+    // `insert_started_peer` / the reconfigure handler.
+    let knobs = super::super::neighbor_group::resolve_inherited_knobs(groups, &config);
+
+    Some((remote_as, config, knobs))
+}
+
+/// Insert a fully-resolved peer into `vrf.peers` and `start()` it — the
+/// task-side half of building a per-VRF peer, factored out of
+/// [`materialize_peers`] so the spawn-time materialize and the runtime
+/// `AddPeer` handler share ONE insert. `config` / `knobs` are already
+/// resolved by [`resolve_vrf_peer_config`]; this builds the `Peer`, derives
+/// its peer-type from the AS comparison, adopts the config, applies the
+/// session knobs, inserts under a stable ident, binds + registers the
+/// staged policy watches, then arms the idle-hold timer.
+pub(super) fn insert_started_peer(
+    vrf: &mut BgpVrf,
+    addr: &std::net::IpAddr,
+    remote_as: u32,
+    config: super::super::peer::PeerConfig,
+    knobs: &super::super::neighbor_group::InheritableKnobs,
+    policy_refs: &BTreeMap<(bgp_packet::AfiSafi, super::super::vrf_config::VrfPolicyRef), String>,
+) {
+    use super::super::peer::{Peer, PeerType};
+    use super::super::peer_key::PeerKey;
+
+    let mut peer = Peer::new(
+        0,
+        vrf.asn,
+        vrf.router_id,
+        remote_as,
+        *addr,
+        // Per-VRF hostnames aren't a thing today; the global
+        // hostname / OS hostname applies to every session.
+        None,
+        vrf.tx.clone(),
+        vrf.ctx.clone(),
+    );
+    // `Peer::new` defaults `peer_type` to IBGP and, unlike the global
+    // `config_remote_as` path, nothing else recomputes it for a VRF
+    // peer — so derive it here from the AS comparison. Without this a
+    // per-VRF PE-CE *eBGP* session (remote-as != the VRF's AS) is
+    // treated as iBGP: its routes are marked internal, carry no
+    // AS-path prepend, and (the symptom) are never re-advertised to
+    // the iBGP VPNv4 core, so an Inter-AS Option A remote-AS customer
+    // prefix never reaches the far PE.
+    peer.peer_type = if remote_as == vrf.asn {
+        PeerType::IBGP
+    } else {
+        PeerType::EBGP
+    };
+    // Adopt the resolved config before applying knobs / `start()` so the
+    // first idle-hold timer a peer arms already honours a configured
+    // `idle-hold-time`; arming from the default and fixing up afterwards
+    // would leave the first dial on the wrong cadence.
+    peer.config = config;
+    // Apply the resolved session knobs. The bounce is meaningless for a
+    // peer that has not started, so it is discarded here (the reconfigure
+    // handler keeps it).
+    let _ = super::super::neighbor_group::apply_resolved_session_knobs(&mut peer, knobs);
+
+    vrf.peers.insert_with_key(PeerKey::Addr(*addr), peer);
+
+    // Bind the staged policy / prefix-set names and register a watch
+    // for each, so the actor resolves them and keeps them current.
+    //
+    // This MUST run after the insert, for the same reason `start()`
+    // does: `peer_policy_ident` encodes `peer.ident`, which
+    // `insert_with_key` is what assigns. Registering beforehand would
+    // key every peer's watch under ident 0, and the resolution would
+    // come back addressed to the first peer in the map — the exact
+    // shape of the bug fixed in #2071, but silent, because a
+    // mis-delivered policy just filters the wrong session's routes.
+    //
+    // The names go straight onto the peer's slots; the resolved set
+    // arrives later on `policy_rx` (see
+    // `BgpVrf::process_policy_msg`). Until it does the binding is
+    // deny-all, which is the same fail-closed posture the global
+    // neighbor has.
+    let ident = {
+        let peer = vrf.peers.get_mut(addr).expect("peer was just inserted");
+        for ((fam, kind), name) in policy_refs {
+            use super::super::policy::InOut;
+            use super::super::vrf_config::VrfPolicyRef;
+            match kind {
+                VrfPolicyRef::PolicyIn => {
+                    peer.policy_list_slot(*fam, InOut::Input).name = Some(name.clone())
+                }
+                VrfPolicyRef::PolicyOut => {
+                    peer.policy_list_slot(*fam, InOut::Output).name = Some(name.clone())
+                }
+                VrfPolicyRef::PrefixSetIn => {
+                    peer.prefix_set_slot(*fam, InOut::Input).name = Some(name.clone())
+                }
+                VrfPolicyRef::PrefixSetOut => {
+                    peer.prefix_set_slot(*fam, InOut::Output).name = Some(name.clone())
+                }
+            }
+        }
+        peer.ident
+    };
+    // The TCP-AO key-chain name a resolved `ao_config` references, if any —
+    // captured after the `ident` block (its peer borrow has ended) so the
+    // Register below can subscribe it. Resolving the actual key material
+    // waits for the actor's reply, handled in `BgpVrf::process_policy_msg`,
+    // which then keys both the active dial and the VRF listener.
+    let ao_key_chain = vrf
+        .peers
+        .get(addr)
+        .and_then(|p| p.config.transport.ao_config.as_ref())
+        .map(|ao| ao.key_chain.clone())
+        .filter(|c| !c.is_empty());
+
+    if (!policy_refs.is_empty() || ao_key_chain.is_some())
+        && let Some(policy_tx) = vrf.policy_tx.clone()
+    {
+        let proto = vrf.policy_proto();
+        for ((fam, kind), name) in policy_refs {
+            let _ = policy_tx.send(crate::policy::Message::Register {
+                proto: proto.clone(),
+                name: name.clone(),
+                ident: super::super::config::peer_policy_ident(ident, Some(*fam)),
+                policy_type: kind.policy_type(),
+            });
+        }
+        // TCP-AO key-chain: raw peer ident (matching the global neighbor) +
+        // the `KeyChain` policy type. The actor's reply lands on `policy_rx`
+        // and populates `resolved_ao_key`.
+        if let Some(chain) = &ao_key_chain {
+            let _ = policy_tx.send(crate::policy::Message::Register {
+                proto: proto.clone(),
+                name: chain.clone(),
+                ident,
+                policy_type: crate::policy::PolicyType::KeyChain(
+                    crate::policy::KeyChainScope::BgpNeighbor,
+                ),
+            });
+        }
+    }
+
+    // `PeerMap::insert_with_key` assigns the stable ident used in every
+    // timer/FSM message. Starting before insertion leaves every peer at
+    // Peer::new's ident 0, so a second neighbor's Start events are
+    // delivered to the first neighbor and the second session never
+    // leaves Idle/Active.
+    vrf.peers
+        .get_mut(addr)
+        .expect("peer was just inserted")
+        .start();
+
+    // Bring up BFD for this CE if configured — after the ident is assigned
+    // and after start(), matching the global neighbor's order and the
+    // spawn-time materialize this was factored out of. A no-op when `bfd
+    // enabled` is unset or no BFD client is wired (placeholder spawn / tests).
+    vrf.bfd_reconcile(ident);
+}
+
 /// Build `Peer` objects from `cfg.neighbors` and insert them into
 /// `vrf.peers`. Calls `peer.start()` on each — that arms the
 /// idle-hold timer; once it fires the FSM event lands on
-/// `vrf.tx`.
+/// `vrf.tx`. Behaviour-preserving wrapper over
+/// [`resolve_vrf_peer_config`] + [`insert_started_peer`] — the same two
+/// primitives the runtime add path uses, so spawn-time and post-spawn
+/// peers are built identically.
 fn materialize_peers(
     vrf: &mut BgpVrf,
     cfg: &BgpVrfConfig,
     groups: &BTreeMap<String, NeighborGroup>,
 ) -> usize {
-    use super::super::peer::{Peer, PeerType};
-    use super::super::peer_key::PeerKey;
-    use bgp_packet::{Afi, AfiSafi, AfiSafis, Safi};
-
     let mut count = 0usize;
     for (addr, nbr_cfg) in &cfg.neighbors {
-        // Resolve the optionally-referenced neighbor-group once. Its
-        // attributes act as a fallback layer beneath the neighbor's own —
-        // the same precedence the global neighbor uses, except a CE peer's
-        // group is resolved here at materialization (and re-resolved on the
-        // next respawn) rather than swept live, because the group lives on
-        // the global `Bgp` and these peers run in a separate per-VRF task.
-        let group = nbr_cfg.peer_group().and_then(|name| groups.get(name));
-
-        // `Peer::start()` gates on `remote_as != 0` already, but
-        // skipping the insert entirely keeps the per-VRF peer map
-        // free of dormant rows the show path would have to render
-        // as "remote-as: unset". When the operator later types
-        // the missing leaf the follow-up commit re-runs
-        // `materialize_peers` and the peer arrives. The neighbor's own
-        // `remote-as` wins; otherwise inherit the group's (so a peer-group
-        // that carries `remote-as` makes its members live without a
-        // per-neighbor leaf).
-        let Some(remote_as) = nbr_cfg
-            .remote_as
-            .or_else(|| group.and_then(|g| g.remote_as))
+        let Some((remote_as, config, knobs)) = resolve_vrf_peer_config(addr, nbr_cfg, groups)
         else {
             tracing::debug!(
                 vrf = %vrf.name,
@@ -446,236 +821,7 @@ fn materialize_peers(
             );
             continue;
         };
-        let mut peer = Peer::new(
-            0,
-            vrf.asn,
-            vrf.router_id,
-            remote_as,
-            *addr,
-            // Per-VRF hostnames aren't a thing today; the global
-            // hostname / OS hostname applies to every session.
-            None,
-            vrf.tx.clone(),
-            vrf.ctx.clone(),
-        );
-        // `Peer::new` defaults `peer_type` to IBGP and, unlike the global
-        // `config_remote_as` path, nothing else recomputes it for a VRF
-        // peer — so derive it here from the AS comparison. Without this a
-        // per-VRF PE-CE *eBGP* session (remote-as != the VRF's AS) is
-        // treated as iBGP: its routes are marked internal, carry no
-        // AS-path prepend, and (the symptom) are never re-advertised to
-        // the iBGP VPNv4 core, so an Inter-AS Option A remote-AS customer
-        // prefix never reaches the far PE.
-        peer.peer_type = if remote_as == vrf.asn {
-            PeerType::IBGP
-        } else {
-            PeerType::EBGP
-        };
-        // Adopt the staged config wholesale. `BgpVrfNeighborConfig::config`
-        // IS a `PeerConfig`, so every knob the per-VRF schema stages —
-        // description, peer-group binding, `timers`, and the per-family
-        // `afi-safi` knobs — lands here in one move, and importing another
-        // knob from the global neighbor needs no line of its own.
-        //
-        // Anything the schema doesn't expose keeps its
-        // `PeerConfig::default()` value, which is exactly what `Peer::new`
-        // had just installed, so this is behaviour-preserving for
-        // unconfigured fields.
-        //
-        // Done before `start()` below so the first idle-hold timer a peer
-        // arms already honours a configured `idle-hold-time`; arming from
-        // the default and fixing up afterwards would leave the first dial
-        // on the wrong cadence.
-        //
-        // Two things this deliberately does NOT carry:
-        //   - MRAI. Advertisement pacing comes from the `AdvInterval`
-        //     snapshot on the peer, which per-VRF tasks have no plumbing
-        //     for, so a CE session still runs the stock 30s eBGP / 5s iBGP
-        //     cadence.
-        //   - Policy / prefix-set names. Those need a policy-actor
-        //     Register to resolve, and `BgpVrf` holds no `policy_tx`; a
-        //     staged name would sit inert. They stay out of the schema
-        //     until that plumbing exists.
-        peer.config = nbr_cfg.config.clone();
-
-        // Derive the negotiated address-family set for this CE peer.
-        // `Peer::new` defaults to IPv4 unicast only, which is wrong for
-        // an IPv6 CE peer — so resolve the family set in three layers,
-        // lowest precedence first (mirroring `neighbor_group::effective_mp`
-        // for the global neighbor, but with an address-derived base):
-        //
-        //   1. base = the peer's own address family (an IPv6 peer →
-        //      IPv6 unicast, an IPv4 peer → IPv4 unicast). Unlike the
-        //      global neighbor we deliberately do NOT force IPv4 unicast
-        //      on for a v6 peer.
-        //   2. the referenced neighbor-group's `afi-safi` opinions
-        //      (`enabled true` adds a family, `false` removes it).
-        //   3. the per-neighbor explicit `afi-safi <fam> enabled`
-        //      statements — "any field set on the neighbor itself wins".
-        //
-        // The family set is a Multiprotocol capability fixed at OPEN
-        // time; peers are (re)materialized before the session
-        // establishes, so the resolved set rides the first OPEN with no
-        // bounce needed.
-        let base = if addr.is_ipv6() {
-            AfiSafi::new(Afi::Ip6, Safi::Unicast)
-        } else {
-            AfiSafi::new(Afi::Ip, Safi::Unicast)
-        };
-        let mut mp = AfiSafis::new();
-        mp.insert(base, true);
-        if let Some(g) = group {
-            for (fam, entry) in &g.afi_safi {
-                if entry.enabled {
-                    mp.insert(*fam, true);
-                } else {
-                    mp.remove(fam);
-                }
-            }
-        }
-        for (fam, enabled) in &nbr_cfg.config.mp_explicit {
-            if *enabled {
-                mp.insert(*fam, true);
-            } else {
-                mp.remove(fam);
-            }
-        }
-        // `mp` is the *resolved* set, so it is computed here rather than
-        // staged; `mp_explicit` (the verbatim statements it was resolved
-        // from) already arrived with the config adoption above.
-        peer.config.mp = mp;
-
-        // `next-hop-self` is the one imported knob that is not simply
-        // stored: like `mp`, the staged value is the *verbatim* statement
-        // and the effective value has to be resolved through
-        // neighbor-group precedence (explicit wins, else the group's
-        // per-family opinion, else off). The global neighbor does this in
-        // its config callback against `Bgp::neighbor_groups`; here the
-        // same helper runs against the `groups` map this function is
-        // already handed, so the precedence rule has one implementation.
-        //
-        // Resolve over the negotiated families plus any family carrying an
-        // explicit statement: a statement for a family that never
-        // negotiates is inert, but resolving it costs nothing and keeps
-        // the stored state honest if the family is enabled later.
-        let nhs_families: std::collections::BTreeSet<AfiSafi> = peer
-            .config
-            .mp
-            .0
-            .keys()
-            .copied()
-            .chain(peer.config.nhs_explicit.keys().copied())
-            .collect();
-        for fam in nhs_families {
-            let value =
-                super::super::neighbor_group::resolve_next_hop_self(groups, &peer.config, fam);
-            peer.config.sub.entry(fam).or_default().next_hop_self = value;
-        }
-
-        // Resolve + apply the inheritable session knobs (passive,
-        // ebgp-multihop, ttl-security, …) the same way the global
-        // neighbor does, layering the referenced neighbor-group under the
-        // peer's own explicit statements. `mp` and next-hop-self are done
-        // above (the VRF's base-family rule differs from the global one),
-        // so this covers everything else that is a pure peer mutation;
-        // auth and BFD knobs land in their own follow-ups.
-        super::super::neighbor_group::apply_inherited_session_knobs(groups, &mut peer);
-
-        vrf.peers.insert_with_key(PeerKey::Addr(*addr), peer);
-
-        // Bind the staged policy / prefix-set names and register a watch
-        // for each, so the actor resolves them and keeps them current.
-        //
-        // This MUST run after the insert, for the same reason `start()`
-        // does: `peer_policy_ident` encodes `peer.ident`, which
-        // `insert_with_key` is what assigns. Registering beforehand would
-        // key every peer's watch under ident 0, and the resolution would
-        // come back addressed to the first peer in the map — the exact
-        // shape of the bug fixed in #2071, but silent, because a
-        // mis-delivered policy just filters the wrong session's routes.
-        //
-        // The names go straight onto the peer's slots; the resolved set
-        // arrives later on `policy_rx` (see
-        // `BgpVrf::process_policy_msg`). Until it does the binding is
-        // deny-all, which is the same fail-closed posture the global
-        // neighbor has.
-        let ident = {
-            let peer = vrf.peers.get_mut(addr).expect("peer was just inserted");
-            for ((fam, kind), name) in &nbr_cfg.policy_refs {
-                use super::super::policy::InOut;
-                use super::super::vrf_config::VrfPolicyRef;
-                match kind {
-                    VrfPolicyRef::PolicyIn => {
-                        peer.policy_list_slot(*fam, InOut::Input).name = Some(name.clone())
-                    }
-                    VrfPolicyRef::PolicyOut => {
-                        peer.policy_list_slot(*fam, InOut::Output).name = Some(name.clone())
-                    }
-                    VrfPolicyRef::PrefixSetIn => {
-                        peer.prefix_set_slot(*fam, InOut::Input).name = Some(name.clone())
-                    }
-                    VrfPolicyRef::PrefixSetOut => {
-                        peer.prefix_set_slot(*fam, InOut::Output).name = Some(name.clone())
-                    }
-                }
-            }
-            peer.ident
-        };
-        // The TCP-AO key-chain name a resolved `ao_config` references, if
-        // any — captured here (the peer borrow ends with the `ident`
-        // block above) so the Register below can subscribe it. Resolving
-        // the actual key material waits for the actor's reply, handled in
-        // `BgpVrf::process_policy_msg`.
-        let ao_key_chain = vrf
-            .peers
-            .get(addr)
-            .and_then(|p| p.config.transport.ao_config.as_ref())
-            .map(|ao| ao.key_chain.clone())
-            .filter(|c| !c.is_empty());
-
-        if (!nbr_cfg.policy_refs.is_empty() || ao_key_chain.is_some())
-            && let Some(policy_tx) = vrf.policy_tx.clone()
-        {
-            let proto = vrf.policy_proto();
-            for ((fam, kind), name) in &nbr_cfg.policy_refs {
-                let _ = policy_tx.send(crate::policy::Message::Register {
-                    proto: proto.clone(),
-                    name: name.clone(),
-                    ident: super::super::config::peer_policy_ident(ident, Some(*fam)),
-                    policy_type: kind.policy_type(),
-                });
-            }
-            // TCP-AO key-chain: raw peer ident (matching the global
-            // neighbor) + the `KeyChain` policy type. The actor's reply
-            // lands on `policy_rx` and populates `resolved_ao_key`.
-            if let Some(chain) = &ao_key_chain {
-                let _ = policy_tx.send(crate::policy::Message::Register {
-                    proto: proto.clone(),
-                    name: chain.clone(),
-                    ident,
-                    policy_type: crate::policy::PolicyType::KeyChain(
-                        crate::policy::KeyChainScope::BgpNeighbor,
-                    ),
-                });
-            }
-        }
-
-        // `PeerMap::insert_with_key` assigns the stable ident used in every
-        // timer/FSM message. Starting before insertion leaves every peer at
-        // Peer::new's ident 0, so a second neighbor's Start events are
-        // delivered to the first neighbor and the second session never
-        // leaves Idle/Active.
-        vrf.peers
-            .get_mut(addr)
-            .expect("peer was just inserted")
-            .start();
-
-        // Bring up BFD for this CE if configured. After the ident is
-        // assigned (the session key derives from `peer.address`, but the
-        // subscription is tracked by ident) and after start(), matching
-        // the global neighbor's order. A no-op when `bfd enabled` is
-        // unset or no BFD client is wired (placeholder spawn / tests).
-        vrf.bfd_reconcile(ident);
+        insert_started_peer(vrf, addr, remote_as, config, &knobs, &nbr_cfg.policy_refs);
         count += 1;
     }
     count
@@ -1974,5 +2120,188 @@ mod tests {
             )
             .is_empty()
         );
+    }
+
+    // ---- compute_vrf_neighbor_diff ----
+
+    fn nbr(remote_as: Option<u32>) -> super::super::super::vrf_config::BgpVrfNeighborConfig {
+        super::super::super::vrf_config::BgpVrfNeighborConfig {
+            remote_as,
+            ..Default::default()
+        }
+    }
+
+    fn diff_addr(s: &str) -> std::net::IpAddr {
+        s.parse().unwrap()
+    }
+
+    /// A neighbor present only in `after` (with a resolvable remote-as) is
+    /// an add; nothing is removed or reconfigured.
+    #[test]
+    fn neighbor_diff_classifies_add() {
+        let groups = BTreeMap::new();
+        let before = BTreeMap::new();
+        let mut after = BTreeMap::new();
+        after.insert(diff_addr("192.0.2.1"), nbr(Some(65001)));
+
+        let diff = compute_vrf_neighbor_diff(&before, &groups, &after, &groups);
+        assert_eq!(diff.adds.len(), 1);
+        assert_eq!(diff.adds[0].addr, diff_addr("192.0.2.1"));
+        assert_eq!(diff.adds[0].remote_as, 65001);
+        assert!(diff.removes.is_empty());
+        assert!(diff.reconfigures.is_empty());
+    }
+
+    /// A neighbor present only in `before` (that resolved to a peer) is a
+    /// remove.
+    #[test]
+    fn neighbor_diff_classifies_remove() {
+        let groups = BTreeMap::new();
+        let mut before = BTreeMap::new();
+        before.insert(diff_addr("192.0.2.1"), nbr(Some(65001)));
+        let after = BTreeMap::new();
+
+        let diff = compute_vrf_neighbor_diff(&before, &groups, &after, &groups);
+        assert_eq!(diff.removes, vec![diff_addr("192.0.2.1")]);
+        assert!(diff.adds.is_empty());
+        assert!(diff.reconfigures.is_empty());
+    }
+
+    /// A neighbor in both, but with a differing resolved config
+    /// (remote-as here), is a reconfigure — never an add+remove.
+    #[test]
+    fn neighbor_diff_classifies_reconfigure() {
+        let groups = BTreeMap::new();
+        let mut before = BTreeMap::new();
+        before.insert(diff_addr("192.0.2.1"), nbr(Some(65001)));
+        let mut after = BTreeMap::new();
+        after.insert(diff_addr("192.0.2.1"), nbr(Some(65002)));
+
+        let diff = compute_vrf_neighbor_diff(&before, &groups, &after, &groups);
+        assert_eq!(diff.reconfigures.len(), 1);
+        assert_eq!(diff.reconfigures[0].remote_as, 65002);
+        assert!(diff.adds.is_empty());
+        assert!(diff.removes.is_empty());
+    }
+
+    /// An identical neighbor map yields no work.
+    #[test]
+    fn neighbor_diff_identical_is_empty() {
+        let groups = BTreeMap::new();
+        let mut m = BTreeMap::new();
+        m.insert(diff_addr("192.0.2.1"), nbr(Some(65001)));
+        let diff = compute_vrf_neighbor_diff(&m, &groups, &m.clone(), &groups);
+        assert!(diff.adds.is_empty() && diff.removes.is_empty() && diff.reconfigures.is_empty());
+    }
+
+    /// A neighbor with no resolvable remote-as never materializes a peer,
+    /// so it is absent from every set — adding or removing such a bare
+    /// neighbor entry is a no-op for the runtime.
+    #[test]
+    fn neighbor_diff_ignores_neighbor_without_remote_as() {
+        let groups = BTreeMap::new();
+        let before = BTreeMap::new();
+        let mut after = BTreeMap::new();
+        after.insert(diff_addr("192.0.2.1"), nbr(None));
+
+        let diff = compute_vrf_neighbor_diff(&before, &groups, &after, &groups);
+        assert!(diff.adds.is_empty() && diff.removes.is_empty() && diff.reconfigures.is_empty());
+    }
+
+    /// A neighbor that gains a remote-as (was bare, now resolvable) is an
+    /// add; one that loses it is a remove — the "resolved presence" view,
+    /// not the raw map membership.
+    #[test]
+    fn neighbor_diff_tracks_resolved_presence() {
+        let groups = BTreeMap::new();
+        let mut before = BTreeMap::new();
+        before.insert(diff_addr("192.0.2.1"), nbr(None));
+        let mut after = BTreeMap::new();
+        after.insert(diff_addr("192.0.2.1"), nbr(Some(65001)));
+
+        let diff = compute_vrf_neighbor_diff(&before, &groups, &after, &groups);
+        assert_eq!(diff.adds.len(), 1, "bare → remote-as is an add");
+        assert!(diff.removes.is_empty() && diff.reconfigures.is_empty());
+
+        // Inverse: remote-as → bare is a remove.
+        let diff = compute_vrf_neighbor_diff(&after, &groups, &before, &groups);
+        assert_eq!(diff.removes, vec![diff_addr("192.0.2.1")]);
+        assert!(diff.adds.is_empty() && diff.reconfigures.is_empty());
+    }
+
+    /// A neighbor-group edit that changes a member's resolved config
+    /// surfaces as a reconfigure even though the per-neighbor entry is
+    /// byte-for-byte unchanged (resolution differs across the two group
+    /// snapshots).
+    #[test]
+    fn neighbor_diff_detects_group_driven_reconfigure() {
+        use super::super::super::neighbor_group::NeighborGroup;
+        let mut before_groups = BTreeMap::new();
+        before_groups.insert(
+            "g1".to_string(),
+            NeighborGroup {
+                remote_as: Some(65001),
+                ..Default::default()
+            },
+        );
+        let mut after_groups = BTreeMap::new();
+        after_groups.insert(
+            "g1".to_string(),
+            NeighborGroup {
+                remote_as: Some(65002),
+                ..Default::default()
+            },
+        );
+
+        // Neighbor references the group and has no own remote-as, so it
+        // inherits the group's — which changed across the snapshots.
+        let mut n = nbr(None);
+        n.config.neighbor_group = Some("g1".to_string());
+        let mut m = BTreeMap::new();
+        m.insert(diff_addr("192.0.2.1"), n);
+
+        let diff = compute_vrf_neighbor_diff(&m, &before_groups, &m.clone(), &after_groups);
+        assert_eq!(diff.reconfigures.len(), 1);
+        assert_eq!(diff.reconfigures[0].remote_as, 65002);
+    }
+
+    /// A knob-only edit (here `passive`, part of the resolved
+    /// `InheritableKnobs`) with an unchanged remote-as still surfaces as a
+    /// reconfigure — the signature covers the knobs.
+    #[test]
+    fn neighbor_diff_detects_knob_only_reconfigure() {
+        let groups = BTreeMap::new();
+        let mut before = BTreeMap::new();
+        before.insert(diff_addr("192.0.2.1"), nbr(Some(65001)));
+        let mut after_nbr = nbr(Some(65001));
+        after_nbr.config.knobs_explicit.passive = Some(true);
+        let mut after = BTreeMap::new();
+        after.insert(diff_addr("192.0.2.1"), after_nbr);
+
+        let diff = compute_vrf_neighbor_diff(&before, &groups, &after, &groups);
+        assert_eq!(diff.reconfigures.len(), 1);
+        assert!(diff.adds.is_empty() && diff.removes.is_empty());
+    }
+
+    /// A policy-ref-only edit (unchanged remote-as / config / knobs) still
+    /// surfaces as a reconfigure — the signature covers `policy_refs`.
+    #[test]
+    fn neighbor_diff_detects_policy_only_reconfigure() {
+        use super::super::super::vrf_config::VrfPolicyRef;
+        use bgp_packet::{Afi, AfiSafi, Safi};
+        let groups = BTreeMap::new();
+        let mut before = BTreeMap::new();
+        before.insert(diff_addr("192.0.2.1"), nbr(Some(65001)));
+        let mut after_nbr = nbr(Some(65001));
+        after_nbr.policy_refs.insert(
+            (AfiSafi::new(Afi::Ip, Safi::Unicast), VrfPolicyRef::PolicyIn),
+            "pol-in".to_string(),
+        );
+        let mut after = BTreeMap::new();
+        after.insert(diff_addr("192.0.2.1"), after_nbr);
+
+        let diff = compute_vrf_neighbor_diff(&before, &groups, &after, &groups);
+        assert_eq!(diff.reconfigures.len(), 1);
+        assert!(diff.adds.is_empty() && diff.removes.is_empty());
     }
 }

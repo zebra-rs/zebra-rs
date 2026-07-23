@@ -942,8 +942,9 @@ pub fn config_vrf_neighbor_disable_connected_check(
 // flag; the two structured ones (allowas-in, remove-private-as) go
 // through the shared `InheritableKnobs::stage_*` state machines the
 // global neighbor's callbacks now also use, so the get-or-insert /
-// revert-to-default behaviour has one definition. `materialize_peers`
-// resolves and applies all of them via `apply_inherited_session_knobs`.
+// revert-to-default behaviour has one definition. `resolve_vrf_peer_config`
+// resolves all of them (via `resolve_inherited_knobs`) and the task-side
+// insert applies them (via `apply_resolved_session_knobs`).
 
 pub fn config_vrf_neighbor_as_override(bgp: &mut Bgp, mut args: Args, op: ConfigOp) -> Option<()> {
     let vrf = args.string()?;

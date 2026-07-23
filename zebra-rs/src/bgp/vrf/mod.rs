@@ -32,5 +32,6 @@ pub use inst::{
 };
 pub use msg::BgpGlobalMsg;
 pub use spawn::{
-    BgpVrfHandle, compute_vrf_diff, compute_vrf_respawn, despawn_bgp_vrf, spawn_bgp_vrf,
+    BgpVrfHandle, VrfNeighborDiff, compute_vrf_diff, compute_vrf_neighbor_diff,
+    compute_vrf_respawn, despawn_bgp_vrf, spawn_bgp_vrf,
 };

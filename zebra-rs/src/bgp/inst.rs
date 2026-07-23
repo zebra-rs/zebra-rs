@@ -157,6 +157,21 @@ pub(crate) fn peer_index_register(
     }
 }
 
+/// Inverse of [`peer_index_register`]: drop the `peer_index` row for
+/// `addr` only when it is still claimed by `vrf`. The guard avoids a
+/// stale RemovePeer for `vrfA` clobbering a fresh claim `vrfB` made on
+/// the same address after a move — the most-recent-writer semantics of
+/// `peer_index_register` win.
+pub(crate) fn peer_index_unregister(
+    index: &mut BTreeMap<std::net::IpAddr, String>,
+    vrf: &str,
+    addr: std::net::IpAddr,
+) {
+    if index.get(&addr).is_some_and(|owner| owner == vrf) {
+        index.remove(&addr);
+    }
+}
+
 /// Append `export_rts` to `attr.ecom` as Route-Target extended
 /// communities (RFC 4360 §4.1 — subtype `0x02`). RTs share the
 /// 6-octet on-wire encoding with RDs; the `From<RouteDistinguisher>`
@@ -2519,6 +2534,18 @@ impl Bgp {
             self.router_id,
             self.asn,
         );
+        // Incremental per-neighbor apply for VRFs that stay running at the
+        // task level (not spawned, despawned, or respawned this
+        // transaction). A neighbor add/remove/edit no longer forces a
+        // respawn (`runtime_structure_eq` dropped the neighbor term); apply
+        // it to the live task instead — the per-VRF equivalent of the
+        // global neighbor path, resolved GLOBAL-side against
+        // `neighbor_groups` and shipped as `AddPeer`/`RemovePeer`/
+        // `ReconfigurePeer`. Done BEFORE the despawn/respawn mutations
+        // below so a respawned VRF (which re-materializes every neighbor at
+        // spawn) is correctly skipped.
+        self.apply_vrf_neighbor_diffs(&to_respawn);
+
         // Reuse the full teardown/spawn path: it unregisters the old show
         // client, purges exports before label reuse, clears peer_index, then
         // registers fresh peers/show routing from final config.
@@ -2625,6 +2652,89 @@ impl Bgp {
         // Originate / withdraw config-driven MUP DSD segment routes now the
         // VRF set (and its SIDs / kernel context) may have changed.
         self.reconcile_mup_segment();
+    }
+
+    /// Apply per-neighbor config changes incrementally to every VRF that
+    /// stays running unchanged at the task level this transaction. For
+    /// each such VRF, diff the baseline neighbors against the desired ones
+    /// (resolving each side against its own neighbor-group snapshot) and
+    /// send the running task an `AddPeer` / `RemovePeer` /
+    /// `ReconfigurePeer` per delta — the per-VRF twin of the global
+    /// neighbor path, which mutates a live peer directly. `to_respawn`
+    /// names the VRFs already handled by the full teardown/spawn path
+    /// (they re-materialize every neighbor at spawn), so they are skipped.
+    ///
+    /// Resolution happens here, on the global side, because the VRF task
+    /// holds no neighbor-group map; the resolved `(remote_as, PeerConfig,
+    /// knobs, policy_refs)` travels in the message. `RegisterPeer` /
+    /// `UnregisterPeer` are applied directly to `peer_index` (we are
+    /// already the global task, so no round-trip through `global_tx` is
+    /// needed) so the accept dispatcher routes inbound connects correctly.
+    fn apply_vrf_neighbor_diffs(&mut self, to_respawn: &[String]) {
+        use super::vrf::msg::BgpVrfMsg;
+
+        // Collect the resolved diffs first so the `neighbor_groups` /
+        // `vrf_commit_baseline` borrows are released before the dispatch
+        // loop mutates `peer_index`.
+        let mut plan: Vec<(String, super::vrf::VrfNeighborDiff)> = Vec::new();
+        for (name, desired) in &self.vrfs {
+            // Only VRFs already running (not newly spawned this commit) …
+            if !self.vrf_registry.contains_key(name) {
+                continue;
+            }
+            // … and not being fully respawned (that path re-materializes
+            // every neighbor from final config).
+            if to_respawn.iter().any(|n| n == name) {
+                continue;
+            }
+            let Some(baseline) = self.vrf_commit_baseline.get(name) else {
+                continue;
+            };
+            let diff = super::vrf::compute_vrf_neighbor_diff(
+                &baseline.neighbors,
+                &self.vrf_neighbor_group_commit_baseline,
+                &desired.neighbors,
+                &self.neighbor_groups,
+            );
+            if !diff.adds.is_empty() || !diff.removes.is_empty() || !diff.reconfigures.is_empty() {
+                plan.push((name.clone(), diff));
+            }
+        }
+
+        for (name, diff) in plan {
+            for peer in diff.adds {
+                if let Some(handle) = self.vrf_registry.get(&name) {
+                    let _ = handle.inbox.send(BgpVrfMsg::AddPeer {
+                        addr: peer.addr,
+                        remote_as: peer.remote_as,
+                        config: Box::new(peer.config),
+                        knobs: Box::new(peer.knobs),
+                        policy_refs: peer.policy_refs,
+                    });
+                }
+                // Route inbound `:179` connects from this IP to the VRF.
+                peer_index_register(&mut self.peer_index, name.clone(), peer.addr);
+            }
+            for peer in diff.reconfigures {
+                if let Some(handle) = self.vrf_registry.get(&name) {
+                    let _ = handle.inbox.send(BgpVrfMsg::ReconfigurePeer {
+                        addr: peer.addr,
+                        remote_as: peer.remote_as,
+                        config: Box::new(peer.config),
+                        knobs: Box::new(peer.knobs),
+                        policy_refs: peer.policy_refs,
+                    });
+                }
+                // The address→VRF mapping is unchanged by a reconfigure,
+                // so `peer_index` needs no update.
+            }
+            for addr in diff.removes {
+                if let Some(handle) = self.vrf_registry.get(&name) {
+                    let _ = handle.inbox.send(BgpVrfMsg::RemovePeer { addr });
+                }
+                peer_index_unregister(&mut self.peer_index, &name, addr);
+            }
+        }
     }
 
     /// Withdraw every export a despawning VRF left in the VPNv4/v6
@@ -6042,6 +6152,9 @@ impl Bgp {
             super::vrf::BgpGlobalMsg::RegisterPeer { vrf, addr } => {
                 peer_index_register(&mut self.peer_index, vrf, addr);
             }
+            super::vrf::BgpGlobalMsg::UnregisterPeer { vrf, addr } => {
+                peer_index_unregister(&mut self.peer_index, &vrf, addr);
+            }
             // VRF-first MUP origination: a per-VRF task built a controller ST
             // route and exported it. Stamp the RD / export-RTs / controller
             // next-hop and promote it into the SAFI-85 Loc-RIB + advertise.
@@ -6365,6 +6478,24 @@ mod tests {
         peer_index_register(&mut index, "vrfA".to_string(), addr("192.0.2.1"));
         assert_eq!(index.get(&addr("192.0.2.1")), Some(&"vrfA".to_string()));
         assert_eq!(index.len(), 1);
+    }
+
+    #[test]
+    fn unregister_drops_the_owning_mapping() {
+        let mut index: BTreeMap<IpAddr, String> = BTreeMap::new();
+        peer_index_register(&mut index, "vrfA".to_string(), addr("192.0.2.1"));
+        super::peer_index_unregister(&mut index, "vrfA", addr("192.0.2.1"));
+        assert!(index.is_empty());
+    }
+
+    #[test]
+    fn unregister_leaves_a_reclaimed_mapping_alone() {
+        // A stale RemovePeer for vrfA must not clobber a fresh claim vrfB
+        // made on the same address after a move.
+        let mut index: BTreeMap<IpAddr, String> = BTreeMap::new();
+        peer_index_register(&mut index, "vrfB".to_string(), addr("192.0.2.1"));
+        super::peer_index_unregister(&mut index, "vrfA", addr("192.0.2.1"));
+        assert_eq!(index.get(&addr("192.0.2.1")), Some(&"vrfB".to_string()));
     }
 
     /// Helper that takes a `BgpAttr` and tags it with one
