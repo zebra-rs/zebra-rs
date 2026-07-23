@@ -204,6 +204,23 @@ pub struct BgpVrf {
     /// Our half of the reply channel, kept so `subscribe_policy` can
     /// hand a clone to the actor (and a respawn can re-subscribe).
     policy_reply_tx: UnboundedSender<crate::policy::PolicyRx>,
+    /// Sender toward the BFD subsystem, set by [`Self::set_bfd_client`]
+    /// at spawn. `None` in unit tests / when BFD is unavailable, which
+    /// simply means CE peers never bring up a BFD session.
+    ///
+    /// Per-VRF BFD is single-hop only: the BFD `SessionKey` has no
+    /// VRF/table dimension and the daemon's socket is not VRF-bound, so
+    /// a session is disambiguated (and made reachable) purely by the
+    /// egress ifindex of a directly-connected CE. Multihop, which keys
+    /// on ifindex 0, would conflate overlapping-address VRFs and can't
+    /// egress a VRF-only route, so it is refused at config time.
+    pub bfd_client_tx: Option<UnboundedSender<crate::bfd::inst::ClientReq>>,
+    /// BFD state-change events for THIS VRF's sessions. Each Subscribe
+    /// carries `bfd_notifier` as the notifier, and the client id is
+    /// `bfd-vrf:<name>` so two VRFs with overlapping CE addresses get
+    /// distinct subscriptions.
+    pub bfd_event_rx: UnboundedReceiver<crate::bfd::inst::BfdEvent>,
+    bfd_notifier: UnboundedSender<crate::bfd::inst::BfdEvent>,
     /// VRF-first MUP origination tracking: per PFCP SEID, the RD-free ST
     /// prefixes this VRF exported to the global SAFI-85 RIB. Lets a Session
     /// Deletion / Modification (`MupWithdrawOriginate`) withdraw exactly the
@@ -730,6 +747,7 @@ impl BgpVrf {
         let (inbox_tx, global_rx) = mpsc::unbounded_channel();
         let (tx, rx) = mpsc::channel(8192);
         let policy_chan = crate::policy::PolicyRxChannel::new();
+        let (bfd_notifier, bfd_event_rx) = mpsc::unbounded_channel();
         let vrf = Self {
             name,
             ctx,
@@ -768,6 +786,9 @@ impl BgpVrf {
             policy_tx: None,
             policy_rx: policy_chan.rx,
             policy_reply_tx: policy_chan.tx,
+            bfd_client_tx: None,
+            bfd_event_rx,
+            bfd_notifier,
             mup_originated: std::collections::BTreeMap::new(),
             mup_segment_prefix: None,
             mup_st1_isd_installed: std::collections::BTreeMap::new(),
@@ -1271,6 +1292,146 @@ impl BgpVrf {
         format!("bgp-vrf:{}", self.name)
     }
 
+    /// The BFD client id this VRF uses. Per-VRF so two VRFs with
+    /// overlapping CE addresses subscribe as distinct clients (the BFD
+    /// `subscribers` map keys on `(SessionKey, ClientId)`).
+    pub fn bfd_client(&self) -> String {
+        format!("bfd-vrf:{}", self.name)
+    }
+
+    /// Stash the BFD client sender at spawn so `materialize_peers` can
+    /// bring up CE sessions.
+    pub fn set_bfd_client(
+        &mut self,
+        bfd_client_tx: Option<UnboundedSender<crate::bfd::inst::ClientReq>>,
+    ) {
+        self.bfd_client_tx = bfd_client_tx;
+    }
+
+    /// Reconcile the BFD session for one CE peer, single-hop only.
+    ///
+    /// A trimmed per-VRF counterpart of the global `bfd_apply_ident`.
+    /// The differences, all forced by the single-hop scope:
+    ///   * `multihop` is always false — the config path refuses the
+    ///     `bfd multihop` leaf, and an inferred-multihop (iBGP) CE runs
+    ///     single-hop rather than a session that can't egress the VRF;
+    ///   * `min_ttl` is 255 (GTSM), never the multihop value;
+    ///   * the egress ifindex comes from this VRF's own
+    ///     `interface_addrs`, which is what both disambiguates
+    ///     overlapping VRFs and pins the BFD packet to the CE's link.
+    ///
+    /// There is no per-VRF `router bgp { bfd {} }` default, so the
+    /// per-neighbor config resolves over `PeerBfdConfig::default()`.
+    pub fn bfd_reconcile(&mut self, ident: usize) {
+        use crate::bfd::inst::ClientReq;
+        use crate::bfd::session::{EchoMode, SessionKey, SessionParams};
+        let Some(bfd_client_tx) = self.bfd_client_tx.clone() else {
+            return;
+        };
+        let Some(peer) = self.peers.get_by_idx(ident) else {
+            return;
+        };
+        let addr = peer.address;
+        let eff = peer
+            .config
+            .bfd
+            .resolve(&crate::bgp::peer::PeerBfdConfig::default());
+        let local = peer.config.transport.update_source.unwrap_or(match addr {
+            std::net::IpAddr::V4(_) => std::net::Ipv4Addr::UNSPECIFIED.into(),
+            std::net::IpAddr::V6(_) => std::net::Ipv6Addr::UNSPECIFIED.into(),
+        });
+        // Single-hop keying: the connected CE's veth ifindex. v6 CE
+        // (link-local) has no v4 lookup; falls back to 0 (session still
+        // forms, helper-backed Echo stays off) and re-reconciles when
+        // the interface is learned.
+        let ifindex = match addr {
+            std::net::IpAddr::V4(v4) => self.interface_addrs.ifindex_for_v4(v4).unwrap_or(0),
+            std::net::IpAddr::V6(_) => 0,
+        };
+        let key = SessionKey {
+            local,
+            remote: addr,
+            ifindex,
+            multihop: false,
+        };
+        let (echo_mode, echo_rx_us, echo_tx_us) = match eff.echo_mode {
+            Some(mode) => (
+                mode,
+                eff.echo_receive_ms.saturating_mul(1000),
+                eff.echo_transmit_ms.saturating_mul(1000),
+            ),
+            None => (EchoMode::Off, 0, 0),
+        };
+        let params = SessionParams {
+            dst_port: crate::bfd::socket::BFD_SINGLE_HOP_PORT,
+            min_ttl: 255,
+            echo_mode,
+            required_min_echo_rx_us: echo_rx_us,
+            echo_transmit_us: echo_tx_us,
+            detect_offload: eff.detect_offload,
+            ..SessionParams::default()
+        };
+
+        let current = self.peers.get_by_idx(ident).and_then(|p| p.bfd_session_key);
+        let want = eff.enable.then_some(key);
+        let want_params = eff.enable.then_some(params);
+        let client = self.bfd_client();
+        // A key/params change re-subscribes (BFD treats a repeat
+        // Subscribe on the same key as an in-place param update); a
+        // disable or key change unsubscribes the stale key first.
+        if let Some(old) = current
+            && want != current
+        {
+            let _ = bfd_client_tx.send(ClientReq::Unsubscribe {
+                client: client.clone(),
+                key: old,
+            });
+        }
+        if eff.enable {
+            let _ = bfd_client_tx.send(ClientReq::Subscribe {
+                client,
+                key,
+                params,
+                notifier: self.bfd_notifier.clone(),
+            });
+        }
+        if let Some(peer) = self.peers.get_mut_by_idx(ident) {
+            peer.bfd_session_key = want;
+            peer.bfd_session_params = want_params;
+        }
+    }
+
+    /// Every BFD key this VRF's peers currently subscribe, for the
+    /// synchronous unsubscribe on despawn — same ordering hazard as the
+    /// policy watches (a respawn reuses the client id + keys, so a late
+    /// unsubscribe from the outgoing incarnation would tear down the
+    /// incoming one's session).
+    pub fn bfd_session_list(&self) -> Vec<crate::bfd::session::SessionKey> {
+        self.peers
+            .idents()
+            .into_iter()
+            .filter_map(|idx| self.peers.get_by_idx(idx).and_then(|p| p.bfd_session_key))
+            .collect()
+    }
+
+    /// Handle a BFD state change for one of this VRF's CE sessions.
+    /// Mirrors the global `Bgp::process_bfd_event`: on a transition to
+    /// Down, tear the BGP session down (RFC 5882 §5).
+    pub fn process_bfd_event(&mut self, event: crate::bfd::inst::BfdEvent) {
+        let crate::bfd::inst::BfdEvent::StateChange { key, change } = event;
+        if change.from == change.to || change.to != bfd_packet::State::Down {
+            return;
+        }
+        let Some(peer) = self.peers.get_mut(&key.remote) else {
+            return;
+        };
+        let peer_idx = peer.ident;
+        peer.down_reason = Some(super::super::peer::PeerDownReason::BfdDown);
+        let _ = self
+            .tx
+            .try_send(Message::Event(peer_idx, super::super::peer::Event::Stop));
+    }
+
     /// Subscribe this VRF's reply channel with the policy actor and
     /// remember the sender so peers can register their bindings.
     ///
@@ -1397,6 +1558,11 @@ impl BgpVrf {
                     // the global task because we subscribed under our own
                     // proto — see `policy_rx`.
                     self.process_policy_msg(msg);
+                }
+                Some(event) = self.bfd_event_rx.recv() => {
+                    // BFD state change for one of this VRF's CE sessions;
+                    // a transition to Down tears the BGP session down.
+                    self.process_bfd_event(event);
                 }
                 Some(msg) = self.rx.recv() => {
                     self.process_msg(msg);

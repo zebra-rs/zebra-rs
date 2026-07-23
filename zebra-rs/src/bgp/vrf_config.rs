@@ -1038,6 +1038,83 @@ pub fn config_vrf_neighbor_remove_private_as_replace_as(
     Some(())
 }
 
+// BFD, single-hop only. The values stage onto the peer's `config.bfd`
+// (a PeerConfig field, so they ride the wholesale config adoption); the
+// session is brought up by `materialize_peers` via `BgpVrf::bfd_reconcile`.
+// `multihop` is refused — per-VRF BFD keys on the CE's egress ifindex,
+// which multihop (ifindex 0) does not have.
+
+pub fn config_vrf_neighbor_bfd_enabled(bgp: &mut Bgp, mut args: Args, op: ConfigOp) -> Option<()> {
+    let vrf = args.string()?;
+    let addr = args.addr()?;
+    let cfg = vrf_entry(bgp, vrf, op)?;
+    let nbr = neighbor_entry(cfg, addr, op)?;
+    nbr.config.bfd.enable = match op {
+        ConfigOp::Set => Some(args.boolean()?),
+        ConfigOp::Delete => None,
+        _ => return Some(()),
+    };
+    Some(())
+}
+
+pub fn config_vrf_neighbor_bfd_echo_mode(
+    bgp: &mut Bgp,
+    mut args: Args,
+    op: ConfigOp,
+) -> Option<()> {
+    let vrf = args.string()?;
+    let addr = args.addr()?;
+    let value = args.string().unwrap_or_default();
+    let mode = super::config::parse_bfd_echo_mode(&value, op)?;
+    let cfg = vrf_entry(bgp, vrf, op)?;
+    let nbr = neighbor_entry(cfg, addr, op)?;
+    nbr.config.bfd.echo_mode = mode;
+    Some(())
+}
+
+pub fn config_vrf_neighbor_bfd_echo_tx(bgp: &mut Bgp, mut args: Args, op: ConfigOp) -> Option<()> {
+    let vrf = args.string()?;
+    let addr = args.addr()?;
+    let cfg = vrf_entry(bgp, vrf, op)?;
+    let nbr = neighbor_entry(cfg, addr, op)?;
+    nbr.config.bfd.echo_transmit_ms = match op {
+        ConfigOp::Set => Some(args.u32()?),
+        ConfigOp::Delete => None,
+        _ => return Some(()),
+    };
+    Some(())
+}
+
+pub fn config_vrf_neighbor_bfd_echo_rx(bgp: &mut Bgp, mut args: Args, op: ConfigOp) -> Option<()> {
+    let vrf = args.string()?;
+    let addr = args.addr()?;
+    let cfg = vrf_entry(bgp, vrf, op)?;
+    let nbr = neighbor_entry(cfg, addr, op)?;
+    nbr.config.bfd.echo_receive_ms = match op {
+        ConfigOp::Set => Some(args.u32()?),
+        ConfigOp::Delete => None,
+        _ => return Some(()),
+    };
+    Some(())
+}
+
+pub fn config_vrf_neighbor_bfd_detect_offload(
+    bgp: &mut Bgp,
+    mut args: Args,
+    op: ConfigOp,
+) -> Option<()> {
+    let vrf = args.string()?;
+    let addr = args.addr()?;
+    let cfg = vrf_entry(bgp, vrf, op)?;
+    let nbr = neighbor_entry(cfg, addr, op)?;
+    nbr.config.bfd.detect_offload = match op {
+        ConfigOp::Set => Some(args.boolean()?),
+        ConfigOp::Delete => None,
+        _ => return Some(()),
+    };
+    Some(())
+}
+
 /// `set router bgp vrf <NAME> neighbor <addr> afi-safi {ipv4|ipv6} enabled
 /// <BOOL>` — per-family activation for a CE peer, mirroring the global
 /// neighbor's `config_afi_safi`. Records the verbatim statement into the
