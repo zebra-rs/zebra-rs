@@ -1296,6 +1296,14 @@ pub(super) fn apply_inherited_session_knobs(
     // therefore discarded.
     let password = resolve_knob(groups, &peer.config, |k| k.password.clone());
     let _ = super::config::apply_md5_password(peer, password);
+    // TCP-AO: resolve the referenced key-chain *binding* onto
+    // `config.transport.ao_config`. The resolved key material
+    // (`resolved_ao_key`) is filled in later, when the policy actor
+    // answers the per-VRF key-chain Register — see
+    // `BgpVrf::process_policy_msg`'s KeyChain arm. Active/outbound only,
+    // same listener limitation as the MD5 password.
+    let ao_config = resolve_knob(groups, &peer.config, |k| k.ao_config.clone());
+    let _ = super::config::apply_ao_config(peer, ao_config);
 }
 
 pub(super) fn apply_inherited(

@@ -4343,6 +4343,14 @@ impl Bgp {
             super::vrf_config::config_vrf_neighbor_password,
         );
         self.callback_add(
+            "/router/bgp/vrf/neighbor/tcp-ao/key-chain",
+            super::vrf_config::config_vrf_neighbor_tcp_ao_key_chain,
+        );
+        self.callback_add(
+            "/router/bgp/vrf/neighbor/tcp-ao/include-tcp-options",
+            super::vrf_config::config_vrf_neighbor_tcp_ao_include_tcp_options,
+        );
+        self.callback_add(
             "/router/bgp/vrf/neighbor/as-override",
             super::vrf_config::config_vrf_neighbor_as_override,
         );

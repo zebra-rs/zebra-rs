@@ -485,6 +485,41 @@ module zebra-bgp-vrf {
            non-passive). Per-VRF passive-side auth needs a per-VRF listener
            socket (the FRR model) — a separate change.";
       }
+
+      container tcp-ao {
+        ext:help "TCP Authentication Option (RFC 5925)";
+        presence "Enable TCP-AO on this CE";
+        description
+          "TCP-AO for the PE-CE session, same shape as the global
+           neighbor. Active/outbound only, with the same shared-listener
+           caveat as `password`: the key is applied to the PE's connect
+           socket, not the passive listener, so the session comes up on
+           the PE-initiated connection.
+
+           The key-chain is resolved through the policy actor (the CE
+           peer's per-VRF task subscribes under `bgp-vrf:<name>`), so an
+           in-chain key rotation propagates without a reconfig.";
+        reference "RFC 5925, RFC 5926";
+        leaf key-chain {
+          ext:help "Key chain name";
+          type string;
+          mandatory true;
+          description
+            "Name of a key chain under /key-chains. Existence is not
+             enforced by the schema; an unresolved chain simply yields no
+             key (the dial goes out unauthenticated) until it appears.";
+        }
+        leaf include-tcp-options {
+          ext:help "Include TCP options in MAC";
+          type boolean;
+          default "true";
+          description
+            "If true (default) the TCP-AO MAC covers other TCP options;
+             false covers only the fixed header + data. Both endpoints
+             MUST agree. Same as the global neighbor.";
+          reference "RFC 5925 §3.1";
+        }
+      }
       list afi-safi {
         ext:help "Per-address-family activation for this CE peer";
         key "name";
