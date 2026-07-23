@@ -1,0 +1,45 @@
+# PE1 — the router under test (AS 65000). vrf-cust starts with ONE CE
+# neighbor (CE1); CE2 is added, given BFD, and removed at RUNTIME via
+# `vtyctl apply -c` (surgical set/delete), exercising the incremental
+# per-VRF neighbor path (AddPeer / ReconfigurePeer / RemovePeer) on a
+# task that keeps running the whole time — never a respawn, so CE1 must
+# stay Established throughout.
+#
+# Both PE-CE interfaces are enslaved to vrf-cust from the start; only the
+# BGP *neighbor* for CE2 is deferred, so adding it is a pure neighbor edit
+# (not a task-global change) and does not respawn the VRF task.
+vrf:
+- name: vrf-cust
+  ipv4:
+    route-target:
+      import:
+      - 65000:100
+      export:
+      - 65000:100
+interface:
+- if-name: lo
+  ipv4:
+    address: 1.1.1.1/32
+- if-name: ce1
+  vrf: vrf-cust
+  ipv4:
+    address: 10.1.0.1/30
+- if-name: ce2
+  vrf: vrf-cust
+  ipv4:
+    address: 10.2.0.1/30
+router:
+  bgp:
+    global:
+      as: 65000
+      router-id: 1.1.1.1
+    vrf:
+    - name: vrf-cust
+      rd: 65000:1
+      neighbor:
+      # Only CE1 at start. CE2 (10.2.0.2) is added at runtime.
+      - remote-address: 10.1.0.2
+        remote-as: 65001
+        afi-safi:
+        - name: ipv4
+          enabled: true
