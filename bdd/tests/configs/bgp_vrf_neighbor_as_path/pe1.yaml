@@ -1,0 +1,63 @@
+# PE1 (AS 65000) — exercises the three per-VRF neighbor AS-path knobs, one
+# per CE neighbor under `router bgp vrf vrf-cust neighbor X`:
+#   * CE1 (10.1.0.2) — `allowas-in`: CE1 prepends PE1's own AS (65000) onto
+#     10.0.1.9/32, so the route arrives with 65000 in the AS_PATH. Without
+#     allowas-in the RFC 4271 loop check drops it; with it, PE1 accepts it
+#     into the VRF Loc-RIB.
+#   * CE2 (10.2.0.2, AS 65001 — same as CE1) — `as-override`: on egress
+#     toward CE2, PE1 rewrites CE1's 65001 in the path to 65000, so the
+#     shared-AS CE2 accepts CE1's 10.0.1.1/32 instead of dropping it.
+#   * CE3 (10.3.0.2, AS 65003) — `remove-private-as`: on egress toward CE3,
+#     the private 65001 learned from CE1 is stripped, so CE3 sees a path
+#     with only 65000.
+vrf:
+- name: vrf-cust
+  ipv4:
+    route-target:
+      import:
+      - 65000:100
+      export:
+      - 65000:100
+interface:
+- if-name: lo
+  ipv4:
+    address: 1.1.1.1/32
+- if-name: ce1
+  vrf: vrf-cust
+  ipv4:
+    address: 10.1.0.1/30
+- if-name: ce2
+  vrf: vrf-cust
+  ipv4:
+    address: 10.2.0.1/30
+- if-name: ce3
+  vrf: vrf-cust
+  ipv4:
+    address: 10.3.0.1/30
+router:
+  bgp:
+    global:
+      as: 65000
+      router-id: 1.1.1.1
+    vrf:
+    - name: vrf-cust
+      rd: 65000:1
+      neighbor:
+      - remote-address: 10.1.0.2
+        remote-as: 65001
+        allowas-in: {}
+        afi-safi:
+        - name: ipv4
+          enabled: true
+      - remote-address: 10.2.0.2
+        remote-as: 65001
+        as-override: {}
+        afi-safi:
+        - name: ipv4
+          enabled: true
+      - remote-address: 10.3.0.2
+        remote-as: 65003
+        remove-private-as: {}
+        afi-safi:
+        - name: ipv4
+          enabled: true
