@@ -221,6 +221,12 @@ pub struct BgpVrf {
     /// distinct subscriptions.
     pub bfd_event_rx: UnboundedReceiver<crate::bfd::inst::BfdEvent>,
     bfd_notifier: UnboundedSender<crate::bfd::inst::BfdEvent>,
+    /// This VRF's snapshot of the key-chains its CE peers reference for
+    /// TCP-AO, populated from the policy actor's `PolicyRx::KeyChain`
+    /// replies (subscribed under `bgp-vrf:<name>`, so a chain edit is
+    /// delivered here rather than to the global task). Read to resolve
+    /// each peer's `resolved_ao_key`.
+    pub key_chains: std::collections::BTreeMap<String, crate::policy::KeyChain>,
     /// VRF-first MUP origination tracking: per PFCP SEID, the RD-free ST
     /// prefixes this VRF exported to the global SAFI-85 RIB. Lets a Session
     /// Deletion / Modification (`MupWithdrawOriginate`) withdraw exactly the
@@ -789,6 +795,7 @@ impl BgpVrf {
             bfd_client_tx: None,
             bfd_event_rx,
             bfd_notifier,
+            key_chains: std::collections::BTreeMap::new(),
             mup_originated: std::collections::BTreeMap::new(),
             mup_segment_prefix: None,
             mup_st1_isd_installed: std::collections::BTreeMap::new(),
@@ -1278,8 +1285,56 @@ impl BgpVrf {
                     peer.rebuild_out_policy();
                 }
             }
-            // Key-chains and table-maps are not bound by per-VRF peers.
-            _ => {}
+            PolicyRx::KeyChain {
+                name, key_chain, ..
+            } => {
+                // A CE peer's TCP-AO key-chain resolved (or changed). Store
+                // the snapshot by name, then re-resolve every peer that
+                // references it. The ident in the reply is only for the
+                // actor's unregister matching; resolution is by name, like
+                // the global `apply_ao_refresh_all`.
+                if let Some(kc) = key_chain {
+                    self.key_chains.insert(name, kc);
+                } else {
+                    self.key_chains.remove(&name);
+                }
+                self.resolve_ao_keys();
+            }
+        }
+    }
+
+    /// Re-resolve `resolved_ao_key` for every CE peer from the current
+    /// key-chain snapshot, and bounce a live session whose key materially
+    /// changed so its next dial carries the new key. The per-VRF twin of
+    /// the global `apply_ao_refresh_all`, minus the listener install
+    /// (active/outbound only — the connect socket reads
+    /// `resolved_ao_key`). An Idle peer just adopts the new key on its
+    /// next connect, so it is not bounced.
+    fn resolve_ao_keys(&mut self) {
+        use super::super::peer::State;
+        let key_chains = self.key_chains.clone();
+        let mut bounce: Vec<usize> = Vec::new();
+        for ident in self.peers.idents() {
+            let Some(peer) = self.peers.get_mut_by_idx(ident) else {
+                continue;
+            };
+            let resolved = peer
+                .config
+                .transport
+                .ao_config
+                .as_ref()
+                .and_then(|ao| ao.resolve(&key_chains));
+            if peer.config.transport.resolved_ao_key != resolved {
+                if !matches!(peer.state, State::Idle) {
+                    bounce.push(ident);
+                }
+                peer.config.transport.resolved_ao_key = resolved;
+            }
+        }
+        for ident in bounce {
+            let _ = self
+                .tx
+                .try_send(Message::Event(ident, super::super::peer::Event::Stop));
         }
     }
 
@@ -1500,6 +1555,19 @@ impl BgpVrf {
                     PolicyType::PrefixSetOut,
                     *fam,
                 );
+            }
+            // TCP-AO key-chain watch. Keyed by the raw peer ident (not
+            // `peer_policy_ident`) matching the global neighbor, and by a
+            // distinct `KeyChain` policy_type, so it never collides with a
+            // policy/prefix-set watch even if the idents coincide.
+            if let Some(ao) = &peer.config.transport.ao_config
+                && !ao.key_chain.is_empty()
+            {
+                out.push((
+                    ao.key_chain.clone(),
+                    idx,
+                    PolicyType::KeyChain(crate::policy::KeyChainScope::BgpNeighbor),
+                ));
             }
         }
         out

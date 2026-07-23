@@ -334,6 +334,7 @@
 /router/bgp/vrf/neighbor/enforce-first-as	p-container
 /router/bgp/vrf/neighbor/ip-transparent	p-container
 /router/bgp/vrf/neighbor/neighbor-group	leaf
+/router/bgp/vrf/neighbor/password	leaf
 /router/bgp/vrf/neighbor/port	leaf
 /router/bgp/vrf/neighbor/remote-as	leaf
 /router/bgp/vrf/neighbor/remove-private-as	p-container
@@ -341,6 +342,9 @@
 /router/bgp/vrf/neighbor/remove-private-as/replace-as	leaf
 /router/bgp/vrf/neighbor/route-reflector	container
 /router/bgp/vrf/neighbor/route-reflector/client	leaf
+/router/bgp/vrf/neighbor/tcp-ao	p-container
+/router/bgp/vrf/neighbor/tcp-ao/include-tcp-options	leaf
+/router/bgp/vrf/neighbor/tcp-ao/key-chain	leaf
 /router/bgp/vrf/neighbor/timers	container
 /router/bgp/vrf/neighbor/timers/connect-retry-time	leaf
 /router/bgp/vrf/neighbor/timers/hold-time	leaf

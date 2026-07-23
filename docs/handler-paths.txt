@@ -245,12 +245,15 @@
 /router/bgp/vrf/neighbor/enforce-first-as
 /router/bgp/vrf/neighbor/ip-transparent
 /router/bgp/vrf/neighbor/neighbor-group
+/router/bgp/vrf/neighbor/password
 /router/bgp/vrf/neighbor/port
 /router/bgp/vrf/neighbor/remote-as
 /router/bgp/vrf/neighbor/remove-private-as
 /router/bgp/vrf/neighbor/remove-private-as/all
 /router/bgp/vrf/neighbor/remove-private-as/replace-as
 /router/bgp/vrf/neighbor/route-reflector/client
+/router/bgp/vrf/neighbor/tcp-ao/include-tcp-options
+/router/bgp/vrf/neighbor/tcp-ao/key-chain
 /router/bgp/vrf/neighbor/timers/connect-retry-time
 /router/bgp/vrf/neighbor/timers/hold-time
 /router/bgp/vrf/neighbor/timers/idle-hold-time

@@ -1038,6 +1038,81 @@ pub fn config_vrf_neighbor_remove_private_as_replace_as(
     Some(())
 }
 
+/// `set router bgp vrf <NAME> neighbor <addr> password <SECRET>` —
+/// TCP-MD5 for the CE session. Stages the verbatim secret onto
+/// `knobs_explicit.password`; `materialize_peers` resolves it over the
+/// neighbor-group and writes the effective value onto
+/// `config.transport.md5_password`, which the shared connect path applies
+/// to the VRF-bound outbound socket. Active/outbound only — see the YANG
+/// leaf and the FRR per-VRF-listener note.
+pub fn config_vrf_neighbor_password(bgp: &mut Bgp, mut args: Args, op: ConfigOp) -> Option<()> {
+    let vrf = args.string()?;
+    let addr = args.addr()?;
+    let cfg = vrf_entry(bgp, vrf, op)?;
+    let nbr = neighbor_entry(cfg, addr, op)?;
+    nbr.config.knobs_explicit.password = match op {
+        ConfigOp::Set => Some(args.string()?),
+        ConfigOp::Delete => None,
+        _ => return Some(()),
+    };
+    Some(())
+}
+
+/// `set router bgp vrf <NAME> neighbor <addr> tcp-ao key-chain <NAME>` —
+/// TCP-AO (RFC 5925) for the CE session, active/outbound only. Stages the
+/// key-chain name onto `knobs_explicit.ao_config`; `materialize_peers`
+/// resolves it onto `config.transport.ao_config` and registers the
+/// key-chain with the policy actor (proto `bgp-vrf:<name>`), whose reply
+/// fills in `resolved_ao_key`.
+pub fn config_vrf_neighbor_tcp_ao_key_chain(
+    bgp: &mut Bgp,
+    mut args: Args,
+    op: ConfigOp,
+) -> Option<()> {
+    let vrf = args.string()?;
+    let addr = args.addr()?;
+    let cfg = vrf_entry(bgp, vrf, op)?;
+    let nbr = neighbor_entry(cfg, addr, op)?;
+    match op {
+        ConfigOp::Set => {
+            let chain = args.string()?;
+            nbr.config
+                .knobs_explicit
+                .ao_config
+                .get_or_insert_with(super::auth::AoConfig::default)
+                .key_chain = chain;
+        }
+        ConfigOp::Delete => nbr.config.knobs_explicit.ao_config = None,
+        _ => {}
+    }
+    Some(())
+}
+
+/// `… tcp-ao include-tcp-options <BOOL>` — whether the AO MAC covers
+/// other TCP options. Seeds the container if it arrives before the
+/// key-chain leaf (order-independent within a commit).
+pub fn config_vrf_neighbor_tcp_ao_include_tcp_options(
+    bgp: &mut Bgp,
+    mut args: Args,
+    op: ConfigOp,
+) -> Option<()> {
+    let vrf = args.string()?;
+    let addr = args.addr()?;
+    let cfg = vrf_entry(bgp, vrf, op)?;
+    let nbr = neighbor_entry(cfg, addr, op)?;
+    let ao = nbr
+        .config
+        .knobs_explicit
+        .ao_config
+        .get_or_insert_with(super::auth::AoConfig::default);
+    ao.include_tcp_options = match op {
+        ConfigOp::Set => args.boolean()?,
+        ConfigOp::Delete => true,
+        _ => return Some(()),
+    };
+    Some(())
+}
+
 // BFD, single-hop only. The values stage onto the peer's `config.bfd`
 // (a PeerConfig field, so they ride the wholesale config adoption); the
 // session is brought up by `materialize_peers` via `BgpVrf::bfd_reconcile`.

@@ -14,6 +14,7 @@ ORPHAN leaf         /router/bgp/sharding/peer-sharding
   /router/bgp/color-policy  [p-container]
   /router/bgp/sr-policy  [p-container]
   /router/bgp/vrf/neighbor/afi-safi  [list]
+  /router/bgp/vrf/neighbor/tcp-ao  [p-container]
 
 Note: the bare /router/bgp/neighbor list path is deliberately absent
 here — it IS handled, registered as `callback_peer("", config_peer)`
@@ -21,8 +22,8 @@ in src/bgp/config.rs (an empty relative path, easy to miss when
 grepping for registrations), and it creates/tears down the peer when
 the list entry itself is set/deleted.
 
-Total settable schema nodes: 313
-Handled: 300
+Total settable schema nodes: 317
+Handled: 303
 Orphans: 3
 
 Note: these orphans have no config callback but are kept intentionally.
@@ -57,8 +58,19 @@ SessionKey has no VRF dimension and the daemon socket is not VRF-bound.
 `bfd multihop` is not offered (omitted from the schema, so the attempt fails YANG validation rather than reporting a misleading success). BgpVrf holds its own BFD
 client + event channels (client id `bfd-vrf:<name>`), and despawn
 withdraws the sessions synchronously ahead of a respawn's re-subscribe,
-the same ordering the policy watches use. Auth (password, tcp-ao) remains
-the last follow-up. The `neighbor-group` leaf was
+the same ordering the policy watches use. TCP-MD5 `password` is wired for the active/outbound direction only: the
+resolved secret lands on config.transport.md5_password, which the shared
+connect path applies to the VRF-bound dial socket. Passive/inbound auth
+needs a per-VRF listener socket (the FRR model) and is out of scope.
+TCP-AO (key-chain) is wired too, active/outbound only: the ao_config binding
+resolves onto config.transport.ao_config, materialize_peers registers the
+key-chain with the policy actor under proto bgp-vrf:<name> (KeyChain scope),
+and the PolicyRx::KeyChain reply populates resolved_ao_key (BgpVrf keeps its
+own key_chains snapshot + resolve_ao_keys, the per-VRF twin of
+apply_ao_refresh_all minus the listener install). Despawn withdraws the
+key-chain watches alongside the policy watches. This completes the non-AFI
+knob import; per-VRF passive-side MD5/AO (a per-VRF listener socket, the FRR
+model) is the one remaining architectural follow-up. The `neighbor-group` leaf was
 renamed from `peer-group` to match the global neighbor and the list it
 resolves against.
 

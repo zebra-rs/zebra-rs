@@ -578,7 +578,19 @@ fn materialize_peers(
             }
             peer.ident
         };
-        if !nbr_cfg.policy_refs.is_empty()
+        // The TCP-AO key-chain name a resolved `ao_config` references, if
+        // any — captured here (the peer borrow ends with the `ident`
+        // block above) so the Register below can subscribe it. Resolving
+        // the actual key material waits for the actor's reply, handled in
+        // `BgpVrf::process_policy_msg`.
+        let ao_key_chain = vrf
+            .peers
+            .get(addr)
+            .and_then(|p| p.config.transport.ao_config.as_ref())
+            .map(|ao| ao.key_chain.clone())
+            .filter(|c| !c.is_empty());
+
+        if (!nbr_cfg.policy_refs.is_empty() || ao_key_chain.is_some())
             && let Some(policy_tx) = vrf.policy_tx.clone()
         {
             let proto = vrf.policy_proto();
@@ -588,6 +600,19 @@ fn materialize_peers(
                     name: name.clone(),
                     ident: super::super::config::peer_policy_ident(ident, Some(*fam)),
                     policy_type: kind.policy_type(),
+                });
+            }
+            // TCP-AO key-chain: raw peer ident (matching the global
+            // neighbor) + the `KeyChain` policy type. The actor's reply
+            // lands on `policy_rx` and populates `resolved_ao_key`.
+            if let Some(chain) = &ao_key_chain {
+                let _ = policy_tx.send(crate::policy::Message::Register {
+                    proto: proto.clone(),
+                    name: chain.clone(),
+                    ident,
+                    policy_type: crate::policy::PolicyType::KeyChain(
+                        crate::policy::KeyChainScope::BgpNeighbor,
+                    ),
                 });
             }
         }
@@ -969,6 +994,181 @@ mod tests {
             !b.config.transport.ttl_security,
             "ttl-security must be refused when ebgp-multihop is set (mutual exclusion)"
         );
+    }
+
+    /// The TCP-MD5 `password` must resolve (explicit over group) onto
+    /// `config.transport.md5_password`, which the shared connect path
+    /// reads — that is what authenticates the PE's outbound dial.
+    #[tokio::test]
+    async fn materialize_peers_resolves_md5_password() {
+        use super::super::super::neighbor_group::{InheritableKnobs, NeighborGroup};
+        use super::super::super::vrf_config::{BgpVrfConfig, BgpVrfNeighborConfig};
+        use super::super::inst::BgpVrf;
+        use crate::context::ProtoContext;
+
+        let (global_tx, _global_rx) = unbounded_channel::<BgpGlobalMsg>();
+        let ctx = ProtoContext::default_table_no_rib();
+        let (_rib_tx, rib_rx) = unbounded_channel();
+        let (mut vrf, _inbox) = BgpVrf::new(
+            "v1".to_string(),
+            ctx,
+            Ipv4Addr::UNSPECIFIED,
+            65000,
+            16,
+            global_tx,
+            rib_rx,
+        );
+
+        // Group carries a password; one peer inherits it, one overrides.
+        let g = NeighborGroup {
+            knobs: InheritableKnobs {
+                password: Some("group-secret".to_string()),
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let mut groups = BTreeMap::new();
+        groups.insert("g1".to_string(), g);
+
+        let inherits: std::net::IpAddr = "192.0.2.1".parse().unwrap();
+        let overrides: std::net::IpAddr = "192.0.2.2".parse().unwrap();
+
+        let mut cfg = BgpVrfConfig::default();
+        cfg.neighbors.insert(inherits, {
+            let mut n = BgpVrfNeighborConfig {
+                remote_as: Some(65001),
+                ..Default::default()
+            };
+            n.config.neighbor_group = Some("g1".to_string());
+            n
+        });
+        cfg.neighbors.insert(overrides, {
+            let mut n = BgpVrfNeighborConfig {
+                remote_as: Some(65002),
+                ..Default::default()
+            };
+            n.config.neighbor_group = Some("g1".to_string());
+            n.config.knobs_explicit.password = Some("peer-secret".to_string());
+            n
+        });
+
+        materialize_peers(&mut vrf, &cfg, &groups);
+
+        assert_eq!(
+            vrf.peers
+                .get(&inherits)
+                .unwrap()
+                .config
+                .transport
+                .md5_password
+                .as_deref(),
+            Some("group-secret"),
+            "password inherited from the group"
+        );
+        assert_eq!(
+            vrf.peers
+                .get(&overrides)
+                .unwrap()
+                .config
+                .transport
+                .md5_password
+                .as_deref(),
+            Some("peer-secret"),
+            "explicit password beats the group's"
+        );
+    }
+
+    /// TCP-AO: a staged key-chain reference must land on
+    /// `config.transport.ao_config` at materialize, and a subsequent
+    /// `PolicyRx::KeyChain` reply (the policy actor answering the
+    /// per-VRF Register) must resolve `resolved_ao_key` — which is what
+    /// the connect socket applies.
+    #[tokio::test]
+    async fn tcp_ao_key_chain_resolves_on_reply() {
+        use super::super::super::vrf_config::{BgpVrfConfig, BgpVrfNeighborConfig};
+        use super::super::inst::BgpVrf;
+        use crate::bgp::auth::AoConfig;
+        use crate::context::ProtoContext;
+        use crate::policy::{CryptoAlgorithm, PolicyRx, PolicyType};
+        use crate::policy::{Key, KeyChain, KeyChainScope};
+
+        let (global_tx, _global_rx) = unbounded_channel::<BgpGlobalMsg>();
+        let ctx = ProtoContext::default_table_no_rib();
+        let (_rib_tx, rib_rx) = unbounded_channel();
+        let (mut vrf, _inbox) = BgpVrf::new(
+            "v1".to_string(),
+            ctx,
+            Ipv4Addr::UNSPECIFIED,
+            65000,
+            16,
+            global_tx,
+            rib_rx,
+        );
+
+        let addr: std::net::IpAddr = "192.0.2.1".parse().unwrap();
+        let mut cfg = BgpVrfConfig::default();
+        cfg.neighbors.insert(addr, {
+            let mut n = BgpVrfNeighborConfig {
+                remote_as: Some(65001),
+                ..Default::default()
+            };
+            n.config.knobs_explicit.ao_config = Some(AoConfig {
+                key_chain: "KC".to_string(),
+                include_tcp_options: true,
+            });
+            n
+        });
+
+        materialize_peers(&mut vrf, &cfg, &groups_none());
+
+        // Staged onto config; not resolved yet (no chain snapshot).
+        let peer = vrf.peers.get(&addr).unwrap();
+        assert_eq!(
+            peer.config
+                .transport
+                .ao_config
+                .as_ref()
+                .map(|a| &a.key_chain),
+            Some(&"KC".to_string()),
+        );
+        assert!(peer.config.transport.resolved_ao_key.is_none());
+
+        // The actor answers with the chain's key material.
+        let ident = vrf.peers.get(&addr).unwrap().ident;
+        let mut chain = KeyChain::default();
+        chain.keys.insert(
+            1,
+            Key {
+                algo: Some(CryptoAlgorithm::HmacSha256),
+                key_material: b"secret-material".to_vec(),
+                send_id: Some(10),
+                recv_id: Some(20),
+                ..Default::default()
+            },
+        );
+        vrf.process_policy_msg(PolicyRx::KeyChain {
+            name: "KC".to_string(),
+            ident,
+            policy_type: PolicyType::KeyChain(KeyChainScope::BgpNeighbor),
+            key_chain: Some(chain),
+        });
+
+        let resolved = vrf
+            .peers
+            .get(&addr)
+            .unwrap()
+            .config
+            .transport
+            .resolved_ao_key
+            .as_ref()
+            .expect("resolved_ao_key populated by the KeyChain reply");
+        assert_eq!(resolved.send_id, 10);
+        assert_eq!(resolved.recv_id, 20);
+        assert_eq!(resolved.key_material, b"secret-material");
+    }
+
+    fn groups_none() -> BTreeMap<String, super::super::super::neighbor_group::NeighborGroup> {
+        BTreeMap::new()
     }
 
     /// The remaining inheritable knobs (as-override, allowas-in,
