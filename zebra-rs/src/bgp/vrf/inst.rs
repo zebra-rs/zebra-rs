@@ -227,6 +227,25 @@ pub struct BgpVrf {
     /// delivered here rather than to the global task). Read to resolve
     /// each peer's `resolved_ao_key`.
     pub key_chains: std::collections::BTreeMap<String, crate::policy::KeyChain>,
+    /// Dedicated channel for streams this VRF's own listener accepts.
+    /// Separate from the `BgpVrfMsg` inbox on purpose: the accept
+    /// sub-tasks hold `accept_tx` clones, and routing them through the
+    /// inbox would keep `global_rx` alive and defeat the "all senders
+    /// dropped -> exit" detection. The task drops `accept_rx` when it
+    /// ends, which lets the accept loops notice and exit.
+    accept_tx: tokio::sync::mpsc::UnboundedSender<(tokio::net::TcpStream, std::net::SocketAddr)>,
+    accept_rx: tokio::sync::mpsc::UnboundedReceiver<(tokio::net::TcpStream, std::net::SocketAddr)>,
+    /// Raw fds of this VRF's own listener sockets (VRF-bound, opened in
+    /// `open_listeners`). Held so the passive-side MD5/AO key installs
+    /// (`set_tcp_md5_key` / `set_tcp_ao_key`) can target them — the whole
+    /// point of the per-VRF listener. `None` until opened (a
+    /// placeholder-ctx spawn never opens one).
+    listen_fd_v4: Option<std::os::fd::RawFd>,
+    listen_fd_v6: Option<std::os::fd::RawFd>,
+    /// Accept-loop tasks for the listeners above; abort when the VRF task
+    /// ends (dropping `self`), closing the listeners.
+    #[allow(dead_code)]
+    listen_tasks: Vec<crate::context::Task<()>>,
     /// VRF-first MUP origination tracking: per PFCP SEID, the RD-free ST
     /// prefixes this VRF exported to the global SAFI-85 RIB. Lets a Session
     /// Deletion / Modification (`MupWithdrawOriginate`) withdraw exactly the
@@ -754,6 +773,7 @@ impl BgpVrf {
         let (tx, rx) = mpsc::channel(8192);
         let policy_chan = crate::policy::PolicyRxChannel::new();
         let (bfd_notifier, bfd_event_rx) = mpsc::unbounded_channel();
+        let (accept_tx, accept_rx) = mpsc::unbounded_channel();
         let vrf = Self {
             name,
             ctx,
@@ -796,6 +816,11 @@ impl BgpVrf {
             bfd_event_rx,
             bfd_notifier,
             key_chains: std::collections::BTreeMap::new(),
+            accept_tx,
+            accept_rx,
+            listen_fd_v4: None,
+            listen_fd_v6: None,
+            listen_tasks: Vec::new(),
             mup_originated: std::collections::BTreeMap::new(),
             mup_segment_prefix: None,
             mup_st1_isd_installed: std::collections::BTreeMap::new(),
@@ -1336,6 +1361,9 @@ impl BgpVrf {
                 .tx
                 .try_send(Message::Event(ident, super::super::peer::Event::Stop));
         }
+        // Push the newly-resolved keys onto the VRF listener so a
+        // CE-initiated SYN authenticates passively too.
+        self.refresh_listener_ao();
     }
 
     /// The `proto` string this VRF uses with the policy actor.
@@ -1576,7 +1604,161 @@ impl BgpVrf {
     /// global task sends [`BgpVrfMsg::Shutdown`] or when the
     /// inbound channel is closed (i.e. every sender — the global
     /// task plus any per-peer holds — has dropped).
+    /// Open this VRF's own passive listener sockets, spawn an accept loop
+    /// per family, and install the passive-side auth keys any peer
+    /// already carries. Called once at the top of `event_loop`.
+    ///
+    /// Only when the ctx is VRF-bound (`SO_BINDTODEVICE`): a
+    /// device-unbound listener on the BGP port would join the global
+    /// listener's REUSEPORT group and steal default-VRF connections. A
+    /// placeholder-ctx spawn skips it; the kernel-ctx respawn opens it.
+    ///
+    /// The listener is created here (not in a sub-task) so the fd stays
+    /// on `self` for the MD5/AO installs — the reason the per-VRF listener
+    /// exists. Each `TcpListener` is then handed to a spawned accept loop
+    /// that feeds `BgpVrfMsg::Accept` back to this task.
+    async fn open_listeners(&mut self) {
+        use std::net::SocketAddr;
+        use std::os::fd::AsRawFd;
+        if !self.ctx.is_vrf_bound() {
+            return;
+        }
+        let v4: SocketAddr = "0.0.0.0:179".parse().unwrap();
+        let v6: SocketAddr = "[::]:179".parse().unwrap();
+        match self.ctx.tcp_listen(v4).await {
+            Ok(listener) => {
+                self.listen_fd_v4 = Some(listener.as_raw_fd());
+                self.listen_tasks.push(spawn_accept_loop(
+                    listener,
+                    self.accept_tx.clone(),
+                    self.name.clone(),
+                ));
+            }
+            Err(e) => {
+                tracing::warn!(vrf = %self.name, error = %e, "bgp vrf: v4 listener open failed")
+            }
+        }
+        match self.ctx.tcp_listen_v6_only(v6).await {
+            Ok(listener) => {
+                self.listen_fd_v6 = Some(listener.as_raw_fd());
+                self.listen_tasks.push(spawn_accept_loop(
+                    listener,
+                    self.accept_tx.clone(),
+                    self.name.clone(),
+                ));
+            }
+            Err(e) => {
+                tracing::warn!(vrf = %self.name, error = %e, "bgp vrf: v6 listener open failed")
+            }
+        }
+        // Install listener keys for peers materialised before the
+        // listener existed (the common case: materialize_peers runs at
+        // spawn, this runs at event-loop start).
+        self.refresh_listener_md5();
+        self.refresh_listener_ao();
+    }
+
+    /// Reconcile the passive-side TCP-MD5 key on this VRF's listener for
+    /// every peer, from `config.transport.md5_password`. The active-side
+    /// key is applied by the connect path; this is what lets a
+    /// CE-initiated SYN authenticate against the VRF listener.
+    pub fn refresh_listener_md5(&mut self) {
+        for ident in self.peers.idents() {
+            let Some(peer) = self.peers.get_by_idx(ident) else {
+                continue;
+            };
+            let addr = peer.address;
+            if addr.is_unspecified() {
+                continue;
+            }
+            let fd = match addr {
+                std::net::IpAddr::V4(_) => self.listen_fd_v4,
+                std::net::IpAddr::V6(_) => self.listen_fd_v6,
+            };
+            let Some(fd) = fd else { continue };
+            // Empty key removes the entry; a set key installs it.
+            let key = peer
+                .config
+                .transport
+                .md5_password
+                .clone()
+                .unwrap_or_default();
+            if let Err(e) = super::super::auth::set_tcp_md5_key(fd, addr, key.as_bytes()) {
+                tracing::warn!(vrf = %self.name, peer = %addr, error = %e, "bgp vrf: listener MD5 set failed");
+            }
+        }
+    }
+
+    /// Reconcile the passive-side TCP-AO MKT on this VRF's listener for
+    /// every peer from `config.transport.resolved_ao_key`, deleting a
+    /// stale entry before a re-add (the kernel keys MKTs by
+    /// `(addr, send_id, recv_id)` and rejects a duplicate).
+    pub fn refresh_listener_ao(&mut self) {
+        let idents = self.peers.idents();
+        for ident in idents {
+            let Some(peer) = self.peers.get_by_idx(ident) else {
+                continue;
+            };
+            let addr = peer.address;
+            if addr.is_unspecified() {
+                continue;
+            }
+            let fd = match addr {
+                std::net::IpAddr::V4(_) => self.listen_fd_v4,
+                std::net::IpAddr::V6(_) => self.listen_fd_v6,
+            };
+            let Some(fd) = fd else { continue };
+            let resolved = peer.config.transport.resolved_ao_key.clone();
+            let new_ids = resolved.as_ref().map(|r| (r.send_id, r.recv_id));
+            let prev_ids = peer.last_ao_installed;
+            // Delete a stale MKT when the key disappears or its ids change.
+            if let Some((s, r)) = prev_ids
+                && new_ids != Some((s, r))
+                && let Err(e) = super::super::auth::del_tcp_ao_key(fd, addr, s, r)
+            {
+                tracing::warn!(vrf = %self.name, peer = %addr, error = %e, "bgp vrf: listener AO del failed");
+            }
+            if let Some(r) = &resolved
+                && let Err(e) = super::super::auth::set_tcp_ao_key(
+                    fd,
+                    addr,
+                    r.alg_name,
+                    &r.key_material,
+                    r.send_id,
+                    r.recv_id,
+                    r.include_tcp_options,
+                )
+            {
+                tracing::warn!(vrf = %self.name, peer = %addr, error = %e, "bgp vrf: listener AO set failed");
+            }
+            if let Some(peer) = self.peers.get_mut_by_idx(ident) {
+                peer.last_ao_installed = new_ids;
+            }
+        }
+    }
+
+    /// Drive the passive side of the FSM for one accepted inbound
+    /// connection against this VRF's own `peers` — the same path
+    /// `peer::accept` runs for the global instance. Fed by both this
+    /// VRF's own listener (`accept_rx`) and the global dispatcher's
+    /// `BgpVrfMsg::Accept` forward (the pre-listener fallback).
+    fn handle_accept(&mut self, stream: tokio::net::TcpStream, sockaddr: std::net::SocketAddr) {
+        tracing::debug!(vrf = %self.name, peer = %sockaddr.ip(), "bgp vrf: inbound Accept");
+        let peer_addr = sockaddr.ip();
+        let scope_id = match sockaddr {
+            std::net::SocketAddr::V6(addr) if addr.scope_id() != 0 => Some(addr.scope_id()),
+            _ => None,
+        };
+        if let Some(stream) =
+            super::super::peer::handle_peer_connection(&mut self.peers, peer_addr, scope_id, stream)
+        {
+            // No matching peer in this VRF — drop, closing the TCP.
+            drop(stream);
+        }
+    }
+
     pub async fn event_loop(&mut self) {
+        self.open_listeners().await;
         loop {
             tokio::select! {
                 msg = self.global_rx.recv() => {
@@ -1631,6 +1813,10 @@ impl BgpVrf {
                     // BFD state change for one of this VRF's CE sessions;
                     // a transition to Down tears the BGP session down.
                     self.process_bfd_event(event);
+                }
+                Some((stream, sockaddr)) = self.accept_rx.recv() => {
+                    // A connection this VRF's own listener accepted.
+                    self.handle_accept(stream, sockaddr);
                 }
                 Some(msg) = self.rx.recv() => {
                     self.process_msg(msg);
@@ -2644,35 +2830,10 @@ impl BgpVrf {
                 self.tracing = tracing;
             }
             BgpVrfMsg::Accept(stream, sockaddr) => {
-                // Passive accept for the per-VRF PE-CE session. The global
-                // accept dispatcher routed this inbound connection here by
-                // source IP; drive the same FSM path the global `accept`
-                // does, but against this VRF's own `peers`. The active
-                // connect path already runs the per-VRF FSM, so adding the
-                // passive side lets two per-VRF speakers (e.g. two Inter-AS
-                // MPLS/VPN Option A ASBRs peering inside a VRF) resolve a
-                // §6.8 collision into Established — without it neither side's
-                // outbound connect is ever accepted and the session is stuck.
-                tracing::debug!(
-                    vrf = %self.name,
-                    peer = %sockaddr.ip(),
-                    "bgp vrf: inbound Accept",
-                );
-                let peer_addr = sockaddr.ip();
-                let scope_id = match sockaddr {
-                    std::net::SocketAddr::V6(addr) if addr.scope_id() != 0 => Some(addr.scope_id()),
-                    _ => None,
-                };
-                if let Some(stream) = super::super::peer::handle_peer_connection(
-                    &mut self.peers,
-                    peer_addr,
-                    scope_id,
-                    stream,
-                ) {
-                    // No matching peer in this VRF (listen-ranges aren't
-                    // supported inside a VRF yet) — drop, closing the TCP.
-                    drop(stream);
-                }
+                // Passive accept forwarded by the global dispatcher (the
+                // pre-listener fallback). Same handling as a connection
+                // this VRF's own listener accepts.
+                self.handle_accept(stream, sockaddr);
             }
             BgpVrfMsg::ImportV4 {
                 rd,
@@ -2909,6 +3070,32 @@ impl BgpVrf {
 
 /// Spawn the per-VRF event loop on its own tokio task. Mirrors
 /// [`crate::bgp::inst::serve`] / [`crate::nd::inst::serve`].
+/// Accept loop for one per-VRF listener socket: hand each accepted
+/// stream to the VRF task via `BgpVrfMsg::Accept` (the same message the
+/// global dispatcher forwards). Exits when the inbox is gone (task ended)
+/// or on a persistent accept error.
+fn spawn_accept_loop(
+    listener: tokio::net::TcpListener,
+    accept_tx: tokio::sync::mpsc::UnboundedSender<(tokio::net::TcpStream, std::net::SocketAddr)>,
+    name: String,
+) -> Task<()> {
+    Task::spawn(async move {
+        loop {
+            match listener.accept().await {
+                Ok((stream, sockaddr)) => {
+                    if accept_tx.send((stream, sockaddr)).is_err() {
+                        return;
+                    }
+                }
+                Err(e) => {
+                    tracing::warn!(vrf = %name, error = %e, "bgp vrf: accept error");
+                    tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+                }
+            }
+        }
+    })
+}
+
 pub fn serve_vrf(mut vrf: BgpVrf) -> Task<()> {
     Task::spawn(async move {
         vrf.event_loop().await;
