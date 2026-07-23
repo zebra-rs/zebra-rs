@@ -135,7 +135,9 @@ module zebra-bgp-afi-knobs {
          the PE must resolve the ASBR's loopback (reachable via the IGP)
          and push the ASBR's swap label, not the unreachable foreign-AS
          next-hop carried across the inter-AS eBGP link. Honored on the
-         Labeled-Unicast (SAFI 4) and VPNv4 (SAFI 128) advertise paths.
+         unicast (SAFI 1), Labeled-Unicast (SAFI 4), and VPNv4 (SAFI 128)
+         advertise paths — for unicast it forces self even on an iBGP→iBGP
+         (reflected) advertise, unless next-hop-unchanged overrides it.
 
          Unlike the other knobs here this one is not simply stored: the
          statement is recorded verbatim and the EFFECTIVE value is then
@@ -164,9 +166,12 @@ module zebra-bgp-afi-knobs {
          endpoint — as its next-hop (and its original VPN label). The
          receiving PE resolves that PE loopback over BGP-LU.
 
-         Honored for VPN routes on the VPNv4 (SAFI 128) advertise path;
-         locally-originated routes still advertise with self as the
-         next-hop.";
+         Honored on the unicast (SAFI 1), VPNv4 (SAFI 128), and (for the
+         VPN next-hop) related advertise paths; for unicast it preserves
+         the received next-hop on both eBGP and iBGP advertisement and
+         takes precedence over next-hop-self. Locally-originated routes
+         always advertise with self as the next-hop (the originator is
+         the only valid next-hop).";
     }
 
     container policy {

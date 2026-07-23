@@ -1500,6 +1500,8 @@ impl Peer {
             remote_address: self.address,
             vpnv4_next_hop_self: self.next_hop_self(Afi::Ip, Safi::MplsVpn),
             vpnv4_next_hop_unchanged: self.next_hop_unchanged(Afi::Ip, Safi::MplsVpn),
+            unicast_next_hop_self: self.next_hop_self(Afi::Ip, Safi::Unicast),
+            unicast_next_hop_unchanged: self.next_hop_unchanged(Afi::Ip, Safi::Unicast),
             egress_as: self.egress_as(),
             out_policy: self.out_policy.clone(),
             packet_tx: self.packet_tx.clone(),
