@@ -120,7 +120,11 @@ Feature: OSPFv2 graceful restart keeps forwarding through a daemon restart
     And show command "show ospf route" in namespace "a" should eventually contain "10.0.0.2/32"
     And ping from "a" to "10.0.0.2" should eventually succeed
 
-    # Teardown.
+  Scenario: Teardown topology
+    # Separate scenario so cleanup still runs when a step above fails
+    # (a failed step skips the rest of its own scenario only). The
+    # checkpoint removal belongs here too: a leftover ospf.cbor is exactly
+    # what a failed GR scenario would strand.
     When I execute "rm -f /var/lib/zebra-rs/checkpoint/ospf.cbor" in namespace "a"
     And I stop zebra-rs in namespace "a"
     And I stop zebra-rs in namespace "b"

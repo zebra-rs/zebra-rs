@@ -126,6 +126,9 @@ Feature: OSPFv3 NSSA (Not-So-Stubby Area) Type-7 origination and translation
     #     backbone: b must NOT contain it. ---
     And show command "show ospfv3 route" in namespace "b" should not contain "2001:db8:dead::/64"
 
+  Scenario: Teardown topology
+    # Separate scenario so cleanup still runs when a step above fails
+    # (a failed step skips the rest of its own scenario only).
     When I stop zebra-rs in namespace "a"
     And I stop zebra-rs in namespace "b"
     And I stop zebra-rs in namespace "c"

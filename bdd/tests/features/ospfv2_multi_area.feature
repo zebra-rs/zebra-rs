@@ -118,7 +118,9 @@ Feature: OSPFv2 multi-area routing across two Area Border Routers
     # Mirror proof for the cost-20 c-d link (d's c-d address 10.0.34.2).
     And show command "show ospf route" in namespace "c" should contain "[20] via 10.0.34.2"
 
-    # Teardown.
+  Scenario: Teardown topology
+    # Separate scenario so cleanup still runs when a step above fails
+    # (a failed step skips the rest of its own scenario only).
     When I stop zebra-rs in namespace "a"
     And I stop zebra-rs in namespace "b"
     And I stop zebra-rs in namespace "c"

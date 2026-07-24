@@ -36,7 +36,9 @@ Feature: OSPFv3 passive interfaces advertise their prefix without forming adjace
     And show command "show ospfv3 neighbor" in namespace "b" should not contain "10.0.0.3"
     And show command "show ospfv3 neighbor" in namespace "c" should not contain "10.0.0.2"
 
-    # Teardown.
+  Scenario: Teardown topology
+    # Separate scenario so cleanup still runs when a step above fails
+    # (a failed step skips the rest of its own scenario only).
     When I stop zebra-rs in namespace "a"
     And I stop zebra-rs in namespace "b"
     And I stop zebra-rs in namespace "c"

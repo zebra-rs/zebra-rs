@@ -73,7 +73,9 @@ Feature: NSSA Type-7 forwarding address is originated, translated, and resolved
     Then show command "show ospf route" in namespace "b" should eventually contain "10.9.9.0/24"
     And ping from "b" to "10.9.9.1" should succeed
 
-    # Teardown.
+  Scenario: Teardown topology
+    # Separate scenario so cleanup still runs when a step above fails
+    # (a failed step skips the rest of its own scenario only).
     When I stop zebra-rs in namespace "a"
     And I stop zebra-rs in namespace "b"
     And I stop zebra-rs in namespace "c"

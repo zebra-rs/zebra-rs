@@ -61,7 +61,9 @@ Feature: OSPFv2 default-information originate advertises a Type-5 default
     When I apply command "delete router static ipv4 route 0.0.0.0/0" in namespace "b"
     Then show command "show ospf route" in namespace "a" should eventually not contain "0.0.0.0/0"
 
-    # Teardown.
+  Scenario: Teardown topology
+    # Separate scenario so cleanup still runs when a step above fails
+    # (a failed step skips the rest of its own scenario only).
     When I stop zebra-rs in namespace "a"
     And I stop zebra-rs in namespace "b"
     And I delete namespace "a"

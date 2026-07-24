@@ -88,7 +88,9 @@ Feature: OSPFv3 stub-router advertisement (RFC 5340 R-bit clear)
     And show command "show ospfv3 route" in namespace "r1" should eventually contain "2001:db8::3/128 metric 20 via"
     And ping from "r1" to "2001:db8::3" should succeed
 
-    # Teardown.
+  Scenario: Teardown topology
+    # Separate scenario so cleanup still runs when a step above fails
+    # (a failed step skips the rest of its own scenario only).
     When I stop zebra-rs in namespace "r1"
     And I stop zebra-rs in namespace "r2"
     And I stop zebra-rs in namespace "r3"

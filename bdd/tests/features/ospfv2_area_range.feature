@@ -97,7 +97,9 @@ Feature: OSPFv2 area ranges aggregate Type-3 summaries at the ABR
     # protection for the range's gaps.
     And kernel route "10.1.0.0/16" in namespace "a" should eventually contain "blackhole"
 
-    # Teardown.
+  Scenario: Teardown topology
+    # Separate scenario so cleanup still runs when a step above fails
+    # (a failed step skips the rest of its own scenario only).
     When I stop zebra-rs in namespace "a"
     And I stop zebra-rs in namespace "b"
     And I stop zebra-rs in namespace "c"

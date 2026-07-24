@@ -54,7 +54,9 @@ Feature: OSPFv3 default-information originate advertises an AS-External default
     When I apply command "delete router static ipv6 route ::/0" in namespace "b"
     Then show command "show ospfv3 route" in namespace "a" should eventually not contain "::/0"
 
-    # Teardown.
+  Scenario: Teardown topology
+    # Separate scenario so cleanup still runs when a step above fails
+    # (a failed step skips the rest of its own scenario only).
     When I stop zebra-rs in namespace "a"
     And I stop zebra-rs in namespace "b"
     And I delete namespace "a"

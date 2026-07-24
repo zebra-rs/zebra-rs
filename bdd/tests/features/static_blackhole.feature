@@ -25,7 +25,9 @@ Feature: Static blackhole routes install RTN_BLACKHOLE discard entries
     When I apply command "delete router static ipv4 route 10.9.9.0/24 nexthop blackhole" in namespace "r"
     Then kernel route "10.9.9.0/24" in namespace "r" should eventually be gone
 
-    # Teardown.
+  Scenario: Teardown topology
+    # Separate scenario so cleanup still runs when a step above fails
+    # (a failed step skips the rest of its own scenario only).
     When I stop zebra-rs in namespace "r"
     And I delete namespace "r"
     Then the test environment should be clean

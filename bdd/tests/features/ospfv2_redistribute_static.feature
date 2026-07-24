@@ -47,7 +47,9 @@ Feature: OSPFv2 instance-level redistribute static originates Type-5 AS-External
     # b itself must not self-install its own external.
     And show command "show ospf route" in namespace "b" should not contain "192.168.50.0/24"
 
-    # Teardown.
+  Scenario: Teardown topology
+    # Separate scenario so cleanup still runs when a step above fails
+    # (a failed step skips the rest of its own scenario only).
     When I stop zebra-rs in namespace "a"
     And I stop zebra-rs in namespace "b"
     And I delete namespace "a"

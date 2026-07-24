@@ -79,7 +79,9 @@ Feature: OSPFv3 native authentication config drives the RFC 7166 trailer
     Then show command "show ospfv3 neighbor" in namespace "a" should not contain "10.0.0.2"
     And show command "show ospfv3 neighbor" in namespace "b" should not contain "10.0.0.1"
 
-    # Teardown.
+  Scenario: Teardown topology
+    # Separate scenario so cleanup still runs when a step above fails
+    # (a failed step skips the rest of its own scenario only).
     When I stop zebra-rs in namespace "a"
     And I stop zebra-rs in namespace "b"
     And I delete namespace "a"
