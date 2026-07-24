@@ -66,13 +66,15 @@ pub fn init_peer_task(config: Option<bool>) -> bool {
     } else {
         "default"
     };
-    if on {
-        // Debug, not info: this runs inside `spawn_bgp`, before any
-        // `BgpTracing` exists to gate it against.
-        tracing::debug!("BGP per-peer egress task: enabled (from {source})");
-    } else {
-        // Disable default logging.
-        // tracing::info!("BGP per-peer egress task: disabled (from {source})");
+    // Same gate as `init_shard_count` — see `bgp::tracing::TRACE_SHARDING`
+    // for why this is a process-global and not a `BgpTracing` read.
+    if crate::bgp::tracing::trace_sharding() {
+        let state = if on { "enabled" } else { "disabled" };
+        tracing::info!(
+            proto = "bgp",
+            category = "sharding",
+            "BGP per-peer egress task: {state} (from {source})"
+        );
     }
     on
 }

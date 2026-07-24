@@ -124,16 +124,31 @@ impl GroupEgressTask {
     /// (the group emptied).
     pub fn spawn(id: UpdateGroupId) -> Self {
         let (delta_tx, mut delta_rx) = mpsc::unbounded_channel::<GroupEgressDeltaV4>();
-        // Debug, matching the "exited" line below: `spawn` is a plain
-        // constructor with no `BgpTracing` in reach, and it fires once
-        // per update-group.
-        tracing::debug!("BGP egress group task: spawned (group {id:?})");
+        // `spawn` is a plain constructor with no `BgpTracing` in reach, so
+        // both this and the "exited" line below ride the process-global
+        // `sharding` gate (see `bgp::tracing::TRACE_SHARDING`). Read once
+        // here so the spawned task carries the decision instead of
+        // re-reading the global after an unrelated config edit.
+        let trace = crate::bgp::tracing::trace_sharding();
+        if trace {
+            tracing::info!(
+                proto = "bgp",
+                category = "sharding",
+                "BGP egress group task: spawned (group {id:?})"
+            );
+        }
         let task = Task::spawn(async move {
             let mut engine = Engine::default();
             while let Some(delta) = delta_rx.recv().await {
                 engine.handle(delta);
             }
-            tracing::debug!("BGP egress group task: exited (group {id:?})");
+            if trace {
+                tracing::info!(
+                    proto = "bgp",
+                    category = "sharding",
+                    "BGP egress group task: exited (group {id:?})"
+                );
+            }
         });
         GroupEgressTask { delta_tx, task }
     }

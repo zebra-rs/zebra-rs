@@ -525,13 +525,25 @@ pub fn init_shard_count(config_shards: Option<usize>) -> usize {
     } else {
         "default"
     };
-    if n > 1 {
-        // Debug, not info: this runs inside `spawn_bgp`, before any
-        // `BgpTracing` exists to gate it against.
-        tracing::debug!("BGP RIB sharding: {n} shards (from {source})");
-    } else {
-        // Disable default logging.
-        // tracing::info!("BGP RIB sharding: 1 shard, synchronous (from {source})");
+    // Gated on the process-global `sharding` category rather than a
+    // `BgpTracing`: this runs inside `spawn_bgp`, before `Bgp::new`
+    // builds one. `spawn_bgp` seeds the global from the candidate
+    // config first, so a `router bgp tracing sharding` in the same
+    // commit is already visible here.
+    if crate::bgp::tracing::trace_sharding() {
+        if n > 1 {
+            tracing::info!(
+                proto = "bgp",
+                category = "sharding",
+                "BGP RIB sharding: {n} shards (from {source})"
+            );
+        } else {
+            tracing::info!(
+                proto = "bgp",
+                category = "sharding",
+                "BGP RIB sharding: 1 shard, synchronous (from {source})"
+            );
+        }
     }
     n
 }
