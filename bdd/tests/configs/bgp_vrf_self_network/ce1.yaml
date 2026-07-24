@@ -1,0 +1,32 @@
+# CE (AS 65001). Plain global router peering with the PE over IPv4 and
+# IPv6 transport; it just needs the two sessions up to receive the PE's
+# vrf-cust self-originated networks.
+interface:
+- if-name: lo
+  ipv4:
+    address: 10.0.1.1/32
+- if-name: pe1
+  ipv4:
+    address: 10.1.0.2/30
+  ipv6:
+    address: 2001:db8:1::2/64
+router:
+  bgp:
+    global:
+      as: 65001
+      router-id: 10.0.1.1
+    neighbor:
+    - remote-address: 10.1.0.1
+      remote-as: 65000
+      timers:
+        advertisement-interval: 0
+      afi-safi:
+      - name: ipv4
+        enabled: true
+    - remote-address: 2001:db8:1::1
+      remote-as: 65000
+      timers:
+        advertisement-interval: 0
+      afi-safi:
+      - name: ipv6
+        enabled: true
