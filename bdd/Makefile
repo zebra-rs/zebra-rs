@@ -15,6 +15,18 @@ rr:
 	mkdir -p allure-results
 	cargo test --test cucumber -- --concurrency=1 --tags "@bgp_basic_rr"
 
+bgp_adv_interval_zero:
+	mkdir -p allure-results
+	cargo test --test cucumber -- --concurrency=1 --tags "@bgp_adv_interval_zero"
+
+bgp_adv_interval_zero_v6:
+	mkdir -p allure-results
+	cargo test --test cucumber -- --concurrency=1 --tags "@bgp_adv_interval_zero_v6"
+
+bgp_adv_interval_zero_vrf:
+	mkdir -p allure-results
+	cargo test --test cucumber -- --concurrency=1 --tags "@bgp_adv_interval_zero_vrf"
+
 # IPv4 unicast announced inside MP_REACH_NLRI (RFC 4760 §3) by a scripted
 # speaker (tests/scripts/bgp_mp_reach_send.py) — zebra-rs/FRR/GoBGP all
 # emit traditional NLRI, so only the script can produce this encoding.

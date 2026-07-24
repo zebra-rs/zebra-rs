@@ -1,0 +1,43 @@
+# CE (AS 65001). A plain global router (no VRF) peering with the PE over
+# IPv4 and IPv6 transport, each neighbor with `advertisement-interval 0`
+# — the global per-neighbor MRAI knob. It redistributes its connected
+# loopbacks so the PE's vrf-cust receives them; with adv-interval 0 the PE
+# must receive them without waiting out the stock MRAI.
+interface:
+- if-name: lo
+  ipv4:
+    address: 10.0.1.1/32
+  ipv6:
+    address: 2001:db8:8::1/128
+- if-name: pe1
+  ipv4:
+    address: 10.1.0.2/30
+  ipv6:
+    address: 2001:db8:1::2/64
+router:
+  bgp:
+    global:
+      as: 65001
+      router-id: 10.0.1.1
+    neighbor:
+    - remote-address: 10.1.0.1
+      remote-as: 65000
+      timers:
+        advertisement-interval: 0
+      afi-safi:
+      - name: ipv4
+        enabled: true
+    - remote-address: 2001:db8:1::1
+      remote-as: 65000
+      timers:
+        advertisement-interval: 0
+      afi-safi:
+      - name: ipv6
+        enabled: true
+    afi-safi:
+    - name: ipv4
+      redistribute:
+        connected: {}
+    - name: ipv6
+      redistribute:
+        connected: {}
