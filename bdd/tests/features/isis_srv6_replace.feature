@@ -34,7 +34,10 @@ Feature: IS-IS advertises REPLACE-C-SID SRv6 endpoint behaviors
     And I apply config "z1.yaml" to namespace "z1"
     And I apply config "z2.yaml" to namespace "z2"
     Then show command "show isis database detail" in namespace "z2" should eventually contain "End (REP, PSP, USD)"
-    And show command "show isis database detail" in namespace "z2" should contain "End.X (REP, PSP)"
+    # Poll: `End` rides z1's FIRST LSP (locator, no adjacency yet), but
+    # `End.X` is the adjacency SID, added only when z1 re-originates after
+    # the adjacency reaches Up. A bare assert here races that reflood.
+    And show command "show isis database detail" in namespace "z2" should eventually contain "End.X (REP, PSP)"
     # The uSID peer's own SIDs are unchanged — z1 sees plain uN.
     And show command "show isis database detail" in namespace "z1" should eventually contain "Behavior: uN,"
     # Reachability across the adjacency proves the REPLACE codepoints

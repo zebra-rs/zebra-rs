@@ -206,7 +206,9 @@ Feature: Live switchover IS-IS SR-MPLS -> SRv6 (classic) -> SRv6 uSID -> SR-MPLS
     # locator-wide /48 uN with the NEXT-C-SID flavor and the classic
     # /128 End route disappears from the kernel.
     Then show command "show segment-routing srv6 sid" in namespace "s" should eventually contain "uN"
-    And show command "show segment-routing srv6 sid" in namespace "s" should contain "uA"
+    # Poll for the same reason as isis_srv6_replace: `uN` is the node SID,
+    # `uA` the adjacency SID, which only exists once the adjacency is Up.
+    And show command "show segment-routing srv6 sid" in namespace "s" should eventually contain "uA"
     And kernel route "fcbb:bbbb:1::/48" in namespace "s" should eventually contain "next-csid"
     And kernel route "fcbb:bbbb:1::" in namespace "s" should eventually be gone
     And show command "show ipv6 route fcbb:bbbb:8::/48" in namespace "s" should eventually contain "[115/2]"
