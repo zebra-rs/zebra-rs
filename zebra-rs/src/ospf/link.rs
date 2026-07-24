@@ -262,7 +262,7 @@ pub struct OspfLinkBfdConfig {
     pub min_neighbor_state: Option<NbrStateThreshold>,
     /// BFD Echo role for this interface's single-hop sessions
     /// (`transmit` / `receive` / `both`); `None` ⇒ inherit (Echo off if unset
-    /// everywhere). Backed by the per-interface `xdp-bfd-echo` helper;
+    /// everywhere). Backed by the cradle eBPF data plane;
     /// honoured for OSPFv2, inert for v3 (IPv6).
     pub echo_mode: Option<EchoMode>,
     /// Echo transmit interval (milliseconds) — the rate we originate Echo at
@@ -272,7 +272,7 @@ pub struct OspfLinkBfdConfig {
     /// (`receive` / `both`). `None` ⇒ inherit / [`DEFAULT_ECHO_INTERVAL_MS`].
     pub echo_receive_ms: Option<u32>,
     /// Offload control-packet expiration detection (RFC 5880 §6.8.4) to the
-    /// per-interface XDP helper once the session is Up — detection immune to
+    /// XDP data plane once the session is Up — detection immune to
     /// daemon scheduling latency. `None` ⇒ inherit (hard default `false`:
     /// detection in userspace).
     pub detect_offload: Option<bool>,

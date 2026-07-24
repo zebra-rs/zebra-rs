@@ -52,7 +52,7 @@ JSON: an array of interface objects with `ra_scheduler`, `counters`,
 ## BFD
 
 See [BFD](ch-10-00-bfd.md) for configuration and the
-[XDP/eBPF data-plane helper](ch-10-01-bfd-xdp-helper.md).
+[BFD offload in the eBPF data plane](ch-10-01-bfd-xdp-helper.md).
 
 ### `show bfd`
 

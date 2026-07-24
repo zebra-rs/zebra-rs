@@ -268,7 +268,7 @@ message FdbEvent {
   uint32 event = 3;
 }
 
-// --- BFD Echo / detection offload (absorbed from the xdp-bfd-echo helper) ---
+// --- BFD Echo / detection offload ---
 // Arm the Echo *originator* + return detector for a single-hop session: cradle
 // transmits a self-addressed Echo (udp/3785) toward `peer` every `tx_us`
 // (jittered) and times the returns in-kernel (bpf_timer); if returns stop for
@@ -523,8 +523,8 @@ service Cradle {
   rpc AddFdbRemote(FdbRemote) returns (Empty);
   rpc DelFdbRemote(FdbRemoteDel) returns (Empty);
   rpc WatchFdb(WatchFdbRequest) returns (stream FdbEvent);
-  // BFD Echo / detection offload (absorbed xdp-bfd-echo). Arm/disarm are keyed
-  // by our local discriminator; WatchBfd streams echo-down / detect-down.
+  // BFD Echo / detection offload. Arm/disarm are keyed by our local
+  // discriminator; WatchBfd streams echo-down / detect-down.
   rpc ArmBfdEcho(BfdEcho) returns (Empty);
   rpc DisarmBfdEcho(BfdKey) returns (Empty);
   rpc ArmBfdDetect(BfdDetect) returns (Empty);

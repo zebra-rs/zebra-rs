@@ -74,7 +74,7 @@ pub struct Bfd {
     /// up (the receiver is gone) — v6 simply doesn't work in that case.
     write_tx_v6: UnboundedSender<WriteRequest>,
     timer_handles: HashMap<SessionKey, TimerHandle>,
-    /// Supervises the per-interface XDP Echo reflector child processes.
+    /// Drives the Echo / detection offload in the eBPF data plane.
     /// Reference-counted by the single-hop echo sessions on each ifindex
     /// ([`Self::add_session`] / [`Self::remove_session`]).
     reflectors: super::reflector::EchoReflectors,
@@ -171,11 +171,11 @@ pub enum Message {
     /// watchdog armed this is the stretched *backstop* firing (helper dead or
     /// wedged); otherwise it is the primary RFC 5880 §6.8.4 detection.
     DetectExpired { key: SessionKey },
-    /// The per-interface helper reported that our originated Echo for the
+    /// The eBPF data plane reported that our originated Echo for the
     /// session with this local discriminator stopped returning (Echo detection
     /// timeout). Drives the session Down with `EchoFunctionFailed`.
     EchoDown { discr: u32 },
-    /// The per-interface helper reported that the in-kernel expiration
+    /// The eBPF data plane reported that the in-kernel expiration
     /// watchdog fired for this local discriminator: no control packet arrived
     /// at the interface within the programmed detection time (RFC 5880 §6.8.4
     /// evaluated in XDP/`bpf_timer`). Drives the same transition as the
@@ -457,7 +457,7 @@ impl Bfd {
         // Echo and the expiration watchdog are single-hop only; both IPv4 and
         // IPv6 are handled (the XDP helper reflects/observes either family).
         // Any active Echo role or a detect-offload intent needs the
-        // per-interface helper: `receive` reflects a peer's Echo, `transmit`
+        // eBPF data plane: `receive` reflects a peer's Echo, `transmit`
         // sends + detects ours, `detect-offload` times the peer's control
         // packets in-kernel. Bring it up and mark the session `echo_ready`
         // once the child is confirmed running — until then we advertise 0 (an
@@ -881,7 +881,7 @@ impl Bfd {
         self.detect_offload_reconcile(key);
     }
 
-    /// The per-interface helper reported that our originated Echo for the
+    /// The eBPF data plane reported that our originated Echo for the
     /// session with local discriminator `discr` stopped returning (RFC 5880
     /// §6.8.5). Drive the session Down with `EchoFunctionFailed`, then reconcile
     /// the originator — the session is no longer Up, so we stop sending Echo.
@@ -900,7 +900,7 @@ impl Bfd {
         self.detect_offload_reconcile(key);
     }
 
-    /// The per-interface helper reported that the in-kernel expiration
+    /// The eBPF data plane reported that the in-kernel expiration
     /// watchdog fired for the session with local discriminator `discr`: no
     /// control packet arrived at the interface within the programmed
     /// detection time (RFC 5880 §6.8.4, evaluated in XDP/`bpf_timer`). Drive
@@ -973,17 +973,17 @@ impl Bfd {
     }
 
     /// Arm, retune, or disarm the in-kernel expiration watchdog for `key` —
-    /// the XDP helper's `CONTROL_TIMERS` `bpf_timer`, re-armed by every
-    /// control packet arriving for our discriminator (see cradle-rs
-    /// `crates/xdp-bfd-echo`). Mirrors [`Self::echo_originate_reconcile`]:
-    /// the desired kernel detection time is compared to the armed one
-    /// (`Session::kernel_detect_us`) and `detect-add`/`detect-del` are sent
-    /// exactly on the edges; a changed value re-sends `detect-add`, which the
-    /// helper applies as an update.
+    /// the `cradle_xdp` program's `CONTROL_TIMERS` `bpf_timer`, re-armed by
+    /// every control packet arriving for our discriminator (see cradle-rs
+    /// `crates/cradle-ebpf/src/bfd.rs`). Mirrors
+    /// [`Self::echo_originate_reconcile`]: the desired kernel detection time
+    /// is compared to the armed one (`Session::kernel_detect_us`) and
+    /// `detect-add`/`detect-del` are sent exactly on the edges; a changed
+    /// value re-sends `detect-add`, which cradle applies as an update.
     ///
     /// Armed only while the session is **Up** — before establishment the
     /// peer may send `Your Discriminator = 0`, which the XDP program cannot
-    /// key — and only single-hop: the helper attaches per interface, and
+    /// key — and only single-hop: `cradle_xdp` runs on attached ports, and
     /// multihop ingress isn't bound to one (its TTL floor is also below the
     /// GTSM 255 the observer requires). While armed, the userspace detection
     /// timer is stretched to a backstop ([`DETECT_BACKSTOP_FACTOR`]) so the
@@ -1041,7 +1041,7 @@ impl Bfd {
 
     /// RFC 5880 §6.8.9 — start or stop *originating* Echo for `key` based on the
     /// session's current gate, emitting `echo-add`/`echo-del` to the
-    /// per-interface helper exactly on the edges (tracked by
+    /// eBPF data plane exactly on the edges (tracked by
     /// [`Session::echo_originating`]).
     ///
     /// We originate only while the session is **Up**, our configured Echo mode
@@ -1562,8 +1562,8 @@ mod tests {
     // ---- runtime Echo param updates (`Bfd::update_echo_params`) -------------
 
     /// An ifindex with no backing interface: `acquire` tracks the refcount
-    /// but the helper child never spawns (`if_indextoname` fails), so these
-    /// tests exercise the bookkeeping without launching real XDP processes.
+    /// but nothing reaches the data plane (there is no cradle engine under
+    /// test), so these tests exercise the bookkeeping in isolation.
     const ECHO_TEST_IFINDEX: u32 = 0xfff0;
 
     fn echo_key(remote_octet: u8) -> SessionKey {
@@ -1789,7 +1789,7 @@ mod tests {
     }
 
     /// A single-hop subscribe with detect-offload configured refcounts the
-    /// per-interface helper even with Echo off; the last unsubscribe
+    /// eBPF data plane even with Echo off; the last unsubscribe
     /// releases it. Multihop never does.
     #[tokio::test]
     async fn detect_offload_refcounts_reflector() {

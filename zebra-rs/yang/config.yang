@@ -3603,7 +3603,7 @@ module config {
                 "Enable the BFD Echo function (RFC 5880 §6.4) on this
                  interface's single-hop adjacencies (IPv4, or IPv6 over
                  the link-local pair), choosing which half is active.
-                 Backed by the per-interface `xdp-bfd-echo` helper.
+                 Backed by the eBPF data plane (system ebpf enabled).
                  Overrides the instance default; absent ⇒ inherit.";
             }
             leaf echo-transmit-interval {
@@ -3623,11 +3623,11 @@ module config {
                  `receive`/`both`). Hard default 50 ms when unset.";
             }
             leaf detect-offload {
-              ext:help "Offload expiration detection to the XDP helper (kernel)";
+              ext:help "Offload expiration detection to the XDP data plane (kernel)";
               type boolean;
               description
                 "Once the session is Up, detect missing BFD control
-                 packets in the kernel: the per-interface XDP/eBPF helper
+                 packets in the kernel: the XDP/eBPF data plane
                  re-arms a per-session timer on every arriving control
                  packet (UDP/3784, TTL 255) and drives the session Down
                  with Control Detection Time Expired when they stop

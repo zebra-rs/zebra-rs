@@ -22,7 +22,7 @@ pub enum Event {
     /// The Echo detection timer expired: our originated Echo stopped
     /// returning within `echo-interval × detect-mult` (RFC 5880 §6.8.5).
     /// Drives Down like `DetectExpired` but records `EchoFunctionFailed`.
-    /// Reported by the per-interface helper over its IPC channel.
+    /// Reported by the eBPF data plane over its IPC channel.
     EchoDetectExpired,
     /// Administrative shutdown requested (e.g. `shutdown` under a
     /// `bfd peer` block).

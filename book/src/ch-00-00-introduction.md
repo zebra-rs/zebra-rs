@@ -63,8 +63,8 @@ and eBPF. Latency- and throughput-sensitive paths are pushed down into the
 kernel — and, where the NIC supports it, onto the hardware — so they run at line
 rate instead of bouncing through user space.
 
-[BFD](ch-10-00-bfd.md) liveness runs in an [XDP/eBPF data-plane
-helper](ch-10-01-bfd-xdp-helper.md), sustaining sub-second failure detection —
+[BFD](ch-10-00-bfd.md) liveness runs in the [XDP/eBPF data
+plane](ch-10-01-bfd-xdp-helper.md), sustaining sub-second failure detection —
 including Echo mode, across BFD, S-BFD, and STAMP — without loading the control
 plane. [EVPN BUM replication](ch-02-34-bgp-evpn-segmentation.md) is offloaded to
 eBPF, fanning out broadcast, unknown-unicast, and multicast traffic inside the

@@ -378,7 +378,7 @@ pub struct PeerBfdConfig {
     /// [`DEFAULT_ECHO_INTERVAL_MS`].
     pub echo_receive_ms: Option<u32>,
     /// Offload control-packet expiration detection (RFC 5880 §6.8.4) to the
-    /// per-interface XDP helper once the session is Up. Single-hop only —
+    /// XDP data plane once the session is Up. Single-hop only —
     /// inert on multihop sessions (the helper attaches per interface).
     /// `None` ⇒ inherit (hard default `false`: detection in userspace).
     pub detect_offload: Option<bool>,

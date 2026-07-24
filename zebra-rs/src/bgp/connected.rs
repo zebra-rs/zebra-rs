@@ -84,7 +84,7 @@ impl ConnectedSubnets {
     }
 
     /// The interface a directly-connected `ip` lives on, if known — used to
-    /// key single-hop BFD sessions so the per-interface XDP helper (Echo
+    /// key single-hop BFD sessions so the XDP data plane (Echo
     /// reflector + expiration watchdog) can attach to the right link.
     /// IPv6 link-locals are excluded: `fe80::/64` is recorded by *every*
     /// v6 interface, so a covering match would be meaningless (link-local
@@ -204,7 +204,7 @@ mod tests {
     }
 
     /// `ifindex_for` resolves a covered peer to the recording interface —
-    /// the key the per-interface XDP helper (Echo / expiration watchdog)
+    /// the key the XDP data plane (Echo / expiration watchdog)
     /// needs — and returns `None` for uncovered peers, link-local v6, and
     /// after the subnet's last address is forgotten.
     #[test]

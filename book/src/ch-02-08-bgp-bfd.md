@@ -94,8 +94,8 @@ but Echo is **single-hop only** (RFC 5883 multihop has no Echo), so it applies
 **only to directly-connected eBGP** (`multihop` inferred or forced `false`). On
 an iBGP or multihop-eBGP neighbour the `echo-mode` leaf is accepted but inert.
 Within that constraint it works like the OSPF/IS-IS form — `transmit` originates,
-`receive` advertises + reflects, `both` does both, via the per-interface
-`xdp-bfd-echo` helper. IPv4 and IPv6 neighbours are covered alike (the Echo
+`receive` advertises + reflects, `both` does both, via the
+[eBPF data plane](ch-16-00-ebpf.md). IPv4 and IPv6 neighbours are covered alike (the Echo
 session uses the same addresses as the control session):
 
 ```
@@ -115,8 +115,8 @@ router bgp {
 ## Offloading expiration detection
 
 `detect-offload true` moves the RFC 5880 §6.8.4 detection timer into the
-kernel via the per-interface `xdp-bfd-echo` helper — **single-hop
-neighbours only** (the helper attaches per interface; on iBGP / multihop
+kernel via the [eBPF data plane](ch-16-00-ebpf.md) — **single-hop
+neighbours only** (the XDP program runs on attached ports; on iBGP / multihop
 eBGP the leaf is accepted but inert, like `echo-mode`). See
 [the overview](ch-10-00-bfd.md#offloading-expiration-detection-detect-offload)
 for the mechanism and guard-rails.

@@ -1530,8 +1530,8 @@ impl CradleFib {
         Ok(resp.into_inner())
     }
 
-    /// Arm cradle's Echo originator + return detector for `discr` (absorbed
-    /// xdp-bfd-echo). cradle transmits self-addressed Echo out `oif` toward
+    /// Arm cradle's Echo originator + return detector for `discr`.
+    /// cradle transmits self-addressed Echo out `oif` toward
     /// `peer` at `tx_us` and times the returns in-kernel; `WatchBfd` streams
     /// echo-down when they stop. BFD state is soft — a lost session re-arms on
     /// the next reconcile — so this is not mirrored/replayed.

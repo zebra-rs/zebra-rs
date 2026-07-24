@@ -4013,7 +4013,7 @@ impl Bgp {
                 self.connected_subnets.record(&addr);
                 self.refresh_connected();
                 // The connected ifindex keys single-hop BFD sessions (the
-                // per-interface XDP helper attaches by it): re-reconcile so a
+                // XDP data plane attaches by it): re-reconcile so a
                 // session subscribed before this address was learned picks up
                 // its concrete ifindex. Per-neighbor no-op when unchanged.
                 super::config::bfd_reconcile_all(self);
