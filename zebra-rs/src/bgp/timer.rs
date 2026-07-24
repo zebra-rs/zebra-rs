@@ -303,6 +303,7 @@ pub fn update_timers(peer: &mut Peer) {
     }
     if peer.state != Established {
         peer.cache_vpnv4_timer = None;
+        peer.immediate_flush_queued_vpnv4 = false;
     }
 }
 

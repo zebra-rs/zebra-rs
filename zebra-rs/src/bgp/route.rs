@@ -10204,9 +10204,11 @@ pub fn route_clean(
     peer.cache_vpnv4.clear();
     peer.cache_vpnv4_rev.clear();
     peer.cache_vpnv4_timer = None;
+    peer.immediate_flush_queued_vpnv4 = false;
     peer.cache_vpnv6.clear();
     peer.cache_vpnv6_rev.clear();
     peer.cache_vpnv6_timer = None;
+    peer.immediate_flush_queued_vpnv6 = false;
 
     // IPv6 unicast. Same shape as the IPv4 block above — withdraw
     // every prefix the peer gave us from the Loc-RIB (which fans out
@@ -10727,6 +10729,7 @@ pub fn route_clean(
     peer.cache_evpn.clear();
     peer.cache_evpn_rev.clear();
     peer.cache_evpn_timer = None;
+    peer.immediate_flush_queued_evpn = false;
 
     // IPv4 / IPv6 Labeled-Unicast (SAFI 4). No LLGR handling yet —
     // withdraw every labeled route the peer gave us and clear the
@@ -12319,8 +12322,23 @@ impl Peer {
             .or_default()
             .insert(nlri.clone());
         self.cache_vpnv4_rev.insert(nlri, attr);
-        if timer && self.cache_vpnv4_timer.is_none() {
-            self.cache_vpnv4_timer = Some(start_adv_timer_vpnv4(self));
+        if timer && self.cache_vpnv4_timer.is_none() && !self.immediate_flush_queued_vpnv4 {
+            let secs = self.adv_interval.secs_for(self.peer_type);
+            if secs == 0 {
+                // See `update_group::send_ipv4` for why adv-interval 0
+                // queues the flush event directly instead of arming a
+                // timer.
+                self.immediate_flush_queued_vpnv4 = true;
+                let tx = self.tx.clone();
+                let ident = self.ident;
+                tokio::spawn(async move {
+                    let _ = tx
+                        .send(Message::Event(ident, Event::AdvTimerVpnv4Expires))
+                        .await;
+                });
+            } else {
+                self.cache_vpnv4_timer = Some(start_adv_timer_vpnv4(self));
+            }
         }
     }
 
@@ -12350,8 +12368,23 @@ impl Peer {
             .or_default()
             .insert(route.clone());
         self.cache_evpn_rev.insert(route, attr);
-        if timer && self.cache_evpn_timer.is_none() {
-            self.cache_evpn_timer = Some(start_adv_timer_evpn(self));
+        if timer && self.cache_evpn_timer.is_none() && !self.immediate_flush_queued_evpn {
+            let secs = self.adv_interval.secs_for(self.peer_type);
+            if secs == 0 {
+                // See `update_group::send_ipv4` for why adv-interval 0
+                // queues the flush event directly instead of arming a
+                // timer.
+                self.immediate_flush_queued_evpn = true;
+                let tx = self.tx.clone();
+                let ident = self.ident;
+                tokio::spawn(async move {
+                    let _ = tx
+                        .send(Message::Event(ident, Event::AdvTimerEvpnExpires))
+                        .await;
+                });
+            } else {
+                self.cache_evpn_timer = Some(start_adv_timer_evpn(self));
+            }
         }
     }
 
@@ -12427,8 +12460,23 @@ impl Peer {
             .or_default()
             .insert(nlri.clone());
         self.cache_vpnv6_rev.insert(nlri, attr);
-        if timer && self.cache_vpnv6_timer.is_none() {
-            self.cache_vpnv6_timer = Some(start_adv_timer_vpnv6(self));
+        if timer && self.cache_vpnv6_timer.is_none() && !self.immediate_flush_queued_vpnv6 {
+            let secs = self.adv_interval.secs_for(self.peer_type);
+            if secs == 0 {
+                // See `update_group::send_ipv4` for why adv-interval 0
+                // queues the flush event directly instead of arming a
+                // timer.
+                self.immediate_flush_queued_vpnv6 = true;
+                let tx = self.tx.clone();
+                let ident = self.ident;
+                tokio::spawn(async move {
+                    let _ = tx
+                        .send(Message::Event(ident, Event::AdvTimerVpnv6Expires))
+                        .await;
+                });
+            } else {
+                self.cache_vpnv6_timer = Some(start_adv_timer_vpnv6(self));
+            }
         }
     }
 
