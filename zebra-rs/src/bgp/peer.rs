@@ -1012,6 +1012,14 @@ pub struct Peer {
     pub cache_evpn_rev: HashMap<EvpnRoute, Arc<BgpAttr>>,
     pub cache_vpnv4_timer: Option<Timer>,
     pub cache_evpn_timer: Option<Timer>,
+    /// Adv-interval-0 twins of the three timer fields above: set when
+    /// `send_vpnv4`/`send_vpnv6`/`send_evpn` (route.rs) queues an
+    /// immediate flush event with no timer armed. Gates re-queueing
+    /// within one synchronous advertise batch; cleared by
+    /// `fsm_adv_timer_*_expires` alongside the matching `cache_*_timer`.
+    pub immediate_flush_queued_vpnv4: bool,
+    pub immediate_flush_queued_vpnv6: bool,
+    pub immediate_flush_queued_evpn: bool,
     // Runtime bookkeeping for TCP-AO listener state: the (send_id,
     // recv_id) pair most recently installed via TCP_AO_ADD_KEY for
     // this peer. Needed because TCP_AO_DEL_KEY requires the exact
@@ -1167,6 +1175,9 @@ impl Peer {
             cache_evpn_rev: HashMap::default(),
             cache_vpnv4_timer: None,
             cache_evpn_timer: None,
+            immediate_flush_queued_vpnv4: false,
+            immediate_flush_queued_vpnv6: false,
+            immediate_flush_queued_evpn: false,
             last_ao_installed: None,
             update_group_id: BTreeMap::new(),
             adv_interval: timer::AdvInterval::default(),
@@ -1947,6 +1958,7 @@ pub fn fsm(
 
 pub fn fsm_adv_timer_vpnv4_expires(peer: &mut Peer) -> State {
     peer.cache_vpnv4_timer = None;
+    peer.immediate_flush_queued_vpnv4 = false;
     if peer.state.is_established() {
         peer.flush_vpnv4();
     }
@@ -1955,6 +1967,7 @@ pub fn fsm_adv_timer_vpnv4_expires(peer: &mut Peer) -> State {
 
 pub fn fsm_adv_timer_vpnv6_expires(peer: &mut Peer) -> State {
     peer.cache_vpnv6_timer = None;
+    peer.immediate_flush_queued_vpnv6 = false;
     if peer.state.is_established() {
         peer.flush_vpnv6();
     }
@@ -1963,6 +1976,7 @@ pub fn fsm_adv_timer_vpnv6_expires(peer: &mut Peer) -> State {
 
 pub fn fsm_adv_timer_evpn_expires(peer: &mut Peer) -> State {
     peer.cache_evpn_timer = None;
+    peer.immediate_flush_queued_evpn = false;
     if peer.state.is_established() {
         peer.flush_evpn();
     }
@@ -4537,6 +4551,121 @@ mod adv_timer_phantom_tests {
             peer.cache_vpnv6_timer.is_none(),
             "route_clean must cancel the VPNv6 advertise timer"
         );
+    }
+
+    // ── adv-interval 0: immediate flush, no timer ──
+
+    /// `idle_peer()` leaks its receiver since the tests above only
+    /// care about `peer.state`; the tests below need to inspect what
+    /// actually lands on the channel, so build the peer inline keeping
+    /// `rx`.
+    fn peer_with_channel() -> (Peer, mpsc::Receiver<Message>) {
+        let (tx, rx) = mpsc::channel::<Message>(64);
+        let mut peer = Peer::new(
+            1,
+            65001,
+            Ipv4Addr::new(10, 0, 0, 1),
+            65001,
+            "10.0.0.2".parse().unwrap(),
+            None,
+            tx,
+            crate::context::ProtoContext::default_table_no_rib(),
+        );
+        peer.state = State::Idle;
+        (peer, rx)
+    }
+
+    /// adv-interval 0 must behave like FRR's `bgp_adjust_routeadv`
+    /// `v_routeadv == 0` special case: no debounce timer at all — the
+    /// flush event is queued directly (`tokio::spawn`, no sleep) so it
+    /// must already be sitting on the channel well before the old
+    /// `Timer::once` 1 s floor could ever fire.
+    #[tokio::test]
+    async fn send_vpnv4_zero_adv_interval_queues_flush_without_timer() {
+        let (mut peer, mut rx) = peer_with_channel();
+        peer.adv_interval = timer::AdvInterval { ibgp: 0, ebgp: 0 };
+        let nlri = Vpnv4Nlri {
+            label: Label::default(),
+            rd: RouteDistinguisher::default(),
+            nlri: Ipv4Nlri {
+                id: 0,
+                prefix: "10.0.0.0/24".parse().unwrap(),
+            },
+        };
+
+        peer.send_vpnv4(nlri, Arc::new(BgpAttr::new()), true);
+
+        assert!(
+            peer.cache_vpnv4_timer.is_none(),
+            "adv-interval 0 must not arm a debounce timer"
+        );
+        assert!(peer.immediate_flush_queued_vpnv4);
+        let msg = tokio::time::timeout(std::time::Duration::from_millis(200), rx.recv())
+            .await
+            .expect("flush event must already be queued, no timer wait")
+            .expect("channel open");
+        match msg {
+            Message::Event(ident, Event::AdvTimerVpnv4Expires) => assert_eq!(ident, peer.ident),
+            other => panic!("expected AdvTimerVpnv4Expires, got {other:?}"),
+        }
+    }
+
+    /// Non-zero adv-interval (the default) must keep debouncing via a
+    /// real timer exactly as before — no flush event before it fires.
+    #[tokio::test]
+    async fn send_vpnv4_nonzero_adv_interval_still_arms_timer() {
+        let (mut peer, mut rx) = peer_with_channel();
+        assert_eq!(peer.adv_interval, timer::AdvInterval::default());
+        let nlri = Vpnv4Nlri {
+            label: Label::default(),
+            rd: RouteDistinguisher::default(),
+            nlri: Ipv4Nlri {
+                id: 0,
+                prefix: "10.0.0.0/24".parse().unwrap(),
+            },
+        };
+
+        peer.send_vpnv4(nlri, Arc::new(BgpAttr::new()), true);
+
+        assert!(
+            peer.cache_vpnv4_timer.is_some(),
+            "non-zero interval must debounce via a timer"
+        );
+        assert!(!peer.immediate_flush_queued_vpnv4);
+        assert!(
+            rx.try_recv().is_err(),
+            "flush must not fire before the debounce timer elapses"
+        );
+    }
+
+    /// EVPN twin of the VPNv4 zero-interval test above, using a
+    /// distinct `EvpnRoute` shape to catch a copy-paste mistake in the
+    /// mirrored wiring (VPNv6 is identical in shape to VPNv4, so it
+    /// isn't repeated here).
+    #[tokio::test]
+    async fn send_evpn_zero_adv_interval_queues_flush_without_timer() {
+        let (mut peer, mut rx) = peer_with_channel();
+        peer.adv_interval = timer::AdvInterval { ibgp: 0, ebgp: 0 };
+        let route = EvpnRoute::EthernetAd(EvpnEthernetAd {
+            id: 0,
+            rd: RouteDistinguisher::default(),
+            esi: [0; 10],
+            ether_tag: 0,
+            label: 0,
+        });
+
+        peer.send_evpn(route, Arc::new(BgpAttr::new()), true);
+
+        assert!(peer.cache_evpn_timer.is_none());
+        assert!(peer.immediate_flush_queued_evpn);
+        let msg = tokio::time::timeout(std::time::Duration::from_millis(200), rx.recv())
+            .await
+            .expect("flush event must already be queued, no timer wait")
+            .expect("channel open");
+        match msg {
+            Message::Event(ident, Event::AdvTimerEvpnExpires) => assert_eq!(ident, peer.ident),
+            other => panic!("expected AdvTimerEvpnExpires, got {other:?}"),
+        }
     }
 }
 
