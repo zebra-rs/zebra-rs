@@ -1,5 +1,7 @@
 router:
   bgp:
+    tracing:
+      sharding: null
     global:
       as: 65002
       router-id: 10.0.0.2

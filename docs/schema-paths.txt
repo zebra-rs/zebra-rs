@@ -265,6 +265,7 @@
 /router/bgp/tracing/packet/update	p-container
 /router/bgp/tracing/packet/update/detail	leaf
 /router/bgp/tracing/packet/update/direction	leaf
+/router/bgp/tracing/sharding	leaf
 /router/bgp/tracing/srv6	leaf
 /router/bgp/tracing/vpn	leaf
 /router/bgp/tracing/vrf	leaf

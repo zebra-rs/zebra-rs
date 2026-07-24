@@ -291,6 +291,11 @@ pub struct BgpTracing {
     pub srv6: bool,
     pub vrf: bool,
     pub bfd: bool,
+    /// Instance-lifetime knobs frozen at spawn: the RIB shard count, the
+    /// per-peer egress-task model, and update-group egress task
+    /// spawn/exit. Mirrored into [`TRACE_SHARDING`] because those sites
+    /// run where no `BgpTracing` is in reach — see [`trace_sharding`].
+    pub sharding: bool,
 }
 
 impl BgpTracing {
@@ -358,6 +363,36 @@ impl BgpTracing {
     pub fn should_trace_bfd(&self) -> bool {
         self.all || self.bfd
     }
+
+    pub fn should_trace_sharding(&self) -> bool {
+        self.all || self.sharding
+    }
+}
+
+/// Process-global mirror of [`BgpTracing::should_trace_sharding`].
+///
+/// The sharding trace sites cannot reach a `BgpTracing`: `init_shard_count`
+/// and `init_peer_task` run inside `spawn_bgp` *before* `Bgp::new` builds
+/// the instance, and `GroupEgressTask::spawn` is a plain constructor with
+/// neither a `Bgp` nor a `Peer` in scope. A process-global atomic gives
+/// every one of them the same gate — the pattern `bfd::trace` already uses
+/// for its socket tasks.
+///
+/// Seeded by `spawn_bgp` from a candidate-config scan *before*
+/// `init_shard_count` runs (so the freeze-time lines see it), then kept in
+/// step with the live config by [`config_tracing_dispatch`] so a runtime
+/// `set router bgp tracing sharding` reaches update-group tasks spawned
+/// later.
+static TRACE_SHARDING: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// Set the process-global sharding gate. See [`TRACE_SHARDING`].
+pub fn set_trace_sharding(on: bool) {
+    TRACE_SHARDING.store(on, std::sync::atomic::Ordering::Relaxed);
+}
+
+/// Whether the spawn-time sharding / egress-model traces are enabled.
+pub fn trace_sharding() -> bool {
+    TRACE_SHARDING.load(std::sync::atomic::Ordering::Relaxed)
 }
 
 fn parse_direction(args: &mut Args) -> Direction {
@@ -418,6 +453,7 @@ fn apply_tracing(t: &mut BgpTracing, rest: &str, args: &mut Args, op: ConfigOp) 
         "/srv6" => t.srv6 = op.is_set(),
         "/vrf" => t.vrf = op.is_set(),
         "/bfd" => t.bfd = op.is_set(),
+        "/sharding" => t.sharding = op.is_set(),
         other => {
             let pkt = other.strip_prefix("/packet/")?;
             let (typ, sub) = match pkt.split_once('/') {
@@ -481,6 +517,11 @@ pub fn propagate_instance_tracing(bgp: &mut Bgp) {
     for (_, peer) in bgp.peers.iter_mut_all() {
         peer.tracing_instance = snapshot.clone();
     }
+    // Sharding is instance-scoped and read from contexts that hold no
+    // `BgpTracing` at all, so it rides a process-global rather than a
+    // per-peer snapshot. Only the instance config feeds it — a
+    // per-neighbor `tracing sharding` would be meaningless.
+    set_trace_sharding(snapshot.should_trace_sharding());
     bgp.broadcast_tracing();
 }
 
@@ -515,6 +556,36 @@ mod tests {
         assert!(t.vpn && t.srv6 && t.vrf && t.bfd);
         apply_tracing(&mut t, "/vpn", &mut args(&[]), ConfigOp::Delete);
         assert!(!t.vpn);
+
+        apply_tracing(&mut t, "/sharding", &mut args(&[]), ConfigOp::Set);
+        assert!(t.sharding);
+        apply_tracing(&mut t, "/sharding", &mut args(&[]), ConfigOp::Delete);
+        assert!(!t.sharding);
+    }
+
+    #[test]
+    fn sharding_follows_all_master_switch() {
+        let mut t = BgpTracing::default();
+        assert!(!t.should_trace_sharding());
+
+        // The `all` master switch implies the category, matching
+        // `trace_sharding_from_config_text`'s spawn-time scan.
+        apply_tracing(&mut t, "/all", &mut args(&[]), ConfigOp::Set);
+        assert!(t.should_trace_sharding());
+
+        apply_tracing(&mut t, "/all", &mut args(&[]), ConfigOp::Delete);
+        assert!(!t.should_trace_sharding());
+        apply_tracing(&mut t, "/sharding", &mut args(&[]), ConfigOp::Set);
+        assert!(t.should_trace_sharding());
+    }
+
+    #[test]
+    fn trace_sharding_global_tracks_setter() {
+        // The spawn-time sites read this global, not a `BgpTracing`.
+        set_trace_sharding(true);
+        assert!(trace_sharding());
+        set_trace_sharding(false);
+        assert!(!trace_sharding());
     }
 
     #[test]

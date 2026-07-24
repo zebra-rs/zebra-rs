@@ -49,6 +49,14 @@ pub fn spawn_bgp(config: &ConfigManager) {
     let nd_client_tx = config.nd_client_tx.borrow().clone();
     let (rib_client, rib_rx) = config.subscribe_to_rib("bgp");
     let ctx = crate::context::ProtoContext::default_table(rib_client);
+    // Seed the `sharding` trace gate *before* the two freeze calls below:
+    // they log the value they froze, and neither can reach a `BgpTracing`
+    // (the instance does not exist until `Bgp::new`). Scanning the
+    // candidate config here — the same text `configured_shards` reads —
+    // means a `router bgp tracing sharding` landing in the same commit as
+    // `router bgp` is already visible, with no node-ordering dependency.
+    // `config_tracing_dispatch` keeps the global in step afterwards.
+    crate::bgp::tracing::set_trace_sharding(configured_trace_sharding(config));
     // C.4: freeze the shard count from the `router bgp sharding rib-sharding
     // <n>` leaf (else `ZEBRA_BGP_SHARDS`, else 1) before `Bgp::new` spawns the
     // pool.
@@ -137,9 +145,58 @@ fn peer_task_from_config_text(text: &str) -> Option<bool> {
     })
 }
 
+/// Read the `router bgp tracing sharding` / `tracing all` presence leaves from
+/// the committed candidate config. Same flattened-text scan as
+/// [`configured_shards`], for the same reason: the spawn-time sharding traces
+/// fire before `Bgp::new` exists to hold a `BgpTracing`, so the gate has to be
+/// resolved from the config text directly.
+fn configured_trace_sharding(config: &ConfigManager) -> bool {
+    let mut text = String::new();
+    config.store.candidate.borrow().list(&mut text);
+    trace_sharding_from_config_text(&text)
+}
+
+/// Pure line-scan (unit-tested): is the instance-level `sharding` trace
+/// category on? `tracing all` is the master switch and implies it, matching
+/// [`BgpTracing::should_trace_sharding`]. Neighbor-scoped lines
+/// (`router bgp neighbor … tracing …`) must NOT match — sharding is an
+/// instance property.
+fn trace_sharding_from_config_text(text: &str) -> bool {
+    text.lines().any(|line| {
+        matches!(
+            line.trim_end(),
+            "router bgp tracing sharding" | "router bgp tracing all"
+        )
+    })
+}
+
 #[cfg(test)]
 mod tests {
-    use super::shards_from_config_text;
+    use super::{shards_from_config_text, trace_sharding_from_config_text};
+
+    #[test]
+    fn trace_sharding_line_scan() {
+        // The category itself, and the `all` master switch that implies it.
+        assert!(trace_sharding_from_config_text(
+            "router bgp tracing sharding\nrouter bgp sharding rib-sharding 4\n"
+        ));
+        assert!(trace_sharding_from_config_text("router bgp tracing all\n"));
+        // Absent ⇒ off (the spawn-time traces stay silent).
+        assert!(!trace_sharding_from_config_text(
+            "router bgp sharding rib-sharding 4\n"
+        ));
+        assert!(!trace_sharding_from_config_text(""));
+        // A different category must not turn it on.
+        assert!(!trace_sharding_from_config_text("router bgp tracing fsm\n"));
+        // Instance-scoped: the neighbor-scoped path must NOT match, and
+        // neither may a longer line that merely starts with the same text.
+        assert!(!trace_sharding_from_config_text(
+            "router bgp neighbor 10.0.0.1 tracing sharding\n"
+        ));
+        assert!(!trace_sharding_from_config_text(
+            "router bgp tracing sharding-something-else\n"
+        ));
+    }
 
     #[test]
     fn shards_line_scan() {

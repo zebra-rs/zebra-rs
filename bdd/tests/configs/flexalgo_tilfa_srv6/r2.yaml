@@ -38,8 +38,6 @@ router:
       advertise-definition: true
       dataplane:
         srv6: true
-      fast-reroute:
-        ti-lfa: {}
     interface:
     - if-name: lo
       ipv6:
