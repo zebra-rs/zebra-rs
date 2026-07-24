@@ -98,6 +98,32 @@ macro_rules! start_timer {
     }};
 }
 
+/// Advertise-debounce timer. Identical to `start_timer!` except an
+/// adv-interval of 0 arms a next-tick (~1 ms) timer instead of letting
+/// `Timer::once` clamp 0 s up to its 1 s floor. The one-timer-at-a-time
+/// gate (`cache_*_timer.is_none()`) still coalesces a same-batch burst
+/// into a single flush, so 0 means "flush as fast as the executor
+/// turns over" without the artificial second of latency.
+macro_rules! start_adv_timer {
+    ($peer:expr, $secs:expr, $ev:expr) => {{
+        let ident = $peer.ident;
+        let tx = $peer.tx.clone();
+        let secs = $secs;
+
+        let cb = move || {
+            let tx = tx.clone();
+            async move {
+                let _ = tx.send(Message::Event(ident, $ev)).await;
+            }
+        };
+        if secs == 0 {
+            Timer::once_ms(1, cb)
+        } else {
+            Timer::once(secs, cb)
+        }
+    }};
+}
+
 macro_rules! start_repeater {
     ($peer:expr, $time:expr, $ev:expr) => {{
         let ident = $peer.ident;
@@ -148,12 +174,12 @@ fn start_hold_timer(peer: &Peer) -> Timer {
 
 pub fn start_adv_timer_vpnv4(peer: &Peer) -> Timer {
     let secs = peer.adv_interval.secs_for(peer.peer_type);
-    start_timer!(peer, secs, Event::AdvTimerVpnv4Expires)
+    start_adv_timer!(peer, secs, Event::AdvTimerVpnv4Expires)
 }
 
 pub fn start_adv_timer_vpnv6(peer: &Peer) -> Timer {
     let secs = peer.adv_interval.secs_for(peer.peer_type);
-    start_timer!(peer, secs, Event::AdvTimerVpnv6Expires)
+    start_adv_timer!(peer, secs, Event::AdvTimerVpnv6Expires)
 }
 
 /// EVPN advertise debounce — same iBGP/eBGP cadence as the IPv4 /
@@ -161,7 +187,7 @@ pub fn start_adv_timer_vpnv6(peer: &Peer) -> Timer {
 /// UPDATE per attribute group.
 pub fn start_adv_timer_evpn(peer: &Peer) -> Timer {
     let secs = peer.adv_interval.secs_for(peer.peer_type);
-    start_timer!(peer, secs, Event::AdvTimerEvpnExpires)
+    start_adv_timer!(peer, secs, Event::AdvTimerEvpnExpires)
 }
 
 fn start_keepalive_timer(peer: &Peer) -> Timer {
@@ -303,7 +329,6 @@ pub fn update_timers(peer: &mut Peer) {
     }
     if peer.state != Established {
         peer.cache_vpnv4_timer = None;
-        peer.immediate_flush_queued_vpnv4 = false;
     }
 }
 

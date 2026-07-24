@@ -263,13 +263,9 @@ pub struct UpdateGroup {
     pub cache_ipv4_rev: HashMap<Ipv4Nlri, Arc<BgpAttr>>,
     /// Adv-debounce timer. Started on first send; on fire,
     /// `Bgp::serve` drains the cache and ships UPDATEs to members.
+    /// With `adv_interval` 0 this is a ~1 ms next-tick timer (see
+    /// `start_adv_timer_ipv4`) rather than the usual multi-second one.
     pub cache_ipv4_timer: Option<Timer>,
-    /// Set instead of `cache_ipv4_timer` when `adv_interval` is 0: no
-    /// timer is armed at all, a flush message is queued directly (see
-    /// `send_ipv4`). Gates re-queueing within one synchronous
-    /// advertise batch; cleared by `build_flush_job_ipv4` alongside
-    /// `cache_ipv4_timer`.
-    pub immediate_flush_queued_ipv4: bool,
 
     // ── IPv6 unicast pending advertisement cache ──
     //
@@ -279,8 +275,6 @@ pub struct UpdateGroup {
     pub cache_ipv6: HashMap<Arc<BgpAttr>, HashMap<Ipv6Nlri, usize>>,
     pub cache_ipv6_rev: HashMap<Ipv6Nlri, Arc<BgpAttr>>,
     pub cache_ipv6_timer: Option<Timer>,
-    /// IPv6 twin of `immediate_flush_queued_ipv4`.
-    pub immediate_flush_queued_ipv6: bool,
 
     /// Snapshot of `Bgp::adv_interval` captured at group creation
     /// (`attach`) and refreshed by the global config callback. Used
@@ -547,11 +541,9 @@ pub fn attach(
                 cache_ipv4: HashMap::new(),
                 cache_ipv4_rev: HashMap::new(),
                 cache_ipv4_timer: None,
-                immediate_flush_queued_ipv4: false,
                 cache_ipv6: HashMap::new(),
                 cache_ipv6_rev: HashMap::new(),
                 cache_ipv6_timer: None,
-                immediate_flush_queued_ipv6: false,
                 adv_interval,
                 flush_inflight_ipv4: false,
                 flush_pending_ipv4: false,
@@ -662,28 +654,9 @@ pub fn send_ipv4(
         .or_default()
         .insert(nlri.clone(), source_ident);
     group.cache_ipv4_rev.insert(nlri, attr);
-    if kick_timer && group.cache_ipv4_timer.is_none() && !group.immediate_flush_queued_ipv4 {
+    if kick_timer && group.cache_ipv4_timer.is_none() {
         let secs = group.adv_interval.secs_for(group.sig.peer_type);
-        if secs == 0 {
-            // FRR's bgp_adjust_routeadv() treats v_routeadv==0 as "no
-            // timer, schedule update-group packet generation as a 0 ms
-            // event" rather than a fast timer. Mirror that: queue the
-            // flush directly instead of arming `Timer::once`, which
-            // clamps 0 secs to a 1 s floor. `tokio::spawn` doesn't
-            // sleep at all — it just runs on the next scheduler pass —
-            // so this can't fire before the current synchronous
-            // advertise batch returns control to the executor, which
-            // is what keeps same-batch sends coalescing into one
-            // flush.
-            group.immediate_flush_queued_ipv4 = true;
-            let tx = tx.clone();
-            let id = group.id.clone();
-            tokio::spawn(async move {
-                let _ = tx.send(Message::FlushUpdateGroupIpv4(id)).await;
-            });
-        } else {
-            group.cache_ipv4_timer = Some(start_adv_timer_ipv4(tx, &group.id, secs));
-        }
+        group.cache_ipv4_timer = Some(start_adv_timer_ipv4(tx, &group.id, secs));
     }
 }
 
@@ -709,13 +682,23 @@ pub fn cache_remove_ipv4(group: &mut UpdateGroup, prefix: ipnet::Ipv4Net, id: u3
 fn start_adv_timer_ipv4(tx: &mpsc::Sender<Message>, id: &UpdateGroupId, secs: u64) -> Timer {
     let tx = tx.clone();
     let id = id.clone();
-    Timer::once(secs, move || {
+    let cb = move || {
         let tx = tx.clone();
         let id = id.clone();
         async move {
             let _ = tx.send(Message::FlushUpdateGroupIpv4(id)).await;
         }
-    })
+    };
+    // adv-interval 0 fires on the next tick (~1 ms) instead of letting
+    // `Timer::once` clamp 0 s up to its 1 s floor. `cache_ipv4_timer`
+    // stays `Some` until the flush drains it, so a same-batch burst
+    // still coalesces into one flush. See `start_adv_timer!` in
+    // timer.rs for the per-peer twin of this.
+    if secs == 0 {
+        Timer::once_ms(1, cb)
+    } else {
+        Timer::once(secs, cb)
+    }
 }
 
 /// One member's send context, snapshotted out of `PeerMap` while
@@ -965,7 +948,6 @@ pub(super) fn build_flush_job_ipv4(
 ) -> Option<FlushJob<Ipv4Nlri>> {
     let afi_safi = AfiSafi::new(Afi::Ip, Safi::Unicast);
     group.cache_ipv4_timer = None;
-    group.immediate_flush_queued_ipv4 = false;
     let buckets: Vec<(Arc<BgpAttr>, Vec<(Ipv4Nlri, usize)>)> = group
         .cache_ipv4
         .drain()
@@ -1206,20 +1188,9 @@ pub fn send_ipv6(
         .or_default()
         .insert(nlri.clone(), source_ident);
     group.cache_ipv6_rev.insert(nlri, attr);
-    if kick_timer && group.cache_ipv6_timer.is_none() && !group.immediate_flush_queued_ipv6 {
+    if kick_timer && group.cache_ipv6_timer.is_none() {
         let secs = group.adv_interval.secs_for(group.sig.peer_type);
-        if secs == 0 {
-            // See `send_ipv4` for why this queues directly instead of
-            // arming a timer.
-            group.immediate_flush_queued_ipv6 = true;
-            let tx = tx.clone();
-            let id = group.id.clone();
-            tokio::spawn(async move {
-                let _ = tx.send(Message::FlushUpdateGroupIpv6(id)).await;
-            });
-        } else {
-            group.cache_ipv6_timer = Some(start_adv_timer_ipv6(tx, &group.id, secs));
-        }
+        group.cache_ipv6_timer = Some(start_adv_timer_ipv6(tx, &group.id, secs));
     }
 }
 
@@ -1240,13 +1211,19 @@ pub fn cache_remove_ipv6(group: &mut UpdateGroup, prefix: ipnet::Ipv6Net, id: u3
 fn start_adv_timer_ipv6(tx: &mpsc::Sender<Message>, id: &UpdateGroupId, secs: u64) -> Timer {
     let tx = tx.clone();
     let id = id.clone();
-    Timer::once(secs, move || {
+    let cb = move || {
         let tx = tx.clone();
         let id = id.clone();
         async move {
             let _ = tx.send(Message::FlushUpdateGroupIpv6(id)).await;
         }
-    })
+    };
+    // See `start_adv_timer_ipv4` for why 0 fires on the next tick.
+    if secs == 0 {
+        Timer::once_ms(1, cb)
+    } else {
+        Timer::once(secs, cb)
+    }
 }
 
 /// IPv6 counterpart of [`build_flush_job_ipv4`]. No ENHE step — v6
@@ -1258,7 +1235,6 @@ pub(super) fn build_flush_job_ipv6(
 ) -> Option<FlushJob<Ipv6Nlri>> {
     let afi_safi = AfiSafi::new(Afi::Ip6, Safi::Unicast);
     group.cache_ipv6_timer = None;
-    group.immediate_flush_queued_ipv6 = false;
     let buckets: Vec<(Arc<BgpAttr>, Vec<(Ipv6Nlri, usize)>)> = group
         .cache_ipv6
         .drain()
@@ -1893,11 +1869,9 @@ mod tests {
                 cache_ipv4: HashMap::new(),
                 cache_ipv4_rev: HashMap::new(),
                 cache_ipv4_timer: None,
-                immediate_flush_queued_ipv4: false,
                 cache_ipv6: HashMap::new(),
                 cache_ipv6_rev: HashMap::new(),
                 cache_ipv6_timer: None,
-                immediate_flush_queued_ipv6: false,
                 adv_interval: AdvInterval::default(),
                 flush_inflight_ipv4: false,
                 flush_pending_ipv4: false,
@@ -2244,11 +2218,9 @@ mod tests {
             cache_ipv4: HashMap::new(),
             cache_ipv4_rev: HashMap::new(),
             cache_ipv4_timer: None,
-            immediate_flush_queued_ipv4: false,
             cache_ipv6: HashMap::new(),
             cache_ipv6_rev: HashMap::new(),
             cache_ipv6_timer: None,
-            immediate_flush_queued_ipv6: false,
             adv_interval: AdvInterval::default(),
             flush_inflight_ipv4: false,
             flush_pending_ipv4: false,
@@ -2385,28 +2357,33 @@ mod tests {
         assert_eq!(group.counters.messages_formatted, 1);
     }
 
-    // ── adv-interval 0: immediate flush, no timer ──
+    // ── adv-interval 0: sub-second flush, no 1 s floor ──
 
-    /// adv-interval 0 must not arm `cache_ipv4_timer` at all — the
-    /// flush message is queued directly (`tokio::spawn`, no sleep), so
-    /// it must already be sitting on the channel well before the old
-    /// `Timer::once` 1 s floor could ever fire.
+    /// adv-interval 0 must arm a *next-tick* (~1 ms) timer, not the
+    /// 1 s-clamped `Timer::once(0, …)`. `duration_sec() == 0` is the
+    /// regression guard: the old clamp produced a 1 s timer
+    /// (`duration_sec() == 1`). The flush must also land on the channel
+    /// well under the old 1 s floor.
     #[tokio::test]
-    async fn send_ipv4_zero_adv_interval_queues_flush_without_timer() {
+    async fn send_ipv4_zero_adv_interval_flushes_under_one_second_floor() {
         let (id, mut group) = test_group(0);
         group.adv_interval = AdvInterval { ibgp: 0, ebgp: 0 };
         let (tx, mut rx) = mpsc::channel(8);
 
         send_ipv4(&mut group, nlri("10.0.0.1/32"), test_attr(0), 99, &tx, true);
 
-        assert!(
-            group.cache_ipv4_timer.is_none(),
-            "adv-interval 0 must not arm a debounce timer"
+        let timer = group
+            .cache_ipv4_timer
+            .as_ref()
+            .expect("adv-interval 0 must still arm a debounce timer");
+        assert_eq!(
+            timer.duration_sec(),
+            0,
+            "adv-interval 0 must arm a sub-second timer, not the 1 s-clamped one"
         );
-        assert!(group.immediate_flush_queued_ipv4);
         let msg = tokio::time::timeout(std::time::Duration::from_millis(200), rx.recv())
             .await
-            .expect("flush must already be queued, no timer wait")
+            .expect("flush must fire well under the old 1 s floor")
             .expect("channel open");
         let Message::FlushUpdateGroupIpv4(got) = msg else {
             panic!("expected FlushUpdateGroupIpv4, got {msg:?}");
@@ -2415,9 +2392,9 @@ mod tests {
     }
 
     /// A burst of sends within one synchronous batch (before the
-    /// executor gets a chance to run the queued flush task) must still
-    /// coalesce into a single flush message — adv-interval 0 removes
-    /// the timer, not the batching.
+    /// executor runs the ~1 ms timer) must still coalesce into a single
+    /// flush message — adv-interval 0 shortens the debounce, it doesn't
+    /// remove the batching.
     #[tokio::test]
     async fn send_ipv4_zero_adv_interval_coalesces_batch_into_one_flush() {
         let (_id, mut group) = test_group(0);
@@ -2444,8 +2421,8 @@ mod tests {
     }
 
     /// Non-zero adv-interval (the default) must keep debouncing via a
-    /// real timer exactly as before — no flush message before it
-    /// fires.
+    /// multi-second timer exactly as before — no flush message before
+    /// it fires.
     #[tokio::test]
     async fn send_ipv4_nonzero_adv_interval_still_arms_timer() {
         let (_id, mut group) = test_group(0);
@@ -2454,21 +2431,24 @@ mod tests {
 
         send_ipv4(&mut group, nlri("10.0.0.1/32"), test_attr(0), 99, &tx, true);
 
+        let timer = group
+            .cache_ipv4_timer
+            .as_ref()
+            .expect("non-zero interval must debounce via a timer");
         assert!(
-            group.cache_ipv4_timer.is_some(),
-            "non-zero interval must debounce via a timer"
+            timer.duration_sec() >= 1,
+            "non-zero interval must arm a multi-second timer, not the next-tick one"
         );
-        assert!(!group.immediate_flush_queued_ipv4);
         assert!(
             rx.try_recv().is_err(),
             "flush must not fire before the debounce timer elapses"
         );
     }
 
-    /// IPv6 twin of `send_ipv4_zero_adv_interval_queues_flush_without_timer`
+    /// IPv6 twin of `send_ipv4_zero_adv_interval_flushes_under_one_second_floor`
     /// — catches a copy-paste mistake in the mirrored wiring.
     #[tokio::test]
-    async fn send_ipv6_zero_adv_interval_queues_flush_without_timer() {
+    async fn send_ipv6_zero_adv_interval_flushes_under_one_second_floor() {
         let (id, mut group) = test_group(0);
         group.adv_interval = AdvInterval { ibgp: 0, ebgp: 0 };
         let (tx, mut rx) = mpsc::channel(8);
@@ -2486,11 +2466,14 @@ mod tests {
 
         send_ipv6(&mut group, nlri6, attr, 99, &tx, true);
 
-        assert!(group.cache_ipv6_timer.is_none());
-        assert!(group.immediate_flush_queued_ipv6);
+        let timer = group
+            .cache_ipv6_timer
+            .as_ref()
+            .expect("adv-interval 0 must still arm a debounce timer");
+        assert_eq!(timer.duration_sec(), 0);
         let msg = tokio::time::timeout(std::time::Duration::from_millis(200), rx.recv())
             .await
-            .expect("flush must already be queued, no timer wait")
+            .expect("flush must fire well under the old 1 s floor")
             .expect("channel open");
         let Message::FlushUpdateGroupIpv6(got) = msg else {
             panic!("expected FlushUpdateGroupIpv6, got {msg:?}");
@@ -2518,8 +2501,11 @@ mod tests {
 
         send_ipv6(&mut group, nlri6, attr, 99, &tx, true);
 
-        assert!(group.cache_ipv6_timer.is_some());
-        assert!(!group.immediate_flush_queued_ipv6);
+        let timer = group
+            .cache_ipv6_timer
+            .as_ref()
+            .expect("non-zero interval must debounce via a timer");
+        assert!(timer.duration_sec() >= 1);
         assert!(rx.try_recv().is_err());
     }
 
