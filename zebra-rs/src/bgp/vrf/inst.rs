@@ -2559,6 +2559,91 @@ impl BgpVrf {
         );
     }
 
+    /// Push `prefix`'s current best path out to this VRF's Established
+    /// CE peers. An empty `selected` is a withdraw (no path left).
+    ///
+    /// The `network` edit paths need this: at spawn the session-up sync
+    /// dumps the whole Loc-RIB, so a config-file `network` reaches the
+    /// CE for free — but a `network` added to (or removed from) an
+    /// already-established session is only seen if the edit advertises
+    /// it, exactly as the import and redistribute paths already do.
+    ///
+    /// The source ident is `ORIGINATED_PEER`: a self-originated row has
+    /// no source peer, and passing a real ident (e.g. 0) would make the
+    /// withdraw's split-horizon skip whichever CE holds it.
+    fn advertise_network_to_ce_v4(
+        &mut self,
+        prefix: ipnet::Ipv4Net,
+        selected: &[super::super::route::BgpRib],
+    ) {
+        let mut top = super::super::peer::BgpTop {
+            router_id: &self.router_id,
+            srv6_ipv6_export: None,
+            local_rib: &mut self.local_rib,
+            shard: &mut self.shard,
+            tx: &self.tx,
+            rib_client: &self.ctx.rib,
+            attr_store: &mut self.attr_store,
+            update_groups: &mut self.update_groups,
+            interface_addrs: &self.interface_addrs,
+            // No re-export here: the VPNv4 export is emitted separately
+            // by the caller via `vrf_emit_export`.
+            vrf_export: None,
+            color_policy: Some(&self.color_policy),
+            flex_algo_routes: None,
+            flex_algo_srv6_routes: Some(&self.flex_algo_srv6_routes),
+            vrf_import: None,
+            nexthop_cache: None,
+            vrf_transport_v4: Some(&self.transport_v4),
+            vrf_transport_v6: Some(&self.transport_v6),
+            central_label_alloc: None,
+            as_sets_withdraw: true,
+        };
+        super::super::route::route_advertise_to_peers(
+            None,
+            prefix,
+            selected,
+            ORIGINATED_PEER,
+            &mut top,
+            &mut self.peers,
+        );
+    }
+
+    /// IPv6 counterpart of [`Self::advertise_network_to_ce_v4`].
+    fn advertise_network_to_ce_v6(
+        &mut self,
+        prefix: ipnet::Ipv6Net,
+        selected: &[super::super::route::BgpRib],
+    ) {
+        let mut top = super::super::peer::BgpTop {
+            router_id: &self.router_id,
+            srv6_ipv6_export: None,
+            local_rib: &mut self.local_rib,
+            shard: &mut self.shard,
+            tx: &self.tx,
+            rib_client: &self.ctx.rib,
+            attr_store: &mut self.attr_store,
+            update_groups: &mut self.update_groups,
+            interface_addrs: &self.interface_addrs,
+            vrf_export: None,
+            color_policy: Some(&self.color_policy),
+            flex_algo_routes: None,
+            flex_algo_srv6_routes: Some(&self.flex_algo_srv6_routes),
+            vrf_import: None,
+            nexthop_cache: None,
+            vrf_transport_v4: Some(&self.transport_v4),
+            vrf_transport_v6: Some(&self.transport_v6),
+            central_label_alloc: None,
+            as_sets_withdraw: true,
+        };
+        super::super::route::route_advertise_to_peers_v6(
+            prefix,
+            selected,
+            &mut top,
+            &mut self.peers,
+        );
+    }
+
     /// Originate one `network <p>` self-route into this VRF's
     /// Loc-RIB as an `Originated` row and emit `Export` so the
     /// global instance promotes it to a VPNv4 advertisement. Shared
@@ -2584,12 +2669,16 @@ impl BgpVrf {
             let exporter = self.exporter();
             vrf_emit_export(&exporter, prefix, &winner.attr);
         }
+        // Reach CE peers that are already Established (a runtime
+        // `network` add); at spawn this is a no-op — no peer is up yet
+        // and the session-up sync carries the row.
+        self.advertise_network_to_ce_v4(prefix, &selected);
     }
 
     /// Inverse of [`Self::originate_self_network_v4`]: drop the
-    /// self-originated row (ident 0 / remote 0) for `prefix`,
-    /// re-run best-path, and either re-export the surviving winner
-    /// or emit `WithdrawExport` when nothing else carries the
+    /// self-originated row (ident `ORIGINATED_PEER` / remote 0) for
+    /// `prefix`, re-run best-path, and either re-export the surviving
+    /// winner or emit `WithdrawExport` when nothing else carries the
     /// prefix. Driven by [`BgpVrfMsg::WithdrawNetwork`] when a
     /// `network` is removed from a running VRF.
     pub fn withdraw_self_network_v4(&mut self, prefix: ipnet::Ipv4Net) {
@@ -2605,10 +2694,14 @@ impl BgpVrf {
         // `remove` does not re-run best-path; do it explicitly so a
         // surviving candidate (e.g. an imported route on the same
         // prefix) is re-advertised instead of withdrawn.
-        match self.shard.select_best_path(prefix).first() {
+        let selected = self.shard.select_best_path(prefix);
+        match selected.first() {
             Some(winner) => vrf_emit_export(&exporter, prefix, &winner.attr),
             None => vrf_emit_withdraw(&exporter, prefix),
         }
+        // Same for the CE side: an empty `selected` withdraws the
+        // prefix, a surviving candidate replaces it.
+        self.advertise_network_to_ce_v4(prefix, &selected);
     }
 
     /// IPv6 counterpart of [`Self::originate_self_network_v4`]. The
@@ -2628,6 +2721,9 @@ impl BgpVrf {
             let exporter = self.exporter();
             vrf_emit_export_v6(&exporter, prefix, &winner.attr);
         }
+        // See `originate_self_network_v4` — reach already-Established
+        // CE peers on a runtime `network` add.
+        self.advertise_network_to_ce_v6(prefix, &selected);
     }
 
     /// IPv6 counterpart of [`Self::withdraw_self_network_v4`].
@@ -2640,10 +2736,12 @@ impl BgpVrf {
             return;
         }
         let exporter = self.exporter();
-        match self.shard.select_best_path_v6(prefix).first() {
+        let selected = self.shard.select_best_path_v6(prefix);
+        match selected.first() {
             Some(winner) => vrf_emit_export_v6(&exporter, prefix, &winner.attr),
             None => vrf_emit_withdraw_v6(&exporter, prefix),
         }
+        self.advertise_network_to_ce_v6(prefix, &selected);
     }
 
     /// Tell the RIB to start redistributing `source` for `afi` into
@@ -3724,6 +3822,90 @@ mod tests {
         assert!(
             vrf.shard.select_best_path(prefix).is_empty(),
             "withdraw must remove the self-originated row (matching ident)"
+        );
+    }
+
+    /// Regression guard: a `network` added to (or removed from) a VRF
+    /// whose CE session is ALREADY Established must be advertised /
+    /// withdrawn right then. The spawn path gets this for free from the
+    /// session-up sync, so before the fix `originate_self_network_v4`
+    /// wrote the Loc-RIB and emitted the VPNv4 export but the CE never
+    /// saw the prefix. `adj_out` is the per-peer record of what was
+    /// advertised.
+    #[tokio::test]
+    async fn runtime_network_edit_reaches_an_established_ce() {
+        use crate::bgp::peer::{Peer, State};
+        use bgp_packet::{Afi, CapMultiProtocol, Safi};
+        use std::net::IpAddr;
+
+        let (global_tx, _global_rx) = unbounded_channel::<BgpGlobalMsg>();
+        let ctx = test_ctx_for_vrf(52, "vrf-runtime-net");
+        let (_rib_tx, rib_rx) = mpsc::unbounded_channel();
+        let (mut vrf, _inbox) = BgpVrf::new(
+            "vrf-runtime-net".to_string(),
+            ctx,
+            Ipv4Addr::new(1, 1, 1, 1),
+            65000,
+            /* label */ 16,
+            global_tx,
+            rib_rx,
+        );
+
+        // An Established CE peer with IPv4 unicast negotiated. It lands
+        // at ident 0 — the split-horizon collision case.
+        let addr: IpAddr = Ipv4Addr::new(10, 1, 0, 2).into();
+        let (peer_tx, _peer_rx) = mpsc::channel::<Message>(4);
+        let peer_ctx = test_ctx_for_vrf(52, "vrf-runtime-net");
+        let mut peer = Peer::new(
+            0,
+            65000,
+            Ipv4Addr::new(1, 1, 1, 1),
+            65001,
+            addr,
+            None,
+            peer_tx,
+            peer_ctx,
+        );
+        peer.state = State::Established;
+        {
+            let key = CapMultiProtocol::new(&Afi::Ip, &Safi::Unicast);
+            let entry = peer
+                .cap_map
+                .entries
+                .get_mut(&key)
+                .expect("v4 unicast family pre-seeded in CapAfiMap");
+            entry.send = true;
+            entry.recv = true;
+        }
+        vrf.peers.insert(addr, peer);
+        let peer_idx = vrf.peers.get(&addr).expect("peer inserted").ident;
+        assert_eq!(peer_idx, 0, "first CE takes ident 0 (the collision case)");
+        // The advertise audience is the family-membership index, which
+        // the FSM populates on entering Established; this test sets the
+        // state directly, so enroll explicitly.
+        vrf.peers.membership_enroll(peer_idx);
+
+        // Runtime `network` add → must reach the established CE.
+        let prefix: ipnet::Ipv4Net = "10.9.0.0/24".parse().unwrap();
+        vrf.originate_self_network_v4(prefix);
+        assert!(
+            vrf.peers
+                .get_mut_by_idx(peer_idx)
+                .expect("peer")
+                .adj_out
+                .contains_key(None, &prefix),
+            "a runtime `network` add must be advertised to an established CE"
+        );
+
+        // Runtime `network` delete → must be withdrawn from it.
+        vrf.withdraw_self_network_v4(prefix);
+        assert!(
+            !vrf.peers
+                .get_mut_by_idx(peer_idx)
+                .expect("peer")
+                .adj_out
+                .contains_key(None, &prefix),
+            "removing the `network` must withdraw it from the established CE"
         );
     }
 
