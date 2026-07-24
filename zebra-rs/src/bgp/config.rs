@@ -1300,7 +1300,7 @@ pub(super) fn bfd_apply_ident(bgp: &mut Bgp, ident: usize) -> Option<()> {
             255 // GTSM (RFC 5881 §5): single-hop accepts only TTL 255.
         };
         // Key single-hop sessions by the connected interface when we know it
-        // (from `RibRx::AddrAdd`): the per-interface XDP helper — the Echo
+        // (from `RibRx::AddrAdd`): the XDP data plane — the Echo
         // reflector and the expiration watchdog — attaches by ifindex, so an
         // ifindex-0 key can never bring it up. Unknown (no address info yet,
         // or a v6 link-local peer) falls back to 0 — the session still works,
@@ -1492,7 +1492,7 @@ fn config_peer_bfd_echo_rx(bgp: &mut Bgp, mut args: Args, op: ConfigOp) -> Optio
 
 /// `set router bgp neighbor X bfd detect-offload <bool>` — offload
 /// control-packet expiration detection (RFC 5880 §6.8.4) to the
-/// per-interface XDP helper once the session is Up. Single-hop only
+/// XDP data plane once the session is Up. Single-hop only
 /// (inert on multihop sessions).
 fn config_peer_bfd_detect_offload(bgp: &mut Bgp, mut args: Args, op: ConfigOp) -> Option<()> {
     let addr = args.addr()?;
@@ -5139,7 +5139,7 @@ mod bfd_wiring_tests {
 
     /// A single-hop session is keyed by the connected interface once the
     /// covering address is known, and `detect-offload` rides the params —
-    /// both feed the per-interface XDP helper. An address learned AFTER
+    /// both feed the XDP data plane. An address learned AFTER
     /// `bfd enable` re-keys the session (unsubscribe + resubscribe).
     #[tokio::test]
     async fn single_hop_key_carries_connected_ifindex_and_detect_offload() {

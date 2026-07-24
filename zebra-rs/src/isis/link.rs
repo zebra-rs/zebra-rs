@@ -371,7 +371,7 @@ pub struct LinkBfdConfig {
     /// [`DEFAULT_ECHO_INTERVAL_MS`].
     pub echo_receive_ms: Option<u32>,
     /// Offload control-packet expiration detection (RFC 5880 §6.8.4) to the
-    /// per-interface XDP helper once the session is Up. `None` ⇒ inherit
+    /// XDP data plane once the session is Up. `None` ⇒ inherit
     /// (hard default `false`: detection in userspace).
     pub detect_offload: Option<bool>,
 }
@@ -1094,7 +1094,7 @@ pub fn config_bfd_echo_receive_interval(
 }
 
 /// `interface X bfd detect-offload <bool>` — offload control-packet expiration
-/// detection (RFC 5880 §6.8.4) to the per-interface XDP helper once the
+/// detection (RFC 5880 §6.8.4) to the XDP data plane once the
 /// session is Up. Overrides the instance default; the BFD instance arms /
 /// disarms the in-kernel watchdog on live sessions.
 pub fn config_bfd_detect_offload(isis: &mut Isis, mut args: Args, op: ConfigOp) -> Option<()> {

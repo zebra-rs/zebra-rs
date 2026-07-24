@@ -186,8 +186,8 @@ Each command also accepts a trailing `json` for machine-readable output.
 
 The BFD task is quiet by default. A single runtime flag turns on its
 diagnostic traces — session FSM transitions, control-packet handling, and
-the `xdp-bfd-echo` helper lifecycle (Echo and the in-kernel expiration
-watchdog it hosts):
+the eBPF-offload lifecycle (Echo and the in-kernel expiration watchdog the
+data plane hosts):
 
 ```
 set bfd tracing true     # enable
@@ -196,8 +196,8 @@ set bfd tracing false    # disable (or: delete bfd tracing)
 
 It is a runtime toggle — no restart, and no rebuild — backed by a single
 global flag, so it also covers the parts of BFD that run outside the main
-task (the socket read/write tasks and the per-interface Echo reflector
-IPC). It is not per-session or per-interface; it is on or off for the
+task (the socket read/write tasks and the Echo/detect offload driver's
+RPCs). It is not per-session or per-interface; it is on or off for the
 whole BFD task.
 
 The info- and warn-level traces appear at the **default** log level once
@@ -222,34 +222,36 @@ a node slow its control-packet rate while keeping fast detection. Echo is
 **single-hop only** (RFC 5883 multi-hop has no Echo); **both IPv4 and IPv6**
 are supported.
 
-The two halves are independent and zebra-rs implements both, offloaded to a
-per-interface XDP/eBPF helper, **`xdp-bfd-echo`**:
+The two halves are independent and zebra-rs implements both, offloaded to the
+[eBPF data plane](ch-16-00-ebpf.md):
 
 - **Responder** — when we advertise a non-zero `Required Min Echo RX Interval`,
-  the helper's XDP program loops a peer's Echo back in the data plane, so the
-  *peer* gets fast detection. We only advertise non-zero once the helper is
-  confirmed running, so the promise to loop is honest. The loop differs per
+  the data plane's XDP program loops a peer's Echo back in the kernel, so the
+  *peer* gets fast detection. We only advertise non-zero once the engine is
+  confirmed reachable, so the promise to loop is honest. The loop differs per
   family to match what real peers send: IPv4 Echo is *self-addressed* and
   looped as a forwarding hop (TTL decremented to 254), while IPv6 Echo (as FRR
   sends it) is *peer-addressed*, so the reflector also swaps the IPv6
   source/destination and decrements the Hop Limit — both interop-validated
   against FRR `echo-mode`.
-- **Originator** — the helper sends our Echo from a raw `AF_PACKET` socket and
+- **Originator** — the engine sends our Echo from a raw `AF_PACKET` socket and
   the XDP program arms a per-session in-kernel `bpf_timer` on each return; if
   returns stop for `interval × detect-mult`, the session goes `Down` with
   diagnostic `Echo Function Failed` (RFC 5880 §6.8.5). We only originate while
   the session is `Up` and the peer advertised a non-zero echo-rx (§6.8.9).
 
-The helper is reference-counted **per interface**: one `xdp-bfd-echo` process is
-spawned for each interface that has at least one Echo-enabled (or
+The datapath is keyed by discriminator, but it only runs on interfaces the
+engine has attached, so an Echo-enabled (or
 [`detect-offload`](#offloading-expiration-detection-detect-offload)-enabled)
-session, shared by all sessions on that link, and stopped when the last one
-goes away. It needs
-`cap_net_admin,cap_bpf` (load/attach XDP) and `cap_net_raw` (the originator's
-raw socket); the packaged install grants these. A node with no Echo configured
-runs no helper and advertises `Required Min Echo RX Interval = 0`. Deployment,
-attach modes, and troubleshooting are covered in
-[The XDP/eBPF Data-Plane Helper](ch-10-01-bfd-xdp-helper.md).
+session **auto-attaches its egress interface** as a data-plane port — no
+explicit `interface <name> ebpf enabled` line — and releases it when the last
+such session on that link goes away. The engine itself must be enabled with
+`system ebpf enabled true`; it needs `cap_net_admin,cap_bpf` (load/attach XDP)
+and `cap_net_raw` (the originator's raw socket), which the packaged install
+grants. A node with no Echo configured attaches no BFD port and advertises
+`Required Min Echo RX Interval = 0`. Deployment, attach modes, and
+troubleshooting are covered in
+[BFD Offload in the eBPF Data Plane](ch-10-01-bfd-xdp-helper.md).
 
 Echo is enabled per attachment — on OSPFv2/v3 and IS-IS interfaces, and on
 single-hop eBGP neighbours, where `echo-mode` selects the role
@@ -277,8 +279,8 @@ loop, which has two failure modes under load:
   behind the same backlog.
 
 `detect-offload` moves that timing into the kernel, using the same
-per-interface `xdp-bfd-echo` helper as the [Echo
-function](#echo-function). Once the session is `Up`, the helper's XDP
+[eBPF data plane](ch-16-00-ebpf.md) as the [Echo
+function](#echo-function). Once the session is `Up`, its XDP
 program *observes* every BFD control packet (UDP 3784 at TTL 255) on the
 interface: it matches the packet's `Your Discriminator` against the
 session, re-arms a per-session in-kernel `bpf_timer`, and **passes the
@@ -300,20 +302,20 @@ Notes and guard-rails:
   zebra-rs arms the watchdog on the `Up` transition and disarms it when
   the session leaves `Up`. Renegotiated timers retune the armed value
   automatically.
-- **Single-hop only.** The helper attaches per interface; multi-hop
+- **Single-hop only.** The XDP program runs on attached ports; multi-hop
   ingress is not bound to one (and its TTL floor is below the GTSM 255
   the observer requires). IPv4 and IPv6 are both supported.
 - **The userspace timer stays as a backstop.** While the watchdog is
   armed, the normal detection timer keeps running, stretched to 4× the
-  detection time; if the helper process ever dies, zebra-rs reverts the
+  detection time; if the engine ever goes away, zebra-rs reverts the
   session to ordinary userspace detection immediately.
-- **Honesty gate.** The watchdog is only armed once the helper is
-  confirmed running — if it cannot start (missing binary, capabilities,
-  kernel without XDP/`bpf_timer`), detection simply stays in userspace.
-  A watchdog-only helper needs `cap_net_admin,cap_bpf` (no `cap_net_raw`
-  — there is no transmit half; the daemon keeps sending its own control
-  packets). See
-  [The XDP/eBPF Data-Plane Helper](ch-10-01-bfd-xdp-helper.md) for
+- **Honesty gate.** The watchdog is only armed once the engine is
+  confirmed reachable — if it cannot run (`system ebpf` disabled,
+  missing binary or capabilities, kernel without XDP/`bpf_timer`),
+  detection simply stays in userspace. A watchdog-only deployment needs
+  no `cap_net_raw` — there is no transmit half; the daemon keeps sending
+  its own control packets. See
+  [BFD Offload in the eBPF Data Plane](ch-10-01-bfd-xdp-helper.md) for
   requirements and troubleshooting.
 
 It is enabled per attachment, with the same per-interface /
@@ -350,8 +352,8 @@ native timers would allow.
   Sequences (both initiating and answering); BGP `update-source`
   inherited as the session's local address; the **Echo function**
   (RFC 5880 §6.4, single-hop, IPv4 **and** IPv6) — both reflecting a
-  peer's Echo and originating our own, offloaded to the `xdp-bfd-echo`
-  XDP/eBPF helper (see [Echo function](#echo-function) below), with
+  peer's Echo and originating our own, offloaded to the XDP/eBPF data
+  plane (see [Echo function](#echo-function) below), with
   per-role (`transmit` / `receive` / `both`) config applied live on
   commit and an instance-level `router <proto> { bfd {} }` default
   inherited and overridden per interface / neighbour. Echo is

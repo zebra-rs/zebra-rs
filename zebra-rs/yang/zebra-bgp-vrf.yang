@@ -459,9 +459,9 @@ module zebra-bgp-vrf {
           description "Advertised Required Min Echo RX. Default 50ms when unset.";
         }
         leaf detect-offload {
-          ext:help "Offload expiration detection to the XDP helper";
+          ext:help "Offload expiration detection to the XDP data plane";
           type boolean;
-          description "Detect missing control packets in the kernel XDP helper. Absent ⇒ userspace.";
+          description "Detect missing control packets in the kernel XDP data plane. Absent ⇒ userspace.";
         }
       }
 

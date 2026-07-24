@@ -52,7 +52,7 @@ module zebra-ospf-bfd {
      single-hop (UDP/3784, GTSM TTL=255) — there is no multihop knob.
 
      OSPFv3 BFD runs over IPv6 link-local; Echo works there too — the
-     XDP helper reflects and originates both IPv4 and IPv6 Echo.";
+     XDP data plane reflects and originates both IPv4 and IPv6 Echo.";
 
   revision 2026-06-12 {
     description
@@ -145,8 +145,8 @@ module zebra-ospf-bfd {
       description
         "Enable the BFD Echo function (RFC 5880 §6.4) on this interface's
          single-hop sessions, choosing which half (or both) is active.
-         Backed by the per-interface `xdp-bfd-echo` XDP/eBPF helper,
-         which handles both address families: IPv4 on OSPFv2, IPv6 (the
+         Backed by the XDP/eBPF data plane (system ebpf enabled), which
+         handles both address families: IPv4 on OSPFv2, IPv6 (the
          link-local pair) on OSPFv3. Absent ⇒ Echo off.";
     }
 
@@ -171,11 +171,11 @@ module zebra-ospf-bfd {
     }
 
     leaf detect-offload {
-      ext:help "Offload expiration detection to the XDP helper (kernel)";
+      ext:help "Offload expiration detection to the XDP data plane (kernel)";
       type boolean;
       description
         "Once the session is Up, detect missing control packets in the
-         kernel: the per-interface XDP/eBPF helper re-arms a per-session
+         kernel: the XDP/eBPF data plane re-arms a per-session
          timer on every arriving BFD control packet (UDP/3784, TTL 255)
          and drives the session Down with Control Detection Time Expired
          when they stop (RFC 5880 §6.8.4) — immune to daemon scheduling

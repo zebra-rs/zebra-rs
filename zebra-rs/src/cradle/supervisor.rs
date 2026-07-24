@@ -33,7 +33,7 @@ pub enum EngineEvent {
     Down,
 }
 
-/// Binary resolution override (mirrors `ZEBRA_XDP_BFD_ECHO_BIN`).
+/// Binary resolution override for the engine.
 const BIN_ENV: &str = "ZEBRA_CRADLE_BIN";
 /// Liveness-probe cadence for an adopted (externally-started) engine.
 const PROBE_INTERVAL: Duration = Duration::from_secs(5);

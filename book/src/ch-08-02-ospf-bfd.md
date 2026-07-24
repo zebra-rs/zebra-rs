@@ -82,7 +82,7 @@ router ospf {
 this interface's sessions — single-hop only, both address families: IPv4 on
 OSPFv2, and on OSPFv3 the Echo session runs over the same IPv6 link-local pair
 as the control session. The two halves are independent (RFC 5880 §6.4), backed
-by the per-interface `xdp-bfd-echo` helper, whose XDP program handles IPv4 and
+by the [eBPF data plane](ch-16-00-ebpf.md), whose XDP program handles IPv4 and
 IPv6 frames alike:
 
 - **`receive`** — advertise a non-zero Required Min Echo RX and loop the peer's
@@ -108,8 +108,8 @@ router ospf {
 ```
 
 A forwarding-path fault is then caught in sub-second time independent of the
-OSPF Hello/Dead timers. The helper needs `cap_net_admin,cap_bpf,cap_net_raw`
-and a kernel with XDP + `bpf_timer` support; if it can't start, the session
+OSPF Hello/Dead timers. The engine needs `cap_net_admin,cap_bpf,cap_net_raw`
+and a kernel with XDP + `bpf_timer` support; if it can't run, the session
 stays up on control packets and advertises echo-rx `0`. `show bfd peers` shows
 the negotiated `Echo receive interval` / `Echo transmission interval`.
 
@@ -117,8 +117,8 @@ the negotiated `Echo receive interval` / `Echo transmission interval`.
 
 `detect-offload true` moves the RFC 5880 §6.8.4 detection timer — the
 clock that drives the session `Down` when the neighbour's control
-packets stop arriving — into the kernel, via the same per-interface
-`xdp-bfd-echo` helper that backs Echo. The XDP program re-arms a
+packets stop arriving — into the kernel, via the same
+[eBPF data plane](ch-16-00-ebpf.md) that backs Echo. The XDP program re-arms a
 per-session `bpf_timer` on every arriving control packet and the expiry
 fires in softirq, so detection neither false-fires because the daemon
 was busy (packets queued but unprocessed) nor waits on its event loop.

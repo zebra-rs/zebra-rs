@@ -107,7 +107,7 @@ pub struct SessionParams {
     /// `Required Min Echo RX` at send time (RFC 5880 §6.8.9).
     pub echo_transmit_us: u32,
     /// Offload control-packet expiration detection (RFC 5880 §6.8.4) to the
-    /// per-interface XDP helper once the session is Up: the kernel re-arms a
+    /// XDP data plane once the session is Up: the kernel re-arms a
     /// per-session `bpf_timer` on every arriving control packet and reports
     /// `detect-down` when they stop — immune to daemon scheduling latency.
     /// Single-hop only. The userspace detection timer stays armed as a
@@ -197,8 +197,8 @@ pub struct Session {
     /// Interval (microseconds) at which we originate Echo when
     /// [`EchoMode::transmits`]; clamped up to the peer's advertised echo-rx.
     pub echo_transmit_us: u32,
-    /// Whether the per-interface XDP Echo reflector is confirmed up. The
-    /// instance sets this once the child has spawned; until then we advertise
+    /// Whether the XDP Echo reflector is confirmed up. The
+    /// instance sets this once the engine is reachable; until then we advertise
     /// 0 even with `required_min_echo_rx_us` configured, so the non-zero
     /// advertisement stays an honest promise to actually loop Echo back.
     pub echo_ready: bool,

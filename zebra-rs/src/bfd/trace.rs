@@ -3,8 +3,8 @@
 //! Every trace emitted under `src/bfd/` is gated behind a single runtime flag,
 //! toggled with `set bfd tracing true`. The flag is a process-global atomic so
 //! the gate works from every BFD context — the instance methods, the spawned
-//! socket read/write tasks, and the per-interface `xdp-bfd-echo` reflector IPC
-//! tasks — without threading state through each call site.
+//! socket read/write tasks, and the cradle Echo/detect offload driver task —
+//! without threading state through each call site.
 //!
 //! Use the level-preserving macros [`bfd_info!`], [`bfd_warn!`] and
 //! [`bfd_debug!`] in place of `tracing::{info,warn,debug}!`; each expands to a

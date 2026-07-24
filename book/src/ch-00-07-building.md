@@ -11,8 +11,7 @@ zebra-rs itself. The steps mirror the CI build scripts under
 
 The quickest way to get a build host ready is the `setup-build-env.sh` script
 under `packaging/`. It installs everything the rest of this chapter describes —
-the APT system packages, the stable Rust toolchain, the XDP/eBPF toolchain
-(nightly Rust with `rust-src`, LLVM, and `bpf-linker`), and the `cargo-deb`
+the APT system packages, the stable Rust toolchain, and the `cargo-deb`
 package builder — in a single, idempotent pass, mirroring the CI workflows:
 
 ``` shell
@@ -24,13 +23,15 @@ down to what you actually need:
 
 | Flag | Effect |
 |---|---|
-| `--no-xdp` | Skip the XDP/eBPF toolchain (nightly `rust-src`, LLVM, `bpf-linker`). Use this if you only build with `make all` / `cargo test`. |
 | `--no-cargo-deb` | Skip `cargo-deb` (only needed to build the `.deb` package). |
 | `--no-rust` | Do not install rustup/Rust (assume a toolchain is already present). |
 | `-h`, `--help` | Show the help and exit. |
 
-Two environment variables override the pinned tool versions:
-`LLVM_VERSION` (default `18`) and `BPF_LINKER_VERSION` (default `0.10.3`).
+Building zebra-rs needs only the **stable** Rust toolchain: all XDP/eBPF
+data-plane code lives in
+[cradle-rs](https://github.com/zebra-rs/cradle-rs), which is built and
+packaged separately, so no nightly Rust, LLVM, or `bpf-linker` is required
+here.
 
 The script targets Ubuntu/Debian (it drives `apt-get`). On other distributions,
 install the equivalent pieces by hand — the rest of this chapter documents each
@@ -68,31 +69,14 @@ Building or testing only the Rust workspace (`cargo build`, `cargo test`)
 needs just `protobuf-compiler` and `libpam0g-dev` — that is all `ci.yaml`
 installs. The remaining packages are used by the `vty` build and packaging.
 
-### XDP/eBPF toolchain: LLVM and bpf-linker
+### XDP/eBPF toolchain
 
-The XDP BFD Echo helper (`offload/xdp-bfd-echo`) offloads BFD Echo
-reflection to XDP. It is compiled for the `bpfel-unknown-none` target, which
-requires a nightly Rust toolchain with `rust-src`, LLVM 18, and
-[`bpf-linker`](https://github.com/aya-rs/bpf-linker) (which links against
-LLVM). The validated combination is bpf-linker 0.10.3 with LLVM 18.1:
-
-``` shell
-# Nightly Rust + rust-src for the BPF target
-rustup toolchain install nightly --component rust-src
-
-# LLVM 18 from apt.llvm.org
-wget -qO /tmp/llvm.sh https://apt.llvm.org/llvm.sh
-chmod +x /tmp/llvm.sh
-sudo /tmp/llvm.sh 18
-export PATH="/usr/lib/llvm-18/bin:$PATH"
-
-# bpf-linker, linked against the LLVM installed above
-cargo install bpf-linker --version 0.10.3 --locked
-```
-
-This toolchain is **not** required for `make all`. It is required for
-`make xdp-bfd-echo` and for building the Debian package, which bundles the
-helper.
+Not needed. The eBPF data plane — including the BFD Echo reflector and the
+in-kernel detection watchdog — lives in
+[cradle-rs](https://github.com/zebra-rs/cradle-rs), a separate repository
+with its own build (nightly Rust, LLVM, `bpf-linker`) and its own `.deb`.
+Nothing in the zebra-rs workspace targets `bpfel-unknown-none`, so `make
+all`, `cargo test`, and the Debian package all build with stable Rust alone.
 
 ## Build and install from source
 
@@ -131,10 +115,9 @@ cd packaging
 make amd64   # or: make arm64
 ```
 
-This builds the `vty` shell and the Rust workspace if needed, compiles the
-`xdp-bfd-echo` XDP helper, and produces a `.deb` package for the selected
-architecture — the same steps `build-amd64.yaml` and `build-arm64.yaml` run
-in CI.
+This builds the `vty` shell and the Rust workspace if needed and produces a
+`.deb` package for the selected architecture — the same steps
+`build-amd64.yaml` and `build-arm64.yaml` run in CI.
 
 ``` shell
 sudo dpkg -i zebra-rs_26.7.1_arm64.deb

@@ -131,17 +131,17 @@ module zebra-bgp-bfd {
          Hard default 50 ms when unset.";
     }
     leaf detect-offload {
-      ext:help "Offload expiration detection to the XDP helper (kernel)";
+      ext:help "Offload expiration detection to the XDP data plane (kernel)";
       type boolean;
       description
         "Once the session is Up, detect missing BFD control packets in
-         the kernel: the per-interface XDP/eBPF helper re-arms a
+         the kernel: the XDP/eBPF data plane re-arms a
          per-session timer on every arriving control packet (UDP/3784,
          TTL 255) and drives the session Down with Control Detection
          Time Expired when they stop (RFC 5880 §6.8.4) — immune to
          daemon scheduling latency. The userspace detection timer stays
          armed as a stretched backstop. **Single-hop only** — inert on
-         multihop sessions (the helper attaches per interface). Absent ⇒
+         multihop sessions (the XDP program runs on attached ports). Absent ⇒
          inherit (false: detection in userspace).";
     }
   }

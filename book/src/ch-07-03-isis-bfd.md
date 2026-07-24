@@ -76,8 +76,9 @@ this interface's adjacencies — single-hop only. Both IPv4 and IPv6 are
 supported: the Echo session is built from the interface's and neighbour's
 addresses (an IPv6-only adjacency uses the two ends' link-locals). `transmit`
 originates Echo + detects on the return; `receive` advertises + reflects (the
-peer detects); `both` does both — backed by the per-interface `xdp-bfd-echo`
-helper, whose XDP reflector handles 0x0800 and 0x86DD frames alike.
+peer detects); `both` does both — backed by the
+[eBPF data plane](ch-16-00-ebpf.md), whose XDP reflector handles 0x0800 and
+0x86DD frames alike.
 
 ```
 router isis {
@@ -95,7 +96,7 @@ router isis {
 ## Offloading expiration detection
 
 `detect-offload true` moves the RFC 5880 §6.8.4 detection timer into the
-kernel via the same per-interface `xdp-bfd-echo` helper that backs Echo:
+kernel via the same [eBPF data plane](ch-16-00-ebpf.md) that backs Echo:
 the XDP program re-arms a per-session timer on every arriving control
 packet and the expiry fires in softirq, immune to daemon scheduling
 latency. The adjacency teardown on expiry — and the

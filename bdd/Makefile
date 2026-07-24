@@ -328,8 +328,9 @@ isis_endx_ipv6:
 	cargo test --test cucumber -- --concurrency=1 --tags "@isis_endx_ipv6"
 
 # IS-IS BFD over IPv6. The `_echo` targets exercise the Echo scenarios, which
-# require the IPv6 `xdp-bfd-echo` dataplane helper (built out-of-workspace) and
-# XDP-capable namespaces; the plain targets run only the no-echo scenario.
+# require the cradle engine (`/usr/bin/cradle`, from the cradle-rs package) for
+# the IPv6 Echo dataplane and XDP-capable namespaces; the plain targets run only
+# the no-echo scenario.
 isis_bfd_ipv6_p2p:
 	mkdir -p allure-results
 	cargo test --test cucumber -- --concurrency=1 --tags "@isis_bfd_ipv6_p2p and not @bfd_echo"
@@ -347,8 +348,9 @@ isis_bfd_ipv6_lan_echo:
 	cargo test --test cucumber -- --concurrency=1 --tags "@isis_bfd_ipv6_lan and @bfd_echo"
 
 # IS-IS BFD over IPv4. The `_echo` targets exercise the Echo scenarios, which
-# require the `xdp-bfd-echo` dataplane helper (built out-of-workspace) and
-# XDP-capable namespaces; the plain targets run only the no-echo scenario.
+# require the cradle engine (`/usr/bin/cradle`, from the cradle-rs package) for
+# the Echo dataplane and XDP-capable namespaces; the plain targets run only the
+# no-echo scenario.
 isis_bfd_ipv4_p2p:
 	mkdir -p allure-results
 	cargo test --test cucumber -- --concurrency=1 --tags "@isis_bfd_ipv4_p2p and not @bfd_echo"

@@ -1671,7 +1671,7 @@ pub(super) fn config_ospf_interface_bfd_echo_receive_interval<V: OspfVersion>(
 }
 
 /// `interface <if> bfd detect-offload <bool>` — offload control-packet
-/// expiration detection to the per-interface XDP helper once the session is
+/// expiration detection to the XDP data plane once the session is
 /// Up (RFC 5880 §6.8.4 evaluated in-kernel). Reconciles the link; the BFD
 /// instance arms/disarms the watchdog on live sessions.
 pub(super) fn config_ospf_interface_bfd_detect_offload<V: OspfVersion>(
