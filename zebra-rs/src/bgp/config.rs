@@ -4423,6 +4423,10 @@ impl Bgp {
             super::vrf_config::config_vrf_neighbor_idle_hold_time,
         );
         self.callback_add(
+            "/router/bgp/vrf/neighbor/timers/advertisement-interval",
+            super::vrf_config::config_vrf_neighbor_advertisement_interval,
+        );
+        self.callback_add(
             "/router/bgp/vrf/neighbor/afi-safi/enabled",
             super::vrf_config::config_vrf_neighbor_afi_safi_enabled,
         );
