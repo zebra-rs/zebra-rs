@@ -188,6 +188,17 @@ pub struct UpdateGroupSig {
     /// attributes (or only one attaching) must not share canonical
     /// bytes — fold it into the key. `None` when off (the common case).
     pub attach_unknown_attr: Option<UnknownAttr>,
+    /// Per-neighbor `advertisement-interval` override (MRAI in seconds),
+    /// or `None` to inherit the instance-level `router bgp timer
+    /// adv-interval` cadence via `adv_interval`. Unlike the fields
+    /// above it does NOT change the encoded UPDATE bytes — it only sets
+    /// how long the advertise debounce waits before flushing. It still
+    /// belongs in the signature: a group owns a single debounce timer,
+    /// so two peers with different advertise cadences must not share one
+    /// group (the slower peer's interval would otherwise pace the
+    /// faster one, or vice versa). `Some(0)` disables the MRAI — the
+    /// group flushes on the next tick (see `start_adv_timer_ipv4`).
+    pub adv_interval_override: Option<u16>,
     pub signature_version: u32,
 }
 
@@ -308,6 +319,21 @@ pub struct UpdateGroup {
     /// created, dropped (abort-on-drop) when it empties. For now it is idle —
     /// it tracks the member set and routes no egress yet.
     pub task: Option<super::group_egress::GroupEgressTask>,
+}
+
+impl UpdateGroup {
+    /// Seconds the advertise debounce should wait before flushing this
+    /// group's cache. A per-neighbor `advertisement-interval` override
+    /// (folded into the signature, so every member shares it) wins over
+    /// the instance-level `router bgp timer adv-interval` cadence held
+    /// in `adv_interval`. `0` disables the MRAI — `start_adv_timer_*`
+    /// arms a next-tick (~1 ms) timer rather than the multi-second one.
+    pub fn effective_adv_interval_secs(&self) -> u64 {
+        match self.sig.adv_interval_override {
+            Some(secs) => secs as u64,
+            None => self.adv_interval.secs_for(self.sig.peer_type),
+        }
+    }
 }
 
 /// Per-AFI/SAFI bookkeeping: the active groups plus a monotonic seq
@@ -441,6 +467,10 @@ pub fn signature_of(peer: &Peer, afi: Afi, safi: Safi) -> Option<UpdateGroupSig>
         // onto every advertised route, so peers with different attach
         // specs encode different bytes and must shard the group.
         attach_unknown_attr: peer.config.attach_unknown_attr.clone(),
+        // Per-neighbor `advertisement-interval` (all AFI/SAFIs — a
+        // timing knob, not a per-family transform). `None` inherits the
+        // instance-level `router bgp timer adv-interval` cadence.
+        adv_interval_override: peer.config.timer.min_adv_interval,
         signature_version: SIGNATURE_VERSION,
     })
 }
@@ -655,7 +685,7 @@ pub fn send_ipv4(
         .insert(nlri.clone(), source_ident);
     group.cache_ipv4_rev.insert(nlri, attr);
     if kick_timer && group.cache_ipv4_timer.is_none() {
-        let secs = group.adv_interval.secs_for(group.sig.peer_type);
+        let secs = group.effective_adv_interval_secs();
         group.cache_ipv4_timer = Some(start_adv_timer_ipv4(tx, &group.id, secs));
     }
 }
@@ -1189,7 +1219,7 @@ pub fn send_ipv6(
         .insert(nlri.clone(), source_ident);
     group.cache_ipv6_rev.insert(nlri, attr);
     if kick_timer && group.cache_ipv6_timer.is_none() {
-        let secs = group.adv_interval.secs_for(group.sig.peer_type);
+        let secs = group.effective_adv_interval_secs();
         group.cache_ipv6_timer = Some(start_adv_timer_ipv6(tx, &group.id, secs));
     }
 }
@@ -1461,6 +1491,7 @@ mod tests {
             vpnv4_next_hop_unchanged: false,
             egress_script: None,
             attach_unknown_attr: None,
+            adv_interval_override: None,
             signature_version: SIGNATURE_VERSION,
         }
     }
@@ -2507,6 +2538,55 @@ mod tests {
             .expect("non-zero interval must debounce via a timer");
         assert!(timer.duration_sec() >= 1);
         assert!(rx.try_recv().is_err());
+    }
+
+    // ── per-neighbor advertisement-interval override ──
+
+    /// `effective_adv_interval_secs` prefers the signature override
+    /// (per-neighbor `advertisement-interval`) over the instance-level
+    /// `adv_interval` snapshot.
+    #[test]
+    fn effective_adv_interval_prefers_the_signature_override() {
+        let (_id, mut group) = test_group(0);
+        // Instance default is non-zero (30s eBGP for the test sig).
+        assert!(group.effective_adv_interval_secs() >= 1);
+        group.sig.adv_interval_override = Some(0);
+        assert_eq!(group.effective_adv_interval_secs(), 0);
+        group.sig.adv_interval_override = Some(7);
+        assert_eq!(group.effective_adv_interval_secs(), 7);
+    }
+
+    /// A per-neighbor `advertisement-interval 0` override (as a VRF CE
+    /// neighbor sets) must arm the next-tick (~1 ms) debounce even when
+    /// the instance-level `adv_interval` is the multi-second default —
+    /// this is the VRF-neighbor path, where the instance knob never
+    /// reaches the peer.
+    #[tokio::test]
+    async fn send_ipv4_neighbor_override_zero_flushes_under_one_second_floor() {
+        let (id, mut group) = test_group(0);
+        assert_eq!(group.adv_interval, AdvInterval::default());
+        group.sig.adv_interval_override = Some(0);
+        let (tx, mut rx) = mpsc::channel(8);
+
+        send_ipv4(&mut group, nlri("10.0.0.1/32"), test_attr(0), 99, &tx, true);
+
+        let timer = group
+            .cache_ipv4_timer
+            .as_ref()
+            .expect("override 0 must still arm a debounce timer");
+        assert_eq!(
+            timer.duration_sec(),
+            0,
+            "per-neighbor advertisement-interval 0 must arm a sub-second timer"
+        );
+        let msg = tokio::time::timeout(std::time::Duration::from_millis(200), rx.recv())
+            .await
+            .expect("flush must fire well under the old 1 s floor")
+            .expect("channel open");
+        let Message::FlushUpdateGroupIpv4(got) = msg else {
+            panic!("expected FlushUpdateGroupIpv4, got {msg:?}");
+        };
+        assert_eq!(got, id);
     }
 
     /// Counter merge accumulates additive fields and overwrites the

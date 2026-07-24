@@ -787,6 +787,34 @@ pub fn config_vrf_neighbor_idle_hold_time(
     Some(())
 }
 
+/// `set router bgp vrf <NAME> neighbor <addr> timers
+/// advertisement-interval <SECS>`.
+///
+/// Per-neighbor MinRouteAdvertisementInterval (MRAI). Staged onto
+/// `min_adv_interval` and carried onto the VRF peer by
+/// `materialize_peers`; the update-group folds it into its signature
+/// (`signature_of`) and `effective_adv_interval_secs` consults it when
+/// arming the ipv4/ipv6-unicast advertise debounce. This is the only
+/// way to give a per-VRF neighbor an MRAI other than the stock default:
+/// the instance-level `router bgp timer adv-interval` never reaches the
+/// per-VRF task. `0` disables the debounce (next-tick flush).
+pub fn config_vrf_neighbor_advertisement_interval(
+    bgp: &mut Bgp,
+    mut args: Args,
+    op: ConfigOp,
+) -> Option<()> {
+    let name = args.string()?;
+    let addr = args.addr()?;
+    let cfg = vrf_entry(bgp, name, op)?;
+    let nbr = neighbor_entry(cfg, addr, op)?;
+    match op {
+        ConfigOp::Set => nbr.config.timer.min_adv_interval = Some(args.u16()?),
+        ConfigOp::Delete => nbr.config.timer.min_adv_interval = None,
+        _ => {}
+    }
+    Some(())
+}
+
 /// Generate a `… afi-safi <af> {policy,prefix-set} {in,out} <name>`
 /// callback. Unlike the `vrf_afi_knob!` family these do not go through a
 /// shared `afi_knob` setter: the value is not a `PeerConfig` field but a
@@ -1872,21 +1900,53 @@ mod tests {
 
     #[test]
     fn neighbor_timers_leave_the_inert_leaves_unset() {
-        // The schema deliberately omits advertisement-interval /
-        // originate-interval / delay-open-time: they are staged onto
-        // `PeerConfig::timer` and never read by any arming path, even for
-        // a global neighbor. Sharing `timer::Config` with the peer means
-        // they exist as fields, so pin that they stay `None` — if one is
-        // ever wired up, this test should fail and prompt exposing it
-        // here too.
+        // The schema still omits originate-interval / delay-open-time:
+        // they are staged onto `PeerConfig::timer` and never read by any
+        // arming path, even for a global neighbor. Sharing `timer::Config`
+        // with the peer means they exist as fields, so pin that they stay
+        // `None` — if one is ever wired up, this test should fail and
+        // prompt exposing it here too. `min_adv_interval` is now wired
+        // (advertisement-interval), so it is no longer pinned here — see
+        // `neighbor_advertisement_interval_stages_min_adv_interval`.
         let address: IpAddr = "192.0.2.1".parse().unwrap();
         let mut cfg = BgpVrfConfig::default();
         let nbr = neighbor_entry(&mut cfg, address, ConfigOp::Set).unwrap();
         nbr.config.timer.connect_retry_time = Some(3);
 
-        assert!(nbr.config.timer.min_adv_interval.is_none());
         assert!(nbr.config.timer.orig_interval.is_none());
         assert!(nbr.config.timer.delay_open_time.is_none());
+    }
+
+    /// `timers advertisement-interval <secs>` on a VRF neighbor stages
+    /// `min_adv_interval`; a delete clears it. This is what
+    /// `signature_of` reads into the update-group's
+    /// `adv_interval_override`, so a VRF neighbor can run an MRAI other
+    /// than the stock default (the instance-level knob never reaches the
+    /// per-VRF task).
+    #[test]
+    fn neighbor_advertisement_interval_stages_min_adv_interval() {
+        let address: IpAddr = "192.0.2.1".parse().unwrap();
+        let mut cfg = BgpVrfConfig::default();
+        let nbr = neighbor_entry(&mut cfg, address, ConfigOp::Set).unwrap();
+        nbr.config.timer.min_adv_interval = Some(0);
+        assert_eq!(
+            cfg.neighbors[&address].config.timer.min_adv_interval,
+            Some(0)
+        );
+
+        cfg.neighbors
+            .get_mut(&address)
+            .unwrap()
+            .config
+            .timer
+            .min_adv_interval = None;
+        assert!(
+            cfg.neighbors[&address]
+                .config
+                .timer
+                .min_adv_interval
+                .is_none()
+        );
     }
 
     #[test]
