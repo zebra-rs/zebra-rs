@@ -46,7 +46,9 @@ Feature: OSPFv3 instance-level redistribute originates AS-External LSAs
     And show command "show ospfv3 route" in namespace "a" should contain "2001:db8:99::/64"
     And show command "show ospfv3 database" in namespace "a" should contain "AS-External-LSA"
 
-    # Teardown.
+  Scenario: Teardown topology
+    # Separate scenario so cleanup still runs when a step above fails
+    # (a failed step skips the rest of its own scenario only).
     When I stop zebra-rs in namespace "a"
     And I stop zebra-rs in namespace "b"
     And I delete namespace "a"

@@ -141,7 +141,9 @@ Feature: OSPFv2 AS-External (Type-5) LSA origination with E1 and E2 metric types
     And show command "show ospf route" in namespace "f" should contain "192.168.1.0/24"
     And show command "show ospf route" in namespace "f" should contain "[40]"
 
-    # Teardown.
+  Scenario: Teardown topology
+    # Separate scenario so cleanup still runs when a step above fails
+    # (a failed step skips the rest of its own scenario only).
     When I stop zebra-rs in namespace "a"
     And I stop zebra-rs in namespace "b"
     And I stop zebra-rs in namespace "c"

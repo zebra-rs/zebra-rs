@@ -46,7 +46,9 @@ Feature: OSPFv3 two-router adjacency forms over a point-to-point link
     And show command "show ospfv3 neighbor" in namespace "o2" should contain "10.0.0.1"
     And show command "show ospfv3 neighbor" in namespace "o2" should contain "Full"
 
-    # Teardown.
+  Scenario: Teardown topology
+    # Separate scenario so cleanup still runs when a step above fails
+    # (a failed step skips the rest of its own scenario only).
     When I stop zebra-rs in namespace "o1"
     And I stop zebra-rs in namespace "o2"
     And I delete namespace "o1"

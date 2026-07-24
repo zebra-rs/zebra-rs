@@ -47,7 +47,9 @@ Feature: OSPFv2 redistributes routes from a kernel routing table
     Then show command "show ospf route" in namespace "r1" should eventually not contain "10.55.1.0/24"
     And show command "show ospf route" in namespace "r1" should contain "10.55.2.0/24"
 
-    # Teardown.
+  Scenario: Teardown topology
+    # Separate scenario so cleanup still runs when a step above fails
+    # (a failed step skips the rest of its own scenario only).
     When I stop zebra-rs in namespace "r1"
     And I stop zebra-rs in namespace "r2"
     And I delete namespace "r1"

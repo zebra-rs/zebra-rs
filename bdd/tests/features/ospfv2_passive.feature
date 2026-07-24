@@ -48,7 +48,9 @@ Feature: OSPFv2 passive interfaces advertise their prefix without forming adjace
     # The passive interface reports its state.
     And show command "show ospf interface" in namespace "b" should contain "No Hellos (Passive interface)"
 
-    # Teardown.
+  Scenario: Teardown topology
+    # Separate scenario so cleanup still runs when a step above fails
+    # (a failed step skips the rest of its own scenario only).
     When I stop zebra-rs in namespace "a"
     And I stop zebra-rs in namespace "b"
     And I stop zebra-rs in namespace "c"

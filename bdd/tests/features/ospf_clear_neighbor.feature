@@ -61,7 +61,9 @@ Feature: clear ospf neighbor resets an OSPFv2 adjacency
     Then show command "show ospf neighbor" in namespace "o1" should contain "Full"
     And ping from "o1" to "10.0.0.2" should succeed
 
-    # Teardown.
+  Scenario: Teardown topology
+    # Separate scenario so cleanup still runs when a step above fails
+    # (a failed step skips the rest of its own scenario only).
     When I stop zebra-rs in namespace "o1"
     And I stop zebra-rs in namespace "o2"
     And I delete namespace "o1"

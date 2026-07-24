@@ -83,7 +83,9 @@ Feature: OSPFv3 area ranges aggregate Inter-Area-Prefix-LSAs at the ABR
     # The discard route is installed even with not-advertise.
     And kernel route "2001:db8:1::/48" in namespace "a" should eventually contain "blackhole"
 
-    # Teardown.
+  Scenario: Teardown topology
+    # Separate scenario so cleanup still runs when a step above fails
+    # (a failed step skips the rest of its own scenario only).
     When I stop zebra-rs in namespace "a"
     And I stop zebra-rs in namespace "b"
     And I stop zebra-rs in namespace "c"

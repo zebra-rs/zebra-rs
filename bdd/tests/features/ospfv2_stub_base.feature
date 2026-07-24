@@ -75,7 +75,9 @@ Feature: OSPFv2 stub area drops Type-5 AS-External while keeping inter-area rout
     And ping from "c" to "10.0.0.2" should succeed
     And ping from "a" to "192.168.1.1" should succeed
 
-    # Teardown.
+  Scenario: Teardown topology
+    # Separate scenario so cleanup still runs when a step above fails
+    # (a failed step skips the rest of its own scenario only).
     When I stop zebra-rs in namespace "a"
     And I stop zebra-rs in namespace "b"
     And I stop zebra-rs in namespace "c"

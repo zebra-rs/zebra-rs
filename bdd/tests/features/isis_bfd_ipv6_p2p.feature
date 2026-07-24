@@ -112,6 +112,10 @@ Feature: IS-IS BFD over an IPv6-only point-to-point link
     Then bfd session in namespace "z1" on interface "i1" should be up
     And isis neighbor in namespace "z1" at level 2 on interface "i1" should be up
     And ping from "z1" to "2001:db8:0:ffff::2" should succeed
+
+  Scenario: Teardown topology
+    # Separate scenario so cleanup still runs when a step above fails
+    # (a failed step skips the rest of its own scenario only).
     When I stop zebra-rs in namespace "z1"
     And I stop zebra-rs in namespace "z2"
     And I delete namespace "z1"

@@ -91,7 +91,9 @@ Feature: OSPFv2 stub-router advertisement (RFC 6987 max-metric router-lsa)
     And show command "show ospf route" in namespace "r1" should eventually contain "10.0.0.3/32          [20] via 10.0.12.2"
     And ping from "r1" to "10.0.0.3" should succeed
 
-    # Teardown.
+  Scenario: Teardown topology
+    # Separate scenario so cleanup still runs when a step above fails
+    # (a failed step skips the rest of its own scenario only).
     When I stop zebra-rs in namespace "r1"
     And I stop zebra-rs in namespace "r2"
     And I stop zebra-rs in namespace "r3"
