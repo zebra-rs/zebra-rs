@@ -1,0 +1,64 @@
+# PE (AS 65000). vrf-cust originates one prefix per family with a bare
+# `network` statement and peers with the CE over IPv4 and IPv6 transport.
+#
+# Regression guard: a self-originated `network` row must reach the CE. It
+# previously did not for the family whose CE neighbor held ident 0 (the
+# first peer enrolled in the VRF PeerMap) — the row's ident (0) aliased
+# that peer, so the egress split-horizon dropped it. The ipv4 neighbor is
+# listed first so it takes ident 0 and exercises that exact collision.
+#
+# advertisement-interval 0 keeps the runtime-add scenario prompt.
+vrf:
+- name: vrf-cust
+  ipv4:
+    route-target:
+      import:
+      - 65000:100
+      export:
+      - 65000:100
+  ipv6:
+    route-target:
+      import:
+      - 65000:100
+      export:
+      - 65000:100
+interface:
+- if-name: lo
+  ipv4:
+    address: 1.1.1.1/32
+- if-name: ce1
+  vrf: vrf-cust
+  ipv4:
+    address: 10.1.0.1/30
+  ipv6:
+    address: 2001:db8:1::1/64
+router:
+  bgp:
+    global:
+      as: 65000
+      router-id: 1.1.1.1
+    vrf:
+    - name: vrf-cust
+      rd: 65000:1
+      neighbor:
+      - remote-address: 10.1.0.2
+        remote-as: 65001
+        timers:
+          advertisement-interval: 0
+        afi-safi:
+        - name: ipv4
+          enabled: true
+      - remote-address: 2001:db8:1::2
+        remote-as: 65001
+        timers:
+          advertisement-interval: 0
+        afi-safi:
+        - name: ipv6
+          enabled: true
+      afi-safi:
+        ipv4:
+          network:
+          - prefix: 10.9.0.0/24
+        ipv6:
+          network:
+          - prefix: 2001:db8:9::/64

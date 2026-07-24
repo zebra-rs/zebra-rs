@@ -2593,7 +2593,11 @@ impl BgpVrf {
     /// prefix. Driven by [`BgpVrfMsg::WithdrawNetwork`] when a
     /// `network` is removed from a running VRF.
     pub fn withdraw_self_network_v4(&mut self, prefix: ipnet::Ipv4Net) {
-        let removed = self.shard.remove(None, prefix, 0, 0);
+        // ident `ORIGINATED_PEER` — must match `originate_self_network_v4`
+        // (see `self_originated_rib`), else the row is never found.
+        let removed = self
+            .shard
+            .remove(None, prefix, 0, super::super::route::ORIGINATED_PEER);
         if removed.is_empty() {
             return;
         }
@@ -2628,7 +2632,10 @@ impl BgpVrf {
 
     /// IPv6 counterpart of [`Self::withdraw_self_network_v4`].
     pub fn withdraw_self_network_v6(&mut self, prefix: ipnet::Ipv6Net) {
-        let removed = self.shard.remove_v6(prefix, 0, 0);
+        // ident `ORIGINATED_PEER` — see `withdraw_self_network_v4`.
+        let removed = self
+            .shard
+            .remove_v6(prefix, 0, super::super::route::ORIGINATED_PEER);
         if removed.is_empty() {
             return;
         }
@@ -2819,7 +2826,14 @@ impl BgpVrf {
             remote_id: 0,
             local_id: 0,
             attr,
-            ident: 0,
+            // `ORIGINATED_PEER`, not 0: a self-originated row must not
+            // alias any real peer's ident, or the egress split-horizon
+            // (`route_update_ipv4`: `rib.ident == ctx.ident`) drops the
+            // route when advertising to the peer that happens to hold
+            // ident 0 (the first CE enrolled in this VRF's PeerMap). The
+            // redistribute path already uses `ORIGINATED_PEER` for the
+            // same reason; the withdraw paths key on it too.
+            ident: super::super::route::ORIGINATED_PEER,
             router_id: self.router_id,
             weight: 32768,
             typ: super::super::route::BgpRibType::Originated,
@@ -3663,6 +3677,54 @@ mod tests {
         Box::leak(Box::new(inbound_rx));
         let rib = RibClient::new(inbound_tx, ProtoId::from_raw(0));
         ProtoContext::for_vrf(rib, table_id, ifname.to_string())
+    }
+
+    /// Regression guard: a self-originated `network` row must carry
+    /// `ORIGINATED_PEER`, not ident 0. Ident 0 aliases the first CE
+    /// enrolled in the VRF PeerMap (also ident 0), so the egress
+    /// split-horizon (`route_update_ipv4`: `rib.ident == ctx.ident`)
+    /// dropped the route to that peer — a bare `network` never reached
+    /// the CE. `redist_inject_v4` already used `ORIGINATED_PEER`.
+    #[tokio::test]
+    async fn self_originated_network_uses_originated_peer_ident() {
+        let (global_tx, _global_rx) = unbounded_channel::<BgpGlobalMsg>();
+        let ctx = test_ctx_for_vrf(51, "vrf-selforig");
+        let (_rib_tx, rib_rx) = mpsc::unbounded_channel();
+        let (mut vrf, _inbox) = BgpVrf::new(
+            "vrf-selforig".to_string(),
+            ctx,
+            Ipv4Addr::UNSPECIFIED,
+            65000,
+            /* label */ 16,
+            global_tx,
+            rib_rx,
+        );
+
+        let prefix: ipnet::Ipv4Net = "10.9.0.0/24".parse().unwrap();
+        vrf.originate_self_network_v4(prefix);
+        let row = vrf.shard.select_best_path(prefix);
+        let rib = row.first().expect("self-originated v4 row present");
+        assert_eq!(
+            rib.ident,
+            crate::bgp::route::ORIGINATED_PEER,
+            "self-originated v4 ident must be ORIGINATED_PEER, not 0 (split-horizon)"
+        );
+
+        let prefix6: ipnet::Ipv6Net = "2001:db8:9::/64".parse().unwrap();
+        vrf.originate_self_network_v6(prefix6);
+        let row6 = vrf.shard.select_best_path_v6(prefix6);
+        assert_eq!(
+            row6.first().expect("self-originated v6 row present").ident,
+            crate::bgp::route::ORIGINATED_PEER,
+            "self-originated v6 ident must be ORIGINATED_PEER, not 0"
+        );
+
+        // And the withdraw must find and remove the row by that ident.
+        vrf.withdraw_self_network_v4(prefix);
+        assert!(
+            vrf.shard.select_best_path(prefix).is_empty(),
+            "withdraw must remove the self-originated row (matching ident)"
+        );
     }
 
     #[tokio::test]
