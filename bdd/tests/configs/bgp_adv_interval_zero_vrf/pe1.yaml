@@ -4,12 +4,9 @@
 # to give a per-VRF neighbor a non-default MRAI: the instance-level
 # `router bgp timer adv-interval` snapshot never reaches the per-VRF task.
 #
-# The PE originates one prefix per family into vrf-cust via a static route
-# with a vrf-local next hop (the CE link address) + `redistribute static`
-# — a bare `network` statement in a VRF resolves its next hop to the
-# global router-id, which is unreachable inside the VRF and so is not
-# advertised. With adv-interval 0 the CE must receive both without waiting
-# out the stock 5s/30s MRAI.
+# The PE originates one prefix per family into vrf-cust with a plain
+# `network` statement. With adv-interval 0 the CE must receive both
+# without waiting out the stock 5s/30s MRAI.
 vrf:
 - name: vrf-cust
   ipv4:
@@ -35,19 +32,6 @@ interface:
   ipv6:
     address: 2001:db8:1::1/64
 router:
-  static:
-    vrf:
-    - name: vrf-cust
-      ipv4:
-        route:
-        - prefix: 10.9.0.0/24
-          nexthop:
-          - address: 10.1.0.2
-      ipv6:
-        route:
-        - prefix: 2001:db8:9::/64
-          nexthop:
-          - address: 2001:db8:1::2
   bgp:
     global:
       as: 65000
@@ -72,8 +56,8 @@ router:
           enabled: true
       afi-safi:
         ipv4:
-          redistribute:
-            static: {}
+          network:
+          - prefix: 10.9.0.0/24
         ipv6:
-          redistribute:
-            static: {}
+          network:
+          - prefix: 2001:db8:9::/64
