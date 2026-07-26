@@ -4458,6 +4458,7 @@ impl Bgp {
         let evis: Vec<u32> = self.evpn_evis.keys().copied().collect();
         let mut freed = Vec::new();
         let mut short = false;
+        let mut changed = false;
         for evi in evis {
             let current = self.evpn_evis.get(&evi).and_then(|e| e.label);
             match (want_labels, current) {
@@ -4472,6 +4473,7 @@ impl Bgp {
                         cfg.label = Some(label);
                     }
                     self.evi_ilm_install(evi, label);
+                    changed = true;
                 }
                 (false, Some(label)) => {
                     if let Some(cfg) = self.evpn_evis.get_mut(&evi) {
@@ -4479,6 +4481,7 @@ impl Bgp {
                     }
                     self.evi_ilm_uninstall(evi, label);
                     freed.push(label);
+                    changed = true;
                 }
                 _ => {}
             }
@@ -4487,6 +4490,28 @@ impl Bgp {
         if short {
             self.request_label_block();
         }
+        // A label that just appeared (or went away) changes what every L2
+        // route for that EVI puts on the wire, so re-originate. Routes
+        // originated before the block landed carry label 0; this is what
+        // replaces them.
+        if changed {
+            self.evpn_reoriginate_l2();
+        }
+    }
+
+    /// Re-originate every locally-originated EVPN L2 route (Type-2 from the
+    /// local FDB, Type-3 per service) so they pick up the current
+    /// encapsulation's service identifier. No-op while `advertise-all-vni`
+    /// is off — nothing was originated to refresh.
+    pub(super) fn evpn_reoriginate_l2(&mut self) {
+        if !self.advertise_all_vni {
+            return;
+        }
+        let entries: Vec<FdbEntry> = self.local_fdb.values().cloned().collect();
+        for entry in entries {
+            self.evpn_originate_macip(&entry);
+        }
+        super::config::reoriginate_all_imet(self);
     }
 
     /// Drop one EVI's label and decap ILM — the config handler's delete path.
