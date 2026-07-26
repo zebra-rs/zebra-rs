@@ -339,6 +339,11 @@ pub enum Message {
         /// all-ones BUM sentinel. `Some` selects the cradle L2 tee over the
         /// kernel VXLAN FDB.
         srv6_sid: Option<std::net::Ipv6Addr>,
+        /// EVPN-over-MPLS (RFC 7432): the remote PE's EVI service label,
+        /// imposed on frames toward this MAC under the transport LSP that
+        /// reaches `tunnel_endpoint`. `Some` selects the cradle L2 tee — the
+        /// kernel has no MPLS-to-bridge data path.
+        mpls_label: Option<u32>,
     },
     MacDel {
         vni: u32,
@@ -354,6 +359,19 @@ pub enum Message {
     CradleReplDel {
         vni: u32,
         sid: std::net::Ipv6Addr,
+    },
+    /// The MPLS flavor (RFC 7432): a remote PE joined/left a bridge domain's
+    /// BUM flood set, advertising `label` as the service label to impose on
+    /// BUM toward it (the Type-3 PMSI's label field). Teed to cradle as a
+    /// replication slot — per-copy MPLS encap in the flood list.
+    CradleReplAddMpls {
+        bd: u32,
+        pe: IpAddr,
+        label: u32,
+    },
+    CradleReplDelMpls {
+        bd: u32,
+        pe: IpAddr,
     },
     /// MUP `dataplane gtp` uplink decap (`H.M.GTP4.D`): a GTP-U decap PDR teed
     /// to cradle — a G-PDU on (`dst`, `teid`) is stripped and its inner packet
@@ -3442,9 +3460,19 @@ impl Rib {
                 seq,
                 esi,
                 srv6_sid,
+                mpls_label,
             } => {
-                self.mac_add(vni, mac, tunnel_endpoint, flags, seq, esi, srv6_sid)
-                    .await;
+                self.mac_add(
+                    vni,
+                    mac,
+                    tunnel_endpoint,
+                    flags,
+                    seq,
+                    esi,
+                    srv6_sid,
+                    mpls_label,
+                )
+                .await;
             }
             Message::MacDel { vni, mac } => {
                 self.mac_del(vni, mac).await;
@@ -3468,6 +3496,12 @@ impl Rib {
             }
             Message::CradleReplDel { vni, sid } => {
                 self.fib_handle.cradle_repl_del(vni, sid).await;
+            }
+            Message::CradleReplAddMpls { bd, pe, label } => {
+                self.fib_handle.cradle_repl_add_mpls(bd, pe, label).await;
+            }
+            Message::CradleReplDelMpls { bd, pe } => {
+                self.fib_handle.cradle_repl_del_mpls(bd, pe).await;
             }
             Message::CradleGtpPdrAdd {
                 dst,
@@ -4361,6 +4395,7 @@ impl Rib {
         seq: u32,
         esi: Option<[u8; 10]>,
         srv6_sid: Option<std::net::Ipv6Addr>,
+        mpls_label: Option<u32>,
     ) {
         // MAC Mobility: ignore stale duplicates (lower sequence number)
         if let Some(existing) = self.mac_table.get(&(vni, mac))
@@ -4382,7 +4417,16 @@ impl Rib {
         // Forward to kernel FIB (or, with an SRv6 L2 service SID, the
         // cradle eBPF tee).
         self.fib_handle
-            .mac_add(vni, &mac, tunnel_endpoint, flags, seq, esi, srv6_sid)
+            .mac_add(
+                vni,
+                &mac,
+                tunnel_endpoint,
+                flags,
+                seq,
+                esi,
+                srv6_sid,
+                mpls_label,
+            )
             .await;
     }
 

@@ -605,6 +605,20 @@ impl FibHandle {
         }
     }
 
+    /// The MPLS flavor (RFC 7432 ingress replication): a BUM replication slot
+    /// toward PE `pe`, whose copies carry that PE's `label`.
+    pub async fn cradle_repl_add_mpls(&self, bd: u32, pe: IpAddr, label: u32) {
+        if let Some(cradle) = &self.cradle {
+            cradle.repl_slot_add_mpls(bd, pe, label).await;
+        }
+    }
+
+    pub async fn cradle_repl_del_mpls(&self, bd: u32, pe: IpAddr) {
+        if let Some(cradle) = &self.cradle {
+            cradle.repl_slot_del_mpls(bd, pe).await;
+        }
+    }
+
     /// Tee an RFC 9524 Replication segment (operator `replication-segment`
     /// config) to cradle: the local End.Replicate SID and its downstream
     /// branches. No kernel counterpart — cradle's `REPL_SEG` is the SR-P2MP
@@ -3458,6 +3472,7 @@ impl FibHandle {
         _seq: u32,
         esi: Option<[u8; 10]>,
         srv6_sid: Option<std::net::Ipv6Addr>,
+        mpls_label: Option<u32>,
     ) {
         // EVPN over SRv6 (RFC 9252): the MAC sits behind a remote L2 service
         // SID (End.DT2U; the all-ones BUM sentinel behind End.DT2M). The
@@ -3466,6 +3481,18 @@ impl FibHandle {
         if let Some(sid) = srv6_sid {
             if let Some(cradle) = &self.cradle {
                 cradle.fdb_add(vni, mac.octets(), sid).await;
+            }
+            return;
+        }
+        // EVPN over MPLS (RFC 7432): the MAC sits behind a remote PE, reached
+        // by imposing that PE's EVI service label under the transport LSP.
+        // cradle-only for the same reason the decap ILM is — the kernel has
+        // no MPLS-to-bridge data path — so a label with no cradle tee means
+        // this MAC simply is not forwardable, and installing a kernel VXLAN
+        // row for it would be worse than doing nothing.
+        if let Some(label) = mpls_label {
+            if let (Some(cradle), Some(pe)) = (&self.cradle, tunnel_endpoint) {
+                cradle.fdb_add_mpls(vni, mac.octets(), pe, label).await;
             }
             return;
         }
