@@ -1,0 +1,36 @@
+# rr — a pure EVPN route reflector with BOTH PEs as clients. It runs no
+# VNI, no locator and no `encapsulation srv6`, so it can carve no SID of
+# its own: anything SRv6 that reaches pe2 must have come through the
+# reflection of pe1's route with its Prefix-SID attribute intact.
+interface:
+- if-name: lo
+  ipv6:
+    address: 2001:db8::3/128
+- if-name: rr1
+  ipv6:
+    address: 2001:db8:13::3/64
+- if-name: rr2
+  ipv6:
+    address: 2001:db8:23::3/64
+router:
+  bgp:
+    global:
+      as: 65001
+      router-id: 192.168.0.3
+    neighbor:
+    - remote-address: 2001:db8:13::1
+      enabled: true
+      remote-as: 65001
+      route-reflector:
+        client: true
+      afi-safi:
+      - name: evpn
+        enabled: true
+    - remote-address: 2001:db8:23::2
+      enabled: true
+      remote-as: 65001
+      route-reflector:
+        client: true
+      afi-safi:
+      - name: evpn
+        enabled: true
