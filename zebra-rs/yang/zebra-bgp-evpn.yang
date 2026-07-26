@@ -245,7 +245,7 @@ module zebra-bgp-evpn {
            Absent = whole-port service (End.DX2).";
       }
       leaf ethernet-segment {
-        ext:help "Ethernet Segment this AC belongs to (multihoming)";
+        ext:help "Override the Ethernet Segment inferred from the AC";
         type string;
         description
           "Name of an `ethernet-segment` this service's attachment circuit
@@ -253,8 +253,20 @@ module zebra-bgp-evpn {
            supplies the ESI carried in this service's Type-1 route and the
            redundancy mode that drives Designated-Forwarder election, run
            per <ESI, VPWS service instance> over the PEs advertising the
-           segment's Type-4. Absent = single-homed: the Type-1 carries the
-           all-zero ESI and is always advertised as primary.";
+           segment's Type-4.
+
+           Normally this is NOT needed: the segment is inferred from the
+           attachment circuit, so an `ethernet-segment` whose `interface` is
+           this service's `interface` binds automatically. Set this leaf
+           only to override that — when several segments name the same
+           access port, or when the segment declares no interface of its
+           own. It always wins over inference; if it names a segment whose
+           `interface` is some other port, the service still uses it and
+           `show bgp evpn vpws` reports the discrepancy.
+
+           No segment configured and none claiming the AC = single-homed:
+           the Type-1 carries the all-zero ESI and is advertised as
+           primary.";
       }
     }
     leaf bum-tunnel-type {

@@ -84,10 +84,14 @@ the whole-port service.
 
 ### Multihoming (RFC 8214 §5)
 
-When the AC sits on a CE that is dual-homed to two PEs, both PEs name the
-same `ethernet-segment` (RFC 7432 — the shared ESI both advertise a Type-4
-under) and advertise the **same** VPWS service instance id: the pair is one
-logical endpoint of the E-Line.
+When the AC sits on a CE that is dual-homed to two PEs, both PEs configure
+the same `ethernet-segment` (RFC 7432 — the shared ESI both advertise a
+Type-4 under) and advertise the **same** VPWS service instance id: the pair
+is one logical endpoint of the E-Line.
+
+The service picks up the segment **from its attachment circuit** — the
+segment declares an `interface`, the service declares the same one, and that
+is the binding. Nothing else is needed:
 
 ```
 router bgp
@@ -95,14 +99,37 @@ router bgp
   ethernet-segment ES1
    esi 00:11:22:33:44:55:66:77:88:99
    redundancy-mode single-active
-   interface ce1
+   interface ce1              <-- the segment claims ce1 ...
   vpws eline1
    evi 100
    local-service-id 101
    remote-service-id 103
-   interface ce1
-   ethernet-segment ES1
+   interface ce1              <-- ... and this AC is ce1, so ES1 binds
 ```
+
+`show bgp evpn vpws` marks an inferred binding `(from ce1)`. This matches
+how every commercial implementation works — IOS-XR, Junos, Arista and FRR
+all configure the segment *on the interface*, so the AC is what identifies
+it and the two cannot contradict each other.
+
+The `ethernet-segment` leaf overrides that inference and is only needed in
+two cases: several segments claim the same access port, or the segment
+declares no `interface` of its own.
+
+```
+  vpws eline1
+   interface ce1
+   ethernet-segment ES2       <-- override; ES2 is used even if ES1 claims ce1
+```
+
+Two situations are reported rather than silently resolved:
+
+* **Ambiguous** — more than one segment claims the AC. The service stays
+  single-homed and `show` lists the candidates, because guessing would put
+  it on the wrong ESI. Naming one on the leaf resolves it.
+* **Interface mismatch** — the leaf names a segment whose `interface` is a
+  different port. The override still wins (explicit config is respected),
+  but `show` prints a `WARNING` line rather than swallowing the discrepancy.
 
 The segment supplies two things. Its **ESI** replaces the all-zero one in
 the service's Type-1, so the remote PE can tell that the routes it receives
@@ -148,17 +175,24 @@ VPWS service: eline1
   State: up
 ```
 
-A multihomed service adds its segment and elected role:
+A multihomed service adds its segment and elected role. `(from ce1)` marks a
+binding inferred from the AC; an overridden one is printed without it:
 
 ```
-  Ethernet Segment: ES1 (ESI 00:11:22:33:44:55:66:77:88:99, single-active)
+  Ethernet Segment: ES1 (from ce1) (ESI 00:11:22:33:44:55:66:77:88:99, single-active)
   Role: backup (DF 192.168.0.2)
 ```
 
-A segment name that resolves to nothing — no such `ethernet-segment`, or one
-whose `esi` is not set — shows as `(unresolved)` and the service stays
-single-homed, which distinguishes a typo from a deliberately single-homed
-service.
+The problem cases each print distinctly, so none of them can be mistaken for
+a deliberately single-homed service:
+
+```
+  Ethernet Segment: ES9 (no such segment)
+  Ethernet Segment: ambiguous — ES1, ES2 claim ce1; name one explicitly
+  Ethernet Segment: ES1 (ESI unset)
+  Ethernet Segment: ES2 (ESI …, single-active)
+  WARNING: segment interface ce7 differs from AC ce1
+```
 
 `json` is supported. The state progresses `partial-config` (mandatory
 leaves missing) → `pending` (config complete, no router-id / locator

@@ -27,7 +27,6 @@ router:
         local-service-id: 101
         remote-service-id: 103
         interface: ce1
-        ethernet-segment: es1
     neighbor:
     - remote-address: 192.168.0.2
       enabled: true

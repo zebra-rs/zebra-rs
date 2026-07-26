@@ -68,8 +68,10 @@ Feature: BGP EVPN VPWS multihoming — ESI and DF-elected P/B (RFC 8214 §5)
     # Instance 101 -> ordinal 1 -> z2 is DF. Both PEs agree on the winner.
     Then show command "show bgp evpn vpws" in namespace "z2" should eventually contain "Role: primary (DF 192.168.0.2)"
     And show command "show bgp evpn vpws" in namespace "z1" should eventually contain "Role: backup (DF 192.168.0.2)"
-    # The segment and its mode are reported alongside the role.
-    And show command "show bgp evpn vpws" in namespace "z1" should contain "Ethernet Segment: es1 (ESI 00:11:22:33:44:55:66:77:88:99, single-active)"
+    # Neither PE names a segment on its vpws service: es1 declares ce1 as its
+    # access port and the service's AC is ce1, so the binding is inferred —
+    # `(from ce1)` is the show reporting that it was derived, not configured.
+    And show command "show bgp evpn vpws" in namespace "z1" should contain "Ethernet Segment: es1 (from ce1) (ESI 00:11:22:33:44:55:66:77:88:99, single-active)"
     # The election reaches the wire: z3 receives one P and one B for the
     # same service instance.
     And show command "show bgp evpn" in namespace "z3" should eventually contain "l2-attr:P:mtu0"
@@ -83,7 +85,7 @@ Feature: BGP EVPN VPWS multihoming — ESI and DF-elected P/B (RFC 8214 §5)
     # and the backup bit disappears from the segment entirely.
     Then show command "show bgp evpn vpws" in namespace "z1" should eventually contain "Role: primary"
     And show command "show bgp evpn vpws" in namespace "z2" should eventually contain "Role: primary"
-    And show command "show bgp evpn vpws" in namespace "z1" should contain "(ESI 00:11:22:33:44:55:66:77:88:99, all-active)"
+    And show command "show bgp evpn vpws" in namespace "z1" should contain "(from ce1) (ESI 00:11:22:33:44:55:66:77:88:99, all-active)"
     And show command "show bgp evpn" in namespace "z3" should eventually not contain "l2-attr:B:mtu0"
     # Back to single-active for the re-election scenario below.
     When I apply config "z1-1.yaml" to namespace "z1"
@@ -105,6 +107,31 @@ Feature: BGP EVPN VPWS multihoming — ESI and DF-elected P/B (RFC 8214 §5)
     # Put z2 back on the segment: z1 hands the DF role back, again with no
     # config change of its own.
     When I apply config "z2-1.yaml" to namespace "z2"
+    Then show command "show bgp evpn vpws" in namespace "z1" should eventually contain "Role: backup (DF 192.168.0.2)"
+
+  Scenario: An AC claimed by two segments is reported, not guessed; the leaf resolves it
+    Given the test topology exists
+    # Add a second segment es2 that also claims ce1. Inference now has two
+    # candidates and refuses both — picking one would silently move the
+    # service onto the wrong ESI.
+    When I apply config "z1-ambiguous.yaml" to namespace "z1"
+    Then show command "show bgp evpn vpws" in namespace "z1" should eventually contain "Ethernet Segment: ambiguous"
+    And show command "show bgp evpn vpws" in namespace "z1" should contain "es1, es2 claim ce1"
+    # Ambiguous is not a segment: the service falls back to single-homed, so
+    # its Type-1 re-keys onto the all-zero ESI.
+    And show command "show bgp evpn" in namespace "z3" should eventually contain "[1]:[00:00:00:00:00:00:00:00:00:00]:[101]"
+    And show command "show bgp evpn vpws" in namespace "z1" should not contain "Role:"
+    # Naming one on the leaf is the documented way out. es2 wins over the
+    # inference that would have picked neither, and the Type-1 re-keys again
+    # — now onto es2's ESI, where z1 is the only PE and so elects itself.
+    When I apply config "z1-override.yaml" to namespace "z1"
+    Then show command "show bgp evpn vpws" in namespace "z1" should eventually contain "Ethernet Segment: es2 (ESI 00:aa:bb:cc:dd:ee:ff:01:02:03, single-active)"
+    And show command "show bgp evpn vpws" in namespace "z1" should contain "Role: primary (DF 192.168.0.1)"
+    # An overridden binding is not annotated `(from ...)` — it was configured.
+    And show command "show bgp evpn vpws" in namespace "z1" should not contain "es2 (from ce1)"
+    And show command "show bgp evpn" in namespace "z3" should eventually contain "[1]:[00:aa:bb:cc:dd:ee:ff:01:02:03]:[101]"
+    # Back to the inferred single-segment config for the scenarios that follow.
+    When I apply config "z1-1.yaml" to namespace "z1"
     Then show command "show bgp evpn vpws" in namespace "z1" should eventually contain "Role: backup (DF 192.168.0.2)"
 
   Scenario: Teardown topology

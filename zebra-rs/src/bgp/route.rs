@@ -16120,27 +16120,41 @@ impl Bgp {
     /// than a bare re-originate) is what withdraws the route under the old
     /// segment before advertising it under the new one.
     pub fn vpws_resync_es(&mut self) {
-        let resolved: Vec<(String, Option<[u8; 10]>, bool)> = self
+        use super::vpws::EsBinding;
+        type Resolved = (String, EsBinding, Option<[u8; 10]>, bool, Option<String>);
+        let resolved: Vec<Resolved> = self
             .local_rib
             .evpn_vpws
             .services
             .iter()
             .map(|(name, svc)| {
-                let es = svc
-                    .ethernet_segment
-                    .as_ref()
-                    .and_then(|es_name| self.ethernet_segments.get(es_name));
+                let binding = self.vpws_bind_es(svc);
+                let es = binding.name().and_then(|n| self.ethernet_segments.get(n));
+                // The segment's own `interface`, when it names one that is
+                // not this AC. Only reachable through the explicit leaf —
+                // inference matches on that very field.
+                let mismatch = es
+                    .and_then(|e| e.interface.as_ref())
+                    .filter(|es_if| Some(*es_if) != svc.interface.as_ref())
+                    .cloned();
                 (
                     name.clone(),
+                    binding,
                     es.and_then(|e| e.esi),
                     es.is_some_and(|e| e.redundancy_mode.single_active()),
+                    mismatch,
                 )
             })
             .collect();
-        for (name, esi, single_active) in resolved {
+        for (name, binding, esi, single_active, mismatch) in resolved {
             let Some(svc) = self.local_rib.evpn_vpws.services.get_mut(&name) else {
                 continue;
             };
+            // The binding and the mismatch note are display state — record
+            // them either way, but only an ESI or mode move is a wire event
+            // worth reconciling for.
+            svc.es = binding;
+            svc.es_if_mismatch = mismatch;
             if svc.esi == esi && svc.single_active == single_active {
                 continue;
             }
@@ -16148,6 +16162,17 @@ impl Bgp {
             svc.single_active = single_active;
             self.vpws_reconcile(&name);
         }
+    }
+
+    /// Resolve which Ethernet Segment VPWS service `svc` sits on. Thin
+    /// wrapper over [`super::vpws::bind_es`], which holds the rules (and the
+    /// unit tests) without needing a whole `Bgp`.
+    fn vpws_bind_es(&self, svc: &super::vpws::VpwsService) -> super::vpws::EsBinding {
+        super::vpws::bind_es(
+            svc.ethernet_segment.as_ref(),
+            svc.interface.as_ref(),
+            &self.ethernet_segments,
+        )
     }
 
     /// Re-run DF election for the services marked by a Type-4 install or
