@@ -5152,7 +5152,7 @@ pub fn route_update_evpn(
             orig: *orig,
         }),
         EvpnPrefix::MacIp { eth_tag, mac, .. } => {
-            let vni = extract_vni_from_attr(&rib.attr).unwrap_or(0);
+            let vni = macip_service_field(rib);
             EvpnRoute::Mac(EvpnMac {
                 id,
                 rd: *rd,
@@ -5395,6 +5395,29 @@ pub fn route_withdraw_evpn_to_peers(
 /// inbound attr to consult and the VNI is recovered from the RD's
 /// trailing 2 bytes (Type-1 form). ESI defaults to zero, eth-tag
 /// passes through.
+/// The 24-bit service field a Type-2 (MAC/IP) route puts on the wire.
+///
+/// It is an MPLS service label under `encapsulation mpls` (RFC 7432) and a
+/// VNI under VXLAN / SRv6 (RFC 8365, which encodes the VNI redundantly in the
+/// route target — historically this field was read back from there).
+///
+/// The path's own label wins whenever it has one: that is the faithful value
+/// both for a locally-originated MPLS route and for a route being reflected
+/// (whose label came off the wire). Only a VXLAN-originated path, which
+/// carries no label, falls back to the route-target derivation.
+///
+/// Announce and withdraw must agree — a withdraw carrying a different service
+/// field would not match its announce at the receiver — so both emit sites
+/// call this.
+fn macip_service_field(rib: &BgpRib) -> u32 {
+    rib.label
+        .as_ref()
+        .map(|l| l.label)
+        .filter(|l| *l != 0)
+        .or_else(|| extract_vni_from_attr(&rib.attr))
+        .unwrap_or(0)
+}
+
 fn evpn_route_from_prefix(rd: &RouteDistinguisher, prefix: &EvpnPrefix, id: u32) -> EvpnRoute {
     match prefix {
         // Type-1/4: reconstructed from the key for a withdraw (label/RD are
@@ -7739,6 +7762,9 @@ fn evpn_reoriginate_per_region(
         None,
         IpAddr::V4(*bgp.router_id),
         vni,
+        // RFC 9572 segmentation is a VXLAN/SRv6 feature: identity and
+        // service field are both the VNI.
+        vni,
     );
     // RFC 9572 §6.3: set the L (Leaf Information Required) flag so in-region
     // tunnel leaves answer with a Leaf A-D (Type-11), letting the RBR learn the
@@ -7799,6 +7825,9 @@ fn evpn_reoriginate_spmsi(
         AssistedReplicationRole::None,
         None,
         IpAddr::V4(*bgp.router_id),
+        vni,
+        // RFC 9572 segmentation is a VXLAN/SRv6 feature: identity and
+        // service field are both the VNI.
         vni,
     );
     pmsi.set_leaf_info_required(true);
@@ -10930,7 +10959,7 @@ fn build_evpn_route(
             orig: *orig,
         })),
         EvpnPrefix::MacIp { eth_tag, mac, .. } => {
-            let vni = extract_vni_from_attr(&rib.attr).unwrap_or(0);
+            let vni = macip_service_field(rib);
             Some(EvpnRoute::Mac(EvpnMac {
                 id: rib.remote_id,
                 rd: *rd,
@@ -15281,8 +15310,14 @@ impl Bgp {
         // 16-byte nexthop). Per-peer NEXT_HOP rewrite for eBGP
         // still happens inside `route_update_evpn`.
         let mut attr = BgpAttr::new();
-        let mut ecom =
-            ExtCommunity::from([evpn_route_target(self.asn, entry.vni), evpn_encap_vxlan()]);
+        // RFC 8365 §5.1.2.4 wants the Encapsulation EC so the receiver knows
+        // which data plane to use. MPLS is the *default* encapsulation
+        // (RFC 8365 §5.1.3) and is signalled by its absence, so only the
+        // overlay encapsulations tag themselves.
+        let mut ecom = ExtCommunity::from([evpn_route_target(self.asn, entry.vni)]);
+        if !self.evpn_encap.is_mpls() {
+            ecom.0.insert(evpn_encap_vxlan());
+        }
         // RFC 7432 §7.7 MAC Mobility: a MAC that is (or was) advertised by
         // a remote PE makes this origination a MOVE — carry sequence
         // `max_remote + 1` so every PE (including the previous owner)
@@ -15314,7 +15349,13 @@ impl Bgp {
             .copied()
             .or(entry.vxlan_local)
             .unwrap_or(IpAddr::V4(self.router_id));
-        if !self.local_vxlans.contains_key(&entry.vni) && entry.vxlan_local.is_none() {
+        // Under MPLS the router-id IS the next hop — there is no VTEP to
+        // resolve, and the transport LSP is looked up on it — so the fallback
+        // is the intended answer rather than a degraded one.
+        if !self.evpn_encap.is_mpls()
+            && !self.local_vxlans.contains_key(&entry.vni)
+            && entry.vxlan_local.is_none()
+        {
             tracing::warn!(
                 "evpn_originate_macip: VXLAN for VNI {} has no local IP; \
                  falling back to router-id {} as nexthop",
@@ -15329,6 +15370,16 @@ impl Bgp {
         if self.evpn_encap.is_srv6() {
             attr.prefix_sid = self.vni_dt2u_prefix_sid(entry.vni);
         }
+        // RFC 7432: under `encapsulation mpls` the Type-2 carries this PE's
+        // per-EVI service label in the NLRI's label field, which is what the
+        // remote PE imposes on frames toward this MAC. An EVI still waiting
+        // for its label (no dynamic block granted yet) originates without
+        // one; `evi_reconcile` re-originates when the grant lands.
+        let evi_label = self
+            .evpn_encap
+            .is_mpls()
+            .then(|| self.evpn_evis.get(&entry.vni).and_then(|cfg| cfg.label))
+            .flatten();
 
         let mut rib = BgpRib::new(
             ORIGINATED_PEER,
@@ -15338,7 +15389,11 @@ impl Bgp {
             // withdraw path matches against the same value.
             32768,
             &attr,
-            None,
+            evi_label.map(|label| bgp_packet::Label {
+                label,
+                exp: 0,
+                bos: true,
+            }),
             None,
             false,
         );
@@ -15533,6 +15588,13 @@ impl Bgp {
     ///     mechanism to use and will reject the route.
     ///   - Nexthop = local VTEP IP. Same as Type-2 origination.
     ///
+    /// Under `encapsulation mpls` (RFC 7432 §11.2) the same shape carries
+    /// MPLS values instead: the PMSI Label is this PE's per-EVI service
+    /// label — what a remote PE imposes on BUM toward us — the Tunnel
+    /// Identifier and next hop are the router-id, and the Encapsulation EC
+    /// is omitted (MPLS is the default). `vtep_local` is the router-id in
+    /// that mode.
+    ///
     /// Same gates as `evpn_originate_macip`: `advertise_all_vni` on
     /// AND a valid router-id. RD = `<router-id>:<VNI>`.
     pub fn evpn_originate_imet(&mut self, vni: u32, vtep_local: IpAddr) {
@@ -15554,7 +15616,12 @@ impl Bgp {
             orig: vtep_local,
         };
         let mut attr = BgpAttr::new();
-        let mut ecom = ExtCommunity::from([evpn_route_target(self.asn, vni), evpn_encap_vxlan()]);
+        // As on Type-2: MPLS is signalled by the absence of the
+        // Encapsulation EC (RFC 8365 §5.1.3).
+        let mut ecom = ExtCommunity::from([evpn_route_target(self.asn, vni)]);
+        if !self.evpn_encap.is_mpls() {
+            ecom.0.insert(evpn_encap_vxlan());
+        }
         // RFC 9251 §6 / RFC 9572 §8: advertise IGMP/MLD proxy capability
         // and/or BUM tunnel-segmentation support on the IMET route via the
         // Multicast Flags EC, so peers and Regional Border Routers learn
@@ -15581,7 +15648,20 @@ impl Bgp {
         let prune_bm = self.local_rib.evpn_flood.prune_bm;
         let prune_unknown = self.local_rib.evpn_flood.prune_unknown;
         let selective = self.local_rib.evpn_flood.selective;
-        let (mut pmsi, nexthop) = imet_pmsi_tunnel(bum, role, ar_ip, vtep_local, vni);
+        // The PMSI's 24-bit service field: the VNI under VXLAN/SRv6, this
+        // PE's per-EVI service label under MPLS (RFC 7432 §11.2 — it is what
+        // a remote PE imposes on BUM toward us, so it must be the label, not
+        // the EVI id). An EVI still awaiting its label advertises 0 and is
+        // re-originated by `evi_reconcile` when the block lands.
+        let service = if self.evpn_encap.is_mpls() {
+            self.evpn_evis
+                .get(&vni)
+                .and_then(|cfg| cfg.label)
+                .unwrap_or(0)
+        } else {
+            vni
+        };
+        let (mut pmsi, nexthop) = imet_pmsi_tunnel(bum, role, ar_ip, vtep_local, vni, service);
         // RFC 9574 Pruned-Flood-List: advertise our prune preferences so
         // remote PEs can drop us from the BM / unknown-unicast flood lists.
         pmsi.set_prune_bm(prune_bm);
@@ -16812,12 +16892,17 @@ fn imet_whole_vtep_prune(pmsi: Option<&PmsiTunnel>) -> bool {
         .unwrap_or(false)
 }
 
+///
+/// `service` is the PMSI's 24-bit label field — the VNI under VXLAN/SRv6, the
+/// PE's per-EVI MPLS service label under `encapsulation mpls`. `vni` remains
+/// the EVI/VNI identity itself, which the SR-P2MP form uses as its Tree-ID.
 fn imet_pmsi_tunnel(
     bum: EvpnBumTunnel,
     role: AssistedReplicationRole,
     ar_ip: Option<IpAddr>,
     vtep_local: IpAddr,
     vni: u32,
+    service: u32,
 ) -> (PmsiTunnel, IpAddr) {
     // SR P2MP replication trees ignore the AR role. The MPLS Label field
     // stays 0 (shared-tunnel upstream label / SRv6 transposition is a
@@ -16838,7 +16923,7 @@ fn imet_pmsi_tunnel(
             PmsiTunnel {
                 flags: 0,
                 tunnel_type: PmsiTunnel::TUNNEL_ASSISTED_REPLICATION,
-                vni,
+                vni: service,
                 endpoint: ar,
                 tree_id: None,
             }
@@ -16849,7 +16934,7 @@ fn imet_pmsi_tunnel(
             PmsiTunnel {
                 flags: 0,
                 tunnel_type: PmsiTunnel::TUNNEL_INGRESS_REPLICATION,
-                vni,
+                vni: service,
                 endpoint: vtep_local,
                 tree_id: None,
             }
@@ -16860,7 +16945,7 @@ fn imet_pmsi_tunnel(
             PmsiTunnel {
                 flags: 0,
                 tunnel_type: PmsiTunnel::TUNNEL_INGRESS_REPLICATION,
-                vni,
+                vni: service,
                 endpoint: vtep_local,
                 tree_id: None,
             },
@@ -17129,6 +17214,61 @@ fn evpn_encap_vxlan() -> ExtCommunityValue {
     // Encapsulation type 8 = VXLAN, occupies the trailing 2 octets.
     encap.val[5] = 8;
     encap
+}
+
+/// The Type-2 service field: MPLS label vs RT-derived VNI.
+#[cfg(test)]
+mod macip_service_field_tests {
+    use super::*;
+
+    fn rib_with(label: Option<u32>, rt_vni: Option<u32>) -> BgpRib {
+        let mut attr = BgpAttr::new();
+        if let Some(vni) = rt_vni {
+            attr.ecom = Some(ExtCommunity::from([evpn_route_target(65001, vni)]));
+        }
+        BgpRib::new(
+            ORIGINATED_PEER,
+            Ipv4Addr::UNSPECIFIED,
+            BgpRibType::Originated,
+            0,
+            32768,
+            &attr,
+            label.map(|label| bgp_packet::Label {
+                label,
+                exp: 0,
+                bos: true,
+            }),
+            None,
+            false,
+        )
+    }
+
+    /// EVPN over MPLS: the EVI service label is what goes on the wire, even
+    /// though the route target names a different number (the EVI id).
+    #[test]
+    fn mpls_label_wins_over_the_route_target() {
+        assert_eq!(macip_service_field(&rib_with(Some(16), Some(100))), 16);
+    }
+
+    /// EVPN over VXLAN: a locally-originated path carries no label, so the
+    /// VNI is recovered from the route target (RFC 8365 §5.1.2.4).
+    #[test]
+    fn vxlan_falls_back_to_the_route_target() {
+        assert_eq!(macip_service_field(&rib_with(None, Some(100))), 100);
+    }
+
+    /// A zero label is "no label", not a service id of 0 — an EVI whose
+    /// dynamic block has not landed yet must not shadow the RT derivation.
+    #[test]
+    fn zero_label_is_not_a_service_id() {
+        assert_eq!(macip_service_field(&rib_with(Some(0), Some(100))), 100);
+    }
+
+    /// Neither source: 0, the same value the pre-refactor code emitted.
+    #[test]
+    fn no_label_and_no_route_target_is_zero() {
+        assert_eq!(macip_service_field(&rib_with(None, None)), 0);
+    }
 }
 
 #[cfg(test)]
@@ -17571,6 +17711,7 @@ mod evpn_imet_ar_tests {
             Some(ar_ip()),
             ir_ip(),
             100,
+            100,
         );
         assert_eq!(pmsi.tunnel_type, PmsiTunnel::TUNNEL_INGRESS_REPLICATION);
         assert_eq!(pmsi.ar_type(), AssistedReplicationType::Rnve);
@@ -17589,6 +17730,7 @@ mod evpn_imet_ar_tests {
             Some(ar_ip()),
             ir_ip(),
             100,
+            100,
         );
         assert_eq!(pmsi.tunnel_type, PmsiTunnel::TUNNEL_ASSISTED_REPLICATION);
         assert_eq!(pmsi.ar_type(), AssistedReplicationType::Replicator);
@@ -17605,6 +17747,7 @@ mod evpn_imet_ar_tests {
             AssistedReplicationRole::Leaf,
             None,
             ir_ip(),
+            100,
             100,
         );
         assert_eq!(pmsi.tunnel_type, PmsiTunnel::TUNNEL_INGRESS_REPLICATION);
@@ -17624,6 +17767,7 @@ mod evpn_imet_ar_tests {
             None,
             ir_ip(),
             100,
+            100,
         );
         assert_eq!(pmsi.tunnel_type, PmsiTunnel::TUNNEL_INGRESS_REPLICATION);
         assert_eq!(pmsi.ar_type(), AssistedReplicationType::Rnve);
@@ -17641,6 +17785,7 @@ mod evpn_imet_ar_tests {
             Some(ar_ip()),
             ir_ip(),
             100,
+            100,
         );
         assert_eq!(pmsi.tunnel_type, PmsiTunnel::TUNNEL_SR_MPLS_P2MP);
         assert!(pmsi.is_sr_p2mp());
@@ -17657,6 +17802,7 @@ mod evpn_imet_ar_tests {
             AssistedReplicationRole::None,
             None,
             ir_ip(),
+            4242,
             4242,
         );
         assert_eq!(pmsi.tunnel_type, PmsiTunnel::TUNNEL_SRV6_P2MP);

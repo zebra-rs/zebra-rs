@@ -4070,7 +4070,22 @@ fn show_evpn_ecom(attr: &BgpAttr) -> String {
 /// the T field, and the RFC 9574 Pruned-Flood-List (BM/U) and Leaf
 /// Information Required (L) flags are appended when set. SR P2MP trees per
 /// RFC 9524 carry a Root and Tree-ID instead of a plain endpoint and VNI.
-fn format_pmsi_tunnel(p: &PmsiTunnel) -> String {
+/// True when the path carries a BGP Encapsulation extended community
+/// (RFC 9012 type 0x03 / sub 0x0c). Its *absence* is how RFC 8365 §5.1.3
+/// signals plain MPLS, so the show path reads it to decide whether a
+/// 24-bit service field is a VNI or a label.
+fn has_encap_ec(attr: &BgpAttr) -> bool {
+    attr.ecom.as_ref().is_some_and(|ecom| {
+        ecom.0
+            .iter()
+            .any(|ec| ec.high_type == 0x03 && ec.low_type == 0x0c)
+    })
+}
+
+/// `mpls` names the 24-bit service field a label rather than a VNI: the PMSI
+/// carries one field whose meaning follows the encapsulation, and calling an
+/// MPLS service label "vni" reads as a bug to an operator.
+fn format_pmsi_tunnel(p: &PmsiTunnel, mpls: bool) -> String {
     let mut s = String::new();
     let type_name = match p.tunnel_type {
         PmsiTunnel::TUNNEL_INGRESS_REPLICATION => "ingress-replication".to_string(),
@@ -4098,7 +4113,8 @@ fn format_pmsi_tunnel(p: &PmsiTunnel) -> String {
             let _ = write!(s, " tree-id:{tree_id}");
         }
     } else {
-        let _ = write!(s, " endpoint:{} vni:{}", p.endpoint, p.vni);
+        let field = if mpls { "label" } else { "vni" };
+        let _ = write!(s, " endpoint:{} {field}:{}", p.endpoint, p.vni);
     }
     // RFC 9574 flags: BM/U prune requests and the L (Leaf Information
     // Required) selective-AR solicitation.
@@ -4163,7 +4179,11 @@ fn write_evpn_path_attrs(buf: &mut String, attr: &BgpAttr, originated: bool) -> 
     // IMET route — ingress vs assisted replication, the AR role, prune flags,
     // or an SR P2MP tree binding.
     if let Some(pmsi) = &attr.pmsi_tunnel {
-        writeln!(buf, "{PAD}PMSI: {}", format_pmsi_tunnel(pmsi))?;
+        writeln!(
+            buf,
+            "{PAD}PMSI: {}",
+            format_pmsi_tunnel(pmsi, !has_encap_ec(attr))
+        )?;
     }
     if let Some(com) = &attr.com {
         let s = com.to_string();
@@ -7791,7 +7811,7 @@ mod pmsi_render_tests {
             tree_id: None,
         };
         assert_eq!(
-            format_pmsi_tunnel(&p),
+            format_pmsi_tunnel(&p, false),
             "ingress-replication endpoint:10.0.0.1 vni:550"
         );
     }
@@ -7809,7 +7829,7 @@ mod pmsi_render_tests {
         }
         .with_ar_type(AssistedReplicationType::Replicator);
         assert_eq!(
-            format_pmsi_tunnel(&p),
+            format_pmsi_tunnel(&p, false),
             "assisted-replication(replicator) endpoint:10.0.0.254 vni:550"
         );
     }
@@ -7828,7 +7848,7 @@ mod pmsi_render_tests {
         .with_ar_type(AssistedReplicationType::Replicator);
         p.set_leaf_info_required(true);
         assert_eq!(
-            format_pmsi_tunnel(&p),
+            format_pmsi_tunnel(&p, false),
             "assisted-replication(replicator) endpoint:10.0.0.254 vni:10 flags:leaf-info-required"
         );
     }
@@ -7848,7 +7868,7 @@ mod pmsi_render_tests {
         p.set_prune_bm(true);
         p.set_prune_unknown(true);
         assert_eq!(
-            format_pmsi_tunnel(&p),
+            format_pmsi_tunnel(&p, false),
             "ingress-replication endpoint:10.0.0.2 vni:10 flags:prune-bm,prune-u"
         );
     }
@@ -7858,6 +7878,30 @@ mod pmsi_render_tests {
     #[test]
     fn sr_p2mp_tree() {
         let p = PmsiTunnel::sr_p2mp(PmsiTunnel::TUNNEL_SRV6_P2MP, 0, 10, ip(10, 0, 0, 1));
-        assert_eq!(format_pmsi_tunnel(&p), "srv6-p2mp root:10.0.0.1 tree-id:10");
+        assert_eq!(
+            format_pmsi_tunnel(&p, false),
+            "srv6-p2mp root:10.0.0.1 tree-id:10"
+        );
+    }
+
+    /// The PMSI's one 24-bit field means different things per
+    /// encapsulation; calling an MPLS service label "vni" reads as a bug.
+    #[test]
+    fn mpls_names_the_service_field_a_label() {
+        let p = PmsiTunnel {
+            flags: 0,
+            tunnel_type: PmsiTunnel::TUNNEL_INGRESS_REPLICATION,
+            vni: 16,
+            endpoint: "10.255.0.1".parse().unwrap(),
+            tree_id: None,
+        };
+        assert_eq!(
+            format_pmsi_tunnel(&p, true),
+            "ingress-replication endpoint:10.255.0.1 label:16"
+        );
+        assert_eq!(
+            format_pmsi_tunnel(&p, false),
+            "ingress-replication endpoint:10.255.0.1 vni:16"
+        );
     }
 }

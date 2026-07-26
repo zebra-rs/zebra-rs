@@ -2346,8 +2346,16 @@ pub(super) fn reoriginate_all_imet(bgp: &mut Bgp) {
     if !bgp.advertise_all_vni {
         return;
     }
-    let vxlans: Vec<(u32, IpAddr)> = bgp.local_vxlans.iter().map(|(k, v)| (*k, *v)).collect();
-    for (vni, vtep_local) in vxlans {
+    // Under MPLS there is no VXLAN device to enumerate: the configured EVIs
+    // are the local L2 services, and the router-id stands in for the VTEP
+    // (it is the BGP next hop the transport LSP resolves on).
+    let services: Vec<(u32, IpAddr)> = if bgp.evpn_encap.is_mpls() {
+        let orig = IpAddr::V4(bgp.router_id);
+        bgp.evpn_evis.keys().map(|evi| (*evi, orig)).collect()
+    } else {
+        bgp.local_vxlans.iter().map(|(k, v)| (*k, *v)).collect()
+    };
+    for (vni, vtep_local) in services {
         bgp.evpn_originate_imet(vni, vtep_local);
     }
 }
