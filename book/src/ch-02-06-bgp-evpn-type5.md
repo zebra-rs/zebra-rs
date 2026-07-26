@@ -77,9 +77,11 @@ next-hop resolves over the underlay, and re-installs if that underlay
 reroutes.
 
 > **Note** — this is the **L3** EVPN service. EVPN's **L2** services
-> (Type-2 MAC/IP, Type-3 inclusive-multicast) run over VXLAN and are
-> documented separately; EVPN-over-MPLS *L2* is not supported (the Linux
-> kernel has no L2-over-MPLS data path).
+> (Type-2 MAC/IP, Type-3 inclusive-multicast) are documented separately and
+> run over VXLAN, SRv6, or MPLS. EVPN-over-MPLS *L2* is not forwardable by
+> the Linux kernel — it has no action that pops a label and hands the frame
+> to a bridge — so it needs the cradle eBPF data plane; see
+> [EVPN over MPLS](ch-02-39-bgp-evpn-mpls.md).
 
 ## Verification
 
