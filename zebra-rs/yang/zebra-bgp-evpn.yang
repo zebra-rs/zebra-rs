@@ -134,8 +134,11 @@ module zebra-bgp-evpn {
         "EVPN Ethernet Segment (RFC 7432) — a CE multihomed to two or more
          PEs. Identified to the overlay by a 10-octet ESI; the PEs on the
          same ES discover one another (Type-4 route + ES-Import RT) and run
-         Designated-Forwarder election. Config + state only in this phase;
-         Type-1/4 origination and DF election are later phases.";
+         Designated-Forwarder election. Setting the ESI originates the
+         Type-4 and the per-ES Type-1 A-D (mass withdraw); a `vpws` service
+         naming this segment elects its RFC 8214 §5 role over it. The VXLAN
+         data plane (DF-gated BUM, split-horizon, aliasing) is a later
+         phase.";
       leaf name {
         ext:help "Ethernet Segment name";
         type string;
@@ -240,6 +243,18 @@ module zebra-bgp-evpn {
            cross-connect (the tag rides through the service), and the
            local SID becomes End.DX2V demuxed over the EVI's VLAN table.
            Absent = whole-port service (End.DX2).";
+      }
+      leaf ethernet-segment {
+        ext:help "Ethernet Segment this AC belongs to (multihoming)";
+        type string;
+        description
+          "Name of an `ethernet-segment` this service's attachment circuit
+           belongs to (RFC 8214 §5 multihoming). The referenced segment
+           supplies the ESI carried in this service's Type-1 route and the
+           redundancy mode that drives Designated-Forwarder election, run
+           per <ESI, VPWS service instance> over the PEs advertising the
+           segment's Type-4. Absent = single-homed: the Type-1 carries the
+           all-zero ESI and is always advertised as primary.";
       }
     }
     leaf bum-tunnel-type {

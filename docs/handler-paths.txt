@@ -38,6 +38,7 @@
 /router/bgp/afi-safi/segmentation
 /router/bgp/afi-safi/table-map
 /router/bgp/afi-safi/vpws
+/router/bgp/afi-safi/vpws/ethernet-segment
 /router/bgp/afi-safi/vpws/evi
 /router/bgp/afi-safi/vpws/interface
 /router/bgp/afi-safi/vpws/local-service-id

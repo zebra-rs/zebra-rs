@@ -7123,6 +7123,20 @@ fn evpn_vpws_sid(attr: &BgpAttr) -> Option<std::net::Ipv6Addr> {
         .or_else(|| evpn_srv6_sid(attr, bgp_packet::SRV6_BEHAVIOR_END_DX2V))
 }
 
+/// Mark every VPWS service sitting on Ethernet Segment `esi` as needing a DF
+/// re-election, for `Bgp::vpws_df_drain` to pick up. Called from the Type-4
+/// install and withdraw arms, which see only `LocalRib`.
+fn vpws_mark_df_dirty(local_rib: &mut LocalRib, esi: &[u8; 10]) {
+    let names: Vec<String> = local_rib
+        .evpn_vpws
+        .services
+        .iter()
+        .filter(|(_, svc)| svc.esi.as_ref() == Some(esi))
+        .map(|(name, _)| name.clone())
+        .collect();
+    local_rib.evpn_vpws.df_dirty.extend(names);
+}
+
 /// The L2 MTU from an EVPN route's Layer-2 Attributes EC (RFC 8214 §3.1).
 /// 0 when the EC is absent or carries no MTU — either way, no MTU check.
 fn evpn_l2_attr_mtu(attr: &BgpAttr) -> u16 {
@@ -7284,11 +7298,14 @@ fn route_evpn_export_selected(
                     }
                 }
             }
-            // RFC 7432 Type-4 ES routes, RFC 9251 Type-7/8 Synch, and RFC
-            // 9572 A-D routes have no VXLAN dataplane action here — withdraw
-            // is a control-plane no-op.
-            EvpnPrefix::EthernetSeg { .. }
-            | EvpnPrefix::IgmpJoinSync { .. }
+            // A withdrawn Type-4: a PE left the Ethernet Segment, so every
+            // carving ordinal on it shifts and the VPWS services bound to
+            // that ESI may need a new role (RFC 8214 §5). Mark them; the
+            // re-election runs once this borrow ends.
+            EvpnPrefix::EthernetSeg { esi, .. } => vpws_mark_df_dirty(bgp.local_rib, esi),
+            // RFC 9251 Type-7/8 Synch and RFC 9572 A-D routes have no VXLAN
+            // dataplane action here — withdraw is a control-plane no-op.
+            EvpnPrefix::IgmpJoinSync { .. }
             | EvpnPrefix::IgmpLeaveSync { .. }
             | EvpnPrefix::PerRegionImet { .. }
             | EvpnPrefix::SPmsi { .. }
@@ -7494,13 +7511,17 @@ fn route_evpn_export_selected(
                 }
             }
         }
-        // RFC 7432 Type-4 ES routes, RFC 9251 Type-7/8 Synch, and RFC 9572
-        // Per-Region I-PMSI / S-PMSI / Leaf A-D have no VXLAN dataplane action
-        // in the current control-plane phase — install is a no-op (the routes
-        // are still stored and re-advertised; only kernel programming is
-        // skipped).
-        EvpnPrefix::EthernetSeg { .. }
-        | EvpnPrefix::IgmpJoinSync { .. }
+        // A Type-4: a PE joined the Ethernet Segment (or re-advertised on
+        // it). Its VTEP enters the DF-election candidate set, shifting every
+        // carving ordinal, so the VPWS services bound to that ESI may need a
+        // new RFC 8214 §5 role. Mark them; the re-election needs the full
+        // `Bgp` and runs once this borrow ends. No VXLAN dataplane action.
+        EvpnPrefix::EthernetSeg { esi, .. } => vpws_mark_df_dirty(bgp.local_rib, esi),
+        // RFC 9251 Type-7/8 Synch and RFC 9572 Per-Region I-PMSI / S-PMSI /
+        // Leaf A-D have no VXLAN dataplane action in the current
+        // control-plane phase — install is a no-op (the routes are still
+        // stored and re-advertised; only kernel programming is skipped).
+        EvpnPrefix::IgmpJoinSync { .. }
         | EvpnPrefix::IgmpLeaveSync { .. }
         | EvpnPrefix::PerRegionImet { .. }
         | EvpnPrefix::SPmsi { .. }
@@ -15855,9 +15876,10 @@ impl Bgp {
 
     /// Originate VPWS service `name`'s Ethernet A-D per-EVI route (Type-1,
     /// RFC 8214 §3.1): RD = `<router-id>:<evi>`, Ethernet Tag = the local
-    /// service instance id, all-zero ESI (single-homed), the EVI RT, and
-    /// this PE's `End.DX2` L2-Service Prefix-SID (RFC 9252 §6.3). No-op
-    /// while the config is partial or the router-id is unset.
+    /// service instance id, the referenced Ethernet Segment's ESI (all-zero
+    /// when single-homed), the EVI RT, and this PE's `End.DX2` L2-Service
+    /// Prefix-SID (RFC 9252 §6.3). No-op while the config is partial or the
+    /// router-id is unset.
     pub fn evpn_originate_vpws(&mut self, name: &str) {
         if self.router_id.is_unspecified() {
             return;
@@ -15874,18 +15896,27 @@ impl Bgp {
         let Some(rd) = rd_from_router_id_vni(self.router_id, evi) else {
             return;
         };
+        // RFC 8214 §5: on a multihomed segment the role is elected per
+        // <ESI, service instance> across the PEs advertising the segment's
+        // Type-4; single-homed services keep the all-zero ESI and primary.
+        let (esi, role, df) = self.vpws_elect_role(name, local_id);
+        let (primary, backup) = role.bits();
+        if let Some(svc) = self.local_rib.evpn_vpws.services.get_mut(name) {
+            svc.role = role;
+            svc.df = df;
+        }
         let prefix_sid = self.vpws_dx2_prefix_sid(name);
         let prefix = EvpnPrefix::EthernetAd {
-            esi: [0; 10],
+            esi,
             eth_tag: local_id,
         };
         let mut attr = BgpAttr::new();
-        // The EVI RT plus the RFC 8214 §3.1 Layer-2 Attributes EC: P bit
-        // (single-homed primary), no backup, no control word (SRv6), and
-        // the configured L2 MTU (0 = no MTU check at the remote).
+        // The EVI RT plus the RFC 8214 §3.1 Layer-2 Attributes EC: the
+        // elected P/B bits, no control word (SRv6), and the configured L2
+        // MTU (0 = no MTU check at the remote).
         attr.ecom = Some(ExtCommunity::from([
             evpn_route_target(self.asn, evi),
-            ExtCommunityValue::l2_attr(true, false, false, mtu.unwrap_or(0)),
+            ExtCommunityValue::l2_attr(primary, backup, false, mtu.unwrap_or(0)),
         ]));
         attr.prefix_sid = prefix_sid;
         attr.nexthop = Some(BgpNexthop::Evpn(IpAddr::V4(self.router_id)));
@@ -15901,28 +15932,66 @@ impl Bgp {
             false,
         );
         if let Some(svc) = self.local_rib.evpn_vpws.services.get_mut(name) {
-            svc.originated = Some((evi, local_id));
+            svc.originated = Some((evi, local_id, esi));
         }
         self.evpn_originate_synch(rd, prefix, rib);
     }
 
+    /// Elect this PE's RFC 8214 §5 role for VPWS service `name`'s service
+    /// instance `local_id`, returning `(ESI, role, elected DF)`.
+    ///
+    /// The ESI and redundancy mode come from the service's resolved segment
+    /// (`vpws_resync_es` keeps them in step with `ethernet_segments`); the
+    /// candidate PEs are those advertising that ESI's Type-4, ordered by
+    /// ascending VTEP so the ordinal is the RFC 7432 §8.5 carving position.
+    /// A single-homed service — no `ethernet-segment`, or one whose ESI is
+    /// not configured yet — is the all-zero ESI and primary, which is what
+    /// the pre-multihoming behavior was.
+    fn vpws_elect_role(
+        &self,
+        name: &str,
+        local_id: u32,
+    ) -> ([u8; 10], super::ethernet_segment::VpwsRole, Option<IpAddr>) {
+        use super::ethernet_segment::{
+            EsRedundancyMode, VpwsRole, designated_forwarder, vpws_role,
+        };
+
+        let Some(svc) = self.local_rib.evpn_vpws.services.get(name) else {
+            return ([0; 10], VpwsRole::Primary, None);
+        };
+        let Some(esi) = svc.esi else {
+            return ([0; 10], VpwsRole::Primary, None);
+        };
+        let mode = if svc.single_active {
+            EsRedundancyMode::SingleActive
+        } else {
+            EsRedundancyMode::AllActive
+        };
+        let vteps: Vec<IpAddr> = self
+            .es_df_candidates(&esi)
+            .into_iter()
+            .map(|(vtep, _alg)| vtep)
+            .collect();
+        let me = IpAddr::V4(self.router_id);
+        let role = vpws_role(mode, &vteps, me, local_id);
+        (esi, role, designated_forwarder(&vteps, local_id))
+    }
+
     /// Withdraw VPWS service `name`'s Type-1 — keyed by what was actually
-    /// originated, so it stays correct after config-field changes. No-op
-    /// if nothing is originated.
+    /// originated (EVI, Ethernet Tag **and** ESI), so it stays correct after
+    /// config-field changes, including re-pointing `ethernet-segment` at a
+    /// different ESI. No-op if nothing is originated.
     pub fn evpn_withdraw_vpws(&mut self, name: &str) {
         let Some(svc) = self.local_rib.evpn_vpws.services.get_mut(name) else {
             return;
         };
-        let Some((evi, eth_tag)) = svc.originated.take() else {
+        let Some((evi, eth_tag, esi)) = svc.originated.take() else {
             return;
         };
         let Some(rd) = rd_from_router_id_vni(self.router_id, evi) else {
             return;
         };
-        let prefix = EvpnPrefix::EthernetAd {
-            esi: [0; 10],
-            eth_tag,
-        };
+        let prefix = EvpnPrefix::EthernetAd { esi, eth_tag };
         let _ = self.local_rib.remove_evpn(rd, &prefix, 0, ORIGINATED_PEER);
         let _ = self.local_rib.select_best_path_evpn(&rd, &prefix);
         route_withdraw_evpn_to_peers(rd, prefix, &mut self.peers);
@@ -16037,6 +16106,78 @@ impl Bgp {
             });
         }
         self.free_vpws_dx2_sid(name);
+    }
+
+    /// Re-resolve every VPWS service's `ethernet-segment` reference against
+    /// `Bgp::ethernet_segments`, reconciling the ones whose ESI or
+    /// redundancy mode moved. This is the single sync point between the two
+    /// config trees: the route paths read the denormalized `svc.esi` /
+    /// `svc.single_active`, so every edit that can change what they resolve
+    /// to — the vpws leaf itself, the segment's `esi`, its
+    /// `redundancy-mode`, or the segment being deleted — calls here.
+    ///
+    /// A changed ESI moves the Type-1's NLRI key, so the reconcile (rather
+    /// than a bare re-originate) is what withdraws the route under the old
+    /// segment before advertising it under the new one.
+    pub fn vpws_resync_es(&mut self) {
+        let resolved: Vec<(String, Option<[u8; 10]>, bool)> = self
+            .local_rib
+            .evpn_vpws
+            .services
+            .iter()
+            .map(|(name, svc)| {
+                let es = svc
+                    .ethernet_segment
+                    .as_ref()
+                    .and_then(|es_name| self.ethernet_segments.get(es_name));
+                (
+                    name.clone(),
+                    es.and_then(|e| e.esi),
+                    es.is_some_and(|e| e.redundancy_mode.single_active()),
+                )
+            })
+            .collect();
+        for (name, esi, single_active) in resolved {
+            let Some(svc) = self.local_rib.evpn_vpws.services.get_mut(&name) else {
+                continue;
+            };
+            if svc.esi == esi && svc.single_active == single_active {
+                continue;
+            }
+            svc.esi = esi;
+            svc.single_active = single_active;
+            self.vpws_reconcile(&name);
+        }
+    }
+
+    /// Re-run DF election for the services marked by a Type-4 install or
+    /// withdraw (RFC 8214 §5): a PE joining or leaving the segment shifts
+    /// every carving ordinal, so this PE's role for a service instance can
+    /// flip without any local config change.
+    ///
+    /// Called once the receive path's `BgpTop` borrow has ended, because
+    /// re-originating needs the full `Bgp`. Only a changed role re-advertises
+    /// the Type-1 — a moved DF that leaves our own role alone is display
+    /// state, not a wire event.
+    pub fn vpws_df_drain(&mut self) {
+        let dirty = std::mem::take(&mut self.local_rib.evpn_vpws.df_dirty);
+        for name in dirty {
+            let Some((local_id, old_role)) = self
+                .local_rib
+                .evpn_vpws
+                .services
+                .get(&name)
+                .and_then(|s| Some((s.local_service_id?, s.role)))
+            else {
+                continue;
+            };
+            let (_esi, role, df) = self.vpws_elect_role(&name, local_id);
+            if role != old_role {
+                self.evpn_originate_vpws(&name);
+            } else if let Some(svc) = self.local_rib.evpn_vpws.services.get_mut(&name) {
+                svc.df = df;
+            }
+        }
     }
 
     /// Originate the full set of routes for a locally-configured ES: the Type-4

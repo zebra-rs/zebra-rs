@@ -2622,6 +2622,11 @@ struct VpwsServiceJson {
     local_sid: Option<String>,
     remote_sid: Option<String>,
     remote_mtu_mismatch: Option<u16>,
+    ethernet_segment: Option<String>,
+    esi: Option<String>,
+    redundancy_mode: Option<String>,
+    role: Option<String>,
+    designated_forwarder: Option<String>,
     state: String,
 }
 
@@ -2662,6 +2667,17 @@ fn show_bgp_evpn_vpws(
                 local_sid: vpws.sids.get(name).map(|(addr, _)| addr.to_string()),
                 remote_sid: svc.remote_sid.map(|sid| sid.to_string()),
                 remote_mtu_mismatch: svc.remote_mtu_mismatch,
+                ethernet_segment: svc.ethernet_segment.clone(),
+                esi: svc.esi.map(|esi| bgp_packet::esi_display(&esi)),
+                redundancy_mode: svc.esi.map(|_| {
+                    if svc.single_active {
+                        "single-active".to_string()
+                    } else {
+                        "all-active".to_string()
+                    }
+                }),
+                role: svc.esi.map(|_| svc.role.as_str().to_string()),
+                designated_forwarder: svc.df.map(|df| df.to_string()),
                 state: vpws_state(svc).to_string(),
             })
             .collect();
@@ -2696,6 +2712,28 @@ fn show_bgp_evpn_vpws(
         }
         if let Some(mtu) = svc.mtu.filter(|m| *m != 0) {
             writeln!(buf, "  MTU: {mtu}")?;
+        }
+        // RFC 8214 §5 multihoming. The segment name shows even when it
+        // resolves to nothing (no such ES, or its ESI unset) — that is the
+        // difference between "single-homed" and "misconfigured".
+        if let Some(es_name) = &svc.ethernet_segment {
+            match svc.esi {
+                Some(esi) => {
+                    let mode = if svc.single_active {
+                        "single-active"
+                    } else {
+                        "all-active"
+                    };
+                    writeln!(
+                        buf,
+                        "  Ethernet Segment: {es_name} (ESI {}, {mode})",
+                        bgp_packet::esi_display(&esi)
+                    )?;
+                    let df = svc.df.map_or("(none)".to_string(), |df| df.to_string());
+                    writeln!(buf, "  Role: {} (DF {df})", svc.role.as_str())?;
+                }
+                None => writeln!(buf, "  Ethernet Segment: {es_name} (unresolved)")?,
+            }
         }
         if let Some((sid, _)) = vpws.sids.get(name) {
             let behavior = if svc.vlan.is_some() {

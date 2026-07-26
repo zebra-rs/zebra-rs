@@ -1,0 +1,43 @@
+# z3 — the single-homed remote end of eline1 (RFC 8214). Its AC sits on no
+# Ethernet Segment, so its Type-1 keeps the all-zero ESI and always
+# advertises primary. It imports service instance 101 — advertised by *both*
+# z1 and z2 under the shared ESI — and picks the end to bind from the P/B
+# bits those two carry. Control-plane only — no cradle dataplane.
+segment-routing:
+  locator:
+  - name: LOC3
+    prefix: fcbb:bbbb:3::/48
+    behavior: usid
+router:
+  bgp:
+    global:
+      as: 65001
+      router-id: 192.168.0.3
+    segment-routing:
+      srv6:
+        locator: LOC3
+    afi-safi:
+    - name: evpn
+      vpws:
+      - name: eline1
+        evi: 100
+        local-service-id: 103
+        remote-service-id: 101
+        interface: ce3
+    neighbor:
+    - remote-address: 192.168.0.1
+      enabled: true
+      remote-as: 65001
+      afi-safi:
+      - name: ipv4
+        enabled: true
+      - name: evpn
+        enabled: true
+    - remote-address: 192.168.0.2
+      enabled: true
+      remote-as: 65001
+      afi-safi:
+      - name: ipv4
+        enabled: true
+      - name: evpn
+        enabled: true
