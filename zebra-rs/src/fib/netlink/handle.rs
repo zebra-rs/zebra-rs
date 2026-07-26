@@ -3149,6 +3149,12 @@ impl FibHandle {
                         )
                         .await;
                 }
+                // EVPN-over-MPLS EVI service label: pop and bridge in `bd`.
+                IlmType::DecapBd { bd } => {
+                    cradle
+                        .ilm_install(label, crate::fib::cradle::MPLS_OP_POP_L2, *bd, None, 0, &[])
+                        .await;
+                }
                 // Self prefix-SID (UHP local pop): the loopback nexthop is
                 // for the kernel LFIB only — teeing it would make the eBPF
                 // pop-and-forward resolve an L2 neighbor on `lo` and punt.
@@ -3185,6 +3191,15 @@ impl FibHandle {
                     }
                 }
             }
+        }
+
+        // EVPN-over-MPLS decap is cradle-only. Linux has no action that pops
+        // a label and hands the exposed Ethernet frame to a bridge, so there
+        // is nothing to program here — and falling through would install a
+        // bogus pure-swap route at the EVI's service label. Mirrors
+        // `route_sid_install` skipping netlink for the End.DT2U/DT2M SIDs.
+        if matches!(ilm.ilm_type, IlmType::DecapBd { .. }) {
+            return;
         }
 
         let create_flags = if replace {
@@ -3347,6 +3362,11 @@ impl FibHandle {
     pub async fn ilm_del(&self, label: u32, ilm: &IlmEntry) {
         if let Some(cradle) = &self.cradle {
             cradle.ilm_uninstall(label).await;
+        }
+        // Never installed into the kernel (see `ilm_install`), so there is
+        // nothing to delete — and asking would log a spurious ESRCH.
+        if matches!(ilm.ilm_type, IlmType::DecapBd { .. }) {
+            return;
         }
 
         let mut msg = RouteMessage::default();

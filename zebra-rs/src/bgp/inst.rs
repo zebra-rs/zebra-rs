@@ -4417,6 +4417,9 @@ impl Bgp {
         for name in unlabelled {
             self.relabel_vrf(&name);
         }
+        // EVPN-over-MPLS instances draw from the same block, and an EVI
+        // configured before the grant is sitting label-less too.
+        self.evi_reconcile();
         // The reconcile may have outgrown this block too (a large VRF
         // fleet). If any VRF is still label-less, ask for another.
         if self.vrf_registry.values().any(|h| h.label == 0) {
@@ -4434,6 +4437,106 @@ impl Bgp {
         self.vrf_label_request_pending = true;
         self.rib_subscriber
             .send_label_block_request("bgp", VRF_LABEL_BLOCK_SIZE);
+    }
+
+    /// Bring every configured EVPN Instance's MPLS service label and decap
+    /// ILM in line with the current encapsulation.
+    ///
+    /// Under `encapsulation mpls` each EVI takes one label from the same
+    /// dynamic block the per-VRF labels come from — labels are unique in one
+    /// platform label space, so a second allocator would buy nothing — and
+    /// installs a [`IlmType::DecapBd`] ILM at it, so a remote PE's frame with
+    /// that label pops into the EVI's bridge domain. Under any other
+    /// encapsulation the labels are handed back: an EVI's routes carry a VNI
+    /// or an SRv6 SID instead, and a stale ILM would decap traffic the label
+    /// no longer belongs to.
+    ///
+    /// Idempotent, so it can be called from the config handlers, from a
+    /// label-block grant, and from an encapsulation change alike.
+    pub(super) fn evi_reconcile(&mut self) {
+        let want_labels = self.evpn_encap.is_mpls();
+        let evis: Vec<u32> = self.evpn_evis.keys().copied().collect();
+        let mut freed = Vec::new();
+        let mut short = false;
+        for evi in evis {
+            let current = self.evpn_evis.get(&evi).and_then(|e| e.label);
+            match (want_labels, current) {
+                (true, None) => {
+                    let Some(label) = self.vrf_label_alloc.as_mut().and_then(|a| a.alloc()) else {
+                        // No block bound yet, or this one is spent. Ask for
+                        // (more) space; `label_block_arrived` calls us back.
+                        short = true;
+                        continue;
+                    };
+                    if let Some(cfg) = self.evpn_evis.get_mut(&evi) {
+                        cfg.label = Some(label);
+                    }
+                    self.evi_ilm_install(evi, label);
+                }
+                (false, Some(label)) => {
+                    if let Some(cfg) = self.evpn_evis.get_mut(&evi) {
+                        cfg.label = None;
+                    }
+                    self.evi_ilm_uninstall(evi, label);
+                    freed.push(label);
+                }
+                _ => {}
+            }
+        }
+        self.free_evi_labels(freed);
+        if short {
+            self.request_label_block();
+        }
+    }
+
+    /// Drop one EVI's label and decap ILM — the config handler's delete path.
+    pub(super) fn evi_release(&mut self, evi: u32, label: Option<u32>) {
+        let Some(label) = label else {
+            return;
+        };
+        self.evi_ilm_uninstall(evi, label);
+        self.free_evi_labels(vec![label]);
+    }
+
+    /// Return EVI labels to the shared pool, releasing any block that fully
+    /// empties (mirrors the per-VRF despawn path).
+    fn free_evi_labels(&mut self, labels: Vec<u32>) {
+        if labels.is_empty() {
+            return;
+        }
+        let released: Vec<(u32, u32)> = if let Some(alloc) = self.vrf_label_alloc.as_mut() {
+            for label in labels {
+                alloc.free(label);
+            }
+            alloc.reclaim_free_blocks()
+        } else {
+            Vec::new()
+        };
+        for (start, end) in released {
+            self.rib_subscriber
+                .send_label_block_release("bgp", start, end - start);
+        }
+    }
+
+    /// Install the EVI's bridge-decap ILM. Cradle-only by construction — the
+    /// RIB's FIB handle skips netlink for `DecapBd`, since Linux has no
+    /// action that pops a label into a bridge.
+    fn evi_ilm_install(&self, evi: u32, label: u32) {
+        let entry = crate::rib::inst::IlmEntry {
+            ilm_type: crate::rib::inst::IlmType::DecapBd { bd: evi },
+            nexthop: crate::rib::Nexthop::default(),
+            ..crate::rib::inst::IlmEntry::new(crate::rib::RibType::Bgp)
+        };
+        self.rib_subscriber.send_ilm_add(label, entry);
+    }
+
+    fn evi_ilm_uninstall(&self, evi: u32, label: u32) {
+        let entry = crate::rib::inst::IlmEntry {
+            ilm_type: crate::rib::inst::IlmType::DecapBd { bd: evi },
+            nexthop: crate::rib::Nexthop::default(),
+            ..crate::rib::inst::IlmEntry::new(crate::rib::RibType::Bgp)
+        };
+        self.rib_subscriber.send_ilm_del(label, entry);
     }
 
     /// Allocate a per-VRF label from the dynamic block(s). When no block

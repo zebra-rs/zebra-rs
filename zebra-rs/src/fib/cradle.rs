@@ -28,6 +28,10 @@ const FIB_F_ECMP: u32 = 1 << 3;
 /// Mirrors `cradle_common::MPLS_OP_*` — the ILM `action` values.
 pub const MPLS_OP_SWAP: u32 = 0;
 pub const MPLS_OP_POP_L3: u32 = 1;
+/// Pop an EVPN-over-MPLS EVI service label and bridge the exposed Ethernet
+/// frame; the ILM's `vrf_table_id` carries the bridge domain rather than a
+/// VRF table (the same field reuse cradle applies to `End.DT2U`).
+pub const MPLS_OP_POP_L2: u32 = 3;
 
 /// An EVPN symmetric-IRB VXLAN L3 encap leg: `(remote VTEP, L3VNI, remote
 /// router MAC)`. `Some` on a member marks it a VXLAN-encapsulated nexthop

@@ -1748,6 +1748,10 @@ fn config_evpn_encapsulation(bgp: &mut Bgp, mut args: Args, op: ConfigOp) -> Opt
         return Some(());
     }
     bgp.evpn_encap = encap;
+    // Entering MPLS mode gives every EVI a service label + decap ILM;
+    // leaving it hands them back (the routes now carry a VNI or an SRv6 SID,
+    // and a stale ILM would decap traffic the label no longer owns).
+    bgp.evi_reconcile();
     // Re-originate under the new encapsulation (no-op when
     // advertise-all-vni is off; the config-load gate replay covers
     // cold boot, where this leaf lands before the FdbAdds arrive).
@@ -1933,9 +1937,12 @@ fn config_evi(bgp: &mut Bgp, mut args: Args, op: ConfigOp) -> Option<()> {
     match op {
         ConfigOp::Set => {
             bgp.evpn_evis.entry(evi).or_default();
+            // Give it a service label + decap ILM if we are in MPLS mode.
+            bgp.evi_reconcile();
         }
         ConfigOp::Delete => {
-            bgp.evpn_evis.remove(&evi);
+            let label = bgp.evpn_evis.remove(&evi).and_then(|cfg| cfg.label);
+            bgp.evi_release(evi, label);
         }
         _ => {}
     }

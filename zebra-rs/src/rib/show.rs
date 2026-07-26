@@ -1662,19 +1662,29 @@ pub fn ilm_show(rib: &Rib, _args: Args, json: bool) -> String {
 /// just a VRF the popped packet is routed into. Other no-nexthop types
 /// are skipped.
 fn write_ilm_decap_entry(buf: &mut String, rib: &Rib, label: u32, ilm: &super::inst::IlmEntry) {
-    let (prefix_or_id, vrf_ifindex) = match &ilm.ilm_type {
+    let (prefix_or_id, interface) = match &ilm.ilm_type {
         super::inst::IlmType::DecapVrf {
             table_id,
             vrf_ifindex,
-        } => (format!("VPN Decap (tbl {:<3})", table_id), *vrf_ifindex),
+        } => (
+            format!("VPN Decap (tbl {:<3})", table_id),
+            rib.link_name(*vrf_ifindex),
+        ),
         super::inst::IlmType::ContextLabel {
             table_id,
             vrf_ifindex,
-        } => (format!("Mirror Ctx (tbl {:<3})", table_id), *vrf_ifindex),
+        } => (
+            format!("Mirror Ctx (tbl {:<3})", table_id),
+            rib.link_name(*vrf_ifindex),
+        ),
+        // EVPN-over-MPLS: the pop delivers into a bridge domain, not a VRF
+        // device, so there is no egress interface to name.
+        super::inst::IlmType::DecapBd { bd } => {
+            (format!("EVPN Decap (bd {:<4})", bd), "-".to_string())
+        }
         _ => return,
     };
     let marker = if ilm.selected { "*>" } else { "" };
-    let interface = rib.link_name(vrf_ifindex);
     // No forwarding next-hop column — the popped packet is routed in the VRF.
     writeln!(
         buf,
@@ -1727,6 +1737,7 @@ fn write_ilm_entry(
             vrf_ifindex: _,
         } => format!("Mirror Ctx (tbl {:<3})", table_id),
         super::inst::IlmType::Swap => "LU Swap".to_string(),
+        super::inst::IlmType::DecapBd { bd } => format!("EVPN Decap (bd {:<4})", bd),
         // A static ILM (`router static mpls label ...`) is keyed by its
         // incoming label and has no prefix or SID identity to show.
         // (Guessing one from the RIB — any route sharing the gateway —
@@ -1783,6 +1794,7 @@ fn ilm_to_json(
             vrf_ifindex: _,
         } => format!("Mirror Ctx (tbl {})", table_id),
         super::inst::IlmType::Swap => "LU Swap".to_string(),
+        super::inst::IlmType::DecapBd { bd } => format!("EVPN Decap (bd {:<4})", bd),
         // See `write_ilm_entry`: no prefix/SID identity to show.
         super::inst::IlmType::None => "-".to_string(),
     };
