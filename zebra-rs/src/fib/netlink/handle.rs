@@ -954,6 +954,21 @@ impl FibHandle {
         false
     }
 
+    /// Re-tee one selected ILM into a freshly-(re)connected cradle engine.
+    ///
+    /// The cradle branch of [`Self::ilm_install`] is a no-op when the tee is
+    /// not up yet, and unlike IP routes an ILM does not churn afterwards — a
+    /// service label is programmed once, at config load, which is exactly
+    /// when the tee is still connecting. Without this the label FIB stays
+    /// permanently empty for anything installed in that window.
+    pub async fn cradle_ilm_resync(&self, label: u32, ilm: &IlmEntry) -> bool {
+        if self.cradle.is_none() {
+            return false;
+        }
+        self.cradle_ilm_program(label, ilm).await;
+        true
+    }
+
     /// v6 sibling of [`Self::cradle_route_resync_v4`].
     pub async fn cradle_route_resync_v6(
         &self,
@@ -3143,12 +3158,15 @@ impl FibHandle {
         self.ilm_install(label, ilm, true).await;
     }
 
-    async fn ilm_install(&self, label: u32, ilm: &IlmEntry, replace: bool) {
-        // Tee the ILM to the cradle eBPF data plane (mirrors the netlink
-        // install below). DecapVrf/ContextLabel decap to IP in a VRF; every
-        // other type is a swap whose out stack rides the nexthop — an empty
-        // stack is PHP, popped by the data plane on the packet's S bit.
-        // Multi-member ILM ECMP is not teed yet (first member only).
+    /// Tee an ILM to the cradle eBPF data plane. `DecapVrf`/`ContextLabel`
+    /// decap to IP in a VRF, `DecapBd` pops into a bridge domain, and every
+    /// other type is a swap whose out stack rides the nexthop — an empty
+    /// stack is PHP, popped by the data plane on the packet's S bit.
+    /// Multi-member ILM ECMP is not teed yet (first member only).
+    ///
+    /// Split out of [`Self::ilm_install`] so the post-connect resync can
+    /// replay it without re-running the netlink half.
+    async fn cradle_ilm_program(&self, label: u32, ilm: &IlmEntry) {
         if let Some(cradle) = &self.cradle {
             match &ilm.ilm_type {
                 IlmType::DecapVrf { table_id, .. } | IlmType::ContextLabel { table_id, .. } => {
@@ -3206,6 +3224,10 @@ impl FibHandle {
                 }
             }
         }
+    }
+
+    async fn ilm_install(&self, label: u32, ilm: &IlmEntry, replace: bool) {
+        self.cradle_ilm_program(label, ilm).await;
 
         // EVPN-over-MPLS decap is cradle-only. Linux has no action that pops
         // a label and hands the exposed Ethernet frame to a bridge, so there

@@ -4145,8 +4145,20 @@ impl Rib {
                 }
             }
         }
-        if v4 + v6 > 0 {
-            tracing::info!("rib: cradle resync walked {v4} v4 + {v6} v6 installed routes");
+        // ILMs too. Unlike an IP route these do not churn afterwards — a
+        // service label is programmed once, at config load, which is exactly
+        // when the tee is still connecting — so without this walk the label
+        // FIB stays permanently empty for anything installed in that window.
+        let mut ilms = 0usize;
+        for (label, entries) in self.ilm.iter() {
+            if let Some(entry) = entries.iter().find(|e| e.selected)
+                && self.fib_handle.cradle_ilm_resync(*label, entry).await
+            {
+                ilms += 1;
+            }
+        }
+        if v4 + v6 + ilms > 0 {
+            tracing::info!("rib: cradle resync walked {v4} v4 + {v6} v6 routes + {ilms} ILMs");
         }
     }
 
