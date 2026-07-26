@@ -625,6 +625,20 @@ pub enum IlmType {
     /// swap (same path as Node/Adjacency); this variant only labels the
     /// owner for show output and ILM selection.
     Swap,
+    /// EVPN-over-MPLS per-EVI decap (RFC 7432): pop the EVI service label
+    /// and **bridge** the exposed Ethernet frame in bridge domain `bd`. The
+    /// L2 counterpart of [`IlmType::DecapVrf`].
+    ///
+    /// Unlike every other variant this one is **never programmed into the
+    /// kernel** — Linux has no action that pops an MPLS label and hands the
+    /// frame to a bridge, which is exactly why EVPN-over-MPLS L2 was
+    /// previously unsupported. It exists only to be teed to the cradle eBPF
+    /// data plane (`MPLS_OP_POP_L2`), the same way the SRv6 `End.DT2U` /
+    /// `End.DT2M` local SIDs skip netlink because the kernel has no
+    /// seg6local action for them.
+    DecapBd {
+        bd: u32,
+    },
 }
 
 /// All ILM candidates competing for a single incoming label. Mirrors

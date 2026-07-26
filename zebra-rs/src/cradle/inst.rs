@@ -153,6 +153,12 @@ pub struct Cradle {
     /// Stable auto-allocated bd ids, keyed by bridge name so a bridge
     /// keeps its id across ifindex churn.
     bd_alloc: BTreeMap<String, u16>,
+    /// Bridge name → EVI id, from `router bgp afi-safi evpn evi <id>
+    /// bridge <name>` (EVPN over MPLS). Takes precedence over both the
+    /// VXLAN-slave VNI and the auto-allocated id in [`Self::recompute_bds`]:
+    /// the EVI id *is* the bridge domain, so the control plane's `(mac, bd)`
+    /// and the datapath's agree.
+    evi_by_bridge: BTreeMap<String, u16>,
     engine: Option<Engine>,
     /// Last observed engine availability (from [`EngineEvent`]s).
     status: EngineStatus,
@@ -195,6 +201,7 @@ impl Cradle {
             links: HashMap::new(),
             bd_by_ifindex: HashMap::new(),
             bd_alloc: BTreeMap::new(),
+            evi_by_bridge: BTreeMap::new(),
             engine: None,
             status: EngineStatus::default(),
             applied: HashMap::new(),
@@ -257,6 +264,41 @@ impl Cradle {
                         } else {
                             self.if_ebpf.remove(&if_name);
                         }
+                    }
+                    // `router bgp afi-safi evpn evi <id> bridge <name>` — an
+                    // EVPN-over-MPLS instance. Config is broadcast to every
+                    // subscriber, so this arrives here directly and pins the
+                    // bridge's domain id to the EVI, exactly as a VXLAN
+                    // slave's VNI does for the vxlan/srv6 overlays. Without
+                    // it the bridge would take an auto-allocated bd and the
+                    // EVPN tee's `(mac, bd)` would not match the datapath's.
+                    "/router/bgp/afi-safi/evi/bridge" => {
+                        let Some(afi_safi) = args.string() else {
+                            return;
+                        };
+                        if afi_safi != "evpn" {
+                            return;
+                        }
+                        let Some(evi) = args.u32() else { return };
+                        let Some(bridge) = args.string() else { return };
+                        // EVI ids run to 2^24; a bridge domain is a u16. A
+                        // wider EVI simply keeps its auto-allocated bd.
+                        match (msg.op.is_set(), u16::try_from(evi)) {
+                            (true, Ok(bd)) => {
+                                self.evi_by_bridge.insert(bridge, bd);
+                            }
+                            (true, Err(_)) => {
+                                warn!(
+                                    "cradle: evi {evi} on {bridge} exceeds the bridge-domain range; \
+                                     using an auto-allocated id"
+                                );
+                                self.evi_by_bridge.remove(&bridge);
+                            }
+                            (false, _) => {
+                                self.evi_by_bridge.remove(&bridge);
+                            }
+                        }
+                        self.recompute_bds();
                     }
                     _ => {}
                 }
@@ -345,10 +387,12 @@ impl Cradle {
     }
 
     /// Re-derive every bridge's domain id from link state. Preference
-    /// order per bridge: the VNI of a VXLAN slave when it fits a u16
-    /// (EVPN — the ports must land in the same bd the EVPN FDB tee
-    /// programs), else a stable auto-allocated id (smallest unused,
-    /// per bridge name, skipping ids claimed by any known VNI).
+    /// order per bridge: a configured EVI id (EVPN over MPLS — the operator
+    /// named this bridge's instance), else the VNI of a VXLAN slave when it
+    /// fits a u16 (EVPN over VXLAN/SRv6), else a stable auto-allocated id
+    /// (smallest unused, per bridge name, skipping ids claimed by any known
+    /// VNI). The first two exist for the same reason: the ports must land in
+    /// the same bd the EVPN FDB tee programs.
     fn recompute_bds(&mut self) {
         self.bd_by_ifindex.clear();
         let vni_claimed: std::collections::HashSet<u16> = self
@@ -370,7 +414,7 @@ impl Cradle {
                 .find(|l| l.master == Some(ifindex) && l.vni.is_some())
                 .and_then(|l| l.vni)
                 .and_then(|v| u16::try_from(v).ok());
-            let bd = match vni_bd {
+            let bd = match self.evi_by_bridge.get(&name).copied().or(vni_bd) {
                 Some(bd) => bd,
                 None => match self.bd_alloc.get(&name) {
                     Some(bd) => *bd,

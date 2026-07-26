@@ -1957,6 +1957,7 @@ fn fmt_ilm_type(t: &crate::rib::inst::IlmType) -> String {
             format!("Pop Mirror Ctx (table {})", table_id)
         }
         crate::rib::inst::IlmType::Swap => "Swap LU".to_string(),
+        crate::rib::inst::IlmType::DecapBd { bd } => format!("Pop DecapBd (bd {})", bd),
     }
 }
 
