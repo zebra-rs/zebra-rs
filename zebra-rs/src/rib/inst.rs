@@ -698,6 +698,12 @@ fn ilm_distance(rtype: RibType) -> u8 {
 #[derive(Debug, Clone)]
 pub struct MacEntry {
     pub tunnel_endpoint: Option<IpAddr>,
+    /// The remote PE's SRv6 L2 service SID (`End.DT2U`) this MAC sits
+    /// behind, when the route arrived EVPN-over-SRv6 (RFC 9252). Mutually
+    /// exclusive with `tunnel_endpoint`, which carries the VXLAN VTEP of
+    /// an EVPN-over-VXLAN MAC — the encapsulation decides which one the
+    /// route supplies, so exactly one is set on a remote entry.
+    pub srv6_sid: Option<std::net::Ipv6Addr>,
     pub flags: u8,
     pub seq: u32,
     pub installed: bool,
@@ -4351,6 +4357,7 @@ impl Rib {
 
         let entry = MacEntry {
             tunnel_endpoint,
+            srv6_sid,
             flags,
             seq,
             installed: false,

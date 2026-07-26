@@ -1835,10 +1835,28 @@ fn ilm_interface(rib: &Rib, uni: &super::NexthopUni) -> String {
 pub struct MacJson {
     pub vni: u32,
     pub mac: String,
+    /// The overlay destination this MAC sits behind: the remote VTEP for
+    /// an EVPN-over-VXLAN MAC, the remote `End.DT2U` service SID for an
+    /// EVPN-over-SRv6 one. `encap` says which.
     pub tunnel_endpoint: Option<String>,
+    /// `"vxlan"`, `"srv6"`, or `None` for a locally-learned MAC with no
+    /// overlay destination. A bare IPv6 in `tunnel_endpoint` is ambiguous
+    /// on its own — VXLAN runs over an IPv6 underlay too — so the
+    /// encapsulation is stated rather than inferred.
+    pub encap: Option<&'static str>,
     pub flags: String,
     pub seq: u32,
     pub installed: bool,
+}
+
+/// The overlay destination of a MAC table entry, as `(encap, destination)`.
+/// `(None, "-")` for a local entry that has neither.
+fn mac_destination(entry: &crate::rib::inst::MacEntry) -> (Option<&'static str>, String) {
+    match (entry.srv6_sid, entry.tunnel_endpoint) {
+        (Some(sid), _) => (Some("srv6"), sid.to_string()),
+        (None, Some(vtep)) => (Some("vxlan"), vtep.to_string()),
+        (None, None) => (None, "-".to_string()),
+    }
 }
 
 #[derive(Serialize)]
@@ -1846,15 +1864,69 @@ pub struct MacTable {
     pub entries: Vec<MacJson>,
 }
 
+/// Render the MAC table as text. Pure over the table so the column
+/// layout is testable without a live `Rib`.
+fn mac_show_text(
+    mac_table: &std::collections::BTreeMap<(u32, crate::rib::MacAddr), crate::rib::inst::MacEntry>,
+) -> String {
+    let mut buf = String::new();
+
+    if mac_table.is_empty() {
+        writeln!(buf, "No MAC entries").unwrap();
+        return buf;
+    }
+
+    // Add header. "Tunnel Endpoint" holds the VXLAN VTEP or the SRv6
+    // End.DT2U service SID; "Encap" says which, since an IPv6 value
+    // alone does not (VXLAN runs over an IPv6 underlay too).
+    writeln!(
+        buf,
+        "VNI    MAC Address         Encap Tunnel Endpoint       Flags Seq    Installed"
+    )
+    .unwrap();
+    writeln!(
+        buf,
+        "------ ------------------- ----- --------------------- ----- ------ ---------",
+    )
+    .unwrap();
+
+    for ((vni, mac), entry) in mac_table.iter() {
+        let (encap, tunnel_endpoint) = mac_destination(entry);
+        let flags = format_mac_flags(entry.flags);
+        let installed = if entry.installed { "Yes" } else { "No" };
+
+        writeln!(
+            buf,
+            "{:<6} {:<19} {:<5} {:<21} {:<5} {:<6} {}",
+            vni,
+            // `.to_string()` is load-bearing: `MacAddr`'s Display writes
+            // straight to the formatter without honoring its width, so a
+            // bare `mac` renders 17 chars wide and shifts every column
+            // after it out from under its header.
+            mac.to_string(),
+            encap.unwrap_or("-"),
+            tunnel_endpoint,
+            flags,
+            entry.seq,
+            installed
+        )
+        .unwrap();
+    }
+
+    buf
+}
+
 pub fn mac_show(rib: &Rib, _args: Args, json: bool) -> String {
     if json {
         let mut entries = Vec::new();
 
         for ((vni, mac), entry) in rib.mac_table.iter() {
+            let (encap, dest) = mac_destination(entry);
             entries.push(MacJson {
                 vni: *vni,
                 mac: mac.to_string(),
-                tunnel_endpoint: entry.tunnel_endpoint.map(|addr| addr.to_string()),
+                tunnel_endpoint: encap.is_some().then_some(dest),
+                encap,
                 flags: format_mac_flags(entry.flags),
                 seq: entry.seq,
                 installed: entry.installed,
@@ -1865,42 +1937,7 @@ pub fn mac_show(rib: &Rib, _args: Args, json: bool) -> String {
         serde_json::to_string_pretty(&mac_table)
             .unwrap_or_else(|e| format!("{{\"error\": \"Failed to serialize MAC table: {}\"}}", e))
     } else {
-        let mut buf = String::new();
-
-        if rib.mac_table.is_empty() {
-            writeln!(buf, "No MAC entries").unwrap();
-            return buf;
-        }
-
-        // Add header
-        writeln!(
-            buf,
-            "VNI    MAC Address       Tunnel Endpoint       Flags Seq    Installed"
-        )
-        .unwrap();
-        writeln!(
-            buf,
-            "------ ------------------- --------------------- ----- ------ ---------",
-        )
-        .unwrap();
-
-        for ((vni, mac), entry) in rib.mac_table.iter() {
-            let tunnel_endpoint = entry
-                .tunnel_endpoint
-                .map(|addr| addr.to_string())
-                .unwrap_or_else(|| "-".to_string());
-            let flags = format_mac_flags(entry.flags);
-            let installed = if entry.installed { "Yes" } else { "No" };
-
-            writeln!(
-                buf,
-                "{:<6} {:<19} {:<21} {:<5} {:<6} {}",
-                vni, mac, tunnel_endpoint, flags, entry.seq, installed
-            )
-            .unwrap();
-        }
-
-        buf
+        mac_show_text(&rib.mac_table)
     }
 }
 
@@ -2332,6 +2369,108 @@ mod tests {
             segs,
             ..Default::default()
         }
+    }
+
+    fn mac_entry(
+        tunnel_endpoint: Option<IpAddr>,
+        srv6_sid: Option<Ipv6Addr>,
+    ) -> crate::rib::inst::MacEntry {
+        crate::rib::inst::MacEntry {
+            tunnel_endpoint,
+            srv6_sid,
+            flags: 0,
+            seq: 0,
+            installed: false,
+        }
+    }
+
+    /// An EVPN-over-SRv6 MAC shows the remote End.DT2U service SID as its
+    /// destination; an EVPN-over-VXLAN one shows the VTEP. Both used to
+    /// render from `tunnel_endpoint` alone, so an SRv6 MAC — which never
+    /// sets it — displayed a bare "-" with the SID nowhere in the output.
+    #[test]
+    fn mac_destination_distinguishes_srv6_sid_from_vxlan_vtep() {
+        let sid: Ipv6Addr = "fcbb:bbbb:2:e000::".parse().unwrap();
+        assert_eq!(
+            mac_destination(&mac_entry(None, Some(sid))),
+            (Some("srv6"), "fcbb:bbbb:2:e000::".to_string())
+        );
+
+        let vtep: IpAddr = "10.1.1.1".parse().unwrap();
+        assert_eq!(
+            mac_destination(&mac_entry(Some(vtep), None)),
+            (Some("vxlan"), "10.1.1.1".to_string())
+        );
+    }
+
+    /// A VXLAN VTEP over an IPv6 underlay is an IPv6 address too, so the
+    /// encapsulation cannot be inferred from the destination's family —
+    /// this is why the encap is carried explicitly rather than guessed.
+    #[test]
+    fn mac_destination_v6_vtep_is_not_mistaken_for_a_sid() {
+        let vtep: IpAddr = "2001:db8::1".parse().unwrap();
+        assert_eq!(
+            mac_destination(&mac_entry(Some(vtep), None)),
+            (Some("vxlan"), "2001:db8::1".to_string())
+        );
+    }
+
+    /// A locally-learned MAC has no overlay destination at all: no encap,
+    /// and the placeholder the table has always shown.
+    #[test]
+    fn mac_destination_local_entry_has_no_encap() {
+        assert_eq!(mac_destination(&mac_entry(None, None)), (None, "-".into()));
+    }
+
+    /// The rendered table puts every column under its own header — the
+    /// header row and the separator row must agree with the row format,
+    /// which they did not before the Encap column was added.
+    #[test]
+    fn mac_show_text_columns_line_up_under_their_headers() {
+        use crate::rib::MacAddr;
+        let mut table = std::collections::BTreeMap::new();
+        table.insert(
+            (10u32, "02:00:00:00:00:02".parse::<MacAddr>().unwrap()),
+            mac_entry(None, Some("fcbb:bbbb:2:e000::".parse().unwrap())),
+        );
+        table.insert(
+            (5000u32, "00:11:22:33:44:55".parse::<MacAddr>().unwrap()),
+            mac_entry(Some("10.1.1.1".parse().unwrap()), None),
+        );
+
+        let out = mac_show_text(&table);
+        let lines: Vec<&str> = out.lines().collect();
+        assert_eq!(lines.len(), 4, "header + separator + 2 rows:\n{out}");
+
+        // The separator row is the column ruler: each dash run marks one
+        // column, so every header label and every cell must start at the
+        // offset of its own run.
+        let starts: Vec<usize> = lines[1]
+            .match_indices("-")
+            .filter(|(i, _)| *i == 0 || lines[1].as_bytes()[i - 1] == b' ')
+            .map(|(i, _)| i)
+            .collect();
+        assert_eq!(starts.len(), 7, "seven columns: {:?}", starts);
+
+        for (col, &at) in starts.iter().enumerate() {
+            for line in [lines[0], lines[2], lines[3]] {
+                assert!(
+                    at == 0 || line.as_bytes()[at - 1] == b' ',
+                    "column {col} at offset {at} is not delimited in {line:?}"
+                );
+                assert_ne!(
+                    line.as_bytes()[at],
+                    b' ',
+                    "column {col} at offset {at} is empty in {line:?}"
+                );
+            }
+        }
+
+        // And the SRv6 row carries the SID, under Encap "srv6".
+        assert!(
+            lines[2].contains("srv6") && lines[2].contains("fcbb:bbbb:2:e000::"),
+            "SRv6 row:\n{out}"
+        );
     }
 
     #[test]

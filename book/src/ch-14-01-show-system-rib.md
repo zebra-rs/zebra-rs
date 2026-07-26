@@ -200,20 +200,27 @@ JSON: `{ "entries": [ { "protocol", "distance", "selected",
 
 ### `show l2 mac table`
 
-The EVPN MAC table — one entry per (VNI, MAC), with the remote VTEP
-(tunnel endpoint), the entry flags, its sequence number, and whether it
-is installed in the data plane. This is the control-plane view of the
-MACs EVPN has learned, keyed by VNI.
+The EVPN MAC table — one entry per (VNI, MAC), with the overlay
+destination the MAC sits behind, the entry flags, its sequence number,
+and whether it is installed in the data plane. This is the
+control-plane view of the MACs EVPN has learned, keyed by VNI.
+
+The destination depends on the encapsulation the route arrived with:
+the remote VTEP for EVPN-over-VXLAN, or the remote PE's `End.DT2U`
+service SID for EVPN-over-SRv6 (RFC 9252). `Encap` states which — an
+IPv6 destination alone is ambiguous, since VXLAN also runs over an IPv6
+underlay. A locally-learned MAC has neither and shows `-`.
 
 ```
 r1> show l2 mac table
-VNI    MAC Address        Tunnel Endpoint  Flags  Seq  Installed
-5000   00:11:22:33:44:55  10.1.1.1         R      0    Yes
-5001   aa:bb:cc:dd:ee:ff  10.2.2.1         R      2    Yes
+VNI    MAC Address         Encap Tunnel Endpoint       Flags Seq    Installed
+5000   00:11:22:33:44:55   vxlan 10.1.1.1              R     0      Yes
+5001   aa:bb:cc:dd:ee:ff   vxlan 10.2.2.1              R     2      Yes
+10     02:00:00:00:00:02   srv6  fcbb:bbbb:2:e000::    R     0      Yes
 ```
 
-JSON: `{ "entries": [ { "vni", "mac", "tunnel_endpoint", "flags",
-"seq", "installed" } ] }`.
+JSON: `{ "entries": [ { "vni", "mac", "tunnel_endpoint", "encap",
+"flags", "seq", "installed" } ] }`.
 
 ### `show l2 neighbor`
 
