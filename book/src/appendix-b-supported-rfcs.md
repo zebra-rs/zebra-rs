@@ -169,7 +169,7 @@ implementation; the corresponding features track the referenced draft revision.
 
 | RFC / Internet-Draft | Description |
 | --- | --- |
-| RFC 7432 | BGP MPLS-Based Ethernet VPN (EVPN) — the base control plane. |
+| RFC 7432 | BGP MPLS-Based Ethernet VPN (EVPN) — the base control plane, and MPLS-encapsulated L2 forwarding (Type-2 / Type-3) over the cradle eBPF data plane. |
 | RFC 8365 | A Network Virtualization Overlay Solution Using EVPN (EVPN over VXLAN). |
 | RFC 9136 | IP Prefix Advertisement in EVPN (Type-5 routes). |
 | RFC 8584 | Framework for EVPN Designated Forwarder (DF) Election Extensibility. |
