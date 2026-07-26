@@ -1,0 +1,84 @@
+# z2 — mirror of z1. Imports z1's Type-5 routes by route-target match and
+# must H.Encaps CE traffic toward z1's End.DT46 SID for both AFIs, proving
+# the Type-5 receive path reuses the VPNv4/VPNv6 SRv6 dataplane.
+vrf:
+- name: vrf-cust
+  ipv4:
+    route-target:
+      import:
+      - 65001:100
+      export:
+      - 65001:100
+  ipv6:
+    route-target:
+      import:
+      - 65001:100
+      export:
+      - 65001:100
+interface:
+- if-name: lo
+  ipv6:
+    address: 2001:db8::2/128
+- if-name: z2-z1
+  ipv6:
+    address: 2001:db8:0:12::2/64
+- if-name: ce2
+  vrf: vrf-cust
+  ipv4:
+    address: 10.2.2.1/24
+  ipv6:
+    address: 2001:db8:b::1/64
+segment-routing:
+  locator:
+  - name: LOC2
+    prefix: fcbb:bbbb:2::/48
+    behavior: usid
+router:
+  isis:
+    net: 49.0000.0000.0000.0002.00
+    hostname: z2
+    is-type: level-2-only
+    segment-routing:
+      srv6:
+        locator: LOC2
+    interface:
+    - if-name: lo
+      ipv6:
+        enabled: true
+    - if-name: z2-z1
+      network-type: point-to-point
+      metric: 1
+      ipv6:
+        enabled: true
+  bgp:
+    global:
+      as: 65001
+      router-id: 10.0.0.2
+    timer:
+      adv-interval:
+        ibgp: 1
+    segment-routing:
+      srv6:
+        locator: LOC2
+    neighbor:
+    - remote-address: 2001:db8::1
+      remote-as: 65001
+      update-source: 2001:db8::2
+      enabled: true
+      afi-safi:
+      - name: evpn
+        enabled: true
+    vrf:
+    - name: vrf-cust
+      rd: 65001:200
+      encapsulation: srv6
+      evpn:
+        advertise-ipv4: true
+        advertise-ipv6: true
+      afi-safi:
+        ipv4:
+          network:
+          - prefix: 10.2.2.0/24
+        ipv6:
+          network:
+          - prefix: 2001:db8:b::/64
