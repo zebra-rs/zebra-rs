@@ -473,14 +473,20 @@ fn show_lcom(attr: &BgpAttr) -> String {
 }
 
 /// Human-readable name for an SRv6 endpoint-behavior codepoint (IANA
-/// "SRv6 Endpoint Behaviors", RFC 8986). Only the L3-service decap
-/// behaviors that ride a BGP Prefix-SID SRv6 L3 Service TLV are named;
-/// any other codepoint renders as its hex value.
+/// "SRv6 Endpoint Behaviors", RFC 8986). Only the service decap
+/// behaviors that ride a BGP Prefix-SID SRv6 Service TLV are named — the
+/// L3 ones (RFC 9252 L3VPN / EVPN Type-5) and the L2 ones (RFC 9252
+/// EVPN-over-SRv6 bridging and VPWS); any other codepoint renders as its
+/// hex value.
 fn srv6_behavior_name(behavior: u16) -> String {
     match behavior {
         SRV6_BEHAVIOR_END_DT6 => "End.DT6".to_string(),
         SRV6_BEHAVIOR_END_DT4 => "End.DT4".to_string(),
         SRV6_BEHAVIOR_END_DT46 => "End.DT46".to_string(),
+        SRV6_BEHAVIOR_END_DX2 => "End.DX2".to_string(),
+        SRV6_BEHAVIOR_END_DX2V => "End.DX2V".to_string(),
+        SRV6_BEHAVIOR_END_DT2U => "End.DT2U".to_string(),
+        SRV6_BEHAVIOR_END_DT2M => "End.DT2M".to_string(),
         other => format!("0x{:04x}", other),
     }
 }
@@ -669,16 +675,50 @@ struct EvpnRouteJson {
     attrs: CommonRouteAttrs,
     #[serde(skip_serializing_if = "Option::is_none")]
     extended_communities: Option<String>,
+    /// SRv6 service SIDs (RFC 9252) carried in the Prefix-SID attribute,
+    /// L2 Service TLV before L3. Omitted entirely on an MPLS-encapsulated
+    /// route, which carries none.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    srv6_sids: Vec<Srv6ServiceSidJson>,
+}
+
+/// One SRv6 service SID on an EVPN route: the SID itself, its decoded
+/// endpoint behavior, and which service TLV carried it.
+#[derive(Serialize)]
+struct Srv6ServiceSidJson {
+    sid: String,
+    behavior: String,
+    /// `"l2"` (End.DT2U / End.DT2M / End.DX2 / End.DX2V) or `"l3"`
+    /// (End.DT4 / End.DT6 / End.DT46).
+    service: &'static str,
+    /// True when we originated the route, i.e. the SID is ours to decap
+    /// rather than a remote PE's to encap toward.
+    local: bool,
 }
 
 fn evpn_route_json(rd: &RouteDistinguisher, prefix: &EvpnPrefix, rib: &BgpRib) -> EvpnRouteJson {
     let ecom = show_evpn_ecom(&rib.attr);
+    let local = rib.is_originated();
+    let sid_json = |service| {
+        move |(sid, behavior): (std::net::Ipv6Addr, u16)| Srv6ServiceSidJson {
+            sid: sid.to_string(),
+            behavior: srv6_behavior_name(behavior),
+            service,
+            local,
+        }
+    };
     EvpnRouteJson {
         route_distinguisher: rd.to_string(),
         route_type: prefix.route_type(),
         prefix: prefix.to_string(),
         attrs: common_route_attrs(rib),
         extended_communities: (!ecom.is_empty()).then_some(ecom),
+        srv6_sids: rib
+            .attr
+            .srv6_l2_sids()
+            .map(sid_json("l2"))
+            .chain(rib.attr.srv6_l3_sids().map(sid_json("l3")))
+            .collect(),
     }
 }
 
@@ -1474,7 +1514,7 @@ fn show_adj_rib_routes_evpn<D: RibDirection>(
                     nexthop, med, local_pref, weight, aspath, origin
                 )?;
 
-                write_evpn_path_attrs(&mut buf, &rib.attr)?;
+                write_evpn_path_attrs(&mut buf, &rib.attr, rib.is_originated())?;
             }
         }
     }
@@ -3992,8 +4032,25 @@ fn format_pmsi_tunnel(p: &PmsiTunnel) -> String {
 ///   rendered together on one line as in the unicast detail view.
 /// - Aggregation (RFC 4271): Atomic-Aggregate flag and Aggregator AS/IP.
 /// - Accumulated IGP metric (RFC 7311).
-fn write_evpn_path_attrs(buf: &mut String, attr: &BgpAttr) -> std::fmt::Result {
+fn write_evpn_path_attrs(buf: &mut String, attr: &BgpAttr, originated: bool) -> std::fmt::Result {
     const PAD: &str = "                    ";
+
+    // SRv6 service SIDs (RFC 9252), printed first so they sit directly
+    // under the next-hop line — they *are* the forwarding instruction for
+    // an EVPN-over-SRv6 route, the way the label is for EVPN-over-MPLS.
+    // L2 Service TLV first (End.DT2U on a Type-2, End.DT2M on a Type-3,
+    // End.DX2/End.DX2V on a VPWS Type-1), then the L3 Service TLV
+    // (End.DT46 on a Type-5, or the routing half of a symmetric-IRB
+    // Type-2). "Local" when we originated the route — the SID is ours to
+    // decap; "Remote" when a peer did.
+    let kind = if originated {
+        "Local SID"
+    } else {
+        "Remote SID"
+    };
+    for (sid, behavior) in attr.srv6_l2_sids().chain(attr.srv6_l3_sids()) {
+        writeln!(buf, "{PAD}{kind}: {sid} ({})", srv6_behavior_name(behavior))?;
+    }
 
     let ecom = show_evpn_ecom(attr);
     if !ecom.is_empty() {
@@ -4181,7 +4238,7 @@ fn show_bgp_evpn(
             // route-reflection attrs (RFC 4456: Originator / Cluster list),
             // aggregation (RFC 4271), and AIGP (RFC 7311). Lines are emitted
             // only when the attribute is present.
-            write_evpn_path_attrs(&mut buf, &rib.attr)?;
+            write_evpn_path_attrs(&mut buf, &rib.attr, rib.is_originated())?;
 
             // Line 4 (Type-9 only): RFC 9572 §5.3.1 inter-AS DF election among
             // the ASBRs advertising this region's Per-Region I-PMSI.
@@ -5227,7 +5284,7 @@ mod evpn_show_tests {
         };
 
         let mut buf = String::new();
-        write_evpn_path_attrs(&mut buf, &attr).unwrap();
+        write_evpn_path_attrs(&mut buf, &attr, false).unwrap();
 
         let pad = " ".repeat(20);
         let expected = format!(
@@ -5252,7 +5309,7 @@ mod evpn_show_tests {
         };
 
         let mut buf = String::new();
-        write_evpn_path_attrs(&mut buf, &attr).unwrap();
+        write_evpn_path_attrs(&mut buf, &attr, false).unwrap();
 
         let pad = " ".repeat(20);
         assert_eq!(
@@ -5274,7 +5331,7 @@ mod evpn_show_tests {
         };
 
         let mut buf = String::new();
-        write_evpn_path_attrs(&mut buf, &attr).unwrap();
+        write_evpn_path_attrs(&mut buf, &attr, false).unwrap();
 
         let pad = " ".repeat(20);
         assert_eq!(buf, format!("{pad}Cluster list: 10.0.0.2\n"));
@@ -5294,7 +5351,7 @@ mod evpn_show_tests {
         };
 
         let mut buf = String::new();
-        write_evpn_path_attrs(&mut buf, &attr).unwrap();
+        write_evpn_path_attrs(&mut buf, &attr, false).unwrap();
 
         let pad = " ".repeat(20);
         let expected = format!(
@@ -5307,12 +5364,120 @@ mod evpn_show_tests {
 
     /// A path with none of the surfaced attributes adds no lines — callers
     /// print the route's status/prefix line regardless, keeping the table
-    /// tight.
+    /// tight. In particular an EVPN-over-MPLS route carries no Prefix-SID,
+    /// so the SRv6 lines must stay absent rather than render a placeholder.
     #[test]
     fn write_path_attrs_empty_attr_writes_nothing() {
         let mut buf = String::new();
-        write_evpn_path_attrs(&mut buf, &BgpAttr::default()).unwrap();
+        write_evpn_path_attrs(&mut buf, &BgpAttr::default(), false).unwrap();
         assert!(buf.is_empty());
+    }
+
+    /// A received Type-3 IMET carrying an SRv6 L2 Service TLV (RFC 9252)
+    /// shows the End.DT2M SID as a "Remote SID" line, before the extended
+    /// communities and directly under the caller's next-hop line.
+    #[test]
+    fn write_path_attrs_renders_remote_l2_service_sid() {
+        let attr = BgpAttr {
+            prefix_sid: Some(super::super::inst::srv6_l2_service_prefix_sid(
+                "fcbb:bbbb:2:e000::".parse().unwrap(),
+                None,
+                SRV6_BEHAVIOR_END_DT2M,
+            )),
+            ecom: Some(ExtCommunity::from([ExtCommunityValue {
+                high_type: 0x00,
+                low_type: 0x02,
+                val: [0xfd, 0xe9, 0x00, 0x00, 0x00, 0x0a], // RT:65001:10
+            }])),
+            ..Default::default()
+        };
+
+        let mut buf = String::new();
+        write_evpn_path_attrs(&mut buf, &attr, false).unwrap();
+
+        let pad = " ".repeat(20);
+        assert_eq!(
+            buf,
+            format!(
+                "{pad}Remote SID: fcbb:bbbb:2:e000:: (End.DT2M)\n\
+                 {pad}Extended community: RT:65001:10\n"
+            )
+        );
+    }
+
+    /// The same TLV on a route we originated is labelled "Local SID" — it
+    /// is our own decap SID, not a remote PE's to encapsulate toward. Every
+    /// L2 behavior decodes by name (End.DT2U bridging, End.DX2/DX2V VPWS).
+    #[test]
+    fn write_path_attrs_labels_originated_l2_sid_local() {
+        for (behavior, name) in [
+            (SRV6_BEHAVIOR_END_DT2U, "End.DT2U"),
+            (SRV6_BEHAVIOR_END_DT2M, "End.DT2M"),
+            (SRV6_BEHAVIOR_END_DX2, "End.DX2"),
+            (SRV6_BEHAVIOR_END_DX2V, "End.DX2V"),
+        ] {
+            let attr = BgpAttr {
+                prefix_sid: Some(super::super::inst::srv6_l2_service_prefix_sid(
+                    "fcbb:bbbb:1:e001::".parse().unwrap(),
+                    None,
+                    behavior,
+                )),
+                ..Default::default()
+            };
+
+            let mut buf = String::new();
+            write_evpn_path_attrs(&mut buf, &attr, true).unwrap();
+
+            let pad = " ".repeat(20);
+            assert_eq!(
+                buf,
+                format!("{pad}Local SID: fcbb:bbbb:1:e001:: ({name})\n")
+            );
+        }
+    }
+
+    /// A symmetric-IRB Type-2 carries both service TLVs: the L2 SID that
+    /// bridges within the VNI and the L3 SID that routes between them.
+    /// Both render, L2 first — the order the wire and the encap stack use.
+    #[test]
+    fn write_path_attrs_renders_both_l2_and_l3_service_sids() {
+        let attr = BgpAttr {
+            prefix_sid: Some(PrefixSid {
+                tlvs: vec![
+                    PrefixSidTlv::Srv6L2Service(Srv6ServiceTlv {
+                        sids: vec![Srv6SidInfo::new(
+                            "fcbb:bbbb:2:e000::".parse().unwrap(),
+                            0,
+                            SRV6_BEHAVIOR_END_DT2U,
+                            None,
+                        )],
+                        ..Default::default()
+                    }),
+                    PrefixSidTlv::Srv6L3Service(Srv6ServiceTlv {
+                        sids: vec![Srv6SidInfo::new(
+                            "fcbb:bbbb:2:40::".parse().unwrap(),
+                            0,
+                            SRV6_BEHAVIOR_END_DT46,
+                            None,
+                        )],
+                        ..Default::default()
+                    }),
+                ],
+            }),
+            ..Default::default()
+        };
+
+        let mut buf = String::new();
+        write_evpn_path_attrs(&mut buf, &attr, false).unwrap();
+
+        let pad = " ".repeat(20);
+        assert_eq!(
+            buf,
+            format!(
+                "{pad}Remote SID: fcbb:bbbb:2:e000:: (End.DT2U)\n\
+                 {pad}Remote SID: fcbb:bbbb:2:40:: (End.DT46)\n"
+            )
+        );
     }
 }
 
