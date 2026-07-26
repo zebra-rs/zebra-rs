@@ -2642,6 +2642,9 @@ struct VpwsServiceJson {
     mtu: Option<u16>,
     local_sid: Option<String>,
     remote_sid: Option<String>,
+    remote_pe: Option<String>,
+    remote_is_backup: bool,
+    remote_count: usize,
     remote_mtu_mismatch: Option<u16>,
     ethernet_segment: Option<String>,
     ethernet_segment_binding: Option<String>,
@@ -2690,6 +2693,9 @@ fn show_bgp_evpn_vpws(
                 mtu: svc.mtu,
                 local_sid: vpws.sids.get(name).map(|(addr, _)| addr.to_string()),
                 remote_sid: svc.remote_sid.map(|sid| sid.to_string()),
+                remote_pe: svc.remote_pe.map(|pe| pe.to_string()),
+                remote_is_backup: svc.remote_is_backup,
+                remote_count: svc.remote_count,
                 remote_mtu_mismatch: svc.remote_mtu_mismatch,
                 // The *effective* segment, however it was bound — a JSON
                 // consumer wants what the service is on, not what was typed.
@@ -2809,7 +2815,24 @@ fn show_bgp_evpn_vpws(
             writeln!(buf, "  Local SID ({behavior}): {sid}")?;
         }
         if let Some(sid) = svc.remote_sid {
-            writeln!(buf, "  Remote SID: {sid}")?;
+            // Which PE won, and whether the service is running on the
+            // segment's standby rather than its primary — on a multihomed
+            // far end that is the difference between converged and failed
+            // over.
+            let via = match svc.remote_pe {
+                Some(pe) if svc.remote_is_backup => format!(" (via {pe}, backup)"),
+                Some(pe) => format!(" (via {pe})"),
+                None => String::new(),
+            };
+            writeln!(buf, "  Remote SID: {sid}{via}")?;
+            if svc.remote_count > 1 {
+                writeln!(
+                    buf,
+                    "  Remote endpoints: {} (multihomed; {} standing by)",
+                    svc.remote_count,
+                    svc.remote_count - 1
+                )?;
+            }
         }
         if let Some(remote_mtu) = svc.remote_mtu_mismatch {
             writeln!(buf, "  Remote MTU (mismatch): {remote_mtu}")?;

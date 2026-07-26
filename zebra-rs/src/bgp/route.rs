@@ -20,6 +20,7 @@ use super::peer_map::PeerMap;
 use super::shard::msg::{ShardUpdateV4, ShardUpdateV6};
 use super::shard::{ShardMsg, ShardOut};
 use super::timer::{start_adv_timer_vpnv4, start_adv_timer_vpnv6};
+use super::vpws::{VpwsRemote, VpwsSelection, ZERO_ESI};
 use super::{AssistedReplicationRole, Bgp, EvpnBumTunnel, InOut, Message};
 
 pub const ORIGINATED_PEER: usize = usize::MAX;
@@ -7167,6 +7168,200 @@ fn evpn_vpws_sid(attr: &BgpAttr) -> Option<std::net::Ipv6Addr> {
         .or_else(|| evpn_srv6_sid(attr, bgp_packet::SRV6_BEHAVIOR_END_DX2V))
 }
 
+/// The PEs currently advertising a live per-ES Ethernet A-D route
+/// (`[1]:[esi]:[MAX-ET]`) for `esi` — the RFC 7432 §8.2 liveness signal a
+/// multihomed PE keeps up for as long as its segment is usable.
+///
+/// Withdrawing that one route is the **mass withdraw**: it invalidates every
+/// per-EVI Type-1 that PE advertised on the segment at once, without waiting
+/// for each to be withdrawn individually. Because selection re-derives this
+/// set from the Loc-RIB on every pass, honouring the mass withdraw needs no
+/// state of its own — the routes simply stop being candidates.
+fn vpws_es_live_pes(local_rib: &LocalRib, esi: &[u8; 10]) -> BTreeSet<IpAddr> {
+    let mut live = BTreeSet::new();
+    for table in local_rib.evpn.values() {
+        for (prefix, rib) in table.selected.iter() {
+            if let EvpnPrefix::EthernetAd { esi: e, eth_tag } = prefix
+                && eth_tag == &MAX_ET
+                && e == esi
+                && rib.typ != BgpRibType::Originated
+                && let Some(BgpNexthop::Evpn(nh)) = rib.attr.nexthop
+            {
+                live.insert(nh);
+            }
+        }
+    }
+    live
+}
+
+/// Every remote endpoint advertised for VPWS service instance `remote_id`
+/// within `evi`: the non-originated per-EVI Type-1s carrying an
+/// `End.DX2`/`End.DX2V` SID, with their ESI, advertising PE and RFC 8214
+/// §3.1 P/B bits.
+///
+/// A candidate on a **non-zero** ESI is dropped unless its PE also has a
+/// live per-ES A-D for that segment — that is the mass-withdraw gate. A
+/// single-homed (all-zero ESI) remote has no per-ES A-D to check, so it is
+/// never gated: requiring one would break every plain point-to-point peer.
+fn vpws_gather_remotes(local_rib: &LocalRib, evi: u32, remote_id: u32) -> Vec<VpwsRemote> {
+    if remote_id == MAX_ET {
+        // MAX-ET tags per-ES A-D routes, never a VPWS service instance.
+        return Vec::new();
+    }
+    let mut out: Vec<VpwsRemote> = Vec::new();
+    let mut live_cache: BTreeMap<[u8; 10], BTreeSet<IpAddr>> = BTreeMap::new();
+    for table in local_rib.evpn.values() {
+        for (prefix, rib) in table.selected.iter() {
+            let EvpnPrefix::EthernetAd { esi, eth_tag } = prefix else {
+                continue;
+            };
+            if *eth_tag != remote_id
+                || rib.typ == BgpRibType::Originated
+                || extract_vni_from_attr(&rib.attr) != Some(evi)
+            {
+                continue;
+            }
+            let Some(sid) = evpn_vpws_sid(&rib.attr) else {
+                // A Type-1 without an End.DX2/DX2V L2-Service SID (e.g. an
+                // RFC 9572 A-D form) has no SRv6 dataplane binding.
+                continue;
+            };
+            let Some(BgpNexthop::Evpn(originator)) = rib.attr.nexthop else {
+                continue;
+            };
+            if *esi != ZERO_ESI {
+                let live = live_cache
+                    .entry(*esi)
+                    .or_insert_with(|| vpws_es_live_pes(local_rib, esi));
+                if !live.contains(&originator) {
+                    continue;
+                }
+            }
+            let l2 = rib
+                .attr
+                .ecom
+                .as_ref()
+                .and_then(|ecom| ecom.0.iter().find_map(|v| v.as_l2_attr()));
+            out.push(VpwsRemote {
+                sid,
+                mtu: l2.map(|a| a.mtu).unwrap_or(0),
+                esi: *esi,
+                originator,
+                primary: l2.is_some_and(|a| a.primary),
+                backup: l2.is_some_and(|a| a.backup),
+            });
+        }
+    }
+    out
+}
+
+/// Re-select and re-bind the remote end of every named VPWS service.
+///
+/// This is the single place a service's AC binding is decided. The receive
+/// path (a Type-1 arriving or being withdrawn), the per-ES A-D mass
+/// withdraw, and the config path all funnel through it, so an event that
+/// removes the current remote *re-selects* rather than merely unbinding —
+/// which is what makes primary→backup failover work. It needs only
+/// `LocalRib` and the RIB client, so it runs unchanged from the `BgpTop`
+/// receive path and from the full `Bgp`.
+fn vpws_rebind(local_rib: &mut LocalRib, rib_client: &crate::rib::client::RibClient, name: &str) {
+    let Some(svc) = local_rib.evpn_vpws.services.get(name) else {
+        return;
+    };
+    let cached = svc.remote_sid;
+    let ifname = svc.interface.clone();
+    let (vid, table) = svc.vid_table();
+    let local_mtu = svc.mtu;
+    let selection = match svc.params() {
+        Some((evi, _, remote_id, _)) => {
+            super::vpws::select_remote(vpws_gather_remotes(local_rib, evi, remote_id), local_mtu)
+        }
+        None => VpwsSelection::None,
+    };
+    let local_sid = local_rib.evpn_vpws.sids.get(name).map(|(a, _)| *a);
+
+    let Some(svc) = local_rib.evpn_vpws.services.get_mut(name) else {
+        return;
+    };
+    match selection {
+        VpwsSelection::Bound { remote, usable } => {
+            svc.remote_sid = Some(remote.sid);
+            svc.remote_mtu_mismatch = None;
+            svc.remote_pe = Some(remote.originator);
+            svc.remote_is_backup = remote.esi != ZERO_ESI && !remote.primary && remote.backup;
+            svc.remote_count = usable;
+            if let Some(ifname) = ifname {
+                let _ = rib_client.send(rib::Message::XconnectAdd {
+                    ifname,
+                    remote_sid: remote.sid,
+                    local_sid,
+                    vid,
+                    table,
+                });
+            }
+        }
+        VpwsSelection::MtuMismatch(mtu) => {
+            svc.remote_sid = None;
+            svc.remote_mtu_mismatch = Some(mtu);
+            svc.remote_pe = None;
+            svc.remote_is_backup = false;
+            svc.remote_count = 0;
+            if cached.is_some()
+                && let Some(ifname) = ifname
+            {
+                let _ = rib_client.send(rib::Message::XconnectDel {
+                    ifname,
+                    local_sid,
+                    vid,
+                    table,
+                });
+            }
+        }
+        VpwsSelection::None => {
+            svc.remote_sid = None;
+            svc.remote_mtu_mismatch = None;
+            svc.remote_pe = None;
+            svc.remote_is_backup = false;
+            svc.remote_count = 0;
+            if cached.is_some()
+                && let Some(ifname) = ifname
+            {
+                let _ = rib_client.send(rib::Message::XconnectDel {
+                    ifname,
+                    local_sid,
+                    vid,
+                    table,
+                });
+            }
+        }
+    }
+}
+
+/// Re-select every VPWS service whose remote candidates could have moved.
+///
+/// `scope` limits the sweep: a per-EVI Type-1 event only affects services
+/// with that `(evi, service instance)`, while a per-ES A-D event can
+/// invalidate candidates for any service, so it re-selects all of them.
+fn vpws_rebind_scope(
+    local_rib: &mut LocalRib,
+    rib_client: &crate::rib::client::RibClient,
+    scope: Option<(u32, u32)>,
+) {
+    let names: Vec<String> = local_rib
+        .evpn_vpws
+        .services
+        .iter()
+        .filter(|(_, svc)| match scope {
+            Some((evi, eth_tag)) => svc.evi == Some(evi) && svc.remote_service_id == Some(eth_tag),
+            None => true,
+        })
+        .map(|(name, _)| name.clone())
+        .collect();
+    for name in names {
+        vpws_rebind(local_rib, rib_client, &name);
+    }
+}
+
 /// Mark every VPWS service sitting on Ethernet Segment `esi` as needing a DF
 /// re-election, for `Bgp::vpws_df_drain` to pick up. Called from the Type-4
 /// install and withdraw arms, which see only `LocalRib`.
@@ -7179,16 +7374,6 @@ pub(super) fn vpws_mark_df_dirty(local_rib: &mut LocalRib, esi: &[u8; 10]) {
         .map(|(name, _)| name.clone())
         .collect();
     local_rib.evpn_vpws.df_dirty.extend(names);
-}
-
-/// The L2 MTU from an EVPN route's Layer-2 Attributes EC (RFC 8214 §3.1).
-/// 0 when the EC is absent or carries no MTU — either way, no MTU check.
-fn evpn_l2_attr_mtu(attr: &BgpAttr) -> u16 {
-    attr.ecom
-        .as_ref()
-        .and_then(|ecom| ecom.0.iter().find_map(|v| v.as_l2_attr()))
-        .map(|a| a.mtu)
-        .unwrap_or(0)
 }
 
 /// The Router's MAC of a received EVPN route (RFC 9135 §6): the advertising
@@ -7313,33 +7498,23 @@ fn route_evpn_export_selected(
                     });
                 }
             }
-            // A withdrawn per-EVI Type-1 (RFC 8214): the remote end of a
-            // VPWS E-Line went away — unbind the AC cross-connect of every
-            // service that had matched it. Per-ES A-D (eth-tag MAX-ET) and
-            // our own originations don't bind anything.
+            // A withdrawn Ethernet A-D route. For a **per-EVI** one the
+            // remote end of an E-Line went away; for a **per-ES** one
+            // (MAX-ET) the RFC 7432 §8.2 mass withdraw just invalidated
+            // every endpoint that PE advertised on the segment at once.
+            //
+            // Both re-select rather than unbind: if the far end is
+            // multihomed, losing the primary must fail the service over to
+            // the backup, not tear it down. `vpws_rebind` unbinds only when
+            // the re-scan genuinely finds nothing usable.
             EvpnPrefix::EthernetAd { eth_tag, .. } => {
-                if *eth_tag != MAX_ET
-                    && wd.typ != BgpRibType::Originated
-                    && let Some(evi) = extract_vni_from_attr(&wd.attr)
-                {
-                    let vpws = &mut bgp.local_rib.evpn_vpws;
-                    for (name, svc) in vpws.services.iter_mut() {
-                        if svc.remote_service_id != Some(*eth_tag) || svc.evi != Some(evi) {
-                            continue;
-                        }
-                        svc.remote_sid = None;
-                        svc.remote_mtu_mismatch = None;
-                        if let Some(ifname) = svc.interface.clone() {
-                            let local_sid = vpws.sids.get(name).map(|(a, _)| *a);
-                            let (vid, table) = svc.vid_table();
-                            let _ = bgp.rib_client.send(rib::Message::XconnectDel {
-                                ifname,
-                                local_sid,
-                                vid,
-                                table,
-                            });
-                        }
-                    }
+                let scope = if *eth_tag == MAX_ET {
+                    None
+                } else {
+                    extract_vni_from_attr(&wd.attr).map(|evi| (evi, *eth_tag))
+                };
+                if *eth_tag == MAX_ET || scope.is_some() {
+                    vpws_rebind_scope(bgp.local_rib, bgp.rib_client, scope);
                 }
             }
             // A withdrawn Type-4: a PE left the Ethernet Segment, so every
@@ -7499,61 +7674,24 @@ fn route_evpn_export_selected(
                 });
             }
         }
-        // A per-EVI Type-1 (RFC 8214): a remote VPWS endpoint. Match its
-        // Ethernet Tag against each configured service's remote-service-id
-        // (within the same EVI, via the RT) and cross-connect the service's
-        // AC to the route's End.DX2 SID through the cradle tee — the
-        // XconnectAdd carries our own End.DX2 SID too, so one message
-        // programs both the ingress encap and the egress decap. Per-ES A-D
-        // (eth-tag MAX-ET) and our own originations bind nothing.
+        // An Ethernet A-D route (RFC 8214 / RFC 7432 §8.2). A **per-EVI**
+        // one (eth-tag = a service instance) is a remote VPWS endpoint, so
+        // re-select the services that could bind it. A **per-ES** one
+        // (MAX-ET) is the segment's liveness signal: its arrival can make a
+        // whole segment's endpoints usable again, so every service
+        // re-selects. Either way the decision itself lives in
+        // `vpws_rebind` — arrival never binds directly, because the route
+        // that just arrived may lose to one already in the Loc-RIB.
         EvpnPrefix::EthernetAd { eth_tag, .. } => {
-            if *eth_tag != MAX_ET
-                && best.typ != BgpRibType::Originated
-                && let Some(evi) = extract_vni_from_attr(&best.attr)
-            {
-                let Some(remote_sid) = evpn_vpws_sid(&best.attr) else {
-                    // A Type-1 without an End.DX2/DX2V L2-Service SID (e.g.
-                    // an RFC 9572 A-D form) has no SRv6 dataplane binding.
-                    return;
-                };
-                let remote_mtu = evpn_l2_attr_mtu(&best.attr);
-                let vpws = &mut bgp.local_rib.evpn_vpws;
-                for (name, svc) in vpws.services.iter_mut() {
-                    if svc.remote_service_id != Some(*eth_tag) || svc.evi != Some(evi) {
-                        continue;
-                    }
-                    let (vid, table) = svc.vid_table();
-                    // RFC 8214 §3.1: both ends non-zero and different —
-                    // the remote MUST NOT be used. Unbind if it had been.
-                    if !svc.mtu_compatible(remote_mtu) {
-                        svc.remote_mtu_mismatch = Some(remote_mtu);
-                        if svc.remote_sid.take().is_some()
-                            && let Some(ifname) = svc.interface.clone()
-                        {
-                            let local_sid = vpws.sids.get(name).map(|(a, _)| *a);
-                            let _ = bgp.rib_client.send(rib::Message::XconnectDel {
-                                ifname,
-                                local_sid,
-                                vid,
-                                table,
-                            });
-                        }
-                        continue;
-                    }
-                    svc.remote_mtu_mismatch = None;
-                    svc.remote_sid = Some(remote_sid);
-                    if let Some(ifname) = svc.interface.clone() {
-                        let local_sid = vpws.sids.get(name).map(|(a, _)| *a);
-                        let _ = bgp.rib_client.send(rib::Message::XconnectAdd {
-                            ifname,
-                            remote_sid,
-                            local_sid,
-                            vid,
-                            table,
-                        });
-                    }
+            let scope = if *eth_tag == MAX_ET {
+                None
+            } else {
+                match extract_vni_from_attr(&best.attr) {
+                    Some(evi) => Some((evi, *eth_tag)),
+                    None => return,
                 }
-            }
+            };
+            vpws_rebind_scope(bgp.local_rib, bgp.rib_client, scope);
         }
         // A Type-4: a PE joined the Ethernet Segment (or re-advertised on
         // it). Its VTEP enters the DF-election candidate set, shifting every
@@ -12417,11 +12555,26 @@ impl Peer {
     /// per-attribute batching so a single MP_REACH UPDATE can carry
     /// every route that shares an attribute set.
     pub fn send_evpn(&mut self, route: EvpnRoute, attr: Arc<BgpAttr>, timer: bool) {
-        self.cache_evpn
-            .entry(attr.clone())
-            .or_default()
-            .insert(route.clone());
-        self.cache_evpn_rev.insert(route, attr);
+        // Re-advertising a route whose *attribute* changed must first evict
+        // it from the attr group it was queued under. `cache_evpn` groups
+        // pending NLRIs by attribute and `flush_evpn` emits one UPDATE per
+        // group, so leaving the stale entry ships the route twice — once
+        // with each attribute — and which one the peer ends up believing
+        // depends on `BTreeMap` iteration order over the attr keys. That is
+        // arbitrary, so the peer intermittently keeps the *old* attribute.
+        //
+        // `evpn_withdraw_one` already evicts this way for the withdraw case;
+        // this is the same eviction for the re-advertise case.
+        if let Some(old) = self.cache_evpn_rev.insert(route.clone(), attr.clone())
+            && old != attr
+            && let Some(set) = self.cache_evpn.get_mut(&old)
+        {
+            set.remove(&route);
+            if set.is_empty() {
+                self.cache_evpn.remove(&old);
+            }
+        }
+        self.cache_evpn.entry(attr).or_default().insert(route);
         if timer && self.cache_evpn_timer.is_none() {
             self.cache_evpn_timer = Some(start_adv_timer_evpn(self));
         }
@@ -16104,95 +16257,20 @@ impl Bgp {
         route_withdraw_evpn_to_peers(rd, prefix, &mut self.peers);
     }
 
-    /// Find the currently-selected remote end of a VPWS service in the EVPN
-    /// Loc-RIB: a non-originated per-EVI Type-1 (RFC 8214) whose Ethernet Tag
-    /// is the service's `remote-service-id` within the same EVI, carrying an
-    /// `End.DX2` L2-Service SID. Returns the SID plus the route's Layer-2
-    /// Attributes MTU (0 = none signalled); `None` while no such route is
-    /// selected.
-    fn vpws_lookup_remote_sid(
-        &self,
-        evi: u32,
-        remote_id: u32,
-    ) -> Option<(std::net::Ipv6Addr, u16)> {
-        if remote_id == MAX_ET {
-            // MAX-ET tags per-ES A-D routes, never a VPWS service instance.
-            return None;
-        }
-        for table in self.local_rib.evpn.values() {
-            for (prefix, rib) in table.selected.iter() {
-                let EvpnPrefix::EthernetAd { eth_tag, .. } = prefix else {
-                    continue;
-                };
-                if *eth_tag != remote_id
-                    || rib.typ == BgpRibType::Originated
-                    || extract_vni_from_attr(&rib.attr) != Some(evi)
-                {
-                    continue;
-                }
-                if let Some(sid) = evpn_vpws_sid(&rib.attr) {
-                    return Some((sid, evpn_l2_attr_mtu(&rib.attr)));
-                }
-            }
-        }
-        None
-    }
-
     /// Re-sync VPWS service `name` after a config or locator change:
-    /// withdraw the stale Type-1 (if any), originate afresh when the
-    /// config is complete, and re-derive the AC cross-connect from the
-    /// Loc-RIB — the matching remote Type-1 may have arrived before this
-    /// service was (fully) configured, or a re-pointed `remote-service-id`
-    /// / `evi` may now select a different remote, or none at all.
+    /// withdraw the stale Type-1 (if any), originate afresh when the config
+    /// is complete, and re-select the remote end from the Loc-RIB.
+    ///
+    /// The selection is the same `vpws_rebind` the receive path uses, so a
+    /// config edit and a route event can never disagree about which remote
+    /// wins. The Loc-RIB rescan also means ordering does not matter: a
+    /// remote Type-1 that arrived *before* this service was (fully)
+    /// configured is found without waiting for a route churn, and a
+    /// re-pointed `remote-service-id` / `evi` re-selects immediately.
     pub fn vpws_reconcile(&mut self, name: &str) {
         self.evpn_withdraw_vpws(name);
         self.evpn_originate_vpws(name);
-        let Some(svc) = self.local_rib.evpn_vpws.services.get(name) else {
-            return;
-        };
-        let cached = svc.remote_sid;
-        let ifname = svc.interface.clone();
-        // The RFC 8214 §3.1 MTU gate: a found remote whose non-zero MTU
-        // differs from our non-zero MTU is unusable — treated as no match,
-        // remembered for `show` as mtu-mismatch.
-        let found = svc
-            .params()
-            .and_then(|(evi, _, remote_id, _)| self.vpws_lookup_remote_sid(evi, remote_id));
-        let (remote, mismatch) = match found {
-            Some((sid, remote_mtu)) if svc.mtu_compatible(remote_mtu) => (Some(sid), None),
-            Some((_, remote_mtu)) => (None, Some(remote_mtu)),
-            None => (None, None),
-        };
-        let (vid, table) = svc.vid_table();
-        if let Some(svc) = self.local_rib.evpn_vpws.services.get_mut(name) {
-            svc.remote_sid = remote;
-            svc.remote_mtu_mismatch = mismatch;
-        }
-        let local_sid = self.local_rib.evpn_vpws.sids.get(name).map(|(a, _)| *a);
-        match (remote, ifname) {
-            (Some(remote_sid), Some(ifname)) => {
-                let _ = self.ctx.rib.send(crate::rib::Message::XconnectAdd {
-                    ifname,
-                    remote_sid,
-                    local_sid,
-                    vid,
-                    table,
-                });
-            }
-            // A previously-bound AC whose remote no longer matches (config
-            // re-pointed, MTU now clashing, or partial config): unbind.
-            // Interface *changes* are unbound by `config_vpws_interface`,
-            // which still knows the old AC name.
-            (None, Some(ifname)) if cached.is_some() => {
-                let _ = self.ctx.rib.send(crate::rib::Message::XconnectDel {
-                    ifname,
-                    local_sid,
-                    vid,
-                    table,
-                });
-            }
-            _ => {}
-        }
+        vpws_rebind(&mut self.local_rib, &self.ctx.rib, name);
     }
 
     /// Full teardown for a deleted VPWS service: withdraw the Type-1,
