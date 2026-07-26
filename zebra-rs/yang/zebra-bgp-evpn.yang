@@ -80,7 +80,7 @@ module zebra-bgp-evpn {
          `address-family l2vpn evpn`.";
     }
     leaf encapsulation {
-      ext:help "EVPN overlay encapsulation (vxlan or srv6)";
+      ext:help "EVPN overlay encapsulation (vxlan, srv6 or mpls)";
       type enumeration {
         enum vxlan {
           description
@@ -97,11 +97,60 @@ module zebra-bgp-evpn {
              plane is the cradle eBPF tee (`system cradle grpc-endpoint`) —
              the kernel has no End.DT2U/DT2M seg6local actions.";
         }
+        enum mpls {
+          description
+            "MPLS (RFC 7432) — EVPN's base encapsulation. Type-2 and
+             Type-3 routes carry a per-EVI MPLS service label, imposed
+             under whatever transport LSP reaches the egress PE, which
+             pops it into the EVI's bridge domain. Bridge domains are
+             declared explicitly with the `evi` list (there is no VXLAN
+             device to read a VNI from). The L2 data plane is the
+             cradle eBPF tee (`system cradle grpc-endpoint`) — the
+             kernel has no action that pops a label into a bridge.";
+        }
       }
       default vxlan;
       description
         "EVPN overlay encapsulation for locally originated and
-         received MAC routes.";
+         received MAC routes. This is the L2 (Type-2 / Type-3) service;
+         Type-5 (IP Prefix) is an L3 service and takes its
+         encapsulation from the VRF's own `encapsulation` leaf.";
+    }
+    list evi {
+      ext:help "EVPN Instance (bridge domain) for `encapsulation mpls`";
+      key "id";
+      description
+        "An EVPN Instance — one bridge domain advertised into EVPN.
+
+         Only needed with `encapsulation mpls`. The vxlan and srv6
+         paths infer which bridge domains to advertise, and their
+         service identifier, from a local VXLAN device's VNI; an MPLS
+         EVI has no VNI, so the operator names the bridge and the
+         instance id here.
+
+         The id doubles as the bridge domain and as the low 24 bits of
+         the auto-derived RD (<router-id>:<id>) and route target
+         (<local-AS>:<id>), so it is interchangeable with a VNI
+         everywhere else in the EVPN path — matching the `evi` leaf
+         the vpws list already uses.";
+      leaf id {
+        ext:help "EVPN Instance id";
+        type uint32 {
+          range "1..16777215";
+        }
+        description
+          "EVPN Instance identifier (the list key). Both PEs of a
+           service must agree on it.";
+      }
+      leaf bridge {
+        ext:help "Bridge interface carrying this EVI's L2 domain";
+        type string;
+        description
+          "Name of the bridge interface whose L2 domain this EVI
+           carries — its CE-facing ports are the attachment circuits,
+           and MACs learned there are advertised as Type-2 routes
+           under this EVI's RD and route target.";
+      }
     }
     leaf igmp-mld-proxy {
       ext:help "Advertise IGMP/MLD proxy capability (RFC 9251)";

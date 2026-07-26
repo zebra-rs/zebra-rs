@@ -4315,6 +4315,38 @@ mod yang_load_tests {
         }
     }
 
+    /// `encapsulation mpls` (RFC 7432) and the `evi` list it needs — an MPLS
+    /// EVI has no VXLAN device to read a VNI from, so the bridge domain is
+    /// named explicitly. The two pre-existing encapsulations are asserted
+    /// alongside so a future enum edit can't silently drop one.
+    #[test]
+    fn bgp_evpn_mpls_encapsulation_and_evi_are_settable() {
+        use crate::config::ExecCode;
+        use crate::config::parse::{State, parse};
+        use libyang::to_entry;
+
+        let mut yang = YangStore::new();
+        yang.add_path(concat!(env!("CARGO_MANIFEST_DIR"), "/yang"));
+        yang.read_with_resolve("configure")
+            .expect("configure mode loads");
+        yang.identity_resolve();
+        let module = yang
+            .find_module("configure")
+            .expect("configure module present");
+        let entry = to_entry(&yang, module);
+
+        for path in [
+            "set router bgp afi-safi evpn encapsulation vxlan",
+            "set router bgp afi-safi evpn encapsulation srv6",
+            "set router bgp afi-safi evpn encapsulation mpls",
+            "set router bgp afi-safi evpn evi 100",
+            "set router bgp afi-safi evpn evi 100 bridge br100",
+        ] {
+            let (code, _comps, _state) = parse(path, entry.clone(), None, State::new());
+            assert_eq!(code, ExecCode::Success, "`{path}` must be a settable path");
+        }
+    }
+
     #[test]
     fn bgp_evpn_pruned_flood_list_is_settable() {
         use crate::config::ExecCode;

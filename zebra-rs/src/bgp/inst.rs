@@ -659,6 +659,72 @@ pub enum EvpnBumTunnel {
     SrV6P2mp,
 }
 
+/// Overlay encapsulation for EVPN's L2 services (Type-2 MAC/IP, Type-3
+/// Inclusive Multicast), configured under `router bgp afi-safi evpn
+/// encapsulation`. Type-5 (IP Prefix) is unaffected — it is an L3 service and
+/// takes its encapsulation from the VRF's own `encapsulation` leaf.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum EvpnEncap {
+    /// VXLAN tunnels (RFC 8365) — the kernel bridge/VXLAN FDB data plane, and
+    /// the default. The service identifier on the wire is the VNI, derived
+    /// from the route target.
+    #[default]
+    Vxlan,
+    /// SRv6 (RFC 9252) — a per-VNI `End.DT2U` SID on Type-2 and an `End.DT2M`
+    /// SID on Type-3, carved from the BGP SRv6 locator.
+    Srv6,
+    /// MPLS (RFC 7432) — the base encapsulation: routes carry a per-EVI MPLS
+    /// service label and the egress PE pops it into a bridge domain. The L2
+    /// data plane is the cradle eBPF tee; the kernel has no MPLS-to-bridge
+    /// action.
+    Mpls,
+}
+
+impl EvpnEncap {
+    pub fn parse(s: &str) -> Option<Self> {
+        match s {
+            "vxlan" => Some(Self::Vxlan),
+            "srv6" => Some(Self::Srv6),
+            "mpls" => Some(Self::Mpls),
+            _ => None,
+        }
+    }
+
+    /// True when locally originated L2 routes carry an SRv6 L2 service SID.
+    pub fn is_srv6(&self) -> bool {
+        matches!(self, Self::Srv6)
+    }
+
+    /// True when locally originated L2 routes carry an MPLS service label.
+    // Consumed by the Type-2/Type-3 originate path, which lands with the
+    // label allocator; the config surface is separated out to keep the
+    // encapsulation refactor reviewable on its own.
+    #[allow(dead_code)]
+    pub fn is_mpls(&self) -> bool {
+        matches!(self, Self::Mpls)
+    }
+}
+
+/// One EVPN Instance declared under `router bgp afi-safi evpn evi <id>`.
+///
+/// Only meaningful with `encapsulation mpls`: the VXLAN and SRv6 paths infer
+/// the service identifier from a local VXLAN device's VNI, but an MPLS EVI has
+/// no VNI to read, so the operator names the bridge and the EVI id explicitly.
+/// The EVI id doubles as the bridge domain and as the low 24 bits of the
+/// auto-derived RD (`<router-id>:<evi>`) and RT (`<as>:<evi>`), keeping it
+/// interchangeable with a VNI everywhere else in the EVPN path.
+#[derive(Debug, Clone, Default)]
+pub struct EviConfig {
+    /// Bridge interface whose L2 domain this EVI carries.
+    pub bridge: Option<String>,
+    /// MPLS service label advertised for this EVI, allocated from the BGP
+    /// dynamic label block. `None` until the block arrives.
+    // Filled in by the label allocator in the follow-up; declared here so the
+    // EVI's shape is settled in one place.
+    #[allow(dead_code)]
+    pub label: Option<u32>,
+}
+
 pub struct Bgp {
     pub asn: u32,
     /// Effective BGP Identifier — what OPENs, EVPN RDs and the show
@@ -1027,10 +1093,14 @@ pub struct Bgp {
     /// advertised on every Type-2 the VNI originates when
     /// [`Self::evpn_encap_srv6`] is set.
     pub evpn_dt2u_sids: BTreeMap<u32, (std::net::Ipv6Addr, u16)>,
-    /// `router bgp afi-safi evpn encapsulation srv6` (RFC 9252): EVPN rides
-    /// SRv6 L2 service SIDs (End.DT2U on Type-2, End.DT2M on Type-3) instead
-    /// of VXLAN. The L2 data plane is the cradle eBPF tee.
-    pub evpn_encap_srv6: bool,
+    /// `router bgp afi-safi evpn encapsulation {vxlan|srv6|mpls}` — the
+    /// overlay locally originated and received L2 routes ride.
+    pub evpn_encap: EvpnEncap,
+    /// EVPN Instances declared under `router bgp afi-safi evpn evi <id>`,
+    /// keyed by EVI id. Populated only for `encapsulation mpls`, where there
+    /// is no VXLAN device to infer a service identifier from. See
+    /// [`EviConfig`].
+    pub evpn_evis: BTreeMap<u32, EviConfig>,
     /// Precomputed advertise-time data derived from
     /// [`Self::srv6_ipv6_sid`] and the locator, borrowed into
     /// [`super::peer::BgpTop`] so the egress path stamps
@@ -1276,7 +1346,8 @@ impl Bgp {
             srv6_ipv6_sid: None,
             evpn_dt2m_sids: BTreeMap::new(),
             evpn_dt2u_sids: BTreeMap::new(),
-            evpn_encap_srv6: false,
+            evpn_encap: EvpnEncap::default(),
+            evpn_evis: BTreeMap::new(),
             srv6_ipv6_export: None,
             networks_v6: std::collections::BTreeSet::new(),
             peer_index: BTreeMap::new(),
