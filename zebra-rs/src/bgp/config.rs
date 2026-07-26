@@ -1820,6 +1820,9 @@ fn config_ethernet_segment(bgp: &mut Bgp, mut args: Args, op: ConfigOp) -> Optio
         }
         _ => {}
     }
+    // A VPWS service naming this segment resolves through it for its ESI and
+    // redundancy mode; deleting it makes those services single-homed again.
+    bgp.vpws_resync_es();
     Some(())
 }
 
@@ -1852,6 +1855,9 @@ fn config_ethernet_segment_esi(bgp: &mut Bgp, mut args: Args, op: ConfigOp) -> O
     if let Some(esi) = new_esi {
         bgp.evpn_originate_es_routes(esi, vtep, single_active);
     }
+    // The ESI is part of a VPWS Type-1's NLRI key, so services on this
+    // segment must be re-originated under the new one.
+    bgp.vpws_resync_es();
     Some(())
 }
 
@@ -1884,6 +1890,10 @@ fn config_ethernet_segment_redundancy_mode(
         let vtep = IpAddr::V4(bgp.router_id);
         bgp.evpn_originate_es_routes(esi, vtep, mode.single_active());
     }
+    // Single-active carves one primary per service instance where all-active
+    // makes every attached PE primary, so the mode changes the P/B bits the
+    // segment's VPWS services advertise (RFC 8214 §5).
+    bgp.vpws_resync_es();
     Some(())
 }
 
@@ -2010,6 +2020,33 @@ fn config_vpws_mtu(bgp: &mut Bgp, args: Args, op: ConfigOp) -> Option<()> {
 /// body unbinds the old scoping and re-allocates the SID on a flip.
 fn config_vpws_vlan(bgp: &mut Bgp, args: Args, op: ConfigOp) -> Option<()> {
     config_vpws_leaf(bgp, args, op, |svc, v| svc.vlan = v.map(|x| x as u16), true)
+}
+
+/// `router bgp afi-safi evpn vpws <name> ethernet-segment <es-name>` — bind
+/// the service's AC to a multihomed Ethernet Segment (RFC 8214 §5). The
+/// segment supplies the ESI carried in this service's Type-1 and the
+/// redundancy mode driving DF election; `vpws_resync_es` resolves the
+/// reference and reconciles, so a name pointing at a segment that does not
+/// exist (yet) simply leaves the service single-homed until it does.
+fn config_vpws_ethernet_segment(bgp: &mut Bgp, mut args: Args, op: ConfigOp) -> Option<()> {
+    let afi_safi: AfiSafi = args.afi_safi()?;
+    if afi_safi.afi != Afi::L2vpn || afi_safi.safi != Safi::Evpn {
+        return None;
+    }
+    let name = args.string()?;
+    let es_name = if op.is_set() {
+        Some(args.string()?)
+    } else {
+        None
+    };
+    bgp.local_rib
+        .evpn_vpws
+        .services
+        .entry(name)
+        .or_default()
+        .ethernet_segment = es_name;
+    bgp.vpws_resync_es();
+    Some(())
 }
 
 /// `router bgp afi-safi evpn vpws <name> interface <name>` — the
@@ -4767,6 +4804,10 @@ impl Bgp {
         self.callback_add("/router/bgp/afi-safi/vpws/interface", config_vpws_interface);
         self.callback_add("/router/bgp/afi-safi/vpws/mtu", config_vpws_mtu);
         self.callback_add("/router/bgp/afi-safi/vpws/vlan", config_vpws_vlan);
+        self.callback_add(
+            "/router/bgp/afi-safi/vpws/ethernet-segment",
+            config_vpws_ethernet_segment,
+        );
 
         // MUP controller (`router bgp mup-c …`, draft-ietf-bess-mup-safi).
         // Augmented in by zebra-bgp-mup-controller.yang; the controller

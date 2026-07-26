@@ -222,6 +222,22 @@ routes rides the generic EVPN Loc-RIB.
   replication work, `zebra-rs-evpn-rfc9524-replication-plan`). Feasibility
   spike belongs at the top of this phase.
 
+**First consumer of the Phase 1–5 foundation (separate, RFC 8214 §5): VPWS
+multihoming. ✅** A `vpws` service names an `ethernet-segment`; the segment
+supplies the ESI its Type-1 is originated under and the redundancy mode that
+drives a per-`<ESI, VPWS service instance>` DF election over
+`es_df_candidates` (all-active ⇒ every PE primary; single-active ⇒ carved DF
+primary, its successor backup), landing in the Layer-2 Attributes P/B bits.
+Notably this needed **no** VXLAN data plane and no import-RT filtering — the
+Type-4 candidate set plus service carving was enough, so it validates the
+Phase 3/5 foundation ahead of Phase 6. The receive-path re-election is worth
+copying for the DF-gated BUM work: the Type-4 install/withdraw arms only see
+`LocalRib`, so they mark `evpn_vpws.df_dirty` and `Bgp::vpws_df_drain` runs
+after the `BgpTop` borrow ends (the "Tier 1a" post-FSM slot in `process_msg`).
+*Still open on the VPWS side:* remote selection across a multihomed pair
+(prefer P, fail over to B, honour the per-ES A-D mass withdraw) and
+all-active load balancing, which needs a cradle xconnect holding >1 SID.
+
 **Then (separate, RFC 9251):** wire the multihomed-ES IGMP/MLD snoop to the
 **organic** Type-7/8 origination (`evpn_originate_igmp_*_sync`, today only
 the `clear bgp debug …` test command drives them); the DF computes the

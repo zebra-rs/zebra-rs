@@ -2248,6 +2248,14 @@ impl Bgp {
                     );
                 }
 
+                // RFC 8214 §5: a Type-4 that arrived (or was withdrawn) in
+                // this batch changed an Ethernet Segment's DF-election
+                // candidate set. Re-elect the affected VPWS services'
+                // roles now that the `BgpTop` borrow has ended —
+                // re-originating a Type-1 needs full `self` (SID pool,
+                // peers). Cheap no-op when nothing was marked.
+                self.vpws_df_drain();
+
                 // Tier 1a: a peer that just got a fresh resumable v4
                 // sync cursor (set by `route_sync` inside the FSM) is
                 // enqueued here exactly once — the kick needs full

@@ -95,6 +95,86 @@ pub fn designated_forwarder(candidates: &[IpAddr], tag: u32) -> Option<IpAddr> {
     Some(candidates[idx])
 }
 
+/// The backup Designated Forwarder for `tag` — the candidate one ordinal
+/// past the DF, wrapping (RFC 8584 §2: the DF's successor in the carving
+/// order takes over when the DF's routes are withdrawn). `None` for fewer
+/// than two candidates: a lone PE is the DF with nobody to back it up.
+pub fn backup_forwarder(candidates: &[IpAddr], tag: u32) -> Option<IpAddr> {
+    if candidates.len() < 2 {
+        return None;
+    }
+    let idx = (tag as usize).wrapping_add(1) % candidates.len();
+    Some(candidates[idx])
+}
+
+/// The role a PE advertises for one VPWS service instance on an Ethernet
+/// Segment — the RFC 8214 §3.1 P and B bits of the Layer-2 Attributes
+/// extended community.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum VpwsRole {
+    /// P=1, B=0. The PE forwards for this service instance: the DF under
+    /// single-active, *every* attached PE under all-active, and the sole
+    /// advertiser of a single-homed service.
+    #[default]
+    Primary,
+    /// P=0, B=1. Single-active standby — the remote PE switches to this SID
+    /// when the primary's Type-1 is withdrawn.
+    Backup,
+    /// P=0, B=0. On the segment but neither DF nor its backup; the remote
+    /// PE must not use this PE for the service instance.
+    NonDesignated,
+}
+
+impl VpwsRole {
+    /// The `(P, B)` bit pair this role puts in the Layer-2 Attributes EC.
+    pub fn bits(&self) -> (bool, bool) {
+        match self {
+            VpwsRole::Primary => (true, false),
+            VpwsRole::Backup => (false, true),
+            VpwsRole::NonDesignated => (false, false),
+        }
+    }
+
+    /// Short display form for `show bgp evpn vpws`.
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            VpwsRole::Primary => "primary",
+            VpwsRole::Backup => "backup",
+            VpwsRole::NonDesignated => "non-designated",
+        }
+    }
+}
+
+/// RFC 8214 §5 role election for one VPWS service instance: `candidates` are
+/// the VTEPs advertising the segment's Type-4 (ascending, as
+/// `Bgp::es_df_candidates` returns them), `me` is this PE, and `service_id`
+/// is the VPWS service instance id — the Ethernet Tag of the Type-1, and the
+/// carving key that spreads service instances across the attached PEs.
+///
+/// All-active makes every attached PE primary (§5: all PEs can forward, and
+/// the remote load-balances). Single-active gives the carved DF the P bit and
+/// its successor the B bit, leaving any further PE with neither. A candidate
+/// set that does not (yet) list `me` — our own Type-4 not selected, or no
+/// segment at all — falls back to primary rather than blackholing the
+/// service while the segment converges.
+pub fn vpws_role(
+    mode: EsRedundancyMode,
+    candidates: &[IpAddr],
+    me: IpAddr,
+    service_id: u32,
+) -> VpwsRole {
+    if !matches!(mode, EsRedundancyMode::SingleActive) || !candidates.contains(&me) {
+        return VpwsRole::Primary;
+    }
+    if designated_forwarder(candidates, service_id) == Some(me) {
+        VpwsRole::Primary
+    } else if backup_forwarder(candidates, service_id) == Some(me) {
+        VpwsRole::Backup
+    } else {
+        VpwsRole::NonDesignated
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -166,5 +246,85 @@ mod tests {
         assert_eq!(designated_forwarder(&[a], 7), Some(a));
         // Empty → none.
         assert_eq!(designated_forwarder(&[], 0), None);
+    }
+
+    /// Three PEs to make "DF", "backup" and "neither" distinguishable.
+    fn pes() -> [IpAddr; 3] {
+        use std::net::Ipv4Addr;
+        [
+            IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1)),
+            IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2)),
+            IpAddr::V4(Ipv4Addr::new(10, 0, 0, 3)),
+        ]
+    }
+
+    #[test]
+    fn backup_is_the_df_successor() {
+        let [a, b, c] = pes();
+        let cands = [a, b, c];
+        // tag 0: DF = a (ordinal 0), backup = b (ordinal 1).
+        assert_eq!(designated_forwarder(&cands, 0), Some(a));
+        assert_eq!(backup_forwarder(&cands, 0), Some(b));
+        // tag 2: DF = c (ordinal 2), backup wraps to a (ordinal 0).
+        assert_eq!(designated_forwarder(&cands, 2), Some(c));
+        assert_eq!(backup_forwarder(&cands, 2), Some(a));
+        // A lone PE is the DF with nobody behind it.
+        assert_eq!(backup_forwarder(&[a], 0), None);
+        assert_eq!(backup_forwarder(&[], 0), None);
+    }
+
+    #[test]
+    fn all_active_makes_every_pe_primary() {
+        let [a, b, c] = pes();
+        let cands = [a, b, c];
+        // RFC 8214 §5: under all-active every attached PE forwards, so each
+        // advertises P=1 regardless of its carving ordinal.
+        for me in [a, b, c] {
+            for service_id in 0..4u32 {
+                assert_eq!(
+                    vpws_role(EsRedundancyMode::AllActive, &cands, me, service_id),
+                    VpwsRole::Primary
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn single_active_carves_one_primary_and_one_backup() {
+        let [a, b, c] = pes();
+        let cands = [a, b, c];
+        let mode = EsRedundancyMode::SingleActive;
+        // Service instance 0 carves to ordinal 0: a is DF, b backs it up,
+        // c must not be used for this instance.
+        assert_eq!(vpws_role(mode, &cands, a, 0), VpwsRole::Primary);
+        assert_eq!(vpws_role(mode, &cands, b, 0), VpwsRole::Backup);
+        assert_eq!(vpws_role(mode, &cands, c, 0), VpwsRole::NonDesignated);
+        // Instance 1 shifts the whole assignment by one — that spread is the
+        // point of carving per <ESI, service instance>.
+        assert_eq!(vpws_role(mode, &cands, b, 1), VpwsRole::Primary);
+        assert_eq!(vpws_role(mode, &cands, c, 1), VpwsRole::Backup);
+        assert_eq!(vpws_role(mode, &cands, a, 1), VpwsRole::NonDesignated);
+    }
+
+    #[test]
+    fn single_active_pe_not_yet_in_candidates_stays_primary() {
+        let [a, b, c] = pes();
+        let mode = EsRedundancyMode::SingleActive;
+        // Our own Type-4 not selected yet (or no segment at all): advertise
+        // primary rather than blackhole the service while it converges.
+        assert_eq!(vpws_role(mode, &[a, b], c, 0), VpwsRole::Primary);
+        assert_eq!(vpws_role(mode, &[], a, 0), VpwsRole::Primary);
+        // Sole PE on the segment is the DF.
+        assert_eq!(vpws_role(mode, &[a], a, 3), VpwsRole::Primary);
+    }
+
+    #[test]
+    fn role_maps_to_l2_attr_bits() {
+        assert_eq!(VpwsRole::Primary.bits(), (true, false));
+        assert_eq!(VpwsRole::Backup.bits(), (false, true));
+        assert_eq!(VpwsRole::NonDesignated.bits(), (false, false));
+        // The single-homed default must stay P=1/B=0 — that is the
+        // pre-multihoming behavior every existing service relies on.
+        assert_eq!(VpwsRole::default(), VpwsRole::Primary);
     }
 }

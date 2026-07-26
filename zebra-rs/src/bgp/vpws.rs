@@ -10,13 +10,21 @@
 //! → cradle `AddXconnect`, which programs both the ingress XCONNECT map and
 //! the local `End.DX2` decap).
 //!
-//! Scope: single-homed (all-zero ESI), untagged AC (`End.DX2`). The Type-1
-//! carries the RFC 8214 §3.1 Layer-2 Attributes extended community (P bit
-//! set — single-homed primary — plus the configured L2 MTU); a remote whose
-//! non-zero MTU differs from our non-zero MTU is not bound (`mtu-mismatch`).
+//! A service whose AC sits on a multihomed Ethernet Segment names it with
+//! `ethernet-segment <name>`: the segment's ESI replaces the all-zero one in
+//! the Type-1, and Designated-Forwarder election over the PEs advertising
+//! that segment's Type-4 — run per `<ESI, VPWS service instance>` (RFC 8214
+//! §5) — drives the P/B bits. Single-homed services keep the all-zero ESI
+//! and advertise as primary.
+//!
+//! The Type-1 carries the RFC 8214 §3.1 Layer-2 Attributes extended
+//! community (P/B plus the configured L2 MTU); a remote whose non-zero MTU
+//! differs from our non-zero MTU is not bound (`mtu-mismatch`).
 
-use std::collections::BTreeMap;
-use std::net::Ipv6Addr;
+use std::collections::{BTreeMap, BTreeSet};
+use std::net::{IpAddr, Ipv6Addr};
+
+use super::ethernet_segment::VpwsRole;
 
 /// One configured VPWS service (`router bgp afi-safi evpn vpws <name>`).
 #[derive(Debug, Default, Clone)]
@@ -30,9 +38,11 @@ pub struct VpwsService {
     pub remote_service_id: Option<u32>,
     /// The attachment circuit (CE-facing port) of the E-Line.
     pub interface: Option<String>,
-    /// The `(evi, eth_tag)` our Type-1 is currently originated under —
-    /// what a withdraw must key on even after config fields change.
-    pub originated: Option<(u32, u32)>,
+    /// The `(evi, eth_tag, esi)` our Type-1 is currently originated under —
+    /// what a withdraw must key on even after config fields change. The ESI
+    /// rides here too: it is part of the Type-1 NLRI key, so re-pointing
+    /// `ethernet-segment` must withdraw under the *old* segment's ESI.
+    pub originated: Option<(u32, u32, [u8; 10])>,
     /// The remote `End.DX2` SID currently cross-connected (set by the
     /// import side) — lets a config change re-program the xconnect
     /// without waiting for a route churn.
@@ -48,6 +58,25 @@ pub struct VpwsService {
     /// The remote's L2 MTU when a matching Type-1 was **rejected** for an
     /// MTU mismatch — the service shows `mtu-mismatch` instead of `up`.
     pub remote_mtu_mismatch: Option<u16>,
+    /// Name of the `ethernet-segment` this AC belongs to (RFC 8214 §5
+    /// multihoming). `None` = single-homed.
+    pub ethernet_segment: Option<String>,
+    /// The referenced segment's ESI, resolved from `Bgp::ethernet_segments`.
+    /// Denormalized so the route paths — which see `LocalRib`, not the ES
+    /// config map — can key the Type-1 without another borrow. Kept in step
+    /// by `Bgp::vpws_resync_es` at every point either side can change.
+    pub esi: Option<[u8; 10]>,
+    /// The referenced segment's redundancy mode, denormalized alongside
+    /// `esi`. Single-active gives exactly one primary per service instance;
+    /// all-active advertises every PE as primary (RFC 8214 §5).
+    pub single_active: bool,
+    /// The primary/backup role last advertised on this service's Type-1,
+    /// and the elected DF it was derived from — display state for `show`,
+    /// and the comparison a DF re-election tests before re-originating.
+    pub role: VpwsRole,
+    /// The elected Designated Forwarder for `<esi, local_service_id>`, or
+    /// `None` when the service is single-homed or no Type-4 is selected.
+    pub df: Option<IpAddr>,
 }
 
 impl VpwsService {
@@ -90,4 +119,10 @@ pub struct VpwsState {
     pub services: BTreeMap<String, VpwsService>,
     /// Allocated `End.DX2` SID `(addr, locator function)` per service name.
     pub sids: BTreeMap<String, (Ipv6Addr, u16)>,
+    /// Services whose DF election may have changed because a Type-4 for
+    /// their segment was installed or withdrawn. The receive path only sees
+    /// `LocalRib`, but re-originating a Type-1 needs the full `Bgp` (SID
+    /// pool, peers), so it marks here and `Bgp::vpws_df_drain` re-elects
+    /// once the `BgpTop` borrow has ended.
+    pub df_dirty: BTreeSet<String>,
 }

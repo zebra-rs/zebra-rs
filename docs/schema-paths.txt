@@ -38,6 +38,7 @@
 /router/bgp/afi-safi/segmentation	leaf
 /router/bgp/afi-safi/table-map	leaf
 /router/bgp/afi-safi/vpws	list keys=name
+/router/bgp/afi-safi/vpws/ethernet-segment	leaf
 /router/bgp/afi-safi/vpws/evi	leaf
 /router/bgp/afi-safi/vpws/interface	leaf
 /router/bgp/afi-safi/vpws/local-service-id	leaf

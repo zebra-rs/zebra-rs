@@ -82,6 +82,59 @@ the whole-port service.
 > classifies on bytes, cannot demux the VID. This is the standard
 > requirement for any XDP VLAN path.
 
+### Multihoming (RFC 8214 §5)
+
+When the AC sits on a CE that is dual-homed to two PEs, both PEs name the
+same `ethernet-segment` (RFC 7432 — the shared ESI both advertise a Type-4
+under) and advertise the **same** VPWS service instance id: the pair is one
+logical endpoint of the E-Line.
+
+```
+router bgp
+ afi-safi evpn
+  ethernet-segment ES1
+   esi 00:11:22:33:44:55:66:77:88:99
+   redundancy-mode single-active
+   interface ce1
+  vpws eline1
+   evi 100
+   local-service-id 101
+   remote-service-id 103
+   interface ce1
+   ethernet-segment ES1
+```
+
+The segment supplies two things. Its **ESI** replaces the all-zero one in
+the service's Type-1, so the remote PE can tell that the routes it receives
+from the two PEs are the same endpoint rather than two E-Lines. Its
+**redundancy mode** drives the P/B bits of the Layer-2 Attributes extended
+community:
+
+| Mode | P/B advertised |
+|---|---|
+| (no `ethernet-segment`) | every service is primary — `P=1 B=0` |
+| `all-active` | *every* attached PE is primary — `P=1 B=0` |
+| `single-active` | the elected DF is `P=1 B=0`, its successor in the carving order is `P=0 B=1`, any further PE is `P=0 B=0` |
+
+The election runs per `<ESI, VPWS service instance>`: the PEs advertising
+the segment's Type-4 are ordered by ascending VTEP address and the DF is
+ordinal `service-id mod N` (RFC 7432 §8.5 service carving). Keying on the
+service instance rather than a fixed ordinal is what spreads different
+E-Lines on one segment across both PEs instead of piling them all onto the
+lowest address.
+
+Because the candidate set comes from the Type-4 routes in the Loc-RIB, the
+role is re-elected whenever a PE joins or leaves the segment — a peer's
+Type-4 arriving or being withdrawn re-runs the election and re-advertises
+the Type-1 if this PE's own role changed, with no local config change. A PE
+whose own Type-4 is not selected yet advertises primary rather than
+blackholing the service while the segment converges.
+
+> **Note:** which of a multihomed pair the *remote* PE binds is remote
+> selection, tracked separately — a remote today binds a single end and does
+> not yet prefer `P` over `B` or fail over to the backup. All-active
+> therefore signals correctly but is not load-balanced: one end is used.
+
 ## Show command
 
 ```
@@ -94,6 +147,18 @@ VPWS service: eline1
   Remote SID: fcbb:bbbb:2:40::
   State: up
 ```
+
+A multihomed service adds its segment and elected role:
+
+```
+  Ethernet Segment: ES1 (ESI 00:11:22:33:44:55:66:77:88:99, single-active)
+  Role: backup (DF 192.168.0.2)
+```
+
+A segment name that resolves to nothing — no such `ethernet-segment`, or one
+whose `esi` is not set — shows as `(unresolved)` and the service stays
+single-homed, which distinguishes a typo from a deliberately single-homed
+service.
 
 `json` is supported. The state progresses `partial-config` (mandatory
 leaves missing) → `pending` (config complete, no router-id / locator
@@ -111,8 +176,11 @@ configured (or re-pointed) is found without waiting for a route churn.
 
 ## Scope
 
-Single-homed only (all-zero ESI): no multihoming, DF election, or
-primary/backup signalling yet — the L2-Attributes P/B bits are fixed at
-P=1/B=0. Forwarding requires the [eBPF data plane](ch-16-00-ebpf.md)
+Multihoming covers origination: the Type-1 carries the segment's ESI and
+DF-elected P/B bits. Not yet implemented — remote selection over a
+multihomed pair (prefer `P`, fail over to `B`, honour the per-ES A-D mass
+withdraw), all-active load balancing across both remote SIDs, and the
+control word (`C` is always 0). Forwarding requires the
+[eBPF data plane](ch-16-00-ebpf.md)
 (`system ebpf enabled`); the kernel has no End.DX2/DX2V seg6local action, so
 these SIDs are never installed via netlink.
