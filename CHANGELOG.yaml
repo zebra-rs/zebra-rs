@@ -11,6 +11,116 @@
 # Fields "distribution" and "urgency" are optional per-entry; if you omit them,
 # changelog-gen.sh defaults to distribution "unstable" and urgency "medium".
 
+- semver: 26.7.8
+  date: 2026-07-25T18:00:00+09:00
+  distribution: unstable
+  urgency: medium
+  packager: Kunihiro Ishiguro <kunihiro@zebra.rs>
+  changes:
+    - note: |
+        ### BGP per-VRF neighbors (L3VPN PE-CE)
+        * A neighbor configured under `router bgp vrf <name>` now
+          accepts the full global neighbor knob set: timers, transport
+          and session options, per-AFI knobs (the AFI grouping is now
+          shared between the global and VRF trees, so the two can no
+          longer drift), route policies and prefix-set bindings,
+          next-hop-self, and the remaining inheritable knobs
+        * Single-hop BFD, TCP-MD5 passwords and TCP-AO key-chains work
+          on per-VRF sessions; a VRF-bound passive listener socket
+          carries the authentication onto the inbound side as well
+        * Neighbors can be added, reconfigured and removed at runtime:
+          changes apply incrementally, VRF tasks respawn only for
+          task-global edits, and policy edits trigger a soft-reconfig
+          replay instead of a session reset
+        * Fixes along the way: per-VRF peers no longer start before
+          their identity is assigned, child config deletes no longer
+          resurrect deleted VRF neighbors, a runtime-added neighbor's
+          policy watch no longer leaks, TCP-AO re-subscribes on
+          reconfigure, and BFD comes up for runtime-added peers
+        * BDD coverage for the whole surface: runtime add/reconfigure/
+          remove, AFI policy, AS-path knobs, authentication,
+          enforce-first-as, route-reflector client, AddPath, the
+          neighbor detail show, and two CE neighbors under one VRF
+
+    - note: |
+        ### BGP update generation and egress
+        * `next-hop-self` / `next-hop-unchanged` are now honored on the
+          plain unicast egress path, not only on the labeled/VPN paths
+        * A VRF's self-originated `network` routes are advertised to CE
+          neighbors, including `network` statements edited at runtime on
+          an already-established session
+        * `advertisement-interval 0` really means "send now": the update
+          is flushed on the current tick via a 1 ms timer instead of
+          waiting out a stock MRAI, and the per-neighbor value is
+          honored for IPv4/IPv6 unicast as well as VPN and EVPN
+        * Adj-RIB-Out bookkeeping is corrected for AddPath and for
+          empty fan-outs
+        * A failed outbound dial parks the FSM in Active, so an inbound
+          connection from the peer is still accepted
+
+    - note: |
+        ### BGP dynamic neighbors and MP-BGP
+        * A freshly materialized dynamic peer starts its FSM, so
+          listen-range sessions reach Established; revoking a
+          listen-range now sweeps the peers it created
+        * Dynamic neighbors authenticate with prefix-scoped TCP-MD5 and
+          TCP-AO
+        * IPv4 unicast carried in MP_REACH_NLRI with an IPv4 next-hop is
+          accepted (RFC 4760 §3), as are IPv4 unicast withdrawals in
+          MP_UNREACH_NLRI (RFC 4760 §4) — both are what several
+          implementations send on the wire
+
+    - note: |
+        ### IS-IS Flex-Algorithm and SR-MPLS
+        * Per-algorithm show views: `show isis flex-algo <n>
+          {topology|route|spf|graph}`
+        * TI-LFA repairs over SR-MPLS are algorithm-aware, so a
+          Flex-Algo path is protected by a backup computed in the same
+          algorithm's topology
+        * Per-algorithm fast-reroute became an opt-out rather than an
+          opt-in
+        * A DIS that loses its circuit now purges the pseudonode LSP it
+          originated, instead of leaving it to age out
+        * New `playset` lab for IS-IS Flex-Algorithm over SR-MPLS
+
+    - note: |
+        ### Packet parsing hardening
+        * ospf-packet: a length-stamp guard and an auth-gated raw_body
+          copy close the last two findings of the OSPF packet review
+        * isis-packet: the remaining review findings are fixed; the
+          audit docs for bgp-packet, ospf-packet and isis-packet are
+          condensed to the still-open items
+
+    - note: |
+        ### 5G MUP
+        * A single MUP VRF can bind both the st1 and st2 directions, so
+          a UPF with one N6 leg no longer needs a second VRF (issue
+          #1947); the mup-lab and the book chapter follow
+
+    - note: |
+        ### Configuration, CLI and build
+        * The build moved to libyang 2
+        * Startup config load reports its outcome instead of failing
+          silently, and fails loudly when it cannot enter configure mode
+        * `#` comment lines are skipped in set/delete config documents
+        * `vtyctl` fails loudly when a show command yields no output
+        * Every unconditional `tracing::info!` in BGP is gated behind a
+          tracing category; the shard/peer-task startup lines get a new
+          instance-level `sharding` category
+        * The Debian package ships the playset `*.json` topologies, and
+          CI guards playset asset coverage on PRs
+
+    - note: |
+        ### Test infrastructure
+        * Every BDD feature that creates namespaces now ends with an
+          explicit teardown scenario, and each scenario sweeps its own
+          leftovers, so failures no longer cascade into the next feature
+        * Namespaces are created with `rp_filter` zeroed, so a host with
+          a non-default `rp_filter` no longer poisons the suite
+        * Convergence assertions poll instead of sleeping a fixed
+          interval; the full-suite concurrency default is raised from 8
+          to 16
+
 - semver: 26.7.7
   date: 2026-07-19T18:00:00+09:00
   distribution: unstable
