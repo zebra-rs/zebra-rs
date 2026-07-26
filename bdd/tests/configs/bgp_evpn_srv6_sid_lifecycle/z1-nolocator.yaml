@@ -1,0 +1,36 @@
+# z1 — an EVPN-over-SRv6 VTEP whose BGP instance REFERENCES locator LOC1
+# that does not exist yet. `advertise-all-vni` + `encapsulation srv6` are
+# already on, so Type-2 / Type-3 routes are originated before any SID can
+# be carved — the "originated before the locator resolved" case the
+# reconcile in `process_sr_rx` exists to repair. The locator is created at
+# runtime by the feature.
+interface:
+- if-name: lo
+  ipv6:
+    address: 2001:db8::1/128
+- if-name: z1z2
+  ipv6:
+    address: 2001:db8:12::1/64
+vxlan:
+- name: vxlan10
+  vni: 10
+  local-address: 2001:db8::1
+router:
+  bgp:
+    global:
+      as: 65001
+      router-id: 192.168.0.1
+    segment-routing:
+      srv6:
+        locator: LOC1
+    afi-safi:
+    - name: evpn
+      advertise-all-vni: true
+      encapsulation: srv6
+    neighbor:
+    - remote-address: 2001:db8:12::2
+      enabled: true
+      remote-as: 65001
+      afi-safi:
+      - name: evpn
+        enabled: true

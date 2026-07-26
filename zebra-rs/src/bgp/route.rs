@@ -5288,6 +5288,27 @@ pub fn route_update_evpn(
     if peer.is_ibgp() && attrs.local_pref.is_none() {
         attrs.local_pref = Some(LocalPref::default());
     }
+
+    // ORIGINATOR_ID / CLUSTER_LIST for route reflection (RFC 4456 §8), the
+    // same stamping the unicast paths do. Reflecting an EVPN route without
+    // them leaves the fabric with no loop prevention: a client cannot tell
+    // that a route it receives back through a redundant reflector is one it
+    // originated, and a second reflector has no cluster path to check.
+    if peer.peer_type == PeerType::IBGP && rib.typ == BgpRibType::IBGP {
+        // Set once, by the first reflector, and preserved thereafter so it
+        // keeps identifying the original source.
+        if attrs.originator_id.is_none() {
+            attrs.originator_id = Some(OriginatorId::new(rib.router_id));
+        }
+        if let Some(ref mut cluster_list) = attrs.cluster_list {
+            cluster_list.list.insert(0, *bgp.router_id);
+        } else {
+            let mut cluster_list = ClusterList::new();
+            cluster_list.list.push(*bgp.router_id);
+            attrs.cluster_list = Some(cluster_list);
+        }
+    }
+
     // Strip the iBGP-only attributes (RR attrs + LOCAL_PREF) on the eBGP
     // egress path — AFI/SAFI-agnostic: an iBGP-learned EVPN route reflected by
     // an upstream RR carries them through the cloned attrs. See
