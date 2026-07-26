@@ -1,0 +1,100 @@
+# z2 — mirror of z1 running BOTH EVPN-over-SRv6 services at once, the
+# control-plane shape of symmetric IRB:
+#   L2 — `advertise-all-vni` + `encapsulation srv6` bridges VNI 10, so a
+#        local MAC leaves as a Type-2 carrying a per-VNI End.DT2U and the
+#        IMET carries an End.DT2M.
+#   L3 — vrf-cust (`encapsulation srv6` + `evpn advertise-ipv4/ipv6`)
+#        routes between subnets, so its prefixes leave as Type-5 carrying
+#        the per-VRF End.DT46.
+# All three SIDs are carved from the SAME locator LOC2 and the same SID
+# pool, which is the point of the test: the L2 and L3 allocators must
+# coexist without colliding or evicting each other.
+vrf:
+- name: vrf-cust
+  ipv4:
+    route-target:
+      import:
+      - 65001:100
+      export:
+      - 65001:100
+  ipv6:
+    route-target:
+      import:
+      - 65001:100
+      export:
+      - 65001:100
+interface:
+- if-name: lo
+  ipv6:
+    address: 2001:db8::2/128
+- if-name: z2z1
+  ipv6:
+    address: 2001:db8:0:12::2/64
+- if-name: ce2
+  vrf: vrf-cust
+  ipv4:
+    address: 10.2.2.1/24
+  ipv6:
+    address: 2001:db8:b::1/64
+segment-routing:
+  locator:
+  - name: LOC2
+    prefix: fcbb:bbbb:2::/48
+    behavior: usid
+vxlan:
+- name: vxlan10
+  vni: 10
+  local-address: 2001:db8::2
+router:
+  isis:
+    net: 49.0000.0000.0000.0002.00
+    hostname: z2
+    is-type: level-2-only
+    segment-routing:
+      srv6:
+        locator: LOC2
+    interface:
+    - if-name: lo
+      ipv6:
+        enabled: true
+    - if-name: z2z1
+      network-type: point-to-point
+      metric: 1
+      ipv6:
+        enabled: true
+  bgp:
+    global:
+      as: 65001
+      router-id: 192.168.0.2
+    timer:
+      adv-interval:
+        ibgp: 1
+    segment-routing:
+      srv6:
+        locator: LOC2
+    afi-safi:
+    - name: evpn
+      advertise-all-vni: true
+      encapsulation: srv6
+    neighbor:
+    - remote-address: 2001:db8::1
+      remote-as: 65001
+      update-source: 2001:db8::2
+      enabled: true
+      afi-safi:
+      - name: evpn
+        enabled: true
+    vrf:
+    - name: vrf-cust
+      rd: 65001:200
+      encapsulation: srv6
+      evpn:
+        advertise-ipv4: true
+        advertise-ipv6: true
+      afi-safi:
+        ipv4:
+          network:
+          - prefix: 10.2.2.0/24
+        ipv6:
+          network:
+          - prefix: 2001:db8:b::/64
