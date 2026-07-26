@@ -4633,6 +4633,60 @@ mod adv_timer_phantom_tests {
         );
     }
 
+    /// A route re-advertised with a *changed* attribute must not stay
+    /// queued under its previous attribute group. `cache_evpn` groups
+    /// pending NLRIs by attribute and `flush_evpn` emits one UPDATE per
+    /// group, so a stale entry ships the route twice and the peer keeps
+    /// whichever attribute happened to be emitted last — arbitrary, because
+    /// the groups drain in `BTreeMap` key order.
+    ///
+    /// This is what made a DF-elected VPWS Type-1 flipping B -> P reach the
+    /// peer as B: the local Loc-RIB said primary while the peer still
+    /// believed backup.
+    #[tokio::test]
+    async fn send_evpn_readvertise_evicts_the_previous_attr_group() {
+        let (mut peer, _rx) = peer_with_channel();
+        let route = EvpnRoute::EthernetAd(EvpnEthernetAd {
+            id: 0,
+            rd: RouteDistinguisher::default(),
+            esi: [0x00, 0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77, 0x88, 0x99],
+            ether_tag: 101,
+            label: 0,
+        });
+
+        // Queue it under one attribute, then re-advertise under another
+        // before the debounce timer flushes.
+        let backup = Arc::new(BgpAttr::new());
+        let mut primary_attr = BgpAttr::new();
+        primary_attr.local_pref = Some(bgp_packet::LocalPref { local_pref: 200 });
+        let primary = Arc::new(primary_attr);
+
+        peer.send_evpn(route.clone(), backup.clone(), true);
+        peer.send_evpn(route.clone(), primary.clone(), true);
+
+        // Exactly one group holds it, and it is the newer one.
+        assert!(
+            !peer.cache_evpn.contains_key(&backup),
+            "the superseded attr group must be dropped, not emitted alongside"
+        );
+        assert!(
+            peer.cache_evpn
+                .get(&primary)
+                .is_some_and(|set| set.contains(&route)),
+            "the route must be queued under the attribute last advertised"
+        );
+        assert_eq!(peer.cache_evpn_rev.get(&route), Some(&primary));
+
+        // Re-advertising with the *same* attribute is idempotent.
+        peer.send_evpn(route.clone(), primary.clone(), true);
+        assert_eq!(peer.cache_evpn.len(), 1);
+        assert_eq!(
+            peer.cache_evpn.get(&primary).map(|s| s.len()),
+            Some(1),
+            "a repeat advertise must not duplicate the NLRI"
+        );
+    }
+
     /// EVPN twin of the VPNv4 zero-interval test above, using a
     /// distinct `EvpnRoute` shape to catch a copy-paste mistake in the
     /// mirrored wiring (VPNv6 is identical in shape to VPNv4, so it

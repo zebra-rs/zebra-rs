@@ -158,6 +158,34 @@ Feature: BGP EVPN VPWS multihoming — ESI and DF-elected P/B (RFC 8214 §5)
     When I apply config "z2-1.yaml" to namespace "z2"
     Then show command "show bgp evpn vpws" in namespace "z1" should eventually contain "Role: backup (DF 192.168.0.2)"
 
+  Scenario: The remote PE binds the primary of a multihomed pair
+    Given the test topology exists
+    # z1 and z2 both advertise service instance 101 under es1's ESI. Instance
+    # 101 carves to z2, so z2 sends P=1 and z1 sends B=1 — z3 must bind z2's
+    # SID (carved from LOC2), not simply the first route it happened to see.
+    Then show command "show bgp evpn vpws" in namespace "z3" should eventually contain "Remote SID: fcbb:bbbb:2:"
+    And show command "show bgp evpn vpws" in namespace "z3" should contain "(via 192.168.0.2)"
+    # Both ends are visible to z3, and it knows one is standing by.
+    And show command "show bgp evpn vpws" in namespace "z3" should contain "Remote endpoints: 2 (multihomed; 1 standing by)"
+    And show command "show bgp evpn vpws" in namespace "z3" should contain "State: up"
+
+  Scenario: Losing the primary fails the service over to the backup
+    Given the test topology exists
+    # Remove z2's service so it withdraws its per-EVI Type-1, leaving only
+    # z1's B=1 route. Before remote selection this unbound the AC and the
+    # E-Line went down; now it re-selects onto the backup.
+    When I apply config "z2-novpws.yaml" to namespace "z2"
+    Then show command "show bgp evpn vpws" in namespace "z3" should eventually contain "Remote SID: fcbb:bbbb:1:"
+    And show command "show bgp evpn vpws" in namespace "z3" should contain "(via 192.168.0.1, backup)"
+    # One endpoint left, so no standby line, and the service stays up.
+    And show command "show bgp evpn vpws" in namespace "z3" should not contain "standing by"
+    And show command "show bgp evpn vpws" in namespace "z3" should contain "State: up"
+    # Restoring the primary takes the service back — the re-selection is
+    # symmetric, and z3 changed no config in either direction.
+    When I apply config "z2-1.yaml" to namespace "z2"
+    Then show command "show bgp evpn vpws" in namespace "z3" should eventually contain "Remote SID: fcbb:bbbb:2:"
+    And show command "show bgp evpn vpws" in namespace "z3" should contain "(via 192.168.0.2)"
+
   Scenario: Teardown topology
     Given the test topology exists
     When I stop zebra-rs in namespace "z1"

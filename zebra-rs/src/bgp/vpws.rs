@@ -60,6 +60,16 @@ pub struct VpwsService {
     /// The remote's L2 MTU when a matching Type-1 was **rejected** for an
     /// MTU mismatch — the service shows `mtu-mismatch` instead of `up`.
     pub remote_mtu_mismatch: Option<u16>,
+    /// The PE whose SID is currently bound, and whether it was chosen as the
+    /// segment's backup rather than its primary. Display state: on a
+    /// multihomed far end this is the difference between "converged" and
+    /// "running on the standby".
+    pub remote_pe: Option<IpAddr>,
+    /// True when the bound remote advertised `B=1` rather than `P=1`.
+    pub remote_is_backup: bool,
+    /// How many usable remotes were advertised for this service instance —
+    /// 2 or more means the far end is multihomed and one is standing by.
+    pub remote_count: usize,
     /// Name configured on the `ethernet-segment` leaf, if any. Usually
     /// absent: every commercial implementation derives the segment from the
     /// attachment circuit, so this is the override for the cases inference
@@ -130,6 +140,105 @@ impl EsBinding {
     }
 }
 
+/// The all-zero ESI a single-homed service advertises.
+pub const ZERO_ESI: [u8; 10] = [0; 10];
+
+/// One remote endpoint advertised for a VPWS service instance — a per-EVI
+/// Type-1 that matched this service's `remote-service-id` within its EVI.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct VpwsRemote {
+    /// The advertised `End.DX2` / `End.DX2V` L2-Service SID.
+    pub sid: Ipv6Addr,
+    /// L2 MTU from the route's Layer-2 Attributes EC; 0 = none signalled.
+    pub mtu: u16,
+    /// The route's ESI. All-zero means the far end is single-homed.
+    pub esi: [u8; 10],
+    /// The advertising PE (the route's BGP next-hop) — the tie-break, and
+    /// what the per-ES A-D liveness check keys on.
+    pub originator: IpAddr,
+    /// RFC 8214 §3.1 P bit: this PE forwards for the service instance.
+    pub primary: bool,
+    /// RFC 8214 §3.1 B bit: this PE is the standby.
+    pub backup: bool,
+}
+
+impl VpwsRemote {
+    /// Preference rank, lower is better; `None` means the remote must not be
+    /// used at all.
+    ///
+    /// A single-homed remote (all-zero ESI) is always usable regardless of
+    /// the bits — an implementation that omits the Layer-2 Attributes EC
+    /// entirely decodes as `P=0 B=0`, and refusing those would break every
+    /// plain point-to-point peer. Only on a *multihomed* remote do the bits
+    /// carry an election result: primary beats backup, and a PE that claims
+    /// neither has lost the election and must not be forwarded to.
+    fn rank(&self) -> Option<u8> {
+        match (self.esi == ZERO_ESI, self.primary, self.backup) {
+            (true, _, _) => Some(0),
+            (false, true, _) => Some(0),
+            (false, false, true) => Some(1),
+            (false, false, false) => None,
+        }
+    }
+}
+
+/// The outcome of choosing among the remotes advertised for one service.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum VpwsSelection {
+    /// Bind this remote's SID to the attachment circuit. `usable` counts
+    /// every remote that survived filtering, so a caller can tell a
+    /// multihomed far end (2+) from a plain one without re-scanning.
+    Bound { remote: VpwsRemote, usable: usize },
+    /// Remotes exist but every one clashes on L2 MTU (RFC 8214 §3.1), so
+    /// none may be bound. Carries one clashing MTU for `show`.
+    MtuMismatch(u16),
+    /// Nothing usable: no matching route, or every candidate lost its
+    /// election / was mass-withdrawn.
+    None,
+}
+
+/// Choose which advertised remote a VPWS service binds.
+///
+/// MTU is filtered first, so a primary with a clashing MTU steps aside for a
+/// compatible backup rather than wedging the service. Then the RFC 8214 §5
+/// roles rank the survivors — primary over backup, non-designated dropped —
+/// with the lowest originating address breaking a tie so both ends of a
+/// segment make the same choice.
+///
+/// Under all-active every attached PE advertises `P=1`, so this picks the
+/// lowest-addressed of them: correct, since any of them can deliver, but not
+/// load-balanced. Spreading flows across several remote SIDs needs an
+/// xconnect that can hold more than one, which is a data-plane change.
+pub fn select_remote(candidates: Vec<VpwsRemote>, local_mtu: Option<u16>) -> VpwsSelection {
+    if candidates.is_empty() {
+        return VpwsSelection::None;
+    }
+    let mtu_ok = |remote_mtu: u16| match local_mtu {
+        Some(local) if local != 0 && remote_mtu != 0 => local == remote_mtu,
+        _ => true,
+    };
+    let clash = candidates.iter().find(|c| !mtu_ok(c.mtu)).map(|c| c.mtu);
+    let mut usable: Vec<(u8, VpwsRemote)> = candidates
+        .into_iter()
+        .filter(|c| mtu_ok(c.mtu))
+        .filter_map(|c| c.rank().map(|r| (r, c)))
+        .collect();
+    if usable.is_empty() {
+        // Report the MTU clash only when that is what removed everything —
+        // a lost election is not an MTU problem.
+        return match clash {
+            Some(mtu) => VpwsSelection::MtuMismatch(mtu),
+            None => VpwsSelection::None,
+        };
+    }
+    usable.sort_by(|(ra, a), (rb, b)| ra.cmp(rb).then_with(|| a.originator.cmp(&b.originator)));
+    let count = usable.len();
+    VpwsSelection::Bound {
+        remote: usable.remove(0).1,
+        usable: count,
+    }
+}
+
 /// Resolve which Ethernet Segment a VPWS service sits on, from its
 /// `ethernet-segment` leaf (`explicit`), its attachment circuit (`ac`) and
 /// the configured segments.
@@ -184,15 +293,6 @@ impl VpwsService {
         ))
     }
 
-    /// RFC 8214 §3.1 MTU check: a remote is usable unless **both** ends
-    /// signal a non-zero L2 MTU and they differ.
-    pub fn mtu_compatible(&self, remote_mtu: u16) -> bool {
-        match self.mtu {
-            Some(local) if local != 0 && remote_mtu != 0 => local == remote_mtu,
-            _ => true,
-        }
-    }
-
     /// The cradle xconnect scoping pair `(802.1Q VID, End.DX2V VLAN-table
     /// id — the EVI)`; `(0, 0)` for a whole-port `End.DX2` service.
     pub fn vid_table(&self) -> (u16, u32) {
@@ -242,6 +342,142 @@ mod tests {
 
     fn s(v: &str) -> String {
         v.to_string()
+    }
+
+    const ES1: [u8; 10] = [0x00, 0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77, 0x88, 0x99];
+
+    fn pe(last: u8) -> IpAddr {
+        use std::net::Ipv4Addr;
+        IpAddr::V4(Ipv4Addr::new(192, 168, 0, last))
+    }
+
+    fn sid(last: u16) -> Ipv6Addr {
+        Ipv6Addr::new(0xfcbb, 0xbbbb, last, 0, 0, 0, 0, 0)
+    }
+
+    /// A remote on ES1 advertising the given role bits.
+    fn mh(last: u8, primary: bool, backup: bool) -> VpwsRemote {
+        VpwsRemote {
+            sid: sid(last as u16),
+            mtu: 0,
+            esi: ES1,
+            originator: pe(last),
+            primary,
+            backup,
+        }
+    }
+
+    /// A single-homed remote — all-zero ESI, no role bits at all (the shape
+    /// a peer that omits the Layer-2 Attributes EC produces).
+    fn sh(last: u8) -> VpwsRemote {
+        VpwsRemote {
+            sid: sid(last as u16),
+            mtu: 0,
+            esi: ZERO_ESI,
+            originator: pe(last),
+            primary: false,
+            backup: false,
+        }
+    }
+
+    fn bound(sel: &VpwsSelection) -> &VpwsRemote {
+        match sel {
+            VpwsSelection::Bound { remote, .. } => remote,
+            other => panic!("expected a bound remote, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn primary_beats_backup() {
+        // z2 advertises P, z3 advertises B: the primary is bound even though
+        // it is the higher address, so role beats the tie-break.
+        let sel = select_remote(vec![mh(3, false, true), mh(2, true, false)], None);
+        assert_eq!(bound(&sel).originator, pe(2));
+        assert!(matches!(sel, VpwsSelection::Bound { usable: 2, .. }));
+    }
+
+    #[test]
+    fn losing_the_primary_fails_over_to_the_backup() {
+        // The primary's route is gone (mass withdraw, or its own withdraw):
+        // what remains is the backup, and it binds rather than the service
+        // going down. This is the whole point of remote selection.
+        let sel = select_remote(vec![mh(3, false, true)], None);
+        assert_eq!(bound(&sel).originator, pe(3));
+        assert!(bound(&sel).backup);
+    }
+
+    #[test]
+    fn non_designated_is_never_used() {
+        // P=0 B=0 on a multihomed remote means that PE lost the election —
+        // forwarding to it blackholes. With only such remotes there is no
+        // usable endpoint at all.
+        assert_eq!(
+            select_remote(vec![mh(2, false, false), mh(3, false, false)], None),
+            VpwsSelection::None
+        );
+        // ... and it is skipped in favour of a usable peer.
+        let sel = select_remote(vec![mh(2, false, false), mh(3, false, true)], None);
+        assert_eq!(bound(&sel).originator, pe(3));
+        assert!(matches!(sel, VpwsSelection::Bound { usable: 1, .. }));
+    }
+
+    #[test]
+    fn single_homed_remote_ignores_the_role_bits() {
+        // A plain point-to-point peer may not send the Layer-2 Attributes EC
+        // at all, which decodes as P=0 B=0. Excluding those would break every
+        // pre-multihoming deployment, so an all-zero ESI is always usable.
+        let sel = select_remote(vec![sh(2)], None);
+        assert_eq!(bound(&sel).originator, pe(2));
+        assert!(!bound(&sel).backup);
+    }
+
+    #[test]
+    fn equal_rank_breaks_on_lowest_originator() {
+        // All-active: every attached PE advertises P=1, so pick deterministically
+        // — both ends of the segment must reach the same answer.
+        let sel = select_remote(vec![mh(4, true, false), mh(2, true, false)], None);
+        assert_eq!(bound(&sel).originator, pe(2));
+        assert!(matches!(sel, VpwsSelection::Bound { usable: 2, .. }));
+    }
+
+    #[test]
+    fn mtu_is_filtered_before_the_role_ranking() {
+        // The primary clashes on MTU but the backup agrees: bind the backup
+        // rather than wedging the service on the unusable primary.
+        let mut primary = mh(2, true, false);
+        primary.mtu = 9000;
+        let mut backup = mh(3, false, true);
+        backup.mtu = 1500;
+        let sel = select_remote(vec![primary, backup], Some(1500));
+        assert_eq!(bound(&sel).originator, pe(3));
+    }
+
+    #[test]
+    fn mtu_mismatch_only_when_that_is_what_removed_everything() {
+        // Every candidate clashes -> mtu-mismatch, carrying the remote value.
+        let mut clash = sh(2);
+        clash.mtu = 9000;
+        assert_eq!(
+            select_remote(vec![clash], Some(1500)),
+            VpwsSelection::MtuMismatch(9000)
+        );
+        // Removed by the election instead -> plain None, not an MTU story.
+        assert_eq!(
+            select_remote(vec![mh(2, false, false)], Some(1500)),
+            VpwsSelection::None
+        );
+        // A zero MTU on either side disables the check (RFC 8214 §3.1).
+        let mut zero = sh(2);
+        zero.mtu = 0;
+        assert!(matches!(
+            select_remote(vec![zero], Some(1500)),
+            VpwsSelection::Bound { .. }
+        ));
+    }
+
+    #[test]
+    fn no_candidates_is_none() {
+        assert_eq!(select_remote(vec![], Some(1500)), VpwsSelection::None);
     }
 
     #[test]
