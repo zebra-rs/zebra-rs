@@ -134,6 +134,30 @@ Feature: BGP EVPN VPWS multihoming — ESI and DF-elected P/B (RFC 8214 §5)
     When I apply config "z1-1.yaml" to namespace "z1"
     Then show command "show bgp evpn vpws" in namespace "z1" should eventually contain "Role: backup (DF 192.168.0.2)"
 
+  Scenario: Preference-based DF election overrides the carving ordinal
+    Given the test topology exists
+    # Switch es1 to Alg 2 with z1 bidding 300 and z2 bidding 100. Under
+    # carving, instance 101 elected z2 (ordinal 101 % 2 = 1); preference is
+    # per-segment, so the higher bid now wins every instance — the DF flips
+    # to z1 with no change to the service ids.
+    When I apply config "z1-pref.yaml" to namespace "z1"
+    And I apply config "z2-pref.yaml" to namespace "z2"
+    Then show command "show bgp evpn ethernet-segment" in namespace "z1" should eventually contain "DF algorithm: preference-based (local pref 300)"
+    And show command "show bgp evpn vpws" in namespace "z1" should eventually contain "Role: primary (DF 192.168.0.1)"
+    And show command "show bgp evpn vpws" in namespace "z2" should eventually contain "Role: backup (DF 192.168.0.1)"
+    # Each PE's bid rides its Type-4's DF Election EC, so the peer sees it.
+    And show command "show bgp evpn" in namespace "z2" should eventually contain "df-election:alg2:pref300"
+    And show command "show bgp evpn ethernet-segment" in namespace "z1" should contain "192.168.0.2 pref 100"
+    # Raising z2 above z1 hands the DF back — the election is re-run from the
+    # peer's Type-4 alone, with no config change on z1.
+    When I apply config "z1-1.yaml" to namespace "z1"
+    Then show command "show bgp evpn ethernet-segment" in namespace "z1" should eventually contain "DF algorithm: service-carving (default)"
+    # One PE back on Alg 0 means the segment cannot agree, so RFC 8584
+    # negotiation drops both to carving — and instance 101 carves to z2 again.
+    And show command "show bgp evpn vpws" in namespace "z1" should eventually contain "Role: backup (DF 192.168.0.2)"
+    When I apply config "z2-1.yaml" to namespace "z2"
+    Then show command "show bgp evpn vpws" in namespace "z1" should eventually contain "Role: backup (DF 192.168.0.2)"
+
   Scenario: Teardown topology
     Given the test topology exists
     When I stop zebra-rs in namespace "z1"

@@ -166,6 +166,7 @@ impl ExtCommunityValue {
         Some(DfElectionEc {
             df_alg: self.val[0] & DfElectionEc::DF_ALG_MASK,
             bitmap: u16::from_be_bytes([self.val[1], self.val[2]]),
+            pref: u16::from_be_bytes([self.val[4], self.val[5]]),
         })
     }
 
@@ -528,6 +529,10 @@ pub struct DfElectionEc {
     pub df_alg: u8,
     /// Capability Bitmap (16 bits, RFC MSB-0 numbering: Bit 0 = `0x8000`).
     pub bitmap: u16,
+    /// DF Preference, in the last two octets of the value
+    /// (draft-ietf-bess-evpn-pref-df). Only meaningful under
+    /// [`ALG_PREF`](Self::ALG_PREF); zero and ignored otherwise.
+    pub pref: u16,
 }
 
 impl DfElectionEc {
@@ -538,6 +543,18 @@ impl DfElectionEc {
     pub const ALG_DEFAULT: u8 = 0;
     /// DF Alg 1 — Highest Random Weight (HRW, RFC 8584 §3).
     pub const ALG_HRW: u8 = 1;
+    /// DF Alg 2 — Preference-based (draft-ietf-bess-evpn-pref-df). The
+    /// highest [`pref`](Self::pref) wins, ties broken by lowest IP. This is
+    /// what IOS-XR (`service-carving preference-based`), Junos
+    /// (`df-election-type preference`), Arista
+    /// (`designated-forwarder election algorithm preference`) and FRR
+    /// (`evpn mh es-df-pref`) all expose.
+    pub const ALG_PREF: u8 = 2;
+
+    /// The preference every implementation defaults to when the algorithm
+    /// is selected but no value is configured (FRR
+    /// `EVPN_MH_DF_PREF_DEFAULT`).
+    pub const PREF_DEFAULT: u16 = 32767;
 
     /// Bitmap Bit 1 (RFC 8584 §2.2): AC-DF Capability (AC-Influenced DF
     /// election). MSB-0 within the 16-bit Bitmap → `0x4000`.
@@ -571,6 +588,9 @@ impl From<DfElectionEc> for ExtCommunityValue {
         // RSV (high 3 bits of val[0]) stays 0; only the low 5 bits carry DF Alg.
         val[0] = df.df_alg & DfElectionEc::DF_ALG_MASK;
         val[1..3].copy_from_slice(&df.bitmap.to_be_bytes());
+        // val[3] stays reserved; the DF Preference occupies the last two
+        // octets (EC bytes 6..8 counting the two type octets).
+        val[4..6].copy_from_slice(&df.pref.to_be_bytes());
         ExtCommunityValue {
             high_type: ExtCommunityType::Evpn as u8,
             low_type: EVPN_DF_ELECTION_SUB_TYPE,
@@ -699,6 +719,9 @@ impl fmt::Display for ExtCommunityValue {
             // DF Election EC (RFC 8584 §2.2): render the algorithm and append
             // `+ac-df` when the AC-Influenced DF election bit is set.
             write!(f, "df-election:alg{}", df.df_alg)?;
+            if df.df_alg == DfElectionEc::ALG_PREF {
+                write!(f, ":pref{}", df.pref)?;
+            }
             if df.ac_df() {
                 write!(f, "+ac-df")?;
             }
@@ -1156,6 +1179,7 @@ mod tests {
         let ec: ExtCommunityValue = DfElectionEc {
             df_alg: DfElectionEc::ALG_HRW,
             bitmap: DfElectionEc::CAP_AC_DF,
+            pref: 0,
         }
         .into();
         assert_eq!(ec.high_type, 0x06);
@@ -1167,12 +1191,69 @@ mod tests {
     }
 
     #[test]
+    fn df_election_pref_wire_layout_matches_frr() {
+        // draft-ietf-bess-evpn-pref-df: the DF Preference is the LAST two
+        // octets of the 8-octet EC, i.e. val[4..6], with val[3] still
+        // reserved. Pinned against FRR's `encode_df_elect_extcomm`
+        // (bgp_evpn_private.h), which writes eval->val[6]/val[7], and its
+        // decoder (bgp_attr_df_pref_from_ec), which skips 3 octets after the
+        // alg byte before reading a BE16 — interop depends on this offset.
+        let ec: ExtCommunityValue = DfElectionEc {
+            df_alg: DfElectionEc::ALG_PREF,
+            bitmap: 0,
+            pref: DfElectionEc::PREF_DEFAULT,
+        }
+        .into();
+        let mut buf = BytesMut::new();
+        ec.encode(&mut buf);
+        // 32767 = 0x7FFF in the final two octets.
+        assert_eq!(&buf[..], &[0x06, 0x06, 0x02, 0x00, 0x00, 0x00, 0x7f, 0xff]);
+        // And it survives the round trip.
+        let back = ec.as_df_election().expect("decodes");
+        assert_eq!(back.df_alg, DfElectionEc::ALG_PREF);
+        assert_eq!(back.pref, 32767);
+
+        // A non-preference EC leaves the field zero, so an Alg-0 speaker is
+        // byte-identical to what it emitted before preference existed.
+        let carving: ExtCommunityValue = DfElectionEc {
+            df_alg: DfElectionEc::ALG_DEFAULT,
+            bitmap: 0,
+            pref: 0,
+        }
+        .into();
+        assert_eq!(carving.val, [0, 0, 0, 0, 0, 0]);
+    }
+
+    #[test]
+    fn df_election_pref_renders_only_for_alg_two() {
+        let pref: ExtCommunityValue = DfElectionEc {
+            df_alg: DfElectionEc::ALG_PREF,
+            bitmap: DfElectionEc::CAP_AC_DF,
+            pref: 200,
+        }
+        .into();
+        assert_eq!(pref.to_string(), "df-election:alg2:pref200+ac-df");
+        // Under carving the field is meaningless, so it is not rendered even
+        // if a peer sent a stale non-zero value.
+        let mut carving: ExtCommunityValue = DfElectionEc {
+            df_alg: DfElectionEc::ALG_DEFAULT,
+            bitmap: 0,
+            pref: 0,
+        }
+        .into();
+        carving.val[4] = 0x00;
+        carving.val[5] = 0x64;
+        assert_eq!(carving.to_string(), "df-election:alg0");
+    }
+
+    #[test]
     fn df_election_df_alg_is_low_five_bits() {
         // Only the low 5 bits of val[0] carry DF Alg; the high 3 (RSV) stay 0.
         // A 5-bit value of 31 (max) must round-trip without bleeding into RSV.
         let ec: ExtCommunityValue = DfElectionEc {
             df_alg: 31,
             bitmap: 0,
+            pref: 0,
         }
         .into();
         assert_eq!(ec.val[0], 0x1F, "DF Alg in low 5 bits, RSV clear");
@@ -1184,6 +1265,7 @@ mod tests {
         let wide: ExtCommunityValue = DfElectionEc {
             df_alg: 0xFF,
             bitmap: 0,
+            pref: 0,
         }
         .into();
         assert_eq!(wide.val[0], 0x1F);
@@ -1194,6 +1276,7 @@ mod tests {
         let mut df = DfElectionEc {
             df_alg: DfElectionEc::ALG_DEFAULT,
             bitmap: 0,
+            pref: 0,
         };
         assert!(!df.ac_df());
         df.set_ac_df(true);
@@ -1211,6 +1294,7 @@ mod tests {
         let original: ExtCommunityValue = DfElectionEc {
             df_alg: DfElectionEc::ALG_HRW,
             bitmap: DfElectionEc::CAP_AC_DF,
+            pref: 0,
         }
         .into();
         let mut buf = BytesMut::new();
@@ -1228,12 +1312,14 @@ mod tests {
         let hrw_ac: ExtCommunityValue = DfElectionEc {
             df_alg: DfElectionEc::ALG_HRW,
             bitmap: DfElectionEc::CAP_AC_DF,
+            pref: 0,
         }
         .into();
         assert_eq!(hrw_ac.to_string(), "df-election:alg1+ac-df");
         let default_only: ExtCommunityValue = DfElectionEc {
             df_alg: DfElectionEc::ALG_DEFAULT,
             bitmap: 0,
+            pref: 0,
         }
         .into();
         assert_eq!(default_only.to_string(), "df-election:alg0");

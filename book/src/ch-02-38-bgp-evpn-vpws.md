@@ -143,12 +143,43 @@ community:
 | `all-active` | *every* attached PE is primary — `P=1 B=0` |
 | `single-active` | the elected DF is `P=1 B=0`, its successor in the carving order is `P=0 B=1`, any further PE is `P=0 B=0` |
 
-The election runs per `<ESI, VPWS service instance>`: the PEs advertising
-the segment's Type-4 are ordered by ascending VTEP address and the DF is
-ordinal `service-id mod N` (RFC 7432 §8.5 service carving). Keying on the
-service instance rather than a fixed ordinal is what spreads different
-E-Lines on one segment across both PEs instead of piling them all onto the
-lowest address.
+By default the election runs per `<ESI, VPWS service instance>`: the PEs
+advertising the segment's Type-4 are ordered by ascending VTEP address and
+the DF is ordinal `service-id mod N` (RFC 7432 §8.5 service carving). Keying
+on the service instance rather than a fixed ordinal is what spreads
+different E-Lines on one segment across both PEs instead of piling them all
+onto the lowest address.
+
+**Preference-based election** (Alg 2, draft-ietf-bess-evpn-pref-df) replaces
+that hash with an explicit choice — set a preference on the segment and the
+highest bid wins, ties broken by the lowest originating address:
+
+```
+  ethernet-segment ES1
+   esi 00:11:22:33:44:55:66:77:88:99
+   redundancy-mode single-active
+   interface ce1
+   df-election
+    preference 300
+    ac-df           # optional: advertise the AC-Influenced DF capability
+```
+
+Preference is per-*segment*, so one PE wins every service instance on it —
+that is the trade against carving, and the reason to use it: the operator
+pins the DF instead of accepting a hash. The value rides each PE's Type-4 in
+the DF Election extended community, so `show bgp evpn` on a peer renders
+`df-election:alg2:pref300`.
+
+Every PE on the segment must advertise the same algorithm. RFC 8584
+negotiation drops the whole segment back to service carving if any one of
+them disagrees, so a half-configured segment silently reverts rather than
+splitting the election — `show bgp evpn ethernet-segment` reports the
+negotiated algorithm and each PE's bid.
+
+This interoperates with IOS-XR `service-carving preference-based`, Junos
+`df-election-type preference`, Arista
+`designated-forwarder election algorithm preference` and FRR
+`evpn mh es-df-pref`.
 
 Because the candidate set comes from the Type-4 routes in the Loc-RIB, the
 role is re-elected whenever a PE joins or leaves the segment — a peer's

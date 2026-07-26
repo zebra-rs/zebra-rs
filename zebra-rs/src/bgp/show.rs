@@ -2489,6 +2489,8 @@ struct EthernetSegmentJson {
     esi: Option<String>,
     redundancy_mode: String,
     interface: Option<String>,
+    df_preference: Option<u16>,
+    ac_df: bool,
     es_import_rt: Option<String>,
     member_vteps: Vec<EsMemberVtepJson>,
     df_algorithm: Option<String>,
@@ -2511,25 +2513,25 @@ fn show_bgp_evpn_ethernet_segment(
             let mut designated_forwarder = None;
             if let Some(esi) = es.esi {
                 let cands = bgp.es_df_candidates(&esi);
-                let vteps: Vec<std::net::IpAddr> = cands.iter().map(|(ip, _)| *ip).collect();
-                for (ordinal, (vtep, _)) in cands.iter().enumerate() {
+                for (ordinal, (vtep, _, _)) in cands.iter().enumerate() {
                     member_vteps.push(EsMemberVtepJson {
                         ordinal,
                         vtep: vtep.to_string(),
                         local: *vtep == local,
                     });
                 }
-                let algs: Vec<u8> = cands.iter().map(|(_, a)| *a).collect();
+                let algs: Vec<u8> = cands.iter().map(|(_, a, _)| *a).collect();
                 let alg = super::ethernet_segment::negotiate_df_alg(&algs);
                 df_algorithm = Some(
-                    if alg == bgp_packet::DfElectionEc::ALG_DEFAULT {
-                        "service-carving (default)"
-                    } else {
-                        "negotiated (non-default; carving fallback)"
+                    match alg {
+                        bgp_packet::DfElectionEc::ALG_DEFAULT => "service-carving",
+                        bgp_packet::DfElectionEc::ALG_PREF => "preference-based",
+                        _ => "unsupported (carving fallback)",
                     }
                     .to_string(),
                 );
-                designated_forwarder = super::ethernet_segment::designated_forwarder(&vteps, 0)
+                designated_forwarder = super::ethernet_segment::elect_forwarders(&cands, 0)
+                    .0
                     .map(|df| df.to_string());
             }
             list.push(EthernetSegmentJson {
@@ -2537,6 +2539,8 @@ fn show_bgp_evpn_ethernet_segment(
                 esi: es.esi.map(|esi| bgp_packet::esi_display(&esi)),
                 redundancy_mode: es.redundancy_mode.as_str().to_string(),
                 interface: es.interface.clone(),
+                df_preference: es.df_preference,
+                ac_df: es.ac_df,
                 es_import_rt: es.es_import_rt().map(|rt| format_evpn_ecom_value(&rt)),
                 member_vteps,
                 df_algorithm,
@@ -2571,22 +2575,39 @@ fn show_bgp_evpn_ethernet_segment(
         // §8.5 service-carving ordinal.
         if let Some(esi) = es.esi {
             let cands = bgp.es_df_candidates(&esi);
-            let vteps: Vec<std::net::IpAddr> = cands.iter().map(|(ip, _)| *ip).collect();
+            let vteps: Vec<std::net::IpAddr> = cands.iter().map(|(ip, _, _)| *ip).collect();
             writeln!(buf, "  Member VTEPs ({}):", vteps.len())?;
-            for (ordinal, (vtep, _)) in cands.iter().enumerate() {
+            for (ordinal, (vtep, valg, vpref)) in cands.iter().enumerate() {
                 let tag = if *vtep == local { " (local)" } else { "" };
-                writeln!(buf, "    [{ordinal}] {vtep}{tag}")?;
+                // Each PE's own bid, so a disagreement is visible per-PE
+                // rather than only as the segment-wide carving fallback.
+                let bid = if *valg == bgp_packet::DfElectionEc::ALG_PREF {
+                    format!(" pref {vpref}")
+                } else {
+                    String::new()
+                };
+                writeln!(buf, "    [{ordinal}] {vtep}{bid}{tag}")?;
             }
-            // RFC 8584 algorithm negotiation, then RFC 7432 §8.5 carving.
-            let algs: Vec<u8> = cands.iter().map(|(_, a)| *a).collect();
+            // RFC 8584 algorithm negotiation, then the elected DF.
+            let algs: Vec<u8> = cands.iter().map(|(_, a, _)| *a).collect();
             let alg = super::ethernet_segment::negotiate_df_alg(&algs);
-            let alg_name = if alg == bgp_packet::DfElectionEc::ALG_DEFAULT {
-                "service-carving (default)"
-            } else {
-                "negotiated (non-default; carving fallback)"
+            let alg_name = match alg {
+                bgp_packet::DfElectionEc::ALG_DEFAULT => "service-carving (default)".to_string(),
+                bgp_packet::DfElectionEc::ALG_PREF => {
+                    // Under Alg 2 the local preference is what this PE is
+                    // bidding with, so show it next to the algorithm.
+                    match es.df_preference {
+                        Some(pref) => format!("preference-based (local pref {pref})"),
+                        None => "preference-based".to_string(),
+                    }
+                }
+                other => format!("alg {other} (unsupported; carving fallback)"),
             };
             writeln!(buf, "  DF algorithm: {alg_name}")?;
-            if let Some(df) = super::ethernet_segment::designated_forwarder(&vteps, 0) {
+            if es.ac_df {
+                writeln!(buf, "  AC-DF capability: advertised")?;
+            }
+            if let Some(df) = super::ethernet_segment::elect_forwarders(&cands, 0).0 {
                 let tag = if df == local { " (this node)" } else { "" };
                 writeln!(buf, "  Designated Forwarder (tag 0): {df}{tag}")?;
             }

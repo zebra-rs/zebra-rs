@@ -7126,7 +7126,7 @@ fn evpn_vpws_sid(attr: &BgpAttr) -> Option<std::net::Ipv6Addr> {
 /// Mark every VPWS service sitting on Ethernet Segment `esi` as needing a DF
 /// re-election, for `Bgp::vpws_df_drain` to pick up. Called from the Type-4
 /// install and withdraw arms, which see only `LocalRib`.
-fn vpws_mark_df_dirty(local_rib: &mut LocalRib, esi: &[u8; 10]) {
+pub(super) fn vpws_mark_df_dirty(local_rib: &mut LocalRib, esi: &[u8; 10]) {
     let names: Vec<String> = local_rib
         .evpn_vpws
         .services
@@ -7700,6 +7700,7 @@ fn evpn_reoriginate_per_region(
     let df_ec: ExtCommunityValue = DfElectionEc {
         df_alg: DfElectionEc::ALG_DEFAULT,
         bitmap: 0,
+        pref: 0,
     }
     .into();
     attr.ecom
@@ -15779,10 +15780,20 @@ impl Bgp {
             orig: vtep_local,
         };
         let mut attr = BgpAttr::new();
-        let df = bgp_packet::DfElectionEc {
-            df_alg: bgp_packet::DfElectionEc::ALG_DEFAULT,
-            bitmap: 0,
-        };
+        // The segment's configured DF Election EC: Alg 2 + preference when
+        // one is set, otherwise the default carving algorithm, plus the
+        // AC-DF capability bit. Falls back to a bare default for an ESI with
+        // no matching `ethernet-segment` entry (replay before config).
+        let df = self
+            .ethernet_segments
+            .values()
+            .find(|es| es.esi == Some(esi))
+            .map(|es| es.df_election_ec())
+            .unwrap_or(bgp_packet::DfElectionEc {
+                df_alg: bgp_packet::DfElectionEc::ALG_DEFAULT,
+                bitmap: 0,
+                pref: 0,
+            });
         attr.ecom = Some(ExtCommunity::from([
             ExtCommunityValue::es_import_rt(&esi),
             df.into(),
@@ -15952,9 +15963,7 @@ impl Bgp {
         name: &str,
         local_id: u32,
     ) -> ([u8; 10], super::ethernet_segment::VpwsRole, Option<IpAddr>) {
-        use super::ethernet_segment::{
-            EsRedundancyMode, VpwsRole, designated_forwarder, vpws_role,
-        };
+        use super::ethernet_segment::{EsRedundancyMode, VpwsRole, elect_forwarders, vpws_role};
 
         let Some(svc) = self.local_rib.evpn_vpws.services.get(name) else {
             return ([0; 10], VpwsRole::Primary, None);
@@ -15967,14 +15976,11 @@ impl Bgp {
         } else {
             EsRedundancyMode::AllActive
         };
-        let vteps: Vec<IpAddr> = self
-            .es_df_candidates(&esi)
-            .into_iter()
-            .map(|(vtep, _alg)| vtep)
-            .collect();
+        let cands = self.es_df_candidates(&esi);
         let me = IpAddr::V4(self.router_id);
-        let role = vpws_role(mode, &vteps, me, local_id);
-        (esi, role, designated_forwarder(&vteps, local_id))
+        let role = vpws_role(mode, &cands, me, local_id);
+        let (df, _backup) = elect_forwarders(&cands, local_id);
+        (esi, role, df)
     }
 
     /// Withdraw VPWS service `name`'s Type-1 — keyed by what was actually
@@ -16229,31 +16235,35 @@ impl Bgp {
     }
 
     /// The DF-election candidates for an ES, computed from the EVPN Loc-RIB:
-    /// the `(VTEP, advertised DF algorithm)` of every Type-4 route with this
-    /// ESI (our own originated one included), **sorted by ascending VTEP** so
-    /// the index is the RFC 7432 §8.5 service-carving ordinal. The algorithm
-    /// is read from each Type-4's DF Election EC (RFC 8584), defaulting to
-    /// service-carving (Alg 0) when absent. The ESI is in the Type-4 NLRI key,
-    /// so candidates match on it directly rather than on the ES-Import RT.
-    pub fn es_df_candidates(&self, esi: &[u8; 10]) -> Vec<(IpAddr, u8)> {
-        let mut cands: Vec<(IpAddr, u8)> = Vec::new();
+    /// the `(VTEP, advertised DF algorithm, DF preference)` of every Type-4
+    /// route with this ESI (our own originated one included), **sorted by
+    /// ascending VTEP** so the index is the RFC 7432 §8.5 service-carving
+    /// ordinal. Algorithm and preference are read from each Type-4's DF
+    /// Election EC (RFC 8584 / draft-ietf-bess-evpn-pref-df), defaulting to
+    /// service-carving (Alg 0) with preference 0 when absent. The ESI is in
+    /// the Type-4 NLRI key, so candidates match on it directly rather than on
+    /// the ES-Import RT.
+    pub fn es_df_candidates(&self, esi: &[u8; 10]) -> Vec<super::ethernet_segment::DfCandidate> {
+        let mut cands: Vec<super::ethernet_segment::DfCandidate> = Vec::new();
         for table in self.local_rib.evpn.values() {
             for (prefix, rib) in table.selected.iter() {
                 if let EvpnPrefix::EthernetSeg { esi: e, orig } = prefix
                     && e == esi
                 {
-                    let alg = rib
+                    let df = rib
                         .attr
                         .ecom
                         .as_ref()
-                        .and_then(|ec| ec.0.iter().find_map(|v| v.as_df_election()))
-                        .map(|df| df.df_alg)
+                        .and_then(|ec| ec.0.iter().find_map(|v| v.as_df_election()));
+                    let alg = df
+                        .map(|d| d.df_alg)
                         .unwrap_or(bgp_packet::DfElectionEc::ALG_DEFAULT);
-                    cands.push((*orig, alg));
+                    let pref = df.map(|d| d.pref).unwrap_or(0);
+                    cands.push((*orig, alg, pref));
                 }
             }
         }
-        cands.sort_by_key(|(ip, _)| *ip);
+        cands.sort_by_key(|(ip, _, _)| *ip);
         cands
     }
 
