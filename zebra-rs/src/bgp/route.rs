@@ -7276,6 +7276,12 @@ fn route_evpn_export_selected(
                             .rib_client
                             .send(rib::Message::CradleReplDel { vni, sid: dt2m });
                     }
+                    // Mirror the announce side's MPLS slot.
+                    if let Some((pe, _label)) = evpn_mpls_bum(wd) {
+                        let _ = bgp
+                            .rib_client
+                            .send(rib::Message::CradleReplDelMpls { bd: vni, pe });
+                    }
                     bgp.local_rib.evpn_flood.remove_remote(vni, *orig);
                     bgp.local_rib.evpn_flood.reconcile(vni, bgp.rib_client);
                 } else {
@@ -7397,6 +7403,11 @@ fn route_evpn_export_selected(
                     // RFC 9252: a remote End.DT2U SID selects the SRv6 L2
                     // data plane (cradle tee) over the kernel VXLAN FDB.
                     srv6_sid: evpn_srv6_sid(&best.attr, bgp_packet::SRV6_BEHAVIOR_END_DT2U),
+                    // RFC 7432: an MPLS service label likewise selects the
+                    // cradle tee — the kernel cannot pop a label into a
+                    // bridge. The next hop is the PE the transport LSP
+                    // resolves on (`tunnel_endpoint`).
+                    mpls_label: evpn_mpls_label(best),
                 };
                 let _ = bgp.rib_client.send(msg);
             } else {
@@ -7424,6 +7435,15 @@ fn route_evpn_export_selected(
                     let _ = bgp
                         .rib_client
                         .send(rib::Message::CradleReplAdd { vni, sid: dt2m });
+                }
+                // RFC 7432 ingress replication: an MPLS IMET advertises the
+                // BUM service label in its PMSI. Same shape as the SRv6 slot
+                // above — one slot per remote PE in the bridge domain's flood
+                // list, independent of the AR/PMSI role machinery.
+                if let Some((pe, label)) = evpn_mpls_bum(best) {
+                    let _ =
+                        bgp.rib_client
+                            .send(rib::Message::CradleReplAddMpls { bd: vni, pe, label });
                 }
                 let pmsi = best.attr.pmsi_tunnel.as_ref();
                 if let Some(p) = pmsi.filter(|p| p.is_sr_p2mp()) {
@@ -7936,6 +7956,18 @@ pub fn route_evpn_update(
     // Extract ESI from EVPN Type 2 route for multi-homing support.
     if let EvpnRoute::Mac(m) = route {
         rib.esi = Some(m.esi);
+        // The Type-2 service field: an MPLS service label under
+        // `encapsulation mpls`, the VNI under VXLAN/SRv6. Capture it either
+        // way — the MPLS import needs the label to impose toward this MAC,
+        // and for VXLAN it simply restates the VNI the route target already
+        // carries, so a reflected route re-emits exactly what arrived.
+        if m.vni != 0 {
+            rib.label = Some(bgp_packet::Label {
+                label: m.vni,
+                exp: 0,
+                bos: true,
+            });
+        }
     }
     // Type-5 (IP Prefix) carries an MPLS service label in its NLRI;
     // preserve it on the BgpRib so the VRF import (which reuses the
@@ -17205,6 +17237,71 @@ fn evpn_mac_mobility(seq: u32) -> ExtCommunityValue {
 /// two octets. Without this community a Type-2 receiver that
 /// understands EVPN but supports multiple data planes can't tell
 /// which encap to install, so RFC 8365 §5.1.2.4 makes it mandatory.
+/// True when the path carries a BGP Encapsulation extended community
+/// (RFC 9012 type 0x03 / sub 0x0c) — i.e. it names an overlay explicitly.
+pub(super) fn attr_has_encap_ec(attr: &BgpAttr) -> bool {
+    encap_ec_tunnel_type(attr).is_some()
+}
+
+/// The tunnel type in the path's Encapsulation extended community (RFC 9012
+/// type 0x03 / sub 0x0c), if it carries one. The type occupies the trailing
+/// two octets of the 6-byte value.
+fn encap_ec_tunnel_type(attr: &BgpAttr) -> Option<u16> {
+    attr.ecom.as_ref().and_then(|ecom| {
+        ecom.0
+            .iter()
+            .find(|ec| ec.high_type == 0x03 && ec.low_type == 0x0c)
+            .map(|ec| u16::from_be_bytes([ec.val[4], ec.val[5]]))
+    })
+}
+
+/// True when the path is MPLS-encapsulated: RFC 8365 §5.1.3 makes MPLS the
+/// default, signalled by the *absence* of an Encapsulation extended
+/// community — but accept an explicit tunnel type 10 (MPLS) too, since a
+/// peer is free to tag it.
+fn attr_encap_is_mpls(attr: &BgpAttr) -> bool {
+    match encap_ec_tunnel_type(attr) {
+        None => true,
+        Some(t) => t == TunnelType::Mpls as u16,
+    }
+}
+
+/// The MPLS service label a received EVPN L2 route asks us to impose toward
+/// it, or `None` when the route is not MPLS-encapsulated.
+///
+/// RFC 8365 §5.1.3: the *absence* of an Encapsulation extended community
+/// means plain MPLS — VXLAN and the other overlays name themselves. Combined
+/// with a non-zero service field that is an unambiguous read of the wire, and
+/// it works for a route reflector too, which has no local encapsulation
+/// config to consult. An SRv6 route is classified before this by its L2
+/// service SID.
+fn evpn_mpls_label(rib: &BgpRib) -> Option<u32> {
+    if !attr_encap_is_mpls(&rib.attr) {
+        return None;
+    }
+    rib.label.as_ref().map(|l| l.label).filter(|l| *l != 0)
+}
+
+/// The `(remote PE, BUM service label)` a received Type-3 IMET asks us to
+/// replicate toward, or `None` when it is not MPLS-encapsulated.
+///
+/// Same read as [`evpn_mpls_label`] — no Encapsulation EC means plain MPLS
+/// (RFC 8365 §5.1.3) — but the label comes from the PMSI Tunnel's label
+/// field, which is where RFC 7432 §11.2 puts the ingress-replication label,
+/// and the PE is the PMSI's tunnel endpoint.
+fn evpn_mpls_bum(rib: &BgpRib) -> Option<(IpAddr, u32)> {
+    if !attr_encap_is_mpls(&rib.attr) {
+        return None;
+    }
+    let pmsi = rib.attr.pmsi_tunnel.as_ref()?;
+    // SR-P2MP trees are not ingress replication: their label field is unused
+    // and BUM rides the tree, not a per-PE slot.
+    if pmsi.is_sr_p2mp() || pmsi.vni == 0 {
+        return None;
+    }
+    Some((pmsi.endpoint, pmsi.vni))
+}
+
 fn evpn_encap_vxlan() -> ExtCommunityValue {
     let mut encap = ExtCommunityValue {
         high_type: 0x03,
@@ -17214,6 +17311,47 @@ fn evpn_encap_vxlan() -> ExtCommunityValue {
     // Encapsulation type 8 = VXLAN, occupies the trailing 2 octets.
     encap.val[5] = 8;
     encap
+}
+
+/// Receive-side encapsulation classification: which overlay is a received
+/// EVPN L2 route asking us to use?
+#[cfg(test)]
+mod evpn_encap_classify_tests {
+    use super::*;
+
+    fn attr_with_encap(tunnel_type: Option<u16>) -> BgpAttr {
+        let mut attr = BgpAttr::new();
+        if let Some(t) = tunnel_type {
+            let mut ec = ExtCommunityValue {
+                high_type: 0x03,
+                low_type: 0x0c,
+                val: [0; 6],
+            };
+            ec.val[4..6].copy_from_slice(&t.to_be_bytes());
+            attr.ecom = Some(ExtCommunity::from([ec]));
+        }
+        attr
+    }
+
+    /// RFC 8365 §5.1.3: no Encapsulation EC means plain MPLS.
+    #[test]
+    fn absent_encap_ec_is_mpls() {
+        assert!(attr_encap_is_mpls(&attr_with_encap(None)));
+    }
+
+    /// A peer may tag MPLS explicitly (RFC 9012 tunnel type 10) rather than
+    /// signalling it by omission; both must read as MPLS.
+    #[test]
+    fn explicit_tunnel_type_10_is_mpls() {
+        assert!(attr_encap_is_mpls(&attr_with_encap(Some(10))));
+    }
+
+    /// VXLAN (8) is not MPLS — this is the case that keeps a VXLAN Type-2
+    /// out of the MPLS FDB install.
+    #[test]
+    fn vxlan_is_not_mpls() {
+        assert!(!attr_encap_is_mpls(&attr_with_encap(Some(8))));
+    }
 }
 
 /// The Type-2 service field: MPLS label vs RT-derived VNI.

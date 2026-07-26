@@ -167,8 +167,10 @@ message FdbRemote {
   string mac         = 1;
   uint32 bd          = 2;
   string remote_sid  = 3;   // SRv6: remote End.DT2U/DT2M service SID
-  uint32 nexthop_id  = 4;   // 0 = FIB lookup on the SID/VTEP in the datapath
-  string remote_vtep = 5;   // VXLAN: remote VTEP IPv4 (exactly one of sid/vtep)
+  uint32 nexthop_id  = 4;   // 0 = FIB lookup on the SID/VTEP/PE in the datapath
+  string remote_vtep = 5;   // VXLAN: remote VTEP IPv4
+  string remote_pe    = 6;  // MPLS: remote PE address (exactly one of sid/vtep/pe)
+  uint32 remote_label = 7;  // MPLS: that PE's EVI service label
 }
 
 message FdbRemoteDel {
@@ -213,6 +215,8 @@ message ReplSlot {
   uint32 bd          = 1;
   string remote_sid  = 2;   // SRv6: remote End.DT2M SID
   string remote_vtep = 3;   // VXLAN: remote VTEP IPv4 (VNI from the bd's SetVni)
+  string remote_pe    = 4;  // MPLS: remote PE address
+  uint32 remote_label = 5;  // MPLS: that PE's BUM (EVI) service label
 }
 
 // An RFC 9524 Replication segment: the local End.Replicate SID `sid` is an SR

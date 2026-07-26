@@ -115,6 +115,11 @@ pub enum TunnelType {
     Vxlan = 8,
     #[strum(serialize = "NVGRE")]
     Nvgre = 9,
+    /// Plain MPLS (RFC 9012). Rarely seen on EVPN: RFC 8365 §5.1.3 makes MPLS
+    /// the default and signals it by omitting the Encapsulation extended
+    /// community entirely, but a peer may tag it explicitly.
+    #[strum(serialize = "MPLS")]
+    Mpls = 10,
     #[strum(serialize = "MPLS-in-GRE")]
     MplsGre = 11,
 }

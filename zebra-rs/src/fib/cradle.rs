@@ -99,6 +99,12 @@ struct CradleMirror {
     /// `fdb_vxlan` depending on the received route's encap.
     fdb_vxlan: HashMap<(u32, [u8; 6]), Ipv4Addr>,
     repl_slots_vxlan: HashSet<(u32, Ipv4Addr)>,
+    /// EVPN-over-MPLS counterparts: (bridge domain, mac) → (remote PE, that
+    /// PE's EVI service label), and the per-(bd, PE) BUM replication slots
+    /// with their BUM label. A `(vni, mac)` key lives in exactly one of
+    /// `fdb` / `fdb_vxlan` / `fdb_mpls`, per the received route's encap.
+    fdb_mpls: HashMap<(u32, [u8; 6]), (IpAddr, u32)>,
+    repl_slots_mpls: HashSet<(u32, IpAddr, u32)>,
     /// RFC 9524 Replication segments (operator `replication-segment` config):
     /// local End.Replicate SID → (hop-limit threshold, downstream branches
     /// `(sid, nexthop_id, local)`). Replayed as `SetReplSeg` on engine restart.
@@ -1454,6 +1460,8 @@ impl CradleFib {
                     remote_sid: sid.to_string(),
                     nexthop_id: 0,
                     remote_vtep: String::new(),
+                    remote_pe: String::new(),
+                    remote_label: 0,
                 })
                 .await?;
             anyhow::Ok(())
@@ -1483,6 +1491,8 @@ impl CradleFib {
                     remote_sid: String::new(),
                     nexthop_id: 0,
                     remote_vtep: vtep.to_string(),
+                    remote_pe: String::new(),
+                    remote_label: 0,
                 })
                 .await?;
             anyhow::Ok(())
@@ -1490,6 +1500,42 @@ impl CradleFib {
         .await;
         if let Err(e) = result {
             tracing::warn!("fib: cradle fdb_add_vxlan {mac_str} vni {vni} failed: {e}");
+        }
+    }
+
+    /// EVPN/MPLS overlay FDB entry (Type-2, RFC 7432): `mac` in bridge domain
+    /// `bd` sits behind PE `pe`, reached by imposing that PE's EVI service
+    /// `label`. `nexthop_id: 0` — cradle resolves the underlay adjacency with
+    /// a FIB lookup on the PE, which is also what supplies the transport LSP
+    /// label stack the service label rides under.
+    pub async fn fdb_add_mpls(&self, bd: u32, mac: [u8; 6], pe: IpAddr, label: u32) {
+        self.mirror
+            .lock()
+            .await
+            .fdb_mpls
+            .insert((bd, mac), (pe, label));
+        let mac_str = format!(
+            "{:02x}:{:02x}:{:02x}:{:02x}:{:02x}:{:02x}",
+            mac[0], mac[1], mac[2], mac[3], mac[4], mac[5]
+        );
+        let result = async {
+            self.client()
+                .await?
+                .add_fdb_remote(pb::FdbRemote {
+                    mac: mac_str.clone(),
+                    bd,
+                    remote_sid: String::new(),
+                    nexthop_id: 0,
+                    remote_vtep: String::new(),
+                    remote_pe: pe.to_string(),
+                    remote_label: label,
+                })
+                .await?;
+            anyhow::Ok(())
+        }
+        .await;
+        if let Err(e) = result {
+            tracing::warn!("fib: cradle fdb_add_mpls {mac_str} bd {bd} failed: {e}");
         }
     }
 
@@ -1639,6 +1685,8 @@ impl CradleFib {
                     bd: vni,
                     remote_sid: sid.to_string(),
                     remote_vtep: String::new(),
+                    remote_pe: String::new(),
+                    remote_label: 0,
                 })
                 .await?;
             anyhow::Ok(())
@@ -1788,6 +1836,8 @@ impl CradleFib {
                     bd: vni,
                     remote_sid: sid.to_string(),
                     remote_vtep: String::new(),
+                    remote_pe: String::new(),
+                    remote_label: 0,
                 })
                 .await?;
             anyhow::Ok(())
@@ -1815,6 +1865,8 @@ impl CradleFib {
                     bd: vni,
                     remote_sid: String::new(),
                     remote_vtep: vtep.to_string(),
+                    remote_pe: String::new(),
+                    remote_label: 0,
                 })
                 .await?;
             anyhow::Ok(())
@@ -1822,6 +1874,61 @@ impl CradleFib {
         .await;
         if let Err(e) = result {
             tracing::warn!("fib: cradle repl_slot_add_vxlan vni {vni} {vtep} failed: {e}");
+        }
+    }
+
+    /// EVPN/MPLS BUM replication slot (RFC 7432 ingress replication): each
+    /// copy flooded in bridge domain `bd` is MPLS-encapsulated toward PE `pe`
+    /// with that PE's BUM service `label`.
+    pub async fn repl_slot_add_mpls(&self, bd: u32, pe: IpAddr, label: u32) {
+        self.mirror
+            .lock()
+            .await
+            .repl_slots_mpls
+            .insert((bd, pe, label));
+        let result = async {
+            self.client()
+                .await?
+                .add_repl_slot(pb::ReplSlot {
+                    bd,
+                    remote_sid: String::new(),
+                    remote_vtep: String::new(),
+                    remote_pe: pe.to_string(),
+                    remote_label: label,
+                })
+                .await?;
+            anyhow::Ok(())
+        }
+        .await;
+        if let Err(e) = result {
+            tracing::warn!("fib: cradle repl_slot_add_mpls bd {bd} {pe} failed: {e}");
+        }
+    }
+
+    /// Remove a `(bd, pe)` MPLS replication slot. cradle keys the slot on
+    /// `(bd, PE)`, so the label is not needed to find it.
+    pub async fn repl_slot_del_mpls(&self, bd: u32, pe: IpAddr) {
+        self.mirror
+            .lock()
+            .await
+            .repl_slots_mpls
+            .retain(|(b, p, _)| !(*b == bd && *p == pe));
+        let result = async {
+            self.client()
+                .await?
+                .del_repl_slot(pb::ReplSlot {
+                    bd,
+                    remote_sid: String::new(),
+                    remote_vtep: String::new(),
+                    remote_pe: pe.to_string(),
+                    remote_label: 0,
+                })
+                .await?;
+            anyhow::Ok(())
+        }
+        .await;
+        if let Err(e) = result {
+            tracing::warn!("fib: cradle repl_slot_del_mpls bd {bd} {pe} failed: {e}");
         }
     }
 
@@ -1839,6 +1946,8 @@ impl CradleFib {
                     bd: vni,
                     remote_sid: String::new(),
                     remote_vtep: vtep.to_string(),
+                    remote_pe: String::new(),
+                    remote_label: 0,
                 })
                 .await?;
             anyhow::Ok(())

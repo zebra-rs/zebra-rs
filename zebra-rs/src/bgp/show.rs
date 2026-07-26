@@ -4070,18 +4070,6 @@ fn show_evpn_ecom(attr: &BgpAttr) -> String {
 /// the T field, and the RFC 9574 Pruned-Flood-List (BM/U) and Leaf
 /// Information Required (L) flags are appended when set. SR P2MP trees per
 /// RFC 9524 carry a Root and Tree-ID instead of a plain endpoint and VNI.
-/// True when the path carries a BGP Encapsulation extended community
-/// (RFC 9012 type 0x03 / sub 0x0c). Its *absence* is how RFC 8365 §5.1.3
-/// signals plain MPLS, so the show path reads it to decide whether a
-/// 24-bit service field is a VNI or a label.
-fn has_encap_ec(attr: &BgpAttr) -> bool {
-    attr.ecom.as_ref().is_some_and(|ecom| {
-        ecom.0
-            .iter()
-            .any(|ec| ec.high_type == 0x03 && ec.low_type == 0x0c)
-    })
-}
-
 /// `mpls` names the 24-bit service field a label rather than a VNI: the PMSI
 /// carries one field whose meaning follows the encapsulation, and calling an
 /// MPLS service label "vni" reads as a bug to an operator.
@@ -4182,7 +4170,7 @@ fn write_evpn_path_attrs(buf: &mut String, attr: &BgpAttr, originated: bool) -> 
         writeln!(
             buf,
             "{PAD}PMSI: {}",
-            format_pmsi_tunnel(pmsi, !has_encap_ec(attr))
+            format_pmsi_tunnel(pmsi, !super::route::attr_has_encap_ec(attr))
         )?;
     }
     if let Some(com) = &attr.com {
