@@ -1899,6 +1899,64 @@ fn config_ethernet_segment_redundancy_mode(
     Some(())
 }
 
+/// `router bgp afi-safi evpn ethernet-segment <name> df-election preference
+/// <1..65535>` — switch the segment to preference-based DF election (Alg 2,
+/// draft-ietf-bess-evpn-pref-df) and set this PE's preference. Clearing it
+/// reverts to service carving. Either way the Type-4 is re-originated so
+/// peers see the new algorithm, and the VPWS services on the segment
+/// re-elect against it.
+fn config_es_df_preference(bgp: &mut Bgp, mut args: Args, op: ConfigOp) -> Option<()> {
+    let afi_safi: AfiSafi = args.afi_safi()?;
+    if afi_safi.afi != Afi::L2vpn || afi_safi.safi != Safi::Evpn {
+        return None;
+    }
+    let name = args.string()?;
+    let pref = if op.is_set() {
+        Some(args.u32()? as u16)
+    } else {
+        None
+    };
+    let es = bgp.ethernet_segments.entry(name).or_default();
+    es.df_preference = pref;
+    es_df_election_changed(bgp);
+    Some(())
+}
+
+/// `router bgp afi-safi evpn ethernet-segment <name> df-election ac-df` —
+/// advertise the RFC 8584 §2.2 AC-Influenced DF election capability bit.
+fn config_es_ac_df(bgp: &mut Bgp, mut args: Args, op: ConfigOp) -> Option<()> {
+    let afi_safi: AfiSafi = args.afi_safi()?;
+    if afi_safi.afi != Afi::L2vpn || afi_safi.safi != Safi::Evpn {
+        return None;
+    }
+    let name = args.string()?;
+    let es = bgp.ethernet_segments.entry(name).or_default();
+    es.ac_df = op.is_set();
+    es_df_election_changed(bgp);
+    Some(())
+}
+
+/// Re-originate every configured segment's ES routes and re-elect the VPWS
+/// services sitting on them. The DF Election EC rides the Type-4, so any
+/// change to the algorithm or preference has to reach peers *and* re-run the
+/// local election — our own Type-4 is one of the election's candidates.
+fn es_df_election_changed(bgp: &mut Bgp) {
+    let vtep = IpAddr::V4(bgp.router_id);
+    let segments: Vec<([u8; 10], bool)> = bgp
+        .ethernet_segments
+        .values()
+        .filter_map(|es| Some((es.esi?, es.redundancy_mode.single_active())))
+        .collect();
+    for (esi, single_active) in segments {
+        bgp.evpn_originate_es_routes(esi, vtep, single_active);
+        // The candidate set did not change, but its contents did: mark the
+        // services on this ESI so the drain re-elects against the new
+        // preference / algorithm.
+        super::route::vpws_mark_df_dirty(&mut bgp.local_rib, &esi);
+    }
+    bgp.vpws_df_drain();
+}
+
 /// `router bgp afi-safi evpn ethernet-segment <name> interface <name>` — the
 /// CE-facing access port bound to this ES. This is also what a VPWS service
 /// matches its AC against to infer its segment, so setting it can bind (or
@@ -4838,6 +4896,14 @@ impl Bgp {
         self.callback_add(
             "/router/bgp/afi-safi/ethernet-segment/interface",
             config_ethernet_segment_interface,
+        );
+        self.callback_add(
+            "/router/bgp/afi-safi/ethernet-segment/df-election/preference",
+            config_es_df_preference,
+        );
+        self.callback_add(
+            "/router/bgp/afi-safi/ethernet-segment/df-election/ac-df",
+            config_es_ac_df,
         );
 
         // EVPN VPWS E-Line services (RFC 8214), under

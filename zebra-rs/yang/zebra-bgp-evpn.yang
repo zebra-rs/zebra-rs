@@ -221,6 +221,50 @@ module zebra-bgp-evpn {
         type string;
         description "Access interface (CE-facing port) bound to this ES.";
       }
+      container df-election {
+        presence "Designated-Forwarder election tuning";
+        ext:help "Designated-Forwarder election tuning";
+        description
+          "Designated-Forwarder election parameters advertised in this
+           segment's Type-4 DF Election extended community (RFC 8584 §2.2).
+           Absent = the RFC 7432 §8.5 default: service carving, no
+           capabilities.";
+        leaf preference {
+          ext:help "DF preference; highest wins (selects Alg 2)";
+          type uint16 {
+            range "1..65535";
+          }
+          description
+            "Setting a preference switches this segment to preference-based
+             DF election (Alg 2, draft-ietf-bess-evpn-pref-df): the PE with
+             the **highest** preference becomes the Designated Forwarder,
+             ties broken by the lowest originating address. Unset = service
+             carving (Alg 0), where the DF is `service-id mod N` over the
+             address-ordered PEs.
+
+             Preference is per-segment, so one PE wins every service
+             instance on it — which is the point: it lets the operator pin
+             the DF instead of accepting a hash. Carving instead spreads
+             instances across the PEs.
+
+             All PEs on the segment must advertise the same algorithm; RFC
+             8584 negotiation falls the whole segment back to carving if any
+             one of them disagrees. Interoperates with IOS-XR
+             `service-carving preference-based`, Junos
+             `df-election-type preference`, Arista
+             `designated-forwarder election algorithm preference` and FRR
+             `evpn mh es-df-pref`.";
+        }
+        leaf ac-df {
+          ext:help "Advertise the AC-Influenced DF election capability";
+          type empty;
+          description
+            "Advertise the AC-DF (AC-Influenced DF election) capability bit
+             in the DF Election extended community (RFC 8584 §2.2), telling
+             the other PEs on the segment that this PE excludes itself from
+             the election while its attachment circuit is down.";
+        }
+      }
     }
     list vpws {
       ext:help "EVPN VPWS point-to-point E-Line service (RFC 8214)";

@@ -57,9 +57,37 @@ pub struct EthernetSegment {
     pub redundancy_mode: EsRedundancyMode,
     /// Access interface bound to this ES (the multihomed CE-facing port).
     pub interface: Option<String>,
+    /// DF Preference (draft-ietf-bess-evpn-pref-df). `Some` switches this
+    /// segment to Alg 2, where the highest preference wins and ties break on
+    /// the lowest address, instead of the RFC 7432 §8.5 carving modulus.
+    /// `None` = service carving (Alg 0), the default.
+    pub df_preference: Option<u16>,
+    /// Advertise the RFC 8584 §2.2 AC-DF (AC-Influenced DF election)
+    /// capability on this segment's Type-4.
+    pub ac_df: bool,
 }
 
 impl EthernetSegment {
+    /// The DF Election extended community this segment advertises on its
+    /// Type-4: Alg 2 with the configured preference when one is set,
+    /// otherwise the default carving algorithm.
+    pub fn df_election_ec(&self) -> DfElectionEc {
+        let mut ec = match self.df_preference {
+            Some(pref) => DfElectionEc {
+                df_alg: DfElectionEc::ALG_PREF,
+                bitmap: 0,
+                pref,
+            },
+            None => DfElectionEc {
+                df_alg: DfElectionEc::ALG_DEFAULT,
+                bitmap: 0,
+                pref: 0,
+            },
+        };
+        ec.set_ac_df(self.ac_df);
+        ec
+    }
+
     /// Auto-derive the ES-Import Route Target (RFC 7432 §7.6) from the ESI —
     /// the high-order 6 octets of the ESI value. `None` until the ESI is set.
     /// Used (in a later phase) to scope the Type-4 ES route to the PEs on this
@@ -105,6 +133,53 @@ pub fn backup_forwarder(candidates: &[IpAddr], tag: u32) -> Option<IpAddr> {
     }
     let idx = (tag as usize).wrapping_add(1) % candidates.len();
     Some(candidates[idx])
+}
+
+/// One PE's advertised DF-election parameters, read off its Type-4's DF
+/// Election extended community: `(VTEP, algorithm, preference)`.
+pub type DfCandidate = (IpAddr, u8, u16);
+
+/// Order two preference-based candidates by who wins
+/// (draft-ietf-bess-evpn-pref-df): the higher preference, and on a tie the
+/// **lower** IP address. Matches FRR's comparison in
+/// `zebra_evpn_es_run_df_election`, so the two agree on a shared segment —
+/// disagreement here means two PEs both forward and the CE sees duplicates.
+fn pref_wins(a: &DfCandidate, b: &DfCandidate) -> std::cmp::Ordering {
+    // Higher pref first, then lower IP first.
+    b.2.cmp(&a.2).then_with(|| a.0.cmp(&b.0))
+}
+
+/// The candidates ordered best-DF-first under preference-based election.
+fn pref_ranked(candidates: &[DfCandidate]) -> Vec<IpAddr> {
+    let mut ranked = candidates.to_vec();
+    ranked.sort_by(pref_wins);
+    ranked.into_iter().map(|(ip, _, _)| ip).collect()
+}
+
+/// Elect the Designated Forwarder and its backup for one service instance,
+/// dispatching on the algorithm the segment's PEs agreed on.
+///
+/// Alg 2 (preference) ranks by preference then address, so the DF is the
+/// winner and the backup is the runner-up. Anything else falls back to
+/// service carving, where the ordinal is `tag mod N` and the backup is the
+/// next ordinal — the RFC 8584 fallback for a disagreed algorithm, which
+/// [`negotiate_df_alg`] already resolves to Alg 0.
+///
+/// `candidates` need not be sorted; carving sorts by address internally so
+/// the ordinal is stable across PEs.
+pub fn elect_forwarders(candidates: &[DfCandidate], tag: u32) -> (Option<IpAddr>, Option<IpAddr>) {
+    let algs: Vec<u8> = candidates.iter().map(|(_, alg, _)| *alg).collect();
+    if negotiate_df_alg(&algs) == DfElectionEc::ALG_PREF {
+        let ranked = pref_ranked(candidates);
+        return (ranked.first().copied(), ranked.get(1).copied());
+    }
+    let mut vteps: Vec<IpAddr> = candidates.iter().map(|(ip, _, _)| *ip).collect();
+    vteps.sort();
+    vteps.dedup();
+    (
+        designated_forwarder(&vteps, tag),
+        backup_forwarder(&vteps, tag),
+    )
 }
 
 /// The role a PE advertises for one VPWS service instance on an Ethernet
@@ -159,16 +234,18 @@ impl VpwsRole {
 /// service while the segment converges.
 pub fn vpws_role(
     mode: EsRedundancyMode,
-    candidates: &[IpAddr],
+    candidates: &[DfCandidate],
     me: IpAddr,
     service_id: u32,
 ) -> VpwsRole {
-    if !matches!(mode, EsRedundancyMode::SingleActive) || !candidates.contains(&me) {
+    let on_segment = candidates.iter().any(|(ip, _, _)| *ip == me);
+    if !matches!(mode, EsRedundancyMode::SingleActive) || !on_segment {
         return VpwsRole::Primary;
     }
-    if designated_forwarder(candidates, service_id) == Some(me) {
+    let (df, backup) = elect_forwarders(candidates, service_id);
+    if df == Some(me) {
         VpwsRole::Primary
-    } else if backup_forwarder(candidates, service_id) == Some(me) {
+    } else if backup == Some(me) {
         VpwsRole::Backup
     } else {
         VpwsRole::NonDesignated
@@ -273,10 +350,25 @@ mod tests {
         assert_eq!(backup_forwarder(&[], 0), None);
     }
 
+    /// Carving candidates: every PE advertising Alg 0 with no preference.
+    fn carving(ips: &[IpAddr]) -> Vec<DfCandidate> {
+        ips.iter()
+            .map(|ip| (*ip, DfElectionEc::ALG_DEFAULT, 0))
+            .collect()
+    }
+
+    /// Preference candidates: every PE advertising Alg 2 with its own value.
+    fn prefs(entries: &[(IpAddr, u16)]) -> Vec<DfCandidate> {
+        entries
+            .iter()
+            .map(|(ip, p)| (*ip, DfElectionEc::ALG_PREF, *p))
+            .collect()
+    }
+
     #[test]
     fn all_active_makes_every_pe_primary() {
         let [a, b, c] = pes();
-        let cands = [a, b, c];
+        let cands = carving(&[a, b, c]);
         // RFC 8214 §5: under all-active every attached PE forwards, so each
         // advertises P=1 regardless of its carving ordinal.
         for me in [a, b, c] {
@@ -292,7 +384,7 @@ mod tests {
     #[test]
     fn single_active_carves_one_primary_and_one_backup() {
         let [a, b, c] = pes();
-        let cands = [a, b, c];
+        let cands = carving(&[a, b, c]);
         let mode = EsRedundancyMode::SingleActive;
         // Service instance 0 carves to ordinal 0: a is DF, b backs it up,
         // c must not be used for this instance.
@@ -312,10 +404,98 @@ mod tests {
         let mode = EsRedundancyMode::SingleActive;
         // Our own Type-4 not selected yet (or no segment at all): advertise
         // primary rather than blackhole the service while it converges.
-        assert_eq!(vpws_role(mode, &[a, b], c, 0), VpwsRole::Primary);
+        assert_eq!(vpws_role(mode, &carving(&[a, b]), c, 0), VpwsRole::Primary);
         assert_eq!(vpws_role(mode, &[], a, 0), VpwsRole::Primary);
         // Sole PE on the segment is the DF.
-        assert_eq!(vpws_role(mode, &[a], a, 3), VpwsRole::Primary);
+        assert_eq!(vpws_role(mode, &carving(&[a]), a, 3), VpwsRole::Primary);
+    }
+
+    #[test]
+    fn preference_beats_address_order() {
+        let [a, b, c] = pes();
+        // a is the lowest address but the lowest preference, so under Alg 2
+        // it loses to both — the whole point of preference over carving.
+        let cands = prefs(&[(a, 10), (b, 300), (c, 200)]);
+        assert_eq!(elect_forwarders(&cands, 0), (Some(b), Some(c)));
+        // ... and the service instance no longer shifts the winner, unlike
+        // carving: preference is per-segment, not per-service.
+        for tag in 0..5u32 {
+            assert_eq!(elect_forwarders(&cands, tag).0, Some(b));
+        }
+    }
+
+    #[test]
+    fn equal_preference_breaks_on_lowest_address() {
+        let [a, b, c] = pes();
+        // draft-ietf-bess-evpn-pref-df, and FRR's comparison: equal pref ->
+        // lowest IP wins. Both PEs must agree or they both forward.
+        let cands = prefs(&[(c, 100), (a, 100), (b, 100)]);
+        assert_eq!(elect_forwarders(&cands, 0), (Some(a), Some(b)));
+    }
+
+    #[test]
+    fn mixed_algorithms_fall_back_to_carving() {
+        let [a, b, c] = pes();
+        // One PE still on Alg 0 means the segment cannot agree, so RFC 8584
+        // negotiation drops everyone to carving — preference is ignored even
+        // though two PEs advertised it.
+        let mut cands = prefs(&[(a, 10), (b, 300)]);
+        cands.push((c, DfElectionEc::ALG_DEFAULT, 0));
+        // Carving on the address-sorted list [a, b, c], tag 1 -> ordinal 1.
+        assert_eq!(elect_forwarders(&cands, 1), (Some(b), Some(c)));
+        // Whereas all-Alg-2 would have given b (highest pref) for every tag.
+        let agreed = prefs(&[(a, 10), (b, 300), (c, 0)]);
+        assert_eq!(elect_forwarders(&agreed, 1).0, Some(b));
+    }
+
+    #[test]
+    fn preference_drives_the_vpws_role() {
+        let [a, b, c] = pes();
+        let mode = EsRedundancyMode::SingleActive;
+        let cands = prefs(&[(a, 10), (b, 300), (c, 200)]);
+        // Highest preference is primary, runner-up is the backup, the rest
+        // must not be used — and unlike carving this holds for every
+        // service instance.
+        for tag in 0..4u32 {
+            assert_eq!(vpws_role(mode, &cands, b, tag), VpwsRole::Primary);
+            assert_eq!(vpws_role(mode, &cands, c, tag), VpwsRole::Backup);
+            assert_eq!(vpws_role(mode, &cands, a, tag), VpwsRole::NonDesignated);
+        }
+        // All-active still overrides the election entirely.
+        for me in [a, b, c] {
+            assert_eq!(
+                vpws_role(EsRedundancyMode::AllActive, &cands, me, 0),
+                VpwsRole::Primary
+            );
+        }
+    }
+
+    #[test]
+    fn single_pe_wins_and_empty_elects_nobody() {
+        let [a, _, _] = pes();
+        assert_eq!(elect_forwarders(&prefs(&[(a, 1)]), 0), (Some(a), None));
+        assert_eq!(elect_forwarders(&[], 0), (None, None));
+    }
+
+    #[test]
+    fn segment_advertises_the_configured_algorithm() {
+        // No preference configured: Alg 0, byte-identical to what the
+        // segment advertised before preference existed.
+        let carving_es = EthernetSegment::default();
+        let ec = carving_es.df_election_ec();
+        assert_eq!(ec.df_alg, DfElectionEc::ALG_DEFAULT);
+        assert_eq!(ec.pref, 0);
+        assert!(!ec.ac_df());
+        // A preference switches the segment to Alg 2 and carries the value.
+        let pref_es = EthernetSegment {
+            df_preference: Some(200),
+            ac_df: true,
+            ..Default::default()
+        };
+        let ec = pref_es.df_election_ec();
+        assert_eq!(ec.df_alg, DfElectionEc::ALG_PREF);
+        assert_eq!(ec.pref, 200);
+        assert!(ec.ac_df());
     }
 
     #[test]

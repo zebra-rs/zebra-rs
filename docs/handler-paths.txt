@@ -10,6 +10,8 @@
 /router/bgp/afi-safi/bum-tunnel-type
 /router/bgp/afi-safi/encapsulation
 /router/bgp/afi-safi/ethernet-segment
+/router/bgp/afi-safi/ethernet-segment/df-election/ac-df
+/router/bgp/afi-safi/ethernet-segment/df-election/preference
 /router/bgp/afi-safi/ethernet-segment/esi
 /router/bgp/afi-safi/ethernet-segment/interface
 /router/bgp/afi-safi/ethernet-segment/redundancy-mode
