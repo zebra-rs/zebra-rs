@@ -15304,7 +15304,7 @@ impl Bgp {
         // RFC 9252 §6.1/§6.2: under `encapsulation srv6` the Type-2 carries
         // this PE's per-VNI End.DT2U SID (SRv6 L2 Service TLV) so receivers
         // install the MAC against the SID instead of a VXLAN VTEP.
-        if self.evpn_encap_srv6 {
+        if self.evpn_encap.is_srv6() {
             attr.prefix_sid = self.vni_dt2u_prefix_sid(entry.vni);
         }
 
@@ -15575,7 +15575,7 @@ impl Bgp {
         // for the VNI on the IMET route (SRv6 L2 Service TLV in the Prefix-SID
         // attribute) so remote roots fan replicated BUM to it. SID-less when no
         // locator has resolved yet (reconciled on the next locator update).
-        if matches!(bum, EvpnBumTunnel::SrV6P2mp) || self.evpn_encap_srv6 {
+        if matches!(bum, EvpnBumTunnel::SrV6P2mp) || self.evpn_encap.is_srv6() {
             attr.prefix_sid = self.vni_dt2m_prefix_sid(vni);
         }
 

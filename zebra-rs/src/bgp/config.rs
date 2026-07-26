@@ -17,7 +17,7 @@ use super::peer::BgpTop;
 use super::route_clean;
 use super::{
     AssistedReplicationRole, BGP_PORT, Bgp, EvpnBumTunnel,
-    inst::Callback,
+    inst::{Callback, EvpnEncap},
     peer::{AllowAsIn, LocalAs, PasswordEncoding, Peer, PeerType, RemovePrivateAs},
     timer,
 };
@@ -1726,26 +1726,28 @@ fn config_advertise_all_vni(bgp: &mut Bgp, mut args: Args, op: ConfigOp) -> Opti
     Some(())
 }
 
-/// `router bgp afi-safi evpn encapsulation {vxlan|srv6}` (RFC 9252).
-/// With `srv6`, Type-2 routes carry a per-VNI End.DT2U SID and Type-3
-/// IMETs an End.DT2M SID (SRv6 L2 Service TLVs), both carved from the
-/// BGP SRv6 locator; received MACs install against the peer's SIDs.
-/// Toggling re-originates the local FDB and IMETs so the SIDs are
+/// `router bgp afi-safi evpn encapsulation {vxlan|srv6|mpls}`.
+/// With `srv6` (RFC 9252), Type-2 routes carry a per-VNI End.DT2U SID and
+/// Type-3 IMETs an End.DT2M SID (SRv6 L2 Service TLVs), both carved from
+/// the BGP SRv6 locator; received MACs install against the peer's SIDs.
+/// With `mpls` (RFC 7432) they carry a per-EVI MPLS service label instead.
+/// Toggling re-originates the local FDB and IMETs so the SIDs / labels are
 /// attached/dropped in place.
 fn config_evpn_encapsulation(bgp: &mut Bgp, mut args: Args, op: ConfigOp) -> Option<()> {
     let afi_safi: AfiSafi = args.afi_safi()?;
     if afi_safi.afi != Afi::L2vpn || afi_safi.safi != Safi::Evpn {
         return None;
     }
-    let srv6 = if op.is_set() {
-        args.string()?.as_str() == "srv6"
+    // Delete falls back to the YANG default rather than to "not SRv6".
+    let encap = if op.is_set() {
+        EvpnEncap::parse(args.string()?.as_str())?
     } else {
-        false
+        EvpnEncap::default()
     };
-    if bgp.evpn_encap_srv6 == srv6 {
+    if bgp.evpn_encap == encap {
         return Some(());
     }
-    bgp.evpn_encap_srv6 = srv6;
+    bgp.evpn_encap = encap;
     // Re-originate under the new encapsulation (no-op when
     // advertise-all-vni is off; the config-load gate replay covers
     // cold boot, where this leaf lands before the FdbAdds arrive).
@@ -1914,6 +1916,50 @@ fn config_ethernet_segment_interface(bgp: &mut Bgp, mut args: Args, op: ConfigOp
     };
     bgp.ethernet_segments.entry(name).or_default().interface = interface;
     bgp.vpws_resync_es();
+    Some(())
+}
+
+/// `router bgp afi-safi evpn evi <id>` — declare or remove an EVPN Instance.
+///
+/// The VXLAN and SRv6 paths read a local VXLAN device's VNI to learn which
+/// bridge domains to advertise; an MPLS EVI has no VNI, so the operator names
+/// it here. See [`EviConfig`].
+fn config_evi(bgp: &mut Bgp, mut args: Args, op: ConfigOp) -> Option<()> {
+    let afi_safi: AfiSafi = args.afi_safi()?;
+    if afi_safi.afi != Afi::L2vpn || afi_safi.safi != Safi::Evpn {
+        return None;
+    }
+    let evi: u32 = args.u32()?;
+    match op {
+        ConfigOp::Set => {
+            bgp.evpn_evis.entry(evi).or_default();
+        }
+        ConfigOp::Delete => {
+            bgp.evpn_evis.remove(&evi);
+        }
+        _ => {}
+    }
+    Some(())
+}
+
+/// `router bgp afi-safi evpn evi <id> bridge <ifname>` — the bridge interface
+/// whose L2 domain this EVI carries.
+fn config_evi_bridge(bgp: &mut Bgp, mut args: Args, op: ConfigOp) -> Option<()> {
+    let afi_safi: AfiSafi = args.afi_safi()?;
+    if afi_safi.afi != Afi::L2vpn || afi_safi.safi != Safi::Evpn {
+        return None;
+    }
+    let evi: u32 = args.u32()?;
+    let bridge = if op.is_set() {
+        Some(args.string()?)
+    } else {
+        None
+    };
+    let entry = bgp.evpn_evis.entry(evi).or_default();
+    if entry.bridge == bridge {
+        return Some(());
+    }
+    entry.bridge = bridge;
     Some(())
 }
 
@@ -4797,6 +4843,8 @@ impl Bgp {
         // EVPN VPWS E-Line services (RFC 8214), under
         // `router bgp afi-safi evpn vpws <name> …`. Augmented in by
         // zebra-bgp-evpn.yang.
+        self.callback_add("/router/bgp/afi-safi/evi", config_evi);
+        self.callback_add("/router/bgp/afi-safi/evi/bridge", config_evi_bridge);
         self.callback_add("/router/bgp/afi-safi/vpws", config_vpws);
         self.callback_add("/router/bgp/afi-safi/vpws/evi", config_vpws_evi);
         self.callback_add(

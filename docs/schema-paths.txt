@@ -10,6 +10,8 @@
 /router/bgp/afi-safi/ethernet-segment/esi	leaf
 /router/bgp/afi-safi/ethernet-segment/interface	leaf
 /router/bgp/afi-safi/ethernet-segment/redundancy-mode	leaf
+/router/bgp/afi-safi/evi	list keys=id
+/router/bgp/afi-safi/evi/bridge	leaf
 /router/bgp/afi-safi/igmp-mld-proxy	leaf
 /router/bgp/afi-safi/network	list keys=prefix
 /router/bgp/afi-safi/pruned-flood-list	container
