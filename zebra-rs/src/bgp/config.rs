@@ -1898,7 +1898,9 @@ fn config_ethernet_segment_redundancy_mode(
 }
 
 /// `router bgp afi-safi evpn ethernet-segment <name> interface <name>` — the
-/// CE-facing access port bound to this ES.
+/// CE-facing access port bound to this ES. This is also what a VPWS service
+/// matches its AC against to infer its segment, so setting it can bind (or
+/// unbind) services that name no segment of their own.
 fn config_ethernet_segment_interface(bgp: &mut Bgp, mut args: Args, op: ConfigOp) -> Option<()> {
     let afi_safi: AfiSafi = args.afi_safi()?;
     if afi_safi.afi != Afi::L2vpn || afi_safi.safi != Safi::Evpn {
@@ -1911,6 +1913,7 @@ fn config_ethernet_segment_interface(bgp: &mut Bgp, mut args: Args, op: ConfigOp
         None
     };
     bgp.ethernet_segments.entry(name).or_default().interface = interface;
+    bgp.vpws_resync_es();
     Some(())
 }
 
@@ -2084,6 +2087,9 @@ fn config_vpws_interface(bgp: &mut Bgp, mut args: Args, op: ConfigOp) -> Option<
         });
     }
     bgp.vpws_reconcile(&name);
+    // The AC is what infers the segment, so moving it can move the service
+    // onto (or off) one — even though no `ethernet-segment` leaf changed.
+    bgp.vpws_resync_es();
     Some(())
 }
 

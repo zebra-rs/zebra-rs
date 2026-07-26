@@ -2623,6 +2623,9 @@ struct VpwsServiceJson {
     remote_sid: Option<String>,
     remote_mtu_mismatch: Option<u16>,
     ethernet_segment: Option<String>,
+    ethernet_segment_binding: Option<String>,
+    ethernet_segment_candidates: Option<Vec<String>>,
+    ethernet_segment_if_mismatch: Option<String>,
     esi: Option<String>,
     redundancy_mode: Option<String>,
     role: Option<String>,
@@ -2667,7 +2670,21 @@ fn show_bgp_evpn_vpws(
                 local_sid: vpws.sids.get(name).map(|(addr, _)| addr.to_string()),
                 remote_sid: svc.remote_sid.map(|sid| sid.to_string()),
                 remote_mtu_mismatch: svc.remote_mtu_mismatch,
-                ethernet_segment: svc.ethernet_segment.clone(),
+                // The *effective* segment, however it was bound — a JSON
+                // consumer wants what the service is on, not what was typed.
+                ethernet_segment: svc.es.name().map(str::to_string),
+                ethernet_segment_binding: match &svc.es {
+                    super::vpws::EsBinding::None => None,
+                    super::vpws::EsBinding::Explicit(_) => Some("explicit".to_string()),
+                    super::vpws::EsBinding::Derived(_) => Some("derived".to_string()),
+                    super::vpws::EsBinding::Ambiguous(_) => Some("ambiguous".to_string()),
+                    super::vpws::EsBinding::Unresolved(_) => Some("unresolved".to_string()),
+                },
+                ethernet_segment_candidates: match &svc.es {
+                    super::vpws::EsBinding::Ambiguous(names) => Some(names.clone()),
+                    _ => None,
+                },
+                ethernet_segment_if_mismatch: svc.es_if_mismatch.clone(),
                 esi: svc.esi.map(|esi| bgp_packet::esi_display(&esi)),
                 redundancy_mode: svc.esi.map(|_| {
                     if svc.single_active {
@@ -2713,26 +2730,53 @@ fn show_bgp_evpn_vpws(
         if let Some(mtu) = svc.mtu.filter(|m| *m != 0) {
             writeln!(buf, "  MTU: {mtu}")?;
         }
-        // RFC 8214 §5 multihoming. The segment name shows even when it
-        // resolves to nothing (no such ES, or its ESI unset) — that is the
-        // difference between "single-homed" and "misconfigured".
-        if let Some(es_name) = &svc.ethernet_segment {
-            match svc.esi {
-                Some(esi) => {
-                    let mode = if svc.single_active {
-                        "single-active"
-                    } else {
-                        "all-active"
-                    };
+        // RFC 8214 §5 multihoming. Both failure states print — a typo'd
+        // segment name and an AC claimed by several segments must not look
+        // like a deliberately single-homed service.
+        match &svc.es {
+            super::vpws::EsBinding::None => {}
+            super::vpws::EsBinding::Unresolved(es_name) => {
+                writeln!(buf, "  Ethernet Segment: {es_name} (no such segment)")?;
+            }
+            super::vpws::EsBinding::Ambiguous(names) => {
+                writeln!(
+                    buf,
+                    "  Ethernet Segment: ambiguous — {} claim {}; name one explicitly",
+                    names.join(", "),
+                    svc.interface.as_deref().unwrap_or("this AC"),
+                )?;
+            }
+            binding @ (super::vpws::EsBinding::Explicit(es_name)
+            | super::vpws::EsBinding::Derived(es_name)) => {
+                let how = if matches!(binding, super::vpws::EsBinding::Derived(_)) {
+                    format!(" (from {})", svc.interface.as_deref().unwrap_or("AC"))
+                } else {
+                    String::new()
+                };
+                match svc.esi {
+                    Some(esi) => {
+                        let mode = if svc.single_active {
+                            "single-active"
+                        } else {
+                            "all-active"
+                        };
+                        writeln!(
+                            buf,
+                            "  Ethernet Segment: {es_name}{how} (ESI {}, {mode})",
+                            bgp_packet::esi_display(&esi)
+                        )?;
+                        let df = svc.df.map_or("(none)".to_string(), |df| df.to_string());
+                        writeln!(buf, "  Role: {} (DF {df})", svc.role.as_str())?;
+                    }
+                    None => writeln!(buf, "  Ethernet Segment: {es_name}{how} (ESI unset)")?,
+                }
+                if let Some(es_if) = &svc.es_if_mismatch {
                     writeln!(
                         buf,
-                        "  Ethernet Segment: {es_name} (ESI {}, {mode})",
-                        bgp_packet::esi_display(&esi)
+                        "  WARNING: segment interface {es_if} differs from AC {}",
+                        svc.interface.as_deref().unwrap_or("(unset)")
                     )?;
-                    let df = svc.df.map_or("(none)".to_string(), |df| df.to_string());
-                    writeln!(buf, "  Role: {} (DF {df})", svc.role.as_str())?;
                 }
-                None => writeln!(buf, "  Ethernet Segment: {es_name} (unresolved)")?,
             }
         }
         if let Some((sid, _)) = vpws.sids.get(name) {
