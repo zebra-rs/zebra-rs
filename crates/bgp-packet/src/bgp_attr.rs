@@ -214,10 +214,24 @@ impl BgpAttr {
     /// `End.DT2M` SID on a Type-3 IMET route). `None` when the attribute
     /// is absent or carries no SRv6 L2 Service TLV.
     pub fn srv6_l2_sid(&self) -> Option<(std::net::Ipv6Addr, u16)> {
-        self.prefix_sid.as_ref()?.tlvs.iter().find_map(|t| match t {
-            PrefixSidTlv::Srv6L2Service(svc) => svc.sids.first().map(|s| (s.sid, s.behavior)),
-            _ => None,
-        })
+        self.srv6_l2_sids().next()
+    }
+
+    /// Every SRv6 L2 Service SID (value + endpoint behavior) carried in
+    /// the Prefix-SID attribute, in wire order across all SRv6 L2 Service
+    /// TLVs and their SID Information sub-TLVs. Empty when the attribute
+    /// is absent or carries no SRv6 L2 Service TLV. The L2 twin of
+    /// [`Self::srv6_l3_sids`] — a display or audit path wants every SID,
+    /// where a forwarding path picks one by behavior.
+    pub fn srv6_l2_sids(&self) -> impl Iterator<Item = (std::net::Ipv6Addr, u16)> + '_ {
+        self.prefix_sid
+            .iter()
+            .flat_map(|ps| ps.tlvs.iter())
+            .filter_map(|t| match t {
+                PrefixSidTlv::Srv6L2Service(svc) => Some(svc),
+                _ => None,
+            })
+            .flat_map(|svc| svc.sids.iter().map(|s| (s.sid, s.behavior)))
     }
 
     /// Iterate every Color extended community (RFC 9012 §4.3, type
