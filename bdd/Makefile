@@ -338,7 +338,7 @@ vrf_phantom_instance:
 
 interface_vrf_binding:
 	mkdir -p allure-results
-	cargo test --test cucumber -- --concurrency=1 --tags "@interface_vrf_binding"
+	$(CUCUMBER) -- --concurrency=1 --tags "@interface_vrf_binding"
 
 vrf_connected_route:
 	mkdir -p allure-results
@@ -549,7 +549,7 @@ bgp_evpn_vpws_multihoming:
 # this target runs longer than most.
 bgp_evpn_vpws_startup_delay:
 	mkdir -p allure-results
-	cargo test --test cucumber -- --concurrency=1 --tags "@bgp_evpn_vpws_startup_delay"
+	$(CUCUMBER) -- --concurrency=1 --tags "@bgp_evpn_vpws_startup_delay"
 
 # EVPN Type-5 over SRv6 (End.DT46) with CE-to-CE forwarding. Kernel
 # dataplane only — no cradle engine needed.
