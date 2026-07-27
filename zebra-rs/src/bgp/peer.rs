@@ -823,6 +823,13 @@ impl PeerStat {
     }
 }
 
+/// Identity of one EVPN advertisement in [`Peer::cache_evpn_rev`]:
+/// `(RD, route key, AddPath path-id)` — the same triple the Adj-RIB-Out is
+/// keyed on, and everything a withdraw can reconstruct. Deliberately
+/// excludes the per-path forwarding properties (MPLS label / VNI, Type-5
+/// gateway IP) that the NLRI also carries.
+pub type EvpnCacheKey = (RouteDistinguisher, EvpnPrefix, u32);
+
 #[derive(Debug)]
 pub struct Peer {
     pub ident: usize,
@@ -1006,10 +1013,18 @@ pub struct Peer {
     pub cache_vpnv6_timer: Option<Timer>,
     /// EVPN advertise cache. Mirrors `cache_vpnv4` shape — NLRIs
     /// grouped by attribute so a single MP_REACH UPDATE on flush can
-    /// carry every route that shares one attr set. Withdraw path uses
-    /// the reverse map; not yet implemented in this PR.
+    /// carry every route that shares one attr set.
     pub cache_evpn: HashMap<Arc<BgpAttr>, HashSet<EvpnRoute>>,
-    pub cache_evpn_rev: HashMap<EvpnRoute, Arc<BgpAttr>>,
+    /// Reverse index into `cache_evpn`, keyed by **route identity**
+    /// ([`EvpnCacheKey`]) rather than by the `EvpnRoute` itself. The queued
+    /// NLRI carries per-path forwarding properties — the MPLS label / VNI,
+    /// the Type-5 gateway — that a withdraw does not know
+    /// (`evpn_route_from_prefix` zeroes them), so an `EvpnRoute`-keyed index
+    /// could not be looked up from the withdraw side. The value keeps the
+    /// NLRI exactly as queued so the eviction can remove it from the
+    /// attribute group. `Vpnv4Nlri` solves the same problem the other way
+    /// round, with a label-blind `PartialEq`/`Hash`.
+    pub cache_evpn_rev: HashMap<EvpnCacheKey, (Arc<BgpAttr>, EvpnRoute)>,
     pub cache_vpnv4_timer: Option<Timer>,
     pub cache_evpn_timer: Option<Timer>,
     // Runtime bookkeeping for TCP-AO listener state: the (send_id,
@@ -4387,6 +4402,8 @@ mod as4_negotiation_tests {
 
 #[cfg(test)]
 mod adv_timer_phantom_tests {
+    use std::str::FromStr;
+
     use super::*;
 
     fn idle_peer() -> Peer {
@@ -4675,7 +4692,11 @@ mod adv_timer_phantom_tests {
                 .is_some_and(|set| set.contains(&route)),
             "the route must be queued under the attribute last advertised"
         );
-        assert_eq!(peer.cache_evpn_rev.get(&route), Some(&primary));
+        let (rd, prefix) = EvpnPrefix::from_route(&route);
+        assert_eq!(
+            peer.cache_evpn_rev.get(&(rd, prefix, 0)),
+            Some(&(primary.clone(), route.clone()))
+        );
 
         // Re-advertising with the *same* attribute is idempotent.
         peer.send_evpn(route.clone(), primary.clone(), true);
@@ -4685,6 +4706,46 @@ mod adv_timer_phantom_tests {
             Some(1),
             "a repeat advertise must not duplicate the NLRI"
         );
+    }
+
+    /// A withdraw must cancel the advertisement of the same route still
+    /// sitting in the debounce cache, even though the two carry different
+    /// label / gateway values: `evpn_route_from_prefix` rebuilds the NLRI
+    /// from the RIB key alone and zeroes both, while the queued copy holds
+    /// the real service label.
+    ///
+    /// Missing that eviction is what resurrected a withdrawn route: rebinding
+    /// a peer's EVPN out-policy to an undefined name ran two soft-outs (the
+    /// unbind of the old name, then the bind of the new one), the first
+    /// queued a re-advertise and the second sent the withdraw — and the
+    /// orphaned advertise reached the peer when the advertisement-interval
+    /// timer fired five seconds later.
+    #[tokio::test]
+    async fn cache_remove_evpn_cancels_a_queued_advertise_with_a_label() {
+        let (mut peer, _rx) = peer_with_channel();
+        let rd = RouteDistinguisher::from_str("65001:100").unwrap();
+        let advertised = EvpnRoute::Prefix(bgp_packet::EvpnIpPrefix {
+            id: 0,
+            rd,
+            esi: [0; 10],
+            ether_tag: 0,
+            prefix: "10.1.0.0/24".parse().unwrap(),
+            gw: IpAddr::V4(Ipv4Addr::new(192, 168, 0, 1)),
+            label: 16,
+        });
+
+        peer.send_evpn(advertised.clone(), Arc::new(BgpAttr::new()), true);
+        assert_eq!(peer.cache_evpn.len(), 1);
+
+        // The withdraw side knows only (rd, prefix, path-id).
+        let (_, key) = EvpnPrefix::from_route(&advertised);
+        peer.cache_remove_evpn(rd, &key, 0);
+
+        assert!(
+            peer.cache_evpn.is_empty(),
+            "the queued advertise must be cancelled, not left to flush after the withdraw"
+        );
+        assert!(peer.cache_evpn_rev.is_empty());
     }
 
     /// EVPN twin of the VPNv4 zero-interval test above, using a

@@ -5345,16 +5345,14 @@ fn route_withdraw_evpn(peer: &mut Peer, route: EvpnRoute) {
 /// Adj-RIB-Out clear); a non-zero `id` withdraws exactly that path.
 fn evpn_withdraw_one(peer: &mut Peer, rd: &RouteDistinguisher, prefix: &EvpnPrefix, id: u32) {
     let route = evpn_route_from_prefix(rd, prefix, id);
-    // Drop a queued advertise for the same route from the peer's cache
-    // so flush_evpn doesn't ship a now-stale add after the withdraw.
-    if let Some(attr) = peer.cache_evpn_rev.remove(&route)
-        && let Some(set) = peer.cache_evpn.get_mut(&attr)
-    {
-        set.remove(&route);
-        if set.is_empty() {
-            peer.cache_evpn.remove(&attr);
-        }
-    }
+    // Drop a queued advertise for the same route from the peer's cache so
+    // flush_evpn doesn't ship a now-stale add after the withdraw. Keyed on
+    // `(rd, prefix, id)` — `route` above carries a zeroed label and gateway,
+    // so matching the queued NLRI itself would miss (and did: a rebind of an
+    // EVPN out-policy to an undefined name withdrew the route and then the
+    // advertisement-interval timer re-sent the copy queued moments earlier
+    // by the same soft-out, five seconds later).
+    peer.cache_remove_evpn(*rd, prefix, id);
     // Drop the Adj-RIB-Out entry so soft-out's baseline reflects
     // reality — without this a follow-up policy change would think the
     // route is still advertised and emit a redundant withdraw.
@@ -5417,6 +5415,31 @@ fn macip_service_field(rib: &BgpRib) -> u32 {
         .filter(|l| *l != 0)
         .or_else(|| extract_vni_from_attr(&rib.attr))
         .unwrap_or(0)
+}
+
+/// The RFC 7911 path-id carried on an EVPN NLRI — 0 for a non-AddPath
+/// advertisement, which is also the whole-prefix sentinel the Adj-RIB-Out
+/// and the advertise cache use.
+pub(super) fn evpn_path_id(route: &EvpnRoute) -> u32 {
+    match route {
+        EvpnRoute::EthernetAd(e) => e.id,
+        EvpnRoute::EthernetSeg(e) => e.id,
+        EvpnRoute::Mac(m) => m.id,
+        EvpnRoute::Multicast(m) => m.id,
+        EvpnRoute::Prefix(p) => p.id,
+        EvpnRoute::Smet(s) => s.id,
+        EvpnRoute::IgmpJoinSync(j) => j.id,
+        EvpnRoute::IgmpLeaveSync(l) => l.id,
+        EvpnRoute::PerRegionImet(r) => r.id,
+        EvpnRoute::SPmsi(r) => r.id,
+        EvpnRoute::LeafAd(r) => r.id,
+    }
+}
+
+/// The advertise-cache identity of `route` — see [`super::peer::EvpnCacheKey`].
+fn evpn_cache_key(route: &EvpnRoute) -> super::peer::EvpnCacheKey {
+    let (rd, prefix) = EvpnPrefix::from_route(route);
+    (rd, prefix, evpn_path_id(route))
 }
 
 fn evpn_route_from_prefix(rd: &RouteDistinguisher, prefix: &EvpnPrefix, id: u32) -> EvpnRoute {
@@ -8024,19 +8047,7 @@ pub fn route_evpn_update(
     // reflect path as the other EVPN types; they carry no VXLAN dataplane
     // action (`route_evpn_export_selected` handles them as no-ops). Local
     // origination / segmentation re-origination lands in a later phase.
-    let id = match route {
-        EvpnRoute::EthernetAd(e) => e.id,
-        EvpnRoute::EthernetSeg(e) => e.id,
-        EvpnRoute::Mac(m) => m.id,
-        EvpnRoute::Multicast(m) => m.id,
-        EvpnRoute::Prefix(p) => p.id,
-        EvpnRoute::Smet(s) => s.id,
-        EvpnRoute::IgmpJoinSync(j) => j.id,
-        EvpnRoute::IgmpLeaveSync(l) => l.id,
-        EvpnRoute::PerRegionImet(r) => r.id,
-        EvpnRoute::SPmsi(r) => r.id,
-        EvpnRoute::LeafAd(r) => r.id,
-    };
+    let id = evpn_path_id(route);
 
     // Loop detection mirrors route_ipv4_update — drop the route silently
     // (no eprintln) on local-AS / ORIGINATOR_ID / CLUSTER_LIST hits.
@@ -8238,19 +8249,7 @@ pub fn route_evpn_update(
 /// and the Loc-RIB, then re-run best-path selection.
 pub fn route_evpn_withdraw(ident: usize, route: &EvpnRoute, bgp: &mut BgpTop, peers: &mut PeerMap) {
     let (rd, prefix) = EvpnPrefix::from_route(route);
-    let id = match route {
-        EvpnRoute::EthernetAd(e) => e.id,
-        EvpnRoute::EthernetSeg(e) => e.id,
-        EvpnRoute::Mac(m) => m.id,
-        EvpnRoute::Multicast(m) => m.id,
-        EvpnRoute::Prefix(p) => p.id,
-        EvpnRoute::Smet(s) => s.id,
-        EvpnRoute::IgmpJoinSync(j) => j.id,
-        EvpnRoute::IgmpLeaveSync(l) => l.id,
-        EvpnRoute::PerRegionImet(r) => r.id,
-        EvpnRoute::SPmsi(r) => r.id,
-        EvpnRoute::LeafAd(r) => r.id,
-    };
+    let id = evpn_path_id(route);
 
     {
         let peer = peers.get_mut_by_idx(ident).expect("peer must exist");
@@ -12587,28 +12586,46 @@ impl Peer {
     /// per-attribute batching so a single MP_REACH UPDATE can carry
     /// every route that shares an attribute set.
     pub fn send_evpn(&mut self, route: EvpnRoute, attr: Arc<BgpAttr>, timer: bool) {
-        // Re-advertising a route whose *attribute* changed must first evict
-        // it from the attr group it was queued under. `cache_evpn` groups
-        // pending NLRIs by attribute and `flush_evpn` emits one UPDATE per
-        // group, so leaving the stale entry ships the route twice — once
-        // with each attribute — and which one the peer ends up believing
-        // depends on `BTreeMap` iteration order over the attr keys. That is
-        // arbitrary, so the peer intermittently keeps the *old* attribute.
-        //
-        // `evpn_withdraw_one` already evicts this way for the withdraw case;
-        // this is the same eviction for the re-advertise case.
-        if let Some(old) = self.cache_evpn_rev.insert(route.clone(), attr.clone())
-            && old != attr
-            && let Some(set) = self.cache_evpn.get_mut(&old)
+        // Re-advertising a route must first evict whatever copy of it is
+        // already queued. `cache_evpn` groups pending NLRIs by attribute and
+        // `flush_evpn` emits one UPDATE per group, so leaving the stale entry
+        // ships the route twice — once with each attribute — and which one
+        // the peer ends up believing depends on `HashMap` iteration order
+        // over the attr keys. That is arbitrary, so the peer intermittently
+        // keeps the *old* attribute. Evicting on identity (not on the whole
+        // NLRI) also catches a re-advertise that changed only the label /
+        // gateway under an unchanged attribute set.
+        let key = evpn_cache_key(&route);
+        if let Some((old_attr, old_route)) = self
+            .cache_evpn_rev
+            .insert(key, (attr.clone(), route.clone()))
+            && let Some(set) = self.cache_evpn.get_mut(&old_attr)
         {
-            set.remove(&route);
+            set.remove(&old_route);
             if set.is_empty() {
-                self.cache_evpn.remove(&old);
+                self.cache_evpn.remove(&old_attr);
             }
         }
         self.cache_evpn.entry(attr).or_default().insert(route);
         if timer && self.cache_evpn_timer.is_none() {
             self.cache_evpn_timer = Some(start_adv_timer_evpn(self));
+        }
+    }
+
+    /// Drop a not-yet-flushed EVPN advertisement of `(rd, prefix, id)` from
+    /// the advertise cache. The EVPN twin of [`Peer::cache_remove_vpnv4`],
+    /// and the reason `cache_evpn_rev` is keyed on identity: a withdraw
+    /// reconstructs the NLRI from the RIB key alone (`evpn_route_from_prefix`
+    /// zeroes the label and the Type-5 gateway), so it can never present the
+    /// queued NLRI byte-for-byte.
+    pub fn cache_remove_evpn(&mut self, rd: RouteDistinguisher, prefix: &EvpnPrefix, id: u32) {
+        if let Some((attr, route)) = self.cache_evpn_rev.remove(&(rd, prefix.clone(), id))
+            && let Some(set) = self.cache_evpn.get_mut(&attr)
+        {
+            set.remove(&route);
+            if set.is_empty() {
+                self.cache_evpn.remove(&attr);
+            }
         }
     }
 
