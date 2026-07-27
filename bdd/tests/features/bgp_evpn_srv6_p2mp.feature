@@ -8,20 +8,25 @@ Feature: BGP EVPN BUM over SRv6 P2MP replication (RFC 9524) — cradle engine
   cradle — its own End.DT2M leaf SID into the SRv6 table, and each remote PE's
   End.DT2M SID as a VNI-10 replication slot.
 
-  This proves the control-plane -> cradle-tee integration end to end (session,
-  SID exchange, engine programming). BUM forwarding is the cradle engine's job
-  (the retired standalone tc-evpn-replicate offload is superseded); its packet
-  path is exercised by the veth scripts in cradle-rs
-  (crates/tc-evpn-replicate/scripts/veth-*.sh). Requires /usr/bin/cradle — see
-  the cradle_spawn feature header for install instructions.
+  Scope is the control plane and the tee, not forwarding: no frames are sent
+  here. BUM forwarding is the cradle engine's job (the standalone
+  tc-evpn-replicate offload this feature was originally written against has
+  been retired), and its packet path is covered in cradle-rs by
+  `cradle_evpn_srv6_zebra_multi` — three PEs, this same BGP control plane, a
+  real eBPF data plane and CE-to-CE traffic. What is proven here is the
+  session, the SID exchange, and the engine programming.
+
+  Requires /usr/bin/cradle — see the cradle_spawn feature header for install
+  instructions.
 
   Test Topology — z1 and z2 are SRv6 EVPN PEs on a direct underlay link, each a
   root + leaf for VNI 10. Each runs the cradle engine, which encaps BUM toward
-  the remote End.DT2M SID and decaps a replicated copy onto its bridge.
+  the remote End.DT2M SID and decaps a replicated copy onto its bridge. The
+  bridge holding the config-created vxlan10 is zebra's VNI declaration — it is
+  what makes the EVI exist and the Type-3 originate; cradle owns the flood
+  path itself (it creates its own replication-slot veths).
   ```
-   z1 [br10: vxlan10 + oport1 + host1]      z2 [br10: vxlan10 + iport2 + host2]
-        host1 ─(inject bare BUM)                     host2 ─(capture)
-          │                                            ▲
+   z1 [br10: vxlan10]                          z2 [br10: vxlan10]
         br10 ─ cradle ═encap═► z1z2 ═════ z2z1 ═decap═ cradle ─ br10
   ```
 
@@ -37,30 +42,14 @@ Feature: BGP EVPN BUM over SRv6 P2MP replication (RFC 9524) — cradle engine
     And I start zebra-rs in namespace "z2"
     And I apply config "z1-1.yaml" to namespace "z1"
     And I apply config "z2-1.yaml" to namespace "z2"
-    # Per-node L2 domain: a VNI-10 bridge with an overlay port (encap egress),
-    # a leaf flood-in port (decap target), and an access port.
+    # Per-node L2 domain: the VNI-10 bridge holding the config-created
+    # vxlan10. That pairing is the VNI declaration the EVI is derived from.
     And I execute "ip link add br10 type bridge" in namespace "z1"
     And I execute "ip link set vxlan10 master br10" in namespace "z1"
-    And I execute "ip link add oport1 type veth peer name oport1p" in namespace "z1"
-    And I execute "ip link add host1 type veth peer name host1p" in namespace "z1"
-    And I execute "ip link set oport1 master br10" in namespace "z1"
-    And I execute "ip link set host1 master br10" in namespace "z1"
     And I execute "ip link set br10 up" in namespace "z1"
-    And I execute "ip link set oport1 up" in namespace "z1"
-    And I execute "ip link set oport1p up" in namespace "z1"
-    And I execute "ip link set host1 up" in namespace "z1"
-    And I execute "ip link set host1p up" in namespace "z1"
     And I execute "ip link add br10 type bridge" in namespace "z2"
     And I execute "ip link set vxlan10 master br10" in namespace "z2"
-    And I execute "ip link add iport2 type veth peer name iport2p" in namespace "z2"
-    And I execute "ip link add host2 type veth peer name host2p" in namespace "z2"
-    And I execute "ip link set iport2 master br10" in namespace "z2"
-    And I execute "ip link set host2 master br10" in namespace "z2"
     And I execute "ip link set br10 up" in namespace "z2"
-    And I execute "ip link set iport2 up" in namespace "z2"
-    And I execute "ip link set iport2p up" in namespace "z2"
-    And I execute "ip link set host2 up" in namespace "z2"
-    And I execute "ip link set host2p up" in namespace "z2"
     And I wait 12 seconds for BGP to operate
     Then BGP session in "z1" to "2001:db8:12::2" should be "Established"
     # z1 learns z2's per-PE IMET carrying z2's End.DT2M SID (SRv6 L2 Prefix-SID).
