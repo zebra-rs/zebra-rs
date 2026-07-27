@@ -5,6 +5,8 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use tokio::fs;
 use tokio::process::Command;
 
+use crate::toolchain;
+
 /// Per-process counter for generating unique temporary veth names in
 /// `connect_netns_pair` and `connect_netns_to_bridge`. Names get renamed
 /// and moved into namespaces immediately after creation, so they only need
@@ -29,13 +31,39 @@ async fn run_cmd(args: &[&str], error_msg: &str) -> Result<()> {
     }
 }
 
+/// Build the `sudo ip netns exec <netns> [env KEY=VAL …]` prelude shared by
+/// every in-namespace command.
+///
+/// `assignments` are pre-rendered `KEY=VAL` strings. When this worktree has
+/// a staged toolchain (see [`crate::toolchain`]), a `PATH=` assignment
+/// leading with the stage's `bin/` is prepended, so commands built from this
+/// repo — `zebra-rs`, `vtyctl`, `pfcp-inject`, and anything a feature file
+/// names — resolve to this worktree's copies instead of whatever another
+/// worktree last installed under `/usr/bin`. System tools (`ip`, `bridge`,
+/// `timeout`, `python3`) resolve exactly as before.
+///
+/// `sudo` resets the environment, which is why the assignments ride on an
+/// `env` prefix rather than on the harness process. GNU `env` applies them
+/// to its own environment before `execvp`, so the command name is looked up
+/// against the PATH set here.
+fn netns_prelude(c: &mut Command, netns: &str, assignments: &[String]) {
+    c.arg("ip").arg("netns").arg("exec").arg(netns);
+
+    let path = toolchain::prefix().map(|p| p.path_env());
+    if path.is_some() || !assignments.is_empty() {
+        c.arg("env");
+        if let Some(path) = path {
+            c.arg(path);
+        }
+        c.args(assignments);
+    }
+}
+
 /// Execute a command in a network namespace
 pub async fn exec_in_netns(netns: &str, cmd: &str, args: &[&str]) -> Result<String> {
-    let output = Command::new("sudo")
-        .arg("ip")
-        .arg("netns")
-        .arg("exec")
-        .arg(netns)
+    let mut c = Command::new("sudo");
+    netns_prelude(&mut c, netns, &[]);
+    let output = c
         .arg(cmd)
         .args(args)
         .stdout(Stdio::piped())
@@ -353,8 +381,8 @@ pub async fn spawn_in_netns_env(
     cmd: &str,
     args: &[&str],
 ) -> Result<tokio::process::Child> {
-    let mut c = Command::new("sudo");
-    c.arg("ip").arg("netns").arg("exec").arg(netns);
+    let is_zebra = cmd == "zebra-rs";
+    let mut assignments: Vec<String> = Vec::new();
 
     // Give each zebra-rs daemon a per-namespace OSPF graceful-restart
     // checkpoint dir. The daemon otherwise reads/writes the fixed
@@ -369,17 +397,15 @@ pub async fn spawn_in_netns_env(
     // checkpoint private while staying STABLE across a same-namespace
     // restart, so graceful-restart resume still works; the daemon
     // create_dir_all's it on write.
-    let ckpt = format!("ZEBRA_OSPF_CHECKPOINT_DIR=/tmp/zebra-rs-ckpt/{netns}");
-    let is_zebra = cmd == "zebra-rs";
-    if is_zebra || !env.is_empty() {
-        c.arg("env");
-        if is_zebra {
-            c.arg(&ckpt);
-        }
-        for (k, v) in env {
-            c.arg(format!("{k}={v}"));
-        }
+    if is_zebra {
+        assignments.push(format!(
+            "ZEBRA_OSPF_CHECKPOINT_DIR=/tmp/zebra-rs-ckpt/{netns}"
+        ));
     }
+    assignments.extend(env.iter().map(|(k, v)| format!("{k}={v}")));
+
+    let mut c = Command::new("sudo");
+    netns_prelude(&mut c, netns, &assignments);
     c.arg(cmd);
     // Force every BDD daemon to cold-start from an empty config. Without an
     // explicit `--config-file`, zebra-rs loads its default config file; under
@@ -395,6 +421,17 @@ pub async fn spawn_in_netns_env(
     // untouched, so we neither depend on nor delete it.
     if is_zebra {
         c.arg("-c").arg("/dev/null");
+
+        // Pin the schemas to this worktree's staged copy. Without it the
+        // daemon walks its own search order — `~/.zebra-rs/yang` then
+        // `/usr/share/zebra-rs/yang` (see `yang_path()` in zebra-rs's
+        // main.rs) — and both are host-global. Under `sudo` HOME is /root,
+        // so a stray `/root/.zebra-rs/yang` shadows even the installed set;
+        // whichever wins, a schema from a different worktree rejects config
+        // this binary supports, surfacing as "unknown key" at apply time.
+        if let Some(prefix) = toolchain::prefix() {
+            c.arg("--yang-path").arg(prefix.yang_dir());
+        }
     }
     c.args(args);
     c.stdout(Stdio::null()).stderr(Stdio::null());

@@ -1,4 +1,8 @@
 pub mod netns;
+// `netns` is compiled into this scratch binary as its own module tree (not
+// pulled from the lib), so its `crate::toolchain` dependency has to be
+// declared here as well.
+pub mod toolchain;
 
 #[tokio::main]
 async fn main() {

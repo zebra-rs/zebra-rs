@@ -92,7 +92,37 @@ fn set_git_info() {
     println!("cargo:rustc-env=GIT_DIRTY={git_dirty}");
     println!("cargo:rustc-env=BUILD_DATE={build_date}");
 
-    // Rerun build script if git HEAD changes
-    println!("cargo:rerun-if-changed=../.git/HEAD");
-    println!("cargo:rerun-if-changed=../.git/refs");
+    // Rerun the build script when HEAD or a ref moves. The paths are
+    // resolved through git rather than assumed to be `../.git/<name>`,
+    // because `../.git` is only a directory in a primary checkout: in a
+    // linked git worktree it is a FILE holding `gitdir: …`, so
+    // `../.git/HEAD` does not exist. `rerun-if-changed` on a MISSING path
+    // makes cargo treat the build script as permanently dirty, which fully
+    // rebuilt zebra-rs — the largest crate in the workspace — on every
+    // cargo invocation in every worktree (and in any source-tarball build,
+    // which has no git metadata at all). A path that still doesn't resolve
+    // is therefore skipped rather than emitted.
+    for name in ["HEAD", "refs"] {
+        if let Some(path) = git_path(name) {
+            println!("cargo:rerun-if-changed={path}");
+        }
+    }
+}
+
+/// Absolute path to `name` inside the repository's git directory, or `None`
+/// when this is not a git checkout.
+///
+/// `git rev-parse --git-path` knows the linked-worktree split that a plain
+/// `../.git/<name>` join cannot express: HEAD lives in the worktree's
+/// private directory while `refs` lives in the shared common directory.
+fn git_path(name: &str) -> Option<String> {
+    let output = Command::new("git")
+        .args(["rev-parse", "--git-path", name])
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let path = String::from_utf8(output.stdout).ok()?.trim().to_string();
+    std::path::Path::new(&path).exists().then_some(path)
 }

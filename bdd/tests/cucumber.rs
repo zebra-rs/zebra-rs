@@ -2884,6 +2884,12 @@ async fn main() {
     let _ = fs::create_dir_all("logs");
     let _ = fs::create_dir_all("allure-results");
 
+    // Say which binaries and schemas this run executes. A failure caused by
+    // a stale or foreign toolchain (another worktree's `make install`) is
+    // otherwise indistinguishable from a product bug, so the run log has to
+    // carry the evidence. See `bdd::toolchain`.
+    println!("{}", bdd::toolchain::describe());
+
     // Parse the standard cucumber CLI ourselves. Each feature is run in its
     // own cucumber instance with scenarios forced serial (and in declaration
     // order) via `max_concurrent_scenarios(1)`, while *different* features run
