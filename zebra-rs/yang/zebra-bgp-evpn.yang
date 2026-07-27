@@ -267,6 +267,43 @@ module zebra-bgp-evpn {
              the other PEs on the segment that this PE excludes itself from
              the election while its attachment circuit is down.";
         }
+        leaf startup-delay {
+          ext:help "Seconds to stay out of the election after joining the segment";
+          type uint16 {
+            range "1..3600";
+          }
+          description
+            "Seconds this PE stays out of the segment's Designated-Forwarder
+             election after joining it — after the ESI is first configured,
+             which on a reboot is when the startup configuration is applied.
+
+             A PE that has just booted has not yet learned the other PEs'
+             Type-4 routes. An election run against that empty candidate set
+             elects this PE the DF for every service instance, so it starts
+             forwarding toward a CE the incumbent DF is already serving and
+             the CE sees duplicates. The hold gives BGP time to converge
+             first.
+
+             While the hold runs the PE suppresses this segment's ES routes
+             (the Type-4 and the per-ES A-D) and advertises P=0/B=0 in the
+             Layer-2 Attributes extended community of every VPWS service on
+             the segment. Suppressing the advertisement is what makes the
+             hold safe: deferring only the local election would leave the
+             other PEs still seeing our Type-4 and still running the same
+             deterministic election, free to hand the DF role to a PE that is
+             refusing to forward.
+
+             The corollary is that a segment with no other PE on it — a
+             single-homed segment, or one whose peer is down — is down for
+             the whole delay, since there is no incumbent for the hold to
+             protect. That is why this is off by default.
+
+             Unset = join the election immediately. Clearing it while a hold
+             is running ends the hold at once. Interoperates with IOS-XR
+             `timers peering`, Junos
+             `designated-forwarder-election-hold-time` and FRR
+             `evpn mh startup-delay`.";
+        }
       }
     }
     list vpws {

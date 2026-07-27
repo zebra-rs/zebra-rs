@@ -131,6 +131,17 @@ pub enum Message {
     /// sync; handled directly in [`Bgp::event_loop`], which awaits
     /// [`Bgp::relisten`].
     Relisten,
+    /// An Ethernet Segment's startup hold (`ethernet-segment <name>
+    /// df-election startup-delay`) elapsed: put its ES routes back on the
+    /// wire and re-run DF election for the VPWS services on it. Sent by the
+    /// timer [`Bgp::es_arm_hold`] spawns. `until` is the deadline that timer
+    /// was armed for — the identity of the hold, so a wake-up for a hold that
+    /// has since been cleared or re-armed is discarded rather than ending one
+    /// it does not own.
+    EsHoldExpired {
+        name: String,
+        until: std::time::Instant,
+    },
 }
 
 pub type Callback = fn(&mut Bgp, Args, ConfigOp) -> Option<()>;
@@ -2514,6 +2525,9 @@ impl Bgp {
                 // Intercepted in `event_loop` before this dispatcher
                 // (the rebind is async, this method is not). Nothing to
                 // do if one slips through another path.
+            }
+            Message::EsHoldExpired { name, until } => {
+                self.es_hold_expired(&name, until);
             }
         }
     }

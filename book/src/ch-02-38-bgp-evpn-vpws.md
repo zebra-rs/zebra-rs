@@ -188,6 +188,52 @@ the Type-1 if this PE's own role changed, with no local config change. A PE
 whose own Type-4 is not selected yet advertises primary rather than
 blackholing the service while the segment converges.
 
+**Startup delay** covers the one case where that last rule is wrong. A PE
+that has just booted has not learned the other PEs' Type-4 routes yet, so an
+election run immediately sees an empty candidate set, elects this PE the DF
+for every service instance, and starts forwarding toward a CE the incumbent
+DF is already serving — the CE sees duplicates. `startup-delay` holds the PE
+out of the segment for that many seconds after it joins (on a reboot, from
+when the startup configuration is applied):
+
+```
+  ethernet-segment ES1
+   esi 00:11:22:33:44:55:66:77:88:99
+   redundancy-mode single-active
+   interface ce1
+   df-election
+    startup-delay 180
+```
+
+While the hold runs the PE **withholds this segment's ES routes** — the
+Type-4 and the per-ES A-D — and forces every VPWS service on the segment to
+`P=0 B=0`. Suppressing the advertisement is what makes the hold safe:
+deferring only the local election would leave the other PEs still seeing our
+Type-4, still running the same deterministic election, and free to hand the
+DF role to a PE that is refusing to forward. Withholding the routes keeps us
+out of their candidate sets entirely, so the incumbent simply keeps
+forwarding until we join.
+
+The corollary is that a segment with no other PE on it — single-homed, or
+one whose peer is down — is out of service for the whole delay, since there
+is no incumbent for the hold to protect. That is why this is off by default.
+Clearing the leaf releases a hold in flight immediately rather than making
+the operator wait out a timer they have just cancelled, and
+`show bgp evpn ethernet-segment` reports the remaining time:
+
+```
+Ethernet Segment: ES1
+  ESI: 00:11:22:33:44:55:66:77:88:99
+  Redundancy mode: single-active
+  Interface: ce1
+  Startup hold: 143s of 180s remaining (ES routes suppressed)
+  Member VTEPs (1):
+    [0] 192.168.0.2
+```
+
+This interoperates with IOS-XR `timers peering`, Junos
+`designated-forwarder-election-hold-time` and FRR `evpn mh startup-delay`.
+
 **Remote selection** — which of a multihomed pair this PE binds — ranks the
 advertised remotes per RFC 8214 §5: primary over backup, non-designated
 (`P=0 B=0`) dropped, lowest originator breaking a tie so both ends agree.

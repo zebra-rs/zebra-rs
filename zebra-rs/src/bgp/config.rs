@@ -1854,12 +1854,20 @@ fn config_ethernet_segment_esi(bgp: &mut Bgp, mut args: Args, op: ConfigOp) -> O
         bgp.evpn_withdraw_es_routes(old, vtep);
     }
     let single_active = {
-        let es = bgp.ethernet_segments.entry(name).or_default();
+        let es = bgp.ethernet_segments.entry(name.clone()).or_default();
         es.esi = new_esi;
         es.redundancy_mode.single_active()
     };
     if let Some(esi) = new_esi {
+        // Joining the segment starts its startup hold, when one is
+        // configured. Arm before originating so the origination below finds
+        // the gate already closed — on a reboot this is what keeps a
+        // just-booted PE out of the other PEs' candidate sets.
+        bgp.es_arm_hold(&name);
         bgp.evpn_originate_es_routes(esi, vtep, single_active);
+    } else {
+        // No segment left to hold out of an election.
+        bgp.es_hold_leave(&name);
     }
     // The ESI is part of a VPWS Type-1's NLRI key, so services on this
     // segment must be re-originated under the new one.
@@ -1937,6 +1945,42 @@ fn config_es_ac_df(bgp: &mut Bgp, mut args: Args, op: ConfigOp) -> Option<()> {
     let es = bgp.ethernet_segments.entry(name).or_default();
     es.ac_df = op.is_set();
     es_df_election_changed(bgp);
+    Some(())
+}
+
+/// `router bgp afi-safi evpn ethernet-segment <name> df-election
+/// startup-delay <1..3600>` — hold this PE out of the segment's DF election
+/// for that many seconds after it joins, so a just-booted PE does not elect
+/// itself DF against a candidate set BGP has not populated yet and start
+/// duplicating traffic the incumbent DF is already forwarding.
+///
+/// Setting it on a segment that already has an ESI arms the hold
+/// immediately: a commit may apply this leaf either side of `esi`, and the
+/// hold has to arm whichever order that happens in. The consequence is that
+/// re-configuring the delay on a live segment does retract it for the new
+/// duration — asking for a hold gets you one. Clearing the leaf ends any
+/// hold in flight at once.
+fn config_es_startup_delay(bgp: &mut Bgp, mut args: Args, op: ConfigOp) -> Option<()> {
+    let afi_safi: AfiSafi = args.afi_safi()?;
+    if afi_safi.afi != Afi::L2vpn || afi_safi.safi != Safi::Evpn {
+        return None;
+    }
+    let name = args.string()?;
+    let delay = if op.is_set() {
+        Some(args.u32()? as u16)
+    } else {
+        None
+    };
+    let has_esi = {
+        let es = bgp.ethernet_segments.entry(name.clone()).or_default();
+        es.startup_delay = delay;
+        es.esi.is_some()
+    };
+    match delay {
+        Some(_) if has_esi => bgp.es_arm_hold(&name),
+        Some(_) => {}
+        None => bgp.es_hold_leave(&name),
+    }
     Some(())
 }
 
@@ -4915,6 +4959,10 @@ impl Bgp {
         self.callback_add(
             "/router/bgp/afi-safi/ethernet-segment/df-election/preference",
             config_es_df_preference,
+        );
+        self.callback_add(
+            "/router/bgp/afi-safi/ethernet-segment/df-election/startup-delay",
+            config_es_startup_delay,
         );
         self.callback_add(
             "/router/bgp/afi-safi/ethernet-segment/df-election/ac-df",
