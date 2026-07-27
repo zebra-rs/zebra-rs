@@ -283,6 +283,10 @@ vrf_phantom_instance:
 	mkdir -p allure-results
 	cargo test --test cucumber -- --concurrency=1 --tags "@vrf_phantom_instance"
 
+interface_vrf_binding:
+	mkdir -p allure-results
+	cargo test --test cucumber -- --concurrency=1 --tags "@interface_vrf_binding"
+
 vrf_connected_route:
 	mkdir -p allure-results
 	cargo test --test cucumber -- --concurrency=1 --tags "@vrf_connected_route"

@@ -1,0 +1,16 @@
+# z1 — one router, one VRF, two dummy interfaces.
+#
+# vi1 is enslaved to vrf1 AND given an address in the same commit, so the
+# ordering inside a single apply is exercised: the address must end up in
+# the VRF's table, not the default one. vi2 stays unbound as the control
+# for `show interface brief`'s VRF column.
+vrf:
+- name: vrf1
+interface:
+- if-name: vi1
+  vrf: vrf1
+  ipv4:
+    address: 192.168.10.1/24
+- if-name: vi2
+  ipv4:
+    address: 10.0.0.1/24
