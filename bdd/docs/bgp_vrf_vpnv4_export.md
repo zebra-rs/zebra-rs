@@ -39,4 +39,6 @@ inside vrf-blue and z2 peers with z1 over VPNv4 only.
 | z1 advertises the self-originated network as VPNv4 | |
 | z2 receives the VPNv4 NLRI under the same RD | |
 | VPNv4 route detail by address and by exact prefix | |
+| Deleting the VRF withdraws its VPNv4 exports from the remote PE | |
+| Re-adding the VRF re-exports the network | |
 | Teardown topology | |

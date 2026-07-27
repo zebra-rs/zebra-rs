@@ -27,3 +27,4 @@ been a no-op the up-time would keep climbing past the wait budget.
 | Scenario | Result |
 |----------|--------|
 | clear ospf neighbor destroys and re-forms the adjacency | |
+| Teardown topology | |

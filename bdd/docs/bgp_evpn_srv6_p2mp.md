@@ -4,17 +4,21 @@
 
 As a network operator
 I want the BGP control plane to program EVPN BUM replication into the cradle
-eBPF engine: two SRv6 EVPN PEs exchange their End.DT2M SIDs over a Type-3 IMET,
-and each daemon (with `system ebpf enabled`) tees the datapath to cradle — its
-own End.DT2M leaf SID into the SRv6 table, and each remote PE's End.DT2M SID as
-a VNI-10 replication slot. This proves the control-plane -> cradle-tee
-integration end to end (session, SID exchange, engine programming). BUM
-forwarding is the cradle engine's job (the standalone tc-evpn-replicate offload
-is retired); its packet path is exercised by the veth scripts in cradle-rs
-(crates/tc-evpn-replicate/scripts/veth-*.sh). Requires /usr/bin/cradle.
-
+eBPF engine: two SRv6 EVPN PEs exchange their End.DT2M SIDs over a Type-3
+IMET, and each daemon (with `system ebpf enabled`) tees the datapath to
+cradle — its own End.DT2M leaf SID into the SRv6 table, and each remote PE's
+End.DT2M SID as a VNI-10 replication slot.
+This proves the control-plane -> cradle-tee integration end to end (session,
+SID exchange, engine programming). BUM forwarding is the cradle engine's job
+(the retired standalone tc-evpn-replicate offload is superseded); its packet
+path is exercised by the veth scripts in cradle-rs
+(crates/tc-evpn-replicate/scripts/veth-*.sh). Requires /usr/bin/cradle — see
+the cradle_spawn feature header for install instructions.
 Test Topology — z1 and z2 are SRv6 EVPN PEs on a direct underlay link, each a
-root + leaf for VNI 10, each running the cradle engine.
+root + leaf for VNI 10. Each runs the cradle engine, which encaps BUM toward
+the remote End.DT2M SID and decaps a replicated copy onto its bridge.
+```
+```
 
 ## Test Scenarios
 

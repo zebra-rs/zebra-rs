@@ -7,17 +7,17 @@ I want policy-list `set ext-community` and `set large-community`
 actions to stamp the EXT_COMMUNITIES and LARGE_COMMUNITIES attributes
 on routes, so that I can tag routes the same way `set community` tags
 the standard COMMUNITIES attribute.
-
 Both actions reference a named set (`ext-community-set` /
 `large-community-set`); only the set's exact members contribute
 concrete values (regex members are skipped). `replace` (default)
 overwrites the attribute, `additive` merges, `delete` removes — the
 same {replace|additive|delete} choice as `set community`.
-
 The set is applied as z2's INBOUND policy so the modified attribute
 lands in z2's own Loc-RIB and is directly observable via
 `show bgp -j`, which now surfaces `community`, `ext_community`, and
-`large_community` fields.
+`large_community` fields. Re-evaluation rides the policy-change
+trigger (PolicyRx -> soft-in): applying a config whose policy content
+changed re-runs the inbound policy over the Adj-RIB-In.
 
 ## Test Topology
 
@@ -33,6 +33,11 @@ lands in z2's own Loc-RIB and is directly observable via
            │  0.1/24 │     │  0.2/24 │
            └─────────┘     └─────────┘
 ```
+
+## Notes
+
+z1 originates 10.0.0.1/32 + 10.0.0.2/32 with no communities. z2
+swaps its inbound policy and we read back the stamped attributes.
 
 ## Config Files
 

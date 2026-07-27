@@ -33,4 +33,6 @@ is provably BFD's doing — not carrier loss, not the ~30s IS-IS hold timer.
 | BFD without Echo protects the adjacency and tears it down on BFD failure | |
 | BFD with Echo in one direction (z1 transmit, z2 receive) | |
 | Echo transmit is toggled at runtime on the live session | |
+| BFD Echo auto-attaches eBPF without an explicit interface ebpf line | |
 | BFD with Echo in both directions | |
+| Teardown topology | |

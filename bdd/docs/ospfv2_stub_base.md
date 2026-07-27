@@ -39,3 +39,4 @@ stub as a Type-3, so c reaches it across the area boundary.
 | Scenario | Result |
 |----------|--------|
 | Stub router learns inter-area Type-3 but never the Type-5 external | |
+| Teardown topology | |

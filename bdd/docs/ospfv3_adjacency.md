@@ -32,3 +32,4 @@ hold.
 | Scenario | Result |
 |----------|--------|
 | Two OSPFv3 routers reach Full over a point-to-point link | |
+| Teardown topology | |

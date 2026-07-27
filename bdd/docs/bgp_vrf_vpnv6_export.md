@@ -17,5 +17,6 @@ Topology: z1 (RD 65001:100) <-VPNv6 iBGP-> z2 (RD 65001:200), both AS
 |----------|--------|
 | Setup topology (z1 originates its vrf-blue v6 networks at spawn) | |
 | z1 originates the vrf-blue v6 networks; z2 receives them as VPNv6 | |
+| Deleting the VRF withdraws its VPNv6 exports from the remote PE | |
 | z1 dies; z2 withdraws the VPNv6 routes it learned from it | |
 | Teardown topology | |

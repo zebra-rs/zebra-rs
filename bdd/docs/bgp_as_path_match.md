@@ -6,7 +6,6 @@ As a network operator
 I want zebra-rs `match as-path` to accept the same AS-path regular
 expressions as FRR's `bgp as-path access-list`, so that policies port
 between the two routers unchanged.
-
 The AS-path regex engine mirrors FRR's `bgp_regcomp`
 (bgpd/bgp_regex.c): the `_` magic character expands to
 `(^|[,{}() ]|$)`, matching a separator, the start, or the end of the
@@ -16,15 +15,7 @@ This feature exercises exact anchored matching plus the three classic
 `_` idioms — neighbor-is (`^ASN_`), originates-from (`_ASN$`), and
 transits (`_ASN_`).
 
-Re-evaluation rides the policy-change trigger (PolicyRx -> soft-in):
-applying a config whose as-path-set/policy changed re-runs the inbound
-policy over the Adj-RIB-In — no `clear` needed.
-
 ## Test Topology
-
-Linear eBGP chain, all three routers on one L2 segment. z1 and z3 are
-never peered, so z1's prefixes reach z3 only via the transit AS z2 and
-arrive with AS_PATH `65002 65001`.
 
 ```
   ┌──────────────────────────────────────────────────┐
@@ -37,6 +28,16 @@ arrive with AS_PATH `65002 65001`.
      │ .0.1/24 │     │ .0.2/24 │     │ .0.3/24 │
      └─────────┘     └─────────┘     └─────────┘
 ```
+
+## Notes
+
+z1 originates 10.0.0.1/32 + 10.0.0.2/32 and peers only z2. z2 is a
+transit AS with no policy, peering z1 and z3. z3 peers only z2, so the
+two prefixes reach z3 with AS_PATH `65002 65001`. Each scenario swaps
+z3's inbound policy and asserts which prefixes survive in z3's RIB.
+Re-evaluation rides the policy-change trigger (PolicyRx -> soft-in):
+applying a config whose as-path-set/policy changed re-runs the inbound
+policy over the Adj-RIB-In — no `clear` needed.
 
 ## Config Files
 

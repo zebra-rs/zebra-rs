@@ -24,7 +24,7 @@ IPv6 on an already-Up adjacency starts advertising an End.X without a flap.
 
 x1 runs SRv6 with a classic locator, so it owns an End SID and would carve
 an End.X for each IPv6-capable adjacency. The x1–x2 IS-IS circuit starts
-IPv4-only (IS-IS `ipv4 enable` only), so x2 advertises no IPv6 and x1 must
+IPv4-only (IS-IS `ipv4 enabled` only), so x2 advertises no IPv6 and x1 must
 NOT allocate an End.X for it. A later scenario enables IPv6 on the circuit;
 x2 then advertises IPv6 and x1 allocates the End.X by re-evaluation.
 This also pins the `show segment-routing srv6 sid` column rename: the owner

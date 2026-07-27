@@ -57,3 +57,4 @@ mirror image for f — so the ABR producer is exercised end to end.
 | Scenario | Result |
 |----------|--------|
 | Two ABRs glue three areas; inter-area routes form and resolve by cost | |
+| Teardown topology | |
