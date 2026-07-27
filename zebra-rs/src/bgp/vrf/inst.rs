@@ -108,6 +108,16 @@ pub struct BgpVrf {
     /// (8192) to match the global `Bgp::tx/rx`.
     pub tx: tokio::sync::mpsc::Sender<Message>,
     pub rx: tokio::sync::mpsc::Receiver<Message>,
+    /// Priority lane for session-liveness events (keepalive / hold
+    /// timer fires), the per-VRF mirror of the global `Bgp::ptx`.
+    /// A CE-side ingest burst backs `rx` up with queued UPDATEs;
+    /// timer events queued behind them would not be serviced for
+    /// minutes and this VRF's quiet-but-alive sessions would die of
+    /// hold-timer expiry on the remote side. The event loop drains
+    /// this lane at the top of every turn, so timer latency is
+    /// bounded by one `process_msg` call.
+    pub ptx: tokio::sync::mpsc::Sender<Message>,
+    pub prx: tokio::sync::mpsc::Receiver<Message>,
     /// Local AS number. Threaded in from the global `Bgp::asn` at
     /// spawn time so per-VRF peers `Peer::new` can fill
     /// `local_as`. The per-VRF runtime does not maintain a
@@ -773,6 +783,9 @@ impl BgpVrf {
     ) -> (Self, BgpVrfInbox) {
         let (inbox_tx, global_rx) = mpsc::unbounded_channel();
         let (tx, rx) = mpsc::channel(8192);
+        // Liveness-timer traffic is tiny (a few events per peer per
+        // keepalive interval); 1024 absorbs any realistic burst.
+        let (ptx, prx) = mpsc::channel(1024);
         let policy_chan = crate::policy::PolicyRxChannel::new();
         let (bfd_notifier, bfd_event_rx) = mpsc::unbounded_channel();
         let (accept_tx, accept_rx) = mpsc::unbounded_channel();
@@ -797,6 +810,8 @@ impl BgpVrf {
             rib_rx,
             tx,
             rx,
+            ptx,
+            prx,
             asn,
             label,
             // Default off; `spawn_bgp_vrf` sets it from the VRF config.
@@ -1794,7 +1809,18 @@ impl BgpVrf {
     pub async fn event_loop(&mut self) {
         self.open_listeners().await;
         loop {
+            // Priority lane first: keepalive / hold timer events must
+            // not queue behind an ingest backlog on `rx` (see the
+            // `ptx` field docs). `try_recv` keeps this non-blocking;
+            // the select below still has a `prx` arm so a lone timer
+            // event wakes the loop when everything else is idle.
+            while let Ok(msg) = self.prx.try_recv() {
+                self.process_msg(msg);
+            }
             tokio::select! {
+                Some(msg) = self.prx.recv() => {
+                    self.process_msg(msg);
+                }
                 msg = self.global_rx.recv() => {
                     match msg {
                         Some(BgpVrfMsg::Shutdown) => {
@@ -5457,6 +5483,154 @@ mod tests {
         assert!(
             global_rx.try_recv().is_err(),
             "soft-out must not touch the VPNv4 export (vrf_export stays None)"
+        );
+    }
+
+    /// The keepalive and hold timers of a VRF CE peer must fire into
+    /// the per-VRF priority lane (`ptx`), not the normal lane a CE
+    /// ingest backlog occupies — the VRF mirror of the global
+    /// `keepalive_and_hold_timers_fire_into_priority_channel`. The
+    /// peer arrives through the real runtime `AddPeer` path, so this
+    /// also exercises the `insert_started_peer` wiring end-to-end.
+    #[tokio::test]
+    async fn vrf_peer_timers_fire_into_priority_channel() {
+        use crate::bgp::peer::Event;
+        use crate::bgp::timer;
+        use bgp_packet::{BGP_HEADER_LEN, BgpCap, BgpHeader, BgpType, OpenPacket};
+
+        let (global_tx, _global_rx) = unbounded_channel::<BgpGlobalMsg>();
+        let ctx = test_ctx_for_vrf(53, "vrf-liveness");
+        let (_rib_tx, rib_rx) = mpsc::unbounded_channel();
+        let (mut vrf, _inbox) = BgpVrf::new(
+            "vrf-liveness".to_string(),
+            ctx,
+            Ipv4Addr::new(1, 1, 1, 1),
+            65000,
+            /* label */ 16,
+            global_tx,
+            rib_rx,
+        );
+
+        let a: std::net::IpAddr = "192.0.2.9".parse().unwrap();
+        let (remote_as, config, knobs) = super::super::spawn::resolve_vrf_peer_config(
+            &a,
+            &crate::bgp::vrf_config::BgpVrfNeighborConfig {
+                remote_as: Some(65001),
+                ..Default::default()
+            },
+            &std::collections::BTreeMap::new(),
+        )
+        .expect("neighbor with remote-as resolves");
+        vrf.process_global_msg(BgpVrfMsg::AddPeer {
+            addr: a,
+            remote_as,
+            config: Box::new(config),
+            knobs: Box::new(knobs),
+            policy_refs: std::collections::BTreeMap::new(),
+        });
+
+        let _guard = {
+            let peer = vrf.peers.get_mut(&a).expect("peer added at runtime");
+            // `insert_started_peer` armed the idle-hold timer, which
+            // fires `Event::Start` on the NORMAL lane by design; park
+            // it so the final nothing-on-`rx` assert only sees the
+            // liveness routing.
+            peer.timer.idle_hold_timer = None;
+            // Negotiate hold 3s / keepalive 1s via the real arming path
+            // (`Timer` has whole-second granularity, so 1s keepalive is
+            // the fastest a real fire can happen).
+            let header = BgpHeader::new(BgpType::Open, BGP_HEADER_LEN + 10);
+            let open = OpenPacket::new(
+                header,
+                65001,
+                3,
+                &Ipv4Addr::new(2, 2, 2, 2),
+                BgpCap::default(),
+            );
+            timer::update_open_timers(peer, &open);
+            // The guard re-arm variant must ride the same lane.
+            timer::start_hold_timer_ms(peer, 10)
+        };
+
+        let deadline = Duration::from_secs(3);
+        let ka = tokio::time::timeout(deadline, async {
+            loop {
+                if let Some(Message::Event(_, Event::KeepaliveTimerExpires)) = vrf.prx.recv().await
+                {
+                    return;
+                }
+            }
+        })
+        .await;
+        assert!(ka.is_ok(), "keepalive timer must use the priority lane");
+        let hold = tokio::time::timeout(deadline, async {
+            loop {
+                if let Some(Message::Event(_, Event::HoldTimerExpires)) = vrf.prx.recv().await {
+                    return;
+                }
+            }
+        })
+        .await;
+        assert!(hold.is_ok(), "hold-timer re-arm must use the priority lane");
+        assert!(
+            vrf.rx.try_recv().is_err(),
+            "liveness timers must not land on the normal lane"
+        );
+    }
+
+    /// Both production entry points — spawn-time materialize and the
+    /// runtime `AddPeer` handler — build CE peers through the single
+    /// `insert_started_peer` funnel, which must hand every peer the
+    /// VRF task's priority-lane sender. A future path that bypasses it
+    /// leaves `ptx` on its `Peer::new` default (a `tx` clone: the
+    /// lanes collapse) and silently reintroduces timer starvation, so
+    /// assert the wiring directly.
+    #[tokio::test]
+    async fn insert_started_peer_wires_priority_lane() {
+        let (global_tx, _global_rx) = unbounded_channel::<BgpGlobalMsg>();
+        let ctx = test_ctx_for_vrf(54, "vrf-ptx-wire");
+        let (_rib_tx, rib_rx) = mpsc::unbounded_channel();
+        let (mut vrf, _inbox) = BgpVrf::new(
+            "vrf-ptx-wire".to_string(),
+            ctx,
+            Ipv4Addr::UNSPECIFIED,
+            65000,
+            /* label */ 16,
+            global_tx,
+            rib_rx,
+        );
+
+        let a: std::net::IpAddr = "192.0.2.10".parse().unwrap();
+        let (remote_as, config, knobs) = super::super::spawn::resolve_vrf_peer_config(
+            &a,
+            &crate::bgp::vrf_config::BgpVrfNeighborConfig {
+                remote_as: Some(65001),
+                ..Default::default()
+            },
+            &std::collections::BTreeMap::new(),
+        )
+        .expect("neighbor with remote-as resolves");
+        super::super::spawn::insert_started_peer(
+            &mut vrf,
+            &a,
+            remote_as,
+            config,
+            &knobs,
+            &std::collections::BTreeMap::new(),
+        );
+
+        let peer = vrf.peers.get(&a).expect("peer inserted");
+        assert!(
+            peer.ptx.same_channel(&vrf.ptx),
+            "peer liveness timers must ride this VRF task's priority lane"
+        );
+        assert!(
+            peer.tx.same_channel(&vrf.tx),
+            "peer events must ride this VRF task's normal lane"
+        );
+        assert!(
+            !peer.ptx.same_channel(&peer.tx),
+            "the lanes must be distinct, not the Peer::new collapsed default"
         );
     }
 }
