@@ -7,6 +7,7 @@ I want zebra-rs to react correctly when an OSPFv2 instance's Router-ID is
 set, changed, or deleted while an adjacency is already up, so the peer
 re-learns the new identity, the database advertised under the old identity
 is withdrawn, and forwarding keeps working.
+
 Two routers on a point-to-point link, each advertising a loopback that is
 numerically distinct from any Router-ID, so a Router-ID only ever appears
 in the database as an *advertising router* (never as a stub prefix). That

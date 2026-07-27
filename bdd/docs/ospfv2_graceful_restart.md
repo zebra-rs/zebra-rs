@@ -8,6 +8,7 @@ holding a restarting neighbor's adjacency past the dead interval, and
 the restarter checkpointing its LSDB, exiting, and resuming inside
 the grace window — so that a planned restart does not disturb
 forwarding.
+
 Two routers on a point-to-point link: a is the helper, b the
 restarter. The first scenario stages a restart and aborts it,
 proving the Grace-LSA drives helper entry on a. The second commits

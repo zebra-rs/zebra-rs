@@ -7,6 +7,7 @@ the main `bgp.shard` (not pooled), so its Loc-RIB stays populated at
 N>1. This pins that `route_sync_vpnv6` dumps the VPNv6 Loc-RIB to a
 late peer AND registers each route in `adj_out` (it already does), so
 a later config-withdraw + peer-down reach the synced peer.
+
 z1 is a PE: a route in vrf-blue (RD 65001:100, RT 65001:100) exported
 to VPNv6. z2 (4 shards) is an eBGP VPNv6 relay (no VRF — holds the
 VPNv6 routes and re-advertises, Inter-AS Option-B style). z3

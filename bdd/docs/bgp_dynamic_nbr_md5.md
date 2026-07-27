@@ -20,6 +20,7 @@ So unconfigured sources cannot open a session just by being in the prefix.
 
 The DUT (z1) has no static neighbors: z2 arrives through the
 listen-range and inherits SENDERS, which carries the password.
+
 This needs a listener key scoped to the whole *prefix*, not to a peer
 address: a dynamic peer does not exist until its SYN is accepted, but
 the kernel validates the MD5 option during the handshake — so the

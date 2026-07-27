@@ -8,6 +8,7 @@ I want every neighbor under `router bgp vrf <name>` to establish and
 carry routes, not just the first one
 So that a multi-CE VRF converges instead of silently wedging one
 session in Idle.
+
 Regression guard for issue #2077 / PR #2071. `materialize_peers`
 used to call `Peer::start()` *before* `PeerMap::insert_with_key`
 assigned the peer's stable ident. `start_timer!` captures
@@ -15,10 +16,12 @@ assigned the peer's stable ident. `start_timer!` captures
 per-VRF loop dispatches `Message::Event(ident, …)` purely on that
 value, so every peer past the first armed its timer under ident 0
 and its `Event::Start` was delivered to the *first* peer instead.
+
 The wedged peer stays in Idle, which blocks the session from both
 directions: it never dials, and `handle_peer_connection` drops
 inbound streams for an Idle peer, so the CE's own dial is refused
 too. Before the fix CE2 below never leaves Idle.
+
 Every pre-existing BDD config puts at most one neighbor under a
 `router bgp vrf` block (106 such blocks, zero with two), which is
 why nothing caught this. The second neighbor is the entire point of

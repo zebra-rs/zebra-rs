@@ -9,9 +9,11 @@ End.DX2 L2-Service Prefix-SID (RFC 9252 §6.3) carved from the BGP SRv6
 locator, and to bind the remote PE's Type-1 — matched by Ethernet Tag ==
 remote-service-id within the shared EVI — as the E-Line's remote end, so
 the point-to-point service signals with zero per-peer state.
+
 Control-plane only: no cradle dataplane is attached, so the `interface`
 leaf is just carried state and `show bgp evpn vpws` reaching `up` means
 the Type-1 exchange and the remote-SID bind both worked.
+
 Test Topology — two iBGP (AS 65001) EVPN speakers on a shared transport
 bridge br0, one E-Line service between them:
 ```

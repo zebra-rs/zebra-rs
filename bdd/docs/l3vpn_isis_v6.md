@@ -7,6 +7,7 @@ I want a full [C]-[CE]-[PE]-[P]-[PE]-[CE]-[C] topology where both the
 C-CE and PE-CE segments run IS-IS (IPv6) and the PE does two-way
 redistribution (IS-IS<->VPNv6 over SRv6 End.DT46), so that C1 and C2
 can reach each other's IPv6 loopback across the SRv6 core.
+
 The PE runs the global IS-IS SRv6 core plus a per-VRF IS-IS (IPv6) to
 the CE. Up: `router bgp vrf ... redistribute isis` -> VPNv6. Down:
 `router isis vrf ... afi-safi ipv6 redistribute bgp` -> the VPNv6

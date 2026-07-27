@@ -8,11 +8,13 @@ neighbor on a VRF that is already running
 So that a customer-edge change takes effect on the live task without
 respawning it — CE1 keeps its session while CE2 is added, given BFD,
 and removed.
+
 Regression guard for the incremental per-VRF neighbor path (PR #2087)
 and its two follow-ups: TCP-AO re-subscribe on reconfigure (#2094) and
 live BFD for runtime-added neighbors (#2095). Before #2087 a neighbor
 edit either did nothing until the next respawn or reset every session
 in the VRF; these scenarios prove the edit is surgical.
+
 The whole point is that CE1's session must NOT flap while CE2 is
 churned: `runtime_structure_eq` keeps a neighbor-only edit off the
 respawn path, so CE1 is the "still Established" witness. CE2's BFD

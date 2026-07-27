@@ -8,6 +8,7 @@ advertisements and flood the group-to-RP mapping in Bootstrap
 Messages, so every router in the domain learns the RP without any
 static configuration — and the full ASM control loop (shared tree,
 register, SPT) runs on the learned mapping.
+
 Same chain as the pim_asm feature, but NO router has a static RP:
 r2 is candidate-BSR and candidate-RP (10.9.22.2). r1 and r3 must
 learn both the elected BSR and the RP purely from flooded BSMs,

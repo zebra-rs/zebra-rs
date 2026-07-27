@@ -7,12 +7,14 @@ I want a BGP neighbor whose EVPN outbound policy is rebound to a
 policy name that does not exist to immediately withdraw the routes it
 was advertising, rather than keep leaking them with the previously
 resolved policy still applied.
+
 A bound-but-unresolved peer policy is deny-all. Previously the policy
 actor stayed silent when a peer registered an undefined policy name, so
 no soft-reconfiguration fired and the stale resolved policy lingered:
 the neighbor kept advertising. The actor now answers even with a `None`
 policy, which clears the stale resolve and drives a soft-out that
 withdraws the now-denied routes — all without a session reset.
+
 The exercise: z1 originates 10.1.0.0/24 in vrf-blue and advertises it to
 z2 as an EVPN Type-5 route. z1's EVPN outbound policy starts bound to an
 existing PERMIT-ALL policy (z2 sees the route), is then rebound to the

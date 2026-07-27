@@ -9,6 +9,7 @@ way to bind a peer-wide route-policy is now through a `neighbor-group`,
 which a neighbor inherits as a fallback across families. A per-AFI
 binding MUST take priority over the inherited peer-wide one for routes
 of that family.
+
 This is observed inbound on z2: z1 originates two /32s; z2's inbound
 policy decides which survive in z2's BGP table. Policy edits are picked
 up live (soft-reconfiguration inbound), no session reset.

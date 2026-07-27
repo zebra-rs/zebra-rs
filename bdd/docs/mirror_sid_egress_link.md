@@ -11,6 +11,7 @@ validates the steady state that the failover test builds on: the VPN
 forwards via pea, the Mirror SID is advertised and the End.M localsid +
 mirror-context route install on peb, and pea's End.DT46 service SID is
 in place. The live link-failure redirect is exercised separately.
+
 Topology (loopback 2001:db8::X, SRv6 locator fcbb:bbbb:X::/48):
 ```
 ```

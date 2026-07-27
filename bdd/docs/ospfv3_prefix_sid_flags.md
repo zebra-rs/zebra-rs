@@ -9,6 +9,7 @@ OSPFv2 and matching FRR EXT_SUBTLV_PREFIX_SID_*FLG): NP = 0x40,
 M = 0x20, E = 0x10, V = 0x08, L = 0x04, with the MSB and the low two
 bits reserved — so a Prefix-SID advertised by one router is decoded
 with the correct flags by an interoperable peer.
+
 Regression coverage for the flag-placement bug where every flag sat
 one bit too high (NP = 0x80, ...): zebra-to-zebra flooding is
 symmetric, so the wire encoding is only observable by rendering the

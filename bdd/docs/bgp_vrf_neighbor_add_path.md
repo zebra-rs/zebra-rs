@@ -8,6 +8,7 @@ send-receive` to advertise every VRF path for a prefix
 So that a CE that negotiated AddPath receives BOTH paths for a
 multi-homed prefix, not just the single best one — the per-VRF exercise
 of AddPath send / path-id stamping.
+
 CE1 (65001) and CE2 (65002) both advertise 10.10.10.0/24 into vrf-cust,
 so PE1's VRF Loc-RIB holds two candidate paths. With AddPath negotiated
 toward CE3, PE1 advertises both, so CE3 sees two paths — one via AS 65001

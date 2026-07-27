@@ -9,6 +9,7 @@ indirection groups onto their TI-LFA repairs in one atomic kernel
 operation per failed adjacency, BEFORE SPF reconvergence rewrites
 the routes — phase 4 of docs/design/nexthop-protect-kernel-failover.md,
 the OSPFv3 sibling of isis_tilfa_bfd.feature.
+
 The topology is the ospfv3_tilfa SR-MPLS ring with BFD
 enabled on the protected s<->n1 adjacency. BFD-down is induced by
 dropping inbound UDP/3784 in namespace s: the veth link stays up and

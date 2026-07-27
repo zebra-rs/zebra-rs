@@ -8,6 +8,7 @@ locator <name>` to resolve the locator from the global registry,
 install its End/uN SID, and originate the SRv6 Locator LSA
 (function code 42) plus the SRv6 Capabilities TLV, so that SRv6
 state floods through the area exactly like the IS-IS sibling.
+
 Phase 2 of `docs/design/ospfv3-srv6-plan.md`: origination only —
 receive-side locator routes and TI-LFA SRv6 repairs are later
 phases, so reachability assertions stay out of scope here.

@@ -6,6 +6,7 @@ As a network operator
 I want zebra-rs `match as-path` to accept the same AS-path regular
 expressions as FRR's `bgp as-path access-list`, so that policies port
 between the two routers unchanged.
+
 The AS-path regex engine mirrors FRR's `bgp_regcomp`
 (bgpd/bgp_regex.c): the `_` magic character expands to
 `(^|[,{}() ]|$)`, matching a separator, the start, or the end of the

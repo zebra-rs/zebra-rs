@@ -9,6 +9,7 @@ independent repair for the source's primary path as an SRv6 SID
 list — End/uN of the P-node plus uA hops, NEXT-C-SID-compressed and
 SRH-inserted — so that when the primary link fails the source still
 reaches the destination.
+
 Phases 5+6 of `docs/design/ospfv3-srv6-plan.md`: the OSPFv3 sibling
 of `isis_tilfa_srv6.feature` (same eight-router RFC 9855 §5
 topology and metrics as `ospfv3_tilfa.feature`, with the SR-MPLS

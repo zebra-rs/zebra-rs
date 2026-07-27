@@ -9,6 +9,7 @@ establish a session over the link-local, carry IPv4 routes via
 RFC 8950 Extended Next Hop Encoding, and forward IPv4 traffic
 through the kernel FIB over the IPv6 link-local next-hop (RFC 5549
 style `via inet6 fe80::.. dev i1`).
+
 This exercises the full unnumbered path end-to-end through the
 YAML/YANG/CLI stack — ND RA send + receive, NeighborDiscovered →
 interface-keyed Peer materialization, the active-connect over
@@ -19,6 +20,7 @@ into a single Established session), ENHE-carried IPv4 routes, and
 the v4-over-v6 dataplane: each router owns an IPv4 LAN prefix on a
 dummy interface, learns the other's via ENHE, installs it in the
 kernel with the v6 link-local gateway, and pings across.
+
 Test Topology (P2P veth, link-local only — no v4/global-v6 addrs on
 i1; the LAN prefixes live on dummy interfaces):
 ```

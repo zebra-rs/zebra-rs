@@ -6,9 +6,11 @@
 daemon as a managed child: spawn it, attach `interface <name> ebpf
 enabled` ports, respawn it with backoff when it dies (re-attaching the
 ports and replaying the mirrored FIB tee), and stop it when disabled.
+
 Prerequisite: /usr/bin/cradle (the cradle-rs engine binary). Install it
 from a cradle-rs checkout: `cargo build --release` then
 `install -m755 target/release/cradle /usr/bin/cradle`.
+
 Topology:
 ```
 ```

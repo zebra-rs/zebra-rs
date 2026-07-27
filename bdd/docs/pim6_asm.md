@@ -8,6 +8,7 @@ tree to the static RP, a new IPv6 source's first-hop router to register
 it with the RP, the RP to join the source tree and stop the registers,
 and traffic to flow natively source→RP→receiver — the complete PIMv6-SM
 ASM control loop over three routers.
+
 r2 is the RP (2001:db8:12::2, its own interface address, configured
 statically on all three routers). h2 issues an any-source join for
 ff0e::1 (MLDv2 EXCLUDE{}); r3 (LHR) builds (*,G) toward the RP. h1 then

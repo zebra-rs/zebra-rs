@@ -8,6 +8,7 @@ message-digest` with `crypto-key` / `key-chain` to configure the
 RFC 7166 Authentication Trailer natively — no `router ospf` block
 required in an IPv6-only deployment — so adjacencies form only
 between routers sharing the key.
+
 Two routers on a point-to-point link; each scenario brings the
 pair up under one keying mode. The final scenario proves the
 negative: same SA-ID, different secrets, no neighbor ever forms.

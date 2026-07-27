@@ -9,11 +9,13 @@ PDUs when the IPv4 TLV 135 (Extended IP Reachability) content exceeds
 flooding path, and have the receiver correctly merge those fragments
 back into a single logical origin so SPF can still install routes to
 the originator's loopback.
+
 This is verified at two LSP MTUs over one topology: first a tight
 400-byte cap (fragmentation with only 60 networks), then — after a
 live reconfiguration of z1 — the standard 1500-byte Ethernet MTU
 (fragmentation needs 200 networks), confirming both the small-MTU
 path and that a runtime lsp-mtu-size change re-fragments correctly.
+
 Finally, the same topology exercises the separate transmit-side
 `lsp-mtu` knob: raising it above an interface's MTU makes the flood
 path drop z1's LSP on send (logged at warning level), which `show isis

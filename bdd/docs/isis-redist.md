@@ -9,6 +9,7 @@ IS-IS) is flooded across the whole Level-1 area, installed into every
 router's RIB as an external reachability, reconverges onto a backup
 path when the primary link drops, and disappears again the moment the
 redistribution is withdrawn.
+
 All links are point-to-point veth pairs (network-type point-to-point)
 and every "rN" router is is-type level-1 in area 49.0001. The two
 edge hosts e1 and e2 do NOT run IS-IS — they are plain hosts wired to
@@ -39,6 +40,7 @@ There are two equal-metric-per-hop paths between r1 and r3: the short
 top spine r1—r2—r3 (cost 20) and the longer bottom path
 r1—r4—r5—r3 (cost 30). The top spine is the primary; the bottom path
 is the backup the redistributed route falls onto when r1—r2 drops.
+
 On router rI the interface toward rJ is named "iJ"; the interface
 toward edge host eN is "ieN", and eN's interface toward its router is
 "irK". e1's loopback 10.1.1.1/32 can only enter IS-IS via

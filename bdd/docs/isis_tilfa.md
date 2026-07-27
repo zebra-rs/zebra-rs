@@ -8,10 +8,12 @@ TI-LFA (RFC 9855) to pre-compute a topology-independent loop-free
 repair for the source's primary path, so that when the primary link
 fails the source still reaches the destination over the SR repair /
 post-convergence path.
+
 All links are point-to-point veth pairs; every router is is-type
 level-2-only with `segment-routing mpls` and `fast-reroute ti-lfa`.
 Prefix-SIDs index 100..800 resolve against the RIB's default SRGB
 (base 16000), so node s's SID is label 16100, d's is 16800, etc.
+
 The metrics are tuned so a simple LFA is impossible: s reaches d via
 s-n1 (cost 2); the only other neighbours (n2, n3) are equidistant /
 expensive, so protecting the s-n1 link requires an SR repair tunnel

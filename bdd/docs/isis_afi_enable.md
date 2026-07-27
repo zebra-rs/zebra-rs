@@ -6,6 +6,7 @@ As a network operator
 I want enabling (or disabling) an address-family on an IS-IS interface to
 immediately update the self-originated LSP, so a newly-enabled prefix is
 advertised without waiting for the periodic LSP refresh.
+
 Regression: enabling IPv6 on a loopback that already had IPv4 enabled used
 to leave the loopback's IPv6 prefix out of the LSP, because re-origination
 only fired on a 0<->non-zero *global* protocols-supported (NLPID)

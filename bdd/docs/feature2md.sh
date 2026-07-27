@@ -38,16 +38,26 @@ SCEN_RE='^  Scenario:'
     echo "## Overview"
     echo ""
 
-    # Description: indented non-blank lines between `Feature:`
-    # and the first section header (Test Topology / Config files /
-    # Scenario). Continuation lines that start lowercase (e.g.
-    # "so a static IPv6 route ...") still belong to the same
-    # paragraph and must be captured — using `[^ ]` instead of
-    # `[A-Z]` ensures that.
+    # Description: indented lines between `Feature:` and the first
+    # section header (Test Topology / Config files / Scenario).
+    # Continuation lines that start lowercase (e.g. "so a static
+    # IPv6 route ...") still belong to the same paragraph and must
+    # be captured — using `[^ ]` instead of `[A-Z]` ensures that.
+    #
+    # Blank lines are deferred rather than printed: a run of them
+    # sets `pending`, and the next content line emits exactly one
+    # separator first. That keeps the paragraph breaks Markdown
+    # needs (a description that collapses into one paragraph also
+    # glues prose onto a following bullet list) while dropping the
+    # leading and trailing blanks the sections supply themselves.
     awk -v topo="$TOPO_RE" -v cfg="$CFG_RE" -v scen="$SCEN_RE" '
         /^Feature:/{found=1; next}
         $0 ~ topo || $0 ~ cfg || $0 ~ scen {exit}
-        found && /^  [^ ]/{sub(/^  /, ""); print}
+        found && /^[[:space:]]*$/{if (printed) pending = 1; next}
+        found && /^  [^ ]/{
+            if (pending) {print ""; pending = 0}
+            sub(/^  /, ""); print; printed = 1
+        }
     ' "$INPUT_FILE"
 
     echo ""
@@ -90,7 +100,11 @@ SCEN_RE='^  Scenario:'
         }
         in_topo {next}
         after_topo && ($0 ~ cfg || $0 ~ scen) {exit}
-        after_topo && /^   *[^ ]/{sub(/^  /, ""); print}
+        after_topo && /^[[:space:]]*$/{if (printed) pending = 1; next}
+        after_topo && /^   *[^ ]/{
+            if (pending) {print ""; pending = 0}
+            sub(/^  /, ""); print; printed = 1
+        }
     ' "$INPUT_FILE")
     if [ -n "$NOTES" ]; then
         echo "## Notes"
@@ -117,7 +131,11 @@ SCEN_RE='^  Scenario:'
     ADDITIONAL=$(awk -v cfg="$CFG_RE" -v scen="$SCEN_RE" '
         $0 ~ cfg {found=1; next}
         $0 ~ scen {exit}
-        found && !/^  - / && /^  [0-9A-Za-z]/{sub(/^  /, ""); print}
+        found && /^[[:space:]]*$/{if (printed) pending = 1; next}
+        found && !/^  - / && /^  [0-9A-Za-z]/{
+            if (pending) {print ""; pending = 0}
+            sub(/^  /, ""); print; printed = 1
+        }
     ' "$INPUT_FILE")
     if [ -n "$ADDITIONAL" ]; then
         echo "$ADDITIONAL"

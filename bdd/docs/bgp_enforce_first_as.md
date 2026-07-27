@@ -24,6 +24,7 @@ that prepends a *foreign* AS (65099). zebra-rs applies the mandatory
 eBGP local-AS prepend first ("65001"), then the route-map prepend lands
 65099 left-most, so z2 receives AS_PATH "65099 65001". The left-most AS
 is 65099, not z1's own AS 65001.
+
 Normally z2 accepts that route (AS 65002 is not in the path, so there is
 no loop). With `enforce-first-as` on z2's session toward z1, z2 instead
 requires the left-most AS to be the peer's own AS (65001) and discards

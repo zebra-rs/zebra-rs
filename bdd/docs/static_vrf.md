@@ -9,6 +9,7 @@ its loopback; a ping between the host loopbacks proves the VRF static
 routes are installed and resolving on-link (the gateway sits on a VRF
 interface, whose connected route the kernel flushes on enslave — so
 this exercises the on-link `ifindex_origin` resolution path).
+
 ```
 ```
 

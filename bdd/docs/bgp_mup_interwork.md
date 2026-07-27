@@ -31,6 +31,7 @@ z1 is a combined UPF + controller: VRF N6 (`encapsulation srv6`, rd
 a session on Network Instance `core` — an ST2 (same id 1:2). z2 has
 `afi-safi mup segment interwork`,
 receives both, and resolves the ST2 to z1's End.DT46 Direct segment.
+
 NOTE: needs `pfcp-inject` on the BDD host PATH (cargo build --release -p
 pfcp-inject; copy to /usr/bin) and root netns (kernel VRF + seg6local).
 

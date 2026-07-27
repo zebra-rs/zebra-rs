@@ -9,6 +9,7 @@ program the kernel MRT6 forwarding cache on both, so real IPv6 traffic
 from the source reaches the receiver — the first complete PIMv6
 control-plane-to-dataplane slice (MLD + PIMv6 J/P + the MRT6/MIF/MFC
 datapath).
+
 h1 sends UDPv6 to the SSM group ff3e::1. h2 issues a source-specific
 join for (2001:db8:14::2, ff3e::1). r2 (LHR) must translate the MLDv2
 membership into a PIMv6 (S,G) Join toward r1 — its RPF nexthop is r1's

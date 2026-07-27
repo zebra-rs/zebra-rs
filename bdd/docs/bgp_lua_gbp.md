@@ -9,11 +9,13 @@ longer applies. The `@disabled` tag makes the harness skip this feature
 in every run (full suite and explicit --tags). To re-enable: remove
 `@disabled`, rebuild with `--features lua`, and uncomment the
 zebra-bgp-lua schema.
+
 As a network operator
 I want zebra-rs to carry a Group-Based Policy tag on EVPN Type-2 routes
 and enforce it in the dataplane, driven entirely by embedded Lua hooks,
 so the FRR-scripting "GBP over EVPN" demo runs end to end without any
 blocking I/O on the route path.
+
 Two iBGP (AS 65001) EVPN speakers on a shared transport bridge br0, each
 with a local VXLAN (VNI 10) enslaved to a per-node bridge br10:
 ```
@@ -21,6 +23,7 @@ with a local VXLAN (VNI 10) enslaved to a per-node bridge br10:
 │                    br0                     │
 └───────────┬───────────────────┬───────────┘
 ```
+
 Flow: z1 learns local MAC aa:bb:cc:dd:ee:01 and originates an EVPN
 Type-2 route. z1's egress Lua hook looks the MAC up in the `sgt` map
 (-> tag 100) and stamps a Group-Policy-ID extended community. z2's

@@ -13,6 +13,7 @@ steady state the failover builds on: VPNv4 forwards via pea over the
 SR-MPLS transport, the context binding is advertised and its ILM
 installs on peb, and pea's per-VRF VPN-label ILM is in place. The live
 link-failure redirect is exercised separately.
+
 Topology (loopback 1.1.1.X/32, Prefix-SID index X -> label 1600X):
 ```
 ```

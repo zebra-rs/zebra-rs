@@ -8,6 +8,7 @@ originated) traffic independently of forwarded/transit traffic
 So that I can hide the LSP core from customer traceroutes (forwarded
 `pipe`) while still seeing every P router from the PE itself (local
 `uniform`) — the IOS `mpls ip propagate-ttl [forwarded | local]` split.
+
 Forwarded traffic is imposed by the cradle eBPF data plane (governed by
 `mpls ttl propagate`). Locally-originated traffic is imposed by the host
 kernel's own MPLS stack (the lwtunnel encap routes zebra installs), so the

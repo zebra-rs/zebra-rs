@@ -7,6 +7,7 @@ I want `router bgp vrf <name> neighbor <addr> enforce-first-as` to drop a
 CE UPDATE whose left-most AS is not the CE's own AS
 So that the RFC 4271 first-AS check runs on the per-VRF CE receive path,
 exactly as on a global eBGP neighbor — not silently skipped.
+
 CE1 advertises two routes over one eBGP session:
 
 ## Test Topology

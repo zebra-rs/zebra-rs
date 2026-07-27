@@ -9,6 +9,7 @@ otherwise two speakers that both lack the prefix bounce MP_UNREACH
 forever, the same ping-pong fixed for v6-unicast. z2 runs with 4 shards
 (LU runs in-process at every N; the shards exercise the exact daemon
 configuration that first surfaced the v6 withdraw storm).
+
 A two-node z1—z2 topology is enough: z1 originates two LU prefixes after
 the session is Established (z2 ingests them live), and the withdraw of
 one of them floods back to z1 (the source), which is where the ping-pong

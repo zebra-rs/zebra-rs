@@ -10,6 +10,7 @@ RTM_NEWLINK), so the connected route is often first filed in the
 default table and must be re-homed onto the VRF table once the enslave
 is observed. Regression test for: connected route shown in
 `show ip route` but missing from `show ip route vrf <name>`.
+
 ```
 ```
 

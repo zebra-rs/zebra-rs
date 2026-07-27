@@ -10,6 +10,7 @@ Type-7->Type-5 translation into the rest of the OSPF domain, and a
 default Type-7 injected by the ABR — so that an external prefix born
 inside an NSSA is reachable both inside the area and across the
 backbone, while the area still refuses to carry Type-5 AS-External.
+
 Four routers, two areas. The backbone (0.0.0.0) holds the ABR a and
 a pure backbone router b. The NSSA (0.0.0.1) hangs off a as a
 hub-and-spoke: the ASBR c and the plain internal router d both peer
@@ -47,6 +48,7 @@ NSSA translator —
 re-originates it as a Type-5 AS-External into the backbone, where b
 installs it. b carries no NSSA link, so a Type-5 is the only way the
 prefix can reach it: its presence on b is the proof the translator ran.
+
 The metric is a flat [20] (E2 / type-2) everywhere — on d (Type-7)
 and on b (translated Type-5) alike — because E2 uses the LSA metric
 verbatim, independent of distance to the originator.

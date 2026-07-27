@@ -7,10 +7,12 @@ I want BFD to protect the point-to-point adjacency
 So that a forwarding failure tears the adjacency down well within the IS-IS
 hold time, and the adjacency stays down (RFC 5882 hold-down) until BFD
 recovers — even while IIHs keep arriving.
+
 The single-hop BFD session is built from the two ends' IPv6 link-local
 addresses (learned via TLV 232). Each scenario is self-contained (own setup
 and teardown) so the Echo scenarios configure echo-mode before the session
 first comes up (echo is armed at session establishment, not retrofitted).
+
 BFD-down is induced by dropping inbound UDP/3784 in one namespace: the link
 stays up and IIHs (L2 ISO PDUs, not IP/UDP) keep flowing, so a fast teardown
 is provably BFD's doing — not carrier loss, not the ~30s IS-IS hold timer.

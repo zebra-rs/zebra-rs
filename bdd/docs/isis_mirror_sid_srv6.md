@@ -7,6 +7,7 @@ I want a protector PE to advertise a Mirror SID (SRv6 End.M) for a
 primary egress's locator, and a PLR to install an H.Encaps-to-the-
 Mirror-SID backup, so that on egress failure traffic can be redirected
 to the protector (draft-ietf-rtgwg-srv6-egress-protection).
+
 This feature validates the control + install path that needs no BGP
 L3VPN service: advertisement, reception, the protector's End.M localsid
 install, and the PLR backup install. The mirror-context table

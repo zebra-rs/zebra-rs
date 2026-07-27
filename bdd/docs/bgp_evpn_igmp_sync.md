@@ -11,6 +11,7 @@ multihoming is exercised end to end. (DF election and the kernel-MDB
 synch dataplane are still deferred — there is no organic ES-snoop
 trigger yet, so origination is driven by the `clear bgp debug
 igmp-*-sync-*` test command.)
+
 Test Topology — two iBGP (AS 65001) EVPN speakers on a shared transport
 bridge br0:
 ```
@@ -18,6 +19,7 @@ bridge br0:
 │               br0               │
 └───────┬─────────────────┬───────┘
 ```
+
 z2 originates a Type-7/8 synch route via
 `clear bgp debug igmp-{join,leave}-sync-{originate,withdraw} <spec>`
 (spec = `vni,esi,group[,source]`); z1 imports it into its EVPN RIB and

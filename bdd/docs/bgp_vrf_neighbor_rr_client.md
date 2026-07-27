@@ -8,6 +8,7 @@ reflect iBGP-learned routes to that CE
 So that route reflection works on a per-VRF CE session exactly as on a
 global neighbor — an iBGP-learned route reaches a client but not a
 plain iBGP peer.
+
 All three CEs are iBGP (AS 65000, same as PE1). CE1 originates
 10.0.1.1/32. iBGP-learned routes are not re-advertised to another iBGP
 peer unless that peer is a route-reflector client:

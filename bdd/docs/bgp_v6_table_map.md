@@ -7,6 +7,7 @@ I want `router bgp afi-safi ipv6 table-map <policy>` to filter and
 rewrite IPv6 best paths at the kernel-install boundary — with the
 same semantics as the IPv4 table-map, and strictly scoped to its
 own address family: a v6 binding must never touch v4 installs.
+
 The exercise: a single v4 BGP session carries both families
 (ipv4 + ipv6 afi-safi). z1 advertises three v6 prefixes and one v4
 prefix. z2 binds table-map TMAP6 under `afi-safi ipv6` only:

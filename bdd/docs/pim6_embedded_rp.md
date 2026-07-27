@@ -7,6 +7,7 @@ I want an IPv6 multicast group that embeds its RP address in its own
 bits (RFC 3956, ff70::/12) to run the full ASM control loop with no
 static RP and no BSR — every router derives the same RP straight from
 the group address.
+
 The group ff7e:240:2001:db8:22::9 embeds RP 2001:db8:22::2 (flags R=P=T,
 RIID 2, prefix length 64, network prefix 2001:db8:22::). r2 owns that
 address and therefore acts as the RP purely by derivation. No router

@@ -7,8 +7,11 @@ I want a `network` under `router bgp vrf X afi-safi {ipv4,ipv6}` to be
 advertised to the VRF's CE (unicast) neighbors
 So that a PE can originate a prefix into a customer VRF without a
 static route + redistribute workaround.
+
 Regression guard for two bugs:
+
 1. Split-horizon collision — the self-originated Loc-RIB row carried
+
 2. Runtime edits were never advertised — `originate_self_network_*` /
 
 ## Test Topology

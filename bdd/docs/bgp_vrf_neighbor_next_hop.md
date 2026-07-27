@@ -9,6 +9,7 @@ IPv4-unicast advertise toward a CE
 So that the per-neighbor next-hop policy works on a PE-CE session — the
 knobs used to be honored only on the VPNv4 / labeled-unicast paths and
 were silently ignored for plain unicast.
+
 CE1 advertises 10.0.1.1/32 with its own address 10.1.0.2 as the next-hop.
 PE1 re-advertises it from the VRF Loc-RIB to the other CEs:
 

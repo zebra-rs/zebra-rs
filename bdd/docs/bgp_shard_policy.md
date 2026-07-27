@@ -6,10 +6,12 @@ As a network operator running BGP with the RIB partitioned across
 worker shards (ZEBRA_BGP_SHARDS>1), I want per-neighbor inbound policy
 to be applied by the shard workers exactly as on the synchronous N=1
 path, so that sharding stays transparent to policy.
+
 This exercises RIB sharding Phase C + PolicyReplace + the dropped N=1
 par_iter: z2 runs with 4 shards, so its inbound policy is replicated to
 every shard (a peer's prefixes hash across all of them) and applied in
 `compute_policy` on the shard worker — not on the main task.
+
 Correctness is observed DOWNSTREAM on z3 on the N>1 advertise,
 withdraw, peer-down, and soft-reconfig paths (the N>1 `show` and
 new-peer sync are still gaps): policy is set at startup, z3 is brought
@@ -20,6 +22,7 @@ and implicit-denies 10.0.0.2/32 — a positive and a negative control in
 one shot: z3 must see .1 (sharded permit + advertise works) but never
 .2 (sharded deny works; before PolicyReplace the shard default-permitted
 and .2 would have leaked).
+
 Follow-on scenarios exercise churn at N=4: a soft-reconfig replay (z2's
 prefix-set widens to also permit .2 → SoftInV4 to every pool shard
 replays the stored Adj-RIB-In, no UPDATE from z1), an explicit withdraw

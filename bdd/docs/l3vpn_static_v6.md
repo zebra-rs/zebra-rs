@@ -7,6 +7,7 @@ I want a full [C]-[CE]-[PE]-[P]-[PE]-[CE]-[C] topology where the PE-CE
 and C-CE segments are statically routed and the PE redistributes the
 customer static route into VPNv6 (End.DT46), so that C1 and C2 can
 reach each other's IPv6 loopback across the SRv6 core.
+
 Same core as @l3vpn_bgp_v6 (IS-IS L2 SRv6, iBGP VPNv6); the customer
 side is static instead of eBGP. The PE holds per-VRF static routes to
 the customer loopback + C-CE link via the CE and `redistribute static`;

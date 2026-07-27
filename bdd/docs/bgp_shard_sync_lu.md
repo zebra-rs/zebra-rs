@@ -10,6 +10,7 @@ read paths work. The risk this pins is the Adj-RIB-Out one v6 exposed:
 must register each prefix in `adj_out.v4lu`, otherwise the event-driven
 LU withdraw's `adj_out.v4lu` gate skips that peer and the route gets
 stuck. (route_sync_labelv6 carries the byte-identical fix.)
+
 z2 is the sharded device under test (4 shards) and transit between
 z1 (origin) and two downstream peers:
 

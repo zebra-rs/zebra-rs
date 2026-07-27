@@ -7,6 +7,7 @@ I want a locator's configured RFC 8986 §4.16 flavors folded into the
 advertised endpoint-behavior codepoints, so receivers know the SRH
 will be popped at this node and the data planes agree on the wire
 format.
+
 z1's uSID locator carries `flavor: [psp]`: its End SID must advertise
 as `uN (PSP)` (IANA codepoint 44, End with NEXT-CSID & PSP) and its
 End.X SID as `uA (PSP)` (53) — adjacency SIDs fold only the PSP bit.

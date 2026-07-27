@@ -8,6 +8,7 @@ I want the per-VRF neighbor session and per-AFI knobs to be reflected in
 So that description, timers, update-source, ebgp-multihop, ttl-security,
 add-path, and graceful-restart / long-lived-GR are staged and rendered
 for a per-VRF CE neighbor exactly as for a global neighbor.
+
 One scenario per knob, each asserting the neighbor detail renders the
 configured value. CE1 carries the session + per-AFI knobs (established so
 the negotiated capabilities show); CE2 carries ttl-security, which is

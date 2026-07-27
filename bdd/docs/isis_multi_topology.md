@@ -31,6 +31,7 @@ topologies.
 Both configs add `multi-topology ipv6-unicast;` under `router/isis/`
 so the LSPs carry TLV 229 (capability), TLV 222 (MT IS Reach), and
 TLV 237 (MT IPv6 Reach).
+
 Both vzXns interfaces set a base `metric 55` and a per-MT override
 `multi-topology ipv6-unicast metric 77`. Because IPv6 rides MT 2, the
 connected prefix 2001:db8:1::/64 must be advertised in TLV 237 with the

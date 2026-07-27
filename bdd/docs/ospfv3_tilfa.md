@@ -8,6 +8,7 @@ and TI-LFA (RFC 9855) to pre-compute a topology-independent loop-free
 repair for the source's primary path, so that when the primary link
 fails the source still reaches the destination over the SR repair /
 post-convergence path.
+
 IPv6 OSPFv3 sibling of `ospfv2_tilfa.feature` / `isis_tilfa.feature`
 — the same eight-node RFC 9855 §5 topology and metrics, expressed
 through the (new) per-interface `cost` knob, with the v3 SR
@@ -19,10 +20,12 @@ configured: each router allocates one per Full adjacency out of its
 SRLB (base 15000) automatically and advertises it as a local (V|L)
 Adj-SID — IS-IS-parity dynamic allocation — and the repair encodes
 its mid-path hops as those Adj-SID segments.
+
 The metrics are tuned so a simple LFA is impossible: s reaches d via
 s-n1 (cost 2); the only other neighbours (n2, n3) are equidistant /
 expensive, so protecting the s-n1 first hop requires an SR repair
 tunnel through the r-plane rather than a plain loop-free alternate.
+
 OSPFv3 TI-LFA excludes the primary first-hop *vertex* (node
 protection) and skips SPF-level ECMP destinations (the remaining
 legs already protect the prefix), so repairs exist exactly for r2,

@@ -9,10 +9,12 @@ elect its primary/backup role per <ESI, VPWS service instance> across the
 PEs advertising the segment's Type-4, so the remote PE learns which of the
 two attached PEs to use — and learns it again, without any config change,
 when one of them leaves the segment.
+
 Control-plane only: no cradle dataplane is attached, so this asserts the
 Type-1 ESI, the Layer-2 Attributes P/B bits on the wire, and the role each
 PE reports. Which SID the remote *binds* from a multihomed pair is remote
 selection, a separate phase — z3 here still binds a single end.
+
 Test Topology — three iBGP (AS 65001) EVPN speakers on a shared transport
 bridge br0. z1 and z2 are dual-homed to one CE over Ethernet Segment es1
 and both advertise VPWS service instance 101; z3 is the single-homed

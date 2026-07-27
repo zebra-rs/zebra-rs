@@ -13,6 +13,7 @@ SID, resolved through the IS-IS SRv6 underlay. So a bidirectional ceA<->ceB
 ping traverses the MUP End.DT46 datapath in BOTH directions using only
 MUP-installed routes — the forwarding counterpart of bgp_mup_st2_dsd_fib
 (which asserts the install; this drives real packets through it).
+
 zebra-rs uses End.DT46 as the mainline-kernel stand-in for the draft's
 GTP-U edge behaviours (GTP4.E / H.M.GTP4.D), which need a VPP/eBPF forwarder
 (see docs/design/bgp-mup-dataplane-plan.md, Plan A). Because a VRF binds a

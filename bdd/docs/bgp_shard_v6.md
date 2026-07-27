@@ -7,9 +7,11 @@ worker shards (ZEBRA_BGP_SHARDS>1), IPv6-unicast routes must flow
 through the pool exactly as IPv4-unicast does — ingest → owning shard →
 reduce → advertise — and the churn paths (withdraw, peer-down) must hit
 the pool too, not the now-empty synchronous shard.
+
 z2 runs with 4 shards. Correctness is observed DOWNSTREAM on z3 (N=1,
 so its `show` reads a whole table): z1 originates a v6 prefix only after
 every session is Established, so z2 processes it live on the N>1 path.
+
 IPv6 inbound policy still runs in main (the post-policy decision is sent
 to the shard), so this first cut does not exercise sharded policy /
 soft-reconfig — those land with full v4/v6 parity (compute-policy +

@@ -7,6 +7,7 @@ from config (`router bgp sharding rib-sharding <1-64>`, zebra-bgp-sharding.yang)
 of the `ZEBRA_BGP_SHARDS` environment variable. The sharded device z2 is
 started with the PLAIN `start zebra-rs` step — no env var — and gets its
 shard count purely from `shards: 4` in its applied config.
+
 Sharding is behavior-transparent (the same correct result at N=1 and
 N>1), so a correctness matrix alone cannot prove the knob actually
 activated N=4 — it would pass even if the daemon silently fell back to
@@ -15,6 +16,7 @@ N=1. The decisive assertion is therefore the startup log line
 when `spawn_bgp` reads the leaf — which is true only if the knob resolved
 to 4 from config. The route-propagation scenario then confirms the
 config-sharded daemon ingests and forwards correctly end to end.
+
 The env-driven N>1 read-path matrix (mirror, late-peer sync,
 received-routes gather, withdraw, peer-down) is covered by the
 bgp_shard_v4_sync feature; this one focuses on the config-knob plumbing.

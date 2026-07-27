@@ -8,6 +8,7 @@ to disable the MRAI for a per-VRF CE neighbor
 So that PE-CE ipv4/ipv6 unicast converges without waiting out the stock
 MRAI — the instance-level `router bgp timer adv-interval` never reaches
 the per-VRF task, so the per-neighbor knob is the only lever.
+
 Regression guard for wiring the per-neighbor `advertisement-interval`
 into the update-group signature (`adv_interval_override`) and arming
 path: with 0 the per-VRF ipv4/ipv6-unicast advertise debounce arms a

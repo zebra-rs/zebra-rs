@@ -9,6 +9,7 @@ Up IS adjacency on the circuit (ISO 10589 §7.3.16). We previously
 up after DIS election — while the DIS stayed DIS — was never folded
 into the pseudonode's IS-reach list and was unreachable in every
 speaker's SPF.
+
 Three L2 routers (a1, a2, a3) share one broadcast LAN (br0), with
 loopbacks 10.0.0.{1,2,3}/32. Whichever wins DIS must list all three in
 its pseudonode LSP; the decisive assertion is that every router has an

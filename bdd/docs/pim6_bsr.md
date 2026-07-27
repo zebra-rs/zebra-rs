@@ -7,6 +7,7 @@ I want a candidate BSR to win the election, collect candidate-RP
 advertisements, and flood the RP-set in Bootstrap messages so every
 PIMv6 router learns the group-to-RP mapping without static config —
 then run the ASM control loop on the BSR-learned RP.
+
 r2 is candidate-BSR and candidate-RP (2001:db8:22::2). r1 and r3 must
 learn both the elected BSR and the RP purely from flooded BSMs. The
 Bootstrap messages are link-local-sourced multicast (like Hellos); the

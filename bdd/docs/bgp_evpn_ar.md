@@ -7,6 +7,7 @@ I want zebra-rs to signal RFC 9574 Assisted Replication roles in the
 Type-3 (Inclusive Multicast) IMET route and build the BUM flood list
 accordingly, so that an AR-LEAF offloads BUM replication to an
 AR-REPLICATOR while an RNVE keeps plain ingress replication.
+
 Test Topology — three iBGP (AS 65001) EVPN speakers on a shared bridge,
 each with a local VXLAN (VNI 10) so every node originates a Type-3 IMET:
 ```
@@ -14,10 +15,12 @@ each with a local VXLAN (VNI 10) so every node originates a Type-3 IMET:
 │                            br0                            │
 └─────────┬─────────────────┬─────────────────┬─────────────┘
 ```
+
 Roles (router bgp afi-safi evpn assisted-replication):
 - z1: role replicator, replicator-ip 192.168.0.101 (the AR-IP)
 - z2: role leaf
 - z3: role none (default RNVE); also requests whole-VTEP P-FL pruning
+
 The flood list is observed via the kernel VXLAN FDB: the daemon programs
 zero-MAC (00:00:00:00:00:00) rows, one `dst` per flood target. There is
 no actual BUM forwarding here — the FDB *decisions* are the unit under
@@ -30,6 +33,7 @@ Roles (router bgp afi-safi evpn assisted-replication):
 - z2: role leaf
 - z3: role none (default RNVE); also requests whole-VTEP P-FL pruning
   (pruned-flood-list broadcast-multicast + unknown-unicast)
+
 The flood list is observed via the kernel VXLAN FDB: the daemon programs
 zero-MAC (00:00:00:00:00:00) rows, one `dst` per flood target. There is
 no actual BUM forwarding here — the FDB *decisions* are the unit under

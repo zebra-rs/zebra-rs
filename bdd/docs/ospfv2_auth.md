@@ -7,6 +7,7 @@ I want zebra-rs to authenticate OSPFv2 packets per interface — simple
 password (RFC 2328 §D.3), keyed-MD5 (§D.4), HMAC-SHA (RFC 5709) and
 RFC 8177 key-chains — so that adjacencies form only between routers
 sharing the key, and packets with mismatched keys are dropped.
+
 Two routers on a point-to-point link; each scenario brings the pair
 up under one authentication mode and proves the adjacency reaches
 Full and the loopbacks route. The final scenario proves the negative:

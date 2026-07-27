@@ -7,6 +7,7 @@ I want the iBGP-only path attributes — ORIGINATOR_ID, CLUSTER_LIST and
 LOCAL_PREF — to stay inside the AS for IPv6 unicast routes too
 So that an iBGP-learned IPv6 route re-advertised to an eBGP peer does not
 leak attributes that have meaning only within the local AS.
+
 This is the IPv6 counterpart of @bgp_rr_ebgp_strip: the egress builder
 `route_update_ipv6` clones the route's stored attrs, so without the
 eBGP strip an iBGP-learned v6 route would carry ORIGINATOR_ID /

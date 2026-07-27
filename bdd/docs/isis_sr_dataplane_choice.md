@@ -10,6 +10,7 @@ dataplane implicitly deletes the other (RFC 7950 §7.9.3) — a single
 running SR-MPLS node to SRv6 without a separate `delete`, and the
 implicit delete tears the old dataplane's forwarding state down
 exactly as an explicit one would.
+
 z1 and z2 run dual-stack IS-IS L2 over one point-to-point link, both
 starting on SR-MPLS (Prefix-SID indexes 100/200 -> labels
 16100/16200 against the default SRGB base 16000). z1 additionally

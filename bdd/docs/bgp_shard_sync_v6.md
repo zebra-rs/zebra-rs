@@ -12,6 +12,7 @@ with no mirror needed. This feature pins that: a late-establishing v6
 peer must still get the full table on sync, and the sharded node must
 show its own v6 RIB. (v4 needed `BgpShard::mirror_v4` for this; v6 does
 not, and this guards against v6 ever regressing into the same hole.)
+
 z2 is the sharded device under test (4 shards) and the transit between
 z1 (origin) and two downstream peers:
 

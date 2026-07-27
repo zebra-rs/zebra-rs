@@ -9,9 +9,11 @@ hands matching frames to the TC replication path — and tees the branch set to
 cradle's REPL_SEG (SetReplSeg). This is the control-plane half of RFC 9524
 SR-P2MP replication; the datapath fan-out itself is proven by the cradle-rs
 `cradle_srv6_replicate` BDD.
+
 Prerequisite: /usr/bin/cradle (the cradle-rs engine binary) with the
 SetReplSeg RPC. Install from a cradle-rs checkout: `cargo build --release`
 then `install -m755 target/release/cradle /usr/bin/cradle`.
+
 Topology:
 ```
 ```

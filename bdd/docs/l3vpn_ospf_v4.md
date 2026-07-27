@@ -7,6 +7,7 @@ I want a full [C]-[CE]-[PE]-[P]-[PE]-[CE]-[C] topology where both the
 C-CE and PE-CE segments run OSPFv2 and the PE does two-way
 redistribution (OSPF<->VPNv4), so that C1 and C2 can reach each other's
 loopback across the MPLS/VPN core.
+
 Same core as @l3vpn_bgp_v4 (IS-IS L2 + SR-MPLS, iBGP VPNv4). The
 customer side runs OSPFv2 in area 0 (C-CE and CE-PE). The PE:
 - `router bgp vrf ... redistribute ospf` carries the customer routes

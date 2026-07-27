@@ -39,6 +39,7 @@ segment and the st2 route). `pfcp-inject` plays the SMF: it
 sends an Association Setup + Session Establishment for endpoint 10.0.0.1 /
 TEID 0x12345678 (Network Instance `core`), so z1 originates the ST2 route
 and advertises it to z2.
+
 NOTE: this feature runs `pfcp-inject` inside z1, so the `pfcp-inject`
 binary (`tools/pfcp-inject`) must be on the BDD host PATH — build with
 `cargo build --release -p pfcp-inject` and copy `target/release/pfcp-inject`

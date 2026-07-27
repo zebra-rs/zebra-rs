@@ -8,12 +8,14 @@ kernel cannot see it) to rewire the pre-installed protection
 indirection groups onto their TI-LFA repairs in one atomic kernel
 operation per failed adjacency, BEFORE SPF reconvergence rewrites
 the routes — phase 3 of docs/design/nexthop-protect-kernel-failover.md.
+
 The topology is the isis_tilfa SR-MPLS ring with BFD enabled on the
 protected s<->n1 adjacency. BFD-down is induced by dropping inbound
 UDP/3784 in namespace s: the veth link stays up and IIHs (ISO L2
 PDUs, not IP) keep flowing, so the teardown is provably BFD's doing
 — the exact failure class the kernel's autonomous link-down path
 cannot cover.
+
 The switchover itself is observable only in the daemon log (the
 "rewired N protection group(s) onto repairs" line is emitted ONLY
 when at least one group actually moved): its kernel state is

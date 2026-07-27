@@ -7,6 +7,7 @@ model comes from config (router bgp sharding peer-sharding true, zebra-bgp-shard
 instead of the ZEBRA_BGP_PEER_TASK environment variable. The device z2 is
 started with the PLAIN start step — no env vars — and reads BOTH its shard
 count (shards: 4) and its egress model (peer-task: true) from config.
+
 PET runs the v4-unicast egress through a per-peer task (the GoBGP per-peer
 model) instead of the main-task update-groups, and is exercised together
 with sharding, so z2 sets both knobs. Like sharding, the egress model is
@@ -15,6 +16,7 @@ the startup log line BGP per-peer egress task: enabled (from config),
 emitted by init_peer_task when spawn_bgp reads the leaf. The
 route-propagation scenario then confirms the config-driven PET egress
 ingests and forwards end to end.
+
 The env-driven PET matrix is covered by bgp_peer_egress_v4; this feature
 focuses on the config-knob plumbing.
 

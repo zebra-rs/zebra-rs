@@ -5,13 +5,16 @@
 Flex-Algo sibling of @tilfa_srv6. Same proven eight-router topology and
 metrics (IPv6-only, every circuit point-to-point), but each router also
 runs a Flexible-Algorithm 128 (RFC 9350) on the SRv6 dataplane:
+
 - each router owns a per-algo SRv6 locator fcbb:bbbb:1X::/48 (behavior
 - algo 128 has no affinity constraints, so its topology equals algo 0's
 - `flex-algo 128 fast-reroute ti-lfa` enables per-algo TI-LFA, so the
+
 The metrics are tuned (from @tilfa_srv6) so a simple LFA is impossible:
 s reaches d via s-n1 (cost 2); protecting s-n1 needs an SR repair tunnel
 through the r-plane. This validates per-algo TI-LFA + per-algo End.X SID
 origination end-to-end on the SRv6 dataplane.
+
 NOTE: like every BDD here this runs under the (CI-excluded) bdd suite in
 network namespaces; it has not been executed in the authoring sandbox.
 

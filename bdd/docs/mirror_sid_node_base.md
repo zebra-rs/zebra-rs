@@ -7,6 +7,7 @@ stay alive. This feature covers the other failure: the protected
 egress's whole NODE goes down. pea is a stub egress reachable only via
 the PLR pe1; peb (the protector) is reached directly over pe1-peb and
 advertises a Mirror SID (End.M) for pea's locator fcbb:bbbb:3::/48.
+
 While pea is up, pe1 routes to its locator over the pe1-pea adjacency
 and carries peb's Mirror SID as the egress-protection backup. When pea's
 node fails, that adjacency drops and pea's locator leaves the SPF — the
@@ -16,6 +17,7 @@ alive as a seg6 H.Encaps route to peb's Mirror SID, so traffic into the
 failed egress's locator is carried to the protector and the failover
 survives SPF reconvergence (not just the sub-second BFD window). When
 pea returns, its real locator route supersedes the retained one.
+
 ```
 ```
 The seg6 H.Encaps forwarding the retained route points at is exercised

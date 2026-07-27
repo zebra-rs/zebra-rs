@@ -8,6 +8,7 @@ neighbor <addr>` to take effect on the per-VRF CE session
 So that allowas-in, as-override, and remove-private-as behave on a CE
 neighbor exactly as on a global neighbor — applied on the per-VRF
 receive / advertise path, not silently dropped.
+
 One scenario per knob, each on its own CE neighbor:
 
 ## Test Topology

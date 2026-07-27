@@ -8,6 +8,7 @@ shared tree to the static RP, a new source's first-hop router to
 register it with the RP, the RP to join the source tree and stop
 the registers, and traffic to flow natively source→RP→receiver —
 the complete PIM-SM ASM control loop over three routers.
+
 r2 is the RP (10.1.22.2, its own interface address, configured
 statically on all three routers). h2 issues an any-source join for
 239.2.2.2 (IGMPv3 EXCLUDE{}); r3 (LHR) builds (*,G) toward the RP.

@@ -9,9 +9,11 @@ every committed line to every protocol task, a too-greedy `vrf <name>`
 match used to make IS-IS/OSPF spawn a phantom per-VRF instance for a VRF
 that has no `router <proto> vrf` configuration. With the proto-anchored
 `vrf_config_split` they must not.
+
 This router has a top-level `vrf cust` plus IS-IS and OSPFv2 in the
 default VRF only. `show task` lists each running protocol and its VRF;
 it must show `isis` / `ospf` under `default` and never a `cust` row.
+
 ```
 ```
 

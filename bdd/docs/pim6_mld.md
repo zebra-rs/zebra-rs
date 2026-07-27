@@ -7,6 +7,7 @@ I want a zebra-rs router running MLD on an IPv6 interface to act as
 the querier and learn group memberships from MLDv2 reports, so the
 MLD codec (RFC 3810 over ICMPv6) driving the shared Gm<Ipv6> engine
 is exercised host-to-router.
+
 A host joins an IPv6 multicast group; its kernel emits an MLDv2
 report to ff02::16, which the router's querier (joined to ff02::16)
 receives and records as membership.

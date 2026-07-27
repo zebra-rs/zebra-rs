@@ -8,6 +8,7 @@ in a PIM Register and unicast it to the statically configured RP, and
 the RP to answer Register-Stop so the FHR settles in suppression — the
 PIMv6 unicast Register control loop (transport slice of ASM), before
 the full shared-tree datapath.
+
 Unlike link-local PIM control (Hello / J/P / Assert to ff02::d), the
 Register and Register-Stop are unicast between the FHR and the RP: the
 FHR sources them from a routable (non-link-local) address so the RP can

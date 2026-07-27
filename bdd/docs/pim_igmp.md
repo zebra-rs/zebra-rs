@@ -7,6 +7,7 @@ I want a zebra-rs router to learn IGMP group membership from
 attached hosts and to elect a single querier per LAN, so the
 receiver side of the multicast control plane works before PIM
 trees are built on top of it.
+
 r1 runs IGMP on two links: toward r2 (router-to-router, exercising
 querier election — the lower address 10.1.13.1 must win and r2 must
 step down to Non-Querier) and toward host h1, which joins group

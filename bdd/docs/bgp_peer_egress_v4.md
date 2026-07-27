@@ -9,12 +9,15 @@ reduce (`route_apply_bestpath_v4_batch`) used to do FIB-install +
 advertise but never mirror the best-path back into the synchronous
 `bgp.shard`, so every read path that consults `bgp.shard.v4` was empty
 at N>1:
+
 Forwarding itself is unaffected: the event-driven advertise runs off the
 best-path delta, not `bgp.shard`. This is IPv4-unicast-specific (the only
 pooled family); v6 / VPNv4 / VPNv6 / labeled-unicast are sync-ingested,
 so their `bgp.shard` tables stay populated and read correctly at N>1.
+
 z2 is the sharded device under test (4 shards) and the transit between
 z1 (origin) and two downstream peers:
+
 FIXED by the read-replica mirror: the pool reduce
 (`route_apply_bestpath_v4_batch` → `BgpShard::mirror_v4`) now keeps the
 main shard's `bgp.shard.v4` in step with the pool-owned table, so both
@@ -23,11 +26,13 @@ ipv4` (z2's own RIB) — see the routes at N>1. This feature now guards
 against regressing that. (The sync build still runs serially on the
 main task; parallelizing its egress is a separate optimization, see
 docs/design/bgp-rib-sharding-plan.md §B.4.)
+
 A THIRD read path — `show bgp neighbor <peer> received-routes` (the
 peer's Adj-RIB-In) — is NOT covered by the Loc-RIB mirror: the
 authoritative adj_in lives in the pool shards, so at N>1 this read
 scatter-gathers it from every shard (A2 ⑤, `ShardMsg::DumpAdjInV4`). The
 received-routes scenario below guards that.
+
 A FOURTH — `show bgp ipv4 summary`'s per-neighbor PfxRcd/Snt — reads BOTH
 off-main owners: PfxRcd from the pool shards' Adj-RIB-In (N>1), PfxSnt
 from the PET's Adj-RIB-Out (peer-task). The synchronous row read finds
