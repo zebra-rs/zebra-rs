@@ -95,6 +95,31 @@ Feature: EVPN Type-2 / Type-3 over SRv6 — End.DT2U and End.DT2M signalling
     And show command "show bgp evpn" in namespace "z2" should contain "Remote SID: fcbb:bbbb:1:"
     And show command "show l2 mac table" in namespace "z2" should eventually contain "srv6"
 
+  Scenario: Binding the learning port to an Ethernet Segment stamps its ESI
+    Given the test topology exists
+    # An `ESI:` line renders only for a Type-2 — a Type-1 or Type-4 carries
+    # its ESI in the NLRI key rather than on the path — so this assertion is
+    # unambiguous even once the ES routes below start flowing. Until a segment
+    # claims the port the MAC sits on, the MAC is advertised single-homed.
+    Then show command "show bgp evpn" in namespace "z2" should not contain "ESI:"
+    # Declare the segment, then bind it to host0 — the port this MAC was
+    # learned on. Neither edit touches the FDB, so re-originating the
+    # already-advertised Type-2 under the new ESI is the config handler's job.
+    When I apply command "set router bgp afi-safi evpn ethernet-segment es1 esi 00:11:22:33:44:55:66:77:88:99" in namespace "z1"
+    And I apply command "set router bgp afi-safi evpn ethernet-segment es1 interface host0" in namespace "z1"
+    Then show command "show bgp evpn" in namespace "z1" should eventually contain "ESI: 00:11:22:33:44:55:66:77:88:99"
+    And show command "show bgp evpn" in namespace "z2" should eventually contain "ESI: 00:11:22:33:44:55:66:77:88:99"
+    # A refresh, not a re-learn: the MAC and its End.DT2U SID are unchanged.
+    And show command "show bgp evpn" in namespace "z2" should contain "aa:bb:cc:dd:ee:01"
+    And show command "show bgp evpn" in namespace "z2" should contain "(End.DT2U)"
+
+  Scenario: Deleting the segment returns the MAC to single-homed
+    Given the test topology exists
+    When I apply command "delete router bgp afi-safi evpn ethernet-segment es1" in namespace "z1"
+    Then show command "show bgp evpn" in namespace "z2" should eventually not contain "ESI: 00:11:22:33:44:55:66:77:88:99"
+    # The MAC route itself survives losing its segment.
+    And show command "show bgp evpn" in namespace "z2" should contain "aa:bb:cc:dd:ee:01"
+
   Scenario: Withdrawing the local MAC withdraws the Type-2 and its MAC entry
     Given the test topology exists
     When I execute "bridge fdb del aa:bb:cc:dd:ee:01 dev host0 master" in namespace "z1"

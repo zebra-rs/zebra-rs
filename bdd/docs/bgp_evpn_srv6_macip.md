@@ -37,5 +37,7 @@ toggle, and the withdraw — everything up to the datapath handoff.
 | A local MAC originates a Type-2 carrying a per-VNI End.DT2U SID | |
 | The importing PE binds the remote End.DT2U SID to the MAC | |
 | Toggling the encapsulation re-originates the routes in place | |
+| Binding the learning port to an Ethernet Segment stamps its ESI | |
+| Deleting the segment returns the MAC to single-homed | |
 | Withdrawing the local MAC withdraws the Type-2 and its MAC entry | |
 | Teardown topology | |

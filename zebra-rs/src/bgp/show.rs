@@ -1514,7 +1514,7 @@ fn show_adj_rib_routes_evpn<D: RibDirection>(
                     nexthop, med, local_pref, weight, aspath, origin
                 )?;
 
-                write_evpn_path_attrs(&mut buf, &rib.attr, rib.is_originated())?;
+                write_evpn_path_attrs(&mut buf, &rib.attr, rib.is_originated(), rib.esi)?;
             }
         }
     }
@@ -4184,7 +4184,12 @@ fn format_pmsi_tunnel(p: &PmsiTunnel, mpls: bool) -> String {
 ///   rendered together on one line as in the unicast detail view.
 /// - Aggregation (RFC 4271): Atomic-Aggregate flag and Aggregator AS/IP.
 /// - Accumulated IGP metric (RFC 7311).
-fn write_evpn_path_attrs(buf: &mut String, attr: &BgpAttr, originated: bool) -> std::fmt::Result {
+fn write_evpn_path_attrs(
+    buf: &mut String,
+    attr: &BgpAttr,
+    originated: bool,
+    esi: Option<[u8; 10]>,
+) -> std::fmt::Result {
     const PAD: &str = "                    ";
 
     // SRv6 service SIDs (RFC 9252), printed first so they sit directly
@@ -4202,6 +4207,15 @@ fn write_evpn_path_attrs(buf: &mut String, attr: &BgpAttr, originated: bool) -> 
     };
     for (sid, behavior) in attr.srv6_l2_sids().chain(attr.srv6_l3_sids()) {
         writeln!(buf, "{PAD}{kind}: {sid} ({})", srv6_behavior_name(behavior))?;
+    }
+
+    // The Ethernet Segment this route's MAC (Type-2) or prefix (Type-5) sits
+    // behind. An NLRI field rather than a path attribute, but it belongs with
+    // the forwarding story: it is what lets a remote PE alias traffic across
+    // every PE attached to the same segment (RFC 7432 §8.4). Suppressed when
+    // zero — that is the single-homed case, which is most routes.
+    if let Some(esi) = esi.filter(|esi| esi != &[0u8; 10]) {
+        writeln!(buf, "{PAD}ESI: {}", bgp_packet::esi_display(&esi))?;
     }
 
     let ecom = show_evpn_ecom(attr);
@@ -4394,7 +4408,7 @@ fn show_bgp_evpn(
             // route-reflection attrs (RFC 4456: Originator / Cluster list),
             // aggregation (RFC 4271), and AIGP (RFC 7311). Lines are emitted
             // only when the attribute is present.
-            write_evpn_path_attrs(&mut buf, &rib.attr, rib.is_originated())?;
+            write_evpn_path_attrs(&mut buf, &rib.attr, rib.is_originated(), rib.esi)?;
 
             // Line 4 (Type-9 only): RFC 9572 §5.3.1 inter-AS DF election among
             // the ASBRs advertising this region's Per-Region I-PMSI.
@@ -5440,7 +5454,7 @@ mod evpn_show_tests {
         };
 
         let mut buf = String::new();
-        write_evpn_path_attrs(&mut buf, &attr, false).unwrap();
+        write_evpn_path_attrs(&mut buf, &attr, false, None).unwrap();
 
         let pad = " ".repeat(20);
         let expected = format!(
@@ -5465,7 +5479,7 @@ mod evpn_show_tests {
         };
 
         let mut buf = String::new();
-        write_evpn_path_attrs(&mut buf, &attr, false).unwrap();
+        write_evpn_path_attrs(&mut buf, &attr, false, None).unwrap();
 
         let pad = " ".repeat(20);
         assert_eq!(
@@ -5487,7 +5501,7 @@ mod evpn_show_tests {
         };
 
         let mut buf = String::new();
-        write_evpn_path_attrs(&mut buf, &attr, false).unwrap();
+        write_evpn_path_attrs(&mut buf, &attr, false, None).unwrap();
 
         let pad = " ".repeat(20);
         assert_eq!(buf, format!("{pad}Cluster list: 10.0.0.2\n"));
@@ -5507,7 +5521,7 @@ mod evpn_show_tests {
         };
 
         let mut buf = String::new();
-        write_evpn_path_attrs(&mut buf, &attr, false).unwrap();
+        write_evpn_path_attrs(&mut buf, &attr, false, None).unwrap();
 
         let pad = " ".repeat(20);
         let expected = format!(
@@ -5525,7 +5539,7 @@ mod evpn_show_tests {
     #[test]
     fn write_path_attrs_empty_attr_writes_nothing() {
         let mut buf = String::new();
-        write_evpn_path_attrs(&mut buf, &BgpAttr::default(), false).unwrap();
+        write_evpn_path_attrs(&mut buf, &BgpAttr::default(), false, None).unwrap();
         assert!(buf.is_empty());
     }
 
@@ -5549,7 +5563,7 @@ mod evpn_show_tests {
         };
 
         let mut buf = String::new();
-        write_evpn_path_attrs(&mut buf, &attr, false).unwrap();
+        write_evpn_path_attrs(&mut buf, &attr, false, None).unwrap();
 
         let pad = " ".repeat(20);
         assert_eq!(
@@ -5582,7 +5596,7 @@ mod evpn_show_tests {
             };
 
             let mut buf = String::new();
-            write_evpn_path_attrs(&mut buf, &attr, true).unwrap();
+            write_evpn_path_attrs(&mut buf, &attr, true, None).unwrap();
 
             let pad = " ".repeat(20);
             assert_eq!(
@@ -5624,7 +5638,7 @@ mod evpn_show_tests {
         };
 
         let mut buf = String::new();
-        write_evpn_path_attrs(&mut buf, &attr, false).unwrap();
+        write_evpn_path_attrs(&mut buf, &attr, false, None).unwrap();
 
         let pad = " ".repeat(20);
         assert_eq!(

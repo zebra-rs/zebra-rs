@@ -6,10 +6,55 @@
 //! those are later phases. The config handlers live in `config.rs` alongside
 //! the other EVPN afi-safi knobs; this module owns the state types.
 
+use std::collections::BTreeMap;
 use std::net::IpAddr;
 use std::time::{Duration, Instant};
 
 use bgp_packet::{DfElectionEc, ExtCommunityValue};
+
+use super::vpws::{EsBinding, bind_es};
+
+/// The interface name for `ifindex`, from the `if-name` → `ifindex` mirror
+/// BGP keeps off `RibRx::LinkAdd`.
+///
+/// `ifindex == 0` is "no port", not a lookup miss, and never matches: an FDB
+/// learn that carries no interface (every MAC from the cradle datapath, whose
+/// `FdbEvent` reports only `(mac, bd)`) must not be attributed to whichever
+/// link happens to sit at index 0.
+pub fn ac_name_for_ifindex(ifindex: u32, links: &BTreeMap<String, u32>) -> Option<String> {
+    if ifindex == 0 {
+        return None;
+    }
+    links
+        .iter()
+        .find_map(|(name, &idx)| (idx == ifindex).then(|| name.clone()))
+}
+
+/// The ESI a route learned on access port `ac` should carry, or `None` for
+/// single-homed.
+///
+/// The learning port *is* the attachment circuit, so this reuses the same
+/// [`bind_es`] inference VPWS does — with no explicit leaf to honour, because
+/// a MAC learn carries no operator intent to override. Two segments claiming
+/// one port resolves to single-homed rather than a tie-break: the wrong ESI
+/// is a silent blackhole once a remote PE starts aliasing (RFC 7432 §8.4)
+/// toward the segment we misnamed. `Err` returns the competing names so the
+/// caller can say so.
+pub fn esi_for_ac(
+    ac: &str,
+    segments: &BTreeMap<String, EthernetSegment>,
+) -> Result<Option<[u8; 10]>, Vec<String>> {
+    // `bind_es` keys on the same `Option<&String>` the VPWS `interface` leaf
+    // hands it; the temporary is one allocation per MAC learn.
+    let ac = ac.to_string();
+    match bind_es(None, Some(&ac), segments) {
+        EsBinding::Derived(name) | EsBinding::Explicit(name) => {
+            Ok(segments.get(&name).and_then(|es| es.esi))
+        }
+        EsBinding::Ambiguous(claims) => Err(claims),
+        EsBinding::None | EsBinding::Unresolved(_) => Ok(None),
+    }
+}
 
 /// All-active vs single-active multihoming redundancy mode (RFC 7432 §14.1).
 /// Carried in the ESI Label EC's flag on the per-ES A-D route.
@@ -300,6 +345,87 @@ pub fn vpws_role(
         VpwsRole::Backup
     } else {
         VpwsRole::NonDesignated
+    }
+}
+
+#[cfg(test)]
+mod ac_esi_tests {
+    use super::*;
+
+    const ESI_A: [u8; 10] = [0x00, 0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77, 0x88, 0x99];
+    const ESI_B: [u8; 10] = [0x00, 0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0xff, 0x01, 0x02, 0x03];
+
+    fn links(entries: &[(&str, u32)]) -> BTreeMap<String, u32> {
+        entries
+            .iter()
+            .map(|(name, idx)| (name.to_string(), *idx))
+            .collect()
+    }
+
+    fn segments(
+        entries: &[(&str, Option<&str>, Option<[u8; 10]>)],
+    ) -> BTreeMap<String, EthernetSegment> {
+        entries
+            .iter()
+            .map(|(name, iface, esi)| {
+                (
+                    name.to_string(),
+                    EthernetSegment {
+                        esi: *esi,
+                        interface: iface.map(str::to_string),
+                        ..Default::default()
+                    },
+                )
+            })
+            .collect()
+    }
+
+    #[test]
+    fn ifindex_resolves_to_its_link_name() {
+        let links = links(&[("eth0", 2), ("eth1", 3)]);
+        assert_eq!(ac_name_for_ifindex(3, &links).as_deref(), Some("eth1"));
+        // An index no link claims is a miss, not a wrong answer.
+        assert_eq!(ac_name_for_ifindex(9, &links), None);
+    }
+
+    /// The cradle datapath's `FdbEvent` carries no port, so its learns arrive
+    /// with `ifindex: 0`. That must never be attributed to a link — including
+    /// one that somehow sits at index 0 — or every cradle-learned MAC would
+    /// inherit that link's segment.
+    #[test]
+    fn ifindex_zero_never_resolves() {
+        assert_eq!(ac_name_for_ifindex(0, &links(&[("eth0", 0)])), None);
+        assert_eq!(ac_name_for_ifindex(0, &links(&[("eth0", 2)])), None);
+    }
+
+    #[test]
+    fn port_on_one_segment_takes_its_esi() {
+        let segs = segments(&[("es1", Some("eth0"), Some(ESI_A))]);
+        assert_eq!(esi_for_ac("eth0", &segs), Ok(Some(ESI_A)));
+    }
+
+    #[test]
+    fn port_on_no_segment_is_single_homed() {
+        let segs = segments(&[("es1", Some("eth0"), Some(ESI_A))]);
+        assert_eq!(esi_for_ac("eth1", &segs), Ok(None));
+        // A segment that claims the port but has no ESI configured yet is
+        // still single-homed — there is nothing to advertise.
+        let pending = segments(&[("es1", Some("eth0"), None)]);
+        assert_eq!(esi_for_ac("eth0", &pending), Ok(None));
+    }
+
+    /// Two segments claiming one port must not tie-break: picking the wrong
+    /// ESI blackholes traffic a remote PE aliases toward that segment.
+    #[test]
+    fn port_claimed_twice_is_ambiguous_not_arbitrary() {
+        let segs = segments(&[
+            ("es1", Some("eth0"), Some(ESI_A)),
+            ("es2", Some("eth0"), Some(ESI_B)),
+        ]);
+        assert_eq!(
+            esi_for_ac("eth0", &segs),
+            Err(vec!["es1".to_string(), "es2".to_string()])
+        );
     }
 }
 
