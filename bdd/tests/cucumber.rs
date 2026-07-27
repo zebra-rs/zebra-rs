@@ -5,7 +5,7 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 
-use bdd::netns;
+use bdd::{feature_tag, netns};
 use cucumber::tag::Ext as _;
 use cucumber::writer::Stats as _;
 use cucumber::{World as CucumberWorld, WriterExt, cli, given, then, when, writer};
@@ -63,6 +63,13 @@ impl World {
     /// sibling's *live* namespaces, and the clean-environment check reports
     /// them as this feature's leaked ones. Bridges and host veths are
     /// unaffected — they carry `short_id()`, a hash of the whole tag.
+    ///
+    /// The sibling's *tag* is what has to be read, not its file name: a
+    /// resource is named from the tag, and seven features here declare a tag
+    /// that differs from their stem (`isis_tilfa_srv6.feature` is
+    /// `@tilfa_srv6`). Going by file name both invents siblings that own
+    /// nothing and, if a future tag diverges the other way, misses a real
+    /// one — which is the whole bug, back again.
     fn sibling_prefixes(&self) -> Vec<String> {
         let own = format!("{}_", self.feature_tag);
         let Ok(entries) = fs::read_dir("tests/features") else {
@@ -72,9 +79,10 @@ impl World {
             .filter_map(Result::ok)
             .map(|e| e.path())
             .filter(|p| p.extension().and_then(|s| s.to_str()) == Some("feature"))
-            .filter_map(|p| p.file_stem()?.to_str().map(str::to_owned))
-            .filter(|stem| stem.len() > self.feature_tag.len() && stem.starts_with(&own))
-            .map(|stem| format!("{stem}_"))
+            .filter_map(|p| fs::read_to_string(&p).ok())
+            .filter_map(|text| feature_tag::parse(&text))
+            .filter(|tag| tag.len() > self.feature_tag.len() && tag.starts_with(&own))
+            .map(|tag| format!("{tag}_"))
             .collect()
     }
 }
