@@ -40,3 +40,6 @@ allure-report/
 allure-results/
 .allure/
 typescript
+# Per-worktree staged toolchain (make -C bdd stage)
+/bdd/.stage/
+/bdd/.stage.tmp/

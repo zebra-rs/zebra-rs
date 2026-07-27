@@ -58,6 +58,53 @@ namespaces). The `--tags` expression supports `not`, `and`, and `or`, so
 you can select or exclude scenarios — e.g. `--tags "@isis_l1_p2p or
 @isis_tilfa"`.
 
+## Which binaries the suite tests — the staged toolchain
+
+The daemons and CLIs a scenario runs are resolved by name, so left alone
+they come from the host-global install: `/usr/bin/zebra-rs`,
+`/usr/bin/vtyctl`, `/usr/bin/pfcp-inject`, and the schemas under
+`/usr/share/zebra-rs/yang`. `make install` overwrites all of those, so
+two checkouts — most commonly two **git worktrees** — clobber one
+another and a run silently exercises whichever one installed last. A
+foreign binary or schema set then reads as an inexplicable product
+failure; "unknown key" at apply time is the classic symptom.
+
+`make stage` takes the host out of the picture. It builds *this*
+worktree and copies the result into `bdd/.stage/`, mirroring the `/usr`
+layout:
+
+```text
+bdd/.stage/
+  bin/{zebra-rs,vtyctl,vtyhelper,pfcp-inject}
+  share/zebra-rs/yang/*.yang
+```
+
+The harness picks that up on its own: it prepends `bin/` to `PATH` for
+every in-namespace command and points the daemon at the staged schemas
+with `--yang-path`, so a run reads nothing under `/usr`. Every test
+target in `bdd/Makefile` depends on `stage`, which makes it impossible
+to test a stale binary through make. Each run prints what it resolved:
+
+```text
+toolchain: staged at /path/to/worktree/bdd/.stage (zebra-rs 38487872 bytes)
+```
+
+The staged binaries are copies rather than symlinks into `target/`,
+because cargo rewrites `target/release/zebra-rs` in place — a rebuild
+would otherwise swap the binary out from under a run already in flight.
+
+Useful knobs:
+
+```sh
+make stage PROFILE=debug   # faster to build; fine for control-plane features
+make unstage               # drop .stage and fall back to the /usr install
+ZEBRA_BDD_PREFIX=/some/prefix cargo test --test cucumber -- …
+```
+
+Running `cargo test --test cucumber` directly without a staged prefix
+still works and falls back to the host-global install — the run header
+tells you which one you got.
+
 ## Keeping the topology for inspection — `BDD_KEEP`
 
 By default a scenario tears its topology down at the end, even on
