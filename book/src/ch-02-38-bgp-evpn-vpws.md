@@ -188,10 +188,24 @@ the Type-1 if this PE's own role changed, with no local config change. A PE
 whose own Type-4 is not selected yet advertises primary rather than
 blackholing the service while the segment converges.
 
-> **Note:** which of a multihomed pair the *remote* PE binds is remote
-> selection, tracked separately — a remote today binds a single end and does
-> not yet prefer `P` over `B` or fail over to the backup. All-active
-> therefore signals correctly but is not load-balanced: one end is used.
+**Remote selection** — which of a multihomed pair this PE binds — ranks the
+advertised remotes per RFC 8214 §5: primary over backup, non-designated
+(`P=0 B=0`) dropped, lowest originator breaking a tie so both ends agree.
+Losing the primary re-selects rather than tearing the E-Line down. Two
+details matter in practice:
+
+* **MTU is filtered before the ranking**, so a primary whose MTU clashes
+  steps aside for a compatible backup instead of wedging the service.
+* **The per-ES Ethernet A-D route is the liveness gate**: a candidate on a
+  non-zero ESI is usable only while its PE advertises one, which is how
+  RFC 7432 §8.2 mass withdraw takes effect.
+
+A single-homed remote (all-zero ESI) is always usable regardless of the
+bits — an implementation that omits the Layer-2 Attributes EC decodes as
+`P=0 B=0`, and excluding those would break every plain point-to-point peer.
+
+> **Note:** all-active signals correctly but is not load-balanced — one end
+> is selected and used, with the other standing by.
 
 ## Show command
 
@@ -241,11 +255,12 @@ configured (or re-pointed) is found without waiting for a route churn.
 
 ## Scope
 
-Multihoming covers origination: the Type-1 carries the segment's ESI and
-DF-elected P/B bits. Not yet implemented — remote selection over a
-multihomed pair (prefer `P`, fail over to `B`, honour the per-ES A-D mass
-withdraw), all-active load balancing across both remote SIDs, and the
+Multihoming covers both directions: the Type-1 carries the segment's ESI and
+DF-elected P/B bits, and remote selection honours them (prefer `P`, fail over
+to `B`, per-ES A-D mass withdraw). Not yet implemented — all-active load
+balancing across both remote SIDs, and the
 control word (`C` is always 0). Forwarding requires the
 [eBPF data plane](ch-16-00-ebpf.md)
-(`system ebpf enabled`); the kernel has no End.DX2/DX2V seg6local action, so
-these SIDs are never installed via netlink.
+(`system ebpf enabled` to run the engine, `system cradle enabled` to tee the
+service into it); the kernel has no End.DX2/DX2V seg6local action, so these
+SIDs are never installed via netlink.

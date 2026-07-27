@@ -10,16 +10,22 @@ Type-2 origination.
 
 Some forwarding behaviours have **no mainline-kernel equivalent** and are
 only available on the eBPF data plane — notably real GTP-U for
-[MUP](ch-02-35-bgp-mup.md) (`dataplane gtp`) and
-[EVPN VPWS](ch-02-38-bgp-evpn-vpws.md) E-Line egress.
+[MUP](ch-02-35-bgp-mup.md) (`dataplane gtp`),
+[EVPN VPWS](ch-02-38-bgp-evpn-vpws.md) E-Line egress, and the
+bridge-domain decap that [EVPN over MPLS](ch-02-40-bgp-evpn-mpls.md) needs —
+the kernel has no action that pops an MPLS label and hands the exposed frame
+to a bridge, so that service is cradle-only end to end.
 
 ## Configuration
 
-Two knobs, both runtime toggles:
+Three knobs, all runtime toggles:
 
 ```
 system {
   ebpf {
+    enabled true;
+  }
+  cradle {
     enabled true;
   }
 }
@@ -30,9 +36,17 @@ interface enp0s6 {
 }
 ```
 
-- **`system ebpf enabled true`** turns the data plane on: zebra-rs launches
-  the engine as a managed child process, keeps it healthy, and programs the
-  eBPF FIB from the RIB.
+- **`system ebpf enabled true`** runs the data plane: zebra-rs launches the
+  engine as a managed child process and keeps it healthy. On its own it is a
+  pure eBPF L2 switch — no routing state is programmed into it.
+- **`system cradle enabled true`** is the **FIB tee**: every route zebra-rs
+  installs — plus ILMs, SRv6 SIDs and EVPN state — is programmed into the
+  engine in addition to the kernel, and the data plane's MAC learning is fed
+  back into EVPN Type-2 origination. This is the switch that turns the
+  switch into a forwarder for zebra-rs's routing state, and it is
+  independent of `system ebpf`: an externally-run cradle is teed to with
+  this leaf alone, and `system cradle grpc-endpoint` only overrides the
+  endpoint (default `unix:cradle/grpc`) — it enables nothing by itself.
 - **`interface <name> ebpf enabled true`** makes that interface a data-plane
   port: the forwarding programs attach to it and it participates in eBPF
   forwarding. The port follows the interface's VRF binding
@@ -41,7 +55,9 @@ interface enp0s6 {
 
 | YANG leaf | Type | Default | Notes |
 |---|---|---|---|
-| `/system/ebpf/enabled` | `boolean` | `false` | The data-plane switch: engine + FIB programming. |
+| `/system/ebpf/enabled` | `boolean` | `false` | Engine lifecycle: spawn and supervise the data plane. |
+| `/system/cradle/enabled` | `boolean` | `false` | The FIB tee: program routes / ILM / SRv6 / EVPN into the engine. |
+| `/system/cradle/grpc-endpoint` | `string` | `unix:cradle/grpc` | Endpoint override, shared by the tee and the managed engine. Does not enable the tee. |
 | `/interface/ebpf/enabled` | `boolean` | `false` | Per-interface port membership. |
 
 Port membership is **reconciled**: enabling `ebpf` on an interface that does
@@ -172,3 +188,7 @@ zebra> show ebpf stats json
   real GTP-U on the eBPF data plane.
 - [EVPN VPWS](ch-02-38-bgp-evpn-vpws.md) — E-Line egress runs on the eBPF
   data plane.
+- [EVPN over MPLS](ch-02-40-bgp-evpn-mpls.md) — the per-EVI service label,
+  its bridge-domain decap and every remote MAC exist only here;
+  `show ebpf mpls` and `show ebpf l2` are the only place to confirm the
+  service is actually programmed.

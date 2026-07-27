@@ -5,8 +5,9 @@ RFC 9136. Type-5 carries an IP prefix across an EVPN as an L3VPN-style
 service — it is, in effect, an alternative NLRI *encoding* of the same
 per-VRF IP routing that [VPNv4 / VPNv6 L3VPN](ch-02-04-bgp-l3vpn.md)
 provides. DC fabrics commonly prefer the EVPN encoding because one
-address family (`l2vpn evpn`) then carries both the L2 service
-(Type-2 / Type-3, see VXLAN EVPN) and the L3 service (Type-5).
+address family (`l2vpn evpn`) then carries both the L2 service (Type-2 /
+Type-3, over [VXLAN](ch-00-03-vxlan-configuration.md), SRv6 or
+[MPLS](ch-02-40-bgp-evpn-mpls.md)) and the L3 service (Type-5).
 
 Because Type-5 reuses the existing L3VPN control- and data-plane, the
 two ends of a VPN flow map exactly as they do for VPNv4 / VPNv6:
@@ -81,7 +82,7 @@ reroutes.
 > run over VXLAN, SRv6, or MPLS. EVPN-over-MPLS *L2* is not forwardable by
 > the Linux kernel — it has no action that pops a label and hands the frame
 > to a bridge — so it needs the cradle eBPF data plane; see
-> [EVPN over MPLS](ch-02-39-bgp-evpn-mpls.md).
+> [EVPN over MPLS](ch-02-40-bgp-evpn-mpls.md).
 
 ## Verification
 
