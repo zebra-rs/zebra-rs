@@ -305,6 +305,41 @@ impl NexthopMap {
             .collect()
     }
 
+    /// Multi groups whose kernel membership is missing a member that
+    /// rides `(table_id, addr)` — the inverse of
+    /// [`Self::protect_evict_candidates`], which is why it scans `set`
+    /// (the group's full membership, and its identity) rather than
+    /// `valid` (what the kernel currently holds): eviction removed the
+    /// leg from `valid` precisely so it would stop matching there.
+    ///
+    /// A leg that is legitimately still down also shows up here; that
+    /// is harmless, because the nexthop sync re-derives each member's
+    /// validity from link and route state before deciding what to
+    /// install, and leaves such a group alone.
+    pub fn protect_restore_candidates(&self, table_id: u32, addr: IpAddr) -> Vec<(usize, usize)> {
+        self.groups
+            .iter()
+            .flatten()
+            .filter_map(|grp| {
+                let Group::Multi(multi) = grp else {
+                    return None;
+                };
+                for (m, w) in multi.set.iter() {
+                    if multi.valid.contains(&(*m, *w)) {
+                        continue;
+                    }
+                    if let Some(uni) = self.get_uni(*m)
+                        && uni.table_id == table_id
+                        && uni.addr == addr
+                    {
+                        return Some((multi.gid(), *m));
+                    }
+                }
+                None
+            })
+            .collect()
+    }
+
     pub fn fetch_multi(&mut self, set: &BTreeSet<(usize, u8)>) -> Option<&mut Group> {
         let gid = if let Some(&gid) = self.set.get(set) {
             let update = self.groups.get_mut(gid)?;

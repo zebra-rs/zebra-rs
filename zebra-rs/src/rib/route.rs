@@ -3196,6 +3196,81 @@ mod tests {
         assert!(nmap.protect_switch_candidates(0, addr).is_empty());
     }
 
+    /// The eviction/restore pair must be exact inverses: whatever
+    /// `protect_evict_candidates` drops from a group's kernel
+    /// membership, `protect_restore_candidates` has to find again once
+    /// the adjacency returns. Eviction removes the leg from `valid`,
+    /// so a restore query that also scanned `valid` would match
+    /// nothing and the group would stay shrunk forever — the
+    /// ecmp_bfd_evict failure.
+    #[test]
+    fn protect_restore_candidates_find_what_eviction_dropped() {
+        use super::super::entry::RibEntry;
+        use super::super::nexthop::{NexthopMulti, NexthopUni};
+        use super::super::{Group, Nexthop, NexthopMap};
+        use super::super::{RibEntries, RibType};
+        use super::rib_resolve_nexthop;
+        use ipnet::Ipv4Net;
+        use prefix_trie::PrefixMap;
+
+        // Two-leg ECMP, both legs pinned to live links so they resolve.
+        let mut leg_a = NexthopUni::new("10.1.0.2".parse().unwrap(), 20, vec![]);
+        leg_a.ifindex_origin = Some(10);
+        let mut leg_b = NexthopUni::new("10.2.0.2".parse().unwrap(), 20, vec![]);
+        leg_b.ifindex_origin = Some(20);
+        let mut entry = RibEntry::new(RibType::Isis);
+        entry.nexthop = Nexthop::Multi(NexthopMulti {
+            metric: 20,
+            nexthops: vec![leg_a, leg_b],
+            gid: 0,
+        });
+
+        let mut nmap = NexthopMap::default();
+        let table: PrefixMap<Ipv4Net, RibEntries> = PrefixMap::new();
+        rib_resolve_nexthop(&mut entry, &table, &mut nmap, 0);
+        let Nexthop::Multi(multi) = &entry.nexthop else {
+            panic!("still Multi");
+        };
+        let (gid, a_gid) = (multi.gid, multi.nexthops[0].gid);
+
+        let failed: std::net::IpAddr = "10.1.0.2".parse().unwrap();
+        // Healthy: the kernel holds every leg, so there is nothing to
+        // restore — the message must be a no-op in steady state.
+        assert!(
+            nmap.protect_restore_candidates(0, failed).is_empty(),
+            "a group with full membership is not a restore candidate"
+        );
+
+        // BFD down: eviction drops the failed leg from kernel membership.
+        let evicted = nmap.protect_evict_candidates(0, failed);
+        assert_eq!(evicted, vec![(gid, a_gid)]);
+        if let Some(Group::Multi(m)) = nmap.get_mut(gid) {
+            m.valid.retain(|(m, _)| *m != a_gid);
+        }
+
+        // BFD up: the same (table, addr) now names a shrunken group.
+        assert_eq!(
+            nmap.protect_restore_candidates(0, failed),
+            vec![(gid, a_gid)]
+        );
+        assert!(
+            nmap.protect_restore_candidates(0, "10.9.9.9".parse().unwrap())
+                .is_empty(),
+            "other gateways unaffected"
+        );
+        assert!(
+            nmap.protect_restore_candidates(254, failed).is_empty(),
+            "other tables unaffected"
+        );
+
+        // The surviving leg was never evicted, so it never needs restoring.
+        assert!(
+            nmap.protect_restore_candidates(0, "10.2.0.2".parse().unwrap())
+                .is_empty(),
+            "the leg that stayed up is not a restore candidate"
+        );
+    }
+
     /// A seg6 repair is switchover-eligible like any other live Uni
     /// backup: seg6 members forward correctly through groups (the
     /// black-hole theory was refuted — design doc correction), so
