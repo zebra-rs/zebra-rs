@@ -140,6 +140,15 @@ impl RibClient {
         self.send(Message::ProtectSwitch { addr })
     }
 
+    /// Undo the switchover's ECMP leg eviction for the adjacency at
+    /// `addr`. Protocols call this on BFD-up-with-link-up, the mirror
+    /// of `protect_switch`: the eviction shrank kernel nexthop groups
+    /// in place, and a recovery that produces no route change would
+    /// otherwise leave them shrunk forever.
+    pub fn protect_restore(&self, addr: std::net::IpAddr) -> Result<(), SendError<RibInbound>> {
+        self.send(Message::ProtectRestore { addr })
+    }
+
     /// Toggle FIB-install suppression for this client and every clone
     /// that shares its `Arc`. Idempotent.
     pub fn set_suppress_install(&self, suppress: bool) {

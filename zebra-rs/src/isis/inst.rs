@@ -2895,6 +2895,16 @@ impl Isis {
     /// next received IIH promotes its adjacency back to Up. A no-op when the
     /// neighbour was not held (e.g. the normal first-Up after adjacency form).
     fn process_bfd_up(&mut self, key: &crate::bfd::session::SessionKey) {
+        // Undo the switchover's ECMP leg eviction FIRST, before any of the
+        // early returns below. Each of those is a legitimate "no adjacency
+        // bookkeeping to do" case — the neighbour re-formed from an IIH
+        // before this event landed, a flap already consumed the hold-down
+        // entry, the link went away — but the kernel groups still have this
+        // leg missing regardless, and the RIB has no other way to hear that
+        // it is back. Keying on `key.remote` is exactly what the eviction
+        // used, and the RIB no-ops when nothing was evicted.
+        let _ = self.ctx.rib.protect_restore(key.remote);
+
         // Primary path: resolve via the live neighbour entry in `nbrs`.
         let resolved = self.bfd_resolve_neighbor(key, false);
 
@@ -2940,6 +2950,24 @@ impl Isis {
                 ?level,
                 "isis: bfd recovered; lifting adjacency hold-down",
             );
+        }
+
+        // `key.remote` was already restored at entry; cover the rest of the
+        // keys the eviction used. process_bfd_down snapshots the whole
+        // address set (v4 interface addrs from TLV 132, v6 link-locals from
+        // TLV 232) because those are what SPF keyed the groups on, and a
+        // BFD session names only one of them. Collect before dropping the
+        // link borrow.
+        let mut recovered: Vec<std::net::IpAddr> = Vec::new();
+        if let Some(nbr) = link.state.nbrs.get(&level).get(&sys_id) {
+            recovered.extend(nbr.addr4.keys().copied().map(std::net::IpAddr::V4));
+            recovered.extend(nbr.addr6l.iter().copied().map(std::net::IpAddr::V6));
+        }
+        recovered.retain(|a| *a != key.remote);
+        recovered.sort();
+        recovered.dedup();
+        for addr in recovered {
+            let _ = self.ctx.rib.protect_restore(addr);
         }
     }
     pub fn top(&mut self) -> IsisTop<'_> {

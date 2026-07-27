@@ -194,6 +194,18 @@ pub enum Message {
     ProtectSwitch {
         addr: IpAddr,
     },
+    /// The inverse of [`Message::ProtectSwitch`]: the adjacency at
+    /// `addr` is back (BFD Up while the link never went down). The
+    /// switchover's ECMP leg eviction shrank kernel nexthop groups in
+    /// place, and nothing else tells the RIB the leg returned — the
+    /// eviction only drains via refcnt if reconvergence happens to
+    /// rewrite the affected prefixes, which it does not when SPF's
+    /// post-recovery result equals what the RIB already holds. Without
+    /// this the group stays shrunk indefinitely: the RIB shows every
+    /// leg while the kernel forwards over a subset.
+    ProtectRestore {
+        addr: IpAddr,
+    },
     /// Drop `proto`'s interest in `nh`; the tracking entry is removed
     /// once its last watcher unregisters.
     NexthopUnregister {
@@ -2696,6 +2708,39 @@ impl Rib {
                 }
                 if rewired == 0 && evicted == 0 {
                     tracing::debug!("ProtectSwitch {addr} table {table_id}: no eligible groups");
+                }
+            }
+            Message::ProtectRestore { addr } => {
+                // Re-derive membership through the ordinary nexthop sync
+                // rather than re-installing here: that pass already
+                // recomputes each member's validity from link and route
+                // state and issues one atomic replace per group whose
+                // kernel membership diverged. Duplicating it would risk
+                // resurrecting a leg the sync would reject.
+                let stale = self.nmap.protect_restore_candidates(table_id, addr);
+                if stale.is_empty() {
+                    tracing::debug!("ProtectRestore {addr} table {table_id}: nothing evicted");
+                } else {
+                    tracing::info!(
+                        "ProtectRestore {addr} table {table_id}: {} ECMP group(s) missing this leg, re-syncing",
+                        stale.len()
+                    );
+                    ipv4_nexthop_sync(
+                        &mut self.nmap,
+                        &self.table,
+                        &self.vrf_tables,
+                        &self.links,
+                        &self.fib_handle,
+                    )
+                    .await;
+                    ipv6_nexthop_sync(
+                        &mut self.nmap,
+                        &self.table_v6,
+                        &self.vrf_tables,
+                        &self.links,
+                        &self.fib_handle,
+                    )
+                    .await;
                 }
             }
             Message::NexthopUnregister { proto, nh, vrf_id } => {
