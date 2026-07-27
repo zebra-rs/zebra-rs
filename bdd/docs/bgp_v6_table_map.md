@@ -29,8 +29,13 @@ only the kernel routes move — and the v4 route installs untouched.
 ## Config Files
 
 - z1.yaml: AS 65001, networks 2001:db8:100::/48 + 2001:db8:200::/48
+  + 2001:db8:300::/48 (ipv6) and 1.1.1.1/32 (ipv4).
 - z2.yaml: prefix-set DENY6 = { 2001:db8:100::/48 },
+  MED6 = { 2001:db8:200::/48 }; policy TMAP6 = deny DENY6 /
+  permit MED6 set med 50 / permit; `afi-safi ipv6 table-map TMAP6`;
+  ipv4 afi-safi enabled with NO table-map.
 - z2-deny-more.yaml: DENY6 = { 2001:db8:100::/48,
+  2001:db8:300::/48 } (added).
 
 ## Test Scenarios
 

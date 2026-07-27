@@ -29,8 +29,13 @@ Both on bridge br0.
 
 - z1.yaml: AS65001, peers z2, originates 10.0.0.1/32 + 10.0.0.2/32.
 - z2-base.yaml: AS65002, peers z1, soft-reconfiguration inbound, no
+  policy (both routes accepted).
 - z2-peerwide-deny.yaml: binds a peer-wide `policy in DENY-ALL` (deny
+  everything) via a `neighbor-group` the peer inherits — both routes
+  disappear.
 - z2-perafi-permit.yaml: adds `afi-safi ipv4 policy in PERMIT-ALL`
+  while the inherited DENY-ALL stays bound — the per-AFI policy wins,
+  routes return.
 
 ## Test Scenarios
 

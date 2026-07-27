@@ -39,6 +39,7 @@ permit (z2 must see the route again).
 ## Config Files
 
 - z1-permit.yaml: vrf-blue originates 10.1.0.0/24, EVPN out-policy bound
+  to the existing PERMIT-ALL.
 - z1-undef.yaml: EVPN out-policy rebound to the undefined NOPE.
 - z1-recover.yaml: NOPE defined as a permit policy.
 - z2-1.yaml: EVPN receiver importing RT 65001:100 into vrf-blue.

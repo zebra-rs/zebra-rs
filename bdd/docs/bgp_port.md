@@ -43,6 +43,7 @@ between z3's daemon start (default listener on 179) and the apply.
 ## Config Files
 
 - z1.yaml: `port: 0`; neighbor z2 with `port: 1790`; originates
+  10.10.0.1/32
 - z2.yaml: `port: 1790` listener; passive toward z1; active toward z3
 - z3.yaml: `port: 0` (no listener); passive toward z2
 - z3-listen.yaml: same as z3.yaml with `port: 179` (reopen listener)

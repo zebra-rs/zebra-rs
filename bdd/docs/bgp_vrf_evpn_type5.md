@@ -37,7 +37,10 @@ instead of a VPNv4 NLRI, exchanged over (AFI=25 / SAFI=70).
 ## Config Files
 
 - z1-1.yaml: AS 65001, vrf-blue with RD 65001:100, RT 65001:100, a
+  self-originated network 10.1.0.0/24, and `evpn advertise-ipv4 true`.
+  EVPN iBGP to z2.
 - z2-1.yaml: AS 65001, vrf-blue with RD 65001:200, RT 65001:100
+  (matching import). EVPN iBGP to z1.
 
 ## Test Scenarios
 

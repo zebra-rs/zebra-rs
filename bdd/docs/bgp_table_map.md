@@ -36,6 +36,8 @@ deleting the table-map must restore unfiltered installs.
 
 - z1.yaml: AS 65001, advertises 1.1.1.1/32 + 2.2.2.2/32 + 3.3.3.3/32.
 - z2.yaml: prefix-set DENY = { 1.1.1.1/32 }, MED = { 2.2.2.2/32 };
+  policy TMAP = deny DENY / permit MED set med 50 / permit;
+  `afi-safi ipv4 table-map TMAP`.
 - z2-deny-more.yaml: DENY = { 1.1.1.1/32, 3.3.3.3/32 } (added).
 
 ## Test Scenarios

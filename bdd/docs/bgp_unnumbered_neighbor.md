@@ -29,7 +29,12 @@ i1; the LAN prefixes live on dummy interfaces):
 ## Config Files
 
 - z1-base.yaml / z2-base.yaml: a bare `router bgp` block — spawns ND
+  so it learns i1 before RA is enabled (see the files for the race
+  this two-step bring-up avoids).
 - z1-full.yaml / z2-full.yaml: enable `send-advertisements` on i1,
+  declare `interface-neighbor i1 remote-as N`, and advertise one
+  IPv4 /32 (10.0.0.1/32 from z1, 10.0.0.2/32 from z2) plus the LAN
+  /24 that lives on the local dummy (10.10.1.0/24 / 10.10.2.0/24).
 
 Note: the interface-keyed peer's remote address is a kernel-assigned
 link-local that the scenario can't name, so the session is asserted

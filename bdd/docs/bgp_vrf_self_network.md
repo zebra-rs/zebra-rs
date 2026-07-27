@@ -29,6 +29,8 @@ Regression guard for two bugs:
 ## Config Files
 
 - pe1.yaml: AS 65000, vrf-cust with ipv4 (10.1.0.2) + ipv6 (2001:db8:1::2)
+  CE neighbors, originating `network 10.9.0.0/24` and
+  `network 2001:db8:9::/64`.
 - ce1.yaml: AS 65001, global neighbors to the PE (ipv4 + ipv6).
 
 ## Test Scenarios

@@ -23,7 +23,10 @@ so a PE advertises CE-learned IGP routes into the L3VPN.
 
 - ce.yaml: OSPF only; lo 10.9.9.9/32 + eth0 10.0.0.2/30 in area 0.
 - z1-1.yaml: vrf-blue (RD 65001:100, RT 65001:100), oc1 in the VRF
+  (10.0.0.1/30), `router ospf vrf vrf-blue` on oc1, `afi-safi ipv4
+  redistribute ospf`, VPNv4 iBGP to z2.
 - z2-1.yaml: vrf-blue (RD 65001:200, RT 65001:100 import), VPNv4 iBGP
+  to z1.
 
 ## Test Scenarios
 

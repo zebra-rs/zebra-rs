@@ -29,6 +29,7 @@ Requires Linux kernel >= 6.7 on both peers.
 ## Config Files
 
 - z1-1.yaml: AS 65001, tcp-ao key-chain BGP-AO (hmac-sha-1,
+  send-id=100, recv-id=100, key "shared-ao-secret").
 - z2-1.yaml: AS 65002, mirror configuration.
 
 ## Test Scenarios

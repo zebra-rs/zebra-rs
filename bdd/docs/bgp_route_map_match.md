@@ -45,17 +45,30 @@ rejects unknown document keys loudly.
 ## Config Files
 
 - z1.yaml: AS 65001, advertises 10.0.0.1/32 + 10.0.0.2/32, outbound
+  SET-MED-100 stamps MED=100 on every route.
 - z2-base.yaml: AS 65002, no input policy; baseline that accepts both
+  routes.
 - z2-aspath-pass.yaml: input policy `match as-path-set FROM-65001`
+  (regex `^65001$`) — matches the single-AS path from z1.
 - z2-aspath-fail.yaml: input policy `match as-path-set FROM-65999`
+  (regex `^65999$`) — no route matches.
 - z2-origin-igp.yaml: input policy `match origin igp` — matches
+  network-originated routes.
 - z2-origin-egp.yaml: input policy `match origin egp` — no route
+  matches.
 - z2-med-eq-pass.yaml: input policy `match med eq 100` — matches.
 - z2-med-eq-fail.yaml: input policy `match med eq 999` — no match.
 - z2-med-range-pass.yaml: input policy `match med le 200` —
+  MED=100 is at or below the ceiling, matches. (`match med` is a
+  one-of eq|le|ge choice, so a two-sided range needs two entries;
+  the le and ge bounds are exercised separately.)
 - z2-med-range-fail.yaml: input policy `match med ge 200` — MED=100
+  is below the floor, no match.
 - z2-nh-pass.yaml: input policy `match next-hop-set PEER-SUBNET`
+  where the prefix-set is 192.168.0.0/24 — matches z1's nexthop
+  192.168.0.1.
 - z2-nh-fail.yaml: input policy `match next-hop-set WRONG-SUBNET`
+  where the prefix-set is 10.10.0.0/16 — no route matches.
 
 ## Test Scenarios
 

@@ -32,7 +32,10 @@ covered.
 ## Config Files
 
 - pe1.yaml: AS 65000, vrf-cust with two CE neighbors (10.1.0.2 ipv4,
+  2001:db8:1::2 ipv6), each `timers advertisement-interval 0`. Originates
+  vrf-cust networks 10.9.0.0/24 and 2001:db8:9::/64.
 - ce1.yaml: AS 65001, global neighbors to the PE (ipv4 + ipv6), each
+  `timers advertisement-interval 0`, redistributing connected loopbacks.
 
 ## Test Scenarios
 

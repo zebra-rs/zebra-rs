@@ -40,13 +40,23 @@ route from A exercises both re-advertisement edges:
 - z1-3.yaml: A advertises 1.1.1.1/32 with community "no-export".
 - z1-4.yaml: A advertises 1.1.1.1/32 with community "no-advertise".
 - z1-5.yaml: A advertises 1.1.1.1/32 through a permit-all policy
+  (config apply is additive, so reverting means OVERWRITING the
+  neighbor's `afi-safi ipv4 policy out` leaf with a community-free policy — the
+  no-community z1-2.yaml cannot remove an already-set leaf).
 - z2-1.yaml: B — eBGP to A, iBGP to C, eBGP to D.
 - z3-1.yaml: C — iBGP to B only.
 - z4-1.yaml: D — eBGP to B only.
 - Every router sets `timer adv-interval ebgp: 3`, overriding the
+  30 s default eBGP MinRouteAdvertisementInterval so the two-hop eBGP
+  path does not dominate the run. (iBGP keeps its 5 s default.)
 - End-to-end A → B → C propagation: up to 3 + 5 =  8 s.
 - End-to-end A → B → D propagation: up to 3 + 3 =  6 s.
 - Each scenario that triggers a fresh advertisement on A waits
+  20 seconds (the slowest path plus a wide margin); a session clear
+  before the wait forces an immediate re-flood instead of relying on
+  incremental triggers. The previous 30 s timer / 65 s wait left only
+  a 5 s margin on the 60 s eBGP path, which made the D-receives
+  assertions flaky under load.
 
 Convergence wait-time rationale:
 

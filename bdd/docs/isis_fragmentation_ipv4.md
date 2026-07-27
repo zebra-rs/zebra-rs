@@ -42,8 +42,16 @@ freshly-added prefix until lsp-mtu is lowered back under the MTU.
 ## Config Files
 
 - z1-1.yaml: lsp-mtu-size 400 + 60 IPv4 /32 networks. Each /32 entry
+  costs 9 wire bytes in TLV 135, so 60 entries (~540 bytes) overflow a
+  single 400-byte fragment (373-byte budget after 27 bytes of PDU
+  overhead) and force the packer to spread TLV 135 entries across
+  multiple fragments.
 - z1-2.yaml: lsp-mtu-size 1500 + 200 IPv4 /32 networks. At the standard
+  Ethernet MTU the per-fragment budget is 1473 bytes, so 200 entries
+  (~1800 bytes) are needed to still span multiple fragments. Re-applied
+  to z1 mid-test to exercise a runtime lsp-mtu-size change.
 - z2-1.yaml: default config; verifies the receiver-side rebuild from a
+  fragmented peer LSP works end-to-end at both MTUs.
 
 ## Test Scenarios
 

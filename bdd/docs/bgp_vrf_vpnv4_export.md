@@ -29,7 +29,9 @@ inside vrf-blue and z2 peers with z1 over VPNv4 only.
 ## Config Files
 
 - z1-1.yaml: AS 65001, vrf-blue with RD 65001:100, RT 65001:100,
+  and a self-originated network 10.1.0.0/24. VPNv4 iBGP to z2.
 - z2-1.yaml: AS 65001, vrf-blue with RD 65001:200, RT 65001:100
+  (matching import). VPNv4 iBGP to z1.
 
 ## Test Scenarios
 

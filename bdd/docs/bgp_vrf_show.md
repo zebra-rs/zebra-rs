@@ -23,6 +23,7 @@ redirect into the spawned per-VRF task.
 
 - z1-1.yaml: baseline `router bgp` with no per-VRF block.
 - z1-2.yaml: adds top-level vrf-blue (with RT import/export) and
+  a matching `router bgp vrf vrf-blue` block with RD 65001:100.
 
 ## Test Scenarios
 

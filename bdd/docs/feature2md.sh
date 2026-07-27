@@ -117,10 +117,20 @@ SCEN_RE='^  Scenario:'
     if grep -qE 'Config files[^:]*:' "$INPUT_FILE"; then
         echo "## Config Files"
         echo ""
+        # A bullet that wraps continues on lines indented past the `- `.
+        # Matching only `^  - ` dropped those continuations silently, so a
+        # wrapped entry was published cut off mid-sentence with nothing to
+        # signal the loss. Take any line indented 4+ while a bullet is open,
+        # and de-indent it by the same 2 the bullet lost — that leaves a
+        # continuation at 2 and a nested `- ` at 2, which is exactly what
+        # Markdown wants for each. A blank line closes the bullet so the
+        # trailing prose below the list isn't swallowed into it.
         awk -v cfg="$CFG_RE" -v scen="$SCEN_RE" '
             $0 ~ cfg {found=1; next}
             $0 ~ scen {exit}
-            found && /^  - /{sub(/^  /, ""); print}
+            found && /^  - /{sub(/^  /, ""); print; item = 1; next}
+            found && item && /^ {4,}[^ ]/{sub(/^  /, ""); print; next}
+            found && /^[[:space:]]*$/{item = 0}
         ' "$INPUT_FILE"
         echo ""
     fi

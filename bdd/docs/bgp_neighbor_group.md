@@ -31,9 +31,14 @@ unit tests in #764.
 ## Config Files
 
 - z1-1.yaml: AS 65001, neighbor-group "RR" with remote-as 65002,
+  peer 192.168.0.2 references RR (no per-peer remote-as).
 - z1-2.yaml: same shape, but RR's remote-as is 65099 (wrong) —
+  used to verify the reactive sweep tears the session down.
 - z2-1.yaml: plain AS 65002 peer to 192.168.0.1 remote-as 65001.
 - z1-3.yaml / z2-2.yaml: GTSM round — z1 inherits ttl-security
+  from the GROUP while z2 enables it per-neighbor. GTSM needs both
+  ends at TTL 255, so re-establishment proves the inherited knob
+  is live on the wire, not just stored.
 
 ## Test Scenarios
 

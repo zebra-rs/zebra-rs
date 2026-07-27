@@ -31,6 +31,7 @@ Expected: `show bgp update-group` reports exactly 2 groups on z1.
 ## Config Files
 
 - z1-1.yaml: AS 65001, three eBGP peers; .2 and .3 attach
+  `out-shared`, .4 attaches `out-different`.
 - z2-1.yaml / z3-1.yaml / z4-1.yaml: simple peer back to .0.1.
 
 ## Test Scenarios
