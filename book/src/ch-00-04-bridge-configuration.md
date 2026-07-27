@@ -7,10 +7,13 @@ attributes to an existing device — the top-level `bridge` list
 **creates** the kernel bridge netdevice (`ip link add <name> type
 bridge`) and tears it down when the entry is removed.
 
-A bridge is the L2 forwarding domain an EVPN deployment binds a
-[VXLAN](ch-00-03-vxlan-configuration.md) device into: the VXLAN tunnel
-and the local access ports are enslaved to the same bridge, and the
-control plane drives the forwarding database.
+A bridge is the L2 forwarding domain an EVPN deployment carries. Over
+[VXLAN](ch-00-03-vxlan-configuration.md) that means binding a VXLAN device
+into it — the tunnel and the local access ports are enslaved to the same
+bridge, and the control plane drives the forwarding database. Over
+[MPLS](ch-02-40-bgp-evpn-mpls.md) there is no tunnel device at all: the
+bridge is named directly by an `evi <id> { bridge <name> }` entry, and the
+transport is a service label rather than an enslaved netdevice.
 
 ## Configuration
 

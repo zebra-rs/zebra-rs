@@ -9,7 +9,7 @@ and bridges the frame into that EVI's bridge domain.
 > **This needs the cradle eBPF data plane.** Linux has no action that pops an
 > MPLS label and hands the exposed Ethernet frame to a bridge — that gap is
 > precisely why EVPN-over-MPLS L2 was unsupported for so long. The control
-> plane here programs [cradle](ch-02-00-zebra-integration.md) directly and
+> plane here programs [cradle](ch-16-00-ebpf.md) directly and
 > deliberately skips netlink for the decap. VXLAN and SRv6 have kernel data
 > paths; this one does not.
 >
@@ -87,6 +87,48 @@ across the three encapsulations.
 **BUM** is ingress-replicated: each remote PE's Type-3 becomes a replication
 slot, and a flooded frame gets one copy per slot carrying that PE's BUM label.
 
+### Enabling the data plane
+
+Because none of this forwarding exists in the kernel, the EVI's label, its
+decap and every remote MAC are programmed **only** into cradle. Three
+separate things have to be true — the control plane will happily advertise
+and receive routes with any of them missing:
+
+```
+system {
+  ebpf {
+    enabled true;
+  }
+  cradle {
+    enabled true;
+  }
+}
+interface enp0s6 {
+  ebpf {
+    enabled true;
+  }
+}
+interface enp0s7 {
+  ebpf {
+    enabled true;
+  }
+}
+```
+
+- **`system ebpf enabled`** supervises the engine as a child process. On its
+  own it yields a plain eBPF L2 switch with nothing programmed into it.
+- **`system cradle enabled`** is the FIB tee — the switch that actually
+  carries the service label, the decap ILM and the EVPN FDB across. An
+  externally-run cradle is teed to with this leaf alone (point it with
+  `system cradle grpc-endpoint`; that leaf is an endpoint override and
+  enables nothing by itself).
+- **`interface <name> ebpf enabled`** attaches a port. Both the core-facing
+  port (where labelled frames arrive) and the CE-facing port (where the
+  bridge's access traffic arrives) must be attached.
+
+See the [eBPF data plane](ch-16-00-ebpf.md) chapter for the engine's
+lifecycle and full command set.
+
 ## Verification
 
 ```
@@ -113,9 +155,35 @@ The decap ILM at the service label. There is no outgoing interface because the
 pop delivers into a bridge domain rather than out a port — and no kernel LFIB
 entry to compare it against, since this one lives only in the data plane.
 
+### Check the data-plane side too
+
+`show mpls ilm` and `show bgp evpn` are the RIB's and BGP's *intent*. Because
+there is no kernel LFIB row to cross-check, a correct-looking control plane on
+both PEs is not evidence that anything forwards — the frames arrive with the
+right service label on top and get dropped. Two commands read the engine
+itself and close that gap:
+
+- **`show ebpf mpls`** dumps the engine's incoming-label map. Every label
+  `show mpls ilm` lists must appear here. A service label present in
+  `show mpls ilm` and absent from `show ebpf mpls` means the tee never
+  carried it — check `show ebpf` for `FIB tee: enabled`.
+- **`show ebpf l2`** dumps the L2 FDB: MACs learned from remote Type-2
+  routes alongside the ones the data plane learned locally on the CE ports.
+
+An empty table prints nothing at all, which for this service is itself the
+diagnosis rather than a quiet success.
+
+> The state is **replayed** on reconnect: when the tee comes up — or comes
+> back after an engine restart — the routes, ILMs and EVPN state are
+> re-programmed from the RIB with no operator action. This matters at
+> startup in particular, since a PE allocates its EVI label and programs the
+> decap during config load, which is typically while the tee is still
+> connecting.
+
 ## Limitations
 
-- **Requires cradle** (`system cradle grpc-endpoint`). Without it the routes
+- **Requires cradle** (`system cradle enabled` plus an engine — see
+  [Enabling the data plane](#enabling-the-data-plane)). Without it the routes
   are advertised and received but nothing forwards.
 - **IPv4 underlay only** in the data plane today; an IPv6-underlay PE punts
   rather than misforwarding.
