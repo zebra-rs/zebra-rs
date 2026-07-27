@@ -48,3 +48,4 @@ link, so a translated Type-5 is the only way the prefix reaches it.
 |----------|--------|
 | Internal ASBR Type-7 is installed in-area and translated to Type-5 on the backbone | |
 | Translator-role never keeps the Type-7 in-area and out of the backbone | |
+| Teardown topology | |

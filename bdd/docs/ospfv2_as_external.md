@@ -35,3 +35,4 @@ Loopbacks: 10.0.0.X/32.
 |----------|--------|
 | E2 metric — same external metric from all observers | |
 | E1 metric — external metric plus SPF cost to ASBR varies by location | |
+| Teardown topology | |

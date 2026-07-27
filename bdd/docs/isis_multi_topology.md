@@ -31,6 +31,12 @@ topologies.
 Both configs add `multi-topology ipv6-unicast;` under `router/isis/`
 so the LSPs carry TLV 229 (capability), TLV 222 (MT IS Reach), and
 TLV 237 (MT IPv6 Reach).
+Both vzXns interfaces set a base `metric 55` and a per-MT override
+`multi-topology ipv6-unicast metric 77`. Because IPv6 rides MT 2, the
+connected prefix 2001:db8:1::/64 must be advertised in TLV 237 with the
+per-MT metric 77 — not the base 55 and not a fixed 10. The loopback
+leaves both unset, so it falls all the way back to the default 10: a
+built-in check of the per-MT → base → default fallback chain.
 
 ## Test Scenarios
 
@@ -39,4 +45,6 @@ TLV 237 (MT IPv6 Reach).
 | Setup IS-IS L2 with MT 2 over a shared bridge and confirm the link is up | |
 | MT 2 SPF installs reciprocal IPv6 routes to peer loopbacks | |
 | LSPs carry the multi-topology TLVs | |
+| MT IPv6 Reachability carries the per-MT interface metric | |
+| MT metric falls back to the default for an interface without an override | |
 | Teardown topology | |

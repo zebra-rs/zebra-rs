@@ -39,3 +39,4 @@ is provably BFD's doing — not carrier loss, not the ~30s IS-IS hold timer.
 | BFD without Echo protects the LAN adjacency and tears it down on BFD failure | |
 | BFD with Echo in one direction (z1 transmit, z2 receive) | |
 | BFD with Echo in both directions | |
+| Teardown topology | |

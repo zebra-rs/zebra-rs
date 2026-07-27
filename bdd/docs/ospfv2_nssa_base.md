@@ -59,3 +59,4 @@ verbatim, independent of distance to the originator.
 | Totally-NSSA suppresses Type-3 summaries but keeps the default and translation | |
 | Translator-role never keeps the Type-7 in-area and out of the backbone | |
 | E1 metric grows with SPF distance to the originating ASBR and the translator | |
+| Teardown topology | |
