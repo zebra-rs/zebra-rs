@@ -26,6 +26,7 @@ toggle, and the withdraw — everything up to the datapath handoff.
 ## Config Files
 
 - z1.yaml, z2.yaml — `advertise-all-vni` + `encapsulation srv6`, a
+  locator each, and the EVPN AFI/SAFI as the only negotiated family.
 
 ## Test Scenarios
 

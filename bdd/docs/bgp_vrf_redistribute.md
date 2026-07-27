@@ -22,7 +22,11 @@ without a CE-facing routing protocol.
 ## Config Files
 
 - z1-1.yaml: AS 65001, vrf-blue (RD 65001:100, RT 65001:100), vc1 in
+  the VRF with 10.1.0.1/24 (connected 10.1.0.0/24), a VRF static route
+  10.2.0.0/24 via 10.1.0.2, and `afi-safi ipv4 redistribute
+  {connected,static}`. VPNv4 iBGP to z2.
 - z2-1.yaml: AS 65001, vrf-blue (RD 65001:200, RT 65001:100 import).
+  VPNv4 iBGP to z1.
 
 ## Test Scenarios
 

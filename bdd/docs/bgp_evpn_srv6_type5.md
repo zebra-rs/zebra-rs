@@ -23,6 +23,8 @@ passing ping cannot be a VPNv4/VPNv6 path in disguise.
 ## Config Files
 
 - z1.yaml, z2.yaml — dual-stack vrf-cust, `encapsulation srv6`, and
+  `evpn advertise-ipv4` + `advertise-ipv6`; neighbor carries the EVPN
+  AFI/SAFI only.
 
 ## Test Scenarios
 

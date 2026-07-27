@@ -26,6 +26,7 @@ verify that mismatched secrets prevent the session from coming up.
 - z1-1.yaml: AS 65001, tcp-md5 password "shared-md5-secret".
 - z2-1.yaml: AS 65002, tcp-md5 password "shared-md5-secret" (match).
 - z2-2.yaml: AS 65002, tcp-md5 password "WRONG-md5-secret"
+  (mismatch — peer's kernel silently drops SYNs).
 
 ## Test Scenarios
 

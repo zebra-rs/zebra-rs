@@ -46,8 +46,11 @@ All three on bridge br0.
 
 - z1-base.yaml: AS 65001, peers z2, originates nothing yet.
 - z1-routes.yaml: adds network 10.0.0.1/32 + 10.0.0.2/32 (originated
+  once the sessions are up, so z2 sees them on the live update path).
 - z2.yaml: AS 65002, peers z1 (inbound policy IN-POL permitting only
+  10.0.0.1/32) + z3, 4 shards.
 - z3.yaml: AS 65003, peers z2 — the downstream observer (N=1, `show`
+  works).
 
 ## Test Scenarios
 

@@ -30,7 +30,9 @@ origin so SPF can still install routes to the originator's loopback.
 ## Config Files
 
 - z1-1.yaml: lsp-mtu-size 400 + 40 IPv6 networks. Forces the packer
+  to spread TLV 236 entries across multiple LSP fragments.
 - z2-1.yaml: default config; verifies the receiver-side rebuild from
+  a fragmented peer LSP works end-to-end.
 
 ## Test Scenarios
 

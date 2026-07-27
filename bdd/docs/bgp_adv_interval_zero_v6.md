@@ -29,7 +29,10 @@ routes must still converge at the peer.
 ## Config Files
 
 - z1-1.yaml: AS 65001, adv-interval ibgp 0, neighbor 2001:db8::2 with
+  ipv6/vpnv6 address families. Originates ipv6 unicast 2001:db8:100::/64
+  and vrf-blue net 2001:db8:a::/64 (exported to VPNv6).
 - z2-1.yaml: AS 65001, adv-interval ibgp 0, same address families,
+  vrf-blue RD 65001:200 with matching import RT.
 
 ## Test Scenarios
 

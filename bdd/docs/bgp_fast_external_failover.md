@@ -30,6 +30,9 @@ is itself proof the reset did not come from the hold timer.
 ## Config Files
 
 - z1.yaml / z2.yaml: direct eBGP over the veth, one originated
+  prefix each, fast-external-failover left at its default (enabled).
+  The disabled case is applied at runtime with
+  `set router bgp fast-external-failover false`.
 
 ## Test Scenarios
 

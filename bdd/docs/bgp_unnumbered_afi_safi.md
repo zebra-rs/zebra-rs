@@ -21,8 +21,12 @@ both routers in AS 65001, `remote-as internal` = iBGP):
 ## Config Files
 
 - z1-base.yaml / z2-base.yaml: bare `router bgp` block (two-step
+  bring-up so ND learns i1 before RA is enabled — see the files).
 - z1-full.yaml / z2-full.yaml: RA on, `neighbor-group dynamic` with
+  afi-safi ipv4+ipv6 enabled, `interface-neighbor i1` referencing it
+  with `remote-as internal`, one originated IPv4 /32 and IPv6 /128.
 - z1-v4off.yaml / z2-v4off.yaml: flip the group's ipv4 opinion to
+  `enabled false` (additive apply overwrites just that leaf).
 
 ## Test Scenarios
 

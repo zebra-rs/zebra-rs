@@ -28,7 +28,11 @@ MRAI arms a ~1 ms next-tick debounce timer instead of the old
 ## Config Files
 
 - z1-1.yaml: AS 65001, adv-interval ibgp 0, neighbor 192.168.0.2 with
+  ipv4/vpnv4/evpn address families. Originates ipv4 unicast 10.0.0.1/32
+  and vrf-blue net 10.1.0.0/24 (exported to VPNv4 and, via
+  `evpn advertise-ipv4`, as an EVPN Type-5).
 - z2-1.yaml: AS 65001, adv-interval ibgp 0, same address families,
+  vrf-blue RD 65001:200 with matching import RT.
 
 ## Test Scenarios
 

@@ -33,6 +33,7 @@ only see the change after a manual `clear ... soft in`.
 
 - z1.yaml: AS 65001, advertises 1.1.1.1/32 + 2.2.2.2/32, no policy.
 - z2-initial.yaml: prefix-set HOGE = { 1.1.1.1/32 }; policy HOGE matches
+  prefix-set HOGE; neighbor applies HOGE inbound; soft-reconfig in.
 - z2-both.yaml: prefix-set HOGE = { 1.1.1.1/32, 2.2.2.2/32 } (added).
 - z2-other.yaml: prefix-set HOGE = { 2.2.2.2/32 } (1.1.1.1/32 removed).
 
