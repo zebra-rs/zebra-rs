@@ -2492,6 +2492,12 @@ struct EthernetSegmentJson {
     df_preference: Option<u16>,
     ac_df: bool,
     es_import_rt: Option<String>,
+    /// Configured `df-election startup-delay`, in seconds.
+    startup_delay: Option<u16>,
+    /// Seconds left in the startup hold; absent once it has elapsed. While
+    /// this is set the segment's ES routes are suppressed and its VPWS
+    /// services advertise P=0/B=0, so `member_vteps` will not list this PE.
+    startup_hold_remaining: Option<u64>,
     member_vteps: Vec<EsMemberVtepJson>,
     df_algorithm: Option<String>,
     designated_forwarder: Option<String>,
@@ -2542,6 +2548,8 @@ fn show_bgp_evpn_ethernet_segment(
                 df_preference: es.df_preference,
                 ac_df: es.ac_df,
                 es_import_rt: es.es_import_rt().map(|rt| format_evpn_ecom_value(&rt)),
+                startup_delay: es.startup_delay,
+                startup_hold_remaining: es.hold_remaining_at(std::time::Instant::now()),
                 member_vteps,
                 df_algorithm,
                 designated_forwarder,
@@ -2569,6 +2577,20 @@ fn show_bgp_evpn_ethernet_segment(
         }
         if let Some(rt) = es.es_import_rt() {
             writeln!(buf, "  ES-Import RT: {}", format_evpn_ecom_value(&rt))?;
+        }
+        // A running hold explains an otherwise puzzling pair of facts below:
+        // the local VTEP missing from the member list, and every VPWS service
+        // on the segment sitting at role non-designated.
+        match (
+            es.startup_delay,
+            es.hold_remaining_at(std::time::Instant::now()),
+        ) {
+            (Some(delay), Some(left)) => writeln!(
+                buf,
+                "  Startup hold: {left}s of {delay}s remaining (ES routes suppressed)"
+            )?,
+            (Some(delay), None) => writeln!(buf, "  Startup delay: {delay}s (elapsed)")?,
+            _ => {}
         }
         // PE membership + DF election, from the received (and our own) Type-4
         // routes. Candidates are sorted by VTEP — the index is the RFC 7432

@@ -7,6 +7,7 @@
 //! the other EVPN afi-safi knobs; this module owns the state types.
 
 use std::net::IpAddr;
+use std::time::{Duration, Instant};
 
 use bgp_packet::{DfElectionEc, ExtCommunityValue};
 
@@ -65,9 +66,59 @@ pub struct EthernetSegment {
     /// Advertise the RFC 8584 §2.2 AC-DF (AC-Influenced DF election)
     /// capability on this segment's Type-4.
     pub ac_df: bool,
+    /// Seconds to stay out of this segment's DF election after joining it
+    /// (IOS-XR `timers peering`, Junos
+    /// `designated-forwarder-election-hold-time`, FRR
+    /// `evpn mh startup-delay`). `None` = participate immediately, the
+    /// pre-existing behaviour.
+    pub startup_delay: Option<u16>,
+    /// When the current hold ends. `Some` only while a `startup_delay` is
+    /// running; cleared when the timer fires. Runtime state kept beside the
+    /// config it derives from, as [`super::vpws::VpwsService`] already does
+    /// for its own derived state.
+    pub hold_until: Option<Instant>,
 }
 
 impl EthernetSegment {
+    /// True while this segment is still inside its startup hold at `now`.
+    ///
+    /// A PE that has just booted has not yet learned the other PEs' Type-4
+    /// routes, so an election run immediately would see an empty segment and
+    /// elect this PE the Designated Forwarder — duplicating traffic toward a
+    /// CE the incumbent DF is already serving. The hold keeps this PE out of
+    /// the segment until BGP has had time to converge.
+    pub fn is_holding_at(&self, now: Instant) -> bool {
+        self.hold_until.is_some_and(|until| now < until)
+    }
+
+    /// Seconds left in the hold at `now`, rounded up; `None` once it has
+    /// elapsed. Display only. Rounding up rather than truncating means a hold
+    /// that is genuinely still running never reads as `0s`.
+    pub fn hold_remaining_at(&self, now: Instant) -> Option<u64> {
+        self.hold_until
+            .filter(|until| now < *until)
+            .map(|until| until - now)
+            .map(|left| left.as_secs() + u64::from(left.subsec_nanos() > 0))
+    }
+
+    /// Arm the startup hold, if one is configured and is not already
+    /// running. Returns the deadline so the caller can schedule the wake-up,
+    /// or `None` when there is nothing to arm.
+    ///
+    /// Re-arming is deliberately a no-op: a single commit that sets both the
+    /// ESI and the delay reaches here twice, and restarting the countdown on
+    /// the second edit would extend the outage and leave two timers racing
+    /// to end the same hold.
+    pub fn arm_hold(&mut self, now: Instant) -> Option<Instant> {
+        let secs = self.startup_delay.filter(|s| *s > 0)?;
+        if self.is_holding_at(now) {
+            return None;
+        }
+        let until = now + Duration::from_secs(secs as u64);
+        self.hold_until = Some(until);
+        Some(until)
+    }
+
     /// The DF Election extended community this segment advertises on its
     /// Type-4: Alg 2 with the configured preference when one is set,
     /// otherwise the default carving algorithm.
@@ -496,6 +547,73 @@ mod tests {
         assert_eq!(ec.df_alg, DfElectionEc::ALG_PREF);
         assert_eq!(ec.pref, 200);
         assert!(ec.ac_df());
+    }
+
+    #[test]
+    fn startup_hold_arms_once_and_elapses() {
+        let now = Instant::now();
+        // No delay configured: nothing to arm, and the segment is never
+        // holding — the pre-existing behaviour every current ES relies on.
+        let mut es = EthernetSegment::default();
+        assert_eq!(es.arm_hold(now), None);
+        assert!(!es.is_holding_at(now));
+        assert_eq!(es.hold_remaining_at(now), None);
+
+        let mut es = EthernetSegment {
+            startup_delay: Some(30),
+            ..Default::default()
+        };
+        let until = es.arm_hold(now).expect("armed");
+        assert_eq!(until, now + Duration::from_secs(30));
+        assert!(es.is_holding_at(now));
+        assert!(es.is_holding_at(now + Duration::from_secs(29)));
+        // The deadline itself is already out of the hold, so the timer
+        // firing exactly on time finds the segment free to rejoin.
+        assert!(!es.is_holding_at(until));
+
+        // Re-arming mid-hold keeps the original deadline: one commit reaches
+        // `arm_hold` from both the `esi` and the `startup-delay` leaf, and
+        // restarting the countdown on the second would extend the outage and
+        // leave two timers racing to end the same hold.
+        assert_eq!(es.arm_hold(now + Duration::from_secs(10)), None);
+        assert_eq!(es.hold_until, Some(until));
+        // Once it has elapsed the segment can be held again — leaving and
+        // rejoining a segment is a fresh hold, not a spent one.
+        es.hold_until = None;
+        assert_eq!(es.arm_hold(until), Some(until + Duration::from_secs(30)));
+    }
+
+    #[test]
+    fn hold_remaining_rounds_up_for_display() {
+        let now = Instant::now();
+        let mut es = EthernetSegment {
+            startup_delay: Some(10),
+            ..Default::default()
+        };
+        es.arm_hold(now);
+        // Exactly the full delay, not one more: "11s of 10s remaining" the
+        // instant it arms would be nonsense.
+        assert_eq!(es.hold_remaining_at(now), Some(10));
+        // Part-way through the last second still reads as 1s — while the
+        // hold is genuinely running it must never display as 0.
+        assert_eq!(
+            es.hold_remaining_at(now + Duration::from_millis(9_500)),
+            Some(1)
+        );
+        assert_eq!(es.hold_remaining_at(now + Duration::from_secs(10)), None);
+    }
+
+    #[test]
+    fn zero_startup_delay_never_holds() {
+        // The YANG range starts at 1, but a 0 reaching the type must not arm
+        // a hold no timer would ever come back to end.
+        let now = Instant::now();
+        let mut es = EthernetSegment {
+            startup_delay: Some(0),
+            ..Default::default()
+        };
+        assert_eq!(es.arm_hold(now), None);
+        assert!(!es.is_holding_at(now));
     }
 
     #[test]

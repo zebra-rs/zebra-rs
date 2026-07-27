@@ -1,6 +1,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 use std::sync::Arc;
+use std::time::Instant;
 
 use bgp_packet::*;
 use bytes::BytesMut;
@@ -16264,7 +16265,17 @@ impl Bgp {
         };
         let cands = self.es_df_candidates(&esi);
         let me = IpAddr::V4(self.router_id);
-        let role = vpws_role(mode, &cands, me, local_id);
+        // Inside the segment's startup hold this PE is deliberately missing
+        // from `cands` — its Type-4 is suppressed — and `vpws_role` reads an
+        // absent `me` as "the segment has not converged yet, stay primary
+        // rather than blackhole". During a hold that fallback is exactly
+        // backwards, so the hold decides the role itself: the remote PE must
+        // not use us until we have joined the election.
+        let role = if self.es_holding(&esi) {
+            VpwsRole::NonDesignated
+        } else {
+            vpws_role(mode, &cands, me, local_id)
+        };
         let (df, _backup) = elect_forwarders(&cands, local_id);
         (esi, role, df)
     }
@@ -16432,8 +16443,128 @@ impl Bgp {
         vtep_local: IpAddr,
         single_active: bool,
     ) {
+        // A segment inside its startup hold must not appear in the other
+        // PEs' candidate sets at all — see `es_arm_hold` for why suppressing
+        // the advertisement (rather than only deferring the local election)
+        // is what makes the hold safe. `es_hold_leave` re-originates.
+        if self.es_holding(&esi) {
+            return;
+        }
         self.evpn_originate_ethernet_seg(esi, vtep_local);
         self.evpn_originate_ethernet_ad_es(esi, vtep_local, single_active);
+    }
+
+    /// True while the segment carrying `esi` is inside its startup hold
+    /// (`ethernet-segment <name> df-election startup-delay`).
+    pub fn es_holding(&self, esi: &[u8; 10]) -> bool {
+        let now = Instant::now();
+        self.ethernet_segments
+            .values()
+            .any(|es| es.esi.as_ref() == Some(esi) && es.is_holding_at(now))
+    }
+
+    /// Put segment `name` into its startup hold, if one is configured and is
+    /// not already running: pull its ES routes off the wire, stand its VPWS
+    /// services down to P=0/B=0, and schedule the wake-up.
+    ///
+    /// Called when the segment is joined (its ESI set — on a reboot, when the
+    /// startup configuration is applied) and when the delay itself is
+    /// configured on a segment that already has an ESI, so the hold arms
+    /// whichever order a commit happens to apply the two leaves in.
+    ///
+    /// **Why suppress the advertisement.** Deferring only the *local*
+    /// election would deadlock: the other PEs would still see our Type-4,
+    /// still run the same deterministic election over the same candidate
+    /// set, and could hand the DF role to a PE that is refusing to forward.
+    /// Withholding the routes keeps us out of their candidate sets entirely,
+    /// so the incumbent DF simply keeps forwarding.
+    pub fn es_arm_hold(&mut self, name: &str) {
+        let Some(es) = self.ethernet_segments.get_mut(name) else {
+            return;
+        };
+        let Some(until) = es.arm_hold(Instant::now()) else {
+            return;
+        };
+        let (esi, delay) = (es.esi, es.startup_delay.unwrap_or(0));
+        // Already advertising (the delay was configured on a live segment, or
+        // this commit applied `esi` first): retract before the hold begins.
+        if let Some(esi) = esi {
+            self.evpn_withdraw_es_routes(esi, IpAddr::V4(self.router_id));
+            vpws_mark_df_dirty(&mut self.local_rib, &esi);
+            self.vpws_df_drain();
+        }
+        // One timer per hold. `Handle::try_current` rather than a bare
+        // `tokio::spawn` so a caller with no runtime — a unit test — gets a
+        // hold it can drive by hand instead of a panic. Nothing else would
+        // end the hold though, so say so loudly: a silently permanent hold
+        // is a blackholed segment.
+        match tokio::runtime::Handle::try_current() {
+            Ok(handle) => {
+                let tx = self.tx.clone();
+                let name = name.to_string();
+                handle.spawn(async move {
+                    tokio::time::sleep_until(tokio::time::Instant::from_std(until)).await;
+                    let _ = tx.send(Message::EsHoldExpired { name, until }).await;
+                });
+            }
+            Err(_) => tracing::warn!(
+                proto = "bgp",
+                category = "evpn",
+                segment = %name,
+                "bgp: no runtime to time the ethernet-segment startup hold; \
+                 it will only end when the delay is cleared",
+            ),
+        }
+        tracing::info!(
+            proto = "bgp",
+            category = "evpn",
+            segment = %name,
+            delay,
+            "bgp: ethernet-segment held out of DF election for {delay}s",
+        );
+    }
+
+    /// Wake-up for [`super::inst::Message::EsHoldExpired`]. The deadline is
+    /// the identity of the hold, so a timer that does not match the segment's
+    /// current one is stale — the hold was cleared, or the segment was
+    /// deleted and re-armed — and is ignored rather than ending a hold it
+    /// does not own.
+    pub fn es_hold_expired(&mut self, name: &str, until: Instant) {
+        if self
+            .ethernet_segments
+            .get(name)
+            .and_then(|es| es.hold_until)
+            != Some(until)
+        {
+            return;
+        }
+        self.es_hold_leave(name);
+    }
+
+    /// End segment `name`'s startup hold and rejoin its DF election: put the
+    /// ES routes back on the wire so the other PEs count this PE again, and
+    /// re-elect every VPWS service on the segment. Idempotent — a segment
+    /// that is not holding just re-originates.
+    pub fn es_hold_leave(&mut self, name: &str) {
+        let Some(es) = self.ethernet_segments.get_mut(name) else {
+            return;
+        };
+        es.hold_until = None;
+        let Some(esi) = es.esi else {
+            return;
+        };
+        let single_active = es.redundancy_mode.single_active();
+        self.evpn_originate_es_routes(esi, IpAddr::V4(self.router_id), single_active);
+        // Our own Type-4 rejoining the candidate set shifts every carving
+        // ordinal on the segment, so the services on it re-elect.
+        vpws_mark_df_dirty(&mut self.local_rib, &esi);
+        self.vpws_df_drain();
+        tracing::info!(
+            proto = "bgp",
+            category = "evpn",
+            segment = %name,
+            "bgp: ethernet-segment startup hold elapsed; joining DF election",
+        );
     }
 
     /// Withdraw the full set of ES routes (the inverse of
