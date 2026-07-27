@@ -9,6 +9,7 @@ with `evpn advertise-ipv4` to be advertised as an EVPN Type-5
 Using a two-namespace topology where z1 originates the prefix inside
 vrf-blue and z2 peers with z1 over the L2VPN/EVPN address family,
 imports the Type-5 route by matching route-target.
+
 This is the EVPN-encoded counterpart of the VPNv4 export feature: the
 same per-VRF state (RD, route-target, network) produces a Type-5 NLRI
 instead of a VPNv4 NLRI, exchanged over (AFI=25 / SAFI=70).

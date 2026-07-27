@@ -8,8 +8,10 @@ compute the split-horizon re-flood set per region — the control-plane
 primitive the (eBPF) BUM-replication dataplane consumes — so that BUM
 ingressing from one region is replicated only to VTEPs in the other regions,
 never back into the region it came from.
+
 This is the control-plane foundation for the Phase 6 eBPF gateway dataplane;
 no packet forwarding happens yet (the replication offload is a follow-up).
+
 Test Topology — region A (AS 65001) PE z1 and region B (AS 65002) PE z3 each
 own a VXLAN (VNI 10); the gateway z2 borders both and learns one VTEP per
 region.

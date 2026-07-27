@@ -10,12 +10,14 @@ End.X SIDs, SRH-inserted), so that when the primary link fails the
 source still reaches the destination — including BGP-carried SRv6
 service traffic between LAN segments behind the source and the
 destination.
+
 This is the SRv6 sibling of @isis_tilfa (same eight-router topology
 and metrics, IPv6-only). Differences from the SR-MPLS version:
 - every IS-IS circuit is `network-type point-to-point`;
 - `segment-routing srv6 locator LOCx` replaces `segment-routing
 - the TI-LFA repair resolves to an SRv6 SID list — End SID of the
 - s and d each have a stub LAN segment (a host namespace e1 / e2);
+
 The metrics are tuned so a simple LFA is impossible: s reaches d via
 s-n1 (cost 2); protecting the s-n1 link requires an SR repair tunnel
 through the r-plane rather than a plain loop-free alternate.

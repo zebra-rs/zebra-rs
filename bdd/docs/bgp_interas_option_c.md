@@ -8,6 +8,7 @@ for the PE loopbacks and hold no VPN state, while the PEs run a direct
 multihop MP-eBGP VPNv4 session whose next-hop (the remote PE loopback)
 is resolved across the AS boundary through the BGP-LU LSP, with SR-MPLS
 providing the intra-AS transport.
+
 This mirrors Cisco's "Configuration and Verification of L3 MPLS VPN
 Inter-AS Option C" (doc 200523), streamlined to one PE + one P + one
 ASBR per AS and a direct PE↔PE VPNv4 session (no route reflector — the

@@ -9,8 +9,10 @@ fleet of unnumbered peers shares one afi-safi definition — and a
 later change to the group (disable IPv4) takes effect at the next
 capability negotiation (`clear bgp`), exactly like the per-neighbor
 `afi-safi <name> enabled` knob.
+
 Configuration shape under test (flattened `neighbor-group` list —
 no `neighbor-groups` container level):
+
 Test Topology (point-to-point veth, link-local only — no global addrs,
 both routers in AS 65001, `remote-as internal` = iBGP):
 ```

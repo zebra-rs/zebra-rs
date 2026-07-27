@@ -6,6 +6,7 @@ As a network operator
 I want an IPv6 route that shows up while a BGP session is already
 Established to be advertised to that peer, so convergence does not
 depend on session resets.
+
 Regression guard: the incremental v6 advertise path
 (`route_advertise_to_peers_v6`) emits reach only through the
 per-update-group `cache_ipv6`, but `(Ip6, Unicast)` was never in
@@ -14,6 +15,7 @@ peer and the group lookup always missed — incremental v6 reach was
 silently dropped. Only the initial `route_sync_ipv6` dump at
 establishment delivered v6 routes, which is why every pre-existing
 feature (config applied before the session comes up) kept passing.
+
 Topology: one dual-stack point-to-point link, eBGP over the IPv4
 addresses with both ipv4 and ipv6 afi-safi negotiated, both sides
 redistributing connected. adv-interval is pinned to 1s. The route

@@ -8,6 +8,7 @@ cluster into one group, and peers whose signature differs land in
 separate groups. The runtime then shares attribute transform /
 outbound policy work across same-group members (Phase 2) and shares
 encoded UPDATE bytes across non-source members (Phase 3).
+
 This feature exercises grouping by **outbound policy name**, the
 primary signature differentiator under operator control. Three
 eBGP peers from z1: two share `out-shared`, one uses `out-different`.

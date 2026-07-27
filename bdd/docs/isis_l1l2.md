@@ -9,6 +9,7 @@ per circuit, maintains two independent Link State Databases, runs a
 separate SPF per level, and installs both Level-1 and Level-2 routes at
 the same time — while the two levels stay isolated (an L1 area's internal
 prefixes do not bleed into the L2 backbone, and vice versa).
+
 All links are point-to-point veth pairs (network-type point-to-point) and
 every router is dual-stack (IPv4 + IPv6). On router rI the interface
 toward rJ is named "iJ".
@@ -37,6 +38,7 @@ circuit-type level-1 (same area 49.0001 as r1/r2), and its circuit toward
 r4 (i4) is circuit-type level-2-only. r3's loopback is circuit-type
 level-1-2, so 10.0.0.3/2001:db8::3 is advertised into *both* the L1 LSP
 (reachable from the area) and the L2 LSP (reachable from the backbone).
+
 r5 is an L1-only router in the backbone area 49.0000, wired to r4 over a
 circuit-type level-1-2 link (r4 side) — an L1L2 circuit facing a
 single-level neighbor, which exercises the per-circuit P2P three-way
@@ -46,6 +48,7 @@ adjacency. The trailing scenarios promote r4 to level-1-2 (an L1 adjacency
 with r5 then forms and r4's L1 LSP floods to r5) and demote it again (r4
 purges that L1 LSP and r5 drops it) — exercising is-type-driven self-LSP
 origination and purge end-to-end across a real adjacency.
+
 Note on scope: zebra-rs builds each level's LSP only from prefixes whose
 circuit participates at that level — there is no automatic L1->L2 leaking
 and the ATT-bit / default-route mechanism is not implemented. So the L1

@@ -7,6 +7,7 @@ I want a locator's RFC 9800 REPLACE-C-SID format reflected in the
 advertised endpoint-behavior codepoints and SID structure, so SR
 source nodes can compress segment lists with 32-bit C-SIDs and the
 data planes agree on the wire format.
+
 z1's locator carries `behavior: replace` and `flavor: [psp, usd]`:
 its End SID must advertise as `End (REP, PSP, USD)` (IANA codepoint
 129, End with REPLACE-CSID, PSP & USD) and its End.X SID as

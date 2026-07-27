@@ -6,17 +6,20 @@ As a network operator
 I want zebra-rs policy-list entries to filter received routes by
 as-path-set, next-hop-set, MED comparison, and origin, so that
 inbound policy can express the same conditions as IOS-XR RPL.
+
 All four match types are exercised against an established eBGP session
 by swapping z2's input policy and asserting which advertised prefixes
 appear in z2's RIB. z1 attaches an outbound policy that stamps MED=100
 on every advertised route so MED match scenarios have something
 deterministic to compare against.
+
 Re-evaluation relies entirely on the policy-change trigger
 (PolicyRx -> soft-in): applying a config whose policy content changed
 re-runs the inbound policy over the Adj-RIB-In. Deliberately NO
 `I clear namespace ... neighbor` steps here — that step is an egress
 soft-clear (since PR #1318/#1320) and adds nothing to an inbound
 policy test; the apply trigger is the path under test.
+
 History: the MED scenarios were broken from the start — the configs
 used flat `med-eq:`/`med-ge:`/`med-le:` keys that do not exist in
 the schema (the YANG models a one-of `med: { eq | le | ge }`

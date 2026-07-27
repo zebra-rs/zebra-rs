@@ -7,6 +7,7 @@ I want two zebra-rs OSPFv3 routers joined by a point-to-point link to
 progress all the way to Full and synchronise their databases, so the
 OSPFv3 control plane is exercised router-to-router (not only against
 an external implementation).
+
 This is the v3 counterpart of `ospf_clear_neighbor` and guards the
 OSPFv3 half of the adjacency-formation fixes (Router-ID config applied
 per instance, `addr_add` re-firing InterfaceUp, and the DB-exchange
@@ -14,6 +15,7 @@ More-bit being cleared). Without those, two zebra-rs v3 routers share
 the default Router-ID 10.0.0.1 and/or stall in Exchange and never reach
 Full — a regression invisible to zebra-rs<->FRR validation and to CI
 (which does not run the BDD suite).
+
 Reaching Full in BOTH directions is the proof: it requires the master
 (higher Router-ID, o2) and the slave (o1) to complete ExStart ->
 Exchange -> Loading -> Full, which only happens when all three fixes

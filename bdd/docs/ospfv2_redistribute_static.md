@@ -8,6 +8,7 @@ AS-External LSA for every static route in the RIB — with the E-bit
 set in the Router-LSA so the domain computes paths to the ASBR — so
 that statically routed prefixes are reachable OSPF-wide without
 per-area configuration.
+
 Two routers on a point-to-point link. b carries a static route and
 redistributes it; a must install the prefix as an external route.
 

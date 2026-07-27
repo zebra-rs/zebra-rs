@@ -27,6 +27,7 @@ listener, and z2's racing dial toward z1:179 is refused) and z2 is
 passive toward z1. The only session that can exist is the one z1
 opened toward 1790. z1 originates 10.10.0.1/32 to prove routes flow
 over it.
+
 z2—z3 exercises `port 0` on the accept side: z3 starts with
 `port: 0` (no listener) and is passive toward z2, so z2's dials to
 z3:179 are refused and the session must stay down. Re-configuring z3
@@ -34,6 +35,7 @@ to `port: 179` reopens the listener at runtime; a `clear` on z2 then
 redials immediately (a refused connect otherwise parks the peer on
 the 120s connect-retry timer) and the session establishes — the
 close-and-reopen path of a runtime port change.
+
 Config application order matters once: z3's `port: 0` is applied
 before z2's config exists, so z2 never catches the small window
 between z3's daemon start (default listener on 179) and the apply.

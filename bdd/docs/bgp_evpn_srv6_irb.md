@@ -8,15 +8,18 @@ I want `advertise-all-vni` + `encapsulation srv6` (L2) and a VRF with
 `encapsulation srv6` + `evpn advertise-ipv4/ipv6` (L3) to run together
 on one box, each carving its own SIDs from the one locator, so that the
 bridged and routed halves of a tenant are not mutually exclusive.
+
 Every other EVPN-over-SRv6 feature exercises exactly one of the two —
 bgp_evpn_srv6_macip is L2 only, bgp_evpn_srv6_type5 is L3 only. Both
 allocators draw from the same per-instance SID pool against the same
 locator, so coexistence is precisely where an allocator collision or a
 reconcile that evicts the other service's SIDs would hide — and it was
 the one shape untested.
+
 Control-plane scope for the L2 half (End.DT2U/DT2M forward only through
 the cradle tee, which is out of scope here); the L3 half forwards on the
 kernel End.DT46 datapath and is asserted as an installed VRF route.
+
 ```
 ```
 

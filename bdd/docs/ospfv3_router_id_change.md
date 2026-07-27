@@ -6,6 +6,7 @@ As a network operator
 I want zebra-rs to withdraw the LSAs advertised under an OSPFv3 instance's
 old Router-ID when that Router-ID changes on a running adjacency, so a
 stale identity does not linger in every router's database until MaxAge.
+
 Two OSPFv3 routers on a point-to-point link. OSPFv3 keys a neighbour by
 Router-ID (RFC 5340 §10), so when o1's Router-ID changes o2 naturally
 forms a fresh neighbour and the old one ages out on its dead timer. The

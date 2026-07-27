@@ -6,15 +6,20 @@ As a network operator running a global backbone (inspired by the Graphiant
 backbone topology), I want IS-IS Flex-Algo (RFC 9350) to confine traffic to
 specific regional sub-topologies so that data-sovereignty and compliance
 policies (HIPAA, GDPR) are enforced at the routing layer.
+
 Five zebra-rs instances form a two-region backbone.  Each link is tagged
 with one or more affinity names from the global /affinity-map table.
 Two custom algorithms restrict the SPF graph by excluding non-compliant
 link colors:
+
 The FAD (Flex-Algorithm Definition) for both algorithms is originated by
 the Chicago (ch) router; every other router participates without
 advertising a FAD.
+
 Topology (all links point-to-point; default metric 10):
+
 Affinity map:
+
 Per-algo prefix-SIDs (SRGB base 16000):
 
 ## Config Files

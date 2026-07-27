@@ -8,8 +8,11 @@ SRv6 (RFC 9352 §7.1): every node advertises a distinct per-algorithm
 SRv6 locator, so reaching a node "in algo N" is plain longest-prefix
 IPv6 to that node's algo-N locator computed over the algo-N constrained
 topology — no per-prefix SID is pushed for transit.
+
 Topology (all links point-to-point; default metric 10):
+
 Per-node SRv6 locators (/48):
+
 The FAD for both algorithms is originated by ch; every other router
 participates without advertising a FAD.
 

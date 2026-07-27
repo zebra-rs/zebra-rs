@@ -7,6 +7,7 @@ I want `router bgp timer adv-interval ibgp 0` to disable the MRAI
 debounce without stalling advertisement
 Using a two-namespace iBGP topology over IPv6 transport that carries
 IPv6 unicast and VPNv6, both with adv-interval 0.
+
 IPv6 counterpart of @bgp_adv_interval_zero. Regression guard for the
 adv-interval-0 fast-flush path (a 0-second MRAI arms a ~1 ms next-tick
 debounce timer instead of the old 1 s-clamped one): each family's

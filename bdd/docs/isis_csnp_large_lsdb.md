@@ -13,6 +13,7 @@ entry was still emitted, so the receiver mis-framed the CSNP/PSNP and
 the DIS-driven database synchronisation was corrupt on the wire. The
 fix caps each LspEntries TLV at MAX_ENTRIES (15); larger LSDBs simply
 span more CSNP/PSNP PDUs.
+
 This is hard to trigger with a router-per-LSP topology (16+ daemons),
 so instead z1 is given a tight lsp-mtu-size and ~600 IPv4 networks: its
 self-LSP fragments into ~15-20 LSP fragments, each a distinct LSP in

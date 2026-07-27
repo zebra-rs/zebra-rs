@@ -7,6 +7,7 @@ I want `clear ospf neighbor [<router-id>]` to tear an OSPFv2
 adjacency down so it re-forms from scratch — exactly like a
 dead-timer timeout — so I can force a fresh database exchange on
 demand without restarting the daemon.
+
 Two zebra-rs routers, o1 and o2, are joined by one point-to-point
 link and each advertise a /32 loopback into area 0.0.0.0. Once the
 adjacency is Full and the loopbacks are mutually reachable, clearing

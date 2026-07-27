@@ -42,6 +42,7 @@ CORE-side F-TEID (endpoint 10.9.0.1 / TEID 0x87654321), Network Instance
 `internet`. The Type-1 ST carries the access endpoint, the Type-2 ST the
 core endpoint (draft §3.3.7 / §3.3.10 — they are distinct), and z1
 advertises BOTH to z2.
+
 NOTE: this feature runs `pfcp-inject` inside z1, so the `pfcp-inject`
 binary (`tools/pfcp-inject`) must be on the BDD host PATH — build with
 `cargo build --release -p pfcp-inject` and copy `target/release/pfcp-inject`

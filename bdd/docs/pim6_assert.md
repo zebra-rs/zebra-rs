@@ -8,10 +8,12 @@ assert winner, routers sharing an upstream LAN to suppress each other's
 periodic Joins, and a Prune overheard on a LAN to be overridden by
 routers that still want the traffic — the RFC 7761 multi-access
 behaviors that keep exactly one copy of each packet on every LAN.
+
 r1 and r2 both connect the upstream LAN swA (toward r0 and the source)
 and the contested LAN swB. They must forward the same (S,G) onto swB by
 two independent mechanisms — so that DR gating cannot collapse the test
 to a single forwarder:
+
 Both forward onto swB and the duplicate data triggers the assert. The
 IPv6 assert tiebreak is the link-local source (non-deterministic on
 veths), so the winner is made deterministic by RPF cost instead: r2's

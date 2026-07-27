@@ -9,6 +9,7 @@ So that inbound and outbound route policy works on a per-VRF CE
 neighbor exactly as it does on a global neighbor — through the
 per-VRF policy-actor plumbing (`bgp-vrf:<name>` proto,
 `peer_policy_ident`), not just at the global scope.
+
 One scenario per binding. CE1 advertises 10.0.1.1..5/32 into vrf-cust.
 PE1's inbound filters on the CE1 neighbor drop .2 (prefix-set-in, a
 permit-list omitting it) and .3 (policy-in). PE1 re-advertises the VRF

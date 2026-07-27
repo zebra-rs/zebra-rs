@@ -10,6 +10,7 @@ End.X SIDs, SRH-inserted), so that when the primary link fails the
 source still reaches the destination — including BGP-carried SRv6
 service traffic between LAN segments behind the source and the
 destination.
+
 This is the classic-SID sibling of @tilfa_srv6 (same eight-router
 topology, metrics and addressing). The only configuration difference
 is the locator: `behavior usid` is omitted, so every router's
@@ -19,6 +20,7 @@ format. Observable consequences this feature pins:
 - `show segment-routing srv6 sid` lists the node SID as `End` and
 - the End SID is the locator network address installed as a /128
 - everything else is unchanged: the repair is still an SRH
+
 The metrics are tuned so a simple LFA is impossible: s reaches d via
 s-n1 (cost 2); protecting the s-n1 link requires an SR repair tunnel
 through the r-plane rather than a plain loop-free alternate.

@@ -7,6 +7,7 @@ I want `router bgp afi-safi ipv4 table-map <policy>` to filter and
 rewrite BGP best paths at the point they are installed into the
 kernel RIB, while the BGP table itself (and what peers are
 advertised) stays complete — FRR's table-map semantics.
+
 The exercise: z1 advertises three prefixes. z2 binds table-map TMAP:
 entry 10 denies 1.1.1.1/32, entry 20 permits 2.2.2.2/32 with
 `set med 50` (MED lands in the kernel route metric), entry 30

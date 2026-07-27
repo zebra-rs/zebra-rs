@@ -6,6 +6,7 @@ As a network operator
 I want a locator bound to a VRF (`vrf` leaf) to advertise its node
 SID as End.T — or uT for a uSID locator — so receivers know the End
 walk's egress lookup happens in the bound table (RFC 8986 §4.3).
+
 z1's classic locator carries `vrf: vrf-one` and `flavor: [psp]`: its
 End SID must advertise as `End.T (PSP)` (IANA codepoint 10). z2's
 uSID locator carries `vrf: vrf-two`: its node SID advertises as `uT`

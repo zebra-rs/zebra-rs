@@ -9,6 +9,7 @@ area, and install dual-stack (IPv4 + IPv6) routes to every loopback,
 so that traffic follows the expected primary path, falls back out a
 different interface when the primary link drops, and load-shares across
 the two deliberate equal-cost (ECMP) diamonds.
+
 All links are point-to-point veth pairs (network-type point-to-point);
 every router is is-type level-1 in area 49.0001. On router zI the
 interface toward zJ is named "iJ".

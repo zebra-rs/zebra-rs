@@ -6,6 +6,7 @@ As a network operator
 I want a peer that only references a neighbor-group (no per-peer remote-as)
 to inherit the group's remote-as, establish a session, and react to
 later changes to the group's remote-as.
+
 This exercises the runtime path landed in PRs #758 (static-peer
 resolver), #760 (reactive sweep on group remote-as Set/Delete), and
 #762 (group-level delete cascade) through the full YAML/YANG/CLI

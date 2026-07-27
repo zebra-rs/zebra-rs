@@ -7,6 +7,7 @@ I want zebra-rs to act as an OSPFv2 Area Border Router — originating a
 per-area Router-LSA and Type-3 Summary-LSAs — so that hosts in different
 non-backbone areas learn each other's prefixes through the backbone and
 are mutually reachable, with paths chosen by configured interface cost.
+
 Six routers in three areas. The backbone (area 0.0.0.0) holds a, b, c, d
 fully meshed-ish; a and c are the ABRs, each anchoring one non-backbone
 area. Area 0.0.0.1 hangs off a (internal router e); area 0.0.0.2 hangs
@@ -47,6 +48,7 @@ the direct link only ever shows up as an equal-cost path at metric 20 —
 had cost stayed at the default 10 the direct link would win outright at
 10. That metric is the deterministic proof the configured cost took
 effect.
+
 Inter-area reachability between e (area 1) and f (area 2) is the headline:
 it can only work if a and c each originate Type-3 summaries — a's of
 area 1 into the backbone, c re-advertising them into area 2, and the

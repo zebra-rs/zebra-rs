@@ -32,6 +32,7 @@ z1 (VRF N6, rd 65501:10, `segment interwork prefix 10.0.0.0/24`, export RT
 from a PFCP session on NI `access`, originates an ST1 (UE 10.60.1.5, gNB
 endpoint 10.0.0.1 inside 10.0.0.0/24). z2 resolves the ST1's endpoint to
 z1's segment and installs the UE-prefix encap.
+
 NOTE: needs `pfcp-inject` on the BDD host PATH and root netns (kernel VRF +
 seg6 + IS-IS SRv6 underlay).
 

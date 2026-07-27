@@ -25,6 +25,7 @@ exchange routes in both directions (regression pin for PR #2044, where
 the materialized peer was left in Idle and every connection was
 dropped). z3 runs the same client config from 192.168.1.3 — outside
 the range — and must be refused at accept time with no peer state.
+
 `listen-limit` is 1 on the DUT, so every re-establishment below also
 proves the freed slot was actually returned — a leaked slot saturates
 the cap and the client can never reconnect.

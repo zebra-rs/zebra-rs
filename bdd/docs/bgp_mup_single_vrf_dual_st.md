@@ -40,6 +40,7 @@ an ACCESS-side F-TEID (gNB endpoint 10.0.0.1 / TEID 0x12345678) and a
 CORE-side F-TEID (endpoint 10.9.0.1 / TEID 0x87654321), Network Instance
 `internet`. z1 originates BOTH Session-Transformed routes from the one
 VRF — both under rd 65000:1 — and advertises them to z2.
+
 NOTE: this feature runs `pfcp-inject` inside z1, so the `pfcp-inject`
 binary (`tools/pfcp-inject`) must be on the BDD host PATH — build with
 `cargo build --release -p pfcp-inject` and copy `target/release/pfcp-inject`

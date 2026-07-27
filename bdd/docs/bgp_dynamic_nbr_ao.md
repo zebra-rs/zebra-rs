@@ -19,6 +19,7 @@ So unconfigured sources cannot open a session just by being in the prefix.
 ## Notes
 
 Requires Linux kernel >= 6.7 on both peers.
+
 The DUT (z1) has no static neighbors: z2 arrives through the
 listen-range and inherits SENDERS, which carries the tcp-ao
 key-chain. Like the MD5 case, the MKT must be scoped to the whole

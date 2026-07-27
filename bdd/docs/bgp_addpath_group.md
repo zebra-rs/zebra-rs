@@ -6,6 +6,7 @@ As a network operator
 I want a BGP speaker with two paths for one prefix to advertise BOTH
 of them — each carrying its own path identifier — to a neighbor that
 negotiated AddPath, instead of the single best path.
+
 This is the first end-to-end AddPath wire test in the suite: it
 exercises the per-candidate advertise twin
 (`route_advertise_to_addpath`), the AddPath-Send membership split,

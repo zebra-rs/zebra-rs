@@ -7,6 +7,7 @@ I want a full [C]-[CE]-[PE]-[P]-[PE]-[CE]-[C] topology where both the
 C-CE and PE-CE segments run OSPFv3 and the PE does two-way
 redistribution (OSPFv3<->VPNv6 over SRv6 End.DT46), so that C1 and C2
 can reach each other's IPv6 loopback across the SRv6 core.
+
 The PE runs the global IS-IS SRv6 core plus a per-VRF OSPFv3 to the CE.
 Up: `router bgp vrf ... redistribute ospf` -> VPNv6. Down: `router
 ospfv3 vrf ... redistribute bgp` -> the VPNv6 routes imported into the

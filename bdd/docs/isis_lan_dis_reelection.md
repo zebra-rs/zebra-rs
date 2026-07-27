@@ -3,10 +3,12 @@
 ## Overview
 
 Regression for a DIS-election convergence bug on a broadcast LAN.
+
 Three L2 routers (a1, a2, a3) share one LAN (br0), loopbacks
 10.0.0.{1,2,3}/32. a3 starts as DIS (LAN priority 100; a1/a2 at the
 default 64). Raising a1's LAN priority to 200 must move the DIS to a1 on
 *every* speaker while full loopback reachability is preserved.
+
 The bug: a non-DIS bystander (a2) that switched its elected DIS from a3
 to a1 while staying a non-DIS member (DisStatus Other -> Other) never
 re-registered its pseudonode adjacency — the adjacency update was gated

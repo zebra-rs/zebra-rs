@@ -8,7 +8,9 @@ authenticate the per-VRF CE session
 So that a matching key establishes and a wrong key is actually rejected
 — proving the per-VRF neighbor keys the connect socket AND the VRF's own
 listener, not that auth is silently ignored.
+
 One matching + one mismatching CE per knob:
+
 The matching cases exercise both auth directions (PE-initiated dial via
 the VRF-bound connect socket AND CE-initiated dial via the VRF listener);
 the mismatching cases are the regression guard that a bad key can't slip

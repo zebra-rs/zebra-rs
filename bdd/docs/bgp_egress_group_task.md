@@ -8,7 +8,9 @@ ZEBRA_BGP_EGRESS_GROUP_TASK=1 the v4-unicast egress runs in one task per
 update group (M tasks, not N peers): the task owns the group adj_out,
 encodes each best path once, and fans the bytes to its member peers,
 excluding the path's source (split-horizon).
+
 This feature exercises the gate-on egress matrix through the group task:
+
 z3 and z4 share one update group (same eBGP egress identity; remote-AS is
 not part of the signature). z2 is the device under test, started with the
 egress group task.

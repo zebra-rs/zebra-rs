@@ -7,6 +7,7 @@ I want a full [C]-[CE]-[PE]-[P]-[PE]-[CE]-[C] topology where both the
 C-CE and PE-CE segments run IS-IS and the PE does two-way
 redistribution (IS-IS<->VPNv4), so that C1 and C2 can reach each
 other's loopback across the MPLS/VPN core.
+
 The PE runs two IS-IS instances: the GLOBAL core (IS-IS L2 + SR-MPLS)
 and a per-VRF IS-IS (vrf-cust) toward the CE. Up: `router bgp vrf ...
 redistribute isis` -> VPNv4. Down: `router isis vrf ... redistribute

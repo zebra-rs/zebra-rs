@@ -570,7 +570,22 @@ open:
 FEATURE_FILES := $(wildcard tests/features/*.feature)
 DOC_FILES     := $(patsubst tests/features/%.feature,docs/%.md,$(FEATURE_FILES))
 
+# Every page under docs/ is generated from a feature, so a page with
+# no feature behind it is stale: `make docs` can neither refresh it nor
+# notice it has gone wrong. Fail rather than leave one sitting there
+# looking as maintained as the rest.
 docs: $(DOC_FILES)
+	@orphans=$$(for d in docs/*.md; do \
+	    [ -e "$$d" ] || continue; \
+	    b=$$(basename "$$d" .md); \
+	    [ -f "tests/features/$$b.feature" ] || echo "  $$d"; \
+	done); \
+	if [ -n "$$orphans" ]; then \
+	    echo "error: docs/ pages with no tests/features/<name>.feature:"; \
+	    echo "$$orphans"; \
+	    echo "delete them, or restore the feature they document."; \
+	    exit 1; \
+	fi
 
 docs/%.md: tests/features/%.feature docs/feature2md.sh FORCE
 	docs/feature2md.sh $< $@

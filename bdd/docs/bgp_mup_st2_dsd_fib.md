@@ -31,6 +31,7 @@ z1 (VRF N6, rd 65501:10, `segment direct` + `route st2`, export RT
 a PFCP session on NI `core`, an ST2 (endpoint 10.0.0.1, id 1:2). z2 (VRF
 N6, rd 65501:20, `encapsulation srv6`, import RT 65501:10) imports both,
 resolves the ST2 to z1's Direct segment, and installs the endpoint encap.
+
 NOTE: needs `pfcp-inject` on the BDD host PATH and root netns (kernel VRF +
 seg6 + IS-IS SRv6 underlay).
 

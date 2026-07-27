@@ -7,6 +7,7 @@ I want a full [C]-[CE]-[PE]-[P]-[PE]-[CE]-[C] topology where the PE-CE
 and C-CE segments are statically routed and the PE redistributes the
 customer static route into VPNv4, so that C1 and C2 can reach each
 other's loopback across the MPLS/VPN core.
+
 Test Topology (7 namespaces) — same core as @l3vpn_bgp_v4; the customer
 side is static instead of eBGP:
 ```

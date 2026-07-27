@@ -7,6 +7,7 @@ I want a Regional Border Router to aggregate a region's per-PE Inclusive
 Multicast (Type-3) routes into a single Per-Region I-PMSI (Type-9) route,
 re-originated into the other region with next-hop-self, while not leaking
 the per-PE IMET across the region boundary.
+
 Test Topology — three iBGP (AS 65001) speakers on a shared bridge. z2 is the
 Regional Border Router; its neighbor-groups carry the region-id of each
 bordered region. z1 (region A) originates a Type-3 IMET; z3 (region B) only

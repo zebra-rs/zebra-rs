@@ -7,10 +7,12 @@ links, I want a configured `interface-neighbor` to appear in
 `show bgp summary` (as Idle) even when the remote node has never been
 reachable, so that mis-cabled or not-yet-deployed neighbors are
 diagnosable from the summary instead of silently absent.
+
 Interface-keyed peers are normally materialized only when the
 remote's Router Advertisement surfaces its link-local. This feature
 pins the dormant-materialization path: config + link knowledge alone
 must create the operator-visible peer (FRR behaves the same way).
+
 Test Topology (point-to-point veth; z2 exists only to hold the other
 veth end — it never runs zebra-rs, so z1 never sees an RA):
 ```

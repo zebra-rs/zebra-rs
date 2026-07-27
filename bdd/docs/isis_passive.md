@@ -6,8 +6,11 @@ As a network operator
 I want IS-IS to advertise a loopback / stub prefix without running the
 Hello protocol on it, and I never want a router to form an adjacency with
 itself when its own Hellos loop back to it.
+
 Two independent guarantees are exercised here:
+
 1. A loopback is implicitly passive, and an explicitly `passive` interface
+
 2. The self-sourced-IIH guard: if an IIH arrives carrying this router's own
 
 ## Test Topology
@@ -35,6 +38,7 @@ two ends of one veth pair in the same namespace) to force its own Hellos
 back at it, exercising the self-sourced-IIH guard. Every router also runs
 IS-IS on its loopback (network-type defaults to LAN, the configuration that
 used to make a router peer with itself over `lo`).
+
 All routers are level-2-only.
 
 ## Test Scenarios

@@ -10,9 +10,11 @@ identically to the traditional NLRI and Withdrawn Routes fields, because
 RFC 4760 senders such as xk6-bgp encode it that way while zebra-rs, FRR
 and GoBGP use the traditional fields — so only a scripted speaker can
 produce these shapes.
+
 Both directions were broken, and both failure modes are covered here:
 - MP_REACH (fixed by PR #2045): the UPDATE was accepted without error but
 - MP_UNREACH: AFI=1/SAFI=1 had no arm in the parser at all, so the whole
+
 The scripted speaker also sends a decoy NEXT_HOP attribute; per RFC 4760
 the next-hop inside MP_REACH supersedes it, which the next-hop assertions
 pin down.

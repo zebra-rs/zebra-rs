@@ -7,6 +7,7 @@ I want `router pim vrf <name> ipv6` to run a full per-VRF PIMv6
 instance — sockets bound into the VRF, the kernel MRT6 table selected
 with MRT6_TABLE, MLD and Join/Prune state scoped to the VRF — so IPv6
 multicast in one VRF neither sees nor disturbs the default table.
+
 Same shape as the pim6_ssm feature, but every router interface is
 enslaved to VRF mvrf and all PIMv6/MLD config lives under
 `router pim vrf mvrf ipv6`. The parent's per-VRF Pim<Ipv4> child spawns

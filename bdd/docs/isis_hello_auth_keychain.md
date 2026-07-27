@@ -7,6 +7,7 @@ I want to authenticate IS-IS Hello (IIH) PDUs on a point-to-point link
 by referencing a named key-chain (RFC 8177) instead of an inline
 password, and confirm that two zebra-rs routers sharing the same chain
 form a Level-1 adjacency and exchange dual-stack routes.
+
 When an interface's `hello-authentication` carries a `key-chain` leaf
 (and no inline `password`), the chain's active key is self-describing:
 it supplies the algorithm (from `crypto-algorithm`), the RFC 5310 Key

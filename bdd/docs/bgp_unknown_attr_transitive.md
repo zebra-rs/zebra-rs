@@ -23,6 +23,7 @@ z1 originates 10.0.0.1/32. The debug knob `attach-unknown-attribute`
 on z1's session toward z2 stamps a synthetic unrecognized path
 attribute onto that route. Neither z2 nor z3 recognize the Type Code,
 so they exercise the receiver-side RFC 4271 §9 rules:
+
   * Optional Transitive (flags 0xC0) → z2 accepts it, sets the Partial
     bit, retains it, and re-advertises to z3 (which also keeps it,
     Partial still set).

@@ -8,6 +8,7 @@ static` to originate AS-External (Type-5, 0x4005) LSAs for the
 matching IPv6 routes — previously only `redistribute bgp` existed at
 the v3 instance level — so that non-OSPF prefixes are reachable
 OSPFv3-wide.
+
 Two routers on a point-to-point link. b redistributes both a
 connected prefix (a dummy interface outside OSPF) and a static
 route; a must install both as external routes.

@@ -8,6 +8,7 @@ build an (S,G) shortest-path tree back to the first-hop router and
 program the kernel multicast forwarding cache on both, so real
 traffic from the source reaches the receiver — the first complete
 PIM-SM/SSM control-plane-to-dataplane slice.
+
 h1 sends UDP to the SSM group 232.1.1.1. h2 issues a source-specific
 join for (10.1.14.2, 232.1.1.1). r2 (LHR) must translate the IGMPv3
 membership into a PIM (S,G) Join toward r1 (RPF via a static route),

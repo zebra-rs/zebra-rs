@@ -8,6 +8,7 @@ Type-4 Ethernet Segment route (carrying the auto-derived ES-Import RT and a
 DF Election EC) and to discover the other PEs on the same ES, so the
 control-plane foundation for DF election and all-active multihoming is in
 place. (DF election itself and the data plane are later phases.)
+
 Test Topology — two iBGP (AS 65001) EVPN speakers on a shared transport
 bridge br0, both configured with the SAME Ethernet Segment es1 / ESI (the
 defining property of an ES — the shared CE looks identical to both PEs):

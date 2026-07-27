@@ -9,6 +9,7 @@ capability (SAFI 85, draft-ietf-bess-mup-safi) for BOTH IPv4-MUP (AFI 1) and IPv
 bring an iBGP session to Established, so the foundation for MUP route
 exchange (ISD / DSD / ST1 / ST2) is validated before origination is
 implemented.
+
 No MUP routes flow in this scenario — capability negotiation is the unit
 under test. zebra-rs cannot originate MUP routes yet (controller phase),
 so route exchange is exercised in a later feature once a peer can emit

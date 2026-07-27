@@ -9,6 +9,7 @@ and IPv6-MUP) on an already-Established neighbor has no effect until the
 session renegotiates. zebra-rs therefore bounces the session on the
 change — the same teardown `clear bgp ... hard` uses — so the new MUP
 capability is advertised and received without an operator clear.
+
 This regressed silently before: the config was recorded but the live
 session was never bounced, so `show bgp neighbor` kept showing the old
 capability set (no MUP).

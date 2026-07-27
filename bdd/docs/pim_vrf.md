@@ -7,6 +7,7 @@ I want `router pim vrf <name>` to run a full per-VRF PIM instance —
 sockets bound into the VRF, the kernel multicast table selected
 with MRT_TABLE, IGMP and Join/Prune state scoped to the VRF — so
 multicast in one VRF neither sees nor disturbs the default table.
+
 Same shape as the pim_ssm feature, but every router interface is
 enslaved to VRF mvrf and all PIM/IGMP config lives under
 `router pim vrf mvrf`. The default PIM instance runs with no

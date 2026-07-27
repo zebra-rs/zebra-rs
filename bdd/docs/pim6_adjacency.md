@@ -9,6 +9,7 @@ each other through link-local-sourced Hellos, so the PIMv6 transport
 pinning and the pseudo-header checksum) and the address-family split
 (`router pim ipv6` spawning a default-table Pim<Ipv6>) are exercised
 router-to-router.
+
 PIMv6 Hellos are sourced from the interface link-local (fe80::/10,
 RFC 7761 §4.3.1), so each router learns the peer as a link-local
 neighbor.

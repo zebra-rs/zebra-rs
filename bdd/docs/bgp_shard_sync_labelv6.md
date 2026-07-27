@@ -11,8 +11,10 @@ Loc-RIB to a newly-established peer and must register each prefix in
 `adj_out.v6lu`, otherwise the event-driven LU withdraw's gate skips that
 peer and the route gets stuck. (This is native LU-v6 over an IPv6
 session; the next-hop-self is the v6 session local address.)
+
 z2 is the sharded device under test (4 shards) and transit between
 z1 (origin) and two downstream peers:
+
 `show bgp labeled-unicast` renders both the v4lu and v6lu Loc-RIBs, so
 the v6 LU prefixes appear there.
 

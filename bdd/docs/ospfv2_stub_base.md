@@ -7,6 +7,7 @@ I want zebra-rs to support OSPFv2 stub areas — E-bit adjacency
 negotiation, AS-External (Type-5) LSAs excluded from the area, and
 inter-area Type-3 summaries still flooded in — so that a stub router
 learns inter-area destinations but is shielded from the external LSDB.
+
 Three routers, two areas. The backbone (0.0.0.0) holds the ABR a and
 the ASBR b; the stub (0.0.0.1) holds the internal router c hanging
 off a.

@@ -35,6 +35,7 @@ VRF `mobile-up` matching Network Instance `access`). `pfcp-inject` plays
 the SMF: it sends an Association Setup + Session Establishment for UE
 192.0.2.5 (Network Instance `access`), so z1 originates the ST1 route and
 advertises it to z2.
+
 NOTE: this feature runs `pfcp-inject` inside z1, so the `pfcp-inject`
 binary (the test-only SMF simulator, `tools/pfcp-inject`) must be on the
 BDD host PATH — build with `cargo build --release -p pfcp-inject` and

@@ -6,6 +6,7 @@ As a network operator
 I want a BGP speaker with two paths for one IPv6 prefix to advertise
 BOTH of them — each with its own path identifier — to a neighbor that
 negotiated AddPath, instead of only the best path.
+
 The IPv6-unicast twin of @bgp_addpath_ipv4. It exercises the
 IPv6-specific AddPath path: the per-candidate fan-out bucketed into
 the update-group cache (`flush_ipv6`) and the `adj_out.v6` path-id

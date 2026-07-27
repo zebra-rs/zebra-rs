@@ -7,6 +7,7 @@ I want the iBGP-only path attributes — ORIGINATOR_ID, CLUSTER_LIST and
 LOCAL_PREF — to stay inside the AS
 So that an iBGP-learned route re-advertised to an eBGP peer does not leak
 attributes that have meaning only within the local AS.
+
 RFC 4456 §8 defines ORIGINATOR_ID (type 9) and CLUSTER_LIST (type 10) as
 optional NON-TRANSITIVE attributes that carry meaning only within the
 local AS (the originating router-id and the intra-AS reflection path).

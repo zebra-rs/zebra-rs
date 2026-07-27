@@ -7,6 +7,7 @@ I want a source PE to advertise a selective per-(S,G) provider tunnel (Type-10
 S-PMSI) for a snooped multicast flow, and a Regional Border Router to re-root
 that selective tunnel per-region — the selective counterpart of the inclusive
 Per-Region I-PMSI (Type-9) aggregation.
+
 Test Topology — z1 is a source PE in region A with an IGMP-snooping bridge; a
 snooped (*,239.1.1.1) membership makes it originate a Type-10 S-PMSI. z2 is
 the RBR (region A iBGP / region B eBGP); z3 is a PE in region B.
