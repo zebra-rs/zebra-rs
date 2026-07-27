@@ -666,6 +666,10 @@ pub(super) fn insert_started_peer(
         vrf.tx.clone(),
         vrf.ctx.clone(),
     );
+    // Liveness timers (keepalive / hold) must ride this VRF task's
+    // priority lane, not the `tx` lane a CE ingest burst backs up —
+    // the per-VRF mirror of the global instance's `ptx` wiring.
+    peer.ptx = vrf.ptx.clone();
     // `Peer::new` defaults `peer_type` to IBGP and, unlike the global
     // `config_remote_as` path, nothing else recomputes it for a VRF
     // peer — so derive it here from the AS comparison. Without this a
