@@ -870,6 +870,15 @@ pub struct Bgp {
     /// Bounded channel for BGP events (capacity: 8192)
     pub tx: mpsc::Sender<Message>,
     pub rx: mpsc::Receiver<Message>,
+    /// Priority lane for session-liveness events (keepalive / hold
+    /// timer fires). During a heavy ingest burst `rx` backs up with
+    /// thousands of queued UPDATEs; timer events queued behind them
+    /// would not be serviced for minutes and every quiet-but-alive
+    /// session would die of hold-timer expiry on the remote side.
+    /// The event loop drains this lane at the top of every turn, so
+    /// timer latency is bounded by one `process_msg` call.
+    pub ptx: mpsc::Sender<Message>,
+    pub prx: mpsc::Receiver<Message>,
     /// Unbounded self-signal for the resumable IPv4 sync cursor (Tier
     /// 1a). Dedicated + unbounded so a continuation tick can never be
     /// dropped on a full `tx`; carries the peer `ident`. Idle (never
@@ -1251,6 +1260,9 @@ impl Bgp {
         let _ = policy_tx.send(msg);
 
         let (tx, rx) = mpsc::channel(8192);
+        // Liveness-timer traffic is tiny (a few events per peer per
+        // keepalive interval); 1024 absorbs any realistic burst.
+        let (ptx, prx) = mpsc::channel(1024);
         let (sync_tick_tx, sync_tick_rx) = mpsc::unbounded_channel();
         let (bfd_event_tx, bfd_event_rx) = mpsc::unbounded_channel();
         // Fan-in channel: every per-VRF task gets a clone of
@@ -1309,6 +1321,8 @@ impl Bgp {
             bfd: PeerBfdConfig::default(),
             tx,
             rx,
+            ptx,
+            prx,
             sync_tick_tx,
             sync_tick_rx,
             local_rib: LocalRib::default(),
@@ -5725,7 +5739,18 @@ impl Bgp {
         //     self.peers.len()
         // );
         loop {
+            // Priority lane first: keepalive / hold timer events must
+            // not queue behind an ingest backlog on `rx` (see the
+            // `ptx` field docs). `try_recv` keeps this non-blocking;
+            // the select below still has a `prx` arm so a lone timer
+            // event wakes the loop when everything else is idle.
+            while let Ok(msg) = self.prx.try_recv() {
+                self.process_msg(msg);
+            }
             tokio::select! {
+                Some(msg) = self.prx.recv() => {
+                    self.process_msg(msg);
+                }
                 Some(msg) = self.rib_rx.recv() => {
                     self.process_rib_msg(msg);
                 }

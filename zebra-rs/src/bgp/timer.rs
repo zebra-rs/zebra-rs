@@ -84,10 +84,14 @@ impl Config {
     }
 }
 
+// `$chan` names the Peer channel field the fire lands on: `tx` (the
+// normal event lane) or `ptx` (the priority lane drained ahead of the
+// ingest backlog — reserved for the keepalive / hold timers, whose
+// delayed servicing kills established sessions).
 macro_rules! start_timer {
-    ($peer:expr, $time:expr, $ev:expr) => {{
+    ($peer:expr, $chan:ident, $time:expr, $ev:expr) => {{
         let ident = $peer.ident;
-        let tx = $peer.tx.clone();
+        let tx = $peer.$chan.clone();
 
         Timer::once($time, move || {
             let tx = tx.clone();
@@ -125,9 +129,9 @@ macro_rules! start_adv_timer {
 }
 
 macro_rules! start_repeater {
-    ($peer:expr, $time:expr, $ev:expr) => {{
+    ($peer:expr, $chan:ident, $time:expr, $ev:expr) => {{
         let ident = $peer.ident;
-        let tx = $peer.tx.clone();
+        let tx = $peer.$chan.clone();
 
         Timer::repeat($time, move || {
             let tx = tx.clone();
@@ -152,11 +156,16 @@ fn start_idle_hold_timer(peer: &mut Peer) -> Timer {
             peer.config.timer.idle_hold_time()
         }
     };
-    start_timer!(peer, time, Event::Start)
+    start_timer!(peer, tx, time, Event::Start)
 }
 
 pub fn start_connect_retry_timer(peer: &Peer) -> Timer {
-    start_timer!(peer, peer.config.timer.connect_retry_time(), Event::Start)
+    start_timer!(
+        peer,
+        tx,
+        peer.config.timer.connect_retry_time(),
+        Event::Start
+    )
 }
 
 /// Fast redial pacer for a failed dial parked in Active (RFC 4271
@@ -165,11 +174,33 @@ pub fn start_connect_retry_timer(peer: &Peer) -> Timer {
 /// refused dial retries promptly while the peer keeps accepting
 /// inbound connections.
 pub fn start_dial_retry_timer(peer: &Peer) -> Timer {
-    start_timer!(peer, peer.config.timer.idle_hold_time(), Event::Start)
+    start_timer!(peer, tx, peer.config.timer.idle_hold_time(), Event::Start)
 }
 
 fn start_hold_timer(peer: &Peer) -> Timer {
-    start_timer!(peer, peer.param.hold_time as u64, Event::HoldTimerExpires)
+    start_timer!(
+        peer,
+        ptx,
+        peer.param.hold_time as u64,
+        Event::HoldTimerExpires
+    )
+}
+
+/// Short re-arm used by the [`super::peer::fsm_holdtimer_expires`]
+/// liveness guard: the wire was alive within the hold time, so park
+/// the expiry for exactly the window that remains.
+pub fn start_hold_timer_ms(peer: &Peer, ms: u64) -> Timer {
+    let ident = peer.ident;
+    let tx = peer.ptx.clone();
+
+    Timer::once_ms(ms, move || {
+        let tx = tx.clone();
+        async move {
+            let _ = tx
+                .send(Message::Event(ident, Event::HoldTimerExpires))
+                .await;
+        }
+    })
 }
 
 pub fn start_adv_timer_vpnv4(peer: &Peer) -> Timer {
@@ -193,6 +224,7 @@ pub fn start_adv_timer_evpn(peer: &Peer) -> Timer {
 fn start_keepalive_timer(peer: &Peer) -> Timer {
     start_repeater!(
         peer,
+        ptx,
         peer.param.keepalive as u64,
         Event::KeepaliveTimerExpires
     )
@@ -210,9 +242,16 @@ pub fn start_stale_timer(peer: &Peer, afi_safi: AfiSafi, stale_time: u32) -> Tim
     })
 }
 
-pub fn refresh_hold_timer(peer: &Peer) {
-    if let Some(hold_timer) = peer.timer.hold_timer.as_ref() {
-        hold_timer.refresh();
+pub fn refresh_hold_timer(peer: &mut Peer) {
+    // A guard re-arm from `fsm_holdtimer_expires` runs shorter than
+    // the negotiated hold time; refreshing it would keep expiring the
+    // session early forever. Once real traffic is being processed
+    // again, restore the full-length timer.
+    let full = peer.param.hold_time as u64;
+    match peer.timer.hold_timer.as_ref() {
+        Some(hold_timer) if hold_timer.duration_sec() >= full => hold_timer.refresh(),
+        Some(_) => peer.timer.hold_timer = Some(start_hold_timer(peer)),
+        None => {}
     }
 }
 

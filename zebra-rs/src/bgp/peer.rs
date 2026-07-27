@@ -1,8 +1,8 @@
 #![allow(dead_code)]
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
-use std::sync::Arc;
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
+use std::sync::{Arc, OnceLock};
 use std::time::Instant;
 
 use bytes::BytesMut;
@@ -45,6 +45,15 @@ pub enum State {
     OpenSent,
     OpenConfirm,
     Established,
+}
+
+/// Milliseconds on a process-local monotonic clock. Feeds the
+/// wire-liveness stamp shared between reader tasks and the FSM
+/// ([`Peer::last_rx_ms`]); 0 is reserved there for "never received",
+/// so this never returns 0.
+pub fn monotonic_ms() -> u64 {
+    static EPOCH: OnceLock<Instant> = OnceLock::new();
+    (EPOCH.get_or_init(Instant::now).elapsed().as_millis() as u64).max(1)
 }
 
 /// Which side opened the TCP connection. Required for RFC 4271 §6.8
@@ -940,6 +949,20 @@ pub struct Peer {
     /// first OPEN on either connection lets us pick the winner.
     pub collision: Option<CollisionConn>,
     pub tx: mpsc::Sender<Message>,
+    /// Priority-lane sender ([`super::Bgp`]'s `ptx`) for the keepalive
+    /// and hold timer events, so they are serviced ahead of an ingest
+    /// backlog on the normal lane. Defaults to a clone of `tx` (the
+    /// lanes collapse) until the owning instance wires its real
+    /// priority sender in; per-VRF tasks and tests keep the default.
+    pub ptx: mpsc::Sender<Message>,
+    /// Wire-liveness stamp: [`monotonic_ms`] of the last complete BGP
+    /// message a reader task parsed on this peer's connection(s), 0 =
+    /// nothing received yet. Ground truth for hold-timer expiry — the
+    /// expiry event rides the priority lane and can overtake
+    /// refresh-carrying UPDATE / KEEPALIVE events still queued on the
+    /// normal lane, so [`fsm_holdtimer_expires`] must judge liveness
+    /// by receive time, not by processing time.
+    pub last_rx_ms: Arc<AtomicU64>,
     pub config: PeerConfig,
     pub cap_send: BgpCap,
     pub cap_recv: BgpCap,
@@ -1124,6 +1147,8 @@ impl Peer {
             task: PeerTask::default(),
             timer: PeerTimer::default(),
             counter: [PeerCounter::default(); BgpType::Max as usize],
+            ptx: tx.clone(),
+            last_rx_ms: Arc::new(AtomicU64::new(0)),
             tx,
             remote_id: Ipv4Addr::UNSPECIFIED,
             local_identifier: None,
@@ -1766,9 +1791,18 @@ pub fn fsm_next_state(peer: &mut Peer, event: Event) -> (State, FsmEffect) {
             None => (peer.state, FsmEffect::None),
         },
         Event::UpdateMsg(packet) => {
-            peer.counter[BgpType::Update as usize].rcvd += 1;
-            timer::refresh_hold_timer(peer);
-            (State::Established, FsmEffect::RouteUpdate(packet))
+            // UpdateMsg carries no ConnId (unlike the other wire
+            // events), so `resolve_conn` can't screen it. Now that a
+            // priority-lane teardown can precede queued UPDATEs, gate
+            // on state instead — a stale UPDATE from a dead session
+            // must not resurrect it to Established.
+            if peer.state == State::Established {
+                peer.counter[BgpType::Update as usize].rcvd += 1;
+                timer::refresh_hold_timer(peer);
+                (State::Established, FsmEffect::RouteUpdate(packet))
+            } else {
+                (peer.state, FsmEffect::None)
+            }
         }
         Event::UpdateError(code, sub_code, data) => (
             fsm_update_error(peer, code, sub_code, data),
@@ -2403,6 +2437,26 @@ pub fn fsm_conn_retry_expires(peer: &mut Peer) -> State {
 }
 
 pub fn fsm_holdtimer_expires(peer: &mut Peer) -> State {
+    // The expiry event rides the priority lane, so it can overtake
+    // refresh-carrying UPDATE / KEEPALIVE events still queued behind
+    // an ingest backlog on the normal lane. The reader task's
+    // `last_rx_ms` stamp is the ground truth for wire liveness: if the
+    // remote has spoken within the hold time, this expiry is an
+    // artifact of our own processing lag, not of a dead peer — re-arm
+    // for the true remaining window instead of dropping the session.
+    // Only a live session (the states that arm a hold timer) gets the
+    // guard: a stale expiry event for an already-torn-down peer must
+    // not re-arm anything.
+    let live = matches!(peer.state, State::OpenConfirm | State::Established);
+    let hold_ms = (peer.param.hold_time as u64) * 1000;
+    let last = peer.last_rx_ms.load(Ordering::Relaxed);
+    if live && hold_ms > 0 && last != 0 {
+        let elapsed = monotonic_ms().saturating_sub(last);
+        if elapsed < hold_ms {
+            peer.timer.hold_timer = Some(timer::start_hold_timer_ms(peer, hold_ms - elapsed));
+            return peer.state;
+        }
+    }
     peer_send_notification(peer, NotifyCode::HoldTimerExpired, 0, Vec::new());
     State::Idle
 }
@@ -2606,6 +2660,7 @@ pub async fn peer_read(
     mut read_half: OwnedReadHalf,
     mut config: PeerConfig,
     mut opt: ParseOption,
+    last_rx: Arc<AtomicU64>,
 ) {
     let event_conn_fail = async |ident, conn| {
         let _ = tx.send(Message::Event(ident, Event::ConnFail(conn))).await;
@@ -2633,6 +2688,7 @@ pub async fn peer_read(
                         .await
                     {
                         Ok(_) => {
+                            last_rx.store(monotonic_ms(), Ordering::Relaxed);
                             buf = remain;
                         }
                         Err(_err) => {
@@ -2661,8 +2717,14 @@ pub fn peer_start_reader(peer: &Peer, conn: ConnId, read_half: OwnedReadHalf) ->
     // than inherit whatever the previous session negotiated.
     opt.as4.send = peer.config.four_octet || peer.open_local_as() > u16::MAX as u32;
     opt.as4.recv = false;
+    // A fresh connection proves the remote alive right now; without
+    // this stamp a pre-flood `last_rx_ms` of 0 would let the very
+    // first hold-timer expiry kill a session whose traffic is still
+    // queued unprocessed.
+    let last_rx = peer.last_rx_ms.clone();
+    last_rx.store(monotonic_ms(), Ordering::Relaxed);
     Task::spawn(async move {
-        peer_read(ident, conn, tx.clone(), read_half, config, opt).await;
+        peer_read(ident, conn, tx.clone(), read_half, config, opt, last_rx).await;
     })
 }
 
@@ -3318,6 +3380,7 @@ fn try_dynamic_accept(bgp: &mut Bgp, peer_addr: IpAddr, stream: TcpStream) -> Op
         bgp.ctx.clone(),
     );
     peer.tracing_instance = bgp.tracing.clone();
+    peer.ptx = bgp.ptx.clone();
     peer.origin = super::peer_key::PeerOrigin::Dynamic { range_prefix };
     // Dynamic peers are passive-only — they never initiate a connect.
     peer.config.transport.passive = true;
@@ -4878,5 +4941,177 @@ mod dynamic_accept_tests {
 
         assert!(remaining.is_none());
         assert_eq!(peers.get(&addr).unwrap().state, State::Idle);
+    }
+}
+
+#[cfg(test)]
+mod holdtimer_starvation_tests {
+    use super::*;
+
+    /// Peer wired to a parked normal-lane channel, with `packet_tx`
+    /// attached so NOTIFICATION sends are observable.
+    fn established_peer() -> (Peer, UnboundedReceiver<BytesMut>) {
+        let (tx, rx) = mpsc::channel::<Message>(64);
+        Box::leak(Box::new(rx));
+        let mut peer = Peer::new(
+            1,
+            65001,
+            Ipv4Addr::new(10, 0, 0, 1),
+            65002,
+            "10.0.0.2".parse().unwrap(),
+            None,
+            tx,
+            crate::context::ProtoContext::default_table_no_rib(),
+        );
+        peer.state = State::Established;
+        peer.param.hold_time = 90;
+        peer.param.keepalive = 30;
+        let (packet_tx, packet_rx) = mpsc::unbounded_channel::<BytesMut>();
+        peer.packet_tx = Some(packet_tx);
+        (peer, packet_rx)
+    }
+
+    /// The hold-timer expiry event can overtake refresh-carrying
+    /// UPDATE/KEEPALIVE events queued behind an ingest backlog. If the
+    /// reader saw traffic within the hold time, the expiry must re-arm
+    /// instead of killing the session.
+    #[tokio::test]
+    async fn holdtimer_expiry_rearms_when_wire_recently_alive() {
+        let (mut peer, mut packet_rx) = established_peer();
+        peer.last_rx_ms.store(monotonic_ms(), Ordering::Relaxed);
+
+        let next = fsm_holdtimer_expires(&mut peer);
+
+        assert_eq!(next, State::Established, "session must survive");
+        let rearmed = peer
+            .timer
+            .hold_timer
+            .as_ref()
+            .expect("guard must re-arm the hold timer");
+        assert!(rearmed.duration_sec() <= 90);
+        assert!(
+            packet_rx.try_recv().is_err(),
+            "no NOTIFICATION may be sent for a live wire"
+        );
+    }
+
+    /// A genuinely silent peer still dies at last-rx + hold-time.
+    #[tokio::test]
+    async fn holdtimer_expiry_kills_when_wire_silent() {
+        let (mut peer, mut packet_rx) = established_peer();
+        peer.param.hold_time = 1;
+        peer.param.keepalive = 0;
+        peer.last_rx_ms.store(monotonic_ms(), Ordering::Relaxed);
+        // Real wall-clock silence: the guard measures the std
+        // monotonic clock, which tokio's paused time can't drive.
+        std::thread::sleep(std::time::Duration::from_millis(1100));
+
+        let next = fsm_holdtimer_expires(&mut peer);
+
+        assert_eq!(next, State::Idle);
+        assert!(
+            packet_rx.try_recv().is_ok(),
+            "hold-timer expiry must send a NOTIFICATION"
+        );
+    }
+
+    /// `last_rx_ms == 0` means nothing was ever received: no liveness
+    /// evidence, so expiry proceeds.
+    #[tokio::test]
+    async fn holdtimer_expiry_kills_when_nothing_ever_received() {
+        let (mut peer, mut packet_rx) = established_peer();
+        assert_eq!(peer.last_rx_ms.load(Ordering::Relaxed), 0);
+
+        let next = fsm_holdtimer_expires(&mut peer);
+
+        assert_eq!(next, State::Idle);
+        assert!(packet_rx.try_recv().is_ok());
+    }
+
+    /// Once traffic is processed again, `refresh_hold_timer` must
+    /// replace a short guard re-arm with the full negotiated duration —
+    /// refreshing the short timer would keep expiring early forever.
+    #[tokio::test]
+    async fn refresh_restores_full_hold_duration_after_guard_rearm() {
+        let (mut peer, _packet_rx) = established_peer();
+        peer.timer.hold_timer = Some(timer::start_hold_timer_ms(&peer, 3_000));
+
+        timer::refresh_hold_timer(&mut peer);
+
+        let restored = peer.timer.hold_timer.as_ref().unwrap();
+        assert_eq!(restored.duration_sec(), 90);
+    }
+
+    /// The keepalive and hold timers must fire into the priority lane
+    /// (`ptx`), not the normal lane the ingest backlog occupies.
+    #[tokio::test]
+    async fn keepalive_and_hold_timers_fire_into_priority_channel() {
+        let (tx, mut rx) = mpsc::channel::<Message>(64);
+        let (ptx, mut prx) = mpsc::channel::<Message>(64);
+        let mut peer = Peer::new(
+            1,
+            65001,
+            Ipv4Addr::new(10, 0, 0, 1),
+            65002,
+            "10.0.0.2".parse().unwrap(),
+            None,
+            tx,
+            crate::context::ProtoContext::default_table_no_rib(),
+        );
+        peer.ptx = ptx;
+        // Negotiate hold 3s / keepalive 1s via the real arming path
+        // (`Timer` has whole-second granularity, so 1s keepalive is
+        // the fastest a real fire can happen).
+        let header = BgpHeader::new(BgpType::Open, BGP_HEADER_LEN + 10);
+        let open = OpenPacket::new(
+            header,
+            65002,
+            3,
+            &Ipv4Addr::new(2, 2, 2, 2),
+            BgpCap::default(),
+        );
+        timer::update_open_timers(&mut peer, &open);
+        // The guard re-arm variant must ride the same lane.
+        let _guard = timer::start_hold_timer_ms(&peer, 10);
+
+        let deadline = std::time::Duration::from_secs(3);
+        let ka = tokio::time::timeout(deadline, async {
+            loop {
+                if let Some(Message::Event(_, Event::KeepaliveTimerExpires)) = prx.recv().await {
+                    return;
+                }
+            }
+        })
+        .await;
+        assert!(ka.is_ok(), "keepalive timer must use the priority lane");
+        let hold = tokio::time::timeout(deadline, async {
+            loop {
+                if let Some(Message::Event(_, Event::HoldTimerExpires)) = prx.recv().await {
+                    return;
+                }
+            }
+        })
+        .await;
+        assert!(hold.is_ok(), "hold-timer re-arm must use the priority lane");
+        assert!(
+            rx.try_recv().is_err(),
+            "liveness timers must not land on the normal lane"
+        );
+    }
+
+    /// UpdateMsg carries no ConnId, so it cannot be screened by
+    /// `resolve_conn`; a stale UPDATE processed after a teardown must
+    /// not resurrect the session to Established.
+    #[tokio::test]
+    async fn update_msg_ignored_when_not_established() {
+        let (mut peer, _packet_rx) = established_peer();
+        peer.state = State::Idle;
+
+        let update = UpdatePacket::new();
+        let (next, effect) = fsm_next_state(&mut peer, Event::UpdateMsg(update));
+
+        assert_eq!(next, State::Idle, "stale UPDATE must not resurrect");
+        assert!(matches!(effect, FsmEffect::None));
+        assert_eq!(peer.counter[BgpType::Update as usize].rcvd, 0);
     }
 }

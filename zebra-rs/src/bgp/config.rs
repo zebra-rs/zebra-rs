@@ -325,6 +325,7 @@ fn config_peer(bgp: &mut Bgp, mut args: Args, op: ConfigOp) -> Option<()> {
         // start; later instance-config changes refresh it via
         // `propagate_instance_tracing`.
         peer.tracing_instance = bgp.tracing.clone();
+        peer.ptx = bgp.ptx.clone();
         bgp.peers.insert(addr, peer);
         // Seed `shared_network` from interface addresses learned so far so
         // the eBGP connected check is accurate on this peer's first dial
