@@ -717,6 +717,34 @@ impl<V: OspfVersion> Ospf<V> {
             nbr.bfd_session_key = desired;
             nbr.bfd_session_params = desired_params;
         }
+
+        // Mirror of the switchover in `process_bfd_event`, which evicted this
+        // adjacency's leg from the kernel ECMP groups. Unlike IS-IS there is
+        // no BFD "up" to react to: that path unsubscribes the session, and
+        // `process_bfd_event` ignores every transition that is not to Down —
+        // so recovery arrives here instead, as the adjacency re-forming from
+        // hellos and re-arming BFD (`current` none, `desired` some).
+        //
+        // Without this the group stays shrunk whenever reconvergence does not
+        // rewrite the affected prefixes, which is exactly the case when the
+        // adjacency returns before SPF ran: the RIB reports every leg while
+        // the kernel forwards over a subset. Ordinary first-time adjacencies
+        // take this path too and cost nothing — the RIB no-ops when the
+        // groups are whole.
+        //
+        // Keyed on the neighbour's hello source, the same address
+        // `process_bfd_event` hands to `protect_switch`; for OSPFv3 that is
+        // the link-local, which is not `nbr_addr` (the router-id).
+        if current.is_none()
+            && desired.is_some()
+            && let Some(protect_addr) = self
+                .links
+                .get(&ifindex)
+                .and_then(|l| l.nbrs.get(&nbr_addr))
+                .map(|n| V::prefix_ip(&n.ident.prefix))
+        {
+            let _ = self.ctx.rib.protect_restore(protect_addr);
+        }
     }
 
     /// Re-evaluate every neighbor on every interface — used by the

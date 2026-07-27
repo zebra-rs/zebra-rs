@@ -1,0 +1,26 @@
+interface:
+- if-name: lo
+  ipv4:
+    address: 10.0.0.3/32
+- if-name: b-s
+  ipv4:
+    address: 10.2.0.2/30
+- if-name: b-d
+  ipv4:
+    address: 10.4.0.1/30
+router:
+  ospf:
+    router-id: 10.0.0.3
+    area:
+    - area-id: 0.0.0.0
+      interface:
+      - if-name: lo
+        enabled: true
+      - if-name: b-s
+        enabled: true
+        network-type: point-to-point
+        cost: 1
+      - if-name: b-d
+        enabled: true
+        network-type: point-to-point
+        cost: 1
