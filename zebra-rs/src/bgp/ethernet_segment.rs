@@ -18,9 +18,10 @@ use super::vpws::{EsBinding, bind_es};
 /// BGP keeps off `RibRx::LinkAdd`.
 ///
 /// `ifindex == 0` is "no port", not a lookup miss, and never matches: an FDB
-/// learn that carries no interface (every MAC from the cradle datapath, whose
-/// `FdbEvent` reports only `(mac, bd)`) must not be attributed to whichever
-/// link happens to sit at index 0.
+/// learn that carries no interface must not be attributed to whichever link
+/// happens to sit at index 0. Both learn sources normally carry a port — the
+/// kernel bridge always, cradle via `FdbEvent.port` — so 0 now means only
+/// that the source could not attribute the learn.
 pub fn ac_name_for_ifindex(ifindex: u32, links: &BTreeMap<String, u32>) -> Option<String> {
     if ifindex == 0 {
         return None;
@@ -388,10 +389,10 @@ mod ac_esi_tests {
         assert_eq!(ac_name_for_ifindex(9, &links), None);
     }
 
-    /// The cradle datapath's `FdbEvent` carries no port, so its learns arrive
-    /// with `ifindex: 0`. That must never be attributed to a link — including
-    /// one that somehow sits at index 0 — or every cradle-learned MAC would
-    /// inherit that link's segment.
+    /// A learn whose source could not attribute a port arrives with
+    /// `ifindex: 0`. That must never be attributed to a link — including one
+    /// that somehow sits at index 0 — or every such MAC would inherit that
+    /// link's segment.
     #[test]
     fn ifindex_zero_never_resolves() {
         assert_eq!(ac_name_for_ifindex(0, &links(&[("eth0", 0)])), None);

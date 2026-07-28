@@ -107,8 +107,13 @@ Feature: EVPN Type-2 / Type-3 over SRv6 — End.DT2U and End.DT2M signalling
     # already-advertised Type-2 under the new ESI is the config handler's job.
     When I apply command "set router bgp afi-safi evpn ethernet-segment es1 esi 00:11:22:33:44:55:66:77:88:99" in namespace "z1"
     And I apply command "set router bgp afi-safi evpn ethernet-segment es1 interface host0" in namespace "z1"
-    Then show command "show bgp evpn" in namespace "z1" should eventually contain "ESI: 00:11:22:33:44:55:66:77:88:99"
-    And show command "show bgp evpn" in namespace "z2" should eventually contain "ESI: 00:11:22:33:44:55:66:77:88:99"
+    # Assert on z2, the PE that has to act on the ESI: aliasing (RFC 7432
+    # §8.4) is something the REMOTE PE does, so z2 seeing it is the property
+    # worth pinning. z1 is also the weaker vantage point — it originates the
+    # segment's own ES routes, and before those were gated out of the
+    # path-level `ESI:` line their value satisfied this substring on z1
+    # whether or not the Type-2 ever carried it.
+    Then show command "show bgp evpn" in namespace "z2" should eventually contain "ESI: 00:11:22:33:44:55:66:77:88:99"
     # A refresh, not a re-learn: the MAC and its End.DT2U SID are unchanged.
     And show command "show bgp evpn" in namespace "z2" should contain "aa:bb:cc:dd:ee:01"
     And show command "show bgp evpn" in namespace "z2" should contain "(End.DT2U)"

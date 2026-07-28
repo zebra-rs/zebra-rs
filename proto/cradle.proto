@@ -270,6 +270,13 @@ message FdbEvent {
   // 0 = learned; 1 = aged out (the entry was removed after `fdb_age_secs`
   // idle — the control plane should withdraw its Type-2).
   uint32 event = 3;
+  // Ifindex of the port the MAC was learned on, so the MAC can be placed on
+  // an Ethernet Segment (RFC 7432 §7.1) instead of being advertised
+  // single-homed. Set on learn events only; 0 means "unknown" and must be
+  // treated as single-homed rather than as a port — that is also what an
+  // older cradle, which never sets this, leaves behind. Field number must
+  // match cradle-rs's proto/cradle.proto.
+  uint32 port = 4;
 }
 
 // --- BFD Echo / detection offload ---
