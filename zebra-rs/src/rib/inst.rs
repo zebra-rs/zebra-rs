@@ -745,16 +745,144 @@ fn ilm_distance(rtype: RibType) -> u8 {
 
 #[derive(Debug, Clone)]
 pub struct MacEntry {
-    pub tunnel_endpoint: Option<IpAddr>,
-    /// The remote PE's SRv6 L2 service SID (`End.DT2U`) this MAC sits
-    /// behind, when the route arrived EVPN-over-SRv6 (RFC 9252). Mutually
-    /// exclusive with `tunnel_endpoint`, which carries the VXLAN VTEP of
-    /// an EVPN-over-VXLAN MAC — the encapsulation decides which one the
-    /// route supplies, so exactly one is set on a remote entry.
-    pub srv6_sid: Option<std::net::Ipv6Addr>,
+    /// Every overlay destination currently advertised for this MAC.
+    ///
+    /// More than one only under RFC 7432 §8.4 aliasing: several PEs
+    /// attached to the same Ethernet Segment can each be a valid way to
+    /// reach it. A MAC that is single-homed, or whose advertisements
+    /// disagree about the segment, holds exactly one — see `mac_add` for
+    /// the rule that decides between coexisting and replacing.
+    ///
+    /// Ordered, so "which destination do we install" is deterministic
+    /// rather than dependent on arrival order.
+    pub dests: BTreeSet<MacDest>,
+    /// The Ethernet Segment every destination in `dests` sits on, or
+    /// `None` when single-homed. The all-zero ESI is normalized to `None`
+    /// on the way in — on the wire it means "no segment", and letting it
+    /// through as a value would make unrelated single-homed MACs look
+    /// like segment mates.
+    pub esi: Option<[u8; 10]>,
     pub flags: u8,
     pub seq: u32,
     pub installed: bool,
+}
+
+/// One overlay destination for a MAC. The three encapsulations are
+/// mutually exclusive — a route supplies exactly one — so they are an
+/// enum rather than three `Option`s that must not disagree.
+///
+/// `Ord` is derived and load-bearing: it gives `MacEntry::dests` a stable
+/// order, which is what makes destination selection reproducible.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub enum MacDest {
+    /// EVPN over VXLAN (RFC 8365): the remote VTEP.
+    Vxlan { vtep: IpAddr },
+    /// EVPN over SRv6 (RFC 9252): the remote PE's `End.DT2U` L2 service
+    /// SID (the all-ones BUM sentinel rides `End.DT2M`).
+    Srv6 { sid: std::net::Ipv6Addr },
+    /// EVPN over MPLS (RFC 7432): the remote PE and its EVI service
+    /// label, imposed under the transport LSP that reaches the PE.
+    Mpls { pe: IpAddr, label: u32 },
+}
+
+impl MacEntry {
+    /// The entry a first advertisement for this MAC creates.
+    pub fn new(dest: Option<MacDest>, esi: Option<[u8; 10]>, flags: u8, seq: u32) -> Self {
+        Self {
+            dests: dest.into_iter().collect(),
+            esi: normalize_esi(esi),
+            flags,
+            seq,
+            installed: false,
+        }
+    }
+
+    /// Fold a further advertisement for the same MAC into this entry.
+    /// Returns `false` when it was a stale mobility duplicate and ignored.
+    ///
+    /// RFC 7432 §7.7: a MAC advertised by another PE **on the same
+    /// Ethernet Segment** has not moved — it is multihomed, and both PEs
+    /// are valid ways to reach it (§8.4 aliasing). Sequence numbers do not
+    /// arbitrate between segment mates, so the mobility guard deliberately
+    /// does not apply to that case; treating it as a move is how a
+    /// multihomed MAC ends up pinned to whichever PE advertised last.
+    ///
+    /// Anything else is a move — a different segment, or either side
+    /// single-homed — where the highest sequence number wins outright and
+    /// the previous destinations are replaced rather than joined.
+    pub fn absorb(
+        &mut self,
+        dest: Option<MacDest>,
+        esi: Option<[u8; 10]>,
+        flags: u8,
+        seq: u32,
+    ) -> bool {
+        let esi = normalize_esi(esi);
+        if esi.is_some() && self.esi == esi {
+            if let Some(dest) = dest {
+                // A destination we already had leaves the installed state
+                // alone; a new one means the FIB is now behind.
+                self.installed &= !self.dests.insert(dest);
+            }
+            self.seq = self.seq.max(seq);
+            self.flags = flags;
+            return true;
+        }
+        if seq < self.seq {
+            return false;
+        }
+        self.dests.clear();
+        self.dests.extend(dest);
+        self.esi = esi;
+        self.flags = flags;
+        self.seq = seq;
+        self.installed = false;
+        true
+    }
+
+    /// The destination the FIB installs: the first, which is well-defined
+    /// because `dests` is ordered.
+    pub fn installed_dest(&self) -> Option<MacDest> {
+        self.dests.first().copied()
+    }
+}
+
+/// The all-zero ESI means "no Ethernet Segment", not a segment whose id
+/// happens to be zero. Normalizing on the way in keeps unrelated
+/// single-homed MACs from looking like segment mates to `absorb`.
+fn normalize_esi(esi: Option<[u8; 10]>) -> Option<[u8; 10]> {
+    esi.filter(|esi| esi != &[0u8; 10])
+}
+
+impl MacDest {
+    /// The destination a `MacAdd` describes, or `None` for an entry with
+    /// no overlay destination at all (a locally-learned MAC).
+    ///
+    /// Ordered by how the FIB dispatches: an SRv6 service SID wins over a
+    /// VXLAN VTEP because the SID is what selects the cradle L2 tee, and
+    /// a route carrying one is EVPN-over-SRv6 whatever else it carries.
+    pub fn from_parts(
+        tunnel_endpoint: Option<IpAddr>,
+        srv6_sid: Option<std::net::Ipv6Addr>,
+        mpls_label: Option<u32>,
+    ) -> Option<Self> {
+        match (srv6_sid, mpls_label, tunnel_endpoint) {
+            (Some(sid), _, _) => Some(Self::Srv6 { sid }),
+            (None, Some(label), Some(pe)) => Some(Self::Mpls { pe, label }),
+            (None, _, Some(vtep)) => Some(Self::Vxlan { vtep }),
+            (None, _, None) => None,
+        }
+    }
+
+    /// Split back into the `(tunnel_endpoint, srv6_sid, mpls_label)` triple
+    /// the FIB layer still takes.
+    pub fn into_parts(self) -> (Option<IpAddr>, Option<std::net::Ipv6Addr>, Option<u32>) {
+        match self {
+            Self::Vxlan { vtep } => (Some(vtep), None, None),
+            Self::Srv6 { sid } => (None, Some(sid), None),
+            Self::Mpls { pe, label } => (Some(pe), None, Some(label)),
+        }
+    }
 }
 
 /// Composite key for `Rib::neighbors`. The kernel's neighbor table mixes
@@ -4469,25 +4597,35 @@ impl Rib {
         srv6_sid: Option<std::net::Ipv6Addr>,
         mpls_label: Option<u32>,
     ) {
-        // MAC Mobility: ignore stale duplicates (lower sequence number)
-        if let Some(existing) = self.mac_table.get(&(vni, mac))
-            && seq < existing.seq
-        {
-            return; // Ignore stale duplicate
+        let dest = MacDest::from_parts(tunnel_endpoint, srv6_sid, mpls_label);
+        match self.mac_table.get_mut(&(vni, mac)) {
+            Some(existing) => {
+                if !existing.absorb(dest, esi, flags, seq) {
+                    return; // stale mobility duplicate
+                }
+            }
+            None => {
+                self.mac_table
+                    .insert((vni, mac), MacEntry::new(dest, esi, flags, seq));
+            }
         }
-
-        let entry = MacEntry {
-            tunnel_endpoint,
-            srv6_sid,
-            flags,
-            seq,
-            installed: false,
-        };
-
-        self.mac_table.insert((vni, mac), entry);
 
         // Forward to kernel FIB (or, with an SRv6 L2 service SID, the
         // cradle eBPF tee).
+        //
+        // One destination is installed even when the entry holds several:
+        // neither FIB backend can express "this MAC is reachable via N
+        // PEs" yet, so aliasing is modelled in the RIB and not yet acted
+        // on (`handle.rs::mac_add` still only logs the ESI). Installing
+        // the first is deterministic because `dests` is ordered — the
+        // alternative, whichever advertisement arrived last, would make
+        // the datapath depend on BGP arrival order.
+        let (tunnel_endpoint, srv6_sid, mpls_label) = self
+            .mac_table
+            .get(&(vni, mac))
+            .and_then(MacEntry::installed_dest)
+            .map(MacDest::into_parts)
+            .unwrap_or((None, None, None));
         self.fib_handle
             .mac_add(
                 vni,
@@ -4864,5 +5002,126 @@ mod ttl_model_tests {
         // uniform -> the inverse.
         assert!(TtlModel::Pipe.is_pipe());
         assert!(!TtlModel::Uniform.is_pipe());
+    }
+}
+
+/// `MacEntry`'s coexist-vs-replace rule (RFC 7432 §7.7 / §8.4). Pure over
+/// the entry so the decision is testable without a live `Rib` — it is the
+/// whole of MAC multihoming state, and it used to be an unconditional
+/// overwrite buried in an async method.
+#[cfg(test)]
+mod mac_entry_tests {
+    use super::*;
+
+    const ESI_A: [u8; 10] = [0x00, 0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77, 0x88, 0x99];
+    const ESI_B: [u8; 10] = [0x00, 0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0xff, 0x01, 0x02, 0x03];
+
+    fn sid(s: &str) -> MacDest {
+        MacDest::Srv6 {
+            sid: s.parse().unwrap(),
+        }
+    }
+
+    fn vtep(s: &str) -> MacDest {
+        MacDest::Vxlan {
+            vtep: s.parse().unwrap(),
+        }
+    }
+
+    /// The case the whole change exists for: two PEs on one segment are
+    /// both valid, so the second advertisement joins the first.
+    #[test]
+    fn same_segment_advertisements_coexist() {
+        let mut e = MacEntry::new(Some(sid("fcbb:bbbb:1:e000::")), Some(ESI_A), 0, 0);
+        assert!(e.absorb(Some(sid("fcbb:bbbb:2:e000::")), Some(ESI_A), 0, 0));
+        assert_eq!(e.dests.len(), 2);
+        assert_eq!(e.esi, Some(ESI_A));
+    }
+
+    /// A different segment is a move, not multihoming — the old
+    /// destination must not linger and draw traffic to a PE the MAC left.
+    #[test]
+    fn different_segment_replaces_rather_than_joins() {
+        let mut e = MacEntry::new(Some(sid("fcbb:bbbb:1:e000::")), Some(ESI_A), 0, 0);
+        assert!(e.absorb(Some(sid("fcbb:bbbb:2:e000::")), Some(ESI_B), 0, 1));
+        assert_eq!(e.dests.len(), 1);
+        assert_eq!(e.installed_dest(), Some(sid("fcbb:bbbb:2:e000::")));
+        assert_eq!(e.esi, Some(ESI_B));
+    }
+
+    /// Two single-homed advertisements are a move however often they
+    /// repeat: with no segment there is nothing to be multihomed to.
+    #[test]
+    fn single_homed_never_coexists() {
+        let mut e = MacEntry::new(Some(vtep("10.0.0.1")), None, 0, 0);
+        assert!(e.absorb(Some(vtep("10.0.0.2")), None, 0, 1));
+        assert_eq!(e.dests.len(), 1);
+        assert_eq!(e.installed_dest(), Some(vtep("10.0.0.2")));
+    }
+
+    /// The all-zero ESI is "no segment". Two unrelated single-homed MACs
+    /// both carrying it must not read as segment mates.
+    #[test]
+    fn zero_esi_is_not_a_segment() {
+        let mut e = MacEntry::new(Some(vtep("10.0.0.1")), Some([0u8; 10]), 0, 0);
+        assert_eq!(e.esi, None);
+        assert!(e.absorb(Some(vtep("10.0.0.2")), Some([0u8; 10]), 0, 1));
+        assert_eq!(e.dests.len(), 1, "zero ESI must not make these coexist");
+    }
+
+    /// Mobility still arbitrates by sequence number when the segment
+    /// changed — a late lower-seq advertisement is ignored outright.
+    #[test]
+    fn stale_mobility_advertisement_is_ignored() {
+        let mut e = MacEntry::new(Some(vtep("10.0.0.2")), None, 0, 5);
+        assert!(!e.absorb(Some(vtep("10.0.0.1")), None, 0, 4));
+        assert_eq!(e.installed_dest(), Some(vtep("10.0.0.2")));
+        assert_eq!(e.seq, 5);
+    }
+
+    /// Sequence numbers must NOT arbitrate between segment mates: a PE on
+    /// the same segment advertising a lower seq is still a valid path, and
+    /// dropping it is exactly how a multihomed MAC gets pinned to one PE.
+    #[test]
+    fn lower_seq_on_the_same_segment_still_coexists() {
+        let mut e = MacEntry::new(Some(sid("fcbb:bbbb:1:e000::")), Some(ESI_A), 0, 5);
+        assert!(e.absorb(Some(sid("fcbb:bbbb:2:e000::")), Some(ESI_A), 0, 4));
+        assert_eq!(e.dests.len(), 2);
+        assert_eq!(e.seq, 5, "the higher sequence number is kept");
+    }
+
+    /// Re-advertising a destination already held is a refresh, so it must
+    /// not knock the entry out of its installed state and cause a
+    /// pointless FIB rewrite on every BGP refresh.
+    #[test]
+    fn readvertising_a_held_destination_keeps_it_installed() {
+        let mut e = MacEntry::new(Some(sid("fcbb:bbbb:1:e000::")), Some(ESI_A), 0, 0);
+        e.installed = true;
+        assert!(e.absorb(Some(sid("fcbb:bbbb:1:e000::")), Some(ESI_A), 0, 0));
+        assert!(e.installed, "a duplicate must not dirty the entry");
+        assert_eq!(e.dests.len(), 1, "and must not duplicate the destination");
+    }
+
+    /// A genuinely new segment mate does dirty it — the FIB has not seen
+    /// the new destination.
+    #[test]
+    fn a_new_segment_mate_marks_the_entry_uninstalled() {
+        let mut e = MacEntry::new(Some(sid("fcbb:bbbb:1:e000::")), Some(ESI_A), 0, 0);
+        e.installed = true;
+        assert!(e.absorb(Some(sid("fcbb:bbbb:2:e000::")), Some(ESI_A), 0, 0));
+        assert!(!e.installed);
+    }
+
+    /// Selection is by order, not arrival: whichever PE advertised first,
+    /// the same destination is installed. Otherwise the datapath would
+    /// depend on BGP arrival order.
+    #[test]
+    fn installed_destination_is_arrival_order_independent() {
+        let (a, b) = (sid("fcbb:bbbb:1:e000::"), sid("fcbb:bbbb:2:e000::"));
+        let mut first = MacEntry::new(Some(a), Some(ESI_A), 0, 0);
+        first.absorb(Some(b), Some(ESI_A), 0, 0);
+        let mut second = MacEntry::new(Some(b), Some(ESI_A), 0, 0);
+        second.absorb(Some(a), Some(ESI_A), 0, 0);
+        assert_eq!(first.installed_dest(), second.installed_dest());
     }
 }
