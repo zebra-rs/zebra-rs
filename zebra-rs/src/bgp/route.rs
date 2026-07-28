@@ -15455,13 +15455,15 @@ impl Bgp {
     ///     remote VTEP MAC); re-advertising them would loop.
     ///
     /// Hardcodes (per RFC 8365 single-homed VLAN-Based service):
-    ///   - ESI = 0 (no multi-homing)
     ///   - Ethernet Tag = 0 (one bridge per VNI)
     ///   - IP component absent (MAC-only Type-2; MAC+IP needs ARP/NDP
     ///     correlation, follow-up).
     ///   - RD = `<router-id>:<VNI>` (Type-1, IPv4 + 2-byte). VNIs
     ///     above 65535 are skipped — Type-0 ASN-format RD support
     ///     for big VNIs is a follow-up.
+    ///
+    /// The ESI comes from [`Self::macip_esi`] — non-zero when the port that
+    /// learned the MAC is an Ethernet Segment's access port, zero otherwise.
     pub fn evpn_originate_macip(&mut self, entry: &FdbEntry) {
         if !self.advertise_all_vni {
             return;
@@ -15600,6 +15602,11 @@ impl Bgp {
             None,
             false,
         );
+        // RFC 7432 §7.2: the ESI of the Ethernet Segment this MAC was learned
+        // on. Set before `update_evpn` — the clone that lands in the Loc-RIB is
+        // what the advertise path re-encodes into the NLRI.
+        rib.esi = self.macip_esi(entry);
+
         let (_replaced, selected, next_id) =
             self.local_rib.update_evpn(rd, prefix.clone(), rib.clone());
         rib.local_id = next_id;
@@ -15664,7 +15671,69 @@ impl Bgp {
         // re-evaluation here — for a locally-originated route there
         // is no other path that would replace it; the peers can
         // figure it out when they see the MP_UNREACH.
+        //
+        // The withdrawal reconstructs the NLRI with a zero ESI even when the
+        // advertisement carried one. That is deliberate and interoperable: the
+        // MAC/IP route key is (RD, Ethernet Tag, MAC, IP) — the ESI rides in
+        // the NLRI but is not part of the key — so a receiver matches this
+        // against the advertised route regardless. It is also what our own
+        // receive path does, keying `EvpnPrefix::MacIp` on the same four
+        // fields and carrying the ESI on the path.
         route_withdraw_evpn_to_peers(rd, prefix, &mut self.peers);
+    }
+
+    /// The ESI to stamp on a Type-2 originated from `entry`: that of the
+    /// Ethernet Segment whose access port learned the MAC, or `None`
+    /// (encoded as the all-zero ESI) when the port is not on a segment.
+    ///
+    /// The learning port *is* the attachment circuit, so this is the same
+    /// inference [`bind_es`] does for VPWS — with no explicit leaf to honour,
+    /// because a MAC learn carries no operator intent to override. Two
+    /// segments claiming one port stays ambiguous rather than tie-breaking:
+    /// the wrong ESI here is a silent blackhole once a remote PE starts
+    /// aliasing (RFC 7432 §8.4) toward the segment we misnamed.
+    ///
+    /// `ifindex == 0` means the learn carries no port. That is every MAC from
+    /// the cradle datapath — `FdbEvent` (proto/cradle.proto) reports only
+    /// `(mac, bd)`, so cradle-learned MACs stay single-homed here until that
+    /// stream carries the learning port. Kernel bridge learns do carry it.
+    pub fn macip_esi(&self, entry: &FdbEntry) -> Option<[u8; 10]> {
+        let ac =
+            super::ethernet_segment::ac_name_for_ifindex(entry.ifindex, &self.link_index_by_name)?;
+        match super::ethernet_segment::esi_for_ac(&ac, &self.ethernet_segments) {
+            Ok(esi) => esi,
+            Err(claims) => {
+                tracing::warn!(
+                    "evpn_originate_macip: interface {} is claimed by {} ethernet segments ({}); \
+                     originating {} as single-homed",
+                    ac,
+                    claims.len(),
+                    claims.join(", "),
+                    entry.mac,
+                );
+                None
+            }
+        }
+    }
+
+    /// Re-originate every locally-learned Type-2 so its ESI matches the
+    /// current `ethernet_segments`. The ESI is carried on the path rather
+    /// than in the route key, so this is a plain refresh — no withdraw first,
+    /// and MAC mobility sequence numbers are untouched (a local
+    /// re-advertisement does not bump them).
+    ///
+    /// The Type-2 twin of [`Self::vpws_resync_es`], called from the same
+    /// config sites: anything that changes which port belongs to which
+    /// segment, or what that segment's ESI is, changes what we should be
+    /// advertising for MACs already learned on it.
+    pub fn evpn_resync_macip_esi(&mut self) {
+        if !self.advertise_all_vni {
+            return;
+        }
+        let entries: Vec<FdbEntry> = self.local_fdb.values().cloned().collect();
+        for entry in entries {
+            self.evpn_originate_macip(&entry);
+        }
     }
 
     /// Originate (or refresh) an EVPN Type-5 (IP Prefix) route for a

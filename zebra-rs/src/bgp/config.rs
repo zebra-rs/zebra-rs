@@ -1830,6 +1830,9 @@ fn config_ethernet_segment(bgp: &mut Bgp, mut args: Args, op: ConfigOp) -> Optio
     // A VPWS service naming this segment resolves through it for its ESI and
     // redundancy mode; deleting it makes those services single-homed again.
     bgp.vpws_resync_es();
+    // MACs already learned on the segment's access port carry its ESI on their
+    // Type-2s, so adding or removing the segment changes what we advertise.
+    bgp.evpn_resync_macip_esi();
     Some(())
 }
 
@@ -1873,6 +1876,9 @@ fn config_ethernet_segment_esi(bgp: &mut Bgp, mut args: Args, op: ConfigOp) -> O
     // The ESI is part of a VPWS Type-1's NLRI key, so services on this
     // segment must be re-originated under the new one.
     bgp.vpws_resync_es();
+    // Type-2s carry the ESI on the path rather than in the key, so they only
+    // need refreshing under the new value — not withdrawing first.
+    bgp.evpn_resync_macip_esi();
     Some(())
 }
 
@@ -2023,6 +2029,9 @@ fn config_ethernet_segment_interface(bgp: &mut Bgp, mut args: Args, op: ConfigOp
     };
     bgp.ethernet_segments.entry(name).or_default().interface = interface;
     bgp.vpws_resync_es();
+    // This leaf is what decides whether a learned MAC's port is on a segment
+    // at all, so it moves Type-2s between single- and multi-homed.
+    bgp.evpn_resync_macip_esi();
     Some(())
 }
 
