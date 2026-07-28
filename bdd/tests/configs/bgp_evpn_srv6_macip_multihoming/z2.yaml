@@ -1,0 +1,52 @@
+# z2 — the second PE on Ethernet Segment es1; mirror of z1.yaml (same ESI,
+# own locator/router-id). z2 never learns the CE MAC itself — it is the PE
+# a receiver could alias through (RFC 7432 §8.4), advertising only the
+# segment's Type-4 and per-ES Type-1 A-D. Deliberately NO `interface`
+# binding: the ES routes need none, and a bound port's own (auto-generated)
+# MAC would otherwise originate an ESI-carrying Type-2 from z2 that never
+# goes away, masking z1's transitions in whole-output show assertions.
+interface:
+- if-name: lo
+  ipv6:
+    address: 2001:db8::2/128
+- if-name: z2z1
+  ipv6:
+    address: 2001:db8:12::2/64
+segment-routing:
+  locator:
+  - name: LOC2
+    prefix: fcbb:bbbb:2::/48
+    behavior: usid
+vxlan:
+- name: vxlan10
+  vni: 10
+  local-address: 2001:db8::2
+router:
+  bgp:
+    global:
+      as: 65001
+      router-id: 192.168.0.2
+    segment-routing:
+      srv6:
+        locator: LOC2
+    afi-safi:
+    - name: evpn
+      advertise-all-vni: true
+      encapsulation: srv6
+      ethernet-segment:
+      - name: es1
+        esi: "00:11:22:33:44:55:66:77:88:99"
+        redundancy-mode: all-active
+    neighbor:
+    - remote-address: 2001:db8:12::1
+      enabled: true
+      remote-as: 65001
+      afi-safi:
+      - name: evpn
+        enabled: true
+  static:
+    ipv6:
+      route:
+      - prefix: fcbb:bbbb:1::/48
+        nexthop:
+        - address: 2001:db8:12::1
