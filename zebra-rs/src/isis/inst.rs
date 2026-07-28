@@ -2606,6 +2606,14 @@ impl Isis {
     }
 
     fn process_ifsm(&mut self, ev: IfsmEvent, ifindex: u32, level: Option<Level>) {
+        // A DIS election can leave this circuit as the DIS, which needs a
+        // circuit id to name the pseudonode LSP it then originates.
+        // Reserve one here rather than inside `dis_becoming`: the
+        // allocator must see every other link, which the mutable borrow
+        // `link_top` takes below rules out.
+        if ev == IfsmEvent::DisSelection {
+            self.ensure_circuit_id(ifindex);
+        }
         let Some(mut top) = self.link_top(ifindex) else {
             return;
         };

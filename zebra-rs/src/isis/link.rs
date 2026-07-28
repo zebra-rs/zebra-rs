@@ -857,6 +857,45 @@ impl IsisLink {
 }
 
 impl Isis {
+    /// Reserve this circuit's IS-IS circuit id if it does not have one,
+    /// called as a LAN circuit stands for DIS election.
+    ///
+    /// Deliberately lazy. `RibRx::LinkAdd` fires for every interface the
+    /// daemon sees — VLAN subinterfaces, tunnels, veths, anything the
+    /// kernel reports — and links are never removed from `IsisLinks`, so
+    /// assigning at link-add would burn one of only 255 ids per interface
+    /// ever observed, however few of them run IS-IS. Reserving here scopes
+    /// the space to the circuits that can actually originate a pseudonode
+    /// LSP, which is the only thing a circuit id names.
+    ///
+    /// P2P circuits are skipped for the same reason: their `ExtIsReach`
+    /// carries `(peer-sys-id, 0)`, with no pseudonode and so no id to
+    /// spend.
+    ///
+    /// Runs before the caller takes the link's mutable borrow, because the
+    /// allocator has to see every *other* link to know what is free.
+    pub fn ensure_circuit_id(&mut self, ifindex: u32) {
+        let Some(link) = self.links.get(&ifindex) else {
+            return;
+        };
+        if link.is_p2p() || link.state.circuit_id != 0 {
+            return;
+        }
+        let name = link.state.name.clone();
+        match self.links.alloc_circuit_id() {
+            Some(id) => {
+                if let Some(link) = self.links.get_mut(&ifindex) {
+                    link.state.circuit_id = id;
+                }
+            }
+            None => tracing::warn!(
+                "isis: circuit ids exhausted (255 in use); {name} (ifindex={ifindex}) falls \
+                 back to an ifindex-derived pseudonode id, which may collide with another \
+                 circuit's"
+            ),
+        }
+    }
+
     pub fn link_add(&mut self, link: Link) {
         // println!("ISIS: LinkAdd {} {}", link.name, link.index);
         if self.links.get(&link.index).is_some() {
@@ -865,17 +904,12 @@ impl Isis {
         let ifindex = link.index;
         let name = link.name.clone();
         match IsisLink::from(link, self.tx.clone()) {
-            Ok(mut is_link) => {
-                // Assign before insert, so the allocator never sees this
-                // link's own (still zero) id in the used set.
-                match self.links.alloc_circuit_id() {
-                    Some(id) => is_link.state.circuit_id = id,
-                    None => tracing::warn!(
-                        "isis: circuit ids exhausted (255 links); {name} (ifindex={ifindex}) \
-                         falls back to an ifindex-derived pseudonode id, which may collide \
-                         with another circuit's"
-                    ),
-                }
+            Ok(is_link) => {
+                // No circuit id yet. `RibRx::LinkAdd` fires for every
+                // interface the daemon sees, most of which never run IS-IS
+                // at all, and the id space is only 255 wide — see
+                // `Isis::ensure_circuit_id`, which reserves one when a
+                // circuit actually stands for DIS.
                 self.links.insert(is_link.ifindex, is_link);
             }
             Err(e) => {
