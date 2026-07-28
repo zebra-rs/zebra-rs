@@ -15693,10 +15693,10 @@ impl Bgp {
     /// the wrong ESI here is a silent blackhole once a remote PE starts
     /// aliasing (RFC 7432 §8.4) toward the segment we misnamed.
     ///
-    /// `ifindex == 0` means the learn carries no port. That is every MAC from
-    /// the cradle datapath — `FdbEvent` (proto/cradle.proto) reports only
-    /// `(mac, bd)`, so cradle-learned MACs stay single-homed here until that
-    /// stream carries the learning port. Kernel bridge learns do carry it.
+    /// `ifindex == 0` means the learn carries no port and the MAC is
+    /// advertised single-homed. Kernel bridge learns always carry one; a
+    /// cradle-datapath learn carries `FdbEvent.port` (proto/cradle.proto),
+    /// which is 0 only against a cradle predating that field.
     pub fn macip_esi(&self, entry: &FdbEntry) -> Option<[u8; 10]> {
         let ac =
             super::ethernet_segment::ac_name_for_ifindex(entry.ifindex, &self.link_index_by_name)?;

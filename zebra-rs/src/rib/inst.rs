@@ -441,6 +441,10 @@ pub enum Message {
     CradleFdbLearn {
         vni: u32,
         mac: MacAddr,
+        /// The port the datapath learned it on, or 0 when cradle did not
+        /// report one (an older cradle, or a learn it could not attribute).
+        /// Zero flows through as "no port", which BGP reads as single-homed.
+        ifindex: u32,
     },
     /// A cradle-learned MAC aged out (idle past `fdb_age_secs`) — withdraw
     /// its Type-2 by re-emitting the same synthesized entry as a
@@ -3522,8 +3526,8 @@ impl Rib {
             Message::MacDel { vni, mac } => {
                 self.mac_del(vni, mac).await;
             }
-            Message::CradleFdbLearn { vni, mac } => {
-                self.cradle_fdb_learn(vni, mac);
+            Message::CradleFdbLearn { vni, mac, ifindex } => {
+                self.cradle_fdb_learn(vni, mac, ifindex);
             }
             Message::CradleFdbAge { vni, mac } => {
                 self.cradle_fdb_age(vni, mac);
@@ -4255,7 +4259,11 @@ impl Rib {
                             let msg = if ev.event == 1 {
                                 Message::CradleFdbAge { vni: ev.bd, mac }
                             } else {
-                                Message::CradleFdbLearn { vni: ev.bd, mac }
+                                Message::CradleFdbLearn {
+                                    vni: ev.bd,
+                                    mac,
+                                    ifindex: ev.port,
+                                }
                             };
                             let _ = tx.send(msg);
                         }
@@ -4275,7 +4283,14 @@ impl Rib {
     /// would for a kernel-learned MAC. The VXLAN local address (the BGP
     /// nexthop source) resolves from the VNI's vxlan device when one is
     /// configured; router-id is the callers' fallback.
-    fn cradle_fdb_learn(&mut self, vni: u32, mac: MacAddr) {
+    ///
+    /// `ifindex` is the port cradle learned the MAC on, which is what lets
+    /// BGP place it on an Ethernet Segment. It shares the RIB's namespace,
+    /// so it indexes the same links: cradle is a sidecar in this daemon's
+    /// netns. 0 means cradle reported no port and the MAC stays
+    /// single-homed. `bridge_ifindex` stays 0 — a cradle bridge domain is a
+    /// datapath map, not a kernel bridge device.
+    fn cradle_fdb_learn(&mut self, vni: u32, mac: MacAddr, ifindex: u32) {
         if mac.is_multicast() {
             return;
         }
@@ -4287,7 +4302,7 @@ impl Rib {
         let entry = FdbEntry {
             vni,
             mac,
-            ifindex: 0,
+            ifindex,
             bridge_ifindex: 0,
             flags: 0,
             vxlan_local,
