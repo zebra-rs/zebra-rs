@@ -4115,6 +4115,18 @@ impl Bgp {
                 if self.interface_neighbors.contains_key(&link.name) {
                     super::interface_neighbor::materialize_dormant(self, &link.name);
                 }
+                // An Ethernet Segment naming this link as its access port
+                // could not resolve it until now (the same startup race),
+                // so MACs learned there originated single-homed Type-2s —
+                // the config-edit resync sites all ran before the name
+                // resolved. Re-originate them under the segment ESI.
+                if self
+                    .ethernet_segments
+                    .values()
+                    .any(|es| es.esi.is_some() && es.interface.as_deref() == Some(&link.name))
+                {
+                    self.evpn_resync_macip_esi();
+                }
             }
             // Fast external failover: a link going operationally down
             // (or disappearing) immediately resets the single-hop eBGP
