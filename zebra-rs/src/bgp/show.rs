@@ -4172,6 +4172,20 @@ fn format_pmsi_tunnel(p: &PmsiTunnel, mpls: bool) -> String {
     s
 }
 
+/// The path-level ESI to render for a route on `prefix`: only a Type-2
+/// (MAC/IP) or Type-5 (IP Prefix) carries its ESI on the path — every other
+/// route type keys on the ESI, which the prefix column already shows. Without
+/// this gate a locally-originated Type-1/Type-4 (whose `rib.esi` is set)
+/// would grow an `ESI:` line that the same route received from a peer never
+/// has, and "the ESI is gone from `show bgp evpn`" would be unobservable on
+/// any node that has a segment of its own configured.
+fn path_level_esi(prefix: &EvpnPrefix, esi: Option<[u8; 10]>) -> Option<[u8; 10]> {
+    match prefix {
+        EvpnPrefix::MacIp { .. } | EvpnPrefix::IpPrefix { .. } => esi,
+        _ => None,
+    }
+}
+
 /// Append the per-route attribute lines shared by the EVPN table renderers
 /// (`show_bgp_evpn` and `show_adj_rib_routes_evpn`). Each attribute prints on
 /// its own 20-space-indented line (aligned under the "Next Hop" column),
@@ -4189,20 +4203,6 @@ fn format_pmsi_tunnel(p: &PmsiTunnel, mpls: bool) -> String {
 ///   rendered together on one line as in the unicast detail view.
 /// - Aggregation (RFC 4271): Atomic-Aggregate flag and Aggregator AS/IP.
 /// - Accumulated IGP metric (RFC 7311).
-/// The path-level ESI to render for a route on `prefix`: only a Type-2
-/// (MAC/IP) or Type-5 (IP Prefix) carries its ESI on the path — every other
-/// route type keys on the ESI, which the prefix column already shows. Without
-/// this gate a locally-originated Type-1/Type-4 (whose `rib.esi` is set)
-/// would grow an `ESI:` line that the same route received from a peer never
-/// has, and "the ESI is gone from `show bgp evpn`" would be unobservable on
-/// any node that has a segment of its own configured.
-fn path_level_esi(prefix: &EvpnPrefix, esi: Option<[u8; 10]>) -> Option<[u8; 10]> {
-    match prefix {
-        EvpnPrefix::MacIp { .. } | EvpnPrefix::IpPrefix { .. } => esi,
-        _ => None,
-    }
-}
-
 fn write_evpn_path_attrs(
     buf: &mut String,
     attr: &BgpAttr,
