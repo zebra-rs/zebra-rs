@@ -447,8 +447,13 @@ pub fn stop(link: &mut LinkTop) {
     }
 }
 
-/// Circuit id for the pseudonode this router originates as DIS on
-/// `ifindex`, folded into `1..=255`.
+/// Fallback circuit id derived from `ifindex`, folded into `1..=255`.
+///
+/// Only reached when the per-instance allocator
+/// ([`crate::isis::link::IsisLinks::alloc_circuit_id`]) had nothing left
+/// to hand out, i.e. this router already runs IS-IS on 255 circuits. The
+/// pseudonode id is 8 bits, so beyond that some pair must collide however
+/// it is chosen; this at least keeps the value out of the reserved 0.
 ///
 /// Pseudonode id 0 is reserved for a router's own non-pseudonode LSP, so
 /// it can never name a circuit: a DIS that advertises `<sys-id>.00` as its
@@ -475,7 +480,13 @@ fn dis_pseudo_id(ifindex: u32) -> u8 {
 pub fn dis_becoming(link: &mut LinkTop, level: Level) {
     use IfsmEvent::*;
 
-    let pseudo_id: u8 = dis_pseudo_id(link.ifindex);
+    // The circuit's allocated id, unique across this instance's links.
+    // Zero means the allocator was exhausted (or this link predates
+    // assignment), so fall back to the ifindex fold — still never 0.
+    let pseudo_id: u8 = match link.state.circuit_id {
+        0 => dis_pseudo_id(link.ifindex),
+        id => id,
+    };
     let lsp_id = IsisLspId::new(link.up_config.net.sys_id(), pseudo_id, 0);
 
     // Register adjacency with LAN ID.

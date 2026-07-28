@@ -81,6 +81,14 @@ pub struct IsisLinks {
     pub map: BTreeMap<u32, IsisLink>,
 }
 
+/// Lowest id in `1..=255` absent from `used`, or `None` when the space is
+/// full. Split out from [`IsisLinks::alloc_circuit_id`] so the selection
+/// rule is testable without standing up real links (an `IsisLink` owns a
+/// raw `AF_PACKET` socket).
+fn lowest_free_circuit_id(used: &BTreeSet<u8>) -> Option<u8> {
+    (1u8..=255).find(|id| !used.contains(id))
+}
+
 impl IsisLinks {
     pub fn get(&self, key: &u32) -> Option<&IsisLink> {
         self.map.get(key)
@@ -96,6 +104,30 @@ impl IsisLinks {
 
     pub fn insert(&mut self, key: u32, value: IsisLink) -> Option<IsisLink> {
         self.map.insert(key, value)
+    }
+
+    /// Lowest circuit id in `1..=255` not already taken by a link this
+    /// instance holds, or `None` when all 255 are in use.
+    ///
+    /// The used set is read straight off the map rather than tracked in a
+    /// side table: the map is the only source of truth for which circuits
+    /// exist, so uniqueness cannot drift out of sync with it. Links are
+    /// never removed from `IsisLinks`, so ids are never recycled and an
+    /// assignment stays valid for the link's lifetime — which matters,
+    /// because the id names a pseudonode LSP that peers hold in their
+    /// LSDB.
+    ///
+    /// `0` is excluded by construction: it is the router's own
+    /// non-pseudonode LSP id, and a DIS that claimed it would advertise a
+    /// LAN ID aliasing that LSP.
+    pub fn alloc_circuit_id(&self) -> Option<u8> {
+        let used: BTreeSet<u8> = self
+            .map
+            .values()
+            .map(|link| link.state.circuit_id)
+            .filter(|id| *id != 0)
+            .collect();
+        lowest_free_circuit_id(&used)
     }
 
     pub fn iter(&self) -> Iter<'_, u32, IsisLink> {
@@ -642,6 +674,18 @@ impl DisStatistics {
 pub struct LinkState {
     // pub ifindex: u32,
     pub name: String,
+
+    /// This circuit's IS-IS circuit id, `1..=255`, assigned once when the
+    /// link is admitted and stable for its lifetime. It names the
+    /// pseudonode this router originates while DIS here: the pseudonode
+    /// LSP id is `(sys-id, circuit_id)`, so the value must be unique
+    /// across this instance's circuits and must never be 0 — 0 is the
+    /// router's own non-pseudonode LSP, and a LAN claiming it aliases
+    /// that LSP (see `ifsm::dis_becoming`).
+    ///
+    /// 0 means "unassigned": either the link predates assignment, or the
+    /// instance already holds 255 circuits and the space is exhausted.
+    pub circuit_id: u8,
     pub mtu: u32,
     pub mac: Option<MacAddr>,
 
@@ -821,7 +865,17 @@ impl Isis {
         let ifindex = link.index;
         let name = link.name.clone();
         match IsisLink::from(link, self.tx.clone()) {
-            Ok(is_link) => {
+            Ok(mut is_link) => {
+                // Assign before insert, so the allocator never sees this
+                // link's own (still zero) id in the used set.
+                match self.links.alloc_circuit_id() {
+                    Some(id) => is_link.state.circuit_id = id,
+                    None => tracing::warn!(
+                        "isis: circuit ids exhausted (255 links); {name} (ifindex={ifindex}) \
+                         falls back to an ifindex-derived pseudonode id, which may collide \
+                         with another circuit's"
+                    ),
+                }
                 self.links.insert(is_link.ifindex, is_link);
             }
             Err(e) => {
@@ -2050,7 +2104,12 @@ pub fn show_detail(
                         "Down".to_string()
                     },
                     active: true,
-                    circuit_id: format!("0x{:02X}", link.ifindex),
+                    // The circuit's real IS-IS id — what a pseudonode LSP
+                    // this router originates here is named with. Showing
+                    // the ifindex instead made the two disagree, so an
+                    // operator matching `show isis database` against this
+                    // column saw ids that did not exist.
+                    circuit_id: format!("0x{:02X}", link.state.circuit_id),
                     network_type: format!("{}", link.config.network_type()),
                     level: format!("{}", link.state.level()),
                     snpa: link.state.mac.map(|mac| mac.to_string()),
@@ -2647,5 +2706,55 @@ mod te_metric_tests {
                 ..Default::default()
             }
         );
+    }
+}
+
+#[cfg(test)]
+mod circuit_id_tests {
+    use super::lowest_free_circuit_id;
+    use std::collections::BTreeSet;
+
+    fn used(ids: &[u8]) -> BTreeSet<u8> {
+        ids.iter().copied().collect()
+    }
+
+    /// 0 is the router's own non-pseudonode LSP id. A circuit that took
+    /// it would make the DIS advertise a LAN ID aliasing that LSP, which
+    /// is the bug this allocator exists to make unrepresentable.
+    #[test]
+    fn never_allocates_zero() {
+        assert_eq!(lowest_free_circuit_id(&used(&[])), Some(1));
+        // Even if a stale 0 somehow sits in the used set, it is not a
+        // candidate to hand back.
+        assert_eq!(lowest_free_circuit_id(&used(&[0])), Some(1));
+    }
+
+    /// Ids must be distinct across circuits: two LANs sharing one would
+    /// share a pseudonode LSP id and collide in every peer's LSDB.
+    #[test]
+    fn hands_out_distinct_ids_until_exhausted() {
+        let mut used = BTreeSet::new();
+        for expected in 1..=255u8 {
+            let id = lowest_free_circuit_id(&used).expect("space remains");
+            assert_eq!(id, expected, "allocation must be dense and in order");
+            assert!(used.insert(id), "id {id} handed out twice");
+        }
+        assert_eq!(used.len(), 255);
+        assert_eq!(
+            lowest_free_circuit_id(&used),
+            None,
+            "256th circuit must report exhaustion, not wrap to 0"
+        );
+    }
+
+    /// Gaps are reused. Links are never removed today, so this is
+    /// forward cover for the day they are.
+    #[test]
+    fn fills_the_lowest_gap() {
+        assert_eq!(lowest_free_circuit_id(&used(&[1, 2, 4])), Some(3));
+        assert_eq!(lowest_free_circuit_id(&used(&[2, 3])), Some(1));
+        let mut full: BTreeSet<u8> = (1..=255u8).collect();
+        full.remove(&200);
+        assert_eq!(lowest_free_circuit_id(&full), Some(200));
     }
 }
