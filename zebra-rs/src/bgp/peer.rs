@@ -159,7 +159,7 @@ pub enum Event {
     // wire (raw u16/u8) so unknown-AF refreshes still dispatch
     // through the FSM rather than tearing the session down.
     RouteRefreshMsg(u16, u8),
-    StaleTimerExipires(AfiSafi),
+    StaleTimerExpires(AfiSafi),
     AdvTimerVpnv4Expires,
     AdvTimerVpnv6Expires,
     AdvTimerEvpnExpires,
@@ -1828,7 +1828,7 @@ pub fn fsm_next_state(peer: &mut Peer, event: Event) -> (State, FsmEffect) {
             timer::refresh_hold_timer(peer);
             (peer.state, FsmEffect::RouteRefreshRecv { afi, safi })
         }
-        Event::StaleTimerExipires(afi_safi) => {
+        Event::StaleTimerExpires(afi_safi) => {
             peer.timer.stale_timer.remove(&afi_safi);
             (peer.state, FsmEffect::StaleExpire(afi_safi))
         }
