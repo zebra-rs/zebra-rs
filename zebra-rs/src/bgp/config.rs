@@ -8900,3 +8900,146 @@ mod mup_dual_origination_tests {
         );
     }
 }
+
+#[cfg(test)]
+mod es_linkadd_resync_tests {
+    //! The Type-2 ESI resync sites (`evpn_resync_macip_esi`) are all config
+    //! handlers, but the port→segment binding also depends on link state:
+    //! a segment whose `interface` names a link the RIB has not announced
+    //! yet cannot resolve, so its MACs originate single-homed. Startup
+    //! config replay races the link dump, making that ordering routine —
+    //! the `RibRx::LinkAdd` arm must resync once the name resolves.
+
+    use std::collections::VecDeque;
+    use std::str::FromStr;
+
+    use bgp_packet::{EvpnPrefix, RouteDistinguisher};
+    use tokio::sync::mpsc;
+
+    use super::super::inst::Bgp;
+    use super::*;
+    use crate::rib::MacAddr;
+    use crate::rib::api::FdbEntry;
+
+    const ESI1: [u8; 10] = [0x00, 0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77, 0x88, 0x99];
+
+    fn arg_words(parts: &[&str]) -> Args {
+        Args(
+            parts
+                .iter()
+                .map(|s| (*s).to_string())
+                .collect::<VecDeque<_>>(),
+        )
+    }
+
+    fn fresh_bgp() -> Bgp {
+        let (inbound_tx, _inbound_rx) = mpsc::unbounded_channel();
+        let (_rib_rx_tx, rib_rx) = mpsc::unbounded_channel();
+        let client = crate::rib::client::RibClient::new(
+            inbound_tx,
+            crate::rib::client::ProtoId::from_raw(0),
+        );
+        Box::leak(Box::new(_inbound_rx));
+        let ctx = crate::context::ProtoContext::default_table(client);
+
+        let (rib_tx, _rib_rx) = mpsc::unbounded_channel();
+        let (rib_inbound_tx, _sub_inbound_rx) = mpsc::unbounded_channel();
+        Box::leak(Box::new(_rib_rx));
+        Box::leak(Box::new(_sub_inbound_rx));
+        let next_proto_id = std::sync::Arc::new(std::sync::atomic::AtomicU32::new(1));
+        let subscriber =
+            crate::config::RibSubscriber::for_test(rib_tx, rib_inbound_tx, next_proto_id);
+
+        let (policy_tx, _policy_rx) = mpsc::unbounded_channel();
+        Box::leak(Box::new(_policy_rx));
+        Bgp::new(
+            ctx,
+            rib_rx,
+            subscriber,
+            policy_tx,
+            None,
+            None,
+            tokio::sync::mpsc::channel(1).0,
+        )
+    }
+
+    /// The ESI on the originated Type-2's selected Loc-RIB path.
+    fn selected_esi(bgp: &Bgp) -> Option<[u8; 10]> {
+        let rd = RouteDistinguisher::from_str("10.0.0.1:10").unwrap();
+        let prefix = EvpnPrefix::MacIp {
+            eth_tag: 0,
+            mac: MacAddr::from_str("aa:bb:cc:dd:ee:01").unwrap().octets(),
+            ip: None,
+        };
+        bgp.local_rib
+            .evpn
+            .get(&rd)
+            .and_then(|t| t.selected.get(&prefix))
+            .expect("the Type-2 must stay originated across the resync")
+            .esi
+    }
+
+    /// Segment fully configured before the RIB announces its access-port
+    /// link: the MAC originates single-homed, and the `RibRx::LinkAdd` arm
+    /// must re-originate it under the segment ESI once the name resolves.
+    #[tokio::test]
+    async fn link_add_resolves_a_preconfigured_segment_port() {
+        let mut bgp = fresh_bgp();
+        bgp.advertise_all_vni = true;
+        bgp.router_id = "10.0.0.1".parse().unwrap();
+        // Segment fully configured; link `host0` not announced yet.
+        config_ethernet_segment_interface(
+            &mut bgp,
+            arg_words(&["evpn", "es1", "host0"]),
+            ConfigOp::Set,
+        )
+        .unwrap();
+        config_ethernet_segment_esi(
+            &mut bgp,
+            arg_words(&["evpn", "es1", "00:11:22:33:44:55:66:77:88:99"]),
+            ConfigOp::Set,
+        )
+        .unwrap();
+        let entry = FdbEntry {
+            vni: 10,
+            mac: MacAddr::from_str("aa:bb:cc:dd:ee:01").unwrap(),
+            ifindex: 7,
+            bridge_ifindex: 3,
+            flags: 0,
+            vxlan_local: None,
+        };
+        bgp.local_fdb.insert((entry.vni, entry.mac), entry.clone());
+        bgp.evpn_originate_macip(&entry);
+        assert_eq!(
+            selected_esi(&bgp),
+            None,
+            "the segment's port is unresolvable — single-homed for now"
+        );
+
+        let link = crate::rib::Link {
+            index: 7,
+            name: "host0".to_string(),
+            mtu: 1500,
+            original_mtu: 1500,
+            metric: 1,
+            flags: Default::default(),
+            link_type: crate::rib::LinkType::Ethernet,
+            label: false,
+            mac: None,
+            addr4: Vec::new(),
+            addr6: Vec::new(),
+            master: None,
+            vni: None,
+            vrf_table: None,
+            bridge: false,
+            vxlan_local: None,
+            mtu_error: None,
+        };
+        bgp.process_rib_msg(crate::rib::api::RibRx::LinkAdd(link));
+        assert_eq!(
+            selected_esi(&bgp),
+            Some(ESI1),
+            "LinkAdd must re-originate the port's MACs under the segment ESI"
+        );
+    }
+}
