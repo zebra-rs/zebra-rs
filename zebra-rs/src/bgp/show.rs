@@ -1514,7 +1514,12 @@ fn show_adj_rib_routes_evpn<D: RibDirection>(
                     nexthop, med, local_pref, weight, aspath, origin
                 )?;
 
-                write_evpn_path_attrs(&mut buf, &rib.attr, rib.is_originated(), rib.esi)?;
+                write_evpn_path_attrs(
+                    &mut buf,
+                    &rib.attr,
+                    rib.is_originated(),
+                    path_level_esi(prefix, rib.esi),
+                )?;
             }
         }
     }
@@ -4184,6 +4189,20 @@ fn format_pmsi_tunnel(p: &PmsiTunnel, mpls: bool) -> String {
 ///   rendered together on one line as in the unicast detail view.
 /// - Aggregation (RFC 4271): Atomic-Aggregate flag and Aggregator AS/IP.
 /// - Accumulated IGP metric (RFC 7311).
+/// The path-level ESI to render for a route on `prefix`: only a Type-2
+/// (MAC/IP) or Type-5 (IP Prefix) carries its ESI on the path — every other
+/// route type keys on the ESI, which the prefix column already shows. Without
+/// this gate a locally-originated Type-1/Type-4 (whose `rib.esi` is set)
+/// would grow an `ESI:` line that the same route received from a peer never
+/// has, and "the ESI is gone from `show bgp evpn`" would be unobservable on
+/// any node that has a segment of its own configured.
+fn path_level_esi(prefix: &EvpnPrefix, esi: Option<[u8; 10]>) -> Option<[u8; 10]> {
+    match prefix {
+        EvpnPrefix::MacIp { .. } | EvpnPrefix::IpPrefix { .. } => esi,
+        _ => None,
+    }
+}
+
 fn write_evpn_path_attrs(
     buf: &mut String,
     attr: &BgpAttr,
@@ -4213,7 +4232,9 @@ fn write_evpn_path_attrs(
     // behind. An NLRI field rather than a path attribute, but it belongs with
     // the forwarding story: it is what lets a remote PE alias traffic across
     // every PE attached to the same segment (RFC 7432 §8.4). Suppressed when
-    // zero — that is the single-homed case, which is most routes.
+    // zero — that is the single-homed case, which is most routes. Callers
+    // gate on the route type via `path_level_esi`, so a Type-1/4 (ESI in the
+    // prefix column) never doubles it here.
     if let Some(esi) = esi.filter(|esi| esi != &[0u8; 10]) {
         writeln!(buf, "{PAD}ESI: {}", bgp_packet::esi_display(&esi))?;
     }
@@ -4408,7 +4429,12 @@ fn show_bgp_evpn(
             // route-reflection attrs (RFC 4456: Originator / Cluster list),
             // aggregation (RFC 4271), and AIGP (RFC 7311). Lines are emitted
             // only when the attribute is present.
-            write_evpn_path_attrs(&mut buf, &rib.attr, rib.is_originated(), rib.esi)?;
+            write_evpn_path_attrs(
+                &mut buf,
+                &rib.attr,
+                rib.is_originated(),
+                path_level_esi(prefix, rib.esi),
+            )?;
 
             // Line 4 (Type-9 only): RFC 9572 §5.3.1 inter-AS DF election among
             // the ASBRs advertising this region's Per-Region I-PMSI.
