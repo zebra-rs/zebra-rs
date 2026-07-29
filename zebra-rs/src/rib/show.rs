@@ -1864,10 +1864,24 @@ pub struct MacJson {
 /// The overlay destination of a MAC table entry, as `(encap, destination)`.
 /// `(None, "-")` for a local entry that has neither.
 fn mac_destination(entry: &crate::rib::inst::MacEntry) -> (Option<&'static str>, String) {
-    match (entry.srv6_sid, entry.tunnel_endpoint) {
-        (Some(sid), _) => (Some("srv6"), sid.to_string()),
-        (None, Some(vtep)) => (Some("vxlan"), vtep.to_string()),
-        (None, None) => (None, "-".to_string()),
+    use crate::rib::inst::MacDest;
+    // The installed destination is the first — `dests` is ordered and the
+    // RIB installs `dests.first()`. A multihomed MAC (RFC 7432 §8.4) has
+    // more; they are counted rather than listed so the column keeps its
+    // width, and `show l2 mac table detail` can spell them out later.
+    let Some(dest) = entry.dests.first() else {
+        return (None, "-".to_string());
+    };
+    let extra = entry.dests.len() - 1;
+    let suffix = if extra > 0 {
+        format!(" (+{extra})")
+    } else {
+        String::new()
+    };
+    match dest {
+        MacDest::Srv6 { sid } => (Some("srv6"), format!("{sid}{suffix}")),
+        MacDest::Vxlan { vtep } => (Some("vxlan"), format!("{vtep}{suffix}")),
+        MacDest::Mpls { pe, label } => (Some("mpls"), format!("{pe}:{label}{suffix}")),
     }
 }
 
@@ -2387,9 +2401,19 @@ mod tests {
         tunnel_endpoint: Option<IpAddr>,
         srv6_sid: Option<Ipv6Addr>,
     ) -> crate::rib::inst::MacEntry {
+        mac_entry_dests(
+            crate::rib::inst::MacDest::from_parts(tunnel_endpoint, srv6_sid, None)
+                .into_iter()
+                .collect(),
+        )
+    }
+
+    fn mac_entry_dests(
+        dests: std::collections::BTreeSet<crate::rib::inst::MacDest>,
+    ) -> crate::rib::inst::MacEntry {
         crate::rib::inst::MacEntry {
-            tunnel_endpoint,
-            srv6_sid,
+            dests,
+            esi: None,
             flags: 0,
             seq: 0,
             installed: false,
