@@ -8683,6 +8683,28 @@ fn route_update_mup(
     if peer.is_ibgp() && attrs.local_pref.is_none() {
         attrs.local_pref = Some(LocalPref::default());
     }
+
+    // ORIGINATOR_ID / CLUSTER_LIST for route reflection (RFC 4456 §8),
+    // the same stamping the unicast and EVPN paths do. Reflecting a MUP
+    // route without them leaves the fabric with no loop prevention: a
+    // client cannot tell that a route it receives back through a
+    // redundant reflector is one it originated, and a second reflector
+    // has no cluster path to check.
+    if peer.peer_type == PeerType::IBGP && rib.typ == BgpRibType::IBGP {
+        // Set once, by the first reflector, and preserved thereafter so
+        // it keeps identifying the original source.
+        if attrs.originator_id.is_none() {
+            attrs.originator_id = Some(OriginatorId::new(rib.router_id));
+        }
+        if let Some(ref mut cluster_list) = attrs.cluster_list {
+            cluster_list.list.insert(0, *bgp.router_id);
+        } else {
+            let mut cluster_list = ClusterList::new();
+            cluster_list.list.push(*bgp.router_id);
+            attrs.cluster_list = Some(cluster_list);
+        }
+    }
+
     if peer.is_ebgp() {
         strip_ibgp_only_attrs(&mut attrs);
     }
@@ -9785,7 +9807,7 @@ pub fn route_update_flowspec(
     nlri: &FlowspecNlri,
     rib: &BgpRib,
     add_path: bool,
-    as_sets_withdraw: bool,
+    bgp: &BgpTop,
 ) -> Option<(FlowspecNlri, BgpAttr)> {
     if rib.ident == peer.ident {
         return None;
@@ -9802,12 +9824,32 @@ pub fn route_update_flowspec(
 
     let mut attrs = (*rib.attr).clone();
     ebgp_egress_aspath(&peer.egress_as(), &mut attrs);
-    if as_sets_withdraw_suppresses_egress(as_sets_withdraw, &attrs) {
+    if as_sets_withdraw_suppresses_egress(bgp.as_sets_withdraw, &attrs) {
         return None;
     }
     if peer.is_ibgp() && attrs.local_pref.is_none() {
         attrs.local_pref = Some(LocalPref::default());
     }
+
+    // ORIGINATOR_ID / CLUSTER_LIST for route reflection (RFC 4456 §8),
+    // the same stamping the unicast and EVPN paths do — without them a
+    // reflected flow spec has no loop prevention across redundant
+    // reflectors.
+    if peer.peer_type == PeerType::IBGP && rib.typ == BgpRibType::IBGP {
+        // Set once, by the first reflector, and preserved thereafter so
+        // it keeps identifying the original source.
+        if attrs.originator_id.is_none() {
+            attrs.originator_id = Some(OriginatorId::new(rib.router_id));
+        }
+        if let Some(ref mut cluster_list) = attrs.cluster_list {
+            cluster_list.list.insert(0, *bgp.router_id);
+        } else {
+            let mut cluster_list = ClusterList::new();
+            cluster_list.list.push(*bgp.router_id);
+            attrs.cluster_list = Some(cluster_list);
+        }
+    }
+
     // Strip the iBGP-only attributes (RR attrs + LOCAL_PREF) on the eBGP
     // egress path (AFI/SAFI-agnostic — see `strip_ibgp_only_attrs`).
     if peer.is_ebgp() {
@@ -9846,9 +9888,7 @@ pub fn route_advertise_flowspec_to_peers(
         let peer = peers.get_mut_by_idx(ident).expect("peer exists");
         let add_path = peer.opt.is_add_path_send(afi, Safi::Flowspec);
 
-        let Some((out_nlri, attr)) =
-            route_update_flowspec(peer, nlri, best, add_path, bgp.as_sets_withdraw)
-        else {
+        let Some((out_nlri, attr)) = route_update_flowspec(peer, nlri, best, add_path, bgp) else {
             continue;
         };
 
@@ -22650,5 +22690,207 @@ mod eor_stale_expire_tests {
                 .count()
         });
         assert_eq!(stale_left, 0, "EoR must flush the stale VPNv4 paths");
+    }
+}
+
+#[cfg(test)]
+mod rfc4456_reflect_stamp_tests {
+    use super::*;
+    use crate::bgp::peer::State;
+    use bgp_packet::{ClusterList, FlowspecNlri, MupPrefix, OriginatorId};
+    use std::net::IpAddr;
+
+    const OUR_RID: Ipv4Addr = Ipv4Addr::new(1, 1, 1, 1);
+    const SOURCE_RID: Ipv4Addr = Ipv4Addr::new(2, 2, 2, 2);
+
+    fn client_peer() -> Peer {
+        let (tx, rx) = tokio::sync::mpsc::channel(8);
+        Box::leak(Box::new(rx));
+        let mut peer = Peer::new(
+            1,
+            65001,
+            OUR_RID,
+            65001,
+            "10.0.0.2".parse::<IpAddr>().unwrap(),
+            None,
+            tx,
+            crate::context::ProtoContext::default_table_no_rib(),
+        );
+        peer.state = State::Established;
+        peer.peer_type = PeerType::IBGP;
+        peer.reflector_client = true;
+        peer
+    }
+
+    /// An iBGP-learned path as the Loc-RIB holds it: ident 2 ≠ the
+    /// destination peer's ident 1, so the reflection gate is what
+    /// decides, and the attr carries the MP_REACH next-hop MUP ingest
+    /// stamps.
+    fn ibgp_rib(attr: &BgpAttr) -> BgpRib {
+        BgpRib::new(
+            2,
+            SOURCE_RID,
+            BgpRibType::IBGP,
+            0,
+            0,
+            attr,
+            None,
+            None,
+            false,
+        )
+    }
+
+    fn base_attr() -> BgpAttr {
+        let mut attr = BgpAttr::new();
+        attr.nexthop = Some(BgpNexthop::Ipv4("10.0.0.3".parse().unwrap()));
+        attr
+    }
+
+    fn top_with<'a>(
+        router_id: &'a Ipv4Addr,
+        local_rib: &'a mut LocalRib,
+        shard: &'a mut crate::bgp::shard::BgpShard,
+        attr_store: &'a mut crate::bgp::BgpAttrStore,
+        update_groups: &'a mut crate::bgp::update_group::UpdateGroupMap,
+        interface_addrs: &'a crate::bgp::interface_addrs::InterfaceAddrs,
+        rib_client: &'a crate::rib::client::RibClient,
+        tx: &'a tokio::sync::mpsc::Sender<crate::bgp::inst::Message>,
+    ) -> BgpTop<'a> {
+        BgpTop {
+            router_id,
+            srv6_ipv6_export: None,
+            local_rib,
+            shard,
+            tx,
+            rib_client,
+            attr_store,
+            update_groups,
+            interface_addrs,
+            vrf_export: None,
+            color_policy: None,
+            flex_algo_routes: None,
+            flex_algo_srv6_routes: None,
+            vrf_import: None,
+            nexthop_cache: None,
+            vrf_transport_v4: None,
+            vrf_transport_v6: None,
+            central_label_alloc: None,
+            as_sets_withdraw: false,
+        }
+    }
+
+    macro_rules! with_top {
+        ($top:ident, $body:block) => {{
+            let router_id = OUR_RID;
+            let ctx = crate::context::ProtoContext::default_table_no_rib();
+            let mut local_rib = LocalRib::default();
+            let mut shard = crate::bgp::shard::BgpShard::default();
+            let mut attr_store = crate::bgp::BgpAttrStore::default();
+            let mut update_groups = crate::bgp::update_group::empty_map();
+            let interface_addrs = crate::bgp::interface_addrs::InterfaceAddrs::default();
+            let (tx, rx) = tokio::sync::mpsc::channel(8);
+            Box::leak(Box::new(rx));
+            let $top = top_with(
+                &router_id,
+                &mut local_rib,
+                &mut shard,
+                &mut attr_store,
+                &mut update_groups,
+                &interface_addrs,
+                &ctx.rib,
+                &tx,
+            );
+            $body
+        }};
+    }
+
+    /// RFC 4456 §8: a reflected route must carry ORIGINATOR_ID (set by
+    /// the first reflector, preserved thereafter) and our cluster id
+    /// prepended to CLUSTER_LIST. The MUP path reflected with neither.
+    #[tokio::test]
+    async fn mup_reflection_stamps_originator_and_cluster() {
+        with_top!(top, {
+            let mut peer = client_peer();
+            let prefix = MupPrefix::Isd {
+                prefix: "10.9.0.0/24".parse().unwrap(),
+            };
+
+            // First reflector: both attributes appear.
+            let rib = ibgp_rib(&base_attr());
+            let (_, attrs, _) = route_update_mup(
+                &mut peer,
+                RouteDistinguisher::default(),
+                &prefix,
+                &rib,
+                &top,
+            )
+            .expect("reflected to the client");
+            assert_eq!(attrs.originator_id, Some(OriginatorId::new(SOURCE_RID)));
+            assert_eq!(
+                attrs.cluster_list.as_ref().map(|cl| cl.list.clone()),
+                Some(vec![OUR_RID])
+            );
+
+            // Second reflector: the originator is preserved and our
+            // cluster id is prepended, not substituted.
+            let mut attr = base_attr();
+            attr.originator_id = Some(OriginatorId::new(SOURCE_RID));
+            let mut cl = ClusterList::new();
+            cl.list.push(Ipv4Addr::new(9, 9, 9, 9));
+            attr.cluster_list = Some(cl);
+            let rib = ibgp_rib(&attr);
+            let (_, attrs, _) = route_update_mup(
+                &mut peer,
+                RouteDistinguisher::default(),
+                &prefix,
+                &rib,
+                &top,
+            )
+            .expect("reflected to the client");
+            assert_eq!(attrs.originator_id, Some(OriginatorId::new(SOURCE_RID)));
+            assert_eq!(
+                attrs.cluster_list.as_ref().map(|cl| cl.list.clone()),
+                Some(vec![OUR_RID, Ipv4Addr::new(9, 9, 9, 9)])
+            );
+
+            // eBGP-learned toward an iBGP peer is not reflection — no stamp.
+            let mut rib = ibgp_rib(&base_attr());
+            rib.typ = BgpRibType::EBGP;
+            let (_, attrs, _) = route_update_mup(
+                &mut peer,
+                RouteDistinguisher::default(),
+                &prefix,
+                &rib,
+                &top,
+            )
+            .expect("advertised to the iBGP peer");
+            assert_eq!(attrs.originator_id, None);
+            assert_eq!(attrs.cluster_list, None);
+        });
+    }
+
+    /// Same statement for flow specs, which reflected bare as well.
+    #[tokio::test]
+    async fn flowspec_reflection_stamps_originator_and_cluster() {
+        with_top!(top, {
+            let mut peer = client_peer();
+            let nlri = FlowspecNlri::new(Afi::Ip, vec![]);
+
+            let rib = ibgp_rib(&base_attr());
+            let (_, attrs) = route_update_flowspec(&mut peer, &nlri, &rib, false, &top)
+                .expect("reflected to the client");
+            assert_eq!(attrs.originator_id, Some(OriginatorId::new(SOURCE_RID)));
+            assert_eq!(
+                attrs.cluster_list.as_ref().map(|cl| cl.list.clone()),
+                Some(vec![OUR_RID])
+            );
+
+            let mut rib = ibgp_rib(&base_attr());
+            rib.typ = BgpRibType::EBGP;
+            let (_, attrs) = route_update_flowspec(&mut peer, &nlri, &rib, false, &top)
+                .expect("advertised to the iBGP peer");
+            assert_eq!(attrs.originator_id, None);
+            assert_eq!(attrs.cluster_list, None);
+        });
     }
 }
