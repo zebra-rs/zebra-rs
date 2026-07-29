@@ -16286,6 +16286,162 @@ impl Bgp {
         self.evpn_originate_synch(rd, prefix, rib);
     }
 
+    /// Originate the per-EVI Ethernet Auto-Discovery route (Type-1, RFC
+    /// 7432 §8.4) for `esi` in `vni`: RD = `<router-id>:<vni>`, Ethernet
+    /// Tag 0 (one bridge domain per VNI, matching Type-2), the EVI RT, and
+    /// this PE's service binding for the EVI — the End.DT2U SID under
+    /// SRv6, the EVI service label under MPLS.
+    ///
+    /// **This is what makes aliasing possible.** A remote PE that has a
+    /// Type-2 for a MAC on this segment from *another* PE learns from this
+    /// route that we can reach it too, without ever having seen the MAC
+    /// ourselves — which is the entire point: the PE that has not learned
+    /// the MAC is exactly the one traffic would otherwise never reach.
+    pub fn evpn_originate_ethernet_ad_evi(&mut self, esi: [u8; 10], vni: u32) {
+        if self.router_id.is_unspecified() {
+            return;
+        }
+        let Some(rd) = rd_from_router_id_vni(self.router_id, vni) else {
+            return;
+        };
+        let prefix = EvpnPrefix::EthernetAd { esi, eth_tag: 0 };
+        let mut attr = BgpAttr::new();
+        let mut ecom = ExtCommunity::from([evpn_route_target(self.asn, vni)]);
+        if !self.evpn_encap.is_mpls() {
+            ecom.0.insert(evpn_encap_vxlan());
+        }
+        attr.ecom = Some(ecom);
+        attr.nexthop = Some(BgpNexthop::Evpn(self.evpn_nexthop_for_vni(vni)));
+        if self.evpn_encap.is_srv6() {
+            attr.prefix_sid = self.vni_dt2u_prefix_sid(vni);
+        }
+        let evi_label = self
+            .evpn_encap
+            .is_mpls()
+            .then(|| self.evpn_evis.get(&vni).and_then(|cfg| cfg.label))
+            .flatten();
+        let mut rib = BgpRib::new(
+            ORIGINATED_PEER,
+            Ipv4Addr::UNSPECIFIED,
+            BgpRibType::Originated,
+            0,
+            32768,
+            &attr,
+            evi_label.map(|label| bgp_packet::Label {
+                label,
+                exp: 0,
+                bos: true,
+            }),
+            None,
+            false,
+        );
+        rib.esi = Some(esi);
+        self.evpn_originate_synch(rd, prefix, rib);
+    }
+
+    /// Inverse of `evpn_originate_ethernet_ad_evi`.
+    pub fn evpn_withdraw_ethernet_ad_evi(&mut self, esi: [u8; 10], vni: u32) {
+        let Some(rd) = rd_from_router_id_vni(self.router_id, vni) else {
+            return;
+        };
+        let prefix = EvpnPrefix::EthernetAd { esi, eth_tag: 0 };
+        let _ = self.local_rib.remove_evpn(rd, &prefix, 0, ORIGINATED_PEER);
+        let _ = self.local_rib.select_best_path_evpn(&rd, &prefix);
+        route_withdraw_evpn_to_peers(rd, prefix, &mut self.peers);
+    }
+
+    /// The next hop an EVPN route for `vni` carries: the VNI's VTEP when
+    /// one is known, else the router-id. Under MPLS the router-id IS the
+    /// next hop — there is no VTEP and the transport LSP resolves on it —
+    /// so the fallback is the intended answer rather than a degraded one.
+    fn evpn_nexthop_for_vni(&self, vni: u32) -> IpAddr {
+        self.local_vxlans
+            .get(&vni)
+            .copied()
+            .unwrap_or(IpAddr::V4(self.router_id))
+    }
+
+    /// Re-reconcile per-EVI A-D for every configured Ethernet Segment's
+    /// access port. Called after an ES config edit, which is the other
+    /// direction the binding can change: `RibRx::L2PortEvis` covers the
+    /// port moving under a fixed config, this covers the config moving
+    /// under a fixed port. Cheap — segments are operator-configured and
+    /// few, and each reconcile is a Loc-RIB lookup per candidate EVI.
+    pub fn evpn_resync_ad_evi(&mut self) {
+        let ports: Vec<u32> = self
+            .ethernet_segments
+            .values()
+            .filter(|es| es.esi.is_some())
+            .filter_map(|es| es.interface.as_ref())
+            .filter_map(|name| self.link_index_by_name.get(name).copied())
+            .collect();
+        for ifindex in ports {
+            self.evpn_reconcile_ad_evi_for_port(ifindex);
+        }
+    }
+
+    /// Bring the per-EVI A-D routes for every Ethernet Segment bound to
+    /// `ifindex` in line with that port's current EVI membership: one
+    /// route per EVI it is in, and none for an EVI it has left.
+    ///
+    /// Driven by `RibRx::L2PortEvis` and by ES config edits, so a segment
+    /// declared before its port was enslaved — or enslaved before the
+    /// segment was declared — converges either way round.
+    pub fn evpn_reconcile_ad_evi_for_port(&mut self, ifindex: u32) {
+        let Some(port) =
+            super::ethernet_segment::ac_name_for_ifindex(ifindex, &self.link_index_by_name)
+        else {
+            return;
+        };
+        let wanted: std::collections::BTreeSet<u32> =
+            self.l2_port_evis.get(&ifindex).cloned().unwrap_or_default();
+        let segments: Vec<[u8; 10]> = self
+            .ethernet_segments
+            .values()
+            .filter(|es| es.interface.as_deref() == Some(port.as_str()))
+            .filter_map(|es| es.esi)
+            .collect();
+        // Every EVI we could conceivably have advertised for: the ones the
+        // port is in now, plus every local VNI — an EVI the port has left
+        // is no longer in `wanted`, so the withdraw has to come from
+        // somewhere that still remembers it exists.
+        let candidates: std::collections::BTreeSet<u32> = wanted
+            .iter()
+            .copied()
+            .chain(self.local_vxlans.keys().copied())
+            .collect();
+        for esi in segments {
+            for &vni in &candidates {
+                match (
+                    wanted.contains(&vni),
+                    self.evpn_ad_evi_originated(&esi, vni),
+                ) {
+                    (true, false) => self.evpn_originate_ethernet_ad_evi(esi, vni),
+                    (false, true) => self.evpn_withdraw_ethernet_ad_evi(esi, vni),
+                    _ => {}
+                }
+            }
+        }
+    }
+
+    /// Whether we already originate a per-EVI A-D for `esi` in `vni`, read
+    /// back from the Loc-RIB rather than tracked separately — the routes
+    /// are the state, so there is nothing to keep in sync with them.
+    fn evpn_ad_evi_originated(&self, esi: &[u8; 10], vni: u32) -> bool {
+        let Some(rd) = rd_from_router_id_vni(self.router_id, vni) else {
+            return false;
+        };
+        let prefix = EvpnPrefix::EthernetAd {
+            esi: *esi,
+            eth_tag: 0,
+        };
+        self.local_rib
+            .evpn
+            .get(&rd)
+            .and_then(|table| table.selected.get(&prefix))
+            .is_some_and(|rib| rib.typ == BgpRibType::Originated)
+    }
+
     /// Inverse of `evpn_originate_ethernet_ad_es`.
     pub fn evpn_withdraw_ethernet_ad_es(&mut self, esi: [u8; 10]) {
         let Some(rd) = rd_from_router_id_vni(self.router_id, 0) else {
@@ -16702,6 +16858,18 @@ impl Bgp {
     pub fn evpn_withdraw_es_routes(&mut self, esi: [u8; 10], vtep_local: IpAddr) {
         self.evpn_withdraw_ethernet_seg(esi, vtep_local);
         self.evpn_withdraw_ethernet_ad_es(esi);
+        // The per-EVI A-Ds go too. They must be withdrawn from here rather
+        // than from the port reconciler: by the time the segment is gone
+        // nothing still associates it with a port, so the reconciler can no
+        // longer tell these routes were ever ours. Every local VNI is
+        // swept because that is the set the routes could have been
+        // originated for.
+        let vnis: Vec<u32> = self.local_vxlans.keys().copied().collect();
+        for vni in vnis {
+            if self.evpn_ad_evi_originated(&esi, vni) {
+                self.evpn_withdraw_ethernet_ad_evi(esi, vni);
+            }
+        }
     }
 
     /// The DF-election candidates for an ES, computed from the EVPN Loc-RIB:

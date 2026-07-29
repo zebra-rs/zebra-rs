@@ -3,6 +3,7 @@ use anyhow::{Context, Result};
 use ipnet::IpNet;
 use netlink_packet_route::link::LinkFlags;
 use serde::Serialize;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::{self, Write};
 use tokio::sync::mpsc::UnboundedSender;
 
@@ -814,6 +815,15 @@ impl Rib {
             self.rescan_fdb_for_bridge(bridge);
         }
 
+        // Publish EVI membership for everything this event could have
+        // moved. Both masters matter: a port changing bridges leaves one
+        // EVI set and joins another, and only re-reading both reports the
+        // departure. Every port of those bridges is re-read, not just this
+        // one — a VXLAN arriving, leaving, or changing its VNI changes the
+        // EVI set of every port sharing its bridge, and that VXLAN is the
+        // link this event is about.
+        self.publish_l2_evis([prev_master, now_master], ifindex);
+
         // If a VRF binding is pending for this interface (operator
         // configured it before the kernel device appeared, or before
         // the VRF master was created), replay it now.
@@ -879,7 +889,37 @@ impl Rib {
         // VRF lookup in `api_link_del` still resolves to the right
         // subscribers instead of falling through to default VRF.
         self.api_link_del(oslink.index);
+        let master = self.links.get(&oslink.index).and_then(|l| l.master);
         self.links.remove(&oslink.index);
+        // Re-publish AFTER the removal so the surviving ports are read
+        // against a table this link is already out of: deleting the
+        // bridge's VXLAN is exactly how they lose an EVI, and reading
+        // first would report the set that just stopped being true. The
+        // deleted link is published as well, since its own membership is
+        // now empty.
+        self.publish_l2_evis([master], oslink.index);
+    }
+
+    /// Publish [`RibRx::L2PortEvis`] for `port` and for every port of
+    /// `bridges`, re-read from the current link table.
+    ///
+    /// Deliberately unconditional: the snapshot is idempotent, so
+    /// re-sending an unchanged set costs a message and nothing else,
+    /// whereas tracking what was last sent per port would be a cache to
+    /// keep coherent with the kernel. Subscribers compare against what
+    /// they hold, which they must do regardless.
+    fn publish_l2_evis(&self, bridges: impl IntoIterator<Item = Option<u32>>, port: u32) {
+        let mut ports: BTreeSet<u32> = BTreeSet::new();
+        ports.insert(port);
+        for bridge in bridges.into_iter().flatten() {
+            ports.extend(bridge_ports(&self.links, bridge));
+        }
+        for port in ports {
+            if port == 0 {
+                continue;
+            }
+            self.api_l2_port_evis(port, port_evis(&self.links, port));
+        }
     }
 
     pub fn link_name(&self, link_index: u32) -> String {
@@ -1520,5 +1560,176 @@ mod tests {
             "Deleting remaining address should succeed"
         );
         assert_eq!(link.addr4.len(), 0, "Link should have no IPv4 addresses");
+    }
+}
+
+/// The L2VPN EVIs a bridge port participates in: the VNIs of the VXLAN
+/// slaves sharing its bridge. Empty when the port is not enslaved, when
+/// its bridge carries no VXLAN, or when `port` is 0 — index 0 is "no
+/// port" and must never resolve to whichever link happens to sit there.
+///
+/// A VXLAN slave is itself a bridge port, so it reports the VNI it
+/// carries; that is consistent rather than special-cased.
+///
+/// Pure over the link table so the bridge walk is testable without a
+/// live `Rib` — it is the whole basis of `RibRx::L2PortEvis`.
+pub fn port_evis(links: &BTreeMap<u32, Link>, port: u32) -> BTreeSet<u32> {
+    if port == 0 {
+        return BTreeSet::new();
+    }
+    let Some(bridge) = links.get(&port).and_then(|link| link.master) else {
+        return BTreeSet::new();
+    };
+    links
+        .values()
+        .filter(|link| link.master == Some(bridge))
+        .filter_map(|link| link.vni)
+        .collect()
+}
+
+/// Every port enslaved to `bridge`, including its VXLAN slaves. Used to
+/// re-publish membership for a whole bridge when anything about it moves,
+/// since one VXLAN change alters the EVI set of every port on it.
+pub fn bridge_ports(links: &BTreeMap<u32, Link>, bridge: u32) -> Vec<u32> {
+    if bridge == 0 {
+        return Vec::new();
+    }
+    links
+        .values()
+        .filter(|link| link.master == Some(bridge))
+        .map(|link| link.index)
+        .collect()
+}
+
+#[cfg(test)]
+mod l2_port_evi_tests {
+    use super::*;
+
+    fn link(index: u32, name: &str, master: Option<u32>, vni: Option<u32>) -> Link {
+        Link {
+            index,
+            name: name.into(),
+            mtu: 1500,
+            original_mtu: 1500,
+            metric: 1,
+            flags: LinkFlags::Up,
+            link_type: LinkType::Ethernet,
+            label: false,
+            mac: None,
+            addr4: Vec::new(),
+            addr6: Vec::new(),
+            master,
+            vni,
+            vxlan_local: None,
+            vrf_table: None,
+            bridge: master.is_none(),
+            mtu_error: None,
+        }
+    }
+
+    fn table(links: Vec<Link>) -> BTreeMap<u32, Link> {
+        links.into_iter().map(|l| (l.index, l)).collect()
+    }
+
+    /// The case aliasing needs: an access port shares a bridge with a
+    /// VXLAN, so it participates in that VXLAN's EVI.
+    #[test]
+    fn access_port_inherits_its_bridges_vni() {
+        let t = table(vec![
+            link(10, "br10", None, None),
+            link(11, "vxlan10", Some(10), Some(100)),
+            link(12, "host0", Some(10), None),
+        ]);
+        assert_eq!(port_evis(&t, 12), BTreeSet::from([100]));
+    }
+
+    /// A VLAN-aware bridge can carry several VNIs; a port on it is in all
+    /// of them, so the answer is a set rather than an Option.
+    #[test]
+    fn a_port_can_be_in_several_evis() {
+        let t = table(vec![
+            link(10, "br10", None, None),
+            link(11, "vxlan10", Some(10), Some(100)),
+            link(13, "vxlan20", Some(10), Some(200)),
+            link(12, "host0", Some(10), None),
+        ]);
+        assert_eq!(port_evis(&t, 12), BTreeSet::from([100, 200]));
+    }
+
+    /// A port on a bridge with no VXLAN is in no EVI — it is plain L2,
+    /// and advertising an A-D for it would attract traffic we cannot
+    /// deliver.
+    #[test]
+    fn a_bridge_without_a_vxlan_yields_no_evi() {
+        let t = table(vec![
+            link(10, "br10", None, None),
+            link(12, "host0", Some(10), None),
+        ]);
+        assert!(port_evis(&t, 12).is_empty());
+    }
+
+    /// An unenslaved port is in no EVI, and must not pick up the VNIs of
+    /// some unrelated bridge.
+    #[test]
+    fn an_unenslaved_port_is_in_no_evi() {
+        let t = table(vec![
+            link(10, "br10", None, None),
+            link(11, "vxlan10", Some(10), Some(100)),
+            link(12, "host0", None, None),
+        ]);
+        assert!(port_evis(&t, 12).is_empty());
+    }
+
+    /// Ports of a different bridge must not leak in — the filter is on
+    /// the master, not on "any VXLAN anywhere".
+    #[test]
+    fn a_second_bridges_vni_does_not_leak() {
+        let t = table(vec![
+            link(10, "br10", None, None),
+            link(11, "vxlan10", Some(10), Some(100)),
+            link(12, "host0", Some(10), None),
+            link(20, "br20", None, None),
+            link(21, "vxlan20", Some(20), Some(200)),
+        ]);
+        assert_eq!(port_evis(&t, 12), BTreeSet::from([100]));
+    }
+
+    /// Index 0 is "no port". Resolving it would hand every unattributed
+    /// caller whichever link sits at index 0.
+    #[test]
+    fn port_zero_never_resolves() {
+        let t = table(vec![
+            link(0, "weird", Some(10), None),
+            link(10, "br10", None, None),
+            link(11, "vxlan10", Some(10), Some(100)),
+        ]);
+        assert!(port_evis(&t, 0).is_empty());
+        assert!(bridge_ports(&t, 0).is_empty());
+    }
+
+    /// A VXLAN slave is a bridge port too and reports its own VNI, so a
+    /// caller need not special-case it.
+    #[test]
+    fn a_vxlan_slave_reports_its_own_vni() {
+        let t = table(vec![
+            link(10, "br10", None, None),
+            link(11, "vxlan10", Some(10), Some(100)),
+        ]);
+        assert_eq!(port_evis(&t, 11), BTreeSet::from([100]));
+    }
+
+    /// Re-publishing a bridge must cover every port on it: one VXLAN
+    /// joining changes the EVI set of all of them at once.
+    #[test]
+    fn bridge_ports_lists_every_slave() {
+        let t = table(vec![
+            link(10, "br10", None, None),
+            link(11, "vxlan10", Some(10), Some(100)),
+            link(12, "host0", Some(10), None),
+            link(21, "elsewhere", Some(20), None),
+        ]);
+        let mut ports = bridge_ports(&t, 10);
+        ports.sort();
+        assert_eq!(ports, vec![11, 12]);
     }
 }

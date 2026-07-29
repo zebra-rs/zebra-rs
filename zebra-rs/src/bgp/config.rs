@@ -1833,6 +1833,9 @@ fn config_ethernet_segment(bgp: &mut Bgp, mut args: Args, op: ConfigOp) -> Optio
     // MACs already learned on the segment's access port carry its ESI on their
     // Type-2s, so adding or removing the segment changes what we advertise.
     bgp.evpn_resync_macip_esi();
+    // ... and the per-EVI A-D routes that let a remote PE alias toward us
+    // for MACs on the segment it has not learned itself (RFC 7432 §8.4).
+    bgp.evpn_resync_ad_evi();
     Some(())
 }
 
@@ -1879,6 +1882,9 @@ fn config_ethernet_segment_esi(bgp: &mut Bgp, mut args: Args, op: ConfigOp) -> O
     // Type-2s carry the ESI on the path rather than in the key, so they only
     // need refreshing under the new value — not withdrawing first.
     bgp.evpn_resync_macip_esi();
+    // ... and the per-EVI A-D routes that let a remote PE alias toward us
+    // for MACs on the segment it has not learned itself (RFC 7432 §8.4).
+    bgp.evpn_resync_ad_evi();
     Some(())
 }
 
@@ -2032,6 +2038,9 @@ fn config_ethernet_segment_interface(bgp: &mut Bgp, mut args: Args, op: ConfigOp
     // This leaf is what decides whether a learned MAC's port is on a segment
     // at all, so it moves Type-2s between single- and multi-homed.
     bgp.evpn_resync_macip_esi();
+    // ... and the per-EVI A-D routes that let a remote PE alias toward us
+    // for MACs on the segment it has not learned itself (RFC 7432 §8.4).
+    bgp.evpn_resync_ad_evi();
     Some(())
 }
 

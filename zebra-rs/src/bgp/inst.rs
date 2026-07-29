@@ -824,6 +824,13 @@ pub struct Bgp {
     /// — and replays on `advertise_all_vni` / `router_id` transitions
     /// just like `local_fdb`.
     pub local_vxlans: BTreeMap<u32, std::net::IpAddr>,
+    /// Which L2VPN EVIs each bridge port participates in, from
+    /// `RibRx::L2PortEvis`. The RIB resolves it (only it knows what a
+    /// bridge is); this is the mirror an Ethernet Segment's access port is
+    /// looked up in to decide which per-EVI Type-1 A-D routes to originate
+    /// (RFC 7432 §8.4). Absent means "no EVI", which is also what a port
+    /// that left its bridge reports.
+    pub l2_port_evis: BTreeMap<u32, std::collections::BTreeSet<u32>>,
     /// Local snooped IGMP/MLD membership shadow, keyed by
     /// `(vni, group, source)` → local VTEP IP. Populated from
     /// `RibRx::SnoopJoin`, removed on `RibRx::SnoopLeave`. Drives
@@ -1311,6 +1318,7 @@ impl Bgp {
             mup_segment_desired: BTreeMap::new(),
             local_fdb: BTreeMap::new(),
             local_vxlans: BTreeMap::new(),
+            l2_port_evis: BTreeMap::new(),
             local_smet: BTreeMap::new(),
             ethernet_segments: BTreeMap::new(),
             hostname: None,
@@ -4215,6 +4223,20 @@ impl Bgp {
             RibRx::VxlanDel { vni } => {
                 if let Some(vtep_local) = self.local_vxlans.remove(&vni) {
                     self.evpn_withdraw_imet(vni, vtep_local);
+                }
+            }
+            RibRx::L2PortEvis { ifindex, vnis } => {
+                // A snapshot, so an unchanged set is a no-op — the RIB
+                // re-publishes a whole bridge whenever any part of it
+                // moves, and re-originating every A-D on every such event
+                // would churn the Adj-RIB-Out for nothing.
+                let previous = if vnis.is_empty() {
+                    self.l2_port_evis.remove(&ifindex)
+                } else {
+                    self.l2_port_evis.insert(ifindex, vnis.clone())
+                };
+                if previous.unwrap_or_default() != vnis {
+                    self.evpn_reconcile_ad_evi_for_port(ifindex);
                 }
             }
             RibRx::SnoopJoin {
