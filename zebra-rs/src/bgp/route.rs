@@ -16,7 +16,7 @@ use crate::{bgp_adj_in_trace, bgp_adj_out_trace};
 
 use super::adj_rib::{AdjRib, Out};
 use super::cap::CapAfiMap;
-use super::peer::{AllowAsIn, BgpTop, Event, Peer, PeerType};
+use super::peer::{AllowAsIn, BgpTop, Peer, PeerType};
 use super::peer_map::PeerMap;
 use super::shard::msg::{ShardUpdateV4, ShardUpdateV6};
 use super::shard::{ShardMsg, ShardOut};
@@ -10260,9 +10260,7 @@ pub fn route_from_peer(
             }
             MpUnreachAttr::Vpnv4Eor => {
                 let afi_safi = AfiSafi::new(Afi::Ip, Safi::MplsVpn);
-                let _ = bgp
-                    .tx
-                    .send(Message::Event(peer_id, Event::StaleTimerExipires(afi_safi)));
+                eor_stale_expire(peer_id, afi_safi, bgp, peers);
             }
             MpUnreachAttr::Rtcv4Eor => {
                 // If peer's EoR is true.
@@ -10282,9 +10280,7 @@ pub fn route_from_peer(
             }
             MpUnreachAttr::EvpnEor => {
                 let afi_safi = AfiSafi::new(Afi::L2vpn, Safi::Evpn);
-                let _ = bgp
-                    .tx
-                    .send(Message::Event(peer_id, Event::StaleTimerExipires(afi_safi)));
+                eor_stale_expire(peer_id, afi_safi, bgp, peers);
             }
             MpUnreachAttr::Mup { afi: _, withdraws } => {
                 // An empty `withdraws` list is the MUP End-of-RIB marker
@@ -10304,9 +10300,7 @@ pub fn route_from_peer(
             }
             MpUnreachAttr::Ipv4Eor => {
                 let afi_safi = AfiSafi::new(Afi::Ip, Safi::Unicast);
-                let _ = bgp
-                    .tx
-                    .send(Message::Event(peer_id, Event::StaleTimerExipires(afi_safi)));
+                eor_stale_expire(peer_id, afi_safi, bgp, peers);
             }
             MpUnreachAttr::Ipv6Nlri(withdrawals) => {
                 for withdraw in withdrawals.iter() {
@@ -10315,9 +10309,7 @@ pub fn route_from_peer(
             }
             MpUnreachAttr::Ipv6Eor => {
                 let afi_safi = AfiSafi::new(Afi::Ip6, Safi::Unicast);
-                let _ = bgp
-                    .tx
-                    .send(Message::Event(peer_id, Event::StaleTimerExipires(afi_safi)));
+                eor_stale_expire(peer_id, afi_safi, bgp, peers);
             }
             MpUnreachAttr::Vpnv6(withdrawals) => {
                 for withdraw in withdrawals.iter() {
@@ -10333,9 +10325,7 @@ pub fn route_from_peer(
             }
             MpUnreachAttr::Vpnv6Eor => {
                 let afi_safi = AfiSafi::new(Afi::Ip6, Safi::MplsVpn);
-                let _ = bgp
-                    .tx
-                    .send(Message::Event(peer_id, Event::StaleTimerExipires(afi_safi)));
+                eor_stale_expire(peer_id, afi_safi, bgp, peers);
             }
             MpUnreachAttr::Flowspec { afi, withdraws } => {
                 for nlri in withdraws.iter() {
@@ -10364,9 +10354,7 @@ pub fn route_from_peer(
             }
             MpUnreachAttr::Labelv4Eor => {
                 let afi_safi = AfiSafi::new(Afi::Ip, Safi::MplsLabel);
-                let _ = bgp
-                    .tx
-                    .send(Message::Event(peer_id, Event::StaleTimerExipires(afi_safi)));
+                eor_stale_expire(peer_id, afi_safi, bgp, peers);
             }
             MpUnreachAttr::Labelv6(withdrawals) => {
                 for withdraw in withdrawals.iter() {
@@ -10375,9 +10363,7 @@ pub fn route_from_peer(
             }
             MpUnreachAttr::Labelv6Eor => {
                 let afi_safi = AfiSafi::new(Afi::Ip6, Safi::MplsLabel);
-                let _ = bgp
-                    .tx
-                    .send(Message::Event(peer_id, Event::StaleTimerExipires(afi_safi)));
+                eor_stale_expire(peer_id, afi_safi, bgp, peers);
             }
             _ => {
                 //
@@ -11245,6 +11231,22 @@ fn build_evpn_route(
             originator: *orig,
         })),
     }
+}
+
+/// RFC 4724 §3: an End-of-RIB marker ends the graceful-restart stale
+/// period for its AFI/SAFI — cancel the backstop stale timer and flush
+/// the stale paths the restarting peer did not re-advertise. Runs
+/// inline from `route_from_peer` rather than as a queued
+/// `Event::StaleTimerExpires`: that sync context can neither await a
+/// bounded-channel send nor be guaranteed a slot in it, and the FSM
+/// transition for stale expiry is state-preserving, so there is nothing
+/// the detour would add. The stale timer itself stays as the backstop
+/// for a peer that never sends its EoR.
+fn eor_stale_expire(peer_id: usize, afi_safi: AfiSafi, bgp: &mut BgpTop, peers: &mut PeerMap) {
+    if let Some(peer) = peers.get_mut_by_idx(peer_id) {
+        peer.timer.stale_timer.remove(&afi_safi);
+    }
+    stale_route_withdraw(peer_id, bgp, peers);
 }
 
 pub fn stale_route_withdraw(peer_id: usize, bgp: &mut BgpTop, peers: &mut PeerMap) {
@@ -22530,5 +22532,123 @@ mod labeled_community_suppress_tests {
                 "a plain labeled route is still advertised"
             );
         }
+    }
+}
+
+#[cfg(test)]
+mod eor_stale_expire_tests {
+    use super::*;
+    use crate::bgp::peer::State;
+    use std::net::IpAddr;
+
+    fn established_peer() -> Peer {
+        let (tx, rx) = tokio::sync::mpsc::channel(8);
+        Box::leak(Box::new(rx));
+        let mut peer = Peer::new(
+            1,
+            65001,
+            Ipv4Addr::new(10, 0, 0, 9),
+            65001,
+            "10.0.0.2".parse::<IpAddr>().unwrap(),
+            None,
+            tx,
+            crate::context::ProtoContext::default_table_no_rib(),
+        );
+        peer.state = State::Established;
+        peer.peer_type = PeerType::IBGP;
+        peer
+    }
+
+    /// An End-of-RIB marker must flush the peer's graceful-restart
+    /// stale paths and cancel the per-AFI stale timer at receipt, not
+    /// leave both to the timer backstop. The old code queued this
+    /// through `let _ = bgp.tx.send(..)` without awaiting from this
+    /// sync path, so the send future was dropped and the event never
+    /// entered the channel — the EoR was a no-op.
+    #[tokio::test]
+    async fn vpnv4_eor_flushes_stale_routes_and_cancels_timer() {
+        let mut peers = PeerMap::new();
+        let addr: IpAddr = "10.0.0.2".parse().unwrap();
+        peers.insert(addr, established_peer());
+        let id = peers.get(&addr).unwrap().ident;
+        peers.membership_enroll(id);
+
+        let afi_safi = AfiSafi::new(Afi::Ip, Safi::MplsVpn);
+        {
+            let peer = peers.get_mut_by_idx(id).unwrap();
+            let timer = super::super::timer::start_stale_timer(peer, afi_safi, 120);
+            peer.timer.stale_timer.insert(afi_safi, timer);
+        }
+
+        let router_id = Ipv4Addr::new(10, 0, 0, 9);
+        let ctx = crate::context::ProtoContext::default_table_no_rib();
+        let mut local_rib = LocalRib::default();
+        let mut shard = crate::bgp::shard::BgpShard::default();
+        let mut attr_store = crate::bgp::BgpAttrStore::default();
+        let mut update_groups = crate::bgp::update_group::empty_map();
+        let interface_addrs = crate::bgp::interface_addrs::InterfaceAddrs::default();
+        let (tx, rx) = tokio::sync::mpsc::channel(8);
+        Box::leak(Box::new(rx));
+
+        // A GR-stale VPNv4 path in the peer's Adj-RIB-In, as the
+        // session-down mark-stale sweep leaves it.
+        let mut attr = BgpAttr::new();
+        attr.nexthop = Some(BgpNexthop::Ipv4("10.0.0.2".parse().unwrap()));
+        let prefix: Ipv4Net = "10.9.0.0/24".parse().unwrap();
+        let stale_rib = BgpRib::new(
+            id,
+            Ipv4Addr::new(10, 0, 0, 2),
+            BgpRibType::IBGP,
+            0,
+            0,
+            &attr,
+            Some(Label::new(100, 0, true)),
+            None,
+            true,
+        );
+        shard
+            .adj_in_mut(id)
+            .add(Some(RouteDistinguisher::default()), prefix, stale_rib);
+
+        let mut top = BgpTop {
+            router_id: &router_id,
+            srv6_ipv6_export: None,
+            local_rib: &mut local_rib,
+            shard: &mut shard,
+            tx: &tx,
+            rib_client: &ctx.rib,
+            attr_store: &mut attr_store,
+            update_groups: &mut update_groups,
+            interface_addrs: &interface_addrs,
+            vrf_export: None,
+            color_policy: None,
+            flex_algo_routes: None,
+            flex_algo_srv6_routes: None,
+            vrf_import: None,
+            nexthop_cache: None,
+            vrf_transport_v4: None,
+            vrf_transport_v6: None,
+            central_label_alloc: None,
+            as_sets_withdraw: false,
+        };
+
+        let mut packet = UpdatePacket::new();
+        packet.mp_withdraw = Some(MpUnreachAttr::Vpnv4Eor);
+        route_from_peer(id, packet, &mut top, &mut peers, None);
+
+        assert!(
+            peers.get_by_idx(id).unwrap().timer.stale_timer.is_empty(),
+            "EoR must cancel the per-AFI stale timer"
+        );
+        let stale_left = top.shard.adj_in(id).map_or(0, |slice| {
+            slice
+                .v4vpn
+                .values()
+                .flat_map(|table| table.0.values())
+                .flatten()
+                .filter(|rib| rib.stale)
+                .count()
+        });
+        assert_eq!(stale_left, 0, "EoR must flush the stale VPNv4 paths");
     }
 }
