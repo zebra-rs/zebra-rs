@@ -1,0 +1,13 @@
+# z1 — two config-created 802.1Q VLAN sub-interfaces.
+#
+# dum0.100 rides on dum0, which exists before the apply, so the kernel
+# device is created immediately. cust-a (free-form name: the `.vid`
+# suffix is only a convention) rides on dum1, which does NOT exist yet —
+# creation is staged and replayed when dum1 appears.
+vlan:
+- name: dum0.100
+  interface: dum0
+  vlan-id: 100
+- name: cust-a
+  interface: dum1
+  vlan-id: 200

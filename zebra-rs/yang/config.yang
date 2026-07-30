@@ -434,6 +434,58 @@ module config {
       }
     }
 
+    list vlan {
+      ext:help "VLAN sub-interface configuration";
+      // Sorted after bridge (100), vxlan (90) and vrf (30) — a VLAN's
+      // parent may itself be a config-created device (a bridge SVI) —
+      // and before interface (20). Note that `interface` addresses on
+      // a device created in the same commit are dropped today (the
+      // address exec is immediate while device creation lands at
+      // CommitEnd + a netlink echo later) — the same pre-existing
+      // limitation as bridge/vxlan; VRF and bridge binds are staged
+      // (`pending_vrf_bind` / `pending_bridge_bind`) and do apply.
+      ext:sort "25";
+      key "name";
+      description
+        "An 802.1Q VLAN sub-interface created and owned by zebra-rs,
+         equivalent to `ip link add link <interface> name <name> type
+         vlan id <vlan-id>`. Unlike the `interface` list — which only
+         attaches configuration to kernel devices that already exist —
+         each entry here creates the kernel device, and deleting the
+         entry deletes it. The name is a free-form label (`eth0.100` is
+         only a convention); the parent and VLAN id come exclusively
+         from the two mandatory leaves. Creation is deferred until the
+         parent exists in the kernel and replayed when it (re)appears —
+         the kernel removes VLAN children with a deleted parent, so on
+         its return they are created again.";
+      leaf name {
+        ext:help "VLAN interface name";
+        type string;
+      }
+      leaf interface {
+        ext:help "Parent interface the VLAN rides on";
+        ext:sort "5";
+        ext:dynamic "rib:interface";
+        mandatory true;
+        type string;
+        description
+          "The lower device this VLAN sub-interface is stacked on (the
+           kernel's IFLA_LINK). May name an interface that does not
+           exist yet — creation is staged until it appears.";
+      }
+      leaf vlan-id {
+        ext:help "802.1Q VLAN id";
+        mandatory true;
+        type uint16 {
+          range "1..4094";
+        }
+        description
+          "The 802.1Q tag. Changing it (or the parent) on an existing
+           entry re-creates the kernel device — the kernel does not
+           allow either to change on a live link.";
+      }
+    }
+
     container mpls {
       ext:help "MPLS forwarding configuration";
       description

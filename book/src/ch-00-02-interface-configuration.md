@@ -25,7 +25,10 @@ interface enp0s6 {
 The list entry itself is not a separate "create interface" operation —
 it just attaches configuration to a kernel device that already exists
 (or appears later). zebra-rs does not create physical or virtual links
-from this block.
+from this block; devices it does own come from their dedicated top-level
+lists ([`bridge`](ch-00-04-bridge-configuration.md),
+[`vxlan`](ch-00-03-vxlan-configuration.md),
+[`vlan`](ch-00-08-vlan-configuration.md), `vrf`).
 
 ## Bridge and VRF enslavement
 
