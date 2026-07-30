@@ -1230,6 +1230,75 @@ async fn verify_bgp_route_not(world: &mut World, namespace: String, unexpected_p
     );
 }
 
+/// Poll `show bgp` (JSON) until `prefix` is present (`want_present =
+/// true`) or absent (`want_present = false`). Returns
+/// `(satisfied, last_output)`. Polling siblings of [`verify_bgp_route`] /
+/// [`verify_bgp_route_not`] for convergence-dependent asserts — a fixed
+/// wait plus a bare assert is the c=16 load-margin floor.
+async fn poll_bgp_route_presence(scoped: &str, prefix: &str, want_present: bool) -> (bool, String) {
+    const ATTEMPTS: u32 = 60;
+    let mut last = String::new();
+    for i in 0..ATTEMPTS {
+        last = netns::exec_in_netns(scoped, "vtyctl", &["show", "-j", "show bgp"])
+            .await
+            .expect("Failed to get BGP routes");
+        let present = serde_json::from_str::<Value>(&last)
+            .ok()
+            .and_then(|v| {
+                v.as_array().map(|arr| {
+                    arr.iter()
+                        .any(|route| route.get("prefix").and_then(|p| p.as_str()) == Some(prefix))
+                })
+            })
+            .unwrap_or(false);
+        if present == want_present {
+            return (true, last);
+        }
+        if i + 1 < ATTEMPTS {
+            tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
+        }
+    }
+    (false, last)
+}
+
+#[then(expr = "BGP route in {string} should eventually have {string}")]
+async fn verify_bgp_route_eventually(
+    world: &mut World,
+    namespace: String,
+    expected_prefix: String,
+) {
+    let scoped = world.ns(&namespace);
+    let (ok, last) = poll_bgp_route_presence(&scoped, &expected_prefix, true).await;
+    assert!(
+        ok,
+        "BGP route {} never appeared in namespace {}; last output:\n{}",
+        expected_prefix, scoped, last
+    );
+    println!(
+        "✓ BGP route {} found in namespace {}",
+        expected_prefix, scoped
+    );
+}
+
+#[then(expr = "BGP route in {string} should eventually not have {string}")]
+async fn verify_bgp_route_eventually_not(
+    world: &mut World,
+    namespace: String,
+    unexpected_prefix: String,
+) {
+    let scoped = world.ns(&namespace);
+    let (ok, last) = poll_bgp_route_presence(&scoped, &unexpected_prefix, false).await;
+    assert!(
+        ok,
+        "BGP route {} never left namespace {}; last output:\n{}",
+        unexpected_prefix, scoped, last
+    );
+    println!(
+        "✓ BGP route {} not present in namespace {}",
+        unexpected_prefix, scoped
+    );
+}
+
 #[then(expr = "BGP route in {string} has {string} with {string} value {string}")]
 async fn verify_bgp_route_field(
     world: &mut World,

@@ -59,13 +59,17 @@ Feature: BGP match as-path-set with FRR-compatible regular expressions
     And I apply config "z1.yaml" to namespace "z1"
     And I apply config "z2.yaml" to namespace "z2"
     And I apply config "z3-base.yaml" to namespace "z3"
-    And I wait 10 seconds for BGP to operate
-    Then BGP session in "z2" to "192.168.0.1" should be "Established"
-    And BGP session in "z2" to "192.168.0.3" should be "Established"
-    And BGP session in "z3" to "192.168.0.2" should be "Established"
-    And BGP route in "z3" has "10.0.0.1/32"
-    And BGP route in "z3" has "10.0.0.2/32"
+    Then BGP session in "z2" to "192.168.0.1" should eventually be "Established"
+    And BGP session in "z2" to "192.168.0.3" should eventually be "Established"
+    And BGP session in "z3" to "192.168.0.2" should eventually be "Established"
+    And BGP route in "z3" should eventually have "10.0.0.1/32"
+    And BGP route in "z3" should eventually have "10.0.0.2/32"
 
+  # The "accepts" scenarios assert the routes SURVIVED re-evaluation.
+  # They are already present from the previous scenario, so a polling
+  # "eventually have" would pass vacuously before the policy even ran —
+  # keep the fixed wait plus the bare assert (which cannot flake: the
+  # routes stay continuously present when the policy accepts them).
   Scenario: exact match accepts the whole AS_PATH anchored with ^ and $
     Given the test topology exists
     When I apply config "z3-exact-pass.yaml" to namespace "z3"
@@ -76,9 +80,8 @@ Feature: BGP match as-path-set with FRR-compatible regular expressions
   Scenario: exact match rejects the same ASNs in the wrong order
     Given the test topology exists
     When I apply config "z3-exact-fail.yaml" to namespace "z3"
-    And I wait 5 seconds for BGP to operate
-    Then BGP route in "z3" does not have "10.0.0.1/32"
-    And BGP route in "z3" does not have "10.0.0.2/32"
+    Then BGP route in "z3" should eventually not have "10.0.0.1/32"
+    And BGP route in "z3" should eventually not have "10.0.0.2/32"
 
   Scenario: _ASN$ accepts routes originated by that AS
     Given the test topology exists
@@ -90,9 +93,8 @@ Feature: BGP match as-path-set with FRR-compatible regular expressions
   Scenario: _ASN$ rejects routes not originated by that AS
     Given the test topology exists
     When I apply config "z3-origin-fail.yaml" to namespace "z3"
-    And I wait 5 seconds for BGP to operate
-    Then BGP route in "z3" does not have "10.0.0.1/32"
-    And BGP route in "z3" does not have "10.0.0.2/32"
+    Then BGP route in "z3" should eventually not have "10.0.0.1/32"
+    And BGP route in "z3" should eventually not have "10.0.0.2/32"
 
   Scenario: ^ASN_ accepts routes whose neighbor (leftmost) AS matches
     Given the test topology exists
@@ -104,9 +106,8 @@ Feature: BGP match as-path-set with FRR-compatible regular expressions
   Scenario: _ASN_ rejects routes that do not transit that AS
     Given the test topology exists
     When I apply config "z3-transit-fail.yaml" to namespace "z3"
-    And I wait 5 seconds for BGP to operate
-    Then BGP route in "z3" does not have "10.0.0.1/32"
-    And BGP route in "z3" does not have "10.0.0.2/32"
+    Then BGP route in "z3" should eventually not have "10.0.0.1/32"
+    And BGP route in "z3" should eventually not have "10.0.0.2/32"
 
   Scenario: Teardown topology
     Given the test topology exists
