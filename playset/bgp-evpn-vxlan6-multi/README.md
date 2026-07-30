@@ -171,6 +171,27 @@ Three things to notice:
 * The Type-3 IMET NLRI is `[3]:[0]:[128]:[...]` — a 128-bit originating IP
   — and `RT:65001:10` vs `RT:65001:20` is the tenant boundary.
 
+`show evpn vni all` condenses it: on `vtep1` both VNIs with their own IPv6
+VTEP address and IPv4-derived RD; on `vtep3` the foreign VNI 10 appears
+un-flagged (no kernel device, no local VTEP) while VNI 20 is served:
+
+``` shell
+vtep1>show evpn vni all
+Advertise All VNI flag: Enabled
+BUM flooding: Head-end replication
+Number of L2 VNIs: 2
+Number of L3 VNIs: 0
+Flags: * - Kernel VXLAN device
+  VNI        Type Local VTEP                RD                     Import/Export RT  #MACs(loc)  #MACs(rem) #Remote VTEPs  Tenant VRF
+* 10         L2   2001:db8:ff::1            10.0.0.1:10            65001:10                   2           2             1  default
+* 20         L2   2001:db8:ee::1            10.0.0.1:20            65001:20                   2           2             1  default
+vtep3>show evpn vni all
+...
+  VNI        Type Local VTEP                RD                     Import/Export RT  #MACs(loc)  #MACs(rem) #Remote VTEPs  Tenant VRF
+  10         L2   -                         10.0.0.3:10            65001:10                   0           2             1  default
+* 20         L2   2001:db8:ee::2            10.0.0.3:20            65001:20                   2           2             1  default
+```
+
 ## Kernel view: two tenants, two IPv6 flood domains
 
 ``` shell
