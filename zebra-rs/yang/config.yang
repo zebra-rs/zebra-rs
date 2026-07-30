@@ -4898,9 +4898,15 @@ module config {
       }
       container ipv6 {
         ext:help "IPv6 configuration";
-        leaf address {
+        leaf-list address {
           ext:help "IPv6 interface address";
           type inet:ipv6-prefix;
+          description
+            "IPv6 addresses assigned to the interface. Unlike IPv4,
+             IPv6 interfaces routinely hold several addresses (a
+             link-local plus one or more globals); each entry is
+             installed to the kernel independently and removing one
+             leaves the others in place.";
         }
       }
     }
