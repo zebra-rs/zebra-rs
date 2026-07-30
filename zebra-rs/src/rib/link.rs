@@ -1224,47 +1224,56 @@ pub async fn link_config_exec(
             }
         }
     } else if path == "/interface/ipv6/address" {
-        let v6addr = args.v6net().context(IPV6_ADDR_ERR)?;
+        // `address` is a leaf-list: one callback can carry several
+        // addresses (config-file load, multi-value commit), so drain the
+        // args deque and apply each value independently — reading a
+        // single value would silently drop the rest.
+        let first = args.v6net().context(IPV6_ADDR_ERR)?;
+        let mut v6addrs = vec![first];
+        while let Some(more) = args.v6net() {
+            v6addrs.push(more);
+        }
+
+        let Some(ifindex) = link_lookup(rib, ifname.to_string()) else {
+            println!("Interface {} not found", ifname);
+            return Ok(());
+        };
 
         if op.is_set() {
-            // Validate against ::0 address
-            if v6addr.addr().is_unspecified() {
-                println!("Cannot configure ::0 as interface address");
-                return Ok(());
-            }
-
-            // Validate against zero prefix length
-            if v6addr.prefix_len() == 0 {
-                println!("Cannot configure address with zero prefix length");
-                return Ok(());
-            }
-
-            // Validate against loopback address on non-loopback interfaces
-            if v6addr.addr().is_loopback()
-                && let Some(ifindex) = link_lookup(rib, ifname.to_string())
-                && let Some(link) = rib.links.get(&ifindex)
-                && !link.is_loopback()
-            {
-                println!("Cannot configure loopback address on non-loopback interface");
-                return Ok(());
-            }
-
-            // Check if IPv6 address is already configured on the link
-            if let Some(ifindex) = link_lookup(rib, ifname.to_string()) {
-                if let Some(link) = rib.links.get(&ifindex) {
-                    // Check if this IPv6 address already exists on the interface
-                    for existing_addr in &link.addr6 {
-                        if let IpNet::V6(existing_v6) = existing_addr.addr
-                            && existing_v6 == v6addr
-                        {
-                            // println!(
-                            //     "IPv6 address {} is already configured on interface {}",
-                            //     v6addr, ifname
-                            // );
-                            return Ok(());
-                        }
-                    }
+            for v6addr in v6addrs {
+                // Validate against ::0 address
+                if v6addr.addr().is_unspecified() {
+                    println!("Cannot configure ::0 as interface address");
+                    continue;
                 }
+
+                // Validate against zero prefix length
+                if v6addr.prefix_len() == 0 {
+                    println!("Cannot configure address with zero prefix length");
+                    continue;
+                }
+
+                // Validate against loopback address on non-loopback interfaces
+                if v6addr.addr().is_loopback()
+                    && rib
+                        .links
+                        .get(&ifindex)
+                        .is_some_and(|link| !link.is_loopback())
+                {
+                    println!("Cannot configure loopback address on non-loopback interface");
+                    continue;
+                }
+
+                // Skip an address already present on the link (config replay
+                // or kernel echo already delivered it).
+                if rib
+                    .links
+                    .get(&ifindex)
+                    .is_some_and(|link| link.addr6.iter().any(|a| a.addr == IpNet::V6(v6addr)))
+                {
+                    continue;
+                }
+
                 let result = rib.fib_handle.addr_add_ipv6(ifindex, &v6addr).await;
                 match result {
                     Ok(_) => {
@@ -1279,12 +1288,9 @@ pub async fn link_config_exec(
                         println!("IPv6 address add failure");
                     }
                 }
-            } else {
-                println!("Interface {} not found", ifname);
             }
         } else {
-            // Handle IPv6 address deletion
-            if let Some(ifindex) = link_lookup(rib, ifname.to_string()) {
+            for v6addr in v6addrs {
                 // Clear `config` on the existing LinkAddr so the kernel's
                 // subsequent DelAddr notification removes the entry instead
                 // of keeping it as a recovery candidate.
@@ -1301,8 +1307,6 @@ pub async fn link_config_exec(
                     secondary: false,
                 };
                 rib.addr_del(addr);
-            } else {
-                println!("Interface {} not found", ifname);
             }
         }
     } else if path == "/interface/vrf" {
