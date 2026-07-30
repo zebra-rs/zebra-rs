@@ -1312,7 +1312,13 @@ fn config_afi_enable(isis: &mut Isis, mut args: Args, op: ConfigOp, afi: Afi) ->
             // function of config order.
             if !enabled {
                 match isis.circuit_ids.alloc(&name) {
-                    Some(id) => link.circuit_id = id,
+                    Some(id) => {
+                        // Debug-level: silent in normal operation, but a
+                        // RUST_LOG bump recovers the alloc/release history
+                        // when a circuit's id needs explaining.
+                        tracing::debug!("isis: circuit id 0x{id:02X} allocated to {name}");
+                        link.circuit_id = id;
+                    }
                     None => {
                         tracing::warn!(
                             "isis: circuit ids exhausted (255 in use); refusing to enable \
@@ -1348,7 +1354,9 @@ fn config_afi_enable(isis: &mut Isis, mut args: Args, op: ConfigOp, afi: Afi) ->
             // pseudonode LSP still floating under the old id ages out or
             // is purged via the normal DIS-loss path; a same-commit
             // re-enable of another interface may pick this id up.
-            isis.circuit_ids.release(&name);
+            if let Some(id) = isis.circuit_ids.release(&name) {
+                tracing::debug!("isis: circuit id 0x{id:02X} released from {name}");
+            }
             link.circuit_id = 0;
             let msg = Message::Ifsm(IfsmEvent::Stop, link.ifindex, None);
             let _ = isis.tx.send(msg);
@@ -1870,6 +1878,7 @@ fn hello_reoriginate(link: &IsisLink, tx: &UnboundedSender<Message>) {
 struct LinkInfo {
     name: String,
     ifindex: u32,
+    circuit_id: String,
     is_up: bool,
     network_type: String,
     level: String,
@@ -1927,6 +1936,7 @@ pub fn show(isis: &Isis, _args: Args, json: bool) -> std::result::Result<String,
                 links.push(LinkInfo {
                     name: link.state.name.clone(),
                     ifindex: link.ifindex,
+                    circuit_id: format!("0x{:02X}", link.circuit_id),
                     is_up: link.state.is_up(),
                     network_type: link.config.network_type().to_string(),
                     level: link.state.level.to_string(),
@@ -1949,7 +1959,10 @@ pub fn show(isis: &Isis, _args: Args, json: bool) -> std::result::Result<String,
         }
         let level = summary_level(link);
         let link_state = if link.state.is_up() { "Up" } else { "Down" };
-        let circ_id = format!("0x{:02X}", link.ifindex);
+        // The allocated circuit id (also the pseudonode number while DIS
+        // here), NOT the ifindex — the two coincided often enough on
+        // small boxes that the ifindex rendering went unnoticed.
+        let circ_id = format!("0x{:02X}", link.circuit_id);
         writeln!(
             buf,
             "  {:<11} {:<8} {:<8} {:<8} {:<5} {:<9} {}",
@@ -2195,7 +2208,7 @@ pub fn show_detail(
                 writeln!(
                     buf,
                     "Interface: {}, State: {}, Active, Circuit Id: 0x{:02X}",
-                    link.state.name, link_state, link.ifindex
+                    link.state.name, link_state, link.circuit_id
                 )?;
                 writeln!(
                     buf,
