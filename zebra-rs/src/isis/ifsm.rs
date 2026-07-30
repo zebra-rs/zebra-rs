@@ -224,7 +224,9 @@ pub fn hello_p2p_generate(link: &LinkTop, level: Level) -> IsisP2pHello {
         source_id,
         hold_time: link.config.hold_time(),
         pdu_len: 0,
-        circuit_id: 0,
+        // ISO 10589 Local Circuit ID: the id reserved for this circuit
+        // at IS-IS enable, same value the 3-way TLV below advertises.
+        circuit_id: link.circuit_id,
         tlvs: Vec::new(),
     };
 
@@ -260,17 +262,22 @@ pub fn hello_p2p_generate(link: &LinkTop, level: Level) -> IsisP2pHello {
         .get(&Level::L1)
         .first_key_value()
         .or_else(|| link.state.nbrs.get(&Level::L2).first_key_value());
+    // Extended Local Circuit ID: the circuit id reserved at IS-IS
+    // enable, not the ifindex — one identity for the circuit whether it
+    // names a LAN pseudonode or a P2P 3-way handshake. RFC 5303 only
+    // requires the value be unique among this router's circuits and
+    // echoed back verbatim by the peer, which the allocator guarantees.
     let tlv = if let Some((_, nbr)) = nbr {
         IsisTlvP2p3Way {
             state: nbr.state.into(),
-            circuit_id: Some(link.ifindex),
+            circuit_id: Some(link.circuit_id as u32),
             neighbor_id: Some(nbr.sys_id),
             neighbor_circuit_id: nbr.circuit_id,
         }
     } else {
         IsisTlvP2p3Way {
             state: NfsmState::Down.into(),
-            circuit_id: Some(link.ifindex),
+            circuit_id: Some(link.circuit_id as u32),
             neighbor_id: None,
             neighbor_circuit_id: None,
         }
@@ -450,15 +457,9 @@ pub fn stop(link: &mut LinkTop) {
 pub fn dis_becoming(link: &mut LinkTop, level: Level) {
     use IfsmEvent::*;
 
-    // The circuit's reserved id, unique across this instance's links,
-    // allocated when IS-IS was enabled on the interface and cached on
-    // the link. Enabling is refused when the id space is exhausted, so
-    // an enabled circuit always has one; 0 is a defensive case only.
-    // Without an id there is nothing valid to name the pseudonode LSP
-    // with — id 0 would alias the router's own node LSP, and any
-    // invented value could alias another circuit's — so suspend DIS
-    // processing: no adjacency registration, no pseudonode origination.
-    // A later election re-enters here once a reservation exists.
+    // The circuit id is allocated when the interface is enabled. The id
+    // space is only 1..=255, so it can be exhausted. In that case it is
+    // safe to suspend DIS processing rather than go forward.
     if link.circuit_id == 0 {
         tracing::warn!(
             "isis: {} elected DIS without a circuit id; suspending DIS processing",
