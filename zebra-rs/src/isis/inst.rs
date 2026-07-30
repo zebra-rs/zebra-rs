@@ -1666,6 +1666,9 @@ impl Isis {
             RibRx::LinkDown(ifindex) => {
                 self.link_state_down(ifindex);
             }
+            RibRx::LinkDel(ifindex) => {
+                self.link_del(ifindex);
+            }
             RibRx::LinkMtu { ifindex, mtu } => {
                 self.link_mtu(ifindex, mtu);
             }

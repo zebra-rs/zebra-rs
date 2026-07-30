@@ -10,7 +10,6 @@ use isis_packet::neigh::IsisSubTlv as NeighSubTlv;
 use isis_packet::*;
 use netlink_packet_route::link::LinkFlags;
 use serde::Serialize;
-use socket2::Socket;
 use strum_macros::{Display, EnumString};
 use tokio::io::unix::AsyncFd;
 use tokio::sync::mpsc::{self, UnboundedSender};
@@ -96,10 +95,11 @@ pub struct IsisLinks {
 /// non-pseudonode LSP, and a DIS that claimed it would advertise a LAN
 /// ID aliasing that LSP.
 ///
-/// Keyed by interface name, not ifindex: the config tree that drives
-/// enable/disable is name-keyed, and a name survives the delete/re-add
-/// cycles that hand out fresh ifindexes — so a recreated interface keeps
-/// its pseudonode identity.
+/// Keyed by interface name, not ifindex, matching the config tree that
+/// drives enable/disable. Kernel link deletion (`link_del`) also
+/// releases the interface's reservation — without the device the id
+/// names nothing — so a re-created interface allocates afresh when its
+/// IS-IS config is (re)applied.
 ///
 /// The allocated id is also cached on [`IsisLink::circuit_id`] so read
 /// paths (`dis_becoming`, `show isis interface`) don't query this map;
@@ -149,6 +149,10 @@ impl IsisLinks {
         self.map.insert(key, value)
     }
 
+    pub fn remove(&mut self, key: &u32) -> Option<IsisLink> {
+        self.map.remove(key)
+    }
+
     pub fn iter(&self) -> Iter<'_, u32, IsisLink> {
         self.map.iter()
     }
@@ -166,7 +170,15 @@ impl IsisLinks {
 pub struct IsisLink {
     pub ifindex: u32,
     pub ptx: UnboundedSender<PacketMessage>,
-    pub sock: Arc<AsyncFd<Socket>>,
+    /// Handle of the spawned `read_packet` task, aborted on link
+    /// deletion. Once the kernel device is gone the socket never
+    /// becomes readable again, so an un-aborted reader parks forever
+    /// holding its `Arc` to the fd — a quiet task + fd leak per
+    /// deleted interface. The socket itself lives in the read/write
+    /// tasks' `Arc`s (this record holds no copy): the fd closes when
+    /// the aborted reader and the `ptx`-drop-terminated writer are
+    /// both gone.
+    pub read_task: tokio::task::JoinHandle<()>,
     pub flags: LinkFlags,
     /// Cached copy of this interface's [`CircuitIdMap`] reservation, so
     /// readers don't query the map on every access. 0 = no reservation.
@@ -827,10 +839,13 @@ impl IsisLink {
         let raw = isis_socket(link.index)?;
         let sock = Arc::new(AsyncFd::new(raw)?);
         let (ptx, prx) = mpsc::unbounded_channel();
+        // Socket for read/write per interface.
+        let read_task = tokio::spawn(read_packet(sock.clone(), tx.clone()));
+        tokio::spawn(write_packet(sock, prx));
         let mut is_link = Self {
             ifindex: link.index,
             ptx,
-            sock,
+            read_task,
             flags: link.flags,
             circuit_id: 0,
             config: LinkConfig::default(),
@@ -840,16 +855,6 @@ impl IsisLink {
         is_link.state.name = link.name.to_owned();
         is_link.state.mtu = link.mtu;
         is_link.state.mac = link.mac;
-        // Socket for read/write per interface.
-        let sock = is_link.sock.clone();
-        let tx = tx.clone();
-        tokio::spawn(async move {
-            read_packet(sock, tx).await;
-        });
-        let sock = is_link.sock.clone();
-        tokio::spawn(async move {
-            write_packet(sock, prx).await;
-        });
 
         Ok(is_link)
     }
@@ -900,6 +905,40 @@ impl Isis {
                     "isis: skip link {name} (ifindex={ifindex}); raw socket open failed: {e}"
                 );
             }
+        }
+    }
+
+    /// React to kernel link deletion (`RibRx::LinkDel`). Run the full
+    /// operational teardown first — `link_state_down` drops the
+    /// adjacencies (returning SR labels / End.X SIDs), purges our
+    /// pseudonode LSP if we were DIS, clears the LSDB adjacency
+    /// registration, and schedules LSP re-origination + SPF — then drop
+    /// the record itself: timers cancel on drop, the write task exits
+    /// when `ptx` closes, and the reader is aborted so the last `Arc`
+    /// to the dead socket is released.
+    ///
+    /// The interface's `CircuitIdMap` reservation is released along
+    /// with it: without the device the id names nothing, and a
+    /// re-created interface allocates afresh when its IS-IS config is
+    /// (re)applied.
+    ///
+    /// Messages already queued for this ifindex (the Stop / LSP / SPF
+    /// events `link_state_down` just sent included) find no link when
+    /// they arrive and are dropped harmlessly by the `link_top` guard.
+    pub fn link_del(&mut self, ifindex: u32) {
+        if self.links.get(&ifindex).is_none() {
+            return;
+        }
+        self.link_state_down(ifindex);
+        if let Some(link) = self.links.remove(&ifindex) {
+            link.read_task.abort();
+            if let Some(id) = self.circuit_ids.release(&link.state.name) {
+                tracing::debug!(
+                    "isis: circuit id 0x{id:02X} released from {} (link deleted)",
+                    link.state.name
+                );
+            }
+            tracing::debug!("isis: link {} (ifindex {ifindex}) deleted", link.state.name);
         }
     }
 
