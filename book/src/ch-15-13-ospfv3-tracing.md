@@ -31,6 +31,7 @@ router ospfv3 {
 | `fsm` | `ifsm`, `nfsm`, `all` |
 | `spf` | SPF (shortest-path-first) calculation |
 | `lsdb` | LSA origination / installation / flooding |
+| `bfd` | OSPF↔BFD interaction (RFC 5882 session state changes) |
 
 Each `packet` toggle accepts the optional `direction`
 (`send` / `receive`) and `detail` refinements; each `fsm` toggle an

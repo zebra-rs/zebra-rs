@@ -4269,6 +4269,34 @@ mod yang_load_tests {
         );
     }
 
+    /// The OSPF `bfd` tracing category is dispatched path-based from
+    /// `config_tracing_dispatch` — assert the YANG leaf parses on both
+    /// versions so a misplacement can't silently strand the dispatch.
+    #[test]
+    fn ospf_tracing_bfd_is_settable() {
+        use crate::config::ExecCode;
+        use crate::config::parse::{State, parse};
+        use libyang::to_entry;
+
+        let mut yang = YangStore::new();
+        yang.add_path(concat!(env!("CARGO_MANIFEST_DIR"), "/yang"));
+        yang.read_with_resolve("configure")
+            .expect("configure mode loads");
+        yang.identity_resolve();
+        let module = yang
+            .find_module("configure")
+            .expect("configure module present");
+        let entry = to_entry(&yang, module);
+
+        for cmd in [
+            "set router ospf tracing bfd",
+            "set router ospfv3 tracing bfd",
+        ] {
+            let (code, _comps, _state) = parse(cmd, entry.clone(), None, State::new());
+            assert_eq!(code, ExecCode::Success, "`{cmd}` must be settable");
+        }
+    }
+
     /// The BGP SRv6 service-SID locator lives at `router bgp
     /// segment-routing srv6 locator <name>` (mirroring `router isis
     /// segment-routing srv6 locator`; BGP has no SR-MPLS sibling). It is a

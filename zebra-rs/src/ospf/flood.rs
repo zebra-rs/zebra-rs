@@ -45,7 +45,7 @@ pub fn ospf_ls_request_lookup(nbr: &Neighbor, h: &OspfLsaHeader) -> Option<usize
 
 // OSPF LSA flooding -- RFC2328 Section 13.3.
 // Following the ref/ospfd/ospf_flood.c ospf_flood_through_interface() pattern.
-pub fn ospf_flood_through_interface(_oi: &mut OspfInterface, nbr: &mut Neighbor, lsa: &OspfLsa) {
+pub fn ospf_flood_through_interface(oi: &mut OspfInterface, nbr: &mut Neighbor, lsa: &OspfLsa) {
     // For neighbors in Exchange or Loading state, check ls_req list.
     if nbr.state >= NfsmState::Exchange
         && nbr.state < NfsmState::Full
@@ -54,7 +54,9 @@ pub fn ospf_flood_through_interface(_oi: &mut OspfInterface, nbr: &mut Neighbor,
         // The received LSA is the same or newer than what we requested.
         // Remove it from ls_req list.
         nbr.ls_req.remove(idx);
-        tracing::info!(
+        crate::ospf_event_trace!(
+            oi.tracing,
+            Lsdb,
             "[Flood] Removed LSA {} from ls_req (remaining: {})",
             lsa.h.ls_id,
             nbr.ls_req.len()
@@ -111,7 +113,7 @@ pub fn ospf_flood(oi: &mut OspfInterface, nbr: &mut Neighbor, lsa: &OspfLsa) {
         FloodScope::As => None,
         _ => Some(oi.area_id),
     };
-    lsdb.insert_received(lsa.clone(), oi.tx, area_id);
+    lsdb.insert_received(lsa.clone(), oi.tx, area_id, oi.tracing);
     if matches!(
         lsa.h.ls_type,
         OspfLsType::Router
@@ -141,7 +143,9 @@ pub fn ospf_flood(oi: &mut OspfInterface, nbr: &mut Neighbor, lsa: &OspfLsa) {
     {
         let _ = oi.tx.send(Message::NssaTranslateResync(area_id));
     }
-    tracing::info!(
+    crate::ospf_event_trace!(
+        oi.tracing,
+        Lsdb,
         "[Flood] Installed LSA type={:?} id={} adv={}",
         lsa.h.ls_type,
         lsa.h.ls_id,

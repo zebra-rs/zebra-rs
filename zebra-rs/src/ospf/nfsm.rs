@@ -5,10 +5,7 @@ use rand::RngExt;
 use tokio::time::Instant;
 
 use super::version::{OspfVersion, Ospfv2, Ospfv3};
-use super::{
-    Identity, IfsmEvent, Message, Neighbor, inst::OspfInterface, ospf_ls_request_isempty,
-    tracing::FsmType,
-};
+use super::{Identity, IfsmEvent, Message, Neighbor, inst::OspfInterface, ospf_ls_request_isempty};
 use crate::context::{Timer, TimerType};
 
 /// Neighbor state machine state — RFC 2328 §10.1.
@@ -476,7 +473,13 @@ pub fn ospf_nfsm_negotiation_done<V: OspfVersion>(
     // v3 inherits the no-op default until its NFSM path lands.
     V::populate_initial_db_summary(oi, nbr);
 
-    tracing::info!("[NFSM:NegotiationDone] DB Summary len {}", nbr.db_sum.len());
+    crate::ospf_fsm_trace!(
+        oi.tracing,
+        Nfsm,
+        true,
+        "[NFSM:NegotiationDone] DB Summary len {}",
+        nbr.db_sum.len()
+    );
     None
 }
 
@@ -635,7 +638,7 @@ fn ospf_nfsm_change_state<V: OspfVersion>(
         nbr.dd.flags.set_more(true);
         nbr.dd.flags.set_init(true);
 
-        tracing::info!("DB_DESC send from NFSM");
+        crate::ospf_fsm_trace!(oi.tracing, Nfsm, true, "DB_DESC send from NFSM");
         V::send_db_desc(oi, nbr, oident);
     }
 }
@@ -662,14 +665,15 @@ pub fn ospf_nfsm<V: OspfVersion>(
 
     // If a state transition occurs, update the state.
     if let Some(new_state) = next_state {
-        if link.tracing.should_trace_fsm(FsmType::Nfsm, false) {
-            tracing::info!(
-                "[NFSM:State] {}: {:?} -> {:?}",
-                nbr.ident.router_id,
-                nbr.state,
-                new_state
-            );
-        }
+        crate::ospf_fsm_trace!(
+            link.tracing,
+            Nfsm,
+            false,
+            "[NFSM:State] {}: {:?} -> {:?}",
+            nbr.ident.router_id,
+            nbr.state,
+            new_state
+        );
         if new_state != nbr.state {
             ospf_nfsm_change_state(link, nbr, new_state, oident, event);
         }

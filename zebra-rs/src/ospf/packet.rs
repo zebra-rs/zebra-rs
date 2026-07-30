@@ -10,7 +10,7 @@ use crate::{
         nfsm::{ospf_db_summary_isempty, ospf_nfsm, ospf_nfsm_ls_req_timer_on},
         ospf_ls_rquest_new,
     },
-    ospf_pdu_trace,
+    ospf_fsm_trace, ospf_packet_trace, ospf_pdu_trace,
 };
 
 use super::{
@@ -371,7 +371,8 @@ pub fn ospf_hello_recv(
     let prefix = Ipv4Net::new(*src, prefixlen).unwrap();
 
     if addr.prefix.prefix_len() != prefixlen {
-        tracing::info!(
+        ospf_pdu_trace!(
+            tracing,
             "prefixlen mismatch hello {} ifaddr {}",
             prefixlen,
             addr.prefix.prefix_len()
@@ -386,7 +387,8 @@ pub fn ospf_hello_recv(
     if hello.options.external() != oi.area_type.e_bit()
         || hello.options.nssa() != oi.area_type.n_bit()
     {
-        tracing::info!(
+        ospf_pdu_trace!(
+            tracing,
             "[Hello:Recv] dropping {}: option mismatch (peer E={} N={}, area {:?})",
             src,
             hello.options.external(),
@@ -456,11 +458,11 @@ pub fn ospf_hello_recv(
         if oi.state == IfsmState::Waiting {
             use IfsmEvent::*;
             if nbr.ident.prefix.addr() == hello.bd_router {
-                tracing::info!("[IFSM:Event] BackupSeen");
+                ospf_fsm_trace!(tracing, Ifsm, false, "[IFSM:Event] BackupSeen");
                 oi.tx.send(Message::Ifsm(oi.index, BackupSeen)).unwrap();
             }
             if nbr.ident.prefix.addr() == hello.d_router && hello.bd_router.is_unspecified() {
-                tracing::info!("[IFSM:Event] BackupSeen");
+                ospf_fsm_trace!(tracing, Ifsm, false, "[IFSM:Event] BackupSeen");
                 oi.tx.send(Message::Ifsm(oi.index, BackupSeen)).unwrap();
             }
         };
@@ -642,7 +644,10 @@ fn ospf_db_desc_proc(oi: &mut OspfInterface, nbr: &mut Neighbor, dd: &OspfDbDesc
         }
     } else {
         // Slave.
-        tracing::info!(
+        ospf_packet_trace!(
+            oi.tracing,
+            DbDesc,
+            Recv,
             "[DB Desc] packet as Slave: dd.flags.more() {}",
             dd.flags.more()
         );
@@ -651,7 +656,7 @@ fn ospf_db_desc_proc(oi: &mut OspfInterface, nbr: &mut Neighbor, dd: &OspfDbDesc
         // When master's more flags is not set and local system does not have
         // information to be sent.
         if !dd.flags.more() && ospf_db_summary_isempty(nbr) {
-            tracing::info!("[NFSM:Event] ExchangeDone");
+            ospf_fsm_trace!(oi.tracing, Nfsm, false, "[NFSM:Event] ExchangeDone");
             nbr.dd.flags.set_more(false);
             nbr_sched_event(nbr, NfsmEvent::ExchangeDone);
         }
@@ -731,7 +736,8 @@ pub fn ospf_db_desc_recv(
         // 10.6.  Receiving Database Description Packets
         // ExStart
         ExStart => {
-            tracing::info!(
+            ospf_pdu_trace!(
+                oi.tracing,
                 "DB_DESC: Under ExStart {} <-> {}",
                 nbr.ident.router_id,
                 oi.router_id
@@ -748,7 +754,7 @@ pub fn ospf_db_desc_recv(
                 nbr.dd.flags.set_init(false);
                 nbr.dd.seqnum = dd.seqnum;
                 nbr.options = (nbr.options.into_bits() | dd.options.into_bits()).into();
-                tracing::info!("[DB Desc] Becoming Slave {:?}", nbr.dd.flags);
+                ospf_pdu_trace!(oi.tracing, "[DB Desc] Becoming Slave {:?}", nbr.dd.flags);
             }
             // o   The initialize(I) and master(MS) bits are off, the
             //     packet's DD sequence number equals the neighbor data
@@ -763,7 +769,7 @@ pub fn ospf_db_desc_recv(
             {
                 nbr.dd.flags.set_init(false);
                 nbr.options = (nbr.options.into_bits() | dd.options.into_bits()).into();
-                tracing::info!("[DB Desc] Becoming Master {:?}", nbr.dd.flags);
+                ospf_pdu_trace!(oi.tracing, "[DB Desc] Becoming Master {:?}", nbr.dd.flags);
             } else {
                 return;
             }
@@ -922,7 +928,8 @@ pub fn ospf_ls_req_recv(
             }
             None => {
                 // LSA not found in LSDB -> BadLSReq.
-                tracing::info!(
+                ospf_pdu_trace!(
+                    oi.tracing,
                     "[LS Request] BadLSReq: LSA not found type={:?} id={} adv={}",
                     ls_type,
                     req.ls_id,
@@ -997,7 +1004,10 @@ fn ospf_ls_upd_proc(oi: &mut OspfInterface, nbr: &mut Neighbor, lsa: &OspfLsa) -
         OspfLsType::AsExternal | OspfLsType::SummaryAsbr
     ) && oi.area_type.is_stub_or_nssa()
     {
-        tracing::info!(
+        ospf_packet_trace!(
+            oi.tracing,
+            LsUpdate,
+            Recv,
             "[LS Update] Step 3: Discarding {:?} LSA in {:?} area: id={} adv={}",
             lsa.h.ls_type,
             oi.area_type,
@@ -1012,7 +1022,10 @@ fn ospf_ls_upd_proc(oi: &mut OspfInterface, nbr: &mut Neighbor, lsa: &OspfLsa) -
     // negotiation should have prevented the adjacency), but defend
     // against misconfigured neighbors that slip through.
     if matches!(lsa.h.ls_type, OspfLsType::NssaAsExternal) && !oi.area_type.is_nssa() {
-        tracing::info!(
+        ospf_packet_trace!(
+            oi.tracing,
+            LsUpdate,
+            Recv,
             "[LS Update] Step 3: Discarding Type-7 LSA in {:?} area: id={} adv={}",
             oi.area_type,
             lsa.h.ls_id,
@@ -1052,7 +1065,10 @@ fn ospf_ls_upd_proc(oi: &mut OspfInterface, nbr: &mut Neighbor, lsa: &OspfLsa) -
     // Step 4 special case: MaxAge LSA not in database.
     // If no neighbors in the area are in Exchange or Loading, ack and discard.
     if lsa.h.ls_age >= OSPF_MAX_AGE && current.is_none() && oi.exchange_loading_count == 0 {
-        tracing::info!(
+        ospf_packet_trace!(
+            oi.tracing,
+            LsUpdate,
+            Recv,
             "[LS Update] MaxAge not in DB, no Exchange/Loading neighbors: type={:?} id={} adv={}",
             lsa.h.ls_type,
             lsa.h.ls_id,
@@ -1091,7 +1107,10 @@ fn ospf_ls_upd_proc(oi: &mut OspfInterface, nbr: &mut Neighbor, lsa: &OspfLsa) -
             );
             return LsaProcessResult::DiscardNoAck;
         }
-        tracing::info!(
+        ospf_packet_trace!(
+            oi.tracing,
+            LsUpdate,
+            Recv,
             "[LS Update] Installing newer LSA type={:?} id={} adv={} seq={:#x}",
             lsa.h.ls_type,
             lsa.h.ls_id,
@@ -1108,7 +1127,10 @@ fn ospf_ls_upd_proc(oi: &mut OspfInterface, nbr: &mut Neighbor, lsa: &OspfLsa) -
 
         // RFC 2328 Section 13.4: Self-originated LSA check.
         if ospf_is_self_originated(oi, lsa) {
-            tracing::info!(
+            ospf_packet_trace!(
+                oi.tracing,
+                LsUpdate,
+                Recv,
                 "[Self-Originated] Received own LSA type={:?} id={} adv={} seq={:#x}",
                 lsa.h.ls_type,
                 lsa.h.ls_id,
@@ -1125,7 +1147,10 @@ fn ospf_ls_upd_proc(oi: &mut OspfInterface, nbr: &mut Neighbor, lsa: &OspfLsa) -
 
     // Step 6: If LSA is on neighbor's request list, this is a BadLSReq event.
     if ospf_ls_request_lookup(nbr, &lsa.h).is_some() {
-        tracing::info!(
+        ospf_packet_trace!(
+            oi.tracing,
+            LsUpdate,
+            Recv,
             "[LS Update] BadLSReq: LSA on request list type={:?} id={} adv={}",
             lsa.h.ls_type,
             lsa.h.ls_id,
@@ -1137,7 +1162,10 @@ fn ospf_ls_upd_proc(oi: &mut OspfInterface, nbr: &mut Neighbor, lsa: &OspfLsa) -
 
     // Step 7: Same instance (duplicate).
     if ret == 0 {
-        tracing::info!(
+        ospf_packet_trace!(
+            oi.tracing,
+            LsUpdate,
+            Recv,
             "[LS Update] Same instance type={:?} id={} adv={}",
             lsa.h.ls_type,
             lsa.h.ls_id,
@@ -1157,7 +1185,10 @@ fn ospf_ls_upd_proc(oi: &mut OspfInterface, nbr: &mut Neighbor, lsa: &OspfLsa) -
     let current = current.unwrap();
     if current_age >= OSPF_MAX_AGE && current.h.ls_seq_number == OSPF_MAX_LSA_SEQ {
         // MaxAge + MaxSeqNumber: discard without acknowledging.
-        tracing::info!(
+        ospf_packet_trace!(
+            oi.tracing,
+            LsUpdate,
+            Recv,
             "[LS Update] DB copy at MaxAge+MaxSeq, discard: type={:?} id={} adv={}",
             lsa.h.ls_type,
             lsa.h.ls_id,
@@ -1190,7 +1221,10 @@ fn ospf_ls_upd_proc(oi: &mut OspfInterface, nbr: &mut Neighbor, lsa: &OspfLsa) -
     // Send database copy back to the neighbor, and stamp the
     // last-flood-out so the next stale instance lands in the
     // MinLSArrival skip above.
-    tracing::info!(
+    ospf_packet_trace!(
+        oi.tracing,
+        LsUpdate,
+        Recv,
         "[LS Update] DB copy newer, sending back: type={:?} id={} adv={} \
          rcv={{seq={:#x} csum={:#06x} age={}}} \
          db={{seq={:#x} csum={:#06x} age={}}}",
@@ -1282,14 +1316,14 @@ fn gr_maybe_enter_helper(oi: &mut OspfInterface, nbr: &mut Neighbor, lsa: &OspfL
         return;
     }
     if !oi.gr_config.helper_enabled {
-        tracing::info!(
+        tracing::warn!(
             "[GR Helper] reject Grace LSA from nbr {} (helper-enabled is false)",
             nbr.ident.router_id
         );
         return;
     }
     if nbr.state != NfsmState::Full {
-        tracing::info!(
+        tracing::warn!(
             "[GR Helper] reject Grace LSA from non-Full nbr {} (state={:?})",
             nbr.ident.router_id,
             nbr.state
@@ -1300,7 +1334,7 @@ fn gr_maybe_enter_helper(oi: &mut OspfInterface, nbr: &mut Neighbor, lsa: &OspfL
     let grace_period = match body.grace_period() {
         Some(p) if p > 0 && p <= max_grace => p,
         Some(p) => {
-            tracing::info!(
+            tracing::warn!(
                 "[GR Helper] reject Grace LSA from nbr {} (grace={}s out of [1, {}])",
                 nbr.ident.router_id,
                 p,
@@ -1309,7 +1343,7 @@ fn gr_maybe_enter_helper(oi: &mut OspfInterface, nbr: &mut Neighbor, lsa: &OspfL
             return;
         }
         None => {
-            tracing::info!(
+            tracing::warn!(
                 "[GR Helper] reject Grace LSA from nbr {} (no GracePeriod TLV)",
                 nbr.ident.router_id
             );

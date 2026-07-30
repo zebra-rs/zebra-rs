@@ -30,7 +30,7 @@ use crate::{
         path_from_command, vrf_config_split,
     },
     context::Task,
-    ospf_event_trace, ospf_fsm_trace,
+    ospf_event_trace, ospf_fsm_trace, ospf_packet_trace,
 };
 
 use super::area::{OspfArea, OspfAreaMap};
@@ -869,7 +869,7 @@ impl<V: OspfVersion> Ospf<V> {
             },
             None => super::link::LinkTeMetric::default(),
         };
-        tracing::info!(
+        tracing::debug!(
             ifindex = key.ifindex,
             ?snapshot,
             "{}: stamp metric update applied",
@@ -885,13 +885,14 @@ impl<V: OspfVersion> Ospf<V> {
     /// subscribe) and non-Down transitions are ignored.
     pub(crate) fn process_bfd_event(&mut self, event: crate::bfd::inst::BfdEvent) {
         let crate::bfd::inst::BfdEvent::StateChange { key, change } = event;
-        tracing::info!(
+        ospf_event_trace!(
+            self.tracing,
+            Bfd,
             ?key,
             from = %change.from,
             to = %change.to,
             diag = %change.diag,
-            "{}: bfd session state change",
-            V::PROTO,
+            "bfd session state change",
         );
         if change.from == change.to || change.to != bfd_packet::State::Down {
             return;
@@ -2092,7 +2093,7 @@ impl Ospf<Ospfv2> {
                 lsa.update();
                 let flood_lsa = lsa.clone();
                 area.lsdb
-                    .insert_self_originated(lsa, &self.tx, Some(area_id));
+                    .insert_self_originated(lsa, &self.tx, Some(area_id), &self.tracing);
                 Self::ospf_spf_schedule(&self.tx, area, self.spf_interval);
                 Some(flood_lsa)
             } else {
@@ -2106,7 +2107,7 @@ impl Ospf<Ospfv2> {
     }
 
     pub fn router_lsa_originate(&mut self) {
-        tracing::info!("Router LSA Originate");
+        ospf_event_trace!(self.tracing, Lsdb, "Router LSA Originate");
         self.router_lsa_originate_with_min_seq(None);
     }
 
@@ -2381,7 +2382,10 @@ impl Ospf<Ospfv2> {
                     link.addr = vec![super::addr::OspfAddr { prefix }];
                     link.ident.prefix = prefix;
                     changed = true;
-                    tracing::info!(
+                    ospf_fsm_trace!(
+                        self.tracing,
+                        Ifsm,
+                        false,
                         "[VL] area {} peer {} refreshed: cost={} local={} remote={}",
                         transit,
                         peer,
@@ -2420,7 +2424,10 @@ impl Ospf<Ospfv2> {
                 keep.insert(idx);
                 let _ = self.tx.send(Message::Ifsm(idx, IfsmEvent::InterfaceUp));
                 changed = true;
-                tracing::info!(
+                ospf_fsm_trace!(
+                    self.tracing,
+                    Ifsm,
+                    false,
                     "[VL] area {} peer {} up: cost={} local={} remote={} ifindex={:#x}",
                     transit,
                     peer,
@@ -2441,7 +2448,13 @@ impl Ospf<Ospfv2> {
             .collect();
         for idx in stale {
             if let Some(link) = self.links.get_mut(&idx) {
-                tracing::info!("[VL] {} down (unreachable or deconfigured)", link.name);
+                ospf_fsm_trace!(
+                    self.tracing,
+                    Ifsm,
+                    false,
+                    "[VL] {} down (unreachable or deconfigured)",
+                    link.name
+                );
                 ospf_ifsm(link, IfsmEvent::InterfaceDown);
             }
             if let Some(area0) = self.areas.get_mut(AREA0) {
@@ -2713,7 +2726,7 @@ impl Ospf<Ospfv2> {
             lsa.update();
             let flood_lsa = lsa.clone();
             area.lsdb
-                .insert_self_originated(lsa, &self.tx, Some(area_id));
+                .insert_self_originated(lsa, &self.tx, Some(area_id), &self.tracing);
             Some(flood_lsa)
         } else {
             None
@@ -2894,7 +2907,7 @@ impl Ospf<Ospfv2> {
             lsa.update();
             let flood_lsa = lsa.clone();
             area.lsdb
-                .insert_self_originated(lsa, &self.tx, Some(area_id));
+                .insert_self_originated(lsa, &self.tx, Some(area_id), &self.tracing);
             Some(flood_lsa)
         } else {
             None
@@ -2951,7 +2964,8 @@ impl Ospf<Ospfv2> {
 
             let flood_lsa = lsa.clone();
             if let Some(area) = self.areas.get_mut(AREA0) {
-                area.lsdb.insert_self_originated(lsa, &self.tx, Some(AREA0));
+                area.lsdb
+                    .insert_self_originated(lsa, &self.tx, Some(AREA0), &self.tracing);
             }
             self.flood_self_originated_lsa(AREA0, &flood_lsa);
         } else {
@@ -3107,7 +3121,8 @@ impl Ospf<Ospfv2> {
 
             let flood_lsa = lsa.clone();
             if let Some(area) = self.areas.get_mut(AREA0) {
-                area.lsdb.insert_self_originated(lsa, &self.tx, Some(AREA0));
+                area.lsdb
+                    .insert_self_originated(lsa, &self.tx, Some(AREA0), &self.tracing);
             }
             self.flood_self_originated_lsa(AREA0, &flood_lsa);
         } else {
@@ -3172,7 +3187,8 @@ impl Ospf<Ospfv2> {
 
             let flood_lsa = lsa.clone();
             if let Some(area) = self.areas.get_mut(AREA0) {
-                area.lsdb.insert_self_originated(lsa, &self.tx, Some(AREA0));
+                area.lsdb
+                    .insert_self_originated(lsa, &self.tx, Some(AREA0), &self.tracing);
             }
             self.flood_self_originated_lsa(AREA0, &flood_lsa);
         } else {
@@ -3262,7 +3278,7 @@ impl Ospf<Ospfv2> {
         let flood_lsa = lsa.clone();
         if let Some(area) = self.areas.get_mut(area_id) {
             area.lsdb
-                .insert_self_originated(lsa, &self.tx, Some(area_id));
+                .insert_self_originated(lsa, &self.tx, Some(area_id), &self.tracing);
         }
         self.flood_self_originated_lsa(area_id, &flood_lsa);
     }
@@ -3329,7 +3345,8 @@ impl Ospf<Ospfv2> {
         lsa.update();
 
         let flood_lsa = lsa.clone();
-        self.lsdb_as.insert_self_originated(lsa, &self.tx, None);
+        self.lsdb_as
+            .insert_self_originated(lsa, &self.tx, None, &self.tracing);
         self.flood_lsa_through_as(&flood_lsa, None);
     }
 
@@ -3765,7 +3782,8 @@ impl Ospf<Ospfv2> {
         new_lsa.update();
 
         let flood_lsa = new_lsa.clone();
-        self.lsdb_as.insert_self_originated(new_lsa, &self.tx, None);
+        self.lsdb_as
+            .insert_self_originated(new_lsa, &self.tx, None, &self.tracing);
         self.flood_lsa_through_as(&flood_lsa, None);
         true
     }
@@ -4089,7 +4107,9 @@ impl Ospf<Ospfv2> {
         // a dedicated originator exists (Router / Network LSA). Otherwise
         // fall back to cloning the old body and bumping the sequence number.
         if ev == LsdbEvent::RefreshTimerExpire {
-            tracing::info!(
+            ospf_event_trace!(
+                self.tracing,
+                Lsdb,
                 "LSDB refresh timer expired: type={} id={} adv={}",
                 ls_type,
                 ls_id,
@@ -4157,7 +4177,9 @@ impl Ospf<Ospfv2> {
             };
             match ev {
                 LsdbEvent::HoldTimerExpire => {
-                    tracing::info!(
+                    ospf_event_trace!(
+                        self.tracing,
+                        Lsdb,
                         "LSDB hold timer expired: type={} id={} adv={}",
                         ls_type,
                         ls_id,
@@ -4215,7 +4237,9 @@ impl Ospf<Ospfv2> {
 
         match ls_type {
             OspfLsType::Router => {
-                tracing::info!(
+                ospf_event_trace!(
+                    self.tracing,
+                    Lsdb,
                     "[Self-Originated] Re-originating Router LSA id={} seq={:#x}",
                     ls_id,
                     received_seq
@@ -4224,7 +4248,9 @@ impl Ospf<Ospfv2> {
             }
             OspfLsType::Network => {
                 if self.is_dr_for_network_lsa(ls_id) {
-                    tracing::info!(
+                    ospf_event_trace!(
+                        self.tracing,
+                        Lsdb,
                         "[Self-Originated] Re-originating Network LSA id={} seq={:#x}",
                         ls_id,
                         received_seq
@@ -4250,7 +4276,9 @@ impl Ospf<Ospfv2> {
                         }
                     }
                 } else {
-                    tracing::info!(
+                    ospf_event_trace!(
+                        self.tracing,
+                        Lsdb,
                         "[Self-Originated] Flushing Network LSA id={} (no longer DR)",
                         ls_id
                     );
@@ -4278,7 +4306,9 @@ impl Ospf<Ospfv2> {
                     return;
                 };
                 if ls_id.is_unspecified() {
-                    tracing::info!(
+                    ospf_event_trace!(
+                        self.tracing,
+                        Lsdb,
                         "[Self-Originated] Re-originating NSSA default Type-7 id={} seq={:#x}",
                         ls_id,
                         received_seq
@@ -4296,7 +4326,9 @@ impl Ospf<Ospfv2> {
                     })
                     .unwrap_or(false);
                 if owned_redist {
-                    tracing::info!(
+                    ospf_event_trace!(
+                        self.tracing,
+                        Lsdb,
                         "[Self-Originated] Re-originating NSSA redistribute Type-7 id={} seq={:#x}",
                         ls_id,
                         received_seq
@@ -4304,7 +4336,9 @@ impl Ospf<Ospfv2> {
                     self.nssa_redist_connected_resync(area_id);
                     return;
                 }
-                tracing::info!(
+                ospf_event_trace!(
+                    self.tracing,
+                    Lsdb,
                     "[Self-Originated] Flushing Type-7 LSA id={} (no owner)",
                     ls_id
                 );
@@ -4339,7 +4373,9 @@ impl Ospf<Ospfv2> {
                 if network
                     .is_some_and(|p| self.redist_originated.values().any(|set| set.contains(&p)))
                 {
-                    tracing::info!(
+                    ospf_event_trace!(
+                        self.tracing,
+                        Lsdb,
                         "[Self-Originated] Re-originating redistribute Type-5 id={} seq={:#x}",
                         ls_id,
                         received_seq
@@ -4353,7 +4389,9 @@ impl Ospf<Ospfv2> {
                         .find(|(_, area)| area.nssa_translated.contains(&ls_id))
                         .map(|(&id, _)| id);
                     if let Some(area_id) = owning_area {
-                        tracing::info!(
+                        ospf_event_trace!(
+                            self.tracing,
+                            Lsdb,
                             "[Self-Originated] Re-translating Type-5 from NSSA area {} id={} seq={:#x}",
                             area_id,
                             ls_id,
@@ -4361,7 +4399,9 @@ impl Ospf<Ospfv2> {
                         );
                         self.nssa_translate_resync(area_id);
                     } else {
-                        tracing::info!(
+                        ospf_event_trace!(
+                            self.tracing,
+                            Lsdb,
                             "[Self-Originated] Flushing AS-External LSA id={} (no owner)",
                             ls_id
                         );
@@ -4389,7 +4429,9 @@ impl Ospf<Ospfv2> {
                 let opaque_id = u32::from(ls_id) & 0x00FF_FFFF;
                 match opaque_type {
                     OpaqueLsaType::ROUTER_INFO => {
-                        tracing::info!(
+                        ospf_event_trace!(
+                            self.tracing,
+                            Lsdb,
                             "[Self-Originated] Re-originating Router-Info Opaque LSA id={} seq={:#x}",
                             ls_id,
                             received_seq
@@ -4397,7 +4439,9 @@ impl Ospf<Ospfv2> {
                         self.router_info_lsa_originate();
                     }
                     OpaqueLsaType::EXT_PREFIX => {
-                        tracing::info!(
+                        ospf_event_trace!(
+                            self.tracing,
+                            Lsdb,
                             "[Self-Originated] Re-originating Ext-Prefix Opaque LSA id={} ifindex={} seq={:#x}",
                             ls_id,
                             opaque_id,
@@ -4406,7 +4450,9 @@ impl Ospf<Ospfv2> {
                         self.ext_prefix_lsa_originate(opaque_id);
                     }
                     OpaqueLsaType::EXT_LINK => {
-                        tracing::info!(
+                        ospf_event_trace!(
+                            self.tracing,
+                            Lsdb,
                             "[Self-Originated] Re-originating Ext-Link Opaque LSA id={} ifindex={} seq={:#x}",
                             ls_id,
                             opaque_id,
@@ -4415,7 +4461,9 @@ impl Ospf<Ospfv2> {
                         self.ext_link_lsa_originate(opaque_id);
                     }
                     _ => {
-                        tracing::info!(
+                        ospf_event_trace!(
+                            self.tracing,
+                            Lsdb,
                             "[Self-Originated] Flushing Opaque LSA id={} opaque-type={} (unknown owner)",
                             ls_id,
                             opaque_type
@@ -4441,7 +4489,9 @@ impl Ospf<Ospfv2> {
                 // with the body intact (content changes are handled by
                 // `abr_summary_originate`); a stale summary we no longer
                 // want is dropped on the next SPF-driven sync instead.
-                tracing::info!(
+                ospf_event_trace!(
+                    self.tracing,
+                    Lsdb,
                     "[Self-Originated] Re-asserting Summary LSA type={:?} id={} seq={:#x}",
                     ls_type,
                     ls_id,
@@ -4470,7 +4520,9 @@ impl Ospf<Ospfv2> {
             _ => {
                 // Other self-originated types we don't re-originate yet;
                 // flush with MaxAge.
-                tracing::info!(
+                ospf_event_trace!(
+                    self.tracing,
+                    Lsdb,
                     "[Self-Originated] Flushing LSA type={:?} id={} (not re-originable)",
                     ls_type,
                     ls_id
@@ -4497,7 +4549,12 @@ impl Ospf<Ospfv2> {
 
     /// Re-originate Router LSA with seq# >= min_seq + 1.
     fn router_lsa_reoriginate(&mut self, min_seq: u32) {
-        tracing::info!("Router LSA Re-originate (min_seq={:#x})", min_seq);
+        ospf_event_trace!(
+            self.tracing,
+            Lsdb,
+            "Router LSA Re-originate (min_seq={:#x})",
+            min_seq
+        );
         self.router_lsa_originate_with_min_seq(Some(min_seq));
     }
 
@@ -4600,7 +4657,7 @@ impl Ospf<Ospfv2> {
                 lsa.update();
                 let flood_lsa = lsa.clone();
                 area.lsdb
-                    .insert_self_originated(lsa, &self.tx, Some(area_id));
+                    .insert_self_originated(lsa, &self.tx, Some(area_id), &self.tracing);
                 Some(flood_lsa)
             }
         } else {
@@ -4686,7 +4743,10 @@ impl Ospf<Ospfv2> {
             link.state
         };
 
-        tracing::info!(
+        ospf_fsm_trace!(
+            self.tracing,
+            Nfsm,
+            false,
             "[NFSM:FullTransition] ifindex={} nbr={} {} -> {}",
             ifindex,
             nbr_addr,
@@ -5124,11 +5184,15 @@ impl Ospf<Ospfv2> {
                     continue;
                 };
                 if snap.self_originated {
-                    area.lsdb
-                        .insert_self_originated(lsa, &self.tx, Some(area_cp.area_id));
+                    area.lsdb.insert_self_originated(
+                        lsa,
+                        &self.tx,
+                        Some(area_cp.area_id),
+                        &self.tracing,
+                    );
                 } else {
                     area.lsdb
-                        .insert_received(lsa, &self.tx, Some(area_cp.area_id));
+                        .insert_received(lsa, &self.tx, Some(area_cp.area_id), &self.tracing);
                 }
                 total_lsas += 1;
             }
@@ -5378,7 +5442,7 @@ impl Ospf<Ospfv2> {
         let flood_copy = lsa.clone();
         if let Some(area) = self.areas.get_mut(area_id) {
             area.lsdb
-                .insert_self_originated(lsa, &self.tx, Some(area_id));
+                .insert_self_originated(lsa, &self.tx, Some(area_id), &self.tracing);
         }
         self.flood_link_scope_lsa_v2(ifindex, &flood_copy);
         true
@@ -5533,7 +5597,10 @@ impl Ospf<Ospfv2> {
                     &mut packet,
                     &build_auth_ctx(auth_mode, auth_key, crypto_key.clone(), md5_seq_cell),
                 );
-                tracing::info!(
+                ospf_packet_trace!(
+                    self.tracing,
+                    LsUpdate,
+                    Send,
                     "[Flood] Sending LSA type={:?} id={} adv={} to nbr={}",
                     lsa.h.ls_type,
                     lsa.h.ls_id,
@@ -5591,7 +5658,14 @@ impl Ospf<Ospfv2> {
             return;
         }
         let lsas: Vec<OspfLsa> = nbr.ls_rxmt.values().cloned().collect();
-        tracing::info!("[Retransmit] Sending {} LSAs to {}", lsas.len(), addr);
+        ospf_packet_trace!(
+            self.tracing,
+            LsUpdate,
+            Send,
+            "[Retransmit] Sending {} LSAs to {}",
+            lsas.len(),
+            addr
+        );
         let ls_upd = OspfLsUpdate { lsas };
         let mut packet =
             Ospfv2Packet::new(&self.router_id, &area_id, Ospfv2Payload::LsUpdate(ls_upd));
@@ -5635,7 +5709,14 @@ impl Ospf<Ospfv2> {
             Ospfv2Payload::DbDesc(sent.clone()),
         );
         apply_link_auth(&mut packet, &link.auth_send_ctx());
-        tracing::info!("[DB Desc:Retransmit] to {} seq={:#x}", addr, sent.seqnum);
+        ospf_packet_trace!(
+            link.tracing,
+            DbDesc,
+            Send,
+            "[DB Desc:Retransmit] to {} seq={:#x}",
+            addr,
+            sent.seqnum
+        );
         let _ = nbr.ptx.send(Message::Send(
             packet,
             nbr.ifindex,
@@ -5673,7 +5754,10 @@ impl Ospf<Ospfv2> {
             return;
         }
         let ack_headers: Vec<OspfLsaHeader> = link.ls_ack_delayed.drain(..).collect();
-        tracing::info!(
+        ospf_packet_trace!(
+            self.tracing,
+            LsAck,
+            Send,
             "[DelayedAck] Sending {} acks on ifindex={}",
             ack_headers.len(),
             ifindex
@@ -6264,7 +6348,12 @@ impl Ospf<Ospfv2> {
                     let output = compute_spf(input);
                     let _ = tx.send(Message::SpfDone(Box::new(output)));
                 });
-                tracing::info!("[SPF] Calculation dispatched for area {}", area_id);
+                ospf_event_trace!(
+                    self.tracing,
+                    Spf,
+                    "[SPF] Calculation dispatched for area {}",
+                    area_id
+                );
             }
             Message::SpfDone(output) => {
                 let area_id = output.area_id;
@@ -7570,7 +7659,8 @@ impl Ospf<Ospfv3> {
 
         let flood_lsa = lsa.clone();
         if let Some(area) = self.areas.get_mut(area_id) {
-            area.lsdb.install_originated(lsa, &self.tx, Some(area_id));
+            area.lsdb
+                .install_originated(lsa, &self.tx, Some(area_id), &self.tracing);
             Self::ospf_spf_schedule_generic(&self.tx, area, self.spf_interval);
         }
 
@@ -7678,7 +7768,8 @@ impl Ospf<Ospfv3> {
 
         let flood_lsa = lsa.clone();
         if let Some(area) = self.areas.get_mut(area_id) {
-            area.lsdb.install_originated(lsa, &self.tx, Some(area_id));
+            area.lsdb
+                .install_originated(lsa, &self.tx, Some(area_id), &self.tracing);
         }
         self.flood_self_originated_lsa(area_id, &flood_lsa);
     }
@@ -7769,7 +7860,8 @@ impl Ospf<Ospfv3> {
         lsa.update();
 
         let flood_lsa = lsa.clone();
-        self.lsdb_as.install_originated(lsa, &self.tx, None);
+        self.lsdb_as
+            .install_originated(lsa, &self.tx, None, &self.tracing);
         self.flood_lsa_through_as_v3(&flood_lsa, None);
     }
 
@@ -8382,7 +8474,8 @@ impl Ospf<Ospfv3> {
             }
             lsa.update();
             let flood_lsa = lsa.clone();
-            area.lsdb.install_originated(lsa, &self.tx, Some(area_id));
+            area.lsdb
+                .install_originated(lsa, &self.tx, Some(area_id), &self.tracing);
             Some(flood_lsa)
         } else {
             None
@@ -8587,7 +8680,8 @@ impl Ospf<Ospfv3> {
             }
             lsa.update();
             let flood_lsa = lsa.clone();
-            area.lsdb.install_originated(lsa, &self.tx, Some(area_id));
+            area.lsdb
+                .install_originated(lsa, &self.tx, Some(area_id), &self.tracing);
             Some(flood_lsa)
         } else {
             None
@@ -8681,7 +8775,8 @@ impl Ospf<Ospfv3> {
             }
             lsa.update();
             let flood_lsa = lsa.clone();
-            area.lsdb.install_originated(lsa, &self.tx, Some(area_id));
+            area.lsdb
+                .install_originated(lsa, &self.tx, Some(area_id), &self.tracing);
             Some(flood_lsa)
         } else {
             None
@@ -8964,11 +9059,19 @@ impl Ospf<Ospfv3> {
                     // The decoded LSA carries its exact wire bytes in
                     // `raw`, so the re-flood matches helpers' snapshot
                     // verbatim; install_originated arms hold/refresh.
-                    area.lsdb
-                        .install_originated(lsa, &self.tx, Some(area_cp.area_id));
+                    area.lsdb.install_originated(
+                        lsa,
+                        &self.tx,
+                        Some(area_cp.area_id),
+                        &self.tracing,
+                    );
                 } else {
-                    area.lsdb
-                        .insert_received_v3(lsa, &self.tx, Some(area_cp.area_id));
+                    area.lsdb.insert_received_v3(
+                        lsa,
+                        &self.tx,
+                        Some(area_cp.area_id),
+                        &self.tracing,
+                    );
                 }
                 total_lsas += 1;
             }
@@ -9135,7 +9238,8 @@ impl Ospf<Ospfv3> {
         new_lsa.update();
 
         let flood_lsa = new_lsa.clone();
-        self.lsdb_as.install_originated(new_lsa, &self.tx, None);
+        self.lsdb_as
+            .install_originated(new_lsa, &self.tx, None, &self.tracing);
         self.flood_lsa_through_as_v3(&flood_lsa, None);
         true
     }
@@ -9549,7 +9653,10 @@ impl Ospf<Ospfv3> {
         }
 
         let lsas: Vec<ospf_packet::Ospfv3Lsa> = nbr.ls_rxmt.values().cloned().collect();
-        tracing::info!(
+        ospf_packet_trace!(
+            self.tracing,
+            LsUpdate,
+            Send,
             "[v3 Retransmit] Sending {} LSAs to {}",
             lsas.len(),
             router_id
@@ -9606,7 +9713,10 @@ impl Ospf<Ospfv3> {
             nbr.timer.db_desc = None;
             return;
         }
-        tracing::info!(
+        ospf_packet_trace!(
+            oi.tracing,
+            DbDesc,
+            Send,
             "[v3 DBD:Retransmit] to {} seq={:#x}",
             router_id,
             nbr.dd.seqnum
@@ -9629,7 +9739,10 @@ impl Ospf<Ospfv3> {
             return;
         }
         let ident = *oi.ident;
-        tracing::info!(
+        ospf_packet_trace!(
+            oi.tracing,
+            LsRequest,
+            Send,
             "[v3 LSReq:Retransmit] to {} entries={}",
             router_id,
             nbr.ls_req.len()
@@ -9856,7 +9969,12 @@ impl Ospf<Ospfv3> {
                     let output = compute_spf(input);
                     let _ = tx.send(Message::SpfDone(Box::new(output)));
                 });
-                tracing::info!("[v3 SPF] Calculation dispatched for area {}", area_id);
+                ospf_event_trace!(
+                    self.tracing,
+                    Spf,
+                    "[v3 SPF] Calculation dispatched for area {}",
+                    area_id
+                );
             }
             Message::SpfDone(output) => {
                 let area_id = output.area_id;
@@ -10116,7 +10234,8 @@ impl Ospf<Ospfv3> {
             // Link-LSA lives in the per-link LSDB; no area_id is
             // associated with link-scope LSAs in the hold-timer
             // protocol, so pass `None`.
-            link.lsdb.install_originated(lsa, &self.tx, None);
+            link.lsdb
+                .install_originated(lsa, &self.tx, None, &self.tracing);
         }
         self.flood_link_scope_lsa(ifindex, &flood_lsa);
     }
@@ -10284,7 +10403,8 @@ impl Ospf<Ospfv3> {
 
         let flood_lsa = lsa.clone();
         if let Some(area) = self.areas.get_mut(area_id) {
-            area.lsdb.install_originated(lsa, &self.tx, Some(area_id));
+            area.lsdb
+                .install_originated(lsa, &self.tx, Some(area_id), &self.tracing);
             Self::ospf_spf_schedule_generic(&self.tx, area, self.spf_interval);
         }
         self.flood_self_originated_lsa(area_id, &flood_lsa);
@@ -10379,7 +10499,8 @@ impl Ospf<Ospfv3> {
 
             let flood_lsa = lsa.clone();
             if let Some(area) = self.areas.get_mut(area_id) {
-                area.lsdb.install_originated(lsa, &self.tx, Some(area_id));
+                area.lsdb
+                    .install_originated(lsa, &self.tx, Some(area_id), &self.tracing);
             }
             self.flood_self_originated_lsa(area_id, &flood_lsa);
         } else {
@@ -10604,7 +10725,8 @@ impl Ospf<Ospfv3> {
 
             let flood_lsa = lsa.clone();
             if let Some(area) = self.areas.get_mut(area_id) {
-                area.lsdb.install_originated(lsa, &self.tx, Some(area_id));
+                area.lsdb
+                    .install_originated(lsa, &self.tx, Some(area_id), &self.tracing);
             }
             self.flood_self_originated_lsa(area_id, &flood_lsa);
         } else {
@@ -10667,7 +10789,8 @@ impl Ospf<Ospfv3> {
 
             let flood_lsa = lsa.clone();
             if let Some(area) = self.areas.get_mut(area_id) {
-                area.lsdb.install_originated(lsa, &self.tx, Some(area_id));
+                area.lsdb
+                    .install_originated(lsa, &self.tx, Some(area_id), &self.tracing);
             }
             self.flood_self_originated_lsa(area_id, &flood_lsa);
         } else {
@@ -10832,7 +10955,8 @@ impl Ospf<Ospfv3> {
 
             let flood_lsa = lsa.clone();
             if let Some(area) = self.areas.get_mut(area_id) {
-                area.lsdb.install_originated(lsa, &self.tx, Some(area_id));
+                area.lsdb
+                    .install_originated(lsa, &self.tx, Some(area_id), &self.tracing);
             }
             self.flood_self_originated_lsa(area_id, &flood_lsa);
         } else {
@@ -11160,7 +11284,10 @@ impl Ospf<Ospfv3> {
             (link.state, link.area)
         };
 
-        tracing::info!(
+        ospf_fsm_trace!(
+            self.tracing,
+            Nfsm,
+            false,
             "[v3 NFSM:FullTransition] ifindex={} nbr={} {} -> {}",
             ifindex,
             nbr_addr,
@@ -11326,7 +11453,8 @@ impl Ospf<Ospfv3> {
 
         let flood_lsa = lsa.clone();
         if let Some(area) = self.areas.get_mut(area_id) {
-            area.lsdb.install_originated(lsa, &self.tx, Some(area_id));
+            area.lsdb
+                .install_originated(lsa, &self.tx, Some(area_id), &self.tracing);
             Self::ospf_spf_schedule_generic(&self.tx, area, self.spf_interval);
         }
         self.flood_self_originated_lsa(area_id, &flood_lsa);
@@ -11498,7 +11626,8 @@ impl Ospf<Ospfv3> {
 
         let flood_lsa = lsa.clone();
         if let Some(area) = self.areas.get_mut(area_id) {
-            area.lsdb.install_originated(lsa, &self.tx, Some(area_id));
+            area.lsdb
+                .install_originated(lsa, &self.tx, Some(area_id), &self.tracing);
             Self::ospf_spf_schedule_generic(&self.tx, area, self.spf_interval);
         }
         self.flood_self_originated_lsa(area_id, &flood_lsa);

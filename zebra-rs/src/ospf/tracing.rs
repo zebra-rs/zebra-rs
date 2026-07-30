@@ -241,6 +241,7 @@ impl FsmType {
 pub enum EventType {
     Spf,
     Lsdb,
+    Bfd,
 }
 
 impl EventType {
@@ -248,6 +249,7 @@ impl EventType {
         match self {
             EventType::Spf => "spf",
             EventType::Lsdb => "lsdb",
+            EventType::Bfd => "bfd",
         }
     }
 }
@@ -334,6 +336,7 @@ pub struct OspfTracing {
     pub fsm: FsmTracing,
     pub spf: EventConfig,
     pub lsdb: EventConfig,
+    pub bfd: EventConfig,
 }
 
 impl Default for OspfTracing {
@@ -345,6 +348,7 @@ impl Default for OspfTracing {
             fsm: FsmTracing::default(),
             spf: EventConfig::default(),
             lsdb: EventConfig::default(),
+            bfd: EventConfig::default(),
         }
     }
 }
@@ -410,6 +414,7 @@ impl OspfTracing {
         match ty {
             EventType::Spf => self.spf.enabled,
             EventType::Lsdb => self.lsdb.enabled,
+            EventType::Bfd => self.bfd.enabled,
         }
     }
 }
@@ -490,6 +495,7 @@ fn apply_tracing(t: &mut OspfTracing, rest: &str, args: &mut Args, op: ConfigOp)
         "/all" => t.all = op.is_set(),
         "/spf" => t.spf.enabled = op.is_set(),
         "/lsdb" => t.lsdb.enabled = op.is_set(),
+        "/bfd" => t.bfd.enabled = op.is_set(),
         other => {
             if let Some(pkt) = other.strip_prefix("/packet/") {
                 let (typ, sub) = match pkt.split_once('/') {
@@ -564,9 +570,12 @@ mod tests {
 
         apply_tracing(&mut t, "/spf", &mut args(&[]), ConfigOp::Set);
         apply_tracing(&mut t, "/lsdb", &mut args(&[]), ConfigOp::Set);
-        assert!(t.spf.enabled && t.lsdb.enabled);
+        apply_tracing(&mut t, "/bfd", &mut args(&[]), ConfigOp::Set);
+        assert!(t.spf.enabled && t.lsdb.enabled && t.bfd.enabled);
         apply_tracing(&mut t, "/spf", &mut args(&[]), ConfigOp::Delete);
         assert!(!t.spf.enabled);
+        apply_tracing(&mut t, "/bfd", &mut args(&[]), ConfigOp::Delete);
+        assert!(!t.bfd.enabled);
     }
 
     #[test]
@@ -719,6 +728,7 @@ mod tests {
         assert!(t.should_trace_fsm(FsmType::Ifsm, false));
         assert!(t.should_trace_event(EventType::Spf));
         assert!(t.should_trace_event(EventType::Lsdb));
+        assert!(t.should_trace_event(EventType::Bfd));
         // `all` is summary-level only — it does not imply detail.
         assert!(!t.packet_detail(PacketType::LsAck, PacketDirection::Recv));
     }

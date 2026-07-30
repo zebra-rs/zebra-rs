@@ -7,6 +7,7 @@ use crate::spf::label_block::{LabelBlock, LabelConfig, LabelMap};
 
 use super::ReachMap;
 use super::inst::Message;
+use super::tracing::OspfTracing;
 use super::version::{OspfVersion, Ospfv2};
 use crate::context::{Timer, TimerType};
 
@@ -393,6 +394,7 @@ impl<V: OspfVersion> Lsdb<V> {
         lsa_data: V::Lsa,
         tx: &UnboundedSender<Message<V>>,
         area_id: Option<Ipv4Addr>,
+        tracing: &OspfTracing,
     ) {
         let lsa_key: OspfLsaKey = {
             let h = V::lsa_header(&lsa_data);
@@ -401,7 +403,9 @@ impl<V: OspfVersion> Lsdb<V> {
         let ls_age = V::ls_age(V::lsa_header(&lsa_data));
         let hold_secs = (OSPF_MAX_AGE - ls_age).max(1);
         let (ls_type_raw, ls_id_raw, adv_router) = lsa_key;
-        tracing::info!(
+        crate::ospf_event_trace!(
+            tracing,
+            Lsdb,
             "[LSDB install_lsa] type=0x{:04x} id=0x{:08x} adv={} ls_age={} hold={}s",
             ls_type_raw,
             ls_id_raw,
@@ -425,6 +429,7 @@ impl<V: OspfVersion> Lsdb<V> {
         lsa_data: V::Lsa,
         tx: &UnboundedSender<Message<V>>,
         area_id: Option<Ipv4Addr>,
+        tracing: &OspfTracing,
     ) {
         let lsa_key: OspfLsaKey = {
             let h = V::lsa_header(&lsa_data);
@@ -433,7 +438,9 @@ impl<V: OspfVersion> Lsdb<V> {
         let ls_age = V::ls_age(V::lsa_header(&lsa_data));
         let hold_secs = (OSPF_MAX_AGE - ls_age).max(1);
         let (ls_type_raw, ls_id_raw, adv_router) = lsa_key;
-        tracing::info!(
+        crate::ospf_event_trace!(
+            tracing,
+            Lsdb,
             "[LSDB install_originated] type=0x{:04x} id=0x{:08x} adv={} ls_age={} hold={}s refresh={}s",
             ls_type_raw,
             ls_id_raw,
@@ -529,6 +536,7 @@ impl Lsdb<Ospfv2> {
         mut ospf_lsa: OspfLsa,
         tx: &UnboundedSender<Message<Ospfv2>>,
         area_id: Option<Ipv4Addr>,
+        tracing: &OspfTracing,
     ) {
         use OspfLsType::*;
         match ospf_lsa.h.ls_type {
@@ -537,7 +545,7 @@ impl Lsdb<Ospfv2> {
                 // v2-specific Fletcher checksum + length recompute,
                 // then dispatch through the generic install path.
                 ospf_lsa.update();
-                self.install_originated(ospf_lsa, tx, area_id);
+                self.install_originated(ospf_lsa, tx, area_id, tracing);
             }
             _ => {}
         }
@@ -548,13 +556,14 @@ impl Lsdb<Ospfv2> {
         ospf_lsa: OspfLsa,
         tx: &UnboundedSender<Message<Ospfv2>>,
         area_id: Option<Ipv4Addr>,
+        tracing: &OspfTracing,
     ) {
         // v2-specific SR-MPLS / Opaque ExtPrefix ingestion (label
         // map + reach map). Stays v2-only because OspfLsp variants
         // are v2 codec types with no v3 analogue.
         self.update_lsa(&ospf_lsa);
         // Generic key construction + hold timer + insertion.
-        self.install_lsa(ospf_lsa, tx, area_id);
+        self.install_lsa(ospf_lsa, tx, area_id, tracing);
     }
 
     pub fn update_lsa(&mut self, lsa: &OspfLsa) {
@@ -603,9 +612,10 @@ impl Lsdb<super::version::Ospfv3> {
         ospf_lsa: Ospfv3Lsa,
         tx: &UnboundedSender<Message<super::version::Ospfv3>>,
         area_id: Option<Ipv4Addr>,
+        tracing: &OspfTracing,
     ) {
         self.update_lsa_v3(&ospf_lsa);
-        self.install_lsa(ospf_lsa, tx, area_id);
+        self.install_lsa(ospf_lsa, tx, area_id, tracing);
     }
 
     /// Scan an inbound v3 LSA for RFC 8666 §3 SR capability TLVs

@@ -126,7 +126,9 @@ pub fn spawn_ospf_vrf_v2(
     let cm_tx = ospf.cm.tx.clone();
     let show_tx = ospf.show.tx.clone();
     let task = inst::serve(ospf);
-    tracing::info!(vrf = %name, table_id, "ospf: spawned per-VRF instance");
+    if crate::rib::tracing::task() {
+        tracing::info!(vrf = %name, table_id, "ospf: spawned per-VRF instance");
+    }
     finish_spawn(&proto, cm_tx, show_tx, task, config_tx, buffered)
 }
 
@@ -157,7 +159,9 @@ pub fn spawn_ospf_vrf_v3(
     let cm_tx = ospf.cm.tx.clone();
     let show_tx = ospf.show.tx.clone();
     let task = inst::serve_v3(ospf);
-    tracing::info!(vrf = %name, table_id, "ospfv3: spawned per-VRF instance");
+    if crate::rib::tracing::task() {
+        tracing::info!(vrf = %name, table_id, "ospfv3: spawned per-VRF instance");
+    }
     finish_spawn(&proto, cm_tx, show_tx, task, config_tx, buffered)
 }
 
@@ -175,5 +179,7 @@ pub fn despawn_ospf_vrf(
     let proto = format!("{proto_base}:vrf:{name}");
     let _ = config_tx.try_send(Message::UnsubscribeShowVrf { key: proto.clone() });
     rib_subscriber.send_proto_cleanup(&proto);
-    tracing::info!(vrf = %name, proto = %proto, "ospf: despawned per-VRF instance");
+    if crate::rib::tracing::task() {
+        tracing::info!(vrf = %name, proto = %proto, "ospf: despawned per-VRF instance");
+    }
 }
