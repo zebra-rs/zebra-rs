@@ -9,6 +9,11 @@ use super::tools::commands::CommandsTool;
 use super::tools::isis::IsisTools;
 use super::tools::show::ShowTool;
 
+/// Protocol revisions the `initialize` handshake can negotiate, newest first.
+/// 2025-03-26 is deliberately absent: it is the only revision that requires
+/// JSON-RPC batching, which this newline-delimited server does not accept.
+const SUPPORTED_PROTOCOL_VERSIONS: &[&str] = &["2025-06-18", "2024-11-05"];
+
 /// Wrap tool output in the MCP `tools/call` result shape.
 fn tool_result(text: String, is_error: bool) -> Value {
     json!({
@@ -59,21 +64,25 @@ impl ZmcpServer {
             "initialize" => {
                 debug!("MCP initialize request");
 
-                // Validate client protocol version
                 let client_version = params
                     .get("protocolVersion")
                     .and_then(|v| v.as_str())
                     .unwrap_or("");
 
-                if !client_version.is_empty() && client_version != "2024-11-05" {
+                // Echo a supported requested version; otherwise offer our
+                // latest and let the client decide whether to continue.
+                let negotiated = if SUPPORTED_PROTOCOL_VERSIONS.contains(&client_version) {
+                    client_version
+                } else {
                     warn!(
-                        "Client protocol version mismatch: expected 2024-11-05, got {}",
-                        client_version
+                        "Unsupported client protocol version {:?}, offering {}",
+                        client_version, SUPPORTED_PROTOCOL_VERSIONS[0]
                     );
-                }
+                    SUPPORTED_PROTOCOL_VERSIONS[0]
+                };
 
                 json!({
-                    "protocolVersion": "2024-11-05",
+                    "protocolVersion": negotiated,
                     "capabilities": {
                         "tools": {
                             "listChanged": false
@@ -136,6 +145,7 @@ impl ZmcpServer {
                 })
             }
             "tools/call" => self.handle_tool_call(params).await,
+            "ping" => json!({}),
             _ => {
                 warn!("Unknown method: {}", method);
                 // For unknown methods, return error only if request has an ID
@@ -274,6 +284,40 @@ mod tests {
                 "missing {expected}; tools: {names:?}"
             );
         }
+    }
+
+    async fn negotiate(requested: Option<&str>) -> Value {
+        let params = match requested {
+            Some(v) => json!({"protocolVersion": v}),
+            None => json!({}),
+        };
+        let req = json!({"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": params});
+        let resp = server().handle_request(req).await.expect("response");
+        resp["result"]["protocolVersion"].clone()
+    }
+
+    #[tokio::test]
+    async fn initialize_echoes_supported_versions() {
+        for version in SUPPORTED_PROTOCOL_VERSIONS {
+            assert_eq!(negotiate(Some(version)).await, json!(version));
+        }
+    }
+
+    #[tokio::test]
+    async fn initialize_offers_latest_for_unsupported_version() {
+        for requested in [Some("2025-03-26"), Some("1999-01-01"), None] {
+            assert_eq!(
+                negotiate(requested).await,
+                json!(SUPPORTED_PROTOCOL_VERSIONS[0])
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn ping_returns_empty_result() {
+        let req = json!({"jsonrpc": "2.0", "id": 3, "method": "ping"});
+        let resp = server().handle_request(req).await.expect("response");
+        assert_eq!(resp["result"], json!({}));
     }
 
     #[tokio::test]
