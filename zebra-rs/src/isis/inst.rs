@@ -32,7 +32,7 @@ use super::config::{IsisConfig, MtId};
 use super::flood;
 use super::graph::{LspMap, ReachMapV4, ReachMapV6};
 use super::ifsm::{csnp_timer, has_level};
-use super::link::{Afis, IsisLinks, LinkTop};
+use super::link::{Afis, CircuitIdMap, IsisLinks, LinkTop};
 use super::lsdb::insert_self_originate;
 use super::lsp::{
     TlvKey, dis_generate, lsp_emit, lsp_generate, resolve_dis_ifindex, target_block_name,
@@ -142,6 +142,11 @@ pub struct Isis {
     pub ctx: ProtoContext,
     pub rib_rx: UnboundedReceiver<RibRx>,
     pub links: IsisLinks,
+
+    /// Interface-name -> circuit-id reservations (`1..=255`). Allocated
+    /// when IS-IS is enabled on an interface, released when it is
+    /// disabled, read by `dis_becoming` to name the pseudonode LSP.
+    pub circuit_ids: CircuitIdMap,
     pub show: ShowChannel,
     pub show_cb: HashMap<String, ShowCallback>,
     pub config: IsisConfig,
@@ -761,6 +766,7 @@ impl Isis {
                 rib_rx,
                 ctx,
                 links: IsisLinks::default(),
+                circuit_ids: CircuitIdMap::default(),
                 show: ShowChannel::new(),
                 show_cb: HashMap::new(),
                 config: IsisConfig::default(),
@@ -3042,6 +3048,7 @@ impl Isis {
             lsdb: &mut self.lsdb,
             flags: &link.flags,
             config: &mut link.config,
+            circuit_id: link.circuit_id,
             state: &mut link.state,
             timer: &mut link.timer,
             local_pool: &mut self.local_pool,

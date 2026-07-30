@@ -447,47 +447,26 @@ pub fn stop(link: &mut LinkTop) {
     }
 }
 
-/// Fallback circuit id derived from `ifindex`, folded into `1..=255`.
-///
-/// Only reached when the per-instance allocator
-/// ([`crate::isis::link::IsisLinks::alloc_circuit_id`]) had nothing left
-/// to hand out, i.e. this router already runs IS-IS on 255 circuits. The
-/// pseudonode id is 8 bits, so beyond that some pair must collide however
-/// it is chosen; this at least keeps the value out of the reserved 0.
-///
-/// Pseudonode id 0 is reserved for a router's own non-pseudonode LSP, so
-/// it can never name a circuit: a DIS that advertises `<sys-id>.00` as its
-/// LAN ID aliases its own node LSP. Both ends of the LAN then carry a
-/// self-referential `ExtIsReach` — the DIS lists itself as its own
-/// neighbour, and no pseudonode LSP enumerating the members is ever
-/// generated — so SPF sees a self-loop where the LAN should be and the
-/// whole segment drops out of the topology.
-///
-/// `ifindex as u8` did exactly that whenever the kernel index was a
-/// multiple of 256. That is a ~1-in-256 lottery per circuit, drawn afresh
-/// as ifindexes climb with each veth created and torn down, and it
-/// presented as an occasional "ECMP never forms" flake rather than
-/// anything that looked like an IS-IS bug.
-///
-/// Folding into `1..=255` leaves the collision profile unchanged — two
-/// circuits on one router still alias if their ifindexes are 255 apart,
-/// as they previously did at 256 — while removing the case that is
-/// guaranteed broken.
-fn dis_pseudo_id(ifindex: u32) -> u8 {
-    ((ifindex.max(1) - 1) % 255 + 1) as u8
-}
-
 pub fn dis_becoming(link: &mut LinkTop, level: Level) {
     use IfsmEvent::*;
 
-    // The circuit's allocated id, unique across this instance's links.
-    // Zero means the allocator was exhausted (or this link predates
-    // assignment), so fall back to the ifindex fold — still never 0.
-    let pseudo_id: u8 = match link.state.circuit_id {
-        0 => dis_pseudo_id(link.ifindex),
-        id => id,
-    };
-    let lsp_id = IsisLspId::new(link.up_config.net.sys_id(), pseudo_id, 0);
+    // The circuit's reserved id, unique across this instance's links,
+    // allocated when IS-IS was enabled on the interface and cached on
+    // the link. Enabling is refused when the id space is exhausted, so
+    // an enabled circuit always has one; 0 is a defensive case only.
+    // Without an id there is nothing valid to name the pseudonode LSP
+    // with — id 0 would alias the router's own node LSP, and any
+    // invented value could alias another circuit's — so suspend DIS
+    // processing: no adjacency registration, no pseudonode origination.
+    // A later election re-enters here once a reservation exists.
+    if link.circuit_id == 0 {
+        tracing::warn!(
+            "isis: {} elected DIS without a circuit id; suspending DIS processing",
+            link.state.name
+        );
+        return;
+    }
+    let lsp_id = IsisLspId::new(link.up_config.net.sys_id(), link.circuit_id, 0);
 
     // Register adjacency with LAN ID.
     *link.state.adj.get_mut(&level) = Some((lsp_id.neighbor_id(), None));
@@ -790,42 +769,5 @@ pub fn dis_selection(link: &mut LinkTop, level: Level) {
         && let Some((neighbor_id, _)) = link.state.adj.get(&level)
     {
         link.event(Message::DisOriginate(level, *neighbor_id, None));
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::dis_pseudo_id;
-
-    /// The defect this guards: `ifindex as u8` yields 0 on every
-    /// multiple of 256, and pseudonode id 0 aliases the router's own
-    /// node LSP. Observed live as `0000.0000.0003.00` in a neighbour's
-    /// LSDB, with the LAN's two members advertising themselves as their
-    /// own neighbour and the segment vanishing from SPF.
-    #[test]
-    fn dis_pseudo_id_is_never_zero() {
-        for ifindex in [1u32, 2, 254, 255, 256, 511, 512, 65_536, u32::MAX] {
-            let id = dis_pseudo_id(ifindex);
-            assert_ne!(
-                id, 0,
-                "ifindex {ifindex} produced pseudonode id 0, which aliases the node LSP"
-            );
-        }
-        // The truncation that used to break: 256 and 512 are exactly the
-        // indexes `as u8` mapped onto the reserved id.
-        assert_eq!(256u32 as u8, 0, "precondition: the old derivation gave 0");
-        assert_ne!(dis_pseudo_id(256), 0);
-        assert_ne!(dis_pseudo_id(512), 0);
-    }
-
-    /// Distinct circuits on one router must still get distinct ids
-    /// within any 255-index window, or two LANs would share a
-    /// pseudonode LSP.
-    #[test]
-    fn dis_pseudo_id_is_distinct_across_a_full_window() {
-        let ids: std::collections::BTreeSet<u8> = (1..=255u32).map(dis_pseudo_id).collect();
-        assert_eq!(ids.len(), 255, "255 consecutive ifindexes must not collide");
-        assert_eq!(*ids.iter().min().unwrap(), 1);
-        assert_eq!(*ids.iter().max().unwrap(), 255);
     }
 }

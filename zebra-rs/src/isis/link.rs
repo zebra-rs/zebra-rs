@@ -81,12 +81,55 @@ pub struct IsisLinks {
     pub map: BTreeMap<u32, IsisLink>,
 }
 
-/// Lowest id in `1..=255` absent from `used`, or `None` when the space is
-/// full. Split out from [`IsisLinks::alloc_circuit_id`] so the selection
-/// rule is testable without standing up real links (an `IsisLink` owns a
-/// raw `AF_PACKET` socket).
-fn lowest_free_circuit_id(used: &BTreeSet<u8>) -> Option<u8> {
-    (1u8..=255).find(|id| !used.contains(id))
+/// Interface name -> circuit id (`1..=255`), owned by the IS-IS instance.
+///
+/// An id is reserved when IS-IS is enabled on an interface
+/// (`config_afi_enable`, first AFI on) and released when it is disabled
+/// (last AFI off), so the 255-wide space is scoped to interfaces that
+/// actually run IS-IS rather than to every link the kernel ever reports.
+///
+/// The map is the single source of truth: an id is free iff no entry
+/// holds it, so release is just removal and reuse cannot double-assign.
+/// The id names the pseudonode LSP this router originates while DIS on
+/// the circuit — LSP id `(sys-id, circuit-id)` — so it must be unique
+/// across the instance's circuits and never 0: id 0 is the router's own
+/// non-pseudonode LSP, and a DIS that claimed it would advertise a LAN
+/// ID aliasing that LSP.
+///
+/// Keyed by interface name, not ifindex: the config tree that drives
+/// enable/disable is name-keyed, and a name survives the delete/re-add
+/// cycles that hand out fresh ifindexes — so a recreated interface keeps
+/// its pseudonode identity.
+///
+/// The allocated id is also cached on [`IsisLink::circuit_id`] so read
+/// paths (`dis_becoming`, `show isis interface`) don't query this map;
+/// both alloc/release sites keep the cache in step.
+#[derive(Debug, Default)]
+pub struct CircuitIdMap {
+    map: BTreeMap<String, u8>,
+}
+
+impl CircuitIdMap {
+    pub fn get(&self, name: &str) -> Option<u8> {
+        self.map.get(name).copied()
+    }
+
+    /// Idempotent: an interface that already holds an id keeps it.
+    /// Lowest free id wins; `None` when all 255 are in use.
+    pub fn alloc(&mut self, name: &str) -> Option<u8> {
+        if let Some(&id) = self.map.get(name) {
+            return Some(id);
+        }
+        let used: BTreeSet<u8> = self.map.values().copied().collect();
+        let id = (1u8..=255).find(|id| !used.contains(id))?;
+        self.map.insert(name.to_string(), id);
+        Some(id)
+    }
+
+    /// Returns the released id, `None` if the interface held none.
+    pub fn release(&mut self, name: &str) -> Option<u8> {
+        self.map.remove(name)
+    }
 }
 
 impl IsisLinks {
@@ -104,30 +147,6 @@ impl IsisLinks {
 
     pub fn insert(&mut self, key: u32, value: IsisLink) -> Option<IsisLink> {
         self.map.insert(key, value)
-    }
-
-    /// Lowest circuit id in `1..=255` not already taken by a link this
-    /// instance holds, or `None` when all 255 are in use.
-    ///
-    /// The used set is read straight off the map rather than tracked in a
-    /// side table: the map is the only source of truth for which circuits
-    /// exist, so uniqueness cannot drift out of sync with it. Links are
-    /// never removed from `IsisLinks`, so ids are never recycled and an
-    /// assignment stays valid for the link's lifetime — which matters,
-    /// because the id names a pseudonode LSP that peers hold in their
-    /// LSDB.
-    ///
-    /// `0` is excluded by construction: it is the router's own
-    /// non-pseudonode LSP id, and a DIS that claimed it would advertise a
-    /// LAN ID aliasing that LSP.
-    pub fn alloc_circuit_id(&self) -> Option<u8> {
-        let used: BTreeSet<u8> = self
-            .map
-            .values()
-            .map(|link| link.state.circuit_id)
-            .filter(|id| *id != 0)
-            .collect();
-        lowest_free_circuit_id(&used)
     }
 
     pub fn iter(&self) -> Iter<'_, u32, IsisLink> {
@@ -149,6 +168,11 @@ pub struct IsisLink {
     pub ptx: UnboundedSender<PacketMessage>,
     pub sock: Arc<AsyncFd<Socket>>,
     pub flags: LinkFlags,
+    /// Cached copy of this interface's [`CircuitIdMap`] reservation, so
+    /// readers don't query the map on every access. 0 = no reservation.
+    /// Written only where the reservation changes: alloc/release in
+    /// `config_afi_enable`, plus the mirror-in at `link_add`.
+    pub circuit_id: u8,
     pub config: LinkConfig,
     pub state: LinkState,
     pub timer: LinkTimer,
@@ -168,6 +192,11 @@ pub struct LinkTop<'a> {
     pub restarting: Option<&'a super::inst::RestartingState>,
     pub tracing: &'a IsisTracing,
     pub config: &'a LinkConfig,
+    /// This circuit's id (snapshot of `IsisLink::circuit_id`), read by
+    /// `dis_becoming` to name the pseudonode LSP. 0 = no reservation.
+    /// Allocation and release happen at IS-IS enable/disable
+    /// (`config_afi_enable`), never here.
+    pub circuit_id: u8,
     pub state: &'a mut LinkState,
     pub timer: &'a mut LinkTimer,
     pub local_pool: &'a mut Option<LabelPool>,
@@ -675,17 +704,6 @@ pub struct LinkState {
     // pub ifindex: u32,
     pub name: String,
 
-    /// This circuit's IS-IS circuit id, `1..=255`, assigned once when the
-    /// link is admitted and stable for its lifetime. It names the
-    /// pseudonode this router originates while DIS here: the pseudonode
-    /// LSP id is `(sys-id, circuit_id)`, so the value must be unique
-    /// across this instance's circuits and must never be 0 — 0 is the
-    /// router's own non-pseudonode LSP, and a LAN claiming it aliases
-    /// that LSP (see `ifsm::dis_becoming`).
-    ///
-    /// 0 means "unassigned": either the link predates assignment, or the
-    /// instance already holds 255 circuits and the space is exhausted.
-    pub circuit_id: u8,
     pub mtu: u32,
     pub mac: Option<MacAddr>,
 
@@ -814,6 +832,7 @@ impl IsisLink {
             ptx,
             sock,
             flags: link.flags,
+            circuit_id: 0,
             config: LinkConfig::default(),
             state: LinkState::default(),
             timer: LinkTimer::default(),
@@ -866,16 +885,14 @@ impl Isis {
         let name = link.name.clone();
         match IsisLink::from(link, self.tx.clone()) {
             Ok(mut is_link) => {
-                // Assign before insert, so the allocator never sees this
-                // link's own (still zero) id in the used set.
-                match self.links.alloc_circuit_id() {
-                    Some(id) => is_link.state.circuit_id = id,
-                    None => tracing::warn!(
-                        "isis: circuit ids exhausted (255 links); {name} (ifindex={ifindex}) \
-                         falls back to an ifindex-derived pseudonode id, which may collide \
-                         with another circuit's"
-                    ),
-                }
+                // No fresh allocation here. `RibRx::LinkAdd` fires for
+                // every interface the daemon sees, most of which never
+                // run IS-IS, and the id space is only 255 wide — ids are
+                // reserved in `Isis::circuit_ids` when IS-IS is enabled
+                // on the interface (`config_afi_enable`). Only mirror an
+                // existing reservation into the link's cache, should the
+                // name already hold one.
+                is_link.circuit_id = self.circuit_ids.get(&is_link.state.name).unwrap_or(0);
                 self.links.insert(is_link.ifindex, is_link);
             }
             Err(e) => {
@@ -1284,6 +1301,27 @@ fn config_afi_enable(isis: &mut Isis, mut args: Args, op: ConfigOp, afi: Afi) ->
     if op.is_set() && enable {
         // Set Enable.
         if !*link.config.enable.get(&afi) {
+            // The first AFI to come up enables IS-IS on the interface,
+            // which needs a circuit id to name the pseudonode LSP the
+            // circuit originates while DIS. Reserve it before committing
+            // any state: on exhaustion, refuse the enable outright —
+            // there is no fallback id, a circuit without a reservation
+            // would just have its DIS processing suspended
+            // (`dis_becoming`). Reserving on the config transition (not
+            // at DIS election) also keeps the id a deterministic
+            // function of config order.
+            if !enabled {
+                match isis.circuit_ids.alloc(&name) {
+                    Some(id) => link.circuit_id = id,
+                    None => {
+                        tracing::warn!(
+                            "isis: circuit ids exhausted (255 in use); refusing to enable \
+                             IS-IS on {name}"
+                        );
+                        return None;
+                    }
+                }
+            }
             *link.config.enable.get_mut(&afi) = true;
             *isis.config.enable.get_mut(&afi) += 1;
             link_afi_changed = true;
@@ -1299,13 +1337,19 @@ fn config_afi_enable(isis: &mut Isis, mut args: Args, op: ConfigOp, afi: Afi) ->
 
     if !enabled {
         if link.config.enabled() {
-            // Disable -> Enable.
+            // Disable -> Enable. The circuit id was reserved above,
+            // before the AFI flag was committed.
             let msg = Message::Ifsm(IfsmEvent::Start, link.ifindex, None);
             let _ = isis.tx.send(msg);
         }
     } else {
         if !link.config.enabled() {
-            // Enable -> Disable.
+            // Enable -> Disable. Return the circuit id for reuse. Any
+            // pseudonode LSP still floating under the old id ages out or
+            // is purged via the normal DIS-loss path; a same-commit
+            // re-enable of another interface may pick this id up.
+            isis.circuit_ids.release(&name);
+            link.circuit_id = 0;
             let msg = Message::Ifsm(IfsmEvent::Stop, link.ifindex, None);
             let _ = isis.tx.send(msg);
         }
@@ -2108,8 +2152,10 @@ pub fn show_detail(
                     // this router originates here is named with. Showing
                     // the ifindex instead made the two disagree, so an
                     // operator matching `show isis database` against this
-                    // column saw ids that did not exist.
-                    circuit_id: format!("0x{:02X}", link.state.circuit_id),
+                    // column saw ids that did not exist. Enabled links
+                    // always hold a reservation (enable is refused on id
+                    // exhaustion); 0x00 is a defensive render.
+                    circuit_id: format!("0x{:02X}", link.circuit_id),
                     network_type: format!("{}", link.config.network_type()),
                     level: format!("{}", link.state.level()),
                     snpa: link.state.mac.map(|mac| mac.to_string()),
@@ -2711,50 +2757,57 @@ mod te_metric_tests {
 
 #[cfg(test)]
 mod circuit_id_tests {
-    use super::lowest_free_circuit_id;
-    use std::collections::BTreeSet;
-
-    fn used(ids: &[u8]) -> BTreeSet<u8> {
-        ids.iter().copied().collect()
-    }
+    use super::CircuitIdMap;
 
     /// 0 is the router's own non-pseudonode LSP id. A circuit that took
     /// it would make the DIS advertise a LAN ID aliasing that LSP, which
     /// is the bug this allocator exists to make unrepresentable.
     #[test]
     fn never_allocates_zero() {
-        assert_eq!(lowest_free_circuit_id(&used(&[])), Some(1));
-        // Even if a stale 0 somehow sits in the used set, it is not a
-        // candidate to hand back.
-        assert_eq!(lowest_free_circuit_id(&used(&[0])), Some(1));
+        let mut ids = CircuitIdMap::default();
+        assert_eq!(ids.alloc("eth0"), Some(1));
     }
 
     /// Ids must be distinct across circuits: two LANs sharing one would
-    /// share a pseudonode LSP id and collide in every peer's LSDB.
+    /// share a pseudonode LSP id and collide in every peer's LSDB. The
+    /// 256th interface reports exhaustion rather than wrapping to 0.
     #[test]
     fn hands_out_distinct_ids_until_exhausted() {
-        let mut used = BTreeSet::new();
+        let mut ids = CircuitIdMap::default();
         for expected in 1..=255u8 {
-            let id = lowest_free_circuit_id(&used).expect("space remains");
+            let id = ids.alloc(&format!("eth{expected}")).expect("space remains");
             assert_eq!(id, expected, "allocation must be dense and in order");
-            assert!(used.insert(id), "id {id} handed out twice");
         }
-        assert_eq!(used.len(), 255);
-        assert_eq!(
-            lowest_free_circuit_id(&used),
-            None,
-            "256th circuit must report exhaustion, not wrap to 0"
-        );
+        assert_eq!(ids.alloc("one-too-many"), None);
     }
 
-    /// Gaps are reused. Links are never removed today, so this is
-    /// forward cover for the day they are.
+    /// Re-enabling an interface that already holds an id must not burn a
+    /// second one — enable is per-AFI, so the transition code may call
+    /// alloc for a name that is already reserved.
     #[test]
-    fn fills_the_lowest_gap() {
-        assert_eq!(lowest_free_circuit_id(&used(&[1, 2, 4])), Some(3));
-        assert_eq!(lowest_free_circuit_id(&used(&[2, 3])), Some(1));
-        let mut full: BTreeSet<u8> = (1..=255u8).collect();
-        full.remove(&200);
-        assert_eq!(lowest_free_circuit_id(&full), Some(200));
+    fn alloc_is_idempotent_per_name() {
+        let mut ids = CircuitIdMap::default();
+        assert_eq!(ids.alloc("eth0"), Some(1));
+        assert_eq!(ids.alloc("eth1"), Some(2));
+        assert_eq!(ids.alloc("eth0"), Some(1));
+        assert_eq!(ids.get("eth0"), Some(1));
+    }
+
+    /// Disable returns the id to the pool; the next enable — of any
+    /// interface — reuses the lowest gap.
+    #[test]
+    fn release_frees_the_id_for_reuse() {
+        let mut ids = CircuitIdMap::default();
+        ids.alloc("eth0");
+        ids.alloc("eth1");
+        ids.alloc("eth2");
+        assert_eq!(ids.release("eth1"), Some(2));
+        assert_eq!(ids.get("eth1"), None);
+        assert_eq!(ids.alloc("eth3"), Some(2), "lowest gap is reused");
+        assert_eq!(
+            ids.release("eth1"),
+            None,
+            "double release reports nothing held"
+        );
     }
 }
