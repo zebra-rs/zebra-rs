@@ -1323,6 +1323,10 @@ pub async fn link_config_exec(
                 }
             }
         }
+        // Config-driven address changes produce no netlink self-echo
+        // (the FibMessage::NewAddr/DelAddr path never runs for them),
+        // so recompute the auto router-id here.
+        rib.router_id_update();
     } else if path == "/interface/ipv6/address" {
         // `address` is a leaf-list: one callback can carry several
         // addresses (config-file load, multi-value commit), so drain the
