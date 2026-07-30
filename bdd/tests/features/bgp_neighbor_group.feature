@@ -49,22 +49,19 @@ Feature: BGP neighbor-group inheritance end-to-end
     Given the test topology exists
     When I apply config "z1-1.yaml" to namespace "z1"
     And I apply config "z2-1.yaml" to namespace "z2"
-    And I wait 30 seconds for BGP to operate
-    Then BGP session in "z1" to "192.168.0.2" should be "Established"
-    And BGP session in "z2" to "192.168.0.1" should be "Established"
+    Then BGP session in "z1" to "192.168.0.2" should eventually be "Established"
+    And BGP session in "z2" to "192.168.0.1" should eventually be "Established"
 
   Scenario: Reactive sweep — changing the group's remote-as drops the session
     Given the test topology exists
     When I apply config "z1-2.yaml" to namespace "z1"
-    And I wait 5 seconds for BGP to operate
-    Then BGP session in "z2" to "192.168.0.1" should not be "Established"
+    Then BGP session in "z2" to "192.168.0.1" should eventually not be "Established"
 
   Scenario: Reactive sweep — restoring the group's remote-as brings it back
     Given the test topology exists
     When I apply config "z1-1.yaml" to namespace "z1"
-    And I wait 30 seconds for BGP to operate
-    Then BGP session in "z1" to "192.168.0.2" should be "Established"
-    And BGP session in "z2" to "192.168.0.1" should be "Established"
+    Then BGP session in "z1" to "192.168.0.2" should eventually be "Established"
+    And BGP session in "z2" to "192.168.0.1" should eventually be "Established"
 
   Scenario: Inherited ttl-security — group GTSM interoperates with a per-neighbor GTSM far end
     Given the test topology exists
@@ -73,11 +70,16 @@ Feature: BGP neighbor-group inheritance end-to-end
     # ritual as the per-neighbor knob), and GTSM only re-establishes
     # when BOTH ends send TTL 255 — so Established below is proof the
     # group-inherited knob reached z1's socket.
+    #
+    # The session is Established BEFORE the flips, so a bare polling
+    # assert could sample the pre-bounce session and pass vacuously.
+    # The fixed wait outlasts the bounce; the polling assert then
+    # absorbs however long re-establishment takes under load.
     When I apply config "z1-3.yaml" to namespace "z1"
     And I apply config "z2-2.yaml" to namespace "z2"
     And I wait 30 seconds for BGP to operate
-    Then BGP session in "z1" to "192.168.0.2" should be "Established"
-    And BGP session in "z2" to "192.168.0.1" should be "Established"
+    Then BGP session in "z1" to "192.168.0.2" should eventually be "Established"
+    And BGP session in "z2" to "192.168.0.1" should eventually be "Established"
     And show command "show bgp neighbor 192.168.0.2" in namespace "z1" should contain "TTL security (GTSM) enabled"
     And show command "show bgp neighbor 192.168.0.2" in namespace "z1" should contain "Neighbor-group: RR"
 
