@@ -1879,6 +1879,7 @@ fn hello_reoriginate(link: &IsisLink, tx: &UnboundedSender<Message>) {
 struct LinkInfo {
     name: String,
     ifindex: u32,
+    circuit_id: String,
     is_up: bool,
     network_type: String,
     level: String,
@@ -1936,6 +1937,7 @@ pub fn show(isis: &Isis, _args: Args, json: bool) -> std::result::Result<String,
                 links.push(LinkInfo {
                     name: link.state.name.clone(),
                     ifindex: link.ifindex,
+                    circuit_id: format!("0x{:02X}", link.circuit_id),
                     is_up: link.state.is_up(),
                     network_type: link.config.network_type().to_string(),
                     level: link.state.level.to_string(),
@@ -1958,7 +1960,10 @@ pub fn show(isis: &Isis, _args: Args, json: bool) -> std::result::Result<String,
         }
         let level = summary_level(link);
         let link_state = if link.state.is_up() { "Up" } else { "Down" };
-        let circ_id = format!("0x{:02X}", link.ifindex);
+        // The allocated circuit id (also the pseudonode number while DIS
+        // here), NOT the ifindex — the two coincided often enough on
+        // small boxes that the ifindex rendering went unnoticed.
+        let circ_id = format!("0x{:02X}", link.circuit_id);
         writeln!(
             buf,
             "  {:<11} {:<8} {:<8} {:<8} {:<5} {:<9} {}",
@@ -2204,7 +2209,7 @@ pub fn show_detail(
                 writeln!(
                     buf,
                     "Interface: {}, State: {}, Active, Circuit Id: 0x{:02X}",
-                    link.state.name, link_state, link.ifindex
+                    link.state.name, link_state, link.circuit_id
                 )?;
                 writeln!(
                     buf,
