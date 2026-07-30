@@ -52,5 +52,6 @@ mod parse;
 mod pim;
 mod stamp;
 mod token;
+mod tracing;
 mod util;
 mod yaml;
