@@ -18,6 +18,7 @@ rather than a routing protocol, the block lives under the top-level
 ```
 system {
   tracing {
+    config { ... }
     rib { ... }
     fib { ... }
   }
@@ -52,7 +53,8 @@ system {
 }
 ```
 
-`all` turns on **every** category under both planes at summary level. It
+`all` turns on **every** category — both planes plus the
+[`config` block](#config-subsystem-categories) — at summary level. It
 does not imply `detail` — that stays opt-in.
 
 ## RIB categories
@@ -102,6 +104,37 @@ system tracing fib l2 mdb       # multicast forwarding database
 > `static`, `vrf`, `kernel`, `neighbor`, `l2 bridge`) are accepted,
 > stored, and covered by `all` — they light up once their sites are
 > instrumented.
+
+## Config subsystem categories
+
+Alongside the two forwarding planes, a small `config` block gates traces
+from the configuration subsystem itself:
+
+| Category | What it traces | Modifiers |
+|---|---|---|
+| `startup` | The startup-config apply summary — resolved path, detected format, and `applied N of M commands` — emitted once the startup commit completes. | — |
+
+```
+system {
+  tracing {
+    config { startup; }
+  }
+}
+```
+
+Two properties are worth knowing:
+
+- **The toggle works from the very file it traces.** Unlike the RIB /
+  FIB categories (dispatched to the RIB task over a channel), `config`
+  toggles are applied by the config manager synchronously at commit
+  time, and the startup summary is emitted after that commit. Putting
+  `system tracing config startup` in the startup config therefore
+  enables the summary for that same boot — no save-and-restart dance.
+- **Failures stay loud.** Only the *success* summary is gated. An
+  unreadable file, per-command rejections, and a schema-rejected
+  commit are always logged at error level; the empty-file and
+  missing-file notes are also unconditional, since a boot that hits
+  them had no config that could have carried the toggle.
 
 ## Modifiers
 
