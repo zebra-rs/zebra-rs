@@ -4884,9 +4884,16 @@ module config {
       }
       container ipv4 {
         ext:help "IPv4 configuration";
-        leaf address {
+        leaf-list address {
           ext:help "IPv4 interface address";
           type inet:ipv4-prefix;
+          description
+            "Interface IPv4 addresses. Multiple addresses may be
+             configured; the kernel marks an address secondary when it
+             shares its mask and subnet with an existing primary on the
+             interface (shown by `show interface`). Within a subnet the
+             first address installed becomes the primary, so on a full
+             config replay the leaf-list order decides.";
         }
       }
       container ipv6 {

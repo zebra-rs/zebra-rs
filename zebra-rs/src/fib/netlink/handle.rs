@@ -3071,7 +3071,16 @@ impl FibHandle {
 
         let mut response = self.handle.clone().request(req)?;
         while let Some(msg) = response.next().await {
-            if let NetlinkPayload::Error(e) = msg.payload {
+            if let NetlinkPayload::Error(e) = msg.payload
+                && let Some(code) = e.code
+            {
+                // EEXIST: the address is already installed (added outside
+                // zebra-rs, or it survived a primary delete because the
+                // host runs promote_secondaries=1). The intent — address
+                // present in the kernel — holds, so report success.
+                if code.get() == -libc::EEXIST {
+                    return Ok(());
+                }
                 return Err(anyhow::anyhow!("NewAddress netlink error: {}", e));
             }
         }
@@ -3121,7 +3130,13 @@ impl FibHandle {
 
         let mut response = self.handle.clone().request(req)?;
         while let Some(msg) = response.next().await {
-            if let NetlinkPayload::Error(e) = msg.payload {
+            if let NetlinkPayload::Error(e) = msg.payload
+                && let Some(code) = e.code
+            {
+                // Same EEXIST tolerance as the IPv4 twin.
+                if code.get() == -libc::EEXIST {
+                    return Ok(());
+                }
                 return Err(anyhow::anyhow!("NewAddress IPv6 netlink error: {}", e));
             }
         }
