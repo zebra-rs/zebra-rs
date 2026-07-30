@@ -223,6 +223,12 @@ You can see all of it with `bridge -d link show dev vxlan10`,
 `bridge vlan tunnelshow`, and `ip -d link show vxlan10` inside the VTEP's
 vty shell.
 
+## Tear down
+
+``` shell
+$ ./down.sh
+```
+
 ## Appendix: Addresses
 
 | node  | role | underlay      | overlay        |
