@@ -1313,11 +1313,10 @@ fn config_afi_enable(isis: &mut Isis, mut args: Args, op: ConfigOp, afi: Afi) ->
             if !enabled {
                 match isis.circuit_ids.alloc(&name) {
                     Some(id) => {
-                        // Unconditional: alloc/release fire only on config
-                        // transitions, and the log is the audit trail for
-                        // "why is this circuit 0x03, not 0x02" — holes come
-                        // from enables/disables that leave no other trace.
-                        tracing::info!("isis: circuit id 0x{id:02X} allocated to {name}");
+                        // Debug-level: silent in normal operation, but a
+                        // RUST_LOG bump recovers the alloc/release history
+                        // when a circuit's id needs explaining.
+                        tracing::debug!("isis: circuit id 0x{id:02X} allocated to {name}");
                         link.circuit_id = id;
                     }
                     None => {
@@ -1356,7 +1355,7 @@ fn config_afi_enable(isis: &mut Isis, mut args: Args, op: ConfigOp, afi: Afi) ->
             // is purged via the normal DIS-loss path; a same-commit
             // re-enable of another interface may pick this id up.
             if let Some(id) = isis.circuit_ids.release(&name) {
-                tracing::info!("isis: circuit id 0x{id:02X} released from {name}");
+                tracing::debug!("isis: circuit id 0x{id:02X} released from {name}");
             }
             link.circuit_id = 0;
             let msg = Message::Ifsm(IfsmEvent::Stop, link.ifindex, None);
