@@ -12,7 +12,7 @@ use netlink_packet_route::address::{
 };
 use netlink_packet_route::link::{
     AfSpecInet6, AfSpecUnspec, InfoBridgePort, InfoData, InfoKind, InfoPortData, InfoPortKind,
-    InfoVrf, InfoVxlan, LinkAttribute, LinkFlags, LinkInfo, LinkLayerType, LinkMessage,
+    InfoVlan, InfoVrf, InfoVxlan, LinkAttribute, LinkFlags, LinkInfo, LinkLayerType, LinkMessage,
 };
 use netlink_packet_route::neighbour::{NeighbourAddress, NeighbourAttribute, NeighbourMessage};
 use netlink_packet_route::nexthop::{NexthopAttribute, NexthopFlags, NexthopGroup, NexthopMessage};
@@ -4059,13 +4059,20 @@ pub fn link_from_msg(msg: LinkMessage) -> FibLink {
                 // slave-of-VRF membership.
                 link.master = Some(idx);
             }
+            LinkAttribute::Link(idx) => {
+                // `IFLA_LINK` — the lower device of a stacked link
+                // (the parent of a VLAN sub-interface). Distinct from
+                // `IFLA_MASTER` above, which is enslavement.
+                link.parent = Some(idx);
+            }
             LinkAttribute::LinkInfo(infos) => {
                 // VXLAN link data carries both the VNI (`IFLA_VXLAN_ID`)
                 // and the local VTEP source IP (`IFLA_VXLAN_LOCAL` or
                 // `IFLA_VXLAN_LOCAL6`); VRF master devices carry their
-                // kernel routing table (`IFLA_VRF_TABLE`). Walk every
-                // sub-attr and capture them. Other link types
-                // contribute nothing.
+                // kernel routing table (`IFLA_VRF_TABLE`); VLAN
+                // sub-interfaces carry their 802.1Q id
+                // (`IFLA_VLAN_ID`). Walk every sub-attr and capture
+                // them. Other link types contribute nothing.
                 for info in infos {
                     if let LinkInfo::Data(InfoData::Vxlan(vxlan_attrs)) = info {
                         for v in vxlan_attrs {
@@ -4089,6 +4096,12 @@ pub fn link_from_msg(msg: LinkMessage) -> FibLink {
                         for v in vrf_attrs {
                             if let InfoVrf::TableId(t) = v {
                                 link.vrf_table = Some(t);
+                            }
+                        }
+                    } else if let LinkInfo::Data(InfoData::Vlan(vlan_attrs)) = info {
+                        for v in vlan_attrs {
+                            if let InfoVlan::Id(id) = v {
+                                link.vlan_id = Some(id);
                             }
                         }
                     } else if let LinkInfo::Kind(InfoKind::Bridge) = info {
@@ -4643,5 +4656,36 @@ mod tests {
             })
             .expect("RTA_TABLE attribute emitted");
         assert_eq!(table_attr, 1000);
+    }
+
+    #[test]
+    fn link_from_msg_parses_vlan_sub_interface() {
+        let mut msg = LinkMessage::default();
+        msg.attributes
+            .push(LinkAttribute::IfName("eth0.100".into()));
+        msg.attributes.push(LinkAttribute::Link(2));
+        msg.attributes.push(LinkAttribute::LinkInfo(vec![
+            LinkInfo::Kind(InfoKind::Vlan),
+            LinkInfo::Data(InfoData::Vlan(vec![InfoVlan::Id(100)])),
+        ]));
+        let link = link_from_msg(msg);
+        assert_eq!(link.name, "eth0.100");
+        assert_eq!(link.parent, Some(2), "IFLA_LINK parent ifindex");
+        assert_eq!(link.vlan_id, Some(100), "IFLA_VLAN_ID");
+        assert!(!link.bridge);
+    }
+
+    #[test]
+    fn link_from_msg_without_linkinfo_leaves_vlan_fields_unset() {
+        // A partial RTM_NEWLINK (e.g. an enslave notification) carries
+        // no IFLA_LINKINFO; the parser must report absence, letting the
+        // RIB's adopt-if-present update keep the previously learned
+        // values instead of clearing them.
+        let mut msg = LinkMessage::default();
+        msg.attributes
+            .push(LinkAttribute::IfName("eth0.100".into()));
+        let link = link_from_msg(msg);
+        assert_eq!(link.parent, None);
+        assert_eq!(link.vlan_id, None);
     }
 }
