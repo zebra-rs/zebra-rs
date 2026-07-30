@@ -449,6 +449,16 @@ fn cradle_members(nexthop: &Nexthop) -> Vec<CradleMember> {
     }
 }
 
+/// The access VLAN of the single-VXLAN-device EVPN datapath: VLAN 1 is
+/// mapped to the VNI on every VXLAN bridge port (`vxlan_svd_datapath`),
+/// and the bridge-master FDB entries for remote MACs are scoped to it.
+/// Scoping matters on a `vlan_filtering` bridge: an FDB add carrying no
+/// `NDA_VLAN` is expanded by the kernel to VLAN 0 *plus every VLAN on
+/// the port*, which both litters `bridge fdb show` with a useless VLAN-0
+/// duplicate per MAC and would poison unrelated VLANs the moment a port
+/// carries more than one.
+const EVPN_SVD_VLAN: u16 = 1;
+
 /// Op selector for `fdb_neigh_send`. The kernel netlink flag set
 /// differs per scenario:
 ///
@@ -2699,6 +2709,8 @@ impl FibHandle {
     /// datapath for a VXLAN port that joined a bridge, so bridged
     /// traffic actually encapsulates:
     ///
+    /// (The access VLAN is [`EVPN_SVD_VLAN`]; the bridge-master FDB
+    /// entries `mac_add`/`mac_del` install are scoped to the same VLAN.)
     ///   1. enable `vlan_filtering` on the bridge master — the per-VLAN
     ///      machinery (and thus the tunnel mapping) is dormant without
     ///      it; other ports keep the kernel's `default_pvid 1` untagged
@@ -2742,7 +2754,7 @@ impl FibHandle {
         // 2. VLAN 1 on the VXLAN port, tagged (flags = 0).
         let mut vinfo = BridgeVlanInfo::default();
         vinfo.flags = 0;
-        vinfo.vid = 1;
+        vinfo.vid = EVPN_SVD_VLAN;
         let mut msg = LinkMessage::default();
         msg.header.interface_family = AddressFamily::Bridge;
         msg.header.index = ifindex;
@@ -2774,7 +2786,7 @@ impl FibHandle {
         // TUNNEL_VID: nla_len 6, type 2, u16 payload + 2 pad bytes.
         nest.extend_from_slice(&6u16.to_ne_bytes());
         nest.extend_from_slice(&2u16.to_ne_bytes());
-        nest.extend_from_slice(&1u16.to_ne_bytes());
+        nest.extend_from_slice(&EVPN_SVD_VLAN.to_ne_bytes());
         nest.extend_from_slice(&[0u8; 2]);
 
         let mut msg = LinkMessage::default();
@@ -3561,6 +3573,7 @@ impl FibHandle {
             NUD_REACHABLE,
             None,
             None,
+            Some(EVPN_SVD_VLAN),
             FdbOp::Upsert,
             "mac_add(master)",
         )
@@ -3579,6 +3592,7 @@ impl FibHandle {
             NUD_PERMANENT,
             Some(vni),
             tunnel_endpoint,
+            None,
             FdbOp::Upsert,
             "mac_add(self)",
         )
@@ -3598,7 +3612,10 @@ impl FibHandle {
     /// `is_add` selects RTM_NEWNEIGH (with `NLM_F_CREATE | NLM_F_REPLACE`
     /// upsert flags) vs RTM_DELNEIGH. `vni` adds NDA_VNI/NDA_SRC_VNI/
     /// NDA_PORT (only meaningful for VXLAN self entries). `dst` adds
-    /// NDA_DST (the remote VTEP IP, also self-only).
+    /// NDA_DST (the remote VTEP IP, also self-only). `vlan` adds
+    /// NDA_VLAN, scoping a bridge-master entry to one VLAN — without it
+    /// a `vlan_filtering` bridge expands the add to VLAN 0 plus every
+    /// VLAN on the port (see [`EVPN_SVD_VLAN`]).
     #[allow(clippy::too_many_arguments)]
     async fn fdb_neigh_send(
         &self,
@@ -3608,6 +3625,7 @@ impl FibHandle {
         nud_state: u16,
         vni: Option<u32>,
         dst: Option<IpAddr>,
+        vlan: Option<u16>,
         op: FdbOp,
         log_label: &str,
     ) {
@@ -3637,6 +3655,9 @@ impl FibHandle {
             };
             msg.attributes
                 .push(NeighbourAttribute::TunnelEndpoint(addr));
+        }
+        if let Some(vid) = vlan {
+            msg.attributes.push(NeighbourAttribute::Vlan(vid));
         }
 
         let req = match op {
@@ -3846,6 +3867,7 @@ impl FibHandle {
             0,
             None,
             None,
+            Some(EVPN_SVD_VLAN),
             FdbOp::Delete,
             "mac_del(master)",
         )
@@ -3856,6 +3878,7 @@ impl FibHandle {
             NTF_SELF,
             0,
             Some(vni),
+            None,
             None,
             FdbOp::Delete,
             "mac_del(self)",
@@ -3938,6 +3961,7 @@ impl FibHandle {
             NUD_PERMANENT,
             Some(vni),
             Some(group),
+            None,
             FdbOp::Append,
             "mdb_add(zero-mac)",
         )
@@ -3982,6 +4006,7 @@ impl FibHandle {
             0,
             Some(vni),
             Some(group),
+            None,
             FdbOp::Delete,
             "mdb_del(zero-mac)",
         )
