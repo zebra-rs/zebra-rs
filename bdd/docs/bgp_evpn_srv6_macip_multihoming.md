@@ -8,12 +8,15 @@ its Type-2 under the segment ESI (RFC 7432 §7.1), alongside both PEs'
 per-ES Type-1 A-D and Type-4 routes, so a receiver holds the complete
 input set for §8.4 aliasing and §8.2 mass withdraw.
 
-Scope is the SIGNAL set, not its consumption: zebra-rs does not yet
-alias MAC traffic across the segment's PEs nor mass-withdraw MACs on
-a per-ES A-D loss (both exist for VPWS only — `vpws_gather_remotes`
-gates on per-ES A-D liveness; the MAC install path does not). What is
-proven here is that every route a consumer would need is originated,
-exchanged and revoked correctly under `encapsulation srv6`.
+Scope is the SIGNAL set, not its consumption: zebra-rs originates the
+full input set — Type-2 under the ESI, per-ES A-D, per-EVI A-D, Type-4
+— but does not yet alias MAC traffic across the segment's PEs nor
+mass-withdraw MACs on a per-ES A-D loss (both exist for VPWS only —
+`vpws_gather_remotes` gates on per-ES A-D liveness; the MAC install
+path does not, and `MacEntry` only recently grew room for a second
+destination). What is proven here is that every route a consumer would
+need is originated, exchanged and revoked correctly under
+`encapsulation srv6`.
 
 The ES machinery itself (Type-4/ES-Import RT, membership, DF election)
 is covered by bgp_evpn_es under the default encapsulation with no MACs;

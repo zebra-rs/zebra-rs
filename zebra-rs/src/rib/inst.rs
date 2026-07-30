@@ -2171,6 +2171,22 @@ impl Rib {
                 });
             }
         }
+        // Bridge-port EVI membership dump, for the same cold-start race:
+        // `publish_l2_evis` walks `client_registry`, which was empty while
+        // `fib_dump` was building the link table, so without this replay a
+        // subscriber learns nothing about ports that already existed and an
+        // Ethernet Segment on one of them never gets its per-EVI A-D. Only
+        // ports that resolve to at least one EVI are worth sending; an
+        // empty set is the subscriber's default.
+        for link in self.links.values() {
+            let vnis = crate::rib::link::port_evis(&self.links, link.index);
+            if !vnis.is_empty() {
+                let _ = tx.send(RibRx::L2PortEvis {
+                    ifindex: link.index,
+                    vnis,
+                });
+            }
+        }
         // FDB dump. Replay every existing AF_BRIDGE neighbor that
         // resolves to a known VNI. Without this, FDB entries learned
         // during `fib_dump` — i.e. *before* BGP subscribed — would

@@ -135,6 +135,25 @@ pub enum RibRx {
     VxlanDel {
         vni: u32,
     },
+    /// Every L2VPN EVI a bridge port participates in: the VNIs carried by
+    /// the VXLAN slaves of the bridge this port is enslaved to.
+    ///
+    /// A **snapshot, not a delta** — membership moves for several unrelated
+    /// reasons (the port is enslaved or freed, a VXLAN joins or leaves the
+    /// bridge, a VXLAN's VNI changes), and reconciling deltas from all of
+    /// them is far easier to get wrong than replacing the set. An empty
+    /// `vnis` therefore means "in no EVI", which is how a port leaving its
+    /// bridge is reported; there is no separate removal message.
+    ///
+    /// Resolved here rather than in the subscriber because `Link.master`
+    /// and `Link.vni` live here: BGP needs to know which EVIs an Ethernet
+    /// Segment's access port covers (RFC 7432 §8.4 aliasing needs a
+    /// per-EVI Type-1 A-D for each), and that is the only thing it needs —
+    /// not a model of bridges.
+    L2PortEvis {
+        ifindex: u32,
+        vnis: std::collections::BTreeSet<u32>,
+    },
     /// Local IGMP/MLD membership snooped by the kernel bridge
     /// (`RTM_NEWMDB`), resolved to its VNI. The EVPN advertise path
     /// consumes this to originate a Type-6 SMET route. `source` is
@@ -430,6 +449,19 @@ impl Rib {
     pub fn api_vxlan_add(&self, vni: u32, vtep_local: IpAddr) {
         for (_, sub) in self.client_registry.iter() {
             let _ = sub.rib_rx_tx.send(RibRx::VxlanAdd { vni, vtep_local });
+        }
+    }
+
+    /// Announce a bridge port's current EVI membership (see
+    /// [`RibRx::L2PortEvis`]). Always a full snapshot, so re-sending an
+    /// unchanged set is harmless — subscribers compare and act only on a
+    /// change, which is why this side keeps no per-port cache.
+    pub fn api_l2_port_evis(&self, ifindex: u32, vnis: std::collections::BTreeSet<u32>) {
+        for (_, sub) in self.client_registry.iter() {
+            let _ = sub.rib_rx_tx.send(RibRx::L2PortEvis {
+                ifindex,
+                vnis: vnis.clone(),
+            });
         }
     }
 
