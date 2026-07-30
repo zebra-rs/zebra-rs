@@ -1962,6 +1962,11 @@ impl Ospf<Ospfv2> {
                     if addr.prefix.addr().octets()[0] == 127 {
                         continue;
                     }
+                    // A kernel-secondary shares the primary's subnet;
+                    // its P2p/Stub links would be byte-duplicates.
+                    if addr.secondary {
+                        continue;
+                    }
                     for nbr in link.nbrs.values() {
                         if nbr.state != NfsmState::Full {
                             continue;
@@ -1990,6 +1995,14 @@ impl Ospf<Ospfv2> {
             for addr in &link.addr {
                 // Skip loopback addresses (127.0.0.0/8).
                 if addr.prefix.addr().octets()[0] == 127 {
+                    continue;
+                }
+                // Skip kernel-secondary addresses: the primary already
+                // contributes the Transit link (RFC 2328 has one per
+                // interface) or the Stub for the shared subnet — a
+                // secondary would emit a duplicate with only
+                // `link_data` differing.
+                if addr.secondary {
                     continue;
                 }
                 let lsa_link = if use_transit {
@@ -2325,7 +2338,7 @@ impl Ospf<Ospfv2> {
                         let local_addr = self
                             .links
                             .get(&nh.ifindex)
-                            .and_then(|l| l.addr.first())
+                            .and_then(|l| super::addr::primary_addr(&l.addr))
                             .map(|a| a.prefix.addr())?;
                         Some(Viable {
                             cost: path.cost,
@@ -2373,13 +2386,17 @@ impl Ospf<Ospfv2> {
                     || vl.first_hop_addr != v.first_hop_addr
                     || vl.first_hop_ifindex != v.first_hop_ifindex
                     || link.output_cost != v.cost
-                    || link.addr.first().map(|a| a.prefix.addr()) != Some(v.local_addr)
+                    || super::addr::primary_addr(&link.addr).map(|a| a.prefix.addr())
+                        != Some(v.local_addr)
                 {
                     vl.peer_addr = v.peer_addr;
                     vl.first_hop_addr = v.first_hop_addr;
                     vl.first_hop_ifindex = v.first_hop_ifindex;
                     link.output_cost = v.cost;
-                    link.addr = vec![super::addr::OspfAddr { prefix }];
+                    link.addr = vec![super::addr::OspfAddr {
+                        prefix,
+                        secondary: false,
+                    }];
                     link.ident.prefix = prefix;
                     changed = true;
                     ospf_fsm_trace!(
@@ -2411,7 +2428,10 @@ impl Ospf<Ospfv2> {
                 Self::vl_apply_config(&mut link, cfg);
                 let prefix = Ipv4Net::new(v.local_addr, 32).unwrap();
                 link.output_cost = v.cost;
-                link.addr = vec![super::addr::OspfAddr { prefix }];
+                link.addr = vec![super::addr::OspfAddr {
+                    prefix,
+                    secondary: false,
+                }];
                 link.ident.prefix = prefix;
                 {
                     let vl = link.vl.as_mut().unwrap();
@@ -3020,7 +3040,8 @@ impl Ospf<Ospfv2> {
             && let Some(link) = self.links.get(&ifindex)
             && link.enabled
             && link.nbrs.values().any(|n| n.state == NfsmState::Full)
-            && let Some(addr) = link.addr.iter().find(|a| !a.prefix.addr().is_loopback())
+            && let Some(addr) =
+                super::addr::primary_addr_where(&link.addr, |a| !a.prefix.addr().is_loopback())
         {
             let our_addr = addr.prefix.addr();
             // Per-link ASLA carrying this link's flex-algo affinity
@@ -3159,7 +3180,9 @@ impl Ospf<Ospfv2> {
         if should_originate {
             let link = link.unwrap();
             // Use the first non-loopback address as a /32 host prefix.
-            let Some(addr) = link.addr.iter().find(|a| !a.prefix.addr().is_loopback()) else {
+            let Some(addr) =
+                super::addr::primary_addr_where(&link.addr, |a| !a.prefix.addr().is_loopback())
+            else {
                 return;
             };
             let prefix = ipnet::Ipv4Net::new(addr.prefix.addr(), 32).unwrap_or(addr.prefix);
@@ -4598,7 +4621,7 @@ impl Ospf<Ospfv2> {
                 return;
             }
 
-            let Some(primary_addr) = link.addr.first() else {
+            let Some(primary_addr) = super::addr::primary_addr(&link.addr) else {
                 return;
             };
 
@@ -4693,7 +4716,7 @@ impl Ospf<Ospfv2> {
         let Some(link) = self.links.get(&ifindex) else {
             return;
         };
-        let Some(primary_addr) = link.addr.first() else {
+        let Some(primary_addr) = super::addr::primary_addr(&link.addr) else {
             return;
         };
         let ls_id = primary_addr.prefix.addr();
@@ -5405,7 +5428,7 @@ impl Ospf<Ospfv2> {
         let Some(link) = self.links.get(&ifindex) else {
             return false;
         };
-        let Some(addr) = link.addr.first() else {
+        let Some(addr) = super::addr::primary_addr(&link.addr) else {
             return false;
         };
         let if_addr = addr.prefix.addr();
@@ -5936,7 +5959,12 @@ impl Ospf<Ospfv2> {
         // Router-LSA repeats the stub network once per delivery.
         let ospf_addr = OspfAddr::from(&addr, prefix);
         super::addr::link_addr_push_unique(&mut link.addr, ospf_addr);
-        link.ident.prefix = *prefix;
+        // Identity follows the primary (first non-secondary) address:
+        // a last-delivered secondary must not steal the DR-election
+        // identity, and a promotion re-broadcast moves it back.
+        if let Some(primary) = super::addr::primary_addr(&link.addr) {
+            link.ident.prefix = primary.prefix;
+        }
 
         // If this address made an enabled-but-Down interface usable,
         // re-fire `InterfaceUp` so the FSM can progress past the
@@ -5972,6 +6000,15 @@ impl Ospf<Ospfv2> {
             return;
         };
         link.addr.retain(|a| a.prefix != *prefix);
+
+        // Repair the identity: it may have pointed at the removed
+        // address (historically it tracked the last-delivered one and
+        // was never cleaned up on delete). With no address left, the
+        // stale value is harmless — the IFSM refuses to run on an
+        // empty list and the next addr_add recomputes it.
+        if let Some(primary) = super::addr::primary_addr(&link.addr) {
+            link.ident.prefix = primary.prefix;
+        }
 
         // Re-evaluate enable state after address removal.
         let (next, next_id) = super::config::link_should_enable(link);
@@ -15841,7 +15878,8 @@ fn add_self_prefix_sids_to_ilm(top: &Ospf, ilm: &mut BTreeMap<u32, SpfIlm>) {
                 let Some(link) = self_link_by_prefix(top, area_id, tlv.prefix) else {
                     continue;
                 };
-                let Some(addr) = link.addr.first().map(|a| a.prefix.addr()) else {
+                let Some(addr) = super::addr::primary_addr(&link.addr).map(|a| a.prefix.addr())
+                else {
                     continue;
                 };
                 for sub in &tlv.subs {
