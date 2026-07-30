@@ -1,7 +1,9 @@
 # Conditional Tracing
 
-OSPFv3 shares the conditional-tracing model of OSPFv2, BGP and
-IS-IS: each category is a *presence* toggle — name it in the config
+OSPFv3 shares the conditional-tracing model of
+[OSPFv2](ch-08-10-ospf-tracing.md), [BGP](ch-02-10-bgp-tracing.md) and
+[IS-IS](ch-07-09-isis-tracing.md): each category is a *presence*
+toggle — name it in the config
 to enable, delete it to disable — and the gated log sites consult
 the live config on every packet, transition and event, so
 categories flip without a restart. The block is identical to the v2
