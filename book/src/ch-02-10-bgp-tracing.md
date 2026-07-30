@@ -8,8 +8,9 @@ typed config block of per-**category** switches that turn detailed
 `info`-level traces on at runtime, with no rebuild and no global log-level
 change.
 
-This mirrors the IS-IS / OSPF `tracing` model — gated log macros consult a
-config struct — but with the BGP-specific category set.
+This mirrors the [IS-IS](ch-07-09-isis-tracing.md) /
+[OSPF](ch-08-10-ospf-tracing.md) `tracing` model — gated log macros
+consult a config struct — but with the BGP-specific category set.
 
 Every traced line is stamped `proto="bgp"` and `category="<name>"`, so the
 filtering recipes in [Protocol-Specific Logging](ch-03-03-protocol-logging.md)
@@ -26,9 +27,11 @@ The same `tracing { ... }` block attaches at two points:
 
 Per-neighbour config is **additive** to the instance config: a category is
 traced for a peer if either the instance block *or* that peer's block
-enables it. Instance-only categories (`vpn`, `srv6`, `vrf`, `bfd`,
+enables it. The instance-scoped categories (`vpn`, `srv6`, `vrf`, `bfd`,
 `label`) are most useful at the instance scope, since they are not tied to
-a single session.
+a single session; `sharding` exists **only** at the instance scope — the
+values it reports are chosen once for the whole BGP instance, before any
+neighbour exists.
 
 ## The `all` master switch
 
@@ -59,6 +62,7 @@ Absence means the category is silent.
 | `srv6` | instance | SRv6 locator resolution and per-VRF End.DT46 service-SID reconciliation (L3VPN over SRv6). |
 | `vrf` | instance | Per-VRF task lifecycle — spawn / respawn / despawn / shutdown, inbound-connection routing, and the staged per-VRF config observed at commit. |
 | `bfd` | instance | BGP's interaction with the BFD client — session state changes and client-readiness that drive RFC 5882 peer teardown. |
+| `sharding` | instance only | The instance-lifetime concurrency knobs frozen at spawn — the RIB shard count and the per-peer egress-task model, each with the source it came from (config, environment, or default) — plus update-group egress task spawn/exit. |
 
 > **Warnings stay on.** Tracing categories gate *diagnostic* `info`/`debug`
 > detail only. Operator-facing **warnings and errors** — missing RD,

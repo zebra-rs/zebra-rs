@@ -2,7 +2,8 @@
 
 Conditional tracing is a runtime debug switch: a category is silent
 until you name it in the config, at which point the matching log
-sites start emitting. It mirrors the BGP and IS-IS `tracing` model —
+sites start emitting. It mirrors the [BGP](ch-02-10-bgp-tracing.md)
+and [IS-IS](ch-07-09-isis-tracing.md) `tracing` model —
 each toggle is a *presence* flag (name it to enable, delete it to
 disable), and the gated log macros consult the live config on every
 packet, transition, and event, so categories turn on and off without
