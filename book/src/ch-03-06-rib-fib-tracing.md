@@ -113,6 +113,7 @@ from the configuration subsystem itself:
 | Category | What it traces | Modifiers |
 |---|---|---|
 | `startup` | The startup-config apply summary — resolved path, detected format, and `applied N of M commands` — emitted once the startup commit completes. | — |
+| `vty` | VTY session lifecycle and per-RPC events: session creation on first RPC, per-RPC accept, logout / disable, `enable` promotion, session removal when the client shell exits, and GC sweeps that removed sessions. Denied RPCs and authentication failures are warnings and always logged. | — |
 
 ```
 system {

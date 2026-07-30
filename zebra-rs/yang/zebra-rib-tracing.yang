@@ -100,8 +100,11 @@ module zebra-rib-tracing {
        Failure outcomes (missing / empty / unreadable / rejected
        startup config) stay unconditional: they fire only when the
        config file carries no commands, so a config-borne toggle could
-       never have enabled them. The `all` master switch covers the new
-       block.";
+       never have enabled them. `config vty` gates the VTY session
+       lifecycle / RPC traces (formerly behind the compile-time
+       VTY_TRACING const); the one-shot serve() setup notices fire
+       before the startup config is loaded and log at debug level
+       instead. The `all` master switch covers the new block.";
   }
 
   revision 2026-07-07 {
@@ -208,6 +211,23 @@ module zebra-rib-tracing {
              toggle; the empty-file and missing-file notes are also
              unconditional, since a boot that hits them had no config
              that could have carried the toggle.";
+        }
+
+        leaf vty {
+          ext:help "Trace VTY session lifecycle and RPC events";
+          type empty;
+          description
+            "Log VTY session lifecycle and per-RPC events: session
+             creation on first RPC, per-RPC accept, logout / disable,
+             enable promotion (root noop, config-group, PAM success),
+             session removal when the client shell exits, and GC
+             sweeps that removed sessions. Denied RPCs and
+             authentication failures are warnings and always logged
+             regardless of this toggle. The one-shot serve() setup
+             notices (listening socket, configure-authorization group,
+             peer allow-list, GC start) fire before the startup config
+             is loaded, so they are debug-level rather than gated
+             here.";
         }
       }
 

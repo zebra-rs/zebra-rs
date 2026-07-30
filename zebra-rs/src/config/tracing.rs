@@ -31,6 +31,16 @@ struct State {
     /// `system tracing config startup` — the startup-config apply
     /// summary (`applied N of M commands`).
     startup: AtomicBool,
+
+    /// `system tracing config vty` — VTY session lifecycle and RPC
+    /// events (session create / remove, enable / disable, per-RPC
+    /// accept, GC sweeps). These are recurring runtime events, so the
+    /// ordinary commit path is early enough — no bootstrap subtlety
+    /// like `startup`'s. The one-shot `serve()` setup notices are NOT
+    /// here: they fire before the startup config is loaded, so they
+    /// log at debug level instead of consulting a toggle no config
+    /// could have set yet.
+    vty: AtomicBool,
 }
 
 impl State {
@@ -38,6 +48,7 @@ impl State {
         State {
             all: AtomicBool::new(false),
             startup: AtomicBool::new(false),
+            vty: AtomicBool::new(false),
         }
     }
 
@@ -56,6 +67,7 @@ impl State {
         match line {
             "system tracing all" => self.all.store(set, Relaxed),
             "system tracing config startup" => self.startup.store(set, Relaxed),
+            "system tracing config vty" => self.vty.store(set, Relaxed),
             _ => {}
         }
     }
@@ -77,6 +89,12 @@ pub(super) fn startup() -> bool {
     STATE.on(&STATE.startup)
 }
 
+/// `system tracing config vty` — gate for VTY session lifecycle and
+/// RPC traces.
+pub(super) fn vty() -> bool {
+    STATE.on(&STATE.vty)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -91,12 +109,24 @@ mod tests {
     }
 
     #[test]
-    fn all_master_switch_covers_startup() {
+    fn vty_toggle_set_delete() {
+        let s = State::new();
+        s.apply("system tracing config vty", ConfigOp::Set);
+        assert!(s.on(&s.vty));
+        assert!(!s.on(&s.startup));
+        s.apply("system tracing config vty", ConfigOp::Delete);
+        assert!(!s.on(&s.vty));
+    }
+
+    #[test]
+    fn all_master_switch_covers_every_category() {
         let s = State::new();
         s.apply("system tracing all", ConfigOp::Set);
         assert!(s.on(&s.startup));
+        assert!(s.on(&s.vty));
         s.apply("system tracing all", ConfigOp::Delete);
         assert!(!s.on(&s.startup));
+        assert!(!s.on(&s.vty));
     }
 
     #[test]

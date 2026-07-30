@@ -4250,7 +4250,7 @@ mod yang_load_tests {
 
         let (code, _comps, _state) = parse(
             "set system tracing config startup",
-            entry,
+            entry.clone(),
             None,
             State::new(),
         );
@@ -4258,6 +4258,14 @@ mod yang_load_tests {
             code,
             ExecCode::Success,
             "`set system tracing config startup` must be a valid settable path",
+        );
+
+        let (code, _comps, _state) =
+            parse("set system tracing config vty", entry, None, State::new());
+        assert_eq!(
+            code,
+            ExecCode::Success,
+            "`set system tracing config vty` must be a valid settable path",
         );
     }
 
