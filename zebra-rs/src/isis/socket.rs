@@ -1,7 +1,7 @@
 use std::os::fd::AsRawFd;
 
 use nix::sys::socket::{self, LinkAddr, SockaddrLike};
-use socket2::{Domain, Protocol, SockFilter, Socket, Type};
+use socket2::{Domain, SockFilter, Socket, Type};
 
 use super::network::{L1_ISS, L2_ISS, P2P_ISS};
 
@@ -29,19 +29,26 @@ const ISIS_BPF_FILTER: [SockFilter; 10] = [
 ];
 
 pub fn isis_socket(ifindex: u32) -> Result<Socket, std::io::Error> {
-    let socket = Socket::new(
-        Domain::PACKET,
-        Type::DGRAM,
-        Some(Protocol::from(libc::ETH_P_ALL)),
-    )?;
+    // Create with protocol 0 and attach the BPF filter BEFORE bind. An
+    // AF_PACKET socket with protocol 0 is delivered nothing, and it is
+    // bind() that installs the protocol hook — so this order leaves no
+    // window where packets queue unfiltered (the libpcap recipe).
+    //
+    // The previous order (socket(ETH_P_ALL) → bind → attach_filter) had
+    // two races: between socket() and bind() the socket captured from
+    // EVERY interface, and anything queued before attach_filter() was
+    // delivered despite the filter. Observed live as a burst of looped-
+    // back mDNS packets from `lo` hitting the IS-IS parser (one "Error
+    // Packet parse" per link socket mid-setup) at daemon start.
+    let socket = Socket::new(Domain::PACKET, Type::DGRAM, None)?;
 
     let _ = socket.set_nonblocking(true);
+
+    socket.attach_filter(&ISIS_BPF_FILTER)?;
 
     let sockaddr = link_addr(libc::ETH_P_ALL as u16, ifindex, None);
 
     socket::bind(socket.as_raw_fd(), &sockaddr)?;
-
-    socket.attach_filter(&ISIS_BPF_FILTER)?;
 
     join_isis_multicast(socket.as_raw_fd(), ifindex);
 
