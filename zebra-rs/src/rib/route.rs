@@ -108,7 +108,7 @@ impl Rib {
                         net
                     );
                 }
-                if let Err(e) = self.fib_handle.addr_add_ipv4(ifindex, net, false).await {
+                if let Err(e) = self.fib_handle.addr_add_ipv4(ifindex, net).await {
                     tracing::warn!(
                         "addr_reinstall: {} failed to re-install IPv4 {}: {}",
                         link_name,
@@ -125,7 +125,7 @@ impl Rib {
                         net
                     );
                 }
-                if let Err(e) = self.fib_handle.addr_add_ipv6(ifindex, net, false).await {
+                if let Err(e) = self.fib_handle.addr_add_ipv6(ifindex, net).await {
                     tracing::warn!(
                         "addr_reinstall: {} failed to re-install IPv6 {}: {}",
                         link_name,

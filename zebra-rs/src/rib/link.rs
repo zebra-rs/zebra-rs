@@ -1137,7 +1137,7 @@ pub async fn link_config_exec(
                     }
                 }
 
-                let result = rib.fib_handle.addr_add_ipv4(ifindex, &v4addr, false).await;
+                let result = rib.fib_handle.addr_add_ipv4(ifindex, &v4addr).await;
                 match result {
                     Ok(_) => {
                         let addr = FibAddr {
@@ -1215,7 +1215,7 @@ pub async fn link_config_exec(
                         }
                     }
                 }
-                let result = rib.fib_handle.addr_add_ipv6(ifindex, &v6addr, false).await;
+                let result = rib.fib_handle.addr_add_ipv6(ifindex, &v6addr).await;
                 match result {
                     Ok(_) => {
                         let addr = FibAddr {

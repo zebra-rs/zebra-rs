@@ -3035,20 +3035,16 @@ impl FibHandle {
         Ok(())
     }
 
-    pub async fn addr_add_ipv4(
-        &self,
-        ifindex: u32,
-        prefix: &Ipv4Net,
-        secondary: bool,
-    ) -> anyhow::Result<()> {
+    /// Add an IPv4 address via `RTM_NEWADDR`. No `IFA_F_SECONDARY` is
+    /// ever requested: the kernel clears the userspace flag and
+    /// recomputes it itself (secondary iff same mask+subnet as an
+    /// existing primary), so the flag is read back, never written.
+    pub async fn addr_add_ipv4(&self, ifindex: u32, prefix: &Ipv4Net) -> anyhow::Result<()> {
         let mut msg = AddressMessage::default();
         msg.header.family = AddressFamily::Inet;
         msg.header.prefix_len = prefix.prefix_len();
         msg.header.index = ifindex;
         msg.header.scope = AddressScope::Universe;
-        if secondary {
-            msg.header.flags = AddressHeaderFlags::Secondary;
-        }
         let attr = AddressAttribute::Local(IpAddr::V4(prefix.addr()));
         msg.attributes.push(attr);
 
@@ -3090,20 +3086,15 @@ impl FibHandle {
         }
     }
 
-    pub async fn addr_add_ipv6(
-        &self,
-        ifindex: u32,
-        prefix: &Ipv6Net,
-        secondary: bool,
-    ) -> anyhow::Result<()> {
+    /// Add an IPv6 address via `RTM_NEWADDR`. Never sets header flag
+    /// bit 0x01: on IPv6 it is `IFA_F_TEMPORARY` (privacy address),
+    /// not "secondary" — IPv6 has no secondary concept.
+    pub async fn addr_add_ipv6(&self, ifindex: u32, prefix: &Ipv6Net) -> anyhow::Result<()> {
         let mut msg = AddressMessage::default();
         msg.header.family = AddressFamily::Inet6;
         msg.header.prefix_len = prefix.prefix_len();
         msg.header.index = ifindex;
         msg.header.scope = AddressScope::Universe;
-        if secondary {
-            msg.header.flags = AddressHeaderFlags::Secondary;
-        }
         let attr = AddressAttribute::Local(IpAddr::V6(prefix.addr()));
         msg.attributes.push(attr);
 
@@ -4075,6 +4066,12 @@ pub fn link_from_msg(msg: LinkMessage) -> FibLink {
 pub fn addr_from_msg(msg: AddressMessage) -> FibAddr {
     let mut os_addr = FibAddr::new();
     os_addr.link_index = msg.header.index;
+    // IFA_F_SECONDARY is kernel-computed for IPv4: the kernel sets it
+    // when an address shares mask+subnet with an existing primary on
+    // the device. The same bit on an IPv6 address is IFA_F_TEMPORARY
+    // (a privacy address), so it must not map to `secondary`.
+    os_addr.secondary = msg.header.family == AddressFamily::Inet
+        && msg.header.flags.contains(AddressHeaderFlags::Secondary);
     for attr in msg.attributes.into_iter() {
         match attr {
             AddressAttribute::Address(addr) => match addr {
@@ -4491,6 +4488,54 @@ mod tests {
             "RTM_NEWNEXTHOP decode regressed: {:?}",
             parsed.err()
         );
+    }
+
+    fn addr_msg(family: AddressFamily, flags: AddressHeaderFlags, addr: IpAddr) -> AddressMessage {
+        let mut msg = AddressMessage::default();
+        msg.header.family = family;
+        msg.header.prefix_len = 24;
+        msg.header.index = 3;
+        msg.header.flags = flags;
+        msg.attributes.push(AddressAttribute::Address(addr));
+        msg
+    }
+
+    #[test]
+    fn addr_from_msg_reads_v4_secondary_flag() {
+        use std::net::Ipv4Addr;
+        let msg = addr_msg(
+            AddressFamily::Inet,
+            AddressHeaderFlags::Secondary,
+            IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2)),
+        );
+        let addr = addr_from_msg(msg);
+        assert!(addr.secondary);
+        assert_eq!(addr.link_index, 3);
+        assert_eq!(addr.addr.to_string(), "10.0.0.2/24");
+    }
+
+    #[test]
+    fn addr_from_msg_v4_primary_is_not_secondary() {
+        use std::net::Ipv4Addr;
+        let msg = addr_msg(
+            AddressFamily::Inet,
+            AddressHeaderFlags::empty(),
+            IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1)),
+        );
+        assert!(!addr_from_msg(msg).secondary);
+    }
+
+    #[test]
+    fn addr_from_msg_v6_temporary_bit_is_not_secondary() {
+        // On IPv6 the 0x01 header flag is IFA_F_TEMPORARY (a privacy
+        // address), not "secondary" — it must never map to the flag.
+        use std::net::Ipv6Addr;
+        let msg = addr_msg(
+            AddressFamily::Inet6,
+            AddressHeaderFlags::Secondary,
+            IpAddr::V6("2001:db8::1".parse::<Ipv6Addr>().unwrap()),
+        );
+        assert!(!addr_from_msg(msg).secondary);
     }
 
     #[test]
