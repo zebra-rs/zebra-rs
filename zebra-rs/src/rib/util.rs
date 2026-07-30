@@ -1,6 +1,6 @@
 use std::net::{Ipv4Addr, Ipv6Addr};
 
-use ipnet::{Ipv4Net, Ipv6Net};
+use ipnet::{IpNet, Ipv4Net, Ipv6Net};
 
 pub trait IpAddrExt<T> {
     fn to_host_prefix(&self) -> T;
@@ -31,5 +31,14 @@ impl IpNetExt<Ipv4Net> for Ipv4Net {
 impl IpNetExt<Ipv6Net> for Ipv6Net {
     fn apply_mask(&self) -> Ipv6Net {
         Ipv6Net::new(self.network(), self.prefix_len()).unwrap()
+    }
+}
+
+impl IpNetExt<IpNet> for IpNet {
+    fn apply_mask(&self) -> IpNet {
+        match self {
+            IpNet::V4(v4) => IpNet::V4(v4.apply_mask()),
+            IpNet::V6(v6) => IpNet::V6(v6.apply_mask()),
+        }
     }
 }
