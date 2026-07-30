@@ -224,7 +224,9 @@ pub fn hello_p2p_generate(link: &LinkTop, level: Level) -> IsisP2pHello {
         source_id,
         hold_time: link.config.hold_time(),
         pdu_len: 0,
-        circuit_id: 0,
+        // ISO 10589 Local Circuit ID: the id reserved for this circuit
+        // at IS-IS enable, same value the 3-way TLV below advertises.
+        circuit_id: link.circuit_id,
         tlvs: Vec::new(),
     };
 
@@ -260,17 +262,22 @@ pub fn hello_p2p_generate(link: &LinkTop, level: Level) -> IsisP2pHello {
         .get(&Level::L1)
         .first_key_value()
         .or_else(|| link.state.nbrs.get(&Level::L2).first_key_value());
+    // Extended Local Circuit ID: the circuit id reserved at IS-IS
+    // enable, not the ifindex — one identity for the circuit whether it
+    // names a LAN pseudonode or a P2P 3-way handshake. RFC 5303 only
+    // requires the value be unique among this router's circuits and
+    // echoed back verbatim by the peer, which the allocator guarantees.
     let tlv = if let Some((_, nbr)) = nbr {
         IsisTlvP2p3Way {
             state: nbr.state.into(),
-            circuit_id: Some(link.ifindex),
+            circuit_id: Some(link.circuit_id as u32),
             neighbor_id: Some(nbr.sys_id),
             neighbor_circuit_id: nbr.circuit_id,
         }
     } else {
         IsisTlvP2p3Way {
             state: NfsmState::Down.into(),
-            circuit_id: Some(link.ifindex),
+            circuit_id: Some(link.circuit_id as u32),
             neighbor_id: None,
             neighbor_circuit_id: None,
         }
@@ -447,47 +454,20 @@ pub fn stop(link: &mut LinkTop) {
     }
 }
 
-/// Fallback circuit id derived from `ifindex`, folded into `1..=255`.
-///
-/// Only reached when the per-instance allocator
-/// ([`crate::isis::link::IsisLinks::alloc_circuit_id`]) had nothing left
-/// to hand out, i.e. this router already runs IS-IS on 255 circuits. The
-/// pseudonode id is 8 bits, so beyond that some pair must collide however
-/// it is chosen; this at least keeps the value out of the reserved 0.
-///
-/// Pseudonode id 0 is reserved for a router's own non-pseudonode LSP, so
-/// it can never name a circuit: a DIS that advertises `<sys-id>.00` as its
-/// LAN ID aliases its own node LSP. Both ends of the LAN then carry a
-/// self-referential `ExtIsReach` — the DIS lists itself as its own
-/// neighbour, and no pseudonode LSP enumerating the members is ever
-/// generated — so SPF sees a self-loop where the LAN should be and the
-/// whole segment drops out of the topology.
-///
-/// `ifindex as u8` did exactly that whenever the kernel index was a
-/// multiple of 256. That is a ~1-in-256 lottery per circuit, drawn afresh
-/// as ifindexes climb with each veth created and torn down, and it
-/// presented as an occasional "ECMP never forms" flake rather than
-/// anything that looked like an IS-IS bug.
-///
-/// Folding into `1..=255` leaves the collision profile unchanged — two
-/// circuits on one router still alias if their ifindexes are 255 apart,
-/// as they previously did at 256 — while removing the case that is
-/// guaranteed broken.
-fn dis_pseudo_id(ifindex: u32) -> u8 {
-    ((ifindex.max(1) - 1) % 255 + 1) as u8
-}
-
 pub fn dis_becoming(link: &mut LinkTop, level: Level) {
     use IfsmEvent::*;
 
-    // The circuit's allocated id, unique across this instance's links.
-    // Zero means the allocator was exhausted (or this link predates
-    // assignment), so fall back to the ifindex fold — still never 0.
-    let pseudo_id: u8 = match link.state.circuit_id {
-        0 => dis_pseudo_id(link.ifindex),
-        id => id,
-    };
-    let lsp_id = IsisLspId::new(link.up_config.net.sys_id(), pseudo_id, 0);
+    // The circuit id is allocated when the interface is enabled. The id
+    // space is only 1..=255, so it can be exhausted. In that case it is
+    // safe to suspend DIS processing rather than go forward.
+    if link.circuit_id == 0 {
+        tracing::warn!(
+            "isis: {} elected DIS without a circuit id; suspending DIS processing",
+            link.state.name
+        );
+        return;
+    }
+    let lsp_id = IsisLspId::new(link.up_config.net.sys_id(), link.circuit_id, 0);
 
     // Register adjacency with LAN ID.
     *link.state.adj.get_mut(&level) = Some((lsp_id.neighbor_id(), None));
@@ -790,42 +770,5 @@ pub fn dis_selection(link: &mut LinkTop, level: Level) {
         && let Some((neighbor_id, _)) = link.state.adj.get(&level)
     {
         link.event(Message::DisOriginate(level, *neighbor_id, None));
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::dis_pseudo_id;
-
-    /// The defect this guards: `ifindex as u8` yields 0 on every
-    /// multiple of 256, and pseudonode id 0 aliases the router's own
-    /// node LSP. Observed live as `0000.0000.0003.00` in a neighbour's
-    /// LSDB, with the LAN's two members advertising themselves as their
-    /// own neighbour and the segment vanishing from SPF.
-    #[test]
-    fn dis_pseudo_id_is_never_zero() {
-        for ifindex in [1u32, 2, 254, 255, 256, 511, 512, 65_536, u32::MAX] {
-            let id = dis_pseudo_id(ifindex);
-            assert_ne!(
-                id, 0,
-                "ifindex {ifindex} produced pseudonode id 0, which aliases the node LSP"
-            );
-        }
-        // The truncation that used to break: 256 and 512 are exactly the
-        // indexes `as u8` mapped onto the reserved id.
-        assert_eq!(256u32 as u8, 0, "precondition: the old derivation gave 0");
-        assert_ne!(dis_pseudo_id(256), 0);
-        assert_ne!(dis_pseudo_id(512), 0);
-    }
-
-    /// Distinct circuits on one router must still get distinct ids
-    /// within any 255-index window, or two LANs would share a
-    /// pseudonode LSP.
-    #[test]
-    fn dis_pseudo_id_is_distinct_across_a_full_window() {
-        let ids: std::collections::BTreeSet<u8> = (1..=255u32).map(dis_pseudo_id).collect();
-        assert_eq!(ids.len(), 255, "255 consecutive ifindexes must not collide");
-        assert_eq!(*ids.iter().min().unwrap(), 1);
-        assert_eq!(*ids.iter().max().unwrap(), 255);
     }
 }
