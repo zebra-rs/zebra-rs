@@ -1592,7 +1592,7 @@ mod tests {
         // different subnet does not; the address itself never counts.
         assert!(prefix_covered_by_other(&[a.clone(), b.clone()], &a));
         assert!(!prefix_covered_by_other(&[a.clone(), other_net], &a));
-        assert!(!prefix_covered_by_other(&[a.clone()], &a));
+        assert!(!prefix_covered_by_other(std::slice::from_ref(&a), &a));
 
         // A sibling the kernel no longer holds (fib=false recovery
         // candidate) does not keep the connected route alive.
