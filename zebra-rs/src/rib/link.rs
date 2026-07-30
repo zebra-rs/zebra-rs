@@ -1,6 +1,6 @@
 use anyhow::{Context, Result};
 
-use ipnet::IpNet;
+use ipnet::{IpNet, Ipv4Net};
 use netlink_packet_route::link::LinkFlags;
 use serde::Serialize;
 use std::collections::{BTreeMap, BTreeSet};
@@ -424,10 +424,25 @@ pub enum AddrUpdate {
     Added,
     /// The address was present and the incoming flags flipped `config` or
     /// `fib` true — a config push landing on an already-known kernel
-    /// address, or the kernel confirming a config-driven (re-)install.
+    /// address, or the kernel confirming a config-driven (re-)install —
+    /// or its secondary verdict moved (promotion/demotion).
     Merged,
     /// The address was present and nothing changed (kernel re-notify).
     Unchanged,
+}
+
+/// Kernel-mirror of `__inet_insert_ifa`'s IFA_F_SECONDARY verdict for an
+/// IPv4 address being installed on `link`: secondary iff another installed
+/// primary with the same mask and network already exists. The config path
+/// must compute this itself — the kernel excludes the originating socket
+/// from the RTNLGRP broadcast, so our own RTM_NEWADDR never echoes back.
+pub fn v4_secondary_verdict(link: &Link, v4: Ipv4Net) -> bool {
+    link.addr4.iter().any(|e| {
+        e.fib
+            && !e.secondary
+            && matches!(e.addr, IpNet::V4(ev)
+                if ev != v4 && ev.prefix_len() == v4.prefix_len() && ev.network() == v4.network())
+    })
 }
 
 /// Insert a LinkAddr or merge it into an existing entry with the same address.
@@ -435,7 +450,10 @@ pub enum AddrUpdate {
 /// In the merge case, the existing entry's `config` and `fib` flags are
 /// OR-ed with the incoming flags — this lets the kernel's netlink
 /// confirmation of a config-driven address flip `fib` true on the
-/// already-present LinkAddr without creating a duplicate. The returned
+/// already-present LinkAddr without creating a duplicate — and `secondary`
+/// is adopted from the incoming address: kernel events carry the kernel's
+/// IFA_F_SECONDARY, and the config path computes the same verdict via
+/// [`v4_secondary_verdict`] before calling here. The returned
 /// [`AddrUpdate`] tells the caller whether anything actually changed, so
 /// redundant kernel notifications aren't re-broadcast to protocol clients.
 pub fn link_addr_update(link: &mut Link, addr: LinkAddr) -> AddrUpdate {
@@ -445,9 +463,12 @@ pub fn link_addr_update(link: &mut Link, addr: LinkAddr) -> AddrUpdate {
         &mut link.addr6
     };
     if let Some(existing) = bucket.iter_mut().find(|a| a.addr == addr.addr) {
-        let changed = (addr.config && !existing.config) || (addr.fib && !existing.fib);
+        let changed = (addr.config && !existing.config)
+            || (addr.fib && !existing.fib)
+            || existing.secondary != addr.secondary;
         existing.config |= addr.config;
         existing.fib |= addr.fib;
+        existing.secondary = addr.secondary;
         return if changed {
             AddrUpdate::Merged
         } else {
@@ -1021,6 +1042,12 @@ impl Rib {
             addr.config = true;
         }
         if let Some(link) = self.links.get_mut(&addr.ifindex) {
+            // Our own RTM_NEWADDR never echoes back (the kernel excludes
+            // the originating socket from the RTNLGRP broadcast), so the
+            // config path computes the kernel's secondary verdict locally.
+            if from_config && let IpNet::V4(v4) = addr.addr {
+                addr.secondary = v4_secondary_verdict(link, v4);
+            }
             let update = link_addr_update(link, addr.clone());
 
             // Install the connected route only for the first address that
@@ -1155,72 +1182,145 @@ pub async fn link_config_exec(
 
     // let func = self.builder.map.get()
     if path == "/interface/ipv4/address" {
-        let v4addr = args.v4net().context(IPV4_ADDR_ERR)?;
+        // `address` is a leaf-list: each commit line carries one value,
+        // but drain the deque so a bundled delivery would not silently
+        // drop trailing values.
+        let mut values: Vec<Ipv4Net> = Vec::new();
+        while let Some(v4addr) = args.v4net() {
+            values.push(v4addr);
+        }
 
         if op.is_set() {
-            // Validate against 0.0.0.0 address
-            if v4addr.addr().is_unspecified() {
-                println!("Cannot configure 0.0.0.0 as interface address");
-                return Ok(());
+            if values.is_empty() {
+                return Err(anyhow::anyhow!(IPV4_ADDR_ERR));
             }
-
-            // Validate against zero prefix length
-            if v4addr.prefix_len() == 0 {
-                println!("Cannot configure address with zero prefix length");
-                return Ok(());
-            }
-
-            if let Some(ifindex) = link_lookup(rib, ifname.to_string()) {
-                // Check if IPv4 address is already configured on the link
-                if let Some(link) = rib.links.get(&ifindex) {
-                    // Check if this IPv4 address already exists on the interface
-                    for existing_addr in &link.addr4 {
-                        if let IpNet::V4(existing_v4) = existing_addr.addr
-                            && existing_v4 == v4addr
-                        {
-                            // println!(
-                            //     "IPv4 address {} is already configured on interface {}",
-                            //     v4addr, ifname
-                            // );
-                            return Ok(());
-                        }
-                    }
+            for v4addr in values {
+                // Validate against 0.0.0.0 address
+                if v4addr.addr().is_unspecified() {
+                    println!("Cannot configure 0.0.0.0 as interface address");
+                    continue;
                 }
 
-                let result = rib.fib_handle.addr_add_ipv4(ifindex, &v4addr).await;
-                match result {
-                    Ok(_) => {
-                        let addr = FibAddr {
-                            addr: ipnet::IpNet::V4(v4addr),
-                            link_index: ifindex,
-                            secondary: false,
-                        };
-                        rib.addr_add(addr, true);
+                // Validate against zero prefix length
+                if v4addr.prefix_len() == 0 {
+                    println!("Cannot configure address with zero prefix length");
+                    continue;
+                }
+
+                if let Some(ifindex) = link_lookup(rib, ifname.to_string()) {
+                    // If the address is already present (configured earlier or
+                    // learned from the kernel), just mark it configured: the
+                    // kernel add would EEXIST, and adopting a kernel-learned
+                    // address lets a later config delete remove it.
+                    if let Some(link) = rib.links.get_mut(&ifindex)
+                        && let Some(existing) =
+                            link.addr4.iter_mut().find(|a| a.addr == IpNet::V4(v4addr))
+                    {
+                        existing.config = true;
+                        continue;
                     }
-                    Err(_) => {
-                        println!("IPaddress add failure");
+
+                    let result = rib.fib_handle.addr_add_ipv4(ifindex, &v4addr).await;
+                    match result {
+                        Ok(_) => {
+                            let addr = FibAddr {
+                                addr: ipnet::IpNet::V4(v4addr),
+                                link_index: ifindex,
+                                secondary: false,
+                            };
+                            rib.addr_add(addr, true);
+                        }
+                        Err(_) => {
+                            println!("IPaddress add failure");
+                        }
                     }
                 }
             }
         } else {
-            // Handle IPv4 address deletion
+            // Handle IPv4 address deletion. A value-less delete
+            // (`delete interface X ipv4 address`) removes every
+            // configured address on the interface.
             if let Some(ifindex) = link_lookup(rib, ifname.to_string()) {
-                // Clear `config` on the existing LinkAddr so the kernel's
-                // subsequent DelAddr notification removes the entry instead
-                // of keeping it as a recovery candidate.
-                if let Some(link) = rib.links.get_mut(&ifindex) {
-                    let target = IpNet::V4(v4addr);
-                    if let Some(existing) = link.addr4.iter_mut().find(|a| a.addr == target) {
-                        existing.config = false;
+                if values.is_empty()
+                    && let Some(link) = rib.links.get(&ifindex)
+                {
+                    values = link
+                        .addr4
+                        .iter()
+                        .filter(|a| a.config)
+                        .filter_map(|a| match a.addr {
+                            IpNet::V4(v4) => Some(v4),
+                            IpNet::V6(_) => None,
+                        })
+                        .collect();
+                }
+                for v4addr in values {
+                    // Clear `config` on the existing LinkAddr so addr_del
+                    // below removes the entry instead of keeping it as a
+                    // recovery candidate. Read the primary verdict first:
+                    // deleting a primary triggers the kernel's purge cascade
+                    // on its same-subnet secondaries.
+                    let mut was_primary = false;
+                    if let Some(link) = rib.links.get_mut(&ifindex) {
+                        let target = IpNet::V4(v4addr);
+                        if let Some(existing) = link.addr4.iter_mut().find(|a| a.addr == target) {
+                            was_primary = !existing.secondary;
+                            existing.config = false;
+                        }
+                    }
+                    rib.fib_handle.addr_del_ipv4(ifindex, &v4addr).await;
+                    let addr = FibAddr {
+                        addr: ipnet::IpNet::V4(v4addr),
+                        link_index: ifindex,
+                        secondary: false,
+                    };
+                    rib.addr_del(addr);
+
+                    if !was_primary {
+                        continue;
+                    }
+                    // Kernel cascade mirror: deleting a primary also purged
+                    // its same-subnet secondaries in the kernel
+                    // (promote_secondaries=0 is the default), and none of it
+                    // is visible here — the kernel excludes the originating
+                    // socket from the RTNLGRP broadcast. Drop kernel-only
+                    // siblings to match, and re-install configured ones so
+                    // deleting the primary doesn't silently take them down.
+                    // The re-add tolerates EEXIST for hosts running
+                    // promote_secondaries=1, where the kernel promoted the
+                    // first secondary instead of purging.
+                    let siblings: Vec<(Ipv4Net, bool)> = rib
+                        .links
+                        .get(&ifindex)
+                        .map(|link| {
+                            link.addr4
+                                .iter()
+                                .filter_map(|a| match a.addr {
+                                    IpNet::V4(ev)
+                                        if ev.prefix_len() == v4addr.prefix_len()
+                                            && ev.network() == v4addr.network() =>
+                                    {
+                                        Some((ev, a.config))
+                                    }
+                                    _ => None,
+                                })
+                                .collect()
+                        })
+                        .unwrap_or_default();
+                    for (sib, config) in siblings {
+                        let fib_sib = FibAddr {
+                            addr: IpNet::V4(sib),
+                            link_index: ifindex,
+                            secondary: false,
+                        };
+                        if config {
+                            let _ = rib.fib_handle.addr_add_ipv4(ifindex, &sib).await;
+                            rib.addr_add(fib_sib, true);
+                        } else {
+                            rib.addr_del(fib_sib);
+                        }
                     }
                 }
-                rib.fib_handle.addr_del_ipv4(ifindex, &v4addr).await;
-                let addr = FibAddr {
-                    addr: ipnet::IpNet::V4(v4addr),
-                    link_index: ifindex,
-                    secondary: false,
-                };
-                rib.addr_del(addr);
             }
         }
     } else if path == "/interface/ipv6/address" {
@@ -1548,6 +1648,69 @@ mod tests {
         let result = link_addr_update(&mut link, kernel);
         assert_eq!(result, AddrUpdate::Unchanged);
         assert_eq!(link.addr4.len(), 1);
+    }
+
+    #[test]
+    fn test_link_addr_update_merge_adopts_secondary() {
+        let mut link = test_link();
+        let cfg = test_addr_v4(Ipv4Addr::new(10, 0, 0, 2), 24, true, true);
+        link_addr_update(&mut link, cfg);
+        assert!(!link.addr4[0].secondary);
+
+        // A kernel event carrying IFA_F_SECONDARY (external add observed
+        // via netlink) updates the merged entry — and counts as a state
+        // change, so it is re-broadcast.
+        let mut kernel = test_addr_v4(Ipv4Addr::new(10, 0, 0, 2), 24, false, true);
+        kernel.secondary = true;
+        assert_eq!(link_addr_update(&mut link, kernel), AddrUpdate::Merged);
+        assert_eq!(link.addr4.len(), 1);
+        assert!(link.addr4[0].secondary && link.addr4[0].config);
+
+        // Promotion: the kernel re-announces the address without the
+        // flag — the merge clears it again (Merged, not Unchanged).
+        let promoted = test_addr_v4(Ipv4Addr::new(10, 0, 0, 2), 24, false, true);
+        assert_eq!(link_addr_update(&mut link, promoted), AddrUpdate::Merged);
+        assert!(!link.addr4[0].secondary);
+
+        // Same flag again: nothing changed, nothing re-broadcast.
+        let renotify = test_addr_v4(Ipv4Addr::new(10, 0, 0, 2), 24, false, true);
+        assert_eq!(link_addr_update(&mut link, renotify), AddrUpdate::Unchanged);
+    }
+
+    #[test]
+    fn test_v4_secondary_verdict_mirrors_kernel() {
+        let mut link = test_link();
+        let primary: Ipv4Net = "10.0.0.1/24".parse().unwrap();
+        let same_subnet: Ipv4Net = "10.0.0.2/24".parse().unwrap();
+        let other_mask: Ipv4Net = "10.0.0.3/25".parse().unwrap();
+        let other_subnet: Ipv4Net = "10.1.0.1/24".parse().unwrap();
+
+        // Empty link: first address is primary.
+        assert!(!v4_secondary_verdict(&link, primary));
+        link_addr_update(
+            &mut link,
+            test_addr_v4(Ipv4Addr::new(10, 0, 0, 1), 24, true, true),
+        );
+
+        // Same mask + same network as an installed primary → secondary.
+        assert!(v4_secondary_verdict(&link, same_subnet));
+        // A different prefix length is a different subnet to the kernel,
+        // even though it overlaps.
+        assert!(!v4_secondary_verdict(&link, other_mask));
+        // Distinct subnet → its own primary.
+        assert!(!v4_secondary_verdict(&link, other_subnet));
+        // Re-evaluating the installed address itself is not "another"
+        // primary (self is excluded).
+        assert!(!v4_secondary_verdict(&link, primary));
+
+        // A primary that is configured but not installed (fib=false,
+        // e.g. link down) does not make the newcomer secondary.
+        let mut down_link = test_link();
+        link_addr_update(
+            &mut down_link,
+            test_addr_v4(Ipv4Addr::new(10, 0, 0, 1), 24, true, false),
+        );
+        assert!(!v4_secondary_verdict(&down_link, same_subnet));
     }
 
     #[test]
