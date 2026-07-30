@@ -22,7 +22,7 @@ use super::{
     Identity, IfsmEvent, IfsmState, Message, Neighbor, NfsmEvent, NfsmState, OspfLink,
     inst::OspfInterface,
 };
-use crate::ospf_pdu_trace;
+use crate::{ospf_packet_trace, ospf_pdu_trace};
 
 /// RFC 7166 §3.5 Apad — a per-algorithm hex pattern used to fill
 /// the Authentication Data field while computing the HMAC. The
@@ -388,7 +388,8 @@ pub fn ospfv3_hello_recv(
     // RFC 5340 inherits RFC 2328 §10.5 / RFC 3101 §2.5: drop the
     // Hello when the peer's E or N bit disagrees with our area type.
     if hello.options.e() != oi.area_type.e_bit() || hello.options.n() != oi.area_type.n_bit() {
-        tracing::info!(
+        ospf_pdu_trace!(
+            tracing,
             "[v3 Hello:Recv] dropping {}: option mismatch (peer E={} N={}, area {:?})",
             src,
             hello.options.e(),
@@ -1051,7 +1052,8 @@ pub fn ospfv3_ls_req_recv(
         match ospfv3_lsa_lookup_raw(oi, req.ls_type, req.link_state_id, req.advertising_router) {
             Some(lsa) => lsas.push(lsa.clone()),
             None => {
-                tracing::info!(
+                ospf_pdu_trace!(
+                    oi.tracing,
                     "[v3 LSReq] BadLSReq: not in LSDB ls_type=0x{:04x} id={} adv={}",
                     req.ls_type,
                     req.link_state_id,
@@ -1260,14 +1262,14 @@ fn gr_maybe_enter_helper_v3(
         return;
     }
     if !oi.gr_config.helper_enabled {
-        tracing::info!(
+        tracing::warn!(
             "[GR Helper v3] reject Grace LSA from nbr {} (helper-enabled is false)",
             nbr.ident.router_id
         );
         return;
     }
     if nbr.state != NfsmState::Full {
-        tracing::info!(
+        tracing::warn!(
             "[GR Helper v3] reject Grace LSA from non-Full nbr {} (state={:?})",
             nbr.ident.router_id,
             nbr.state
@@ -1278,7 +1280,7 @@ fn gr_maybe_enter_helper_v3(
     let grace_period = match body.grace_period() {
         Some(p) if p > 0 && p <= max_grace => p,
         Some(p) => {
-            tracing::info!(
+            tracing::warn!(
                 "[GR Helper v3] reject Grace LSA from nbr {} (grace={}s out of [1, {}])",
                 nbr.ident.router_id,
                 p,
@@ -1287,7 +1289,7 @@ fn gr_maybe_enter_helper_v3(
             return;
         }
         None => {
-            tracing::info!(
+            tracing::warn!(
                 "[GR Helper v3] reject Grace LSA from nbr {} (no GracePeriod TLV)",
                 nbr.ident.router_id
             );
@@ -1377,7 +1379,10 @@ fn ospfv3_ls_upd_proc(
 
     // Step 3: AS-scope LSAs aren't accepted in stub / NSSA areas.
     if scope == Ospfv3LsaScope::As && oi.area_type.is_stub_or_nssa() {
-        tracing::info!(
+        ospf_packet_trace!(
+            oi.tracing,
+            LsUpdate,
+            Recv,
             "[v3 LSUpd] Step 3: discarding AS-scope LSA in {:?} area",
             oi.area_type
         );
@@ -1388,7 +1393,10 @@ fn ospfv3_ls_upd_proc(
     // usually prevents the adjacency in the first
     // place, but defend against misconfigured peers.
     if h.ls_type == OSPFV3_NSSA_LSA_TYPE && !oi.area_type.is_nssa() {
-        tracing::info!(
+        ospf_packet_trace!(
+            oi.tracing,
+            LsUpdate,
+            Recv,
             "[v3 LSUpd] Step 3: discarding Type-7 NSSA-LSA in {:?} area",
             oi.area_type
         );
@@ -1434,7 +1442,10 @@ fn ospfv3_ls_upd_proc(
             && install_time.elapsed()
                 < std::time::Duration::from_millis(oi.min_ls_arrival_ms as u64)
         {
-            tracing::info!(
+            ospf_packet_trace!(
+                oi.tracing,
+                LsUpdate,
+                Recv,
                 "[v3 LSUpd] Step 5(a) MinLSArrival: discarding (no ack) LSA type={:#x} id={} adv={} seq={:#x}",
                 h.ls_type,
                 h.link_state_id,
@@ -1452,15 +1463,17 @@ fn ospfv3_ls_upd_proc(
                 // capability TLVs on E-Router-LSAs (SRGB / SRLB)
                 // update `label_map[adv_router]` before the LSA hits
                 // the LSDB. Mirrors v2's `insert_received` shape.
-                oi.lsdb.insert_received_v3(cloned, oi.tx, Some(area_id));
+                oi.lsdb
+                    .insert_received_v3(cloned, oi.tx, Some(area_id), oi.tracing);
                 area_lsa_installed = true;
             }
             Ospfv3LsaScope::As => {
-                oi.lsdb_as.install_lsa(cloned, oi.tx, None);
+                oi.lsdb_as.install_lsa(cloned, oi.tx, None, oi.tracing);
                 as_lsa_installed = true;
             }
             Ospfv3LsaScope::Link => {
-                oi.link_lsdb.install_lsa(cloned, oi.tx, Some(area_id));
+                oi.link_lsdb
+                    .install_lsa(cloned, oi.tx, Some(area_id), oi.tracing);
                 // A peer Link-LSA can carry the neighbor's global /128
                 // (LA-bit) — the preferred SRv6 End.X nexthop. Nudge
                 // the instance to re-evaluate installs on this link.

@@ -56,6 +56,15 @@ module zebra-ospf-tracing {
      config dispatch keys off set vs delete and never reads a value, so
      `type empty` is the honest type here.";
 
+  revision 2026-07-29 {
+    description
+      "Add the `bfd` leaf — gates the OSPF↔BFD interaction traces
+       (RFC 5882 session state changes that drive neighbor teardown),
+       which previously logged unconditionally. Mirrors the IS-IS
+       tracing block's `bfd` category. Covered by the `all` master
+       switch.";
+  }
+
   revision 2026-06-05 {
     description
       "Initial revision — shared OSPFv2 / OSPFv3 tracing block (an `all`
@@ -209,6 +218,14 @@ module zebra-ospf-tracing {
         type empty;
         description
           "Log LSA origination, installation, and flooding decisions.";
+      }
+
+      leaf bfd {
+        ext:help "Trace BFD interaction (RFC 5882)";
+        type empty;
+        description
+          "Log OSPF's interaction with BFD — session state changes
+           that drive RFC 5882 neighbor teardown.";
       }
     }
   }
