@@ -23,7 +23,7 @@ use netlink_packet_route::route::{
 use netlink_packet_route::{AddressFamily, RouteNetlinkMessage};
 use netlink_sys::{AsyncSocket, SocketAddr};
 use rtnetlink::{
-    LinkDummy, LinkVrf,
+    LinkDummy, LinkVlan, LinkVrf,
     constants::{
         RTMGRP_IPV4_IFADDR, RTMGRP_IPV4_ROUTE, RTMGRP_IPV6_IFADDR, RTMGRP_IPV6_ROUTE, RTMGRP_LINK,
         RTMGRP_NEIGH,
@@ -2920,6 +2920,45 @@ impl FibHandle {
         };
         if let Err(e) = self.handle.clone().link().del(ifindex).execute().await {
             tracing::warn!("dummy_del({}) error: {}", name, e);
+        }
+    }
+
+    /// Create an 802.1Q VLAN sub-interface `name` on the parent link
+    /// `parent`, brought up at creation. Mirrors
+    /// `ip link add link <parent> name <name> type vlan id <vlan_id>`
+    /// followed by `ip link set <name> up`. Returns the ifindex the
+    /// kernel assigned, or None if creation failed (name collision,
+    /// duplicate vid on the same parent, etc.).
+    pub async fn vlan_add(&self, name: &str, parent: u32, vlan_id: u16) -> Option<u32> {
+        let result = self
+            .handle
+            .clone()
+            .link()
+            .add(LinkVlan::new(name, parent, vlan_id).up().build())
+            .execute()
+            .await;
+        if let Err(e) = result {
+            tracing::warn!(
+                "vlan_add({}, parent={}, id={}) error: {}",
+                name,
+                parent,
+                vlan_id,
+                e
+            );
+            return None;
+        }
+        self.link_index_by_name(name).await
+    }
+
+    /// Delete a VLAN sub-interface by name. Idempotent — missing names
+    /// log at info but don't propagate.
+    pub async fn vlan_del(&self, name: &str) {
+        let Some(ifindex) = self.link_index_by_name(name).await else {
+            tracing::info!("vlan_del({}) skipped — not present", name);
+            return;
+        };
+        if let Err(e) = self.handle.clone().link().del(ifindex).execute().await {
+            tracing::warn!("vlan_del({}) error: {}", name, e);
         }
     }
 

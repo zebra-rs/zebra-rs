@@ -67,6 +67,9 @@ pub mod tracing;
 pub mod bridge;
 pub use bridge::*;
 
+pub mod vlan;
+pub use vlan::*;
+
 pub mod vxlan;
 pub use vxlan::*;
 

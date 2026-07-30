@@ -15,7 +15,7 @@ use crate::fib::sysctl::{sysctl_keep_addr_on_down, sysctl_mpls_enable, sysctl_se
 use super::entry::RibEntry;
 use super::tracing::rib_interface;
 use super::util::IpNetExt;
-use super::{LinkFlagsExt, MacAddr, Message, Rib, RibType};
+use super::{LinkFlagsExt, MacAddr, Message, Rib, RibType, Vlan};
 
 mod linkflags_serde {
     use super::*;
@@ -969,6 +969,65 @@ impl Rib {
                 bridge,
             });
         }
+
+        // Replay configured VLAN sub-interfaces waiting on this link as
+        // their parent. Covers either order: config-before-parent, and
+        // a parent re-created after deletion (the kernel cascades VLAN
+        // children away with a deleted parent, so on its return they
+        // must be made again). This replay is also the normal path for
+        // a same-commit `bridge br0` + `vlan br0.50 interface br0`:
+        // when `VlanAdd` is processed the bridge's netlink create has
+        // not echoed back into `self.links` yet, so `vlan_apply`
+        // defers, and this hook fires on the echo. `vlan_apply` no-ops
+        // when the device already exists with the right parent and id.
+        let waiting_vlans: Vec<Vlan> = self
+            .vlans
+            .values()
+            .filter(|v| v.parent == ifname)
+            .cloned()
+            .collect();
+        for vlan in waiting_vlans {
+            self.vlan_apply(&vlan).await;
+        }
+    }
+
+    /// Create the kernel device for a configured VLAN sub-interface.
+    /// No-op while the parent link is absent — `link_add` replays this
+    /// when the parent appears. A pre-existing device of the same name
+    /// is adopted when its parent and VLAN id match the config; a
+    /// mismatched VLAN device is deleted and re-created, because the
+    /// kernel refuses to change either property on a live link. A
+    /// same-named link that is NOT a VLAN device (an operator naming
+    /// collision with a physical or other logical interface) is left
+    /// untouched — deleting it would destroy an interface we don't own.
+    pub async fn vlan_apply(&self, vlan: &Vlan) {
+        if let Some(existing) = self.link_by_name(&vlan.name) {
+            if existing.vlan_id.is_none() {
+                tracing::warn!(
+                    "vlan {}: a non-VLAN kernel link with this name exists (ifindex {}); not touching it",
+                    vlan.name,
+                    existing.index
+                );
+                return;
+            }
+            let parent_matches = self
+                .link_by_name(&vlan.parent)
+                .map(|p| existing.parent == Some(p.index))
+                .unwrap_or(false);
+            if existing.vlan_id == Some(vlan.vlan_id) && parent_matches {
+                // Adopt: left over from a previous run, or pre-created
+                // by the operator with matching properties.
+                return;
+            }
+            self.fib_handle.vlan_del(&vlan.name).await;
+        }
+        let Some(parent) = self.link_by_name(&vlan.parent) else {
+            // Pending: the parent is not in the kernel yet.
+            return;
+        };
+        self.fib_handle
+            .vlan_add(&vlan.name, parent.index, vlan.vlan_id)
+            .await;
     }
 
     pub async fn link_delete(&mut self, oslink: FibLink) {

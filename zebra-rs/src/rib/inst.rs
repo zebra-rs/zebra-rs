@@ -6,8 +6,8 @@ use super::{
     Block, BlockBuilder, BlockConfig, BridgeBuilder, BridgeConfig, DEFAULT_BLOCK_NAME, GroupTrait,
     Link, Locator, LocatorBuilder, LocatorConfig, MacAddr, MplsConfig, Nexthop, NexthopMap,
     NexthopUni, ReplSegBuilder, ReplSegConfig, RibSrRx, RibType, Sid, SidBehavior, SidContext,
-    SidOwner, StaticConfig, V4, V6, Vrf, VrfBuilder, VrfIdAllocator, VrfRibTables, VrfStaticConfig,
-    Vxlan, VxlanBuilder, VxlanConfig,
+    SidOwner, StaticConfig, V4, V6, Vlan, VlanBuilder, VlanConfig, Vrf, VrfBuilder, VrfIdAllocator,
+    VrfRibTables, VrfStaticConfig, Vxlan, VxlanBuilder, VxlanConfig,
 };
 
 use crate::config::{Args, path_from_command};
@@ -117,6 +117,13 @@ pub enum Message {
         config: BridgeConfig,
     },
     BridgeDel {
+        name: String,
+    },
+    VlanAdd {
+        name: String,
+        config: VlanConfig,
+    },
+    VlanDel {
         name: String,
     },
     BlockAdd {
@@ -1007,6 +1014,13 @@ pub struct Rib {
     pub table_routes_v4: BTreeMap<u32, BTreeMap<Ipv4Net, super::RouteEntryV4>>,
     pub links: BTreeMap<u32, Link>,
     pub bridges: BTreeMap<String, Bridge>,
+    /// Desired state for config-created 802.1Q VLAN sub-interfaces,
+    /// keyed by device name. Populated by `Message::VlanAdd`, removed
+    /// by `Message::VlanDel`. Durable across parent-link absence:
+    /// `link_add` replays creation via `vlan_apply` when a parent
+    /// (re)appears — the kernel cascades VLAN children away with a
+    /// deleted parent, so on its return they must be made again.
+    pub vlans: BTreeMap<String, Vlan>,
     pub vxlan: BTreeMap<String, Vxlan>,
     /// Applied VRFs, keyed by name. Populated when `Message::VrfAdd`
     /// is handled (allocator hands out a fresh table id, netlink
@@ -1076,6 +1090,7 @@ pub struct Rib {
     pub mpls_config: MplsConfig,
     pub link_config: LinkConfig,
     pub bridge_config: BridgeBuilder,
+    pub vlan_config: VlanBuilder,
     pub vxlan_config: VxlanBuilder,
     pub vrf_config: VrfBuilder,
     pub block_config: BlockBuilder,
@@ -1220,6 +1235,7 @@ impl Rib {
             table_routes_v4: BTreeMap::new(),
             links: BTreeMap::new(),
             bridges: BTreeMap::new(),
+            vlans: BTreeMap::new(),
             vxlan: BTreeMap::new(),
             vrfs: BTreeMap::new(),
             vrf_tables: BTreeMap::new(),
@@ -1243,6 +1259,7 @@ impl Rib {
             mpls_config: MplsConfig::new(),
             link_config: LinkConfig::new(),
             bridge_config: BridgeBuilder::new(),
+            vlan_config: VlanBuilder::new(),
             vxlan_config: VxlanBuilder::new(),
             vrf_config: VrfBuilder::new(),
             block_config: BlockBuilder::new(),
@@ -2956,6 +2973,29 @@ impl Rib {
                 self.bridges.remove(&name);
                 self.fib_handle.bridge_del(&bridge).await;
             }
+            Message::VlanAdd { name, config } => {
+                // Both leaves are mandatory in YANG; guard anyway so a
+                // partial entry can never reach the kernel path.
+                let (Some(parent), Some(vlan_id)) = (config.interface.clone(), config.vlan_id)
+                else {
+                    tracing::warn!(
+                        "vlan {}: incomplete config (interface / vlan-id missing), not applied",
+                        name
+                    );
+                    return;
+                };
+                let vlan = Vlan {
+                    name: name.clone(),
+                    parent,
+                    vlan_id,
+                };
+                self.vlans.insert(name.clone(), vlan.clone());
+                self.vlan_apply(&vlan).await;
+            }
+            Message::VlanDel { name } => {
+                self.vlans.remove(&name);
+                self.fib_handle.vlan_del(&name).await;
+            }
             Message::VxlanAdd { name, config } => {
                 let vxlan = Vxlan {
                     name: name.clone(),
@@ -4548,6 +4588,8 @@ impl Rib {
                     }
                 } else if path.as_str().starts_with("/vxlan") {
                     let _ = self.vxlan_config.exec(path, args, msg.op);
+                } else if path.as_str().starts_with("/vlan") {
+                    let _ = self.vlan_config.exec(path, args, msg.op);
                 } else if path.as_str().starts_with("/vrf") {
                     let _ = self.vrf_config.exec(path, args, msg.op);
                 } else if path.as_str().starts_with("/segment-routing/block") {
@@ -4565,6 +4607,7 @@ impl Rib {
             }
             ConfigOp::CommitEnd => {
                 self.bridge_config.commit(self.tx.clone());
+                self.vlan_config.commit(self.tx.clone());
                 self.vxlan_config.commit(self.tx.clone());
                 self.vrf_config.commit(self.tx.clone());
                 self.link_config.commit(self.tx.clone());

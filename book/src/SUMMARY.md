@@ -11,6 +11,7 @@
 - [Interface Configuration](ch-00-02-interface-configuration.md)
 - [VXLAN Configuration](ch-00-03-vxlan-configuration.md)
 - [Bridge Configuration](ch-00-04-bridge-configuration.md)
+- [VLAN Sub-interface Configuration](ch-00-08-vlan-configuration.md)
 
 ## Static Route
 
