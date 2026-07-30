@@ -143,6 +143,22 @@ Route Distinguisher: 192.168.0.2:10
 (The MAC addresses are the hosts' and bridges' randomly generated ones and
 differ per run.)
 
+`show evpn vni all` condenses the same state into a per-VNI inventory —
+the auto-derived RD and route-target, the MAC counts (local from the
+kernel FDB, remote from Type-2 routes), and the remote VTEPs learned from
+Type-3 IMET. The `*` flag marks a VNI backed by a kernel VXLAN device:
+
+``` shell
+vtep1>show evpn vni all
+Advertise All VNI flag: Enabled
+BUM flooding: Head-end replication
+Number of L2 VNIs: 1
+Number of L3 VNIs: 0
+Flags: * - Kernel VXLAN device
+  VNI        Type Local VTEP                RD                     Import/Export RT  #MACs(loc)  #MACs(rem) #Remote VTEPs  Tenant VRF
+* 10         L2   192.168.0.1               192.168.0.1:10         65001:10                   2           2             1  default
+```
+
 ## How the routes land in the kernel
 
 The vty shell is a full shell, so the standard `bridge` tooling works
