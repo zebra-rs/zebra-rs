@@ -7530,6 +7530,8 @@ mod neighbor_group_wiring_tests {
             vrf_table: None,
             bridge: false,
             vxlan_local: None,
+            parent: None,
+            vlan_id: None,
             mtu_error: None,
         };
         bgp.process_rib_msg(crate::rib::api::RibRx::LinkAdd(link));
@@ -9042,6 +9044,8 @@ mod es_linkadd_resync_tests {
             vrf_table: None,
             bridge: false,
             vxlan_local: None,
+            parent: None,
+            vlan_id: None,
             mtu_error: None,
         };
         bgp.process_rib_msg(crate::rib::api::RibRx::LinkAdd(link));

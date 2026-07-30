@@ -70,6 +70,16 @@ pub struct Link {
     /// bridge ⇒ L2 port in the bridge's flood domain, VRF ⇒ routed port.
     #[serde(skip)]
     pub bridge: bool,
+    /// Lower-device ifindex from `IFLA_LINK` on stacked devices — for
+    /// an 802.1Q sub-interface, the interface the VLAN rides on. None
+    /// for top-level links. Not the same as `master` (enslavement).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub parent: Option<u32>,
+    /// 802.1Q VLAN id from `IFLA_VLAN_ID` on VLAN sub-interfaces.
+    /// Presence is what classifies the link as a VLAN device — the
+    /// name is never parsed; `eth0.100` is only a convention.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub vlan_id: Option<u16>,
     /// Last failure reason from applying the operator-configured MTU
     /// (`mtu_config` keyed by name on `Rib`). `None` once a set
     /// succeeds. Rendered by `show interface` so a kernel rejection
@@ -99,6 +109,8 @@ impl Link {
             vxlan_local: link.vxlan_local,
             vrf_table: link.vrf_table,
             bridge: link.bridge,
+            parent: link.parent,
+            vlan_id: link.vlan_id,
             mtu_error: None,
         }
     }
@@ -185,6 +197,17 @@ fn link_info_show(rib: &Rib, link: &Link, buf: &mut String, cb: &impl Fn(&String
     if let Some(err) = &link.mtu_error {
         writeln!(buf, "  {}", err).unwrap();
     }
+    if let Some(vid) = link.vlan_id {
+        write!(buf, "  VLAN id {}", vid).unwrap();
+        if let Some(parent) = link.parent {
+            match rib.links.get(&parent) {
+                Some(p) => writeln!(buf, " parent {} (index {})", p.name, parent).unwrap(),
+                None => writeln!(buf, " parent index {}", parent).unwrap(),
+            }
+        } else {
+            writeln!(buf).unwrap();
+        }
+    }
     write!(
         buf,
         "  Link is {}",
@@ -235,6 +258,12 @@ pub struct InterfaceDetailed {
     pub mtu_error: Option<String>,
     pub link_status: String,
     pub flags: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub vlan_id: Option<u16>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub parent: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub parent_index: Option<u32>,
     pub vrf_binding: String,
     pub label_switching: String,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -366,6 +395,12 @@ fn link_to_detailed_json(rib: &Rib, link: &Link) -> InterfaceDetailed {
             "Down".to_string()
         },
         flags: format!("{}", link.flags),
+        vlan_id: link.vlan_id,
+        parent: link
+            .parent
+            .and_then(|p| rib.links.get(&p))
+            .map(|p| p.name.clone()),
+        parent_index: link.parent,
         vrf_binding: link_vrf_name(rib, link)
             .map(|n| format!("vrf {}", n))
             .unwrap_or_else(|| "Not bound".to_string()),
@@ -597,6 +632,18 @@ impl Rib {
             // FDB resolution gets the right bridge.
             link.master = fib_link.master;
             link.vni = fib_link.vni;
+            // Parent ifindex / VLAN id: adopt-if-present, never clear.
+            // A partial RTM_NEWLINK (e.g. the enslave notification, see
+            // the VXLAN refill comment above) omits `IFLA_LINKINFO`
+            // entirely, and the kernel never changes either value on a
+            // live link, so a missing attribute means "unchanged", not
+            // "gone".
+            if fib_link.parent.is_some() {
+                link.parent = fib_link.parent;
+            }
+            if fib_link.vlan_id.is_some() {
+                link.vlan_id = fib_link.vlan_id;
+            }
             // Adopt the kernel's current MTU (it may have changed since
             // we last saw this link — our own `link_set_mtu` echoes back
             // here, as does an external `ip link set`). The fan-out to
@@ -1448,6 +1495,8 @@ mod tests {
             vrf_table: None,
             bridge: false,
             vxlan_local: None,
+            parent: None,
+            vlan_id: None,
             mtu_error: None,
         }
     }
@@ -1623,6 +1672,8 @@ mod l2_port_evi_tests {
             vxlan_local: None,
             vrf_table: None,
             bridge: master.is_none(),
+            parent: None,
+            vlan_id: None,
             mtu_error: None,
         }
     }

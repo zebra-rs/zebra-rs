@@ -56,6 +56,15 @@ pub struct FibLink {
     /// bridge ⇒ L2 port in the bridge's flood domain, VRF ⇒ routed port
     /// in that table.
     pub bridge: bool,
+    /// Lower-device ifindex from `IFLA_LINK` — set on stacked devices
+    /// such as 802.1Q VLAN sub-interfaces, where it is the interface
+    /// the VLAN rides on. None for top-level links.
+    pub parent: Option<u32>,
+    /// 802.1Q VLAN id from `IFLA_VLAN_ID`
+    /// (`LinkInfo::Data(InfoData::Vlan(InfoVlan::Id(_)))`). Presence is
+    /// what marks the link as a VLAN sub-interface — the name is never
+    /// parsed; `eth0.100` is only a convention.
+    pub vlan_id: Option<u16>,
 }
 
 impl FibLink {

@@ -659,6 +659,8 @@ mod tests {
             vrf_table: None,
             bridge: false,
             vxlan_local: None,
+            parent: None,
+            vlan_id: None,
             mtu_error: None,
         }
     }
