@@ -712,6 +712,15 @@ impl ConfigManager {
             if op == ConfigOp::Set && line.starts_with("logging output") {
                 self.handle_logging_config(&line);
             }
+            // The config subsystem's own trace toggles are applied here,
+            // synchronously, not in a subscriber task: `load_config`
+            // consults them the moment this commit returns, so a channel
+            // dispatch would race the very startup summary they gate.
+            // The RIB / FIB categories still travel the normal subscriber
+            // path; this dispatch ignores their lines.
+            if line.starts_with("system tracing") {
+                super::tracing::config_dispatch(&line, op);
+            }
         }
         for line in diff.lines() {
             if !line.is_empty() {
@@ -849,8 +858,12 @@ impl ConfigManager {
         // file, a shadowed path (`~/.zebra-rs/zebra-rs.conf` wins over
         // /etc when both exist), and per-command rejections were all
         // swallowed, so a daemon that came up unconfigured gave the
-        // operator nothing to go on. Log every outcome — including
-        // success — with the resolved path.
+        // operator nothing to go on. Log every failure outcome, with the
+        // resolved path. The success summary is deferred to the bottom of
+        // the function and gated on `system tracing config startup`: the
+        // commit below is what applies that toggle, so logging any earlier
+        // would miss a toggle carried in this very file.
+        let mut summary = None;
         match std::fs::read_to_string(&self.config_path) {
             // An empty (or comment/whitespace-only) config file carries no
             // commands. Skip the format parsers entirely so the YAML
@@ -859,6 +872,10 @@ impl ConfigManager {
             // path keeps its existing empty-document behavior — an empty
             // apply must not clear+commit the running config.)
             Ok(output) if output.trim().is_empty() => {
+                // Unconditional, unlike the applied summary: the trace
+                // toggle rides in the config file, so a boot that lands
+                // here (or in the missing-file arm below) had nothing
+                // that could have enabled it.
                 tracing::info!(
                     "startup config {} is empty; starting unconfigured",
                     self.config_path.display()
@@ -890,13 +907,7 @@ impl ConfigManager {
                             render_rejected_commands(&self.config_path, &rejected)
                         );
                     }
-                    tracing::info!(
-                        "startup config {} ({:?} format): applied {} of {} commands",
-                        self.config_path.display(),
-                        format,
-                        cmds.len() - rejected.len(),
-                        cmds.len()
-                    );
+                    summary = Some((format, cmds.len() - rejected.len(), cmds.len()));
                 }
                 Err(doc_errors) => {
                     tracing::error!("{}", render_config_errors(&self.config_path, &doc_errors));
@@ -929,6 +940,19 @@ impl ConfigManager {
                 "startup config {} rejected by schema validation: {}",
                 self.config_path.display(),
                 e
+            );
+        }
+        // Gated after the commit so `system tracing config startup` set in
+        // this very startup file counts (commit_config applied it above).
+        if let Some((format, applied, total)) = summary
+            && super::tracing::startup()
+        {
+            tracing::info!(
+                "startup config {} ({:?} format): applied {} of {} commands",
+                self.config_path.display(),
+                format,
+                applied,
+                total
             );
         }
     }
@@ -1384,8 +1408,9 @@ impl ConfigManager {
             };
 
             // Note: Due to tracing-subscriber limitations, we can't reinitialize at runtime
-            // This would require a restart to take effect
-            tracing::info!(
+            // This would require a restart to take effect — warn, so the
+            // operator learns their committed change is not yet live.
+            tracing::warn!(
                 "Logging output configuration change detected: {} (restart required)",
                 output_type
             );
@@ -4200,6 +4225,39 @@ mod yang_load_tests {
             code,
             ExecCode::Success,
             "`set bfd tracing true` must be a valid settable path",
+        );
+    }
+
+    /// `system tracing config startup` gates the startup-config apply
+    /// summary. The toggle is dispatched line-based from
+    /// `commit_config` (not via a subscriber), so a YANG misplacement
+    /// would silently strand the dispatch — assert the path parses.
+    #[test]
+    fn system_tracing_config_startup_is_settable() {
+        use crate::config::ExecCode;
+        use crate::config::parse::{State, parse};
+        use libyang::to_entry;
+
+        let mut yang = YangStore::new();
+        yang.add_path(concat!(env!("CARGO_MANIFEST_DIR"), "/yang"));
+        yang.read_with_resolve("configure")
+            .expect("configure mode loads");
+        yang.identity_resolve();
+        let module = yang
+            .find_module("configure")
+            .expect("configure module present");
+        let entry = to_entry(&yang, module);
+
+        let (code, _comps, _state) = parse(
+            "set system tracing config startup",
+            entry,
+            None,
+            State::new(),
+        );
+        assert_eq!(
+            code,
+            ExecCode::Success,
+            "`set system tracing config startup` must be a valid settable path",
         );
     }
 
