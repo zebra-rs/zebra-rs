@@ -13,8 +13,6 @@ use std::time::{Duration, Instant};
 #[cfg(target_os = "linux")]
 use dashmap::DashMap;
 
-use super::serve::VTY_TRACING;
-
 /// Default idle TTL for VTY sessions. Mirrors the typical Cisco IOS
 /// `exec-timeout 10 0` default.
 #[cfg(target_os = "linux")]
@@ -517,7 +515,7 @@ pub async fn watch_bash_death(table: Arc<SessionTable>, key: SessionKey, bash_pi
     match async_fd.readable().await {
         Ok(_guard) => {
             if table.remove(&key) {
-                if VTY_TRACING {
+                if super::tracing::vty() {
                     tracing::info!(uid = key.0, bash_pid, "vty session removed (bash exited)");
                 }
             } else {
@@ -550,7 +548,7 @@ where
         ticker.tick().await;
         let stats = table.gc_once(&reader, idle_ttl);
         if stats.removed_idle > 0 || stats.removed_gone > 0 {
-            if VTY_TRACING {
+            if super::tracing::vty() {
                 tracing::info!(
                     removed_idle = stats.removed_idle,
                     removed_gone = stats.removed_gone,

@@ -29,8 +29,6 @@ use super::vty::{
     LogoutRequest, ShowReply, ShowRequest, YangMatch,
 };
 
-pub(super) const VTY_TRACING: bool = false;
-
 #[derive(Debug)]
 struct ExecService {
     pub tx: mpsc::Sender<Message>,
@@ -220,7 +218,7 @@ impl Exec for ExecService {
     ) -> Result<Response<LogoutReply>, tonic::Status> {
         if let Some(ctx) = request.extensions().get::<SessionContext>() {
             let removed = self.sessions.remove(&ctx.key);
-            if VTY_TRACING {
+            if super::tracing::vty() {
                 tracing::info!(uid = ctx.key.0, bash_pid = ctx.key.1, removed, "vty logout",);
             }
         }
@@ -240,7 +238,7 @@ impl Exec for ExecService {
 
         // Root (D20) is already Admin from session creation.
         if uid == 0 {
-            if VTY_TRACING {
+            if super::tracing::vty() {
                 tracing::info!(uid, "enable noop (root permanent admin)");
             }
             return Ok(Response::new(EnableReply {
@@ -258,7 +256,7 @@ impl Exec for ExecService {
             if !promoted {
                 return Err(tonic::Status::unauthenticated("session vanished"));
             }
-            if VTY_TRACING {
+            if super::tracing::vty() {
                 tracing::info!(uid, "enable success (config group)");
             }
             return Ok(Response::new(EnableReply {
@@ -302,7 +300,7 @@ impl Exec for ExecService {
                 if !promoted {
                     return Err(tonic::Status::unauthenticated("session vanished"));
                 }
-                if VTY_TRACING {
+                if super::tracing::vty() {
                     tracing::info!(uid, auth_user = %target_user, "enable success");
                 }
                 Ok(Response::new(EnableReply {
@@ -338,7 +336,7 @@ impl Exec for ExecService {
     ) -> Result<Response<DisableReply>, tonic::Status> {
         if let Some(ctx) = request.extensions().get::<SessionContext>() {
             let cleared = self.sessions.disable(&ctx.key);
-            if VTY_TRACING {
+            if super::tracing::vty() {
                 tracing::info!(
                     uid = ctx.key.0,
                     bash_pid = ctx.key.1,
@@ -673,7 +671,7 @@ impl tonic::service::Interceptor for VtyPeerInterceptor {
                         key: (skey_uid, bash_pid),
                     });
                     if is_new {
-                        if VTY_TRACING {
+                        if super::tracing::vty() {
                             tracing::info!(
                                 uid = skey_uid,
                                 gid,
@@ -686,7 +684,7 @@ impl tonic::service::Interceptor for VtyPeerInterceptor {
                         tokio::spawn(async move {
                             watch_bash_death(table, (skey_uid, bash_pid), bash_pid).await;
                         });
-                    } else if VTY_TRACING {
+                    } else if super::tracing::vty() {
                         tracing::info!(uid = skey_uid, gid, pid, bash_pid, "vty rpc");
                     }
                 }
@@ -722,8 +720,12 @@ impl tonic::service::Interceptor for VtyPeerInterceptor {
 
 pub fn serve(cli: Cli, addr: VtyAddr) -> anyhow::Result<()> {
     let config_group_gid = SessionTable::resolve_config_group_gid();
-    if VTY_TRACING && let Some(gid) = config_group_gid {
-        tracing::info!(gid, "VTY configure-authorization group active");
+    // The one-shot setup notices in this function run before the startup
+    // config is loaded (`serve()` precedes `event_loop`), so no runtime
+    // toggle could be live yet — they log at debug level instead of
+    // consulting `system tracing config vty` like the per-session sites.
+    if let Some(gid) = config_group_gid {
+        tracing::debug!(gid, "VTY configure-authorization group active");
     } else {
         tracing::debug!("VTY configure-authorization group not found; PAM-only fallback");
     }
@@ -746,8 +748,8 @@ pub fn serve(cli: Cli, addr: VtyAddr) -> anyhow::Result<()> {
     };
 
     let interceptor = VtyPeerInterceptor::from_env(sessions.clone());
-    if VTY_TRACING && let Some(set) = &interceptor.allow_uids {
-        tracing::info!(uids = ?set, "VTY peer UID allow-list active (log-only)");
+    if let Some(set) = &interceptor.allow_uids {
+        tracing::debug!(uids = ?set, "VTY peer UID allow-list active (log-only)");
     }
 
     {
@@ -761,13 +763,11 @@ pub fn serve(cli: Cli, addr: VtyAddr) -> anyhow::Result<()> {
             )
             .await
         });
-        if VTY_TRACING {
-            tracing::info!(
-                interval_secs = DEFAULT_GC_INTERVAL.as_secs(),
-                idle_ttl_secs = DEFAULT_IDLE_TTL.as_secs(),
-                "VTY session GC sweep started",
-            );
-        }
+        tracing::debug!(
+            interval_secs = DEFAULT_GC_INTERVAL.as_secs(),
+            idle_ttl_secs = DEFAULT_IDLE_TTL.as_secs(),
+            "VTY session GC sweep started",
+        );
     }
 
     let builder = Server::builder()
@@ -787,16 +787,12 @@ pub fn serve(cli: Cli, addr: VtyAddr) -> anyhow::Result<()> {
 
     match addr {
         VtyAddr::Tcp(addr) => {
-            if VTY_TRACING {
-                tracing::info!("VTY gRPC listening on tcp://{addr}");
-            }
+            tracing::debug!("VTY gRPC listening on tcp://{addr}");
             tokio::spawn(async move { builder.serve(addr).await });
         }
         VtyAddr::AbstractUds(name) => {
             let incoming = bind_abstract_uds(&name)?;
-            if VTY_TRACING {
-                tracing::info!("VTY gRPC listening on abstract UDS @{name}");
-            }
+            tracing::debug!("VTY gRPC listening on abstract UDS @{name}");
             tokio::spawn(async move { builder.serve_with_incoming(incoming).await });
         }
     }
