@@ -19,7 +19,7 @@ interface enp0s6 {
 | `/interface/<name>/mtu` | `uint32` (68..65535) | Maximum transmission unit in bytes. See below. |
 | `/interface/<name>/vrf` | leafref `/vrf/name` | Enslave the interface to a VRF master device. |
 | `/interface/<name>/bridge` | leafref `/bridge/name` | Enslave the interface to a bridge master device. See below. |
-| `/interface/<name>/ipv4/address` | `inet:ipv4-prefix` | IPv4 address (with prefix length). |
+| `/interface/<name>/ipv4/address` | leaf-list of `inet:ipv4-prefix` | IPv4 address(es) with prefix length — repeatable. See [Multiple IPv4 Addresses](ch-00-09-multi-address.md). |
 | `/interface/<name>/ipv6/address` | `inet:ipv6-prefix` | IPv6 address (with prefix length). |
 
 The list entry itself is not a separate "create interface" operation —

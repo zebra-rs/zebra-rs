@@ -16,6 +16,8 @@ To avoid confusion among operators who are familiar with existing router impleme
 2. If not, then if one or more physical interfaces have an IP address configured, the highest among them is selected regardless of the interface's state.
 3. Otherwise, the router-id remains unset.
 
+[Kernel-secondary addresses](ch-00-09-multi-address.md) — same-subnet duplicates of an interface's primary — are never candidates in either step: the kernel will not source packets from them unless explicitly bound, so a router-id derived from one would not match the router's identity on the wire.
+
 Interfaces that are enslaved to a VRF are excluded from this default-instance selection — their addresses participate in the per-VRF selection instead (see below). Interfaces enslaved to a bridge remain candidates, since a bridge master does not move its ports out of the default routing table.
 
 Once a router-id has been selected it is *sticky*: if the address it was derived from later disappears and no other candidate exists, the previously selected value is retained rather than reverting to unset. This avoids churning every protocol session over a transient address removal.

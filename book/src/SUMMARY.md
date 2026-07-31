@@ -9,6 +9,7 @@
 
 - [Router ID Selection](ch-00-01-router-id.md)
 - [Interface Configuration](ch-00-02-interface-configuration.md)
+- [Multiple IPv4 Addresses and the Secondary Flag](ch-00-09-multi-address.md)
 - [VXLAN Configuration](ch-00-03-vxlan-configuration.md)
 - [Bridge Configuration](ch-00-04-bridge-configuration.md)
 - [VLAN Sub-interface Configuration](ch-00-08-vlan-configuration.md)
