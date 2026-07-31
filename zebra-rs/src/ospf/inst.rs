@@ -2005,7 +2005,16 @@ impl Ospf<Ospfv2> {
                 if addr.secondary {
                     continue;
                 }
-                let lsa_link = if use_transit {
+                // Only the address on the DR's network sits on the
+                // transit network — the Hello protocol (and thus the
+                // election) runs on the primary's subnet. An
+                // additional address from another subnet is a Stub
+                // link (the Cisco secondary-subnet model): making it
+                // Transit would point a second transit edge at a DR
+                // that is not on that network, and drop the subnet's
+                // reachability from SPF entirely.
+                let on_transit_net = addr.prefix.trunc().contains(&link.ident.d_router);
+                let lsa_link = if use_transit && on_transit_net {
                     RouterLsaLink {
                         // Transit link points to DR interface address.
                         link_id: link.ident.d_router,
@@ -5524,6 +5533,7 @@ impl Ospf<Ospfv2> {
                 packet,
                 nbr.ifindex,
                 Some(nbr.ident.prefix.addr()),
+                None,
             ));
         }
     }
@@ -5634,6 +5644,7 @@ impl Ospf<Ospfv2> {
                     packet,
                     nbr.ifindex,
                     Some(nbr.ident.prefix.addr()),
+                    None,
                 ));
             }
         }
@@ -5700,6 +5711,7 @@ impl Ospf<Ospfv2> {
             packet,
             nbr.ifindex,
             Some(nbr.ident.prefix.addr()),
+            None,
         ));
         // Restart retransmit timer.
         nbr.timer.ls_rxmt = Some(super::flood::ospf_retransmit_timer(
@@ -5744,6 +5756,7 @@ impl Ospf<Ospfv2> {
             packet,
             nbr.ifindex,
             Some(nbr.ident.prefix.addr()),
+            None,
         ));
     }
 
@@ -5792,9 +5805,11 @@ impl Ospf<Ospfv2> {
             Ospfv2Packet::new(&self.router_id, &link.area, Ospfv2Payload::LsAck(ls_ack));
         apply_link_auth(&mut packet, &link.auth_send_ctx(chains, now));
         // AllSPFRouters multicast on physical interfaces; unicast to
-        // the far ABR on a virtual link.
+        // the far ABR on a virtual link. Multicast pins the source to
+        // the interface identity (see `Message::Send`).
         let dest = link.vl.as_ref().map(|vl| vl.peer_addr);
-        let _ = link.ptx.send(Message::Send(packet, ifindex, dest));
+        let src = dest.is_none().then(|| link.ident.prefix.addr());
+        let _ = link.ptx.send(Message::Send(packet, ifindex, dest, src));
     }
 
     /// Queue delayed ack headers and start delayed ack timer if needed.
@@ -5990,6 +6005,14 @@ impl Ospf<Ospfv2> {
         // without SR + a configured prefix-sid). Mirrors the v3
         // `addr_add` fix.
         self.ext_prefix_lsa_originate(addr.ifindex);
+
+        // The Router-LSA's stub links and transit Link Data are built
+        // from the address list / identity that just changed; without
+        // re-origination a new subnet (or a promoted primary) only
+        // reaches peers at the next unrelated refresh, and their SPF
+        // keeps resolving nexthops from the stale Link Data.
+        // MinLSInterval-throttled, so an address burst coalesces.
+        self.router_lsa_originate();
     }
 
     fn addr_del(&mut self, addr: LinkAddr) {
@@ -6018,6 +6041,10 @@ impl Ospf<Ospfv2> {
         // host prefix may have just gone away or a different
         // remaining address now wins.
         self.ext_prefix_lsa_originate(addr.ifindex);
+
+        // See `addr_add`: drop the removed subnet / stale Link Data
+        // from the Router-LSA immediately.
+        self.router_lsa_originate();
     }
 
     async fn process_recv(
@@ -11963,10 +11990,18 @@ pub enum Message<V: OspfVersion = Ospfv2> {
     /// src/dst/ifaddr per its raw IPv6 socket layer.
     Recv(V::Packet, V::Addr, V::Addr, u32, V::Addr),
     /// Packet to send. v2 carries
-    /// `(Ospfv2Packet, ifindex, Option<Ipv4Addr>)` — the optional
-    /// destination is the multicast group or unicast nbr address.
+    /// `(Ospfv2Packet, ifindex, Option<Ipv4Addr>, Option<Ipv4Addr>)`
+    /// — the first option is the destination (multicast group when
+    /// `None`, unicast nbr address otherwise), the second the source
+    /// to pin via `ipi_spec_dst`. Multicast sends MUST pin the
+    /// interface's OSPF identity: with `spec_dst = 0` the kernel
+    /// free-picks the device's first primary address, which on a
+    /// multi-subnet interface can be an address outside the OSPF
+    /// network — peers then key a phantom neighbor on the bogus
+    /// source. Unicast sends pass `None`; kernel source selection
+    /// follows the route to the destination and is subnet-correct.
     /// v3 uses `V::Addr = Ipv6Addr` accordingly.
-    Send(V::Packet, u32, Option<V::Addr>),
+    Send(V::Packet, u32, Option<V::Addr>, Option<V::Addr>),
     Lsdb(LsdbEvent, Option<Ipv4Addr>, OspfLsaKey),
     /// Flood LSA through area, excluding source neighbor.
     /// (area_id, lsa, source_ifindex, source_nbr_addr)

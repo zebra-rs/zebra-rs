@@ -380,6 +380,24 @@ pub fn ospf_hello_recv(
         return;
     }
 
+    // RFC 2328 §10.5: on broadcast/NBMA the source must lie on the
+    // interface's own network. A multi-address peer whose kernel
+    // sourced a Hello from one of its *other* subnets must not be
+    // keyed as a neighbor here — the entry can never complete an
+    // exchange (its unicast replies come from the on-link address)
+    // and wedges in ExStart. P2P adjacencies are address-agnostic
+    // (§10.5 checks the mask only there) and virtual links unicast
+    // through the transit area, so both skip the check.
+    if !oi.is_pointopoint() && oi.vl.is_none() && !addr.prefix.trunc().contains(src) {
+        ospf_pdu_trace!(
+            tracing,
+            "[Hello:Recv] dropping {}: source not on network {}",
+            src,
+            addr.prefix.trunc(),
+        );
+        return;
+    }
+
     // RFC 2328 §10.5 / RFC 3101 §2.5: the E-bit and N-bit in the
     // Hello Options MUST match our local area-type, else drop the
     // packet. An NSSA neighbor seen on a normal link (or vice
@@ -491,8 +509,12 @@ pub fn ospf_hello_send(
     let packet = ospf_hello_packet(oi, chains, now).unwrap();
     // Virtual links unicast their Hellos to the far ABR (RFC 2328
     // §15); physical interfaces multicast to AllSPFRouters (None).
+    // Multicast pins the source to the interface's OSPF identity —
+    // the kernel would otherwise free-pick across subnets on a
+    // multi-address interface.
     let dest = oi.vl.as_ref().map(|vl| vl.peer_addr);
-    if let Err(e) = oi.ptx.send(Message::Send(packet, oi.index, dest)) {
+    let src = dest.is_none().then(|| oi.ident.prefix.addr());
+    if let Err(e) = oi.ptx.send(Message::Send(packet, oi.index, dest, src)) {
         tracing::warn!("[Hello:Send] channel send failed: {}", e);
         return;
     }
@@ -571,6 +593,7 @@ pub fn ospf_db_desc_send(link: &mut OspfInterface, nbr: &mut Neighbor, oident: &
         packet,
         nbr.ifindex,
         Some(nbr.ident.prefix.addr()),
+        None,
     ));
 }
 
@@ -600,6 +623,7 @@ pub fn ospf_ls_req_send(link: &mut OspfInterface, nbr: &mut Neighbor, oident: &I
             packet,
             nbr.ifindex,
             Some(nbr.ident.prefix.addr()),
+            None,
         ))
         .unwrap();
 }
@@ -848,6 +872,7 @@ fn ospf_db_desc_resend(oi: &OspfInterface, nbr: &Neighbor) {
         packet,
         nbr.ifindex,
         Some(nbr.ident.prefix.addr()),
+        None,
     ));
 }
 
@@ -868,6 +893,7 @@ pub fn ospf_ls_upd_send(oi: &OspfInterface, nbr: &Neighbor, lsas: Vec<OspfLsa>) 
             packet,
             nbr.ifindex,
             Some(nbr.ident.prefix.addr()),
+            None,
         ))
         .unwrap();
 }
@@ -889,6 +915,7 @@ pub fn ospf_ls_ack_send(oi: &OspfInterface, nbr: &Neighbor, lsa_headers: Vec<Osp
             packet,
             nbr.ifindex,
             Some(nbr.ident.prefix.addr()),
+            None,
         ))
         .unwrap();
 }

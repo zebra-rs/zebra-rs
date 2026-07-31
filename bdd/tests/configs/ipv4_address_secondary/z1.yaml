@@ -1,0 +1,33 @@
+# z1: three addresses on the LAN veth — 10.0.1.1/24 (kernel primary,
+# first installed), 10.0.1.2/24 (same subnet+mask → kernel marks it
+# IFA_F_SECONDARY), 10.2.0.1/24 (distinct subnet → primary). No
+# `secondary` keyword exists in the config: the kernel computes the
+# flag and zebra-rs reads it back / mirrors it on config-driven
+# installs.
+#
+# OSPFv2 and IS-IS both run on the veth so one topology proves both
+# advertisement disciplines: OSPF Router-LSA links and IS-IS Extended
+# IP Reachability must count subnets, not addresses.
+interface:
+- if-name: vz1ns
+  ipv4:
+    address:
+    - 10.0.1.1/24
+    - 10.0.1.2/24
+    - 10.2.0.1/24
+router:
+  ospf:
+    router-id: 1.1.1.1
+    area:
+    - area-id: 0.0.0.0
+      interface:
+      - if-name: vz1ns
+        enabled: true
+  isis:
+    net: 49.0000.0000.0000.0001.00
+    is-type: level-2-only
+    hostname: z1
+    interface:
+    - if-name: vz1ns
+      ipv4:
+        enabled: true

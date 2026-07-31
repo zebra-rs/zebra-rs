@@ -108,7 +108,7 @@ pub async fn write_packet(sock: Arc<AsyncFd<Socket>>, mut rx: UnboundedReceiver<
     // Exits the loop when the event loop drops the sender on
     // instance teardown — mirrors `network_v6::write_packet_v6`.
     while let Some(msg) = rx.recv().await {
-        let Message::Send(packet, ifindex, dest) = msg else {
+        let Message::Send(packet, ifindex, dest, src) = msg else {
             continue;
         };
 
@@ -133,9 +133,13 @@ pub async fn write_packet(sock: Arc<AsyncFd<Socket>>, mut rx: UnboundedReceiver<
         } else {
             ifindex as i32
         };
+        // `ipi_spec_dst` pins the source address when the sender
+        // provided one (multicast Hellos/Acks — see `Message::Send`);
+        // 0 leaves selection to the kernel (unicast).
+        let spec_dst = src.map(|s| u32::from(s).to_be()).unwrap_or(0);
         let pktinfo = libc::in_pktinfo {
             ipi_ifindex: egress_ifindex,
-            ipi_spec_dst: libc::in_addr { s_addr: 0 },
+            ipi_spec_dst: libc::in_addr { s_addr: spec_dst },
             ipi_addr: libc::in_addr { s_addr: 0 },
         };
         let cmsg = [socket::ControlMessage::Ipv4PacketInfo(&pktinfo)];
