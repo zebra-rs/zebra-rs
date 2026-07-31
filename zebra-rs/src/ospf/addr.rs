@@ -35,6 +35,29 @@ where
     }
 }
 
+/// The interface's IPv6 link-local source address (RFC 5340 §A.1:
+/// every v3 control packet sources from it, and the Link-LSA
+/// advertises it).
+///
+/// Selection must be STABLE against address-list reordering — the
+/// list order is netlink delivery order, which a re-notify or a
+/// delete/re-add can permute — because every consumer must keep
+/// agreeing on one address: the Hello source, the pseudo-header
+/// checksum + `IPV6_PKTINFO` pin, the Link-LSA, and the BFD session
+/// local endpoint. Pick the numerically lowest link-local instead of
+/// the first in list order. Adding a lower link-local moves the
+/// source; peers absorb that via the same-Router-ID source refresh
+/// in `ospfv3_hello_recv`.
+pub fn stable_link_local(
+    addrs: &[OspfAddr<crate::ospf::version::Ospfv3>],
+) -> Option<std::net::Ipv6Addr> {
+    addrs
+        .iter()
+        .map(|a| a.prefix.addr())
+        .filter(|a| a.is_unicast_link_local())
+        .min()
+}
+
 /// First address passing `pred` that is not kernel-secondary, falling
 /// back to the first passing one at all. Selection sites (identity,
 /// Hello netmask, Network-LSA ls_id, BFD, SR host prefix) go through
@@ -179,6 +202,27 @@ mod tests {
                 secondary: false
             }
         ));
+    }
+
+    #[test]
+    fn stable_link_local_is_order_independent() {
+        let ll_low: ipnet::Ipv6Net = "fe80::1/64".parse().unwrap();
+        let ll_high: ipnet::Ipv6Net = "fe80::5054:ff:fe00:1/64".parse().unwrap();
+        let global: ipnet::Ipv6Net = "2001:db8::1/64".parse().unwrap();
+        let mk = |p: ipnet::Ipv6Net| OspfAddr::<Ospfv3> {
+            prefix: p,
+            secondary: false,
+        };
+
+        // Same set, both delivery orders → same pick (the lowest).
+        let fwd = vec![mk(global), mk(ll_low), mk(ll_high)];
+        let rev = vec![mk(ll_high), mk(ll_low), mk(global)];
+        assert_eq!(stable_link_local(&fwd), Some("fe80::1".parse().unwrap()));
+        assert_eq!(stable_link_local(&fwd), stable_link_local(&rev));
+
+        // No link-local → None; globals never qualify.
+        assert_eq!(stable_link_local(&[mk(global)]), None);
+        assert_eq!(stable_link_local(&[]), None);
     }
 
     #[test]
