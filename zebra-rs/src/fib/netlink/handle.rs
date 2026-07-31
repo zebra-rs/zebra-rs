@@ -743,15 +743,29 @@ impl FibHandle {
     pub async fn cradle_xconnect_add(
         &self,
         port: &str,
-        remote_sid: std::net::Ipv6Addr,
+        remote: crate::rib::XconnectRemote,
         local_sid: Option<std::net::Ipv6Addr>,
+        local_vni: Option<u32>,
         vid: u16,
         table: u32,
     ) {
         if let Some(cradle) = &self.cradle {
-            cradle
-                .xconnect_add(port, remote_sid, local_sid, vid, table)
-                .await;
+            match remote {
+                crate::rib::XconnectRemote::Srv6(remote_sid) => {
+                    cradle
+                        .xconnect_add(port, remote_sid, local_sid, vid, table)
+                        .await;
+                }
+                crate::rib::XconnectRemote::Vxlan { vtep, vni } => {
+                    // The cradle Xconnect RPC has no VXLAN flavor yet — the
+                    // control plane binds and shows `up`, the datapath tee
+                    // lands with the cradle-side E-Line/VXLAN support.
+                    tracing::info!(
+                        "fib: cradle xconnect {port} -> vtep {vtep} vni {vni} \
+                         (local vni {local_vni:?}): VXLAN tee not yet implemented"
+                    );
+                }
+            }
         }
     }
 
@@ -759,10 +773,16 @@ impl FibHandle {
         &self,
         port: &str,
         local_sid: Option<std::net::Ipv6Addr>,
+        local_vni: Option<u32>,
         vid: u16,
         table: u32,
     ) {
         if let Some(cradle) = &self.cradle {
+            if local_vni.is_some() {
+                // VXLAN-flavored binding: nothing was teed (see
+                // `cradle_xconnect_add`), so nothing to remove.
+                return;
+            }
             cradle.xconnect_del(port, local_sid, vid, table).await;
         }
     }

@@ -51,6 +51,7 @@
 /router/bgp/afi-safi/vpws/mtu	leaf
 /router/bgp/afi-safi/vpws/remote-service-id	leaf
 /router/bgp/afi-safi/vpws/vlan	leaf
+/router/bgp/afi-safi/vpws/vni	leaf
 /router/bgp/as-sets-withdraw	leaf
 /router/bgp/bfd	container
 /router/bgp/bfd/detect-offload	leaf

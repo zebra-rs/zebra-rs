@@ -4553,6 +4553,7 @@ mod yang_load_tests {
             "set router bgp afi-safi evpn vpws eline1 interface eth0",
             "set router bgp afi-safi evpn vpws eline1 mtu 1500",
             "set router bgp afi-safi evpn vpws eline1 vlan 30",
+            "set router bgp afi-safi evpn vpws eline1 vni 10100",
         ] {
             let (code, _comps, _state) = parse(path, entry.clone(), None, State::new());
             assert_eq!(code, ExecCode::Success, "`{path}` must be a settable path");

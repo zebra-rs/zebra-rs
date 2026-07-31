@@ -706,6 +706,11 @@ impl EvpnEncap {
         matches!(self, Self::Srv6)
     }
 
+    /// True when locally originated L2 routes carry a VXLAN VNI.
+    pub fn is_vxlan(&self) -> bool {
+        matches!(self, Self::Vxlan)
+    }
+
     /// True when locally originated L2 routes carry an MPLS service label.
     // Consumed by the Type-2/Type-3 originate path, which lands with the
     // label allocator; the config surface is separated out to keep the
@@ -4218,6 +4223,23 @@ impl Bgp {
                 for vrf in vxlan_vrfs {
                     self.retag_vrf_exports_v4(&vrf);
                     self.retag_vrf_exports_v6(&vrf);
+                }
+                // A VPWS service advertising this VNI resolved its Type-1
+                // nexthop before the device was observed — same race as the
+                // Type-2/Type-5 cases above: re-originate so the nexthop
+                // becomes the VTEP rather than the router-id.
+                if self.evpn_encap.is_vxlan() {
+                    let stale: Vec<String> = self
+                        .local_rib
+                        .evpn_vpws
+                        .services
+                        .iter()
+                        .filter(|(_, svc)| svc.vni_or_evi() == Some(vni))
+                        .map(|(name, _)| name.clone())
+                        .collect();
+                    for name in stale {
+                        self.evpn_originate_vpws(&name);
+                    }
                 }
             }
             RibRx::VxlanDel { vni } => {

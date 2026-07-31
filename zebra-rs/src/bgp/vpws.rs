@@ -1,14 +1,18 @@
-//! EVPN VPWS (RFC 8214): point-to-point E-Line services over SRv6.
+//! EVPN VPWS (RFC 8214): point-to-point E-Line services over SRv6 or VXLAN.
 //!
 //! A VPWS service binds one local attachment circuit to one remote PE's AC
 //! with no MAC learning: the PE advertises an Ethernet A-D per-EVI route
 //! (Type-1) whose Ethernet Tag is the *local* VPWS service instance id,
-//! carrying an `End.DX2` L2-Service Prefix-SID (RFC 9252 §6.3). Importing
-//! the remote PE's Type-1 — matched by Ethernet Tag == `remote_service_id`
-//! and the EVI Route Target — yields the remote service SID, and the AC is
-//! cross-connected to it through the cradle tee (`rib::Message::XconnectAdd`
-//! → cradle `AddXconnect`, which programs both the ingress XCONNECT map and
-//! the local `End.DX2` decap).
+//! carrying this PE's service binding per the `afi-safi evpn encapsulation`
+//! — an `End.DX2` L2-Service Prefix-SID (RFC 9252 §6.3) under SRv6, or the
+//! VNI in the label field plus the VXLAN Encapsulation extended community
+//! (RFC 8365 §6) under VXLAN. Importing the remote PE's Type-1 — matched by
+//! Ethernet Tag == `remote_service_id` and the EVI Route Target — yields
+//! the remote service endpoint *as the remote signalled it* (the two
+//! directions of an E-Line are independent), and the AC is cross-connected
+//! to it through the cradle tee (`rib::Message::XconnectAdd` → cradle
+//! `AddXconnect`, which programs both the ingress XCONNECT map and the
+//! local decap — the `End.DX2` LocalSid or the VNI→AC binding).
 //!
 //! A service whose AC sits on a multihomed Ethernet Segment picks it up from
 //! that AC — an `ethernet-segment` whose `interface` is this service's
@@ -24,9 +28,26 @@
 //! differs from our non-zero MTU is not bound (`mtu-mismatch`).
 
 use std::collections::{BTreeMap, BTreeSet};
-use std::net::{IpAddr, Ipv6Addr};
+use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 
 use super::ethernet_segment::{EthernetSegment, VpwsRole};
+
+/// The dataplane endpoint a remote PE's Type-1 advertises for a VPWS
+/// service instance — what our AC's frames are encapsulated toward. Each
+/// direction of an E-Line carries the encapsulation its *originator*
+/// signalled, so a service can bind a VXLAN remote while advertising SRv6
+/// itself (and vice versa) — which is what lets a fabric migrate one PE at
+/// a time.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum VpwsEndpoint {
+    /// The advertised `End.DX2` / `End.DX2V` L2-Service SID (RFC 9252
+    /// §6.3).
+    Srv6(Ipv6Addr),
+    /// The advertised VTEP and VNI (RFC 8365 §6): the VNI rides the
+    /// Type-1's label field, the VTEP is the route's next hop. IPv4 only —
+    /// the cradle VXLAN underlay is IPv4.
+    Vxlan { vtep: Ipv4Addr, vni: u32 },
+}
 
 /// One configured VPWS service (`router bgp afi-safi evpn vpws <name>`).
 #[derive(Debug, Default, Clone)]
@@ -45,10 +66,10 @@ pub struct VpwsService {
     /// rides here too: it is part of the Type-1 NLRI key, so re-pointing
     /// `ethernet-segment` must withdraw under the *old* segment's ESI.
     pub originated: Option<(u32, u32, [u8; 10])>,
-    /// The remote `End.DX2` SID currently cross-connected (set by the
-    /// import side) — lets a config change re-program the xconnect
-    /// without waiting for a route churn.
-    pub remote_sid: Option<Ipv6Addr>,
+    /// The remote endpoint currently cross-connected (set by the import
+    /// side) — lets a config change re-program the xconnect without
+    /// waiting for a route churn.
+    pub remote: Option<VpwsEndpoint>,
     /// L2 MTU signalled in our Type-1's Layer-2 Attributes EC (RFC 8214
     /// §3.1) and checked against the remote's. `None`/0 = no MTU check.
     pub mtu: Option<u16>,
@@ -57,6 +78,16 @@ pub struct VpwsService {
     /// becomes `End.DX2V` (VLAN table = the EVI). `None` = whole-port
     /// service (`End.DX2`).
     pub vlan: Option<u16>,
+    /// The VNI advertised in our Type-1's label field under `encapsulation
+    /// vxlan` (RFC 8365 §6). `None` = the EVI, which is the common
+    /// fabric-wide-VNI deployment; set it when the VNI space is
+    /// administered separately from the EVI space.
+    pub vni: Option<u32>,
+    /// The VNI our Type-1 actually went out with — the local decap
+    /// identity the xconnect tee programs (VNI→AC), mirror of the
+    /// `End.DX2` entry in `VpwsState::sids`. `None` when the service
+    /// originated under SRv6 (or not at all).
+    pub local_vni: Option<u32>,
     /// The remote's L2 MTU when a matching Type-1 was **rejected** for an
     /// MTU mismatch — the service shows `mtu-mismatch` instead of `up`.
     pub remote_mtu_mismatch: Option<u16>,
@@ -147,8 +178,8 @@ pub const ZERO_ESI: [u8; 10] = [0; 10];
 /// Type-1 that matched this service's `remote-service-id` within its EVI.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct VpwsRemote {
-    /// The advertised `End.DX2` / `End.DX2V` L2-Service SID.
-    pub sid: Ipv6Addr,
+    /// The advertised dataplane endpoint — SRv6 service SID or VTEP+VNI.
+    pub endpoint: VpwsEndpoint,
     /// L2 MTU from the route's Layer-2 Attributes EC; 0 = none signalled.
     pub mtu: u16,
     /// The route's ESI. All-zero means the far end is single-homed.
@@ -301,6 +332,12 @@ impl VpwsService {
             _ => (0, 0),
         }
     }
+
+    /// The VNI this service uses under `encapsulation vxlan`: the `vni`
+    /// leaf, defaulting to the EVI. `None` while the EVI is unset too.
+    pub fn vni_or_evi(&self) -> Option<u32> {
+        self.vni.or(self.evi)
+    }
 }
 
 /// All VPWS state. Lives on `LocalRib` — like `sr_policy_local` — so both
@@ -358,7 +395,7 @@ mod tests {
     /// A remote on ES1 advertising the given role bits.
     fn mh(last: u8, primary: bool, backup: bool) -> VpwsRemote {
         VpwsRemote {
-            sid: sid(last as u16),
+            endpoint: VpwsEndpoint::Srv6(sid(last as u16)),
             mtu: 0,
             esi: ES1,
             originator: pe(last),
@@ -371,7 +408,7 @@ mod tests {
     /// a peer that omits the Layer-2 Attributes EC produces).
     fn sh(last: u8) -> VpwsRemote {
         VpwsRemote {
-            sid: sid(last as u16),
+            endpoint: VpwsEndpoint::Srv6(sid(last as u16)),
             mtu: 0,
             esi: ZERO_ESI,
             originator: pe(last),
@@ -438,6 +475,25 @@ mod tests {
         let sel = select_remote(vec![mh(4, true, false), mh(2, true, false)], None);
         assert_eq!(bound(&sel).originator, pe(2));
         assert!(matches!(sel, VpwsSelection::Bound { usable: 2, .. }));
+    }
+
+    #[test]
+    fn selection_is_encapsulation_agnostic() {
+        // A multihomed pair where the primary advertises VXLAN and the
+        // backup SRv6 (a fabric mid-migration): the ranking sees only the
+        // role bits, so the VXLAN primary wins — and losing it fails over
+        // to the SRv6 backup, endpoint flavor notwithstanding.
+        let vxlan = VpwsEndpoint::Vxlan {
+            vtep: Ipv4Addr::new(192, 0, 2, 2),
+            vni: 100,
+        };
+        let mut primary = mh(2, true, false);
+        primary.endpoint = vxlan;
+        let backup = mh(3, false, true);
+        let sel = select_remote(vec![backup.clone(), primary], None);
+        assert_eq!(bound(&sel).endpoint, vxlan);
+        let sel = select_remote(vec![backup], None);
+        assert!(matches!(bound(&sel).endpoint, VpwsEndpoint::Srv6(_)));
     }
 
     #[test]

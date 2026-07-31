@@ -29,6 +29,19 @@ use tokio::sync::oneshot;
 
 pub type ShowCallback = fn(&Rib, Args, bool) -> String;
 
+/// The remote endpoint of an EVPN VPWS cross-connect ([`Message::XconnectAdd`])
+/// — what AC-ingress frames are encapsulated toward, per the encapsulation
+/// the remote PE signalled on its Type-1 route.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum XconnectRemote {
+    /// The remote `End.DX2`/`End.DX2V` L2-Service SID (RFC 9252 §6.3).
+    Srv6(Ipv6Addr),
+    /// The remote VTEP and its advertised VNI (RFC 8365 §6: the VNI rides
+    /// the Type-1's label field, the VTEP is the route's next hop). IPv4
+    /// only — the cradle VXLAN underlay is IPv4.
+    Vxlan { vtep: Ipv4Addr, vni: u32 },
+}
+
 pub enum Message {
     LinkUp {
         ifindex: u32,
@@ -404,23 +417,27 @@ pub enum Message {
         dst: std::net::Ipv4Addr,
         teid: u32,
     },
-    /// EVPN VPWS (RFC 8214): bind attachment circuit `ifname` to a remote
-    /// PE's `End.DX2`/`End.DX2V` service SID — teed to cradle as an
-    /// XCONNECT entry (every AC frame MAC-in-SRv6 encapsulates toward it,
-    /// no FDB) plus, when `local_sid` is present, the local decap LocalSid
-    /// that emits raw on the same AC. A non-zero `vid` scopes the binding
-    /// to that 802.1Q VID (End.DX2V over VLAN table `table`). No kernel
-    /// counterpart — cradle is the L2 data plane.
+    /// EVPN VPWS (RFC 8214): bind attachment circuit `ifname` to the
+    /// remote PE's service endpoint — teed to cradle as an XCONNECT entry
+    /// (every AC frame encapsulates toward it, no FDB) plus the local
+    /// decap for the return direction: the `End.DX2`/`End.DX2V` LocalSid
+    /// (`local_sid`) under SRv6, or the VNI→AC binding (`local_vni`) under
+    /// VXLAN — at most one of the two is present, per this PE's EVPN
+    /// encapsulation. A non-zero `vid` scopes the binding to that 802.1Q
+    /// VID (End.DX2V over VLAN table `table`). No kernel counterpart —
+    /// cradle is the L2 data plane.
     XconnectAdd {
         ifname: String,
-        remote_sid: std::net::Ipv6Addr,
+        remote: XconnectRemote,
         local_sid: Option<std::net::Ipv6Addr>,
+        local_vni: Option<u32>,
         vid: u16,
         table: u32,
     },
     XconnectDel {
         ifname: String,
         local_sid: Option<std::net::Ipv6Addr>,
+        local_vni: Option<u32>,
         vid: u16,
         table: u32,
     },
@@ -3750,23 +3767,25 @@ impl Rib {
             }
             Message::XconnectAdd {
                 ifname,
-                remote_sid,
+                remote,
                 local_sid,
+                local_vni,
                 vid,
                 table,
             } => {
                 self.fib_handle
-                    .cradle_xconnect_add(&ifname, remote_sid, local_sid, vid, table)
+                    .cradle_xconnect_add(&ifname, remote, local_sid, local_vni, vid, table)
                     .await;
             }
             Message::XconnectDel {
                 ifname,
                 local_sid,
+                local_vni,
                 vid,
                 table,
             } => {
                 self.fib_handle
-                    .cradle_xconnect_del(&ifname, local_sid, vid, table)
+                    .cradle_xconnect_del(&ifname, local_sid, local_vni, vid, table)
                     .await;
             }
             Message::CradleGtpEncapAdd {

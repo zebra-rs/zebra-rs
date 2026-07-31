@@ -50,6 +50,7 @@
 /router/bgp/afi-safi/vpws/mtu
 /router/bgp/afi-safi/vpws/remote-service-id
 /router/bgp/afi-safi/vpws/vlan
+/router/bgp/afi-safi/vpws/vni
 /router/bgp/as-sets-withdraw
 /router/bgp/bfd/detect-offload
 /router/bgp/bfd/echo-mode

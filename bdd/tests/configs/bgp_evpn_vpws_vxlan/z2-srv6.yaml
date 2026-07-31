@@ -1,7 +1,7 @@
-# z2 — leaves Ethernet Segment es1 entirely. Its Type-4 is withdrawn, so z1
-# is left as the sole candidate and re-elects itself DF for instance 101
-# (the DF-drain path). z2's own eline1 falls back to single-homed: all-zero
-# ESI, primary.
+# z2 variant: flipped to `encapsulation srv6` mid-life (gaining LOC2) while
+# z1 stays VXLAN — the mixed-encapsulation migration step. z2's Type-1 now
+# carries an End.DX2 SID carved from LOC2; z2 keeps binding z1's VTEP+VNI,
+# z1 binds z2's SID. Each direction is what its originator signalled.
 segment-routing:
   locator:
   - name: LOC2
@@ -21,19 +21,11 @@ router:
       vpws:
       - name: eline1
         evi: 100
-        local-service-id: 101
-        remote-service-id: 103
-        interface: ce1
+        local-service-id: 102
+        remote-service-id: 101
+        interface: ce2
     neighbor:
     - remote-address: 192.168.0.1
-      enabled: true
-      remote-as: 65001
-      afi-safi:
-      - name: ipv4
-        enabled: true
-      - name: evpn
-        enabled: true
-    - remote-address: 192.168.0.3
       enabled: true
       remote-as: 65001
       afi-safi:
