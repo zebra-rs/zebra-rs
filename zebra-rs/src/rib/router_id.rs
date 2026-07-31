@@ -8,7 +8,11 @@ use super::{Link, Rib};
 /// Highest non-localhost IPv4 among the links accepted by `in_scope`
 /// — loopback-flagged links first, then the rest. "Highest" (not
 /// first-seen) is the rule the book documents (ch. 0.2), matching
-/// Cisco IOS selection so operators can predict the value.
+/// Cisco IOS selection so operators can predict the value. Secondary
+/// addresses are never candidates (Cisco/FRR semantics): the kernel
+/// won't source packets from them unless explicitly bound, so a
+/// router-id derived from one would not match the router's identity
+/// on the wire.
 fn pick_router_id(
     links: &BTreeMap<u32, Link>,
     in_scope: impl Fn(&Link) -> bool,
@@ -22,6 +26,7 @@ fn pick_router_id(
             .values()
             .filter(|link| in_scope(link) && link.is_loopback() == loopback)
             .flat_map(|link| &link.addr4)
+            .filter(|laddr| !laddr.secondary)
             .filter_map(|laddr| match laddr.addr {
                 ipnet::IpNet::V4(v4net) => Some(v4net.addr()),
                 _ => None,
@@ -185,6 +190,27 @@ mod tests {
 
         // Only 127.0.0.1 left -> no candidate at all.
         links.remove(&2);
+        assert_eq!(auto_router_id(&links, &no_vrfs), None);
+    }
+
+    #[test]
+    fn auto_pick_skips_secondary_addresses() {
+        let no_vrfs = BTreeSet::new();
+
+        // 10.0.0.9 is numerically highest but a kernel secondary
+        // (same-subnet duplicate); the primary 10.0.0.1 must win.
+        let mut link = test_link(2, false, None, &[addr("10.0.0.1"), addr("10.0.0.9")]);
+        link.addr4[1].secondary = true;
+        let mut links = BTreeMap::new();
+        links.insert(2, link);
+        assert_eq!(auto_router_id(&links, &no_vrfs), Some(addr("10.0.0.1")));
+
+        // Every candidate secondary → no pick; the caller keeps the
+        // previous value (sticky).
+        let mut only_sec = test_link(3, false, None, &[addr("10.2.0.9")]);
+        only_sec.addr4[0].secondary = true;
+        let mut links = BTreeMap::new();
+        links.insert(3, only_sec);
         assert_eq!(auto_router_id(&links, &no_vrfs), None);
     }
 
