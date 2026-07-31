@@ -1,11 +1,13 @@
 # VXLAN Configuration
 
-zebra-rs can create a **VXLAN tunnel device** from configuration. Unlike
-the [`interface`](ch-00-02-interface-configuration.md) block — which
-only attaches attributes to a device that already exists — the
-top-level `vxlan` list **creates** the kernel VXLAN netdevice (the
-equivalent of `ip link add <name> type vxlan ...`) and tears it down
-when the entry is removed.
+zebra-rs can create a **VXLAN tunnel device** from configuration. Like
+the [`bridge`](ch-00-04-bridge-configuration.md) and
+[`vlan`](ch-00-08-vlan-configuration.md) blocks — and unlike the
+[`interface`](ch-00-02-interface-configuration.md) block, which only
+attaches attributes to a device that already exists — the top-level
+`vxlan` list **creates** the kernel VXLAN netdevice (the equivalent of
+`ip link add <name> type vxlan ...`) and tears it down when the entry
+is removed.
 
 A VXLAN device is the data-plane endpoint (VTEP) for an EVPN overlay:
 once it is enslaved to a Linux [bridge](ch-00-04-bridge-configuration.md)

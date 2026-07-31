@@ -1,7 +1,8 @@
 # Bridge Configuration
 
 zebra-rs can create a **Linux bridge device** from configuration. Like
-the [`vxlan`](ch-00-03-vxlan-configuration.md) block — and unlike
+the [`vxlan`](ch-00-03-vxlan-configuration.md) and
+[`vlan`](ch-00-08-vlan-configuration.md) blocks — and unlike
 [`interface`](ch-00-02-interface-configuration.md), which only attaches
 attributes to an existing device — the top-level `bridge` list
 **creates** the kernel bridge netdevice (`ip link add <name> type

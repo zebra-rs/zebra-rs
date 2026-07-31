@@ -92,3 +92,18 @@ Interface: eth0.100
   VLAN id 100 parent eth0 (index 2)
   ...
 ```
+
+## Cross-reference — FRR / iproute2
+
+| zebra-rs | iproute2 |
+|---|---|
+| `vlan <n> interface <p>` + `vlan <n> vlan-id <v>` | `ip link add link <p> name <n> type vlan id <v>` |
+| *(automatic)* device up | `ip link set <n> up` |
+| `delete vlan <n>` | `ip link del <n>` |
+
+FRR has no equivalent configuration: its zebra daemon never creates
+interfaces of any kind. It only *learns* VLAN devices the kernel
+already has (netlink kind `vlan`, `IFLA_LINK`, `IFLA_VLAN_ID`) and
+reports them in `show interface`. zebra-rs behaves the same way for
+externally-created devices — the `vlan` list is the additional,
+configuration-driven creation path.
