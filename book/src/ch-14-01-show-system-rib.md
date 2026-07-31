@@ -84,7 +84,10 @@ where `router_id` is `null` for a VRF with no Router ID yet.
 ### `show interface [brief | <name>]`
 
 Interface state: hardware address, ifindex, MTU, flags, VRF binding,
-MPLS switching state, and the IPv4/IPv6 addresses on the link.
+MPLS switching state, and the IPv4/IPv6 addresses on the link. An
+802.1Q sub-interface — whether created from the
+[`vlan`](ch-00-08-vlan-configuration.md) list or learned from the
+kernel — additionally reports its tag and parent device.
 
 - `show interface` — every interface, in detail (the default view).
 - `show interface brief` — a one-line-per-interface summary table.
@@ -104,12 +107,22 @@ Interface: eth0
   VRF Binding: Not bound
   inet 10.0.0.1/24
   inet6 2001:db8::1/64
+
+r1> show interface eth0.100
+Interface: eth0.100
+  Hardware is Ethernet 00:11:22:33:44:55
+  index 12 metric 1 mtu 1500
+  VLAN id 100 parent eth0 (index 2)
+  Link is Up <UP,BROADCAST,RUNNING,MULTICAST>
+  ...
 ```
 
 JSON: an array of interface objects. The brief view carries `interface`,
 `status`, `vrf`, and `addresses`; the detailed view adds `hardware`,
 `index`, `metric`, `mtu`, `link_status`, `flags`, `vrf_binding`,
-`label_switching`, `inet_addresses`, and `inet6_addresses`.
+`label_switching`, `inet_addresses`, and `inet6_addresses`. A VLAN
+sub-interface also carries `vlan_id`, `parent` (the parent's name), and
+`parent_index`; the fields are omitted on ordinary interfaces.
 
 ## IPv4 / IPv6 routing tables
 
