@@ -21,7 +21,7 @@ use super::peer_map::PeerMap;
 use super::shard::msg::{ShardUpdateV4, ShardUpdateV6};
 use super::shard::{ShardMsg, ShardOut};
 use super::timer::{start_adv_timer_vpnv4, start_adv_timer_vpnv6};
-use super::vpws::{VpwsRemote, VpwsSelection, ZERO_ESI};
+use super::vpws::{VpwsEndpoint, VpwsRemote, VpwsSelection, ZERO_ESI};
 use super::{AssistedReplicationRole, Bgp, EvpnBumTunnel, InOut, Message};
 
 pub const ORIGINATED_PEER: usize = usize::MAX;
@@ -7209,6 +7209,28 @@ fn evpn_vpws_sid(attr: &BgpAttr) -> Option<std::net::Ipv6Addr> {
         .or_else(|| evpn_srv6_sid(attr, bgp_packet::SRV6_BEHAVIOR_END_DX2V))
 }
 
+/// The dataplane endpoint a remote VPWS Type-1 advertises, per its
+/// signalled encapsulation. The SRv6 L2-Service SID wins first — SRv6
+/// names the endpoint explicitly in the Prefix-SID attribute. Otherwise a
+/// route whose Encapsulation EC says VXLAN carries the VNI in its label
+/// field with the VTEP as next hop (RFC 8365 §6). `None` = nothing we can
+/// bind: an RFC 9572 A-D form, a zero label, a non-IPv4 VTEP (the cradle
+/// VXLAN underlay is IPv4), or an MPLS VPWS — no Encapsulation EC means
+/// MPLS per RFC 8365 §5.1.3, and MPLS VPWS is not yet supported.
+fn vpws_remote_endpoint(rib: &BgpRib) -> Option<VpwsEndpoint> {
+    if let Some(sid) = evpn_vpws_sid(&rib.attr) {
+        return Some(VpwsEndpoint::Srv6(sid));
+    }
+    if encap_ec_tunnel_type(&rib.attr) != Some(TunnelType::Vxlan as u16) {
+        return None;
+    }
+    let vni = rib.label.as_ref().map(|l| l.label).filter(|&l| l != 0)?;
+    match rib.attr.nexthop {
+        Some(BgpNexthop::Evpn(IpAddr::V4(vtep))) => Some(VpwsEndpoint::Vxlan { vtep, vni }),
+        _ => None,
+    }
+}
+
 /// The PEs currently advertising a live per-ES Ethernet A-D route
 /// (`[1]:[esi]:[MAX-ET]`) for `esi` — the RFC 7432 §8.2 liveness signal a
 /// multihomed PE keeps up for as long as its segment is usable.
@@ -7262,9 +7284,10 @@ fn vpws_gather_remotes(local_rib: &LocalRib, evi: u32, remote_id: u32) -> Vec<Vp
             {
                 continue;
             }
-            let Some(sid) = evpn_vpws_sid(&rib.attr) else {
-                // A Type-1 without an End.DX2/DX2V L2-Service SID (e.g. an
-                // RFC 9572 A-D form) has no SRv6 dataplane binding.
+            let Some(endpoint) = vpws_remote_endpoint(rib) else {
+                // A Type-1 without a bindable dataplane endpoint — an RFC
+                // 9572 A-D form, or an encapsulation we do not support
+                // (MPLS VPWS) — is not a candidate.
                 continue;
             };
             let Some(BgpNexthop::Evpn(originator)) = rib.attr.nexthop else {
@@ -7284,7 +7307,7 @@ fn vpws_gather_remotes(local_rib: &LocalRib, evi: u32, remote_id: u32) -> Vec<Vp
                 .as_ref()
                 .and_then(|ecom| ecom.0.iter().find_map(|v| v.as_l2_attr()));
             out.push(VpwsRemote {
-                sid,
+                endpoint,
                 mtu: l2.map(|a| a.mtu).unwrap_or(0),
                 esi: *esi,
                 originator,
@@ -7309,10 +7332,11 @@ fn vpws_rebind(local_rib: &mut LocalRib, rib_client: &crate::rib::client::RibCli
     let Some(svc) = local_rib.evpn_vpws.services.get(name) else {
         return;
     };
-    let cached = svc.remote_sid;
+    let cached = svc.remote;
     let ifname = svc.interface.clone();
     let (vid, table) = svc.vid_table();
     let local_mtu = svc.mtu;
+    let local_vni = svc.local_vni;
     let selection = match svc.params() {
         Some((evi, _, remote_id, _)) => {
             super::vpws::select_remote(vpws_gather_remotes(local_rib, evi, remote_id), local_mtu)
@@ -7326,23 +7350,28 @@ fn vpws_rebind(local_rib: &mut LocalRib, rib_client: &crate::rib::client::RibCli
     };
     match selection {
         VpwsSelection::Bound { remote, usable } => {
-            svc.remote_sid = Some(remote.sid);
+            svc.remote = Some(remote.endpoint);
             svc.remote_mtu_mismatch = None;
             svc.remote_pe = Some(remote.originator);
             svc.remote_is_backup = remote.esi != ZERO_ESI && !remote.primary && remote.backup;
             svc.remote_count = usable;
             if let Some(ifname) = ifname {
+                let remote = match remote.endpoint {
+                    VpwsEndpoint::Srv6(sid) => rib::XconnectRemote::Srv6(sid),
+                    VpwsEndpoint::Vxlan { vtep, vni } => rib::XconnectRemote::Vxlan { vtep, vni },
+                };
                 let _ = rib_client.send(rib::Message::XconnectAdd {
                     ifname,
-                    remote_sid: remote.sid,
+                    remote,
                     local_sid,
+                    local_vni,
                     vid,
                     table,
                 });
             }
         }
         VpwsSelection::MtuMismatch(mtu) => {
-            svc.remote_sid = None;
+            svc.remote = None;
             svc.remote_mtu_mismatch = Some(mtu);
             svc.remote_pe = None;
             svc.remote_is_backup = false;
@@ -7353,13 +7382,14 @@ fn vpws_rebind(local_rib: &mut LocalRib, rib_client: &crate::rib::client::RibCli
                 let _ = rib_client.send(rib::Message::XconnectDel {
                     ifname,
                     local_sid,
+                    local_vni,
                     vid,
                     table,
                 });
             }
         }
         VpwsSelection::None => {
-            svc.remote_sid = None;
+            svc.remote = None;
             svc.remote_mtu_mismatch = None;
             svc.remote_pe = None;
             svc.remote_is_backup = false;
@@ -7370,6 +7400,7 @@ fn vpws_rebind(local_rib: &mut LocalRib, rib_client: &crate::rib::client::RibCli
                 let _ = rib_client.send(rib::Message::XconnectDel {
                     ifname,
                     local_sid,
+                    local_vni,
                     vid,
                     table,
                 });
@@ -16476,19 +16507,21 @@ impl Bgp {
     /// Originate VPWS service `name`'s Ethernet A-D per-EVI route (Type-1,
     /// RFC 8214 §3.1): RD = `<router-id>:<evi>`, Ethernet Tag = the local
     /// service instance id, the referenced Ethernet Segment's ESI (all-zero
-    /// when single-homed), the EVI RT, and this PE's `End.DX2` L2-Service
-    /// Prefix-SID (RFC 9252 §6.3). No-op while the config is partial or the
-    /// router-id is unset.
+    /// when single-homed), the EVI RT, and this PE's service binding per
+    /// the afi-safi `encapsulation` — the `End.DX2` L2-Service Prefix-SID
+    /// (RFC 9252 §6.3) under SRv6, or the service VNI in the label field
+    /// plus the VXLAN Encapsulation EC and the VTEP next hop (RFC 8365 §6)
+    /// under VXLAN. No-op while the config is partial or the router-id is
+    /// unset.
     pub fn evpn_originate_vpws(&mut self, name: &str) {
         if self.router_id.is_unspecified() {
             return;
         }
-        let Some((evi, local_id, mtu)) = self
-            .local_rib
-            .evpn_vpws
-            .services
-            .get(name)
-            .and_then(|s| s.params().map(|(evi, local, _, _)| (evi, local, s.mtu)))
+        let Some((evi, local_id, mtu, vni)) =
+            self.local_rib.evpn_vpws.services.get(name).and_then(|s| {
+                s.params()
+                    .map(|(evi, local, _, _)| (evi, local, s.mtu, s.vni))
+            })
         else {
             return;
         };
@@ -16504,21 +16537,36 @@ impl Bgp {
             svc.role = role;
             svc.df = df;
         }
-        let prefix_sid = self.vpws_dx2_prefix_sid(name);
+        // VXLAN advertises the service VNI (the `vni` leaf, default the
+        // EVI); everything else advertises the End.DX2/DX2V SID — MPLS
+        // VPWS is not implemented, so an `encapsulation mpls` fabric
+        // signals its E-Lines over SRv6 like before the knob was honored.
+        let local_vni = self.evpn_encap.is_vxlan().then(|| vni.unwrap_or(evi));
+        let prefix_sid = match local_vni {
+            Some(_) => None,
+            None => self.vpws_dx2_prefix_sid(name),
+        };
         let prefix = EvpnPrefix::EthernetAd {
             esi,
             eth_tag: local_id,
         };
         let mut attr = BgpAttr::new();
         // The EVI RT plus the RFC 8214 §3.1 Layer-2 Attributes EC: the
-        // elected P/B bits, no control word (SRv6), and the configured L2
-        // MTU (0 = no MTU check at the remote).
-        attr.ecom = Some(ExtCommunity::from([
+        // elected P/B bits, no control word (not an MPLS PW), and the
+        // configured L2 MTU (0 = no MTU check at the remote).
+        let mut ecom = ExtCommunity::from([
             evpn_route_target(self.asn, evi),
             ExtCommunityValue::l2_attr(primary, backup, false, mtu.unwrap_or(0)),
-        ]));
+        ]);
+        if local_vni.is_some() {
+            ecom.0.insert(evpn_encap_vxlan());
+        }
+        attr.ecom = Some(ecom);
         attr.prefix_sid = prefix_sid;
-        attr.nexthop = Some(BgpNexthop::Evpn(IpAddr::V4(self.router_id)));
+        attr.nexthop = Some(BgpNexthop::Evpn(match local_vni {
+            Some(vni) => self.evpn_nexthop_for_vni(vni),
+            None => IpAddr::V4(self.router_id),
+        }));
         let rib = BgpRib::new(
             ORIGINATED_PEER,
             Ipv4Addr::UNSPECIFIED,
@@ -16526,12 +16574,17 @@ impl Bgp {
             0,
             32768,
             &attr,
-            None,
+            local_vni.map(|vni| bgp_packet::Label {
+                label: vni,
+                exp: 0,
+                bos: true,
+            }),
             None,
             false,
         );
         if let Some(svc) = self.local_rib.evpn_vpws.services.get_mut(name) {
             svc.originated = Some((evi, local_id, esi));
+            svc.local_vni = local_vni;
         }
         self.evpn_originate_synch(rd, prefix, rib);
     }
@@ -16622,19 +16675,51 @@ impl Bgp {
     pub fn vpws_teardown(&mut self, name: &str) {
         self.evpn_withdraw_vpws(name);
         if let Some(svc) = self.local_rib.evpn_vpws.services.get_mut(name)
-            && svc.remote_sid.take().is_some()
+            && svc.remote.take().is_some()
             && let Some(ifname) = svc.interface.clone()
         {
             let (vid, table) = svc.vid_table();
+            let local_vni = svc.local_vni;
             let local_sid = self.local_rib.evpn_vpws.sids.get(name).map(|(a, _)| *a);
             let _ = self.ctx.rib.send(crate::rib::Message::XconnectDel {
                 ifname,
                 local_sid,
+                local_vni,
                 vid,
                 table,
             });
         }
         self.free_vpws_dx2_sid(name);
+    }
+
+    /// Re-encapsulate every VPWS service after an `afi-safi evpn
+    /// encapsulation` change: unbind any live cross-connect under its OLD
+    /// flavor first (the reconcile's re-add cannot reach a stale cradle
+    /// entry whose local decap identity changed), release the
+    /// `End.DX2`/`End.DX2V` SID (the new encapsulation may not use one),
+    /// then reconcile — withdraw + re-originate + re-bind under the new
+    /// encapsulation.
+    pub fn vpws_reencap(&mut self) {
+        let names: Vec<String> = self.local_rib.evpn_vpws.services.keys().cloned().collect();
+        for name in names {
+            if let Some(svc) = self.local_rib.evpn_vpws.services.get_mut(&name)
+                && svc.remote.take().is_some()
+                && let Some(ifname) = svc.interface.clone()
+            {
+                let (vid, table) = svc.vid_table();
+                let local_vni = svc.local_vni;
+                let local_sid = self.local_rib.evpn_vpws.sids.get(&name).map(|(a, _)| *a);
+                let _ = self.ctx.rib.send(crate::rib::Message::XconnectDel {
+                    ifname,
+                    local_sid,
+                    local_vni,
+                    vid,
+                    table,
+                });
+            }
+            self.free_vpws_dx2_sid(&name);
+            self.vpws_reconcile(&name);
+        }
     }
 
     /// Re-resolve every VPWS service's `ethernet-segment` reference against
@@ -17873,6 +17958,113 @@ mod evpn_encap_classify_tests {
     #[test]
     fn vxlan_is_not_mpls() {
         assert!(!attr_encap_is_mpls(&attr_with_encap(Some(8))));
+    }
+}
+
+/// The dataplane endpoint of a received VPWS Type-1: SRv6 SID vs VTEP+VNI.
+#[cfg(test)]
+mod vpws_endpoint_classify_tests {
+    use super::*;
+
+    const SID: Ipv6Addr = Ipv6Addr::new(0xfcbb, 0xbbbb, 1, 0, 0, 0, 0, 0);
+    const VTEP: Ipv4Addr = Ipv4Addr::new(192, 0, 2, 2);
+
+    /// A Type-1 as a remote PE would send it: optional End.DX2 Prefix-SID,
+    /// optional Encapsulation EC tunnel type, optional label, and the
+    /// given next hop.
+    fn rib_with(
+        srv6: bool,
+        tunnel_type: Option<u16>,
+        label: Option<u32>,
+        nexthop: Option<IpAddr>,
+    ) -> BgpRib {
+        let mut attr = BgpAttr::new();
+        if srv6 {
+            attr.prefix_sid = Some(super::super::inst::srv6_l2_service_prefix_sid(
+                SID,
+                None,
+                bgp_packet::SRV6_BEHAVIOR_END_DX2,
+            ));
+        }
+        if let Some(t) = tunnel_type {
+            let mut ec = ExtCommunityValue {
+                high_type: 0x03,
+                low_type: 0x0c,
+                val: [0; 6],
+            };
+            ec.val[4..6].copy_from_slice(&t.to_be_bytes());
+            attr.ecom = Some(ExtCommunity::from([ec]));
+        }
+        attr.nexthop = nexthop.map(BgpNexthop::Evpn);
+        BgpRib::new(
+            ORIGINATED_PEER,
+            Ipv4Addr::UNSPECIFIED,
+            BgpRibType::Originated,
+            0,
+            32768,
+            &attr,
+            label.map(|label| bgp_packet::Label {
+                label,
+                exp: 0,
+                bos: true,
+            }),
+            None,
+            false,
+        )
+    }
+
+    /// The SRv6 L2-Service SID names the endpoint explicitly, so it wins
+    /// even when the route also carries a VXLAN-shaped EC and label.
+    #[test]
+    fn srv6_sid_wins_first() {
+        let rib = rib_with(true, Some(8), Some(100), Some(IpAddr::V4(VTEP)));
+        assert_eq!(vpws_remote_endpoint(&rib), Some(VpwsEndpoint::Srv6(SID)));
+    }
+
+    /// The RFC 8365 §6 form: Encapsulation EC = VXLAN, the VNI in the
+    /// label field, the VTEP as next hop.
+    #[test]
+    fn vxlan_needs_ec_label_and_v4_vtep() {
+        let rib = rib_with(false, Some(8), Some(100), Some(IpAddr::V4(VTEP)));
+        assert_eq!(
+            vpws_remote_endpoint(&rib),
+            Some(VpwsEndpoint::Vxlan {
+                vtep: VTEP,
+                vni: 100
+            })
+        );
+    }
+
+    /// No Encapsulation EC means MPLS (RFC 8365 §5.1.3) — a label alone
+    /// must NOT be bound as a VNI. MPLS VPWS is not supported, so no
+    /// endpoint at all.
+    #[test]
+    fn label_without_encap_ec_is_mpls_not_vxlan() {
+        let rib = rib_with(false, None, Some(100), Some(IpAddr::V4(VTEP)));
+        assert_eq!(vpws_remote_endpoint(&rib), None);
+    }
+
+    /// An explicitly non-VXLAN tunnel type is not ours either.
+    #[test]
+    fn other_tunnel_types_are_not_bound() {
+        let rib = rib_with(false, Some(2), Some(100), Some(IpAddr::V4(VTEP)));
+        assert_eq!(vpws_remote_endpoint(&rib), None);
+    }
+
+    /// A zero label is "no VNI", not VNI 0.
+    #[test]
+    fn zero_label_is_no_vni() {
+        let rib = rib_with(false, Some(8), Some(0), Some(IpAddr::V4(VTEP)));
+        assert_eq!(vpws_remote_endpoint(&rib), None);
+        let rib = rib_with(false, Some(8), None, Some(IpAddr::V4(VTEP)));
+        assert_eq!(vpws_remote_endpoint(&rib), None);
+    }
+
+    /// The cradle VXLAN underlay is IPv4 — a v6 VTEP cannot be bound.
+    #[test]
+    fn v6_vtep_is_not_bound() {
+        let rib = rib_with(false, Some(8), Some(100), Some(IpAddr::V6(SID)));
+        assert_eq!(vpws_remote_endpoint(&rib), None);
     }
 }
 

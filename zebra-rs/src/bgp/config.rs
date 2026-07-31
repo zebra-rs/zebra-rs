@@ -1763,6 +1763,9 @@ fn config_evpn_encapsulation(bgp: &mut Bgp, mut args: Args, op: ConfigOp) -> Opt
         }
     }
     reoriginate_all_imet(bgp);
+    // VPWS Type-1s carry the encapsulation too (End.DX2 SID vs VNI+EC) —
+    // unbind under the old flavor and re-originate under the new one.
+    bgp.vpws_reencap();
     Some(())
 }
 
@@ -2116,11 +2119,11 @@ fn config_vpws(bgp: &mut Bgp, mut args: Args, op: ConfigOp) -> Option<()> {
 /// Shared body for the VPWS leaf handlers: mutate one field, then
 /// reconcile the service (withdraw + re-originate + re-push the AC
 /// cross-connect as needed). Two invariants ride here so every leaf gets
-/// them: a live binding whose `(vid, VLAN-table)` scoping changed (vlan
-/// or evi edits) is unbound under its OLD pair first — the reconcile's
-/// re-add can't reach the stale cradle entry — and a vlan-presence flip
-/// releases the End.DX2/DX2V SID so the re-originate allocates one with
-/// the right behavior.
+/// them: a live binding whose `(vid, VLAN-table)` scoping or local VNI
+/// decap identity changed (vlan, evi or vni edits) is unbound under its
+/// OLD values first — the reconcile's re-add can't reach the stale cradle
+/// entry — and a vlan-presence flip releases the End.DX2/DX2V SID so the
+/// re-originate allocates one with the right behavior.
 fn config_vpws_leaf(
     bgp: &mut Bgp,
     mut args: Args,
@@ -2144,19 +2147,29 @@ fn config_vpws_leaf(
         .services
         .entry(name.clone())
         .or_default();
-    let old_bound = svc.remote_sid.is_some().then(|| svc.interface.clone());
+    let old_bound = svc.remote.is_some().then(|| svc.interface.clone());
     let old_vt = svc.vid_table();
     let old_vlan_set = svc.vlan.is_some();
+    let old_local_vni = svc.local_vni;
     set(svc, value);
     let new_vt = svc.vid_table();
     let vlan_flipped = svc.vlan.is_some() != old_vlan_set;
-    if old_vt != new_vt
+    // What the re-originate will advertise (and the tee re-program) as the
+    // local VNI decap identity — an edit that moves it (vni, or evi while
+    // the vni leaf defaults) must unbind under the old one.
+    let new_local_vni = bgp
+        .evpn_encap
+        .is_vxlan()
+        .then(|| svc.vni_or_evi())
+        .flatten();
+    if (old_vt != new_vt || old_local_vni != new_local_vni)
         && let Some(Some(ifname)) = old_bound
     {
         let local_sid = bgp.local_rib.evpn_vpws.sids.get(&name).map(|(a, _)| *a);
         let _ = bgp.ctx.rib.send(crate::rib::Message::XconnectDel {
             ifname,
             local_sid,
+            local_vni: old_local_vni,
             vid: old_vt.0,
             table: old_vt.1,
         });
@@ -2197,6 +2210,13 @@ fn config_vpws_mtu(bgp: &mut Bgp, args: Args, op: ConfigOp) -> Option<()> {
 /// body unbinds the old scoping and re-allocates the SID on a flip.
 fn config_vpws_vlan(bgp: &mut Bgp, args: Args, op: ConfigOp) -> Option<()> {
     config_vpws_leaf(bgp, args, op, |svc, v| svc.vlan = v.map(|x| x as u16), true)
+}
+
+/// `router bgp afi-safi evpn vpws <name> vni <1..16777215>` — the VNI
+/// advertised in the Type-1's label field under `encapsulation vxlan`
+/// (RFC 8365 §6). Unset = the EVI.
+fn config_vpws_vni(bgp: &mut Bgp, args: Args, op: ConfigOp) -> Option<()> {
+    config_vpws_leaf(bgp, args, op, |svc, v| svc.vni = v, true)
 }
 
 /// `router bgp afi-safi evpn vpws <name> ethernet-segment <es-name>` — bind
@@ -2248,14 +2268,16 @@ fn config_vpws_interface(bgp: &mut Bgp, mut args: Args, op: ConfigOp) -> Option<
         .or_default();
     let old = std::mem::replace(&mut svc.interface, interface);
     let (vid, table) = svc.vid_table();
+    let local_vni = svc.local_vni;
     if old != svc.interface
-        && svc.remote_sid.is_some()
+        && svc.remote.is_some()
         && let Some(old_ifname) = old
     {
         let local_sid = bgp.local_rib.evpn_vpws.sids.get(&name).map(|(a, _)| *a);
         let _ = bgp.ctx.rib.send(crate::rib::Message::XconnectDel {
             ifname: old_ifname,
             local_sid,
+            local_vni,
             vid,
             table,
         });
@@ -5006,6 +5028,7 @@ impl Bgp {
         self.callback_add("/router/bgp/afi-safi/vpws/interface", config_vpws_interface);
         self.callback_add("/router/bgp/afi-safi/vpws/mtu", config_vpws_mtu);
         self.callback_add("/router/bgp/afi-safi/vpws/vlan", config_vpws_vlan);
+        self.callback_add("/router/bgp/afi-safi/vpws/vni", config_vpws_vni);
         self.callback_add(
             "/router/bgp/afi-safi/vpws/ethernet-segment",
             config_vpws_ethernet_segment,

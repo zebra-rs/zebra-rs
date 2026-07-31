@@ -15,6 +15,7 @@ router:
         locator: LOC2
     afi-safi:
     - name: evpn
+      encapsulation: srv6
       vpws:
       - name: eline1
         evi: 100

@@ -18,6 +18,7 @@ router:
         locator: LOC2
     afi-safi:
     - name: evpn
+      encapsulation: srv6
       ethernet-segment:
       - name: es1
         esi: "00:11:22:33:44:55:66:77:88:99"

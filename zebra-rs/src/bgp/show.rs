@@ -2652,12 +2652,13 @@ fn show_bgp_evpn_summary(
 }
 
 /// `show bgp evpn vpws` — the configured EVPN VPWS E-Line services (RFC
-/// 8214): EVI, service instance ids, attachment circuit, the local End.DX2
-/// SID our Type-1 advertises, the imported remote SID, and the service
-/// state — `partial-config` (mandatory leaves missing), `pending` (config
+/// 8214): EVI, service instance ids, attachment circuit, the local service
+/// binding our Type-1 advertises (the End.DX2 SID under SRv6, the VNI
+/// under VXLAN), the imported remote endpoint, and the service state —
+/// `partial-config` (mandatory leaves missing), `pending` (config
 /// complete, Type-1 not originated: no router-id / locator yet),
-/// `advertised` (Type-1 out, remote not yet matched), `up` (remote SID
-/// bound to the AC).
+/// `advertised` (Type-1 out, remote not yet matched), `up` (remote
+/// endpoint bound to the AC).
 #[derive(Serialize)]
 struct VpwsServiceJson {
     name: String,
@@ -2667,8 +2668,14 @@ struct VpwsServiceJson {
     interface: Option<String>,
     vlan: Option<u16>,
     mtu: Option<u16>,
+    /// The configured `vni` leaf (`None` = the EVI is the VNI).
+    vni: Option<u32>,
     local_sid: Option<String>,
+    /// The VNI the Type-1 went out with — set only under VXLAN.
+    local_vni: Option<u32>,
     remote_sid: Option<String>,
+    remote_vtep: Option<String>,
+    remote_vni: Option<u32>,
     remote_pe: Option<String>,
     remote_is_backup: bool,
     remote_count: usize,
@@ -2691,7 +2698,7 @@ fn vpws_state(svc: &super::vpws::VpwsService) -> &'static str {
         "pending"
     } else if svc.remote_mtu_mismatch.is_some() {
         "mtu-mismatch"
-    } else if svc.remote_sid.is_none() {
+    } else if svc.remote.is_none() {
         "advertised"
     } else {
         "up"
@@ -2718,8 +2725,21 @@ fn show_bgp_evpn_vpws(
                 interface: svc.interface.clone(),
                 vlan: svc.vlan,
                 mtu: svc.mtu,
+                vni: svc.vni,
                 local_sid: vpws.sids.get(name).map(|(addr, _)| addr.to_string()),
-                remote_sid: svc.remote_sid.map(|sid| sid.to_string()),
+                local_vni: svc.local_vni,
+                remote_sid: match svc.remote {
+                    Some(super::vpws::VpwsEndpoint::Srv6(sid)) => Some(sid.to_string()),
+                    _ => None,
+                },
+                remote_vtep: match svc.remote {
+                    Some(super::vpws::VpwsEndpoint::Vxlan { vtep, .. }) => Some(vtep.to_string()),
+                    _ => None,
+                },
+                remote_vni: match svc.remote {
+                    Some(super::vpws::VpwsEndpoint::Vxlan { vni, .. }) => Some(vni),
+                    _ => None,
+                },
                 remote_pe: svc.remote_pe.map(|pe| pe.to_string()),
                 remote_is_backup: svc.remote_is_backup,
                 remote_count: svc.remote_count,
@@ -2841,7 +2861,10 @@ fn show_bgp_evpn_vpws(
             };
             writeln!(buf, "  Local SID ({behavior}): {sid}")?;
         }
-        if let Some(sid) = svc.remote_sid {
+        if let Some(vni) = svc.local_vni {
+            writeln!(buf, "  Local VNI: {vni}")?;
+        }
+        if let Some(endpoint) = svc.remote {
             // Which PE won, and whether the service is running on the
             // segment's standby rather than its primary — on a multihomed
             // far end that is the difference between converged and failed
@@ -2851,7 +2874,14 @@ fn show_bgp_evpn_vpws(
                 Some(pe) => format!(" (via {pe})"),
                 None => String::new(),
             };
-            writeln!(buf, "  Remote SID: {sid}{via}")?;
+            match endpoint {
+                super::vpws::VpwsEndpoint::Srv6(sid) => {
+                    writeln!(buf, "  Remote SID: {sid}{via}")?;
+                }
+                super::vpws::VpwsEndpoint::Vxlan { vtep, vni } => {
+                    writeln!(buf, "  Remote VTEP: {vtep} (VNI {vni}){via}")?;
+                }
+            }
             if svc.remote_count > 1 {
                 writeln!(
                     buf,

@@ -117,7 +117,16 @@ module zebra-bgp-evpn {
         "EVPN overlay encapsulation for locally originated and
          received MAC routes. This is the L2 (Type-2 / Type-3) service;
          Type-5 (IP Prefix) is an L3 service and takes its
-         encapsulation from the VRF's own `encapsulation` leaf.";
+         encapsulation from the VRF's own `encapsulation` leaf.
+
+         VPWS E-Line services (the `vpws` list) originate under this
+         encapsulation too: their Type-1 carries an End.DX2/DX2V
+         L2-Service SID under srv6, or the service VNI in the label
+         field plus the VXLAN Encapsulation extended community under
+         vxlan (RFC 8365 §6). MPLS VPWS is not implemented — under
+         mpls a VPWS still signals SRv6. The *receive* side is not
+         gated by this leaf: each direction of an E-Line uses the
+         encapsulation its originator signalled.";
     }
     list evi {
       ext:help "EVPN Instance (bridge domain) for `encapsulation mpls`";
@@ -313,10 +322,14 @@ module zebra-bgp-evpn {
         "EVPN VPWS service (RFC 8214) — a point-to-point E-Line between one
          local attachment circuit and one remote PE's AC, no MAC learning.
          Advertises an Ethernet A-D per-EVI route (Type-1) whose Ethernet
-         Tag is the local VPWS service instance id, carrying an End.DX2
-         L2-Service Prefix-SID (RFC 9252 §6.3); imports the remote's
-         Type-1 by matching its Ethernet Tag against remote-service-id and
-         cross-connects the AC to the remote SID.";
+         Tag is the local VPWS service instance id, carrying this PE's
+         service binding per the afi-safi `encapsulation` — an End.DX2
+         L2-Service Prefix-SID (RFC 9252 §6.3) under srv6, or the service
+         VNI in the label field plus the VXLAN Encapsulation extended
+         community (RFC 8365 §6) under vxlan; imports the remote's Type-1
+         by matching its Ethernet Tag against remote-service-id and
+         cross-connects the AC to the remote endpoint as the remote
+         signalled it.";
       leaf name {
         ext:help "VPWS service name";
         type string;
@@ -376,6 +389,20 @@ module zebra-bgp-evpn {
            cross-connect (the tag rides through the service), and the
            local SID becomes End.DX2V demuxed over the EVI's VLAN table.
            Absent = whole-port service (End.DX2).";
+      }
+      leaf vni {
+        ext:help "VNI advertised for the service (default: the EVI)";
+        type uint32 {
+          range "1..16777215";
+        }
+        description
+          "VXLAN Network Identifier advertised in the Type-1's label
+           field under `encapsulation vxlan` (RFC 8365 §6) — the VNI the
+           remote PE encapsulates this service's frames with, and this
+           PE's decap identity for them. Absent = the EVI, the common
+           fabric-wide-VNI deployment; set it when the VNI space is
+           administered separately from the EVI space. Ignored under
+           srv6.";
       }
       leaf ethernet-segment {
         ext:help "Override the Ethernet Segment inferred from the AC";
