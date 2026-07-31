@@ -12167,6 +12167,7 @@ pub enum Message<V: OspfVersion = Ospfv2> {
     ///     peer Link-LSA prefixes feed its aggregation
     ///     (RFC 5340 §4.4.3.9), so a peer's added / removed prefix
     ///     must re-originate it.
+    ///
     /// v3-only; the v2 handler ignores it.
     LinkLsaInstalled(u32),
     /// Retransmit LSAs to a specific neighbor.
