@@ -50,7 +50,7 @@ pub(super) fn bfd_session_key(
     peer_v4: Option<Ipv4Addr>,
     peer_v6ll: Option<Ipv6Addr>,
 ) -> Option<SessionKey> {
-    let local_v4 = link.state.v4addr.first().map(|p| p.addr());
+    let local_v4 = super::link::v4_primary(&link.state.v4addr).map(|e| e.prefix.addr());
     let local_v6ll = link.state.v6laddr.first().map(|p| p.addr());
     let (local, remote) = bfd_session_addrs(local_v4, peer_v4, local_v6ll, peer_v6ll)?;
     Some(SessionKey {
@@ -236,12 +236,14 @@ pub fn nbr_hello_interpret(
                 }
             }
             IsisTlv::Ipv4IfAddr(ifaddr) => {
-                addr4.insert(ifaddr.addr, NeighborAddr4::new(ifaddr.addr, None));
+                for &addr in &ifaddr.addrs {
+                    addr4.insert(addr, NeighborAddr4::new(addr, None));
+                }
             }
             IsisTlv::Ipv6GlobalIfAddr(ifaddr) => {
-                addr6.insert(ifaddr.addr);
+                addr6.extend(&ifaddr.addrs);
             }
-            IsisTlv::Ipv6IfAddr(ifaddr) => laddr6.push(ifaddr.addr),
+            IsisTlv::Ipv6IfAddr(ifaddr) => laddr6.extend(&ifaddr.addrs),
             IsisTlv::ProtoSupported(tlv) => {
                 nbr.proto = Some(tlv.clone());
             }
@@ -499,7 +501,7 @@ pub fn hello_recv(link: &mut LinkTop, level: Level, pdu: IsisHello, mac: Option<
     // transition point below — by that time nbr is no longer in
     // scope and we can no longer reach back into `link.state.nbrs`
     // while link.state.v4addr is also borrowed.
-    let bfd_peer_v4: Option<Ipv4Addr> = nbr.addr4.keys().next().copied();
+    let bfd_peer_v4: Option<Ipv4Addr> = super::link::nbr_v4_pick(&link.state.v4addr, &nbr.addr4);
     // IPv6-only adjacency: the single-hop BFD session is keyed on the
     // neighbour's link-local (learned via TLV 232) and our own link-local.
     let bfd_peer_v6ll: Option<Ipv6Addr> = nbr.addr6l.first().copied();
@@ -749,7 +751,8 @@ pub fn hello_p2p_recv(link: &mut LinkTop, pdu: IsisP2pHello, mac: Option<MacAddr
         let mut state = nbr.state;
         let was_up = state == NfsmState::Up;
         // Snapshot before any mut-nbr work; see LAN handler comment.
-        let bfd_peer_v4: Option<Ipv4Addr> = nbr.addr4.keys().next().copied();
+        let bfd_peer_v4: Option<Ipv4Addr> =
+            super::link::nbr_v4_pick(&link.state.v4addr, &nbr.addr4);
         let bfd_peer_v6ll: Option<Ipv6Addr> = nbr.addr6l.first().copied();
 
         // When it is three way handshake.

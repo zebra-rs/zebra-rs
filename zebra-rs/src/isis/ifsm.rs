@@ -50,28 +50,33 @@ pub fn proto_supported(enable: &Afis<bool>) -> IsisTlvProtoSupported {
 /// honor. Shared by the LAN and P2P Hello generators.
 fn push_if_addr_tlvs(tlvs: &mut Vec<IsisTlv>, link: &LinkTop) {
     if link.config.enable.v4 {
-        for prefix in &link.state.v4addr {
+        // One packed TLV per MAX_ADDRS chunk (the FRR/Cisco form),
+        // secondaries included — they are real interface addresses.
+        let addrs: Vec<_> = link.state.v4addr.iter().map(|e| e.prefix.addr()).collect();
+        for chunk in addrs.chunks(IsisTlvIpv4IfAddr::MAX_ADDRS) {
             tlvs.push(
                 IsisTlvIpv4IfAddr {
-                    addr: prefix.addr(),
+                    addrs: chunk.to_vec(),
                 }
                 .into(),
             );
         }
     }
     if link.config.enable.v6 {
-        for prefix in &link.state.v6laddr {
+        let laddrs: Vec<_> = link.state.v6laddr.iter().map(|p| p.addr()).collect();
+        for chunk in laddrs.chunks(IsisTlvIpv6IfAddr::MAX_ADDRS) {
             tlvs.push(
                 IsisTlvIpv6IfAddr {
-                    addr: prefix.addr(),
+                    addrs: chunk.to_vec(),
                 }
                 .into(),
             );
         }
-        for prefix in &link.state.v6addr {
+        let gaddrs: Vec<_> = link.state.v6addr.iter().map(|p| p.addr()).collect();
+        for chunk in gaddrs.chunks(IsisTlvIpv6GlobalIfAddr::MAX_ADDRS) {
             tlvs.push(
                 IsisTlvIpv6GlobalIfAddr {
-                    addr: prefix.addr(),
+                    addrs: chunk.to_vec(),
                 }
                 .into(),
             );

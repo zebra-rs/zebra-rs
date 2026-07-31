@@ -411,7 +411,11 @@ impl Display for IsisTlvProtoSupported {
 
 impl Display for IsisTlvIpv4IfAddr {
     fn fmt(&self, f: &mut Formatter<'_>) -> Result {
-        write!(f, "  IPv4 Interface Address: {}", self.addr)
+        write!(
+            f,
+            "  IPv4 Interface Address: {}",
+            self.addrs.iter().format(" ")
+        )
     }
 }
 
@@ -441,13 +445,21 @@ impl Display for IsisTlvIpv6TeRouterId {
 
 impl Display for IsisTlvIpv6IfAddr {
     fn fmt(&self, f: &mut Formatter<'_>) -> Result {
-        write!(f, "  IPv6 Interface Address: {}", self.addr)
+        write!(
+            f,
+            "  IPv6 Interface Address: {}",
+            self.addrs.iter().format(" ")
+        )
     }
 }
 
 impl Display for IsisTlvIpv6GlobalIfAddr {
     fn fmt(&self, f: &mut Formatter<'_>) -> Result {
-        write!(f, "  IPv6 Global Interface Address: {}", self.addr)
+        write!(
+            f,
+            "  IPv6 Global Interface Address: {}",
+            self.addrs.iter().format(" ")
+        )
     }
 }
 

@@ -25,7 +25,7 @@ use super::flex_algo::FlexAlgoEntry;
 use super::graph::{LspMap, graph, graph_flex_algo, graph_mt2};
 use super::inst::{Isis, IsisTop, Message};
 use super::level::Level;
-use super::link::{Afi, LinkTop};
+use super::link::{Afi, IsisLink, LinkTop, nbr_v4_pick, v4_primary_where};
 use super::lsdb::Lsdb;
 use super::neigh::Neighbor;
 use super::srmpls::LabelConfig;
@@ -54,8 +54,12 @@ pub trait IsisRibFamily: Sized + 'static {
     /// TI-LFA protection into trivial / 1-segment / N-segment tallies.
     fn backup_sr_len(backup: &Self::Backup) -> usize;
 
-    /// Collect nexthop addresses for this family from one neighbor record.
-    fn nhop_addrs(nbr: &Neighbor) -> Vec<Self::Addr>;
+    /// Nexthop addresses for this family from one neighbor record on
+    /// `link`. One address per neighbor: the peer advertises every
+    /// interface address in its Hello (TLV 132 / 232), and treating
+    /// them all as ECMP nexthops both skewed load-balancing weights
+    /// and installed peer addresses from subnets this link is not on.
+    fn nhop_addrs(link: &IsisLink, nbr: &Neighbor) -> Vec<Self::Addr>;
 
     /// Look up the family's reach entries for `sys_id`.
     /// `mt2_mode` selects `mt2_reach_map_v6` vs `reach_map_v6` for V6;
@@ -135,8 +139,10 @@ impl IsisRibFamily for V4 {
         backup.labels.push(rib::Label::Explicit(sid));
     }
 
-    fn nhop_addrs(nbr: &Neighbor) -> Vec<Ipv4Addr> {
-        nbr.addr4.keys().copied().collect()
+    fn nhop_addrs(link: &IsisLink, nbr: &Neighbor) -> Vec<Ipv4Addr> {
+        nbr_v4_pick(&link.state.v4addr, &nbr.addr4)
+            .into_iter()
+            .collect()
     }
 
     fn reach_entries<'a>(
@@ -232,8 +238,10 @@ impl IsisRibFamily for V6 {
         backup.segs.len()
     }
 
-    fn nhop_addrs(nbr: &Neighbor) -> Vec<Ipv6Addr> {
-        nbr.addr6l.clone()
+    fn nhop_addrs(_link: &IsisLink, nbr: &Neighbor) -> Vec<Ipv6Addr> {
+        // Link-locals are on-link by definition; the first is the
+        // same one the BFD/STAMP session keys use.
+        nbr.addr6l.first().into_iter().copied().collect()
     }
 
     fn reach_entries<'a>(
@@ -838,16 +846,16 @@ fn build_adjacency_ilm(
         let mut nhops = BTreeMap::new();
 
         for (ifindex, link) in top.links.iter() {
-            if let Some(nbr) = link.state.nbrs.get(&level).get(nhop_id) {
-                for addr in nbr.addr4.keys() {
-                    let nhop = SpfNexthop::<V4> {
-                        ifindex: *ifindex,
-                        adjacency: true,
-                        sys_id: Some(*nhop_id),
-                        backup: None,
-                    };
-                    nhops.insert(*addr, nhop);
-                }
+            if let Some(nbr) = link.state.nbrs.get(&level).get(nhop_id)
+                && let Some(addr) = nbr_v4_pick(&link.state.v4addr, &nbr.addr4)
+            {
+                let nhop = SpfNexthop::<V4> {
+                    ifindex: *ifindex,
+                    adjacency: true,
+                    sys_id: Some(*nhop_id),
+                    backup: None,
+                };
+                nhops.insert(addr, nhop);
             }
         }
 
@@ -956,7 +964,7 @@ fn build_rib_from_spf<F: IsisRibFamily>(
                 let Some(nbr) = link.state.nbrs.get(&level).get(&nhop_sys_id) else {
                     continue;
                 };
-                for addr in F::nhop_addrs(nbr) {
+                for addr in F::nhop_addrs(link, nbr) {
                     spf_nhops.insert(
                         addr,
                         SpfNexthop::<F> {
@@ -2094,7 +2102,7 @@ fn build_rib6_from_flex_algo(
                 let Some(nbr) = link.state.nbrs.get(&level).get(&nhop_sys_id) else {
                     continue;
                 };
-                for addr in nbr.addr6l.iter() {
+                if let Some(addr) = nbr.addr6l.first() {
                     spf_nhops.insert(
                         *addr,
                         SpfNexthop::<V6> {
@@ -2273,14 +2281,14 @@ fn build_rib_from_flex_algo(
                 let Some(nbr) = link.state.nbrs.get(&level).get(&nhop_sys_id) else {
                     continue;
                 };
-                for addr in nbr.addr4.keys() {
+                if let Some(addr) = nbr_v4_pick(&link.state.v4addr, &nbr.addr4) {
                     let nhop = SpfNexthop::<V4> {
                         ifindex: *link_id,
                         adjacency: *node == nhop_id,
                         sys_id: Some(nhop_sys_id),
                         backup: None,
                     };
-                    spf_nhops.insert(*addr, nhop);
+                    spf_nhops.insert(addr, nhop);
                 }
             }
         }
@@ -2423,13 +2431,11 @@ pub(super) fn update_self_sid_ilm(isis: &mut Isis) {
                 continue;
             };
             // The local delivery nexthop is the loopback's own routable
-            // IPv4 address; skip the 127.0.0.0/8 literal range.
-            let Some(addr) = link
-                .state
-                .v4addr
-                .iter()
-                .map(|p| p.addr())
-                .find(|a| !a.is_loopback())
+            // IPv4 address — primary preferred; skip the 127.0.0.0/8
+            // literal range.
+            let Some(addr) =
+                v4_primary_where(&link.state.v4addr, |e| !e.prefix.addr().is_loopback())
+                    .map(|e| e.prefix.addr())
             else {
                 continue;
             };

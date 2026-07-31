@@ -82,8 +82,10 @@ pub fn nbr_hold_timer_expire(
     let ifindex = nbr.ifindex;
     // Snapshot the peer's IPv4 and IPv6 link-local so we can send a BFD
     // Unsubscribe after dropping the nbr borrow. nbr's addr maps are about to
-    // be wiped along with the entire entry below.
-    let bfd_peer_v4 = nbr.addr4.keys().next().copied();
+    // be wiped along with the entire entry below. Must be the same pick the
+    // subscribe path used (packet::bfd_session_key) or the Unsubscribe key
+    // won't match the live session.
+    let bfd_peer_v4 = super::link::nbr_v4_pick(&link.state.v4addr, &nbr.addr4);
     let bfd_peer_v6ll = nbr.addr6l.first().copied();
 
     // Originate Hello and LSP.
