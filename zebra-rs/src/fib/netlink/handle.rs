@@ -7,9 +7,7 @@ use netlink_packet_core::{
     NLM_F_ACK, NLM_F_APPEND, NLM_F_CREATE, NLM_F_EXCL, NLM_F_REPLACE, NLM_F_REQUEST,
     NetlinkMessage, NetlinkPayload,
 };
-use netlink_packet_route::address::{
-    AddressAttribute, AddressHeaderFlags, AddressMessage, AddressScope,
-};
+use netlink_packet_route::address::{AddressAttribute, AddressMessage, AddressScope};
 use netlink_packet_route::link::{
     AfSpecInet6, AfSpecUnspec, InfoBridgePort, InfoData, InfoKind, InfoPortData, InfoPortKind,
     InfoVlan, InfoVrf, InfoVxlan, LinkAttribute, LinkFlags, LinkInfo, LinkLayerType, LinkMessage,
@@ -39,7 +37,9 @@ use crate::rib::inst::{IlmEntry, IlmType};
 use crate::rib::tracing::{fib_l2_fdb, fib_l2_mdb, fib_l2_vxlan, fib_nexthop, fib_route, fib_srv6};
 use crate::rib::{
     AddrGenMode, Bridge, Group, GroupTrait, MacAddr, Nexthop, NexthopMulti, NexthopUni, RibType,
-    Vxlan, link, nexthop::NexthopMember,
+    Vxlan, link,
+    link::{AddrFlags, AddrScope},
+    nexthop::NexthopMember,
 };
 
 /// Pull the nexthop-object id (`NHA_ID`) out of an inbound
@@ -4158,12 +4158,10 @@ pub fn link_from_msg(msg: LinkMessage) -> FibLink {
 pub fn addr_from_msg(msg: AddressMessage) -> FibAddr {
     let mut os_addr = FibAddr::new();
     os_addr.link_index = msg.header.index;
-    // IFA_F_SECONDARY is kernel-computed for IPv4: the kernel sets it
-    // when an address shares mask+subnet with an existing primary on
-    // the device. The same bit on an IPv6 address is IFA_F_TEMPORARY
-    // (a privacy address), so it must not map to `secondary`.
-    os_addr.secondary = msg.header.family == AddressFamily::Inet
-        && msg.header.flags.contains(AddressHeaderFlags::Secondary);
+    os_addr.scope = AddrScope::from_kernel(u8::from(msg.header.scope));
+    // The header byte is the truncated legacy copy of the flags; the
+    // 32-bit `IFA_FLAGS` attribute below supersedes it when present.
+    let mut flag_bits = msg.header.flags.bits() as u32;
     for attr in msg.attributes.into_iter() {
         match attr {
             AddressAttribute::Address(addr) => match addr {
@@ -4178,11 +4176,25 @@ pub fn addr_from_msg(msg: AddressMessage) -> FibAddr {
                     }
                 }
             },
+            AddressAttribute::Flags(flags) => {
+                flag_bits = flags.bits();
+            }
+            AddressAttribute::CacheInfo(ci) => {
+                os_addr.valid_lft = Some(ci.ifa_valid);
+                os_addr.preferred_lft = Some(ci.ifa_preferred);
+            }
             _ => {
                 //
             }
         }
     }
+    // IFA_F_SECONDARY is kernel-computed for IPv4: the kernel sets it
+    // when an address shares mask+subnet with an existing primary on
+    // the device. The same bit on an IPv6 address is IFA_F_TEMPORARY
+    // (a privacy address), so it must not map to `secondary`.
+    let is_v6 = msg.header.family == AddressFamily::Inet6;
+    os_addr.secondary = msg.header.family == AddressFamily::Inet && flag_bits & 0x01 != 0;
+    os_addr.flags = AddrFlags::from_kernel(is_v6, flag_bits);
     os_addr
 }
 
@@ -4582,6 +4594,8 @@ mod tests {
         );
     }
 
+    use netlink_packet_route::address::AddressHeaderFlags;
+
     fn addr_msg(family: AddressFamily, flags: AddressHeaderFlags, addr: IpAddr) -> AddressMessage {
         let mut msg = AddressMessage::default();
         msg.header.family = family;
@@ -4627,7 +4641,67 @@ mod tests {
             AddressHeaderFlags::Secondary,
             IpAddr::V6("2001:db8::1".parse::<Ipv6Addr>().unwrap()),
         );
-        assert!(!addr_from_msg(msg).secondary);
+        let addr = addr_from_msg(msg);
+        assert!(!addr.secondary);
+        assert!(addr.flags.temporary, "v6 0x01 is IFA_F_TEMPORARY");
+    }
+
+    #[test]
+    fn addr_from_msg_reads_ifa_flags_attribute() {
+        // The 32-bit IFA_FLAGS attribute supersedes the truncated
+        // header byte. A fresh static v6 address arrives tentative
+        // (DAD running) and permanent.
+        use netlink_packet_route::address::AddressFlags;
+        use std::net::Ipv6Addr;
+        let mut msg = addr_msg(
+            AddressFamily::Inet6,
+            AddressHeaderFlags::empty(),
+            IpAddr::V6("2001:db8::1".parse::<Ipv6Addr>().unwrap()),
+        );
+        msg.attributes.push(AddressAttribute::Flags(
+            AddressFlags::Tentative | AddressFlags::Permanent,
+        ));
+        let addr = addr_from_msg(msg);
+        assert!(addr.flags.tentative);
+        assert!(addr.flags.permanent);
+        assert!(!addr.flags.temporary);
+        assert!(!addr.secondary);
+    }
+
+    #[test]
+    fn addr_from_msg_header_flags_are_the_fallback() {
+        // No IFA_FLAGS attribute → the legacy 8-bit header copy is
+        // still honored.
+        use std::net::Ipv6Addr;
+        let msg = addr_msg(
+            AddressFamily::Inet6,
+            AddressHeaderFlags::Deprecated,
+            IpAddr::V6("2001:db8::2".parse::<Ipv6Addr>().unwrap()),
+        );
+        assert!(addr_from_msg(msg).flags.deprecated);
+    }
+
+    #[test]
+    fn addr_from_msg_reads_scope_and_cacheinfo() {
+        use netlink_packet_route::address::{CacheInfo, CacheInfoBuffer};
+        use netlink_packet_utils::Parseable;
+        use std::net::Ipv6Addr;
+        let mut msg = addr_msg(
+            AddressFamily::Inet6,
+            AddressHeaderFlags::empty(),
+            IpAddr::V6("fe80::1".parse::<Ipv6Addr>().unwrap()),
+        );
+        msg.header.scope = netlink_packet_route::address::AddressScope::Link;
+        // struct ifa_cacheinfo: preferred, valid, cstamp, tstamp.
+        let mut bytes = [0u8; 16];
+        bytes[0..4].copy_from_slice(&14400u32.to_ne_bytes());
+        bytes[4..8].copy_from_slice(&86400u32.to_ne_bytes());
+        let ci = CacheInfo::parse(&CacheInfoBuffer::new(&bytes)).unwrap();
+        msg.attributes.push(AddressAttribute::CacheInfo(ci));
+        let addr = addr_from_msg(msg);
+        assert_eq!(addr.scope, crate::rib::link::AddrScope::Link);
+        assert_eq!(addr.valid_lft, Some(86400));
+        assert_eq!(addr.preferred_lft, Some(14400));
     }
 
     #[test]

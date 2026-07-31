@@ -6,7 +6,11 @@ use netlink_packet_route::link::LinkFlags;
 use netlink_packet_route::neighbour::{NeighbourFlags, NeighbourState};
 use tokio::sync::mpsc::{self, UnboundedReceiver, UnboundedSender};
 
-use crate::rib::{MacAddr, entry::RibEntry};
+use crate::rib::{
+    MacAddr,
+    entry::RibEntry,
+    link::{AddrFlags, AddrScope},
+};
 
 use super::LinkType;
 
@@ -80,6 +84,15 @@ pub struct FibAddr {
     pub addr: IpNet,
     pub link_index: u32,
     pub secondary: bool,
+    /// Kernel `ifa_scope` from the address message header.
+    pub scope: AddrScope,
+    /// Normalized `IFA_FLAGS` state (tentative/deprecated/temporary/…).
+    pub flags: AddrFlags,
+    /// Remaining valid lifetime from `IFA_CACHEINFO`; `u32::MAX` =
+    /// forever, `None` = the platform didn't report one.
+    pub valid_lft: Option<u32>,
+    /// Remaining preferred lifetime; see `valid_lft`.
+    pub preferred_lft: Option<u32>,
 }
 
 impl FibAddr {

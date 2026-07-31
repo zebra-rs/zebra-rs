@@ -144,6 +144,7 @@ fn os_dump(tx: UnboundedSender<FibMessage>) {
                                 addr: IpNet::V4(ipv4net),
                                 link_index: index,
                                 secondary: false,
+                                ..Default::default()
                             };
                             let msg = FibMessage::NewAddr(osaddr);
                             tx.send(msg).unwrap();
@@ -162,6 +163,7 @@ fn os_dump(tx: UnboundedSender<FibMessage>) {
                                 addr: IpNet::V6(ipv6net),
                                 link_index: index,
                                 secondary: false,
+                                ..Default::default()
                             };
                             let msg = FibMessage::NewAddr(osaddr);
                             tx.send(msg).unwrap();
