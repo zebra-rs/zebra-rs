@@ -1951,12 +1951,22 @@ impl Ospf<Ospfv2> {
                 continue;
             }
 
+            // On a point-to-point link the primary (first
+            // non-secondary) address owns the P2p entries — RFC 2328
+            // §12.4.1.1 has one per Full neighbor, not one per
+            // address. Every other non-secondary address names a
+            // different subnet sharing the wire and contributes a
+            // Stub link only, matching Cisco/FRR secondary-network
+            // behavior. (The broadcast arm below picks its Transit
+            // owner by the DR's network instead.)
+            let primary_prefix = super::addr::primary_addr(&link.addr).map(|a| a.prefix);
+
             // RFC 2328 §12.4.1.1, numbered point-to-point: one Type-1
             // P2p link per Full neighbor (pointing at the neighbor's
-            // router-id, link_data = our interface address), plus a
-            // Type-3 Stub for the local /N. With no Full neighbor we
-            // fall through to Stub-only, which keeps the local prefix
-            // advertised even while the adjacency is still forming.
+            // router-id, link_data = our primary interface address),
+            // plus a Type-3 Stub per local /N. With no Full neighbor
+            // we fall through to Stub-only, which keeps the local
+            // prefix advertised even while the adjacency is forming.
             if link.is_pointopoint() {
                 for addr in &link.addr {
                     if addr.prefix.addr().octets()[0] == 127 {
@@ -1967,18 +1977,20 @@ impl Ospf<Ospfv2> {
                     if addr.secondary {
                         continue;
                     }
-                    for nbr in link.nbrs.values() {
-                        if nbr.state != NfsmState::Full {
-                            continue;
+                    if Some(addr.prefix) == primary_prefix {
+                        for nbr in link.nbrs.values() {
+                            if nbr.state != NfsmState::Full {
+                                continue;
+                            }
+                            router_lsa.links.push(RouterLsaLink {
+                                link_id: nbr.ident.router_id,
+                                link_data: addr.prefix.addr(),
+                                link_type: OspfLinkType::P2p,
+                                num_tos: 0,
+                                tos_0_metric: transit_metric,
+                                toses: vec![],
+                            });
                         }
-                        router_lsa.links.push(RouterLsaLink {
-                            link_id: nbr.ident.router_id,
-                            link_data: addr.prefix.addr(),
-                            link_type: OspfLinkType::P2p,
-                            num_tos: 0,
-                            tos_0_metric: transit_metric,
-                            toses: vec![],
-                        });
                     }
                     router_lsa
                         .links
@@ -2025,6 +2037,9 @@ impl Ospf<Ospfv2> {
                         toses: vec![],
                     }
                 } else {
+                    // An address off the DR's network (multi-address
+                    // interface) — or any address while the segment
+                    // has no DR adjacency — is a Stub.
                     Self::router_lsa_stub_link(addr.prefix, metric)
                 };
                 router_lsa.links.push(lsa_link);
@@ -5973,7 +5988,7 @@ impl Ospf<Ospfv2> {
         // why the same address arrives multiple times. Without it the
         // Router-LSA repeats the stub network once per delivery.
         let ospf_addr = OspfAddr::from(&addr, prefix);
-        super::addr::link_addr_push_unique(&mut link.addr, ospf_addr);
+        let changed = super::addr::link_addr_push_unique(&mut link.addr, ospf_addr);
         // Identity follows the primary (first non-secondary) address:
         // a last-delivered secondary must not steal the DR-election
         // identity, and a promotion re-broadcast moves it back.
@@ -5995,24 +6010,29 @@ impl Ospf<Ospfv2> {
                 .send(Message::Ifsm(addr.ifindex, IfsmEvent::InterfaceUp));
         }
 
-        // The Prefix-SID's Extended-Prefix LSA advertises this link's
-        // first non-loopback address as a /32 host prefix. The config
-        // handler originates it at commit time, but the kernel's
-        // AddrAdd for an address configured in the same commit can
-        // land *after* that — origination then finds no usable
-        // address and bails without retry. Re-originate here so the
-        // LSA appears as soon as the address does (no-op on links
-        // without SR + a configured prefix-sid). Mirrors the v3
-        // `addr_add` fix.
-        self.ext_prefix_lsa_originate(addr.ifindex);
+        if changed {
+            // The Router-LSA's stub links and transit Link Data are
+            // built from the address list / identity that just
+            // changed; without re-origination a new subnet (or a
+            // promoted primary) only reaches peers at the next
+            // unrelated refresh, and their SPF keeps resolving
+            // nexthops from the stale Link Data. Gated on `changed`
+            // (with MinLSInterval coalescing bursts) so a
+            // re-delivered address doesn't bump the sequence number
+            // and re-flood.
+            self.router_lsa_originate();
 
-        // The Router-LSA's stub links and transit Link Data are built
-        // from the address list / identity that just changed; without
-        // re-origination a new subnet (or a promoted primary) only
-        // reaches peers at the next unrelated refresh, and their SPF
-        // keeps resolving nexthops from the stale Link Data.
-        // MinLSInterval-throttled, so an address burst coalesces.
-        self.router_lsa_originate();
+            // The Prefix-SID's Extended-Prefix LSA advertises this
+            // link's first non-loopback address as a /32 host prefix.
+            // The config handler originates it at commit time, but the
+            // kernel's AddrAdd for an address configured in the same
+            // commit can land *after* that — origination then finds no
+            // usable address and bails without retry. Re-originate
+            // here so the LSA appears as soon as the address does
+            // (no-op on links without SR + a configured prefix-sid).
+            // Mirrors the v3 `addr_add` fix.
+            self.ext_prefix_lsa_originate(addr.ifindex);
+        }
     }
 
     fn addr_del(&mut self, addr: LinkAddr) {
@@ -6022,7 +6042,9 @@ impl Ospf<Ospfv2> {
         let IpNet::V4(prefix) = &addr.addr else {
             return;
         };
+        let before = link.addr.len();
         link.addr.retain(|a| a.prefix != *prefix);
+        let changed = link.addr.len() != before;
 
         // Repair the identity: it may have pointed at the removed
         // address (historically it tracked the last-delivered one and
@@ -6037,14 +6059,14 @@ impl Ospf<Ospfv2> {
         let (next, next_id) = super::config::link_should_enable(link);
         super::config::apply_link_enable_transition(link, next, next_id);
 
-        // Mirror of the `addr_add` re-origination: the advertised
-        // host prefix may have just gone away or a different
-        // remaining address now wins.
-        self.ext_prefix_lsa_originate(addr.ifindex);
-
-        // See `addr_add`: drop the removed subnet / stale Link Data
-        // from the Router-LSA immediately.
-        self.router_lsa_originate();
+        if changed {
+            // Mirror of the `addr_add` re-origination: drop the
+            // removed subnet / stale Link Data from the Router-LSA
+            // now, and the SR host prefix may have just gone away or
+            // a different remaining address now wins.
+            self.router_lsa_originate();
+            self.ext_prefix_lsa_originate(addr.ifindex);
+        }
     }
 
     async fn process_recv(
@@ -7033,7 +7055,8 @@ impl Ospf<Ospfv3> {
         // why the same address arrives multiple times. Without it the
         // Intra-Area-Prefix-LSA repeats the prefix once per delivery.
         let ospf_addr = OspfAddr::<Ospfv3>::from(&addr, prefix);
-        super::addr::link_addr_push_unique(&mut link.addr, ospf_addr);
+        let changed = super::addr::link_addr_push_unique(&mut link.addr, ospf_addr);
+        let area_id = link.area;
 
         if link.enabled && link.state == IfsmState::Down {
             let _ = self
@@ -7041,16 +7064,34 @@ impl Ospf<Ospfv3> {
                 .send(Message::Ifsm(addr.ifindex, IfsmEvent::InterfaceUp));
         }
 
-        // The Prefix-SID's E-Intra-Area-Prefix-LSA advertises this
-        // link's first routable global as a /128 host prefix. The
-        // config handler originates it at commit time, but the
-        // kernel's AddrAdd for an address configured in the same
-        // commit can land *after* that — origination then finds no
-        // usable address and stays flushed forever. Re-originate
-        // here so the LSA appears as soon as the address does (the
-        // builder gates on SR mode + a configured prefix-sid, so
-        // this is a no-op on links without one).
-        self.ext_intra_area_prefix_v3_lsa_originate(addr.ifindex);
+        // A prefix the address list didn't hold yet must reach the
+        // three LSAs that advertise it — without this, peers only
+        // learn it at the ~30min LSRefreshTime re-origination:
+        //   * Link-LSA (link scope, feeds the DR's aggregation),
+        //   * the Router-LSA-referenced Intra-Area-Prefix-LSA
+        //     (area scope; its builder's transit filter decides
+        //     whether this link's prefixes belong to us or the DR),
+        //   * the Network-LSA-referenced one when we are the DR
+        //     (self-gating: flushes or no-ops otherwise).
+        // Each originator is safe to call on a disabled / Down link.
+        // Gated on `changed` so a re-delivered address (kernel echo,
+        // DAD re-notify) doesn't bump sequence numbers and re-flood.
+        if changed {
+            self.link_lsa_originate(addr.ifindex);
+            self.router_intra_area_prefix_lsa_originate(area_id);
+            self.network_intra_area_prefix_lsa_originate(addr.ifindex);
+
+            // The Prefix-SID's E-Intra-Area-Prefix-LSA advertises this
+            // link's first routable global as a /128 host prefix. The
+            // config handler originates it at commit time, but the
+            // kernel's AddrAdd for an address configured in the same
+            // commit can land *after* that — origination then finds no
+            // usable address and stays flushed forever. Re-originate
+            // here so the LSA appears as soon as the address does (the
+            // builder gates on SR mode + a configured prefix-sid, so
+            // this is a no-op on links without one).
+            self.ext_intra_area_prefix_v3_lsa_originate(addr.ifindex);
+        }
     }
 
     /// Apply a Router-ID to this OSPFv3 instance. Mirror of the v2
@@ -7186,15 +7227,27 @@ impl Ospf<Ospfv3> {
         let IpNet::V6(prefix) = &addr.addr else {
             return;
         };
+        let before = link.addr.len();
         link.addr.retain(|a| a.prefix != *prefix);
+        let changed = link.addr.len() != before;
+        let area_id = link.area;
 
         let (next, next_id) = super::config::link_should_enable(link);
         super::config::apply_link_enable_transition(link, next, next_id);
 
-        // Mirror of the `addr_add` re-origination: the advertised
-        // host prefix may have just gone away (the builder flushes)
-        // or a different remaining address now wins.
-        self.ext_intra_area_prefix_v3_lsa_originate(addr.ifindex);
+        // Mirror of the `addr_add` re-origination: the removed prefix
+        // must leave the Link-LSA and both Intra-Area-Prefix-LSA
+        // variants now, not at the next LSRefreshTime — each
+        // originator re-builds from the current address list and
+        // flushes when nothing is left to advertise. The SR host
+        // prefix may have gone away too (the builder flushes) or a
+        // different remaining address now wins.
+        if changed {
+            self.link_lsa_originate(addr.ifindex);
+            self.router_intra_area_prefix_lsa_originate(area_id);
+            self.network_intra_area_prefix_lsa_originate(addr.ifindex);
+            self.ext_intra_area_prefix_v3_lsa_originate(addr.ifindex);
+        }
     }
 
     /// Look up the v3 show-path handler for `msg.paths` and invoke
@@ -7240,9 +7293,13 @@ impl Ospf<Ospfv3> {
         use ospf_packet::{
             OSPFV3_INTRA_AREA_PREFIX_LSA_TYPE, OSPFV3_ROUTER_LSA_TYPE, Ospfv3IntraAreaPrefix,
             Ospfv3IntraAreaPrefixLsa, Ospfv3LsBody, Ospfv3Lsa, Ospfv3LsaHeader,
-            Ospfv3PrefixOptions, ospfv3_prefix_wire_len,
+            Ospfv3PrefixOptions,
         };
 
+        // Dedup on the masked wire form: two same-subnet addresses on
+        // one link (or the same prefix on two links in the area)
+        // contribute one entry, first-seen metric wins.
+        let mut seen: std::collections::BTreeSet<(u8, Vec<u8>)> = std::collections::BTreeSet::new();
         let mut prefixes: Vec<Ospfv3IntraAreaPrefix> = Vec::new();
         for link in self.links.values() {
             if !link.enabled || link.area != area_id {
@@ -7280,13 +7337,12 @@ impl Ospf<Ospfv3> {
                 if a.prefix.addr().segments()[0] == 0xfe80 {
                     continue;
                 }
-                let net = &a.prefix;
-                let prefix_length = net.prefix_len();
-                let wire_len = ospfv3_prefix_wire_len(prefix_length);
-                let mut address_prefix = vec![0u8; wire_len];
-                let bytes = net.addr().octets();
-                let copy_len = prefix_length.div_ceil(8) as usize;
-                address_prefix[..copy_len].copy_from_slice(&bytes[..copy_len]);
+                let prefix_length = a.prefix.prefix_len();
+                let address_prefix =
+                    Self::ospfv3_masked_prefix_bytes(prefix_length, &a.prefix.addr().octets());
+                if !seen.insert((prefix_length, address_prefix.clone())) {
+                    continue;
+                }
                 prefixes.push(Ospfv3IntraAreaPrefix {
                     prefix_length,
                     prefix_options: Ospfv3PrefixOptions::default(),
@@ -7327,6 +7383,26 @@ impl Ospf<Ospfv3> {
         Some(lsa)
     }
 
+    /// The v3 on-wire form of an address prefix (RFC 5340 §A.4.1):
+    /// the address octets truncated to `ceil(len / 8)` bytes, padded
+    /// to a 32-bit boundary, with the host bits inside the last
+    /// partial byte masked to zero — §A.4.1 requires the trailing
+    /// pad bits be zero, and the mask is what lets two same-subnet
+    /// addresses (or an address and a peer's Link-LSA copy of the
+    /// prefix) compare equal for dedup.
+    fn ospfv3_masked_prefix_bytes(prefix_length: u8, octets: &[u8; 16]) -> Vec<u8> {
+        use ospf_packet::ospfv3_prefix_wire_len;
+        let wire_len = ospfv3_prefix_wire_len(prefix_length);
+        let mut out = vec![0u8; wire_len];
+        let copy_len = (prefix_length as usize).div_ceil(8);
+        out[..copy_len].copy_from_slice(&octets[..copy_len]);
+        let partial_bits = prefix_length % 8;
+        if partial_bits != 0 {
+            out[copy_len - 1] &= 0xFFu8 << (8 - partial_bits);
+        }
+        out
+    }
+
     /// Build the v3 Link-LSA for a given interface (RFC 5340 §A.4.9).
     ///
     /// Originated by every router on every active interface with
@@ -7350,7 +7426,7 @@ impl Ospf<Ospfv3> {
     pub fn build_link_lsa(&self, ifindex: u32) -> Option<ospf_packet::Ospfv3Lsa> {
         use ospf_packet::{
             OSPFV3_LINK_LSA_TYPE, Ospfv3LinkLsa, Ospfv3LinkLsaPrefix, Ospfv3LsBody, Ospfv3Lsa,
-            Ospfv3LsaHeader, Ospfv3Options, Ospfv3PrefixOptions, ospfv3_prefix_wire_len,
+            Ospfv3LsaHeader, Ospfv3Options, Ospfv3PrefixOptions,
         };
         use std::net::Ipv6Addr;
 
@@ -7370,29 +7446,29 @@ impl Ospf<Ospfv3> {
             .unwrap_or(Ipv6Addr::UNSPECIFIED);
 
         // Every non-link-local prefix configured on the interface
-        // gets advertised. Each prefix's wire bytes are the
-        // address octets truncated to `ceil(prefix_len / 8)`,
-        // then padded to a 32-bit boundary by
-        // `ospfv3_prefix_wire_len`.
-        let mut prefixes: Vec<Ospfv3LinkLsaPrefix> = link
+        // gets advertised, host bits masked (see
+        // `ospfv3_masked_prefix_bytes`) and deduped: two addresses
+        // in the same subnet contribute the prefix once, not once
+        // per address.
+        let mut seen: std::collections::BTreeSet<(u8, Vec<u8>)> = std::collections::BTreeSet::new();
+        let mut prefixes: Vec<Ospfv3LinkLsaPrefix> = Vec::new();
+        for a in link
             .addr
             .iter()
             .filter(|a| a.prefix.addr().segments()[0] != 0xfe80)
-            .map(|a| {
-                let net = &a.prefix;
-                let prefix_length = net.prefix_len();
-                let wire_len = ospfv3_prefix_wire_len(prefix_length);
-                let mut address_prefix = vec![0u8; wire_len];
-                let addr_bytes = net.addr().octets();
-                let copy_len = prefix_length.div_ceil(8) as usize;
-                address_prefix[..copy_len].copy_from_slice(&addr_bytes[..copy_len]);
-                Ospfv3LinkLsaPrefix {
-                    prefix_length,
-                    prefix_options: Ospfv3PrefixOptions::default(),
-                    address_prefix,
-                }
-            })
-            .collect();
+        {
+            let prefix_length = a.prefix.prefix_len();
+            let address_prefix =
+                Self::ospfv3_masked_prefix_bytes(prefix_length, &a.prefix.addr().octets());
+            if !seen.insert((prefix_length, address_prefix.clone())) {
+                continue;
+            }
+            prefixes.push(Ospfv3LinkLsaPrefix {
+                prefix_length,
+                prefix_options: Ospfv3PrefixOptions::default(),
+                address_prefix,
+            });
+        }
 
         // RFC 5340 §4.4.3.8 LA-bit: additionally advertise each global
         // interface address as a /128 host prefix. Peers use it as the
@@ -10059,7 +10135,7 @@ impl Ospf<Ospfv3> {
             Message::Retransmit(ifindex, router_id) => {
                 self.process_retransmit(ifindex, router_id);
             }
-            Message::Srv6EndxReconcile(ifindex) => {
+            Message::LinkLsaInstalled(ifindex) => {
                 // A Link-LSA landed on this interface — the neighbor's
                 // global /128 may have just become available. Sweep
                 // the link's Full neighbors so any installed End.X
@@ -10078,6 +10154,13 @@ impl Ospf<Ospfv3> {
                 for rid in rids {
                     self.reconcile_endx_sid(ifindex, rid);
                 }
+
+                // If we are the DR on this segment, the peer's changed
+                // Link-LSA changes our Network-LSA-referenced
+                // Intra-Area-Prefix-LSA aggregation (RFC 5340
+                // §4.4.3.9) — re-originate it. Self-gating: flushes
+                // or no-ops when we aren't DR.
+                self.network_intra_area_prefix_lsa_originate(ifindex);
             }
             Message::DdRetransmit(ifindex, router_id) => {
                 self.process_dd_retransmit(ifindex, router_id);
@@ -11574,7 +11657,7 @@ impl Ospf<Ospfv3> {
         use ospf_packet::{
             OSPFV3_INTRA_AREA_PREFIX_LSA_TYPE, OSPFV3_NETWORK_LSA_TYPE, Ospfv3IntraAreaPrefix,
             Ospfv3IntraAreaPrefixLsa, Ospfv3LsBody, Ospfv3Lsa, Ospfv3LsaHeader,
-            Ospfv3PrefixOptions, ospfv3_prefix_wire_len,
+            Ospfv3PrefixOptions,
         };
 
         let link = self.links.get(&ifindex)?;
@@ -11588,18 +11671,21 @@ impl Ospf<Ospfv3> {
             return None;
         }
 
+        // Dedup on the masked wire form — the DR's own addresses and
+        // the aggregated peer prefixes below routinely name the same
+        // subnet.
+        let mut seen: std::collections::BTreeSet<(u8, Vec<u8>)> = std::collections::BTreeSet::new();
         let mut prefixes: Vec<Ospfv3IntraAreaPrefix> = Vec::new();
         for a in link.addr.iter() {
             if a.prefix.addr().segments()[0] == 0xfe80 {
                 continue;
             }
-            let net = &a.prefix;
-            let prefix_length = net.prefix_len();
-            let wire_len = ospfv3_prefix_wire_len(prefix_length);
-            let mut address_prefix = vec![0u8; wire_len];
-            let bytes = net.addr().octets();
-            let copy_len = prefix_length.div_ceil(8) as usize;
-            address_prefix[..copy_len].copy_from_slice(&bytes[..copy_len]);
+            let prefix_length = a.prefix.prefix_len();
+            let address_prefix =
+                Self::ospfv3_masked_prefix_bytes(prefix_length, &a.prefix.addr().octets());
+            if !seen.insert((prefix_length, address_prefix.clone())) {
+                continue;
+            }
             prefixes.push(Ospfv3IntraAreaPrefix {
                 prefix_length,
                 prefix_options: Ospfv3PrefixOptions::default(),
@@ -11607,6 +11693,57 @@ impl Ospf<Ospfv3> {
                 address_prefix,
             });
         }
+
+        // RFC 5340 §4.4.3.9: the DR's Intra-Area-Prefix-LSA carries
+        // the union of the segment's prefixes — its own plus those in
+        // the Link-LSAs of routers fully adjacent to it. On a
+        // single-subnet segment the peers' prefixes dedup against
+        // ours, but a peer holding an address in a subnet we don't
+        // share only reaches the area through this aggregation (the
+        // transit filter in `build_router_intra_area_prefix_lsa`
+        // suppresses it at the peer). NU-bit prefixes are excluded
+        // per the RFC; LA-bit /128 host entries stay link-scope —
+        // they exist for SRv6 End.X resolution on the segment, not
+        // as area-wide host routes.
+        let full_rids: std::collections::BTreeSet<Ipv4Addr> = link
+            .nbrs
+            .values()
+            .filter(|n| n.state == NfsmState::Full)
+            .map(|n| n.ident.router_id)
+            .collect();
+        for ((_id, adv), entry) in link
+            .lsdb
+            .iter_by_raw_type(ospf_packet::OSPFV3_LINK_LSA_TYPE)
+        {
+            if !full_rids.contains(&adv) {
+                continue;
+            }
+            let ospf_packet::Ospfv3LsBody::Link(body) = &entry.data.body else {
+                continue;
+            };
+            for p in body.prefixes.iter() {
+                if p.prefix_options.nu() || p.prefix_options.la() {
+                    continue;
+                }
+                // Normalize the peer's wire bytes through the same
+                // masking so a nonconforming sender's stray host
+                // bits can't defeat the dedup.
+                let mut octets = [0u8; 16];
+                let copy = p.address_prefix.len().min(16);
+                octets[..copy].copy_from_slice(&p.address_prefix[..copy]);
+                let address_prefix = Self::ospfv3_masked_prefix_bytes(p.prefix_length, &octets);
+                if !seen.insert((p.prefix_length, address_prefix.clone())) {
+                    continue;
+                }
+                prefixes.push(Ospfv3IntraAreaPrefix {
+                    prefix_length: p.prefix_length,
+                    prefix_options: Ospfv3PrefixOptions::default(),
+                    metric: 0,
+                    address_prefix,
+                });
+            }
+        }
+
         if prefixes.is_empty() {
             return None;
         }
@@ -11674,7 +11811,18 @@ impl Ospf<Ospfv3> {
             return;
         }
 
+        // Still DR but nothing left to advertise (the segment's last
+        // non-link-local prefix was deleted): flush the prior copy
+        // instead of letting it linger until LSRefreshTime.
         let Some(mut lsa) = self.build_network_intra_area_prefix_lsa(ifindex) else {
+            let flushed = if let Some(area) = self.areas.get_mut(area_id) {
+                area.lsdb.flush_lsa_by_raw_key(key, &self.tx, Some(area_id))
+            } else {
+                None
+            };
+            if let Some(lsa) = flushed {
+                self.flood_self_originated_lsa(area_id, &lsa);
+            }
             return;
         };
 
@@ -12009,13 +12157,19 @@ pub enum Message<V: OspfVersion = Ospfv2> {
     /// Flood AS-scoped LSA through all normal areas, excluding source neighbor.
     /// (lsa, source_ifindex, source_nbr_addr)
     FloodAs(V::Lsa, u32, V::Addr),
-    /// A link-scope LSA (Link-LSA) was installed on this interface —
-    /// re-evaluate SRv6 End.X nexthops, because the neighbor's global
-    /// address (LA-bit /128 in its Link-LSA) may have just arrived
-    /// and the kernel End.X entry must drift from the link-local to
-    /// it (Linux resolves End.X nh6 by ingress iif).
+    /// A peer's Link-LSA was installed on this interface. Two
+    /// consumers react:
+    ///   * SRv6 End.X — the neighbor's global address (LA-bit /128
+    ///     in its Link-LSA) may have just arrived and the kernel
+    ///     End.X entry must drift from the link-local to it (Linux
+    ///     resolves End.X nh6 by ingress iif);
+    ///   * the DR's Network-LSA-referenced Intra-Area-Prefix-LSA —
+    ///     peer Link-LSA prefixes feed its aggregation
+    ///     (RFC 5340 §4.4.3.9), so a peer's added / removed prefix
+    ///     must re-originate it.
+    ///
     /// v3-only; the v2 handler ignores it.
-    Srv6EndxReconcile(u32),
+    LinkLsaInstalled(u32),
     /// Retransmit LSAs to a specific neighbor.
     /// (ifindex, nbr_addr)
     Retransmit(u32, Ipv4Addr),
@@ -16602,5 +16756,40 @@ mod diff_apply_tests {
         let (dels, adds) = run_diff_apply(&curr, &next);
         assert_eq!(dels, vec![prefix]);
         assert!(adds.is_empty());
+    }
+}
+
+#[cfg(test)]
+mod v3_prefix_wire_tests {
+    use super::{Ospf, Ospfv3};
+
+    #[test]
+    fn masked_prefix_bytes_byte_aligned() {
+        // /64: 8 wire bytes, host bits beyond them simply truncate.
+        let addr: std::net::Ipv6Addr = "2001:db8:0:1::1".parse().unwrap();
+        let bytes = Ospf::<Ospfv3>::ospfv3_masked_prefix_bytes(64, &addr.octets());
+        assert_eq!(bytes, vec![0x20, 0x01, 0x0d, 0xb8, 0x00, 0x00, 0x00, 0x01]);
+    }
+
+    #[test]
+    fn masked_prefix_bytes_masks_partial_byte() {
+        // /61 keeps the top 5 bits of the final byte: two addresses
+        // inside the same /61 must yield identical wire bytes or the
+        // Intra-Area-Prefix dedup misses them.
+        let a: std::net::Ipv6Addr = "2001:db8:0:1f::1".parse().unwrap();
+        let b: std::net::Ipv6Addr = "2001:db8:0:18::2".parse().unwrap();
+        let wa = Ospf::<Ospfv3>::ospfv3_masked_prefix_bytes(61, &a.octets());
+        let wb = Ospf::<Ospfv3>::ospfv3_masked_prefix_bytes(61, &b.octets());
+        assert_eq!(wa, vec![0x20, 0x01, 0x0d, 0xb8, 0x00, 0x00, 0x00, 0x18]);
+        assert_eq!(wa, wb);
+    }
+
+    #[test]
+    fn masked_prefix_bytes_host_and_zero() {
+        let addr: std::net::Ipv6Addr = "2001:db8::7".parse().unwrap();
+        let host = Ospf::<Ospfv3>::ospfv3_masked_prefix_bytes(128, &addr.octets());
+        assert_eq!(host, addr.octets().to_vec());
+        let none = Ospf::<Ospfv3>::ospfv3_masked_prefix_bytes(0, &addr.octets());
+        assert!(none.is_empty());
     }
 }

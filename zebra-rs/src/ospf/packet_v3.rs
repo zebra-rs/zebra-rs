@@ -1474,10 +1474,15 @@ fn ospfv3_ls_upd_proc(
             Ospfv3LsaScope::Link => {
                 oi.link_lsdb
                     .install_lsa(cloned, oi.tx, Some(area_id), oi.tracing);
-                // A peer Link-LSA can carry the neighbor's global /128
-                // (LA-bit) — the preferred SRv6 End.X nexthop. Nudge
-                // the instance to re-evaluate installs on this link.
-                let _ = oi.tx.send(Message::Srv6EndxReconcile(nbr.ifindex));
+                // A peer Link-LSA carries the neighbor's global /128
+                // (LA-bit, the preferred SRv6 End.X nexthop) and the
+                // segment prefixes the DR aggregates (RFC 5340
+                // §4.4.3.9). Nudge the instance to re-evaluate both.
+                // Gated on the actual Link-LSA type — Grace-LSAs are
+                // link-scope too and feed neither consumer.
+                if h.ls_type == ospf_packet::OSPFV3_LINK_LSA_TYPE {
+                    let _ = oi.tx.send(Message::LinkLsaInstalled(nbr.ifindex));
+                }
             }
             Ospfv3LsaScope::Reserved => {
                 return LsaProcessResult::DiscardNoAck;
