@@ -6032,6 +6032,11 @@ impl Ospf<Ospfv2> {
             // (no-op on links without SR + a configured prefix-sid).
             // Mirrors the v3 `addr_add` fix.
             self.ext_prefix_lsa_originate(addr.ifindex);
+
+            // A kernel promotion may have moved the primary — the BFD
+            // sessions on this link key on it as the local endpoint,
+            // so re-key them. No-op when the pick didn't change.
+            self.bfd_reconcile_link(addr.ifindex);
         }
     }
 
@@ -6066,6 +6071,9 @@ impl Ospf<Ospfv2> {
             // a different remaining address now wins.
             self.router_lsa_originate();
             self.ext_prefix_lsa_originate(addr.ifindex);
+            // See `addr_add`: the deleted address may have been the
+            // primary — BFD must re-key onto the promoted survivor.
+            self.bfd_reconcile_link(addr.ifindex);
         }
     }
 
@@ -7081,6 +7089,13 @@ impl Ospf<Ospfv3> {
             self.router_intra_area_prefix_lsa_originate(area_id);
             self.network_intra_area_prefix_lsa_originate(addr.ifindex);
 
+            // Our own stable link-local pick may have moved (a lower
+            // fe80 was added) — the BFD sessions on this link key on
+            // it as the local endpoint, so re-key them. Peers absorb
+            // the moved Hello source via their `NbrSourceChanged`
+            // refresh. No-op when the pick didn't change.
+            self.bfd_reconcile_link(addr.ifindex);
+
             // The Prefix-SID's E-Intra-Area-Prefix-LSA advertises this
             // link's first routable global as a /128 host prefix. The
             // config handler originates it at commit time, but the
@@ -7247,6 +7262,9 @@ impl Ospf<Ospfv3> {
             self.router_intra_area_prefix_lsa_originate(area_id);
             self.network_intra_area_prefix_lsa_originate(addr.ifindex);
             self.ext_intra_area_prefix_v3_lsa_originate(addr.ifindex);
+            // See `addr_add`: the deleted address may have been the
+            // stable link-local — BFD must re-key onto the survivor.
+            self.bfd_reconcile_link(addr.ifindex);
         }
     }
 
@@ -7334,7 +7352,7 @@ impl Ospf<Ospfv3> {
                 // Skip link-local addresses — those are
                 // advertised by Link-LSAs (RFC 5340 §A.4.9), not
                 // by Intra-Area-Prefix-LSAs (§A.4.10).
-                if a.prefix.addr().segments()[0] == 0xfe80 {
+                if a.prefix.addr().is_unicast_link_local() {
                     continue;
                 }
                 let prefix_length = a.prefix.prefix_len();
@@ -7435,15 +7453,12 @@ impl Ospf<Ospfv3> {
             return None;
         }
 
-        // Pick a link-local. v3 hellos source from the link-local
-        // and v3 Link-LSAs advertise it (RFC 5340 §A.4.9). Until
-        // netlink reports one we publish `::` as a placeholder.
-        let link_local_address: Ipv6Addr = link
-            .addr
-            .iter()
-            .map(|a| a.prefix.addr())
-            .find(|a| a.segments()[0] == 0xfe80)
-            .unwrap_or(Ipv6Addr::UNSPECIFIED);
+        // The stable link-local — the same pick every v3 source-address
+        // site uses, so the Link-LSA advertises exactly the address our
+        // hellos come from (RFC 5340 §A.4.9). Until netlink reports one
+        // we publish `::` as a placeholder.
+        let link_local_address: Ipv6Addr =
+            super::addr::stable_link_local(&link.addr).unwrap_or(Ipv6Addr::UNSPECIFIED);
 
         // Every non-link-local prefix configured on the interface
         // gets advertised, host bits masked (see
@@ -7455,7 +7470,7 @@ impl Ospf<Ospfv3> {
         for a in link
             .addr
             .iter()
-            .filter(|a| a.prefix.addr().segments()[0] != 0xfe80)
+            .filter(|a| !a.prefix.addr().is_unicast_link_local())
         {
             let prefix_length = a.prefix.prefix_len();
             let address_prefix =
@@ -7481,7 +7496,7 @@ impl Ospf<Ospfv3> {
             link.addr
                 .iter()
                 .map(|a| a.prefix.addr())
-                .filter(|a| a.segments()[0] != 0xfe80)
+                .filter(|a| !a.is_unicast_link_local())
                 .map(|addr| {
                     let mut options = Ospfv3PrefixOptions::default();
                     options.set_la(true);
@@ -8209,7 +8224,7 @@ impl Ospf<Ospfv3> {
             l.addr
                 .iter()
                 .map(|a| a.prefix.addr())
-                .find(|a| !a.is_loopback() && (a.segments()[0] & 0xffc0) != 0xfe80)
+                .find(|a| !a.is_loopback() && !a.is_unicast_link_local())
         })
     }
 
@@ -9664,10 +9679,7 @@ impl Ospf<Ospfv3> {
             let Some(link) = self.links.get_mut(&ifindex) else {
                 continue;
             };
-            let Some(src) = link.addr.iter().find_map(|a| {
-                let addr = a.prefix.addr();
-                addr.is_unicast_link_local().then_some(addr)
-            }) else {
+            let Some(src) = super::addr::stable_link_local(&link.addr) else {
                 continue;
             };
             let retransmit_interval = link.retransmit_interval();
@@ -9770,10 +9782,7 @@ impl Ospf<Ospfv3> {
         let area_id = link.area;
         let v3_instance_id = link.v3_instance_id();
         let retransmit_interval = link.retransmit_interval();
-        let Some(src) = link.addr.iter().find_map(|a| {
-            let addr = a.prefix.addr();
-            addr.is_unicast_link_local().then_some(addr)
-        }) else {
+        let Some(src) = super::addr::stable_link_local(&link.addr) else {
             return;
         };
         // Auth send state captured before the neighbor borrow (see
@@ -10162,6 +10171,17 @@ impl Ospf<Ospfv3> {
                 // or no-ops when we aren't DR.
                 self.network_intra_area_prefix_lsa_originate(ifindex);
             }
+            Message::NbrSourceChanged(ifindex, nbr_router_id) => {
+                // The neighbor renumbered its link-local; its
+                // `ident.prefix` was already updated on the receive
+                // path. Re-key the consumers that cached the old
+                // address: the BFD session (remote endpoint) and the
+                // SRv6 End.X nexthop. Both reconciles read the
+                // current neighbor state and no-op when nothing is
+                // configured.
+                self.bfd_reconcile_nbr(ifindex, nbr_router_id);
+                self.reconcile_endx_sid(ifindex, nbr_router_id);
+            }
             Message::DdRetransmit(ifindex, router_id) => {
                 self.process_dd_retransmit(ifindex, router_id);
             }
@@ -10443,10 +10463,7 @@ impl Ospf<Ospfv3> {
             return;
         };
         let area_id = link.area;
-        let Some(src) = link.addr.iter().find_map(|a| {
-            let addr = a.prefix.addr();
-            addr.is_unicast_link_local().then_some(addr)
-        }) else {
+        let Some(src) = super::addr::stable_link_local(&link.addr) else {
             return;
         };
         let retransmit_interval = link.retransmit_interval();
@@ -10602,7 +10619,7 @@ impl Ospf<Ospfv3> {
                 // remote SIDs onto their own ::1/128 route (last
                 // writer wins) instead of the advertised loopbacks.
                 let a = a.prefix.addr();
-                a.segments()[0] != 0xfe80 && !a.is_loopback() && !a.is_unspecified()
+                !a.is_unicast_link_local() && !a.is_loopback() && !a.is_unspecified()
             }) {
             let host = Ipv6Net::new(addr.prefix.addr(), 128).unwrap_or(addr.prefix);
             // Loopback parity with v2 / FRR / Junos: stamp 0 instead
@@ -11144,7 +11161,7 @@ impl Ospf<Ospfv3> {
             let mut octets = [0u8; 16];
             octets.copy_from_slice(&p.address_prefix[..16]);
             let addr = Ipv6Addr::from(octets);
-            (addr.segments()[0] != 0xfe80).then_some(addr)
+            (!addr.is_unicast_link_local()).then_some(addr)
         })
     }
 
@@ -11677,7 +11694,7 @@ impl Ospf<Ospfv3> {
         let mut seen: std::collections::BTreeSet<(u8, Vec<u8>)> = std::collections::BTreeSet::new();
         let mut prefixes: Vec<Ospfv3IntraAreaPrefix> = Vec::new();
         for a in link.addr.iter() {
-            if a.prefix.addr().segments()[0] == 0xfe80 {
+            if a.prefix.addr().is_unicast_link_local() {
                 continue;
             }
             let prefix_length = a.prefix.prefix_len();
@@ -12170,6 +12187,17 @@ pub enum Message<V: OspfVersion = Ospfv2> {
     ///
     /// v3-only; the v2 handler ignores it.
     LinkLsaInstalled(u32),
+    /// A known neighbor's link-local source address moved — a Hello
+    /// arrived with the same Router-ID from a new source (the peer
+    /// renumbered its link-local). `ospfv3_hello_recv` already
+    /// updated `nbr.ident.prefix`, which redirects every unicast
+    /// exchange (DBD / LSR / LSU retransmit / LSAck); this message
+    /// lets the instance re-key the consumers that cached the old
+    /// address: the BFD session (its remote endpoint is the
+    /// link-local pair) and the SRv6 End.X nexthop.
+    ///
+    /// (ifindex, nbr_router_id). v3-only; the v2 handler ignores it.
+    NbrSourceChanged(u32, Ipv4Addr),
     /// Retransmit LSAs to a specific neighbor.
     /// (ifindex, nbr_addr)
     Retransmit(u32, Ipv4Addr),
@@ -16175,7 +16203,7 @@ fn add_self_prefix_sids_to_ilm_v3(top: &Ospf<Ospfv3>, ilm: &mut BTreeMap<u32, Sp
                 let Some(our_addr) = link
                     .addr
                     .iter()
-                    .find(|a| a.prefix.addr().segments()[0] != 0xfe80)
+                    .find(|a| !a.prefix.addr().is_unicast_link_local())
                     .map(|a| a.prefix.addr())
                 else {
                     continue;

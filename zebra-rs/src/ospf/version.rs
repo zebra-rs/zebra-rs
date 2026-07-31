@@ -594,12 +594,9 @@ impl OspfVersion for Ospfv3 {
         // as a /128 in `ident.prefix`. BFD mirrors that — both
         // endpoints are link-local, demuxed per-ifindex (the
         // `SessionKey.ifindex` is set by the reconcile, and v6 egress
-        // is pinned to it via `IPV6_PKTINFO`). Mirrors
+        // is pinned to it via `IPV6_PKTINFO`). Same stable pick as
         // `packet_v3::link_local_src`.
-        let local = addrs.iter().find_map(|a| {
-            let addr = a.prefix.addr();
-            addr.is_unicast_link_local().then_some(addr)
-        })?;
+        let local = crate::ospf::addr::stable_link_local(addrs)?;
         let remote = nbr.ident.prefix.addr();
         Some((std::net::IpAddr::V6(local), std::net::IpAddr::V6(remote)))
     }

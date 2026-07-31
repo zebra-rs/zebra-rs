@@ -228,15 +228,14 @@ pub(super) fn verify_v3_auth_trailer(
     Some(seq)
 }
 
-/// First link-local address on this interface, or `None` if none has
+/// The interface's stable link-local address, or `None` if none has
 /// been picked up from `rib::Link` yet. The v3 send loop folds this
 /// into the IPv6 pseudo-header checksum and pins it via
 /// `IPV6_PKTINFO` so the kernel emits from the matching source.
+/// Selection is [`super::addr::stable_link_local`] — every source
+/// pick in the v3 path must agree on the same address.
 fn link_local_src(link: &OspfLink<Ospfv3>) -> Option<Ipv6Addr> {
-    link.addr.iter().find_map(|a| {
-        let addr = a.prefix.addr();
-        addr.is_unicast_link_local().then_some(addr)
-    })
+    super::addr::stable_link_local(&link.addr)
 }
 
 /// Build the next Ospfv3 Hello to emit on `link`. Mirrors v2's
@@ -449,6 +448,28 @@ pub fn ospfv3_hello_recv(
     // PointToPoint link records.
     nbr.interface_id = hello.interface_id;
 
+    // Same Router-ID, new link-local source: the peer renumbered its
+    // link-local (deleted / replaced, or its own stable pick moved).
+    // The recorded address was set once at neighbor creation and is
+    // the destination of every unicast exchange (DBD / LSR / LSU
+    // retransmit / LSAck) — left stale, those all go to a dead
+    // address and the adjacency wedges on retransmits while
+    // multicast Hellos keep it looking alive. Follow the source and
+    // tell the instance so BFD / End.X re-key too.
+    if !init && nbr.ident.prefix != prefix {
+        ospf_pdu_trace!(
+            tracing,
+            "[v3 Hello:Recv] neighbor {} link-local moved {} -> {}",
+            nbr_router_id,
+            nbr.ident.prefix.addr(),
+            src,
+        );
+        nbr.ident.prefix = prefix;
+        oi.tx
+            .send(Message::NbrSourceChanged(oi.index, nbr_router_id))
+            .unwrap();
+    }
+
     oi.tx
         .send(Message::Nfsm(
             oi.index,
@@ -504,14 +525,11 @@ pub fn ospfv3_hello_recv(
     }
 }
 
-/// First link-local v6 address among the interface's configured
-/// addresses. Same helper as `link_local_src` but on the
+/// The stable link-local among the interface's configured addresses.
+/// Same helper as `link_local_src` but on the
 /// `OspfInterface<Ospfv3>` borrow used by NFSM-side packet senders.
 fn interface_link_local_src(oi: &OspfInterface<Ospfv3>) -> Option<Ipv6Addr> {
-    oi.addr.iter().find_map(|a| {
-        let addr = a.prefix.addr();
-        addr.is_unicast_link_local().then_some(addr)
-    })
+    super::addr::stable_link_local(oi.addr)
 }
 
 /// Pack the LSAs currently queued on `nbr.db_sum` into `dd.lsa_headers`.
