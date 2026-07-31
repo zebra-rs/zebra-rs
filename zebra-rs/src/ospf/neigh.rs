@@ -169,6 +169,9 @@ pub struct Neighbor<V: OspfVersion = Ospfv2> {
     pub ls_req_last: Option<V::LsRequest>,
     pub ls_rxmt: BTreeMap<OspfLsaKey, V::Lsa>,
     pub uptime: Instant,
+    /// RouterDeadInterval (seconds) governing this neighbor's
+    /// inactivity timer — captured from the interface at creation.
+    pub dead_interval: u64,
     pub last_progressive: Option<Instant>,
     pub last_regressive: Option<Instant>,
     pub last_regressive_reason: Option<NfsmEvent>,
@@ -263,7 +266,7 @@ where
         ifindex: u32,
         prefix: V::Prefix,
         router_id: &Ipv4Addr,
-        _dead_interval: u64,
+        dead_interval: u64,
         ptx: UnboundedSender<Message<V>>,
     ) -> Self {
         let mut nbr = Self {
@@ -283,6 +286,7 @@ where
             ls_req_last: None,
             ls_rxmt: BTreeMap::new(),
             uptime: Instant::now(),
+            dead_interval,
             last_progressive: None,
             last_regressive: None,
             last_regressive_reason: None,

@@ -211,11 +211,23 @@ pub fn ospf_nfsm_reset_nbr<V: super::version::OspfVersion>(nbr: &mut Neighbor<V>
     nbr.timer.ls_rxmt = None;
 }
 
+/// Runs after EVERY NFSM event (not just state changes), so it must
+/// never clear the inactivity timer for a live state: HelloReceived
+/// arms it and this function runs right after — clearing it here left
+/// every Full (and Init/TwoWay) neighbor without the RFC 2328 §10.5
+/// dead-man, so a neighbor whose Hellos stopped (or moved to another
+/// source address) survived as a zombie forever. FRR's
+/// `nsm_timer_set` clears `t_inactivity` only for Down/Deleted.
 pub fn ospf_nfsm_timer_set<V: OspfVersion>(nbr: &mut Neighbor<V>) {
     use NfsmState::*;
     match nbr.state {
-        Down | Init | TwoWay => {
+        Down => {
             nbr.timer.inactivity = None;
+            nbr.timer.db_desc = None;
+            nbr.timer.db_desc_free = None;
+            nbr.timer.ls_upd = None;
+        }
+        Init | TwoWay => {
             nbr.timer.db_desc = None;
             nbr.timer.db_desc_free = None;
             nbr.timer.ls_upd = None;
@@ -237,7 +249,6 @@ pub fn ospf_nfsm_timer_set<V: OspfVersion>(nbr: &mut Neighbor<V>) {
             nbr.timer.db_desc_free = None;
         }
         Full => {
-            nbr.timer.inactivity = None;
             nbr.timer.db_desc = None;
             nbr.timer.ls_upd = None;
         }
@@ -286,7 +297,7 @@ pub fn ospf_inactivity_timer<V: OspfVersion>(nbr: &Neighbor<V>) -> Timer {
     let tx = nbr.tx.clone();
     let nbr_addr = V::nbr_addr(&nbr.ident);
     let ifindex = nbr.ifindex;
-    Timer::new(40, TimerType::Once, move || {
+    Timer::new(nbr.dead_interval, TimerType::Once, move || {
         use NfsmEvent::*;
         let tx = tx.clone();
         async move {

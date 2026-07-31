@@ -1,0 +1,25 @@
+# z2: single-address neighbor on the shared 10.0.1.0/24 subnet. It
+# learns z1's 10.2.0.0/24 via OSPF and IS-IS; the route's nexthop
+# proves which of z1's same-subnet addresses the protocols treat as
+# the interface identity (the primary).
+interface:
+- if-name: vz2ns
+  ipv4:
+    address:
+    - 10.0.1.9/24
+router:
+  ospf:
+    router-id: 2.2.2.2
+    area:
+    - area-id: 0.0.0.0
+      interface:
+      - if-name: vz2ns
+        enabled: true
+  isis:
+    net: 49.0000.0000.0000.0002.00
+    is-type: level-2-only
+    hostname: z2
+    interface:
+    - if-name: vz2ns
+      ipv4:
+        enabled: true
