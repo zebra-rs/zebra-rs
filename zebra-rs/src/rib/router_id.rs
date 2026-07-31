@@ -154,6 +154,7 @@ mod tests {
                     secondary: false,
                     config: false,
                     fib: true,
+                    ..Default::default()
                 })
                 .collect(),
             addr6: Vec::new(),

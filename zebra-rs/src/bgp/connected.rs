@@ -114,6 +114,7 @@ mod tests {
             secondary: false,
             config: false,
             fib: true,
+            ..Default::default()
         }
     }
 
@@ -125,6 +126,7 @@ mod tests {
             secondary: false,
             config: false,
             fib: true,
+            ..Default::default()
         }
     }
 

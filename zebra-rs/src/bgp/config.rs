@@ -5414,6 +5414,7 @@ mod bfd_wiring_tests {
             secondary: false,
             config: false,
             fib: true,
+            ..Default::default()
         });
         bfd_reconcile_all(&mut bgp);
 
@@ -6179,6 +6180,7 @@ mod neighbor_group_wiring_tests {
             secondary: false,
             config: false,
             fib: true,
+            ..Default::default()
         }
     }
 

@@ -124,6 +124,134 @@ impl Link {
     }
 }
 
+/// Kernel address scope (`ifa_scope`), the `RT_SCOPE_*` value from the
+/// RTM_NEWADDR header. The kernel derives it from the address kind
+/// (fe80::/10 → link, loopback → host), so it is authoritative where
+/// prefix matching is only heuristic.
+#[derive(Default, Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum AddrScope {
+    #[default]
+    Universe,
+    Site,
+    Link,
+    Host,
+    Nowhere,
+    Other(u8),
+}
+
+impl AddrScope {
+    /// Map the raw `ifa_scope` byte from a netlink address message.
+    pub fn from_kernel(scope: u8) -> Self {
+        match scope {
+            0 => Self::Universe,
+            200 => Self::Site,
+            253 => Self::Link,
+            254 => Self::Host,
+            255 => Self::Nowhere,
+            v => Self::Other(v),
+        }
+    }
+
+    /// Scope the kernel will assign to `addr` — for the config path,
+    /// whose own RTM_NEWADDR never echoes back (see
+    /// [`v4_secondary_verdict`] for the same constraint on the
+    /// secondary bit).
+    pub fn derive(addr: &IpNet) -> Self {
+        match addr {
+            IpNet::V4(v4) if v4.addr().is_loopback() => Self::Host,
+            IpNet::V6(v6) if v6.addr().is_loopback() => Self::Host,
+            IpNet::V6(v6) if v6.addr().is_unicast_link_local() => Self::Link,
+            _ => Self::Universe,
+        }
+    }
+}
+
+impl fmt::Display for AddrScope {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Universe => write!(f, "global"),
+            Self::Site => write!(f, "site"),
+            Self::Link => write!(f, "link"),
+            Self::Host => write!(f, "host"),
+            Self::Nowhere => write!(f, "nowhere"),
+            Self::Other(v) => write!(f, "{}", v),
+        }
+    }
+}
+
+/// Kernel address state from `IFA_FLAGS` (falling back to the legacy
+/// 8-bit header flags), normalized per family: the 0x01 bit is
+/// IFA_F_SECONDARY on IPv4 but IFA_F_TEMPORARY on IPv6, so `secondary`
+/// stays a [`LinkAddr`] field of its own and only the IPv6 reading
+/// lands here.
+#[derive(Default, Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+pub struct AddrFlags {
+    /// IFA_F_TENTATIVE — DAD still running; not yet usable as a source.
+    pub tentative: bool,
+    /// IFA_F_DADFAILED — a duplicate was detected; the address is dead.
+    pub dadfailed: bool,
+    /// IFA_F_DEPRECATED — preferred lifetime expired; avoid for new flows.
+    pub deprecated: bool,
+    /// IFA_F_TEMPORARY (IPv6 only) — RFC 4941 privacy address.
+    pub temporary: bool,
+    /// IFA_F_OPTIMISTIC — RFC 4429, usable while DAD is still running.
+    pub optimistic: bool,
+    /// IFA_F_PERMANENT — statically added, no lifetime expiry.
+    pub permanent: bool,
+    /// IFA_F_NOPREFIXROUTE — kernel did not install the prefix route.
+    pub noprefixroute: bool,
+}
+
+impl AddrFlags {
+    /// Normalize raw kernel flag bits. `is_v6` decides the 0x01 bit:
+    /// TEMPORARY on IPv6, SECONDARY on IPv4 (captured elsewhere).
+    pub fn from_kernel(is_v6: bool, bits: u32) -> Self {
+        Self {
+            tentative: bits & 0x40 != 0,
+            dadfailed: bits & 0x08 != 0,
+            deprecated: bits & 0x20 != 0,
+            temporary: is_v6 && bits & 0x01 != 0,
+            optimistic: bits & 0x04 != 0,
+            permanent: bits & 0x80 != 0,
+            noprefixroute: bits & 0x200 != 0,
+        }
+    }
+
+    /// True when no abnormal state is set — `permanent` alone is the
+    /// steady state of a static address, not worth displaying.
+    fn display_empty(&self) -> bool {
+        !(self.tentative
+            || self.dadfailed
+            || self.deprecated
+            || self.temporary
+            || self.optimistic
+            || self.noprefixroute)
+    }
+}
+
+impl fmt::Display for AddrFlags {
+    /// Space-separated abnormal-state tokens in `ip addr` vocabulary;
+    /// empty for a plain permanent address.
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let mut sep = "";
+        for (set, name) in [
+            (self.tentative, "tentative"),
+            (self.dadfailed, "dadfailed"),
+            (self.deprecated, "deprecated"),
+            (self.temporary, "temporary"),
+            (self.optimistic, "optimistic"),
+            (self.noprefixroute, "noprefixroute"),
+        ] {
+            if set {
+                write!(f, "{}{}", sep, name)?;
+                sep = " ";
+            }
+        }
+        Ok(())
+    }
+}
+
 #[derive(Default, Debug, Clone, PartialEq, Serialize)]
 pub struct LinkAddr {
     pub addr: IpNet,
@@ -131,6 +259,14 @@ pub struct LinkAddr {
     pub secondary: bool,
     pub config: bool,
     pub fib: bool,
+    pub scope: AddrScope,
+    pub flags: AddrFlags,
+    /// Remaining valid lifetime in seconds at the time of the last
+    /// kernel notification (`IFA_CACHEINFO`); `u32::MAX` = forever,
+    /// `None` = the kernel never reported one (config-path entry).
+    pub valid_lft: Option<u32>,
+    /// Remaining preferred lifetime; see `valid_lft`.
+    pub preferred_lft: Option<u32>,
 }
 
 impl LinkAddr {
@@ -147,6 +283,10 @@ impl LinkAddr {
             secondary: osaddr.secondary,
             config: false,
             fib: true,
+            scope: osaddr.scope,
+            flags: osaddr.flags,
+            valid_lft: osaddr.valid_lft,
+            preferred_lft: osaddr.preferred_lft,
         }
     }
 
@@ -228,15 +368,35 @@ fn link_info_show(rib: &Rib, link: &Link, buf: &mut String, cb: &impl Fn(&String
     for addr in link.addr4.iter() {
         write!(buf, "  inet {}", addr.addr).unwrap();
         if addr.secondary {
-            writeln!(buf, " secondary").unwrap();
-        } else {
-            writeln!(buf).unwrap();
+            write!(buf, " secondary").unwrap();
         }
+        addr_tokens_show(buf, addr);
+        writeln!(buf).unwrap();
     }
     for addr in link.addr6.iter() {
-        writeln!(buf, "  inet6 {}", addr.addr).unwrap();
+        write!(buf, "  inet6 {}", addr.addr).unwrap();
+        addr_tokens_show(buf, addr);
+        writeln!(buf).unwrap();
     }
     cb(&link.name, buf);
+}
+
+/// Append the kernel-state tokens for one address line: non-global
+/// scope, abnormal `IFA_FLAGS` state, and finite lifetimes. A plain
+/// permanent global address contributes nothing, keeping the common
+/// case as it always looked.
+fn addr_tokens_show(buf: &mut String, addr: &LinkAddr) {
+    if addr.scope != AddrScope::Universe {
+        write!(buf, " scope {}", addr.scope).unwrap();
+    }
+    if !addr.flags.display_empty() {
+        write!(buf, " {}", addr.flags).unwrap();
+    }
+    if let (Some(valid), Some(preferred)) = (addr.valid_lft, addr.preferred_lft)
+        && valid != u32::MAX
+    {
+        write!(buf, " valid-lft {} preferred-lft {}", valid, preferred).unwrap();
+    }
 }
 
 #[derive(Serialize)]
@@ -269,13 +429,41 @@ pub struct InterfaceDetailed {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub mac_address: Option<String>,
     pub inet_addresses: Vec<InterfaceAddress>,
-    pub inet6_addresses: Vec<String>,
+    pub inet6_addresses: Vec<InterfaceAddressV6>,
 }
 
 #[derive(Serialize)]
 pub struct InterfaceAddress {
     pub address: String,
     pub secondary: bool,
+    pub scope: String,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub flags: Vec<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub valid_lft: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub preferred_lft: Option<u32>,
+}
+
+#[derive(Serialize)]
+pub struct InterfaceAddressV6 {
+    pub address: String,
+    pub scope: String,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub flags: Vec<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub valid_lft: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub preferred_lft: Option<u32>,
+}
+
+/// The address's abnormal-state flags as display tokens, for JSON output.
+fn addr_flag_tokens(flags: &AddrFlags) -> Vec<String> {
+    flags
+        .to_string()
+        .split_whitespace()
+        .map(str::to_string)
+        .collect()
 }
 
 pub fn link_brief_show(rib: &Rib, buf: &mut String) {
@@ -373,13 +561,23 @@ fn link_to_detailed_json(rib: &Rib, link: &Link) -> InterfaceDetailed {
         .map(|addr| InterfaceAddress {
             address: addr.addr.to_string(),
             secondary: addr.secondary,
+            scope: addr.scope.to_string(),
+            flags: addr_flag_tokens(&addr.flags),
+            valid_lft: addr.valid_lft,
+            preferred_lft: addr.preferred_lft,
         })
         .collect();
 
-    let inet6_addresses: Vec<String> = link
+    let inet6_addresses: Vec<InterfaceAddressV6> = link
         .addr6
         .iter()
-        .map(|addr| addr.addr.to_string())
+        .map(|addr| InterfaceAddressV6 {
+            address: addr.addr.to_string(),
+            scope: addr.scope.to_string(),
+            flags: addr_flag_tokens(&addr.flags),
+            valid_lft: addr.valid_lft,
+            preferred_lft: addr.preferred_lft,
+        })
         .collect();
 
     InterfaceDetailed {
@@ -462,6 +660,15 @@ pub enum AddrUpdate {
     /// address, or the kernel confirming a config-driven (re-)install —
     /// or its secondary verdict moved (promotion/demotion).
     Merged,
+    /// The address was present and only its kernel metadata moved —
+    /// `IFA_FLAGS` (DAD completing clears tentative), scope, or the
+    /// `IFA_CACHEINFO` lifetimes an RA renewal refreshes. The stored
+    /// entry was updated but nothing is re-broadcast to protocol
+    /// clients yet: today no protocol consumes the flags, and the BGP
+    /// connected-subnet registry counts AddrAdd events non-idempotently,
+    /// so re-notifying on every DAD completion would inflate it. The
+    /// re-broadcast comes with the BGP registry-hygiene PR.
+    Refreshed,
     /// The address was present and nothing changed (kernel re-notify).
     Unchanged,
 }
@@ -501,11 +708,30 @@ pub fn link_addr_update(link: &mut Link, addr: LinkAddr) -> AddrUpdate {
         let changed = (addr.config && !existing.config)
             || (addr.fib && !existing.fib)
             || existing.secondary != addr.secondary;
+        // Kernel metadata (scope, DAD/lifetime state) is only knowable
+        // from netlink events — the config path (`addr.config`) carries
+        // defaults and must not wipe what the kernel told us. The
+        // kernel resends RTM_NEWADDR whenever this state moves (DAD
+        // completion flips tentative off, each RA renews the
+        // lifetimes), so a kernel event is always the fresher truth.
+        let mut refreshed = false;
+        if !addr.config {
+            refreshed = existing.scope != addr.scope
+                || existing.flags != addr.flags
+                || existing.valid_lft != addr.valid_lft
+                || existing.preferred_lft != addr.preferred_lft;
+            existing.scope = addr.scope;
+            existing.flags = addr.flags;
+            existing.valid_lft = addr.valid_lft;
+            existing.preferred_lft = addr.preferred_lft;
+        }
         existing.config |= addr.config;
         existing.fib |= addr.fib;
         existing.secondary = addr.secondary;
         return if changed {
             AddrUpdate::Merged
+        } else if refreshed {
+            AddrUpdate::Refreshed
         } else {
             AddrUpdate::Unchanged
         };
@@ -1146,6 +1372,12 @@ impl Rib {
         let mut addr = LinkAddr::from(osaddr);
         if from_config {
             addr.config = true;
+            // Our own RTM_NEWADDR never echoes back, so mirror the scope
+            // the kernel will assign. Flags and lifetimes stay at their
+            // defaults — the kernel's own follow-up notification (DAD
+            // completion) delivers the truth and link_addr_update adopts
+            // it without disturbing the config state.
+            addr.scope = AddrScope::derive(&addr.addr);
         }
         if let Some(link) = self.links.get_mut(&addr.ifindex) {
             // Our own RTM_NEWADDR never echoes back (the kernel excludes
@@ -1190,9 +1422,24 @@ impl Rib {
             }
             // Don't re-broadcast a notification that changed nothing (the
             // kernel echoing an address we already hold) — consumers that
-            // count events rather than addresses would drift.
-            if update != AddrUpdate::Unchanged {
-                self.api_addr_add(&addr);
+            // count events rather than addresses would drift. Refreshed
+            // (kernel metadata moved) stays silent too; see [`AddrUpdate`].
+            if matches!(update, AddrUpdate::Added | AddrUpdate::Merged) {
+                // Broadcast the merged entry, not the raw incoming addr —
+                // a config push landing on a kernel-known address must
+                // not advertise default kernel metadata over the state
+                // netlink already delivered.
+                let bucket = if addr.is_v4() {
+                    &link.addr4
+                } else {
+                    &link.addr6
+                };
+                let canonical = bucket
+                    .iter()
+                    .find(|a| a.addr == addr.addr)
+                    .cloned()
+                    .unwrap_or(addr);
+                self.api_addr_add(&canonical);
             }
         }
     }
@@ -1333,6 +1580,7 @@ pub async fn link_config_exec(
                                 addr: ipnet::IpNet::V4(v4addr),
                                 link_index: ifindex,
                                 secondary: false,
+                                ..Default::default()
                             };
                             rib.addr_add(addr, true);
                         }
@@ -1379,6 +1627,7 @@ pub async fn link_config_exec(
                         addr: ipnet::IpNet::V4(v4addr),
                         link_index: ifindex,
                         secondary: false,
+                        ..Default::default()
                     };
                     rib.addr_del(addr);
 
@@ -1418,6 +1667,7 @@ pub async fn link_config_exec(
                             addr: IpNet::V4(sib),
                             link_index: ifindex,
                             secondary: false,
+                            ..Default::default()
                         };
                         if config {
                             let _ = rib.fib_handle.addr_add_ipv4(ifindex, &sib).await;
@@ -1491,6 +1741,7 @@ pub async fn link_config_exec(
                             addr: ipnet::IpNet::V6(v6addr),
                             link_index: ifindex,
                             secondary: false,
+                            ..Default::default()
                         };
                         rib.addr_add(addr, true);
                     }
@@ -1515,6 +1766,7 @@ pub async fn link_config_exec(
                     addr: ipnet::IpNet::V6(v6addr),
                     link_index: ifindex,
                     secondary: false,
+                    ..Default::default()
                 };
                 rib.addr_del(addr);
             }
@@ -1643,6 +1895,7 @@ mod tests {
             addr: IpNet::V4(Ipv4Net::new(Ipv4Addr::new(0, 0, 0, 0), 24).unwrap()),
             link_index: 1,
             secondary: false,
+            ..Default::default()
         };
 
         // Check that 0.0.0.0 is correctly identified as unspecified
@@ -1661,6 +1914,7 @@ mod tests {
             addr: IpNet::V4(Ipv4Net::new(Ipv4Addr::new(192, 168, 1, 1), 0).unwrap()),
             link_index: 1,
             secondary: false,
+            ..Default::default()
         };
 
         assert_eq!(
@@ -1677,6 +1931,7 @@ mod tests {
             addr: IpNet::V4(Ipv4Net::new(Ipv4Addr::new(192, 168, 1, 1), 24).unwrap()),
             link_index: 1,
             secondary: false,
+            ..Default::default()
         };
 
         // Should pass both validations
@@ -1725,6 +1980,7 @@ mod tests {
             secondary: false,
             config,
             fib,
+            ..Default::default()
         }
     }
 
@@ -1794,6 +2050,86 @@ mod tests {
     }
 
     #[test]
+    fn test_link_addr_update_dad_completion_is_refreshed() {
+        let mut link = test_link();
+        // Kernel announces a fresh static v6 address: tentative while
+        // DAD runs.
+        let mut tentative = test_addr_v6("2001:db8::1/64", false, true);
+        tentative.flags.tentative = true;
+        tentative.flags.permanent = true;
+        assert_eq!(link_addr_update(&mut link, tentative), AddrUpdate::Added);
+
+        // DAD completes: the kernel resends RTM_NEWADDR with tentative
+        // cleared. That is a metadata update of the entry we hold — not
+        // a duplicate add, and (for now) not a client re-broadcast.
+        let mut done = test_addr_v6("2001:db8::1/64", false, true);
+        done.flags.permanent = true;
+        assert_eq!(link_addr_update(&mut link, done), AddrUpdate::Refreshed);
+        assert_eq!(link.addr6.len(), 1);
+        assert!(!link.addr6[0].flags.tentative);
+        assert!(link.addr6[0].flags.permanent);
+
+        // The same announcement again changes nothing.
+        let mut again = test_addr_v6("2001:db8::1/64", false, true);
+        again.flags.permanent = true;
+        assert_eq!(link_addr_update(&mut link, again), AddrUpdate::Unchanged);
+    }
+
+    #[test]
+    fn test_link_addr_update_lifetime_renewal_is_refreshed() {
+        let mut link = test_link();
+        let mut slaac = test_addr_v6("2001:db8::5054:ff:fe00:1/64", false, true);
+        slaac.valid_lft = Some(86400);
+        slaac.preferred_lft = Some(14400);
+        assert_eq!(link_addr_update(&mut link, slaac), AddrUpdate::Added);
+
+        // Each RA renews the lifetimes; the stored entry follows without
+        // notifying protocol clients.
+        let mut renewed = test_addr_v6("2001:db8::5054:ff:fe00:1/64", false, true);
+        renewed.valid_lft = Some(86400);
+        renewed.preferred_lft = Some(13000);
+        assert_eq!(link_addr_update(&mut link, renewed), AddrUpdate::Refreshed);
+        assert_eq!(link.addr6[0].preferred_lft, Some(13000));
+    }
+
+    #[test]
+    fn test_link_addr_update_config_push_keeps_kernel_state() {
+        let mut link = test_link();
+        // Kernel-known SLAAC-style entry with live metadata.
+        let mut kernel = test_addr_v6("2001:db8::1/64", false, true);
+        kernel.scope = AddrScope::Universe;
+        kernel.flags.permanent = true;
+        kernel.valid_lft = Some(86400);
+        kernel.preferred_lft = Some(14400);
+        link_addr_update(&mut link, kernel);
+
+        // The operator now configures the same address. The config push
+        // carries default (unknown) kernel metadata — the merge must
+        // flip `config` without wiping what netlink delivered.
+        let mut cfg = test_addr_v6("2001:db8::1/64", true, true);
+        cfg.scope = AddrScope::derive(&cfg.addr);
+        assert_eq!(link_addr_update(&mut link, cfg), AddrUpdate::Merged);
+        assert!(link.addr6[0].config);
+        assert!(link.addr6[0].flags.permanent, "kernel flags survive");
+        assert_eq!(link.addr6[0].valid_lft, Some(86400));
+        assert_eq!(link.addr6[0].preferred_lft, Some(14400));
+    }
+
+    #[test]
+    fn test_addr_scope_derive_mirrors_kernel() {
+        let global: IpNet = "2001:db8::1/64".parse().unwrap();
+        let ll: IpNet = "fe80::1/64".parse().unwrap();
+        let lo6: IpNet = "::1/128".parse().unwrap();
+        let v4: IpNet = "10.0.0.1/24".parse().unwrap();
+        let lo4: IpNet = "127.0.0.1/8".parse().unwrap();
+        assert_eq!(AddrScope::derive(&global), AddrScope::Universe);
+        assert_eq!(AddrScope::derive(&ll), AddrScope::Link);
+        assert_eq!(AddrScope::derive(&lo6), AddrScope::Host);
+        assert_eq!(AddrScope::derive(&v4), AddrScope::Universe);
+        assert_eq!(AddrScope::derive(&lo4), AddrScope::Host);
+    }
+
+    #[test]
     fn test_v4_secondary_verdict_mirrors_kernel() {
         let mut link = test_link();
         let primary: Ipv4Net = "10.0.0.1/24".parse().unwrap();
@@ -1858,6 +2194,7 @@ mod tests {
             secondary: false,
             config,
             fib,
+            ..Default::default()
         }
     }
 
