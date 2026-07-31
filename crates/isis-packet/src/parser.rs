@@ -1008,7 +1008,7 @@ impl ParseBe<IsisTlvIpv4IfAddr> for IsisTlvIpv4IfAddr {
         // An empty or non-multiple-of-4 value is malformed; fail so
         // parse_tlv degrades the TLV to Unknown (bytes preserved)
         // instead of accepting a truncated read.
-        if input.is_empty() || input.len() % 4 != 0 {
+        if input.is_empty() || !input.len().is_multiple_of(4) {
             return Err(Err::Error(nom::error::make_error(
                 input,
                 nom::error::ErrorKind::LengthValue,
@@ -1234,7 +1234,7 @@ impl From<IsisTlvIpv6TeRouterId> for IsisTlv {
 /// Interface Address). Same multi-address rule as TLV 132: one TLV
 /// instance may carry several addresses.
 fn parse_ipv6_addr_array(input: &[u8]) -> IResult<&[u8], Vec<Ipv6Addr>> {
-    if input.is_empty() || input.len() % 16 != 0 {
+    if input.is_empty() || !input.len().is_multiple_of(16) {
         return Err(Err::Error(nom::error::make_error(
             input,
             nom::error::ErrorKind::LengthValue,
