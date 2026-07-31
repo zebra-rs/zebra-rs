@@ -283,7 +283,7 @@ pub fn ospf_hello_packet(
     chains: &std::collections::BTreeMap<String, crate::policy::KeyChain>,
     now: chrono::DateTime<chrono::Utc>,
 ) -> Option<Ospfv2Packet> {
-    let addr = oi.addr.first()?;
+    let addr = crate::ospf::addr::primary_addr(&oi.addr)?;
     let mut hello = OspfHello {
         netmask: addr.prefix.netmask(),
         hello_interval: oi.hello_interval(),
@@ -352,7 +352,7 @@ pub fn ospf_hello_recv(
     src: &Ipv4Addr,
     tracing: &OspfTracing,
 ) {
-    let Some(addr) = oi.addr.first() else {
+    let Some(addr) = crate::ospf::addr::primary_addr(&oi.addr) else {
         return;
     };
 

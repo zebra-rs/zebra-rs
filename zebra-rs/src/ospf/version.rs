@@ -447,7 +447,7 @@ impl OspfVersion for Ospfv2 {
         addrs: &[crate::ospf::addr::OspfAddr<Ospfv2>],
         nbr: &crate::ospf::Neighbor<Ospfv2>,
     ) -> Option<(std::net::IpAddr, std::net::IpAddr)> {
-        let local = addrs.first()?.prefix.addr();
+        let local = crate::ospf::addr::primary_addr(addrs)?.prefix.addr();
         let remote = nbr.ident.prefix.addr();
         Some((std::net::IpAddr::V4(local), std::net::IpAddr::V4(remote)))
     }
@@ -680,6 +680,7 @@ mod bfd_tests {
         let nbr = v2_neighbor("10.0.0.2/24");
         let local = OspfAddr::<Ospfv2> {
             prefix: Ipv4Net::from_str("10.0.0.1/24").unwrap(),
+            secondary: false,
         };
         assert_eq!(
             Ospfv2::bfd_addrs(&[local], &nbr),
@@ -711,9 +712,11 @@ mod bfd_tests {
         let nbr = v3_neighbor("fe80::2/128");
         let global = OspfAddr::<Ospfv3> {
             prefix: Ipv6Net::from_str("2001:db8::1/64").unwrap(),
+            secondary: false,
         };
         let link_local = OspfAddr::<Ospfv3> {
             prefix: Ipv6Net::from_str("fe80::1/64").unwrap(),
+            secondary: false,
         };
         assert_eq!(
             Ospfv3::bfd_addrs(&[global, link_local], &nbr),
@@ -730,6 +733,7 @@ mod bfd_tests {
         let nbr = v3_neighbor("fe80::2/128");
         let global = OspfAddr::<Ospfv3> {
             prefix: Ipv6Net::from_str("2001:db8::1/64").unwrap(),
+            secondary: false,
         };
         assert_eq!(Ospfv3::bfd_addrs(&[global], &nbr), None);
     }
