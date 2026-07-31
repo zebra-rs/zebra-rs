@@ -710,6 +710,59 @@ impl DisStatistics {
     }
 }
 
+/// One IPv4 address on an IS-IS link. `secondary` is the
+/// kernel-computed IFA_F_SECONDARY verdict carried on the RIB's
+/// `LinkAddr`: a same-subnet duplicate of an earlier (primary)
+/// address. Secondaries stay in Hello TLV 132 (they are real
+/// interface addresses) but must never be the link's identity —
+/// endpoint picks prefer the primary, and the primary's Extended IP
+/// Reachability entry already covers a secondary's subnet.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct LinkV4Addr {
+    pub prefix: Ipv4Net,
+    pub secondary: bool,
+}
+
+/// First non-secondary entry accepted by `pred`, falling back to the
+/// first accepted entry at all (a transient all-secondary list must
+/// not leave the link identity-less). Kernel event order makes entry
+/// 0 the kernel's own primary in the common case.
+pub fn v4_primary_where(
+    addrs: &[LinkV4Addr],
+    pred: impl Fn(&LinkV4Addr) -> bool + Copy,
+) -> Option<&LinkV4Addr> {
+    addrs
+        .iter()
+        .find(|a| !a.secondary && pred(a))
+        .or_else(|| addrs.iter().find(|a| pred(a)))
+}
+
+/// The link's primary IPv4 address, if any.
+pub fn v4_primary(addrs: &[LinkV4Addr]) -> Option<&LinkV4Addr> {
+    v4_primary_where(addrs, |_| true)
+}
+
+/// Choose the neighbor address to use as this link's peer endpoint
+/// (SPF nexthop, BFD/STAMP session key, SRLG remote). TLV 132 carries
+/// every interface address of the peer — including addresses from
+/// subnets we are not on — and `addr4` iterates in numeric order, so
+/// "first key" may be unreachable. Walk our own subnets primaries
+/// first and take the lowest peer address inside the first subnet
+/// that holds one; fall back to the lowest advertised address (the
+/// pre-multi-address behavior) so unnumbered setups keep working.
+pub fn nbr_v4_pick(
+    local: &[LinkV4Addr],
+    addr4: &BTreeMap<std::net::Ipv4Addr, super::NeighborAddr4>,
+) -> Option<std::net::Ipv4Addr> {
+    local
+        .iter()
+        .filter(|e| !e.secondary)
+        .chain(local.iter().filter(|e| e.secondary))
+        .find_map(|e| addr4.keys().find(|a| e.prefix.contains(*a)))
+        .or_else(|| addr4.keys().next())
+        .copied()
+}
+
 // Mutable data during operation.
 #[derive(Default, Debug)]
 pub struct LinkState {
@@ -720,7 +773,7 @@ pub struct LinkState {
     pub mac: Option<MacAddr>,
 
     // IP addresses.
-    pub v4addr: Vec<Ipv4Net>,
+    pub v4addr: Vec<LinkV4Addr>,
     pub v6addr: Vec<Ipv6Net>,
     pub v6laddr: Vec<Ipv6Net>,
 
@@ -1080,7 +1133,9 @@ impl Isis {
     /// the link's per-family address list (v4 skipping loopbacks, v6
     /// split into link-local vs global), apply the add/remove, and
     /// re-originate the Hello so the interface-address TLVs track the
-    /// kernel.
+    /// kernel — plus the self LSP, whose Extended IP Reachability
+    /// TLVs would otherwise only pick the change up at the next
+    /// periodic refresh (up to the LSP lifetime, 1800s).
     fn addr_update(&mut self, addr: LinkAddr, add: bool) {
         let Some(link) = self.links.get_mut(&addr.ifindex) else {
             return;
@@ -1089,7 +1144,14 @@ impl Isis {
         match addr.addr {
             IpNet::V4(prefix) => {
                 if !prefix.addr().is_loopback() {
-                    addr_list_update(&mut link.state.v4addr, prefix, add);
+                    v4addr_list_update(
+                        &mut link.state.v4addr,
+                        LinkV4Addr {
+                            prefix,
+                            secondary: addr.secondary,
+                        },
+                        add,
+                    );
                 }
             }
             IpNet::V6(prefix) => {
@@ -1105,6 +1167,8 @@ impl Isis {
         if link.config.enabled() {
             let msg = Message::Ifsm(IfsmEvent::HelloOriginate, addr.ifindex, None);
             let _ = self.tx.send(msg);
+            let _ = self.tx.send(Message::LspOriginate(Level::L1, None));
+            let _ = self.tx.send(Message::LspOriginate(Level::L2, None));
         }
     }
 }
@@ -1118,6 +1182,22 @@ fn addr_list_update<T: PartialEq>(list: &mut Vec<T>, item: T, add: bool) {
         }
     } else {
         list.retain(|p| p != &item);
+    }
+}
+
+/// v4 variant keyed by prefix: an add for a prefix already present
+/// upserts the secondary flag instead of pushing a duplicate — the
+/// RIB re-broadcasts an AddrAdd when the kernel verdict flips (e.g. a
+/// primary delete promotes its same-subnet sibling).
+fn v4addr_list_update(list: &mut Vec<LinkV4Addr>, item: LinkV4Addr, add: bool) {
+    if add {
+        if let Some(existing) = list.iter_mut().find(|e| e.prefix == item.prefix) {
+            existing.secondary = item.secondary;
+        } else {
+            list.push(item);
+        }
+    } else {
+        list.retain(|e| e.prefix != item.prefix);
     }
 }
 
@@ -2217,7 +2297,12 @@ pub fn show_detail(
                     level_1_info: None,
                     level_2_info: None,
                     authentication: build_auth_info(link),
-                    ip_prefixes: link.state.v4addr.iter().map(|p| p.to_string()).collect(),
+                    ip_prefixes: link
+                        .state
+                        .v4addr
+                        .iter()
+                        .map(|p| p.prefix.to_string())
+                        .collect(),
                     ipv6_link_locals: link.state.v6laddr.iter().map(|p| p.to_string()).collect(),
                     ipv6_prefixes: link.state.v6addr.iter().map(|p| p.to_string()).collect(),
                 };
@@ -2285,8 +2370,9 @@ pub fn show_detail(
                 // IPv4 Address.
                 if !link.state.v4addr.is_empty() {
                     writeln!(buf, "  IP Prefix(es):")?;
-                    for prefix in link.state.v4addr.iter() {
-                        writeln!(buf, "    {}", prefix)?;
+                    for entry in link.state.v4addr.iter() {
+                        let tag = if entry.secondary { " (secondary)" } else { "" };
+                        writeln!(buf, "    {}{}", entry.prefix, tag)?;
                     }
                 }
                 if !link.state.v6laddr.is_empty() {
@@ -2861,5 +2947,89 @@ mod circuit_id_tests {
             None,
             "double release reports nothing held"
         );
+    }
+}
+
+#[cfg(test)]
+mod v4addr_tests {
+    use std::collections::BTreeMap;
+    use std::net::Ipv4Addr;
+
+    use super::super::NeighborAddr4;
+    use super::{LinkV4Addr, nbr_v4_pick, v4_primary, v4addr_list_update};
+
+    fn entry(s: &str, secondary: bool) -> LinkV4Addr {
+        LinkV4Addr {
+            prefix: s.parse().unwrap(),
+            secondary,
+        }
+    }
+
+    fn nbr_addrs(addrs: &[&str]) -> BTreeMap<Ipv4Addr, NeighborAddr4> {
+        addrs
+            .iter()
+            .map(|s| {
+                let a: Ipv4Addr = s.parse().unwrap();
+                (a, NeighborAddr4::new(a, None))
+            })
+            .collect()
+    }
+
+    #[test]
+    fn primary_skips_secondary_entries() {
+        // Kernel event order can put the secondary first in the list
+        // (e.g. after a flag-flip upsert); the pick must not care.
+        let addrs = [entry("10.0.0.9/24", true), entry("10.0.0.1/24", false)];
+        assert_eq!(v4_primary(&addrs), Some(&addrs[1]));
+
+        // All-secondary (transient mid-promotion): fall back to first
+        // rather than leaving the link identity-less.
+        let addrs = [entry("10.0.0.9/24", true)];
+        assert_eq!(v4_primary(&addrs), Some(&addrs[0]));
+
+        assert_eq!(v4_primary(&[]), None);
+    }
+
+    #[test]
+    fn nbr_pick_prefers_primary_subnet_over_lowest_key() {
+        // Peer advertises 10.1.0.2 (numerically lowest, from a subnet
+        // shared only with our secondary-ordered walk's later entry)
+        // and 10.2.0.2 (our primary's subnet). The primary's subnet
+        // must win even though its address sorts higher.
+        let local = [entry("10.2.0.1/24", false), entry("10.1.0.1/24", true)];
+        let nbr = nbr_addrs(&["10.1.0.2", "10.2.0.2"]);
+        assert_eq!(nbr_v4_pick(&local, &nbr), Some("10.2.0.2".parse().unwrap()));
+
+        // No peer address in the primary's subnet: the secondary's
+        // subnet is the next stop in the walk.
+        let nbr = nbr_addrs(&["10.1.0.2", "192.168.0.2"]);
+        assert_eq!(nbr_v4_pick(&local, &nbr), Some("10.1.0.2".parse().unwrap()));
+
+        // No shared subnet at all (unnumbered): lowest advertised
+        // address, the pre-multi-address behavior.
+        let nbr = nbr_addrs(&["192.168.0.2", "172.16.0.2"]);
+        assert_eq!(
+            nbr_v4_pick(&local, &nbr),
+            Some("172.16.0.2".parse().unwrap())
+        );
+
+        assert_eq!(nbr_v4_pick(&local, &BTreeMap::new()), None);
+    }
+
+    #[test]
+    fn list_update_upserts_secondary_flag() {
+        let mut list = vec![entry("10.0.0.1/24", false)];
+
+        // Same prefix re-announced with a flipped verdict (the RIB
+        // re-broadcasts on Merged): update in place, no duplicate.
+        v4addr_list_update(&mut list, entry("10.0.0.1/24", true), true);
+        assert_eq!(list, vec![entry("10.0.0.1/24", true)]);
+
+        v4addr_list_update(&mut list, entry("10.0.0.2/24", true), true);
+        assert_eq!(list.len(), 2);
+
+        // Delete matches by prefix regardless of the event's flag.
+        v4addr_list_update(&mut list, entry("10.0.0.1/24", false), false);
+        assert_eq!(list, vec![entry("10.0.0.2/24", true)]);
     }
 }

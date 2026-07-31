@@ -988,9 +988,38 @@ impl From<IsisTlvProtoSupported> for IsisTlv {
     }
 }
 
-#[derive(Debug, NomBE, Clone, Serialize, Deserialize, PartialEq)]
+/// TLV 132 — IP Interface Address(es) (RFC 1195 §5.3). The value is a
+/// packed array of 4-byte addresses: FRR and Cisco emit one TLV
+/// instance carrying every interface address, so the parser must not
+/// stop at the first entry (it used to, silently dropping the rest of
+/// a multi-address interface).
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct IsisTlvIpv4IfAddr {
-    pub addr: Ipv4Addr,
+    pub addrs: Vec<Ipv4Addr>,
+}
+
+impl IsisTlvIpv4IfAddr {
+    /// 255-byte value budget / 4 bytes per address.
+    pub const MAX_ADDRS: usize = 63;
+}
+
+impl ParseBe<IsisTlvIpv4IfAddr> for IsisTlvIpv4IfAddr {
+    fn parse_be(input: &[u8]) -> IResult<&[u8], Self> {
+        // An empty or non-multiple-of-4 value is malformed; fail so
+        // parse_tlv degrades the TLV to Unknown (bytes preserved)
+        // instead of accepting a truncated read.
+        if input.is_empty() || input.len() % 4 != 0 {
+            return Err(Err::Error(nom::error::make_error(
+                input,
+                nom::error::ErrorKind::LengthValue,
+            )));
+        }
+        let addrs = input
+            .chunks_exact(4)
+            .map(|c| Ipv4Addr::from([c[0], c[1], c[2], c[3]]))
+            .collect();
+        Ok((&input[input.len()..], Self { addrs }))
+    }
 }
 
 impl TlvEmitter for IsisTlvIpv4IfAddr {
@@ -999,11 +1028,13 @@ impl TlvEmitter for IsisTlvIpv4IfAddr {
     }
 
     fn len(&self) -> u8 {
-        IPV4_ADDR_LEN
+        (self.addrs.len().min(Self::MAX_ADDRS) * IPV4_ADDR_LEN as usize) as u8
     }
 
     fn emit(&self, buf: &mut BytesMut) {
-        buf.put(&self.addr.octets()[..])
+        for addr in self.addrs.iter().take(Self::MAX_ADDRS) {
+            buf.put(&addr.octets()[..]);
+        }
     }
 }
 
@@ -1198,9 +1229,45 @@ impl From<IsisTlvIpv6TeRouterId> for IsisTlv {
     }
 }
 
-#[derive(Debug, NomBE, Clone, Serialize, Deserialize, PartialEq)]
+/// Packed array of 16-byte IPv6 addresses — the value layout shared by
+/// TLV 232 (Interface Address, RFC 5308 §2) and TLV 233 (Global
+/// Interface Address). Same multi-address rule as TLV 132: one TLV
+/// instance may carry several addresses.
+fn parse_ipv6_addr_array(input: &[u8]) -> IResult<&[u8], Vec<Ipv6Addr>> {
+    if input.is_empty() || input.len() % 16 != 0 {
+        return Err(Err::Error(nom::error::make_error(
+            input,
+            nom::error::ErrorKind::LengthValue,
+        )));
+    }
+    let addrs = input
+        .chunks_exact(16)
+        .map(|c| {
+            let mut octets = [0u8; 16];
+            octets.copy_from_slice(c);
+            Ipv6Addr::from(octets)
+        })
+        .collect();
+    Ok((&input[input.len()..], addrs))
+}
+
+/// 255-byte value budget / 16 bytes per address.
+const MAX_IPV6_IF_ADDRS: usize = 15;
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct IsisTlvIpv6IfAddr {
-    pub addr: Ipv6Addr,
+    pub addrs: Vec<Ipv6Addr>,
+}
+
+impl IsisTlvIpv6IfAddr {
+    pub const MAX_ADDRS: usize = MAX_IPV6_IF_ADDRS;
+}
+
+impl ParseBe<IsisTlvIpv6IfAddr> for IsisTlvIpv6IfAddr {
+    fn parse_be(input: &[u8]) -> IResult<&[u8], Self> {
+        let (input, addrs) = parse_ipv6_addr_array(input)?;
+        Ok((input, Self { addrs }))
+    }
 }
 
 impl TlvEmitter for IsisTlvIpv6IfAddr {
@@ -1209,11 +1276,13 @@ impl TlvEmitter for IsisTlvIpv6IfAddr {
     }
 
     fn len(&self) -> u8 {
-        IPV6_ADDR_LEN
+        (self.addrs.len().min(Self::MAX_ADDRS) * IPV6_ADDR_LEN as usize) as u8
     }
 
     fn emit(&self, buf: &mut BytesMut) {
-        buf.put(&self.addr.octets()[..])
+        for addr in self.addrs.iter().take(Self::MAX_ADDRS) {
+            buf.put(&addr.octets()[..]);
+        }
     }
 }
 
@@ -1223,9 +1292,20 @@ impl From<IsisTlvIpv6IfAddr> for IsisTlv {
     }
 }
 
-#[derive(Debug, NomBE, Clone, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct IsisTlvIpv6GlobalIfAddr {
-    pub addr: Ipv6Addr,
+    pub addrs: Vec<Ipv6Addr>,
+}
+
+impl IsisTlvIpv6GlobalIfAddr {
+    pub const MAX_ADDRS: usize = MAX_IPV6_IF_ADDRS;
+}
+
+impl ParseBe<IsisTlvIpv6GlobalIfAddr> for IsisTlvIpv6GlobalIfAddr {
+    fn parse_be(input: &[u8]) -> IResult<&[u8], Self> {
+        let (input, addrs) = parse_ipv6_addr_array(input)?;
+        Ok((input, Self { addrs }))
+    }
 }
 
 impl TlvEmitter for IsisTlvIpv6GlobalIfAddr {
@@ -1234,11 +1314,13 @@ impl TlvEmitter for IsisTlvIpv6GlobalIfAddr {
     }
 
     fn len(&self) -> u8 {
-        IPV6_ADDR_LEN
+        (self.addrs.len().min(Self::MAX_ADDRS) * IPV6_ADDR_LEN as usize) as u8
     }
 
     fn emit(&self, buf: &mut BytesMut) {
-        buf.put(&self.addr.octets()[..])
+        for addr in self.addrs.iter().take(Self::MAX_ADDRS) {
+            buf.put(&addr.octets()[..]);
+        }
     }
 }
 

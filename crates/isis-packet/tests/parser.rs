@@ -1,6 +1,7 @@
 use bytes::BytesMut;
 use hex_literal::hex;
 use isis_packet::*;
+use std::net::Ipv4Addr;
 
 fn parse_emit(buf: &[u8]) {
     let packet = parse(buf);
@@ -619,11 +620,9 @@ pub fn parse_p2p_hello_cisco_state_only_three_way() {
     assert_eq!(three_way.neighbor_circuit_id, None);
 
     // TLVs after 240 must be present.
-    assert!(
-        hello.tlvs.iter().any(
-            |tlv| matches!(tlv, IsisTlv::Ipv4IfAddr(v) if v.addr.octets() == [192, 168, 0, 2])
-        )
-    );
+    assert!(hello.tlvs.iter().any(
+        |tlv| matches!(tlv, IsisTlv::Ipv4IfAddr(v) if v.addrs == [Ipv4Addr::new(192, 168, 0, 2)])
+    ));
     assert!(
         hello
             .tlvs
@@ -692,6 +691,68 @@ pub fn three_way_tlv_round_trips_all_lengths() {
         assert!(rest.is_empty());
         assert_eq!(parsed, vec![IsisTlv::P2p3Way(original)]);
     }
+}
+
+/// TLV 132 as FRR/Cisco emit it for a multi-address interface: ONE TLV
+/// instance whose value packs every address. The parser used to read
+/// only the first 4 bytes, so a peer's secondary/extra addresses were
+/// silently dropped from the neighbor's address set.
+#[test]
+pub fn ipv4_if_addr_tlv_carries_multiple_addresses() {
+    const TLVS: &[u8] = &hex!("84 08 c0 a8 00 02 c0 a8 00 03");
+    let (rest, tlvs) = IsisTlv::parse_tlvs(TLVS).expect("stream must parse");
+    assert!(rest.is_empty());
+    assert_eq!(tlvs.len(), 1);
+    let IsisTlv::Ipv4IfAddr(v) = &tlvs[0] else {
+        panic!("expected Ipv4IfAddr, got {:?}", tlvs[0]);
+    };
+    assert_eq!(
+        v.addrs,
+        [Ipv4Addr::new(192, 168, 0, 2), Ipv4Addr::new(192, 168, 0, 3)]
+    );
+
+    // And it round-trips byte-identically.
+    let mut buf = BytesMut::new();
+    tlvs[0].emit(&mut buf);
+    assert_eq!(&buf[..], TLVS);
+}
+
+/// Multi-address forms of TLV 232 (link-local) and TLV 233 (global)
+/// must parse every 16-byte entry and round-trip.
+#[test]
+pub fn ipv6_if_addr_tlvs_carry_multiple_addresses() {
+    use std::net::Ipv6Addr;
+    let addrs = vec![
+        "fe80::1".parse::<Ipv6Addr>().unwrap(),
+        "fe80::2".parse::<Ipv6Addr>().unwrap(),
+    ];
+    for tlv in [
+        IsisTlv::Ipv6IfAddr(IsisTlvIpv6IfAddr {
+            addrs: addrs.clone(),
+        }),
+        IsisTlv::Ipv6GlobalIfAddr(IsisTlvIpv6GlobalIfAddr {
+            addrs: addrs.clone(),
+        }),
+    ] {
+        let mut buf = BytesMut::new();
+        tlv.emit(&mut buf);
+        assert_eq!(buf.len(), 2 + 32);
+        let (rest, parsed) = IsisTlv::parse_tlvs(&buf).expect("round-trip parse");
+        assert!(rest.is_empty());
+        assert_eq!(parsed, vec![tlv]);
+    }
+}
+
+/// An empty-value TLV 132 is malformed (RFC 1195 mandates at least one
+/// address) and must degrade to Unknown, not parse as an empty list.
+#[test]
+pub fn empty_ipv4_if_addr_tlv_degrades_to_unknown() {
+    const TLVS: &[u8] = &hex!("84 00  81 01 cc");
+    let (rest, tlvs) = IsisTlv::parse_tlvs(TLVS).expect("stream must parse");
+    assert!(rest.is_empty());
+    assert_eq!(tlvs.len(), 2);
+    assert!(matches!(&tlvs[0], IsisTlv::Unknown(u) if u.values.is_empty()));
+    assert!(matches!(tlvs[1], IsisTlv::ProtoSupported(_)));
 }
 
 /// A known TLV whose value fails its inner parser must degrade to

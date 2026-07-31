@@ -1,4 +1,4 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::net::Ipv4Addr;
 
 use bytes::BytesMut;
@@ -1149,25 +1149,21 @@ pub fn lsp_generate(top: &mut IsisTop, level: Level, seq_floor: Option<u32>) -> 
                 .filter_map(|name| top.srlg_groups.get(name).map(|g| g.value))
                 .collect();
             if !values.is_empty() {
-                // Local v4 address: first interface address on the
-                // link. Remote v4 address: first known neighbor v4
-                // (best-effort — for LAN there's no single "remote"
-                // endpoint, so any peer address suffices as the
-                // disambiguator together with the neighbor sys-id +
-                // psn carried in the TLV).
-                let local_v4 = link
-                    .state
-                    .v4addr
-                    .first()
-                    .map(|p| p.addr())
+                // Local v4 address: the link's primary interface
+                // address. Remote v4 address: first known neighbor v4
+                // sharing one of our subnets (best-effort — for LAN
+                // there's no single "remote" endpoint, so any peer
+                // address suffices as the disambiguator together with
+                // the neighbor sys-id + psn carried in the TLV).
+                let local_v4 = super::link::v4_primary(&link.state.v4addr)
+                    .map(|e| e.prefix.addr())
                     .unwrap_or(Ipv4Addr::UNSPECIFIED);
                 let remote_v4 = link
                     .state
                     .nbrs
                     .get(&level)
                     .values()
-                    .flat_map(|nbr| nbr.addr4.keys().copied())
-                    .next()
+                    .find_map(|nbr| super::link::nbr_v4_pick(&link.state.v4addr, &nbr.addr4))
                     .unwrap_or(Ipv4Addr::UNSPECIFIED);
                 // T-bit (numbered link) when we have a real local
                 // address. Unnumbered case (T=0, Link Local/Remote
@@ -1300,13 +1296,17 @@ pub fn lsp_generate(top: &mut IsisTop, level: Level, seq_floor: Option<u32>) -> 
         }
     }
 
-    // IPv4 Reachability.
+    // IPv4 Reachability. Two same-subnet addresses (a primary plus a
+    // kernel secondary) mask to the same prefix — advertise it once.
+    // First entry wins, which also keeps the primary's Prefix-SID
+    // sub-TLVs when a duplicate would have carried none.
     let mut ext_ip_reach = IsisTlvExtIpReach::default();
+    let mut seen_v4: BTreeSet<Ipv4Net> = BTreeSet::new();
     for (_, link) in top.links.iter() {
         if link.config.enable.v4 && has_level(link.state.level(), level) {
             for ifaddr in link.state.v4addr.iter() {
-                let prefix = ifaddr.apply_mask();
-                if !prefix.addr().is_loopback() {
+                let prefix = ifaddr.prefix.apply_mask();
+                if !prefix.addr().is_loopback() && seen_v4.insert(prefix) {
                     let sub_tlv = if let Some(sid) = &link.config.prefix_sid {
                         let prefix_sid = IsisSubPrefixSid {
                             // RFC 8667 §2.1.1: N (Node-SID) flag for a host

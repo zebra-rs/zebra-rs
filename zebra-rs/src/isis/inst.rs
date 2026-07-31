@@ -2123,7 +2123,7 @@ impl Isis {
         let mut actions: Vec<(crate::bfd::session::SessionKey, bool)> = Vec::new();
         for (ifindex, link) in self.links.iter() {
             let enable = link.config.bfd.resolve(&self.config.bfd).enable;
-            let local_v4 = link.state.v4addr.first().map(|p| p.addr());
+            let local_v4 = super::link::v4_primary(&link.state.v4addr).map(|e| e.prefix.addr());
             let local_v6ll = link.state.v6laddr.first().map(|p| p.addr());
             for level in [Level::L1, Level::L2] {
                 for nbr in link.state.nbrs.get(&level).values() {
@@ -2132,7 +2132,7 @@ impl Isis {
                     }
                     // v4-preferred / v6-link-local fallback, same selection as
                     // the NFSM subscribe path (see packet::bfd_session_key).
-                    let remote_v4 = nbr.addr4.keys().next().copied();
+                    let remote_v4 = super::link::nbr_v4_pick(&link.state.v4addr, &nbr.addr4);
                     let remote_v6ll = nbr.addr6l.first().copied();
                     let Some((local, remote)) = super::packet::bfd_session_addrs(
                         local_v4,
@@ -2208,7 +2208,7 @@ impl Isis {
         // A v6-only adjacency thus yields a link-local v6 session whose
         // scope is the link's ifindex.
         let desired = if link.config.te_metric_measurement.enabled() && link.is_p2p() {
-            let local_v4 = link.state.v4addr.first().map(|p| p.addr());
+            let local_v4 = super::link::v4_primary(&link.state.v4addr).map(|e| e.prefix.addr());
             let local_v6ll = link.state.v6laddr.first().map(|p| p.addr());
             let nbr = [Level::L1, Level::L2].iter().find_map(|level| {
                 link.state
@@ -2217,7 +2217,8 @@ impl Isis {
                     .values()
                     .find(|nbr| nbr.state == NfsmState::Up)
             });
-            let remote_v4 = nbr.and_then(|n| n.addr4.keys().next().copied());
+            let remote_v4 =
+                nbr.and_then(|n| super::link::nbr_v4_pick(&link.state.v4addr, &n.addr4));
             let remote_v6ll = nbr.and_then(|n| n.addr6l.first().copied());
             super::packet::bfd_session_addrs(local_v4, remote_v4, local_v6ll, remote_v6ll).map(
                 |(local, remote)| {
