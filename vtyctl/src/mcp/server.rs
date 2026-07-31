@@ -9,6 +9,63 @@ use super::tools::commands::CommandsTool;
 use super::tools::isis::IsisTools;
 use super::tools::show::ShowTool;
 
+/// Handshake revisions the legacy `initialize` path can negotiate, newest
+/// first. 2025-03-26 is deliberately absent: it is the only revision that
+/// requires JSON-RPC batching, which this newline-delimited server does not
+/// accept.
+const LEGACY_PROTOCOL_VERSIONS: &[&str] = &["2025-06-18", "2024-11-05"];
+
+/// Stateless revisions served from per-request `_meta`; 2026-07-28 and later
+/// carry the protocol version on every request instead of negotiating it in
+/// an `initialize` handshake.
+const MODERN_PROTOCOL_VERSIONS: &[&str] = &["2026-07-28"];
+
+const META_PROTOCOL_VERSION: &str = "io.modelcontextprotocol/protocolVersion";
+const META_CLIENT_CAPABILITIES: &str = "io.modelcontextprotocol/clientCapabilities";
+const META_SERVER_INFO: &str = "io.modelcontextprotocol/serverInfo";
+
+/// Freshness hint for cacheable results: the tool list is fixed for the
+/// lifetime of the process.
+const CACHE_TTL_MS: u64 = 3_600_000;
+
+fn supported_versions() -> Vec<&'static str> {
+    let mut versions = MODERN_PROTOCOL_VERSIONS.to_vec();
+    versions.extend_from_slice(LEGACY_PROTOCOL_VERSIONS);
+    versions
+}
+
+fn server_info() -> Value {
+    json!({
+        "name": "vtyctl-mcp",
+        "version": env!("CARGO_PKG_VERSION")
+    })
+}
+
+fn method_not_found(method: &str) -> Value {
+    warn!("Unknown method: {}", method);
+    json!({
+        "code": -32601,
+        "message": "Method not found",
+        "data": format!("Unknown method: {}", method)
+    })
+}
+
+/// Stamp the fields the 2026-07-28 revision requires on every result
+/// (`resultType`, server identity in `_meta`); legacy clients ignore them.
+fn stamp_result(result: &mut Value) {
+    let Some(obj) = result.as_object_mut() else {
+        return;
+    };
+    obj.entry("resultType").or_insert_with(|| json!("complete"));
+    if let Some(meta) = obj
+        .entry("_meta")
+        .or_insert_with(|| json!({}))
+        .as_object_mut()
+    {
+        meta.insert(META_SERVER_INFO.to_string(), server_info());
+    }
+}
+
 /// Wrap tool output in the MCP `tools/call` result shape.
 fn tool_result(text: String, is_error: bool) -> Value {
     json!({
@@ -55,114 +112,185 @@ impl ZmcpServer {
 
         debug!("Handling request: method={}, id={:?}", method, id);
 
-        let result = match method {
+        let meta_version = params
+            .get("_meta")
+            .and_then(|m| m.get(META_PROTOCOL_VERSION))
+            .and_then(|v| v.as_str())
+            .map(str::to_owned);
+
+        // `server/discover` doubles as the era/version probe, so answer it
+        // regardless of the requested version.
+        let outcome = if method == "server/discover" {
+            Ok(self.discover_result())
+        } else if let Some(version) = meta_version {
+            self.handle_modern(method, &version, params).await
+        } else {
+            self.handle_legacy(method, params).await
+        };
+
+        // Notifications (no ID) never get responses.
+        let id = id?;
+        Some(match outcome {
+            Ok(mut result) => {
+                stamp_result(&mut result);
+                json!({
+                    "jsonrpc": "2.0",
+                    "id": id,
+                    "result": result
+                })
+            }
+            Err(error) => json!({
+                "jsonrpc": "2.0",
+                "id": id,
+                "error": error
+            }),
+        })
+    }
+
+    /// Serve a request that declared its protocol version per-request
+    /// (2026-07-28 stateless semantics).
+    async fn handle_modern(
+        &self,
+        method: &str,
+        version: &str,
+        params: Value,
+    ) -> Result<Value, Value> {
+        if !MODERN_PROTOCOL_VERSIONS.contains(&version) {
+            return Err(json!({
+                "code": -32022,
+                "message": "Unsupported protocol version",
+                "data": {
+                    "supported": supported_versions(),
+                    "requested": version
+                }
+            }));
+        }
+
+        // Required on every stateless request; a request missing it is
+        // malformed under the 2026-07-28 revision.
+        if params
+            .get("_meta")
+            .and_then(|m| m.get(META_CLIENT_CAPABILITIES))
+            .is_none()
+        {
+            return Err(json!({
+                "code": -32602,
+                "message": "Invalid params",
+                "data": format!("missing required _meta field {}", META_CLIENT_CAPABILITIES)
+            }));
+        }
+
+        match method {
+            "tools/list" => Ok(self.tools_list()),
+            "tools/call" => Ok(self.handle_tool_call(params).await),
+            _ => Err(method_not_found(method)),
+        }
+    }
+
+    /// Serve a request under the pre-2026 handshake-based semantics.
+    async fn handle_legacy(&self, method: &str, params: Value) -> Result<Value, Value> {
+        match method {
             "initialize" => {
                 debug!("MCP initialize request");
 
-                // Validate client protocol version
                 let client_version = params
                     .get("protocolVersion")
                     .and_then(|v| v.as_str())
                     .unwrap_or("");
 
-                if !client_version.is_empty() && client_version != "2024-11-05" {
+                // Echo a supported requested version; otherwise offer our
+                // latest and let the client decide whether to continue.
+                let negotiated = if LEGACY_PROTOCOL_VERSIONS.contains(&client_version) {
+                    client_version
+                } else {
                     warn!(
-                        "Client protocol version mismatch: expected 2024-11-05, got {}",
-                        client_version
+                        "Unsupported client protocol version {:?}, offering {}",
+                        client_version, LEGACY_PROTOCOL_VERSIONS[0]
                     );
-                }
+                    LEGACY_PROTOCOL_VERSIONS[0]
+                };
 
-                json!({
-                    "protocolVersion": "2024-11-05",
+                Ok(json!({
+                    "protocolVersion": negotiated,
                     "capabilities": {
                         "tools": {
                             "listChanged": false
                         }
                     },
-                    "serverInfo": {
-                        "name": "vtyctl-mcp",
-                        "version": env!("CARGO_PKG_VERSION")
-                    }
-                })
+                    "serverInfo": server_info()
+                }))
             }
-            "tools/list" => {
-                debug!("Listing available tools");
-                json!({
-                    "tools": [
-                        {
-                            "name": "list-show-commands",
-                            "description": "List every available read-only `show` command with a one-line explanation of each, generated live from the daemon's command grammar. Call this first to discover what `show` can do.",
-                            "inputSchema": {
-                                "type": "object",
-                                "properties": {},
-                                "additionalProperties": false
-                            }
-                        },
-                        {
-                            "name": "show",
-                            "description": "Run a read-only zebra-rs operational `show` command and return its output. The command must begin with 'show' (e.g. 'show ip route', 'show bgp summary', 'show isis neighbor'). Use 'list-show-commands' to discover the available commands.",
-                            "inputSchema": {
-                                "type": "object",
-                                "properties": {
-                                    "command": {
-                                        "type": "string",
-                                        "description": "Full show command to execute, beginning with 'show'."
-                                    },
-                                    "json": {
-                                        "type": "boolean",
-                                        "description": "Return JSON-formatted output when the command supports it (default false)."
-                                    }
-                                },
-                                "required": ["command"],
-                                "additionalProperties": false
-                            }
-                        },
-                        {
-                            "name": "get-isis-graph",
-                            "description": "Get IS-IS topology graph data for network visualization and analysis",
-                            "inputSchema": {
-                                "type": "object",
-                                "properties": {
-                                    "level": {
-                                        "type": "string",
-                                        "enum": ["L1", "L2", "both"],
-                                        "description": "IS-IS level to retrieve (L1, L2, or both)"
-                                    }
-                                },
-                                "additionalProperties": false
-                            }
-                        }
-                    ]
-                })
-            }
-            "tools/call" => self.handle_tool_call(params).await,
-            _ => {
-                warn!("Unknown method: {}", method);
-                // For unknown methods, return error only if request has an ID
-                if let Some(id) = id {
-                    return Some(json!({
-                        "jsonrpc": "2.0",
-                        "id": id,
-                        "error": {
-                            "code": -32601,
-                            "message": "Method not found",
-                            "data": format!("Unknown method: {}", method)
-                        }
-                    }));
-                } else {
-                    // For notifications (no ID), don't send response
-                    return None;
-                }
-            }
-        };
+            "tools/list" => Ok(self.tools_list()),
+            "tools/call" => Ok(self.handle_tool_call(params).await),
+            "ping" => Ok(json!({})),
+            _ => Err(method_not_found(method)),
+        }
+    }
 
-        // Build response with id if present (notifications with no ID don't get responses)
-        id.map(|id| {
-            json!({
-                "jsonrpc": "2.0",
-                "id": id,
-                "result": result
-            })
+    fn discover_result(&self) -> Value {
+        json!({
+            "supportedVersions": supported_versions(),
+            "capabilities": {
+                "tools": {
+                    "listChanged": false
+                }
+            },
+            "instructions": "Read-only view of a zebra-rs routing daemon. Call list-show-commands to discover the available show commands, then execute them with the show tool.",
+            "ttlMs": CACHE_TTL_MS,
+            "cacheScope": "private"
+        })
+    }
+
+    fn tools_list(&self) -> Value {
+        debug!("Listing available tools");
+        json!({
+            "tools": [
+                {
+                    "name": "list-show-commands",
+                    "description": "List every available read-only `show` command with a one-line explanation of each, generated live from the daemon's command grammar. Call this first to discover what `show` can do.",
+                    "inputSchema": {
+                        "type": "object",
+                        "properties": {},
+                        "additionalProperties": false
+                    }
+                },
+                {
+                    "name": "show",
+                    "description": "Run a read-only zebra-rs operational `show` command and return its output. The command must begin with 'show' (e.g. 'show ip route', 'show bgp summary', 'show isis neighbor'). Use 'list-show-commands' to discover the available commands.",
+                    "inputSchema": {
+                        "type": "object",
+                        "properties": {
+                            "command": {
+                                "type": "string",
+                                "description": "Full show command to execute, beginning with 'show'."
+                            },
+                            "json": {
+                                "type": "boolean",
+                                "description": "Return JSON-formatted output when the command supports it (default false)."
+                            }
+                        },
+                        "required": ["command"],
+                        "additionalProperties": false
+                    }
+                },
+                {
+                    "name": "get-isis-graph",
+                    "description": "Get IS-IS topology graph data for network visualization and analysis",
+                    "inputSchema": {
+                        "type": "object",
+                        "properties": {
+                            "level": {
+                                "type": "string",
+                                "enum": ["L1", "L2", "both"],
+                                "description": "IS-IS level to retrieve (L1, L2, or both)"
+                            }
+                        },
+                        "additionalProperties": false
+                    }
+                }
+            ],
+            "ttlMs": CACHE_TTL_MS,
+            "cacheScope": "private"
         })
     }
 
@@ -274,6 +402,116 @@ mod tests {
                 "missing {expected}; tools: {names:?}"
             );
         }
+    }
+
+    async fn negotiate(requested: Option<&str>) -> Value {
+        let params = match requested {
+            Some(v) => json!({"protocolVersion": v}),
+            None => json!({}),
+        };
+        let req = json!({"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": params});
+        let resp = server().handle_request(req).await.expect("response");
+        resp["result"]["protocolVersion"].clone()
+    }
+
+    #[tokio::test]
+    async fn initialize_echoes_supported_versions() {
+        for version in LEGACY_PROTOCOL_VERSIONS {
+            assert_eq!(negotiate(Some(version)).await, json!(version));
+        }
+    }
+
+    #[tokio::test]
+    async fn initialize_offers_latest_for_unsupported_version() {
+        for requested in [Some("2025-03-26"), Some("1999-01-01"), None] {
+            assert_eq!(
+                negotiate(requested).await,
+                json!(LEGACY_PROTOCOL_VERSIONS[0])
+            );
+        }
+    }
+
+    /// Build a stateless 2026-07-28 request carrying the required `_meta`
+    /// fields, spelled out literally to pin the wire format.
+    fn modern_request(method: &str, mut params: Value) -> Value {
+        params["_meta"] = json!({
+            "io.modelcontextprotocol/protocolVersion": "2026-07-28",
+            "io.modelcontextprotocol/clientCapabilities": {}
+        });
+        json!({"jsonrpc": "2.0", "id": 7, "method": method, "params": params})
+    }
+
+    #[tokio::test]
+    async fn server_discover_answers_without_meta() {
+        let req = json!({"jsonrpc": "2.0", "id": 5, "method": "server/discover"});
+        let resp = server().handle_request(req).await.expect("response");
+        let result = &resp["result"];
+        assert_eq!(result["resultType"], json!("complete"));
+        assert_eq!(
+            result["supportedVersions"],
+            json!(["2026-07-28", "2025-06-18", "2024-11-05"])
+        );
+        assert_eq!(
+            result["_meta"]["io.modelcontextprotocol/serverInfo"]["name"],
+            json!("vtyctl-mcp")
+        );
+        assert!(result["capabilities"]["tools"].is_object());
+    }
+
+    #[tokio::test]
+    async fn modern_tools_list_needs_no_handshake() {
+        let resp = server()
+            .handle_request(modern_request("tools/list", json!({})))
+            .await
+            .expect("response");
+        let result = &resp["result"];
+        assert!(result["tools"].as_array().is_some_and(|t| t.len() == 3));
+        assert_eq!(result["resultType"], json!("complete"));
+        assert_eq!(result["cacheScope"], json!("private"));
+        assert!(result["ttlMs"].is_u64());
+        assert_eq!(
+            result["_meta"]["io.modelcontextprotocol/serverInfo"]["name"],
+            json!("vtyctl-mcp")
+        );
+    }
+
+    #[tokio::test]
+    async fn modern_unsupported_version_is_32022() {
+        let mut req = modern_request("tools/list", json!({}));
+        req["params"]["_meta"]["io.modelcontextprotocol/protocolVersion"] = json!("2099-01-01");
+        let resp = server().handle_request(req).await.expect("response");
+        assert_eq!(resp["error"]["code"], json!(-32022));
+        assert_eq!(resp["error"]["data"]["requested"], json!("2099-01-01"));
+        assert!(
+            resp["error"]["data"]["supported"]
+                .as_array()
+                .is_some_and(|v| v.contains(&json!("2026-07-28")))
+        );
+    }
+
+    #[tokio::test]
+    async fn modern_request_requires_client_capabilities() {
+        let mut req = modern_request("tools/list", json!({}));
+        req["params"]["_meta"]
+            .as_object_mut()
+            .expect("meta object")
+            .remove("io.modelcontextprotocol/clientCapabilities");
+        let resp = server().handle_request(req).await.expect("response");
+        assert_eq!(resp["error"]["code"], json!(-32602));
+    }
+
+    #[tokio::test]
+    async fn ping_is_legacy_only() {
+        let req = json!({"jsonrpc": "2.0", "id": 3, "method": "ping"});
+        let resp = server().handle_request(req).await.expect("response");
+        assert_eq!(resp["result"]["resultType"], json!("complete"));
+
+        // 2026-07-28 removed ping from the protocol.
+        let resp = server()
+            .handle_request(modern_request("ping", json!({})))
+            .await
+            .expect("response");
+        assert_eq!(resp["error"]["code"], json!(-32601));
     }
 
     #[tokio::test]

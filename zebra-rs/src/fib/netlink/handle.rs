@@ -449,6 +449,16 @@ fn cradle_members(nexthop: &Nexthop) -> Vec<CradleMember> {
     }
 }
 
+/// The access VLAN of the single-VXLAN-device EVPN datapath: VLAN 1 is
+/// mapped to the VNI on every VXLAN bridge port (`vxlan_svd_datapath`),
+/// and the bridge-master FDB entries for remote MACs are scoped to it.
+/// Scoping matters on a `vlan_filtering` bridge: an FDB add carrying no
+/// `NDA_VLAN` is expanded by the kernel to VLAN 0 *plus every VLAN on
+/// the port*, which both litters `bridge fdb show` with a useless VLAN-0
+/// duplicate per MAC and would poison unrelated VLANs the moment a port
+/// carries more than one.
+const EVPN_SVD_VLAN: u16 = 1;
+
 /// Op selector for `fdb_neigh_send`. The kernel netlink flag set
 /// differs per scenario:
 ///
@@ -2699,6 +2709,8 @@ impl FibHandle {
     /// datapath for a VXLAN port that joined a bridge, so bridged
     /// traffic actually encapsulates:
     ///
+    /// (The access VLAN is [`EVPN_SVD_VLAN`]; the bridge-master FDB
+    /// entries `mac_add`/`mac_del` install are scoped to the same VLAN.)
     ///   1. enable `vlan_filtering` on the bridge master — the per-VLAN
     ///      machinery (and thus the tunnel mapping) is dormant without
     ///      it; other ports keep the kernel's `default_pvid 1` untagged
@@ -2742,7 +2754,7 @@ impl FibHandle {
         // 2. VLAN 1 on the VXLAN port, tagged (flags = 0).
         let mut vinfo = BridgeVlanInfo::default();
         vinfo.flags = 0;
-        vinfo.vid = 1;
+        vinfo.vid = EVPN_SVD_VLAN;
         let mut msg = LinkMessage::default();
         msg.header.interface_family = AddressFamily::Bridge;
         msg.header.index = ifindex;
@@ -2774,7 +2786,7 @@ impl FibHandle {
         // TUNNEL_VID: nla_len 6, type 2, u16 payload + 2 pad bytes.
         nest.extend_from_slice(&6u16.to_ne_bytes());
         nest.extend_from_slice(&2u16.to_ne_bytes());
-        nest.extend_from_slice(&1u16.to_ne_bytes());
+        nest.extend_from_slice(&EVPN_SVD_VLAN.to_ne_bytes());
         nest.extend_from_slice(&[0u8; 2]);
 
         let mut msg = LinkMessage::default();
@@ -3074,20 +3086,16 @@ impl FibHandle {
         Ok(())
     }
 
-    pub async fn addr_add_ipv4(
-        &self,
-        ifindex: u32,
-        prefix: &Ipv4Net,
-        secondary: bool,
-    ) -> anyhow::Result<()> {
+    /// Add an IPv4 address via `RTM_NEWADDR`. No `IFA_F_SECONDARY` is
+    /// ever requested: the kernel clears the userspace flag and
+    /// recomputes it itself (secondary iff same mask+subnet as an
+    /// existing primary), so the flag is read back, never written.
+    pub async fn addr_add_ipv4(&self, ifindex: u32, prefix: &Ipv4Net) -> anyhow::Result<()> {
         let mut msg = AddressMessage::default();
         msg.header.family = AddressFamily::Inet;
         msg.header.prefix_len = prefix.prefix_len();
         msg.header.index = ifindex;
         msg.header.scope = AddressScope::Universe;
-        if secondary {
-            msg.header.flags = AddressHeaderFlags::Secondary;
-        }
         let attr = AddressAttribute::Local(IpAddr::V4(prefix.addr()));
         msg.attributes.push(attr);
 
@@ -3102,7 +3110,16 @@ impl FibHandle {
 
         let mut response = self.handle.clone().request(req)?;
         while let Some(msg) = response.next().await {
-            if let NetlinkPayload::Error(e) = msg.payload {
+            if let NetlinkPayload::Error(e) = msg.payload
+                && let Some(code) = e.code
+            {
+                // EEXIST: the address is already installed (added outside
+                // zebra-rs, or it survived a primary delete because the
+                // host runs promote_secondaries=1). The intent — address
+                // present in the kernel — holds, so report success.
+                if code.get() == -libc::EEXIST {
+                    return Ok(());
+                }
                 return Err(anyhow::anyhow!("NewAddress netlink error: {}", e));
             }
         }
@@ -3129,20 +3146,15 @@ impl FibHandle {
         }
     }
 
-    pub async fn addr_add_ipv6(
-        &self,
-        ifindex: u32,
-        prefix: &Ipv6Net,
-        secondary: bool,
-    ) -> anyhow::Result<()> {
+    /// Add an IPv6 address via `RTM_NEWADDR`. Never sets header flag
+    /// bit 0x01: on IPv6 it is `IFA_F_TEMPORARY` (privacy address),
+    /// not "secondary" — IPv6 has no secondary concept.
+    pub async fn addr_add_ipv6(&self, ifindex: u32, prefix: &Ipv6Net) -> anyhow::Result<()> {
         let mut msg = AddressMessage::default();
         msg.header.family = AddressFamily::Inet6;
         msg.header.prefix_len = prefix.prefix_len();
         msg.header.index = ifindex;
         msg.header.scope = AddressScope::Universe;
-        if secondary {
-            msg.header.flags = AddressHeaderFlags::Secondary;
-        }
         let attr = AddressAttribute::Local(IpAddr::V6(prefix.addr()));
         msg.attributes.push(attr);
 
@@ -3157,7 +3169,13 @@ impl FibHandle {
 
         let mut response = self.handle.clone().request(req)?;
         while let Some(msg) = response.next().await {
-            if let NetlinkPayload::Error(e) = msg.payload {
+            if let NetlinkPayload::Error(e) = msg.payload
+                && let Some(code) = e.code
+            {
+                // Same EEXIST tolerance as the IPv4 twin.
+                if code.get() == -libc::EEXIST {
+                    return Ok(());
+                }
                 return Err(anyhow::anyhow!("NewAddress IPv6 netlink error: {}", e));
             }
         }
@@ -3609,6 +3627,7 @@ impl FibHandle {
             NUD_REACHABLE,
             None,
             None,
+            Some(EVPN_SVD_VLAN),
             FdbOp::Upsert,
             "mac_add(master)",
         )
@@ -3627,6 +3646,7 @@ impl FibHandle {
             NUD_PERMANENT,
             Some(vni),
             tunnel_endpoint,
+            None,
             FdbOp::Upsert,
             "mac_add(self)",
         )
@@ -3646,7 +3666,10 @@ impl FibHandle {
     /// `is_add` selects RTM_NEWNEIGH (with `NLM_F_CREATE | NLM_F_REPLACE`
     /// upsert flags) vs RTM_DELNEIGH. `vni` adds NDA_VNI/NDA_SRC_VNI/
     /// NDA_PORT (only meaningful for VXLAN self entries). `dst` adds
-    /// NDA_DST (the remote VTEP IP, also self-only).
+    /// NDA_DST (the remote VTEP IP, also self-only). `vlan` adds
+    /// NDA_VLAN, scoping a bridge-master entry to one VLAN — without it
+    /// a `vlan_filtering` bridge expands the add to VLAN 0 plus every
+    /// VLAN on the port (see [`EVPN_SVD_VLAN`]).
     #[allow(clippy::too_many_arguments)]
     async fn fdb_neigh_send(
         &self,
@@ -3656,6 +3679,7 @@ impl FibHandle {
         nud_state: u16,
         vni: Option<u32>,
         dst: Option<IpAddr>,
+        vlan: Option<u16>,
         op: FdbOp,
         log_label: &str,
     ) {
@@ -3685,6 +3709,9 @@ impl FibHandle {
             };
             msg.attributes
                 .push(NeighbourAttribute::TunnelEndpoint(addr));
+        }
+        if let Some(vid) = vlan {
+            msg.attributes.push(NeighbourAttribute::Vlan(vid));
         }
 
         let req = match op {
@@ -3894,6 +3921,7 @@ impl FibHandle {
             0,
             None,
             None,
+            Some(EVPN_SVD_VLAN),
             FdbOp::Delete,
             "mac_del(master)",
         )
@@ -3904,6 +3932,7 @@ impl FibHandle {
             NTF_SELF,
             0,
             Some(vni),
+            None,
             None,
             FdbOp::Delete,
             "mac_del(self)",
@@ -3986,6 +4015,7 @@ impl FibHandle {
             NUD_PERMANENT,
             Some(vni),
             Some(group),
+            None,
             FdbOp::Append,
             "mdb_add(zero-mac)",
         )
@@ -4030,6 +4060,7 @@ impl FibHandle {
             0,
             Some(vni),
             Some(group),
+            None,
             FdbOp::Delete,
             "mdb_del(zero-mac)",
         )
@@ -4127,6 +4158,12 @@ pub fn link_from_msg(msg: LinkMessage) -> FibLink {
 pub fn addr_from_msg(msg: AddressMessage) -> FibAddr {
     let mut os_addr = FibAddr::new();
     os_addr.link_index = msg.header.index;
+    // IFA_F_SECONDARY is kernel-computed for IPv4: the kernel sets it
+    // when an address shares mask+subnet with an existing primary on
+    // the device. The same bit on an IPv6 address is IFA_F_TEMPORARY
+    // (a privacy address), so it must not map to `secondary`.
+    os_addr.secondary = msg.header.family == AddressFamily::Inet
+        && msg.header.flags.contains(AddressHeaderFlags::Secondary);
     for attr in msg.attributes.into_iter() {
         match attr {
             AddressAttribute::Address(addr) => match addr {
@@ -4543,6 +4580,54 @@ mod tests {
             "RTM_NEWNEXTHOP decode regressed: {:?}",
             parsed.err()
         );
+    }
+
+    fn addr_msg(family: AddressFamily, flags: AddressHeaderFlags, addr: IpAddr) -> AddressMessage {
+        let mut msg = AddressMessage::default();
+        msg.header.family = family;
+        msg.header.prefix_len = 24;
+        msg.header.index = 3;
+        msg.header.flags = flags;
+        msg.attributes.push(AddressAttribute::Address(addr));
+        msg
+    }
+
+    #[test]
+    fn addr_from_msg_reads_v4_secondary_flag() {
+        use std::net::Ipv4Addr;
+        let msg = addr_msg(
+            AddressFamily::Inet,
+            AddressHeaderFlags::Secondary,
+            IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2)),
+        );
+        let addr = addr_from_msg(msg);
+        assert!(addr.secondary);
+        assert_eq!(addr.link_index, 3);
+        assert_eq!(addr.addr.to_string(), "10.0.0.2/24");
+    }
+
+    #[test]
+    fn addr_from_msg_v4_primary_is_not_secondary() {
+        use std::net::Ipv4Addr;
+        let msg = addr_msg(
+            AddressFamily::Inet,
+            AddressHeaderFlags::empty(),
+            IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1)),
+        );
+        assert!(!addr_from_msg(msg).secondary);
+    }
+
+    #[test]
+    fn addr_from_msg_v6_temporary_bit_is_not_secondary() {
+        // On IPv6 the 0x01 header flag is IFA_F_TEMPORARY (a privacy
+        // address), not "secondary" — it must never map to the flag.
+        use std::net::Ipv6Addr;
+        let msg = addr_msg(
+            AddressFamily::Inet6,
+            AddressHeaderFlags::Secondary,
+            IpAddr::V6("2001:db8::1".parse::<Ipv6Addr>().unwrap()),
+        );
+        assert!(!addr_from_msg(msg).secondary);
     }
 
     #[test]

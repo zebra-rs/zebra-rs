@@ -2665,6 +2665,23 @@ impl EvpnFloodState {
         self.vnis.keys().copied().collect()
     }
 
+    /// Every remote VTEP endpoint recorded for `vni` — Ingress/Assisted
+    /// Replication IMET originators plus SR P2MP tree roots. Unlike
+    /// [`desired`](Self::desired) this is the raw membership view (no AR
+    /// collapse, no prune filtering), for `show evpn vni`.
+    pub fn remote_vteps(&self, vni: u32) -> Vec<IpAddr> {
+        self.vnis
+            .get(&vni)
+            .map(|v| {
+                v.remotes
+                    .keys()
+                    .chain(v.sr_remotes.keys())
+                    .copied()
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
     /// The flood-target set this node should program for `vni`, given its
     /// Assisted Replication role (RFC 9574 §5):
     ///
@@ -5409,7 +5426,7 @@ pub fn route_withdraw_evpn_to_peers(
 /// Announce and withdraw must agree — a withdraw carrying a different service
 /// field would not match its announce at the receiver — so both emit sites
 /// call this.
-fn macip_service_field(rib: &BgpRib) -> u32 {
+pub(super) fn macip_service_field(rib: &BgpRib) -> u32 {
     rib.label
         .as_ref()
         .map(|l| l.label)
@@ -17395,7 +17412,7 @@ fn smet_advertisable_group(group: IpAddr) -> bool {
 /// when the VNI exceeds 16 bits — Type-1 only has 2 bytes for the
 /// assigned-number field; supporting VNIs above 65535 needs the
 /// Type-0 (ASN) format and is a follow-up.
-fn rd_from_router_id_vni(router_id: Ipv4Addr, vni: u32) -> Option<RouteDistinguisher> {
+pub(super) fn rd_from_router_id_vni(router_id: Ipv4Addr, vni: u32) -> Option<RouteDistinguisher> {
     let vni_short: u16 = vni.try_into().ok()?;
     let mut rd = RouteDistinguisher::new(RouteDistinguisherType::IP);
     rd.val[0..4].copy_from_slice(&router_id.octets());

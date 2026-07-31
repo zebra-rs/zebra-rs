@@ -108,7 +108,7 @@ impl Rib {
                         net
                     );
                 }
-                if let Err(e) = self.fib_handle.addr_add_ipv4(ifindex, net, false).await {
+                if let Err(e) = self.fib_handle.addr_add_ipv4(ifindex, net).await {
                     tracing::warn!(
                         "addr_reinstall: {} failed to re-install IPv4 {}: {}",
                         link_name,
@@ -125,7 +125,7 @@ impl Rib {
                         net
                     );
                 }
-                if let Err(e) = self.fib_handle.addr_add_ipv6(ifindex, net, false).await {
+                if let Err(e) = self.fib_handle.addr_add_ipv6(ifindex, net).await {
                     tracing::warn!(
                         "addr_reinstall: {} failed to re-install IPv6 {}: {}",
                         link_name,
@@ -2177,13 +2177,18 @@ fn rib_replace_system(
     prefix: &Ipv4Net,
     entry: RibEntry,
 ) -> Vec<RibEntry> {
-    // println!("rib_replace_system {}", prefix);
     let entries = table.entry(*prefix).or_default();
-    let index = rib_rtype(entries, entry.rtype);
+    let index = if entry.is_connected() {
+        // Connected entries are keyed by (type, ifindex) — mirror
+        // rib_add_system, so a shared-prefix entry on another interface
+        // is neither examined nor evicted here.
+        rib_rtype_ifindex(entries, entry.rtype, entry.ifindex)
+    } else {
+        rib_rtype(entries, entry.rtype)
+    };
     let Some(index) = index else {
         return vec![];
     };
-    // println!("index {}", index);
     let e = entries.get_mut(index).unwrap();
     let replace = match &mut e.nexthop {
         Nexthop::Uni(uni) => uni.metric == entry.metric,
@@ -2208,9 +2213,12 @@ fn rib_replace_system(
         Nexthop::Protect(_) => false,
         Nexthop::Blackhole(m) => *m == entry.metric,
     };
-    // println!("replace {}", replace);
     if replace {
-        return rib_replace(table, prefix, entry.rtype);
+        return if entry.is_connected() {
+            rib_replace_connected(table, prefix, entry.rtype, entry.ifindex)
+        } else {
+            rib_replace(table, prefix, entry.rtype)
+        };
     }
     vec![]
 }
@@ -2224,6 +2232,25 @@ fn rib_replace(
         return vec![];
     };
     let (remain, replace): (Vec<_>, Vec<_>) = entries.drain(..).partition(|x| x.rtype != rtype);
+    *entries = remain;
+    replace
+}
+
+/// Remove only the connected entry belonging to `ifindex`. Two interfaces
+/// can each hold a Connected entry for the same prefix, and deleting an
+/// address on one must not evict the other's.
+fn rib_replace_connected(
+    table: &mut PrefixMap<Ipv4Net, RibEntries>,
+    prefix: &Ipv4Net,
+    rtype: RibType,
+    ifindex: u32,
+) -> Vec<RibEntry> {
+    let Some(entries) = table.get_mut(prefix) else {
+        return vec![];
+    };
+    let (remain, replace): (Vec<_>, Vec<_>) = entries
+        .drain(..)
+        .partition(|x| !(x.rtype == rtype && x.ifindex == ifindex));
     *entries = remain;
     replace
 }
@@ -2452,7 +2479,14 @@ fn rib_replace_system_v6(
     entry: RibEntry,
 ) -> Vec<RibEntry> {
     let entries = table.entry(*prefix).or_default();
-    let index = rib_rtype(entries, entry.rtype);
+    let index = if entry.is_connected() {
+        // Connected entries are keyed by (type, ifindex) — mirror
+        // rib_add_system_v6, so a shared-prefix entry on another
+        // interface is neither examined nor evicted here.
+        rib_rtype_ifindex(entries, entry.rtype, entry.ifindex)
+    } else {
+        rib_rtype(entries, entry.rtype)
+    };
     let Some(index) = index else {
         return vec![];
     };
@@ -2481,9 +2515,32 @@ fn rib_replace_system_v6(
         Nexthop::Blackhole(m) => *m == entry.metric,
     };
     if replace {
-        return rib_replace_v6(table, prefix, entry.rtype);
+        return if entry.is_connected() {
+            rib_replace_connected_v6(table, prefix, entry.rtype, entry.ifindex)
+        } else {
+            rib_replace_v6(table, prefix, entry.rtype)
+        };
     }
     vec![]
+}
+
+/// Remove only the connected entry belonging to `ifindex`. Two interfaces
+/// can each hold a Connected entry for the same prefix, and deleting an
+/// address on one must not evict the other's.
+fn rib_replace_connected_v6(
+    table: &mut PrefixMap<Ipv6Net, RibEntries>,
+    prefix: &Ipv6Net,
+    rtype: RibType,
+    ifindex: u32,
+) -> Vec<RibEntry> {
+    let Some(entries) = table.get_mut(prefix) else {
+        return vec![];
+    };
+    let (remain, replace): (Vec<_>, Vec<_>) = entries
+        .drain(..)
+        .partition(|x| !(x.rtype == rtype && x.ifindex == ifindex));
+    *entries = remain;
+    replace
 }
 
 fn rib_replace_v6(
@@ -2873,6 +2930,68 @@ mod tests {
         a.distance = 50;
         b.distance = 50;
         assert_eq!(ilm_next(&[a, b]), Some(1));
+    }
+
+    fn connected_entry(ifindex: u32) -> super::RibEntry {
+        use crate::rib::RibType;
+        let mut e = super::RibEntry::new(RibType::Connected);
+        e.ifindex = ifindex;
+        e.set_valid(true);
+        e
+    }
+
+    #[test]
+    fn replace_system_connected_is_ifindex_scoped_v4() {
+        use super::{rib_add_system, rib_replace_system};
+        use crate::rib::entry::RibEntries;
+        use ipnet::Ipv4Net;
+        use prefix_trie::PrefixMap;
+
+        // Two interfaces hold a Connected entry for the same prefix.
+        let mut table: PrefixMap<Ipv4Net, RibEntries> = PrefixMap::new();
+        let prefix: Ipv4Net = "10.0.0.0/24".parse().unwrap();
+        rib_add_system(&mut table, &prefix, connected_entry(1));
+        rib_add_system(&mut table, &prefix, connected_entry(2));
+        assert_eq!(table.get(&prefix).unwrap().len(), 2);
+
+        // Deleting interface 2's connected route must evict only its
+        // entry, not interface 1's.
+        let removed = rib_replace_system(&mut table, &prefix, connected_entry(2));
+        assert_eq!(removed.len(), 1);
+        assert_eq!(removed[0].ifindex, 2);
+        let remain = table.get(&prefix).unwrap();
+        assert_eq!(remain.len(), 1);
+        assert_eq!(remain[0].ifindex, 1);
+
+        // A delete keyed to an interface with no entry is a no-op.
+        let removed = rib_replace_system(&mut table, &prefix, connected_entry(7));
+        assert!(removed.is_empty());
+        assert_eq!(table.get(&prefix).unwrap().len(), 1);
+    }
+
+    #[test]
+    fn replace_system_connected_is_ifindex_scoped_v6() {
+        use super::{rib_add_system_v6, rib_replace_system_v6};
+        use crate::rib::entry::RibEntries;
+        use ipnet::Ipv6Net;
+        use prefix_trie::PrefixMap;
+
+        let mut table: PrefixMap<Ipv6Net, RibEntries> = PrefixMap::new();
+        let prefix: Ipv6Net = "2001:db8:1::/64".parse().unwrap();
+        rib_add_system_v6(&mut table, &prefix, connected_entry(1));
+        rib_add_system_v6(&mut table, &prefix, connected_entry(2));
+        assert_eq!(table.get(&prefix).unwrap().len(), 2);
+
+        let removed = rib_replace_system_v6(&mut table, &prefix, connected_entry(2));
+        assert_eq!(removed.len(), 1);
+        assert_eq!(removed[0].ifindex, 2);
+        let remain = table.get(&prefix).unwrap();
+        assert_eq!(remain.len(), 1);
+        assert_eq!(remain[0].ifindex, 1);
+
+        let removed = rib_replace_system_v6(&mut table, &prefix, connected_entry(7));
+        assert!(removed.is_empty());
+        assert_eq!(table.get(&prefix).unwrap().len(), 1);
     }
 
     #[test]

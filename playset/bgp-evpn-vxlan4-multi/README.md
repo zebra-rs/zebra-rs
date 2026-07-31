@@ -184,6 +184,33 @@ Two details worth noticing:
   `local-address`, facing `vtep3`), while its VNI 10 routes use
   `192.168.0.1`. Each tenant's tunnel rides the right underlay link.
 
+`show evpn vni all` shows the whole inventory at a glance. On the
+multi-tenant `vtep1`, both VNIs with their per-tenant VTEP addresses:
+
+``` shell
+vtep1>show evpn vni all
+Advertise All VNI flag: Enabled
+BUM flooding: Head-end replication
+Number of L2 VNIs: 2
+Number of L3 VNIs: 0
+Flags: * - Kernel VXLAN device
+  VNI        Type Local VTEP                RD                     Import/Export RT  #MACs(loc)  #MACs(rem) #Remote VTEPs  Tenant VRF
+* 10         L2   192.168.0.1               192.168.0.1:10         65001:10                   2           2             1  default
+* 20         L2   192.168.1.1               192.168.0.1:20         65001:20                   2           2             1  default
+```
+
+On single-tenant `vtep2` the other tenant's VNI 20 still appears — its
+routes arrive over iBGP — but without the `*` flag and with no local
+VTEP: BGP knows the VNI, the kernel serves only VNI 10:
+
+``` shell
+vtep2>show evpn vni all
+...
+  VNI        Type Local VTEP                RD                     Import/Export RT  #MACs(loc)  #MACs(rem) #Remote VTEPs  Tenant VRF
+* 10         L2   192.168.0.2               192.168.0.2:10         65001:10                   2           2             1  default
+  20         L2   -                         192.168.0.2:20         65001:20                   0           2             1  default
+```
+
 ## Kernel view: two tenants, two flood domains
 
 ``` shell

@@ -142,6 +142,20 @@ require:
   and could not hold an IPv6 address). The **route-target** `RT:65001:10`
   is still auto-derived from the VNI.
 
+`show evpn vni all` puts that split on one line — an IPv6 local VTEP next
+to an IPv4-derived RD (counts are from after the hosts have talked):
+
+``` shell
+vtep1>show evpn vni all
+Advertise All VNI flag: Enabled
+BUM flooding: Head-end replication
+Number of L2 VNIs: 1
+Number of L3 VNIs: 0
+Flags: * - Kernel VXLAN device
+  VNI        Type Local VTEP                RD                     Import/Export RT  #MACs(loc)  #MACs(rem) #Remote VTEPs  Tenant VRF
+* 10         L2   2001:db8:ff::1            10.0.0.1:10            65001:10                   2           2             1  default
+```
+
 ## How the routes land in the kernel
 
 ``` shell

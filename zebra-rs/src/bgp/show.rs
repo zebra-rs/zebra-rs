@@ -6881,18 +6881,308 @@ mod detail_tests {
     }
 }
 
+/// One row of `show evpn vni all`: a VNI this node participates in, drawn
+/// from any of its sources — a kernel VXLAN device (`local_vxlans`), a
+/// configured MPLS EVI (`evpn_evis`), a VRF's symmetric-IRB L3VNI, or
+/// remote Type-3 IMET state (`evpn_flood`). Shared by the text and JSON
+/// renderers so both views come from one collection pass.
+#[derive(Serialize)]
+struct EvpnVniJson {
+    vni: u32,
+    /// `"L2"`, or `"L3"` when some VRF uses this VNI as its EVPN
+    /// symmetric-IRB L3VNI.
+    #[serde(rename = "type")]
+    vni_type: &'static str,
+    /// True when a kernel VXLAN device has this VNI registered.
+    kernel: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    local_vtep: Option<String>,
+    /// The auto-derived Type-1 RD (`router-id:vni`, RFC 8365 §5.1.2).
+    /// Absent when the router-id is unset or the VNI exceeds 16 bits.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    rd: Option<String>,
+    /// The auto-derived route target (`as:vni`) — import and export are
+    /// the same value.
+    route_target: String,
+    local_macs: usize,
+    remote_macs: usize,
+    remote_vteps: Vec<String>,
+    tenant_vrf: String,
+}
+
+#[derive(Serialize)]
+struct EvpnVniAllJson {
+    advertise_all_vni: bool,
+    bum_flooding: &'static str,
+    num_l2_vnis: usize,
+    num_l3_vnis: usize,
+    vnis: Vec<EvpnVniJson>,
+}
+
+/// The human name of the configured BUM flooding mechanism.
+fn evpn_bum_flooding_label(bgp: &Bgp) -> &'static str {
+    use super::inst::{AssistedReplicationRole, EvpnBumTunnel};
+    match bgp.local_rib.evpn_flood.bum_tunnel {
+        EvpnBumTunnel::IngressReplication => match bgp.local_rib.evpn_flood.role {
+            AssistedReplicationRole::Replicator => "Assisted replication (replicator)",
+            AssistedReplicationRole::Leaf => "Assisted replication (leaf)",
+            AssistedReplicationRole::None => "Head-end replication",
+        },
+        EvpnBumTunnel::SrMplsP2mp => "SR-MPLS P2MP replication tree",
+        EvpnBumTunnel::SrV6P2mp => "SRv6 P2MP replication tree",
+    }
+}
+
+fn evpn_vni_all_view(bgp: &Bgp) -> EvpnVniAllJson {
+    use std::collections::BTreeSet;
+
+    // vni → tenant VRF name for VNIs serving as a VRF's symmetric-IRB
+    // L3VNI (same predicate the Type-5 origination path uses).
+    let l3vnis: BTreeMap<u32, &str> = bgp
+        .vrfs
+        .iter()
+        .filter(|(_, c)| c.encapsulation == super::vrf_config::BgpVrfEncapsulation::Vxlan)
+        .filter_map(|(name, c)| c.l3vni.map(|vni| (vni, name.as_str())))
+        .collect();
+
+    // Union of every VNI this node knows about.
+    let mut vnis: BTreeSet<u32> = bgp.local_vxlans.keys().copied().collect();
+    vnis.extend(bgp.evpn_evis.keys().copied());
+    vnis.extend(bgp.local_rib.evpn_flood.vnis());
+    vnis.extend(l3vnis.keys().copied());
+
+    // Remote MACs per VNI: selected Type-2 paths we did not originate,
+    // deduplicated by MAC (one MAC may appear under several RDs during a
+    // move or with multihoming) and bucketed by the same service field
+    // (NLRI label, else RT-derived VNI) the import path uses.
+    let mut remote_macs: BTreeSet<(u32, [u8; 6])> = BTreeSet::new();
+    for table in bgp.local_rib.evpn.values() {
+        for (prefix, rib) in table.selected.iter() {
+            let EvpnPrefix::MacIp { mac, .. } = prefix else {
+                continue;
+            };
+            if rib.is_originated() {
+                continue;
+            }
+            let vni = super::route::macip_service_field(rib);
+            if vni != 0 {
+                remote_macs.insert((vni, *mac));
+            }
+        }
+    }
+
+    let rows: Vec<EvpnVniJson> = vnis
+        .into_iter()
+        .map(|vni| {
+            let (vni_type, tenant_vrf) = match l3vnis.get(&vni) {
+                Some(name) => ("L3", (*name).to_string()),
+                None => ("L2", "default".to_string()),
+            };
+            let rd = (!bgp.router_id.is_unspecified())
+                .then(|| super::route::rd_from_router_id_vni(bgp.router_id, vni))
+                .flatten()
+                .map(|rd| rd.to_string());
+            EvpnVniJson {
+                vni,
+                vni_type,
+                kernel: bgp.local_vxlans.contains_key(&vni),
+                local_vtep: bgp.local_vxlans.get(&vni).map(|ip| ip.to_string()),
+                rd,
+                // Wire encoding truncates the ASN to 16 bits (Type-0 RT
+                // with the low half of a 4-byte ASN) — display the value
+                // actually advertised.
+                route_target: format!("{}:{}", bgp.asn as u16, vni),
+                local_macs: bgp.local_fdb.keys().filter(|(v, _)| *v == vni).count(),
+                remote_macs: remote_macs.iter().filter(|(v, _)| *v == vni).count(),
+                remote_vteps: bgp
+                    .local_rib
+                    .evpn_flood
+                    .remote_vteps(vni)
+                    .iter()
+                    .map(|ip| ip.to_string())
+                    .collect(),
+                tenant_vrf,
+            }
+        })
+        .collect();
+
+    EvpnVniAllJson {
+        advertise_all_vni: bgp.advertise_all_vni,
+        bum_flooding: evpn_bum_flooding_label(bgp),
+        num_l2_vnis: rows.iter().filter(|r| r.vni_type == "L2").count(),
+        num_l3_vnis: rows.iter().filter(|r| r.vni_type == "L3").count(),
+        vnis: rows,
+    }
+}
+
+fn format_evpn_vni_table(view: &EvpnVniAllJson) -> std::result::Result<String, std::fmt::Error> {
+    let mut buf = String::new();
+    writeln!(
+        buf,
+        "Advertise All VNI flag: {}",
+        if view.advertise_all_vni {
+            "Enabled"
+        } else {
+            "Disabled"
+        }
+    )?;
+    writeln!(buf, "BUM flooding: {}", view.bum_flooding)?;
+    writeln!(buf, "Number of L2 VNIs: {}", view.num_l2_vnis)?;
+    writeln!(buf, "Number of L3 VNIs: {}", view.num_l3_vnis)?;
+    if view.vnis.is_empty() {
+        return Ok(buf);
+    }
+    writeln!(buf, "Flags: * - Kernel VXLAN device")?;
+    writeln!(
+        buf,
+        "  {:<10} {:<4} {:<25} {:<22} {:<17} {:>10} {:>11} {:>13}  Tenant VRF",
+        "VNI",
+        "Type",
+        "Local VTEP",
+        "RD",
+        "Import/Export RT",
+        "#MACs(loc)",
+        "#MACs(rem)",
+        "#Remote VTEPs"
+    )?;
+    for row in view.vnis.iter() {
+        let flag = if row.kernel { '*' } else { ' ' };
+        writeln!(
+            buf,
+            "{flag} {:<10} {:<4} {:<25} {:<22} {:<17} {:>10} {:>11} {:>13}  {}",
+            row.vni,
+            row.vni_type,
+            row.local_vtep.as_deref().unwrap_or("-"),
+            row.rd.as_deref().unwrap_or("-"),
+            row.route_target,
+            row.local_macs,
+            row.remote_macs,
+            row.remote_vteps.len(),
+            row.tenant_vrf
+        )?;
+    }
+    Ok(buf)
+}
+
 fn show_evpn_vni_all(
-    _bgp: &Bgp,
+    bgp: &Bgp,
     _args: Args,
     json: bool,
 ) -> std::result::Result<String, std::fmt::Error> {
-    // Placeholder: the EVPN VNI inventory isn't wired up here yet (the
-    // per-VNI MAC state lives in the RIB — see `show l2 mac table`).
-    // Honor `-j` with an empty array so the flag isn't a silent no-op.
+    let view = evpn_vni_all_view(bgp);
     if json {
-        return Ok("[]".to_string());
+        return Ok(serde_json::to_string_pretty(&view)
+            .unwrap_or_else(|e| format!("{{\"error\": \"{e}\"}}")));
     }
-    Ok(String::from("EVPN output here"))
+    format_evpn_vni_table(&view)
+}
+
+#[cfg(test)]
+mod evpn_vni_show_tests {
+    use super::*;
+
+    fn sample_view() -> EvpnVniAllJson {
+        EvpnVniAllJson {
+            advertise_all_vni: true,
+            bum_flooding: "Head-end replication",
+            num_l2_vnis: 2,
+            num_l3_vnis: 1,
+            vnis: vec![
+                EvpnVniJson {
+                    vni: 10,
+                    vni_type: "L2",
+                    kernel: true,
+                    local_vtep: Some("192.168.0.1".to_string()),
+                    rd: Some("192.168.0.1:10".to_string()),
+                    route_target: "65001:10".to_string(),
+                    local_macs: 2,
+                    remote_macs: 2,
+                    remote_vteps: vec!["192.168.0.2".to_string()],
+                    tenant_vrf: "default".to_string(),
+                },
+                // A remote-only VNI: IMET state arrived but no kernel
+                // VXLAN device registers the VNI locally.
+                EvpnVniJson {
+                    vni: 20,
+                    vni_type: "L2",
+                    kernel: false,
+                    local_vtep: None,
+                    rd: Some("192.168.0.1:20".to_string()),
+                    route_target: "65001:20".to_string(),
+                    local_macs: 0,
+                    remote_macs: 1,
+                    remote_vteps: vec!["192.168.1.2".to_string()],
+                    tenant_vrf: "default".to_string(),
+                },
+                EvpnVniJson {
+                    vni: 4001,
+                    vni_type: "L3",
+                    kernel: true,
+                    local_vtep: Some("2001:db8:ff::1".to_string()),
+                    rd: Some("192.168.0.1:4001".to_string()),
+                    route_target: "65001:4001".to_string(),
+                    local_macs: 0,
+                    remote_macs: 0,
+                    remote_vteps: vec![],
+                    tenant_vrf: "cust1".to_string(),
+                },
+            ],
+        }
+    }
+
+    #[test]
+    fn evpn_vni_table_renders_rows_and_flags() {
+        let out = format_evpn_vni_table(&sample_view()).unwrap();
+        for needle in [
+            "Advertise All VNI flag: Enabled",
+            "BUM flooding: Head-end replication",
+            "Number of L2 VNIs: 2",
+            "Number of L3 VNIs: 1",
+            "Flags: * - Kernel VXLAN device",
+        ] {
+            assert!(out.contains(needle), "missing {needle:?} in:\n{out}");
+        }
+        // Kernel VNIs get the `*` flag; the remote-only one does not.
+        assert!(out.contains("* 10         L2   192.168.0.1"), "{out}");
+        assert!(out.contains("  20         L2   -"), "{out}");
+        // The L3 row carries its tenant VRF and IPv6 VTEP.
+        assert!(out.contains("* 4001       L3   2001:db8:ff::1"), "{out}");
+        assert!(out.contains("cust1"), "{out}");
+        // RD / RT columns.
+        assert!(out.contains("192.168.0.1:10"), "{out}");
+        assert!(out.contains("65001:10"), "{out}");
+    }
+
+    #[test]
+    fn evpn_vni_table_empty_omits_table() {
+        let view = EvpnVniAllJson {
+            advertise_all_vni: false,
+            bum_flooding: "Head-end replication",
+            num_l2_vnis: 0,
+            num_l3_vnis: 0,
+            vnis: vec![],
+        };
+        let out = format_evpn_vni_table(&view).unwrap();
+        assert!(out.contains("Advertise All VNI flag: Disabled"), "{out}");
+        assert!(!out.contains("VNI        Type"), "{out}");
+    }
+
+    #[test]
+    fn evpn_vni_json_shape() {
+        let js = serde_json::to_value(sample_view()).unwrap();
+        assert_eq!(js["advertise_all_vni"], true);
+        assert_eq!(js["num_l2_vnis"], 2);
+        let row = &js["vnis"][0];
+        assert_eq!(row["vni"], 10);
+        assert_eq!(row["type"], "L2");
+        assert_eq!(row["kernel"], true);
+        assert_eq!(row["local_vtep"], "192.168.0.1");
+        assert_eq!(row["rd"], "192.168.0.1:10");
+        assert_eq!(row["route_target"], "65001:10");
+        assert_eq!(row["remote_vteps"][0], "192.168.0.2");
+        // Absent optionals are omitted, not null.
+        assert!(js["vnis"][1].get("local_vtep").is_none());
+    }
 }
 
 fn show_bgp_rtcv4(
