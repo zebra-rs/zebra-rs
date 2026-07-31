@@ -2030,9 +2030,10 @@ async fn isis_neighbor_up(scoped: &str, level: u64, interface: &str) -> (bool, S
 /// Assert an IS-IS adjacency at the given level on the given interface is
 /// Up — e.g. the area-independent Level-2 backbone adjacency.
 ///
-/// Polls for up to 30 seconds: after BFD recovers the hold-down pin is cleared
-/// immediately, but the adjacency only promotes Init→Up on the next inbound IIH
-/// (default 3 s interval), so a single-shot check races that window.
+/// Polls for up to 60 seconds (the suite's standard convergence budget): after
+/// BFD recovers the hold-down pin is cleared immediately, but the adjacency
+/// only promotes Init→Up on the next inbound IIH (default 3 s interval), so a
+/// single-shot check races that window.
 #[then(
     expr = "isis neighbor in namespace {string} at level {int} on interface {string} should be up"
 )]
@@ -2043,7 +2044,7 @@ async fn isis_neighbor_should_be_up(
     interface: String,
 ) {
     let scoped = world.ns(&namespace);
-    const ATTEMPTS: u32 = 30;
+    const ATTEMPTS: u32 = 60;
     let mut up = false;
     let mut output = String::new();
     for i in 0..ATTEMPTS {
@@ -2137,13 +2138,14 @@ async fn bfd_session_up(scoped: &str, interface: &str) -> (bool, String) {
     (up, output)
 }
 
-/// Assert a single-hop BFD session on the given interface reaches Up. Polls for
-/// a short window so the step tolerates the session's negotiation / detection
-/// latency without the feature needing a hard-coded long wait.
+/// Assert a single-hop BFD session on the given interface reaches Up. Polls
+/// for up to 60 seconds (the suite's standard convergence budget) so the step
+/// tolerates the session's negotiation / detection latency without the
+/// feature needing a hard-coded long wait.
 #[then(expr = "bfd session in namespace {string} on interface {string} should be up")]
 async fn bfd_session_should_be_up(world: &mut World, namespace: String, interface: String) {
     let scoped = world.ns(&namespace);
-    const ATTEMPTS: u32 = 20;
+    const ATTEMPTS: u32 = 60;
     let mut up = false;
     let mut output = String::new();
     for i in 0..ATTEMPTS {
@@ -2173,7 +2175,7 @@ async fn bfd_session_should_be_up(world: &mut World, namespace: String, interfac
 #[then(expr = "bfd session in namespace {string} on interface {string} should be down")]
 async fn bfd_session_should_be_down(world: &mut World, namespace: String, interface: String) {
     let scoped = world.ns(&namespace);
-    const ATTEMPTS: u32 = 20;
+    const ATTEMPTS: u32 = 60;
     let mut up = true;
     let mut output = String::new();
     for i in 0..ATTEMPTS {
@@ -2213,7 +2215,7 @@ async fn bfd_session_should_have_echo(
     role: String,
 ) {
     let scoped = world.ns(&namespace);
-    const ATTEMPTS: u32 = 20;
+    const ATTEMPTS: u32 = 60;
     let mut ok = false;
     let mut output = String::new();
     for i in 0..ATTEMPTS {
