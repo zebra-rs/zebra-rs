@@ -41,6 +41,23 @@ to any MCP client and your assistant can reach the router straight away:
 }
 ```
 
+## Current protocol, older clients welcome
+
+The server speaks the stateless [MCP 2026-07-28
+revision](https://modelcontextprotocol.io/specification/2026-07-28) and stays
+compatible with earlier handshake-based clients, following the spec's dual-era
+rules:
+
+- **Modern clients** declare their protocol version on every request (and may
+  probe with `server/discover` first); requests are served statelessly, and
+  `tools/list` results carry cache hints so the client need not refetch them.
+- **Legacy clients** negotiate `2025-06-18` or `2024-11-05` through the classic
+  `initialize` handshake, unchanged.
+
+Either way the transport is stdio: the server runs as a local subprocess of
+your MCP client, so the daemon sees your own OS identity — no tokens, no
+network listener.
+
 This is what *AI native* means for a routing stack: the network is no longer a
 black box your tools poke at from the outside — it is a first-class participant
 in the conversation.

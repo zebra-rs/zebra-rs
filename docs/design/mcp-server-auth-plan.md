@@ -82,8 +82,8 @@ Two invariants:
 
 ## 3. Tool surface (read + write)
 
-Today the server exposes a single tool, `get-isis-graph` (read-only,
-backed by `Show`). For read+write it becomes a small generic set, each
+Phase 0 landed the read-only set (`list-show-commands`, `show`, and the
+kept `get-isis-graph`). For read+write it becomes a small generic set, each
 tagged with a required role the server enforces *and* the daemon
 re-checks:
 
@@ -192,6 +192,22 @@ touched.
 
 ## Status
 
+- **2026-07-30** — **Protocol upgraded to MCP 2026-07-28 (PRs #2170,
+  #2177).** The server is now "dual-era" per the spec's versioning rules:
+  a request carrying `_meta` `io.modelcontextprotocol/protocolVersion` is
+  served under the stateless 2026-07-28 revision (mandatory
+  `server/discover`, per-request version enforcement with `-32022`,
+  `resultType`/`serverInfo` stamping on every result, `ttlMs`/`cacheScope`
+  on list results), while `initialize`-handshake clients negotiate
+  `2025-06-18` or `2024-11-05` unchanged. `2025-03-26` is deliberately
+  unsupported: it is the only revision requiring JSON-RPC batching, which
+  the newline-delimited server does not accept. None of this changes the
+  auth story — identity remains `SO_PEERCRED`, and the 2026-07-28
+  authorization framework is HTTP-only (the spec directs stdio servers to
+  take credentials from the environment instead). **Phase 1 note:**
+  2026-07-28 deprecates server-initiated elicitation; if the write tools
+  want a confirm-before-apply interaction, the Multi Round-Trip Request
+  pattern (`resultType: "input_required"`) is the native replacement.
 - **2026-06-27** — **Scope reduced to stdio only; HTTP transport and
   OAuth 2.1 dropped.** This removes the entire trusted-asserter /
   asserted-identity design (former decisions D27–D31), the OAuth 2.1
