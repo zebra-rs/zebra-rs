@@ -129,6 +129,20 @@ module zebra-bgp-evpn {
          side is not gated by this leaf: each direction of an E-Line
          uses the encapsulation its originator signalled.";
     }
+    leaf vtep-source {
+      ext:help "VTEP advertised as the EVPN next hop";
+      type inet:ip-address;
+      description
+        "The VTEP address — IPv4 or IPv6 — advertised as the next hop
+         of locally originated EVPN routes when no local VXLAN device
+         supplies one for the VNI. A VPWS E-Line under `encapsulation
+         vxlan` has no VXLAN device (the service VNI is a decap identity,
+         not a bridge domain), so without this leaf its Type-1 falls back
+         to the IPv4 router-id — which cannot express a VTEP on an IPv6
+         underlay. Routes whose VNI does have a local VXLAN device keep
+         taking that device's local address; unset, the fallback remains
+         the router-id.";
+    }
     list evi {
       ext:help "EVPN Instance (bridge domain) for `encapsulation mpls`";
       key "id";

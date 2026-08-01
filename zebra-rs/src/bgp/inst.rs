@@ -1128,6 +1128,11 @@ pub struct Bgp {
     /// `router bgp afi-safi evpn encapsulation {vxlan|srv6|mpls}` — the
     /// overlay locally originated and received L2 routes ride.
     pub evpn_encap: EvpnEncap,
+    /// `router bgp afi-safi evpn vtep-source` — the VTEP (either family)
+    /// advertised as the next hop of originated EVPN routes whose VNI has
+    /// no local VXLAN device to take one from (a VPWS E-Line under
+    /// `encapsulation vxlan`); `None` falls back to the router-id.
+    pub evpn_vtep_source: Option<std::net::IpAddr>,
     /// EVPN Instances declared under `router bgp afi-safi evpn evi <id>`,
     /// keyed by EVI id. Populated only for `encapsulation mpls`, where there
     /// is no VXLAN device to infer a service identifier from. See
@@ -1385,6 +1390,7 @@ impl Bgp {
             evpn_dt2m_sids: BTreeMap::new(),
             evpn_dt2u_sids: BTreeMap::new(),
             evpn_encap: EvpnEncap::default(),
+            evpn_vtep_source: None,
             evpn_evis: BTreeMap::new(),
             srv6_ipv6_export: None,
             networks_v6: std::collections::BTreeSet::new(),

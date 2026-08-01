@@ -1727,6 +1727,36 @@ fn config_advertise_all_vni(bgp: &mut Bgp, mut args: Args, op: ConfigOp) -> Opti
     Some(())
 }
 
+/// `router bgp afi-safi evpn vtep-source <ip>`: the VTEP advertised as
+/// the next hop of originated EVPN routes whose VNI has no local VXLAN
+/// device (a VPWS E-Line under `encapsulation vxlan` — the way a
+/// v6-underlay E-Line names its VTEP). Changing it moves the next hop of
+/// every such route, so re-originate them all.
+fn config_evpn_vtep_source(bgp: &mut Bgp, mut args: Args, op: ConfigOp) -> Option<()> {
+    let afi_safi: AfiSafi = args.afi_safi()?;
+    if afi_safi.afi != Afi::L2vpn || afi_safi.safi != Safi::Evpn {
+        return None;
+    }
+    let source = if op.is_set() {
+        Some(args.addr()?)
+    } else {
+        None
+    };
+    if bgp.evpn_vtep_source == source {
+        return Some(());
+    }
+    bgp.evpn_vtep_source = source;
+    if bgp.advertise_all_vni {
+        let entries: Vec<FdbEntry> = bgp.local_fdb.values().cloned().collect();
+        for entry in entries {
+            bgp.evpn_originate_macip(&entry);
+        }
+    }
+    reoriginate_all_imet(bgp);
+    bgp.vpws_reencap();
+    Some(())
+}
+
 /// `router bgp afi-safi evpn encapsulation {vxlan|srv6|mpls}`.
 /// With `srv6` (RFC 9252), Type-2 routes carry a per-VNI End.DT2U SID and
 /// Type-3 IMETs an End.DT2M SID (SRv6 L2 Service TLVs), both carved from
@@ -4976,6 +5006,10 @@ impl Bgp {
             "/router/bgp/afi-safi/encapsulation",
             config_evpn_encapsulation,
         );
+
+        // The VTEP advertised as the EVPN next hop when no VXLAN device
+        // supplies one (`router bgp afi-safi evpn vtep-source`).
+        self.callback_add("/router/bgp/afi-safi/vtep-source", config_evpn_vtep_source);
 
         // EVPN IGMP/MLD proxy capability (RFC 9251 §6) under
         // `router bgp afi-safi evpn igmp-mld-proxy`. When set, the

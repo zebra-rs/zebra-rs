@@ -1,0 +1,77 @@
+# VTEP 1 — serves BOTH tenants on the eBPF data plane over an IPv6
+# underlay: bridge domain 10 (h1, stretched to vtep2) and bridge domain
+# 20 (h4, stretched to vtep3). Same engine shape as the v4 twin — one
+# fabric-wide VTEP source per family — so both vxlan devices ride the
+# same v6 loopback (2001:db8::1), the BGP sessions ride it too, and
+# static /128s toward the peers' loopbacks resolve the encapsulation via
+# the teed FIB6.
+system:
+  hostname: vtep1
+  ebpf:
+    enabled: true
+interface:
+- if-name: lo
+  ipv6:
+    address: 2001:db8::1/128
+- if-name: vtep1-vtep2
+  ipv6:
+    address: 2001:db8:12::1/64
+  ebpf:
+    enabled: true
+- if-name: vtep1-vtep3
+  ipv6:
+    address: 2001:db8:13::1/64
+  ebpf:
+    enabled: true
+- if-name: vtep1-h1
+  bridge: br10
+  ebpf:
+    enabled: true
+- if-name: vtep1-h4
+  bridge: br20
+  ebpf:
+    enabled: true
+bridge:
+- name: br10
+- name: br20
+vxlan:
+- name: vxlan10
+  vni: 10
+  local-address: 2001:db8::1
+  bridge: br10
+- name: vxlan20
+  vni: 20
+  local-address: 2001:db8::1
+  bridge: br20
+router:
+  static:
+    ipv6:
+      route:
+      - prefix: 2001:db8::2/128
+        nexthop:
+        - address: 2001:db8:12::2
+      - prefix: 2001:db8::3/128
+        nexthop:
+        - address: 2001:db8:13::2
+  bgp:
+    global:
+      as: 65001
+      router-id: 10.0.0.1
+    afi-safi:
+    - name: evpn
+      advertise-all-vni: true
+    neighbor:
+    - remote-address: 2001:db8::2
+      remote-as: 65001
+      update-source: 2001:db8::1
+      enabled: true
+      afi-safi:
+      - name: evpn
+        enabled: true
+    - remote-address: 2001:db8::3
+      remote-as: 65001
+      update-source: 2001:db8::1
+      enabled: true
+      afi-safi:
+      - name: evpn
+        enabled: true

@@ -25,11 +25,10 @@ Two deliberate differences from the kernel twin:
              VNI 10 / bridge domain 10 stretched across
 ```
 
-> **Why is there no `bgp-evpn-vxlan6-ebpf`?** The engine's VXLAN underlay
-> is IPv4-only (VTEPs ride v4-mapped in its tables, the outer header is
-> IPv4) — a v6-VTEP MAC is deliberately handed to the kernel data path
-> instead. The IPv6-underlay story is the kernel labs'
-> ([bgp-evpn-vxlan6](../bgp-evpn-vxlan6/README.md)).
+> The IPv6-underlay twin of this lab is
+> [bgp-evpn-vxlan6-ebpf](../bgp-evpn-vxlan6-ebpf/README.md) — same
+> engine, outer header Ethernet + IPv6 + UDP, VTEPs native v6 in the
+> engine's tables.
 
 ## Bring up all nodes
 

@@ -1,0 +1,48 @@
+# VTEP 2 — mirror of vtep1: v6 loopback VTEP 2001:db8::2, bridge domain
+# 10 toward h2, static /128 back to vtep1's loopback.
+system:
+  hostname: vtep2
+  ebpf:
+    enabled: true
+interface:
+- if-name: lo
+  ipv6:
+    address: 2001:db8::2/128
+- if-name: vtep2-vtep1
+  ipv6:
+    address: 2001:db8:12::2/64
+  ebpf:
+    enabled: true
+- if-name: vtep2-h2
+  bridge: br10
+  ebpf:
+    enabled: true
+bridge:
+- name: br10
+vxlan:
+- name: vxlan10
+  vni: 10
+  local-address: 2001:db8::2
+  bridge: br10
+router:
+  static:
+    ipv6:
+      route:
+      - prefix: 2001:db8::1/128
+        nexthop:
+        - address: 2001:db8:12::1
+  bgp:
+    global:
+      as: 65001
+      router-id: 10.0.0.2
+    afi-safi:
+    - name: evpn
+      advertise-all-vni: true
+    neighbor:
+    - remote-address: 2001:db8::1
+      remote-as: 65001
+      update-source: 2001:db8::2
+      enabled: true
+      afi-safi:
+      - name: evpn
+        enabled: true

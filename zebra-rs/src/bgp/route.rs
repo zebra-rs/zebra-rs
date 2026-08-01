@@ -7216,9 +7216,8 @@ fn evpn_vpws_sid(attr: &BgpAttr) -> Option<std::net::Ipv6Addr> {
 /// PE: an Encapsulation EC saying VXLAN makes it a VNI toward a VTEP
 /// (RFC 8365 §6); no Encapsulation EC (or an explicit MPLS one) makes it
 /// an MPLS service label toward the PE, RFC 8365 §5.1.3's default.
-/// `None` = nothing we can bind: an RFC 9572 A-D form, a zero label, a
-/// non-IPv4 VTEP (the cradle VXLAN underlay is IPv4), or some other
-/// explicitly-named tunnel type.
+/// `None` = nothing we can bind: an RFC 9572 A-D form, a zero label, or
+/// some other explicitly-named tunnel type.
 fn vpws_remote_endpoint(rib: &BgpRib) -> Option<VpwsEndpoint> {
     if let Some(sid) = evpn_vpws_sid(&rib.attr) {
         return Some(VpwsEndpoint::Srv6(sid));
@@ -7226,9 +7225,7 @@ fn vpws_remote_endpoint(rib: &BgpRib) -> Option<VpwsEndpoint> {
     let label = rib.label.as_ref().map(|l| l.label).filter(|&l| l != 0)?;
     if encap_ec_tunnel_type(&rib.attr) == Some(TunnelType::Vxlan as u16) {
         return match rib.attr.nexthop {
-            Some(BgpNexthop::Evpn(IpAddr::V4(vtep))) => {
-                Some(VpwsEndpoint::Vxlan { vtep, vni: label })
-            }
+            Some(BgpNexthop::Evpn(vtep)) => Some(VpwsEndpoint::Vxlan { vtep, vni: label }),
             _ => None,
         };
     }
@@ -7695,7 +7692,8 @@ fn route_evpn_export_selected(
                 // bridge domain's flood list, one slot per remote PE, so any
                 // number of remotes works (the old single-remote all-ones
                 // sentinel is superseded). Independent of the PMSI mode.
-                if let Some(dt2m) = evpn_srv6_sid(&best.attr, bgp_packet::SRV6_BEHAVIOR_END_DT2M) {
+                let dt2m = evpn_srv6_sid(&best.attr, bgp_packet::SRV6_BEHAVIOR_END_DT2M);
+                if let Some(dt2m) = dt2m {
                     let _ = bgp
                         .rib_client
                         .send(rib::Message::CradleReplAdd { vni, sid: dt2m });
@@ -7704,7 +7702,8 @@ fn route_evpn_export_selected(
                 // BUM service label in its PMSI. Same shape as the SRv6 slot
                 // above — one slot per remote PE in the bridge domain's flood
                 // list, independent of the AR/PMSI role machinery.
-                if let Some((pe, label)) = evpn_mpls_bum(best) {
+                let mpls_bum = evpn_mpls_bum(best);
+                if let Some((pe, label)) = mpls_bum {
                     let _ =
                         bgp.rib_client
                             .send(rib::Message::CradleReplAddMpls { bd: vni, pe, label });
@@ -7719,7 +7718,7 @@ fn route_evpn_export_selected(
                     bgp.local_rib
                         .evpn_flood
                         .update_sr_remote(vni, *orig, p.tree_id.unwrap_or(0));
-                } else {
+                } else if dt2m.is_none() && mpls_bum.is_none() {
                     let ar_ip = pmsi
                         .filter(|p| p.is_assisted_replication())
                         .map(|p| p.endpoint);
@@ -7728,6 +7727,14 @@ fn route_evpn_export_selected(
                     // RFC 9572 §6.1: the remote VTEP's region (the ingress
                     // peer's region-id, stamped on the path) lets a gateway
                     // partition its flood set for cross-boundary re-flooding.
+                    //
+                    // Only an IMET with neither a DT2M SID nor an MPLS BUM
+                    // label enters the VXLAN head-end flood set: those two
+                    // already teed their own replication slot above, and a
+                    // VXLAN flood entry for the same originator would be a
+                    // second copy of every BUM frame. (Under the old
+                    // v4-only VTEP gate that duplicate was inert; with v6
+                    // VTEPs live it would be real double delivery.)
                     let region = best.ingress_region;
                     bgp.local_rib.evpn_flood.update_remote(
                         vni,
@@ -16416,13 +16423,17 @@ impl Bgp {
     }
 
     /// The next hop an EVPN route for `vni` carries: the VNI's VTEP when
-    /// one is known, else the router-id. Under MPLS the router-id IS the
-    /// next hop — there is no VTEP and the transport LSP resolves on it —
-    /// so the fallback is the intended answer rather than a degraded one.
+    /// one is known, else the configured `vtep-source`, else the
+    /// router-id. Under MPLS the router-id IS the next hop — there is no
+    /// VTEP and the transport LSP resolves on it — so the final fallback
+    /// is the intended answer rather than a degraded one. The middle one
+    /// serves VXLAN services with no device to read a VTEP from (a VPWS
+    /// E-Line), which is the only way to advertise an IPv6 VTEP for them.
     fn evpn_nexthop_for_vni(&self, vni: u32) -> IpAddr {
         self.local_vxlans
             .get(&vni)
             .copied()
+            .or(self.evpn_vtep_source)
             .unwrap_or(IpAddr::V4(self.router_id))
     }
 
@@ -16641,10 +16652,7 @@ impl Bgp {
             svc.local_vni = local_vni;
             // The advertised next hop is what the remote encapsulates
             // toward — the tee programs it as the VXLAN decap source.
-            svc.local_vtep = match (local_vni, nexthop) {
-                (Some(_), IpAddr::V4(vtep)) => Some(vtep),
-                _ => None,
-            };
+            svc.local_vtep = local_vni.map(|_| nexthop);
         }
         self.evpn_originate_synch(rd, prefix, rib);
     }
@@ -18136,7 +18144,22 @@ mod vpws_endpoint_classify_tests {
         assert_eq!(
             vpws_remote_endpoint(&rib),
             Some(VpwsEndpoint::Vxlan {
-                vtep: VTEP,
+                vtep: IpAddr::V4(VTEP),
+                vni: 100
+            })
+        );
+    }
+
+    /// A v6 next hop under the VXLAN Encapsulation EC binds the same way —
+    /// the VTEP rides an IPv6 underlay (cradle's VXLAN_SRC6 side).
+    #[test]
+    fn vxlan_binds_v6_vtep() {
+        let vtep6: IpAddr = "2001:db8::2".parse().unwrap();
+        let rib = rib_with(false, Some(8), Some(100), Some(vtep6));
+        assert_eq!(
+            vpws_remote_endpoint(&rib),
+            Some(VpwsEndpoint::Vxlan {
+                vtep: vtep6,
                 vni: 100
             })
         );
@@ -18192,13 +18215,6 @@ mod vpws_endpoint_classify_tests {
         let rib = rib_with(false, Some(8), None, Some(IpAddr::V4(VTEP)));
         assert_eq!(vpws_remote_endpoint(&rib), None);
         let rib = rib_with(false, None, Some(0), Some(IpAddr::V4(VTEP)));
-        assert_eq!(vpws_remote_endpoint(&rib), None);
-    }
-
-    /// The cradle VXLAN underlay is IPv4 — a v6 VTEP cannot be bound.
-    #[test]
-    fn v6_vtep_is_not_bound() {
-        let rib = rib_with(false, Some(8), Some(100), Some(IpAddr::V6(SID)));
         assert_eq!(vpws_remote_endpoint(&rib), None);
     }
 }

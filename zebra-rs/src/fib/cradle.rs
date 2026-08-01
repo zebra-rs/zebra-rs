@@ -94,11 +94,11 @@ struct CradleMirror {
     /// (bridge domain, remote End.DT2M SID) flood-set memberships.
     repl_slots: HashSet<(u32, Ipv6Addr)>,
     /// EVPN/VXLAN counterparts of `fdb`/`repl_slots`: (bridge domain, mac) →
-    /// remote VTEP IPv4 (Type-2), and (bridge domain, remote VTEP) flood-set
+    /// remote VTEP (Type-2), and (bridge domain, remote VTEP) flood-set
     /// memberships (Type-3). A `(vni, mac)` key is in exactly one of `fdb` /
     /// `fdb_vxlan` depending on the received route's encap.
-    fdb_vxlan: HashMap<(u32, [u8; 6]), Ipv4Addr>,
-    repl_slots_vxlan: HashSet<(u32, Ipv4Addr)>,
+    fdb_vxlan: HashMap<(u32, [u8; 6]), IpAddr>,
+    repl_slots_vxlan: HashSet<(u32, IpAddr)>,
     /// EVPN-over-MPLS counterparts: (bridge domain, mac) → (remote PE, that
     /// PE's EVI service label), and the per-(bd, PE) BUM replication slots
     /// with their BUM label. A `(vni, mac)` key lives in exactly one of
@@ -114,7 +114,11 @@ struct CradleMirror {
     vnis: HashMap<u32, u32>,
     /// L3VNI ↔ VRF bindings (symmetric IRB): vni → (vrf_table_id, rmac).
     vnis_l3: HashMap<u32, (u32, [u8; 6])>,
+    /// One slot per address family, mirroring cradle's own pair of
+    /// `VXLAN_SRC`/`VXLAN_SRC6` slots — a dual-stack fabric sets both and
+    /// a respawn replay must restore both.
     vtep_source: Option<Ipv4Addr>,
+    vtep_source6: Option<Ipv6Addr>,
     /// (AC port, vid, dx2v table) → (remote endpoint — SID, VTEP+VNI or
     /// PE+label, local decap SID, local decap VNI, local decap label).
     #[allow(clippy::type_complexity)]
@@ -554,7 +558,10 @@ impl CradleFib {
         // resolves its VNI from the SetVni binding), then the overlay FDB and
         // flood slots.
         if let Some(src) = m.vtep_source {
-            self.set_vtep_source(src).await;
+            self.set_vtep_source(IpAddr::V4(src)).await;
+        }
+        if let Some(src) = m.vtep_source6 {
+            self.set_vtep_source(IpAddr::V6(src)).await;
         }
         for (vni, vlan) in &m.vnis {
             self.set_vni(*vni, *vlan).await;
@@ -1501,7 +1508,7 @@ impl CradleFib {
     /// sits behind the remote VTEP `vtep`. The VNI stamped on encap comes
     /// from the bridge domain's `SetVni` binding; `nexthop_id: 0` — cradle
     /// resolves the underlay adjacency with a FIB4 lookup on the VTEP.
-    pub async fn fdb_add_vxlan(&self, vni: u32, mac: [u8; 6], vtep: std::net::Ipv4Addr) {
+    pub async fn fdb_add_vxlan(&self, vni: u32, mac: [u8; 6], vtep: IpAddr) {
         self.mirror.lock().await.fdb_vxlan.insert((vni, mac), vtep);
         let mac_str = format!(
             "{:02x}:{:02x}:{:02x}:{:02x}:{:02x}:{:02x}",
@@ -1901,7 +1908,7 @@ impl CradleFib {
     /// joins VNI `vni`'s flood set. The VNI resolves from the bridge
     /// domain's `SetVni` binding, so a `cradle_vni_register` must have run
     /// first (it does — the VXLAN device is declared before any Type-3).
-    pub async fn repl_slot_add_vxlan(&self, vni: u32, vtep: std::net::Ipv4Addr) {
+    pub async fn repl_slot_add_vxlan(&self, vni: u32, vtep: IpAddr) {
         self.mirror
             .lock()
             .await
@@ -1982,7 +1989,7 @@ impl CradleFib {
     }
 
     /// Remove a `(vni, vtep)` VXLAN replication slot.
-    pub async fn repl_slot_del_vxlan(&self, vni: u32, vtep: std::net::Ipv4Addr) {
+    pub async fn repl_slot_del_vxlan(&self, vni: u32, vtep: IpAddr) {
         self.mirror
             .lock()
             .await
@@ -2076,10 +2083,17 @@ impl CradleFib {
         }
     }
 
-    /// Set the fabric-wide local VTEP source (VXLAN outer source + decap
-    /// match). Idempotent; last write wins.
-    pub async fn set_vtep_source(&self, addr: std::net::Ipv4Addr) {
-        self.mirror.lock().await.vtep_source = Some(addr);
+    /// Set the local VTEP source (VXLAN outer source + decap match) for
+    /// `addr`'s address family — cradle keeps one slot per family, so a
+    /// dual-stack fabric sets both. Idempotent; last write per family wins.
+    pub async fn set_vtep_source(&self, addr: IpAddr) {
+        {
+            let mut m = self.mirror.lock().await;
+            match addr {
+                IpAddr::V4(v4) => m.vtep_source = Some(v4),
+                IpAddr::V6(v6) => m.vtep_source6 = Some(v6),
+            }
+        }
         let result = async {
             self.client()
                 .await?
