@@ -199,10 +199,49 @@ validated configuration and walk-through live in the book
 shape is regression-tested end-to-end by the cradle
 `@cradle_mup_gtp_n3_vrf` BDD with free5GC-shaped sessions.
 
-Adapting **this** free5GC lab to it needs one topology change first:
-`mun3` doubles as the N4 link, and the PFCP socket must stay reachable
-outside the N3 VRF — add a dedicated N4 veth in the global table (point
-`smfcfg.yaml`'s UPF node address at it) before moving `mun3` into VRF N3.
+The lab ships that variant as a parallel set of files — `mun3` doubles as
+the N4 link here, and the PFCP socket is not VRF-aware, so N4 moves to its
+own global-table veth (`mun4`, 10.0.11.0/24) while `mun3` goes into VRF N3:
+
+| Baseline | N4-separated faithful variant |
+|---|---|
+| `setup-topo.sh` | `setup-topo-n3vrf.sh` (adds the `mu4Host`↔`mun4` N4 link) |
+| `upf.yaml` + `upf-ports.json` | `upf-n3vrf.yaml` + `upf-n3vrf-ports.json` |
+| `smfcfg.yaml` | `smfcfg-n3vrf.yaml` (N4 node/listen/UPF addr → 10.0.11.x; the UPF **N3 endpoint stays 10.0.12.2**, so the SMF still CH=0-allocates the UPF N3 F-TEID at the address that now lives inside VRF N3) |
+
+Bring-up is otherwise identical — substitute those three files in steps 1–3.
+`router static vrf N3` carries the gNB route (10.0.1.0/24 via 10.0.12.1)
+inside the interwork VRF, and the UPF namespace has **no global default
+route**: the only global-table traffic is PFCP to an on-link SMF.
+
+**Validated live on 2026-08-01** (free5GC v4.0.1 + free-ran-ue, debug
+builds, single box). One PFCP session originated all four routes across
+the two segments:
+
+```
+# show bgp mup
+MUP VRFs:
+  N3: rd=65000:3 decap/ST2 ni=internet dataplane=gtp route-targets=0
+  N6: rd=65000:6 encap/ST1 ni=internet dataplane=gtp route-targets=0
+
+ *> [ISD][65000:3][10.0.1.0/24]        # N3 = the interwork segment
+ *> [ST2][65000:3][ep=10.0.12.2][teid=2]  mup:1:6
+ *> [DSD][65000:6][1.1.1.1]  mup:1:6   # N6 = the direct segment
+ *> [ST1][65000:6][ue=10.60.0.1/32][teid=1][qfi=0][ep=10.0.1.2:src=10.0.12.2]
+```
+
+The single `GTP_PDR` entry is the resolution in one line — key
+`(vrf 1, 10.0.12.2, TEID 2)`, value `vrf 2`: the tunnel **matches** in
+N3's table (where the G-PDU arrives) and **decaps into** N6's table
+(picked by the ST2's `mup:1:6` against the direct segment), with the
+downlink UE route in N6's table resolving its outer via N3's. UE ping
+5/5 at 0% loss; iperf3 **uplink ~1.63 Gbit/s, downlink ~2.63 Gbit/s**
+(within noise of the baseline lab's 1.86 / 2.65 — the split costs
+nothing); `gtp_encap` 1.75M / `gtp_decap` 0.97M.
+
+Same two gotchas as the baseline apply — set `ueTun0` MTU 1400 and add
+the UE's DN route before iperf3, or TCP moves 0 bytes while ping is
+clean.
 
 ## Teardown
 
