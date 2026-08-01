@@ -1,8 +1,11 @@
 # BGP MUP — explicit interwork/direct segment resolution for `dataplane gtp`
 
-> **Status:** proposed (2026-08-01), awaiting confirmation. Staged so every PR
-> is independently shippable and the current single-N6 lab stays green at each
-> stage.
+> **Status:** confirmed (2026-08-01); stages 1–4 implemented on review
+> branches — cradle `decap-meta-precedence` → `gtp-pdr-vrf-scope`, zebra
+> `gtp-pdr-match-vrf` → `mup-segment-catalog` → `mup-endpoint-nht-vrf`.
+> Staged so every PR is independently shippable and the current single-N6
+> lab stays green at each stage. Implementation notes from verification are
+> folded into §3.4 and Stage 4 below.
 >
 > Origin: design review of the single-N6 configuration (`bdd/mup-lab`,
 > issue #1947 arc). The `dataplane gtp` datapath hard-codes three forwarding
@@ -250,21 +253,30 @@ resolved in
 2. table 0 (today's behavior).
 
 `mup_endpoint_track_cache` (`bgp/route.rs:3334`) takes the resolved table id
-instead of the literal `vrf_id: 0`. Two plumbing gaps found in verification
-must be fixed first:
+instead of the literal `vrf_id: 0`. Of the two plumbing gaps flagged at
+design time, implementation found only one real:
 
-* **RIB re-notify**: `nht_recompute_and_notify()` runs only on main-table
-  route changes (`rib/inst.rs:2814-2843` — the `_vrf` else-branches skip
-  it), so a VRF-registered nexthop resolves once and never re-fires. Fix: run
-  it on VRF-table changes too (registration + resolution are already
-  per-VRF: entries keyed `(vrf_id, nh)`, `nht_resolve(vrf_id, nh)`,
-  `rib/inst.rs:1360-1382`).
-* **Update identity**: `RibRx::NexthopUpdate { nh, resolution }`
-  (`rib/api.rs:285`) carries no `vrf_id`, and BGP's `NexthopCache.entries`
-  is keyed by bare `IpAddr` (`bgp/nht.rs:93`). The same address tracked in
-  two tables would collide. Fix: add `vrf_id` to `NexthopUpdate` and key the
-  BGP cache by `(vrf_id, IpAddr)`; every existing user migrates mechanically
-  to `(0, nh)`.
+* **RIB re-notify** — *already closed upstream*: the four
+  `*_route_{add,del}_vrf` paths end with `nht_recompute_and_notify()`
+  (added by the PIM RPF-in-VRF work), so VRF-table route changes re-fire
+  watchers today; registration + resolution were already per-VRF (entries
+  keyed `(vrf_id, nh)`, `nht_resolve(vrf_id, nh)`). The one genuinely
+  missing recompute — dropping a whole VRF table on `VrfDel` — is added.
+* **Update identity** — real: `RibRx::NexthopUpdate` carried no `vrf_id`,
+  and BGP's `NexthopCache.entries` was keyed by bare `IpAddr`, so the same
+  address tracked in two tables would collide. Fixed: `vrf_id` on
+  `NexthopUpdate`, BGP cache keyed `(vrf_id, IpAddr)`, every existing user
+  mechanically at `(0, nh)`; PIM binds and ignores the field (global-only
+  registrations).
+
+Implementation refinement: the endpoint-table choice lives on the
+`NexthopCache` itself as a mirrored interwork-prefix view
+(`set_mup_interwork`, fed by `push_mup_segment_catalog`) rather than
+threading the catalog through every `BgpTop` construction; on a catalog
+change, live `MupEndpoint` registrations are **migrated** to their new
+table (untrack/unregister old, retrack/register new; an already-live
+target entry re-dispatches the ST1 with its current resolution since no
+sync-reply fires).
 
 Cradle needs **no downlink change** — it never looks up the outer packet;
 zebra keeps handing it a fully resolved `(gw, oif)`.
