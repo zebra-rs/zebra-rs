@@ -4226,8 +4226,10 @@ impl Bgp {
                 }
                 // A VPWS service advertising this VNI resolved its Type-1
                 // nexthop before the device was observed — same race as the
-                // Type-2/Type-5 cases above: re-originate so the nexthop
-                // becomes the VTEP rather than the router-id.
+                // Type-2/Type-5 cases above. Full reconcile rather than a
+                // bare re-originate: the device also makes the VNI an
+                // L2VNI, so the service may now be parked in vni-conflict,
+                // which must withdraw the stale Type-1.
                 if self.evpn_encap.is_vxlan() {
                     let stale: Vec<String> = self
                         .local_rib
@@ -4238,7 +4240,7 @@ impl Bgp {
                         .map(|(name, _)| name.clone())
                         .collect();
                     for name in stale {
-                        self.evpn_originate_vpws(&name);
+                        self.vpws_reconcile(&name);
                     }
                 }
             }
@@ -4246,6 +4248,9 @@ impl Bgp {
                 if let Some(vtep_local) = self.local_vxlans.remove(&vni) {
                     self.evpn_withdraw_imet(vni, vtep_local);
                 }
+                // The removed L2VNI may have been the owner a parked VPWS
+                // service was waiting on.
+                self.vpws_retry_conflicts();
             }
             RibRx::L2PortEvis { ifindex, vnis } => {
                 // A snapshot, so an unchanged set is a no-op — the RIB

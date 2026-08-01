@@ -1705,10 +1705,34 @@ pub fn config_vrf_evpn_advertise_ipv6(bgp: &mut Bgp, mut args: Args, op: ConfigO
 pub fn config_vrf_evpn_l3vni(bgp: &mut Bgp, mut args: Args, op: ConfigOp) -> Option<()> {
     let name = args.string()?;
     let cfg = vrf_entry(bgp, name, op)?;
-    match op {
-        ConfigOp::Set => cfg.l3vni = Some(args.u32()?),
-        ConfigOp::Delete => cfg.l3vni = None,
-        _ => {}
+    let claimed = match op {
+        ConfigOp::Set => {
+            cfg.l3vni = Some(args.u32()?);
+            cfg.l3vni
+        }
+        ConfigOp::Delete => {
+            cfg.l3vni = None;
+            None
+        }
+        _ => return Some(()),
+    };
+    // An L3VNI is a decap identity too: claiming one parks a VPWS service
+    // advertising the same VNI, releasing one un-parks it.
+    match claimed {
+        Some(vni) => {
+            let stale: Vec<String> = bgp
+                .local_rib
+                .evpn_vpws
+                .services
+                .iter()
+                .filter(|(_, svc)| svc.local_vni == Some(vni))
+                .map(|(n, _)| n.clone())
+                .collect();
+            for svc in stale {
+                bgp.vpws_reconcile(&svc);
+            }
+        }
+        None => bgp.vpws_retry_conflicts(),
     }
     Some(())
 }

@@ -1,18 +1,22 @@
-# EVPN VPWS (E-Line over SRv6)
+# EVPN VPWS (E-Line over SRv6 or VXLAN)
 
 zebra-rs implements **EVPN VPWS** (Virtual Private Wire Service, RFC
-8214) over an SRv6 data plane: a point-to-point **E-Line** that
+8214) over an SRv6 or VXLAN data plane: a point-to-point **E-Line** that
 cross-connects one local attachment circuit (AC) to one remote PE's AC
 as a transparent wire — no MAC learning, no FDB, no flooding. The two
 CEs behave as if joined by a cable: they share subnets and resolve each
 other by ARP straight through the service.
 
 Each side advertises a **per-EVI Ethernet A-D route (Type-1)** whose
-Ethernet Tag is its *local* VPWS service instance id, carrying an
-**SRv6 End.DX2 L2-Service Prefix-SID** (RFC 9252 §6.3) carved from the
-BGP SRv6 locator. Importing the remote's Type-1 — matched by Ethernet
-Tag == `remote-service-id` within the shared EVI — binds the remote SID
-as the AC's cross-connect target. Forwarding runs in the
+Ethernet Tag is its *local* VPWS service instance id, carrying its
+service binding per the afi-safi `encapsulation`: an **SRv6 End.DX2
+L2-Service Prefix-SID** (RFC 9252 §6.3) carved from the BGP SRv6
+locator, or — under the default `vxlan` — the **service VNI in the
+label field** with the VXLAN Encapsulation extended community and the
+VTEP as next hop (RFC 8365 §6). Importing the remote's Type-1 — matched
+by Ethernet Tag == `remote-service-id` within the shared EVI — binds
+the remote endpoint *as the remote signalled it* as the AC's
+cross-connect target. Forwarding runs in the
 [eBPF data plane](ch-16-00-ebpf.md): the AC's ingress encapsulates every
 frame (any EtherType)
 MAC-in-SRv6 toward the remote SID, and the local End.DX2 decap emits
@@ -81,6 +85,49 @@ the whole-port service.
 > travels as skb metadata, never in the packet bytes — and XDP, which
 > classifies on bytes, cannot demux the VID. This is the standard
 > requirement for any XDP VLAN path.
+
+### VXLAN encapsulation (RFC 8365 §6)
+
+Under the default `encapsulation vxlan` a VPWS needs **no SRv6
+locator** — the whole configuration is:
+
+```
+set router bgp global as 65001
+set router bgp global router-id 192.0.2.1
+set router bgp afi-safi evpn vpws eline1 evi 100
+set router bgp afi-safi evpn vpws eline1 local-service-id 101
+set router bgp afi-safi evpn vpws eline1 remote-service-id 102
+set router bgp afi-safi evpn vpws eline1 interface ce1
+set router bgp afi-safi evpn vpws eline1 vni 5001
+```
+
+* `vni` is the VNI advertised in the Type-1's label field — the VNI the
+  remote encapsulates *toward this PE* with, and this PE's decap
+  identity. Unset = the EVI. The label field is downstream-assigned, so
+  the two directions of one E-Line may carry different VNIs; each PE
+  simply uses what its peer advertised.
+* The Type-1's next hop is the VTEP: a vxlan device's `local-address`
+  when one declares the VNI, else the router-id — so make the router-id
+  a routable loopback and peer BGP over it (`update-source`), the
+  standard EVPN shape. The tee programs that same address as the
+  fabric-wide VXLAN source (the decap match), so the address the remote
+  sends to and the address this PE accepts can never disagree.
+* A VNI is a **per-PE decap identity**: one already claimed — by another
+  VPWS service, an L2VNI vxlan device, or a VRF's symmetric-IRB L3VNI —
+  parks the service in `vni-conflict` (naming the owner in `show bgp
+  evpn vpws`) instead of originating; it un-parks by itself the moment
+  the owner releases the VNI.
+
+The receive side is **not** gated by the local knob: each direction of
+an E-Line uses the encapsulation its originator signalled (SRv6 SID
+first; else Encapsulation EC = VXLAN with a non-zero label; a label
+with no EC means MPLS per RFC 8365 §5.1.3 and is not bound). A fabric
+therefore migrates between encapsulations one PE at a time, the service
+staying up asymmetrically in between. VLAN-scoped services, the MTU
+check and multihoming below all work identically under VXLAN — the
+election, selection and mass-withdraw machinery is
+encapsulation-agnostic, and a failover to the other PE of a multihomed
+pair re-binds both the VTEP and that PE's own VNI.
 
 ### Multihoming (RFC 8214 §5)
 
@@ -266,6 +313,14 @@ VPWS service: eline1
   State: up
 ```
 
+A VXLAN service shows its VNI and the bound remote endpoint instead of
+SIDs (and `VNI conflict: in use by …` when parked):
+
+```
+  Local VNI: 5001
+  Remote VTEP: 192.0.2.2 (VNI 100) (via 192.0.2.2)
+```
+
 A multihomed service adds its segment and elected role. `(from ce1)` marks a
 binding inferred from the AC; an overridden one is printed without it:
 
@@ -288,8 +343,9 @@ a deliberately single-homed service:
 `json` is supported. The state progresses `partial-config` (mandatory
 leaves missing) → `pending` (config complete, no router-id / locator
 yet) → `advertised` (Type-1 originated, remote not matched) →
-`up` (remote SID bound to the AC), with `mtu-mismatch` reported when a
-matching remote is rejected by the MTU check.
+`up` (remote endpoint bound to the AC), with `mtu-mismatch` reported
+when a matching remote is rejected by the MTU check and `vni-conflict`
+when the service's VNI is already claimed on this PE.
 
 ## Reconciliation
 
@@ -304,8 +360,9 @@ configured (or re-pointed) is found without waiting for a route churn.
 Multihoming covers both directions: the Type-1 carries the segment's ESI and
 DF-elected P/B bits, and remote selection honours them (prefer `P`, fail over
 to `B`, per-ES A-D mass withdraw). Not yet implemented — all-active load
-balancing across both remote SIDs, and the
-control word (`C` is always 0). Forwarding requires the
+balancing across both remote endpoints, MPLS
+encapsulation (under `encapsulation mpls` a VPWS still signals SRv6),
+and the control word (`C` is always 0). Forwarding requires the
 [eBPF data plane](ch-16-00-ebpf.md)
 (`system ebpf enabled` to run the engine, `system cradle enabled` to tee the
 service into it); the kernel has no End.DX2/DX2V seg6local action, so these

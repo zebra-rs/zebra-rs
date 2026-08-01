@@ -1,0 +1,42 @@
+# z1 — EVPN VPWS PE dual-homed to the CE (RFC 8214 §5), signalling over
+# the DEFAULT `encapsulation vxlan` (no SRv6 locator). Shares Ethernet
+# Segment es1 with z2, so both advertise service instance 101 — each
+# with its OWN VNI in its Type-1 label field (z1: 5111). Single-active:
+# instance 101 carves to ordinal 101 % 2 = 1 = z2, so z1 is the backup.
+# Control-plane only — no cradle dataplane.
+router:
+  bgp:
+    global:
+      as: 65001
+      router-id: 192.168.0.1
+    afi-safi:
+    - name: evpn
+      ethernet-segment:
+      - name: es1
+        esi: "00:11:22:33:44:55:66:77:88:99"
+        redundancy-mode: single-active
+        interface: ce1
+      vpws:
+      - name: eline1
+        evi: 100
+        local-service-id: 101
+        remote-service-id: 103
+        interface: ce1
+        vni: 5111
+    neighbor:
+    - remote-address: 192.168.0.2
+      enabled: true
+      remote-as: 65001
+      afi-safi:
+      - name: ipv4
+        enabled: true
+      - name: evpn
+        enabled: true
+    - remote-address: 192.168.0.3
+      enabled: true
+      remote-as: 65001
+      afi-safi:
+      - name: ipv4
+        enabled: true
+      - name: evpn
+        enabled: true

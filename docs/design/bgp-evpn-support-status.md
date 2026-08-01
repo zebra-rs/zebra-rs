@@ -46,6 +46,7 @@ datapath via SRv6 End.DX2 / End.DX2V cross-connects.
 | L2-Attributes extended community (P/B/C flags + MTU) | ✅ | Attached to every VPWS Type-1 (#1779); MTU mismatch ⇒ do not bind, state `mtu-mismatch` |
 | Service re-point / route-before-config reconcile | ✅ | `vpws_reconcile` re-derives remote SID from an EVPN Loc-RIB rescan |
 | Multihoming origination (ESI, Primary/Backup roles) | ✅ | #2116 — `vpws` references an `ethernet-segment`; DF election per `<ESI, service instance>`; all-active ⇒ all Primary, single-active ⇒ DF Primary + Backup |
+| VNI-conflict guard (VXLAN) | ✅ | A VNI already claimed on the PE — another VPWS service, an L2VNI vxlan device, a VRF's L3VNI — parks the service in `vni-conflict` (owner named in show) instead of originating; retry hooks un-park it when the owner releases the VNI |
 | Remote Primary/Backup selection + per-ES A-D fast failover | ✅ | `select_remote` ranks P over B with the per-ES A-D mass-withdraw gate; failover scenarios in `bgp_evpn_vpws_multihoming.feature` |
 | All-active load balancing | ❌ Open | Needs a cradle xconnect holding more than one remote SID |
 | Control word | ❌ | C flag always 0 |
@@ -71,7 +72,7 @@ source in one `AddXconnect`. MPLS VPWS originates/consumes nothing yet
 | **P2P cross-connect data plane** | ✅ cradle eBPF xconnect (`ReplTarget`-shaped maps + `VNI_F_ELINE` decap, cradle #163) | ✅ cradle eBPF xconnect (cradle #45) | ❌ Not built (cradle MPLS L2 covers E-LAN, not xconnect) |
 | **VLAN-scoped E-Line** | ✅ Inner-VID demux from the DX2V table (`VNI_F_ELINE_VLAN`) | ✅ End.DX2V, VLAN table = EVI (zebra #1782, cradle #48) | ❌ |
 | **L2-Attributes EC (P/B/C flags + MTU)** | ✅ On every VPWS Type-1 | ✅ On every VPWS Type-1 (#1779) | ❌ No service to attach to |
-| **Multihoming origination (ESI, P/B roles)** | ✅ Encap-agnostic (#2116) | ✅ DF per `<ESI, service instance>` (#2116) | ❌ |
+| **Multihoming origination (ESI, P/B roles)** | ✅ Encap-agnostic (#2116; `bgp_evpn_vpws_vxlan_multihoming` proves failover re-binds VTEP *and* per-PE VNI) | ✅ DF per `<ESI, service instance>` (#2116) | ❌ |
 | **Remote P/B selection + per-ES fast failover** | ✅ Encap-agnostic | ✅ | ❌ |
 | **All-active load balancing** | ❌ | ❌ Open (needs multi-SID xconnect) | ❌ |
 | **Control word** | — (no control word in VXLAN) | — (no control word in SRv6) | ❌ C flag always 0 |

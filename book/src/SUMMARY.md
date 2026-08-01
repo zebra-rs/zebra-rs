@@ -52,7 +52,7 @@
   - [EVPN IGMP/MLD Proxy (Selective Multicast)](ch-02-32-bgp-evpn-igmp-mld-proxy.md)
   - [EVPN BUM & Assisted Replication](ch-02-33-bgp-evpn-assisted-replication.md)
   - [EVPN BUM Tunnel Segmentation (RFC 9572)](ch-02-34-bgp-evpn-segmentation.md)
-  - [EVPN VPWS (E-Line over SRv6)](ch-02-38-bgp-evpn-vpws.md)
+  - [EVPN VPWS (E-Line over SRv6 or VXLAN)](ch-02-38-bgp-evpn-vpws.md)
   - [EVPN over MPLS](ch-02-40-bgp-evpn-mpls.md)
   - [Mobile User Plane (MUP) & the MUP Controller](ch-02-35-bgp-mup.md)
   - [Route Target Constraint (RTC)](ch-02-07-bgp-rtc.md)

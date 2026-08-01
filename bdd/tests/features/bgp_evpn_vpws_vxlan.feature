@@ -114,6 +114,26 @@ Feature: BGP EVPN VPWS E-Line signalling over VXLAN (RFC 8365 §6)
     And show command "show bgp evpn vpws" in namespace "z1" should contain "State: up"
     And show command "show bgp evpn vpws" in namespace "z2" should eventually contain "State: up"
 
+  Scenario: A VNI claimed twice parks the second claimant until it is released
+    Given the test topology exists
+    # eline9 configures the VNI eline1 is already advertising (10101): a
+    # VNI is a per-PE decap identity, so eline9 must NOT originate — it
+    # parks in vni-conflict, naming the owner — while eline1 is untouched.
+    When I apply config "z1-conflict.yaml" to namespace "z1"
+    Then show command "show bgp evpn vpws" in namespace "z1" should eventually contain "State: vni-conflict"
+    And show command "show bgp evpn vpws" in namespace "z1" should contain "VNI conflict: in use by vpws service eline1"
+    And show command "show bgp evpn vpws" in namespace "z1" should contain "State: up"
+    # Moving eline1 off the contested VNI releases it: the retry hook
+    # re-originates eline9 with no edit to eline9 itself — it reaches
+    # `advertised` (nobody advertises its remote-service-id 302).
+    When I apply config "z1-conflict-release.yaml" to namespace "z1"
+    Then show command "show bgp evpn vpws" in namespace "z1" should eventually contain "State: advertised"
+    And show command "show bgp evpn vpws" in namespace "z1" should not contain "VNI conflict:"
+    And show command "show bgp evpn vpws" in namespace "z2" should eventually contain "Remote VTEP: 192.168.0.1 (VNI 10100)"
+    # Back to the baseline single-service config.
+    When I apply config "z1-1.yaml" to namespace "z1"
+    Then show command "show bgp evpn vpws" in namespace "z1" should eventually contain "State: up"
+
   Scenario: Teardown topology
     Given the test topology exists
     When I stop zebra-rs in namespace "z1"

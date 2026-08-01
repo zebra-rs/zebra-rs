@@ -2110,6 +2110,9 @@ fn config_vpws(bgp: &mut Bgp, mut args: Args, op: ConfigOp) -> Option<()> {
         ConfigOp::Delete => {
             bgp.vpws_teardown(&name);
             bgp.local_rib.evpn_vpws.services.remove(&name);
+            // The deleted service may have been the VNI owner a parked
+            // sibling was waiting on.
+            bgp.vpws_retry_conflicts();
         }
         _ => {}
     }
@@ -2178,6 +2181,8 @@ fn config_vpws_leaf(
         bgp.free_vpws_dx2_sid(&name);
     }
     bgp.vpws_reconcile(&name);
+    // A vni/evi move may have released the VNI a parked sibling waits on.
+    bgp.vpws_retry_conflicts();
     Some(())
 }
 

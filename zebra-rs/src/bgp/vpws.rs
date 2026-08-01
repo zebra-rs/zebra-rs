@@ -94,6 +94,12 @@ pub struct VpwsService {
     /// alongside `local_vni`; `None` under SRv6 or when the advertised
     /// next hop is not IPv4.
     pub local_vtep: Option<Ipv4Addr>,
+    /// Set when the service's VNI is already claimed as a decap identity
+    /// by someone else on this PE (another VPWS service, an L2VNI vxlan
+    /// device, a VRF's L3VNI): who owns it. The service is parked — no
+    /// Type-1 originated — until the owner releases the VNI or the
+    /// service is re-pointed; state shows `vni-conflict`.
+    pub vni_conflict: Option<String>,
     /// The remote's L2 MTU when a matching Type-1 was **rejected** for an
     /// MTU mismatch — the service shows `mtu-mismatch` instead of `up`.
     pub remote_mtu_mismatch: Option<u16>,
