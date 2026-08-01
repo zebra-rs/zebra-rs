@@ -4146,8 +4146,24 @@ impl Bgp {
             // sessions riding it, instead of leaving them to hold-timer
             // expiry. LinkUp re-kicks parked peers for fast
             // reconvergence.
-            RibRx::LinkDown(ifindex) | RibRx::LinkDel(ifindex) => {
+            RibRx::LinkDown(ifindex) => {
                 self.link_down_failover(ifindex);
+            }
+            RibRx::LinkDel(ifindex) => {
+                self.link_down_failover(ifindex);
+                // A deleted link's addresses are not reliably withdrawn
+                // one by one (a veth moved into another netns emits only
+                // RTM_DELLINK), so sweep its contributions out of the
+                // address registries — otherwise `covers()` keeps
+                // passing the connected check against a subnet that no
+                // longer exists and the next-hop sources go stale. Not
+                // done for LinkDown: v4 addresses persist across admin
+                // down/up, and the kernel's v6 flush arrives as
+                // explicit AddrDel events.
+                self.interface_addrs.purge_ifindex(ifindex);
+                self.connected_subnets.purge_ifindex(ifindex);
+                self.refresh_connected();
+                super::config::bfd_reconcile_all(self);
             }
             RibRx::LinkUp(ifindex) => {
                 self.link_up_kick(ifindex);

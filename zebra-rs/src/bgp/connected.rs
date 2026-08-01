@@ -16,24 +16,33 @@
 //! addresses) makes the check **fail open**, matching FRR's behaviour
 //! when it has no RIB connectivity information.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::net::IpAddr;
 
 use ipnet::IpNet;
 
 use crate::rib::link::LinkAddr;
 
-/// One reference-counted connected network and the interface it lives on.
-#[derive(Debug)]
+/// One connected network, its contributing addresses, and the interface
+/// it lives on.
+#[derive(Debug, Default)]
 struct SubnetRef {
-    count: usize,
+    /// The interface addresses (with host bits, plus owning ifindex)
+    /// that contribute this network. A set, not a counter: the RIB
+    /// re-broadcasts an address it already announced whenever its
+    /// *state* changes (kernel secondary flip today, address-flag
+    /// updates when those start re-broadcasting), so counting events
+    /// would inflate on every re-delivery and one AddrDel could never
+    /// drain the subnet again.
+    addrs: BTreeSet<(IpNet, u32)>,
     /// The recording address's ifindex. With several addresses in one subnet
     /// the last writer wins — a subnet spanning *different* interfaces is a
     /// pathological config we don't try to disambiguate.
     ifindex: u32,
 }
 
-/// Reference-counted set of directly-connected networks.
+/// Set of directly-connected networks, keyed by network with the exact
+/// contributing addresses tracked per entry.
 #[derive(Debug, Default)]
 pub struct ConnectedSubnets {
     nets: BTreeMap<IpNet, SubnetRef>,
@@ -45,29 +54,45 @@ impl ConnectedSubnets {
     }
 
     /// Record an interface address. The stored key is its network
-    /// (`addr.trunc()`, host bits cleared), reference-counted so several
-    /// addresses sharing one subnet coexist. A /32 or /128 host address
+    /// (`addr.trunc()`, host bits cleared); the exact address is tracked
+    /// so several addresses sharing one subnet coexist and re-delivery
+    /// of a known address is a no-op. A /32 or /128 host address
     /// contributes only itself, which is exactly what we want — it does
     /// not make a different peer "connected".
     pub fn record(&mut self, addr: &LinkAddr) {
-        let entry = self.nets.entry(addr.addr.trunc()).or_insert(SubnetRef {
-            count: 0,
-            ifindex: addr.ifindex,
-        });
-        entry.count += 1;
+        let entry = self.nets.entry(addr.addr.trunc()).or_default();
+        entry.addrs.insert((addr.addr, addr.ifindex));
         entry.ifindex = addr.ifindex;
     }
 
     /// Forget an interface address previously passed to [`Self::record`].
-    /// The subnet is dropped only when its last contributing address goes.
+    /// The subnet is dropped only when its last contributing address goes;
+    /// forgetting an address never recorded (or already forgotten) changes
+    /// nothing.
     pub fn forget(&mut self, addr: &LinkAddr) {
         let net = addr.addr.trunc();
         if let Some(entry) = self.nets.get_mut(&net) {
-            entry.count -= 1;
-            if entry.count == 0 {
+            entry.addrs.remove(&(addr.addr, addr.ifindex));
+            if entry.addrs.is_empty() {
                 self.nets.remove(&net);
             }
         }
+    }
+
+    /// Drop every contribution made by addresses on `ifindex`. A deleted
+    /// link's addresses are not reliably withdrawn one by one — a veth
+    /// moved into another netns emits only RTM_DELLINK — so the LinkDel
+    /// handler sweeps them here wholesale.
+    pub fn purge_ifindex(&mut self, ifindex: u32) {
+        self.nets.retain(|_, entry| {
+            entry.addrs.retain(|(_, ifi)| *ifi != ifindex);
+            if let Some((_, survivor)) = entry.addrs.iter().next()
+                && entry.ifindex == ifindex
+            {
+                entry.ifindex = *survivor;
+            }
+            !entry.addrs.is_empty()
+        });
     }
 
     /// True while no interface address is known. The connected check
@@ -132,6 +157,48 @@ mod tests {
 
     fn ip(s: &str) -> IpAddr {
         s.parse().unwrap()
+    }
+
+    #[test]
+    fn record_is_idempotent_per_address() {
+        let mut t = ConnectedSubnets::new();
+        // The RIB re-broadcasts a known address on state changes
+        // (secondary flip, flag updates) — the re-delivery must not
+        // create a second reference one AddrDel can't drain.
+        t.record(&v4("10.0.0.1", 24));
+        t.record(&v4("10.0.0.1", 24));
+        assert!(t.covers(ip("10.0.0.2")));
+        t.forget(&v4("10.0.0.1", 24));
+        assert!(!t.covers(ip("10.0.0.2")));
+
+        // Two DISTINCT addresses in one subnet still keep it alive
+        // until the last one goes.
+        t.record(&v4("10.0.0.1", 24));
+        t.record(&v4("10.0.0.9", 24));
+        t.forget(&v4("10.0.0.1", 24));
+        assert!(t.covers(ip("10.0.0.2")));
+        t.forget(&v4("10.0.0.9", 24));
+        assert!(!t.covers(ip("10.0.0.2")));
+    }
+
+    #[test]
+    fn purge_ifindex_sweeps_only_that_link() {
+        let mut t = ConnectedSubnets::new();
+        t.record(&v4_on("10.0.0.1", 24, 3));
+        t.record(&v4_on("10.1.0.1", 24, 5));
+        // A subnet spanning both links survives the purge via the
+        // other link's contribution, and its ifindex re-points.
+        t.record(&v4_on("10.2.0.1", 24, 3));
+        t.record(&v4_on("10.2.0.2", 24, 5));
+
+        t.purge_ifindex(3);
+        assert!(!t.covers(ip("10.0.0.2")), "purged link's subnet gone");
+        assert!(t.covers(ip("10.1.0.2")), "other link untouched");
+        assert!(t.covers(ip("10.2.0.9")), "shared subnet survives");
+        assert_eq!(t.ifindex_for(ip("10.2.0.9")), Some(5));
+
+        t.purge_ifindex(5);
+        assert!(t.is_empty());
     }
 
     #[test]

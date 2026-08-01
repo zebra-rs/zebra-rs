@@ -660,16 +660,18 @@ pub enum AddrUpdate {
     /// address, or the kernel confirming a config-driven (re-)install —
     /// or its secondary verdict moved (promotion/demotion).
     Merged,
-    /// The address was present and only its kernel metadata moved —
-    /// `IFA_FLAGS` (DAD completing clears tentative), scope, or the
-    /// `IFA_CACHEINFO` lifetimes an RA renewal refreshes. The stored
-    /// entry was updated but nothing is re-broadcast to protocol
-    /// clients yet: today no protocol consumes the flags, and the BGP
-    /// connected-subnet registry counts AddrAdd events non-idempotently,
-    /// so re-notifying on every DAD completion would inflate it. The
-    /// re-broadcast comes with the BGP registry-hygiene PR.
+    /// The address was present and its kernel address state moved —
+    /// `IFA_FLAGS` (DAD completing clears tentative, deprecation) or
+    /// scope. Re-broadcast to protocol clients: address-state-aware
+    /// consumers (BGP next-hop selection) need the transition, and
+    /// every registry fed by AddrAdd is idempotent against
+    /// re-delivery of a known address.
     Refreshed,
-    /// The address was present and nothing changed (kernel re-notify).
+    /// The address was present and nothing broadcast-worthy changed —
+    /// a kernel re-notify, or an `IFA_CACHEINFO` lifetime renewal
+    /// (adopted into the stored entry silently: every RA refreshes
+    /// the lifetimes, and re-broadcasting each one would have IS-IS
+    /// re-originating LSPs on the RA interval).
     Unchanged,
 }
 
@@ -714,12 +716,11 @@ pub fn link_addr_update(link: &mut Link, addr: LinkAddr) -> AddrUpdate {
         // kernel resends RTM_NEWADDR whenever this state moves (DAD
         // completion flips tentative off, each RA renews the
         // lifetimes), so a kernel event is always the fresher truth.
+        // Flag / scope movement is broadcast-worthy (Refreshed);
+        // lifetime renewal is adopted silently — see [`AddrUpdate`].
         let mut refreshed = false;
         if !addr.config {
-            refreshed = existing.scope != addr.scope
-                || existing.flags != addr.flags
-                || existing.valid_lft != addr.valid_lft
-                || existing.preferred_lft != addr.preferred_lft;
+            refreshed = existing.scope != addr.scope || existing.flags != addr.flags;
             existing.scope = addr.scope;
             existing.flags = addr.flags;
             existing.valid_lft = addr.valid_lft;
@@ -1421,10 +1422,14 @@ impl Rib {
                 }
             }
             // Don't re-broadcast a notification that changed nothing (the
-            // kernel echoing an address we already hold) — consumers that
-            // count events rather than addresses would drift. Refreshed
-            // (kernel metadata moved) stays silent too; see [`AddrUpdate`].
-            if matches!(update, AddrUpdate::Added | AddrUpdate::Merged) {
+            // kernel echoing an address we already hold, a lifetime-only
+            // renewal). Added / Merged / Refreshed all carry state a
+            // subscriber can act on; every AddrAdd-fed registry is
+            // idempotent against re-delivery of a known address.
+            if matches!(
+                update,
+                AddrUpdate::Added | AddrUpdate::Merged | AddrUpdate::Refreshed
+            ) {
                 // Broadcast the merged entry, not the raw incoming addr —
                 // a config push landing on a kernel-known address must
                 // not advertise default kernel metadata over the state
@@ -2076,19 +2081,20 @@ mod tests {
     }
 
     #[test]
-    fn test_link_addr_update_lifetime_renewal_is_refreshed() {
+    fn test_link_addr_update_lifetime_renewal_is_silent() {
         let mut link = test_link();
         let mut slaac = test_addr_v6("2001:db8::5054:ff:fe00:1/64", false, true);
         slaac.valid_lft = Some(86400);
         slaac.preferred_lft = Some(14400);
         assert_eq!(link_addr_update(&mut link, slaac), AddrUpdate::Added);
 
-        // Each RA renews the lifetimes; the stored entry follows without
-        // notifying protocol clients.
+        // Each RA renews the lifetimes; the stored entry follows but
+        // protocol clients are NOT re-notified — Unchanged, not
+        // Refreshed, or IS-IS would re-originate LSPs per RA interval.
         let mut renewed = test_addr_v6("2001:db8::5054:ff:fe00:1/64", false, true);
         renewed.valid_lft = Some(86400);
         renewed.preferred_lft = Some(13000);
-        assert_eq!(link_addr_update(&mut link, renewed), AddrUpdate::Refreshed);
+        assert_eq!(link_addr_update(&mut link, renewed), AddrUpdate::Unchanged);
         assert_eq!(link.addr6[0].preferred_lft, Some(13000));
     }
 
