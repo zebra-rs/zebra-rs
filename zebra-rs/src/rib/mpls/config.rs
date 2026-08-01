@@ -152,20 +152,36 @@ fn config_builder() -> ConfigBuilder {
         .path("/router/static/mpls/label/nexthop")
         .set(|config, cache, label, args| {
             let s = cache_get(config, cache, &label).context(CONFIG_ERR)?;
-            let naddr = args.v4addr().context(NEXTHOP_ERR)?;
+            let naddr = args.addr().context(NEXTHOP_ERR)?;
             let _ = s.nexthops.entry(naddr).or_default();
             Ok(())
         })
         .del(|config, cache, label, args| {
             let s = cache_lookup(config, cache, &label).context(CONFIG_ERR)?;
-            let naddr = args.v4addr().context(NEXTHOP_ERR)?;
+            let naddr = args.addr().context(NEXTHOP_ERR)?;
             s.nexthops.remove(&naddr).context(CONFIG_ERR)?;
+            Ok(())
+        })
+        .path("/router/static/mpls/label/nexthop/interface")
+        .set(|config, cache, label, args| {
+            const IFNAME_ERR: &str = "missing interface arg";
+            let s = cache_get(config, cache, &label).context(CONFIG_ERR)?;
+            let naddr = args.addr().context(NEXTHOP_ERR)?;
+            let n = s.nexthops.entry(naddr).or_default();
+            n.interface = Some(args.string().context(IFNAME_ERR)?);
+            Ok(())
+        })
+        .del(|config, cache, label, args| {
+            let s = cache_lookup(config, cache, &label).context(CONFIG_ERR)?;
+            let naddr = args.addr().context(NEXTHOP_ERR)?;
+            let n = s.nexthops.get_mut(&naddr).context(CONFIG_ERR)?;
+            n.interface = None;
             Ok(())
         })
         .path("/router/static/mpls/label/nexthop/outgoing-label")
         .set(|config, cache, label, args| {
             let s = cache_get(config, cache, &label).context(CONFIG_ERR)?;
-            let naddr = args.v4addr().context(NEXTHOP_ERR)?;
+            let naddr = args.addr().context(NEXTHOP_ERR)?;
             let n = s.nexthops.entry(naddr).or_default();
             let olabel = args.u32().context(OUT_LABEL_ERR)?;
             n.out_label = Some(olabel);
@@ -173,7 +189,7 @@ fn config_builder() -> ConfigBuilder {
         })
         .del(|config, cache, label, args| {
             let s = cache_lookup(config, cache, &label).context(CONFIG_ERR)?;
-            let naddr = args.v4addr().context(NEXTHOP_ERR)?;
+            let naddr = args.addr().context(NEXTHOP_ERR)?;
             let n = s.nexthops.get_mut(&naddr).context(CONFIG_ERR)?;
             n.out_label = None;
             Ok(())

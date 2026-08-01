@@ -848,6 +848,20 @@ impl Rib {
     /// `table_id` parameter, and the inbound dispatcher doesn't pass
     /// one for these variants.
     pub async fn ilm_add(&mut self, label: u32, mut ilm: IlmEntry) {
+        // Resolve an explicitly named egress interface (`mpls label ...
+        // nexthop <gw> interface <name>`) to its ifindex. Deliberately
+        // opt-in, never inferred from connected prefixes: a resolved oif
+        // moves the eBPF pop onto the XDP fast path, whose redirect only
+        // delivers toward XDP-attached ports — naming the interface is
+        // the operator asserting this is a core-facing transit hop. An
+        // unnamed nexthop stays oif-less and pops via the FIB-assisted
+        // path, which reaches any device.
+        if let Some(name) = ilm.nexthop_ifname.clone()
+            && let Nexthop::Uni(u) = &mut ilm.nexthop
+            && u.ifindex().is_none()
+        {
+            u.ifindex_resolved = self.link_by_name(&name).map(|l| l.index);
+        }
         // Stamp the local-delivery pops (see `IlmEntry::local_pop`): a
         // nexthop egressing a loopback means the label's owner is this
         // node — every producer's self prefix-SID entry has this shape.

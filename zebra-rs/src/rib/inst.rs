@@ -727,6 +727,13 @@ pub struct IlmEntry {
     pub rtype: RibType,
     pub ilm_type: IlmType,
     pub nexthop: Nexthop,
+    /// Egress interface the operator named on a static label binding
+    /// (`mpls label ... nexthop <gw> interface <name>`), resolved to the
+    /// nexthop's ifindex by `Rib::ilm_add`. `None` for every other
+    /// producer — IGP ILMs carry their adjacency ifindex directly, and an
+    /// unnamed static nexthop deliberately stays oif-less (FIB-assisted
+    /// pop). Single-nexthop bindings only; ECMP members ignore it.
+    pub nexthop_ifname: Option<String>,
     /// Administrative distance, mirroring the IP RIB convention
     /// (static 1, OSPF 110, IS-IS 115, BGP 20). Set by
     /// `IlmEntry::new` from the owning `rtype`. Primary tie-break key
@@ -759,6 +766,7 @@ impl IlmEntry {
             rtype,
             ilm_type: IlmType::None,
             nexthop: Nexthop::default(),
+            nexthop_ifname: None,
             distance: ilm_distance(rtype),
             metric: 0,
             selected: false,

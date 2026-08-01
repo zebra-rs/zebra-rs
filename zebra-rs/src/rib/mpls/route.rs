@@ -1,5 +1,5 @@
 use std::collections::BTreeMap;
-use std::net::Ipv4Addr;
+use std::net::IpAddr;
 
 use crate::rib::inst::IlmEntry;
 use crate::rib::nexthop::NexthopUni;
@@ -8,11 +8,14 @@ use crate::rib::{Nexthop, NexthopMulti, RibType};
 #[derive(Debug, Default, Clone)]
 pub struct MplsNexthop {
     pub out_label: Option<u32>,
+    /// Explicit egress interface — opts the pop onto the eBPF XDP fast
+    /// path (see `IlmEntry::nexthop_ifname`).
+    pub interface: Option<String>,
 }
 
 #[derive(Debug, Default, Clone)]
 pub struct MplsRoute {
-    pub nexthops: BTreeMap<Ipv4Addr, MplsNexthop>,
+    pub nexthops: BTreeMap<IpAddr, MplsNexthop>,
     pub delete: bool,
 }
 
@@ -27,12 +30,13 @@ impl MplsRoute {
         if self.nexthops.len() == 1 {
             let (&addr, n) = self.nexthops.iter().next()?;
             let mut nhop = NexthopUni {
-                addr: std::net::IpAddr::V4(addr),
+                addr,
                 ..Default::default()
             };
             if let Some(out_label) = n.out_label {
                 nhop.mpls_label.push(out_label);
             }
+            ilm.nexthop_ifname = n.interface.clone();
             ilm.nexthop = Nexthop::Uni(nhop);
             return Some(ilm);
         }
@@ -40,7 +44,7 @@ impl MplsRoute {
         let mut multi = NexthopMulti::default();
         for (&addr, n) in self.nexthops.iter() {
             let mut nhop = NexthopUni {
-                addr: std::net::IpAddr::V4(addr),
+                addr,
                 ..Default::default()
             };
             if let Some(out_label) = n.out_label {
