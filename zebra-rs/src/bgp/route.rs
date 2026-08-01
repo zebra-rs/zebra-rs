@@ -15681,8 +15681,8 @@ impl Bgp {
             .get(&entry.vni)
             .copied()
             .or(entry.vxlan_local)
-            .unwrap_or(IpAddr::V4(self.router_id));
-        // Under MPLS the router-id IS the next hop — there is no VTEP to
+            .unwrap_or_else(|| self.evpn_local_source());
+        // Under MPLS the local source IS the next hop — there is no VTEP to
         // resolve, and the transport LSP is looked up on it — so the fallback
         // is the intended answer rather than a degraded one.
         if !self.evpn_encap.is_mpls()
@@ -15900,7 +15900,7 @@ impl Bgp {
                 IpAddr::V4(vtep)
             }
             (None, Some(v6)) => IpAddr::V6(v6),
-            (None, None) => IpAddr::V4(self.router_id),
+            (None, None) => self.evpn_local_source(),
         };
         attr.nexthop = Some(BgpNexthop::Evpn(nexthop));
         // MPLS: the service label rides on the BgpRib (mirrored by the
@@ -16447,8 +16447,17 @@ impl Bgp {
         self.local_vxlans
             .get(&vni)
             .copied()
-            .or(self.evpn_vtep_source)
-            .unwrap_or(IpAddr::V4(self.router_id))
+            .unwrap_or_else(|| self.evpn_local_source())
+    }
+
+    /// This PE's EVPN source address when no VXLAN device supplies one: the
+    /// configured `vtep-source`, else the router-id. Every locally
+    /// originated EVPN identity that is not device-derived — MPLS IMET
+    /// origins, ES routes, deviceless next hops — must come from here, and
+    /// so must any self-identification against those routes (the DF
+    /// election's "me"), or a v6 source would break self-matching.
+    pub(crate) fn evpn_local_source(&self) -> IpAddr {
+        self.evpn_vtep_source.unwrap_or(IpAddr::V4(self.router_id))
     }
 
     /// Re-reconcile per-EVI A-D for every configured Ethernet Segment's
@@ -16643,7 +16652,7 @@ impl Bgp {
         attr.prefix_sid = prefix_sid;
         let nexthop = match local_vni {
             Some(vni) => self.evpn_nexthop_for_vni(vni),
-            None => IpAddr::V4(self.router_id),
+            None => self.evpn_local_source(),
         };
         attr.nexthop = Some(BgpNexthop::Evpn(nexthop));
         let rib = BgpRib::new(
@@ -16700,7 +16709,7 @@ impl Bgp {
             EsRedundancyMode::AllActive
         };
         let cands = self.es_df_candidates(&esi);
-        let me = IpAddr::V4(self.router_id);
+        let me = self.evpn_local_source();
         // Inside the segment's startup hold this PE is deliberately missing
         // from `cands` — its Type-4 is suppressed — and `vpws_role` reads an
         // absent `me` as "the segment has not converged yet, stay primary
@@ -17004,7 +17013,7 @@ impl Bgp {
         // Already advertising (the delay was configured on a live segment, or
         // this commit applied `esi` first): retract before the hold begins.
         if let Some(esi) = esi {
-            self.evpn_withdraw_es_routes(esi, IpAddr::V4(self.router_id));
+            self.evpn_withdraw_es_routes(esi, self.evpn_local_source());
             vpws_mark_df_dirty(&mut self.local_rib, &esi);
             self.vpws_df_drain();
         }
@@ -17069,7 +17078,7 @@ impl Bgp {
             return;
         };
         let single_active = es.redundancy_mode.single_active();
-        self.evpn_originate_es_routes(esi, IpAddr::V4(self.router_id), single_active);
+        self.evpn_originate_es_routes(esi, self.evpn_local_source(), single_active);
         // Our own Type-4 rejoining the candidate set shifts every carving
         // ordinal on the segment, so the services on it re-elect.
         vpws_mark_df_dirty(&mut self.local_rib, &esi);
@@ -17352,7 +17361,7 @@ impl Bgp {
             eprintln!("[debug] igmp-sync: bad spec '{spec}' — want vni,esi,group[,source]");
             return;
         };
-        let vtep = IpAddr::V4(self.router_id);
+        let vtep = self.evpn_local_source();
         let flags = smet_flags(group, source);
         match action {
             "igmp-join-sync-originate" => {

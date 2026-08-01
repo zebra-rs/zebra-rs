@@ -1745,6 +1745,26 @@ fn config_evpn_vtep_source(bgp: &mut Bgp, mut args: Args, op: ConfigOp) -> Optio
     if bgp.evpn_vtep_source == source {
         return Some(());
     }
+    // The source is part of some route KEYS (an MPLS IMET's Originating
+    // Router IP, an ES route's originator), not just a next hop — those
+    // must be withdrawn under the OLD source or they linger as originated
+    // ghosts. Type-2/Type-5/VPWS Type-1 keys don't carry it, so their
+    // re-origination below updates them in place.
+    let old_source = bgp.evpn_local_source();
+    if bgp.evpn_encap.is_mpls() && bgp.advertise_all_vni {
+        let evis: Vec<u32> = bgp.evpn_evis.keys().copied().collect();
+        for evi in evis {
+            bgp.evpn_withdraw_imet(evi, old_source);
+        }
+    }
+    let segments: Vec<[u8; 10]> = bgp
+        .ethernet_segments
+        .values()
+        .filter_map(|es| es.esi)
+        .collect();
+    for esi in &segments {
+        bgp.evpn_withdraw_es_routes(*esi, old_source);
+    }
     bgp.evpn_vtep_source = source;
     if bgp.advertise_all_vni {
         let entries: Vec<FdbEntry> = bgp.local_fdb.values().cloned().collect();
@@ -1753,6 +1773,7 @@ fn config_evpn_vtep_source(bgp: &mut Bgp, mut args: Args, op: ConfigOp) -> Optio
         }
     }
     reoriginate_all_imet(bgp);
+    es_df_election_changed(bgp);
     bgp.vpws_reencap();
     Some(())
 }
@@ -1852,7 +1873,7 @@ fn config_ethernet_segment(bgp: &mut Bgp, mut args: Args, op: ConfigOp) -> Optio
             bgp.ethernet_segments.entry(name).or_default();
         }
         ConfigOp::Delete => {
-            let vtep = IpAddr::V4(bgp.router_id);
+            let vtep = bgp.evpn_local_source();
             if let Some(esi) = bgp.ethernet_segments.get(&name).and_then(|es| es.esi) {
                 bgp.evpn_withdraw_es_routes(esi, vtep);
             }
@@ -1887,7 +1908,7 @@ fn config_ethernet_segment_esi(bgp: &mut Bgp, mut args: Args, op: ConfigOp) -> O
     } else {
         None
     };
-    let vtep = IpAddr::V4(bgp.router_id);
+    let vtep = bgp.evpn_local_source();
     // Withdraw the ES routes for the previously-configured ESI (if any), then
     // set the new one and originate under it.
     if let Some(old) = bgp.ethernet_segments.get(&name).and_then(|es| es.esi) {
@@ -1947,7 +1968,7 @@ fn config_ethernet_segment_redundancy_mode(
     // re-originate the ES routes with the new mode (a no-op for the Type-4,
     // an in-place update for the per-ES A-D).
     if let Some(esi) = esi {
-        let vtep = IpAddr::V4(bgp.router_id);
+        let vtep = bgp.evpn_local_source();
         bgp.evpn_originate_es_routes(esi, vtep, mode.single_active());
     }
     // Single-active carves one primary per service instance where all-active
@@ -2035,7 +2056,7 @@ fn config_es_startup_delay(bgp: &mut Bgp, mut args: Args, op: ConfigOp) -> Optio
 /// change to the algorithm or preference has to reach peers *and* re-run the
 /// local election — our own Type-4 is one of the election's candidates.
 fn es_df_election_changed(bgp: &mut Bgp) {
-    let vtep = IpAddr::V4(bgp.router_id);
+    let vtep = bgp.evpn_local_source();
     let segments: Vec<([u8; 10], bool)> = bgp
         .ethernet_segments
         .values()
@@ -2474,7 +2495,7 @@ pub(super) fn reoriginate_all_imet(bgp: &mut Bgp) {
     // are the local L2 services, and the router-id stands in for the VTEP
     // (it is the BGP next hop the transport LSP resolves on).
     let services: Vec<(u32, IpAddr)> = if bgp.evpn_encap.is_mpls() {
-        let orig = IpAddr::V4(bgp.router_id);
+        let orig = bgp.evpn_local_source();
         bgp.evpn_evis.keys().map(|evi| (*evi, orig)).collect()
     } else {
         bgp.local_vxlans.iter().map(|(k, v)| (*k, *v)).collect()

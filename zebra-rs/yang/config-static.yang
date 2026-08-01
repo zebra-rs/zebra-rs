@@ -269,6 +269,17 @@ module config-static {
             type uint8;
             description "Weight of ECMP route.";
           }
+          leaf-list label {
+            ext:help "MPLS labels to push";
+            type uint32;
+            description
+              "MPLS label stack imposed toward this nexthop, outermost
+               first — the IPv6 sibling of the IPv4 nexthop's `label`
+               list. This is what gives a labeled transport route to an
+               IPv6 PE loopback (SR-MPLS-style over a v6-numbered core)
+               without an IGP: EVPN-over-MPLS resolves its transport
+               stack from the FIB entry this route installs.";
+          }
         }
         leaf distance {
           ext:help "Administrative distance";

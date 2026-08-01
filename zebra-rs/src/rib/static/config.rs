@@ -424,9 +424,15 @@ fn config_builder<F: StaticFamily>(base: &str) -> ConfigBuilder<F> {
             let s = cache_get::<F>(config, cache, prefix).context(CONFIG_ERR)?;
             let naddr = F::parse_addr(args).context(NEXTHOP_ERR)?;
             let n = s.nexthops.entry(naddr).or_default();
-            n.labels.clear();
+            // Leaf-list values arrive ONE CALL PER VALUE (the commit
+            // text-diff serializes one line each), so clearing here would
+            // keep only the last label of a stack. Append in delivery
+            // order — YANG leaf-list values are unique, so an
+            // already-present value is a re-delivery, not a second push.
             while let Some(label) = args.u32() {
-                n.labels.push(label);
+                if !n.labels.contains(&label) {
+                    n.labels.push(label);
+                }
             }
             Ok(())
         })
@@ -434,28 +440,45 @@ fn config_builder<F: StaticFamily>(base: &str) -> ConfigBuilder<F> {
             let s = cache_lookup::<F>(config, cache, prefix).context(CONFIG_ERR)?;
             let naddr = F::parse_addr(args).context(NEXTHOP_ERR)?;
             let n = s.nexthops.get_mut(&naddr).context(CONFIG_ERR)?;
-            n.labels.clear();
+            // Per-value delete removes just the named labels; a bare
+            // delete (whole leaf-list) clears the stack.
+            let mut any = false;
+            while let Some(label) = args.u32() {
+                n.labels.retain(|l| *l != label);
+                any = true;
+            }
+            if !any {
+                n.labels.clear();
+            }
             Ok(())
         })
         .path(&format!("{base}/{}/route/segments", F::FAMILY))
         .set(|config, cache, prefix, args| {
             const SEG_ERR: &str = "segment address parse error";
             let s = cache_get::<F>(config, cache, prefix).context(CONFIG_ERR)?;
-            let mut segs: Vec<Ipv6Addr> = vec![];
+            // One call per value (see the `label` handler above): append,
+            // skipping re-deliveries, instead of replacing the whole list
+            // with this call's single value.
             while let Some(addr) = args.string() {
-                segs.push(addr.parse::<Ipv6Addr>().context(SEG_ERR)?);
+                let seg = addr.parse::<Ipv6Addr>().context(SEG_ERR)?;
+                if !s.segs.contains(&seg) {
+                    s.segs.push(seg);
+                }
             }
-            s.segs = segs;
             Ok(())
         })
         .del(|config, cache, prefix, args| {
             const SEG_ERR: &str = "segment address parse error";
             let s = cache_lookup::<F>(config, cache, prefix).context(CONFIG_ERR)?;
-            let mut segs: Vec<Ipv6Addr> = vec![];
+            let mut any = false;
             while let Some(addr) = args.string() {
-                segs.push(addr.parse::<Ipv6Addr>().context(SEG_ERR)?);
+                let seg = addr.parse::<Ipv6Addr>().context(SEG_ERR)?;
+                s.segs.retain(|v| *v != seg);
+                any = true;
             }
-            s.segs.clear();
+            if !any {
+                s.segs.clear();
+            }
             Ok(())
         })
         .path(&format!("{base}/{}/route/encap-type", F::FAMILY))
