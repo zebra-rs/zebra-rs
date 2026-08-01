@@ -112,6 +112,26 @@ The four EVPN labs reuse the same namespace names (`vtep1`..`vtep3`,
 `h1`..`h4`), so bring up only one at a time — `up.sh` sweeps leftovers of
 the same names first.
 
+## BGP EVPN VPWS (E-Line)
+
+Three labs, one service — a point-to-point **E-Line** (EVPN VPWS,
+RFC 8214) cross-connecting two CEs as a transparent wire, once per
+encapsulation. The signaling is the same Type-1 per-EVI Ethernet A-D route
+throughout; what changes is the service binding it carries and the wire
+format underneath. All three forward on the eBPF data plane —
+`system ebpf enabled` makes zebra-rs spawn the cradle engine
+(`/usr/bin/cradle`, from the co-distributed cradle-rs package) — since the
+kernel has no E-Line disposition for any of them.
+
+| playset | wire format |
+|:--|:--|
+| [bgp-evpn-vpws-srv6](bgp-evpn-vpws-srv6/README.md) | End.DX2 L2-Service SID carved from the SRv6 locator, IS-IS SRv6 underlay |
+| [bgp-evpn-vpws-vxlan](bgp-evpn-vpws-vxlan/README.md) | Service VNI in the Type-1 label field + VXLAN Encapsulation EC, loopback VTEPs — with deliberately asymmetric VNIs per direction |
+| [bgp-evpn-vpws-mpls](bgp-evpn-vpws-mpls/README.md) | Dynamic per-service MPLS label, no Encapsulation EC (RFC 8365 §5.1.3), IS-IS SR-MPLS transport through a pure-transit P router |
+
+The labs share namespace names (`c1`, `c2`, `pe1`, `pe2`, plus `p` in the
+MPLS variant), so bring up only one at a time.
+
 ## BGP Inter-AS L3VPN
 
 Two providers, one VPN — the RFC 4364 §10 options (plus Cisco's AB

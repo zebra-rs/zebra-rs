@@ -1,0 +1,9 @@
+# CE 1 — a plain host on the E-Line. It shares 10.0.0.0/24 with c2 and
+# resolves it by ARP straight through the service: no routing, no
+# gateway, nothing E-Line-aware.
+interface:
+- if-name: c1-pe1
+  ipv4:
+    address: 10.0.0.1/24
+system:
+  hostname: c1

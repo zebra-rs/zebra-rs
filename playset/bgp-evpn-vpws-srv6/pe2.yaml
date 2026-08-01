@@ -1,0 +1,66 @@
+# PE2 — the mirror of PE1 (LOC2, service instance 102).
+system:
+  hostname: pe2
+  ebpf:
+    enabled: true
+interface:
+- if-name: lo
+  ipv6:
+    address: 2001:db8::2/128
+- if-name: pe2-pe1
+  ipv6:
+    address: 2001:db8:0:12::2/64
+  ebpf:
+    enabled: true
+- if-name: pe2-c2
+  ebpf:
+    enabled: true
+segment-routing:
+  locator:
+  - name: LOC2
+    prefix: fcbb:bbbb:2::/48
+    behavior: usid
+router:
+  isis:
+    net: 49.0000.0000.0000.0002.00
+    hostname: pe2
+    is-type: level-2-only
+    segment-routing:
+      srv6:
+        locator: LOC2
+    interface:
+    - if-name: lo
+      ipv6:
+        enabled: true
+    - if-name: pe2-pe1
+      network-type: point-to-point
+      metric: 1
+      ipv6:
+        enabled: true
+  bgp:
+    global:
+      as: 65001
+      router-id: 10.0.0.2
+    timer:
+      adv-interval:
+        ibgp: 1
+    segment-routing:
+      srv6:
+        locator: LOC2
+    afi-safi:
+    - name: evpn
+      encapsulation: srv6
+      vpws:
+      - name: eline1
+        evi: 100
+        local-service-id: 102
+        remote-service-id: 101
+        interface: pe2-c2
+    neighbor:
+    - remote-address: 2001:db8::1
+      remote-as: 65001
+      update-source: 2001:db8::2
+      enabled: true
+      afi-safi:
+      - name: evpn
+        enabled: true

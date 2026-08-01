@@ -1,0 +1,47 @@
+# P — the transit LSR. No BGP and no EVPN state at all: it only
+# label-switches the transport label toward the egress PE's loopback,
+# and — being the penultimate hop for both loopbacks — pops it, exposing
+# the service label to the egress PE. That layering is the demo: BGP
+# advertises a PE, IS-IS supplies the label to reach it, and the eBPF
+# data plane composes the two.
+system:
+  hostname: p
+  ebpf:
+    enabled: true
+interface:
+- if-name: lo
+  ipv4:
+    address: 3.3.3.3/32
+- if-name: p-pe1
+  ipv4:
+    address: 10.250.0.2/30
+  ebpf:
+    enabled: true
+- if-name: p-pe2
+  ipv4:
+    address: 10.250.0.5/30
+  ebpf:
+    enabled: true
+router:
+  isis:
+    net: 49.0000.0000.0000.0003.00
+    hostname: p
+    is-type: level-2-only
+    segment-routing: mpls
+    te-router-id: 3.3.3.3
+    interface:
+    - if-name: lo
+      ipv4:
+        enabled: true
+        prefix-sid:
+          index: 3
+    - if-name: p-pe1
+      network-type: point-to-point
+      metric: 10
+      ipv4:
+        enabled: true
+    - if-name: p-pe2
+      network-type: point-to-point
+      metric: 10
+      ipv4:
+        enabled: true
