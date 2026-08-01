@@ -1,11 +1,14 @@
 # BGP MUP — explicit interwork/direct segment resolution for `dataplane gtp`
 
-> **Status:** confirmed (2026-08-01); stages 1–4 implemented on review
-> branches — cradle `decap-meta-precedence` → `gtp-pdr-vrf-scope`, zebra
-> `gtp-pdr-match-vrf` → `mup-segment-catalog` → `mup-endpoint-nht-vrf`.
-> Staged so every PR is independently shippable and the current single-N6
-> lab stays green at each stage. Implementation notes from verification are
-> folded into §3.4 and Stage 4 below.
+> **Status:** confirmed (2026-08-01); stages 1–5 implemented on review
+> branches — cradle `decap-meta-precedence` → `gtp-pdr-vrf-scope` →
+> `mup-n3-vrf-lab`, zebra `gtp-pdr-match-vrf` → `mup-segment-catalog` →
+> `mup-endpoint-nht-vrf` → `mup-n3-vrf-lab`. Staged so every PR is
+> independently shippable and the current single-N6 lab stays green at
+> each stage. The stage-5 proof — `@cradle_mup_gtp_n3_vrf`, the §2 target
+> configuration with the N3 port inside a kernel VRF — passes end-to-end.
+> Implementation notes from verification are folded into §3.4, Stage 4 and
+> Stage 5 below. Stage 6 remains deferred.
 >
 > Origin: design review of the single-N6 configuration (`bdd/mup-lab`,
 > issue #1947 arc). The `dataplane gtp` datapath hard-codes three forwarding
@@ -350,13 +353,20 @@ preserving).*
 
 * cradle BDD `@cradle_mup_gtp_n3_vrf`: the faithful two-VRF UPF with the N3
   port **inside a kernel VRF**, round-trip ICMP + counters (the topology that
-  is impossible today).
-* zebra: a `bdd/mup-lab` faithful-variant config (or a second lab dir) proving
-  the §2 target configuration end-to-end with free5GC-shaped sessions.
+  is impossible today). *As implemented:* free5GC-shaped session via
+  pfcp-inject (PFCP on loopback), dual-segment origination asserted per RD
+  (`[ST1]` under N6's, `[ST2]`+`mup:1:6` under N3's), round trip through
+  both re-scoped lookups.
+* zebra: the §2 target configuration is proven end-to-end **by that BDD**;
+  `bdd/mup-lab` gains a variant README section pointing at it and at the
+  book, rather than a parallel config file — this lab's `mun3` doubles as
+  the N4 link, so moving it into VRF N3 first needs a dedicated global-table
+  N4 veth (the PFCP socket is not VRF-aware), and an unrunnable yaml in the
+  lab dir would only drift.
 * Book ch-02-35: an "architecture mapping" section — the §1 resolution table,
-  both shapes (single-N6 degenerate + faithful N3/N6), and retiring the
-  "N3 stays in the global table" invariant notes (Stage 1/2 turned it from a
-  correctness requirement into a mere default).
+  both shapes (single-N6 degenerate + faithful N3/N6), the N4 note, and
+  retiring the "N3 stays in the global table" invariant notes (Stage 1/2
+  turned it from a correctness requirement into a mere default).
 
 ### Stage 6 — deferred (revisit after 1–5)
 
