@@ -86,7 +86,7 @@ struct CradleMirror {
     /// (SID address, prefix len) → (registry Sid, ifindex).
     local_sids: HashMap<(Ipv6Addr, u8), (crate::rib::Sid, u32)>,
     /// (outer dst, teid) → decap table (original kernel table id).
-    gtp_pdrs: HashMap<(Ipv4Addr, u32), u32>,
+    gtp_pdrs: HashMap<(Ipv4Addr, u32, u32), u32>,
     /// (UE prefix, kernel table) → (gtp_src, gtp_dst, teid, underlay gw, oif).
     gtp_encaps: HashMap<(Ipv4Net, u32), (Ipv4Addr, Ipv4Addr, u32, Option<Ipv4Addr>, u32)>,
     /// (bridge domain, mac) → remote End.DT2U/DT2M service SID.
@@ -586,8 +586,8 @@ impl CradleFib {
             )
             .await;
         }
-        for ((dst, teid), table) in &m.gtp_pdrs {
-            self.gtp_pdr_add(*dst, *teid, *table).await;
+        for ((dst, teid, match_vrf), table) in &m.gtp_pdrs {
+            self.gtp_pdr_add(*dst, *teid, *table, *match_vrf).await;
         }
         for ((prefix, table), (src, dst, teid, gw, oif)) in &m.gtp_encaps {
             self.gtp_encap_install(*prefix, *table, *src, *dst, *teid, *gw, *oif)
@@ -1307,15 +1307,16 @@ impl CradleFib {
     }
 
     /// Install a GTP-U decap PDR (`H.M.GTP4.D`): a G-PDU arriving on
-    /// (`dst`, `teid`) is stripped and its inner packet forwarded in the VRF
-    /// table `table_id` (0 = global). Cradle-only — the mainline kernel has no
-    /// GTP action, so this is never a kernel route.
-    pub async fn gtp_pdr_add(&self, dst: Ipv4Addr, teid: u32, table_id: u32) {
+    /// (`dst`, `teid`) on a port bound to VRF table `match_vrf` (0 = global)
+    /// is stripped and its inner packet forwarded in the VRF table `table_id`
+    /// (0 = global). Cradle-only — the mainline kernel has no GTP action, so
+    /// this is never a kernel route.
+    pub async fn gtp_pdr_add(&self, dst: Ipv4Addr, teid: u32, table_id: u32, match_vrf: u32) {
         self.mirror
             .lock()
             .await
             .gtp_pdrs
-            .insert((dst, teid), table_id);
+            .insert((dst, teid, match_vrf), table_id);
         if let Err(e) = async {
             self.client()
                 .await?
@@ -1323,6 +1324,7 @@ impl CradleFib {
                     dst: dst.to_string(),
                     teid,
                     vrf: cradle_vrf(table_id),
+                    match_vrf: cradle_vrf(match_vrf),
                 })
                 .await?;
             anyhow::Ok(())
@@ -1334,14 +1336,19 @@ impl CradleFib {
     }
 
     /// Remove a GTP-U decap PDR.
-    pub async fn gtp_pdr_del(&self, dst: Ipv4Addr, teid: u32) {
-        self.mirror.lock().await.gtp_pdrs.remove(&(dst, teid));
+    pub async fn gtp_pdr_del(&self, dst: Ipv4Addr, teid: u32, match_vrf: u32) {
+        self.mirror
+            .lock()
+            .await
+            .gtp_pdrs
+            .remove(&(dst, teid, match_vrf));
         if let Err(e) = async {
             self.client()
                 .await?
                 .del_gtp_pdr(pb::GtpPdrDel {
                     dst: dst.to_string(),
                     teid,
+                    match_vrf: cradle_vrf(match_vrf),
                 })
                 .await?;
             anyhow::Ok(())
