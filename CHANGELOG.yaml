@@ -11,6 +11,111 @@
 # Fields "distribution" and "urgency" are optional per-entry; if you omit them,
 # changelog-gen.sh defaults to distribution "unstable" and urgency "medium".
 
+- semver: 26.8.1
+  date: 2026-08-01T18:00:00+09:00
+  distribution: unstable
+  urgency: medium
+  packager: Kunihiro Ishiguro <kunihiro@zebra.rs>
+  changes:
+    - note: |
+        ### EVPN VPWS / E-LINE on all three encapsulations
+        * EVPN VPWS (RFC 8214) point-to-point service now runs over
+          SRv6, VXLAN and MPLS: per-EVI Ethernet A-D routes, Ethernet
+          Segments derived from the attachment circuit, remote-PE
+          selection, single-active multihoming with DF preference and
+          a configurable DF startup delay
+        * E-LINE cross-connect datapaths ship in the cradle eBPF
+          engine for both VXLAN and MPLS transport, wired end-to-end
+          from the EVPN control plane
+        * `show evpn vni all` and EVPN service status views were
+          implemented; an undefined outbound policy bound to an EVPN
+          session no longer silently drops routes
+    - note: |
+        ### EVPN over MPLS and IPv6 transport
+        * The E-LAN service gained a full MPLS encapsulation:
+          per-EVI encap negotiation, service-label ILM programming
+          with resync after engine restart, local MAC origination and
+          a receive tee into the cradle engine
+        * PEs can interconnect over pure IPv6 transport: MPLS service
+          labels resolve over IPv6 nexthops (FIB6), every VXLAN
+          service supports native IPv6 VTEPs with a new `vtep-source`
+          leaf, and static ILM entries accept IPv6 nexthops with an
+          optional `interface` leaf for the XDP fast path
+        * Static label routes take IPv6 nexthops and multi-label
+          stacks (leaf-list); a latent double-flood in the IMET flood
+          filter was fixed
+    - note: |
+        ### EVPN over SRv6
+        * MAC SIDs for Type-2 routes, ESI-carrying Type-2 routes,
+          MAC/IP multihoming, multi-destination MAC moves and Type-5
+          prefix routes are covered by new end-to-end BDD scenarios,
+          with `show` views for the allocated SIDs
+        * Route reflection now stamps ORIGINATOR_ID and CLUSTER_LIST
+          for the EVPN, MUP and Flowspec address families (RFC 4456)
+          and drops looped routes on ingress
+    - note: |
+        ### 5G Mobile User Plane (BGP MUP, SAFI 85)
+        * MUP segment resolution was reworked: Interwork Segments can
+          name the GTP-side VRF via `lookup-network-instance`, GTP
+          gateways resolve through that VRF (nexthop cache is keyed
+          per VRF), SID-less segments are accepted, and N9 / SRGW
+          composite segments plus GTP over IPv6 are supported
+        * A UPF with a single N6 interface now works (issue #1947),
+          and GTP PDR matching honours the VRF
+        * The N3-interface-in-a-VRF split was validated live against
+          free5GC (UE ping end-to-end), including an N4-separated
+          faithful variant; the lab and book chapter ship in-tree
+    - note: |
+        ### Interface addressing: secondaries, multiple addresses, VLANs
+        * Interfaces accept multiple IPv4 addresses with a
+          `secondary` flag and multiple IPv6 addresses (leaf-list
+          config); router-id derivation skips secondaries and the RIB
+          keeps connected coverage when a covering address is removed
+        * OSPFv2 handles secondary addresses per RFC 2328: TX source
+          pinning, §10.5 ingress checks, LSA re-origination on
+          address change, dead-timer handling for Full neighbors and
+          transit-vs-stub link classification
+        * OSPFv3 keeps a stable link-local source and re-originates
+          address-bearing LSAs on change; IS-IS re-originates
+          reachability for added/removed v4/v6 addresses
+        * 802.1Q VLAN sub-interfaces are configurable via the new
+          `vlan` list
+    - note: |
+        ### BGP, OSPF and IS-IS fixes
+        * BGP: the receive path no longer starves the hold timer
+          under sustained UPDATE load (contributed by @higebu);
+          per-VRF sessions keep liveness on a priority lane; an
+          End-of-RIB could be dropped on a stale event and is now
+          delivered
+        * OSPF: a nexthop evicted from an ECMP group by BFD is
+          restored when the session recovers, and initial convergence
+          no longer races the first BFD poll
+        * IS-IS: circuit IDs are allocated when the interface is
+          enabled, a socket-filter attach race was closed, and an
+          ex-DIS no longer leaks its pseudonode LSP after link
+          deletion
+    - note: |
+        ### Operability: runtime tracing and MCP
+        * Conditional tracing is now runtime configuration: `tracing`
+          subtrees under `router bgp` / `isis` / `ospf` / `ospfv3`
+          and `system` (RIB/FIB) toggle per-category traces (packets
+          with direction/detail, FSMs, LSDB, SPF, kernel exchanges)
+          without rebuilds or restarts, from the CLI and config files
+        * The MCP server implements the 2026-07-28 specification:
+          protocol version negotiation and stateless HTTP mode, while
+          remaining compatible with older clients
+    - note: |
+        ### Packaging, playsets and test infrastructure
+        * The pinned cradle-rs engine release is v1.0.0; the APT
+          pipeline ingests its .debs for jammy, noble and resolute
+        * New playsets: EVPN E-LINE, EVPN LAN, VXLAN eBPF and
+          MPLS-over-IPv6; new book chapters for EVPN LAN/MPLS,
+          protocol tracing, multi-address interfaces and the free5GC
+          MUP lab
+        * BDD hardening: per-feature leak-guard prefixes, exec
+          isolation, polling asserts with a BFD poll budget, and
+          generated per-scenario documentation
+
 - semver: 26.7.8
   date: 2026-07-25T18:00:00+09:00
   distribution: unstable
