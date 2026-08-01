@@ -184,6 +184,26 @@ Known gap: if you restart *cradle* under a live zebra-rs, the tee does
 not replay its mirror (tonic reconnects transparently) — restart
 zebra-rs instead, wait for the SMF to re-associate, and re-attach the UE.
 
+## Variant: the faithful interwork/direct split (N3 in a VRF)
+
+This lab keeps N3 (`mun3`) in the **global table** — the default GTP-U
+match context and the simplest shape, since the same interface carries
+PFCP/N4. zebra-rs also supports the architecture-faithful split, where
+**VRF N3 is the interwork segment** (`segment interwork prefix <gNB net>`
++ `route st2 { mup-ext-comm <id> }`) and **VRF N6 the direct segment**
+(`segment direct { mup-ext-comm <id> }` + `route st1`): the decap PDR then
+matches only on N3-bound ports, decaps into N6's table by the
+Direct-segment id, and the downlink outer resolves in N3's table. The
+validated configuration and walk-through live in the book
+(`ch-02-35`, "The faithful interwork/direct split — N3 in a VRF") and the
+shape is regression-tested end-to-end by the cradle
+`@cradle_mup_gtp_n3_vrf` BDD with free5GC-shaped sessions.
+
+Adapting **this** free5GC lab to it needs one topology change first:
+`mun3` doubles as the N4 link, and the PFCP socket must stay reachable
+outside the N3 VRF — add a dedicated N4 veth in the global table (point
+`smfcfg.yaml`'s UPF node address at it) before moving `mun3` into VRF N3.
+
 ## Teardown
 
 ```sh

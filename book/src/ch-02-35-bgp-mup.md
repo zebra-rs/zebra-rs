@@ -257,9 +257,10 @@ the recommended shape. The complete, validated configuration (the
 `bdd/mup-lab` free5GC lab):
 
 ```
-# The kernel VRF and its single N6 interface. N3 (mun3) stays in the
-# GLOBAL table — it carries PFCP/N4 and the outer GTP-U packets, which
-# are terminated by the UPF itself, never routed in the service VRF.
+# The kernel VRF and its single N6 interface. N3 (mun3) sits in the
+# GLOBAL table here — the default GTP-U match context, and the simplest
+# shape since it also carries PFCP/N4. N3 may instead live in its own
+# VRF: see "The faithful interwork/direct split" below.
 vrf mobile {
 }
 interface mun3 {
@@ -425,6 +426,99 @@ zebra-rs uses **End.DT46** for both Direct and Interwork segments; the
 draft's GTP-U endpoint behaviours (GTP4.E / GTP6.E / H.M.GTP4.D) themselves
 are VPP/eBPF and not yet implemented — the kernel dataplane performs the
 SRv6 H.Encaps toward the segment, and the End.DT46 decap at the far end.
+
+### The faithful interwork/direct split — N3 in a VRF (`dataplane gtp`)
+
+Beyond advertising DSD/ISD routes, `segment direct` / `segment interwork`
+declare a **local datapath role**: *this VRF is a direct / interwork
+segment*. With `dataplane gtp`, the reconcilers resolve every forwarding
+context from those declarations instead of implicit defaults — the MUP
+architecture's own mapping, where the **interwork segment is the N3
+routing context** (GTP-U terminates there) and the **direct segment is the
+N6 routing context** (decapped subscriber traffic routes there):
+
+| Context | Resolved from | Default when undeclared |
+|---|---|---|
+| Where does GTP-U **match**? | The ST2-holding VRF's own table when it is a `segment interwork` — the decap PDR only matches G-PDUs arriving on that VRF's ports | VRF 0 (N3 ports in the global table) |
+| Which table after **decap**? | The direct segment whose `mup-ext-comm` equals the ST2's MUP Extended Community (the DSD correlation) | The ST2-holding VRF's own table |
+| Which table resolves the **outer** packet after encap? | The most-specific `segment interwork` prefix containing the ST1's gNB endpoint — the (gw, oif) is NHT-resolved in that VRF's table | The global table |
+
+The complete, validated configuration (the cradle
+`@cradle_mup_gtp_n3_vrf` BDD):
+
+```
+vrf N3 { }                      # interwork segment: the GTP/N3 routing context
+vrf N6 { }                      # direct segment: the N6 routing context
+interface z1n3 { vrf N3; ipv4 { address 10.0.12.1/24; } }
+interface z1n6 { vrf N6; ipv4 { address 10.0.60.1/24; } }
+
+router bgp {
+  global { as 65000; router-id 1.1.1.1; }
+  vrf N3 {
+    rd 65000:3;
+    afi-safi mup {
+      dataplane gtp;
+      segment interwork {
+        prefix 10.0.12.0/24;    # the gNB N3 network
+      }
+      route st2 {
+        network-instance internet;
+        mup-ext-comm 1:6;       # resolves the decap target to the N6 segment
+      }
+    }
+  }
+  vrf N6 {
+    rd 65000:6;
+    afi-safi mup {
+      dataplane gtp;
+      segment direct {
+        mup-ext-comm 1:6;       # this VRF's Direct-segment id
+      }
+      route st1 {
+        network-instance internet;
+      }
+    }
+  }
+  mup-c { enabled true; controller-address 2001:db8::1;
+          pfcp { listen-address 127.0.0.1; } }
+}
+```
+
+One PFCP session then originates the **ST1 under N6's RD** (`65000:6` —
+the UE route belongs to the direct segment) and the **ST2 under N3's RD**
+(`65000:3`, stamped `mup:1:6`), and the datapath follows the table above:
+
+* **Uplink**: a G-PDU arriving on `z1n3` — a port bound to N3's kernel
+  table — matches the decap PDR *in N3's context* (the same
+  `(endpoint, TEID)` may be reused by another slice's interwork VRF), is
+  stripped, and its inner packet routes in **N6's table** although it
+  arrived on an N3-bound port: the `mup:1:6` correlation picked the direct
+  segment, and the decap's table choice takes precedence over the ingress
+  port's VRF binding.
+* **Downlink**: traffic to the UE hits the ST1 route in **N6's table** and
+  is GTP-encapsulated toward the gNB; `10.0.12.2` falls inside the
+  interwork prefix, so the outer `(gw, oif)` was resolved in **N3's
+  table** — where the gNB's connected route actually lives.
+
+With **no** `segment` declared, all three defaults apply and the behaviour
+is exactly the single-N6 shape above — that configuration is the
+degenerate case of this one, and remains the recommended simple form.
+
+Two deployment notes:
+
+* **N4 stays out of the N3 VRF.** The PFCP endpoint (`pfcp
+  listen-address`) is an ordinary socket in the default routing context —
+  keep it on loopback (collocated SMF/injector) or on a dedicated N4
+  interface in the global table. Placing it on an address inside the N3
+  VRF would require VRF-aware control-plane sockets, which the MUP
+  controller does not do.
+* A **catalog change on live sessions is handled**: re-scoping a segment
+  re-keys the installed PDRs (withdrawing the old match context) and
+  migrates the gNB endpoint's NHT registration to its new table.
+
+The datapath is regression-tested by the cradle `@cradle_mup_gtp_n3_vrf`
+BDD (dual-segment origination, round-trip ICMP through both re-scoped
+lookups, tunnel counters on both ends).
 
 ## From PFCP session to ST route
 
