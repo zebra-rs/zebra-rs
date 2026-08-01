@@ -1110,13 +1110,18 @@ impl BgpVrf {
             .copied()
             .collect();
         for (dst, teid) in stale {
-            let _ = self
-                .ctx
-                .rib
-                .send(crate::rib::Message::CradleGtpPdrDel { dst, teid });
+            let _ = self.ctx.rib.send(crate::rib::Message::CradleGtpPdrDel {
+                dst,
+                teid,
+                match_vrf: 0,
+            });
             self.mup_gtp_pdr_installed.remove(&(dst, teid));
         }
-        // Install new PDRs.
+        // Install new PDRs. The match context is the global table for now —
+        // GTP-U terminates on ports in VRF 0, today's only supported
+        // placement; the interwork-segment resolution
+        // (docs/design/bgp-mup-gtp-segment-resolution-plan.md stage 3) will
+        // derive it from the segment catalog instead.
         for (dst, teid) in &desired {
             if !self.mup_gtp_pdr_installed.insert((*dst, *teid)) {
                 continue;
@@ -1125,6 +1130,7 @@ impl BgpVrf {
                 dst: *dst,
                 teid: *teid,
                 table_id,
+                match_vrf: 0,
             });
         }
     }

@@ -701,18 +701,25 @@ impl FibHandle {
     }
 
     /// Install a GTP-U decap PDR (`H.M.GTP4.D`) into the cradle data plane: a
-    /// G-PDU on (`dst`, `teid`) is stripped and its inner packet forwarded in
+    /// G-PDU on (`dst`, `teid`), arriving on a port bound to VRF table
+    /// `match_vrf` (0 = global), is stripped and its inner packet forwarded in
     /// VRF `table_id`. No kernel counterpart — the mainline kernel has no GTP
     /// action, so cradle is the only forwarder for the MUP `dataplane gtp` mode.
-    pub async fn cradle_gtp_pdr_add(&self, dst: std::net::Ipv4Addr, teid: u32, table_id: u32) {
+    pub async fn cradle_gtp_pdr_add(
+        &self,
+        dst: std::net::Ipv4Addr,
+        teid: u32,
+        table_id: u32,
+        match_vrf: u32,
+    ) {
         if let Some(cradle) = &self.cradle {
-            cradle.gtp_pdr_add(dst, teid, table_id).await;
+            cradle.gtp_pdr_add(dst, teid, table_id, match_vrf).await;
         }
     }
 
-    pub async fn cradle_gtp_pdr_del(&self, dst: std::net::Ipv4Addr, teid: u32) {
+    pub async fn cradle_gtp_pdr_del(&self, dst: std::net::Ipv4Addr, teid: u32, match_vrf: u32) {
         if let Some(cradle) = &self.cradle {
-            cradle.gtp_pdr_del(dst, teid).await;
+            cradle.gtp_pdr_del(dst, teid, match_vrf).await;
         }
     }
     #[allow(clippy::too_many_arguments)]

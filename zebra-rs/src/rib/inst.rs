@@ -410,16 +410,19 @@ pub enum Message {
         pe: IpAddr,
     },
     /// MUP `dataplane gtp` uplink decap (`H.M.GTP4.D`): a GTP-U decap PDR teed
-    /// to cradle — a G-PDU on (`dst`, `teid`) is stripped and its inner packet
+    /// to cradle — a G-PDU on (`dst`, `teid`), arriving on a port bound to VRF
+    /// table `match_vrf` (0 = global), is stripped and its inner packet
     /// forwarded in VRF `table_id`. Cradle-only (the kernel has no GTP action).
     CradleGtpPdrAdd {
         dst: std::net::Ipv4Addr,
         teid: u32,
         table_id: u32,
+        match_vrf: u32,
     },
     CradleGtpPdrDel {
         dst: std::net::Ipv4Addr,
         teid: u32,
+        match_vrf: u32,
     },
     /// EVPN VPWS (RFC 8214): bind attachment circuit `ifname` to the
     /// remote PE's service endpoint — teed to cradle as an XCONNECT entry
@@ -3770,13 +3773,20 @@ impl Rib {
                 dst,
                 teid,
                 table_id,
+                match_vrf,
             } => {
                 self.fib_handle
-                    .cradle_gtp_pdr_add(dst, teid, table_id)
+                    .cradle_gtp_pdr_add(dst, teid, table_id, match_vrf)
                     .await;
             }
-            Message::CradleGtpPdrDel { dst, teid } => {
-                self.fib_handle.cradle_gtp_pdr_del(dst, teid).await;
+            Message::CradleGtpPdrDel {
+                dst,
+                teid,
+                match_vrf,
+            } => {
+                self.fib_handle
+                    .cradle_gtp_pdr_del(dst, teid, match_vrf)
+                    .await;
             }
             Message::XconnectAdd {
                 ifname,
