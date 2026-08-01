@@ -16544,6 +16544,33 @@ impl Bgp {
         // VPWS is not implemented, so an `encapsulation mpls` fabric
         // signals its E-Lines over SRv6 like before the knob was honored.
         let local_vni = self.evpn_encap.is_vxlan().then(|| vni.unwrap_or(evi));
+        // A VNI is a per-PE decap identity: one already claimed — by an
+        // originated VPWS service, an L2VNI vxlan device, or a VRF's
+        // symmetric-IRB L3VNI — cannot also be this E-Line's. Advertising
+        // it anyway would invite traffic the datapath must misdeliver
+        // (one VNI_INFO slot), so refuse to originate and surface
+        // `vni-conflict` instead; the retry hooks re-originate when the
+        // owner releases it.
+        if let Some(vni) = local_vni {
+            let owner = self.vpws_vni_owner(name, vni);
+            let conflicted = owner.is_some();
+            if let Some(svc) = self.local_rib.evpn_vpws.services.get_mut(name) {
+                svc.vni_conflict = owner;
+                if conflicted {
+                    // A parked service advertises nothing, so it holds no
+                    // decap identity either — `local_vni` must stay an
+                    // accurate "currently advertising" marker for the
+                    // ownership checks and the xconnect tee.
+                    svc.local_vni = None;
+                    svc.local_vtep = None;
+                }
+            }
+            if conflicted {
+                return;
+            }
+        } else if let Some(svc) = self.local_rib.evpn_vpws.services.get_mut(name) {
+            svc.vni_conflict = None;
+        }
         let prefix_sid = match local_vni {
             Some(_) => None,
             None => self.vpws_dx2_prefix_sid(name),
@@ -16677,6 +16704,47 @@ impl Bgp {
         self.evpn_withdraw_vpws(name);
         self.evpn_originate_vpws(name);
         vpws_rebind(&mut self.local_rib, &self.ctx.rib, name);
+    }
+
+    /// Who already owns VNI `vni` as a decap identity on this PE, if
+    /// anyone but VPWS service `name` itself: another VPWS service
+    /// currently advertising it, an L2VNI vxlan device, or a VRF's
+    /// symmetric-IRB L3VNI. `None` = free to claim.
+    fn vpws_vni_owner(&self, name: &str, vni: u32) -> Option<String> {
+        if let Some((other, _)) = self
+            .local_rib
+            .evpn_vpws
+            .services
+            .iter()
+            .find(|(n, s)| n.as_str() != name && s.local_vni == Some(vni))
+        {
+            return Some(format!("vpws service {other}"));
+        }
+        if self.local_vxlans.contains_key(&vni) {
+            return Some("an L2VNI vxlan device".to_string());
+        }
+        if let Some((vrf, _)) = self.vrfs.iter().find(|(_, c)| c.l3vni == Some(vni)) {
+            return Some(format!("vrf {vrf} (l3vni)"));
+        }
+        None
+    }
+
+    /// Re-attempt every service parked in `vni-conflict`. Called whenever
+    /// a VNI owner may have released one — a vpws delete or re-vni, a
+    /// vxlan device removal, an L3VNI unbind — so a parked E-Line comes
+    /// up without an operator nudge.
+    pub fn vpws_retry_conflicts(&mut self) {
+        let parked: Vec<String> = self
+            .local_rib
+            .evpn_vpws
+            .services
+            .iter()
+            .filter(|(_, s)| s.vni_conflict.is_some())
+            .map(|(n, _)| n.clone())
+            .collect();
+        for name in parked {
+            self.vpws_reconcile(&name);
+        }
     }
 
     /// Full teardown for a deleted VPWS service: withdraw the Type-1,

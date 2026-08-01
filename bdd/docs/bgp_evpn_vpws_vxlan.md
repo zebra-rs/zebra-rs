@@ -34,4 +34,5 @@ bridge br0, one E-Line service between them. z1 pins an explicit
 | Re-pointing remote-service-id rebinds from the Loc-RIB without a route churn | |
 | Changing the vni leaf re-originates and the remote end follows | |
 | A fabric can run mixed encapsulations, one per direction | |
+| A VNI claimed twice parks the second claimant until it is released | |
 | Teardown topology | |

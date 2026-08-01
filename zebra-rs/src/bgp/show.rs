@@ -2673,6 +2673,9 @@ struct VpwsServiceJson {
     local_sid: Option<String>,
     /// The VNI the Type-1 went out with — set only under VXLAN.
     local_vni: Option<u32>,
+    /// Who already claims this service's VNI as a decap identity, when
+    /// someone does (the service is then parked, state `vni-conflict`).
+    vni_conflict: Option<String>,
     remote_sid: Option<String>,
     remote_vtep: Option<String>,
     remote_vni: Option<u32>,
@@ -2694,6 +2697,8 @@ struct VpwsServiceJson {
 fn vpws_state(svc: &super::vpws::VpwsService) -> &'static str {
     if svc.params().is_none() {
         "partial-config"
+    } else if svc.vni_conflict.is_some() {
+        "vni-conflict"
     } else if svc.originated.is_none() {
         "pending"
     } else if svc.remote_mtu_mismatch.is_some() {
@@ -2728,6 +2733,7 @@ fn show_bgp_evpn_vpws(
                 vni: svc.vni,
                 local_sid: vpws.sids.get(name).map(|(addr, _)| addr.to_string()),
                 local_vni: svc.local_vni,
+                vni_conflict: svc.vni_conflict.clone(),
                 remote_sid: match svc.remote {
                     Some(super::vpws::VpwsEndpoint::Srv6(sid)) => Some(sid.to_string()),
                     _ => None,
@@ -2863,6 +2869,9 @@ fn show_bgp_evpn_vpws(
         }
         if let Some(vni) = svc.local_vni {
             writeln!(buf, "  Local VNI: {vni}")?;
+        }
+        if let Some(owner) = &svc.vni_conflict {
+            writeln!(buf, "  VNI conflict: in use by {owner}")?;
         }
         if let Some(endpoint) = svc.remote {
             // Which PE won, and whether the service is running on the
