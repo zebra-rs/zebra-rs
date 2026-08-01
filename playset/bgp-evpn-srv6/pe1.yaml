@@ -1,0 +1,77 @@
+# PE1 — an EVPN-over-SRv6 VTEP (RFC 9252). `advertise-all-vni` originates
+# Type-2 (MAC/IP) and Type-3 (IMET) routes for VNI 100; `encapsulation
+# srv6` makes them carry SRv6 L2 Service SIDs carved from LOC1 — a
+# per-VNI End.DT2U on the Type-2 and an End.DT2M on the Type-3 — instead
+# of the VXLAN encapsulation extended community. The vxlan100 device
+# enslaved to br100 is the VNI declaration; the kernel path stays inert:
+# `system ebpf enabled` spawns the cradle engine, the host port (enslaved
+# to br100, `ebpf enabled`) becomes its L2 port in bridge domain 100, and
+# every learned MAC, flood copy and decap runs in eBPF.
+system:
+  hostname: pe1
+  ebpf:
+    enabled: true
+interface:
+- if-name: lo
+  ipv6:
+    address: 2001:db8::1/128
+- if-name: pe1-pe2
+  ipv6:
+    address: 2001:db8:0:12::1/64
+  ebpf:
+    enabled: true
+- if-name: pe1-h1
+  bridge: br100
+  ebpf:
+    enabled: true
+bridge:
+- name: br100
+vxlan:
+- name: vxlan100
+  vni: 100
+  local-address: 2001:db8::1
+  bridge: br100
+segment-routing:
+  locator:
+  - name: LOC1
+    prefix: fcbb:bbbb:1::/48
+    behavior: usid
+router:
+  isis:
+    net: 49.0000.0000.0000.0001.00
+    hostname: pe1
+    is-type: level-2-only
+    segment-routing:
+      srv6:
+        locator: LOC1
+    interface:
+    - if-name: lo
+      ipv6:
+        enabled: true
+    - if-name: pe1-pe2
+      network-type: point-to-point
+      metric: 1
+      ipv6:
+        enabled: true
+  bgp:
+    global:
+      as: 65001
+      router-id: 10.0.0.1
+    timer:
+      adv-interval:
+        ibgp: 1
+    segment-routing:
+      srv6:
+        locator: LOC1
+    afi-safi:
+    - name: evpn
+      advertise-all-vni: true
+      encapsulation: srv6
+    neighbor:
+    - remote-address: 2001:db8::2
+      remote-as: 65001
+      update-source: 2001:db8::1
+      enabled: true
+      afi-safi:
+      - name: evpn
+        enabled: true

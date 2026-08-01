@@ -1,0 +1,68 @@
+# PE2 — an EVPN-over-MPLS provider edge, RFC 7432's original
+# encapsulation. IS-IS SR-MPLS supplies the transport LSP to PE2's
+# loopback; under `encapsulation mpls` the `evi 100` instance takes a
+# dynamic per-EVI service label — advertised on the Type-2/Type-3 routes
+# instead of a VNI — and installs its bridge-domain decap ILM. The `evi`
+# list pins bridge br100 as the instance's bridge domain; the host port
+# (enslaved to br100, `ebpf enabled`) becomes the cradle engine's L2
+# port in it. Everything forwards in eBPF — no kernel action pops an
+# MPLS label into a bridge.
+system:
+  hostname: pe2
+  ebpf:
+    enabled: true
+interface:
+- if-name: lo
+  ipv4:
+    address: 2.2.2.2/32
+- if-name: pe2-p
+  ipv4:
+    address: 10.250.0.6/30
+  ebpf:
+    enabled: true
+- if-name: pe2-h2
+  bridge: br100
+  ebpf:
+    enabled: true
+bridge:
+- name: br100
+router:
+  isis:
+    net: 49.0000.0000.0000.0002.00
+    hostname: pe2
+    is-type: level-2-only
+    segment-routing: mpls
+    te-router-id: 2.2.2.2
+    interface:
+    - if-name: lo
+      ipv4:
+        enabled: true
+        prefix-sid:
+          index: 2
+    - if-name: pe2-p
+      network-type: point-to-point
+      metric: 10
+      ipv4:
+        enabled: true
+  bgp:
+    global:
+      as: 65000
+      router-id: 2.2.2.2
+    timer:
+      adv-interval:
+        ibgp: 1
+    afi-safi:
+    - name: evpn
+      advertise-all-vni: true
+      encapsulation: mpls
+      evi:
+      - id: 100
+        bridge: br100
+    neighbor:
+    - remote-address: 1.1.1.1
+      remote-as: 65000
+      update-source: 2.2.2.2
+      enabled: true
+      afi-safi:
+      - name: evpn
+        enabled: true

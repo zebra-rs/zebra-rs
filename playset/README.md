@@ -112,6 +112,22 @@ The four EVPN labs reuse the same namespace names (`vtep1`..`vtep3`,
 `h1`..`h4`), so bring up only one at a time — `up.sh` sweeps leftovers of
 the same names first.
 
+## BGP EVPN over SRv6 and MPLS (E-LAN in eBPF)
+
+The stretched-segment story of the VXLAN labs, re-run on the other two
+encapsulations — the ones the kernel cannot forward, so `system ebpf
+enabled` makes zebra-rs spawn the cradle engine and the whole L2 service
+(XDP MAC learning → WatchFdb → Type-2, ingress-replication flood, decap)
+runs in eBPF:
+
+| playset | wire format |
+|:--|:--|
+| [bgp-evpn-srv6](bgp-evpn-srv6/README.md) | MAC-in-SRv6 (RFC 9252): per-VNI End.DT2U on the Type-2, End.DT2M on the Type-3, SIDs carved from each PE's locator; IS-IS SRv6 underlay |
+| [bgp-evpn-mpls](bgp-evpn-mpls/README.md) | RFC 7432's original encapsulation: a dynamic per-EVI service label (no Encapsulation EC — absent means MPLS), IS-IS SR-MPLS transport through a pure-transit P router |
+
+Both share namespace names (`h1`, `h2`, `pe1`, `pe2`, plus `p` in the
+MPLS variant) — one at a time.
+
 ## BGP EVPN VPWS (E-Line)
 
 Three labs, one service — a point-to-point **E-Line** (EVPN VPWS,
