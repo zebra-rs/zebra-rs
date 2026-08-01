@@ -1797,19 +1797,15 @@ impl CradleFib {
         vid: u16,
         table: u32,
     ) {
-        let (remote_sid, remote_vtep, remote_vni) = match remote {
-            crate::rib::XconnectRemote::Srv6(sid) => (sid.to_string(), String::new(), 0),
+        let (remote_sid, remote_vtep, remote_vni, remote_pe, remote_label) = match remote {
+            crate::rib::XconnectRemote::Srv6(sid) => {
+                (sid.to_string(), String::new(), 0, String::new(), 0)
+            }
             crate::rib::XconnectRemote::Vxlan { vtep, vni } => {
-                (String::new(), vtep.to_string(), vni)
+                (String::new(), vtep.to_string(), vni, String::new(), 0)
             }
             crate::rib::XconnectRemote::Mpls { pe, label } => {
-                // Unreachable until the cradle proto grows its MPLS
-                // fields — `FibHandle::cradle_xconnect_add` filters the
-                // flavor out before this method.
-                tracing::warn!(
-                    "fib: cradle xconnect {port} -> pe {pe} label {label}: no MPLS RPC form"
-                );
-                return;
+                (String::new(), String::new(), 0, pe.to_string(), label)
             }
         };
         self.mirror.lock().await.xconnects.insert(
@@ -1825,8 +1821,11 @@ impl CradleFib {
                     remote_sid,
                     remote_vtep,
                     remote_vni,
+                    remote_pe,
+                    remote_label,
                     local_sid: local_sid.map(|s| s.to_string()).unwrap_or_default(),
                     local_vni: local_vni.unwrap_or(0),
+                    local_label: local_label.unwrap_or(0),
                     vid: vid as u32,
                     dx2v_table: table,
                 })
@@ -1846,6 +1845,7 @@ impl CradleFib {
         port: &str,
         local_sid: Option<std::net::Ipv6Addr>,
         local_vni: Option<u32>,
+        local_label: Option<u32>,
         vid: u16,
         table: u32,
     ) {
@@ -1862,6 +1862,7 @@ impl CradleFib {
                     port_index: 0,
                     local_sid: local_sid.map(|s| s.to_string()).unwrap_or_default(),
                     local_vni: local_vni.unwrap_or(0),
+                    local_label: local_label.unwrap_or(0),
                     vid: vid as u32,
                     dx2v_table: table,
                 })

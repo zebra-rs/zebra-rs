@@ -1,7 +1,8 @@
-# EVPN VPWS (E-Line over SRv6 or VXLAN)
+# EVPN VPWS (E-Line over SRv6, VXLAN or MPLS)
 
 zebra-rs implements **EVPN VPWS** (Virtual Private Wire Service, RFC
-8214) over an SRv6 or VXLAN data plane: a point-to-point **E-Line** that
+8214) over an SRv6, VXLAN or MPLS data plane: a point-to-point **E-Line**
+that
 cross-connects one local attachment circuit (AC) to one remote PE's AC
 as a transparent wire — no MAC learning, no FDB, no flooding. The two
 CEs behave as if joined by a cable: they share subnets and resolve each
@@ -121,13 +122,43 @@ set router bgp afi-safi evpn vpws eline1 vni 5001
 The receive side is **not** gated by the local knob: each direction of
 an E-Line uses the encapsulation its originator signalled (SRv6 SID
 first; else Encapsulation EC = VXLAN with a non-zero label; a label
-with no EC means MPLS per RFC 8365 §5.1.3 and is not bound). A fabric
+with no EC — RFC 8365 §5.1.3's default — binds as an MPLS PE+label
+endpoint). A fabric
 therefore migrates between encapsulations one PE at a time, the service
 staying up asymmetrically in between. VLAN-scoped services, the MTU
-check and multihoming below all work identically under VXLAN — the
-election, selection and mass-withdraw machinery is
+check and multihoming below all work identically under every
+encapsulation — the election, selection and mass-withdraw machinery is
 encapsulation-agnostic, and a failover to the other PE of a multihomed
-pair re-binds both the VTEP and that PE's own VNI.
+pair re-binds the whole endpoint (VTEP *and* VNI, or PE *and* label —
+each PE assigns its own).
+
+### MPLS encapsulation (RFC 8365 §5.1.3)
+
+Under `encapsulation mpls` a VPWS needs no locator and no VNI — and no
+configuration beyond the service itself:
+
+```
+set router bgp afi-safi evpn encapsulation mpls
+set router bgp afi-safi evpn vpws eline1 evi 100
+set router bgp afi-safi evpn vpws eline1 local-service-id 101
+set router bgp afi-safi evpn vpws eline1 remote-service-id 102
+set router bgp afi-safi evpn vpws eline1 interface ce1
+```
+
+* The Type-1 carries a **per-service MPLS label**, allocated dynamically
+  from the same block VRF and EVI labels come from, with **no
+  Encapsulation extended community** — its absence is what says MPLS. A
+  service configured before the block grant advertises label 0 (which no
+  remote binds) and is re-originated the moment the grant lands.
+* The next hop is the router-id — the address the transport LSP resolves
+  on. Make it a routable loopback carried by the IGP (IS-IS/OSPF
+  SR-MPLS) and peer BGP over it, the classic MPLS-VPN shape; the ingress
+  imposes `[transport…][service label]` with the transport stack coming
+  from the FIB toward the PE.
+* The egress pops its own service label and emits the frame **raw on the
+  AC** (for a VLAN-scoped service, demuxed on the inner VID) — a
+  disposition the kernel does not have, so MPLS E-Lines require the
+  [eBPF data plane](ch-16-00-ebpf.md).
 
 ### Multihoming (RFC 8214 §5)
 
@@ -314,11 +345,17 @@ VPWS service: eline1
 ```
 
 A VXLAN service shows its VNI and the bound remote endpoint instead of
-SIDs (and `VNI conflict: in use by …` when parked):
+SIDs (and `VNI conflict: in use by …` when parked); an MPLS service its
+labels:
 
 ```
   Local VNI: 5001
   Remote VTEP: 192.0.2.2 (VNI 100) (via 192.0.2.2)
+```
+
+```
+  Local Label: 16
+  Remote PE: 2.2.2.2 (label 16) (via 2.2.2.2)
 ```
 
 A multihomed service adds its segment and elected role. `(from ce1)` marks a
@@ -360,10 +397,9 @@ configured (or re-pointed) is found without waiting for a route churn.
 Multihoming covers both directions: the Type-1 carries the segment's ESI and
 DF-elected P/B bits, and remote selection honours them (prefer `P`, fail over
 to `B`, per-ES A-D mass withdraw). Not yet implemented — all-active load
-balancing across both remote endpoints, MPLS
-encapsulation (under `encapsulation mpls` a VPWS still signals SRv6),
-and the control word (`C` is always 0). Forwarding requires the
+balancing across both remote endpoints, and the control word (`C` is
+always 0). Forwarding requires the
 [eBPF data plane](ch-16-00-ebpf.md)
 (`system ebpf enabled` to run the engine, `system cradle enabled` to tee the
-service into it); the kernel has no End.DX2/DX2V seg6local action, so these
-SIDs are never installed via netlink.
+service into it); the kernel has no End.DX2/DX2V seg6local action and no
+pop-to-port MPLS disposition, so neither is ever installed via netlink.
