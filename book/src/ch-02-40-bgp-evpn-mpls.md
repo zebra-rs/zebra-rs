@@ -185,13 +185,72 @@ diagnosis rather than a quiet success.
 > decap during config load, which is typically while the tee is still
 > connecting.
 
+## IPv6 PEs
+
+Nothing in RFC 7432 requires an IPv4 core — MPLS imposes no outer IP
+header, so the PE's address family lives only in the control plane and the
+adjacency. Three pieces make an IPv6-only deployment:
+
+* **`vtep-source`** names the v6 loopback the EVPN routes advertise. The
+  router-id — the default source for an MPLS PE's next hop and IMET
+  Originating Router IP — can only express IPv4, so a v6 PE sets it
+  explicitly (the leaf is shared with VXLAN, where it covers deviceless
+  services; here it covers every origination):
+
+  ```
+  afi-safi {
+    name evpn;
+    encapsulation mpls;
+    vtep-source 2001:db8:255::1;
+    ...
+  }
+  ```
+
+* **A labeled route to the far PE's v6 loopback** supplies the transport
+  LSP. IS-IS SR-MPLS prefix-SIDs are IPv4-only today, so on a v6 core the
+  static form carries the stack — the `label` list on an ipv6 route
+  nexthop, the exact sibling of the ipv4 one:
+
+  ```
+  router static ipv6 route 2001:db8:255::2/128 {
+    nexthop 2001:db8:12::2 {
+      label 100;
+    }
+  }
+  ```
+
+  The datapath resolves a remote MAC's service-label imposition by a FIB6
+  /128 lookup on the PE, picking up this route's transport labels — the
+  same nexthop-0 shape as the IPv4 core.
+
+* **Static label bindings with v6 nexthops** give a pure-transit P router
+  its pops. The explicit `interface` leaf opts each binding onto the eBPF
+  XDP fast path — the operator's assertion of a core-facing hop, needed
+  because the P holds no route for the exposed payload (the PEs'
+  loopbacks) and the XDP redirect delivers only between XDP-attached
+  ports. A binding without it keeps the FIB-assisted pop, which reaches
+  any device but needs a route for what the pop exposes:
+
+  ```
+  router static mpls label 100 {
+    nexthop 2001:db8:23::2 {
+      interface p-pe2;
+    }
+  }
+  ```
+
+The
+[`playset/bgp-evpn-mpls6`](https://github.com/zebra-rs/zebra-rs/tree/main/playset/bgp-evpn-mpls6)
+lab is the IPv6 twin of this chapter's — the same stretched segment and
+pure-transit P, with static labels replacing the IGP and even the PEs' own
+iBGP session riding the LSP through the routeless P. Its E-Line sibling is
+[`playset/bgp-evpn-vpws-mpls6`](https://github.com/zebra-rs/zebra-rs/tree/main/playset/bgp-evpn-vpws-mpls6).
+
 ## Limitations
 
 - **Requires cradle** (`system cradle enabled` plus an engine — see
   [Enabling the data plane](#enabling-the-data-plane)). Without it the routes
   are advertised and received but nothing forwards.
-- **IPv4 underlay only** in the data plane today; an IPv6-underlay PE punts
-  rather than misforwarding.
 - **Single-homed.** Multihoming (Type-1/Type-4 and the ESI label's
   split-horizon check) is not implemented for MPLS.
 - **No control word.** RFC 7432 leaves it optional and both ends must agree.

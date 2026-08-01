@@ -1,0 +1,58 @@
+# PE1 — an EVPN-over-MPLS provider edge on an IPv6-only core, no IGP
+# anywhere. A labeled static /128 supplies the transport LSP toward
+# PE2's v6 loopback (the P pops it); `vtep-source` names the v6 loopback
+# the EVPN routes advertise as next hop and Originating Router IP — the
+# router-id fallback could only express an IPv4 PE. Under
+# `encapsulation mpls` the `evi 100` instance takes a dynamic per-EVI
+# service label and installs its bridge-domain decap ILM. Everything
+# forwards in eBPF — no kernel action pops an MPLS label into a bridge.
+system:
+  hostname: pe1
+  ebpf:
+    enabled: true
+interface:
+- if-name: lo
+  ipv6:
+    address: 2001:db8:255::1/128
+- if-name: pe1-p
+  ipv6:
+    address: 2001:db8:12::1/64
+  ebpf:
+    enabled: true
+- if-name: pe1-h1
+  bridge: br100
+  ebpf:
+    enabled: true
+bridge:
+- name: br100
+router:
+  static:
+    ipv6:
+      route:
+      - prefix: 2001:db8:255::2/128
+        nexthop:
+        - address: 2001:db8:12::2
+          label: [100]
+  bgp:
+    global:
+      as: 65000
+      router-id: 1.1.1.1
+    timer:
+      adv-interval:
+        ibgp: 1
+    afi-safi:
+    - name: evpn
+      advertise-all-vni: true
+      encapsulation: mpls
+      vtep-source: 2001:db8:255::1
+      evi:
+      - id: 100
+        bridge: br100
+    neighbor:
+    - remote-address: 2001:db8:255::2
+      remote-as: 65000
+      update-source: 2001:db8:255::1
+      enabled: true
+      afi-safi:
+      - name: evpn
+        enabled: true

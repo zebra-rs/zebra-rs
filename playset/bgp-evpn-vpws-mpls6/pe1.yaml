@@ -1,0 +1,58 @@
+# PE1 — EVPN VPWS provider edge over MPLS on an IPv6-only core, no IGP
+# anywhere. A labeled static /128 supplies the transport LSP toward
+# PE2's v6 loopback (the P pops it). A VPWS service has no VXLAN device
+# to take an address from and the router-id fallback is IPv4-only, so
+# `vtep-source` names the v6 loopback the Type-1 advertises as next
+# hop. Under `encapsulation mpls` the Type-1 carries a per-service
+# label with NO Encapsulation extended community — its absence is the
+# MPLS signal (RFC 8365 §5.1.3). cradle is the E-Line data plane: the
+# kernel has no action that pops a label onto a port.
+system:
+  hostname: pe1
+  ebpf:
+    enabled: true
+interface:
+- if-name: lo
+  ipv6:
+    address: 2001:db8:255::1/128
+- if-name: pe1-p
+  ipv6:
+    address: 2001:db8:12::1/64
+  ebpf:
+    enabled: true
+- if-name: pe1-c1
+  ebpf:
+    enabled: true
+router:
+  static:
+    ipv6:
+      route:
+      - prefix: 2001:db8:255::2/128
+        nexthop:
+        - address: 2001:db8:12::2
+          label: [100]
+  bgp:
+    global:
+      as: 65000
+      router-id: 1.1.1.1
+    timer:
+      adv-interval:
+        ibgp: 1
+    afi-safi:
+    - name: evpn
+      encapsulation: mpls
+      vtep-source: 2001:db8:255::1
+      vpws:
+      - name: eline1
+        evi: 100
+        local-service-id: 101
+        remote-service-id: 102
+        interface: pe1-c1
+    neighbor:
+    - remote-address: 2001:db8:255::2
+      remote-as: 65000
+      update-source: 2001:db8:255::1
+      enabled: true
+      afi-safi:
+      - name: evpn
+        enabled: true

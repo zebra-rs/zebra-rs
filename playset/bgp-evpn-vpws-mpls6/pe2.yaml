@@ -1,0 +1,51 @@
+# PE2 — mirror of pe1: v6 loopback 2001:db8:255::2 as `vtep-source`,
+# transport label 101 toward pe1's loopback, eline1 svc-id 102 ⇄ 101.
+system:
+  hostname: pe2
+  ebpf:
+    enabled: true
+interface:
+- if-name: lo
+  ipv6:
+    address: 2001:db8:255::2/128
+- if-name: pe2-p
+  ipv6:
+    address: 2001:db8:23::2/64
+  ebpf:
+    enabled: true
+- if-name: pe2-c2
+  ebpf:
+    enabled: true
+router:
+  static:
+    ipv6:
+      route:
+      - prefix: 2001:db8:255::1/128
+        nexthop:
+        - address: 2001:db8:23::1
+          label: [101]
+  bgp:
+    global:
+      as: 65000
+      router-id: 2.2.2.2
+    timer:
+      adv-interval:
+        ibgp: 1
+    afi-safi:
+    - name: evpn
+      encapsulation: mpls
+      vtep-source: 2001:db8:255::2
+      vpws:
+      - name: eline1
+        evi: 100
+        local-service-id: 102
+        remote-service-id: 101
+        interface: pe2-c2
+    neighbor:
+    - remote-address: 2001:db8:255::1
+      remote-as: 65000
+      update-source: 2001:db8:255::2
+      enabled: true
+      afi-safi:
+      - name: evpn
+        enabled: true
