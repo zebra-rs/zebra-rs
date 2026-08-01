@@ -192,4 +192,6 @@ diagnosis rather than a quiet success.
 - **No control word.** RFC 7432 leaves it optional and both ends must agree.
   Its absence is only a hazard where a P router hashes deeply enough to
   mistake a customer frame beginning with nibble 4 or 6 for an IP packet.
-- **EVPN-VPWS** (RFC 8214) over MPLS is not implemented; VPWS is SRv6-only.
+- **EVPN-VPWS** (RFC 8214) over MPLS is implemented — a per-service label
+  in the Type-1 and a pop-to-AC disposition; see
+  [EVPN VPWS](ch-02-38-bgp-evpn-vpws.md).

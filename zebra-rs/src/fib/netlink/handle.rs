@@ -765,18 +765,7 @@ impl FibHandle {
                         cradle.set_vtep_source(local).await;
                     }
                 }
-                crate::rib::XconnectRemote::Mpls { pe, label } => {
-                    // The cradle Xconnect RPC has no MPLS flavor yet —
-                    // the control plane binds and shows `up`, the
-                    // datapath tee lands with the cradle-side
-                    // E-Line/MPLS support.
-                    tracing::info!(
-                        "fib: cradle xconnect {port} -> pe {pe} label {label} \
-                         (local label {local_label:?}): MPLS tee not yet implemented"
-                    );
-                    return;
-                }
-                crate::rib::XconnectRemote::Srv6(_) => {}
+                crate::rib::XconnectRemote::Mpls { .. } | crate::rib::XconnectRemote::Srv6(_) => {}
             }
             cradle
                 .xconnect_add(port, remote, local_sid, local_vni, local_label, vid, table)
@@ -794,13 +783,8 @@ impl FibHandle {
         table: u32,
     ) {
         if let Some(cradle) = &self.cradle {
-            if local_label.is_some() {
-                // MPLS-flavored binding: nothing was teed (see
-                // `cradle_xconnect_add`), so nothing to remove.
-                return;
-            }
             cradle
-                .xconnect_del(port, local_sid, local_vni, vid, table)
+                .xconnect_del(port, local_sid, local_vni, local_label, vid, table)
                 .await;
         }
     }

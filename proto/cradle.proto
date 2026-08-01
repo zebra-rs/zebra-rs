@@ -200,8 +200,15 @@ message Xconnect {
   uint32 remote_vni  = 8; // VXLAN: VNI the remote advertised (with remote_vtep)
   // When non-zero, also bind this VNI as the E-Line's local decap
   // identity (the VNI our own Type-1 advertised) — the VXLAN analog of
-  // local_sid, at most one of the two.
+  // local_sid, at most one of local_sid / local_vni / local_label.
   uint32 local_vni   = 9;
+  string remote_pe    = 10; // MPLS: remote PE (IPv4 or IPv6)
+  uint32 remote_label = 11; // MPLS: service label the remote advertised (with remote_pe)
+  // When non-zero, also install this label as the E-Line's local decap
+  // identity (the label our own Type-1 advertised): an ILM entry pops it
+  // and emits the inner frame raw on the AC — the MPLS analog of
+  // local_sid, at most one of the three.
+  uint32 local_label  = 12;
 }
 
 message XconnectDel {
@@ -211,6 +218,7 @@ message XconnectDel {
   uint32 vid        = 4; // non-zero = remove the VLAN-scoped binding
   uint32 dx2v_table = 5;
   uint32 local_vni  = 6; // when non-zero, also remove this E-Line VNI binding
+  uint32 local_label = 7; // when non-zero, also remove this E-Line pop ILM
 }
 
 // A BUM ingress-replication slot: one remote PE in bridge domain `bd`,
