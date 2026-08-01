@@ -1,0 +1,7 @@
+# Host 2 — the other tenant host.
+interface:
+- if-name: h2-pe2
+  ipv4:
+    address: 172.16.10.2/24
+system:
+  hostname: h2
