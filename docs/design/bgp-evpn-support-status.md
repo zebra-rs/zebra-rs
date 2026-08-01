@@ -20,13 +20,13 @@ datapath, driven from zebra-rs via the FibHandle tee.
 | **Multihoming ESI (Type-1/4, DF election)** | ✅ Control plane (shared) | ✅ Full signal set incl. Type-2 ESI (#2148/#2150/#2152) | ✅ Control plane (shared) |
 | **MAC aliasing / mass-withdraw consumers** | ❌ Open (receive side) | ❌ Open — exists for VPWS only | ❌ Open |
 | **E-Line / VPWS (RFC 8214)** | ✅ Type-1 VNI + Encapsulation EC + VTEP next hop; cradle eBPF xconnect (VTEP+VNI encap, E-Line-VNI decap) | ✅ End.DX2/DX2V, VLAN scoping, MTU check, P/B multihoming (#2116) | ✅ Per-service label, no Encapsulation EC; cradle eBPF xconnect (label encap under the transport LSP, pop-to-AC decap) |
-| **IPv6 underlay transport** | ✅ Kernel: zero code changes (#1850); eBPF: native v6 VTEPs incl. E-Line + `vtep-source` origination knob (cradle #168) | ✅ (native) | — (IS-IS SR-MPLS underlay; MPLS-over-v6 PEs open) |
+| **IPv6 underlay transport** | ✅ Kernel: zero code changes (#1850); eBPF: native v6 VTEPs incl. E-Line + `vtep-source` origination knob (cradle #168) | ✅ (native) | ✅ v6 PEs: FIB6 service-label resolution (engine) + `vtep-source` next hops; labeled static v6 routes for transport (IS-IS SR-MPLS prefix-SIDs remain v4-only) |
 | **IGMP/MLD proxy / SMET (RFC 9251)** | ✅ Incl. per-VTEP selective MDB | ✅ Control plane (shared) | ✅ Control plane (shared) |
 | **Assisted Replication (RFC 9574)** | ✅ Control plane; AR-LEAF/RNVE forward natively. ❌ AR-REPLICATOR data plane deferred | ✅ Control plane (shared) | ✅ Control plane (shared) |
 | **BUM segmentation (RFC 9572, Types 9/10/11)** | ✅ Control plane complete (RBR/ASBR, DF, S-PMSI) | ✅ + SR-P2MP tree offload wiring | ✅ Control plane (shared) |
 | **P2MP replication tree** | — (head-end IR model) | ✅ RFC 9524 End.Replicate incl. Bud (zebra #1923 + cradle #131) | ❌ MPLS-P2MP forwarder not built |
 | **ARP suppression** | ❌ Open | ❌ Open | ❌ Open |
-| **Datapath BDD (CE-to-CE ping, zebra-driven)** | ✅ `cradle_evpn_vxlan_zebra*`, `cradle_vpws_vxlan_zebra`, v6-underlay twins `cradle_evpn_vxlan6_zebra` + `cradle_vpws_vxlan6_zebra` + kernel playsets | ✅ `cradle_evpn_srv6_zebra*`, `cradle_vpws_zebra` — deepest coverage | ✅ `cradle_evpn_mpls_zebra`, `cradle_vpws_mpls_zebra` (IS-IS SR-MPLS transport + pure-P transit) |
+| **Datapath BDD (CE-to-CE ping, zebra-driven)** | ✅ `cradle_evpn_vxlan_zebra*`, `cradle_vpws_vxlan_zebra`, v6-underlay twins `cradle_evpn_vxlan6_zebra` + `cradle_vpws_vxlan6_zebra` + kernel playsets | ✅ `cradle_evpn_srv6_zebra*`, `cradle_vpws_zebra` — deepest coverage | ✅ `cradle_evpn_mpls_zebra`, `cradle_vpws_mpls_zebra` (IS-IS SR-MPLS transport + pure-P transit), v6-PE twins `cradle_evpn_mpls6_zebra` + `cradle_vpws_mpls6_zebra` |
 
 **Legend**: ✅ supported · ❌ not yet · — not applicable. "Control plane
 (shared)" = the feature is encapsulation-agnostic in zebra-rs; the per-encap

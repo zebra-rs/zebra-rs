@@ -130,18 +130,20 @@ module zebra-bgp-evpn {
          uses the encapsulation its originator signalled.";
     }
     leaf vtep-source {
-      ext:help "VTEP advertised as the EVPN next hop";
+      ext:help "EVPN source address (next hop / origin) when no VXLAN device supplies one";
       type inet:ip-address;
       description
-        "The VTEP address — IPv4 or IPv6 — advertised as the next hop
-         of locally originated EVPN routes when no local VXLAN device
-         supplies one for the VNI. A VPWS E-Line under `encapsulation
-         vxlan` has no VXLAN device (the service VNI is a decap identity,
-         not a bridge domain), so without this leaf its Type-1 falls back
-         to the IPv4 router-id — which cannot express a VTEP on an IPv6
-         underlay. Routes whose VNI does have a local VXLAN device keep
-         taking that device's local address; unset, the fallback remains
-         the router-id.";
+        "This PE's EVPN source address — IPv4 or IPv6 — used wherever a
+         locally originated EVPN route needs an address and no local
+         VXLAN device supplies one: the next hop of a VPWS Type-1 or a
+         deviceless Type-2/Type-5, the Originating Router IP of an
+         `encapsulation mpls` IMET, and the originator of Ethernet
+         Segment routes (also the DF election's self-identity). Without
+         it those fall back to the IPv4 router-id, which cannot express
+         a PE on an IPv6 underlay — under `encapsulation vxlan` the
+         address is the VTEP, under `mpls` it is the address the
+         transport LSP resolves on. Routes whose VNI does have a local
+         VXLAN device keep taking that device's local address.";
     }
     list evi {
       ext:help "EVPN Instance (bridge domain) for `encapsulation mpls`";
