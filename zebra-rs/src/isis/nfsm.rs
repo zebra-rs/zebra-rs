@@ -86,7 +86,7 @@ pub fn nbr_hold_timer_expire(
     // subscribe path used (packet::bfd_session_key) or the Unsubscribe key
     // won't match the live session.
     let bfd_peer_v4 = super::link::nbr_v4_pick(&link.state.v4addr, &nbr.addr4);
-    let bfd_peer_v6ll = nbr.addr6l.first().copied();
+    let bfd_peer_v6ll = super::link::nbr_v6ll_pick(&nbr.addr6l);
 
     // Originate Hello and LSP.
     if is_p2p {

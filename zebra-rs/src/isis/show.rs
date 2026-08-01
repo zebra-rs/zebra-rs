@@ -1591,7 +1591,7 @@ fn write_local_sids(buf: &mut String, isis: &Isis) -> std::fmt::Result {
                         .map(|a: &Ipv6Addr| a.to_string())
                         .unwrap_or_else(|| "-".to_string()),
                     action: behavior.to_string(),
-                    nh6: nbr.addr6l.first().copied(),
+                    nh6: super::link::nbr_v6ll_pick(&nbr.addr6l),
                 });
             }
         }

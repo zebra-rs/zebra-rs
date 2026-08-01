@@ -174,7 +174,7 @@ impl Neighbor {
         self.addr6
             .first()
             .copied()
-            .or_else(|| self.addr6l.first().copied())
+            .or_else(|| super::link::nbr_v6ll_pick(&self.addr6l))
     }
 
     /// Re-originate the self-LSP (both levels; the per-level guard in
