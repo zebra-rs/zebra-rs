@@ -1,0 +1,71 @@
+# The FAITHFUL interwork/direct split for the free5GC lab (pair with
+# setup-topo-n3vrf.sh + smfcfg-n3vrf.yaml): VRF N3 (table 1) is the
+# interwork segment — mun3, the gNB static route, the decap PDR match
+# context — and VRF N6 (table 2) the direct segment — mun6 and the UE
+# routes. One PFCP session originates the ST1 under N6's RD and the ST2
+# (mup:1:6, resolving its decap target to N6) under N3's. N4/PFCP rides
+# its own global-table interface (mun4): the controller's socket is not
+# VRF-aware.
+system:
+  cradle:
+    enabled: true
+vrf:
+- name: N3
+- name: N6
+interface:
+- if-name: lo
+  ipv6:
+    address: 2001:db8::1/128
+- if-name: mun3
+  vrf: N3
+  ipv4:
+    address: 10.0.12.2/24
+- if-name: mun4
+  ipv4:
+    address: 10.0.11.2/24
+- if-name: mun6
+  vrf: N6
+  ipv4:
+    address: 10.0.60.1/24
+router:
+  static:
+    vrf:
+    - name: N3
+      ipv4:
+        route:
+        - prefix: 10.0.1.0/24
+          nexthop:
+          - address: 10.0.12.1
+  bgp:
+    global:
+      as: 65000
+      router-id: 1.1.1.1
+    vrf:
+    - name: N3
+      rd: "65000:3"
+      afi-safi:
+        mup:
+          dataplane: gtp
+          segment:
+          - type: interwork
+            prefix: 10.0.1.0/24
+          route:
+          - type: st2
+            network-instance: internet
+            mup-ext-comm: "1:6"
+    - name: N6
+      rd: "65000:6"
+      afi-safi:
+        mup:
+          dataplane: gtp
+          segment:
+          - type: direct
+            mup-ext-comm: "1:6"
+          route:
+          - type: st1
+            network-instance: internet
+    mup-c:
+      enabled: true
+      controller-address: 2001:db8::1
+      pfcp:
+        listen-address: 10.0.11.2
