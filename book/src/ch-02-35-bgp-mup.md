@@ -555,14 +555,33 @@ Two deployment notes:
   keep it on loopback (collocated SMF/injector) or on a dedicated N4
   interface in the global table. Placing it on an address inside the N3
   VRF would require VRF-aware control-plane sockets, which the MUP
-  controller does not do.
+  controller does not do. Note this is a *control-plane* separation only:
+  the UPF's **N3 endpoint address is unchanged** by it, so an SMF that
+  CH=0-allocates the UPF's N3 F-TEID keeps allocating at the address that
+  now lives inside the N3 VRF.
 * A **catalog change on live sessions is handled**: re-scoping a segment
   re-keys the installed PDRs (withdrawing the old match context) and
   migrates the gNB endpoint's NHT registration to its new table.
 
 The datapath is regression-tested by the cradle `@cradle_mup_gtp_n3_vrf`
 BDD (dual-segment origination, round-trip ICMP through both re-scoped
-lookups, tunnel counters on both ends).
+lookups, tunnel counters on both ends), and was validated against real
+free5GC v4.0.1 + free-ran-ue — the `bdd/mup-lab` N4-separated variant
+(`setup-topo-n3vrf.sh` + `upf-n3vrf.yaml` + `smfcfg-n3vrf.yaml`), which
+moves N4 onto its own global-table link and puts N3 in a kernel VRF. One
+PFCP session originated all four routes across the two segments (ISD +
+ST2 under N3's RD, DSD + ST1 under N6's), and the single installed decap
+PDR states the whole resolution:
+
+```
+key: (vrf 1, 10.0.12.2, TEID 2)   ->   value: vrf 2
+      ^ match context = N3's table        ^ decap target = N6's table
+        (where the G-PDU arrives)           (picked by the ST2's mup:1:6)
+```
+
+UE ping at 0% loss and iperf3 at ~1.6 Gbit/s uplink / ~2.6 Gbit/s
+downlink on a single box with debug builds — within noise of the
+single-N6 lab's ~1.9 / ~2.6, so the split costs no throughput.
 
 #### IPv6 N3 transport (GTP6) and composing with SRv6 segments
 
