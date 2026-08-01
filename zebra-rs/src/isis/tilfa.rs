@@ -178,7 +178,7 @@ pub(super) fn build_repair_path_srv6(
             .nbrs
             .get(&level)
             .values()
-            .find_map(|nbr| nbr.addr6l.first().copied())?
+            .find_map(|nbr| super::link::nbr_v6ll_pick(&nbr.addr6l))?
     } else {
         let sys_id = lsp_map.resolve(rp.first_hop)?;
         link.state

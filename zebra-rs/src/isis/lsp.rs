@@ -1190,14 +1190,13 @@ pub fn lsp_generate(top: &mut IsisTop, level: Level, seq_floor: Option<u32>) -> 
                 // (peer v6 address known). Skipped on v4-only links
                 // even if the v4 TLV above was emitted; the two TLVs
                 // are independent per RFC 6119.
-                let local_v6 = link.state.v6addr.first().map(|p| p.addr());
+                let local_v6 = super::link::v6_global_pick(&link.state.v6addr);
                 let remote_v6 = link
                     .state
                     .nbrs
                     .get(&level)
                     .values()
-                    .flat_map(|nbr| nbr.addr6.iter().copied())
-                    .next();
+                    .find_map(|nbr| nbr.addr6.iter().copied().min());
                 if let (Some(local_v6), Some(remote_v6)) = (local_v6, remote_v6) {
                     for chunk in values.chunks(IsisTlvIpv6Srlg::MAX_VALUES_PER_TLV) {
                         let tlv = IsisTlvIpv6Srlg {
@@ -1398,6 +1397,11 @@ pub fn lsp_generate(top: &mut IsisTop, level: Level, seq_floor: Option<u32>) -> 
     // topology, so the plain interface metric leaf is the metric.
     let mt_v6 = top.config.mt_enabled && top.config.mt_topologies.contains(&MtId::Ipv6Unicast);
     let mut ipv6_reach = IsisTlvIpv6Reach::default();
+    // Mask + dedup, the TLV 135 discipline above: RFC 5308 prefixes
+    // carry no host bits (a /64 address advertised unmasked leaks
+    // them into receivers' RIBs), and two same-subnet addresses mask
+    // to one prefix — advertise it once.
+    let mut seen_v6: BTreeSet<Ipv6Net> = BTreeSet::new();
     for (_, link) in top.links.iter() {
         if link.config.enable.v6 && has_level(link.state.level(), level) {
             let metric = if mt_v6 {
@@ -1406,10 +1410,11 @@ pub fn lsp_generate(top: &mut IsisTop, level: Level, seq_floor: Option<u32>) -> 
                 link.config.metric()
             };
             for v6addr in link.state.v6addr.iter() {
-                if !v6addr.addr().is_loopback() {
+                let prefix = v6addr.apply_mask();
+                if !prefix.addr().is_loopback() && seen_v6.insert(prefix) {
                     ipv6_reach
                         .entries
-                        .push(ipv6_reach_entry(*v6addr, metric, false));
+                        .push(ipv6_reach_entry(prefix, metric, false));
                 }
             }
         }

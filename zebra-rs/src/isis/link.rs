@@ -763,6 +763,43 @@ pub fn nbr_v4_pick(
         .copied()
 }
 
+/// The link's stable IPv6 link-local — the v6 sibling of
+/// [`v4_primary`]. IPv6 has no kernel-secondary, so the only
+/// instability is list order (`v6laddr` is netlink delivery order,
+/// which a re-notify or delete/re-add permutes); pick the numerically
+/// lowest link-local instead. Every local v6 endpoint consumer (BFD
+/// session key on both the subscribe and the NFSM-teardown side,
+/// STAMP) must agree on one address. Mirrors OSPFv3's
+/// `stable_link_local`.
+pub fn v6ll_pick(v6laddr: &[Ipv6Net]) -> Option<std::net::Ipv6Addr> {
+    v6laddr
+        .iter()
+        .map(|p| p.addr())
+        .filter(|a| a.is_unicast_link_local())
+        .min()
+}
+
+/// The link's stable global IPv6 address (the SRLG TLV 139 local
+/// endpoint disambiguator): lowest non-loopback global.
+pub fn v6_global_pick(v6addr: &[Ipv6Net]) -> Option<std::net::Ipv6Addr> {
+    v6addr
+        .iter()
+        .map(|p| p.addr())
+        .filter(|a| !a.is_loopback() && !a.is_unicast_link_local())
+        .min()
+}
+
+/// One stable link-local out of a neighbor's advertised set — the v6
+/// sibling of [`nbr_v4_pick`]. TLV 232 packs the peer's link-locals
+/// in the peer's own list order, so "first" can flip between hellos;
+/// any of them is a valid nexthop on this link, so take the lowest.
+/// SPF nexthop resolution, the BFD/STAMP session keys, TI-LFA repair
+/// nexthops, and `show isis topology` all route through here so they
+/// agree with each other.
+pub fn nbr_v6ll_pick(addr6l: &[std::net::Ipv6Addr]) -> Option<std::net::Ipv6Addr> {
+    addr6l.iter().copied().min()
+}
+
 // Mutable data during operation.
 #[derive(Default, Debug)]
 pub struct LinkState {
@@ -3031,5 +3068,47 @@ mod v4addr_tests {
         // Delete matches by prefix regardless of the event's flag.
         v4addr_list_update(&mut list, entry("10.0.0.1/24", false), false);
         assert_eq!(list, vec![entry("10.0.0.2/24", true)]);
+    }
+}
+
+#[cfg(test)]
+mod v6_pick_tests {
+    use super::*;
+
+    #[test]
+    fn v6ll_pick_is_order_independent() {
+        let low: Ipv6Net = "fe80::1/64".parse().unwrap();
+        let high: Ipv6Net = "fe80::5054:ff:fe00:1/64".parse().unwrap();
+        assert_eq!(
+            v6ll_pick(&[high, low]),
+            Some("fe80::1".parse().unwrap()),
+            "lowest wins regardless of list order"
+        );
+        assert_eq!(v6ll_pick(&[low, high]), v6ll_pick(&[high, low]));
+        assert_eq!(v6ll_pick(&[]), None);
+    }
+
+    #[test]
+    fn v6_global_pick_skips_ll_and_loopback() {
+        let ll: Ipv6Net = "fe80::1/64".parse().unwrap();
+        let lo: Ipv6Net = "::1/128".parse().unwrap();
+        let g1: Ipv6Net = "2001:db8::2/64".parse().unwrap();
+        let g2: Ipv6Net = "2001:db8::1/64".parse().unwrap();
+        assert_eq!(
+            v6_global_pick(&[ll, lo, g1, g2]),
+            Some("2001:db8::1".parse().unwrap())
+        );
+        assert_eq!(v6_global_pick(&[ll, lo]), None);
+    }
+
+    #[test]
+    fn nbr_v6ll_pick_is_stable_across_peer_order() {
+        let a: std::net::Ipv6Addr = "fe80::2".parse().unwrap();
+        let b: std::net::Ipv6Addr = "fe80::10".parse().unwrap();
+        // The peer may pack its TLV 232 in either order between
+        // hellos; the pick must not flip.
+        assert_eq!(nbr_v6ll_pick(&[b, a]), Some(a));
+        assert_eq!(nbr_v6ll_pick(&[a, b]), Some(a));
+        assert_eq!(nbr_v6ll_pick(&[]), None);
     }
 }

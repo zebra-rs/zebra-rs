@@ -239,9 +239,11 @@ impl IsisRibFamily for V6 {
     }
 
     fn nhop_addrs(_link: &IsisLink, nbr: &Neighbor) -> Vec<Ipv6Addr> {
-        // Link-locals are on-link by definition; the first is the
-        // same one the BFD/STAMP session keys use.
-        nbr.addr6l.first().into_iter().copied().collect()
+        // Link-locals are on-link by definition; the stable pick is
+        // the same one the BFD/STAMP session keys use.
+        super::link::nbr_v6ll_pick(&nbr.addr6l)
+            .into_iter()
+            .collect()
     }
 
     fn reach_entries<'a>(
@@ -2102,9 +2104,9 @@ fn build_rib6_from_flex_algo(
                 let Some(nbr) = link.state.nbrs.get(&level).get(&nhop_sys_id) else {
                     continue;
                 };
-                if let Some(addr) = nbr.addr6l.first() {
+                if let Some(addr) = super::link::nbr_v6ll_pick(&nbr.addr6l) {
                     spf_nhops.insert(
-                        *addr,
+                        addr,
                         SpfNexthop::<V6> {
                             ifindex: *link_id,
                             adjacency: *node == nhop_id,

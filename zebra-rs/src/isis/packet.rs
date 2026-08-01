@@ -51,7 +51,7 @@ pub(super) fn bfd_session_key(
     peer_v6ll: Option<Ipv6Addr>,
 ) -> Option<SessionKey> {
     let local_v4 = super::link::v4_primary(&link.state.v4addr).map(|e| e.prefix.addr());
-    let local_v6ll = link.state.v6laddr.first().map(|p| p.addr());
+    let local_v6ll = super::link::v6ll_pick(&link.state.v6laddr);
     let (local, remote) = bfd_session_addrs(local_v4, peer_v4, local_v6ll, peer_v6ll)?;
     Some(SessionKey {
         local,
@@ -504,7 +504,7 @@ pub fn hello_recv(link: &mut LinkTop, level: Level, pdu: IsisHello, mac: Option<
     let bfd_peer_v4: Option<Ipv4Addr> = super::link::nbr_v4_pick(&link.state.v4addr, &nbr.addr4);
     // IPv6-only adjacency: the single-hop BFD session is keyed on the
     // neighbour's link-local (learned via TLV 232) and our own link-local.
-    let bfd_peer_v6ll: Option<Ipv6Addr> = nbr.addr6l.first().copied();
+    let bfd_peer_v6ll: Option<Ipv6Addr> = super::link::nbr_v6ll_pick(&nbr.addr6l);
 
     if state == NfsmState::Down {
         // 8.4.2.5.1
@@ -753,7 +753,7 @@ pub fn hello_p2p_recv(link: &mut LinkTop, pdu: IsisP2pHello, mac: Option<MacAddr
         // Snapshot before any mut-nbr work; see LAN handler comment.
         let bfd_peer_v4: Option<Ipv4Addr> =
             super::link::nbr_v4_pick(&link.state.v4addr, &nbr.addr4);
-        let bfd_peer_v6ll: Option<Ipv6Addr> = nbr.addr6l.first().copied();
+        let bfd_peer_v6ll: Option<Ipv6Addr> = super::link::nbr_v6ll_pick(&nbr.addr6l);
 
         // When it is three way handshake.
         if state == NfsmState::Down {
