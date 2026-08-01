@@ -228,11 +228,17 @@ pub struct MupSegmentCatalog {
 }
 
 impl MupSegmentCatalog {
-    /// Whether `vrf` is declared an interwork segment — its ports terminate
-    /// GTP-U, so the uplink PDR match is scoped to its own table instead of
-    /// the global context.
-    pub fn is_interwork(&self, vrf: &str) -> bool {
-        self.interwork.iter().any(|e| e.vrf == vrf)
+    /// The GTP-side routing context of the interwork segment `vrf`
+    /// declares: the table G-PDUs arrive in, so the uplink PDR match for
+    /// ST2s held in `vrf` is scoped to it. With `lookup-network-instance`
+    /// this is the named VRF's table (the split/GTP-gateway shape); without
+    /// it, the declaring VRF's own. `None` when `vrf` declares no interwork
+    /// segment — the match context stays global.
+    pub fn gtp_context_of(&self, vrf: &str) -> Option<u32> {
+        self.interwork
+            .iter()
+            .find(|e| e.vrf == vrf)
+            .map(|e| e.table_id)
     }
 
     /// The kernel table of the direct segment carrying Direct-segment id
@@ -246,10 +252,13 @@ impl MupSegmentCatalog {
     }
 }
 
-/// One interwork segment (`segment interwork` on a VRF): a GTP/N3 routing
-/// context. `prefix` is the configured gNB network (`segment interwork
-/// prefix <p>`), absent when only the membership is declared — the ISD does
-/// not originate without it, but the match-context scoping already applies.
+/// One interwork segment (`segment interwork` on a VRF). `table_id` is the
+/// segment's **GTP-side routing context** — the `lookup-network-instance`
+/// VRF's kernel table when named, else the declaring VRF's own — consumed
+/// by both the uplink match scoping and the downlink endpoint resolution.
+/// `prefix` is the configured gNB network (`segment interwork prefix <p>`),
+/// absent when only the association is declared — the ISD does not
+/// originate without it, but the match-context scoping already applies.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MupInterworkEntry {
     pub vrf: String,
@@ -348,6 +357,12 @@ pub struct BgpVrfMobileUplane {
     /// `interwork` segment; the ISD does not originate until it is set, and
     /// its AFI follows this prefix's family.
     pub interwork_prefix: Option<IpNet>,
+    /// `afi-safi mup segment interwork lookup-network-instance <vrf>` — the
+    /// VRF that is the GTP-side routing context for this interwork segment
+    /// when it is not the declaring VRF itself (the split/GTP-gateway shape:
+    /// the service VRF declares the interwork association while GTP-U rides
+    /// a separate N3 VRF). `None` = the declaring VRF.
+    pub interwork_lookup_ni: Option<String>,
     /// `afi-safi mup dataplane {end-dt46|gtp}` — the forwarding-plane
     /// behaviour for this VRF's MUP service. `EndDt46` (default) installs the
     /// SRv6 End.DT46 stand-in into the mainline kernel; `Gtp` programs a real
@@ -700,6 +715,24 @@ pub fn config_vrf_mup_segment_prefix(bgp: &mut Bgp, mut args: Args, op: ConfigOp
             cfg.mobile_uplane.interwork_prefix = Some(IpNet::from_str(&raw).ok()?);
         }
         ConfigOp::Delete => cfg.mobile_uplane.interwork_prefix = None,
+        _ => {}
+    }
+    Some(())
+}
+
+/// `set router bgp vrf <NAME> afi-safi mup segment interwork
+/// lookup-network-instance <vrf>` — names the GTP-side routing context for
+/// the interwork segment (skips the segment list key like the `prefix`
+/// handler).
+pub fn config_vrf_mup_segment_lookup_ni(bgp: &mut Bgp, mut args: Args, op: ConfigOp) -> Option<()> {
+    let name = args.string()?;
+    let _segment = args.string()?; // segment list key (direct|interwork)
+    let cfg = vrf_entry(bgp, name, op)?;
+    match op {
+        ConfigOp::Set => {
+            cfg.mobile_uplane.interwork_lookup_ni = Some(args.string()?);
+        }
+        ConfigOp::Delete => cfg.mobile_uplane.interwork_lookup_ni = None,
         _ => {}
     }
     Some(())

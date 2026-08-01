@@ -1,14 +1,12 @@
 # BGP MUP — explicit interwork/direct segment resolution for `dataplane gtp`
 
-> **Status:** confirmed (2026-08-01); stages 1–5 implemented on review
-> branches — cradle `decap-meta-precedence` → `gtp-pdr-vrf-scope` →
-> `mup-n3-vrf-lab`, zebra `gtp-pdr-match-vrf` → `mup-segment-catalog` →
-> `mup-endpoint-nht-vrf` → `mup-n3-vrf-lab`. Staged so every PR is
-> independently shippable and the current single-N6 lab stays green at
-> each stage. The stage-5 proof — `@cradle_mup_gtp_n3_vrf`, the §2 target
-> configuration with the N3 port inside a kernel VRF — passes end-to-end.
-> Implementation notes from verification are folded into §3.4, Stage 4 and
-> Stage 5 below. Stage 6 remains deferred.
+> **Status:** COMPLETE (2026-08-01). Stages 1–5 merged (zebra
+> #2206/#2207/#2208/#2209/#2210, cradle #170/#171/#172); stage 6's two
+> knobs (`lookup-network-instance`, SID-less segment origination) are
+> implemented as well — only the N9/SRGW composite and GTP6 remain out of
+> scope by design. Every PR was independently shippable and the single-N6
+> lab stayed green at each stage. Implementation notes from verification
+> are folded into §3.4 and Stages 4–6 below.
 >
 > Origin: design review of the single-N6 configuration (`bdd/mup-lab`,
 > issue #1947 arc). The `dataplane gtp` datapath hard-codes three forwarding
@@ -368,19 +366,29 @@ preserving).*
   retiring the "N3 stays in the global table" invariant notes (Stage 1/2
   turned it from a correctness requirement into a mere default).
 
-### Stage 6 — deferred (revisit after 1–5)
+### Stage 6 — the deferred knobs (implemented)
 
-* **Remote-entry-point interwork** (the split-SRGW case): `segment interwork`
-  on the **N6** VRF advertising an ISD whose SID is the N6 VRF's DT SID (the
-  downlink entry point for remote PEs), with an explicit
-  `lookup-network-instance <n3-vrf>` leaf on the segment entry naming the
-  post-encap context — it cannot be inferred there. New grammar; only knob
-  this plan adds, and only if/when the split deployment is wanted.
-* **SID-less segment origination** for GTP-only interop (relaxing the
-  `encapsulation srv6` gate in `compute_mup_segment_desired`) — needed only
-  when a GTP-only node must advertise its segments to peers.
+* **`lookup-network-instance`** — *as implemented, generalized*: the leaf
+  lives on the `segment interwork` entry and names the segment's **GTP-side
+  routing context** when it is not the declaring VRF itself. The catalog's
+  interwork entry carries the named VRF's kernel table (entry gated on that
+  table being known); the uplink match context and the downlink endpoint
+  resolution both consume it, so the split shape needs no per-rule special
+  cases. The flagship use is the **GTP-gateway variant**: ONE service VRF
+  binds both `route` directions (the single-N6 shape) while its interwork
+  declaration names a bare kernel VRF as N3 — no `router bgp vrf` block on
+  the named VRF at all. Proven end-to-end by `@cradle_mup_gtp_lookup_ni`.
+  The only new grammar in the whole plan.
+* **SID-less segment origination** — *implemented*: a `dataplane gtp` VRF
+  without `encapsulation srv6` originates its DSD/ISD with no SRv6 L3
+  Service Prefix-SID; the export stamps the `mup-c` `controller-address` as
+  the next-hop (gated on it being configured — there is no locator to
+  derive one from). `MupSegmentDesired.sid` became `Option`; the SRv6 path
+  is untouched. Proven by the `bgp_mup_sidless_segment` BDD (originate +
+  receive, `should not contain` SID assertions).
 * **GTP encap toward a remote interwork segment** (N9 / SRGW composite) and
-  **GTP6** (v6 outer): out of scope; the GTP datapath stays v4-outer.
+  **GTP6** (v6 outer): remain out of scope; the GTP datapath stays
+  v4-outer.
 
 ## 5. Compatibility summary
 

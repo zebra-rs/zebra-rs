@@ -126,6 +126,14 @@ bgp_mup_isd:
 	mkdir -p allure-results
 	$(CUCUMBER) -- --concurrency=1 --tags "@bgp_mup_isd"
 
+# MUP SID-less segments: a GTP-only PE (dataplane gtp, no SRv6 locator or
+# encapsulation) originates DSD/ISD routes without an SRv6 L3 Service
+# Prefix-SID, next-hop = the mup-c controller address; the peer receives
+# them as bare correlation objects. Needs root netns (kernel VRFs).
+bgp_mup_sidless_segment:
+	mkdir -p allure-results
+	$(CUCUMBER) -- --concurrency=1 --tags "@bgp_mup_sidless_segment"
+
 # MUP ST1->ISD encap: one interwork node originates a local ISD (`segment
 # interwork prefix <p>`) and, via its MUP-C, an ST1 whose UE is inside <p>.
 # The ST1 resolves to the local End.DT46 segment and an oif-only recursive

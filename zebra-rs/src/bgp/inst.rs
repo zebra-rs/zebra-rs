@@ -389,11 +389,26 @@ pub(crate) fn mup_segment_catalog_from(
             continue;
         };
         match mode {
-            MupSegmentMode::Interwork => catalog.interwork.push(MupInterworkEntry {
-                vrf: name.clone(),
-                table_id: kernel.table_id,
-                prefix: cfg.mobile_uplane.interwork_prefix,
-            }),
+            MupSegmentMode::Interwork => {
+                // The GTP-side routing context: the named
+                // `lookup-network-instance` VRF when set (the
+                // split/GTP-gateway shape — the declaring VRF advertises
+                // the downlink entry point while GTP-U rides a separate
+                // N3 VRF), else the declaring VRF itself. The entry is
+                // only usable once the context's kernel table is known.
+                let context = match &cfg.mobile_uplane.interwork_lookup_ni {
+                    Some(ni) => known.get(ni),
+                    None => Some(kernel),
+                };
+                let Some(context) = context else {
+                    continue;
+                };
+                catalog.interwork.push(MupInterworkEntry {
+                    vrf: name.clone(),
+                    table_id: context.table_id,
+                    prefix: cfg.mobile_uplane.interwork_prefix,
+                });
+            }
             MupSegmentMode::Direct => {
                 let Some(id) = cfg.mobile_uplane.mup_ext_comm else {
                     continue;
@@ -7450,12 +7465,21 @@ mod tests {
             kn.insert("N9".to_string(), known(13));
 
             let cat = mup_segment_catalog_from(&vrfs, &kn);
-            assert!(cat.is_interwork("N3"));
-            assert!(
-                !cat.is_interwork("N8"),
+            assert_eq!(
+                cat.gtp_context_of("N3"),
+                Some(7),
+                "self-context interwork: the declaring VRF's own table"
+            );
+            assert_eq!(
+                cat.gtp_context_of("N8"),
+                None,
                 "no kernel table yet → not cataloged"
             );
-            assert!(!cat.is_interwork("N6"), "a direct segment is not interwork");
+            assert_eq!(
+                cat.gtp_context_of("N6"),
+                None,
+                "a direct segment is not interwork"
+            );
             let seg: bgp_packet::RouteDistinguisher = "1:6".parse().unwrap();
             assert_eq!(cat.direct_table(&seg.val), Some(9));
             assert_eq!(cat.direct.len(), 1, "the id-less direct segment is skipped");
@@ -7463,6 +7487,66 @@ mod tests {
             assert_eq!(
                 cat.interwork[0].prefix,
                 Some("10.0.1.0/24".parse().unwrap())
+            );
+        }
+
+        #[test]
+        fn mup_segment_catalog_lookup_ni_overrides_the_gtp_context() {
+            use crate::bgp::inst::mup_segment_catalog_from;
+            use crate::bgp::vrf_config::{BgpVrfConfig, BgpVrfMobileUplane, MupSegmentMode};
+            fn vrf_cfg(mobile_uplane: BgpVrfMobileUplane) -> BgpVrfConfig {
+                BgpVrfConfig {
+                    mobile_uplane,
+                    ..Default::default()
+                }
+            }
+            fn known(table_id: u32) -> RibKnownVrf {
+                RibKnownVrf {
+                    table_id,
+                    ..Default::default()
+                }
+            }
+            // The split/GTP-gateway shape: the service VRF declares the
+            // interwork association, naming N3 as the GTP-side context.
+            let mut vrfs = BTreeMap::new();
+            vrfs.insert(
+                "mobile".to_string(),
+                vrf_cfg(BgpVrfMobileUplane {
+                    segment: Some(MupSegmentMode::Interwork),
+                    interwork_prefix: Some("10.0.12.0/24".parse().unwrap()),
+                    interwork_lookup_ni: Some("N3".to_string()),
+                    ..Default::default()
+                }),
+            );
+            // A second declarer whose named context has no kernel table yet.
+            vrfs.insert(
+                "early".to_string(),
+                vrf_cfg(BgpVrfMobileUplane {
+                    segment: Some(MupSegmentMode::Interwork),
+                    interwork_lookup_ni: Some("missing".to_string()),
+                    ..Default::default()
+                }),
+            );
+            let mut kn = BTreeMap::new();
+            kn.insert("mobile".to_string(), known(2));
+            kn.insert("early".to_string(), known(4));
+            kn.insert("N3".to_string(), known(1));
+
+            let cat = mup_segment_catalog_from(&vrfs, &kn);
+            assert_eq!(
+                cat.gtp_context_of("mobile"),
+                Some(1),
+                "lookup-network-instance overrides the context to N3's table"
+            );
+            assert_eq!(
+                cat.interwork[0].prefix,
+                Some("10.0.12.0/24".parse().unwrap()),
+                "the prefix still resolves downlink endpoints — into table 1"
+            );
+            assert_eq!(
+                cat.gtp_context_of("early"),
+                None,
+                "a named context without a kernel table is not cataloged yet"
             );
         }
 

@@ -1,0 +1,25 @@
+# z2 — plain iBGP receiver with the MUP family enabled; asserts the
+# SID-less DSD/ISD from z1 arrive with no SRv6 L3 Service.
+interface:
+- if-name: lo
+  ipv6:
+    address: 2001:db8::2/128
+- if-name: z2-z1
+  ipv6:
+    address: 2001:db8:0:12::2/64
+router:
+  bgp:
+    global:
+      as: 65501
+      router-id: 10.0.0.2
+    timer:
+      adv-interval:
+        ibgp: 1
+    neighbor:
+    - remote-address: 2001:db8:0:12::1
+      remote-as: 65501
+      update-source: 2001:db8:0:12::2
+      enabled: true
+      afi-safi:
+      - name: mup
+        enabled: true

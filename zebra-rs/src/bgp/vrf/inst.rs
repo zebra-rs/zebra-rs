@@ -1097,9 +1097,12 @@ impl BgpVrf {
     /// becomes a cradle PDR, resolved against the segment catalog
     /// (docs/design/bgp-mup-gtp-segment-resolution-plan.md §3.2/§3.3):
     ///
-    ///   * **match context** — when THIS VRF is a `segment interwork`, the
-    ///     PDR is scoped to its own table (GTP-U terminates on its ports);
-    ///     otherwise VRF 0 (N3 in the global table — the single-N6 shape).
+    ///   * **match context** — when THIS VRF declares a `segment interwork`,
+    ///     the PDR is scoped to that segment's GTP-side context: its
+    ///     `lookup-network-instance` VRF's table when named (the
+    ///     split/GTP-gateway shape), else this VRF's own (GTP-U terminates
+    ///     on its ports); otherwise VRF 0 (N3 in the global table — the
+    ///     single-N6 shape).
     ///   * **decap target** — the direct segment whose Direct-segment id
     ///     matches the ST2's MUP Extended Community (the DSD correlation,
     ///     draft §3.3.12), else this VRF's own table.
@@ -1109,11 +1112,10 @@ impl BgpVrf {
     fn reconcile_mup_gtp_uplink(&mut self) {
         use std::net::{IpAddr, Ipv4Addr};
         let own_table = self.ctx.vrf_id();
-        let match_vrf = if self.mup_segment_catalog.is_interwork(&self.name) {
-            own_table
-        } else {
-            0
-        };
+        let match_vrf = self
+            .mup_segment_catalog
+            .gtp_context_of(&self.name)
+            .unwrap_or(0);
         // Desired PDRs: each selected ST2 with a v4 endpoint + non-zero TEID,
         // mapped to its resolved inner-lookup table.
         let mut desired: std::collections::BTreeMap<(u32, Ipv4Addr, u32), u32> =
@@ -4723,6 +4725,71 @@ mod tests {
                 .get(&(7, Ipv4Addr::new(10, 0, 12, 2), 0x100)),
             Some(&7),
             "the PDR re-keys onto the interwork VRF's table"
+        );
+        assert_eq!(vrf.mup_gtp_pdr_installed.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn dataplane_gtp_uplink_lookup_ni_scopes_match_to_the_named_context() {
+        use crate::bgp::route::{BgpRib, BgpRibType};
+        use crate::bgp::vrf_config::{MupInterworkEntry, MupSegmentCatalog};
+        use bgp_packet::{BgpAttr, MupPrefix};
+        use std::net::{IpAddr, Ipv4Addr};
+
+        // The split/GTP-gateway shape: ONE service VRF (table 2) holds the
+        // ST2, and its interwork declaration names N3 (table 1) as the
+        // GTP-side context via lookup-network-instance — the catalog entry
+        // carries the NAMED table.
+        let (global_tx, _global_rx) = unbounded_channel::<BgpGlobalMsg>();
+        let ctx = test_ctx_for_vrf(2, "mobile");
+        let (_rib_tx, rib_rx) = mpsc::unbounded_channel();
+        let (mut vrf, _inbox) = BgpVrf::new(
+            "mobile".to_string(),
+            ctx,
+            Ipv4Addr::UNSPECIFIED,
+            65000,
+            /* label */ 16,
+            global_tx,
+            rib_rx,
+        );
+        vrf.dataplane = crate::bgp::vrf_config::MupDataplane::Gtp;
+        vrf.mup_segment_catalog = MupSegmentCatalog {
+            interwork: vec![MupInterworkEntry {
+                vrf: "mobile".to_string(),
+                table_id: 1,
+                prefix: Some("10.0.12.0/24".parse().unwrap()),
+            }],
+            direct: Vec::new(),
+        };
+
+        let attr = BgpAttr::new();
+        let rd: bgp_packet::RouteDistinguisher = "65000:1".parse().unwrap();
+        vrf.local_rib.mup.entry(rd).or_default().selected.insert(
+            MupPrefix::T2st {
+                endpoint: IpAddr::V4(Ipv4Addr::new(10, 0, 12, 1)),
+                teid: 0x500,
+            },
+            BgpRib::new(
+                1,
+                Ipv4Addr::UNSPECIFIED,
+                BgpRibType::EBGP,
+                0,
+                0,
+                &attr,
+                None,
+                None,
+                false,
+            ),
+        );
+
+        vrf.reconcile_mup_gtp();
+        // Match context = the named N3 table (1); decap target = the
+        // holding service VRF's own table (2) — no direct segment needed.
+        assert_eq!(
+            vrf.mup_gtp_pdr_installed
+                .get(&(1, Ipv4Addr::new(10, 0, 12, 1), 0x500)),
+            Some(&2),
+            "PDR matches in the named GTP context, decaps into the service VRF"
         );
         assert_eq!(vrf.mup_gtp_pdr_installed.len(), 1);
     }

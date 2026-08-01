@@ -1,0 +1,53 @@
+# z1 — GTP-only MUP PE (dataplane gtp, NO segment-routing locator, no
+# `encapsulation srv6` on either VRF): `segment direct` on N6 and
+# `segment interwork` on N3 originate SID-less DSD / ISD routes — the
+# correlation objects a peer resolves by Direct-segment id / prefix
+# containment. The mup-c controller address is the exported next-hop.
+vrf:
+- name: N3
+- name: N6
+interface:
+- if-name: lo
+  ipv6:
+    address: 2001:db8::1/128
+- if-name: z1-z2
+  ipv6:
+    address: 2001:db8:0:12::1/64
+router:
+  bgp:
+    global:
+      as: 65501
+      router-id: 10.0.0.1
+    timer:
+      adv-interval:
+        ibgp: 1
+    neighbor:
+    - remote-address: 2001:db8:0:12::2
+      remote-as: 65501
+      update-source: 2001:db8:0:12::1
+      enabled: true
+      afi-safi:
+      - name: mup
+        enabled: true
+    vrf:
+    - name: N3
+      rd: "65501:10"
+      afi-safi:
+        mup:
+          dataplane: gtp
+          segment:
+          - type: interwork
+            prefix: 10.0.1.0/24
+    - name: N6
+      rd: "65501:20"
+      afi-safi:
+        mup:
+          dataplane: gtp
+          segment:
+          - type: direct
+            mup-ext-comm: "1:6"
+    mup-c:
+      enabled: true
+      controller-address: 2001:db8::1
+      pfcp:
+        listen-address: 127.0.0.1

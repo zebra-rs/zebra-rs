@@ -427,6 +427,13 @@ draft's GTP-U endpoint behaviours (GTP4.E / GTP6.E / H.M.GTP4.D) themselves
 are VPP/eBPF and not yet implemented — the kernel dataplane performs the
 SRv6 H.Encaps toward the segment, and the End.DT46 decap at the far end.
 
+A **GTP-only PE** (`dataplane gtp`, no SRv6 locator and no `encapsulation
+srv6`) still originates its DSD/ISD routes — **SID-less**: no SRv6 L3
+Service Prefix-SID, next-hop = the `mup-c` `controller-address` (which must
+be configured; there is no locator to derive one from). The segments are
+then pure correlation objects a peer resolves by Direct-segment id and
+prefix containment. Regression-tested by the `bgp_mup_sidless_segment` BDD.
+
 ### The faithful interwork/direct split — N3 in a VRF (`dataplane gtp`)
 
 Beyond advertising DSD/ISD routes, `segment direct` / `segment interwork`
@@ -503,6 +510,43 @@ the UE route belongs to the direct segment) and the **ST2 under N3's RD**
 With **no** `segment` declared, all three defaults apply and the behaviour
 is exactly the single-N6 shape above — that configuration is the
 degenerate case of this one, and remains the recommended simple form.
+
+#### The GTP-gateway variant — `lookup-network-instance`
+
+The service VRF need not be split in two. `segment interwork` may instead
+name a **separate VRF as the GTP-side routing context** — the single-N6
+shape lifted to N3-in-a-VRF (validated by the cradle
+`@cradle_mup_gtp_lookup_ni` BDD; the named VRF needs no `router bgp vrf`
+block of its own):
+
+```
+vrf N3 { }                      # the GTP-side context — kernel VRF only
+vrf mobile { }
+interface z1n3 { vrf N3; ipv4 { address 10.0.12.1/24; } }
+interface z1n6 { vrf mobile; ipv4 { address 10.0.60.1/24; } }
+
+router bgp {
+  vrf mobile {
+    rd 65000:1;
+    afi-safi mup {
+      dataplane gtp;
+      segment interwork {
+        prefix 10.0.12.0/24;
+        lookup-network-instance N3;   # GTP-U matches and resolves in N3
+      }
+      route st1 { network-instance internet; }
+      route st2 { network-instance internet; }
+    }
+  }
+}
+```
+
+The ST2's decap PDR is scoped to **N3's** table (where G-PDUs arrive) and
+decaps into `mobile`'s own table (the fallback — no Direct-segment id
+needed when both directions share one VRF); the ST1's gNB endpoint falls
+inside the interwork prefix, so the outer `(gw, oif)` resolves in **N3's**
+table. Without the leaf, the declaring VRF is its own GTP context — the
+two-VRF split above.
 
 Two deployment notes:
 
