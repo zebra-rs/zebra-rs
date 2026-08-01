@@ -12,28 +12,34 @@ Each side advertises a **per-EVI Ethernet A-D route (Type-1)** whose
 Ethernet Tag is its *local* VPWS service instance id, carrying its
 service binding per the afi-safi `encapsulation`: an **SRv6 End.DX2
 L2-Service Prefix-SID** (RFC 9252 §6.3) carved from the BGP SRv6
-locator, or — under the default `vxlan` — the **service VNI in the
-label field** with the VXLAN Encapsulation extended community and the
-VTEP as next hop (RFC 8365 §6). Importing the remote's Type-1 — matched
-by Ethernet Tag == `remote-service-id` within the shared EVI — binds
-the remote endpoint *as the remote signalled it* as the AC's
-cross-connect target. Forwarding runs in the
+locator, the **service VNI in the label field** with the VXLAN
+Encapsulation extended community and the VTEP as next hop under the
+default `vxlan` (RFC 8365 §6), or a **per-service MPLS label** with no
+Encapsulation EC under `mpls` (RFC 8365 §5.1.3). Importing the remote's
+Type-1 — matched by Ethernet Tag == `remote-service-id` within the
+shared EVI — binds the remote endpoint *as the remote signalled it* as
+the AC's cross-connect target. Forwarding runs in the
 [eBPF data plane](ch-16-00-ebpf.md): the AC's ingress encapsulates every
-frame (any EtherType)
-MAC-in-SRv6 toward the remote SID, and the local End.DX2 decap emits
-received frames raw on the same AC.
+frame (any EtherType) toward the remote endpoint, and the local decap —
+End.DX2 SID, E-Line VNI, or pop-to-AC label — emits received frames raw
+on the same AC.
 
 The RD is auto-derived as `router-id:evi`, the route-target as
-`AS:evi`; the ESI is all-zero (single-homed) in this phase.
+`AS:evi`; the ESI is all-zero unless the AC sits on a multihomed
+Ethernet Segment (see below).
 
 ## Configuration
 
-A VPWS service lives under the EVPN address family:
+A VPWS service lives under the EVPN address family, and its wire format
+follows the afi-safi `encapsulation` (`vxlan` — the default — `srv6` or
+`mpls`; per-encapsulation specifics in the sections below). Under
+`encapsulation srv6`:
 
 ```
 set router bgp global as 65001
 set router bgp global router-id 10.0.0.1
 set router bgp segment-routing srv6 locator LOC1
+set router bgp afi-safi evpn encapsulation srv6
 set router bgp afi-safi evpn vpws eline1 evi 100
 set router bgp afi-safi evpn vpws eline1 local-service-id 101
 set router bgp afi-safi evpn vpws eline1 remote-service-id 102
@@ -75,11 +81,13 @@ set router bgp afi-safi evpn vpws eline2 vlan 30
 
 `vlan` scopes the AC to one 802.1Q VID (RFC 8214 VLAN-based E-Line):
 only tagged frames with that VID enter the cross-connect — the tag
-crosses the service transparently — and the local SID becomes
-**End.DX2V** (RFC 8986 §4.10), demuxing return traffic by inner VID
-over the EVI's VLAN table. Tagged and untagged services can share the
+crosses the service transparently — and return traffic is demuxed by
+inner VID over the EVI's VLAN table (the local SID becomes **End.DX2V**,
+RFC 8986 §4.10, under SRv6; the E-Line VNI or pop label demuxes over the
+same table under VXLAN/MPLS). Tagged and untagged services can share the
 same AC port: VID-scoped entries match first, everything else rides
-the whole-port service.
+the whole-port service. Works identically under all three
+encapsulations.
 
 > **Operational note:** VLAN offloads must be **off** on the CE side of
 > the AC (`ethtool -K <if> txvlan off rxvlan off`). An offloaded tag
@@ -378,19 +386,25 @@ a deliberately single-homed service:
 ```
 
 `json` is supported. The state progresses `partial-config` (mandatory
-leaves missing) → `pending` (config complete, no router-id / locator
-yet) → `advertised` (Type-1 originated, remote not matched) →
-`up` (remote endpoint bound to the AC), with `mtu-mismatch` reported
-when a matching remote is rejected by the MTU check and `vni-conflict`
-when the service's VNI is already claimed on this PE.
+leaves missing) → `pending` (config complete, no router-id yet — or,
+under srv6, no locator) → `advertised` (Type-1 originated, remote not
+matched) → `up` (remote endpoint bound to the AC), with `mtu-mismatch`
+reported when a matching remote is rejected by the MTU check and
+`vni-conflict` when the service's VNI is already claimed on this PE. An
+MPLS service configured before the dynamic label block arrives shows
+`advertised` with no `Local Label:` line — its Type-1 carries label 0,
+which no remote binds — and re-originates by itself on the grant.
 
 ## Reconciliation
 
 The service re-syncs — withdraw + re-originate + re-derive the AC
 binding from the EVPN Loc-RIB — on any leaf change, router-id rebind,
-and locator (re)resolution. The Loc-RIB rescan means ordering does not
-matter: a remote Type-1 that arrived *before* the service was
-configured (or re-pointed) is found without waiting for a route churn.
+locator (re)resolution, label-block grant, and `encapsulation` change
+(which also releases the old flavor's SID or label and unbinds the live
+cross-connect under its old decap identity first). The Loc-RIB rescan
+means ordering does not matter: a remote Type-1 that arrived *before*
+the service was configured (or re-pointed) is found without waiting for
+a route churn.
 
 ## Scope
 
