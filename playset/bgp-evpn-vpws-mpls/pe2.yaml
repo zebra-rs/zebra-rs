@@ -1,0 +1,59 @@
+# PE2 — the mirror of PE1.
+system:
+  hostname: pe2
+  ebpf:
+    enabled: true
+interface:
+- if-name: lo
+  ipv4:
+    address: 2.2.2.2/32
+- if-name: pe2-p
+  ipv4:
+    address: 10.250.0.6/30
+  ebpf:
+    enabled: true
+- if-name: pe2-c2
+  ebpf:
+    enabled: true
+router:
+  isis:
+    net: 49.0000.0000.0000.0002.00
+    hostname: pe2
+    is-type: level-2-only
+    segment-routing: mpls
+    te-router-id: 2.2.2.2
+    interface:
+    - if-name: lo
+      ipv4:
+        enabled: true
+        prefix-sid:
+          index: 2
+    - if-name: pe2-p
+      network-type: point-to-point
+      metric: 10
+      ipv4:
+        enabled: true
+  bgp:
+    global:
+      as: 65000
+      router-id: 2.2.2.2
+    timer:
+      adv-interval:
+        ibgp: 1
+    afi-safi:
+    - name: evpn
+      encapsulation: mpls
+      vpws:
+      - name: eline1
+        evi: 100
+        local-service-id: 102
+        remote-service-id: 101
+        interface: pe2-c2
+    neighbor:
+    - remote-address: 1.1.1.1
+      remote-as: 65000
+      update-source: 2.2.2.2
+      enabled: true
+      afi-safi:
+      - name: evpn
+        enabled: true

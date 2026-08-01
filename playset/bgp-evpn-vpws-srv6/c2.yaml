@@ -1,0 +1,7 @@
+# CE 2 — the other end of the wire.
+interface:
+- if-name: c2-pe2
+  ipv4:
+    address: 10.0.0.2/24
+system:
+  hostname: c2

@@ -1,0 +1,64 @@
+# PE1 — EVPN VPWS provider edge over MPLS (RFC 8365 §5.1.3). IS-IS
+# SR-MPLS supplies the transport LSP to PE2's loopback; under
+# `encapsulation mpls` the vpws Type-1 carries a per-service label from
+# the dynamic block with NO Encapsulation extended community — its
+# absence is the MPLS signal. No locator, no VNI. cradle is the E-Line
+# data plane: the kernel has no action that pops a label onto a port.
+system:
+  hostname: pe1
+  ebpf:
+    enabled: true
+interface:
+- if-name: lo
+  ipv4:
+    address: 1.1.1.1/32
+- if-name: pe1-p
+  ipv4:
+    address: 10.250.0.1/30
+  ebpf:
+    enabled: true
+- if-name: pe1-c1
+  ebpf:
+    enabled: true
+router:
+  isis:
+    net: 49.0000.0000.0000.0001.00
+    hostname: pe1
+    is-type: level-2-only
+    segment-routing: mpls
+    te-router-id: 1.1.1.1
+    interface:
+    - if-name: lo
+      ipv4:
+        enabled: true
+        prefix-sid:
+          index: 1
+    - if-name: pe1-p
+      network-type: point-to-point
+      metric: 10
+      ipv4:
+        enabled: true
+  bgp:
+    global:
+      as: 65000
+      router-id: 1.1.1.1
+    timer:
+      adv-interval:
+        ibgp: 1
+    afi-safi:
+    - name: evpn
+      encapsulation: mpls
+      vpws:
+      - name: eline1
+        evi: 100
+        local-service-id: 101
+        remote-service-id: 102
+        interface: pe1-c1
+    neighbor:
+    - remote-address: 2.2.2.2
+      remote-as: 65000
+      update-source: 1.1.1.1
+      enabled: true
+      afi-safi:
+      - name: evpn
+        enabled: true
