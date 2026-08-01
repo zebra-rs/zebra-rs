@@ -735,10 +735,11 @@ impl FibHandle {
     }
 
     /// Tee an EVPN VPWS cross-connect to cradle (RFC 8214 Type-1 with an
-    /// SRv6 End.DX2/DX2V SID or a VXLAN VTEP+VNI): bind AC `port` to the
-    /// remote service endpoint, and install the local decap for the return
-    /// direction — the `local_sid` LocalSid on the same AC (SRv6), or the
-    /// `local_vni` E-Line VNI binding (VXLAN). A non-zero `vid` scopes the
+    /// SRv6 End.DX2/DX2V SID, a VXLAN VTEP+VNI or an MPLS PE+label): bind
+    /// AC `port` to the remote service endpoint, and install the local
+    /// decap for the return direction — the `local_sid` LocalSid on the
+    /// same AC (SRv6), the `local_vni` E-Line VNI binding (VXLAN), or the
+    /// `local_label` pop-to-AC ILM (MPLS). A non-zero `vid` scopes the
     /// binding to that 802.1Q VID (demuxed over VLAN table `table`). No
     /// kernel counterpart — cradle is the L2 data plane.
     #[allow(clippy::too_many_arguments)]
@@ -749,18 +750,36 @@ impl FibHandle {
         local_sid: Option<std::net::Ipv6Addr>,
         local_vni: Option<u32>,
         local_vtep: Option<std::net::Ipv4Addr>,
+        local_label: Option<u32>,
         vid: u16,
         table: u32,
     ) {
         if let Some(cradle) = &self.cradle {
-            if let (crate::rib::XconnectRemote::Vxlan { .. }, Some(local)) = (&remote, local_vtep) {
-                // The fabric-wide VXLAN source — decap match and outer
-                // source — must be the address our Type-1 told the remote
-                // to send to. Idempotent; one VTEP per PE.
-                cradle.set_vtep_source(local).await;
+            match &remote {
+                crate::rib::XconnectRemote::Vxlan { .. } => {
+                    if let Some(local) = local_vtep {
+                        // The fabric-wide VXLAN source — decap match and
+                        // outer source — must be the address our Type-1
+                        // told the remote to send to. Idempotent; one
+                        // VTEP per PE.
+                        cradle.set_vtep_source(local).await;
+                    }
+                }
+                crate::rib::XconnectRemote::Mpls { pe, label } => {
+                    // The cradle Xconnect RPC has no MPLS flavor yet —
+                    // the control plane binds and shows `up`, the
+                    // datapath tee lands with the cradle-side
+                    // E-Line/MPLS support.
+                    tracing::info!(
+                        "fib: cradle xconnect {port} -> pe {pe} label {label} \
+                         (local label {local_label:?}): MPLS tee not yet implemented"
+                    );
+                    return;
+                }
+                crate::rib::XconnectRemote::Srv6(_) => {}
             }
             cradle
-                .xconnect_add(port, remote, local_sid, local_vni, vid, table)
+                .xconnect_add(port, remote, local_sid, local_vni, local_label, vid, table)
                 .await;
         }
     }
@@ -770,10 +789,16 @@ impl FibHandle {
         port: &str,
         local_sid: Option<std::net::Ipv6Addr>,
         local_vni: Option<u32>,
+        local_label: Option<u32>,
         vid: u16,
         table: u32,
     ) {
         if let Some(cradle) = &self.cradle {
+            if local_label.is_some() {
+                // MPLS-flavored binding: nothing was teed (see
+                // `cradle_xconnect_add`), so nothing to remove.
+                return;
+            }
             cradle
                 .xconnect_del(port, local_sid, local_vni, vid, table)
                 .await;

@@ -1,12 +1,14 @@
-//! EVPN VPWS (RFC 8214): point-to-point E-Line services over SRv6 or VXLAN.
+//! EVPN VPWS (RFC 8214): point-to-point E-Line services over SRv6, VXLAN
+//! or MPLS.
 //!
 //! A VPWS service binds one local attachment circuit to one remote PE's AC
 //! with no MAC learning: the PE advertises an Ethernet A-D per-EVI route
 //! (Type-1) whose Ethernet Tag is the *local* VPWS service instance id,
 //! carrying this PE's service binding per the `afi-safi evpn encapsulation`
-//! — an `End.DX2` L2-Service Prefix-SID (RFC 9252 §6.3) under SRv6, or the
+//! — an `End.DX2` L2-Service Prefix-SID (RFC 9252 §6.3) under SRv6, the
 //! VNI in the label field plus the VXLAN Encapsulation extended community
-//! (RFC 8365 §6) under VXLAN. Importing the remote PE's Type-1 — matched by
+//! (RFC 8365 §6) under VXLAN, or a per-service MPLS label with no
+//! Encapsulation EC (RFC 8365 §5.1.3) under MPLS. Importing the remote PE's Type-1 — matched by
 //! Ethernet Tag == `remote_service_id` and the EVI Route Target — yields
 //! the remote service endpoint *as the remote signalled it* (the two
 //! directions of an E-Line are independent), and the AC is cross-connected
@@ -47,6 +49,11 @@ pub enum VpwsEndpoint {
     /// Type-1's label field, the VTEP is the route's next hop. IPv4 only —
     /// the cradle VXLAN underlay is IPv4.
     Vxlan { vtep: Ipv4Addr, vni: u32 },
+    /// The advertised MPLS service label (RFC 7432 base encapsulation,
+    /// signalled by the *absence* of an Encapsulation EC per RFC 8365
+    /// §5.1.3), imposed toward the advertising PE — the route's next hop —
+    /// under whatever transport LSP reaches it.
+    Mpls { pe: IpAddr, label: u32 },
 }
 
 /// One configured VPWS service (`router bgp afi-safi evpn vpws <name>`).
@@ -100,6 +107,13 @@ pub struct VpwsService {
     /// Type-1 originated — until the owner releases the VNI or the
     /// service is re-pointed; state shows `vni-conflict`.
     pub vni_conflict: Option<String>,
+    /// The MPLS service label our Type-1 advertises under `encapsulation
+    /// mpls` — this PE's decap identity for the service, drawn from the
+    /// same dynamic block as VRF and EVI labels (the `sids`/`local_vni`
+    /// analog). `None` under other encapsulations, or while no block
+    /// space is available (the service then advertises label 0 until the
+    /// grant lands and `label_block_arrived` reconciles it).
+    pub local_label: Option<u32>,
     /// The remote's L2 MTU when a matching Type-1 was **rejected** for an
     /// MTU mismatch — the service shows `mtu-mismatch` instead of `up`.
     pub remote_mtu_mismatch: Option<u16>,

@@ -40,6 +40,10 @@ pub enum XconnectRemote {
     /// the Type-1's label field, the VTEP is the route's next hop). IPv4
     /// only — the cradle VXLAN underlay is IPv4.
     Vxlan { vtep: Ipv4Addr, vni: u32 },
+    /// The remote PE and the MPLS service label it advertised (RFC 7432
+    /// base encapsulation — the Type-1's label field, imposed under
+    /// whatever transport LSP reaches the PE).
+    Mpls { pe: IpAddr, label: u32 },
 }
 
 pub enum Message {
@@ -435,6 +439,10 @@ pub enum Message {
         /// teed as cradle's fabric-wide `SetVtepSource` (the VXLAN decap
         /// match and outer source) before the VXLAN xconnect lands.
         local_vtep: Option<Ipv4Addr>,
+        /// The MPLS service label this PE advertised — the E-Line's local
+        /// decap identity under `encapsulation mpls` (pop-to-AC ILM), the
+        /// `local_sid`/`local_vni` analog; at most one of the three.
+        local_label: Option<u32>,
         vid: u16,
         table: u32,
     },
@@ -442,6 +450,7 @@ pub enum Message {
         ifname: String,
         local_sid: Option<std::net::Ipv6Addr>,
         local_vni: Option<u32>,
+        local_label: Option<u32>,
         vid: u16,
         table: u32,
     },
@@ -3775,12 +3784,20 @@ impl Rib {
                 local_sid,
                 local_vni,
                 local_vtep,
+                local_label,
                 vid,
                 table,
             } => {
                 self.fib_handle
                     .cradle_xconnect_add(
-                        &ifname, remote, local_sid, local_vni, local_vtep, vid, table,
+                        &ifname,
+                        remote,
+                        local_sid,
+                        local_vni,
+                        local_vtep,
+                        local_label,
+                        vid,
+                        table,
                     )
                     .await;
             }
@@ -3788,11 +3805,12 @@ impl Rib {
                 ifname,
                 local_sid,
                 local_vni,
+                local_label,
                 vid,
                 table,
             } => {
                 self.fib_handle
-                    .cradle_xconnect_del(&ifname, local_sid, local_vni, vid, table)
+                    .cradle_xconnect_del(&ifname, local_sid, local_vni, local_label, vid, table)
                     .await;
             }
             Message::CradleGtpEncapAdd {

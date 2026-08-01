@@ -4525,6 +4525,9 @@ impl Bgp {
         // EVPN-over-MPLS instances draw from the same block, and an EVI
         // configured before the grant is sitting label-less too.
         self.evi_reconcile();
+        // So do VPWS E-Lines: a service configured before the grant
+        // originated its Type-1 with label 0, which no remote binds.
+        self.vpws_label_drain();
         // The reconcile may have outgrown this block too (a large VRF
         // fleet). If any VRF is still label-less, ask for another.
         if self.vrf_registry.values().any(|h| h.label == 0) {
@@ -4617,6 +4620,69 @@ impl Bgp {
             self.evpn_originate_macip(&entry);
         }
         super::config::reoriginate_all_imet(self);
+    }
+
+    /// Allocate (or return the memoized) MPLS service label for VPWS
+    /// service `name` — advertised in the Type-1's label field under
+    /// `encapsulation mpls`, drawn from the same dynamic block as VRF and
+    /// EVI labels. `None` when no block space is available yet: a block
+    /// request goes out and `label_block_arrived` reconciles the service
+    /// once the grant lands.
+    pub(super) fn alloc_vpws_label(&mut self, name: &str) -> Option<u32> {
+        if let Some(label) = self
+            .local_rib
+            .evpn_vpws
+            .services
+            .get(name)
+            .and_then(|s| s.local_label)
+        {
+            return Some(label);
+        }
+        match self.vrf_label_alloc.as_mut().and_then(|a| a.alloc()) {
+            Some(label) => {
+                if let Some(svc) = self.local_rib.evpn_vpws.services.get_mut(name) {
+                    svc.local_label = Some(label);
+                }
+                Some(label)
+            }
+            None => {
+                self.request_label_block();
+                None
+            }
+        }
+    }
+
+    /// Release VPWS service `name`'s MPLS service label back to the shared
+    /// pool (releasing any block that fully empties).
+    pub(super) fn free_vpws_label(&mut self, name: &str) {
+        if let Some(label) = self
+            .local_rib
+            .evpn_vpws
+            .services
+            .get_mut(name)
+            .and_then(|s| s.local_label.take())
+        {
+            self.free_evi_labels(vec![label]);
+        }
+    }
+
+    /// Reconcile every VPWS service still label-less under `encapsulation
+    /// mpls` — the label-block-grant callback's VPWS half.
+    fn vpws_label_drain(&mut self) {
+        if !self.evpn_encap.is_mpls() {
+            return;
+        }
+        let parked: Vec<String> = self
+            .local_rib
+            .evpn_vpws
+            .services
+            .iter()
+            .filter(|(_, s)| s.local_label.is_none())
+            .map(|(n, _)| n.clone())
+            .collect();
+        for name in parked {
+            self.vpws_reconcile(&name);
+        }
     }
 
     /// Drop one EVI's label and decap ILM — the config handler's delete path.
