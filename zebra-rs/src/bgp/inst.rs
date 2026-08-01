@@ -367,6 +367,48 @@ pub(crate) fn mup_dispatch_targets(
     targets
 }
 
+/// Build the config-derived MUP segment catalog: one entry per VRF whose
+/// `afi-safi mup segment` declares it an interwork or direct segment AND
+/// whose kernel table is known (`rib_known_vrfs` — the table id is what the
+/// `dataplane gtp` reconcilers scope matches and decap targets by, so an
+/// entry without one is unusable; it appears when `VrfAdd` lands). A
+/// `segment direct` without `mup-ext-comm` is skipped — nothing can
+/// correlate to it. Pure so the catalog rules are unit-testable without a
+/// `Bgp` (the [`mup_dispatch_targets`] pattern).
+pub(crate) fn mup_segment_catalog_from(
+    vrfs: &BTreeMap<String, super::vrf_config::BgpVrfConfig>,
+    known: &BTreeMap<String, RibKnownVrf>,
+) -> super::vrf_config::MupSegmentCatalog {
+    use super::vrf_config::{MupDirectEntry, MupInterworkEntry, MupSegmentMode};
+    let mut catalog = super::vrf_config::MupSegmentCatalog::default();
+    for (name, cfg) in vrfs {
+        let Some(mode) = cfg.mobile_uplane.segment else {
+            continue;
+        };
+        let Some(kernel) = known.get(name) else {
+            continue;
+        };
+        match mode {
+            MupSegmentMode::Interwork => catalog.interwork.push(MupInterworkEntry {
+                vrf: name.clone(),
+                table_id: kernel.table_id,
+                prefix: cfg.mobile_uplane.interwork_prefix,
+            }),
+            MupSegmentMode::Direct => {
+                let Some(id) = cfg.mobile_uplane.mup_ext_comm else {
+                    continue;
+                };
+                catalog.direct.push(MupDirectEntry {
+                    vrf: name.clone(),
+                    table_id: kernel.table_id,
+                    segment_id: id.val,
+                });
+            }
+        }
+    }
+    catalog
+}
+
 /// Extract the route-target set a route carries: every extended
 /// community with RT sub-type (`low_type == 0x02`), reinterpreted as a
 /// `RouteDistinguisher` (RT and RD share the on-wire 6-octet shape).
@@ -809,6 +851,11 @@ pub struct Bgp {
     /// route while an unrelated commit doesn't churn a re-advertise. A VRF has
     /// at most one segment (its `segment` is direct XOR interwork).
     pub mup_segment_desired: BTreeMap<String, super::route::MupSegmentKey>,
+    /// Last MUP segment catalog pushed to the per-VRF tasks
+    /// ([`mup_segment_catalog_from`]) — the diff base for
+    /// [`Self::push_mup_segment_catalog`], and the seed a freshly spawned
+    /// task receives ([`Self::seed_mup_segment_catalog`]).
+    pub mup_segment_catalog: super::vrf_config::MupSegmentCatalog,
     /// Local bridge FDB shadow keyed by `(vni, mac)`. Populated from
     /// every `RibRx::FdbAdd`, removed on `RibRx::FdbDel`. We need
     /// durable state (not just one-shot event handling) because the
@@ -1321,6 +1368,7 @@ impl Bgp {
             mup_c_view: crate::mup_c::inst::MupCView::default(),
             mup_c_dirty: false,
             mup_segment_desired: BTreeMap::new(),
+            mup_segment_catalog: Default::default(),
             local_fdb: BTreeMap::new(),
             local_vxlans: BTreeMap::new(),
             l2_port_evis: BTreeMap::new(),
@@ -1994,6 +2042,7 @@ impl Bgp {
             self.policy_tx.clone(),
             self.bfd_client_tx.clone(),
         );
+        self.seed_mup_segment_catalog(&new_handle);
         self.register_vrf_show(name, &new_handle);
         self.vrf_registry.insert(name.to_string(), new_handle);
         // Re-seed the respawned VRF with the colour-steering snapshot.
@@ -2774,6 +2823,7 @@ impl Bgp {
                 self.policy_tx.clone(),
                 self.bfd_client_tx.clone(),
             );
+            self.seed_mup_segment_catalog(&handle);
             self.register_vrf_show(&name, &handle);
             self.vrf_registry.insert(name, handle);
         }
@@ -3214,6 +3264,7 @@ impl Bgp {
             self.policy_tx.clone(),
             self.bfd_client_tx.clone(),
         );
+        self.seed_mup_segment_catalog(&new_handle);
         self.register_vrf_show(name, &new_handle);
         self.vrf_registry.insert(name.to_string(), new_handle);
         bgp_vrf_trace!(
@@ -4110,6 +4161,40 @@ impl Bgp {
         }
     }
 
+    /// Rebuild the config-derived MUP segment catalog and, when it changed,
+    /// push it to every per-VRF task (`tracing`-style broadcast, diff-gated
+    /// against the last pushed copy). Hooked at the top of
+    /// `reconcile_mup_segment`, which already runs at every site where
+    /// segment config or kernel table ids move (commit diff, `VrfAdd` via
+    /// the kernel-ctx respawn, `VrfDel`, MUP RT changes, router-id).
+    pub(super) fn push_mup_segment_catalog(&mut self) {
+        let catalog = mup_segment_catalog_from(&self.vrfs, &self.rib_known_vrfs);
+        if catalog == self.mup_segment_catalog {
+            return;
+        }
+        for handle in self.vrf_registry.values() {
+            let _ = handle
+                .inbox
+                .send(super::vrf::msg::BgpVrfMsg::MupSegmentCatalog(
+                    catalog.clone(),
+                ));
+        }
+        self.mup_segment_catalog = catalog;
+    }
+
+    /// Seed one freshly spawned per-VRF task with the current catalog. The
+    /// broadcast above only fires on *change*, and a (re)spawned task must
+    /// still learn the standing entries of the other segments (its own
+    /// default is empty). The colour-steering re-seed after each spawn is
+    /// the precedent.
+    fn seed_mup_segment_catalog(&self, handle: &super::vrf::BgpVrfHandle) {
+        let _ = handle
+            .inbox
+            .send(super::vrf::msg::BgpVrfMsg::MupSegmentCatalog(
+                self.mup_segment_catalog.clone(),
+            ));
+    }
+
     pub fn process_rib_msg(&mut self, msg: RibRx) {
         // println!("RIB Message {:?}", msg);
         match msg {
@@ -4785,6 +4870,7 @@ impl Bgp {
             self.policy_tx.clone(),
             self.bfd_client_tx.clone(),
         );
+        self.seed_mup_segment_catalog(&new_handle);
         self.register_vrf_show(name, &new_handle);
         self.vrf_registry.insert(name.to_string(), new_handle);
         bgp_label_trace!(self.tracing, vrf = %name, label, "bgp: assigned dynamic label to VRF");
@@ -7231,6 +7317,82 @@ mod tests {
             assert_eq!(
                 mup_dispatch_targets(&index, &ecom, None),
                 vec!["N3".to_string()]
+            );
+        }
+
+        #[test]
+        fn mup_segment_catalog_requires_kernel_table_and_correlatable_id() {
+            use crate::bgp::inst::mup_segment_catalog_from;
+            use crate::bgp::vrf_config::{BgpVrfConfig, BgpVrfMobileUplane, MupSegmentMode};
+            fn vrf_cfg(mobile_uplane: BgpVrfMobileUplane) -> BgpVrfConfig {
+                BgpVrfConfig {
+                    mobile_uplane,
+                    ..Default::default()
+                }
+            }
+            fn known(table_id: u32) -> RibKnownVrf {
+                RibKnownVrf {
+                    table_id,
+                    ..Default::default()
+                }
+            }
+            let mut vrfs = BTreeMap::new();
+            vrfs.insert(
+                "N3".to_string(),
+                vrf_cfg(BgpVrfMobileUplane {
+                    segment: Some(MupSegmentMode::Interwork),
+                    interwork_prefix: Some("10.0.1.0/24".parse().unwrap()),
+                    ..Default::default()
+                }),
+            );
+            vrfs.insert(
+                "N6".to_string(),
+                vrf_cfg(BgpVrfMobileUplane {
+                    segment: Some(MupSegmentMode::Direct),
+                    mup_ext_comm: Some("1:6".parse().unwrap()),
+                    ..Default::default()
+                }),
+            );
+            // Direct without a Direct-segment id: uncorrelatable → skipped.
+            vrfs.insert(
+                "N7".to_string(),
+                vrf_cfg(BgpVrfMobileUplane {
+                    segment: Some(MupSegmentMode::Direct),
+                    ..Default::default()
+                }),
+            );
+            // Interwork whose kernel table hasn't arrived: skipped until
+            // `VrfAdd` lands and the catalog is rebuilt.
+            vrfs.insert(
+                "N8".to_string(),
+                vrf_cfg(BgpVrfMobileUplane {
+                    segment: Some(MupSegmentMode::Interwork),
+                    ..Default::default()
+                }),
+            );
+            // No segment declared at all.
+            vrfs.insert("N9".to_string(), BgpVrfConfig::default());
+
+            let mut kn = BTreeMap::new();
+            kn.insert("N3".to_string(), known(7));
+            kn.insert("N6".to_string(), known(9));
+            kn.insert("N7".to_string(), known(11));
+            kn.insert("N9".to_string(), known(13));
+
+            let cat = mup_segment_catalog_from(&vrfs, &kn);
+            assert!(cat.is_interwork("N3"));
+            assert!(
+                !cat.is_interwork("N8"),
+                "no kernel table yet → not cataloged"
+            );
+            assert!(!cat.is_interwork("N6"), "a direct segment is not interwork");
+            let seg: bgp_packet::RouteDistinguisher = "1:6".parse().unwrap();
+            assert_eq!(cat.direct_table(&seg.val), Some(9));
+            assert_eq!(cat.direct.len(), 1, "the id-less direct segment is skipped");
+            assert_eq!(cat.interwork.len(), 1);
+            assert_eq!(
+                cat.interwork[0].prefix,
+                Some("10.0.1.0/24".parse().unwrap())
             );
         }
 

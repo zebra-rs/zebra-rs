@@ -14594,6 +14594,10 @@ impl Bgp {
     /// VRF for that change detection. A VRF has at most one segment route (its
     /// `segment` is direct XOR interwork).
     pub(super) fn reconcile_mup_segment(&mut self) {
+        // Segment config or kernel table ids may have moved — refresh the
+        // per-VRF tasks' config-derived segment catalog first (diff-gated;
+        // this fn is already invoked from every such site).
+        self.push_mup_segment_catalog();
         let names: Vec<String> = self.vrfs.keys().cloned().collect();
         let mut desired: std::collections::BTreeMap<String, MupSegmentDesired> =
             std::collections::BTreeMap::new();

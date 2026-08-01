@@ -295,9 +295,19 @@ pub struct BgpVrf {
     /// `reconcile_mup_st2_dsd`, mirroring `mup_st1_isd_installed`.
     pub mup_st2_dsd_installed: std::collections::BTreeMap<ipnet::IpNet, std::net::Ipv6Addr>,
     /// Installed GTP-U decap PDRs for `dataplane gtp` (the ST2 uplink /
-    /// `H.M.GTP4.D`): the set of (endpoint, TEID) tunnels teed to cradle. Diff
-    /// base for `reconcile_mup_gtp`.
-    pub mup_gtp_pdr_installed: std::collections::BTreeSet<(std::net::Ipv4Addr, u32)>,
+    /// `H.M.GTP4.D`), teed to cradle: `(match VRF, endpoint, TEID)` → the
+    /// inner-lookup table. Diff base for `reconcile_mup_gtp` — a vanished
+    /// key withdraws; a changed inner table re-installs in place (the
+    /// cradle map insert overwrites).
+    pub mup_gtp_pdr_installed: std::collections::BTreeMap<(u32, std::net::Ipv4Addr, u32), u32>,
+    /// Config-derived MUP segment catalog (which VRFs are interwork /
+    /// direct segments, with their kernel tables). Seeded by the global
+    /// task right after spawn and refreshed via
+    /// `BgpVrfMsg::MupSegmentCatalog` (`tracing`-style). Consumed by the
+    /// `dataplane gtp` reconcilers: interwork membership of THIS VRF picks
+    /// the uplink PDR match context, and the Direct-segment id of an ST2's
+    /// MUP Extended Community picks its decap target.
+    pub mup_segment_catalog: super::super::vrf_config::MupSegmentCatalog,
     /// Resolved v4 underlay transport for each selected ST1's GTP endpoint
     /// (gNB), keyed by the ST1's `(rd, prefix)`. Supplied by the global NHT via
     /// `MupUpdate.endpoint_transport` (register-then-gate on `st1.endpoint`) and
@@ -843,7 +853,8 @@ impl BgpVrf {
             mup_st1_isd_installed: std::collections::BTreeMap::new(),
             mup_segment_transport: std::collections::BTreeMap::new(),
             mup_st2_dsd_installed: std::collections::BTreeMap::new(),
-            mup_gtp_pdr_installed: std::collections::BTreeSet::new(),
+            mup_gtp_pdr_installed: std::collections::BTreeMap::new(),
+            mup_segment_catalog: Default::default(),
             mup_endpoint_transport: std::collections::BTreeMap::new(),
             mup_gtp_encap_installed: std::collections::BTreeMap::new(),
         };
@@ -1083,55 +1094,74 @@ impl BgpVrf {
 
     /// Install GTP-U decap PDRs for a `dataplane gtp` VRF — the ST2 uplink
     /// (`H.M.GTP4.D`). Each selected Type-2 ST route's `(endpoint, TEID)`
-    /// becomes a cradle PDR: a G-PDU arriving on that tunnel is stripped and
-    /// its inner packet forwarded in this VRF's table. Cradle-only (the kernel
-    /// has no GTP action), diff-gated against `mup_gtp_pdr_installed`.
+    /// becomes a cradle PDR, resolved against the segment catalog
+    /// (docs/design/bgp-mup-gtp-segment-resolution-plan.md §3.2/§3.3):
+    ///
+    ///   * **match context** — when THIS VRF is a `segment interwork`, the
+    ///     PDR is scoped to its own table (GTP-U terminates on its ports);
+    ///     otherwise VRF 0 (N3 in the global table — the single-N6 shape).
+    ///   * **decap target** — the direct segment whose Direct-segment id
+    ///     matches the ST2's MUP Extended Community (the DSD correlation,
+    ///     draft §3.3.12), else this VRF's own table.
+    ///
+    /// Cradle-only (the kernel has no GTP action), diff-gated against
+    /// `mup_gtp_pdr_installed`.
     fn reconcile_mup_gtp_uplink(&mut self) {
         use std::net::{IpAddr, Ipv4Addr};
-        let table_id = self.ctx.vrf_id();
-        // Desired PDRs: each selected ST2 with a v4 endpoint + non-zero TEID.
-        let mut desired: std::collections::BTreeSet<(Ipv4Addr, u32)> =
-            std::collections::BTreeSet::new();
+        let own_table = self.ctx.vrf_id();
+        let match_vrf = if self.mup_segment_catalog.is_interwork(&self.name) {
+            own_table
+        } else {
+            0
+        };
+        // Desired PDRs: each selected ST2 with a v4 endpoint + non-zero TEID,
+        // mapped to its resolved inner-lookup table.
+        let mut desired: std::collections::BTreeMap<(u32, Ipv4Addr, u32), u32> =
+            std::collections::BTreeMap::new();
         for table in self.local_rib.mup.values() {
-            for prefix in table.selected.keys() {
+            for (prefix, rib) in table.selected.iter() {
                 if let bgp_packet::MupPrefix::T2st { endpoint, teid } = prefix
                     && let IpAddr::V4(v4) = endpoint
                     && *teid != 0
                 {
-                    desired.insert((*v4, *teid));
+                    let inner = mup_direct_segment_id(&rib.attr)
+                        .and_then(|seg| self.mup_segment_catalog.direct_table(&seg))
+                        .unwrap_or(own_table);
+                    desired.insert((match_vrf, *v4, *teid), inner);
                 }
             }
         }
-        // Withdraw PDRs no longer desired.
-        let stale: Vec<(Ipv4Addr, u32)> = self
+        // Withdraw PDRs whose key is no longer desired (a catalog change
+        // re-keys the match context, so the old-context entry must go). An
+        // inner-table change alone re-installs in place below — the cradle
+        // map insert overwrites.
+        let stale: Vec<(u32, Ipv4Addr, u32)> = self
             .mup_gtp_pdr_installed
-            .iter()
-            .filter(|k| !desired.contains(k))
+            .keys()
+            .filter(|k| !desired.contains_key(*k))
             .copied()
             .collect();
-        for (dst, teid) in stale {
+        for (mv, dst, teid) in stale {
             let _ = self.ctx.rib.send(crate::rib::Message::CradleGtpPdrDel {
                 dst,
                 teid,
-                match_vrf: 0,
+                match_vrf: mv,
             });
-            self.mup_gtp_pdr_installed.remove(&(dst, teid));
+            self.mup_gtp_pdr_installed.remove(&(mv, dst, teid));
         }
-        // Install new PDRs. The match context is the global table for now —
-        // GTP-U terminates on ports in VRF 0, today's only supported
-        // placement; the interwork-segment resolution
-        // (docs/design/bgp-mup-gtp-segment-resolution-plan.md stage 3) will
-        // derive it from the segment catalog instead.
-        for (dst, teid) in &desired {
-            if !self.mup_gtp_pdr_installed.insert((*dst, *teid)) {
+        // Install new / retargeted PDRs.
+        for ((mv, dst, teid), inner) in &desired {
+            if self.mup_gtp_pdr_installed.get(&(*mv, *dst, *teid)) == Some(inner) {
                 continue;
             }
             let _ = self.ctx.rib.send(crate::rib::Message::CradleGtpPdrAdd {
                 dst: *dst,
                 teid: *teid,
-                table_id,
-                match_vrf: 0,
+                table_id: *inner,
+                match_vrf: *mv,
             });
+            self.mup_gtp_pdr_installed
+                .insert((*mv, *dst, *teid), *inner);
         }
     }
 
@@ -3502,6 +3532,18 @@ impl BgpVrf {
                 // logging switch — nothing to re-run.
                 self.tracing = tracing;
             }
+            BgpVrfMsg::MupSegmentCatalog(catalog) => {
+                // The interwork/direct segment associations moved (or this
+                // is the post-spawn seed). Re-derive the GTP datapath —
+                // match contexts and decap targets both come from the
+                // catalog. Diff-gated locally: the seed is unconditional.
+                if self.mup_segment_catalog != catalog {
+                    self.mup_segment_catalog = catalog;
+                    if matches!(self.dataplane, super::super::vrf_config::MupDataplane::Gtp) {
+                        self.reconcile_mup_gtp();
+                    }
+                }
+            }
             BgpVrfMsg::Accept(stream, sockaddr) => {
                 // Passive accept forwarded by the global dispatcher (the
                 // pre-respawn fallback, before this task's own listener
@@ -4475,9 +4517,11 @@ mod tests {
         }
 
         vrf.reconcile_mup_gtp();
-        assert!(
+        assert_eq!(
             vrf.mup_gtp_pdr_installed
-                .contains(&(Ipv4Addr::new(10, 9, 0, 1), 0x1234))
+                .get(&(0, Ipv4Addr::new(10, 9, 0, 1), 0x1234)),
+            Some(&42),
+            "no segment catalog: global match context, own table as decap target"
         );
         assert_eq!(
             vrf.mup_gtp_pdr_installed.len(),
@@ -4492,6 +4536,195 @@ mod tests {
             vrf.mup_gtp_pdr_installed.is_empty(),
             "the decap PDR is withdrawn when its ST2 is gone"
         );
+    }
+
+    /// Build a `BgpAttr` carrying the MUP Direct-segment id `seg` (the
+    /// 0x0c/0x00 extended community an ST2 is stamped with).
+    fn attr_with_segment_id(seg: [u8; 6]) -> bgp_packet::BgpAttr {
+        use bgp_packet::{ExtCommunity, MupExtCom, MupExtComSubType};
+        let mut attr = bgp_packet::BgpAttr::new();
+        let mut ecom = ExtCommunity::default();
+        ecom.0
+            .insert(MupExtCom::new(MupExtComSubType::Sub00, seg).into());
+        attr.ecom = Some(ecom);
+        attr
+    }
+
+    #[tokio::test]
+    async fn dataplane_gtp_uplink_resolves_match_context_and_decap_target() {
+        use crate::bgp::route::{BgpRib, BgpRibType};
+        use crate::bgp::vrf_config::{MupDirectEntry, MupInterworkEntry, MupSegmentCatalog};
+        use bgp_packet::MupPrefix;
+        use std::net::{IpAddr, Ipv4Addr};
+
+        let (global_tx, _global_rx) = unbounded_channel::<BgpGlobalMsg>();
+        // The interwork/N3 VRF: kernel table 7.
+        let ctx = test_ctx_for_vrf(7, "N3");
+        let (_rib_tx, rib_rx) = mpsc::unbounded_channel();
+        let (mut vrf, _inbox) = BgpVrf::new(
+            "N3".to_string(),
+            ctx,
+            Ipv4Addr::UNSPECIFIED,
+            65000,
+            /* label */ 16,
+            global_tx,
+            rib_rx,
+        );
+        vrf.dataplane = crate::bgp::vrf_config::MupDataplane::Gtp;
+        let seg: bgp_packet::RouteDistinguisher = "1:6".parse().unwrap();
+        let other: bgp_packet::RouteDistinguisher = "9:9".parse().unwrap();
+        vrf.mup_segment_catalog = MupSegmentCatalog {
+            interwork: vec![MupInterworkEntry {
+                vrf: "N3".to_string(),
+                table_id: 7,
+                prefix: None,
+            }],
+            direct: vec![MupDirectEntry {
+                vrf: "N6".to_string(),
+                table_id: 9,
+                segment_id: seg.val,
+            }],
+        };
+
+        let mk = |attr: &bgp_packet::BgpAttr| {
+            BgpRib::new(
+                1,
+                Ipv4Addr::UNSPECIFIED,
+                BgpRibType::EBGP,
+                0,
+                0,
+                attr,
+                None,
+                None,
+                false,
+            )
+        };
+        let rd: bgp_packet::RouteDistinguisher = "65000:3".parse().unwrap();
+        {
+            let table = vrf.local_rib.mup.entry(rd).or_default();
+            // Direct-segment id matches the cataloged N6 segment → the
+            // decap target is N6's table.
+            table.selected.insert(
+                MupPrefix::T2st {
+                    endpoint: IpAddr::V4(Ipv4Addr::new(10, 0, 12, 2)),
+                    teid: 0x100,
+                },
+                mk(&attr_with_segment_id(seg.val)),
+            );
+            // A Direct-segment id no direct segment carries → own table.
+            table.selected.insert(
+                MupPrefix::T2st {
+                    endpoint: IpAddr::V4(Ipv4Addr::new(10, 0, 12, 3)),
+                    teid: 0x200,
+                },
+                mk(&attr_with_segment_id(other.val)),
+            );
+            // No MUP Extended Community at all → own table.
+            table.selected.insert(
+                MupPrefix::T2st {
+                    endpoint: IpAddr::V4(Ipv4Addr::new(10, 0, 12, 4)),
+                    teid: 0x300,
+                },
+                mk(&bgp_packet::BgpAttr::new()),
+            );
+        }
+
+        vrf.reconcile_mup_gtp();
+        // All three PDRs are scoped to the interwork VRF's own table.
+        assert_eq!(
+            vrf.mup_gtp_pdr_installed
+                .get(&(7, Ipv4Addr::new(10, 0, 12, 2), 0x100)),
+            Some(&9),
+            "matching Direct-segment id decaps into the direct segment's table"
+        );
+        assert_eq!(
+            vrf.mup_gtp_pdr_installed
+                .get(&(7, Ipv4Addr::new(10, 0, 12, 3), 0x200)),
+            Some(&7),
+            "an uncataloged Direct-segment id falls back to the holding VRF"
+        );
+        assert_eq!(
+            vrf.mup_gtp_pdr_installed
+                .get(&(7, Ipv4Addr::new(10, 0, 12, 4), 0x300)),
+            Some(&7),
+            "no MUP Extended Community falls back to the holding VRF"
+        );
+        assert_eq!(vrf.mup_gtp_pdr_installed.len(), 3);
+    }
+
+    #[tokio::test]
+    async fn dataplane_gtp_uplink_catalog_change_rekeys_match_context() {
+        use crate::bgp::route::{BgpRib, BgpRibType};
+        use crate::bgp::vrf_config::{MupInterworkEntry, MupSegmentCatalog};
+        use bgp_packet::{BgpAttr, MupPrefix};
+        use std::net::{IpAddr, Ipv4Addr};
+
+        let (global_tx, _global_rx) = unbounded_channel::<BgpGlobalMsg>();
+        let ctx = test_ctx_for_vrf(7, "N3");
+        let (_rib_tx, rib_rx) = mpsc::unbounded_channel();
+        let (mut vrf, _inbox) = BgpVrf::new(
+            "N3".to_string(),
+            ctx,
+            Ipv4Addr::UNSPECIFIED,
+            65000,
+            /* label */ 16,
+            global_tx,
+            rib_rx,
+        );
+        vrf.dataplane = crate::bgp::vrf_config::MupDataplane::Gtp;
+
+        let attr = BgpAttr::new();
+        let rd: bgp_packet::RouteDistinguisher = "65000:3".parse().unwrap();
+        vrf.local_rib.mup.entry(rd).or_default().selected.insert(
+            MupPrefix::T2st {
+                endpoint: IpAddr::V4(Ipv4Addr::new(10, 0, 12, 2)),
+                teid: 0x100,
+            },
+            BgpRib::new(
+                1,
+                Ipv4Addr::UNSPECIFIED,
+                BgpRibType::EBGP,
+                0,
+                0,
+                &attr,
+                None,
+                None,
+                false,
+            ),
+        );
+
+        // No catalog: global match context.
+        vrf.reconcile_mup_gtp();
+        assert!(
+            vrf.mup_gtp_pdr_installed
+                .contains_key(&(0, Ipv4Addr::new(10, 0, 12, 2), 0x100))
+        );
+
+        // The VRF becomes an interwork segment: the PDR re-keys onto its
+        // own table — the old global-context entry is withdrawn, not
+        // leaked (a stale (0, dst, teid) would keep matching global-port
+        // arrivals after the operator scoped the segment).
+        vrf.mup_segment_catalog = MupSegmentCatalog {
+            interwork: vec![MupInterworkEntry {
+                vrf: "N3".to_string(),
+                table_id: 7,
+                prefix: None,
+            }],
+            direct: Vec::new(),
+        };
+        vrf.reconcile_mup_gtp();
+        assert!(
+            !vrf.mup_gtp_pdr_installed
+                .contains_key(&(0, Ipv4Addr::new(10, 0, 12, 2), 0x100)),
+            "the global-context PDR is withdrawn on re-scope"
+        );
+        assert_eq!(
+            vrf.mup_gtp_pdr_installed
+                .get(&(7, Ipv4Addr::new(10, 0, 12, 2), 0x100)),
+            Some(&7),
+            "the PDR re-keys onto the interwork VRF's table"
+        );
+        assert_eq!(vrf.mup_gtp_pdr_installed.len(), 1);
     }
 
     #[tokio::test]
