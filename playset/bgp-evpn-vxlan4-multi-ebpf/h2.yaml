@@ -1,0 +1,6 @@
+interface:
+- if-name: h2-vtep2
+  ipv4:
+    address: 172.16.10.2/24
+system:
+  hostname: h2

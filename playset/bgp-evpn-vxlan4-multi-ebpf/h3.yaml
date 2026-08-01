@@ -1,0 +1,6 @@
+interface:
+- if-name: h3-vtep3
+  ipv4:
+    address: 172.16.10.3/24
+system:
+  hostname: h3
